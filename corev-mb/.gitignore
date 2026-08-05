@@ -1,0 +1,11 @@
+# corev-mb — generated + design outputs are reproducible, so they are not tracked.
+# `mb select <id>` regenerates boards/<id>/generated/ and `mb design` writes outputs/.
+
+boards/*/generated/
+boards/*/outputs/
+
+# Python / SKiDL byproducts
+__pycache__/
+*.pyc
+.skidl_lib_sklib.py
+*_erc.txt

@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+// Copyright (c) 2026 Etienne Cimon
+//
+// Linux-oriented single-hart GSys LibreCore DTS, validated against the sparse
+// Linux tree: build-platform/workspace/linux-dts/ (fetch-linux-dts.ps1).
+// Reference shape: arch/riscv/boot/dts/sifive/fu540-c000.dtsi (cpu + plic)
+// CLINT shape: Documentation/devicetree/bindings/timer/sifive,clint.yaml + mpfs.dtsi
+//
+// Full Linux-boot feature set (B + Zicbo* + Zacas + server extras). Dual-hart
+// topology remains ariane-smt2.dts. RVV 1.0 is *not* advertised here — only
+// ariane-server-math-v.dts + g6lc64_server_math_v (Ara) may list "v"/"zve64d".
+//
+// Gaps: architecture/multi-threading/dts-linux-smt.md §3.2
+
+/dts-v1/;
+
+/ {
+  #address-cells = <2>;
+  #size-cells = <2>;
+  compatible = "eth,ariane-bare-dev";
+  model = "eth,ariane-bare";
+
+  chosen {
+    stdout-path = "/soc/uart@10000000:115200";
+  };
+
+  cpus {
+    #address-cells = <1>;
+    #size-cells = <0>;
+    // Matches CLINT rtc (testharness often 32.768 kHz; FPGA may differ)
+    timebase-frequency = <32768>;
+
+    CPU0: cpu@0 {
+      device_type = "cpu";
+      // Linux cpus.yaml: only "riscv" is schema-safe without an upstream vendor ID.
+      compatible = "riscv";
+      reg = <0>;
+      status = "okay";
+      clock-frequency = <50000000>;
+      // Full feature set for Linux boot (matches server_math / smt2 plane + Zacas).
+      riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
+      riscv,isa-base = "rv64i";
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "b",
+        "zicntr", "zicsr", "zifencei", "zihpm",
+        "zba", "zbb", "zbs",
+        "zcb", "zicond",
+        "zicbom", "zicboz", "zicbop",
+        "zacas",
+        "zkn",
+        "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+      mmu-type = "riscv,sv39";
+      tlb-split;
+      riscv,cboz-block-size = <64>;
+      riscv,cbom-block-size = <64>;
+      // L1 geometry — I$/D$ line width 128 bit → 16 B (do not lie with 64)
+      i-cache-block-size = <16>;
+      i-cache-size = <16384>;
+      d-cache-block-size = <16>;
+      d-cache-size = <32768>;
+
+      CPU0_intc: interrupt-controller {
+        #interrupt-cells = <1>;
+        interrupt-controller;
+        compatible = "riscv,cpu-intc";
+      };
+
+      // Optional PMU map (Sscofpmf). Binding may live outside sparse fetch — GAP if strict.
+      pmu {
+        compatible = "riscv,pmu";
+        // Event codes = perf_counters group-0 legacy index (mhpmevent low 5 bits)
+        riscv,event-to-mhpmevent =
+          <0x01 0x00000000 0x00000001>,
+          <0x02 0x00000000 0x00000002>,
+          <0x03 0x00000000 0x00000003>,
+          <0x04 0x00000000 0x00000004>,
+          <0x05 0x00000000 0x00000005>,
+          <0x06 0x00000000 0x00000006>,
+          <0x09 0x00000000 0x00000009>,
+          <0x0a 0x00000000 0x0000000a>;
+      };
+    };
+
+    cpu-map {
+      cluster0 {
+        core0 {
+          cpu = <&CPU0>;
+        };
+      };
+    };
+  };
+
+  memory@80000000 {
+    device_type = "memory";
+    reg = <0x0 0x80000000 0x0 0x10000000>;
+  };
+
+  soc {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    compatible = "simple-bus";
+    ranges;
+
+    // sifive,clint.yaml dual form (chip-specific first string unfixable without SKU)
+    clint@2000000 {
+      compatible = "sifive,clint0", "riscv,clint0";
+      interrupts-extended = <&CPU0_intc 3>, <&CPU0_intc 7>;
+      reg = <0x0 0x2000000 0x0 0xc0000>;
+    };
+
+    PLIC0: interrupt-controller@c000000 {
+      compatible = "sifive,plic-1.0.0", "riscv,plic0";
+      #address-cells = <0>;
+      #interrupt-cells = <1>;
+      interrupt-controller;
+      // M-ext (11) + S-ext (9) for hart 0 — matches ariane_soc::NumTargets pair
+      interrupts-extended = <&CPU0_intc 11>, <&CPU0_intc 9>;
+      reg = <0x0 0xc000000 0x0 0x4000000>;
+      riscv,ndev = <30>;
+    };
+
+    uart@10000000 {
+      compatible = "ns16550a";
+      reg = <0x0 0x10000000 0x0 0x1000>;
+      clock-frequency = <50000000>;
+      current-speed = <115200>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <1>;
+      reg-shift = <2>;
+      reg-io-width = <4>;
+    };
+  };
+};

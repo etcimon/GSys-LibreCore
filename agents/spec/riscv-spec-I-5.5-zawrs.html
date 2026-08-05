@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zawrs Wait-on-Reservation-Set (Vol I, 5.5)</title></head>
+<body>
+<h1>Vol I &sect;5.5 — Zawrs Extension for Wait-on-Reservation-Set Instructions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zawrs">specs/riscv-spec.html#ext:zawrs</a>
+(source line 14761). <strong>Domain:</strong> SPEC.</p>
+
+<p>WRS.NT and WRS.STO allow software to pause execution until either the LR reservation is lost or a
+timeout occurs, enabling low-power polling loops. The Zawrs extension defines a pair of WRS
+(wait-on-reservation-set) instructions to be used in polling loops that allows a core to enter a
+low-power state and wait on a store to a memory location. The instructions are architecturally
+defined as spin-loop hints and do not change architectural state.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Zawrs extension defines a pair of WRS (wait-on-reservation-set)
+instructions to be used in polling loops that allows a core to enter a
+low-power state and wait on a store to a memory location."
+(specs/riscv-spec.html:14761-14764, anchor #ext:zawrs)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module zawrs_unit (
+  input  logic        wrs_i,
+  input  logic        reservation_valid_i,
+  input  logic        timeout_i,
+  output logic        resume_o,
+  output logic        clock_gate_o
+);
+  // stall frontend until !reservation or interrupt/timeout
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> <strong>partial (config)</strong> — U7ᵇ. When <code>CVA6Cfg.ZawrsEn</code>
+is set, <code>core/decoder.sv</code> decodes <code>WRS.NTO</code> / <code>WRS.STO</code> (SYSTEM
+funct3=0, imm 0x00d / 0x01d) and maps them onto the existing <code>WFI</code> wait path in
+<code>core/csr_regfile.sv</code> (TW/VTW privilege checks shared with WFI). Enabled on primary
+<code>cv64a6_imafdc_sv39</code> and HPDCACHE targets. Gaps vs full Zawrs: no reservation-set loss
+detector (wake is interrupt/timeout-class only), STO timeout is not a distinct microarch timer, and
+there is no dedicated low-power clock gate (U8ᵇ).</p>
+
+<p><strong>.dts linkage:</strong> advertise <code>zawrs</code> in <code>riscv,isa-extensions</code> when
+enabled; may later pair with idle-state DT if U8 power management lands.</p>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# .active-contributor.example  —  template; copy to `.active-contributor` (drop the .example).
+#
+# Identifies the human on whose behalf an agent is contributing code. Consumed by AGENTS-licensing.md.
+# Lines starting with `#` are comments. Provide exactly ONE non-comment line:
+#
+#     Full Name <optional-email>
+#
+# Required for in-scope (actual code) edits. If `.active-contributor` is absent when a code edit is
+# needed, agents MUST error (E-NOCONTRIB) and halt until it is created. Not used for docs/specs.
+
+Your Name <you@example.com>

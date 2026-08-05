@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sv-timing.local/schemas/analyze-result.v0.json",
+  "title": "sv-timing AnalyzeResult v0",
+  "description": "Versioned JSON contract between Rust CLI and TypeScript (@sv-timing/js). Structural timing only — not STA.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "disclaimer",
+    "banner",
+    "target_mhz",
+    "files",
+    "modules_requested",
+    "ast"
+  ],
+  "properties": {
+    "schema_version": { "const": "0" },
+    "disclaimer": { "type": "string" },
+    "banner": { "type": "string" },
+    "target_mhz": { "type": "number" },
+    "fo4_ps": { "type": "number" },
+    "budget_margin": { "type": "number" },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "parse_ok"],
+        "properties": {
+          "path": { "type": "string" },
+          "parse_ok": { "type": "boolean" },
+          "byte_len": { "type": "integer" }
+        }
+      }
+    },
+    "modules_requested": {
+      "oneOf": [
+        { "type": "array", "items": { "type": "string" } },
+        { "const": "*" }
+      ]
+    },
+    "ast": {
+      "type": "object",
+      "required": ["kind", "files_parsed"],
+      "properties": {
+        "kind": { "const": "parsed_unit_stub" },
+        "files_parsed": { "type": "integer" },
+        "note": { "type": "string" }
+      }
+    },
+    "paths": { "type": "array" },
+    "opportunities": { "type": "array" },
+    "versions": {
+      "type": "object",
+      "properties": {
+        "ir": { "type": "string" },
+        "parser_pin": { "type": "string" },
+        "cost_model": { "type": "string" }
+      }
+    }
+  },
+  "additionalProperties": true
+}

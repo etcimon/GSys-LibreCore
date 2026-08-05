@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Profiles Introduction (Vol III, 1)</title></head>
+<body>
+<h1>Vol III &sect;1 — Introduction</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#_profiles_versus_platforms">#_profiles_versus_platforms</a> (1.1),
+<a href="../../specs/riscv-spec.html#_components_of_a_profile">#_components_of_a_profile</a> (1.2),
+<a href="../../specs/riscv-spec.html#_rva_profiles_rationale">#_rva_profiles_rationale</a> (1.3).
+Source line: <code>specs/riscv-spec.html:89579</code> (1.1).</p>
+
+<p>Volume III defines RISC-V Profiles, which are named, versioned, and platform-agnostic sets of ISA
+extensions. Profiles separate the profile itself (the ISA contract) from the platform (the SoC
+environment). Components of a profile include the base ISA, standard extensions, privileged
+architecture version, and optional extensions. Profiles serve as the conformance target for software
+and as a checklist for hardware configuration and device-tree ISA strings.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"Profiles only describe ISA features, not a complete execution
+environment. A software platform is a specification for an execution
+environment, in which software targeted for that software platform can
+run."
+(specs/riscv-spec.html:89579-89587, anchor #_profiles_versus_platforms)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module profile_check (
+  input  config_pkg::cva6_cfg_t CVA6Cfg,
+  output logic                  rva20_u64_o, rva22_s64_o, rva23_u64_o
+);
+  // derive profile membership from config extension bits
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> not a hardware feature. Each per-target config package in
+<code>core/include/cv*a6*_config_pkg.sv</code> selects a concrete set of extension bits
+(<code>RVA/RVC/RVF/RVD/RVB/ZKN/RVZiCond</code>, etc.). The profile membership is derived from those
+bits and should be cross-checked against the <code>riscv,isa</code> string in the generated device tree.</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string is the profile advertisement; it
+must be consistent with <code>CVA6Cfg</code>. For example, a RVA20U64 configuration should yield
+<code>rv64imafdc_zicsr_zifencei</code> or equivalent.</p>
+</body>
+</html>

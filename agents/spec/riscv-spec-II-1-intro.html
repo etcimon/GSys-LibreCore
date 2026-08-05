@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Privileged Introduction (Vol II, chapter 1)</title></head>
+<body>
+<h1>Vol II chapter 1 — Introduction</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#_risc_v_privileged_software_stack_terminology">#_risc_v_privileged_software_stack_terminology</a> (1.1),
+<a href="../../specs/riscv-spec.html#_privilege_levels">#_privilege_levels</a> (1.2),
+<a href="../../specs/riscv-spec.html#_debug_mode">#_debug_mode</a> (1.3).
+Source lines: <code>specs/riscv-spec.html:68620</code> (1.1), <code>:68722</code> (1.2), <code>:68912</code> (1.3).</p>
+
+<p>This chapter introduces privileged-architecture terminology (M/S/U modes, privilege stack, debug
+mode) and the debug-mode CSRs. It sets the context for the machine-mode, supervisor-mode, and
+hypervisor chapters. Debug mode is a special state entered through an external debug request or an
+EBREAK in debug-mode configuration.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This section describes the terminology we use to describe components of
+the wide range of possible privileged software stacks for RISC-V."
+...
+"At any time, a RISC-V hardware thread (hart) is running at some
+privilege level encoded as a mode in one or more CSRs (control and
+status registers). Three RISC-V privilege levels are currently defined."
+(specs/riscv-spec.html:68620-68622 anchor 1.1; :68722-68725 anchor 1.2)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module privilege_intro (
+  input  logic        debug_req_i,
+  input  logic        ebreak_i,
+  output priv_lvl_e   priv_o,
+  output logic        debug_mode_o
+);
+  // M/S/U mode selection; debug mode entry on ebreak/debug request
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partially implemented. The privilege mode is maintained in
+<code>core/csr_regfile.sv</code> and used for CSR access permission checks. The debug unit is
+connected at the top level via <code>debug_req_i</code> in <code>core/cva6.sv</code>; debug CSRs
+(<code>dcsr</code>, <code>dpc</code>, <code>dscratch0/1</code>) are declared in
+<code>core/include/rvfi_types.svh:44-47</code> and handled in <code>core/csr_regfile.sv</code>. M/S/U
+mode context switches, ECALL/EBREAK/MRET/SRET/WFI, and trap entry/return are sequenced in
+<code>core/controller.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> the CPU node <code>status</code> and <code>riscv,isa</code> indirectly
+reflect the supported privilege levels; the debug module is declared in the SoC device tree (e.g.
+<code>riscv,debug-013</code> node) and tied to <code>debug_req_i</code>.</p>
+</body>
+</html>

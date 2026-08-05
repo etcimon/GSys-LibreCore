@@ -1,0 +1,33 @@
+{
+  "name": "@g6lc/build-platform",
+  "version": "0.1.0",
+  "description": "Bun + TypeScript build platform for GSys LibreCore (G6LC): cross-platform toolchain bootstrap, contained workspace, and test orchestration driven by a single top-level .config.ts. CLI: g6lc-build (alias cva6-build).",
+  "type": "module",
+  "private": true,
+  "author": "Etienne Cimon",
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "main": "./src/cli/index.ts",
+  "scripts": {
+    "start": "bun run src/cli/index.ts",
+    "help": "bun run src/cli/index.ts help",
+    "doctor": "bun run src/cli/index.ts doctor",
+    "probe": "bun run src/cli/index.ts probe",
+    "diag": "bun run src/cli/index.ts diag",
+    "man": "bun run src/cli/index.ts man",
+    "config": "bun run src/cli/index.ts config",
+    "setup": "bun run src/cli/index.ts setup",
+    "build": "bun run src/cli/index.ts build",
+    "clean": "bun run src/cli/index.ts clean",
+    "tools": "bun run src/cli/index.ts tools",
+    "test": "bun test",
+    "typecheck": "bun --bun tsc --noEmit",
+    "self-test": "bun --bun tsc --noEmit && bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "^5.5.0"
+  }
+}

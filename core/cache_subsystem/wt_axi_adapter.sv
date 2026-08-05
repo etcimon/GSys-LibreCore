@@ -358,6 +358,23 @@ module wt_axi_adapter
                     };
                   end
                 end
+                // Zacas AMOCAS: AtomicCompare; W data is {cmp,swap} from missunit
+                AMO_CAS1: begin
+                  axi_wr_atop = axi_pkg::ATOP_ATOMICCMP;
+                  // Deliver full 64-bit pack so ALU sees both halves.
+                  // On 64-bit AXI, $clog2(AxiDataWidth/8)=3 → paddr[2:3] would be
+                  // reversed (slang -Wrange-select-reversed). Full beat BE is fine.
+                  // Wider AXI: enable the 8-byte lane selected by paddr[msb:3].
+                  if (CVA6Cfg.AxiDataWidth >= 64 && dcache_data.size[1:0] == 2'b10) begin
+                    if (CVA6Cfg.AxiDataWidth == 64) begin
+                      axi_wr_be[0][7:0] = '1;
+                    end else begin
+                      axi_wr_be[0][dcache_data.paddr[$clog2(
+                          CVA6Cfg.AxiDataWidth/8
+                      )-1:3]*8+:8] = '1;
+                    end
+                  end
+                end
                 default:  ;  // Do nothing
               endcase
             end

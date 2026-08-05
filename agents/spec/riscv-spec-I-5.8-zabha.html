@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zabha Byte and Halfword AMOs (Vol I, 5.8)</title></head>
+<body>
+<h1>Vol I &sect;5.8 — Zabha Extension for Byte and Halfword Atomic Memory Operations</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zabha">specs/riscv-spec.html#ext:zabha</a>.
+<strong>Domain:</strong> RAM.</p>
+
+<p>Zabha extends AMOs to byte and halfword operands (AMOSWAP.B/H, AMOADD.B/H, etc.). The Zaamo and
+Zacas extensions offer AMO instructions for words, doublewords, and quadwords (only for AMOCAS). The
+absence of atomic operations for subword data types necessitates emulation strategies; Zabha fills
+that gap. It requires the memory system to provide atomic read-modify-write at subword granularities
+without corrupting neighboring bytes.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Zaamo and Zacas extensions offer atomic memory operation (AMO)
+instructions for words, doublewords, and quadwords (only for AMOCAS).
+The absence of atomic operations for subword data types necessitates
+emulation strategies."
+(specs/riscv-spec.html:15200-15208, anchor #ext:zabha)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module zabha_amo (
+  input  logic [XLEN-1:0] addr_i, operand_i, mem_i,
+  input  logic [1:0]      size_i,       // 1 or 2 bytes
+  input  amo_op_e         op_i,
+  output logic [XLEN-1:0] result_o,
+  output logic [7:0]      byte_mask_o
+);
+  // compute subword mask; ALU operates on sign/zero-extended subword
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The AMO opcode space in <code>core/decoder.sv:1602-1647</code>
+only decodes word/doubleword AMO and LR/SC variants; the <code>amo_t</code> enum in
+<code>core/include/ariane_pkg.sv:361-373</code> has no byte/halfword AMO operations, and
+<code>core/cache_subsystem/amo_alu.sv:14-65</code> operates on full 64-bit operands with no subword
+masking or sign-extension path. Extending Zabha would require new decode slots, a subword operand
+align/mask unit in the LSU/store unit, and either byte-masked cache writes or locked read-modify-write
+bus transactions.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Zabha capability would be added to the <code>riscv,isa</code>
+string and requires cacheable/coherent <code>memory@</code> regions with subword atomic support.</p>
+</body>
+</html>

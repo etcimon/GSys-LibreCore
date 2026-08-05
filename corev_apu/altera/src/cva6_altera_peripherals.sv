@@ -34,7 +34,7 @@ module cva6_peripherals #(
     AXI_BUS.Slave      gpio            ,
     AXI_BUS.Slave      ethernet        ,
     AXI_BUS.Slave      timer           ,
-    output logic [1:0] irq_o           ,
+    output logic [ariane_soc::NumTargets-1:0] irq_o,
     // UART
     input  logic       rx_i            ,
     output logic       tx_o            ,

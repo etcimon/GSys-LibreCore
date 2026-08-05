@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Hypervisor and Virtual Supervisor CSRs (Vol II, 5.2)</title></head>
+<body>
+<h1>Vol II &sect;5.2 — Hypervisor and Virtual Supervisor CSRs</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#_hypervisor_and_virtual_supervisor_csrs">specs/riscv-spec.html#_hypervisor_and_virtual_supervisor_csrs</a>.
+Source line: <code>specs/riscv-spec.html:79917</code>. <strong>Domain:</strong> —.</p>
+
+<p>This subchapter defines the hypervisor CSRs (<code>hstatus</code>, <code>hedeleg</code>,
+<code>hideleg</code>, <code>hcounteren</code>, etc.) and the virtual supervisor CSRs
+(<code>vsstatus</code>, <code>vsie</code>, <code>vsip</code>, <code>vstvec</code>, <code>vsscratch</code>,
+<code>vsepc</code>, <code>vscause</code>, <code>vstval</code>, <code>vsatp</code>). They are the
+S-mode CSRs shadowed for guest context and are essential for two-stage translation and virtual
+interrupts.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"An OS or hypervisor running in HS-mode uses the supervisor CSRs to
+interact with the exception, interrupt, and address-translation
+subsystems. Additional CSRs are provided to HS-mode, but not to VS-mode,
+to manage two-stage address translation and to control the behavior of a
+VS-mode guest: hstatus, hedeleg, hideleg, hvip, hip, hie, hgeip, hgeie,
+henvcfg, henvcfgh, hcounteren, htimedelta, htimedeltah, htval, htinst,
+and hgatp."
+(specs/riscv-spec.html:79917-79924, anchor #_hypervisor_and_virtual_supervisor_csrs)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module hypervisor_csrs (
+  input  csr_addr_e     addr_i,
+  input  logic          we_i,
+  output logic [XLEN-1:0] rdata_o,
+  output hstatus_t      hstatus_o,
+  output satp_t         vsatp_o
+);
+  // shadow S-mode CSRs for VS-mode; vsatp roots guest stage-1 page tables
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. No hypervisor or virtual-supervisor CSR bank is declared
+in <code>core/csr_regfile.sv</code> and no VS/HS-mode trap/CSR routing exists in
+<code>core/controller.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> no hypervisor DT node; <code>h</code> is not present in the
+<code>riscv,isa</code> string.</p>
+</body>
+</html>

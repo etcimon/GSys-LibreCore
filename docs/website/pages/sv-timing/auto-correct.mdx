@@ -1,0 +1,79 @@
+---
+title: Auto-Correct & -O Levels
+description: Optional allowlisted sv-timing transforms, optimization presets, and safety rules for emitted SystemVerilog.
+---
+
+# Auto-Correct & -O Levels
+
+Auto-correct is an **expert, opt-in** path: measure on the IR → apply
+**scope-safe, allowlisted** transforms → re-measure → emit rewritten SystemVerilog
+plus an edit trace. It is not a silent rewriter of the monorepo tree.
+
+## Safety rules
+
+1. **Allowlist / flags** — destructive or latency-changing edits require
+   explicit consent (e.g. `--allow-latency`, module allowlists as implemented).
+2. **Never auto-commit** — hosts must not merge emit trees into `core/` without
+   human review.
+3. **Integrity** — reparse + structural checks + fixture golden FO4; formal
+   functional equivalence of transforms is a non-goal for v1.
+4. **CVA6-style SV** — emit follows project-oriented style notes in
+   `sv-timing/architecture/CVA6-STYLE-SV.md` when targeting similar RTL patterns.
+
+## Optimization surface (`-O`)
+
+Presets map to a small set of **dials** (pipeline aggressiveness, operator
+rewrites, area vs delay, etc.). Design delta:
+`sv-timing/architecture/OPTIMIZATION-LEVELS.md`.
+
+Typical shape (names follow the package CLI; always check `--help`):
+
+| Level | Intent |
+|---|---|
+| `-O0` | Analyze / report only; minimal or no transform |
+| `-O1`…`-O2` | Conservative structural improvements |
+| `-O3` | Aggressive delay-oriented transforms (may add latency if allowed) |
+| `-Os` / `-Oz` | Prefer fewer / smaller edits when closing is possible |
+
+Exact dial maps live in `sv-timing-core` (`opt.rs`) and the design delta —
+docs here deliberately avoid freezing bit-level dial IDs.
+
+## Multi-pass pipeline
+
+Transform ownership is split:
+
+| Crate | Role |
+|---|---|
+| `sv-timing-transform` | Passes, worklist, edit records |
+| `sv-timing-emit` | Dense / project emit, RHS rewrite, synth shells |
+| `sv-timing-core` | Re-measure after edits |
+
+Agent rules and pass inventory: `sv-timing/AGENTS-auto-correct.md` and
+`sv-timing/architecture/AUTO-CORRECT-CORE-API.md`.
+
+## Project / multi-file emit
+
+For multi-module trees, correct can write an **out directory** with a portable
+`svt_corrected.f` rather than in-place mutation of sources. See
+`sv-timing/architecture/PROJECT-AUTOCORRECT.md`.
+
+After emit, the host points sim or synth at the reviewed tree — never the other
+way around (package does not edit `core/` by itself).
+
+## Example host invocation
+
+```bash
+# Dry-run correct (report only unless --emit)
+./build.sh timings correct --modules alu --allow-latency
+
+# Emit under workspace (paths via timings status)
+./build.sh timings correct --modules alu --allow-latency --emit
+```
+
+Standalone:
+
+```bash
+python tools/svt.py run -- correct \
+  --files-from analyze.f --modules alu \
+  --target-mhz 1250 --allow-latency --emit --out-dir build/svt-corrected
+```

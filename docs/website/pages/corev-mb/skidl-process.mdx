@@ -1,0 +1,170 @@
+---
+title: SKiDL Process
+description: The SKiDL-based PCB design flow for custom corev-mb boards.
+---
+
+# SKiDL Process
+
+SKiDL is a Python library that lets you describe schematics in code. In
+`corev-mb/`, it is the **design-language for custom boards**. It is not a board
+id; it is the PCB counterpart to `AGENTS-coding-philosophy.md`.
+
+PCB design has historically lagged software in version control and automation.
+Schematics are often binary or proprietary-format files that cannot be diffed,
+parametrized, or reviewed in the same way as source code. SKiDL changes this by
+representing the schematic as a Python program. In the CVA6 flow, this program
+is generated from `board.json`, fed with real part data, and checked by ERC.
+The result is a board design that is as reproducible and reviewable as the
+SystemVerilog that runs on the die.
+
+## Why SKiDL
+
+- **Version-controllable.** Schematics are text, not binary files.
+- **Parametric.** Reuse a board template for multiple SoC configs.
+- **Programmable.** Parts, nets, and ERC rules can be generated from
+  `board.json` or fetched from pcbparts.dev.
+- **Lintable.** The same Python tooling that checks the build can check the
+  schematic.
+
+## Where it lives
+
+`corev-mb/lib/` contains the Python support:
+
+- `pcbparts_mcp.py` — stdlib MCP client for pcbparts.dev (14 tools for part
+  search, stock check, pinouts, alternatives, board search, design rules, etc.).
+- `soc.py` — `build_board()` that translates a `board.json` into a SKiDL netlist.
+- `interfaces.py` — lazy SKiDL interfaces for common SoC/PHY connections.
+- `erc.py` — electrical-rule checks and the ERC loop.
+
+The Python library in `corev-mb/lib/` is intentionally small and uses the
+standard library for the MCP client, so it does not introduce a heavy dependency
+chain. SKiDL itself is the only non-stdlib package required, and it is treated
+as a design-time tool, not a runtime dependency. This keeps the board layer as
+light and portable as the other layers.
+
+## The design loop
+
+```
+board.json
+    ↓
+g6lc-build mb design <id> [--online]
+    ↓
+  soc.py builds the SKiDL skeleton from board.json
+  interfaces.py adds SoC/PHY nets
+  pcbparts_mcp.py selects concrete parts (online = live, offline = stub/cache)
+  erc.py checks nets, power rails, pin mappings
+    ↓
+generated netlist / BOM / placement hints
+    ↓
+g6lc-build mb expand <id>   # generate KiCad/netlist/positions
+g6lc-build mb test <id>     # rerun ERC and report
+```
+
+The loop is a closed design-verification cycle. `board.json` specifies intent;
+`soc.py` and `interfaces.py` translate intent into a netlist; `pcbparts_mcp.py`
+selects real components; and `erc.py` validates the result. Each iteration
+can tighten the design without redrawing schematics by hand. This is the same
+continuous-integration pattern used in software, but applied to hardware
+connectivity.
+
+## Part selection with pcbparts.dev
+
+The pcbparts MCP client is **cache-first**. By default it returns stubs from a
+local cache so the design flow works offline. With `--online`, it queries the
+pcbparts.dev MCP server over HTTP JSON-RPC/SSE.
+
+Cache-first operation is a deliberate design for hardware design workflows.
+Hardware engineers often work in secure environments or on laptops without
+reliable internet access. A cache-first client ensures that the SKiDL loop can
+run offline, using the last-known part data and stub responses. The `--online`
+flag then provides an explicit opt-in to live data, which is appropriate when
+querying stock levels, prices, or the latest pinouts.
+
+Typical tools used:
+
+- `jlc_search` — find passives, connectors, and common ICs.
+- `jlc_get_part` / `jlc_get_pinout` — confirm footprint and pinout.
+- `mouser_get_part` / `digikey_get_part` — alternatives.
+- `get_design_rules` — board-house constraints.
+
+## Power-rail planning
+
+A board is a network of power domains. The SKiDL process explicitly plans:
+
+- SoC core / IO / PLL / DDR rails.
+- PHY rail requirements (e.g. RGMII IOVDD, DDR VREF).
+- Regulator and decoupling placement.
+- ERC checks for shorts, missing connections, and level mismatches.
+
+## SoC-pin ↔ PHY mapping
+
+`interfaces.py` translates logical interfaces from `board.json` into physical
+nets:
+
+```python
+# pseudo-code
+for iface in board['interfaces']:
+    for pin in iface['pins']:
+        soc_pin = soc[pin['soc']]
+        phy_pin = phy[pin['phy']]
+        soc_pin += phy_pin
+```
+
+The mapping is checked by `erc.py` for:
+
+- Pin function match (input to output, bidirectional to bidirectional).
+- Voltage level compatibility.
+- Pull-up/down and termination.
+- Differential-pair completeness.
+
+The pin-mapping check is where most board design errors are caught. A missing
+connection, a reversed differential pair, or a 1.8 V signal routed to a 3.3 V
+pin will pass a visual review but fail ERC. By encoding the mapping rules in
+Python, the SKiDL process makes these checks repeatable and exhaustive. This is
+especially valuable for complex SoC packages with hundreds of pins, where
+manual checking is error-prone.
+
+## Physical positioning and layout intent
+
+SKiDL itself does not produce a PCB layout, but `g6lc-build mb expand` can
+generate placement hints (e.g. group PHYs near the SoC edge, keep DDR traces
+short and matched, place decoupling capacitors close to power pins). These hints
+feed the board house's layout tool.
+
+Layout intent is the bridge between circuit design and mechanical design. SKiDL
+does not draw the board, but it can express constraints that the layout tool
+should honor: group high-speed PHYs near the SoC, keep DDR traces matched in
+length, place power regulators near their loads, and put decoupling capacitors
+close to power pins. These constraints are captured in code, so they travel
+with the design and can be validated against the final layout.
+
+## Agent workflow for custom boards
+
+1. Read `AGENTS-mb-skidl.md` and `AGENTS-motherboard.md`.
+2. Run `g6lc-build mb create <id>` to scaffold `board.json` and a starter
+   `design.py`.
+3. Edit `corev-mb/boards/<id>/board.json` and `corev-mb/architecture/<id>/README.md`.
+4. Run `g6lc-build mb design <id> [--online]` for the SKiDL loop.
+5. Iterate on ERC errors with `g6lc-build mb design <id> --fix`.
+6. Generate outputs with `g6lc-build mb expand <id>`.
+7. Validate with `g6lc-build mb test <id>`.
+
+The agent workflow for custom boards is a synthesis of the board specification
+and the design automation loop. The agent starts with the governance documents,
+creates a JSON spec, and then iterates on the SKiDL netlist until ERC passes.
+The final outputs — netlist, BOM, and placement hints — are the deliverables
+that a board house needs to produce a PCB. This workflow makes a custom board as
+reproducible as a software build.
+
+## When not to use SKiDL
+
+Reference or third-party boards set `"skidl": "omitted"`. They ship a
+manually-created schematic and layout; `corev-mb/` only stores the board JSON
+and contract. The `genesys2` reference board is in this category.
+
+SKiDL is a tool for new board designs, not a mandate for all boards. Reference
+and third-party boards often have existing schematics, layouts, and
+manufacturing relationships that predate the CVA6 flow. In those cases, the
+JSON contract and per-board `AGENTS-mb-<id>.md` document are sufficient. The
+build platform can still select and configure these boards without running the
+SKiDL loop.

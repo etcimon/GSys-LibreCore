@@ -1,0 +1,60 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# sv-timing workspace — project-independent SystemVerilog timing IR package.
+# Vendored parser lives under crates/sv-parser (path deps only; no crates.io sv-parser).
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/sv-timing-core",
+    "crates/sv-timing-cache",
+    "crates/sv-timing-transform",
+    "crates/sv-timing-emit",
+    "crates/sv-timing-cli",
+]
+# Nested upstream tree is path-only. Never auto-include it in `cargo test --workspace`.
+exclude = [
+    "crates/sv-parser",
+    "crates/sv-parser/*",
+]
+# Nested upstream workspace under crates/sv-parser is NOT a member; we path-depend
+# on its leaf crates from sv-timing-core.
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Etienne Cimon"]
+repository = "https://github.com/openhwgroup/cva6"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# First-party
+sv-timing-core = { path = "crates/sv-timing-core" }
+sv-timing-cache = { path = "crates/sv-timing-cache" }
+sv-timing-transform = { path = "crates/sv-timing-transform" }
+sv-timing-emit = { path = "crates/sv-timing-emit" }
+
+# Vendored integral copy (refreshed via `svt vendor-sv-parser`)
+sv-parser = { path = "crates/sv-parser/sv-parser" }
+sv-parser-error = { path = "crates/sv-parser/sv-parser-error" }
+sv-parser-pp = { path = "crates/sv-parser/sv-parser-pp" }
+sv-parser-syntaxtree = { path = "crates/sv-parser/sv-parser-syntaxtree" }
+
+# Shared third-party (versions pinned at workspace)
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+rustc-hash = "2.1"
+# P7 cache: SQLite (bundled) + CRC-32C (Castagnoli) + SHA-256 fingerprints
+rusqlite = { version = "0.32", features = ["bundled"] }
+crc = "3.2"
+sha2 = "0.10"
+hex = "0.4"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

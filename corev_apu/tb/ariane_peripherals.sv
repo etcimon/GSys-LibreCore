@@ -30,7 +30,8 @@ module ariane_peripherals #(
     AXI_BUS.Slave      spi             ,
     AXI_BUS.Slave      ethernet        ,
     AXI_BUS.Slave      timer           ,
-    output logic [1:0] irq_o           ,
+    // Multi-context PLIC: one MEIP/SEIP pair per core (see ariane_soc::NumTargets)
+    output logic [ariane_soc::NumTargets-1:0] irq_o,
     // UART
     input  logic       rx_i            ,
     output logic       tx_o            ,

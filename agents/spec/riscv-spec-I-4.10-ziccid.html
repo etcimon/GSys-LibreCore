@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Ziccid Instruction/Data Coherence (Vol I, 4.10)</title></head>
+<body>
+<h1>Vol I &sect;4.10 — Ziccid Extension for Instruction/Data Coherence and Consistency</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#_ziccid_extension_for_instructiondata_coherence_and_consistency">specs/riscv-spec.html#_ziccid_extension_for_instructiondata_coherence_and_consistency</a>.
+<strong>Domain:</strong> CACHE.</p>
+
+<p>Ziccid mandates more stringent consistency between instruction fetches and other memory accesses
+then the base ISA. It guarantees that a hart's instruction fetches appear to occur in program order
+with respect to each other, and that stores eventually become visible to all harts' instruction
+fetches. In CVA6 the separate I$ and D$ are not hardware-coherent by default, so FENCE.I plus the D$
+flush knobs are used as a manual substitute; full Ziccid would require either a coherent cache
+subsystem or automatic invalidation of I$ on D$ writes to code regions.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Ziccid extension mandates more stringent requirements for
+consistency between instruction fetches and other memory accesses than those
+imposed by the base ISA. As described in detail in the next section, Ziccid
+guarantees that a hart's instruction fetches appear to occur in program order
+with respect to each other, and that stores eventually become visible to all
+harts' instruction fetches."
+(specs/riscv-spec.html:10665-10673, anchor #_ziccid_extension_for_instructiondata_coherence_and_consistency)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module ziccid_coherence_bridge (
+  input  logic        dcache_write_to_code_region_i,
+  output logic        icache_invalidate_range_o
+);
+  // maintain I$/D$ coherence for instruction pages
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partial; absent as automatic hardware coherence. FENCE.I is decoded
+in <code>core/controller.sv:70-71,140-157,259</code> and stalls/flushs the frontend via
+<code>core/frontend/frontend.sv:312-321</code>. The optional D$ flush on FENCE.I is controlled by
+<code>DcacheFlushOnFenceI</code> declared in <code>core/include/config_pkg.sv:214</code>; the field's
+purpose is documented at <code>core/include/config_pkg.sv:201-203</code> (required for write-back caches
+because data and instruction caches are currently not coherent). Most shipped target packages set it
+<code>1'b0</code> because the WT D$ is write-through; software must still execute FENCE.I to observe
+its own stores as instructions.</p>
+
+<p><strong>.dts linkage:</strong> <code>memory@</code> nodes describing code regions must use the same
+address ranges as the <code>CachedRegion</code>/<code>ExecuteRegion</code> rules in the CVA6 config, so
+that FENCE.I plus any manual flush/invalidation operates on the intended coherent-cacheable regions.</p>
+</body>
+</html>

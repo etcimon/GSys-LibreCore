@@ -1,0 +1,91 @@
+---
+title: Simultaneous Multithreading
+description: SMT2 on GSys LibreCore — banked arch state, fine-grain switch, Linux/OpenSBI bring-up.
+---
+
+# Simultaneous Multithreading (SMT)
+
+GSys LibreCore supports **two hardware threads** (`NrHarts=2`) sharing pipeline
+resources with **per-hart architectural state**. Default packages keep
+`NrHarts=1` for identity netlists.
+
+Scaffold + bring-up: `architecture/multi-threading/`
+(`README.md`, `smt2-bringup.md`, `dts-linux-smt.md`, `smt-linux-rootfs.md`).
+
+## Software view
+
+| Item | Behavior |
+|---|---|
+| `mhartid` for thread *h* | `hart_id_base + h` |
+| ISA string | Same on both threads |
+| SBI / OpenSBI | Two harts in the domain |
+| Linux | Two `cpu@` nodes; enable after OpenSBI knows both |
+
+## What the RTL guarantees
+
+1. **Per-hart arch state** — RF banks, CSR banks, PC bank, RAS banks, GHR banks  
+2. **Fine-grain switch** — IF flush + drop unissued; EX/scoreboard drain; BP
+   tables preserved where not banked  
+3. **Commit isolation** — CSR writes keyed by instruction `hart_id`  
+4. **Fetch view** — privilege / MMU CSR mux by active fetch hart  
+
+Modules under `core/smt/` include thread select, hart state, banked RF, PC
+bank, and CSR bank helpers.
+
+## Switch policies
+
+| Policy | Intent |
+|---|---|
+| Round-robin quantum | Bound IF unfairness (`SmtFetchQuantum`) |
+| Switch-on-miss | Peer switch on D$/I$ miss when peer ready |
+| Hybrid (typical SMT2 package) | Miss switch + anti-starvation (`SmtStarveLimit`) |
+
+## Enable
+
+```
+core/include/g6lc64_smt2_config_pkg.sv   # NrHarts=2, SMT_HYBRID, often L2
+```
+
+```bash
+g6lc-build verify --target g6lc64_smt2
+g6lc-build test --suite smt-linux-boot-path   # if catalogued
+```
+
+## Bring-up sequence (product)
+
+1. Keep `NrHarts=1` green on default packages.  
+2. Select SMT2 package; bare-metal boot hart 0 only.  
+3. Park hart 1 in WFI; exercise switch-on-miss.  
+4. Dual-thread litmus / `rdcycle` before Linux.  
+5. OpenSBI `expected_harts` / domain for two harts.  
+6. Linux `maxcpus=2` smoke with validated DTS.  
+
+DTS of record: `corev_apu/bootrom/ariane-smt2.dts`  
+Validate: `build-platform/scripts/validate-cva6-dts.*` (after fetch-linux-dts).
+
+Software track: `software/smt2-linux/`.
+
+## Known limits
+
+- **Shared BHT/BTB** (RAS/GHR banked) → mild cross-hart pollution  
+- Dual-commit of **two different harts** in one cycle is not a specialized
+  product path (single CSR port discipline)  
+- Full **KVM-on-SMT** is out of scope for SMT bring-up — use H/server packages
+  separately after bare-metal SMT is green  
+
+## Verification suites (optional / residual)
+
+| Suite id (typical) | Focus |
+|---|---|
+| `smt-linux-boot-path` | DTS + IRQ path / boot path |
+| `smt-linux-rootfs` | Rootfs preflight + dual-park; full image via `CVA6_LINUX_PAYLOAD` |
+
+Diagnostics compartment `smt2` exists under `g6lc-build diag` for focused
+Verilator surfaces.
+
+## Related
+
+- [L2 / L3 Cache](../corev-apu/l2-l3-cache) — MLP for dual-hart traffic  
+- [Server Profiles](./server-profiles)  
+- [Upgrade Program](../architecture/upgrade-program)  
+- Spec-adjacent: precise traps + memory model across harts (`AGENTS-soc-readiness`)

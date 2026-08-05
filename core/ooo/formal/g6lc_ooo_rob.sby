@@ -1,0 +1,23 @@
+# U5 ROB occupancy formal — proves against live g6lc_rob (single-port cone).
+# Uses yosys-slang so `parameter type entry_t` elaborates (classic front-end cannot).
+# Run: sby -f core/ooo/formal/g6lc_ooo_rob.sby
+# Wired into build-platform verify.formalTasks (cva6-build verify --formal).
+
+[options]
+# BMC from forced reset (initial assume in props). Induction free-state is
+# deferred; depth covers fill/drain of ROB_ENTRIES=8 plus flush.
+mode bmc
+depth 16
+
+[engines]
+smtbmc z3
+
+[script]
+plugin -i slang
+# --keep-hierarchy so hierarchical asserts (dut.count_q) survive prep.
+read_slang --std 1800-2017 --keep-hierarchy --top g6lc_ooo_rob_props g6lc_rob.sv g6lc_ooo_rob_props.sv
+prep -top g6lc_ooo_rob_props
+
+[files]
+../g6lc_rob.sv
+g6lc_ooo_rob_props.sv

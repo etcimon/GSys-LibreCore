@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Control-Flow Integrity Unprivileged (Vol I, 4.17)</title></head>
+<body>
+<h1>Vol I &sect;4.17 — Control-Flow Integrity (CFI)</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#unpriv-cfi">specs/riscv-spec.html#unpriv-cfi</a>
+(source line 11109). <strong>Domain:</strong> BP.</p>
+
+<p>CFI provides hardware-assisted defense against ROP/COP/JOP by enforcing landing-pad constraints on
+indirect jumps/calls and by using a shadow stack for returns. It constrains the branch predictor and
+return-address stack: a mispredicted return or jump to a non-landing-pad target is an architectural
+violation, not just a performance event. The unprivileged chapter defines the user-visible aspects;
+privileged controls are in <a href="../spec/riscv-spec-II-6.9-priv-cfi.html">II 6.9</a>.</p>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module cfi_check (
+  input  logic [XLEN-1:0] target_i,
+  input  cfi_instr_e      kind_i,        // call/return/jump
+  input  logic            shadow_stack_match_i,
+  output logic            violation_o    // precise trap
+);
+  // indirect jumps must target landing pads; returns match shadow stack
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent; no CFI landing-pad or shadow-stack logic in the current
+frontend. Requires new config bits, decode, and RAS/BTB integration.</p>
+</body>
+</html>

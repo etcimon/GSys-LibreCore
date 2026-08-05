@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zihintpause Pause Hint (Vol I, 4.19)</title></head>
+<body>
+<h1>Vol I &sect;4.19 — Zihintpause Extension for Pause Hint</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zihintpause">specs/riscv-spec.html#ext:zihintpause</a>.
+<strong>Domain:</strong> SPEC.</p>
+
+<p>PAUSE is a HINT instruction that indicates the current hart's rate of instruction retirement
+should be temporarily reduced or paused; the duration of its effect must be bounded and may be zero.
+It is normally used to save energy and execution resources while polling. PAUSE is encoded as a FENCE
+instruction with <em>pred</em>=<code>W</code>, <em>succ</em>=<code>0</code>, <em>fm</em>=<code>0</code>,
+<em>rd</em>=<code>x0</code>, and <em>rs1</em>=<code>x0</code>.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The PAUSE instruction is a HINT that indicates the current hart's rate
+of instruction retirement should be temporarily reduced or paused. The
+duration of its effect must be bounded and may be zero."
+...
+"PAUSE is encoded as a FENCE instruction with pred=W, succ=0, fm=0,
+rd=x0, and rs1=x0."
+(specs/riscv-spec.html:12575-12620, anchor #ext:zihintpause / #norm:pause_op)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module zihintpause (
+  input  logic        pause_i,
+  output logic        throttle_fetch_o,
+  output logic        clock_gate_hint_o
+);
+  // treat as NOP; optionally reduce fetch rate for N cycles
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> <strong>implemented (config)</strong> — U7ᵃ. When
+<code>CVA6Cfg.ZihintpauseEn</code> is set, <code>core/decoder.sv</code> recognises the PAUSE HINT
+encoding (<code>OpcodeMiscMem</code>, funct3=0, <code>imm==12'h010</code>, rd=rs1=x0) and decodes it as
+ALU <code>ADD</code> (NOP) so it does <em>not</em> take the full D$ fence path. With the bit clear,
+PAUSE still falls through as FENCE (architecturally legal HINT, suboptimal for spin loops). Primary
+Linux target enables the bit. No separate micro-op or fetch throttle; energy gating remains a U8ᵇ item.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; advertise via <code>riscv,isa</code> /
+<code>riscv,isa-extensions</code> (<code>zihintpause</code>) when enabled.</p>
+</body>
+</html>

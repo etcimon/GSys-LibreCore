@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Privileged Control-Flow Integrity (Vol II, 6.9)</title></head>
+<body>
+<h1>Vol II &sect;6.9 — Control-Flow Integrity (CFI)</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#priv-cfi">specs/riscv-spec.html#priv-cfi</a>.
+Source line: <code>specs/riscv-spec.html:86912</code>. <strong>Domain:</strong> BP.</p>
+
+<p>The privileged CFI chapter defines the machine-mode controls for the unprivileged CFI extension:
+landing-pad enable bits, shadow-stack pointer CSRs (<code>mssp</code>, <code>ssp</code>), and the
+privileged rules for indirect forward-edge and return-edge checks. It governs how CFI integrates
+with privilege modes and traps.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"Control-flow integrity (CFI) capabilities help defend against Return-
+Oriented Programming (ROP) and Call/Jump-Oriented Programming (COP/JOP)
+style control-flow subversion attacks. The Zicfiss and Zicfilp
+extensions provide backward-edge and forward-edge CFI respectively."
+(specs/riscv-spec.html:86912-86917, anchor #priv-cfi)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module priv_cfi_control (
+  input  priv_lvl_e   priv_i,
+  input  logic [XLEN-1:0] ssp_i,
+  input  logic        landing_pad_en_i,
+  input  logic [XLEN-1:0] target_i,
+  output logic        violation_o
+);
+  // shadow-stack update on call/return; landing-pad check on indirect jump
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The <code>core/csr_regfile.sv</code> does not define the
+privileged CFI CSRs (<code>menvcfg.LPE</code>, <code>mssp</code>/<code>ssp</code>), and the decoder/branch
+unit in <code>core/decoder.sv</code>/<code>core/branch_unit.sv</code> does not perform landing-pad or
+shadow-stack checks. This requires paired work with the unprivileged CFI sub-file
+(<code>riscv-spec-I-4.17-cfi.html</code>).</p>
+
+<p><strong>.dts linkage:</strong> no DT node; privileged CFI would be advertised in the
+<code>riscv,isa</code> string and the <code>menvcfg</code> CSR description if implemented.</p>
+</body>
+</html>

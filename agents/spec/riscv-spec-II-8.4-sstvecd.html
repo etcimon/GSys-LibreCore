@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Sstvecd Direct Trap Vectoring (Vol II, 8.4)</title></head>
+<body>
+<h1>Vol II &sect;8.4 — Sstvecd Extension for Direct Trap Vectoring, Version 1.0</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#sstvecd">specs/riscv-spec.html#sstvecd</a>.
+Source line: <code>specs/riscv-spec.html:88779</code>. <strong>Domain:</strong> SPEC.</p>
+
+<p>Sstvecd allows the trap vector base (<code>stvec</code>) to be set to any 4-byte aligned address,
+rather than requiring 64-byte alignment. It removes the MODE=Vectored alignment restriction and lets
+software use a single dispatch table at an arbitrary base.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Sstvecd extension is implemented, then stvec.MODE must be
+capable of holding the value 0 (Direct). Furthermore, when
+stvec.MODE=Direct, stvec.BASE must be capable of holding any valid
+four-byte-aligned address."
+(specs/riscv-spec.html:88779-88785, anchor #sstvecd)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module sstvecd_vector (
+  input  logic [XLEN-1:0] stvec_i,
+  input  logic [XLEN-1:0] cause_i,
+  output logic [XLEN-1:0] vector_o
+);
+  // base is 4-byte aligned; cause*4 is added for vectored mode
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The <code>stvec</code> CSR is implemented in
+<code>core/csr_regfile.sv</code> but there is no documented guarantee that <code>stvec.BASE</code> accepts
+any 4-byte-aligned address in Direct mode. Verify the WARL mask and trap vector construction in the
+csr_regfile and <code>core/controller.sv</code> before claiming Sstvecd.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Sstvecd capability would be reflected in the
+<code>riscv,isa</code> string.</p>
+</body>
+</html>

@@ -1,0 +1,33 @@
+# Contained toolchain / env (never commit)
+.tools/
+.venv/
+.sv-timing-cache/
+.sv-timing-out/
+
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Logs / local
+*.log
+.env
+.env.local
+
+# TypeScript / Bun (js/)
+js/node_modules/
+js/dist/

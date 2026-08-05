@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Svrsw60t59b PTE Reserved Bits (Vol II, 7.6)</title></head>
+<body>
+<h1>Vol II &sect;7.6 — Svrsw60t59b Extension for PTE Reserved-for-Software Bits 60-59</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:svrsw60t59b">specs/riscv-spec.html#ext:svrsw60t59b</a>.
+<strong>Domain:</strong> RAM.</p>
+
+<p>Svrsw60t59b reserves PTE bits 60-59 for software use and requires hardware to ignore them during
+translation. If the Svrsw60t59b extension is implemented, bits 60-59 of the page table entries (PTEs)
+are reserved for use by supervisor software and are ignored by the implementation. The OS can use
+these bits for metadata (e.g. swap or reference tracking) without affecting the page-table walker.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Svrsw60t59b extension is implemented, then bits 60-59 of the
+page table entries (PTEs) are reserved for use by supervisor software
+and are ignored by the implementation."
+(specs/riscv-spec.html:88567-88570, anchor #ext:svrsw60t59b / #norm:Svrsw60t59b_reserved_bits_60_59)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module svrsw60t59b_mask (
+  input  logic [63:0] pte_i,
+  output logic [63:0] pte_masked_o
+);
+  // mask off bits 60:59 before using PTE for translation
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The page-table walker in <code>core/cva6_mmu/cva6_ptw.sv</code>
+reads the full PTE from memory at <code>:104</code> and uses it directly for permission/type checks
+(e.g. <code>:279-294</code>) and PPN extraction (e.g. <code>:175-198</code>) without masking bits
+60-59. If those bits are set by software, the walker may interpret them as part of the PPN or as
+reserved bits and raise a page fault. A future Svrsw60t59b implementation would add a constant mask
+<code>{pte[63:61], 2'b00, pte[58:0]}</code> or equivalent before the PTE validation logic.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Svrsw60t59b depends on Sv39 and would be exposed through
+the <code>mmu-type</code> or an extension string for 64-bit CVA6 targets.</p>
+</body>
+</html>

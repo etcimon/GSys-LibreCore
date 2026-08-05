@@ -57,6 +57,13 @@ support_verilator_4 := $(shell ($(verilator) --version | grep '4\.') > /dev/null
 ifeq ($(support_verilator_4), 0)
 	verilator_threads := 1
 endif
+# Verilator ≥5.012 introduced SIDEEFFECT; 5.008 rejects -Wno-SIDEEFFECT as unknown.
+support_verilator_sideeffect := $(shell ($(verilator) --help 2>&1 | grep -q SIDEEFFECT) > /dev/null 2>&1 ; echo $$?)
+ifeq ($(support_verilator_sideeffect), 0)
+	verilator_sideeffect_flag := -Wno-SIDEEFFECT
+else
+	verilator_sideeffect_flag :=
+endif
 # Location of Verilator headers and optional source files
 VL_INC_DIR := $(VERILATOR_INSTALL_DIR)/share/verilator/include
 
@@ -140,9 +147,11 @@ endif
 
 dpi_hdr := $(wildcard corev_apu/tb/dpi/*.h)
 dpi_hdr := $(addprefix $(root-dir), $(dpi_hdr))
-CFLAGS += -I$(QUESTASIM_HOME)/include         \
-          -I$(VCS_HOME)/include               \
-          -I$(VL_INC_DIR)/vltstd              \
+# Only add commercial simulator include paths when the tools are configured —
+# empty QUESTASIM_HOME/VCS_HOME otherwise yields a bogus "-I/include".
+CFLAGS += $(if $(QUESTASIM_HOME),-I$(QUESTASIM_HOME)/include,) \
+          $(if $(VCS_HOME),-I$(VCS_HOME)/include,)             \
+          $(if $(wildcard $(VL_INC_DIR)/vltstd),-I$(VL_INC_DIR)/vltstd,) \
           -I$(RISCV)/include                  \
           -I$(SPIKE_INSTALL_DIR)/include      \
           -std=c++17 -I$(CVA6_REPO_DIR)/corev_apu/tb/dpi -O3
@@ -162,6 +171,25 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         $(if $(spike-tandem),corev_apu/tb/common/spike.sv)                           \
         core/cva6_rvfi.sv                                                            \
         corev_apu/src/ariane.sv                                                      \
+        corev_apu/src/g6lc_ara_attach.sv                                             \
+        corev_apu/src/g6lc_axi_2to1_mux.sv                                           \
+        corev_apu/coherence/g6lc_coherence_pkg.sv                                    \
+        corev_apu/coherence/g6lc_inval_bus.sv                                        \
+        corev_apu/coherence/g6lc_snoop_filter.sv                                     \
+        corev_apu/coherence/g6lc_lr_sc_tracker.sv                                    \
+        corev_apu/coherence/g6lc_l1_inv_adapter.sv                                   \
+        corev_apu/coherence/g6lc_coherence_hub.sv                                    \
+        corev_apu/l2_cache/g6lc_l2_pkg.sv                                            \
+        corev_apu/l2_cache/g6lc_l2_tag.sv                                            \
+        corev_apu/l2_cache/g6lc_l2_data.sv                                           \
+        corev_apu/l2_cache/g6lc_l2_mshr.sv                                           \
+        corev_apu/l2_cache/g6lc_l2_top.sv                                            \
+        corev_apu/l3_cache/g6lc_l3_pkg.sv                                            \
+        corev_apu/l3_cache/g6lc_l3_inclusive_inv.sv                                  \
+        corev_apu/l3_cache/g6lc_server_prefetcher.sv                                 \
+        corev_apu/l3_cache/g6lc_l3_top.sv                                            \
+        corev_apu/src/g6lc_cluster.sv                                                \
+        vendor/pulp-platform/axi/src/axi_dw_converter.sv                             \
         $(wildcard corev_apu/bootrom/*.sv)                                           \
         $(wildcard corev_apu/clint/*.sv)                                             \
         $(wildcard corev_apu/fpga/src/axi2apb/src/*.sv)                              \
@@ -214,11 +242,9 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/instr_tracing/ITI/cva6_iti/block_retirement.sv                     \
         corev_apu/instr_tracing/ITI/cva6_iti/single_retirement.sv                    \
         corev_apu/instr_tracing/ITI/cva6_iti/itype_detector.sv                       \
-        vendor/pulp-platform/common_cells/src/counter.sv                             \
         vendor/pulp-platform/common_cells/src/sync.sv                                \
         vendor/pulp-platform/common_cells/src/sync_wedge.sv                          \
         vendor/pulp-platform/common_cells/src/edge_detect.sv                         \
-        corev_apu/instr_tracing/rv_tracer-main/rtl/lzc.sv                            \
         corev_apu/instr_tracing/rv_tracer-main/rtl/te_branch_map.sv                  \
         corev_apu/instr_tracing/rv_tracer-main/rtl/te_filter.sv                      \
         corev_apu/instr_tracing/rv_tracer-main/rtl/te_packet_emitter.sv              \
@@ -226,9 +252,11 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/instr_tracing/rv_tracer-main/rtl/te_reg.sv                         \
         corev_apu/instr_tracing/rv_tracer-main/rtl/te_resync_counter.sv              \
         corev_apu/instr_tracing/rv_tracer-main/rtl/rv_tracer.sv                      \
-        vendor/pulp-platform/common_cells/src/fifo_v3.sv                             \
         corev_apu/instr_tracing/DPTI/slicer_DPTI.sv                                  \
         corev_apu/instr_tracing/rv_encapsulator-main/src/rtl/encapsulator.sv
+# Note: counter.sv, fifo_v3.sv, lzc.sv come from core/Flist.cva6 (common_cells).
+# Do not re-list them here (or the tracer's vendored lzc.sv) — Verilator MODDUP
+# on those modules has been observed to trip an internal fault on 5.0xx.
 src := $(addprefix $(root-dir), $(src))
 
 copro_src := core/cvxif_example/include/cvxif_instr_pkg.sv \
@@ -303,6 +331,14 @@ xil_debug_filter += $(addprefix $(root-dir), corev_apu/riscv-dbg/src/dmi_vjtag_t
 xil_debug_filter += $(addprefix $(root-dir), corev_apu/riscv-dbg/src/dmi_vjtag.sv)						
 src := $(filter-out $(xil_debug_filter), $(src))
 
+# Emit overlay dedup (mc-spo-veri / --use-emit): drop $(src) entries whose
+# basename is already provided by a corrected *__svt.sv in $(flist). Pass e.g.
+#   make verilate flist=…/emit-overlay.f emit_src_exclude="fifo_v3.sv counter.sv"
+emit_src_exclude ?=
+ifneq ($(strip $(emit_src_exclude)),)
+  src := $(foreach f,$(src),$(if $(filter $(notdir $(f)),$(emit_src_exclude)),,$(f)))
+endif
+
 fpga_src += corev_apu/fpga/src/bootrom/bootrom_$(XLEN).sv
 fpga_src := $(addprefix $(root-dir), $(fpga_src))
 
@@ -328,6 +364,7 @@ riscv-benchmarks          := $(shell xargs printf '\n%s' < $(riscv-benchmarks-li
 
 # Search here for include files (e.g.: non-standalone components)
 incdir := $(CVA6_REPO_DIR)/vendor/pulp-platform/common_cells/include/ $(CVA6_REPO_DIR)/vendor/pulp-platform/axi/include/ \
+          $(CVA6_REPO_DIR)/corev_apu/include/ \
           $(CVA6_REPO_DIR)/corev_apu/register_interface/include/ $(CVA6_REPO_DIR)/corev_apu/tb/common/ \
           $(CVA6_REPO_DIR)/vendor/pulp-platform/axi/include/ \
           $(CVA6_REPO_DIR)/verif/core-v-verif/lib/uvm_agents/uvma_rvfi/ \
@@ -666,11 +703,15 @@ xrun-check-benchmarks:
 xrun-ci: xrun-asm-tests xrun-amo-tests xrun-mul-tests xrun-fp-tests xrun-benchmarks
 
 # verilator-specific
+# flist defaults to core/Flist.cva6; emit overlay uses a generated flat .f
+# (see verif/regress/mk-emit-overlay-flist.py / mc-spo-veri.sh USE_EMIT).
+# cva6_rvfi.sv is in $(src) only once (not also on this line) to avoid MODDUP.
+# -Wno-MODDUP: TB/SoC extras can still collide with flist on some builds.
 verilate_command := $(verilator) --no-timing verilator_config.vlt                                                \
-                    -f core/Flist.cva6                                                                           \
-                    core/cva6_rvfi.sv                                                                            \
+                    -f $(flist)                                                                                 \
                     $(filter-out %.vhd, $(ariane_pkg))                                                           \
-                    $(filter-out core/fpu_wrap.sv, $(filter-out %.vhd, $(filter-out %_config_pkg.sv, $(src))))   \
+                    $(filter-out %/cva6_rvfi.sv,$(filter-out core/fpu_wrap.sv, $(filter-out %.vhd, $(filter-out %_config_pkg.sv, $(src)))))   \
+                    core/cva6_rvfi.sv                                                                            \
                     +define+$(defines)$(if $(TRACE_FAST),+VM_TRACE)$(if $(TRACE_COMPACT),+VM_TRACE+VM_TRACE_FST) \
                     corev_apu/tb/common/mock_uart.sv                                                             \
                     +incdir+corev_apu/axi_node                                                                   \
@@ -680,6 +721,7 @@ verilate_command := $(verilator) --no-timing verilator_config.vlt               
                     -Werror-PINMISSING                                                                           \
                     -Werror-IMPLICIT                                                                             \
                     -Wno-fatal                                                                                   \
+                    -Wno-MODDUP                                                                                  \
                     -Wno-PINCONNECTEMPTY                                                                         \
                     -Wno-ASSIGNDLY                                                                               \
                     -Wno-DECLFILENAME                                                                            \
@@ -687,6 +729,10 @@ verilate_command := $(verilator) --no-timing verilator_config.vlt               
                     -Wno-UNOPTFLAT                                                                               \
                     -Wno-BLKANDNBLK                                                                              \
                     -Wno-style                                                                                   \
+                    $(verilator_sideeffect_flag)                                                                 \
+                    --converge-limit 100000                                                                      \
+                    --x-assign 0                                                                                 \
+                    --x-initial 0                                                                                \
                     $(if ($(PRELOAD)!=""), -DPRELOAD=1,)                                                         \
                     $(if $(PROFILE),--stats --stats-vars --profile-cfuncs,)                                      \
                     $(if $(DEBUG), --trace-structs,)                                                             \
@@ -703,10 +749,12 @@ verilate_command := $(verilator) --no-timing verilator_config.vlt               
                     corev_apu/tb/dpi/remote_bitbang.cc corev_apu/tb/dpi/msim_helper.cc
 
 # User Verilator, at some point in the future this will be auto-generated
+# Pass host CXX/CC so conda/mamba toolchains (x86_64-*-g++) work without a bare `g++` on PATH.
 verilate:
 	@echo "[Verilator] Building Model$(if $(PROFILE), for Profiling,)"
 	$(verilate_command)
-	cd $(ver-library) && $(MAKE) -j${NUM_JOBS} -f Variane_testharness.mk
+	cd $(ver-library) && $(MAKE) -j${NUM_JOBS} -f Variane_testharness.mk \
+		CXX="$(CXX)" CC="$(CC)" LINK="$(CXX)"
 
 sim-verilator: verilate
 	$(ver-library)/Variane_testharness $(elf_file)

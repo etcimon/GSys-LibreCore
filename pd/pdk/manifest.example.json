@@ -1,0 +1,32 @@
+{
+  "_comment": "TEMPLATE. Copy to pd/pdk/manifest.json (gitignored) or pd/pdk/<technology>/manifest.json and fill in. Never commit a filled-in manifest that names NDA parts. See ../pd/pdk/README.md and AGENTS-technology.md.",
+  "technology": "REPLACE_ME (e.g. tsmcN5, gf12lp, sky130hd)",
+  "vendor": "REPLACE_ME (foundry / IP vendor)",
+  "node": "REPLACE_ME (e.g. N5, 12LP, 130nm)",
+  "pdkMode": "nda",
+  "nda": true,
+  "guardMacro": "CVA6_TECH_OPT",
+  "abstractionLayers": {
+    "memoryCompiler": { "provided": false, "tool": "", "views": ["lib", "db", "lef", "gds", "verilog"] },
+    "standardCells": { "provided": false, "icg": "", "retentionFlop": "", "levelShifter": "", "isolation": "" },
+    "powerKit": { "provided": false, "format": ["UPF"], "domains": [] },
+    "hardMacros": { "pll": false, "io": false, "serdes": false }
+  },
+  "cellMap": {
+    "tc_sram": "REPLACE_ME compiled-macro / generator key (maps to tc_sram ImplKey)",
+    "tc_clk_gating": "REPLACE_ME integrated clock-gating (ICG) cell",
+    "tc_pwr": "REPLACE_ME level-shifter / isolation / retention cells"
+  },
+  "areas": {
+    "core": { "specGlobs": ["core/**/*.tech-spec.md"], "dropIn": "pd/pdk/core/<technology>" },
+    "corev_apu": { "specGlobs": ["corev_apu/**/*.tech-spec.md"], "dropIn": "pd/pdk/corev_apu/<technology>" }
+  },
+  "socReadiness": {
+    "mbistInserted": false,
+    "scanWrapped": false,
+    "timingClosed": false,
+    "powerAware": false,
+    "verifiedEquivalentToGeneric": false,
+    "areaPowerReported": false
+  }
+}

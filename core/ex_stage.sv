@@ -40,6 +40,8 @@ module ex_stage
     input logic rst_ni,
     // Fetch flush request - CONTROLLER
     input logic flush_i,
+    // FSE S4: younger-only LSU cancel (from scoreboard)
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
     // Debug mode is enabled - CSR_REGFILE
     input logic debug_mode_i,
     // rs1 forwarding - ISSUE_STAGE
@@ -52,6 +54,8 @@ module ex_stage
     input alu_bypass_t alu_bypass_i,
     // PC of the current instruction - ISSUE_STAGE
     input logic [CVA6Cfg.VLEN-1:0] pc_i,
+    // FSE S5: SMT hart of CTRL_FLOW instruction - ISSUE_STAGE
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] branch_hart_i,
     // Is_zcmt instruction - ISSUE_STAGE
     input logic is_zcmt_i,
     // Report whether instruction is compressed - ISSUE_STAGE
@@ -301,16 +305,17 @@ module ex_stage
   logic [CVA6Cfg.VLEN-1:0] rs1_forwarding;
   logic [CVA6Cfg.VLEN-1:0] rs2_forwarding;
   always_comb begin
-    // data silence operation
+    // Priority: highest issue port with a one-cycle op (branch/ALU/CSR/AES)
     one_cycle_data = one_cycle_select[0] ? fu_data_i[0] : '0;
     rs1_forwarding = rs1_forwarding_i[0];
     rs2_forwarding = rs2_forwarding_i[0];
-
     if (CVA6Cfg.SuperscalarEn) begin
-      if (one_cycle_select[1]) begin
-        one_cycle_data = fu_data_i[1];
-        rs1_forwarding = rs1_forwarding_i[1];
-        rs2_forwarding = rs2_forwarding_i[1];
+      for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
+        if (one_cycle_select[p]) begin
+          one_cycle_data = fu_data_i[p];
+          rs1_forwarding = rs1_forwarding_i[p];
+          rs2_forwarding = rs2_forwarding_i[p];
+        end
       end
     end
   end
@@ -318,13 +323,22 @@ module ex_stage
   // 1. ALU(s) (combinatorial)
   assign alu_data[0] = one_cycle_data;
 
-  if (CVA6Cfg.SuperscalarEn) begin : gen_alu2_data_sel
+  // Secondary ALU input: first issue port asserting alu2_valid (priority low→high)
+  if (CVA6Cfg.NrALUs >= 2) begin : gen_alu2_data_sel
     always_comb begin
-      unique case (1'b1)
-        alu2_valid_i[1]: alu_data[1] = fu_data_i[1];
-        alu2_valid_i[0]: alu_data[1] = fu_data_i[0];
-        default: alu_data[1] = '0;
-      endcase
+      alu_data[1] = '0;
+      for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
+        if (alu2_valid_i[p]) alu_data[1] = fu_data_i[p];
+      end
+    end
+  end
+
+  // Extra ALUs: pair issue port p with ALU index p when available
+  for (genvar a = 2; a < CVA6Cfg.NrALUs; a++) begin : gen_extra_alu_data
+    if (a < CVA6Cfg.NrIssuePorts) begin
+      assign alu_data[a] = alu_valid_i[a] ? fu_data_i[a] : '0;
+    end else begin
+      assign alu_data[a] = '0;
     end
   end
 
@@ -356,6 +370,7 @@ module ex_stage
       .debug_mode_i,
       .fu_data_i         (one_cycle_data),
       .pc_i,
+      .hart_id_i         (branch_hart_i),
       .is_zcmt_i,
       .is_compressed_instr_i,
       .branch_valid_i    (|branch_valid_i),
@@ -412,12 +427,12 @@ module ex_stage
 
   // 4. Multiplication (Sequential)
   fu_data_t mult_data;
-  // input silencing of multiplier
+  // input silencing of multiplier — priority pick across issue ports
   always_comb begin
     mult_data = mult_valid_i[0] ? fu_data_i[0] : '0;
     if (CVA6Cfg.SuperscalarEn) begin
-      if (mult_valid_i[1]) begin
-        mult_data = fu_data_i[1];
+      for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
+        if (mult_valid_i[p]) mult_data = fu_data_i[p];
       end
     end
   end
@@ -450,8 +465,8 @@ module ex_stage
       always_comb begin
         fpu_data = fpu_valid_i[0] ? fu_data_i[0] : '0;
         if (CVA6Cfg.SuperscalarEn) begin
-          if (fpu_valid_i[1]) begin
-            fpu_data = fu_data_i[1];
+          for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
+            if (fpu_valid_i[p]) fpu_data = fu_data_i[p];
           end
         end
       end
@@ -489,7 +504,8 @@ module ex_stage
 
   // result MUX
   // This is really explicit so that synthesis tools can elide unused signals
-  if (CVA6Cfg.SuperscalarEn) begin
+  // Secondary ALU result rides the FPU WB port when present (legacy dual-issue).
+  if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrALUs >= 2) begin
     if (CVA6Cfg.FpPresent) begin
       assign fpu_valid_o    = fpu_valid || |alu2_valid_i;
       assign fpu_result_o   = fpu_valid ? fpu_result   : alu_result[1];
@@ -523,11 +539,16 @@ module ex_stage
     speculative_load = 1'b0;
 
     if (CVA6Cfg.SuperscalarEn) begin
-      if (lsu_valid_i[1]) begin
-        lsu_data  = fu_data_i[1];
-        lsu_tinst = tinst_i[1];
-        if (CVA6Cfg.SpeculativeSb) begin
-          speculative_load = branch_valid_i[0];
+      for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
+        if (lsu_valid_i[p]) begin
+          lsu_data  = fu_data_i[p];
+          lsu_tinst = tinst_i[p];
+          // Load after same-cycle branch on any earlier port is speculative
+          if (CVA6Cfg.SpeculativeSb) begin
+            for (int unsigned e = 0; e < p; e++) begin
+              if (branch_valid_i[e]) speculative_load = 1'b1;
+            end
+          end
         end
       end
     end
@@ -552,6 +573,7 @@ module ex_stage
       .clk_i,
       .rst_ni,
       .flush_i,
+      .cancelled_mask_i,
       .stall_st_pending_i,
       .no_st_pending_o,
       .shared_tlb_flush_busy_o(shared_tlb_flush_busy_o),
@@ -621,10 +643,11 @@ module ex_stage
   if (CVA6Cfg.CvxifEn) begin : gen_cvxif
     fu_data_t cvxif_data;
     always_comb begin
+      // CVXIF is port-0 only by structural hazard; keep priority scan for safety
       cvxif_data = x_valid_i[0] ? fu_data_i[0] : '0;
       if (CVA6Cfg.SuperscalarEn) begin
-        if (x_valid_i[1]) begin
-          cvxif_data = fu_data_i[1];
+        for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
+          if (x_valid_i[p]) cvxif_data = fu_data_i[p];
         end
       end
     end

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>RVA22 Profiles (Vol III, 4)</title></head>
+<body>
+<h1>Vol III &sect;4 — RVA22 Profiles</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#_rva22u64_profile">#_rva22u64_profile</a> (4.1),
+<a href="../../specs/riscv-spec.html#_rva22s64_profile">#_rva22s64_profile</a> (4.2).
+Source lines: <code>specs/riscv-spec.html:90764</code> (4.1), <code>:91130</code> (4.2).</p>
+
+<p>RVA22 extends RVA20 with newer extensions: Zicbom, Zicbop, Zicboz, Zicsr/Zifencei remain; it adds
+Zba, Zbb, Zbs, Zfhmin, Zicond, Zihintpause, Zihintntl, and others. RVA22S64 also adds Svadu,
+Svpbmt, and Svinval. It represents the 2022 application-processor target and drives feature
+roadmaps for CVA6 additions.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The RVA22U64 profile specifies the ISA features available to user-mode
+execution environments in 64-bit applications processors. This is the
+most important profile within the application processor family in terms
+of the amount of software that targets this profile."
+...
+"The RVA22S64 profile specifies the ISA features available to a
+supervisor-mode execution environment in 64-bit applications processors.
+RVA22S64 is based on privileged architecture version 1.12."
+(specs/riscv-spec.html:90764-90770 anchor #_rva22u64_profile;
+:91130-91135 anchor #_rva22s64_profile)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module rva22_check (
+  input  config_pkg::cva6_cfg_t CVA6Cfg,
+  output logic                  rva22_u64_o, rva22_s64_o
+);
+  // include RVA20 bits plus RVB (Zba/Zbb/Zbs), Zicond, Zicb*, Svadu, Svpbmt, Svinval
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partial. Some RVA22 bits are configurable: <code>RVB</code>
+(Zba/Zbb/Zbs) in <code>core/alu.sv</code> and decoder; <code>RVZiCond</code> in
+<code>core/decoder.sv</code>/<code>core/alu.sv</code>; <code>RVZiCbom</code> for cache-block ops. Others
+(Svadu, Svpbmt, Svinval, Zfhmin, Zihintntl, Zihintpause) are absent. Thus no shipped target fully
+claims RVA22S64.</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string can only claim RVA22-compatible
+extensions that are implemented and verified; missing extensions must not be advertised.</p>
+</body>
+</html>

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Svadu Hardware A/D Update (Vol II, 7.3)</title></head>
+<body>
+<h1>Vol II &sect;7.3 — Svadu Extension for Hardware Updating of A/D Bits</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:svadu">specs/riscv-spec.html#ext:svadu</a>.
+Source line: <code>specs/riscv-spec.html:88370</code>. <strong>Domain:</strong> RAM.</p>
+
+<p>Svadu permits the hardware to set the accessed (A) and dirty (D) bits in page-table entries
+automatically during translation and writeback, rather than requiring software emulation via page
+faults. This reduces OS overhead but requires atomic PTE updates and careful ordering with stores
+and with the memory model.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Svadu extension adds support and CSR controls for hardware updating
+of PTE A/D bits. If the Svadu extension is implemented, the
+menvcfg.ADUE field is writable."
+(specs/riscv-spec.html:88370-88374, anchor #ext:svadu)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module svadu_pte_update (
+  input  logic [63:0] pte_i,
+  input  logic        access_i, store_i,
+  output logic [63:0] pte_o,
+  output logic        pte_write_o
+);
+  // set A on any successful translation; set D on write; write PTE atomically
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The page-table walker in
+<code>core/cva6_mmu/cva6_ptw.sv</code> reads PTEs but does not write back updated A/D bits. Adding
+Svadu requires an atomic read-modify-write path to memory for PTE updates, ordering with the store
+buffer, and the <code>menvcfg.ADUE</code> CSR in <code>core/csr_regfile.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Svadu would be advertised in the
+<code>riscv,isa</code> string (e.g. <code>_svadu</code>) if implemented.</p>
+</body>
+</html>

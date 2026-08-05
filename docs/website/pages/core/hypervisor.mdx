@@ -1,0 +1,83 @@
+---
+title: Hypervisor & Sstc
+description: RISC-V H extension and Sstc guest timers on GSys LibreCore — CSR surface, G-stage, enable order.
+---
+
+# Hypervisor & Sstc
+
+GSys LibreCore implements the **RISC-V Hypervisor (H)** extension surface under
+`RVH` / `HExtEn`, plus **Sstc** guest timers (`vstimecmp`, `henvcfg.STCE`) for
+KVM-oriented hosts. Default shipping packages keep **H off**; server packages
+opt in.
+
+Authority: `architecture/server-math-hypervisor.md`,
+`architecture/remaining-upgrade-sequence.md`. Spec: Priv II hypervisor chapter,
+Sstc.
+
+## Product status (summary)
+
+| Track | Meaning |
+|---|---|
+| **U9.0** Sstc × H | `vstimecmp` / `vstimecmph`, `henvcfg.STCE`, VS alias of `stimecmp`, hardwired `mip.VSTIP` when STCE pair set |
+| **U9.1** Guest time offset | `htimedelta` / `htimedeltah`; guest time = mtime + htimedelta; multi-context PLIC |
+| **U9.2** Trap polish | Virtual-instr on STCE fail under V; HVIP vs hardwired VSTIP; VS entry litmus |
+| **G-stage** | Two-stage + G-only walks present in PTW; full KVM stress still operator-owned |
+| **HFENCE / HLV / HSV** | Decoder + commit / MMU flush / load-store FU paths when H on |
+| **hgeie / hgeip** | Stub (always 0) — multi-guest external interrupt IDs not a product claim yet |
+
+`check_cfg` treats **`SstcEn && RVH` as legal** (required pair for guest timer
+story).
+
+## CSR / microarch seats
+
+| Feature | Typical locus |
+|---|---|
+| `vstimecmp`, `htimedelta`, HS CSRs | `core/csr_regfile.sv` |
+| G-stage PTW | `core/cva6_mmu/` / `cva6_ptw.sv` |
+| HFENCE | Decoder + commit + MMU flush |
+| HLV/HSV | Decoder → load/store FU |
+| PLIC multi-context | `corev_apu/rv_plic` + harness fan-out |
+
+## Enable packages
+
+| Package | H / Sstc | Notes |
+|---|---|---|
+| Default `cv64a6_imafdc_sv39` etc. | Usually off | Identity host |
+| `g6lc64_server_math` | **On** | H+Sstc + math stack; RVV off |
+| `g6lc64_server_math_v` | **On** | Same + RVV when Ara linked |
+| `g6lc64_ooo_server` | Check package | Wide OoO host; compose carefully with H |
+
+Confirm bits in the package source before marketing a KVM target.
+
+## Best-practice bring-up
+
+1. **Single-core** server package with H+Sstc — guest timer litmus
+   (`verif/tests/custom/sstc_h/…`).  
+2. Raise **`NrCores`** + L2 for SMP host.  
+3. Bring up **OpenSBI + Linux** as a hypervisor host (external to this page).  
+4. Only then compose **SMT** or **Ara** if needed — each multiplies debug space.  
+
+## Verification
+
+```bash
+g6lc-build verify --target g6lc64_server_math
+g6lc-build test --suite server-math-tests   # optional
+```
+
+Directed: `vstimecmp` / `htimedelta` assembly under `verif/tests/custom/sstc_h/`.
+Full KVM regression is **lab / residual**, not default `verify`.
+
+## Software / DTS
+
+- `misa.H` (and related ISA string tokens) must match package  
+- Sstc discovery for supervisor/guest timer software  
+- PLIC contexts sized for multi-core M/S  
+- See `AGENTS-dts-validation.md` when changing timer or interrupt topology  
+
+## Related
+
+- [Server Profiles](./server-profiles)
+- [Multi-Core](../corev-apu/multi-core)
+- [Vector / Ara](./vector)
+- [SKU Matrix](../architecture/sku-matrix)
+- Spec guide: Priv hypervisor + Sstc anchors via `agents/spec/`

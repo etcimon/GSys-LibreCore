@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zacas Atomic Compare-and-Swap (Vol I, 5.9)</title></head>
+<body>
+<h1>Vol I &sect;5.9 — Zacas Extension for Atomic Compare-and-Swap (CAS) Instructions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zacas">specs/riscv-spec.html#ext:zacas</a>.
+<strong>Domain:</strong> SPEC, RAM.</p>
+
+<p>Zacas adds AMOCAS.W/D/Q instructions that atomically load a data value from the address in
+<em>rs1</em>, compare the loaded value to the value held in <em>rd</em>, and, if bitwise equal, store
+the value in <em>rs2</em> to the original address. The loaded value is placed into <em>rd</em>. The
+operation is atomic and supports acquire/release bits. It is a stronger primitive than LR/SC for
+lock-free algorithms and must be implemented with either a cache-level locked RMW or a bus-locked
+transaction.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"For RV32, AMOCAS.W atomically loads a 32-bit data value from address in
+rs1, compares the loaded value to the 32-bit value held in rd, and if
+the comparison is bitwise equal, then stores the 32-bit value held in
+rs2 to the original address in rs1. The value loaded from memory is
+placed into register rd."
+...
+    temp = mem[X(rs1)]
+    if ( temp == X(rd) )
+        mem[X(rs1)] = X(rs2)
+    X(rd) = temp
+(specs/riscv-spec.html:15288-15305, anchor #ext:zacas / #norm:Zacas_rv32_amocas-w_op)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module zacas_unit (
+  input  logic [XLEN-1:0] addr_i, expected_i, new_value_i,
+  input  logic [1:0]      size_i, // W/D/Q
+  output logic [XLEN-1:0] old_value_o,
+  output logic            swapped_o
+);
+  // atomic compare; if match write new value; return old value
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> <strong>partial → implemented (config-gated, W/D)</strong>.
+<code>CVA6Cfg.RVZacas</code> (depends on <code>RVA</code>) enables Zacas:</p>
+<ul>
+  <li><strong>Decode:</strong> <code>core/decoder.sv</code> AMO opcode, <code>funct5=00101</code> →
+    <code>AMO_CASW</code>/<code>AMO_CASD</code>; <code>MUX_RD_RS3</code> reads expected from
+    <code>rd</code> as third GPR source when <code>NrRgprPorts = 3×issue</code>.</li>
+  <li><strong>Pipeline:</strong> <code>fu_data.operand_c</code> / <code>lsu_ctrl.data_cmp</code> /
+    <code>amo_req_t.operand_c</code> carry expected; address still uses <code>imm=0</code>.</li>
+  <li><strong>ALU:</strong> <code>core/cache_subsystem/amo_alu.sv</code> <code>AMO_CAS1</code>:
+    write <code>rs2</code> iff mem == expected, else keep mem.</li>
+  <li><strong>HPDCache:</strong> <code>HPDCACHE_REQ_AMO_CAS</code> + pack
+    <code>{cmp,swap}</code> for W in <code>cva6_hpdcache_if_adapter</code>;
+    <code>hpdcache_amo</code> CAS path.</li>
+  <li><strong>AXI:</strong> <code>ATOP_ATOMICCMP</code> mapping in <code>axi_adapter</code>.</li>
+  <li><strong>Packages:</strong> <code>cv64a6_server_math{,_v}</code>,
+    <code>cv64a6_ooo_server</code> set <code>RVZacas=1</code>. AMOCAS.Q not supported.</li>
+  <li><strong>Tests:</strong> <code>verif/tests/custom/multicore/zacas_*.S</code> +
+    <code>mc_cas_lock_handoff.S</code> in <code>testlist_mc_stream.yaml</code>.</li>
+</ul>
+
+<p><strong>.dts linkage:</strong> when <code>RVZacas=1</code>, advertise
+<code>zacas</code> in <code>riscv,isa-extensions</code> on the matching board DTS
+(server_math / ooo_server trees); default non-Zacas packages must not claim it.</p>
+</body>
+</html>

@@ -1,0 +1,276 @@
+---
+title: Worktree Map
+description: A high-level tour of every top-level directory in the CVA6 repository and what it is for.
+---
+
+# Worktree Map
+
+This page describes the purpose of each top-level directory at a level high
+enough to stay current as files move. For exact file lists, see the repository
+itself.
+
+A repository's directory structure is its long-term API. When a new engineer or
+an automated agent opens the project, the first question is not "what does this
+file do?" but "what is the shape of the system?" The CVA6 worktree is designed
+so that the shape itself communicates intent: directories that hold compiled
+IP are separated from directories that hold configuration, tooling, and
+non-compiled design exploration. Understanding this shape is prerequisite to
+every other activity in the project, because every edit is evaluated by whether
+it respects the seams between these directories.
+
+## `core/` — the RISC-V CPU
+
+Source code for the CVA6 core only. It should contain no code needed to build
+anything other than the core. Key subdirectories:
+
+- `include/` — SystemVerilog packages and config structs (`config_pkg.sv`,
+  `cv64a6_*_config_pkg.sv`, etc.). The `cva6_cfg_t` struct is the single source
+  of truth for feature gating.
+- `frontend/` — fetch, branch prediction (BTB, BHT, RAS), and instruction
+  queue.
+- `cache_subsystem/` — L1 instruction/data caches, AXI adapters, and the
+  HPDcache integration.
+- `cva6_mmu/` — MMU, page-table walker (PTW), shared TLB.
+- `pmp/` — physical memory protection.
+- `perf_counters.sv`, `cva6_rvfi*.sv` — observability and RVFI trace.
+
+The core is the most spec-bound layer: every ISA-visible change must update
+`AGENTS-specs-to-impl.md`, `AGENTS-specs-to-tests.md`, and the derived
+`AGENTS-specs-coverage.md`.
+
+The core's isolation is its most valuable property. In commercial practice, a
+core that can be compiled, simulated, and synthesized stand-alone can be reused
+across multiple SoCs, sold as soft IP, or retargeted to new processes without
+dragging along board-specific wrappers. CVA6 enforces this isolation at the
+file-system level: nothing in `core/` references `corev_apu/` or `corev-mb/`.
+This one-way dependency is the difference between a reusable IP block and a
+monolithic design that can only be used in its original context.
+
+## `corev_apu/` — on-die uncore / FPGA emulation platform
+
+The CORE-V-APU wraps the core for FPGA emulation and SoC integration. It depends
+on `core/` but the core does not depend on it. Key areas:
+
+- `src/` — top-level APU wrapper, AXI crossbar, interrupt controllers, timers,
+  bootrom, and FPGA-specific glue.
+- `axi_mem_if/` — AXI memory interface.
+- `bootrom/` — first-stage boot code and the `.dts` source.
+- `clint/`, `rv_plic/` — standard RISC-V interrupt/timer blocks.
+- `fpga/` — FPGA synthesis constraints and scripts.
+
+Vendored controllers and PHY (DDR, Ethernet, PCIe, etc.) are *fetched* into the
+APU layer by the build-platform `vendor` command; they are not committed as raw
+copies. See `AGENTS-vendor.md` and `AGENTS-corev-apu.md`.
+
+The APU layer is where the economics of integration become visible. Vendors
+typically charge for controllers and PHYs under NDA or license, and those IP
+blocks evolve on their own schedules. By fetching rather than copying, CVA6
+keeps the vendored IP in a form that can be updated, scanned for known issues,
+and audited for license compatibility. The APU layer's job is to hold the
+digital controllers and the AXI fabric that stitches them to the core, while
+leaving the analog PHY and board-specific details to the board layer.
+
+## `corev-mb/` — motherboard / board layer
+
+The board *around* the die. It is non-compiled scaffolding plus a small Python
+library for custom board design with SKiDL.
+
+- `boards/<id>/` — each board has a `board.json` machine spec and a
+  `generated/` directory (gitignored) for `<id>_board_pkg.sv` and `board.mk`.
+- `architecture/<id>/` — non-compiled development-target documentation.
+- `lib/` — SKiDL helper scripts and `pcbparts_mcp.py` (MCP client for
+  pcbparts.dev part selection).
+
+Selecting a board (`g6lc-build mb select <id>`) adapts the SoC config, syncs
+the board's vendored controllers, and generates the board package. See
+`AGENTS-motherboard.md`.
+
+The board layer is the most concrete reminder that a CPU is not a software
+artifact. A chip must live on a board, surrounded by power regulators, memory,
+connectors, and PHYs. The `corev-mb` layer treats the board as a configuration
+problem: `board.json` describes the machine, and the build platform generates
+the artifacts needed to parameterize the APU. This decouples board
+specification from RTL editing, which is essential when multiple boards share
+the same core or when one board goes through multiple revisions.
+
+## `verif/` — verification
+
+The verification environment. It includes:
+
+- `regress/` — one script per regression suite; catalogued by the build
+  platform.
+- `tests/` — test programs and `testlist_*.yaml` files.
+- `sim/` — DV/UVM and `riscv-dv` environment.
+- `tb/` — testbench modules.
+- `bsp/` — board support package for test programs.
+
+`core-v-verif/` is a submodule that contains verification files shared with
+other OpenHW cores.
+
+Verification is not a downstream activity in CVA6; it is a first-class
+deliverable whose structure mirrors the design itself. `regress/` contains the
+orchestration scripts that the build platform catalogues; `tests/` contains the
+programs and test lists; `sim/` and `tb/` contain the environments that execute
+them. By keeping verification at the same directory level as the core and APU,
+the project signals that a feature is not complete until it is verified, not
+when it is coded. The `core-v-verif` submodule further reflects the OpenHW
+collaborative model: common verification infrastructure is shared across cores,
+while core-specific tests live here.
+
+## `vendor/` — third-party IP
+
+Controllers and utility IP maintained outside the repository. It includes the
+pulp-platform AXI, common_cells, and riscv-isa-manual submodules. The build
+platform's `vendor` command can fetch additional controllers and PHY into
+`corev_apu/vendor/`. See `AGENTS-vendor.md`.
+
+Vendor IP management is one of the most legally and technically sensitive
+activities in SoC design. The `vendor/` directory holds utility IP that is
+explicitly open-source and maintained as a submodule, while the build platform's
+`vendor` command handles additional controllers and PHYs that may arrive as
+snapshots, submodules, or NDA drops. This distinction matters because it
+separates "always present infrastructure" from "on-demand integration,"
+preventing the repository from accumulating stale or unlicensed copies of
+third-party code.
+
+## `build-platform/` — automation spine
+
+A Bun + TypeScript project that drives the whole flow from `.config.ts`. It is
+parameterized, cross-platform, and contained: everything it installs or produces
+goes into `build-platform/workspace/`.
+
+- `src/cli/` — command registry (`status`, `probe`, `diag`, `verify`, `timings`,
+  `vendor`, `mb`, `tech`, …).
+- `src/config/` — schema, defaults, and config loader.
+- `src/tooling/` — tool detection, install recipes, vendor sync, motherboard
+  engine, pcbparts MCP client, technology engine, and **timings** host adapter.
+- `src/workspace/` — file discovery and change detection.
+
+The build platform is the orchestration layer that turns the repository from a
+collection of files into a reproducible workflow. Its containment in
+`build-platform/workspace/` is a deliberate isolation choice: anything the
+platform installs, downloads, or produces is disposable. This means CI runners,
+new laptops, and automated agents can all start from a clean state and reach
+the same result. The platform's typed config surface also makes it the natural
+place for an LLM to read the SoC state before deciding which command to run.
+
+See [Build Platform](../build-platform), [Probe, Diag & Verify](../build-platform/verify-and-diag),
+and [Timings](../build-platform/timings).
+
+## `sv-timing/` — structural timing package
+
+A **standalone** Rust workspace (plus Python tooling and a small TypeScript
+client) that analyzes SystemVerilog for FO4-style path cost and optional
+auto-correct. It is project-independent: package tests use fixtures only.
+
+- `AGENTS.md` / `architecture/DESIGN.md` — package law and design.
+- `tools/svt.py` — primary package CLI (setup, doctor, build, test, run).
+- `crates/` — core, cache, transform, emit, CLI, vendored sv-parser.
+- Monorepo host: `g6lc-build timings` (spawn only; see
+  [sv-timing](../sv-timing)).
+
+`architecture/sv-timing/` in the monorepo scaffold is a **redirect** to this
+package so navigation stays consistent.
+
+## `agents/` and `AGENTS-*.md` — agent guides
+
+The `AGENTS-*.md` files are the **navigation layer** for LLM agents and human
+developers. They map intent to the spec and code loci that implement it.
+
+- `AGENTS.md` — main guider and substructure map.
+- `AGENTS-coding-philosophy.md` — the thought patterns for writing
+  synthesizable, timing-clean SystemVerilog.
+- `AGENTS-configuration.md` — target SoC context (frequency, voltage, power,
+  process, memory, software, DFT).
+- `AGENTS-build.md` / `build-platform/AGENTS.md` — build-platform entry and
+  authoritative internals.
+- `sv-timing/AGENTS.md` — structural timing package (when working in that tree).
+- `AGENTS-corev-apu.md` — uncore integration preconditions.
+- `AGENTS-motherboard.md` — board-layer governance.
+- `AGENTS-technology.md` — foundry PDK adaptation.
+- `AGENTS-vendor.md` — vendored controller/PHY workflow.
+- `AGENTS-specs-to-impl.md`, `AGENTS-specs-to-tests.md`,
+  `AGENTS-specs-coverage.md` — RISC-V spec traceability.
+- `AGENTS-dts-validation.md` — Linux device-tree cross-validation.
+
+The `agents/` directory is the project's institutional memory. In a field where
+tacit knowledge is often lost when engineers move between projects, the
+`AGENTS-*.md` files encode the reasoning that an expert would apply to each
+domain. They are written to be read by both humans and LLMs because both
+audiences need the same thing: a precise map from intent to implementation. The
+spec sub-files (`agents/spec/*.html`) provide the canonical reference; the
+guides (`agents/guides/AGENTS-*.md`) provide the playbook; and the root
+`AGENTS.md` provides the index.
+
+## `architecture/` — scaffold, programs of record, and live map
+
+This directory holds **non-compiled** design outlines for growth axes
+(branch-prediction research, deeper speculation, multi-threading, multi-core,
+L2/L3, spec extensions). It is not referenced by any flist; promoting an outline
+into real RTL follows the promotion path in `architecture/README.md`.
+
+It also carries **programs of record** (upgrade sequences, Ara attach, SMT
+bring-up) and a **live RTL summary** of features that already exist under
+`core/` / `corev_apu/` behind config gates. Treat the scaffold subdirs as RFCs;
+treat the live summary as navigation into real code.
+
+The buffer role remains: not every idea should enter synthesis on day one. By
+keeping outlines outside flists, CVA6 provides a sanctioned place for
+speculative design without risking the stability of the working core.
+
+## `pd/` — physical design
+
+- `synth/` — example and CI scripts for synthesis.
+- `pdk/` — protected foundry / NDA PDK drop-in root. Only READMEs and templates
+  are committed; actual foundry views are gitignored. See
+  `AGENTS-technology.md`.
+
+## `docs/` — existing Sphinx documentation
+
+The current user and design manuals (`docs/01_cva6_user/`, `docs/03_cva6_design/`,
+etc.) are written in reStructuredText for Sphinx. This Next.js docs site
+(`docs/website/`) is additive; it does not replace the existing docs, but
+provides a modern, markdown-first, AI-friendly entry point.
+
+The coexistence of two documentation systems is intentional, not transitional.
+
+| Surface | Best for |
+|---|---|
+| **This site** (`docs/website/`) | Worktree, build-platform, boards, PDK, **sv-timing**, agent workflows |
+| **Sphinx / adoc** (`docs/01_…`, design manuals) | Long-form user/ISA/design reference (OpenHW lineage; some design docs marked deprecated) |
+| **`AGENTS*.md` + package AGENTS** | Edit-time authority for agents and contributors |
+
+Each system does what it does best; neither is expected to replace the other.
+When tooling or monorepo layers move, update this site first; keep Sphinx for
+config-specific manuals and classical pipeline prose.
+
+## `specs/`, `config/`, `ci/`, `util/`, `common/`
+
+- `specs/riscv-spec.html` — the canonical RISC-V ISA Manual (Asciidoctor
+  output) used as the spec of record.
+- `config/` — generated config files from `riscv-config` inputs.
+- `ci/` — CI scriptware.
+- `util/` — general utility scripts (toolchain-builder, flist flattener, etc.).
+- `common/` — source used by both the core and the APU.
+
+## `tutorials/`, `perf-model/`
+
+- `tutorials/` — written guides for simulations, ASIC flow, and FPGA bring-up.
+- `perf-model/` — a Python performance model for micro-architecture
+  exploration.
+
+The remaining top-level directories are the support infrastructure. `specs/`
+holds the canonical RISC-V ISA Manual, making the project self-contained in its
+normative references. `config/` holds generated hardware configuration outputs.
+`ci/` holds the scripts that keep continuous integration reproducible. `util/`
+holds tooling that predates or sits outside the build platform, such as the
+toolchain builder. `common/` holds code shared between the core and APU,
+preventing duplication of fundamental primitives. `tutorials/` and `perf-model/`
+support learning and early-stage micro-architecture exploration, respectively.
+
+## How the worktree is read by an agent
+
+An LLM agent does not scan the whole tree. It starts from `AGENTS.md` and
+follows the substructure map to the relevant `AGENTS-*.md` and `agents/guides/`
+file for the task, then opens the spec sub-files and code loci listed there.
+This keeps the context window small and the reasoning grounded.

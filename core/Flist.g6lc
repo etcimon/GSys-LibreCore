@@ -1,0 +1,35 @@
+//////////////////////////////////////////////////////////////////////////////
+//
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// Flist.g6lc — brand-forward manifest alias for GSys LibreCore.
+//
+// This is an ALIAS, not a fork. It exists so that integration scripts, SoC
+// flists and downstream projects can reference the LibreCore name without this
+// project having to rename `core/Flist.cva6` — a file owned by the OpenHW Group
+// (Solderpad SHL-2.0) whose renaming would break upstream rebase for zero
+// benefit. See AGENTS-branding.md §3 ("rename at the boundary, never inside").
+//
+// Contents are therefore exactly Flist.cva6 plus the LibreCore naming seam.
+//
+// USAGE
+//   -f ${CVA6_REPO_DIR}/core/Flist.g6lc
+//
+// NOTE ON THE TOP MODULE
+//   The elaboration top is still `cva6` (core/cva6.sv, tier U / OpenHW).
+//   A branded `g6lc` top wrapper is deliberately NOT provided yet: cva6.sv's
+//   declaration is 362 lines with 31 parameter lines including inline
+//   `parameter type ... struct packed` injections, and a hand-transcribed
+//   wrapper cannot be validated without a Verilator elaboration gate
+//   (AGENTS.md §0.2). Tracked in AGENTS-todo.md as a release blocker.
+//
+//////////////////////////////////////////////////////////////////////////////
+
+// The LibreCore naming seam (g6lc_cfg_t alias + brand identity constants).
+// Must be compiled after config_pkg, which Flist.cva6 provides.
+-f ${CVA6_REPO_DIR}/core/Flist.cva6
+
+${CVA6_REPO_DIR}/core/include/g6lc_pkg.sv
+
+// end of manifest

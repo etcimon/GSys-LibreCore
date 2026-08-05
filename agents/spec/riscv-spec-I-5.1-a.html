@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>A Extension for Atomic Instructions (Vol I, 5.1)</title></head>
+<body>
+<h1>Vol I &sect;5.1 — A Extension for Atomic Instructions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:a">specs/riscv-spec.html#ext:a</a>
+(source line 14288). <strong>Domain:</strong> SPEC, RAM, CACHE.</p>
+
+<p>The A extension comprises the <code>Zalrsc</code> and <code>Zaamo</code> sub-extensions. Atomic
+operations to aligned, naturally-sized memory locations must be performed atomically with respect to
+all harts. The memory-ordering bits (aq/rl) on these instructions directly map to RVWMO
+dependency/ordering rules. Atomics interact with speculation because a speculatively executed atomic
+must not modify the reservation or memory state until commit.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The A extension comprises the Zalrsc and Zaamo extensions, which are
+defined in the following sections."
+(specs/riscv-spec.html:14288-14290, anchor #ext:a)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module atomic_unit (
+  input  logic [XLEN-1:0] addr_i, rs2_i,
+  input  amo_op_e         op_i,       // LR/SC/AMO with aq/rl
+  input  logic            commit_i,   // only act at commit
+  output logic [XLEN-1:0] result_o
+);
+  // reservation table + AMO ALU; ordering bits fed to memory controller
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented when <code>CVA6Cfg.RVA</code> is set. Decode is in
+<code>core/decoder.sv:1602-1647</code> (AMO opcode classification for word/double LR/SC/AMOs). The
+execute path converts instructions to <code>AMO_LR</code>/<code>AMO_SC</code>/<code>AMO_*</code> in
+<code>core/store_unit.sv:134-135,282-319</code>, routes them through <code>core/load_store_unit.sv:728-748</code>,
+and buffers the AMO until commit in <code>core/amo_buffer.sv:50-63</code>. The atomic data path is
+completed by the cache subsystem: either the WT path
+(<code>core/cache_subsystem/wt_dcache_missunit.sv:334-347,576-583</code> and
+<code>core/cache_subsystem/wt_axi_adapter.sv:252-267,577-580</code>) or the HPDcache path
+(<code>core/cache_subsystem/cva6_hpdcache_if_adapter.sv:189-219</code> and
+<code>core/cache_subsystem/hpdcache/rtl/src/hpdcache.sv</code>). The AMO arithmetic is in
+<code>core/cache_subsystem/amo_alu.sv:14-65</code>.</p>
+
+<p><strong>.dts linkage:</strong> the AMO capability is reported through the ISA string
+(<code>riscv,isa</code>); CVA6 derives the <code>A</code> letter from <code>CVA6Cfg.RVA</code>. Atomic
+regions must be in cacheable/coherent memory nodes, matching the <code>CachedRegion</code> PMA rules.</p>
+</body>
+</html>

@@ -89,14 +89,20 @@ module id_stage #(
     input riscv::cbie_t scbie_i,
     // hypervisor-mode cache block invalidate enable - CSR_REGFILE
     input riscv::cbie_t hcbie_i,
-    // machine-mode clean/flush cache block invalidate enable - CSR_REGFILE
+    // machine-mode clean/flush cache block enable - CSR_REGFILE
     input logic mcbcfe_i,
-    // supervisor-mode clean/flush cache block invalidate enable - CSR_REGFILE
+    // supervisor-mode clean/flush cache block enable - CSR_REGFILE
     input logic scbcfe_i,
-    // hypervisor-mode clean/flush cache block invalidate enable - CSR_REGFILE
+    // hypervisor-mode clean/flush cache block enable - CSR_REGFILE
     input logic hcbcfe_i,
+    // cbo.zero enable (menvcfg/senvcfg/henvcfg.CBZE) - CSR_REGFILE
+    input logic mcbze_i,
+    input logic scbze_i,
+    input logic hcbze_i,
     // CVXIF Compressed interface
     input logic [CVA6Cfg.XLEN-1:0] hart_id_i,
+    // U6.1 SMT active thread tag (0 when NrHarts==1)
+    input logic [((CVA6Cfg.NrHarts <= 1) ? 1 : $clog2(CVA6Cfg.NrHarts))-1:0] smt_hart_id_i,
     input logic compressed_ready_i,
     //JVT
     input jvt_t jvt_i,
@@ -183,7 +189,11 @@ module id_stage #(
     end
 
     if (CVA6Cfg.SuperscalarEn) begin
-      assign stall_instr_fetch[1] = is_illegal_rvc[1] || is_macro_instr[1] || is_zcmt_instr[1];
+      // Ports 1..N-1: no ZCMP/ZCMT/CVXIF expansion; stall only on illegal RVC/macro/zcmt
+      for (genvar si = 1; si < CVA6Cfg.NrIssuePorts; si++) begin : gen_ss_stall
+        assign stall_instr_fetch[si] =
+            is_illegal_rvc[si] || is_macro_instr[si] || is_zcmt_instr[si];
+      end
     end
 
     if (CVA6Cfg.RVZCMP) begin
@@ -359,6 +369,10 @@ module id_stage #(
         .mcbcfe_i,
         .scbcfe_i,
         .hcbcfe_i,
+        .mcbze_i,
+        .scbze_i,
+        .hcbze_i,
+        .smt_hart_id_i             (smt_hart_id_i),
         .instruction_o             (decoded_instruction[i]),
         .orig_instr_o              (orig_instr[i]),
         .is_control_flow_instr_o   (is_control_flow_instr[i]),
@@ -378,64 +392,69 @@ module id_stage #(
   end
 
   if (CVA6Cfg.SuperscalarEn) begin
+    // N-wide (2..8) ID↔issue register: compact on ack, then fill from fetch ports.
     always_comb begin
+      issue_struct_t [CVA6Cfg.NrIssuePorts-1:0] compacted;
+      int unsigned wptr;
+      int unsigned rptr;
+      logic took_fetch;
+
       issue_n = issue_q;
       fetch_entry_ready_o = '0;
-      // instruction is not valid if we stall due to ZCMT or CVXIF
+      took_fetch = 1'b0;
+
+      // Port 0 validity accounts for ZCMT/CVXIF stalls; other ports are simple.
       decoded_instruction_valid[0] = (CVA6Cfg.RVZCMT && is_zcmt_instr[0] && stall_macro_deco_zcmt) ||
                                      (CVA6Cfg.CvxifEn && is_illegal_cvxif_i && ~stall_macro_deco) && stall_instr_fetch[0]
                                      ? 1'b0 : 1'b1;
-      // Instruction on port 1 are always valid. It is either 32bits or legal 16bits.
-      decoded_instruction_valid[1] = ~stall_instr_fetch[1];
-
-      // Clear the valid flag if issue has acknowledged the instruction
-      if (issue_instr_ack_i[0]) begin
-        issue_n[0].valid = 1'b0;
-      end
-      if (issue_instr_ack_i[1]) begin
-        issue_n[1].valid = 1'b0;
+      for (int unsigned i = 1; i < CVA6Cfg.NrIssuePorts; i++) begin
+        decoded_instruction_valid[i] = ~stall_instr_fetch[i];
       end
 
-      if (!issue_n[0].valid) begin
-        if (issue_n[1].valid) begin
-          issue_n[0] = issue_n[1];
-          issue_n[1].valid = 1'b0;
-        end else if (fetch_entry_valid_i[0]) begin
-          fetch_entry_ready_o[0] = ~stall_instr_fetch[0];
-          issue_n[0] = '{
-              decoded_instruction_valid[0],
-              decoded_instruction[0],
-              orig_instr[0],
-              is_control_flow_instr[0]
-          };
+      // Clear acked slots
+      for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+        if (issue_instr_ack_i[i]) issue_n[i].valid = 1'b0;
+      end
+
+      // Compact remaining valids toward port 0 (preserve program order)
+      compacted = '0;
+      wptr = 0;
+      for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+        if (issue_n[i].valid) begin
+          compacted[wptr] = issue_n[i];
+          wptr++;
         end
       end
+      issue_n = compacted;
 
-      if (!issue_n[1].valid) begin
-        if (fetch_entry_ready_o[0]) begin
-          if (fetch_entry_valid_i[1]) begin
-            fetch_entry_ready_o[1] = ~stall_instr_fetch[1];
-            issue_n[1] = '{
-                decoded_instruction_valid[1],
-                decoded_instruction[1],
-                orig_instr[1],
-                is_control_flow_instr[1]
+      // Fill empty tail from fetch ports as a *strict prefix* starting at
+      // fetch port 0. Never skip a stalled/invalid earlier fetch port to take
+      // a later one — instr_queue only pops/advances PC on a fire prefix from
+      // port 0 (non-prefix ready[1]&&!ready[0] drops the second IQ slot).
+      rptr = 0;
+      for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+        if (!issue_n[i].valid) begin
+          took_fetch = 1'b0;
+          if (rptr < CVA6Cfg.NrIssuePorts && fetch_entry_valid_i[rptr] &&
+              !fetch_entry_ready_o[rptr] && ~stall_instr_fetch[rptr]) begin
+            fetch_entry_ready_o[rptr] = 1'b1;
+            issue_n[i] = '{
+                decoded_instruction_valid[rptr],
+                decoded_instruction[rptr],
+                orig_instr[rptr],
+                is_control_flow_instr[rptr]
             };
+            rptr = rptr + 1;
+            took_fetch = 1'b1;
+          end else begin
+            // Gap in the fetch stream: stop filling further issue slots.
+            break;
           end
-        end else if (fetch_entry_valid_i[0]) begin
-          fetch_entry_ready_o[0] = ~stall_instr_fetch[0];
-          issue_n[1] = '{
-              decoded_instruction_valid[0],
-              decoded_instruction[0],
-              orig_instr[0],
-              is_control_flow_instr[0]
-          };
         end
       end
 
       if (flush_i) begin
-        issue_n[0].valid = 1'b0;
-        issue_n[1].valid = 1'b0;
+        for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) issue_n[i].valid = 1'b0;
       end
     end
   end else begin

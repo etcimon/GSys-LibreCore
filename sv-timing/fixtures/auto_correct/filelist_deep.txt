@@ -1,0 +1,2 @@
+# Paths resolve against THIS file's directory (see architecture/PROJECT-AUTOCORRECT.md §2).
+deep_add_chain.sv

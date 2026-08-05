@@ -1,0 +1,111 @@
+---
+title: Introduction
+description: GSys LibreCore docs — a Next.js-powered guide to LibreCore (G6LC), covering the CPU, uncore, motherboard, build platform, and agentic workflows.
+---
+
+# GSys LibreCore Documentation
+
+This site is a **living, file-based guide** to **GSys LibreCore** (shorthand
+**LibreCore**, code prefix **G6LC**) — a source-available RISC-V project derived
+from [OpenHW Group CVA6](https://github.com/openhwgroup/cva6). It is built with
+[Next.js](https://nextjs.org) and [Nextra](https://nextra.site) so that new
+sections appear automatically as Markdown files are added under
+`docs/website/pages`.
+
+The modern semiconductor industry is undergoing a structural shift: the
+boundaries between processor design, system integration, board design, and
+manufacturing are collapsing into a single continuous workflow. LibreCore sits
+at the center of this shift. Unlike a research prototype that exists only as a
+simulation model, the CVA6 lineage it builds on is an industrial-grade RISC-V
+core that has been taped out, booted into Linux, and integrated into real SoCs.
+The documentation you are reading is therefore not merely a user manual; it is
+a field guide for navigating the full lifecycle of an open-source silicon
+project, from the first micro-architectural idea to the final foundry sign-off.
+This site treats the repository as a *knowledge graph* in which every
+directory, config file, and agent guide has a precise role, and it explains how
+those roles connect to industry practices such as design reuse, silicon
+sign-off, device-tree contracts, and automated regression.
+
+## What LibreCore is today
+
+LibreCore is a 6-stage RISC-V CPU (classically single-issue in-order; this tree
+adds **config-gated** multi-issue, slice/full OoO, SMT, L2, and related
+extensions). It implements the 64-bit RISC-V ISA (I, M, A, C, plus privilege
+modes M/S/U on typical targets). It is also the **anchor of a
+build-platform-led SoC flow**: one typed configuration file (`.config.ts` at the
+repo root) parameterizes the core, the uncore (`corev_apu`), the board
+(`corev-mb`), vendored controllers/PHY, foundry technology adaptation, and
+optional structural timing analysis via `sv-timing`. Drive it with
+`g6lc-build` (permanent alias: `g6lc-build`).
+
+The stack is intentionally **opt-in and additive**: the classic CVA6 core and
+manual flow remain available; LibreCore extensions and tooling sit beside them
+and are enabled only when you need them.
+
+This additive posture is critical for industrial adoption. A CPU IP block that
+is forced to absorb board, tooling, or foundry concerns into its core
+hierarchy quickly becomes unmaintainable; it accumulates ad hoc dependencies
+that prevent reuse in other SoCs and make every tape-out a bespoke engineering
+event. By keeping each layer optional, LibreCore preserves a clean, reusable
+RISC-V implementation while surrounding it with a growing ecosystem of
+integration tools. This is the same modularity principle that governs
+commercial IP reuse programs, but expressed through open-source conventions:
+configuration structs, file-system routing, and git-ignored drop-ins rather
+than proprietary license managers and encrypted netlists.
+
+## How this documentation is organized
+
+The navigation on the left follows the same layers as the project:
+
+- **Getting Started** — install the toolchain and run your first checks.
+- **Architecture & Worktree** — a high-level map of every top-level directory and
+  how they connect.
+- **CPU Core** — pipeline, config, and product features (OoO, SMT, H, RVV).
+- **Architecture** — worktree, [upgrade program](./architecture/upgrade-program),
+  [SKU matrix](./architecture/sku-matrix).
+- **corev_apu** — uncore/FPGA layer, L2/L3, multi-core cluster.
+- **corev-mb** — the motherboard/board layer and SKiDL-based PCB design flow.
+- **Technology / PDK** — foundry adaptation with NDA-protected PDK drop-ins.
+- **Build Platform** — the `g6lc-build` command (probe, verify, timings, …).
+- **sv-timing** — standalone structural FO4 timing package and host adapter.
+- **Guides** — cross-cutting topics: agent workflows, building docs, and
+  AI-assisted development.
+
+## Philosophy: general before specific
+
+Every page is written to **age well as features are added**. We avoid
+hard-coding command output, exact line numbers, or one-off procedures. Instead,
+each page describes the *seam* where a feature is added, the *config gate* that
+controls it, the *verification* that validates it, and the *agent guides* that
+explain it. When a new feature lands, the same structure still fits.
+
+The reason this level of abstraction endures is that the fundamental questions
+of hardware engineering do not change with each feature. Whether the task is to
+add a branch predictor, integrate a DDR controller, or bind a foundry memory
+compiler, the same four questions must be answered: where is the seam, what
+config gate controls it, how is it verified, and what contract does it expose
+to software? By organizing every page around those four questions, we create
+documentation that remains accurate even when file names change, line numbers
+shift, and new subsystems appear. This is the difference between a procedure
+list, which rots, and a design narrative, which compounds.
+
+## For AI agents and human readers
+
+The CVA6 repository contains a family of `AGENTS-*.md` files. They are
+purpose-built for both humans and LLM agents: each guide states the intent of a
+domain, the sanctioned seam for changes, and the exact checklist to satisfy
+before a change is considered complete. Every section of this docs site maps to
+those files and explains how an agent navigates them during a workflow.
+
+In practice, an agent is not replacing the engineer; it is amplifying the
+engineer's ability to operate at the right level of abstraction. The `AGENTS-*`
+files act as a curated retrieval layer, ensuring that an LLM loads only the
+spec summaries, code loci, and checklists relevant to a given intent rather
+than the entire repository. For a human reader, the same files provide a
+reproducible review checklist. For an automated workflow, they provide a
+planning contract. This dual use is what makes the CVA6 knowledge graph
+different from a conventional wiki: it is written to be *executed* as well as
+read.
+
+Start with [Getting Started](./getting-started), or jump to the
+[worktree map](./architecture/worktree) if you want the big picture first.

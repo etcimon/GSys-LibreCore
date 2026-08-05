@@ -9,13 +9,23 @@
     #address-cells = <1>;
     #size-cells = <0>;
     timebase-frequency = <32768>; // 32.768 kHz
+    // See AGENTS-dts-validation.md + architecture/multi-threading/dts-linux-smt.md
+    // Validated against build-platform/workspace/linux-dts (fetch-linux-dts.ps1).
+    // Tandem bare DTS: PLIC remains commented (Unfixable for tandem vs Linux).
     CPU0: cpu@0 {
       clock-frequency = <50000000>; // 50 MHz
       device_type = "cpu";
       reg = <0>;
       status = "okay";
-      compatible = "eth, ariane", "riscv";
+      // Linux cpus.yaml enum does not list eth,ariane — use "riscv" for schema.
+      // (Legacy "eth, ariane" was invalid: space + not in binding enum.)
+      compatible = "riscv";
       riscv,isa = "rv64imafdc";
+      riscv,isa-base = "rv64i";
+      // Baseline letter extensions + zic* (fu540-c000.dtsi style) + U7a package extras.
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c",
+        "zicntr", "zicsr", "zifencei", "zihpm",
+        "sstc", "sscofpmf", "zihintpause";
       mmu-type = "riscv,sv39";
       tlb-split;
       // HLIC - hart local interrupt controller
@@ -23,6 +33,20 @@
         #interrupt-cells = <1>;
         interrupt-controller;
         compatible = "riscv,cpu-intc";
+      };
+      // Sscofpmf / U8a: Linux perf PMU mapping. Event codes match the group-0
+      // legacy encoding in core/perf_counters.sv (mhpmeventN low 5 bits).
+      pmu {
+        compatible = "riscv,pmu";
+        riscv,event-to-mhpmevent =
+          <0x01 0x00000000 0x00000001>,  /* L1 I-cache miss */
+          <0x02 0x00000000 0x00000002>,  /* L1 D-cache miss */
+          <0x03 0x00000000 0x00000003>,  /* ITLB miss */
+          <0x04 0x00000000 0x00000004>,  /* DTLB miss */
+          <0x05 0x00000000 0x00000005>,  /* Load */
+          <0x06 0x00000000 0x00000006>,  /* Store */
+          <0x09 0x00000000 0x00000009>,  /* Branch */
+          <0x0a 0x00000000 0x0000000a>;  /* Branch mispredict */
       };
     };
   };
@@ -36,10 +60,10 @@
     compatible = "eth,ariane-bare-soc", "simple-bus";
     ranges;
     clint@2000000 {
-      compatible = "riscv,clint0";
-      interrupts-extended = <&CPU0_intc 3 &CPU0_intc 7>;
+      // sifive,clint.yaml: prefer chip/IP pair; bare riscv,clint0 is deprecated/QEMU-only
+      compatible = "sifive,clint0", "riscv,clint0";
+      interrupts-extended = <&CPU0_intc 3>, <&CPU0_intc 7>;
       reg = <0x0 0x2000000 0x0 0xc0000>;
-      reg-names = "control";
     };
     // PLIC needs to be disabled for tandem verification
     // PLIC0: interrupt-controller@c000000 {

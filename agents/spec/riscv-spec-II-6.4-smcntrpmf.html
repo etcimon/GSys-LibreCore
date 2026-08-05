@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Smcntrpmf Cycle and Instret Privilege Mode Filtering (Vol II, 6.4)</title></head>
+<body>
+<h1>Vol II &sect;6.4 — Smcntrpmf Cycle and Instret Privilege Mode Filtering</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#smcntrpmf">specs/riscv-spec.html#smcntrpmf</a>.
+Source line: <code>specs/riscv-spec.html:84853</code>. <strong>Domain:</strong> —.</p>
+
+<p>Smcntrpmf adds counter-enable control bits that allow M-mode to filter <code>cycle</code> and
+<code>instret</code> counting by privilege mode. This lets the OS or hypervisor avoid counting cycles
+spent in firmware or other modes, improving the accuracy of user-level profiling.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The cycle and instret counters serve to support user mode self-
+profiling usages, wherein a user can read the counter(s) twice and
+compute the delta(s) to evaluate user software performance and
+behavior. By default, these counters are not filtered by privilege mode,
+and thus they continue to increment while traps to more privileged code
+are handled. This causes unpredictable noise to the counter values
+observed by the user."
+(specs/riscv-spec.html:84853-84860, anchor #smcntrpmf)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module smcntrpmf_filter (
+  input  logic        count_enable_i,
+  input  priv_lvl_e   priv_i,
+  input  logic [XLEN-1:0] filter_cfg_i,
+  output logic        count_o
+);
+  // increment cycle/instret only when current mode is not masked
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The performance counters in
+<code>core/perf_counters.sv</code> increment unconditionally; there is no
+<code>mcounteren</code>/<code>mcountinhibit</code> privilege-mode filtering per Smcntrpmf.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Smcntrpmf is a CSR behavior extension with no direct
+device-tree property.</p>
+</body>
+</html>

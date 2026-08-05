@@ -1,0 +1,82 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# U6 / p6-buildup: stream plane × multicore + Zacas / speculative narrow suite.
+# Prefer DV_TARGET=g6lc64_ooo_server (4-core, L2/L3/PF, RVZacas) or
+# g6lc64_server_math (2-core, L2+ServerPrefetchEn, RVZacas).
+
+common_test_config: &common_test_config
+  path_var: TESTS_PATH
+  gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+
+testlist:
+  - test: mc_stream_plane
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/multicore/mc_stream_plane.S
+    description: "p6 stream plane: multi-stream PF + capacity thrash (NrCores≥2 packages)"
+
+  - test: l3_stride_stream
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/l3/l3_stride_stream.S
+    description: "L2/L3 sequential + large-stride integrity (PF-friendly)"
+
+  - test: u10_memcpy_stream
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/server_math/u10_memcpy_stream.S
+    description: "Scalar memcpy stream through dual-issue + shared L2"
+
+  # --- Zacas + multi-core speculative narrow (5) ---
+  - test: zacas_amocas_w
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/multicore/zacas_amocas_w.S
+    description: "Zacas AMOCAS.W success/fail (RVZacas packages)"
+
+  - test: zacas_amocas_d
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/multicore/zacas_amocas_d.S
+    description: "Zacas AMOCAS.D success/fail (RV64 + RVZacas)"
+
+  - test: mc_spo_st_fwd
+    iterations: 1
+    path_var: TESTS_PATH
+    # Bare-metal (no CRT): CRT init_tls/memset can hang under Verilator multi-PHDR
+    # before main; bare-metal still proves same-core ST→LD forward on RTL+Spike.
+    gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -T../tests/custom/common/link_verilator.ld"
+    asm_tests: <path_var>/custom/multicore/mc_spo_st_fwd.S
+    description: "Speculative store-to-load forward (same-core RAW, bare-metal)"
+
+  - test: mc_spo_fence_drain
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/multicore/mc_spo_fence_drain.S
+    description: "Store→fence→load drain (RVWMO / multi-core ordering)"
+
+  - test: mc_cas_lock_handoff
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/multicore/mc_cas_lock_handoff.S
+    description: "AMOCAS.W acquire/release lock handoff stress"
+
+  # --- Soak extension: CF × stream plane (narrow) ---
+  - test: mc_spo_cf_stream
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/multicore/mc_spo_cf_stream.S
+    description: "Multi-stream stores interleaved with call/branch CF noise"
+
+  - test: mc_spo_cas_stream
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/multicore/mc_spo_cas_stream.S
+    description: "Stream fill + AMOCAS handoff + integrity re-check"
+
+  - test: mc_spo_mispred_stream
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/multicore/mc_spo_mispred_stream.S
+    description: "Mispredict-friendly branches interleaved with stream stores"

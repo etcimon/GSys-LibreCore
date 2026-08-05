@@ -21,6 +21,13 @@ CVA6 APU
 Editor: **Florian Zaruba**
 `florian@openhwgroup.org <mailto:florian@openhwgroup.org?subject=CVA6%20User%20Manual>`__
 
+.. note::
+
+   For the CVA6V-EC uncore integration model (vendor catalog, board layer,
+   L2, agent guides), see ``docs/website/pages/corev-apu/`` and
+   ``AGENTS-corev-apu.md``. This Sphinx section remains a concise APU /
+   testharness reference.
+
 .. toctree::
    :maxdepth: 2
    :caption: Contents:

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zihintntl Non-Temporal Locality Hints (Vol I, 4.18)</title></head>
+<body>
+<h1>Vol I &sect;4.18 — Zihintntl Extension for Non-Temporal Locality Hints</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zihintntl">specs/riscv-spec.html#ext:zihintntl</a>.
+<strong>Domain:</strong> CACHE.</p>
+
+<p>Zihintntl adds NTL instructions as HINTs that indicate the explicit memory accesses of the
+immediately subsequent instruction exhibit poor temporal locality. They do not change architectural
+state or the architecturally visible effects of the target instruction. Four variants target the
+innermost private cache, any private cache, the innermost shared cache, and all shared caches. They
+affect cache allocation policy and prefetchers but are not functional correctness requirements.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The NTL instructions are HINTs that indicate that the explicit memory
+accesses of the immediately subsequent instruction (henforth `target
+instruction') exhibit poor temporal locality of reference. The NTL
+instructions do not change architectural state, nor do they alter the
+architecturally visible effects of the target instruction."
+(specs/riscv-spec.html:12157-12163, anchor #ext:zihintntl / #norm:NTL_target_definition)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module zihintntl_alloc_policy (
+  input  logic        non_temporal_i,
+  input  logic        hit_i,
+  output logic        allocate_in_cache_o
+);
+  // if non-temporal and miss -> bypass or allocate in streaming buffer
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. No NTL decoding exists in <code>core/decoder.sv</code>, no
+non-temporal load/store type is carried through the LSU/scoreboard, and the D$/HPDcache allocation
+logic does not consult a temporal-locality hint. All current target packages leave <code>RVZiCbom</code>
+enabled where applicable, but there is no equivalent <code>RVZihintntl</code> bit.</p>
+</body>
+</html>

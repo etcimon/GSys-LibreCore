@@ -1,0 +1,147 @@
+---
+title: AI / Agent Development
+description: How LLM agents navigate CVA6, use the AGENTS-* guides, and drive the build platform.
+---
+
+# AI / Agent Development
+
+CVA6 is designed to be developed **with automation**, not only by hand. The
+`AGENTS-*.md` files and the `build-platform/` command surface are the two main
+mechanisms that make the repository legible to an LLM agent.
+
+The rise of large language models has changed the economics of documentation.
+Manuals that once served only human readers now serve as retrieval corpora for
+automated agents. This dual readership imposes a new quality bar: the text must
+be precise enough for a human to understand and structured enough for an agent
+to execute. CVA6 meets this bar by encoding the expert's navigation path into
+the `AGENTS-*.md` files and the `g6lc-build` command surface. An agent that
+follows this path is not guessing; it is replaying the reasoning that an
+experienced engineer would perform.
+
+## The agent loop
+
+A typical AI-led workflow looks like this:
+
+1. **Receive intent.** *"Add L2 cache support to CVA6."*
+2. **Resolve to a guide.** Open `AGENTS.md` and find the intent in the
+   navigation table → `agents/guides/AGENTS-l2l3-cache.md`.
+3. **Load spec context.** Read the relevant `agents/spec/*.html` summaries
+   (memory model, PMA, Zic64b, CMOs).
+4. **Locate code seam.** The guide lists primary code loci (e.g.
+   `core/cache_subsystem/`, `core/cva6.sv:1400-1560`).
+5. **Plan changes.** Extend `cva6_cfg_t` in `core/include/config_pkg.sv`, add a
+   config package, gate the new logic, and add tests.
+6. **Run build platform.** `g6lc-build` resolves config, discovers sources,
+   preflights tools, and runs the chosen test suite.
+7. **Verify and document.** Update traceability files, DFT hooks, PMU events,
+   and docs.
+
+This loop is the same closed-loop engineering process used in safety-critical
+and high-reliability projects, but automated. The intent is the requirement;
+the guide is the design document; the code loci are the implementation; and the
+build platform is the integration and verification harness. The key insight is
+that the agent never needs to "understand" the whole design at once. It only
+needs to understand the next hop in the graph, which is exactly how human
+experts navigate large systems.
+
+## The AGENTS-* contract
+
+Each `AGENTS-*.md` file follows a similar contract:
+
+- **What it is for.** One or two sentences of intent.
+- **Spec anchors.** Canonical `specs/riscv-spec.html#anchor` references.
+- **Code loci.** `path/to/file.sv:start-end` references.
+- **Seam.** Where the change should be made (CVXIF, AXI adapter, config struct,
+  board JSON, PDK drop-in).
+- **Checklist.** The SoC-readiness items that must be true before the change is
+  done (synth, config, verif, DFT, backend, docs).
+
+Because the guides are small, single-topic files, an LLM can load only the 3–6
+files relevant to the prompt instead of the whole repository.
+
+The contract format is itself a form of interface design. By standardizing on
+intent, spec anchors, code loci, seams, and checklists, the repository creates
+a predictable API for reasoning. A human reviewer can quickly confirm that an
+agent loaded the right documents; an automated tool can parse the file list and
+checklist and execute the corresponding commands. This predictability is what
+makes the agent workflow trustworthy enough to be part of a real engineering
+process.
+
+## How an agent navigates by task
+
+| Task | Start here | Then open | Validate with |
+|---|---|---|---|
+| Add an instruction / CSR | `AGENTS.md` §3 | `agents/guides/AGENTS-soc-readiness.md`, `agents/spec/*.html` | `g6lc-build test --open-source` |
+| Add branch prediction | `AGENTS.md` §3 | `agents/guides/AGENTS-branch-prediction.md` | arch smoke + formal |
+| Add L2/L3 cache | `AGENTS.md` §3 | `agents/guides/AGENTS-l2l3-cache.md` | coherence + regression |
+| Add RAM / MMU feature | `AGENTS.md` §3 | `agents/guides/AGENTS-ram-memory.md` | MMU/PMP suites |
+| Structural timing / auto-correct | `sv-timing/AGENTS.md` | `sv-timing/architecture/DESIGN.md`, `AGENTS-host.md` | `g6lc-build timings analyze` (fixtures: `svt.py test`) |
+| Enable OoO / SMT / L2 product stack | [Upgrade Program](./upgrade-program) | `architecture/out-of-order/`, `multi-threading/`, `l2-l3-cache/` | named `verify --target` + optional suites |
+| Pick a config package / SKU | [SKU Matrix](./sku-matrix) | `core/include/*_config_pkg.sv` | `g6lc-build config` + `verify --target` |
+| Hypervisor / guest timers | [Hypervisor & Sstc](../core/hypervisor) | `architecture/server-math-hypervisor.md` | `server-math-tests` / Sstc litmus |
+| RVV / Ara attach | [Vector (RVV) & Ara](../core/vector) | `architecture/ara-vector-attach.md`, `AGENTS-vector.md` | `g6lc64_server_math_v` + Ara flist |
+| Multi-core SMP | [Multi-Core Cluster](../corev-apu/multi-core) | `architecture/multi-core/README.md` | `mc-stream-tests` / `mc-spo-soak` |
+| Integrate uncore controller | `AGENTS.md` §3 | `AGENTS-corev-apu.md`, `AGENTS-vendor.md`, `AGENTS-controller-readiness.md` | `g6lc-build vendor sync <id>` |
+| Select / design a board | `AGENTS.md` §3 | `AGENTS-motherboard.md`, `AGENTS-mb-<id>.md` | `g6lc-build mb check <id>` |
+| Run foundry tech optimization | `AGENTS.md` §3 | `AGENTS-technology.md`, `agents/guides/AGENTS-technology-optimization.md` | `g6lc-build tech check` |
+| Host / residual toolchain | `AGENTS-build.md` | `build-platform/AGENTS.md` §4.6 | `g6lc-build probe` → `diag` → `verify` |
+
+## Build platform as the agent executor
+
+The `g6lc-build` command is the executor for the agent's plan. It:
+
+- Reads `.config.ts` and resolves the whole SoC state.
+- Provisions or skips tools based on what is missing.
+- Runs regression suites and reports preflight skips (missing tool, missing
+  submodule, missing UVM).
+- Generates board packages, vendor sync reports, and technology readiness
+  reports.
+
+Because the platform is typed and deterministic, an agent can call it
+programmatically and trust the exit code and JSON output.
+
+The build platform's role as executor is what separates a useful agent from a
+dangerous one. An LLM that edits source files directly can introduce subtle
+bugs across the whole tree; an LLM that delegates execution to `g6lc-build`
+operates through a typed, tested, and preflighted harness. Preflight checks
+are especially important: they prevent the agent from failing because of a
+missing tool or submodule, and they report skip reasons so the user knows what
+to install. This is the same discipline used in cloud build systems, where
+hermetic execution is a prerequisite for trustworthy automation.
+
+## grok-build / Devin-style development
+
+A "grok-build" or Devin-style agent pass over CVA6 is conceptually:
+
+```
+plan  = read(AGENTS.md) → read(relevant AGENTS-*.md) → read(spec) → plan(changes)
+build = g6lc-build <command> --dry-run
+edit  = gated RTL / config / board / vendor / technology
+verify = g6lc-build test --<group>
+doc   = update AGENTS-*.md + this docs site
+```
+
+The key is that **planning happens against the guides**, while **execution
+happens through `g6lc-build`**. The guides supply the "what" and the "where";
+the platform supplies the "how" and the "did it pass."
+
+A "grok-build" pass is not a one-shot prompt; it is an iterative collaboration
+between a planner and an executor. The planner reads the knowledge graph and
+proposes a change; the executor validates the environment and runs the
+relevant command; the planner interprets the output and decides the next step.
+This separation of concerns mirrors the division between architecture and
+implementation in industrial teams: one group decides what should change,
+another group validates that it can be built and tested.
+
+## Adding a new AI-readable guide
+
+When a new feature domain appears (for example, a new accelerator interface),
+create:
+
+1. `agents/guides/AGENTS-<domain>.md` — the feature playbook.
+2. The relevant `agents/spec/*.html` sub-files for spec anchors.
+3. A page under `docs/website/pages/` (e.g. `architecture/<domain>.mdx`) that
+   links the guide to the high-level narrative.
+4. An entry in `AGENTS-todo.md` if it is a tracked phase.
+
+This keeps the knowledge graph navigable by both humans and LLMs.

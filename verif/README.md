@@ -17,6 +17,26 @@ This BSP is used by both `core` testbench and `uvmt_cva6` UVM verification envir
 
 There are README files in each directory with additional information.
 
+## Build platform (recommended single entry point)
+
+All of these regression suites are catalogued and orchestrated by the **build platform**
+(`../build-platform/`, run `bun` from `build-platform/`) — the recommended single entry point. It provisions the
+open-source toolchain, discovers every `verif/regress` suite, and runs them uniformly across
+Windows / Linux / macOS:
+
+```sh
+cd build-platform
+bun run src/cli/index.ts test --list            # list every discovered suite + runnable status
+bun run src/cli/index.ts test riscv-arch-test   # run one suite
+bun run src/cli/index.ts test --group arch      # run a whole family
+bun run src/cli/index.ts test --open-source     # run everything runnable on the open-source toolchain
+```
+
+The raw `verif/regress/*.sh` scripts and the `DV_*` environment variables below remain fully supported
+for direct and CI use; the build platform simply wraps them with dependency preflight and a single
+configuration surface. The spec ⇄ test mapping for these suites is maintained in
+`../AGENTS-specs-to-tests.md`.
+
 ## Verification plan
 Verification plan is available only for vcs tool and located in sim/cva6.hvp, it's used within a modifier to filter out only needed features. Example sim/modifier_embedded.hvp for embedded config.
 

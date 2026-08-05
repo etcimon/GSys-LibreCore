@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Sv32 Page-Based 32-bit Virtual Memory (Vol II, 4.3)</title></head>
+<body>
+<h1>Vol II &sect;4.3 — Sv32: Page-Based 32-bit Virtual-Memory Systems</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#sv32">specs/riscv-spec.html#sv32</a>.
+<strong>Domain:</strong> RAM.</p>
+
+<p>Sv32 is the 32-bit paging mode. When Sv32 is written to the <code>satp</code> MODE field, the
+supervisor operates in a 32-bit paged virtual-memory system; supervisor and user virtual addresses
+are translated into supervisor physical addresses by traversing a radix-tree page table. Sv32 is
+supported when SXLEN=32. It uses 4 KiB pages, a 20-bit VPN, and a two-level page table with 4-byte
+PTEs; leaf and superpage rules mirror the 64-bit modes.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"When Sv32 is written to the MODE field in the satp register, the
+supervisor operates in a 32-bit paged virtual-memory system. In this
+mode, supervisor and user virtual addresses are translated into
+supervisor physical addresses by traversing a radix-tree page table.
+Sv32 is supported when SXLEN=32 and is designed to include mechanisms
+sufficient for supporting modern Unix-based operating systems."
+(specs/riscv-spec.html:78849-78859, anchor #sv32)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module sv32_ptw (
+  input  logic [31:0] vaddr_i,
+  input  logic [21:0] satp_ppn_i,
+  output logic [31:0] paddr_o,
+  output logic        page_fault_o
+);
+  // two-level walk; VPN[1:0] each 10 bits; 4-byte PTEs
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented when selected. The legal mode enumeration is in
+<code>core/include/config_pkg.sv:45-52</code> (<code>vm_mode_t</code> with <code>ModeSv32 = 1</code>); the
+MMU/PTW is instantiated in <code>core/cva6.sv:1065-1096</code> and the walker is in
+<code>core/cva6_mmu/cva6_ptw.sv:23-</code>, parametrized by <code>CVA6Cfg.PtLevels</code>,
+<code>VpnLen</code>, and <code>PPNW</code>. The 32-bit target packages set <code>MODE_SV = ModeSv32</code>
+(e.g. <code>core/include/cv32a6_imac_sv32_config_pkg.sv</code>) and the <code>satp</code> PPN comes from
+<code>core/csr_regfile.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> the CPU node <code>mmu-type</code> must be <code>riscv,sv32</code> for
+32-bit CVA6 targets; it must match the configured <code>vm_mode_t</code> and the <code>satp</code> MODE
+field.</p>
+</body>
+</html>

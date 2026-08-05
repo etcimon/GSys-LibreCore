@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Ssdbltrp Supervisor Double Trap (Vol II, 8.10)</title></head>
+<body>
+<h1>Vol II &sect;8.10 — Ssdbltrp Double Trap Extension</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ssdbltrp">specs/riscv-spec.html#ssdbltrp</a>.
+Source line: <code>specs/riscv-spec.html:89078</code>. <strong>Domain:</strong> SPEC.</p>
+
+<p>Ssdbltrp is the supervisor-mode counterpart of Smdbltrp, defining double-trap behavior in S-mode
+and the associated delegation and reporting. It ensures that a trap taken while in S-mode trap
+handler is handled safely rather than corrupting trap state.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Ssdbltrp extension addresses a double trap privilege modes lower
+than M. It enables HS-mode to invoke a critical error handler in a
+virtual machine on a double trap in VS-mode. It also allows M-mode to
+invoke a critical error handler in the OS/Hypervisor on a double trap in
+S/HS-mode."
+...
+"The Ssdbltrp extension adds the menvcfg.DTE and the sstatus.SDT fields."
+(specs/riscv-spec.html:89078-89085, anchor #ssdbltrp)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module ssdbltrp (
+  input  logic        trap_i,
+  input  priv_lvl_e   priv_i,
+  input  logic        in_s_handler_i,
+  output logic        double_trap_o
+);
+  // detect trap in S-mode handler and take double-trap action
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. There is no double-trap state machine in
+<code>core/controller.sv</code> and no <code>menvcfg.DTE</code> or <code>sstatus.SDT</code> fields in
+<code>core/csr_regfile.sv</code>. A trap taken during S-mode trap handling would overwrite
+<code>sepc</code>/<code>scause</code>/<code>stval</code> in the normal CSR update path.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Ssdbltrp would be advertised through the
+<code>riscv,isa</code> string and the <code>menvcfg</code>/<code>sstatus</code> field descriptions if
+implemented.</p>
+</body>
+</html>

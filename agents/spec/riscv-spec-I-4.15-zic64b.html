@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zic64b 64-byte Cache Blocks (Vol I, 4.15)</title></head>
+<body>
+<h1>Vol I &sect;4.15 — Zic64b Extension for 64-byte Cache Blocks</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zic64b">specs/riscv-spec.html#ext:zic64b</a>
+(source line 10978). <strong>Domain:</strong> CACHE.</p>
+
+<p>The normative requirement, quoted from <code>specs/riscv-spec.html:10978-10981</code>, is: <em>"If the
+<code>Zic64b</code> extension is implemented, then cache blocks must be 64 bytes in size, naturally
+aligned in the address space."</em> This fixes the line width for both the in-core L1 caches and any
+external L2/L3, and it constrains CMO block operations and block-size device-tree properties.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+If the Zic64b extension is implemented, then cache blocks must be
+64 bytes in size, naturally aligned in the address space.
+(specs/riscv-spec.html:10978-10981, anchor #ext:zic64b)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module zic64b_block_check (
+  input  logic [5:0]  offset_i,
+  output logic        aligned_64B_o
+);
+  // block size = 64 bytes; line width must equal 512 bits
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> <strong>not implemented</strong> by current targets, though the cache
+line width is parameterised. The parameter fields are <code>IcacheLineWidth</code> and
+<code>DcacheLineWidth</code> in <code>core/include/config_pkg.sv:184,194</code>; defaults are supplied by
+<code>core/include/ariane_pkg.sv:226,238</code> as <code>CONFIG_L1I_CACHELINE_WIDTH 128</code> and
+<code>CONFIG_L1D_CACHELINE_WIDTH 128</code> (16 bytes). All active target packages (e.g.
+<code>core/include/cv64a6_imafdc_sv39_config_pkg.sv:42,45</code> and
+<code>core/include/cv64a6_imafdcv_sv39_config_pkg.sv:44,47</code>) set 128- or 256-bit lines
+(16 or 32 bytes), so no shipped configuration satisfies the 64-byte block requirement. Raising
+<code>DcacheLineWidth</code> and <code>IcacheLineWidth</code> to 512 bits (64 bytes) would be the
+tape-out integration path.</p>
+
+<p><strong>.dts linkage:</strong> <code>i-cache-block-size</code> and <code>d-cache-block-size</code> in
+bytes derive from <code>IcacheLineWidth/8</code> and <code>DcacheLineWidth/8</code>. With current defaults
+both are 16 bytes; a Zic64b-compliant target must report 64.</p>
+</body>
+</html>

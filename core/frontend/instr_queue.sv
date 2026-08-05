@@ -88,11 +88,13 @@ module instr_queue
     input logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_ready_i
 );
 
-  // Calculate next index based on whether superscalar is enabled or not.
+  // Legacy dual-issue index (port 1); multi-issue uses NrIssuePorts loops.
   localparam NID = CVA6Cfg.SuperscalarEn ? 1 : 0;
+  localparam int unsigned NISSUE = CVA6Cfg.NrIssuePorts;
 
   typedef struct packed {
     logic [31:0]                     instr;      // instruction word
+    logic [CVA6Cfg.VLEN-1:0]         pc;         // instr PC from realign (not reconstructed)
     ariane_pkg::cf_t                 cf;         // branch was taken
     ariane_pkg::frontend_exception_t ex;         // exception happened
     logic [CVA6Cfg.VLEN-1:0]         ex_vaddr;   // lower VLEN bits of tval for exception
@@ -129,6 +131,29 @@ module instr_queue
   logic reset_address_d, reset_address_q;  // we need to re-set the address because of a flush
 
   logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_is_cf, fetch_entry_fire;
+  // Taken CF (predict) vs any CF *instruction* (incl. not-taken branch).
+  // Dual-issue must not pair a CF instr with a younger op: not-taken bltu+c.j
+  // after dense stack traffic hangs (mini_memcpy0 / bisect_bnez_midj).
+  logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_is_ctrl_instr;
+  logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_blocks_ss;
+  // Prefix mask of fetch_entry_fire (port k only if 0..k-1 also fire).
+  logic [CVA6Cfg.NrIssuePorts-1:0] fetch_fire_prefix;
+
+  // Lightweight CF-class detect from the 32b word (RVI/RVC), no full decode.
+  function automatic logic is_ctrl_instr_f(logic [31:0] instr);
+    logic rvi_cf, rvc_j, rvc_b, rvc_jr;
+    rvi_cf = (instr[1:0] == 2'b11) && (
+        (instr[6:0] == 7'b1100011) ||  // BRANCH
+        (instr[6:0] == 7'b1101111) ||  // JAL
+        (instr[6:0] == 7'b1100111)     // JALR
+    );
+    rvc_j = (instr[1:0] == 2'b01) && (instr[15:13] == 3'b101);  // c.j / c.jal
+    rvc_b = (instr[1:0] == 2'b01) &&
+            ((instr[15:13] == 3'b110) || (instr[15:13] == 3'b111));  // c.beqz/c.bnez
+    rvc_jr = (instr[1:0] == 2'b10) && (instr[15:13] == 3'b100) &&
+             (instr[6:2] == 5'b00000);  // c.jr / c.jalr
+    return rvi_cf | rvc_j | rvc_b | rvc_jr;
+  endfunction
 
   logic [CVA6Cfg.INSTR_PER_FETCH*2-2:0] branch_mask_extended;
   logic [CVA6Cfg.INSTR_PER_FETCH-1:0] branch_mask;
@@ -142,6 +167,7 @@ module instr_queue
   logic [CVA6Cfg.INSTR_PER_FETCH*2-1:0] fifo_pos_extended;
   logic [CVA6Cfg.INSTR_PER_FETCH-1:0] fifo_pos;
   logic [CVA6Cfg.INSTR_PER_FETCH*2-1:0][31:0] instr;
+  logic [CVA6Cfg.INSTR_PER_FETCH*2-1:0][CVA6Cfg.VLEN-1:0] addr_dup;
   ariane_pkg::cf_t [CVA6Cfg.INSTR_PER_FETCH*2-1:0] cf;
   // replay interface
   logic [CVA6Cfg.INSTR_PER_FETCH-1:0] instr_overflow_fifo;
@@ -206,6 +232,8 @@ module instr_queue
     for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_duplicate_instr_input
       assign instr[i] = instr_i[i];
       assign instr[i+CVA6Cfg.INSTR_PER_FETCH] = instr_i[i];
+      assign addr_dup[i] = addr_i[i];
+      assign addr_dup[i+CVA6Cfg.INSTR_PER_FETCH] = addr_i[i];
       assign cf[i] = cf_type_i[i];
       assign cf[i+CVA6Cfg.INSTR_PER_FETCH] = cf_type_i[i];
     end
@@ -214,6 +242,11 @@ module instr_queue
     for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_fifo_input_select
       /* verilator lint_off WIDTH */
       assign instr_data_in[i].instr = instr[CVA6Cfg.INSTR_PER_FETCH+i-idx_is_q];
+      // Hang-4: store realign PC with each word. Dual-issue used to rebuild
+      // sequential PC from instr[1:0] sizes; a garbage/empty head or size
+      // desync advanced PC by +2, so auipc in fdt_next_tag produced
+      // mtval=0x800222be (table base off-by-2) and load-misalign hang.
+      assign instr_data_in[i].pc = addr_dup[CVA6Cfg.INSTR_PER_FETCH+i-idx_is_q];
       assign instr_data_in[i].cf = cf[CVA6Cfg.INSTR_PER_FETCH+i-idx_is_q];
       assign instr_data_in[i].ex = exception_i;  // exceptions hold for the whole fetch packet
       assign instr_data_in[i].ex_vaddr = exception_addr_i;
@@ -248,9 +281,11 @@ module instr_queue
     // Input interface
     // ----------------------
     assign push_instr = valid_i & ~instr_queue_full;
+    assign addr_dup = '0;
 
     /* verilator lint_off WIDTH */
     assign instr_data_in[0].instr = instr_i[0];
+    assign instr_data_in[0].pc = addr_i[0];
     assign instr_data_in[0].cf = cf_type_i[0];
     assign instr_data_in[0].ex = exception_i;  // exceptions hold for the whole fetch packet
     assign instr_data_in[0].ex_vaddr = exception_addr_i;
@@ -296,11 +331,24 @@ module instr_queue
   // ----------------------
   // Downstream interface
   // ----------------------
-  // as long as there is at least one queue which can take the value we have a valid instruction
-  assign fetch_entry_valid_o[0] = ~(&instr_queue_empty);
-  if (CVA6Cfg.SuperscalarEn) begin : gen_fetch_entry_valid_1
-    // TODO Maybe this additional fetch_entry_is_cf check is useless as issue-stage already performs it?
-    assign fetch_entry_valid_o[NID] = ~|(instr_queue_empty & idx_ds[1]) & ~(&fetch_entry_is_cf);
+  // Downstream valid: port 0 only if the *head* rotating FIFO slot has data.
+  // (Using ~(&empty) let a zeroed head present while a later slot still held
+  // ops; dual-issue then advanced PC on a garbage +2 and desynced the queue.)
+  // Later ports: their slot non-empty, no earlier CF-class instr, port0 valid.
+  assign fetch_entry_valid_o[0] = ~|(instr_queue_empty & idx_ds[0]);
+  if (CVA6Cfg.SuperscalarEn) begin : gen_fetch_entry_valid_ss
+    for (genvar p = 1; p < NISSUE; p++) begin : gen_fe_valid
+      logic earlier_blocks;
+      always_comb begin
+        earlier_blocks = 1'b0;
+        for (int unsigned e = 0; e < p; e++) begin
+          // Block dual-issue after any CF instr (taken or not-taken branch).
+          if (fetch_entry_blocks_ss[e]) earlier_blocks = 1'b1;
+        end
+      end
+      assign fetch_entry_valid_o[p] =
+          ~|(instr_queue_empty & idx_ds[p]) & ~earlier_blocks & fetch_entry_valid_o[0];
+    end
   end
 
   assign idx_ds[0] = idx_ds_q;
@@ -322,7 +370,7 @@ module instr_queue
       // assemble fetch entry
       for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
         fetch_entry_o[i].instruction = '0;
-        fetch_entry_o[i].address = pc_j[i];
+        fetch_entry_o[i].address = '0;
         fetch_entry_o[i].ex.valid = 1'b0;
         fetch_entry_o[i].ex.cause = '0;
 
@@ -332,56 +380,49 @@ module instr_queue
         fetch_entry_o[i].ex.tinst = '0;
         fetch_entry_o[i].branch_predict.predict_address = address_out;
         fetch_entry_o[i].branch_predict.cf = ariane_pkg::NoCF;
+        // U6.1: fetch-side tag default 0; decoder overwrites from active SMT hart
+        fetch_entry_o[i].hart_id = '0;
       end
 
-      // output mux select
+      // Output mux: map each issue port to its rotating FIFO slot (idx_ds[p])
       for (int unsigned i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin
-        // TODO handle fetch_entry_o[1] if superscalar
-        if (idx_ds[0][i]) begin
-          if (instr_data_out[i].ex == ariane_pkg::FE_INSTR_ACCESS_FAULT) begin
-            fetch_entry_o[0].ex.cause = riscv::INSTR_ACCESS_FAULT;
-          end else if (CVA6Cfg.RVH && instr_data_out[i].ex == ariane_pkg::FE_INSTR_GUEST_PAGE_FAULT) begin
-            fetch_entry_o[0].ex.cause = riscv::INSTR_GUEST_PAGE_FAULT;
-          end else begin
-            fetch_entry_o[0].ex.cause = riscv::INSTR_PAGE_FAULT;
-          end
-          fetch_entry_o[0].instruction = instr_data_out[i].instr;
-          fetch_entry_o[0].ex.valid = instr_data_out[i].ex != ariane_pkg::FE_NONE;
-          if (CVA6Cfg.TvalEn)
-            fetch_entry_o[0].ex.tval = {
-              {(CVA6Cfg.XLEN - CVA6Cfg.VLEN) {1'b0}}, instr_data_out[i].ex_vaddr
-            };
-          if (CVA6Cfg.RVH) begin
-            fetch_entry_o[0].ex.tval2 = instr_data_out[i].ex_gpaddr;
-            fetch_entry_o[0].ex.tinst = instr_data_out[i].ex_tinst;
-            fetch_entry_o[0].ex.gva   = instr_data_out[i].ex_gva;
-          end
-          fetch_entry_o[0].branch_predict.cf = instr_data_out[i].cf;
-          pop_instr[i] = fetch_entry_fire[0];
-        end
-
-        if (CVA6Cfg.SuperscalarEn) begin
-          if (idx_ds[1][i]) begin
+        for (int unsigned p = 0; p < NISSUE; p++) begin
+          if (idx_ds[p][i]) begin
             if (instr_data_out[i].ex == ariane_pkg::FE_INSTR_ACCESS_FAULT) begin
-              fetch_entry_o[NID].ex.cause = riscv::INSTR_ACCESS_FAULT;
+              fetch_entry_o[p].ex.cause = riscv::INSTR_ACCESS_FAULT;
+            end else if (CVA6Cfg.RVH && p == 0 &&
+                         instr_data_out[i].ex == ariane_pkg::FE_INSTR_GUEST_PAGE_FAULT) begin
+              fetch_entry_o[p].ex.cause = riscv::INSTR_GUEST_PAGE_FAULT;
             end else begin
-              fetch_entry_o[NID].ex.cause = riscv::INSTR_PAGE_FAULT;
+              fetch_entry_o[p].ex.cause = riscv::INSTR_PAGE_FAULT;
             end
-            fetch_entry_o[NID].instruction = instr_data_out[i].instr;
-            fetch_entry_o[NID].ex.valid = instr_data_out[i].ex != ariane_pkg::FE_NONE;
-            fetch_entry_o[NID].ex.tval = {{64 - CVA6Cfg.VLEN{1'b0}}, instr_data_out[i].ex_vaddr};
-            fetch_entry_o[NID].branch_predict.cf = instr_data_out[i].cf;
-            // Cannot output two CF the same cycle.
-            pop_instr[i] = fetch_entry_fire[NID];
+            fetch_entry_o[p].instruction = instr_data_out[i].instr;
+            // PC from FIFO (realign), not combinational size chain.
+            fetch_entry_o[p].address = instr_data_out[i].pc;
+            fetch_entry_o[p].ex.valid = instr_data_out[i].ex != ariane_pkg::FE_NONE;
+            if (CVA6Cfg.TvalEn)
+              fetch_entry_o[p].ex.tval = {
+                {(CVA6Cfg.XLEN - CVA6Cfg.VLEN) {1'b0}}, instr_data_out[i].ex_vaddr
+              };
+            if (CVA6Cfg.RVH && p == 0) begin
+              fetch_entry_o[p].ex.tval2 = instr_data_out[i].ex_gpaddr;
+              fetch_entry_o[p].ex.tinst = instr_data_out[i].ex_tinst;
+              fetch_entry_o[p].ex.gva   = instr_data_out[i].ex_gva;
+            end
+            fetch_entry_o[p].branch_predict.cf = instr_data_out[i].cf;
+            // Prefix-only pop (see fetch_fire_prefix below).
+            pop_instr[i] = fetch_fire_prefix[p];
           end
         end
       end
-      // rotate the pointer left
-      if (fetch_entry_fire[0]) begin
+      // Rotate pointer by number of consecutive prefix fires from port 0
+      if (fetch_fire_prefix[0]) begin
+        idx_ds_d = idx_ds[1];
         if (CVA6Cfg.SuperscalarEn) begin
-          idx_ds_d = fetch_entry_fire[NID] ? idx_ds[2] : idx_ds[1];
-        end else begin
-          idx_ds_d = idx_ds[1];
+          for (int unsigned p = 1; p < NISSUE; p++) begin
+            if (fetch_fire_prefix[p]) idx_ds_d = idx_ds[p+1];
+            else break;
+          end
         end
       end
     end
@@ -390,7 +431,7 @@ module instr_queue
       idx_ds_d = '0;
       idx_is_d = '0;
       fetch_entry_o[0].instruction = instr_data_out[0].instr;
-      fetch_entry_o[0].address = pc_q;
+      fetch_entry_o[0].address = instr_data_out[0].pc;
 
       fetch_entry_o[0].ex.valid = instr_data_out[0].ex != ariane_pkg::FE_NONE;
       if (instr_data_out[0].ex == ariane_pkg::FE_INSTR_ACCESS_FAULT) begin
@@ -413,25 +454,42 @@ module instr_queue
 
       fetch_entry_o[0].branch_predict.predict_address = address_out;
       fetch_entry_o[0].branch_predict.cf = instr_data_out[0].cf;
+      fetch_entry_o[0].hart_id = '0;
 
       pop_instr[0] = fetch_entry_valid_o[0] & fetch_entry_ready_i[0];
     end
   end
 
   for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+    // Taken CF from predictor (drives address FIFO pop + redirect PC).
     assign fetch_entry_is_cf[i] = fetch_entry_o[i].branch_predict.cf != ariane_pkg::NoCF;
+    // Any CF-class instruction (incl. not-taken branch with NoCF predict).
+    assign fetch_entry_is_ctrl_instr[i] = is_ctrl_instr_f(fetch_entry_o[i].instruction);
+    assign fetch_entry_blocks_ss[i] = fetch_entry_is_cf[i] | fetch_entry_is_ctrl_instr[i];
     assign fetch_entry_fire[i]  = fetch_entry_valid_o[i] & fetch_entry_ready_i[i];
   end
 
-  assign pop_address = |(fetch_entry_is_cf & fetch_entry_fire);
+  // Dual-issue must pop/advance as a *prefix* from port 0. A non-prefix
+  // ready[1]&&!ready[0] would pop the second FIFO slot without rotating
+  // idx_ds/PC (instr lost; fall-through after not-taken bltu never commits).
+  assign fetch_fire_prefix[0] = fetch_entry_fire[0];
+  for (genvar p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_fire_prefix
+    assign fetch_fire_prefix[p] = fetch_entry_fire[p] & fetch_fire_prefix[p-1];
+  end
+
+  // Address FIFO only for *taken* CF (not every ctrl instr / not-taken branch).
+  assign pop_address = |(fetch_entry_is_cf & fetch_fire_prefix);
 
   // ----------------------
   // Calculate (Next) PC
   // ----------------------
+  // Fall-through after issue: last fired instr's stored PC + size, or taken
+  // CF predict target. Output addresses themselves come from the FIFO (above).
   assign pc_j[0] = pc_q;
   for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+    // Only taken CF redirects; not-taken branch falls through by size.
     assign pc_j[i+1] = fetch_entry_is_cf[i] ? address_out : (
-      pc_j[i] + ((fetch_entry_o[i].instruction[1:0] != 2'b11) ? 'd2 : 'd4)
+      fetch_entry_o[i].address + ((fetch_entry_o[i].instruction[1:0] != 2'b11) ? 'd2 : 'd4)
     );
   end
 
@@ -439,11 +497,13 @@ module instr_queue
     pc_d = pc_q;
     reset_address_d = flush_i ? 1'b1 : reset_address_q;
 
-    if (fetch_entry_fire[0]) begin
+    if (fetch_fire_prefix[0]) begin
+      // Next sequential PC after the oldest fired instr (port 0).
       pc_d = pc_j[1];
       if (CVA6Cfg.SuperscalarEn) begin
-        if (fetch_entry_fire[NID]) begin
-          pc_d = pc_j[2];
+        for (int unsigned p = 1; p < NISSUE; p++) begin
+          if (fetch_fire_prefix[p]) pc_d = pc_j[p+1];
+          else break;
         end
       end
     end

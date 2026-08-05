@@ -37,6 +37,8 @@ module load_store_unit
     input logic rst_ni,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
     input logic flush_i,
+    // FSE S4: SB cancelled TIDs for younger-only LSU recovery
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
     input logic stall_st_pending_i,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
@@ -524,6 +526,7 @@ module load_store_unit
       .clk_i,
       .rst_ni,
       .flush_i,
+      .cancelled_mask_i,
       .stall_st_pending_i,
       .no_st_pending_o,
       .store_buffer_empty_o(store_buffer_empty),
@@ -574,6 +577,7 @@ module load_store_unit
       .clk_i,
       .rst_ni,
       .flush_i,
+      .cancelled_mask_i,
       .valid_i   (ld_valid_i),
       .lsu_ctrl_i(lsu_ctrl),
       .pop_ld_o  (pop_ld),
@@ -731,7 +735,7 @@ module load_store_unit
                   AMO_LRD, AMO_SCD,
                   AMO_SWAPD, AMO_ADDD, AMO_ANDD, AMO_ORD,
                   AMO_XORD, AMO_MAXD, AMO_MAXDU, AMO_MIND,
-                  AMO_MINDU, HLV_D, HSV_D: begin
+                  AMO_MINDU, AMO_CASD, HLV_D, HSV_D: begin
             if (lsu_ctrl.vaddr[2:0] != 3'b000) begin
               data_misaligned = 1'b1;
             end
@@ -745,7 +749,7 @@ module load_store_unit
                 AMO_LRW, AMO_SCW,
                 AMO_SWAPW, AMO_ADDW, AMO_ANDW, AMO_ORW,
                 AMO_XORW, AMO_MAXW, AMO_MAXWU, AMO_MINW,
-                AMO_MINWU, HLV_W, HLV_WU, HLVX_WU, HSV_W: begin
+                AMO_MINWU, AMO_CASW, HLV_W, HLV_WU, HLVX_WU, HSV_W: begin
           if (lsu_ctrl.vaddr[1:0] != 2'b00) begin
             data_misaligned = 1'b1;
           end
@@ -865,6 +869,9 @@ module load_store_unit
     overflow,
     g_overflow,
     fu_data_i.operand_b,
+    // Zacas: expected value travels as operand_c (imm must stay 0 for addr = rs1)
+    (CVA6Cfg.RVZacas && ariane_pkg::is_amo_cas(fu_data_i.operation)) ? fu_data_i.operand_c
+                                                                      : '0,
     be_i,
     fu_data_i.fu,
     fu_data_i.operation,

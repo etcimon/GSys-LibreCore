@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Ziccrse Main Memory Reservability (Vol I, 4.11)</title></head>
+<body>
+<h1>Vol I &sect;4.11 — Ziccrse Extension for Main Memory Reservability</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:ziccrse">specs/riscv-spec.html#ext:ziccrse</a>.
+<strong>Domain:</strong> RAM, SPEC.</p>
+
+<p>Ziccrse ensures that main-memory regions with both coherence and cacheability PMAs must support the
+RsrvEventual PMA, i.e. that any naturally aligned power-of-two region up to the reservation-set size
+can support a load-reserved/store-conditional reservation. It is a prerequisite for the A/Zalrsc
+extensions and the WRS/WRS.NT instructions. Without it, LR/SC would not have a guaranteed memory
+region to monitor.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Ziccrse extension is implemented, then main memory regions with both
+the coherence and cacheability PMAs must support the RsrvEventual PMA."
+(specs/riscv-spec.html:10919-10923, anchor #ext:ziccrse / #norm:ziccrse_rsrv_eventual)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module reservation_region_check (
+  input  logic [XLEN-1:0] addr_i,
+  input  logic [XLEN-1:0] size_i,
+  output logic            reservable_o
+);
+  // addr aligned to size and within main memory; no MMIO
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented when <code>CVA6Cfg.RVA</code> is set. LR/SC operations are
+routed through <code>core/load_store_unit.sv:728-748</code>, converted to <code>AMO_LR</code>/<code>AMO_SC</code>
+in <code>core/store_unit.sv:134-135,282-319</code>, buffered in <code>core/amo_buffer.sv:50-63</code>, and
+issued to the cache subsystem. The WT cache path implements an SC backoff / pass-fail mechanism in
+<code>core/cache_subsystem/wt_dcache_missunit.sv:334-347,576-583</code> and encodes LR/SC on the AXI
+interface in <code>core/cache_subsystem/wt_axi_adapter.sv:252-267,577-580</code>. The HPDcache path
+carries an explicit LR/SC reservation snoop between <code>core/cache_subsystem/hpdcache/rtl/src/hpdcache_ctrl.sv:157-161,1179-1181</code>
+and <code>hpdcache_uncached.sv:84-89,149-150</code>.</p>
+
+<p><strong>.dts linkage:</strong> LR/SC usable only on main-memory regions that are both cacheable and
+coherent in the <code>memory@</code> nodes, matching the <code>CachedRegion</code> PMA rules configured in
+<code>core/include/config_pkg.sv</code>.</p>
+</body>
+</html>

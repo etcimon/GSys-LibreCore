@@ -129,12 +129,12 @@ package riscv;
   } mstatus_rv_t;
 
   typedef struct packed {
-    logic        stce;   // not implemented - requires Sctc extension
-    logic        pbmte;  // not implemented - requires Svpbmt extension
+    logic        stce;   // Sstc enable (menvcfg.STCE) — wired when CVA6Cfg.SstcEn
+    logic        pbmte;  // Svpbmt enable (menvcfg.PBMTE) — wired when CVA6Cfg.SvpbmtEn
     logic [61:8] wpri1;  // writes preserved reads ignored
-    logic        cbze;   // not implemented - requires Zicboz extension
-    logic        cbcfe;  // not implemented - requires Zicbom extension
-    logic [1:0]  cbie;   // not implemented - requires Zicbom extension
+    logic        cbze;   // Zicboz enable (menvcfg.CBZE) — wired when CVA6Cfg.RVZiCboz
+    logic        cbcfe;  // Zicbom enable (menvcfg.CBCFE)
+    logic [1:0]  cbie;   // Zicbom CBO.INVAL behaviour
     logic [2:0]  wpri0;  // writes preserved reads ignored
     logic        fiom;   // fence of I/O implies memory
   } envcfg_rv_t;
@@ -365,6 +365,8 @@ package riscv;
   localparam int unsigned IRQ_VS_EXT = 10;
   localparam int unsigned IRQ_M_EXT = 11;
   localparam int unsigned IRQ_HS_EXT = 12;
+  // Sscofpmf: Local Counter-Overflow Interrupt
+  localparam int unsigned IRQ_LCOF = 13;
 
   localparam logic [31:0] MIP_SSIP = 1 << IRQ_S_SOFT;
   localparam logic [31:0] MIP_VSSIP = 1 << IRQ_VS_SOFT;
@@ -376,6 +378,7 @@ package riscv;
   localparam logic [31:0] MIP_VSEIP = 1 << IRQ_VS_EXT;
   localparam logic [31:0] MIP_MEIP = 1 << IRQ_M_EXT;
   localparam logic [31:0] MIP_SGEIP = 1 << IRQ_HS_EXT;
+  localparam logic [31:0] MIP_LCOFIP = 1 << IRQ_LCOF;
 
   // ----------------------
   // PseudoInstructions Codes
@@ -425,7 +428,15 @@ package riscv;
     CSR_SCAUSE           = 12'h142,
     CSR_STVAL            = 12'h143,
     CSR_SIP              = 12'h144,
+    // Sstc: supervisor timer compare (stimecmph is RV32-only)
+    CSR_STIMECMP         = 12'h14D,
+    CSR_STIMECMPH        = 12'h15D,
+    // Sstc + H: VS-mode timer compare (vstimecmph is RV32-only)
+    CSR_VSTIMECMP        = 12'h24D,
+    CSR_VSTIMECMPH       = 12'h25D,
     CSR_SATP             = 12'h180,
+    // Sscofpmf: supervisor counter-overflow status (read-only shadow of OF bits)
+    CSR_SCOUNTOVF        = 12'hDA0,
     // Hypervisor-extended Supervisor Mode CSRs
     CSR_HSTATUS          = 12'h600,
     CSR_HEDELEG          = 12'h602,

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Bit-Manipulation Extensions (Vol I, chapter 8)</title></head>
+<body>
+<h1>Vol I chapter 8 — Bit-Manipulation Extensions</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#ext:zba">#ext:zba</a> (8.1 Zba),
+<a href="../../specs/riscv-spec.html#ext:zbb">#ext:zbb</a> (8.2 Zbb),
+<a href="../../specs/riscv-spec.html#ext:zbc">#ext:zbc</a> (8.3/8.5 Zbc),
+<a href="../../specs/riscv-spec.html#ext:zbs">#ext:zbs</a> (8.4 Zbs),
+<a href="../../specs/riscv-spec.html#ext:zicond">#ext:zicond</a> (4.7 Zicond).
+Source lines: <code>specs/riscv-spec.html:23438</code> (Zba), <code>:23519</code> (Zbb),
+<code>:23894</code> (Zbs), <code>:23975</code> (Zbc), <code>:10063</code> (Zicond).</p>
+
+<p>The B/Zb* extensions add bit manipulation, carry-less multiply, conditional move/zero, and
+address-generation shifts. They are pure integer ISA additions and map directly to the integer ALU
+and multiplier. Zba/Zbb/Zbs are the most common profile requirements. Zicond is the integer
+conditional-move/zero extension.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Zba instructions can be used to accelerate the generation of
+addresses that index into arrays of basic types (halfword, word,
+doubleword) using both unsigned word-sized and XLEN-sized indices: a
+shifted index is added to a base address."
+...
+"The single-bit instructions provide a mechanism to set, clear, invert,
+or extract a single bit in a register. The bit is specified by its index."
+(specs/riscv-spec.html:23438-23440 anchor #ext:zba; :23896-23898 anchor #ext:zbs)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module bitmanip_alu (
+  input  logic [XLEN-1:0] a_i, b_i,
+  input  bmu_op_e         op_i,    // Zba/Zbb/Zbc/Zbs/Zicond
+  output logic [XLEN-1:0] result_o
+);
+  // barrel shifter, clz/ctz/pcnt, min/max, and/ior/xor, carry-less mul
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partially implemented. The <code>CVA6Cfg.RVB</code> bit gates
+bit-manipulation operations in <code>core/alu.sv</code> (Zba/Zbb/Zbs logic) and
+<code>core/multiplier.sv:49-52,137-</code> (carry-less multiply Zbc). The <code>CVA6Cfg.RVZiCond</code>
+bit selects conditional-zero/move operations in the ALU. The decoder classifies the operations and
+the issue stage routes them to the ALU/multiplier fixed-latency unit. Coverage of every Zbb/Zbs/Zbc
+instruction should be verified against the spec encoding tables.</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string advertises <code>_zba</code>,
+<code>_zbb</code>, <code>_zbs</code>, <code>_zbc</code>, and/or <code>_zicond</code> extensions when the
+corresponding <code>CVA6Cfg</code> bits are set.</p>
+</body>
+</html>

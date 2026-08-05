@@ -1,0 +1,207 @@
+---
+title: NDA Optimization Pass
+description: Step-by-step workflow for adding foundry technology optimizations under NDA protection.
+---
+
+# NDA Optimization Pass
+
+This page is the practical workflow for binding a foundry's proprietary cells to
+CVA6 while keeping the NDA content out of the repository.
+
+The technology optimization pass is the most sensitive workflow in CVA6
+because it touches proprietary foundry information. It is designed to give
+authorized users a controlled path to map the generic RTL to real silicon
+without exposing that information in the open repository. The pass is therefore
+opt-in, macro-protected, and gated by both a configuration flag and a
+tech-spec document. This is the same class of controls used in commercial IP
+flows to separate public RTL from proprietary process libraries.
+
+## When to use this pass
+
+Use the technology optimization pass when:
+
+- You have a signed NDA with a foundry and want to use their memory compiler,
+  standard-cell variants, retention cells, level shifters, power kits, or hard
+  macros.
+- You want to evaluate area, timing, and power on a specific process node.
+- You are preparing for tape-out and need the design to map to real PDK cells.
+
+Do not use this pass for:
+
+- Generic behavioral simulation (it is inert by default).
+- Adding new ISA-visible features (use the core config + seams instead).
+- General refactoring of the RTL hierarchy.
+
+The "do not use" list is as important as the "use" list. The technology pass
+is not a general-purpose tool; it is a specific mechanism for technology
+mapping. Using it for ISA-visible features or hierarchy refactoring would
+contaminate the generic source with non-generic concerns and would violate the
+separation of concerns that makes CVA6 reusable. The pass should be used only
+when there is a real foundry library to bind and a real tape-out to prepare.
+
+## Step-by-step workflow
+
+### 1. Author a technology spec document
+
+Create a `*.tech-spec.md` under `core/**` or `corev_apu/**` that describes:
+
+- The target technology node and foundry.
+- Which cells are being replaced (SRAM, ICG, retention, level shifter, power,
+  hard macro).
+- The area(s) affected (`core` or `corev_apu`).
+- The expected synthesis / PnR / DFT impact.
+- Verification plan (equivalence, MBIST, timing, power, UPF).
+
+This document is the **second key** that arms the pass.
+
+The tech-spec document is the reasoning artifact. It forces the engineer or
+agent to state what is being replaced, why the replacement is necessary, and
+how the change will be verified. This is essential for a workflow that can
+silently change the netlist: without a written plan, it is impossible to
+review whether the technology mapping is correct. The document also serves as a
+record for future porting to other process nodes.
+
+### 2. Enable the pass in config
+
+Edit `.config.ts`:
+
+```ts
+technology: {
+  optimizationPass: true,
+  pdkMode: 'nda',
+  activeTechnology: 'demoTech',
+  pdkRoot: 'pd/pdk',
+  areaRoots: ['pd/pdk/core', 'pd/pdk/corev_apu'],
+  specGlobs: ['core/**/*.tech-spec.md', 'corev_apu/**/*.tech-spec.md'],
+  guardMacro: 'CVA6_TECH_OPT',
+  protectedGlobs: ['pd/pdk/**'],
+  requireExplicit: true,
+}
+```
+
+Set `pdkMode: 'omitted'` or `'open'` for public/open-source PDK experiments; set
+`'nda'` only when you have an active foundry drop-in.
+
+### 3. Initialize the protected drop-in
+
+```bash
+g6lc-build tech init demoTech
+```
+
+This creates `pd/pdk/demoTech/` with a `README.md` and `.gitignore`. Copy your
+NDA views into this directory; they will be ignored by `git`.
+
+### 4. Plan the adaptation
+
+```bash
+g6lc-build tech plan
+```
+
+The platform scans `*.tech-spec.md` files and the PDK drop-in, then prints a
+read-only adaptation plan. It **never edits RTL** in this step.
+
+### 5. Adapt behind the guard macro
+
+Create or edit a wrapper under `pd/pdk/demoTech/core/` or
+`pd/pdk/demoTech/corev_apu/` and guard it with `CVA6_TECH_OPT`:
+
+```systemverilog
+`ifdef CVA6_TECH_OPT
+module tc_sram_tech_wrapper #(...) (
+  // foundry-specific ports
+);
+  foundry_sram sram (...);
+endmodule
+`endif
+```
+
+At the leaf in the existing `tc_sram` or `sram_cache` file, add:
+
+```systemverilog
+`ifdef CVA6_TECH_OPT
+  tc_sram_tech_wrapper #(...) i_sram (...);
+`else
+  tc_sram #(...) i_sram (...);
+`endif
+```
+
+The generic path must be byte-for-byte unchanged when `CVA6_TECH_OPT` is
+undefined.
+
+### 6. Wire synthesis
+
+Pass `+define+CVA6_TECH_OPT` to the synthesis flow in `pd/synth/Makefile` or
+through the build platform's physical-design integration. The foundry drop-in
+must be on the include path for the target run.
+
+Synthesis is where the guard macro becomes real. When `+define+CVA6_TECH_OPT`
+is passed, the synthesis tool sees the foundry wrapper and uses the proprietary
+`.lib` and `.lef` views to size, place, and route the design. When the macro is
+absent, the generic behavioral cells elaborate exactly as they did before. This
+two-state behavior is the core of the technology pass: it is a single source
+that can be elaborated generically or specifically depending on the target.
+
+### 7. Verify SoC-readiness
+
+Run `g6lc-build tech check` and then the standard verification flow:
+
+- Equivalence: generic vs optimized netlist.
+- DFT/MBIST: scan chains and memory BIST insertion.
+- Timing: STA on the target corner.
+- Power/UPF: power intent and rail analysis.
+- Area: compare against the generic mapping.
+
+The verification list is what makes the technology pass more than a cell swap.
+A foundry memory compiler may produce a smaller, faster SRAM, but it may also
+introduce setup/hold violations, power-rail dependencies, or testability
+requirements that the behavioral model did not have. Equivalence checking
+ensures the netlist is functionally the same; DFT/MBIST ensures it is testable;
+STA ensures it meets timing; UPF analysis ensures it can be powered correctly;
+and area comparison ensures the optimization actually saved silicon. Each step
+is a gate that prevents a silent regression.
+
+### 8. Document
+
+Update:
+
+- The originating `*.tech-spec.md`.
+- `AGENTS-technology.md` and `agents/guides/AGENTS-technology-optimization.md`
+  if the pattern is new.
+- This docs site if the user-facing workflow changed.
+
+## Agent workflow for technology
+
+An LLM agent asked to "optimize CVA6 for foundry X" should:
+
+1. Read `AGENTS-technology.md` and
+   `agents/guides/AGENTS-technology-optimization.md`.
+2. Confirm `technology.optimizationPass` and `pdkMode` in `.config.ts`.
+3. Look for existing `*.tech-spec.md` or create one.
+4. Run `g6lc-build tech status` and `g6lc-build tech plan` before any RTL edit.
+5. Add guard-macro-protected wrappers at the PDK-swap seam.
+6. Run `g6lc-build tech check` and synthesis equivalence checks.
+7. Never commit foundry content; keep it under `pd/pdk/<tech>/`.
+
+For an agent, the technology workflow is a test of discipline. The agent must
+not edit the generic source, must not commit proprietary files, and must not
+skip verification. The two-key ignition and the readiness gates exist precisely
+to catch these mistakes before they reach the repository. A well-behaved agent
+will read the tech-spec, run `tech status`, `tech plan`, and `tech check`, and
+only then touch the guard-macro-protected wrappers.
+
+## Common agent mistakes
+
+- **Editing RTL without the guard macro.** The generic path must remain
+  unchanged.
+- **Committing NDA files.** `pd/pdk/` is gitignored for a reason.
+- **Skipping the tech-spec document.** The pass requires both keys.
+- **Forgetting equivalence/DFT/timing.** The technology pass is not a simple
+  cell swap; it is a SoC-readiness step.
+
+These mistakes are the four fatal errors of technology adaptation. Editing RTL
+without the guard macro forks the source and breaks the generic path.
+Committing NDA files violates legal agreements and exposes the project.
+Skipping the tech-spec removes the planning contract that makes the pass
+reviewable. And skipping equivalence/DFT/timing produces a netlist that may
+simulate but cannot be manufactured. The pass is designed to be safe only when
+all four are respected.

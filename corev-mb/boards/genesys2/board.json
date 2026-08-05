@@ -1,0 +1,122 @@
+{
+  "boardid": "genesys2",
+  "name": "Digilent Genesys 2 (Kintex-7)",
+  "vendor": "Digilent",
+  "status": "reference",
+  "class": "fpga",
+  "skidl": "omitted",
+  "summary": "Reference FPGA target for CVA6. It matches the existing corev_apu/fpga/src/ariane_xilinx.sv GENESYSII build, so selecting it configures the core/uncore exactly the way the shipped Xilinx bitstream expects. As a third-party dev board its PCB is not authored in-tree, hence skidl=omitted (no schematic).",
+  "core": {
+    "config": "cv64a6_imafdc_sv39",
+    "xlen": 64,
+    "extensions": ["i", "m", "a", "f", "d", "c", "zicsr", "zifencei"],
+    "isaString": "rv64imafdc"
+  },
+  "apu": {
+    "axiDataWidth": 64,
+    "noc": "axi4",
+    "socket": { "enabled": false },
+    "controllers": [
+      {
+        "id": "ariane-ethernet",
+        "variant": "rgmii",
+        "enable": false,
+        "note": "Already integrated as a submodule and instantiated in ariane_xilinx.sv; listed for the map, not re-fetched by `mb select`."
+      }
+    ]
+  },
+  "interfaces": [
+    {
+      "id": "ddr3",
+      "domain": "memory",
+      "kind": "ddr3-sodimm",
+      "controller": "xlnx_mig_7_ddr3",
+      "phy": "MIG-7 hard PHY",
+      "count": 1,
+      "notes": "1 GB DDR3 SODIMM. Controller is Xilinx MIG (FPGA hard IP), attached over AXI in ariane_xilinx.sv."
+    },
+    {
+      "id": "eth0",
+      "domain": "network",
+      "kind": "rgmii-1g",
+      "controller": "ariane-ethernet",
+      "phy": "RTL8211E",
+      "count": 1,
+      "notes": "1 GbE. MAC on-die (FPGA); board RGMII PHY."
+    },
+    {
+      "id": "uart0",
+      "domain": "peripheral",
+      "kind": "uart",
+      "phy": "FT2232HQ",
+      "count": 1,
+      "notes": "USB-UART console via the on-board FTDI bridge."
+    },
+    {
+      "id": "sd0",
+      "domain": "storage",
+      "kind": "sd-spi",
+      "controller": "xlnx_axi_quad_spi",
+      "count": 1,
+      "notes": "microSD over SPI (Xilinx AXI Quad SPI)."
+    },
+    {
+      "id": "gpio0",
+      "domain": "peripheral",
+      "kind": "gpio",
+      "controller": "xlnx_axi_gpio",
+      "count": 1,
+      "notes": "LEDs + switches."
+    },
+    {
+      "id": "jtag0",
+      "domain": "peripheral",
+      "kind": "jtag-debug",
+      "count": 1,
+      "notes": "RISC-V debug transport (dmi_jtag) — feeds core debug_req_i."
+    }
+  ],
+  "phys": [
+    {
+      "ref": "eth_phy",
+      "interface": "rgmii-1g",
+      "mpn": "RTL8211E-VL",
+      "vendor": "Realtek",
+      "package": "QFN-48",
+      "datasheet": "Realtek RTL8211E(G) datasheet (vendor)",
+      "license": "vendor",
+      "status": "documented",
+      "mcp": { "tool": "jlc_search", "query": "RTL8211E gigabit ethernet rgmii phy QFN-48" }
+    },
+    {
+      "ref": "usb_uart",
+      "interface": "uart",
+      "mpn": "FT2232HQ",
+      "vendor": "FTDI",
+      "package": "QFN-64",
+      "datasheet": "FTDI FT2232H datasheet (vendor)",
+      "license": "vendor",
+      "status": "documented",
+      "mcp": { "tool": "jlc_search", "query": "FT2232HQ USB UART bridge QFN-64" }
+    },
+    {
+      "ref": "ddr3_sodimm",
+      "interface": "ddr3-sodimm",
+      "mpn": "SODIMM-204",
+      "vendor": "(module)",
+      "package": "SODIMM-204",
+      "status": "documented",
+      "notes": "DDR3 electrical PHY is the Xilinx MIG-7 hard PHY; the module is a standard 204-pin SODIMM."
+    }
+  ],
+  "references": {
+    "spec": ["#vol:priv"],
+    "vendorDocs": [
+      "Digilent Genesys 2 Reference Manual",
+      "Xilinx PG150 (MIG 7 Series DDR3)",
+      "Realtek RTL8211E datasheet",
+      "FTDI FT2232H datasheet"
+    ],
+    "oshwBoard": null
+  }
+}

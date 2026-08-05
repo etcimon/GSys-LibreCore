@@ -8,7 +8,20 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 
 ### Added
 
+- Documentation: Next.js site (`docs/website/`) now covers **sv-timing**
+  (structural FO4 package), build-platform **timings** / **probe–diag–verify**,
+  and a dual-doc map (website vs Sphinx vs AGENTS). See `docs/README.md`.
+- Documentation: product-level pages for the **upgrade program**, frontend
+  extensions, multi-issue, **out-of-order**, **SMT**, **server profiles**,
+  **L2/L3**, **multi-core**, **hypervisor/Sstc**, **vector/Ara**, and a
+  **SKU matrix** (linked from core / architecture / corev_apu).
+- Agent navigation: root `AGENTS.md` rows for `AGENTS-build.md` / `sv-timing`
+  and monorepo pointer `architecture/sv-timing/`.
+
 ### Changed
+
+- Sphinx master + deprecated design intro note CVA6V-EC tooling and live
+  microarchitecture live primarily under `docs/website/` and `architecture/`.
 
 - Fix non-setable MEIE bit in MIE CSR
 - Bump `fpnew` to `v0.6.2`

@@ -11,8 +11,10 @@
 // Author: Florian Zaruba, ETH Zurich
 // Description: Contains SoC information as constants
 package ariane_soc;
-  // M-Mode Hart, S-Mode Hart
-  localparam int unsigned NumTargets = 2;
+  // PLIC contexts: 2 per physical hart (M + S). Fixed at 16 to match plic_regmap.sv
+  // (gen_plic_addrmap.py -t 16) and CVA6_MAX_CORES=8. Target 2*c=MEIP, 2*c+1=SEIP.
+  // If CVA6_MAX_CORES changes, re-run gen_plic_addrmap.py and keep this in lockstep.
+  localparam int unsigned NumTargets = 16;
   // Uart, SPI, Ethernet, reserved
   localparam int unsigned NumSources = 30;
   localparam int unsigned MaxPriority = 7;

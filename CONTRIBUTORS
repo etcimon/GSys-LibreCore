@@ -1,0 +1,36 @@
+GSys LibreCore — Contributors
+=============================
+
+This file is the acknowledgement register for GSys LibreCore.
+
+For tier R (LibreCore-original RTL) it is, per CLA/ICLA.md section 6 and
+CLA/ECLA.md section 6, the sole consideration a contributor receives for a
+contribution. Contributors retain ownership of their copyright and grant a
+licence; they do not assign it. See CONTRIBUTING.md.
+
+Listing is by first contribution. Entries are never removed; a contributor may
+request a change of name or the removal of contact details at any time.
+
+--------------------------------------------------------------------------------
+tier R — LibreCore-original RTL (CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial)
+--------------------------------------------------------------------------------
+
+Etienne Cimon                     rights holder, project originator
+
+--------------------------------------------------------------------------------
+tier T — build platform, timing tooling, verification scripting, docs (MIT)
+--------------------------------------------------------------------------------
+
+Etienne Cimon
+
+--------------------------------------------------------------------------------
+Upstream authorship
+--------------------------------------------------------------------------------
+
+The greater part of this repository was written by others and is attributed in
+the files themselves and in NOTICE section 4. That attribution is not
+administered by this file and must never be altered. LibreCore exists because
+the OpenHW Group, ETH Zurich, the University of Bologna, Thales DIS design
+services SAS, CEA, Univ. Grenoble Alpes, Inria, TIMA Laboratory, the PULP
+Platform, lowRISC, PlanV Technologies, SiFive and the Regents of the University
+of California published their work under permissive terms. See docs/heritage.md.

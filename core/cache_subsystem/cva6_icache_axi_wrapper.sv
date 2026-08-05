@@ -105,7 +105,7 @@ module cva6_icache_axi_wrapper
   // -------
   // I-Cache
   // -------
-  cva6_icache #(
+  g6lc_icache #(
       // use ID 0 for icache reads
       .CVA6Cfg(CVA6Cfg),
       .icache_areq_t(icache_areq_t),
@@ -115,7 +115,7 @@ module cva6_icache_axi_wrapper
       .icache_req_t(icache_req_t),
       .icache_rtrn_t(icache_rtrn_t),
       .RdTxId(0)
-  ) i_cva6_icache (
+  ) i_g6lc_icache (
       .clk_i         (clk_i),
       .rst_ni        (rst_ni),
       .flush_i       (flush_i),

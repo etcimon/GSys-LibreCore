@@ -1,0 +1,4 @@
+# Bun config for @sv-timing/js integration tests.
+[test]
+# Default: run all tests under test/
+root = "."

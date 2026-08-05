@@ -1,0 +1,151 @@
+---
+title: Getting Started
+description: Bootstrap the LibreCore build platform and build the documentation site in one command.
+---
+
+# Getting Started
+
+There are two one-line entry points: the build platform (`build.sh` / `build.ps1`)
+and the documentation builder (`docs.sh` / `docs.ps1`). Both bootstrap Bun if it
+is missing, then delegate to the TypeScript CLI or the Next.js site. This design
+choice reflects a core tenet of the LibreCore build platform: *the host should not
+need to be pre-configured before it can be used*. In industrial settings,
+engineering environments are often locked down, version-controlled, or shared
+across teams. A setup process that requires manual installation of five
+different package managers and toolchain versions is a reproducibility
+failure waiting to happen. By wrapping the bootstrap in a single shell
+function, LibreCore ensures that a clean checkout plus an internet connection is
+sufficient to reach a working state. The scripts intentionally install Bun into
+a user-local directory rather than a system path, mirroring best practices from
+language-version managers and containerized build environments.
+
+## 1. Bootstrap the build platform
+
+```bash
+# Linux / macOS / WSL / Git-Bash
+source ./setenv.sh
+g6lc-build status          # permanent alias: g6lc-build
+
+# Windows PowerShell
+. .\setenv.ps1
+g6lc-build status
+```
+
+`setenv.sh` / `setenv.ps1` put **`g6lc-build`** (and the permanent alias
+`g6lc-build`) on your path and print the current SoC status. If Bun is not
+installed, the scripts download it into `~/.bun` and add it to `PATH` for the
+current shell. This temporary PATH injection is deliberate: it means the
+bootstrap is non-destructive. The rest of the environment is unchanged, and a
+new shell can simply source `setenv.sh` again if needed. For
+continuous-integration runners, the same scripts can be sourced inside a job
+without requiring elevated privileges or global state mutation, which keeps the
+pipeline hermetic and auditable.
+
+### One-off commands without shell setup
+
+```bash
+./build.sh doctor
+./build.sh setup --install
+./build.sh test --open-source
+```
+
+```powershell
+.\build.ps1 doctor
+.\build.ps1 setup --install
+.\build.ps1 test --open-source
+```
+
+## 2. Build this documentation site
+
+The docs site lives in `docs/website` and is a standard Next.js + Nextra project.
+Keeping the documentation builder in the same repository as the hardware source
+is a deliberate convergence of concerns. In industry, documentation drift is a
+well-known failure mode: engineers update RTL, the manual lags, and new
+contributors reconstruct the intended flow from stale wikis and tribal
+knowledge. By making the docs a first-class build artifact that can be served
+locally and exported as static HTML, CVA6 treats documentation with the same
+rigor as verification. The documentation build is reproducible, versioned, and
+subject to the same config-driven conventions as the SoC itself.
+
+```bash
+./docs.sh dev      # start a local dev server on http://localhost:3000
+./docs.sh build    # static export to docs/website/dist
+```
+
+```powershell
+.\docs.ps1 dev
+.\docs.ps1 build
+```
+
+Both scripts:
+
+1. Check for `bun` and install it if missing (same bootstrap as `build.sh` / `build.ps1`).
+2. Run `bun install` inside `docs/website` if `node_modules` is absent.
+3. Run `next dev` or `next build` and exit with the same status code.
+
+The exit-code passthrough is more important than it appears. A wrapper that
+swallows the underlying status makes CI/CD integration fragile, because the
+pipeline cannot distinguish success from failure. Both `docs.sh` and
+`docs.ps1` exit with the same code as the `bun run` invocation, so they compose
+cleanly into makefiles, GitHub Actions, and local shell scripts.
+
+## 3. First checks
+
+After the build platform is bootstrapped:
+
+```bash
+g6lc-build probe         # deep host capability boxes (installs nothing)
+g6lc-build doctor        # quick PATH readiness
+g6lc-build config        # print the resolved SoC configuration
+g6lc-build test --list   # list all available test suites
+g6lc-build timings status  # locate sv-timing package (optional structural FO4)
+```
+
+`probe` / `doctor` answer *can this machine run the flow?* `config` answers
+*what will the flow do?* and `test --list` answers *what could be validated?*
+Together they give a complete readiness picture before any expensive
+compilation or simulation begins.
+
+When tools are missing:
+
+```bash
+g6lc-build probe install
+g6lc-build tools install sim    # or dual-hart / all / spike
+g6lc-build diag run host core
+g6lc-build verify --lint
+```
+
+See [Probe, Diag & Verify](./build-platform/verify-and-diag) and
+[Timings](./build-platform/timings).
+
+## 4. Mental model
+
+LibreCore is developed **from the outside in**:
+
+1. **Config first** — edit `.config.ts` at the repo root; it is the single
+   control surface.
+2. **Build platform** — `g6lc-build` (alias `g6lc-build`) translates config into
+   toolchain setup, simulation, board adaptation, vendor sync, and technology
+   checks.
+3. **Layered directories** — `core/` is the CPU, `corev_apu/` is the on-die
+   uncore/FPGA platform, `corev-mb/` is the board, `vendor/` is third-party IP,
+   `build-platform/` is the automation spine, and `sv-timing/` is an optional
+   independent structural-timing package.
+4. **Agent guides** — `AGENTS.md` and its siblings answer "where in the spec and
+   code does this feature live?" for both humans and LLM agents.
+
+This four-step model inverts the traditional "edit the RTL first" workflow.
+Instead of opening a SystemVerilog file and hoping the surrounding environment
+will adapt, the LibreCore workflow begins with the control surface and lets the
+platform propagate the change through the correct seam. This outside-in
+approach is what makes the project legible to automation: an LLM can read the
+config, discover the relevant agent guide, and invoke the exact command needed
+to verify its change without guessing at directory layout or script names.
+
+## 5. Where to read next
+
+- [Worktree map](./architecture/worktree) — what every top-level directory does.
+- [Build platform overview](./build-platform) — how `g6lc-build` is structured.
+- [sv-timing](./sv-timing) — structural FO4 analyze / auto-correct package.
+- [Agent workflow](./guides/agent-workflow) — how an LLM navigates the `AGENTS-*`
+  files.

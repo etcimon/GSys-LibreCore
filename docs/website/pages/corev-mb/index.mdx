@@ -1,0 +1,120 @@
+---
+title: corev-mb
+description: The motherboard / board layer around the CVA6 die.
+---
+
+# corev-mb
+
+`corev-mb/` is the **motherboard / board layer** around the CVA6 die. It is the
+board counterpart to `corev_apu` (the die/uncore). It describes the physical
+board, the SoC-to-PHY pin mappings, the power rails, and the generated board
+package that configures the APU.
+
+In SoC design, the die is only half the product. The board determines whether
+the die can be powered, clocked, cooled, connected to memory, and exposed to
+peripherals. The `corev-mb` layer treats the board as a first-class design
+object, not an afterthought. By describing the board in a machine-readable JSON
+file and generating the board package automatically, CVA6 ensures that the same
+core can be retargeted to many physical platforms without forking the RTL.
+
+## What it contains
+
+- `boards/<id>/board.json` — machine spec, source of truth for each board.
+- `boards/<id>/generated/` — gitignored `<id>_board_pkg.sv` and `board.mk`
+  produced by `g6lc-build mb select <id>`.
+- `architecture/<id>/README.md` — non-compiled development-target documentation.
+- `lib/` — SKiDL helper scripts and `pcbparts_mcp.py` for part selection.
+
+## Design contract
+
+`AGENTS-motherboard.md` is the standing governance for this layer. The board
+layer is subordinate to `AGENTS.md` §0 and never edits `core/` or
+`corev_apu/src/` directly. Instead, it adapts the SoC config through the
+generated board package and the `build-platform/.config.local.ts` overlay.
+
+The subordination of the board layer to `AGENTS.md` §0 is a critical
+architectural boundary. The board layer is not allowed to change the core or the
+APU source code; it can only adapt their configuration. This rule prevents the
+common anti-pattern in which every new board spawns a separate fork of the RTL.
+Instead, the board layer produces a generated package and an overlay config that
+parameterize the existing source. This is how a single core/APU codebase can
+support a family of boards.
+
+## Board JSON
+
+Each `board.json` declares:
+
+- `core` — the target CVA6 config (e.g. `cv64a6_imafdc_sv39`).
+- `apu.controllers` — controllers to enable and their parameters.
+- `interfaces` — board-level interfaces (UART, Ethernet, SD, GPIO, JTAG, etc.).
+- `phys` — PHY identifiers and pin mappings.
+- `skidl` — `omitted`, `reference`, or `custom` depending on whether SKiDL is
+  used for PCB design.
+
+`board.json` is more than a description; it is an executable specification. The
+build platform reads it, validates it, and derives the board package from it. If
+the JSON is inconsistent — for example, if it enables an Ethernet controller but
+fails to list the PHY — the platform will report the mismatch rather than
+silently generate an invalid package. This makes the board spec the single
+place where the physical intent of the product is recorded.
+
+## Reference board: genesys2
+
+`corev-mb/boards/genesys2/` is the reference. It targets:
+
+- CVA6 config `cv64a6_imafdc_sv39`
+- DDR3 MIG
+- RGMII Ethernet (ariane-ethernet, disabled by default)
+- UART via FT2232HQ
+- SD quad-spi
+- GPIO and JTAG
+
+The board contract `AGENTS-mb-genesys2.md` and the architecture notes
+`corev-mb/architecture/genesys2/README.md` document the handshakes.
+
+## Selecting a board
+
+```bash
+g6lc-build mb list
+g6lc-build mb check genesys2
+g6lc-build mb select genesys2 --dry-run
+g6lc-build mb select genesys2
+```
+
+The `select` step:
+
+1. Checks compatibility between the board's `core` and the current SoC config.
+2. Writes the gitignored overlay `build-platform/.config.local.ts`.
+3. Syncs the board's required vendor controllers.
+4. Generates `genesys2_board_pkg.sv` and `board.mk` under
+   `corev-mb/boards/genesys2/generated/`.
+
+The `select` step is the board equivalent of a compiler invocation: it takes a
+high-level specification (`board.json`) and produces low-level artifacts that
+the APU can consume. The overlay (`build-platform/.config.local.ts`) pins the
+SoC and motherboard configuration for the current working directory, while the
+generated board package exports parameters as SystemVerilog localparams. This
+two-level parameterization keeps the build context local and the generated files
+disposable.
+
+## Custom board design
+
+For `custom` boards, the agent or engineer runs:
+
+```bash
+g6lc-build mb create <id>
+g6lc-build mb design <id> [--online]
+g6lc-build mb expand <id>
+g6lc-build mb test <id>
+```
+
+These use `corev-mb/lib/` Python scripts and SKiDL to plan parts, power rails,
+pin mappings, and ERC. See [SKiDL Process](./skidl-process) and
+[Agent Workflow](./devin-agents).
+
+The custom board flow moves the design problem from manual schematic capture to
+programmatic board generation. This is powerful because it allows the board to
+be parameterized by the same config that drives the core and APU. A change to
+the SoC pinout or the selected PHY can propagate through the SKiDL netlist,
+ERC, BOM, and placement hints without manual redraw. This is the same
+parameterization philosophy applied to the PCB domain.

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Smstateen and Ssstateen Extensions (Vol II, 6.1)</title></head>
+<body>
+<h1>Vol II &sect;6.1 — Smstateen and Ssstateen Extensions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#smstateen">specs/riscv-spec.html#smstateen</a>.
+Source line: <code>specs/riscv-spec.html:83524</code>. <strong>Domain:</strong> —.</p>
+
+<p>Smstateen/Ssstateen provide per-extension state-enable bits in M-mode (<code>mstateen*</code>)
+and S-mode (<code>sstateen*</code>) CSRs. They allow M-mode to selectively disable or enable stateful
+extensions for lower privilege levels, which is important for context switching and virtualization of
+stateful user-mode extensions.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The implementation of optional RISC-V extensions has the potential to
+open covert channels between separate user threads, or between separate
+guest OSes running under a hypervisor. The problem occurs when an
+extension adds processor state that the main OS or hypervisor is unaware
+of (and hence won't context-switch) but that can be modified/written by
+one user thread or guest OS and perceived/examined/read by another."
+(specs/riscv-spec.html:83524-83532, anchor #smstateen)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module stateen (
+  input  csr_addr_e    addr_i,
+  input  logic [63:0]  stateen_i,
+  output logic         extension_enabled_o
+);
+  // bit-mask per extension; read/write controlled by privilege
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. No <code>mstateen*</code> or <code>sstateen*</code> CSRs are
+implemented in <code>core/csr_regfile.sv</code>; context-switch save/restore is performed by software for
+the existing extension state.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Smstateen/Ssstateen would be advertised in the
+<code>riscv,isa</code> string if implemented.</p>
+</body>
+</html>

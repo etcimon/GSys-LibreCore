@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Supervisor Instructions (Vol II, 4.2)</title></head>
+<body>
+<h1>Vol II &sect;4.2 — Supervisor Instructions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#_supervisor_instructions">specs/riscv-spec.html#_supervisor_instructions</a>.
+Source line: <code>specs/riscv-spec.html:78520</code>. <strong>Domain:</strong> RAM.</p>
+
+<p>The S-mode instructions include <code>SFENCE.VMA</code> for TLB/address-translation cache
+invalidation, <code>SINVAL.VMA</code> (with Svinval), <code>SFENCE.W.INVAL</code>, and
+<code>SFENCE.INVAL.IR</code>. SFENCE.VMA is the fundamental coherence mechanism between page-table
+updates and the address-translation cache: after modifying a PTE, software must execute SFENCE.VMA to
+guarantee subsequent translations observe the new mapping.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"In addition to the SRET instruction defined in Section 3.3.2, one new
+supervisor-level instruction is provided. The SFENCE.VMA instruction is
+used to synchronize updates to in-memory memory-management data
+structures with the current execution of instruction fetches, explicit
+memory accesses, and page-table walks."
+(specs/riscv-spec.html:78520-78525, anchor #_supervisor_instructions)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module sfence_vma (
+  input  logic [ASID_WIDTH-1:0] asid_i,
+  input  logic [XLEN-1:0]       vaddr_i,
+  input  logic                  valid_i,
+  output logic                  flush_itlb_o, flush_dtlb_o,
+  output logic                  flush_ptw_o
+);
+  // invalidate TLB entries matching asid/vaddr; broadcast to I/D TLB and PTW
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented. SFENCE.VMA is decoded in <code>core/decoder.sv</code>
+and executed in <code>core/controller.sv</code>; it flushes the ITLB/DTLB and PTW state in
+<code>core/cva6_mmu/cva6_mmu.sv</code>. Svinval (<code>SINVAL.VMA</code>,
+<code>SFENCE.W.INVAL</code>, <code>SFENCE.INVAL.IR</code>) support is gated by
+<code>CVA6Cfg.RVSINVAL</code> and should be verified per target.</p>
+
+<p><strong>.dts linkage:</strong> no dedicated DT node; SFENCE.VMA/Svinval availability is implied by
+the <code>riscv,isa</code> string and <code>mmu-type</code> and by the TLB/PTW configuration.</p>
+</body>
+</html>

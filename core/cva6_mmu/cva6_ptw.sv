@@ -427,7 +427,15 @@ module cva6_ptw
           // Invalid PTE
           // -------------
           // If pte.v = 0, or if pte.r = 0 and pte.w = 1, or if pte.reserved !=0 in sv39 and sv39x4, stop and raise a page-fault exception.
-          if (!pte.v || (!pte.r && pte.w) || (|pte.reserved && CVA6Cfg.IS_XLEN64) || (!CVA6Cfg.SvnapotEn && pte.n) || (CVA6Cfg.SvnapotEn && !(pte.r || pte.x) && pte.n))
+          // Reserved-field check: bits 60:54 must be 0; PBMT[62:61] allowed only with SvpbmtEn
+          // and menvcfg.PBMTE (PBMTE not threaded here — accept non-zero PBMT when SvpbmtEn);
+          // N bit handled by SvnapotEn.
+          if (!pte.v || (!pte.r && pte.w) ||
+              (|pte.reserved && CVA6Cfg.IS_XLEN64) ||
+              (!CVA6Cfg.SvpbmtEn && |pte.pbmt && CVA6Cfg.IS_XLEN64) ||
+              (CVA6Cfg.SvpbmtEn && (pte.pbmt == 2'b11) && CVA6Cfg.IS_XLEN64) ||
+              (!CVA6Cfg.SvnapotEn && pte.n) ||
+              (CVA6Cfg.SvnapotEn && !(pte.r || pte.x) && pte.n))
             state_d = PROPAGATE_ERROR;
           // -----------
           // Valid PTE

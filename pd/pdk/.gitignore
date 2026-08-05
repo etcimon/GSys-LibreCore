@@ -1,0 +1,19 @@
+# pd/pdk — PROTECTED PDK drop-in root (foundry / NDA content lives here).
+#
+# Everything under this directory is IGNORED by default so proprietary,
+# NDA-covered PDK content (memory-compiler outputs, .lib/.db/.lef/.gds, cell
+# decks, UPF/CPF power views, encrypted behavioural models) is NEVER committed.
+# Only the tracked scaffolding below — the guide, the manifest template, and the
+# per-area/example READMEs — is kept. Each protected subdirectory carries its
+# own .gitignore with the same rule, so a real technology drop stays local.
+#
+# See ./README.md, AGENTS-technology.md,
+# and agents/guides/AGENTS-technology-optimization.md.
+
+/*
+!/.gitignore
+!/README.md
+!/manifest.example.json
+!/core/
+!/corev_apu/
+!/technology.example/

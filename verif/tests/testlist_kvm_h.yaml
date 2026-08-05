@@ -1,0 +1,26 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+# Optional KVM/H stress (U9.x open items). DV_TARGET=g6lc64_server_math
+
+common_test_config: &common_test_config
+  path_var: TESTS_PATH
+  gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+
+testlist:
+  - test: kvm_h_stress
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/kvm_h/kvm_h_stress.S
+    description: "H hfence + dual VS ecall re-entry (KVM-oriented)"
+
+  - test: hlv_hsv_smoke
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/kvm_h/hlv_hsv_smoke.S
+    description: "Load/store path smoke under H-present package"
+
+  - test: vstimecmp_htimedelta
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/sstc_h/vstimecmp_htimedelta.S
+    description: "Sstc×H guest timer litmus (existing U9)"

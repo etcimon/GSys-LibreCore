@@ -1,0 +1,31 @@
+# Synthetic OpenSTA-like path report for offline S3a correlate self-test.
+# Names match sta_smoke analyze.json FO4 start/end points (a_i, b_i → y_o).
+# NOT produced by a real STA tool — for host CI only.
+
+Startpoint: a_i
+Endpoint: y_o
+   Path Group: *default*
+   Path Type: max
+   Delay   Time   Description
+   ---------------------------------------------------------
+    0.00    0.00  clock clk (rise edge)
+    0.12    0.12  a_i (in)
+    0.45    0.57  sum (net)
+    0.10    0.67  y_o (reg)
+   data arrival time                          0.67
+   data required time                         0.80
+   slack (MET)                                0.13
+
+Startpoint: b_i
+Endpoint: y_o
+   Path Group: *default*
+   Path Type: max
+   Delay   Time   Description
+   ---------------------------------------------------------
+    0.00    0.00  clock clk (rise edge)
+    0.11    0.11  b_i (in)
+    0.48    0.59  sum (net)
+    0.10    0.69  y_o (reg)
+   data arrival time                          0.69
+   data required time                         0.80
+   slack (MET)                                0.11

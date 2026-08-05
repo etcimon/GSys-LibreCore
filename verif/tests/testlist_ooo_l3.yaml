@@ -1,0 +1,35 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# Directed regression for U5 OoO + L2/L3 hierarchy.
+# Prefer DV_TARGET=g6lc64_ooo_server (4-issue, 4-core, 2-hart, L2/L3 auto).
+# Also runs on cv64a6_imafdc_sv39 (OoOEn=0) for functional baseline.
+
+common_test_config: &common_test_config
+  path_var: TESTS_PATH
+  gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+
+testlist:
+  - test: ooo_ilp_chain
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_ilp_chain.S
+    description: "OoO multi-issue ILP + dependent chain + WAW/WAR rename stress"
+
+  - test: ooo_mem_dep
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_dep.S
+    description: "OoO LSQ store-to-load / mem WAW / interleaved ALU+mem"
+
+  - test: l3_stride_stream
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/l3/l3_stride_stream.S
+    description: "L2/L3 stream + large-stride integrity (capacity / PF friendly)"
+
+  - test: spec_mispredict_chain
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/spec/spec_mispredict_chain.S
+    description: "FSE S2/S3: nested branches + RAS call/ret under deep window"

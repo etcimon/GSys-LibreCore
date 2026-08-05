@@ -1,0 +1,7 @@
+# pd/pdk/core — PROTECTED per-area drop-in for CORE technology adaptations.
+# Foundry / NDA content only; never committed. Only this file + README.md are
+# tracked. Macro-protected wrappers the technology pass generates here are
+# consumed at synthesis/PnR behind the guard macro and stay local to the build.
+/*
+!/.gitignore
+!/README.md

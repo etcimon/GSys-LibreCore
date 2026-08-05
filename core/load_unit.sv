@@ -31,8 +31,10 @@ module load_unit
     input logic clk_i,
     // Asynchronous reset active low - SUBSYSTEM
     input logic rst_ni,
-    // Flush signal - CONTROLLER
+    // Flush signal - CONTROLLER (full flush marks all slots flushed)
     input logic flush_i,
+    // FSE S4: younger-only cancel — mark matching TID slots flushed
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
     // Load request is valid - LSU_BYPASS
     input logic valid_i,
     // Load request input - LSU_BYPASS
@@ -175,6 +177,17 @@ module load_unit
     if (flush_i) begin
       ldbuf_flushed_d = '1;
     end
+    // FSE S4: younger-only — flush only cancelled TIDs (keep older loads)
+    if (|cancelled_mask_i && !flush_i) begin
+      for (int unsigned i = 0; i < CVA6Cfg.NrLoadBufEntries; i++) begin
+        if (ldbuf_valid_q[i] && cancelled_mask_i[ldbuf_q[i].trans_id])
+          ldbuf_flushed_d[i] = 1'b1;
+        // also cancel a same-cycle allocation
+        if (ldbuf_w && cancelled_mask_i[ldbuf_wdata.trans_id] &&
+            (ldbuf_windex == ldbuf_id_t'(i)))
+          ldbuf_flushed_d[i] = 1'b1;
+      end
+    end
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : ldbuf_ff
@@ -227,7 +240,11 @@ module load_unit
   assign ex_o.tinst = CVA6Cfg.RVH ? ex_i.tinst : '0;
   assign ex_o.gva = CVA6Cfg.RVH ? ex_i.gva : 1'b0;
 
-  // Check that NI operations follow the necessary conditions
+  // Check that NI operations follow the necessary conditions.
+  // FSE S2 audit: speculative loads never issue to non-idempotent regions until
+  // the controlling branch is resolved (see IDLE: dtlb_hit && !paddr_ni, else
+  // WAIT_SPEC_LOAD). DeepSpecEn widens the in-flight window but does not relax
+  // this gate — NI still requires NonIdemPotenceEn + store-buffer drain rules.
   logic paddr_ni;
   logic not_commit_time;
   logic inflight_stores;

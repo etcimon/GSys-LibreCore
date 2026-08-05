@@ -113,12 +113,21 @@ module cva6_tb_wrapper import uvmt_cva6_pkg::*; #(
     .irq_i                ( {1'b0, irq_i[0]}             ),
     .ipi_i                ( 1'b0                         ),
     .time_irq_i           ( irq_i[1]                     ),
+    .rtc_time_i           ( 64'b0                        ),
     .debug_req_i          ( debug_if.debug_req           ),
     .rvfi_probes_o        ( rvfi_probes                  ),
     .cvxif_req_o          ( cvxif_req                    ),
     .cvxif_resp_i         ( cvxif_resp                   ),
     .noc_req_o            ( axi_ariane_req               ),
-    .noc_resp_i           ( axi_ariane_resp              )
+    .noc_resp_i           ( axi_ariane_resp              ),
+    .l1_inval_addr_i      ( 64'b0                        ),
+    .l1_inval_valid_i     ( 1'b0                         ),
+    .l1_inval_ready_o     ( /* unused */                 ),
+    .l2_miss_i            ( 1'b0                         ),
+    .l3_hit_i             ( 1'b0                         ),
+    .l3_miss_i            ( 1'b0                         ),
+    .pf_issue_i           ( 1'b0                         ),
+    .pf_train_i           ( 1'b0                         )
   );
 
   //----------------------------------------------------------------------------

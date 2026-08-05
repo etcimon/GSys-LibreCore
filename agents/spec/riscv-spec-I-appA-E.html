@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Vol I Appendices A-E</title></head>
+<body>
+<h1>Vol I Appendices A-E</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#rv32-64g">#rv32-64g</a> (A),
+<a href="../../specs/riscv-spec.html#app:mm">#app:mm</a> (B),
+<a href="../../specs/riscv-spec.html#app:naming">#app:naming</a> (C),
+<a href="../../specs/riscv-spec.html#app:code-examples">#app:code-examples</a> (D),
+<a href="../../specs/riscv-spec.html#app:rationale">#app:rationale</a> (E).
+Source lines: <code>specs/riscv-spec.html:57084</code> (A), <code>:60295</code> (B), <code>:65697</code> (C),
+<code>:66113</code> (D), <code>:67042</code> (E).</p>
+
+<p>Appendix A is the RV32/64G instruction listing (opcode table). Appendix B is a memory-model
+supplement with litmus tests and formal-model references (domain SPEC). Appendix C defines core
+naming and extension-name conventions. Appendix D lists raw opcode spaces. Appendix E describes
+historical rationale for extensions. These are mostly reference material; only Appendix B has
+implementation relevance for memory-model verification and Appendix C for ISA-string construction.</p>
+
+<h2>Spec quotations</h2>
+<pre>
+"One goal of the RISC-V project is that it be used as a stable software
+development target. The architectural descriptions in the earlier
+chapters contain the full ISA specification. This appendix collects the
+assembly code listings for the instructions in the RV32/64G ISA."
+(specs/riscv-spec.html:57084-57090, anchor #rv32-64g / Appendix A summary)
+
+"This appendix contains non-normative documentation that helps explain
+the rationale behind and the workings of the RISC-V memory consistency
+models, including formal models of RVWMO."
+(specs/riscv-spec.html:60295-60300, anchor #app:mm)
+
+"This chapter describes the RISC-V ISA extension naming scheme that is
+used to specify the set of extensions supported by a RISC-V hart."
+(specs/riscv-spec.html:65697-65700, anchor #app:naming)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module opcode_table_check (
+  input  logic [31:0] instr_i,
+  output logic        legal_opcode_o
+);
+  // cross-check against Appendix A/D opcode maps
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> reference. Appendix A/D/E have no dedicated hardware; the encodings
+are implemented by <code>core/decoder.sv</code> and the opcode/CSR tables. Appendix B memory-model
+supplement is exercised by <code>verif/regress/</code> litmus tests and formal/RTL simulation. Appendix
+C naming conventions determine how the <code>riscv,isa</code> string and CVA6 config/RTL extension bits
+are presented to software.</p>
+
+<p><strong>.dts linkage:</strong> the CPU node <code>riscv,isa</code> and <code>mmu-type</code> strings are
+built using the Appendix C naming rules; e.g. <code>rv64imafdc_zicsr_zifencei</code>. Appendix B guides
+memory-ordering tests that verify the <code>memory@</code> and <code>soc</code> node attributes are
+consistent with the implemented PMA/RVWMO model.</p>
+</body>
+</html>

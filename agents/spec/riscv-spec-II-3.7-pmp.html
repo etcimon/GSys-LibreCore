@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Physical Memory Protection (Vol II, 3.7) — Logisplain summary</title>
+</head>
+<body>
+<h1>Vol II &sect;3.7 — Physical Memory Protection (PMP)</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#pmp">specs/riscv-spec.html#pmp</a>
+(source line 76569). <strong>Domain:</strong> RAM.</p>
+
+<section>
+<p>The objective of &sect;3.7 is security and fault containment: to support secure processing and
+contain faults, it is desirable to limit the physical addresses accessible by software running on a
+hart. An optional physical memory protection (PMP) unit provides per-hart machine-mode control
+registers to allow physical memory access privileges (read, write, execute) to be specified for each
+physical memory region. The PMP values are checked in parallel with the PMA checks. The default
+permission model is the security primitive: PMP can grant permissions to S and U modes, which by
+default have none, and can revoke permissions from M-mode, which by default has full permissions.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"To support secure processing and contain faults, it is desirable to
+limit the physical addresses accessible by software running on a hart.
+An optional physical memory protection (PMP) unit provides per-hart
+machine-mode control registers to allow physical memory access
+privileges (read, write, execute) to be specified for each physical
+memory region. The PMP values are checked in parallel with the PMA
+checks described in Section 3.6."
+(specs/riscv-spec.html:76569-76579, anchor #pmp)
+</pre>
+
+<p>Mechanically the specification fixes the checked scope and the register file. Checks "are applied to
+all accesses whose effective privilege mode is S or U, including instruction fetches and data accesses
+... and data accesses in M-mode when the MPRV bit in mstatus is set and the MPP field ... contains S or
+U," and additionally "to page-table accesses for virtual-address translation, for which the effective
+privilege mode is S." Optional M-mode locking makes "the PMP registers themselves ... locked ... until
+the hart is reset." Enforcement is exact — "PMP violations are always trapped precisely." The register
+file is normative: "PMP entries are described by an 8-bit configuration register and one MXLEN-bit
+address register," "up to 64 PMP entries are supported," implementations "may implement zero, 16, or 64
+... the lowest-numbered PMP entries must be implemented first," all fields are WARL, and matching modes
+are TOR/NA4/NAPOT with lowest-index priority. CVA6 implements this in <code>core/pmp/</code>, with the
+<code>pmpcfg*</code>/<code>pmpaddr*</code> CSRs living in <code>core/csr_regfile.sv</code>; the check is
+wired into the fetch and load/store address paths. This links to the RAM guide (PMP + PMA must agree
+with the <code>.dts</code> map) and to the speculation guide (a precise PMP trap must not permit any
+speculative side effect to commit).</p>
+</section>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<p>The implied structure is a priority-encoded matcher over up to 64 entries, evaluated in parallel with
+PMA and producing a precise fault:</p>
+<pre>
+module pmp #(parameter int unsigned NrEntries)(   // 0, 16, or 64
+  input  logic [PLEN-1:0]  paddr_i,
+  input  priv_lvl_e        priv_i,       // effective mode (MPRV/MPP aware)
+  input  access_e          access_i,     // fetch/load/store
+  input  logic [7:0]       pmpcfg_i  [NrEntries],  // R W X A(TOR/NA4/NAPOT) L
+  input  logic [XLEN-1:0]  pmpaddr_i [NrEntries],  // core/csr_regfile.sv
+  output logic             allow_o,
+  output logic             access_fault_o          // always precise
+);
+  // lowest-numbered matching entry wins; locked entries bind M-mode too.
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented (configurable entry count per target via
+<code>CVA6Cfg.NrPMPEntries</code>). CSR state is declared in <code>core/csr_regfile.sv:300-301</code>,
+output to the PMP unit at <code>:339-340</code>, and read at <code>:857-960</code>. Writes with
+lock/TOR checks are at <code>:1839-1936</code> (pmpcfg) and <code>:1866-1936</code> (pmpaddr). The
+PMP block is in <code>core/pmp/src/pmp.sv:15-73</code>, with per-entry matching in
+<code>core/pmp/src/pmp_entry.sv:15-</code> and TOR/NA4/NAPOT extraction. It is consumed by the
+instruction fetch port (<code>core/pmp/src/pmp_if.sv</code>) and the data port
+(<code>core/pmp/src/pmp_data_if.sv:9-160</code>), the latter instantiated in
+<code>core/load_store_unit.sv:383-407</code>. PMP violations raise precise access faults
+(<code>INSTR_ACCESS_FAULT</code>, <code>LD_ACCESS_FAULT</code>, <code>ST_ACCESS_FAULT</code>).</p>
+
+<p><strong>.dts linkage:</strong> PMP is an internal hart security mechanism and is not described by a
+DT node, but any <code>memory@</code> / <code>reserved-memory</code> regions visible to PMP-aware
+software (OpenSBI/Linux pmp driver) must match the ranges configured by the firmware in
+<code>pmpcfg</code>/<code>pmpaddr</code> CSRs.</p>
+</body>
+</html>

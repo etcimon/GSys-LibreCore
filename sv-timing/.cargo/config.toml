@@ -1,0 +1,8 @@
+# Larger main-thread stack for deep SV package ASTs (ariane_pkg etc.) on Windows.
+# RUST_MIN_STACK only affects new threads; CST walks run on main.
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:33554432"]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-arg=-Wl,--stack,33554432"]

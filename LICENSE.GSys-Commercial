@@ -1,0 +1,177 @@
+GSys Commercial License for GSys LibreCore
+SPDX identifier: LicenseRef-GSys-Commercial
+
+Copyright (c) 2026 Etienne Cimon. All rights reserved.
+
+================================================================================
+STATUS OF THIS DOCUMENT
+================================================================================
+
+This document describes the terms on which the GSys Commercial License is
+OFFERED. It is not itself a grant of rights and it is not a signed agreement.
+No rights under this document arise until a separate written agreement has been
+executed between the Licensee and the rights holder.
+
+  >> This offer document requires review by qualified counsel before it is
+  >> used in a commercial transaction. Royalty rates, territory, term,
+  >> indemnity caps and governing law are deliberately left to the executed
+  >> agreement and are NOT fixed here.
+
+================================================================================
+1. WHAT THIS LICENSE IS FOR
+================================================================================
+
+GSys LibreCore is dual-licensed:
+
+  (A) the open path -- CERN Open Hardware Licence Version 2 - Strongly
+      Reciprocal (CERN-OHL-S-2.0), at no charge, with no royalty, for anyone;
+      see LICENSE.CERN-OHL-S; or
+
+  (B) this commercial path -- for parties who cannot or will not satisfy the
+      reciprocal disclosure obligations of the open path.
+
+Files offered under both paths carry:
+
+    SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+
+The choice is the Licensee's. Choosing (A) requires nothing from anyone: no
+registration, no notification, no fee.
+
+================================================================================
+2. WHAT THE OPEN PATH ALREADY GIVES YOU FOR FREE
+================================================================================
+
+Do not purchase a commercial license for something you already have. Under
+CERN-OHL-S-2.0 you may, at no charge and with no royalty:
+
+  - use, study, simulate and modify the Covered Source without limit;
+  - develop privately and indefinitely, including FPGA prototyping and internal
+    silicon exploration, without any disclosure obligation, because the
+    obligations of section 4 run to recipients and there is no recipient until
+    You Convey (section 4);
+  - engage design houses, verification vendors, DFT and backend contractors,
+    because work carried out on Your behalf under confidentiality is covered by
+    the Research and Development provision (section 5);
+  - Make and Convey Products commercially, PROVIDED you supply the Complete
+    Source or notify recipients of its Source Location (section 4) and license
+    your modifications under the same terms (section 3.3(d));
+  - rely on a perpetual, worldwide, royalty-free patent licence from each
+    Licensor to Make, have Made, use, offer to sell, sell and import Products
+    (section 7.1).
+
+================================================================================
+3. WHY PARTIES CHOOSE THE COMMERCIAL PATH
+================================================================================
+
+The commercial license is offered to grant, by separate written agreement, one
+or more of the following, none of which the open path provides:
+
+  3.1 CLOSED PRODUCT. The right to Make and Convey a Product incorporating
+      Covered Source WITHOUT providing the Complete Source of that Product and
+      without licensing modifications reciprocally.
+
+      This is the principal subject of the license. Note the mechanism: under
+      CERN-OHL-S-2.0 the definition of "Available Component" (section 1.7(b)(i))
+      requires availability "as a physical part". Proprietary SOFT IP -- a
+      closed DDR or SerDes PHY in RTL, a third-party network-on-chip, a closed
+      accelerator -- is therefore NOT an Available Component, and its Source
+      falls inside the Complete Source that section 4 requires You to provide.
+      A party integrating LibreCore alongside proprietary soft IP generally
+      cannot satisfy section 4 and must take this license.
+
+  3.2 CLOSED MODIFICATIONS. The right to modify Covered Source -- including
+      cache and TLB geometry, predictor sizing, PMA/PMP regions, SRAM macro
+      binding, clock-gating and retention insertion, scan and ATPG stitching,
+      timing-closure edits, and foundry PDK adaptation behind the technology
+      guard macro -- without publishing those modifications.
+
+      Foundry PDK adaptation is ordinarily impossible to publish because it is
+      bound by NDA to the process owner. Parties performing a technology
+      optimization pass will normally require this clause.
+
+  3.3 MARKING RELIEF. Relief from the die, package and documentation marking
+      requirements specified in NOTICE section 2.
+
+  3.4 WARRANTY AND INDEMNITY. Affirmative warranties and intellectual-property
+      indemnification. CERN-OHL-S-2.0 sections 6.1 and 6.2 disclaim all
+      warranties, exclude all liability, and require the Licensee to hold the
+      Licensor harmless. Many commercial integrators require the opposite
+      posture and this is frequently the operative reason for taking a
+      commercial license.
+
+  3.5 PATENT ASSURANCE. Patent coverage broader than the "necessarily
+      infringed" scope of CERN-OHL-S-2.0 section 7.1, and relief from the
+      patent-retaliation termination of section 7.2 and the
+      termination-on-breach exposure of section 8.4.
+
+  3.6 SUPPORT AND COLLATERAL. Maintenance, roadmap influence, and delivery of
+      verification, DFT and backend collateral.
+
+================================================================================
+4. SCOPE -- WHAT THIS LICENSE CAN AND CANNOT COVER
+================================================================================
+
+  4.1 COVERED. This license covers only LibreCore-original material: the files
+      identified as tier R in .licensing-tiers, being those in which Etienne
+      Cimon holds the rights, carrying the dual SPDX expression given in
+      section 1 above.
+
+  4.2 NOT COVERED, AND NOT NEEDED. The remainder of this repository is
+      third-party material -- ETH Zurich and University of Bologna, Thales DIS
+      design services SAS, CEA, Univ. Grenoble Alpes / Inria / TIMA, OpenHW
+      Group, SiFive, lowRISC, PlanV, PULP Platform, The Regents of the
+      University of California -- licensed under the Solderpad Hardware
+      License, Apache-2.0 or BSD-3-Clause. Those licenses are permissive. The
+      Licensee ALREADY HOLDS them, directly from those rights holders, at no
+      charge, and this license neither adds to nor subtracts from them. See
+      NOTICE section 4.
+
+      Accordingly, what is purchased here is the LibreCore delta and nothing
+      else. The rights holder makes no claim over upstream CVA6.
+
+  4.3 EXPRESSLY EXCLUDED. This license does not and cannot cover:
+        - the GPL-licensed FPGA zero-stage bootrom, which is a separate work
+          conveyed under GPL-2.0-or-later; see
+          corev_apu/fpga/src/bootrom/LICENSE.GPL-2.0-or-later;
+        - any third-party trademark, including "CVA6", "CORE-V", "OpenHW" and
+          "RISC-V";
+        - any foundry PDK, memory compiler output or vendor cell library, which
+          remain subject to their own terms.
+
+  4.4 TRADEMARK. The GSys marks are licensed separately and on different
+      conditions; see TRADEMARKS.md. A commercial licensee that takes marking
+      relief under section 3.3 thereby declines the compliance-badge grant in
+      TRADEMARKS.md section 3 and may not represent the Product as
+      source-available.
+
+================================================================================
+5. CONSIDERATION
+================================================================================
+
+Royalties are payable to Etienne Cimon. Commercial relationships are
+administered through GlobecSys Inc. ("GSys"); the contracting entity and
+structure are at the rights holder's discretion and are fixed in the executed
+agreement.
+
+Royalty basis is set per agreement and is typically structured on one or more
+of: per-unit shipped, per-tape-out or per-mask-set, per-design-win, or an
+annual site license. Consideration for the warranty, indemnity and support
+elements of sections 3.4 to 3.6 is priced separately from the closed-product
+and closed-modification rights of sections 3.1 to 3.2.
+
+================================================================================
+6. CONTRIBUTIONS AND THIS LICENSE
+================================================================================
+
+The rights holder's ability to offer this license depends on holding
+sufficient rights in all tier R material. Contributions to tier R are therefore
+accepted only under the contributor licence agreements in CLA/; see
+CONTRIBUTING.md. Contributions to tier T are MIT inbound and outbound and
+require no agreement.
+
+================================================================================
+7. CONTACT
+================================================================================
+
+Commercial licensing enquiries: see CONTRIBUTING.md for current contact
+routing. Enquiries are not required in order to use the open path.

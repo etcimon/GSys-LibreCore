@@ -1,0 +1,10 @@
+# NOTICE — vendored sv-parser
+
+This package vendors [dalance/sv-parser](https://github.com/dalance/sv-parser.git) at pin `v0.13.5` under
+`crates/sv-parser/`.
+
+Upstream is dual-licensed MIT OR Apache-2.0. See the LICENSE files inside
+`crates/sv-parser/` (and per-crate LICENSE-MIT / LICENSE-APACHE where present).
+
+Do not re-license the vendored tree. Local patches live in `patches/sv-parser/`.
+Refresh with `svt vendor-sv-parser` (see tools/vendor-sv-parser.md).

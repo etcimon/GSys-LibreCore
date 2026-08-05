@@ -1,0 +1,3 @@
+# Fixture file list for offline analyze.
+# Paths resolve against THIS file's directory (see architecture/PROJECT-AUTOCORRECT.md §2).
+comb_adder_cloud.sv

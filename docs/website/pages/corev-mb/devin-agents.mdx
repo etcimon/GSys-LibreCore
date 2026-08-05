@@ -1,0 +1,146 @@
+---
+title: Agent Workflow for corev-mb
+description: How an LLM agent selects, checks, and designs a CVA6 board.
+---
+
+# Agent Workflow for corev-mb
+
+This page walks through an LLM agent task like:
+
+> "Port CVA6 to a new milkv-jupiter board."
+
+Porting CVA6 to a new board is not a coding task in the traditional sense; it
+is a specification and integration task. The agent must discover what the
+board's core, controllers, PHYs, and connectors are, then express that
+discovery in `board.json` and the per-board contract. The goal is not to write
+new RTL but to configure the existing RTL to run correctly on the new physical
+platform. This makes board porting a natural fit for an agent that can read and
+synthesize multiple contracts.
+
+## Step 1: Load the governance
+
+The agent opens `AGENTS.md` and resolves the motherboard intent:
+
+- `AGENTS-motherboard.md` — board-layer governance.
+- `AGENTS-mb-skidl.md` — SKiDL design philosophy.
+- `AGENTS-mb-<id>.md` for existing similar boards (e.g. `AGENTS-mb-genesys2.md`).
+- `corev-mb/architecture/<id>/README.md` if the target is already documented.
+
+Governance loading is especially important for board work because the board
+layer is the most physically constrained layer. `AGENTS-motherboard.md` gives
+the rules; `AGENTS-mb-skidl.md` gives the design philosophy; and an existing
+per-board contract such as `AGENTS-mb-genesys2.md` gives a concrete example of
+what a finished board port looks like. Reading the architecture README tells the
+agent whether the target is already understood or whether it is an analysis-only
+exploration.
+
+## Step 2: Decide board class
+
+The board class determines the flow:
+
+- **Reference / third-party:** `skidl: "omitted"`. The agent writes the board
+  JSON, contract, and architecture doc; no SKiDL design.
+- **Custom:** `skidl: "custom"`. The agent runs the SKiDL loop.
+- **Reference starting point:** `skidl: "reference"`. Reuse a reference
+  schematic but parameterize it.
+
+## Step 3: Author board.json
+
+The agent creates `corev-mb/boards/<id>/board.json` with:
+
+- `core` matching the target CVA6 config.
+- `apu.controllers` listing only the controllers the board actually has.
+- `interfaces` and `phys` describing external PHYs and connectors.
+- `skidl` mode.
+
+Authoring `board.json` is the central act of board porting. It requires the
+agent to reconcile four inputs: the CVA6 core config that the board can support,
+the controllers that are physically present, the PHYs and connectors that are
+wired to the SoC, and the SKiDL mode that determines how the schematic is
+produced. A mistake at this stage propagates into the generated board package,
+the vendor sync list, and the DTS. The agent must therefore validate the JSON
+against the build platform before proceeding.
+
+## Step 4: Compatibility and select
+
+```bash
+g6lc-build mb check <id>
+g6lc-build mb select <id> --dry-run
+g6lc-build mb select <id>
+```
+
+The agent uses `--dry-run` first to see the overlay and generated artifacts
+without writing them. `mb check` exits 3 on incompatibility, so the agent knows
+immediately if the SoC config must change.
+
+The dry-run and check sequence is the board porting safety net. `mb check`
+validates the JSON against the current SoC config and exits with a non-zero
+code if they are incompatible. `mb select --dry-run` shows the generated
+artifacts and overlay without mutating the workspace. Only after both pass does
+the agent run `mb select` for real. This sequence prevents a malformed board
+spec from corrupting the working configuration.
+
+## Step 5: SKiDL design (custom boards only)
+
+```bash
+g6lc-build mb create <id>      # scaffold design.py
+g6lc-build mb design <id>      # offline, cache-first
+g6lc-build mb design <id> --online --fix
+g6lc-build mb expand <id>
+g6lc-build mb test <id>
+```
+
+The agent iterates on `erc.py` reports. It may call the pcbparts MCP tools
+(either through `g6lc-build mb parts` or directly via `corev-mb/lib/`) to find
+parts and confirm pinouts.
+
+The SKiDL design loop is the equivalent of writing and compiling the
+schematic. The agent starts with a scaffolded `design.py`, runs the design
+command, reads the ERC report, fixes errors, and re-runs. The `--online` flag
+allows the agent to query pcbparts.dev for real-time stock and pinout data;
+the default offline mode uses cached or stub data for reproducibility. This
+iterative loop continues until the netlist is clean and the BOM is complete.
+
+## Step 6: Documentation and contract
+
+The agent writes or updates:
+
+- `AGENTS-mb-<id>.md` — the per-board contract.
+- `corev-mb/architecture/<id>/README.md` — non-compiled development notes.
+- `AGENTS-dts-validation.md` — if the board exposes new device-tree nodes.
+- This docs site (`docs/website/pages/corev-mb/`) if a new board class needs
+  explanation.
+
+Documentation is not an afterthought in board porting; it is the contract that
+future maintainers and automated agents will read. The per-board
+`AGENTS-mb-<id>.md` explains the design decisions and known limitations. The
+`architecture/<id>/README.md` captures non-compiled development notes. And the
+DTS validation file records any device-tree-visible changes. Without these
+documents, the board port exists only in generated files and will be lost when
+they are regenerated.
+
+## Step 7: Validate end-to-end
+
+```bash
+g6lc-build mb check <id>
+g6lc-build mb test <id>
+g6lc-build test --open-source   # once the toolchain is provisioned
+```
+
+## Common agent mistakes
+
+- **Editing `core/` or `corev_apu/src/` to fit a board.** Board selection
+  adapts config; it does not edit the source hierarchy.
+- **Forgetting the overlay.** `build-platform/.config.local.ts` is
+  gitignored and generated; the agent must not commit it.
+- **Mismatching `core` config.** The board's `core` field and `.config.ts`
+  `soc.coreConfig` must agree.
+- **Skipping ERC.** The SKiDL loop is not cosmetic; it catches power and pin
+  mapping errors before layout.
+
+These mistakes are common because they violate the board-layer boundary. The
+board layer is not allowed to edit the source hierarchy, and it is not allowed
+to leave the overlay or ERC unvalidated. An agent that follows the prescribed
+workflow — governance → JSON → check → select → SKiDL → docs → validate — will
+avoid all of them. The workflow is designed to catch each mistake at the step
+where it is cheapest to fix.

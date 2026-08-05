@@ -1,0 +1,6 @@
+# Pin the toolchain for this package. Contained rustup installs this channel
+# into .tools/rustup when you run `./svt.sh setup` or `.\svt.ps1 setup`.
+[toolchain]
+channel = "1.85.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

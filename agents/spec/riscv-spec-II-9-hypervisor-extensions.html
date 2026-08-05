@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Sh Hypervisor Extensions (Vol II, chapter 9)</title></head>
+<body>
+<h1>Vol II chapter 9 — Sh Hypervisor Extensions</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#shvstvecd">#shvstvecd</a> (9.1),
+<a href="../../specs/riscv-spec.html#shcounterenw">#shcounterenw</a> (9.2),
+<a href="../../specs/riscv-spec.html#shvstvala">#shvstvala</a> (9.3),
+<a href="../../specs/riscv-spec.html#shtvala">#shtvala</a> (9.4),
+<a href="../../specs/riscv-spec.html#shvsatpa">#shvsatpa</a> (9.5),
+<a href="../../specs/riscv-spec.html#shgatpa">#shgatpa</a> (9.6),
+<a href="../../specs/riscv-spec.html#sha">#sha</a> (9.7).
+Source line: <code>specs/riscv-spec.html:89115</code> (Shvstvecd).</p>
+
+<p>The Sh extensions are hypervisor-tuning add-ons: direct trap vectoring (Shvstvecd), counter-enable
+writability (Shcounterenw), trap value reporting for VS and HS modes (Shvstvala, Shtvala),
+translation-mode support for VS-mode and guest-stage satp (Shvsatpa, Shgatpa), and the augmented
+hypervisor extension (Sha). They all depend on the H extension being present and refine hypervisor
+behavior rather than introducing major new mechanisms.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Shvstvecd extension is implemented, then vstvec.MODE must be
+capable of holding the value 0 (Direct). Furthermore, when
+vstvec.MODE=Direct, vstvec.BASE must be capable of holding any valid
+four-byte-aligned address."
+(specs/riscv-spec.html:89115-89120, anchor #shvstvecd)
+
+"The Sh counter-enable writability extension (Shcounterenw) adds the
+mcounteren CSR."
+...
+"The Sh vstvala extension (Shvstvala) adds the vstval CSR."
+...
+"The Sh vsatpa extension (Shvsatpa) adds the vsatp CSR."
+(Chapter 9 anchors #shcounterenw, #shvstvala, #shtvala, #shvsatpa, #shgatpa, #sha)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module sh_hypervisor_tuning (
+  input  logic        v_i,
+  input  priv_lvl_e   priv_i,
+  output logic        direct_vector_o,
+  output logic        writable_counter_o,
+  output logic        tval_reports_v_o
+);
+  // fine-grained hypervisor behavior bits
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The H extension is not implemented in CVA6
+(<code>CVA6Cfg.RVH</code> is not enabled in shipped targets), so the VS/HS-mode CSRs and
+hypervisor-specific trap/translation logic in <code>core/csr_regfile.sv</code>,
+<code>core/cva6_mmu/</code>, and <code>core/controller.sv</code> are absent. All Sh extensions are
+therefore absent.</p>
+
+<p><strong>.dts linkage:</strong> no hypervisor DT node; <code>h</code> is not present in the
+<code>riscv,isa</code> string.</p>
+</body>
+</html>

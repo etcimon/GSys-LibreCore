@@ -41,6 +41,15 @@ module ariane_testharness #(
   output logic [31:0]                    exit_o
 );
 
+  // U6.2: physical cores; U6.1 SMT: software harts = cores × NrHarts
+  localparam int unsigned NR_CORES =
+      (CVA6Cfg.NrCores < 1) ? 1 :
+      (CVA6Cfg.NrCores > config_pkg::CVA6_MAX_CORES) ? config_pkg::CVA6_MAX_CORES :
+      CVA6Cfg.NrCores;
+  localparam int unsigned NR_HARTS_PER_CORE =
+      (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
+  // CLINT/PLIC software contexts scale with total harts (Linux DTS cpu@N count)
+  localparam int unsigned NR_HARTS = NR_CORES * NR_HARTS_PER_CORE;
   localparam [7:0] hart_id = '0;
 
   // RVFI
@@ -511,11 +520,16 @@ module ariane_testharness #(
     '{ idx: ariane_soc::DRAM,     start_addr: ariane_soc::DRAMBase,     end_addr: ariane_soc::DRAMBase + ariane_soc::DRAMLength         }
   };
 
+  // Multi-core + L2 miss-fill needs multi-outstanding on the xbar demux.
+  // Max*=1 (legacy single-core) silently stalls AR when an ID is still
+  // occupied on another master port or the ID counter is full — seen as L2
+  // stuck in S_MISS_AR with axi2mem IDLE and demux ar_valid=0 (OpenSBI hang
+  // at 0x80000080). Match hub OT depth (4) with headroom for L2 line fills.
   localparam axi_pkg::xbar_cfg_t AXI_XBAR_CFG = '{
     NoSlvPorts: unsigned'(ariane_soc::NrSlaves),
     NoMstPorts: unsigned'(ariane_soc::NB_PERIPHERALS),
-    MaxMstTrans: unsigned'(1), // Probably requires update
-    MaxSlvTrans: unsigned'(1), // Probably requires update
+    MaxMstTrans: unsigned'(8),
+    MaxSlvTrans: unsigned'(8),
     FallThrough: 1'b0,
     LatencyMode: axi_pkg::NO_LATENCY,
     AxiIdWidthSlvPorts: unsigned'(ariane_axi_soc::IdWidth),
@@ -542,10 +556,11 @@ module ariane_testharness #(
   );
 
   // ---------------
-  // CLINT
+  // CLINT (scaled to total software harts = NR_CORES × NrHarts)
   // ---------------
-  logic ipi;
-  logic timer_irq;
+  logic [NR_HARTS-1:0] ipi;
+  logic [NR_HARTS-1:0] timer_irq;
+  logic [63:0] clint_mtime;
 
   ariane_axi_soc::req_slv_t  axi_clint_req;
   ariane_axi_soc::resp_slv_t axi_clint_resp;
@@ -555,7 +570,7 @@ module ariane_testharness #(
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
     .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
     .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
-    .NR_CORES       ( 1                            ),
+    .NR_CORES       ( NR_HARTS                     ), // one MSIP/MTIMECMP per mhartid
     .axi_req_t      ( ariane_axi_soc::req_slv_t    ),
     .axi_resp_t     ( ariane_axi_soc::resp_slv_t   )
   ) i_clint (
@@ -566,7 +581,8 @@ module ariane_testharness #(
     .axi_resp_o  ( axi_clint_resp ),
     .rtc_i       ( rtc_i          ),
     .timer_irq_o ( timer_irq      ),
-    .ipi_o       ( ipi            )
+    .ipi_o       ( ipi            ),
+    .mtime_o     ( clint_mtime    )
   );
 
   `AXI_ASSIGN_TO_REQ(axi_clint_req, master[ariane_soc::CLINT])
@@ -576,7 +592,8 @@ module ariane_testharness #(
   // Peripherals
   // ---------------
   logic tx, rx;
-  logic [1:0] irqs;
+  // Full PLIC target vector (2 × CVA6_MAX_CORES); fan-out slices NR_CORES below
+  logic [ariane_soc::NumTargets-1:0] irqs;
 
   ariane_peripherals #(
     .AxiAddrWidth ( AXI_ADDRESS_WIDTH            ),
@@ -621,8 +638,9 @@ module ariane_testharness #(
   uart_bus #(.BAUD_RATE(115200), .PARITY_EN(0)) i_uart_bus (.rx(tx), .tx(rx), .rx_en(1'b1));
 
   // ---------------
-  // Core
+  // Core / Cluster (U6.2)
   // ---------------
+  // Shared AXI toward the SoC xbar (cluster or single core + optional L2).
   ariane_axi::req_t    axi_ariane_req;
   ariane_axi::resp_t   axi_ariane_resp;
   rvfi_probes_t rvfi_probes;
@@ -631,30 +649,62 @@ module ariane_testharness #(
   rvfi_to_iti_t rvfi_to_iti;
   iti_to_encoder_t iti_to_encoder;
 
-  ariane #(
-    .CVA6Cfg              ( CVA6Cfg             ),
-    .rvfi_probes_instr_t  ( rvfi_probes_instr_t ),
-    .rvfi_probes_csr_t    ( rvfi_probes_csr_t   ),
-    .rvfi_probes_t        ( rvfi_probes_t       ),
-    .noc_req_t            ( ariane_axi::req_t   ),
-    .noc_resp_t           ( ariane_axi::resp_t  )
-  ) i_ariane (
-    .clk_i                ( clk_i               ),
-    .rst_ni               ( ndmreset_n          ),
-    .boot_addr_i          ( ariane_soc::ROMBase ), // start fetching from ROM
-    .hart_id_i            ( {56'h0, hart_id}    ),
-    .irq_i                ( irqs                ),
-    .ipi_i                ( ipi                 ),
-    .time_irq_i           ( timer_irq           ),
-    .rvfi_probes_o        ( rvfi_probes         ),
-// Disable Debug when simulating with Spike
+  // Per-core × SMT-hart IRQ: PLIC context 2*global_hart + {0=MEIP,1=SEIP}
+  // CLINT slots indexed by global mhartid = core*NrHarts + local_hart
+  logic [NR_CORES-1:0][NR_HARTS_PER_CORE-1:0][1:0] core_irqs;
+  logic [NR_CORES-1:0][NR_HARTS_PER_CORE-1:0]      core_ipi;
+  logic [NR_CORES-1:0][NR_HARTS_PER_CORE-1:0]      core_timer_irq;
+  logic [NR_CORES-1:0]                             core_debug_req;
+
+  for (genvar c = 0; c < NR_CORES; c++) begin : gen_core_irq
 `ifdef SPIKE_TANDEM
-    .debug_req_i          ( 1'b0                ),
+    assign core_debug_req[c] = 1'b0;
 `else
-    .debug_req_i          ( debug_req_core      ),
+    assign core_debug_req[c] = (c == 0) ? debug_req_core : 1'b0;
 `endif
-    .noc_req_o            ( axi_ariane_req      ),
-    .noc_resp_i           ( axi_ariane_resp     )
+    for (genvar h = 0; h < NR_HARTS_PER_CORE; h++) begin : gen_hart_irq
+      // PLIC targets: need 2 * NR_HARTS contexts (capped by NumTargets=16)
+      assign core_irqs[c][h] =
+          irqs[2*(c * NR_HARTS_PER_CORE + h) +: 2];
+      assign core_ipi[c][h]       = ipi[c * NR_HARTS_PER_CORE + h];
+      assign core_timer_irq[c][h] = timer_irq[c * NR_HARTS_PER_CORE + h];
+    end
+  end
+
+  // Always use the cluster wrapper: N=1 is identity (no hub), N>1 is coherent.
+  // L2 is owned by the cluster when L2En (avoids double-instantiation).
+  g6lc_cluster #(
+    .CVA6Cfg        ( CVA6Cfg             ),
+    .NR_CORES       ( NR_CORES            ),
+    .L2_ENABLE      ( CVA6Cfg.L2En        ),
+    .IDENTITY_FAST  ( 1'b1                ),
+    // Inclusive L1 (+ L2 when L3En) back-inval on LLC victim — stream plane
+    // × multicore coherence for U6.2 / L3 hierarchy.
+    .INCLUSIVE_L3   ( CVA6Cfg.L3En        ),
+    .AXI_ADDR_WIDTH ( ariane_axi::AddrWidth ),
+    .AXI_DATA_WIDTH ( ariane_axi::DataWidth ),
+    .AXI_ID_WIDTH   ( ariane_axi::IdWidth   ),
+    .AXI_USER_WIDTH ( ariane_axi::UserWidth ),
+    .axi_req_t      ( ariane_axi::req_t   ),
+    .axi_resp_t     ( ariane_axi::resp_t  ),
+    .rvfi_probes_t  ( rvfi_probes_t       )
+  ) i_cluster (
+    .clk_i          ( clk_i               ),
+    .rst_ni         ( ndmreset_n          ),
+    .boot_addr_i    ( ariane_soc::ROMBase[CVA6Cfg.VLEN-1:0] ),
+    .irq_i          ( core_irqs           ),
+    .ipi_i          ( core_ipi            ),
+    .time_irq_i     ( core_timer_irq      ),
+    .rtc_time_i     ( clint_mtime         ),
+    .debug_req_i    ( core_debug_req      ),
+    .mem_req_o      ( axi_ariane_req      ),
+    .mem_resp_i     ( axi_ariane_resp     ),
+    .rvfi_probes_o  ( rvfi_probes         ),
+    .l2_miss_o      (                     ),
+    .l3_hit_o       (                     ),
+    .l3_miss_o      (                     ),
+    .pf_issue_o     (                     ),
+    .pf_train_o     (                     )
   );
 
   `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)
@@ -700,6 +750,13 @@ module ariane_testharness #(
     logic [te_pkg::P_LEN-1:0] packet_length;
     logic [te_pkg::PAYLOAD_LEN-1:0] packet_payload;
 
+    logic                           encap_valid;
+    encap_pkg::encap_fifo_entry_s   encap_fifo_entry_i;
+    encap_pkg::encap_fifo_entry_s   encap_fifo_entry_o;
+    logic                           encap_fifo_full;
+    logic                           encap_fifo_empty;
+    logic                           encap_fifo_pop;
+
     rv_tracer #(
         .N(1),
         .ONLY_BRANCHES(1)
@@ -717,7 +774,9 @@ module ariane_testharness #(
         .time_i              (iti_to_encoder.cycles),
         .tvec_i              ('0),
         .epc_i               ('0),
-        .encapsulator_ready_i('1),
+        // Backpressure when the TB encapsulator FIFO is full (dense CF streams
+        // used to $stop on fifo_v3 full_write with ready hardwired to 1).
+        .encapsulator_ready_i(~encap_fifo_full),
         .paddr_i             ('0),
         .pwrite_i            ('0),
         .psel_i              ('0),
@@ -731,13 +790,6 @@ module ariane_testharness #(
         .pready_o            (),
         .prdata_o            ()
     );
-
-    logic                           encap_valid;
-    encap_pkg::encap_fifo_entry_s   encap_fifo_entry_i;
-    encap_pkg::encap_fifo_entry_s   encap_fifo_entry_o;
-    logic                           encap_fifo_full;
-    logic                           encap_fifo_empty;
-    logic                           encap_fifo_pop;
 
     encapsulator i_encapsulator (
         .clk_i              (clk_i),
@@ -765,7 +817,7 @@ module ariane_testharness #(
         .empty_o   (encap_fifo_empty),
         .usage_o   (),
         .data_i    (encap_fifo_entry_i),
-        .push_i    (encap_valid),
+        .push_i    (encap_valid && !encap_fifo_full),
         .data_o    (encap_fifo_entry_o),
         .pop_i     (encap_fifo_pop)
     );

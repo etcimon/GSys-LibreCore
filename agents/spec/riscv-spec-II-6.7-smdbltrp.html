@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Smdbltrp Double Trap (Vol II, 6.7)</title></head>
+<body>
+<h1>Vol II &sect;6.7 — Smdbltrp Double Trap Extension</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#smdbltrp">specs/riscv-spec.html#smdbltrp</a>.
+Source line: <code>specs/riscv-spec.html:85529</code>. <strong>Domain:</strong> SPEC.</p>
+
+<p>Smdbltrp defines the behavior when a trap occurs while the hart is already handling a previous trap
+in the same privilege mode. It introduces a double-trap state and recovery mechanism, preventing
+unrecoverable state corruption. The implementation must detect the condition and enter a safe debug
+or reset path.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Smdbltrp extension addresses a double trap in M-mode. When the
+Smrnmi extension is implemented, it enables invocation of the RNMI
+handler on a double trap in M-mode to handle the critical error. If the
+Smrnmi extension is not implemented or if a double trap occurs during
+the RNMI handler's execution, this extension helps transition the hart
+to a critical error state and enables signaling the critical error to
+the platform."
+(specs/riscv-spec.html:85529-85537, anchor #smdbltrp)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module double_trap (
+  input  logic        trap_i,
+  input  priv_lvl_e   priv_i,
+  input  logic        in_trap_handler_i,
+  output logic        double_trap_o,
+  output logic [XLEN-1:0] vector_o
+);
+  // if already in trap handler for this mode, take double-trap vector
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. There is no double-trap detection state machine in
+<code>core/controller.sv</code> and no <code>mstatus.MDT</code> or <code>mcause</code> critical-error
+reporting. A second trap taken during M-mode trap handling would overwrite the M-mode trap CSRs in the
+normal update path.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Smdbltrp would be advertised in the
+<code>riscv,isa</code> string if implemented.</p>
+</body>
+</html>

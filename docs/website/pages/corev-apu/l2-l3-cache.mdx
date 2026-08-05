@@ -1,0 +1,99 @@
+---
+title: L2 / L3 Cache
+description: Memory-side L2/L3 hierarchy and server prefetcher in corev_apu — config-gated, RVWMO-safe.
+---
+
+# L2 / L3 Cache
+
+GSys LibreCore places **L2 and optional L3 below L1**, on the **memory-side / APU**
+path. This is an integration product, not an L1 rewrite. L1 remains in
+`core/cache_subsystem/`; L2/L3 live under `corev_apu/l2_cache/` and
+`corev_apu/l3_cache/`.
+
+Playbook: `agents/guides/AGENTS-l2l3-cache.md`.  
+Scaffold status: `architecture/l2-l3-cache/README.md`.
+
+## Hierarchy
+
+```
+core L1(s)
+    → coherence hub (multi-core)
+        → L2 (g6lc_l2_top)
+            → L3 (optional; wraps L2 engine)
+                → server prefetcher (optional)
+                    → DRAM / AXI memory
+```
+
+| Level | Module | Config (concept) |
+|---|---|---|
+| L2 | `g6lc_l2_top` | `L2En`, size / assoc / MSHR / banks |
+| L3 | `g6lc_l3_top` | `L3En` (requires `L2En`) |
+| Prefetch | `g6lc_server_prefetcher` | `ServerPrefetchEn`, streams, distance |
+
+Default on many packages: **`L2En=0`** (off). Server / OoO packages may auto-enable.
+
+## Product features (L2 done)
+
+- MSHR line merge  
+- Banked data arrays via **`tc_sram`**  
+- Non-cacheable bypass for MMIO / PMA  
+- Write-through + read-allocate policies as configured  
+- Parallel tags  
+
+## L3 + server prefetcher
+
+L3 reuses L2 engine structure at the next level. The **server prefetcher** sits
+on the L3→DRAM (or L2→DRAM) AXI edge:
+
+1. Next-line at configurable distance on demand miss  
+2. Multi-stream stride training  
+3. **Demand always wins** arbitration; prefetch only when AR is idle  
+
+Complements L1 HPDCACHE stride (`HwPrefetchEn`): L1 for tight loops, LLC edge
+for server streams (packet buffers, page copy, guest memory).
+
+## Inclusive hierarchy (config-gated)
+
+When enabled, victim / invalidation paths keep L1 (and L2 tags) coherent with
+L3/L2 policy — see `g6lc_l3_inclusive_inv` and L2 tag match-inval ports in the
+architecture README. Treat inclusive mode as a **product option** with its own
+verification cost.
+
+## Invariants
+
+- **RVWMO** preserved  
+- **PMA** — MMIO uncached via NC bypass  
+- **CBO** end-to-end when Zicbo* enabled  
+- Prefer **64 B lines** with `Zic64b` for software alignment  
+
+## DTS / software
+
+Describe next-level caches in device tree when software or firmware must know
+geometry. Notes: `architecture/l2-l3-cache/dts-l3-prefetch.md`. Keep
+`AGENTS-dts-validation.md` in sync when nodes change.
+
+## Verification
+
+| Suite / path | Focus |
+|---|---|
+| `ooo-l3-tests` | Stream + L2/L3 with OoO server target |
+| `verif/tests/custom/l3/l3_stride_stream.S` | Stride / stream stress |
+| Multi-core stream | `mc-stream-tests` (when catalogued) |
+
+```bash
+g6lc-build verify --target g6lc64_ooo_server
+g6lc-build test --suite ooo-l3-tests
+```
+
+## PMU
+
+Cluster → core PMU group 2 is wired for cache hierarchy events (see
+architecture README). Use counters when debugging thrash vs DRAM bandwidth.
+
+## Related
+
+- [Server Profiles](../core/server-profiles)
+- [Out-of-Order](../core/out-of-order)
+- [SMT](../core/smt) — dual-hart MLP benefits from L2 MSHR  
+- Controllers: [Controllers & PHY](./controllers)  
+- Spec: memory model / PMA / CMO under `agents/guides/AGENTS-l2l3-cache.md`

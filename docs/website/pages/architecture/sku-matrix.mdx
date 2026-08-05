@@ -1,0 +1,98 @@
+---
+title: Product SKU Matrix
+description: Compare GSys LibreCore config packages — issue width, OoO, SMT, cores, L2/L3, H/Sstc, RVV, and typical use.
+---
+
+# Product SKU Matrix
+
+A **SKU** here is a `core/include/*_config_pkg.sv` (plus the build-platform
+`soc.coreConfig` that selects it). Features are opt-in; empty cells mean
+“typically off / not the product intent,” not “impossible to set by hand.”
+
+Re-check package sources before tape-out claims — this matrix is a **navigation
+aid**, not a formal datasheet.
+
+## 64-bit application / server family
+
+| Package | Issue | OoO | SMT | Cores | L2/L3 | H+Sstc | RVV | Typical use |
+|---|---|---|---|---|---|---|---|---|
+| `cv64a6_imafdc_sv39` | 1–2 | Off | 1 | 1 | Off | Off | Off | Classic Linux-class identity |
+| `cv64a6_imafdc_sv39_hpdcache` | 1–2 | Off | 1 | 1 | Off | Off | Off | HPDCACHE L1 variant |
+| `cv64a6_imafdc_sv39_wb` | 1–2 | Off | 1 | 1 | Off | Off | Off | Write-back L1 variant |
+| `cv64a6_imafdch_sv39` | 1–2 | Off | 1 | 1 | Off | H path | Off | Hypervisor-oriented without full server math |
+| `cv64a6_spec_deep` | ↑ | Off* | 1 | 1 | * | * | Off | Deep speculation knobs (`DeepSpecEn`) |
+| `g6lc64_smt2` | 1–2 | Off | **2** | 1 | Often on | Off | Off | Dual-thread bring-up |
+| `g6lc64_ooo` | **2** | **On** | 1 | 1 | Optional | Off | Off | Dual-issue OoO lite |
+| `g6lc64_ooo_server` | **4** | **On** | ≤2 | **2+** | **L2/L3 auto** | Check pkg | Off | Fat server OoO + multicore |
+| `g6lc64_server_math` | **2** | Off | 1 | **2** | **L2 auto** | **On** | Off | KVM/math host C-light |
+| `g6lc64_server_math_v` | **2** | Off | 1 | **2** | **L2 auto** | **On** | **On** | Same + Ara/RVV |
+| `cv64a6_imafdcv_sv39` | 1–2 | Off | 1 | 1 | Off | Off | **On** | Legacy vector-oriented |
+
+\*Deep-spec package details: open the package; not every deep-spec knob implies OoO.
+
+## 32-bit / FPGA-oriented (short list)
+
+| Package | Typical use |
+|---|---|
+| `cv32a65x` | Production 32-bit application TRL path (OpenHW book) |
+| `cv32a60x` | Leaner 32-bit profile |
+| `cv32a6_imac_sv32` / `*_fpga` | Embedded / FPGA evaluation |
+
+These remain first-class for OpenHW manuals; most GSys LibreCore upgrade pages focus
+on 64-bit server-class SKUs.
+
+## Capability → page
+
+| Capability | Product page |
+|---|---|
+| Frontend / prediction | [Frontend Extensions](../core/frontend-extensions) |
+| Multi-issue | [Multi-Issue](../core/multi-issue) |
+| Out-of-order | [Out-of-Order](../core/out-of-order) |
+| SMT | [SMT](../core/smt) |
+| Multi-core | [Multi-Core Cluster](../corev-apu/multi-core) |
+| L2/L3 | [L2 / L3 Cache](../corev-apu/l2-l3-cache) |
+| Hypervisor / Sstc | [Hypervisor & Sstc](../core/hypervisor) |
+| Vector / Ara | [Vector (RVV) & Ara](../core/vector) |
+| Server composition | [Server Profiles](../core/server-profiles) |
+| Roadmap | [Upgrade Program](./upgrade-program) |
+
+## How to select a SKU
+
+```ts
+// .config.ts
+export default defineBuildConfig({
+  soc: { coreConfig: 'g6lc64_server_math' },
+})
+```
+
+```bash
+g6lc-build config
+g6lc-build verify --lint --target g6lc64_server_math
+```
+
+Board overlays (`g6lc-build mb select`) may pin `soc.*` — prefer board contracts
+over fighting the overlay.
+
+## Verification cost ladder
+
+| SKU class | Default verify | Optional suites |
+|---|---|---|
+| Classic imafdc | In default targets | Open-source smoke |
+| SMT2 | Opt-in target | `smt-linux-*` |
+| OoO lite / server | Opt-in target | `ooo-l3-tests`, `mc-*` |
+| Server math | Opt-in target | `server-math-tests` |
+| Server math + V | Opt-in + Ara flist | `testlist_ara_vector`, live Ara env |
+
+Optional suites are often excluded from default CI for **runtime**, not maturity.
+
+## Structural timing
+
+Wider issue, OoO, and multi-core hubs raise FO4 risk. Use
+[`g6lc-build timings`](../build-platform/timings) for early structural feedback;
+STA remains sign-off.
+
+## Related
+
+- Package sources: `core/include/*_config_pkg.sv`  
+- Inference: `core/include/build_config_pkg.sv`  
+- Live RTL summary: `architecture/README.md`  

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Ssu64xl UXLEN=64 Support (Vol II, 8.2)</title></head>
+<body>
+<h1>Vol II &sect;8.2 — Ssu64xl Extension for UXLEN=64 Support, Version 1.0</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ssu64xl">specs/riscv-spec.html#ssu64xl</a>.
+Source line: <code>specs/riscv-spec.html:88765</code>. <strong>Domain:</strong> —.</p>
+
+<p>Ssu64xl allows U-mode to use XLEN=64 on a core that supports variable XLEN, so user software runs
+as a 64-bit application. It is relevant for systems with dynamic XLEN switching (e.g. RV32/RV64
+hybrids) and requires the CSR width and register file to support 64-bit U-mode.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Ssu64xl extension is implemented, then sstatus.UXL must be
+capable of holding the value 2 (i.e., UXLEN=64 must be supported)."
+(specs/riscv-spec.html:88765-88768, anchor #ssu64xl)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module ssu64xl (
+  input  priv_lvl_e   priv_i,
+  input  logic [1:0]  sxl_uxl_i,
+  output logic [XLEN-1:0] effective_xlen_o
+);
+  // UXL field in mstatus/sstatus selects 32/64-bit mode for U-mode
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. CVA6 targets are fixed XLEN: the <code>CVA6Cfg.XLEN</code>
+and <code>VLEN</code> are constants per target package in <code>core/include/cv*a6*_config_pkg.sv</code>; there
+is no dynamic UXL switching via <code>sstatus.UXL</code> in <code>core/csr_regfile.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> the DT <code>riscv,isa</code> string is fixed per target; no
+<code>ssu64xl</code> extension is advertised.</p>
+</body>
+</html>

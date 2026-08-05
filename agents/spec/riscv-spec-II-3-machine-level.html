@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Machine-Level ISA (Vol II, 3.1-3.3)</title></head>
+<body>
+<h1>Vol II &sect;3.1-3.3 — Machine-Level ISA</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#_machine_level_csrs">#_machine_level_csrs</a> (3.1),
+<a href="../../specs/riscv-spec.html#_machine_mode_privileged_instructions">#_machine_mode_privileged_instructions</a> (3.3),
+<a href="../../specs/riscv-spec.html#_multi_regional_address_translation_and_protection_catalog_2">#_multi_regional_address_translation_and_protection_catalog_2</a> (3.3/3.6/3.7).
+Source lines: <code>specs/riscv-spec.html:71698</code> (3.1), <code>:75595</code> (3.3).</p>
+
+<p>This group covers M-mode CSRs (<code>mstatus</code>, <code>misa</code>, <code>mie</code>,
+<code>mip</code>, <code>mtvec</code>, <code>mscratch</code>, <code>mepc</code>, <code>mcause</code>,
+<code>mtval</code>, <code>mconfigptr</code>, <code>mvendorid</code>, etc.), M-mode instructions
+(ECALL/EBREAK/MRET/WFI), and the multi-region address-translation/protection catalog (PMA/PMP). It is
+the foundation of the privileged architecture and must be implemented before any S-mode or U-mode
+features.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"In addition to the machine-level CSRs described in this section,
+M-mode code can access all CSRs at lower privilege levels."
+...
+"The ECALL instruction is used to make a request to the supporting
+execution environment. When executed in U-mode, S-mode, or M-mode, it
+generates an environment-call-from-U-mode exception. The MRET
+instruction is used to return from a trap taken in M-mode."
+(specs/riscv-spec.html:71698-71701 anchor #_machine_level_csrs;
+:75595-75610 anchor #_machine_mode_privileged_instructions)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module machine_mode (
+  input  logic        ecall_i, ebreak_i, mret_i, wfi_i,
+  input  logic        irq_i,
+  output logic [XLEN-1:0] mstatus_o, mepc_o, mcause_o, mtvec_o,
+  output logic        take_trap_o
+);
+  // trap entry/return; interrupt enable; WFI sleep
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented. M-mode CSRs are read/written in
+<code>core/csr_regfile.sv</code> (e.g. <code>mstatus</code>, <code>misa</code>, <code>mie</code>,
+<code>mip</code>, <code>mtvec</code>, <code>mepc</code>, <code>mcause</code>, <code>mtval</code>,
+PMP CSRs). ECALL, EBREAK, MRET, and WFI are decoded in <code>core/decoder.sv</code> and sequenced by
+<code>core/controller.sv</code>. The multi-region address-translation/protection catalog is
+implemented by PMA rules in <code>core/include/config_pkg.sv:472-502</code> and PMP in
+<code>core/pmp/</code> (see <code>agents/spec/riscv-spec-II-3.6-pma.html</code> and
+<code>riscv-spec-II-3.7-pmp.html</code>).</p>
+
+<p><strong>.dts linkage:</strong> the CPU node carries <code>riscv,isa</code> and <code>mmu-type</code>
+derived from <code>misa</code>/<code>mstatus</code> and the paging config; <code>memory@</code> nodes
+must align with PMA/PMP regions.</p>
+</body>
+</html>

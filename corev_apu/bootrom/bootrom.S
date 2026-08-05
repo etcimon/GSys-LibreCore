@@ -5,9 +5,14 @@ _start:
 # li s0, DRAM_BASE creates instructions not compatible with both
 # versions. That's why we have replaced it by li and slli instructions
 # to generates code compatible with both versions.
+#
+# Multi-core: only hart 0 jumps to DRAM. Secondary harts park in WFI so they
+# do not compete for I$ fills through the coherence hub (dual simultaneous
+# bootrom→DRAM fetch was hanging Verilator bare-metal N>1).
+  csrr a0, mhartid
+  bnez a0, _hang
   li s0, 1
   slli s0, s0, 31
-  csrr a0, mhartid
   la a1, _dtb
   jr s0
 

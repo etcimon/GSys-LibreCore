@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # Copyright 2021 Thales DIS design services SAS
 #
 # Licensed under the Solderpad Hardware Licence, Version 2.0 (the "License");
@@ -6,42 +7,61 @@
 # You may obtain a copy of the License at https://solderpad.org/licenses/
 #
 # Original Author: Jean-Roch COULON - Thales
+#
+# Smoke suite for cv32a65x. Executed (not sourced) — fail hard on errors.
 
-# where are the tools
-if ! [ -n "$RISCV" ]; then
-  echo "Error: RISCV variable undefined"
-  return
+# Avoid -u: legacy install-*.sh expand optional env vars unbound.
+set -eo pipefail
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "Error: required tool '$1' not found on PATH" >&2
+    exit 127
+  }
+}
+need dirname
+need make
+need python3
+need sed
+need rm
+if ! make --version 2>/dev/null | head -1 | grep -qi "GNU Make"; then
+  echo "Error: 'make' is not GNU Make (got: $(command -v make))" >&2
+  exit 127
 fi
 
-if ! [ -n "$DV_SIMULATORS" ]; then
+if [ -z "${RISCV:-}" ]; then
+  echo "Error: RISCV variable undefined"
+  exit 1
+fi
+
+if [ -z "${DV_SIMULATORS:-}" ]; then
   DV_SIMULATORS=vcs-testharness,spike
 fi
 
-# install the required tools
 if [[ "$DV_SIMULATORS" == *"veri-testharness"* ]]; then
+  # shellcheck source=/dev/null
   source ./verif/regress/install-verilator.sh
 fi
+# shellcheck source=/dev/null
 source ./verif/regress/install-spike.sh
-
-# setup sim env
+# shellcheck source=/dev/null
 source ./verif/sim/setup-env.sh
 
-echo "$SPIKE_INSTALL_DIR$"
+echo "SPIKE_INSTALL_DIR=${SPIKE_INSTALL_DIR:-}"
 
-if ! [ -n "$UVM_VERBOSITY" ]; then
-    export UVM_VERBOSITY=UVM_NONE
+if [ -z "${UVM_VERBOSITY:-}" ]; then
+  export UVM_VERBOSITY=UVM_NONE
 fi
 
-export DV_OPTS="$DV_OPTS --issrun_opts=+debug_disable=1+UVM_VERBOSITY=$UVM_VERBOSITY"
+export DV_OPTS="${DV_OPTS:-} --issrun_opts=+debug_disable=1+UVM_VERBOSITY=$UVM_VERBOSITY"
 
 CC_OPTS="-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -g ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common -lgcc"
-
 
 cd verif/sim/
 
 make -C ../.. clean
 make clean_all
-python3 cva6.py --c_tests ../tests/custom/hello_world/hello_world.c --iss_yaml cva6.yaml --target cv32a65x --iss=$DV_SIMULATORS --linker=../../config/gen_from_riscv_config/cv32a65x/linker/link.ld --gcc_opts="$CC_OPTS" $DV_OPTS
+python3 cva6.py --c_tests ../tests/custom/hello_world/hello_world.c --iss_yaml cva6.yaml --target cv32a65x --iss="$DV_SIMULATORS" --linker=../../config/gen_from_riscv_config/cv32a65x/linker/link.ld --gcc_opts="$CC_OPTS" $DV_OPTS
 make -C ../.. clean
 make clean_all
 

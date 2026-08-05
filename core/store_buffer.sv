@@ -24,8 +24,9 @@ module store_buffer
 ) (
     input logic clk_i,  // Clock
     input logic rst_ni,  // Asynchronous reset active low
-    input logic flush_i,  // if we flush we need to pause the transactions on the memory
-                          // otherwise we will run in a deadlock with the memory arbiter
+    input logic flush_i,  // full flush: drop all speculative stores
+    // FSE S4: younger-only cancel (SB cancelled TIDs); does not touch commit queue
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
     input logic stall_st_pending_i,  // Stall issuing non-speculative request
     output logic         no_st_pending_o, // non-speculative queue is empty (e.g.: everything is committed to the memory hierarchy)
     output logic         store_buffer_empty_o, // there is no store pending in neither the speculative unit or the non-speculative queue
@@ -42,6 +43,7 @@ module store_buffer
     input  logic         valid_without_flush_i, // just tell if the address is valid which we are current putting and do not take any further action
 
     input  logic [CVA6Cfg.PLEN-1:0]  paddr_i,         // physical address of store which needs to be placed in the queue
+    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_i, // scoreboard tid (FSE S4 younger cancel)
     output logic [CVA6Cfg.PLEN-1:0] rvfi_mem_paddr_o,
     input logic [CVA6Cfg.XLEN-1:0] data_i,  // data which is placed in the queue
     input logic [(CVA6Cfg.XLEN/8)-1:0] be_i,  // byte enable in
@@ -53,6 +55,28 @@ module store_buffer
     output dcache_req_i_t req_port_o
 );
 
+  // FSE S1: speculative/commit queue depths.
+  // DeepSpecEn=0 → legacy ariane_pkg::DEPTH_SPEC/COMMIT (4) for netlist identity.
+  // DeepSpecEn=1 → next power-of-two of MaxOutstandingStores (capped 16).
+  function automatic int unsigned fse_next_pow2(input int unsigned n);
+    if (n <= 1) return 1;
+    if (n <= 2) return 2;
+    if (n <= 4) return 4;
+    if (n <= 8) return 8;
+    if (n <= 16) return 16;
+    return 32;
+  endfunction
+  localparam int unsigned DEPTH_SPEC = CVA6Cfg.DeepSpecEn
+      ? fse_next_pow2(
+            (CVA6Cfg.MaxOutstandingStores < 4) ? 4 :
+            (CVA6Cfg.MaxOutstandingStores > 16) ? 16 : CVA6Cfg.MaxOutstandingStores)
+      : int'(ariane_pkg::DEPTH_SPEC);
+  localparam int unsigned DEPTH_COMMIT = CVA6Cfg.DeepSpecEn
+      ? fse_next_pow2(
+            (CVA6Cfg.MaxOutstandingStores < 4) ? 4 :
+            (CVA6Cfg.MaxOutstandingStores > 8) ? 8 : CVA6Cfg.MaxOutstandingStores)
+      : int'(ariane_pkg::DEPTH_COMMIT);
+
   // the store queue has two parts:
   // 1. Speculative queue
   // 2. Commit queue which is non-speculative, e.g.: the store will definitely happen.
@@ -62,6 +86,7 @@ module store_buffer
     logic [(CVA6Cfg.XLEN/8)-1:0] be;
     logic [1:0] data_size;
     cbo_t cbo_op;
+    logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;  // FSE S4: for younger-only cancel
     logic valid;  // this entry is valid, we need this for checking if the address offset matches
     logic wait_rvalid;  // need to wait for rvalid...
   }
@@ -94,13 +119,15 @@ module store_buffer
     speculative_queue_n         = speculative_queue_q;
     // LSU interface
     // we are ready to accept a new entry and the input data is valid
-    if (valid_i) begin
+    // (skip if this TID is already cancelled — FSE S4)
+    if (valid_i && !cancelled_mask_i[trans_id_i]) begin
       speculative_queue_n[speculative_write_pointer_q].address = paddr_i;
       speculative_queue_n[speculative_write_pointer_q].data = data_i;
       speculative_queue_n[speculative_write_pointer_q].be = be_i;
       speculative_queue_n[speculative_write_pointer_q].data_size = data_size_i;
       speculative_queue_n[speculative_write_pointer_q].valid = 1'b1;
       speculative_queue_n[speculative_write_pointer_q].cbo_op = cbo_op_i;
+      speculative_queue_n[speculative_write_pointer_q].trans_id = trans_id_i;
       speculative_queue_n[speculative_write_pointer_q].wait_rvalid = 1'b0;
       // advance the write pointer
       speculative_write_pointer_n = speculative_write_pointer_q + 1'b1;
@@ -118,6 +145,63 @@ module store_buffer
     end
 
     speculative_status_cnt_n = speculative_status_cnt;
+
+    // FSE S4: younger-only cancel — keep older stores, drop cancelled TIDs.
+    // Snapshot then rewrite dense [0 .. live) so pointers match status_cnt.
+    if (|cancelled_mask_i && !flush_i) begin
+      automatic logic [$clog2(DEPTH_SPEC)-1:0] src, dst;
+      automatic logic [$clog2(DEPTH_SPEC):0] live, old_cnt;
+      automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.PLEN-1:0] a_addr;
+      automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] a_data;
+      automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] a_be;
+      automatic logic [DEPTH_SPEC-1:0][1:0] a_sz;
+      automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] a_tid;
+      automatic logic [DEPTH_SPEC-1:0] a_wr;
+      automatic cbo_t a_cbo[DEPTH_SPEC];
+      old_cnt = speculative_status_cnt_n;
+      live = '0;
+      dst  = '0;
+      a_addr = '0;
+      a_data = '0;
+      a_be   = '0;
+      a_sz   = '0;
+      a_tid  = '0;
+      a_wr   = '0;
+      for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
+      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+        if (k < unsigned'(old_cnt)) begin
+          src = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
+          if (speculative_queue_n[src].valid &&
+              !cancelled_mask_i[speculative_queue_n[src].trans_id]) begin
+            a_addr[dst] = speculative_queue_n[src].address;
+            a_data[dst] = speculative_queue_n[src].data;
+            a_be[dst]   = speculative_queue_n[src].be;
+            a_sz[dst]   = speculative_queue_n[src].data_size;
+            a_cbo[dst]  = speculative_queue_n[src].cbo_op;
+            a_tid[dst]  = speculative_queue_n[src].trans_id;
+            a_wr[dst]   = speculative_queue_n[src].wait_rvalid;
+            dst  = dst + 1'b1;
+            live = live + 1'b1;
+          end
+        end
+      end
+      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+        speculative_queue_n[k].valid = 1'b0;
+        if (k < unsigned'(live)) begin
+          speculative_queue_n[k].address     = a_addr[k];
+          speculative_queue_n[k].data        = a_data[k];
+          speculative_queue_n[k].be          = a_be[k];
+          speculative_queue_n[k].data_size   = a_sz[k];
+          speculative_queue_n[k].cbo_op      = a_cbo[k];
+          speculative_queue_n[k].trans_id    = a_tid[k];
+          speculative_queue_n[k].wait_rvalid = a_wr[k];
+          speculative_queue_n[k].valid       = 1'b1;
+        end
+      end
+      speculative_read_pointer_n  = '0;
+      speculative_write_pointer_n = dst;
+      speculative_status_cnt_n    = live;
+    end
 
     // when we flush evict the speculative stores
     if (flush_i) begin

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Hypervisor Privilege Modes (Vol II, 5.1)</title></head>
+<body>
+<h1>Vol II &sect;5.1 — Privilege Modes</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#_privilege_modes">specs/riscv-spec.html#_privilege_modes</a>.
+Source line: <code>specs/riscv-spec.html:79829</code>. <strong>Domain:</strong> —.</p>
+
+<p>The H extension adds two new operating modes: VS (virtual supervisor) and VU (virtual user), plus
+the HS-mode hypervisor. These modes let a hypervisor run guest OSes with their own S/U privilege
+levels while trapping sensitive operations to the hypervisor. Correct implementation requires a new
+privilege encoding, virtual interrupt handling, and two-stage translation.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The current virtualization mode, denoted V, indicates whether the hart
+is currently executing in a guest. When V=1, the hart is either in
+virtual S-mode (VS-mode), or in virtual U-mode (VU-mode) atop a guest OS
+running in VS-mode. When V=0, the hart is either in M-mode, in HS-mode,
+or in U-mode atop an OS running in HS-mode."
+(specs/riscv-spec.html:79829-79839, anchor #_privilege_modes)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module hypervisor_modes (
+  input  priv_lvl_e     priv_i,           // M/HS/S/U/VS/VU
+  input  logic          v_i,              // virtualization mode
+  output logic [1:0]    effective_priv_o
+);
+  // translate current mode to effective privilege for CSR/trap/translation
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The privilege enum in <code>core/include/riscv_pkg.sv</code>
+defines only M/S/U; there is no V/HS/VS/VU encoding and the <code>v</code> bit is not present in
+<code>mstatus</code>/<code>hstatus</code> in <code>core/csr_regfile.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> no hypervisor DT node; <code>h</code> is not present in the
+<code>riscv,isa</code> string.</p>
+</body>
+</html>

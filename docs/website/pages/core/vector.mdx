@@ -1,0 +1,92 @@
+---
+title: Vector (RVV) & Ara
+description: RVV 1.0 / Ara accelerator attach on GSys LibreCore — packages, flist, DTS, and open software items.
+---
+
+# Vector (RVV) & Ara
+
+AVX-like memcpy/memset and bulk math map to **RISC-V Vector (RVV 1.0)** via the
+**PULP Ara** accelerator, attached at the existing **accelerator / scoreboard**
+seam — not a second execute datapath inside the classic ALU.
+
+Authority: `architecture/ara-vector-attach.md`,
+`agents/guides/AGENTS-vector.md`, vendor guide `agents/vendor/AGENTS-vendor-ara.md`.
+
+## Product status (summary)
+
+| Item | Status |
+|---|---|
+| Config scaffold (`_v` package) | Done |
+| Accelerator path in core | Pre-existing (`acc_dispatcher`, `EnableAccelerator`) |
+| Ara vendored + `Flist.ara` | Done under `vendor/ara/` |
+| SoC glue | `corev_apu/src/g6lc_ara_attach.sv` (+ AXI helpers) |
+| Lint `g6lc64_server_math_v` | Green path documented (stub vs live Ara) |
+| Directed vector tests | Landed (`testlist_ara_vector.yaml`) |
+| OpenSBI VRF save/restore + full cosim | **Open / external** |
+| Linux `CONFIG_RISCV_ISA_V` | Operator / distro ownership |
+
+## Config identity
+
+| Knob | Meaning |
+|---|---|
+| `RVV` / `CVA6ConfigVExtEn` | `misa.V`, vector decode |
+| `EnableAccelerator` | Scoreboard long-latency + dispatcher (from RVV in build_config) |
+| `CvxifEn` | **Mutually exclusive** with accelerator (`core/cva6.sv` assert) |
+
+| Package | V | CVXIF | Use |
+|---|---|---|---|
+| `g6lc64_server_math` | 0 | 1 | Server math without vector IP |
+| `g6lc64_server_math_v` | **1** | **0** | Server + RVV when Ara linked |
+| `cv64a6_imafdcv_sv39` | 1 | 0 | Legacy vector-oriented profile |
+
+Select `_v` only when the Ara flist is part of the sim/synth target.
+
+## Pipeline / SoC seam
+
+1. Decode/issue classifies vector ops as accelerator FU when RVV enabled.  
+2. `core/acc_dispatcher.sv` + scoreboard long-latency completion.  
+3. Accelerator-side cache invalidation merges with multi-core inv paths.  
+4. SoC: `g6lc_ara_attach` under `` `define CVA6_ARA_ATTACH `` (else stub).  
+5. Prefer **not** inventing an in-pipeline vector ALU.  
+
+## Operator enable
+
+```bash
+# Lint typed RVV attach path (stub Ara default):
+g6lc-build verify --lint --target g6lc64_server_math_v
+
+# Live Ara RTL (Verilator; env as documented in ara-vector-attach.md):
+#   CVA6_ARA_ATTACH=1  + verify.extraFlistsByTarget for Flist.ara
+```
+
+Flist append is opt-in via build-platform
+`verify.extraFlistsByTarget.g6lc64_server_math_v` → `vendor/ara/Flist.ara`.
+
+```bash
+g6lc-build vendor status ara    # if catalogued
+g6lc-build test --list          # ara / vector suites when present
+```
+
+## Software contract
+
+| Layer | Requirement |
+|---|---|
+| DTS | `corev_apu/bootrom/ariane-server-math-v.dts` — `v` in ISA extensions |
+| OpenSBI | VRF / context switch (see vector guide § checklist) |
+| Linux | `CONFIG_RISCV_ISA_V` + matching ISA string |
+| Directed | `v_misa_v`, `v_memcpy_*` under `verif/tests/` |
+
+## SoC-readiness
+
+- **Timing / floorplan:** vector unit as placement island; own clock-gate plan  
+- **DFT:** thread `test_en_i` / `testmode_i` through Ara wrapper  
+- **Observability:** PMU “V busy”; RVFI accelerator retire hooks as needed  
+- **Never** enable `CvxifEn` and Ara accelerator together  
+
+## Related
+
+- [Server Profiles](./server-profiles)
+- [Hypervisor & Sstc](./hypervisor) — compose after scalar host is green  
+- [SKU Matrix](../architecture/sku-matrix)
+- [Upgrade Program](../architecture/upgrade-program)
+- Controllers / vendor: `AGENTS-vendor.md`, `agents/vendor/AGENTS-vendor-ara.md`

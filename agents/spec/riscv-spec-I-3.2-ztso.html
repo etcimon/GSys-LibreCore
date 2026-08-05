@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Ztso Total Store Ordering (Vol I, 3.2)</title></head>
+<body>
+<h1>Vol I &sect;3.2 — Ztso Extension for Total Store Ordering</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:ztso">specs/riscv-spec.html#ext:ztso</a>.
+<strong>Domain:</strong> SPEC, CACHE.</p>
+
+<p>Ztso augments RVWMO with the RISC-V Total Store Ordering (RVTSO) model. RVTSO makes the following
+adjustments to RVWMO: all loads behave as if they have an acquire-RCpc annotation, all stores as if
+they have a release-RCpc annotation, and all AMOs as if they have both acquire-RCsc and release-RCsc
+annotations. Vector memory instructions also follow RVTSO at the instruction level. Implementing it
+requires that all stores become visible to all harts in a total order and that loads see stores in
+that order unless explicitly allowed otherwise. This impacts the write-buffer drain,
+store-to-load forwarding, and any cache-coherence protocol.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This section defines the Ztso extension for the RISC-V Total Store
+Ordering (RVTSO) memory consistency model. RVTSO is defined as a delta
+from RVWMO."
+...
+"RVTSO makes the following adjustments to RVWMO:
+  - All load operations behave as if they have an acquire-RCpc annotation.
+  - All store operations behave as if they have a release-RCpc annotation.
+  - All AMOs behave as if they have both acquire-RCsc and release-RCsc
+    annotations.
+  - Additionally, if the Ztso extension is implemented, then vector memory
+    instructions in the V extension and Zve* family of extensions follow
+    RVTSO at the instruction level."
+(specs/riscv-spec.html:8774-8811, anchor #ext:ztso / #norm:rvtso_adj_rvwmo)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module ztso_ordering (
+  input  logic        store_commit_i,
+  input  logic        load_i,
+  output logic        drain_wbuffer_o    // stricter store serialization
+);
+  // all stores appear in a single total order observed by all harts
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. CVA6 implements RVWMO only. No <code>RVZtso</code> configuration
+bit, no TSO annotation logic, and no store-buffer/load-forwarding serialization beyond RVWMO exists in
+the source. Enabling Ztso would require structural changes to
+<code>core/store_buffer.sv</code>, <code>core/cache_subsystem/wt_dcache_wbuffer.sv</code>, and
+<code>core/load_unit.sv</code>.</p>
+</body>
+</html>

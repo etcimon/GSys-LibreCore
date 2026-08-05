@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zicclsm Misaligned Accesses (Vol I, 4.14)</title></head>
+<body>
+<h1>Vol I &sect;4.14 — Zicclsm Extension for Main Memory Misaligned Accesses</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zicclsm">specs/riscv-spec.html#ext:zicclsm</a>.
+<strong>Domain:</strong> RAM.</p>
+
+<p>Zicclsm guarantees that misaligned loads and stores to main memory are supported without generating
+an address-misaligned exception. Without it, the implementation may trap on misaligned accesses. This
+is a main-memory attribute that interacts with the LSU and the PMA checker: if the extension is not
+present, the LSU must split or trap; if present, the memory system must handle subword/unaligned
+accesses.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Zicclsm extension is implemented, then misaligned loads and stores
+to main memory regions with both the coherence and cacheability PMAs must be
+supported."
+(specs/riscv-spec.html:10942-10946, anchor #ext:zicclsm / #norm:zicclsm_misaligned_support)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module zicclsm_lsu (
+  input  logic [XLEN-1:0] addr_i,
+  input  logic [2:0]      size_i,     // 1/2/4/8 bytes
+  output logic            misaligned_o,
+  output logic [XLEN-1:0] addr_lo_o, addr_hi_o
+);
+  // if Zicclsm present: split access; otherwise raise misaligned
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. CVA6 does not split misaligned loads or stores in hardware.
+Detection is performed in <code>core/load_store_unit.sv:176-177,244,720-762</code>; when the address does
+not satisfy the access-size alignment, <code>data_misaligned</code> is asserted and the LSU raises
+<code>LD_ADDR_MISALIGNED</code> (load, <code>:767-768</code>) or <code>ST_ADDR_MISALIGNED</code> (store,
+<code>:779-780</code>) through the MMU. Software emulation or a trap handler is required to complete the
+access. Enabling Zicclsm would require a hardware splitter in the LSU and write-buffer, plus PMA
+gating so that misaligned access support is advertised only for coherent-cacheable main-memory
+regions.</p>
+
+<p><strong>.dts linkage:</strong> a Zicclsm-compliant CVA6 would advertise <code>riscv,unaligned-access</code>
+(or a profile-specific property) and ensure the corresponding <code>memory@</code> nodes are marked
+cacheable/coherent; current configurations leave the property unset because hardware does not split.</p>
+</body>
+</html>

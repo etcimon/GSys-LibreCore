@@ -1,0 +1,7 @@
+# pd/pdk/corev_apu — PROTECTED per-area drop-in for UNCORE (corev_apu) adaptations.
+# Foundry / NDA content only; never committed. Only this file + README.md are
+# tracked. SoC-macro views (DDR/HBM PHY, PLL/clocking, IO pads) dropped here are
+# consumed at synthesis/PnR behind the guard macro and stay local to the build.
+/*
+!/.gitignore
+!/README.md

@@ -25,6 +25,19 @@ The CVA6 targets both ASIC and FPGA implementations, although individual cores m
 The CVA6 is written in SystemVerilog and is heavily parameterizable.
 For example parameters can set the ILEN to be either 32- or 64-bits and support for floating point can be enabled/disabled.
 
+CVA6V-EC note (this worktree)
+-----------------------------
+
+This Sphinx tree remains the **OpenHW-lineage** long-form manuals (user guide,
+requirements, classical pipeline design, config-specific ISA books).
+
+The **CVA6V-EC** monorepo layers — build-platform (``cva6-build``), structural
+timing (``sv-timing``), motherboard (``corev-mb``), agent guides (``AGENTS*.md``),
+and config-gated microarchitecture extensions — are documented primarily on the
+Next.js site under ``docs/website/`` (build with ``./docs.sh dev`` or
+``.\docs.ps1 dev``). See also ``docs/README.md`` for the three-plane map
+(website / Sphinx / AGENTS).
+
 CORE-V Nomenclature
 -------------------
 
@@ -45,6 +58,9 @@ Organization of this Document
 -----------------------------
 
 This documentation is split into multiple parts.
+For worktree layout, ``cva6-build``, and ``sv-timing``, prefer ``docs/website/``
+over the stage-oriented design chapters below (some of which are marked
+deprecated).
 
 The :doc:`CVA6 User Guide <01_cva6_user/index>` provides a detailed introduction to the CVA6.
 This document is based on the original Ariane documentation and is aimed at hardware developers integrating CVA6 into a design.

@@ -271,6 +271,7 @@ logic ndmreset_n;
 logic debug_req_irq;
 logic timer_irq;
 logic ipi;
+logic [63:0] clint_mtime;
 
 logic clk;
 logic eth_clk;
@@ -319,7 +320,7 @@ dm::dmi_resp_t debug_resp;
 logic dmactive;
 
 // IRQ
-logic [1:0] irq;
+logic [ariane_soc::NumTargets-1:0] irq;
 assign test_en    = 1'b0;
 
 logic [NBSlave-1:0] pc_asserted;
@@ -787,13 +788,22 @@ ariane #(
     .rst_ni       ( ndmreset_n          ),
     .boot_addr_i  ( ariane_soc::ROMBase ), // start fetching from ROM
     .hart_id_i    ( '0                  ),
-    .irq_i        ( irq                 ),
+    .irq_i        ( irq[1:0]            ), // hart0 M/S PLIC contexts
     .ipi_i        ( ipi                 ),
     .time_irq_i   ( timer_irq           ),
+    .rtc_time_i   ( clint_mtime         ),
     .rvfi_probes_o( rvfi_probes         ),
     .debug_req_i  ( debug_req_irq       ),
     .noc_req_o    ( axi_ariane_req      ),
-    .noc_resp_i   ( axi_ariane_resp     )
+    .noc_resp_i   ( axi_ariane_resp     ),
+    .l1_inval_addr_i  ( 64'b0           ),
+    .l1_inval_valid_i ( 1'b0            ),
+    .l1_inval_ready_o (                 ),
+    .l2_miss_i        ( 1'b0            ),
+    .l3_hit_i         ( 1'b0            ),
+    .l3_miss_i        ( 1'b0            ),
+    .pf_issue_i       ( 1'b0            ),
+    .pf_train_i       ( 1'b0            )
 );
 
 `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)
@@ -960,7 +970,8 @@ clint #(
     .axi_resp_o  ( axi_clint_resp ),
     .rtc_i       ( rtc            ),
     .timer_irq_o ( timer_irq      ),
-    .ipi_o       ( ipi            )
+    .ipi_o       ( ipi            ),
+    .mtime_o     ( clint_mtime    )
 );
 
 `AXI_ASSIGN_TO_REQ(axi_clint_req, master[ariane_soc::CLINT])

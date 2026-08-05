@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Floating-Point Extensions (Vol I, chapter 6)</title></head>
+<body>
+<h1>Vol I chapter 6 — Floating-Point Extensions</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#ext:f">#ext:f</a> (6.1 F),
+<a href="../../specs/riscv-spec.html#ext:d">#ext:d</a> (6.2 D),
+<a href="../../specs/riscv-spec.html#ext:q">#ext:q</a> (6.3 Q),
+<a href="../../specs/riscv-spec.html#ext:zfh">#ext:zfh</a> (6.4 Zfh),
+<a href="../../specs/riscv-spec.html#ext:zfa">#ext:zfa</a> (6.6 Zfa),
+<a href="../../specs/riscv-spec.html#ext:zfinx">#ext:zfinx</a> (6.8 Zfinx/Zdinx/Zhinx).
+Source lines: <code>specs/riscv-spec.html:15605</code> (F), <code>:16455</code> (D), <code>:16767</code> (Q),
+<code>:16910</code> (Zfh), <code>:17142</code> (Zfa).</p>
+
+<p>This chapter defines the F (single), D (double), Q (quad), and H/Zfh (half) precision floating-point
+extensions, the shared floating-point CSR (<code>fcsr</code>, <code>frm</code>, <code>fflags</code>),
+rounding modes, and NaN boxing. FP is a large architectural island: the decoder, register file,
+issue/execute units, and write-back must support a separate FP register file and control/status state.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This section describes the F standard extension for single-precision
+floating-point, which adds computational instructions compliant with
+the IEEE 754-2008 arithmetic standard's binary32 format and operations.
+The F extension depends on the Zicsr extension."
+(specs/riscv-spec.html:15605-15612, anchor #ext:f)
+</pre>
+
+<p>F adds 32 floating-point registers, <code>f0</code>–<code>f31</code>, and the <code>fcsr</code> CSR;
+D expands the registers to 64 bits (FLEN=64) and adds double-precision instructions; Q further
+expands to 128 bits; Zfh adds half-precision; Zfa adds additional FP instructions; Zfinx/Zdinx/Zhinx
+use the integer register file for FP values.</p>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module fpu_top (
+  input  logic [XLEN-1:0] rs1_i, rs2_i, rs3_i,
+  input  logic [2:0]      rm_i,
+  input  fp_op_e          op_i,
+  input  logic [4:0]      fflags_i,    // exception flags
+  output logic [XLEN-1:0] result_o,
+  output logic [4:0]      fflags_o
+);
+  // separate register file; NaN boxing for narrower formats; fcsr update
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented when configured via <code>CVA6Cfg.RVF/RVD/RVQ/RVZfh/RVZfa/RVZfinx</code>
+in <code>core/include/config_pkg.sv</code> and the per-target packages. The decoder classifies FP
+operations in <code>core/decoder.sv:1849-1850</code> (orig-instr preservation for CVXIF/FP/ZKN). The
+FPR issue/read-operand path is in <code>core/issue_stage.sv:310-315</code> and
+<code>core/issue_read_operands.sv:129-137</code>; the FPU wrapper is <code>core/fpu_wrap.sv</code> and
+the CVFPU implementation lives under <code>core/cvfpu/</code> (e.g. <code>fpnew_classifier.sv</code>).
+The FP CSRs <code>fflags</code>/<code>frm</code>/<code>fcsr</code> are defined in
+<code>core/include/rvfi_types.svh:39-41</code> and read/written in <code>core/csr_regfile.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string reflects F/D/Q/Zfh/Zfa/Zfinx
+extensions; <code>status = "okay"</code> and the chosen ISA string must match the
+<code>CVA6Cfg.RVF/RVD/RVQ/RVZfh</code> bits.</p>
+</body>
+</html>

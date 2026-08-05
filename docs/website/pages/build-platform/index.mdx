@@ -1,0 +1,165 @@
+---
+title: Build Platform
+description: The g6lc-build command and how it orchestrates the CVA6 flow.
+---
+
+# Build Platform
+
+The build platform in `build-platform/` is a Bun + TypeScript project that
+drives the entire CVA6 flow from a single typed config file (`.config.ts`). It
+is the spine that connects the core, APU, motherboard, vendor IP, and
+foundry/PDK adaptation.
+
+A build platform is more than a collection of scripts; it is the expression of
+the project's workflow as a typed, versioned API. By centralizing the flow in a
+single command, CVA6 ensures that every engineer and every automated agent
+invokes the same logic, reads the same config, and reports the same exit codes.
+This eliminates the "it worked on my machine" problem and makes CI, local
+development, and agent execution interchangeable.
+
+## Operator workflow
+
+Default loop on a new host or after toolchain changes (see
+[Probe, Diag & Verify](./verify-and-diag)):
+
+```text
+probe → tools install / setup --install → probe install → diag → verify / test
+```
+
+## Commands
+
+| Command | Role |
+|---|---|
+| `status` | SoC target + managed provisioning snapshot |
+| `doctor` | Quick host PATH readiness (points to `probe`) |
+| `probe` | In-depth capability boxes + install playbook |
+| `diag` | Compartmentalized diagnostics (per-test Verilator configs) |
+| `man` | Interactive man-page Q&A (Grok headless, when available) |
+| `setup` | Workspace + submodules; `--install --profile …` provisions tools |
+| `tools` | List / install managed tools (`sim`, `dual-hart`, `spike`, `all`, …) |
+| `build` | Build the RTL simulation model (Verilator on open-source path) |
+| `test` | Regression suites from `verif/regress` |
+| `verify` | Per-change gate: `--lint` / `--formal` / `--sim` / `--synth` |
+| `timings` | Host adapter for [`sv-timing`](../sv-timing) (structural FO4) |
+| `vendor` | Uncore controller/PHY catalog sync |
+| `mb` | Motherboard select / design / check |
+| `tech` | Foundry technology optimization |
+| `clean` | Remove workspace outputs |
+| `config` | Print resolved configuration (`--json`) |
+
+```bash
+g6lc-build status
+g6lc-build probe
+g6lc-build tools install sim
+g6lc-build diag run host core
+g6lc-build verify --lint
+g6lc-build timings status
+g6lc-build vendor list
+g6lc-build mb status
+g6lc-build tech status
+```
+
+## Single control surface
+
+The repo-root `.config.ts` is the only file a user normally needs to edit. It is
+typed by `build-platform/src/config/schema.ts`, defaulted by
+`build-platform/src/config/defaults.ts`, merged by
+`build-platform/src/config/load.ts`, and validated before use.
+
+Example structure:
+
+```ts
+export default defineBuildConfig({
+  soc: { coreConfig: 'cv64a6_imafdc_sv39' },
+  tests: { defaultSuites: ['smoke-cv64a6'] },
+  motherboard: { activeBoard: 'genesys2' },
+  vendor: { controllers: [...] },
+  technology: { optimizationPass: false },
+})
+```
+
+Because the merge is `DeepPartial`, new options are automatically optional for
+existing configs.
+
+The `DeepPartial` merge is a deliberate extensibility mechanism. It means that
+adding a new config field does not require every existing user to update their
+`.config.ts`; the default value is used unless overridden. This is how the build
+platform can evolve without breaking the ecosystem. It also means that the
+schema is the documentation: a contributor can read `schema.ts` and know every
+available option and its type.
+
+## Architecture
+
+```
+argv
+  ↓
+cli/index.ts → registry.findCommand()
+  ↓
+needsContext? → createContext()
+  ↓
+loadConfig(): defaults ⊕ .config.ts ⊕ overlay → validate
+  ↓
+getHostInfo(), resolveWorkspacePaths(), toolLocations(), Logger
+  ↓
+command.run({ ctx, positionals, flags, logger })
+```
+
+- `PlatformContext` (`src/context.ts`) is the one object every command receives.
+- `childEnv(ctx)` builds the environment for CVA6 child processes (`RISCV`,
+  `CVA6_REPO_DIR`, `VERILATOR_INSTALL_DIR`, etc.).
+- `src/workspace/discovery.ts` provides file discovery and change detection.
+
+## Zero runtime dependencies
+
+`bun run` works without `bun install`. Only `devDependencies` (type packages)
+are used. All runtime code uses Bun/Web/Node built-ins. This keeps the platform
+self-contained and fast to clone.
+
+Zero runtime dependencies are unusual for a TypeScript project, but they are a
+major advantage for a hardware build platform. They eliminate the risk that a
+package in `node_modules` will change behavior or disappear, and they allow the
+platform to run from a fresh clone with only Bun installed. The platform uses
+Bun's built-in APIs for file system, process spawning, and HTTP, which are fast
+and stable. Type packages live in `devDependencies` for editor support and
+`tsc`, but they never run in production.
+
+## Contained workspace
+
+Everything the platform installs or produces goes under
+`build-platform/workspace/` (gitignored). Deletions are confined to that
+directory. The repo outside `workspace/` is never modified by normal commands.
+
+Containment is a trust property. Engineers and CI runners need to know that
+running `g6lc-build setup` or `g6lc-build clean` will not delete their RTL,
+their config, or their documentation. By confining all mutable state to a
+gitignored workspace, the platform makes this guarantee explicit. This is
+especially important for automated agents, which must be able to explore and
+build without fear of corrupting the source tree.
+
+## Cross-platform
+
+No OS-specific assumptions outside `src/platform/`:
+
+- `src/platform/os.ts` — OS detection and conventions.
+- `src/platform/exec.ts` — `Bun.spawn` wrapper, `which()`, `capture()`.
+- `src/platform/shell.ts` — pwsh/bash/zsh dispatch.
+
+## Test orchestration
+
+The `test` command catalogues every non-vendored `verif/regress/*.sh` script.
+Each suite has preflight checks: missing tool, missing submodule, or missing UVM
+simulator causes the suite to be **skipped with a reason**, not failed. This
+lets `--open-source` run cleanly without proprietary EDA.
+
+Preflight is the mechanism that makes the test suite portable. In a world where
+some contributors have access to VCS, Questa, and UVM while others have only
+Verilator and a laptop, the platform cannot simply fail when a tool is missing.
+Instead, it reports a skip with a reason. This preserves the signal of the
+tests that can run while being honest about the tests that cannot. It is the
+difference between a red CI and an informative CI.
+
+## Pages in this section
+
+- [Probe, Diag & Verify](./verify-and-diag) — host readiness and §0.2 gate
+- [Timings](./timings) — `sv-timing` host adapter
+- [Extending the Platform](./extending) — add commands, config, tools, suites

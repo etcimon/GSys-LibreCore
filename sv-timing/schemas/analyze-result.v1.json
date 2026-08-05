@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sv-timing.local/schemas/analyze-result.v1.json",
+  "title": "sv-timing AnalyzeResult v1",
+  "description": "Versioned JSON contract for analyze (structural FO4 — not STA). Supersedes v0 with frequency_closure, path start/end, and optional cache stats. CLI may still emit schema_version \"0\" while fields match this shape; hosts should treat frequency_closure as required for closure tooling.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "disclaimer",
+    "banner",
+    "target_mhz",
+    "files",
+    "modules_requested",
+    "ast",
+    "paths",
+    "frequency_closure",
+    "versions"
+  ],
+  "properties": {
+    "schema_version": {
+      "oneOf": [{ "const": "0" }, { "const": "1" }],
+      "description": "\"1\" when fully v1; \"0\" accepted during transition if frequency_closure is present."
+    },
+    "disclaimer": { "type": "string" },
+    "banner": { "type": "string" },
+    "target_mhz": { "type": "number" },
+    "fo4_ps": { "type": "number" },
+    "budget_margin": { "type": "number" },
+    "budget_fo4": { "type": "number" },
+    "files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "parse_ok"],
+        "properties": {
+          "path": { "type": "string" },
+          "parse_ok": { "type": "boolean" },
+          "byte_len": { "type": "integer" }
+        }
+      }
+    },
+    "modules_requested": {
+      "oneOf": [
+        { "type": "array", "items": { "type": "string" } },
+        { "const": "*" }
+      ]
+    },
+    "ast": {
+      "type": "object",
+      "required": ["kind", "files_parsed"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "timing_ir_v0 or later"
+        },
+        "files_parsed": { "type": "integer" },
+        "module_count": { "type": "integer" },
+        "path_count": { "type": "integer" },
+        "opportunity_count": { "type": "integer" },
+        "note": { "type": "string" }
+      }
+    },
+    "modules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "name": { "type": "string" },
+          "file": { "type": "string" },
+          "node_count": { "type": "integer" },
+          "region_count": { "type": "integer" }
+        }
+      }
+    },
+    "paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "path_id",
+          "total_fo4",
+          "slack_fo4",
+          "max_freq_mhz",
+          "startpoint",
+          "endpoint",
+          "path_kind"
+        ],
+        "properties": {
+          "path_id": { "type": "integer" },
+          "module_id": { "type": "integer" },
+          "path_kind": {
+            "type": "string",
+            "enum": ["in_to_out", "reg_to_reg", "in_to_reg", "reg_to_out"]
+          },
+          "startpoint": { "type": "string" },
+          "endpoint": { "type": "string" },
+          "total_fo4": { "type": "number" },
+          "slack_fo4": { "type": "number" },
+          "max_freq_mhz": { "type": "number" },
+          "closes": { "type": "boolean" },
+          "multi_cycle": { "type": "boolean" },
+          "node_count": { "type": "integer" },
+          "primary_loc": { "type": "object" }
+        }
+      }
+    },
+    "opportunities": { "type": "array" },
+    "frequency_closure": {
+      "type": "object",
+      "required": [
+        "closes",
+        "target_mhz",
+        "budget_fo4",
+        "max_freq_mhz",
+        "worst_startpoint",
+        "worst_endpoint"
+      ],
+      "properties": {
+        "target_mhz": { "type": "number" },
+        "budget_fo4": { "type": "number" },
+        "closes": { "type": "boolean" },
+        "worst_path_id": { "type": ["integer", "null"] },
+        "worst_slack_fo4": { "type": "number" },
+        "worst_path_fo4": { "type": "number" },
+        "worst_startpoint": { "type": "string" },
+        "worst_endpoint": { "type": "string" },
+        "worst_path_kind": { "type": "string" },
+        "max_freq_mhz": { "type": "number" },
+        "failing_paths": { "type": "integer" },
+        "reg_to_reg_paths": { "type": "integer" }
+      }
+    },
+    "cache": {
+      "type": "object",
+      "description": "Present when analyze --cache is used.",
+      "properties": {
+        "from_cache": { "type": "boolean" },
+        "design_hit": { "type": "boolean" },
+        "module_hits": { "type": "integer" },
+        "module_misses": { "type": "integer" },
+        "files_content_stable": { "type": "integer" },
+        "files_changed": { "type": "integer" },
+        "pp_fingerprint": { "type": "string" },
+        "design_key": { "type": "string" },
+        "crc_algo": { "const": "crc32c" }
+      }
+    },
+    "opt": {
+      "type": "object",
+      "description": "Resolved optimization level + dials (additive, P15). A level is only a preset over `dials`; it never relaxes a safety gate (allowlist, refuse lists, --allow-latency, dry-run, emit containment).",
+      "properties": {
+        "level": { "enum": ["O0", "O1", "O2", "O3", "Os", "Oz"] },
+        "digest": {
+          "type": "string",
+          "description": "Stable digest of the resolved dials; also folded into the cache design key."
+        },
+        "measurement": { "type": "string" },
+        "dials": {
+          "type": "object",
+          "properties": {
+            "max_passes": { "type": "integer", "minimum": 0 },
+            "worklist_width": { "type": "integer", "minimum": 0 },
+            "cut_strategy": { "enum": ["mid-node", "cost-balanced", "budget-fit"] },
+            "max_stages_per_region": { "type": "integer", "minimum": 0 },
+            "min_gain_fo4": { "type": "number" },
+            "slack_target_fo4": { "type": "number" },
+            "area_weight": { "type": "number" },
+            "allow_reassoc": { "type": "boolean" },
+            "effort": { "enum": ["fast", "balanced", "thorough"] },
+            "jobs": { "type": ["integer", "null"] },
+            "cache_mode": { "enum": ["off", "ir", "unit", "full"] }
+          }
+        }
+      }
+    },
+    "versions": {
+      "type": "object",
+      "properties": {
+        "ir": { "type": "string" },
+        "parser_pin": { "type": "string" },
+        "cost_model": { "type": "string" },
+        "measurement": {
+          "type": "string",
+          "description": "Measurement semantics: how delay is computed, independent of the cost table. 'legacy-sum' = pre-P14 source-order sums (width-blind); 'delay-v1' = def-use DAG longest path with expression critical chain and width scaling. Never compare numbers across values."
+        },
+        "package": { "type": "string" }
+      }
+    }
+  },
+  "additionalProperties": true
+}

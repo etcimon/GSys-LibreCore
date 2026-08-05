@@ -81,8 +81,8 @@ module tc_sram #(
   output data_t [NumPorts-1:0] rdata_o     // read data
 );
 
-  // memory array
-  data_t sram [NumWords-1:0];
+  // memory array — public_flat_rw so ariane_tb.cpp DRAM preload is live
+  data_t sram [NumWords-1:0] /* verilator public_flat_rw */;  // CVA6 TB preload
   // hold the read address when no read access is made
   addr_t [NumPorts-1:0] r_addr_q;
 

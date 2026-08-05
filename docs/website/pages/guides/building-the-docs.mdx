@@ -1,0 +1,178 @@
+---
+title: Building the Docs
+description: How the CVA6 Next.js + Nextra documentation site is structured and extended.
+---
+
+# Building the Docs
+
+This documentation site is a **Next.js + Nextra** project under
+`docs/website/`. It uses file-based routing: every `.mdx` file in `pages/`
+becomes a page automatically.
+
+Documentation is a first-class build artifact in CVA6. It is not an
+afterthought appended to a release; it is part of the repository and is built,
+versioned, and deployed with the same care as the RTL. Treating docs as code
+means they can be reviewed in diffs, validated by automated tools, and extended
+by agents using the same workflow as source code. The `docs/website/` site is
+the modern, interactive complement to the existing Sphinx manuals.
+
+## Why Nextra
+
+After reviewing Fumadocs, Mintlify, Docusaurus, and custom MDX loaders, Nextra
+was chosen because it provides the fastest path to a polished, content-first
+Next.js docs site with:
+
+- File-system routing and auto-generated sidebars.
+- MDX-first content.
+- Built-in full-text search, dark/light mode, and copy-to-code buttons.
+- Minimal configuration for standard documentation sites.
+
+Fumadocs is a strong alternative for teams that want a more composable,
+product-integrated docs shell; Nextra is the better fit for a lightweight,
+content-heavy guide that can grow one Markdown file at a time.
+
+The choice of Nextra over alternatives reflects the project's values. Fumadocs
+and Mintlify are strong for product-integrated docs, but they often assume a
+dedicated docs team and a managed hosting environment. Docusaurus is powerful
+but heavier in configuration and plugin management. Nextra provides the right
+balance for CVA6: it is built on Next.js, so it integrates with the same
+ecosystem as the build platform; it supports MDX natively, so technical content
+can embed components and code; and it generates static HTML, so it can be
+hosted anywhere without vendor lock-in.
+
+## Directory layout
+
+```
+docs/website/
+  next.config.mjs         # Nextra + static export config
+  theme.config.tsx        # Nextra theme settings
+  tsconfig.json           # TypeScript config
+  package.json            # Next.js + Nextra dependencies
+  pages/                  # Content (file-based routing)
+    _app.tsx              # Global app wrapper + theme CSS
+    _meta.ts              # Top-level sidebar order
+    index.mdx             # /
+    getting-started.mdx   # /getting-started
+    architecture/         # /architecture/*
+    core/                 # /core/*
+    corev-apu/            # /corev-apu/*
+    corev-mb/             # /corev-mb/*
+    technology/           # /technology/*
+    build-platform/       # /build-platform/*
+    sv-timing/            # /sv-timing/*
+    guides/               # /guides/*
+  public/                 # Static assets
+  dist/                   # Static export output (gitignored)
+```
+
+The directory layout is deliberately simple. `pages/` is the content; `_meta.ts`
+files control the sidebar; `theme.config.tsx` controls the appearance; and
+`next.config.mjs` controls the static export. This simplicity is important for
+an open-source hardware project where contributors may be more familiar with
+SystemVerilog than with TypeScript. The docs site should be easy to extend
+without becoming a frontend project in its own right.
+
+Do not add empty placeholder directories under `pages/` for “future” sections —
+real content lives in top-level sections (`build-platform/`, `sv-timing/`,
+`core/`, …). Nested empty dirs only confuse the file tree.
+
+## Adding a page
+
+1. Create a `.mdx` file under `docs/website/pages/<section>/`.
+2. Add frontmatter:
+   ```mdx
+   ---
+   title: Page Title
+   description: Short description.
+   ---
+   ```
+3. Add the file name to the section's `_meta.ts` for sidebar ordering.
+
+If no `_meta.ts` entry is added, Nextra will still show the page, but with a
+derived title and default order.
+
+Adding a page is a three-step process: write the content, add frontmatter, and
+register the page in the section's `_meta.ts`. The registration step is what
+gives the page its place in the sidebar and its discoverability. Because Nextra
+uses file-system routing, a page can exist without registration, but it will be
+harder to find. This small ceremony ensures that new content is intentionally
+placed in the information architecture.
+
+## Adding a section
+
+1. Create a directory under `pages/`.
+2. Add an `index.mdx` for the section landing page.
+3. Add a `_meta.ts` for the section's sidebar.
+4. Add the section name to `pages/_meta.ts`.
+
+Adding a section follows the same pattern as adding a page, but at the
+directory level. A section needs an `index.mdx` landing page, a `_meta.ts` for
+its own sidebar, and an entry in the top-level `_meta.ts`. This hierarchical
+structure maps directly to the layered architecture of CVA6, so readers can
+navigate from the top-level concepts down to the specific layer or workflow
+they need.
+
+## Local development
+
+```bash
+./docs.sh dev
+```
+
+Or directly:
+
+```bash
+cd docs/website
+bun install
+bun run dev
+```
+
+## Static build
+
+```bash
+./docs.sh build
+```
+
+The output is written to `docs/website/dist`. You can serve it with any static
+host (Vercel, GitHub Pages, Netlify, an internal nginx server, etc.).
+
+The static export is what makes the docs site portable. It does not require a
+Node.js server at runtime; it is a collection of HTML files and assets that can
+be served by any web server. This is ideal for open-source projects that may be
+hosted on GitHub Pages, mirrored internally, or shipped as offline
+documentation with a release. The build command `./docs.sh build` wraps the
+Next.js export in a consistent, cross-platform interface.
+
+## Linking between pages
+
+Use relative Markdown links:
+
+```mdx
+See [CPU Architecture](../core/cpu-architecture).
+```
+
+Nextra resolves these automatically.
+
+Relative links are the correct way to reference other pages in the docs. They
+keep the link graph local to the content and make the site robust to changes in
+base URL or hosting path. Absolute paths or external URLs should be used only
+when pointing outside the docs site. This discipline is especially important
+for a static export, where URL structure is determined at build time.
+
+## Writing style
+
+- **General before specific.** Avoid exact line numbers, command output, or
+  version pins unless necessary.
+- **Seam-first.** Describe where a feature is added, how it is gated, and how
+  it is verified.
+- **Agent-readable.** Use explicit file paths and command names so an LLM can
+  follow the instructions.
+- **Cross-reference.** Link to the relevant `AGENTS-*.md` files and build
+  platform commands.
+
+The writing style is designed for a dual audience: human engineers who need to
+understand the project, and automated agents who need to execute instructions.
+"General before specific" keeps the content stable as the code evolves. "Seam-first" aligns the explanation with the project's architecture. "Agent-readable"
+ensures that file paths and commands are explicit enough to be parsed. And
+"Cross-reference" ties every page back to the authoritative guides and the
+build platform. A page that follows these rules will remain useful as the
+project grows.

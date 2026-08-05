@@ -1,0 +1,84 @@
+//////////////////////////////////////////////////////////////////////////////
+// Ara RVV flist (U10ᵇ) — after `cva6-build vendor sync ara`.
+// Append via verify.extraFlistsByTarget; do NOT add to core/Flist.cva6.
+//
+// Live Ara (`CVA6_ARA_ATTACH=1`) needs the full dep list below.
+// SPDX (this flist): MIT / Etienne Cimon
+// Upstream Ara RTL under upstream/: SHL-0.51
+//////////////////////////////////////////////////////////////////////////////
+
++incdir+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include
++incdir+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include/ara
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/include
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/tech_cells_generic/src/rtl
++incdir+${CVA6_REPO_DIR}/corev_apu/include
+
+// --- Deps not always pulled by core/Flist.cva6 (Ara + attach) -------------
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/cf_math_pkg.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/spill_register_flushable.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/spill_register.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/fifo_v3.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/deprecated/fifo_v2.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/fall_through_register.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/stream_register.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/stream_xbar.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/onehot_to_bin.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/id_queue.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_clk.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_atop_filter.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_err_slv.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_demux.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_id_prepend.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_cut.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_dw_downsizer.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_dw_upsizer.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_dw_converter.sv
+
+// Packages first
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include/rvv_pkg.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/include/ara_pkg.sv
+
+// Top + control
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara_dispatcher.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ara_sequencer.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/segment_sequencer.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/axi_inval_filter.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ctrl_registers.sv
+
+// First-pass vector decoder (overrides core stub when listed after it)
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/cva6_accel_first_pass_decoder.sv
+
+// APU glue
+${CVA6_REPO_DIR}/corev_apu/src/cva6_ara_attach.sv
+${CVA6_REPO_DIR}/corev_apu/src/cva6_axi_2to1_mux.sv
+
+// Lanes / FUs
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/fixed_p_rounding.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/power_gating_generic.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_alu.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_div.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/simd_mul.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/valu.sv
+// CVA6-adapted FPU (OpenHW cvfpu 5-format / 4-opgroup + no hart_id_i)
+${CVA6_REPO_DIR}/vendor/ara/cva6_shim/vmfpu.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/vector_regfile.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_queue.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_queues_stage.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/operand_requester.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/vector_fus_stage.sv
+${CVA6_REPO_DIR}/vendor/ara/cva6_shim/lane_sequencer.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/lane.sv
+
+// Mask / slide / load-store
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/masku/masku_operands.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/masku/masku.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/p2_stride_gen.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/sldu_op_dp.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/sldu/sldu.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/addrgen.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/vldu.sv
+${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/vlsu/vstu.sv
+${CVA6_REPO_DIR}/vendor/ara/cva6_shim/vlsu.sv

@@ -1,0 +1,51 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - 'docs/website/**'
+      - 'README.md'
+      - '.github/workflows/deploy-docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: 'pages'
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Build and deploy documentation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Build static docs with Next.js
+        run: |
+          cd docs/website
+          bun install
+          bun run build
+
+      - name: Disable Jekyll processing
+        run: touch docs/website/dist/.nojekyll
+
+      - name: Deploy dist to gh-pages branch
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          branch: gh-pages
+          folder: docs/website/dist
+          clean: true

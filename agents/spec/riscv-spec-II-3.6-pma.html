@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Physical Memory Attributes (Vol II, 3.6) — Logisplain summary</title>
+</head>
+<body>
+<h1>Vol II &sect;3.6 — Physical Memory Attributes (PMA)</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#pma">specs/riscv-spec.html#pma</a>
+(source line 75927). <strong>Domain:</strong> RAM, CACHE.</p>
+
+<section>
+<p>The purpose of &sect;3.6 is to give every region of the physical address map a declared set of
+capabilities, since some memory regions might not support reads, writes, or execution; some might not
+support subword or subblock accesses; some might not support atomic operations; and some might not
+support cache coherence or might have different memory models. The specification terms these
+properties and capabilities of each region of the machine's physical address space <em>physical memory
+attributes</em> (PMAs). PMAs are inherent properties of the underlying hardware and rarely change during
+system operation; unlike PMP, PMAs do not vary by execution context. This is the memory-map contract a
+RAM bring-up and any cache addition must respect, because it decides which regions are cacheable,
+idempotent, and atomic-capable.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The physical memory map for a complete system includes various address
+ranges, some corresponding to memory regions and some to memory-mapped
+control registers, portions of which might not be accessible. Some
+memory regions might not support reads, writes, or execution; some might
+not support subword or subblock accesses; some might not support atomic
+operations; and some might not support cache coherence or might have
+different memory models. ... In RISC-V systems, these properties and
+capabilities of each region of the machine's physical address space are
+termed physical memory attributes (PMAs)."
+...
+"Unlike physical memory protection values described in Section 3.7,
+PMAs do not vary by execution context."
+(specs/riscv-spec.html:75927-75954, anchor #pma / #norm:pma_indep_exec_context)
+</pre>
+
+<p>Mechanically the specification separates policy from checking into "a separate hardware structure,
+the PMA checker," whose attributes "in many cases ... are known at system design time ... and can be
+hardwired," while "where the attributes are run-time configurable, platform-specific memory-mapped
+control registers can be provided." The checking obligation is total: "PMAs are checked for any access
+to physical memory, including accesses that have undergone virtual to physical memory translation,"
+and the specification "strongly recommend[s] that ... RISC-V processors precisely trap physical memory
+accesses that fail PMA checks," surfacing as "instruction, load, or store access-fault exceptions,
+distinct from virtual-memory page-fault exceptions." CVA6 realizes a <em>static</em> form of this: the
+attributes are expressed as configuration region rules rather than runtime MMRs, counted and legality-
+checked in <code>core/include/config_pkg.sv</code> (<code>NrCachedRegionRules</code>,
+<code>NrExecuteRegionRules</code>, <code>NrNonIdempotentRules</code>; asserted in <code>check_cfg</code>
+451-453), and consulted in the load/store path (<code>core/load_store_unit.sv</code>) and the cache
+subsystem selected at <code>core/cva6.sv:1400-1560</code>. This links directly to the cache guide (a
+non-idempotent MMIO region must stay uncacheable end-to-end into any L2) and to the speculation guide
+(non-idempotent regions must not be speculatively accessed).</p>
+</section>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<p>The implied structure is a post-translation attribute lookup that gates caching, execution, and
+atomics and raises a precise access fault:</p>
+<pre>
+module pma_checker #(
+  parameter int unsigned NrCachedRegionRules,     // config_pkg::cva6_cfg_t
+  parameter int unsigned NrExecuteRegionRules,
+  parameter int unsigned NrNonIdempotentRules
+)(
+  input  logic [PLEN-1:0] paddr_i,        // checked AFTER VA->PA translation
+  input  access_e         access_i,       // fetch / load / store / amo
+  output logic            cacheable_o,    // -> D$/I$ + any external L2
+  output logic            executable_o,
+  output logic            idempotent_o,   // MMIO => 0 => no speculation/caching
+  output logic            access_fault_o  // precise trap (recommended)
+);
+  // attributes are region-static (design-time), not per-context (contrast PMP)
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partial (static, config-region PMA; no runtime PMA CSRs/MMRs). The
+region arrays are declared in <code>core/include/config_pkg.sv:143-161,365-373</code> and range-checked
+by helper functions at <code>:472-502</code> (<code>is_inside_cacheable_regions</code>,
+<code>is_inside_execute_regions</code>, <code>is_inside_nonidempotent_regions</code>). The I$ consults
+cacheable and non-idempotent regions at <code>core/cache_subsystem/g6lc_icache.sv:140-143,189-191</code>
+(gating <code>paddr_is_nc</code> and <code>addr_ni</code>). Fetch permission is checked against
+execute regions in <code>core/pmp/src/pmp_if.sv</code> (via
+<code>config_pkg::is_inside_execute_regions</code>). The D$ and LSU receive the PMA attributes
+indirectly through the cacheable-region configuration, with the subsystem selection in
+<code>core/cva6.sv:1432-1560</code>. Legality of the region count is asserted in
+<code>core/include/config_pkg.sv:check_cfg(...)</code>.</p>
+
+<p><strong>.dts linkage:</strong> <code>memory@</code> and <code>soc</code> nodes must be kept aligned with
+the <code>CachedRegion</code>, <code>ExecuteRegion</code>, and <code>NonIdempotentRegion</code> address
+ranges in the active CVA6 config package; the device-tree <code>cacheable</code> / <code>compatible</code>
+properties describe the same PMAs to software.</p>
+</body>
+</html>

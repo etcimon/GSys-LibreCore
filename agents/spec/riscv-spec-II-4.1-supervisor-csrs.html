@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Supervisor CSRs (Vol II, 4.1)</title></head>
+<body>
+<h1>Vol II &sect;4.1 — Supervisor CSRs</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#_supervisor_csrs">specs/riscv-spec.html#_supervisor_csrs</a>.
+Source line: <code>specs/riscv-spec.html:77065</code>. <strong>Domain:</strong> RAM.</p>
+
+<p>This subchapter enumerates the supervisor-mode control and status registers: <code>sstatus</code>,
+<code>sie</code>, <code>sip</code>, <code>stvec</code>, <code>sscratch</code>, <code>sepc</code>,
+<code>scause</code>, <code>stval</code>, <code>satp</code>, and the counter-enable CSRs. They are the
+privileged-state interface for virtual memory, interrupts, and exceptions visible to the OS. Any
+feature touching paging or S-mode interrupts must update these CSRs.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"A number of CSRs are provided for the supervisor."
+(specs/riscv-spec.html:77065-77067, anchor #_supervisor_csrs)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module supervisor_csrs (
+  input  csr_addr_e   addr_i,
+  input  logic        we_i,
+  input  logic [XLEN-1:0] wdata_i,
+  output logic [XLEN-1:0] rdata_o,
+  // paging
+  output logic [XLEN-1:0] satp_o
+);
+  // CSR read/write with WARL fields; satp.PPN roots the page table
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented. Supervisor CSRs are read/written in
+<code>core/csr_regfile.sv</code>; <code>satp</code> is consumed by the MMU/PTW in
+<code>core/cva6_mmu/cva6_mmu.sv</code> and <code>core/cva6_mmu/cva6_ptw.sv</code>. <code>sstatus</code>,
+<code>sie</code>/<code>sip</code>, <code>stvec</code>, <code>sepc</code>/<code>scause</code>/<code>stval</code>
+participate in trap entry and return in <code>core/controller.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> S-mode presence and the paging mode are advertised by the CPU
+<code>riscv,isa</code> string (e.g. <code>_s</code> or <code>...s...</code>) and
+<code>mmu-type</code> (e.g. <code>riscv,sv39</code>); these must match the <code>satp</code> mode field.</p>
+</body>
+</html>

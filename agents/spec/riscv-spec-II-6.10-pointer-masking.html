@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Pointer Masking Extensions (Vol II, 6.10)</title></head>
+<body>
+<h1>Vol II &sect;6.10 — Pointer Masking Extensions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#Zpm">specs/riscv-spec.html#Zpm</a>.
+Source line: <code>specs/riscv-spec.html:87492</code>. <strong>Domain:</strong> RAM.</p>
+
+<p>The Zpm pointer-masking extensions allow software to store metadata in the upper bits of pointers
+by masking those bits during memory-address generation. The mask is configurable per privilege mode
+through CSRs. It relaxes the usual sign-extension/canonicality rules for effective addresses.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"RISC-V Pointer Masking (PM) is a feature that, when enabled, causes the
+CPU to ignore the upper bits of the effective address. This allows these
+bits to be used in whichever way the application chooses. Such tools can
+be applied in all privilege modes (U, S, and M)."
+(specs/riscv-spec.html:87492-87497, anchor #Zpm)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module pointer_masking (
+  input  logic [XLEN-1:0] vaddr_i,
+  input  logic [XLEN-1:0] mask_i,
+  output logic [XLEN-1:0] masked_vaddr_o
+);
+  // clear or set masked bits before address translation
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. No pointer-masking CSRs (<code>mpmmask</code>,
+<code>spmmask</code>, etc.) are implemented in <code>core/csr_regfile.sv</code>, and the LSU/MMU in
+<code>core/load_store_unit.sv</code>/<code>core/cva6_mmu/</code> does not mask upper address bits
+before translation.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Zpm would be advertised in the
+<code>riscv,isa</code> string if implemented.</p>
+</body>
+</html>

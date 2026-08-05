@@ -43,7 +43,11 @@ module rvfi_tracer #(
   initial begin
     TOHOST_ADDR = '0;
     f = $fopen($sformatf("trace_rvfi_hart_%h.dasm", HART_ID), "w");
-    if (!$value$plusargs("time_out=%d", SIM_FINISH)) SIM_FINISH = 2000000;
+    // Default 40M: rv64ui-v-* vm_boot page-table memset on WT-dcache configs
+    // needs ~12–18M cycles (run-to-run variance); the historical 2M default
+    // times out a correct run (tohost=0x7fffffff). Override with +time_out=<N>
+    // when a tighter bound is wanted (directed unit tests, hang diagnosis).
+    if (!$value$plusargs("time_out=%d", SIM_FINISH)) SIM_FINISH = 40000000;
     if (!$value$plusargs("tohost_addr=%h", TOHOST_ADDR)) TOHOST_ADDR = '0;
     if (TOHOST_ADDR == '0) begin
         if (!$value$plusargs("elf_file=%s", binary)) binary = "";

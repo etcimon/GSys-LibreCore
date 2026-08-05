@@ -1,0 +1,156 @@
+---
+title: Extending the Platform
+description: How to add a command, config option, tool, test suite, or vendor controller to g6lc-build.
+---
+
+# Extending the Platform
+
+The CVA6 build platform is designed so that new features are **additive,
+discovered automatically, and require touching as few files as possible**. This
+page is a concise recipe book.
+
+## Add a configuration option
+
+1. Add the typed field to `build-platform/src/config/schema.ts`.
+2. Add its default value to `build-platform/src/config/defaults.ts`.
+3. (Optional) Validate it in `build-platform/src/config/load.ts`.
+
+Because the user config is a `DeepPartial` merged over defaults, the new option
+is automatically optional for every existing `.config.ts`.
+
+The schema-first approach makes the build platform self-documenting. Every
+config field has a type, a default, and a validation rule. When a new option is
+added, the TypeScript compiler and the config loader immediately catch invalid
+values. This is especially valuable for automated agents, which can read
+`schema.ts` to discover the available control surface rather than guessing from
+Makefiles or environment variables.
+
+## Add a CLI command
+
+1. Create `build-platform/src/cli/commands/<name>.ts` exporting a `Command`
+   (`name`, `summary`, `usage`, `needsContext`, `run`).
+2. Import it in `build-platform/src/cli/registry.ts` and append to `COMMANDS`.
+
+Help text and dispatch pick it up automatically.
+
+The registry pattern is the plugin architecture of the build platform. It means
+that adding a command does not require editing a central `switch` statement or
+a command parser. Instead, the command exports a small object that the registry
+discovers. This separation makes commands easy to test in isolation and easy
+for an agent to add by following the same pattern.
+
+## Add a managed tool
+
+1. Add its install path to `build-platform/src/tooling/locations.ts`.
+2. Add a version pin to `schema.ts` `ToolVersions` and `defaults.ts`.
+3. Add a host probe to `build-platform/src/tooling/detect.ts` `HOST_PROBES`.
+4. Add an `installX` recipe to `build-platform/src/tooling/recipes.ts`.
+5. Wire it into `build-platform/src/cli/commands/setup.ts` and `childEnv` in
+   `context.ts` if it needs to be on the child `PATH`.
+
+Managed tools are the platform's answer to the heterogeneous environments in
+which CVA6 runs. A contributor on Windows may not have `riscv64-unknown-elf-gcc`
+on their PATH; a CI runner may need a specific Verilator version; a laptop user
+may prefer to use system packages. The platform probes the host, downloads or
+builds the tool if allowed, and exposes it through `childEnv`. This gives every
+command a consistent view of the toolchain while respecting the user's choice
+to use system or managed tools.
+
+## Add a regression/test suite
+
+1. Add a `TestSuite` entry to `defaults.ts` `tests.suites` (or `.config.ts`):
+   - `id`, `description`, `script`, `group`, `target`, `dvSimulators`, `tools`
+   - optional: `dvTarget`, `testSuiteInstallers`, `requiresSubmodule`,
+     `requiresUvm`, `openSource`, `optional`
+2. Reference its `id` in `tests.defaultSuites` to include it in the default run.
+
+`test --list` and `bun test` discover suites from config with no further code
+change.
+
+The test suite catalog is config-driven. A new regression does not require a
+new TypeScript command; it requires a new entry in the suite list. The runner
+then preflights the suite, skips it if the environment is insufficient, and
+reports the result. This model scales to dozens of suites because the code that
+executes them is generic; only the metadata differs. It also makes it easy to
+mark a suite as open-source, optional, or UVM-dependent without touching the
+runner logic.
+
+## Add a vendored controller / PHY
+
+1. Add a `VendorControllerSpec` to `defaults.ts` `vendor.controllers` or
+   `.config.ts`:
+   - `id`, `description`, `domain`, `kind`, `mechanism`, `url`, `path`,
+     `license`, `status`, `enabled`, `scanPaths`, `integrationSeam`, `phyNote`,
+     `architectureDoc`
+2. (Optional) Add a per-domain outline under `architecture/uncore/`.
+
+`g6lc-build vendor list|status|sync|add|update|scan` discovers it automatically.
+
+The vendored controller catalog is the platform's extension point for uncore
+IP. By describing a controller in config rather than committing its source, the
+project keeps the repository free of stale or unlicensed copies while still
+supporting a rich set of peripherals. The catalog metadata records where the IP
+comes from, how it is integrated, and which PHY it requires. This is what
+allows `g6lc-build vendor sync` to be reproducible and auditable.
+
+## Add a motherboard
+
+1. Create `corev-mb/boards/<id>/board.json`.
+2. Write `corev-mb/architecture/<id>/README.md` and `AGENTS-mb-<id>.md`.
+3. Run `g6lc-build mb select <id>`.
+
+For custom boards, also use `g6lc-build mb create <id>` and the SKiDL flow.
+
+Adding a motherboard is the most cross-layer extension. It touches `corev-mb/`
+for the board spec and contract, `build-platform/src/tooling/motherboard.ts` for
+the generation logic, and potentially `corev_apu/` for the APU wrapper. The
+platform handles the common steps — validation, overlay writing, board package
+generation — so the contributor can focus on the board-specific details. This
+is the same additive philosophy: the core and APU are not edited, only
+configured.
+
+## Add a technology optimization
+
+See [NDA Optimization Pass](../technology/nda-optimization). The build-platform
+files to touch are:
+
+- `build-platform/src/config/schema.ts` — `TechnologyConfig` (already exists).
+- `build-platform/src/config/defaults.ts` — defaults (already exist).
+- `build-platform/src/tooling/technology.ts` — the engine.
+- `build-platform/src/cli/commands/technology.ts` — the `tech` command.
+
+## Host-adapt an independent package (worked example: timings)
+
+Some tools must stay **project-independent** (no monorepo imports in their
+crates). Integrate them the same way `timings` integrates `sv-timing/`:
+
+1. Keep the package under its own root with its own tests and AGENTS.
+2. Add host helpers under `build-platform/src/tooling/<name>.ts` that:
+   - expand project manifests (flists, env) into package-portable inputs;
+   - build argv / env;
+   - **spawn** the package CLI (never link monorepo modules into the package).
+3. Add `src/cli/commands/<name>.ts` + register it in `registry.ts`.
+4. Document the boundary in the package’s host guide and on this site
+   ([Timings](./timings), [sv-timing host integration](../sv-timing/host-integration)).
+
+Do not put CVA6 paths, `ariane_pkg`, or `edaEnv` into the independent package’s
+compile graph.
+
+## Validation after changes
+
+```bash
+cd build-platform
+bun install            # once, for dev type packages
+bunx tsc --noEmit      # strict type-check
+bun test               # fast unit tests (+ skipped regression specs)
+bun run src/cli/index.ts doctor
+```
+
+`bun run` needs no install; `tsc` and editor types do.
+
+The validation sequence is the safety net for platform changes. Type-checking
+catches schema and command signature errors before runtime. The unit tests
+verify config loading, suite discovery, and command dispatch. The `doctor`
+command confirms that the host environment is still healthy. Running these
+three commands after any platform change is the minimum due diligence; without
+them, a small TypeScript error can propagate into the whole build flow.

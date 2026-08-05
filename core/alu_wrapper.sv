@@ -10,7 +10,7 @@
 //
 // Original authors: Gianmarco Ottavi,  University of Bologna
 //                   Riccardo Tedeschi, University of Bologna
-// Description: ALU(s) wrapper
+// Description: ALU(s) wrapper — NrALUs instances (1 scalar, 2..4 multi-issue)
 
 module alu_wrapper
   import ariane_pkg::*;
@@ -26,6 +26,7 @@ module alu_wrapper
     output logic                                               alu_branch_res_o
 );
 
+  // Primary ALU always present (handles branch compare on port 0)
   alu #(
       .CVA6Cfg  (CVA6Cfg),
       .HasBranch(1'b1),
@@ -39,13 +40,12 @@ module alu_wrapper
       .alu_branch_res_o(alu_branch_res_o)
   );
 
-  if (CVA6Cfg.SuperscalarEn) begin : gen_alu2
-
+  // Secondary ALU with optional rs1/rs2 bypass from primary (dual-issue path)
+  if (CVA6Cfg.NrALUs >= 2) begin : gen_alu2
     fu_data_t fu_data_bypass;
 
     always_comb begin
       fu_data_bypass = fu_data_i[1];
-
       if (alu_bypass_i.rs1_from_rd) begin
         fu_data_bypass.operand_a = result_o[0];
       end
@@ -64,6 +64,22 @@ module alu_wrapper
         .fu_data_i       (fu_data_bypass),
         .fu_data_cpop_i  (fu_data_i[1]),
         .result_o        (result_o[1]),
+        .alu_branch_res_o(  /* Unconnected */)
+    );
+  end
+
+  // Extra ALUs for wider multi-issue (no cross-bypass; area-cheap precursor)
+  for (genvar a = 2; a < CVA6Cfg.NrALUs; a++) begin : gen_extra_alu
+    alu #(
+        .CVA6Cfg  (CVA6Cfg),
+        .HasBranch(1'b0),
+        .fu_data_t(fu_data_t)
+    ) alu_extra_i (
+        .clk_i           (clk_i),
+        .rst_ni          (rst_ni),
+        .fu_data_i       (fu_data_i[a]),
+        .fu_data_cpop_i  (fu_data_i[a]),
+        .result_o        (result_o[a]),
         .alu_branch_res_o(  /* Unconnected */)
     );
   end

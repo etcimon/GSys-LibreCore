@@ -119,10 +119,19 @@ module ariane_gate_tb;
         .irq_i                ( 2'b00 /*irqs*/      ),
         .ipi_i                ( 1'b0  /*ipi*/       ),
         .time_irq_i           ( 1'b0  /*timer_irq*/ ),
+        .rtc_time_i           ( 64'b0               ),
         .debug_req_i          ( 1'b0                ),
         .rvfi_probes_o        ( rvfi_probes         ),
         .noc_req_o            ( axi_ariane_req      ),
-        .noc_resp_i           ( axi_ariane_resp     )
+        .noc_resp_i           ( axi_ariane_resp     ),
+        .l1_inval_addr_i      ( 64'b0               ),
+        .l1_inval_valid_i     ( 1'b0                ),
+        .l1_inval_ready_o     (                     ),
+        .l2_miss_i            ( 1'b0                ),
+        .l3_hit_i             ( 1'b0                ),
+        .l3_miss_i            ( 1'b0                ),
+        .pf_issue_i           ( 1'b0                ),
+        .pf_train_i           ( 1'b0                )
     );
 
     `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)

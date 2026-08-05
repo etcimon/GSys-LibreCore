@@ -1,0 +1,172 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# build-platform — cross-platform verification of the Bun build platform.
+#
+# `verify` runs the platform end-to-end on Windows, Ubuntu and macOS (typecheck,
+# unit tests, config/list/dry-run) so a change to build-platform is proven on
+# every host. `smoke` (on-demand) provisions the open-source toolchain and runs
+# real Verilator+Spike smoke suites on Ubuntu.
+name: build-platform
+
+on:
+  push:
+    paths:
+      - 'build-platform/**'
+      - 'verif/sv-timing-tests/**'
+      - 'verif/regress/timings-sta-handoff.sh'
+      - 'verif/regress/sv-timing-*.sh'
+      - 'architecture/build-platform-*.md'
+      - '.config.ts'
+      - 'build.sh'
+      - 'build.ps1'
+      - '.github/workflows/build-platform.yml'
+  pull_request:
+    paths:
+      - 'build-platform/**'
+      - 'verif/sv-timing-tests/**'
+      - 'verif/regress/timings-sta-handoff.sh'
+      - 'verif/regress/sv-timing-*.sh'
+      - 'architecture/build-platform-*.md'
+      - '.config.ts'
+      - 'build.sh'
+      - 'build.ps1'
+      - '.github/workflows/build-platform.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-platform-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dev dependencies
+        working-directory: build-platform
+        run: bun install
+
+      - name: Typecheck (tsc --noEmit)
+        working-directory: build-platform
+        run: bunx tsc --noEmit
+
+      - name: Unit tests (bun test)
+        working-directory: build-platform
+        run: bun test
+
+      # Exercise the real bootstrap wrappers (install Bun if missing, then run
+      # the CLI). These commands never touch the network or build tools.
+      - name: Platform CLI (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x build.sh
+          ./build.sh config
+          ./build.sh test --list
+          ./build.sh test --open-source --dry-run
+          ./build.sh status
+          ./build.sh timings doctor
+          ./build.sh timings lab-run
+
+      - name: Timings lab-run report (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          test -f build-platform/workspace/build/sta-handoff/lab-run/lab-report.md
+          test -f build-platform/workspace/build/sta-handoff/lab-run/lab-report.json
+          test -f build-platform/workspace/build/sta-handoff/lab-run/seeds.sdc
+          test -f build-platform/workspace/build/sta-handoff/lab-run/opensta/paths.rpt
+          test -f build-platform/workspace/build/sta-handoff/lab-run/correlate.json
+          # Offline S3a: fixture inject must yield a numeric overlap_score (not null)
+          grep -E '"overlap_score"[[:space:]]*:[[:space:]]*[0-9]' \
+            build-platform/workspace/build/sta-handoff/lab-run/correlate.json
+          test -f build-platform/workspace/build/sta-handoff/lab-run/retune-proposal.md
+          grep -q 'cva6-fo4-retune-proposal' \
+            build-platform/workspace/build/sta-handoff/lab-run/retune-proposal.json
+          head -n 40 build-platform/workspace/build/sta-handoff/lab-run/lab-report.md
+
+      - name: Doctor — host readiness (Linux/macOS, informational)
+        if: runner.os != 'Windows'
+        continue-on-error: true
+        run: ./build.sh doctor
+
+      - name: Platform CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\build.ps1 config
+          .\build.ps1 test --list
+          .\build.ps1 test --open-source --dry-run
+          .\build.ps1 status
+          .\build.ps1 timings doctor
+          .\build.ps1 timings lab-run
+
+      - name: Timings lab-run report (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build-platform/workspace/build/sta-handoff/lab-run/lab-report.md)) { throw "missing lab-report.md" }
+          if (-not (Test-Path build-platform/workspace/build/sta-handoff/lab-run/lab-report.json)) { throw "missing lab-report.json" }
+          if (-not (Test-Path build-platform/workspace/build/sta-handoff/lab-run/seeds.sdc)) { throw "missing seeds.sdc" }
+          if (-not (Test-Path build-platform/workspace/build/sta-handoff/lab-run/opensta/paths.rpt)) { throw "missing injected paths.rpt" }
+          if (-not (Test-Path build-platform/workspace/build/sta-handoff/lab-run/correlate.json)) { throw "missing correlate.json" }
+          # Offline S3a: fixture inject must yield a numeric overlap_score (not null)
+          $corr = Get-Content build-platform/workspace/build/sta-handoff/lab-run/correlate.json -Raw
+          if ($corr -notmatch '"overlap_score"\s*:\s*[0-9]') { throw "overlap_score missing or null in correlate.json" }
+          if (-not (Test-Path build-platform/workspace/build/sta-handoff/lab-run/retune-proposal.md)) { throw "missing retune-proposal.md" }
+          $rp = Get-Content build-platform/workspace/build/sta-handoff/lab-run/retune-proposal.json -Raw
+          if ($rp -notmatch 'cva6-fo4-retune-proposal') { throw "retune-proposal.json schema missing" }
+          Get-Content build-platform/workspace/build/sta-handoff/lab-run/lab-report.md -TotalCount 40
+
+      - name: Doctor — host readiness (Windows, informational)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: .\build.ps1 doctor
+
+  smoke:
+    name: open-source smoke (ubuntu)
+    needs: verify
+    # Heavy (builds Verilator + Spike). Run on demand to conserve CI minutes.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache managed toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-platform/workspace/tooling
+            build-platform/workspace/.cache
+          key: ${{ runner.os }}-cva6-tooling-${{ hashFiles('verif/regress/install-verilator.sh', 'verif/regress/install-spike.sh', '.config.ts') }}
+
+      - name: Provision open-source toolchain
+        run: |
+          chmod +x build.sh
+          ./build.sh setup --install --allow-system-install
+
+      - name: Run open-source smoke suites
+        env:
+          CVA6_BUILD_RUN_HW: "1"
+        run: ./build.sh test --group smoke

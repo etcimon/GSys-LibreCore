@@ -1,0 +1,18 @@
+# U5 OoO freelist formal scaffold (bounded) — proves against real g6lc_freelist.
+# Run: sby -f core/ooo/formal/g6lc_ooo_freelist.sby
+# Wired into build-platform verify.formalTasks (cva6-build verify --formal).
+
+[options]
+mode prove
+depth 8
+
+[engines]
+smtbmc z3
+
+[script]
+read -formal g6lc_freelist.sv g6lc_ooo_freelist_props.sv
+prep -top g6lc_ooo_freelist_props
+
+[files]
+../g6lc_freelist.sv
+g6lc_ooo_freelist_props.sv

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Control and Status Registers (Vol II, chapter 2)</title></head>
+<body>
+<h1>Vol II chapter 2 — Control and Status Registers</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#priv-csrs">#priv-csrs</a> (chapter 2),
+<a href="../../specs/riscv-spec.html#_csr_addressing_conventions">#_csr_addressing_conventions</a> (2.1),
+<a href="../../specs/riscv-spec.html#_csr_listing">#_csr_listing</a> (2.2),
+<a href="../../specs/riscv-spec.html#_csr_field_specifications">#_csr_field_specifications</a> (2.3),
+<a href="../../specs/riscv-spec.html#_csr_width_modulation">#_csr_width_modulation</a> (2.4),
+<a href="../../specs/riscv-spec.html#_csr_standard_metadata">#_csr_standard_metadata</a> (2.5-2.7).
+Source line: <code>specs/riscv-spec.html:68926</code> (chapter 2).</p>
+
+<p>This chapter defines the CSR address space, read/write/modify behavior, WARL/WLRL/WPRI fields, and
+the standard CSR listings. It is the plumbing for all privileged CSRs in the core. Any new extension
+that adds CSRs must follow these addressing and field conventions.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The SYSTEM major opcode is used to encode all privileged instructions
+in the RISC-V ISA. These can be divided into two main classes: those
+that atomically read-modify-write control and status registers (CSRs),
+which are defined in the Zicsr extension, and all other privileged
+instructions. The privileged architecture requires the Zicsr extension."
+(specs/riscv-spec.html:68926-68932, anchor #priv-csrs)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module csr_regfile (
+  input  logic [11:0] addr_i,
+  input  logic        we_i,
+  input  logic [XLEN-1:0] wdata_i,
+  input  priv_lvl_e   priv_i,
+  output logic [XLEN-1:0] rdata_o,
+  output logic        illegal_o
+);
+  // decode priv bits [9:8]; WARL masks; read/write side effects
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented. The central CSR file <code>core/csr_regfile.sv</code>
+implements read/write/mask logic for M/S/U CSRs, privilege checks, and WARL semantics. CSR addresses
+are decoded from the instruction; illegal accesses raise an illegal-instruction exception. The RVFI
+CSR bundle in <code>core/include/rvfi_types.svh:38-92</code> enumerates the observable CSRs.</p>
+
+<p><strong>.dts linkage:</strong> many CSRs have SoC-visible effects (e.g. <code>mvendorid</code>,
+<code>marchid</code>, <code>mimpid</code>, <code>mhartid</code>); the CPU node in the DT reflects
+<code>misa</code>-derived ISA string and <code>mmu-type</code> matching the CSR configuration.</p>
+</body>
+</html>

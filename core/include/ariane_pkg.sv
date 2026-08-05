@@ -10,6 +10,7 @@
  *
  * File:   ariane_pkg.sv
  * Author: Florian Zaruba <zarubaf@iis.ee.ethz.ch>
+ * Modified by: Etienne Cimon
  * Date:   8.4.2017
  *
  * Description: Contains all the necessary defines for Ariane
@@ -356,6 +357,7 @@ package ariane_pkg;
     AMO_MAXWU,
     AMO_MINW,
     AMO_MINWU,
+    AMO_CASW,   // Zacas AMOCAS.W (expected in rd, new in rs2)
     AMO_SWAPD,
     AMO_ADDD,
     AMO_ANDD,
@@ -365,11 +367,17 @@ package ariane_pkg;
     AMO_MAXDU,
     AMO_MIND,
     AMO_MINDU,
-    // cache block operations (CBO)
+    AMO_CASD,   // Zacas AMOCAS.D
+    // cache block operations (CBO) — Zicbom + Zicboz
     CBO_CLEAN,
     CBO_FLUSH,
     CBO_INVAL,
+    CBO_ZERO,   // Zicboz: zero a cache block
     CBO_NONE,
+    // Zicbop prefetches (HINT → typically NOP at issue; kept for decode identity)
+    PREFETCH_I,
+    PREFETCH_R,
+    PREFETCH_W,
     // Multiplications
     MUL,
     MULH,
@@ -633,17 +641,38 @@ package ariane_pkg;
 
   function automatic logic is_amo(fu_op op);
     case (op) inside
-      [AMO_LRW : AMO_MINDU]: begin
+      [AMO_LRW : AMO_MINDU], AMO_CASW, AMO_CASD: begin
         return 1'b1;
       end
       default: return 1'b0;
     endcase
   endfunction
 
+  // Zacas: AMOCAS needs GPR[rd] as expected source (third operand).
+  function automatic logic is_amo_cas(fu_op op);
+    return (op == AMO_CASW) || (op == AMO_CASD);
+  endfunction
+
   // -------------------
   // Performance counter
   // -------------------
   localparam int unsigned MHPMCounterNum = 6;
+
+  // Width of the writable portion of mhpmeventN, split as
+  //   [MHPMEventWidth-1:MHPMEventIdxWidth] = event group
+  //   [MHPMEventIdxWidth-1:0]              = index within that group
+  // Group 0 is the historical 5-bit encoding, bit-for-bit unchanged, so
+  // existing software, tests and the Linux `riscv,pmu` mapping keep working.
+  // The remaining groups give each microarchitectural block a private 32-entry
+  // numbering space instead of one flat list that every feature must extend.
+  localparam int unsigned MHPMEventIdxWidth = 5;
+  localparam int unsigned MHPMEventGrpWidth = 3;
+  localparam int unsigned MHPMEventWidth = MHPMEventGrpWidth + MHPMEventIdxWidth;
+  localparam int unsigned MHPMEventGrpNum = 2 ** MHPMEventGrpWidth;
+  localparam int unsigned MHPMEventIdxNum = 2 ** MHPMEventIdxWidth;
+
+  // Event groups. Group 0 must stay first and unchanged (legacy encoding).
+  localparam logic [MHPMEventGrpWidth-1:0] MHPMGrpLegacy = 3'd0;
 
   // --------------------
   // Atomics
@@ -661,8 +690,8 @@ package ariane_pkg;
     AMO_MAXU = 4'b1001,
     AMO_MIN  = 4'b1010,
     AMO_MINU = 4'b1011,
-    AMO_CAS1 = 4'b1100,  // unused, not part of riscv spec, but provided in OpenPiton
-    AMO_CAS2 = 4'b1101   // unused, not part of riscv spec, but provided in OpenPiton
+    AMO_CAS1 = 4'b1100,  // Zacas AMOCAS (was OpenPiton CAS1 placeholder)
+    AMO_CAS2 = 4'b1101   // reserved / OpenPiton CAS2 (unused)
   } amo_t;
 
   // Bits required for representation of physical address space as 4K pages
@@ -693,7 +722,8 @@ package ariane_pkg;
     amo_t        amo_op;     // atomic memory operation to perform
     logic [1:0]  size;       // 2'b10 --> word operation, 2'b11 --> double word operation
     logic [63:0] operand_a;  // address
-    logic [63:0] operand_b;  // data as layouted in the register
+    logic [63:0] operand_b;  // data as layouted in the register (AMOCAS: new/swap value)
+    logic [63:0] operand_c;  // Zacas expected/compare value (AMOCAS only; else 0)
   } amo_req_t;
 
   // AMO response coming from cache.
@@ -795,7 +825,7 @@ package ariane_pkg;
             AMO_ANDD,  AMO_ORD,
             AMO_XORD,  AMO_MAXD,
             AMO_MAXDU, AMO_MIND,
-            AMO_MINDU: begin
+            AMO_MINDU, AMO_CASD: begin
         return 2'b11;
       end
       LW, LWU, HLV_W, HLV_WU, HLVX_WU,
@@ -805,12 +835,14 @@ package ariane_pkg;
             AMO_ANDW,  AMO_ORW,
             AMO_XORW,  AMO_MAXW,
             AMO_MAXWU, AMO_MINW,
-            AMO_MINWU: begin
+            AMO_MINWU, AMO_CASW: begin
         return 2'b10;
       end
       LH, LHU, HLV_H, HLV_HU, HLVX_HU, SH, HSV_H, FLH, FSH: return 2'b01;
       LB, LBU, HLV_B, HLV_BU, SB, HSV_B, FLB, FSB:          return 2'b00;
       CBO_CLEAN, CBO_FLUSH, CBO_INVAL:                      return 2'b00;
+      // CBO.ZERO: native XLEN zero stores; store_unit multi-beats the full D$ line
+      CBO_ZERO:                                             return 2'b11;
       default:                                              return 2'b11;
     endcase
   endfunction

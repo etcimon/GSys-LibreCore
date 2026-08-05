@@ -13,6 +13,8 @@ lint_off -rule WIDTHTRUNC -file "*/core/include/std_cache_pkg.sv"
 lint_off -file "*/corev_apu/*"
 lint_off -file "*/vendor/*"
 
+// SIDEEFFECT waived via Makefile -Wno-SIDEEFFECT for TB cast shims.
+
 lint_off -rule WIDTHEXPAND -file "*/core/cache_subsystem/axi_adapter.sv"
 lint_off -rule WIDTHEXPAND -file "*/core/axi_shim.sv"
 

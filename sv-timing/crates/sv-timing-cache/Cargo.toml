@@ -1,0 +1,22 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "sv-timing-cache"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CRC-32C + SQLite cache for partial timing IR rebuild"
+rust-version.workspace = true
+
+[dependencies]
+sv-timing-core = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+crc = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

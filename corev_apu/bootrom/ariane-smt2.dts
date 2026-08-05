@@ -1,0 +1,176 @@
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+// Copyright (c) 2026 Etienne Cimon
+//
+// Dual-hart SMT DTS for g6lc64_smt2_config_pkg (NrCores=1, NrHarts=2).
+//
+// Shape is taken only from the sparse Linux tree (fetch-linux-dts.ps1):
+//   «dts»/Documentation/devicetree/bindings/riscv/cpus.yaml  (hart = execution context)
+//   «dts»/Documentation/devicetree/bindings/riscv/extensions.yaml
+//   «dts»/Documentation/devicetree/bindings/timer/sifive,clint.yaml
+//   «dts»/Documentation/devicetree/bindings/interrupt-controller/sifive,plic-1.0.0.yaml
+//   «dts»/arch/riscv/boot/dts/sifive/fu540-c000.dtsi       (cpu + cpu-map + plic list form)
+//   «dts»/arch/riscv/boot/dts/microchip/mpfs.dtsi           (clint multi-hart list form)
+//
+// Topology (cpus.yaml): two harts share one physical core → cpu-map thread0/1 under core0.
+// mhartid 0 and 1 match CSR bank (hart_id_base + h) and CLINT/PLIC slot indices.
+//
+// Validate: .\build-platform\scripts\validate-cva6-dts.ps1
+// Unfixable gaps (no Linux vendor enum, no chip CLINT/PLIC ID): dts-linux-smt.md §3.2
+
+/dts-v1/;
+
+/ {
+  #address-cells = <2>;
+  #size-cells = <2>;
+  // Board-level model only — not a cpus.yaml vendor CPU ID
+  compatible = "eth,ariane-bare-dev";
+  model = "eth,ariane-smt2";
+
+  chosen {
+    stdout-path = "/soc/uart@10000000:115200";
+    // R1 rootfs-oriented defaults (override in FIT/U-Boot for SD root).
+    // earlycon matches ns16550a @ 0x10000000; maxcpus=2 for dual SMT harts.
+    bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio,0x10000000,115200n8 maxcpus=2 root=/dev/ram rw";
+  };
+
+  cpus {
+    #address-cells = <1>;
+    #size-cells = <0>;
+    // CLINT timebase (sifive,clint.yaml → /cpus timebase-frequency)
+    timebase-frequency = <32768>;
+
+    CPU0: cpu@0 {
+      device_type = "cpu";
+      // cpus.yaml: const "riscv" is the simulator-safe form (no eth,ariane enum)
+      compatible = "riscv";
+      reg = <0>;
+      status = "okay";
+      clock-frequency = <50000000>;
+      // Full Linux-boot feature set for g6lc64_smt2 (incl. Zacas AMOCAS.W/D).
+      // No RVV/"v" here — vector is only on ariane-server-math-v.dts (Ara).
+      // Spike ISS string (opensbi-linux-boot): injects zicsr/zifencei →
+      //   rv64imafdc_zicsr_zifencei_zba_zbb_zbs_zicbom_zicboz_zacas
+      riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
+      riscv,isa-base = "rv64i";
+      // Tokens only from extensions.yaml; set matches g6lc64_smt2_config_pkg
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "b",
+        "zicntr", "zicsr", "zifencei", "zihpm",
+        "zba", "zbb", "zbs",
+        "zcb", "zicond",
+        "zicbom", "zicboz", "zicbop",
+        "zacas",
+        "zkn",
+        "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+      mmu-type = "riscv,sv39";
+      tlb-split;
+      // CMO geometry (Zicbo*); block size 64 B is platform CMO, not L1 line width
+      riscv,cboz-block-size = <64>;
+      riscv,cbom-block-size = <64>;
+      // L1 truth: IcacheLineWidth/DcacheLineWidth = 128 bit → 16 B (do not advertise 64)
+      i-cache-block-size = <16>;
+      i-cache-size = <16384>;
+      d-cache-block-size = <16>;
+      d-cache-size = <32768>;
+
+      CPU0_intc: interrupt-controller {
+        #interrupt-cells = <1>;
+        interrupt-controller;
+        compatible = "riscv,cpu-intc";
+      };
+    };
+
+    CPU1: cpu@1 {
+      device_type = "cpu";
+      compatible = "riscv";
+      reg = <1>;
+      status = "okay";
+      clock-frequency = <50000000>;
+      riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
+      riscv,isa-base = "rv64i";
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "b",
+        "zicntr", "zicsr", "zifencei", "zihpm",
+        "zba", "zbb", "zbs",
+        "zcb", "zicond",
+        "zicbom", "zicboz", "zicbop",
+        "zacas",
+        "zkn",
+        "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+      mmu-type = "riscv,sv39";
+      tlb-split;
+      riscv,cboz-block-size = <64>;
+      riscv,cbom-block-size = <64>;
+      i-cache-block-size = <16>;
+      i-cache-size = <16384>;
+      d-cache-block-size = <16>;
+      d-cache-size = <32768>;
+
+      CPU1_intc: interrupt-controller {
+        #interrupt-cells = <1>;
+        interrupt-controller;
+        compatible = "riscv,cpu-intc";
+      };
+    };
+
+    // One physical core, two SMT threads (harts) — cpus.yaml terminology
+    cpu-map {
+      cluster0 {
+        core0 {
+          thread0 {
+            cpu = <&CPU0>;
+          };
+          thread1 {
+            cpu = <&CPU1>;
+          };
+        };
+      };
+    };
+  };
+
+  // Sim-friendly 256 MiB. FPGA Genesys2 DRAMLength is 1 GiB — board overlay
+  // may extend size to 0x40000000; keep honest for veri-testharness rootfs smoke.
+  memory@80000000 {
+    device_type = "memory";
+    reg = <0x0 0x80000000 0x0 0x10000000>;
+  };
+
+  soc {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    compatible = "simple-bus";
+    ranges;
+
+    // 2 harts × (MSIP=3, MTIP=7) — mpfs/fu540 multi-hart list form
+    // compatible: QEMU dual form (chip-id first string unfixable without product SKU)
+    clint@2000000 {
+      compatible = "sifive,clint0", "riscv,clint0";
+      interrupts-extended =
+        <&CPU0_intc 3>, <&CPU0_intc 7>,
+        <&CPU1_intc 3>, <&CPU1_intc 7>;
+      reg = <0x0 0x2000000 0x0 0xc0000>;
+    };
+
+    // 2 harts × (M-ext=11, S-ext=9) — 4 PLIC contexts (fu540 uses M+S per app hart)
+    PLIC0: interrupt-controller@c000000 {
+      compatible = "sifive,plic-1.0.0", "riscv,plic0";
+      #address-cells = <0>;
+      #interrupt-cells = <1>;
+      interrupt-controller;
+      interrupts-extended =
+        <&CPU0_intc 11>, <&CPU0_intc 9>,
+        <&CPU1_intc 11>, <&CPU1_intc 9>;
+      reg = <0x0 0xc000000 0x0 0x4000000>;
+      riscv,ndev = <30>;
+    };
+
+    uart@10000000 {
+      compatible = "ns16550a";
+      reg = <0x0 0x10000000 0x0 0x1000>;
+      clock-frequency = <50000000>;
+      current-speed = <115200>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <1>;
+      reg-shift = <2>;
+      reg-io-width = <4>;
+    };
+  };
+};

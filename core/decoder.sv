@@ -10,6 +10,7 @@
 //
 // File:   issue_read_operands.sv
 // Author: Florian Zaruba <zarubaf@ethz.ch>
+// Modified by: Etienne Cimon
 // Date:   8.4.2017
 //
 // Copyright (C) 2017 ETH Zurich, University of Bologna
@@ -18,6 +19,15 @@
 // Description: Issues instruction from the scoreboard and fetches the operands
 //              This also includes all the forwarding logic
 //
+
+// ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
+// The original work of the copyright holders named above remains licensed
+// under the license stated above, and that grant is unaffected.
+// Modifications (c) 2026 Etienne Cimon: OoO dispatch fields, hypervisor instruction decode, Zb* and CMO decode.
+// The upstream notice above is prose and declares no SPDX identifier, so the
+// outbound offer is stated here as the file's single SPDX tag. See REUSE.toml.
+// Etienne Cimon offers this file AS A WHOLE under:
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 
 module decoder
   import ariane_pkg::*;
@@ -90,12 +100,20 @@ module decoder
     input riscv::cbie_t scbie_i,
     // hypervisor-mode cache block invalidate enable - CSR_REGFILE
     input riscv::cbie_t hcbie_i,
-    // machine-mode clean/flush cache block invalidate enable - CSR_REGFILE
+    // machine-mode clean/flush cache block enable - CSR_REGFILE
     input logic mcbcfe_i,
-    // supervisor-mode clean/flush cache block invalidate enable - CSR_REGFILE
+    // supervisor-mode clean/flush cache block enable - CSR_REGFILE
     input logic scbcfe_i,
-    // hypervisor-mode clean/flush cache block invalidate enable - CSR_REGFILE
+    // hypervisor-mode clean/flush cache block enable - CSR_REGFILE
     input logic hcbcfe_i,
+    // machine-mode cbo.zero enable (menvcfg.CBZE) - CSR_REGFILE
+    input logic mcbze_i,
+    // supervisor-mode cbo.zero enable (senvcfg.CBZE) - CSR_REGFILE
+    input logic scbze_i,
+    // hypervisor-mode cbo.zero enable (henvcfg.CBZE) - CSR_REGFILE
+    input logic hcbze_i,
+    // U6.1 SMT active thread tag (0 when NrHarts==1) - SMT
+    input logic [((CVA6Cfg.NrHarts <= 1) ? 1 : $clog2(CVA6Cfg.NrHarts))-1:0] smt_hart_id_i,
     // Instruction to be added to scoreboard entry - ISSUE_STAGE
     output scoreboard_entry_t instruction_o,
     // Instruction - ISSUE_STAGE
@@ -196,6 +214,7 @@ module decoder
     instruction_o.bp                       = branch_predict_i;
     instruction_o.vfp                      = 1'b0;
     instruction_o.is_zcmt                  = is_zcmt_i;
+    instruction_o.hart_id                  = smt_hart_id_i;
     ecall                                  = 1'b0;
     ebreak                                 = 1'b0;
     check_fprm                             = 1'b0;
@@ -290,6 +309,30 @@ module decoder
                   if (CVA6Cfg.RVU && priv_lvl_i == riscv::PRIV_LVL_U) begin
                     if (CVA6Cfg.RVH && v_i) virtual_illegal_instr = 1'b1;
                     else illegal_instr = 1'b1;
+                    instruction_o.op = ariane_pkg::ADD;
+                  end
+                end
+                // Zawrs: WRS.NTO (imm=0x00d) / WRS.STO (imm=0x01d) — wait like WFI
+                12'b0_0000_1101,  // WRS.NTO
+                12'b0_0001_1101: begin  // WRS.STO
+                  if (CVA6Cfg.ZawrsEn) begin
+                    // Same privilege/TW rules as WFI; STO timeout is microarch (treat as WFI)
+                    instruction_o.op = ariane_pkg::WFI;
+                    if (CVA6Cfg.RVS && priv_lvl_i == riscv::PRIV_LVL_S && tw_i) begin
+                      illegal_instr = 1'b1;
+                      instruction_o.op = ariane_pkg::ADD;
+                    end
+                    if (CVA6Cfg.RVH && priv_lvl_i == riscv::PRIV_LVL_S && v_i && vtw_i && !tw_i) begin
+                      virtual_illegal_instr = 1'b1;
+                      instruction_o.op = ariane_pkg::ADD;
+                    end
+                    if (CVA6Cfg.RVU && priv_lvl_i == riscv::PRIV_LVL_U) begin
+                      if (CVA6Cfg.RVH && v_i) virtual_illegal_instr = 1'b1;
+                      else illegal_instr = 1'b1;
+                      instruction_o.op = ariane_pkg::ADD;
+                    end
+                  end else begin
+                    illegal_instr = 1'b1;
                     instruction_o.op = ariane_pkg::ADD;
                   end
                 end
@@ -463,63 +506,95 @@ module decoder
           instruction_o.rd  = '0;
 
           case (instr.stype.funct3)
-            // FENCE
-            // Currently implemented as a whole DCache flush boldly ignoring other things
-            3'b000: instruction_o.op = ariane_pkg::FENCE;
+            // FENCE — or PAUSE when Zihintpause is enabled.
+            // PAUSE is the HINT encoding fm=0, pred=W, succ=0, rd=x0, rs1=x0
+            // (imm[11:0] = 12'h010). Architecturally legal as a zero-duration HINT;
+            // with ZihintpauseEn we decode it as a pure NOP so it does not flush D$.
+            3'b000: begin
+              if (CVA6Cfg.ZihintpauseEn &&
+                  instr.itype.rs1 == '0 &&
+                  instr.itype.rd == '0 &&
+                  instr.itype.imm == 12'h010) begin
+                instruction_o.fu  = ALU;
+                instruction_o.op  = ariane_pkg::ADD;
+                instruction_o.rs1 = '0;
+                instruction_o.rs2 = '0;
+                instruction_o.rd  = '0;
+              end else begin
+                // Currently implemented as a whole DCache flush boldly ignoring other things
+                instruction_o.op = ariane_pkg::FENCE;
+              end
+            end
             // FENCE.I
             3'b001: instruction_o.op = ariane_pkg::FENCE_I;
-            // CBO - optional
+            // CBO — Zicbom (inval/clean/flush) and Zicboz (zero)
             3'b010: begin
-              if (CVA6Cfg.RVZiCbom) begin
+              if (CVA6Cfg.RVZiCbom || CVA6Cfg.RVZiCboz) begin
                 instruction_o.fu = STORE;
                 instruction_o.rs1[4:0] = instr.itype.rs1;
-                // not used - zero
                 instruction_o.rs2[4:0] = '0;
                 unique case (instr.itype.imm)
-                  // CBO.INVAL
-                  12'b000000000000: instruction_o.op = ariane_pkg::CBO_INVAL;
-                  // CBO.CLEAN
-                  12'b000000000001: instruction_o.op = ariane_pkg::CBO_CLEAN;
-                  // CBO.FLUSH
-                  12'b000000000010: instruction_o.op = ariane_pkg::CBO_FLUSH;
+                  // CBO.INVAL (Zicbom)
+                  12'b000000000000: begin
+                    if (CVA6Cfg.RVZiCbom) instruction_o.op = ariane_pkg::CBO_INVAL;
+                    else illegal_instr = 1'b1;
+                  end
+                  // CBO.CLEAN (Zicbom)
+                  12'b000000000001: begin
+                    if (CVA6Cfg.RVZiCbom) instruction_o.op = ariane_pkg::CBO_CLEAN;
+                    else illegal_instr = 1'b1;
+                  end
+                  // CBO.FLUSH (Zicbom)
+                  12'b000000000010: begin
+                    if (CVA6Cfg.RVZiCbom) instruction_o.op = ariane_pkg::CBO_FLUSH;
+                    else illegal_instr = 1'b1;
+                  end
+                  // CBO.ZERO (Zicboz) — imm[11:0] = 4
+                  12'b000000000100: begin
+                    if (CVA6Cfg.RVZiCboz) instruction_o.op = ariane_pkg::CBO_ZERO;
+                    else illegal_instr = 1'b1;
+                  end
                   default: illegal_instr = 1'b1;
                 endcase
 
-                if (instruction_o.op == ariane_pkg::CBO_INVAL) begin
-                  // permissions checks
+                if (CVA6Cfg.RVZiCbom && instruction_o.op == ariane_pkg::CBO_INVAL) begin
                   if((priv_lvl_i != riscv::PRIV_LVL_M && mcbie_i == riscv::CBIE_ILLEGAL) ||
                     (CVA6Cfg.RVU && priv_lvl_i == riscv::PRIV_LVL_U && scbie_i == riscv::CBIE_ILLEGAL)) begin
-                    // disabled in M-mode / S-mode
                     illegal_instr = 1'b1;
                   end
                   else if((priv_lvl_i == riscv::PRIV_LVL_HS && hcbie_i == riscv::CBIE_ILLEGAL) ||
                     (priv_lvl_i == riscv::PRIV_LVL_U && hu_i) ) begin
-                    // disabled in HS-mode / H-mode
                     virtual_illegal_instr = 1'b1;
                   end else begin
-                    if((priv_lvl_i != riscv::PRIV_LVL_M && mcbie_i == riscv::CBIE_FLUSH) || 
+                    if((priv_lvl_i != riscv::PRIV_LVL_M && mcbie_i == riscv::CBIE_FLUSH) ||
                       (priv_lvl_i == riscv::PRIV_LVL_U && scbie_i == riscv::CBIE_FLUSH) ||
                       (priv_lvl_i == riscv::PRIV_LVL_HS && hcbie_i == riscv::CBIE_FLUSH) ||
                       (priv_lvl_i == riscv::PRIV_LVL_U && hu_i && (hcbie_i == riscv::CBIE_FLUSH || scbie_i == riscv::CBIE_FLUSH))) begin
-                      // have to flush instead of invalidate
                       instruction_o.op = ariane_pkg::CBO_FLUSH;
                     end
                   end
-                  // otherwise: normal invalidate
                 end
 
-                if (instruction_o.op inside {ariane_pkg::CBO_CLEAN, ariane_pkg::CBO_FLUSH}) begin
+                if (CVA6Cfg.RVZiCbom && instruction_o.op inside {ariane_pkg::CBO_CLEAN, ariane_pkg::CBO_FLUSH}) begin
                   if((priv_lvl_i != riscv::PRIV_LVL_M && !mcbcfe_i) ||
                     (priv_lvl_i == riscv::PRIV_LVL_U && !scbcfe_i)) begin
-                    // disabled in m-mode / s-mode
                     illegal_instr = 1'b1;
                   end
                   else if((priv_lvl_i == riscv::PRIV_LVL_HS && !hcbcfe_i) ||
                           (priv_lvl_i == riscv::PRIV_LVL_U && hu_i && !(hcbcfe_i && scbcfe_i))) begin
-                    // disabled in HS-mode / H-mode
                     virtual_illegal_instr = 1'b1;
                   end
-                  // otherwise: normal flush / clean
+                end
+
+                // CBO.ZERO: gated by xenvcfg.CBZE (same privilege shape as CBCFE)
+                if (instruction_o.op == ariane_pkg::CBO_ZERO) begin
+                  if ((priv_lvl_i != riscv::PRIV_LVL_M && !mcbze_i) ||
+                      (priv_lvl_i == riscv::PRIV_LVL_U && !scbze_i)) begin
+                    illegal_instr = 1'b1;
+                  end else if ((priv_lvl_i == riscv::PRIV_LVL_HS && !hcbze_i) ||
+                               (priv_lvl_i == riscv::PRIV_LVL_U && hu_i && !(hcbze_i && scbze_i))) begin
+                    virtual_illegal_instr = 1'b1;
+                  end
                 end
               end else begin
                 illegal_instr = 1'b1;
@@ -1122,6 +1197,19 @@ module decoder
           imm_select = IIMM;
           instruction_o.rs1 = instr.itype.rs1;
           instruction_o.rd = instr.itype.rd;
+          // Zicbop PREFETCH.{I,R,W}: ORI HINT with rd=x0, imm[4:0]=0;
+          // imm[11:5] ∈ {0,1,3}. itype.imm is [31:20] so use [24:20]/[31:25].
+          // Execute as architectural NOP (ADD x0,x0,x0).
+          if (CVA6Cfg.RVZiCbop &&
+              instr.itype.funct3 == 3'b110 &&
+              instr.itype.rd == 5'b0 &&
+              instr.itype.imm[24:20] == 5'b0 &&
+              (instr.itype.imm[31:25] inside {7'd0, 7'd1, 7'd3})) begin
+            instruction_o.op  = ariane_pkg::ADD;
+            instruction_o.rs1 = '0;
+            instruction_o.rd  = '0;
+            imm_select        = NOIMM;
+          end else begin
           unique case (instr.itype.funct3)
             3'b000: instruction_o.op = ariane_pkg::ADD;  // Add Immediate
             3'b010: instruction_o.op = ariane_pkg::SLTS;  // Set to one if Lower Than Immediate
@@ -1146,6 +1234,7 @@ module decoder
               if (instr.instr[25] != 1'b0 && CVA6Cfg.IS_XLEN32) illegal_instr_non_bm = 1'b1;
             end
           endcase
+          end
           if (CVA6Cfg.RVB) begin
             unique case (instr.itype.funct3)
               3'b001: begin
@@ -1617,6 +1706,13 @@ module decoder
               end
               5'h3: instruction_o.op = ariane_pkg::AMO_SCW;
               5'h4: instruction_o.op = ariane_pkg::AMO_XORW;
+              // Zacas AMOCAS.W — funct5=00101; rd holds expected (third source)
+              5'h5: begin
+                if (CVA6Cfg.RVZacas) begin
+                  instruction_o.op = ariane_pkg::AMO_CASW;
+                  imm_select = MUX_RD_RS3;  // result = rd addr → GPR expected
+                end else illegal_instr = 1'b1;
+              end
               5'h8: instruction_o.op = ariane_pkg::AMO_ORW;
               5'hC: instruction_o.op = ariane_pkg::AMO_ANDW;
               5'h10: instruction_o.op = ariane_pkg::AMO_MINW;
@@ -1636,6 +1732,13 @@ module decoder
               end
               5'h3: instruction_o.op = ariane_pkg::AMO_SCD;
               5'h4: instruction_o.op = ariane_pkg::AMO_XORD;
+              // Zacas AMOCAS.D
+              5'h5: begin
+                if (CVA6Cfg.RVZacas) begin
+                  instruction_o.op = ariane_pkg::AMO_CASD;
+                  imm_select = MUX_RD_RS3;
+                end else illegal_instr = 1'b1;
+              end
               5'h8: instruction_o.op = ariane_pkg::AMO_ORD;
               5'hC: instruction_o.op = ariane_pkg::AMO_ANDD;
               5'h10: instruction_o.op = ariane_pkg::AMO_MIND;
@@ -1912,6 +2015,13 @@ module decoder
       // Hypervisor Guest External Interrupts
       if (irq_ctrl_i.mie[riscv::IRQ_HS_EXT] && irq_ctrl_i.mip[riscv::IRQ_HS_EXT]) begin
         interrupt_cause = INTERRUPTS.HS_EXT;
+      end
+    end
+    // Sscofpmf LCOFI has the lowest default priority among the standard major
+    // interrupts, so it is evaluated first (later assignments win).
+    if (CVA6Cfg.SscofpmfEn) begin
+      if (irq_ctrl_i.mie[riscv::IRQ_LCOF] && irq_ctrl_i.mip[riscv::IRQ_LCOF]) begin
+        interrupt_cause = INTERRUPTS.LCOF;
       end
     end
     if (CVA6Cfg.RVS) begin

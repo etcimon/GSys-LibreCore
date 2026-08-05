@@ -502,8 +502,9 @@ module axi_adapter #(
       result = {axi_pkg::ATOP_ATOMICLOAD, axi_pkg::ATOP_LITTLE_END, axi_pkg::ATOP_SMIN};
       ariane_pkg::AMO_MINU:
       result = {axi_pkg::ATOP_ATOMICLOAD, axi_pkg::ATOP_LITTLE_END, axi_pkg::ATOP_UMIN};
-      ariane_pkg::AMO_CAS1: result = {axi_pkg::ATOP_NONE, 4'b0000};  // Unsupported
-      ariane_pkg::AMO_CAS2: result = {axi_pkg::ATOP_NONE, 4'b0000};  // Unsupported
+      // Zacas AMOCAS → AXI ATOMICCMP (compare||swap in W data; adapter packs)
+      ariane_pkg::AMO_CAS1: result = {axi_pkg::ATOP_ATOMICCMP};
+      ariane_pkg::AMO_CAS2: result = {axi_pkg::ATOP_NONE, 4'b0000};  // reserved
       default: result = 6'b000000;
     endcase
 

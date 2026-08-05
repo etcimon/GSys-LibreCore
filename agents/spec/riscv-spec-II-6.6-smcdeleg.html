@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Smcdeleg / Ssccfg Counter Delegation (Vol II, 6.6)</title></head>
+<body>
+<h1>Vol II &sect;6.6 — Smcdeleg and Ssccfg Counter Delegation Extensions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#smcdeleg">specs/riscv-spec.html#smcdeleg</a>.
+Source line: <code>specs/riscv-spec.html:85274</code>. <strong>Domain:</strong> —.</p>
+
+<p>Smcdeleg/Ssccfg allow M-mode to delegate control of performance-counter event selection and
+filtering to S-mode. This supports OS-level profiling without M-mode intervention for every counter
+configuration change.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"In modern 'Rich OS' environments, hardware performance monitoring
+resources are managed by the kernel, kernel driver, and/or hypervisor.
+Counters may be configured with differing scopes ... In such
+environments, the latency of counter writes has a direct impact on
+overall profiling overhead."
+(specs/riscv-spec.html:85274-85280, anchor #smcdeleg)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module counter_delegation (
+  input  logic [XLEN-1:0] mcountinhibit_i, sscfg_i,
+  input  logic            delegate_i,
+  output logic [XLEN-1:0] effective_config_o
+);
+  // S-mode controls counters delegated by M-mode
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. Counter access control in <code>core/csr_regfile.sv</code>
+does not delegate <code>mhpmevent</code> or counter-filter CSRs to S-mode; there is no
+<code>scountercfg</code>/<code>mcountercfg</code> delegation path.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Smcdeleg/Ssccfg are CSR behavior extensions with no direct
+device-tree property.</p>
+</body>
+</html>

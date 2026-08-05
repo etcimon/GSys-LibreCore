@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Memory (Vol I, 1.4)</title></head>
+<body>
+<h1>Vol I &sect;1.4 — Memory</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#sec:intro-memory">specs/riscv-spec.html#sec:intro-memory</a>.
+<strong>Domain:</strong> RAM.</p>
+
+<p>The &sect;1.4 objective is to define the address space abstraction: a RISC-V hart has a single
+byte-addressable address space of 2<sup>XLEN</sup> bytes, with a byte of 8 bits. Loads and stores
+are defined on this flat space; the canonical split between main memory and memory-mapped I/O is not
+part of the ISA itself but is realized by Physical Memory Attributes (<a href="../spec/riscv-spec-II-3.6-pma.html">II 3.6</a>).
+This anchors all later memory-model, cache, and MMU discussion.</p>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module address_space #(parameter int XLEN)(
+  input  logic [XLEN-1:0] addr_i,
+  input  logic            load_i, store_i, fetch_i,
+  // main memory / MMIO split is a PMA attribute, not an address-space difference
+  output logic            main_memory_o, mmio_o
+);
+  // byte addressable, no ISA-imposed holes
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented; address generation and MMU in <code>core/cva6_mmu/</code>,
+LSU in <code>core/load_store_unit.sv</code>, region rules in <code>core/include/config_pkg.sv</code>.</p>
+</body>
+</html>

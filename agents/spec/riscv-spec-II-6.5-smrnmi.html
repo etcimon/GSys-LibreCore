@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Smrnmi Resumable NMI (Vol II, 6.5)</title></head>
+<body>
+<h1>Vol II &sect;6.5 — Smrnmi Extension for Resumable Non-Maskable Interrupts</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#rnmi">specs/riscv-spec.html#rnmi</a>.
+Source line: <code>specs/riscv-spec.html:85026</code>. <strong>Domain:</strong> SPEC.</p>
+
+<p>Smrnmi provides resumable NMIs with dedicated CSRs (<code>mnscratch</code>, <code>mnePc</code>,
+<code>mncause</code>, <code>mnstatus</code>) that shadow the normal M-mode trap CSRs. The handler can
+return with <code>mnret</code> to resume the interrupted context. It requires the core to swap trap
+state without using the normal exception path.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The base machine-level architecture supports only unresumable
+non-maskable interrupts (UNMIs), where the NMI jumps to a handler in
+machine mode, overwriting the current mepc and mcause register values.
+If the hart had been executing machine-mode code in a trap handler, the
+previous values in mepc and mcause would not be recoverable and so
+execution is not generally resumable."
+(specs/riscv-spec.html:85026-85033, anchor #rnmi)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module smrnmi_unit (
+  input  logic        nmi_i,
+  input  logic [XLEN-1:0] pc_i,
+  input  logic [XLEN-1:0] cause_i,
+  output logic        take_rmnmi_o,
+  output logic [XLEN-1:0] mnepc_o
+);
+  // save state to NMI CSRs; mnret restores from mnepc
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. There are no <code>mnscratch</code>, <code>mnepc</code>,
+<code>mncause</code>, <code>mnstatus</code> CSRs in <code>core/csr_regfile.sv</code> and no
+<code>mnret</code> instruction decode/sequencing in <code>core/controller.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Smrnmi would be advertised in the
+<code>riscv,isa</code> string if implemented.</p>
+</body>
+</html>

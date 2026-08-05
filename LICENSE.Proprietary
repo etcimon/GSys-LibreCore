@@ -1,0 +1,29 @@
+Proprietary License — Etienne Cimon / CVA6V-EC
+
+Copyright (c) 2026 Etienne Cimon. All rights reserved.
+
+This software and associated documentation files (the "Software"), including
+net-new RTL, build-platform tooling, verification assets, and other files
+marked with:
+
+    SPDX-License-Identifier: LicenseRef-Proprietary
+
+are proprietary to Etienne Cimon (and any co-rights holders named in the
+file headers).
+
+NO LICENSE is granted to any third party to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, except under a
+separate written agreement with the copyright holder(s).
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Note: Files in this repository that carry other SPDX identifiers (for example
+Apache-2.0 WITH SHL-2.1, Apache-2.0, BSD-3-Clause, or upstream vendor licenses)
+remain under those licenses. This file applies only to LicenseRef-Proprietary
+works.

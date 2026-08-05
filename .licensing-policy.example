@@ -1,0 +1,34 @@
+# .licensing-policy.example  —  template; copy to `.licensing-policy` (drop the .example).
+#
+# Multi-select policy for how agents apply license headers / attribution when editing ACTUAL CODE.
+# See AGENTS-licensing.md for full semantics, the codebase license catalog, and the resolution order.
+# Enable a directive by UNCOMMENTING its line. Lines starting with `#` are disabled.
+#
+# SCOPE: code only (.sv/.svh/.v, .c/.h/.cpp, .py, .S, .tcl, Makefile, .sh, ...).
+# NEVER applies to AGENTS*.md, agents/**, specs/**, docs/**, *.md, or LICENSE* files.
+# If `.active-contributor` or `.licensing-policy` is missing on an in-scope edit, agents MUST error.
+
+# --- Base directive: what to do when editing an existing code file --------------------------------
+# Inherit and PRESERVE the file's own declared SPDX license (never rewrite an existing license).
+# DEFAULT_TO_FILE_LICENSE
+
+# --- Selection strategy: how to CHOOSE a license for a NEW file / a file with no header ------------
+# Enable AT MOST ONE of the following (two or more => E-MULTISELECT error).
+# Most permissive hardware license in the codebase (=> Apache-2.0 WITH SHL-2.1).
+# SELECT_MOST_PERMISSIVE
+# Most personally-protecting codebase license (patent grant + retaliation + liability limit).
+# SELECT_MOST_PROTECTIVE
+# Most restrictive codebase license (bounded by the permissive in-repo set; no copyleft present).
+# SELECT_MOST_RESTRICTIVE
+
+# --- Personal-contribution directives (apply only to net-new, contributor-authored files) ---------
+# Allow the active contributor's new files to carry a different license than the codebase default.
+# ALLOW_PERSONAL_LICENSE
+# The SPDX id to use when ALLOW_PERSONAL_LICENSE is enabled (required, else E-PERSONAL).
+# PERSONAL_LICENSE=LicenseRef-Proprietary
+# Write the chosen personal-license notice into new files' headers.
+# ADD_PERSONAL_LICENSE_HEADER
+
+# --- Attribution ----------------------------------------------------------------------------------
+# Add the active contributor (from .active-contributor) to the file's author/attribution line.
+# ADD_CONTRIBUTOR_NAME

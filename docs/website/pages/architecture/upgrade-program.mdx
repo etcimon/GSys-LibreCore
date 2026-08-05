@@ -1,0 +1,113 @@
+---
+title: Upgrade Program
+description: Product-level map of GSys LibreCore microarchitecture upgrades (U1–U10) — what shipped, what is gated, and where to read next.
+---
+
+# Upgrade Program
+
+GSys LibreCore evolves the baseline OpenHW CVA6 core through a ranked **upgrade
+program**. Features are **config-gated**: minimal targets keep identity with
+the classic in-order machine; production profiles opt into wider issue, OoO,
+SMT, L2/L3, hypervisor, and server math packages.
+
+Authority and status detail live under monorepo `architecture/` (not flisted
+RTL). This page is the **product map** for humans and agents.
+
+| Document | Role |
+|---|---|
+| `architecture/README.md` | Scaffold contract + **live RTL summary** |
+| `architecture/router-core-upgrade-program.md` | Perf/W-ranked upgrade program |
+| `architecture/remaining-upgrade-sequence.md` | Post-U6 queue and enable recipes |
+
+## Snapshot (product view)
+
+Statuses below summarize the architecture tree; re-check those docs before
+claiming a gate is “done” for a specific target package.
+
+| Track | Product meaning | Typical gate / package |
+|---|---|---|
+| **U1–U3** Frontend fabric | Stronger prediction, FTQ/FDIP, cache way-pred / RRIP | Primary 64b targets; target-dependent |
+| **U4** Slice-OoO | Limited out-of-order slice path | `SliceOoOEn` (often **off** by default) |
+| **U5** Full OoO | Rename / IQ / ROB / LSQ backend | `OoOEn` — identity when 0 |
+| **Multi-issue** | 2–8 issue ports | `NrIssuePorts` / `SuperscalarEn` |
+| **U6.0** L2 | Memory-side L2 under APU | `L2En` (often **off** by default) |
+| **U6.1** SMT2 | Dual hardware threads | `NrHarts=2`, `cv64a6_smt2_*` |
+| **U6.2** Multi-core hub | Multi-hart tile / coherence | `NrCores` + APU hub |
+| **U7** ISA extras | CBO / bitmanip / related | Decoder + cache policy |
+| **U9** Hypervisor + Sstc | KVM-oriented timer / VS | `RVH`, `Sstc`, server packages |
+| **U10** Server math | HPDCACHE + HWPF + L2 auto, RVB/Zicbo* | `cv64a6_server_math_*` |
+| **U10ᵇ** RVV / Ara | Vector attach | Partial — see vector guide |
+
+## Layering principle
+
+```
+Classic in-order CVA6  (OoOEn=0, NrHarts=1, L2En=0, …)
+        │  opt-in packages / knobs
+        ▼
+Wider issue → slice OoO → full OoO
+        │
+        ▼
+SMT (shared pipeline, banked arch state)
+        │
+        ▼
+L2 / L3 / server prefetch (APU memory side)
+        │
+        ▼
+H + Sstc + server math / RVV packages
+```
+
+**Never** enable a wide stack without the SoC-readiness checklist
+(`AGENTS.md` §0.2): config gate, verify target, DFT, observability, DTS when
+software-visible.
+
+## Product pages (detail)
+
+| Topic | Page |
+|---|---|
+| Package comparison | [SKU Matrix](./sku-matrix) |
+| Frontend / prediction fabric | [Frontend Extensions](../core/frontend-extensions) |
+| Multi-issue | [Multi-Issue](../core/multi-issue) |
+| Out-of-order | [Out-of-Order Execution](../core/out-of-order) |
+| SMT | [Simultaneous Multithreading](../core/smt) |
+| Multi-core cluster | [Multi-Core Cluster](../corev-apu/multi-core) |
+| L2 / L3 / prefetch | [L2 / L3 Cache](../corev-apu/l2-l3-cache) |
+| Hypervisor / Sstc | [Hypervisor & Sstc](../core/hypervisor) |
+| RVV / Ara | [Vector (RVV) & Ara](../core/vector) |
+| Server / KVM-oriented packages | [Server Profiles](../core/server-profiles) |
+
+## Operator enable (examples)
+
+Package names evolve; treat these as **illustrative** and confirm against
+`core/include/*_config_pkg.sv` and `.config.ts` `soc.coreConfig`.
+
+```bash
+# In-order dual-issue-style / default Linux-class 64b
+g6lc-build config   # inspect soc.coreConfig
+
+# Full OoO production lite / server
+#   g6lc64_ooo  |  g6lc64_ooo_server
+g6lc-build verify --target g6lc64_ooo
+g6lc-build test --suite ooo-l3-tests   # optional, lengthy
+
+# SMT2
+#   g6lc64_smt2
+g6lc-build verify --target g6lc64_smt2
+
+# Server math (H, Sstc, L2 auto, …)
+#   g6lc64_server_math  |  g6lc64_server_math_v (RVV when Ara linked)
+```
+
+## What “production gated” means
+
+- **Production:** intended for real targets; tested under named packages.
+- **Gated:** default or minimal configs keep the feature **off** so netlists
+  stay identity with the classic path unless a package opts in.
+- **Optional suites** (e.g. `ooo-l3-tests`, full Linux SMT payloads) may be
+  excluded from default `verify` for **runtime cost**, not because the RTL is
+  “experimental.”
+
+## Structural timing
+
+Frequency risk grows with issue width and OoO depth. Use
+[`sv-timing`](../sv-timing) / `g6lc-build timings` for **early structural FO4**
+feedback. It does not replace STA on the target library.

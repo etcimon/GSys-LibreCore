@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Scalar Integer Extensions Zicsr/Zicntr/M/Zmmul/Zicond (Vol I, 4.2-4.16)</title></head>
+<body>
+<h1>Vol I &sect;4.2-4.16 — Scalar Integer Extensions (Zicsr, Zicntr, M, Zmmul, Zicond, ...)</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#ext:zicsr">#ext:zicsr</a> (4.2-4.3 Zicsr),
+<a href="../../specs/riscv-spec.html#ext:m">#ext:m</a> (4.5 M/Zmmul),
+<a href="../../specs/riscv-spec.html#ext:zicond">#ext:zicond</a> (4.16 Zicond),
+<a href="../../specs/riscv-spec.html#ext:zicntr">#ext:zicntr</a>/<a href="../../specs/riscv-spec.html#ext:zihpm">#ext:zihpm</a> (4.12-4.13 counters).
+Source lines: <code>specs/riscv-spec.html:9064</code> (Zicsr), <code>:9603</code> (M), <code>:10063</code>
+(Zicond), <code>:10627</code> (Zicntr/Zihpm).</p>
+
+<p>This group contains the remaining unprivileged scalar integer extensions: Zicsr (CSRRW/CSRRS/CSRRC
+and their immediate/rd=x0 variants), M/Zmmul (multiply/divide instructions), Zicntr/Zihpm (cycle,
+instret, and hpmcounters), and Zicond (conditional move and zero). They are pure ISA decode and
+execute additions that map to the CSR file, the integer multiplier/divider, and the ALU.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"Zicsr comprises the CSR instructions CSRRW, CSRRS, CSRRC, and their
+immediate counterparts."
+...
+"The M extension adds integer multiplication and division operations to
+the base integer ISA."
+...
+"Zicond comprises two instructions: czero.eqz and czero.nez."
+(specs/riscv-spec.html:9064-9080 anchor #ext:zicsr; :9603-9610 anchor #ext:m;
+:10063-10070 anchor #ext:zicond)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module scalar_extensions_decode (
+  input  logic [31:0] instr_i,
+  output logic        csr_op_o, muldiv_op_o, cond_op_o,
+  output logic [11:0] csr_addr_o
+);
+  // Zicsr: CSR address in instr[31:20]
+  // M: MUL/MULH/MULHSU/MULHU/DIV/DIVU/REM/REMU
+  // Zicond: CZERO.EQZ/CZERO.NEQZ
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented. Zicsr instructions are decoded in
+<code>core/decoder.sv</code> and executed in <code>core/csr_regfile.sv</code>; the CSR address is in
+instr[31:20]. M/Zmmul operations are handled by <code>core/mult.sv</code> and
+<code>core/multiplier.sv</code>, routed through the issue stage. Zicond operations are decoded and
+executed in <code>core/alu.sv</code> when <code>CVA6Cfg.RVZiCond</code> is set. Counters (cycle, instret,
+hpmcounters) are maintained in <code>core/perf_counters.sv</code> and the CSR file.</p>
+
+<p><strong>.dts linkage:</strong> these extensions appear in the <code>riscv,isa</code> string as
+<code>_zicsr</code>, <code>_m</code>/<code>_zmmul</code>, <code>_zicond</code>, <code>_zicntr</code>, and
+<code>_zihpm*</code> where applicable.</p>
+</body>
+</html>

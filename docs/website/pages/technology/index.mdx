@@ -1,0 +1,134 @@
+---
+title: Technology / PDK
+description: Foundry PDK adaptation and technology optimization for CVA6.
+---
+
+# Technology / PDK
+
+The technology optimization pass adapts CVA6 to a specific foundry process by
+binding proprietary high-level abstractions — memory compilers, ICG / retention
+/ level-shifter cells, power kits, and hard macros — at the existing **PDK-swap
+seam**. It is opt-in, additive, and macro-protected so the generic RTL path
+remains byte-for-byte unchanged when the pass is not armed.
+
+Technology adaptation is the final bridge between functional RTL and
+manufacturable silicon. A CPU core that simulates correctly with behavioral
+models is not yet a chip; it must be mapped to a foundry's cells, memories,
+clocking, and power network. The CVA6 technology pass performs this mapping
+without forking the generic RTL, so the same source can be evaluated on
+multiple process nodes and reused by partners who have access to different
+foundries.
+
+## PDK-swap seam
+
+The seam is the set of technology-agnostic cells that a foundry can replace:
+
+- `vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv` — SRAM macro
+  boundary.
+- `vendor/pulp-platform/tech_cells_generic/src/rtl/tc_clk.sv` — clock gating
+  (`tc_clk_gating`) and clock buffers.
+- `vendor/pulp-platform/tech_cells_generic/src/rtl/tc_pwr.sv` — power cells.
+- `common/local/util/sram_cache.sv` — `TECHNO_CUT` boundary.
+- HPDcache `behav` / `blackbox` / `<tech>` macros.
+
+A foundry drop-in provides implementation views (`.lib`, `.lef`, `.gds`) and a
+`manifest.json` under `pd/pdk/<tech>/`. The RTL wrapper lives under
+`pd/pdk/<tech>/<area>/` and is guarded by `CVA6_TECH_OPT`.
+
+## Two-key ignition
+
+The pass is **inert by default**. It arms only when **both** conditions are met:
+
+1. `technology.optimizationPass` is `true` in `.config.ts`.
+2. A `*.tech-spec.md` document exists under `core/**` or `corev_apu/**`
+   (governed by `technology.specGlobs`).
+
+If either key is missing, the generic path builds exactly as before.
+
+## Macro protection
+
+Every adaptation is fenced behind the guard macro `CVA6_TECH_OPT`
+(`technology.guardMacro`). When the macro is undefined, the generic path
+elaborates. The `` `ifdef `` stays at the **leaf**; structure is still gated by
+`cva6_cfg_t`.
+
+Example pattern:
+
+```systemverilog
+`ifdef CVA6_TECH_OPT
+  // foundry-specific tc_sram instantiation
+`else
+  // generic behavioral tc_sram
+`endif
+```
+
+## NDA protection
+
+Proprietary foundry content lives only under `pd/pdk/`, which is **gitignored
+by default**. Only these files are committed:
+
+- `pd/pdk/README.md`, `.gitignore`, `manifest.example.json`
+- `pd/pdk/core/README.md`, `.gitignore`
+- `pd/pdk/corev_apu/README.md`, `.gitignore`
+- `pd/pdk/technology.example/README.md`, `.gitignore`
+
+`g6lc-build tech init <tech>` scaffolds a gitignored per-tech drop-in. NDA
+views (`.lib`, `.lef`, `.gds`, `manifest.json`) never enter the repository.
+
+The protected-path model is a legal and technical necessity. Foundry libraries
+are proprietary and often covered by NDAs; committing them to a public
+repository would violate license agreements and expose the project to legal
+risk. At the same time, the build flow must know where to find these views
+when the technology pass is armed. The `pd/pdk/` scaffolding provides a stable,
+predictable location while the `.gitignore` ensures that only READMEs and
+templates are tracked.
+
+## Commands
+
+```bash
+g6lc-build tech status        # is the pass armed?
+g6lc-build tech specs         # list discovered *.tech-spec.md docs
+g6lc-build tech plan          # read-only adaptation plan
+g6lc-build tech check         # hard + soft readiness gates
+g6lc-build tech init <tech>   # scaffold a protected per-tech drop-in
+```
+
+`tech check` exits 3 when `optimizationPass` is on but a hard gate fails; it
+exits 0 when the pass is disabled.
+
+## Readiness gates
+
+Hard gates (must pass when armed):
+
+- Guard macro is a valid identifier.
+- `pd/pdk/` root is gitignored.
+- Foundry PDK consistency (manifest or drop-ins present only when expected).
+
+Soft gates (warned but not blocking):
+
+- `requireExplicit` — the user must explicitly enable the pass.
+
+Readiness gates are the safeguards that prevent the technology pass from being
+armed accidentally or with incomplete information. The guard-macro check
+ensures that the `ifdef` in the RTL refers to a valid identifier. The
+`pd/pdk/` gitignore check ensures that proprietary content cannot be committed
+by accident. The PDK consistency check ensures that the foundry views match the
+configured technology. These gates are deliberately conservative because an
+incorrect technology mapping can corrupt the netlist without failing
+simulation.
+
+## SoC-readiness
+
+An armed technology pass must still satisfy the same `AGENTS.md` §0 checklist as
+any RTL change: synthesizability, verification, DFT, timing, power/UPF, area,
+and documentation.
+
+The SoC-readiness checklist is not waived by the technology pass; if anything,
+it is intensified. Foundry-specific cells have different timing arcs, power
+characteristics, and test requirements than behavioral models. The pass must
+therefore be followed by equivalence checking, DFT/MBIST verification, static
+timing analysis, power intent validation, and area comparison. Only when the
+optimized netlist passes the same functional and physical checks as the generic
+netlist is the technology adaptation complete.
+
+See [NDA Optimization Pass](./nda-optimization) for the full agent workflow.

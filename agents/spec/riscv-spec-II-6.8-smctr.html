@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Smctr Control Transfer Records (Vol II, 6.8)</title></head>
+<body>
+<h1>Vol II &sect;6.8 — Smctr Control Transfer Records Extension, Version 1.0</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#smctr">specs/riscv-spec.html#smctr</a>.
+Source line: <code>specs/riscv-spec.html:85550</code>. <strong>Domain:</strong> BP.</p>
+
+<p>Smctr defines a hardware log of control-flow transfers (jumps, branches, calls, returns, traps,
+trap returns) exposed through CSRs for profiling and debugging. It requires the frontend to capture
+control-flow events and write them to a FIFO/buffer in program order, with filtering by privilege and
+mode. This is related to branch prediction because both must classify control-flow instructions, but
+CTR is an architectural record rather than a predictor.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Smctr/Ssctr extensions provide a hardware mechanism to record
+control transfers (branches, jumps, calls, returns, traps, and trap
+returns) made by software. The recorded control transfers can be read
+through a set of CSRs."
+(specs/riscv-spec.html:85550-85555, anchor #smctr)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module smctr (
+  input  logic        cf_event_i,     // branch/call/return/jump/trap
+  input  logic [XLEN-1:0] src_pc_i, target_i,
+  input  cf_type_e    kind_i,
+  output logic [XLEN-1:0] record_o,
+  output logic        record_valid_o
+);
+  // record control transfers in-order; CSR-visible buffer
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. No control-transfer record buffer or CTR CSRs exist in the
+core. Adding Smctr would tap the same branch/call/return classification logic as the branch predictor
+(<code>core/frontend/frontend.sv:210-221</code>) and add an in-order FIFO accessible to
+<code>core/csr_regfile.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Smctr/Ssctr would be advertised in the
+<code>riscv,isa</code> string if implemented.</p>
+</body>
+</html>

@@ -268,8 +268,9 @@ module axi_riscv_amos #(
             if (slv_aw_valid_i && slv_aw_atop_i) begin
                 // Default is invalid request
                 atop_valid_d = INVALID;
-                // Valid load operation
+                // Valid load operation (includes AtomicCompare — returns old data)
                 if ((slv_aw_atop_i      ==  axi_pkg::ATOP_ATOMICSWAP) ||
+                    (slv_aw_atop_i      ==  axi_pkg::ATOP_ATOMICCMP) ||
                     (slv_aw_atop_i[5:4] == {axi_pkg::ATOP_ATOMICLOAD})) begin
                     atop_valid_d = LOAD;
                 end
@@ -915,11 +916,24 @@ module axi_riscv_amos #(
      */
 
     assign big_endian     = (atop_q[3] == axi_pkg::ATOP_BIG_END);
-    assign op_a           = big_endian ? {<<8{r_data_q & strb_ext}} : (r_data_q & strb_ext);
-    assign op_b           = big_endian ? {<<8{w_data_q & strb_ext}} : (w_data_q & strb_ext);
+    // Intermediate wires: Verilator ≥5.0xx rejects streaming concat in ternary
+    // (implicit cast context, IEEE 1800-2023 11.4.17).
+    logic [AXI_ALU_RATIO*RISCV_WORD_WIDTH-1:0] op_a_be, op_b_be, op_b_be_full, res_be;
+    assign op_a_be        = {<<8{r_data_q & strb_ext}};
+    assign op_b_be        = {<<8{w_data_q & strb_ext}};
+    // Full-word BE swap for AtomicCompare (no strb mask); keep stream out of ternary.
+    assign op_b_be_full   = {<<8{w_data_q}};
+    assign res_be         = {<<8{res}};
+    assign op_a           = big_endian ? op_a_be : (r_data_q & strb_ext);
+    // AtomicCompare packs {cmp,swap} across the full write data word; do not
+    // byte-mask op_b or the compare half is lost when strb covers only the
+    // store lane.
+    assign op_b           = (atop_q == axi_pkg::ATOP_ATOMICCMP)
+                                ? (big_endian ? op_b_be_full : w_data_q)
+                                : (big_endian ? op_b_be : (w_data_q & strb_ext));
     assign sign_a         = |(op_a & ~(strb_ext >> 1));
     assign sign_b         = |(op_b & ~(strb_ext >> 1));
-    assign alu_result_ext = big_endian ? {<<8{res}} : res;
+    assign alu_result_ext = big_endian ? res_be : res;
 
     generate
         if (AXI_ALU_RATIO == 1 && RISCV_WORD_WIDTH == 32) begin

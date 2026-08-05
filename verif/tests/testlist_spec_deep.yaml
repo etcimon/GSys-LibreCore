@@ -1,0 +1,35 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# FSE S6 directed suite for deep speculation / recovery.
+# Prefer DV_TARGET=cv64a6_spec_deep (DeepSpecEn=1). Also runs on
+# g6lc64_ooo / default packages for functional baseline.
+
+common_test_config: &common_test_config
+  path_var: TESTS_PATH
+  gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+
+testlist:
+  - test: spec_mispredict_chain
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/spec/spec_mispredict_chain.S
+    description: "FSE S2: nested branches + RAS call/ret under deep window"
+
+  - test: spec_stq_stress
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/spec/spec_stq_stress.S
+    description: "FSE S1/S6: STQ fill + branch interleave; store data integrity"
+
+  - test: spec_fence_drain
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/spec/spec_fence_drain.S
+    description: "FSE S6: FENCE / FENCE.I drain after stores + control flow"
+
+  - test: spec_rvwmo_litmus
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/spec/spec_rvwmo_litmus.S
+    description: "FSE S6.2: single-hart RVWMO/A subset (coherence, fence, AMO, LR/SC)"

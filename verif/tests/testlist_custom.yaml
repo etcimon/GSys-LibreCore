@@ -41,3 +41,10 @@ testlist:
     <<: *common_test_config
     asm_tests: <path_var>/custom/hello_world/custom_test_template.S
 
+  # U9.0/U9.1: vstimecmp + htimedelta (requires RVH+Sstc config package)
+  - test: vstimecmp_htimedelta
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/sstc_h/vstimecmp_htimedelta.S
+    description: "Sstc×H directed: htimedelta R/W + vstimecmp R/W (server_math/H cfg)"
+

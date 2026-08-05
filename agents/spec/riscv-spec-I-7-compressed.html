@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Compressed Instructions (Vol I, chapter 7)</title></head>
+<body>
+<h1>Vol I chapter 7 — Compressed Instructions</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#ext:c">#ext:c</a> (7.4 C),
+<a href="../../specs/riscv-spec.html#ext:zca">#ext:zca</a> (7.1 Zca),
+<a href="../../specs/riscv-spec.html#ext:zcf">#ext:zcf</a> (7.2 Zcf),
+<a href="../../specs/riscv-spec.html#ext:zcd">#ext:zcd</a> (7.3 Zcd),
+<a href="../../specs/riscv-spec.html#ext:zcb">#ext:zcb</a> (7.5 Zcb),
+<a href="../../specs/riscv-spec.html#ext:zcmt">#ext:zcmt</a> (7.6 Zcmt).
+Source lines: <code>specs/riscv-spec.html:18213</code> (Zca), <code>:19846</code> (C).</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This section describes the C extension, which incorporates the
+compressed instruction-set extensions designed for application- and
+server-class processors. The C extension substantially improves code
+density across a wide range of applications, thereby improving
+performance, area-efficiency, and energy-efficiency of processors with
+instruction caches. It excludes features that improve code density at
+the cost of performance."
+(specs/riscv-spec.html:19846-19853, anchor #ext:c)
+</pre>
+
+<p>The C extension encodes common 32-bit instructions in 16-bit formats, halving code size. It adds
+compressed load/store, branches, jumps, arithmetic, and floating-point operations. The frontend must
+expand 16-bit instructions to 32-bit equivalents before decode; expansion must preserve original
+register specifiers and immediate values. C interacts with branch prediction because a fetch packet
+may contain a mixture of 16- and 32-bit instructions, and the PC advance must be computed per
+instruction.</p>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module compressed_decoder (
+  input  logic [15:0] c_instr_i,
+  output logic [31:0] instr_o,
+  output logic        is_rvc_o,
+  output logic        illegal_o
+);
+  // expand all C opcodes to 32-bit RV32/RV64 forms
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented when <code>CVA6Cfg.RVC</code> is set. The 16-bit
+instruction expansion is in <code>core/compressed_decoder.sv:22-</code>. The expanded instruction is
+passed to the decoder, which preserves the original 16-bit form for exception reporting at
+<code>core/decoder.sv:1849-1852</code>. The issue stage records the compressed flag at
+<code>core/issue_read_operands.sv:158,1043-1055,1087</code> and propagates it to the branch unit and
+ex stage (<code>core/branch_unit.sv:37</code>, <code>core/ex_stage.sv:58</code>). The PC advance in the
+frontend handles mixed 16/32-bit packets.</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string contains <code>C</code> when
+RVC is enabled; this must match <code>CVA6Cfg.RVC</code>.</p>
+</body>
+</html>

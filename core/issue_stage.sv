@@ -35,6 +35,10 @@ module issue_stage
     input logic rst_ni,
     // Is scoreboard full - PERF_COUNTERS
     output logic sb_full_o,
+    // FSE: SpeculativeSb younger cancel - PERF_COUNTERS
+    output logic spec_cancel_o,
+    // U5 production: SB cancel mask for OoO squash
+    output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_o,
     // Prevent from issuing - CONTROLLER
     input logic flush_unissued_instr_i,
     // Flush whole scoreboard - CONTROLLER
@@ -62,6 +66,8 @@ module issue_stage
     output alu_bypass_t alu_bypass_o,
     // Program Counter - EX_STAGE
     output logic [CVA6Cfg.VLEN-1:0] pc_o,
+    // FSE S5: SMT hart of CTRL_FLOW instruction - EX_STAGE
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] branch_hart_o,
     // Is zcmt instruction - EX_STAGE
     output logic is_zcmt_o,
     // Is compressed instruction - EX_STAGE
@@ -162,6 +168,12 @@ module issue_stage
     input logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack_i,
     // Issue stall - PERF_COUNTERS
     output logic stall_issue_o,
+    // U5 OoO PMU probes (tied 0 when OoOEn=0)
+    output logic ooo_rename_stall_o,
+    output logic ooo_iq_full_o,
+    output logic ooo_rob_full_o,
+    output logic ooo_lsq_stall_o,
+    output logic ooo_stl_forward_o,
     // Information dedicated to RVFI - RVFI
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rvfi_issue_pointer_o,
     // Information dedicated to RVFI - RVFI
@@ -185,13 +197,19 @@ module issue_stage
   } forwarding_t;
 
   forwarding_t                                        fwd;
-  scoreboard_entry_t [CVA6Cfg.NrIssuePorts-1:0]       issue_instr_sb_iro;
-  logic              [CVA6Cfg.NrIssuePorts-1:0][31:0] orig_instr_sb_iro;
-  logic              [CVA6Cfg.NrIssuePorts-1:0]       issue_instr_valid_sb_iro;
-  logic              [CVA6Cfg.NrIssuePorts-1:0]       issue_ack_iro_sb;
+  // Scoreboard dispatch stream (program-order alloc)
+  scoreboard_entry_t [CVA6Cfg.NrIssuePorts-1:0]       issue_instr_sb;
+  logic              [CVA6Cfg.NrIssuePorts-1:0][31:0] orig_instr_sb;
+  logic              [CVA6Cfg.NrIssuePorts-1:0]       issue_instr_valid_sb;
+  logic              [CVA6Cfg.NrIssuePorts-1:0]       issue_ack_sb;
+  // FU issue stream into IRO (identity or U4-selected)
+  scoreboard_entry_t [CVA6Cfg.NrIssuePorts-1:0]       issue_instr_iro;
+  logic              [CVA6Cfg.NrIssuePorts-1:0][31:0] orig_instr_iro;
+  logic              [CVA6Cfg.NrIssuePorts-1:0]       issue_instr_valid_iro;
+  logic              [CVA6Cfg.NrIssuePorts-1:0]       issue_ack_iro;
 
-  assign issue_instr_o    = issue_instr_sb_iro[0];
-  assign issue_instr_hs_o = issue_instr_valid_sb_iro[0] & issue_ack_iro_sb[0];
+  assign issue_instr_o    = issue_instr_iro[0];
+  assign issue_instr_hs_o = issue_instr_valid_iro[0] & issue_ack_iro[0];
 
   logic x_transaction_accepted_iro_sb, x_issue_writeback_iro_sb;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] x_id_iro_sb;
@@ -211,6 +229,8 @@ module issue_stage
       .clk_i,
       .rst_ni,
       .sb_full_o               (sb_full_o),
+      .spec_cancel_o           (spec_cancel_o),
+      .cancelled_mask_o        (cancelled_mask_o),
       .flush_unissued_instr_i,
       .flush_i,
       .x_transaction_accepted_i(x_transaction_accepted_iro_sb),
@@ -223,10 +243,10 @@ module issue_stage
       .orig_instr_i,
       .decoded_instr_valid_i   (decoded_instr_valid_i),
       .decoded_instr_ack_o     (decoded_instr_ack_o),
-      .issue_instr_o           (issue_instr_sb_iro),
-      .orig_instr_o            (orig_instr_sb_iro),
-      .issue_instr_valid_o     (issue_instr_valid_sb_iro),
-      .issue_ack_i             (issue_ack_iro_sb),
+      .issue_instr_o           (issue_instr_sb),
+      .orig_instr_o            (orig_instr_sb),
+      .issue_instr_valid_o     (issue_instr_valid_sb),
+      .issue_ack_i             (issue_ack_sb),
       .fwd_o                   (fwd),
       .resolved_branch_i       (resolved_branch_i),
       .trans_id_i              (trans_id_i),
@@ -238,6 +258,126 @@ module issue_stage
       .rvfi_issue_pointer_o,
       .rvfi_commit_pointer_o
   );
+
+  // ---------------------------------------------------------
+  // 2b. U4 slice-OoO / U5 full OoO dispatch (mutually exclusive)
+  // ---------------------------------------------------------
+  logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] ooo_op_a, ooo_op_b;
+  logic [CVA6Cfg.NrIssuePorts-1:0] ooo_op_a_v, ooo_op_b_v;
+
+  if (CVA6Cfg.OoOEn) begin : gen_full_ooo
+    logic [CVA6Cfg.NrWbPorts-1:0] wb_exc_bits;
+    for (genvar wi = 0; wi < CVA6Cfg.NrWbPorts; wi++) begin : gen_wb_exc
+      assign wb_exc_bits[wi] = ex_ex_i[wi].valid;
+    end
+    g6lc_ooo_dispatch #(
+        .CVA6Cfg(CVA6Cfg),
+        .scoreboard_entry_t(scoreboard_entry_t)
+    ) i_ooo_dispatch (
+        .clk_i,
+        .rst_ni,
+        .flush_i          (flush_i),
+        .flush_unissued_i (flush_unissued_instr_i),
+        .cancelled_mask_i (cancelled_mask_o),
+        .dispatch_sbe_i   (issue_instr_sb),
+        .dispatch_orig_i  (orig_instr_sb),
+        .dispatch_valid_i (issue_instr_valid_sb),
+        .dispatch_ack_o   (issue_ack_sb),
+        .issue_sbe_o      (issue_instr_iro),
+        .issue_orig_o     (orig_instr_iro),
+        .issue_valid_o    (issue_instr_valid_iro),
+        .issue_ack_i      (issue_ack_iro),
+        .issue_op_a_o     (ooo_op_a),
+        .issue_op_b_o     (ooo_op_b),
+        .issue_op_a_valid_o(ooo_op_a_v),
+        .issue_op_b_valid_o(ooo_op_b_v),
+        .wb_valid_i       (wt_valid_i),
+        .wb_id_i          (trans_id_i),
+        .wb_data_i        (wbdata_i),
+        .wb_exc_i         (wb_exc_bits),
+        .commit_ack_i     (commit_ack_i),
+        .commit_instr_i   (commit_instr_o),
+        .mispredict_i     (resolved_branch_i.valid && resolved_branch_i.is_mispredict),
+        .freelist_empty_o (),
+        .rob_full_o       (ooo_rob_full_o),
+        .iq_full_o        (ooo_iq_full_o),
+        .lsq_stall_o      (ooo_lsq_stall_o),
+        .rename_stall_o   (ooo_rename_stall_o),
+        .stl_forward_o    (ooo_stl_forward_o)
+    );
+  end else if (CVA6Cfg.SliceOoOEn) begin : gen_slice_ooo
+    assign ooo_op_a   = '0;
+    assign ooo_op_b   = '0;
+    assign ooo_op_a_v = '0;
+    assign ooo_op_b_v = '0;
+    assign ooo_rename_stall_o = 1'b0;
+    assign ooo_iq_full_o      = 1'b0;
+    assign ooo_rob_full_o     = 1'b0;
+    assign ooo_lsq_stall_o    = 1'b0;
+    assign ooo_stl_forward_o  = 1'b0;
+    g6lc_slice_dispatch #(
+        .CVA6Cfg(CVA6Cfg),
+        .scoreboard_entry_t(scoreboard_entry_t)
+    ) i_slice_dispatch (
+        .clk_i,
+        .rst_ni,
+        .flush_i          (flush_i),
+        .flush_unissued_i (flush_unissued_instr_i),
+        .dispatch_sbe_i   (issue_instr_sb),
+        .dispatch_orig_i  (orig_instr_sb),
+        .dispatch_valid_i (issue_instr_valid_sb),
+        .dispatch_ack_o   (issue_ack_sb),
+        .issue_sbe_o      (issue_instr_iro),
+        .issue_orig_o     (orig_instr_iro),
+        .issue_valid_o    (issue_instr_valid_iro),
+        .issue_ack_i      (issue_ack_iro),
+        .wb_valid_i       (wt_valid_i),
+        .wb_id_i          (trans_id_i)
+    );
+  end else begin : gen_inorder_issue
+    // Netlist-identity path: SB dispatch is FU issue
+    assign issue_instr_iro = issue_instr_sb;
+    assign orig_instr_iro  = orig_instr_sb;
+    assign issue_ack_sb    = issue_ack_iro;
+    assign ooo_op_a   = '0;
+    assign ooo_op_b   = '0;
+    assign ooo_op_a_v = '0;
+    assign ooo_op_b_v = '0;
+    assign ooo_rename_stall_o = 1'b0;
+    assign ooo_iq_full_o      = 1'b0;
+    assign ooo_rob_full_o     = 1'b0;
+    assign ooo_lsq_stall_o    = 1'b0;
+    assign ooo_stl_forward_o  = 1'b0;
+
+    // Hang-7: without SpeculativeSb, do not issue past an unresolved CTRL_FLOW.
+    // ret_ex probe: RAS-miss Return mispredicts (tgt=ra, pred=0) but post-ret
+    // jal@alias still reaches EX 5 cycles later — fallthrough was already
+    // issued/queued. Stall issue until the cycle *after* resolve_branch.
+    // (Earlier combo with force-Return-mispredict/flush_id regressed; this
+    // alone restores classic Ariane unresolved-branch discipline.)
+    if (!CVA6Cfg.SpeculativeSb) begin : gen_unresolved_cf_stall
+      logic unresolved_cf_q;
+      logic issue_ctrl_flow;
+      assign issue_ctrl_flow = issue_instr_valid_iro[0] && issue_ack_iro[0] &&
+                               (issue_instr_iro[0].fu == CTRL_FLOW);
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          unresolved_cf_q <= 1'b0;
+        end else if (resolve_branch_i || flush_i) begin
+          // Clear only on resolve or full SB flush — not flush_unissued alone
+          // (that fires same cycle as resolve and would re-open too early).
+          unresolved_cf_q <= 1'b0;
+        end else if (issue_ctrl_flow) begin
+          unresolved_cf_q <= 1'b1;
+        end
+      end
+      for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_gate
+        assign issue_instr_valid_iro[p] = issue_instr_valid_sb[p] && !unresolved_cf_q;
+      end
+    end else begin : gen_no_cf_stall
+      assign issue_instr_valid_iro = issue_instr_valid_sb;
+    end
+  end
 
   // ---------------------------------------------------------
   // 3. Issue instruction and read operand, also commit
@@ -259,17 +399,22 @@ module issue_stage
       .rst_ni,
       .flush_i                 (flush_unissued_instr_i),
       .stall_i,
-      .issue_instr_i           (issue_instr_sb_iro),
+      .issue_instr_i           (issue_instr_iro),
       .issue_instr_i_prev      (decoded_instr_i_prev),
-      .orig_instr_i            (orig_instr_sb_iro),
-      .issue_instr_valid_i     (issue_instr_valid_sb_iro),
-      .issue_ack_o             (issue_ack_iro_sb),
+      .orig_instr_i            (orig_instr_iro),
+      .issue_instr_valid_i     (issue_instr_valid_iro),
+      .issue_ack_o             (issue_ack_iro),
       .fwd_i                   (fwd),
+      .ooo_op_a_i              (ooo_op_a),
+      .ooo_op_b_i              (ooo_op_b),
+      .ooo_op_a_valid_i        (ooo_op_a_v),
+      .ooo_op_b_valid_i        (ooo_op_b_v),
       .fu_data_o               (fu_data_o),
       .alu_bypass_o            (alu_bypass_o),
       .rs1_forwarding_o        (rs1_forwarding_o),
       .rs2_forwarding_o        (rs2_forwarding_o),
       .pc_o,
+      .branch_hart_o,
       .is_zcmt_o,
       .is_compressed_instr_o,
       .flu_ready_i             (flu_ready_i),

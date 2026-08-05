@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Sv39 Page-Based Virtual Memory (Vol II, 4.4) — Logisplain summary</title>
+</head>
+<body>
+<h1>Vol II &sect;4.4 — Sv39: Page-Based 39-bit Virtual-Memory System</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#sv39">specs/riscv-spec.html#sv39</a>
+(source line 79453). <strong>Domain:</strong> RAM. <strong>Siblings:</strong>
+<a href="../../specs/riscv-spec.html#sv32">#sv32</a>, <a href="../../specs/riscv-spec.html#sv48">#sv48</a>,
+<a href="../../specs/riscv-spec.html#sv57">#sv57</a>.</p>
+
+<section>
+<p>The purpose of &sect;4.4 is to define a simple paged virtual-memory system for SXLEN=64 that
+supports 39-bit virtual address spaces, chosen because for many systems 39 bits of virtual-address
+space is ample, trading the larger reach of Sv48/Sv57 against the latency of page-table traversals
+and the size of hardware structures that store virtual addresses. It is the default translation mode
+for 64-bit Linux-class RISC-V and the mode most 64-bit CVA6 targets use.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This section describes a simple paged virtual-memory system for
+SXLEN=64, which supports 39-bit virtual address spaces. The design of
+Sv39 follows the overall scheme of Sv32, and this section details only
+the differences between the schemes."
+...
+"We specified multiple virtual memory systems for RV64 to relieve the
+tension between providing a large address space and minimizing
+address-translation cost. For many systems, 39 bits of virtual-address
+space is ample, and so Sv39 suffices."
+(specs/riscv-spec.html:79453-79472, anchor #sv39 / #norm:Sv39_sxlen)
+</pre>
+
+<p>Mechanically, Sv39 supports a 39-bit virtual address space divided into 4 KiB pages; effective
+addresses must have bits 63-39 all equal to bit 38, or else a page-fault exception will occur.
+Translation maps the 27-bit VPN into a 44-bit PPN via a three-level page table, while the 12-bit page
+offset is untranslated. Sv39 page tables contain 512 8-byte PTEs, are exactly one page in size, and
+must be page-aligned; the root page-table PPN comes from <code>satp</code>. CVA6 implements the walker,
+I/D TLBs, and mode selection in <code>core/cva6_mmu/</code>: the mode enum is
+<code>core/include/config_pkg.sv:45-52</code> (<code>ModeSv39 = 8</code>), the <code>satp</code> PPN and
+translation enables are driven from <code>core/csr_regfile.sv</code> and wired through
+<code>core/cva6.sv:1074-1096,1208-1226</code> to the MMU. The page-table walker itself is
+<code>core/cva6_mmu/cva6_ptw.sv:23-</code> with state machine at <code>:332</code>, PTE validation at
+<code>:279-294</code>, and misaligned superpage detection at <code>:183-198</code>. Canonicality checks
+for fetch are in <code>core/cva6_mmu/cva6_mmu.sv:399-401</code> and for load/store at
+<code>:538-540,615</code>. The I- and D-TLBs are in <code>core/cva6_mmu/cva6_tlb.sv</code> and the
+shared TLB in <code>core/cva6_mmu/cva6_shared_tlb.sv</code>. This links to the PMP sub-file
+(page-table reads are PMP-checked at effective privilege S) and to PMA (translated physical addresses
+are then PMA-checked).</p>
+</section>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<p>The implied structure is a three-level page-table walker over 8-byte PTEs with a canonicality check,
+cross-referenced to <code>core/cva6_mmu/</code>:</p>
+<pre>
+module sv39_ptw (
+  input  logic [38:0] vaddr_i,       // VPN[2:0] = vaddr[38:30],[29:21],[20:12]
+  input  logic [43:0] satp_ppn_i,    // core/csr_regfile.sv (satp.PPN)
+  // canonicality: vaddr[63:39] must all equal vaddr[38] else page-fault
+  output logic [55:0] paddr_o,       // 44-bit PPN : 12-bit offset
+  output logic        page_fault_o
+);
+  // for level in {2,1,0}: pte = mem[ (ppn<<12) + vpn[level]*8 ];
+  //   if !pte.V or bad RWX -> page_fault; if leaf -> assemble PA (superpage if level>0);
+  //   else ppn = pte.ppn; each pte access is PMP/PMA checked.
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented (Sv32/39/48/57 selectable via <code>vm_mode_t</code>). Loci:
+<code>core/cva6_mmu/cva6_mmu.sv</code>, <code>core/cva6_mmu/cva6_ptw.sv</code>,
+<code>core/cva6_mmu/cva6_tlb.sv</code>, <code>core/cva6_mmu/cva6_shared_tlb.sv</code>;
+<code>core/csr_regfile.sv</code> (satp); <code>core/include/config_pkg.sv:45-52,257-258,424</code>;
+design doc <code>docs/03_cva6_design/MMU.rst</code>.</p>
+
+<p><strong>.dts linkage:</strong> the CPU node <code>mmu-type = "riscv,sv39"</code> must equal the
+configured <code>vm_mode_t::ModeSv39</code>; the <code>memory@</code> nodes describe the physical
+address map that the page tables and PMA rules reference.</p>
+</body>
+</html>

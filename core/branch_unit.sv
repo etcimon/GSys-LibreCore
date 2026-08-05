@@ -31,6 +31,8 @@ module branch_unit #(
     input fu_data_t fu_data_i,
     // Instruction PC - ISSUE_STAGE
     input logic [CVA6Cfg.VLEN-1:0] pc_i,
+    // FSE S5: SMT hart of the resolving control-flow instruction
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] hart_id_i,
     // Is zcmt instruction - ISSUE_STAGE
     input logic is_zcmt_i,
     // Instruction is compressed - ISSUE_STAGE
@@ -66,6 +68,9 @@ module branch_unit #(
     resolved_branch_o.valid = branch_valid_i;
     resolved_branch_o.is_mispredict = 1'b0;
     resolved_branch_o.cf_type = branch_predict_i.cf;
+    resolved_branch_o.hart_id = hart_id_i;
+    // Default: restore BP ckpt on any mispredict (Return verify overrides below)
+    resolved_branch_o.ckpt_restore = 1'b0;
     // calculate next PC, depending on whether the instruction is compressed or not this may be different
     // TODO(zarubaf): We already calculate this a couple of times, maybe re-use?
     next_pc                          = pc_i + ((is_compressed_instr_i) ? {{CVA6Cfg.VLEN-2{1'b0}}, 2'h2} : {{CVA6Cfg.VLEN-3{1'b0}}, 3'h4});
@@ -87,7 +92,8 @@ module branch_unit #(
       if (CVA6Cfg.RVZCMT) begin
         if (is_zcmt_i) begin
           // Unconditional jump handling
-          resolved_branch_o.is_mispredict = 1'b1;  // miss prediction for ZCMT 
+          resolved_branch_o.is_mispredict = 1'b1;  // miss prediction for ZCMT
+          resolved_branch_o.ckpt_restore = 1'b1;
           resolved_branch_o.cf_type = ariane_pkg::JumpR;
         end
       end
@@ -97,14 +103,34 @@ module branch_unit #(
         resolved_branch_o.cf_type = ariane_pkg::Branch;
         // If the ALU comparison does not agree with the BHT prediction set the resolution as mispredicted.
         resolved_branch_o.is_mispredict  = branch_comp_res_i != (branch_predict_i.cf == ariane_pkg::Branch);
+        resolved_branch_o.ckpt_restore   = resolved_branch_o.is_mispredict;
       end
       if (fu_data_i.operation == ariane_pkg::JALR
           // check if the address of the jump register is correct and that we actually predicted
-          && (branch_predict_i.cf == ariane_pkg::NoCF || target_address != branch_predict_i.predict_address)) begin
+          && (branch_predict_i.cf == ariane_pkg::NoCF
+              || target_address != branch_predict_i.predict_address)) begin
         resolved_branch_o.is_mispredict = 1'b1;
+        resolved_branch_o.ckpt_restore  = 1'b1;
         // update BTB only if this wasn't a return
         if (branch_predict_i.cf != ariane_pkg::Return)
           resolved_branch_o.cf_type = ariane_pkg::JumpR;
+      end
+      // JAL is decoded as CTRL_FLOW with default op=ADD (no JAL fu_op).
+      // Always taken; EX-correct if frontend left NoCF or wrong target.
+      // Hang-6 residual at jal@0x80012b0a has cf=Jump+matching tgt (jal_ex
+      // misp=0) yet sequential still retires — frontend IQ/NPC follow-through.
+      // Forced is_mispredict on every JAL regressed to early IAF
+      // (mepc=0x1400000000) even without ckpt_restore; keep selective only.
+      if (!ariane_pkg::op_is_branch(fu_data_i.operation) &&
+          fu_data_i.operation != ariane_pkg::JALR) begin
+        resolved_branch_o.is_taken = 1'b1;
+        resolved_branch_o.target_address = target_address;
+        resolved_branch_o.cf_type = ariane_pkg::Jump;
+        if (branch_predict_i.cf == ariane_pkg::NoCF ||
+            target_address != branch_predict_i.predict_address) begin
+          resolved_branch_o.is_mispredict = 1'b1;
+          resolved_branch_o.ckpt_restore  = 1'b1;
+        end
       end
       // to resolve the branch in ID
       resolve_branch_o = 1'b1;

@@ -1,0 +1,8 @@
+{
+  "XLEN": 64,
+  "CVA6Cfg.XLEN": 64,
+  "cva6_cfg.XLEN": 64,
+  "CVA6ConfigXlen": 64,
+  "CVA6Cfg.XLEN-1": 63,
+  "config_pkg::CVA6ConfigXlen": 64
+}

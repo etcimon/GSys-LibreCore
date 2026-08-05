@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Ziccif Instruction-Fetch Atomicity (Vol I, 4.9)</title></head>
+<body>
+<h1>Vol I &sect;4.9 — Ziccif Extension for Instruction-Fetch Atomicity</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:ziccif">specs/riscv-spec.html#ext:ziccif</a>.
+<strong>Domain:</strong> RAM.</p>
+
+<p>Ziccif requires that aligned instruction fetches are atomic: an instruction fetch must return a
+single value corresponding to one of the writes to that location, never a torn combination of
+multiple writes. It underpins self-modifying code and I-cache/D-cache coherence: without atomic
+instruction fetches, FENCE.I would not have a well-defined value to observe.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Ziccif extension is implemented, main memory regions with both the
+coherence and cacheability PMAs must support instruction fetch, and any
+instruction fetches of naturally aligned power-of-2 sizes of at most
+min(ILEN, XLEN) bits are atomic."
+(specs/riscv-spec.html:10542-10550, anchor #norm:ziccif_if_atomicity)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module ziccif_fetch_buffer (
+  input  logic [XLEN-1:0] paddr_i,
+  input  logic [ILEN-1:0] data_i,
+  output logic [ILEN-1:0] instr_o
+);
+  // aligned ILEN-wide fetch is atomic; no cross-write tearing visible
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented/partial; instruction fetches are always aligned to a
+32-bit or 64-bit boundary (<code>core/cache_subsystem/g6lc_icache.sv:22,65-113</code>; selected word
+<code>cl_sel</code> at <code>:113</code>) and refill a whole cache line atomically before the line becomes
+valid (<code>core/cache_subsystem/g6lc_icache.sv:319-321</code>). <code>core/frontend/frontend.sv:149,312-313,318-321</code>
+gates fetches during <code>halt_frontend_i</code> and kills speculative fetches on <code>flush_i</code>,
+preventing stale data from being consumed. Full Ziccif conformance over main-memory PMA regions has not
+been documented as a separately verified artifact.</p>
+
+<p><strong>.dts linkage:</strong> the <code>memory@</code> nodes for cacheable instruction regions must keep
+<code>cacheable</code> PMAs aligned with <code>NrCachedRegionRules/CachedRegionAddrBase/CachedRegionLength</code>
+in <code>core/include/config_pkg.sv</code>; only those regions are guaranteed to provide atomic
+instruction fetches.</p>
+</body>
+</html>

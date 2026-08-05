@@ -42,7 +42,25 @@ LDFLAGS = -nostdlib -nodefaultlibs -nostartfiles
 
 INCLUDES = -I./ -I./src
 
-SRCS_C = src/main.c src/uart.c src/spi.c src/sd.c src/gpt.c src/dw_mmc.c src/bouncebuf.c
+# Licensing-critical: the default link set is GPL-free.
+#
+# src/dw_mmc.c and src/bouncebuf.c are U-Boot derived and GPL-2.0-or-later; they
+# transitively pull in src/{dwmmc,bouncebuf,cache,memalign,dma-mapping}.h, and
+# src/dma-mapping.h is GPL-2.0-ONLY, which cannot lawfully be linked with the
+# Apache-2.0 bootrom sources or offered under CERN-OHL-S-2.0.
+#
+# They are also dead code: src/main.c makes no reference to dwmmc/mmc_/bounce.
+# They are therefore excluded by default. Setting WITH_DWMMC=1 re-adds them and
+# produces a bootrom binary (and hence a bitstream ROM image) that is a GPL
+# derivative work, which must then be conveyed under GPL terms.
+# See LICENSE.GPL-2.0-or-later and README.md in this directory.
+WITH_DWMMC ?= 0
+
+SRCS_C = src/main.c src/uart.c src/spi.c src/sd.c src/gpt.c
+ifeq ($(WITH_DWMMC), 1)
+SRCS_C += src/dw_mmc.c src/bouncebuf.c
+CFLAGS += -DWITH_DWMMC=1
+endif
 SRCS_ASM = startup.S
 OBJS_C = $(SRCS_C:.c=.o)
 OBJS_S = $(SRCS_ASM:.S=.o)

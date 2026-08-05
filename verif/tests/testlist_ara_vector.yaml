@@ -1,0 +1,30 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# U10ᵇ Ara / RVV directed tests. Prefer DV_TARGET=g6lc64_server_math_v and live
+# Ara (CVA6_ARA_ATTACH=1) for v_memcpy_lmul functional path.
+# Soft-skip tests stay green on non-V packages.
+# Suite gate: verif/regress/ara-vector-path.sh + agents/guides/AGENTS-vector.md
+
+common_test_config: &common_test_config
+  path_var: TESTS_PATH
+  gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+
+testlist:
+  - test: v_memcpy_skip
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/vector/v_memcpy_skip.S
+    description: "U10ᵇ soft-skip (no V ops; CI-safe)"
+
+  - test: v_misa_v
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/vector/v_misa_v.S
+    description: "U10ᵇ misa.V discovery smoke"
+
+  - test: v_memcpy_lmul
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/vector/v_memcpy_lmul.S
+    description: "U10ᵇ e64 m1 unit-stride memcpy (needs live Ara when V set)"

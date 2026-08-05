@@ -1,0 +1,81 @@
+---
+title: Server Profiles
+description: Production config packages for server, OoO, math, and hypervisor-oriented GSys LibreCore targets.
+---
+
+# Server Profiles
+
+“Server” on this project means **Linux-class configs** that compose multi-issue
+or OoO, optional SMT, L2/L3, hypervisor timer extensions, and math/memory
+acceleration — always through **named config packages**, never ad hoc RTL
+forks.
+
+Detail: `architecture/remaining-upgrade-sequence.md`,
+`architecture/server-math-hypervisor.md`, `architecture/ara-vector-attach.md`.
+
+## Package families (illustrative)
+
+Confirm exact filenames under `core/include/`.
+
+| Family | Intent | Typical stack |
+|---|---|---|
+| `g6lc64_ooo` | Dual-issue OoO lite | `OoOEn`, deep scoreboard, no fat multicore |
+| `g6lc64_ooo_server` | Server OoO | Wide issue, multi-core×hart, L2/L3 auto, memdep |
+| `g6lc64_smt2` | Dual-thread | `NrHarts=2`, hybrid switch, often L2 |
+| `g6lc64_server_math` | KVM / math host (C-light) | H+Sstc, RVB, Zicbo*, HWPF, HPDCACHE, L2 auto; RVV off until Ara |
+| `g6lc64_server_math_v` | + RVV | `VExtEn`, Ara attach; `CvxifEn` exclusive with accelerator path |
+
+Default packages (e.g. `cv64a6_imafdc_sv39`) remain the **identity** path for
+integrators who want classic CVA6 behavior.
+
+## Composition rules
+
+1. **Config package is the product SKU.** Selecting a package sets dozens of
+   knobs consistently (`check_cfg` enforces legality).  
+2. **L2/L3 live in APU**, not as L1 hacks — see
+   [L2 / L3 Cache](../corev-apu/l2-l3-cache).  
+3. **H + Sstc** before heavy guest timer work; G-stage present, KVM stress still
+   operator-owned.  
+4. **Ara / RVV** prefers the CVXIF / acc_dispatcher seam; `CvxifEn` and
+   accelerator enables are mutually exclusive by assertion.  
+5. **SMT × KVM** is a later composition — bring up SMT bare-metal first.  
+
+## Operator selection
+
+```bash
+# .config.ts
+export default defineBuildConfig({
+  soc: { coreConfig: 'g6lc64_ooo_server' }, // example
+})
+
+g6lc-build config
+g6lc-build verify --target g6lc64_ooo_server
+```
+
+Board selection (`g6lc-build mb select`) may pin `soc.*` via overlay — do not
+fight the board contract when co-developing FPGA targets.
+
+## Software / DTS
+
+| Capability | Visibility |
+|---|---|
+| ISA string / `misa` | Must match package extensions |
+| Multi-hart / SMT | Multiple `cpu@` nodes, CLINT/PLIC sizing |
+| L2/L3 | `next-level-cache` / cache nodes when present |
+| Hypervisor | OpenSBI + Linux KVM prerequisites |
+
+Cross-check: `AGENTS-dts-validation.md` and
+`build-platform/scripts/validate-cva6-dts.*`.
+
+## Related product pages
+
+- [SKU Matrix](../architecture/sku-matrix) — side-by-side package comparison
+- [Out-of-Order](./out-of-order)
+- [SMT](./smt)
+- [Multi-Issue](./multi-issue)
+- [Hypervisor & Sstc](./hypervisor)
+- [Vector (RVV) & Ara](./vector)
+- [Multi-Core](../corev-apu/multi-core)
+- [L2 / L3](../corev-apu/l2-l3-cache)
+- [Upgrade Program](../architecture/upgrade-program)
+- Vector guide: `agents/guides/AGENTS-vector.md`

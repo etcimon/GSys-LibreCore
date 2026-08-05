@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Cache Management Operations (Vol I, 4.20)</title></head>
+<body>
+<h1>Vol I &sect;4.20 — Cache Management Operations (CMOs)</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#cmo">specs/riscv-spec.html#cmo</a>
+(source line 12653). <strong>Domain:</strong> CACHE, RAM.</p>
+
+<p>Cache management operation (CMO) instructions perform operations on copies of data in the memory
+hierarchy, generally on cached copies. CMOs are grouped into management (inval/clean/flush), zero
+(<code>CBO.ZERO</code>), and prefetch (<code>CBO.PREFETCH</code>) classes. The <code>Zicbom</code>
+extension defines <code>CBO.INVAL</code>, <code>CBO.CLEAN</code>, and <code>CBO.FLUSH</code> for aligned
+64-byte blocks; <code>Zicboz</code> adds <code>CBO.ZERO</code>; <code>Zicbop</code> adds
+<code>CBO.PREFETCH</code>. CMOs require privilege and PMA checks and can replace heavyweight
+fence/flush sequences for DMA coherence.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"Cache management operation (CMO) instructions perform operations on
+copies of data in the memory hierarchy. In general, CMO instructions
+operate on cached copies of data, but in some cases, a CMO instruction
+may operate on memory locations directly. Furthermore, CMO instructions
+are grouped by operation into the following classes:
+  - A management instruction manipulates cached copies of data with
+    respect to a set of agents that can access the data.
+  - A zero instruction zeros out a range of memory locations, potentially
+    allocating cached copies of data in one or more caches.
+  - A prefetch instruction indicates to hardware that data at a given
+    memory location may be accessed in the near future, potentially
+    allocating cached copies of data in one or more caches."
+(specs/riscv-spec.html:12653-12673, anchor #cmo / #intro-cmo)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module cmo_unit (
+  input  logic [XLEN-1:0] vaddr_i,
+  input  cmo_op_e         op_i,     // inval/clean/flush/zero
+  input  logic            mprv_i,   // effective privilege
+  output logic            cache_inval_o, cache_clean_o, cache_zero_o
+);
+  // block-aligned 64B operation; must be PMA-allowed and privileged
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> <strong>partial (config)</strong> — Zicbom + U7ᵇ Zicboz/Zicbop.
+<code>Zicbom</code> (<code>CBO.INVAL/CLEAN/FLUSH</code>) is decoded when <code>CVA6Cfg.RVZiCbom</code>,
+routed via <code>core/store_unit.sv</code> / <code>store_buffer.sv</code>, and mapped to HPDCACHE CMO ops
+in <code>cva6_hpdcache_if_adapter.sv</code> (HPDCACHE targets enable <code>RVZiCbom</code>).
+<code>Zicboz</code>: <code>CBO.ZERO</code> (imm=4) decoded under <code>RVZiCboz</code>, gated by
+<code>menvcfg/senvcfg/henvcfg.CBZE</code>; store path forces zero data / full BE; HPDCACHE maps to STORE
+(single native-XLEN zero store today — full multi-beat line zero is a follow-on).
+<code>Zicbop</code>: <code>PREFETCH.{I,R,W}</code> ORI HINTs decode as architectural NOP under
+<code>RVZiCbop</code>. WT L1 still has no CMO controller (Zicbom is HPDCACHE-effective). Primary
+<code>cv64a6_imafdc_sv39</code> enables Zicboz/Zicbop (not Zicbom).</p>
+
+<p><strong>.dts linkage:</strong> advertise <code>riscv,cbom-block-size</code> /
+<code>riscv,cboz-block-size</code> from <code>DcacheLineWidth</code>; Zic64b (64 B) is still not met by
+shipped 128-bit-line targets unless geometry is raised.</p>
+</body>
+</html>

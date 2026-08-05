@@ -1,0 +1,120 @@
+---
+title: Architecture & Worktree
+description: How CVA6 is organized from core to product, and how to read the repository as an SoC architecture.
+---
+
+# Architecture & Worktree
+
+CVA6 is organized as a set of **concentric layers** that take a RISC-V CPU core
+to a finished SoC product:
+
+```
+RISC-V CPU core (core/)
+    ⇄ on-die uncore / FPGA emulation platform (corev_apu/)
+        ⇄ motherboard / board layer (corev-mb/)
+            ⇄ foundry / process technology (pd/pdk/)
+                ⇄ vendor controllers & PHY (vendor/, corev_apu/)
+                    ⇄ build automation & AI orchestration (build-platform/)
+                         ⇄ structural timing package (sv-timing/)  [spawn only]
+```
+
+Each silicon layer has its own directory, config gate, and agent guide. The
+build platform is the **spine**: it reads the repo-root `.config.ts` and drives
+setup, simulation, board selection, vendor sync, technology checks, and the
+optional **`timings`** host adapter. `sv-timing/` is **not** a silicon layer; it
+is an independent analysis package that the spine may spawn (see
+[sv-timing](../sv-timing)).
+
+This layered model is not an accident of history; it is the physical design of
+a reusable silicon IP business. A CPU core that can be sold or reused across
+multiple SoCs must remain agnostic to the boards and processes that surround it.
+An uncore layer must be able to change controllers without rewriting the core.
+A board layer must be able to target a new physical platform without forking
+the RTL. And a technology layer must be able to bind a foundry process without
+contaminating the generic source. Each arrow in the diagram above represents a
+one-way dependency that protects the inner layer from the outer layer's
+concerns, which is the same dependency discipline used in commercial IP
+ecosystems such as Arm Flexible Access, SiFive Core Complex, and the OpenHW
+Group's own portfolio.
+
+## Why this structure exists
+
+CVA6 is not a software model; it is silicon IP that is integrated into SoCs,
+booted into Linux, and taped out. The directory layout is therefore designed to
+keep ** concerns separated**:
+
+- `core/` has no dependency on `corev_apu/` — it can be simulated and
+  synthesized stand-alone.
+- `corev_apu/` depends on `core/` and adds the FPGA/uncore platform.
+- `corev-mb/` describes the board *around* the die without editing `core/` or
+  `corev_apu/src/`.
+- `vendor/` holds third-party IP that is fetched and scanned on demand.
+- `build-platform/` automates the cross-platform setup and orchestration.
+- `sv-timing/` is a standalone structural-timing package (optional host:
+  `g6lc-build timings`).
+- `architecture/` holds non-compiled extension scaffolds **and** pointers to
+  live upgrade status (OoO, SMT, L2, …) without entering flists.
+- `agents/` and `AGENTS-*.md` contain the **living guides** that agents and
+  humans use to navigate each layer.
+
+The `AGENTS-*.md` layer is the key to scaling this repository. As the project
+grows, the number of files, spec subchapters, and verification suites grows
+faster than any single engineer can memorize. The agent guides compress that
+complexity into a curated retrieval graph, so that both human and automated
+readers can resolve intent to a small set of relevant documents. This is the
+same knowledge-management pattern used in large-scale software monorepos, but
+adapted to the unique needs of hardware: precise file-line references, spec
+anchors, and silicon sign-off checklists.
+
+## Key design rules
+
+1. **Config is the single source of truth.** The `cva6_cfg_t` struct in
+   `core/include/config_pkg.sv` gates CPU features; the repo-root `.config.ts`
+   gates the whole SoC build.
+2. **Add at a sanctioned seam.** New compute prefers the CVXIF coprocessor
+   boundary; new memories go through `tc_sram`; new board targets go under
+   `corev-mb/architecture/`; new PDK drop-ins go under `pd/pdk/`.
+3. **Never churn the working hierarchy.** New features are additive; they do not
+   move existing files or break flists.
+4. **Every change is verified in lockstep.** RTL, tests, formal properties,
+   DFT hooks, and docs are updated together.
+
+Each rule addresses a specific failure mode seen in industrial SoC projects.
+"Config as the single source of truth" prevents silent divergence between the
+RTL and the build scripts that invoke it. "Add at a sanctioned seam" prevents
+ad hoc coupling that later makes timing closure or floorplanning impossible.
+"Never churn the working hierarchy" preserves the investment that partners and
+tool flows have made in the existing directory structure and flists. "Every
+change is verified in lockstep" closes the gap between "it simulates" and "it
+is ready for silicon," where DFT, formal equivalence, and documentation are
+traditionally left as afterthoughts.
+
+## Live microarchitecture (GSys LibreCore)
+
+Beyond the classic in-order pipeline, this branch carries **config-gated**
+extensions. Defaults vary by target package; many features elaborate as
+identity when disabled. Full product map:
+[Upgrade Program](./upgrade-program). Live RTL table: `architecture/README.md`.
+
+| Area | Product page | Gate (concept) |
+|---|---|---|
+| Prediction fabric / FTQ | [Frontend Extensions](../core/frontend-extensions) | target-dependent |
+| Multi-issue | [Multi-Issue](../core/multi-issue) | `NrIssuePorts` |
+| Slice / full OoO | [Out-of-Order](../core/out-of-order) | `SliceOoOEn`, `OoOEn` |
+| SMT | [SMT](../core/smt) | `NrHarts` |
+| Multi-core | [Multi-Core Cluster](../corev-apu/multi-core) | `NrCores` |
+| L2 / L3 | [L2 / L3 Cache](../corev-apu/l2-l3-cache) | `L2En`, `L3En` |
+| Hypervisor / Sstc | [Hypervisor & Sstc](../core/hypervisor) | `RVH`, `SstcEn` |
+| RVV / Ara | [Vector (RVV) & Ara](../core/vector) | `RVV`, Ara flist |
+| Server / KVM packages | [Server Profiles](../core/server-profiles) | named `*_config_pkg` |
+| Package comparison | [SKU Matrix](./sku-matrix) | — |
+
+## Pages in this section
+
+- [Worktree map](./worktree) — the purpose of every top-level directory.
+- [Upgrade Program](./upgrade-program) — U1–U10 product roadmap.
+- [SKU Matrix](./sku-matrix) — config package comparison.
+- [Specs, DTS & architecture](./specs-and-dts) — how RISC-V spec, Linux DTS, and
+  architecture documents stay aligned.
+- [AI / agent development](./ai-development) — how LLM agents navigate the
+  repo and the `AGENTS-*` files.

@@ -14,6 +14,21 @@ package config_pkg;
   // ---------------
   localparam int unsigned ILEN = 32;
   localparam int unsigned NRET = 1;
+  /// Maximum in-order multi-issue width (superscalar precursor to U5 OoO).
+  /// Used for static bounds; the live width is `cva6_cfg_t.NrIssuePorts` (1 or 2..8).
+  localparam int unsigned CVA6_MAX_ISSUE_PORTS = 8;
+  /// Supported FETCH_WIDTH values once multi-issue scales the front-end bus.
+  localparam int unsigned CVA6_MAX_FETCH_WIDTH = 256;
+  /// Maximum coherent cluster size (U6.2 multi-core). Live width is
+  /// `cva6_cfg_t.NrCores` ∈ {1..CVA6_MAX_CORES}. CLINT/PLIC/snoop scale to this.
+  /// Overridable at compile time: `+define+CVA6_MAX_CORES=4` (must be power-of-two-friendly ≤8).
+`ifdef CVA6_MAX_CORES
+  localparam int unsigned CVA6_MAX_CORES = `CVA6_MAX_CORES;
+`else
+  localparam int unsigned CVA6_MAX_CORES = 8;
+`endif
+  /// Max SMT hardware threads *per core* (U6.1). Cluster hart count ≈ NrCores×NrHarts.
+  localparam int unsigned CVA6_MAX_SMT_HARTS = 2;
 
   /// The NoC type is a top-level parameter, hence we need a bit more
   /// information on what protocol those type parameters are supporting.
@@ -35,11 +50,35 @@ package config_pkg;
     HPDCACHE_WT_WB = 4
   } cache_type_t;
 
-  /// Branch predictor parameter
-  typedef enum logic {
-    BHT = 0,  // Bimodal predictor
-    PH_BHT = 1  // Private History Bimodal predictor
+  /// Branch predictor parameter (U1 fabric; BHT/PH_BHT are the legacy paths)
+  typedef enum logic [1:0] {
+    BHT       = 2'd0,  // Bimodal predictor (default, bit-identical to pre-U1)
+    PH_BHT    = 2'd1,  // Private History Bimodal predictor
+    GSHARE    = 2'd2,  // Global-history XOR index (U1)
+    TAGE_LITE = 2'd3   // TAGE-SC-lite fabric via g6lc_bp_top (U1)
   } bp_type_t;
+
+  /// U3 L1 replacement policy (HPDCACHE victim select; WT keeps LFSR/random)
+  typedef enum logic [1:0] {
+    REPL_PLRU  = 2'd0,
+    REPL_RANDOM = 2'd1,
+    REPL_RRIP  = 2'd2,  // SRRIP — scan-resistant (best for skb streaming)
+    REPL_DRRIP = 2'd3   // set-dueling SRRIP/BRRIP
+  } repl_policy_t;
+
+  /// U6.1 SMT thread-select policy (contention-aware; ignored when NrHarts==1)
+  typedef enum logic [1:0] {
+    SMT_RR             = 2'd0,  // pure round-robin after SmtFetchQuantum
+    SMT_SWITCH_ON_MISS = 2'd1,  // switch immediately when active hart D$/I$ miss
+    SMT_HYBRID         = 2'd2   // miss-prefer + quantum RR + anti-starvation
+  } smt_policy_t;
+
+  /// U6.2 multi-core coherence policy (SoC; ignored when NrCores==1)
+  typedef enum logic [1:0] {
+    COH_WRITE_INVAL  = 2'd0,  // WT: remote write → invalidate peer L1(s)
+    COH_BROADCAST    = 2'd1,  // always broadcast inv (filter off / debug)
+    COH_FILTERED     = 2'd2   // snoop-filter guided inv (default when NrCores>1)
+  } coh_policy_t;
 
   /// Data and Address length
   typedef enum logic [3:0] {
@@ -66,6 +105,8 @@ package config_pkg;
     int unsigned                 VLEN;
     // Atomic RISC-V extension
     bit                          RVA;
+    // Zacas: atomic compare-and-swap (AMOCAS.W/D; depends on RVA/Zaamo)
+    bit                          RVZacas;
     // Bit manipulation RISC-V extension
     bit                          RVB;
     // Scalar Cryptography RISC-V extension
@@ -86,6 +127,10 @@ package config_pkg;
     bit                          RVZiCond;
     // Zicbom RISC-V extension (cache management / CBO)
     bit                          RVZiCbom;
+    // Zicboz: cbo.zero (requires RVZiCbom for menvcfg CBIE/CBCFE machinery optional)
+    bit                          RVZiCboz;
+    // Zicbop: prefetch.i / prefetch.r / prefetch.w HINTs
+    bit                          RVZiCbop;
     // Zicntr RISC-V extension
     bit                          RVZicntr;
     // Zihpm RISC-V extension
@@ -227,11 +272,15 @@ package config_pkg;
     bit          FpgaAlteraEn;
     // Is Techno Cut instantiated
     bit          TechnoCut;
-    // Enable superscalar* with 2 issue ports and 2 commit ports.
+    // Enable superscalar multi-issue (in-order). Width is NrIssuePorts (2..8).
     bit          SuperscalarEn;
+    // Issue width: 0 = auto (SuperscalarEn ? 2 : 1); else 1, or 2..CVA6_MAX_ISSUE_PORTS
+    // when SuperscalarEn. Precursor knob for U5 multi-issue OoO scaling.
+    int unsigned NrIssuePorts;
     // Enable ALU-ALU bypass (superscalar mode only)
     bit          ALUBypass;
-    // Number of commit ports. Forced to 2 if SuperscalarEn.
+    // Number of commit ports. When SuperscalarEn and 0/under-sized, raised to
+    // match issue width (capped by check_cfg).
     int unsigned NrCommitPorts;
     // Load cycle latency number
     int unsigned NrLoadPipeRegs;
@@ -253,6 +302,17 @@ package config_pkg;
     int unsigned BHTEntries;
     // Branch history bits
     int unsigned BHTHist;
+    // U1 prediction fabric knobs (used when BPType is GSHARE or TAGE_LITE).
+    // Zero / disabled defaults keep BHT/PH_BHT configs bit-identical.
+    int unsigned BPGhistLen;          // global / folded history length (≤ 64)
+    int unsigned BPTageTables;        // number of tagged TAGE components (0..8)
+    int unsigned BPTageTableEntries;  // entries per tagged table (0 or power-of-two)
+    int unsigned BPTageTagBits;       // tag width per TAGE entry
+    bit          BPLoopEn;            // loop (trip-count) predictor
+    bit          BPIndirectEn;        // ITTAGE / indirect target predictor
+    int unsigned BPIndirectEntries;   // ITTAGE entries (0 or power-of-two)
+    bit          BPStatCorEn;         // statistical corrector
+    int unsigned BPCkptDepth;         // prediction checkpoint FIFO depth (U4/U5)
     // MMU instruction TLB entries
     int unsigned InstrTlbEntries;
     // MMU data TLB entries
@@ -263,6 +323,81 @@ package config_pkg;
     int unsigned SharedTlbDepth;
     // Option to enable Svnapot extension
     bit          SvnapotEn;
+    // Option to enable Sstc extension (stimecmp/vstimecmp supervisor timer).
+    // Requires RVS, and requires the platform to supply the mtime value on
+    // cva6's rtc_time_i port (the CLINT owns the counter, the hart owns the
+    // comparator). Also enables the in-core time/timeh CSRs.
+    bit          SstcEn;
+    // Sscofpmf: counter-overflow interrupt (LCOFI), mhpmeventN.OF + privilege
+    // filtering (MINH/SINH/UINH), and the scountovf CSR. Requires PerfCounterEn.
+    bit          SscofpmfEn;
+    // Zihintpause: decode the PAUSE HINT (FENCE with pred=W,succ=0,rd=x0,rs1=x0)
+    // as a NOP rather than a full D$ fence flush.
+    bit          ZihintpauseEn;
+    // U7ᵇ: Svpbmt — page-based memory types (PTE[62:61]); menvcfg.PBMTE
+    bit          SvpbmtEn;
+    // U7ᵇ: Zawrs — wrs.nto / wrs.sto wait-on-reservation-set
+    bit          ZawrsEn;
+    // U6 — L2 / SMT / multi-core (memory-side L2 + precursor knobs)
+    bit          L2En;                // instantiate AXI L2 in SoC (corev_apu)
+    int unsigned L2ByteSize;          // e.g. 262144 = 256 KiB
+    int unsigned L2SetAssoc;          // ways
+    int unsigned L2LineWidth;         // bits; must match D$ / 512 for 64 B
+    int unsigned L2MshrDepth;         // outstanding misses (MLP)
+    int unsigned L2DataBanks;         // banked data array
+    int unsigned NrHarts;             // SMT threads per core: 1 baseline, ≤CVA6_MAX_SMT_HARTS
+    // U6.1 SMT contention policy (inert when NrHarts==1)
+    smt_policy_t SmtPolicy;           // RR / switch-on-miss / hybrid
+    int unsigned SmtFetchQuantum;     // consecutive fetch grants before RR (0→1)
+    int unsigned SmtStarveLimit;      // force switch after N idle cycles (0=off)
+    // U6.2 coherent multi-core cluster (SoC; inert when NrCores==1)
+    int unsigned NrCores;             // physical cores: 1..CVA6_MAX_CORES (2–8 multi-core)
+    coh_policy_t CohPolicy;           // write-inval / broadcast / filtered
+    bit          SnoopFilterEn;       // filter useless L1 snoops
+    int unsigned SnoopFilterEntries;  // SF entries (0 or power-of-two)
+    int unsigned CohInvalDepth;       // per-core inv FIFO depth
+    int unsigned CohAxiStarveLimit;   // multi-master AXI anti-starve cycles
+    // U3 energy-first L1
+    bit          WayPredEn;           // MRU way prediction (I$ data-array CE)
+    int unsigned WayPredEntries;      // way-predictor table entries (0 or pot)
+    repl_policy_t ReplPolicy;         // PLRU/RANDOM/RRIP/DRRIP (HPDCACHE)
+    bit          HwPrefetchEn;        // enable HPDCACHE stride prefetcher
+    int unsigned HwPrefetchStreams;   // number of stride streams
+    int unsigned DcacheMshrDepth;     // MSHR entries hint (0 = IP default)
+    // U2 decoupled front-end (0 FTQ depth ⇒ today's direct NPC→I$ path)
+    int unsigned FtqDepth;            // fetch-target queue depth (0 = off)
+    bit          FdipEn;              // fetch-directed I-prefetch
+    int unsigned FdipDistance;        // FTQ entries of run-ahead for FDIP
+    bit          LoopBufEn;           // loop buffer
+    int unsigned LoopBufEntries;      // max fetch blocks in the loop body
+    // U4 slice-out-of-order (mutually exclusive with U5 OoOEn)
+    bit          SliceOoOEn;          // LSC-style A/B queue steering
+    int unsigned SliceIstEntries;     // instruction-slice table entries
+    int unsigned SliceAiqDepth;       // address-slice issue queue depth
+    int unsigned SliceBiqDepth;       // main (B) issue queue depth
+    int unsigned SliceMaxRunahead;    // max A-ahead-of-B in-flight
+    // U5 full OoO production path (config-gated; illegal with SliceOoOEn)
+    bit          OoOEn;
+    // FSE: deep speculation depth plane (architecture/speculative-execution/)
+    // 0 = legacy STQ depth 4 + package-stated buffers; 1 = auto floors + deeper STQ
+    bit          DeepSpecEn;
+    int unsigned RobEntries;          // ROB depth (0 → NrScoreboardEntries when OoOEn)
+    int unsigned PrfEntries;          // physical RF size (0 → 32+RobEntries)
+    int unsigned IqEntries;           // unified IQ depth (0 → RobEntries)
+    int unsigned LsqLoadEntries;      // load queue (0 → NrLoadBufEntries)
+    int unsigned LsqStoreEntries;     // store queue (0 → MaxOutstandingStores)
+    bit          MemDepPredEn;        // store-set memory dependence predictor
+    int unsigned OoORetireWidth;      // max retire/cycle (0 → NrCommitPorts)
+    // U5/U6 memory hierarchy: optional L3 + server-ready prefetch (SoC, not L1)
+    bit          L3En;                // AXI L3 below L2 (requires L2En)
+    int unsigned L3ByteSize;          // e.g. 2 MiB
+    int unsigned L3SetAssoc;
+    int unsigned L3LineWidth;         // bits; must match L2 / 64 B Zic64b
+    int unsigned L3MshrDepth;
+    int unsigned L3DataBanks;
+    bit          ServerPrefetchEn;    // multi-stream + next-line at L3 boundary
+    int unsigned ServerPfStreams;     // concurrent stream trackers
+    int unsigned ServerPfDistance;    // next-line look-ahead (lines)
   } cva6_user_cfg_t;
 
   typedef struct packed {
@@ -284,6 +419,7 @@ package config_pkg;
     int unsigned NrCommitPorts;
     int unsigned NrIssuePorts;
     bit          SpeculativeSb;
+    bit          DeepSpecEn;          // FSE depth plane (STQ/load/ckpt floors)
 
     int unsigned NrALUs;
     bit          ALUBypass;
@@ -303,6 +439,7 @@ package config_pkg;
     bit          XF16ALT;
     bit          XF8;
     bit          RVA;
+    bit          RVZacas;  // Zacas AMOCAS.W/D (implies RVA)
     bit          RVB;
     bit          ZKN;
     bit          RVV;
@@ -316,6 +453,8 @@ package config_pkg;
     copro_type_t CoproType;
     bit          RVZiCond;
     bit          RVZiCbom;
+    bit          RVZiCboz;
+    bit          RVZiCbop;
     bit          RVZicntr;
     bit          RVZihpm;
 
@@ -345,10 +484,73 @@ package config_pkg;
     bp_type_t    BPType;
     int unsigned BHTEntries;
     int unsigned BHTHist;
+    int unsigned BPGhistLen;
+    int unsigned BPTageTables;
+    int unsigned BPTageTableEntries;
+    int unsigned BPTageTagBits;
+    bit          BPLoopEn;
+    bit          BPIndirectEn;
+    int unsigned BPIndirectEntries;
+    bit          BPStatCorEn;
+    int unsigned BPCkptDepth;
     int unsigned InstrTlbEntries;
     int unsigned DataTlbEntries;
     bit unsigned UseSharedTlb;
     bit SvnapotEn;
+    bit SstcEn;
+    bit SscofpmfEn;
+    bit ZihintpauseEn;
+    bit SvpbmtEn;
+    bit ZawrsEn;
+    bit L2En;
+    int unsigned L2ByteSize;
+    int unsigned L2SetAssoc;
+    int unsigned L2LineWidth;
+    int unsigned L2MshrDepth;
+    int unsigned L2DataBanks;
+    int unsigned NrHarts;
+    smt_policy_t SmtPolicy;
+    int unsigned SmtFetchQuantum;
+    int unsigned SmtStarveLimit;
+    int unsigned NrCores;
+    coh_policy_t CohPolicy;
+    bit SnoopFilterEn;
+    int unsigned SnoopFilterEntries;
+    int unsigned CohInvalDepth;
+    int unsigned CohAxiStarveLimit;
+    bit WayPredEn;
+    int unsigned WayPredEntries;
+    repl_policy_t ReplPolicy;
+    bit HwPrefetchEn;
+    int unsigned HwPrefetchStreams;
+    int unsigned DcacheMshrDepth;
+    int unsigned FtqDepth;
+    bit          FdipEn;
+    int unsigned FdipDistance;
+    bit          LoopBufEn;
+    int unsigned LoopBufEntries;
+    bit          SliceOoOEn;
+    int unsigned SliceIstEntries;
+    int unsigned SliceAiqDepth;
+    int unsigned SliceBiqDepth;
+    int unsigned SliceMaxRunahead;
+    bit          OoOEn;
+    int unsigned RobEntries;
+    int unsigned PrfEntries;
+    int unsigned IqEntries;
+    int unsigned LsqLoadEntries;
+    int unsigned LsqStoreEntries;
+    bit          MemDepPredEn;
+    int unsigned OoORetireWidth;
+    bit          L3En;
+    int unsigned L3ByteSize;
+    int unsigned L3SetAssoc;
+    int unsigned L3LineWidth;
+    int unsigned L3MshrDepth;
+    int unsigned L3DataBanks;
+    bit          ServerPrefetchEn;
+    int unsigned ServerPfStreams;
+    int unsigned ServerPfDistance;
     int unsigned SharedTlbDepth;
     int unsigned VpnLen;
     int unsigned PtLevels;
@@ -409,7 +611,9 @@ package config_pkg;
     int unsigned WtDcacheWbufDepth;
     int unsigned FETCH_USER_WIDTH;
     int unsigned FETCH_USER_EN;
-    bit          AXI_USER_EN;
+    // Match TB `parameter int unsigned AXI_USER_EN` (was bit; width mismatch
+    // tripped vlt 5.020 internal fault on ariane_testharness default).
+    int unsigned AXI_USER_EN;
 
     int unsigned FETCH_WIDTH;
     int unsigned FETCH_ALIGN_BITS;
@@ -452,13 +656,126 @@ package config_pkg;
     assert (Cfg.NrExecuteRegionRules <= NrMaxRules);
     assert (Cfg.NrCachedRegionRules <= NrMaxRules);
     assert (Cfg.NrPMPEntries <= 64);
-    assert (Cfg.FETCH_WIDTH == 32 || Cfg.FETCH_WIDTH == 64)
-    else $fatal(1, "[frontend] fetch width != not supported");
+    assert (Cfg.FETCH_WIDTH == 32 || Cfg.FETCH_WIDTH == 64 ||
+            Cfg.FETCH_WIDTH == 128 || Cfg.FETCH_WIDTH == 256)
+    else $fatal(1, "[frontend] fetch width not supported");
+    // Multi-issue width (superscalar precursor to OoO).
+    assert (Cfg.NrIssuePorts >= 1 && Cfg.NrIssuePorts <= CVA6_MAX_ISSUE_PORTS);
+    assert (!(Cfg.NrIssuePorts > 1 && !Cfg.SuperscalarEn));
+    assert (!(Cfg.SuperscalarEn && Cfg.NrIssuePorts < 2));
+    assert (Cfg.NrCommitPorts >= 1 && Cfg.NrCommitPorts <= CVA6_MAX_ISSUE_PORTS);
+    assert (!(Cfg.SuperscalarEn && Cfg.NrCommitPorts < 2));
+    assert (Cfg.NrALUs >= 1 && Cfg.NrALUs <= CVA6_MAX_ISSUE_PORTS);
+    assert (!(Cfg.SuperscalarEn && Cfg.NrALUs < 2));
+    assert (Cfg.NrIssuePorts <= Cfg.NR_SB_ENTRIES);
+    assert (Cfg.INSTR_PER_FETCH >= 1);
     // Support for disabling MIP.MSIP and MIE.MSIE in Hypervisor and Supervisor mode is not supported
     // Software Interrupt can be disabled when there is only M machine mode in CVA6.
     assert (!(Cfg.RVS && !Cfg.SoftwareInterruptEn));
     assert (!(Cfg.RVH && !Cfg.SoftwareInterruptEn));
     assert (!(Cfg.RVZCMT && ~Cfg.MmuPresent));
+    // Sstc places stimecmp in S-mode; without supervisor mode the CSRs have no home.
+    assert (!(Cfg.SstcEn && !Cfg.RVS));
+    // U9.0: Sstc under H is legal when RVH is on — needs vstimecmp + henvcfg.STCE
+    // (implemented in csr_regfile). RVH without Sstc is fine (legacy HS).
+    assert (!(Cfg.RVH && !Cfg.RVS));
+    // Sscofpmf needs the HPM counters that carry the OF bits.
+    assert (!(Cfg.SscofpmfEn && !Cfg.PerfCounterEn));
+    // U7ᵇ extension legality.
+    // Svpbmt is an Sv39+ feature (PTE bits 62:61); only meaningful with an MMU on RV64.
+    assert (!(Cfg.SvpbmtEn && !Cfg.MmuPresent));
+    assert (!(Cfg.SvpbmtEn && Cfg.IS_XLEN32));
+    // Zacas (AMOCAS.W/D) depends on Zaamo / RVA atomics.
+    assert (!(Cfg.RVZacas && !Cfg.RVA));
+    // U6 L2 / multi-hart (SMT) / multi-core legality.
+    assert (Cfg.NrHarts >= 1 && Cfg.NrHarts <= CVA6_MAX_SMT_HARTS);
+    assert (!(Cfg.NrHarts > 1 && !Cfg.RVS));
+    assert (!(Cfg.NrHarts > 1 && !Cfg.MmuPresent));
+    // U6.1 SMT: when multi-hart, require a quantum ≥1 and a legal policy.
+    assert (Cfg.SmtPolicy inside {SMT_RR, SMT_SWITCH_ON_MISS, SMT_HYBRID});
+    assert (!(Cfg.NrHarts > 1 && Cfg.SmtFetchQuantum == 0));
+    // Multi-hart needs checkpoint depth for per-hart BP recovery (if ckpts used).
+    assert (!(Cfg.NrHarts > 1 && Cfg.SpeculativeSb && Cfg.BPCkptDepth != 0 &&
+              Cfg.BPCkptDepth < Cfg.NR_SB_ENTRIES));
+    // U6.2 multi-core cluster (1..CVA6_MAX_CORES; multi-core path is 2–8).
+    assert (Cfg.NrCores >= 1 && Cfg.NrCores <= CVA6_MAX_CORES);
+    assert (Cfg.CohPolicy inside {COH_WRITE_INVAL, COH_BROADCAST, COH_FILTERED});
+    assert (!(Cfg.NrCores > 1 && Cfg.SnoopFilterEn && Cfg.SnoopFilterEntries == 0));
+    assert (Cfg.SnoopFilterEntries == 0 ||
+            (2 ** $clog2(Cfg.SnoopFilterEntries) == Cfg.SnoopFilterEntries));
+    assert (Cfg.CohInvalDepth == 0 ||
+            (2 ** $clog2(Cfg.CohInvalDepth) == Cfg.CohInvalDepth));
+    // Multi-core needs supervisor + MMU for SMP Linux (same gate as multi-hart).
+    assert (!(Cfg.NrCores > 1 && !Cfg.RVS));
+    assert (!(Cfg.NrCores > 1 && !Cfg.MmuPresent));
+    assert (!(Cfg.L2En && Cfg.L2ByteSize == 0));
+    assert (!(Cfg.L2En && Cfg.L2SetAssoc == 0));
+    // L2 line width: 0 → inferred 512 (64 B / Zic64b), explicit 512, or match L1
+    // DCACHE_LINE_WIDTH. L1 may be 128b (16 B) while L2 is 64 B — that is legal.
+    assert (!(Cfg.L2En && Cfg.L2LineWidth != 0 && Cfg.L2LineWidth != 512 &&
+              Cfg.DCACHE_LINE_WIDTH != 0 && Cfg.L2LineWidth != Cfg.DCACHE_LINE_WIDTH));
+    assert (Cfg.L2MshrDepth == 0 || (2 ** $clog2(Cfg.L2MshrDepth) == Cfg.L2MshrDepth));
+    assert (Cfg.L2DataBanks == 0 || (2 ** $clog2(Cfg.L2DataBanks) == Cfg.L2DataBanks));
+    // scountovf is an S-mode CSR; without RVS there is no supervisor observer.
+    assert (!(Cfg.SscofpmfEn && !Cfg.RVS));
+    // U1 prediction fabric legality.
+    assert (Cfg.BPGhistLen <= 64);
+    assert (Cfg.BPTageTables <= 8);
+    assert (Cfg.BPTageTableEntries == 0 ||
+            (2 ** $clog2(Cfg.BPTageTableEntries) == Cfg.BPTageTableEntries));
+    assert (Cfg.BPIndirectEntries == 0 ||
+            (2 ** $clog2(Cfg.BPIndirectEntries) == Cfg.BPIndirectEntries));
+    assert (!(Cfg.BPIndirectEn && Cfg.BTBEntries == 0));
+    assert (!(Cfg.BPType == TAGE_LITE && Cfg.BPTageTables == 0));
+    assert (!(Cfg.BPType == GSHARE && Cfg.BHTEntries == 0));
+    assert (!(Cfg.BPType == GSHARE && Cfg.BPGhistLen == 0 && Cfg.BHTHist == 0));
+    // Checkpoint depth must cover the in-flight window when the scoreboard is speculative.
+    assert (!(Cfg.SpeculativeSb && Cfg.BPCkptDepth != 0 &&
+              Cfg.BPCkptDepth < Cfg.NR_SB_ENTRIES));
+    // U3 L1 energy / MLP legality.
+    assert (!(Cfg.WayPredEn && Cfg.ICACHE_SET_ASSOC <= 1));
+    assert (Cfg.WayPredEntries == 0 ||
+            (2 ** $clog2(Cfg.WayPredEntries) == Cfg.WayPredEntries));
+    assert (!(Cfg.HwPrefetchEn &&
+              !(Cfg.DCacheType inside {HPDCACHE_WT, HPDCACHE_WB, HPDCACHE_WT_WB})));
+    // U2 decoupled front-end legality.
+    assert (!(Cfg.FdipEn && Cfg.FtqDepth < 2));
+    assert (!(Cfg.FtqDepth == 0 && (Cfg.FdipEn || Cfg.LoopBufEn)));
+    assert (Cfg.LoopBufEntries == 0 ||
+            (2 ** $clog2(Cfg.LoopBufEntries) == Cfg.LoopBufEntries));
+    assert (Cfg.FtqDepth == 0 || (2 ** $clog2(Cfg.FtqDepth) == Cfg.FtqDepth));
+    // U4 slice-OoO legality (mutually exclusive with U5; needs speculative SB + non-blocking D$).
+    assert (!(Cfg.SliceOoOEn && Cfg.OoOEn));
+    assert (!(Cfg.SliceOoOEn && !Cfg.SpeculativeSb));
+    assert (!(Cfg.SliceOoOEn && Cfg.BPCkptDepth != 0 &&
+              Cfg.BPCkptDepth < Cfg.SliceAiqDepth));
+    assert (!(Cfg.SliceOoOEn &&
+              !(Cfg.DCacheType inside {HPDCACHE_WT, HPDCACHE_WB, HPDCACHE_WT_WB})));
+    assert (!(Cfg.SliceOoOEn && Cfg.SliceAiqDepth == 0));
+    assert (!(Cfg.SliceOoOEn && Cfg.SliceBiqDepth == 0));
+    assert (Cfg.SliceIstEntries == 0 ||
+            (2 ** $clog2(Cfg.SliceIstEntries) == Cfg.SliceIstEntries));
+    assert (Cfg.SliceAiqDepth == 0 ||
+            (2 ** $clog2(Cfg.SliceAiqDepth) == Cfg.SliceAiqDepth));
+    assert (Cfg.SliceBiqDepth == 0 ||
+            (2 ** $clog2(Cfg.SliceBiqDepth) == Cfg.SliceBiqDepth));
+    // U5 full OoO legality (production path). OoOEn=0 must remain bit-identical.
+    assert (!(Cfg.OoOEn && Cfg.SliceOoOEn));
+    assert (!(Cfg.OoOEn && !Cfg.SpeculativeSb));
+    assert (!(Cfg.OoOEn && Cfg.RobEntries == 0));
+    assert (!(Cfg.OoOEn && Cfg.PrfEntries != 0 && Cfg.PrfEntries <= 32 + Cfg.RobEntries));
+    assert (!(Cfg.OoOEn && Cfg.BPCkptDepth != 0 && Cfg.BPCkptDepth < Cfg.RobEntries));
+    // FSE deep speculation (DeepSpecEn=0 keeps legacy STQ depth / package depths).
+    assert (!(Cfg.DeepSpecEn && !Cfg.SpeculativeSb));
+    assert (!(Cfg.DeepSpecEn && Cfg.BPCkptDepth != 0 &&
+              Cfg.BPCkptDepth < Cfg.NR_SB_ENTRIES));
+    assert (!(Cfg.DeepSpecEn && Cfg.MaxOutstandingStores > 16)); // STQ CAM cap v1
+    // L3 sits below L2; line size must match for inclusive hierarchy.
+    assert (!(Cfg.L3En && !Cfg.L2En));
+    assert (!(Cfg.L3En && Cfg.L3ByteSize == 0));
+    assert (!(Cfg.L3En && Cfg.L2LineWidth != 0 && Cfg.L3LineWidth != 0 &&
+              Cfg.L3LineWidth != Cfg.L2LineWidth));
+    assert (!(Cfg.ServerPrefetchEn && !Cfg.L2En && !Cfg.L3En));
     // pragma translate_on
   endfunction
 

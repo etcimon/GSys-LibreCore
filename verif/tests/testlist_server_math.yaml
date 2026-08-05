@@ -1,0 +1,28 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# U10 server-math directed (C-light). Prefer DV_TARGET=g6lc64_server_math.
+# Optional suite — not in default verify.
+
+common_test_config: &common_test_config
+  path_var: TESTS_PATH
+  gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+
+testlist:
+  - test: u10_misa_bhz
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/server_math/u10_misa_bhz.S
+    description: "U10 misa B/H discovery + Zbb ANDN smoke"
+
+  - test: u10_cboz_memset
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/server_math/u10_cboz_memset.S
+    description: "U10 Zicboz cbo.zero / scalar memset zeroing"
+
+  - test: u10_memcpy_stream
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/server_math/u10_memcpy_stream.S
+    description: "U10 scalar stream memcpy (AVX-like stand-in pre-Ara)"

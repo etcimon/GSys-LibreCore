@@ -1,0 +1,100 @@
+---
+title: Multi-Core Cluster
+description: Parameterized 1–8 coherent CVA6 cores — cluster wrapper, snoop hub, shared L2/L3, CLINT/PLIC scaling.
+---
+
+# Multi-Core Cluster
+
+GSys LibreCore multi-core is a **SoC product**, not a second copy of the core pipeline.
+Each core instance stays a single-tile CPU with a unique `mhartid` base; the
+**cluster** wires N masters through a coherence hub into shared L2/L3.
+
+Authority: `architecture/multi-core/README.md` (U6.2).
+
+## Intent
+
+N coherent cores (parameterized **1…8**), shared LLC, write-invalidate
+coherence, scaled CLINT/PLIC, and SMP Linux. SMT threads **per core** remain
+`NrHarts` ≤ 2, so software hart count ≈ `NrCores × NrHarts`.
+
+```
+N × ariane (core tile)
+        │ AXI masters
+        ▼
+  coherence hub / snoop filter   (corev_apu/coherence/)
+        ▼
+  shared L2 → optional L3 → PF → DRAM
+```
+
+## Live building blocks
+
+| Piece | Location | Notes |
+|---|---|---|
+| Cluster size | `cva6_cfg_t.NrCores` | 1…`CVA6_MAX_CORES` (default max 8) |
+| Cluster wrapper | `corev_apu/src/g6lc_cluster.sv` | N×ariane + hub + L2/L3/PF |
+| Coherence | `corev_apu/coherence/` | Snoop filter, inv bus, hub |
+| L1 inv path | `g6lc_l1_inv_adapter` + core `l1_inval_*` | WT and HPDCACHE |
+| Shared L2/L3 | `l2_cache/`, `l3_cache/` | See [L2 / L3 Cache](./l2-l3-cache) |
+| CLINT | Scaled to `NrCores` (× harts in SoC) | MSIP / timer slots |
+| PLIC | Multi-context (e.g. 16 targets = 8×M/S) | Harness fans IRQs per core |
+| Testharness | `ariane_testharness` + cluster | CLINT `NR_CORES=NrCores` |
+
+**N=1** remains identity: hub and multi-master paths stay inert.
+
+## Config and inference
+
+When geometry fields are **0**, `build_config_pkg` can infer L2/L3/prefetch and
+snoop-filter sizing from `NrCores` (e.g. L2 ≈ max(256 KiB, N×128 KiB)). Exact
+formulas live in `core/include/build_config_pkg.sv` — do not hardcode in docs.
+
+`check_cfg` enforces multi-core legality (e.g. S when N>1, MMU present, snoop
+filter entries when filter enabled).
+
+## Contention optimisations (product view)
+
+- Snoop filter guided invalidation  
+- Invalidate coalesce  
+- Multi-master AXI RR + anti-starve  
+- Non-cacheable bypass for MMIO  
+- Inclusive L3→L2/L1 when configured  
+
+## Software / DTS
+
+- N× `cpu@` nodes with consecutive hart ids (account for SMT)  
+- PLIC contexts matching M/S per core  
+- CLINT extents covering all harts  
+- `next-level-cache = <&l2>` (and L3 when present)  
+
+Validate with `AGENTS-dts-validation.md` / `build-platform/scripts/validate-cva6-dts.*`.
+
+## Verification
+
+| Suite (typical id) | Focus |
+|---|---|
+| `mc-stream-tests` | Multi-core stream × cache |
+| `mc-spo-soak` | Stream soak + Zacas/CAS/CF narrow |
+| `ooo-l3-tests` | OoO server + L2/L3 |
+| `dual-hart-ci` | Dual-hart CI path where catalogued |
+
+```bash
+g6lc-build verify --target g6lc64_ooo_server
+g6lc-build test --suite mc-stream-tests
+```
+
+Zacas (AMOCAS) is **partial** on selected packages (W/D); see multicore directed
+tests under `verif/tests/custom/multicore/`.
+
+## Invariants
+
+- RVWMO across harts  
+- Cluster-wide LR/SC + AMO discipline  
+- MMIO never cached  
+- Precise traps **per hart**  
+
+## Related
+
+- [L2 / L3 Cache](./l2-l3-cache)
+- [SMT](../core/smt) — threads × cores
+- [Server Profiles](../core/server-profiles)
+- [SKU Matrix](../architecture/sku-matrix)
+- [Upgrade Program](../architecture/upgrade-program)

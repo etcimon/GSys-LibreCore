@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Ssccptr Main Memory Page-Table Reads (Vol II, 8.3)</title></head>
+<body>
+<h1>Vol II &sect;8.3 — Ssccptr Extension for Main Memory Page-Table Reads, Version 1.0</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ssccptr">specs/riscv-spec.html#ssccptr</a>.
+Source line: <code>specs/riscv-spec.html:88772</code>. <strong>Domain:</strong> RAM.</p>
+
+<p>Ssccptr guarantees that page-table reads from main memory are coherent with respect to stores from
+the same hart, so the page-table walker does not observe stale PTE values after software updates a
+page table. This removes the need for explicit cache maintenance around PTE modifications and
+simplifies OS code.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Ssccptr extension is implemented, then main memory regions with
+both the cacheability and coherence PMAs must support hardware page-table
+reads."
+(specs/riscv-spec.html:88772-88775, anchor #ssccptr)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module ssccptr_coherency (
+  input  logic        pte_write_i,
+  input  logic        pte_read_i,
+  output logic        coherent_o
+);
+  // page-table walker observes own previous stores without SFENCE.VMA
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partial / implicit. The PTW in <code>core/cva6_mmu/cva6_ptw.sv</code>
+reads PTEs from the data cache or memory; in-order commit and coherent D$/write-through paths mean a
+same-hart PTE store should be visible. However, explicit Ssccptr conformance (main memory regions with
+cacheability+coherence PMAs guarantee hardware page-table reads) has not been verified or claimed.</p>
+
+<p><strong>.dts linkage:</strong> no dedicated DT node; Ssccptr behavior is implied by the
+<code>memory@</code> PMA attributes (cacheable + coherent) for any region used for page tables.</p>
+</body>
+</html>

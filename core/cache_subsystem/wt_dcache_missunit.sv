@@ -107,16 +107,32 @@ module wt_dcache_missunit
   endfunction : paddrSizeAlign
 
   // controller FSM
-  typedef enum logic [2:0] {
+  // AMO_CAS_* : local load-compare-store for AMOCAS.D (64b cmp||swap is 128b
+  // on AXI AtomicCompare; axi_riscv_amos rejects multi-beat atomics).
+  typedef enum logic [3:0] {
     IDLE,
     DRAIN,
     AMO,
     FLUSH,
     STORE_WAIT,
     LOAD_WAIT,
-    AMO_WAIT
+    AMO_WAIT,
+    AMO_CAS_LD,
+    AMO_CAS_LD_WAIT,
+    AMO_CAS_ST,
+    AMO_CAS_ST_WAIT
   } state_e;
   state_e state_d, state_q;
+
+  // Zacas local RMW (dword CAS)
+  logic        cas_local_en;  // size==dword && AMO_CAS1
+  logic [63:0] cas_old_d, cas_old_q;
+  logic [63:0] cas_new_d, cas_new_q;
+  logic        cas_ld_ack, cas_st_ack;
+  logic        cas_amo_sel;  // drive AMO paddr/size/tid without ATOP
+  // Uncached CAS store updates DRAM only; drop any stale L1 line so later
+  // cached loads see the new value (CRT stack lines are often hot).
+  logic        cas_inv;
 
   // MSHR for reads
   typedef struct packed {
@@ -259,7 +275,16 @@ module wt_dcache_missunit
   always_comb begin
     if (CVA6Cfg.RVA) begin
       if (CVA6Cfg.IS_XLEN64) begin
-        if (amo_req_i.size == 2'b10) begin
+        // Zacas AMOCAS.W: pack {cmp[31:0], swap[31:0]} (matches hpdcache)
+        // AMOCAS.D: operand_b is swap; cmp travels in operand_c (adapter/ALU)
+        if (CVA6Cfg.RVZacas && amo_req_i.amo_op == AMO_CAS1) begin
+          if (amo_req_i.size == 2'b10) begin
+            amo_data = {amo_req_i.operand_c[31:0], amo_req_i.operand_b[31:0]};
+          end else begin
+            // Double-word CAS: low=swap, high=cmp (ALU splits)
+            amo_data = amo_req_i.operand_b;
+          end
+        end else if (amo_req_i.size == 2'b10) begin
           amo_data = amo_data_a;
         end else begin
           amo_data = amo_data_b;
@@ -312,22 +337,36 @@ module wt_dcache_missunit
     assign amoResult_BE = (amo_req_i.size == 2'b10) ? amoResult_32bitBE : amoResult_64bitBE;
     assign amoResult_LE = (amo_req_i.size == 2'b10) ? amoResult_32bitLE : amo_rtrn_mux;
 
-    assign amo_resp_o.result = mbe_i ? amoResult_BE : amoResult_LE;
+    // Local dword CAS returns the saved old value; ATOP path uses mem rtrn mux.
+    assign amo_resp_o.result = (state_q inside {AMO_CAS_ST, AMO_CAS_ST_WAIT})
+                                   ? cas_old_q
+                                   : (mbe_i ? amoResult_BE : amoResult_LE);
     // end BIG ENDIAN CAPABLE logic for amo return value from memory
 
     assign amo_req_d = amo_req_i.req;
   end
 
-  // outgoing memory requests (AMOs are always uncached)
-  assign mem_data_o.tid = (CVA6Cfg.RVA && amo_sel) ? AmoTxId : miss_id_i[miss_port_idx];
-  assign mem_data_o.nc = (CVA6Cfg.RVA && amo_sel) ? 1'b1 : miss_nc_i[miss_port_idx];
-  assign mem_data_o.way = (CVA6Cfg.RVA && amo_sel) ? '0 : repl_way;
-  assign mem_data_o.data = (CVA6Cfg.RVA && amo_sel) ? amo_data : miss_wdata_i[miss_port_idx];
-  assign mem_data_o.user = (CVA6Cfg.RVA && amo_sel) ? amo_user : miss_wuser_i[miss_port_idx];
-  assign mem_data_o.size   = (CVA6Cfg.RVA && amo_sel) ? {1'b0, amo_req_i.size} : miss_size_i [miss_port_idx];
-  assign mem_data_o.amo_op = (CVA6Cfg.RVA && amo_sel) ? amo_req_i.amo_op : AMO_NONE;
+  // Local RMW for AMOCAS.D (size dword). Word CAS stays on AXI AtomicCompare.
+  assign cas_local_en = CVA6Cfg.RVA && CVA6Cfg.RVZacas && CVA6Cfg.IS_XLEN64
+      && (amo_req_i.amo_op == AMO_CAS1) && (amo_req_i.size == 2'b11);
 
-  assign tmp_paddr         = (CVA6Cfg.RVA && amo_sel) ? amo_req_i.operand_a[CVA6Cfg.PLEN-1:0] : miss_paddr_i[miss_port_idx];
+  // outgoing memory requests (AMOs are always uncached)
+  // cas_amo_sel: CAS.D load/store uses AMO address/tid/nc but plain LD/ST rtype
+  assign mem_data_o.tid = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? AmoTxId : miss_id_i[miss_port_idx];
+  assign mem_data_o.nc = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? 1'b1 : miss_nc_i[miss_port_idx];
+  assign mem_data_o.way = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? '0 : repl_way;
+  assign mem_data_o.data = (CVA6Cfg.RVA && cas_amo_sel && (state_q inside {AMO_CAS_ST, AMO_CAS_ST_WAIT}))
+                               ? cas_new_q
+                               : (CVA6Cfg.RVA && amo_sel) ? amo_data : miss_wdata_i[miss_port_idx];
+  assign mem_data_o.user = (CVA6Cfg.RVA && amo_sel) ? amo_user : miss_wuser_i[miss_port_idx];
+  assign mem_data_o.size   = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel)) ? {1'b0, amo_req_i.size}
+                                                                         : miss_size_i[miss_port_idx];
+  // Plain load/store for local CAS.D — no AXI ATOP
+  assign mem_data_o.amo_op = (CVA6Cfg.RVA && amo_sel && !cas_amo_sel) ? amo_req_i.amo_op : AMO_NONE;
+
+  assign tmp_paddr         = (CVA6Cfg.RVA && (amo_sel || cas_amo_sel))
+                                 ? amo_req_i.operand_a[CVA6Cfg.PLEN-1:0]
+                                 : miss_paddr_i[miss_port_idx];
   assign mem_data_o.paddr = paddrSizeAlign(tmp_paddr, mem_data_o.size);
 
   ///////////////////////////////////////////////////////
@@ -365,6 +404,8 @@ module wt_dcache_missunit
     load_ack        = 1'b0;
     store_ack       = 1'b0;
     amo_ack         = 1'b0;
+    cas_ld_ack      = 1'b0;
+    cas_st_ack      = 1'b0;
     inv_vld         = 1'b0;
     inv_vld_all     = 1'b0;
     sc_fail         = 1'b0;
@@ -376,10 +417,16 @@ module wt_dcache_missunit
           if (mshr_vld_q) begin
             load_ack = 1'b1;
             miss_rtrn_vld_o[mshr_q.miss_port_idx] = 1'b1;
+          end else if (CVA6Cfg.RVA && (state_q inside {AMO_CAS_LD, AMO_CAS_LD_WAIT})) begin
+            // Local AMOCAS.D load completed (no MSHR)
+            cas_ld_ack = 1'b1;
           end
         end
         DCACHE_STORE_ACK: begin
-          if (stores_inflight_q > 0) begin
+          if (CVA6Cfg.RVA && (state_q inside {AMO_CAS_ST, AMO_CAS_ST_WAIT}) && stores_inflight_q > 0) begin
+            store_ack  = 1'b1;
+            cas_st_ack = 1'b1;
+          end else if (stores_inflight_q > 0) begin
             store_ack = 1'b1;
             miss_rtrn_vld_o[NumPorts-1] = 1'b1;
           end
@@ -424,19 +471,18 @@ module wt_dcache_missunit
   assign wr_cl_nc_o = mshr_q.nc;
   assign wr_cl_vld_o = load_ack | (|wr_cl_we_o);
 
-  assign wr_cl_we_o = (flush_en) ? '1 : (inv_vld_all) ? '1 : (inv_vld) ? dcache_way_bin2oh(
-      mem_rtrn_i.inv.way
-  ) : (cl_write_en) ? dcache_way_bin2oh(
-      mshr_q.repl_way
-  ) : '0;
+  assign wr_cl_we_o = (flush_en || cas_inv || inv_vld_all) ? '1 :
+                      (inv_vld) ? dcache_way_bin2oh(mem_rtrn_i.inv.way) :
+                      (cl_write_en) ? dcache_way_bin2oh(mshr_q.repl_way) : '0;
 
-  assign wr_vld_bits_o = (flush_en) ? '0 : (inv_vld) ? '0 : (cl_write_en) ? dcache_way_bin2oh(
-      mshr_q.repl_way
-  ) : '0;
+  assign wr_vld_bits_o = (flush_en || cas_inv || inv_vld) ? '0 :
+                         (cl_write_en) ? dcache_way_bin2oh(mshr_q.repl_way) : '0;
 
-  assign wr_cl_idx_o     = (flush_en) ? cnt_q                                                        :
-                           (inv_vld)  ? mem_rtrn_i.inv.idx[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
-                                        mshr_q.paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
+  assign wr_cl_idx_o =
+      (flush_en) ? cnt_q :
+      (cas_inv)  ? amo_req_i.operand_a[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
+      (inv_vld)  ? mem_rtrn_i.inv.idx[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
+                   mshr_q.paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
 
   assign wr_cl_tag_o = mshr_q.paddr[CVA6Cfg.DCACHE_TAG_WIDTH+CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_INDEX_WIDTH];
   assign wr_cl_off_o = mshr_q.paddr[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0];
@@ -466,6 +512,10 @@ module wt_dcache_missunit
     flush_ack_d      = flush_ack_q;
     flush_en         = 1'b0;
     amo_sel          = 1'b0;
+    cas_amo_sel      = 1'b0;
+    cas_inv          = 1'b0;
+    cas_old_d        = cas_old_q;
+    cas_new_d        = cas_new_q;
     update_lfsr      = 1'b0;
     mshr_allocate    = 1'b0;
     lock_reqs        = 1'b0;
@@ -574,13 +624,18 @@ module wt_dcache_missunit
       // send out amo op request
       AMO: begin
         if (CVA6Cfg.RVA) begin
-          mem_data_o.rtype = DCACHE_ATOMIC_REQ;
-          amo_sel          = 1'b1;
-          // if this is an LR, we need to consult the backoff counter
-          if ((amo_req_i.amo_op != AMO_LR) || sc_backoff_over) begin
-            mem_data_req_o = 1'b1;
-            if (mem_data_ack_i) begin
-              state_d = AMO_WAIT;
+          if (cas_local_en) begin
+            // AMOCAS.D: local uncached load → compare → store
+            state_d = AMO_CAS_LD;
+          end else begin
+            mem_data_o.rtype = DCACHE_ATOMIC_REQ;
+            amo_sel          = 1'b1;
+            // if this is an LR, we need to consult the backoff counter
+            if ((amo_req_i.amo_op != AMO_LR) || sc_backoff_over) begin
+              mem_data_req_o = 1'b1;
+              if (mem_data_ack_i) begin
+                state_d = AMO_WAIT;
+              end
             end
           end
         end
@@ -591,6 +646,51 @@ module wt_dcache_missunit
         if (CVA6Cfg.RVA) begin
           amo_sel = 1'b1;
           if (amo_ack) begin
+            amo_resp_o.ack = 1'b1;
+            state_d        = IDLE;
+          end
+        end
+      end
+      //////////////////////////////////
+      // AMOCAS.D local RMW: issue uncached load of the CAS address
+      AMO_CAS_LD: begin
+        if (CVA6Cfg.RVA) begin
+          cas_amo_sel      = 1'b1;
+          mem_data_o.rtype = DCACHE_LOAD_REQ;
+          mem_data_req_o   = 1'b1;
+          if (mem_data_ack_i) begin
+            state_d = AMO_CAS_LD_WAIT;
+          end
+        end
+      end
+      AMO_CAS_LD_WAIT: begin
+        if (CVA6Cfg.RVA) begin
+          cas_amo_sel = 1'b1;
+          if (cas_ld_ack) begin
+            // Full 64-bit lane (dword CAS is naturally aligned)
+            cas_old_d = amo_rtrn_mux;
+            cas_new_d = (amo_rtrn_mux == amo_req_i.operand_c) ? amo_req_i.operand_b
+                                                              : amo_rtrn_mux;
+            state_d   = AMO_CAS_ST;
+          end
+        end
+      end
+      AMO_CAS_ST: begin
+        if (CVA6Cfg.RVA) begin
+          cas_amo_sel      = 1'b1;
+          mem_data_o.rtype = DCACHE_STORE_REQ;
+          mem_data_req_o   = 1'b1;
+          if (mem_data_ack_i) begin
+            state_d = AMO_CAS_ST_WAIT;
+          end
+        end
+      end
+      AMO_CAS_ST_WAIT: begin
+        if (CVA6Cfg.RVA) begin
+          cas_amo_sel = 1'b1;
+          if (cas_st_ack) begin
+            // Drop L1 line for CAS paddr (uncached store does not update D$).
+            cas_inv        = 1'b1;
             amo_resp_o.ack = 1'b1;
             state_d        = IDLE;
           end
@@ -621,6 +721,8 @@ module wt_dcache_missunit
       miss_req_masked_q     <= '0;
       amo_req_q             <= '0;
       stores_inflight_q     <= '0;
+      cas_old_q             <= '0;
+      cas_new_q             <= '0;
     end else begin
       state_q               <= state_d;
       cnt_q                 <= cnt_d;
@@ -633,6 +735,8 @@ module wt_dcache_missunit
       miss_req_masked_q     <= miss_req_masked_d;
       amo_req_q             <= amo_req_d;
       stores_inflight_q     <= stores_inflight_d;
+      cas_old_q             <= cas_old_d;
+      cas_new_q             <= cas_new_d;
     end
   end
 

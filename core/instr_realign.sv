@@ -248,50 +248,64 @@ module instr_realign
             end
           end
         end
-        // this means the previous instruction was either compressed or unaligned
-        // in any case we don't care
-        // TODO input is actually right-shifted so the code below is wrong
+        // Frontend already right-shifts I$ data so halfword 0 is at address_i.
+        // With address_i[2:1]==2'b01 only 3 halfwords remain (data_i[47:0]).
+        // Hang-6: old code treated data as unshifted and used data_i[63:32] as a
+        // live instruction — wrong after the frontend shift (dual-issue FETCH_WIDTH=64).
         2'b01: begin
-          // 64  48  32  16  0
-          // | 3 | 2 | 1 | 0 | <- instruction slot
-          // |   I   |   I   | -> again unaligned
-          // | * | C |   I   | -> aligned
-          // | * |   I   | C | -> aligned
-          // |   I   | C | C | -> again unaligned
-          // | * | C | C | C | -> aligned
-          //   000 110 100 010 <- unaligned address
+          if (unaligned_q) begin
+            // Complete spanning RVI; up to two more halfwords follow.
+            instr_o[0] = {data_i[15:0], unaligned_instr_q};
+            addr_o[0]  = unaligned_address_q;
+            valid_o[0] = valid_i;
 
-          instr_o[0] = data_i[31:0];
-          addr_o[0]  = {address_i[CVA6Cfg.VLEN-1:3], 3'b010};
-          valid_o[0] = valid_i;
-
-          instr_o[2] = data_i[63:32];
-          addr_o[2]  = {address_i[CVA6Cfg.VLEN-1:3], 3'b110};
-
-          if (instr_is_compressed[0]) begin
             instr_o[1] = data_i[47:16];
-            addr_o[1]  = {address_i[CVA6Cfg.VLEN-1:3], 3'b100};
+            addr_o[1]  = address_i + CVA6Cfg.VLEN'(2);
             valid_o[1] = valid_i;
-
             if (instr_is_compressed[1]) begin
               if (instr_is_compressed[2]) begin
+                instr_o[2] = {16'b0, data_i[47:32]};
+                addr_o[2]  = address_i + CVA6Cfg.VLEN'(4);
                 valid_o[2] = valid_i;
               end else begin
                 unaligned_d         = 1'b1;
-                unaligned_instr_d   = instr_o[2];
-                unaligned_address_d = addr_o[2];
+                unaligned_instr_d   = data_i[47:32];
+                unaligned_address_d = address_i + CVA6Cfg.VLEN'(4);
               end
             end
+            // else instr_o[1] is a full RVI from halfwords 1+2 — done
           end else begin
-            instr_o[1] = instr_o[2];
-            addr_o[1]  = addr_o[2];
+            instr_o[0] = data_i[31:0];
+            addr_o[0]  = address_i;
+            valid_o[0] = valid_i;
 
-            if (instr_is_compressed[2]) begin
+            if (instr_is_compressed[0]) begin
+              instr_o[1] = data_i[47:16];
+              addr_o[1]  = address_i + CVA6Cfg.VLEN'(2);
               valid_o[1] = valid_i;
+              if (instr_is_compressed[1]) begin
+                if (instr_is_compressed[2]) begin
+                  instr_o[2] = {16'b0, data_i[47:32]};
+                  addr_o[2]  = address_i + CVA6Cfg.VLEN'(4);
+                  valid_o[2] = valid_i;
+                end else begin
+                  unaligned_d         = 1'b1;
+                  unaligned_instr_d   = data_i[47:32];
+                  unaligned_address_d = address_i + CVA6Cfg.VLEN'(4);
+                end
+              end
+              // else instr_o[1] is RVI from halfwords 1+2
             end else begin
-              unaligned_d         = 1'b1;
-              unaligned_instr_d   = instr_o[2];
-              unaligned_address_d = addr_o[2];
+              // First is RVI (halfwords 0+1); one halfword remains
+              if (instr_is_compressed[2]) begin
+                instr_o[1] = {16'b0, data_i[47:32]};
+                addr_o[1]  = address_i + CVA6Cfg.VLEN'(4);
+                valid_o[1] = valid_i;
+              end else begin
+                unaligned_d         = 1'b1;
+                unaligned_instr_d   = data_i[47:32];
+                unaligned_address_d = address_i + CVA6Cfg.VLEN'(4);
+              end
             end
           end
         end

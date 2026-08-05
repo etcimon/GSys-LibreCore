@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Scalar Cryptography Extensions (Vol I, chapter 11)</title></head>
+<body>
+<h1>Vol I chapter 11 — Scalar Cryptography Extensions</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#crypto">#crypto</a> (11. Cryptography Extensions),
+<a href="../../specs/riscv-spec.html#crypto_scalar_instructions">#crypto_scalar_instructions</a> (11.1 Scalar),
+<a href="../../specs/riscv-spec.html#ext:zkr">#ext:zkr</a> (Zkr),
+<a href="../../specs/riscv-spec.html#ext:zkn">#ext:zkn</a> (Zkn),
+<a href="../../specs/riscv-spec.html#ext:zks">#ext:zks</a> (Zks).
+Source lines: <code>specs/riscv-spec.html:42400</code> (crypto), <code>:42419</code> (scalar), <code>:43001</code> (Zkr),
+<code>:43014</code> (Zkn), <code>:43061</code> (Zks).</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This chapter describes RISC-V's scalar and vector cryptography
+extensions."
+...
+"This chapter describes the scalar cryptography extensions to the
+RISC-V ISA."
+(specs/riscv-spec.html:42400-42421, anchors #crypto and #crypto_scalar_instructions)
+</pre>
+
+<p>The scalar cryptography extensions include the NIST suite (Zkn: AES, SHA-256, SHA-512, SHA-256 SIG0/1,
+etc.), the Shangmi suite (Zks: SM3/SM4), and the entropy source (Zkr). They add new instructions that
+operate on the integer register file or special entropy CSRs. They are implemented as dedicated
+functional units alongside the ALU.</p>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module crypto_alu (
+  input  logic [XLEN-1:0] a_i, b_i, c_i,
+  input  crypto_op_e      op_i,
+  output logic [XLEN-1:0] result_o
+);
+  // AES round/ARIA-like instructions, SHA acceleration, SM3/SM4 operations
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partial. The <code>CVA6Cfg.ZKN</code> bit in
+<code>core/include/config_pkg.sv</code> enables the scalar AES functional unit. The decoder routes
+AES instructions when <code>CVA6Cfg.ZKN</code> is set (<code>core/decoder.sv:1849</code>), and the issue
+stage drives <code>aes_valid_o</code> (<code>core/issue_read_operands.sv:69-70,770-771</code>). The AES
+unit itself is <code>core/aes.sv</code>; original instruction bits for AES are captured at
+<code>core/issue_read_operands.sv:1080-1082</code>. The Zkr entropy-source CSR, Zks ShangMi
+instructions, and vector cryptography (<code>zvk*</code>) are not implemented.
+(U10ᵇ Ara RVV attach covers base V/Zve* compute paths, not Zvk* — see
+<a href="riscv-spec-I-9-vector.html">Vol I ch9</a>.)</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string advertises <code>_zkn</code> when
+<code>CVA6Cfg.ZKN</code> is set; Zkr/Zks/Zvk would be added when implemented.</p>
+</body>
+</html>

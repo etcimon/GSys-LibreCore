@@ -1,0 +1,120 @@
+---
+title: Agent Workflow for Core Development
+description: How an LLM agent develops CPU core features in CVA6.
+---
+
+# Agent Workflow for Core Development
+
+This page is a concrete playbook for an LLM agent (Devin, grok-build, or
+otherwise) that is asked to modify the CVA6 CPU core.
+
+A CPU core is a high-stakes target for automated editing. Unlike a web
+application, where a bug can be rolled back with a deployment, a CPU bug may not
+be discovered until silicon returns from the foundry. The agent workflow for
+core development is therefore conservative: it requires the agent to ground
+every proposed change in the spec, the config struct, and the sanctioned seam
+before writing any RTL. This conservatism is not an obstacle to productivity;
+it is the discipline that makes productivity possible at scale.
+
+## Intent resolution
+
+The agent receives a prompt such as:
+
+> "Add a configurable branch-target buffer size to CVA6."
+
+The first step is **not** to search the whole tree. The first step is to open
+`AGENTS.md` and resolve the intent to a small set of guide files:
+
+1. `AGENTS.md` §3 → `agents/guides/AGENTS-branch-prediction.md`.
+2. `AGENTS-branch-prediction.md` → spec anchors and code loci.
+3. `agents/spec/riscv-spec-I-*.html` or `agents/spec/riscv-spec-II-*.html` for
+   the relevant subchapter.
+
+The first step is the most important. A common failure mode for LLM agents on
+large repositories is to search the entire tree and then synthesize a plan from
+fragments. This produces plausible-looking but contextually wrong edits. By
+starting at `AGENTS.md`, the agent loads a curated, expert-written map that
+tells it which spec chapters, code loci, and checklists are relevant. This is
+the hardware-engineering equivalent of starting with the design document instead
+of grep.
+
+## Plan the change
+
+From the guides, the agent extracts:
+
+- **Spec constraint:** branches and jumps must behave as architecturally
+  defined; predictor sizing is microarchitectural.
+- **Config seam:** `CVA6Cfg.BTBEntries` exists; may need a new field.
+- **Code loci:** `core/frontend/btb.sv`, `core/frontend/frontend.sv`.
+- **Verification:** arch smoke tests + formal equivalence (same branch
+  outcomes).
+- **Traceability:** update `AGENTS-specs-to-impl.md` only if the ISA-visible
+  behavior changes; branch predictor sizing usually does not.
+
+The plan produced at this stage is a reasoning contract. It separates
+microarchitectural changes (such as BTB sizing) from ISA-visible changes (such
+as new instructions). This separation matters because microarchitectural
+changes need architectural verification — the same branch outcomes must occur —
+while ISA-visible changes need compliance verification against the spec. The
+agent that gets this distinction right will produce a focused, reviewable PR;
+the agent that conflates them will produce a broad, risky change.
+
+## Edit sequence
+
+1. **Config.** Add the new field to `cva6_cfg_t` and the relevant target
+   packages. Add a `check_cfg` assertion.
+2. **RTL.** Modify `btb.sv` to use the new parameter; keep the generic path
+   byte-for-byte when the field equals the old default.
+3. **Tests.** Add or update a directed test and a smoke suite.
+4. **Docs.** Update the relevant `AGENTS-*.md` and this docs site if the user
+   experience changes.
+
+The edit sequence is deliberately config-first. Many engineers, human or
+automated, are tempted to open the module first because that is where the
+"real" logic lives. But in a config-driven core, the struct is the contract
+that the rest of the system reads. Changing the module before the struct is
+like changing a function implementation before updating its signature: it may
+compile in isolation, but it will not integrate. The agent must prove that the
+new field is legal and visible before using it.
+
+## Validate
+
+```bash
+g6lc-build test --group arch --dry-run   # see what would run
+g6lc-build test --group arch             # run it (requires toolchain)
+```
+
+The build platform preflights tool availability. If the toolchain is not
+installed, the suite is skipped with a reason, not failed.
+
+Preflight is the agent's safety net. It prevents the agent from concluding that
+a change is broken when the only problem is a missing tool. It also prevents
+the agent from running suites that require UVM or proprietary simulators on a
+laptop that only has Verilator. This graceful degradation is essential for
+automated workflows that must run across heterogeneous environments.
+
+## Common agent mistakes
+
+- **Editing modules before config.** Always extend `cva6_cfg_t` first.
+- **Ignoring the critical path.** A larger BTB may add area but should not
+  lengthen the access path.
+- **Forgetting observability.** Add or update PMU events for the changed
+  structure.
+- **Skipping traceability.** Even microarchitectural changes may need a note in
+  `AGENTS-specs-to-impl.md` if they affect observable timing or cache behavior.
+
+## When to escalate
+
+Escalate to a human (or a deeper design doc) when:
+
+- The change crosses clock domains or requires CDC analysis.
+- The change modifies the memory model or exception semantics.
+- The change requires a new PDK cell or foundry view.
+- The change is larger than a single config + module pair.
+
+Escalation is not failure; it is risk management. The items above are exactly
+the boundaries where an automated agent's reasoning can become underconstrained.
+Clock-domain crossing, memory-model changes, and PDK cells all have physical
+consequences that require human judgment or specialized tools. A well-designed
+agent workflow knows when to stop and ask, rather than guessing and creating
+silicon-debug work later.

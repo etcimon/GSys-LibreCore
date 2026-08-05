@@ -1,0 +1,71 @@
+{
+  "schema_version": "1",
+  "disclaimer": "structural FO4 estimates only — not STA sign-off (fixture for handoff CI)",
+  "banner": "sta_smoke fixture",
+  "target_mhz": 1250,
+  "fo4_ps": 20,
+  "budget_fo4": 40,
+  "modules_requested": ["comb_adder"],
+  "modules": [{ "id": 0, "name": "comb_adder", "file": "comb_adder.v", "node_count": 4, "region_count": 1 }],
+  "paths": [
+    {
+      "path_id": 1,
+      "module_id": 0,
+      "path_kind": "in_to_reg",
+      "startpoint": "a_i",
+      "endpoint": "y_o",
+      "total_fo4": 8.0,
+      "slack_fo4": 32.0,
+      "max_freq_mhz": 5000,
+      "closes": true,
+      "node_count": 3
+    },
+    {
+      "path_id": 2,
+      "module_id": 0,
+      "path_kind": "in_to_reg",
+      "startpoint": "b_i",
+      "endpoint": "y_o",
+      "total_fo4": 8.0,
+      "slack_fo4": 32.0,
+      "max_freq_mhz": 5000,
+      "closes": true,
+      "node_count": 3
+    }
+  ],
+  "opportunities": [],
+  "sta_hints": [
+    {
+      "from": "a_i",
+      "to": "y_o",
+      "sdc_comment": "fixture seed — engineer validates after synth"
+    }
+  ],
+  "frequency_closure": {
+    "closes": true,
+    "target_mhz": 1250,
+    "budget_fo4": 40,
+    "worst_path_id": 1,
+    "worst_slack_fo4": 32.0,
+    "worst_path_fo4": 8.0,
+    "worst_startpoint": "a_i",
+    "worst_endpoint": "y_o",
+    "worst_path_kind": "in_to_reg",
+    "max_freq_mhz": 5000,
+    "failing_paths": 0,
+    "reg_to_reg_paths": 0
+  },
+  "ast": {
+    "kind": "timing_ir_v0",
+    "files_parsed": 1,
+    "module_count": 1,
+    "path_count": 2,
+    "opportunity_count": 0,
+    "note": "hand-authored fixture for S1 CI (not from live analyze)"
+  },
+  "versions": {
+    "ir": "fixture",
+    "cost_model": "fo4-v1",
+    "package": "sta_smoke"
+  }
+}

@@ -1,0 +1,186 @@
+---
+title: CPU Architecture Guidelines
+description: Patterns and rules for developing the CVA6 CPU architecture.
+---
+
+# CPU Architecture Guidelines
+
+This page is the practical counterpart to `AGENTS-coding-philosophy.md` and
+`AGENTS-configuration.md`. It explains the patterns that keep CVA6 synthesizable,
+timing-clean, and verifiable as the architecture grows.
+
+CPU architecture is a discipline of constraint. Unlike software, where an
+incorrect result can be patched and re-deployed, an incorrect CPU may require a
+new mask set, a board re-spin, or a product recall. The guidelines below are
+therefore not stylistic preferences; they are risk-mitigation patterns derived
+from the experience of taping out in-order RISC-V cores and integrating them
+into real products.
+
+## 1. Correctness before performance
+
+Baseline CVA6 is an in-order core with precise speculation and a short critical
+path. This branch may enable **config-gated** multi-issue, slice-OoO, full OoO
+(`core/ooo/`), SMT (`core/smt/`), and related structures — still behind
+`CVA6Cfg` so minimal targets elaborate as the classic machine. The first
+question is always: *does this change preserve ISA semantics?* The second
+question is: *does it close timing?* A performance improvement that lengthens
+the critical path is not an improvement for silicon.
+
+For structural path feedback before STA, use [`sv-timing`](../sv-timing) /
+`g6lc-build timings` (FO4 estimates only).
+
+This ordering of priorities is non-negotiable for physical design. A core that
+passes architectural tests but fails timing at the target frequency cannot be
+shipped. In practice, this means architects and RTL engineers must collaborate
+with synthesis and place-and-route engineers early, not as a hand-off at the
+end. The most common source of timing surprises is a "small" microarchitectural
+change that adds a multiplexer or comparator in the wrong place. CVA6's short,
+pipelined structure makes it sensitive to such changes, which is why every PR
+should include a timing impact note.
+
+## 2. Timing as a first-class citizen
+
+- Keep combinational cones short.
+- Add pipeline stages for complex units rather than widening a single stage.
+- Avoid high fan-in / fan-out nets that create routing hotspots.
+- Every new unit needs an early-synthesis loop (see `pd/synth/`) and a timing
+  impact note in the PR.
+
+## 3. Modularity through `CVA6Cfg`
+
+`CVA6Cfg` is not just a parameter bundle; it is the **contract** between the
+config layer and the RTL. Every module that receives it can gate behavior
+structurally:
+
+```systemverilog
+if (CVA6Cfg.DCacheType == config_pkg::WT) begin : gen_wt_cache
+  // ...
+end else begin : gen_hpdcache
+  // ...
+end
+```
+
+Per-target packages (`cv64a6_imafdc_sv39_config_pkg.sv`, etc.) instantiate
+`cva6_cfg_t` with concrete values. A new target = a new package, not a new RTL
+file.
+
+Structural gating with `CVA6Cfg` has a subtle but important benefit: it makes
+the cost of a feature visible. When a developer adds an `if` statement based on
+a config bit, synthesis will physically remove the unused branch for targets
+that do not enable the feature. This is the hardware equivalent of conditional
+compilation, but it is more robust because it happens inside the same
+SystemVerilog source and is checked by the type system. It also makes formal
+verification easier, because the config space is explicit rather than implicit
+in `ifdef` soup.
+
+## 4. Single reset, single clock domain by default
+
+- Use asynchronous-active-low reset:
+  `always_ff @(posedge clk_i or negedge rst_ni)`.
+- Do not add a new clock or asynchronous reset without explicit CDC/reset-sync
+  analysis.
+- The only sanctioned latch is inside `tc_clk_gating` in the tech-cells generic.
+
+## 5. Simulation-only code belongs behind translate pragmas
+
+Assertions, display statements, and other non-synthesizable debug code must be
+fenced with:
+
+```systemverilog
+//pragma translate_off
+// ...
+//pragma translate_on
+```
+
+This keeps the synthesis view clean.
+
+Translate pragmas are the boundary between the model and the artifact. In
+simulation, assertions and displays are invaluable for debug. In synthesis,
+they are either ignored or cause errors. By fencing them explicitly, CVA6
+ensures that the netlist the foundry receives is exactly the netlist the
+engineer intended. This discipline is especially important when tools are
+chained: a display statement that slips into synthesis can break the entire
+ASIC flow at the worst possible moment.
+
+## 6. Backend-friendly memory and power
+
+- Use `tc_sram` for arrays; do not instantiate raw flops for large memories.
+- Use `tc_clk_gating` for clock gating.
+- Use `tc_pwr` cells for power-aware placement.
+- These cells are the **PDK-swap seam**: a foundry drop-in replaces them at the
+  technology-optimization pass.
+
+The `tc_*` cells are the PDK-swap seam for a reason. Memory compilers produce
+DRAMs, SRAMs, and register files with foundry-specific bit cells, redundancy,
+and BIST wrappers. Clock gating cells have specific enable polarities and
+timing arcs. Power cells implement isolation, retention, and level shifting.
+By routing every one of these through a generic wrapper, CVA6 allows the generic
+RTL to be technology-agnostic and the technology pass to bind foundry-specific
+views without forking the source. This is how commercial IP houses maintain a
+single RTL base across dozens of process nodes.
+
+## 7. Verification parity
+
+A change is not done until:
+
+- A directed test exists.
+- The compliance regression is still green.
+- Formal properties or coverage are updated if applicable.
+- DFT hooks (`test_en_i`, `testmode_i`) are preserved.
+- PMU events and RVFI probes are added or updated.
+
+## 8. Ecosystem contract
+
+New instructions and CSRs must have:
+
+- A real encoding.
+- A config bit that flows to `misa` / the ISA string.
+- DTS alignment if Linux sees it.
+- Toolchain / OpenSBI / Linux visibility stated in the PR.
+
+The ecosystem contract is what makes a CPU feature useful outside the RTL. A
+new instruction that the core executes but the compiler does not emit is dead
+code. A CSR that Linux does not know how to read is invisible. The `misa`
+register and the ISA string are the discovery mechanism by which the boot
+firmware and operating system learn what the core can do. Violating this
+contract is a common source of "the core passes tests but the board won't boot"
+bugs.
+
+## 9. Prefer sanctioned seams
+
+When in doubt, add at a seam rather than inside a pipeline stage:
+
+| Feature type | Seam |
+|---|---|
+| Custom compute | CVXIF coprocessor (`core/cvxif_fu.sv`, `core/acc_dispatcher.sv`) |
+| New memory macro | `tc_sram` wrapper + `pd/pdk/` drop-in |
+| New cache subsystem | `cva6_cfg_t` cache-type enum + `core/cva6.sv` selection |
+| New branch predictor | `bp_type_t` + `core/frontend/` |
+| OoO / slice / multi-issue | `CVA6Cfg` gates + `core/ooo/`, `core/cva6_slice_*.sv`, issue width |
+| SMT | `core/smt/` + target packages (see `architecture/multi-threading/`) |
+| L2/L3 | memory-side / `corev_apu` — not an L1-only edit |
+| Structural timing feedback | `sv-timing/` via `g6lc-build timings` (host only) |
+| New uncore controller | `corev_apu/src/` AXI seam + `build-platform` vendor catalog |
+
+## 10. Agent checklist for core changes
+
+Before proposing a core RTL edit:
+
+- [ ] Config-gated in `cva6_cfg_t` with `check_cfg` assertion.
+- [ ] Synth-clean (`always_ff`/`always_comb`, no new latch/clock).
+- [ ] Timing-aware (no long combinational path, impact note attached).
+- [ ] Backend-friendly (`tc_sram`, `tc_clk_gating`, `tc_pwr`).
+- [ ] Verified (directed test + regression + formal/coverage as needed).
+- [ ] Testable (DFT hooks preserved).
+- [ ] Observable (RVFI/trace, PMU, debug trigger).
+- [ ] Ecosystem-safe (encoding/discovery, DTS alignment).
+- [ ] Documented (this site + relevant `AGENTS-*.md` updated).
+
+This checklist is the minimum bar for a core change. It is deliberately not
+exhaustive; a complex change may also require micro-architectural review,
+power analysis, security review, and formal verification. But no core change
+should be proposed without these items, because each one corresponds to a
+question that will be asked during code review or silicon sign-off. Treating
+the checklist as a prerequisite rather than a postscript is the difference
+between a feature that merges cleanly and one that creates a month of follow-up
+work.

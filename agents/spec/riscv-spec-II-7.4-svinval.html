@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Svinval Fine-Grained TLB Invalidation (Vol II, 7.4)</title></head>
+<body>
+<h1>Vol II &sect;7.4 — Svinval Extension for Fine-Grained Address-Translation Cache Invalidation</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:svinval">specs/riscv-spec.html#ext:svinval</a>.
+Source line: <code>specs/riscv-spec.html:88388</code>. <strong>Domain:</strong> RAM.</p>
+
+<p>Svinval provides the <code>SINVAL.VMA</code> instruction, a fine-grained TLB invalidation operation,
+plus ordering instructions <code>SFENCE.W.INVAL</code> and <code>SFENCE.INVAL.IR</code> to fence its
+visibility. It allows TLB invalidations to be batched and synchronized with instruction fetches,
+reducing the cost of <code>SFENCE.VMA</code>.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Svinval extension splits SFENCE.VMA, HFENCE.VVMA, and HFENCE.GVMA
+instructions into finer-grained invalidation and ordering operations,
+allowing TLB invalidations to be batched."
+(specs/riscv-spec.html:88388-88392, anchor #ext:svinval)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module svinval_unit (
+  input  logic [XLEN-1:0] vaddr_i,
+  input  logic [ASID-1:0] asid_i,
+  input  logic            sinv_i, sfence_w_inval_i, sfence_inval_ir_i,
+  output logic            flush_tlb_o,
+  output logic            fence_ifetch_o
+);
+  // targeted TLB shootdown; barrier instructions synchronize I-fetch
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partial/absent. The base <code>SFENCE.VMA</code> is decoded and
+executed in <code>core/decoder.sv</code>/<code>core/controller.sv</code> to flush the TLB/PTW. The
+Svinval instructions (<code>SINVAL.VMA</code>, <code>SFENCE.W.INVAL</code>,
+<code>SFENCE.INVAL.IR</code>) are not separately decoded; if <code>CVA6Cfg.RVSINVAL</code> is set, verify
+decoder and fence logic.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Svinval availability is implied by the
+<code>riscv,isa</code> string and the TLB/PTW configuration.</p>
+</body>
+</html>

@@ -1,0 +1,144 @@
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+// Copyright (c) 2026 Etienne Cimon
+//
+// Linux-oriented DTS for g6lc64_server_math_v_config_pkg (RVV 1.0 / Ara attach).
+//
+// This is the *only* bootrom tree that may advertise "v". Default trees
+// (ariane.dts, ariane-linux.dts, ariane-smt2.dts) stay non-V so package RVV ⇔
+// misa.V ⇔ DTS v ⇔ SBI VRF stay aligned (agents/guides/AGENTS-vector.md §5).
+//
+// Align with:
+//   core/include/g6lc64_server_math_v_config_pkg.sv  (CVA6ConfigVExtEn=1, CvxifEn=0)
+//   corev_apu/src/g6lc_ara_attach.sv                 (default VLEN=4096, NrLanes=4)
+//   agents/guides/AGENTS-vector.md
+//   architecture/ara-vector-attach.md
+//   Documentation/devicetree/bindings/riscv/extensions.yaml (sparse linux-dts)
+//
+// RVV 1.0 application V depends on Zve64d + Zvl128b (spec #ext:v). Ara owns the
+// VRF; scalar core only issues via acc_dispatcher. OpenSBI must save/restore
+// vector CSRs + VRF when misa.V is set; Linux needs CONFIG_RISCV_ISA_V after SBI.
+//
+// Validate: .\build-platform\scripts\validate-cva6-dts.ps1
+//           bash verif/regress/opensbi-linux-boot.sh   (tier A RVV contract)
+//           bash verif/regress/ara-vector-path.sh
+
+/dts-v1/;
+
+/ {
+  #address-cells = <2>;
+  #size-cells = <2>;
+  compatible = "eth,ariane-bare-dev";
+  model = "eth,ariane-server-math-v";
+
+  chosen {
+    stdout-path = "/soc/uart@10000000:115200";
+    bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio,0x10000000,115200n8 root=/dev/ram rw";
+  };
+
+  cpus {
+    #address-cells = <1>;
+    #size-cells = <0>;
+    timebase-frequency = <32768>;
+
+    CPU0: cpu@0 {
+      device_type = "cpu";
+      compatible = "riscv";
+      reg = <0>;
+      status = "okay";
+      clock-frequency = <50000000>;
+      // Full server_math_v Linux-boot set: imafdc + B + H + Zicbo* + Zacas +
+      // RVV 1.0 (V / Zve64d) via Ara. Spike ISS string injects zicsr/zifencei →
+      //   rv64imafdcv_zicsr_zifencei_zba_zbb_zbs_zicbom_zicboz_zacas_zve64d_h
+      // (opensbi tier-B still boots smt2 DTB; this tree is the RVV DT contract).
+      riscv,isa = "rv64imafdcv_zba_zbb_zbs_zicbom_zicboz_zacas_zve64d_h";
+      riscv,isa-base = "rv64i";
+      // Tokens from extensions.yaml. "v" = application RVV 1.0; "zve64d" is the
+      // embedded/vector-FP base V depends on (#ext:v). Ara default VLEN=4096
+      // (vlenb=512) exceeds Zvl128b minimum required by V.
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "v", "b", "h",
+        "zicntr", "zicsr", "zifencei", "zihpm",
+        "zba", "zbb", "zbs",
+        "zcb", "zicond",
+        "zicbom", "zicboz", "zicbop",
+        "zacas",
+        "zve64d",
+        "zkn",
+        "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+      mmu-type = "riscv,sv39";
+      tlb-split;
+      riscv,cboz-block-size = <64>;
+      riscv,cbom-block-size = <64>;
+      // L1: IcacheLineWidth/DcacheLineWidth = 128 bit → 16 B
+      i-cache-block-size = <16>;
+      i-cache-size = <16384>;
+      d-cache-block-size = <16>;
+      d-cache-size = <32768>;
+
+      CPU0_intc: interrupt-controller {
+        #interrupt-cells = <1>;
+        interrupt-controller;
+        compatible = "riscv,cpu-intc";
+      };
+
+      pmu {
+        compatible = "riscv,pmu";
+        riscv,event-to-mhpmevent =
+          <0x01 0x00000000 0x00000001>,
+          <0x02 0x00000000 0x00000002>,
+          <0x03 0x00000000 0x00000003>,
+          <0x04 0x00000000 0x00000004>,
+          <0x05 0x00000000 0x00000005>,
+          <0x06 0x00000000 0x00000006>,
+          <0x09 0x00000000 0x00000009>,
+          <0x0a 0x00000000 0x0000000a>;
+      };
+    };
+
+    cpu-map {
+      cluster0 {
+        core0 {
+          cpu = <&CPU0>;
+        };
+      };
+    };
+  };
+
+  memory@80000000 {
+    device_type = "memory";
+    reg = <0x0 0x80000000 0x0 0x10000000>;
+  };
+
+  soc {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    compatible = "simple-bus";
+    ranges;
+
+    clint@2000000 {
+      compatible = "sifive,clint0", "riscv,clint0";
+      interrupts-extended = <&CPU0_intc 3>, <&CPU0_intc 7>;
+      reg = <0x0 0x2000000 0x0 0xc0000>;
+    };
+
+    PLIC0: interrupt-controller@c000000 {
+      compatible = "sifive,plic-1.0.0", "riscv,plic0";
+      #address-cells = <0>;
+      #interrupt-cells = <1>;
+      interrupt-controller;
+      interrupts-extended = <&CPU0_intc 11>, <&CPU0_intc 9>;
+      reg = <0x0 0xc000000 0x0 0x4000000>;
+      riscv,ndev = <30>;
+    };
+
+    uart@10000000 {
+      compatible = "ns16550a";
+      reg = <0x0 0x10000000 0x0 0x1000>;
+      clock-frequency = <50000000>;
+      current-speed = <115200>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <1>;
+      reg-shift = <2>;
+      reg-io-width = <4>;
+    };
+  };
+};

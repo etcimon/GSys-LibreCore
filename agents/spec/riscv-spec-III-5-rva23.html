@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>RVA23 Profiles (Vol III, 5)</title></head>
+<body>
+<h1>Vol III &sect;5 — RVA23 Profiles</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#_rva23u64_profile">#_rva23u64_profile</a> (5.1),
+<a href="../../specs/riscv-spec.html#_rva23s64_profile">#_rva23s64_profile</a> (5.2).
+Source lines: <code>specs/riscv-spec.html:91366</code> (5.1), <code>:91701</code> (5.2).</p>
+
+<p>RVA23 is the 2023 application-processor profile. It adds vector (V), scalar crypto (Zkn), and
+additional bit-manipulation/conditional extensions beyond RVA22. It tightens cache-block and CMO
+requirements. RVA23S64 keeps S-mode and advanced virtual-memory extensions. It is the target for
+modern Linux-capable cores.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The RVA23U64 profile specifies the ISA features available to user-mode
+execution environments in 64-bit applications processors. This is the
+most important profile within the application processor family in terms
+of the amount of software that targets this profile."
+...
+"The RVA23S64 profile specifies the ISA features available to a
+supervisor-mode execution environment in 64-bit applications processors.
+RVA23S64 is based on privileged architecture version 1.13."
+(specs/riscv-spec.html:91366-91372 anchor #_rva23u64_profile;
+:91701-91706 anchor #_rva23s64_profile)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module rva23_check (
+  input  config_pkg::cva6_cfg_t CVA6Cfg,
+  output logic                  rva23_u64_o, rva23_s64_o
+);
+  // include RVA22 bits plus RVV, ZKN, V, advanced CMOs
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partial. Vector is no longer purely absent: U10ᵇ attaches PULP Ara as
+the RVV unit behind <code>EnableAccelerator</code> / <code>acc_dispatcher</code>
+(<code>CVA6Cfg.RVV</code>, package <code>cv64a6_server_math_v_config_pkg</code>,
+<code>corev_apu/src/g6lc_ara_attach.sv</code>, <code>vendor/ara/</code>) — see
+<a href="riscv-spec-I-9-vector.html">Vol I ch9</a>. That is still short of a full RVA23-mandated V
+profile (compliance cosim open; default DTS does not claim <code>v</code>). Scalar crypto
+(<code>ZKN</code>) AES is in <code>core/aes.sv</code>. Most other RVA23 extensions (advanced CMOs,
+Zicfilp/Zicfiss CFI, Ssaia, vector crypto <code>zvk*</code>, etc.) remain absent. No shipped target
+claims full RVA23U64/S64.</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string must not claim RVA23 unless every
+mandatory extension is present and verified; missing extensions should be omitted. Advertise
+<code>v</code> only when the <code>_v</code> package + Ara flist are the active build.</p>
+</body>
+</html>

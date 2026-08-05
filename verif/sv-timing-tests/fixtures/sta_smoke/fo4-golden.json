@@ -1,0 +1,17 @@
+{
+  "schema": "cva6-fo4-golden.v0",
+  "note": "S3b golden path FO4 totals for sta_smoke fixture — structural only, not STA. Update when fixture analyze.json changes intentionally.",
+  "package_id": "sta_smoke",
+  "target_mhz": 1250,
+  "budget_fo4": 40,
+  "tolerance": 0.01,
+  "paths": [
+    { "path_id": 1, "startpoint": "a_i", "endpoint": "y_o", "total_fo4": 8.0 },
+    { "path_id": 2, "startpoint": "b_i", "endpoint": "y_o", "total_fo4": 8.0 }
+  ],
+  "frequency_closure": {
+    "closes": true,
+    "worst_path_fo4": 8.0,
+    "failing_paths": 0
+  }
+}

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>RVB23 Profiles (Vol III, 6)</title></head>
+<body>
+<h1>Vol III &sect;6 — RVB23 Profiles</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#_rvb23u64_profile">#_rvb23u64_profile</a> (6.1),
+<a href="../../specs/riscv-spec.html#_rvb23s64_profile">#_rvb23s64_profile</a> (6.2).
+Source lines: <code>specs/riscv-spec.html:92061</code> (6.1), <code>:92388</code> (6.2).</p>
+
+<p>RVB23 is the 2023 embedded/bare-metal profile. It is a superset-oriented profile for high-performance
+embedded processors, including RVA23 features plus additional embedded-specific extensions. It is
+less commonly the direct target for CVA6, but embedded CVA6 variants may align with RVB23U64.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The RVB23U64 profile specifies the ISA features available to user-mode
+execution environments in 64-bit RVB applications processors."
+...
+"The RVB23S64 profile specifies the ISA features available to a
+supervisor-mode execution environment in 64-bit applications processors.
+RVB23S64 is based on privileged architecture version 1.13."
+(specs/riscv-spec.html:92061-92065 anchor #_rvb23u64_profile;
+:92388-92392 anchor #_rvb23s64_profile)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module rvb23_check (
+  input  config_pkg::cva6_cfg_t CVA6Cfg,
+  output logic                  rvb23_u64_o, rvb23_s64_o
+);
+  // RVA23 bits plus embedded optional extensions
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> not explicitly targeted. Individual RVB23 extension bits may be
+configured in per-target packages, but no shipped target is verified as a full RVB23S64
+configuration.</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string should not claim RVB23 unless the
+target package and verification explicitly cover every mandatory and optional extension in the
+profile.</p>
+</body>
+</html>

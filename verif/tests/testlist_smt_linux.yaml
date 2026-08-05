@@ -1,0 +1,23 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# Directed tests on the path to SMT Linux rootfs.
+# Prefer DV_TARGET=g6lc64_smt2. Full OpenSBI+rootfs is env-driven in
+# verif/regress/smt-linux-rootfs.{sh,ps1}, not listed here.
+
+common_test_config: &common_test_config
+  path_var: TESTS_PATH
+  gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+
+testlist:
+  - test: smt_dual_park
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/smt/smt_dual_park.S
+    description: "SMT R1: hart0 self-check + hart1 WFI park (secondary model)"
+
+  - test: spec_mispredict_chain
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/spec/spec_mispredict_chain.S
+    description: "Control recovery under deep window (also used by FSE)"

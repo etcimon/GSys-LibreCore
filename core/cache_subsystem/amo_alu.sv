@@ -16,9 +16,10 @@ module amo_alu #(
 ) (
     // AMO interface
     input  ariane_pkg::amo_t        amo_op_i,
-    input  logic             [63:0] amo_operand_a_i,
-    input  logic             [63:0] amo_operand_b_i,
-    output logic             [63:0] amo_result_o      // result of atomic memory operation
+    input  logic             [63:0] amo_operand_a_i,  // old memory value
+    input  logic             [63:0] amo_operand_b_i,  // rs2 / new (AMOCAS: swap)
+    input  logic             [63:0] amo_operand_c_i,  // Zacas expected (AMOCAS only)
+    output logic             [63:0] amo_result_o      // value to write back to memory
 );
 
   logic [64:0] adder_sum;
@@ -58,6 +59,10 @@ module amo_alu #(
         adder_operand_a = $unsigned(amo_operand_a_i);
         adder_operand_b = -$unsigned(amo_operand_b_i);
         amo_result_o = adder_sum[64] ? amo_operand_a_i : amo_operand_b_i;
+      end
+      // Zacas AMOCAS: write new if mem == expected, else keep mem
+      ariane_pkg::AMO_CAS1: begin
+        amo_result_o = (amo_operand_a_i == amo_operand_c_i) ? amo_operand_b_i : amo_operand_a_i;
       end
       default: amo_result_o = '0;
     endcase

@@ -1,0 +1,208 @@
+---
+title: Agent Workflow
+description: How an LLM agent navigates CVA6, the AGENTS-* guides, and the build platform.
+---
+
+# Agent Workflow
+
+This page is the central playbook for an LLM agent working in the CVA6
+repository. It explains the **knowledge graph** — the `AGENTS-*.md` files — and
+how to traverse it from intent to verified change.
+
+An LLM agent working on a CPU core cannot read every file. Even if it could,
+the raw file tree does not tell the agent what is important or how to reason
+about a change. The CVA6 knowledge graph is a curated map that turns a human
+intent into a sequence of documents, code loci, and commands. It is the
+central nervous system of the agent workflow.
+
+## The CVA6 knowledge graph
+
+The repository is not a flat directory tree; it is a **graph of intents**:
+
+```
+Intent (e.g. "add L2 cache")
+    ↓
+AGENTS.md §3 navigation table
+    ↓
+agents/guides/AGENTS-<domain>.md
+    ↓
+agents/spec/riscv-spec-*.html
+    ↓
+code loci (file.sv:start-end)
+    ↓
+config seam (cva6_cfg_t / .config.ts / board.json)
+    ↓
+build-platform command (g6lc-build ...)
+    ↓
+verification + traceability update
+```
+
+The graph has a regular shape that mirrors the engineering process. Each level
+carries a different kind of truth: intent is the requirement; `AGENTS.md` is
+the index; the domain guide is the design contract; the spec summary is the
+normative reference; the code loci are the implementation; the config seam is
+the integration boundary; the build command is the execution harness; and the
+traceability update closes the loop. An agent that traverses this graph in
+order will rarely get lost.
+
+## How to read an AGENTS-* file
+
+Every agent guide has the same anatomy:
+
+- **What it is for.** One sentence of intent.
+- **Spec anchors.** `specs/riscv-spec.html#anchor` references.
+- **Code loci.** `path/to/file.sv:start-end` references.
+- **Sanctioned seam.** Where to make the change.
+- **Checklist.** The SoC-readiness items that must be true before declaring done.
+
+When an agent opens an `AGENTS-*.md` file, it should read it as a **planning
+contract**, not as prose. The contract tells the agent what to open next.
+
+Reading an `AGENTS-*.md` file as a contract rather than prose is a discipline.
+The spec anchors tell the agent which normative text governs the change. The
+code loci tell the agent where to look in the RTL. The sanctioned seam tells
+the agent where the change should be inserted. And the checklist tells the
+agent when the change is truly complete. Skipping any of these sections is
+like signing a contract without reading the clauses.
+
+## Intent resolution by example
+
+### Example 1: "Add a new RISC-V CSR"
+
+1. `AGENTS.md` §3 → no exact row, but `AGENTS-soc-readiness.md` is the
+   cross-cutting guide for ISA-visible changes.
+2. `AGENTS-soc-readiness.md` → extend `cva6_cfg_t`, add encoding, update
+   `misa`/ISA string, add tests, update traceability.
+3. `agents/spec/INDEX.md` → find the CSR subchapter in Volume II.
+4. Read `agents/spec/riscv-spec-II-*.html` for the exact CSR semantics.
+5. Open `core/csr_regfile.sv` and `core/include/config_pkg.sv`.
+6. Implement, run `g6lc-build test --open-source`, update
+   `AGENTS-specs-to-impl.md` and `AGENTS-dts-validation.md` if the CSR is
+   visible to Linux.
+
+### Example 2: "Add an Ethernet controller for the genesys2 board"
+
+1. `AGENTS.md` §3 → `AGENTS-controller-readiness.md` +
+   `AGENTS-corev-apu.md` + `AGENTS-vendor.md`.
+2. Read `AGENTS-mb-genesys2.md` and `corev-mb/boards/genesys2/board.json`.
+3. Add the controller to `vendor.controllers` in `.config.ts` or defaults.
+4. `g6lc-build vendor sync <id>`.
+5. Wire the controller into `corev_apu/src/` at the AXI seam.
+6. `g6lc-build mb select genesys2` to regenerate the board package.
+7. Update `.dts`, `AGENTS-dts-validation.md`, and per-board contract.
+
+### Example 3: "Run a foundry technology optimization"
+
+1. `AGENTS.md` §3 → `AGENTS-technology.md` +
+   `agents/guides/AGENTS-technology-optimization.md`.
+2. Confirm `technology.optimizationPass` and `pdkMode` in `.config.ts`.
+3. Author or locate `*.tech-spec.md`.
+4. `g6lc-build tech status` → `g6lc-build tech plan` → `g6lc-build tech check`.
+5. Add guard-macro-protected wrappers at the PDK-swap seam.
+6. Verify equivalence, DFT, timing, power, area.
+
+These examples are not exhaustive, but they illustrate a pattern. In each case,
+the agent starts with `AGENTS.md`, narrows to a domain guide, reads the spec
+and the board or config contract, makes a targeted change, and validates
+through `g6lc-build`. The pattern holds whether the task is an ISA-visible
+change, an uncore integration, or a technology optimization. Mastering this
+pattern is what makes an agent effective on CVA6.
+
+## The build platform as the agent executor
+
+The agent does not run `make` directly. It runs `g6lc-build <command>`:
+
+- `g6lc-build probe` / `doctor` — host readiness (prefer `probe` for depth).
+- `g6lc-build tools install …` / `setup --install` — provision tools.
+- `g6lc-build diag run …` — compartmentalized lint/diagnostic surfaces.
+- `g6lc-build verify --lint` (etc.) — AGENTS.md §0.2 per-change gate.
+- `g6lc-build test --<filter>` — regression suites.
+- `g6lc-build timings analyze|correct` — structural FO4 via `sv-timing`.
+- `g6lc-build vendor sync <id>` — fetch IP.
+- `g6lc-build mb select <id>` — configure board.
+- `g6lc-build tech check` — technology readiness gates.
+
+Each command returns an exit code and (with `--json`) structured output. The
+agent can parse the output to decide the next step.
+
+The build platform is the agent's hands. It provisions tools, fetches IP,
+configures boards, runs tests, and checks technology readiness. By delegating
+to `g6lc-build` rather than running ad hoc commands, the agent benefits from
+the platform's preflight checks, error handling, and deterministic exit codes.
+The `--json` output makes this delegation programmatic, so an agent can read
+the result and branch accordingly.
+
+## Dry-run discipline
+
+Before any mutating command, the agent should run the `--dry-run` variant when
+available:
+
+```bash
+g6lc-build vendor sync <id> --dry-run
+g6lc-build mb select <id> --dry-run
+g6lc-build tech plan
+```
+
+This shows what will change without writing files, so the agent can validate
+its plan before execution.
+
+Dry-run is the agent's rehearsal. It is especially important for commands that
+mutate the workspace, such as `vendor sync`, `mb select`, or `tech init`. A
+dry-run shows what files will be fetched, what overlays will be written, and
+what gates will be checked. It lets the agent validate that its plan is
+consistent with the config before making irreversible changes. This discipline
+prevents the common agent failure of "I ran a command and now the workspace is
+in an unexpected state."
+
+## Traceability updates
+
+For ISA-visible changes, the agent must update the living traceability files:
+
+- `AGENTS-specs-to-impl.md`
+- `AGENTS-specs-to-tests.md`
+- `AGENTS-specs-coverage.md` (re-derived)
+- `AGENTS-dts-validation.md` (if Linux-visible)
+
+For test suite changes, update `AGENTS-specs-to-tests.md` and re-derive
+`AGENTS-specs-coverage.md`.
+
+Traceability is the agent's proof of correctness. For an ISA-visible change,
+the forward map (`AGENTS-specs-to-impl.md`) shows where the spec requirement
+was implemented, and the reverse map (`AGENTS-specs-to-tests.md`) shows how it
+was verified. The derived coverage summary is the dashboard that tells the
+project whether the change is complete. Without these updates, a change is
+merely code; with them, it is an auditable engineering artifact.
+
+## When to stop and ask a human
+
+An agent should escalate when:
+
+- The change touches clock domains, reset strategy, or CDC.
+- The change modifies the memory model or exception semantics.
+- The change requires a new PDK cell or foundry hard macro.
+- The change is larger than one config + one seam pair.
+- The change has unclear legal/licensing implications (vendor IP, NDA content).
+
+Escalation criteria are the boundaries of safe automation. Each item in the
+list is a domain where human judgment is currently more reliable than an LLM:
+clock and reset design, memory-model semantics, foundry-specific cell
+integration, large cross-cutting changes, and legal/licensing questions. An
+agent that escalates early avoids creating expensive problems and preserves the
+trust of the human reviewers.
+
+## Tooling for agents
+
+- **File discovery:** `src/workspace/discovery.ts` with glob patterns.
+- **Config loading:** `src/config/load.ts`.
+- **Process execution:** `src/platform/exec.ts`.
+- **Child environment:** `childEnv(ctx)` in `src/context.ts`.
+
+These helpers keep the agent's interaction with the host deterministic and
+cross-platform.
+
+The agent tooling is intentionally thin. It does not try to implement the
+entire workflow in TypeScript; it provides deterministic helpers for the
+operations that every command needs: finding files, loading config, running
+processes, and setting up the child environment. By keeping these helpers
+cross-platform, the platform ensures that an agent written for one operating
+system will behave the same on another.

@@ -1,0 +1,71 @@
+---
+title: Frontend Extensions
+description: GSys LibreCore frontend upgrades — prediction fabric, FTQ/FDIP, way prediction, and config seams.
+---
+
+# Frontend Extensions
+
+The fetch / prediction path is the first place GSys LibreCore invests for IPC: better
+branch direction, better target prediction, and a fetch stream that can feed
+wider issue without thrashing the memory system.
+
+Baseline CVA6 already had BTB / BHT / RAS. The upgrade program adds a richer
+**prediction fabric** and **fetch queue** structures while remaining
+config- and target-dependent.
+
+Playbook: `agents/guides/AGENTS-branch-prediction.md`. Spec constraints remain
+control-transfer semantics + optional CFI / CTR — not a mandated predictor
+microarchitecture.
+
+## Live areas (product map)
+
+| Upgrade | Intent | Typical loci |
+|---|---|---|
+| **U1** Prediction fabric | TAGE-style / multi-table direction, gshare/GHR | `core/frontend/cva6_bp_*.sv` |
+| **U2** FTQ / FDIP / loop buffer | Decouple fetch stream from decode; prefetch discipline | `core/frontend/g6lc_ftq.sv` and related |
+| **U3** Way-pred / RRIP | I$/D$ way and replacement helpers | `cache_subsystem/g6lc_way_predictor.sv`, `g6lc_rrip_repl.sv`, HPDcache hooks |
+
+Exact enablement depends on the **target package** (primary 64-bit packages
+tend to turn fabric on; tiny targets stay lean).
+
+## Config surface
+
+Branch and fetch knobs live on `cva6_cfg_t` (names illustrative — check
+`core/include/config_pkg.sv` for the current fields):
+
+- `BPType`, `BTBEntries`, `BHTEntries`, `BHTHist`, `RASDepth`
+- Frontend queue / FTQ depths where present
+- Cache geometry and way-predictor enables on the cache side
+
+`check_cfg` continues to enforce power-of-two geometries and non-zero RAS when
+required by the package.
+
+## Design rules
+
+1. **Mispredict recovery stays precise.** Frontend redirect interfaces
+   (`resolved_branch`, flush) remain the contract with execute/commit —
+   see `agents/guides/AGENTS-speculation.md`.
+2. **SMT interaction.** With `NrHarts>1`, RAS and GHR are banked; BHT/BTB may
+   remain **shared** (cross-hart pollution is a known limit). See [SMT](./smt).
+3. **Do not couple predictor internals to EX.** Resolve in `branch_unit` /
+   scoreboard paths; train tables on the resolve interface only.
+4. **Timing.** Wide hash tables and multi-port train ports are critical-path
+   risks — pipeline or cut before lengthening IF.
+
+## Verification sketch
+
+- Directed branch / mispredict suites under `verif/`
+- Arch smoke with prediction-heavy kernels
+- Formal / RVFI where mispredict and exception paths must stay precise
+
+```bash
+g6lc-build verify --lint --target <your_cfg>
+g6lc-build test --list   # pick prediction / arch suites for the target
+```
+
+## Related
+
+- [Multi-Issue](./multi-issue) — consumer of a healthy fetch stream
+- [Out-of-Order](./out-of-order) — mispredict cancel into IQ/ROB/LSQ
+- [Upgrade Program](../architecture/upgrade-program)
+- Scaffold: `architecture/branch-prediction/`

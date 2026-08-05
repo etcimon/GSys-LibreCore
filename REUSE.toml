@@ -1,0 +1,129 @@
+version = 1
+SPDX-PackageName = "GSys LibreCore"
+SPDX-PackageSupplier = "Etienne Cimon <see .active-contributor>"
+SPDX-PackageDownloadLocation = "https://github.com/GlobecSys/librecore"
+
+# ------------------------------------------------------------------------------
+# Machine-readable provenance for tier R "Case B" files.
+#
+# These are third-party files that Etienne Cimon has substantially modified (see
+# the measured deltas in AGENTS-licensing.md). Each such file:
+#
+#   * RETAINS its original upstream copyright notice and its original
+#     SPDX-License-Identifier verbatim, in place, untouched. Removing either
+#     would breach Apache-2.0 s.4(c) / Solderpad s.4 and is E-UPSTREAMWRITE.
+#
+#   * is ADDITIONALLY offered, as a whole, by Etienne Cimon under
+#     "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial", per the permission in
+#     Apache-2.0 s.4 final paragraph to license "any such Derivative Works as a
+#     whole" under different terms.
+#
+# SPDX has no operator expressing "the whole is X while portions remain Y":
+# AND means both apply to the whole, OR means licensee's choice. Stacking two
+# bare SPDX-License-Identifier tags in one file is ambiguous and is rejected as
+# E-TIERCONFLICT. Every file therefore carries exactly ONE tag:
+#
+#   * where the upstream notice already declares an SPDX identifier (the five
+#     Thales config packages, SHL-2.0), that upstream tag is kept untouched and
+#     the outbound offer is a prose "Outbound-License:" line;
+#
+#   * where the upstream notice is PROSE ONLY and declares no identifier (the
+#     eight ETH Zurich / University of Bologna files with prose Solderpad
+#     notices), there is nothing to displace, so the outbound offer IS the
+#     file's single SPDX tag. The prose upstream notice above it is untouched.
+#
+# Either way the authoritative machine-readable statement lives here.
+#
+# Reading this table: "SPDX-License-Identifier" below is the OUTBOUND offer.
+# The retained upstream licence is named in the comment on each block and in the
+# file's own header.
+# ------------------------------------------------------------------------------
+
+# --- ETH Zurich / University of Bologna originals (retain SHL-0.51) -----------
+[[annotations]]
+path = [
+  "core/csr_regfile.sv",
+  "core/decoder.sv",
+  "core/perf_counters.sv",
+  "core/frontend/frontend.sv",
+  "core/cache_subsystem/g6lc_icache.sv",
+  "corev_apu/src/ariane.sv",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = [
+  "2018 ETH Zurich and University of Bologna",
+  "2026 Etienne Cimon",
+]
+SPDX-License-Identifier = "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial"
+SPDX-FileComment = "Upstream portions remain licensed Apache-2.0 WITH SHL-0.51 by ETH Zurich and University of Bologna; that grant is unaffected."
+
+# --- ETH Zurich originals under SHL-2.0 --------------------------------------
+[[annotations]]
+path = [
+  "core/frontend/ras.sv",
+  "core/frontend/g6lc_bp_gshare.sv",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = [
+  "2018-2019 ETH Zurich and University of Bologna",
+  "2026 Etienne Cimon",
+]
+SPDX-License-Identifier = "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial"
+SPDX-FileComment = "Upstream portions remain licensed Apache-2.0 WITH SHL-2.0; that grant is unaffected. core/frontend/ras.sv carries an unattributed upstream copyright line ('Copyright (C) 2018 to present') which is a pre-existing defect and must not be filled in speculatively."
+
+# --- Thales DIS config-package template derivatives (retain SHL-2.0) ---------
+[[annotations]]
+path = [
+  "core/include/g6lc64_smt2_config_pkg.sv",
+  "core/include/g6lc64_ooo_config_pkg.sv",
+  "core/include/g6lc64_ooo_server_config_pkg.sv",
+  "core/include/g6lc64_server_math_config_pkg.sv",
+  "core/include/g6lc64_server_math_v_config_pkg.sv",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = [
+  "2021 Thales DIS design services SAS",
+  "2026 Etienne Cimon",
+]
+SPDX-License-Identifier = "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial"
+SPDX-FileComment = "Derived from the Thales DIS configuration-package template; the Thales original remains licensed Apache-2.0 WITH SHL-2.0. Note these files declare 'package cva6_config_pkg' -- the PACKAGE name is an upstream ABI consumed by tier-U modules and is deliberately NOT renamed."
+
+# ------------------------------------------------------------------------------
+# De minimis exclusions — recorded here so a scanner cannot silently "promote"
+# them. These carry an Etienne Cimon modification that is too small to support
+# relicensing the whole file. They are tier U. Do not change.
+#   core/include/ariane_pkg.sv  +39/-7 in 806 lines (4.8%)
+#   corev_apu/clint/clint.sv     +8/-1 in 264 lines
+# ------------------------------------------------------------------------------
+[[annotations]]
+path = [
+  "core/include/ariane_pkg.sv",
+  "corev_apu/clint/clint.sv",
+]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2018 ETH Zurich and University of Bologna"
+SPDX-License-Identifier = "Apache-2.0 WITH SHL-0.51"
+SPDX-FileComment = "TIER U BY DELIBERATE DECISION. Contains a small Etienne Cimon modification, below the de minimis threshold in .licensing-policy. NOT offered under CERN-OHL-S-2.0. See AGENTS-licensing.md."
+
+# ------------------------------------------------------------------------------
+# GPL firmware — separate work, never offered under CERN-OHL-S or the commercial
+# licence. Excluded from the default build; see that directory's README.md.
+# ------------------------------------------------------------------------------
+[[annotations]]
+path = [
+  "corev_apu/fpga/src/bootrom/src/dw_mmc.c",
+  "corev_apu/fpga/src/bootrom/src/dwmmc.h",
+  "corev_apu/fpga/src/bootrom/src/bouncebuf.c",
+  "corev_apu/fpga/src/bootrom/src/bouncebuf.h",
+  "corev_apu/fpga/src/bootrom/src/cache.h",
+  "corev_apu/fpga/src/bootrom/src/memalign.h",
+]
+precedence = "aggregate"
+SPDX-License-Identifier = "GPL-2.0-or-later"
+SPDX-FileComment = "U-Boot derived. Separate work; excluded from the default bootrom link set."
+
+[[annotations]]
+path = ["corev_apu/fpga/src/bootrom/src/dma-mapping.h"]
+precedence = "aggregate"
+SPDX-License-Identifier = "GPL-2.0-only"
+SPDX-FileComment = "GPL-2.0-ONLY. Incompatible with Apache-2.0 and not a CERN-OHL Compatible Licence. Must never enter a link set with Apache/CERN-OHL material (E-GPLLINK). Reachable only from bouncebuf.c, which is excluded from the default build."

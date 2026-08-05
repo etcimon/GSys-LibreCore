@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zifencei Instruction-Fetch Fence (Vol I, 4.1)</title></head>
+<body>
+<h1>Vol I &sect;4.1 — Zifencei Extension for Instruction-Fetch Fence</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zifencei">specs/riscv-spec.html#ext:zifencei</a>
+(source line 8880). <strong>Domain:</strong> BP, SPEC, CACHE.</p>
+
+<p>FENCE.I provides explicit synchronization between writes to instruction memory and instruction
+fetches on the same hart. The execution rule is that a program must execute a FENCE.I after storing to
+instruction memory and before fetching those stores as instructions. This directly affects the
+frontend: the pipeline must flush or stall the instruction fetch and invalidate or refetch from the
+I$ so that stale instructions are not executed. It is the canonical interface between stores and the
+predictor/fetch unit.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This chapter defines the Zifencei extension, which includes the FENCE.I
+instruction that provides explicit synchronization between writes to
+instruction memory and instruction fetches on the same hart. Currently,
+this instruction is the only standard mechanism to ensure that stores
+visible to a hart will also be visible to its instruction fetches."
+(specs/riscv-spec.html:8880-8888, anchor #ext:zifencei)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module fence_i_handler (
+  input  logic        fence_i_i,
+  output logic        flush_frontend_o,
+  output logic        icache_inval_o   // or refetch-from-memory signal
+);
+  // serialize: store -> FENCE.I -> fetch
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented. <code>core/commit_stage.sv:155</code> drives
+<code>fence_i_o</code>; <code>core/controller.sv:70-71,140-157,259</code> latches the request, flushes
+both caches when <code>CVA6Cfg.DcacheFlushOnFenceI</code> is set, and asserts
+<code>halt_frontend_o</code> while the flush is in progress. <code>core/frontend/frontend.sv:39-40,312-313,318-321</code>
+gates I$ requests with <code>halt_frontend_i</code> and kills speculative fetches with
+<code>flush_i</code>. The coherence knob <code>DcacheFlushOnFenceI</code> is declared in
+<code>core/include/config_pkg.sv:214</code>; most target packages keep it <code>1'b0</code> because the WT
+D$ already writes through to memory.</p>
+
+<p><strong>.dts linkage:</strong> no DT node for FENCE.I itself, but self-modifying code regions must be
+marked cacheable in <code>memory@</code> nodes so that FENCE.I plus any optional D$ flush/invalidation
+behaves deterministically; <code>cache-unified</code> / <code>icache/dcache</code> nodes describe the I$/D$
+separation that FENCE.I bridges.</p>
+</body>
+</html>

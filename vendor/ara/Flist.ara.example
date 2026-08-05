@@ -1,0 +1,14 @@
+//////////////////////////////////////////////////////////////////////////////
+// Example flist fragment for Ara — copy to Flist.ara after vendor sync and
+// adjust paths to the pinned Ara tree. Do NOT add Ara sources to core/Flist.cva6.
+//
+// Usage (Verilator / sim top):
+//   -f ${CVA6_REPO_DIR}/vendor/ara/Flist.ara
+//////////////////////////////////////////////////////////////////////////////
+
+// +incdir+${CVA6_REPO_DIR}/vendor/ara/upstream/...
+// ${CVA6_REPO_DIR}/vendor/ara/upstream/.../ara_pkg.sv
+// ${CVA6_REPO_DIR}/vendor/ara/upstream/.../ara.sv
+// ${CVA6_REPO_DIR}/vendor/ara/upstream/.../ara_dispatcher.sv
+// Replace the core stub by listing Ara's first-pass decoder LAST with the
+// same module name `cva6_accel_first_pass_decoder`, or use a bind/wrapper.

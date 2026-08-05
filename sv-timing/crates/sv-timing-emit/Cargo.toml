@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "sv-timing-emit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Emit SystemVerilog from timing IR / corrected forms"
+rust-version.workspace = true
+
+[dependencies]
+sv-timing-core = { workspace = true }
+sv-timing-transform = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

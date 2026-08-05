@@ -20,6 +20,19 @@ CVA6 Design Document (deprecated)
 Editor: **Florian Zaruba**
 `florian@openhwgroup.org <mailto:florian@openhwgroup.org?subject=CVA6%20Design%20Document>`__
 
+.. note::
+
+   This classical Ariane/CVA6 stage-oriented design manual is **deprecated**
+   as a full description of the CVA6V-EC worktree. It remains useful historical
+   context for the baseline in-order pipeline.
+
+   For current monorepo documentation use:
+
+   * ``docs/website/`` — worktree, build-platform, boards, PDK, **sv-timing**
+   * repo-root ``AGENTS.md`` / ``architecture/README.md`` — live RTL map,
+     config-gated OoO/SMT/L2, upgrade programs
+   * ``docs/design/`` adoc design manuals for config-generated product books
+
 .. toctree::
    :maxdepth: 2
    :caption: Contents:

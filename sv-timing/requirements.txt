@@ -1,0 +1,5 @@
+# Python deps for package tooling + verif regress.
+# Installed into .tools/python-venv via `svt setup` / `svt verif-regress`.
+
+# SystemVerilog lint/compile frontend for optimized emit validation
+pyslang>=7.0

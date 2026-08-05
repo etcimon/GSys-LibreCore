@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zama16b 16-byte Misaligned Atomicity (Vol I, 5.10)</title></head>
+<body>
+<h1>Vol I &sect;5.10 — Zama16b Extension for 16-byte Misaligned Atomicity</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zama16b">specs/riscv-spec.html#ext:zama16b</a>.
+<strong>Domain:</strong> RAM.</p>
+
+<p>Zama16b guarantees that 16-byte atomic memory operations are atomic even when the 16-byte object is
+not aligned to a 16-byte boundary. If Zama16b is implemented, the misaligned atomicity granule in
+main memory regions with both the coherence and cacheability PMAs is 16 bytes; misaligned loads,
+stores, and AMOs to those regions that do not cross a naturally aligned 16-byte boundary are atomic.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Zama16b extension is implemented, then the misaligned atomicity
+granule in main memory regions with both the coherence and cacheability
+PMAs is 16 bytes. Misaligned loads, stores and AMOs to those regions
+that do not cross a naturally aligned 16-byte boundary are atomic."
+(specs/riscv-spec.html:15483-15486, anchor #ext:zama16b / #norm:zama16b_mag)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module zama16b_amo (
+  input  logic [XLEN-1:0] addr_i,
+  input  logic [127:0]    expected_i, new_i,
+  output logic [127:0]    old_o,
+  output logic            swapped_o
+);
+  // 16-byte atomic RMW irrespective of 16-byte alignment
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. CVA6 has no 128-bit AMO/CAS datapath: the <code>amo_t</code>
+enum in <code>core/include/ariane_pkg.sv:361-373</code> is limited to word/doubleword operations,
+<code>core/decoder.sv:1602-1647</code> does not decode 16-byte AMOs, and
+<code>core/cache_subsystem/amo_alu.sv:14-65</code> operates on 64-bit operands. There is no 128-bit
+load/store/AMO port in the LSU or cache subsystem, and no misaligned-16-byte atomicity mechanism in
+<code>core/load_store_unit.sv</code>. Adding Zama16b would require a 128-bit AMO datapath, cross-bank
+atomic write masking, and either a locked AXI transaction or HPDcache support for 16-byte atomic RMW.</p>
+
+<p><strong>.dts linkage:</strong> no DT node currently; Zama16b would be advertised through the
+<code>riscv,isa</code> string and would require <code>memory@</code> nodes with both coherence and
+cacheability PMAs.</p>
+</body>
+</html>

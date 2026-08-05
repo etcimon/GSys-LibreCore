@@ -1,0 +1,17 @@
+# U5 cancel-mask / drop formal scaffold (bounded).
+# Run: sby -f core/ooo/formal/g6lc_ooo_cancel.sby
+# Wired into build-platform verify.formalTasks (cva6-build verify --formal).
+
+[options]
+mode prove
+depth 12
+
+[engines]
+smtbmc z3
+
+[script]
+read -formal g6lc_ooo_cancel_props.sv
+prep -top g6lc_ooo_cancel_props
+
+[files]
+g6lc_ooo_cancel_props.sv

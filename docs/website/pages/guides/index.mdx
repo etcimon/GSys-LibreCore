@@ -1,0 +1,44 @@
+---
+title: Guides
+description: Cross-cutting guides for AI agents, workflows, and maintaining this documentation.
+---
+
+# Guides
+
+This section contains cross-cutting guides that do not belong to a single layer
+(core, APU, motherboard, etc.) but instead describe **how** the project is
+developed and maintained.
+
+In a large hardware project, the most expensive mistakes are not technical
+errors; they are process errors. A contributor may know how to write
+SystemVerilog but not know which config struct to extend. An agent may know how
+to fetch vendor IP but not know which license to record. Cross-cutting guides
+exist to capture these process rules so that every task is performed in the
+context of the project's architecture and governance.
+
+## Pages
+
+- [Agent Workflow](./agent-workflow) — how LLM agents navigate the CVA6
+  knowledge graph and `AGENTS-*` files.
+- [Building the Docs](./building-the-docs) — how this Next.js + Nextra site is
+  structured and extended.
+
+Related layer docs (not under Guides but often next):
+
+- [sv-timing](../sv-timing) — structural FO4 package
+- [Build platform · Timings](../build-platform/timings) — monorepo host adapter
+- [Probe, Diag & Verify](../build-platform/verify-and-diag) — operator loop
+
+## Why cross-cutting guides matter
+
+A hardware project has many moving parts: RTL, verification, board design,
+vendor IP, foundry views, toolchain, and documentation. Without a shared
+workflow, an agent or contributor has to re-discover the rules for every task.
+The guides here encode the **process** so that the **content** in the other
+sections can be applied correctly.
+
+The guides are the project's operating manual. They do not replace the deep
+documentation in the `AGENTS-*.md` files or the technical details in the layer
+sections; they explain how to move between those documents and how to decide
+which one to read first. For an automated agent, they are the high-level
+control flow; for a human, they are the onboarding and review checklist.

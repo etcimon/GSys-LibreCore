@@ -1,0 +1,80 @@
+---
+title: Pipeline & IR
+description: Multi-step sv-timing pipeline from ingest through FO4 path ranking, reporting, and SQLite cache.
+---
+
+# Pipeline & IR
+
+Authoritative detail lives in `sv-timing/architecture/DESIGN.md`.
+This page is the durable map of **stages**, not a line-by-line IR reference.
+
+## Multi-step pipeline
+
+| Stage | Owner | Notes |
+|---|---|---|
+| 0 Host discovery | **Host only** | Flists → file list; not in the package |
+| 0b Ingest | CLI | `--files` / `--files-from`, defines, modules |
+| 1 Parse | core + vendored sv-parser | Location adapter for `file:line:column` |
+| 2 Scope | core | Local scopes; packages + host param-map |
+| 3–4 Lower + FO4 | core | Cost table from `resources/fo4-v1.toml` |
+| 5–7 Paths / rank / opportunities | core | Requires `--modules` or `--all-modules` |
+| 8 Correct | transform + emit | Opt-in, allowlisted (see [Auto-Correct](./auto-correct)) |
+| 9–10 Report + cache | cli + cache | Versioned JSON; default `./.sv-timing-cache/` |
+
+## Timing IR (conceptually)
+
+The IR is not a full elaborator netlist. It is a **timing-oriented** graph of:
+
+- **Operators** (add, mul, mux, compare, …) with FO4-class costs
+- **Sequential elements** and sequential/combinational region boundaries
+- **Gating** (clock edge, enable, reset) where recoverable from the source
+- **Path endpoints** (reg / port / hierarchical stitch)
+- **Precise origins** on every node for report anchors and edits
+
+Expression trees (`lhs_expr` / `rhs_expr`) feed cost attribution and
+synthesize/emit so rewrites can preserve recoverable RHS structure.
+
+## Cost model and frequency budget
+
+- Costs are **structural FO4 estimates**, calibrated from a package-owned table
+  (`fo4-v1.toml`), not process-corner cell libraries.
+- The caller supplies **target frequency** (`--target-mhz`; CLI default is
+  package-defined; CVA6 hosts often pass SoC `targetFrequencyMHz`, e.g. 1250).
+- Paths and regions are ranked against that budget so designers see
+  **which source constructs** threaten closure — not a P&R critical path.
+
+Active measurement and optimization-surface deltas:
+`sv-timing/architecture/OPTIMIZATION-LEVELS.md`.
+
+## Cache
+
+Analyze results can hit a **SQLite cache** keyed by design inputs (file CRCs,
+param-map, etc.). Cache path is **caller-chosen** (default under the working
+directory). Throughput and a pre-compiled per-file `units` tier are described in
+`sv-timing/architecture/PERF-CACHE.md`.
+
+Hosts should map cache and report directories into their own workspace (in CVA6:
+under `build-platform/workspace/`) so package defaults do not pollute the RTL
+tree.
+
+## Portable file lists
+
+The package understands a simple `.f` format: paths, comments, `+incdir+`,
+`+define+`, nested `-f`/`-F` (cycle-guarded). Relative paths resolve against the
+listing file’s directory.
+
+- **Package-owned expand:** `python tools/svt.py flist --in entry.f --set VAR=…`
+- **Host-owned expand:** Bender / FuseSoC / env-heavy EDA `-F` stay outside the
+  crates; hosts flatten to portable `.f` before analyze.
+
+## JSON contract
+
+Analyze and correct emit versioned JSON (see `sv-timing/schemas/`). Hosts
+rehydrate DTOs; they do not reimplement the cost model. The TypeScript client
+under `sv-timing/js/` documents the same shapes for Bun consumers.
+
+## STA handoff
+
+Structural reports can produce **hints** (path comments, SDC-oriented notes)
+for design review. Sign-off remains with the project’s STA flow and PDK
+libraries. See `sv-timing/architecture/STA-HANDOFF.md`.

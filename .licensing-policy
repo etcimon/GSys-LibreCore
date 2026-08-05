@@ -1,0 +1,51 @@
+# .licensing-policy  (see AGENTS-licensing.md).  Enabled = uncommented.
+#
+# GSys LibreCore is TIER-DIRECTED: every file resolves to a tier via
+# .licensing-tiers, and each tier resolves to an SPDX expression below.
+# This replaced the previous single-license + personal-override model.
+
+# Editing an existing code file: inherit and preserve its declared SPDX license
+# (never rewrite it). This is what protects tier U (upstream) material.
+DEFAULT_TO_FILE_LICENSE
+
+# Tier-directed selection. Supersedes ALLOW_PERSONAL_LICENSE / PERSONAL_LICENSE.
+TIER_DIRECTED_LICENSING
+TIER_MAP=.licensing-tiers
+
+# tier R — LibreCore-original RTL + reference device trees (dual-licensed)
+LICENSE_TIER_R=CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+
+# tier T — build platform, timing tooling, verification scripting, docs
+LICENSE_TIER_T=MIT
+
+# tier F — FPGA zero-stage bootrom, conveyed as a separate work
+LICENSE_TIER_F=GPL-2.0-or-later
+
+# tier P — material under third-party NDA / foundry PDK terms (AGENTS-technology.md)
+LICENSE_TIER_P=LicenseRef-Proprietary
+
+# Documentation follows its tier rather than being out of scope. Markdown takes
+# no inline header; the license is conveyed by the root LICENSE.* files + NOTICE.
+DOCS_UNDER_TIER
+
+# Contributor agreement is required for tier R only; tier T is MIT inbound=outbound.
+CLA_REQUIRED_TIERS=R
+
+# Attribution: add the active contributor without removing existing attribution.
+ADD_CONTRIBUTOR_NAME
+
+# De minimis guard: do not apply a tier-R outbound license to a third-party file
+# on the strength of a trivial modification. Threshold is advisory; the audit
+# procedure and the current exclusion list are in AGENTS-licensing.md.
+DE_MINIMIS_GUARD
+DE_MINIMIS_MIN_ADDED_LINES=50
+
+# Fallback when no tier matches and a license must be chosen.
+SELECT_MOST_PERMISSIVE
+
+# --- Retired (do not re-enable without reading AGENTS-licensing.md) -----------
+# ALLOW_PERSONAL_LICENSE          superseded by TIER_DIRECTED_LICENSING
+# PERSONAL_LICENSE=<SPDX>         superseded by LICENSE_TIER_R / LICENSE_TIER_T
+# ADD_PERSONAL_LICENSE_HEADER     superseded by the per-tier header conventions
+# SELECT_MOST_PROTECTIVE
+# SELECT_MOST_RESTRICTIVE

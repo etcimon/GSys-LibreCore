@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Za64rs Reservation-Set Size (Vol I, 5.4)</title></head>
+<body>
+<h1>Vol I &sect;5.4 — Za64rs Extension for Reservation-Set Size</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:za64rs">specs/riscv-spec.html#ext:za64rs</a>.
+<strong>Domain:</strong> RAM.</p>
+
+<p>Za64rs guarantees a maximum LR/SC reservation-set size of 64 bytes. The Za64rs extension requires
+that the reservation sets used by the instructions in the Zalrsc extension be contiguous, naturally
+aligned, and at most 64 bytes in size. This is the common case when combined with Zic64b (64-byte
+cache blocks), because the reservation is naturally bounded by the cache-line size.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Za64rs extension requires that the reservation sets used by the
+instructions in the Zalrsc extension be contiguous, naturally aligned,
+and at most 64 bytes in size."
+(specs/riscv-spec.html:14750-14753, anchor #ext:za64rs / #norm:za64rs_res_set_req)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module za64rs_check (
+  input  logic [XLEN-1:0] lr_addr_i, sc_addr_i,
+  output logic            same_reservation_set_o
+);
+  // compare addresses ignoring lower 6 bits (64-byte mask)
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> not guaranteed. CVA6 does not implement a 64-byte reservation-set
+guarantee explicitly. The LR/SC path is in <code>core/load_store_unit.sv:728-748</code>,
+<code>core/store_unit.sv:134-135,282-319</code>, and the cache subsystem (WT
+<code>core/cache_subsystem/wt_dcache_missunit.sv:334-347,576-583</code>; HPDcache
+<code>core/cache_subsystem/hpdcache/rtl/src/hpdcache_ctrl.sv:157-161,1179-1181</code>). The effective
+reservation set is bounded by the cache-line size, but shipped targets use <code>DcacheLineWidth</code>
+of 128 or 256 bits (16 or 32 bytes) in <code>core/include/config_pkg.sv</code>, not 64 bytes, and
+<code>Zic64b</code> is not satisfied. Therefore Za64rs is not currently advertised and should not be
+claimed in the ISA string.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Za64rs would be exposed through <code>riscv,isa</code> only
+when the reservation-set size and cache-line width are both raised to at least 64 bytes and verified.</p>
+</body>
+</html>

@@ -1,0 +1,158 @@
+---
+title: CPU Core
+description: The CVA6 RISC-V core and how to develop it.
+---
+
+# CPU Core
+
+The `core/` directory contains the CVA6 RISC-V CPU. It is designed to be
+compiled, simulated, and synthesized stand-alone. It has no dependency on the
+APU, the board layer, or the build platform.
+
+This independence is the foundation of CVA6's industrial value. In a commercial
+IP flow, the CPU core is often licensed separately from the SoC integration
+layer; it must compile in environments where the board, peripherals, and
+foundry libraries are not yet known. By ensuring that `core/` has no
+dependency on the outer layers, CVA6 can be integrated into many SoCs without
+forcing each integrator to adopt a specific tool chain or board definition. The
+core is where the RISC-V architecture is realized; everything else is context.
+
+## What the core implements
+
+- **ISA:** 64-bit RISC-V I, M, A, C with privilege modes M, S, U (extensions
+  grow with package: H, Sstc, RVB, Zicbo*, optional RVV, …).
+- **Pipeline:** 6-stage baseline; **config-gated** multi-issue, slice-OoO, and
+  full OoO (`OoOEn`) on production packages.
+- **Threads:** optional **SMT2** (`NrHarts=2`) with banked arch state.
+- **Memory:** TLBs, hardware PTW, configurable L1; **L2/L3** attach on the APU
+  side when enabled.
+- **Branch prediction:** BTB/BHT/RAS plus upgraded prediction fabric / FTQ on
+  primary targets.
+- **Observability:** RVFI probes, debug triggers, PMU counters (including OoO
+  and cache hierarchy groups where wired).
+
+The same RTL elaborates as a minimal embedded core, a Linux-capable application
+core, an OoO server package, or an SMT bring-up target by selecting the right
+**config package**. That is the product model — not separate forks.
+
+### Product-level pages
+
+| Topic | Page |
+|---|---|
+| Roadmap / U1–U10 map | [Upgrade Program](../architecture/upgrade-program) |
+| Package comparison | [SKU Matrix](../architecture/sku-matrix) |
+| Prediction / FTQ | [Frontend Extensions](./frontend-extensions) |
+| Issue width | [Multi-Issue](./multi-issue) |
+| Rename / IQ / ROB / LSQ | [Out-of-Order](./out-of-order) |
+| Dual hardware threads | [SMT](./smt) |
+| H + Sstc | [Hypervisor & Sstc](./hypervisor) |
+| RVV / Ara | [Vector (RVV) & Ara](./vector) |
+| Named server packages | [Server Profiles](./server-profiles) |
+| L2/L3 (APU) | [L2 / L3 Cache](../corev-apu/l2-l3-cache) |
+| Multi-core cluster | [Multi-Core Cluster](../corev-apu/multi-core) |
+
+## How to read the core
+
+The core is organized by pipeline stage and subsystem:
+
+| Area | Subdirectory / file | Responsibility |
+|---|---|---|
+| Fetch | `frontend/` | Prediction fabric, FTQ, instruction queue |
+| Decode / Issue | `issue_stage.sv`, `issue_read_operands.sv` | Scoreboard, operand read, multi-issue |
+| Slice / full OoO | `cva6_slice_*.sv`, `ooo/` | Slice path / rename·IQ·ROB·LSQ (gated) |
+| SMT | `smt/` | Thread select, banked RF/PC/CSR |
+| Execute | `ex_stage.sv` | ALU, FPU, multiplier, divider, branch unit, CSR, CVXIF |
+| Load / Store | `load_store_unit.sv`, `load_unit.sv`, `store_unit.sv`, `store_buffer.sv` | Memory access, ordering, MMU interaction |
+| Commit | `commit_stage.sv`, `controller.sv` | Retire, exception/flush, redirect |
+| Caches / MMU | `cache_subsystem/`, `cva6_mmu/`, `pmp/` | L1, PTW, TLB, PMP |
+
+## The config struct is the gate
+
+`config_pkg::cva6_cfg_t` (defined in `core/include/config_pkg.sv`) is the single
+source of truth for feature selection. A feature is enabled by extending the
+struct and the per-target config packages (`core/include/cv64a6_*_config_pkg.sv`,
+`core/include/cv32a6_*_config_pkg.sv`), not by editing modules ad hoc.
+
+Key config domains:
+
+- `cache_type_t` / `DCacheType` — D$ subsystem selection.
+- `bp_type_t` / `BPType` / `BTBEntries` / `BHTEntries` / `RASDepth` — branch
+  predictor.
+- `vm_mode_t` — virtual-memory mode (Sv32, Sv39, Sv48, Sv57).
+- `Axi*Width` — memory-side bus width.
+- `InstrTlbEntries` / `DataTlbEntries` — TLB sizing.
+- `NrScoreboardEntries` / `NrLoadBufEntries` / `MaxOutstandingStores` —
+  speculation / in-flight window.
+- `NrIssuePorts` / `SuperscalarEn` — multi-issue width.
+- `OoOEn` / `SliceOoOEn` — full vs slice out-of-order (mutually exclusive).
+- `NrHarts` / SMT policy fields — simultaneous multithreading.
+- (APU-side) `L2En` / `L3En` / prefetch — not L1 fields; see L2/L3 page.
+
+`check_cfg(...)` assertions enforce legality (power-of-two geometry, region-rule
+counts, OoO/SMT legality, etc.).
+
+`check_cfg` is the contract enforcer. It encodes the architectural and
+microarchitectural invariants that the RTL assumes. For example, if a cache
+geometry is not a power of two, the indexing logic will silently produce
+incorrect results; if the RAS depth is zero, the return-address stack will
+misbehave. By expressing these as assertions in the config package, CVA6 turns
+configuration errors from runtime mysteries into elaboration-time failures. This
+is especially important when an agent or a new contributor extends the struct:
+the assertions teach the valid design space.
+
+## Development guidelines
+
+1. **Spec-anchored.** An ISA-visible change must start with the spec anchor in
+   `specs/riscv-spec.html` and update `AGENTS-specs-to-impl.md`.
+2. **Config-gated.** Extend `cva6_cfg_t` and the target packages before touching
+   modules.
+3. **Synth-clean.** Use `always_ff` / `always_comb`; no simulation-only
+   constructs in the logic path; respect the async-active-low reset strategy.
+4. **Backend-friendly.** Memories go through `tc_sram`; clock gating through
+   `tc_clk_gating`; power cells through `tc_pwr`.
+5. **Observable.** Add RVFI probes, PMU events, and debug trigger visibility.
+6. **Verified.** Add a directed test and keep the compliance regression green.
+7. **Ecosystem-safe.** The feature must be discoverable (`misa`/ISA string) and
+   toolchain/SBI/Linux-visible.
+
+Each guideline addresses a failure mode that is expensive to fix late in the
+design cycle. Spec-anchoring prevents subtle ISA incompatibilities. Config
+ gating prevents one target from breaking another. Synth-clean code ensures
+that a change that simulates can also be fabricated. Backend-friendly cells
+ensure that synthesis and place-and-route flows can target multiple processes.
+Observability ensures that post-silicon debug is possible. Verification parity
+prevents regression. And ecosystem safety ensures that the feature is usable by
+the broader software stack, which is the ultimate customer of the RTL.
+
+## Sanctioned seams for new features
+
+- **New instructions** — prefer the CVXIF coprocessor boundary (`core/cvxif_fu.sv`,
+  `core/acc_dispatcher.sv`).
+- **New cache policy / L1 geometry** — extend `cva6_cfg_t` and select in
+  `core/cva6.sv`.
+- **New branch predictor** — extend `bp_type_t` and implement in
+  `core/frontend/`.
+- **New memory/TLB feature** — extend `vm_mode_t` or TLB parameters and the MMU
+  in `core/cva6_mmu/`.
+
+These seams are not arbitrary boundaries; they are the points where the RTL
+structure naturally accepts variation. The CVXIF coprocessor interface exists
+precisely because custom accelerators should not perturb the in-order pipeline.
+The cache selection in `core/cva6.sv` exists because cache subsystem design is
+a target-specific decision. The branch-predictor enum exists because predictor
+choice is a classic area/timing/accuracy trade-off. By routing all feature
+additions through these seams, CVA6 preserves the integrity of the pipeline
+while allowing rich configurability.
+
+## Agent workflow for core work
+
+1. Open `AGENTS.md` and find the intent row (branch prediction, RAM, L2/L3,
+   speculation, etc.).
+2. Read the linked `agents/guides/AGENTS-*.md` and `agents/spec/*.html`.
+3. Plan the config change, the code seam, and the verification.
+4. Run `g6lc-build test --open-source` or the relevant arch group.
+5. Update `AGENTS-specs-to-impl.md`, `AGENTS-specs-to-tests.md`, and
+   `AGENTS-dts-validation.md` if needed.
+
+See [CPU Architecture Guidelines](./cpu-architecture) for a deeper look at the
+development patterns.

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Za128rs Reservation-Set Size (Vol I, 5.3)</title></head>
+<body>
+<h1>Vol I &sect;5.3 — Za128rs Extension for Reservation-Set Size</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:za128rs">specs/riscv-spec.html#ext:za128rs</a>.
+<strong>Domain:</strong> RAM.</p>
+
+<p>Za128rs declares that the implementation guarantees a maximum reservation-set size of 128 bytes for
+LR/SC. The Za128rs extension requires that the reservation sets used by the instructions in the
+Zalrsc extension be contiguous, naturally aligned, and at most 128 bytes in size.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Za128rs extension requires that the reservation sets used by the
+instructions in the Zalrsc extension be contiguous, naturally aligned,
+and at most 128 bytes in size."
+(specs/riscv-spec.html:14742-14745, anchor #ext:za128rs / #norm:za128rs_res_set_req)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module za128rs_check (
+  input  logic [XLEN-1:0] lr_addr_i, sc_addr_i,
+  output logic            same_reservation_set_o
+);
+  // compare addresses ignoring lower 7 bits (128-byte mask)
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> not guaranteed. As with Za64rs, CVA6 does not implement a 128-byte
+reservation-set guarantee. The cache-line widths in shipped targets are 16 or 32 bytes
+(<code>core/include/config_pkg.sv</code>), far below 128 bytes. The LR/SC reservation monitoring in
+<code>core/cache_subsystem/hpdcache/rtl/src/hpdcache_ctrl.sv:157-161,1179-1181</code> and
+<code>core/cache_subsystem/wt_dcache_missunit.sv</code> operates at cache-line or word granularity.
+Za128rs would require a wider reservation register / snoop mask and a 128-byte cache-line or a
+software-visible reservation-set size, neither of which exists.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Za128rs would be exposed through <code>riscv,isa</code> only
+when the reservation-set size is raised to at least 128 bytes and verified.</p>
+</body>
+</html>

@@ -124,7 +124,7 @@ core/cache_subsystem/wt_dcache_mem.sv
 core/cache_subsystem/wt_dcache_missunit.sv
 core/cache_subsystem/wt_dcache_wbuffer.sv
 core/cache_subsystem/wt_dcache.sv
-core/cache_subsystem/cva6_icache.sv
+core/cache_subsystem/g6lc_icache.sv
 core/cache_subsystem/cva6_icache_axi_wrapper.sv
 core/cache_subsystem/wt_l15_adapter.sv
 core/cache_subsystem/wt_cache_subsystem.sv

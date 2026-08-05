@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Exceptions, Traps, Interrupts (Vol I, 1.6)</title></head>
+<body>
+<h1>Vol I &sect;1.6 — Exceptions, Traps, and Interrupts</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#trap-defn">specs/riscv-spec.html#trap-defn</a>.
+<strong>Domain:</strong> SPEC.</p>
+
+<p>This subchapter defines the platform-neutral trap vocabulary: synchronous exceptions, interrupts,
+and the trap-handling model. It sets up the precise-trap contract that speculative execution must
+honor: no architectural state, memory, or CSR may become visible before in-order commit, and any
+exception must be reported at a well-defined instruction boundary. The definitions are elaborated
+in the Privileged Architecture (Volume II, chapters 3-5).</p>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module trap_unit (
+  input  logic ex_valid_i,           // exception detected in execute
+  input  logic [VLEN-1:0] pc_i,
+  output logic trap_o,               // precise trap to commit stage
+  output logic [VLEN-1:0] trap_pc_o
+);
+  // trap reported only at commit boundary
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented; precise trap handling in <code>core/controller.sv</code>,
+<code>core/commit_stage.sv</code>, exception PC routing in <code>core/csr_regfile.sv</code>.</p>
+</body>
+</html>

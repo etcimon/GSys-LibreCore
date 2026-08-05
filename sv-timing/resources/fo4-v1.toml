@@ -1,0 +1,14 @@
+# fo4-v1.toml — deterministic unit-width base FO4 costs for goldens.
+# Width scaling applied in measure code (see architecture/DESIGN.md).
+version = "fo4-v1"
+logic_bit = 1.0
+compare = 4.0
+shift_const = 2.0
+shift_var = 12.0
+add_sub = 10.0
+mul = 56.0
+div_rem = 120.0
+mux = 2.5
+priority_mux_per_level = 3.0
+concat = 0.5
+other = 1.0

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Machine-Level CSRs for Hypervisor (Vol II, 5.4)</title></head>
+<body>
+<h1>Vol II &sect;5.4 — Machine-Level CSRs</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#_machine_level_csrs_2">specs/riscv-spec.html#_machine_level_csrs_2</a>.
+Source line: <code>specs/riscv-spec.html:81791</code>. <strong>Domain:</strong> —.</p>
+
+<p>This subchapter extends M-mode CSRs for hypervisor support: <code>mstatus</code> bits MPV and MPP
+modifications, <code>medeleg</code>/<code>mideleg</code> hypervisor bits, and the second-stage
+translation root <code>hgatp</code>. These allow M-mode to delegate traps to HS-mode and configure the
+host stage-2 page table.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The hypervisor extension augments or modifies machine CSRs mstatus,
+mstatush, mideleg, mip, and mie, and adds CSRs mtval2 and mtinst."
+(specs/riscv-spec.html:81791-81794, anchor #_machine_level_csrs_2)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module m_csr_hypervisor (
+  output hgatp_t   hgatp_o,      // host stage-2 root
+  output mstatus_t mstatus_o     // MPV, GVA fields
+);
+  // M-mode hypervisor state; shared with HS-mode delegation
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The <code>mstatus</code>/<code>mideleg</code>/<code>mip</code>/<code>mie</code>
+CSRs in <code>core/csr_regfile.sv</code> do not include MPV/GVA/MTVAL2/MTINST fields, and
+<code>hgatp</code> is not implemented. Trap delegation in <code>core/controller.sv</code> handles only
+M/S/U.</p>
+
+<p><strong>.dts linkage:</strong> no hypervisor DT node; <code>h</code> is not present in the
+<code>riscv,isa</code> string.</p>
+</body>
+</html>

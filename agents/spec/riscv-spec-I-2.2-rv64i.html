@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>RV64I Base Integer Instruction Set (Vol I, 2.2)</title></head>
+<body>
+<h1>Vol I &sect;2.2 — RV64I Base Integer Instruction Set</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#rv64">specs/riscv-spec.html#rv64</a>.
+Source line: <code>specs/riscv-spec.html:5284</code>. <strong>Domain:</strong> RAM.</p>
+
+<p>RV64I extends RV32I with 64-bit integer operations: LWU, LD, SD, and the 64-bit arithmetic
+instructions (ADDW/ADDIW/SUBW/etc.) and shifts. It establishes XLEN=64 for the general-purpose
+registers and memory addresses. It is the base for the Linux-class configurations (e.g.
+<code>cv64a6_imafdc_sv39_config_pkg.sv</code>) and for the Sv39/Sv48 virtual-memory modes.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"RV64I builds upon RV32I, adding 10 instructions and changing the width
+of integer registers to 64 bits."
+...
+"The integer base supports the execution environment that runs on a
+RISC-V hart and supports the execution of software written in compiled
+high-level languages."
+(specs/riscv-spec.html:5284-5290, anchor #rv64)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module rv64i_alu (
+  input  logic [63:0] a_i, b_i,
+  input  alu_op_e     op_i,         // ADDW/SUBW/SLLW/SRLW/SRAW/LD/SD/LWU
+  output logic [63:0] result_o
+);
+  // W-suffix ops produce 32-bit results sign-extended to 64
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented. The 64-bit ALU in <code>core/alu.sv</code> executes
+ADDW/SUBW/SLLW/SRLW/SRAW/ADDIW and sign-extends 32-bit W-suffix results; the load/store unit handles
+LWU/LD/SD in <code>core/load_store_unit.sv</code>. The decoder classifies RV64I opcodes in
+<code>core/decoder.sv</code>. <code>CVA6Cfg.XLEN=64</code> is selected by
+<code>core/include/cv64a6*_config_pkg.sv</code> targets.</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string begins with <code>rv64i</code> for
+RV64I-based targets, e.g. <code>rv64imafdc...</code>.</p>
+</body>
+</html>

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Matrix Multiply Extensions (Vol I, chapter 12)</title></head>
+<body>
+<h1>Vol I chapter 12 — Matrix Multiply Extensions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#matrix">#matrix</a> (12. Matrix Extensions).
+Source line: <code>specs/riscv-spec.html:57076</code>.</p>
+
+<p>The matrix multiply extensions are a recent proposal class for matrix/tensor operations, targeting
+AI/ML acceleration. They are not yet frozen in the profile used by CVA6. No stable details are
+available to implement in the scalar pipeline.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This chapter is a placeholder for forthcoming matrix extensions."
+(specs/riscv-spec.html:57076-57080, anchor #matrix)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module matrix_unit (
+  input  logic [31:0] instr_i,
+  output logic        unsupported_o
+);
+  // not implemented; reserved encodings
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent; matrix extensions are not part of any CVA6 target. No
+decoder slots or functional units exist for matrix/tensor instructions in <code>core/decoder.sv</code>
+or <code>core/ex_stage.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; matrix extensions are not ratified and are not advertised
+in the <code>riscv,isa</code> string.</p>
+</body>
+</html>

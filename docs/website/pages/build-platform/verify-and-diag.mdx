@@ -1,0 +1,79 @@
+---
+title: Probe, Diag & Verify
+description: Operator workflow for host readiness, compartmentalized diagnostics, and the AGENTS.md §0.2 verify gate.
+---
+
+# Probe, Diag & Verify
+
+The standing operator loop on a new host, after a toolchain change, or before a
+heavy residual suite is:
+
+```text
+probe (observe)  →  tools install / setup --install  →  probe install
+       →  diag run  →  verify / test
+```
+
+Authoritative detail: `AGENTS-build.md` and `build-platform/AGENTS.md` §4.6.
+
+## Probe
+
+`probe` is the **deep** host capability report (installs nothing):
+
+```bash
+./build.sh probe                 # all tabs
+./build.sh probe install         # playbook for missing pieces
+./build.sh probe tools           # managed workspace tooling
+./build.sh probe diag            # diagnostic readiness
+./build.sh probe commands        # CLI → capability matrix
+./build.sh probe --json
+```
+
+| Layer | Command | Role |
+|---|---|---|
+| Snapshot | `status` | SoC + provisioned flags |
+| Quick host | `doctor` | PATH readiness + managed-tool summary |
+| Deep host | `probe` | Boxes: host, pkg, utils, tools, env, diag, commands, install |
+| Install | `tools install` / `setup --install --profile` | Profiles: `sim`, `dual-hart`, `opensbi`, `all`, … |
+| Focused gate | `diag run` | Compartments with per-test Verilator config |
+| Full gate | `verify` | Lint / formal / sim / synth (SoC checklist) |
+
+## Diag
+
+Compartmentalized checks with **independent Verilator surfaces** per test
+(`config.diagnostics` in `.config.ts` / defaults):
+
+```bash
+./build.sh diag list
+./build.sh diag status
+./build.sh diag run              # default compartments
+./build.sh diag run host core
+./build.sh diag run smt2 ooo apu residual
+```
+
+Compartments keep residual suites from sharing one fragile global lint config.
+
+## Verify
+
+Per-change gate aligned with `AGENTS.md` §0.2:
+
+```bash
+./build.sh verify                # full configured gate
+./build.sh verify --lint
+./build.sh verify --formal
+./build.sh verify --sim
+./build.sh verify --synth
+./build.sh verify --lint --target g6lc64_smt2
+```
+
+Use `verify` after RTL changes; use `test` for regression suites catalogued from
+`verif/regress`. Structural timing feedback is separate: see
+[Timings](./timings).
+
+## Man pages
+
+Interactive human docs via Grok headless (when the Grok Build CLI is available):
+
+```bash
+./build.sh man "How does tools install dual-hart work?"
+./build.sh man --list
+```

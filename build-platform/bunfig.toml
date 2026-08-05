@@ -1,0 +1,15 @@
+# GSys LibreCore build-platform — Bun runtime configuration.
+# The platform is intentionally zero-runtime-dependency so `bun run` works
+# without a prior `bun install`. Dev-only type packages live in devDependencies.
+
+[install]
+# Keep installs deterministic and local to the platform folder.
+exact = true
+production = false
+
+[test]
+# `bun test` discovers test/**/*.test.ts. Each spec shells out to the CVA6
+# verification flow (verif/regress/*.sh) through the platform's test runner.
+root = "./test"
+# Hardware regressions can be long; give them room (ms). Overridable per-spec.
+timeout = 3600000

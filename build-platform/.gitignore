@@ -1,0 +1,17 @@
+# The workspace is fully managed by the build platform and never committed.
+# It holds installed tools (workspace/tooling) and all build outputs
+# (workspace/build), plus the generated Python environment.
+/workspace/
+
+# Bun / Node local state
+/node_modules/
+bun.lock
+bun.lockb
+
+# Local, uncommitted config overlays (see src/config/load.ts).
+/.config.local.ts
+*.local.json
+
+# Platform run logs and caches
+/.cache/
+*.log

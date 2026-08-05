@@ -1,0 +1,22 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "sv-timing-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Timing IR, location adapter, FO4 cost, path extraction for SystemVerilog"
+rust-version.workspace = true
+
+[dependencies]
+sv-parser = { workspace = true }
+sv-parser-error = { workspace = true }
+sv-parser-pp = { workspace = true }
+sv-parser-syntaxtree = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustc-hash = { workspace = true }

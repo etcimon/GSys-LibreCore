@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>RV32I Base Integer Instruction Set (Vol I, 2.1)</title></head>
+<body>
+<h1>Vol I &sect;2.1 — RV32I Base Integer Instruction Set</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#rv32">specs/riscv-spec.html#rv32</a>.
+<strong>Domain:</strong> BP, RAM (control-transfer and load/store semantics).</p>
+
+<p>RV32I defines the base 32-bit instructions, including the control-transfer instructions that the
+branch predictor must reproduce: conditional branches (BEQ/BNE/BLT/BLTU/BGE/BGEU), unconditional
+jumps (JAL/JALR), and the FENCE instruction for ordering. It also defines the load/store semantics
+(LB/LH/LW/LBU/LHU/SB/SH/SW) and the immediate encoding. Branch prediction is microarchitectural, but
+its correctness is judged against the exact control-flow results of this chapter; a predictor must
+not change the target or taken/not-taken outcome visible to the ISA.</p>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module rv32i_decoder (
+  input  logic [31:0] instr_i,
+  output logic        is_branch_o, is_jal_o, is_jalr_o,
+  output logic [31:0] branch_target_o
+);
+  // decode opcode/funct3 and compute PC-relative or register target
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented; control-flow classification in
+<code>core/frontend/frontend.sv:210-221</code>, instruction decode in <code>core/decoder.sv</code>.
+</p>
+</body>
+</html>

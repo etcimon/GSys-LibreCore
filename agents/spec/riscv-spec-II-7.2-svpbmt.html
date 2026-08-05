@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Svpbmt Page-Based Memory Types (Vol II, 7.2)</title></head>
+<body>
+<h1>Vol II &sect;7.2 — Svpbmt Extension for Page-Based Memory Types</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:svpbmt">specs/riscv-spec.html#ext:svpbmt</a>.
+Source line: <code>specs/riscv-spec.html:88171</code>. <strong>Domain:</strong> CACHE, RAM.</p>
+
+<p>Svpbmt adds page-table-encodable memory-type attributes (PMA-like cacheability, idempotency, and
+ordering) in the PTE bits. It lets the OS set memory types per page rather than only via static
+PMA regions. This decouples memory-type configuration from physical regions and interacts with the
+TLB and cache allocation/flush policies.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"In Sv39, Sv48, and Sv57, bits 62-61 of a leaf page table entry indicate
+the use of page-based memory types that override the PMA(s) for the
+associated memory pages. The encoding for the PBMT bits is captured in
+Table 149. The Svpbmt extension depends on the Sv39 extension."
+(specs/riscv-spec.html:88171-88176, anchor #ext:svpbmt)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module svpbmt_decode (
+  input  logic [63:0] pte_i,
+  output pma_attr_e   pma_attr_o    // cacheable / uncacheable / I/O
+);
+  // extract PBMT from reserved PTE bits
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> <strong>partial (config)</strong> — U7ᵇ. When <code>CVA6Cfg.SvpbmtEn</code>
+(RV64 + MMU only; <code>check_cfg</code> enforced), the PTE type in <code>core/cva6_mmu/cva6_mmu.sv</code>
+carries explicit <code>pbmt[1:0]</code> (bits 62:61) alongside <code>n</code> (Svnapot). The PTW in
+<code>cva6_ptw.sv</code> faults on illegal reserved bits and on <code>pbmt==2'b11</code>; non-zero PBMT is
+accepted only with SvpbmtEn. <code>menvcfg.PBMTE</code> (bit 62) is WARL in <code>csr_regfile.sv</code>
+(<code>pbmte_o</code>). Enabled on primary <code>cv64a6_imafdc_sv39</code> and HPDCACHE targets.
+Gap: PBMT is not yet forced through to LSU/cache NC/IO PMA behaviour (static region PMA still primary).</p>
+
+<p><strong>.dts linkage:</strong> advertise <code>svpbmt</code> in <code>riscv,isa-extensions</code>;
+<code>memory@</code> regions must remain consistent with physical PMAs.</p>
+</body>
+</html>

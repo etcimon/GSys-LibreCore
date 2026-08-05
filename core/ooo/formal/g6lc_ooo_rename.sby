@@ -1,0 +1,19 @@
+# U5 multi-port rename formal — proves against live g6lc_rename.
+# Run: sby -f core/ooo/formal/g6lc_ooo_rename.sby
+# Wired into build-platform verify.formalTasks (cva6-build verify --formal).
+
+[options]
+# BMC from forced reset. Depth covers dual-issue alloc + free + ckpt/mispredict.
+mode bmc
+depth 12
+
+[engines]
+smtbmc z3
+
+[script]
+read -formal g6lc_rename.sv g6lc_ooo_rename_props.sv
+prep -top g6lc_ooo_rename_props
+
+[files]
+../g6lc_rename.sv
+g6lc_ooo_rename_props.sv

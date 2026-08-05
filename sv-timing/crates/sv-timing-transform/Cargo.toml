@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "sv-timing-transform"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Bounded auto-correct transforms on the timing IR"
+rust-version.workspace = true
+
+[dependencies]
+sv-timing-core = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -16,6 +16,8 @@
       status = "okay";
       compatible = "eth, cva6", "riscv";
       riscv,isa = "rv64imafdc";
+      // U7a: matches cv64a6_imafdc_sv39 (SstcEn / SscofpmfEn / ZihintpauseEn).
+      riscv,isa-extensions = "sstc", "sscofpmf", "zihintpause";
       mmu-type = "riscv,sv39";
       tlb-split;
       // HLIC - hart local interrupt controller
@@ -23,6 +25,18 @@
         #interrupt-cells = <1>;
         interrupt-controller;
         compatible = "riscv,cpu-intc";
+      };
+      pmu {
+        compatible = "riscv,pmu";
+        riscv,event-to-mhpmevent =
+          <0x01 0x00000000 0x00000001>,
+          <0x02 0x00000000 0x00000002>,
+          <0x03 0x00000000 0x00000003>,
+          <0x04 0x00000000 0x00000004>,
+          <0x05 0x00000000 0x00000005>,
+          <0x06 0x00000000 0x00000006>,
+          <0x09 0x00000000 0x00000009>,
+          <0x0a 0x00000000 0x0000000a>;
       };
     };
   };

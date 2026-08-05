@@ -1,0 +1,14 @@
+[workspace]
+members = [
+    "sv-parser",
+    "sv-parser-error",
+    "sv-parser-macros",
+    "sv-parser-parser",
+    "sv-parser-pp",
+    "sv-parser-syntaxtree",
+]
+
+[patch.crates-io]
+#nom = {path = "../nom"}
+#nom_locate = {path = "../nom_locate"}
+#criterion = {path = "../criterion.rs"}

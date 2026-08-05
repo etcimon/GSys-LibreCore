@@ -27,6 +27,11 @@ module scoreboard #(
     input  logic                                          rst_ni,
     // Is scoreboard full - PERF_COUNTERS
     output logic                                          sb_full_o,
+    // FSE: younger-than-branch cancel fired this cycle (SpeculativeSb path) - PERF
+    output logic                                          spec_cancel_o,
+    // U5 production: per-SB-slot cancel mask (sticky cancelled | same-cycle bmiss window)
+    // OoO IQ/ROB/LSQ squash younger wrong-path ops without full-pipe flush.
+    output logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              cancelled_mask_o,
     // Prevent from issuing - CONTROLLER
     input  logic                                          flush_unissued_instr_i,
     // Flush whole scoreboard - CONTROLLER
@@ -101,7 +106,6 @@ module scoreboard #(
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] still_issued;
 
   logic [CVA6Cfg.NrIssuePorts-1:0] issue_full;
-  logic [1:0][CVA6Cfg.NR_SB_ENTRIES/2-1:0] issued_instrs_even_odd;
 
   logic bmiss;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] after_flu_wb;
@@ -114,20 +118,24 @@ module scoreboard #(
   logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] commit_pointer_n, commit_pointer_q;
   logic [$clog2(CVA6Cfg.NrCommitPorts):0] num_commit;
 
+  // Free-slot count for N-wide issue (port k needs k+1 free entries).
+  logic [$clog2(CVA6Cfg.NR_SB_ENTRIES+1)-1:0] sb_issued_cnt, sb_free_cnt;
+
   for (genvar i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
     assign still_issued[i] = mem_q[i].issued & ~mem_q[i].cancelled;
   end
 
-  for (genvar i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
-    assign issued_instrs_even_odd[i%2][i/2] = mem_q[i].issued;
+  always_comb begin
+    sb_issued_cnt = '0;
+    for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+      if (mem_q[i].issued) sb_issued_cnt += 1'b1;
+    end
+    sb_free_cnt = $clog2(CVA6Cfg.NR_SB_ENTRIES+1)'(CVA6Cfg.NR_SB_ENTRIES) - sb_issued_cnt;
   end
 
-  // the issue queue is full don't issue any new instructions
-  assign issue_full[0] = &issued_instrs_even_odd[0] && &issued_instrs_even_odd[1];
-  if (CVA6Cfg.SuperscalarEn) begin : assign_issue_full
-    // Need two slots available to issue two instructions.
-    // They are next to each other so one must be even and one odd
-    assign issue_full[1] = &issued_instrs_even_odd[0] || &issued_instrs_even_odd[1];
+  // Port i is full when fewer than (i+1) free scoreboard slots remain.
+  for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin : gen_issue_full
+    assign issue_full[i] = sb_free_cnt < $clog2(CVA6Cfg.NR_SB_ENTRIES+1)'(i + 1);
   end
 
   assign sb_full_o = issue_full[0];
@@ -178,6 +186,11 @@ module scoreboard #(
             is_rd_fpr_flag: CVA6Cfg.FpPresent && ariane_pkg::is_rd_fpr(decoded_instr_i[i].op),
             sbe: decoded_instr_i[i]
         };
+        // Clear OoO tags at SB alloc (dispatch renames later when OoOEn)
+        mem_n[issue_pointer[i]].sbe.p_rs1 = '0;
+        mem_n[issue_pointer[i]].sbe.p_rs2 = '0;
+        mem_n[issue_pointer[i]].sbe.p_rd  = '0;
+        mem_n[issue_pointer[i]].sbe.ooo_renamed = 1'b0;
       end
     end
 
@@ -225,13 +238,30 @@ module scoreboard #(
     end
 
     // ------------
-    // Cancel
+    // Cancel (U5.0: cancel younger than the mispredicted branch)
+    // FSE S5: when NrHarts>1 only cancel same-hart younger ops so a peer
+    // hart's in-flight window survives the mispredict isolation.
     // ------------
-    if (CVA6Cfg.SpeculativeSb) begin
-      if (bmiss) begin
-        if (after_flu_wb != issue_pointer[0]) begin
-          mem_n[after_flu_wb].cancelled = 1'b1;
+    // Circular window [after_flu_wb, issue_pointer[0]) — not just one entry.
+    // Required for precise speculative recovery before full rename/ROB (U5.1+).
+    // Hang-7: also cancel on the classic (!SpeculativeSb) path. flush_unissued
+    // alone does not drop already-issued wrong-path ops (e.g. post-ret alias
+    // jal); commit_drop of cancelled entries has no RF/LSU side-effects.
+    if (bmiss) begin
+      automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] cid;
+      cid = after_flu_wb;
+      for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
+        if (cid == issue_pointer[0]) break;
+        // NrHarts==1 → hart_id always 0 → identity (cancel all younger).
+        if (CVA6Cfg.NrHarts <= 1 ||
+            mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
+          mem_n[cid].cancelled = 1'b1;
+          // Mark complete so commit can drop without waiting for WB.
+          // Incomplete cancelled loads (valid==0) previously stuck commit
+          // forever under dual-issue SpeculativeSb (size-0 memcpy hang).
+          mem_n[cid].sbe.valid = 1'b1;
         end
+        cid = cid + 1'b1;
       end
     end
 
@@ -262,8 +292,35 @@ module scoreboard #(
     end
   end
 
+  // Classic mispredict only. Cancel-younger on matching taken Jump without
+  // NPC reseed kills correct target-path ops; with reseed it double-pushes
+  // RAS on re-fetched calls. Hang-6 residual needs selective fallthrough kill.
   assign bmiss = resolved_branch_i.valid && resolved_branch_i.is_mispredict;
   assign after_flu_wb = trans_id_i[ariane_pkg::FLU_WB] + 'd1;
+  // Younger cancel on mispredict (U5.0 / FSE / hang-7 classic path) — PMU g3
+  assign spec_cancel_o = bmiss;
+
+  // Combinational cancel mask for OoO recovery (includes same-cycle bmiss window)
+  // FSE S5: same-hart filter as the sequential cancelled sticky bits.
+  // Also driven without SpeculativeSb so LSU/issue see same-cycle bmiss drops.
+  always_comb begin : gen_cancelled_mask
+    cancelled_mask_o = '0;
+    for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+      cancelled_mask_o[i] = mem_q[i].cancelled;
+    end
+    if (bmiss) begin
+      automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] cid;
+      cid = after_flu_wb;
+      for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
+        if (cid == issue_pointer[0]) break;
+        if (CVA6Cfg.NrHarts <= 1 ||
+            mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
+          cancelled_mask_o[cid] = 1'b1;
+        end
+        cid = cid + 1'b1;
+      end
+    end
+  end
 
   // FIFO counter updates
   if (CVA6Cfg.NrCommitPorts == 2) begin : gen_commit_ports

@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Two-Stage Address Translation (Vol II, 5.5)</title></head>
+<body>
+<h1>Vol II &sect;5.5 — Two-Stage Address Translation</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#two-stage-translation">specs/riscv-spec.html#two-stage-translation</a>.
+Source line: <code>specs/riscv-spec.html:82075</code>. <strong>Domain:</strong> RAM.</p>
+
+<p>Two-stage translation is the hypervisor extension (H) feature that translates a guest virtual
+address (GVA) first to a guest physical address (GPA) using guest page tables (<code>vsatp</code>), then
+to a machine physical address using host page tables (<code>hgatp</code>). It is required for
+virtualizing operating systems and adds significant MMU complexity: the combined GPA- and
+second-stage page-fault handling, access-bit updating, and TLB tagging with VMID/ASID.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"Whenever the current virtualization mode V is 1, two-stage address
+translation and protection is in effect. For any virtual memory access,
+the original virtual address is converted in the first stage by VS-level
+address translation, as controlled by the vsatp register, into a guest
+physical address. The guest physical address is then converted in the
+second stage by guest physical address translation, as controlled by the
+hgatp register, into a supervisor physical address."
+(specs/riscv-spec.html:82075-82084, anchor #two-stage-translation)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module two_stage_ptw (
+  input  logic [XLEN-1:0] gva_i,
+  input  logic [XLEN-1:0] vsatp_i, hgatp_i,
+  output logic [XLEN-1:0] pa_o,
+  output logic            page_fault_o, guest_page_fault_o
+);
+  // stage 1: GVA -> GPA using vsatp; stage 2: GPA -> PA using hgatp
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The H extension is not implemented. The MMU in
+<code>core/cva6_mmu/</code> performs only single-stage translation. Adding two-stage translation would
+require a nested PTW, TLB tagging with VMID, and the H-mode CSR state.</p>
+
+<p><strong>.dts linkage:</strong> no hypervisor DT node; <code>h</code> is not present in the
+<code>riscv,isa</code> string.</p>
+</body>
+</html>

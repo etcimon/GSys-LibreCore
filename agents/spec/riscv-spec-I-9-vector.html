@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Vector Extension (Vol I, chapter 9)</title></head>
+<body>
+<h1>Vol I chapter 9 — Vector Extension</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#_vector_extension_overview">#_vector_extension_overview</a> (9.1),
+<a href="../../specs/riscv-spec.html#_vector_instruction_formats">#_vector_instruction_formats</a> (9.2),
+<a href="../../specs/riscv-spec.html#_vector_load_store_instructions">#_vector_load_store_instructions</a> (9.3-9.4),
+<a href="../../specs/riscv-spec.html#_vector_integer_arithmetic_instructions">#_vector_integer_arithmetic_instructions</a> (9.5-9.11),
+<a href="../../specs/riscv-spec.html#_vector_reduction_operations">#_vector_reduction_operations</a> (9.12-9.14),
+<a href="../../specs/riscv-spec.html#ext:v">#ext:v</a> (9.7 V),
+<a href="../../specs/riscv-spec.html#ext:zve32x">#ext:zve32x</a>,
+<a href="../../specs/riscv-spec.html#ext:zve64x">#ext:zve64x</a>,
+<a href="../../specs/riscv-spec.html#ext:zve64d">#ext:zve64d</a>.
+Source lines: <code>specs/riscv-spec.html:38688</code> (Zve32x), <code>:38767</code> (Zve64x),
+<code>:38873</code> (V).</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The single-letter V extension is intended for use in application
+processor profiles. The misa.V bit is set for implementations providing
+misa and supporting V. The V vector extension has precise traps. The V
+vector extension depends upon the Zvl128b and Zve64d extensions."
+(specs/riscv-spec.html:38873-38880, anchor #ext:v)
+</pre>
+
+<p>The V extension adds a vector register file, vector instruction formats, and a rich set of load,
+store, integer, fixed-point, floating-point, reduction, permutation, and mask operations. It is a
+major microarchitectural subsystem: it requires a vector register file, vector ALUs, memory unit
+with strided/segmented/indexed access, and length polymorphism (VLEN, SEW, LMUL). CVA6 does not
+implement a full in-pipeline V unit; RVV is provided by attaching an external vector unit (PULP
+Ara) at the accelerator seam, which is mutually exclusive with CVXIF.</p>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+// Preferred path (U10ᵇ): accelerator FU + Ara attach, not CVXIF
+// CVA6Cfg.RVV ⇒ EnableAccelerator; CvxifEn must be 0 (core/cva6.sv assert)
+module cva6_ara_attach #(/* VLEN, NrLanes, typed acc/AXI ints */) (
+  input  cva6_to_acc_t  acc_req_i,
+  output acc_to_cva6_t  acc_resp_o,
+  output ara_axi_req_t  ara_axi_req_o,
+  input  ara_axi_resp_t ara_axi_resp_i
+);
+  // `ifdef CVA6_ARA_ATTACH → live Ara; else stub (acc_resp idle, AXI quiet)
+  // Core path: acc_dispatcher + scoreboard long-latency FU; misa.V when RVV
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> <strong>partial (Ara / RVV attach — U10ᵇ)</strong>. There is still no
+in-core VLEN/SEW register file inside the scalar pipeline. Vector is delivered as an accelerator:</p>
+<ul>
+  <li><strong>Config:</strong> <code>CVA6Cfg.RVV</code> in <code>core/include/config_pkg.sv</code>;
+    package <code>core/include/g6lc64_server_math_v_config_pkg.sv</code> sets
+    <code>CVA6ConfigVExtEn=1</code> / <code>RVV=1</code> and <code>CvxifEn=0</code>. Default
+    non-<code>_v</code> targets leave <code>RVV=0</code>.</li>
+  <li><strong>ISA discovery:</strong> when <code>RVV</code> is set,
+    <code>misa.V</code> is OR’d in <code>core/csr_regfile.sv</code> (bit 21). Vector dirty state /
+    <code>acc_cons</code> follow the accelerator path.</li>
+  <li><strong>Core seam:</strong> <code>core/cva6.sv</code> <code>gen_accelerator</code> →
+    <code>core/acc_dispatcher.sv</code> (long-latency FU); mutually exclusive with
+    <code>CvxifEn</code> and superscalar accelerator asserts.</li>
+  <li><strong>SoC attach:</strong> <code>corev_apu/src/g6lc_ara_attach.sv</code> (live under
+    <code>`define CVA6_ARA_ATTACH</code>, else stub) + <code>corev_apu/src/cva6_axi_2to1_mux.sv</code>;
+    <code>ariane</code> EnableAccelerator wiring. Contract:
+    <code>architecture/ara-vector-attach.md</code>.</li>
+  <li><strong>Vendor IP:</strong> <code>vendor/ara/upstream</code>, <code>vendor/ara/Flist.ara</code>,
+    CVA6 shims under <code>vendor/ara/cva6_shim/</code>. Build-platform
+    <code>verify.extraFlistsByTarget</code> / <code>topByTarget</code> arm
+    <code>cv64a6_server_math_v</code>; suite <code>ara-vector-path</code>.</li>
+  <li><strong>Verify state:</strong> live Ara Verilator lint is green with
+    <code>CVA6_ARA_ATTACH=1</code>. Directed suite
+    <code>verif/tests/testlist_ara_vector.yaml</code> (soft-skip / misa.V / e64 m1 memcpy).
+    Purpose guide: <code>agents/guides/AGENTS-vector.md</code>. Full RVV compliance / Spike cosim
+    under <code>cva6.py</code> still open. Subsets Zve32x/Zve64x/Zve64d and Zvfh are not
+    separately config-gated beyond Ara’s VLEN/lanes; vector crypto (<code>zvk*</code>) remains
+    absent.</li>
+</ul>
+
+<p><strong>.dts linkage:</strong> only the <code>_v</code> / RVV-enabled target may advertise
+<code>v</code> in <code>riscv,isa</code> / <code>riscv,isa-extensions</code> —
+<code>corev_apu/bootrom/ariane-server-math-v.dts</code>. Default
+<code>ariane*.dts</code> trees must not claim V; when enabled, align DTS ↔
+<code>cv64a6_server_math_v_config_pkg</code> ↔ <code>misa.V</code> (see
+<code>AGENTS-dts-validation.md</code>). OpenSBI must save/restore vector context on the Ara path.</p>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Svnapot NAPOT Translation Contiguity (Vol II, 7.1)</title></head>
+<body>
+<h1>Vol II &sect;7.1 — Svnapot Extension for NAPOT Translation Contiguity</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:svnapot">specs/riscv-spec.html#ext:svnapot</a>.
+Source line: <code>specs/riscv-spec.html:87936</code>. <strong>Domain:</strong> RAM, CACHE.</p>
+
+<p>Svnapot allows a page-table entry to represent a naturally aligned power-of-two (NAPOT) region of
+contiguous translations, reducing TLB pressure for huge pages. The PTE encodes the size in the low
+bits of the PPN, and the region must be aligned to its size. TLB entries can cache the full range.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"In Sv39, Sv48, and Sv57, when a PTE has N=1, the PTE represents a
+translation that is part of a range of contiguous virtual-to-physical
+translations with the same values for PTE bits 5-0. Such ranges must be
+of a naturally aligned power-of-2 (NAPOT) granularity larger than the
+base page size."
+(specs/riscv-spec.html:87936-87942, anchor #ext:svnapot)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module svnapot_decode (
+  input  logic [63:0] pte_i,
+  output logic [XLEN-1:0] page_size_o,  // NAPOT decoded range
+  output logic            napot_o
+);
+  // if PTE.N=1, low PPN bits encode log2(size)-12
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> <strong>implemented (config)</strong>. When
+<code>CVA6Cfg.SvnapotEn</code>, the PTW (<code>core/cva6_mmu/cva6_ptw.sv</code>) recognises leaf PTE
+<code>N</code> with 64 KiB NAPOT encoding (<code>ppn[3:0]==4'b1000</code> at the appropriate level),
+and TLB / shared-TLB paths carry <code>is_napot_64k</code> for tag match and PPN patching
+(<code>cva6_tlb.sv</code>, <code>cva6_shared_tlb.sv</code>). Illegal NAPOT encodings fault. Primary
+targets may enable or leave off per package.</p>
+
+<p><strong>.dts linkage:</strong> advertise <code>svnapot</code> in <code>riscv,isa-extensions</code>
+when enabled.</p>
+</body>
+</html>

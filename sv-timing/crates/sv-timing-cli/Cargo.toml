@@ -1,0 +1,25 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "sv-timing-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "sv-timing command-line front end (compile-to-timing)"
+rust-version.workspace = true
+
+[[bin]]
+name = "sv-timing"
+path = "src/main.rs"
+
+[dependencies]
+sv-timing-core = { workspace = true }
+sv-timing-cache = { workspace = true }
+sv-timing-transform = { workspace = true }
+sv-timing-emit = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,134 @@
+---
+title: Agent Workflow for corev_apu
+description: How an LLM agent integrates uncore controllers and PHY into corev_apu.
+---
+
+# Agent Workflow for corev_apu
+
+This page describes how an LLM agent should approach a task like:
+
+> "Integrate a DDR4 controller and PHY for the genesys2 board."
+
+Integrating an uncore controller is one of the most cross-functional tasks in
+the CVA6 workflow. The agent must reason about the core config (what the CPU
+can do), the controller IP (what the vendor provides), the board contract (what
+PHY and pins are available), and the device tree (how Linux will see it). No
+single file contains the whole picture. The agent's job is to assemble the
+picture from the contracts and to make the integration pass `g6lc-build mb
+check` and `g6lc-build vendor sync`.
+
+## Step 1: Resolve intent
+
+Open `AGENTS.md` §3 and find the row for vendored uncore controllers/PHY. It
+points to:
+
+- `AGENTS-corev-apu.md` — uncore preconditions.
+- `AGENTS-vendor.md` — fetch/update/scan workflow.
+- `AGENTS-controller-readiness.md` — feature playbook.
+- `agents/guides/AGENTS-technology-optimization.md` — if the integration
+  requires a foundry hard macro.
+
+Intent resolution for `corev_apu` is a multi-document lookup because the
+relevant knowledge is distributed. `AGENTS-corev-apu.md` gives the uncore
+preconditions; `AGENTS-vendor.md` explains how to fetch and scan IP;
+`AGENTS-controller-readiness.md` gives the feature-specific playbook; and
+`AGENTS-technology.md` is needed if the integration touches a foundry hard
+macro. Reading them in sequence builds a complete plan before any file is
+modified.
+
+## Step 2: Read the board contract
+
+The target board is `genesys2`. Open:
+
+- `corev-mb/boards/genesys2/board.json` — the machine spec.
+- `AGENTS-mb-genesys2.md` — per-board contract.
+- `corev-mb/architecture/genesys2/README.md` — development target notes.
+
+These tell the agent which controllers are already enabled, which PHYs the
+board uses, and what remains to be integrated.
+
+The board contract is the source of truth for the physical environment. It
+tells the agent which controllers are already enabled, which PHYs the board
+uses, and whether the board is a reference board or a custom SKiDL board. This
+context is essential because the same controller may be used differently on
+different boards. For example, an Ethernet MAC may be enabled on one board and
+disabled on another, depending on whether the PHY is present and connected.
+
+## Step 3: Catalog and fetch the controller
+
+The agent checks `.config.ts` for `vendor.controllers` and runs:
+
+```bash
+g6lc-build vendor list
+g6lc-build vendor status <id>
+g6lc-build vendor sync <id> --dry-run
+g6lc-build vendor sync <id>
+```
+
+The `--dry-run` pass lets the agent confirm what will be fetched before
+mutating the workspace.
+
+The dry-run discipline is especially important for vendor IP, because fetching
+can modify the workspace and introduce legal obligations. By running `vendor
+status` and `vendor sync --dry-run` first, the agent confirms the source, the
+version, and the scan results before committing to the fetch. This is the same
+discipline used in package managers such as `npm` or `cargo`, where the lock
+file is inspected before dependencies are downloaded.
+
+## Step 4: Integrate at the APU seam
+
+Using the `integrationSeam` pointer from the catalog, the agent opens the APU
+top-level and wires the controller:
+
+- Match `Axi*Width` to the core config.
+- Connect clock/reset/CDC correctly.
+- Propagate `test_en_i` / `testmode_i` for DFT.
+- Keep PHY-vs-controller separation: the controller lives in `corev_apu/`; the
+  PHY details live in `corev-mb/`.
+
+Integration at the APU seam is where the agent's understanding of the AXI
+protocol, clock domains, and DFT is tested. The controller must be wired to a
+fabric whose widths and ordering semantics match the core. The clock and reset
+must be clean. And the `test_en_i` / `testmode_i` pins must be propagated so
+that scan and ATPG tools can control the new logic in manufacturing test. These
+are not optional niceties; they are what make the chip manufacturable.
+
+## Step 5: Board package and DTS
+
+Run the board configure step:
+
+```bash
+g6lc-build mb select genesys2 --dry-run
+g6lc-build mb select genesys2
+```
+
+This generates `genesys2_board_pkg.sv` and `board.mk` and updates the overlay
+config. The agent then updates the `.dts` to match the new controller and its
+interrupts, and updates `AGENTS-dts-validation.md` if needed.
+
+## Step 6: Verify
+
+```bash
+g6lc-build mb check genesys2
+g6lc-build test --open-source   # if the toolchain is provisioned
+```
+
+The `mb check` command exits 3 on incompatibility, so the agent knows
+immediately if the board/package handshake failed.
+
+The verification sequence closes the loop. `mb check` confirms that the board
+and the SoC config agree; `mb select` generates the board package; and `test
+--open-source` runs the architectural tests that confirm the core still behaves
+correctly with the new controller. If any step fails, the agent knows exactly
+where the integration broke. This is the benefit of a platform-driven workflow:
+failures are localized and diagnostic, not mysterious regressions discovered
+weeks later.
+
+## Common agent mistakes
+
+- **Mixing PHY into APU RTL.** PHYs are board or PDK concerns, not `corev_apu/src/`.
+- **Hard-coding widths.** Widths come from `cva6_cfg_t` / board package.
+- **Skipping vendor scan.** Always run the scan step before integrating vendored
+  IP.
+- **Forgetting the overlay.** `mb select` writes `build-platform/.config.local.ts`;
+  the agent must not hand-edit it.

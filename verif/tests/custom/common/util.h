@@ -46,7 +46,9 @@ static void __attribute__((noinline)) barrier(int ncores)
 #ifdef __riscv_atomic // __sync_* builtins require A extension
   static volatile int sense;
   static volatile int count;
-  static __thread int threadsense;
+  // Avoid __thread: bare-metal -nostdlib links lack emutls/malloc.
+  // Single-hart directed tests never hit multi-core barrier wait.
+  static int threadsense;
 
   __sync_synchronize();
 

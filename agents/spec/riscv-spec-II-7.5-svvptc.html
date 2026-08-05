@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Svvptc Obviating MM Instructions (Vol II, 7.5)</title></head>
+<body>
+<h1>Vol II &sect;7.5 — Svvptc Extension for Obviating Memory-Management Instructions after Marking PTEs Valid</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:svvptc">specs/riscv-spec.html#ext:svvptc</a>.
+<strong>Domain:</strong> RAM.</p>
+
+<p>Svvptc allows software to make a PTE valid without executing an SFENCE.VMA/SINVAL.VMA afterward,
+provided the PTE was previously invalid and no stale translation existed. When the Svvptc extension is
+implemented, explicit stores by a hart that update the Valid bit of leaf and/or non-leaf PTEs from 0
+to 1 and are visible to a hart will eventually become visible within a bounded timeframe to subsequent
+implicit accesses by that hart to such PTEs. It relaxes the normal page-table-modification ordering,
+reducing TLB shootdown overhead, but relies on cache/TLB coherency mechanisms to ensure stale entries
+cannot be used.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"When the Svvptc extension is implemented, explicit stores by a hart
+that update the Valid bit of leaf and/or non-leaf PTEs from 0 to 1 and
+are visible to a hart will eventually become visible within a bounded
+timeframe to subsequent implicit accesses by that hart to such PTEs."
+(specs/riscv-spec.html:88527-88531, anchor #ext:svvptc / #norm:Svvptc_explicit_stores_update_valid_bit)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module svvptc_tracker (
+  input  logic        pte_was_invalid_i,
+  input  logic        pte_now_valid_i,
+  output logic        no_sfence_needed_o
+);
+  // guarantee no stale TLB entry exists for this mapping
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The MMU/TLB in <code>core/cva6_mmu/cva6_mmu.sv</code> and
+<code>core/cva6_mmu/cva6_tlb.sv</code> treats <code>SFENCE.VMA</code> / <code>SINVAL.VMA</code> as the
+only architecturally required synchronization for PTE modifications; there is no tracker that records
+"this PTE changed from invalid to valid by this hart" to skip an explicit fence. The page-table walker
+in <code>core/cva6_mmu/cva6_ptw.sv</code> reads PTEs from memory and installs them in the TLB, but it
+does not guarantee bounded visibility of a remote hart's 0→1 Valid-bit update without an SFENCE.VMA.
+Implementing Svvptc would require either TLB invalidation state tagging or a cache-coherency-based
+invalidation promise for PTE writes.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Svvptc capability would be reported through the CPU
+<code>mmu-type</code> or an ISA/property string and would require OS support to elide SFENCE.VMA after
+valid PTE stores.</p>
+</body>
+</html>

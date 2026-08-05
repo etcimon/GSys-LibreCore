@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>RVI20 Profiles (Vol III, 2)</title></head>
+<body>
+<h1>Vol III &sect;2 — RVI20 Profiles</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#_rvi20u32_profile">#_rvi20u32_profile</a> (2.1),
+<a href="../../specs/riscv-spec.html#_rvi20u64_profile">#_rvi20u64_profile</a> (2.2).
+Source lines: <code>specs/riscv-spec.html:90120</code> (2.1), <code>:90233</code> (2.2).</p>
+
+<p>RVI20 is the base integer-only profile: RVI20U32 requires RV32I, Zicsr, Zifencei, and the
+unprivileged base; RVI20U64 is the RV64 equivalent. It contains no M, A, F, D, or C extensions and
+is the minimum profile for cores that rely on software emulation for multiplication and atomics.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"RVI20U32 specifies the ISA features available to generic unprivileged
+execution environments."
+...
+"RVI20U64 specifies the ISA features available to generic unprivileged
+execution environments."
+(specs/riscv-spec.html:90120-90122 anchor #_rvi20u32_profile;
+:90233-90235 anchor #_rvi20u64_profile)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module rvi20_check (
+  input  config_pkg::cva6_cfg_t CVA6Cfg,
+  output logic                  rvi20_u32_o, rvi20_u64_o
+);
+  // only RV[I|E] + Zicsr + Zifencei
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> configurable. CVA6 targets include RV32I and RV64I base packages
+(<code>core/include/cv32a6*_config_pkg.sv</code> and <code>cv64a6*_config_pkg.sv</code>), but shipped
+targets typically add M/A/F/D/C. A pure RVI20 configuration would clear <code>RVA/RVF/RVD/RVC</code> and
+ensure only <code>Zicsr</code> and <code>Zifencei</code> are set in <code>core/include/config_pkg.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string would be <code>rv32i_zicsr_zifencei</code>
+or <code>rv64i_zicsr_zifencei</code> for a strict RVI20 configuration; the DT must not advertise M/A/F/D/C.</p>
+</body>
+</html>

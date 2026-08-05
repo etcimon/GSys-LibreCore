@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 15/07/2017
 // Description: A RISC-V privilege spec 1.11 (WIP) compatible CLINT (core local interrupt controller)
 //
@@ -32,7 +33,10 @@ module clint #(
     output axi_resp_t           axi_resp_o,
     input  logic                rtc_i,       // Real-time clock in (usually 32.768 kHz)
     output logic [NR_CORES-1:0] timer_irq_o, // Timer interrupts
-    output logic [NR_CORES-1:0] ipi_o        // software interrupt (a.k.a inter-process-interrupt)
+    output logic [NR_CORES-1:0] ipi_o,       // software interrupt (a.k.a inter-process-interrupt)
+    // 64-bit mtime value for Sstc (stimecmp comparator lives in the hart).
+    // Safe to leave unconnected; software still reads mtime via MMIO.
+    output logic [63:0]         mtime_o
 );
     // register offset
     localparam logic [15:0] MSIP_BASE     = 16'h0;
@@ -192,6 +196,9 @@ module clint #(
             end
         end
     end
+
+    // Expose mtime to the hart for Sstc (route A: comparator in-core).
+    assign mtime_o = mtime_q;
 
     // -----------------------------
     // RTC time tracking facilities

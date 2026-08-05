@@ -1,0 +1,138 @@
+---
+title: Controllers & PHY
+description: Adding uncore controllers and PHY to corev_apu, with AXI seams and board alignment.
+---
+
+# Controllers & PHY
+
+The `corev_apu` layer is where on-die digital controllers connect to the CVA6
+core. The analog or board-side PHY is described in `corev-mb/`. This split is
+intentional: a controller can be reused across boards, while the PHY and pin
+mapping are board-specific.
+
+The controller/PHY split is one of the most important organizational decisions
+in SoC design. A digital controller is a synchronous logic block that can be
+simulated, linted, and synthesized with standard RTL tools. A PHY is a
+mixed-signal or analog block that is characterized by timing diagrams, IBIS
+models, SPICE decks, and foundry hard-macros. Treating them as a single unit
+leads to two predictable failures: the digital team modifies the controller
+assuming a PHY behavior that is only valid for one board, and the board team
+selects a PHY that the controller cannot drive. The CVA6 directory structure
+enforces this separation so that each team can work against a stable contract.
+
+## Controller taxonomy
+
+A controller is digital RTL that speaks a standard interface (usually AXI or an
+SoC-internal bus). A PHY is the mixed-signal or hard-macro block that sits at
+the chip edge and drives pads, SerDes, or analog front-ends.
+
+Examples:
+
+| Function | Controller (in `corev_apu` / vendor) | PHY (in `corev-mb` / PDK) |
+|---|---|---|
+| DDR3/4 | MIG / vendor DDR controller | DDR PHY on the board or hard macro in the SoC |
+| Ethernet | ariane-ethernet / vendor MAC | RTL8211E / external PHY |
+| PCIe | vendor root complex | PHY hard macro |
+| UART | simple APB/APB-lite UART | FT2232HQ / level shifter |
+
+## AXI seam
+
+The core's memory-side port is AXI. Controllers connect through this seam. The
+critical parameters are:
+
+- `AxiAddrWidth`
+- `AxiDataWidth`
+- `AxiIdWidth`
+- `AxiUserWidth`
+
+These must match between the core config, the crossbar, and the controller. The
+`mb` select step generates a board package that exports `AxiDataWidth` and
+feature enables so the APU wrapper can parameterize correctly.
+
+The AXI seam is the universal socket of the CVA6 memory system. AXI's
+standardized address, data, ID, and user channels allow controllers from
+different vendors and authors to coexist on the same fabric, but only if their
+parameters match. Mismatched `AxiDataWidth` causes silent data corruption;
+mismatched `AxiIdWidth` causes ID aliasing and ordering violations. The board
+package exists precisely to export these widths as localparams so the APU
+can instantiate the core and controllers with a single, consistent view.
+
+## Adding a vendored controller
+
+1. **Catalog.** Add a `VendorControllerSpec` to `.config.ts` or
+   `build-platform/src/config/defaults.ts` with `id`, `description`, `domain`,
+   `kind`, `mechanism` (submodule / snapshot), `url`, `path`, `license`,
+   `scanPaths`, `integrationSeam`, `phyNote`, and `architectureDoc`.
+2. **Fetch.** Run `g6lc-build vendor sync <id>`. The platform fetches or updates
+   the IP and runs the scan step if configured.
+3. **Integrate.** Wire the controller into the APU at the declared seam,
+   respecting `AGENTS-corev-apu.md` preconditions.
+4. **Board.** If the controller needs a PHY, update `corev-mb/` board JSON and
+   the per-board `AGENTS-mb-<id>.md` contract.
+5. **DTS.** Add or update device-tree nodes for the controller and its
+   interrupts.
+
+Cataloging a controller is not merely bookkeeping. The catalog fields record
+*where* the IP comes from, *how* it is fetched, *what* license governs it, and
+*which* seam it integrates through. This metadata is what allows the build
+platform to automate vendor sync and the legal review to confirm that the
+resulting product is distributable. Skipping the catalog and copying files by
+hand destroys this traceability and creates a hidden compliance debt.
+
+## PHY development considerations
+
+A PHY is not authored like RTL. It is selected, placed, and constrained:
+
+- **Part selection** — for board PHYs, use `g6lc-build mb parts` (pcbparts.dev
+  MCP) or the `corev-mb/lib/pcbparts_mcp.py` client.
+- **Pin mapping** — record PHY pins and their SoC pad mappings in the board
+  contract.
+- **Power rails** — the board's SKiDL flow plans power domains and ERC.
+- **Timing** — PHY interfaces (RGMII, DDR, PCIe, etc.) have skew and delay
+  constraints captured in the board/fpga constraints.
+- **Hard macros** — for SoC-integrated PHYs, the foundry provides a hard macro
+  that is bound at the PDK-swap seam during the technology optimization pass.
+
+PHY development is a different engineering culture from RTL development. It is
+not about writing logic; it is about selecting parts, analyzing signal
+integrity, planning power rails, and capturing skew constraints. For a board
+PHY such as an RGMII Ethernet transceiver, the critical question is whether the
+SoC's output delays and the PHY's input setup/hold windows overlap across
+temperature and voltage corners. For an SoC-integrated PHY, the question is
+whether the foundry hard macro's interface can be driven by the digital
+controller at the target frequency. The CVA6 flow pushes these questions to
+the board layer and the technology pass, where the right experts and tools
+live.
+
+## DTS alignment for controllers
+
+Every enabled controller must appear consistently in:
+
+1. `.config.ts` / `cva6_cfg_t`.
+2. `corev_apu/bootrom/*.dts` or the board's generated `.dts`.
+3. `corev-mb/boards/<id>/board.json`.
+4. `AGENTS-dts-validation.md` if it is a device-tree-visible block.
+
+See [Specs, DTS & Architecture](../architecture/specs-and-dts) for the
+full triple-alignment rule.
+
+## SoC-readiness gates
+
+Before a controller/PHY integration is considered done:
+
+- [ ] AXI widths and ordering aligned with core config.
+- [ ] PHY identity, pin mapping, and power rails documented in board contract.
+- [ ] Vendor IP scanned and license recorded.
+- [ ] DTS nodes added/updated.
+- [ ] Simulation / smoke test passes.
+- [ ] Synthesis constraints for FPGA or ASIC target present.
+- [ ] DFT hooks and test-mode pins propagated.
+
+This checklist reflects the full lifecycle of a controller integration. It
+begins with protocol correctness (AXI), proceeds through legal and engineering
+traceability (vendor scan, board contract), and ends with manufacturing
+readiness (DFT, synthesis constraints). Each unchecked item is a risk that will
+surface at a different point in the program: AXI issues in simulation, PHY
+issues in board bring-up, DTS issues in Linux boot, and DFT issues in
+production test. Completing the list before declaring done is what makes the
+integration durable.

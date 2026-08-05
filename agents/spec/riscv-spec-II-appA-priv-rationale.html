@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Privileged Appendix A — Historical Rationale (Vol II)</title></head>
+<body>
+<h1>Vol II Appendix A — Historical Rationale for Extensions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#app:priv-rationale">specs/riscv-spec.html#app:priv-rationale</a>.
+Source line: <code>specs/riscv-spec.html:89221</code>.</p>
+
+<p>This appendix provides historical rationale for the Smepmp extension. It is non-normative and not
+needed for implementation, but it clarifies design choices for PMP enhancements. No code locus is
+directly implied.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This appendix contains the rationale for RISC-V ISA extensions at the
+time they were ratified. Unlike the ISA specification, this appendix is
+ordered chronologically, so as to convey the motivation and
+architectural reasoning underpinning each extension."
+(specs/riscv-spec.html:89221-89226, anchor #app:priv-rationale)
+</pre>
+
+<p><strong>CVA6 status:</strong> not applicable; reference material. The Smepmp implementation, where
+enabled, is in <code>core/pmp/</code> and <code>core/csr_regfile.sv</code> (see
+<code>agents/spec/riscv-spec-II-6.3-smepmp.html</code>).</p>
+
+<p><strong>.dts linkage:</strong> no DT node; this appendix informs PMP region design and the
+<code>memory@</code> / <code>reserved-memory</code> nodes protected by PMP.</p>
+</body>
+</html>

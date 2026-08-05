@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Hypervisor Instructions (Vol II, 5.3)</title></head>
+<body>
+<h1>Vol II &sect;5.3 — Hypervisor Instructions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#_hypervisor_instructions">specs/riscv-spec.html#_hypervisor_instructions</a>.
+Source line: <code>specs/riscv-spec.html:81519</code>. <strong>Domain:</strong> —.</p>
+
+<p>The H extension adds hypervisor instructions including <code>HFENCE.VVMA</code>,
+<code>HFENCE.GVMA</code>, <code>HLV</code>, <code>HSV</code>, and virtual-memory load/store
+instructions. HFENCE.* flush guest and host translation caches; HLV/HSV allow the hypervisor to
+access guest memory using guest virtual/physical addresses. These require a two-stage MMU and
+decode/execute integration.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The hypervisor extension adds virtual-machine load and store
+instructions and two privileged fence instructions."
+(specs/riscv-spec.html:81519-81521, anchor #_hypervisor_instructions)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module hypervisor_instructions (
+  input  logic [XLEN-1:0] gva_i,
+  input  logic            hfence_vvma_i, hfence_gvma_i,
+  output logic            flush_guest_tlb_o, flush_host_tlb_o
+);
+  // decode hypervisor ops; route to two-stage PTW and TLB flush
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The decoder in <code>core/decoder.sv</code> does not
+recognize HFENCE.* or HLV/HSV opcodes and the MMU in <code>core/cva6_mmu/</code> has no second-stage
+translation path.</p>
+
+<p><strong>.dts linkage:</strong> no hypervisor DT node; <code>h</code> is not present in the
+<code>riscv,isa</code> string.</p>
+</body>
+</html>

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Reset (Vol II, 3.4)</title></head>
+<body>
+<h1>Vol II &sect;3.4 — Reset</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#reset">specs/riscv-spec.html#reset</a>.
+Source line: <code>specs/riscv-spec.html:75843</code>. <strong>Domain:</strong> —.</p>
+
+<p>Reset initializes the hart to a defined architectural state: pc set to the reset vector, privilege
+mode M, and all CSRs to specified initial values. It is the bootstrap contract that makes the rest of
+the machine-mode ISA deterministic. Any feature addition must preserve these reset values and vector.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"Upon reset, a hart's privilege mode is set to M. The mstatus fields
+MIE and MPRV are reset to 0. If little-endian memory accesses are
+supported, the mstatus/mstatush field MBE is reset to 0. The misa
+register is reset to enable the maximal set of supported extensions. For
+implementations with the Zalrsc standard extension, there is no valid
+load reservation. The pc is set to an implementation-defined reset
+vector. The mcause register is set to a value indicating the cause of
+the reset."
+(specs/riscv-spec.html:75843-75857, anchor #reset)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module reset_unit (
+  input  logic        rst_ni,
+  input  logic [XLEN-1:0] reset_vector_i,
+  output logic [XLEN-1:0] boot_addr_o,
+  output priv_lvl_e   priv_o
+);
+  // on reset deassert: pc <= reset_vector; priv <= M
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented. The reset vector is supplied as <code>boot_addr_i</code>
+to <code>core/frontend/frontend.sv</code> and to the core top-level in <code>core/cva6.sv</code>. CSR
+reset values and the M privilege level are established in <code>core/csr_regfile.sv</code>. The
+cache/TLB reservation state is invalidated on reset in the LR/SC tracker. The reset strategy is
+asynchronous-active-low <code>rst_ni</code> pervasive throughout the core
+(<code>core/cva6_fifo_v3.sv:207-213</code>).</p>
+
+<p><strong>.dts linkage:</strong> the SoC device tree defines the boot/reset vector via the
+<code>memory@</code> / boot ROM and the CPU node <code>status = "okay"</code>; the chosen boot
+arguments must match the reset vector configuration.</p>
+</body>
+</html>

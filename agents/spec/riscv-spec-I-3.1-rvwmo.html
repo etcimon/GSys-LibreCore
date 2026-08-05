@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RVWMO Memory Consistency Model (Vol I, 3.1) — Logisplain summary</title>
+</head>
+<body>
+<h1>Vol I &sect;3.1 — RVWMO Memory Consistency Model</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#memorymodel">specs/riscv-spec.html#memorymodel</a>
+(source line 6600). <strong>Domain:</strong> CACHE, RAM, SPEC.</p>
+
+<section>
+<p>The objective of &sect;3.1 is to fix, at the architectural level, "the values that can be returned
+by loads of memory" without dictating microarchitecture, and the specification names the chosen model
+"RISC-V Weak Memory Ordering (RVWMO)" precisely because it "is designed to provide flexibility for
+architects to build high-performance scalable designs while simultaneously supporting a tractable
+programming model." The load-bearing normative sentence for any speculative, buffered, or cached
+implementation is that "code running on a single hart appears to execute in order from the perspective
+of other memory instructions in the same hart, but memory instructions from another hart may observe
+the memory instructions from the first hart being executed in a different order"; the corollary is
+that "multithreaded code may require explicit synchronization," for which "the base RISC-V ISA
+provides a FENCE instruction," augmented by the <code>Zalrsc</code>/<code>Zaamo</code> atomics and, for
+stricter ordering, the <code>Ztso</code> extension referenced at <a href="../../specs/riscv-spec.html#ext:ztso">#ext:ztso</a>.</p>
+
+<p>Mechanically the model is defined in terms of the <em>global memory order, a total ordering of the
+memory operations produced by all harts</em> (spec quote below). The specification explicitly scopes
+itself to regular main-memory operations and states that <em>the interaction of the memory model with
+I/O memory, instruction fetches (<code>Ziccif</code>), FENCE.I, page-table walks, and SFENCE.VMA is
+not (yet) formalized</em>; those adjacent behaviors are carried in their own sub-files. In CVA6 the
+model is upheld not by a single block but by the composition of in-order commit and an ordered store
+path: architectural store visibility is deferred to <code>core/commit_stage.sv:188-192</code>
+(<code>commit_lsu_o</code> only when the LSU is ready), the speculative-to-commit queue in
+<code>core/store_buffer.sv:56-71,110-116,137-167</code> and the write-through drain in
+<code>core/cache_subsystem/wt_dcache_wbuffer.sv:52-107,259-280,420-427</code> release stores in program
+order, FENCE/FENCE.I are sequenced through <code>core/controller.sv:121-173,257-259</code>
+(<code>fence_active_q</code>, <code>fence_i_active_q</code>, <code>halt_frontend_o</code>), and atomics/LR-SC
+flow via <code>core/amo_buffer.sv:50-63</code>, <code>core/store_unit.sv:134-135,282-319</code>,
+<code>core/load_store_unit.sv:728-748</code>, plus the WT miss-unit backoff
+<code>core/cache_subsystem/wt_dcache_missunit.sv:334-347,576-583</code> and AXI adapter
+<code>core/cache_subsystem/wt_axi_adapter.sv:252-267,577-580</code>. This connects RVWMO to the
+speculation guide (misspeculated loads must never leak a globally-inconsistent value) and to the cache
+guide (any added L2 must preserve this same global order).</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This section defines the base RISC-V memory consistency model. A memory
+consistency model is a set of rules specifying the values that can be
+returned by loads of memory. RISC-V uses a memory model called RISC-V
+Weak Memory Ordering (RVWMO) which is designed to provide flexibility
+for architects to build high-performance scalable designs while
+simultaneously supporting a tractable programming model. Under RVWMO,
+code running on a single hart appears to execute in order from the
+perspective of other memory instructions in the same hart, but memory
+instructions from another hart may observe the memory instructions from
+the first hart being executed in a different order. Therefore,
+multithreaded code may require explicit synchronization to guarantee
+ordering between memory instructions from different harts."
+(specs/riscv-spec.html:6600-6621, anchor #memorymodel)
+</pre>
+</section>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<p>The skeleton an implementation must provide is an ordered release point plus fence gating and
+reservation tracking, cross-referenced to the CVA6 loci above:</p>
+<pre>
+module rvwmo_order_point #(parameter int unsigned StoreBufDepth)(
+  input  logic        commit_store_i,   // core/commit_stage.sv: only committed stores are released
+  input  fence_t      fence_i,          // pred/succ sets; sequenced by core/controller.sv
+  // stores leave in program order -> global memory order
+  output logic        store_release_o,  // core/store_buffer.sv, wt_dcache_wbuffer.sv
+  // LR sets reservation; SC succeeds iff reservation still valid (Zalrsc)
+  input  logic        lr_valid_i, sc_req_i,
+  output logic        sc_success_o      // core/load_store_unit.sv + D$
+);
+  // invariant: no younger memory op may be globally ordered before an
+  // older one except where RVWMO preserved-program-order permits.
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partial (RVWMO enforced operationally by in-order commit + ordered
+store buffer + FENCE/FENCE.I handling; no formal-model checker). Loci:
+<code>core/commit_stage.sv:188-192</code>, <code>core/store_buffer.sv:56-71,110-116,137-167</code>,
+<code>core/controller.sv:121-173,257-259</code>,
+<code>core/cache_subsystem/wt_dcache_wbuffer.sv:52-107,259-280,420-427</code>,
+<code>core/amo_buffer.sv:50-63</code>, <code>core/load_store_unit.sv:728-748</code>.</p>
+
+<p><strong>.dts linkage:</strong> RVWMO is not exposed as a discrete DT node, but cacheable memory
+regions in <code>memory@</code> / cache nodes must stay aligned with the
+<code>NrCachedRegionRules/CachedRegionAddrBase/CachedRegionLength</code> rules from
+<code>core/include/config_pkg.sv</code> and <code>check_cfg(...)</code>; any added L2/L3 must preserve the
+same global order.</p>
+</body>
+</html>

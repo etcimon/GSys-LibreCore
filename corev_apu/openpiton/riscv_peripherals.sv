@@ -478,6 +478,7 @@ module riscv_peripherals #(
     .rtc_i                         ,
     .timer_irq_o                   ,
     .ipi_o
+    // mtime_o left open: OpenPiton path keeps SstcEn=0 for now
   );
 
   noc_axilite_bridge #(

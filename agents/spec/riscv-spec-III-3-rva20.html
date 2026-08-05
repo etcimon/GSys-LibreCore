@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>RVA20 Profiles (Vol III, 3)</title></head>
+<body>
+<h1>Vol III &sect;3 — RVA20 Profiles</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#_rva20u64_profile">#_rva20u64_profile</a> (3.1),
+<a href="../../specs/riscv-spec.html#_rva20s64_profile">#_rva20s64_profile</a> (3.2).
+Source lines: <code>specs/riscv-spec.html:90395</code> (3.1), <code>:90621</code> (3.2).</p>
+
+<p>RVA20 is the first application-processor profile. RVA20U64 requires RV64I, M, A, F, D, C, Zicsr,
+Zifencei, and a set of Zic* extensions. RVA20S64 adds S-mode and Sv39 paging. It is the baseline
+for 64-bit Linux application processors and directly maps to a CVA6 Linux configuration.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The RVA20U64 profile specifies the ISA features available to user-mode
+execution environments in 64-bit applications processors. This is the
+most important profile within the application processor family in terms
+of the amount of software that targets this profile."
+...
+"The RVA20S64 profile specifies the ISA features available to a
+supervisor-mode execution environment in 64-bit applications processors.
+RVA20S64 is based on privileged architecture version 1.11."
+(specs/riscv-spec.html:90395-90401 anchor #_rva20u64_profile;
+:90621-90626 anchor #_rva20s64_profile)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module rva20_check (
+  input  config_pkg::cva6_cfg_t CVA6Cfg,
+  output logic                  rva20_u64_o, rva20_s64_o
+);
+  // check RVI/RVA/RVF/RVD/RVC/RVS/Sv39 bits
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> configurable. Targets like
+<code>core/include/cv64a6_imafdc_sv39_config_pkg.sv</code> match RVA20S64 by setting
+<code>RVA/RVC/RVF/RVD/RVA/RVM</code> and <code>RVS</code>/<code>RVU</code> with Sv39. The
+<code>riscv,isa</code> string in the generated DT must reflect those bits.</p>
+
+<p><strong>.dts linkage:</strong> the CPU <code>riscv,isa</code> string for an RVA20S64 CVA6 is
+<code>rv64imafdc_zicsr_zifencei</code> plus any implemented Zic*; <code>mmu-type</code> is
+<code>riscv,sv39</code>.</p>
+</body>
+</html>

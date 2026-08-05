@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Ssqosid QoS Identifiers (Vol II, 8.1)</title></head>
+<body>
+<h1>Vol II &sect;8.1 — Ssqosid Extension for Quality-of-Service (QoS) Identifiers</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ssqosid">specs/riscv-spec.html#ssqosid</a>.
+Source line: <code>specs/riscv-spec.html:88620</code>. <strong>Domain:</strong> CACHE.</p>
+
+<p>Ssqosid adds machine/supervisor CSRs that carry a quality-of-service identifier (QoS ID). This ID
+can be propagated with memory transactions to prioritize or throttle cache/memory bandwidth in
+interconnects and memory controllers. It is a system-level extension that touches the cache and bus
+interfaces.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"Quality of Service (QoS) is defined as the minimal end-to-end performance
+guaranteed in advance by a service level agreement (SLA) to a workload.
+When multiple workloads execute concurrently on modern processors—
+equipped with large core counts, multiple cache hierarchies, and multiple
+memory controllers—the performance of any given workload becomes less
+deterministic, or even non-deterministic, due to shared resource
+contention."
+(specs/riscv-spec.html:88620-88628, anchor #ssqosid)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module ssqosid_tracker (
+  input  logic [XLEN-1:0] srmcfg_i,  // QoS ID fields
+  output logic [QOSID_WIDTH-1:0] qos_id_o
+);
+  // per-hart QoS ID carried on AXI/user signals
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. No QoS ID CSRs (<code>srmcfg</code>/<code>sscfg</code>) are
+declared in <code>core/csr_regfile.sv</code> and no AXI user-sideband or cache priority signal is
+driven from the core. Adding Ssqosid would require new CSRs, a QoS ID register in the LSU, and
+sideband propagation through <code>core/cache_subsystem/</code> and the AXI adapter.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Ssqosid would be advertised through the
+<code>riscv,isa</code> string or SoC interconnect QoS properties if implemented.</p>
+</body>
+</html>

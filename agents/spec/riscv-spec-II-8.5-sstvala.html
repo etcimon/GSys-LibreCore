@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Sstvala Trap Value Reporting (Vol II, 8.5)</title></head>
+<body>
+<h1>Vol II &sect;8.5 — Sstvala Extension for Trap Value Reporting, Version 1.0</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#sstvala">specs/riscv-spec.html#sstvala</a>.
+Source line: <code>specs/riscv-spec.html:88790</code>. <strong>Domain:</strong> SPEC.</p>
+
+<p>Sstvala requires that <code>stval</code> (and <code>mtval</code>) report useful values for traps
+where the base spec left it optional or zero. It mandates, for example, that instruction
+page-fault exceptions report the faulting virtual address in <code>stval</code>.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Sstvala extension is implemented, then stval must be written
+with the faulting virtual address for load, store, and instruction
+page-fault, access-fault, and misaligned exceptions, and for breakpoint
+exceptions that are defined to write an address to stval, other than
+those caused by execution of the EBREAK or C.EBREAK instructions."
+(specs/riscv-spec.html:88790-88796, anchor #sstvala)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module sstvala_reporting (
+  input  logic [XLEN-1:0] fault_addr_i,
+  input  logic [XLEN-1:0] fault_instr_i,
+  input  cause_e          cause_i,
+  output logic [XLEN-1:0] tval_o
+);
+  // write meaningful tval based on trap cause
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partial. The controller/csr_regfile write <code>mtval</code>/<code>stval</code>
+for some causes, but full Sstvala coverage (faulting virtual address for page/access/misaligned
+faults, faulting instruction for illegal/virtual-instruction) should be verified against
+<code>core/controller.sv</code> trap logic and <code>core/csr_regfile.sv</code> CSR write paths.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Sstvala capability would be advertised through the
+<code>riscv,isa</code> string if claimed.</p>
+</body>
+</html>

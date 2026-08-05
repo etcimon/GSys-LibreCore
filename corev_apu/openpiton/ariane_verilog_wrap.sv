@@ -106,6 +106,8 @@ module ariane_verilog_wrap
   input                       ipi_i,        // inter-processor interrupts (async)
   // Timer facilities
   input                       time_irq_i,   // timer interrupt in (async)
+  // Platform mtime for Sstc (tie to 0 when SstcEn is off)
+  input  [63:0]               rtc_time_i,
   input                       debug_req_i,  // debug request (async)
 
   // L15 (memory side)
@@ -128,6 +130,8 @@ module ariane_verilog_wrap
     RVZiCond:               RVZiCondEn,
     RVZicntr:               RVZicntrEn,
     RVZihpm:                RVZihpmEn,
+    RVZiCboz:               0,
+    RVZiCbop:               0,
     RVZiCbom:               1'b0, // OpenPiton doesn't support CMOs at this time
     RVF:                    RVFEn,
     RVD:                    RVDEn,
@@ -188,6 +192,7 @@ module ariane_verilog_wrap
     FpgaAlteraEn:           FpgaAlteraEn,
     TechnoCut:              1'b0,
     SuperscalarEn:          1'b0,
+    NrIssuePorts:           0,     // 0 = auto (1 when scalar)
     ALUBypass:              1'b0,  // ALU bypass disabled
     NrCommitPorts:          NrCommitPorts,
     NrLoadPipeRegs:         2,
@@ -199,11 +204,49 @@ module ariane_verilog_wrap
     BTBEntries:             BTBEntries,
     BPType:                 config_pkg::BHT,  // Bimodal predictor
     BHTEntries:             BHTEntries,
-    BHTHist:                2,  // 2-bit history for BHT
+    BHTHist:                2,
+    BPGhistLen:              0,
+    BPTageTables:            0,
+    BPTageTableEntries:      0,
+    BPTageTagBits:           0,
+    BPLoopEn:                0,
+    BPIndirectEn:            0,
+    BPIndirectEntries:       0,
+    BPStatCorEn:             0,
+    BPCkptDepth:             0,  // 2-bit history for BHT
     InstrTlbEntries:        16,
     DataTlbEntries:         16,
     UseSharedTlb:           0,
     SvnapotEn:              0,
+    SstcEn:                 0,
+    SscofpmfEn:             0,
+    SvpbmtEn:               0,
+    ZawrsEn:                0,
+    L2En:                   0,
+    L2ByteSize:             0,
+    L2SetAssoc:             0,
+    L2LineWidth:            0,
+    L2MshrDepth:            0,
+    L2DataBanks:            0,
+    NrHarts:                1,
+    ZihintpauseEn:          0,
+    WayPredEn:               0,
+    WayPredEntries:          0,
+    ReplPolicy:              config_pkg::REPL_PLRU,
+    HwPrefetchEn:            0,
+    HwPrefetchStreams:       0,
+    DcacheMshrDepth:         0,
+    FtqDepth:                0,
+    FdipEn:                  0,
+    FdipDistance:            0,
+    LoopBufEn:               0,
+    LoopBufEntries:          0,
+    SliceOoOEn:              0,
+    SliceIstEntries:         0,
+    SliceAiqDepth:           0,
+    SliceBiqDepth:           0,
+    SliceMaxRunahead:        0,
+    OoOEn:                   0,
     SharedTlbDepth:         64,
     SDTRIG:                 0,
     Mcontrol6:              0,
@@ -325,9 +368,18 @@ module ariane_verilog_wrap
     .irq_i       ( irq        ),
     .ipi_i       ( ipi        ),
     .time_irq_i  ( time_irq   ),
+    .rtc_time_i  ( rtc_time_i ),
     .debug_req_i ( debug_req  ),
     .noc_req_o   ( l15_req    ),
-    .noc_resp_i  ( l15_rtrn   )
+    .noc_resp_i  ( l15_rtrn   ),
+    .l1_inval_addr_i  ( 64'b0 ),
+    .l1_inval_valid_i ( 1'b0  ),
+    .l1_inval_ready_o (       ),
+    .l2_miss_i        ( 1'b0  ),
+    .l3_hit_i         ( 1'b0  ),
+    .l3_miss_i        ( 1'b0  ),
+    .pf_issue_i       ( 1'b0  ),
+    .pf_train_i       ( 1'b0  )
   );
 
 endmodule // ariane_verilog_wrap

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>RISC-V Privileged Instruction Set Listings (Vol II, 10)</title></head>
+<body>
+<h1>Vol II &sect;10 — RISC-V Privileged Instruction Set Listings</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#_risc_v_privileged_instruction_set_listings">specs/riscv-spec.html#_risc_v_privileged_instruction_set_listings</a>.
+Source line: <code>specs/riscv-spec.html:89202</code>.</p>
+
+<p>This chapter provides compact instruction encodings for all privileged instructions (CSR access,
+MRET/SRET/URET/WFI, SFENCE.VMA, etc.). It is the reference for the decoder table that maps opcodes
+to control signals for the controller and CSR unit.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"This chapter presents instruction-set listings for all instructions
+defined in the RISC-V Privileged Architecture. The instruction-set
+listings for unprivileged instructions, including the ECALL and EBREAK
+instructions, are provided in Volume I, Appendix A."
+(specs/riscv-spec.html:89202-89208, anchor #_risc_v_privileged_instruction_set_listings)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module privileged_decoder (
+  input  logic [31:0] instr_i,
+  output priv_instr_e op_o
+);
+  // one-hot decode of ECALL/EBREAK/MRET/SRET/URET/WFI/SFENCE.VMA/...
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented. The decoder recognizes privileged SYSTEM opcodes in
+<code>core/decoder.sv</code> and emits control signals for CSR read/write, MRET/SRET/WFI, ECALL/EBREAK,
+SFENCE.VMA/SINVAL.VMA, and FENCE.I. Execution is sequenced in <code>core/controller.sv</code> and
+<code>core/csr_regfile.sv</code>. The instruction encodings in this chapter map directly to the
+case statements in the decoder and the control flow in the controller.</p>
+
+<p><strong>.dts linkage:</strong> no direct DT node; the supported privileged operations are implied by
+the <code>riscv,isa</code> and <code>mmu-type</code> strings (e.g. S-mode, Sv39, Svpbmt).</p>
+</body>
+</html>

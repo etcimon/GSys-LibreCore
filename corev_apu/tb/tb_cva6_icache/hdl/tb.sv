@@ -237,7 +237,7 @@ module tb import tb_pkg::*; import ariane_pkg::*; import wt_cache_pkg::*; #()();
 // MUT
 ///////////////////////////////////////////////////////////////////////////////
 
-  cva6_icache  #(
+  g6lc_icache  #(
     .CVA6Cfg(ariane_pkg::CVA6DefaultCfg)
     ) dut (
     .clk_i          ( clk_i          ),

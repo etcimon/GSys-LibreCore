@@ -1,0 +1,80 @@
+---
+title: Multi-Issue
+description: Config-gated multi-issue (2–8 ports) on GSys LibreCore — width, superscalar, and interaction with OoO.
+---
+
+# Multi-Issue
+
+GSys LibreCore can elaborate **more than one issue port** so independent ops leave
+decode/issue in the same cycle. Width is a **config product choice**, not a
+hardwired pipeline rewrite.
+
+## Knobs
+
+| Concept | Config / code | Notes |
+|---|---|---|
+| Issue width | `NrIssuePorts` | Scaled structures in build_config / packages |
+| Superscalar baseline | `SuperscalarEn` | Often auto-selects 1 vs 2 issue |
+| Scoreboard / load / store depth | `NrScoreboardEntries`, `NrLoadBufEntries`, `MaxOutstandingStores` | Must grow with MLP and width |
+| OoO backend | `OoOEn` | Multi-issue **with** rename/IQ when on; without when off |
+
+When `OoOEn=0`, multi-issue is still an **in-order multi-issue** product (dual
+or wider issue with scoreboard discipline). When `OoOEn=1`, issue width feeds
+the rename/IQ/ROB path — see [Out-of-Order](./out-of-order).
+
+## Pipeline impact
+
+```
+frontend (wider fetch useful)
+    → ID / decode (multi-op)
+    → issue / IRO (NrIssuePorts)
+    → EX ports / WB
+    → commit (multi-commit ports where configured)
+```
+
+Areas that must scale with width:
+
+- Operand read ports and forwarding
+- Functional unit arbitration
+- Scoreboard allocation and RAW checks (or OoO rename bypass of arch RAW)
+- Commit free of physical registers (OoO packages)
+
+## Product packages
+
+Examples (confirm names in `core/include/`):
+
+| Profile | Typical width | Notes |
+|---|---|---|
+| Default `cv64a6_imafdc_sv39` | 1 (or 2 if superscalar) | Identity-lean path |
+| `g6lc64_ooo` | 2 | Dual-issue OoO lite |
+| `g6lc64_ooo_server` | 4 | Server production width |
+| Server math packages | 2+ | Dual-issue + L2/H/Sstc stack |
+
+## Timing and power
+
+Wider issue multiplies:
+
+- Register file / PRF ports
+- Wakeup and select networks (especially under OoO)
+- Commit / free bandwidth
+
+Treat every width step as a **timing closure event**. Use `g6lc-build verify`
+on the target package and optional structural FO4 via
+[`timings`](../build-platform/timings).
+
+## Verification
+
+```bash
+g6lc-build verify --target <wide_pkg>
+# OoO-wide directed path (optional / lengthy):
+g6lc-build test --suite ooo-l3-tests
+```
+
+Directed ILP and multi-issue stress live under `verif/tests/custom/` for OoO
+packages; open-source smoke remains the minimum for every change.
+
+## Related
+
+- [Frontend Extensions](./frontend-extensions)
+- [Out-of-Order](./out-of-order)
+- [CPU Architecture Guidelines](./cpu-architecture)

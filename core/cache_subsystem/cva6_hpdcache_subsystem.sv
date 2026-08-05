@@ -118,7 +118,12 @@ module cva6_hpdcache_subsystem
     // TO_BE_COMPLETED - TO_BE_COMPLETED
     output logic [NrHwPrefetchers-1:0][63:0] hwpf_throttle_o,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
-    output logic [               63:0]       hwpf_status_o
+    output logic [               63:0]       hwpf_status_o,
+
+    // U6.2 external L1 invalidation (coherence hub → D$). Tie valid=0 if unused.
+    input  logic [63:0] inval_addr_i,
+    input  logic        inval_valid_i,
+    output logic        inval_ready_o
     //  }}}
 );
   //  }}}
@@ -141,7 +146,7 @@ module cva6_hpdcache_subsystem
 
   localparam int ICACHE_RDTXID = 1 << (CVA6Cfg.MEM_TID_WIDTH - 1);
 
-  cva6_icache #(
+  g6lc_icache #(
       .CVA6Cfg(CVA6Cfg),
       .icache_areq_t(icache_areq_t),
       .icache_arsp_t(icache_arsp_t),
@@ -150,7 +155,7 @@ module cva6_hpdcache_subsystem
       .icache_req_t(icache_req_t),
       .icache_rtrn_t(icache_rtrn_t),
       .RdTxId(ICACHE_RDTXID)
-  ) i_cva6_icache (
+  ) i_g6lc_icache (
       .clk_i         (clk_i),
       .rst_ni        (rst_ni),
       .flush_i       (icache_flush_i),
@@ -280,6 +285,13 @@ module cva6_hpdcache_subsystem
 
   logic                 dcache_resp_read_inval;
   hpdcache_nline_t      dcache_resp_read_inval_nline;
+  // Intermediate: L15/NoC inv OR external coherence inv
+  logic                 noc_inval_valid;
+  hpdcache_nline_t      noc_inval_nline;
+  logic                 ext_inval_valid;
+  hpdcache_nline_t      ext_inval_nline;
+  // nline = paddr >> clOffsetWidth (see hpdcache_pkg buildCfg)
+  localparam int unsigned HPDC_LINE_OFF = HPDcacheCfg.clOffsetWidth;
 
   cva6_hpdcache_wrapper #(
       .CVA6Cfg(CVA6Cfg),
@@ -421,8 +433,8 @@ module cva6_hpdcache_subsystem
         .dcache_read_resp_valid_o(dcache_read_resp_valid),
         .dcache_read_resp_o      (dcache_read_resp),
 
-        .dcache_inval_valid_o(dcache_resp_read_inval),
-        .dcache_inval_o      (dcache_resp_read_inval_nline),
+        .dcache_inval_valid_o(noc_inval_valid),
+        .dcache_inval_o      (noc_inval_nline),
 
         .dcache_write_ready_o(dcache_write_ready),
         .dcache_write_valid_i(dcache_write_valid),
@@ -439,6 +451,13 @@ module cva6_hpdcache_subsystem
         .l15_req_o (noc_req_o),
         .l15_rtrn_i(noc_resp_i)
     );
+    // External inv ORed with L15 (external wins address if both same cycle)
+    assign ext_inval_valid = inval_valid_i;
+    assign ext_inval_nline =
+        hpdcache_nline_t'(inval_addr_i[HPDC_LINE_OFF +: HPDcacheCfg.nlineWidth]);
+    assign dcache_resp_read_inval = noc_inval_valid | ext_inval_valid;
+    assign dcache_resp_read_inval_nline = ext_inval_valid ? ext_inval_nline : noc_inval_nline;
+    assign inval_ready_o = 1'b1;
     //}}}
   end else begin
 
@@ -502,9 +521,17 @@ module cva6_hpdcache_subsystem
     );
     //  }}}
 
-    // AXI NoC doesn't support invalidations
-    assign dcache_resp_read_inval = 0;
-    assign dcache_resp_read_inval_nline = '0;
+    // U6.2: inject external coherence invalidations into HPDCACHE read-resp
+    // inv path (same port L15 adapter uses). Address is converted to nline
+    // (drop line offset bits). Always ready — HPDcache accepts inv pulses.
+    assign noc_inval_valid = 1'b0;
+    assign noc_inval_nline = '0;
+    assign ext_inval_valid = inval_valid_i;
+    assign ext_inval_nline =
+        hpdcache_nline_t'(inval_addr_i[HPDC_LINE_OFF +: HPDcacheCfg.nlineWidth]);
+    assign dcache_resp_read_inval = ext_inval_valid;
+    assign dcache_resp_read_inval_nline = ext_inval_nline;
+    assign inval_ready_o = 1'b1;
   end
 
   //  Assertions

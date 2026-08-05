@@ -110,7 +110,12 @@ endif
 # Make these variables available to sub-Makefiles.
 export DEBUG TRACE_FAST TRACE_COMPACT
 
+# elf is empty during clean_all / early parse — avoid "basename: missing operand".
+ifneq ($(strip $(elf)),)
 TESTNAME := $(shell basename -s .o $(elf))
+else
+TESTNAME :=
+endif
 
 ifeq ($(isspostrun_opts), "")
 grep_address:
@@ -137,10 +142,18 @@ endif
 ###############################################################################
 # Spike specific commands, variables
 ###############################################################################
+# Stage Spike's commit log under $${TMPDIR:-/tmp} then copy into $(log).iss.
+# Direct redirection to a WSL /mnt/* (9p) path is extremely slow for the
+# multi-MB --log-commits traces of VM tests (rv64ui-v-add ~40k lines, 60-90s);
+# local tmp + cp keeps the same artifact layout and finishes in a few seconds.
 spike:
+	@set -e; \
+	tmp=$$(mktemp "$${TMPDIR:-/tmp}/cva6-spike.XXXXXX.iss"); \
+	trap 'rm -f "$$tmp"' EXIT; \
 	LD_LIBRARY_PATH="$$(realpath ../../tools/spike/lib):$$LD_LIBRARY_PATH" \
-		$(tool_path)/spike $(spike_stepout) $(spike_extension) --log-commits --isa=$(variant) --priv=$(priv) $(spike_params_final) -l $(elf)
-	grep -v '^\([[]\|/top/\)' $(log).iss > $(log)
+		$(tool_path)/spike $(spike_stepout) $(spike_extension) --log-commits --isa=$(variant) --priv=$(priv) $(spike_params_final) -l $(elf) > "$$tmp" 2>&1; \
+	grep -v '^\([[]\|/top/\)' "$$tmp" > $(log); \
+	cp "$$tmp" $(log).iss
 
 ###############################################################################
 # UVM specific commands, variables

@@ -78,6 +78,10 @@ module cva6
       exception_t                          ex;     // we've encountered an exception
     },
 
+    // SMT thread id width (1 when NrHarts==1 → constant-0 tag, inert netlist)
+    localparam int unsigned HART_ID_BITS =
+        (CVA6Cfg.NrHarts <= 1) ? 1 : $clog2(CVA6Cfg.NrHarts),
+
     // IF/ID Stage
     // store the decompressed instruction
     localparam type fetch_entry_t = struct packed {
@@ -85,6 +89,7 @@ module cva6
       logic [31:0] instruction;  // instruction word
       branchpredict_sbe_t     branch_predict; // this field contains branch prediction information regarding the forward branch path
       exception_t             ex;             // this field contains exceptions which might have happened earlier, e.g.: fetch exceptions
+      logic [HART_ID_BITS-1:0] hart_id;  // U6.1 SMT thread tag (0 when NrHarts==1)
     },
     //JVT struct{base,mode}
     localparam type jvt_t = struct packed {
@@ -119,6 +124,12 @@ module cva6
       logic is_double_rd_macro_instr;  // is double move decoded 32bit instruction of macro definition
       logic vfp;  // is this a vector floating-point instruction?
       logic is_zcmt;  //is a zcmt instruction
+      logic [HART_ID_BITS-1:0] hart_id;  // U6.1 SMT thread tag (0 when NrHarts==1)
+      // U5 OoO phys tags (0 / unused when OoOEn=0; max 256 PRF)
+      logic [7:0] p_rs1;
+      logic [7:0] p_rs2;
+      logic [7:0] p_rd;
+      logic       ooo_renamed;  // tags valid for PRF operand path
     },
     localparam type writeback_t = struct packed {
       logic valid;  // wb data is valid
@@ -138,6 +149,9 @@ module cva6
       logic                    is_mispredict;   // set if this was a mis-predict
       logic                    is_taken;        // branch is taken
       cf_t                     cf_type;         // Type of control flow change
+      logic [HART_ID_BITS-1:0] hart_id;         // FSE S5: resolving branch's SMT hart (0 if NrHarts==1)
+      // Hang-7: restore GHR/RAS ckpt only on real wrong-path (not Return verify bubble)
+      logic                    ckpt_restore;
     },
 
     // All information needed to determine whether we need to associate an interrupt
@@ -160,6 +174,8 @@ module cva6
       logic                             overflow;
       logic                             g_overflow;
       logic [CVA6Cfg.XLEN-1:0]          data;
+      // Zacas AMOCAS expected value (operand_c); 0 for non-CAS
+      logic [CVA6Cfg.XLEN-1:0]          data_cmp;
       logic [(CVA6Cfg.XLEN/8)-1:0]      be;
       fu_t                              fu;
       fu_op                             operation;
@@ -177,6 +193,8 @@ module cva6
       logic [CVA6Cfg.XLEN-1:0]          operand_a;
       logic [CVA6Cfg.XLEN-1:0]          operand_b;
       logic [CVA6Cfg.XLEN-1:0]          imm;
+      // Zacas: expected/compare value for AMOCAS (0 when unused). Not used in addr calc.
+      logic [CVA6Cfg.XLEN-1:0]          operand_c;
       logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;
     },
 
@@ -325,11 +343,17 @@ module cva6
     // Hard ID reflected as CSR - SUBSYSTEM
     input logic [CVA6Cfg.XLEN-1:0] hart_id_i,
     // Level sensitive (async) interrupts - SUBSYSTEM
-    input logic [1:0] irq_i,
-    // Inter-processor (async) interrupt - SUBSYSTEM
-    input logic ipi_i,
-    // Timer (async) interrupt - SUBSYSTEM
-    input logic time_irq_i,
+    // Per SMT hart: [hart][1:0] = {MEIP, SEIP} (width 1 when NrHarts==1 → [0][1:0])
+    input logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][1:0] irq_i,
+    // Inter-processor (async) interrupt - SUBSYSTEM (one bit per SMT hart)
+    input logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] ipi_i,
+    // Timer (async) interrupt - SUBSYSTEM (one bit per SMT hart / CLINT slot)
+    input logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] time_irq_i,
+    // Platform mtime counter value, only used when CVA6Cfg.SstcEn - SUBSYSTEM
+    // Sstc keeps the counter in the platform timer (CLINT) and the stimecmp
+    // comparator in the hart, so the hart needs to observe the value. Tie to '0
+    // when SstcEn is disabled; nothing reads it in that case.
+    input logic [63:0] rtc_time_i,
     // Debug (async) request - SUBSYSTEM
     input logic debug_req_i,
     // Probes to build RVFI, can be left open when not used - RVFI
@@ -341,7 +365,18 @@ module cva6
     // noc request, can be AXI or OpenPiton - SUBSYSTEM
     output noc_req_t noc_req_o,
     // noc response, can be AXI or OpenPiton - SUBSYSTEM
-    input noc_resp_t noc_resp_i
+    input noc_resp_t noc_resp_i,
+    // U6.2 external L1 invalidation (coherence hub). Tie valid=0 when unused.
+    // WT cache accepts these; HPDCACHE/std paths ack and ignore.
+    input  logic [63:0] l1_inval_addr_i,
+    input  logic        l1_inval_valid_i,
+    output logic        l1_inval_ready_o,
+    // PMU group 2: SoC L2/L3/PF probes (tie 0 for single-core / no hierarchy)
+    input  logic        l2_miss_i,
+    input  logic        l3_hit_i,
+    input  logic        l3_miss_i,
+    input  logic        pf_issue_i,
+    input  logic        pf_train_i
 );
 
   localparam type interrupts_t = struct packed {
@@ -355,6 +390,7 @@ module cva6
     logic [CVA6Cfg.XLEN-1:0] VS_EXT;
     logic [CVA6Cfg.XLEN-1:0] M_EXT;
     logic [CVA6Cfg.XLEN-1:0] HS_EXT;
+    logic [CVA6Cfg.XLEN-1:0] LCOF;
   };
 
   localparam interrupts_t INTERRUPTS = '{
@@ -367,7 +403,8 @@ module cva6
       S_EXT: (CVA6Cfg.XLEN'(1) << (CVA6Cfg.XLEN - 1)) | CVA6Cfg.XLEN'(riscv::IRQ_S_EXT),
       VS_EXT: (CVA6Cfg.XLEN'(1) << (CVA6Cfg.XLEN - 1)) | CVA6Cfg.XLEN'(riscv::IRQ_VS_EXT),
       M_EXT: (CVA6Cfg.XLEN'(1) << (CVA6Cfg.XLEN - 1)) | CVA6Cfg.XLEN'(riscv::IRQ_M_EXT),
-      HS_EXT: (CVA6Cfg.XLEN'(1) << (CVA6Cfg.XLEN - 1)) | CVA6Cfg.XLEN'(riscv::IRQ_HS_EXT)
+      HS_EXT: (CVA6Cfg.XLEN'(1) << (CVA6Cfg.XLEN - 1)) | CVA6Cfg.XLEN'(riscv::IRQ_HS_EXT),
+      LCOF: (CVA6Cfg.XLEN'(1) << (CVA6Cfg.XLEN - 1)) | CVA6Cfg.XLEN'(riscv::IRQ_LCOF)
   };
 
   // ------------------------------------------
@@ -439,6 +476,7 @@ module cva6
   fu_data_t [CVA6Cfg.NrIssuePorts-1:0] fu_data_id_ex;
   alu_bypass_t alu_bypass_id_ex;
   logic [CVA6Cfg.VLEN-1:0] pc_id_ex;
+  logic [HART_ID_BITS-1:0] branch_hart_id_ex;
   logic zcmt_id_ex;
   logic is_compressed_instr_id_ex;
   logic [CVA6Cfg.NrIssuePorts-1:0][31:0] tinst_ex;
@@ -604,12 +642,16 @@ module cva6
   logic break_from_trigger;
   riscv::cbie_t mcbie, scbie, hcbie;
   logic mcbcfe, scbcfe, hcbcfe;
+  logic mcbze, scbze, hcbze;
+  logic pbmte;
   // ----------------------------
   // Performance Counters <-> *
   // ----------------------------
   logic [11:0] addr_csr_perf;
   logic [CVA6Cfg.XLEN-1:0] data_csr_perf, data_perf_csr;
   logic we_csr_perf;
+  logic [31:0] scountovf_perf_csr;
+  logic lcofi_perf_csr;
 
   logic icache_flush_ctrl_cache;
   logic itlb_miss_ex_perf;
@@ -618,6 +660,28 @@ module cva6
   logic icache_miss_cache_perf;
   logic [NumPorts-1:0][CVA6Cfg.DCACHE_SET_ASSOC-1:0] miss_vld_bits;
   logic stall_issue;
+
+  // U6.1 SMT (instances after CTRL nets are declared)
+  logic [HART_ID_BITS-1:0] smt_active_hart;
+  // Decode/RVFI see only the *active* fetch hart's MEIP/SEIP; CSR banks
+  // already receive the full per-hart irq_i[] vector (Linux CLINT/PLIC identity).
+  logic [1:0] irq_active;
+  assign irq_active = irq_i[smt_active_hart];
+  logic                    smt_switch;
+  logic                    smt_switch_on_miss;
+  logic                    smt_switch_on_quantum;
+  logic                    smt_switch_on_starve;
+  logic [CVA6Cfg.NrHarts-1:0] smt_hart_ready;
+  logic [CVA6Cfg.NrHarts-1:0] smt_hart_dmiss;
+  logic [CVA6Cfg.NrHarts-1:0] smt_hart_imiss;
+  logic [CVA6Cfg.NrHarts-1:0] smt_hart_block;
+  logic [CVA6Cfg.NrHarts-1:0] smt_hart_halt;
+  logic [CVA6Cfg.NrHarts-1:0] smt_hart_enable;
+  logic smt_fetch_fire;
+  logic smt_issue_fire;
+  logic smt_miss_clear;
+  logic smt_long_block;
+
   // --------------
   // CTRL <-> *
   // --------------
@@ -653,6 +717,10 @@ module cva6
   amo_req_t amo_req;
   amo_resp_t amo_resp;
   logic sb_full;
+  logic spec_cancel;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_cancelled_mask;
+  // U5 OoO PMU probes (0 when OoOEn=0)
+  logic ooo_rename_stall, ooo_iq_full, ooo_rob_full, ooo_lsq_stall, ooo_stl_forward;
 
   // ----------------
   // DCache <-> *
@@ -676,10 +744,21 @@ module cva6
   logic [63:0] inval_addr;
   logic inval_valid;
   logic inval_ready;
+  // Accelerator-side inv (Ara/CVXIF) OR external multi-core coherence inv
+  logic [63:0] acc_inval_addr;
+  logic        acc_inval_valid;
+  // External inv has priority when accelerator is idle
+  assign inval_addr  = acc_inval_valid ? acc_inval_addr : l1_inval_addr_i;
+  assign inval_valid = acc_inval_valid | l1_inval_valid_i;
+  assign l1_inval_ready_o = inval_ready & ~acc_inval_valid;
 
   // --------------
   // Frontend
   // --------------
+  logic [CVA6Cfg.VLEN-1:0] smt_npc_live;
+  logic [CVA6Cfg.VLEN-1:0] smt_npc_restore;
+  logic                    smt_pc_restore;
+
   frontend #(
       .CVA6Cfg(CVA6Cfg),
       .bp_resolve_t(bp_resolve_t),
@@ -704,11 +783,28 @@ module cva6
       .trap_vector_base_i (trap_vector_base_commit_pcgen),
       .set_debug_pc_i     (set_debug_pc),
       .debug_mode_i       (debug_mode),
+      .smt_hart_i         (smt_active_hart),
+      .smt_restore_i      (smt_pc_restore),
+      .smt_npc_restore_i  (smt_npc_restore),
+      .npc_q_o            (smt_npc_live),
       .icache_dreq_o      (icache_dreq_if_cache),
       .icache_dreq_i      (icache_dreq_cache_if),
       .fetch_entry_o      (fetch_entry_if_id),
       .fetch_entry_valid_o(fetch_valid_if_id),
       .fetch_entry_ready_i(fetch_ready_id_if)
+  );
+
+  g6lc_smt_pc_bank #(
+      .CVA6Cfg(CVA6Cfg)
+  ) i_smt_pc_bank (
+      .clk_i,
+      .rst_ni,
+      .boot_addr_i  (boot_addr_i[CVA6Cfg.VLEN-1:0]),
+      .npc_live_i   (smt_npc_live),
+      .active_hart_i(smt_active_hart),
+      .switch_i     (smt_switch),
+      .npc_restore_o(smt_npc_restore),
+      .restore_o    (smt_pc_restore)
   );
 
   // ---------
@@ -753,7 +849,7 @@ module cva6
       .vfs_i               (vfs),
       .frm_i               (frm_csr_id_issue_ex),
       .vs_i                (vs),
-      .irq_i               (irq_i),
+      .irq_i               (irq_active),
       .irq_ctrl_i          (irq_ctrl_csr_id),
       .debug_mode_i        (debug_mode),
       .tvm_i               (tvm_csr_id),
@@ -767,7 +863,11 @@ module cva6
       .mcbcfe_i            (mcbcfe),
       .scbcfe_i            (scbcfe),
       .hcbcfe_i            (hcbcfe),
+      .mcbze_i             (mcbze),
+      .scbze_i             (scbze),
+      .hcbze_i             (hcbze),
       .hart_id_i           (hart_id_i),
+      .smt_hart_id_i       (smt_active_hart),
       .compressed_ready_i  (x_compressed_ready),
       .compressed_resp_i   (x_compressed_resp),
       .compressed_valid_o  (x_compressed_valid),
@@ -778,6 +878,81 @@ module cva6
       .dcache_req_ports_i  (dcache_req_ports_cache_id),
       .dcache_req_ports_o  (dcache_req_ports_id_cache)
   );
+
+  // ------------------------
+  // U6.1 SMT thread fabric
+  // NrHarts==1: identity (active=0, no switches). Contention policies
+  // (switch-on-miss / quantum RR / anti-starve) elaborate for NrHarts==2.
+  // ------------------------
+  // U6.1: per-hart WFI halt sticky + enable (all enabled). Coarse-grain switch
+  // clears halt for the newly active hart when its CSR leaves WFI (halt_csr=0).
+  logic [CVA6Cfg.NrHarts-1:0] smt_hart_halt_q, smt_hart_halt_d;
+  assign smt_hart_enable = '1;
+  assign smt_fetch_fire  = |(fetch_valid_if_id & fetch_ready_id_if);
+  assign smt_issue_fire  = |issue_instr_issue_id;
+  assign smt_miss_clear  = ~dcache_miss_cache_perf & ~icache_miss_cache_perf & ~stall_issue;
+  assign smt_long_block  = flush_ctrl_ex;
+
+  if (CVA6Cfg.NrHarts <= 1) begin : gen_smt_halt_single
+    assign smt_hart_halt   = '0;
+    assign smt_hart_halt_d = '0;
+    assign smt_hart_halt_q = '0;
+  end else begin : gen_smt_halt_multi
+    always_comb begin
+      smt_hart_halt_d = smt_hart_halt_q;
+      // Active hart enters WFI → mark halted so select prefers a peer
+      if (halt_csr_ctrl) smt_hart_halt_d[smt_active_hart] = 1'b1;
+      // Leaving WFI (interrupt unstall) clears active halt
+      if (!halt_csr_ctrl) smt_hart_halt_d[smt_active_hart] = 1'b0;
+      if (flush_ctrl_if && smt_switch) smt_hart_halt_d[smt_active_hart] = 1'b0;
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) smt_hart_halt_q <= '0;
+      else smt_hart_halt_q <= smt_hart_halt_d;
+    end
+    assign smt_hart_halt = smt_hart_halt_q;
+  end
+
+  g6lc_hart_state #(
+      .CVA6Cfg(CVA6Cfg)
+  ) i_smt_hart_state (
+      .clk_i,
+      .rst_ni,
+      .active_hart_i (smt_active_hart),
+      .dcache_miss_i (dcache_miss_cache_perf),
+      .icache_miss_i (icache_miss_cache_perf),
+      .issue_stall_i (stall_issue),
+      .long_block_i  (smt_long_block),
+      .hart_halt_i   (smt_hart_halt),
+      .hart_enable_i (smt_hart_enable),
+      .flush_i       (flush_ctrl_if),
+      .miss_clear_i  (smt_miss_clear),
+      .hart_ready_o  (smt_hart_ready),
+      .hart_dmiss_o  (smt_hart_dmiss),
+      .hart_imiss_o  (smt_hart_imiss),
+      .hart_block_o  (smt_hart_block)
+  );
+
+  g6lc_thread_select #(
+      .CVA6Cfg(CVA6Cfg)
+  ) i_smt_thread_select (
+      .clk_i,
+      .rst_ni,
+      .fetch_fire_i        (smt_fetch_fire),
+      .issue_fire_i        (smt_issue_fire),
+      .flush_i             (flush_ctrl_if),
+      .hart_ready_i        (smt_hart_ready),
+      .hart_dmiss_i        (smt_hart_dmiss),
+      .hart_imiss_i        (smt_hart_imiss),
+      .hart_block_i        (smt_hart_block),
+      .active_hart_o       (smt_active_hart),
+      .switch_o            (smt_switch),
+      .switch_on_miss_o    (smt_switch_on_miss),
+      .switch_on_quantum_o (smt_switch_on_quantum),
+      .switch_on_starve_o  (smt_switch_on_starve)
+  );
+
+  // U5 full OoO lives in issue_stage (g6lc_ooo_dispatch) when OoOEn=1.
 
   logic [CVA6Cfg.NrWbPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_ex_id;
   logic [CVA6Cfg.NrWbPorts-1:0][CVA6Cfg.XLEN-1:0] wbdata_ex_id;
@@ -870,6 +1045,8 @@ module cva6
       .clk_i,
       .rst_ni,
       .sb_full_o               (sb_full),
+      .spec_cancel_o           (spec_cancel),
+      .cancelled_mask_o        (sb_cancelled_mask),
       .flush_unissued_instr_i  (flush_unissued_instr_ctrl_id),
       .flush_i                 (flush_ctrl_id),
       .stall_i                 (stall_acc_id),
@@ -886,6 +1063,7 @@ module cva6
       .fu_data_o               (fu_data_id_ex),
       .alu_bypass_o            (alu_bypass_id_ex),
       .pc_o                    (pc_id_ex),
+      .branch_hart_o           (branch_hart_id_ex),
       .is_zcmt_o               (zcmt_id_ex),
       .is_compressed_instr_o   (is_compressed_instr_id_ex),
       .tinst_o                 (tinst_ex),
@@ -949,6 +1127,11 @@ module cva6
       .commit_ack_i         (commit_ack_commit_id),
       // Performance Counters
       .stall_issue_o        (stall_issue),
+      .ooo_rename_stall_o   (ooo_rename_stall),
+      .ooo_iq_full_o        (ooo_iq_full),
+      .ooo_rob_full_o       (ooo_rob_full),
+      .ooo_lsq_stall_o      (ooo_lsq_stall),
+      .ooo_stl_forward_o    (ooo_stl_forward),
       //RVFI
       .rvfi_issue_pointer_o (rvfi_issue_pointer),
       .rvfi_commit_pointer_o(rvfi_commit_pointer),
@@ -982,11 +1165,13 @@ module cva6
       .rst_ni(rst_ni),
       .debug_mode_i(debug_mode),
       .flush_i(flush_ctrl_ex),
+      .cancelled_mask_i(sb_cancelled_mask),
       .rs1_forwarding_i(rs1_forwarding_id_ex),
       .rs2_forwarding_i(rs2_forwarding_id_ex),
       .fu_data_i(fu_data_id_ex),
       .alu_bypass_i(alu_bypass_id_ex),
       .pc_i(pc_id_ex),
+      .branch_hart_i(branch_hart_id_ex),
       .is_zcmt_i(zcmt_id_ex),
       .is_compressed_instr_i(is_compressed_instr_id_ex),
       .tinst_i(tinst_ex),
@@ -1163,9 +1348,9 @@ module cva6
   assign commit_ack = commit_macro_ack & ~commit_drop_id_commit;
 
   // ---------
-  // CSR
+  // CSR (U6.1: banked via g6lc_smt_csr_bank when NrHarts>1)
   // ---------
-  csr_regfile #(
+  g6lc_smt_csr_bank #(
       .CVA6Cfg           (CVA6Cfg),
       .exception_t       (exception_t),
       .jvt_t             (jvt_t),
@@ -1176,13 +1361,16 @@ module cva6
   ) csr_regfile_i (
       .clk_i,
       .rst_ni,
+      .active_hart_i           (smt_active_hart),
+      .switch_i                (smt_switch),
       .time_irq_i,
+      .rtc_time_i,
       .flush_o                 (flush_csr_ctrl),
       .halt_csr_o              (halt_csr_ctrl),
       .commit_instr_i          (commit_instr_id_commit[0]),
       .commit_ack_i            (commit_ack),
       .boot_addr_i             (boot_addr_i[CVA6Cfg.VLEN-1:0]),
-      .hart_id_i               (hart_id_i[CVA6Cfg.XLEN-1:0]),
+      .hart_id_base_i          (hart_id_i[CVA6Cfg.XLEN-1:0]),
       .ex_i                    (ex_commit),
       .csr_op_i                (csr_op_commit_csr),
       .csr_addr_i              (csr_addr_ex_csr),
@@ -1243,6 +1431,8 @@ module cva6
       .perf_data_o             (data_csr_perf),
       .perf_data_i             (data_perf_csr),
       .perf_we_o               (we_csr_perf),
+      .scountovf_i             (scountovf_perf_csr),
+      .lcofi_i                 (lcofi_perf_csr),
       .pmpcfg_o                (pmpcfg),
       .pmpaddr_o               (pmpaddr),
       .mcountinhibit_o         (mcountinhibit_csr_perf),
@@ -1252,6 +1442,10 @@ module cva6
       .mcbcfe_o                (mcbcfe),
       .scbcfe_o                (scbcfe),
       .hcbcfe_o                (hcbcfe),
+      .mcbze_o                 (mcbze),
+      .scbze_o                 (scbze),
+      .hcbze_o                 (hcbze),
+      .pbmte_o                 (pbmte),
       .jvt_o                   (jvt),
       //RVFI
       .rvfi_csr_o              (rvfi_csr),
@@ -1280,10 +1474,13 @@ module cva6
         .clk_i         (clk_i),
         .rst_ni        (rst_ni),
         .debug_mode_i  (debug_mode),
+        .priv_lvl_i    (priv_lvl),
         .addr_i        (addr_csr_perf),
         .we_i          (we_csr_perf),
         .data_i        (data_csr_perf),
         .data_o        (data_perf_csr),
+        .scountovf_o   (scountovf_perf_csr),
+        .lcofi_o       (lcofi_perf_csr),
         .commit_instr_i(commit_instr_id_commit),
         .commit_ack_i  (commit_ack),
 
@@ -1292,6 +1489,17 @@ module cva6
         .itlb_miss_i        (itlb_miss_ex_perf),
         .dtlb_miss_i        (dtlb_miss_ex_perf),
         .sb_full_i          (sb_full),
+        .ooo_rename_stall_i (ooo_rename_stall),
+        .ooo_iq_full_i      (ooo_iq_full),
+        .ooo_rob_full_i     (ooo_rob_full),
+        .ooo_lsq_stall_i    (ooo_lsq_stall),
+        .ooo_stl_forward_i  (ooo_stl_forward),
+        .l2_miss_i          (l2_miss_i),
+        .l3_hit_i           (l3_hit_i),
+        .l3_miss_i          (l3_miss_i),
+        .pf_issue_i         (pf_issue_i),
+        .pf_train_i         (pf_train_i),
+        .spec_cancel_i      (spec_cancel),
         // TODO this is more complex that that
         // If superscalar then we additionally have to check [1] when transaction 0 succeeded
         .if_empty_i         (~fetch_valid_if_id[0]),
@@ -1309,6 +1517,8 @@ module cva6
   end : gen_perf_counter
   else begin : gen_no_perf_counter
     assign data_perf_csr = '0;
+    assign scountovf_perf_csr = '0;
+    assign lcofi_perf_csr = 1'b0;
   end : gen_no_perf_counter
 
   // ------------
@@ -1339,6 +1549,7 @@ module cva6
       .halt_acc_i            (halt_acc_ctrl),
       .halt_frontend_o       (halt_frontend),
       .halt_o                (halt_ctrl),
+      .smt_switch_i          (smt_switch),
       // control ports
       .eret_i                (eret),
       .ex_valid_i            (ex_commit.valid),
@@ -1509,9 +1720,12 @@ module cva6
         .hwpf_status_o      (  /*FIXME*/),
 
         .noc_req_o (noc_req_o),
-        .noc_resp_i(noc_resp_i)
+        .noc_resp_i(noc_resp_i),
+        // U6.2 external L1 inv from coherence hub
+        .inval_addr_i (inval_addr),
+        .inval_valid_i(inval_valid),
+        .inval_ready_o(inval_ready)
     );
-    assign inval_ready   = 1'b1;
     assign miss_vld_bits = '0;
   end else begin : gen_cache_wb
     std_cache_subsystem #(
@@ -1627,8 +1841,8 @@ module cva6
         .acc_dcache_req_ports_o(dcache_req_ports_acc_cache),
         .acc_dcache_req_ports_i(dcache_req_ports_cache_acc),
         .inval_ready_i         (inval_ready),
-        .inval_valid_o         (inval_valid),
-        .inval_addr_o          (inval_addr),
+        .inval_valid_o         (acc_inval_valid),
+        .inval_addr_o          (acc_inval_addr),
         .acc_req_o             (cvxif_req_o),
         .acc_resp_i            (cvxif_resp_i)
     );
@@ -1654,9 +1868,9 @@ module cva6
     // MMU access is unused
     assign acc_mmu_req                = '0;
 
-    // No invalidation interface
-    assign inval_valid                = '0;
-    assign inval_addr                 = '0;
+    // No accelerator invalidation — external l1_inval_* still reach the D$
+    assign acc_inval_valid            = 1'b0;
+    assign acc_inval_addr             = '0;
 
     // Feed through cvxif
     assign cvxif_req_o                = cvxif_req;
@@ -1874,7 +2088,7 @@ module cva6
       .wdata_i     (wdata_commit_id),
 
       .csr_i(rvfi_csr),
-      .irq_i(irq_i),
+      .irq_i(irq_active),
       .resolved_branch_i(resolved_branch),
       .flu_trans_id_ex_id_i(flu_trans_id_ex_id),
       .rvfi_probes_o(rvfi_probes_o)

@@ -34,6 +34,29 @@ module axi_riscv_amos_alu # (
         if (amo_op_i == axi_pkg::ATOP_ATOMICSWAP) begin
             // Swap operation
             amo_result_o = amo_operand_b_i;
+        end else if (amo_op_i == axi_pkg::ATOP_ATOMICCMP) begin
+            // Zacas AMOCAS via AXI AtomicCompare.
+            // W data layout (from CVA6 missunit / hpdcache): {cmp[31:0], swap[31:0]}
+            // for word CAS on a 64-bit data path. For pure 32-bit DATA_WIDTH, treat
+            // b as swap and compare a==b (limited). Double-word: compare full a to
+            // high/low n/a — word path is the Verilator smoke target.
+            if (DATA_WIDTH >= 64) begin
+                automatic logic [31:0] cas_cmp  = amo_operand_b_i[63:32];
+                automatic logic [31:0] cas_swap = amo_operand_b_i[31:0];
+                automatic logic [31:0] cas_mem  = amo_operand_a_i[31:0];
+                // Preserve upper half of the 64-bit lane; CAS the low word.
+                // (Word AMOs are issued at natural alignment; high-half word CAS
+                //  still works if the adapter places the pack in the active lane.)
+                if (cas_mem == cas_cmp) begin
+                    amo_result_o = {amo_operand_a_i[DATA_WIDTH-1:32], cas_swap};
+                end else begin
+                    amo_result_o = amo_operand_a_i;
+                end
+            end else begin
+                // 32-bit datapath: b is swap only; keep if a != b (degenerate)
+                amo_result_o = (amo_operand_a_i == amo_operand_b_i) ? amo_operand_b_i
+                                                                   : amo_operand_a_i;
+            end
         end else if ((amo_op_i[5:4] == axi_pkg::ATOP_ATOMICLOAD) | (amo_op_i[5:4] == axi_pkg::ATOP_ATOMICSTORE)) begin
             // Load operation
             unique case (amo_op_i[2:0])

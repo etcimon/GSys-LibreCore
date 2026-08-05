@@ -1,5 +1,16 @@
 package build_config_pkg;
 
+  // Scale FETCH_WIDTH with issue width: min bits for N×{16,32}-bit instrs, pot.
+  function automatic int unsigned build_fetch_width(int unsigned n_issue, bit rvc);
+    int unsigned min_bits;
+    int unsigned fw;
+    min_bits = n_issue * (rvc ? 16 : 32);
+    if (min_bits < 32) min_bits = 32;
+    fw = 32;
+    while (fw < min_bits && fw < config_pkg::CVA6_MAX_FETCH_WIDTH) fw = fw << 1;
+    return fw;
+  endfunction
+
   function automatic config_pkg::cva6_cfg_t build_config(config_pkg::cva6_user_cfg_t CVA6Cfg);
     bit IS_XLEN32 = (CVA6Cfg.XLEN == 32) ? 1'b1 : 1'b0;
     bit IS_XLEN64 = (CVA6Cfg.XLEN == 32) ? 1'b0 : 1'b1;
@@ -46,11 +57,41 @@ package build_config_pkg;
     cfg.TechnoCut = CVA6Cfg.TechnoCut;
 
     cfg.SuperscalarEn = CVA6Cfg.SuperscalarEn;
-    cfg.NrCommitPorts = CVA6Cfg.SuperscalarEn ? unsigned'(2) : CVA6Cfg.NrCommitPorts;
-    cfg.NrIssuePorts = unsigned'(CVA6Cfg.SuperscalarEn ? 2 : 1);
-    cfg.SpeculativeSb = CVA6Cfg.SuperscalarEn;
+    // Issue width: explicit 1..8, or auto from SuperscalarEn (legacy: SS→2, else 1).
+    if (CVA6Cfg.NrIssuePorts == 0) begin
+      cfg.NrIssuePorts = unsigned'(CVA6Cfg.SuperscalarEn ? 2 : 1);
+    end else begin
+      cfg.NrIssuePorts = CVA6Cfg.NrIssuePorts;
+    end
+    // Commit ports: keep user value if wide enough; else match issue width under SS.
+    // Hang-6: NrCommitPorts=1 under dual still BADOFFSET — not dual-commit residual.
+    if (CVA6Cfg.SuperscalarEn) begin
+      if (CVA6Cfg.NrCommitPorts >= cfg.NrIssuePorts)
+        cfg.NrCommitPorts = CVA6Cfg.NrCommitPorts;
+      else if (CVA6Cfg.NrCommitPorts >= 2)
+        cfg.NrCommitPorts = CVA6Cfg.NrCommitPorts;  // allow commit < issue
+      else
+        cfg.NrCommitPorts = cfg.NrIssuePorts > 2 ? cfg.NrIssuePorts : unsigned'(2);
+    end else begin
+      cfg.NrCommitPorts = CVA6Cfg.NrCommitPorts;
+    end
+    // Speculative SB: superscalar may issue non-CF ops past unresolved branches.
+    // Younger cancel sets cancelled+valid for commit_drop; commit frees without
+    // LSU/AMO side-effects (fixes SS size-0 memcpy hang on mispredict).
+    // Hang-6 bisect: SpeculativeSb=0 under dual still failed /cpus BADOFFSET —
+    // not the root cause. Keep production coupling.
+    cfg.SpeculativeSb = CVA6Cfg.SuperscalarEn || CVA6Cfg.SliceOoOEn || CVA6Cfg.OoOEn ||
+                        CVA6Cfg.DeepSpecEn;
+    cfg.DeepSpecEn = CVA6Cfg.DeepSpecEn;
 
-    cfg.NrALUs = CVA6Cfg.SuperscalarEn ? unsigned'(2) : unsigned'(1);
+    // Dual ALU minimum under SS; scale toward issue width (cap 4 for area).
+    // Hang-6: NrALUs=1 under dual still BADOFFSET — not dual-ALU residual.
+    if (CVA6Cfg.SuperscalarEn) begin
+      cfg.NrALUs = (cfg.NrIssuePorts >= 4) ? unsigned'(4) :
+                   (cfg.NrIssuePorts >= 2) ? unsigned'(2) : unsigned'(1);
+    end else begin
+      cfg.NrALUs = unsigned'(1);
+    end
     cfg.ALUBypass = CVA6Cfg.SuperscalarEn ? bit'(CVA6Cfg.ALUBypass) : bit'(0);
 
     cfg.NrLoadPipeRegs = CVA6Cfg.NrLoadPipeRegs;
@@ -61,12 +102,20 @@ package build_config_pkg;
     cfg.AxiUserWidth = CVA6Cfg.AxiUserWidth;
     cfg.MEM_TID_WIDTH = CVA6Cfg.MemTidWidth;
     cfg.NrLoadBufEntries = CVA6Cfg.NrLoadBufEntries;
+    // FSE S1: raise load-buffer floor for MLP when DeepSpecEn (B2).
+    if (CVA6Cfg.DeepSpecEn) begin
+      automatic int unsigned load_floor = cfg.NrIssuePorts * 4;
+      if (load_floor < 8) load_floor = 8;
+      if (cfg.NrLoadBufEntries < load_floor) cfg.NrLoadBufEntries = load_floor;
+    end
     cfg.RVF = CVA6Cfg.RVF;
     cfg.RVD = CVA6Cfg.RVD;
     cfg.XF16 = CVA6Cfg.XF16;
     cfg.XF16ALT = CVA6Cfg.XF16ALT;
     cfg.XF8 = CVA6Cfg.XF8;
     cfg.RVA = CVA6Cfg.RVA;
+    // Zacas requires Zaamo/A (RVA). Illegal if set without RVA — check_cfg asserts.
+    cfg.RVZacas = CVA6Cfg.RVZacas && CVA6Cfg.RVA;
     cfg.RVB = CVA6Cfg.RVB || CVA6Cfg.ZKN; // ZKN requires RVB
     cfg.ZKN = CVA6Cfg.ZKN;
     cfg.RVV = CVA6Cfg.RVV;
@@ -80,10 +129,18 @@ package build_config_pkg;
     cfg.CoproType = CVA6Cfg.CoproType;
     cfg.RVZiCond = CVA6Cfg.RVZiCond;
     cfg.RVZiCbom = CVA6Cfg.RVZiCbom;
+    cfg.RVZiCboz = CVA6Cfg.RVZiCboz;
+    cfg.RVZiCbop = CVA6Cfg.RVZiCbop;
     cfg.RVZicntr = CVA6Cfg.RVZicntr;
     cfg.RVZihpm = CVA6Cfg.RVZihpm;
     cfg.NR_SB_ENTRIES = CVA6Cfg.NrScoreboardEntries;
-    cfg.TRANS_ID_BITS = $clog2(CVA6Cfg.NrScoreboardEntries);
+    // FSE S1: deepen in-flight window floor when DeepSpecEn (B3 companion).
+    if (CVA6Cfg.DeepSpecEn) begin
+      automatic int unsigned sb_floor = cfg.NrIssuePorts * 8;
+      if (sb_floor < 16) sb_floor = 16;
+      if (cfg.NR_SB_ENTRIES < sb_floor) cfg.NR_SB_ENTRIES = sb_floor;
+    end
+    cfg.TRANS_ID_BITS = $clog2(cfg.NR_SB_ENTRIES);
 
     cfg.FpPresent = bit'(FpPresent);
     cfg.NSX = bit'(NSX);
@@ -92,9 +149,13 @@ package build_config_pkg;
     cfg.XF16Vec = bit'(XF16Vec);
     cfg.XF16ALTVec = bit'(XF16ALTVec);
     cfg.XF8Vec = bit'(XF8Vec);
-    // Can take 2 or 3 in single issue. 4 or 6 in dual issue.
-    cfg.NrRgprPorts = unsigned'(CVA6Cfg.SuperscalarEn ? 4 : 2);
-    // cfg.NrRgprPorts = unsigned'(CVA6Cfg.SuperscalarEn ? 6 : 3);
+    // 2 read ports per issue slot (rs1/rs2). Zacas AMOCAS needs rd as a third
+    // source (expected value) → 3 ports/slot when RVZacas. CVXIF also uses
+    // OPERANDS_PER_INSTR==3 when NrRgprPorts/NrIssuePorts == 3.
+    if (CVA6Cfg.RVZacas)
+      cfg.NrRgprPorts = unsigned'(cfg.NrIssuePorts * 3);
+    else
+      cfg.NrRgprPorts = unsigned'(cfg.NrIssuePorts * 2);
     cfg.NrWbPorts = unsigned'(NrWbPorts);
     cfg.EnableAccelerator = bit'(EnableAccelerator);
     cfg.PerfCounterEn = CVA6Cfg.PerfCounterEn;
@@ -110,6 +171,20 @@ package build_config_pkg;
     cfg.BPType = CVA6Cfg.BPType;
     cfg.BHTEntries = CVA6Cfg.BHTEntries;
     cfg.BHTHist = CVA6Cfg.BHTHist;
+    cfg.BPGhistLen = CVA6Cfg.BPGhistLen;
+    cfg.BPTageTables = CVA6Cfg.BPTageTables;
+    cfg.BPTageTableEntries = CVA6Cfg.BPTageTableEntries;
+    cfg.BPTageTagBits = CVA6Cfg.BPTageTagBits;
+    cfg.BPLoopEn = CVA6Cfg.BPLoopEn;
+    cfg.BPIndirectEn = CVA6Cfg.BPIndirectEn;
+    cfg.BPIndirectEntries = CVA6Cfg.BPIndirectEntries;
+    cfg.BPStatCorEn = CVA6Cfg.BPStatCorEn;
+    cfg.BPCkptDepth = CVA6Cfg.BPCkptDepth;
+    // FSE S1: BP checkpoints must cover the speculative window.
+    if (CVA6Cfg.DeepSpecEn) begin
+      if (cfg.BPCkptDepth == 0 || cfg.BPCkptDepth < cfg.NR_SB_ENTRIES)
+        cfg.BPCkptDepth = cfg.NR_SB_ENTRIES;
+    end
     cfg.DmBaseAddress = CVA6Cfg.DmBaseAddress;
     cfg.TvalEn = CVA6Cfg.TvalEn;
     cfg.DirectVecOnly = CVA6Cfg.DirectVecOnly;
@@ -129,6 +204,13 @@ package build_config_pkg;
     cfg.CachedRegionAddrBase = CVA6Cfg.CachedRegionAddrBase;
     cfg.CachedRegionLength = CVA6Cfg.CachedRegionLength;
     cfg.MaxOutstandingStores = CVA6Cfg.MaxOutstandingStores;
+    // FSE S1: store outstanding floor (B1 companion; STQ depth derived in store_buffer).
+    if (CVA6Cfg.DeepSpecEn) begin
+      automatic int unsigned st_floor = cfg.NrIssuePorts * 4;
+      if (st_floor < 8) st_floor = 8;
+      if (st_floor > 16) st_floor = 16;  // check_cfg + STQ CAM cap
+      if (cfg.MaxOutstandingStores < st_floor) cfg.MaxOutstandingStores = st_floor;
+    end
     cfg.DebugEn = CVA6Cfg.DebugEn;
     cfg.SDTRIG = CVA6Cfg.SDTRIG;
     cfg.Mcontrol6 = CVA6Cfg.Mcontrol6;
@@ -168,9 +250,14 @@ package build_config_pkg;
     cfg.WtDcacheWbufDepth = CVA6Cfg.WtDcacheWbufDepth;
     cfg.FETCH_USER_WIDTH = CVA6Cfg.FetchUserWidth;
     cfg.FETCH_USER_EN = CVA6Cfg.FetchUserEn;
-    cfg.AXI_USER_EN = CVA6Cfg.DataUserEn | CVA6Cfg.FetchUserEn;
+    // Non-zero enables (DataUserEn/FetchUserEn are int unsigned enables).
+    // Cast to int: bare || yields 1-bit and trips Verilator WIDTHEXPAND (and
+    // has crashed Verilator 5.020 with an internal fault on this design).
+    cfg.AXI_USER_EN = int'((CVA6Cfg.DataUserEn != 0) || (CVA6Cfg.FetchUserEn != 0));
 
-    cfg.FETCH_WIDTH = unsigned'(CVA6Cfg.SuperscalarEn ? 64 : 32);
+    // Front-end bus: enough bits for NrIssuePorts compressed (16b) or full (32b)
+    // instructions, rounded up to the next supported power-of-two width.
+    cfg.FETCH_WIDTH = build_fetch_width(cfg.NrIssuePorts, CVA6Cfg.RVC);
     cfg.FETCH_ALIGN_BITS = $clog2(cfg.FETCH_WIDTH / 8);
     cfg.INSTR_PER_FETCH = cfg.FETCH_WIDTH / (CVA6Cfg.RVC ? 16 : 32);
     cfg.LOG2_INSTR_PER_FETCH = cfg.INSTR_PER_FETCH > 1 ? $clog2(cfg.INSTR_PER_FETCH) : 1;
@@ -187,6 +274,164 @@ package build_config_pkg;
     cfg.DataTlbEntries = CVA6Cfg.DataTlbEntries;
     cfg.UseSharedTlb = CVA6Cfg.UseSharedTlb;
     cfg.SvnapotEn = CVA6Cfg.SvnapotEn;
+    cfg.SstcEn = CVA6Cfg.SstcEn;
+    cfg.SscofpmfEn = CVA6Cfg.SscofpmfEn;
+    cfg.ZihintpauseEn = CVA6Cfg.ZihintpauseEn;
+    cfg.SvpbmtEn = CVA6Cfg.SvpbmtEn;
+    cfg.ZawrsEn = CVA6Cfg.ZawrsEn;
+    cfg.L2En = CVA6Cfg.L2En;
+    // L2/L3 geometry filled later (auto-infer when 0); placeholder until then.
+    cfg.L2ByteSize = CVA6Cfg.L2ByteSize;
+    cfg.L2SetAssoc = CVA6Cfg.L2SetAssoc;
+    cfg.L2LineWidth = CVA6Cfg.L2LineWidth;
+    cfg.L2MshrDepth = CVA6Cfg.L2MshrDepth;
+    cfg.L2DataBanks = CVA6Cfg.L2DataBanks;
+    cfg.NrHarts = (CVA6Cfg.NrHarts == 0) ? unsigned'(1) : CVA6Cfg.NrHarts;
+    cfg.SmtPolicy = CVA6Cfg.SmtPolicy;
+    // Quantum 0 → 1 so NrHarts==1 configs stay legal without every package listing it.
+    cfg.SmtFetchQuantum = (CVA6Cfg.SmtFetchQuantum == 0) ? unsigned'(1)
+                                                         : CVA6Cfg.SmtFetchQuantum;
+    cfg.SmtStarveLimit = CVA6Cfg.SmtStarveLimit;
+    // Cluster size: 0 → 1 (single-core identity). Cap at CVA6_MAX_CORES.
+    if (CVA6Cfg.NrCores == 0)
+      cfg.NrCores = unsigned'(1);
+    else if (CVA6Cfg.NrCores > config_pkg::CVA6_MAX_CORES)
+      cfg.NrCores = config_pkg::CVA6_MAX_CORES;
+    else
+      cfg.NrCores = CVA6Cfg.NrCores;
+    cfg.CohPolicy = CVA6Cfg.CohPolicy;
+    cfg.SnoopFilterEn = CVA6Cfg.SnoopFilterEn;
+    cfg.SnoopFilterEntries = CVA6Cfg.SnoopFilterEntries;
+    // Multi-core defaults when depths left zero.
+    cfg.CohInvalDepth = (CVA6Cfg.CohInvalDepth == 0 && cfg.NrCores > 1)
+                            ? unsigned'(4) : CVA6Cfg.CohInvalDepth;
+    cfg.CohAxiStarveLimit = (CVA6Cfg.CohAxiStarveLimit == 0 && cfg.NrCores > 1)
+                            ? unsigned'(16) : CVA6Cfg.CohAxiStarveLimit;
+    cfg.WayPredEn = CVA6Cfg.WayPredEn;
+    cfg.WayPredEntries = CVA6Cfg.WayPredEntries;
+    cfg.ReplPolicy = CVA6Cfg.ReplPolicy;
+    cfg.HwPrefetchEn = CVA6Cfg.HwPrefetchEn;
+    cfg.HwPrefetchStreams = CVA6Cfg.HwPrefetchStreams;
+    cfg.DcacheMshrDepth = CVA6Cfg.DcacheMshrDepth;
+    cfg.FtqDepth = CVA6Cfg.FtqDepth;
+    cfg.FdipEn = CVA6Cfg.FdipEn;
+    cfg.FdipDistance = CVA6Cfg.FdipDistance;
+    cfg.LoopBufEn = CVA6Cfg.LoopBufEn;
+    cfg.LoopBufEntries = CVA6Cfg.LoopBufEntries;
+    cfg.SliceOoOEn = CVA6Cfg.SliceOoOEn;
+    cfg.SliceIstEntries = CVA6Cfg.SliceIstEntries;
+    cfg.SliceAiqDepth = CVA6Cfg.SliceAiqDepth;
+    cfg.SliceBiqDepth = CVA6Cfg.SliceBiqDepth;
+    cfg.SliceMaxRunahead = CVA6Cfg.SliceMaxRunahead;
+    cfg.OoOEn = CVA6Cfg.OoOEn;
+    // U5 geometry defaults when enabled and left zero.
+    // Scale ROB/IQ/LSQ with issue width so 4-issue is not starved by 2-issue depths.
+    if (CVA6Cfg.OoOEn) begin
+      automatic int unsigned base_rob = CVA6Cfg.NrScoreboardEntries;
+      automatic int unsigned wide_rob = cfg.NrIssuePorts * 16;
+      if (wide_rob > base_rob) base_rob = wide_rob;
+      cfg.RobEntries = (CVA6Cfg.RobEntries == 0) ? base_rob : CVA6Cfg.RobEntries;
+      cfg.PrfEntries = (CVA6Cfg.PrfEntries == 0)
+                           ? unsigned'(32 + cfg.RobEntries + cfg.NrIssuePorts * 4)
+                           : CVA6Cfg.PrfEntries;
+      cfg.IqEntries = (CVA6Cfg.IqEntries == 0)
+                          ? ((cfg.RobEntries * 3) / 4)
+                          : CVA6Cfg.IqEntries;
+      if (cfg.IqEntries < cfg.NrIssuePorts * 4)
+        cfg.IqEntries = cfg.NrIssuePorts * 4;
+      cfg.LsqLoadEntries = (CVA6Cfg.LsqLoadEntries == 0)
+                               ? (CVA6Cfg.NrLoadBufEntries > cfg.NrIssuePorts * 4
+                                      ? CVA6Cfg.NrLoadBufEntries
+                                      : cfg.NrIssuePorts * 4)
+                               : CVA6Cfg.LsqLoadEntries;
+      cfg.LsqStoreEntries = (CVA6Cfg.LsqStoreEntries == 0)
+                                ? (CVA6Cfg.MaxOutstandingStores > cfg.NrIssuePorts * 4
+                                       ? CVA6Cfg.MaxOutstandingStores
+                                       : cfg.NrIssuePorts * 4)
+                                : CVA6Cfg.LsqStoreEntries;
+      cfg.OoORetireWidth = (CVA6Cfg.OoORetireWidth == 0) ? cfg.NrCommitPorts
+                                                         : CVA6Cfg.OoORetireWidth;
+    end else begin
+      cfg.RobEntries = CVA6Cfg.RobEntries;
+      cfg.PrfEntries = CVA6Cfg.PrfEntries;
+      cfg.IqEntries = CVA6Cfg.IqEntries;
+      cfg.LsqLoadEntries = CVA6Cfg.LsqLoadEntries;
+      cfg.LsqStoreEntries = CVA6Cfg.LsqStoreEntries;
+      cfg.OoORetireWidth = CVA6Cfg.OoORetireWidth;
+    end
+    // FSE S3 / U5 production: store-set on by default whenever full OoO is enabled
+    // (can still force-off only by also disabling OoO). Explicit MemDepPredEn=1 keeps on for slice/etc.
+    cfg.MemDepPredEn = CVA6Cfg.MemDepPredEn || CVA6Cfg.OoOEn;
+    cfg.L3En = CVA6Cfg.L3En;
+    // --- Shared L2/L3 geometry inference (0 = auto from NrCores) -------------
+    // Model: shared inclusive L2 below private L1s, shared L3 below L2.
+    //   L2 ≈ max(256 KiB, NrCores × 128 KiB), 8-way, 64 B line, MSHR ~ 4×cores
+    //   L3 ≈ max(2 MiB,  NrCores × 1 MiB),   16-way, match L2 line, MSHR ~ 4×cores
+    //   Prefetch streams ≈ max(4, 2×NrCores); snoop-filter entries ≈ 64×NrCores
+    if (CVA6Cfg.L2En) begin
+      if (CVA6Cfg.L2ByteSize == 0) begin
+        automatic int unsigned l2 = cfg.NrCores * 32'd131072; // 128 KiB / core
+        if (l2 < 32'd262144) l2 = 32'd262144;
+        cfg.L2ByteSize = l2;
+      end else begin
+        cfg.L2ByteSize = CVA6Cfg.L2ByteSize;
+      end
+      cfg.L2SetAssoc = (CVA6Cfg.L2SetAssoc == 0) ? unsigned'(8) : CVA6Cfg.L2SetAssoc;
+      cfg.L2LineWidth = (CVA6Cfg.L2LineWidth == 0) ? unsigned'(512) : CVA6Cfg.L2LineWidth;
+      cfg.L2MshrDepth = (CVA6Cfg.L2MshrDepth == 0)
+                            ? ((cfg.NrCores * 4) < 8 ? unsigned'(8) : cfg.NrCores * 4)
+                            : CVA6Cfg.L2MshrDepth;
+      cfg.L2DataBanks = (CVA6Cfg.L2DataBanks == 0)
+                            ? ((cfg.NrCores < 4) ? unsigned'(4) : cfg.NrCores)
+                            : CVA6Cfg.L2DataBanks;
+    end else begin
+      cfg.L2ByteSize = CVA6Cfg.L2ByteSize;
+      cfg.L2SetAssoc = CVA6Cfg.L2SetAssoc;
+      cfg.L2LineWidth = CVA6Cfg.L2LineWidth;
+      cfg.L2MshrDepth = CVA6Cfg.L2MshrDepth;
+      cfg.L2DataBanks = CVA6Cfg.L2DataBanks;
+    end
+    if (CVA6Cfg.L3En) begin
+      if (CVA6Cfg.L3ByteSize == 0) begin
+        automatic int unsigned l3 = cfg.NrCores * 32'd1048576; // 1 MiB / core
+        if (l3 < 32'd2097152) l3 = 32'd2097152;
+        cfg.L3ByteSize = l3;
+      end else begin
+        cfg.L3ByteSize = CVA6Cfg.L3ByteSize;
+      end
+      cfg.L3SetAssoc = (CVA6Cfg.L3SetAssoc == 0) ? unsigned'(16) : CVA6Cfg.L3SetAssoc;
+      // Match L2 line when either side is auto/0
+      if (CVA6Cfg.L3LineWidth == 0)
+        cfg.L3LineWidth = cfg.L2LineWidth != 0 ? cfg.L2LineWidth : unsigned'(512);
+      else
+        cfg.L3LineWidth = CVA6Cfg.L3LineWidth;
+      cfg.L3MshrDepth = (CVA6Cfg.L3MshrDepth == 0)
+                            ? ((cfg.NrCores * 4) < 16 ? unsigned'(16) : cfg.NrCores * 4)
+                            : CVA6Cfg.L3MshrDepth;
+      cfg.L3DataBanks = (CVA6Cfg.L3DataBanks == 0)
+                            ? ((cfg.NrCores * 2) < 8 ? unsigned'(8) : cfg.NrCores * 2)
+                            : CVA6Cfg.L3DataBanks;
+    end else begin
+      cfg.L3ByteSize = CVA6Cfg.L3ByteSize;
+      cfg.L3SetAssoc = CVA6Cfg.L3SetAssoc;
+      cfg.L3LineWidth = CVA6Cfg.L3LineWidth;
+      cfg.L3MshrDepth = CVA6Cfg.L3MshrDepth;
+      cfg.L3DataBanks = CVA6Cfg.L3DataBanks;
+    end
+    // Multi-core snoop-filter / prefetch defaults when left zero
+    if (cfg.NrCores > 1 && CVA6Cfg.SnoopFilterEn && CVA6Cfg.SnoopFilterEntries == 0)
+      cfg.SnoopFilterEntries = cfg.NrCores * 64;
+    else
+      cfg.SnoopFilterEntries = CVA6Cfg.SnoopFilterEntries;
+    cfg.ServerPrefetchEn = CVA6Cfg.ServerPrefetchEn;
+    if (CVA6Cfg.ServerPrefetchEn && CVA6Cfg.ServerPfStreams == 0) begin
+      automatic int unsigned pfs = cfg.NrCores * 2;
+      cfg.ServerPfStreams = (pfs < 4) ? unsigned'(4) : pfs;
+    end else begin
+      cfg.ServerPfStreams = CVA6Cfg.ServerPfStreams;
+    end
+    cfg.ServerPfDistance = (CVA6Cfg.ServerPfDistance == 0 && CVA6Cfg.ServerPrefetchEn)
+                               ? unsigned'(2) : CVA6Cfg.ServerPfDistance;
     cfg.SharedTlbDepth = CVA6Cfg.SharedTlbDepth;
     cfg.VpnLen = VpnLen;
     cfg.PtLevels = PtLevels;

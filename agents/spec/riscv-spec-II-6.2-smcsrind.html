@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Smcsrind / Sscsrind Indirect CSR Access (Vol II, 6.2)</title></head>
+<body>
+<h1>Vol II &sect;6.2 — Smcsrind and Sscsrind Extensions for Indirect CSR Access</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#indirect-csr">specs/riscv-spec.html#indirect-csr</a>.
+Source line: <code>specs/riscv-spec.html:83960</code>. <strong>Domain:</strong> —.</p>
+
+<p>These extensions provide indirect CSR read/write instructions (<code>csrind</code>) that use a CSR
+index register to select one of a bank of CSRs. They are intended for accessing arrays of state
+(e.g. many performance counters or many PMP entries) without exhausting the 12-bit CSR address space.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"Smcsrind/Sscsrind is an ISA extension that extends the indirect CSR
+access mechanism originally defined as part of the Smaia/Ssaia
+extensions, in order to make it available for use by other extensions
+without creating an unnecessary dependence on Smaia/Ssaia."
+(specs/riscv-spec.html:83960-83965, anchor #indirect-csr)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module indirect_csr (
+  input  logic [11:0] base_addr_i,
+  input  logic [XLEN-1:0] index_i,
+  input  logic        we_i,
+  output logic [XLEN-1:0] data_o
+);
+  // effective_csr = base_addr + index; access selected CSR array entry
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The CSR file in <code>core/csr_regfile.sv</code> uses direct
+12-bit addresses; there is no indirect-index register or auto-increment CSR access mechanism.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Smcsrind/Sscsrind would be advertised in the
+<code>riscv,isa</code> string if implemented.</p>
+</body>
+</html>

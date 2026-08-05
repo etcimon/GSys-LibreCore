@@ -1,0 +1,28 @@
+{
+  "name": "@sv-timing/js",
+  "version": "0.1.0",
+  "description": "TypeScript client and integration tests for sv-timing CLI (AST JSON, debug exports, auto-correct connections). Bun-primary, zero runtime npm deps.",
+  "type": "module",
+  "private": true,
+  "author": "Etienne Cimon",
+  "license": "MIT",
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts",
+    "./client": "./src/client.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bun --bun tsc --noEmit",
+    "self-test": "bun --bun tsc --noEmit && bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  }
+}

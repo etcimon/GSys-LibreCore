@@ -80,7 +80,9 @@ module controller
     // Flush request from commit stage - COMMIT_STAGE
     input logic flush_commit_i,
     // Flush request from accelerator - ACC_DISPATCHER
-    input logic flush_acc_i
+    input logic flush_acc_i,
+    // U6.1 coarse-grain SMT switch: full pipeline flush, PC comes from PC bank
+    input logic smt_switch_i
 );
 
   // active fence - high if we are currently flushing the dcache
@@ -109,7 +111,11 @@ module controller
     // ------------
     // Mis-predict
     // ------------
-    // flush on mispredict
+    // Only real EX is_mispredict. Matching taken Jump must not flush_if:
+    // without NPC reseed it discards the correct target stream (early
+    // load-misalign/illegal); with reseed via is_mispredict, TAGE RAS restore
+    // → IAF mepc=0x1400000000; reseed without TAGE double-pushes RAS → PC=0x4.
+    // Hang-6 residual fallthrough needs a selective IQ kill (not global flush).
     if (resolved_branch_i.is_mispredict) begin
       // flush only un-issued instructions
       flush_unissued_instr_o = 1'b1;
@@ -246,6 +252,22 @@ module controller
       // machine mode. TODO: remove when PMA checkers have been
       // added to the system
       flush_bp_o             = 1'b1;
+    end
+
+    // ---------------------------------
+    // U6.1 fine-grain SMT switch
+    // ---------------------------------
+    // Flush frontend IF path and drop unissued decode; do NOT assert flush_id
+    // (that clears the scoreboard) or flush_ex so in-flight ops of the outgoing
+    // hart can drain. CSR/RF bank by instruction hart_id. Do NOT flush BP —
+    // RAS/GHR are per-hart and must survive. PC from g6lc_smt_pc_bank.
+    if (CVA6Cfg.NrHarts > 1 && smt_switch_i) begin
+      set_pc_commit_o        = 1'b0;
+      flush_if_o             = 1'b1;
+      flush_unissued_instr_o = 1'b1;
+      flush_id_o             = 1'b0;
+      flush_ex_o             = 1'b0;
+      flush_bp_o             = 1'b0;
     end
   end
 

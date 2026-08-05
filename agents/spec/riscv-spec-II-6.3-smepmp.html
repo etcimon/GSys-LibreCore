@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Smepmp PMP Enhancements (Vol II, 6.3)</title></head>
+<body>
+<h1>Vol II &sect;6.3 — Smepmp Extension for PMP Enhancements for Memory Access and Execution Prevention in Machine Mode</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#smepmp">specs/riscv-spec.html#smepmp</a>.
+Source line: <code>specs/riscv-spec.html:84610</code>. <strong>Domain:</strong> RAM.</p>
+
+<p>Smepmp extends PMP to allow M-mode execution prevention and to add a rule-locking feature that
+can restrict M-mode itself. It introduces the MML (Machine Mode Lockdown) bit and X permission
+behaviors that differ from baseline PMP, enabling M-mode code to be execute-only or read-only. This
+is important for secure boot and TEE designs.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"Being able to access the memory of a process running at a high
+privileged execution mode, such as the Supervisor or Machine mode, from
+a lower privileged mode introduces an obvious attack vector since it
+allows for an attacker to perform privilege escalation. Two mechanisms
+combine to prevent this attack vector. The first one prevents the OS
+from accessing the memory of an unprivileged process unless a specific
+code path is followed, and the second one prevents the OS from
+executing the memory of an unprivileged process at all times."
+(specs/riscv-spec.html:84610-84620, anchor #smepmp)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module smepmp_check (
+  input  logic [XLEN-1:0] paddr_i,
+  input  logic [7:0]      pmpcfg_i,
+  input  priv_lvl_e       priv_i,
+  input  logic            mml_i,      // Smepmp lockdown
+  output logic            allow_o
+);
+  // M-mode permissions depend on MML and the new encoding rules
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The baseline PMP in <code>core/pmp/pmp.sv</code> and
+<code>core/pmp/pmp_entry.sv</code> does not implement Smepmp's MML (Machine Mode Lockdown) bit or the
+modified X permission encoding for M-mode. Adding Smepmp would require updating
+<code>pmpcfg</code> interpretation in the PMP entries and CSR write logic in
+<code>core/csr_regfile.sv</code>.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Smepmp would be advertised in the
+<code>riscv,isa</code> string and would interact with the <code>memory@</code> regions protected by PMP.</p>
+</body>
+</html>

@@ -1,0 +1,134 @@
+# .licensing-tiers — path -> licensing tier map for GSys LibreCore.
+#
+# Format:  <TIER> <whitespace> <glob>          (one glob per line; '#' comments)
+# Tiers:   R  LibreCore-original  -> CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+#          T  tooling/docs        -> MIT
+#          U  upstream/third-party-> unchanged, preserve verbatim
+#          F  GPL firmware        -> GPL-2.0-or-later, separate work
+#          P  NDA / foundry PDK   -> LicenseRef-Proprietary
+#
+# Resolution: LAST matching rule wins, so specific rules follow general ones.
+# U is asserted explicitly for whole subtrees to make E-UPSTREAMWRITE enforceable.
+# Governed by AGENTS-licensing.md. Consumed by `build.sh diag run licensing`.
+
+# ------------------------------------------------------------------ default ---
+# Anything not otherwise classified is treated as upstream and left alone.
+U   **
+
+# ------------------------------------------------------------------- tier U ---
+# Vendored / submodule / third-party subtrees. Never relicense, never rename,
+# never alter a copyright, SPDX or attribution line inside these.
+U   vendor/**
+U   core/cvfpu/**
+U   core/cache_subsystem/hpdcache/**
+U   corev_apu/riscv-dbg/**
+U   corev_apu/axi_mem_if/**
+U   corev_apu/fpga/src/ariane-ethernet/**
+U   verif/core-v-verif/**
+U   common/**
+U   config/**
+U   util/**
+
+# ------------------------------------------------------------------- tier R ---
+# LibreCore-original RTL: sole-authorship modules (Case A).
+R   core/ooo/**
+R   core/smt/**
+R   core/g6lc_slice_*.sv
+R   core/g6lc_bp_*.sv
+R   core/frontend/g6lc_bp_*.sv
+R   core/frontend/g6lc_ftq.sv
+R   core/frontend/g6lc_fdip.sv
+R   core/frontend/g6lc_loop_buffer.sv
+R   core/cache_subsystem/g6lc_way_predictor.sv
+R   core/cache_subsystem/g6lc_rrip_repl.sv
+R   core/cache_subsystem/hpdcache_victim_rrip.sv
+R   core/include/g6lc_pkg.sv
+R   core/g6lc.sv
+R   corev_apu/coherence/**
+R   corev_apu/l2_cache/**
+R   corev_apu/l3_cache/**
+R   corev_apu/src/g6lc_axi_2to1_mux.sv
+R   corev_apu/src/g6lc_ara_attach.sv
+R   corev_apu/src/g6lc_cluster.sv
+
+# LibreCore-original reference device trees (hardware description; NOT tier T).
+R   corev_apu/bootrom/ariane-linux.dts
+R   corev_apu/bootrom/ariane-smt2.dts
+R   corev_apu/bootrom/ariane-server-math-v.dts
+
+# Substantially-modified upstream RTL relicensed under Apache-2.0 s.4 (Case B).
+# Upstream copyright + SHL notices are RETAINED VERBATIM in these files; only the
+# outbound offer for the file as a whole is tier R. See AGENTS-licensing.md.
+R   core/csr_regfile.sv
+R   core/decoder.sv
+R   core/perf_counters.sv
+R   core/frontend/frontend.sv
+R   core/frontend/ras.sv
+R   core/frontend/g6lc_bp_gshare.sv
+R   core/cache_subsystem/g6lc_icache.sv
+R   corev_apu/src/ariane.sv
+R   core/include/g6lc64_smt2_config_pkg.sv
+R   core/include/g6lc64_ooo_config_pkg.sv
+R   core/include/g6lc64_ooo_server_config_pkg.sv
+R   core/include/g6lc64_server_math_config_pkg.sv
+R   core/include/g6lc64_server_math_v_config_pkg.sv
+
+# --- DE MINIMIS EXCLUSIONS (deliberately tier U, do not "fix") ----------------
+# These carry an Etienne Cimon modification but the delta is too small to support
+# relicensing the whole file. Measured against upstream a962460:
+#   core/include/ariane_pkg.sv   +39/-7  in 806 lines (4.8%)  <- chokepoint file
+#   corev_apu/clint/clint.sv      +8/-1  in 264 lines         <- clearly trivial
+# Asserting CERN-OHL-S over ETH Zurich's work on this basis would be an
+# overreach and is the weakest link in the reciprocity chain. Keep as tier U and
+# keep the "Modified by" attribution. Re-audit if the delta grows past
+# DE_MINIMIS_MIN_ADDED_LINES.
+U   core/include/ariane_pkg.sv
+U   corev_apu/clint/clint.sv
+
+# ------------------------------------------------------------------- tier T ---
+T   build-platform/**
+T   sv-timing/**
+T   corev-mb/lib/**
+T   docs/**
+T   architecture/**
+T   agents/**
+T   verif/regress/**
+T   verif/tb/**
+T   verif/tests/**
+T   verif/sv-timing-tests/**
+T   verif/sim/**
+# Linux / OpenSBI reference software and payload (not-quite-RTL).
+T   software/**
+# Repo-root control surface, bootstrap wrappers and CI.
+T   .config.ts
+T   build.sh
+T   build.ps1
+T   docs.sh
+T   docs.ps1
+T   setenv.sh
+T   setenv.ps1
+T   .github/**
+# LibreCore-authored flist that lives beside a vendored submodule. The submodule
+# itself (vendor/ara/upstream) is tier U and stays SHL-0.51.
+T   vendor/ara/Flist.ara
+# Re-assert U inside tier T for the vendored verification environment.
+U   verif/core-v-verif/**
+# agents/spec/** are annotated copies of the RISC-V specification, not our work.
+U   agents/spec/**
+
+# ------------------------------------------------------------------- tier F ---
+F   corev_apu/fpga/src/bootrom/**
+# ...but the Apache-licensed bootrom sources keep their own license (tier U
+# semantics: preserve verbatim). Only the GPL files are GPL.
+U   corev_apu/fpga/src/bootrom/src/main.c
+U   corev_apu/fpga/src/bootrom/src/uart.*
+U   corev_apu/fpga/src/bootrom/src/spi.*
+U   corev_apu/fpga/src/bootrom/src/sd.*
+U   corev_apu/fpga/src/bootrom/src/gpt.*
+U   corev_apu/fpga/src/bootrom/src/bootrom_*.h
+U   corev_apu/fpga/src/bootrom/src/mmc.h
+
+# ------------------------------------------------------------------- tier P ---
+# Enabled only by the opt-in technology pass; see AGENTS-technology.md.
+P   **/*.tech-spec.md
+P   pdk/**

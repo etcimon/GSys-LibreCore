@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zaamo Atomic Memory Operations (Vol I, 5.6)</title></head>
+<body>
+<h1>Vol I &sect;5.6 — Zaamo Extension for Atomic Memory Operations</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zaamo">specs/riscv-spec.html#ext:zaamo</a>.
+<strong>Domain:</strong> RAM, CACHE, SPEC.</p>
+
+<p>Zaamo defines the AMO instructions (AMOSWAP/ADD/AND/OR/XOR/MIN/MAX/MINU/MAXU) operating on aligned
+word/doubleword/quadword. They atomically load a data value from the address in <em>rs1</em>, place
+the value into register <em>rd</em>, apply a binary operator to the loaded value and the original
+value in <em>rs2</em>, then store the result back to the original address in <em>rs1</em>. AMOs
+support acquire/release ordering bits. For RV64, 32-bit AMOs always sign-extend the value placed in
+<em>rd</em> and ignore the upper 32 bits of <em>rs2</em>.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The atomic memory operation (AMO) instructions perform read-modify-write
+operations for multiprocessor synchronization and are encoded with an
+R-type instruction format. These AMO instructions atomically load a data
+value from the address in rs1, place the value into register rd, apply a
+binary operator to the loaded value and the original value in rs2, then
+store the result back to the original address in rs1. AMOs can either
+operate on doublewords (RV64 only) or words in memory. For RV64, 32-bit
+AMOs always sign-extend the value placed in rd, and ignore the upper 32
+bits of the original value of rs2."
+(specs/riscv-spec.html:14907-14940, anchor #ext:zaamo / #norm:amo_operand_size)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module zaamo_alu (
+  input  logic [XLEN-1:0] addr_i, operand_i, mem_i,
+  input  amo_op_e         op_i,
+  output logic [XLEN-1:0] result_o,
+  output logic            write_o
+);
+  // atomic read-modify-write; aq/rl forwarded to memory-ordering controller
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented when <code>CVA6Cfg.RVA</code> is set. Decode in
+<code>core/decoder.sv:1602-1647</code> maps funct7/funct3 to <code>AMO_*W</code>/<code>AMO_*D</code>
+operations; <code>core/store_unit.sv:134-135,282-319</code> reduces these to the canonical
+<code>AMO_SWAP/ADD/AND/OR/XOR/MIN/MAX/MINU/MAXU</code> values; <code>core/amo_buffer.sv:50-63</code>
+holds the AMO until commit. The atomic ALU is in <code>core/cache_subsystem/amo_alu.sv:14-65</code>. The
+WT cache path issues AMO transactions through <code>core/cache_subsystem/wt_dcache_missunit.sv:576-583</code>
+and the AXI ATOP encoding in <code>core/cache_subsystem/wt_axi_adapter.sv:252-280</code>; the HPDcache
+path translates AMO operations in <code>core/cache_subsystem/cva6_hpdcache_if_adapter.sv:189-219</code>.</p>
+
+<p><strong>.dts linkage:</strong> AMO support is exposed via the <code>riscv,isa</code> string and requires
+cacheable/coherent <code>memory@</code> nodes aligned with the <code>CachedRegion</code> PMA rules.</p>
+</body>
+</html>

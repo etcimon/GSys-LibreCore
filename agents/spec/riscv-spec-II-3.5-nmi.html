@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Non-Maskable Interrupts (Vol II, 3.5)</title></head>
+<body>
+<h1>Vol II &sect;3.5 — Non-Maskable Interrupts</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#nmi">specs/riscv-spec.html#nmi</a>.
+Source line: <code>specs/riscv-spec.html:75904</code>. <strong>Domain:</strong> SPEC.</p>
+
+<p>NMIs are highest-priority interrupts that cannot be disabled by <code>mstatus.mie</code>. They use a
+dedicated trap vector and preserve the pre-NMI PC in <code>mnepc</code>. NMIs must be taken precisely
+and cannot be nested until the handler acknowledges the NMI. Any speculation/flush unit must preserve
+NMI priority over ordinary interrupts and exceptions.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"Non-maskable interrupts (NMIs) are only used for hardware error
+conditions, and cause an immediate jump to an implementation-defined
+NMI vector running in M-mode regardless of the state of a hart's
+interrupt enable bits. The mepc register is written with the virtual
+address of the instruction that was interrupted, and mcause is set to a
+value indicating the source of the NMI."
+(specs/riscv-spec.html:75904-75912, anchor #nmi)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module nmi_unit (
+  input  logic        nmi_i,
+  input  priv_lvl_e   priv_i,
+  output logic        take_nmi_o,
+  output logic [XLEN-1:0] vector_o,
+  output logic [XLEN-1:0] mnepc_o
+);
+  // highest priority; disable further NMIs until handler returns
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent / not separately documented. The standard interrupt path uses
+<code>corev_apu/rv_plic</code> for maskable interrupts, and exceptions are handled in
+<code>core/controller.sv</code>. There are no dedicated <code>mnepc</code>/<code>mnstatus</code>/<code>mnvec</code>
+CSRs in <code>core/csr_regfile.sv</code> and no separate NMI trap vector; an NMI would be delivered as
+a high-priority external interrupt or handled by the SoC.</p>
+
+<p><strong>.dts linkage:</strong> no standard DT node for an NMI inside the hart; an SoC-level NMI is
+usually wired to the PLIC/CLINT or a custom interrupt controller.</p>
+</body>
+</html>

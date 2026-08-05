@@ -1,0 +1,7 @@
+# pd/pdk/technology.example — committed TEMPLATE showing a per-technology drop-in
+# layout. Only this file + README.md are tracked; anything else you place here is
+# ignored so an experiment never leaks NDA content. Copy this to
+# pd/pdk/<technology>/ (via `cva6-build tech init <technology>`) for a real drop.
+/*
+!/.gitignore
+!/README.md

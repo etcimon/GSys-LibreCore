@@ -1,0 +1,82 @@
+# sv-timing verif regress suite catalog (Python runner).
+# Each case: heavy .sv → analyze (start/end closure) → correct --emit (dense)
+#          → density score (params/assigns/predicates/ternaries/always/locals)
+#          → post_closure (IR re-measure) → post_analyze_sv (emit re-parse)
+#          → pyslang → optional require_post_closes (closes=true gate).
+
+target_mhz = 2000.0
+fo4_ps = 20.0
+budget_margin = 0.2
+allow_latency = true
+assume_clk = true
+max_passes = 8
+require_density = true
+require_fo4_improved = true
+
+[[case]]
+id = "heavy_mul_add_path"
+sv = "verif/tests/heavy_mul_add_path.sv"
+module = "heavy_mul_add_path"
+expect_paths_min = 1
+expect_failing_before = true
+require_pyslang_clean = true
+# Single mul is 56 FO4; cannot close 2GHz (budget 20) — require improvement + density only.
+require_post_closes = false
+require_max_freq_improved = true
+
+[[case]]
+id = "heavy_reg_to_reg"
+sv = "verif/tests/heavy_reg_to_reg.sv"
+module = "heavy_reg_to_reg"
+expect_paths_min = 1
+expect_failing_before = true
+require_pyslang_clean = true
+require_post_closes = false
+require_max_freq_improved = true
+
+[[case]]
+id = "heavy_priority_chain"
+sv = "verif/tests/heavy_priority_chain.sv"
+module = "heavy_priority_chain"
+expect_paths_min = 1
+expect_failing_before = true
+require_pyslang_clean = true
+# After cuts max FO4 ~20 → closes at 2GHz budget 20 (slack ~0).
+require_post_closes = true
+require_max_freq_improved = true
+
+# Multi-file / multi-module project via portable .f + --out-dir (see PROJECT-AUTOCORRECT.md).
+[[case]]
+id = "project_mini"
+files_from = "fixtures/project_mini/project.f"
+all_modules = true
+expect_paths_min = 1
+expect_failing_before = true
+require_pyslang_clean = true
+require_post_closes = true
+require_max_freq_improved = true
+require_project_filelist = true
+
+# CVA6-style package + localparam + function + always_ff posedge/negedge begin:name
+[[case]]
+id = "cva6_style_unit"
+files_from = "fixtures/cva6_style/project.f"
+module = "cva6_style_unit"
+expect_paths_min = 1
+expect_failing_before = false
+require_pyslang_clean = true
+require_post_closes = false
+require_max_freq_improved = false
+require_project_filelist = true
+
+# issue_read_operands-style: import, CVA6Cfg param, typed ports, genvar loops
+[[case]]
+id = "issue_style_unit"
+files_from = "fixtures/issue_style/project.f"
+module = "issue_style_unit"
+expect_paths_min = 1
+expect_failing_before = false
+require_pyslang_clean = true
+require_post_closes = false
+require_max_freq_improved = false
+require_project_filelist = true

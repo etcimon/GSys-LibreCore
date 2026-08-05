@@ -57,3 +57,11 @@ Bender.lock
 /verif/sim/encaps.traces
 /verif/sim/iti.traces
 /verif/sim/verilator.fst.hier
+
+# Local soak / sim noise (not part of GSys LibreCore product tree)
+monorepo-soak/*.log
+monorepo-soak/*.elf
+monorepo-soak/*-trace.txt
+encaps.traces
+iti.traces
+

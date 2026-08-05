@@ -1,0 +1,102 @@
+---
+title: corev_apu
+description: The CORE-V-APU uncore / FPGA emulation platform that wraps the CVA6 core.
+---
+
+# corev_apu
+
+`corev_apu/` is the on-die uncore and FPGA emulation platform **around** the
+CVA6 core. It depends on `core/` but the core does not depend on it. This
+separation lets the core be reused in different SoCs while the APU supplies the
+peripherals, memory interfaces, and board-specific glue for the reference FPGA
+targets.
+
+The uncore layer is the integration boundary of an SoC. It does not implement
+the instruction set, but it determines whether the core can boot Linux, access
+memory, and communicate with the outside world. In CVA6, this layer is
+intentionally thin: it wraps the core, provides the AXI fabric, and connects
+standard RISC-V blocks and vendored controllers. The philosophy is to keep the
+APU as a digital glue layer and to push analog, board, and process-specific
+concerns outward to `corev-mb/` and `pd/pdk/`.
+
+## What it contains
+
+- **Top-level wrappers** — `corev_apu/src/ariane.sv` and related files
+  instantiate the core and wire it to the AXI fabric.
+- **AXI fabric and memory interfaces** — `axi_mem_if/`, crossbar, adapters.
+- **L2 / L3 / server prefetch** — config-gated memory-side hierarchy under
+  `l2_cache/`, `l3_cache/` — see [L2 / L3 Cache](./l2-l3-cache).
+- **Multi-core cluster** — `g6lc_cluster.sv` + `coherence/` — see
+  [Multi-Core Cluster](./multi-core).
+- **Bootrom** — first-stage boot code and the reference `.dts` (incl. SMT / server
+  math DTS variants).
+- **Standard RISC-V blocks** — `clint/`, `rv_plic/` for timers and interrupts
+  (sized for multi-hart / multi-core packages).
+- **FPGA support** — constraints and scripts under `fpga/`.
+- **Ara attach** — optional RVV SoC glue (`g6lc_ara_attach.sv`); see
+  [Vector (RVV) & Ara](../core/vector).
+
+## Design contract
+
+`AGENTS-corev-apu.md` is the standing governance for this layer. Before any
+controller or wrapper enters an flist, it must satisfy the preconditions there:
+
+- AXI seam compatibility (address, data, ID, user widths).
+- Clock/reset/CDC hygiene.
+- PHY-vs-controller separation (the digital controller lives here; the analog
+  PHY is described in `corev-mb/`).
+- DFT hooks preserved.
+- DTS alignment with the board.
+
+The design contract is a pre-flight checklist, not a suggestion. AXI width
+mismatches are one of the most common integration bugs in SoC design, because
+they may simulate correctly in simple testbenches but fail under realistic
+traffic. Clock/reset/CDC hygiene is equally critical: an uncore controller that
+receives an asynchronously generated clock without proper synchronization can
+cause metastability in the core. The contract ensures that these issues are
+addressed before a controller enters the flist, not discovered during
+bring-up.
+
+## Vendored controllers
+
+Most non-trivial controllers (DDR, PCIe, Ethernet, HDMI, storage) are not
+authored in `corev_apu/`; they are fetched by the build-platform `vendor`
+command from third-party repositories or vendor snapshots and scanned before
+integration. The catalog lives in `.config.ts` (`vendor.controllers`) and
+`build-platform/src/config/defaults.ts`.
+
+Vendored controllers are the reality of modern SoC design. A contemporary SoC
+may contain dozens of controllers for memory, networking, storage, display, and
+security. Authoring all of them from scratch is neither feasible nor desirable;
+the industry relies on a combination of in-house controllers, open-source
+controllers, and licensed IP. The build platform's `vendor` command treats these
+as dependencies rather than source: it fetches them, scans them, records their
+licenses, and makes them available to the APU. This dependency model is what
+allows CVA6 to integrate state-of-the-art peripherals without bloating the core
+repository.
+
+## Relationship to the board
+
+A board (`corev-mb/boards/<id>/board.json`) declares which APU controllers it
+needs. When you run `g6lc-build mb select <id>`, the platform:
+
+1. Checks compatibility between the board's required core config and the current
+   `.config.ts`.
+2. Syncs the vendored controllers the board requires.
+3. Generates a `<id>_board_pkg.sv` and `board.mk` under
+   `corev-mb/boards/<id>/generated/`.
+
+The APU itself is not edited by board selection; it is *configured* by the
+resulting board package.
+
+## Agent workflow
+
+See [Agent Workflow for corev_apu](./devin-agents) and
+[Controllers & PHY](./controllers).
+
+The agent workflow for `corev_apu` is integration-heavy. The agent must read
+multiple contracts (controller, board, technology) before making a change,
+because a controller that is correct in isolation may be incompatible with the
+chosen board or core config. This multi-contract reading is the core skill of
+SoC integration: the ability to hold the core, the controller, the board, and
+the DTS in alignment at the same time.

@@ -1,0 +1,79 @@
+---
+title: Timings Command
+description: g6lc-build timings — host adapter for the independent sv-timing package (structural FO4 analyze and auto-correct).
+---
+
+# Timings Command
+
+The `timings` command is the **host adapter** that connects CVA6’s flists and
+SoC config to the standalone [`sv-timing`](../sv-timing) package. It expands
+verify flists, writes portable `.f` files under the contained workspace, and
+**spawns** the package CLI. It never links monorepo TypeScript into Rust crates.
+
+> Structural FO4 estimates only — **not** STA sign-off.
+
+## Subcommands
+
+| Subcommand | What it does |
+|---|---|
+| `status` | Locate `sv-timing/`, print default out dirs |
+| `flist` | Flatten verify flist → portable `.f` under workspace build |
+| `analyze` | Flist + `sv-timing analyze` (JSON report) |
+| `correct` | Flist + `sv-timing correct` (dry-run unless `--emit`) |
+
+## Examples
+
+```bash
+./build.sh timings status
+./build.sh timings flist --target cv64a6_imafdc_sv39
+./build.sh timings analyze --modules alu --target-mhz 1250
+./build.sh timings analyze --all-modules --json-out build/svt.json
+./build.sh timings correct --modules alu --allow-latency --emit
+```
+
+```powershell
+.\build.ps1 timings status
+.\build.ps1 timings analyze --modules alu --target-mhz 1250
+```
+
+Common flags (see `timings --help` / command `details` for the full set):
+
+- `--target <cfg>` — verify / SoC target (drives flist env)
+- `--modules m1,m2` or `--all-modules`
+- `--target-mhz N`, `--fo4-ps N`
+- `--json-out PATH`, `--out PATH`
+- `--emit`, `--allow-latency` (correct path)
+
+## Data flow
+
+```
+.config.ts / TARGET_CFG
+        ↓
+edaEnv + flattenFlist  (build-platform)
+        ↓
+portable .f + optional param-map  →  workspace/build/sv-timing/…
+        ↓
+python tools/svt.py run -- analyze|correct …
+        ↓
+JSON report  (+ optional emit tree under --out-dir)
+```
+
+Implementation map:
+
+- `build-platform/src/tooling/timings.ts` — paths, flist writers, argv builders
+- `build-platform/src/cli/commands/timings.ts` — CLI command
+- `sv-timing/AGENTS-host.md` — normative host boundary
+
+## Operator rules
+
+1. Prefer **analyze** before **correct**; treat emit as a review artifact.
+2. Keep corrected trees under `build-platform/workspace/` until reviewed.
+3. Do not auto-commit emit output into `core/` or `corev_apu/`.
+4. For package-only work (no monorepo flist), use `sv-timing` fixtures and
+   `python tools/svt.py` directly — see [sv-timing Overview](../sv-timing).
+
+## Related
+
+- [sv-timing host integration](../sv-timing/host-integration)
+- [sv-timing pipeline](../sv-timing/pipeline)
+- [Extending the platform](./extending) — pattern for independent package adapters

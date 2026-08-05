@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Sscounterenw Counter-Enable Writability (Vol II, 8.6)</title></head>
+<body>
+<h1>Vol II &sect;8.6 — Sscounterenw Extension for Counter-Enable Writability, Version 1.0</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#sscounterenw">specs/riscv-spec.html#sscounterenw</a>.
+Source line: <code>specs/riscv-spec.html:88804</code>. <strong>Domain:</strong> —.</p>
+
+<p>Sscounterenw guarantees that <code>scounteren</code> is writable, allowing S-mode to control which
+counters are accessible to U-mode. It is a small CSR behavior requirement relevant to any core
+supporting S-mode with user-level counter access.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"If the Sscounterenw extension is implemented, then for any hpmcounter
+that is not read-only zero, the corresponding bit in scounteren must be
+writable."
+(specs/riscv-spec.html:88804-88807, anchor #sscounterenw)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module sscounterenw (
+  input  logic        we_i,
+  input  logic [XLEN-1:0] wdata_i,
+  output logic [XLEN-1:0] scounteren_o
+);
+  // scounteren CSR writable from S-mode
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> partial. The performance counters and <code>scounteren</code> CSR are
+present in <code>core/csr_regfile.sv</code> and <code>core/perf_counters.sv</code>, but S-mode writability
+of every non-zero <code>hpmcounter</code>'s corresponding <code>scounteren</code> bit should be
+verified.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Sscounterenw is a CSR behavior extension and has no direct
+device-tree property.</p>
+</body>
+</html>

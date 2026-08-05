@@ -1,0 +1,142 @@
+GSys LibreCore (G6LC)
+=====================
+
+A RISC-V application-class processor core, derived from the OpenHW Group CVA6
+(originally the PULP Platform "Ariane" core).
+
+  Product name .... GSys LibreCore
+  Short name ...... LibreCore
+  Code prefix ..... G6LC
+  Steward ......... GlobecSys Inc. ("GSys")
+  Rights holder ... Etienne Cimon (LibreCore-original material)
+
+--------------------------------------------------------------------------------
+1. SOURCE LOCATION  (CERN-OHL-S-2.0 sections 1.9, 3.3(c) and 4)
+--------------------------------------------------------------------------------
+
+The Source Location for all Covered Source in this repository is:
+
+    https://github.com/GlobecSys/librecore
+
+This is the location at which the Licensor places Covered Source and which the
+Licensor reasonably believes will remain easily accessible for at least three
+years for anyone to obtain a digital copy.
+
+--------------------------------------------------------------------------------
+2. PRODUCT MARKING REQUIREMENT  (specified Notice under CERN-OHL-S-2.0 s.4)
+--------------------------------------------------------------------------------
+
+CERN-OHL-S-2.0 section 4 provides that "If specified in a Notice, the Product
+must visibly and securely display the Source Location on it or its packaging or
+documentation in the manner specified in that Notice."
+
+THIS IS THAT NOTICE. If You Make or Convey a Product incorporating Covered
+Source, You must display the Source Location as follows:
+
+  (a) DIE / PACKAGE MARKING. Where the Product is an integrated circuit, the
+      Source Location URL must appear in at least one of:
+        - the die surface metal or passivation layer marking, adjacent to or
+          combined with the GSys mark (see section 3 below); or
+        - the package top-side laser marking; or
+        - the package substrate silkscreen.
+      The marking must be legible under 20x optical magnification and must
+      survive normal handling and assembly ("visibly and securely").
+
+  (b) IDENTIFICATION REGISTERS. The Product must report, through architecturally
+      visible identification state, values that resolve to the Source Location
+      through published documentation. See AGENTS-todo.md for the pending
+      assignment of the GlobecSys JEDEC manufacturer ID (mvendorid) and the
+      RISC-V International architecture ID (marchid).
+
+  (c) DOCUMENTATION. Where the Product is a bitstream, a soft macro, a
+      simulation model, or is otherwise conveyed without a physical package,
+      the Source Location must appear in the accompanying documentation and in
+      any "about"/version output the Product is capable of producing.
+
+  (d) PROPORTIONALITY. Where You display attribution or source-location
+      information for other parties, the Source Location required by this
+      Notice shall be no less prominent than that information.
+
+--------------------------------------------------------------------------------
+3. TRADEMARKS
+--------------------------------------------------------------------------------
+
+"GSys", "GlobecSys", "GSys LibreCore" and "LibreCore" and the GSys logo are
+marks of GlobecSys Inc. CERN-OHL-S-2.0 section 8.2 restricts use of a Licensor's
+name, image or logo. A separate, affirmative and royalty-free grant of the GSys
+mark -- including the miniature GSys die mark -- is made in TRADEMARKS.md, and
+is conditioned on compliance with the disclosure obligations of
+CERN-OHL-S-2.0 section 4 and with section 2 of this Notice.
+
+This Notice grants no rights in the trademarks of any third party. In
+particular, "CVA6", "CORE-V" and "OpenHW" are marks of the OpenHW Group and
+"RISC-V" is a registered trademark of RISC-V International; no rights in those
+marks are granted or implied here. See docs/heritage.md.
+
+--------------------------------------------------------------------------------
+4. THIRD-PARTY ATTRIBUTION  (Apache-2.0 s.4(d) / Solderpad s.4(d))
+--------------------------------------------------------------------------------
+
+The majority of this repository is NOT LibreCore-original material. It remains
+licensed by, and attributed to, its own rights holders under its own terms, and
+those licenses are unchanged. Attribution notices required to be preserved
+include, without limitation:
+
+  Copyright ETH Zurich and University of Bologna
+    -- the CVA6/Ariane pipeline, caches, CLINT and supporting RTL
+       (Solderpad Hardware License 0.51 / 2.0; see LICENSE)
+
+  Copyright Thales DIS design services SAS
+    -- configuration packages and CVA6 verification/config infrastructure
+       (Apache-2.0 WITH SHL-2.0)
+
+  Copyright Commissariat a l'Energie Atomique et aux Energies Alternatives (CEA)
+  Copyright Univ. Grenoble Alpes, Inria, TIMA Laboratory
+    -- the HPDcache subsystem (Apache-2.0 WITH SHL-2.1;
+       see core/cache_subsystem/hpdcache/LICENSE)
+
+  Copyright OpenHW Group
+    -- CVA6 project documentation, CI and core-v-verif verification environment
+       (Apache-2.0 WITH SHL-2.0; see verif/core-v-verif/LICENSE.md)
+
+  Copyright SiFive, Inc.
+    -- Apache-2.0 material; see LICENSE.SiFive
+
+  Copyright The Regents of the University of California
+    -- BSD-3-Clause material; see LICENSE.Berkeley
+
+  Copyright lowRISC contributors, PlanV Technologies, PULP Platform
+    -- vendored utilities, FPGA integration and technology cells
+       (Solderpad Hardware License 0.51 / Apache-2.0)
+
+  U-Boot contributors
+    -- the FPGA zero-stage bootrom storage drivers, which are GPL-licensed and
+       are conveyed as a SEPARATE WORK. See
+       corev_apu/fpga/src/bootrom/LICENSE.GPL-2.0-or-later and the README in
+       that directory. GPL-licensed material is NOT offered under
+       CERN-OHL-S-2.0 or under the GSys Commercial License.
+
+--------------------------------------------------------------------------------
+5. LICENSE MAP
+--------------------------------------------------------------------------------
+
+Per-file licensing is authoritative and is declared by each file's
+SPDX-License-Identifier. The repository-level map is declared in
+.licensing-tiers and governed by AGENTS-licensing.md:
+
+  tier R  LibreCore-original RTL and the reference device trees
+          -> CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+          -> LICENSE.CERN-OHL-S, LICENSE.GSys-Commercial
+
+  tier T  build platform, static-timing tooling, verification scripting, docs
+          -> MIT
+          -> LICENSE.MIT
+
+  tier U  upstream / third-party material, unchanged
+          -> LICENSE, LICENSE.SiFive, LICENSE.Berkeley, and per-subtree LICENSEs
+
+  tier F  FPGA zero-stage bootrom (separate work, GPL)
+          -> corev_apu/fpga/src/bootrom/LICENSE.GPL-2.0-or-later
+
+  tier P  material under third-party NDA / foundry PDK terms, if enabled
+          -> LICENSE.Proprietary

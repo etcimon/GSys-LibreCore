@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Introduction (Vol I, chapter 1)</title></head>
+<body>
+<h1>Vol I chapter 1 — Introduction</h1>
+<p><strong>Canonical anchors:</strong>
+<a href="../../specs/riscv-spec.html#_risc_v_hardware_platform_terminology">#_risc_v_hardware_platform_terminology</a> (1.1),
+<a href="../../specs/riscv-spec.html#_risc_v_software_execution_environments_and_harts">#_risc_v_software_execution_environments_and_harts</a> (1.2),
+<a href="../../specs/riscv-spec.html#_risc_v_isa_overview">#_risc_v_isa_overview</a> (1.3),
+<a href="../../specs/riscv-spec.html#sec:intro-memory">#sec:intro-memory</a> (1.4),
+<a href="../../specs/riscv-spec.html#_suggested_base_integer_isa_nomenclature">#_suggested_base_integer_isa_nomenclature</a> (1.5),
+<a href="../../specs/riscv-spec.html#_exceptions_traps_and_interrupts">#_exceptions_traps_and_interrupts</a> (1.6),
+<a href="../../specs/riscv-spec.html#_memory">#_memory</a> (1.7).
+Source lines: <code>specs/riscv-spec.html:3503</code> (1.1), <code>:3654</code> (1.2), <code>:3775</code> (1.3),
+<code>:3858</code> (1.4), <code>:4080</code> (1.5), <code>:4280</code> (1.6), <code>:4410</code> (1.7).</p>
+
+<p>Chapter 1 introduces the RISC-V module nomenclature (e.g. I, M, A, F, D, G), the hardware platform
+terms (hart, agent, coprocessor), and the foundational trap and memory-model vocabulary. It is the
+context for all subsequent implementation work: every feature must map to the right extension letter
+and must preserve the precise-trap, byte-addressable-memory, and XLEN abstraction introduced here.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"A RISC-V hardware platform can contain one or more RISC-V-compatible
+processing cores together with other non-RISC-V-compatible cores,
+low-level interrupt controller, clock generators, reset circuitry, and so
+forth."
+...
+"A RISC-V-compatible core can be implemented with varying levels of
+privilege, and with various combinations of optional and custom
+extensions."
+(specs/riscv-spec.html:3503-3512, anchor #_risc_v_hardware_platform_terminology)
+</pre>
+
+<p><strong>CVA6 status:</strong> not a hardware feature. The chapter's nomenclature is realized in the
+per-target config packages (<code>core/include/cv*a6*_config_pkg.sv</code>) and in the
+<code>riscv,isa</code> string produced for the device tree. The CVA6 top-level
+(<code>core/cva6.sv</code>) instantiates the hart, debug, interrupt, and reset agents described here.</p>
+
+<p><strong>.dts linkage:</strong> the top-level device tree declares the hart(s), interrupt controller,
+clocks, and reset. The <code>riscv,isa</code> string is built from the nomenclature of this chapter and
+must match the config extension bits.</p>
+</body>
+</html>

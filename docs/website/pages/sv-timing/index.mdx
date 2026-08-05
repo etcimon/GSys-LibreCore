@@ -1,0 +1,104 @@
+---
+title: sv-timing
+description: Standalone SystemVerilog structural timing package — FO4-style IR, path ranking, optional auto-correct. Not STA sign-off.
+---
+
+# sv-timing
+
+`sv-timing/` is a **project-independent** Rust package that compiles an explicit
+list of SystemVerilog sources into a **timing-oriented intermediate
+representation (IR)**, ranks combinational paths against a FO4-style budget and
+a caller-supplied target frequency, and optionally applies **allowlisted
+auto-correct** transforms that re-emit SystemVerilog with edit traces.
+
+It exists to give designers **early, source-level structural feedback** before
+synthesis and static timing analysis (STA). Functionally correct RTL can still
+be hostile to a high-frequency target; long combinational clouds, expensive
+operators, and weakly explicit sequencing typically surface only after STA,
+when restructuring is expensive.
+
+> **Disclaimer:** FO4 numbers and path ranks are **structural estimates only**.
+> They do **not** replace STA, SDF, place-and-route, or foundry sign-off. See
+> `sv-timing/architecture/STA-HANDOFF.md` for the handoff contract.
+
+## Independence (hard requirement)
+
+The package builds, tests, and analyzes with **only** the `sv-timing/` tree and
+its fixtures. It has **no** compile- or link-time dependency on CVA6 RTL,
+`build-platform`, monorepo flists, `edaEnv`, or SoC config packages.
+
+```
+Hosts (optional)                    Package (standalone)
+─────────────────                   ────────────────────
+flist / defines / MHz               parse → IR → FO4
+param-map / cache path         →    path rank / report
+spawn CLI / rehydrate JSON     ←    optional correct + emit
+```
+
+Hosts **prepare inputs and consume outputs**. They never pull monorepo code into
+the crate graph. The CVA6 monorepo adapter is the build-platform `timings`
+command; see [Host Integration](./host-integration) and
+[Build Platform · Timings](../build-platform/timings).
+
+## What it owns vs what hosts own
+
+| Package owns | Hosts own |
+|---|---|
+| Parse (vendored sv-parser) → timing IR | Project discovery (Bender, FuseSoC, EDA flists) |
+| FO4 cost model (`resources/fo4-v1.toml`) | Defines, include dirs, target MHz |
+| Path ranking, opportunities | Module roots / `--all-modules` |
+| Optional auto-correct + emit | Flatten env-heavy flists → portable `.f` |
+| SQLite CRC cache (caller-chosen path) | Where to put reports / corrected trees |
+| Versioned JSON schema | Review before pointing sim/synth at emit |
+
+## Entry points
+
+From `sv-timing/` (Python-first tooling under `tools/`):
+
+```bash
+python tools/svt.py setup      # contained rustup/cargo + venv
+python tools/svt.py doctor
+python tools/svt.py build
+python tools/svt.py test
+python tools/svt.py check      # independence + fmt + clippy + test
+python tools/svt.py run -- --help   # cargo run -p sv-timing-cli
+```
+
+Thin wrappers `svt.sh` / `svt.ps1` only invoke `tools/svt.py`; business logic
+stays in Python and Rust.
+
+From the monorepo (host):
+
+```bash
+./build.sh timings status
+./build.sh timings flist --target <cfg>
+./build.sh timings analyze --modules alu --target-mhz 1250
+./build.sh timings correct --modules alu --allow-latency --emit
+```
+
+## Non-goals
+
+- Replacing STA or foundry sign-off
+- Full IEEE 1800 elaboration in v1
+- Synthesis, place, or route
+- Auto-merging corrected RTL into `core/` without human review
+- Absolute FO4 CI gates as hard fails until the model is trusted
+- Owning monorepo flist expansion inside the crates
+
+## Authority and deeper reading
+
+| Artifact | Role |
+|---|---|
+| `sv-timing/AGENTS.md` | Agent entry + invariants |
+| `sv-timing/architecture/DESIGN.md` | Full architecture (IR, cache, hosts) |
+| `sv-timing/architecture/OPTIMIZATION-LEVELS.md` | `-O0..-O3/-Os/-Oz` + dials |
+| `sv-timing/architecture/PERF-CACHE.md` | Throughput + pre-compiled cache |
+| `sv-timing/AGENTS-host.md` | Host boundary |
+| `sv-timing/AGENTS-todo.md` | Live implementation phase |
+| `architecture/sv-timing/` | Monorepo pointer only |
+
+## Pages in this section
+
+- [Pipeline & IR](./pipeline) — multi-step stages, cost model, cache
+- [Auto-Correct & -O Levels](./auto-correct) — transforms, presets, safety
+- [Host Integration](./host-integration) — CLI/JSON contract and monorepo adapter

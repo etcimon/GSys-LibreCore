@@ -1,0 +1,130 @@
+---
+title: Board Layer
+description: How corev-mb fits around the die and how boards are described, selected, and validated.
+---
+
+# Board Layer
+
+The `corev-mb` board layer sits **around the die** and is the PCB counterpart
+to the SoC integration layer. Its job is to describe the physical board, the
+SoC pins, the PHYs, the power rails, and the constraints that allow the die to
+boot on that board.
+
+The board layer is the bridge between the digital SoC and the physical world.
+Whereas the core and APU are described in SystemVerilog and simulated in
+cycles, the board is described in schematics, constraints, and placement. The
+`corev-mb` layer captures the board-specific information that the APU needs to
+know — pin mappings, PHY identities, controller enables — and leaves the rest
+to the board house's layout tools. This separation of concerns is what allows
+the same RTL to be reused across many physical products.
+
+## Board = machine spec
+
+A board is fully described by `corev-mb/boards/<id>/board.json`. It is the
+**source of truth** for:
+
+- Which CVA6 core config the board expects.
+- Which APU controllers are enabled.
+- Which interfaces exist (UART, Ethernet, SD, etc.).
+- Which PHYs are present and how they connect to SoC pins.
+- Whether SKiDL is used (`omitted`, `reference`, or `custom`).
+
+This JSON is read by `build-platform/src/tooling/motherboard.ts`.
+
+Treating a JSON file as the source of truth is a form of configuration-driven
+design. It means that the board is not buried inside a Makefile or a
+generated SystemVerilog file; it is an artifact that humans can read, diff, and
+review. When the board changes, the JSON changes first, and the build platform
+propagates that change to the generated board package, the vendor sync list,
+and the overlay config. This reversibility is important: an engineer can look
+at `board.json` and know exactly what the board is supposed to be.
+
+## From board.json to board package
+
+When `g6lc-build mb select <id>` runs, the platform:
+
+1. Loads and validates `board.json`.
+2. Compares `board.core` against the current `.config.ts` `soc.coreConfig`.
+3. For each enabled controller, runs `g6lc-build vendor sync <controllerId>`.
+4. Generates `corev-mb/boards/<id>/generated/<id>_board_pkg.sv` with localparams
+   such as:
+   - `CoreConfig`
+   - `Xlen`
+   - `AxiDataWidth`
+   - `SocketEn`
+   - `MbCtrl_<id>_En`
+   - `MbIf_<ID>_En`, `MbIf_<ID>_Count`, `MbIf_<ID>_Phy`
+5. Generates `corev-mb/boards/<id>/generated/board.mk`.
+6. Writes the overlay `build-platform/.config.local.ts` to pin `soc.*` and
+   `motherboard.activeBoard`.
+
+The APU wrapper imports `<id>_board_pkg.sv` and parameterizes itself from these
+localparams. The core and APU source files are **never edited** by this step.
+
+This generation model is the key to board reuse. The core and APU source files
+remain generic; the board package supplies the target-specific parameters.
+Because the package is generated from a typed JSON spec, the parameters are
+consistent with the rest of the build configuration. There is no risk that a
+manual edit to a localparam will drift out of sync with `.config.ts` or
+`board.json`.
+
+## PHY development on the board
+
+A PHY is a physical-layer device. It may be:
+
+- **On-board** — e.g. Realtek RTL8211E for RGMII Ethernet, FT2232HQ for USB-UART.
+- **In-package** — a hardened PHY macro supplied by the foundry.
+- **Off-chip** — e.g. a DDR DIMM's SPD/termination logic.
+
+The board layer records:
+
+- PHY identity and datasheet references.
+- SoC pin ↔ PHY pin mapping.
+- Power rails and decoupling.
+- Timing and skew constraints.
+- Reset/clock distribution.
+
+A PHY is not software-addressable in the way a CSR is; it is a physical device
+with analog characteristics. The board layer records enough information about
+the PHY and its connections for the APU to instantiate the correct digital
+controller and for the board house to design the surrounding circuitry. The
+actual signal-integrity work — trace length matching, impedance control,
+crosstalk analysis — happens in the board layout tool, but the constraints
+that drive it come from the contract captured here.
+
+For custom boards, the SKiDL flow automates part selection, net creation, and
+ERC. See [SKiDL Process](./skidl-process).
+
+## Compatibility check
+
+```bash
+g6lc-build mb check <id>
+```
+
+Exits 0 if the board is compatible with the current SoC config, 3 if not.
+Incompatibility usually means the core config (XLEN, extensions, cache type) in
+`.config.ts` does not match the board's `core` field.
+
+The compatibility check is the gate that prevents impossible boards from being
+built. A board cannot make the core have more extensions than the configured
+core supports; it cannot enable a 64-bit bus on a 32-bit core; and it cannot use
+a cache type that the core does not implement. By enforcing these invariants
+before generation, the platform prevents subtle mismatches that would only
+appear during Linux boot or FPGA bring-up.
+
+## SoC-readiness gates for board work
+
+- [ ] `board.json` is valid and checked into `corev-mb/boards/<id>/`.
+- [ ] `AGENTS-mb-<id>.md` per-board contract exists and cross-references the
+      board JSON and architecture doc.
+- [ ] PHY pin mappings and power rails are documented.
+- [ ] `mb select <id>` generates the board package cleanly.
+- [ ] DTS matches the generated board package.
+- [ ] Simulation or CI smoke for the board target passes.
+
+These gates are the board-layer equivalent of the SoC-readiness checklist. They
+cover the specification (`board.json`), the contract (`AGENTS-mb-<id>.md`), the
+physical mapping (PHY, power rails), the generation flow (`mb select`), the
+software contract (DTS), and the functional validation (smoke tests). A board
+that passes all these gates is ready to move from design into layout,
+prototype, and eventually production.

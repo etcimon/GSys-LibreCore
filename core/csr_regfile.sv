@@ -9,8 +9,18 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 05.05.2017
 // Description: CSR Register File as specified by RISC-V
+
+// ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
+// The original work of the copyright holders named above remains licensed
+// under the license stated above, and that grant is unaffected.
+// Modifications (c) 2026 Etienne Cimon: SMT2 per-hart CSR banking, hypervisor/H-extension CSRs, PMU counter CSRs.
+// The upstream notice above is prose and declares no SPDX identifier, so the
+// outbound offer is stated here as the file's single SPDX tag. See REUSE.toml.
+// Etienne Cimon offers this file AS A WHOLE under:
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 
 
 module csr_regfile
@@ -32,6 +42,10 @@ module csr_regfile
     input logic rst_ni,
     // Timer threw an interrupt - SUBSYSTEM
     input logic time_irq_i,
+    // Platform mtime counter value, only used when CVA6Cfg.SstcEn - SUBSYSTEM
+    // The CLINT owns the counter; the hart owns the stimecmp comparator (Sstc).
+    // Tie to '0 when SstcEn is disabled.
+    input logic [63:0] rtc_time_i,
     // send a flush request out when a CSR with a side effect changes - CONTROLLER
     output logic flush_o,
     // halt requested - CONTROLLER
@@ -134,12 +148,18 @@ module csr_regfile
     output riscv::cbie_t scbie_o,
     // hypervisor-mode cache block invalidate enable - ID_STAGE
     output riscv::cbie_t hcbie_o,
-    // machine-mode clean/flush cache block invalidate enable - ID_STAGE
+    // machine-mode clean/flush cache block enable - ID_STAGE
     output logic mcbcfe_o,
-    // supervisor-mode clean/flush cache block invalidate enable - ID_STAGE
+    // supervisor-mode clean/flush cache block enable - ID_STAGE
     output logic scbcfe_o,
-    // hypervisor-mode clean/flush cache block invalidate enable - ID_STAGE
+    // hypervisor-mode clean/flush cache block enable - ID_STAGE
     output logic hcbcfe_o,
+    // machine/supervisor/hypervisor cbo.zero enable (xenvcfg.CBZE) - ID_STAGE
+    output logic mcbze_o,
+    output logic scbze_o,
+    output logic hcbze_o,
+    // Svpbmt enable (menvcfg.PBMTE) - MMU
+    output logic pbmte_o,
     // external interrupt in - SUBSYSTEM
     input logic [1:0] irq_i,
     // inter processor interrupt -> connected to machine mode sw - SUBSYSTEM
@@ -176,6 +196,9 @@ module csr_regfile
     input logic [CVA6Cfg.XLEN-1:0] perf_data_i,
     // TO_BE_COMPLETED - PERF_COUNTERS
     output logic perf_we_o,
+    // Sscofpmf: scountovf OF vector and LCOFI pending from perf_counters
+    input logic [31:0] scountovf_i,
+    input logic lcofi_i,
     // PMP configuration containing pmpcfg for max 64 PMPs - ACC_DISPATCHER
     output riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] pmpcfg_o,
     // PMP addresses - ACC_DISPATCHER
@@ -268,6 +291,31 @@ module csr_regfile
   logic [CVA6Cfg.XLEN-1:0] mtval2_q, mtval2_d;
   logic fiom_d, fiom_q;
 
+  // Sstc (supervisor timer compare). 64-bit regardless of XLEN; on RV32 it is
+  // accessed as the stimecmp/stimecmph pair.
+  logic [63:0] stimecmp_q, stimecmp_d;
+  // menvcfg.STCE — when clear, Sstc is off and mip.STIP stays software-writable.
+  logic mstce_q, mstce_d;
+  // Registered comparator result. Deliberately NOT combinational into the
+  // trap-taking decision: rtc_time_i crosses from the platform timer and a
+  // 64-bit compare has no business on the interrupt path's critical cone.
+  logic stimecmp_hit_q, stimecmp_hit_d;
+  // The comparison is unsigned and uses >= so a pending timer stays pending
+  // until software re-arms stimecmp (the extension's required behaviour).
+  assign stimecmp_hit_d = CVA6Cfg.SstcEn ? (rtc_time_i >= stimecmp_q) : 1'b0;
+
+  // U9.0/U9.1 Sstc + H: VS timer compare + henvcfg.STCE + htimedelta.
+  // Guest time = host mtime (rtc_time_i) + htimedelta (unsigned wrap, Priv H §Hypervisor).
+  // htimedelta is an HS CSR (always under RVH); vstimecmp/STCE remain Sstc×H.
+  logic [63:0] vstimecmp_q, vstimecmp_d;
+  logic [63:0] htimedelta_q, htimedelta_d;
+  logic        hstce_q, hstce_d;  // henvcfg.STCE
+  logic        vstimecmp_hit_q, vstimecmp_hit_d;
+  logic [63:0] guest_time;
+  assign guest_time = CVA6Cfg.RVH ? (rtc_time_i + htimedelta_q) : rtc_time_i;
+  assign vstimecmp_hit_d = (CVA6Cfg.SstcEn && CVA6Cfg.RVH) ? (guest_time >= vstimecmp_q)
+                                                           : 1'b0;
+
   logic [CVA6Cfg.XLEN-1:0] stvec_q, stvec_d;
   logic [CVA6Cfg.XLEN-1:0] scounteren_q, scounteren_d;
   logic [CVA6Cfg.XLEN-1:0] sscratch_q, sscratch_d;
@@ -317,9 +365,12 @@ module csr_regfile
   logic debug_from_trigger;
   logic debug_from_mcontrol;
 
-  // CBO enable flags from menvcfg/senvcfg/henvcfg
+  // CBO enable flags from menvcfg/senvcfg/henvcfg (Zicbom CBIE/CBCFE + Zicboz CBZE)
   riscv::cbie_t mcbie_q, mcbie_d, scbie_q, scbie_d, hcbie_q, hcbie_d;
   logic mcbcfe_q, mcbcfe_d, scbcfe_q, scbcfe_d, hcbcfe_q, hcbcfe_d;
+  logic mcbze_q, mcbze_d, scbze_q, scbze_d, hcbze_q, hcbze_d;
+  // Svpbmt: menvcfg.PBMTE (bit 62)
+  logic mpbmte_q, mpbmte_d;
 
   localparam logic [CVA6Cfg.XLEN-1:0] IsaCode = (CVA6Cfg.XLEN'(CVA6Cfg.RVA) <<  0)                // A - Atomic Instructions extension
   | (CVA6Cfg.XLEN'(CVA6Cfg.RVB) << 1)  // B - Bitmanip extension
@@ -504,6 +555,11 @@ module csr_regfile
         riscv::CSR_SCOUNTEREN:
         if (CVA6Cfg.RVS) csr_rdata = scounteren_q;
         else read_access_exception = 1'b1;
+        // Sscofpmf: scountovf is a read-only S-mode view of the HPM OF bits.
+        riscv::CSR_SCOUNTOVF: begin
+          if (CVA6Cfg.SscofpmfEn && CVA6Cfg.RVS) csr_rdata = CVA6Cfg.XLEN'(scountovf_i);
+          else read_access_exception = 1'b1;
+        end
         riscv::CSR_SSCRATCH:
         if (CVA6Cfg.RVS) csr_rdata = sscratch_q;
         else read_access_exception = 1'b1;
@@ -516,6 +572,60 @@ module csr_regfile
         riscv::CSR_STVAL:
         if (CVA6Cfg.RVS) csr_rdata = stval_q;
         else read_access_exception = 1'b1;
+        // Sstc: stimecmp is only accessible when menvcfg.STCE permits it. In
+        // M-mode it is always accessible; in S-mode STCE=0 makes it illegal.
+        // When V=1 (VS-mode), stimecmp is an alias of vstimecmp (Priv Sstc + H).
+        // STCE fail under V → virtual-instruction (not illegal), per Sstc×H.
+        riscv::CSR_STIMECMP: begin
+          if (CVA6Cfg.SstcEn && CVA6Cfg.RVS) begin
+            if (CVA6Cfg.RVH && v_q) begin
+              // VS-mode: alias of vstimecmp; needs menvcfg.STCE and henvcfg.STCE
+              if (!mstce_q || !hstce_q) virtual_read_access_exception = 1'b1;
+              else csr_rdata = vstimecmp_q[CVA6Cfg.XLEN-1:0];
+            end else if (priv_lvl_o != riscv::PRIV_LVL_M && !mstce_q) begin
+              read_access_exception = 1'b1;
+            end else begin
+              csr_rdata = stimecmp_q[CVA6Cfg.XLEN-1:0];
+            end
+          end else begin
+            read_access_exception = 1'b1;
+          end
+        end
+        riscv::CSR_STIMECMPH: begin
+          if (CVA6Cfg.SstcEn && CVA6Cfg.RVS && CVA6Cfg.IS_XLEN32) begin
+            if (CVA6Cfg.RVH && v_q) begin
+              if (!mstce_q || !hstce_q) virtual_read_access_exception = 1'b1;
+              else csr_rdata = CVA6Cfg.XLEN'(vstimecmp_q[63:32]);
+            end else if (priv_lvl_o != riscv::PRIV_LVL_M && !mstce_q) begin
+              read_access_exception = 1'b1;
+            end else begin
+              csr_rdata = CVA6Cfg.XLEN'(stimecmp_q[63:32]);
+            end
+          end else begin
+            read_access_exception = 1'b1;
+          end
+        end
+        // U9.0: direct vstimecmp access (HS/M); VS uses the stimecmp alias above.
+        // VS/VU hits HS CSR → virtual-instruction via privilege_check; STCE fail
+        // from HS remains illegal-instruction.
+        riscv::CSR_VSTIMECMP: begin
+          if (CVA6Cfg.SstcEn && CVA6Cfg.RVH) begin
+            if (priv_lvl_o == riscv::PRIV_LVL_U ||
+                (priv_lvl_o == riscv::PRIV_LVL_S && v_q) ||
+                (priv_lvl_o != riscv::PRIV_LVL_M && !(mstce_q && hstce_q)))
+              read_access_exception = 1'b1;
+            else csr_rdata = vstimecmp_q[CVA6Cfg.XLEN-1:0];
+          end else read_access_exception = 1'b1;
+        end
+        riscv::CSR_VSTIMECMPH: begin
+          if (CVA6Cfg.SstcEn && CVA6Cfg.RVH && CVA6Cfg.IS_XLEN32) begin
+            if (priv_lvl_o == riscv::PRIV_LVL_U ||
+                (priv_lvl_o == riscv::PRIV_LVL_S && v_q) ||
+                (priv_lvl_o != riscv::PRIV_LVL_M && !(mstce_q && hstce_q)))
+              read_access_exception = 1'b1;
+            else csr_rdata = CVA6Cfg.XLEN'(vstimecmp_q[63:32]);
+          end else read_access_exception = 1'b1;
+        end
         riscv::CSR_SATP: begin
           if (CVA6Cfg.RVS) begin
             // intercept reads to SATP if in S-Mode and TVM is enabled
@@ -535,6 +645,7 @@ module csr_regfile
               csr_rdata[5:4] = scbie_q;
               csr_rdata[6]   = scbcfe_q;
             end
+            if (CVA6Cfg.RVZiCboz) csr_rdata[7] = scbze_q;
           end else begin
             read_access_exception = 1'b1;
           end
@@ -580,9 +691,28 @@ module csr_regfile
               csr_rdata[5:4] = hcbie_q;
               csr_rdata[6]   = hcbcfe_q;
             end
+            if (CVA6Cfg.RVZiCboz) csr_rdata[7] = hcbze_q;
+            // henvcfg.STCE (bit 63 on RV64) — Sstc for VS-mode
+            if (CVA6Cfg.SstcEn && CVA6Cfg.IS_XLEN64) csr_rdata[CVA6Cfg.XLEN-1] = hstce_q;
           end else begin
             read_access_exception = 1'b1;
           end
+        end
+        riscv::CSR_HENVCFGH: begin
+          if (CVA6Cfg.RVH && CVA6Cfg.IS_XLEN32) begin
+            csr_rdata = '0;
+            if (CVA6Cfg.SstcEn) csr_rdata[31] = hstce_q;
+          end else read_access_exception = 1'b1;
+        end
+        // U9.1: htimedelta — HS offset added to time / vstimecmp compare (Priv H)
+        riscv::CSR_HTIMEDELTA: begin
+          if (CVA6Cfg.RVH) csr_rdata = htimedelta_q[CVA6Cfg.XLEN-1:0];
+          else read_access_exception = 1'b1;
+        end
+        riscv::CSR_HTIMEDELTAH: begin
+          if (CVA6Cfg.RVH && CVA6Cfg.IS_XLEN32)
+            csr_rdata = CVA6Cfg.XLEN'(htimedelta_q[63:32]);
+          else read_access_exception = 1'b1;
         end
         riscv::CSR_HGATP: begin
           if (CVA6Cfg.RVH) begin
@@ -636,13 +766,29 @@ module csr_regfile
             csr_rdata[5:4] = mcbie_q;
             csr_rdata[6]   = mcbcfe_q;
           end
-          if (!CVA6Cfg.RVU && !CVA6Cfg.RVZiCbom) begin
+          if (CVA6Cfg.RVZiCboz) begin
+            csr_rdata[7] = mcbze_q;  // menvcfg.CBZE
+          end
+          // PBMTE is menvcfg bit 62 (RV64 only)
+          if (CVA6Cfg.SvpbmtEn && CVA6Cfg.IS_XLEN64) begin
+            csr_rdata[62] = mpbmte_q;
+          end
+          // STCE is menvcfg bit 63, so on RV32 it lives in menvcfgh instead.
+          // Indexed as XLEN-1 (== 63 under the IS_XLEN64 guard) to stay in range
+          // when the dead branch is elaborated for RV32.
+          if (CVA6Cfg.SstcEn && CVA6Cfg.IS_XLEN64) begin
+            csr_rdata[CVA6Cfg.XLEN-1] = mstce_q;
+          end
+          if (!CVA6Cfg.RVU && !CVA6Cfg.RVZiCbom && !CVA6Cfg.RVZiCboz &&
+              !CVA6Cfg.SstcEn && !CVA6Cfg.SvpbmtEn) begin
             read_access_exception = 1'b1;
           end
         end
         riscv::CSR_MENVCFGH: begin
-          if (CVA6Cfg.RVU && CVA6Cfg.IS_XLEN32) csr_rdata = '0;
-          else read_access_exception = 1'b1;
+          if (CVA6Cfg.RVU && CVA6Cfg.IS_XLEN32) begin
+            csr_rdata = '0;
+            if (CVA6Cfg.SstcEn) csr_rdata[31] = mstce_q;
+          end else read_access_exception = 1'b1;
         end
         riscv::CSR_MVENDORID: csr_rdata = {{CVA6Cfg.XLEN - 32{1'b0}}, OPENHWGROUP_MVENDORID};
         riscv::CSR_MARCHID: csr_rdata = {{CVA6Cfg.XLEN - 32{1'b0}}, ARIANE_MARCHID};
@@ -676,6 +822,22 @@ module csr_regfile
           if (CVA6Cfg.IS_XLEN32) csr_rdata = instret_q[63:32];
           else read_access_exception = 1'b1;
         else read_access_exception = 1'b1;
+        // `time`/`timeh` become real CSRs once the platform mtime value is wired
+        // in for Sstc. Without it the read traps and M-mode/OpenSBI emulates it.
+        // U9.1: under V=1, time is virtualized as host mtime + htimedelta (Priv H).
+        // CSR_TIME (0xC01) still falls inside the mcounteren/scounteren check below.
+        riscv::CSR_TIME: begin
+          if (CVA6Cfg.SstcEn && CVA6Cfg.RVZicntr) begin
+            if (CVA6Cfg.RVH && v_q) csr_rdata = guest_time[CVA6Cfg.XLEN-1:0];
+            else csr_rdata = rtc_time_i[CVA6Cfg.XLEN-1:0];
+          end else read_access_exception = 1'b1;
+        end
+        riscv::CSR_TIMEH: begin
+          if (CVA6Cfg.SstcEn && CVA6Cfg.RVZicntr && CVA6Cfg.IS_XLEN32) begin
+            if (CVA6Cfg.RVH && v_q) csr_rdata = CVA6Cfg.XLEN'(guest_time[63:32]);
+            else csr_rdata = CVA6Cfg.XLEN'(rtc_time_i[63:32]);
+          end else read_access_exception = 1'b1;
+        end
         //Event Selector
         riscv::CSR_MHPM_EVENT_3,
                 riscv::CSR_MHPM_EVENT_4,
@@ -1063,6 +1225,25 @@ module csr_regfile
     icache_d   = icache_q;
     acc_cons_d = acc_cons_q;
 
+    if (CVA6Cfg.SstcEn) begin
+      stimecmp_d = stimecmp_q;
+      mstce_d    = mstce_q;
+    end else begin
+      stimecmp_d = '0;
+      mstce_d    = 1'b0;
+    end
+    // U9.0 Sstc + H defaults (vstimecmp / henvcfg.STCE)
+    if (CVA6Cfg.SstcEn && CVA6Cfg.RVH) begin
+      vstimecmp_d = vstimecmp_q;
+      hstce_d     = hstce_q;
+    end else begin
+      vstimecmp_d = '0;
+      hstce_d     = 1'b0;
+    end
+    // U9.1: htimedelta lives under RVH (guest time virtualization), not only Sstc
+    if (CVA6Cfg.RVH) htimedelta_d = htimedelta_q;
+    else htimedelta_d = '0;
+
     if (CVA6Cfg.RVH) begin
       vstvec_d                 = vstvec_q;
       vsscratch_d              = vsscratch_q;
@@ -1103,6 +1284,11 @@ module csr_regfile
     mcbcfe_d               = mcbcfe_q;
     scbcfe_d               = scbcfe_q;
     hcbcfe_d               = hcbcfe_q;
+
+    mcbze_d                = mcbze_q;
+    scbze_d                = scbze_q;
+    hcbze_d                = hcbze_q;
+    mpbmte_d               = mpbmte_q;
 
     // trigger module defaults
     tdata1_to_tm           = '0;
@@ -1363,6 +1549,56 @@ module csr_regfile
         riscv::CSR_STVAL:
         if (CVA6Cfg.RVS && CVA6Cfg.TvalEn) stval_d = csr_wdata;
         else update_access_exception = 1'b1;
+        // Sstc: writing stimecmp re-arms the supervisor timer. Writing it also
+        // implicitly clears the pending STIP, because STIP is a pure function of
+        // (time >= stimecmp) once STCE is set — no explicit clear is needed.
+        // V=1: stimecmp is an alias of vstimecmp; STCE fail → virtual-instruction.
+        riscv::CSR_STIMECMP: begin
+          if (CVA6Cfg.SstcEn && CVA6Cfg.RVS) begin
+            if (CVA6Cfg.RVH && v_q) begin
+              if (!mstce_q || !hstce_q) virtual_update_access_exception = 1'b1;
+              else vstimecmp_d[CVA6Cfg.XLEN-1:0] = csr_wdata;
+            end else if (priv_lvl_o != riscv::PRIV_LVL_M && !mstce_q) begin
+              update_access_exception = 1'b1;
+            end else begin
+              stimecmp_d[CVA6Cfg.XLEN-1:0] = csr_wdata;
+            end
+          end else begin
+            update_access_exception = 1'b1;
+          end
+        end
+        riscv::CSR_STIMECMPH: begin
+          if (CVA6Cfg.SstcEn && CVA6Cfg.RVS && CVA6Cfg.IS_XLEN32) begin
+            if (CVA6Cfg.RVH && v_q) begin
+              if (!mstce_q || !hstce_q) virtual_update_access_exception = 1'b1;
+              else vstimecmp_d[63:32] = csr_wdata[31:0];
+            end else if (priv_lvl_o != riscv::PRIV_LVL_M && !mstce_q) begin
+              update_access_exception = 1'b1;
+            end else begin
+              stimecmp_d[63:32] = csr_wdata[31:0];
+            end
+          end else begin
+            update_access_exception = 1'b1;
+          end
+        end
+        riscv::CSR_VSTIMECMP: begin
+          if (CVA6Cfg.SstcEn && CVA6Cfg.RVH) begin
+            if (priv_lvl_o == riscv::PRIV_LVL_U ||
+                (priv_lvl_o == riscv::PRIV_LVL_S && v_q) ||
+                (priv_lvl_o != riscv::PRIV_LVL_M && !(mstce_q && hstce_q)))
+              update_access_exception = 1'b1;
+            else vstimecmp_d[CVA6Cfg.XLEN-1:0] = csr_wdata;
+          end else update_access_exception = 1'b1;
+        end
+        riscv::CSR_VSTIMECMPH: begin
+          if (CVA6Cfg.SstcEn && CVA6Cfg.RVH && CVA6Cfg.IS_XLEN32) begin
+            if (priv_lvl_o == riscv::PRIV_LVL_U ||
+                (priv_lvl_o == riscv::PRIV_LVL_S && v_q) ||
+                (priv_lvl_o != riscv::PRIV_LVL_M && !(mstce_q && hstce_q)))
+              update_access_exception = 1'b1;
+            else vstimecmp_d[63:32] = csr_wdata[31:0];
+          end else update_access_exception = 1'b1;
+        end
         // supervisor address translation and protection
         riscv::CSR_SATP: begin
           if (CVA6Cfg.RVS) begin
@@ -1396,6 +1632,7 @@ module csr_regfile
               endcase
               scbcfe_d = csr_wdata[6];
             end
+            if (CVA6Cfg.RVZiCboz) scbze_d = csr_wdata[7];
           end else begin
             update_access_exception = 1'b1;
           end
@@ -1455,7 +1692,12 @@ module csr_regfile
         end
         riscv::CSR_HVIP: begin
           if (CVA6Cfg.RVH) begin
-            mask  = VS_DELEG_INTERRUPTS[CVA6Cfg.XLEN-1:0];
+            // Writable VS interrupt inject bits. When Sstc×H STCE pair is on,
+            // VSTIP is hardwired from (guest_time >= vstimecmp) later — exclude it
+            // from the writable mask so software cannot race the hardwire.
+            mask = VS_DELEG_INTERRUPTS[CVA6Cfg.XLEN-1:0];
+            if (CVA6Cfg.SstcEn && mstce_q && hstce_q)
+              mask = mask & ~CVA6Cfg.XLEN'(riscv::MIP_VSTIP);
             mip_d = (mip_q & ~mask) | (csr_wdata & mask);
           end else begin
             update_access_exception = 1'b1;
@@ -1523,9 +1765,26 @@ module csr_regfile
               endcase
               hcbcfe_d = csr_wdata[6];
             end
+            if (CVA6Cfg.RVZiCboz) hcbze_d = csr_wdata[7];
+            // henvcfg.STCE — enable VS Sstc (requires menvcfg.STCE as well)
+            if (CVA6Cfg.SstcEn && CVA6Cfg.IS_XLEN64) hstce_d = csr_wdata[CVA6Cfg.XLEN-1];
           end else begin
             update_access_exception = 1'b1;
           end
+        end
+        riscv::CSR_HENVCFGH: begin
+          if (CVA6Cfg.RVH && CVA6Cfg.IS_XLEN32) begin
+            if (CVA6Cfg.SstcEn) hstce_d = csr_wdata[31];
+          end else update_access_exception = 1'b1;
+        end
+        // U9.1: htimedelta write (HS/M). VS access is blocked by CSR privilege decode.
+        riscv::CSR_HTIMEDELTA: begin
+          if (CVA6Cfg.RVH) htimedelta_d[CVA6Cfg.XLEN-1:0] = csr_wdata;
+          else update_access_exception = 1'b1;
+        end
+        riscv::CSR_HTIMEDELTAH: begin
+          if (CVA6Cfg.RVH && CVA6Cfg.IS_XLEN32) htimedelta_d[63:32] = csr_wdata[31:0];
+          else update_access_exception = 1'b1;
         end
         riscv::CSR_MSTATUS: begin
           mstatus_d    = {{64 - CVA6Cfg.XLEN{1'b0}}, csr_wdata};
@@ -1611,6 +1870,8 @@ module csr_regfile
             mask = CVA6Cfg.XLEN'(riscv::MIP_SSIP)
                     | CVA6Cfg.XLEN'(riscv::MIP_STIP)
                     | CVA6Cfg.XLEN'(riscv::MIP_SEIP);
+            // Sscofpmf: LCOFI is delegable to S-mode.
+            if (CVA6Cfg.SscofpmfEn) mask = mask | CVA6Cfg.XLEN'(riscv::MIP_LCOFIP);
             if (CVA6Cfg.RVH) begin
               mideleg_d = (mideleg_q & ~mask) | (csr_wdata & mask) | HS_DELEG_INTERRUPTS[CVA6Cfg.XLEN-1:0];
             end else begin
@@ -1649,6 +1910,8 @@ module csr_regfile
               end
             end
           end
+          // Sscofpmf: LCOFIE is always M-mode-writable when the extension is on.
+          if (CVA6Cfg.SscofpmfEn) mask = mask | CVA6Cfg.XLEN'(riscv::MIP_LCOFIP);
           mie_d = (mie_q & ~mask) | (csr_wdata & mask); // we only support supervisor and M-mode interrupts
         end
 
@@ -1705,9 +1968,21 @@ module csr_regfile
             endcase
             mcbcfe_d = csr_wdata[6];
           end
+          if (CVA6Cfg.RVZiCboz) begin
+            mcbze_d = csr_wdata[7];
+          end
+          if (CVA6Cfg.SvpbmtEn && CVA6Cfg.IS_XLEN64) begin
+            mpbmte_d = csr_wdata[62];
+          end
+          // menvcfg.STCE (bit 63) is only present on RV64; RV32 uses menvcfgh.
+          if (CVA6Cfg.SstcEn && CVA6Cfg.IS_XLEN64) begin
+            mstce_d = csr_wdata[CVA6Cfg.XLEN-1];
+          end
         end
         riscv::CSR_MENVCFGH: begin
           if (!CVA6Cfg.RVU || !CVA6Cfg.IS_XLEN32) update_access_exception = 1'b1;
+          // menvcfgh.STCE is menvcfg bit 63 on RV32.
+          else if (CVA6Cfg.SstcEn) mstce_d = csr_wdata[31];
         end
         riscv::CSR_MCOUNTINHIBIT:
         if (CVA6Cfg.PerfCounterEn)
@@ -1999,6 +2274,22 @@ module csr_regfile
     mip_d[riscv::IRQ_M_SOFT] = CVA6Cfg.SoftwareInterruptEn && ipi_i;
     // Timer interrupt pending, coming from platform timer
     mip_d[riscv::IRQ_M_TIMER] = time_irq_i;
+    // Sstc: with menvcfg.STCE set, STIP is no longer software-writable — it is a
+    // pure function of (time >= stimecmp). This assignment sits after the CSR
+    // write logic on purpose, so it overrides any write through mip/sip and
+    // makes the bit effectively read-only, as the extension requires.
+    if (CVA6Cfg.SstcEn && mstce_q) begin
+      mip_d[riscv::IRQ_S_TIMER] = stimecmp_hit_q;
+    end
+    // U9.0 Sstc + H: VSTIP is hardwired from (time >= vstimecmp) when both
+    // menvcfg.STCE and henvcfg.STCE are set (Sstc for VS-mode).
+    if (CVA6Cfg.SstcEn && CVA6Cfg.RVH && mstce_q && hstce_q) begin
+      mip_d[riscv::IRQ_VS_TIMER] = vstimecmp_hit_q;
+    end
+    // Sscofpmf: LCOFIP tracks the OR of mhpmeventN.OF bits (cleared by writing OF=0).
+    if (CVA6Cfg.SscofpmfEn) begin
+      mip_d[riscv::IRQ_LCOF] = lcofi_i;
+    end
 
     // -----------------------
     // Manage Exception Stack
@@ -2702,6 +2993,11 @@ module csr_regfile
   assign mcbcfe_o = CVA6Cfg.RVZiCbom ? mcbcfe_q : 1'b0;
   assign scbcfe_o = CVA6Cfg.RVZiCbom ? scbcfe_q : 1'b0;
   assign hcbcfe_o = CVA6Cfg.RVZiCbom ? hcbcfe_q : 1'b0;
+
+  assign mcbze_o = CVA6Cfg.RVZiCboz ? mcbze_q : 1'b0;
+  assign scbze_o = CVA6Cfg.RVZiCboz ? scbze_q : 1'b0;
+  assign hcbze_o = CVA6Cfg.RVZiCboz ? hcbze_q : 1'b0;
+  assign pbmte_o = CVA6Cfg.SvpbmtEn ? mpbmte_q : 1'b0;
   // we support bare memory addressing and SV39
   if (CVA6Cfg.RVH) begin
     assign en_translation_o = (((config_pkg::vm_mode_t'(satp_q.mode) == CVA6Cfg.MODE_SV && !v_q) || (config_pkg::vm_mode_t'(vsatp_q.mode) == CVA6Cfg.MODE_SV && v_q)) &&
@@ -2780,6 +3076,13 @@ module csr_regfile
       mscratch_q       <= {CVA6Cfg.XLEN{1'b0}};
       if (CVA6Cfg.TvalEn) mtval_q <= {CVA6Cfg.XLEN{1'b0}};
       fiom_q          <= '0;
+      stimecmp_q      <= '0;
+      mstce_q         <= 1'b0;
+      stimecmp_hit_q  <= 1'b0;
+      vstimecmp_q     <= '0;
+      hstce_q         <= 1'b0;
+      vstimecmp_hit_q <= 1'b0;
+      htimedelta_q    <= '0;
       dcache_q        <= {{CVA6Cfg.XLEN - 1{1'b0}}, 1'b1};
       icache_q        <= {{CVA6Cfg.XLEN - 1{1'b0}}, 1'b1};
       mcountinhibit_q <= '0;
@@ -2787,6 +3090,12 @@ module csr_regfile
       if (CVA6Cfg.RVZiCbom) begin
         mcbie_q  <= riscv::CBIE_INVAL;
         mcbcfe_q <= 1'b1;
+      end
+      if (CVA6Cfg.RVZiCboz) begin
+        mcbze_q <= 1'b1;  // CBZE defaults enabled like CBCFE
+      end
+      if (CVA6Cfg.SvpbmtEn) begin
+        mpbmte_q <= 1'b0;  // software must opt in via menvcfg.PBMTE
       end
       // supervisor mode registers
       if (CVA6Cfg.RVS) begin
@@ -2803,6 +3112,7 @@ module csr_regfile
           scbie_q  <= riscv::CBIE_INVAL;
           scbcfe_q <= 1'b1;
         end
+        if (CVA6Cfg.RVZiCboz) scbze_q <= 1'b1;
       end
 
       if (CVA6Cfg.RVH) begin
@@ -2830,6 +3140,7 @@ module csr_regfile
           hcbie_q  <= riscv::CBIE_INVAL;
           hcbcfe_q <= 1'b1;
         end
+        if (CVA6Cfg.RVZiCboz) hcbze_q <= 1'b1;
       end
       if (CVA6Cfg.SDTRIG) begin
         scontext_q <= '0;
@@ -2878,6 +3189,13 @@ module csr_regfile
       mscratch_q       <= mscratch_d;
       if (CVA6Cfg.TvalEn) mtval_q <= mtval_d;
       fiom_q          <= fiom_d;
+      stimecmp_q      <= stimecmp_d;
+      mstce_q         <= mstce_d;
+      stimecmp_hit_q  <= stimecmp_hit_d;
+      vstimecmp_q     <= vstimecmp_d;
+      hstce_q         <= hstce_d;
+      vstimecmp_hit_q <= vstimecmp_hit_d;
+      htimedelta_q    <= htimedelta_d;
       dcache_q        <= dcache_d;
       icache_q        <= icache_d;
       mcountinhibit_q <= mcountinhibit_d;
@@ -2886,6 +3204,8 @@ module csr_regfile
         mcbie_q  <= mcbie_d;
         mcbcfe_q <= mcbcfe_d;
       end
+      if (CVA6Cfg.RVZiCboz) mcbze_q <= mcbze_d;
+      if (CVA6Cfg.SvpbmtEn) mpbmte_q <= mpbmte_d;
       // supervisor mode registers
       if (CVA6Cfg.RVS) begin
         medeleg_q    <= medeleg_d;
@@ -2901,6 +3221,7 @@ module csr_regfile
           scbie_q  <= scbie_d;
           scbcfe_q <= scbcfe_d;
         end
+        if (CVA6Cfg.RVZiCboz) scbze_q <= scbze_d;
       end
       if (CVA6Cfg.RVH) begin
         v_q                      <= v_d;
@@ -2928,6 +3249,7 @@ module csr_regfile
           hcbie_q  <= hcbie_d;
           hcbcfe_q <= hcbcfe_d;
         end
+        if (CVA6Cfg.RVZiCboz) hcbze_q <= hcbze_d;
       end
       if (CVA6Cfg.SDTRIG) begin
         scontext_q <= scontext_d;

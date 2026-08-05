@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Sstc Supervisor Timer Interrupts (Vol II, 8.8)</title></head>
+<body>
+<h1>Vol II &sect;8.8 — Sstc Extension for Supervisor-mode Timer Interrupts</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#Sstc">specs/riscv-spec.html#Sstc</a>.
+Source line: <code>specs/riscv-spec.html:88824</code>. <strong>Domain:</strong> —.</p>
+
+<p>Sstc provides supervisor-level timer CSRs (<code>stimecmp</code>, <code>stimecmph</code>) and a
+supervisor timer interrupt, removing the need for S-mode to delegate the M-mode timer interrupt. It
+allows the OS to manage timer interrupts directly and improves virtualization latency.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The current Privileged arch specification only defines a hardware
+mechanism for generating machine-mode timer interrupts (based on the
+mtime and mtimecmp registers). With the resultant requirement that timer
+services for S-mode/HS-mode ... have to all be provided by M-mode - via
+SBI calls from S/HS-mode up to M-mode."
+...
+"The Sstc extension defines supervisor-level timer interrupts.
+The Sstc extension provides a facility for supervisor-mode software to
+receive timer interrupts through the stimecmp and stimecmph registers."
+(specs/riscv-spec.html:88824-88835, anchor #Sstc)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module sstc_timer (
+  input  logic [63:0] time_i,
+  input  logic [63:0] stimecmp_i,
+  output logic        timer_irq_o
+);
+  // timer_irq asserted when time >= stimecmp and enabled
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> <strong>implemented (config)</strong> — U7ᵃ. When
+<code>CVA6Cfg.SstcEn</code> (requires RVS; not combined with RVH yet), the hart owns
+<code>stimecmp</code>/<code>stimecmph</code> and compares against platform <code>rtc_time_i</code>
+(mtime from CLINT) inside <code>core/csr_regfile.sv</code>; STIP is generated in-core when
+<code>menvcfg.STCE</code> permits. CLINT still owns <code>mtime</code>/<code>mtimecmp</code> and is
+wired through <code>corev_apu</code> / <code>ariane.sv</code>. Enabled on primary Linux-class configs.
+vstimecmp under H is not implemented (asserted illegal with RVH).</p>
+
+<p><strong>.dts linkage:</strong> keep <code>riscv,clint0</code> + <code>timebase-frequency</code>;
+advertise <code>sstc</code> in <code>riscv,isa-extensions</code> when <code>SstcEn</code>.</p>
+</body>
+</html>

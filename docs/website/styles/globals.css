@@ -1,0 +1,209 @@
+/* Copyright (c) 2026 Etienne Cimon */
+/* SPDX-License-Identifier: MIT */
+
+/*
+ * GSys LibreCore docs theme — "mathpazo" look.
+ *
+ * mathpazo is the LaTeX package that typesets text (and math) in Palatino.
+ * On the web the closest open equivalent is TeX Gyre Pagella, a metric
+ * clone of Palatino. We load it as a progressive enhancement and fall back
+ * to the Palatino system stack (Palatino Linotype on Windows, Palatino on
+ * macOS, URW Palladio on Linux) so the look is preserved offline.
+ */
+@import url('https://fonts.cdnfonts.com/css/tex-gyre-pagella');
+
+:root {
+  /* Palatino / mathpazo body + heading stack. */
+  --pazo-serif: 'TeX Gyre Pagella', 'Palatino Linotype', 'Book Antiqua',
+    Palatino, 'URW Palladio L', 'P052', Georgia, 'Times New Roman', serif;
+  --pazo-mono: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', 'Fira Code',
+    ui-monospace, 'Menlo', 'Consolas', monospace;
+
+  /* Modern accent: a refined indigo/violet. */
+  --nextra-primary-hue: 255deg;
+  --nextra-primary-saturation: 72%;
+
+  /* Softer, larger reading rhythm suited to Palatino. */
+  --pazo-line-height: 1.75;
+  --pazo-measure: 46rem;
+}
+
+html {
+  font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1, 'onum' 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Base typography — apply Palatino everywhere except code. */
+html,
+body,
+.nextra-container,
+.nextra-content {
+  font-family: var(--pazo-serif);
+}
+
+/* Body copy: generous leading + old-style numerals for an editorial feel. */
+.nextra-content p,
+.nextra-content li,
+.nextra-content td,
+.nextra-content th,
+.nextra-content blockquote {
+  font-size: 1.05rem;
+  line-height: var(--pazo-line-height);
+  letter-spacing: 0.003em;
+}
+
+/* Headings: tighter tracking, balanced wrapping, slightly heavier weight. */
+.nextra-content h1,
+.nextra-content h2,
+.nextra-content h3,
+.nextra-content h4,
+.nextra-content h5,
+.nextra-content h6 {
+  font-family: var(--pazo-serif);
+  letter-spacing: -0.012em;
+  text-wrap: balance;
+}
+
+.nextra-content h1 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: 1.15;
+  background: linear-gradient(
+    92deg,
+    hsl(var(--nextra-primary-hue) var(--nextra-primary-saturation) 55%),
+    hsl(calc(var(--nextra-primary-hue) + 40deg) var(--nextra-primary-saturation) 58%)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.nextra-content h2 {
+  font-size: 1.7rem;
+  font-weight: 650;
+  margin-top: 2.5rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid hsl(var(--nextra-primary-hue) 30% 50% / 0.18);
+}
+
+.nextra-content h3 {
+  font-size: 1.32rem;
+  font-weight: 600;
+}
+
+/* Keep code in a crisp monospace, not Palatino. */
+code,
+kbd,
+pre,
+samp,
+.nextra-content code {
+  font-family: var(--pazo-mono);
+  font-feature-settings: 'liga' 1, 'calt' 1;
+}
+
+/* Inline code: pill styling that reads well next to serif text. */
+.nextra-content :not(pre) > code {
+  font-size: 0.86em;
+  padding: 0.12em 0.42em;
+  border-radius: 0.4rem;
+  background: hsl(var(--nextra-primary-hue) 40% 50% / 0.1);
+  border: 1px solid hsl(var(--nextra-primary-hue) 40% 50% / 0.14);
+}
+
+/* Links: refined underline that animates on hover. */
+.nextra-content a {
+  text-decoration: none;
+  background-image: linear-gradient(
+    currentColor,
+    currentColor
+  );
+  background-position: 0 100%;
+  background-repeat: no-repeat;
+  background-size: 0% 1.5px;
+  transition: background-size 0.22s ease;
+}
+
+.nextra-content a:hover {
+  background-size: 100% 1.5px;
+}
+
+/* Blockquotes: editorial callout look. */
+.nextra-content blockquote {
+  border-inline-start-width: 3px;
+  border-inline-start-color: hsl(
+    var(--nextra-primary-hue) var(--nextra-primary-saturation) 60%
+  );
+  background: hsl(var(--nextra-primary-hue) 40% 50% / 0.05);
+  border-radius: 0 0.5rem 0.5rem 0;
+  padding: 0.75rem 1.1rem;
+  font-style: italic;
+}
+
+/* Tables: modern, airy grid. */
+.nextra-content table {
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border-radius: 0.6rem;
+  border: 1px solid hsl(var(--nextra-primary-hue) 20% 50% / 0.16);
+}
+
+.nextra-content thead {
+  background: hsl(var(--nextra-primary-hue) 40% 50% / 0.08);
+}
+
+.nextra-content th,
+.nextra-content td {
+  border: none;
+  border-bottom: 1px solid hsl(var(--nextra-primary-hue) 20% 50% / 0.12);
+}
+
+.nextra-content tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.nextra-content tbody tr:hover {
+  background: hsl(var(--nextra-primary-hue) 40% 50% / 0.04);
+}
+
+/* Code blocks: softer, elevated card. */
+.nextra-content pre {
+  border-radius: 0.7rem;
+  border: 1px solid hsl(var(--nextra-primary-hue) 20% 50% / 0.16);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 8px 24px rgb(0 0 0 / 0.05);
+}
+
+/* Sidebar: keep the UI serifed but a touch smaller and calmer. */
+.nextra-sidebar-container {
+  font-size: 0.95rem;
+}
+
+/* Active sidebar link: pill with accent tint. */
+.nextra-sidebar-container a.active,
+.nextra-sidebar-container li.active > a {
+  background: hsl(var(--nextra-primary-hue) var(--nextra-primary-saturation) 55% / 0.14);
+  font-weight: 600;
+}
+
+/* Navbar polish. */
+.nextra-nav-container {
+  backdrop-filter: saturate(1.4) blur(12px);
+}
+
+/* Constrain measure for comfortable long-form reading. */
+.nextra-content article {
+  max-width: none;
+}
+
+/* A little more breathing room between list items. */
+.nextra-content ul > li,
+.nextra-content ol > li {
+  margin-top: 0.4rem;
+}
+
+/* Selection color tuned to the accent. */
+::selection {
+  background: hsl(var(--nextra-primary-hue) var(--nextra-primary-saturation) 60% / 0.28);
+}

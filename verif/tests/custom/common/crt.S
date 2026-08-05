@@ -137,6 +137,7 @@ _start:
   .size    _start, . - _start
 
   .align 2
+  .globl trap_entry
 trap_entry:
   addi sp, sp, -272
 

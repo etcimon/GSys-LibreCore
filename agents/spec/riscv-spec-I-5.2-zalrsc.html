@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zalrsc Load-Reserved/Store-Conditional (Vol I, 5.2)</title></head>
+<body>
+<h1>Vol I &sect;5.2 — Zalrsc Extension for Load-Reserved/Store-Conditional Instructions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zalrsc">specs/riscv-spec.html#ext:zalrsc</a>.
+<strong>Domain:</strong> SPEC, RAM, CACHE.</p>
+
+<p>LR loads a word/doubleword from the address in <em>rs1</em>, places the sign-extended value in
+<em>rd</em>, and registers a reservation set: a set of bytes that subsumes the bytes in the addressed
+word. SC conditionally writes a word in <em>rs2</em> to the address in <em>rs1</em>; it succeeds only
+if the reservation is still valid and the reservation set contains the bytes being written. If SC
+succeeds it writes the word to memory and writes zero to <em>rd</em>; if it fails it does not write to
+memory and writes a nonzero value to <em>rd</em>. Executing an SC invalidates any reservation held by
+this hart.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"LR.W loads a word from the address in rs1, places the sign-extended
+value in rd, and registers a reservation set: a set of bytes that
+subsumes the bytes in the addressed word. SC.W conditionally writes a
+word in rs2 to the address in rs1: the SC.W succeeds only if the
+reservation is still valid and the reservation set contains the bytes
+being written. If the SC.W succeeds, the instruction writes the word in
+rs2 to memory, and it writes zero to rd. If the SC.W fails, the
+instruction does not write to memory, and it writes a nonzero value to
+rd. ... Regardless of success or failure, executing an SC.W instruction
+invalidates any reservation held by this hart."
+(specs/riscv-spec.html:14329-14378, anchor #ext:zalrsc / #norm:lr_w_op)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module lrsc_tracker (
+  input  logic [XLEN-1:0] addr_i,
+  input  logic            lr_i, sc_i,
+  input  logic [XLEN-1:0] snoop_addr_i,
+  input  logic            snoop_store_i,
+  output logic            reservation_valid_o,
+  output logic [XLEN-1:0] sc_result_o
+);
+  // track reservation per hart; clear on conflicting store, exception, SFENCE.VMA, etc.
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> implemented when <code>CVA6Cfg.RVA</code> is set. Decode in
+<code>core/decoder.sv:1602-1637</code> emits <code>AMO_LRW</code>/<code>AMO_SCD</code> etc.; the LSU
+selects the operation at <code>core/load_store_unit.sv:728-748</code>; <code>core/store_unit.sv:134-135,282-319</code>
+converts to <code>AMO_LR</code>/<code>AMO_SC</code>; <code>core/amo_buffer.sv:50-63</code> holds the
+AMO until non-speculative commit. The WT cache path implements SC success/fail through the
+read-modify-write response and an exponential backoff counter in
+<code>core/cache_subsystem/wt_dcache_missunit.sv:334-347,576-583</code> and the AXI lock encoding in
+<code>core/cache_subsystem/wt_axi_adapter.sv:252-267,577-580</code>. The HPDcache path uses an explicit
+LR/SC reservation snoop in <code>core/cache_subsystem/hpdcache/rtl/src/hpdcache_ctrl.sv:157-161,1179-1181</code>
+/ <code>hpdcache_uncached.sv:84-89,149-150</code>.</p>
+
+<p><strong>.dts linkage:</strong> the reservation-set size is tied to the cache-line width and is only
+valid on cacheable/coherent memory nodes matching the <code>CachedRegion</code> PMA configuration.</p>
+</body>
+</html>

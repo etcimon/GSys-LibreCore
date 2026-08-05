@@ -177,8 +177,11 @@ int puts(const char *s)
 int putchar(int ch)
 {
 #if !NOPRINT
-  static __thread char buf[64] __attribute__((aligned(64)));
-  static __thread int buflen = 0;
+  // Single-hart directed tests: avoid __thread (emutls needs malloc under
+  // -nostdlib with modern riscv-none-elf-gcc). Multi-hart can still use
+  // util.h barrier TLS when linked with a libc that provides emutls.
+  static char buf[64] __attribute__((aligned(64)));
+  static int buflen = 0;
 
   buf[buflen++] = ch;
 

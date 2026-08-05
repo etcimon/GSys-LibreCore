@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Sscofpmf Count Overflow and Mode-Based Filtering (Vol II, 8.9)</title></head>
+<body>
+<h1>Vol II &sect;8.9 — Sscofpmf Extension for Count Overflow and Mode-Based Filtering</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#Sscofpmf">specs/riscv-spec.html#Sscofpmf</a>.
+Source line: <code>specs/riscv-spec.html:88852</code>. <strong>Domain:</strong> —.</p>
+
+<p>Sscofpmf adds overflow status and interrupt facilities for performance counters, plus mode-based
+filtering (event counting enabled only in selected privilege modes). It uses <code>mhpmevent</code>
+bits and the <code>scountovf</code> CSR for S-mode visibility of overflow.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The current Privileged specification defines mhpmevent CSRs to select
+and control event counting by the associated hpmcounter CSRs, but
+provides no standardization of any fields within these CSRs. This
+extension serves to accomplish exactly this within the existing mhpmevent
+CSRs (and correspondingly avoids the unnecessary creation of whole new
+sets of CSRs - past just one new CSR)."
+(specs/riscv-spec.html:88852-88860, anchor #Sscofpmf)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module sscofpmf_counter (
+  input  logic        event_i,
+  input  priv_lvl_e   priv_i,
+  input  logic [XLEN-1:0] filter_i,
+  output logic        overflow_o
+);
+  // count only when filter matches current mode; overflow latches
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> <strong>implemented (config)</strong> — U7ᵃ (+ U8ᵃ event width).
+When <code>CVA6Cfg.SscofpmfEn</code> (requires PerfCounterEn + RVS), <code>core/perf_counters.sv</code>
+tracks HPM OF bits / privilege filters and feeds LCOFI; <code>core/csr_regfile.sv</code> exposes
+<code>scountovf</code> and related CSR paths. mhpmevent selectors were widened under U8ᵃ for headroom.
+Enabled on primary Linux-class configs. Full Linux <code>riscv,pmu</code> DT mapping of every U1–U6
+event remains an observability follow-on.</p>
+
+<p><strong>.dts linkage:</strong> <code>riscv,pmu</code> with
+<code>riscv,event-to-mhpmevent</code> / counter bindings must match the RTL event table when enabling
+Sscofpmf for <code>perf</code>.</p>
+</body>
+</html>

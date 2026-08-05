@@ -1,0 +1,77 @@
+---
+title: Host Integration
+description: How external tools and the CVA6 build-platform consume sv-timing without linking monorepo code into the package.
+---
+
+# Host Integration
+
+Rule: **hosts prepare inputs and consume outputs.** They do not link monorepo
+code into `sv-timing` crates.
+
+Full package text: `sv-timing/AGENTS-host.md`.
+
+## Interaction modes
+
+| Mode | How |
+|---|---|
+| **CLI + JSON** (v1 required) | Spawn `sv-timing` / `svt.py run -- …` with file list argv |
+| **Rust library** | Path dependency on `sv-timing-core` only |
+| **TypeScript client** | `sv-timing/js/` rehydrates DTOs (connection tests) |
+| **Host adapter** | Lives **outside** `sv-timing/` (e.g. `build-platform/src/tooling/timings.ts`) |
+
+## Inputs a host may pass
+
+- `--file` / `--files-from`, `--incdir`, `--define`
+- `--modules` or `--all-modules`
+- `--target-mhz`, `--fo4-ps`
+- `--package-mode`, `--param-map`, `--assume-xlen`
+- `--cache`, `--json-out`, `--out-dir` / `--emit-dir`
+- Multi-cycle / refuse path knobs as documented by the CLI
+
+### Host responsibilities
+
+1. Expand project manifests → portable `.f` or path list.
+2. Supply defines, incdirs, target MHz, module roots.
+3. Optional: write `param-map.json` for package/config typedef substitutions.
+4. Map `--out-dir` and cache into the host workspace.
+5. Review emit tree + `svt_corrected.f`; **never auto-commit** corrected RTL.
+
+### Conceptual flow
+
+```text
+host: flatten flist + env → analyze.f
+host: write param-map.json (optional)
+host: run  sv-timing analyze --files-from analyze.f --modules alu \
+           --target-mhz 1250 --json-out report.json
+host: run  sv-timing correct … --emit --out-dir build/svt-corrected
+host: point sim/synth at build/svt-corrected/svt_corrected.f (after review)
+```
+
+## CVA6 monorepo adapter
+
+When `sv-timing` is checked into this tree, the optional host is
+**build-platform**:
+
+| Piece | Role |
+|---|---|
+| `build-platform/src/tooling/timings.ts` | Flatten flist, argv builders, spawn helpers |
+| `build-platform/src/cli/commands/timings.ts` | `timings status\|flist\|analyze\|correct` |
+| `src/tooling/eda.ts` | `flattenFlist` / `edaEnv` **only on the host side** |
+
+User-facing page: [Build Platform · Timings](../build-platform/timings).
+
+```bash
+bun run build-platform/src/cli/index.ts timings status
+bun run build-platform/src/cli/index.ts timings flist --target cv64a6_imafdc_sv39
+bun run build-platform/src/cli/index.ts timings analyze --modules alu --target-mhz 1250
+bun run build-platform/src/cli/index.ts timings correct --modules alu --allow-latency --emit
+```
+
+Removing build-platform or extracting `sv-timing/` to its own repository must
+leave the Rust package fully usable via `tools/svt.py` alone.
+
+## Independence checks
+
+Package CI-style checks include `tools/check_independence.py` so monorepo
+imports cannot creep into crates. Host tests may live in build-platform; package
+tests use **fixtures only**.

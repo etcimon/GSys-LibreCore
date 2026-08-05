@@ -1,0 +1,116 @@
+---
+title: Out-of-Order Execution
+description: Production config-gated OoO backend (rename, IQ, ROB, LSQ) and slice-OoO path for GSys LibreCore.
+---
+
+# Out-of-Order Execution
+
+Full multi-issue out-of-order is a **shipping, config-gated** backend on
+GSys LibreCore. Minimal packages keep `OoOEn=0` for **netlist identity** with the
+in-order path — a product option, not a quality disclaimer.
+
+Authoritative detail: `architecture/out-of-order/README.md`.
+
+## Two knobs
+
+| Knob | Meaning |
+|---|---|
+| `SliceOoOEn` | U4 **slice** OoO path (`core/cva6_slice_*.sv`); often default **off** |
+| `OoOEn` | U5 **full** rename/IQ/ROB/LSQ backend (`core/ooo/*`); **identity when 0** |
+
+**Invariant:** `SliceOoOEn` and `OoOEn` are mutually exclusive product choices
+(XOR) — do not enable both.
+
+## Pipeline when `OoOEn=1`
+
+```
+decode → scoreboard (in-order alloc + commit)
+              │
+              ▼
+     g6lc_ooo_dispatch
+        multi-port rename + freelist
+        age-ordered IQ + chain wakeup
+        ROB multi-WB complete
+        LSQ + memdep / STL
+        PRF + WB bypass → issue operands
+        mispredict: cancel mask → squash younger IQ/ROB/LSQ
+              │
+              ▼
+     issue_read_operands → EX → WB → commit
+```
+
+When `OoOEn=0`, the dispatch module is not in the path (identity).
+
+## Module map (`core/ooo/`)
+
+| Module | Role |
+|---|---|
+| `g6lc_rename.sv` | Multi-port RAT, free pool, busy, branch checkpoint |
+| `g6lc_iq.sv` | Compacting IQ, multi-grant, cancel squash |
+| `g6lc_rob.sv` | ROB, multi-WB complete by `trans_id` |
+| `g6lc_lsq.sv` | Multi-alloc LSQ, CAM, store-to-load forward |
+| `g6lc_memdep.sv` | Store-set style memory dependence |
+| `g6lc_prf.sv` | Multi-port physical register file |
+| `g6lc_ooo_dispatch.sv` | Glue, AGU, PRF outs, PMU probes |
+
+Scoreboard entries carry physical tags (`p_rs1/p_rs2/p_rd`, `ooo_renamed`) when
+on; zeros when off. RVFI/commit observe tags via the scoreboard entry.
+
+## Production packages
+
+| Package | Role |
+|---|---|
+| `g6lc64_ooo_server_config_pkg.sv` | Server: wide issue, multi-core×hart, L2/L3 auto, deep spec, memdep |
+| `g6lc64_ooo_config_pkg.sv` | Dual-issue OoO lite (area-lean bring-up) |
+| Default `cv64a6_imafdc_sv39` (etc.) | `OoOEn=0` identity |
+
+ROB / IQ / LSQ / PRF depths scale from issue width when left at 0 in package
+builders (see `build_config_pkg` / package sources).
+
+## Bottlenecks the design targets
+
+| Risk | Mitigation (product view) |
+|---|---|
+| Multi-issue WAW/WAR | Single-cycle multi-port rename |
+| Mispredict blast radius | Checkpoint + scoreboard **cancel mask** squash |
+| Dependent ALU bubbles | Same-cycle producer→consumer IQ wakeup |
+| PRF read latency | Write-through PRF + WB bypass |
+| Memory order | Store-set + LSQ CAM; STL with live AGU |
+
+## Observability
+
+PMU **group 1** (see architecture README) exposes rename/IQ/ROB/LSQ/STL-class
+events. Prefer counters + RVFI when debugging mispredict or memory-order bugs.
+
+## Verification
+
+| Suite | Path / id |
+|---|---|
+| Directed list | `verif/tests/testlist_ooo_l3.yaml` |
+| Regress | `verif/regress/ooo-l3-tests.*` → suite **`ooo-l3-tests`** (optional) |
+| ILP / rename | `verif/tests/custom/ooo/ooo_ilp_chain.S` |
+| Memdep / STL | `verif/tests/custom/ooo/ooo_mem_dep.S` |
+
+```bash
+g6lc-build verify --target g6lc64_ooo
+g6lc-build verify --target g6lc64_ooo_server
+g6lc-build test --suite ooo-l3-tests
+```
+
+Optional suites are long-running by design; gate them in CI deliberately.
+
+## SoC-readiness notes
+
+- DFT: preserve `test_en_i` / `testmode_i` through new stateful structures.
+- Timing: IQ select, rename, and LSQ CAM are first-class critical paths —
+  structural FO4 with [`sv-timing`](../sv-timing) is useful early; STA still
+  owns sign-off.
+- Do not break in-order packages: `OoOEn=0` must remain identity.
+
+## Related
+
+- [Multi-Issue](./multi-issue)
+- [L2 / L3 Cache](../corev-apu/l2-l3-cache) — often co-enabled on server packages
+- [Server Profiles](./server-profiles)
+- [Upgrade Program](../architecture/upgrade-program)
+- Spec / flush discipline: `agents/guides/AGENTS-speculation.md`

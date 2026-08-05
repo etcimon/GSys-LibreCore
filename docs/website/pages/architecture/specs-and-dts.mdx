@@ -1,0 +1,183 @@
+---
+title: Specs, DTS & Architecture
+description: How the RISC-V specification, Linux device-tree, and architecture documents stay aligned across core, controllers, and board PHY.
+---
+
+# Specs, DTS & Architecture
+
+Three documents form the **cross-cutting contract** for every ISA-visible or
+SoC-visible change: the RISC-V specification, the CVA6 device tree, and the
+`AGENTS-*.md` architecture guides. Keeping them aligned is what makes a feature
+"real" for software bring-up.
+
+Traceability is the discipline that turns a collection of source files into an
+auditable engineering artifact. In safety-critical and security-critical
+markets, traceability is often a contractual requirement: every feature must be
+traceable to a requirement, every requirement to an implementation, and every
+implementation to a verification method. CVA6 adopts this discipline not as
+bureaucracy, but as a correctness mechanism. When the RISC-V spec, the device
+tree, and the agent guides are kept aligned, the project can answer the
+question "does this change break the SoC contract?" before silicon is wasted.
+
+## 1. RISC-V specification of record
+
+The file `specs/riscv-spec.html` is the canonical spec of record. It is
+organized into three volumes:
+
+- **I** Unprivileged ISA — instruction encodings, base integer, extensions.
+- **II** Privileged ISA — CSRs, privilege modes, interrupts, virtual memory.
+- **III** Profiles — platform profiles and optionality.
+
+The `agents/spec/` directory contains one small summary file per subchapter
+(`riscv-spec-<Vol>-<X.y>-<slug>.html`). These summaries give the canonical
+anchor, a Logisplain prose summary, pseudo-SystemVerilog synthesis notes, and a
+CVA6 status line.
+
+Having the full ISA manual in the repository is not just a convenience; it is a
+form of configuration management. External spec URLs rot, versions drift, and
+different engineers silently reference different snapshots. By pinning the
+spec as a single file (`specs/riscv-spec.html`) and producing per-subchapter
+summaries in `agents/spec/`, CVA6 ensures that every ISA-visible change is
+argued against the same normative text. The sub-files also serve as a
+negotiation boundary: an engineer can propose a change by updating the relevant
+`agents/spec/` summary, and reviewers can evaluate whether the summary
+accurately reflects the canonical anchor.
+
+### Traceability files
+
+Three root files are updated whenever ISA-visible code or tests change:
+
+- `AGENTS-specs-to-impl.md` — RISC-V chapter ⇄ CVA6 RTL.
+- `AGENTS-specs-to-tests.md` — RISC-V chapter ⇄ test suite.
+- `AGENTS-specs-coverage.md` — derived status summary (never hand-edited
+  directly).
+
+If you add or modify an instruction, CSR, privilege behavior, or memory rule,
+you must update the first two and re-derive the third.
+
+Living traceability documents are essential because hardware knowledge decays
+quickly. A test suite may pass today but become obsolete when the next
+extension is added; an implementation may be complete for one target but
+incomplete for another. By maintaining both a forward map (spec chapter → RTL)
+and a reverse map (RTL → test suite), CVA6 creates a closed loop. The derived
+`AGENTS-specs-coverage.md` summary is the dashboard that tells a project manager,
+a contributor, or an agent which areas are solid and which are honest gaps.
+
+## 2. Device tree as the SoC contract
+
+Linux device-tree properties are the **SoC-visible contract** of what the core
+implements. Each property maps to a config knob and a spec anchor. The standing
+rule is: any change to a device-tree-visible capability must update
+`AGENTS-dts-validation.md`.
+
+The device tree is the boundary between hardware and operating-system software.
+Unlike a register map, which describes how to operate a device, the device tree
+describes what the platform *is*: how many cores, which extensions, how much
+cache, where the memory lives, which interrupt controllers exist. When this
+description is wrong, the kernel may boot but fail to use a peripheral, or it
+may configure itself for a different microarchitecture. The standing rule to
+update `AGENTS-dts-validation.md` on every device-tree-visible change is
+therefore not documentation hygiene; it is a correctness gate for software
+bring-up.
+
+Key mappings:
+
+| `.dts` property | Config knob | Spec anchor |
+|---|---|---|
+| `riscv,isa` | Extension bits in `cva6_cfg_t` | Vol I base + extension chapters |
+| `mmu-type` | `vm_mode_t` | Sv32/Sv39/Sv48/Sv57 |
+| `i-cache-size`, `d-cache-size` | `IcacheByteSize`, `DcacheByteSize` | `Zic64b`, PMA, CMO |
+| `memory@<base>` | `Axi*Width` + region rules | Address-space introduction, PMA |
+| `clint@`, `plic@` | `corev_apu/clint`, `corev_apu/rv_plic` | Privileged interrupts/timers |
+
+The script `build-platform/scripts/fetch-linux-dts.{sh,ps1}` populates the
+upstream Linux DTS reference used by `AGENTS-dts-validation.md`.
+
+## 3. Architecture considerations by layer
+
+### Core
+
+- **Spec first:** an instruction or CSR must have a real encoding and a spec
+  anchor before RTL.
+- **Config gate:** every new feature is gated in `cva6_cfg_t` and has a
+  `check_cfg` legality assertion.
+- **Discovery:** the ISA string (`misa`) must expose the feature so that
+  OpenSBI / Linux / toolchain can see it.
+- **DTS:** cache sizes, MMU type, and interrupt/timer nodes must match the
+  config.
+
+### Controllers (`corev_apu` / vendor)
+
+- **Spec second-order:** controllers are not in the RISC-V instruction-set spec,
+  but they must honor the platform's memory and interrupt model (PMA, PMP, AXI
+  ordering, interrupt IDs).
+- **AXI seam:** the core's memory-side port is AXI. Controllers connect through
+  this seam; their `AXI*Width` must match the core config.
+- **PHY split:** a controller (digital) and its PHY (analog/hard macro) are
+  often separate IP. The board layer (`corev-mb`) records which PHY is used and
+  how pins map.
+- **DTS:** controller nodes (clint, plic, ethernet, etc.) are described in the
+  board `.dts` and must match the enabled controllers.
+
+Controllers are where the RISC-V platform model meets the messy reality of
+peripheral IP. An Ethernet MAC does not appear in the unprivileged ISA, but it
+must obey the platform's memory ordering, interrupt routing, and clock/reset
+rules. The PHY split matters because the digital controller is usually
+synthesizable SystemVerilog that can be simulated, while the PHY is often an
+analog hard macro or an external chip whose behavior is characterized by
+datasheets and SPICE models. Keeping these layers separate in the worktree —
+controller in `corev_apu/`, PHY in `corev-mb/` — mirrors the separation between
+digital and analog design teams in a real SoC program.
+
+### Motherboard (`corev-mb`) and PHY
+
+- **Board spec source of truth:** `corev-mb/boards/<id>/board.json` declares the
+  SoC core config, enabled controllers, and physical interfaces/PHYs.
+- **PHY development:** a PHY is not RTL in the traditional sense; it is an
+  analog/mixed-signal block or a hard macro. The board layer records PHY
+  identity, pin mapping, power rails, and timing constraints, while the APU
+  layer contains the digital controller.
+- **DTS alignment:** the board's generated or hand-written `.dts` must match
+  `board.json` and the enabled controllers. `g6lc-build mb select <id>` adapts
+  the SoC config and vendor sync to match.
+- **Power / placement:** custom boards use SKiDL + pcbparts.dev to select parts,
+  plan power rails, and run ERC. See [SKiDL process](../corev-mb/skidl-process).
+
+## 4. The `.config.ts` ⇄ `.dts` ⇄ spec triple
+
+The repo-root `.config.ts` is the human/AI-editable control surface. It must be
+consistent with:
+
+1. `core/include/*config_pkg.sv` — the SystemVerilog config structs.
+2. `corev_apu/bootrom/*.dts` and `corev-mb/boards/<id>/board.json` — the
+   device-tree view.
+3. `specs/riscv-spec.html` — the normative ISA behavior.
+
+A feature is fully integrated only when all three are aligned and the matching
+rows in `AGENTS-specs-to-impl.md` / `AGENTS-specs-to-tests.md` /
+`AGENTS-dts-validation.md` are updated.
+
+The triple-alignment rule is deceptively simple and devastatingly effective.
+Misalignment between `.config.ts` and `cva6_cfg_t` means the RTL does not match
+the build description. Misalignment between `.config.ts` and `.dts` means
+OpenSBI or Linux will see a different platform than the one the RTL implements.
+Misalignment between `.dts` and `specs/riscv-spec.html` means the operating
+system will expect ISA behavior that the core does not provide. The agent
+checklist at the end of this page forces every ISA-visible change to cross
+these three boundaries explicitly, which is exactly the discipline required
+for a chip that must boot real software.
+
+## 5. For AI agents
+
+When asked to add an ISA-visible feature, an LLM agent should:
+
+1. Open `AGENTS.md` and find the relevant `agents/spec/` sub-file and
+   `agents/guides/` entry.
+2. Read the spec anchor in `specs/riscv-spec.html`.
+3. Update or verify `cva6_cfg_t` in `core/include/config_pkg.sv`.
+4. Implement at the sanctioned seam (CVXIF, `tc_sram`, AXI adapter, etc.).
+5. Update `AGENTS-specs-to-impl.md` and the test map.
+6. If the feature changes a device-tree-visible property, update
+   `AGENTS-dts-validation.md` and the relevant `.dts`.
+7. Run `g6lc-build test --open-source` (or the relevant suite) before declaring
+   done.

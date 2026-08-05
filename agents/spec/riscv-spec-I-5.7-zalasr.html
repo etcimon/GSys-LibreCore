@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Zalasr Atomic Load-Acquire / Store-Release (Vol I, 5.7)</title></head>
+<body>
+<h1>Vol I &sect;5.7 — Zalasr Extension for Atomic Load-Acquire and Store-Release Instructions</h1>
+<p><strong>Canonical:</strong> <a href="../../specs/riscv-spec.html#ext:zalasr">specs/riscv-spec.html#ext:zalasr</a>.
+<strong>Domain:</strong> SPEC.</p>
+
+<p>Zalasr exposes standalone load-acquire and store-release semantics without requiring the full AMO
+encoding. The Zalasr extension provides load-acquire and store-release instructions in RISC-V. These
+can be important for high-performance designs by enabling finer-grained synchronisation than is
+possible with fences alone, by providing a unidirectional fence. The Zalasr instructions are atomic
+loads and stores that support ordering annotations.</p>
+
+<h2>Spec quotation</h2>
+<pre>
+"The Zalasr extension provides load-acquire and store-release
+instructions in RISC-V. These can be important for high performance
+designs by enabling finer-grained synchronisation than is possible with
+fences alone, by providing a unidirectional fence."
+...
+"The Zalasr instructions are atomic loads and stores that support
+ordering annotations."
+(specs/riscv-spec.html:15021-15036, anchor #ext:zalasr / #norm:zalasr_def)
+</pre>
+
+<h2>Pseudo-SystemVerilog synthesis notes</h2>
+<pre>
+module zalasr_ordering (
+  input  logic        load_acquire_i, store_release_i,
+  output logic        acquire_barrier_o, release_barrier_o
+);
+  // acquire: all later loads/stores cannot pass this load
+  // release: all earlier loads/stores cannot pass this store
+endmodule
+</pre>
+
+<p><strong>CVA6 status:</strong> absent. The A extension supports LR/SC acquire/release bits
+(<code>core/decoder.sv:1602-1637</code>, <code>core/load_store_unit.sv:728-748</code>), but there are
+no standalone <code>load-acquire</code> / <code>store-release</code> instruction encodings decoded in
+<code>core/decoder.sv</code>. The LSU/store unit does not generate ordering annotations for ordinary
+loads/stores beyond the existing <code>amo_t</code> operations. Adding Zalasr would require new decode
+slots, a way to carry acquire/release ordering bits through the LSU/Store Buffer, and memory-system
+checks that enforce the unidirectional fence relative to ordinary loads/stores.</p>
+
+<p><strong>.dts linkage:</strong> no DT node; Zalasr capability would be reported through
+<code>riscv,isa</code> and would require the <code>memory@</code> PMA nodes to be cacheable/coherent,
+as with other atomic extensions.</p>
+</body>
+</html>

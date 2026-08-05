@@ -108,11 +108,13 @@ module cva6_mmu
     input logic           [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] pmpaddr_i
 );
 
-  // memory management, pte for cva6
+  // memory management, pte for cva6 (Sv39 layout, MSB-first)
+  // bit 63: N (Svnapot), bits 62:61: PBMT (Svpbmt), bits 60:54: reserved
   localparam type pte_cva6_t = struct packed {
-    logic n;
-    logic [8:0] reserved;
-    logic [CVA6Cfg.PPNW-1:0] ppn;  // PPN length for
+    logic n;                 // 63 — Svnapot
+    logic [1:0] pbmt;        // 62:61 — Svpbmt page-based memory type
+    logic [6:0] reserved;    // 60:54 — must be zero
+    logic [CVA6Cfg.PPNW-1:0] ppn;
     logic [1:0] rsw;
     logic d;
     logic a;
