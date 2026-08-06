@@ -60,7 +60,7 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | `spec-deep-tests` | directed (optional) | `testlist_spec_deep.yaml` + `spec-deep-tests.{sh,ps1}` | FSE S6: mispredict/STQ/fence + single-hart RVWMO/A litmus (`cv64a6_spec_deep`) |
 | `server-math-tests` | directed (optional) | `testlist_server_math.yaml` | U10 C-light: misa B/H, cbo.zero, scalar memcpy (`cv64a6_server_math`) |
 | `kvm-h-tests` | directed (optional) | `testlist_kvm_h.yaml` | H hfence + dual VS ecall + Sstc litmus (KVM-oriented) |
-| `kvm-h-spike` | directed (optional, Spike-first) | `verif/regress/kvm-h-spike.sh` + `kvm_h/*` | H-edge: hedeleg WARL, VT*→22, MPV, dual VS ecall (3/3 Spike) |
+| `kvm-h-spike` | directed (optional, Spike+RTL green) | `verif/regress/kvm-h-spike.sh` + `kvm_h/*` + Variane | H-edge: hedeleg WARL, VT*→22, MPV, dual VS ecall (3/3 Spike+RTL) |
 | `dual-hart-ci` | directed (optional) | `dual-hart-ci.sh` | SMT2/NrHarts=2 artifact + checklist |
 | `smt-linux-boot-path` | directed (optional) | `smt-linux-boot-path.{sh,ps1}` | DTS vs sparse linux-dts + CLINT/PLIC per-hart gate (no full Linux image) |
 | `smt-linux-rootfs` | linux (optional) | `smt-linux-rootfs.{sh,ps1}` + `testlist_smt_linux.yaml` + `software/smt2-linux/` | SMT OpenSBI R3a auto-build when toolchain present; sim if `CVA6_LINUX_PAYLOAD` / `fw_payload.elf` |

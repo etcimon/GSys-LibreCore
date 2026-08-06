@@ -72,7 +72,7 @@ Line numbers are cited only where stable/known; otherwise the file is cited at m
 | CMO — Zicbom/Zicboz/Zicbop (4.20, `#cmo`) | **partial→Zicboz full-line** | Zicbom: decoder/store/HPDCACHE; **U7ᶜ Zicboz multi-beat** (`CBOZ_WAIT`/`ISSUE`); Zicbop: PREFETCH HINT→NOP; server package enables all three | `RVZiCbom`, `RVZiCboz`, `RVZiCbop` |
 | Server math / AVX-like (U10) | partial (C-light + `_v`) | `cv64a6_server_math{,_v}`; HPDCACHE+HWPF+L2 auto; `server-math-tests`; `_v` enables RVV for Ara | `RVB`, `RVZiCbo*`, `HwPrefetchEn`, `RVH`, `RVV` |
 | Ara / RVV attach (U10ᵇ) | **partial / live lintable** | Same as Vector V row: `ariane` gen_acc + `cva6_ara_attach` + `cva6_axi_2to1_mux`; `CVA6_ARA_ATTACH=1` Verilator green; `vendor/ara/` + shims; suite `ara-vector-path`. Spec sub-file `agents/spec/riscv-spec-I-9-vector.html` | `RVV`, `EnableAccelerator` |
-| KVM/H stress + H-edge | partial (Spike 3/3; RTL open) | `verif/tests/custom/kvm_h/*`, suites `kvm-h-spike` / `kvm-h-tests` | `RVH`, `SstcEn` |
+| KVM/H stress + H-edge | directed green (Spike+RTL 3/3) | `verif/tests/custom/kvm_h/*`, suites `kvm-h-spike` / `kvm-h-tests` | `RVH`, `SstcEn` |
 | L3 DT / inclusive | **implemented (gated)** | L3/L2 victim→L1 (`cva6_l3_inclusive_inv`); L3→L2 tag match-inval (`l2_back_inval_*` / `inval_match_*`); TB `INCLUSIVE_L3=L3En` | `L3En`, cluster `INCLUSIVE_L3` |
 | Stream plane × multicore (U6/p6) | **implemented (gated)** | `cva6_server_prefetcher` + `NrCores` packages; suite `mc-stream-tests` | `ServerPrefetchEn`, `NrCores`, `L2En`/`L3En` |
 | PMU group 2 L2/L3/PF | implemented | `perf_counters` g2; cluster→ariane→cva6 ports | `L2En`/`L3En`/`ServerPrefetchEn` |
