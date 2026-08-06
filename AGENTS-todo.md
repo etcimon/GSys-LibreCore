@@ -102,11 +102,13 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    **Priors:** `verif/regress/zacas-policy.sh` · `mini_amocas_{w,d,q,q_illegal}.S` ·
    `software/zacas/` · `architecture/zacas-amocas-q.md` · maps Zacas rows.
 
-9. **Lab-only** — S3b-lab FO4 retune of `fo4-v1.toml` from **real** STA; S4b OpenROAD+LEF; full
-   `./build.sh verify` when tools provisioned.  
-   **Priors:** `architecture/build-platform-opensta-from-timing.md` (S0–S5) ·
-   `AGENTS-build-platform.md` §7 · `sv-timing/architecture/STA-HANDOFF.md` ·
-   `architecture/build-platform-workspace-lifecycle.md` · `AGENTS-technology.md` (PDK opt-in) ·
+9. **Lab-only FO4/STA** — **host re-validated** (`s9-lab-gate`: doctor + lab-run fixture +
+   retune guard). Still **lab-blocked**: S3b-lab `fo4-v1.toml` retune from **real** STA;
+   S4b OpenROAD+LEF under `pd/pdk/`; full `./build.sh verify` when tools provisioned
+   (`S9_FULL_VERIFY=1`). Do **not** retune FO4 from synthetic fixture STA.  
+   **Priors:** `verif/regress/s9-lab-gate.sh` · `architecture/build-platform-opensta-from-timing.md`
+   · `AGENTS-build-platform.md` §7 · `sv-timing/architecture/STA-HANDOFF.md` ·
+   `architecture/build-platform-workspace-lifecycle.md` · `AGENTS-technology.md` ·
    verify gate `AGENTS.md` §0.2 / `build-platform/AGENTS.md` §4.6.
 
 10. **Optional growth (not blocking residual bugs)** — production **stream8-class** package

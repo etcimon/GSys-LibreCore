@@ -450,13 +450,23 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "zacas-policy",
         description:
-          "OPTIONAL: §8 Zacas residual — AMOCAS.Q illegal, W/D hard mini golden, Spike never CAS golden.",
+          "OPTIONAL: §8 Zacas residual — AMOCAS.W/D/Q hard mini golden + odd-pair illegal; Spike never CAS golden.",
         script: "verif/regress/zacas-policy.sh",
         group: "directed",
         target: "cv64a6_imafdc_sv39",
         dvTarget: "cv64a6_imafdc_sv39",
         dvSimulators: "veri-testharness",
         tools: ["riscv-gcc", "verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "s9-lab-gate",
+        description:
+          "OPTIONAL: §9 lab FO4/STA residual — host timings doctor+lab-run offline; soft-skip real S3b-lab/S4b without liberty/OpenSTA/OpenROAD.",
+        script: "verif/regress/s9-lab-gate.sh",
+        group: "directed",
+        tools: [],
         openSource: true,
         optional: true,
       },

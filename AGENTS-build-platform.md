@@ -258,12 +258,13 @@ Maps: `AGENTS-specs-to-impl.md` · `AGENTS-specs-to-tests.md` · `AGENTS-specs-c
 | S4a OpenROAD floorplan.tcl scaffold | done |
 | doctor / lab-run / lab-report / CI asserts | done |
 
-### Still open (lab PD or RTL residual)
+### Still open (lab PD or residual)
 
-1. **S3b-lab (package edit)** — retune `sv-timing` FO4 table from **real** STA using `retune-proposal.md`.  
-2. **S4b OpenROAD + LEF** — open-PDK/NDA tech (scaffold already).  
+1. **S3b-lab (package edit)** — retune `sv-timing` FO4 table from **real** STA using `retune-proposal.md`
+   (host propose + fixture guard done; gate `s9-lab-gate`).  
+2. **S4b OpenROAD + LEF** — open-PDK/NDA tech under `pd/pdk/` (scaffold already).  
 3. **Full `verify --sim` on Windows CI** — preflight + Git-Bash prefer done; needs riscv-gcc/verilator (+ WSL spike).  
-4. **R3b Linux Image** · dual-ISS · OpenSBI vector (Ara) · AMOCAS.Q + Spike cosim.  
+4. ~~AMOCAS.Q~~ **done** · R3b Image (soft-skip gate) · dual-ISS · OpenSBI/Ara live still lab-optional.  
 5. **Optional** Windows VS Build Tools provisioning.  
 
 **Lab tip (offline S3a + retune propose + optional real S2):**  

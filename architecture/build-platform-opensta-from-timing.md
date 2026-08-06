@@ -251,4 +251,6 @@ CVA6_LIBERTY=/path/to.lib python tools/svt.py monorepo-soak --profile sparse_ex 
 
 See `sv-timing/architecture/MONOREPO-SOAK.md` §5.1.
 
-*Host offline track is complete (S0–S3a fixture, S3b propose, S4a scaffold, doctor, CI). Remaining work is lab PD (real S3b-lab FO4 retune, S4b LEF) or orthogonal RTL residuals (Zacas.Q, RVV OpenSBI, dual-ISS, Windows full sim).*
+*Host offline track is complete (S0–S3a fixture, S3b propose, S4a scaffold, doctor, CI) and re-gated by
+`verif/regress/s9-lab-gate.sh` (AGENTS-todo §9). Remaining work is lab PD (real S3b-lab FO4 retune,
+S4b LEF) or optional live stacks (R3b Image, Ara cosim, dual-hart CRT). Zacas.Q residual is closed.*
