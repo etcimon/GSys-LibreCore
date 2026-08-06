@@ -199,6 +199,29 @@ patch_yaml_cpp() {
 }
 patch_yaml_cpp
 
+# GSys multi-hart OpenSBI bring-up: step every hart, tick CLINT/UART, no
+# spurious HTIF yield in standalone_mode (see build-platform/patches/spike-multihart/).
+apply_spike_multihart_patches() {
+  local pdir="${REPO_ROOT}/build-platform/patches/spike-multihart"
+  [[ -d "${pdir}" ]] || return 0
+  # Marker in Simulation.cc after 0001 applied
+  if grep -q 'Standalone multi-hart boot path' "${BUILD_SRC}/riscv/Simulation.cc" 2>/dev/null; then
+    log "spike multihart patches already present in ${BUILD_SRC}"
+    return 0
+  fi
+  command -v patch >/dev/null 2>&1 || die "patch(1) required to apply spike-multihart patches"
+  local f
+  for f in "${pdir}"/0*.patch; do
+    [[ -f "${f}" ]] || continue
+    log "apply $(basename "${f}") → ${BUILD_SRC}"
+    # --forward: no-op if already applied; -p1 strips a/ b/ from git diffs
+    if ! patch -p1 --forward --directory="${BUILD_SRC}" < "${f}"; then
+      die "failed to apply ${f} (clean isa-sim tree or refresh patches)"
+    fi
+  done
+}
+apply_spike_multihart_patches
+
 # Export for cmake child processes of the Spike Makefile
 export CMAKE_POLICY_VERSION_MINIMUM="${CMAKE_POLICY_VERSION_MINIMUM:-3.5}"
 export CMAKE_ARGS="${CMAKE_ARGS:-} -DCMAKE_POLICY_VERSION_MINIMUM=3.5"
@@ -219,6 +242,8 @@ if [[ -z "${VERILATOR_ROOT:-}" ]]; then
 fi
 
 # --- configure / build / install --------------------------------------------
+# Prefer an out-of-tree build dir under BUILD_SRC so ../configure works. If
+# SPIKE_BUILD_DIR is set to a path outside BUILD_SRC, invoke configure by abs path.
 BUILD_DIR="${SPIKE_BUILD_DIR:-${BUILD_SRC}/build}"
 log "source : ${BUILD_SRC}"
 log "build  : ${BUILD_DIR}"
@@ -227,6 +252,11 @@ log "jobs   : ${NUM_JOBS}"
 
 mkdir -p "${BUILD_DIR}" "${SPIKE_INSTALL_DIR}"
 cd "${BUILD_DIR}"
+
+CONFIGURE="${BUILD_SRC}/configure"
+if [[ ! -x "${CONFIGURE}" && ! -f "${CONFIGURE}" ]]; then
+  die "configure missing at ${CONFIGURE} (source sync incomplete?)"
+fi
 
 if [[ ! -f config.log || "${SPIKE_FORCE}" == "1" ]]; then
   log "configure --prefix=${SPIKE_INSTALL_DIR}"
@@ -242,7 +272,7 @@ if [[ ! -f config.log || "${SPIKE_FORCE}" == "1" ]]; then
     WITH_BOOST+=(--with-boost-libdir="${BOOST_LIBDIR}")
   fi
   # shellcheck disable=SC2086
-  ../configure --prefix="${SPIKE_INSTALL_DIR}" "${WITH_BOOST[@]+"${WITH_BOOST[@]}"}"
+  "${CONFIGURE}" --prefix="${SPIKE_INSTALL_DIR}" "${WITH_BOOST[@]+"${WITH_BOOST[@]}"}"
 else
   log "config.log present; skipping configure"
 fi

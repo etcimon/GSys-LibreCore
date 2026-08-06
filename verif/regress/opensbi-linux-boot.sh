@@ -16,18 +16,26 @@
 #   C. RTL CO-SIMULATION (delegated)
 #      verif/regress/smt-linux-r3-cosim.sh — needs Verilator; Linux/WSL only.
 #
-# Console extraction note. The CVA6/LibreCore verification Spike is an
-# instrumented cosim build that always emits a commit log on stdout, and the
-# HTIF console writes single bytes interleaved into it. So we do NOT try to read
-# console text directly: we recover it from the trace by decoding the byte
-# written to the HTIF address. This is exact, and immune to the interleaving.
+# Console extraction note. OpenHW cosim Spike defaults /top/log_commits=true and
+# context-switches host/target every instruction — dual-hart OpenSBI FDT walks
+# take tens of minutes with commit logging on. The patched Simulation::run
+# standalone path steps every hart, ticks CLINT/UART every INTERLEAVE, and does
+# *not* HTIF-yield (that spuriously completed the run mid-firmware). With that
+# fix, OSBI_LOG_COMMITS=0 is the fast dual-hart path: raw UART text reaches
+# stdout in seconds–minutes. Commit-log decode (mem <UART> 0xXX) remains the
+# fallback when log_commits=1.
 #
 # Env:
 #   SPIKE                  explicit spike binary
-#   OSBI_BOOT_TIMEOUT      seconds for tier B (default 1800; the instrumented
-#                          ISS runs ~6k instr/s, so the banner takes minutes)
-#   OSBI_HARTS             spike -p value (default 1; payload passes on 1-hart
-#                          via its "peer timeout (ok if 1-hart)" path)
+#   OSBI_BOOT_TIMEOUT      seconds for tier B (default 300 with log_commits=0;
+#                          3600 if OSBI_LOG_COMMITS=1)
+#   OSBI_HARTS             spike -p value (default 2). Must match the 2-cpu
+#                          ariane-smt2.dts / g6lc64_smt2 NrHarts: OpenSBI's
+#                          coldboot IPI init fails with error -3 on -p1 when the
+#                          DTB advertises two harts. Requires multi-hart Spike
+#                          (Simulation::run steps all procs — patched in vendor
+#                          riscv-isa-sim).
+#   OSBI_LOG_COMMITS       =0 (default) fast path; =1 full commit log (slow)
 #   CVA6_REQUIRE_OSBI_BOOT =1 turns a tier-B skip/timeout into a hard failure
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -35,9 +43,17 @@ cd "$ROOT"
 
 HTIF_ADDR="0x0000000010000000"
 WS="build-platform/workspace/smt2-linux"
-TIMEOUT_S="${OSBI_BOOT_TIMEOUT:-1800}"
-HARTS="${OSBI_HARTS:-1}"
+HARTS="${OSBI_HARTS:-2}"
 REQUIRE="${CVA6_REQUIRE_OSBI_BOOT:-0}"
+# Fast dual-hart default: log_commits off (patched standalone Spike).
+LOG_COMMITS="${OSBI_LOG_COMMITS:-0}"
+if [[ -n "${OSBI_BOOT_TIMEOUT:-}" ]]; then
+  TIMEOUT_S="$OSBI_BOOT_TIMEOUT"
+elif [[ "$LOG_COMMITS" == "1" ]]; then
+  TIMEOUT_S=3600
+else
+  TIMEOUT_S=300
+fi
 
 echo "=== OpenSBI / Linux boot gate (GSys LibreCore) ==="
 
@@ -190,21 +206,52 @@ LOG="$(mktemp -t osbi-boot-XXXXXX.log)"
 CONSOLE="$(mktemp -t osbi-console-XXXXXX.txt)"
 trap 'rm -f "$LOG" "$CONSOLE"' EXIT
 
-echo "  booting (timeout ${TIMEOUT_S}s, -p${HARTS}) ..."
+SPIKE_EXTRA=()
+if [[ "$LOG_COMMITS" == "1" ]]; then
+  echo "  note: OSBI_LOG_COMMITS=1 — full commit log (slow dual-hart path)"
+else
+  # OpenHW cosim default is log_commits=true; turn it off for usable wall time.
+  SPIKE_EXTRA+=(--param /top/log_commits:bool=false)
+fi
+
+# Line-buffer host stdout so UART console appears before process exit (stdbuf
+# is GNU coreutils; fall back to plain invoke if missing).
+RUN_PREFIX=()
+if command -v stdbuf >/dev/null 2>&1; then
+  RUN_PREFIX=(stdbuf -oL -eL)
+fi
+
+echo "  booting (timeout ${TIMEOUT_S}s, -p${HARTS}, log_commits=${LOG_COMMITS}) ..."
 set +e
-timeout "$TIMEOUT_S" "$SPIKE_BIN" \
-  -p"$HARTS" --isa="$ISA" --dtb="$DTB" "$FW" > "$LOG" 2>&1
+timeout "$TIMEOUT_S" "${RUN_PREFIX[@]}" "$SPIKE_BIN" \
+  -p"$HARTS" --isa="$ISA" --dtb="$DTB" \
+  "${SPIKE_EXTRA[@]}" \
+  "$FW" > "$LOG" 2>&1
 RC=$?
 set -e
 
-# Recover the HTIF console from the commit log: each console byte appears as
-#   mem <HTIF_ADDR> 0x000000XX
-grep -oE "mem ${HTIF_ADDR} 0x[0-9a-f]{8}" "$LOG" \
-  | sed -E 's/.*0x0*([0-9a-f]{2})$/\1/' \
-  | while read -r hx; do printf "\\x$hx"; done > "$CONSOLE" || true
+# Console recovery:
+#  1) Prefer raw host UART/HTIF text (log_commits=false path).
+#  2) Else decode commit-log stores to the UART/HTIF address.
+if grep -qaE 'OpenSBI|SMT2-OSBI' "$LOG"; then
+  # Strip Spike param chatter / commit-log lines; keep printable console text.
+  grep -aE 'OpenSBI|SMT2-OSBI|Platform |Boot HART|Domain0|Firmware|ipi init|init_coldboot' "$LOG" \
+    > "$CONSOLE" 2>/dev/null || true
+  # If that was too sparse, also try a broader filter of non-trace lines.
+  if ! grep -qa 'OpenSBI' "$CONSOLE" 2>/dev/null; then
+    grep -avE '^(\[SPIKE\]|\[spike|Params::|core +[0-9]+:|### |^\s*$)' "$LOG" \
+      > "$CONSOLE" 2>/dev/null || true
+  fi
+fi
+if ! grep -qa 'OpenSBI' "$CONSOLE" 2>/dev/null; then
+  # Commit-log path: each UART/HTIF byte is `mem <HTIF_ADDR> 0x000000XX`
+  grep -oE "mem ${HTIF_ADDR} 0x[0-9a-f]{8}" "$LOG" \
+    | sed -E 's/.*0x0*([0-9a-f]{2})$/\1/' \
+    | while read -r hx; do printf "\\x$hx"; done > "$CONSOLE" || true
+fi
 
 echo "  --- recovered console ---"
-sed 's/^/  | /' "$CONSOLE" | head -40
+sed 's/^/  | /' "$CONSOLE" | head -60
 echo "  --- end console ---"
 
 fail=0

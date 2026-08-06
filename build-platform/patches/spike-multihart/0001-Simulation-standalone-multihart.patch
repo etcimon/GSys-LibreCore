@@ -1,0 +1,59 @@
+diff --git a/riscv/Simulation.cc b/riscv/Simulation.cc
+index d960966c..c48a86c2 100644
+--- a/riscv/Simulation.cc
++++ b/riscv/Simulation.cc
+@@ -132,11 +132,49 @@ Simulation::~Simulation() {
+ 
+ int Simulation::run() {
+   try {
+-    while (!sim_t::done()) {
+-      st_rvfi reference;
+-      std::vector<st_rvfi> vreference, vspike;
+-      vreference.push_back(reference);
+-      vspike = this->step(1, vreference);
++    // Standalone multi-hart boot path.
++    //
++    // Historical bug: this loop called step(1) so only procs[0] ever ran;
++    // OpenSBI dual-hart DTB then failed IPI init with error -3.
++    //
++    // Speed: the co-sim step() path does host/target context-switch per
++    // instruction (plus optional commit logging). That makes OpenSBI FDT
++    // walks take tens of minutes. In standalone_mode, batch many instructions
++    // per hart between HTIF/device yields so dual-hart fw_payload boots are
++    // practical while still ticking CLINT/UART and polling tohost.
++    if (standalone_mode) {
++      // Round-robin one insn per hart (needed for OpenSBI lottery / IPI /
++      // CLINT MSWI). Skip the per-insn co-sim host/target switch. Tick
++      // CLINT/UART every INTERLEAVE rounds. Do NOT yield to the HTIF target
++      // thread: that co-sim idle path can spuriously complete the HTIF run
++      // (exit_code 0) mid-firmware when we are not using the per-insn
++      // handshake. Poll tohost via done() after guest stores instead.
++      size_t since_tick = 0;
++      st_rvfi dummy{};
++      while (!sim_t::done()) {
++        for (size_t i = 0; i < procs.size() && !sim_t::done(); i++) {
++          ((Processor *)procs[i])->step(1, dummy);
++          ++total_steps;
++          if (max_steps_enabled && max_steps < total_steps)
++            throw std::ios_base::failure("Max steps exceeded");
++        }
++        ++since_tick;
++        if (since_tick >= INTERLEAVE) {
++          since_tick = 0;
++          if (clint)
++            clint->increment(INTERLEAVE / INSNS_PER_RTC_TICK);
++          if (ns16550)
++            ns16550->tick();
++        }
++      }
++    } else {
++      // DPI / external-step cosim: step every hart once per round, with the
++      // per-instruction host/target handshake expected by the TB.
++      while (!sim_t::done()) {
++        const size_t n = procs.size();
++        std::vector<st_rvfi> vreference(n);
++        (void)this->step(n, vreference);
++      }
+     }
+   } catch (std::ios_base::failure e) {
+     std::cout << "[SPIKE] Max steps exceeded!" << std::endl;

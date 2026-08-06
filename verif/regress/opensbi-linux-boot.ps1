@@ -8,7 +8,9 @@
 # script inside WSL when available, so there is exactly one implementation of
 # the boot logic and the console-decode.
 #
-# Env: OSBI_BOOT_TIMEOUT, OSBI_HARTS, CVA6_REQUIRE_OSBI_BOOT (see the .sh)
+# Env: OSBI_BOOT_TIMEOUT (default 2400), OSBI_HARTS (default 2 — must match
+# ariane-smt2 2-cpu DTB or OpenSBI IPI init fails with -3), CVA6_REQUIRE_OSBI_BOOT.
+# See opensbi-linux-boot.sh.
 $ErrorActionPreference = 'Stop'
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 Set-Location $Root

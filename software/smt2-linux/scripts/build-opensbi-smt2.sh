@@ -49,6 +49,11 @@ BUILD="$OUT/opensbi-build"
 # Bare-metal toolchains without -pie (optional)
 python3 "$SMT2/scripts/patch_opensbi_nopie.py" "$SRC/Makefile" || true
 python3 "$SMT2/scripts/wrap_pie_flags.py" "$SRC/Makefile" || true
+# Dual-hart CLINT/PLIC bring-up (ROOT_REGION_MAX, mtime_size, mswi single-init).
+# Idempotent; required for ariane-smt2.dts (NrHarts=2, 0xc0000 CLINT, 64 MiB PLIC).
+python3 "$SMT2/scripts/patch_opensbi_g6lc_clint.py" "$SRC"
+# Prefer full ISA string when the toolchain supports zifencei (fence.i in OpenSBI).
+PLATFORM_RISCV_ISA="${PLATFORM_RISCV_ISA:-rv64imafdc_zicsr_zifencei}"
 make -C "$SRC" O="$BUILD" PLATFORM=generic distclean || true
 make -C "$SRC" O="$BUILD" PLATFORM=generic \
   FW_TEXT_START=0x80000000 \
@@ -56,6 +61,7 @@ make -C "$SRC" O="$BUILD" PLATFORM=generic \
   FW_FDT_PATH="$DTB" \
   CROSS_COMPILE="$CROSS_COMPILE" \
   OPENSBI_ALLOW_NO_PIE=y \
+  PLATFORM_RISCV_ISA="$PLATFORM_RISCV_ISA" \
   -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 
 FWDIR="$BUILD/platform/generic/firmware"

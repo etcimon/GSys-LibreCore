@@ -459,8 +459,17 @@ fi
 export PATH="\$RISCV/bin:\${VERILATOR_INSTALL_DIR:+\$VERILATOR_INSTALL_DIR/bin:}/usr/local/bin:/usr/bin:/bin\${SPIKE_INSTALL_DIR:+:\$SPIKE_INSTALL_DIR/bin}"
 ${e.DV_SIMULATORS ? `export DV_SIMULATORS=${JSON.stringify(e.DV_SIMULATORS)}` : "true"}
 ${e.DV_TARGET ? `export DV_TARGET=${JSON.stringify(e.DV_TARGET)}` : "true"}
+${e.ISS_TIMEOUT ? `export ISS_TIMEOUT=${JSON.stringify(e.ISS_TIMEOUT)}` : "true"}
+${e.OUT_DIR ? `export OUT_DIR=${JSON.stringify(e.OUT_DIR)}` : "true"}
 ${e.UVM_VERBOSITY ? `export UVM_VERBOSITY=${JSON.stringify(e.UVM_VERBOSITY)}` : 'export UVM_VERBOSITY=UVM_NONE'}
 ${e.NUM_JOBS ? `export NUM_JOBS=${JSON.stringify(e.NUM_JOBS)}` : "true"}
+# OpenSBI/Linux boot gate (tier B) — WSL child env is intentionally minimal, so
+# suite knobs must be re-exported explicitly (same pattern as DV_* above).
+${e.OSBI_BOOT_TIMEOUT ? `export OSBI_BOOT_TIMEOUT=${JSON.stringify(e.OSBI_BOOT_TIMEOUT)}` : "true"}
+${e.OSBI_HARTS ? `export OSBI_HARTS=${JSON.stringify(e.OSBI_HARTS)}` : "true"}
+${e.OSBI_LOG_COMMITS ? `export OSBI_LOG_COMMITS=${JSON.stringify(e.OSBI_LOG_COMMITS)}` : "true"}
+${e.CVA6_REQUIRE_OSBI_BOOT ? `export CVA6_REQUIRE_OSBI_BOOT=${JSON.stringify(e.CVA6_REQUIRE_OSBI_BOOT)}` : "true"}
+${e.SPIKE ? `export SPIKE=${JSON.stringify(e.SPIKE)}` : "true"}
 # Managed workspace Spike often reports bare "1.1.1-dev"; do not fail on monorepo git walk.
 export CVA6_SPIKE_VERSION_RELAXED="\${CVA6_SPIKE_VERSION_RELAXED:-1}"
 export G6LC_SPIKE_VERSION_RELAXED="\${G6LC_SPIKE_VERSION_RELAXED:-1}"

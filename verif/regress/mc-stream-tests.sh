@@ -67,8 +67,17 @@ echo "  ok inclusive L3→L2 + L1 + PF + Zacas wiring contracts"
 
 # shellcheck source=common-riscv-tools.sh
 source "$(dirname "$0")/common-riscv-tools.sh"
+# cva6.py requires RISCV_CC / SPIKE_PATH (not only RISCV_GCC).
+export RISCV_CC="${RISCV_CC:-${RISCV_GCC:-}}"
+export RISCV_OBJCOPY="${RISCV_OBJCOPY:-${CROSS_COMPILE:-}objcopy}"
+export RISCV_PREFIX="${RISCV_PREFIX:-${CROSS_COMPILE:-}}"
+if [[ -n "${SPIKE:-}" && -z "${SPIKE_PATH:-}" ]]; then
+  export SPIKE_PATH="$(cd "$(dirname "$SPIKE")" && pwd)"
+fi
+export CVA6_SPIKE_VERSION_RELAXED="${CVA6_SPIKE_VERSION_RELAXED:-1}"
 echo "[mc-stream-tests] toolchain:"
 cva6_tools_report
+echo "  RISCV_CC=${RISCV_CC:-MISSING}  SPIKE_PATH=${SPIKE_PATH:-MISSING}"
 
 # Optional assemble smoke for Zacas/spo + CF stream narrow tests
 asm_one() {
@@ -110,6 +119,10 @@ cva6_have_riscv_gcc && have_riscv=1
 have_spike=0
 cva6_have_spike && have_spike=1
 
+# riscv_trace_csv lives in verif/sim/dv/scripts (bare import from log converters).
+# Match working smoke / mc-spo-spike PYTHONPATH layout.
+export PYTHONPATH="verif/sim:verif/sim/dv/scripts:${PYTHONPATH:-}"
+
 if [[ -f verif/sim/cva6.py ]]; then
   if [[ "$have_riscv" -eq 0 || "$have_spike" -eq 0 ]]; then
     echo "[mc-stream-tests] note: full sim needs riscv-gcc + spike (PATH or managed tooling/)"
@@ -122,15 +135,26 @@ if [[ -f verif/sim/cva6.py ]]; then
       echo "[mc-stream-tests] installing PyYAML for cva6.py..."
       "$PY" -m pip install --user pyyaml >/dev/null 2>&1 || true
     fi
-    export PYTHONPATH="verif/sim:${PYTHONPATH:-}"
     if "$PY" -c "import yaml" 2>/dev/null; then
-      if "$PY" -c "import sys; sys.path.insert(0,'verif/sim'); import verilator_log_to_trace_csv" 2>/dev/null; then
-        echo "[mc-stream-tests] running cva6.py (lengthy)..."
-        "$PY" verif/sim/cva6.py \
-          --target "$DV_TARGET" \
-          --iss "$DV_SIMULATORS" \
-          --testlist verif/tests/testlist_mc_stream.yaml \
-          "$@"
+      if "$PY" -c "import sys; sys.path[:0]=['verif/sim','verif/sim/dv/scripts']; import verilator_log_to_trace_csv" 2>/dev/null; then
+        # Prefer native Linux OUT_DIR (Spike commit logs are slow on /mnt/<win>).
+        export OUT_DIR="${OUT_DIR:-/tmp/cva6-mc-stream-out}"
+        mkdir -p "$OUT_DIR"
+        # Default wall for Spike: cva6.py uses iss_timeout//10; raise for stream plane.
+        export ISS_TIMEOUT="${ISS_TIMEOUT:-5000}"
+        echo "[mc-stream-tests] running cva6.py (iss=${DV_SIMULATORS}, timeout=${ISS_TIMEOUT})..."
+        (
+          cd verif/sim
+          export PYTHONPATH=".:dv/scripts:${PYTHONPATH:-}"
+          "$PY" cva6.py \
+            --target "$DV_TARGET" \
+            --iss "$DV_SIMULATORS" \
+            --iss_yaml cva6.yaml \
+            --testlist ../tests/testlist_mc_stream.yaml \
+            --iss_timeout "$ISS_TIMEOUT" \
+            --output "$OUT_DIR" \
+            "$@"
+        )
         echo "[mc-stream-tests] PASS (cva6.py)"
         exit 0
       fi
@@ -142,12 +166,36 @@ if [[ -f verif/sim/cva6.py ]]; then
 fi
 
 # --- Fallback: real lint of multicore + dual-core stream packages ---
-if command -v bun >/dev/null 2>&1; then
-  echo "[mc-stream-tests] lint ${DV_TARGET}..."
-  bun build-platform/src/cli/index.ts verify --lint --target "$DV_TARGET"
+# bun may live on the Windows host when regress runs under WSL.
+find_bun() {
+  if command -v bun >/dev/null 2>&1; then
+    command -v bun
+    return 0
+  fi
+  local cand
+  for cand in \
+    "${HOME}/.bun/bin/bun" \
+    /mnt/c/Users/*/.bun/bin/bun.exe \
+    /mnt/c/Users/*/AppData/Roaming/npm/bun.exe
+  do
+    # shellcheck disable=SC2086
+    for p in $cand; do
+      if [[ -x "$p" || -f "$p" ]]; then
+        echo "$p"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+BUN_BIN="$(find_bun || true)"
+if [[ -n "$BUN_BIN" ]]; then
+  echo "[mc-stream-tests] lint ${DV_TARGET} (bun=${BUN_BIN})..."
+  "$BUN_BIN" build-platform/src/cli/index.ts verify --lint --target "$DV_TARGET"
   if [[ "$DV_TARGET" == "g6lc64_ooo_server" ]]; then
-    echo "[mc-stream-tests] lint g6lc64_server_math (2-core stream plane)..."
-    bun build-platform/src/cli/index.ts verify --lint --target g6lc64_server_math || \
+    echo "[mc-stream-tests] lint g6lc64_server_math (2-core multicore package)..."
+    "$BUN_BIN" build-platform/src/cli/index.ts verify --lint --target g6lc64_server_math || \
       echo "[mc-stream-tests] WARN: server_math lint skipped"
   fi
   echo "[mc-stream-tests] PASS (lint fallback + artifact contracts)"

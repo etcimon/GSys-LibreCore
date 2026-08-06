@@ -181,9 +181,10 @@ export async function runSuite(
   options: RunSuiteOptions = {},
 ): Promise<SuiteResult> {
   const { logger, config, repoRoot } = ctx;
-  const dvTarget = suite.dvTarget ?? suite.target;
+  const dvTarget = process.env.DV_TARGET || suite.dvTarget || suite.target;
+  // Prefer caller env so `DV_SIMULATORS=spike` short-circuits multi-hour Verilator.
   const extra: Record<string, string> = {
-    DV_SIMULATORS: suite.dvSimulators,
+    DV_SIMULATORS: process.env.DV_SIMULATORS || suite.dvSimulators,
     UVM_VERBOSITY: config.tests.uvmVerbosity,
     DV_TARGET: dvTarget,
   };
@@ -197,6 +198,18 @@ export async function runSuite(
   }
   if (process.env.CVA6_TIMINGS_USE_EMIT) {
     extra.CVA6_TIMINGS_USE_EMIT = process.env.CVA6_TIMINGS_USE_EMIT;
+  }
+  // OpenSBI / Linux boot gate knobs + cva6.py overrides (WSL needs explicit forward).
+  for (const k of [
+    "OSBI_BOOT_TIMEOUT",
+    "OSBI_HARTS",
+    "OSBI_LOG_COMMITS",
+    "CVA6_REQUIRE_OSBI_BOOT",
+    "SPIKE",
+    "ISS_TIMEOUT",
+    "OUT_DIR",
+  ] as const) {
+    if (process.env[k]) extra[k] = process.env[k]!;
   }
   const env = childEnv(ctx, extra);
 

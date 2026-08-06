@@ -1,0 +1,22 @@
+diff --git a/spike_main/spike.cc b/spike_main/spike.cc
+index a25f3fa7..a9f7be09 100644
+--- a/spike_main/spike.cc
++++ b/spike_main/spike.cc
+@@ -630,8 +630,15 @@ int main(int argc, char** argv)
+   }
+   openhw::Params::cfg_to_params(cfg, params);
+   params.set_uint64_t("/top/", "num_procs", cfg.nprocs());
+-  params.set_string("/top/core/0/", "isa", std::string(cfg.isa()));
+-  params.set_string("/top/core/0/", "priv", std::string(cfg.priv()));
++  // Propagate CLI --isa/--priv to every hart; secondary cores otherwise fall
++  // back to Processor::default_params (RV32GC) and break dual-hart OpenSBI.
++  for (size_t i = 0; i < cfg.nprocs(); i++) {
++    const std::string cbase = "/top/core/" + std::to_string(cfg.hartids()[i]) + "/";
++    params.set_string(cbase, "isa", std::string(cfg.isa()));
++    params.set_string(cbase, "priv", std::string(cfg.priv()));
++    params.set_uint64_t(cbase, "mhartid",
++                        static_cast<uint64_t>(cfg.hartids()[i]));
++  }
+   if(paramSetter != NULL)
+     paramSetter->setParams();
+   openhw::Param param = params.get("/top/core/0/misa_we");

@@ -27,9 +27,20 @@ echo "Hash:  " $ARCH_TEST_HASH
 mkdir -p verif/tests
 if ! [ -d verif/tests/riscv-arch-test ]; then
   git clone $ARCH_TEST_REPO -b $ARCH_TEST_BRANCH verif/tests/riscv-arch-test
-  cd verif/tests/riscv-arch-test; git checkout $ARCH_TEST_HASH;
-  # Copy Spike definitions to the corresponding riscv-target subdirectory.
-  cp -rpa $SPIKE_SRC_DIR/arch_test_target riscv-target
-  cd -
 fi
+# Pin hash even if the directory already exists (e.g. a prior clone left on
+# main tip without riscv-test-suite layout expected by the testlists).
+(
+  cd verif/tests/riscv-arch-test
+  current=$(git rev-parse HEAD 2>/dev/null || true)
+  if [ "$current" != "$ARCH_TEST_HASH" ]; then
+    git fetch --depth=1 origin "$ARCH_TEST_HASH" 2>/dev/null \
+      || git fetch origin "$ARCH_TEST_HASH"
+    git checkout -f "$ARCH_TEST_HASH"
+  fi
+  # Copy Spike definitions to the corresponding riscv-target subdirectory.
+  if [ ! -d riscv-target ] && [ -d "$SPIKE_SRC_DIR/arch_test_target" ]; then
+    cp -rpa "$SPIKE_SRC_DIR/arch_test_target" riscv-target
+  fi
+)
 

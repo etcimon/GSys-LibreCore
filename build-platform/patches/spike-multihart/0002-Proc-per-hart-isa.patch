@@ -1,0 +1,30 @@
+diff --git a/riscv/Proc.cc b/riscv/Proc.cc
+index 3fcc1f58..47640eb5 100644
+--- a/riscv/Proc.cc
++++ b/riscv/Proc.cc
+@@ -227,7 +227,7 @@ Processor::Processor(
+   string priv_str = this->params[base + "priv"].a_string;
+   this->isa =
+       (const isa_parser_t *)new isa_parser_t(isa_str.c_str(), priv_str.c_str());
+-  std::cout << "[SPIKE] Proc 0 | ISA: " << isa_str << " PRIV: " << priv_str << std::endl;
++  std::cout << "[SPIKE] Proc " << id << " | ISA: " << isa_str << " PRIV: " << priv_str << std::endl;
+   std::cout << "[SPIKE]     Non standard interrupts " << this->params[base + "non_standard_interrupts"].a_bool << std::endl;
+ 
+   uint64_t pmpregions_max = this->params[base + "pmpregions_max"].a_uint64_t;
+@@ -354,8 +354,14 @@ void Processor::default_params(string base, openhw::Params &params, Processor *p
+ 			"Default PMPCFG0 value");
+   if (!params.exist(base, "marchid"))
+     params.set_uint64_t(base, "marchid", 0x3UL, "0x3", "MARCHID value");
+-  if (!params.exist(base, "mhartid"))
+-    params.set_uint64_t(base, "mhartid", 0x0UL, "0x0", "MHARTID value");
++  // Default mhartid to the processor id so multi-hart standalone (-pN) works.
++  // Hardcoding 0 made every secondary hart report mhartid=0 (lottery/IPI break).
++  if (!params.exist(base, "mhartid")) {
++    uint64_t hid = 0;
++    if (proc)
++      hid = static_cast<uint64_t>(proc->get_id());
++    params.set_uint64_t(base, "mhartid", hid, std::to_string(hid), "MHARTID value");
++  }
+   if (!params.exist(base, "mvendorid"))
+     params.set_uint64_t(base, "mvendorid", 0x00000602UL, "0x00000602UL",
+ 			"MVENDORID value");

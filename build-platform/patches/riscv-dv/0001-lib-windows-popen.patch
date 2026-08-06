@@ -1,0 +1,86 @@
+diff --git a/scripts/lib.py b/scripts/lib.py
+index a12cbc0..744aa22 100644
+--- a/scripts/lib.py
++++ b/scripts/lib.py
+@@ -25,9 +25,37 @@ import time
+ import yaml
+ import logging
+ import signal
++import platform
++import shutil
+ 
+ from datetime import date
+ 
++
++def _popen_shell(cmd, **kwargs):
++    """Spawn a shell command portably.
++
++    Upstream used ``exec <cmd>`` with ``executable=/bin/bash``, which breaks on
++    native Windows Python (``shell=True`` + non-cmd shell becomes ``bash /c``).
++    On Windows, invoke bash as ``bash -c <cmd>`` without ``shell=True``.
++    """
++    is_win = platform.system() == "Windows"
++    bash = shutil.which("bash")
++    if bash and not is_win:
++        return subprocess.Popen(
++            "exec " + cmd,
++            shell=True,
++            executable=bash if os.path.isfile(bash) else "/bin/bash",
++            **kwargs,
++        )
++    if bash and is_win:
++        # Avoid shell=True: Python would pass /c (cmd.exe style) to bash.
++        return subprocess.Popen(
++            [bash, "-lc", cmd],
++            shell=False,
++            **kwargs,
++        )
++    return subprocess.Popen(cmd, shell=True, **kwargs)
++
+ RET_SUCCESS = 0
+ RET_FAIL    = 1
+ RET_FATAL   = -1
+@@ -110,14 +138,14 @@ def run_cmd(cmd, timeout_s=3600, exit_on_error=1, check_return_code=True,
+             ps.kill()
+         sys.exit(130)
+     try:
+-        ps = subprocess.Popen("exec " + cmd,
+-                              shell=True,
+-                              executable='/bin/bash',
+-                              universal_newlines=True,
+-                              start_new_session=True,
+-                              env=os.environ,
+-                              stdout=subprocess.PIPE,
+-                              stderr=subprocess.STDOUT)
++        ps = _popen_shell(
++            cmd,
++            universal_newlines=True,
++            start_new_session=True,
++            env=os.environ,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.STDOUT,
++        )
+         output = ps.communicate(timeout = timeout_s)[0]
+     except subprocess.CalledProcessError:
+         logging.error(ps.communicate()[0])
+@@ -157,13 +185,13 @@ def run_parallel_cmd(cmd_list, timeout_s=999, exit_on_error=0,
+         return
+     children = []
+     for cmd in cmd_list:
+-        ps = subprocess.Popen("exec " + cmd,
+-                              shell=True,
+-                              executable='/bin/bash',
+-                              universal_newlines=True,
+-                              start_new_session=True,
+-                              stdout=subprocess.PIPE,
+-                              stderr=subprocess.STDOUT)
++        ps = _popen_shell(
++            cmd,
++            universal_newlines=True,
++            start_new_session=True,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.STDOUT,
++        )
+         children.append(ps)
+     for i in range(len(children)):
+         logging.info("Command progress: {}/{}".format(i + 1, len(children)))

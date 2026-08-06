@@ -336,12 +336,16 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "mc-stream-tests",
         description:
-          "OPTIONAL: U6/p6 stream plane × multicore (inclusive L3→L2/L1, ServerPrefetch, multi-stream, Zacas/spo). Default DV_TARGET=g6lc64_ooo_server.",
+          "OPTIONAL: U6/p6 stream plane × multicore (inclusive L3→L2/L1, ServerPrefetch, multi-stream, Zacas/spo). " +
+          "Default DV_TARGET=g6lc64_ooo_server, DV_SIMULATORS=spike (fast ISS). " +
+          "Set DV_SIMULATORS=veri-testharness,spike for full RTL cosim (lengthy).",
         script: "verif/regress/mc-stream-tests.sh",
         group: "directed",
         target: "g6lc64_ooo_server",
         dvTarget: "g6lc64_ooo_server",
-        dvSimulators: "veri-testharness,spike",
+        // Spike-first: full 4-core veri-testharness of the testlist is multi-hour.
+        // Override with DV_SIMULATORS=veri-testharness,spike for RTL cosim.
+        dvSimulators: "spike",
         tools: [],
         openSource: true,
         optional: true,
@@ -528,7 +532,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "fw_payload.elf on Spike, asserting the OpenSBI banner and the payload " +
           "reaching SMT2-OSBI-OK. Console is recovered by decoding HTIF byte " +
           "writes out of the cosim commit log. Tier C (RTL cosim) is " +
-          "smt-linux-r3-cosim. Env: OSBI_BOOT_TIMEOUT, OSBI_HARTS, " +
+          "smt-linux-r3-cosim. Env: OSBI_BOOT_TIMEOUT, OSBI_HARTS=2, " +
+          "OSBI_LOG_COMMITS=0 (fast dual-hart default), " +
           "CVA6_REQUIRE_OSBI_BOOT=1 to hard-fail instead of soft-pass.",
         script: "verif/regress/opensbi-linux-boot.sh",
         group: "linux",
