@@ -147,7 +147,7 @@
     };
 
     // Shared L2 (package L2En=1; size inferred ~256 KiB for N=2)
-    L2: l2-cache {
+    L2: l2-cache@1f000000 {
       compatible = "cache";
       // Soft node for next-level-cache phandle; reserved MMIO hole (not a bus slave).
       reg = <0x0 0x1f000000 0x0 0x1000>;
