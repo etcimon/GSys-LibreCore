@@ -71,4 +71,8 @@ Combine with **H** (`server_math`) only after SMT bare-metal is green — KVM-on
 
 - RVFI: `mhartid` differs per bank; trace `smt_active_hart` / `smt_switch`  
 - If hang: check both CSRs not in permanent WFI with no peer IRQ  
-- Mispredict after switch should only zero the **active** RAS/GHR bank  
+- Mispredict after switch should only zero the **active** RAS/GHR bank
+
+## Dual-hart bare-metal Variane (open residual)
+
+Linux Verilator **5.008** can build `work-ver-smt2` (`make verilate target=g6lc64_smt2 ver-library=work-ver-smt2`). Bare `smt_dual_park` is green on **Spike** and on **NrHarts=1** packages (e.g. stream8 software gate). On **g6lc64_smt2** Variane, RVFI shows execution stuck in **bootrom @0x10000** with `ILLEGAL_INSTR` loops instead of DRAM @0x80000000 — dual-hart live CRT remains **open** until boot/PC init for NrHarts=2 is fixed. Soft gate: `DUAL_HART_LIVE=1 bash verif/regress/dual-hart-ci.sh`.

@@ -115,8 +115,9 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    `dual-hart-ci`: artifacts + boot-path + dual-park ELF compile; rootfs preflight with
    `SMT2_SKIP_R3=1` / `DUAL_HART_SKIP_R3=1` by default; smt2 lint soft-skips when only
    Windows OSS CAD PE is present under WSL (hard: `DUAL_HART_REQUIRE_LINT=1` + Linux-native
-   `verilator_bin`). Optional `DUAL_HART_PARK_SPIKE=1`. Live Variane dual-hart CRT + R3
-   Linux cosim remain lab when native Verilator TB is rebuilt for `g6lc64_smt2`.
+   `verilator_bin`). Optional `DUAL_HART_PARK_SPIKE=1` + bare dual-park. **Live smt2 Variane open**:
+   `work-ver-smt2` builds on Linux Verilator 5.008 but bare DRAM tests hang in bootrom @0x10000
+   (see `smt2-bringup.md`). R3 Linux cosim still lab/Image-external.
    **Priors:** `verif/regress/dual-hart-ci.sh` · `smt_dual_park.S` · `smt-linux-rootfs.sh` ·
    `architecture/multi-threading/smt2-bringup.md`.
 

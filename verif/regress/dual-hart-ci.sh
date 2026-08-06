@@ -10,6 +10,7 @@
 #   DUAL_HART_REQUIRE_LINT=1  hard-fail if g6lc64_smt2 lint unavailable/fails
 #   DUAL_HART_SKIP_R3=1       default: skip R3 cosim in rootfs preflight
 #   DUAL_HART_PARK_SPIKE=1    optional Spike tohost smoke for smt_dual_park
+#   DUAL_HART_LIVE=1          optional Variane on work-ver-smt2 (see note)
 #   SMT2_SKIP_R3=1            passed through to smt-linux-rootfs.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -26,6 +27,7 @@ fi
 REQUIRE_LINT="${DUAL_HART_REQUIRE_LINT:-0}"
 SKIP_R3="${DUAL_HART_SKIP_R3:-1}"
 PARK_SPIKE="${DUAL_HART_PARK_SPIKE:-0}"
+LIVE="${DUAL_HART_LIVE:-0}"
 OUT="${DUAL_HART_OUT:-/tmp/cva6-dual-hart-ci}"
 mkdir -p "$OUT"
 
@@ -69,7 +71,8 @@ bash verif/regress/smt-linux-boot-path.sh
 PASS=$((PASS + 1))
 
 # Bare-metal dual-park directed source gate
-grep -q "smt_dual_park\|wfi\|mhartid" verif/tests/custom/smt/smt_dual_park.S
+grep -qE "mhartid|wfi" verif/tests/custom/smt/smt_dual_park.S
+grep -qE "_start|tohost" verif/tests/custom/smt/smt_dual_park.S
 log "  ok smt_dual_park.S bare-metal dual-hart directed"
 
 # Compile dual-park ELF when a RISC-V cross compiler is present
@@ -91,10 +94,12 @@ if [[ "${RISCV_CC:-}" == *.exe ]] || ! command -v "${RISCV_CC:-false}" >/dev/nul
   fi
 fi
 if [[ -n "${RISCV_CC:-}" ]] && command -v "$RISCV_CC" >/dev/null 2>&1; then
-  log "building smt_dual_park.elf with $RISCV_CC..."
+  log "building smt_dual_park.elf (bare, early secondary park) with $RISCV_CC..."
+  # Bare-metal: own _start parks hart>0 before stack/BSS. CRT assumes 1 core
+  # (spins secondaries in a tight loop — wrong for SMT WFI park model).
   "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
     -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
-    "$COMMON/syscalls.c" "$COMMON/crt.S" "$PARK_SRC" \
+    "$PARK_SRC" \
     -T "$LD" -o "$PARK_ELF" -march=rv64imafdc_zicsr_zifencei -mabi=lp64d
   test -f "$PARK_ELF"
   log "  ok $PARK_ELF"
@@ -147,22 +152,17 @@ fi
 
 # ---- lint g6lc64_smt2 (soft when host has only Windows OSS CAD PE or no bun) ----
 native_verilator_ok() {
-  # Managed suite expects host-native verilator_bin (no .exe under Linux).
-  local suite="$ROOT/build-platform/workspace/tooling/oss-cad-suite"
-  local bin="$suite/bin"
-  if [[ -x "$bin/verilator_bin" ]]; then
-    return 0
-  fi
-  # Linux-native managed install (not a Windows PE symlink farm)
-  if [[ -x "$ROOT/build-platform/workspace/tooling/verilator-v5.008/bin/verilator_bin" ]] \
-    && file "$ROOT/build-platform/workspace/tooling/verilator-v5.008/bin/verilator_bin" 2>/dev/null \
-      | grep -qiE 'ELF|executable'; then
-    return 0
-  fi
-  # Windows-only suite under WSL → not usable for Linux verify --lint
-  if [[ -f "$bin/verilator_bin.exe" ]] && [[ ! -x "$bin/verilator_bin" ]]; then
-    return 1
-  fi
+  local candidates=(
+    "$ROOT/build-platform/workspace/tooling/linux-eda-suite/bin/verilator_bin"
+    "${VERILATOR_INSTALL_DIR:-$HOME/tools/verilator-v5.008}/bin/verilator_bin"
+    "$ROOT/build-platform/workspace/tooling/oss-cad-suite/bin/verilator_bin"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -x "$c" ]] && file "$c" 2>/dev/null | grep -qiE 'ELF|executable'; then
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -197,6 +197,42 @@ else
   SKIP=$((SKIP + 1))
 fi
 
+
+# Optional live dual-park on work-ver-smt2 (Linux Verilator). Known open:
+# g6lc64_smt2 bare-metal currently stays in bootrom @0x10000 (ILLEGAL_INSTR loop);
+# software gate is Spike + stream8 NrHarts=1. Soft-report unless DUAL_HART_LIVE_HARD=1.
+if [[ "${LIVE:-0}" == "1" ]]; then
+  harness="${DUAL_HART_HARNESS:-$ROOT/work-ver-smt2/Variane_testharness}"
+  export LD_LIBRARY_PATH="${ROOT}/tools/spike/lib:${ROOT}/build-platform/workspace/tooling/spike/lib:${LD_LIBRARY_PATH:-}"
+  if [[ ! -x "$harness" ]]; then
+    log "WARN: DUAL_HART_LIVE=1 but missing $harness"
+    log "  build: make verilate target=g6lc64_smt2 ver-library=work-ver-smt2"
+    SKIP=$((SKIP + 1))
+  elif [[ ! -f "$PARK_ELF" ]]; then
+    log "WARN: no dual-park ELF for live run"
+    SKIP=$((SKIP + 1))
+  else
+    th="$("${CROSS_COMPILE:-riscv-none-elf-}nm" "$PARK_ELF" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
+    vlog="$OUT/veri_smt_dual_park.log"
+    set +e
+    "$harness" +max-cycles=200000 +time_out=200000 +debug_disable \
+      +tohost_addr="0x${th}" "$PARK_ELF" >"$vlog" 2>&1
+    set -e
+    if grep -q SUCCESS "$vlog"; then
+      log "  PASS live smt_dual_park on $harness"
+      PASS=$((PASS + 1))
+    else
+      log "  OPEN: live smt2 dual-park did not SUCCESS (bootrom@0x10000 hang — see $vlog)"
+      tail -8 "$vlog" || true
+      if [[ "${DUAL_HART_LIVE_HARD:-0}" == "1" ]]; then
+        FAIL=$((FAIL + 1))
+      else
+        SKIP=$((SKIP + 1))
+      fi
+    fi
+  fi
+fi
+
 if [[ $FAIL -gt 0 ]]; then
   log "FAIL pass=$PASS skip=$SKIP fail=$FAIL"
   exit 1
@@ -211,6 +247,7 @@ cat <<'EOF'
   Gates: smt-linux-boot-path + smt-linux-rootfs (CVA6_LINUX_PAYLOAD for sim)
   Lint hard: DUAL_HART_REQUIRE_LINT=1 (needs Linux-native verilator_bin)
   Dual-park Spike: DUAL_HART_PARK_SPIKE=1
+  Dual-park live smt2: DUAL_HART_LIVE=1 (open: bootrom hang unless fixed)
   R3 cosim in this suite: DUAL_HART_SKIP_R3=0 (default skips R3 rebuild)
 EOF
 log "PASS (artifacts + boot-path + dual-park; pass=$PASS skip=$SKIP fail=$FAIL)"
