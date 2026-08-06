@@ -368,6 +368,7 @@ package ariane_pkg;
     AMO_MIND,
     AMO_MINDU,
     AMO_CASD,   // Zacas AMOCAS.D
+    AMO_CASQ,   // Zacas AMOCAS.Q (RV64 register-pair)
     // cache block operations (CBO) — Zicbom + Zicboz
     CBO_CLEAN,
     CBO_FLUSH,
@@ -641,7 +642,7 @@ package ariane_pkg;
 
   function automatic logic is_amo(fu_op op);
     case (op) inside
-      [AMO_LRW : AMO_MINDU], AMO_CASW, AMO_CASD: begin
+      [AMO_LRW : AMO_MINDU], AMO_CASW, AMO_CASD, AMO_CASQ: begin
         return 1'b1;
       end
       default: return 1'b0;
@@ -650,7 +651,7 @@ package ariane_pkg;
 
   // Zacas: AMOCAS needs GPR[rd] as expected source (third operand).
   function automatic logic is_amo_cas(fu_op op);
-    return (op == AMO_CASW) || (op == AMO_CASD);
+    return (op == AMO_CASW) || (op == AMO_CASD) || (op == AMO_CASQ);
   endfunction
 
   // -------------------
@@ -720,16 +721,21 @@ package ariane_pkg;
   typedef struct packed {
     logic        req;        // this request is valid
     amo_t        amo_op;     // atomic memory operation to perform
-    logic [1:0]  size;       // 2'b10 --> word operation, 2'b11 --> double word operation
+    logic [1:0]  size;       // 2'b10 word, 2'b11 dword (Q uses is_quad multi-beat)
     logic [63:0] operand_a;  // address
-    logic [63:0] operand_b;  // data as layouted in the register (AMOCAS: new/swap value)
-    logic [63:0] operand_c;  // Zacas expected/compare value (AMOCAS only; else 0)
+    logic [63:0] operand_b;  // new/swap low (AMOCAS)
+    logic [63:0] operand_c;  // expected low (AMOCAS)
+    logic [63:0] operand_b_hi; // AMOCAS.Q new high (rs2+1)
+    logic [63:0] operand_c_hi; // AMOCAS.Q expected high (rd+1)
+    logic        is_quad;      // AMOCAS.Q 128-bit
   } amo_req_t;
 
   // AMO response coming from cache.
   typedef struct packed {
-    logic        ack;     // response is valid
-    logic [63:0] result;  // sign-extended, result
+    logic        ack;        // response is valid
+    logic [63:0] result;     // low half / sole result
+    logic [63:0] result_hi;  // AMOCAS.Q high half (rd+1)
+    logic        dual_we;    // write rd and rd+1
   } amo_resp_t;
 
   localparam RVFI = cva6_config_pkg::CVA6ConfigRvfiTrace;
@@ -825,7 +831,7 @@ package ariane_pkg;
             AMO_ANDD,  AMO_ORD,
             AMO_XORD,  AMO_MAXD,
             AMO_MAXDU, AMO_MIND,
-            AMO_MINDU, AMO_CASD: begin
+            AMO_MINDU, AMO_CASD, AMO_CASQ: begin
         return 2'b11;
       end
       LW, LWU, HLV_W, HLV_WU, HLVX_WU,

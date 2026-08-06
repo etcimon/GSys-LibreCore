@@ -1747,6 +1747,18 @@ module decoder
               5'h1C: instruction_o.op = ariane_pkg::AMO_MAXDU;
               default: illegal_instr = 1'b1;
             endcase
+          // Zacas AMOCAS.Q — funct3=100, RV64 only; register-pair rd/rs2 must be even
+          end else if (CVA6Cfg.IS_XLEN64 && CVA6Cfg.RVA && CVA6Cfg.RVZacas
+                       && instr.stype.funct3 == 3'h4) begin
+            unique case (instr.instr[31:27])
+              5'h5: begin
+                instruction_o.op = ariane_pkg::AMO_CASQ;
+                imm_select = MUX_RD_RS3;
+                // Odd pair base is reserved / illegal
+                if (instr.atype.rd[0] || instr.atype.rs2[0]) illegal_instr = 1'b1;
+              end
+              default: illegal_instr = 1'b1;
+            endcase
           end else begin
             illegal_instr = 1'b1;
           end

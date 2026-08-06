@@ -223,6 +223,8 @@ module miss_handler
     // AMOs
     amo_resp_o.ack              = 1'b0;
     amo_resp_o.result           = '0;
+    amo_resp_o.result_hi        = '0;
+    amo_resp_o.dual_we          = 1'b0;
     amo_operand_b               = '0;
 
     halfword                    = '0;

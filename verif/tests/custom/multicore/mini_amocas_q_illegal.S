@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# AMOCAS.Q is intentionally NOT implemented (AGENTS-todo §8 deferred).
-# On RV64 with Zacas W/D, AMOCAS.Q (funct3=100) must illegal-trap.
-# Bare-metal: trap → PASS (tohost=1); fallthrough / success without trap → FAIL.
+# AMOCAS.Q with odd rd (register-pair base) must illegal-trap.
+# Encoding: amocas.q a1, a2, (a4) — a1 is odd → illegal.
 
   .section .text.init
   .globl _start
@@ -12,18 +11,16 @@ _start:
   la   t0, trap_ok
   csrw mtvec, t0
 
-  # AMOCAS.Q a0, a1, (a2) — funct5=00101, funct3=100 (128-bit)
-  # Encoding: 0x28B6452F (same as amocas.w but funct3=4)
-  li   a0, 0
   li   a1, 0
-  mv   a2, sp
-  .word 0x28B6452F
+  li   a2, 0
+  mv   a4, sp
+  # amocas.q a1, a2, (a4)  rd=a1 odd
+  # funct5=00101 aqrl=00 rs2=a2 rs1=a4 funct3=100 rd=a1 opcode=AMO
+  .word 0x28C745AF
 
-  # Must not reach here if illegal works
   j    fail
 
 trap_ok:
-  # Illegal-instruction path is the golden for deferred Q
   li   a0, 1
   la   t0, tohost
   sw   a0, 0(t0)

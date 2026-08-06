@@ -109,7 +109,16 @@ module commit_stage
   // );
 
   for (genvar i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin : gen_waddr
-    assign waddr_o[i] = commit_instr_i[i].rd;
+    if (i == 0) begin
+      assign waddr_o[0] = casq_hi_pending_q ? casq_hi_rd_q
+                                          : commit_instr_i[0].rd[4:0];
+    end else if (i == 1) begin
+      assign waddr_o[1] = casq_dual_now
+                           ? (commit_instr_i[0].rd[4:0] | 5'b00001)
+                           : commit_instr_i[1].rd[4:0];
+    end else begin
+      assign waddr_o[i] = commit_instr_i[i].rd;
+    end
   end
 
   assign pc_o = commit_instr_i[0].pc;
@@ -131,6 +140,13 @@ module commit_stage
   logic instr_0_is_amo;
   logic [CVA6Cfg.NrCommitPorts-1:0] commit_macro_ack;
   assign instr_0_is_amo = is_amo(commit_instr_i[0].op);
+  // AMOCAS.Q dual-write helpers
+  logic casq_hi_pending_q, casq_hi_pending_d;
+  logic [CVA6Cfg.XLEN-1:0] casq_hi_data_q;
+  logic [4:0] casq_hi_rd_q;
+  logic casq_dual_now;
+  assign casq_dual_now = CVA6Cfg.RVA && CVA6Cfg.RVZacas &&
+                        amo_resp_i.dual_we && amo_resp_i.ack;
   // -------------------
   // Commit Instruction
   // -------------------
@@ -282,12 +298,36 @@ module commit_stage
         // AMO
         // ------------------
         if (CVA6Cfg.RVA && instr_0_is_amo) begin
-          // AMO finished
-          commit_ack_o[0] = amo_resp_i.ack;
-          // flush the pipeline
-          flush_commit_o = amo_resp_i.ack;
+          // AMO finished (AMOCAS.Q may dual-write rd and rd+1)
+          // Hold amo_valid while dual_we pulse OR while finishing hi write on 1-port.
           amo_valid_commit_o = 1'b1;
-          we_gpr_o[0] = amo_resp_i.ack;
+          if (CVA6Cfg.RVZacas && (amo_resp_i.dual_we || casq_hi_pending_q)) begin
+            if (CVA6Cfg.NrCommitPorts > 1) begin
+              // Same-cycle dual write: port0=rd/lo, port1=rd+1/hi
+              commit_ack_o[0] = amo_resp_i.ack;
+              flush_commit_o = amo_resp_i.ack;
+              we_gpr_o[0] = amo_resp_i.ack;
+              wdata_o[0] = amo_resp_i.result[CVA6Cfg.XLEN-1:0];
+              we_gpr_o[1] = amo_resp_i.ack;
+              wdata_o[1] = amo_resp_i.result_hi[CVA6Cfg.XLEN-1:0];
+            end else if (casq_hi_pending_q) begin
+              // Cycle1 (NrCommitPorts==1): dual_we/ack already dropped — write hi + retire
+              commit_ack_o[0] = 1'b1;
+              flush_commit_o = 1'b1;
+              we_gpr_o[0] = 1'b1;
+              wdata_o[0] = casq_hi_data_q;
+            end else begin
+              // Cycle0: write lo, hold commit until hi pending cycle
+              commit_ack_o[0] = 1'b0;
+              flush_commit_o = 1'b0;
+              we_gpr_o[0] = amo_resp_i.ack;
+              wdata_o[0] = amo_resp_i.result[CVA6Cfg.XLEN-1:0];
+            end
+          end else begin
+            commit_ack_o[0] = amo_resp_i.ack;
+            flush_commit_o = amo_resp_i.ack;
+            we_gpr_o[0] = amo_resp_i.ack;
+          end
         end
       end
     end
@@ -295,8 +335,11 @@ module commit_stage
     if (CVA6Cfg.NrCommitPorts > 1) begin
       commit_macro_ack[1] = 1'b0;
       commit_ack_o[1]     = 1'b0;
-      we_gpr_o[1]         = 1'b0;
-      wdata_o[1]          = commit_instr_i[1].result;
+      // Preserve AMOCAS.Q dual-write on port1 (set above when casq_dual_now)
+      if (!(CVA6Cfg.RVZacas && casq_dual_now)) begin
+        we_gpr_o[1] = 1'b0;
+        wdata_o[1]  = commit_instr_i[1].result;
+      end
 
       // -----------------
       // Commit Port 2
@@ -400,4 +443,31 @@ module commit_stage
       exception_o.cause = 32'h00000003;
     end
   end
+
+  always_comb begin
+    casq_hi_pending_d = 1'b0;
+    if (CVA6Cfg.RVA && CVA6Cfg.RVZacas && CVA6Cfg.NrCommitPorts == 1) begin
+      // Arm one cycle after dual_we/ack so hi write runs when resp pulse is gone
+      if (amo_resp_i.ack && amo_resp_i.dual_we && !casq_hi_pending_q)
+        casq_hi_pending_d = 1'b1;
+      // while pending, drop next cycle (hi write consumes it)
+    end
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      casq_hi_pending_q <= 1'b0;
+      casq_hi_data_q    <= '0;
+      casq_hi_rd_q      <= '0;
+    end else begin
+      casq_hi_pending_q <= casq_hi_pending_d;
+      if (amo_resp_i.ack && amo_resp_i.dual_we) begin
+        casq_hi_data_q <= amo_resp_i.result_hi[CVA6Cfg.XLEN-1:0];
+        casq_hi_rd_q   <= commit_instr_i[0].rd[4:0] | 5'b00001;
+      end
+    end
+  end
+
+
 endmodule
+
+

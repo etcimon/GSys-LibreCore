@@ -27,6 +27,9 @@ module amo_buffer #(
     input  logic [CVA6Cfg.PLEN-1:0]      paddr_i,            // physical address of store which needs to be placed in the queue
     input logic [CVA6Cfg.XLEN-1:0] data_i,  // data which is placed in the queue (AMOCAS: swap/new)
     input logic [CVA6Cfg.XLEN-1:0] data_cmp_i,  // Zacas expected value (0 if unused)
+    input logic [CVA6Cfg.XLEN-1:0] data_hi_i,  // AMOCAS.Q new high
+    input logic [CVA6Cfg.XLEN-1:0] data_cmp_hi_i,  // AMOCAS.Q expected high
+    input logic is_quad_i,  // AMOCAS.Q
     input logic [1:0] data_size_i,  // type of request we are making (e.g.: bytes to write)
     // D$
     output ariane_pkg::amo_req_t amo_req_o,  // request to cache subsystem
@@ -43,6 +46,9 @@ module amo_buffer #(
     logic [CVA6Cfg.PLEN-1:0] paddr;
     logic [CVA6Cfg.XLEN-1:0] data;
     logic [CVA6Cfg.XLEN-1:0] data_cmp;
+    logic [CVA6Cfg.XLEN-1:0] data_hi;
+    logic [CVA6Cfg.XLEN-1:0] data_cmp_hi;
+    logic                    is_quad;
     logic [1:0]              size;
   } amo_op_t;
 
@@ -55,10 +61,16 @@ module amo_buffer #(
   assign amo_req_o.operand_a = {{64 - CVA6Cfg.PLEN{1'b0}}, amo_data_out.paddr};
   assign amo_req_o.operand_b = {{64 - CVA6Cfg.XLEN{1'b0}}, amo_data_out.data};
   assign amo_req_o.operand_c = {{64 - CVA6Cfg.XLEN{1'b0}}, amo_data_out.data_cmp};
+  assign amo_req_o.operand_b_hi = {{64 - CVA6Cfg.XLEN{1'b0}}, amo_data_out.data_hi};
+  assign amo_req_o.operand_c_hi = {{64 - CVA6Cfg.XLEN{1'b0}}, amo_data_out.data_cmp_hi};
+  assign amo_req_o.is_quad = amo_data_out.is_quad;
 
   assign amo_data_in.op = amo_op_i;
   assign amo_data_in.data = data_i;
   assign amo_data_in.data_cmp = data_cmp_i;
+  assign amo_data_in.data_hi = data_hi_i;
+  assign amo_data_in.data_cmp_hi = data_cmp_hi_i;
+  assign amo_data_in.is_quad = is_quad_i;
   assign amo_data_in.paddr = paddr_i;
   assign amo_data_in.size = data_size_i;
 

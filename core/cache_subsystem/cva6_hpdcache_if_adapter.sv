@@ -150,19 +150,25 @@ module cva6_hpdcache_if_adapter
 
       // AMOCAS.D: 64b expected + 64b swap cannot fit in one req wdata.
       // Local RMW in the adapter (same spirit as wt_dcache_missunit AMO_CAS_*).
-      typedef enum logic [2:0] {
+      typedef enum logic [3:0] {
         CASD_IDLE,
         CASD_LD,
         CASD_LD_WAIT,
+        CASD_LD_HI,
+        CASD_LD_HI_WAIT,
         CASD_ST,
         CASD_ST_WAIT,
+        CASD_ST_HI,
+        CASD_ST_HI_WAIT,
         CASD_INVAL,
         CASD_INVAL_WAIT,
         CASD_DONE
       } casd_fsm_e;
       casd_fsm_e casd_fsm_q, casd_fsm_d;
       logic [63:0] casd_old_q, casd_old_d;
+      logic [63:0] casd_old_hi_q, casd_old_hi_d;
       logic        casd_do_store_q, casd_do_store_d;
+      logic        casd_is_quad_q, casd_is_quad_d;
       logic        is_casd_req;
       logic        casd_busy;
 
@@ -343,22 +349,28 @@ module cva6_hpdcache_if_adapter
               }
           };
 
-      // AMOCAS.D detection (size != word → dword for Zacas path)
+      // AMOCAS.D/Q local multi-beat RMW (128b Q or 64b D; word CAS uses AMO path)
       assign is_casd_req = CVA6Cfg.RVZacas && cva6_amo_req_i.req &&
                            (cva6_amo_req_i.amo_op == ariane_pkg::AMO_CAS1) &&
-                           !amo_is_word;
+                           (!amo_is_word || cva6_amo_req_i.is_quad);
+      // is_quad forces multi-beat even if size bits look like dword
+      wire is_casq_req = is_casd_req && cva6_amo_req_i.is_quad;
       assign casd_busy = (casd_fsm_q != CASD_IDLE);
 
       // CAS.D local RMW FSM
       always_comb begin : casd_fsm_comb
         casd_fsm_d      = casd_fsm_q;
         casd_old_d      = casd_old_q;
+        casd_old_hi_d   = casd_old_hi_q;
         casd_do_store_d = casd_do_store_q;
+        casd_is_quad_d  = casd_is_quad_q;
         forward_casd    = 1'b0;
         unique case (casd_fsm_q)
           CASD_IDLE: begin
             casd_do_store_d = 1'b0;
+            casd_is_quad_d  = 1'b0;
             if (is_casd_req && !amo_pending_q) begin
+              casd_is_quad_d = cva6_amo_req_i.is_quad;
               casd_fsm_d = CASD_LD;
             end
           end
@@ -371,13 +383,31 @@ module cva6_hpdcache_if_adapter
           CASD_LD_WAIT: begin
             if (hpdcache_rsp_valid_i && (hpdcache_rsp_i.tid == '1)) begin
               casd_old_d = hpdcache_rsp_i.rdata[0];
-              if (hpdcache_rsp_i.rdata[0] == cva6_amo_req_i.operand_c) begin
+              if (casd_is_quad_q) begin
+                casd_fsm_d = CASD_LD_HI;
+              end else if (hpdcache_rsp_i.rdata[0] == cva6_amo_req_i.operand_c) begin
                 casd_do_store_d = 1'b1;
                 casd_fsm_d      = CASD_ST;
               end else begin
-                // mismatch: keep mem; still drop any hot L1 line
                 casd_do_store_d = 1'b0;
                 casd_fsm_d      = CASD_INVAL;
+              end
+            end
+          end
+          CASD_LD_HI: begin
+            forward_casd = 1'b1;
+            if (hpdcache_req_ready_i) casd_fsm_d = CASD_LD_HI_WAIT;
+          end
+          CASD_LD_HI_WAIT: begin
+            if (hpdcache_rsp_valid_i && (hpdcache_rsp_i.tid == '1)) begin
+              casd_old_hi_d = hpdcache_rsp_i.rdata[0];
+              if ((casd_old_q == cva6_amo_req_i.operand_c) &&
+                  (hpdcache_rsp_i.rdata[0] == cva6_amo_req_i.operand_c_hi)) begin
+                casd_do_store_d = 1'b1;
+                casd_fsm_d = CASD_ST;
+              end else begin
+                casd_do_store_d = 1'b0;
+                casd_fsm_d = CASD_INVAL;
               end
             end
           end
@@ -389,12 +419,19 @@ module cva6_hpdcache_if_adapter
           end
           CASD_ST_WAIT: begin
             if (hpdcache_rsp_valid_i && (hpdcache_rsp_i.tid == '1)) begin
+              casd_fsm_d = casd_is_quad_q ? CASD_ST_HI : CASD_INVAL;
+            end
+          end
+          CASD_ST_HI: begin
+            forward_casd = 1'b1;
+            if (hpdcache_req_ready_i) casd_fsm_d = CASD_ST_HI_WAIT;
+          end
+          CASD_ST_HI_WAIT: begin
+            if (hpdcache_rsp_valid_i && (hpdcache_rsp_i.tid == '1)) begin
               casd_fsm_d = CASD_INVAL;
             end
           end
           CASD_INVAL: begin
-            // Drop L1 line so a following cached load refills from DRAM
-            // (uncached store does not update D$).
             forward_casd = 1'b1;
             if (hpdcache_req_ready_i) begin
               casd_fsm_d = CASD_INVAL_WAIT;
@@ -406,7 +443,6 @@ module cva6_hpdcache_if_adapter
             end
           end
           CASD_DONE: begin
-            // one-cycle ack to core
             casd_fsm_d = CASD_IDLE;
           end
           default: casd_fsm_d = CASD_IDLE;
@@ -417,11 +453,15 @@ module cva6_hpdcache_if_adapter
         if (!rst_ni) begin
           casd_fsm_q      <= CASD_IDLE;
           casd_old_q      <= '0;
+          casd_old_hi_q   <= '0;
           casd_do_store_q <= 1'b0;
+          casd_is_quad_q  <= 1'b0;
         end else begin
           casd_fsm_q      <= casd_fsm_d;
           casd_old_q      <= casd_old_d;
+          casd_old_hi_q   <= casd_old_hi_d;
           casd_do_store_q <= casd_do_store_d;
+          casd_is_quad_q  <= casd_is_quad_d;
         end
       end
 
@@ -440,19 +480,27 @@ module cva6_hpdcache_if_adapter
         hpdcache_req_casd.pma.io = 1'b0;
         hpdcache_req_casd.pma.wr_policy_hint = hpdcache_pkg::HPDCACHE_WR_POLICY_AUTO;
         unique case (casd_fsm_q)
-          CASD_LD: begin
+          CASD_LD, CASD_LD_HI: begin
             hpdcache_req_casd.op = hpdcache_pkg::HPDCACHE_REQ_LOAD;
             hpdcache_req_casd.wdata = '0;
+            if (casd_fsm_q == CASD_LD_HI) begin
+              // second dword at addr+8
+              hpdcache_req_casd.addr_offset = amo_addr_offset + 8;
+            end
           end
           CASD_ST: begin
             hpdcache_req_casd.op = hpdcache_pkg::HPDCACHE_REQ_STORE;
-            hpdcache_req_casd.wdata = cva6_amo_req_i.operand_b;  // swap
+            hpdcache_req_casd.wdata = cva6_amo_req_i.operand_b;  // swap lo
+          end
+          CASD_ST_HI: begin
+            hpdcache_req_casd.op = hpdcache_pkg::HPDCACHE_REQ_STORE;
+            hpdcache_req_casd.wdata = cva6_amo_req_i.operand_b_hi;
+            hpdcache_req_casd.addr_offset = amo_addr_offset + 8;
           end
           CASD_INVAL: begin
             hpdcache_req_casd.op = hpdcache_pkg::HPDCACHE_REQ_CMO_INVAL_NLINE;
             hpdcache_req_casd.wdata = '0;
             hpdcache_req_casd.be = '0;
-            // CMO uses cacheable address for nline select
             hpdcache_req_casd.pma.uncacheable = 1'b0;
           end
           default: ;
@@ -496,11 +544,14 @@ module cva6_hpdcache_if_adapter
       // Normal AMO rsp, or CAS.D completion
       assign cva6_amo_resp.ack = (casd_fsm_q == CASD_DONE) ||
           (hpdcache_rsp_valid_i && (hpdcache_rsp_i.tid == '1) && !casd_busy &&
-           !(casd_fsm_q inside {CASD_LD_WAIT, CASD_ST_WAIT, CASD_INVAL_WAIT}));
+           !(casd_fsm_q inside {CASD_LD_WAIT, CASD_LD_HI_WAIT, CASD_ST_WAIT,
+                                CASD_ST_HI_WAIT, CASD_INVAL_WAIT}));
       assign cva6_amo_resp.result = (casd_fsm_q == CASD_DONE)
           ? casd_old_q
           : (amo_is_word ? {{32{amo_resp_word[31]}}, amo_resp_word}
                          : hpdcache_rsp_i.rdata[0]);
+      assign cva6_amo_resp.result_hi = (casd_fsm_q == CASD_DONE) ? casd_old_hi_q : '0;
+      assign cva6_amo_resp.dual_we = (casd_fsm_q == CASD_DONE) && casd_is_quad_q;
       //  }}}
 
       always_ff @(posedge clk_i or negedge rst_ni) begin : amo_pending_ff

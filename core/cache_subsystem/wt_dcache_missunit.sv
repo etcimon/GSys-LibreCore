@@ -534,6 +534,8 @@ module wt_dcache_missunit
     mem_data_o.rtype = DCACHE_LOAD_REQ;
     mem_data_req_o   = 1'b0;
     amo_resp_o.ack   = 1'b0;
+    amo_resp_o.result_hi = '0;
+    amo_resp_o.dual_we = 1'b0;
     miss_replay_o    = '0;
 
     // disabling cache is possible anytime, enabling goes via flush

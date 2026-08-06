@@ -692,6 +692,20 @@ module issue_read_operands
     end
   end
 
+  // AMOCAS.Q: 2-phase RF gather for register pairs (rd/rd+1, rs2/rs2+1)
+  logic casq_phase_q, casq_phase_d;
+  logic [CVA6Cfg.XLEN-1:0] casq_new_lo_q, casq_exp_lo_q;
+  logic [CVA6Cfg.XLEN-1:0] casq_new_hi_q, casq_exp_hi_q;
+  logic casq_active;
+  assign casq_active = CVA6Cfg.RVZacas && issue_instr_valid_i[0] &&
+                       (issue_instr_i[0].op == ariane_pkg::AMO_CASQ);
+  logic casq_ready_q;
+  logic casq_stall;
+  // Stall until both pair halves are latched (casq_ready_q). Do not issue on
+  // phase1: raddr is remapped to hi so live RF lo would be wrong.
+  assign casq_stall = casq_active && (OPERANDS_PER_INSTR == 3) && !casq_ready_q
+                      && !issue_instr_i[0].ex.valid;
+
   // Forwarding/Output MUX
   for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
     always_comb begin : forwarding_operand_select
@@ -704,6 +718,9 @@ module issue_read_operands
       // for FP operations, the imm field can also be the third operand from the regfile
       // Zacas AMOCAS: third GPR (rd=expected) goes to operand_c; imm stays 0 so
       // vaddr = rs1 (AMOs do not use an address offset).
+      // Default Q hi halves unused
+      fu_data_n[i].operand_b_hi = '0;
+      fu_data_n[i].operand_c_hi = '0;
       if (CVA6Cfg.RVZacas && ariane_pkg::is_amo_cas(issue_instr_i[i].op) && OPERANDS_PER_INSTR == 3) begin
         fu_data_n[i].imm = '0;
         fu_data_n[i].operand_c = operand_c_regfile[i];
@@ -755,6 +772,13 @@ module issue_read_operands
               issue_instr_i[i].op
           ))) begin
         fu_data_n[i].operand_b = issue_instr_i[i].result;
+      end
+      // AMOCAS.Q: after all forwards, force pair-gather (latched lo + hi)
+      if (CVA6Cfg.RVZacas && issue_instr_i[i].op == ariane_pkg::AMO_CASQ && casq_ready_q) begin
+        fu_data_n[i].operand_b    = casq_new_lo_q;
+        fu_data_n[i].operand_c    = casq_exp_lo_q;
+        fu_data_n[i].operand_b_hi = casq_new_hi_q;
+        fu_data_n[i].operand_c_hi = casq_exp_hi_q;
       end
     end
   end
@@ -901,6 +925,7 @@ module issue_read_operands
     end
 
     issue_ack_o = issue_ack;
+    if (casq_stall) issue_ack_o[0] = 1'b0;
     // Do not acknowledge the issued instruction if transaction is not completed.
     if (issue_instr_i[0].fu == CVXIF && !(x_transaction_accepted_o || x_transaction_rejected)) begin
       issue_ack_o[0] = issue_instr_i[0].ex.valid && issue_instr_valid_i[0];
@@ -918,6 +943,7 @@ module issue_read_operands
   // ----------------------
   logic [  CVA6Cfg.NrRgprPorts-1:0][CVA6Cfg.XLEN-1:0] rdata;
   logic [  CVA6Cfg.NrRgprPorts-1:0][             4:0] raddr_pack;
+  logic [  CVA6Cfg.NrRgprPorts-1:0][             4:0] raddr_pack_base;
 
   // pack signals
   logic [CVA6Cfg.NrCommitPorts-1:0][             4:0] waddr_pack;
@@ -926,10 +952,12 @@ module issue_read_operands
 
   //adjust address to read from register file (when synchronous RAM is used reads take one cycle, so we advance the address)
   for (genvar i = 0; i <= CVA6Cfg.NrIssuePorts - 1; i++) begin
-    assign raddr_pack[i*OPERANDS_PER_INSTR+0] = CVA6Cfg.FpgaEn && CVA6Cfg.FpgaAlteraEn ? issue_instr_i_prev[i].rs1[4:0] : issue_instr_i[i].rs1[4:0];
-    assign raddr_pack[i*OPERANDS_PER_INSTR+1] = CVA6Cfg.FpgaEn && CVA6Cfg.FpgaAlteraEn ? issue_instr_i_prev[i].rs2[4:0] : issue_instr_i[i].rs2[4:0];
+    assign raddr_pack_base[i*OPERANDS_PER_INSTR+0] = CVA6Cfg.FpgaEn && CVA6Cfg.FpgaAlteraEn ? issue_instr_i_prev[i].rs1[4:0] : issue_instr_i[i].rs1[4:0];
+    assign raddr_pack_base[i*OPERANDS_PER_INSTR+1] = CVA6Cfg.FpgaEn && CVA6Cfg.FpgaAlteraEn ? issue_instr_i_prev[i].rs2[4:0] : issue_instr_i[i].rs2[4:0];
     if (OPERANDS_PER_INSTR == 3) begin
-      assign raddr_pack[i*OPERANDS_PER_INSTR+2] = CVA6Cfg.FpgaEn && CVA6Cfg.FpgaAlteraEn ? issue_instr_i_prev[i].result[4:0] : issue_instr_i[i].result[4:0];
+      assign raddr_pack_base[i*OPERANDS_PER_INSTR+2] = CVA6Cfg.FpgaEn && CVA6Cfg.FpgaAlteraEn ? issue_instr_i_prev[i].result[4:0] : issue_instr_i[i].result[4:0];
+      // CASQ phase1: read rs2+1 and rd+1 on ports 1 and 2 (port0 unused/addr already latched)
+      // Applied after generate via always_comb override below.
     end
   end
 
@@ -938,6 +966,61 @@ module issue_read_operands
     assign wdata_pack[i] = wdata_i[i];
     assign we_pack[i]    = we_gpr_i[i];
   end
+  // Force pair addresses during CASQ second RF phase (issue port 0 only)
+  always_comb begin
+    casq_phase_d = casq_phase_q;
+    raddr_pack = raddr_pack_base;
+    if (casq_active && OPERANDS_PER_INSTR == 3) begin
+      if (casq_ready_q) begin
+        casq_phase_d = 1'b0;
+      end else if (!casq_phase_q) begin
+        // phase0: normal rs1/rs2/rd — after RF, latch lo and advance
+        casq_phase_d = 1'b1;
+      end else begin
+        // phase1: reread high halves
+        raddr_pack[1] = issue_instr_i[0].rs2[4:0] | 5'b00001;  // rs2+1
+        raddr_pack[2] = issue_instr_i[0].result[4:0] | 5'b00001;  // rd+1
+        casq_phase_d = 1'b0;
+      end
+    end else begin
+      casq_phase_d = 1'b0;
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      casq_phase_q  <= 1'b0;
+      casq_ready_q  <= 1'b0;
+      casq_new_lo_q <= '0;
+      casq_exp_lo_q <= '0;
+      casq_new_hi_q <= '0;
+      casq_exp_hi_q <= '0;
+    end else if (flush_i) begin
+      casq_phase_q <= 1'b0;
+      casq_ready_q <= 1'b0;
+    end else if (casq_active && OPERANDS_PER_INSTR == 3) begin
+      if (casq_ready_q) begin
+        // Hold gathered pair until issue_ack drops the instr (casq_active clears)
+        casq_phase_q <= 1'b0;
+        casq_ready_q <= 1'b1;
+      end else begin
+        casq_phase_q <= casq_phase_d;
+        if (!casq_phase_q) begin
+          casq_new_lo_q <= rdata[1];
+          casq_exp_lo_q <= rdata[2];
+          casq_ready_q  <= 1'b0;
+        end else begin
+          casq_new_hi_q <= rdata[1];
+          casq_exp_hi_q <= rdata[2];
+          casq_ready_q  <= 1'b1;
+        end
+      end
+    end else begin
+      casq_phase_q <= 1'b0;
+      casq_ready_q <= 1'b0;
+    end
+  end
+
   if (CVA6Cfg.FpgaEn) begin : gen_fpga_regfile
     ariane_regfile_fpga #(
         .CVA6Cfg      (CVA6Cfg),
@@ -1162,11 +1245,11 @@ module issue_read_operands
 
   //pragma translate_off
   initial begin
-    assert (OPERANDS_PER_INSTR == 2 || (OPERANDS_PER_INSTR == 3 && CVA6Cfg.CvxifEn))
+    assert (OPERANDS_PER_INSTR == 2 || (OPERANDS_PER_INSTR == 3 && (CVA6Cfg.CvxifEn || CVA6Cfg.RVZacas)))
     else
       $fatal(
           1,
-          "If CVXIF is enable, ariane regfile can have either 2 or 3 read ports. Else it has 2 read ports."
+          "RF ports/instr must be 2, or 3 when CVXIF or Zacas (AMOCAS expected source)."
       );
   end
 
@@ -1180,4 +1263,8 @@ module issue_read_operands
   end
   //pragma translate_on
 
+
 endmodule
+
+
+

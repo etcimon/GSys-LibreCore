@@ -176,6 +176,9 @@ module cva6
       logic [CVA6Cfg.XLEN-1:0]          data;
       // Zacas AMOCAS expected value (operand_c); 0 for non-CAS
       logic [CVA6Cfg.XLEN-1:0]          data_cmp;
+      // AMOCAS.Q high halves (0 when not Q)
+      logic [CVA6Cfg.XLEN-1:0]          data_hi;
+      logic [CVA6Cfg.XLEN-1:0]          data_cmp_hi;
       logic [(CVA6Cfg.XLEN/8)-1:0]      be;
       fu_t                              fu;
       fu_op                             operation;
@@ -195,6 +198,9 @@ module cva6
       logic [CVA6Cfg.XLEN-1:0]          imm;
       // Zacas: expected/compare value for AMOCAS (0 when unused). Not used in addr calc.
       logic [CVA6Cfg.XLEN-1:0]          operand_c;
+      // AMOCAS.Q high halves (new=rs2+1, expected=rd+1)
+      logic [CVA6Cfg.XLEN-1:0]          operand_b_hi;
+      logic [CVA6Cfg.XLEN-1:0]          operand_c_hi;
       logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;
     },
 

@@ -140,6 +140,8 @@ module store_unit
   // keep the data and the byte enable for the second cycle (after address translation)
   logic [CVA6Cfg.XLEN-1:0] st_data_n, st_data_q;
   logic [CVA6Cfg.XLEN-1:0] st_data_cmp_q;  // Zacas expected (latched with st_data)
+  logic [CVA6Cfg.XLEN-1:0] st_data_hi_q, st_data_cmp_hi_q;  // AMOCAS.Q high
+  logic                   st_is_quad_q;
   logic [(CVA6Cfg.XLEN/8)-1:0] st_be_n, st_be_q;
   logic [1:0] st_data_size_n, st_data_size_q;
   amo_t amo_op_d, amo_op_q;
@@ -335,7 +337,7 @@ module store_unit
         SB, HSV_B, FSB: endian_data[7:0] = {lsu_ctrl_i.data[7:0]};
         SH, HSV_H, FSH: endian_data[15:0] = {<<8{lsu_ctrl_i.data[15:0]}};
         SW, HSV_W, FSW, AMO_LRW, AMO_SCW, AMO_SWAPW, AMO_ADDW, AMO_ANDW, AMO_ORW, AMO_XORW, AMO_MAXW,
-        AMO_MINW, AMO_MAXWU, AMO_MINWU, AMO_CASW:
+        AMO_MINW, AMO_MAXWU, AMO_MINWU, AMO_CASW, AMO_CASQ:
         endian_data[31:0] = {<<8{lsu_ctrl_i.data[31:0]}};
         default: endian_data[CVA6Cfg.XLEN-1:0] = {<<8{lsu_ctrl_i.data[CVA6Cfg.XLEN-1:0]}};
       endcase
@@ -373,6 +375,7 @@ module store_unit
         AMO_MINW, AMO_MIND:   amo_op_d = AMO_MIN;
         AMO_MINWU, AMO_MINDU: amo_op_d = AMO_MINU;
         AMO_CASW, AMO_CASD:   amo_op_d = CVA6Cfg.RVZacas ? AMO_CAS1 : AMO_NONE;
+        AMO_CASQ:             amo_op_d = CVA6Cfg.RVZacas ? AMO_CAS1 : AMO_NONE;  // is_quad on req
         default:              amo_op_d = AMO_NONE;
       endcase
     end else begin
@@ -462,6 +465,9 @@ module store_unit
         .amo_op_i          (amo_op_q),
         .data_i            (st_data_q),
         .data_cmp_i        (st_data_cmp_q),
+        .data_hi_i         (st_data_hi_q),
+        .data_cmp_hi_i     (st_data_cmp_hi_q),
+        .is_quad_i         (st_is_quad_q),
         .data_size_i       (st_data_size_q),
         .amo_req_o         (amo_req_o),
         .amo_resp_i        (amo_resp_i),
@@ -482,6 +488,9 @@ module store_unit
       st_be_q        <= '0;
       st_data_q      <= '0;
       st_data_cmp_q  <= '0;
+      st_data_hi_q  <= '0;
+      st_data_cmp_hi_q <= '0;
+      st_is_quad_q  <= 1'b0;
       st_data_size_q <= '0;
       trans_id_q     <= '0;
       amo_op_q       <= AMO_NONE;
@@ -493,8 +502,12 @@ module store_unit
       st_be_q        <= st_be_n;
       st_data_q      <= st_data_n;
       // Capture expected when accepting a new store/AMO (same cycle as st_data_n)
-      if (valid_i && (state_q == IDLE || st_valid))
+      if (valid_i && (state_q == IDLE || st_valid)) begin
         st_data_cmp_q <= CVA6Cfg.RVZacas ? lsu_ctrl_i.data_cmp : '0;
+        st_data_hi_q <= CVA6Cfg.RVZacas ? lsu_ctrl_i.data_hi : '0;
+        st_data_cmp_hi_q <= CVA6Cfg.RVZacas ? lsu_ctrl_i.data_cmp_hi : '0;
+        st_is_quad_q <= CVA6Cfg.RVZacas && (lsu_ctrl_i.operation == ariane_pkg::AMO_CASQ);
+      end
       trans_id_q     <= trans_id_n;
       st_data_size_q <= st_data_size_n;
       amo_op_q       <= amo_op_d;

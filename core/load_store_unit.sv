@@ -740,6 +740,12 @@ module load_store_unit
               data_misaligned = 1'b1;
             end
           end
+          // AMOCAS.Q: 16-byte alignment
+          AMO_CASQ: begin
+            if (lsu_ctrl.vaddr[3:0] != 4'b0000) begin
+              data_misaligned = 1'b1;
+            end
+          end
           default: ;
         endcase
       end
@@ -872,6 +878,9 @@ module load_store_unit
     // Zacas: expected value travels as operand_c (imm must stay 0 for addr = rs1)
     (CVA6Cfg.RVZacas && ariane_pkg::is_amo_cas(fu_data_i.operation)) ? fu_data_i.operand_c
                                                                       : '0,
+    // AMOCAS.Q high halves
+    (CVA6Cfg.RVZacas && fu_data_i.operation == ariane_pkg::AMO_CASQ) ? fu_data_i.operand_b_hi : '0,
+    (CVA6Cfg.RVZacas && fu_data_i.operation == ariane_pkg::AMO_CASQ) ? fu_data_i.operand_c_hi : '0,
     be_i,
     fu_data_i.fu,
     fu_data_i.operation,
