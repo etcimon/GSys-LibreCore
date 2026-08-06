@@ -2,7 +2,7 @@
 
 > **Role:** Answer *"which script, which plane (ISS vs RTL), which target, how tall is the stack?"* in one hop.  
 > **Governance:** `AGENTS.md` §0.2 (verify in lockstep) · suite catalog `build-platform/src/config/defaults.ts` · status rows `AGENTS-specs-to-tests.md`.  
-> **Battery entry:** `verif/regress/stability-regress.sh` (suite id `stability-regress`).
+> **Battery entry:** `verif/regress/stability-regress (profiles: artifact|spike|full|**stream8**).sh` (suite id `stability-regress`).
 
 This file is the **isolation ladder** for residual multicore / H / stream / CAS work. Prefer the **narrowest green gate** that would have caught the bug class before climbing to full CRT or Linux.
 

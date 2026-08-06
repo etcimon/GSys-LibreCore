@@ -1,6 +1,6 @@
 # Stream8-class production package (scaffold)
 
-**Status:** **promoted + live RTL green + full CRT 9/9** — `g6lc64_stream8` / `work-ver-stream8` (Linux Verilator 5.008): mini AMOCAS.W/D/Q + stream; `mc-spo-veri` **9/9** (compact LD); H-edge Variane **3/3** (`kvm-h-veri`).
+**Status:** **promoted + live RTL green + full CRT 9/9** — `g6lc64_stream8` / `work-ver-stream8` (Linux Verilator 5.008): mini AMOCAS.W/D/Q + stream; `mc-spo-veri` **9/9** (compact LD); H-edge Variane **3/3** (`kvm-h-veri`); composed battery `STABILITY_PROFILE=stream8` **6/6**.
 **Queue:** `AGENTS-todo.md` practical next optional growth · residual CRT + H-edge **already green**.  
 **Contract:** `architecture/README.md` (scaffold; promote via §0.2 + config-first).
 

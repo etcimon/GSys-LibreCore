@@ -71,8 +71,8 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
 4. **Stability battery + regress isolation map** — **landed**: isolation map
    `verif/regress/AGENTS-regress-scripts.md` (axes: target / ISS vs RTL / stack height / feature)
    + composed suite `stability-regress` (`verif/regress/stability-regress.sh`).
-   Profiles: `artifact` | `spike` (default: kvm-h-spike + mc-spo-spike + mini compile) | `full`
-   (+ mini-veri + H-edge Variane when harness present). FO4 optional outside this battery.
+   Profiles: `artifact` | `spike` | `full` | **`stream8`** (spike + mini CAS on
+   `work-ver-stream8` + `kvm-h-veri` + `stream8-smoke` live). FO4 optional outside this battery.
    **Priors:** `AGENTS.md` §0.2 · `AGENTS-specs-to-tests.md` · `AGENTS-build-platform.md` §4–§5 ·
    `mc-spo-*.sh` · `kvm-h-spike.sh` · `mc-mini-veri.sh`.
 

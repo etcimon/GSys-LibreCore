@@ -56,11 +56,12 @@ export DV_TARGET="${DV_TARGET:-cv64a6_imafdc_sv39}"
 export CVA6_REPO_DIR="${CVA6_REPO_DIR:-$ROOT}"
 
 REBUILD="${MC_MINI_VERI_REBUILD:-0}"
+VER_LIBRARY="${MC_MINI_VER_LIBRARY:-work-ver}"
 DEFAULT_TESTS="mini_tohost mini_jumps mini_amocas_w mini_amocas_d"
 # shellcheck disable=SC2206
 tests=( ${MC_MINI_VERI_TESTS:-$DEFAULT_TESTS} )
 
-echo "[mc-mini-veri] target=${DV_TARGET} rebuild=${REBUILD}"
+echo "[mc-mini-veri] target=${DV_TARGET} rebuild=${REBUILD} ver-library=${VER_LIBRARY}"
 cva6_tools_report
 command -v verilator >/dev/null || { echo "need verilator"; exit 1; }
 command -v g++ >/dev/null || { echo "need g++"; exit 1; }
@@ -68,10 +69,10 @@ cva6_have_riscv_gcc || { echo "need riscv gcc"; exit 1; }
 
 if [[ "$REBUILD" == "1" ]]; then
   echo "[mc-mini-veri] verilate..."
-  rm -rf "$ROOT/work-ver"
+  rm -rf "$ROOT/$VER_LIBRARY"
   make -C "$ROOT" verilate \
     verilator="verilator --no-timing" \
-    target="$DV_TARGET" \
+    target="$DV_TARGET" ver-library="$VER_LIBRARY" \
     XLEN=64 \
     CVA6_REPO_DIR="$CVA6_REPO_DIR" \
     SPIKE_INSTALL_DIR="$SPIKE_INSTALL_DIR" \
@@ -79,14 +80,14 @@ if [[ "$REBUILD" == "1" ]]; then
     VERILATOR_INSTALL_DIR="$VERILATOR_INSTALL_DIR" \
     CXX="$CXX" CC="$CC"
 fi
-test -x "$ROOT/work-ver/Variane_testharness" || {
-  echo "[mc-mini-veri] missing work-ver/Variane_testharness (set MC_MINI_VERI_REBUILD=1)"
+test -x "$ROOT/$VER_LIBRARY/Variane_testharness" || {
+  echo "[mc-mini-veri] missing $VER_LIBRARY/Variane_testharness (set MC_MINI_VERI_REBUILD=1)"
   exit 1
 }
 
 LD="$ROOT/verif/tests/custom/common/link_verilator.ld"
 SRC_DIR="$ROOT/verif/tests/custom/multicore"
-OUT_DIR="$ROOT/work-ver/mini"
+OUT_DIR="$ROOT/$VER_LIBRARY/mini"
 mkdir -p "$OUT_DIR"
 
 PASS=0
@@ -108,7 +109,7 @@ for t in "${tests[@]}"; do
   th=$("${CROSS_COMPILE}nm" "$elf" | awk '$3=="tohost"{print $1; exit}')
   log="/tmp/mc-mini-veri_${t}.log"
   set +e
-  "$ROOT/work-ver/Variane_testharness" \
+  "$ROOT/$VER_LIBRARY/Variane_testharness" \
     +time_out=20000 \
     +debug_disable \
     ${th:+ +tohost_addr=0x$th} \

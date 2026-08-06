@@ -6,12 +6,14 @@
 # Profiles:
 #   artifact  — mc-spo-soak (fast assemble) + mini compile only
 #   spike     — kvm-h-spike + mc-spo-spike + mini compile  (default)
-#   full      — spike + mini-veri run (if harness) + H-edge Variane (if harness)
+#   full      — spike + mini-veri + H-edge Variane (prefers work-ver-stream8)
+#   stream8   — full + stream8-smoke live RTL when harness present
 #
 # Usage:
 #   bash verif/regress/stability-regress.sh
 #   STABILITY_PROFILE=artifact bash verif/regress/stability-regress.sh
 #   STABILITY_PROFILE=full bash verif/regress/stability-regress.sh
+#   STABILITY_PROFILE=stream8 bash verif/regress/stability-regress.sh
 #   STABILITY_SKIP_SPO_SPIKE=1 bash verif/regress/stability-regress.sh
 #
 # Map: verif/regress/AGENTS-regress-scripts.md
@@ -42,6 +44,15 @@ export CROSS_COMPILE="${CROSS_COMPILE:-riscv-none-elf-}"
   export PATH="${ROOT}/build-platform/workspace/tooling/spike/bin:${PATH}"
 
 PROFILE="${STABILITY_PROFILE:-spike}"
+# Prefer stream8 TB when present (Linux Verilator residual path).
+if [[ -z "${STABILITY_VER_LIBRARY:-}" ]]; then
+  if [[ -x "$ROOT/work-ver-stream8/Variane_testharness" ]]; then
+    STABILITY_VER_LIBRARY=work-ver-stream8
+  else
+    STABILITY_VER_LIBRARY=work-ver
+  fi
+fi
+export STABILITY_VER_LIBRARY
 PASS=0
 FAIL=0
 SKIP=0
@@ -136,13 +147,22 @@ leg_mini_veri() {
     skip_leg mc-mini-veri
     return 0
   fi
-  if [[ ! -x "$ROOT/work-ver/Variane_testharness" ]]; then
-    skip_leg "mc-mini-veri (no work-ver harness)"
+  if [[ ! -x "$ROOT/$STABILITY_VER_LIBRARY/Variane_testharness" ]]; then
+    skip_leg "mc-mini-veri (no $STABILITY_VER_LIBRARY harness)"
     return 0
   fi
-  # Default smoke: tohost + jumps only (AMOCAS needs matching Zacas package/TB).
+  # stream8 TB has RVZacas → include mini CAS; other TBs: tohost+jumps only.
+  local mini_tests="${STABILITY_MINI_VERI_TESTS:-}"
+  if [[ -z "$mini_tests" ]]; then
+    if [[ "$STABILITY_VER_LIBRARY" == *stream8* ]]; then
+      mini_tests="mini_tohost mini_jumps mini_amocas_w mini_amocas_d"
+    else
+      mini_tests="mini_tohost mini_jumps"
+    fi
+  fi
   MC_MINI_VERI_REBUILD=0 \
-    MC_MINI_VERI_TESTS="${STABILITY_MINI_VERI_TESTS:-mini_tohost mini_jumps}" \
+    MC_MINI_VER_LIBRARY="$STABILITY_VER_LIBRARY" \
+    MC_MINI_VERI_TESTS="$mini_tests" \
     run_leg mc-mini-veri bash "$ROOT/verif/regress/mc-mini-veri.sh"
 }
 
@@ -151,15 +171,31 @@ leg_hedge_veri() {
     skip_leg h-edge-veri
     return 0
   fi
-  if [[ ! -x "$ROOT/work-ver/Variane_testharness" ]]; then
-    skip_leg "h-edge-veri (no work-ver harness)"
+  if [[ ! -x "$ROOT/$STABILITY_VER_LIBRARY/Variane_testharness" ]]; then
+    skip_leg "h-edge-veri (no $STABILITY_VER_LIBRARY harness)"
     return 0
   fi
-  if [[ -x "$ROOT/monorepo-soak/run-h-edge-veri.sh" ]]; then
+  if [[ -f "$ROOT/verif/regress/kvm-h-veri.sh" ]]; then
+    KVM_H_VER_LIBRARY="$STABILITY_VER_LIBRARY" \
+      run_leg kvm-h-veri bash "$ROOT/verif/regress/kvm-h-veri.sh"
+  elif [[ -x "$ROOT/monorepo-soak/run-h-edge-veri.sh" ]]; then
     run_leg h-edge-veri bash "$ROOT/monorepo-soak/run-h-edge-veri.sh"
   else
     skip_leg "h-edge-veri (helper missing)"
   fi
+}
+
+leg_stream8() {
+  if [[ "${STABILITY_SKIP_STREAM8:-0}" == "1" ]]; then
+    skip_leg stream8-smoke
+    return 0
+  fi
+  if [[ ! -x "$ROOT/work-ver-stream8/Variane_testharness" ]]; then
+    skip_leg "stream8-smoke (no work-ver-stream8 harness)"
+    return 0
+  fi
+  STREAM8_LIVE_RTL=1 STREAM8_REQUIRE_LINT="${STABILITY_STREAM8_LINT:-0}" \
+    run_leg stream8-smoke bash "$ROOT/verif/regress/stream8-smoke.sh"
 }
 
 log "profile=${PROFILE}"
@@ -182,8 +218,19 @@ case "$PROFILE" in
     leg_mini_veri
     leg_hedge_veri
     ;;
+  stream8)
+    leg_hedge_spike
+    leg_spo_spike
+    leg_mini_compile
+    # Force stream8 library for mini + H-edge legs
+    STABILITY_VER_LIBRARY=work-ver-stream8
+    export STABILITY_VER_LIBRARY
+    leg_mini_veri
+    leg_hedge_veri
+    leg_stream8
+    ;;
   *)
-    log "unknown STABILITY_PROFILE=${PROFILE} (use artifact|spike|full)"
+    log "unknown STABILITY_PROFILE=${PROFILE} (use artifact|spike|full|stream8)"
     exit 2
     ;;
 esac

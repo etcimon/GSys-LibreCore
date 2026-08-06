@@ -86,7 +86,11 @@ build_bare() {
 run_veri() {
   local elf="$1" logf="$2"
   local th harness
-  harness="$ROOT/work-ver/Variane_testharness"
+  if [[ -x "$ROOT/work-ver-stream8/Variane_testharness" ]]; then
+    harness="$ROOT/work-ver-stream8/Variane_testharness"
+  else
+    harness="$ROOT/work-ver/Variane_testharness"
+  fi
   [[ -x "$harness" ]] || return 2
   th="$(riscv-none-elf-nm "$elf" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
   [[ -n "$th" ]] || return 1
@@ -99,8 +103,8 @@ run_veri() {
 
 # ---- B. AMOCAS.Q odd-reg illegal on RTL ----
 log "--- B. AMOCAS.Q odd-reg illegal (RTL)"
-if [[ ! -x "$ROOT/work-ver/Variane_testharness" ]]; then
-  log "  SKIP Q odd-illegal (no work-ver harness)"
+if [[ ! -x "$ROOT/work-ver-stream8/Variane_testharness" && ! -x "$ROOT/work-ver/Variane_testharness" ]]; then
+  log "  SKIP Q odd-illegal (no Variane harness)"
   SKIP=$((SKIP + 1))
 else
   elf=$(build_bare mini_amocas_q_illegal)
@@ -119,7 +123,7 @@ log "--- C. hard AMOCAS.W/D/Q mini golden (RTL only)"
 if [[ "$SKIP_MINI" == "1" ]]; then
   log "  SKIP mini (ZACAS_SKIP_MINI=1)"
   SKIP=$((SKIP + 3))
-elif [[ ! -x "$ROOT/work-ver/Variane_testharness" ]]; then
+elif [[ ! -x "$ROOT/work-ver-stream8/Variane_testharness" && ! -x "$ROOT/work-ver/Variane_testharness" ]]; then
   log "  SKIP mini (no harness)"
   SKIP=$((SKIP + 3))
 else
