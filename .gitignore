@@ -46,7 +46,10 @@ xrun_results/
 __pycache__
 .bender/
 Bender.lock
-/tools/
+# Local toolchain installs (spike, verilator, …) — keep out of git
+/tools/**
+# Tracked monorepo maintenance scripts that live under tools/
+!/tools/g6lc_submodule_forks.py
 /util/toolchain-builder/src/
 /util/toolchain-builder/build/
 # Both following lines are needed to list contents of ISA manual build dir.
