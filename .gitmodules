@@ -33,16 +33,16 @@
 	url = https://github.com/pulp-platform/common_verification.git
 [submodule "verif/core-v-verif"]
 	path = verif/core-v-verif
-	url = https://github.com/openhwgroup/core-v-verif
+	url = https://github.com/etcimon/core-v-verif.git
 [submodule "core/cvfpu"]
 	path = core/cvfpu
 	url = https://github.com/openhwgroup/cvfpu.git
 [submodule "core/cache_subsystem/hpdcache"]
 	path = core/cache_subsystem/hpdcache
-	url = https://github.com/openhwgroup/cv-hpdcache.git
+	url = https://github.com/etcimon/cv-hpdcache.git
 [submodule "verif/sim/dv"]
 	path = verif/sim/dv
-	url = https://github.com/google/riscv-dv.git
+	url = https://github.com/etcimon/riscv-dv.git
 [submodule "docs/06_cv32a65x_riscv/riscv-isa-manual"]
 	path = docs/riscv-isa/riscv-isa-manual
 	url = https://github.com/riscv/riscv-isa-manual.git
