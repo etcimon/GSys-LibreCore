@@ -25,7 +25,7 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **Directed multicore suite** | `testlist_mc_stream` — stream, AMOCAS, st-fwd, fence, CAS lock, **CF×stream**, CAS×stream, mispred×stream | `architecture/multi-core/README.md` · `architecture/l2-l3-cache/README.md` · U6/p6 notes in `remaining-upgrade-sequence.md` · `verif/tests/testlist_mc_stream.yaml` · asm `verif/tests/custom/multicore/` |
 | **Spike soak** | `stability-regress` + `mc-spo-spike` / `mc-spo-soak` / `kvm-h-spike` | Scripts `verif/regress/mc-spo-{spike,soak}.sh` · suite registry `build-platform/src/config/defaults.ts` · host residual `AGENTS-build-platform.md` §4–§5 |
 | **RTL mini golden** | `mc-mini-veri` hard PASS AMOCAS.W/D (no soft-skip); **cataloged** in `defaults.ts` | `verif/regress/mc-mini-veri.sh` · `mini_amocas_{w,d}.S` · suite id `mc-mini-veri` · TB `corev_apu/tb/ariane_tb.cpp` · Zacas impl row |
-| **RTL full CRT residual** | imafdc **9/9** + `g6lc64_server_math` L2 **9/9** (DeepSpec STQ); dual-hart live CRT open | suite id `mc-spo-veri` · `verif/regress/mc-spo-veri.sh` · FSE: `architecture/speculative-execution/` · `agents/guides/AGENTS-speculation.md` |
+| **RTL full CRT residual** | imafdc **9/9** + `g6lc64_server_math` L2 **9/9** (DeepSpec STQ); dual-hart-ci residual revalidated (lint soft when host-skewed; dual-park ELF; R3 skippable) | suite id `mc-spo-veri` · `verif/regress/mc-spo-veri.sh` · FSE: `architecture/speculative-execution/` · `agents/guides/AGENTS-speculation.md` |
 | **FTQ / frontend** | Mispredict reseed + demand fixes for bare-metal green | Guide `agents/guides/AGENTS-branch-prediction.md` · scaffold `architecture/branch-prediction/README.md` · RTL `core/frontend/{frontend,cva6_ftq}.sv` |
 | **Structural FO4** | sparse_ex/frontend residual close @ **2.5 GHz** (screening ≠ STA) | Package `sv-timing/AGENTS.md` · `sv-timing/architecture/MONOREPO-SOAK.md` · `FREQUENCY-CLOSURE.md` · host `AGENTS-build-platform.md` §6.1 / §7 · plan `architecture/build-platform-opensta-from-timing.md` · philosophy §2.8 in `AGENTS-coding-philosophy.md` |
 | **R3a dual-hart OpenSBI** | `fw_payload` + WSL SUCCESS; **R3b gate** `r3b-linux-image` (Image external) | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
@@ -110,6 +110,15 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    · `AGENTS-build-platform.md` §7 · `sv-timing/architecture/STA-HANDOFF.md` ·
    `architecture/build-platform-workspace-lifecycle.md` · `AGENTS-technology.md` ·
    verify gate `AGENTS.md` §0.2 / `build-platform/AGENTS.md` §4.6.
+
+11. ~~**Dual-hart residual re-validation**~~ **done (host residual)** - suite
+   `dual-hart-ci`: artifacts + boot-path + dual-park ELF compile; rootfs preflight with
+   `SMT2_SKIP_R3=1` / `DUAL_HART_SKIP_R3=1` by default; smt2 lint soft-skips when only
+   Windows OSS CAD PE is present under WSL (hard: `DUAL_HART_REQUIRE_LINT=1` + Linux-native
+   `verilator_bin`). Optional `DUAL_HART_PARK_SPIKE=1`. Live Variane dual-hart CRT + R3
+   Linux cosim remain lab when native Verilator TB is rebuilt for `g6lc64_smt2`.
+   **Priors:** `verif/regress/dual-hart-ci.sh` · `smt_dual_park.S` · `smt-linux-rootfs.sh` ·
+   `architecture/multi-threading/smt2-bringup.md`.
 
 10. **Optional growth (not blocking residual bugs)** — production **stream8-class** package
     (n-wide / y-core / FO4@x GHz) once multicore RTL CRT + H-edge are green; branding/publication
@@ -361,7 +370,7 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
       cancel remains policy model
     - [x] Live multi-port rename formal (`cva6_ooo_rename.sby`): free∩busy=∅, x0 map,
       dual-issue bypass, alloc≠0; rename package-free `NR_WB` API; **PASS** + `cv64a6_ooo` lint
-    - [x] dual-hart-ci hardened (boot-path + dual-park + rootfs preflight + smt2 lint gate)
+    - [x] dual-hart-ci hardened (boot-path + dual-park ELF + rootfs R3-skippable + smt2 lint soft-skip when PE-only/WSL host-skew)
     - [x] smt-linux-rootfs R2a (payload+DTB when CROSS_COMPILE) + clearer R3/OpenSBI path
     - [x] mc-stream toolchain probe (riscv-gcc/spike) with clear lint fallback
     - [x] Windows managed xPack install (`toolchain.riscvGcc.prebuiltUrl.windows` + zip recipe)

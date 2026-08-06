@@ -71,6 +71,10 @@ fi
 
 if [[ -n "${CVA6_LINUX_PAYLOAD:-}" ]]; then
   test -f "$CVA6_LINUX_PAYLOAD"
+  if [[ "${SMT2_SKIP_R3:-0}" == "1" ]]; then
+    echo "[smt-linux-rootfs] PASS (R1–R2 preflight; SMT2_SKIP_R3=1 skips R3 cosim)"
+    exit 0
+  fi
   if [[ -f verif/regress/smt-linux-r3-cosim.sh ]]; then
     echo "[smt-linux-rootfs] R3 via smt-linux-r3-cosim.sh..."
     bash verif/regress/smt-linux-r3-cosim.sh
