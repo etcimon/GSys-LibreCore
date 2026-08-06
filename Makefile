@@ -105,7 +105,8 @@ endif
 # cv64a6_imafdc_sv39, cv32a6_imac_sv0, cv32a6_imac_sv32, cv32a6_imafc_sv32, cv32a6_ima_sv32_fpga
 # Changing the default target to cv32a60x for Step1 verification
 target     ?= cv64a6_imafdc_sv39
-ifeq ($(target), cv64a6_imafdc_sv39)
+# 64-bit packages: OpenHW cv64a6_* and G6LC g6lc64_* (server_math / ooo / smt2).
+ifneq (,$(filter cv64a6_% g6lc64_%,$(target)))
 	XLEN ?= 64
 else
 	XLEN ?= 32

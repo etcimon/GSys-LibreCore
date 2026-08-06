@@ -248,7 +248,10 @@ package cva6_config_pkg;
       SliceMaxRunahead: unsigned'(0),
       // U10 is C-light (in-order multi-issue); full OoO is ooo_server package
       OoOEn: bit'(0),
-      DeepSpecEn: bit'(0),
+      // Same STQ deepen as imafdc FORCE_IMAFDC smoke: DEPTH_COMMIT=4 with
+      // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+      // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+      DeepSpecEn: bit'(1),
       RobEntries: unsigned'(0),
       PrfEntries: unsigned'(0),
       IqEntries: unsigned'(0),
