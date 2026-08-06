@@ -48,17 +48,18 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    Spike Zacas soft-skip remains honest (RTL mini = CAS golden). Maps:
    `AGENTS-specs-to-tests.md`, `AGENTS-build-platform.md` §4/§6.
 
-2. ~~**Full CRT `mc-spo-veri` green on one target**~~ **partial (smoke green)** —
-   `MC_SPO_VERI_FORCE_IMAFDC=1` + Verilator **5.008** + compact `link_verilator.ld`:
-   **7/7 smoke PASS** (`zacas_w/d`, st_fwd, fence, cas_lock, cf_stream, mispred_stream).
-   Infra fixed: self-built CRT ELFs, `Makefile` `-Wno-SIDEEFFECT` only if supported,
-   TB hierarchical probes behind `CVA6_MC_PC_PROBE_COMPILE` (WT single-core build).
-   **Residual hard:** `mc_spo_cas_stream` + `mc_stream_plane` hang/flake (timeout sentinel
-   `0x7fffffff`; one cas_stream PASS @~2.9M then re-timeout @20M) — keep in
-   `MC_SPO_VERI_FULL=1`, do **not** soft-pass; diagnose store-loop / SB drain next.
+2. ~~**Full CRT `mc-spo-veri` green on one target**~~ **partial → stream residual closed** —
+   `MC_SPO_VERI_FORCE_IMAFDC=1` + Verilator **5.008** + compact `link_verilator.ld`.
+   **Root cause (2026-08-06):** WT fill→verify hang at ≥40 B was **STQ depth=4**
+   (`DeepSpecEn=0` → `ariane_pkg::DEPTH_COMMIT=4`). Bare `mini_stream_plane`: 32 B
+   PASS, 40 B+ timeout; store-only PASS; `fence` between fill/verify PASS. Enabling
+   `DeepSpecEn=1` on `cv64a6_imafdc_sv39` deepens STQ (spec/commit) and hard-greens:
+   mini 32–512 B, CRT `mc_stream_plane` (~2.9k cyc), `mc_spo_cas_stream` (~3.3k cyc).
+   Prior TX free / load_tx_collision missunit fixes still required under load.
    Multi-core `server_math`+L2 CRT still open.  
-   **Priors:** `verif/regress/mc-spo-veri.sh` · `agents/guides/AGENTS-speculation.md` ·
-   `architecture/speculative-execution/` · TB `corev_apu/tb/ariane_tb.cpp`.
+   **Priors:** `verif/regress/mc-spo-veri.sh` · `verif/tests/custom/multicore/mini_stream_plane.S`
+   · `core/store_buffer.sv` · `core/include/cv64a6_imafdc_sv39_config_pkg.sv` ·
+   `agents/guides/AGENTS-speculation.md` · TB `corev_apu/tb/ariane_tb.cpp`.
 
 3. **H-edge directed diagnostics** (10 narrow + CF) — VS entry / hedeleg WARL / VTSR·VTW·VTVM→cause 22
    / SPV vs MPV polish; Spike first (`--isa …h…`, open PMP), then RTL; harden `*tval`/`*tinst` if

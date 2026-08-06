@@ -165,24 +165,24 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         $(if $(spike-tandem),corev_apu/tb/common/spike.sv)                           \
         core/cva6_rvfi.sv                                                            \
         corev_apu/src/ariane.sv                                                      \
-        corev_apu/src/cva6_ara_attach.sv                                             \
-        corev_apu/src/cva6_axi_2to1_mux.sv                                           \
-        corev_apu/coherence/cva6_coherence_pkg.sv                                    \
-        corev_apu/coherence/cva6_inval_bus.sv                                        \
-        corev_apu/coherence/cva6_snoop_filter.sv                                     \
-        corev_apu/coherence/cva6_lr_sc_tracker.sv                                    \
-        corev_apu/coherence/cva6_l1_inv_adapter.sv                                   \
-        corev_apu/coherence/cva6_coherence_hub.sv                                    \
-        corev_apu/l2_cache/cva6_l2_pkg.sv                                            \
-        corev_apu/l2_cache/cva6_l2_tag.sv                                            \
-        corev_apu/l2_cache/cva6_l2_data.sv                                           \
-        corev_apu/l2_cache/cva6_l2_mshr.sv                                           \
-        corev_apu/l2_cache/cva6_l2_top.sv                                            \
-        corev_apu/l3_cache/cva6_l3_pkg.sv                                            \
-        corev_apu/l3_cache/cva6_l3_inclusive_inv.sv                                  \
-        corev_apu/l3_cache/cva6_server_prefetcher.sv                                 \
-        corev_apu/l3_cache/cva6_l3_top.sv                                            \
-        corev_apu/src/cva6_cluster.sv                                                \
+        corev_apu/src/g6lc_ara_attach.sv                                             \
+        corev_apu/src/g6lc_axi_2to1_mux.sv                                           \
+        corev_apu/coherence/g6lc_coherence_pkg.sv                                    \
+        corev_apu/coherence/g6lc_inval_bus.sv                                        \
+        corev_apu/coherence/g6lc_snoop_filter.sv                                     \
+        corev_apu/coherence/g6lc_lr_sc_tracker.sv                                    \
+        corev_apu/coherence/g6lc_l1_inv_adapter.sv                                   \
+        corev_apu/coherence/g6lc_coherence_hub.sv                                    \
+        corev_apu/l2_cache/g6lc_l2_pkg.sv                                            \
+        corev_apu/l2_cache/g6lc_l2_tag.sv                                            \
+        corev_apu/l2_cache/g6lc_l2_data.sv                                           \
+        corev_apu/l2_cache/g6lc_l2_mshr.sv                                           \
+        corev_apu/l2_cache/g6lc_l2_top.sv                                            \
+        corev_apu/l3_cache/g6lc_l3_pkg.sv                                            \
+        corev_apu/l3_cache/g6lc_l3_inclusive_inv.sv                                  \
+        corev_apu/l3_cache/g6lc_server_prefetcher.sv                                 \
+        corev_apu/l3_cache/g6lc_l3_top.sv                                            \
+        corev_apu/src/g6lc_cluster.sv                                                \
         vendor/pulp-platform/axi/src/axi_dw_converter.sv                             \
         $(wildcard corev_apu/bootrom/*.sv)                                           \
         $(wildcard corev_apu/clint/*.sv)                                             \

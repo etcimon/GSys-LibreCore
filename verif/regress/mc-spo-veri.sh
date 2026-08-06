@@ -189,7 +189,25 @@ else
       echo "[mc-spo-veri] missing source $src" >&2
       return 1
     fi
-    # Same shape as testlist_mc_stream gcc_opts + cva6.py -march/-mabi.
+    # Bare-metal sources define their own _start (e.g. mc_spo_st_fwd, mini_*).
+    # Linking CRT then collides on _start/tohost.
+    if grep -qE '^\s*\.globl\s+_start|_start:' "$src" 2>/dev/null && \
+       ! grep -qE '^\s*\.globl\s+main' "$src" 2>/dev/null; then
+      "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
+        -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
+        "$src" -T "$LINKER" -o "$elf" \
+        -march="$MARCH" -mabi="$MABI"
+      return
+    fi
+    if grep -qE '^\s*_start:' "$src" 2>/dev/null; then
+      # Has _start (possibly also main alias) — bare-metal only.
+      "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
+        -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
+        "$src" -T "$LINKER" -o "$elf" \
+        -march="$MARCH" -mabi="$MABI"
+      return
+    fi
+    # CRT shape (syscalls + crt.S + main).
     "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
       -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
       "$COMMON/syscalls.c" "$COMMON/crt.S" "$src" \
