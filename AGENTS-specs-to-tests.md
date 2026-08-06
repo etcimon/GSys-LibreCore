@@ -66,6 +66,7 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | `dual-hart-ci` | directed (optional) | `dual-hart-ci.sh` | SMT2/NrHarts=2 artifact + checklist |
 | `smt-linux-boot-path` | directed (optional) | `smt-linux-boot-path.{sh,ps1}` | DTS vs sparse linux-dts + CLINT/PLIC per-hart gate (no full Linux image) |
 | `smt-linux-rootfs` | linux (optional) | `smt-linux-rootfs.{sh,ps1}` + `testlist_smt_linux.yaml` + `software/smt2-linux/` | SMT OpenSBI R3a auto-build when toolchain present; sim if `CVA6_LINUX_PAYLOAD` / `fw_payload.elf` |
+| `r3b-linux-image` | linux (optional) | `verif/regress/r3b-linux-image.sh` + `fetch-linux-image-hint.sh` | R3b: contract + soft-skip without Image; optional OpenSBI rebuild with LINUX_IMAGE |
 | `iti` / `instr-tracing` | directed | ITI / trace directed | trace/observability (not ISA-normative) |
 | `debug` | directed | debug-module test | Debug spec (external), triggers |
 | `interrupt` | uvm | `testlist_interrupt.yaml` | Part II traps/interrupts, CLINT/PLIC delivery |

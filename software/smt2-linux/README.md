@@ -135,3 +135,20 @@ Windows `smt-linux-rootfs.ps1` auto-dispatches R3 to WSL when `wsl` is available
 | `CROSS_COMPILE` | e.g. `riscv64-unknown-elf-` or `riscv-none-elf-` |
 | `LINUX_IMAGE` | Path to kernel Image for R3b |
 | `CVA6_LINUX_PAYLOAD` | Override guest for `smt-linux-rootfs` suite |
+
+---
+
+## R3b Linux Image (external)
+
+Kernel Image is not in-tree. Place it under
+`build-platform/workspace/smt2-linux/Image` or set `LINUX_IMAGE`.
+
+```bash
+bash software/smt2-linux/scripts/fetch-linux-image-hint.sh
+LINUX_IMAGE=$PWD/build-platform/workspace/smt2-linux/Image \
+  CVA6_R3B_BUILD=1 bash verif/regress/r3b-linux-image.sh
+# or:
+make -C software/smt2-linux opensbi-linux
+```
+
+Gate suite: `verif/regress/r3b-linux-image.sh` (soft-skip without Image).

@@ -28,7 +28,7 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **RTL full CRT residual** | imafdc **9/9** + `g6lc64_server_math` L2 **9/9** (DeepSpec STQ); dual-hart live CRT open | suite id `mc-spo-veri` · `verif/regress/mc-spo-veri.sh` · FSE: `architecture/speculative-execution/` · `agents/guides/AGENTS-speculation.md` |
 | **FTQ / frontend** | Mispredict reseed + demand fixes for bare-metal green | Guide `agents/guides/AGENTS-branch-prediction.md` · scaffold `architecture/branch-prediction/README.md` · RTL `core/frontend/{frontend,cva6_ftq}.sv` |
 | **Structural FO4** | sparse_ex/frontend residual close @ **2.5 GHz** (screening ≠ STA) | Package `sv-timing/AGENTS.md` · `sv-timing/architecture/MONOREPO-SOAK.md` · `FREQUENCY-CLOSURE.md` · host `AGENTS-build-platform.md` §6.1 / §7 · plan `architecture/build-platform-opensta-from-timing.md` · philosophy §2.8 in `AGENTS-coding-philosophy.md` |
-| **R3a dual-hart OpenSBI** | `fw_payload` + WSL Variane SUCCESS; **R3b Image external** | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
+| **R3a dual-hart OpenSBI** | `fw_payload` + WSL SUCCESS; **R3b gate** `r3b-linux-image` (Image external) | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
 | **Ara / RVV** | Attach live-lintable + DTS + directed; VRF/cosim **open** | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
 | **H / KVM** | U9 + **H-edge Spike+RTL 3/3** (`kvm-h-spike` / Variane server_math) | `architecture/server-math-hypervisor.md` · remaining-upgrade Phase B · `agents/spec/riscv-spec-II-5.*-hypervisor*.html` · impl Hypervisor row · `verif/tests/custom/kvm_h/` · suite `kvm-h-tests` |
 
@@ -83,10 +83,11 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    **Priors:** `verif/regress/dual-iss-regress.sh` · `verif/sim/cva6.py` ·
    `AGENTS-build-platform.md` §5 · `AGENTS-specs-to-tests.md` · `defaults.ts`.
 
-6. **R3b Linux `Image`** — external (cva6-sdk / kernel); then OpenSBI payload with real userspace.  
-   **Priors:** `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` ·
-   `dts-linux-smt.md` · `software/smt2-linux/` · `remaining-upgrade-sequence.md` §4 item 8 ·
-   `AGENTS-dts-validation.md` · suites `opensbi-linux-boot`, `smt-linux-r3-cosim`.
+6. **R3b Linux `Image`** — **gate landed** (`r3b-linux-image`): contract always;
+   soft-skip without external Image; `CVA6_R3B_BUILD=1` embeds Image via
+   `build-opensbi-smt2.sh --linux`. Full shell//proc/cpuinfo still lab when Image present.
+   **Priors:** `verif/regress/r3b-linux-image.sh` · `fetch-linux-image-hint.sh` ·
+   `smt-linux-rootfs.md` · `software/smt2-linux/` · `smt-linux-r3-cosim` · `opensbi-linux-boot`.
 
 7. **OpenSBI VRF save/restore + `CONFIG_RISCV_ISA_V` + live Ara cosim** of `v_memcpy_lmul`
    under `cva6.py` / `CVA6_ARA_ATTACH=1`.  
@@ -405,9 +406,9 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
       priors: `AGENTS.md` §0.2, `AGENTS-build-platform.md` §4–§5, `AGENTS-specs-to-tests.md`
     - [x] Dual-ISS Spike+Verilator residual (`dual-iss-regress` tohost 2/2; +H 3/3) → **§5 done**;
       priors: `verif/regress/dual-iss-regress.sh`, `AGENTS-build-platform.md` §5
-    - [ ] R3b Linux Image → **§6**;
-      priors: `architecture/multi-threading/smt2-bringup.md`,
-      `smt-linux-rootfs.md`, `AGENTS-dts-validation.md`
+    - [x] R3b Linux Image **gate** (`r3b-linux-image` soft-skip without Image; LINUX_IMAGE build path) → **§6 gate done**;
+      full rootfs shell still external/lab when Image available
+      priors: `verif/regress/r3b-linux-image.sh`, `smt-linux-rootfs.md`, `software/smt2-linux/`
     - [ ] OpenSBI VRF + Linux `CONFIG_RISCV_ISA_V` + live Ara cosim `v_memcpy_lmul` → **§7**;
       priors: `architecture/ara-vector-attach.md`, `agents/guides/AGENTS-vector.md`,
       `agents/spec/riscv-spec-I-9-vector.html`

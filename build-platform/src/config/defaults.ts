@@ -629,6 +629,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         openSource: false,
       },
       {
+        id: "r3b-linux-image",
+        description:
+          "OPTIONAL: R3b Linux Image gate (contract + soft-skip without Image; CVA6_R3B_BUILD embeds Image in OpenSBI).",
+        script: "verif/regress/r3b-linux-image.sh",
+        group: "linux",
+        target: "g6lc64_smt2",
+        dvTarget: "g6lc64_smt2",
+        dvSimulators: "veri-testharness,spike",
+        tools: ["riscv-gcc"],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "csr-embedded",
         description: "Embedded CSR UVM tests.",
         script: "verif/regress/dv-csr-embedded-tests.sh",

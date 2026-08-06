@@ -115,3 +115,13 @@ Memory: **256 MiB** at `0x8000_0000` (sim-friendly). Genesys2 may overlay 1 GiB.
 | `dts-linux-smt.md` | DTS validation |
 | `smt2-bringup.md` | RTL software view |
 | `smt-linux-boot-path` / `smt-linux-rootfs` | Gates |
+
+## R3b gate (suite)
+
+| Item | Path |
+|------|------|
+| Gate script | `verif/regress/r3b-linux-image.sh` (suite id `r3b-linux-image`) |
+| Image hint | `software/smt2-linux/scripts/fetch-linux-image-hint.sh` |
+| Build FW with Image | `LINUX_IMAGE=...` + `CVA6_R3B_BUILD=1` or `make -C software/smt2-linux opensbi-linux` |
+
+Soft-skips when no Image unless `CVA6_REQUIRE_R3B=1`. Full shell /proc/cpuinfo remains lab criteria when Image is present.

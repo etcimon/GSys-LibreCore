@@ -130,3 +130,14 @@ Install helpers (`install-spike.sh`, `install-verilator.sh`, …) and `common-ri
 | Full instr-trace CSV | may diverge on CSR noise | — | DUAL_ISS_MODE=trace; triage only — do not soft-pass tohost fail |
 
 Requires existing work-ver/Variane_testharness for the active DV_TARGET (default g6lc64_server_math).
+
+---
+
+## 8. R3b Linux Image (AGENTS-todo section 6)
+
+| Script | Suite | Notes |
+|--------|-------|-------|
+| r3b-linux-image.sh | r3b-linux-image | Contract always; soft-skip without Image; CVA6_R3B_BUILD embeds LINUX_IMAGE |
+| fetch-linux-image-hint.sh | (helper) | cva6-sdk / Buildroot operator paths |
+
+Image never committed; lives under build-platform/workspace/smt2-linux/.
