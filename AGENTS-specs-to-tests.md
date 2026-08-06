@@ -51,7 +51,7 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | `mc-stream-tests` | directed (optional) | `testlist_mc_stream.yaml` + `mc-stream-tests.{sh,ps1}` | U6/p6 stream plane × multicore + Zacas/spo: multi-stream PF, thrash, inclusive L3→L2/L1, AMOCAS.W/D, store-fwd, fence drain, CAS lock handoff, CF×stream (`cv64a6_ooo_server` / `server_math`) |
 | `mc-spo-soak` | directed (optional) | `mc-spo-soak.{sh,ps1}` + `testlist_mc_stream` artifacts | Assemble smoke + dual-target lint for stream×spo/CF/CAS narrow list (no full sim required) |
 | `mc-spo-spike` | directed (optional) | `mc-spo-spike.sh` + `testlist_mc_stream` | Spike ISS soak of multicore spo/CF/Zacas narrow tests (`cv64a6_server_math`); **Spike has no zacas** — CAS paths may soft-skip; not a hard CAS golden |
-| `mc-mini-veri` | directed (optional) | `mc-mini-veri.sh` + `verif/tests/custom/multicore/mini_*.S` | **Hard** Verilator bare-metal CAS golden: `mini_tohost` / `mini_jumps` / `mini_amocas_{w,d}` on Variane (`cv64a6_imafdc_sv39`, `RVZacas`); no CRT |
+| `mc-mini-veri` | directed (optional) | `mc-mini-veri.sh` + `verif/tests/custom/multicore/mini_*.S` | **Hard** Verilator bare-metal CAS golden: `mini_tohost` / `mini_jumps` / `mini_amocas_{w,d}` (+ Q via `zacas-policy`) on Variane (`cv64a6_imafdc_sv39`, `RVZacas`); no CRT |
 | `zacas-policy` | directed (optional) | `verif/regress/zacas-policy.sh` + `software/zacas/` | §8: Q illegal trap; W/D hard mini; Spike ≠ golden |
 | `mc-spo-veri` | directed (optional) | `mc-spo-veri.sh` + self-built CRT ELFs (`work-ver/mc_spo_elfs`) | CRT Variane smoke (**7/7** with `MC_SPO_VERI_FORCE_IMAFDC=1`, Verilator 5.008): AMOCAS.W/D, st-fwd, fence, cas_lock, cf/mispred stream. Residual hang/flake: `cas_stream`+`stream_plane` via `MC_SPO_VERI_FULL=1`. Prefer `mc-mini-veri` for hard bare CAS |
 | `ara-vector-path` | directed (optional) | `ara-vector-path.{sh,ps1}` + `testlist_ara_vector.yaml` | U10ᵇ RVV (I ch9): Ara vendor + `Flist.ara` + `server_math_v` + DTS `v` + directed soft-skip/misa/LMUL memcpy + attach/lint gate (full RVV compliance cosim still open) |
@@ -93,7 +93,7 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | Part I base RV32I / RV64I | `riscv-tests`, `riscv-arch-test`, `riscv-compliance`, `smoke-*`, `generated` |
 | M (mul/div) | `riscv-tests` (`*um*`), `riscv-arch-test`, `generated` |
 | A / Zalrsc (atomics, LR/SC) | `riscv-tests` (`*ua*`), `riscv-arch-test`, `linux` |
-| Zacas AMOCAS.W/D (I §5.9) | `mc-mini-veri` (hard RTL), `mc-stream-tests` / `mc-spo-soak` / `mc-spo-spike` (directed/ISS), `mc-spo-veri` (CRT residual) |
+| Zacas AMOCAS.W/D/Q (I §5.9) | `mc-mini-veri` + **`zacas-policy`** (hard RTL W/D/Q + odd illegal), `mc-stream-tests` / `mc-spo-soak` / `mc-spo-spike` (directed/ISS), `mc-spo-veri` (CRT residual) |
 | F / D (floating point) | `riscv-tests` (`*uf*`/`*ud*`), `riscv-arch-test` (rv64 targets) |
 | C (compressed) | `riscv-tests` (`*uc*`), `riscv-arch-test`, `smoke-*` |
 | Zicsr + Part II ch2 CSRs | `csr-access`, `csr-embedded`, `hwconfig` |
@@ -124,7 +124,7 @@ randomized `generated` breadth, a commercial UVM sim, or are `absent` in RTL so 
 - **Hypervisor H, Sv48/Sv57, newer Ss*/Sm*/Sv* extensions** — no dedicated suite; add one when the RTL
   row in `AGENTS-specs-to-impl.md` moves off `absent`/`partial`.
 - **CFI, Packed SIMD, Matrix, vector crypto (`zvk*`)** — `absent` in RTL, therefore untested by design.
-- **Zacas (I §5.9)** — RTL is **partial** (AMOCAS.W/D config-gated via `RVZacas`; AMOCAS.Q absent).
+- **Zacas (I §5.9)** — RTL **W/D/Q** config-gated via `RVZacas`; hard golden `mc-mini-veri` + `zacas-policy` (Spike never golden).
   Directed coverage: `testlist_mc_stream.yaml` (`zacas_*`, CAS lock, CF×stream) + suites
   `mc-stream-tests` / `mc-spo-soak` / `mc-spo-spike` (ISS; **not** hard CAS) /
   **`mc-mini-veri` (hard RTL golden)** / `mc-spo-veri` (CRT residual).

@@ -55,7 +55,7 @@ configs; a specific build may have less. Use the source maps + the target's prof
 | A — atomics (5.1) | Implemented & tested |
 | Zalrsc — LR/SC (5.2) | Implemented & tested |
 | Zawrs — wait-on-reservation (5.5) | Partial (config; WRS→WFI path) |
-| Zacas — compare-and-swap (5.9) | Partial (AMOCAS.W/D config-gated; Q absent) |
+| Zacas — compare-and-swap (5.9) | Implemented (AMOCAS.W/D/Q config-gated) |
 | Other Za* (Za128rs/Za64rs/Zabha/Zaamo/Zalasr) | Partial |
 | F / D — floating point (ch6) | Implemented & tested |
 | Q — quad float | Not implemented |
@@ -153,8 +153,8 @@ Implemented (config / limited test): Sstc, Sscofpmf, Zihintpause, Svnapot; parti
 Zicbop / Svpbmt; U1–U4 micro-arch, multi-issue width, U6.0 L2 (off by default).
 
 Not implemented (and therefore untested by design): Ztso, CFI, Packed SIMD, vector crypto
-(`zvk*`), Matrix, Sv57, Smctr/priv-CFI, Svinval, AMOCAS.Q (quad CAS). **Partial:**
-**Zacas** AMOCAS.W/D (`RVZacas`, directed multicore / `mc-spo-soak`); **RVV/V** via Ara attach
+(`zvk*`), Matrix, Sv57, Smctr/priv-CFI, Svinval. **Partial:**
+**Zacas** AMOCAS.W/D/Q (`RVZacas`, `zacas-policy` / `mc-mini-veri`); **RVV/V** via Ara attach
 (live lint + DTS + directed `ara-vector-path`; OpenSBI VRF + cosim open); dual-hart Linux lab;
 L2/L3/multi-core hub as config-gated SoC work. See `AGENTS-specs-to-impl.md` for authoritative
 RTL status; sub-files `agents/spec/riscv-spec-I-5.9-zacas.html` and

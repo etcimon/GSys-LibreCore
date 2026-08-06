@@ -96,12 +96,11 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    **Priors:** `verif/regress/ara-vector-cosim.sh` · `software/vector/` ·
    `architecture/ara-vector-attach.md` · `AGENTS-vector.md` · `testlist_ara_vector.yaml`.
 
-8. **AMOCAS.Q deferred** — **policy gate landed** (`zacas-policy`): Q illegal-trap directed
-   (`mini_amocas_q_illegal`); W/D hard golden remains `mc-mini-veri` / policy mini smoke;
-   Spike never CAS golden (`software/zacas/README.md`). CAS.D dual-word path stays HPDCache
-   `CASD_*` RMW (polish only if hard fail).  
-   **Priors:** `verif/regress/zacas-policy.sh` · `software/zacas/` ·
-   `agents/spec/riscv-spec-I-5.9-zacas.html` · `mc-mini-veri` · maps Zacas rows.
+8. ~~**AMOCAS.Q deferred**~~ **done (functional)** — `zacas-policy` hard green 4/4:
+   odd-pair illegal + W/D/Q mini on Variane; plan `architecture/zacas-amocas-q.md`.
+   Decode/pair RF/128b multi-beat RMW/dual WB; Spike never CAS golden.  
+   **Priors:** `verif/regress/zacas-policy.sh` · `mini_amocas_{w,d,q,q_illegal}.S` ·
+   `software/zacas/` · `architecture/zacas-amocas-q.md` · maps Zacas rows.
 
 9. **Lab-only** — S3b-lab FO4 retune of `fo4-v1.toml` from **real** STA; S4b OpenROAD+LEF; full
    `./build.sh verify` when tools provisioned.  
@@ -415,7 +414,7 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
     - [x] OpenSBI VRF contract + Linux `CONFIG_RISCV_ISA_V` fragment + `ara-vector-cosim` soft path → **§7 gate done**;
       live lmul rebuild optional (`ARA_COSIM_LIVE=1`)
       priors: `software/vector/`, `verif/regress/ara-vector-cosim.sh`, `AGENTS-vector.md`
-    - [x] AMOCAS.Q deferred policy + illegal trap + W/D hard mini (`zacas-policy`) → **§8 done**;
+    - [x] AMOCAS.Q **functional** + odd illegal + W/D/Q hard mini (`zacas-policy`) → **§8 done**;
       priors: `software/zacas/README.md`, `mini_amocas_q_illegal.S`, `mc-mini-veri`, zacas maps
 
 
@@ -509,7 +508,7 @@ Tick as completed. Each is `agents/spec/<filename>`.
 - [x] Exact `file:line` for PMP CSR read/write in `core/csr_regfile.sv` — verified (`:857-960` read, `:1839-1936` write).
 - [x] Exact `file:line` for LR/SC reservation state in `core/load_store_unit.sv` and D$ — verified (LSU/AMO buffer/WT/HPDcache paths).
 - [x] Extension presence audit (re-verified against live RTL / packages):
-  - **Absent** (this tree): `Ztso`, `Zabha`, `Zama16b`, `Svvptc`, `Svrsw60t59b`, AMOCAS.**Q**, in-core RVV VRF.
+  - **Absent** (this tree): `Ztso`, `Zabha`, `Zama16b`, `Svvptc`, `Svrsw60t59b`, in-core RVV VRF (AMOCAS.Q **implemented**).
   - **Partial / config**: **Zacas AMOCAS.W/D** (`RVZacas`); **RVV via Ara attach**; H U9.0–U9.2;
     L2/L3/multi-core hub; SMT2.
   - **Authoritative status tables:** `AGENTS-specs-to-impl.md` · `AGENTS-specs-coverage.md` ·

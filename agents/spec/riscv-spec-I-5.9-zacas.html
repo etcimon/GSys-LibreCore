@@ -40,7 +40,7 @@ module zacas_unit (
 endmodule
 </pre>
 
-<p><strong>CVA6 status:</strong> <strong>partial → implemented (config-gated, W/D)</strong>.
+<p><strong>CVA6 status:</strong> <strong>implemented (config-gated, W/D/Q)</strong>.
 <code>CVA6Cfg.RVZacas</code> (depends on <code>RVA</code>) enables Zacas:</p>
 <ul>
   <li><strong>Decode:</strong> <code>core/decoder.sv</code> AMO opcode, <code>funct5=00101</code> →
@@ -55,11 +55,11 @@ endmodule
     <code>hpdcache_amo</code> CAS path.</li>
   <li><strong>AXI:</strong> <code>ATOP_ATOMICCMP</code> mapping in <code>axi_adapter</code>.</li>
   <li><strong>Packages:</strong> <code>cv64a6_server_math{,_v}</code>,
-    <code>cv64a6_ooo_server</code> set <code>RVZacas=1</code>. AMOCAS.Q not supported.</li>
+    <code>cv64a6_ooo_server</code> set <code>RVZacas=1</code>. AMOCAS.Q: pair RF + multi-beat RMW + dual WB.</li>
   <li><strong>Tests:</strong> <code>verif/tests/custom/multicore/zacas_*.S</code> +
     <code>mc_cas_lock_handoff.S</code> in <code>testlist_mc_stream.yaml</code>; build-platform
     suites <code>mc-stream-tests</code> / <code>mc-spo-soak</code>.</li>
-  <li><strong>Open:</strong> AMOCAS.Q (deferred; illegal-trap gate <code>zacas-policy</code>); CAS.D dual-word uses HPDCache <code>CASD_*</code> (polish on hard fail only); Spike /
+  <li><strong>Open:</strong> Spike has no zacas (not golden); CAS multi-beat polish on hard fail only; dual-ISS never Zacas golden. Prior Q residual closed via <code>zacas-policy</code> 4/4. Spike /
     <code>cva6.py</code> cosim of the Zacas directed suite.</li>
 </ul>
 
