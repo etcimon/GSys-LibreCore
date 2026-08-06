@@ -65,3 +65,8 @@ monorepo-soak/*-trace.txt
 encaps.traces
 iti.traces
 
+
+# Local fork work clones
+.g6lc-forks/
+.g6lc-forks-win/
+
