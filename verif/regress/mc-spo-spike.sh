@@ -46,17 +46,16 @@ command -v dtc  >/dev/null || { echo "need dtc (device-tree-compiler)"; exit 1; 
 cva6_have_riscv_gcc || { echo "need riscv gcc"; exit 1; }
 cva6_have_spike || { echo "need spike"; exit 1; }
 
-tests=(
-  mc_spo_st_fwd
-  mc_spo_fence_drain
-  mc_spo_mispred_stream
-  mc_spo_cf_stream
-  mc_spo_cas_stream
-  zacas_amocas_w
-  zacas_amocas_d
-  mc_cas_lock_handoff
-  mc_stream_plane
-)
+# Override with space-separated names, e.g. MC_SPO_SPIKE_TESTS="mc_spo_st_fwd mc_spo_fence_drain"
+DEFAULT_SPIKE_TESTS="mc_spo_st_fwd mc_spo_fence_drain mc_spo_mispred_stream mc_spo_cf_stream mc_spo_cas_stream zacas_amocas_w zacas_amocas_d mc_cas_lock_handoff mc_stream_plane"
+# shellcheck disable=SC2206
+if [[ -n "${MC_SPO_SPIKE_TESTS:-}" ]]; then
+  # shellcheck disable=SC2206
+  tests=( ${MC_SPO_SPIKE_TESTS} )
+else
+  # shellcheck disable=SC2206
+  tests=( ${DEFAULT_SPIKE_TESTS} )
+fi
 
 cd verif/sim
 export PYTHONPATH=".:${PYTHONPATH:-}"

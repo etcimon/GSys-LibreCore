@@ -19,7 +19,7 @@ cd "$ROOT"
 
 ROUNDS="${MC_SPO_ROUNDS:-3}"
 DO_LINT="${MC_SPO_LINT:-1}"
-export DV_TARGET="${DV_TARGET:-cv64a6_ooo_server}"
+export DV_TARGET="${DV_TARGET:-g6lc64_ooo_server}"
 
 echo "[mc-spo-soak] multi-core stream plane × spo/CF diagnostics"
 echo "  target=${DV_TARGET} rounds=${ROUNDS} lint=${DO_LINT}"
@@ -61,12 +61,22 @@ for f in "${narrow[@]}" verif/tests/testlist_mc_stream.yaml; do
 done
 echo "  ok ${#narrow[@]} narrow tests + testlist"
 
-# RTL contracts for stream plane + Zacas
-grep -q "ServerPrefetchEn" core/include/cv64a6_ooo_server_config_pkg.sv
-grep -q "RVZacas" core/include/cv64a6_server_math_config_pkg.sv
-grep -q "l2_back_inval" corev_apu/src/cva6_cluster.sv
+# RTL contracts for stream plane + Zacas (g6lc64 primary; cv64a6 legacy aliases)
+ooo_pkg=""
+for cand in core/include/g6lc64_ooo_server_config_pkg.sv core/include/cv64a6_ooo_server_config_pkg.sv; do
+  if [[ -f "$cand" ]]; then ooo_pkg=$cand; break; fi
+done
+math_pkg=""
+for cand in core/include/g6lc64_server_math_config_pkg.sv core/include/cv64a6_server_math_config_pkg.sv; do
+  if [[ -f "$cand" ]]; then math_pkg=$cand; break; fi
+done
+[[ -n "$ooo_pkg" ]] || { echo "[mc-spo-soak] MISSING ooo_server config pkg"; exit 1; }
+[[ -n "$math_pkg" ]] || { echo "[mc-spo-soak] MISSING server_math config pkg"; exit 1; }
+grep -q "ServerPrefetchEn" "$ooo_pkg"
+grep -q "RVZacas" "$math_pkg"
+grep -q "l2_back_inval" corev_apu/src/g6lc_cluster.sv
 grep -q "AMO_CAS1" core/cache_subsystem/amo_alu.sv
-echo "  ok stream-plane + Zacas RTL contracts"
+echo "  ok stream-plane + Zacas RTL contracts ($ooo_pkg, $math_pkg)"
 
 # shellcheck source=common-riscv-tools.sh
 source "$(dirname "$0")/common-riscv-tools.sh"
@@ -96,10 +106,10 @@ else
 fi
 
 if [[ "$DO_LINT" == "1" ]] && command -v bun >/dev/null 2>&1; then
-  echo "[mc-spo-soak] lint cv64a6_ooo_server..."
-  bun build-platform/src/cli/index.ts verify --lint --target cv64a6_ooo_server
-  echo "[mc-spo-soak] lint cv64a6_server_math..."
-  bun build-platform/src/cli/index.ts verify --lint --target cv64a6_server_math || \
+  echo "[mc-spo-soak] lint g6lc64_ooo_server..."
+  bun build-platform/src/cli/index.ts verify --lint --target g6lc64_ooo_server
+  echo "[mc-spo-soak] lint g6lc64_server_math..."
+  bun build-platform/src/cli/index.ts verify --lint --target g6lc64_server_math || \
     echo "[mc-spo-soak] WARN: server_math lint skipped/failed"
   echo "  ok dual-target lint soak"
 else

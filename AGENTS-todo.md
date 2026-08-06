@@ -23,7 +23,7 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 |-------|--------|----------------------------------|
 | **Zacas AMOCAS.W/D** | `RVZacas` on `cv64a6_server_math{,_v}`, `cv64a6_ooo_server`, `cv64a6_imafdc_sv39`; decode + 3rd-op RF + `amo_alu` + WT/HPDCache/AXI CAS | Spec: `agents/spec/riscv-spec-I-5.9-zacas.html` · `#ext:zacas` · impl row `AGENTS-specs-to-impl.md` (Zacas) · tests `AGENTS-specs-to-tests.md` (mc-stream / gaps) · packages under `core/include/*config_pkg.sv` |
 | **Directed multicore suite** | `testlist_mc_stream` — stream, AMOCAS, st-fwd, fence, CAS lock, **CF×stream**, CAS×stream, mispred×stream | `architecture/multi-core/README.md` · `architecture/l2-l3-cache/README.md` · U6/p6 notes in `remaining-upgrade-sequence.md` · `verif/tests/testlist_mc_stream.yaml` · asm `verif/tests/custom/multicore/` |
-| **Spike soak** | `mc-spo-spike` / `mc-spo-soak` green path for narrow list | Scripts `verif/regress/mc-spo-{spike,soak}.sh` · suite registry `build-platform/src/config/defaults.ts` · host residual `AGENTS-build-platform.md` §4–§5 |
+| **Spike soak** | `stability-regress` + `mc-spo-spike` / `mc-spo-soak` / `kvm-h-spike` | Scripts `verif/regress/mc-spo-{spike,soak}.sh` · suite registry `build-platform/src/config/defaults.ts` · host residual `AGENTS-build-platform.md` §4–§5 |
 | **RTL mini golden** | `mc-mini-veri` hard PASS AMOCAS.W/D (no soft-skip); **cataloged** in `defaults.ts` | `verif/regress/mc-mini-veri.sh` · `mini_amocas_{w,d}.S` · suite id `mc-mini-veri` · TB `corev_apu/tb/ariane_tb.cpp` · Zacas impl row |
 | **RTL full CRT residual** | imafdc **9/9** + `g6lc64_server_math` L2 **9/9** (DeepSpec STQ); dual-hart live CRT open | suite id `mc-spo-veri` · `verif/regress/mc-spo-veri.sh` · FSE: `architecture/speculative-execution/` · `agents/guides/AGENTS-speculation.md` |
 | **FTQ / frontend** | Mispredict reseed + demand fixes for bare-metal green | Guide `agents/guides/AGENTS-branch-prediction.md` · scaffold `architecture/branch-prediction/README.md` · RTL `core/frontend/{frontend,cva6_ftq}.sv` |
@@ -68,12 +68,13 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    architecture/server-math-hypervisor.md · Phase B · agents/spec/riscv-spec-II-5.* ·
    Hypervisor row in AGENTS-specs-to-impl.md · suites kvm-h-spike / kvm-h-tests.
 
-4. **Stability battery + regress isolation map** — compose Spike: h-edge (when present) +
-   `mc-spo-spike` + mini artifact gate; FO4 optional; write
-   `verif/regress/AGENTS-regress-scripts.md` (axes: target / ISS vs RTL / stack height / feature).  
-   **Priors:** `AGENTS.md` §0.2 (verify-in-lockstep) · `AGENTS-specs-to-tests.md` ·
-   `AGENTS-build-platform.md` §4–§5 · existing scripts under `verif/regress/mc-spo-*.sh`,
-   `mc-mini-veri.sh`, `mc-stream-tests.sh`.
+4. **Stability battery + regress isolation map** — **landed**: isolation map
+   `verif/regress/AGENTS-regress-scripts.md` (axes: target / ISS vs RTL / stack height / feature)
+   + composed suite `stability-regress` (`verif/regress/stability-regress.sh`).
+   Profiles: `artifact` | `spike` (default: kvm-h-spike + mc-spo-spike + mini compile) | `full`
+   (+ mini-veri + H-edge Variane when harness present). FO4 optional outside this battery.
+   **Priors:** `AGENTS.md` §0.2 · `AGENTS-specs-to-tests.md` · `AGENTS-build-platform.md` §4–§5 ·
+   `mc-spo-*.sh` · `kvm-h-spike.sh` · `mc-mini-veri.sh`.
 
 5. **Dual-ISS Spike+Verilator tandem polish** — same ELF, both planes; residual mismatch triage only.  
    **Priors:** `AGENTS-build-platform.md` §5 (Dual-ISS open) · `verif/sim/cva6.py` ·
@@ -397,7 +398,7 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
       → **§3 done** (kvm-h-spike + monorepo-soak/run-h-edge-veri.sh on server_math TB)
       priors: verif/regress/kvm-h-spike.sh, h_edge_diag.S, architecture/server-math-hypervisor.md,
       Phase B, agents/spec/riscv-spec-II-5.*, Hypervisor impl row
-    - [ ] `verif/regress/AGENTS-regress-scripts.md` + `stability-regress` battery → **§4**;
+    - [x] `verif/regress/AGENTS-regress-scripts.md` + `stability-regress` battery → **§4 done**;
       priors: `AGENTS.md` §0.2, `AGENTS-build-platform.md` §4–§5, `AGENTS-specs-to-tests.md`
     - [ ] Dual-ISS Spike+Verilator polish; R3b Linux Image → **§5–§6**;
       priors: `AGENTS-build-platform.md` §5, `architecture/multi-threading/smt2-bringup.md`,
