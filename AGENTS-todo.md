@@ -124,7 +124,7 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
     package `g6lc64_stream8` (NrCores=2, RVZacas, DeepSpec, L2, H; C-light),
     `ariane-stream8.dts`, suite `stream8-smoke` (optional). **Live RTL green** on
     Linux Verilator 5.008 (`work-ver-stream8`): AMOCAS.W/D/Q + stream plane SUCCESS;
-    lint via `linux-eda-suite` / `$HOME/tools/verilator-v5.008`; **full CRT `mc-spo-veri` 9/9** (`MC_SPO_VER_LIBRARY=work-ver-stream8`, compact LD).
+    lint via `linux-eda-suite` / `$HOME/tools/verilator-v5.008`; **full CRT `mc-spo-veri` 9/9** + **H-edge Variane 3/3** (`kvm-h-veri` on work-ver-stream8).
     Branding/publication only if a rebrand branch merges here.
     **Priors:** `architecture/stream8-class.md` · `g6lc64_stream8_config_pkg.sv` ·
     `verif/regress/stream8-smoke.sh` · `multi-core/README.md` · `AGENTS-configuration.md`.

@@ -61,6 +61,7 @@ Profile `full` also runs mini + H-edge on an existing Variane harness when prese
 | `monorepo-soak/run-h-edge-veri.sh` | (soak helper) | veri | existing `work-ver` | CRT | H-edge | Reuses server_math TB; not a defaults suite |
 | `stability-regress.sh` | `stability-regress` | composed | see profile | see legs | residual battery | §4 entry point |
 | `stream8-smoke.sh` | `stream8-smoke` | artifact/compile | stream8 | package | stream/Zacas | Contract + mini golden |
+| `kvm-h-veri.sh` | `kvm-h-veri` | RTL | stream8 | package | H/KVM | Variane H-edge 3/3 |
 | `dual-hart-ci.sh` | `dual-hart-ci` | artifact/lint | smt2 | package | SMT | Path/lint gate |
 | `server-math-tests.sh` | `server-math-tests` | veri+spike | server_math | directed | B/H/CMO/memcpy | Package C-light |
 | `sv-timing-*.sh` | `sv-timing-*` | FO4 screen | sparse/core | n/a | timing | Not functional ISS; not STA |

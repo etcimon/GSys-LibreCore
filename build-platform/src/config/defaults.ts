@@ -613,6 +613,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        id: "kvm-h-veri",
+        description:
+          "OPTIONAL: H-edge Variane 3/3 (h_edge_diag/kvm_h_stress/hlv_hsv). Prefers work-ver-stream8.",
+        script: "verif/regress/kvm-h-veri.sh",
+        group: "directed",
+        target: "g6lc64_stream8",
+        dvTarget: "g6lc64_stream8",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "dual-hart-ci",
         description:
           "OPTIONAL: dual-hart/SMT2 artifact + real lint of cv64a6_smt2.",
