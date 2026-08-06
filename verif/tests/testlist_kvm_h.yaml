@@ -7,6 +7,12 @@ common_test_config: &common_test_config
   gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
 
 testlist:
+  - test: h_edge_diag
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/kvm_h/h_edge_diag.S
+    description: "H-edge: hedeleg WARL + VTSR/VTVM/VTW cause 22 + MPV after VS ecall"
+
   - test: kvm_h_stress
     iterations: 1
     <<: *common_test_config

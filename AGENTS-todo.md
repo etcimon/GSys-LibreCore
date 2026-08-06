@@ -30,7 +30,7 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **Structural FO4** | sparse_ex/frontend residual close @ **2.5 GHz** (screening ≠ STA) | Package `sv-timing/AGENTS.md` · `sv-timing/architecture/MONOREPO-SOAK.md` · `FREQUENCY-CLOSURE.md` · host `AGENTS-build-platform.md` §6.1 / §7 · plan `architecture/build-platform-opensta-from-timing.md` · philosophy §2.8 in `AGENTS-coding-philosophy.md` |
 | **R3a dual-hart OpenSBI** | `fw_payload` + WSL Variane SUCCESS; **R3b Image external** | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
 | **Ara / RVV** | Attach live-lintable + DTS + directed; VRF/cosim **open** | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
-| **H / KVM** | U9.0–U9.2 + `kvm-h-tests`; **no H-edge suite yet** | `architecture/server-math-hypervisor.md` · remaining-upgrade Phase B · `agents/spec/riscv-spec-II-5.*-hypervisor*.html` · impl Hypervisor row · `verif/tests/custom/kvm_h/` · suite `kvm-h-tests` |
+| **H / KVM** | U9 + `kvm-h-tests`; **Spike H-edge 3/3** (`kvm-h-spike`); RTL residual | `architecture/server-math-hypervisor.md` · remaining-upgrade Phase B · `agents/spec/riscv-spec-II-5.*-hypervisor*.html` · impl Hypervisor row · `verif/tests/custom/kvm_h/` · suite `kvm-h-tests` |
 
 Standing disciplines remain active (`AGENTS.md` §0.4–§0.6). Keep
 `AGENTS-specs-to-{impl,tests,coverage}.md` in lockstep on ISA-visible / suite edits
@@ -58,12 +58,15 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    **Priors:** `mc-spo-veri.sh` · `mini_stream_plane.S` · `store_buffer.sv` ·
    `cv64a6_imafdc_sv39_config_pkg.sv` · `g6lc64_server_math_config_pkg.sv`.
 
-3. **H-edge directed diagnostics** (10 narrow + CF) — VS entry / hedeleg WARL / VTSR·VTW·VTVM→cause 22
-   / SPV vs MPV polish; Spike first (`--isa …h…`, open PMP), then RTL; harden `*tval`/`*tinst` if
-   litmus fails. Extends U9 + `kvm-h-tests`.  
-   **Priors:** `architecture/server-math-hypervisor.md` · `remaining-upgrade-sequence.md` Phase B ·
-   `agents/spec/riscv-spec-II-5.{1–6}-*.html` · `AGENTS-specs-to-impl.md` (Hypervisor H) ·
-   `verif/tests/custom/kvm_h/*` · suite `kvm-h-tests` · Priv ch5 anchors via `agents/spec/INDEX.md`.
+3. **H-edge directed diagnostics** (10 narrow + CF) — **Spike 3/3 hard green** (suite
+   `kvm-h-spike`: h_edge_diag + kvm_h_stress + hlv_hsv_smoke). Covers hedeleg WARL,
+   VTSR/VTVM/VTW cause 22, VS ecall to M (cause 10) + MPV sticky, dual VS re-entry.
+   Spike footgun: default PMP denies S/VS fetch until TOR open (or PMP CSRs absent —
+   illegal swallowed). **RTL Variane residual** (kvm-h-tests / g6lc64_server_math) still
+   open; SPV and tval/tinst polish if litmus fails. Extends U9 + kvm-h-tests.
+   **Priors:** verif/regress/kvm-h-spike.sh · verif/tests/custom/kvm_h/h_edge_diag.S ·
+   architecture/server-math-hypervisor.md · Phase B · agents/spec/riscv-spec-II-5.* ·
+   Hypervisor row in AGENTS-specs-to-impl.md · suites kvm-h-spike / kvm-h-tests.
 
 4. **Stability battery + regress isolation map** — compose Spike: h-edge (when present) +
    `mc-spo-spike` + mini artifact gate; FO4 optional; write
@@ -390,9 +393,12 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
       priors: `mc-spo-veri.sh`, `mini_stream_plane.S`, `g6lc64_server_math_config_pkg.sv`
     - [x] Register `mc-mini-veri` + `mc-spo-veri` in `defaults.ts` → **§1 done**;
       priors: `build-platform/AGENTS.md` §4, `AGENTS-specs-to-tests.md`
-    - [ ] H-edge directed suite (VS/hedeleg/VT*→22/SPV·MPV) Spike then RTL → **§3**;
-      priors: `architecture/server-math-hypervisor.md`, Phase B
-      `remaining-upgrade-sequence.md`, `agents/spec/riscv-spec-II-5.*`, Hypervisor impl row
+    - [x] H-edge Spike-first suite 3/3 (kvm-h-spike: hedeleg WARL, VT*→22, MPV, dual VS ecall)
+      → **§3 Spike done**; RTL Variane still open
+      priors: verif/regress/kvm-h-spike.sh, h_edge_diag.S, architecture/server-math-hypervisor.md,
+      Phase B, agents/spec/riscv-spec-II-5.*, Hypervisor impl row
+    - [ ] H-edge RTL Variane on g6lc64_server_math (kvm-h-tests) → **§3 RTL**;
+      priors: same + verif/regress/kvm-h-tests.sh, work-ver server_math TB
     - [ ] `verif/regress/AGENTS-regress-scripts.md` + `stability-regress` battery → **§4**;
       priors: `AGENTS.md` §0.2, `AGENTS-build-platform.md` §4–§5, `AGENTS-specs-to-tests.md`
     - [ ] Dual-ISS Spike+Verilator polish; R3b Linux Image → **§5–§6**;
@@ -505,7 +511,7 @@ Tick as completed. Each is `agents/spec/<filename>`.
   `AGENTS-specs-to-tests.md`, `verif/regress/mc-mini-veri.sh`.
 - [x] `g6lc64_server_math` L2 bare-metal CRT 9/9 (DeepSpecEn=1; NrHarts=1 / NrCores=2).  
   → **§2**; logs `mc-spo-veri-server-math-full.log`. Dual-hart live CRT still open.
-- [ ] H-edge litmus completeness vs Priv ch5 (hedeleg WARL, virt-instr 22, MPV vs SPV) —
-  only `kvm_h/*` today.
-  → **§3**; priors: `architecture/server-math-hypervisor.md`,
-  `agents/spec/riscv-spec-II-5.*-hypervisor*.html`, Hypervisor row in `AGENTS-specs-to-impl.md`.
+- [x] H-edge Spike litmus (hedeleg WARL, virt-instr 22, VS ecall/MPV, dual re-entry) via
+  kvm-h-spike 3/3. RTL + SPV residual still open.
+  → **§3 Spike**; priors: h_edge_diag.S, kvm-h-spike.sh,
+  architecture/server-math-hypervisor.md, agents/spec/riscv-spec-II-5.*-hypervisor*.html.

@@ -514,12 +514,26 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "kvm-h-tests",
         description:
-          "OPTIONAL: KVM-oriented H stress (hfence, dual VS ecall, Sstc litmus). DV_TARGET=cv64a6_server_math.",
+          "OPTIONAL: KVM/H stress + H-edge (hedeleg WARL, VTSR/VTVM/VTW→22). DV_TARGET=g6lc64_server_math.",
         script: "verif/regress/kvm-h-tests.sh",
         group: "directed",
-        target: "cv64a6_server_math",
+        target: "g6lc64_server_math",
+        dvTarget: "g6lc64_server_math",
         dvSimulators: "veri-testharness,spike",
         tools: ["riscv-gcc", "verilator", "spike"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "kvm-h-spike",
+        description:
+          "OPTIONAL: Spike-first H-edge directed (h_edge_diag + kvm_h_stress). No Verilator required.",
+        script: "verif/regress/kvm-h-spike.sh",
+        group: "directed",
+        target: "g6lc64_server_math",
+        dvTarget: "g6lc64_server_math",
+        dvSimulators: "spike",
+        tools: ["riscv-gcc", "spike"],
         openSource: true,
         optional: true,
       },

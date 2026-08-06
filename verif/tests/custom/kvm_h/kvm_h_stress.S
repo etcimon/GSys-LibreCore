@@ -9,6 +9,7 @@
 #   5. stimecmp alias under V when STCE pair set (if Sstc)
 #
 # Target: g6lc64_server_math (RVH=1, Sstc=1).
+# Opens PMP before VS entry (Spike default PMP denies S/VS fetches).
 
   .globl main
 main:
@@ -21,9 +22,24 @@ skip_no_h:
   jal  exit
 
 have_h:
+  li   s11, 0                 # trap count
+
+  # PMP allow-all so VS/S can fetch from DRAM (Spike default PMP denies
+  # S/U/VS if no entry matches). Swallow illegal if PMP CSRs absent.
+  la   t0, pmp_done
+  csrw mtvec, t0
+  li   t0, -1
+  csrw pmpaddr0, t0
+  li   t0, 0x0F
+  csrw pmpcfg0, t0
+  .align 2
+pmp_done:
   la   t0, m_trap
   csrw mtvec, t0
-  li   s11, 0                 # trap count
+  csrw satp, x0
+  csrw 0x280, x0              # vsatp
+  csrw 0x680, x0              # hgatp
+  sfence.vma
 
   # ---- HFENCE (M-mode) ----
   # hfence.vvma x0, x0
@@ -53,12 +69,13 @@ have_h:
   csrw mstatus, t1
   mret
 
+  .align 2
 vs_body:
-  # Under V: touch stimecmp alias (0x14D) if STCE — may trap if not; tolerate
-  li   t0, -1
-  csrw 0x14D, t0
-  ecall                       # ENV_CALL_VSMODE = 10
+  # ENV_CALL_VSMODE = 10. (stimecmp alias is covered by sstc_h tests; writing
+  # 0x14D here is illegal on Spike without full Sstc/STCE wiring.)
+  ecall
 
+  .align 2
 m_trap:
   csrr t0, mcause
   li   t1, 10
