@@ -111,7 +111,7 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    `architecture/build-platform-workspace-lifecycle.md` · `AGENTS-technology.md` ·
    verify gate `AGENTS.md` §0.2 / `build-platform/AGENTS.md` §4.6.
 
-11. ~~**Dual-hart residual re-validation**~~ **done (host residual)** - suite
+10. ~~**Dual-hart residual re-validation**~~ **done (host residual)** - suite
    `dual-hart-ci`: artifacts + boot-path + dual-park ELF compile; rootfs preflight with
    `SMT2_SKIP_R3=1` / `DUAL_HART_SKIP_R3=1` by default; smt2 lint soft-skips when only
    Windows OSS CAD PE is present under WSL (hard: `DUAL_HART_REQUIRE_LINT=1` + Linux-native
@@ -120,13 +120,13 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    **Priors:** `verif/regress/dual-hart-ci.sh` · `smt_dual_park.S` · `smt-linux-rootfs.sh` ·
    `architecture/multi-threading/smt2-bringup.md`.
 
-10. **Optional growth (not blocking residual bugs)** — production **stream8-class** package
-    (n-wide / y-core / FO4@x GHz) once multicore RTL CRT + H-edge are green; branding/publication
-    only if a rebrand branch merges here.  
-    **Priors:** `architecture/out-of-order/README.md` · `router-core-upgrade-program.md` ·
-    `architecture/multi-core/README.md` · `l2-l3-cache/README.md` · config surface
-    `AGENTS-configuration.md` · FO4 scale notes `AGENTS-build-platform.md` §6.1 ·
-    research drafts `architecture/Architecture-research-todo-drafts.md` (context only).
+11. **Optional growth (not blocking residual bugs)** — production **stream8-class** package
+    (n-wide / y-core / FO4@x GHz). CRT + H-edge green; **scaffold landed**:
+    `architecture/stream8-class.md` (no flist / no RTL yet). Promote only with config package +
+    DTS + smoke suite per that checklist. Branding/publication only if a rebrand branch merges here.
+    **Priors:** `architecture/stream8-class.md` · `out-of-order/README.md` · `router-core-upgrade-program.md` ·
+    `multi-core/README.md` · `l2-l3-cache/README.md` · `AGENTS-configuration.md` ·
+    `AGENTS-build-platform.md` §6.1 · research drafts (context only).
 
 ## Standing disciplines (apply every pass, per applicability)
 Six **co-equal** upkeep rules; run each pass when it applies (none overrides the SoC prime directive):

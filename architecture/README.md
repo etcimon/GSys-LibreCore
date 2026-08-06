@@ -146,3 +146,8 @@ playbook and the `AGENTS.md` §0.2 carry-over checklist:
   `architecture/sv-timing/`.
 - **Human docs**: `docs/website/` (Next.js site) mirrors worktree + build-platform +
   sv-timing; Sphinx under `docs/01_…` remains for classic manuals.
+
+## Optional growth scaffold
+
+- [`stream8-class.md`](stream8-class.md) — n-wide / y-core production package freeze (scaffold only; no flist).
+

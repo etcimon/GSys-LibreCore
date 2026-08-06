@@ -25,7 +25,7 @@ unique `mhartid`, SMP Linux. Not dual-only — **parameterized 2–8**.
 | CLINT | Scaled to `NrCores` |
 | PLIC | Multi-context 16 targets (8×M/S) |
 | Tests | **`mc-stream-tests`** + **`mc-spo-soak`** (stream × Zacas/spo/CF narrow); `dual-hart-ci`, `ooo-l3-tests` |
-| Zacas (AMOCAS) | **Partial** — `RVZacas` on server_math / ooo_server; W/D only; suite under `verif/tests/custom/multicore/` |
+| Zacas (AMOCAS) | **W/D/Q** — `RVZacas` on server_math / ooo_server / imafdc; hard golden `zacas-policy` + `mc-mini-veri`; suite under `verif/tests/custom/multicore/` |
 | Spo/CF soak | **`mc-spo-soak`**: multi-round assemble + dual-target lint; CF×stream, CAS×stream, mispred×stream |
 
 ## Contention optimisations

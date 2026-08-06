@@ -104,25 +104,26 @@ core/include/cv64a6_server_math_v_config_pkg.sv  # VExtEn=1, CvxifEn=0
    OpenSBI VRF context + `cva6.py` cosim of `v_memcpy_lmul` under live Ara
 10. ~~Zacas AMOCAS.W/D + multicore spo/CF directed + Spike soak~~ **done** (`RVZacas`,
     `testlist_mc_stream`, `mc-spo-soak` / `mc-spo-spike`); ~~RTL mini hard CAS~~ **done**
-    (`mc-mini-veri`); full CRT `mc-spo-veri` residual
+    (`mc-mini-veri`); ~~full CRT `mc-spo-veri`~~ **done** (imafdc + server_math 9/9); ~~AMOCAS.Q~~ **done**
 11. ~~Structural FO4 residual close sparse_ex/frontend @ 2.5 GHz~~ **done** (screening;
     S3b-lab real-STA retune still open)
 
 **Live next (authoritative ordered list + file priors):**
 [`AGENTS-todo.md`](../AGENTS-todo.md) — **Current phase** (landed table with prior paths) and
-**Practical next §1–§10** (each item cites architecture / guides / specs-to-* / regress scripts).
+**Practical next** in `AGENTS-todo.md` (host residual §1–§10 largely **done**; lab FO4/STA + stream8 optional growth open).
 
 Quick spine for those open items:
 
 | Next | Open these |
 |------|------------|
 | ~~Suite catalog~~ **done** | `mc-mini-veri` + `mc-spo-veri` in `defaults.ts`; `AGENTS-specs-to-tests.md` |
-| CRT RTL residual (**§2**) | `verif/regress/mc-spo-veri.sh` · `agents/guides/AGENTS-speculation.md` |
-| H-edge | `architecture/server-math-hypervisor.md` · this file Phase B · `agents/spec/riscv-spec-II-5.*` |
-| Stability / regress map | `AGENTS.md` §0.2 · `AGENTS-build-platform.md` §4–§5 |
-| R3b Linux | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` |
-| Ara cosim / VRF | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` |
-| AMOCAS.Q / CAS golden | `agents/spec/riscv-spec-I-5.9-zacas.html` · `mc-mini-veri.sh` |
-| Lab FO4/STA | `architecture/build-platform-opensta-from-timing.md` · `AGENTS-build-platform.md` §7 |
+| ~~CRT RTL residual~~ **done** | imafdc + server_math L2 9/9 · `mc-spo-veri.sh` |
+| ~~H-edge~~ **done** (Spike+RTL 3/3) | `kvm-h-spike` · `architecture/server-math-hypervisor.md` |
+| ~~Stability / dual-ISS / dual-hart host~~ **done** | `stability-regress` · `dual-iss-regress` · `dual-hart-ci` |
+| ~~AMOCAS.Q~~ **done** | `zacas-policy` · `architecture/zacas-amocas-q.md` |
+| R3b Linux Image | soft gate `r3b-linux-image` · Image external |
+| Ara live cosim / VRF | `ara-vector-cosim` · lab when `_v` TB + Image |
+| Lab FO4/STA | `s9-lab-gate` · real STA / OpenROAD still lab |
+| Stream8-class package | `architecture/stream8-class.md` (scaffold only) |
 
 

@@ -205,7 +205,7 @@ Full catalog: `./build.sh test --list`.
 | PnR / OpenROAD / OpenSTA synth (S1–S4) | **planned** — `architecture/build-platform-opensta-from-timing.md` |
 | Dual-ISS Spike+Verilator polish | **done** (suite `dual-iss-regress` tohost golden) |
 | R3b Linux Image gate | **done** (suite `r3b-linux-image`; Image still external) |
-| CRT `mc-spo-veri` FORCE_IMAFDC smoke | **7/7 green** (Verilator 5.008); residual `cas_stream`/`stream_plane` hang/flake |
+| CRT `mc-spo-veri` | **imafdc 9/9** + **server_math L2 9/9** (DeepSpec STQ; Verilator 5.008); dual-hart-ci host residual green |
 
 ---
 
@@ -213,8 +213,8 @@ Full catalog: `./build.sh test --list`.
 
 | Feature | Spec | Platform / test touchpoint | Status summary |
 |---------|------|----------------------------|----------------|
-| **Zacas** compare-and-swap | Vol I §5.9 `#ext:zacas` · `agents/spec/riscv-spec-I-5.9-zacas.html` | `mc-mini-veri` (hard RTL) · `mc-spo-spike` / `mc-stream-tests` / `mc-spo-soak` · residual `mc-spo-veri`; `RVZacas` packages | **Partial:** AMOCAS.W/D gated; Q absent; Spike ≠ CAS golden |
-| **RVV / Ara** | Vol I ch9 `#vector` · `riscv-spec-I-9-vector.html` | suite `ara-vector-path`; `timings` structural only | **Partial:** attach live-lintable; DTS+directed; OpenSBI VRF + cosim open |
+| **Zacas** compare-and-swap | Vol I §5.9 `#ext:zacas` · `agents/spec/riscv-spec-I-5.9-zacas.html` | `mc-mini-veri` (hard RTL) · `mc-spo-spike` / `mc-stream-tests` / `mc-spo-soak` · residual `mc-spo-veri`; `RVZacas` packages | **W/D/Q functional** (`zacas-policy` 4/4); Spike never CAS golden |
+| **RVV / Ara** | Vol I ch9 `#vector` · `riscv-spec-I-9-vector.html` | suite `ara-vector-path`; `timings` structural only | **Partial:** attach + DTS + directed; `ara-vector-cosim` gate; live lmul/OpenSBI VRF lab-optional |
 | Structural FO4 | package `sv-timing/` (not ISA) | `timings compile` / monorepo-soak / soaks | Screening only — not STA; see §6.1 |
 
 ### 6.1 Structural FO4 timing adjustments (host ↔ package)
