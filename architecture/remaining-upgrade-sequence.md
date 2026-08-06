@@ -124,6 +124,6 @@ Quick spine for those open items:
 | R3b Linux Image | soft gate `r3b-linux-image` · Image external |
 | Ara live cosim / VRF | `ara-vector-cosim` · lab when `_v` TB + Image |
 | Lab FO4/STA | `s9-lab-gate` · real STA / OpenROAD still lab |
-| ~~Stream8-class package~~ **promoted** (config+DTS+smoke) | `g6lc64_stream8` · `stream8-smoke` · live lint/RTL lab |
+| ~~Stream8-class package~~ **promoted + live RTL** | `g6lc64_stream8` · `work-ver-stream8` · AMOCAS.W/D/Q+stream SUCCESS |
 
 

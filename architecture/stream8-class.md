@@ -1,6 +1,6 @@
 # Stream8-class production package (scaffold)
 
-**Status:** **promoted (config + DTS + smoke)** — package on `Flist.cva6` via `TARGET_CFG=g6lc64_stream8`; no pipeline RTL churn. Live Variane/lint still need native Verilator.  
+**Status:** **promoted + live RTL green** — package on `Flist.cva6` via `TARGET_CFG=g6lc64_stream8`; Variane `work-ver-stream8` on Linux Verilator **5.008**: mini AMOCAS.W/D/Q + stream plane SUCCESS; lint via `linux-eda-suite` overlay.
 **Queue:** `AGENTS-todo.md` practical next optional growth · residual CRT + H-edge **already green**.  
 **Contract:** `architecture/README.md` (scaffold; promote via §0.2 + config-first).
 

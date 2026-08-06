@@ -111,12 +111,18 @@ else
 fi
 
 native_verilator_ok() {
-  local suite="$ROOT/build-platform/workspace/tooling/oss-cad-suite"
-  local bin="$suite/bin"
-  [[ -x "$bin/verilator_bin" ]] && return 0
-  if [[ -f "$bin/verilator_bin.exe" ]] && [[ ! -x "$bin/verilator_bin" ]]; then
-    return 1
-  fi
+  # Prefer Linux ELF suite overlay (WSL) then managed home install, then OSS CAD.
+  local candidates=(
+    "$ROOT/build-platform/workspace/tooling/linux-eda-suite/bin/verilator_bin"
+    "${VERILATOR_INSTALL_DIR:-$HOME/tools/verilator-v5.008}/bin/verilator_bin"
+    "$ROOT/build-platform/workspace/tooling/oss-cad-suite/bin/verilator_bin"
+  )
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -x "$c" ]] && file "$c" 2>/dev/null | grep -qiE 'ELF|executable'; then
+      return 0
+    fi
+  done
   return 1
 }
 
@@ -150,27 +156,54 @@ else
 fi
 
 if [[ "$LIVE_RTL" == "1" ]]; then
-  harness="$ROOT/work-ver/Variane_testharness"
-  elf="$OUT/mini_amocas_w.elf"
-  if [[ -x "$harness" && -f "$elf" ]]; then
-    th="$(riscv-none-elf-nm "$elf" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
-    if [[ -n "$th" ]]; then
-      vlog="$OUT/veri_mini_amocas_w.log"
+  # Prefer dedicated stream8 TB; fall back to work-ver.
+  harness="${STREAM8_HARNESS:-}"
+  if [[ -z "$harness" ]]; then
+    if [[ -x "$ROOT/work-ver-stream8/Variane_testharness" ]]; then
+      harness="$ROOT/work-ver-stream8/Variane_testharness"
+    else
+      harness="$ROOT/work-ver/Variane_testharness"
+    fi
+  fi
+  export LD_LIBRARY_PATH="${ROOT}/tools/spike/lib:${ROOT}/build-platform/workspace/tooling/spike/lib:${LD_LIBRARY_PATH:-}"
+  if [[ ! -x "$harness" ]]; then
+    log "  WARN: STREAM8_LIVE_RTL=1 but no Variane harness (build: make verilate target=g6lc64_stream8 ver-library=work-ver-stream8)"
+    SKIP=$((SKIP + 1))
+  else
+    log "live RTL via $harness"
+    live_pass=0
+    live_fail=0
+    for name in mini_amocas_w mini_amocas_d mini_amocas_q mini_stream_plane; do
+      elf="$OUT/${name}.elf"
+      if [[ ! -f "$elf" ]]; then
+        log "  SKIP $name (no elf)"
+        SKIP=$((SKIP + 1))
+        continue
+      fi
+      th="$(riscv-none-elf-nm "$elf" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
+      if [[ -z "$th" ]]; then
+        log "  FAIL $name (no tohost)"
+        live_fail=$((live_fail + 1))
+        continue
+      fi
+      maxc=500000
+      [[ "$name" == "mini_stream_plane" ]] && maxc=2000000
+      vlog="$OUT/veri_${name}.log"
       set +e
-      "$harness" +max-cycles=200000 +time_out=200000 +debug_disable \
+      "$harness" +max-cycles="$maxc" +time_out="$maxc" +debug_disable \
         +tohost_addr="0x${th}" "$elf" >"$vlog" 2>&1
       set -e
       if grep -q SUCCESS "$vlog"; then
-        log "  PASS live RTL mini_amocas_w (note: harness may be non-stream8 target)"
-        PASS=$((PASS + 1))
+        log "  PASS live RTL $name"
+        live_pass=$((live_pass + 1))
       else
-        log "  WARN: live RTL mini_amocas_w did not SUCCESS (see $vlog)"
-        SKIP=$((SKIP + 1))
+        log "  FAIL live RTL $name (see $vlog)"
+        tail -12 "$vlog" || true
+        live_fail=$((live_fail + 1))
       fi
-    fi
-  else
-    log "  WARN: STREAM8_LIVE_RTL=1 but harness/elf missing"
-    SKIP=$((SKIP + 1))
+    done
+    PASS=$((PASS + live_pass))
+    FAIL=$((FAIL + live_fail))
   fi
 fi
 
@@ -180,11 +213,13 @@ if [[ $FAIL -gt 0 ]]; then
 fi
 
 cat <<'EOF'
-[stream8-smoke] next (lab / promotion):
-  1. Linux-native verilator_bin → STREAM8_REQUIRE_LINT=1
-  2. Rebuild Variane for TARGET_CFG=g6lc64_stream8 → STREAM8_LIVE_RTL=1
-  3. Full CRT: DV_TARGET=g6lc64_stream8 bash verif/regress/mc-spo-veri.sh
-  4. H-edge: DV_TARGET=g6lc64_stream8 bash verif/regress/kvm-h-spike.sh
+[stream8-smoke] live RTL / lint (Linux Verilator 5.008):
+  export VERILATOR_INSTALL_DIR=$HOME/tools/verilator-v5.008
+  export PATH=$VERILATOR_INSTALL_DIR/bin:$PATH
+  # optional: build-platform/.config.local.ts suite.root=linux-eda-suite
+  make verilate target=g6lc64_stream8 ver-library=work-ver-stream8
+  STREAM8_LIVE_RTL=1 STREAM8_REQUIRE_LINT=1 bash verif/regress/stream8-smoke.sh
+  Full CRT: DV_TARGET=g6lc64_stream8 bash verif/regress/mc-spo-veri.sh
 EOF
 log "PASS (pass=$PASS skip=$SKIP fail=$FAIL)"
 exit 0
