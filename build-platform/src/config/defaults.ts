@@ -474,6 +474,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        id: "ara-vector-cosim",
+        description:
+          "OPTIONAL: §7 Ara cosim + OpenSBI VRF/Linux ISA_V contract (soft skip/misa; live lmul via ARA_COSIM_LIVE).",
+        script: "verif/regress/ara-vector-cosim.sh",
+        group: "directed",
+        target: "g6lc64_server_math_v",
+        dvTarget: "g6lc64_server_math_v",
+        dvSimulators: "veri-testharness",
+        tools: ["riscv-gcc", "verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "spec-deep-path",
         description:
           "OPTIONAL: FSE S1–S5 path gate + real lint of cv64a6_spec_deep and cv64a6_ooo.",

@@ -9,7 +9,7 @@ memcpy/memset and bulk math.
 under `` `define CVA6_ARA_ATTACH ``, else stub) and `g6lc_axi_2to1_mux.sv`. Live
 Verilator lint is green for `g6lc64_server_math_v`. Software contract: purpose guide
 `agents/guides/AGENTS-vector.md`, DTS `ariane-server-math-v.dts`, directed
-`testlist_ara_vector.yaml`. Full RVV cosim / OpenSBI VRF still open. Spec status:
+`testlist_ara_vector.yaml`. Cosim/VRF **gate**: `software/vector/` + `ara-vector-cosim` (soft path green; live lmul opt-in). Spec status:
 `agents/spec/riscv-spec-I-9-vector.html` + `AGENTS-specs-to-impl.md` (Vector / Ara rows).
 
 ## Spec / config identity
@@ -86,7 +86,7 @@ vendor/ara/...           # git-ignored or vendored — not committed if NDA
 | Live Ara IP (`CVA6_ARA_ATTACH=1`) | **PASS (Verilator)** — deps on Flist.ara; `cva6_shim/vmfpu`+`lane_sequencer`+`vlsu` for OpenHW cvfpu / pulp axi; slang skipped |
 | Purpose guide | **Done** — `agents/guides/AGENTS-vector.md` |
 | Linux DTS (`v` token) | **Done** — `corev_apu/bootrom/ariane-server-math-v.dts` (only for `_v` package) |
-| Linux/SBI vector context | **Partial** — DTS contract + guide checklist; OpenSBI VRF save/restore + kernel `CONFIG_RISCV_ISA_V` still external |
+| Linux/SBI vector context | **Partial** — DTS + `software/vector/opensbi-vrf.md` + `linux.config-fragment`; full SBI/kernel lab |
 | Directed vector memcpy | **Done (directed)** — `v_memcpy_skip` / `v_misa_v` / `v_memcpy_lmul` + `testlist_ara_vector.yaml`; functional LMUL needs live Ara cosim |
 
 ### Live Ara IP (operator)

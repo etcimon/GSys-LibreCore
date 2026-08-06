@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Etienne Cimon
+#
+# Linux defconfig fragment for GSys LibreCore RVV (Ara path).
+# Merge into a cva6-sdk / Buildroot / Yocto kernel defconfig only when:
+#   - package is g6lc64_server_math_v (or equivalent RVV=1)
+#   - live Ara is linked (CVA6_ARA_ATTACH)
+#   - DTS is ariane-server-math-v.dts (advertises "v" / zve64d)
+#   - OpenSBI saves/restores vector context (see opensbi-vrf.md)
+#
+# Never enable on smt2 / default server_math trees (no V).
+
+CONFIG_RISCV_ISA_V=y
+# Optional subsets if your kernel version splits them:
+# CONFIG_RISCV_ISA_V_UABI=y
+# CONFIG_RISCV_ISA_ZAWRS=y
+
+# Keep FPU if package has FD (usual for server_math_v)
+CONFIG_FPU=y
+
+# Vector-using userspace needs enough stack / ELF support (defaults usually OK)
+# CONFIG_BINFMT_ELF=y

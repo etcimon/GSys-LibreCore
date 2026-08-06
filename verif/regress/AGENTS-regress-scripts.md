@@ -141,3 +141,15 @@ Requires existing work-ver/Variane_testharness for the active DV_TARGET (default
 | fetch-linux-image-hint.sh | (helper) | cva6-sdk / Buildroot operator paths |
 
 Image never committed; lives under build-platform/workspace/smt2-linux/.
+
+---
+
+## 9. Ara / RVV cosim (AGENTS-todo section 7)
+
+| Script | Suite | Notes |
+|--------|-------|-------|
+| ara-vector-path.sh | ara-vector-path | Artifacts + optional lint |
+| ara-vector-cosim.sh | ara-vector-cosim | Soft skip/misa on Variane; ARA_COSIM_LIVE for lmul |
+| software/vector/* | (contract) | opensbi-vrf.md + linux.config-fragment |
+
+Never dual-ISS-golden AMOCAS; vector golden is live Ara when misa.V is set.

@@ -29,7 +29,7 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **FTQ / frontend** | Mispredict reseed + demand fixes for bare-metal green | Guide `agents/guides/AGENTS-branch-prediction.md` · scaffold `architecture/branch-prediction/README.md` · RTL `core/frontend/{frontend,cva6_ftq}.sv` |
 | **Structural FO4** | sparse_ex/frontend residual close @ **2.5 GHz** (screening ≠ STA) | Package `sv-timing/AGENTS.md` · `sv-timing/architecture/MONOREPO-SOAK.md` · `FREQUENCY-CLOSURE.md` · host `AGENTS-build-platform.md` §6.1 / §7 · plan `architecture/build-platform-opensta-from-timing.md` · philosophy §2.8 in `AGENTS-coding-philosophy.md` |
 | **R3a dual-hart OpenSBI** | `fw_payload` + WSL SUCCESS; **R3b gate** `r3b-linux-image` (Image external) | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
-| **Ara / RVV** | Attach live-lintable + DTS + directed; VRF/cosim **open** | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
+| **Ara / RVV** | Attach + DTS + directed; **VRF/cosim gate** `ara-vector-cosim` (live lmul opt) | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
 | **H / KVM** | U9 + **H-edge Spike+RTL 3/3** (`kvm-h-spike` / Variane server_math) | `architecture/server-math-hypervisor.md` · remaining-upgrade Phase B · `agents/spec/riscv-spec-II-5.*-hypervisor*.html` · impl Hypervisor row · `verif/tests/custom/kvm_h/` · suite `kvm-h-tests` |
 
 Standing disciplines remain active (`AGENTS.md` §0.4–§0.6). Keep
@@ -89,11 +89,12 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    **Priors:** `verif/regress/r3b-linux-image.sh` · `fetch-linux-image-hint.sh` ·
    `smt-linux-rootfs.md` · `software/smt2-linux/` · `smt-linux-r3-cosim` · `opensbi-linux-boot`.
 
-7. **OpenSBI VRF save/restore + `CONFIG_RISCV_ISA_V` + live Ara cosim** of `v_memcpy_lmul`
-   under `cva6.py` / `CVA6_ARA_ATTACH=1`.  
-   **Priors:** `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` §5 (SBI/Linux) ·
-   `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` ·
-   `verif/tests/testlist_ara_vector.yaml` · `remaining-upgrade-sequence.md` §4 item 9 / Phase C-heavy.
+7. **OpenSBI VRF + `CONFIG_RISCV_ISA_V` + Ara cosim** — **gate landed**:
+   `software/vector/` (opensbi-vrf.md + linux.config-fragment) + suite `ara-vector-cosim`
+   (soft skip/misa on Variane; live `v_memcpy_lmul` via `ARA_COSIM_LIVE=1` + server_math_v rebuild).
+   Full multi-task OpenSBI VRF + kernel still lab when Image/_v TB provisioned.
+   **Priors:** `verif/regress/ara-vector-cosim.sh` · `software/vector/` ·
+   `architecture/ara-vector-attach.md` · `AGENTS-vector.md` · `testlist_ara_vector.yaml`.
 
 8. **AMOCAS.Q deferred** — CAS.D dual-word pack polish only on hard fail; Spike has no zacas
    (never treat Spike skip as RTL pass).  
@@ -409,9 +410,9 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
     - [x] R3b Linux Image **gate** (`r3b-linux-image` soft-skip without Image; LINUX_IMAGE build path) → **§6 gate done**;
       full rootfs shell still external/lab when Image available
       priors: `verif/regress/r3b-linux-image.sh`, `smt-linux-rootfs.md`, `software/smt2-linux/`
-    - [ ] OpenSBI VRF + Linux `CONFIG_RISCV_ISA_V` + live Ara cosim `v_memcpy_lmul` → **§7**;
-      priors: `architecture/ara-vector-attach.md`, `agents/guides/AGENTS-vector.md`,
-      `agents/spec/riscv-spec-I-9-vector.html`
+    - [x] OpenSBI VRF contract + Linux `CONFIG_RISCV_ISA_V` fragment + `ara-vector-cosim` soft path → **§7 gate done**;
+      live lmul rebuild optional (`ARA_COSIM_LIVE=1`)
+      priors: `software/vector/`, `verif/regress/ara-vector-cosim.sh`, `AGENTS-vector.md`
     - [ ] AMOCAS.Q deferred; CAS.D polish only on hard fail; Spike ≠ Zacas golden → **§8**;
       priors: `agents/spec/riscv-spec-I-5.9-zacas.html`, Zacas rows in specs-to-impl/tests
 

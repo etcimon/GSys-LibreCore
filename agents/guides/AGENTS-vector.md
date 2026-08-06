@@ -108,8 +108,10 @@ SBI/firmware notes (bring-up checklist, not a full OpenSBI fork in this repo):
 | Gate | What it proves |
 |------|----------------|
 | `ara-vector-path` | Artifacts + `server_math_v` lint + optional live Ara lint (`CVA6_ARA_ATTACH=1`) |
+| `ara-vector-cosim` | Soft RTL skip/misa + optional live `v_memcpy_lmul`; OpenSBI VRF + Linux fragment contract |
+| `software/vector/` | OpenSBI VRF checklist + `CONFIG_RISCV_ISA_V` fragment |
 | `testlist_ara_vector.yaml` | Directed asm: soft-skip without V; LMUL memcpy when V+live Ara |
-| Full RVV compliance / Spike cosim | Still open — needs provisioned `riscv-gcc` + Spike + `cva6.py` target |
+| Full RVV compliance / multi-task SBI | Lab — apply OpenSBI VRF + kernel fragment on `_v` Image |
 
 Directed tests under `verif/tests/custom/vector/`:
 
