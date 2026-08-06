@@ -60,6 +60,7 @@ CVA6 DTS under validation:
 | `corev_apu/bootrom/ariane.dts` | Tandem bare (PLIC off) |
 | `corev_apu/bootrom/ariane-linux.dts` | Single-hart Linux |
 | `corev_apu/bootrom/ariane-smt2.dts` | Dual-hart SMT Linux topology |
+| `corev_apu/bootrom/ariane-stream8.dts` | Dual-core stream8 residual package topology |
 
 ---
 
@@ -91,8 +92,8 @@ CVA6's own device trees (the files an edit must keep consistent):
 
 | DT node / property | `compatible` | Linux binding (`«dts»/Documentation/devicetree/bindings/…`) | RISC-V spec anchor | CVA6 RTL (+ config knob) | CVA6 `.dts` node |
 |---|---|---|---|---|---|
-| `cpu@N` ISA string — `riscv,isa`, `riscv,isa-base`, `riscv,isa-extensions` | `"riscv"` (vendor IDs need upstream enum) | `riscv/cpus.yaml`, `riscv/extensions.yaml` | Vol I `#base`, extension chapters; Zacas `#ext:zacas` | `core/csr_regfile.sv` (`IsaCode`/`misa`); `RVZacas` on `g6lc64_smt2` / `server_math{,_v}` / `ooo_server` | `ariane.dts` (baseline) / **`ariane-linux.dts`** + **`ariane-smt2.dts`** (full: zba/zbb/zbs/zicbo*/**zacas**) / **`ariane-server-math-v.dts`** (`v` + zacas for `_v` pkg) |
-| Multi-hart / SMT `cpu@N` + `cpu-map` `{ threadN { cpu } }` | `"riscv"` | `cpus.yaml` (hart = execution context) | Priv (hart) | `NrHarts`, `cva6_smt_*`, mhartid=`base+h` | `ariane-smt2.dts` (thread0/1 under core0); `chosen.bootargs` maxcpus=2 + root=/dev/ram (rootfs track) |
+| `cpu@N` ISA string — `riscv,isa`, `riscv,isa-base`, `riscv,isa-extensions` | `"riscv"` (vendor IDs need upstream enum) | `riscv/cpus.yaml`, `riscv/extensions.yaml` | Vol I `#base`, extension chapters; Zacas `#ext:zacas` | `core/csr_regfile.sv` (`IsaCode`/`misa`); `RVZacas` on `g6lc64_smt2` / `server_math{,_v}` / `ooo_server` / `stream8` | `ariane.dts` (baseline) / **`ariane-linux.dts`** + **`ariane-smt2.dts`** (full: zba/zbb/zbs/zicbo*/**zacas**) / **`ariane-server-math-v.dts`** (`v` + zacas for `_v` pkg) |
+| Multi-hart / SMT `cpu@N` + `cpu-map` `{ threadN { cpu } }` | `"riscv"` | `cpus.yaml` (hart = execution context) | Priv (hart) | `NrHarts`, `cva6_smt_*`, mhartid=`base+h` | `ariane-smt2.dts` (thread0/1 under core0); `ariane-stream8.dts` (core0/core1 × thread0); `chosen.bootargs` maxcpus=2 + root=/dev/ram (rootfs track) |
 | `cpu@N` `mmu-type` | `"riscv"` | `riscv/cpus.yaml` | `#sv39` (II-4.4), `#sv32`/`#sv48`/`#sv57` | `core/cva6_mmu/` (`vm_mode_t`) | `mmu-type = "riscv,sv39"` |
 | `cpu@N` `tlb-split` | — | `riscv/cpus.yaml` | II-4.x paging / TLB | `core/cva6_mmu/` (`InstrTlbEntries`,`DataTlbEntries`) | `tlb-split;` |
 | `cpu@N` `riscv,cbom-block-size` / `riscv,cboz-block-size` | — | `riscv/cpus.yaml` | `#cmo` (I-4.20), `#ext:zic64b` (I-4.15) | `core/cache_subsystem/*` (`RVZiCbom`/`RVZiCboz`) | `ariane-smt2.dts` (`<64>`) when Zicbo* on |

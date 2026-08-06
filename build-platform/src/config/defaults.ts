@@ -600,6 +600,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        id: "stream8-smoke",
+        description:
+          "OPTIONAL: stream8-class package contract + mini golden compile + soft lint of g6lc64_stream8.",
+        script: "verif/regress/stream8-smoke.sh",
+        group: "directed",
+        target: "g6lc64_stream8",
+        dvTarget: "g6lc64_stream8",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "dual-hart-ci",
         description:
           "OPTIONAL: dual-hart/SMT2 artifact + real lint of cv64a6_smt2.",

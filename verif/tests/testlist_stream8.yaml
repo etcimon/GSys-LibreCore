@@ -1,0 +1,45 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# Stream8-class narrow residual suite (optional).
+# Prefer DV_TARGET=g6lc64_stream8 (NrCores=2, RVZacas, DeepSpec, L2).
+# Full CRT remains mc-spo-veri; this list is the stream8 smoke subset.
+
+common_test_config: &common_test_config
+  path_var: TESTS_PATH
+  gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+
+testlist:
+  - test: mini_stream_plane
+    iterations: 1
+    path_var: TESTS_PATH
+    gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -T../tests/custom/common/link_verilator.ld"
+    asm_tests: <path_var>/custom/multicore/mini_stream_plane.S
+    description: "Stream plane fill→verify (DeepSpec STQ; stream8 CRT core)"
+
+  - test: mini_amocas_w
+    iterations: 1
+    path_var: TESTS_PATH
+    gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -T../tests/custom/common/link_verilator.ld"
+    asm_tests: <path_var>/custom/multicore/mini_amocas_w.S
+    description: "Zacas AMOCAS.W mini golden"
+
+  - test: mini_amocas_d
+    iterations: 1
+    path_var: TESTS_PATH
+    gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -T../tests/custom/common/link_verilator.ld"
+    asm_tests: <path_var>/custom/multicore/mini_amocas_d.S
+    description: "Zacas AMOCAS.D mini golden"
+
+  - test: mini_amocas_q
+    iterations: 1
+    path_var: TESTS_PATH
+    gcc_opts: "-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -T../tests/custom/common/link_verilator.ld"
+    asm_tests: <path_var>/custom/multicore/mini_amocas_q.S
+    description: "Zacas AMOCAS.Q mini golden (RTL only; Spike never CAS golden)"
+
+  - test: h_edge_diag
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/kvm_h/h_edge_diag.S
+    description: "H-edge hedeleg/VTSR/VTVM/VS ecall (Spike+RTL green on server_math)"

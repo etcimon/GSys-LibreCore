@@ -141,7 +141,7 @@ export const statusCommand: Command = {
     );
     logger.info(`sim suites : ${config.verify.simSuites.join(", ")}`);
     logger.info(
-      "opt-in pkgs: g6lc64_ooo, g6lc64_ooo_server, g6lc64_server_math, g6lc64_smt2, cv64a6_spec_deep",
+      "opt-in pkgs: g6lc64_ooo, g6lc64_ooo_server, g6lc64_server_math, g6lc64_stream8, g6lc64_smt2, cv64a6_spec_deep",
     );
     logger.info(
       "opt-in test: mc-stream-tests, ooo-l3-tests, server-math-tests, dual-hart-ci, timings-sta-handoff, sv-timing-*",

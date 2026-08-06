@@ -1,6 +1,6 @@
 # Stream8-class production package (scaffold)
 
-**Status:** non-compiled **scaffold** — not in any flist; no RTL moved.  
+**Status:** **promoted (config + DTS + smoke)** — package on `Flist.cva6` via `TARGET_CFG=g6lc64_stream8`; no pipeline RTL churn. Live Variane/lint still need native Verilator.  
 **Queue:** `AGENTS-todo.md` practical next optional growth · residual CRT + H-edge **already green**.  
 **Contract:** `architecture/README.md` (scaffold; promote via §0.2 + config-first).
 
@@ -35,15 +35,15 @@ and keep minimal packages identity-clean.
 
 ## Proposed package surface (when promoted)
 
-Do **not** create these files until a promotion pass; this is the intended shape:
+Promotion artifacts (landed this pass):
 
 | Artifact | Role |
 |----------|------|
-| `core/include/g6lc64_stream8_config_pkg.sv` | `cva6_cfg_t` freeze: `NrCores`, issue width, L2/L3, `RVZacas`, H, DeepSpec STQ |
-| `corev_apu/bootrom/ariane-stream8.dts` | N×cpu, CLINT/PLIC extents, cache nodes, `riscv,isa` |
-| `verif/tests/testlist_stream8.yaml` | Narrow: stream plane + AMOCAS.W/D/Q + one H-edge + optional dual-park |
-| `verif/regress/stream8-smoke.sh` | Artifact + optional lint target + mini golden subset |
-| `build-platform` suite `stream8-smoke` | `optional: true` (not `defaultSuites`) |
+| `core/include/g6lc64_stream8_config_pkg.sv` | **landed** — N=2, Zacas, DeepSpec, L2, H; C-light in-order (server_math freeze) |
+| `corev_apu/bootrom/ariane-stream8.dts` | **landed** — dual physical cores + L2 + zacas ISA |
+| `verif/tests/testlist_stream8.yaml` | **landed** — stream + AMOCAS.W/D/Q + h_edge_diag |
+| `verif/regress/stream8-smoke.sh` | **landed** — contract + mini compile + soft lint |
+| `build-platform` suite `stream8-smoke` | **landed** — `optional: true` (not `defaultSuites`) |
 
 Config knobs stay in `config_pkg::cva6_cfg_t` + `check_cfg` — no hard-coded stream8 inside pipeline stages.
 

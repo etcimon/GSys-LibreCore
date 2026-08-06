@@ -13,7 +13,7 @@ This file is the **isolation ladder** for residual multicore / H / stream / CAS 
 | Axis | Values | How to use |
 |------|--------|------------|
 | **Plane** | `artifact` · `spike` (ISS) · `veri` (Variane RTL) · `dual-iss` | Fail on Spike first → ISS/test bug or ISA setup (PMP, medeleg). Pass Spike / fail RTL → microarch. Fail both → test or env. |
-| **Target / package** | `cv64a6_imafdc_sv39` · `g6lc64_server_math` / `cv64a6_server_math` · `*_ooo_server` · `*_smt2` · `*_spec_deep` | Match `DV_TARGET` to the feature under test (Zacas → imafdc or server_math with `RVZacas`; H → server_math with `RVH`). |
+| **Target / package** | `cv64a6_imafdc_sv39` · `g6lc64_server_math` / `cv64a6_server_math` · `*_ooo_server` · `*_smt2` · `*_stream8` · `*_spec_deep` | Match `DV_TARGET` to the feature under test (Zacas → imafdc or server_math with `RVZacas`; H → server_math with `RVH`). |
 | **Stack height** | bare ELF · CRT bare-metal · OpenSBI · Linux | Climb only after the lower stack is green. CRT hang ≠ bare hang. |
 | **Feature domain** | stream/CRT · spo/CF · Zacas · H/KVM · vector/Ara · SMT · FO4/timing | Use the domain row in §3; do not mix CAS soft-skip on Spike with hard RTL golden. |
 | **Budget** | seconds (Spike directed) · minutes (Variane smoke) · hours (full soak / Linux) | Use `STABILITY_PROFILE` / env knobs; never soft-pass a hard golden. |
@@ -60,6 +60,7 @@ Profile `full` also runs mini + H-edge on an existing Variane harness when prese
 | `kvm-h-tests.sh` | `kvm-h-tests` | veri+spike | `g6lc64_server_math` | CRT | H + Sstc | Optional full DV list |
 | `monorepo-soak/run-h-edge-veri.sh` | (soak helper) | veri | existing `work-ver` | CRT | H-edge | Reuses server_math TB; not a defaults suite |
 | `stability-regress.sh` | `stability-regress` | composed | see profile | see legs | residual battery | §4 entry point |
+| `stream8-smoke.sh` | `stream8-smoke` | artifact/compile | stream8 | package | stream/Zacas | Contract + mini golden |
 | `dual-hart-ci.sh` | `dual-hart-ci` | artifact/lint | smt2 | package | SMT | Path/lint gate |
 | `server-math-tests.sh` | `server-math-tests` | veri+spike | server_math | directed | B/H/CMO/memcpy | Package C-light |
 | `sv-timing-*.sh` | `sv-timing-*` | FO4 screen | sparse/core | n/a | timing | Not functional ISS; not STA |

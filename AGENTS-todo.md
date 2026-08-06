@@ -120,13 +120,13 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    **Priors:** `verif/regress/dual-hart-ci.sh` · `smt_dual_park.S` · `smt-linux-rootfs.sh` ·
    `architecture/multi-threading/smt2-bringup.md`.
 
-11. **Optional growth (not blocking residual bugs)** — production **stream8-class** package
-    (n-wide / y-core / FO4@x GHz). CRT + H-edge green; **scaffold landed**:
-    `architecture/stream8-class.md` (no flist / no RTL yet). Promote only with config package +
-    DTS + smoke suite per that checklist. Branding/publication only if a rebrand branch merges here.
-    **Priors:** `architecture/stream8-class.md` · `out-of-order/README.md` · `router-core-upgrade-program.md` ·
-    `multi-core/README.md` · `l2-l3-cache/README.md` · `AGENTS-configuration.md` ·
-    `AGENTS-build-platform.md` §6.1 · research drafts (context only).
+11. ~~**Optional growth stream8-class**~~ **promoted (config + DTS + smoke)** —
+    package `g6lc64_stream8` (NrCores=2, RVZacas, DeepSpec, L2, H; C-light),
+    `ariane-stream8.dts`, suite `stream8-smoke` (optional). Live lint/RTL still need
+    host-native Verilator + Variane rebuild for `TARGET_CFG=g6lc64_stream8`.
+    Branding/publication only if a rebrand branch merges here.
+    **Priors:** `architecture/stream8-class.md` · `g6lc64_stream8_config_pkg.sv` ·
+    `verif/regress/stream8-smoke.sh` · `multi-core/README.md` · `AGENTS-configuration.md`.
 
 ## Standing disciplines (apply every pass, per applicability)
 Six **co-equal** upkeep rules; run each pass when it applies (none overrides the SoC prime directive):

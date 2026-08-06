@@ -1,0 +1,179 @@
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+// Copyright (c) 2026 Etienne Cimon
+//
+// Dual-core stream8 DTS for g6lc64_stream8_config_pkg (NrCores=2, NrHarts=1).
+// Matches residual CRT envelope: IMAFDC + H-capable ISA string tokens + zacas,
+// shared L2-class next-level cache node, CLINT/PLIC for two physical harts.
+//
+// Topology: two physical cores (cpu-map core0/core1), one thread each.
+// Contrast: ariane-smt2.dts = 1 core × 2 SMT threads.
+//
+// Validate: .\build-platform\scripts\validate-cva6-dts.ps1
+// Priors: architecture/stream8-class.md · AGENTS-dts-validation.md
+
+/dts-v1/;
+
+/ {
+  #address-cells = <2>;
+  #size-cells = <2>;
+  compatible = "eth,ariane-bare-dev";
+  model = "eth,ariane-stream8";
+
+  chosen {
+    stdout-path = "/soc/uart@10000000:115200";
+    bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio,0x10000000,115200n8 maxcpus=2 root=/dev/ram rw";
+  };
+
+  cpus {
+    #address-cells = <1>;
+    #size-cells = <0>;
+    timebase-frequency = <32768>;
+
+    CPU0: cpu@0 {
+      device_type = "cpu";
+      compatible = "riscv";
+      reg = <0>;
+      status = "okay";
+      clock-frequency = <50000000>;
+      // Stream8 package: rv64imafdc + Zacas + Zicbo* + bitmanip subset (no RVV)
+      riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
+      riscv,isa-base = "rv64i";
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "b",
+        "zicntr", "zicsr", "zifencei", "zihpm",
+        "zba", "zbb", "zbs",
+        "zcb", "zicond",
+        "zicbom", "zicboz", "zicbop",
+        "zacas",
+        "zkn",
+        "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+      mmu-type = "riscv,sv39";
+      tlb-split;
+      riscv,cboz-block-size = <64>;
+      riscv,cbom-block-size = <64>;
+      i-cache-block-size = <16>;
+      i-cache-size = <16384>;
+      d-cache-block-size = <16>;
+      d-cache-size = <32768>;
+      next-level-cache = <&L2>;
+
+      CPU0_intc: interrupt-controller {
+        #interrupt-cells = <1>;
+        interrupt-controller;
+        compatible = "riscv,cpu-intc";
+      };
+    };
+
+    CPU1: cpu@1 {
+      device_type = "cpu";
+      compatible = "riscv";
+      reg = <1>;
+      status = "okay";
+      clock-frequency = <50000000>;
+      riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
+      riscv,isa-base = "rv64i";
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "b",
+        "zicntr", "zicsr", "zifencei", "zihpm",
+        "zba", "zbb", "zbs",
+        "zcb", "zicond",
+        "zicbom", "zicboz", "zicbop",
+        "zacas",
+        "zkn",
+        "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+      mmu-type = "riscv,sv39";
+      tlb-split;
+      riscv,cboz-block-size = <64>;
+      riscv,cbom-block-size = <64>;
+      i-cache-block-size = <16>;
+      i-cache-size = <16384>;
+      d-cache-block-size = <16>;
+      d-cache-size = <32768>;
+      next-level-cache = <&L2>;
+
+      CPU1_intc: interrupt-controller {
+        #interrupt-cells = <1>;
+        interrupt-controller;
+        compatible = "riscv,cpu-intc";
+      };
+    };
+
+    // Two physical cores, one hart each (NrCores=2, NrHarts=1)
+    cpu-map {
+      cluster0 {
+        core0 {
+          thread0 {
+            cpu = <&CPU0>;
+          };
+        };
+        core1 {
+          thread0 {
+            cpu = <&CPU1>;
+          };
+        };
+      };
+    };
+  };
+
+  memory@80000000 {
+    device_type = "memory";
+    reg = <0x0 0x80000000 0x0 0x10000000>;
+  };
+
+  soc {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    compatible = "simple-bus";
+    ranges;
+
+    clint@2000000 {
+      compatible = "sifive,clint0", "riscv,clint0";
+      interrupts-extended =
+        <&CPU0_intc 3>, <&CPU0_intc 7>,
+        <&CPU1_intc 3>, <&CPU1_intc 7>;
+      reg = <0x0 0x2000000 0x0 0xc0000>;
+    };
+
+    // PLIC multi-context (M+S per core) — 4 contexts for 2 cores
+    PLIC0: interrupt-controller@c000000 {
+      #address-cells = <0>;
+      #interrupt-cells = <1>;
+      compatible = "sifive,plic-1.0.0", "riscv,plic0";
+      interrupt-controller;
+      interrupts-extended =
+        <&CPU0_intc 11>, <&CPU0_intc 9>,
+        <&CPU1_intc 11>, <&CPU1_intc 9>;
+      reg = <0x0 0xc000000 0x0 0x4000000>;
+      riscv,max-priority = <7>;
+      riscv,ndev = <2>;
+    };
+
+    // Shared L2 (package L2En=1; size inferred ~256 KiB for N=2)
+    L2: l2-cache {
+      compatible = "cache";
+      // Soft node for next-level-cache phandle; reserved MMIO hole (not a bus slave).
+      reg = <0x0 0x1f000000 0x0 0x1000>;
+      cache-level = <2>;
+      cache-unified;
+      cache-size = <262144>;
+      cache-block-size = <64>;
+      cache-sets = <512>;
+    };
+
+    uart@10000000 {
+      compatible = "ns16550a";
+      reg = <0x0 0x10000000 0x0 0x1000>;
+      clock-frequency = <50000000>;
+      current-speed = <115200>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <1>;
+      reg-shift = <2>;
+      reg-io-width = <4>;
+    };
+
+    timer@18000000 {
+      compatible = "pulp,apb_timer";
+      interrupts = <0x00000004 0x00000005 0x00000006 0x00000007>;
+      interrupt-parent = <&PLIC0>;
+      reg = <0x0 0x18000000 0x0 0xc>;
+    };
+  };
+};

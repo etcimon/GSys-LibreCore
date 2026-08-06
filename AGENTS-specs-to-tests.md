@@ -65,6 +65,7 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | `kvm-h-spike` | directed (optional, Spike+RTL green) | `verif/regress/kvm-h-spike.sh` + `kvm_h/*` + Variane | H-edge: hedeleg WARL, VT*→22, MPV, dual VS ecall (3/3 Spike+RTL) |
 | `stability-regress` | directed (optional, composed) | `verif/regress/stability-regress.sh` + `AGENTS-regress-scripts.md` | §4 residual battery: H-edge Spike + mc-spo-spike + mini compile (`STABILITY_PROFILE`) |
 | `dual-iss-regress` | directed (optional, dual-ISS) | `verif/regress/dual-iss-regress.sh` | Same ELF Spike+Variane tohost golden (mini_tohost/jumps; optional H-edge); not Zacas golden |
+| `stream8-smoke` | directed (optional) | `stream8-smoke.sh` + `testlist_stream8.yaml` | stream8 package contract + mini compile; soft lint |
 | `dual-hart-ci` | directed (optional) | `dual-hart-ci.sh` | SMT2/NrHarts=2 artifact + checklist |
 | `smt-linux-boot-path` | directed (optional) | `smt-linux-boot-path.{sh,ps1}` | DTS vs sparse linux-dts + CLINT/PLIC per-hart gate (no full Linux image) |
 | `smt-linux-rootfs` | linux (optional) | `smt-linux-rootfs.{sh,ps1}` + `testlist_smt_linux.yaml` + `software/smt2-linux/` | SMT OpenSBI R3a auto-build when toolchain present; sim if `CVA6_LINUX_PAYLOAD` / `fw_payload.elf` |

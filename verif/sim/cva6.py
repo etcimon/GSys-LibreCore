@@ -911,6 +911,7 @@ def load_config(args, cwd):
         "g6lc64_ooo_server",
         "g6lc64_server_math",
         "g6lc64_server_math_v",
+        "g6lc64_stream8",
         "cv64a6_spec_deep",
     ):
       args.mabi = "lp64d"
