@@ -25,6 +25,8 @@
 #   MC_SPO_VERI_TESTS="zacas_amocas_w mc_spo_st_fwd" bash verif/regress/mc-spo-veri.sh
 #   MC_SPO_VERI_REBUILD=0 bash verif/regress/mc-spo-veri.sh   # reuse work-ver
 #   DV_TARGET=cv64a6_ooo_server bash verif/regress/mc-spo-veri.sh
+#   DV_TARGET=g6lc64_stream8 MC_SPO_VER_LIBRARY=work-ver-stream8 MC_SPO_VERI_REBUILD=0 \
+#     MC_SPO_VERI_COMPACT_LD=1 bash verif/regress/mc-spo-veri.sh
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -89,12 +91,13 @@ export CXX="${CXX:-g++}"
 export CC="${CC:-gcc}"
 
 REBUILD="${MC_SPO_VERI_REBUILD:-1}"
+VER_LIBRARY="${MC_SPO_VER_LIBRARY:-work-ver}"
 # Compact CRT list for FORCE_IMAFDC Variane / Verilator 5.008 (default all 9).
 DEFAULT_TESTS="zacas_amocas_w zacas_amocas_d mc_spo_st_fwd mc_spo_fence_drain mc_cas_lock_handoff mc_spo_cf_stream mc_spo_cas_stream mc_spo_mispred_stream mc_stream_plane"
 # shellcheck disable=SC2206
 tests=( ${MC_SPO_VERI_TESTS:-$DEFAULT_TESTS} )
 
-echo "[mc-spo-veri] Verilator RTL soak target=${DV_TARGET} rebuild=${REBUILD}"
+echo "[mc-spo-veri] Verilator RTL soak target=${DV_TARGET} rebuild=${REBUILD} ver-library=${VER_LIBRARY}"
 cva6_tools_report
 echo "  verilator: $(command -v verilator || echo MISSING)"
 echo "  g++:       $(command -v g++ || echo MISSING)"
@@ -114,25 +117,26 @@ if [[ "${MC_SPO_VERI_FORCE_IMAFDC:-0}" == "1" ]]; then
 fi
 
 if [[ "$REBUILD" == "1" ]]; then
-  echo "[mc-spo-veri] verilate target=${DV_TARGET} (clean work-ver)..."
-  rm -rf "$ROOT/work-ver"
+  echo "[mc-spo-veri] verilate target=${DV_TARGET} (clean ${VER_LIBRARY})..."
+  rm -rf "$ROOT/$VER_LIBRARY"
   make -C "$ROOT" verilate \
     verilator="verilator --no-timing" \
     target="$DV_TARGET" \
+    ver-library="$VER_LIBRARY" \
     XLEN=64 \
     CVA6_REPO_DIR="$CVA6_REPO_DIR" \
     SPIKE_INSTALL_DIR="$SPIKE_INSTALL_DIR" \
     RISCV="$RISCV" \
     VERILATOR_INSTALL_DIR="$VERILATOR_INSTALL_DIR" \
     CXX="$CXX" CC="$CC"
-  test -x "$ROOT/work-ver/Variane_testharness" || {
+  test -x "$ROOT/$VER_LIBRARY/Variane_testharness" || {
     echo "[mc-spo-veri] Variane_testharness missing after rebuild"
     exit 1
   }
-  echo "[mc-spo-veri] ok Variane_testharness ready"
+  echo "[mc-spo-veri] ok Variane_testharness ready ($VER_LIBRARY)"
 else
-  test -x "$ROOT/work-ver/Variane_testharness" || {
-    echo "[mc-spo-veri] work-ver/Variane_testharness missing; set MC_SPO_VERI_REBUILD=1"
+  test -x "$ROOT/$VER_LIBRARY/Variane_testharness" || {
+    echo "[mc-spo-veri] $VER_LIBRARY/Variane_testharness missing; set MC_SPO_VERI_REBUILD=1"
     exit 1
   }
 fi
@@ -167,7 +171,7 @@ if [[ "$USE_CVA6PY" == "1" ]]; then
 else
   # CRT ELFs: build locally when missing (do not depend on a dated out_YYYY-MM-DD path).
   # Override with MC_SPO_ELFDIR=... to reuse cva6.py directed_tests from mc-spo-spike.
-  ELFDIR="${MC_SPO_ELFDIR:-$ROOT/work-ver/mc_spo_elfs}"
+  ELFDIR="${MC_SPO_ELFDIR:-$ROOT/$VER_LIBRARY/mc_spo_elfs}"
   mkdir -p "$ELFDIR"
   COMMON="$ROOT/verif/tests/custom/common"
   SRC_DIR="$ROOT/verif/tests/custom/multicore"
@@ -243,7 +247,7 @@ else
     # Compact CRT sets finish well under this; raise for oversized custom ELFs.
     cycles="${MC_SPO_VERI_CYCLES:-5000000}"
     set +e
-    "$ROOT/work-ver/Variane_testharness" \
+    "$ROOT/$VER_LIBRARY/Variane_testharness" \
       +max-cycles="$cycles" +time_out="$cycles" \
       +debug_disable \
       "${tohost_arg[@]}" \
@@ -277,6 +281,6 @@ fi
 
 echo "[mc-spo-veri] SUMMARY pass=${PASS} fail=${FAIL} total=${#tests[@]}"
 echo "  note: prefer MC_SPO_VERI_FORCE_IMAFDC=1 for single-core Zacas+spo CRT smoke;"
-echo "        multi-core server_math+L2 bare-metal Verilator remains residual."
+echo "        stream8: DV_TARGET=g6lc64_stream8 MC_SPO_VER_LIBRARY=work-ver-stream8 MC_SPO_VERI_REBUILD=0."
 echo "  hard CAS golden remains mc-mini-veri (no CRT soft-skip path)."
 [[ "$FAIL" -eq 0 ]]

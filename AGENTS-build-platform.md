@@ -205,7 +205,7 @@ Full catalog: `./build.sh test --list`.
 | PnR / OpenROAD / OpenSTA synth (S1–S4) | **planned** — `architecture/build-platform-opensta-from-timing.md` |
 | Dual-ISS Spike+Verilator polish | **done** (suite `dual-iss-regress` tohost golden) |
 | R3b Linux Image gate | **done** (suite `r3b-linux-image`; Image still external) |
-| CRT `mc-spo-veri` | **imafdc 9/9** + **server_math L2 9/9** (DeepSpec STQ; Verilator 5.008); dual-hart-ci host residual green |
+| CRT `mc-spo-veri` | **imafdc 9/9** + **server_math L2 9/9** + **stream8 9/9** (DeepSpec STQ; Verilator 5.008); dual-hart-ci host residual green |
 
 ---
 

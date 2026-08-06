@@ -1,6 +1,6 @@
 # Stream8-class production package (scaffold)
 
-**Status:** **promoted + live RTL green** — package on `Flist.cva6` via `TARGET_CFG=g6lc64_stream8`; Variane `work-ver-stream8` on Linux Verilator **5.008**: mini AMOCAS.W/D/Q + stream plane SUCCESS; lint via `linux-eda-suite` overlay.
+**Status:** **promoted + live RTL green + full CRT 9/9** — `g6lc64_stream8` / `work-ver-stream8` (Linux Verilator 5.008): mini AMOCAS.W/D/Q + stream; `mc-spo-veri` **9/9** (compact LD).
 **Queue:** `AGENTS-todo.md` practical next optional growth · residual CRT + H-edge **already green**.  
 **Contract:** `architecture/README.md` (scaffold; promote via §0.2 + config-first).
 
@@ -62,7 +62,7 @@ Config knobs stay in `config_pkg::cva6_cfg_t` + `check_cfg` — no hard-coded st
 
 1. **Config-gated** package elaborates; minimal configs unchanged.  
 2. **Lint** `verify --lint --target g6lc64_stream8` with host-native Verilator.  
-3. **Mini golden** AMOCAS.W/D/Q + stream plane subset hard PASS (no soft-skip CAS).  
+3. **Mini golden** AMOCAS.W/D/Q + stream plane subset hard PASS; **full CRT** `mc-spo-veri` 9/9 on `DV_TARGET=g6lc64_stream8` (no soft-skip CAS).  
 4. **H-edge** smoke still green on the package (or documented ISA strip).  
 5. **`.dts` ↔ config ↔ spec** row in `AGENTS-dts-validation.md`.  
 6. **Timing note** + FO4 screen; no `fo4-v1` edit from fixture STA.  
