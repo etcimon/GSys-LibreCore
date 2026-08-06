@@ -25,7 +25,7 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **Directed multicore suite** | `testlist_mc_stream` — stream, AMOCAS, st-fwd, fence, CAS lock, **CF×stream**, CAS×stream, mispred×stream | `architecture/multi-core/README.md` · `architecture/l2-l3-cache/README.md` · U6/p6 notes in `remaining-upgrade-sequence.md` · `verif/tests/testlist_mc_stream.yaml` · asm `verif/tests/custom/multicore/` |
 | **Spike soak** | `mc-spo-spike` / `mc-spo-soak` green path for narrow list | Scripts `verif/regress/mc-spo-{spike,soak}.sh` · suite registry `build-platform/src/config/defaults.ts` · host residual `AGENTS-build-platform.md` §4–§5 |
 | **RTL mini golden** | `mc-mini-veri` hard PASS AMOCAS.W/D (no soft-skip); **cataloged** in `defaults.ts` | `verif/regress/mc-mini-veri.sh` · `mini_amocas_{w,d}.S` · suite id `mc-mini-veri` · TB `corev_apu/tb/ariane_tb.cpp` · Zacas impl row |
-| **RTL full CRT residual** | `mc-spo-veri` **cataloged**; CRT density / timeout residual | suite id `mc-spo-veri` · `verif/regress/mc-spo-veri.sh` · FSE: `architecture/speculative-execution/` · `agents/guides/AGENTS-speculation.md` |
+| **RTL full CRT residual** | `mc-spo-veri` **FORCE_IMAFDC 9/9 hard green** (DeepSpec STQ); multi-core L2 open | suite id `mc-spo-veri` · `verif/regress/mc-spo-veri.sh` · FSE: `architecture/speculative-execution/` · `agents/guides/AGENTS-speculation.md` |
 | **FTQ / frontend** | Mispredict reseed + demand fixes for bare-metal green | Guide `agents/guides/AGENTS-branch-prediction.md` · scaffold `architecture/branch-prediction/README.md` · RTL `core/frontend/{frontend,cva6_ftq}.sv` |
 | **Structural FO4** | sparse_ex/frontend residual close @ **2.5 GHz** (screening ≠ STA) | Package `sv-timing/AGENTS.md` · `sv-timing/architecture/MONOREPO-SOAK.md` · `FREQUENCY-CLOSURE.md` · host `AGENTS-build-platform.md` §6.1 / §7 · plan `architecture/build-platform-opensta-from-timing.md` · philosophy §2.8 in `AGENTS-coding-philosophy.md` |
 | **R3a dual-hart OpenSBI** | `fw_payload` + WSL Variane SUCCESS; **R3b Image external** | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
@@ -48,18 +48,14 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    Spike Zacas soft-skip remains honest (RTL mini = CAS golden). Maps:
    `AGENTS-specs-to-tests.md`, `AGENTS-build-platform.md` §4/§6.
 
-2. ~~**Full CRT `mc-spo-veri` green on one target**~~ **partial → stream residual closed** —
-   `MC_SPO_VERI_FORCE_IMAFDC=1` + Verilator **5.008** + compact `link_verilator.ld`.
-   **Root cause (2026-08-06):** WT fill→verify hang at ≥40 B was **STQ depth=4**
-   (`DeepSpecEn=0` → `ariane_pkg::DEPTH_COMMIT=4`). Bare `mini_stream_plane`: 32 B
-   PASS, 40 B+ timeout; store-only PASS; `fence` between fill/verify PASS. Enabling
-   `DeepSpecEn=1` on `cv64a6_imafdc_sv39` deepens STQ (spec/commit) and hard-greens:
-   mini 32–512 B, CRT `mc_stream_plane` (~2.9k cyc), `mc_spo_cas_stream` (~3.3k cyc).
-   Prior TX free / load_tx_collision missunit fixes still required under load.
-   Multi-core `server_math`+L2 CRT still open.  
-   **Priors:** `verif/regress/mc-spo-veri.sh` · `verif/tests/custom/multicore/mini_stream_plane.S`
-   · `core/store_buffer.sv` · `core/include/cv64a6_imafdc_sv39_config_pkg.sv` ·
-   `agents/guides/AGENTS-speculation.md` · TB `corev_apu/tb/ariane_tb.cpp`.
+2. ~~**Full CRT `mc-spo-veri` green on one target**~~ **done (FORCE_IMAFDC imafdc)** —
+   `MC_SPO_VERI_FORCE_IMAFDC=1` + Verilator **5.008** + compact `link_verilator.ld`:
+   **9/9 hard PASS** (`zacas_w/d`, st_fwd, fence, cas_lock, cf_stream, cas_stream,
+   mispred_stream, stream_plane) after `DeepSpecEn=1` STQ deepen + prior WT TX/missunit
+   fixes. Root cause was STQ `DEPTH_COMMIT=4` (hang ≥40 B fill→verify; fence/store-only OK).
+   Log: `monorepo-soak/mc-spo-veri-full-smoke.log`. Multi-core `server_math`+L2 CRT still open.  
+   **Priors:** `verif/regress/mc-spo-veri.sh` · `mini_stream_plane.S` · `store_buffer.sv` ·
+   `cv64a6_imafdc_sv39_config_pkg.sv` · `AGENTS-speculation.md` · `ariane_tb.cpp`.
 
 3. **H-edge directed diagnostics** (10 narrow + CF) — VS entry / hedeleg WARL / VTSR·VTW·VTVM→cause 22
    / SPV vs MPV polish; Spike first (`--isa …h…`, open PMP), then RTL; harden `*tval`/`*tinst` if
@@ -388,10 +384,9 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
       FTQ reseed + I$/missunit/AMO path fixes for green Variane
     - [x] Structural FO4 residual cuts on sparse_ex/frontend at **2.5 GHz** (`sv-timing`;
       screening only — not STA). Host clean/`--from-timing` track closed offline
-    - [~] Full CRT RTL cosim (`mc-spo-veri`) — **smoke 7/7 green** FORCE_IMAFDC;
-      residual hang/flake `cas_stream`+`stream_plane` (`MC_SPO_VERI_FULL=1`);
-      mini = hard CAS golden. → Practical next **§2** residual; priors: `mc-spo-veri.sh`,
-      `agents/guides/AGENTS-speculation.md`, `architecture/speculative-execution/`
+    - [x] Full CRT RTL cosim (`mc-spo-veri`) — **FORCE_IMAFDC 9/9 hard green** (DeepSpec STQ
+      + WT TX/missunit); multi-core `server_math`+L2 still open. → **§2 done (imafdc)**;
+      priors: `mc-spo-veri.sh`, `mini_stream_plane.S`, `AGENTS-speculation.md`
     - [x] Register `mc-mini-veri` + `mc-spo-veri` in `defaults.ts` → **§1 done**;
       priors: `build-platform/AGENTS.md` §4, `AGENTS-specs-to-tests.md`
     - [ ] H-edge directed suite (VS/hedeleg/VT*→22/SPV·MPV) Spike then RTL → **§3**;
@@ -507,10 +502,10 @@ Tick as completed. Each is `agents/spec/<filename>`.
 - [ ] Spike Zacas cosim remains **unavailable** (ISS); hard-gate CAS on RTL mini / Variane only.
   → Practical next **§8**; priors: `riscv-spec-I-5.9-zacas.html`, Zacas gap in
   `AGENTS-specs-to-tests.md`, `verif/regress/mc-mini-veri.sh`.
-- [ ] Multicore RTL CRT residual (`mc-spo-veri`) — document last-known fail modes
-  (timeout sentinel `0x7fffffff`, I$ way-pred, PHDR preload) on re-entry.
-  → **§2**; priors: `mc-spo-veri.sh` header, `agents/guides/AGENTS-speculation.md`,
-  `architecture/speculative-execution/`.
+- [ ] Multicore RTL CRT residual (`server_math`+L2, not FORCE_IMAFDC) — re-entry after
+  single-core imafdc 9/9 green.  
+  → **§2 open multi-core**; priors: `mc-spo-veri.sh` header, `AGENTS-speculation.md`,
+  `architecture/speculative-execution/`, `architecture/multi-core/README.md`.
 - [ ] H-edge litmus completeness vs Priv ch5 (hedeleg WARL, virt-instr 22, MPV vs SPV) —
   only `kvm_h/*` today.
   → **§3**; priors: `architecture/server-math-hypervisor.md`,
