@@ -794,7 +794,7 @@ module cva6
       .fetch_entry_ready_i(fetch_ready_id_if)
   );
 
-  cva6_smt_pc_bank #(
+  g6lc_smt_pc_bank #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_pc_bank (
       .clk_i,
@@ -913,7 +913,7 @@ module cva6
     assign smt_hart_halt = smt_hart_halt_q;
   end
 
-  cva6_hart_state #(
+  g6lc_hart_state #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_hart_state (
       .clk_i,
@@ -933,7 +933,7 @@ module cva6
       .hart_block_o  (smt_hart_block)
   );
 
-  cva6_thread_select #(
+  g6lc_thread_select #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_thread_select (
       .clk_i,
@@ -1350,7 +1350,7 @@ module cva6
   // ---------
   // CSR (U6.1: banked via cva6_smt_csr_bank when NrHarts>1)
   // ---------
-  cva6_smt_csr_bank #(
+  g6lc_smt_csr_bank #(
       .CVA6Cfg           (CVA6Cfg),
       .exception_t       (exception_t),
       .jvt_t             (jvt_t),

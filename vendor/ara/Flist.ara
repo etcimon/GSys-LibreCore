@@ -52,8 +52,8 @@ ${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/ctrl_registers.sv
 ${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/cva6_accel_first_pass_decoder.sv
 
 // APU glue
-${CVA6_REPO_DIR}/corev_apu/src/cva6_ara_attach.sv
-${CVA6_REPO_DIR}/corev_apu/src/cva6_axi_2to1_mux.sv
+${CVA6_REPO_DIR}/corev_apu/src/g6lc_ara_attach.sv
+${CVA6_REPO_DIR}/corev_apu/src/g6lc_axi_2to1_mux.sv
 
 // Lanes / FUs
 ${CVA6_REPO_DIR}/vendor/ara/upstream/hardware/src/lane/fixed_p_rounding.sv

@@ -437,7 +437,7 @@ module frontend
     // Without this, sequential addresses already queued after a taken jump/branch
     // are drained by demand fetch (often empty DRAM → 0x0000 → ILLEGAL_INSTR).
     // Same-cycle push (via if_ready) re-seeds the redirect PC into an empty FTQ.
-    cva6_ftq #(
+    g6lc_ftq #(
         .CVA6Cfg(CVA6Cfg),
         .DEPTH  (CVA6Cfg.FtqDepth)
     ) i_ftq (
@@ -462,7 +462,7 @@ module frontend
     );
 
     if (CVA6Cfg.FdipEn) begin : gen_fdip
-      cva6_fdip #(
+      g6lc_fdip #(
           .CVA6Cfg (CVA6Cfg),
           .DISTANCE(CVA6Cfg.FdipDistance)
       ) i_fdip (
@@ -484,7 +484,7 @@ module frontend
     end
 
     if (CVA6Cfg.LoopBufEn) begin : gen_lbuf
-      cva6_loop_buffer #(
+      g6lc_loop_buffer #(
           .CVA6Cfg    (CVA6Cfg),
           .NR_ENTRIES (CVA6Cfg.LoopBufEntries),
           .DATA_W     (CVA6Cfg.FETCH_WIDTH)
@@ -866,7 +866,7 @@ module frontend
     );
   end else if (CVA6Cfg.BPType == config_pkg::GSHARE) begin : gshare_gen
     // U1: standalone gshare (PC ⊕ GHR), same port contract as bht.
-    cva6_bp_gshare #(
+    g6lc_bp_gshare #(
         .CVA6Cfg     (CVA6Cfg),
         .bht_update_t(bht_update_t),
         .NR_ENTRIES  (CVA6Cfg.BHTEntries)
@@ -886,7 +886,7 @@ module frontend
     // btb_prediction is only driven here when BPIndirectEn (ITTAGE); otherwise
     // the classic btb_gen above owns it.
     btb_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] btb_fabric;
-    cva6_bp_top #(
+    g6lc_bp_top #(
         .CVA6Cfg          (CVA6Cfg),
         .bht_update_t     (bht_update_t),
         .btb_update_t     (btb_update_t),

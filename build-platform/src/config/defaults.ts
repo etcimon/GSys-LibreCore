@@ -980,18 +980,18 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     // Per-target extras: Ara RVV IP only when linting/synthing the _v package.
     // Requires `cva6-build vendor sync ara` (upstream tree + Flist.ara present).
     extraFlistsByTarget: {
-      cv64a6_server_math_v: ["vendor/ara/Flist.ara"],
+      g6lc64_server_math_v: ["vendor/ara/Flist.ara"],
     },
     waiverFile: "verilator_config.vlt",
     top: "cva6",
     // RVV package needs typed accelerator interfaces for LSU/acc paths.
     topByTarget: {
-      cv64a6_server_math_v: "cva6_ara_lint_top",
+      g6lc64_server_math_v: "g6lc_ara_lint_top",
     },
     // Default gate: full-feature 64-bit + minimal 32-bit. Production-heavy
-    // packages (cv64a6_ooo / ooo_server, server_math, smt2, spec_deep) are
+    // packages (g6lc64_ooo / ooo_server, server_math, smt2, spec_deep) are
     // opt-in so every PR stays fast:
-    //   cva6-build verify --target cv64a6_ooo_server
+    //   cva6-build verify --target g6lc64_ooo_server
     //   cva6-build test --suite ooo-l3-tests
     targets: ["cv64a6_imafdc_sv39", "cv32a65x"],
     // Mirrors the accepted Verilator flag set in the repo-root Makefile
@@ -1020,10 +1020,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     // next-work #3; AGENTS-specs-to-impl.md "OoO formal"). Self-contained prop
     // modules under core/ooo/formal/ — do not require full-core elaboration.
     formalTasks: [
-      "core/ooo/formal/cva6_ooo_freelist.sby",
-      "core/ooo/formal/cva6_ooo_rob.sby",
-      "core/ooo/formal/cva6_ooo_cancel.sby",
-      "core/ooo/formal/cva6_ooo_rename.sby",
+      "core/ooo/formal/g6lc_ooo_freelist.sby",
+      "core/ooo/formal/g6lc_ooo_rob.sby",
+      "core/ooo/formal/g6lc_ooo_cancel.sby",
+      "core/ooo/formal/g6lc_ooo_rename.sby",
     ],
     simSuites: ["smoke-cv64a6", "smoke-cv32a65x"],
     stages: { lint: true, formal: true, sim: true, synth: true },
@@ -1034,9 +1034,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // 483 at the 2026-07-24 measurement; ratcheted to 482 when U8a's explicit
       // mhpmevent WARL slice removed a WIDTHTRUNC warning; ratcheted to 481
       // when U7a landed; 482 with U1 TAGE-lite; 483 with U3 I$ way-predictor.
-      // cv32a65x stays on BHT / WayPredEn=0 and is unchanged.
+      // cv32a65x: was 138 when g6lc_* instances failed to elaborate (under-count);
+      // re-measured 2026-08-06 after g6lc instance rename (full elab): 146.
       cv64a6_imafdc_sv39: 483,
-      cv32a65x: 138,
+      cv32a65x: 146,
     },
     failOnMissingBaseline: false,
   },
@@ -1112,20 +1113,20 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         compartment: "smt2",
         kind: "path-check",
         paths: [
-          "core/include/cv64a6_smt2_config_pkg.sv",
+          "core/include/g6lc64_smt2_config_pkg.sv",
           "corev_apu/bootrom/ariane-smt2.dts",
           "verif/regress/smt-linux-r3-cosim.sh",
         ],
       },
       {
         id: "diag-smt2-lint",
-        description: "Verilator lint of cv64a6_smt2 (NrHarts=2 package).",
+        description: "Verilator lint of g6lc64_smt2 (NrHarts=2 package).",
         compartment: "smt2",
         kind: "verilator-lint",
         tools: ["verilator"],
         optional: true,
         verilator: {
-          target: "cv64a6_smt2",
+          target: "g6lc64_smt2",
           // SMT2 may add warnings; own budget so core baseline is not polluted.
           warningBudget: 600,
         },
@@ -1153,20 +1154,20 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         compartment: "ooo",
         kind: "path-check",
         paths: [
-          "core/ooo/formal/cva6_ooo_freelist.sby",
-          "core/ooo/formal/cva6_ooo_rob.sby",
-          "core/ooo/formal/cva6_ooo_rename.sby",
+          "core/ooo/formal/g6lc_ooo_freelist.sby",
+          "core/ooo/formal/g6lc_ooo_rob.sby",
+          "core/ooo/formal/g6lc_ooo_rename.sby",
         ],
       },
       {
         id: "diag-ooo-lint",
-        description: "Verilator lint of cv64a6_ooo config package.",
+        description: "Verilator lint of g6lc64_ooo config package.",
         compartment: "ooo",
         kind: "verilator-lint",
         tools: ["verilator"],
         optional: true,
         verilator: {
-          target: "cv64a6_ooo",
+          target: "g6lc64_ooo",
           warningBudget: 650,
         },
       },
@@ -1177,7 +1178,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         compartment: "apu",
         kind: "path-check",
         optional: true,
-        paths: ["vendor/ara/Flist.ara", "verif/tb/cva6_ara_lint_top.sv"],
+        paths: ["vendor/ara/Flist.ara", "verif/tb/g6lc_ara_lint_top.sv"],
       },
       {
         id: "diag-ara-lint",
@@ -1187,8 +1188,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         tools: ["verilator"],
         optional: true,
         verilator: {
-          target: "cv64a6_server_math_v",
-          top: "cva6_ara_lint_top",
+          target: "g6lc64_server_math_v",
+          top: "g6lc_ara_lint_top",
           extraFlists: ["vendor/ara/Flist.ara"],
           warningBudget: 800,
         },
