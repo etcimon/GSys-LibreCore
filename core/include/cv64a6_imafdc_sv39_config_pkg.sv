@@ -49,15 +49,19 @@ package cva6_config_pkg;
   localparam CVA6ConfigDcacheInvalidateOnFlush = 1'b0;
 
   localparam CVA6ConfigDcacheIdWidth = 1;
-  localparam CVA6ConfigMemTidWidth = 2;
+  // Stream ST→LD CRT (mc_stream_plane / fill≥160B) needs more in-flight store TXes
+  // than the legacy embedded default (MemTidWidth=2 → only 4 TX slots). 4 → 16 TX.
+  localparam CVA6ConfigMemTidWidth = 4;
 
-  localparam CVA6ConfigWtDcacheWbufDepth = 8;
+  // Deeper WT coalescing buffer for dense sequential stores before verify loads.
+  localparam CVA6ConfigWtDcacheWbufDepth = 16;
 
-  localparam CVA6ConfigNrScoreboardEntries = 8;
+  localparam CVA6ConfigNrScoreboardEntries = 16;
 
   localparam CVA6ConfigNrLoadPipeRegs = 1;
   localparam CVA6ConfigNrStorePipeRegs = 0;
-  localparam CVA6ConfigNrLoadBufEntries = 2;
+  // Match denser load verify after stream fill (was 2 — too tight under CRT).
+  localparam CVA6ConfigNrLoadBufEntries = 8;
 
   localparam CVA6ConfigRASDepth = 2;
   localparam CVA6ConfigBTBEntries = 32;
@@ -157,7 +161,7 @@ package cva6_config_pkg;
       NrCachedRegionRules: unsigned'(1),
       CachedRegionAddrBase: 1024'({64'h8000_0000}),
       CachedRegionLength: 1024'({64'h40000000}),
-      MaxOutstandingStores: unsigned'(7),
+      MaxOutstandingStores: unsigned'(16),
       DebugEn: bit'(1),
       SDTRIG: bit'(0),
       Mcontrol6: bit'(0),

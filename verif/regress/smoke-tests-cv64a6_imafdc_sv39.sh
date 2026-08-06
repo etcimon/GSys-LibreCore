@@ -72,35 +72,28 @@ if [ -z "${UVM_VERBOSITY:-}" ]; then
   export UVM_VERBOSITY=UVM_NONE
 fi
 
+# Cycle limit lives in rvfi_tracer.sv default (20M) — covers rv64ui-v-add
+# (~12M cycles on WT dcache). Override per-run with +time_out=<N> if needed.
 export DV_OPTS="${DV_OPTS:-} --issrun_opts=+debug_disable=1+UVM_VERBOSITY=$UVM_VERBOSITY"
 
 CC_OPTS="-static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -g ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common -lgcc"
 
 cd verif/sim/
 
-# iss_timeout wall seconds (Spike uses max(//3, 120); Verilator uses full budget).
-ISS_TIMEOUT="${ISS_TIMEOUT:-600}"
-
-# Prefer dual ISS when the caller asked for it; Spike-only override for the
-# virtual-memory smoke case (see below).
-ISS_DUAL="${DV_SIMULATORS}"
+# iss_timeout (wall seconds): Verilator rv64ui-v-add is ~12–18e6 cycles ≈
+# 5–8 min on this host; allow 20 min. Spike uses max(iss_timeout//3, 120) and
+# stages logs via /tmp (see verif/sim/Makefile), so Spike is not the bottleneck.
+ISS_TIMEOUT="${ISS_TIMEOUT:-1200}"
 
 make -C ../.. clean
 make clean_all
-python3 cva6.py --testlist=../tests/testlist_riscv-compliance-cv64a6_imafdc_sv39.yaml --test rv32i-I-ADD-01 --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$ISS_DUAL" $DV_OPTS --iss_timeout="$ISS_TIMEOUT"
-# rv64ui-v-add: Spike-only in smoke. Verilator dual-ISS on the v/ env has a
-# residual hang mid-vm_boot memset (pipeline stops retiring after ~3k commits
-# for tens of millions of cycles). Spike still exercises the VM ELF; physical
-# dual-ISS is covered by rv64ui-p-add below. Re-enable veri when hang is fixed.
-python3 cva6.py --testlist=../tests/testlist_riscv-tests-cv64a6_imafdc_sv39-v.yaml --test rv64ui-v-add --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss=spike $DV_OPTS --iss_timeout="$ISS_TIMEOUT"
-python3 cva6.py --testlist=../tests/testlist_riscv-tests-cv64a6_imafdc_sv39-p.yaml --test rv64ui-p-add --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$ISS_DUAL" $DV_OPTS --iss_timeout="$ISS_TIMEOUT"
-python3 cva6.py --testlist=../tests/testlist_riscv-tests-cv64a6_imafdc_sv39-p.yaml --test rv64si-p-noncanonical --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$ISS_DUAL" $DV_OPTS --iss_timeout="$ISS_TIMEOUT"
-python3 cva6.py --testlist=../tests/testlist_riscv-arch-test-cv64a6_imafdc_sv39.yaml --test rv64i_m-add-01 --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$ISS_DUAL" $DV_OPTS --iss_timeout="$ISS_TIMEOUT" --linker=../../config/gen_from_riscv_config/linker/link.ld
-python3 cva6.py --testlist=../tests/testlist_custom.yaml --test custom_test_template --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$ISS_DUAL" $DV_OPTS --iss_timeout="$ISS_TIMEOUT"
-# hello_world: Spike-only. Verilator dual currently traps early (tohost=1337 /
-# handle_exception) while Spike exits cleanly; C/syscall bring-up residual.
-# custom_test_template above already dual-passes bare-metal ASM.
-python3 cva6.py --c_tests ../tests/custom/hello_world/hello_world.c --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss=spike --gcc_opts="$CC_OPTS -nostdlib -lgcc" $DV_OPTS --iss_timeout="$ISS_TIMEOUT" --linker=../../config/gen_from_riscv_config/linker/link.ld
+python3 cva6.py --testlist=../tests/testlist_riscv-compliance-cv64a6_imafdc_sv39.yaml --test rv32i-I-ADD-01 --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$DV_SIMULATORS" $DV_OPTS --iss_timeout="$ISS_TIMEOUT"
+python3 cva6.py --testlist=../tests/testlist_riscv-tests-cv64a6_imafdc_sv39-v.yaml --test rv64ui-v-add --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$DV_SIMULATORS" $DV_OPTS --iss_timeout="$ISS_TIMEOUT"
+python3 cva6.py --testlist=../tests/testlist_riscv-tests-cv64a6_imafdc_sv39-p.yaml --test rv64ui-p-add --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$DV_SIMULATORS" $DV_OPTS --iss_timeout="$ISS_TIMEOUT"
+python3 cva6.py --testlist=../tests/testlist_riscv-tests-cv64a6_imafdc_sv39-p.yaml --test rv64si-p-noncanonical --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$DV_SIMULATORS" $DV_OPTS --iss_timeout="$ISS_TIMEOUT"
+python3 cva6.py --testlist=../tests/testlist_riscv-arch-test-cv64a6_imafdc_sv39.yaml --test rv64i_m-add-01 --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$DV_SIMULATORS" $DV_OPTS --iss_timeout="$ISS_TIMEOUT" --linker=../../config/gen_from_riscv_config/linker/link.ld
+python3 cva6.py --testlist=../tests/testlist_custom.yaml --test custom_test_template --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$DV_SIMULATORS" $DV_OPTS --iss_timeout="$ISS_TIMEOUT"
+python3 cva6.py --c_tests ../tests/custom/hello_world/hello_world.c --iss_yaml cva6.yaml --target cv64a6_imafdc_sv39 --iss="$DV_SIMULATORS" --gcc_opts="$CC_OPTS -nostdlib -lgcc" $DV_OPTS --iss_timeout="$ISS_TIMEOUT" --linker=../../config/gen_from_riscv_config/linker/link.ld
 make -C ../.. clean
 make clean_all
 

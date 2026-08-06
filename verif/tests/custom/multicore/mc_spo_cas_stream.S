@@ -1,18 +1,21 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: LicenseRef-Proprietary
 # Copyright (c) 2026 Etienne Cimon
 #
-# Stream fill + optional AMOCAS handoff + integrity. Soft-skip CAS if illegal.
+# Stream fill + AMOCAS handoff + integrity.
+# Working set kept compact (512 B data + 8 B lock): WT D$ write-through makes
+# multi-KiB loops multi-million-cycle on bare Variane; pattern is unchanged.
+# Soft-skip CAS only if illegal (ISS without Zacas).
 
   .globl main
 main:
-  li   t0, 4096
+  # frame: 512 B stream + 16 B pad/lock (aligned)
+  li   t0, 544
   sub  sp, sp, t0
   mv   s0, sp
-  li   t1, 2048
-  add  s1, sp, t1             # CAS lock region
+  addi s1, sp, 512            # CAS lock word (past stream)
 
   mv   t0, s0
-  li   t1, 2048
+  li   t1, 512
 1:
   sub  t2, t0, s0
   xor  t3, t0, t2
@@ -48,7 +51,7 @@ main:
 
 skip_cas:
   mv   t0, s0
-  li   t1, 2048
+  li   t1, 512
 2:
   sub  t2, t0, s0
   xor  t3, t0, t2
@@ -58,7 +61,7 @@ skip_cas:
   addi t1, t1, -8
   bnez t1, 2b
 
-  li   t0, 4096
+  li   t0, 544
   add  sp, sp, t0
   li   a0, 0
   jal  exit
@@ -69,7 +72,7 @@ cas_illegal:
   j    skip_cas
 
 fail:
-  li   t0, 4096
+  li   t0, 544
   add  sp, sp, t0
   li   a0, 1
   jal  exit

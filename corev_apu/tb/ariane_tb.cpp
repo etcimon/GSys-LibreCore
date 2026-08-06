@@ -29,7 +29,12 @@
 #endif
 #include "Variane_testharness__Dpi.h"
 
-// Define CVA6_PROBE_NO_L2=1 without gen_l2; CVA6_PROBE_NO_CORE1 without core1.
+// Hierarchical MC hang probes (OpenSBI bring-up only). Default bare-metal /
+// Zacas mini builds must NOT compile them — paths assume multi-core + HPDCACHE + L2
+// and fail to build for WT single-core packages (cv64a6_imafdc_sv39).
+// Enable with: -DCVA6_MC_PC_PROBE_COMPILE and optional CVA6_PROBE_NO_{L2,CORE1,HPD}.
+// Runtime still requires env CVA6_MC_PC_PROBE=1.
+// Define CVA6_PROBE_NO_L2 without gen_l2; CVA6_PROBE_NO_CORE1 without core1.
 #include <stdio.h>
 #include <iostream>
 #include <iomanip>
@@ -460,9 +465,7 @@ done_processing:
     }
     // Hang-7 event probe (every cycle, capped): use COMMIT PC (not npc) so RF
     // matches retired state. Also filter mentry to alias-shaped calls.
-    // Compile-time gated: hierarchical paths depend on multi-core/L2/HPD layout
-    // and break default cv64a6_imafdc_sv39 smoke (g6lc_icache, NrCores=1).
-    // Enable with: make verilate CFLAGS+="-DCVA6_MC_PC_PROBE_COMPILE=1"
+    // Compile-time gated: see CVA6_MC_PC_PROBE_COMPILE at file head.
 #if defined(CVA6_MC_PC_PROBE_COMPILE) && (VERILATOR_VERSION_INTEGER >= 5000000)
     if (std::getenv("CVA6_MC_PC_PROBE") != nullptr && main_time >= 10000 && main_time <= 400000) {
       static int path0_logs = 0;
@@ -548,115 +551,6 @@ done_processing:
                   << std::dec << "\n";
         ntag_logs++;
       }
-      // Hang-6 residual: next_node/next_tag path around /cpus walk.
-      // Prior run: all tag loads match DRAM; failing next_node(0x64) returns
-      // -4 in ~49 cycles with no next_tag probe — check entry args + BAD path.
-      static int ntag_ent = 0;
-      static int ntag_ret = 0;
-      static int ntag_ld = 0;
-      static int optr_null = 0;
-      static int nn_ent = 0;
-      static int nn_bad = 0;
-      static int nn_chk = 0;
-      auto *dram = reinterpret_cast<const uint8_t *>(MEM);
-      auto be32_at = [&](uint64_t abs) -> uint32_t {
-        if (abs < 0x80000000ULL || abs + 4 > 0x80200000ULL) return 0xffffffffu;
-        size_t o = (size_t)(abs - 0x80000000ULL);
-        return ((uint32_t)dram[o] << 24) | ((uint32_t)dram[o + 1] << 16) |
-               ((uint32_t)dram[o + 2] << 8) | (uint32_t)dram[o + 3];
-      };
-      const uint64_t fdt_base = 0x8001e000ULL;
-      const uint32_t off_struct = 0x38;
-      if (committing && main_time >= 130000 && main_time <= 160000) {
-        // next_node entry @0x80012ae6: a0=fdt a1=offset a2=&depth
-        if (cpc_ev == 0x80012ae6ULL && nn_ent < 40) {
-          int32_t depth = -999;
-          if (a2_ev >= 0x80000000ULL && a2_ev + 4 <= 0x80200000ULL) {
-            // depth is stack (often near 0x80046e00) — still in DRAM window
-            size_t o = (size_t)(a2_ev - 0x80000000ULL);
-            depth = (int32_t)(dram[o] | (dram[o + 1] << 8) | (dram[o + 2] << 16) |
-                              (dram[o + 3] << 24));
-          } else if (a2_ev >= 0x80040000ULL && a2_ev < 0x80050000ULL) {
-            size_t o = (size_t)(a2_ev - 0x80000000ULL);
-            depth = (int32_t)(dram[o] | (dram[o + 1] << 8) | (dram[o + 2] << 16) |
-                              (dram[o + 3] << 24));
-          }
-          uint32_t golden = be32_at(fdt_base + off_struct + (uint32_t)a1_ev);
-          std::cerr << std::hex << "[nn_e] @" << main_time
-                    << " off=0x" << a1_ev << " fdt=0x" << a0_ev
-                    << " depth_p=0x" << a2_ev << " depth=" << std::dec << depth
-                    << std::hex << " dram_tag=0x" << golden
-                    << " ra=0x" << ra_ev << std::dec << "\n";
-          nn_ent++;
-        }
-        // next_node after first next_tag: @0x80012b0e li a5,1 — a0 should be tag
-        if (cpc_ev == 0x80012b0eULL && nn_chk < 40) {
-          std::cerr << std::hex << "[nn_chk] @" << main_time
-                    << " tag_a0=0x" << a0_ev << " a1=0x" << a1_ev
-                    << " s1=0x" << ge(9) << " ra=0x" << ra_ev
-                    << std::dec << "\n";
-          nn_chk++;
-        }
-        // BADOFFSET path @0x80012bc8: li s1,-4
-        if (cpc_ev == 0x80012bc8ULL && nn_bad < 20) {
-          std::cerr << std::hex << "[nn_bad] @" << main_time
-                    << " a0=0x" << a0_ev << " a1=0x" << a1_ev
-                    << " a5=0x" << ge(15) << " s1=0x" << ge(9)
-                    << " s3=0x" << ge(19) << " ra=0x" << ra_ev
-                    << std::dec << "\n";
-          nn_bad++;
-        }
-        // Range catch: any commit in next_node during late fail window
-        static int nn_body = 0;
-        if (nn_body < 60 && main_time >= 140000 &&
-            cpc_ev >= 0x80012ae6ULL && cpc_ev <= 0x80012bcaULL) {
-          std::cerr << std::hex << "[nn_b] @" << main_time << " cpc=0x" << cpc_ev
-                    << " a0=0x" << a0_ev << " a1=0x" << a1_ev << " a2=0x" << a2_ev
-                    << " a5=0x" << ge(15) << " s1=0x" << ge(9) << " s2=0x" << ge(18)
-                    << " ra=0x" << ra_ev << std::dec << "\n";
-          nn_body++;
-        }
-        // next_tag entry: a0=fdt a1=offset a2=&nextoffset
-        if (cpc_ev == 0x80012944ULL && ntag_ent < 80) {
-          uint32_t golden = be32_at(fdt_base + off_struct + (uint32_t)a1_ev);
-          std::cerr << std::hex << "[ntag_e] @" << main_time
-                    << " off=0x" << a1_ev << " fdt=0x" << a0_ev
-                    << " dram_tag=0x" << golden << " ra=0x" << ra_ev
-                    << std::dec << "\n";
-          ntag_ent++;
-        }
-        // After BE-tag assembly @0x8001299e (li a5,9): s2 holds BE tag
-        if (cpc_ev == 0x8001299eULL && ntag_ld < 100) {
-          uint32_t be = (uint32_t)ge(18); // s2
-          uint32_t off = (uint32_t)ge(21); // s5
-          uint32_t golden = be32_at(fdt_base + off_struct + off);
-          std::cerr << std::hex << "[ntag_ld] @" << main_time
-                    << " off=0x" << off << " cpu_tag=0x" << be
-                    << " dram_tag=0x" << golden
-                    << " match=" << (be == golden ? 1 : 0)
-                    << " a0_ptr=0x" << a0_ev << " ra=0x" << ra_ev
-                    << std::dec << "\n";
-          ntag_ld++;
-        }
-        // next_tag return: mv a0,s2 @0x800129dc
-        if (cpc_ev == 0x800129dcULL && ntag_ret < 100) {
-          std::cerr << std::hex << "[ntag_r] @" << main_time
-                    << " tag=0x" << a0_ev << " s2=0x" << ge(18)
-                    << " s5_off=0x" << ge(21)
-                    << " s1_nex=0x" << ge(9) << " ra=0x" << ra_ev
-                    << std::dec << "\n";
-          ntag_ret++;
-        }
-        // offset_ptr returning NULL (a0==0 at ret 0x80012942)
-        if (cpc_ev == 0x80012942ULL && a0_ev == 0 && optr_null < 40) {
-          std::cerr << std::hex << "[optr_null] @" << main_time
-                    << " a0=0 a1=0x" << a1_ev << " a2=0x" << a2_ev
-                    << " ra=0x" << ra_ev << " s4=0x" << ge(20)
-                    << " s5=0x" << ge(21)
-                    << std::dec << "\n";
-          optr_null++;
-        }
-      }
       // Any commit that produces a0 = FDT_ERR_BADOFFSET (-4) in fdt / platform code
       static int bad4_logs = 0;
       static uint64_t last_a0 = 0;
@@ -681,31 +575,6 @@ done_processing:
                   << " a0=0x" << a0_ev << " a1=0x" << a1_ev << " s1=0x" << ge(9)
                   << " ra=0x" << ra_ev << std::dec << "\n";
         fdtret_logs++;
-      }
-      // Hang-6: EX resolve of jal fdt_next_tag @0x80012b0a — did is_mispredict fire?
-      static int jal_ex_logs = 0;
-      if (jal_ex_logs < 20 && main_time >= 130000 && main_time <= 160000) {
-        auto &rbj = top->rootp
-            ->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__ex_stage_i__DOT____Vcellout__branch_unit_i__resolved_branch_o;
-        auto rbj_bit = [&](int b) -> unsigned {
-          return (rbj[b / 32] >> (b % 32)) & 1u;
-        };
-        auto rbj_bits = [&](int lo, int n) -> uint64_t {
-          uint64_t v = 0;
-          for (int i = 0; i < n; i++)
-            if (rbj_bit(lo + i)) v |= (uint64_t)1 << i;
-          return v;
-        };
-        uint64_t jpc = rbj_bits(71, 64);
-        unsigned jv = rbj_bit(135);
-        if (jv && jpc == 0x80012b0aULL) {
-          std::cerr << std::hex << "[jal_ex] @" << main_time
-                    << " pc=0x" << jpc << " tgt=0x" << rbj_bits(7, 64)
-                    << " misp=" << rbj_bit(6) << " taken=" << rbj_bit(5)
-                    << " cf=" << rbj_bits(2, 3) << " ckpt=" << rbj_bit(0)
-                    << std::dec << "\n";
-          jal_ex_logs++;
-        }
       }
       // Hang-7: EX resolve of path_offset ret (0x8001377e) / nearby CF —
       // compare predict vs architectural target and whether bmiss fires.
@@ -760,11 +629,11 @@ done_processing:
       }
     }
 #endif
-    // Multi-core hang probe: PC + I$/L2/hub/ROM/DRAM (set CVA6_MC_PC_PROBE=1).
+    // Multi-core hang probe: PC + I$/L2/hub/ROM/DRAM.
+    // Compile: -DCVA6_MC_PC_PROBE_COMPILE  Runtime: CVA6_MC_PC_PROBE=1
     // Dense early samples catch L2/AMO hangs; late samples track OpenSBI progress
     // (historical SUCCESS ~6.5M cycles on smt2; server_math still soaking).
-    // Default off at compile time — see CVA6_MC_PC_PROBE_COMPILE above.
-#if defined(CVA6_MC_PC_PROBE_COMPILE) && (VERILATOR_VERSION_INTEGER >= 5000000)
+#if defined(CVA6_MC_PC_PROBE_COMPILE)
     if (std::getenv("CVA6_MC_PC_PROBE") != nullptr &&
         ((main_time >= 100 && main_time <= 800 && (main_time % 50) == 0) ||
          (main_time >= 400 && main_time <= 520 && (main_time % 5) == 0) ||

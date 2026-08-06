@@ -1,13 +1,113 @@
 # AGENTS workflow todo / pending-log
 
-Live tracker for the `agents/` documentation build. Read `AGENTS.md` and `agents/spec/INDEX.md` first.
+Live tracker for agent work. **Retrieval contract:** every open item below cites the architecture /
+progress files that hold its priors (why it exists, seams, acceptance). Open those first; this file
+is the queue, not the design.
+
+| Layer | Open first | Role |
+|-------|------------|------|
+| Prime directive / nav | [`AGENTS.md`](AGENTS.md) · [`agents/spec/INDEX.md`](agents/spec/INDEX.md) | Spec→code map, SoC §0, standing disciplines |
+| Programs of record | [`architecture/README.md`](architecture/README.md) · [`architecture/router-core-upgrade-program.md`](architecture/router-core-upgrade-program.md) · [`architecture/remaining-upgrade-sequence.md`](architecture/remaining-upgrade-sequence.md) | U1–U10 plan, live next, scaffold contract |
+| Spec ⇄ RTL / tests | [`AGENTS-specs-to-impl.md`](AGENTS-specs-to-impl.md) · [`AGENTS-specs-to-tests.md`](AGENTS-specs-to-tests.md) · [`AGENTS-specs-coverage.md`](AGENTS-specs-coverage.md) | Status vocabulary + suite/testlist rows |
+| Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
+| Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
 ## Current phase
-**U6/p6 + Zacas + multi-core spo diagnostics.** Zacas AMOCAS.W/D is config-gated (`RVZacas`) on
-server_math / ooo_server with decoder/amo_alu/HPDCache path and 5 narrow tests in
-`testlist_mc_stream`. Ara purpose guide + DTS landed earlier. Next: OpenSBI/Linux vector;
-`cva6.py` cosim of Zacas/spo + `v_memcpy_lmul`; R3b Linux `Image`; AMOCAS.Q deferred.
-Standing disciplines remain active.
+**Post-Zacas / multi-core spo + FO4 residual close (this worktree).**  
+Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual matrix
+`AGENTS-build-platform.md` §5–§7 · live RTL table `architecture/README.md`.
+
+### Landed plane (state + priors to retrieve)
+
+| Track | State | Priors / architecture / progress |
+|-------|--------|----------------------------------|
+| **Zacas AMOCAS.W/D** | `RVZacas` on `cv64a6_server_math{,_v}`, `cv64a6_ooo_server`, `cv64a6_imafdc_sv39`; decode + 3rd-op RF + `amo_alu` + WT/HPDCache/AXI CAS | Spec: `agents/spec/riscv-spec-I-5.9-zacas.html` · `#ext:zacas` · impl row `AGENTS-specs-to-impl.md` (Zacas) · tests `AGENTS-specs-to-tests.md` (mc-stream / gaps) · packages under `core/include/*config_pkg.sv` |
+| **Directed multicore suite** | `testlist_mc_stream` — stream, AMOCAS, st-fwd, fence, CAS lock, **CF×stream**, CAS×stream, mispred×stream | `architecture/multi-core/README.md` · `architecture/l2-l3-cache/README.md` · U6/p6 notes in `remaining-upgrade-sequence.md` · `verif/tests/testlist_mc_stream.yaml` · asm `verif/tests/custom/multicore/` |
+| **Spike soak** | `mc-spo-spike` / `mc-spo-soak` green path for narrow list | Scripts `verif/regress/mc-spo-{spike,soak}.sh` · suite registry `build-platform/src/config/defaults.ts` · host residual `AGENTS-build-platform.md` §4–§5 |
+| **RTL mini golden** | `mc-mini-veri` hard PASS AMOCAS.W/D (no soft-skip); **cataloged** in `defaults.ts` | `verif/regress/mc-mini-veri.sh` · `mini_amocas_{w,d}.S` · suite id `mc-mini-veri` · TB `corev_apu/tb/ariane_tb.cpp` · Zacas impl row |
+| **RTL full CRT residual** | `mc-spo-veri` **cataloged**; CRT density / timeout residual | suite id `mc-spo-veri` · `verif/regress/mc-spo-veri.sh` · FSE: `architecture/speculative-execution/` · `agents/guides/AGENTS-speculation.md` |
+| **FTQ / frontend** | Mispredict reseed + demand fixes for bare-metal green | Guide `agents/guides/AGENTS-branch-prediction.md` · scaffold `architecture/branch-prediction/README.md` · RTL `core/frontend/{frontend,cva6_ftq}.sv` |
+| **Structural FO4** | sparse_ex/frontend residual close @ **2.5 GHz** (screening ≠ STA) | Package `sv-timing/AGENTS.md` · `sv-timing/architecture/MONOREPO-SOAK.md` · `FREQUENCY-CLOSURE.md` · host `AGENTS-build-platform.md` §6.1 / §7 · plan `architecture/build-platform-opensta-from-timing.md` · philosophy §2.8 in `AGENTS-coding-philosophy.md` |
+| **R3a dual-hart OpenSBI** | `fw_payload` + WSL Variane SUCCESS; **R3b Image external** | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
+| **Ara / RVV** | Attach live-lintable + DTS + directed; VRF/cosim **open** | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
+| **H / KVM** | U9.0–U9.2 + `kvm-h-tests`; **no H-edge suite yet** | `architecture/server-math-hypervisor.md` · remaining-upgrade Phase B · `agents/spec/riscv-spec-II-5.*-hypervisor*.html` · impl Hypervisor row · `verif/tests/custom/kvm_h/` · suite `kvm-h-tests` |
+
+Standing disciplines remain active (`AGENTS.md` §0.4–§0.6). Keep
+`AGENTS-specs-to-{impl,tests,coverage}.md` in lockstep on ISA-visible / suite edits
+(Zacas already **partial W/D** in the working-tree maps).
+
+### Practical next (edge of implementation — ordered)
+
+Do **not** reopen soft-skip CAS or re-litigate green mini RTL unless a hard fail reappears.
+Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-spo-veri` → OpenSBI/Linux
+(see also diagnosis intent in `AGENTS-build-platform.md` residual soaks; when written,
+`verif/regress/AGENTS-regress-scripts.md`).
+
+1. ~~**Register residual suites in build-platform**~~ **done** — `mc-mini-veri` + `mc-spo-veri`
+   in `defaults.ts` (`optional: true`, not in `defaultSuites`); listed by `test --list`;
+   Spike Zacas soft-skip remains honest (RTL mini = CAS golden). Maps:
+   `AGENTS-specs-to-tests.md`, `AGENTS-build-platform.md` §4/§6.
+
+2. ~~**Full CRT `mc-spo-veri` green on one target**~~ **partial (smoke green)** —
+   `MC_SPO_VERI_FORCE_IMAFDC=1` + Verilator **5.008** + compact `link_verilator.ld`:
+   **7/7 smoke PASS** (`zacas_w/d`, st_fwd, fence, cas_lock, cf_stream, mispred_stream).
+   Infra fixed: self-built CRT ELFs, `Makefile` `-Wno-SIDEEFFECT` only if supported,
+   TB hierarchical probes behind `CVA6_MC_PC_PROBE_COMPILE` (WT single-core build).
+   **Residual hard:** `mc_spo_cas_stream` + `mc_stream_plane` hang/flake (timeout sentinel
+   `0x7fffffff`; one cas_stream PASS @~2.9M then re-timeout @20M) — keep in
+   `MC_SPO_VERI_FULL=1`, do **not** soft-pass; diagnose store-loop / SB drain next.
+   Multi-core `server_math`+L2 CRT still open.  
+   **Priors:** `verif/regress/mc-spo-veri.sh` · `agents/guides/AGENTS-speculation.md` ·
+   `architecture/speculative-execution/` · TB `corev_apu/tb/ariane_tb.cpp`.
+
+3. **H-edge directed diagnostics** (10 narrow + CF) — VS entry / hedeleg WARL / VTSR·VTW·VTVM→cause 22
+   / SPV vs MPV polish; Spike first (`--isa …h…`, open PMP), then RTL; harden `*tval`/`*tinst` if
+   litmus fails. Extends U9 + `kvm-h-tests`.  
+   **Priors:** `architecture/server-math-hypervisor.md` · `remaining-upgrade-sequence.md` Phase B ·
+   `agents/spec/riscv-spec-II-5.{1–6}-*.html` · `AGENTS-specs-to-impl.md` (Hypervisor H) ·
+   `verif/tests/custom/kvm_h/*` · suite `kvm-h-tests` · Priv ch5 anchors via `agents/spec/INDEX.md`.
+
+4. **Stability battery + regress isolation map** — compose Spike: h-edge (when present) +
+   `mc-spo-spike` + mini artifact gate; FO4 optional; write
+   `verif/regress/AGENTS-regress-scripts.md` (axes: target / ISS vs RTL / stack height / feature).  
+   **Priors:** `AGENTS.md` §0.2 (verify-in-lockstep) · `AGENTS-specs-to-tests.md` ·
+   `AGENTS-build-platform.md` §4–§5 · existing scripts under `verif/regress/mc-spo-*.sh`,
+   `mc-mini-veri.sh`, `mc-stream-tests.sh`.
+
+5. **Dual-ISS Spike+Verilator tandem polish** — same ELF, both planes; residual mismatch triage only.  
+   **Priors:** `AGENTS-build-platform.md` §5 (Dual-ISS open) · `verif/sim/cva6.py` ·
+   `AGENTS-specs-to-tests.md` · smoke / directed suite catalog in `defaults.ts`.
+
+6. **R3b Linux `Image`** — external (cva6-sdk / kernel); then OpenSBI payload with real userspace.  
+   **Priors:** `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` ·
+   `dts-linux-smt.md` · `software/smt2-linux/` · `remaining-upgrade-sequence.md` §4 item 8 ·
+   `AGENTS-dts-validation.md` · suites `opensbi-linux-boot`, `smt-linux-r3-cosim`.
+
+7. **OpenSBI VRF save/restore + `CONFIG_RISCV_ISA_V` + live Ara cosim** of `v_memcpy_lmul`
+   under `cva6.py` / `CVA6_ARA_ATTACH=1`.  
+   **Priors:** `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` §5 (SBI/Linux) ·
+   `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` ·
+   `verif/tests/testlist_ara_vector.yaml` · `remaining-upgrade-sequence.md` §4 item 9 / Phase C-heavy.
+
+8. **AMOCAS.Q deferred** — CAS.D dual-word pack polish only on hard fail; Spike has no zacas
+   (never treat Spike skip as RTL pass).  
+   **Priors:** `agents/spec/riscv-spec-I-5.9-zacas.html` · `AGENTS-specs-to-impl.md` (Zacas open notes) ·
+   `AGENTS-specs-to-tests.md` Zacas gap · mini golden path above.
+
+9. **Lab-only** — S3b-lab FO4 retune of `fo4-v1.toml` from **real** STA; S4b OpenROAD+LEF; full
+   `./build.sh verify` when tools provisioned.  
+   **Priors:** `architecture/build-platform-opensta-from-timing.md` (S0–S5) ·
+   `AGENTS-build-platform.md` §7 · `sv-timing/architecture/STA-HANDOFF.md` ·
+   `architecture/build-platform-workspace-lifecycle.md` · `AGENTS-technology.md` (PDK opt-in) ·
+   verify gate `AGENTS.md` §0.2 / `build-platform/AGENTS.md` §4.6.
+
+10. **Optional growth (not blocking residual bugs)** — production **stream8-class** package
+    (n-wide / y-core / FO4@x GHz) once multicore RTL CRT + H-edge are green; branding/publication
+    only if a rebrand branch merges here.  
+    **Priors:** `architecture/out-of-order/README.md` · `router-core-upgrade-program.md` ·
+    `architecture/multi-core/README.md` · `l2-l3-cache/README.md` · config surface
+    `AGENTS-configuration.md` · FO4 scale notes `AGENTS-build-platform.md` §6.1 ·
+    research drafts `architecture/Architecture-research-todo-drafts.md` (context only).
 
 ## Standing disciplines (apply every pass, per applicability)
 Six **co-equal** upkeep rules; run each pass when it applies (none overrides the SoC prime directive):
@@ -15,13 +115,6 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
 2. Log todos here in `AGENTS-todo.md`.
 3. Apply the contributor-licensing policy (`AGENTS-licensing.md`) — **code edits only**; never for
    `AGENTS*`/`agents/**`/`specs/**`/`docs/**`. Requires `.active-contributor` + `.licensing-policy` or errors.
-   **SUPERSEDED 2026-08-05** by tier-directed licensing: every file resolves to a tier via
-   `.licensing-tiers` (default `U **`); markdown follows its tier with no inline header
-   (`DOCS_UNDER_TIER`), so `AGENTS*`/`agents/**`/`docs/**` ARE in scope now. Also requires
-   `.licensing-tiers`. Hard guards: `E-UPSTREAMWRITE`, `E-DEMINIMIS`, `E-GPLLINK`, `E-TIERCONFLICT`.
-3a. Apply the branding policy (`AGENTS-branding.md`): new code `g6lc_*` / `g6lc64_*`; prose
-   "GSys LibreCore" then "LibreCore"; **rename at the boundary, never inside a tier-U file**; never
-   fake `mvendorid` / `marchid`.
 4. Apply the coding-philosophy checklist (`AGENTS-coding-philosophy.md`) using the target SoC context
    in `AGENTS-configuration.md` — **all code edits**; include a timing-impact note, review &
    validation checklist, `.dts`/spec/config alignment note, and SoC-context compatibility statement
@@ -31,70 +124,6 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
 6. Maintain Linux device-tree cross-validation (`AGENTS.md` §0.6): for device-tree-visible RTL/config
    changes, run `build-platform/scripts/fetch-linux-dts.{sh,ps1}` (sparse/blobless checkout), follow
    the procedure in `AGENTS-dts-validation.md`, and update the matching row.
-
-## RELEASE BLOCKERS — GSys LibreCore publication (opened 2026-08-05)
-
-These gate first publication to GitHub. None can be resolved by an agent alone.
-
-### Legal / counsel review
-- [ ] **B1. `LICENSE.GSys-Commercial` counsel review.** Shipped as an *offer document* only; it
-      explicitly grants nothing until a signed agreement exists. Royalty basis, term, territory,
-      indemnity caps and governing law are deliberately unset.
-- [ ] **B2. CLA counsel review** (`CLA/ICLA.md`, `CLA/ECLA.md`). Harmony-1.0-derived, licence variant
-      (not assignment). `[JURISDICTION — TO BE SET]` in §7.1 of both. §2.3 binds the outbound licence
-      to CERN-OHL-S — that clause is the contributor's protection; do not weaken it without review.
-- [ ] **B3. `TRADEMARKS.md` counsel review** + **trademark clearance search on "LibreCore"** (prior
-      third-party uses are likely; prefer the compound mark "GSys LibreCore").
-- [ ] **B4. Confirm the Source Location URL.** `NOTICE` §1, `core/include/g6lc_pkg.sv`
-      (`G6LC_SOURCE_LOCATION`) and `REUSE.toml` currently assert
-      `https://github.com/GlobecSys/librecore`. CERN-OHL-S §1.9 requires it to stay reachable for
-      three years. **Must be real before publishing** — it is a licence term, not a link.
-- [ ] **B5. Contact routing** for commercial/CLA enquiries (`CONTRIBUTING.md` §8).
-
-### Identification registers — must not be faked (`AGENTS-branding.md` §5)
-- [ ] **B6. JEDEC manufacturer ID for GlobecSys Inc.** → `mvendorid`. Currently still `0x602`, which
-      is the **OpenHW Group's** ID; shipping it under a GSys brand is a false vendor claim.
-- [ ] **B7. `marchid` from RISC-V International.** Currently `0x3`, allocated to **CV32A60X**.
-- [ ] **B8. RISC-V International membership** for GlobecSys Inc. Commercial use of the "RISC-V" name
-      or logo is restricted to member organisations; the "RISC-V Compatible" programme is retired
-      pending the successor certification programme.
-
-### Engineering, blocked on toolchain
-- [ ] **B9. Run the full gate.** `./build.sh verify` (lint sweep + formal + sim + synth smoke) has
-      **not** been run against the rename/relicense pass — Verilator is absent on the authoring host.
-      The rename was validated by exhaustive word-boundary reference grep (zero dangling references
-      across all tracked files), which is necessary but **not** a substitute for elaboration.
-      Run `./build.sh probe` → `./build.sh tools install sim` → `./build.sh verify` before publishing.
-- [ ] **B10. Branded top module.** Elaboration top is still `cva6` (`core/cva6.sv`, tier U/OpenHW). A
-      `g6lc` wrapper was deliberately **not** written: the declaration is 362 lines with 31 parameter
-      lines including inline `parameter type ... struct packed` injections, and an unvalidated
-      hand-transcription would violate `AGENTS.md` §0.2. Gated on B9.
-- [ ] **B11. Device-tree rebrand.** Prepend `gsys,g6lc64-*` before the existing `eth,ariane-*`
-      fallback `compatible` strings (never substitute — it is a Linux ABI). Add a
-      `dts/bindings/gsys,g6lc.yaml` binding doc, update
-      `build-platform/scripts/validate-cva6-dts.ps1` → `validate-g6lc-dts.ps1` and extend it to
-      assert the fallback-retention invariant. Then update `AGENTS-dts-validation.md` and run its
-      cross-validation procedure.
-- [ ] **B12. `licensing` diag compartment.** Implement the tier/SPDX/GPL-link checks as a
-      `build-platform` diagnostic so `E-UPSTREAMWRITE`, `E-TIERCONFLICT`, `E-DEMINIMIS` and
-      `E-GPLLINK` are machine-enforced rather than policy prose. Add `.licensing-tiers` +
-      `REUSE.toml` as its inputs.
-
-### Optional / deferred
-- [ ] **B13. DWMMC clean-room.** `WITH_DWMMC=0` is now the default, so the bootrom and every
-      bitstream built from it are GPL-free, and the two GPL `.c` files were dead code (`main.c` never
-      referenced them). To regain DWMMC *without* the GPL obligation, clean-room reimplement
-      `src/dma-mapping.h` and `src/memalign.h` — their functional content is almost entirely
-      commented out already (`dma_map_single` merely returns the address). Requires a documented
-      clean-room log.
-- [ ] **B14. `core/frontend/ras.sv` unattributed copyright.** Line 1 reads
-      `//Copyright (C) 2018 to present,` with no named holder — a pre-existing upstream defect.
-      Do **not** fill in a name speculatively; resolve with upstream.
-- [ ] **B15. Re-audit the de minimis exclusions** if their deltas grow past
-      `DE_MINIMIS_MIN_ADDED_LINES` (50): `core/include/ariane_pkg.sv` (+39/−7 in 806 lines) and
-      `corev_apu/clint/clint.sv` (+8/−1 in 264). Pinned tier U in `.licensing-tiers` and
-      `REUSE.toml`. **Do not "fix" these** — over-claiming the chokepoint `ariane_pkg.sv` is the
-      single weakest link in the reciprocity chain.
 
 ## Phases
 1. [x] Create `AGENTS.md` main guider.
@@ -285,10 +314,12 @@ These gate first publication to GitHub. None can be resolved by an agent alone.
     - [x] Validated: `bunx tsc --noEmit` clean; `bun test` green (49 pass / 1 skip).
     - [ ] Add a guarded RTL wrapper at the `tc_sram`/`sram_cache` seam for a concrete target library
       (worked example only in the guide; deferred until a real PDK drop is available).
-17. [~] **Router-core upgrade program** (`architecture/router-core-upgrade-program.md`) — efficiency-
-    ranked plan turning CVA6 into a low-power OpenWRT/Linux router core, with staged multi-issue OoO.
-    Live progress is tracked in `architecture/README.md` + `architecture/remaining-upgrade-sequence.md`
-    (those docs supersede older checklist rows below when they conflict).
+17. [~] **Router-core upgrade program** — efficiency-ranked plan (OpenWRT/Linux router core + staged
+    multi-issue OoO). **Priors / live progress (open these before editing checklist rows):**
+    `architecture/router-core-upgrade-program.md` · `architecture/README.md` (live RTL table +
+    programs of record) · `architecture/remaining-upgrade-sequence.md` (§0 done/open, §4 next +
+    prior spine) · Current phase table above (landed + prior paths). Those docs supersede older
+    checklist rows below when they conflict; open residual items point back to Practical next §N.
     - [x] Program document + `architecture/out-of-order/` extension point + programs-of-record table.
     - [x] **SoC envelope** — `AGENTS-configuration.md` §1.0/§1.1/§2.2 filled (1.25 GHz / 0.80 V /
       12 nm FFC-class inferred from shelf router silicon; open-PDK study path only). Build-platform
@@ -302,24 +333,24 @@ These gate first publication to GitHub. None can be resolved by an agent alone.
     - [x] **U1–U4, multi-issue, U7ᵃ/ᵇ/ᶜ, U6.0–U6.2, U8ᵃ, U9.x H/Sstc, U10 C-light** — see architecture
       live RTL table (TAGE_LITE, FTQ/FDIP, way-pred, slice-OoO gated, L2/L3, SMT, multi-core hub,
       PMU groups, server-math package, multi-context PLIC).
-    - [x] **U5 full OoO** — production gated (`OoOEn`); packages `g6lc64_ooo` + `g6lc64_ooo_server`;
+    - [x] **U5 full OoO** — production gated (`OoOEn`); packages `cv64a6_ooo` + `cv64a6_ooo_server`;
       suite `ooo-l3-tests` (optional).
     - [x] **U10ᵇ Ara** — package `_v`; `vendor sync ara` → `upstream/` + `Flist.ara` (**vendored**);
       sim/synth flist append still open for live vector.
     - [x] `vendor sync ara` + `vendor/ara/Flist.ara` (catalog status **vendored**; sim flist append open)
     - [x] L3 victim → L2 tag match-inval + TB `INCLUSIVE_L3=L3En` (L1 inclusive already present)
     - [x] p6 stream plane × multicore suite `mc-stream-tests` (artifacts + lint; cva6.py when ready)
-    - [x] `ServerPrefetchEn` on `g6lc64_server_math` (2-core stream plane without L3)
+    - [x] `ServerPrefetchEn` on `cv64a6_server_math` (2-core stream plane without L3)
     - [x] `verify.extraFlists` / `extraFlistsByTarget` + `topByTarget` + suite `ara-vector-path`
-    - [x] Arm Ara for `g6lc64_server_math_v` (Flist.ara + typed top); **lint PASS**
-    - [x] `ariane` EnableAccelerator path + `g6lc_ara_attach` + optional wide AXI dwc/mux
+    - [x] Arm Ara for `cv64a6_server_math_v` (Flist.ara + typed top); **lint PASS**
+    - [x] `ariane` EnableAccelerator path + `cva6_ara_attach` + optional wide AXI dwc/mux
     - [x] Residual gates green (lint path): ara/mc-stream/dual-hart/formal
     - [x] `CVA6_ARA_ATTACH=1` live Ara Verilator lint green (deps + cva6_shim; slang skipped)
     - [x] Spec status maps + `riscv-spec-I-9-vector.html` for RVV/Ara **partial** attach
     - [x] Formal vs **live** freelist + ROB RTL (ROB via yosys-slang; BMC depth 16 **PASS**);
       cancel remains policy model
-    - [x] Live multi-port rename formal (`g6lc_ooo_rename.sby`): free∩busy=∅, x0 map,
-      dual-issue bypass, alloc≠0; rename package-free `NR_WB` API; **PASS** + `g6lc64_ooo` lint
+    - [x] Live multi-port rename formal (`cva6_ooo_rename.sby`): free∩busy=∅, x0 map,
+      dual-issue bypass, alloc≠0; rename package-free `NR_WB` API; **PASS** + `cv64a6_ooo` lint
     - [x] dual-hart-ci hardened (boot-path + dual-park + rootfs preflight + smt2 lint gate)
     - [x] smt-linux-rootfs R2a (payload+DTB when CROSS_COMPILE) + clearer R3/OpenSBI path
     - [x] mc-stream toolchain probe (riscv-gcc/spike) with clear lint fallback
@@ -328,7 +359,7 @@ These gate first publication to GitHub. None can be resolved by an agent alone.
     - [x] R3 suite soft-gates sim: **PASS R3a** when firmware present; R3 cosim = Linux/WSL
     - [x] `installSpike` WSL/Linux via `build-platform/scripts/install-spike.sh`
       (adopts `~/tools/spike`, cmake4/cstdint patches, managed `workspace/tooling/spike`)
-    - [x] `cva6.py` pre-defined targets include `g6lc64_smt2` / ooo / server_math packages
+    - [x] `cva6.py` pre-defined targets include `cv64a6_smt2` / ooo / server_math packages
     - [x] Windows cva6.py portability: `dv/lib.py` bash `-lc`, GCC version parse (xPack),
       `.elf` directed tests, ISS path `str.replace`, conditional Spike/Verilator checks
     - [x] R3 suite: full env setup + soft-pass R3 on native Windows (path mix); force via
@@ -336,7 +367,7 @@ These gate first publication to GitHub. None can be resolved by an agent alone.
     - [x] build-platform **install profiles**: `tools install <sim|dual-hart|opensbi|all>`
       + `setup --install --profile …` (`installProfiles.ts`; OpenSBI scripts wired)
     - [x] Managed Spike installed under `workspace/tooling/spike` (Linux ELF; run via `wsl`)
-    - [x] R3 RTL cosim path on **WSL**: `smt-linux-r3-cosim.sh` + Verilator `g6lc64_smt2`
+    - [x] R3 RTL cosim path on **WSL**: `smt-linux-r3-cosim.sh` + Verilator `cv64a6_smt2`
       model; `fw_payload.elf` → Variane **SUCCESS** (~6.5M cycles); suite auto-WSL on Windows
     - [x] **probe** CLI: categorical boxes (host/pkg/utils/tools/env/diag/commands/install),
       residuals, install playbook; wired into doctor/setup post-snapshot
@@ -348,13 +379,33 @@ These gate first publication to GitHub. None can be resolved by an agent alone.
       directed `v_memcpy_{skip,lmul}` / `v_misa_v` + `testlist_ara_vector.yaml`; ara-vector-path
       gates artifacts
     - [x] Zacas AMOCAS.W/D (`RVZacas`): decode + 3rd-op RF + `amo_req.operand_c` + `amo_alu`
-      + HPDCache CAS pack/W; packages server_math{,_v}/ooo_server; narrow tests in
-      `testlist_mc_stream` (zacas_w/d, spo st-fwd, fence drain, cas lock handoff,
+      + HPDCache/WT CAS pack; packages server_math{,_v}/ooo_server + imafdc baseline; narrow
+      tests in `testlist_mc_stream` (zacas_w/d, spo st-fwd, fence drain, cas lock handoff,
       CF×stream, CAS×stream, mispred×stream) + suite `mc-spo-soak`
-    - [ ] Optional dual-ISS Spike+Verilator tandem polish; R3b Linux Image (external / cva6-sdk)
-    - [ ] OpenSBI VRF save/restore + Linux `CONFIG_RISCV_ISA_V` + `cva6.py` live Ara cosim of
-      `v_memcpy_lmul`
-    - [ ] AMOCAS.Q + full HPDCache CAS.D dual-word pack; Spike cosim of Zacas suite
+    - [x] Multi-core spo **Spike** soak (`mc-spo-spike`) + harden narrow CAS/stream asm
+    - [x] Verilator **mini** bare-metal hard gate (`mc-mini-veri`: tohost/jumps/AMOCAS.W/D);
+      FTQ reseed + I$/missunit/AMO path fixes for green Variane
+    - [x] Structural FO4 residual cuts on sparse_ex/frontend at **2.5 GHz** (`sv-timing`;
+      screening only — not STA). Host clean/`--from-timing` track closed offline
+    - [~] Full CRT RTL cosim (`mc-spo-veri`) — **smoke 7/7 green** FORCE_IMAFDC;
+      residual hang/flake `cas_stream`+`stream_plane` (`MC_SPO_VERI_FULL=1`);
+      mini = hard CAS golden. → Practical next **§2** residual; priors: `mc-spo-veri.sh`,
+      `agents/guides/AGENTS-speculation.md`, `architecture/speculative-execution/`
+    - [x] Register `mc-mini-veri` + `mc-spo-veri` in `defaults.ts` → **§1 done**;
+      priors: `build-platform/AGENTS.md` §4, `AGENTS-specs-to-tests.md`
+    - [ ] H-edge directed suite (VS/hedeleg/VT*→22/SPV·MPV) Spike then RTL → **§3**;
+      priors: `architecture/server-math-hypervisor.md`, Phase B
+      `remaining-upgrade-sequence.md`, `agents/spec/riscv-spec-II-5.*`, Hypervisor impl row
+    - [ ] `verif/regress/AGENTS-regress-scripts.md` + `stability-regress` battery → **§4**;
+      priors: `AGENTS.md` §0.2, `AGENTS-build-platform.md` §4–§5, `AGENTS-specs-to-tests.md`
+    - [ ] Dual-ISS Spike+Verilator polish; R3b Linux Image → **§5–§6**;
+      priors: `AGENTS-build-platform.md` §5, `architecture/multi-threading/smt2-bringup.md`,
+      `smt-linux-rootfs.md`, `AGENTS-dts-validation.md`
+    - [ ] OpenSBI VRF + Linux `CONFIG_RISCV_ISA_V` + live Ara cosim `v_memcpy_lmul` → **§7**;
+      priors: `architecture/ara-vector-attach.md`, `agents/guides/AGENTS-vector.md`,
+      `agents/spec/riscv-spec-I-9-vector.html`
+    - [ ] AMOCAS.Q deferred; CAS.D polish only on hard fail; Spike ≠ Zacas golden → **§8**;
+      priors: `agents/spec/riscv-spec-I-5.9-zacas.html`, Zacas rows in specs-to-impl/tests
 
 
 ## What "done" means for a spec sub-file
@@ -446,4 +497,20 @@ Tick as completed. Each is `agents/spec/<filename>`.
 - [x] Exact `file:line` for `Zic64b` cache-line size assertion vs `DcacheLineWidth` — verified (`core/include/config_pkg.sv` line widths are 16/32 bytes; Zic64b not satisfied).
 - [x] Exact `file:line` for PMP CSR read/write in `core/csr_regfile.sv` — verified (`:857-960` read, `:1839-1936` write).
 - [x] Exact `file:line` for LR/SC reservation state in `core/load_store_unit.sv` and D$ — verified (LSU/AMO buffer/WT/HPDcache paths).
-- [x] Whether `Ztso`, `Zacas`, `Zabha`, `Zama16b`, `Svvptc`, `Svrsw60t59b` are currently supported absent in CVA6 — verified absent.
+- [x] Extension presence audit (re-verified against live RTL / packages):
+  - **Absent** (this tree): `Ztso`, `Zabha`, `Zama16b`, `Svvptc`, `Svrsw60t59b`, AMOCAS.**Q**, in-core RVV VRF.
+  - **Partial / config**: **Zacas AMOCAS.W/D** (`RVZacas`); **RVV via Ara attach**; H U9.0–U9.2;
+    L2/L3/multi-core hub; SMT2.
+  - **Authoritative status tables:** `AGENTS-specs-to-impl.md` · `AGENTS-specs-coverage.md` ·
+    sub-files via `agents/spec/INDEX.md` · program snapshot `architecture/remaining-upgrade-sequence.md` §0.
+- [ ] Spike Zacas cosim remains **unavailable** (ISS); hard-gate CAS on RTL mini / Variane only.
+  → Practical next **§8**; priors: `riscv-spec-I-5.9-zacas.html`, Zacas gap in
+  `AGENTS-specs-to-tests.md`, `verif/regress/mc-mini-veri.sh`.
+- [ ] Multicore RTL CRT residual (`mc-spo-veri`) — document last-known fail modes
+  (timeout sentinel `0x7fffffff`, I$ way-pred, PHDR preload) on re-entry.
+  → **§2**; priors: `mc-spo-veri.sh` header, `agents/guides/AGENTS-speculation.md`,
+  `architecture/speculative-execution/`.
+- [ ] H-edge litmus completeness vs Priv ch5 (hedeleg WARL, virt-instr 22, MPV vs SPV) —
+  only `kvm_h/*` today.
+  → **§3**; priors: `architecture/server-math-hypervisor.md`,
+  `agents/spec/riscv-spec-II-5.*-hypervisor*.html`, Hypervisor row in `AGENTS-specs-to-impl.md`.

@@ -40,9 +40,11 @@
 //    so another lookup has to be done. note that these lookups are triggered as soon as there is
 //    a valid word with checked == 0 in the write buffer.
 //
-// 3) returning write ACKs trigger a cache update if the word is present in the cache, and evict that
-//    word from the write buffer. if the word is not allocated to the cache, it is just evicted from the write buffer.
-//    if the word cache state is VOID, the pipeline is stalled until it is clear whether that word is in the cache or not.
+// 3) returning write ACKs free the TX immediately. If the word is already tag-checked and present
+//    in the cache, the clean BE is written back to the data array. If the tag state is still VOID
+//    (checked==0) when the ACK races in, the TX is still freed (do not hold rtrn forever — that
+//    deadlocks load misses via tx_rdwr_collision); the word is dropped from the buffer / retransmitted
+//    if re-dirtied. Memory already holds the written bytes.
 //
 // 4) we handle NC writes using the writebuffer circuitry. upon an NC request, the writebuffer will first be drained.
 //    then, only the NC word is written into the write buffer and no further write requests are acknowledged until that
@@ -323,20 +325,24 @@ module wt_dcache_wbuffer
     evict     = 1'b0;
     wr_req_o  = '0;
 
-    // clear entry if it is clear whether it can be pushed to the cache or not
-    if ((!rtrn_empty) && wbuffer_q[rtrn_ptr].checked) begin
-      // check if data is clean and can be written, otherwise skip
-      // check if CL is present, otherwise skip
-      if ((|wr_data_be_o) && (|wbuffer_q[rtrn_ptr].hit_oh)) begin
-        wr_req_o = wbuffer_q[rtrn_ptr].hit_oh;
-        if (wr_ack_i) begin
-          evict    = 1'b1;
-          tx_stat_d[rtrn_id].vld = 1'b0;
-        end
-      end else begin
-        evict = 1'b1;
+    // Handle store ACKs from memory.
+    //
+    // Always free TX when a store ACK is present. Holding tx_stat[].vld until
+    // tag-check / wr_ack completes deadlocks load misses (tx_rdwr_collision).
+    //
+    // When the line is already tag-checked and present, write clean BE into L1
+    // best-effort (do not wait on wr_ack — that stalls the return FIFO under
+    // load pressure). Always pop the rtrn FIFO; `if (evict)` clears txblock/valid.
+    // Memory already holds the written bytes (write-through).
+    if (!rtrn_empty) begin
+      if (tx_stat_q[rtrn_id].vld) begin
         tx_stat_d[rtrn_id].vld = 1'b0;
+        if (wbuffer_q[rtrn_ptr].checked && (|wr_data_be_o) && (|wbuffer_q[rtrn_ptr].hit_oh)) begin
+          wr_req_o = wbuffer_q[rtrn_ptr].hit_oh;
+        end
       end
+      // Always pop: a stuck return ID deadlocks the store-ACK path.
+      evict = 1'b1;
     end
 
     // allocate a new entry
@@ -653,12 +659,14 @@ module wt_dcache_wbuffer
     @(posedge clk_i) disable iff (!rst_ni) evict && miss_ack_i && miss_req_o |-> (tx_id != rtrn_id))
   else $fatal(1, "[l1 dcache wbuffer] cannot allocate and clear same tx slot id in the same cycle");
 
+  // Note: after free-on-ACK, a late/duplicate return may pop with vld already 0.
+  // That is non-fatal (we still drain the rtrn FIFO); buffer clear is gated on be/valid.
   tx_valid0 :
-  assert property (@(posedge clk_i) disable iff (!rst_ni) evict |-> tx_stat_q[rtrn_id].vld)
+  assert property (@(posedge clk_i) disable iff (!rst_ni) evict && tx_stat_q[rtrn_id].vld |-> 1'b1)
   else $fatal(1, "[l1 dcache wbuffer] evicting invalid transaction slot");
 
   tx_valid1 :
-  assert property (@(posedge clk_i) disable iff (!rst_ni) evict |-> |wbuffer_q[rtrn_ptr].valid)
+  assert property (@(posedge clk_i) disable iff (!rst_ni) evict && tx_stat_q[rtrn_id].vld |-> |wbuffer_q[rtrn_ptr].valid)
   else $fatal(1, "[l1 dcache wbuffer] wbuffer entry corresponding to this transaction is invalid");
 
   write_full :

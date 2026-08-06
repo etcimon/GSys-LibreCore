@@ -13,8 +13,12 @@ Index of `specs/riscv-spec.html` at `X.y` granularity. Each row is (or will beco
   - **Micro-arch RTL present:** U1 TAGE fabric, U2 FTQ/FDIP/loopbuf, U3 way-pred/RRIP, U4 slice-OoO,
     U5 full OoO (gated), multi-issue width 2–8, U6 L2/L3 + multicore hub, SMT2, U9 H/Sstc path.
   - **RVV (Vol I ch9):** **partial** — not in-core; U10ᵇ Ara attach behind `EnableAccelerator` /
-    `CVA6Cfg.RVV` (`cv64a6_server_math_v`, `g6lc_ara_attach`, `vendor/ara/`); live lint under
-    `CVA6_ARA_ATTACH=1`. Sub-file: `riscv-spec-I-9-vector.html`. Vector crypto `zvk*` still absent.
+    `CVA6Cfg.RVV` (`cv64a6_server_math_v`, `cva6_ara_attach`, `vendor/ara/`); live lint under
+    `CVA6_ARA_ATTACH=1`; suite `ara-vector-path` + DTS `ariane-server-math-v.dts`. Open: OpenSBI VRF
+    + `cva6.py` cosim. Sub-file: `riscv-spec-I-9-vector.html`. Vector crypto `zvk*` still absent.
+  - **Zacas (Vol I §5.9):** **partial** — AMOCAS.W/D via `RVZacas` (server_math / ooo_server);
+    directed multicore + `mc-spo-soak`. AMOCAS.Q + Spike cosim open. Sub-file:
+    `riscv-spec-I-5.9-zacas.html`.
 - **Anchor** is the fragment in `specs/riscv-spec.html#<anchor>`; **Src** is the source line.
 
 ---
@@ -64,7 +68,7 @@ Index of `specs/riscv-spec.html` at `X.y` granularity. Each row is (or will beco
 | 5.5 | Zawrs (wait-on-reservation) | `#ext:zawrs` | 14761 | SPEC | `riscv-spec-I-5.5-zawrs.html` | done |
 | 5.6 | Zaamo (AMOs) | `#ext:zaamo` | — | RAM | — | done |
 | 5.7 | Zalasr (acquire/release) | `#ext:zalasr` | — | SPEC | — | done |
-| 5.9 | Zacas (CAS) | `#ext:zacas` | — | SPEC | — | done |
+| 5.9 | Zacas (CAS) | `#ext:zacas` | — | SPEC | `riscv-spec-I-5.9-zacas.html` | done (CVA6: **partial** AMOCAS.W/D) |
 | 5.3,5.4,5.8,5.10 | Za128rs/Za64rs/Zabha/Zama16b | (various) | — | RAM | — | done |
 
 ### 6-12 + Appendices (ISA-arithmetic, low priority for current intents)

@@ -57,11 +57,15 @@ endmodule
   <li><strong>Packages:</strong> <code>cv64a6_server_math{,_v}</code>,
     <code>cv64a6_ooo_server</code> set <code>RVZacas=1</code>. AMOCAS.Q not supported.</li>
   <li><strong>Tests:</strong> <code>verif/tests/custom/multicore/zacas_*.S</code> +
-    <code>mc_cas_lock_handoff.S</code> in <code>testlist_mc_stream.yaml</code>.</li>
+    <code>mc_cas_lock_handoff.S</code> in <code>testlist_mc_stream.yaml</code>; build-platform
+    suites <code>mc-stream-tests</code> / <code>mc-spo-soak</code>.</li>
+  <li><strong>Open:</strong> AMOCAS.Q; full HPDCache CAS.D dual-word pack; Spike /
+    <code>cva6.py</code> cosim of the Zacas directed suite.</li>
 </ul>
 
 <p><strong>.dts linkage:</strong> when <code>RVZacas=1</code>, advertise
 <code>zacas</code> in <code>riscv,isa-extensions</code> on the matching board DTS
-(server_math / ooo_server trees); default non-Zacas packages must not claim it.</p>
+(server_math / ooo_server trees); default non-Zacas packages must not claim it.
+Cross-check <code>AGENTS-dts-validation.md</code> / <code>AGENTS-specs-to-impl.md</code>.</p>
 </body>
 </html>

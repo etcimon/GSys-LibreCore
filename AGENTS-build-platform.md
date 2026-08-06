@@ -180,7 +180,7 @@ Configured in `defaults.ts` `tests.suites` (not exhaustive):
 | Group / area | Example suite ids | Notes |
 |--------------|-------------------|--------|
 | smoke | `smoke-cv64a6`, `smoke-cv32a6`, … | Fast sanity |
-| directed | `mc-stream-tests`, `mc-spo-soak`, `ara-vector-path` | Optional/heavy |
+| directed | `mc-stream-tests`, `mc-spo-soak`, `mc-spo-spike`, **`mc-mini-veri`**, `mc-spo-veri`, `ara-vector-path` | Optional/heavy; mini = hard Zacas golden |
 | timings host | `sv-timing-smoke`, `sv-timing-core-sparse`, `sv-timing-autocorrect`, `sv-timing-advanced` | `--output` packages; honor `CVA6_FROM_TIMING` |
 | linux / SMT | `smt-linux-*`, `dual-hart-ci` | R3 cosim WSL path |
 | formal (verify) | `verify.formalTasks` U5 OoO `.sby` | freelist / ROB / cancel |
@@ -204,6 +204,7 @@ Full catalog: `./build.sh test --list`.
 | Windows VS Build Tools provisioning | **planned** |
 | PnR / OpenROAD / OpenSTA synth (S1–S4) | **planned** — `architecture/build-platform-opensta-from-timing.md` |
 | Dual-ISS Spike+Verilator polish · R3b Linux Image | **open** (RTL residual) |
+| CRT `mc-spo-veri` FORCE_IMAFDC smoke | **7/7 green** (Verilator 5.008); residual `cas_stream`/`stream_plane` hang/flake |
 
 ---
 
@@ -211,7 +212,7 @@ Full catalog: `./build.sh test --list`.
 
 | Feature | Spec | Platform / test touchpoint | Status summary |
 |---------|------|----------------------------|----------------|
-| **Zacas** compare-and-swap | Vol I §5.9 `#ext:zacas` · `agents/spec/riscv-spec-I-5.9-zacas.html` | suites `mc-stream-tests`, `mc-spo-soak`; `RVZacas` packages | **Partial:** AMOCAS.W/D gated; Q absent; directed multicore tests |
+| **Zacas** compare-and-swap | Vol I §5.9 `#ext:zacas` · `agents/spec/riscv-spec-I-5.9-zacas.html` | `mc-mini-veri` (hard RTL) · `mc-spo-spike` / `mc-stream-tests` / `mc-spo-soak` · residual `mc-spo-veri`; `RVZacas` packages | **Partial:** AMOCAS.W/D gated; Q absent; Spike ≠ CAS golden |
 | **RVV / Ara** | Vol I ch9 `#vector` · `riscv-spec-I-9-vector.html` | suite `ara-vector-path`; `timings` structural only | **Partial:** attach live-lintable; DTS+directed; OpenSBI VRF + cosim open |
 | Structural FO4 | package `sv-timing/` (not ISA) | `timings compile` / monorepo-soak / soaks | Screening only — not STA; see §6.1 |
 

@@ -794,7 +794,7 @@ module cva6
       .fetch_entry_ready_i(fetch_ready_id_if)
   );
 
-  g6lc_smt_pc_bank #(
+  cva6_smt_pc_bank #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_pc_bank (
       .clk_i,
@@ -913,7 +913,7 @@ module cva6
     assign smt_hart_halt = smt_hart_halt_q;
   end
 
-  g6lc_hart_state #(
+  cva6_hart_state #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_hart_state (
       .clk_i,
@@ -933,7 +933,7 @@ module cva6
       .hart_block_o  (smt_hart_block)
   );
 
-  g6lc_thread_select #(
+  cva6_thread_select #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_thread_select (
       .clk_i,
@@ -952,7 +952,7 @@ module cva6
       .switch_on_starve_o  (smt_switch_on_starve)
   );
 
-  // U5 full OoO lives in issue_stage (g6lc_ooo_dispatch) when OoOEn=1.
+  // U5 full OoO lives in issue_stage (cva6_ooo_dispatch) when OoOEn=1.
 
   logic [CVA6Cfg.NrWbPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_ex_id;
   logic [CVA6Cfg.NrWbPorts-1:0][CVA6Cfg.XLEN-1:0] wbdata_ex_id;
@@ -1348,9 +1348,9 @@ module cva6
   assign commit_ack = commit_macro_ack & ~commit_drop_id_commit;
 
   // ---------
-  // CSR (U6.1: banked via g6lc_smt_csr_bank when NrHarts>1)
+  // CSR (U6.1: banked via cva6_smt_csr_bank when NrHarts>1)
   // ---------
-  g6lc_smt_csr_bank #(
+  cva6_smt_csr_bank #(
       .CVA6Cfg           (CVA6Cfg),
       .exception_t       (exception_t),
       .jvt_t             (jvt_t),

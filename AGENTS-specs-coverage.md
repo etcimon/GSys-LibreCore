@@ -55,7 +55,7 @@ configs; a specific build may have less. Use the source maps + the target's prof
 | A — atomics (5.1) | Implemented & tested |
 | Zalrsc — LR/SC (5.2) | Implemented & tested |
 | Zawrs — wait-on-reservation (5.5) | Partial (config; WRS→WFI path) |
-| Zacas — compare-and-swap (5.9) | Partial (AMOCAS.W/D on smt2/server_math/ooo_server + DTS; Q absent) |
+| Zacas — compare-and-swap (5.9) | Partial (AMOCAS.W/D config-gated; Q absent) |
 | Other Za* (Za128rs/Za64rs/Zabha/Zaamo/Zalasr) | Partial |
 | F / D — floating point (ch6) | Implemented & tested |
 | Q — quad float | Not implemented |
@@ -65,7 +65,7 @@ configs; a specific build may have less. Use the source maps + the target's prof
 | Zcb / Zcmp | Partial |
 | Zba / Zbb / Zbs — bit-manipulation (ch8) | Implemented (limited test) |
 | Zbc / Zbk* — carry-less / crypto bitmanip | Partial |
-| V / Zve* — vector (ch9) | Partial (Ara attach; DTS v+zve64d on server-math-v only; opensbi A2; full cosim open) |
+| V / Zve* — vector (ch9) | Partial (Ara attach live-lintable; DTS+directed tests; full cosim open) |
 | Packed SIMD (ch10) | Not implemented |
 | Zkn — scalar crypto / AES (ch11) | Partial |
 | Zvk* — vector crypto | Not implemented |
@@ -126,7 +126,7 @@ required feature above. Status is therefore per-target.
 | Speculative execution (in-order, precise traps) | Implemented & tested |
 | L1 caches (I$ + D$) | Implemented & tested |
 | L2 / L3 cache | Not implemented |
-| Multi-threading (SMT) | Not implemented |
+| Multi-threading (SMT) | Partial (U6.1 SMT2 config; dual-hart Linux lab open) |
 | Branch prediction fabric (U1 TAGE/GSHARE/…) | Implemented (config; limited test) |
 | Decoupled front-end (U2 FTQ/FDIP/loopbuf) | Implemented (config; limited test) |
 | Multi-issue width 2–8 (superscalar) | Implemented (config; dual-issue tested) |
@@ -137,7 +137,7 @@ required feature above. Status is therefore per-target.
 | Multi-core | Partial (parameterized 2–8; N=1 identity; stream plane suite) |
 | Hypervisor (RVH) | U9.0–U9.2: vstimecmp/STCE/VSTIP/htimedelta/guest TIME; VS litmus; G-stage PTW; PLIC 16-ctx; HFENCE/HLV |
 | AVX-like / server math | CBO full-line + RVB + server package; `_v` + Ara attach live-lintable |
-| RVV / Ara (U10ᵇ) | Partial: live Ara lint + purpose guide + RVV 1.0 DTS (`v`/`zve64d`) + opensbi tier A2 + directed tests; SBI/cosim open |
+| RVV / Ara (U10ᵇ) | Partial: live Ara lint + purpose guide + `v` DTS + directed tests; SBI/cosim open |
 | CVXIF coprocessor interface | Implemented & tested (mutex with RVV accelerator) |
 | RVFI trace / debug triggers / PMU | Implemented & tested |
 
@@ -152,8 +152,10 @@ microarchitecture (branch prediction, precise speculation, L1 caches, CVXIF, obs
 Implemented (config / limited test): Sstc, Sscofpmf, Zihintpause, Svnapot; partial Zawrs / Zicboz /
 Zicbop / Svpbmt; U1–U4 micro-arch, multi-issue width, U6.0 L2 (off by default).
 
-Not implemented (and therefore untested by design): Ztso, CFI, Zacas, Packed SIMD, vector crypto
-(`zvk*`), Matrix, Sv57, Smctr/priv-CFI, Svinval. **Partial:** RVV/V via Ara attach (lint path;
-full compliance cosim open), dual-hart Linux lab. See `AGENTS-specs-to-impl.md` for the
-authoritative RTL status, `agents/spec/riscv-spec-I-9-vector.html` for the Vector sub-file, and
-`architecture/` for promotion paths.
+Not implemented (and therefore untested by design): Ztso, CFI, Packed SIMD, vector crypto
+(`zvk*`), Matrix, Sv57, Smctr/priv-CFI, Svinval, AMOCAS.Q (quad CAS). **Partial:**
+**Zacas** AMOCAS.W/D (`RVZacas`, directed multicore / `mc-spo-soak`); **RVV/V** via Ara attach
+(live lint + DTS + directed `ara-vector-path`; OpenSBI VRF + cosim open); dual-hart Linux lab;
+L2/L3/multi-core hub as config-gated SoC work. See `AGENTS-specs-to-impl.md` for authoritative
+RTL status; sub-files `agents/spec/riscv-spec-I-5.9-zacas.html` and
+`agents/spec/riscv-spec-I-9-vector.html`; `architecture/` for promotion paths.

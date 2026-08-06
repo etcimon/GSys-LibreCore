@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: LicenseRef-Proprietary
 # Copyright (c) 2026 Etienne Cimon
 #
 # Soak harness for multi-core stream plane × speculative/CF narrow diagnostics.
@@ -8,19 +8,42 @@
 #
 # Usage:
 #   bash verif/regress/mc-spo-soak.sh
-#   MC_SPO_ROUNDS=5 DV_TARGET=g6lc64_server_math bash verif/regress/mc-spo-soak.sh
+#   MC_SPO_ROUNDS=5 DV_TARGET=cv64a6_server_math bash verif/regress/mc-spo-soak.sh
 #   MC_SPO_LINT=0 bash verif/regress/mc-spo-soak.sh   # skip lint
 
 set -euo pipefail
-ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+# Prefer a complete PATH so dirname/grep work when invoked from a minimal Windows shell.
+export PATH="/usr/bin:/bin:${PATH:-}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 cd "$ROOT"
 
 ROUNDS="${MC_SPO_ROUNDS:-3}"
 DO_LINT="${MC_SPO_LINT:-1}"
-export DV_TARGET="${DV_TARGET:-g6lc64_ooo_server}"
+export DV_TARGET="${DV_TARGET:-cv64a6_ooo_server}"
 
 echo "[mc-spo-soak] multi-core stream plane × spo/CF diagnostics"
 echo "  target=${DV_TARGET} rounds=${ROUNDS} lint=${DO_LINT}"
+
+# Optional precompiled timings package (structure gate + S0 STA seeds; does not replace RTL).
+if [[ -n "${CVA6_FROM_TIMING:-${FROM_TIMING:-}}" ]]; then
+  FT="${CVA6_FROM_TIMING:-$FROM_TIMING}"
+  echo "[mc-spo-soak] CVA6_FROM_TIMING=$FT"
+  if command -v bun >/dev/null 2>&1; then
+    set +e
+    (cd "$ROOT/build-platform" && bun run src/cli/index.ts timings validate --from-timing "$FT")
+    vrc=$?
+    set -e
+    if [[ $vrc -ne 0 ]]; then
+      echo "[mc-spo-soak] from-timing validate failed"
+      exit 1
+    fi
+    if [[ "${SVT_STA_HANDOFF:-0}" == "1" ]]; then
+      (cd "$ROOT/build-platform" && bun run src/cli/index.ts timings sta-handoff --from-timing "$FT" --try-tools) || true
+    fi
+  else
+    echo "[mc-spo-soak] bun missing — skip timings validate"
+  fi
+fi
 
 narrow=(
   verif/tests/custom/multicore/mc_stream_plane.S
@@ -39,9 +62,9 @@ done
 echo "  ok ${#narrow[@]} narrow tests + testlist"
 
 # RTL contracts for stream plane + Zacas
-grep -q "ServerPrefetchEn" core/include/g6lc64_ooo_server_config_pkg.sv
-grep -q "RVZacas" core/include/g6lc64_server_math_config_pkg.sv
-grep -q "l2_back_inval" corev_apu/src/g6lc_cluster.sv
+grep -q "ServerPrefetchEn" core/include/cv64a6_ooo_server_config_pkg.sv
+grep -q "RVZacas" core/include/cv64a6_server_math_config_pkg.sv
+grep -q "l2_back_inval" corev_apu/src/cva6_cluster.sv
 grep -q "AMO_CAS1" core/cache_subsystem/amo_alu.sv
 echo "  ok stream-plane + Zacas RTL contracts"
 
@@ -73,10 +96,10 @@ else
 fi
 
 if [[ "$DO_LINT" == "1" ]] && command -v bun >/dev/null 2>&1; then
-  echo "[mc-spo-soak] lint g6lc64_ooo_server..."
-  bun build-platform/src/cli/index.ts verify --lint --target g6lc64_ooo_server
-  echo "[mc-spo-soak] lint g6lc64_server_math..."
-  bun build-platform/src/cli/index.ts verify --lint --target g6lc64_server_math || \
+  echo "[mc-spo-soak] lint cv64a6_ooo_server..."
+  bun build-platform/src/cli/index.ts verify --lint --target cv64a6_ooo_server
+  echo "[mc-spo-soak] lint cv64a6_server_math..."
+  bun build-platform/src/cli/index.ts verify --lint --target cv64a6_server_math || \
     echo "[mc-spo-soak] WARN: server_math lint skipped/failed"
   echo "  ok dual-target lint soak"
 else

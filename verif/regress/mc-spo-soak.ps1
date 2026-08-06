@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: LicenseRef-Proprietary
 # Copyright (c) 2026 Etienne Cimon
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "../..")
@@ -15,6 +15,41 @@ if ($env:MC_SPO_USE_BASH -eq "1") {
 }
 
 Write-Host "[mc-spo-soak] multi-core stream plane x spo/CF (PowerShell)"
+
+# Optional precompiled timings package (structure gate; does not replace RTL by default)
+$ft = if ($env:CVA6_FROM_TIMING) { $env:CVA6_FROM_TIMING } elseif ($env:FROM_TIMING) { $env:FROM_TIMING } else { $null }
+if ($ft) {
+  Write-Host "[mc-spo-soak] CVA6_FROM_TIMING=$ft"
+  $bun0 = Get-Command bun -ErrorAction SilentlyContinue
+  if ($bun0) {
+    Push-Location (Join-Path $Root "build-platform")
+    try {
+      & bun run src/cli/index.ts timings validate --from-timing $ft
+      if ($LASTEXITCODE -ne 0) { throw "[mc-spo-soak] from-timing validate failed" }
+      & bun run src/cli/index.ts timings summary --from-timing $ft
+    } finally {
+      Pop-Location
+    }
+  } else {
+    Write-Host "  skip timings validate (no bun)"
+  }
+  if ($env:CVA6_TIMINGS_EMIT_FLIST) {
+    Write-Host "[mc-spo-soak] CVA6_TIMINGS_EMIT_FLIST=$($env:CVA6_TIMINGS_EMIT_FLIST)"
+    Write-Host "  note: expert --use-emit; lint still uses live RTL unless consumer swaps flist"
+  }
+  if (Test-Path (Join-Path $ft "spo-from-timing-report.json")) {
+    Write-Host "[mc-spo-soak] FO4 report: $(Join-Path $ft 'spo-from-timing-report.json')"
+  }
+  if (Test-Path (Join-Path $ft "correct.json")) {
+    try {
+      $cj = Get-Content (Join-Path $ft "correct.json") -Raw | ConvertFrom-Json
+      Write-Host "[mc-spo-soak] FO4 before=$($cj.max_path_fo4_before) after=$($cj.max_path_fo4_after) edits=$((@($cj.edits)).Count)"
+    } catch {
+      Write-Host "  (could not parse correct.json FO4 fields)"
+    }
+  }
+}
+
 $narrow = @(
   "verif/tests/custom/multicore/mc_stream_plane.S",
   "verif/tests/custom/multicore/zacas_amocas_w.S",
@@ -64,11 +99,11 @@ if ($cc) {
 
 $bun = Get-Command bun -ErrorAction SilentlyContinue
 if ($bun -and $env:MC_SPO_LINT -ne "0") {
-  Write-Host "[mc-spo-soak] lint g6lc64_ooo_server..."
-  & bun build-platform/src/cli/index.ts verify --lint --target g6lc64_ooo_server
+  Write-Host "[mc-spo-soak] lint cv64a6_ooo_server..."
+  & bun build-platform/src/cli/index.ts verify --lint --target cv64a6_ooo_server
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-  Write-Host "[mc-spo-soak] lint g6lc64_server_math..."
-  & bun build-platform/src/cli/index.ts verify --lint --target g6lc64_server_math
+  Write-Host "[mc-spo-soak] lint cv64a6_server_math..."
+  & bun build-platform/src/cli/index.ts verify --lint --target cv64a6_server_math
   if ($LASTEXITCODE -ne 0) { Write-Host "  WARN: server_math lint failed" }
   Write-Host "  ok dual-target lint soak"
 }

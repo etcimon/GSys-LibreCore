@@ -17,7 +17,7 @@ Plan of record extension to `router-core-upgrade-program.md`. Ordered by **prere
 | **U10 server math package** | **C-light production** — HPDCACHE+HWPF+L2 auto, RVB/Zicbo*/H+Sstc, `server-math-tests` (optional) |
 | U10ᵇ RVV / Ara attach | **Partial / live-lintable** — Ara vendored + attach + lint; purpose guide + DTS + directed tests; full cosim/SBI open |
 | Multi-context PLIC | **Done** — 16 targets (8×M/S); harness fan-out per core |
-| **U5 full OoO** | **Production (gated)** — `OoOEn=1` backend; dual-issue `g6lc64_ooo` + 4-issue server pkg; cancel-mask mispredict recovery; `ooo-l3-tests` optional |
+| **U5 full OoO** | **Production (gated)** — `OoOEn=1` backend; dual-issue `cv64a6_ooo` + 4-issue server pkg; cancel-mask mispredict recovery; `ooo-l3-tests` optional |
 
 ---
 
@@ -70,12 +70,12 @@ U6.2 multi-core ──┬── U9.0 Sstc×H (vstimecmp) ✅
 
 ```
 # Server / KVM / math host profile (select as active cva6_config_pkg):
-core/include/g6lc64_server_math_config_pkg.sv
+core/include/cv64a6_server_math_config_pkg.sv
   → H=1, Sstc=1, RVB, Zicbo*, L2, NrCores=2, dual-issue, HWPF
   → RVV=0 until Ara is linked
 
 # When Ara is on the flist:
-core/include/g6lc64_server_math_v_config_pkg.sv  # VExtEn=1, CvxifEn=0
+core/include/cv64a6_server_math_v_config_pkg.sv  # VExtEn=1, CvxifEn=0
 # See architecture/ara-vector-attach.md
 
 # Router low-power remains default imafdc packages (H=0, NrCores=1).
@@ -88,8 +88,8 @@ core/include/g6lc64_server_math_v_config_pkg.sv  # VExtEn=1, CvxifEn=0
 1. ~~`vendor sync ara` + `Flist.ara`~~ **done**  
 2. ~~L3 victim → L2 tag inval~~ **done**  
 3. ~~p6 stream plane × multicore suite~~ **done** — `mc-stream-tests` lint gate green  
-4. ~~Ara flist + typed lint top for `g6lc64_server_math_v`~~ **done** (`extraFlistsByTarget`,
-   `g6lc_ara_lint_top`, suite `ara-vector-path` PASS)  
+4. ~~Ara flist + typed lint top for `cv64a6_server_math_v`~~ **done** (`extraFlistsByTarget`,
+   `cva6_ara_lint_top`, suite `ara-vector-path` PASS)  
 5. ~~Ariane EnableAccelerator + attach + live Ara (`CVA6_ARA_ATTACH=1`)~~ **done** (Verilator lint
    green with `vendor/ara/cva6_shim/*` + expanded Flist.ara deps)  
 6. ~~Strengthen formal vs **live** freelist / ROB / multi-port rename~~ **done**
@@ -102,5 +102,27 @@ core/include/g6lc64_server_math_v_config_pkg.sv  # VExtEn=1, CvxifEn=0
 9. U10ᵇ software contract: ~~purpose guide + DTS `v` + directed vector tests~~ **done**
    (`AGENTS-vector.md`, `ariane-server-math-v.dts`, `testlist_ara_vector.yaml`); next =
    OpenSBI VRF context + `cva6.py` cosim of `v_memcpy_lmul` under live Ara
+10. ~~Zacas AMOCAS.W/D + multicore spo/CF directed + Spike soak~~ **done** (`RVZacas`,
+    `testlist_mc_stream`, `mc-spo-soak` / `mc-spo-spike`); ~~RTL mini hard CAS~~ **done**
+    (`mc-mini-veri`); full CRT `mc-spo-veri` residual
+11. ~~Structural FO4 residual close sparse_ex/frontend @ 2.5 GHz~~ **done** (screening;
+    S3b-lab real-STA retune still open)
+
+**Live next (authoritative ordered list + file priors):**
+[`AGENTS-todo.md`](../AGENTS-todo.md) — **Current phase** (landed table with prior paths) and
+**Practical next §1–§10** (each item cites architecture / guides / specs-to-* / regress scripts).
+
+Quick spine for those open items:
+
+| Next | Open these |
+|------|------------|
+| ~~Suite catalog~~ **done** | `mc-mini-veri` + `mc-spo-veri` in `defaults.ts`; `AGENTS-specs-to-tests.md` |
+| CRT RTL residual (**§2**) | `verif/regress/mc-spo-veri.sh` · `agents/guides/AGENTS-speculation.md` |
+| H-edge | `architecture/server-math-hypervisor.md` · this file Phase B · `agents/spec/riscv-spec-II-5.*` |
+| Stability / regress map | `AGENTS.md` §0.2 · `AGENTS-build-platform.md` §4–§5 |
+| R3b Linux | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` |
+| Ara cosim / VRF | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` |
+| AMOCAS.Q / CAS golden | `agents/spec/riscv-spec-I-5.9-zacas.html` · `mc-mini-veri.sh` |
+| Lab FO4/STA | `architecture/build-platform-opensta-from-timing.md` · `AGENTS-build-platform.md` §7 |
 
 

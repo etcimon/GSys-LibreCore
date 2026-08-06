@@ -17,15 +17,6 @@
 // change request from the back-end and does branch prediction.
 // U2: optional FTQ + FDIP + loop buffer (FtqDepth==0 ⇒ pre-U2 netlist path).
 
-// ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
-// The original work of the copyright holders named above remains licensed
-// under the license stated above, and that grant is unaffected.
-// Modifications (c) 2026 Etienne Cimon: TAGE/ITTAGE/gshare predictor integration, FTQ, FDIP and loop-buffer plumbing.
-// The upstream notice above is prose and declares no SPDX identifier, so the
-// outbound offer is stated here as the file's single SPDX tag. See REUSE.toml.
-// Etienne Cimon offers this file AS A WHOLE under:
-// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
-
 module frontend
   import ariane_pkg::*;
 #(
@@ -446,7 +437,7 @@ module frontend
     // Without this, sequential addresses already queued after a taken jump/branch
     // are drained by demand fetch (often empty DRAM → 0x0000 → ILLEGAL_INSTR).
     // Same-cycle push (via if_ready) re-seeds the redirect PC into an empty FTQ.
-    g6lc_ftq #(
+    cva6_ftq #(
         .CVA6Cfg(CVA6Cfg),
         .DEPTH  (CVA6Cfg.FtqDepth)
     ) i_ftq (
@@ -471,7 +462,7 @@ module frontend
     );
 
     if (CVA6Cfg.FdipEn) begin : gen_fdip
-      g6lc_fdip #(
+      cva6_fdip #(
           .CVA6Cfg (CVA6Cfg),
           .DISTANCE(CVA6Cfg.FdipDistance)
       ) i_fdip (
@@ -493,7 +484,7 @@ module frontend
     end
 
     if (CVA6Cfg.LoopBufEn) begin : gen_lbuf
-      g6lc_loop_buffer #(
+      cva6_loop_buffer #(
           .CVA6Cfg    (CVA6Cfg),
           .NR_ENTRIES (CVA6Cfg.LoopBufEntries),
           .DATA_W     (CVA6Cfg.FETCH_WIDTH)
@@ -827,7 +818,7 @@ module frontend
     if (!(CVA6Cfg.BPType == config_pkg::TAGE_LITE && CVA6Cfg.BPIndirectEn)) begin
       assign btb_prediction = '0;
     end
-    // else: btb_prediction driven by g6lc_bp_top below
+    // else: btb_prediction driven by cva6_bp_top below
   end else begin : btb_gen
     btb #(
         .CVA6Cfg   (CVA6Cfg),
@@ -875,7 +866,7 @@ module frontend
     );
   end else if (CVA6Cfg.BPType == config_pkg::GSHARE) begin : gshare_gen
     // U1: standalone gshare (PC ⊕ GHR), same port contract as bht.
-    g6lc_bp_gshare #(
+    cva6_bp_gshare #(
         .CVA6Cfg     (CVA6Cfg),
         .bht_update_t(bht_update_t),
         .NR_ENTRIES  (CVA6Cfg.BHTEntries)
@@ -895,7 +886,7 @@ module frontend
     // btb_prediction is only driven here when BPIndirectEn (ITTAGE); otherwise
     // the classic btb_gen above owns it.
     btb_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] btb_fabric;
-    g6lc_bp_top #(
+    cva6_bp_top #(
         .CVA6Cfg          (CVA6Cfg),
         .bht_update_t     (bht_update_t),
         .btb_update_t     (btb_update_t),

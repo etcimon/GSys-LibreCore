@@ -270,7 +270,7 @@ module issue_stage
     for (genvar wi = 0; wi < CVA6Cfg.NrWbPorts; wi++) begin : gen_wb_exc
       assign wb_exc_bits[wi] = ex_ex_i[wi].valid;
     end
-    g6lc_ooo_dispatch #(
+    cva6_ooo_dispatch #(
         .CVA6Cfg(CVA6Cfg),
         .scoreboard_entry_t(scoreboard_entry_t)
     ) i_ooo_dispatch (
@@ -315,7 +315,7 @@ module issue_stage
     assign ooo_rob_full_o     = 1'b0;
     assign ooo_lsq_stall_o    = 1'b0;
     assign ooo_stl_forward_o  = 1'b0;
-    g6lc_slice_dispatch #(
+    cva6_slice_dispatch #(
         .CVA6Cfg(CVA6Cfg),
         .scoreboard_entry_t(scoreboard_entry_t)
     ) i_slice_dispatch (

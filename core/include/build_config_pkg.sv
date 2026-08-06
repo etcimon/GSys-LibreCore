@@ -251,12 +251,11 @@ package build_config_pkg;
     cfg.FETCH_USER_WIDTH = CVA6Cfg.FetchUserWidth;
     cfg.FETCH_USER_EN = CVA6Cfg.FetchUserEn;
     // Non-zero enables (DataUserEn/FetchUserEn are int unsigned enables).
-    // Cast to int: bare || yields 1-bit and trips Verilator WIDTHEXPAND (and
-    // has crashed Verilator 5.020 with an internal fault on this design).
-    cfg.AXI_USER_EN = int'((CVA6Cfg.DataUserEn != 0) || (CVA6Cfg.FetchUserEn != 0));
+    cfg.AXI_USER_EN = (CVA6Cfg.DataUserEn != 0) || (CVA6Cfg.FetchUserEn != 0);
 
     // Front-end bus: enough bits for NrIssuePorts compressed (16b) or full (32b)
     // instructions, rounded up to the next supported power-of-two width.
+    // Hang-6: dual+FETCH32 still BADOFFSET — residual is issue/commit, not width.
     cfg.FETCH_WIDTH = build_fetch_width(cfg.NrIssuePorts, CVA6Cfg.RVC);
     cfg.FETCH_ALIGN_BITS = $clog2(cfg.FETCH_WIDTH / 8);
     cfg.INSTR_PER_FETCH = cfg.FETCH_WIDTH / (CVA6Cfg.RVC ? 16 : 32);

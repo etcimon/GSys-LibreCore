@@ -51,7 +51,7 @@ endmodule
 in-core VLEN/SEW register file inside the scalar pipeline. Vector is delivered as an accelerator:</p>
 <ul>
   <li><strong>Config:</strong> <code>CVA6Cfg.RVV</code> in <code>core/include/config_pkg.sv</code>;
-    package <code>core/include/g6lc64_server_math_v_config_pkg.sv</code> sets
+    package <code>core/include/cv64a6_server_math_v_config_pkg.sv</code> sets
     <code>CVA6ConfigVExtEn=1</code> / <code>RVV=1</code> and <code>CvxifEn=0</code>. Default
     non-<code>_v</code> targets leave <code>RVV=0</code>.</li>
   <li><strong>ISA discovery:</strong> when <code>RVV</code> is set,
@@ -60,7 +60,7 @@ in-core VLEN/SEW register file inside the scalar pipeline. Vector is delivered a
   <li><strong>Core seam:</strong> <code>core/cva6.sv</code> <code>gen_accelerator</code> →
     <code>core/acc_dispatcher.sv</code> (long-latency FU); mutually exclusive with
     <code>CvxifEn</code> and superscalar accelerator asserts.</li>
-  <li><strong>SoC attach:</strong> <code>corev_apu/src/g6lc_ara_attach.sv</code> (live under
+  <li><strong>SoC attach:</strong> <code>corev_apu/src/cva6_ara_attach.sv</code> (live under
     <code>`define CVA6_ARA_ATTACH</code>, else stub) + <code>corev_apu/src/cva6_axi_2to1_mux.sv</code>;
     <code>ariane</code> EnableAccelerator wiring. Contract:
     <code>architecture/ara-vector-attach.md</code>.</li>
@@ -69,12 +69,14 @@ in-core VLEN/SEW register file inside the scalar pipeline. Vector is delivered a
     <code>verify.extraFlistsByTarget</code> / <code>topByTarget</code> arm
     <code>cv64a6_server_math_v</code>; suite <code>ara-vector-path</code>.</li>
   <li><strong>Verify state:</strong> live Ara Verilator lint is green with
-    <code>CVA6_ARA_ATTACH=1</code>. Directed suite
+    <code>CVA6_ARA_ATTACH=1</code>. Build-platform suite <code>ara-vector-path</code> + directed
     <code>verif/tests/testlist_ara_vector.yaml</code> (soft-skip / misa.V / e64 m1 memcpy).
-    Purpose guide: <code>agents/guides/AGENTS-vector.md</code>. Full RVV compliance / Spike cosim
-    under <code>cva6.py</code> still open. Subsets Zve32x/Zve64x/Zve64d and Zvfh are not
-    separately config-gated beyond Ara’s VLEN/lanes; vector crypto (<code>zvk*</code>) remains
-    absent.</li>
+    Purpose guide: <code>agents/guides/AGENTS-vector.md</code>. Maps:
+    <code>AGENTS-specs-to-impl.md</code> / <code>AGENTS-specs-to-tests.md</code>.</li>
+  <li><strong>Open:</strong> OpenSBI VRF save/restore; Linux <code>CONFIG_RISCV_ISA_V</code>;
+    live <code>cva6.py</code> Ara cosim of <code>v_memcpy_lmul</code>; full RVV compliance /
+    Spike cosim. Subsets Zve32x/Zve64x/Zve64d and Zvfh are not separately config-gated beyond
+    Ara’s VLEN/lanes; vector crypto (<code>zvk*</code>) remains absent.</li>
 </ul>
 
 <p><strong>.dts linkage:</strong> only the <code>_v</code> / RVV-enabled target may advertise

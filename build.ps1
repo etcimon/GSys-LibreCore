@@ -201,18 +201,12 @@ function Test-ManagedToolPresent {
     "riscv-gcc" {
       if (Get-Command riscv-none-elf-gcc -ErrorAction SilentlyContinue) { return $true }
       if (Get-Command riscv64-unknown-elf-gcc -ErrorAction SilentlyContinue) { return $true }
-      # Managed prefix is workspace/tooling/riscv (not only riscv-*).
-      $gccRoots = @()
-      $fixed = Join-Path $workspaceTooling "riscv"
-      if (Test-Path $fixed) { $gccRoots += Get-Item $fixed }
-      $gccRoots += @(Get-ChildItem (Join-Path $workspaceTooling "riscv-*") -Directory -ErrorAction SilentlyContinue)
+      $gccRoots = Get-ChildItem (Join-Path $workspaceTooling "riscv-*") -Directory -ErrorAction SilentlyContinue
       foreach ($r in $gccRoots) {
         $binDir = Join-Path $r.FullName "bin"
         if (-not (Test-Path $binDir)) { continue }
-        foreach ($pat in @("riscv-none-elf-gcc.exe", "riscv-none-elf-gcc", "riscv64-unknown-elf-gcc.exe", "riscv64-unknown-elf-gcc", "*gcc*.exe")) {
-          $bins = Get-ChildItem $binDir -Filter $pat -ErrorAction SilentlyContinue
-          if ($bins) { return $true }
-        }
+        $bins = Get-ChildItem $binDir -Filter "*gcc*.exe" -ErrorAction SilentlyContinue
+        if ($bins) { return $true }
       }
       return $false
     }

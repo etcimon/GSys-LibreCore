@@ -260,7 +260,7 @@ module controller
     // Flush frontend IF path and drop unissued decode; do NOT assert flush_id
     // (that clears the scoreboard) or flush_ex so in-flight ops of the outgoing
     // hart can drain. CSR/RF bank by instruction hart_id. Do NOT flush BP —
-    // RAS/GHR are per-hart and must survive. PC from g6lc_smt_pc_bank.
+    // RAS/GHR are per-hart and must survive. PC from cva6_smt_pc_bank.
     if (CVA6Cfg.NrHarts > 1 && smt_switch_i) begin
       set_pc_commit_o        = 1'b0;
       flush_if_o             = 1'b1;

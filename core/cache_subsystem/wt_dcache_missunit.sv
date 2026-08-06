@@ -180,8 +180,37 @@ module wt_dcache_missunit
   assign cnt_d = (flush_en) ? cnt_q + 1 : '0;
   assign flush_done = (cnt_q == CVA6Cfg.DCACHE_NUM_WORDS - 1);
 
-  assign miss_req_masked_d = (lock_reqs)  ? miss_req_masked_q      :
-                             (mask_reads) ? miss_we_i & miss_req_i : miss_req_i;
+  // Per-port load vs in-flight store-TX collision. LZC always prefers lower
+  // indices (load ports) over the write-buffer port (NumPorts-1). If a load is
+  // stalled on tx_rdwr_collision but still wins arbitration, pending store
+  // misses never issue → write buffer cannot drain → TX never frees → deadlock
+  // on dense ST→LD streams (fill ≥ ~160 B on imafdc). When a store is pending,
+  // mask colliding loads so the store port can be selected and TX can retire.
+  logic [NumPorts-1:0] load_tx_collision;
+  logic                store_pending;
+  logic [NumPorts-1:0] miss_req_base;
+
+  always_comb begin : p_load_tx_coll
+    load_tx_collision = '0;
+    for (int p = 0; p < NumPorts; p++) begin
+      if (miss_req_i[p] && !miss_we_i[p]) begin
+        for (int k = 0; k < CVA6Cfg.DCACHE_MAX_TX; k++) begin
+          load_tx_collision[p] |=
+              (miss_paddr_i[p][CVA6Cfg.PLEN-1:CVA6Cfg.DCACHE_OFFSET_WIDTH]
+               == tx_paddr_i[k][CVA6Cfg.PLEN-1:CVA6Cfg.DCACHE_OFFSET_WIDTH])
+              && tx_vld_i[k];
+        end
+      end
+    end
+  end
+
+  assign store_pending = miss_req_i[NumPorts-1] & miss_we_i[NumPorts-1];
+
+  assign miss_req_base = (lock_reqs)  ? miss_req_masked_q :
+                         (mask_reads) ? (miss_we_i & miss_req_i) : miss_req_i;
+  assign miss_req_masked_d = (store_pending && !lock_reqs)
+                           ? (miss_req_base & ~load_tx_collision)
+                           : miss_req_base;
   assign miss_is_write = miss_we_i[miss_port_idx];
 
   // read port arbiter
@@ -558,8 +587,12 @@ module wt_dcache_missunit
             // i.e., the cache state may have been updated in the mean time due to a refill at the same CL address
             if (mshr_rdrd_collision_d[miss_port_idx]) begin
               miss_replay_o[miss_port_idx] = 1'b1;
-              // stall in case this CL address overlaps with a write TX that is in flight
-            end else if (!tx_rdwr_collision) begin
+              // Previously stalled forever on tx_rdwr_collision (load vs in-flight
+              // store TX). That deadlocks when the load port wins arbitration and
+              // store misses cannot retire the TX. For write-through, memory already
+              // has (or is receiving) the store; allow the load miss to issue. The
+              // wbuffer still forwards dirty bytes on the read data path.
+            end else begin
               mem_data_req_o   = 1'b1;
               mem_data_o.rtype = DCACHE_LOAD_REQ;
               update_lfsr      = all_ways_valid & mem_data_ack_i;  // need to evict a random way

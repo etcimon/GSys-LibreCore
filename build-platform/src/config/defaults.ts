@@ -1,5 +1,5 @@
 // Copyright (c) 2026 Etienne Cimon
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: LicenseRef-Proprietary
 //
 // defaults.ts — The complete, resolved baseline configuration.
 //
@@ -325,8 +325,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "OPTIONAL / lengthy: U5 production OoO directed. Runs cva6.py when DV ready, else real lint of DV_TARGET.",
         script: "verif/regress/ooo-l3-tests.sh",
         group: "directed",
-        target: "g6lc64_ooo_server",
-        dvTarget: "g6lc64_ooo_server",
+        target: "cv64a6_ooo_server",
+        dvTarget: "cv64a6_ooo_server",
         dvSimulators: "veri-testharness,spike",
         // Empty tools: script falls back to build.ps1 lint; full sim needs setup.
         tools: [],
@@ -336,16 +336,12 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "mc-stream-tests",
         description:
-          "OPTIONAL: U6/p6 stream plane × multicore (inclusive L3→L2/L1, ServerPrefetch, multi-stream, Zacas/spo). " +
-          "Default DV_TARGET=g6lc64_ooo_server, DV_SIMULATORS=spike (fast ISS). " +
-          "Set DV_SIMULATORS=veri-testharness,spike for full RTL cosim (lengthy).",
+          "OPTIONAL: U6/p6 stream plane × multicore (inclusive L3→L2/L1, ServerPrefetch, multi-stream, Zacas/spo). Default DV_TARGET=cv64a6_ooo_server.",
         script: "verif/regress/mc-stream-tests.sh",
         group: "directed",
-        target: "g6lc64_ooo_server",
-        dvTarget: "g6lc64_ooo_server",
-        // Spike-first: full 4-core veri-testharness of the testlist is multi-hour.
-        // Override with DV_SIMULATORS=veri-testharness,spike for RTL cosim.
-        dvSimulators: "spike",
+        target: "cv64a6_ooo_server",
+        dvTarget: "cv64a6_ooo_server",
+        dvSimulators: "veri-testharness,spike",
         tools: [],
         openSource: true,
         optional: true,
@@ -417,8 +413,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "OPTIONAL: Soak assemble + dual-target lint for multi-core stream × spo/CF/CAS narrow diagnostics.",
         script: "verif/regress/mc-spo-soak.sh",
         group: "directed",
-        target: "g6lc64_ooo_server",
-        dvTarget: "g6lc64_ooo_server",
+        target: "cv64a6_ooo_server",
+        dvTarget: "cv64a6_ooo_server",
         dvSimulators: "none",
         tools: [],
         openSource: true,
@@ -430,10 +426,38 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "OPTIONAL: Spike ISS soak of mc_stream spo/CF/Zacas narrow tests (Linux/WSL: gcc+spike+make+dtc).",
         script: "verif/regress/mc-spo-spike.sh",
         group: "directed",
-        target: "g6lc64_server_math",
-        dvTarget: "g6lc64_server_math",
+        target: "cv64a6_server_math",
+        dvTarget: "cv64a6_server_math",
         dvSimulators: "spike",
         tools: ["riscv-gcc", "spike"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        // Hard CAS golden: Spike has no zacas — do not soft-pass AMOCAS on ISS-only paths.
+        id: "mc-mini-veri",
+        description:
+          "OPTIONAL: Verilator bare-metal mini gate (no CRT) — mini_tohost/jumps + hard AMOCAS.W/D on Variane. Default DV_TARGET=cv64a6_imafdc_sv39 (RVZacas). Prefer over CRT for CAS.",
+        script: "verif/regress/mc-mini-veri.sh",
+        group: "directed",
+        target: "cv64a6_imafdc_sv39",
+        dvTarget: "cv64a6_imafdc_sv39",
+        dvSimulators: "veri-testharness",
+        tools: ["riscv-gcc", "verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        // Full CRT residual: budget/density sensitive; mini remains hard CAS golden.
+        id: "mc-spo-veri",
+        description:
+          "OPTIONAL / residual: Verilator CRT multicore stream×spo/CF/Zacas soak (Variane). Default server_math; MC_SPO_VERI_FORCE_IMAFDC=1 for single-core smoke. Prefer mc-mini-veri for hard AMOCAS.",
+        script: "verif/regress/mc-spo-veri.sh",
+        group: "directed",
+        target: "cv64a6_server_math",
+        dvTarget: "cv64a6_server_math",
+        dvSimulators: "veri-testharness",
+        tools: ["riscv-gcc", "verilator", "spike"],
         openSource: true,
         optional: true,
       },
@@ -443,7 +467,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "OPTIONAL: U10ᵇ Ara path gate (Flist.ara + upstream + server_math_v package). Live flist via verify.extraFlists.",
         script: "verif/regress/ara-vector-path.sh",
         group: "directed",
-        target: "g6lc64_server_math",
+        target: "cv64a6_server_math",
         dvSimulators: "veri-testharness",
         tools: [],
         openSource: true,
@@ -452,7 +476,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "spec-deep-path",
         description:
-          "OPTIONAL: FSE S1–S5 path gate + real lint of cv64a6_spec_deep and g6lc64_ooo.",
+          "OPTIONAL: FSE S1–S5 path gate + real lint of cv64a6_spec_deep and cv64a6_ooo.",
         script: "verif/regress/spec-deep-path.sh",
         group: "directed",
         target: "cv64a6_spec_deep",
@@ -478,10 +502,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "server-math-tests",
         description:
-          "OPTIONAL: U10 server-math C-light (misa B/H, cbo.zero, scalar memcpy). DV_TARGET=g6lc64_server_math.",
+          "OPTIONAL: U10 server-math C-light (misa B/H, cbo.zero, scalar memcpy). DV_TARGET=cv64a6_server_math.",
         script: "verif/regress/server-math-tests.sh",
         group: "directed",
-        target: "g6lc64_server_math",
+        target: "cv64a6_server_math",
         dvSimulators: "veri-testharness,spike",
         tools: ["riscv-gcc", "verilator", "spike"],
         openSource: true,
@@ -490,10 +514,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "kvm-h-tests",
         description:
-          "OPTIONAL: KVM-oriented H stress (hfence, dual VS ecall, Sstc litmus). DV_TARGET=g6lc64_server_math.",
+          "OPTIONAL: KVM-oriented H stress (hfence, dual VS ecall, Sstc litmus). DV_TARGET=cv64a6_server_math.",
         script: "verif/regress/kvm-h-tests.sh",
         group: "directed",
-        target: "g6lc64_server_math",
+        target: "cv64a6_server_math",
         dvSimulators: "veri-testharness,spike",
         tools: ["riscv-gcc", "verilator", "spike"],
         openSource: true,
@@ -502,11 +526,11 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "dual-hart-ci",
         description:
-          "OPTIONAL: dual-hart/SMT2 artifact + real lint of g6lc64_smt2.",
+          "OPTIONAL: dual-hart/SMT2 artifact + real lint of cv64a6_smt2.",
         script: "verif/regress/dual-hart-ci.sh",
         group: "directed",
-        target: "g6lc64_smt2",
-        dvTarget: "g6lc64_smt2",
+        target: "cv64a6_smt2",
+        dvTarget: "cv64a6_smt2",
         dvSimulators: "veri-testharness",
         tools: [],
         openSource: true,
@@ -515,33 +539,13 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "smt-linux-boot-path",
         description:
-          "OPTIONAL: SMT Linux boot path gate + real lint of g6lc64_smt2.",
+          "OPTIONAL: SMT Linux boot path gate + real lint of cv64a6_smt2.",
         script: "verif/regress/smt-linux-boot-path.sh",
         group: "directed",
-        target: "g6lc64_smt2",
-        dvTarget: "g6lc64_smt2",
+        target: "cv64a6_smt2",
+        dvTarget: "cv64a6_smt2",
         dvSimulators: "veri-testharness",
         tools: [],
-        openSource: true,
-        optional: true,
-      },
-      {
-        id: "opensbi-linux-boot",
-        description:
-          "OpenSBI/Linux boot gate: artifact gate (always) + functional boot of " +
-          "fw_payload.elf on Spike, asserting the OpenSBI banner and the payload " +
-          "reaching SMT2-OSBI-OK. Console is recovered by decoding HTIF byte " +
-          "writes out of the cosim commit log. Tier C (RTL cosim) is " +
-          "smt-linux-r3-cosim. Env: OSBI_BOOT_TIMEOUT, OSBI_HARTS=2, " +
-          "OSBI_LOG_COMMITS=0 (fast dual-hart default), " +
-          "CVA6_REQUIRE_OSBI_BOOT=1 to hard-fail instead of soft-pass.",
-        script: "verif/regress/opensbi-linux-boot.sh",
-        group: "linux",
-        target: "g6lc64_smt2",
-        dvTarget: "g6lc64_smt2",
-        dvSimulators: "spike",
-        tools: ["spike"],
-        testSuiteInstallers: ["opensbi-smt2"],
         openSource: true,
         optional: true,
       },
@@ -551,8 +555,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "OPTIONAL: SMT OpenSBI/rootfs track (R1–R3a). Auto-builds software/smt2-linux OpenSBI when toolchain+dtc present; sim if fw_payload.elf or CVA6_LINUX_PAYLOAD.",
         script: "verif/regress/smt-linux-rootfs.sh",
         group: "linux",
-        target: "g6lc64_smt2",
-        dvTarget: "g6lc64_smt2",
+        target: "cv64a6_smt2",
+        dvTarget: "cv64a6_smt2",
         dvSimulators: "veri-testharness",
         tools: [],
         openSource: true,
@@ -742,7 +746,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         status: "vendored",
         enabled: false, // opt-in: do not auto-fetch; tree present after `vendor sync ara`
         scanPaths: ["hardware", "src", "ara"],
-        integrationSeam: "core/acc_dispatcher.sv + vendor/ara/Flist.ara; package g6lc64_server_math_v",
+        integrationSeam: "core/acc_dispatcher.sv + vendor/ara/Flist.ara; package cv64a6_server_math_v",
         phyNote: "Soft vector datapath; place as own clock/power island on ASIC.",
         architectureDoc: "architecture/ara-vector-attach.md",
       },
@@ -947,7 +951,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
   // existing config elaborates the generic, macro-protected tech-cell path and
   // CI is untouched. Arming needs BOTH technology.optimizationPass = true AND a
   // *.tech-spec.md doc under core/** or corev_apu/**; proprietary PDK views are
-  // dropped under pdkRoot (gitignored). See AGENTS-technology.md / `g6lc-build
+  // dropped under pdkRoot (gitignored). See AGENTS-technology.md / `cva6-build
   // tech`. The guard macro gates the RTL adaptation: undefined ⇒ generic path.
   technology: {
     optimizationPass: false,
@@ -974,21 +978,21 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     // Global extras: empty so default targets stay free of opt-in IP deps.
     extraFlists: [],
     // Per-target extras: Ara RVV IP only when linting/synthing the _v package.
-    // Requires `g6lc-build vendor sync ara` (upstream tree + Flist.ara present).
+    // Requires `cva6-build vendor sync ara` (upstream tree + Flist.ara present).
     extraFlistsByTarget: {
-      g6lc64_server_math_v: ["vendor/ara/Flist.ara"],
+      cv64a6_server_math_v: ["vendor/ara/Flist.ara"],
     },
     waiverFile: "verilator_config.vlt",
     top: "cva6",
     // RVV package needs typed accelerator interfaces for LSU/acc paths.
     topByTarget: {
-      g6lc64_server_math_v: "g6lc_ara_lint_top",
+      cv64a6_server_math_v: "cva6_ara_lint_top",
     },
     // Default gate: full-feature 64-bit + minimal 32-bit. Production-heavy
-    // packages (g6lc64_ooo / ooo_server, server_math, smt2, spec_deep) are
+    // packages (cv64a6_ooo / ooo_server, server_math, smt2, spec_deep) are
     // opt-in so every PR stays fast:
-    //   g6lc-build verify --target g6lc64_ooo_server
-    //   g6lc-build test --suite ooo-l3-tests
+    //   cva6-build verify --target cv64a6_ooo_server
+    //   cva6-build test --suite ooo-l3-tests
     targets: ["cv64a6_imafdc_sv39", "cv32a65x"],
     // Mirrors the accepted Verilator flag set in the repo-root Makefile
     // (`verilate_command`): -Wall with the project's long-standing waivers, and
@@ -1016,10 +1020,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     // next-work #3; AGENTS-specs-to-impl.md "OoO formal"). Self-contained prop
     // modules under core/ooo/formal/ — do not require full-core elaboration.
     formalTasks: [
-      "core/ooo/formal/g6lc_ooo_freelist.sby",
-      "core/ooo/formal/g6lc_ooo_rob.sby",
-      "core/ooo/formal/g6lc_ooo_cancel.sby",
-      "core/ooo/formal/g6lc_ooo_rename.sby",
+      "core/ooo/formal/cva6_ooo_freelist.sby",
+      "core/ooo/formal/cva6_ooo_rob.sby",
+      "core/ooo/formal/cva6_ooo_cancel.sby",
+      "core/ooo/formal/cva6_ooo_rename.sby",
     ],
     simSuites: ["smoke-cv64a6", "smoke-cv32a65x"],
     stages: { lint: true, formal: true, sim: true, synth: true },
@@ -1038,7 +1042,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
   },
 
   // Compartmentalized diagnostics: each test owns Verilator surface / probe caps.
-  // Run: `g6lc-build diag run` or `probe diag`. Not a substitute for full verify.
+  // Run: `cva6-build diag run` or `probe diag`. Not a substitute for full verify.
   diagnostics: {
     defaultCompartments: ["host", "core"],
     tests: [
@@ -1108,20 +1112,20 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         compartment: "smt2",
         kind: "path-check",
         paths: [
-          "core/include/g6lc64_smt2_config_pkg.sv",
+          "core/include/cv64a6_smt2_config_pkg.sv",
           "corev_apu/bootrom/ariane-smt2.dts",
           "verif/regress/smt-linux-r3-cosim.sh",
         ],
       },
       {
         id: "diag-smt2-lint",
-        description: "Verilator lint of g6lc64_smt2 (NrHarts=2 package).",
+        description: "Verilator lint of cv64a6_smt2 (NrHarts=2 package).",
         compartment: "smt2",
         kind: "verilator-lint",
         tools: ["verilator"],
         optional: true,
         verilator: {
-          target: "g6lc64_smt2",
+          target: "cv64a6_smt2",
           // SMT2 may add warnings; own budget so core baseline is not polluted.
           warningBudget: 600,
         },
@@ -1149,20 +1153,20 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         compartment: "ooo",
         kind: "path-check",
         paths: [
-          "core/ooo/formal/g6lc_ooo_freelist.sby",
-          "core/ooo/formal/g6lc_ooo_rob.sby",
-          "core/ooo/formal/g6lc_ooo_rename.sby",
+          "core/ooo/formal/cva6_ooo_freelist.sby",
+          "core/ooo/formal/cva6_ooo_rob.sby",
+          "core/ooo/formal/cva6_ooo_rename.sby",
         ],
       },
       {
         id: "diag-ooo-lint",
-        description: "Verilator lint of g6lc64_ooo config package.",
+        description: "Verilator lint of cv64a6_ooo config package.",
         compartment: "ooo",
         kind: "verilator-lint",
         tools: ["verilator"],
         optional: true,
         verilator: {
-          target: "g6lc64_ooo",
+          target: "cv64a6_ooo",
           warningBudget: 650,
         },
       },
@@ -1173,7 +1177,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         compartment: "apu",
         kind: "path-check",
         optional: true,
-        paths: ["vendor/ara/Flist.ara", "verif/tb/g6lc_ara_lint_top.sv"],
+        paths: ["vendor/ara/Flist.ara", "verif/tb/cva6_ara_lint_top.sv"],
       },
       {
         id: "diag-ara-lint",
@@ -1183,8 +1187,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         tools: ["verilator"],
         optional: true,
         verilator: {
-          target: "g6lc64_server_math_v",
-          top: "g6lc_ara_lint_top",
+          target: "cv64a6_server_math_v",
+          top: "cva6_ara_lint_top",
           extraFlists: ["vendor/ara/Flist.ara"],
           warningBudget: 800,
         },

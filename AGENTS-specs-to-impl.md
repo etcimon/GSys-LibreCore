@@ -62,7 +62,7 @@ Line numbers are cited only where stable/known; otherwise the file is cited at m
 | ↳ `mhpmeventN` selector encoding | implemented | 8-bit WARL, split `[7:5]`=group / `[4:0]`=index (`core/include/ariane_pkg.sv` `MHPMEvent*`); group 0 is the legacy 5-bit encoding unchanged; groups 1–7 reserved for feature upgrades (`core/perf_counters.sv`) | `MHPMCounterNum` |
 | M / Zmmul (mul/div) | implemented | `core/mult.sv`, `core/multiplier.sv`, `core/serdiv.sv` | `RVM`/`Zmmul` (target pkg) |
 | Zicond (cond. zero) | config | `core/alu.sv`, `core/decoder.sv` | `RVZicond` |
-| Ziccif fetch atomicity (4.9) | implemented | `core/frontend/`, `core/cache_subsystem/g6lc_icache.sv`, `core/instr_realign.sv` | `Icache*` |
+| Ziccif fetch atomicity (4.9) | implemented | `core/frontend/`, `core/cache_subsystem/cva6_icache.sv`, `core/instr_realign.sv` | `Icache*` |
 | Ziccid I/D coherence (4.10) | implemented | `core/controller.sv` (FENCE.I), cache flush policy | `DcacheFlushOnFenceI` |
 | Zicclsm misaligned (4.14) | partial | `core/load_store_unit.sv`, `core/load_unit.sv`, `core/store_unit.sv` | target-dependent |
 | Zic64b 64-byte blocks (4.15) | config | `core/cache_subsystem/*` | `Dcache*LineWidth`/`Icache*LineWidth` |
@@ -70,18 +70,18 @@ Line numbers are cited only where stable/known; otherwise the file is cited at m
 | Zihintntl (4.18) | partial | `core/decoder.sv` (hint→NOP) | — |
 | Zihintpause (4.19) | **implemented (config)** | `core/decoder.sv` (PAUSE→NOP when `ZihintpauseEn`) | `ZihintpauseEn` |
 | CMO — Zicbom/Zicboz/Zicbop (4.20, `#cmo`) | **partial→Zicboz full-line** | Zicbom: decoder/store/HPDCACHE; **U7ᶜ Zicboz multi-beat** (`CBOZ_WAIT`/`ISSUE`); Zicbop: PREFETCH HINT→NOP; server package enables all three | `RVZiCbom`, `RVZiCboz`, `RVZiCbop` |
-| Server math / AVX-like (U10) | partial (C-light + `_v`) | `g6lc64_server_math{,_v}`; HPDCACHE+HWPF+L2 auto; `server-math-tests`; `_v` enables RVV for Ara | `RVB`, `RVZiCbo*`, `HwPrefetchEn`, `RVH`, `RVV` |
-| Ara / RVV attach (U10ᵇ) | **partial / live lintable** | Same as Vector V row: `ariane` gen_acc + `g6lc_ara_attach` + `g6lc_axi_2to1_mux`; `CVA6_ARA_ATTACH=1` Verilator green; `vendor/ara/` + shims; suite `ara-vector-path`. Spec sub-file `agents/spec/riscv-spec-I-9-vector.html` | `RVV`, `EnableAccelerator` |
+| Server math / AVX-like (U10) | partial (C-light + `_v`) | `cv64a6_server_math{,_v}`; HPDCACHE+HWPF+L2 auto; `server-math-tests`; `_v` enables RVV for Ara | `RVB`, `RVZiCbo*`, `HwPrefetchEn`, `RVH`, `RVV` |
+| Ara / RVV attach (U10ᵇ) | **partial / live lintable** | Same as Vector V row: `ariane` gen_acc + `cva6_ara_attach` + `cva6_axi_2to1_mux`; `CVA6_ARA_ATTACH=1` Verilator green; `vendor/ara/` + shims; suite `ara-vector-path`. Spec sub-file `agents/spec/riscv-spec-I-9-vector.html` | `RVV`, `EnableAccelerator` |
 | KVM/H stress | partial (directed) | `verif/tests/custom/kvm_h/*`, suite `kvm-h-tests` | `RVH`, `SstcEn` |
-| L3 DT / inclusive | **implemented (gated)** | L3/L2 victim→L1 (`g6lc_l3_inclusive_inv`); L3→L2 tag match-inval (`l2_back_inval_*` / `inval_match_*`); TB `INCLUSIVE_L3=L3En` | `L3En`, cluster `INCLUSIVE_L3` |
-| Stream plane × multicore (U6/p6) | **implemented (gated)** | `g6lc_server_prefetcher` + `NrCores` packages; suite `mc-stream-tests` | `ServerPrefetchEn`, `NrCores`, `L2En`/`L3En` |
+| L3 DT / inclusive | **implemented (gated)** | L3/L2 victim→L1 (`cva6_l3_inclusive_inv`); L3→L2 tag match-inval (`l2_back_inval_*` / `inval_match_*`); TB `INCLUSIVE_L3=L3En` | `L3En`, cluster `INCLUSIVE_L3` |
+| Stream plane × multicore (U6/p6) | **implemented (gated)** | `cva6_server_prefetcher` + `NrCores` packages; suite `mc-stream-tests` | `ServerPrefetchEn`, `NrCores`, `L2En`/`L3En` |
 | PMU group 2 L2/L3/PF | implemented | `perf_counters` g2; cluster→ariane→cva6 ports | `L2En`/`L3En`/`ServerPrefetchEn` |
-| OoO formal | **live freelist+ROB+rename** | `core/ooo/formal/`: freelist→`g6lc_freelist` (prove); ROB→`g6lc_rob` via yosys-slang (BMC d=16); rename→`g6lc_rename` multi-port free/busy/bypass (BMC d=12); cancel policy model; `verify.formalTasks` (4 tasks) | `OoOEn` |
+| OoO formal | **live freelist+ROB+rename** | `core/ooo/formal/`: freelist→`cva6_freelist` (prove); ROB→`cva6_rob` via yosys-slang (BMC d=16); rename→`cva6_rename` multi-port free/busy/bypass (BMC d=12); cancel policy model; `verify.formalTasks` (4 tasks) | `OoOEn` |
 | SMT / multi-hart (U6.1) | implemented (fine) | `core/smt/*` + banked RAS/GHR; IF-only switch; CSR commit by `hart_id`; `smt2-bringup.md` | `NrHarts`, `SmtPolicy` |
-| Full OoO (U5) | **implemented (production, gated)** | 4-issue rename/IQ/ROB/LSQ; cancel-mask mispredict squash; PRF WB gate; PMU g1; `g6lc64_ooo` + `g6lc64_ooo_server` | `OoOEn`, `DeepSpecEn`, `NrIssuePorts`, `RobEntries`, `MemDepPredEn` |
+| Full OoO (U5) | **implemented (production, gated)** | 4-issue rename/IQ/ROB/LSQ; cancel-mask mispredict squash; PRF WB gate; PMU g1; `cv64a6_ooo` + `cv64a6_ooo_server` | `OoOEn`, `DeepSpecEn`, `NrIssuePorts`, `RobEntries`, `MemDepPredEn` |
 | Full speculative execution (FSE) | implemented (config; S0–S6) | Arch+plan under `architecture/speculative-execution/`; depth plane; recovery; LSU younger cancel; SMT-tagged cancel; **S6** `spec-deep-tests` + RVWMO/A directed + security residual | `DeepSpecEn`, `SpeculativeSb`, `BPCkptDepth`, `NrHarts`, `NrLoadBufEntries`, `MaxOutstandingStores` |
 | L3 + server prefetch | implemented (gated) | `corev_apu/l3_cache/*`; DT notes `dts-l3-prefetch.md`; PMU grp1 proxies | `L3En`, `ServerPrefetchEn` |
-| Multi-core cluster + L1 inv (U6.2) | partial | `corev_apu/src/g6lc_cluster.sv`, `g6lc_l1_inv_adapter.sv`; core `l1_inval_*` ports → WT D$ | `NrCores`, `Coh*` |
+| Multi-core cluster + L1 inv (U6.2) | partial | `corev_apu/src/cva6_cluster.sv`, `cva6_l1_inv_adapter.sv`; core `l1_inval_*` ports → WT D$ | `NrCores`, `Coh*` |
 
 ### Atomics (ch5)
 | Spec (anchor) | Status | Primary RTL loci | Config knob |
@@ -89,7 +89,7 @@ Line numbers are cited only where stable/known; otherwise the file is cited at m
 | A extension (5.1, `#ext:a`) | config | `core/amo_buffer.sv`, `core/load_store_unit.sv`, `core/store_buffer.sv` | `RVA` (target pkg) |
 | Zalrsc LR/SC (5.2) | config | `core/load_store_unit.sv`, D$ reservation in `core/cache_subsystem/*` | `RVA` |
 | Zawrs wait-on-reservation (5.5) | **partial (config)** | `core/decoder.sv` (WRS.NTO/STO→WFI path), `core/csr_regfile.sv` WFI stall | `ZawrsEn` |
-| Zacas compare-and-swap (5.9) | **partial (W/D gated)** | `RVZacas`; decode `AMO_CASW/D`; `amo_req.operand_c`; `amo_alu` `AMO_CAS1`; HPDCache `HPDCACHE_REQ_AMO_CAS` + W pack; AXI `ATOP_ATOMICCMP`; pkgs `smt2` / `server_math{,_v}` / `ooo_server` + DTS `zacas` on `ariane-{linux,smt2,server-math-v}.dts`. No AMOCAS.Q | `RVZacas` (⇒ `RVA`) |
+| Zacas compare-and-swap (5.9, `#ext:zacas`) | **partial (W/D gated)** | `RVZacas`; decode `AMO_CASW/D` (`core/decoder.sv`); third-op RF / `amo_req.operand_c`; `amo_alu` `AMO_CAS1`; HPDCache/WT CAS pack; AXI `ATOP_ATOMICCMP`; pkgs `server_math{,_v}` / `ooo_server` / `imafdc_sv39`. Directed: `zacas_*.S`, `testlist_mc_stream`, suites `mc-stream-tests` / `mc-spo-soak` / `mc-spo-spike`; **hard RTL golden** `mc-mini-veri` (`mini_amocas_{w,d}`); CRT residual `mc-spo-veri`. Spec sub-file `agents/spec/riscv-spec-I-5.9-zacas.html`. **Open:** AMOCAS.Q; Spike has no zacas (not a golden) | `RVZacas` (⇒ `RVA`) |
 | Za128rs/Za64rs/Zabha/Zaamo/Zalasr (5.3-5.10) | partial | (subset via A) `core/amo_buffer.sv` | — |
 
 ### Floating point, compressed, bitmanip, vector, crypto, matrix
@@ -102,7 +102,7 @@ Line numbers are cited only where stable/known; otherwise the file is cited at m
 | Zcb / Zcmp | config / partial | `core/compressed_decoder.sv`, `core/macro_decoder.sv` | target-dependent |
 | Zba / Zbb / Zbs bitmanip (ch8, `#bits`) | config | `core/alu.sv`, `core/decoder.sv` | `RVB` |
 | Zbc / Zbk* (carry-less / crypto bitmanip) | partial | `core/alu.sv`, `core/aes.sv` | target-dependent |
-| Vector V / Zve* (ch9, `#vector`) | **partial (Ara attach)** | No in-core VRF; U10ᵇ Ara: `core/acc_dispatcher.sv`, `core/cva6.sv` `gen_accelerator`, `misa.V` in `core/csr_regfile.sv`; SoC `corev_apu/src/g6lc_ara_attach.sv` + `g6lc_axi_2to1_mux.sv`; vendor `vendor/ara/{upstream,Flist.ara,cva6_shim/}`; package `g6lc64_server_math_v_config_pkg.sv`. Mutually exclusive with `CvxifEn`. Live Verilator lint under `CVA6_ARA_ATTACH=1`. Software contract: `agents/guides/AGENTS-vector.md`; DTS **only** `ariane-server-math-v.dts` (`v`+`zve64d`+`imafdcv…_zacas_…`); opensbi-linux-boot tier A2 asserts RVV alignment; directed `verif/tests/testlist_ara_vector.yaml`. Full RVV cosim / OpenSBI VRF still open | `RVV`, `EnableAccelerator` (`CVA6ConfigVExtEn`) |
+| Vector V / Zve* (ch9, `#vector`) | **partial (Ara attach)** | No in-core VRF; U10ᵇ Ara: `core/acc_dispatcher.sv`, `core/cva6.sv` `gen_accelerator`, `misa.V` in `core/csr_regfile.sv`; SoC `corev_apu/src/cva6_ara_attach.sv` + `cva6_axi_2to1_mux.sv`; vendor `vendor/ara/{upstream,Flist.ara,cva6_shim/}`; package `cv64a6_server_math_v_config_pkg.sv`. Mutually exclusive with `CvxifEn`. Live Verilator lint under `CVA6_ARA_ATTACH=1`. Software contract: `agents/guides/AGENTS-vector.md`, DTS `corev_apu/bootrom/ariane-server-math-v.dts`, directed `verif/tests/testlist_ara_vector.yaml`. Full RVV cosim / OpenSBI VRF still open | `RVV`, `EnableAccelerator` (`CVA6ConfigVExtEn`) |
 | Packed SIMD (ch10, `#zp`) | absent | — | — |
 | Scalar crypto Zkn (AES) (ch11, `#crypto`) | partial | `core/aes.sv` | target-dependent |
 | Vector crypto Zvk* | absent | (not part of Ara attach baseline) | — |
@@ -163,12 +163,12 @@ to architectural results, coherence, ordering, precise traps). See `AGENTS.md` �
 
 | Feature | Status | Primary RTL loci | Config knob | Guide |
 |---|---|---|---|---|
-| Branch prediction (BHT/PH_BHT/BTB/RAS + U1 fabric) | **implemented (config)** | `frontend.sv`, `bht*.sv`, `btb.sv`, `ras.sv`, `g6lc_bp_{top,tage,gshare,loop,ittage,statcor,ckpt,ghist}.sv`, `branch_unit.sv` | `BPType` (BHT/PH_BHT/GSHARE/TAGE_LITE), `BP*`, `RASDepth` | `agents/guides/AGENTS-branch-prediction.md` |
-| Decoupled front-end (U2) | **implemented (config)** | `g6lc_ftq.sv`, `g6lc_fdip.sv`, `g6lc_loop_buffer.sv`, `frontend.sv` | `FtqDepth`, `FdipEn`, `LoopBufEn` | `architecture/speculative-execution/` |
+| Branch prediction (BHT/PH_BHT/BTB/RAS + U1 fabric) | **implemented (config)** | `frontend.sv`, `bht*.sv`, `btb.sv`, `ras.sv`, `cva6_bp_{top,tage,gshare,loop,ittage,statcor,ckpt,ghist}.sv`, `branch_unit.sv` | `BPType` (BHT/PH_BHT/GSHARE/TAGE_LITE), `BP*`, `RASDepth` | `agents/guides/AGENTS-branch-prediction.md` |
+| Decoupled front-end (U2) | **implemented (config)** | `cva6_ftq.sv`, `cva6_fdip.sv`, `cva6_loop_buffer.sv`, `frontend.sv` | `FtqDepth`, `FdipEn`, `LoopBufEn` | `architecture/speculative-execution/` |
 | Speculative execution (in-order, precise) | implemented | `scoreboard.sv`, `issue_read_operands.sv`, `ex_stage.sv`, `commit_stage.sv`, `controller.sv` | `NrScoreboardEntries`, `NrLoadBufEntries`, `MaxOutstandingStores` | `agents/guides/AGENTS-speculation.md` |
 | Multi-issue width (superscalar precursor) | **implemented (config)** | `build_config_pkg` (NrIssuePorts 1\|2–8), `id_stage`, `instr_queue`, `issue_read_operands`, `ex_stage`, `scoreboard` free-slot full | `SuperscalarEn`, `NrIssuePorts` | `architecture/out-of-order/` |
-| Slice-OoO (U4) | **implemented (off by default)** | `g6lc_slice_{ist,steer,iq,rmt,dispatch}.sv`, `issue_stage.sv` | `SliceOoOEn`, `Slice*` | `architecture/out-of-order/` |
-| Full OoO (U5) | **implemented (production, gated)** | `core/ooo/*`, cancel-mask recovery, `g6lc64_ooo` / `g6lc64_ooo_server` | `OoOEn`, `NrIssuePorts≤8` | `architecture/out-of-order/` |
+| Slice-OoO (U4) | **implemented (off by default)** | `cva6_slice_{ist,steer,iq,rmt,dispatch}.sv`, `issue_stage.sv` | `SliceOoOEn`, `Slice*` | `architecture/out-of-order/` |
+| Full OoO (U5) | **implemented (production, gated)** | `core/ooo/*`, cancel-mask recovery, `cv64a6_ooo` / `cv64a6_ooo_server` | `OoOEn`, `NrIssuePorts≤8` | `architecture/out-of-order/` |
 | L1 caches (I$ + D$: WT / HPDCACHE / std) | implemented | `core/cache_subsystem/*`; selection `core/cva6.sv` | `DCacheType`, `Icache*`, `Dcache*`, `WayPredEn`, `ReplPolicy` | `agents/guides/AGENTS-l2l3-cache.md` |
 | L2 cache (U6.0) | **implemented (config, SoC)** | `corev_apu/l2_cache/*`; wire in `ariane_testharness` when `L2En` | `L2En`, `L2ByteSize`, `L2SetAssoc`, `L2LineWidth`, `L2MshrDepth`, `L2DataBanks` | `architecture/l2-l3-cache/` |
 | L3 / multi-core snoop (U6.2) | partial (hub+SF+inv; N=1 identity) | `corev_apu/coherence/cva6_{coherence_pkg,snoop_filter,inval_bus,coherence_hub}.sv` | `NrCores` 1…`CVA6_MAX_CORES`, `CohPolicy`, `SnoopFilter*` | `architecture/multi-core/`, `remaining-upgrade-sequence.md` |

@@ -47,18 +47,22 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | `iss-tests` | directed | ISS directed programs | Part I base semantics vs. Spike reference |
 | `issue-tests` | directed | `testlist_issues.yaml` | regression for previously-filed ISA/pipeline bugs |
 | `cv32a6-tests` / `cv64a6-tests` | directed | `cv32a6_tests.sh` / `cv64a6_imafdc_tests.sh` | per-target directed base/ext regressions |
-| `ooo-l3-tests` | directed (optional/lengthy) | `testlist_ooo_l3.yaml` + `ooo-l3-tests.sh` | U5 4-issue OoO ILP/memdep + L2/L3 (`g6lc64_ooo_server`) |
-| `mc-stream-tests` | directed (optional) | `testlist_mc_stream.yaml` + `mc-stream-tests.{sh,ps1}` | U6/p6 stream plane × multicore + Zacas/spo: multi-stream PF, thrash, inclusive L3→L2/L1, AMOCAS.W/D, store-fwd, fence drain, CAS lock handoff (`g6lc64_ooo_server` / `server_math`) |
+| `ooo-l3-tests` | directed (optional/lengthy) | `testlist_ooo_l3.yaml` + `ooo-l3-tests.sh` | U5 4-issue OoO ILP/memdep + L2/L3 (`cv64a6_ooo_server`) |
+| `mc-stream-tests` | directed (optional) | `testlist_mc_stream.yaml` + `mc-stream-tests.{sh,ps1}` | U6/p6 stream plane × multicore + Zacas/spo: multi-stream PF, thrash, inclusive L3→L2/L1, AMOCAS.W/D, store-fwd, fence drain, CAS lock handoff, CF×stream (`cv64a6_ooo_server` / `server_math`) |
+| `mc-spo-soak` | directed (optional) | `mc-spo-soak.{sh,ps1}` + `testlist_mc_stream` artifacts | Assemble smoke + dual-target lint for stream×spo/CF/CAS narrow list (no full sim required) |
+| `mc-spo-spike` | directed (optional) | `mc-spo-spike.sh` + `testlist_mc_stream` | Spike ISS soak of multicore spo/CF/Zacas narrow tests (`cv64a6_server_math`); **Spike has no zacas** — CAS paths may soft-skip; not a hard CAS golden |
+| `mc-mini-veri` | directed (optional) | `mc-mini-veri.sh` + `verif/tests/custom/multicore/mini_*.S` | **Hard** Verilator bare-metal CAS golden: `mini_tohost` / `mini_jumps` / `mini_amocas_{w,d}` on Variane (`cv64a6_imafdc_sv39`, `RVZacas`); no CRT |
+| `mc-spo-veri` | directed (optional) | `mc-spo-veri.sh` + self-built CRT ELFs (`work-ver/mc_spo_elfs`) | CRT Variane smoke (**7/7** with `MC_SPO_VERI_FORCE_IMAFDC=1`, Verilator 5.008): AMOCAS.W/D, st-fwd, fence, cas_lock, cf/mispred stream. Residual hang/flake: `cas_stream`+`stream_plane` via `MC_SPO_VERI_FULL=1`. Prefer `mc-mini-veri` for hard bare CAS |
 | `ara-vector-path` | directed (optional) | `ara-vector-path.{sh,ps1}` + `testlist_ara_vector.yaml` | U10ᵇ RVV (I ch9): Ara vendor + `Flist.ara` + `server_math_v` + DTS `v` + directed soft-skip/misa/LMUL memcpy + attach/lint gate (full RVV compliance cosim still open) |
-| `verify --formal` (not a suite) | formal | `core/ooo/formal/{g6lc_ooo_freelist,g6lc_ooo_rob,g6lc_ooo_cancel,g6lc_ooo_rename}.sby` via `verify.formalTasks` | U5: live freelist + ROB occupancy (slang BMC) + rename free/busy/bypass + cancel-mask policy model |
-| `spec-deep-path` | directed (optional) | `spec-deep-path.{sh,ps1}` | FSE path/artifact gate + lint `cv64a6_spec_deep` / `g6lc64_ooo` |
+| `timings-sta-handoff` | directed (optional) | `timings-sta-handoff.sh` | Host S0: timings package → review-only OpenSTA `seeds.sdc` + FO4 CSV + correlate scaffold (`architecture/build-platform-opensta-from-timing.md`) |
+| `verify --formal` (not a suite) | formal | `core/ooo/formal/{cva6_ooo_freelist,cva6_ooo_rob,cva6_ooo_cancel,cva6_ooo_rename}.sby` via `verify.formalTasks` | U5: live freelist + ROB occupancy (slang BMC) + rename free/busy/bypass + cancel-mask policy model |
+| `spec-deep-path` | directed (optional) | `spec-deep-path.{sh,ps1}` | FSE path/artifact gate + lint `cv64a6_spec_deep` / `cv64a6_ooo` |
 | `spec-deep-tests` | directed (optional) | `testlist_spec_deep.yaml` + `spec-deep-tests.{sh,ps1}` | FSE S6: mispredict/STQ/fence + single-hart RVWMO/A litmus (`cv64a6_spec_deep`) |
-| `server-math-tests` | directed (optional) | `testlist_server_math.yaml` | U10 C-light: misa B/H, cbo.zero, scalar memcpy (`g6lc64_server_math`) |
+| `server-math-tests` | directed (optional) | `testlist_server_math.yaml` | U10 C-light: misa B/H, cbo.zero, scalar memcpy (`cv64a6_server_math`) |
 | `kvm-h-tests` | directed (optional) | `testlist_kvm_h.yaml` | H hfence + dual VS ecall + Sstc litmus (KVM-oriented) |
 | `dual-hart-ci` | directed (optional) | `dual-hart-ci.sh` | SMT2/NrHarts=2 artifact + checklist |
 | `smt-linux-boot-path` | directed (optional) | `smt-linux-boot-path.{sh,ps1}` | DTS vs sparse linux-dts + CLINT/PLIC per-hart gate (no full Linux image) |
 | `smt-linux-rootfs` | linux (optional) | `smt-linux-rootfs.{sh,ps1}` + `testlist_smt_linux.yaml` + `software/smt2-linux/` | SMT OpenSBI R3a auto-build when toolchain present; sim if `CVA6_LINUX_PAYLOAD` / `fw_payload.elf` |
-| `opensbi-linux-boot` | linux (optional) | `opensbi-linux-boot.{sh,ps1}` + `software/smt2-linux/` + `corev_apu/bootrom/ariane-smt2.dts` | **Functional** OpenSBI boot on Spike: tier A artifact/DTS-ABI gate, tier B boot `fw_payload.elf` asserting the OpenSBI banner and payload `SMT2-OSBI-OK`. Exercises Part II M-mode init, Zicsr, Sv39 setup, CLINT/timer and the M→S transition end-to-end. Console is recovered by decoding HTIF byte writes out of the cosim commit log. Tier C = `smt-linux-r3-cosim` (RTL, needs Verilator). `CVA6_REQUIRE_OSBI_BOOT=1` hard-fails instead of soft-passing |
 | `iti` / `instr-tracing` | directed | ITI / trace directed | trace/observability (not ISA-normative) |
 | `debug` | directed | debug-module test | Debug spec (external), triggers |
 | `interrupt` | uvm | `testlist_interrupt.yaml` | Part II traps/interrupts, CLINT/PLIC delivery |
@@ -83,6 +87,7 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | Part I base RV32I / RV64I | `riscv-tests`, `riscv-arch-test`, `riscv-compliance`, `smoke-*`, `generated` |
 | M (mul/div) | `riscv-tests` (`*um*`), `riscv-arch-test`, `generated` |
 | A / Zalrsc (atomics, LR/SC) | `riscv-tests` (`*ua*`), `riscv-arch-test`, `linux` |
+| Zacas AMOCAS.W/D (I §5.9) | `mc-mini-veri` (hard RTL), `mc-stream-tests` / `mc-spo-soak` / `mc-spo-spike` (directed/ISS), `mc-spo-veri` (CRT residual) |
 | F / D (floating point) | `riscv-tests` (`*uf*`/`*ud*`), `riscv-arch-test` (rv64 targets) |
 | C (compressed) | `riscv-tests` (`*uc*`), `riscv-arch-test`, `smoke-*` |
 | Zicsr + Part II ch2 CSRs | `csr-access`, `csr-embedded`, `hwconfig` |
@@ -98,7 +103,7 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | Vector V / RVV (I ch9) | `ara-vector-path` + `testlist_ara_vector.yaml` (attach/lint + directed; not full compliance cosim) |
 | CVXIF coprocessor seam | `cvxif`, `generated-xif` (mutex with RVV accelerator path) |
 | Randomized / functional coverage | `generated`, `smoke-gen`, `testlist_isacov.yaml` |
-| Full-system integration | `linux` (single-hart BBL), `smt-linux-rootfs` (SMT preflight + optional payload), `opensbi-linux-boot` (functional OpenSBI M→S boot on Spike), `smt-linux-r3-cosim` (RTL cosim boot), `pk-tests` |
+| Full-system integration | `linux` (single-hart BBL), `smt-linux-rootfs` (SMT preflight + optional payload), `pk-tests` |
 
 ---
 
@@ -112,10 +117,17 @@ randomized `generated` breadth, a commercial UVM sim, or are `absent` in RTL so 
   `generated` (riscv-dv) where a UVM/ISS path is available.
 - **Hypervisor H, Sv48/Sv57, newer Ss*/Sm*/Sv* extensions** — no dedicated suite; add one when the RTL
   row in `AGENTS-specs-to-impl.md` moves off `absent`/`partial`.
-- **CFI, Packed SIMD, Matrix, Zacas, vector crypto (`zvk*`)** — `absent` in RTL, therefore untested by design.
+- **CFI, Packed SIMD, Matrix, vector crypto (`zvk*`)** — `absent` in RTL, therefore untested by design.
+- **Zacas (I §5.9)** — RTL is **partial** (AMOCAS.W/D config-gated via `RVZacas`; AMOCAS.Q absent).
+  Directed coverage: `testlist_mc_stream.yaml` (`zacas_*`, CAS lock, CF×stream) + suites
+  `mc-stream-tests` / `mc-spo-soak` / `mc-spo-spike` (ISS; **not** hard CAS) /
+  **`mc-mini-veri` (hard RTL golden)** / `mc-spo-veri` (CRT residual).
+  Spike lacks zacas — never treat ISS skip as RTL pass. Sub-file:
+  `agents/spec/riscv-spec-I-5.9-zacas.html`.
 - **RVV / Vector (I ch9)** — RTL is **partial** (Ara attach live-lintable; purpose guide + DTS +
-  directed `testlist_ara_vector.yaml`). Functional `v_memcpy_lmul` needs live Ara cosim; full RVV
-  compliance / Spike cosim still open until `cva6.py` runs under that config.
+  directed `testlist_ara_vector.yaml` / suite `ara-vector-path`). Functional `v_memcpy_lmul`
+  needs live Ara cosim; OpenSBI VRF save/restore + full RVV compliance / Spike cosim still open
+  until `cva6.py` runs under that config. Sub-file: `agents/spec/riscv-spec-I-9-vector.html`.
 
 When you close a gap, add/extend a `verif/tests/testlist_*.yaml`, register (or reuse) a suite in
 `build-platform/src/config/defaults.ts`, and update the tables above + `AGENTS-specs-coverage.md`.

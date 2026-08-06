@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: LicenseRef-Proprietary
 # Copyright (c) 2026 Etienne Cimon
 #
 # Verilator (Variane_testharness) soak for multi-core stream × spo/CF/Zacas.
-# Rebuilds RTL for DV_TARGET (default g6lc64_server_math, RVZacas) so AMOCAS
+# Rebuilds RTL for DV_TARGET (default cv64a6_server_math, RVZacas) so AMOCAS
 # exercises real hardware paths instead of Spike soft-skip.
 #
 # Bare-metal gate (no CRT, imafdc) — preferred green path:
@@ -24,7 +24,7 @@
 #   bash verif/regress/mc-spo-veri.sh
 #   MC_SPO_VERI_TESTS="zacas_amocas_w mc_spo_st_fwd" bash verif/regress/mc-spo-veri.sh
 #   MC_SPO_VERI_REBUILD=0 bash verif/regress/mc-spo-veri.sh   # reuse work-ver
-#   DV_TARGET=g6lc64_ooo_server bash verif/regress/mc-spo-veri.sh
+#   DV_TARGET=cv64a6_ooo_server bash verif/regress/mc-spo-veri.sh
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -55,66 +55,20 @@ export RISCV_OBJCOPY="${RISCV_OBJCOPY:-${CROSS_COMPILE}objcopy}"
   export PATH="${HOME}/tools/mamba/envs/build/bin:${PATH}"
 [[ -d "${HOME}/tools/mamba/envs/build/lib" ]] && \
   export LD_LIBRARY_PATH="${HOME}/tools/mamba/envs/build/lib:${LD_LIBRARY_PATH:-}"
-# Prefer Verilator 5.008 (Debian 5.020 internal-faults on this SoC testharness).
-# Strip flags unknown to 5.008 via a PATH wrapper named `verilator`.
-if [[ -x "${HOME}/tools/verilator-v5.008/bin/verilator" ]]; then
-  # Do not set VERILATOR_ROOT — the 5.008 layout keeps verilator_bin in bin/.
-  unset VERILATOR_ROOT || true
-  _vlt_real="${HOME}/tools/verilator-v5.008/bin/verilator"
-  _vlt_wrap_dir="/tmp/mc-spo-veri-vlt-wrap"
-  mkdir -p "$_vlt_wrap_dir"
-  cat > "$_vlt_wrap_dir/verilator" <<EOF
-#!/bin/bash
-args=()
-for a in "\$@"; do
-  case "\$a" in
-    -Wno-SIDEEFFECT|-Wno-UNOPTTHREADS) ;;
-    *) args+=("\$a") ;;
-  esac
-done
-exec ${_vlt_real} "\${args[@]}"
-EOF
-  chmod +x "$_vlt_wrap_dir/verilator"
-  export PATH="${_vlt_wrap_dir}:${HOME}/tools/verilator-v5.008/bin:${PATH}"
-elif [[ -f "${HOME}/tools/oss-cad-suite/environment" ]]; then
+# oss-cad-suite Verilator
+if [[ -f "${HOME}/tools/oss-cad-suite/environment" ]]; then
   # shellcheck disable=SC1091
   source "${HOME}/tools/oss-cad-suite/environment"
-  [[ -d "${HOME}/tools/oss-cad-suite/bin" ]] && \
-    export PATH="${HOME}/tools/oss-cad-suite/bin:${PATH}"
 fi
+[[ -d "${HOME}/tools/oss-cad-suite/bin" ]] && \
+  export PATH="${HOME}/tools/oss-cad-suite/bin:${PATH}"
 
-export DV_TARGET="${DV_TARGET:-g6lc64_server_math}"
+export DV_TARGET="${DV_TARGET:-cv64a6_server_math}"
 export CVA6_REPO_DIR="${CVA6_REPO_DIR:-$ROOT}"
 export RTL_PATH="${RTL_PATH:-$ROOT}"
 export TB_PATH="${TB_PATH:-$ROOT/verif/tb}"
 export TESTS_PATH="${TESTS_PATH:-$ROOT/verif/tests}"
 export CVA6_SPIKE_VERSION_RELAXED="${CVA6_SPIKE_VERSION_RELAXED:-1}"
-
-# Lean-emit overlay (cycle-accurate of corrected tree). Requires emit flist.
-#   CVA6_TIMINGS_USE_EMIT=1 CVA6_TIMINGS_EMIT_FLIST=<pkg>/corrected/svt_corrected.f
-USE_EMIT=0
-if [[ "${CVA6_TIMINGS_USE_EMIT:-0}" == "1" || "${CVA6_TIMINGS_USE_EMIT:-}" == "true" ]]; then
-  USE_EMIT=1
-fi
-EMIT_FLIST="${CVA6_TIMINGS_EMIT_FLIST:-}"
-if [[ "$USE_EMIT" == "1" && -z "$EMIT_FLIST" && -n "${CVA6_FROM_TIMING:-}" ]]; then
-  EMIT_FLIST="${CVA6_FROM_TIMING}/corrected/svt_corrected.f"
-fi
-OVERLAY_FLIST=""
-if [[ "$USE_EMIT" == "1" ]]; then
-  if [[ -z "$EMIT_FLIST" || ! -f "$EMIT_FLIST" ]]; then
-    echo "[mc-spo-veri] USE_EMIT set but emit flist missing: ${EMIT_FLIST:-<empty>}"
-    exit 1
-  fi
-  OVERLAY_FLIST="${MC_SPO_VERI_OVERLAY_FLIST:-$ROOT/work-ver/emit-overlay-${DV_TARGET}.f}"
-  mkdir -p "$(dirname "$OVERLAY_FLIST")"
-  echo "[mc-spo-veri] building emit overlay flist → $OVERLAY_FLIST"
-  /usr/bin/python3 "$ROOT/verif/regress/mk-emit-overlay-flist.py" \
-    --repo "$ROOT" \
-    --emit "$EMIT_FLIST" \
-    --out "$OVERLAY_FLIST" \
-    --primary core/Flist.cva6
-fi
 
 # Spike install (fesvr + spike-dasm). Prefer managed workspace, then ~/tools/spike.
 if [[ -z "${SPIKE_INSTALL_DIR:-}" ]]; then
@@ -135,20 +89,16 @@ export CXX="${CXX:-g++}"
 export CC="${CC:-gcc}"
 
 REBUILD="${MC_SPO_VERI_REBUILD:-1}"
-# Default: CAS + diagnostics + denser streams (FtqDepth=0 imafdc green 2026-08-01)
+# Compact CRT list for FORCE_IMAFDC Variane / Verilator 5.008 (default all 9).
 DEFAULT_TESTS="zacas_amocas_w zacas_amocas_d mc_spo_st_fwd mc_spo_fence_drain mc_cas_lock_handoff mc_spo_cf_stream mc_spo_cas_stream mc_spo_mispred_stream mc_stream_plane"
 # shellcheck disable=SC2206
 tests=( ${MC_SPO_VERI_TESTS:-$DEFAULT_TESTS} )
 
-echo "[mc-spo-veri] Verilator RTL soak target=${DV_TARGET} rebuild=${REBUILD} use_emit=${USE_EMIT}"
+echo "[mc-spo-veri] Verilator RTL soak target=${DV_TARGET} rebuild=${REBUILD}"
 cva6_tools_report
 echo "  verilator: $(command -v verilator || echo MISSING)"
 echo "  g++:       $(command -v g++ || echo MISSING)"
 echo "  SPIKE_INSTALL_DIR=${SPIKE_INSTALL_DIR:-MISSING}"
-if [[ "$USE_EMIT" == "1" ]]; then
-  echo "  emit flist: $EMIT_FLIST"
-  echo "  overlay  : $OVERLAY_FLIST"
-fi
 command -v make >/dev/null || { echo "need make"; exit 1; }
 command -v dtc  >/dev/null || { echo "need dtc"; exit 1; }
 command -v verilator >/dev/null || { echo "need verilator"; exit 1; }
@@ -161,54 +111,25 @@ command -v spike-dasm >/dev/null || { echo "need spike-dasm (SPIKE_INSTALL_DIR/b
 if [[ "${MC_SPO_VERI_FORCE_IMAFDC:-0}" == "1" ]]; then
   export DV_TARGET=cv64a6_imafdc_sv39
   echo "[mc-spo-veri] FORCE_IMAFDC -> target=${DV_TARGET}"
-  # Rebuild overlay path name if emit was requested with previous target tag
-  if [[ "$USE_EMIT" == "1" && -n "$OVERLAY_FLIST" ]]; then
-    OVERLAY_FLIST="${MC_SPO_VERI_OVERLAY_FLIST:-$ROOT/work-ver/emit-overlay-${DV_TARGET}.f}"
-  fi
 fi
 
 if [[ "$REBUILD" == "1" ]]; then
   echo "[mc-spo-veri] verilate target=${DV_TARGET} (clean work-ver)..."
   rm -rf "$ROOT/work-ver"
-  mkdir -p "$ROOT/work-ver"
-  # Re-create overlay after clean if emit mode (work-ver was wiped)
-  if [[ "$USE_EMIT" == "1" ]]; then
-    OVERLAY_FLIST="${MC_SPO_VERI_OVERLAY_FLIST:-$ROOT/work-ver/emit-overlay-${DV_TARGET}.f}"
-    /usr/bin/python3 "$ROOT/verif/regress/mk-emit-overlay-flist.py" \
-      --repo "$ROOT" \
-      --emit "$EMIT_FLIST" \
-      --out "$OVERLAY_FLIST" \
-      --primary core/Flist.cva6
-  fi
-  MAKE_FLIST_ARGS=()
-  if [[ "$USE_EMIT" == "1" && -n "$OVERLAY_FLIST" ]]; then
-    MAKE_FLIST_ARGS+=(flist="$OVERLAY_FLIST")
-    # Drop Makefile $(src) dups of overlaid basenames (avoids MODDUP + internal fault)
-    excl_file="${OVERLAY_FLIST}.exclude"
-    if [[ -f "$excl_file" ]]; then
-      # make wants space-separated basenames
-      excl_bases=$(tr '\n' ' ' < "$excl_file" | sed 's/[[:space:]]*$//')
-      if [[ -n "$excl_bases" ]]; then
-        MAKE_FLIST_ARGS+=(emit_src_exclude="$excl_bases")
-      fi
-    fi
-    echo "[mc-spo-veri] make verilate flist=$OVERLAY_FLIST emit_src_exclude=$([[ -f $excl_file ]] && wc -l < "$excl_file" || echo 0) names"
-  fi
   make -C "$ROOT" verilate \
-    verilator="verilator --no-timing -Wno-MODDUP" \
+    verilator="verilator --no-timing" \
     target="$DV_TARGET" \
     XLEN=64 \
     CVA6_REPO_DIR="$CVA6_REPO_DIR" \
     SPIKE_INSTALL_DIR="$SPIKE_INSTALL_DIR" \
     RISCV="$RISCV" \
     VERILATOR_INSTALL_DIR="$VERILATOR_INSTALL_DIR" \
-    CXX="$CXX" CC="$CC" \
-    "${MAKE_FLIST_ARGS[@]}"
+    CXX="$CXX" CC="$CC"
   test -x "$ROOT/work-ver/Variane_testharness" || {
     echo "[mc-spo-veri] Variane_testharness missing after rebuild"
     exit 1
   }
-  echo "[mc-spo-veri] ok Variane_testharness ready (emit=${USE_EMIT})"
+  echo "[mc-spo-veri] ok Variane_testharness ready"
 else
   test -x "$ROOT/work-ver/Variane_testharness" || {
     echo "[mc-spo-veri] work-ver/Variane_testharness missing; set MC_SPO_VERI_REBUILD=1"
@@ -244,27 +165,51 @@ if [[ "$USE_CVA6PY" == "1" ]]; then
     fi
   done
 else
-  # Prefer newest directed_tests ELFs (mc-spo-spike), then known dated outs.
-  if [[ -z "${MC_SPO_ELFDIR:-}" ]]; then
-    ELFDIR=""
-    for cand in \
-      "$ROOT/verif/sim/out_2026-08-03/directed_tests" \
-      "$ROOT/verif/sim/out_2026-08-01/directed_tests" \
-      /tmp/cva6-mc-spo-spike-out/directed_tests; do
-      if [[ -d "$cand" ]]; then ELFDIR="$cand"; break; fi
-    done
-    ELFDIR="${ELFDIR:-$ROOT/verif/sim/out_2026-08-03/directed_tests}"
+  # CRT ELFs: build locally when missing (do not depend on a dated out_YYYY-MM-DD path).
+  # Override with MC_SPO_ELFDIR=... to reuse cva6.py directed_tests from mc-spo-spike.
+  ELFDIR="${MC_SPO_ELFDIR:-$ROOT/work-ver/mc_spo_elfs}"
+  mkdir -p "$ELFDIR"
+  COMMON="$ROOT/verif/tests/custom/common"
+  SRC_DIR="$ROOT/verif/tests/custom/multicore"
+  # Compact linker for Verilator bare-metal (avoids multi-PHDR density issues when set).
+  # Default: standard gen_from_riscv_config linker (matches cva6.py directed_tests).
+  if [[ "${MC_SPO_VERI_COMPACT_LD:-0}" == "1" ]] || [[ "${MC_SPO_VERI_FORCE_IMAFDC:-0}" == "1" ]]; then
+    LINKER="${MC_SPO_LINKER:-$COMMON/link_verilator.ld}"
   else
-    ELFDIR="$MC_SPO_ELFDIR"
+    LINKER="${MC_SPO_LINKER:-$ROOT/config/gen_from_riscv_config/linker/link.ld}"
   fi
+  MARCH="${MC_SPO_MARCH:-rv64imafdc_zicsr_zifencei}"
+  MABI="${MC_SPO_MABI:-lp64d}"
+
+  build_crt_elf() {
+    local t="$1"
+    local elf="$2"
+    local src="$SRC_DIR/${t}.S"
+    if [[ ! -f "$src" ]]; then
+      echo "[mc-spo-veri] missing source $src" >&2
+      return 1
+    fi
+    # Same shape as testlist_mc_stream gcc_opts + cva6.py -march/-mabi.
+    "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
+      -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
+      "$COMMON/syscalls.c" "$COMMON/crt.S" "$src" \
+      -T "$LINKER" -o "$elf" \
+      -march="$MARCH" -mabi="$MABI"
+  }
+
   cd "$ROOT"
   for t in "${tests[@]}"; do
     echo "[mc-spo-veri] === $t ==="
     elf="$ELFDIR/${t}.o"
-    if [[ ! -f "$elf" ]]; then
-      echo "  FAIL $t (missing $elf — run mc-spo-spike first)"
-      FAIL=$((FAIL + 1))
-      continue
+    src="$SRC_DIR/${t}.S"
+    if [[ ! -f "$elf" ]] || [[ "${MC_SPO_VERI_REBUILD_ELF:-0}" == "1" ]] || \
+       [[ -n "$src" && "$src" -nt "$elf" ]]; then
+      echo "  build $elf (linker=$(basename "$LINKER"))"
+      if ! build_crt_elf "$t" "$elf"; then
+        echo "  FAIL $t (compile)"
+        FAIL=$((FAIL + 1))
+        continue
+      fi
     fi
     log="/tmp/mc-spo-veri_${t}.log"
     # RVFI tracer tohost (fesvr may not see the symbol under preload_aware_dtm)
@@ -277,18 +222,33 @@ else
     fi
     # +debug_disable: bare-metal CRT traps must not enter the debug ROM
     # (otherwise BREAKPOINT loops hide the real exception / tohost write).
+    # Compact CRT sets finish well under this; raise for oversized custom ELFs.
+    cycles="${MC_SPO_VERI_CYCLES:-5000000}"
     set +e
     "$ROOT/work-ver/Variane_testharness" \
-      +max-cycles=2000000 +time_out=2000000 \
+      +max-cycles="$cycles" +time_out="$cycles" \
       +debug_disable \
       "${tohost_arg[@]}" \
-      "$elf" 2>&1 | tee "$log" | tail -12
+      "$elf" >"$log" 2>&1
+    rc=$?
     set -e
+    tail -12 "$log" || true
     if grep -q '\*\*\* SUCCESS \*\*\*' "$log"; then
+      # Hard-fail if tohost encodes failure (bit0=1 often still SUCCESS in tracer).
+      if grep -qE 'tohost = [0-9]*[13579]\b|tohost=0x[0-9a-fA-F]*[13579]\b' "$log"; then
+        # Odd tohost with high bits may be syscall payload — only treat small fail codes.
+        thv=$(grep -oE 'tohost = [0-9]+' "$log" | tail -1 | awk '{print $3}')
+        if [[ -n "${thv:-}" ]] && [[ "$thv" -gt 1 ]] && [[ "$thv" -lt 256 ]]; then
+          echo "  FAIL $t (tohost fail code $thv)"
+          FAIL=$((FAIL + 1))
+          continue
+        fi
+      fi
       echo "  PASS $t"; PASS=$((PASS + 1))
     else
-      echo "  FAIL $t"
+      echo "  FAIL $t (rc=$rc)"
       FAIL=$((FAIL + 1))
+      grep -E "ILLEGAL|exception|FAILED|DIDNOTCONVERGE|timeout|TIMEOUT|tohost" "$log" | head -12 || true
       if [[ -f "$ROOT/trace_rvfi_hart_00.dasm" ]]; then
         echo "  dasm lines: $(wc -l < "$ROOT/trace_rvfi_hart_00.dasm")"
         grep -E "exception|SUCCESS|FAILED" "$ROOT/trace_rvfi_hart_00.dasm" | head -5 || true
@@ -297,11 +257,8 @@ else
   done
 fi
 
-echo "[mc-spo-veri] SUMMARY pass=${PASS} fail=${FAIL} total=${#tests[@]} use_emit=${USE_EMIT} target=${DV_TARGET}"
-if [[ "$USE_EMIT" == "1" ]]; then
-  echo "  emit: cycle-accurate soak of lean emit overlay (not live-only Flist)."
-else
-  echo "  note: live RTL path. For lean emit: CVA6_TIMINGS_USE_EMIT=1 + EMIT_FLIST."
-fi
-echo "  multi-core: DV_TARGET=g6lc64_server_math (NrCores=2). FORCE_IMAFDC=1 = single-core smoke."
+echo "[mc-spo-veri] SUMMARY pass=${PASS} fail=${FAIL} total=${#tests[@]}"
+echo "  note: prefer MC_SPO_VERI_FORCE_IMAFDC=1 for single-core Zacas+spo CRT smoke;"
+echo "        multi-core server_math+L2 bare-metal Verilator remains residual."
+echo "  hard CAS golden remains mc-mini-veri (no CRT soft-skip path)."
 [[ "$FAIL" -eq 0 ]]

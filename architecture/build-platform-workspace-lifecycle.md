@@ -82,8 +82,9 @@ workspace/
 | Path | Notes |
 |---|---|
 | `work-ver/` | Default Verilator library (`Makefile` `ver-library ?= work-ver`). Large object trees; soak scripts (`mc-spo-veri`, `mc-mini-veri`) rebuild with `rm -rf work-ver`. |
-| `sv-timing/target/` | Cargo build dir (package-local). **Not** workspace. Optional `clean rust-target` **only** when explicitly requested and path resolves under `sv-timing/target`. |
-| Package `.sv-timing-cache/` / `.sv-timing-out/` | Defaults CWD-relative when CLI run bare; host should pin `--cache` / outs under `workspace/build/sv-timing/`. |
+| `sv-timing/target/` | Cargo build dir (package-local). **Not** workspace. `clean svt` / `clean rust-target` (allowlisted leaf only). |
+| Package `.sv-timing-cache/` / `.sv-timing-out/` | Package CWD defaults when CLI run bare; also cleaned by `clean svt`. Host soaks pin `--cache` under `workspace/build/sv-timing/` (`clean timings`). |
+| `sv-timing/.tools/` | Contained rustup/cargo from `svt.py setup`. `clean svt-tools --yes` (re-run setup after). |
 
 ---
 
@@ -116,6 +117,8 @@ cva6-build clean all [--tooling] [--firmware] [--sim]   # explicit escalation
 | `tooling` | `workspace/tooling/` | requires confirm or `--yes` in non-dry-run |
 | `firmware` | `workspace/smt2-linux/` | expensive rebuild |
 | `sim` | repo-root `work-ver/` (allowlist) | **opt-in**; never implied by bare `clean` |
+| `svt` / `rust-target` | `sv-timing/target`, `.sv-timing-out`, `.sv-timing-cache` | **opt-in**; never crates/source |
+| `svt-tools` | `sv-timing/.tools` | **opt-in** + `--yes` |
 | `all` | whole workspace root; flags add `sim` / never PDK | same as today's `--all` + optional sim |
 
 Bare `clean` (no subcommand): **preserve current behaviour** — remove `workspace/build` only — and print a one-line hint: `see clean status | clean --help`.
@@ -265,6 +268,9 @@ Defaults keep CI byte-stable: no emit flist swap unless explicit.
 ./build.sh clean formal --older-than 7d
 ./build.sh clean timings --older-than 14d
 ./build.sh clean sim --yes              # repo work-ver only
+./build.sh clean svt                    # sv-timing/target (+ package out/cache)
+./build.sh clean rust-target --dry-run  # alias for svt
+./build.sh clean svt-tools --yes        # sv-timing/.tools (re-setup after)
 # keep tooling + downloads
 ```
 
@@ -327,4 +333,4 @@ Do **not** start T2 until T0/T1 and human review policy for emit trees are accep
 
 ---
 
-*Last updated: 2026-08-02 — plan of record for granular clean + `--from-timing` soak integration.*
+*Last updated: 2026-08-03 — plan of record for granular clean (`svt` / `svt-tools` package leaves) + `--from-timing` soak integration; FO4 scale notes in monorepo `AGENTS-build-platform.md` §6.1.*

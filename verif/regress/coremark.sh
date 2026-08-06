@@ -86,6 +86,11 @@ cflags=(
 
 isa="rv32imc_zba_zbb_zbc_zbs"
 
+ROOT_REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+BENCH_LOG="${CVA6_BENCH_LOG:-$ROOT_REPO/build-platform/workspace/build/bench/coremark.log}"
+mkdir -p "$(dirname "$BENCH_LOG")"
+
+set +e
 python3 cva6.py \
         --target hwconfig \
         --hwconfig_opts="$DV_HWCONFIG_OPTS" \
@@ -95,4 +100,15 @@ python3 cva6.py \
         --sv_seed 1 \
         --gcc_opts "${srcA[*]} ${cflags[*]}" \
         --iss_timeout=2000 \
-        $DV_OPTS
+        $DV_OPTS 2>&1 | tee "$BENCH_LOG"
+py_rc=${PIPESTATUS[0]:-${?}}
+set -e
+
+export CVA6_BENCH_ID="${CVA6_BENCH_ID:-coremark}"
+if [[ -n "${CVA6_FROM_TIMING:-${FROM_TIMING:-}}" ]] && command -v bun >/dev/null 2>&1; then
+  FT="${CVA6_FROM_TIMING:-$FROM_TIMING}"
+  echo "[coremark] timings correlate --bench coremark --from-timing $FT"
+  (cd "$ROOT_REPO/build-platform" && bun run src/cli/index.ts timings correlate \
+    --from-timing "$FT" --bench coremark --file "$BENCH_LOG") || true
+fi
+exit "$py_rc"
