@@ -59,7 +59,7 @@ endmodule
   <li><strong>Tests:</strong> <code>verif/tests/custom/multicore/zacas_*.S</code> +
     <code>mc_cas_lock_handoff.S</code> in <code>testlist_mc_stream.yaml</code>; build-platform
     suites <code>mc-stream-tests</code> / <code>mc-spo-soak</code>.</li>
-  <li><strong>Open:</strong> AMOCAS.Q; full HPDCache CAS.D dual-word pack; Spike /
+  <li><strong>Open:</strong> AMOCAS.Q (deferred; illegal-trap gate <code>zacas-policy</code>); CAS.D dual-word uses HPDCache <code>CASD_*</code> (polish on hard fail only); Spike /
     <code>cva6.py</code> cosim of the Zacas directed suite.</li>
 </ul>
 

@@ -448,6 +448,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        id: "zacas-policy",
+        description:
+          "OPTIONAL: §8 Zacas residual — AMOCAS.Q illegal, W/D hard mini golden, Spike never CAS golden.",
+        script: "verif/regress/zacas-policy.sh",
+        group: "directed",
+        target: "cv64a6_imafdc_sv39",
+        dvTarget: "cv64a6_imafdc_sv39",
+        dvSimulators: "veri-testharness",
+        tools: ["riscv-gcc", "verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
         // Full CRT residual: budget/density sensitive; mini remains hard CAS golden.
         id: "mc-spo-veri",
         description:

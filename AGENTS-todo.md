@@ -96,10 +96,12 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    **Priors:** `verif/regress/ara-vector-cosim.sh` · `software/vector/` ·
    `architecture/ara-vector-attach.md` · `AGENTS-vector.md` · `testlist_ara_vector.yaml`.
 
-8. **AMOCAS.Q deferred** — CAS.D dual-word pack polish only on hard fail; Spike has no zacas
-   (never treat Spike skip as RTL pass).  
-   **Priors:** `agents/spec/riscv-spec-I-5.9-zacas.html` · `AGENTS-specs-to-impl.md` (Zacas open notes) ·
-   `AGENTS-specs-to-tests.md` Zacas gap · mini golden path above.
+8. **AMOCAS.Q deferred** — **policy gate landed** (`zacas-policy`): Q illegal-trap directed
+   (`mini_amocas_q_illegal`); W/D hard golden remains `mc-mini-veri` / policy mini smoke;
+   Spike never CAS golden (`software/zacas/README.md`). CAS.D dual-word path stays HPDCache
+   `CASD_*` RMW (polish only if hard fail).  
+   **Priors:** `verif/regress/zacas-policy.sh` · `software/zacas/` ·
+   `agents/spec/riscv-spec-I-5.9-zacas.html` · `mc-mini-veri` · maps Zacas rows.
 
 9. **Lab-only** — S3b-lab FO4 retune of `fo4-v1.toml` from **real** STA; S4b OpenROAD+LEF; full
    `./build.sh verify` when tools provisioned.  
@@ -413,8 +415,8 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
     - [x] OpenSBI VRF contract + Linux `CONFIG_RISCV_ISA_V` fragment + `ara-vector-cosim` soft path → **§7 gate done**;
       live lmul rebuild optional (`ARA_COSIM_LIVE=1`)
       priors: `software/vector/`, `verif/regress/ara-vector-cosim.sh`, `AGENTS-vector.md`
-    - [ ] AMOCAS.Q deferred; CAS.D polish only on hard fail; Spike ≠ Zacas golden → **§8**;
-      priors: `agents/spec/riscv-spec-I-5.9-zacas.html`, Zacas rows in specs-to-impl/tests
+    - [x] AMOCAS.Q deferred policy + illegal trap + W/D hard mini (`zacas-policy`) → **§8 done**;
+      priors: `software/zacas/README.md`, `mini_amocas_q_illegal.S`, `mc-mini-veri`, zacas maps
 
 
 ## What "done" means for a spec sub-file
@@ -512,9 +514,8 @@ Tick as completed. Each is `agents/spec/<filename>`.
     L2/L3/multi-core hub; SMT2.
   - **Authoritative status tables:** `AGENTS-specs-to-impl.md` · `AGENTS-specs-coverage.md` ·
     sub-files via `agents/spec/INDEX.md` · program snapshot `architecture/remaining-upgrade-sequence.md` §0.
-- [ ] Spike Zacas cosim remains **unavailable** (ISS); hard-gate CAS on RTL mini / Variane only.
-  → Practical next **§8**; priors: `riscv-spec-I-5.9-zacas.html`, Zacas gap in
-  `AGENTS-specs-to-tests.md`, `verif/regress/mc-mini-veri.sh`.
+- [x] Spike Zacas cosim remains **unavailable** (ISS); hard-gate CAS on RTL mini / `zacas-policy`.
+  → **§8**; priors: `software/zacas/README.md`, `mc-mini-veri.sh`, `zacas-policy.sh`.
 - [x] `g6lc64_server_math` L2 bare-metal CRT 9/9 (DeepSpecEn=1; NrHarts=1 / NrCores=2).  
   → **§2**; logs `mc-spo-veri-server-math-full.log`. Dual-hart live CRT still open.
 - [x] H-edge Spike + RTL Variane litmus 3/3 (hedeleg WARL, virt-instr 22, VS ecall/MPV,

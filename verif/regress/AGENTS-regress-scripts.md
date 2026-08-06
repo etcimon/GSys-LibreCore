@@ -153,3 +153,15 @@ Image never committed; lives under build-platform/workspace/smt2-linux/.
 | software/vector/* | (contract) | opensbi-vrf.md + linux.config-fragment |
 
 Never dual-ISS-golden AMOCAS; vector golden is live Ara when misa.V is set.
+
+---
+
+## 10. Zacas residual policy (AGENTS-todo section 8)
+
+| Script | Suite | Notes |
+|--------|-------|-------|
+| mc-mini-veri.sh | mc-mini-veri | Hard AMOCAS.W/D golden (RTL) |
+| zacas-policy.sh | zacas-policy | Q illegal + policy + optional mini W/D |
+| software/zacas/README.md | (policy) | Spike never golden; Q deferred |
+
+AMOCAS.Q remains unimplemented (decoder illegal). CAS.D dual-word = HPDCache local RMW.
