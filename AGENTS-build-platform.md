@@ -203,7 +203,8 @@ Full catalog: `./build.sh test --list`.
 | Bench × FO4 correlate (`timings correlate --bench`) | **done** (scaffold) |
 | Windows VS Build Tools provisioning | **planned** |
 | PnR / OpenROAD / OpenSTA synth (S1–S4) | **planned** — `architecture/build-platform-opensta-from-timing.md` |
-| Dual-ISS Spike+Verilator polish · R3b Linux Image | **open** (RTL residual) |
+| Dual-ISS Spike+Verilator polish | **done** (suite `dual-iss-regress` tohost golden) |
+| R3b Linux Image | **open** (RTL residual / external SDK) |
 | CRT `mc-spo-veri` FORCE_IMAFDC smoke | **7/7 green** (Verilator 5.008); residual `cas_stream`/`stream_plane` hang/flake |
 
 ---

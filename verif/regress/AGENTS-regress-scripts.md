@@ -106,3 +106,27 @@ Install helpers (`install-spike.sh`, `install-verilator.sh`, …) and `common-ri
 - **New residual suite:** add script under `verif/regress/`, register in `defaults.ts`, add a row here + `AGENTS-specs-to-tests.md`.
 - **New directed test:** prefer extending an existing testlist (`testlist_mc_stream.yaml`, `testlist_kvm_h.yaml`) over a one-off soak script.
 - **Do not** document foundry/NDA PDK paths here (`AGENTS-technology.md` / `pd/pdk/`).
+
+
+---
+
+
+---
+
+## 7. Dual-ISS Spike + Verilator (AGENTS-todo section 5)
+
+| Script | Suite id | Plane | Default tests | Golden |
+|--------|----------|-------|---------------|--------|
+| dual-iss-regress.sh | dual-iss-regress | spike and veri | mini_tohost mini_jumps (+ h_edge_diag if DUAL_ISS_H=1) | tohost both pass (default); optional DUAL_ISS_MODE=trace via cva6.py --iss=spike,veri-testharness |
+
+### Mismatch triage (residual polish only)
+
+| Class | Spike | RTL | Dual-ISS policy |
+|-------|-------|-----|-----------------|
+| Bare tohost / I-cache jumps | pass | pass | hard golden (default suite) |
+| H-edge (VS/ecall/MPV) | pass | pass | optional (DUAL_ISS_H=1); open PMP in test |
+| Zacas AMOCAS.W/D | no zacas / soft-skip | hard on mc-mini-veri | never dual-ISS golden |
+| Dense CRT stream | ISS OK | budget/hang residual | use mc-spo-veri isolation, not dual-ISS |
+| Full instr-trace CSV | may diverge on CSR noise | — | DUAL_ISS_MODE=trace; triage only — do not soft-pass tohost fail |
+
+Requires existing work-ver/Variane_testharness for the active DV_TARGET (default g6lc64_server_math).

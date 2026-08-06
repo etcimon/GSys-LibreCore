@@ -76,9 +76,12 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
    **Priors:** `AGENTS.md` §0.2 · `AGENTS-specs-to-tests.md` · `AGENTS-build-platform.md` §4–§5 ·
    `mc-spo-*.sh` · `kvm-h-spike.sh` · `mc-mini-veri.sh`.
 
-5. **Dual-ISS Spike+Verilator tandem polish** — same ELF, both planes; residual mismatch triage only.  
-   **Priors:** `AGENTS-build-platform.md` §5 (Dual-ISS open) · `verif/sim/cva6.py` ·
-   `AGENTS-specs-to-tests.md` · smoke / directed suite catalog in `defaults.ts`.
+5. **Dual-ISS Spike+Verilator tandem polish** — **landed**: suite `dual-iss-regress`
+   (tohost golden: mini_tohost + mini_jumps; optional `DUAL_ISS_H=1` for h_edge_diag;
+   `DUAL_ISS_MODE=trace` via cva6.py). Zacas never dual-ISS golden. Mismatch triage in
+   `verif/regress/AGENTS-regress-scripts.md` §7.
+   **Priors:** `verif/regress/dual-iss-regress.sh` · `verif/sim/cva6.py` ·
+   `AGENTS-build-platform.md` §5 · `AGENTS-specs-to-tests.md` · `defaults.ts`.
 
 6. **R3b Linux `Image`** — external (cva6-sdk / kernel); then OpenSBI payload with real userspace.  
    **Priors:** `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` ·
@@ -400,8 +403,10 @@ Six **co-equal** upkeep rules; run each pass when it applies (none overrides the
       Phase B, agents/spec/riscv-spec-II-5.*, Hypervisor impl row
     - [x] `verif/regress/AGENTS-regress-scripts.md` + `stability-regress` battery → **§4 done**;
       priors: `AGENTS.md` §0.2, `AGENTS-build-platform.md` §4–§5, `AGENTS-specs-to-tests.md`
-    - [ ] Dual-ISS Spike+Verilator polish; R3b Linux Image → **§5–§6**;
-      priors: `AGENTS-build-platform.md` §5, `architecture/multi-threading/smt2-bringup.md`,
+    - [x] Dual-ISS Spike+Verilator residual (`dual-iss-regress` tohost 2/2; +H 3/3) → **§5 done**;
+      priors: `verif/regress/dual-iss-regress.sh`, `AGENTS-build-platform.md` §5
+    - [ ] R3b Linux Image → **§6**;
+      priors: `architecture/multi-threading/smt2-bringup.md`,
       `smt-linux-rootfs.md`, `AGENTS-dts-validation.md`
     - [ ] OpenSBI VRF + Linux `CONFIG_RISCV_ISA_V` + live Ara cosim `v_memcpy_lmul` → **§7**;
       priors: `architecture/ara-vector-attach.md`, `agents/guides/AGENTS-vector.md`,

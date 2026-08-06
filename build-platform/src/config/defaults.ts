@@ -551,6 +551,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        id: "dual-iss-regress",
+        description:
+          "OPTIONAL: §5 dual-ISS residual — same ELF on Spike+Variane (tohost golden; optional trace). Not Zacas golden.",
+        script: "verif/regress/dual-iss-regress.sh",
+        group: "directed",
+        target: "g6lc64_server_math",
+        dvTarget: "g6lc64_server_math",
+        dvSimulators: "spike,veri-testharness",
+        tools: ["riscv-gcc", "spike", "verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "dual-hart-ci",
         description:
           "OPTIONAL: dual-hart/SMT2 artifact + real lint of cv64a6_smt2.",
