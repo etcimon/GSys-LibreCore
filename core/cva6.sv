@@ -674,6 +674,7 @@ module cva6
   logic [1:0] irq_active;
   assign irq_active = irq_i[smt_active_hart];
   logic                    smt_switch;
+  logic                    smt_switch_hold;  // suppress switches in bootrom page
   logic                    smt_switch_on_miss;
   logic                    smt_switch_on_quantum;
   logic                    smt_switch_on_starve;
@@ -939,6 +940,41 @@ module cva6
       .hart_block_o  (smt_hart_block)
   );
 
+  // Dual-hart bare-metal: hold all SMT switches until hart 0 has *committed*
+  // an instruction outside the boot ROM 64 KiB page. Gating only on live NPC
+  // was insufficient: the bootrom `jr s0` → DRAM could drop the hold the same
+  // cycle a switch restored a sequential PC past the jump (ILLEGAL @ 0x10020).
+  // Sticky boot-done matches OpenSBI (primary boots first; secondaries park).
+  // Sticky: primary has committed outside bootrom. Then require a short grace
+  // of DRAM commits before peers may switch in (avoids PC-bank restore killing
+  // the first few DRAM instructions of bare-metal / OpenSBI entry).
+  logic        smt_boot_done_q;
+  logic [7:0]  smt_dram_grace_q;
+  // Bare dual_park ~32-loop + bootrom (~150 commits); peers after primary tohost-era.
+  localparam logic [7:0] SMT_DRAM_GRACE = 8'd200;
+  if (CVA6Cfg.NrHarts > 1) begin : gen_smt_boot_hold
+    logic commit_outside_rom;
+    assign commit_outside_rom =
+        |commit_ack &&
+        (pc_commit[CVA6Cfg.VLEN-1:16] != boot_addr_i[CVA6Cfg.VLEN-1:16]) &&
+        (pc_commit[CVA6Cfg.VLEN-1:12] != '0);
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        smt_boot_done_q  <= 1'b0;
+        smt_dram_grace_q <= '0;
+      end else begin
+        if (commit_outside_rom) begin
+          smt_boot_done_q <= 1'b1;
+          if (smt_dram_grace_q < SMT_DRAM_GRACE)
+            smt_dram_grace_q <= smt_dram_grace_q + 8'd1;
+        end
+      end
+    end
+    assign smt_switch_hold = ~smt_boot_done_q | (smt_dram_grace_q < SMT_DRAM_GRACE);
+  end else begin : gen_smt_boot_hold_off
+    assign smt_switch_hold = 1'b0;
+  end
+
   g6lc_thread_select #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_thread_select (
@@ -947,6 +983,7 @@ module cva6
       .fetch_fire_i        (smt_fetch_fire),
       .issue_fire_i        (smt_issue_fire),
       .flush_i             (flush_ctrl_if),
+      .hold_i              (smt_switch_hold),
       .hart_ready_i        (smt_hart_ready),
       .hart_dmiss_i        (smt_hart_dmiss),
       .hart_imiss_i        (smt_hart_imiss),

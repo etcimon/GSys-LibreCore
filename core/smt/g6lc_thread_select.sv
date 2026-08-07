@@ -24,6 +24,9 @@ module g6lc_thread_select
     input  logic fetch_fire_i,
     input  logic issue_fire_i,
     input  logic flush_i,
+    // Hold switches (e.g. active hart still executing bootrom). Keeps active_hart
+    // stable so PC-bank save/restore cannot corrupt a bootrom→DRAM jump.
+    input  logic hold_i,
     input  logic [CVA6Cfg.NrHarts-1:0] hart_ready_i,
     input  logic [CVA6Cfg.NrHarts-1:0] hart_dmiss_i,
     input  logic [CVA6Cfg.NrHarts-1:0] hart_imiss_i,
@@ -160,6 +163,14 @@ module g6lc_thread_select
           end
         end
       endcase
+
+      // Hold wins over policy: no switch, keep active, still age quantum/starve.
+      if (hold_i) begin
+        do_switch      = 1'b0;
+        reason_miss    = 1'b0;
+        reason_quantum = 1'b0;
+        reason_starve  = 1'b0;
+      end
 
       if (do_switch) begin
         active_d            = next_peer;

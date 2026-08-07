@@ -11,6 +11,7 @@
 #   DUAL_HART_SKIP_R3=1       default: skip R3 cosim in rootfs preflight
 #   DUAL_HART_PARK_SPIKE=1    optional Spike tohost smoke for smt_dual_park
 #   DUAL_HART_LIVE=1          optional Variane on work-ver-smt2 (see note)
+#   DUAL_HART_LIVE_HARD=1     fail suite if live dual-park does not SUCCESS
 #   SMT2_SKIP_R3=1            passed through to smt-linux-rootfs.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -198,9 +199,9 @@ else
 fi
 
 
-# Optional live dual-park on work-ver-smt2 (Linux Verilator). Known open:
-# g6lc64_smt2 bare-metal currently stays in bootrom @0x10000 (ILLEGAL_INSTR loop);
-# software gate is Spike + stream8 NrHarts=1. Soft-report unless DUAL_HART_LIVE_HARD=1.
+# Optional live dual-park on work-ver-smt2 (Linux Verilator). After SMT boot hold +
+# DRAM grace (core/cva6.sv SMT_DRAM_GRACE), bare dual_park is green on g6lc64_smt2.
+# Soft-report unless DUAL_HART_LIVE_HARD=1.
 if [[ "${LIVE:-0}" == "1" ]]; then
   harness="${DUAL_HART_HARNESS:-$ROOT/work-ver-smt2/Variane_testharness}"
   export LD_LIBRARY_PATH="${ROOT}/tools/spike/lib:${ROOT}/build-platform/workspace/tooling/spike/lib:${LD_LIBRARY_PATH:-}"
@@ -222,7 +223,7 @@ if [[ "${LIVE:-0}" == "1" ]]; then
       log "  PASS live smt_dual_park on $harness"
       PASS=$((PASS + 1))
     else
-      log "  OPEN: live smt2 dual-park did not SUCCESS (bootrom@0x10000 hang — see $vlog)"
+      log "  FAIL/OPEN: live smt2 dual-park did not SUCCESS (see $vlog)"
       tail -8 "$vlog" || true
       if [[ "${DUAL_HART_LIVE_HARD:-0}" == "1" ]]; then
         FAIL=$((FAIL + 1))
@@ -247,7 +248,7 @@ cat <<'EOF'
   Gates: smt-linux-boot-path + smt-linux-rootfs (CVA6_LINUX_PAYLOAD for sim)
   Lint hard: DUAL_HART_REQUIRE_LINT=1 (needs Linux-native verilator_bin)
   Dual-park Spike: DUAL_HART_PARK_SPIKE=1
-  Dual-park live smt2: DUAL_HART_LIVE=1 (open: bootrom hang unless fixed)
+  Dual-park live smt2: DUAL_HART_LIVE=1 DUAL_HART_LIVE_HARD=1 (boot hold+grace greened)
   R3 cosim in this suite: DUAL_HART_SKIP_R3=0 (default skips R3 rebuild)
 EOF
 log "PASS (artifacts + boot-path + dual-park; pass=$PASS skip=$SKIP fail=$FAIL)"
