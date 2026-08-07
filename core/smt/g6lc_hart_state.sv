@@ -8,6 +8,12 @@
 // it latches miss/block edges so a one-cycle cache-miss pulse still forces a
 // switch under SMT_SWITCH_ON_MISS / SMT_HYBRID.
 //
+// Ready must NOT include sticky miss/block: a peer that took an I$ miss under a
+// short fetch quantum would otherwise stay ~ready forever (miss_clear only
+// clears the *active* bank), stranding dual-active workloads. Miss/block still
+// drive active_stalled / peer_clean preference in g6lc_thread_select.
+// Sticky miss/block for a hart is cleared when that hart becomes active again.
+//
 // Architectural state (RF banks, CSR banks, PC) lives elsewhere; this module
 // only owns the *scheduling* view of each hart.
 
@@ -49,11 +55,23 @@ module g6lc_hart_state
     logic [NH-1:0] dmiss_q, dmiss_d;
     logic [NH-1:0] imiss_q, imiss_d;
     logic [NH-1:0] block_q, block_d;
+    logic [HID_W-1:0] prev_active_q;
+    logic activate;
+
+    assign activate = (active_hart_i != prev_active_q);
 
     always_comb begin
       dmiss_d = dmiss_q;
       imiss_d = imiss_q;
       block_d = block_q;
+
+      // Fresh window when a hart is (re)activated: drop orphan sticky miss
+      // left behind after a short quantum switch-away mid-fill.
+      if (activate) begin
+        dmiss_d[active_hart_i] = 1'b0;
+        imiss_d[active_hart_i] = 1'b0;
+        block_d[active_hart_i] = 1'b0;
+      end
 
       // Tag events onto the active hart
       if (dcache_miss_i)
@@ -63,8 +81,8 @@ module g6lc_hart_state
       if (long_block_i | issue_stall_i)
         block_d[active_hart_i] = 1'b1;
 
-      // Clear on fill / resume / flush
-      if (miss_clear_i || flush_i) begin
+      // Clear on fill / resume for the active hart
+      if (miss_clear_i) begin
         dmiss_d[active_hart_i] = 1'b0;
         imiss_d[active_hart_i] = 1'b0;
         block_d[active_hart_i] = 1'b0;
@@ -79,13 +97,15 @@ module g6lc_hart_state
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        dmiss_q <= '0;
-        imiss_q <= '0;
-        block_q <= '0;
+        dmiss_q       <= '0;
+        imiss_q       <= '0;
+        block_q       <= '0;
+        prev_active_q <= '0;
       end else begin
-        dmiss_q <= dmiss_d;
-        imiss_q <= imiss_d;
-        block_q <= block_d;
+        dmiss_q       <= dmiss_d;
+        imiss_q       <= imiss_d;
+        block_q       <= block_d;
+        prev_active_q <= active_hart_i;
       end
     end
 
@@ -93,12 +113,10 @@ module g6lc_hart_state
     assign hart_imiss_o = imiss_q;
     assign hart_block_o = block_q | hart_halt_i;
 
+    // Eligible to schedule: enable and not WFI. Miss/block are contention
+    // only (exported above), not permanent exclusion from the ready set.
     for (genvar h = 0; h < NH; h++) begin : gen_ready
-      assign hart_ready_o[h] = hart_enable_i[h] &
-                               ~hart_halt_i[h] &
-                               ~dmiss_q[h] &
-                               ~imiss_q[h] &
-                               ~block_q[h];
+      assign hart_ready_o[h] = hart_enable_i[h] & ~hart_halt_i[h];
     end
 
   end

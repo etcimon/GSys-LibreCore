@@ -86,6 +86,10 @@ bootrom `jr s0` into zeros (`ILLEGAL_INSTR` @ 0x10020).
 **Green:** bare `mini_tohost` + `smt_dual_park` on `work-ver-smt2`; Spike dual-park;
 `DUAL_HART_LIVE=1 DUAL_HART_LIVE_HARD=1 bash verif/regress/dual-hart-ci.sh`.
 
-**Deeper residual (not blocking bare park):** post-grace peer quantum/miss switch
-under dual-active workloads; OpenSBI dual-hart + Linux R3 Image still lab-external.
+**Peer post-grace green:** `smt_peer_tohost` (hart1 tohost PASS after primary
+WFI) on `work-ver-smt2` after: delayed switch pulse, ready≠sticky-miss, miss-switch
+blackout, longer `SmtFetchQuantum`, bootrom all-harts→DRAM (no mhartid WFI park).
+
+**Still open:** concurrent `peer_marker` visibility while primary keeps polling
+(`smt_dual_active`); dual-WFI without IPI; OpenSBI dual-hart + Linux R3 Image lab.
 

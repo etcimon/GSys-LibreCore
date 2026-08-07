@@ -12,6 +12,7 @@
 #   DUAL_HART_PARK_SPIKE=1    optional Spike tohost smoke for smt_dual_park
 #   DUAL_HART_LIVE=1          optional Variane on work-ver-smt2 (see note)
 #   DUAL_HART_LIVE_HARD=1     fail suite if live dual-park does not SUCCESS
+#   DUAL_HART_ACTIVE=1        also build/run smt_peer_tohost (peer tohost prove)
 #   SMT2_SKIP_R3=1            passed through to smt-linux-rootfs.sh
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -29,6 +30,7 @@ REQUIRE_LINT="${DUAL_HART_REQUIRE_LINT:-0}"
 SKIP_R3="${DUAL_HART_SKIP_R3:-1}"
 PARK_SPIKE="${DUAL_HART_PARK_SPIKE:-0}"
 LIVE="${DUAL_HART_LIVE:-0}"
+ACTIVE="${DUAL_HART_ACTIVE:-0}"
 OUT="${DUAL_HART_OUT:-/tmp/cva6-dual-hart-ci}"
 mkdir -p "$OUT"
 
@@ -75,6 +77,11 @@ PASS=$((PASS + 1))
 grep -qE "mhartid|wfi" verif/tests/custom/smt/smt_dual_park.S
 grep -qE "_start|tohost" verif/tests/custom/smt/smt_dual_park.S
 log "  ok smt_dual_park.S bare-metal dual-hart directed"
+if [[ -f verif/tests/custom/smt/smt_peer_tohost.S ]]; then
+  grep -qE "mhartid|peer_pass|tohost" verif/tests/custom/smt/smt_peer_tohost.S
+  log "  ok smt_peer_tohost.S post-grace peer-tohost directed"
+  PASS=$((PASS + 1))
+fi
 
 # Compile dual-park ELF when a RISC-V cross compiler is present
 COMMON="$ROOT/verif/tests/custom/common"
@@ -106,6 +113,21 @@ if [[ -n "${RISCV_CC:-}" ]] && command -v "$RISCV_CC" >/dev/null 2>&1; then
   log "  ok $PARK_ELF"
   PASS=$((PASS + 1))
 
+  ACTIVE_SRC="$ROOT/verif/tests/custom/smt/smt_peer_tohost.S"
+  ACTIVE_ELF="$OUT/smt_peer_tohost.elf"
+  if [[ "${ACTIVE:-0}" == "1" || "${LIVE:-0}" == "1" || "${PARK_SPIKE:-0}" == "1" ]]; then
+    if [[ -f "$ACTIVE_SRC" ]]; then
+      log "building smt_peer_tohost.elf (peer tohost prove) with $RISCV_CC..."
+      "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
+        -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
+        "$ACTIVE_SRC" \
+        -T "$LD" -o "$ACTIVE_ELF" -march=rv64imafdc_zicsr_zifencei -mabi=lp64d
+      test -f "$ACTIVE_ELF"
+      log "  ok $ACTIVE_ELF"
+      PASS=$((PASS + 1))
+    fi
+  fi
+
   if [[ "$PARK_SPIKE" == "1" ]]; then
     SPIKE_BIN=""
     if command -v spike >/dev/null 2>&1; then SPIKE_BIN=spike
@@ -121,6 +143,23 @@ if [[ -n "${RISCV_CC:-}" ]] && command -v "$RISCV_CC" >/dev/null 2>&1; then
       if grep -qE "mem 0x[0-9a-fA-F]+ 0x0*1\b" "$slog"; then
         log "  PASS smt_dual_park Spike tohost"
         PASS=$((PASS + 1))
+
+      # Dual-active needs two Spike harts (-p2); single-hart cannot see peer_marker.
+      if [[ -f "${ACTIVE_ELF:-}" && ( "${ACTIVE:-0}" == "1" || "${PARK_SPIKE:-0}" == "1" ) ]]; then
+        sloga="$OUT/spike_smt_peer_tohost.log"
+        set +e
+        timeout 90s "$SPIKE_BIN" -p2 --isa=rv64imafdc_zicsr_zifencei --steps=500000 \
+          "$ACTIVE_ELF" >"$sloga" 2>&1
+        set -e
+        if grep -qE "mem 0x[0-9a-fA-F]+ 0x0*1\b" "$sloga"; then
+          log "  PASS smt_peer_tohost Spike -p2 tohost"
+          PASS=$((PASS + 1))
+        else
+          log "  FAIL smt_peer_tohost Spike -p2 (see $sloga)"
+          tail -12 "$sloga" || true
+          FAIL=$((FAIL + 1))
+        fi
+      fi
       else
         log "  FAIL smt_dual_park Spike (see $slog)"
         tail -12 "$slog" || true
@@ -231,6 +270,29 @@ if [[ "${LIVE:-0}" == "1" ]]; then
         SKIP=$((SKIP + 1))
       fi
     fi
+
+  # Post-grace peer-marker prove on same smt2 harness
+  if [[ -f "${ACTIVE_ELF:-$OUT/smt_peer_tohost.elf}" ]]; then
+    ACTIVE_ELF="${ACTIVE_ELF:-$OUT/smt_peer_tohost.elf}"
+    tha="$("${CROSS_COMPILE:-riscv-none-elf-}nm" "$ACTIVE_ELF" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
+    vloga="$OUT/veri_smt_peer_tohost.log"
+    set +e
+    "$harness" +max-cycles=500000 +time_out=500000 +debug_disable \
+      +tohost_addr="0x${tha}" "$ACTIVE_ELF" >"$vloga" 2>&1
+    set -e
+    if grep -q SUCCESS "$vloga"; then
+      log "  PASS live smt_peer_tohost on $harness"
+      PASS=$((PASS + 1))
+    else
+      log "  FAIL/OPEN: live smt_peer_tohost did not SUCCESS (see $vloga)"
+      tail -12 "$vloga" || true
+      if [[ "${DUAL_HART_LIVE_HARD:-0}" == "1" ]]; then
+        FAIL=$((FAIL + 1))
+      else
+        SKIP=$((SKIP + 1))
+      fi
+    fi
+  fi
   fi
 fi
 
@@ -249,6 +311,7 @@ cat <<'EOF'
   Lint hard: DUAL_HART_REQUIRE_LINT=1 (needs Linux-native verilator_bin)
   Dual-park Spike: DUAL_HART_PARK_SPIKE=1
   Dual-park live smt2: DUAL_HART_LIVE=1 DUAL_HART_LIVE_HARD=1 (boot hold+grace greened)
+  Dual-active peer:    DUAL_HART_ACTIVE=1 → smt_peer_tohost (Spike -p2 / live)
   R3 cosim in this suite: DUAL_HART_SKIP_R3=0 (default skips R3 rebuild)
 EOF
 log "PASS (artifacts + boot-path + dual-park; pass=$PASS skip=$SKIP fail=$FAIL)"
