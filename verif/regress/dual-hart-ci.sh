@@ -311,7 +311,7 @@ if [[ "${LIVE:-0}" == "1" ]]; then
             thc="$("${CROSS_COMPILE:-riscv-none-elf-}nm" "$DC_ELF" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
             vlogc="$OUT/veri_smt_dual_concurrent.log"
             set +e
-            "$harness" +max-cycles=500000 +time_out=500000 +debug_disable \
+            "$harness" +max-cycles=1500000 +time_out=1500000 +debug_disable \
               +tohost_addr="0x${thc}" "$DC_ELF" >"$vlogc" 2>&1
             set -e
             if grep -q SUCCESS "$vlogc"; then

@@ -123,3 +123,7 @@ Also open: dual-WFI without IPI; OpenSBI dual-hart + Linux R3 Image lab.
 **Residual suite:** erif/regress/dual-hart-residual.sh.
 
 **HYBRID miss thrash fix:** miss-switch requires sustained stall (`stall_age >= 32`) + blackout 16; smt2 Q=128, starve=64. Stopped dual-ready thrash every ~8 cycles (OpenSBI stuck in sbi_strchr).
+
+**SMT cold-boot exclusive:** SMT_COLD_EXCL=200000 holds switches so hart 0 alone owns early OpenSBI (shared temp stack / lottery). Concurrent burn extended past this window.
+
+**R3a RTL status:** hart 0 still reaches _start_hang ~9k commits without ever returning from w_platform_init (dasm: call@6965 → hang@9255, no fter_plat); FDT magic@0x8001e000 OK; no RVFI exceptions; bare dual moswap lottery PASS; Spike R3a PASS. Next: stack/ra corruption or FDT path failure mode inside w_platform_init on CVA6.

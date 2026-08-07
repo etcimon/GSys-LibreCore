@@ -3,7 +3,9 @@
 #
 # Pure no-WFI concurrent dual-active (live greened):
 #   Primary burns (stays ready). Peer scores tohost without primary WFI.
-#   RTL: first-activation exclusive window + first-boot hold (core/cva6.sv).
+#   RTL: cold-boot exclusive (hart 0 alone for OpenSBI temp-stack safety) then
+#   first-activation exclusive + first-boot hold (core/cva6.sv).
+#   Primary burn must exceed SMT_COLD_EXCL so peer still has time to score.
 
   .section .text.init
   .globl _start
@@ -11,8 +13,8 @@ _start:
   csrr t0, mhartid
   bnez t0, peer_pass
 
-  # Long dual-ready burn; FAIL only if peer never scored
-  li   t1, 20000
+  # Long dual-ready burn after cold-excl (~200k cycles); FAIL only if peer never scored
+  li   t1, 400000
 1:
   addi t1, t1, -1
   andi t2, t1, 7

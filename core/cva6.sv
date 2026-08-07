@@ -959,11 +959,19 @@ module cva6
     logic [9:0] smt_first_act_excl_q;
     localparam logic [9:0] SMT_FIRST_ACT_EXCL = 10'd512;
     logic first_act_excl;
+    // OpenSBI early boot uses one shared temp stack before lottery/scratch
+    // setup. Dual-ready SMT must not interleave two harts on that stack or both
+    // fall into _start_hang with no console. Hart 0 alone owns the pipeline for
+    // SMT_COLD_EXCL cycles from reset (then dual-ready + first-act resume).
+    logic [17:0] smt_cold_q;
+    localparam logic [17:0] SMT_COLD_EXCL = 18'd200000;
+    logic cold_excl;
     assign active_needs_boot_raw =
         ~smt_hart_left_rom_q[smt_active_hart] & ~smt_hart_halt[smt_active_hart];
     assign active_needs_boot =
         active_needs_boot_raw & (smt_boot_hold_cnt_q < SMT_BOOT_HOLD_CAP);
     assign first_act_excl = (smt_first_act_excl_q != '0);
+    assign cold_excl = (smt_cold_q < SMT_COLD_EXCL);
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         smt_boot_done_q      <= 1'b0;
@@ -972,7 +980,10 @@ module cva6
         smt_boot_hold_cnt_q  <= '0;
         smt_hart_seen_q      <= '0;
         smt_first_act_excl_q <= '0;
+        smt_cold_q           <= '0;
       end else begin
+        if (smt_cold_q != 18'h3ffff)
+          smt_cold_q <= smt_cold_q + 18'd1;
         if (commit_outside_rom) begin
           smt_boot_done_q <= 1'b1;
           if (commit_ack[0])
@@ -1009,13 +1020,16 @@ module cva6
       end
     end
     assign smt_switch_hold =
-        ~smt_boot_done_q
+        cold_excl
+        | ~smt_boot_done_q
         | (smt_dram_grace_q < SMT_DRAM_GRACE)
         | active_needs_boot
         | first_act_excl;
   end else begin : gen_smt_boot_hold_off
     assign smt_switch_hold = 1'b0;
   end
+
+
 
 
 
