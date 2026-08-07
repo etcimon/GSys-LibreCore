@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# Pure no-WFI concurrent dual-active:
-#   Primary burns (stays ready). Peer must score tohost without primary WFI.
-#   Relies on post-grace one-shot peer bootstrap + first-boot hold.
+# Pure no-WFI concurrent dual-active (live greened):
+#   Primary burns (stays ready). Peer scores tohost without primary WFI.
+#   RTL: first-activation exclusive window + first-boot hold (core/cva6.sv).
 
   .section .text.init
   .globl _start

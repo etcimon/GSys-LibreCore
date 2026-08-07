@@ -301,6 +301,32 @@ if [[ "${LIVE:-0}" == "1" ]]; then
         if grep -q SUCCESS "$vlogd"; then
           log "  PASS live smt_dual_active on $harness"
           PASS=$((PASS + 1))
+          # Pure no-WFI concurrent dual-ready (first-act exclusive greened)
+          DC_SRC="$ROOT/verif/tests/custom/smt/smt_dual_concurrent.S"
+          DC_ELF="$OUT/smt_dual_concurrent.elf"
+          if [[ -f "$DC_SRC" && -n "${RISCV_CC:-}" ]]; then
+            "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
+              -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
+              "$DC_SRC" -T "$LD" -o "$DC_ELF" -march=rv64imafdc_zicsr_zifencei -mabi=lp64d
+            thc="$("${CROSS_COMPILE:-riscv-none-elf-}nm" "$DC_ELF" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
+            vlogc="$OUT/veri_smt_dual_concurrent.log"
+            set +e
+            "$harness" +max-cycles=500000 +time_out=500000 +debug_disable \
+              +tohost_addr="0x${thc}" "$DC_ELF" >"$vlogc" 2>&1
+            set -e
+            if grep -q SUCCESS "$vlogc"; then
+              log "  PASS live smt_dual_concurrent on $harness"
+              PASS=$((PASS + 1))
+            else
+              log "  FAIL/OPEN: live smt_dual_concurrent (see $vlogc)"
+              tail -8 "$vlogc" || true
+              if [[ "${DUAL_HART_LIVE_HARD:-0}" == "1" ]]; then
+                FAIL=$((FAIL + 1))
+              else
+                SKIP=$((SKIP + 1))
+              fi
+            fi
+          fi
         else
           log "  FAIL/OPEN: live smt_dual_active (see $vlogd)"
           tail -8 "$vlogd" || true
@@ -341,6 +367,7 @@ cat <<'EOF'
   Dual-park live smt2: DUAL_HART_LIVE=1 DUAL_HART_LIVE_HARD=1 (boot hold+grace greened)
   Dual-active peer:    DUAL_HART_ACTIVE=1 → smt_peer_tohost (Spike -p2 / live)
   Dual-active live:     smt_dual_active (dual-ready burn + WFI yield)
+  Concurrent live:      smt_dual_concurrent (no-WFI; first-act exclusive)
   R3 cosim in this suite: DUAL_HART_SKIP_R3=0 (default skips R3 rebuild)
 EOF
 log "PASS (artifacts + boot-path + dual-park; pass=$PASS skip=$SKIP fail=$FAIL)"

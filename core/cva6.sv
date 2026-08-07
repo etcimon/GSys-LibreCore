@@ -958,19 +958,33 @@ module cva6
         (pc_commit[CVA6Cfg.VLEN-1:16] != boot_addr_i[CVA6Cfg.VLEN-1:16]) &&
         (pc_commit[CVA6Cfg.VLEN-1:12] != '0);
     logic active_needs_boot_raw;
-    logic [7:0] smt_boot_hold_cnt_q;
-    // Cap first-boot hold so a stuck peer mid-bootrom cannot freeze the core.
-    localparam logic [7:0] SMT_BOOT_HOLD_CAP = 8'd128;
+    // 16-bit stuck-escape for first-boot hold (dual-ready RR used to eject the
+    // peer mid-bootrom after an 8-bit/128 cap; WFI-yield survived because the
+    // primary was ~ready).
+    logic [15:0] smt_boot_hold_cnt_q;
+    localparam logic [15:0] SMT_BOOT_HOLD_CAP = 16'd2048;
+    // One-shot exclusive window on each hart's *first* activation after the
+    // primary DRAM grace. Pure dual-ready quantum thrash (Q=8) every ~9 cycles
+    // never gave peer a contiguous bootrom->peer_pass->tohost run; WFI-yield
+    // paths worked because primary left the ready set. This is NOT continuous
+    // force-boot — only the first activation per hart.
+    logic [CVA6Cfg.NrHarts-1:0] smt_hart_seen_q;
+    logic [9:0] smt_first_act_excl_q;
+    localparam logic [9:0] SMT_FIRST_ACT_EXCL = 10'd512;
+    logic first_act_excl;
     assign active_needs_boot_raw =
         ~smt_hart_left_rom_q[smt_active_hart] & ~smt_hart_halt[smt_active_hart];
     assign active_needs_boot =
         active_needs_boot_raw & (smt_boot_hold_cnt_q < SMT_BOOT_HOLD_CAP);
+    assign first_act_excl = (smt_first_act_excl_q != '0);
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         smt_boot_done_q      <= 1'b0;
         smt_dram_grace_q     <= '0;
         smt_hart_left_rom_q  <= '0;
         smt_boot_hold_cnt_q  <= '0;
+        smt_hart_seen_q      <= '0;
+        smt_first_act_excl_q <= '0;
       end else begin
         if (commit_outside_rom) begin
           smt_boot_done_q <= 1'b1;
@@ -984,21 +998,39 @@ module cva6
         // Count consecutive cycles the active hart still needs first DRAM exit.
         if (smt_switch) begin
           smt_boot_hold_cnt_q <= '0;
-        end else if (active_needs_boot_raw) begin
-          if (smt_boot_hold_cnt_q != 8'hff)
-            smt_boot_hold_cnt_q <= smt_boot_hold_cnt_q + 8'd1;
+          // Arm one-shot exclusive for a never-before-active incoming hart.
+          // smt_switch pulses with active already equal to the incoming hart.
+          if (!smt_hart_seen_q[smt_active_hart] && smt_boot_done_q &&
+              (smt_dram_grace_q >= SMT_DRAM_GRACE)) begin
+            smt_hart_seen_q[smt_active_hart] <= 1'b1;
+            smt_first_act_excl_q             <= SMT_FIRST_ACT_EXCL;
+          end else begin
+            smt_first_act_excl_q <= '0;
+          end
         end else begin
-          smt_boot_hold_cnt_q <= '0;
+          if (active_needs_boot_raw) begin
+            if (smt_boot_hold_cnt_q != 16'hffff)
+              smt_boot_hold_cnt_q <= smt_boot_hold_cnt_q + 16'd1;
+          end else begin
+            smt_boot_hold_cnt_q <= '0;
+          end
+          // Mark active as seen even without switch (hart 0 at reset).
+          smt_hart_seen_q[smt_active_hart] <= 1'b1;
+          if (smt_first_act_excl_q != '0)
+            smt_first_act_excl_q <= smt_first_act_excl_q - 10'd1;
         end
       end
     end
     assign smt_switch_hold =
         ~smt_boot_done_q
         | (smt_dram_grace_q < SMT_DRAM_GRACE)
-        | active_needs_boot;
+        | active_needs_boot
+        | first_act_excl;
   end else begin : gen_smt_boot_hold_off
     assign smt_switch_hold = 1'b0;
   end
+
+
 
 
 
