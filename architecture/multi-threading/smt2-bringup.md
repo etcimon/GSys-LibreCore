@@ -90,6 +90,11 @@ bootrom `jr s0` into zeros (`ILLEGAL_INSTR` @ 0x10020).
 WFI) on `work-ver-smt2` after: delayed switch pulse, ready≠sticky-miss, miss-switch
 blackout, longer `SmtFetchQuantum`, bootrom all-harts→DRAM (no mhartid WFI park).
 
-**Still open:** concurrent `peer_marker` visibility while primary keeps polling
-(`smt_dual_active`); dual-WFI without IPI; OpenSBI dual-hart + Linux R3 Image lab.
+**Still open:** concurrent `smt_dual_active` (primary polls `peer_marker` while both
+ready). Live fails with primary PC landing near bootrom `_hang`/mtvec under dual-ready
+thrash (exception/PC-bank residual). `smt_peer_tohost` remains the hard dual-active gate.
+Also open: dual-WFI without IPI; OpenSBI dual-hart + Linux R3 Image lab.
+
+**Hold policy (`cva6.sv`):** primary DRAM grace + hold while active NPC is in bootrom
+(unless active is WFI/halted — escape so a peer can run).
 
