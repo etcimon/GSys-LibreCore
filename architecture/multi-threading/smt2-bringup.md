@@ -110,3 +110,5 @@ Also open: dual-WFI without IPI; OpenSBI dual-hart + Linux R3 Image lab.
 **Scheduler (landed):** quantum zeroed under hold (full window on release); starve freeze under hold; sticky per-hart first DRAM exit (capped); RF write hart banking + hart-qualified RAW.
 **Hard dual-active:** `smt_peer_tohost` / `smt_dual_active` (WFI yield after dual-ready burn).
 **Soft open:** pure no-WFI concurrent peer score under dual-ready RR only.
+
+**Pure concurrent residual:** `verif/tests/custom/smt/smt_dual_concurrent.S` (no-WFI peer score) still hangs on live; hard gates remain park / peer_tohost / dual_active (WFI yield).
