@@ -285,8 +285,10 @@ module ariane_peripherals #(
             .SOUT    ( tx_o            )
         );
     end else begin
+        // Sim TB uses InclUART=0 + mock_uart. Keep mock_uart out of
+        // pragma translate_off so Verilator elaborates it (otherwise APB
+        // UART is undriven and OpenSBI console polls hang — R3a RTL hang).
         assign irq_sources[0] = 1'b0;
-        /* pragma translate_off */
         mock_uart i_mock_uart (
             .clk_i     ( clk_i        ),
             .rst_ni    ( rst_ni       ),
@@ -299,7 +301,6 @@ module ariane_peripherals #(
             .pready_o  ( uart_pready  ),
             .pslverr_o ( uart_pslverr )
         );
-        /* pragma translate_on */
     end
 
     // ---------------

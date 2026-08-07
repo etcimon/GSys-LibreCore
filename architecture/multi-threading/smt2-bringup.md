@@ -116,3 +116,8 @@ Also open: dual-WFI without IPI; OpenSBI dual-hart + Linux R3 Image lab.
 **Pure concurrent residual:** closed on live — `smt_dual_concurrent.S` PASS (first-act exclusive + Q=32). Remaining soft: OpenSBI dual-hart + Linux R3 Image lab.
 
 **Dual-WFI timer gate:** `verif/tests/custom/smt/smt_dual_wfi_timer.S` — both harts MTIE + CLINT mtimecmp, no MSIP; live PASS after bank-vector halt.
+
+**OpenSBI R3a (Spike):** greened via opensbi-linux-boot / dual-hart-residual (Domain0 HARTs 0*,1* + SMT2-OSBI-OK).
+**R3a RTL:** still open — Variane w_payload needs longer bring-up after mock_uart Verilator fix (riane_peripherals InclUART=0 path); no console @5M cycles yet.
+**R3b Linux Image:** external (contract gate soft-skip without Image).
+**Residual suite:** erif/regress/dual-hart-residual.sh.

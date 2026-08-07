@@ -125,3 +125,8 @@ Memory: **256 MiB** at `0x8000_0000` (sim-friendly). Genesys2 may overlay 1 GiB.
 | Build FW with Image | `LINUX_IMAGE=...` + `CVA6_R3B_BUILD=1` or `make -C software/smt2-linux opensbi-linux` |
 
 Soft-skips when no Image unless `CVA6_REQUIRE_R3B=1`. Full shell /proc/cpuinfo remains lab criteria when Image is present.
+
+## Residual gate
+
+erif/regress/dual-hart-residual.sh — Spike R3a OpenSBI + R3b contract; optional bare LIVE and R3a RTL (CVA6_R3A_RTL=1).
+R3a Spike is the hard dual-hart firmware gate; R3a RTL remains open after mock_uart Verilator elaboration fix.
