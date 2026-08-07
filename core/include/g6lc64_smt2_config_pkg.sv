@@ -207,8 +207,8 @@ package cva6_config_pkg;
       // U6.1 SMT2
       NrHarts: unsigned'(2),
       SmtPolicy: config_pkg::SMT_HYBRID,
-      SmtFetchQuantum: unsigned'(32),  // dual-ready RR; larger window after first-act excl
-      SmtStarveLimit: unsigned'(8),
+      SmtFetchQuantum: unsigned'(128),  // dual-ready RR; OpenSBI-scale (miss thrash fix)
+      SmtStarveLimit: unsigned'(64),
       NrCores: unsigned'(1),
       CohPolicy: config_pkg::COH_FILTERED,
       SnoopFilterEn: bit'(0),

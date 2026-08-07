@@ -66,10 +66,14 @@ module g6lc_thread_select
     logic [Q_W-1:0]   quantum_q, quantum_d;
     logic [ST_W-1:0]  starve_q[NH];
     logic [ST_W-1:0]  starve_d[NH];
-    // After activate, suppress miss-switch briefly so an I$ fill can complete
-    // (otherwise HYBRID ejects the peer every miss before bootrom progresses).
+    // After activate, suppress miss-switch briefly so an I$ fill can complete.
+    // Also require *sustained* stall (stall_age) before miss-switch: counting
+    // only activate_age caused dual-ready thrash every ~8 cycles on I$ misses
+    // (OpenSBI FDT/strchr never progressed on RTL while Spike was fine).
     logic [3:0] activate_age_q, activate_age_d;
-    localparam logic [3:0] MISS_SWITCH_BLACKOUT = 4'd8;
+    logic [7:0] stall_age_q, stall_age_d;
+    localparam logic [3:0] MISS_SWITCH_BLACKOUT = 4'd16;
+    localparam logic [7:0] MISS_STALL_THRESH = 8'd32;
 
     logic [NH-1:0] miss_or_block;
     logic          active_stalled;
@@ -124,6 +128,15 @@ module g6lc_thread_select
       rr_ptr_d       = rr_ptr_q;
       quantum_d      = quantum_q;
       activate_age_d = (activate_age_q == 4'hF) ? 4'hF : (activate_age_q + 4'd1);
+      // Sustained-stall counter for miss-switch (resets when active fetches).
+      if (active_stalled) begin
+        if (stall_age_q != 8'hff)
+          stall_age_d = stall_age_q + 8'd1;
+        else
+          stall_age_d = stall_age_q;
+      end else begin
+        stall_age_d = '0;
+      end
       do_switch      = 1'b0;
       reason_miss    = 1'b0;
       reason_quantum = 1'b0;
@@ -134,7 +147,8 @@ module g6lc_thread_select
       unique case (POLICY)
         SMT_SWITCH_ON_MISS: begin
           if (active_stalled && found_clean &&
-              (activate_age_q >= MISS_SWITCH_BLACKOUT)) begin
+              (activate_age_q >= MISS_SWITCH_BLACKOUT) &&
+              (stall_age_q >= MISS_STALL_THRESH)) begin
             do_switch   = 1'b1;
             reason_miss = 1'b1;
             next_peer   = peer_clean;
@@ -157,7 +171,8 @@ module g6lc_thread_select
         end
         default: begin  // SMT_HYBRID
           if (active_stalled && found_clean &&
-              (activate_age_q >= MISS_SWITCH_BLACKOUT)) begin
+              (activate_age_q >= MISS_SWITCH_BLACKOUT) &&
+              (stall_age_q >= MISS_STALL_THRESH)) begin
             do_switch   = 1'b1;
             reason_miss = 1'b1;
             next_peer   = peer_clean;
@@ -191,11 +206,13 @@ module g6lc_thread_select
         // receives a full fetch quantum (freeze-high caused immediate RR steal).
         quantum_d      = '0;
         activate_age_d = activate_age_q;
+        stall_age_d    = stall_age_q;
         for (int unsigned h = 0; h < NH; h++) starve_d[h] = starve_q[h];
       end else if (do_switch) begin
         active_d            = next_peer;
         quantum_d           = '0;
         activate_age_d      = '0;
+        stall_age_d         = '0;
         starve_d[next_peer] = '0;
         // Zero all starve counters on switch so the outgoing hart does not
         // re-win on starve the next cycle after a bootrom hold window.
@@ -234,6 +251,7 @@ module g6lc_thread_select
         rr_ptr_q         <= HID_W'(1 % NH);  // prefer hart 1 as first alternate
         quantum_q        <= '0;
         activate_age_q   <= '0;
+        stall_age_q      <= '0;
         switch_q         <= 1'b0;
         reason_miss_q    <= 1'b0;
         reason_quantum_q <= 1'b0;
@@ -244,6 +262,7 @@ module g6lc_thread_select
         rr_ptr_q         <= rr_ptr_d;
         quantum_q        <= quantum_d;
         activate_age_q   <= activate_age_d;
+        stall_age_q      <= stall_age_d;
         switch_q         <= do_switch;
         reason_miss_q    <= do_switch & reason_miss;
         reason_quantum_q <= do_switch & reason_quantum;

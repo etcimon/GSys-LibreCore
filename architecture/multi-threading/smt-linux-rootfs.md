@@ -130,3 +130,9 @@ Soft-skips when no Image unless `CVA6_REQUIRE_R3B=1`. Full shell /proc/cpuinfo r
 
 erif/regress/dual-hart-residual.sh — Spike R3a OpenSBI + R3b contract; optional bare LIVE and R3a RTL (CVA6_R3A_RTL=1).
 R3a Spike is the hard dual-hart firmware gate; R3a RTL remains open after mock_uart Verilator elaboration fix.
+
+### R3a RTL notes (live)
+
+- Verilator mock_uart must elaborate (InclUART=0 without translate_off).
+- HYBRID miss-switch thrash fixed via stall_age (see g6lc_thread_select.sv).
+- Remaining: both harts park in OpenSBI _start_hang early on Variane; diagnose coldboot lottery / mhartid mapping / AMO under fine-grain SMT.
