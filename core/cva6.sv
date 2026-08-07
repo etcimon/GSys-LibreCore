@@ -942,46 +942,67 @@ module cva6
   );
 
   // Dual-hart bare-metal SMT switch holds:
-  // 1) Sticky: primary has committed outside boot ROM + DRAM grace (avoids
-  //    mid-bootrom PC-bank restore past bootrom `jr s0` → ILLEGAL @ 0x10020).
-  // 2) Active-NPC bootrom hold: once peers may run, do *not* eject a hart while
-  //    its live NPC is still in the boot ROM page. Concurrent dual-active was
-  //    thrashing peer/primary mid-bootrom into `_hang` WFI (ready=00 deadlock).
+  // 1) Sticky: primary has committed outside boot ROM + DRAM grace.
+  // 2) Sticky per-hart first-exit: do not eject a hart until *that* hart has
+  //    committed outside the boot ROM page (covers peer's first bootrom pass).
+  //    Live-NPC hold was too sticky after WFI yield (pin + freeze deadlock).
   logic        smt_boot_done_q;
   logic [7:0]  smt_dram_grace_q;
-  // Bare dual_park ~32-loop + bootrom (~150 commits); peers after primary grace.
+  logic [CVA6Cfg.NrHarts-1:0] smt_hart_left_rom_q;
   localparam logic [7:0] SMT_DRAM_GRACE = 8'd200;
   if (CVA6Cfg.NrHarts > 1) begin : gen_smt_boot_hold
     logic commit_outside_rom;
-    logic active_npc_in_bootrom;
+    logic active_needs_boot;
     assign commit_outside_rom =
         |commit_ack &&
         (pc_commit[CVA6Cfg.VLEN-1:16] != boot_addr_i[CVA6Cfg.VLEN-1:16]) &&
         (pc_commit[CVA6Cfg.VLEN-1:12] != '0);
-    // Live fetch NPC still in bootrom 64 KiB page (same compare as commit gate).
-    assign active_npc_in_bootrom =
-        (smt_npc_live[CVA6Cfg.VLEN-1:16] == boot_addr_i[CVA6Cfg.VLEN-1:16]);
+    logic active_needs_boot_raw;
+    logic [7:0] smt_boot_hold_cnt_q;
+    // Cap first-boot hold so a stuck peer mid-bootrom cannot freeze the core.
+    localparam logic [7:0] SMT_BOOT_HOLD_CAP = 8'd128;
+    assign active_needs_boot_raw =
+        ~smt_hart_left_rom_q[smt_active_hart] & ~smt_hart_halt[smt_active_hart];
+    assign active_needs_boot =
+        active_needs_boot_raw & (smt_boot_hold_cnt_q < SMT_BOOT_HOLD_CAP);
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        smt_boot_done_q  <= 1'b0;
-        smt_dram_grace_q <= '0;
+        smt_boot_done_q      <= 1'b0;
+        smt_dram_grace_q     <= '0;
+        smt_hart_left_rom_q  <= '0;
+        smt_boot_hold_cnt_q  <= '0;
       end else begin
         if (commit_outside_rom) begin
           smt_boot_done_q <= 1'b1;
+          if (commit_ack[0])
+            smt_hart_left_rom_q[commit_instr_id_commit[0].hart_id] <= 1'b1;
+          if (CVA6Cfg.NrCommitPorts > 1 && commit_ack[1])
+            smt_hart_left_rom_q[commit_instr_id_commit[1].hart_id] <= 1'b1;
           if (smt_dram_grace_q < SMT_DRAM_GRACE)
             smt_dram_grace_q <= smt_dram_grace_q + 8'd1;
         end
+        // Count consecutive cycles the active hart still needs first DRAM exit.
+        if (smt_switch) begin
+          smt_boot_hold_cnt_q <= '0;
+        end else if (active_needs_boot_raw) begin
+          if (smt_boot_hold_cnt_q != 8'hff)
+            smt_boot_hold_cnt_q <= smt_boot_hold_cnt_q + 8'd1;
+        end else begin
+          smt_boot_hold_cnt_q <= '0;
+        end
       end
     end
-    // Do not pin a WFI/halted hart in the bootrom page — that deadlocks when
-    // PC corruption lands active on `_hang` (ready peer can never be selected).
     assign smt_switch_hold =
         ~smt_boot_done_q
         | (smt_dram_grace_q < SMT_DRAM_GRACE)
-        | (active_npc_in_bootrom & ~smt_hart_halt[smt_active_hart]);
+        | active_needs_boot;
   end else begin : gen_smt_boot_hold_off
     assign smt_switch_hold = 1'b0;
   end
+
+
+
+
 
 
 

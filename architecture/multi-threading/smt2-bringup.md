@@ -90,6 +90,11 @@ bootrom `jr s0` into zeros (`ILLEGAL_INSTR` @ 0x10020).
 WFI) on `work-ver-smt2` after: delayed switch pulse, ready≠sticky-miss, miss-switch
 blackout, longer `SmtFetchQuantum`, bootrom all-harts→DRAM (no mhartid WFI park).
 
+**Scheduler holds (`cva6.sv` / `g6lc_thread_select.sv`):**
+- Primary DRAM grace before first peer switch
+- Sticky per-hart first DRAM exit (capped ~128 cycles) so peer finishes bootrom
+- Freeze quantum/starve during hold (prevents starve-steal when hold drops)
+
 **Hard dual-active gate:** `smt_peer_tohost` (primary WFI yield → peer tohost).
 
 **RTL isolation landed:** commit RF writes banked by `commit_instr.hart_id` (was stuck

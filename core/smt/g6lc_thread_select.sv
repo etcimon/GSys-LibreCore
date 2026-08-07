@@ -176,19 +176,28 @@ module g6lc_thread_select
         end
       endcase
 
-      // Hold wins over policy: no switch, keep active, still age quantum/starve.
+      // Hold wins over policy: no switch. Also *freeze* quantum/starve aging —
+      // otherwise the parked primary's starve hits ST_MAX during peer bootrom
+      // and, the cycle peer exits bootrom (hold drops), starve immediately
+      // steals the pipeline back before peer_pass can run (concurrent dual-active fail).
       if (hold_i) begin
         do_switch      = 1'b0;
         reason_miss    = 1'b0;
         reason_quantum = 1'b0;
         reason_starve  = 1'b0;
-      end
-
-      if (do_switch) begin
+        quantum_d      = quantum_q;
+        activate_age_d = activate_age_q;
+        for (int unsigned h = 0; h < NH; h++) starve_d[h] = starve_q[h];
+      end else if (do_switch) begin
         active_d            = next_peer;
         quantum_d           = '0;
         activate_age_d      = '0;
         starve_d[next_peer] = '0;
+        // Zero all starve counters on switch so the outgoing hart does not
+        // re-win on starve the next cycle after a bootrom hold window.
+        for (int unsigned h = 0; h < NH; h++) begin
+          if (h[HID_W-1:0] != next_peer) starve_d[h] = '0;
+        end
         rr_ptr_d            = HID_W'((int'(next_peer) + 1) % NH);
       end else begin
         if (fetch_fire_i) begin

@@ -207,8 +207,8 @@ package cva6_config_pkg;
       // U6.1 SMT2
       NrHarts: unsigned'(2),
       SmtPolicy: config_pkg::SMT_HYBRID,
-      SmtFetchQuantum: unsigned'(32),  // longer window so peer can exit bootrom
-      SmtStarveLimit: unsigned'(16),
+      SmtFetchQuantum: unsigned'(8),  // dual-ready RR under concurrent load
+      SmtStarveLimit: unsigned'(8),
       NrCores: unsigned'(1),
       CohPolicy: config_pkg::COH_FILTERED,
       SnoopFilterEn: bit'(0),
