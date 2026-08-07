@@ -711,6 +711,7 @@ module cva6
   logic halt_ctrl;
   logic halt_frontend;
   logic halt_csr_ctrl;
+  logic [CVA6Cfg.NrHarts-1:0] smt_csr_hart_halt;
   logic dcache_flush_ctrl_cache;
   logic dcache_flush_ack_cache_ctrl;
   logic set_debug_pc;
@@ -892,9 +893,9 @@ module cva6
   // NrHarts==1: identity (active=0, no switches). Contention policies
   // (switch-on-miss / quantum RR / anti-starve) elaborate for NrHarts==2.
   // ------------------------
-  // U6.1: per-hart WFI halt sticky + enable (all enabled). Coarse-grain switch
-  // clears halt for the newly active hart when its CSR leaves WFI (halt_csr=0).
-  logic [CVA6Cfg.NrHarts-1:0] smt_hart_halt_q, smt_hart_halt_d;
+  // U6.1: per-hart WFI halt from CSR banks (not active-only sticky).
+  // Sticky-active-only left inactive harts ~ready forever after timer/IPI wake
+  // while another hart held the pipeline (dual-WFI without IPI hang).
   assign smt_hart_enable = '1;
   assign smt_fetch_fire  = |(fetch_valid_if_id & fetch_ready_id_if);
   assign smt_issue_fire  = |issue_instr_issue_id;
@@ -902,23 +903,9 @@ module cva6
   assign smt_long_block  = flush_ctrl_ex;
 
   if (CVA6Cfg.NrHarts <= 1) begin : gen_smt_halt_single
-    assign smt_hart_halt   = '0;
-    assign smt_hart_halt_d = '0;
-    assign smt_hart_halt_q = '0;
+    assign smt_hart_halt = '0;
   end else begin : gen_smt_halt_multi
-    always_comb begin
-      smt_hart_halt_d = smt_hart_halt_q;
-      // Active hart enters WFI → mark halted so select prefers a peer
-      if (halt_csr_ctrl) smt_hart_halt_d[smt_active_hart] = 1'b1;
-      // Leaving WFI (interrupt unstall) clears active halt
-      if (!halt_csr_ctrl) smt_hart_halt_d[smt_active_hart] = 1'b0;
-      if (flush_ctrl_if && smt_switch) smt_hart_halt_d[smt_active_hart] = 1'b0;
-    end
-    always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) smt_hart_halt_q <= '0;
-      else smt_hart_halt_q <= smt_hart_halt_d;
-    end
-    assign smt_hart_halt = smt_hart_halt_q;
+    assign smt_hart_halt = smt_csr_hart_halt;
   end
 
   g6lc_hart_state #(
@@ -1478,6 +1465,7 @@ module cva6
       .rtc_time_i,
       .flush_o                 (flush_csr_ctrl),
       .halt_csr_o              (halt_csr_ctrl),
+      .hart_halt_o             (smt_csr_hart_halt),
       .commit_instr_i          (commit_instr_id_commit[0]),
       .commit_ack_i            (commit_ack),
       .boot_addr_i             (boot_addr_i[CVA6Cfg.VLEN-1:0]),

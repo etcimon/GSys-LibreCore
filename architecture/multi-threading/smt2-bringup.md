@@ -97,6 +97,8 @@ blackout, longer `SmtFetchQuantum`, bootrom all-harts→DRAM (no mhartid WFI par
 
 **Hard dual-active gate:** `smt_peer_tohost` (primary WFI yield → peer tohost).
 
+**WFI halt vector:** `g6lc_smt_csr_bank.hart_halt_o` → `smt_hart_halt` (was sticky-active-only; dual-WFI timer wake hung).
+
 **RTL isolation landed:** commit RF writes banked by `commit_instr.hart_id` (was stuck
 at hart 0); RAW hazards hart-qualified in `raw_checker` (no cross-hart forward/stall).
 
@@ -111,4 +113,6 @@ Also open: dual-WFI without IPI; OpenSBI dual-hart + Linux R3 Image lab.
 **Hard dual-active:** `smt_peer_tohost` / `smt_dual_active` (WFI yield after dual-ready burn).
 **Concurrent green:** `smt_dual_concurrent` (no-WFI peer tohost) live PASS after one-shot first-activation exclusive window (`SMT_FIRST_ACT_EXCL=512` in `core/cva6.sv`) + larger `SmtFetchQuantum=32`. Hard gates remain park / peer_tohost / dual_active.
 
-**Pure concurrent residual:** closed on live — `smt_dual_concurrent.S` PASS (first-act exclusive + Q=32). Remaining soft: dual-WFI without IPI; OpenSBI/Linux R3 Image lab.
+**Pure concurrent residual:** closed on live — `smt_dual_concurrent.S` PASS (first-act exclusive + Q=32). Remaining soft: OpenSBI dual-hart + Linux R3 Image lab.
+
+**Dual-WFI timer gate:** `verif/tests/custom/smt/smt_dual_wfi_timer.S` — both harts MTIE + CLINT mtimecmp, no MSIP; live PASS after bank-vector halt.

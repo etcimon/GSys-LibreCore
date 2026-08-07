@@ -35,6 +35,9 @@ module g6lc_smt_csr_bank
     input  logic [63:0] rtc_time_i,
     output logic flush_o,
     output logic halt_csr_o,
+    // Per-hart WFI halt (bank-local). Thread select must use this vector so an
+    // inactive bank woken by timer/IPI becomes ready without waiting to be active.
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] hart_halt_o,
     input  scoreboard_entry_t commit_instr_i,
     input  logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack_i,
     input  logic [CVA6Cfg.VLEN-1:0] boot_addr_i,
@@ -233,6 +236,7 @@ module g6lc_smt_csr_bank
         .store_result_i,
         .break_from_trigger_o
     );
+    assign hart_halt_o = halt_csr_o;  // width-1 vector
   end else begin : gen_banked
     // Fine-grain SMT: commit-side ops select the *committing instruction's*
     // hart bank (allows drain after switch). Privilege outputs mux by active
@@ -403,6 +407,11 @@ module g6lc_smt_csr_bank
           .store_result_i,
           .break_from_trigger_o(brk_trig_b[h])
       );
+    end
+
+    // Per-hart WFI for thread select (not sticky-active-only).
+    for (genvar h = 0; h < NH; h++) begin : gen_halt_pack
+      assign hart_halt_o[h] = halt_b[h];
     end
 
     // Mux by active hart

@@ -317,6 +317,32 @@ if [[ "${LIVE:-0}" == "1" ]]; then
             if grep -q SUCCESS "$vlogc"; then
               log "  PASS live smt_dual_concurrent on $harness"
               PASS=$((PASS + 1))
+              # Dual-WFI without software IPI (timer MTIP wake)
+              DW_SRC="$ROOT/verif/tests/custom/smt/smt_dual_wfi_timer.S"
+              DW_ELF="$OUT/smt_dual_wfi_timer.elf"
+              if [[ -f "$DW_SRC" && -n "${RISCV_CC:-}" ]]; then
+                "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
+                  -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
+                  "$DW_SRC" -T "$LD" -o "$DW_ELF" -march=rv64imafdc_zicsr_zifencei -mabi=lp64d
+                thw="$("${CROSS_COMPILE:-riscv-none-elf-}nm" "$DW_ELF" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
+                vlogw="$OUT/veri_smt_dual_wfi_timer.log"
+                set +e
+                "$harness" +max-cycles=500000 +time_out=500000 +debug_disable \
+                  +tohost_addr="0x${thw}" "$DW_ELF" >"$vlogw" 2>&1
+                set -e
+                if grep -q SUCCESS "$vlogw"; then
+                  log "  PASS live smt_dual_wfi_timer on $harness"
+                  PASS=$((PASS + 1))
+                else
+                  log "  FAIL/OPEN: live smt_dual_wfi_timer (see $vlogw)"
+                  tail -8 "$vlogw" || true
+                  if [[ "${DUAL_HART_LIVE_HARD:-0}" == "1" ]]; then
+                    FAIL=$((FAIL + 1))
+                  else
+                    SKIP=$((SKIP + 1))
+                  fi
+                fi
+              fi
             else
               log "  FAIL/OPEN: live smt_dual_concurrent (see $vlogc)"
               tail -8 "$vlogc" || true
@@ -368,6 +394,7 @@ cat <<'EOF'
   Dual-active peer:    DUAL_HART_ACTIVE=1 → smt_peer_tohost (Spike -p2 / live)
   Dual-active live:     smt_dual_active (dual-ready burn + WFI yield)
   Concurrent live:      smt_dual_concurrent (no-WFI; first-act exclusive)
+  Dual-WFI timer:       smt_dual_wfi_timer (MTIP wake, no MSIP)
   R3 cosim in this suite: DUAL_HART_SKIP_R3=0 (default skips R3 rebuild)
 EOF
 log "PASS (artifacts + boot-path + dual-park; pass=$PASS skip=$SKIP fail=$FAIL)"
