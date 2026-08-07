@@ -57,6 +57,8 @@ module g6lc_thread_select
     assign switch_on_miss_o    = 1'b0;
     assign switch_on_quantum_o = 1'b0;
     assign switch_on_starve_o  = 1'b0;
+    logic _unused_boot;
+    assign _unused_boot = fetch_fire_i | issue_fire_i | flush_i | hold_i;
   end else begin : gen_smt
 
     logic [HID_W-1:0] active_q, active_d;
@@ -185,7 +187,9 @@ module g6lc_thread_select
         reason_miss    = 1'b0;
         reason_quantum = 1'b0;
         reason_starve  = 1'b0;
-        quantum_d      = quantum_q;
+        // Zero quantum under hold so when hold drops the active hart always
+        // receives a full fetch quantum (freeze-high caused immediate RR steal).
+        quantum_d      = '0;
         activate_age_d = activate_age_q;
         for (int unsigned h = 0; h < NH; h++) starve_d[h] = starve_q[h];
       end else if (do_switch) begin
@@ -217,6 +221,7 @@ module g6lc_thread_select
       end
 
       if (flush_i) quantum_d = '0;
+
     end
 
     // Delayed switch pulse: fires when active_q already equals the incoming hart.

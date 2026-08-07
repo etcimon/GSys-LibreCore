@@ -285,26 +285,28 @@ if [[ "${LIVE:-0}" == "1" ]]; then
     if grep -q SUCCESS "$vloga"; then
       log "  PASS live smt_peer_tohost on $harness"
       PASS=$((PASS + 1))
-      if [[ "${CONCURRENT:-0}" == "1" && -f "$ROOT/verif/tests/custom/smt/smt_dual_active.S" ]]; then
-        CA_ELF="$OUT/smt_dual_active.elf"
-        if [[ -n "${RISCV_CC:-}" ]]; then
-          "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
-            -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
-            "$ROOT/verif/tests/custom/smt/smt_dual_active.S" \
-            -T "$LD" -o "$CA_ELF" -march=rv64imafdc_zicsr_zifencei -mabi=lp64d || true
-        fi
-        if [[ -f "$CA_ELF" ]]; then
-          thc="$("${CROSS_COMPILE:-riscv-none-elf-}nm" "$CA_ELF" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
-          vlogc="$OUT/veri_smt_dual_active.log"
-          set +e
-          "$harness" +max-cycles=300000 +time_out=300000 +debug_disable \
-            +tohost_addr="0x${thc}" "$CA_ELF" >"$vlogc" 2>&1
-          set -e
-          if grep -q SUCCESS "$vlogc"; then
-            log "  PASS live smt_dual_active concurrent"
-            PASS=$((PASS + 1))
+      # Dual-active: dual-ready burn then WFI yield (hard when LIVE)
+      DA_SRC="$ROOT/verif/tests/custom/smt/smt_dual_active.S"
+      DA_ELF="$OUT/smt_dual_active.elf"
+      if [[ -f "$DA_SRC" && -n "${RISCV_CC:-}" ]]; then
+        "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
+          -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
+          "$DA_SRC" -T "$LD" -o "$DA_ELF" -march=rv64imafdc_zicsr_zifencei -mabi=lp64d
+        thd="$("${CROSS_COMPILE:-riscv-none-elf-}nm" "$DA_ELF" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
+        vlogd="$OUT/veri_smt_dual_active.log"
+        set +e
+        "$harness" +max-cycles=300000 +time_out=300000 +debug_disable \
+          +tohost_addr="0x${thd}" "$DA_ELF" >"$vlogd" 2>&1
+        set -e
+        if grep -q SUCCESS "$vlogd"; then
+          log "  PASS live smt_dual_active on $harness"
+          PASS=$((PASS + 1))
+        else
+          log "  FAIL/OPEN: live smt_dual_active (see $vlogd)"
+          tail -8 "$vlogd" || true
+          if [[ "${DUAL_HART_LIVE_HARD:-0}" == "1" ]]; then
+            FAIL=$((FAIL + 1))
           else
-            log "  OPEN: concurrent smt_dual_active (soft; see $vlogc)"
             SKIP=$((SKIP + 1))
           fi
         fi
@@ -338,7 +340,7 @@ cat <<'EOF'
   Dual-park Spike: DUAL_HART_PARK_SPIKE=1
   Dual-park live smt2: DUAL_HART_LIVE=1 DUAL_HART_LIVE_HARD=1 (boot hold+grace greened)
   Dual-active peer:    DUAL_HART_ACTIVE=1 → smt_peer_tohost (Spike -p2 / live)
-  Concurrent residual: DUAL_HART_CONCURRENT=1 → smt_dual_active soft
+  Dual-active live:     smt_dual_active (dual-ready burn + WFI yield)
   R3 cosim in this suite: DUAL_HART_SKIP_R3=0 (default skips R3 rebuild)
 EOF
 log "PASS (artifacts + boot-path + dual-park; pass=$PASS skip=$SKIP fail=$FAIL)"
