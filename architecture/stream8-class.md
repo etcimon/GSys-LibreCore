@@ -28,7 +28,7 @@ Residual host gates that blocked package freeze are **landed**:
 - Multicore RTL CRT: imafdc **9/9** + `g6lc64_server_math` L2 **9/9** (`mc-spo-veri`)
 - H-edge Spike+RTL **3/3** (`kvm-h-spike` / Variane)
 - Zacas **W/D/Q** hard green (`zacas-policy`)
-- Dual-hart host residual (`dual-hart-ci`; live smt2 Variane still lab when native Verilator)
+- Dual-hart host residual greened (`dual-hart-ci` LIVE_HARD: boot hold+DRAM grace; `work-ver-smt2`)
 
 Stream8 is therefore **optional growth**, not a bugfix: pick numbers, add a config package + DTS,
 and keep minimal packages identity-clean.
@@ -53,7 +53,7 @@ Config knobs stay in `config_pkg::cva6_cfg_t` + `check_cfg` — no hard-coded st
 |------|-------|-------|
 | `NrCores` | 2 | CRT proven; scale to 4/8 only after N=2 smoke |
 | Issue width | 2 (`g6lc64_ooo` lite) or in-order server_math | 4-issue only if FO4 screen + formal stay green |
-| `NrHarts` | 1 bare-metal CRT; 2 only on smt2 track | Dual-park software gate exists; full smt2 Variane lab |
+| `NrHarts` | 1 bare-metal CRT; 2 only on smt2 track | Dual-park Spike+live green on `g6lc64_smt2` (hold+grace) |
 | `RVZacas` | 1 | W/D/Q; Spike never CAS golden |
 | `DeepSpecEn` | 1 | STQ deepen required for stream fill→verify |
 | Target FO4 screen | 2.5 GHz structural | STA retune separate (S3b-lab) |

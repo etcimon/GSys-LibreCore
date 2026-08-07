@@ -54,7 +54,7 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
      **9/9** hard PASS after same `DeepSpecEn=1` STQ deepen (log
      `mc-spo-veri-server-math-full.log`). Compact linker + Verilator 5.008.
    Root cause was STQ `DEPTH_COMMIT=4` (hang ≥40 B fill→verify). Dual-hart live CRT
-   still optional (package keeps `NrHarts=1` for bare-metal).  
+   optional on multi-hart packages; smt2 dual_park LIVE_HARD greened (hold+grace).  
    **Priors:** `mc-spo-veri.sh` · `mini_stream_plane.S` · `store_buffer.sv` ·
    `cv64a6_imafdc_sv39_config_pkg.sv` · `g6lc64_server_math_config_pkg.sv`.
 
@@ -528,7 +528,7 @@ Tick as completed. Each is `agents/spec/<filename>`.
 - [x] Spike Zacas cosim remains **unavailable** (ISS); hard-gate CAS on RTL mini / `zacas-policy`.
   → **§8**; priors: `software/zacas/README.md`, `mc-mini-veri.sh`, `zacas-policy.sh`.
 - [x] `g6lc64_server_math` L2 bare-metal CRT 9/9 (DeepSpecEn=1; NrHarts=1 / NrCores=2).  
-  → **§2**; logs `mc-spo-veri-server-math-full.log`. Dual-hart live CRT still open.
+  → **§2**; logs `mc-spo-veri-server-math-full.log`. Dual-hart live park greened on smt2 (`a0c410f3d`).
 - [x] H-edge Spike + RTL Variane litmus 3/3 (hedeleg WARL, virt-instr 22, VS ecall/MPV,
   dual re-entry). SPV residual optional.
   → **§3 done**; priors: h_edge_diag.S, kvm-h-spike.sh, run-h-edge-veri.sh,
