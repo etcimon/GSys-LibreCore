@@ -48,6 +48,8 @@ module commit_stage
     output logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.XLEN-1:0] wdata_o,
     // Register file write enable - ISSUE_STAGE
     output logic [CVA6Cfg.NrCommitPorts-1:0] we_gpr_o,
+    // SMT hart tag for RF write banking - ISSUE_STAGE
+    output logic [CVA6Cfg.NrCommitPorts-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] whart_o,
     // Floating point register enable - ISSUE_STAGE
     output logic [CVA6Cfg.NrCommitPorts-1:0] we_fpr_o,
     // Result of AMO operation - CACHE
@@ -118,6 +120,19 @@ module commit_stage
                            : commit_instr_i[1].rd[4:0];
     end else begin
       assign waddr_o[i] = commit_instr_i[i].rd;
+    end
+  end
+
+  // U6.1: RF write bank = committing instruction's SMT hart (not active_fetch).
+  // AMOCAS.Q dual-WB and casq_hi reuse port-0's hart.
+  for (genvar i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin : gen_whart
+    if (i == 0) begin
+      assign whart_o[0] = commit_instr_i[0].hart_id;
+    end else if (i == 1) begin
+      assign whart_o[1] = casq_dual_now ? commit_instr_i[0].hart_id
+                                        : commit_instr_i[1].hart_id;
+    end else begin
+      assign whart_o[i] = commit_instr_i[i].hart_id;
     end
   end
 

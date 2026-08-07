@@ -132,6 +132,8 @@ module issue_read_operands
     input logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.XLEN-1:0] wdata_i,
     // GPR write enable - COMMIT_STAGE
     input logic [CVA6Cfg.NrCommitPorts-1:0] we_gpr_i,
+    // SMT hart tag for RF write banking - COMMIT_STAGE
+    input logic [CVA6Cfg.NrCommitPorts-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] whart_i,
     // FPR write enable - COMMIT_STAGE
     input logic [CVA6Cfg.NrCommitPorts-1:0] we_fpr_i,
     // Issue stall - PERF_COUNTERS
@@ -475,9 +477,11 @@ module issue_read_operands
   // ----------------------------------
   // Renaming
   // ----------------------------------
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] rd_hart;
   for (genvar i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
     assign rd_list[i] = fwd_i.sbe[i].rd;
     assign rd_fpr[i]  = CVA6Cfg.FpPresent && ariane_pkg::is_rd_fpr(fwd_i.sbe[i].op);
+    assign rd_hart[i] = fwd_i.sbe[i].hart_id;
   end
 
   for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin : gen_raw_checks
@@ -492,6 +496,8 @@ module issue_read_operands
         .rd_fpr_i(rd_fpr),
         .still_issued_i(fwd_i.still_issued),
         .issue_pointer_i(fwd_i.issue_pointer),
+        .rs_hart_i(issue_instr_i[i].hart_id),
+        .rd_hart_i(rd_hart),
         .idx_o(idx_hzd_rs1[i]),
         .valid_o(rs1_raw_check[i])
     );
@@ -508,6 +514,8 @@ module issue_read_operands
         .rd_fpr_i(rd_fpr),
         .still_issued_i(fwd_i.still_issued),
         .issue_pointer_i(fwd_i.issue_pointer),
+        .rs_hart_i(issue_instr_i[i].hart_id),
+        .rd_hart_i(rd_hart),
         .idx_o(idx_hzd_rs2[i]),
         .valid_o(rs2_raw_check[i])
     );
@@ -524,6 +532,8 @@ module issue_read_operands
         .rd_fpr_i(rd_fpr),
         .still_issued_i(fwd_i.still_issued),
         .issue_pointer_i(fwd_i.issue_pointer),
+        .rs_hart_i(issue_instr_i[i].hart_id),
+        .rd_hart_i(rd_hart),
         .idx_o(idx_hzd_rs3[i]),
         .valid_o(rs3_raw_check[i])
     );
@@ -1044,9 +1054,8 @@ module issue_read_operands
         (CVA6Cfg.NrHarts <= 1) ? 1 : $clog2(CVA6Cfg.NrHarts);
     logic [CVA6Cfg.NrRgprPorts-1:0][SMT_HID_W-1:0] rhart_pack;
     logic [CVA6Cfg.NrCommitPorts-1:0][SMT_HID_W-1:0] whart_pack;
-    // Tag reads from the issuing instruction's hart_id; writes default to 0
-    // until dual-hart commit threads hart_id on the writeback bus (still
-    // correct for NrHarts==1; dual-hart commit is a follow-up).
+    // Tag reads from issuing instr hart_id; writes from commit instr hart_id.
+    // (Previously whart was stuck at 0 — peer commits corrupted primary RF.)
     always_comb begin
       rhart_pack = '0;
       whart_pack = '0;
@@ -1055,6 +1064,9 @@ module issue_read_operands
           for (int unsigned k = 0; k < OPERANDS_PER_INSTR; k++) begin
             rhart_pack[p*OPERANDS_PER_INSTR+k] = issue_instr_i[p].hart_id;
           end
+        end
+        for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++) begin
+          whart_pack[c] = whart_i[c];
         end
       end
     end

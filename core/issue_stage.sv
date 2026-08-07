@@ -158,6 +158,8 @@ module issue_stage
     input logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.XLEN-1:0] wdata_i,
     // GPR write enable - COMMIT_STAGE
     input logic [CVA6Cfg.NrCommitPorts-1:0] we_gpr_i,
+    // SMT hart tag for RF write banking - COMMIT_STAGE
+    input logic [CVA6Cfg.NrCommitPorts-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] whart_i,
     // FPR write enable - COMMIT_STAGE
     input logic [CVA6Cfg.NrCommitPorts-1:0] we_fpr_i,
     // Instructions to commit - COMMIT_STAGE
@@ -453,6 +455,7 @@ module issue_stage
       .waddr_i,
       .wdata_i,
       .we_gpr_i,
+      .whart_i,
       .we_fpr_i,
       .stall_issue_o,
       .rvfi_rs1_o              (rvfi_rs1_o),

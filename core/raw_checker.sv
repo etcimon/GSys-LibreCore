@@ -6,6 +6,7 @@
 // You may obtain a copy of the License at https://solderpad.org/licenses/
 //
 // Original Author: Junheng Zheng - Thales
+// U6.1: hart-qualified RAW for fine-grain SMT (Etienne Cimon, 2026)
 
 module raw_checker
   import ariane_pkg::*;
@@ -20,7 +21,7 @@ module raw_checker
     input logic [REG_ADDR_SIZE-1:0] rs_i,
     // Type of register source (FPR or GPR) - SCOREBOARD
     input logic rs_fpr_i,
-    // Registers of destination of the instructions already issued in the scoreboard - SCOREBOARD 
+    // Registers of destination of the instructions already issued in the scoreboard - SCOREBOARD
     input logic [CVA6Cfg.NR_SB_ENTRIES-1:0][REG_ADDR_SIZE-1:0] rd_i,
     // Type of registers of destination (FPR or GPR) - SCOREBOARD
     input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] rd_fpr_i,
@@ -28,6 +29,9 @@ module raw_checker
     input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] still_issued_i,
     // Issue pointer - SCOREBOARD
     input logic [CVA6Cfg.TRANS_ID_BITS-1:0] issue_pointer_i,
+    // U6.1 SMT hart of consumer (issuing) and producers (SB entries)
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] rs_hart_i,
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] rd_hart_i,
 
     // Index in the scoreboard of the most recent RAW dependency - SCOREBOARD
     output logic [CVA6Cfg.TRANS_ID_BITS-1:0] idx_o,
@@ -45,8 +49,13 @@ module raw_checker
 
   logic                             rs_is_gpr0;
 
-  for (genvar i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
-    assign same_rd_as_rs[i] = (rs_fpr_i == rd_fpr_i[i]) && (rs_i == rd_i[i]) && still_issued_i[i];
+  for (genvar i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin : gen_same_rd
+    // NrHarts==1: always same hart. Else require matching SMT bank so peer
+    // and primary never stall/forward on each other's architectural regs.
+    logic same_hart;
+    assign same_hart = (CVA6Cfg.NrHarts <= 1) || (rd_hart_i[i] == rs_hart_i);
+    assign same_rd_as_rs[i] =
+        same_hart && (rs_fpr_i == rd_fpr_i[i]) && (rs_i == rd_i[i]) && still_issued_i[i];
     assign same_rd_as_rs_before[i] = (i < issue_pointer_i) && same_rd_as_rs[i];
     assign same_rd_as_rs_after[i] = (i >= issue_pointer_i) && same_rd_as_rs[i];
   end

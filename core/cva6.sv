@@ -595,6 +595,7 @@ module cva6
   logic [CVA6Cfg.NrCommitPorts-1:0][4:0] waddr_commit_id;
   logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.XLEN-1:0] wdata_commit_id;
   logic [CVA6Cfg.NrCommitPorts-1:0] we_gpr_commit_id;
+  logic [CVA6Cfg.NrCommitPorts-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] whart_commit_id;
   logic [CVA6Cfg.NrCommitPorts-1:0] we_fpr_commit_id;
   // --------------
   // CSR <-> *
@@ -1175,6 +1176,7 @@ module cva6
       .waddr_i              (waddr_commit_id),
       .wdata_i              (wdata_commit_id),
       .we_gpr_i             (we_gpr_commit_id),
+      .whart_i              (whart_commit_id),
       .we_fpr_i             (we_fpr_commit_id),
       .commit_instr_o       (commit_instr_id_commit),
       .commit_drop_o        (commit_drop_id_commit),
@@ -1375,6 +1377,7 @@ module cva6
       .waddr_o                (waddr_commit_id),
       .wdata_o                (wdata_commit_id),
       .we_gpr_o               (we_gpr_commit_id),
+      .whart_o                (whart_commit_id),
       .we_fpr_o               (we_fpr_commit_id),
       .amo_resp_i             (amo_resp),
       .pc_o                   (pc_commit),
