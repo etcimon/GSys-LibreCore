@@ -118,6 +118,15 @@ module ariane_testharness #(
     .AXI_USER_WIDTH ( AXI_USER_WIDTH          )
   ) slave[ariane_soc::NrSlaves-1:0]();
 
+  // Port 2: AI island desc-fetch DMA master (NrSlaves=3). Idle until
+  // g6lc_ai_desc_fetch is wired through the island; keeps the xbar port
+  // from floating after the IdWidthSlave bump.
+  ariane_axi::req_t  ai_dma_req;
+  ariane_axi::resp_t ai_dma_resp;
+  assign ai_dma_req = '0;
+  `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_req)
+  `AXI_ASSIGN_TO_RESP(ai_dma_resp, slave[2])
+
   AXI_BUS #(
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
     .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),

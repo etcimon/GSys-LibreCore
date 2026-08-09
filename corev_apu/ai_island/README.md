@@ -20,9 +20,10 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_cap_window.sv` | read-only capability MMIO | **landed** |
 | `g6lc_ai_addr_check.sv` | per-queue `[base,limit)` + R/W (AI-3) | **landed** |
 | `g6lc_ai_desc_engine.sv` | validate version/op + check all ptrs + complete | **landed** (no GEMM yet) |
+| `g6lc_ai_desc_fetch.sv` | AXI read-only 64 B descriptor fetch | **RTL landed**; xbar port 2 reserved, not yet driven by island |
 | `g6lc_ai_island_top.sv` | reg map + IRQ sticky | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 |
-| AXI/DMA master + xbar attach | fabric citizen | next |
+| AXI/DMA master + xbar attach | fabric citizen | **port reserved** (`NrSlaves=3`); wire fetch next |
 
 ## SoC map (Variane)
 
@@ -51,7 +52,7 @@ reg before `ai.enq` (same-addr load-back can STLF; kick is a core wire).
 ## Ordering
 
 1. **P3 spine** — descriptor engine + per-queue address check (**done**).
-2. **AXI attach + PLIC-8** (**done**); DMA master (desc fetch from enq ptr) next.
+2. **AXI attach + PLIC-8** (**done**); DMA desc-fetch RTL + xbar port reserved; **wire into island next**.
 3. **I1** — one cluster; freeze `T` / DRAM class / NoC cut.
 4. **I3** — memory system measured.
 5. **I2** — N clusters (must not change latency-SKU results).
