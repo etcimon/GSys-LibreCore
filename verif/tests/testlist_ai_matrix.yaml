@@ -12,3 +12,6 @@ testlist:
   - test: ai_mma_s8_golden
     description: T1 2x2x2 s8 MMA tile RF + multi-cycle mma
     path: custom/ai/ai_mma_s8_golden.S
+  - test: ai_requant_rhe_golden
+    description: requant round-half-to-even + relu
+    path: custom/ai/ai_requant_rhe_golden.S

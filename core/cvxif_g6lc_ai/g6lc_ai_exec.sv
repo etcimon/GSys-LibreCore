@@ -126,8 +126,14 @@ module g6lc_ai_exec
   logic signed [31:0] acc_q [AccCount][AccElems];
   logic signed [31:0] acc_d [AccCount][AccElems];
 
-  // ------------------------------------------------------------------ MMA FSM
-  typedef enum logic [1:0] { ST_IDLE = 2'b00, ST_MMA = 2'b01, ST_DONE = 2'b10 } state_e;
+  // ------------------------------------------------------------------ multi-cycle FSM
+  typedef enum logic [2:0] {
+    ST_IDLE  = 3'd0,
+    ST_MMA   = 3'd1,
+    ST_DONE  = 3'd2,
+    ST_RQ    = 3'd3,  // requant s32→s8
+    ST_RELU  = 3'd4
+  } state_e;
   state_e state_q, state_d;
 
   logic [4:0]  mma_acc_q, mma_ta_q, mma_tb_q;
@@ -142,6 +148,10 @@ module g6lc_ai_exec
   id_t         mma_id_q, mma_id_d;
   logic [4:0]  mma_rd_q, mma_rd_d;
   opcode_t     mma_op_q, mma_op_d;
+  // requant packed scale: [15:0] s16 scale, [23:16] s8 zp, [27:24] shift 0..15
+  // Seam B: both ai.requant and ai.requant.t take this packing in the rs2 GPR
+  // (pointer form cannot dereference memory without a DMA port).
+  logic [31:0] rq_pack_q, rq_pack_d;
 
   logic [31:0] ticket_q, ticket_d;
 
@@ -203,6 +213,7 @@ module g6lc_ai_exec
     mma_id_d       = mma_id_q;
     mma_rd_d       = mma_rd_q;
     mma_op_d       = mma_op_q;
+    rq_pack_d      = rq_pack_q;
     ticket_d       = ticket_q;
 
     result_n       = '0;
@@ -303,9 +314,48 @@ module g6lc_ai_exec
               state_d       = ST_MMA;
               // no result this cycle
             end
-            AI_REQUANT, AI_REQUANT_T, AI_ACT_RELU, AI_ACT_GELU: begin
-              dirty_n = 1'b1;
-              valid_n = 1'b1;
+            AI_REQUANT, AI_REQUANT_T: begin
+              // dest tile=rd, src acc=rs1, packed scale in rs2 GPR
+              mma_ta_d      = idx_rd;   // dest tile
+              mma_acc_d     = idx_rs1;  // src acc
+              mma_m_d       = '0;
+              mma_n_d       = '0;
+              mma_M_d       = 4'(dim_of(aicfg_i[3:0], TileM));
+              mma_N_d       = 4'(dim_of(aicfg_i[7:4], TileN));
+              rq_pack_d     = registers_i[1][31:0];
+              mma_hart_d    = hartid_i;
+              mma_id_d      = id_i;
+              mma_rd_d      = rd_i;
+              mma_op_d      = opcode_i;
+              state_d       = ST_RQ;
+            end
+            AI_ACT_RELU: begin
+              // dest=rd tile, src=rs1 tile
+              mma_ta_d      = idx_rd;
+              mma_tb_d      = idx_rs1;
+              mma_m_d       = '0;
+              mma_n_d       = '0;
+              mma_M_d       = 4'(dim_of(aicfg_i[3:0], TileM));
+              mma_N_d       = 4'(dim_of(aicfg_i[7:4], TileN));
+              mma_hart_d    = hartid_i;
+              mma_id_d      = id_i;
+              mma_rd_d      = rd_i;
+              mma_op_d      = opcode_i;
+              state_d       = ST_RELU;
+            end
+            AI_ACT_GELU: begin
+              // P1: identity copy (approximation TBD); still multi-cycle for shape
+              mma_ta_d      = idx_rd;
+              mma_tb_d      = idx_rs1;
+              mma_m_d       = '0;
+              mma_n_d       = '0;
+              mma_M_d       = 4'(dim_of(aicfg_i[3:0], TileM));
+              mma_N_d       = 4'(dim_of(aicfg_i[7:4], TileN));
+              mma_hart_d    = hartid_i;
+              mma_id_d      = id_i;
+              mma_rd_d      = rd_i;
+              mma_op_d      = opcode_i;
+              state_d       = ST_RELU;  // gelu path distinguished by mma_op_q
             end
             AI_ENQ: begin
               result_n = XLEN'(ticket_q);
@@ -395,6 +445,76 @@ module g6lc_ai_exec
         end
       end
 
+      ST_RQ: begin
+        // y = clamp_s8( RHE(acc * scale, shift) + zp )
+        // pack: scale s16 [15:0], zp s8 [23:16], shift [27:24]
+        begin
+          logic signed [15:0] sc;
+          logic signed [7:0]  zp;
+          logic [3:0]         sh;
+          logic signed [31:0] aval;
+          logic signed [47:0] prod, adj, ux, t;
+          logic [47:0]        rem, half;
+          logic signed [31:0] with_zp;
+          int unsigned        c_elem;
+          sc  = signed'(rq_pack_q[15:0]);
+          zp  = signed'(rq_pack_q[23:16]);
+          sh  = rq_pack_q[27:24];
+          c_elem = mma_m_q * TileN + mma_n_q;
+          if (mma_acc_q < AccCount && mma_ta_q < TileCount && c_elem < AccElems &&
+              c_elem < TileElems) begin
+            aval = acc_q[mma_acc_q][c_elem];
+            // Signed widen: s32×s16 → s48
+            prod = signed'({{16{aval[31]}}, aval}) * signed'({{32{sc[15]}}, sc});
+            if (sh == 4'd0) begin
+              adj = prod;
+            end else begin
+              ux   = prod[47] ? -prod : prod;
+              half = 48'b1 << (sh - 4'd1);
+              rem  = ux & ((48'b1 << sh) - 48'b1);
+              t    = ux >> sh;
+              if (rem > half || (rem == half && t[0])) t = t + 48'b1;
+              adj  = prod[47] ? -t : t;
+            end
+            with_zp = adj[31:0] + 32'(zp);
+            if (with_zp > 32'sd127) with_zp = 32'sd127;
+            else if (with_zp < -32'sd128) with_zp = -32'sd128;
+            tiles_d[mma_ta_q][c_elem] = with_zp[7:0];
+          end
+        end
+        if (mma_n_q + 4'd1 < mma_N_q) begin
+          mma_n_d = mma_n_q + 4'd1;
+        end else begin
+          mma_n_d = '0;
+          if (mma_m_q + 4'd1 < mma_M_q) mma_m_d = mma_m_q + 4'd1;
+          else state_d = ST_DONE;
+        end
+      end
+
+      ST_RELU: begin
+        begin
+          int unsigned c_elem;
+          logic signed [7:0] v;
+          c_elem = mma_m_q * TileN + mma_n_q;
+          if (mma_ta_q < TileCount && mma_tb_q < TileCount && c_elem < TileElems) begin
+            v = signed'(tiles_q[mma_tb_q][c_elem]);
+            if (mma_op_q == AI_ACT_RELU) begin
+              tiles_d[mma_ta_q][c_elem] = (v < 0) ? 8'sd0 : v;
+            end else begin
+              // GELU stub: copy
+              tiles_d[mma_ta_q][c_elem] = v;
+            end
+          end
+        end
+        if (mma_n_q + 4'd1 < mma_N_q) begin
+          mma_n_d = mma_n_q + 4'd1;
+        end else begin
+          mma_n_d = '0;
+          if (mma_m_q + 4'd1 < mma_M_q) mma_m_d = mma_m_q + 4'd1;
+          else state_d = ST_DONE;
+        end
+      end
+
       ST_DONE: begin
         // Complete with no GPR writeback
         hartid_n = mma_hart_q;
@@ -438,6 +558,7 @@ module g6lc_ai_exec
       mma_id_q       <= '0;
       mma_rd_q       <= '0;
       mma_op_q       <= AI_ILLEGAL;
+      rq_pack_q      <= '0;
       for (int unsigned t = 0; t < TileCount; t++)
         for (int unsigned e = 0; e < TileElems; e++) tiles_q[t][e] <= '0;
       for (int unsigned a = 0; a < AccCount; a++)
@@ -468,6 +589,7 @@ module g6lc_ai_exec
       mma_id_q       <= mma_id_d;
       mma_rd_q       <= mma_rd_d;
       mma_op_q       <= mma_op_d;
+      rq_pack_q      <= rq_pack_d;
       for (int unsigned t = 0; t < TileCount; t++)
         for (int unsigned e = 0; e < TileElems; e++) tiles_q[t][e] <= tiles_d[t][e];
       for (int unsigned a = 0; a < AccCount; a++)

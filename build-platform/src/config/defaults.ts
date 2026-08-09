@@ -628,16 +628,30 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
-        // Xg6lcai directed: CSR/AI-X + ai.dot4 contract + optional ELF compile.
+        // Xg6lcai directed: CSR/AI-X + ai.dot4/mma/requant contract + ELF compile.
         id: "ai-matrix-directed",
         description:
-          "OPTIONAL: Xg6lcai directed gate (RTL contract, CSR addr, compile ai_csr/ai_dot4 smokes).",
+          "OPTIONAL: Xg6lcai directed gate (RTL contract, CSR addr, compile CSR/dot4/mma/requant smokes).",
         script: "verif/regress/ai-matrix-directed.sh",
         group: "directed",
         target: "g6lc64_ai",
         dvTarget: "g6lc64_ai",
         dvSimulators: "veri-testharness",
         tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
+        // Live Variane on g6lc64_ai (rebuild with AI_MATRIX_VERI_REBUILD=1).
+        id: "ai-matrix-veri",
+        description:
+          "OPTIONAL: live Variane run of Xg6lcai directed ELFs on g6lc64_ai (work-ver-ai).",
+        script: "verif/regress/ai-matrix-veri.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvTarget: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: ["verilator", "riscv-gcc"],
         openSource: true,
         optional: true,
       },

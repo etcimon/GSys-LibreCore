@@ -41,6 +41,7 @@ need=(
   verif/tests/custom/ai/ai_csr_aistatus_xs.S
   verif/tests/custom/ai/ai_dot4_s8_smoke.S
   verif/tests/custom/ai/ai_mma_s8_golden.S
+  verif/tests/custom/ai/ai_requant_rhe_golden.S
   verif/tests/testlist_ai_matrix.yaml
   architecture/ai-matrix/isa-encoding.md
 )
@@ -75,7 +76,7 @@ if [[ -z "$RISCV_CC" ]]; then
     skip "no RISC-V gcc — ELF compile skipped"
   fi
 else
-  for t in ai_csr_aistatus_xs ai_dot4_s8_smoke ai_mma_s8_golden; do
+  for t in ai_csr_aistatus_xs ai_dot4_s8_smoke ai_mma_s8_golden ai_requant_rhe_golden; do
     src="verif/tests/custom/ai/${t}.S"
     elf="$OUT/${t}.elf"
     if "$RISCV_CC" -march=rv64imafdc -mabi=lp64d -static -mcmodel=medany \

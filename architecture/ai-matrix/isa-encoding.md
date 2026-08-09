@@ -169,6 +169,20 @@ Rounding is **round-half-to-even** on the `s32 → s8` narrowing, then saturatin
 (or `[0, 255]` for unsigned output). **This rule is normative**: a mismatch here silently degrades
 model accuracy and is the single most likely source of a "works in Python, wrong on hardware" bug.
 
+**Seam B packed scale (GPR `rs2`) for both `ai.requant` and `ai.requant.t`:** the CVXIF seam has no
+memory port, so the “pointer” form cannot dereference a table. Software passes one tensor’s parameters
+inline:
+
+| Bits | Field | Type |
+|---|---|---|
+| `15:0` | `scale` | s16 multiplier |
+| `23:16` | `zp` | s8 zero-point |
+| `27:24` | `shift` | 0–15, applied after multiply |
+| `31:28` | reserved | write 0 |
+
+Compute: `y = clamp_s8( round_half_to_even(acc * scale, shift) + zp )`. Per-channel tables remain the
+job of the T2 island / seam D (or a software loop of `.t` ops).
+
 ### 3.6 Queue management (T2) — `funct3 = 101`, gated on `AiQueues > 0`
 
 | `funct7` | Mnemonic | `rd` | `rs1` | `rs2` |
