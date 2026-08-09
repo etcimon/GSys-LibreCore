@@ -393,6 +393,23 @@ embedded part and a ~100-TOPS card (`scaling-100tops.md` §8).
 vector track enforces for `v` (`agents/guides/AGENTS-vector.md:94-95`), cross-validated per
 `AGENTS-dts-validation.md`.
 
+## 8.1 PMU event group (implementation contract)
+
+`mhpmeventN` uses `{group[7:5], idx[4:0]}` (`core/include/ariane_pkg.sv`). Group **4**
+(`MHPMGrpAI`) is allocated to Xg6lcai. Indices:
+
+| idx | `mhpmevent` low byte | Event |
+|---|---|---|
+| 0 | `0x80` | any AI instruction result_valid |
+| 1 | `0x81` | MMA complete |
+| 2 | `0x82` | post-op complete (requant / relu / gelu) |
+| 3 | `0x83` | T0 complete (setcfg/getcfg/dot4/mv*/queue mgmt) |
+| 4 | `0x84` | busy cycle (multi-cycle unit occupied) |
+
+Island MMIO counters (cluster throughput, queue occupancy) stay **out** of `perf_counters` —
+see `README.md` § island telemetry. RVFI exposes `aicfg`/`aistatus` for cosim when
+`AiCfg.MatrixEn=1`.
+
 ## 9. Versioning and change control
 
 `aicfg.version` (bits 19:16) is the contract version; this document describes **version 1**.

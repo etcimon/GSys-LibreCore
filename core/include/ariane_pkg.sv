@@ -682,6 +682,15 @@ package ariane_pkg;
 
   // Event groups. Group 0 must stay first and unchanged (legacy encoding).
   localparam logic [MHPMEventGrpWidth-1:0] MHPMGrpLegacy = 3'd0;
+  // Group 4: Xg6lcai AI matrix (architecture/ai-matrix). Indices stable once published.
+  //   [7:5]=4, [4:0]=idx  → mhpmevent = {3'b100, 5'idx}
+  localparam logic [MHPMEventGrpWidth-1:0] MHPMGrpAI = 3'd4;
+  // Indices within MHPMGrpAI:
+  //   0: AI op complete (any accepted AI instruction retires a result)
+  //   1: AI MMA complete
+  //   2: AI post-op complete (requant / relu / gelu)
+  //   3: AI T0 complete (setcfg/getcfg/dot4/mv*/enq/poll/qfence/expsel)
+  //   4: AI busy cycle (multi-cycle unit occupied)
 
   // --------------------
   // Atomics

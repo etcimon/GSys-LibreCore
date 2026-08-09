@@ -36,7 +36,13 @@ module g6lc_ai_coprocessor
     input  logic [1:0]      ais_i,
     output logic            dirty_ai_state_o,
     output logic            ai_setcfg_we_o,
-    output logic [XLEN-1:0] ai_setcfg_wdata_o
+    output logic [XLEN-1:0] ai_setcfg_wdata_o,
+    // PMU group-4 probes (pulse/level → perf_counters)
+    output logic            ai_pmu_op_o,
+    output logic            ai_pmu_mma_o,
+    output logic            ai_pmu_post_o,
+    output logic            ai_pmu_t0_o,
+    output logic            ai_pmu_busy_o
 );
 
   assign cvxif_resp_o.compressed_ready       = 1'b1;
@@ -153,6 +159,10 @@ module g6lc_ai_coprocessor
       .setcfg_wdata_o(ai_setcfg_wdata_o),
       .dirty_o       (dirty_ai_state_o),
       .busy_o        (exec_busy),
+      .pmu_op_o      (ai_pmu_op_o),
+      .pmu_mma_o     (ai_pmu_mma_o),
+      .pmu_post_o    (ai_pmu_post_o),
+      .pmu_t0_o      (ai_pmu_t0_o),
       .result_o      (result),
       .hartid_o      (res_hartid),
       .id_o          (res_id),
@@ -160,6 +170,8 @@ module g6lc_ai_coprocessor
       .valid_o       (res_valid),
       .we_o          (res_we)
   );
+
+  assign ai_pmu_busy_o = exec_busy;
 
   always_comb begin
     cvxif_resp_o.result_valid  = res_valid;

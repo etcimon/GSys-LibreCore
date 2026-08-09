@@ -377,6 +377,12 @@ module cva6
     input  logic                    dirty_ai_state_i,
     input  logic                    ai_setcfg_we_i,
     input  logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata_i,
+    // Xg6lcai PMU group-4 probes (tie 0 when no AI coprocessor)
+    input  logic                    ai_pmu_op_i,
+    input  logic                    ai_pmu_mma_i,
+    input  logic                    ai_pmu_post_i,
+    input  logic                    ai_pmu_t0_i,
+    input  logic                    ai_pmu_busy_i,
     // noc request, can be AXI or OpenPiton - SUBSYSTEM
     output noc_req_t noc_req_o,
     // noc response, can be AXI or OpenPiton - SUBSYSTEM
@@ -1627,6 +1633,11 @@ module cva6
         .pf_issue_i         (pf_issue_i),
         .pf_train_i         (pf_train_i),
         .spec_cancel_i      (spec_cancel),
+        .ai_pmu_op_i        (ai_pmu_op_i),
+        .ai_pmu_mma_i       (ai_pmu_mma_i),
+        .ai_pmu_post_i      (ai_pmu_post_i),
+        .ai_pmu_t0_i        (ai_pmu_t0_i),
+        .ai_pmu_busy_i      (ai_pmu_busy_i),
         // TODO this is more complex that that
         // If superscalar then we additionally have to check [1] when transaction 0 succeeded
         .if_empty_i         (~fetch_valid_if_id[0]),

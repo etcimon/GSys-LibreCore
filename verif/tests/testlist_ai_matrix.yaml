@@ -15,3 +15,6 @@ testlist:
   - test: ai_requant_rhe_golden
     description: requant round-half-to-even + relu
     path: custom/ai/ai_requant_rhe_golden.S
+  - test: ai_pmu_group4_smoke
+    description: PMU group-4 AI op/T0/MMA events via mhpmcounter3-5
+    path: custom/ai/ai_pmu_group4_smoke.S

@@ -145,8 +145,8 @@ and option D, and is the single largest hidden cost in the phasing below. Tracke
 | First-pass decoder stub | `core/cva6_accel_first_pass_decoder_stub.sv`, flist `core/Flist.cva6:194` | replace for option D |
 | Accelerator decode hooks | `core/decoder.sv:168-171, 1854-1857, 1939-1942` | `is_accel` overrides decode |
 | Writeback port count | `core/include/build_config_pkg.sv:38` | 5th port shared by both seams |
-| PMU | `core/perf_counters.sv` | new AI events land here |
-| RVFI | `core/cva6_rvfi.sv`, `core/cva6_rvfi_probes.sv` | accept/retire probes |
+| PMU | `core/perf_counters.sv` group 4 (`MHPMGrpAI`) | see §5.1 |
+| RVFI | `core/cva6_rvfi.sv`, `rvfi_types.svh` | `aicfg`/`aistatus` probes + UVMT assigns |
 
 ## 4. Config knobs (proposed — `cva6_cfg_t` + `check_cfg`)
 
@@ -198,17 +198,38 @@ occupied by the CVXIF example (`core/cvxif_example/include/cvxif_instr_pkg.sv:56
 | Queue mgmt | `ai.enq`, `ai.poll`, `ai.qfence` | T2 doorbell / completion from user mode, no syscall |
 | Sparse assist | `ai.gathr`, `ai.expsel` | INT8 row gather + MoE expert-select reduction |
 
-CSRs (custom range, in `core/csr_regfile.sv`): `aicfg` (geometry/dtype), `aistatus` (busy, dirty,
-error, ownership), `aiscale`/`aizp` (requant), `aiqbase`/`aiqctl` (**S-mode only**; U-mode gets a
-mapped doorbell page), `aiperm` (per-privilege issue enable).
+CSRs (custom range, in `core/csr_regfile.sv`): `aicfg` `0x801` (geometry/dtype), `aistatus` `0x802`
+(busy, dirty, error, ownership, **`ais[7:6]`**), `aiscale`/`aizp` (requant), `aiqbase`/`aiqctl`
+(**S-mode only**; U-mode gets a mapped doorbell page), `aiperm` (per-privilege issue enable).
+**Note:** `0x800` is `CSR_FTRAN` — never host `aicfg` there.
 
-**Extension state must be context-switchable.** State rides `mstatus.XS` — but note that
-**`mstatus.xs` is currently hardwired to `Off`** in this tree (`core/csr_regfile.sv:1791`, and
-`vsstatus_d.xs` at `:1425`), while `mstatus.sd` **already** ORs `xs == Dirty` (`:2242`). Only the
-hardwire has to be lifted, gated on `AiMatrixEn`, so existing packages stay bit-identical. Full
-contract in `isa-encoding.md` §5. **Accumulators must be flushed or ownership-checked on context
-switch** — stale INT8 activations of another tenant are a real cross-tenant leak on a multi-tenant
-inference card.
+**Extension state (AI-X, landed).** `aistatus.ais` is the extension’s own Off/Initial/Clean/Dirty
+field; `mstatus.xs` / `vsstatus.xs` are a **read-only** summary of `ais` when `AiCfg.MatrixEn=1`.
+Illegal-instruction on issue tests **`ais`**, not a writable XS. Full contract in `isa-encoding.md`
+§5. **Accumulators must be flushed or ownership-checked on context switch** — stale INT8 activations
+of another tenant are a real cross-tenant leak on a multi-tenant inference card.
+
+### 5.1 PMU group 4 + RVFI (landed)
+
+`mhpmeventN` packing is `{group[7:5], idx[4:0]}` (`ariane_pkg`: `MHPMEventGrpWidth=3`,
+`MHPMEventIdxWidth=5`). Group **`MHPMGrpAI = 4`** is reserved for Xg6lcai; indices are stable once
+published:
+
+| `mhpmevent` | idx | Event | Source |
+|---|---|---|---|
+| `0x80` | 0 | AI op complete (any result_valid) | `ai_pmu_op` |
+| `0x81` | 1 | AI MMA complete | `ai_pmu_mma` |
+| `0x82` | 2 | AI post-op (requant / relu / gelu) | `ai_pmu_post` |
+| `0x83` | 3 | AI T0 complete (setcfg/getcfg/dot4/mv*/enq/…) | `ai_pmu_t0` |
+| `0x84` | 4 | AI busy cycle (level → cycle count) | `ai_pmu_busy` |
+
+Probes are generated in `g6lc_ai_exec` (class pulses with `valid_q`; busy is `exec_busy`), threaded
+copro → `ariane` → `cva6` → `perf_counters`, gated on `AiCfg.MatrixEn`. Tie-offs when the copro is
+absent. Directed smoke: `verif/tests/custom/ai/ai_pmu_group4_smoke.S`.
+
+**RVFI:** `RVFI_PROBES_CSR_T` / `RVFI_CSR_T` carry `aicfg`/`aistatus`; `csr_regfile` drives
+`rvfi_csr_o.*_q`; `cva6_rvfi` uses `CONNECT_RVFI_SAME(MatrixEn, …)`; UVMT
+`RVFI_CSR_ASSIGN`/`UVM_CONFIG_DB_SET` for both.
 
 **Tile loads are the one behavioural difference between the seams.** CVXIF has no memory port, so
 `ai.ldt`/`ai.stt` are not executable under option B and the compiler must synthesise them from scalar

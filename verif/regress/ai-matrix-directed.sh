@@ -42,6 +42,7 @@ need=(
   verif/tests/custom/ai/ai_dot4_s8_smoke.S
   verif/tests/custom/ai/ai_mma_s8_golden.S
   verif/tests/custom/ai/ai_requant_rhe_golden.S
+  verif/tests/custom/ai/ai_pmu_group4_smoke.S
   verif/tests/testlist_ai_matrix.yaml
   architecture/ai-matrix/isa-encoding.md
 )

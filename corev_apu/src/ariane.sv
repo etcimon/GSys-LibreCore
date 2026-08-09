@@ -107,12 +107,13 @@ module ariane import ariane_pkg::*; #(
 
     cvxif_req_t  cvxif_req;
     cvxif_resp_t cvxif_resp;
-    // Xg6lcai CSR sideband (csr_regfile ↔ AI coprocessor)
+    // Xg6lcai CSR sideband + PMU probes (csr_regfile / perf_counters ↔ AI copro)
     logic [CVA6Cfg.XLEN-1:0] ai_aicfg;
     logic [1:0]              ai_ais;
     logic                    dirty_ai_state;
     logic                    ai_setcfg_we;
     logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata;
+    logic                    ai_pmu_op, ai_pmu_mma, ai_pmu_post, ai_pmu_t0, ai_pmu_busy;
 
     cva6 #(
       .CVA6Cfg ( CVA6Cfg ),
@@ -155,6 +156,11 @@ module ariane import ariane_pkg::*; #(
       .dirty_ai_state_i     ( dirty_ai_state            ),
       .ai_setcfg_we_i       ( ai_setcfg_we              ),
       .ai_setcfg_wdata_i    ( ai_setcfg_wdata           ),
+      .ai_pmu_op_i          ( ai_pmu_op                 ),
+      .ai_pmu_mma_i         ( ai_pmu_mma                ),
+      .ai_pmu_post_i        ( ai_pmu_post               ),
+      .ai_pmu_t0_i          ( ai_pmu_t0                 ),
+      .ai_pmu_busy_i        ( ai_pmu_busy               ),
       .noc_req_o            ( noc_req_o                 ),
       .noc_resp_i           ( noc_resp_i                ),
       .l1_inval_addr_i      ( l1_inval_addr_i           ),
@@ -172,6 +178,11 @@ module ariane import ariane_pkg::*; #(
         assign dirty_ai_state  = 1'b0;
         assign ai_setcfg_we    = 1'b0;
         assign ai_setcfg_wdata = '0;
+        assign ai_pmu_op       = 1'b0;
+        assign ai_pmu_mma      = 1'b0;
+        assign ai_pmu_post     = 1'b0;
+        assign ai_pmu_t0       = 1'b0;
+        assign ai_pmu_busy     = 1'b0;
         cvxif_example_coprocessor #(
           .NrRgprPorts (CVA6Cfg.NrRgprPorts),
           .XLEN (CVA6Cfg.XLEN),
@@ -222,18 +233,33 @@ module ariane import ariane_pkg::*; #(
           .ais_i                ( ai_ais                         ),
           .dirty_ai_state_o     ( dirty_ai_state                 ),
           .ai_setcfg_we_o       ( ai_setcfg_we                   ),
-          .ai_setcfg_wdata_o    ( ai_setcfg_wdata                )
+          .ai_setcfg_wdata_o    ( ai_setcfg_wdata                ),
+          .ai_pmu_op_o          ( ai_pmu_op                      ),
+          .ai_pmu_mma_o         ( ai_pmu_mma                     ),
+          .ai_pmu_post_o        ( ai_pmu_post                    ),
+          .ai_pmu_t0_o          ( ai_pmu_t0                      ),
+          .ai_pmu_busy_o        ( ai_pmu_busy                    )
         );
       end else begin: gen_COPRO_NONE
         assign dirty_ai_state  = 1'b0;
         assign ai_setcfg_we    = 1'b0;
         assign ai_setcfg_wdata = '0;
+        assign ai_pmu_op       = 1'b0;
+        assign ai_pmu_mma      = 1'b0;
+        assign ai_pmu_post     = 1'b0;
+        assign ai_pmu_t0       = 1'b0;
+        assign ai_pmu_busy     = 1'b0;
         assign cvxif_resp = '{compressed_ready: 1'b1, issue_ready: 1'b1, register_ready: 1'b1, default: '0};
       end
     end else begin: gen_no_cvxif
       assign dirty_ai_state  = 1'b0;
       assign ai_setcfg_we    = 1'b0;
       assign ai_setcfg_wdata = '0;
+      assign ai_pmu_op       = 1'b0;
+      assign ai_pmu_mma      = 1'b0;
+      assign ai_pmu_post     = 1'b0;
+      assign ai_pmu_t0       = 1'b0;
+      assign ai_pmu_busy     = 1'b0;
       assign cvxif_resp = '0;
     end
 
@@ -317,6 +343,11 @@ module ariane import ariane_pkg::*; #(
       .dirty_ai_state_i     ( 1'b0                      ),
       .ai_setcfg_we_i       ( 1'b0                      ),
       .ai_setcfg_wdata_i    ( '0                        ),
+      .ai_pmu_op_i          ( 1'b0                      ),
+      .ai_pmu_mma_i         ( 1'b0                      ),
+      .ai_pmu_post_i        ( 1'b0                      ),
+      .ai_pmu_t0_i          ( 1'b0                      ),
+      .ai_pmu_busy_i        ( 1'b0                      ),
       .noc_req_o            ( core_noc_req              ),
       .noc_resp_i           ( core_noc_resp             ),
       .l1_inval_addr_i      ( l1_inval_addr_i           ),

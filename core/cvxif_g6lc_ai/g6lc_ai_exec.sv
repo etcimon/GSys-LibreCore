@@ -38,6 +38,11 @@ module g6lc_ai_exec
     output logic                  dirty_o,
     // Stall new issue while multi-cycle MMA is in flight
     output logic                  busy_o,
+    // PMU pulses (1-cycle, group 4 — see ariane_pkg MHPMGrpAI)
+    output logic                  pmu_op_o,      // any result_valid
+    output logic                  pmu_mma_o,     // MMA done
+    output logic                  pmu_post_o,    // requant/relu/gelu done
+    output logic                  pmu_t0_o,      // T0 single-cycle complete
     // Result
     output logic       [XLEN-1:0] result_o,
     output hartid_t               hartid_o,
@@ -185,6 +190,13 @@ module g6lc_ai_exec
   assign dirty_o        = dirty_q;
   assign busy_o         = (state_q != ST_IDLE);
 
+  // Classify completing ops for PMU (latched with valid_q)
+  logic pmu_mma_n, pmu_mma_q, pmu_post_n, pmu_post_q, pmu_t0_n, pmu_t0_q;
+  assign pmu_op_o   = valid_q;
+  assign pmu_mma_o  = valid_q && pmu_mma_q;
+  assign pmu_post_o = valid_q && pmu_post_q;
+  assign pmu_t0_o   = valid_q && pmu_t0_q;
+
   // ------------------------------------------------------------------ combo
   always_comb begin
     logic signed [31:0] mac_sum, mac_old, mac_new;
@@ -225,6 +237,9 @@ module g6lc_ai_exec
     setcfg_we_n    = 1'b0;
     setcfg_wdata_n = '0;
     dirty_n        = 1'b0;
+    pmu_mma_n      = 1'b0;
+    pmu_post_n     = 1'b0;
+    pmu_t0_n       = 1'b0;
     dot4a_prod     = '0;
     dot4a_dot_s    = '0;
     dot4a_acc_s    = '0;
@@ -240,28 +255,33 @@ module g6lc_ai_exec
               we_n           = 1'b1;
               dirty_n        = 1'b1;
               valid_n        = 1'b1;
+              pmu_t0_n       = 1'b1;
             end
             AI_GETCFG: begin
               result_n = aicfg_i;
               we_n     = 1'b1;
               valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             AI_RELACC: begin
               if (idx_rd < AccCount) begin
                 for (int unsigned e = 0; e < AccElems; e++) acc_d[idx_rd][e] = '0;
               end
-              dirty_n = 1'b1;
-              valid_n = 1'b1;
+              dirty_n  = 1'b1;
+              valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             AI_DOT4_S8: begin
               result_n = dot4_s8(registers_i[0], registers_i[1]);
               we_n     = 1'b1;
               valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             AI_DOT4_U8: begin
               result_n = dot4_u8(registers_i[0], registers_i[1]);
               we_n     = 1'b1;
               valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             AI_DOT4A_S8: begin
               dot4a_prod  = dot4_s8(registers_i[0], registers_i[1]);
@@ -270,24 +290,27 @@ module g6lc_ai_exec
                 dot4a_acc_s = signed'(registers_i[2][31:0]);
                 result_n    = XLEN'(signed'(dot4a_dot_s + dot4a_acc_s));
               end else result_n = dot4a_prod;
-              we_n    = 1'b1;
-              valid_n = 1'b1;
+              we_n     = 1'b1;
+              valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             AI_MVTA: begin
               // tile=rd, data=rs1 GPR, elem=rs2 field (0..31)
               if (idx_rd < TileCount && int'(idx_rs2) < TileElems) begin
                 tiles_d[idx_rd][idx_rs2] = registers_i[0][7:0];
               end
-              dirty_n = 1'b1;
-              valid_n = 1'b1;
+              dirty_n  = 1'b1;
+              valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             AI_MVACC: begin
               // rd GPR, acc=rs1, elem=rs2
               if (idx_rs1 < AccCount && int'(idx_rs2) < AccElems)
                 result_n = XLEN'(signed'(acc_q[idx_rs1][idx_rs2]));
               else result_n = '0;
-              we_n    = 1'b1;
-              valid_n = 1'b1;
+              we_n     = 1'b1;
+              valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             AI_MMA_S8, AI_MMA_U8, AI_MMA_SU8, AI_MMA_US8: begin
               // Capture and enter multi-cycle
@@ -362,19 +385,23 @@ module g6lc_ai_exec
               ticket_d = ticket_q + 32'd1;
               we_n     = 1'b1;
               valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             AI_POLL: begin
               result_n = XLEN'(32'd1);
               we_n     = 1'b1;
               valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             AI_QFENCE: begin
-              valid_n = 1'b1;
+              valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             AI_EXPSEL: begin
               result_n = '0;
               we_n     = 1'b1;
               valid_n  = 1'b1;
+              pmu_t0_n = 1'b1;
             end
             default: begin
               valid_n = 1'b0;
@@ -523,6 +550,10 @@ module g6lc_ai_exec
         we_n     = 1'b0;
         valid_n  = 1'b1;
         dirty_n  = 1'b1;
+        if (mma_op_q inside {AI_MMA_S8, AI_MMA_U8, AI_MMA_SU8, AI_MMA_US8})
+          pmu_mma_n = 1'b1;
+        else if (mma_op_q inside {AI_REQUANT, AI_REQUANT_T, AI_ACT_RELU, AI_ACT_GELU})
+          pmu_post_n = 1'b1;
         state_d  = ST_IDLE;
       end
 
@@ -542,6 +573,9 @@ module g6lc_ai_exec
       setcfg_we_q    <= 1'b0;
       setcfg_wdata_q <= '0;
       dirty_q        <= 1'b0;
+      pmu_mma_q      <= 1'b0;
+      pmu_post_q     <= 1'b0;
+      pmu_t0_q       <= 1'b0;
       ticket_q       <= '0;
       state_q        <= ST_IDLE;
       mma_acc_q      <= '0;
@@ -573,6 +607,9 @@ module g6lc_ai_exec
       setcfg_we_q    <= setcfg_we_n;
       setcfg_wdata_q <= setcfg_wdata_n;
       dirty_q        <= dirty_n;
+      pmu_mma_q      <= pmu_mma_n;
+      pmu_post_q     <= pmu_post_n;
+      pmu_t0_q       <= pmu_t0_n;
       ticket_q       <= ticket_d;
       state_q        <= state_d;
       mma_acc_q      <= mma_acc_d;

@@ -213,6 +213,8 @@ module uvmt_cva6_tb;
    `RVFI_CSR_ASSIGN(dcache)
    `RVFI_CSR_ASSIGN(icache)
    `RVFI_CSR_ASSIGN(acc_cons)
+   `RVFI_CSR_ASSIGN(aicfg)
+   `RVFI_CSR_ASSIGN(aistatus)
 
    `RVFI_CSR_ASSIGN(pmpcfg0)
    `RVFI_CSR_ASSIGN(pmpcfg1)
@@ -295,6 +297,8 @@ module uvmt_cva6_tb;
          `RVFI_CSR_UVM_CONFIG_DB_SET(instreth, i)
          `RVFI_CSR_UVM_CONFIG_DB_SET(dcache, i)
          `RVFI_CSR_UVM_CONFIG_DB_SET(icache, i)
+         `RVFI_CSR_UVM_CONFIG_DB_SET(aicfg, i)
+         `RVFI_CSR_UVM_CONFIG_DB_SET(aistatus, i)
 
          `RVFI_CSR_UVM_CONFIG_DB_SET(pmpcfg0, i)
          `RVFI_CSR_UVM_CONFIG_DB_SET(pmpcfg1, i)

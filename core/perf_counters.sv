@@ -74,6 +74,12 @@ module perf_counters
     input logic pf_train_i,
     // Group 3: FSE speculation recovery (tie 0 when unused)
     input logic spec_cancel_i,
+    // Group 4: Xg6lcai AI matrix (tie 0 when AiCfg.MatrixEn=0 / no copro)
+    input logic ai_pmu_op_i,      // any AI result_valid pulse
+    input logic ai_pmu_mma_i,     // MMA complete pulse
+    input logic ai_pmu_post_i,    // requant / relu / gelu complete pulse
+    input logic ai_pmu_t0_i,      // T0 single-cycle complete pulse
+    input logic ai_pmu_busy_i,    // multi-cycle unit busy (level → cycle count)
     // from frontend
     input logic if_empty_i,
     // from PC Gen
@@ -210,7 +216,16 @@ module perf_counters
     event_group[3'd3][5'd4] = |load_event;     // load pressure
     event_group[3'd3][5'd5] = |store_event;    // store pressure
 
-    // Groups 4..7 reserved.
+    // Group 4: Xg6lcai AI (mhpmevent[7:5]==MHPMGrpAI). See ariane_pkg.
+    if (CVA6Cfg.AiCfg.MatrixEn) begin
+      event_group[MHPMGrpAI][5'd0] = ai_pmu_op_i;
+      event_group[MHPMGrpAI][5'd1] = ai_pmu_mma_i;
+      event_group[MHPMGrpAI][5'd2] = ai_pmu_post_i;
+      event_group[MHPMGrpAI][5'd3] = ai_pmu_t0_i;
+      event_group[MHPMGrpAI][5'd4] = ai_pmu_busy_i;
+    end
+
+    // Groups 5..7 reserved.
 
     for (int unsigned i = 1; i <= MHPMCounterNum; i++) begin
       events[i] = event_group[event_grp_sel[i]][event_idx_sel[i]];

@@ -85,6 +85,8 @@
   rvfi_csr_elmt_t dcache; \
   rvfi_csr_elmt_t icache; \
   rvfi_csr_elmt_t acc_cons; \
+  rvfi_csr_elmt_t aicfg; \
+  rvfi_csr_elmt_t aistatus; \
   rvfi_csr_elmt_t pmpcfg0; \
   rvfi_csr_elmt_t pmpcfg1; \
   rvfi_csr_elmt_t pmpcfg2; \
@@ -164,6 +166,9 @@
   logic [Cfg.XLEN-1:0] dcache_q; \
   logic [Cfg.XLEN-1:0] icache_q; \
   logic [Cfg.XLEN-1:0] acc_cons_q; \
+  /* Xg6lcai AI CSRs (zero when AiCfg.MatrixEn=0) */ \
+  logic [Cfg.XLEN-1:0] aicfg_q; \
+  logic [Cfg.XLEN-1:0] aistatus_q; \
   riscv::pmpcfg_t [63:0] pmpcfg_q; \
   logic [63:0][Cfg.PLEN-3:0] pmpaddr_q; \
 }

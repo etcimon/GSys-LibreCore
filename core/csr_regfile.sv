@@ -3586,6 +3586,8 @@ module csr_regfile
   assign rvfi_csr_o.dcache_q = dcache_q;
   assign rvfi_csr_o.icache_q = icache_q;
   assign rvfi_csr_o.acc_cons_q = CVA6Cfg.EnableAccelerator ? acc_cons_q : '0;
+  assign rvfi_csr_o.aicfg_q = CVA6Cfg.AiCfg.MatrixEn ? aicfg_q : '0;
+  assign rvfi_csr_o.aistatus_q = CVA6Cfg.AiCfg.MatrixEn ? aistatus_q : '0;
   assign rvfi_csr_o.pmpcfg_q = pmpcfg_q;
   assign rvfi_csr_o.pmpaddr_q = pmpaddr_q;
 
