@@ -46,7 +46,7 @@ fi
 
 REBUILD="${AI_MATRIX_VERI_REBUILD:-0}"
 VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai}"
-DEFAULT_TESTS="ai_csr_aistatus_xs ai_dot4_s8_smoke ai_mma_s8_golden ai_requant_rhe_golden ai_pmu_group4_smoke"
+DEFAULT_TESTS="ai_csr_aistatus_xs ai_setcfg_readback ai_illegal_when_off ai_dot4_s8_smoke ai_mma_s8_golden ai_requant_rhe_golden ai_pmu_group4_smoke"
 # shellcheck disable=SC2206
 tests=( ${AI_MATRIX_VERI_TESTS:-$DEFAULT_TESTS} )
 TIME_OUT="${AI_MATRIX_TIME_OUT:-200000}"

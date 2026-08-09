@@ -4,9 +4,9 @@
 // Xg6lcai execute stage (CVXIF seam B).
 //
 // T0: setcfg/getcfg/dot4* (1-cycle).
-// T1: tile/acc register files + multi-cycle ai.mma.* (one (m,n) full-K
-// reduction per cycle). Small arrays are flops (≤ ~1.5 KiB at 8×8×8 / 8
-// tiles / 4 acc); island-scale storage stays on tc_sram in corev_apu.
+// T1: tile RF (flops) + accumulator bank on tc_sram (g6lc_ai_acc_bank) +
+// multi-cycle ai.mma.* (one (m,n) full-K reduction per cycle).
+// Island-scale staging lives in corev_apu (I1), not here.
 //
 // aicfg/ais owned by csr_regfile; sideband setcfg/dirty writeback.
 // Timing: multi-cycle MMA stalls issue via busy_o (no ex_stage cone growth).
@@ -125,11 +125,57 @@ module g6lc_ai_exec
   endfunction
 
   // ------------------------------------------------------------------ storage
-  // tiles[tile][elem] INT8; acc[acc_idx][elem] INT32
+  // tiles[tile][elem] INT8 — flops (multi-read K-reduction per cycle)
   logic [7:0]  tiles_q [TileCount][TileElems];
   logic [7:0]  tiles_d [TileCount][TileElems];
-  logic signed [31:0] acc_q [AccCount][AccElems];
-  logic signed [31:0] acc_d [AccCount][AccElems];
+
+  // Accumulators: one SRAM word = full spatial tile (AccElems × s32) via tc_sram
+  localparam int unsigned AccDataW = AccElems * 32;
+  localparam int unsigned AccBeW   = AccDataW / 8;
+  localparam int unsigned AccAddrW = (AccCount > 1) ? $clog2(AccCount) : 1;
+
+  logic                 acc_r_req, acc_w_req;
+  logic [AccAddrW-1:0]  acc_r_acc, acc_w_acc;
+  logic [AccDataW-1:0]  acc_r_data, acc_w_data;
+  logic [AccBeW-1:0]    acc_w_be;
+
+  g6lc_ai_acc_bank #(
+      .AccCount(AccCount),
+      .AccElems(AccElems)
+  ) i_acc_bank (
+      .clk_i   (clk_i),
+      .rst_ni  (rst_ni),
+      .r_req_i (acc_r_req),
+      .r_acc_i (acc_r_acc),
+      .r_data_o(acc_r_data),
+      .w_req_i (acc_w_req),
+      .w_acc_i (acc_w_acc),
+      .w_data_i(acc_w_data),
+      .w_be_i  (acc_w_be)
+  );
+
+  // Element extract / byte-enable helpers for the wide bank word
+  function automatic logic signed [31:0] acc_get(
+      input logic [AccDataW-1:0] bank, input int unsigned elem
+  );
+    return signed'(bank[elem*32 +: 32]);
+  endfunction
+
+  function automatic logic [AccBeW-1:0] acc_be_elem(input int unsigned elem);
+    logic [AccBeW-1:0] be;
+    be = '0;
+    if (elem < AccElems) be[elem*4 +: 4] = 4'hF;
+    return be;
+  endfunction
+
+  function automatic logic [AccDataW-1:0] acc_wdata_elem(
+      input int unsigned elem, input logic signed [31:0] v
+  );
+    logic [AccDataW-1:0] w;
+    w = '0;
+    if (elem < AccElems) w[elem*32 +: 32] = v;
+    return w;
+  endfunction
 
   // ------------------------------------------------------------------ multi-cycle FSM
   typedef enum logic [2:0] {
@@ -204,11 +250,15 @@ module g6lc_ai_exec
     logic [7:0]         mac_au, mac_bu;
     logic signed [32:0] mac_wide;
     int unsigned        mac_a_elem, mac_b_elem, mac_c_elem;
-    // defaults: hold storage
+    // defaults: hold tiles; no acc write
     for (int unsigned t = 0; t < TileCount; t++)
       for (int unsigned e = 0; e < TileElems; e++) tiles_d[t][e] = tiles_q[t][e];
-    for (int unsigned a = 0; a < AccCount; a++)
-      for (int unsigned e = 0; e < AccElems; e++) acc_d[a][e] = acc_q[a][e];
+    acc_r_req  = 1'b0;
+    acc_r_acc  = '0;
+    acc_w_req  = 1'b0;
+    acc_w_acc  = '0;
+    acc_w_data = '0;
+    acc_w_be   = '0;
 
     state_d        = state_q;
     mma_acc_d      = mma_acc_q;
@@ -264,8 +314,12 @@ module g6lc_ai_exec
               pmu_t0_n = 1'b1;
             end
             AI_RELACC: begin
+              // Whole-bank clear through tc_sram (single cycle, full BE)
               if (idx_rd < AccCount) begin
-                for (int unsigned e = 0; e < AccElems; e++) acc_d[idx_rd][e] = '0;
+                acc_w_req  = 1'b1;
+                acc_w_acc  = AccAddrW'(idx_rd);
+                acc_w_data = '0;
+                acc_w_be   = '1;
               end
               dirty_n  = 1'b1;
               valid_n  = 1'b1;
@@ -304,10 +358,12 @@ module g6lc_ai_exec
               pmu_t0_n = 1'b1;
             end
             AI_MVACC: begin
-              // rd GPR, acc=rs1, elem=rs2
-              if (idx_rs1 < AccCount && int'(idx_rs2) < AccElems)
-                result_n = XLEN'(signed'(acc_q[idx_rs1][idx_rs2]));
-              else result_n = '0;
+              // rd GPR, acc=rs1, elem=rs2 — Latency=0 combo read
+              if (idx_rs1 < AccCount && int'(idx_rs2) < AccElems) begin
+                acc_r_req = 1'b1;
+                acc_r_acc = AccAddrW'(idx_rs1);
+                result_n  = XLEN'(acc_get(acc_r_data, int'(idx_rs2)));
+              end else result_n = '0;
               we_n     = 1'b1;
               valid_n  = 1'b1;
               pmu_t0_n = 1'b1;
@@ -446,7 +502,9 @@ module g6lc_ai_exec
         end
         mac_c_elem = mma_m_q * TileN + mma_n_q;
         if (mma_acc_q < AccCount && mac_c_elem < AccElems) begin
-          mac_old = acc_q[mma_acc_q][mac_c_elem];
+          acc_r_req = 1'b1;
+          acc_r_acc = AccAddrW'(mma_acc_q);
+          mac_old   = acc_get(acc_r_data, mac_c_elem);
           unique case (mma_accmode_q)
             2'b00: mac_new = mac_sum;
             2'b10: begin
@@ -457,7 +515,10 @@ module g6lc_ai_exec
             end
             default: mac_new = mac_old + mac_sum;
           endcase
-          acc_d[mma_acc_q][mac_c_elem] = mac_new;
+          acc_w_req  = 1'b1;
+          acc_w_acc  = AccAddrW'(mma_acc_q);
+          acc_w_data = acc_wdata_elem(mac_c_elem, mac_new);
+          acc_w_be   = acc_be_elem(mac_c_elem);
         end
         // Advance (m,n)
         if (mma_n_q + 4'd1 < mma_N_q) begin
@@ -490,7 +551,9 @@ module g6lc_ai_exec
           c_elem = mma_m_q * TileN + mma_n_q;
           if (mma_acc_q < AccCount && mma_ta_q < TileCount && c_elem < AccElems &&
               c_elem < TileElems) begin
-            aval = acc_q[mma_acc_q][c_elem];
+            acc_r_req = 1'b1;
+            acc_r_acc = AccAddrW'(mma_acc_q);
+            aval = acc_get(acc_r_data, c_elem);
             // Signed widen: s32×s16 → s48
             prod = signed'({{16{aval[31]}}, aval}) * signed'({{32{sc[15]}}, sc});
             if (sh == 4'd0) begin
@@ -595,8 +658,7 @@ module g6lc_ai_exec
       rq_pack_q      <= '0;
       for (int unsigned t = 0; t < TileCount; t++)
         for (int unsigned e = 0; e < TileElems; e++) tiles_q[t][e] <= '0;
-      for (int unsigned a = 0; a < AccCount; a++)
-        for (int unsigned e = 0; e < AccElems; e++) acc_q[a][e] <= '0;
+      // Accumulators reset via tc_sram SimInit="zeros"
     end else begin
       result_q       <= result_n;
       hartid_q       <= hartid_n;
@@ -629,8 +691,6 @@ module g6lc_ai_exec
       rq_pack_q      <= rq_pack_d;
       for (int unsigned t = 0; t < TileCount; t++)
         for (int unsigned e = 0; e < TileElems; e++) tiles_q[t][e] <= tiles_d[t][e];
-      for (int unsigned a = 0; a < AccCount; a++)
-        for (int unsigned e = 0; e < AccElems; e++) acc_q[a][e] <= acc_d[a][e];
     end
   end
 

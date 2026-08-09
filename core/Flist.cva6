@@ -110,6 +110,7 @@ ${CVA6_REPO_DIR}/core/cvxif_example/compressed_instr_decoder.sv
 ${CVA6_REPO_DIR}/core/cvxif_example/copro_alu.sv
 // Xg6lcai AI matrix plane on CVXIF (seam B). Tier R; see architecture/ai-matrix/.
 ${CVA6_REPO_DIR}/core/cvxif_g6lc_ai/include/g6lc_ai_instr_pkg.sv
+${CVA6_REPO_DIR}/core/cvxif_g6lc_ai/g6lc_ai_acc_bank.sv
 ${CVA6_REPO_DIR}/core/cvxif_g6lc_ai/g6lc_ai_exec.sv
 ${CVA6_REPO_DIR}/core/cvxif_g6lc_ai/g6lc_ai_coprocessor.sv
 
