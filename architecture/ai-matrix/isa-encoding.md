@@ -196,16 +196,19 @@ Same memory-access caveat as §3.3 under seam B.
 
 ## 4. CSR map
 
-Addresses chosen to avoid the collisions verified in this tree: `0x7C0`/`0x7C1`/`0x7C2` are already
-`CSR_ICACHE`/`CSR_DCACHE`/`CSR_ACC_CONS` (`core/include/riscv_pkg.sv:655-658`); nothing currently
-occupies `0x5C0-0x5FF` or `0x800-0x8FF`.
+Addresses chosen to avoid collisions in this tree:
+
+- `0x7C0`/`0x7C1`/`0x7C2` = `CSR_ICACHE`/`CSR_DCACHE`/`CSR_ACC_CONS`
+- **`0x800` = `CSR_FTRAN`** (FP precision control) — **must not** host `aicfg`. Surfaced at CSR
+  implementation time; URW AI CSRs therefore start at **`0x801`** (pre-implementation address fix,
+  not a version bump — no software was shipped against `0x800`).
 
 | Address | Name | Priv | Purpose |
 |---|---|---|---|
-| `0x800` | `aicfg` | URW | active geometry/dtype/accmode; layout per §3.1 |
-| `0x801` | `aistatus` | URW | `[0]` busy, `[1]` acc dirty, `[2]` queue error, `[5:4]` owning hart, `[7:6]` **`ais`** extension status (§5), `[15:8]` last error code |
-| `0x802` | `aiscale` | URW | pointer to the active per-channel scale table |
-| `0x803` | `aizp` | URW | pointer to the active zero-point table |
+| `0x801` | `aicfg` | URW | active geometry/dtype/accmode; layout per §3.1 |
+| `0x802` | `aistatus` | URW | `[0]` busy, `[1]` acc dirty, `[2]` queue error, `[5:4]` owning hart, `[7:6]` **`ais`** extension status (§5), `[15:8]` last error code |
+| `0x803` | `aiscale` | URW | pointer to the active per-channel scale table |
+| `0x804` | `aizp` | URW | pointer to the active zero-point table |
 | `0x5C0` | `aiqbase` | SRW | T2 ring base physical/effective address |
 | `0x5C1` | `aiqctl` | SRW | `[0]` enable, `[7:4]` log2 ring entries, `[15:8]` queue id |
 | `0x5C2` | `aiqhead` | SRW | ring head, software-owned |

@@ -16,7 +16,7 @@
 // ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
 // The original work of the copyright holders named above remains licensed
 // under the license stated above, and that grant is unaffected.
-// Modifications (c) 2026 Etienne Cimon: SMT2 per-hart CSR banking, hypervisor/H-extension CSRs, PMU counter CSRs.
+// Modifications (c) 2026 Etienne Cimon: SMT2 per-hart CSR banking, hypervisor/H-extension CSRs, PMU counter CSRs, Xg6lcai AI CSRs + mstatus.xs (AI-X).
 // The upstream notice above is prose and declares no SPDX identifier, so the
 // outbound offer is stated here as the file's single SPDX tag. See REUSE.toml.
 // Etienne Cimon offers this file AS A WHOLE under:
@@ -339,6 +339,18 @@ module csr_regfile
   logic [CVA6Cfg.XLEN-1:0] dcache_q, dcache_d;
   logic [CVA6Cfg.XLEN-1:0] icache_q, icache_d;
   logic [CVA6Cfg.XLEN-1:0] acc_cons_q, acc_cons_d;
+
+  // Xg6lcai AI CSRs (architecture/ai-matrix/isa-encoding.md §4). Present only
+  // when AiCfg.MatrixEn; otherwise accesses raise illegal-instruction.
+  // Addresses: 0x801-0x804 URW (0x800 is CSR_FTRAN), 0x5C0-0x5C2 SRW, 0x7C8 MRW.
+  logic [CVA6Cfg.XLEN-1:0] aicfg_q, aicfg_d;
+  logic [CVA6Cfg.XLEN-1:0] aistatus_q, aistatus_d;
+  logic [CVA6Cfg.XLEN-1:0] aiscale_q, aiscale_d;
+  logic [CVA6Cfg.XLEN-1:0] aizp_q, aizp_d;
+  logic [CVA6Cfg.XLEN-1:0] aiqbase_q, aiqbase_d;
+  logic [CVA6Cfg.XLEN-1:0] aiqctl_q, aiqctl_d;
+  logic [CVA6Cfg.XLEN-1:0] aiqhead_q, aiqhead_d;
+  logic [CVA6Cfg.XLEN-1:0] aiperm_q, aiperm_d;
 
   logic wfi_d, wfi_q;
 
@@ -1016,6 +1028,39 @@ module csr_regfile
             read_access_exception = 1'b1;
           end
         end
+        // Xg6lcai AI matrix CSRs (gated on AiCfg.MatrixEn)
+        12'h801: begin  // aicfg
+          if (CVA6Cfg.AiCfg.MatrixEn) csr_rdata = aicfg_q;
+          else read_access_exception = 1'b1;
+        end
+        12'h802: begin  // aistatus
+          if (CVA6Cfg.AiCfg.MatrixEn) csr_rdata = aistatus_q;
+          else read_access_exception = 1'b1;
+        end
+        12'h803: begin  // aiscale
+          if (CVA6Cfg.AiCfg.MatrixEn) csr_rdata = aiscale_q;
+          else read_access_exception = 1'b1;
+        end
+        12'h804: begin  // aizp
+          if (CVA6Cfg.AiCfg.MatrixEn) csr_rdata = aizp_q;
+          else read_access_exception = 1'b1;
+        end
+        12'h5C0: begin  // aiqbase
+          if (CVA6Cfg.AiCfg.MatrixEn && CVA6Cfg.AiCfg.Queues != 0) csr_rdata = aiqbase_q;
+          else read_access_exception = 1'b1;
+        end
+        12'h5C1: begin  // aiqctl
+          if (CVA6Cfg.AiCfg.MatrixEn && CVA6Cfg.AiCfg.Queues != 0) csr_rdata = aiqctl_q;
+          else read_access_exception = 1'b1;
+        end
+        12'h5C2: begin  // aiqhead
+          if (CVA6Cfg.AiCfg.MatrixEn && CVA6Cfg.AiCfg.Queues != 0) csr_rdata = aiqhead_q;
+          else read_access_exception = 1'b1;
+        end
+        12'h7C8: begin  // aiperm
+          if (CVA6Cfg.AiCfg.MatrixEn) csr_rdata = aiperm_q;
+          else read_access_exception = 1'b1;
+        end
         // PMPs
         riscv::CSR_PMPCFG0,
                 riscv::CSR_PMPCFG1,
@@ -1224,6 +1269,15 @@ module csr_regfile
     dcache_d   = dcache_q;
     icache_d   = icache_q;
     acc_cons_d = acc_cons_q;
+    // AI CSR defaults (hold)
+    aicfg_d    = aicfg_q;
+    aistatus_d = aistatus_q;
+    aiscale_d  = aiscale_q;
+    aizp_d     = aizp_q;
+    aiqbase_d  = aiqbase_q;
+    aiqctl_d   = aiqctl_q;
+    aiqhead_d  = aiqhead_q;
+    aiperm_d   = aiperm_q;
 
     if (CVA6Cfg.SstcEn) begin
       stimecmp_d = stimecmp_q;
@@ -1421,7 +1475,7 @@ module csr_regfile
           if (CVA6Cfg.RVH) begin
             mask = ariane_pkg::SMODE_STATUS_WRITE_MASK[CVA6Cfg.XLEN-1:0];
             vsstatus_d = (vsstatus_q & ~{{64-CVA6Cfg.XLEN{1'b0}}, mask}) | {{64-CVA6Cfg.XLEN{1'b0}}, (csr_wdata & mask)};
-            // hardwire to zero if floating point extension is not present
+            // XS read-only summary (AI-E3); forced Off here, re-driven from ais below.
             vsstatus_d.xs = riscv::Off;
             if (!CVA6Cfg.FpPresent) begin
               vsstatus_d.fs = riscv::Off;
@@ -1788,6 +1842,8 @@ module csr_regfile
         end
         riscv::CSR_MSTATUS: begin
           mstatus_d    = {{64 - CVA6Cfg.XLEN{1'b0}}, csr_wdata};
+          // XS is read-only (AI-E3 / isa-encoding.md §5). Forced Off unless the
+          // AI plane is present; when present it is overwritten below from ais.
           mstatus_d.xs = riscv::Off;
           if (!CVA6Cfg.FpPresent) begin
             mstatus_d.fs = riscv::Off;
@@ -2107,6 +2163,56 @@ module csr_regfile
             update_access_exception = 1'b1;
           end
         end
+        // Xg6lcai AI matrix CSRs
+        12'h801: begin  // aicfg
+          if (CVA6Cfg.AiCfg.MatrixEn) begin
+            aicfg_d = csr_wdata;
+            // version field is read-only on grant path; keep contract version
+            aicfg_d[19:16] = 4'd1;
+            // Downgrade unsupported ew/sp24 (isa-encoding.md §3.1)
+            if (!CVA6Cfg.AiCfg.Int4En) aicfg_d[21:20] = 2'b00;
+            if (!CVA6Cfg.AiCfg.Sparse24En) aicfg_d[22] = 1'b0;
+          end else update_access_exception = 1'b1;
+        end
+        12'h802: begin  // aistatus — software may write ais[7:6] for lazy enable
+          if (CVA6Cfg.AiCfg.MatrixEn) begin
+            // Preserve hardware-owned busy/error unless software clears ais to Off
+            aistatus_d = aistatus_q;
+            aistatus_d[7:6] = csr_wdata[7:6];  // ais
+            aistatus_d[15:8] = csr_wdata[15:8];  // last error (SW clear)
+            // If ais forced Off, drop dirty
+            if (csr_wdata[7:6] == 2'b00) begin
+              aistatus_d[1] = 1'b0;
+            end
+          end else update_access_exception = 1'b1;
+        end
+        12'h803: begin  // aiscale
+          if (CVA6Cfg.AiCfg.MatrixEn) aiscale_d = csr_wdata;
+          else update_access_exception = 1'b1;
+        end
+        12'h804: begin  // aizp
+          if (CVA6Cfg.AiCfg.MatrixEn) aizp_d = csr_wdata;
+          else update_access_exception = 1'b1;
+        end
+        12'h5C0: begin  // aiqbase
+          if (CVA6Cfg.AiCfg.MatrixEn && CVA6Cfg.AiCfg.Queues != 0) aiqbase_d = csr_wdata;
+          else update_access_exception = 1'b1;
+        end
+        12'h5C1: begin  // aiqctl
+          if (CVA6Cfg.AiCfg.MatrixEn && CVA6Cfg.AiCfg.Queues != 0) aiqctl_d = csr_wdata;
+          else update_access_exception = 1'b1;
+        end
+        12'h5C2: begin  // aiqhead
+          if (CVA6Cfg.AiCfg.MatrixEn && CVA6Cfg.AiCfg.Queues != 0) aiqhead_d = csr_wdata;
+          else update_access_exception = 1'b1;
+        end
+        12'h7C8: begin  // aiperm
+          if (CVA6Cfg.AiCfg.MatrixEn) begin
+            if (!aiperm_q[3]) begin  // lock bit sticky once set
+              aiperm_d = {{CVA6Cfg.XLEN - 4{1'b0}}, csr_wdata[3:0]};
+            end
+          end else update_access_exception = 1'b1;
+        end
         // PMP locked logic
         // 1. refuse to update any locked entry
         // 2. also refuse to update the entry below a locked TOR entry
@@ -2237,14 +2343,29 @@ module csr_regfile
     if (CVA6Cfg.RVV && dirty_v_state_i) begin
       mstatus_d.vs = riscv::Dirty;
     end
+    // AI-X: mstatus.xs is a read-only summary of aistatus.ais when the AI plane
+    // is present; otherwise forced Off (spec-required hardwire). Writes to xs
+    // are ignored (see mstatus/vsstatus write arms above).
+    if (CVA6Cfg.AiCfg.MatrixEn) begin
+      mstatus_d.xs = riscv::xs_t'(aistatus_d[7:6]);
+      if (CVA6Cfg.RVH) begin
+        vsstatus_d.xs = riscv::xs_t'(aistatus_d[7:6]);
+      end
+    end else begin
+      mstatus_d.xs = riscv::Off;
+      if (CVA6Cfg.RVH) begin
+        vsstatus_d.xs = riscv::Off;
+      end
+    end
+
     // hardwired extension registers
-    if (CVA6Cfg.RVS || CVA6Cfg.RVF) begin
-      mstatus_d.sd = (mstatus_q.xs == riscv::Dirty) | (mstatus_q.fs == riscv::Dirty);
+    if (CVA6Cfg.RVS || CVA6Cfg.RVF || CVA6Cfg.AiCfg.MatrixEn) begin
+      mstatus_d.sd = (mstatus_d.xs == riscv::Dirty) | (mstatus_d.fs == riscv::Dirty);
     end else begin
       mstatus_d.sd = riscv::Off;
     end
     if (CVA6Cfg.RVH) begin
-      vsstatus_d.sd = (vsstatus_q.xs == riscv::Dirty) | (vsstatus_q.fs == riscv::Dirty);
+      vsstatus_d.sd = (vsstatus_d.xs == riscv::Dirty) | (vsstatus_d.fs == riscv::Dirty);
     end
 
     // reserve PMPCFG bits 5 and 6 (hardwire to 0)
@@ -3087,6 +3208,34 @@ module csr_regfile
       icache_q        <= {{CVA6Cfg.XLEN - 1{1'b0}}, 1'b1};
       mcountinhibit_q <= '0;
       acc_cons_q      <= {{CVA6Cfg.XLEN - 1{1'b0}}, CVA6Cfg.EnableAccelerator};
+      // Xg6lcai defaults: ais=Initial when plane present; aicfg geometry from package
+      if (CVA6Cfg.AiCfg.MatrixEn) begin
+        aicfg_q <= '0;
+        aicfg_q[3:0]   <= 4'($clog2(CVA6Cfg.AiCfg.TileM == 0 ? 1 : CVA6Cfg.AiCfg.TileM));
+        aicfg_q[7:4]   <= 4'($clog2(CVA6Cfg.AiCfg.TileN == 0 ? 1 : CVA6Cfg.AiCfg.TileN));
+        aicfg_q[11:8]  <= 4'($clog2(CVA6Cfg.AiCfg.TileK == 0 ? 1 : CVA6Cfg.AiCfg.TileK));
+        aicfg_q[15:14] <= 2'b01;  // accumulate
+        aicfg_q[19:16] <= 4'd1;   // contract version
+        aistatus_q     <= '0;
+        aistatus_q[7:6] <= 2'b01;  // Initial (Table 101)
+        aiscale_q      <= '0;
+        aizp_q         <= '0;
+        aiqbase_q      <= '0;
+        aiqctl_q       <= '0;
+        aiqhead_q      <= '0;
+        aiperm_q       <= '0;
+        aiperm_q[0]    <= CVA6Cfg.AiCfg.UmodeEn;
+        aiperm_q[1]    <= 1'b1;  // S-mode issue allowed by default
+      end else begin
+        aicfg_q    <= '0;
+        aistatus_q <= '0;
+        aiscale_q  <= '0;
+        aizp_q     <= '0;
+        aiqbase_q  <= '0;
+        aiqctl_q   <= '0;
+        aiqhead_q  <= '0;
+        aiperm_q   <= '0;
+      end
       if (CVA6Cfg.RVZiCbom) begin
         mcbie_q  <= riscv::CBIE_INVAL;
         mcbcfe_q <= 1'b1;
@@ -3200,6 +3349,16 @@ module csr_regfile
       icache_q        <= icache_d;
       mcountinhibit_q <= mcountinhibit_d;
       acc_cons_q      <= acc_cons_d;
+      if (CVA6Cfg.AiCfg.MatrixEn) begin
+        aicfg_q    <= aicfg_d;
+        aistatus_q <= aistatus_d;
+        aiscale_q  <= aiscale_d;
+        aizp_q     <= aizp_d;
+        aiqbase_q  <= aiqbase_d;
+        aiqctl_q   <= aiqctl_d;
+        aiqhead_q  <= aiqhead_d;
+        aiperm_q   <= aiperm_d;
+      end
       if (CVA6Cfg.RVZiCbom) begin
         mcbie_q  <= mcbie_d;
         mcbcfe_q <= mcbcfe_d;

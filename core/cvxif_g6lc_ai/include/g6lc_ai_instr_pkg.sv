@@ -18,6 +18,17 @@ package g6lc_ai_instr_pkg;
   // Contract version returned by ai.setcfg (isa-encoding.md §9)
   localparam logic [3:0] AiContractVersion = 4'd1;
 
+  // CSR addresses (isa-encoding.md §4). URW window starts at 0x801 — 0x800 is
+  // already CSR_FTRAN (fprec) in this tree; pre-implementation address fix.
+  localparam logic [11:0] CSR_AICFG    = 12'h801;  // URW
+  localparam logic [11:0] CSR_AISTATUS = 12'h802;  // URW
+  localparam logic [11:0] CSR_AISCALE  = 12'h803;  // URW
+  localparam logic [11:0] CSR_AIZP     = 12'h804;  // URW
+  localparam logic [11:0] CSR_AIQBASE  = 12'h5C0;  // SRW
+  localparam logic [11:0] CSR_AIQCTL   = 12'h5C1;  // SRW
+  localparam logic [11:0] CSR_AIQHEAD  = 12'h5C2;  // SRW
+  localparam logic [11:0] CSR_AIPERM   = 12'h7C8;  // MRW
+
   // Extension status encodings (spec Table 101 / aistatus.ais)
   localparam logic [1:0] AiOff     = 2'b00;
   localparam logic [1:0] AiInitial = 2'b01;
