@@ -30,6 +30,39 @@ static-timing analyser** (`sv-timing/`); and a layered set of `AGENTS*.md` guide
 level of the stack legible to an AI agent.
 
 > **Status.** Active development, pre-release. The core boots Linux under OpenSBI in simulation.
+>
+> **Architecture / performance-plane readiness** (plan of record under
+> [`architecture/`](architecture/), especially
+> [`architecture/README.md`](architecture/README.md) live RTL summary +
+> [`remaining-upgrade-sequence.md`](architecture/remaining-upgrade-sequence.md)):
+>
+> | Plane | Status | Docs |
+> |---|---|---|
+> | **Branch prediction (U1)** | **Landed** — TAGE_LITE fabric (`g6lc_bp_*`), gshare/loop/ITTAGE/statcor/ckpt; primary 64b target; further growth (full TAGE-SC, multi-level BTB) open | [`branch-prediction/`](architecture/branch-prediction/) |
+> | **Speculative execution (FSE)** | **S0–S6 landed** — `DeepSpecEn` depth plane, SpeculativeSb cancel, BP ckpt restore, younger LSU cancel, SMT same-hart cancel, `spec-deep-tests`; default packages stay shallow | [`speculative-execution/`](architecture/speculative-execution/) |
+> | **Multi-issue** | **Live** — `SuperscalarEn` / `NrIssuePorts` 1–8 (auto 1 or 2); dual-issue production path; wider issue on OoO server packages | issue/ID/EX + config |
+> | **Slice-OoO (U4) / full OoO (U5)** | U4 **off** by default (`SliceOoOEn=0`); U5 **production-gated** (`OoOEn`) — rename/ROB/IQ/LSQ/PRF/memdep, cancel-mask recovery; `g6lc64_ooo` + `g6lc64_ooo_server` | [`out-of-order/`](architecture/out-of-order/) |
+> | **SMT (U6.1)** | **Fine-grain live** — dual PC/CSR/RF/RAS/GHR banks, hybrid thread select; default `NrHarts=1` identity; OpenSBI dual-issue soft-ladder residuals remain | [`multi-threading/`](architecture/multi-threading/) |
+> | **Multi-core (U6.2)** | **Live** — `NrCores` 1…8, `g6lc_cluster`, coherence hub, scaled CLINT/PLIC; L1 inv adapters | [`multi-core/`](architecture/multi-core/) |
+> | **L2 / L3 / stream PF** | L2 **done**; L3 + server multi-stream prefetcher **done (config-gated)**; inclusive back-inval live | [`l2-l3-cache/`](architecture/l2-l3-cache/) |
+> | **Stream plane** | **Stream8 class green** — `g6lc64_stream8`, `mc-spo-veri` 9/9, AMOCAS W/D/Q, H-edge 3/3; optional suite (not default CI) | [`stream8-class.md`](architecture/stream8-class.md) |
+>
+> Defaults keep **netlist identity** for small targets: `OoOEn=0`, `SliceOoOEn=0`,
+> `NrHarts=1`, `L2En=0` / `L3En=0`, `DeepSpecEn=0`. Production profiles opt in via
+> `g6lc64_{smt2,ooo,ooo_server,server_math,stream8}_config_pkg.sv`.
+>
+> **Toward production-ready (honest estimate, not a tape-out gate):**
+>
+> | Scope | ~% | What “100%” means |
+> |---|---:|---|
+> | **Config-gated RTL planes above** (BP + FSE + multi-issue + OoO + SMT + multi-core + L2/L3/stream) | **~75%** | Features present, identity-safe off, directed/optional suites green on primary packages |
+> | **Full product / ship readiness** (default CI on advanced packages, DI OpenSBI soft-ladder retired, full Linux image handoff, Ara cosim, STA/FO4 lab, publication/ID registers) | **~55–60%** | Partner could take an advanced config to silicon without known open residuals |
+>
+> The ~15–20 point gap is mostly **verification depth & software residuals** (soft-ladder
+> freelist / dual-`c.mv` / FDT; full Linux R3b; RVV live cosim; default-on advanced CI),
+> not missing microarchitecture scaffolds. Router program detail:
+> [`router-core-upgrade-program.md`](architecture/router-core-upgrade-program.md).
+>
 > Publication blockers — counsel review of the commercial licence and CLAs, trademark clearance, and
 > the JEDEC/RISC-V-International identification registers — are tracked openly in
 > [`AGENTS-todo.md`](AGENTS-todo.md). Do not tape out against this tree without reading them.
