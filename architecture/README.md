@@ -64,6 +64,7 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `l2-l3-cache/README.md` | L2 done; **L3 + server prefetcher** |
 | `ara-vector-attach.md` | U10ᵇ Ara/RVV flist + `server_math_v` package contract |
 | `multi-threading/smt2-bringup.md` | U6.1 SMT2 enable + dual-thread Linux/OpenSBI checklist |
+| `multi-threading/soft-ladder/` | DI OpenSBI soft-ladder promotion (B1 RTL / B2 FW / B3 harness) |
 | `server-math-hypervisor.md` | U9/U10 detail: vstimecmp, server config, RVV enable order |
 | `Architecture-research-todo-drafts.md` | Earlier research roadmap that the program above refines for a power-bound target. |
 
@@ -146,8 +147,3 @@ playbook and the `AGENTS.md` §0.2 carry-over checklist:
   `architecture/sv-timing/`.
 - **Human docs**: `docs/website/` (Next.js site) mirrors worktree + build-platform +
   sv-timing; Sphinx under `docs/01_…` remains for classic manuals.
-
-## Optional growth scaffold
-
-- [`stream8-class.md`](stream8-class.md) — n-wide / y-core production package freeze (scaffold only; no flist).
-

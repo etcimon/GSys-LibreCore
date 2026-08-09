@@ -1,0 +1,266 @@
+# Soft-ladder inventory — living registry
+# status: open | in_progress | source-landed | rtl-fixed | retired | deferred
+# bucket: B1 | B2 | B3
+# ladder: cont.N where first pinned / last soft form
+# priority: 1 = do first (blocks other peels)
+#
+# Update this file whenever a soft site is peeled, fixed, or reclassified.
+
+meta:
+  ladder_head: cont.51
+  production_elf_builder: tmp-dual-ci/mk_plat_skip.py
+  narrative: architecture/multi-threading/smt2-bringup.md
+  monorepo_soak_map: architecture/multi-threading/soft-ladder/monorepo-soak-integration.md
+  concurrent_baseline: "SUCCESS 200155 (hold unless noted)"
+  target_config: g6lc64_smt2
+  worktree_rtl_sync: "2026-08-08 from E:\\cva6 monorepo-soak landings (AMOCAS.Q, SMT hart, trapdump)"
+
+# ---------------------------------------------------------------------------
+# B1 — RTL / dual-issue residuals (fix in core; delete soft nops after)
+# ---------------------------------------------------------------------------
+sites:
+  - id: b1-amocas-q-landed
+    bucket: B1
+    priority: 0
+    status: rtl-fixed
+    ladder: monorepo-soak AMOCAS.Q (not cont soft-ladder)
+    soft_form: none (RTL implementation)
+    pin: "AMOCAS.Q dual_we / issue raddr / commit dual-write"
+    rtl_loci:
+      - core/include/ariane_pkg.sv
+      - core/decoder.sv
+      - core/amo_buffer.sv
+      - core/commit_stage.sv
+      - core/issue_read_operands.sv
+      - core/cache_subsystem/cva6_hpdcache_if_adapter.sv
+    monorepo_soak:
+      - patch-amocas-q-rtl.py
+      - patch-amocas-q-rtl2.py
+      - patch-amocas-q-commit.py
+      - patch-amocas-q-issue-stall.py
+      - patch-amocas-q-raddr.py
+    retire_when: n/a (feature land); keep dual-iss out of Spike golden
+    notes: "Synced E:\\cva6 → worktree 2026-08-08"
+
+  - id: b1-hang4-instr-queue-pc
+    bucket: B1
+    priority: 0
+    status: rtl-fixed
+    ladder: monorepo-soak hang-4
+    soft_form: none
+    pin: "dual-issue PC+2 / instr_queue stores realign PC per FIFO word"
+    rtl_loci:
+      - core/frontend/instr_queue.sv
+    retire_when: n/a landed both trees
+
+  - id: b1-hang7-younger-cancel
+    bucket: B1
+    priority: 0
+    status: rtl-fixed
+    ladder: monorepo-soak hang-7
+    soft_form: none
+    pin: "ret fallthrough after path_offset; younger cancel + ckpt_restore"
+    rtl_loci:
+      - core/scoreboard.sv
+      - core/issue_stage.sv
+      - core/branch_unit.sv
+      - core/frontend/frontend.sv
+    notes: "Partial residual hang-6 BADOFFSET family still open (see b1-fdt-lenp-store)"
+
+  - id: b1-amo-spin-lock
+    bucket: B1
+    priority: 1
+    status: open
+    ladder: cont.47-51
+    soft_form: >
+      NOP jal spin_lock/unlock in sbi_scratch_alloc_offset, heap free/used,
+      scratch_used (mk_plat_skip NOP4 sites).
+    pin: "real spin_lock → mepc=0x2 / hang under DI"
+    rtl_loci:
+      - core/store_unit.sv
+      - core/amo_buffer.sv
+      - core/load_store_unit.sv
+      - core/issue_read_operands.sv
+      - core/scoreboard.sv
+    monorepo_soak_note: "Hang-1..3 AMO/interconnect fixed historically; SA spin residual still open under DI OpenSBI"
+    verif_idea: >
+      Bare-metal: amoadd.w loop + dual-issue neighbor ops; then OpenSBI SA
+      without spin nops.
+    retire_when: mk_plat_skip has no spin NOP for SA/heap/scratch
+
+  - id: b1-lrsc-cmpxchg
+    bucket: B1
+    priority: 1
+    status: open
+    ladder: cont.49-50
+    soft_form: >
+      atomic_cmpxchg replaced by ld/bne/sd shim (non-LR/SC); finish uses natural jal.
+    pin: "real lr.d/sc.d cmpxchg → hang, no 51b1babe"
+    rtl_loci:
+      - core/load_store_unit.sv
+      - core/store_unit.sv
+      - core/load_unit.sv
+      - core/amo_buffer.sv
+    verif_idea: >
+      Bare-metal LR/SC success + sc-fail path under DI; then restore real
+      atomic_cmpxchg body in OpenSBI build (delete shim).
+    retire_when: soft atomic_cmpxchg shim removed; real LR/SC green on DI
+
+  - id: b1-csr-expected-trap
+    bucket: B1
+    priority: 2
+    status: open
+    ladder: cont.33
+    soft_form: "jal after memset @cd86 → reinit @cd0e (skip CSR probe tail)"
+    pin: "probe CSR dual-issues with csrw mtvec; expected trap never sees illegal"
+    rtl_loci:
+      - core/csr_regfile.sv
+      - core/csr_buffer.sv
+      - core/controller.sv
+      - core/commit_stage.sv
+    verif_idea: "Directed illegal CSR + immediate csrw mtvec under DI"
+    retire_when: full sbi_hart_init CSR probes run without cut
+
+  - id: b1-fdt-lenp-store
+    bucket: B1
+    priority: 2
+    status: open
+    ladder: cont.44
+    soft_form: "soft sbi_printf BANR cave (real printf mepc lenp sw mcause=6)"
+    pin: "mepc~0x80012eb2 / 0x80013128 mcause=6; hang-6/7 FDT walk family"
+    rtl_loci:
+      - core/store_unit.sv
+      - core/issue_read_operands.sv
+      - core/scoreboard.sv
+      - core/load_unit.sv
+      - core/frontend/frontend.sv
+    monorepo_soak_note: >
+      Same family as hang-6 dual FDT BADOFFSET and hang-7 single FDT walk
+      (L2-OPENSBI-HANG-PROGRESS.md). CF younger-cancel landed; load/CF residual open.
+    verif_idea: "Stack store of fdt lenp-like pointer under dual-issue; path_offset /cpus"
+    retire_when: real sbi_printf green; soft printf cave deleted
+
+  - id: b1-dual-cmv-s3
+    bucket: B1
+    priority: 3
+    status: open
+    ladder: cont.19
+    soft_form: "nop c.mv a1/a0 @7312/7314 in platform_override path"
+    pin: "dual c.mv clobber s3 under DI"
+    rtl_loci:
+      - core/issue_read_operands.sv
+      - core/id_stage.sv
+      - core/decoder.sv
+    verif_idea: "Paired c.mv back-to-back with live s3 consumer"
+    retire_when: override loop natural; nops removed
+
+# ---------------------------------------------------------------------------
+# B2 — Firmware policy (source profile; not permanent binary VAs)
+# ---------------------------------------------------------------------------
+  - id: b2-domain-finalize-cut
+    bucket: B2
+    priority: 2
+    status: open
+    ladder: cont.46-51
+    soft_form: >
+      At bb68-region: jal cave ld domain_hart_ptr; j finalize epilogue.
+      Multi-iter a4=0 green only if ecall soft (ecall table poison).
+    pin: "multi-iter → ecall_init mepc=0x8f5a mcause=4"
+    source_target: >
+      software/smt2-linux OpenSBI platform: optional early finalize after
+      table walk; or fix root cause then full walk.
+    retire_when: full domain_finalize without cut on DI; real ecall
+
+  - id: b2-soft-printf
+    bucket: B2
+    priority: 3
+    status: open
+    ladder: cont.26-50
+    soft_form: "jal sbi_printf → BANR cave @2C98"
+    depends_on: [b1-fdt-lenp-store]
+    source_target: "CVA6_SOFT_PRINTF or fix B1 then real printf"
+    retire_when: real printf or source stub not binary cave
+
+  - id: b2-switch-mode-payload
+    bucket: B2
+    priority: 2
+    status: open
+    ladder: cont.49-51
+    soft_form: >
+      Natural jal switch_mode; prologue then fall into success cookie WFI
+      (no S-mode/Linux payload).
+    source_target: >
+      platform bring-up switch_mode that signals SUCCESS to harness until
+      LINUX_IMAGE payload ready.
+    retire_when: real S-mode handoff or source-gated stub
+
+  - id: b2-console-platform-jalr
+    bucket: B2
+    priority: 3
+    status: open
+    ladder: cont.35
+    soft_form: "c.li a0,0 replaces device/platform jalr"
+    source_target: "NULL ops / empty device_init in platform"
+    retire_when: source no-ops; binary patches gone
+
+  - id: b2-early-init-skip
+    bucket: B2
+    priority: 4
+    status: open
+    ladder: cont.20
+    soft_form: "c.j skip early_init callback"
+    source_target: "empty platform early_init"
+    retire_when: source empty or real early_init green
+
+  - id: b2-csr-probe-skip
+    bucket: B2
+    priority: 3
+    status: open
+    ladder: cont.33
+    soft_form: "skip CSR probes after memset (firmware-side mirror of B1)"
+    depends_on: [b1-csr-expected-trap]
+    source_target: "optional probe disable until B1 fixed"
+    retire_when: B1 fixed; full probes on
+
+# ---------------------------------------------------------------------------
+# B3 — Sim / harness only
+# ---------------------------------------------------------------------------
+  - id: b3-success-hang-cookies
+    bucket: B3
+    priority: 1
+    status: open
+    ladder: cont.7-51
+    soft_form: "51b1babe / 51b1dead caves; 996 → success; hang preserve-ra"
+    harness_target: >
+      Document SUCCESS = cookie in trapdump or tohost; optional TB probe;
+      must not ship in production ROM.
+    retire_when: documented in verif + soak scripts only
+
+  - id: b3-trapdump-cave
+    bucket: B3
+    priority: 2
+    status: open
+    ladder: cont.21
+    soft_form: "mtvec trap cave t1=0x80001000 dump"
+    harness_target: "CVA6_TRAP_DUMP / debug build only"
+    retire_when: debug-only path documented
+
+  - id: b3-lottery-hart0
+    bucket: B3
+    priority: 3
+    status: open
+    ladder: cont.16+
+    soft_form: "752 → 7a2 lottery; hart0 wins"
+    harness_target: "sim multi-hart coldboot force or platform single-hart"
+    retire_when: multi-hart lottery natural or sim-only platform flag
+
+  - id: b3-mk-plat-skip-oracle
+    bucket: B3
+    priority: 1
+    status: in_progress
+    ladder: cont.33-51
+    soft_form: "entire mk_plat_skip.py production ELF builder"
+    harness_target: >
+      Keep as optional oracle until B1+B2 land; shrink site-by-site;
+      no new hard-coded VAs without inventory id.
+    retire_when: DI OpenSBI green without mk_plat_skip

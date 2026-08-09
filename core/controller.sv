@@ -116,6 +116,9 @@ module controller
     // load-misalign/illegal); with reseed via is_mispredict, TAGE RAS restore
     // → IAF mepc=0x1400000000; reseed without TAGE double-pushes RAS → PC=0x4.
     // Hang-6 residual fallthrough needs a selective IQ kill (not global flush).
+    // Note (R3a): do NOT flush_ex here — that would drop older still-speculative
+    // correct-path stores from the STQ. Younger-cancel must not mark STORE
+    // cancelled (scoreboard); STQ flush remains full-flush only (fence/exception).
     if (resolved_branch_i.is_mispredict) begin
       // flush only un-issued instructions
       flush_unissued_instr_o = 1'b1;

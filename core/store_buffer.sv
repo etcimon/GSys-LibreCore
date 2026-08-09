@@ -31,8 +31,19 @@ module store_buffer
     output logic         no_st_pending_o, // non-speculative queue is empty (e.g.: everything is committed to the memory hierarchy)
     output logic         store_buffer_empty_o, // there is no store pending in neither the speculative unit or the non-speculative queue
 
-    input  logic [11:0]  page_offset_i,         // check for the page offset (the last 12 bit if the current load matches them)
-    output logic         page_offset_matches_o, // the above input page offset matches -> let the store buffer drain
+    input  logic [11:0]  page_offset_i,         // load VA/PA[11:0] (always available)
+    // R3a: full load paddr when DTLB has translated; required for exact STQ match.
+    input  logic [CVA6Cfg.PLEN-1:0] load_paddr_i,
+    input  logic                    load_paddr_valid_i,
+    // R3a cont.13: D$ write buffer empty — sticky [11:0] match must outlive
+    // STQ→wbuffer handoff so post-return loads of *nextoffset see the store.
+    input  logic                    dcache_wbuffer_empty_i,
+    output logic         page_offset_matches_o, // hazard: stall load until STQ drains / forward
+    // R3a: store→load data forward (byte-merge, oldest→youngest). When a load's
+    // BE is fully covered, the load unit may complete without a D$ request.
+    output logic                              st_fwd_valid_o,
+    output logic [CVA6Cfg.XLEN-1:0]           st_fwd_data_o,
+    output logic [(CVA6Cfg.XLEN/8)-1:0]       st_fwd_be_o,
 
     input logic commit_i,  // commit the instruction which was placed there most recently
     output logic commit_ready_o,  // commit queue is ready to accept another commit request
@@ -318,28 +329,151 @@ module store_buffer
   //
   // checks if the requested load is in the store buffer
   // page offsets are virtually and physically the same
+  //
+  // R3a: also hold a 1-cycle sticky match after the STQ entry leaves so the
+  // load unit does not race the commit-queue → D$ wbuffer handoff. Without
+  // this, WAIT_PAGE_OFFSET can release the cycle the store is granted into
+  // the wbuffer and the load can sample stale D$ data (libfdt *nextoffset
+  // stays 0 → OpenSBI FDT walk stuck). D$ wbuffer already forwards on hit;
+  // the sticky covers the grant/accept bubble.
+  // R3a: hazard detect uses full paddr when available (DTLB hit). [11:0]-only
+  // matching false-aliased stack SW vs FDT structure loads across pages and
+  // either stalled forever or STQ-forwarded the wrong bytes (*nextoff=-11).
+  logic page_offset_matches_now;
+  logic [CVA6Cfg.PLEN-1:0] page_offset_sticky_pa_q;
+  logic                    page_offset_sticky_v_q;
+  logic                    page_offset_sticky_po_v_q;  // [11:0]-only sticky
+  logic [11:0]             page_offset_sticky_po_q;
+
+  // Exact paddr equality helper
+  function automatic logic pa_eq(input logic [CVA6Cfg.PLEN-1:0] a,
+                                 input logic [CVA6Cfg.PLEN-1:0] b);
+    return a == b;
+  endfunction
+
   always_comb begin : address_checker
-    page_offset_matches_o = 1'b0;
+    // R3a: **stall** on [11:0] always (classic Ariane — never miss stack RAW).
+    // load_paddr is vaddr (see load_unit); full-PA-only stall missed stack RAW
+    // when store queue holds paddr form. Forward remains full-PA only.
+    // cont.11 false-alias FDT vs stack is still open (next_tag tag=9).
+    page_offset_matches_now = 1'b0;
 
-    // check if the LSBs are identical and the entry is valid
     for (int unsigned i = 0; i < DEPTH_COMMIT; i++) begin
-      // Check if the page offset matches and whether the entry is valid, for the commit queue
-      if ((page_offset_i[11:3] == commit_queue_q[i].address[11:3]) && commit_queue_q[i].valid) begin
-        page_offset_matches_o = 1'b1;
+      if (commit_queue_q[i].valid &&
+          (commit_queue_q[i].address[11:0] == page_offset_i)) begin
+        page_offset_matches_now = 1'b1;
         break;
+      end
+    end
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+      if (speculative_queue_q[i].valid &&
+          (speculative_queue_q[i].address[11:0] == page_offset_i)) begin
+        page_offset_matches_now = 1'b1;
+        break;
+      end
+    end
+    if (valid_without_flush_i && (paddr_i[11:0] == page_offset_i)) begin
+      page_offset_matches_now = 1'b1;
+    end
+
+    page_offset_matches_o = page_offset_matches_now ||
+        (page_offset_sticky_po_v_q && (page_offset_sticky_po_q == page_offset_i)) ||
+        (page_offset_sticky_v_q && load_paddr_valid_i &&
+         pa_eq(page_offset_sticky_pa_q, load_paddr_i));
+  end
+
+  // Forward only on full paddr match (never on [11:0] alone).
+  always_comb begin : st_fwd_merge
+    automatic logic [CVA6Cfg.XLEN-1:0]     data_m;
+    automatic logic [(CVA6Cfg.XLEN/8)-1:0] be_m;
+    automatic logic [$clog2(DEPTH_COMMIT)-1:0] cidx;
+    automatic logic [$clog2(DEPTH_SPEC)-1:0]   sidx;
+    data_m = '0;
+    be_m   = '0;
+
+    if (load_paddr_valid_i) begin
+      for (int unsigned k = 0; k < DEPTH_COMMIT; k++) begin
+        cidx = commit_read_pointer_q + $clog2(DEPTH_COMMIT)'(k);
+        if (commit_queue_q[cidx].valid &&
+            pa_eq(commit_queue_q[cidx].address, load_paddr_i)) begin
+          for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+            if (commit_queue_q[cidx].be[b]) begin
+              data_m[8*b+:8] = commit_queue_q[cidx].data[8*b+:8];
+              be_m[b]        = 1'b1;
+            end
+          end
+        end
+      end
+      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+        sidx = speculative_read_pointer_q + $clog2(DEPTH_SPEC)'(k);
+        if (speculative_queue_q[sidx].valid &&
+            pa_eq(speculative_queue_q[sidx].address, load_paddr_i)) begin
+          for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+            if (speculative_queue_q[sidx].be[b]) begin
+              data_m[8*b+:8] = speculative_queue_q[sidx].data[8*b+:8];
+              be_m[b]        = 1'b1;
+            end
+          end
+        end
+      end
+      if (valid_without_flush_i && pa_eq(paddr_i, load_paddr_i)) begin
+        for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+          if (be_i[b]) begin
+            data_m[8*b+:8] = data_i[8*b+:8];
+            be_m[b]        = 1'b1;
+          end
+        end
       end
     end
 
-    for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
-      // do the same for the speculative queue
-      if ((page_offset_i[11:3] == speculative_queue_q[i].address[11:3]) && speculative_queue_q[i].valid) begin
-        page_offset_matches_o = 1'b1;
-        break;
+    st_fwd_data_o  = data_m;
+    st_fwd_be_o    = be_m;
+    // R3a cont.13: keep STQ forward on; nofwd + store-side sticky still −4,
+    // so residual is not STQ→wbuffer *nextoffset alone.
+    st_fwd_valid_o = |be_m;
+  end
+
+  // R3a cont.13: **store-side** sticky on STQ→D$ grant.
+  // Load-side sticky only armed when a load was checking during STQ occupancy;
+  // the caller's post-return load of libfdt *nextoffset often issues after the
+  // store left the STQ, so match_now was never seen and sticky never set.
+  // Capture the store address when it is granted into the D$ wbuffer and hold
+  // until wbuffer_empty so load_unit condition (2) covers the handoff.
+  logic st_to_wbuf_grant;
+  assign st_to_wbuf_grant =
+      commit_queue_q[commit_read_pointer_q].valid && !stall_st_pending_i &&
+      !commit_queue_q[commit_read_pointer_q].wait_rvalid && req_port_i.data_gnt &&
+      (commit_queue_q[commit_read_pointer_q].cbo_op == ariane_pkg::CBO_NONE ||
+       req_port_i.data_rvalid);
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_page_offset_sticky
+    if (~rst_ni) begin
+      page_offset_sticky_v_q    <= 1'b0;
+      page_offset_sticky_pa_q   <= '0;
+      page_offset_sticky_po_v_q <= 1'b0;
+      page_offset_sticky_po_q   <= '0;
+    end else if (flush_i) begin
+      page_offset_sticky_v_q    <= 1'b0;
+      page_offset_sticky_po_v_q <= 1'b0;
+    end else if (st_to_wbuf_grant) begin
+      // Store accepted into D$ hierarchy — remember its [11:0]/full PA
+      page_offset_sticky_po_v_q <= 1'b1;
+      page_offset_sticky_po_q   <= commit_queue_q[commit_read_pointer_q].address[11:0];
+      page_offset_sticky_v_q    <= 1'b1;
+      page_offset_sticky_pa_q   <= commit_queue_q[commit_read_pointer_q].address;
+    end else if (page_offset_matches_now) begin
+      // Also arm while load is matching STQ (covers same-cycle forward path)
+      page_offset_sticky_po_v_q <= 1'b1;
+      page_offset_sticky_po_q   <= page_offset_i;
+      if (load_paddr_valid_i) begin
+        page_offset_sticky_v_q  <= 1'b1;
+        page_offset_sticky_pa_q <= load_paddr_i;
       end
-    end
-    // or it matches with the entry we are currently putting into the queue
-    if ((page_offset_i[11:3] == paddr_i[11:3]) && valid_without_flush_i) begin
-      page_offset_matches_o = 1'b1;
+    end else if (page_offset_sticky_po_v_q && !dcache_wbuffer_empty_i) begin
+      // Keep sticky until D$ wbuffer drains
+    end else begin
+      page_offset_sticky_v_q    <= 1'b0;
+      page_offset_sticky_po_v_q <= 1'b0;
     end
   end
 

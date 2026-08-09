@@ -75,13 +75,15 @@ package build_config_pkg;
     end else begin
       cfg.NrCommitPorts = CVA6Cfg.NrCommitPorts;
     end
-    // Speculative SB: superscalar may issue non-CF ops past unresolved branches.
-    // Younger cancel sets cancelled+valid for commit_drop; commit frees without
-    // LSU/AMO side-effects (fixes SS size-0 memcpy hang on mispredict).
-    // Hang-6 bisect: SpeculativeSb=0 under dual still failed /cpus BADOFFSET —
-    // not the root cause. Keep production coupling.
-    cfg.SpeculativeSb = CVA6Cfg.SuperscalarEn || CVA6Cfg.SliceOoOEn || CVA6Cfg.OoOEn ||
-                        CVA6Cfg.DeepSpecEn;
+    // Speculative SB: younger cancel + speculative-load LSU gates.
+    // cont.14: do NOT couple SpeculativeSb to SuperscalarEn alone.
+    // True SI (SS=0 ⇒ SpeculativeSb was 0) advances OpenSBI past path_offset;
+    // DI+force-SI with SpeculativeSb=1 still returned -4. Speculative LSU
+    // gating (is_speculative_load / STQ interlocks) is the residual. Keep
+    // SpeculativeSb for OoO/DeepSpec only until the FDT walk is clean under SS.
+    // Hang-6 note: SpeculativeSb alone was not the *only* BADOFFSET cause then;
+    // cont.14 shows it is necessary for stock /cpus with current STQ RTL.
+    cfg.SpeculativeSb = CVA6Cfg.SliceOoOEn || CVA6Cfg.OoOEn || CVA6Cfg.DeepSpecEn;
     cfg.DeepSpecEn = CVA6Cfg.DeepSpecEn;
 
     // Dual ALU minimum under SS; scale toward issue width (cap 4 for area).

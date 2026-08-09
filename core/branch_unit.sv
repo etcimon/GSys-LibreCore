@@ -71,6 +71,8 @@ module branch_unit #(
     resolved_branch_o.hart_id = hart_id_i;
     // Default: restore BP ckpt on any mispredict (Return verify overrides below)
     resolved_branch_o.ckpt_restore = 1'b0;
+    // R3a: carry branch SB tid for younger-cancel (not FLU_WB mux tid)
+    resolved_branch_o.trans_id = fu_data_i.trans_id;
     // calculate next PC, depending on whether the instruction is compressed or not this may be different
     // TODO(zarubaf): We already calculate this a couple of times, maybe re-use?
     next_pc                          = pc_i + ((is_compressed_instr_i) ? {{CVA6Cfg.VLEN-2{1'b0}}, 2'h2} : {{CVA6Cfg.VLEN-3{1'b0}}, 3'h4});

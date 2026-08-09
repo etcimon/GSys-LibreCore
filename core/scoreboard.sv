@@ -255,11 +255,17 @@ module scoreboard #(
         // NrHarts==1 → hart_id always 0 → identity (cancel all younger).
         if (CVA6Cfg.NrHarts <= 1 ||
             mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
-          mem_n[cid].cancelled = 1'b1;
+          // R3a cont.5: do not younger-cancel LOAD. Cancelled ld s4 in
+          // fdt_getprop left RF as a3 (lenp=s0-108) → misalign at
+          // fw_platform_init ld a5,0(s4). Correct-path epilogue LDs must
+          // commit. Wrong-path loads: CF stall + flush_if limit issue;
+          // residual wrong-path RF write is preferred over silent drop of
+          // callee-saved restores. STORE still cancels (STQ).
           // Mark complete so commit can drop without waiting for WB.
-          // Incomplete cancelled loads (valid==0) previously stuck commit
-          // forever under dual-issue SpeculativeSb (size-0 memcpy hang).
-          mem_n[cid].sbe.valid = 1'b1;
+          if (mem_q[cid].sbe.fu != ariane_pkg::LOAD) begin
+            mem_n[cid].cancelled = 1'b1;
+            mem_n[cid].sbe.valid = 1'b1;
+          end
         end
         cid = cid + 1'b1;
       end
@@ -296,7 +302,10 @@ module scoreboard #(
   // NPC reseed kills correct target-path ops; with reseed it double-pushes
   // RAS on re-fetched calls. Hang-6 residual needs selective fallthrough kill.
   assign bmiss = resolved_branch_i.valid && resolved_branch_i.is_mispredict;
-  assign after_flu_wb = trans_id_i[ariane_pkg::FLU_WB] + 'd1;
+  // R3a: cancel window starts after the *branch* tid, not FLU_WB. FLU_WB can
+  // be a same-cycle mult/ALU result (ex_stage flu mux) while the branch still
+  // resolves — using FLU_WB+1 then cancels older correct-path ops (frame SDs).
+  assign after_flu_wb = resolved_branch_i.trans_id + 'd1;
   // Younger cancel on mispredict (U5.0 / FSE / hang-7 classic path) — PMU g3
   assign spec_cancel_o = bmiss;
 
@@ -315,7 +324,10 @@ module scoreboard #(
         if (cid == issue_pointer[0]) break;
         if (CVA6Cfg.NrHarts <= 1 ||
             mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
-          cancelled_mask_o[cid] = 1'b1;
+          // Same-cycle cancel window: skip LOAD (see sequential cancel).
+          if (mem_q[cid].sbe.fu != ariane_pkg::LOAD) begin
+            cancelled_mask_o[cid] = 1'b1;
+          end
         end
         cid = cid + 1'b1;
       end

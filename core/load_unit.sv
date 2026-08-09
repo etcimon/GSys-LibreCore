@@ -71,10 +71,17 @@ module load_unit
     input logic [CVA6Cfg.PPNW-1:0] dtlb_ppn_i,
     // Page offset for address checking - STORE_UNIT
     output logic [11:0] page_offset_o,
+    // R3a: full load paddr when DTLB hit - STORE_UNIT / STQ match
+    output logic [CVA6Cfg.PLEN-1:0] load_paddr_o,
+    output logic                    load_paddr_valid_o,
     // Indicates if the page offset matches a store unit entry - STORE_UNIT
     input logic page_offset_matches_i,
     // Store buffer is empty - STORE_UNIT
     input logic store_buffer_empty_i,
+    // R3a: STQ store→load data forward - STORE_UNIT
+    input logic                        st_fwd_valid_i,
+    input logic [CVA6Cfg.XLEN-1:0]     st_fwd_data_i,
+    input logic [(CVA6Cfg.XLEN/8)-1:0] st_fwd_be_i,
     // Transaction ID of the committing instruction - COMMIT_STAGE
     input logic [CVA6Cfg.TRANS_ID_BITS-1:0] commit_tran_id_i,
     // Data cache request out - CACHES
@@ -82,7 +89,9 @@ module load_unit
     // Data cache request in - CACHES
     output dcache_req_i_t req_port_o,
     // Presence of non-idempotent operations in the D$ write buffer - CACHES
-    input logic dcache_wbuffer_not_ni_i
+    input logic dcache_wbuffer_not_ni_i,
+    // R3a cont.10: D$ write buffer empty (all committed stores visible in D$)
+    input logic dcache_wbuffer_empty_i
 );
   enum logic [3:0] {
     IDLE,
@@ -208,6 +217,12 @@ module load_unit
 
   // page offset is defined as the lower 12 bits, feed through for address checker
   assign page_offset_o = lsu_ctrl_i.vaddr[11:0];
+  // R3a: use load **vaddr** as STQ key (always). Shared MMU dtlb_ppn/paddr is
+  // also used by the store path — sampling ppn while a store translates desyncs
+  // the key and misses stack RAW (next_tag ld s2 → 0 → by_offset sw 0(s2)
+  // store-access-fault mcause=6 @ 0x80012e9c). Bare OpenSBI: VA==PA for DRAM.
+  assign load_paddr_valid_o = 1'b1;
+  assign load_paddr_o = CVA6Cfg.PLEN'(lsu_ctrl_i.vaddr);
   // feed-through the virtual address for VA translation
   assign vaddr_o = lsu_ctrl_i.vaddr;
   assign hs_ld_st_inst_o = CVA6Cfg.RVH ? lsu_ctrl_i.hs_ld_st_inst : 1'b0;
@@ -256,6 +271,26 @@ module load_unit
   assign inflight_stores = (!dcache_wbuffer_not_ni_i || !store_buffer_empty_i);
   assign stall_ni = (inflight_stores || not_commit_time) && (paddr_ni && CVA6Cfg.NonIdemPotenceEn);
 
+  // R3a: STQ data forward covers this load's bytes (lsu_ctrl.be already sized/aligned)
+  logic st_fwd_covers;
+  assign st_fwd_covers = st_fwd_valid_i && (|lsu_ctrl_i.be) &&
+                         ((st_fwd_be_i & lsu_ctrl_i.be) == lsu_ctrl_i.be);
+
+  // R3a cont.14: cont.4/10 STQ-empty-for-all-loads under SpeculativeSb made
+  // DI force-SI path_offset return -4, while true SI (SpeculativeSb=0, no
+  // st_pipeline_busy) advances past /cpus into sbi_trap_handler. Revert to
+  // classic Ariane page-offset interlock only (+ store-side sticky so post-
+  // grant loads still wait for wbuffer). Forward covers stack RAW when live.
+  // Revisit STQ-empty-all only if s2/s4 dual-issue residuals return after
+  // peeling force-SI.
+  logic st_pipeline_busy;
+  assign st_pipeline_busy = CVA6Cfg.SpeculativeSb && CVA6Cfg.SuperscalarEn &&
+                            page_offset_matches_i && !st_fwd_covers &&
+                            (!store_buffer_empty_i || !dcache_wbuffer_empty_i);
+
+  // Pulse: load completed from STQ forward this cycle (no D$ request)
+  logic st_fwd_done;
+
   // ---------------
   // Load Control
   // ---------------
@@ -272,6 +307,7 @@ module load_unit
     req_port_o.data_be   = lsu_ctrl_i.be;
     req_port_o.data_size = extract_transfer_size(lsu_ctrl_i.operation);
     pop_ld_o             = 1'b0;
+    st_fwd_done          = 1'b0;
 
     // In IDLE and SEND_TAG states, this unit can accept a new load request
     // when the load buffer is not full or if there is a response and the
@@ -286,8 +322,17 @@ module load_unit
           translation_req_o = (!CVA6Cfg.SpeculativeSb || dtlb_hit_i || !lsu_ctrl_i.is_speculative_load);
           // check if load is speculative and non idempotent, if it is then stall and wait for branch result
           if (!CVA6Cfg.SpeculativeSb || !lsu_ctrl_i.is_speculative_load || (dtlb_hit_i && !paddr_ni)) begin
-            // check if the page offset matches with a store, if it does then stall and wait
-            if (!page_offset_matches_i) begin
+            // R3a: if STQ can fully satisfy this load, complete from forward
+            // (no D$ request). Closes stack *nextoffset RAW without waiting for
+            // STQ drain + wbuffer. Partial coverage still waits in WAIT_PAGE_OFFSET.
+            // R3a cont.4/5: wait until STQ + D$ wbuffer empty (unless forward).
+            if (st_pipeline_busy) begin
+              state_d = WAIT_PAGE_OFFSET;
+            end else if (page_offset_matches_i && st_fwd_covers && !req_port_i.data_rvalid) begin
+              state_d     = IDLE;
+              pop_ld_o    = 1'b1;
+              st_fwd_done = 1'b1;
+            end else if (!page_offset_matches_i) begin
               // make a load request to memory
               req_port_o.data_req = 1'b1;
               // we got no data grant so wait for the grant before sending the tag
@@ -309,6 +354,7 @@ module load_unit
               end
             end else begin
               // wait for the store buffer to train and the page offset to not match anymore
+              // (or until STQ forward fully covers)
               state_d = WAIT_PAGE_OFFSET;
             end
           end else begin
@@ -320,8 +366,16 @@ module load_unit
 
       // wait here for the page offset to not match anymore
       WAIT_PAGE_OFFSET: begin
-        // we make a new request as soon as the page offset does not match anymore
-        if (!page_offset_matches_i) begin
+        // R3a: complete from STQ forward when bytes are fully covered
+        if (st_fwd_covers && !req_port_i.data_rvalid) begin
+          state_d     = IDLE;
+          pop_ld_o    = 1'b1;
+          st_fwd_done = 1'b1;
+        end else if (st_pipeline_busy) begin
+          // hold until STQ + D$ wbuffer drain
+          state_d = WAIT_PAGE_OFFSET;
+        end else begin
+          // No in-flight stores (or sticky match only): re-issue to D$
           state_d = WAIT_GNT;
         end
       end
@@ -376,7 +430,14 @@ module load_unit
           // check if load is speculative and non idempotent, if it is then stall and wait for branch result
           if (!CVA6Cfg.SpeculativeSb || !lsu_ctrl_i.is_speculative_load || (dtlb_hit_i && !paddr_ni)) begin
             // check if the page offset matches with a store, if it does stall and wait
-            if (!page_offset_matches_i) begin
+            // R3a: STQ forward path (mirror IDLE)
+            if (st_pipeline_busy) begin
+              state_d = WAIT_PAGE_OFFSET;
+            end else if (page_offset_matches_i && st_fwd_covers && !req_port_i.data_rvalid) begin
+              state_d     = IDLE;
+              pop_ld_o    = 1'b1;
+              st_fwd_done = 1'b1;
+            end else if (!page_offset_matches_i) begin
               // make a load request to memory
               req_port_o.data_req = 1'b1;
               // we got no data grant so wait for the grant before sending the tag
@@ -512,6 +573,13 @@ module load_unit
       valid_o = 1'b1;
       ex_o.valid = 1'b0;
     end
+
+    // R3a: STQ store→load forward completion (no D$ rvalid / ldbuf slot)
+    if (st_fwd_done) begin
+      trans_id_o = lsu_ctrl_i.trans_id;
+      valid_o    = 1'b1;
+      ex_o.valid = 1'b0;
+    end
   end
 
 
@@ -528,10 +596,20 @@ module load_unit
   // Sign Extend
   // ---------------
   logic [CVA6Cfg.XLEN-1:0] shifted_data;
+  // R3a: mux D$ rdata vs STQ forward; operation/offset from active source
+  logic [CVA6Cfg.XLEN-1:0]                 load_rdata;
+  logic [CVA6Cfg.XLEN_ALIGN_BYTES-1:0]     load_addr_offset;
+  fu_op                                    load_operation;
+
+  assign load_rdata = st_fwd_done ? st_fwd_data_i : req_port_i.data_rdata;
+  assign load_addr_offset = st_fwd_done
+                              ? lsu_ctrl_i.vaddr[CVA6Cfg.XLEN_ALIGN_BYTES-1:0]
+                              : ldbuf_rdata.address_offset;
+  assign load_operation = st_fwd_done ? lsu_ctrl_i.operation : ldbuf_rdata.operation;
 
   // realign as needed
-  // ldbuf_rdata.address_offset is just the last three bits of the load address which select the byte address within the word
-  assign shifted_data = req_port_i.data_rdata >> {ldbuf_rdata.address_offset, 3'b000};
+  // address_offset is just the last three bits of the load address which select the byte address within the word
+  assign shifted_data = load_rdata >> {load_addr_offset, 3'b000};
 
   // The code here is legacy - from the days before CVA6 was Big Endian Capable :)
   /*// result mux (leaner code, but more logic stages.
@@ -573,7 +651,7 @@ module load_unit
   always_comb begin
     endian_data = shifted_data;
     if (mbe_i) begin
-      case (ldbuf_rdata.operation)
+      case (load_operation)
         LB, LBU, HLV_B, HLV_BU, FLB: begin
           // If we are just loading a byte, then this needs not be touched
           endian_data[7:0] = {shifted_data[7:0]};
@@ -599,15 +677,15 @@ module load_unit
 
 
   // prepare these signals for faster selection in the next cycle
-  assign rdata_is_signed    =   ldbuf_rdata.operation inside {ariane_pkg::LW,  ariane_pkg::LH,  ariane_pkg::LB, ariane_pkg::HLV_W, ariane_pkg::HLV_H, ariane_pkg::HLV_B};
-  assign rdata_is_fp_signed =   ldbuf_rdata.operation inside {ariane_pkg::FLW, ariane_pkg::FLH, ariane_pkg::FLB};
+  assign rdata_is_signed    =   load_operation inside {ariane_pkg::LW,  ariane_pkg::LH,  ariane_pkg::LB, ariane_pkg::HLV_W, ariane_pkg::HLV_H, ariane_pkg::HLV_B};
+  assign rdata_is_fp_signed =   load_operation inside {ariane_pkg::FLW, ariane_pkg::FLH, ariane_pkg::FLB};
   // If we are in Big Endian Mode, we don't need to add anything to the address offset to find the byte that contains the sign bit, as it is always the lowest addressed byte that has the sign bit.
-  assign rdata_offset       = ((ldbuf_rdata.operation inside {ariane_pkg::LW,  ariane_pkg::FLW, ariane_pkg::HLV_W}) && CVA6Cfg.IS_XLEN64 && (~mbe_i)) ? ldbuf_rdata.address_offset + 3 :
-                                ( ldbuf_rdata.operation inside {ariane_pkg::LH,  ariane_pkg::FLH, ariane_pkg::HLV_H} && (~mbe_i))                     ? ldbuf_rdata.address_offset + 1 :
-                                                                                                                         ldbuf_rdata.address_offset;
+  assign rdata_offset       = ((load_operation inside {ariane_pkg::LW,  ariane_pkg::FLW, ariane_pkg::HLV_W}) && CVA6Cfg.IS_XLEN64 && (~mbe_i)) ? load_addr_offset + 3 :
+                                ( load_operation inside {ariane_pkg::LH,  ariane_pkg::FLH, ariane_pkg::HLV_H} && (~mbe_i))                     ? load_addr_offset + 1 :
+                                                                                                                         load_addr_offset;
 
   for (genvar i = 0; i < (CVA6Cfg.XLEN / 8); i++) begin : gen_sign_bits
-    assign rdata_sign_bits[i] = req_port_i.data_rdata[(i+1)*8-1];
+    assign rdata_sign_bits[i] = load_rdata[(i+1)*8-1];
   end
 
 
@@ -617,7 +695,7 @@ module load_unit
 
   // result mux
   always_comb begin
-    unique case (ldbuf_rdata.operation)
+    unique case (load_operation)
       ariane_pkg::LW, ariane_pkg::LWU, ariane_pkg::HLV_W, ariane_pkg::HLV_WU, ariane_pkg::HLVX_WU:
       result_o = {{CVA6Cfg.XLEN - 32{rdata_sign_bit}}, endian_data[31:0]};
       ariane_pkg::LH, ariane_pkg::LHU, ariane_pkg::HLV_H, ariane_pkg::HLV_HU, ariane_pkg::HLVX_HU:
@@ -627,7 +705,7 @@ module load_unit
       default: begin
         // FLW, FLH and FLB have been defined here in default case to improve Code Coverage
         if (CVA6Cfg.FpPresent) begin
-          unique case (ldbuf_rdata.operation)
+          unique case (load_operation)
             ariane_pkg::FLW: begin
               result_o = {{CVA6Cfg.XLEN - 32{rdata_sign_bit}}, endian_data[31:0]};
             end

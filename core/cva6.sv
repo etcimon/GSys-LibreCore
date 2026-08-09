@@ -152,6 +152,9 @@ module cva6
       logic [HART_ID_BITS-1:0] hart_id;         // FSE S5: resolving branch's SMT hart (0 if NrHarts==1)
       // Hang-7: restore GHR/RAS ckpt only on real wrong-path (not Return verify bubble)
       logic                    ckpt_restore;
+      // R3a: resolving branch's SB trans_id (cancel younger must not use FLU_WB
+      // when mult/ALU shares the FLU port the same cycle as branch resolve).
+      logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;
     },
 
     // All information needed to determine whether we need to associate an interrupt

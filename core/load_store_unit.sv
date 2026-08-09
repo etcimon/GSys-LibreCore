@@ -242,6 +242,11 @@ module load_store_unit
 
   logic [                     11:0] page_offset;
   logic                             page_offset_matches;
+  logic [         CVA6Cfg.PLEN-1:0] load_paddr;
+  logic                             load_paddr_valid;
+  logic                             st_fwd_valid;
+  logic [         CVA6Cfg.XLEN-1:0] st_fwd_data;
+  logic [     (CVA6Cfg.XLEN/8)-1:0] st_fwd_be;
 
   exception_t misaligned_exception, cva6_misaligned_exception, acc_misaligned_exception;
   exception_t ld_ex;
@@ -555,7 +560,13 @@ module load_store_unit
       .dtlb_hit_i           (cva6_dtlb_hit),
       // Load Unit
       .page_offset_i        (page_offset),
+      .load_paddr_i         (load_paddr),
+      .load_paddr_valid_i   (load_paddr_valid),
+      .dcache_wbuffer_empty_i,
       .page_offset_matches_o(page_offset_matches),
+      .st_fwd_valid_o       (st_fwd_valid),
+      .st_fwd_data_o        (st_fwd_data),
+      .st_fwd_be_o          (st_fwd_be),
       // AMOs
       .amo_req_o,
       .amo_resp_i,
@@ -599,13 +610,19 @@ module load_store_unit
       .dtlb_ppn_i           (cva6_dtlb_ppn),
       // to store unit
       .page_offset_o        (page_offset),
+      .load_paddr_o         (load_paddr),
+      .load_paddr_valid_o   (load_paddr_valid),
       .page_offset_matches_i(page_offset_matches),
       .store_buffer_empty_i (store_buffer_empty),
+      .st_fwd_valid_i       (st_fwd_valid),
+      .st_fwd_data_i        (st_fwd_data),
+      .st_fwd_be_i          (st_fwd_be),
       .commit_tran_id_i,
       // to memory arbiter
       .req_port_i           (dcache_req_ports_i[1]),
       .req_port_o           (dcache_req_ports_o[1]),
-      .dcache_wbuffer_not_ni_i
+      .dcache_wbuffer_not_ni_i,
+      .dcache_wbuffer_empty_i
   );
 
   // ----------------------------

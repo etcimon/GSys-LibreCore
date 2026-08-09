@@ -54,6 +54,23 @@ core/include/g6lc64_smt2_config_pkg.sv   # NrHarts=2, SMT_HYBRID, L2
 
 Bring-up: `smt2-bringup.md`. OpenSBI: `software/smt2-linux/README.md`.
 
+### Soft-ladder promotion (DI OpenSBI → codebase)
+
+Binary peels in `tmp-dual-ci/mk_plat_skip.py` are an **oracle**, not the long-term
+contract. Promote via three buckets and a closed iteration loop:
+
+| Path | Role |
+|------|------|
+| `soft-ladder/README.md` | Buckets B1/B2/B3, promotion order, safety rails |
+| `soft-ladder/inventory.yaml` | Soft-site registry (status, loci, retire criteria) |
+| `soft-ladder/ITERATION.md` | Active iteration + backlog |
+| `soft-ladder/b1-rtl-residuals.md` | Core DI residuals (AMO, LR/SC, CSR, FDT, c.mv) |
+| `soft-ladder/b2-firmware-policy.md` | OpenSBI/platform source profile sketch |
+| `soft-ladder/b3-sim-harness.md` | Cookies / TB / SUCCESS definition |
+| `soft-ladder/monorepo-soak-integration.md` | monorepo-soak patches × cont.## × RTL sync |
+
+**Order:** B1 RTL first → B3 harness SUCCESS → B2 firmware profile → retire binary patcher.
+
 ## Invariants
 Per-hart precise traps and isolation; RVWMO per and across harts; no starvation (enforced by `SmtStarveLimit` under hybrid).
 

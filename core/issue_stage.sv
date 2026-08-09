@@ -351,33 +351,74 @@ module issue_stage
     assign ooo_lsq_stall_o    = 1'b0;
     assign ooo_stl_forward_o  = 1'b0;
 
-    // Hang-7: without SpeculativeSb, do not issue past an unresolved CTRL_FLOW.
-    // ret_ex probe: RAS-miss Return mispredicts (tgt=ra, pred=0) but post-ret
-    // jal@alias still reaches EX 5 cycles later — fallthrough was already
-    // issued/queued. Stall issue until the cycle *after* resolve_branch.
-    // (Earlier combo with force-Return-mispredict/flush_id regressed; this
-    // alone restores classic Ariane unresolved-branch discipline.)
-    if (!CVA6Cfg.SpeculativeSb) begin : gen_unresolved_cf_stall
-      logic unresolved_cf_q;
-      logic issue_ctrl_flow;
-      assign issue_ctrl_flow = issue_instr_valid_iro[0] && issue_ack_iro[0] &&
-                               (issue_instr_iro[0].fu == CTRL_FLOW);
-      always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-          unresolved_cf_q <= 1'b0;
-        end else if (resolve_branch_i || flush_i) begin
-          // Clear only on resolve or full SB flush — not flush_unissued alone
-          // (that fires same cycle as resolve and would re-open too early).
-          unresolved_cf_q <= 1'b0;
-        end else if (issue_ctrl_flow) begin
-          unresolved_cf_q <= 1'b1;
+    // Hang-7 / hang-6 residual: do not issue past an unresolved CTRL_FLOW,
+    // even when SpeculativeSb is forced on with SuperscalarEn (build_config_pkg).
+    //
+    // History: stall was gated on !SpeculativeSb so dual-issue (SpeculativeSb=1)
+    // could issue fallthrough past RAS-miss Return / predicted Jump before
+    // resolve — younger cancel recovered some paths but FDT walks still saw
+    // pointer corruption (BADOFFSET / memchr-low). Classic Ariane stalls issue
+    // until resolve; keep SpeculativeSb younger-cancel as a second line of
+    // defense without re-opening the issue window early.
+    //
+    // Clear only on resolve or full SB flush — not flush_unissued alone (that
+    // fires same cycle as resolve and would re-open too early).
+    begin : gen_unresolved_cf_stall
+      // Per-hart unresolved CF (R3a 2026-08-07):
+      // - Arm when **any** issue port accepts CTRL_FLOW for that hart (port-0-only
+      //   missed ALU||JAL on port 1 under dual-issue).
+      // - Gate only instructions of the stalled hart so peer SMT harts keep
+      //   issuing (global all-ports stall hung smt_dual_concurrent).
+      // - Clear on same-hart resolve or full SB flush.
+      // NrHarts==1 → single bit, identical netlist intent to classic stall.
+      localparam int unsigned N_HARTS = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
+      logic [N_HARTS-1:0] unresolved_cf_q, issue_cf_hart;
+      logic [N_HARTS-1:0] resolve_cf_hart;
+
+      // Detect CF accept from SB path (not gated iro) so the cycle that issues
+      // CTRL_FLOW still sees valid_sb && ack before the stall latches.
+      always_comb begin
+        issue_cf_hart = '0;
+        for (int unsigned pi = 0; pi < CVA6Cfg.NrIssuePorts; pi++) begin
+          if (issue_instr_valid_sb[pi] && issue_ack_iro[pi] &&
+              (issue_instr_sb[pi].fu == CTRL_FLOW)) begin
+            // hart_id width is HART_ID_BITS (1 when NrHarts==1)
+            if (!unresolved_cf_q[issue_instr_sb[pi].hart_id]) begin
+              issue_cf_hart[issue_instr_sb[pi].hart_id] = 1'b1;
+            end
+          end
         end
       end
-      for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_gate
-        assign issue_instr_valid_iro[p] = issue_instr_valid_sb[p] && !unresolved_cf_q;
+
+      always_comb begin
+        resolve_cf_hart = '0;
+        // resolve_branch_i is the in-order resolve pulse; hart from EX resolve bus
+        if (resolve_branch_i) begin
+          resolve_cf_hart[resolved_branch_i.hart_id] = 1'b1;
+        end
       end
-    end else begin : gen_no_cf_stall
-      assign issue_instr_valid_iro = issue_instr_valid_sb;
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          unresolved_cf_q <= '0;
+        end else if (flush_i) begin
+          unresolved_cf_q <= '0;
+        end else begin
+          for (int unsigned h = 0; h < N_HARTS; h++) begin
+            // resolve wins same-cycle over re-arm (matches prior else-if order)
+            if (resolve_cf_hart[h]) begin
+              unresolved_cf_q[h] <= 1'b0;
+            end else if (issue_cf_hart[h]) begin
+              unresolved_cf_q[h] <= 1'b1;
+            end
+          end
+        end
+      end
+
+      for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_gate
+        assign issue_instr_valid_iro[p] =
+            issue_instr_valid_sb[p] && !unresolved_cf_q[issue_instr_sb[p].hart_id];
+      end
     end
   end
 

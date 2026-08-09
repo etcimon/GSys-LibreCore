@@ -373,8 +373,16 @@ module issue_read_operands
       end
 
       // Propagate structural hazards port-by-port (in-order multi-issue).
+      //
+      // Soft-ladder / monorepo-soak integration (R3a cont.6/14/15/18, hang-6/7):
+      // Under SuperscalarEn, after CTRL_FLOW / ALU / MULT / FPU / LOAD / STORE
+      // block *all* younger ports. This is intentional dual-issue throttle for
+      // OpenSBI FDT / callee-saved correctness until precise WAW dual-WB is
+      // proven. CSR/CVXIF remain port-0 only. See architecture/multi-threading/
+      // soft-ladder/monorepo-soak-integration.md and inventory b1-fdt-lenp-store.
       for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
         fus_busy[p] = fus_busy[p-1];
+
         // CSR / CVXIF only on port 0
         fus_busy[p].csr   = 1'b1;
         fus_busy[p].cvxif = 1'b1;
@@ -382,11 +390,9 @@ module issue_read_operands
         unique case (issue_instr_i[p-1].fu)
           NONE: fus_busy[p].none = 1'b1;
           CTRL_FLOW: begin
-            if (CVA6Cfg.SpeculativeSb) begin
-              fus_busy[p].alu = 1'b1;
-              fus_busy[p].ctrl_flow = 1'b1;
-              fus_busy[p].csr = 1'b1;
-              fus_busy[p].store = 1'b1;
+            // Full post-CF serialize under SS (jal/ret RA poison under partial).
+            if (CVA6Cfg.SuperscalarEn) begin
+              fus_busy[p] = '1;
             end else if (issue_instr_i[p-1].op == ariane_pkg::ADD) begin
               fus_busy[p].alu = 1'b1;
               fus_busy[p].ctrl_flow = 1'b1;
@@ -396,7 +402,10 @@ module issue_read_operands
             end
           end
           ALU: begin
-            if (use_alu2[p-1] && CVA6Cfg.NrALUs >= 2) begin
+            // One ALU issue/cycle under SS until dual-WB clean on OpenSBI.
+            if (CVA6Cfg.SuperscalarEn) begin
+              fus_busy[p] = '1;
+            end else if (use_alu2[p-1] && CVA6Cfg.NrALUs >= 2) begin
               fus_busy[p].alu2 = 1'b1;
             end else begin
               fus_busy[p].alu = 1'b1;
@@ -405,7 +414,10 @@ module issue_read_operands
             end
           end
           CSR: fus_busy[p] = '1;
-          MULT: fus_busy[p].mult = 1'b1;
+          MULT: begin
+            fus_busy[p].mult = 1'b1;
+            if (CVA6Cfg.SuperscalarEn) fus_busy[p] = '1;
+          end
           FPU, FPU_VEC: begin
             fus_busy[p].fpu = 1'b1;
             fus_busy[p].fpu_vec = 1'b1;
@@ -413,13 +425,18 @@ module issue_read_operands
               fus_busy[p].load  = 1'b1;
               fus_busy[p].store = 1'b1;
             end
+            if (CVA6Cfg.SuperscalarEn) fus_busy[p] = '1;
           end
           LOAD, STORE: begin
+            // Includes AMO (STORE FU). Full LSU serialize under SS.
             fus_busy[p].load  = 1'b1;
             fus_busy[p].store = 1'b1;
             if (issue_instr_i[p-1].op inside {[FLD : FSB]}) begin
               fus_busy[p].fpu = 1'b1;
               fus_busy[p].fpu_vec = 1'b1;
+            end
+            if (CVA6Cfg.SuperscalarEn) begin
+              fus_busy[p] = '1;
             end
           end
           CVXIF: ;

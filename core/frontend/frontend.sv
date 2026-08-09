@@ -271,8 +271,20 @@ module frontend
           // make sure to only alter the RAS if we actually consumed the instruction
           ras_pop = ras_predict.valid & instr_queue_consumed[i];
           ras_push = 1'b0;
-          predict_address = ras_predict.ra;
-          cf_type[i] = ariane_pkg::Return;
+          // Hang-7 residual: if RAS is empty/invalid, do NOT advertise Return
+          // with a garbage target. Leave NoCF so branch_unit always treats the
+          // JALR as mispredicted (cf==NoCF) and redirects to rs1 (ra). Marking
+          // Return with an invalid RAS top previously allowed wrong-path fetch
+          // into fdt_path_offset alias (jal memchr with a0=-4).
+          if (ras_predict.valid) begin
+            predict_address = ras_predict.ra;
+            cf_type[i] = ariane_pkg::Return;
+          end else begin
+            // Sequential NPC only for bookkeeping; NoCF forces EX mispredict→ra.
+            predict_address = addr[i] + (rvc_return[i] ? {{CVA6Cfg.VLEN - 2{1'b0}}, 2'h2}
+                                                       : {{CVA6Cfg.VLEN - 3{1'b0}}, 3'h4});
+            cf_type[i] = ariane_pkg::NoCF;
+          end
         end
         // branch prediction
         4'b1000: begin
@@ -320,7 +332,9 @@ module frontend
   // feed TAGE mispredict_i: reseed re-fetches calls → double RAS push
   // (RASDepth=2) → return to PC=0x4; OR-ing into is_mispredict → IAF
   // mepc=0x1400000000. Hang-6 residual fallthrough is handled elsewhere
-  // (icache clear on bp_valid, CF issue stall, selective IQ kill).
+  // (icache clear on bp_valid, CF issue stall). Post-bp IQ sequential drop
+  // was tried (Jump-only) but regressed bare smt_dual_concurrent — do not rearm
+  // without a concurrent soak.
   assign is_mispredict = resolved_branch_i.valid & resolved_branch_i.is_mispredict;
 
   // Cache interface

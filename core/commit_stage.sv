@@ -224,6 +224,11 @@ module commit_stage
             commit_ack_o[0] = 1'b0;
           end
         end
+        // NOTE: SpeculativeSb + CTRL_FLOW hold-until-no_st_pending was tried (R3a
+        // *nextoffset / ret drain). It stalled every ret until the full commit-queue
+        // + D$ wbuffer path emptied and regressed OpenSBI FDT progress (next_tag
+        // collapsed 8→0, nx_slot→0) while bare concurrent stayed green. Reverted;
+        // residual is store→load visibility / structure loads, not global ret drain.
         // ---------
         // FPU Flags
         // ---------

@@ -137,4 +137,4 @@ R3a Spike is the hard dual-hart firmware gate; R3a RTL remains open after mock_u
 - HYBRID miss-switch thrash fixed via stall_age (see g6lc_thread_select.sv).
 - Remaining: both harts park in OpenSBI _start_hang early on Variane; diagnose coldboot lottery / mhartid mapping / AMO under fine-grain SMT.
 
-**R3a RTL debug (live):** w_platform_init never returns on Variane (trace_hart_0.dasm: enter then _start_hang); preload FDT magic good; dual amoswap bare green.
+**R3a RTL debug (live):** trapdump mepc=`fdt_get_property_by_offset_`/`thead_generic` (mcause 6 or 2); SI diag hart_count stuck 0x80;  w_platform_init never returns on Variane (trace_hart_0.dasm: enter then _start_hang); preload FDT magic good; dual amoswap bare green.

@@ -69,9 +69,14 @@ package cva6_config_pkg;
 
   localparam CVA6ConfigNrLoadPipeRegs = 1;
   localparam CVA6ConfigNrStorePipeRegs = 0;
-  localparam CVA6ConfigNrLoadBufEntries = 2;
+  // Hang-7 bisect (server_math): ldbuf=1 still hung; 8 matches multi-outstanding
+  // FDT walks. smt2 was left at 2 during dual-issue bring-up — raise with RAS.
+  localparam CVA6ConfigNrLoadBufEntries = 8;
 
-  localparam CVA6ConfigRASDepth = 2;
+  // Hang-7: RASDepth=2 is tiny vs OpenSBI FDT call depth. Depth 16 previously
+  // unmasked load-misalign under server_math TAGE+ckpt; smt2 has BPCkptDepth=0
+  // and RAS-miss is now NoCF (frontend) so EX always corrects empty RAS. Use 16.
+  localparam CVA6ConfigRASDepth = 16;
   localparam CVA6ConfigBTBEntries = 32;
   localparam CVA6ConfigBHTEntries = 128;
 

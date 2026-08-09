@@ -79,8 +79,16 @@ module store_unit
     input logic dtlb_hit_i,
     // Address to be checked - load_unit
     input logic [11:0] page_offset_i,
+    input logic [CVA6Cfg.PLEN-1:0] load_paddr_i,
+    input logic                    load_paddr_valid_i,
+    // R3a cont.13: D$ wbuffer empty for STQ page-offset sticky release
+    input logic dcache_wbuffer_empty_i,
     // Address check result - load_unit
     output logic page_offset_matches_o,
+    // R3a: STQ store→load data forward - load_unit
+    output logic                        st_fwd_valid_o,
+    output logic [CVA6Cfg.XLEN-1:0]     st_fwd_data_o,
+    output logic [(CVA6Cfg.XLEN/8)-1:0] st_fwd_be_o,
     // AMO request - CACHES
     output amo_req_t amo_req_o,
     // AMO response - CACHES
@@ -429,7 +437,13 @@ module store_unit
       .no_st_pending_o,
       .store_buffer_empty_o,
       .page_offset_i,
+      .load_paddr_i,
+      .load_paddr_valid_i,
+      .dcache_wbuffer_empty_i,
       .page_offset_matches_o,
+      .st_fwd_valid_o,
+      .st_fwd_data_o,
+      .st_fwd_be_o,
       .commit_i,
       .commit_ready_o,
       .ready_o              (store_buffer_ready),

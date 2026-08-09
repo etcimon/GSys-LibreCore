@@ -456,6 +456,10 @@ done_processing:
       top->rtc_i ^= 1;
     }
     main_time++;
+    // Honor -m / +max-cycles= (parsed above). Without this the TB never times
+    // out on bare-metal/OpenSBI images that lack a tohost handshake.
+    if (main_time >= max_cycles)
+      break;
     if (probe && main_time == 500) {
       std::cerr << std::hex << "[preload] @500"
                 << " MEM[0]=0x" << mem_half(0)
@@ -467,7 +471,8 @@ done_processing:
     // matches retired state. Also filter mentry to alias-shaped calls.
     // Compile-time gated: see CVA6_MC_PC_PROBE_COMPILE at file head.
 #if defined(CVA6_MC_PC_PROBE_COMPILE) && (VERILATOR_VERSION_INTEGER >= 5000000)
-    if (std::getenv("CVA6_MC_PC_PROBE") != nullptr && main_time >= 10000 && main_time <= 400000) {
+    // Window extended: smt2 dual often dies 100k–2M (not only <400k).
+    if (std::getenv("CVA6_MC_PC_PROBE") != nullptr && main_time >= 10000 && main_time <= 2500000) {
       static int path0_logs = 0;
       static int mentry_logs = 0;
       static int alias_logs = 0;
@@ -481,15 +486,17 @@ done_processing:
         if (bit_ev(401 + i)) cpc_ev |= (uint64_t)1 << i;
       }
       auto cack_ev = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__commit_ack;
+      // SMT banked RF: hart0 bank (gen_single_bank removed)
       const auto &rf_ev = top->rootp
-          ->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_single_bank__DOT__i_rf__DOT__mem;
+          ->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem;
       auto ge = [&](int n) -> uint64_t {
         return (uint64_t)rf_ev[2 * n] | ((uint64_t)rf_ev[2 * n + 1] << 32);
       };
       // Only log when something is actually committing
       bool committing = ((unsigned)cack_ev) != 0;
-      // fdt_path_offset_namelen: lbu@0x8001370a, li a1@0x8001370e, bne@0x80013718
-      if (committing && cpc_ev >= 0x8001370aULL && cpc_ev <= 0x80013720ULL && path0_logs < 60) {
+      // fw_payload 2026-08: fdt_path_offset_namelen @0x80013778
+      // lbu path[0]@0x8001379a, li a1@0x8001379e, bne@0x800137a8
+      if (committing && cpc_ev >= 0x8001379aULL && cpc_ev <= 0x800137b0ULL && path0_logs < 80) {
         auto *b = reinterpret_cast<const uint8_t *>(MEM);
         uint64_t s1 = ge(9);
         uint8_t dram_b = (s1 >= 0x80000000ULL && s1 < 0x80200000ULL)
@@ -503,11 +510,11 @@ done_processing:
                   << std::dec << "\n";
         path0_logs++;
       }
-      // Alias memchr entry only (ra will be 0x80013788 after jal; at entry of
-      // memchr ra is already the return). Also late window / small a0.
+      // sbi_memchr @0x80004c4a; alias jal ret = 0x80013818
       uint64_t ra_ev = ge(1), a0_ev = ge(10), a1_ev = ge(11), a2_ev = ge(12);
-      bool alias_shaped = (ra_ev == 0x80013788ULL) || (a0_ev < 0x10000ULL && main_time > 100000);
-      if (committing && cpc_ev >= 0x80004be4ULL && cpc_ev <= 0x80004bf6ULL &&
+      bool alias_shaped = (ra_ev == 0x80013818ULL) || (a0_ev < 0x10000ULL && main_time > 100000) ||
+                          (a0_ev == 0xfffffffffffffffcULL);
+      if (committing && cpc_ev >= 0x80004c4aULL && cpc_ev <= 0x80004c6aULL &&
           (alias_shaped || main_time > 120000) && mentry_logs < 80) {
         std::cerr << std::hex << "[mentryc] @" << main_time << " cpc=0x" << cpc_ev
                   << " a0=0x" << a0_ev << " a1=0x" << a1_ev << " a2=0x" << a2_ev
@@ -518,8 +525,8 @@ done_processing:
       // One-shot when we first see alias memchr active (npc in loop + ra)
       auto npc_ev = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__i_frontend__DOT__npc_q;
       uint64_t np = (uint64_t)npc_ev;
-      if (alias_logs < 5 && ra_ev == 0x80013788ULL &&
-          np >= 0x80004be4ULL && np < 0x80004c1aULL &&
+      if (alias_logs < 5 && ra_ev == 0x80013818ULL &&
+          np >= 0x80004c4aULL && np < 0x80004c80ULL &&
           (a0_ev < 0x10000ULL || a0_ev >= 0xffffffffffffff00ULL)) {
         std::cerr << std::hex << "[alias_hang] @" << main_time << " npc=0x" << np
                   << " cpc=0x" << cpc_ev << " a0=0x" << a0_ev << " a1=0x" << a1_ev
@@ -528,10 +535,10 @@ done_processing:
                   << std::dec << "\n";
         alias_logs++;
       }
-      // Alias setup + post-subnode bltz: 0x8001375e–0x80013790
+      // Alias setup: 0x8001380e ret … 0x80013814 jal memchr; also error ret 0x8001380e
       static int aset_logs = 0;
-      if (committing && cpc_ev >= 0x8001375eULL && cpc_ev <= 0x80013790ULL &&
-          aset_logs < 60) {
+      if (committing && cpc_ev >= 0x800137f0ULL && cpc_ev <= 0x80013830ULL &&
+          aset_logs < 80) {
         std::cerr << std::hex << "[alias_setup] @" << main_time << " cpc=0x" << cpc_ev
                   << " a0=0x" << a0_ev << " a1=0x" << a1_ev << " a2=0x" << a2_ev
                   << " a5=0x" << ge(15) << " s1=0x" << ge(9) << " s3=0x" << ge(19)
@@ -610,9 +617,10 @@ done_processing:
       uint64_t bp_pred = (uint64_t)bpv[0] | (((uint64_t)bpv[1] & 0xffffffffULL) << 32);
       // cf in bits 66:64 → bit 2 of bpv[2]
       unsigned bp_cf = (bpv[2] >> 0) & 0x7u;
+      // path_offset_namelen ret @0x8001380e; alias block @0x80013810+
       bool ret_window =
-          (pc_ex == 0x8001377eULL) || (rb_valid && rb_pc == 0x8001377eULL) ||
-          (pc_ex >= 0x8001376eULL && pc_ex <= 0x80013790ULL && (unsigned)bv_q);
+          (pc_ex == 0x8001380eULL) || (rb_valid && rb_pc == 0x8001380eULL) ||
+          (pc_ex >= 0x800137f8ULL && pc_ex <= 0x80013820ULL && (unsigned)bv_q);
       if (retex_logs < 40 && ret_window &&
           (rb_valid || (unsigned)bv_q) && main_time >= 100000) {
         std::cerr << std::hex << "[ret_ex] @" << main_time
@@ -830,7 +838,7 @@ done_processing:
         // GPR snapshot: RF mem is [32][64] packed → VlWide word n = bit/32.
         // xN lives at bits [64*N +: 64] → words 2*N, 2*N+1 (LE).
         const auto &rf = top->rootp
-            ->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_single_bank__DOT__i_rf__DOT__mem;
+            ->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem;
         auto gpr = [&](int n) -> uint64_t {
           return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
         };
@@ -892,6 +900,168 @@ done_processing:
   if (vcdfile)
     fclose(vcdfile);
 #endif
+
+  // Optional post-run DRAM dump for OpenSBI hang diagnostics (CVA6_TRAP_DUMP=1)
+  if (std::getenv("CVA6_TRAP_DUMP") != nullptr) {
+    auto *bytes = reinterpret_cast<const uint8_t *>(MEM);
+    auto rd64 = [&](size_t off) -> uint64_t {
+      uint64_t v = 0;
+      for (int i = 0; i < 8; i++) v |= (uint64_t)bytes[off + i] << (8 * i);
+      return v;
+    };
+    // R3a phase cookies (0x51b1xxxx) at DRAM+0x1000..; also platform/scratch BSS.
+    std::cerr << std::hex << "[trapdump]";
+    for (int s = 0; s < 16; s++) {
+      uint64_t v = rd64(0x1000 + 8 * s);
+      // only print non-zero / cookie-like slots to keep the line short
+      if (v != 0)
+        std::cerr << " [" << (0x1000 + 8 * s) << "]=" << v;
+    }
+    std::cerr << " plat_hc=" << (rd64(0x40438) & 0xffffffffULL)
+              << " last_hartidx=" << (rd64(0x42064) & 0xffffffffULL)
+              << " coldboot_done=" << rd64(0x42018) << std::dec << "\n";
+    // R3a cont.9: runtime FDT header + root/cpus tags from DRAM model (host view).
+    // Confirms whether path_offset/-4 is software-walk vs corrupted blob.
+    {
+      auto be32 = [&](size_t off) -> uint32_t {
+        return ((uint32_t)bytes[off] << 24) | ((uint32_t)bytes[off + 1] << 16) |
+               ((uint32_t)bytes[off + 2] << 8) | (uint32_t)bytes[off + 3];
+      };
+      const size_t fdt_off = 0x1e000;
+      uint32_t mag = be32(fdt_off);
+      uint32_t tsz = be32(fdt_off + 4);
+      uint32_t off_struct = be32(fdt_off + 8);
+      uint32_t off_strings = be32(fdt_off + 12);
+      uint32_t ver = be32(fdt_off + 20);
+      uint32_t sz_struct = be32(fdt_off + 36);
+      uint32_t tag_root = be32(fdt_off + 0x38);
+      uint32_t tag_cpus = be32(fdt_off + 0x13c);
+      // LE words as CPU `ld` would see at fdt base / +8
+      uint64_t le0 = rd64(fdt_off);
+      uint64_t le8 = rd64(fdt_off + 8);
+      std::cerr << std::hex << "[fdtmem] mag=0x" << mag << " tsz=0x" << tsz
+                << " off_struct=0x" << off_struct << " off_strings=0x" << off_strings
+                << " ver=0x" << ver << " sz_struct=0x" << sz_struct
+                << " tag_root=0x" << tag_root << " tag_cpus=0x" << tag_cpus
+                << " le0=0x" << le0 << " le8=0x" << le8 << std::dec << "\n";
+      // R3a cont.9 walk probe log @ DRAM+0x42e00 (VA 0x80042e00)
+      std::cerr << std::hex << "[walk]";
+      for (int i = 0; i < 12; i++) {
+        uint64_t v = rd64(0x42e00 + 8 * i);
+        if (v != 0)
+          std::cerr << " [+" << (8 * i) << "]=" << v;
+      }
+      std::cerr << std::dec << "\n";
+      // R3a cont.10: walk log in first PT_LOAD @ DRAM+0x22c00 (VA 0x80022c00)
+      std::cerr << std::hex << "[walk22]";
+      for (int i = 0; i < 16; i++) {
+        uint64_t v = rd64(0x22c00 + 8 * i);
+        if (v != 0)
+          std::cerr << " [+" << (8 * i) << "]=" << v;
+      }
+      std::cerr << std::dec << "\n";
+    }
+    // R3a hang state: npc + banked CSR (NrHarts>1 uses gen_banked)
+    {
+      auto npc0 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__i_frontend__DOT__npc_q;
+      auto mepc = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q;
+      auto mtvec = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mtvec_q;
+      auto mcause = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q;
+      auto wfi = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__wfi_q;
+      std::cerr << std::hex << "[hangpc] npc0=0x" << (uint64_t)npc0
+                << " mepc=0x" << (uint64_t)mepc
+                << " mtvec=0x" << (uint64_t)mtvec
+                << " mcause=0x" << (uint64_t)mcause
+                << " wfi=" << (unsigned)wfi
+                << std::dec << "\n";
+    }
+    // R3a fdtcnt probe BSS log @ DRAM+0x42e00 (VA 0x80042e00):
+    //   +0x00 next_tag entry count
+    //   +0x08 last structure offset (a1 into fdt_next_tag)
+    //   +0x10 last fdt base (a0)
+    //   +0x18 path_offset entry count
+    //   +0x20 last path pointer
+    //   +0x28 fail-WFI cookie (0x51b1dead)
+    //   +0x30 next_tag return count
+    //   +0x38 last returned tag
+    //   +0x40 last nextoffset (*a2)
+    //   +0x48 max structure offset seen
+    //   +0x50 last path_offset fdt
+    {
+      uint64_t nt = rd64(0x42e00), off = rd64(0x42e08), fdt = rd64(0x42e10);
+      uint64_t pc = rd64(0x42e18), path = rd64(0x42e20), fail = rd64(0x42e28);
+      uint64_t nret = rd64(0x42e30), tag = rd64(0x42e38), nxoff = rd64(0x42e40);
+      uint64_t maxoff = rd64(0x42e48), pfdt = rd64(0x42e50);
+      if (nt | off | fdt | pc | path | fail | nret | tag | nxoff | maxoff | pfdt) {
+        std::cerr << std::hex << "[fdtcnt]"
+                  << " next_tag=" << nt
+                  << " last_off=" << off
+                  << " last_fdt=" << fdt
+                  << " path_cnt=" << pc
+                  << " last_path=" << path
+                  << " fail=" << fail
+                  << " ret_cnt=" << nret
+                  << " last_tag=" << tag
+                  << " last_nxoff=" << nxoff
+                  << " max_off=" << maxoff
+                  << " path_fdt=" << pfdt
+                  << " a2_entry=" << rd64(0x42e68)
+                  << " path_ret=" << rd64(0x42e70)
+                  << " force_nx=" << rd64(0x42e78)
+                  << " nx_slot=" << (rd64(0x42f80) & 0xffffffffULL)
+                  << std::dec << "\n";
+        // offset ring: 8 x u64 at DRAM+0x42e80 (LOG+0x80)
+        std::cerr << std::hex << "[fdtcnt-ring]";
+        for (int i = 0; i < 8; i++)
+          std::cerr << " [" << i << "]=" << rd64(0x42e80 + 8 * i);
+        std::cerr << std::dec << "\n";
+        // a0/fdt entry ring (fdtcnt5): LOG+0x140
+        if (nt) {
+          std::cerr << std::hex << "[fdtcnt-a0]";
+          for (int i = 0; i < 8; i++)
+            std::cerr << " [" << i << "]=" << rd64(0x42f40 + 8 * i);
+          std::cerr << std::dec << "\n";
+          // fdtcnt6: ra ring LOG+0x180, s2 ring LOG+0x1c0, last ra/s2
+          std::cerr << std::hex << "[fdtcnt-ra]";
+          for (int i = 0; i < 8; i++)
+            std::cerr << " [" << i << "]=" << rd64(0x42f80 + 8 * i);
+          std::cerr << "\n[fdtcnt-s2]";
+          for (int i = 0; i < 8; i++)
+            std::cerr << " [" << i << "]=" << rd64(0x42fc0 + 8 * i);
+          std::cerr << " last_ra=" << rd64(0x43000) << " last_s2=" << rd64(0x43008)
+                    << std::dec << "\n";
+        }
+        // return tag / nextoff rings (fdtcnt3): LOG+0xC0 / LOG+0x100
+        if (nret) {
+          std::cerr << std::hex << "[fdtcnt-rettag]";
+          for (int i = 0; i < 8; i++)
+            std::cerr << " [" << i << "]=" << rd64(0x42ec0 + 8 * i);
+          std::cerr << "\n[fdtcnt-retnx]";
+          for (int i = 0; i < 8; i++)
+            std::cerr << " [" << i << "]=" << rd64(0x42f00 + 8 * i);
+          std::cerr << std::dec << "\n";
+        }
+      }
+    }
+    // R3a DRAM console ring (cursor @0x10f0, bytes @0x1100..) when firmware
+    // putc is stubbed off UART MMIO (which can hang the AXI fabric).
+    // Cursor may be a DRAM offset or a full VA (0x8000xxxx).
+    uint64_t cur = rd64(0x10f0);
+    if (cur >= 0x80000000ULL && cur < 0x80010000ULL)
+      cur -= 0x80000000ULL;
+    if (cur >= 0x1100 && cur < 0x10000) {
+      size_t n = (size_t)(cur - 0x1100);
+      if (n > 512) n = 512;
+      std::cerr << "[dram-console] (" << std::dec << n << " bytes) ";
+      for (size_t i = 0; i < n; i++) {
+        char c = (char)bytes[0x1100 + i];
+        if (c == '\n') std::cerr << "\\n";
+        else if (c >= 32 && c < 127) std::cerr << c;
+        else std::cerr << ".";
+      }
+      std::cerr << "\n";
+    }
+  }
 
   if (dtm->exit_code()) {
     fprintf(stderr, "%s *** FAILED *** (tohost = %d) after %ld cycles\n", htif_argv[1], dtm->exit_code(), main_time);
