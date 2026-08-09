@@ -32,25 +32,26 @@ When `CVA6Cfg.AiCfg.MatrixEn`, the island sits on the **GPIO window**:
 |---|---|---|
 | `0x4000_0000` (`ariane_soc::GPIOBase` / `AiIslandBase`) | 4 KiB | AXI → `axi2apb_64_32` → `g6lc_ai_island_apb` → `g6lc_ai_island_top` |
 
-Non-AI packages keep the GPIO error slave. IRQ sticky is MMIO-visible; PLIC wiring is next.
+Non-AI packages keep the GPIO error slave. Island `irq_o` is sticky on
+`desc.flags[2]`; in Variane it is **PLIC source ID 8** (`irq_sources[7]`).
+Clear level source (`AI_DONE`) **before** PLIC complete, or level-set re-arms IP.
 
 ## Verification
 
 ```bash
 bash verif/regress/ai-island-veri.sh          # standalone spine
-bash verif/regress/ai-matrix-veri.sh          # includes ai_island_mmio_smoke on g6lc64_ai
+bash verif/regress/ai-matrix-veri.sh          # g6lc64_ai directed suite
 ```
 
 Standalone smoke: cap, good desc, AI-3 OOR/perm, bad version, disabled.  
-SoC smoke: MMIO at `0x40000000` — cap, doorbell, AI-3 reject.  
-Sideband: after any desc/region MMIO write, load a **different** island reg
-before `ai.enq` (same-addr load-back can STLF and skip the bus; the kick is a
-core wire and races BRESP).
+SoC: MMIO doorbell + AI-3; sideband enq/poll (phase-2 AI-3); **PLIC-8 IRQ**.  
+Sideband protocol: after any desc/region MMIO write, load a **different** island
+reg before `ai.enq` (same-addr load-back can STLF; kick is a core wire).
 
 ## Ordering
 
 1. **P3 spine** — descriptor engine + per-queue address check (**done**).
-2. **AXI attach on testharness GPIO window** (**done**); PLIC + DMA master next.
+2. **AXI attach + PLIC-8** (**done**); DMA master (desc fetch from enq ptr) next.
 3. **I1** — one cluster; freeze `T` / DRAM class / NoC cut.
 4. **I3** — memory system measured.
 5. **I2** — N clusters (must not change latency-SKU results).
