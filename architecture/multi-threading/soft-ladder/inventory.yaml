@@ -184,17 +184,16 @@ sites:
     priority: 2
     status: peeled_partial
     ladder: cont.19-44
-    soft_form: "natural jal fdt_match; soft sbi_strlen ret-imm 11 @4a3a"
-    pin: "PEEL_STRLEN stock loop mepc=0x80004a50 mcause=2"
+    soft_form: "soft sbi_strlen ret-imm 11 until FDT green; natural match"
+    pin: "mid-RVI fixed (FETCH_WIDTH=64); PEEL_STRLEN now FDT lenp residual"
     rtl_loci:
+      - core/include/build_config_pkg.sv
       - core/frontend/instr_queue.sv
-      - core/issue_read_operands.sv
-      - core/load_unit.sv
     rtl_progress: >
-      2026-08-09: natural match + soft strlen ret-imm cookie green.
-      Bare mini_strlen_rvc PASS; PEEL_STRLEN still red (RVI add loop).
-    verif_idea: "PEEL_STRLEN cookie; mini_strlen_rvc"
-    retire_when: PEEL_STRLEN cookie green
+      2026-08-09: build_fetch_width min 64 for DI+RVC. PEEL_STRLEN no longer
+      mepc=0x4a50; advances to FDT lenp 0x12eb2 mcause=6.
+    verif_idea: "work-ver-smt2-fw64 PEEL_STRLEN; mini_strlen_rvc"
+    retire_when: soft strlen dropped after FDT green
 
 # ---------------------------------------------------------------------------
 # B2 — Firmware policy (source profile; not permanent binary VAs)

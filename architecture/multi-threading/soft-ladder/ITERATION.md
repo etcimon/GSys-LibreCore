@@ -3,28 +3,36 @@
 Append-only. One **primary** residual (or tightly coupled pair) per iteration.
 Template at bottom.
 
-**Active:** `iter-011` (PEEL_STRLEN stock sbi_strlen RVI loop).
+**Active:** `iter-012` (FDT lenp store after PEEL_STRLEN mid-instr fixed).
 
 ---
 
 ## Active iteration
 
-### iter-011 — Stock sbi_strlen RVI dual-issue residual
+### iter-012 — FDT `lenp` store residual (post FETCH_WIDTH=64)
 
 | Field | Value |
 |-------|--------|
 | **Started** | 2026-08-09 |
 | **Bucket** | B1 |
-| **Primary ids** | `b1-sbi-strlen-rvi` |
-| **Hypothesis** | Stock loop `c.addi`+RVI `add` → mepc=0x4a50 mid-instr; hang-4 left size-based `pc_j` / dual-issue PC holes |
-| **I2 Repro** | `PEEL_STRLEN=1 bash verif/regress/soft-ladder-opensbi-soak.sh` → red |
-| **I3 Fix (in tree)** | `instr_queue.sv`: dual-issue PC continuity gate + prefer younger realign PC in `pc_j` (hang-4 completion). Soft: keep ret-imm 11 (pointer-inc soft body regressed to 7316 poison). |
-| **I4 Verify** | default cookie green (ret-imm); PEEL_STRLEN needs harness rebuild (`make verilate target=g6lc64_smt2 ver-library=work-ver-smt2` — host Verilator faulted 2026-08-09) |
-| **I6 Next** | Rebuild harness → PEEL_STRLEN; else real printf |
+| **Primary ids** | `b1-fdt-lenp-store` |
+| **Hypothesis** | With DI+RVC FETCH_WIDTH=64, stock strlen no longer dies mid-`add`; PEEL_STRLEN reaches `mepc=0x80012eb2` mcause=6 (hang-6 lenp family) |
+| **I2 Repro** | `PEEL_STRLEN=1 SOFT_LADDER_HARNESS=work-ver-smt2-fw64 bash verif/regress/soft-ladder-opensbi-soak.sh` |
+| **I3 Fix** | TBD FDT pointer / dual-issue store integrity |
+| **I4 Verify** | default cookie green; PEEL_STRLEN+real printf when fixed |
+| **I6 Next** | real printf; domain |
 
 ---
 
 ## Completed iterations
+
+### iter-011 — Stock sbi_strlen mid-RVI residual (closed: FETCH_WIDTH=64)
+
+| Field | Value |
+|-------|--------|
+| **Completed** | 2026-08-09 |
+| **Result** | Root cause: dual-issue+RVC used FETCH_WIDTH=32 (`realign_bp_32`). Fix: `build_fetch_width` min 64 for n_issue≥2 && RVC. PEEL_STRLEN no longer mepc=0x4a50; advances to FDT lenp. Soft ret-imm still default for cookie until FDT green. Harness: `work-ver-smt2-fw64`. Also instr_queue PC continuity (defensive). |
+| **Next** | iter-012 FDT lenp |
 
 ### iter-010 — Heap freelist / PEEL_MALLOC (closed: peeled)
 
@@ -114,8 +122,8 @@ See also `CONT-FULL-MAP.md` for cont.## disposition.
 
 | Order | id | Bucket | Note |
 |------:|----|--------|------|
-| 1 | `b1-sbi-strlen-rvi` | B1 | **active** — soft ret-imm 11; PEEL_STRLEN red @4a50 |
-| 2 | `b1-fdt-lenp-store` | B1 | real printf / hang-6 family |
+| 1 | `b1-fdt-lenp-store` | B1 | **active** — PEEL_STRLEN@FW64 hits 12eb2 mcause=6 |
+| 2 | `b1-sbi-strlen-rvi` | B1 | **mid-RVI fixed** (FETCH_WIDTH=64); soft ret-imm until FDT |
 | 3 | `b1-heap-freelist-malloc` | B1 | **peeled** natural malloc default |
 | 4 | `b1-dual-cmv-s3` | B1 | **peeled** natural c.mv default |
 | 5 | `b1-amo-spin-lock` | B1 | **rtl-fixed** (natural spins default) |

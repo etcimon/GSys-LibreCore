@@ -56,7 +56,10 @@ MABI="${SOFT_LADDER_MABI:-lp64d}"
 SPIKE_ISA="${SOFT_LADDER_SPIKE_ISA:-rv64imafdc_zicsr_zifencei}"
 MAX_CYCLES="${SOFT_LADDER_MAX_CYCLES:-400000}"
 SPIKE_STEPS="${SOFT_LADDER_SPIKE_STEPS:-400000}"
-HARNESS_DIR="${SOFT_LADDER_HARNESS:-work-ver-smt2}"
+HARNESS_DIR="${SOFT_LADDER_HARNESS:-work-ver-smt2-fw64}"
+if [[ ! -x "$ROOT/${HARNESS_DIR}/Variane_testharness" && -x "$ROOT/work-ver-smt2/Variane_testharness" ]]; then
+  HARNESS_DIR=work-ver-smt2
+fi
 RUN_SPIKE="${SOFT_LADDER_SPIKE:-0}"
 COMPILE_ONLY="${SOFT_LADDER_COMPILE_ONLY:-0}"
 

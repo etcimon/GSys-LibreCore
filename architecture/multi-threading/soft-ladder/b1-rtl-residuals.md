@@ -45,15 +45,15 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Retire criterion | Full CSR probe loop in hart_init under DI |
 | **iter-006 fix (in tree)** | `issue_stage` `unresolved_csr_q`: after CSR issue, no same-hart younger issue until that CSR `commit_ack` or flush. Test: `mini_csr_expected_trap.S`. |
 
-### FDT `lenp` store (priority 2)
+### FDT `lenp` store (priority 2 — **active iter-012**)
 
 | Item | Detail |
 |------|--------|
-| Soft evidence | Soft `sbi_printf` BANR cave |
-| Fail pin | `sw` to lenp `mcause=6` (misaligned) at fdt property helpers |
+| Soft evidence | Soft `sbi_printf` BANR cave; soft strlen ret-imm avoids deep FDT |
+| Fail pin | PEEL_STRLEN on FW64: mepc=`0x80012eb2` mcause=6 mtval=`0x80012b2a` (code ptr as lenp) |
 | Primary RTL | Store address path / dual-issue of address calc + store |
-| Note | Multiple store sites (12eb2, 13128, …); root is pointer integrity under DI |
-| Retire criterion | Real `sbi_printf` / FDT walk green |
+| Note | Hang-6 family; multiple sites (12eb2, 13128, …) |
+| Retire criterion | Real `sbi_printf` / FDT walk green under PEEL_STRLEN |
 
 ### Dual `c.mv` (priority 3 — **peeled iter-008**)
 
@@ -66,15 +66,15 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Residual moved to | Soft stub fdt_match / FDT lenp / strlen (`b1-fdt-lenp-store`) |
 | Retire criterion | **Met** for dual-c.mv class; `SOFT_CMV=1` bisect only |
 
-### FDT match / `sbi_strlen` (priority 2 — **match peeled; strlen soft; RTL pending rebuild**)
+### FDT match / `sbi_strlen` (priority 2 — **mid-RVI fixed; soft ret-imm until FDT**)
 
 | Item | Detail |
 |------|--------|
-| Soft evidence | Natural `jal fdt_match` @731e; soft `sbi_strlen` @4a3a = `li a0,11; ret` |
-| Fail pin (stock strlen) | `PEEL_STRLEN=1` → mepc=`0x80004a50` mcause=2 mid RVI `add` @4a4e |
-| Isolate | Soft ret-imm 11 + natural match → **cookie green**; bare `mini_strlen_rvc` PASS; full soft pointer-inc body → 7316 poison (avoid) |
-| RTL (iter-011) | `instr_queue.sv`: dual-issue PC continuity + `pc_j` prefer younger realign PC |
-| Retire criterion | `PEEL_STRLEN=1` cookie green after harness rebuild; drop soft strlen |
+| Soft evidence | Soft `sbi_strlen` ret-imm 11 (cookie); natural match peeled |
+| Fail pin (old FETCH_WIDTH=32) | `PEEL_STRLEN` mepc=`0x80004a50` mid-`add` |
+| Fail pin (FETCH_WIDTH=64) | `PEEL_STRLEN` **past strlen** → mepc=`0x80012eb2` mcause=6 **FDT lenp** |
+| RTL (iter-011) | `build_fetch_width`: min 64 when n_issue≥2 && RVC; + instr_queue PC continuity |
+| Retire criterion | Soft strlen dropped when FDT green; PEEL_STRLEN mid-instr **closed** |
 
 ### Heap freelist malloc (priority 1 — **peeled iter-010**)
 
@@ -91,7 +91,8 @@ Promotion order among B1 (from `inventory.yaml` priority):
 |---------|----------|-------------------|
 | SS dual-issue serialize after CF/ALU/MULT/FPU/LSU | `issue_read_operands.sv` (R3a cont.6/14/15/18) | Partial fix for FDT/lenp/callee-saved; soft printf may still be needed until fully clean |
 | Hang-4 realign PC per FIFO word | `instr_queue.sv` | Dual-issue PC integrity |
-| Hang-4 completion PC continuity | `instr_queue.sv` pc_j + dual-issue gate | PEEL_STRLEN mid-RVI (needs rebuild) |
+| Hang-4 completion PC continuity | `instr_queue.sv` pc_j + dual-issue gate | defensive with FETCH_WIDTH=64 |
+| DI+RVC FETCH_WIDTH min 64 | `build_config_pkg.sv` `build_fetch_width` | PEEL_STRLEN mid-RVI **fixed** |
 | Hang-7 younger cancel (skip LOAD cancel) | `scoreboard.sv` | CF fallthrough recovery |
 | Unresolved CF issue stall (per-hart) | `issue_stage.sv` | Blocks issue past unresolved CTRL_FLOW |
 | AMOCAS.Q dual_we path | commit/issue/hpdcache/ariane_pkg | Zacas feature (not soft-ladder spin) |

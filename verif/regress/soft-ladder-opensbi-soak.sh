@@ -20,7 +20,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-HARNESS_DIR="${SOFT_LADDER_HARNESS:-work-ver-smt2}"
+# Prefer FETCH_WIDTH=64 rebuild (iter-011 DI+RVC); fall back to work-ver-smt2.
+HARNESS_DIR="${SOFT_LADDER_HARNESS:-work-ver-smt2-fw64}"
+if [[ ! -x "$ROOT/${HARNESS_DIR}/Variane_testharness" && -x "$ROOT/work-ver-smt2/Variane_testharness" ]]; then
+  HARNESS_DIR=work-ver-smt2
+fi
 HARNESS="$ROOT/${HARNESS_DIR}/Variane_testharness"
 ELF="${SOFT_LADDER_ELF:-$ROOT/tmp-dual-ci/fw_payload_r3a_c15_plat_skip.elf}"
 OUT="${SOFT_LADDER_OSBI_OUT:-/tmp/cva6-soft-ladder-osbi}"

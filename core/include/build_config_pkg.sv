@@ -1,11 +1,16 @@
 package build_config_pkg;
 
   // Scale FETCH_WIDTH with issue width: min bits for N×{16,32}-bit instrs, pot.
+  // Soft-ladder iter-011 / PEEL_STRLEN: dual-issue + RVC with FETCH_WIDTH=32
+  // (2×16) uses realign_bp_32, which can desync mid-RVI PCs in tight mixed
+  // C/I loops (OpenSBI sbi_strlen: mepc=0x4a50 into `add` @0x4a4e). Prefer
+  // the hang-6-hardened 64-bit realign path whenever multi-issue and RVC.
   function automatic int unsigned build_fetch_width(int unsigned n_issue, bit rvc);
     int unsigned min_bits;
     int unsigned fw;
     min_bits = n_issue * (rvc ? 16 : 32);
     if (min_bits < 32) min_bits = 32;
+    if (n_issue >= 2 && rvc && min_bits < 64) min_bits = 64;
     fw = 32;
     while (fw < min_bits && fw < config_pkg::CVA6_MAX_FETCH_WIDTH) fw = fw << 1;
     return fw;
