@@ -60,6 +60,8 @@ Profile `full` also runs mini + H-edge on an existing Variane harness when prese
 | `kvm-h-tests.sh` | `kvm-h-tests` | veri+spike | `g6lc64_server_math` | CRT | H + Sstc | Optional full DV list |
 | `monorepo-soak/run-h-edge-veri.sh` | (soak helper) | veri | existing `work-ver` | CRT | H-edge | Reuses server_math TB; not a defaults suite |
 | `stability-regress.sh` | `stability-regress` | composed | see profile | see legs | residual battery | §4 entry point |
+| `soft-ladder-di-regress.sh` | `soft-ladder-di` | veri (+opt spike) | `work-ver-smt2` | bare mini | soft-ladder B1 | Ordered path step1; `SOFT_LADDER_*` env |
+| `dual-iss-regress.sh` | `dual-iss` | dual | server_math | bare | dual plane | `SOFT_LADDER=1` appends B1 minis |
 | `stream8-smoke.sh` | `stream8-smoke` | artifact/compile | stream8 | package | stream/Zacas | Contract + mini golden |
 | `kvm-h-veri.sh` | `kvm-h-veri` | RTL | stream8 | package | H/KVM | Variane H-edge 3/3 |
 | `dual-hart-ci.sh` | `dual-hart-ci` | artifact/lint | smt2 | package | SMT | Path/lint gate |

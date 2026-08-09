@@ -96,17 +96,41 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
 
 ---
 
-## 6. Lab peel checklist (when RTL re-soaks green)
+## 6. Ordered path (lab integration)
 
 ```text
-[ ] mini_amoadd_w_spin + mini_lrsc_d under g6lc64_smt2 DI
-[ ] OpenSBI: restore real spin_lock in SA/heap/scratch (drop NOP4)
-[ ] OpenSBI: restore lr.d/sc.d atomic_cmpxchg (drop ld/sd shim)
-[ ] OpenSBI: restore CSR probe tail after memset (drop cd86→cd0e)
-[ ] OpenSBI: real sbi_printf (drop BANR) once FDT green
-[ ] OpenSBI: real SA body (drop soft SA) once ra+spin green
-[ ] Domain full walk without cut; keep real ecall
-[ ] switch_mode → payload / S-mode
+1. B1 directed DI soak
+   bash verif/regress/soft-ladder-di-regress.sh
+   # SOFT_LADDER_HARNESS=work-ver-smt2 (default)
+   # SOFT_LADDER_SPIKE=1 optional; SOFT_LADDER_COMPILE_ONLY=1 assemble only
+   # or: SOFT_LADDER=1 bash verif/regress/dual-iss-regress.sh
+
+2. OpenSBI peels (one class at a time; re-soak cookie after each)
+   python tmp-dual-ci/mk_plat_skip.py                    # default soft cont.51
+   PEEL_SPIN=1 python tmp-dual-ci/mk_plat_skip.py        # real spins
+   PEEL_CMPX=1 python tmp-dual-ci/mk_plat_skip.py        # real lr/sc cmpx
+   PEEL_CSR=1  python tmp-dual-ci/mk_plat_skip.py        # CSR probes
+   PEEL_CMV=1  python tmp-dual-ci/mk_plat_skip.py        # natural c.mv
+   PEEL_ALL_B1=1 …                                       # experimental all four
+   # SUCCESS = 51b1babe in trapdump (CVA6_TRAP_DUMP=1), Variane DI
+
+3. B1 FDT lenp → real printf (drop BANR) when green
+4. B1 dual-c.mv residual if PEEL_CMV fails
+5. Soft SA retirement (ra + spin already green)
+6. B2 domain full walk (real ecall); switch_mode payload
+7. Empty mk_plat_skip → retire b3-mk-plat-skip-oracle
+```
+
+Checklist:
+
+```text
+[x] step1 soft-ladder-di-regress (4 minis) under work-ver-smt2 — 2026-08-08 PASS 4/4
+[ ] PEEL_SPIN → cookie green
+[ ] PEEL_CMPX → cookie green
+[ ] PEEL_CSR → cookie green
+[ ] PEEL_CMV → cookie green (directed dual_cmv green; OpenSBI still soft)
+[ ] real sbi_printf (FDT lenp)
+[ ] domain full walk; switch_mode payload
 [ ] mk_plat_skip empty → retire
 ```
 

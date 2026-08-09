@@ -36,9 +36,11 @@ Document in soak scripts: **cookie wins over tohost FAIL** for soft-ladder DI ru
 
 | Script | Note |
 |--------|------|
-| `verif/regress/dual-iss-regress.sh` | Dual-plane Spike+Variane; not OpenSBI cookie |
+| `verif/regress/soft-ladder-di-regress.sh` | **Ordered path step1** — B1 four minis on work-ver-smt2 |
+| `verif/regress/dual-iss-regress.sh` | Dual-plane; `SOFT_LADDER=1` appends B1 minis |
+| `tmp-dual-ci/mk_plat_skip.py` | Step2 peels via `PEEL_SPIN` / `PEEL_CMPX` / `PEEL_CSR` / `PEEL_CMV` |
+| `verif/regress/soft-ladder-di-residuals.md` | Test table + gate commands |
 | `verif/regress/smt-linux-boot-path.*` | SMT2 Linux path |
-| `verif/regress/soft-ladder-di-residuals.md` | Checklist of B1 directed tests to add |
 
 ## Retirement of `mk_plat_skip`
 

@@ -86,9 +86,9 @@ sites:
       - core/scoreboard.sv
     monorepo_soak_note: "Hang-1..3 AMO/interconnect fixed historically; SA spin residual still open under DI OpenSBI"
     rtl_progress: >
-      2026-08-08 iter-004: amo_buffer.cancel_i kills younger-cancelled AMO
-      (no flush_ex on mispredict left depth-1 wedged); SS AMO port-0 only;
-      verif/tests/custom/multicore/mini_amoadd_w_spin.S scaffold.
+      2026-08-08 iter-004: amo_buffer.cancel_i; AMO port-0 only.
+      iter-007: mini_amoadd_w_spin PASS on work-ver-smt2 (soft-ladder-di-regress).
+      OpenSBI: PEEL_SPIN=1 available; cookie re-soak still required.
     verif_idea: >
       Bare-metal: amoadd.w loop + dual-issue neighbor ops; then OpenSBI SA
       without spin nops.
@@ -110,9 +110,8 @@ sites:
       - core/amo_buffer.sv
       - core/include/ariane_pkg.sv
     rtl_progress: >
-      2026-08-08 iter-005: no flush_commit after LR; lr_sc_pair_q blocks
-      non-SC STORE between LR and SC; is_amo_lr/is_amo_sc helpers;
-      verif/tests/custom/multicore/mini_lrsc_d.S. Production ELF still soft ld/sd.
+      2026-08-08 iter-005: no LR flush_commit; lr_sc_pair store barrier.
+      iter-007: mini_lrsc_d PASS on work-ver-smt2. OpenSBI PEEL_CMPX=1 available.
     verif_idea: >
       Bare-metal LR/SC success + sc-fail path under DI; then restore real
       atomic_cmpxchg body in OpenSBI build (delete shim).
@@ -132,9 +131,8 @@ sites:
       - core/controller.sv
       - core/commit_stage.sv
     rtl_progress: >
-      2026-08-08 iter-006: unresolved_csr_q stalls same-hart issue after CSR
-      until commit_ack(CSR) or flush (mirrors unresolved_cf). Directed
-      mini_csr_expected_trap.S. OpenSBI CSR cut still soft until soak.
+      2026-08-08 iter-006: unresolved_csr_q issue stall.
+      iter-007: mini_csr_expected_trap PASS on work-ver-smt2. PEEL_CSR=1 available.
     verif_idea: "Directed illegal CSR + immediate csrw mtvec under DI"
     retire_when: full sbi_hart_init CSR probes run without cut
 
@@ -160,7 +158,7 @@ sites:
   - id: b1-dual-cmv-s3
     bucket: B1
     priority: 3
-    status: open
+    status: in_progress
     ladder: cont.19
     soft_form: "nop c.mv a1/a0 @7312/7314 in platform_override path"
     pin: "dual c.mv clobber s3 under DI"
@@ -168,6 +166,9 @@ sites:
       - core/issue_read_operands.sv
       - core/id_stage.sv
       - core/decoder.sv
+    rtl_progress: >
+      2026-08-08 iter-007: mini_dual_cmv_s3 PASS on work-ver-smt2 (SS serialize
+      may already cover bare case). OpenSBI still nops pair; PEEL_CMV=1 available.
     verif_idea: "Paired c.mv back-to-back with live s3 consumer"
     retire_when: override loop natural; nops removed
 

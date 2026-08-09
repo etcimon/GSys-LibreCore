@@ -3,28 +3,36 @@
 Append-only. One **primary** residual (or tightly coupled pair) per iteration.
 Template at bottom.
 
-**Active:** `iter-006` (B1 CSR expected-trap + full cont map).
+**Active:** `iter-007` (ordered-path integration: soak gate + peel flags).
 
 ---
 
 ## Active iteration
 
-### iter-006 — Full cont.## map + CSR expected-trap issue stall
+### iter-007 — Ordered path integration (step1 gate + step2 peel env)
 
 | Field | Value |
 |-------|--------|
 | **Started** | 2026-08-08 |
-| **Bucket** | B1 (+ docs map) |
-| **Primary ids** | `b1-csr-expected-trap`; map all cont.2–51 |
-| **Hypothesis** | cont.33: younger issue after CSR lets `csrw mtvec` race illegal probe so expected-trap handler never runs. Full bring-up map needed to order peels. |
-| **I3 Fix** | `unresolved_csr_q` in `issue_stage` (mirror CF stall); `CONT-FULL-MAP.md`; directed `mini_csr_expected_trap.S` + `mini_dual_cmv_s3.S` |
-| **I4 Verify** | Directed CSR trap under DI when harness wired; OpenSBI peel CSR cut pending soak |
-| **I5 Retire** | partial — keep cd86→cd0e until probe green |
-| **I6 Next** | FDT lenp (`b1-fdt-lenp-store`) or lab re-soak AMO/LRSC/CSR peels |
+| **Bucket** | B1 + B3 |
+| **Primary ids** | all in_progress B1; `b3-mk-plat-skip-oracle` |
+| **Hypothesis** | Landed RTL needs a single soak command and optional OpenSBI peels without hand-editing VAs |
+| **I3 Fix** | `soft-ladder-di-regress.sh`; dual-iss `SOFT_LADDER=1`; `mk_plat_skip` `PEEL_SPIN/CMPX/CSR/CMV` |
+| **I4 Verify** | soft-ladder-di-regress work-ver-smt2 **PASS 4/4** (2026-08-08) |
+| **I5 Retire** | none until OpenSBI PEEL_* cookie green |
+| **I6 Next** | step2 PEEL_SPIN → PEEL_CMPX → PEEL_CSR → PEEL_CMV cookie soaks |
 
 ---
 
 ## Completed iterations
+
+### iter-006 — Full cont.## map + CSR expected-trap issue stall
+
+| Field | Value |
+|-------|--------|
+| **Completed** | 2026-08-08 |
+| **Result** | `ae0acc968` CONT-FULL-MAP + unresolved_csr_q |
+| **Next was** | ordered-path integration |
 
 ### iter-005 — LR/SC: no flush after LR + issue barrier to SC
 

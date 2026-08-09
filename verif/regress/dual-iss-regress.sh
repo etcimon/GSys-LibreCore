@@ -66,6 +66,11 @@ DEFAULT_TESTS="mini_tohost mini_jumps"
 if [[ "${DUAL_ISS_H:-0}" == "1" ]]; then
   DEFAULT_TESTS="${DEFAULT_TESTS} h_edge_diag"
 fi
+# Soft-ladder ordered path step1: B1 directed residuals (prefer soft-ladder-di-regress.sh
+# with work-ver-smt2). SOFT_LADDER=1 appends the four mini_* B1 tests.
+if [[ "${SOFT_LADDER:-0}" == "1" ]]; then
+  DEFAULT_TESTS="${DEFAULT_TESTS} mini_amoadd_w_spin mini_lrsc_d mini_csr_expected_trap mini_dual_cmv_s3"
+fi
 # shellcheck disable=SC2206
 tests=( ${DUAL_ISS_TESTS:-$DEFAULT_TESTS} )
 
