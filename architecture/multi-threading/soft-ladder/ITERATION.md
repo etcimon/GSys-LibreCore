@@ -16,11 +16,14 @@ Template at bottom.
 | **Started** | 2026-08-09 |
 | **Bucket** | B1 |
 | **Primary ids** | `b1-fdt-lenp-store` |
-| **Hypothesis** | `fdt_get_property_by_offset_` error `sw a0,0(s2)` with s2=code (`0x12b2a`); soft `fdt_getprop_namelen` unblocks cookie with natural strlen |
-| **I2 Repro** | `PEEL_FDT_GETPROP=1 SOFT_LADDER_HARNESS=work-ver-smt2-fw64 bash verif/regress/soft-ladder-opensbi-soak.sh` → mepc=0x12eb2 mcause=6 |
-| **I3 Fix** | Soft getprop default; RTL TBD for lenp pointer integrity |
-| **I4 Verify** | default cookie green (natural strlen + soft getprop) |
-| **I6 Next** | real getprop / printf; domain |
+| **Hypothesis** | `fdt_get_property_by_offset_` fail-path `sw a0,0(s2)` with s2=code (`0x12b2a` = ra of `fdt_next_tag` return in `fdt_check_node_offset_`); soft `fdt_getprop_namelen` unblocks cookie with natural strlen |
+| **I2 Repro** | `PEEL_FDT_GETPROP=1 SOFT_LADDER_HARNESS=work-ver-smt2-fw64 bash verif/regress/soft-ladder-opensbi-soak.sh` → mepc=0x12eb2 mcause=6 mtval=0x12b2a; trapdump s2=mtval, ra=0x12e3e (return into by_offset_ after check_prop), sp/s0 frame intact |
+| **I3 Fix** | Soft getprop default; RTL TBD |
+| **I4 Verify** | default cookie **51b1babe** (natural strlen + soft getprop) on work-ver-smt2-fw64 (`veri_20260809-070238`) |
+| **Bisects (negative)** | (1) dual-GPR dual-commit serialize `commit_stage` → still 12eb2; (2) **full** dual-commit serialize under SS (`fw64c`) → still 12eb2. Not dual-commit. Issue already full-serializes ALU/LSU/CF/MULT under SS. |
+| **Disasm pin** | `by_offset_`: `mv s2,a2`; `jal check_prop`; `bltz` → `sw a0,0(s2)`. s2 should be lenp; observed s2=ra from inner `check_node→next_tag`. |
+| **Directed** | `mini_fdt_lenp_sw.S`, `mini_fdt_s2_nest.S` (nest next_tag-shaped s2 save/restore) |
+| **I6 Next** | Prefer: store-to-load / callee-saved restore integrity through `fdt_next_tag`; or corrupt a2/lenp at call boundary. Not dual-commit. Keep soft getprop. |
 
 ---
 

@@ -50,10 +50,11 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Item | Detail |
 |------|--------|
 | Soft evidence | Soft `fdt_getprop_namelen` + `fdt_get_property_namelen` → NULL; soft printf BANR |
-| Fail pin | `PEEL_FDT_GETPROP=1`: mepc=`0x80012eb2` `sw a0,0(s2)` mcause=6 mtval=`0x80012b2a` (s2=code) |
-| Mechanism | `c.mv s2,a2` (lenp) then DI corrupts s2 before error-path store |
-| Primary RTL | Callee-saved / dual-issue pointer integrity (hang-6 family) |
-| Directed | `mini_fdt_lenp_sw.S` |
+| Fail pin | `PEEL_FDT_GETPROP=1`: mepc=`0x80012eb2` `sw a0,0(s2)` mcause=6 mtval=`0x80012b2a` (s2=code = ra of `check_node→next_tag`) |
+| Trapdump | mepc/mcause/mtval/sp/s0/s2/ra: s2==mtval; ra=`0x12e3e`; sp/s0 show intact 48B by_offset_ frame |
+| Mechanism (updated) | **Not dual-commit** (dual-GPR and full dual-commit serialize both PEEL-negative). Under SS, issue already serializes ALU/LSU/CF/MULT. Suspect: callee-saved s2 restore through `fdt_next_tag` (sd/ld 32(sp)) or a2/lenp corruption at call boundary so `mv s2,a2` latches code addr. |
+| Primary RTL | LSU store-to-load forward / RF write of s2; hang-6 family; not commit_stage dual-port |
+| Directed | `mini_fdt_lenp_sw.S`, `mini_fdt_s2_nest.S` |
 | Retire criterion | Natural getprop + real printf cookie green |
 
 ### Dual `c.mv` (priority 3 — **peeled iter-008**)

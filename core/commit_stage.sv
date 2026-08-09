@@ -373,6 +373,10 @@ module commit_stage
       // -----------------
       // check if the second instruction can be committed as well and the first wasn't a CSR instruction
       // also if we are in single step mode don't retire the second instruction
+      //
+      // Soft-ladder iter-012 note: dual-commit serialize (dual-GPR and full) was
+      // PEEL_FDT-negative on work-ver-smt2-fw64{b,c} — same mepc=0x12eb2 /
+      // mtval=0x12b2a. Not a dual-commit residual; see ITERATION.md.
       if (commit_ack_o[0] && commit_instr_i[1].valid
                                 && !halt_i
                                 && !(commit_instr_i[0].fu inside {CSR})
