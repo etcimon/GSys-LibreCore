@@ -3,28 +3,36 @@
 Append-only. One **primary** residual (or tightly coupled pair) per iteration.
 Template at bottom.
 
-**Active:** `iter-003` (cleanup monorepo-soak/tmp-dual-ci; RTL dual-issue notes).
+**Active:** `iter-004` (B1 AMO spin_lock / amo_buffer cancel).
 
 ---
 
 ## Active iteration
 
-### iter-003 — Patch cleanup via in-tree RTL + shrink monorepo-soak / tmp-dual-ci
+### iter-004 — AMO spin_lock residual: amo_buffer younger-cancel kill
 
 | Field | Value |
 |-------|--------|
 | **Started** | 2026-08-08 |
-| **Bucket** | B1 (document landed dual-issue serialize) + B3 cleanup |
-| **Primary ids** | retire monorepo-soak applied scripts; prune tmp-dual-ci probes |
-| **Hypothesis** | Cont dual-issue serialize already lives in `issue_read_operands`; patch scripts/logs are pure debt |
-| **I3 Fix** | Consolidated SS dual-issue comments in `issue_read_operands.sv`; deleted applied `patch-*.py` + E logs; tmp-dual-ci → production-only (~2.6 MB) |
-| **I4 Verify** | Markers still present post-cleanup; dirs reduced |
-| **I5 Retire** | monorepo-soak applied generators → `APPLIED.md` |
-| **I6 Next** | **iter-004** → directed DI residual for remaining soft sites (spin/LRSC) or peel `mk_plat_skip` nops under re-soak |
+| **Bucket** | B1 |
+| **Primary ids** | `b1-amo-spin-lock` |
+| **Hypothesis** | Hang-7 younger-cancel marks AMO cancelled; commit_drop never asserts `amo_valid_commit`; mispredict does not `flush_ex`; depth-1 `amo_buffer` stays full → later OpenSBI `spin_lock`/`amoadd.w` wedges (`mepc=0x2` class) |
+| **I3 Fix** | `amo_buffer.cancel_i` + `store_unit` TID cancel; skip push if already cancelled; SS AMO port-0 only; directed `mini_amoadd_w_spin.S` |
+| **I4 Verify** | Directed bare-metal under DI when harness wired; OpenSBI cont.47 re-soak with real SA locks (peel spin NOP) still pending lab soak |
+| **I5 Retire** | partial — keep spin NOP in `mk_plat_skip` until OpenSBI cookie green |
+| **I6 Next** | Re-soak cont.47 real locks; if green peel SA/heap spin nops; else `b1-lrsc-cmpxchg` |
 
 ---
 
 ## Completed iterations
+
+### iter-003 — Patch cleanup via in-tree RTL + shrink monorepo-soak / tmp-dual-ci
+
+| Field | Value |
+|-------|--------|
+| **Completed** | 2026-08-08 |
+| **Result** | soft-ladder committed on `E:\cva6` master (`a9ee4b143`); monorepo-soak APPLIED.md; SS serialize documented |
+| **Next was** | iter-004 AMO spin |
 
 ### iter-002 — Monorepo-soak RTL sync + cont.## cross-map
 

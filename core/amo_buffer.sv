@@ -20,6 +20,10 @@ module amo_buffer #(
     input logic clk_i,   // Clock
     input logic rst_ni,  // Asynchronous reset active low
     input logic flush_i, // pipeline flush
+    // Soft-ladder B1 (b1-amo-spin-lock / hang-7): younger-cancel can drop an
+    // already-posted AMO at commit without flush_ex. Kill the depth-1 entry so
+    // subsequent correct-path amoadd (OpenSBI spin_lock) is not wedged.
+    input logic cancel_i,
 
     input logic valid_i,  // AMO is valid
     output logic ready_o,  // AMO unit is ready
@@ -74,9 +78,9 @@ module amo_buffer #(
   assign amo_data_in.paddr = paddr_i;
   assign amo_data_in.size = data_size_i;
 
-  // only flush if we are currently not committing the AMO
-  // e.g.: it is not speculative anymore
-  assign flush_amo_buffer = flush_i & !amo_valid_commit_i;
+  // Flush on full pipeline flush *or* younger-cancel of the buffered AMO.
+  // Never flush while the AMO is non-speculative at commit (cache request live).
+  assign flush_amo_buffer = (flush_i | cancel_i) & !amo_valid_commit_i;
 
   cva6_fifo_v3 #(
       .DEPTH  (1),

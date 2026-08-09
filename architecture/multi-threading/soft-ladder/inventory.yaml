@@ -70,7 +70,7 @@ sites:
   - id: b1-amo-spin-lock
     bucket: B1
     priority: 1
-    status: open
+    status: in_progress
     ladder: cont.47-51
     soft_form: >
       NOP jal spin_lock/unlock in sbi_scratch_alloc_offset, heap free/used,
@@ -83,6 +83,10 @@ sites:
       - core/issue_read_operands.sv
       - core/scoreboard.sv
     monorepo_soak_note: "Hang-1..3 AMO/interconnect fixed historically; SA spin residual still open under DI OpenSBI"
+    rtl_progress: >
+      2026-08-08 iter-004: amo_buffer.cancel_i kills younger-cancelled AMO
+      (no flush_ex on mispredict left depth-1 wedged); SS AMO port-0 only;
+      verif/tests/custom/multicore/mini_amoadd_w_spin.S scaffold.
     verif_idea: >
       Bare-metal: amoadd.w loop + dual-issue neighbor ops; then OpenSBI SA
       without spin nops.

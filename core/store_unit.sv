@@ -413,12 +413,20 @@ module store_unit
 
   logic store_buffer_valid, amo_buffer_valid;
   logic store_buffer_ready, amo_buffer_ready;
+  // Soft-ladder B1: TID of AMO currently held in amo_buffer (for cancel kill).
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0] amo_tid_q;
+  logic                             amo_cancel;
 
   // multiplex between store unit and amo buffer
   assign store_buffer_valid = st_valid & (!CVA6Cfg.RVA || (amo_op_q == AMO_NONE));
-  assign amo_buffer_valid = st_valid & (CVA6Cfg.RVA && (amo_op_q != AMO_NONE));
+  // Do not post an already-cancelled AMO (hang-7 younger-cancel race).
+  assign amo_buffer_valid = st_valid & (CVA6Cfg.RVA && (amo_op_q != AMO_NONE)) &
+                            !cancelled_mask_i[trans_id_q];
 
   assign st_ready = store_buffer_ready & amo_buffer_ready;
+  // Kill buffered AMO when its SB entry is younger-cancelled and not yet at commit.
+  // ready_o is fifo empty: !ready ⇒ occupancy=1.
+  assign amo_cancel = CVA6Cfg.RVA && !amo_buffer_ready && cancelled_mask_i[amo_tid_q];
 
   // ---------------
   // Store Queue
@@ -473,6 +481,7 @@ module store_unit
         .clk_i,
         .rst_ni,
         .flush_i,
+        .cancel_i          (amo_cancel),
         .valid_i           (amo_buffer_valid),
         .ready_o           (amo_buffer_ready),
         .paddr_i           (paddr_i),
@@ -511,6 +520,7 @@ module store_unit
       cbo_op_q       <= ariane_pkg::CBO_NONE;
       cboz_beat_q    <= '0;
       cboz_base_q    <= '0;
+      amo_tid_q      <= '0;
     end else begin
       state_q        <= state_d;
       st_be_q        <= st_be_n;
@@ -528,6 +538,10 @@ module store_unit
       cbo_op_q       <= cbo_op_d;
       cboz_beat_q    <= cboz_beat_d;
       cboz_base_q    <= cboz_base_d;
+      // Remember TID of AMO living in the depth-1 buffer (for cancel kill).
+      if (CVA6Cfg.RVA && amo_buffer_valid) begin
+        amo_tid_q <= trans_id_q;
+      end
     end
   end
 

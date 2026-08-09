@@ -21,6 +21,7 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Also check | Dual-issue of AMO with following load/store/ALU; commit `amo_valid_commit` |
 | Directed test sketch | `amoadd.w` to shared word; pair with independent ALU dual-issue; then two-thread later |
 | Retire criterion | Remove all freelist/SA spin NOP4 from `mk_plat_skip.py` |
+| **iter-004 fix (in tree)** | Hang-7 younger-cancel + no `flush_ex` on mispredict left cancelled AMO in depth-1 `amo_buffer` forever (`ready_o=0`). Fix: `cancel_i` flush when `cancelled_mask[tid]` and not yet at commit; skip push if already cancelled; AMO issue port-0 only under `SuperscalarEn`. Test: `verif/tests/custom/multicore/mini_amoadd_w_spin.S`. OpenSBI peel still needs lab re-soak. |
 
 ### LR/SC / `atomic_cmpxchg` (priority 1)
 

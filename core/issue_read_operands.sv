@@ -962,6 +962,15 @@ module issue_read_operands
       for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
         if (!issue_ack_o[p-1]) issue_ack_o[p] = 1'b0;
       end
+      // Soft-ladder B1 (b1-amo-spin-lock): AMO only on issue port 0 under SS.
+      // Port-1 AMO + hang-7 younger-cancel left amo_buffer wedged (depth 1,
+      // no flush_ex on mispredict). store_unit cancel kill recovers that;
+      // keep AMO serial for commit/amo_valid_commit_o coupling.
+      if (CVA6Cfg.RVA) begin
+        for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
+          if (ariane_pkg::is_amo(issue_instr_i[p].op)) issue_ack_o[p] = 1'b0;
+        end
+      end
     end
   end
 

@@ -261,6 +261,8 @@ module scoreboard #(
           // commit. Wrong-path loads: CF stall + flush_if limit issue;
           // residual wrong-path RF write is preferred over silent drop of
           // callee-saved restores. STORE still cancels (STQ).
+          // Soft-ladder B1: AMO (STORE FU) still cancels — store_unit kills
+          // amo_buffer via cancel_i so depth-1 does not wedge after drop.
           // Mark complete so commit can drop without waiting for WB.
           if (mem_q[cid].sbe.fu != ariane_pkg::LOAD) begin
             mem_n[cid].cancelled = 1'b1;
