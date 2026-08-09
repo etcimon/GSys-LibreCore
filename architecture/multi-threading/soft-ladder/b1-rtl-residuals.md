@@ -27,11 +27,12 @@ Promotion order among B1 (from `inventory.yaml` priority):
 
 | Item | Detail |
 |------|--------|
-| Soft evidence | `atomic_cmpxchg` body = `ld; bne; sd; ret` (cont.50) |
+| Soft evidence | `atomic_cmpxchg` body = `ld; bne; sd; ret` (cont.50) at `0x800086c0` |
 | Fail pin | Real `lr.d`/`sc.d` hang; cookie incomplete (`51b1c001` class) |
 | Primary RTL | LSU reservation set, SC fail/success, flush interaction |
 | Directed test sketch | LR; non-conflicting dual-issue op; SC success; LR; store; SC fail |
 | Retire criterion | Delete soft cmpx shim; OpenSBI uses stock atomics |
+| **iter-005 fix (in tree)** | (1) Skip `flush_commit` for `AMO_LR*` so LR does not `flush_ex` the pipe. (2) `lr_sc_pair_q` in issue: after LR until SC, block non-SC STORE so intervening stores cannot clear `axi_riscv_lrsc` exclusive. Helpers `is_amo_lr`/`is_amo_sc`. Test: `mini_lrsc_d.S`. Lab re-soak still required before peeling soft cmpx. |
 
 ### CSR expected-trap (priority 2)
 

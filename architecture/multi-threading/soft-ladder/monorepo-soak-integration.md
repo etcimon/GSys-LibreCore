@@ -130,8 +130,8 @@ After sync: `inventory.yaml` mark related AMOCAS items as rtl-landed; keep B1 op
 |------|-------|--------|
 | **002** | Confirm AMOCAS + dual-issue landings elaborate; dual-iss smoke | monorepo-soak AMOCAS |
 | **003** | soft-ladder commit + monorepo-soak APPLIED cleanup | landed `a9ee4b143` |
-| **004** | `b1-amo-spin-lock` amo_buffer cancel kill + directed test | **in progress** (RTL in tree; OpenSBI peel pending re-soak) |
-| **005** | `b1-lrsc-cmpxchg` | cont.49–50 |
+| **004** | `b1-amo-spin-lock` amo_buffer cancel kill + directed test | RTL landed `47572e98c`; OpenSBI peel pending re-soak |
+| **005** | `b1-lrsc-cmpxchg` no-LR-flush + LR→SC store barrier | **in progress** (RTL in tree) |
 | **006** | FDT dual residual (hang-6 family / lenp) | hang progress + cont.44 |
 | **007** | B2 source profile shrink mk_plat_skip | b2-firmware-policy |
 

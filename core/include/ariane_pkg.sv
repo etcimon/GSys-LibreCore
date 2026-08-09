@@ -640,6 +640,14 @@ package ariane_pkg;
     endcase
   endfunction
 
+  // Soft-ladder B1: LR vs SC classification (exclusive pair helpers)
+  function automatic logic is_amo_lr(fu_op op);
+    return (op == AMO_LRW) || (op == AMO_LRD);
+  endfunction
+  function automatic logic is_amo_sc(fu_op op);
+    return (op == AMO_SCW) || (op == AMO_SCD);
+  endfunction
+
   function automatic logic is_amo(fu_op op);
     case (op) inside
       [AMO_LRW : AMO_MINDU], AMO_CASW, AMO_CASD, AMO_CASQ: begin

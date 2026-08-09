@@ -9,7 +9,7 @@ Status: **scaffold** — tests listed are planned; mark **landed** when in-tree.
 | Inventory id | Test sketch | Status | Suite hook |
 |--------------|-------------|--------|------------|
 | `b1-amo-spin-lock` | `amoadd.w.aqrl` ticket-style + ALU/c.mv/stack filler | **landed scaffold** `verif/tests/custom/multicore/mini_amoadd_w_spin.S` | wire dual-iss / smt2 DI harness |
-| `b1-lrsc-cmpxchg` | LR; filler ops; SC success; LR; store; SC fail | planned | dual-iss-safe (no Zacas) |
+| `b1-lrsc-cmpxchg` | `lr.d`/`sc.d` success + orphan SC fail | **landed scaffold** `verif/tests/custom/multicore/mini_lrsc_d.S` | dual-iss / smt2 DI harness |
 | `b1-csr-expected-trap` | illegal CSR then `csrw mtvec`; check handler / no silent skip | planned | CSR / custom |
 | `b1-fdt-lenp-store` | store word via pointer that is dual-issued with address math | planned | custom |
 | `b1-dual-cmv-s3` | pair `c.mv` + live `s3` consumer | planned | custom |

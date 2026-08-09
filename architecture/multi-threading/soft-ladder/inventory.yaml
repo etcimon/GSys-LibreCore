@@ -95,16 +95,22 @@ sites:
   - id: b1-lrsc-cmpxchg
     bucket: B1
     priority: 1
-    status: open
+    status: in_progress
     ladder: cont.49-50
     soft_form: >
       atomic_cmpxchg replaced by ld/bne/sd shim (non-LR/SC); finish uses natural jal.
     pin: "real lr.d/sc.d cmpxchg → hang, no 51b1babe"
     rtl_loci:
+      - core/commit_stage.sv
+      - core/issue_read_operands.sv
       - core/load_store_unit.sv
       - core/store_unit.sv
-      - core/load_unit.sv
       - core/amo_buffer.sv
+      - core/include/ariane_pkg.sv
+    rtl_progress: >
+      2026-08-08 iter-005: no flush_commit after LR; lr_sc_pair_q blocks
+      non-SC STORE between LR and SC; is_amo_lr/is_amo_sc helpers;
+      verif/tests/custom/multicore/mini_lrsc_d.S. Production ELF still soft ld/sd.
     verif_idea: >
       Bare-metal LR/SC success + sc-fail path under DI; then restore real
       atomic_cmpxchg body in OpenSBI build (delete shim).

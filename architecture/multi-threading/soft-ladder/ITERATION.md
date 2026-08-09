@@ -3,28 +3,36 @@
 Append-only. One **primary** residual (or tightly coupled pair) per iteration.
 Template at bottom.
 
-**Active:** `iter-004` (B1 AMO spin_lock / amo_buffer cancel).
+**Active:** `iter-005` (B1 LR/SC exclusive pair).
 
 ---
 
 ## Active iteration
 
-### iter-004 — AMO spin_lock residual: amo_buffer younger-cancel kill
+### iter-005 — LR/SC: no flush after LR + issue barrier to SC
 
 | Field | Value |
 |-------|--------|
 | **Started** | 2026-08-08 |
 | **Bucket** | B1 |
-| **Primary ids** | `b1-amo-spin-lock` |
-| **Hypothesis** | Hang-7 younger-cancel marks AMO cancelled; commit_drop never asserts `amo_valid_commit`; mispredict does not `flush_ex`; depth-1 `amo_buffer` stays full → later OpenSBI `spin_lock`/`amoadd.w` wedges (`mepc=0x2` class) |
-| **I3 Fix** | `amo_buffer.cancel_i` + `store_unit` TID cancel; skip push if already cancelled; SS AMO port-0 only; directed `mini_amoadd_w_spin.S` |
-| **I4 Verify** | Directed bare-metal under DI when harness wired; OpenSBI cont.47 re-soak with real SA locks (peel spin NOP) still pending lab soak |
-| **I5 Retire** | partial — keep spin NOP in `mk_plat_skip` until OpenSBI cookie green |
-| **I6 Next** | Re-soak cont.47 real locks; if green peel SA/heap spin nops; else `b1-lrsc-cmpxchg` |
+| **Primary ids** | `b1-lrsc-cmpxchg` |
+| **Hypothesis** | Real OpenSBI `atomic_cmpxchg` LR/SC hangs because (1) `flush_commit` after every AMO including LR restarts the pipe and (2) intervening STORE under DI can clear `axi_riscv_lrsc` reservation so SC fails forever. Production ELF uses soft `ld/bne/sd` (cont.50). |
+| **I3 Fix** | Skip `flush_commit` for LR; `lr_sc_pair_q` blocks non-SC STORE issue until SC or flush; `is_amo_lr`/`is_amo_sc` helpers; `mini_lrsc_d.S` |
+| **I4 Verify** | Directed LR/SC when harness wired; OpenSBI peel soft cmpx still needs lab re-soak |
+| **I5 Retire** | partial — keep soft cmpx until cookie green with real `lr.d`/`sc.d` |
+| **I6 Next** | Lab re-soak real cmpxchg + real SA locks; then FDT lenp / CSR |
 
 ---
 
 ## Completed iterations
+
+### iter-004 — AMO spin_lock residual: amo_buffer younger-cancel kill
+
+| Field | Value |
+|-------|--------|
+| **Completed** | 2026-08-08 |
+| **Result** | `amo_buffer.cancel_i` + port-0 AMO; `47572e98c` on E:\cva6 master |
+| **Next was** | iter-005 LR/SC |
 
 ### iter-003 — Patch cleanup via in-tree RTL + shrink monorepo-soak / tmp-dual-ci
 

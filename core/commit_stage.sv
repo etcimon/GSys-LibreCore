@@ -345,7 +345,14 @@ module commit_stage
             end
           end else begin
             commit_ack_o[0] = amo_resp_i.ack;
-            flush_commit_o = amo_resp_i.ack;
+            // Soft-ladder B1 (b1-lrsc-cmpxchg): do NOT flush after LR.
+            // Full flush_commit after LR restarts the pipeline (flush_ex) and
+            // under SuperscalarEn/SpeculativeSb can let intervening stores
+            // clear the AXI exclusive reservation before SC, so sc.d fails
+            // forever (OpenSBI atomic_cmpxchg hang). SC and RMW still flush.
+            if (!ariane_pkg::is_amo_lr(commit_instr_i[0].op)) begin
+              flush_commit_o = amo_resp_i.ack;
+            end
             we_gpr_o[0] = amo_resp_i.ack;
           end
         end

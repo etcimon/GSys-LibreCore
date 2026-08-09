@@ -932,6 +932,12 @@ module issue_read_operands
     end
   end
 
+  // Soft-ladder B1 (b1-lrsc-cmpxchg): LR→SC exclusive pair window.
+  // Set on LR issue ack; clear on SC issue or pipeline flush. While live,
+  // block non-SC STORE issue so intervening stores cannot clear AXI exclusive
+  // reservation (axi_riscv_lrsc → forever-fail SC under OpenSBI cmpxchg).
+  logic lr_sc_pair_q, lr_sc_pair_d;
+
   // We can issue an instruction if we do not detect that any other instruction is writing the same
   // destination register.
   // We also need to check if there is an unresolved branch in the scoreboard.
@@ -957,6 +963,13 @@ module issue_read_operands
     if (issue_instr_i[0].fu == CVXIF && !(x_transaction_accepted_o || x_transaction_rejected)) begin
       issue_ack_o[0] = issue_instr_i[0].ex.valid && issue_instr_valid_i[0];
     end
+    if (CVA6Cfg.RVA && lr_sc_pair_q) begin
+      for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
+        if (issue_instr_i[p].fu == STORE && !ariane_pkg::is_amo_sc(issue_instr_i[p].op)) begin
+          issue_ack_o[p] = 1'b0;
+        end
+      end
+    end
     // In-order multi-issue: a bubble on port k kills ports k+1..N-1
     if (CVA6Cfg.SuperscalarEn) begin
       for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
@@ -972,6 +985,23 @@ module issue_read_operands
         end
       end
     end
+  end
+
+  always_comb begin : gen_lr_sc_pair
+    lr_sc_pair_d = lr_sc_pair_q;
+    if (CVA6Cfg.RVA) begin
+      for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
+        if (issue_instr_valid_i[p] && issue_ack_o[p] && !issue_instr_i[p].ex.valid) begin
+          if (ariane_pkg::is_amo_lr(issue_instr_i[p].op)) lr_sc_pair_d = 1'b1;
+          if (ariane_pkg::is_amo_sc(issue_instr_i[p].op)) lr_sc_pair_d = 1'b0;
+        end
+      end
+    end
+    if (flush_i) lr_sc_pair_d = 1'b0;
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) lr_sc_pair_q <= 1'b0;
+    else lr_sc_pair_q <= lr_sc_pair_d;
   end
 
   // ----------------------
