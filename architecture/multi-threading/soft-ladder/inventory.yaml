@@ -72,36 +72,28 @@ sites:
   - id: b1-amo-spin-lock
     bucket: B1
     priority: 1
-    status: in_progress
+    status: rtl-fixed
     ladder: cont.47-51
-    soft_form: >
-      NOP jal spin_lock/unlock in sbi_scratch_alloc_offset, heap free/used,
-      scratch_used (mk_plat_skip NOP4 sites).
-    pin: "real spin_lock → mepc=0x2 / hang under DI"
+    soft_form: "SOFT_SPIN=1 optional bisect only; default natural spins"
+    pin: "real spin_lock → mepc=0x2 / hang under DI (historical)"
     rtl_loci:
       - core/store_unit.sv
       - core/amo_buffer.sv
       - core/load_store_unit.sv
       - core/issue_read_operands.sv
       - core/scoreboard.sv
-    monorepo_soak_note: "Hang-1..3 AMO/interconnect fixed historically; SA spin residual still open under DI OpenSBI"
     rtl_progress: >
-      2026-08-08 iter-004: amo_buffer.cancel_i; AMO port-0 only.
-      iter-007: mini_amoadd_w_spin PASS on work-ver-smt2 (soft-ladder-di-regress).
-      OpenSBI: PEEL_SPIN=1 available; cookie re-soak still required.
-    verif_idea: >
-      Bare-metal: amoadd.w loop + dual-issue neighbor ops; then OpenSBI SA
-      without spin nops.
+      2026-08-08: mini_amoadd_w_spin PASS; OpenSBI cookie green with natural
+      SA/freelist spins (soft malloc). Spin nops retired from default mk_plat_skip.
     retire_when: mk_plat_skip has no spin NOP for SA/heap/scratch
 
   - id: b1-lrsc-cmpxchg
     bucket: B1
     priority: 1
-    status: in_progress
+    status: rtl-fixed
     ladder: cont.49-50
-    soft_form: >
-      atomic_cmpxchg replaced by ld/bne/sd shim (non-LR/SC); finish uses natural jal.
-    pin: "real lr.d/sc.d cmpxchg → hang, no 51b1babe"
+    soft_form: "SOFT_CMPX=1 optional bisect only; default natural lr/sc"
+    pin: "real lr.d/sc.d cmpxchg → hang, no 51b1babe (historical)"
     rtl_loci:
       - core/commit_stage.sv
       - core/issue_read_operands.sv
@@ -110,20 +102,17 @@ sites:
       - core/amo_buffer.sv
       - core/include/ariane_pkg.sv
     rtl_progress: >
-      2026-08-08 iter-005: no LR flush_commit; lr_sc_pair store barrier.
-      iter-007: mini_lrsc_d PASS on work-ver-smt2. OpenSBI PEEL_CMPX=1 available.
-    verif_idea: >
-      Bare-metal LR/SC success + sc-fail path under DI; then restore real
-      atomic_cmpxchg body in OpenSBI build (delete shim).
+      2026-08-08: mini_lrsc_d PASS; OpenSBI cookie green with natural
+      atomic_cmpxchg (PEEL_CMPX). Soft ld/sd shim retired from default mk_plat_skip.
     retire_when: soft atomic_cmpxchg shim removed; real LR/SC green on DI
 
   - id: b1-csr-expected-trap
     bucket: B1
     priority: 2
-    status: in_progress
+    status: rtl-fixed
     ladder: cont.33
-    soft_form: "jal after memset @cd86 → reinit @cd0e (skip CSR probe tail)"
-    pin: "probe CSR dual-issues with csrw mtvec; expected trap never sees illegal"
+    soft_form: "SOFT_CSR=1 optional bisect only; default natural CSR probes"
+    pin: "probe CSR dual-issues with csrw mtvec (historical)"
     rtl_loci:
       - core/issue_stage.sv
       - core/csr_regfile.sv
@@ -131,8 +120,8 @@ sites:
       - core/controller.sv
       - core/commit_stage.sv
     rtl_progress: >
-      2026-08-08 iter-006: unresolved_csr_q issue stall.
-      iter-007: mini_csr_expected_trap PASS on work-ver-smt2. PEEL_CSR=1 available.
+      2026-08-08: mini_csr_expected_trap PASS; OpenSBI cookie green with
+      natural CSR probe tail (PEEL_CSR). cd86 cut retired from default mk_plat_skip.
     verif_idea: "Directed illegal CSR + immediate csrw mtvec under DI"
     retire_when: full sbi_hart_init CSR probes run without cut
 
@@ -161,19 +150,18 @@ sites:
     status: open
     ladder: cont.49-51 / 2026-08-08 ordered-path step2
     soft_form: >
-      cont.49+ real sbi_heap_free/used (nop spins); freelist walk inside
-      sbi_malloc still DI-fragile. Prior cont.42 soft_ret freelist avoided this.
+      Default soft: sbi_malloc/zalloc → NULL; sbi_free ret; heap free/used/scratch
+      space soft_ret_imm. PEEL_MALLOC=1 for real freelist re-soak.
     pin: >
-      OpenSBI cookie soak FAIL: mepc=0x8000f0ba (sbi_malloc freelist sd a0,8(a1))
-      mcause=6 store-access-fault; coldboot_done=1; no 51b1babe. Repro on
-      work-ver-smt2 and work-ver-smt2-si-c14 (default soft ELF, PEEL_SPIN same).
+      Real malloc freelist unlink sd mcause=6 (mepc=0x8000f0ba) on dual-hart smt2.
+      Soft stubs restore 51b1babe cookie (2026-08-08).
     rtl_loci:
       - core/load_unit.sv
       - core/store_buffer.sv
       - core/issue_read_operands.sv
       - core/scoreboard.sv
-    verif_idea: "Bare freelist ticket insert/remove under DI; then OpenSBI cookie"
-    retire_when: default mk_plat_skip cookie green on smt2 DI without soft freelist
+    verif_idea: "Bare freelist ticket insert/remove under DI; PEEL_MALLOC cookie"
+    retire_when: PEEL_MALLOC cookie green on smt2 DI
 
   - id: b1-dual-cmv-s3
     bucket: B1
@@ -187,8 +175,8 @@ sites:
       - core/id_stage.sv
       - core/decoder.sv
     rtl_progress: >
-      2026-08-08 iter-007: mini_dual_cmv_s3 PASS on work-ver-smt2 (SS serialize
-      may already cover bare case). OpenSBI still nops pair; PEEL_CMV=1 available.
+      2026-08-08: mini_dual_cmv_s3 PASS bare. OpenSBI PEEL_CMV=1 FAIL cookie
+      (mepc=0x80004a50 mcause=2 plat_hc=80). Keep cont.19 c.mv nops default.
     verif_idea: "Paired c.mv back-to-back with live s3 consumer"
     retire_when: override loop natural; nops removed
 

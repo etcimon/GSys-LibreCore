@@ -7,12 +7,19 @@ Promotion (do not grow VAs without inventory):
 Buckets: B1 RTL DI residual | B2 firmware policy | B3 sim harness only.
 Order: B1 first → B3 SUCCESS → B2 source profile → retire this script.
 
-Ordered-path step2 peels (env, default off — re-soak under DI before enabling):
-  PEEL_SPIN=1   drop SA/heap/scratch spin NOP4 (needs b1-amo-spin-lock RTL)
-  PEEL_CMPX=1   leave stock atomic_cmpxchg from diag (needs b1-lrsc-cmpxchg RTL)
-  PEEL_CSR=1    drop hart_init CSR probe cut cd86→cd0e (needs b1-csr-expected-trap)
-  PEEL_CMV=1    leave natural c.mv @7312/7314 (needs b1-dual-cmv-s3)
-  PEEL_ALL_B1=1 enables all four (experimental; do not use as default prod)
+Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
+  Default production soft ELF:
+    - natural SA/freelist spins (spin peeled)
+    - natural atomic_cmpxchg LR/SC (cmpx peeled)
+    - natural hart_init CSR probes (csr peeled)
+    - soft malloc/zalloc/free + heap space stubs (freelist open)
+    - nop dual c.mv @7312/14 (cmv still open on OpenSBI)
+  Bisect restores:
+    SOFT_SPIN=1   SA/heap spin NOP4
+    SOFT_CMPX=1   ld/sd atomic_cmpxchg shim
+    SOFT_CSR=1    CSR probe cut cd86→cd0e
+    PEEL_CMV=1    natural c.mv (FAIL cookie 2026-08-08 — keep nops default)
+    PEEL_MALLOC=1 real malloc/zalloc/free
 
 Critical fix vs cont.16: do NOT patch 0x996 with j lottery.
 0x996 is fall-through after sbi_hsm_hart_start_finish — patching it caused
@@ -97,15 +104,15 @@ def _env_peel(name: str) -> bool:
     return v in ("1", "true", "yes", "on")
 
 
-PEEL_ALL_B1 = _env_peel("PEEL_ALL_B1")
-PEEL_SPIN = PEEL_ALL_B1 or _env_peel("PEEL_SPIN")
-PEEL_CMPX = PEEL_ALL_B1 or _env_peel("PEEL_CMPX")
-PEEL_CSR = PEEL_ALL_B1 or _env_peel("PEEL_CSR")
-PEEL_CMV = PEEL_ALL_B1 or _env_peel("PEEL_CMV")
+PEEL_CMV = _env_peel("PEEL_CMV")
+# Default soft-stub malloc/zalloc/free (freelist DI residual on dual-hart smt2).
+PEEL_MALLOC = _env_peel("PEEL_MALLOC")
 print(
     "peel flags: "
-    f"SPIN={int(PEEL_SPIN)} CMPX={int(PEEL_CMPX)} "
-    f"CSR={int(PEEL_CSR)} CMV={int(PEEL_CMV)}"
+    f"SOFT_SPIN={int(_env_peel('SOFT_SPIN'))} "
+    f"SOFT_CMPX={int(_env_peel('SOFT_CMPX'))} "
+    f"SOFT_CSR={int(_env_peel('SOFT_CSR'))} "
+    f"PEEL_CMV={int(PEEL_CMV)} PEEL_MALLOC={int(PEEL_MALLOC)}"
 )
 
 
@@ -404,16 +411,18 @@ for p, w in seq:
 # hart coldboot does not need the lock; memset + extra_offset update stay real.
 # PEEL_SPIN=1: leave diag spin jal (ordered path step2 / b1-amo-spin-lock).
 NOP4 = 0x00000013  # addi x0,x0,0
-if not PEEL_SPIN:
+# SA spins: peeled by default after 2026-08-08 cookie green (PEEL_SPIN=1 soak).
+# SOFT_SPIN=1 restores NOP4 for AMO bisect. Soft malloc avoids freelist races.
+if _env_peel("SOFT_SPIN"):
     for va in (
         0x800039AC,  # jal spin_lock
         0x800039D2,  # jal spin_unlock (ok path)
         0x80003A1C,  # jal spin_unlock (overflow path)
     ):
         struct.pack_into("<I", data, vf(segs, va), NOP4)
-    print("cont.47: real SA; nop spin lock/unlock @39ac/39d2/3a1c")
+    print("SOFT_SPIN: SA spin lock/unlock NOP4")
 else:
-    print("PEEL_SPIN: SA spin lock/unlock natural (from diag)")
+    print("cont.47+: real SA with natural spin lock/unlock (peeled)")
 
 # --- 6) hang preserve-ra ---
 struct.pack_into("<I", data, vf(segs, 0x80000766), jal(0, 0x80000766, HANG))
@@ -502,18 +511,49 @@ def soft_ret_imm(va, imm):
     struct.pack_into("<H", data, vf(segs, va + 4), 0x8082)
 
 
-# cont.49–51: real heap free/used + scratch_used; nop freelist spin locks
-# unless PEEL_SPIN (same AMO residual class as SA).
-if not PEEL_SPIN:
+# cont.49–51 freelist spin sites: natural by default (SOFT_SPIN restores NOP4).
+# With soft malloc, free/used/scratch_used are soft_ret_imm below unless PEEL_MALLOC.
+if _env_peel("SOFT_SPIN"):
     struct.pack_into("<I", data, vf(segs, 0x8000F2BE), NOP4)  # heap_free spin_lock
     struct.pack_into("<I", data, vf(segs, 0x8000F2E4), NOP4)  # heap_free spin_unlock
     struct.pack_into("<I", data, vf(segs, 0x8000F314), NOP4)  # heap_used spin_lock
     struct.pack_into("<I", data, vf(segs, 0x8000F33E), NOP4)  # heap_used spin_unlock
     struct.pack_into("<I", data, vf(segs, 0x80003A4E), NOP4)  # scratch_used spin_lock
     struct.pack_into("<I", data, vf(segs, 0x80003A62), NOP4)  # scratch_used spin_unlock
-    print("cont.51: real heap free+used+scratch_used; nop freelist spins")
+    print("SOFT_SPIN: freelist/scratch spin NOP4")
 else:
-    print("PEEL_SPIN: freelist/scratch spins natural (from diag)")
+    print("cont.51+: freelist/scratch spins natural (peeled)")
+
+# b1-heap-freelist-malloc (ordered path 2026-08-08): dual-hart smt2 + spin-nop
+# freelist races → sbi_malloc unlink sd mcause=6 (mepc=0xf0ba) after coldboot_done.
+# Soft-stub allocators so cookie path does not walk freelist. Coldboot already
+# completed allocations before hang site; post-coldboot NULL malloc is OK for
+# finish/switch_mode cookie. PEEL_MALLOC=1 restores real malloc/zalloc/free.
+def soft_ret0(va):
+    """c.li a0,0; c.jr ra"""
+    struct.pack_into("<H", data, vf(segs, va), 0x4501)  # c.li a0,0
+    struct.pack_into("<H", data, vf(segs, va + 2), 0x8082)  # c.jr ra
+
+
+def soft_ret_void(va):
+    """c.jr ra"""
+    struct.pack_into("<H", data, vf(segs, va), 0x8082)
+
+
+if not PEEL_MALLOC:
+    soft_ret0(0x8000F04C)  # sbi_malloc → NULL
+    soft_ret0(0x8000F176)  # sbi_zalloc → NULL
+    soft_ret_void(0x8000F1A2)  # sbi_free → ret
+    # Space queries without freelist walk (cont.42 style)
+    soft_ret_imm(0x8000F2AA, 2047)  # sbi_heap_free_space
+    soft_ret_imm(0x8000F2F4, 0)  # sbi_heap_used_space
+    soft_ret_imm(0x80003A3C, 0)  # sbi_scratch_used_space
+    print(
+        "soft malloc/zalloc/free + heap space stubs "
+        "(b1-heap-freelist-malloc; PEEL_MALLOC=1 to restore)"
+    )
+else:
+    print("PEEL_MALLOC: real sbi_malloc/zalloc/free (from diag)")
 
 # cont.42/46: real domain_finalize — natural bb20 (c.sd s9; j bb2c from diag),
 # walk through assigned-bit + scratch-table ld. Soft-skip platform jalr.
@@ -539,15 +579,15 @@ print("cont.46: domain plat→li0; natural bb20; ld hart_ptr @2D40; j bbca")
 struct.pack_into("<H", data, vf(segs, 0x8000AB6A), 0x4501)
 print("cont.35: real console_init; c.li a0,0 @ab6a (skip device jalr)")
 
-# cont.33: real sbi_hart_init — SA, features, memset, then reinit.
-# Soft-skip CSR expected-trap probes unless PEEL_CSR (b1-csr-expected-trap).
-if not PEEL_CSR:
+# cont.33 hart_init CSR probes: natural by default (cookie green 2026-08-08
+# PEEL_CSR soak). SOFT_CSR=1 restores cd86→cd0e cut for bisect.
+if _env_peel("SOFT_CSR"):
     struct.pack_into(
         "<I", data, vf(segs, 0x8000CD86), jal(0, 0x8000CD86, 0x8000CD0E) & 0xFFFFFFFF
     )
-    print("cont.33: real hart_init; skip CSR probes cd86→cd0e reinit")
+    print("SOFT_CSR: skip CSR probes cd86→cd0e reinit")
 else:
-    print("PEEL_CSR: hart_init CSR probe tail natural (from diag)")
+    print("cont.33+: hart_init CSR probe tail natural (peeled)")
 # peeled (not stubbed): 0x470A sse, 0x2EAA dbtr, 0x17CC irqchip, 0x165C ipi,
 # cont.25: 0xC364 fwft, 0x8F22 ecall_init;
 # 0x5A5C tlb, 0x53EC timer, 0xC656 pmp_configure; cont.33: 0xCCCC hart_init
@@ -586,11 +626,11 @@ print(f"soft printf BANR cave {hex(PF_CAVE)}..{hex(pfc)}")
 # Natural ecall at b9c
 struct.pack_into("<I", data, vf(segs, 0x80000B9C), 0x386080EF)  # jal 80008f22 ecall_init
 
-# cont.50: soft atomic_cmpxchg without LR/SC unless PEEL_CMPX (b1-lrsc-cmpxchg).
-# PEEL_CMPX leaves diag body (lr.d/sc.d) in place.
+# cont.50 atomic_cmpxchg: natural LR/SC by default (cookie green 2026-08-08
+# PEEL_CMPX soak). SOFT_CMPX=1 restores ld/sd shim for LR/SC bisect.
 A1, A2 = 11, 12
 CMPX = 0x800086C0
-if not PEEL_CMPX:
+if _env_peel("SOFT_CMPX"):
     cpc_cx = CMPX
     cxseq = []
 
@@ -606,9 +646,9 @@ if not PEEL_CMPX:
     cx4(jalr(0, RA, 0))  # ret
     for p, w in cxseq:
         struct.pack_into("<I", data, vf(segs, p), w)
-    print(f"cont.50: soft atomic_cmpxchg ld/sd @{hex(CMPX)}..{hex(cpc_cx)}")
+    print(f"SOFT_CMPX: atomic_cmpxchg ld/sd @{hex(CMPX)}..{hex(cpc_cx)}")
 else:
-    print("PEEL_CMPX: atomic_cmpxchg natural LR/SC (from diag)")
+    print("cont.50+: atomic_cmpxchg natural LR/SC (peeled)")
 
 # cont.51: switch_mode natural prologue @EF5E..EF6E then fall into SUCCESS
 # cookie cave @EF70 (payload still soft). Finish natural jal switch_mode @F6BC.
@@ -629,19 +669,10 @@ else:
 
 DST.write_bytes(data)
 print("wrote", DST)
-peel_note = []
-if PEEL_SPIN:
-    peel_note.append("SPIN")
-if PEEL_CMPX:
-    peel_note.append("CMPX")
-if PEEL_CSR:
-    peel_note.append("CSR")
-if PEEL_CMV:
-    peel_note.append("CMV")
-if peel_note:
-    print(f"expect DI re-soak with peels: {','.join(peel_note)}")
-else:
-    print("expect SI/DI: 51b1babe + BANR (cont.51 default soft ladder)")
+print(
+    "expect SI/DI: 51b1babe + BANR "
+    f"(soft_malloc={int(not PEEL_MALLOC)} soft_cmv={int(not PEEL_CMV)})"
+)
 
 r = subprocess.run(
     [

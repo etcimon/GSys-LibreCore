@@ -25,17 +25,18 @@ python tmp-dual-ci/mk_plat_skip.py
 # Run under Variane DI (g6lc64_smt2 / work-ver-smt2) with CVA6_TRAP_DUMP=1
 ```
 
-## Ordered path step2 peels (env, default off)
+## Default soft ELF (2026-08-08)
 
-| Env | Effect | Needs |
-|-----|--------|--------|
-| `PEEL_SPIN=1` | no SA/heap/scratch spin NOP4 | b1-amo-spin-lock RTL |
-| `PEEL_CMPX=1` | no soft ld/sd cmpx (diag LR/SC) | b1-lrsc-cmpxchg RTL |
-| `PEEL_CSR=1` | no CSR probe cut after memset | b1-csr-expected-trap RTL |
-| `PEEL_CMV=1` | natural c.mv @7312/14 | b1-dual-cmv-s3 |
-| `PEEL_ALL_B1=1` | all four (experimental) | all B1 minis green |
+| Item | Default | Bisect restore |
+|------|---------|----------------|
+| SA / freelist spins | **natural** (peeled) | `SOFT_SPIN=1` |
+| atomic_cmpxchg | **natural LR/SC** (peeled) | `SOFT_CMPX=1` |
+| hart_init CSR probes | **natural** (peeled) | `SOFT_CSR=1` |
+| malloc/zalloc/free | **soft NULL/ret** | `PEEL_MALLOC=1` |
+| dual c.mv @7312/14 | **nop** (still open) | `PEEL_CMV=1` (fails cookie) |
 
-Step1 directed soak: `bash verif/regress/soft-ladder-di-regress.sh`.
+Cookie gate: `bash verif/regress/soft-ladder-opensbi-soak.sh`  
+Step1 directed: `bash verif/regress/soft-ladder-di-regress.sh`
 
 ## Retirement
 

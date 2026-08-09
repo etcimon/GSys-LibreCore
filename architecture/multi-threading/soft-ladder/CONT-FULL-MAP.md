@@ -124,15 +124,13 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
 Checklist:
 
 ```text
-[x] step1 soft-ladder-di-regress (4 minis) under work-ver-smt2 — 2026-08-08 PASS 4/4
-[!] step2 baseline cookie on work-ver-smt2 / smt2-si-c14 — FAIL (no 51b1babe)
-    hang: mepc=0x8000f0ba (sbi_malloc freelist sd) mcause=6 wfi=1 coldboot_done=1
-    trapdump [1000]=mepc not cookie; harness "*** SUCCESS *** tohost=0" is NOT green
-    gate: verif/regress/soft-ladder-opensbi-soak.sh (strict [1000]=51b1babe only)
-[ ] PEEL_SPIN → cookie green (blocked until baseline cookie green)
-[ ] PEEL_CMPX → cookie green
-[ ] PEEL_CSR → cookie green
-[ ] PEEL_CMV → cookie green (directed dual_cmv green; OpenSBI still soft)
+[x] step1 soft-ladder-di-regress (4 minis) under work-ver-smt2 — PASS 4/4
+[x] step2 cookie baseline (soft malloc + natural spins/cmpx/CSR) — PASS 51b1babe
+[x] PEEL_SPIN / natural spins → cookie green (default)
+[x] PEEL_CMPX / natural LRSC → cookie green (default)
+[x] PEEL_CSR / natural CSR probes → cookie green (default)
+[!] PEEL_CMV → FAIL (mepc=0x4a50 mcause=2); keep c.mv nops
+[ ] PEEL_MALLOC → real freelist (b1-heap-freelist-malloc)
 [ ] real sbi_printf (FDT lenp)
 [ ] domain full walk; switch_mode payload
 [ ] mk_plat_skip empty → retire

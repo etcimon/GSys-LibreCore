@@ -18,9 +18,9 @@ Template at bottom.
 | **Primary ids** | all in_progress B1; `b3-mk-plat-skip-oracle` |
 | **Hypothesis** | Landed RTL needs a single soak command and optional OpenSBI peels without hand-editing VAs |
 | **I3 Fix** | `soft-ladder-di-regress.sh`; dual-iss `SOFT_LADDER=1`; `mk_plat_skip` `PEEL_SPIN/CMPX/CSR/CMV` |
-| **I4 Verify** | step1 **PASS 4/4**; step2 baseline cookie **FAIL** freelist malloc |
-| **I5 Retire** | none |
-| **I6 Next** | **b1-heap-freelist-malloc** (restore cookie) then PEEL_SPIN… |
+| **I4 Verify** | soft malloc restores cookie; SPIN/CMPX/CSR peeled green; CMV fail |
+| **I5 Retire** | spin/cmpx/csr nops removed from default mk_plat_skip |
+| **I6 Next** | PEEL_MALLOC freelist RTL; dual-c.mv OpenSBI; FDT printf |
 
 ---
 

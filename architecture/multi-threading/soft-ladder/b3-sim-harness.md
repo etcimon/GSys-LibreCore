@@ -43,10 +43,11 @@ Document in soak scripts: **cookie wins over tohost FAIL** for soft-ladder DI ru
 | `verif/regress/soft-ladder-di-residuals.md` | Test table + gate commands |
 | `verif/regress/smt-linux-boot-path.*` | SMT2 Linux path |
 
-**Note (2026-08-08):** On `work-ver-smt2` / `smt2-si-c14`, default soft ELF ends
-`coldboot_done=1` then store-faults in `sbi_malloc` freelist (`mepc=0x8000f0ba`
-mcause=6) — **no cookie**. Harness may print `SUCCESS (tohost=0)` on timeout;
-soak script ignores that. Fix freelist residual before PEEL_* soaks.
+**Note (2026-08-08):** Real freelist/`sbi_malloc` on dual-hart smt2 store-faults
+(`mepc=0x8000f0ba` mcause=6). Default `mk_plat_skip` soft-stubs malloc/zalloc/free
+(+ heap space queries). Cookie **green** with soft malloc + natural spins/cmpx/CSR.
+`PEEL_MALLOC=1` re-soaks freelist; `PEEL_CMV=1` still fails cookie. Harness
+`SUCCESS (tohost=0)` without `[1000]=…51b1babe` is **not** green.
 
 ## Retirement of `mk_plat_skip`
 
