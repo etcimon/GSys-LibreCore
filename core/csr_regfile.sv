@@ -188,6 +188,13 @@ module csr_regfile
     output logic dcache_en_o,
     // Accelerator memory consistent mode - ACC_DISPATCHER
     output logic acc_cons_en_o,
+    // Xg6lcai AI CSR sideband (CVXIF coprocessor seam B). Tie inputs 0 when unused.
+    // aicfg / ais are owned here; the coprocessor reads them and may write setcfg / dirty.
+    output logic [CVA6Cfg.XLEN-1:0] ai_aicfg_o,
+    output logic [1:0]              ai_ais_o,
+    input  logic                    dirty_ai_state_i,
+    input  logic                    ai_setcfg_we_i,
+    input  logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata_i,
     // read/write address to performance counter module - PERF_COUNTERS
     output logic [11:0] perf_addr_o,
     // write data to performance counter module - PERF_COUNTERS
@@ -2343,6 +2350,20 @@ module csr_regfile
     if (CVA6Cfg.RVV && dirty_v_state_i) begin
       mstatus_d.vs = riscv::Dirty;
     end
+    // AI coprocessor → CSR writeback (setcfg grant + dirty)
+    if (CVA6Cfg.AiCfg.MatrixEn) begin
+      if (ai_setcfg_we_i) begin
+        aicfg_d = ai_setcfg_wdata_i;
+        aicfg_d[19:16] = 4'd1;  // version RO
+        if (!CVA6Cfg.AiCfg.Int4En) aicfg_d[21:20] = 2'b00;
+        if (!CVA6Cfg.AiCfg.Sparse24En) aicfg_d[22] = 1'b0;
+        aistatus_d[7:6] = 2'b11;  // Dirty
+      end
+      if (dirty_ai_state_i) begin
+        aistatus_d[7:6] = 2'b11;  // Dirty
+        aistatus_d[1]   = 1'b1;   // acc dirty sticky
+      end
+    end
     // AI-X: mstatus.xs is a read-only summary of aistatus.ais when the AI plane
     // is present; otherwise forced Off (spec-required hardwire). Writes to xs
     // are ignored (see mstatus/vsstatus write arms above).
@@ -3158,6 +3179,9 @@ module csr_regfile
 `endif
   assign dcache_en_o = dcache_q[0];
   assign acc_cons_en_o = CVA6Cfg.EnableAccelerator ? acc_cons_q[0] : 1'b0;
+  // Xg6lcai sideband to CVXIF coprocessor
+  assign ai_aicfg_o = CVA6Cfg.AiCfg.MatrixEn ? aicfg_q : '0;
+  assign ai_ais_o   = CVA6Cfg.AiCfg.MatrixEn ? aistatus_q[7:6] : 2'b00;
 
   // determine if mprv needs to be considered if in debug mode
   assign mprv = (CVA6Cfg.DebugEn && debug_mode_q && !dcsr_q.mprven) ? 1'b0 : mstatus_q.mprv;

@@ -371,6 +371,12 @@ module cva6
     output cvxif_req_t cvxif_req_o,
     // CVXIF response - SUBSYSTEM
     input cvxif_resp_t cvxif_resp_i,
+    // Xg6lcai AI CSR sideband for the CVXIF coprocessor (tie inputs 0 when unused)
+    output logic [CVA6Cfg.XLEN-1:0] ai_aicfg_o,
+    output logic [1:0]              ai_ais_o,
+    input  logic                    dirty_ai_state_i,
+    input  logic                    ai_setcfg_we_i,
+    input  logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata_i,
     // noc request, can be AXI or OpenPiton - SUBSYSTEM
     output noc_req_t noc_req_o,
     // noc response, can be AXI or OpenPiton - SUBSYSTEM
@@ -1543,6 +1549,11 @@ module cva6
       .icache_en_o             (icache_en_csr),
       .dcache_en_o             (dcache_en_csr_nbdcache),
       .acc_cons_en_o           (acc_cons_en_csr),
+      .ai_aicfg_o              (ai_aicfg_o),
+      .ai_ais_o                (ai_ais_o),
+      .dirty_ai_state_i        (dirty_ai_state_i),
+      .ai_setcfg_we_i          (ai_setcfg_we_i),
+      .ai_setcfg_wdata_i       (ai_setcfg_wdata_i),
       .perf_addr_o             (addr_csr_perf),
       .perf_data_o             (data_csr_perf),
       .perf_data_i             (data_perf_csr),

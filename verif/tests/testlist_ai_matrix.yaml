@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: MIT
+# Xg6lcai directed tests. Soft-skip / soft-pass on non-AI packages.
+# Package of record: g6lc64_ai
+
+testlist:
+  - test: ai_csr_aistatus_xs
+    description: aicfg/aistatus CSR + mstatus.xs (AI-X)
+    path: custom/ai/ai_csr_aistatus_xs.S
+  - test: ai_dot4_s8_smoke
+    description: T0 ai.dot4.s8 numerical smoke
+    path: custom/ai/ai_dot4_s8_smoke.S

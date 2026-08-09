@@ -4,10 +4,10 @@
 #
 # Xg6lcai AI matrix plane — config-surface smoke (optional; not default verify).
 #
-# This gate exists because the AI plane's config surface is deliberately OPEN
-# (tier R/T) while its implementation is withheld (tier P case 2). A party
-# without the implementation must still be able to elaborate, discover and
-# verify the seam — this script is what proves that stays true.
+# This gate proves the AI config surface (tier R package + nested AiCfg) stays
+# elaboratable for all packages and that g6lc64_ai normalises correctly.
+# Implementation is on the open path (tier R); this smoke does not require a
+# withheld tree.
 #
 # Stages:
 #   1. contract   — the open interface files exist
@@ -49,6 +49,8 @@ need=(
   core/include/config_pkg.sv
   core/include/build_config_pkg.sv
   core/include/g6lc64_ai_config_pkg.sv
+  core/cvxif_g6lc_ai/g6lc_ai_coprocessor.sv
+  core/cvxif_g6lc_ai/include/g6lc_ai_instr_pkg.sv
   architecture/ai-matrix/README.md
   architecture/ai-matrix/isa-encoding.md
 )

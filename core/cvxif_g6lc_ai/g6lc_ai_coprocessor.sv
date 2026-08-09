@@ -4,13 +4,7 @@
 // Xg6lcai CVXIF coprocessor top (seam B / option B).
 // Instantiated from corev_apu/src/ariane.sv gen_COPRO_G6LC_AI.
 //
-// Reuses the generic instr_decoder from core/cvxif_example/ (already on the
-// flist) with this package's mask/match table. Compressed interface always
-// rejects (isa-encoding.md §1: no 16-bit encodings).
-//
-// Config gates (RequantEn / SparseEn / Queues) and ais!=Off are applied at
-// issue so a refused op becomes illegal-instruction via accept=0 — the only
-// precise trap path CVXIF exposes (core/cvxif_fu.sv).
+// Config gates + ais==Off are applied at issue (accept=0 → illegal-instruction).
 
 module g6lc_ai_coprocessor
   import g6lc_ai_instr_pkg::*;
@@ -36,42 +30,38 @@ module g6lc_ai_coprocessor
     input  logic        clk_i,
     input  logic        rst_ni,
     input  cvxif_req_t  cvxif_req_i,
-    output cvxif_resp_t cvxif_resp_o
+    output cvxif_resp_t cvxif_resp_o,
+    // CSR sideband (csr_regfile via cva6 / ariane)
+    input  logic [XLEN-1:0] aicfg_i,
+    input  logic [1:0]      ais_i,
+    output logic            dirty_ai_state_o,
+    output logic            ai_setcfg_we_o,
+    output logic [XLEN-1:0] ai_setcfg_wdata_o
 );
 
-  // ---- compressed: never accept (no 16-bit Xg6lcai encodings) ------------
-  assign cvxif_resp_o.compressed_ready      = 1'b1;
+  assign cvxif_resp_o.compressed_ready       = 1'b1;
   assign cvxif_resp_o.compressed_resp.accept = 1'b0;
   assign cvxif_resp_o.compressed_resp.instr  = '0;
 
-  // ---- issue / register path ---------------------------------------------
   x_issue_req_t  issue_req;
   x_issue_resp_t issue_resp_raw, issue_resp;
   logic          issue_valid, issue_ready_raw, issue_ready;
   x_register_t   register;
   logic          register_valid;
 
-  registers_t registers;
-  opcode_t    opcode_raw, opcode;
-  hartid_t    issue_hartid;
-  id_t        issue_id;
-  logic [4:0] issue_rd;
+  registers_t  registers;
+  opcode_t     opcode_raw, opcode;
+  hartid_t     issue_hartid;
+  id_t         issue_id;
+  logic [4:0]  issue_rd;
   logic [31:0] issue_instr;
+  logic        gate_ok;
 
-  // Local ais mirror for the illegal gate (must match g6lc_ai_exec reset).
-  // Until CSRs land (AI-X), both sides reset to Initial and this gate is open
-  // after reset; when ais is forced Off by a future CSR write path it will
-  // close. For P1 the exec unit is the sole owner of ais — we approximate the
-  // gate as "always on while MatrixEn" by keeping accept from the table and
-  // applying only the config-group gates here. Full ais Off→illegal needs the
-  // CSR seam so software can write Off; tracked as AI-X.
-  logic gate_ok;
-
-  assign issue_req       = cvxif_req_i.issue_req;
-  assign issue_valid     = cvxif_req_i.issue_valid;
-  assign register        = cvxif_req_i.register;
-  assign register_valid  = cvxif_req_i.register_valid;
-  assign issue_instr     = issue_req.instr;
+  assign issue_req      = cvxif_req_i.issue_req;
+  assign issue_valid    = cvxif_req_i.issue_valid;
+  assign register       = cvxif_req_i.register;
+  assign register_valid = cvxif_req_i.register_valid;
+  assign issue_instr    = issue_req.instr;
 
   instr_decoder #(
       .copro_issue_resp_t(g6lc_ai_instr_pkg::copro_issue_resp_t),
@@ -101,25 +91,20 @@ module g6lc_ai_coprocessor
       .rd_o            (issue_rd)
   );
 
-  // Config-group gates (isa-encoding.md §3). MatrixEn is implied by this
-  // module only being elaborated under COPRO_G6LC_AI + AiCfg.MatrixEn.
+  // Config-group gates + ais==Off (isa-encoding.md §5/§6)
   always_comb begin
     gate_ok = 1'b1;
+    if (ais_i == AiOff) gate_ok = 1'b0;
     if (is_requant_group(opcode_raw) && !AiCfg.RequantEn) gate_ok = 1'b0;
-    if (is_sparse_group(opcode_raw)  && !AiCfg.SparseEn)  gate_ok = 1'b0;
-    if (is_queue_group(opcode_raw)   && (AiCfg.Queues == 0)) gate_ok = 1'b0;
-    // Seam B: native tile load/store must never accept (TileLdEn forced 0).
-    if (AiCfg.TileLdEn == 1'b0) begin
-      // ldt/stt are not in the table; nothing else to strip.
-    end
+    if (is_sparse_group(opcode_raw) && !AiCfg.SparseEn) gate_ok = 1'b0;
+    if (is_queue_group(opcode_raw) && (AiCfg.Queues == 0)) gate_ok = 1'b0;
   end
 
   always_comb begin
-    issue_resp = issue_resp_raw;
+    issue_resp  = issue_resp_raw;
     issue_ready = issue_ready_raw;
-    opcode = opcode_raw;
+    opcode      = opcode_raw;
     if (issue_valid && issue_resp_raw.accept && !gate_ok) begin
-      // Refuse → illegal-instruction in the core.
       issue_resp.accept        = 1'b0;
       issue_resp.writeback     = '0;
       issue_resp.register_read = '0;
@@ -132,11 +117,9 @@ module g6lc_ai_coprocessor
   assign cvxif_resp_o.issue_resp     = issue_resp;
   assign cvxif_resp_o.register_ready = issue_ready;
 
-  // Fire the exec unit when the decoder accepted and registers are ready.
   logic exec_fire;
   assign exec_fire = issue_valid && issue_ready && issue_resp.accept;
 
-  // ---- execute -----------------------------------------------------------
   logic [XLEN-1:0] result;
   hartid_t         res_hartid;
   id_t             res_id;
@@ -152,21 +135,26 @@ module g6lc_ai_coprocessor
       .id_t       (id_t),
       .registers_t(registers_t)
   ) i_exec (
-      .clk_i      (clk_i),
-      .rst_ni     (rst_ni),
-      .valid_i    (exec_fire),
-      .registers_i(registers),
-      .opcode_i   (opcode),
-      .instr_i    (issue_instr),
-      .hartid_i   (issue_hartid),
-      .id_i       (issue_id),
-      .rd_i       (issue_rd),
-      .result_o   (result),
-      .hartid_o   (res_hartid),
-      .id_o       (res_id),
-      .rd_o       (res_rd),
-      .valid_o    (res_valid),
-      .we_o       (res_we)
+      .clk_i         (clk_i),
+      .rst_ni        (rst_ni),
+      .valid_i       (exec_fire),
+      .registers_i   (registers),
+      .opcode_i      (opcode),
+      .instr_i       (issue_instr),
+      .hartid_i      (issue_hartid),
+      .id_i          (issue_id),
+      .rd_i          (issue_rd),
+      .aicfg_i       (aicfg_i),
+      .ais_i         (ais_i),
+      .setcfg_we_o   (ai_setcfg_we_o),
+      .setcfg_wdata_o(ai_setcfg_wdata_o),
+      .dirty_o       (dirty_ai_state_o),
+      .result_o      (result),
+      .hartid_o      (res_hartid),
+      .id_o          (res_id),
+      .rd_o          (res_rd),
+      .valid_o       (res_valid),
+      .we_o          (res_we)
   );
 
   always_comb begin
@@ -178,7 +166,6 @@ module g6lc_ai_coprocessor
     cvxif_resp_o.result.we     = res_we;
   end
 
-  // Commit kill is ignored in P1 (no long multi-cycle T1 yet that needs kill).
   // verilator lint_off UNUSEDSIGNAL
   logic commit_valid_unused;
   x_commit_t commit_unused;

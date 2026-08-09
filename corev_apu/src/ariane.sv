@@ -107,6 +107,12 @@ module ariane import ariane_pkg::*; #(
 
     cvxif_req_t  cvxif_req;
     cvxif_resp_t cvxif_resp;
+    // Xg6lcai CSR sideband (csr_regfile ↔ AI coprocessor)
+    logic [CVA6Cfg.XLEN-1:0] ai_aicfg;
+    logic [1:0]              ai_ais;
+    logic                    dirty_ai_state;
+    logic                    ai_setcfg_we;
+    logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata;
 
     cva6 #(
       .CVA6Cfg ( CVA6Cfg ),
@@ -144,6 +150,11 @@ module ariane import ariane_pkg::*; #(
       .rvfi_probes_o        ( rvfi_probes_o             ),
       .cvxif_req_o          ( cvxif_req                 ),
       .cvxif_resp_i         ( cvxif_resp                ),
+      .ai_aicfg_o           ( ai_aicfg                  ),
+      .ai_ais_o             ( ai_ais                    ),
+      .dirty_ai_state_i     ( dirty_ai_state            ),
+      .ai_setcfg_we_i       ( ai_setcfg_we              ),
+      .ai_setcfg_wdata_i    ( ai_setcfg_wdata           ),
       .noc_req_o            ( noc_req_o                 ),
       .noc_resp_i           ( noc_resp_i                ),
       .l1_inval_addr_i      ( l1_inval_addr_i           ),
@@ -158,6 +169,9 @@ module ariane import ariane_pkg::*; #(
 
     if (CVA6Cfg.CvxifEn) begin: gen_cvxif
       if (CVA6Cfg.CoproType == config_pkg::COPRO_EXAMPLE) begin: gen_COPRO_EXAMPLE
+        assign dirty_ai_state  = 1'b0;
+        assign ai_setcfg_we    = 1'b0;
+        assign ai_setcfg_wdata = '0;
         cvxif_example_coprocessor #(
           .NrRgprPorts (CVA6Cfg.NrRgprPorts),
           .XLEN (CVA6Cfg.XLEN),
@@ -182,8 +196,6 @@ module ariane import ariane_pkg::*; #(
         );
       end else if (CVA6Cfg.CoproType == config_pkg::COPRO_G6LC_AI) begin: gen_COPRO_G6LC_AI
         // Xg6lcai AI matrix plane, seam B (architecture/ai-matrix/README.md §2).
-        // P1: real CVXIF coprocessor (core/cvxif_g6lc_ai/). Mask/match + T0
-        // execute; T1/T2 groups accept and stub-complete until tile SRAM / DMA.
         g6lc_ai_coprocessor #(
           .NrRgprPorts (CVA6Cfg.X_NUM_RS),  // per-instr RS count (CVXIF X_NUM_RS)
           .XLEN (CVA6Cfg.XLEN),
@@ -205,12 +217,23 @@ module ariane import ariane_pkg::*; #(
           .clk_i                ( clk_i                          ),
           .rst_ni               ( rst_ni                         ),
           .cvxif_req_i          ( cvxif_req                      ),
-          .cvxif_resp_o         ( cvxif_resp                     )
+          .cvxif_resp_o         ( cvxif_resp                     ),
+          .aicfg_i              ( ai_aicfg                       ),
+          .ais_i                ( ai_ais                         ),
+          .dirty_ai_state_o     ( dirty_ai_state                 ),
+          .ai_setcfg_we_o       ( ai_setcfg_we                   ),
+          .ai_setcfg_wdata_o    ( ai_setcfg_wdata                )
         );
       end else begin: gen_COPRO_NONE
+        assign dirty_ai_state  = 1'b0;
+        assign ai_setcfg_we    = 1'b0;
+        assign ai_setcfg_wdata = '0;
         assign cvxif_resp = '{compressed_ready: 1'b1, issue_ready: 1'b1, register_ready: 1'b1, default: '0};
       end
     end else begin: gen_no_cvxif
+      assign dirty_ai_state  = 1'b0;
+      assign ai_setcfg_we    = 1'b0;
+      assign ai_setcfg_wdata = '0;
       assign cvxif_resp = '0;
     end
 
@@ -288,6 +311,12 @@ module ariane import ariane_pkg::*; #(
       .rvfi_probes_o        ( rvfi_probes_o             ),
       .cvxif_req_o          ( acc_req                   ),
       .cvxif_resp_i         ( acc_resp                  ),
+      // AI plane is CVXIF-only (seam B); RVV/acc path leaves sideband idle
+      .ai_aicfg_o           ( /* unused */              ),
+      .ai_ais_o             ( /* unused */              ),
+      .dirty_ai_state_i     ( 1'b0                      ),
+      .ai_setcfg_we_i       ( 1'b0                      ),
+      .ai_setcfg_wdata_i    ( '0                        ),
       .noc_req_o            ( core_noc_req              ),
       .noc_resp_i           ( core_noc_resp             ),
       .l1_inval_addr_i      ( l1_inval_addr_i           ),

@@ -613,6 +613,35 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        // Xg6lcai AI matrix — config surface smoke (package + check_cfg).
+        // Not in defaultSuites. Map: architecture/ai-matrix/README.md · AGENTS-todo AI-1
+        id: "ai-config-smoke",
+        description:
+          "OPTIONAL: Xg6lcai config-surface smoke (g6lc64_ai package, AiCfg defaults/legality).",
+        script: "verif/regress/ai-config-smoke.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvTarget: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
+        // Xg6lcai directed: CSR/AI-X + ai.dot4 contract + optional ELF compile.
+        id: "ai-matrix-directed",
+        description:
+          "OPTIONAL: Xg6lcai directed gate (RTL contract, CSR addr, compile ai_csr/ai_dot4 smokes).",
+        script: "verif/regress/ai-matrix-directed.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvTarget: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "kvm-h-veri",
         description:
           "OPTIONAL: H-edge Variane 3/3 (h_edge_diag/kvm_h_stress/hlv_hsv). Prefers work-ver-stream8.",
