@@ -155,6 +155,26 @@ sites:
     verif_idea: "Stack store of fdt lenp-like pointer under dual-issue; path_offset /cpus"
     retire_when: real sbi_printf green; soft printf cave deleted
 
+  - id: b1-heap-freelist-malloc
+    bucket: B1
+    priority: 1
+    status: open
+    ladder: cont.49-51 / 2026-08-08 ordered-path step2
+    soft_form: >
+      cont.49+ real sbi_heap_free/used (nop spins); freelist walk inside
+      sbi_malloc still DI-fragile. Prior cont.42 soft_ret freelist avoided this.
+    pin: >
+      OpenSBI cookie soak FAIL: mepc=0x8000f0ba (sbi_malloc freelist sd a0,8(a1))
+      mcause=6 store-access-fault; coldboot_done=1; no 51b1babe. Repro on
+      work-ver-smt2 and work-ver-smt2-si-c14 (default soft ELF, PEEL_SPIN same).
+    rtl_loci:
+      - core/load_unit.sv
+      - core/store_buffer.sv
+      - core/issue_read_operands.sv
+      - core/scoreboard.sv
+    verif_idea: "Bare freelist ticket insert/remove under DI; then OpenSBI cookie"
+    retire_when: default mk_plat_skip cookie green on smt2 DI without soft freelist
+
   - id: b1-dual-cmv-s3
     bucket: B1
     priority: 3

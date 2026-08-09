@@ -37,10 +37,16 @@ Document in soak scripts: **cookie wins over tohost FAIL** for soft-ladder DI ru
 | Script | Note |
 |--------|------|
 | `verif/regress/soft-ladder-di-regress.sh` | **Ordered path step1** — B1 four minis on work-ver-smt2 |
+| `verif/regress/soft-ladder-opensbi-soak.sh` | **Step2** OpenSBI cookie; **only** `[1000]=51b1babe` is green |
 | `verif/regress/dual-iss-regress.sh` | Dual-plane; `SOFT_LADDER=1` appends B1 minis |
 | `tmp-dual-ci/mk_plat_skip.py` | Step2 peels via `PEEL_SPIN` / `PEEL_CMPX` / `PEEL_CSR` / `PEEL_CMV` |
 | `verif/regress/soft-ladder-di-residuals.md` | Test table + gate commands |
 | `verif/regress/smt-linux-boot-path.*` | SMT2 Linux path |
+
+**Note (2026-08-08):** On `work-ver-smt2` / `smt2-si-c14`, default soft ELF ends
+`coldboot_done=1` then store-faults in `sbi_malloc` freelist (`mepc=0x8000f0ba`
+mcause=6) — **no cookie**. Harness may print `SUCCESS (tohost=0)` on timeout;
+soak script ignores that. Fix freelist residual before PEEL_* soaks.
 
 ## Retirement of `mk_plat_skip`
 
