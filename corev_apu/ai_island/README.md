@@ -20,10 +20,10 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_cap_window.sv` | read-only capability MMIO | **landed** |
 | `g6lc_ai_addr_check.sv` | per-queue `[base,limit)` + R/W (AI-3) | **landed** |
 | `g6lc_ai_desc_engine.sv` | validate version/op + check all ptrs + complete | **landed** (no GEMM yet) |
-| `g6lc_ai_desc_fetch.sv` | AXI read-only 64 B descriptor fetch | **RTL landed**; xbar port 2 reserved, not yet driven by island |
-| `g6lc_ai_island_top.sv` | reg map + IRQ sticky | **landed** |
+| `g6lc_ai_desc_fetch.sv` | AXI read-only 64 B descriptor fetch | **landed** |
+| `g6lc_ai_island_top.sv` | reg map + IRQ sticky + desc_ptr/fetch | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 |
-| AXI/DMA master + xbar attach | fabric citizen | **port reserved** (`NrSlaves=3`); wire fetch next |
+| AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |
 
 ## SoC map (Variane)
 
@@ -45,14 +45,15 @@ bash verif/regress/ai-matrix-veri.sh          # g6lc64_ai directed suite
 ```
 
 Standalone smoke: cap, good desc, AI-3 OOR/perm, bad version, disabled.  
-SoC: MMIO doorbell + AI-3; sideband enq/poll (phase-2 AI-3); **PLIC-8 IRQ**.  
+SoC: MMIO doorbell + AI-3; sideband enq/poll; **PLIC-8 IRQ**; **DMA desc fetch**
+(`desc_ptr` @ `0x118/11C`, doorbell bit[31]=fetch → `ai_desc_fetch_smoke`).  
 Sideband protocol: after any desc/region MMIO write, load a **different** island
 reg before `ai.enq` (same-addr load-back can STLF; kick is a core wire).
 
 ## Ordering
 
 1. **P3 spine** — descriptor engine + per-queue address check (**done**).
-2. **AXI attach + PLIC-8** (**done**); DMA desc-fetch RTL + xbar port reserved; **wire into island next**.
+2. **AXI attach + PLIC-8 + DMA desc fetch** (**done**).
 3. **I1** — one cluster; freeze `T` / DRAM class / NoC cut.
 4. **I3** — memory system measured.
 5. **I2** — N clusters (must not change latency-SKU results).

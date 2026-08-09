@@ -7,11 +7,12 @@
 // Register map (byte address, 32-bit data):
 //   0x0000..0x00FF  capability window (RO)
 //   0x0100          control  [0]=enable
-//   0x0104          status   [0]=busy, [31:16]=last_status
-//   0x0108          doorbell  write kicks submit; [7:0]=qid, [31:8]=ticket
+//   0x0104          status   [0]=busy, [1]=fetch_busy, [31:16]=last_status
+//   0x0108          doorbell  [7:0]=qid, [30:8]=ticket, [31]=fetch_from_mem
 //   0x010C          done sticky (write 1 clears irq/done sticky)
 //   0x0110          done ticket (RO)
 //   0x0114          done status (RO)
+//   0x0118/0x011C   desc_ptr lo/hi (fetch source when doorbell[31]=1)
 //   0x0120+q*0x20   region: +0 base_lo, +4 base_hi, +8 limit_lo,
 //                            +c limit_hi, +10 perm (write commits region)
 //   0x0140..0x017F  descriptor latch (16×32-bit)
@@ -21,7 +22,13 @@ module g6lc_ai_island_top
   import g6lc_ai_desc_pkg::*;
 #(
     parameter ai_island_cfg_t IslandCfg = AiIslandLatencyDefault,
-    parameter int unsigned    AddrWidth = 64
+    parameter int unsigned    AddrWidth = 64,
+    // When 1: instantiate AXI desc-fetch (SoC). Standalone spine keeps 0.
+    parameter bit             EnableDmaFetch = 1'b0,
+    parameter int unsigned    AxiDataWidth = 64,
+    parameter int unsigned    AxiIdWidth   = 4,
+    parameter type            axi_req_t    = logic,
+    parameter type            axi_resp_t   = logic
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
@@ -38,13 +45,17 @@ module g6lc_ai_island_top
     // *different* island reg (not the just-written addr — STLF can hide the
     // miss) so AXI BRESP has retired, then ai.enq. fence alone is not enough
     // — sideband is a core wire and races the peripheral write.
+    // Sideband does not trigger DMA fetch (doorbell[31] path only for P3).
     input  logic        sb_enq_valid_i,
     input  logic [7:0]  sb_qid_i,
     input  logic [31:0] sb_ticket_i,
     // Completion feedback for ai.poll (in-order tickets)
     output logic [31:0] sb_last_ticket_o,
     output logic [15:0] sb_last_status_o,
-    output logic        sb_has_completion_o
+    output logic        sb_has_completion_o,
+    // AXI master for desc fetch (tie req idle / resp ready when EnableDmaFetch=0)
+    output axi_req_t    axi_dma_req_o,
+    input  axi_resp_t   axi_dma_resp_i
 );
 
   localparam int unsigned NumQueues = (IslandCfg.Queues == 0) ? 1 : IslandCfg.Queues;
@@ -76,16 +87,20 @@ module g6lc_ai_island_top
   logic              irq_sticky_q;
   logic [31:0]       done_ticket_hold_q;
   logic [15:0]       done_status_hold_q;
+  logic [63:0]       desc_ptr_q;
 
   logic [63:0] base_q [NumQueues];
   logic [63:0] limit_q[NumQueues];
   logic [1:0]  perm_q [NumQueues];
 
   // ------------------------------------------------------------------ check / engine
-  logic        submit_ready, done_valid, busy;
+  logic        submit_ready, done_valid, busy_engine;
   logic [31:0] done_ticket;
   logic [15:0] done_status, last_status;
   logic        done_irq;
+  logic        fetch_busy;
+  logic        busy;
+  assign busy = busy_engine || fetch_busy;
 
   logic                  prog_we;
   logic [QidWidth-1:0]   prog_qid;
@@ -158,6 +173,45 @@ module g6lc_ai_island_top
     end
   end
 
+  // ------------------------------------------------------------------ DMA desc fetch
+  logic        fetch_start_q;
+  logic        fetch_ready, fetch_done, fetch_err;
+  desc_bits_t  fetch_desc;
+  logic        fetch_err_complete_q;  // one-cycle pulse after bus error
+
+  if (EnableDmaFetch) begin : gen_dma_fetch
+    g6lc_ai_desc_fetch #(
+        .AddrWidth (AddrWidth),
+        .DataWidth (AxiDataWidth),
+        .IdWidth   (AxiIdWidth),
+        .axi_req_t (axi_req_t),
+        .axi_resp_t(axi_resp_t)
+    ) i_fetch (
+        .clk_i,
+        .rst_ni,
+        .start_i (fetch_start_q),
+        .addr_i  (AddrWidth'(desc_ptr_q)),
+        .ready_o (fetch_ready),
+        .done_o  (fetch_done),
+        .err_o   (fetch_err),
+        .desc_o  (fetch_desc),
+        .axi_req_o  (axi_dma_req_o),
+        .axi_resp_i (axi_dma_resp_i)
+    );
+    assign fetch_busy = !fetch_ready;
+  end else begin : gen_no_dma_fetch
+    assign fetch_ready = 1'b1;
+    assign fetch_done  = 1'b0;
+    assign fetch_err   = 1'b0;
+    assign fetch_desc  = '0;
+    assign fetch_busy  = 1'b0;
+    assign axi_dma_req_o = '0;
+    // verilator lint_off UNUSEDSIGNAL
+    logic _ax;
+    assign _ax = |axi_dma_resp_i;
+    // verilator lint_on UNUSEDSIGNAL
+  end
+
   g6lc_ai_desc_engine #(.NumQueues(NumQueues), .AddrWidth(AddrWidth)) i_engine (
       .clk_i, .rst_ni,
       .testmode_i      (testmode_i),
@@ -188,7 +242,7 @@ module g6lc_ai_island_top
       .check_need_r_o  (check_need_r),
       .check_need_w_o  (check_need_w),
       .check_ok_i      (check_ok),
-      .busy_o          (busy),
+      .busy_o          (busy_engine),
       .last_status_o   (last_status)
   );
 
@@ -227,6 +281,9 @@ module g6lc_ai_island_top
       irq_sticky_q        <= 1'b0;
       done_ticket_hold_q  <= '0;
       done_status_hold_q  <= '0;
+      desc_ptr_q          <= '0;
+      fetch_start_q       <= 1'b0;
+      fetch_err_complete_q <= 1'b0;
       for (int unsigned i = 0; i < 16; i++) desc_words_q[i] <= '0;
       for (int unsigned q = 0; q < NumQueues; q++) begin
         base_q[q]  <= '0;
@@ -234,8 +291,11 @@ module g6lc_ai_island_top
         perm_q[q]  <= '0;
       end
     end else begin
-      submit_pulse_q <= 1'b0;
+      submit_pulse_q       <= 1'b0;
+      fetch_start_q        <= 1'b0;
+      fetch_err_complete_q <= 1'b0;
 
+      // Engine completion
       if (done_valid) begin
         done_sticky_q      <= 1'b1;
         done_ticket_hold_q <= done_ticket;
@@ -243,18 +303,41 @@ module g6lc_ai_island_top
         if (done_irq) irq_sticky_q <= 1'b1;
       end
 
+      // DMA fetch completion: load latch + submit, or bus-error complete
+      if (EnableDmaFetch && fetch_done) begin
+        if (fetch_err) begin
+          done_sticky_q        <= 1'b1;
+          done_ticket_hold_q   <= db_ticket_q;
+          done_status_hold_q   <= ST_ERR;
+          fetch_err_complete_q <= 1'b1;
+        end else begin
+          for (int unsigned i = 0; i < 16; i++)
+            desc_words_q[i] <= fetch_desc[i*32 +: 32];
+          submit_pulse_q <= 1'b1;
+        end
+      end
+
       if (req_i && we_i) begin
         if (addr_i[15:0] == 16'h0100) begin
           enable_q <= wdata_i[0];
         end else if (addr_i[15:0] == 16'h0108) begin
-          db_qid_q       <= QidWidth'(wdata_i[7:0]);
-          db_ticket_q    <= {8'h0, wdata_i[31:8]};
-          submit_pulse_q <= 1'b1;
+          db_qid_q    <= QidWidth'(wdata_i[7:0]);
+          db_ticket_q <= {9'h0, wdata_i[30:8]};
+          // [31]=fetch_from_mem (DMA); else immediate submit of latched desc
+          if (EnableDmaFetch && wdata_i[31] && (desc_ptr_q != '0)) begin
+            fetch_start_q <= 1'b1;
+          end else begin
+            submit_pulse_q <= 1'b1;
+          end
         end else if (addr_i[15:0] == 16'h010C) begin
           if (wdata_i[0]) begin
             done_sticky_q <= 1'b0;
             irq_sticky_q  <= 1'b0;
           end
+        end else if (addr_i[15:0] == 16'h0118) begin
+          desc_ptr_q[31:0] <= wdata_i;
+        end else if (addr_i[15:0] == 16'h011C) begin
+          desc_ptr_q[63:32] <= wdata_i;
         end else if (addr_i[15:0] >= 16'h0140 && addr_i[15:0] < 16'h0180) begin
           desc_words_q[addr_i[5:2]] <= wdata_i;
         end else if (addr_i[15:0] >= 16'h0120 && addr_i[15:0] < 16'h0140) begin
@@ -294,11 +377,13 @@ module g6lc_ai_island_top
       rvalid_n = 1'b1;
       unique case (addr_i[15:0])
         16'h0100: rdata_n = {31'h0, enable_q};
-        16'h0104: rdata_n = {last_status, 15'h0, busy};
+        16'h0104: rdata_n = {last_status, 14'h0, fetch_busy, busy};
         16'h0108: rdata_n = {db_ticket_q[23:0], 8'(db_qid_q)};
         16'h010C: rdata_n = {31'h0, done_sticky_q};
         16'h0110: rdata_n = done_ticket_hold_q;
         16'h0114: rdata_n = {16'h0, done_status_hold_q};
+        16'h0118: rdata_n = desc_ptr_q[31:0];
+        16'h011C: rdata_n = desc_ptr_q[63:32];
         default: begin
           if (addr_i[15:0] >= 16'h0140 && addr_i[15:0] < 16'h0180)
             rdata_n = desc_words_q[addr_i[5:2]];
@@ -348,8 +433,9 @@ module g6lc_ai_island_top
 
   // Silence unused
   // verilator lint_off UNUSEDSIGNAL
-  logic _sr;
-  assign _sr = submit_ready;
+  logic _sr, _fec;
+  assign _sr  = submit_ready;
+  assign _fec = fetch_err_complete_q;
   // verilator lint_on UNUSEDSIGNAL
 
 endmodule

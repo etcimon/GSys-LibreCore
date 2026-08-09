@@ -40,6 +40,8 @@ verilator --no-timing -Wall -Wno-fatal -Wno-DECLFILENAME -Wno-UNUSED -Wno-UNOPTF
   "$ROOT/corev_apu/ai_island/g6lc_ai_desc_engine.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_island_top.sv" \
   "$ROOT/verif/tb/ai_island/sim_main.cpp"
+# Note: g6lc_ai_desc_fetch.sv omitted — EnableDmaFetch=0 default; no instance.
+# SoC path pulls fetch via Makefile flist + axi_pkg.
 
 log "run"
 set +e

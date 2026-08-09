@@ -3,11 +3,17 @@
 //
 // APB3 slave in front of g6lc_ai_island_top (simple reg port).
 // Setup phase arms the request; access phase waits for rvalid (1–2 cycles).
+// Optional AXI DMA master for descriptor fetch (EnableDmaFetch).
 
 module g6lc_ai_island_apb
   import g6lc_ai_island_cfg_pkg::*;
 #(
-    parameter ai_island_cfg_t IslandCfg = AiIslandLatencyDefault
+    parameter ai_island_cfg_t IslandCfg = AiIslandLatencyDefault,
+    parameter bit             EnableDmaFetch = 1'b1,
+    parameter int unsigned    AxiDataWidth = 64,
+    parameter int unsigned    AxiIdWidth   = 4,
+    parameter type            axi_req_t    = logic,
+    parameter type            axi_resp_t   = logic
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
@@ -28,7 +34,10 @@ module g6lc_ai_island_apb
     input  logic [31:0] sb_ticket_i,
     output logic [31:0] sb_last_ticket_o,
     output logic [15:0] sb_last_status_o,
-    output logic        sb_has_completion_o
+    output logic        sb_has_completion_o,
+    // AXI DMA (desc fetch)
+    output axi_req_t    axi_dma_req_o,
+    input  axi_resp_t   axi_dma_resp_i
 );
 
   logic        is_req, is_we;
@@ -39,7 +48,14 @@ module g6lc_ai_island_apb
   typedef enum logic [1:0] { S_IDLE, S_REQ, S_WAIT } state_e;
   state_e state_q, state_d;
 
-  g6lc_ai_island_top #(.IslandCfg(IslandCfg)) i_island (
+  g6lc_ai_island_top #(
+      .IslandCfg     (IslandCfg),
+      .EnableDmaFetch(EnableDmaFetch),
+      .AxiDataWidth  (AxiDataWidth),
+      .AxiIdWidth    (AxiIdWidth),
+      .axi_req_t     (axi_req_t),
+      .axi_resp_t    (axi_resp_t)
+  ) i_island (
       .clk_i     (clk_i),
       .rst_ni    (rst_ni),
       .testmode_i(testmode_i),
@@ -55,7 +71,9 @@ module g6lc_ai_island_apb
       .sb_ticket_i         (sb_ticket_i),
       .sb_last_ticket_o    (sb_last_ticket_o),
       .sb_last_status_o    (sb_last_status_o),
-      .sb_has_completion_o (sb_has_completion_o)
+      .sb_has_completion_o (sb_has_completion_o),
+      .axi_dma_req_o       (axi_dma_req_o),
+      .axi_dma_resp_i      (axi_dma_resp_i)
   );
 
   always_comb begin
@@ -103,4 +121,3 @@ module g6lc_ai_island_apb
   end
 
 endmodule
-

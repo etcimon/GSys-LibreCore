@@ -138,6 +138,8 @@ int main(int argc, char **argv) {
   dut->sb_enq_valid_i = 0;
   dut->sb_qid_i = 0;
   dut->sb_ticket_i = 0;
+  // EnableDmaFetch=0 (standalone): AXI ports are 1-bit logic stubs
+  dut->axi_dma_resp_i = 0;
   for (int i = 0; i < 5; i++)
     tick();
   dut->rst_ni = 1;

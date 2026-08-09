@@ -118,12 +118,10 @@ module ariane_testharness #(
     .AXI_USER_WIDTH ( AXI_USER_WIDTH          )
   ) slave[ariane_soc::NrSlaves-1:0]();
 
-  // Port 2: AI island desc-fetch DMA master (NrSlaves=3). Idle until
-  // g6lc_ai_desc_fetch is wired through the island; keeps the xbar port
-  // from floating after the IdWidthSlave bump.
+  // Port 2: AI island desc-fetch DMA master (NrSlaves=3).
+  // Driven from gen_ai_island when MatrixEn; idle otherwise.
   ariane_axi::req_t  ai_dma_req;
   ariane_axi::resp_t ai_dma_resp;
-  assign ai_dma_req = '0;
   `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_req)
   `AXI_ASSIGN_TO_RESP(ai_dma_resp, slave[2])
 
@@ -472,7 +470,13 @@ module ariane_testharness #(
         .PSLVERR   ( ai_pslverr )
     );
 
-    g6lc_ai_island_apb i_ai_island (
+    g6lc_ai_island_apb #(
+        .EnableDmaFetch ( 1'b1 ),
+        .AxiDataWidth   ( AXI_DATA_WIDTH ),
+        .AxiIdWidth     ( ariane_axi_soc::IdWidth ),
+        .axi_req_t      ( ariane_axi::req_t ),
+        .axi_resp_t     ( ariane_axi::resp_t )
+    ) i_ai_island (
         .clk_i     ( clk_i      ),
         .rst_ni    ( ndmreset_n ),
         .testmode_i( test_en    ),
@@ -490,12 +494,15 @@ module ariane_testharness #(
         .sb_ticket_i         ( ai_sb_ticket           ),
         .sb_last_ticket_o    ( ai_isl_last_ticket     ),
         .sb_last_status_o    ( ai_isl_last_status     ),
-        .sb_has_completion_o ( ai_isl_has_completion  )
+        .sb_has_completion_o ( ai_isl_has_completion  ),
+        .axi_dma_req_o       ( ai_dma_req             ),
+        .axi_dma_resp_i      ( ai_dma_resp            )
     );
   end else begin : gen_gpio_err
     assign ai_irq = 1'b0;
     assign ai_isl_last_ticket = '0;
     assign ai_isl_last_status = '0;
+    assign ai_dma_req = '0;
     assign ai_isl_has_completion = 1'b0;
     ariane_axi_soc::req_slv_t  gpio_req;
     ariane_axi_soc::resp_slv_t gpio_resp;
