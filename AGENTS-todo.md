@@ -608,5 +608,5 @@ Tick as completed. Each is `agents/spec/<filename>`.
   → **§3 done**; priors: h_edge_diag.S, kvm-h-spike.sh, run-h-edge-veri.sh,
   architecture/server-math-hypervisor.md, agents/spec/riscv-spec-II-5.*-hypervisor*.html.
 
-## AI-matrix open (sideband dual-poll)
-- After good enq+poll then clear+second enq, a second `ai.poll` that needs a non-x0 `rs1` wedges CVXIF issue (`rs_valid`). Workarounds: phase-2 MMIO DSTATUS/TICKET check; poll with `rs1=x0` completes. ALU can still read the ticket reg. Track for CVXIF/regfile handshake after dual enq+MMIO.
+## AI-matrix open (sideband dual-poll) — **closed**
+- Was misdiagnosed as a CVXIF `rs_valid` wedge. Root cause: **sideband `ai.enq` races MMIO desc updates** (`fence` does not wait AXI BRESP; kick is a core wire). Same-addr load-back can STLF and still race. Second enq reused the prior good latch → poll OK; test `fail` used even `a0=2` → HTIF syscall hang (timeout). Fix: drain via a *different* island reg after desc/region MMIO before `ai.enq`; odd HTIF fail codes. Covered by `ai_enq_sideband_smoke` phase-2 + `ai_dual_enq_poll`.

@@ -34,7 +34,10 @@ module g6lc_ai_island_top
     output logic        rvalid_o,
     output logic        irq_o,
     // Core-sideband submit (ai.enq): uses latched descriptor + this ticket/qid.
-    // Bring-up protocol: SW programs region+desc via MMIO, then ai.enq kicks.
+    // Bring-up protocol: SW programs region+desc via MMIO, then loads a
+    // *different* island reg (not the just-written addr — STLF can hide the
+    // miss) so AXI BRESP has retired, then ai.enq. fence alone is not enough
+    // — sideband is a core wire and races the peripheral write.
     input  logic        sb_enq_valid_i,
     input  logic [7:0]  sb_qid_i,
     input  logic [31:0] sb_ticket_i,

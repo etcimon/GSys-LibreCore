@@ -131,7 +131,7 @@ pass:
 5: j 5b
 
 fail:
-  li   a0, 2
+  li   a0, 3
   la   t0, tohost
   sw   a0, 0(t0)
 6: j 6b

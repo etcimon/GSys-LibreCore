@@ -42,7 +42,10 @@ bash verif/regress/ai-matrix-veri.sh          # includes ai_island_mmio_smoke on
 ```
 
 Standalone smoke: cap, good desc, AI-3 OOR/perm, bad version, disabled.  
-SoC smoke: MMIO at `0x40000000` — cap, doorbell, AI-3 reject.
+SoC smoke: MMIO at `0x40000000` — cap, doorbell, AI-3 reject.  
+Sideband: after any desc/region MMIO write, load a **different** island reg
+before `ai.enq` (same-addr load-back can STLF and skip the bus; the kick is a
+core wire and races BRESP).
 
 ## Ordering
 

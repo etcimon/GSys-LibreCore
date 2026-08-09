@@ -1,24 +1,21 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# Core-island sideband bring-up (phase 1 + phase 2):
-#   MMIO program region + good desc, ai.enq kick, wait done sticky,
-#   ai.poll == OK, MMIO ticket/status match; clear; AI-3 bad ptr via
-#   sideband enq (load-back desc before kick) + poll error + dstatus.
-# Doorbell-only AI-3: ai_island_mmio_smoke. Dual-only: ai_dual_enq_poll.
-# Protocol: after desc/region MMIO, load-back before ai.enq (AXI vs wire race).
-# HTIF fail codes must be odd (even = syscall hang).
-# Requires g6lc64_ai. Soft-pass on illegal / bus error.
-
-  .equ AI_BASE,    0x40000000
-  .equ AI_CTL,     0x100
-  .equ AI_DONE,    0x10C
-  .equ AI_TICKET,  0x110
+# Dual sideband enq: good job then AI-3 bad-ptr job.
+#
+# Protocol — after any desc/region MMIO write, drain with a load of a
+# *different* island register (e.g. AI_CTL) before ai.enq. Same-address
+# load-back can store-buffer-forward and return the new data without the
+# AXI write having updated the island latch; sideband is a core wire and
+# races that write. fence alone is not enough.
+# HTIF: only odd a0 (even = syscall hang on this harness).
+  .equ AI_BASE, 0x40000000
+  .equ AI_CTL,  0x100
+  .equ AI_DONE, 0x10C
   .equ AI_DSTATUS, 0x114
-  .equ AI_REG0,    0x120
-  .equ AI_DESC,    0x140
-  .equ ST_OK,      0
-
+  .equ AI_REG0, 0x120
+  .equ AI_DESC, 0x140
+  .equ ST_BAD_PTR, 4
   .section .text.init
   .globl _start
 _start:
@@ -26,15 +23,11 @@ _start:
   la   t0, trap_vec
   csrw mtvec, t0
   andi sp, sp, -16
-
   li   t0, 0x61
   csrw 0x5C1, t0
-
   li   s0, AI_BASE
   li   t0, 1
   sw   t0, AI_CTL(s0)
-
-  # Region q0 [0x80010000, 0x80014000) RW
   li   t0, 0x80010000
   sw   t0, AI_REG0+0x0(s0)
   sw   zero, AI_REG0+0x4(s0)
@@ -43,8 +36,6 @@ _start:
   sw   zero, AI_REG0+0xC(s0)
   li   t0, 0x3
   sw   t0, AI_REG0+0x10(s0)
-
-  # Good descriptor (no IRQ)
   li   t0, (1 << 16) | 1
   sw   t0, AI_DESC+0x0(s0)
   sw   zero, AI_DESC+0x4(s0)
@@ -68,15 +59,13 @@ _start:
   li   t0, 0x80013000
   sw   t0, AI_DESC+0x38(s0)
   sw   zero, AI_DESC+0x3C(s0)
-
-  # Drain MMIO (different-reg load — not same-addr STLF) before sideband kick
+  # Drain program stores (different-reg load)
   lw   zero, AI_CTL(s0)
   fence
   li   a1, 0
-  .word 0x0005D55B             # ai.enq
+  .word 0x0005D55B
   mv   s1, a0
   fence
-
   li   t2, 200
 1:
   lw   t0, AI_DONE(s0)
@@ -87,29 +76,16 @@ _start:
   j    fail
 2:
   mv   a1, s1
-  .word 0x0205D55B             # ai.poll
+  .word 0x0205D55B
   li   t0, 1
   bne  a0, t0, fail
-  # Phase-1 MMIO status (before clear)
-  lw   t0, AI_DSTATUS(s0)
-  slli t0, t0, 48
-  srli t0, t0, 48
-  li   t1, ST_OK
-  bne  t0, t1, fail
-  lw   t0, AI_TICKET(s0)
-  bne  t0, s1, fail
-
   li   t0, 1
   sw   t0, AI_DONE(s0)
-
-  # Phase 2: AI-3 bad ptr via sideband (mirror ai_dual_enq_poll)
-  .equ ST_BAD_PTR, 4
+  # OOR ptr_a
   lui  t0, 0x90000
   sw   t0, AI_DESC+0x18(s0)
+  # Different-reg drain (not same-addr load-back — STLF hazard)
   lw   zero, AI_CTL(s0)
-  fence
-  # Extra different-reg drain after ticket/dstatus traffic
-  lw   zero, AI_DONE(s0)
   fence
   li   a1, 0
   .word 0x0005D55B
@@ -133,25 +109,21 @@ _start:
   .word 0x0205D55B
   li   t0, 2
   bne  a0, t0, fail
-
 pass:
   li   a0, 1
   la   t0, tohost
   sw   a0, 0(t0)
 5: j 5b
-
 fail:
   li   a0, 3
   la   t0, tohost
   sw   a0, 0(t0)
 6: j 6b
-
 trap_vec:
   li   a0, 5
   la   t0, tohost
   sw   a0, 0(t0)
 7: j 7b
-
   .section .tohost,"aw",@progbits
   .align 6
   .globl tohost

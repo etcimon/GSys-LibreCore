@@ -79,7 +79,7 @@ pass:
 1: j 1b
 
 fail:
-  li   a0, 2
+  li   a0, 3
   la   t0, tohost
   sw   a0, 0(t0)
 2: j 2b
