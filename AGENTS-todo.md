@@ -607,3 +607,6 @@ Tick as completed. Each is `agents/spec/<filename>`.
   dual re-entry). SPV residual optional.
   → **§3 done**; priors: h_edge_diag.S, kvm-h-spike.sh, run-h-edge-veri.sh,
   architecture/server-math-hypervisor.md, agents/spec/riscv-spec-II-5.*-hypervisor*.html.
+
+## AI-matrix open (sideband dual-poll)
+- After good enq+poll then clear+second enq, a second `ai.poll` that needs a non-x0 `rs1` wedges CVXIF issue (`rs_valid`). Workarounds: phase-2 MMIO DSTATUS/TICKET check; poll with `rs1=x0` completes. ALU can still read the ticket reg. Track for CVXIF/regfile handshake after dual enq+MMIO.

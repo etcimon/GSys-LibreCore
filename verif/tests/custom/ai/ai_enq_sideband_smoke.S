@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# Core↔island sideband bring-up:
-#   MMIO-program region + good descriptor, ai.enq kick, wait done sticky,
+# Core-island sideband bring-up (phase 1):
+#   MMIO program region + good desc, ai.enq kick, wait done sticky,
 #   ai.poll == OK, MMIO ticket/status match.
-# AI-3 bad-ptr rejection remains covered by ai_island_mmio_smoke (doorbell).
-# Requires g6lc64_ai (MatrixEn + Queues + island @ 0x40000000).
-# Soft-pass on illegal / bus error.
+# AI-3 bad-ptr via doorbell: ai_island_mmio_smoke.
+# Open: second sideband enq + ai.poll(rs1!=x0) can wedge CVXIF issue;
+# see AGENTS-todo.md.
+# Requires g6lc64_ai. Soft-pass on illegal / bus error.
 
   .equ AI_BASE,    0x40000000
   .equ AI_CTL,     0x100

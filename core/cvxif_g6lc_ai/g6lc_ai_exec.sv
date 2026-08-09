@@ -262,6 +262,23 @@ module g6lc_ai_exec
   assign pmu_post_o = valid_q && pmu_post_q;
   assign pmu_t0_o   = valid_q && pmu_t0_q;
 
+  // ai.poll status (0=pending, 1=ok, 2=error) — pure combo, no block locals.
+  // Prefer island completion when it covers the ticket; else T0 local stub.
+  logic [31:0] poll_want;
+  logic        poll_isl_hit, poll_isl_err, poll_local_done;
+  logic [1:0]  poll_status;
+  assign poll_want       = registers_i[0][31:0];
+  assign poll_isl_hit    = isl_has_completion_i && (poll_want <= isl_last_ticket_i);
+  assign poll_isl_err    = poll_isl_hit && (poll_want == isl_last_ticket_i) &&
+                           (isl_last_status_i != 16'd0);
+  assign poll_local_done = (poll_want < ticket_q);
+  always_comb begin
+    if (!ai_q_en_i) poll_status = 2'd0;
+    else if (poll_isl_err) poll_status = 2'd2;
+    else if (poll_isl_hit || poll_local_done) poll_status = 2'd1;
+    else poll_status = 2'd0;
+  end
+
   // ------------------------------------------------------------------ combo
   always_comb begin
     logic signed [31:0] mac_sum, mac_old, mac_new;
@@ -476,26 +493,8 @@ module g6lc_ai_exec
               pmu_t0_n = 1'b1;
             end
             AI_POLL: begin
-              // 0=pending, 1=ok, 2=error.
-              // Dual-mode: when the island reports a completion covering
-              // this ticket, surface its status; otherwise fall back to the
-              // T0 local "issued ⇒ complete" stub (queue_doorbell / no-island).
-              // Note: avoid block-local variable decls inside this always_comb
-              // (some Verilator versions mishandle that branch).
-              if (!ai_q_en_i) begin
-                result_n = XLEN'(32'd0);
-              end else if (isl_has_completion_i &&
-                           registers_i[0][31:0] <= isl_last_ticket_i) begin
-                if (registers_i[0][31:0] == isl_last_ticket_i &&
-                    isl_last_status_i != 16'd0)
-                  result_n = XLEN'(32'd2);
-                else
-                  result_n = XLEN'(32'd1);
-              end else if (registers_i[0][31:0] < ticket_q) begin
-                result_n = XLEN'(32'd1);  // local stub complete
-              end else begin
-                result_n = XLEN'(32'd0);
-              end
+              // Status from poll_status wires (see above). Always complete T0.
+              result_n = XLEN'(poll_status);
               we_n     = 1'b1;
               valid_n  = 1'b1;
               pmu_t0_n = 1'b1;
