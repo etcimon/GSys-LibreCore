@@ -656,6 +656,17 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        id: "ai-island-veri",
+        description:
+          "OPTIONAL: standalone Verilator smoke for Xg6lcai P3 island spine (AI-3 addr check + desc engine).",
+        script: "verif/regress/ai-island-veri.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        tools: ["verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "kvm-h-veri",
         description:
           "OPTIONAL: H-edge Variane 3/3 (h_edge_diag/kvm_h_stress/hlv_hsv). Prefers work-ver-stream8.",
