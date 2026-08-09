@@ -751,10 +751,9 @@ def soft_strlen_ptr_inc(va):
 
 
 if not PEEL_STRLEN:
-    # ret-imm=11 greened PEEL_FDT_MATCH (2026-08-09). Pointer-inc RVI loop
-    # patch regressed to classic s3 poison @7316 under full natural match —
-    # keep ret-imm until strlen RTL residual fixed. "compatible" len is 11;
-    # other coldboot strlen uses are sparse with soft printf.
+    # ret-imm 11 greened natural fdt_match (2026-08-09). Full soft pointer-inc
+    # body regressed to mepc=0x7316 s3 poison (more FDT activity or flake) —
+    # keep ret-imm until PEEL_STRLEN RTL (instr_queue PC continuity) lands.
     soft_ret_imm(0x80004A3A, 11)
     print("soft sbi_strlen @4a3a ret-imm 11 (PEEL_STRLEN=1 for stock RVI loop)")
 else:

@@ -339,15 +339,25 @@ module instr_queue
   if (CVA6Cfg.SuperscalarEn) begin : gen_fetch_entry_valid_ss
     for (genvar p = 1; p < NISSUE; p++) begin : gen_fe_valid
       logic earlier_blocks;
+      logic [CVA6Cfg.VLEN-1:0] exp_pc;
+      logic younger_has_data;
       always_comb begin
         earlier_blocks = 1'b0;
+        younger_has_data = ~|(instr_queue_empty & idx_ds[p]);
+        // Block dual-issue after any earlier CF instr (taken or not-taken).
         for (int unsigned e = 0; e < p; e++) begin
-          // Block dual-issue after any CF instr (taken or not-taken branch).
           if (fetch_entry_blocks_ss[e]) earlier_blocks = 1'b1;
         end
+        // PC continuity vs immediate older port: younger must start at
+        // older+size. Blocks mid-RVI halfword as a new op (PEEL_STRLEN pin).
+        exp_pc = fetch_entry_o[p-1].address +
+            ((fetch_entry_o[p-1].instruction[1:0] != 2'b11) ? CVA6Cfg.VLEN'(2)
+                                                            : CVA6Cfg.VLEN'(4));
+        if (younger_has_data && fetch_entry_o[p].address != exp_pc)
+          earlier_blocks = 1'b1;
       end
       assign fetch_entry_valid_o[p] =
-          ~|(instr_queue_empty & idx_ds[p]) & ~earlier_blocks & fetch_entry_valid_o[0];
+          younger_has_data & ~earlier_blocks & fetch_entry_valid_o[0];
     end
   end
 
@@ -485,12 +495,24 @@ module instr_queue
   // ----------------------
   // Fall-through after issue: last fired instr's stored PC + size, or taken
   // CF predict target. Output addresses themselves come from the FIFO (above).
+  //
+  // Soft-ladder iter-011 / hang-4 completion: when the next issue port is
+  // already presented, use *its* realign PC rather than size-based +2/+4 from
+  // instruction[1:0]. Size arithmetic desynced mid-RVI PCs under OpenSBI
+  // sbi_strlen (mepc=0x80004a50 into `add` @0x80004a4e, mcause=2).
   assign pc_j[0] = pc_q;
-  for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
-    // Only taken CF redirects; not-taken branch falls through by size.
-    assign pc_j[i+1] = fetch_entry_is_cf[i] ? address_out : (
-      fetch_entry_o[i].address + ((fetch_entry_o[i].instruction[1:0] != 2'b11) ? 'd2 : 'd4)
-    );
+  for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin : gen_pc_j
+    logic [CVA6Cfg.VLEN-1:0] size_next;
+    assign size_next = fetch_entry_o[i].address +
+        ((fetch_entry_o[i].instruction[1:0] != 2'b11) ? CVA6Cfg.VLEN'(2) : CVA6Cfg.VLEN'(4));
+    if (i + 1 < CVA6Cfg.NrIssuePorts) begin : gen_pc_j_has_younger
+      // Only taken CF redirects; else prefer younger realign PC when valid.
+      assign pc_j[i+1] = fetch_entry_is_cf[i] ? address_out : (
+          fetch_entry_valid_o[i+1] ? fetch_entry_o[i+1].address : size_next
+      );
+    end else begin : gen_pc_j_last
+      assign pc_j[i+1] = fetch_entry_is_cf[i] ? address_out : size_next;
+    end
   end
 
   always_comb begin

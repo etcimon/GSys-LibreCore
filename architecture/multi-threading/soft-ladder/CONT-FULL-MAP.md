@@ -129,7 +129,7 @@ Checklist:
 [x] natural c.mv + soft fdt_match stub → cookie green (iter-008)
 [x] natural fdt_match + soft sbi_strlen ret-imm 11 → cookie green (iter-009)
 [x] natural malloc/zalloc/free → cookie green (iter-010)
-[!] PEEL_STRLEN → FAIL mid sbi_strlen mepc=0x80004a50 mcause=2
+[!] PEEL_STRLEN → FAIL mid sbi_strlen mepc=0x80004a50; RTL PC continuity in tree, harness rebuild pending
 [ ] real sbi_printf (FDT lenp)
 [ ] domain full walk; switch_mode payload
 [ ] mk_plat_skip empty → retire

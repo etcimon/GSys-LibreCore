@@ -16,11 +16,11 @@ Template at bottom.
 | **Started** | 2026-08-09 |
 | **Bucket** | B1 |
 | **Primary ids** | `b1-sbi-strlen-rvi` |
-| **Hypothesis** | Soft ret-imm 11 greened match path; stock loop `c.addi`+RVI `add a5,a4,a0` → mepc=0x4a50 mcause=2 under OpenSBI DI |
-| **I2 Repro** | `PEEL_STRLEN=1 bash verif/regress/soft-ladder-opensbi-soak.sh` |
-| **I3 Fix** | TBD RTL (RVC/RVI dual-issue PC or RF) |
-| **I4 Verify** | default cookie green; PEEL_STRLEN when fixed |
-| **I6 Next** | real printf / domain |
+| **Hypothesis** | Stock loop `c.addi`+RVI `add` → mepc=0x4a50 mid-instr; hang-4 left size-based `pc_j` / dual-issue PC holes |
+| **I2 Repro** | `PEEL_STRLEN=1 bash verif/regress/soft-ladder-opensbi-soak.sh` → red |
+| **I3 Fix (in tree)** | `instr_queue.sv`: dual-issue PC continuity gate + prefer younger realign PC in `pc_j` (hang-4 completion). Soft: keep ret-imm 11 (pointer-inc soft body regressed to 7316 poison). |
+| **I4 Verify** | default cookie green (ret-imm); PEEL_STRLEN needs harness rebuild (`make verilate target=g6lc64_smt2 ver-library=work-ver-smt2` — host Verilator faulted 2026-08-09) |
+| **I6 Next** | Rebuild harness → PEEL_STRLEN; else real printf |
 
 ---
 
