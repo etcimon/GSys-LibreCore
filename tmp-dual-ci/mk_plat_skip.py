@@ -14,7 +14,8 @@ Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
     - natural hart_init CSR probes (csr peeled)
     - natural dual c.mv @7312/14 (cmv peeled 2026-08-09)
     - natural jal fdt_match @731e (match peeled 2026-08-09)
-    - soft sbi_strlen ret-imm 11 @4a3a (stock RVI add loop residual open)
+    - natural sbi_strlen (mid-RVI fixed via FETCH_WIDTH=64 DI+RVC)
+    - soft fdt_getprop_namelen / fdt_get_property_namelen (FDT lenp residual)
     - natural sbi_malloc/zalloc/free (freelist peeled 2026-08-09)
   Bisect restores:
     SOFT_SPIN=1   SA/heap spin NOP4
@@ -22,8 +23,9 @@ Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
     SOFT_CSR=1    CSR probe cut cd86→cd0e
     SOFT_CMV=1    nop dual c.mv (old cont.19 soft)
     SOFT_FDT_MATCH=1  stub jal fdt_match (old soft)
+    SOFT_STRLEN=1 soft sbi_strlen ret-imm 11 (pre-FETCH_WIDTH=64)
     SOFT_MALLOC=1 soft malloc/zalloc/free + heap space stubs
-    PEEL_STRLEN=1 natural sbi_strlen (FAIL mepc=0x4a50 mid RVI add)
+    PEEL_FDT_GETPROP=1 natural getprop (FAIL FDT lenp mepc=0x12eb2)
     PEEL_MALLOC=1 legacy alias for natural malloc (default)
 
 Critical fix vs cont.16: do NOT patch 0x996 with j lottery.
@@ -116,8 +118,12 @@ PEEL_CMV = _env_peel("PEEL_CMV")  # legacy: force natural c.mv (default already)
 # Default: natural fdt_match. SOFT_FDT_MATCH=1 restores jal stub.
 SOFT_FDT_MATCH = _env_peel("SOFT_FDT_MATCH")
 PEEL_FDT_MATCH = _env_peel("PEEL_FDT_MATCH")  # legacy alias: force natural match
-# Default soft simple sbi_strlen; PEEL_STRLEN=1 restores stock (cookie red).
+# Default: natural sbi_strlen (FETCH_WIDTH=64). SOFT_STRLEN=1 ret-imm bisect.
+# PEEL_STRLEN kept as legacy "force natural" (default already).
+SOFT_STRLEN = _env_peel("SOFT_STRLEN")
 PEEL_STRLEN = _env_peel("PEEL_STRLEN")
+# Default soft fdt getprop (FDT lenp residual). PEEL_FDT_GETPROP=1 natural.
+PEEL_FDT_GETPROP = _env_peel("PEEL_FDT_GETPROP")
 # Default: natural malloc/zalloc/free (peeled 2026-08-09, dual confirm cookie).
 # SOFT_MALLOC=1 restores NULL stubs for bisect.
 SOFT_MALLOC = _env_peel("SOFT_MALLOC")
@@ -128,7 +134,8 @@ print(
     f"SOFT_CMPX={int(_env_peel('SOFT_CMPX'))} "
     f"SOFT_CSR={int(_env_peel('SOFT_CSR'))} "
     f"SOFT_CMV={int(SOFT_CMV)} SOFT_FDT_MATCH={int(SOFT_FDT_MATCH)} "
-    f"SOFT_MALLOC={int(SOFT_MALLOC)} PEEL_STRLEN={int(PEEL_STRLEN)}"
+    f"SOFT_STRLEN={int(SOFT_STRLEN)} SOFT_MALLOC={int(SOFT_MALLOC)} "
+    f"PEEL_FDT_GETPROP={int(PEEL_FDT_GETPROP)}"
 )
 
 
@@ -750,14 +757,25 @@ def soft_strlen_ptr_inc(va):
     struct.pack_into("<I", data, o + 28, rvi_i(0, RA, 0, 0, 0x67))
 
 
-if not PEEL_STRLEN:
-    # ret-imm 11 greened natural fdt_match (2026-08-09). Full soft pointer-inc
-    # body regressed to mepc=0x7316 s3 poison (more FDT activity or flake) —
-    # keep ret-imm until PEEL_STRLEN RTL (instr_queue PC continuity) lands.
+# sbi_strlen: natural by default after FETCH_WIDTH=64 (iter-011). Soft ret-imm
+# only for SOFT_STRLEN bisect.
+if SOFT_STRLEN and not PEEL_STRLEN:
     soft_ret_imm(0x80004A3A, 11)
-    print("soft sbi_strlen @4a3a ret-imm 11 (PEEL_STRLEN=1 for stock RVI loop)")
+    print("SOFT_STRLEN: sbi_strlen @4a3a ret-imm 11")
 else:
-    print("PEEL_STRLEN: natural sbi_strlen (expect mepc=0x4a50 under DI)")
+    print("cont.51+: natural sbi_strlen (peeled; FETCH_WIDTH=64 DI+RVC)")
+
+# FDT getprop: soft unless PEEL_FDT_GETPROP (iter-012 FDT lenp residual).
+# Docs (smt2-bringup cont.R3a): stub fdt_getprop_namelen unblocks DI platform.
+if not PEEL_FDT_GETPROP:
+    soft_ret0(0x800136F0)  # fdt_getprop_namelen → NULL
+    soft_ret0(0x80013622)  # fdt_get_property_namelen → NULL
+    print(
+        "soft fdt_getprop_namelen @136f0 + fdt_get_property_namelen @3622 "
+        "(PEEL_FDT_GETPROP=1 for natural; expect lenp mepc=0x12eb2)"
+    )
+else:
+    print("PEEL_FDT_GETPROP: natural fdt getprop (FDT lenp residual open)")
 
 
 DST.write_bytes(data)
@@ -765,7 +783,8 @@ print("wrote", DST)
 print(
     "expect SI/DI: 51b1babe + BANR "
     f"(soft_malloc={int(SOFT_MALLOC)} soft_cmv={int(SOFT_CMV)} "
-    f"soft_fdt_match={int(SOFT_FDT_MATCH)} soft_strlen={int(not PEEL_STRLEN)})"
+    f"soft_fdt_match={int(SOFT_FDT_MATCH)} soft_strlen={int(SOFT_STRLEN)} "
+    f"soft_fdt_getprop={int(not PEEL_FDT_GETPROP)})"
 )
 
 r = subprocess.run(

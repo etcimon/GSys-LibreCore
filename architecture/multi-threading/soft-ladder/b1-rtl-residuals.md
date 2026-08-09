@@ -45,15 +45,16 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Retire criterion | Full CSR probe loop in hart_init under DI |
 | **iter-006 fix (in tree)** | `issue_stage` `unresolved_csr_q`: after CSR issue, no same-hart younger issue until that CSR `commit_ack` or flush. Test: `mini_csr_expected_trap.S`. |
 
-### FDT `lenp` store (priority 2 — **active iter-012**)
+### FDT `lenp` / getprop (priority 2 — **active iter-012**)
 
 | Item | Detail |
 |------|--------|
-| Soft evidence | Soft `sbi_printf` BANR cave; soft strlen ret-imm avoids deep FDT |
-| Fail pin | PEEL_STRLEN on FW64: mepc=`0x80012eb2` mcause=6 mtval=`0x80012b2a` (code ptr as lenp) |
-| Primary RTL | Store address path / dual-issue of address calc + store |
-| Note | Hang-6 family; multiple sites (12eb2, 13128, …) |
-| Retire criterion | Real `sbi_printf` / FDT walk green under PEEL_STRLEN |
+| Soft evidence | Soft `fdt_getprop_namelen` + `fdt_get_property_namelen` → NULL; soft printf BANR |
+| Fail pin | `PEEL_FDT_GETPROP=1`: mepc=`0x80012eb2` `sw a0,0(s2)` mcause=6 mtval=`0x80012b2a` (s2=code) |
+| Mechanism | `c.mv s2,a2` (lenp) then DI corrupts s2 before error-path store |
+| Primary RTL | Callee-saved / dual-issue pointer integrity (hang-6 family) |
+| Directed | `mini_fdt_lenp_sw.S` |
+| Retire criterion | Natural getprop + real printf cookie green |
 
 ### Dual `c.mv` (priority 3 — **peeled iter-008**)
 
@@ -66,15 +67,14 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Residual moved to | Soft stub fdt_match / FDT lenp / strlen (`b1-fdt-lenp-store`) |
 | Retire criterion | **Met** for dual-c.mv class; `SOFT_CMV=1` bisect only |
 
-### FDT match / `sbi_strlen` (priority 2 — **mid-RVI fixed; soft ret-imm until FDT**)
+### FDT match / `sbi_strlen` (priority 2 — **peeled**)
 
 | Item | Detail |
 |------|--------|
-| Soft evidence | Soft `sbi_strlen` ret-imm 11 (cookie); natural match peeled |
-| Fail pin (old FETCH_WIDTH=32) | `PEEL_STRLEN` mepc=`0x80004a50` mid-`add` |
-| Fail pin (FETCH_WIDTH=64) | `PEEL_STRLEN` **past strlen** → mepc=`0x80012eb2` mcause=6 **FDT lenp** |
-| RTL (iter-011) | `build_fetch_width`: min 64 when n_issue≥2 && RVC; + instr_queue PC continuity |
-| Retire criterion | Soft strlen dropped when FDT green; PEEL_STRLEN mid-instr **closed** |
+| Soft evidence (retired) | Was ret-imm 11; now **natural** with FETCH_WIDTH=64 |
+| Fail pin (old) | mepc=`0x4a50` mid-`add` under FETCH_WIDTH=32 |
+| RTL | `build_fetch_width` min 64 for DI+RVC |
+| Retire criterion | **Met** (`SOFT_STRLEN=1` bisect only) |
 
 ### Heap freelist malloc (priority 1 — **peeled iter-010**)
 
