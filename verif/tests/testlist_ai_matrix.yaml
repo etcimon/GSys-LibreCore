@@ -28,5 +28,8 @@ testlist:
     description: T0 enq/poll/qfence + aiqctl enable stub
     path: custom/ai/ai_queue_doorbell.S
   - test: ai_aiperm_umode
-    description: aiperm[0] gates U-mode AI issue
+    description: aiperm CSR + M-mode always-allowed issue gate
     path: custom/ai/ai_aiperm_umode.S
+  - test: ai_island_mmio_smoke
+    description: SoC MMIO island at 0x40000000 — cap, good doorbell, AI-3 reject
+    path: custom/ai/ai_island_mmio_smoke.S

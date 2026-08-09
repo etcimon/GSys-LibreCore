@@ -24,19 +24,30 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 |
 | AXI/DMA master + xbar attach | fabric citizen | next |
 
+## SoC map (Variane)
+
+When `CVA6Cfg.AiCfg.MatrixEn`, the island sits on the **GPIO window**:
+
+| Base | Length | Path |
+|---|---|---|
+| `0x4000_0000` (`ariane_soc::GPIOBase` / `AiIslandBase`) | 4 KiB | AXI → `axi2apb_64_32` → `g6lc_ai_island_apb` → `g6lc_ai_island_top` |
+
+Non-AI packages keep the GPIO error slave. IRQ sticky is MMIO-visible; PLIC wiring is next.
+
 ## Verification
 
 ```bash
-bash verif/regress/ai-island-veri.sh
+bash verif/regress/ai-island-veri.sh          # standalone spine
+bash verif/regress/ai-matrix-veri.sh          # includes ai_island_mmio_smoke on g6lc64_ai
 ```
 
-Smoke covers: cap version/clusters, good descriptor → `ST_OK`, out-of-range
-pointer → `ST_BAD_PTR`, bad version, W-only region rejects reads, disabled engine.
+Standalone smoke: cap, good desc, AI-3 OOR/perm, bad version, disabled.  
+SoC smoke: MMIO at `0x40000000` — cap, doorbell, AI-3 reject.
 
 ## Ordering
 
-1. **P3 spine** — descriptor engine + per-queue address check + IRQ (**this**).
-2. AXI-lite slave + DMA master on the testharness map.
+1. **P3 spine** — descriptor engine + per-queue address check (**done**).
+2. **AXI attach on testharness GPIO window** (**done**); PLIC + DMA master next.
 3. **I1** — one cluster; freeze `T` / DRAM class / NoC cut.
 4. **I3** — memory system measured.
 5. **I2** — N clusters (must not change latency-SKU results).

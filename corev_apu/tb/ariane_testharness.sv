@@ -381,26 +381,118 @@ module ariane_testharness #(
   );
 
   // ------------------------------
-  // GPIO
+  // GPIO window (0x4000_0000)
   // ------------------------------
+  // When Xg6lcai MatrixEn is set, this window hosts the AI island MMIO
+  // (capability + doorbell + AI-3 regions). Otherwise keep the error slave.
 
-  // GPIO not implemented, adding an error slave here
+  if (CVA6Cfg.AiCfg.MatrixEn) begin : gen_ai_island
+    logic         ai_penable, ai_pwrite, ai_psel, ai_pready, ai_pslverr;
+    logic [31:0]  ai_paddr, ai_pwdata, ai_prdata;
+    logic         ai_irq;
 
-  ariane_axi_soc::req_slv_t  gpio_req;
-  ariane_axi_soc::resp_slv_t gpio_resp;
-  `AXI_ASSIGN_TO_REQ(gpio_req, master[ariane_soc::GPIO])
-  `AXI_ASSIGN_FROM_RESP(master[ariane_soc::GPIO], gpio_resp)
-  axi_err_slv #(
-    .AxiIdWidth ( ariane_axi_soc::IdWidthSlave ),
-    .req_t      ( ariane_axi_soc::req_slv_t    ),
-    .resp_t     ( ariane_axi_soc::resp_slv_t   )
-  ) i_gpio_err_slv (
-    .clk_i      ( clk_i      ),
-    .rst_ni     ( ndmreset_n ),
-    .test_i     ( test_en    ),
-    .slv_req_i  ( gpio_req ),
-    .slv_resp_o ( gpio_resp )
-  );
+    axi2apb_64_32 #(
+        .AXI4_ADDRESS_WIDTH ( AXI_ADDRESS_WIDTH            ),
+        .AXI4_RDATA_WIDTH   ( AXI_DATA_WIDTH               ),
+        .AXI4_WDATA_WIDTH   ( AXI_DATA_WIDTH               ),
+        .AXI4_ID_WIDTH      ( ariane_axi_soc::IdWidthSlave ),
+        .AXI4_USER_WIDTH    ( AXI_USER_WIDTH               ),
+        .BUFF_DEPTH_SLAVE   ( 2                            ),
+        .APB_ADDR_WIDTH     ( 32                           )
+    ) i_axi2apb_ai_island (
+        .ACLK      ( clk_i                          ),
+        .ARESETn   ( ndmreset_n                     ),
+        .test_en_i ( test_en                        ),
+        .AWID_i    ( master[ariane_soc::GPIO].aw_id     ),
+        .AWADDR_i  ( master[ariane_soc::GPIO].aw_addr   ),
+        .AWLEN_i   ( master[ariane_soc::GPIO].aw_len    ),
+        .AWSIZE_i  ( master[ariane_soc::GPIO].aw_size   ),
+        .AWBURST_i ( master[ariane_soc::GPIO].aw_burst  ),
+        .AWLOCK_i  ( master[ariane_soc::GPIO].aw_lock   ),
+        .AWCACHE_i ( master[ariane_soc::GPIO].aw_cache  ),
+        .AWPROT_i  ( master[ariane_soc::GPIO].aw_prot   ),
+        .AWREGION_i( master[ariane_soc::GPIO].aw_region ),
+        .AWUSER_i  ( master[ariane_soc::GPIO].aw_user   ),
+        .AWQOS_i   ( master[ariane_soc::GPIO].aw_qos    ),
+        .AWVALID_i ( master[ariane_soc::GPIO].aw_valid  ),
+        .AWREADY_o ( master[ariane_soc::GPIO].aw_ready  ),
+        .WDATA_i   ( master[ariane_soc::GPIO].w_data    ),
+        .WSTRB_i   ( master[ariane_soc::GPIO].w_strb    ),
+        .WLAST_i   ( master[ariane_soc::GPIO].w_last    ),
+        .WUSER_i   ( master[ariane_soc::GPIO].w_user    ),
+        .WVALID_i  ( master[ariane_soc::GPIO].w_valid   ),
+        .WREADY_o  ( master[ariane_soc::GPIO].w_ready   ),
+        .BID_o     ( master[ariane_soc::GPIO].b_id      ),
+        .BRESP_o   ( master[ariane_soc::GPIO].b_resp    ),
+        .BVALID_o  ( master[ariane_soc::GPIO].b_valid   ),
+        .BUSER_o   ( master[ariane_soc::GPIO].b_user    ),
+        .BREADY_i  ( master[ariane_soc::GPIO].b_ready   ),
+        .ARID_i    ( master[ariane_soc::GPIO].ar_id     ),
+        .ARADDR_i  ( master[ariane_soc::GPIO].ar_addr   ),
+        .ARLEN_i   ( master[ariane_soc::GPIO].ar_len    ),
+        .ARSIZE_i  ( master[ariane_soc::GPIO].ar_size   ),
+        .ARBURST_i ( master[ariane_soc::GPIO].ar_burst  ),
+        .ARLOCK_i  ( master[ariane_soc::GPIO].ar_lock   ),
+        .ARCACHE_i ( master[ariane_soc::GPIO].ar_cache  ),
+        .ARPROT_i  ( master[ariane_soc::GPIO].ar_prot   ),
+        .ARREGION_i( master[ariane_soc::GPIO].ar_region ),
+        .ARUSER_i  ( master[ariane_soc::GPIO].ar_user   ),
+        .ARQOS_i   ( master[ariane_soc::GPIO].ar_qos    ),
+        .ARVALID_i ( master[ariane_soc::GPIO].ar_valid  ),
+        .ARREADY_o ( master[ariane_soc::GPIO].ar_ready  ),
+        .RID_o     ( master[ariane_soc::GPIO].r_id      ),
+        .RDATA_o   ( master[ariane_soc::GPIO].r_data    ),
+        .RRESP_o   ( master[ariane_soc::GPIO].r_resp    ),
+        .RLAST_o   ( master[ariane_soc::GPIO].r_last    ),
+        .RUSER_o   ( master[ariane_soc::GPIO].r_user    ),
+        .RVALID_o  ( master[ariane_soc::GPIO].r_valid   ),
+        .RREADY_i  ( master[ariane_soc::GPIO].r_ready   ),
+        .PENABLE   ( ai_penable ),
+        .PWRITE    ( ai_pwrite  ),
+        .PADDR     ( ai_paddr   ),
+        .PSEL      ( ai_psel    ),
+        .PWDATA    ( ai_pwdata  ),
+        .PRDATA    ( ai_prdata  ),
+        .PREADY    ( ai_pready  ),
+        .PSLVERR   ( ai_pslverr )
+    );
+
+    g6lc_ai_island_apb i_ai_island (
+        .clk_i     ( clk_i      ),
+        .rst_ni    ( ndmreset_n ),
+        .testmode_i( test_en    ),
+        .psel_i    ( ai_psel    ),
+        .penable_i ( ai_penable ),
+        .pwrite_i  ( ai_pwrite  ),
+        .paddr_i   ( ai_paddr   ),
+        .pwdata_i  ( ai_pwdata  ),
+        .prdata_o  ( ai_prdata  ),
+        .pready_o  ( ai_pready  ),
+        .pslverr_o ( ai_pslverr ),
+        .irq_o     ( ai_irq     )
+    );
+    // IRQ not yet wired into PLIC (sources reserved); sticky in MMIO 0x010C.
+    // verilator lint_off UNUSEDSIGNAL
+    logic _ai_irq_unused;
+    assign _ai_irq_unused = ai_irq;
+    // verilator lint_on UNUSEDSIGNAL
+  end else begin : gen_gpio_err
+    ariane_axi_soc::req_slv_t  gpio_req;
+    ariane_axi_soc::resp_slv_t gpio_resp;
+    `AXI_ASSIGN_TO_REQ(gpio_req, master[ariane_soc::GPIO])
+    `AXI_ASSIGN_FROM_RESP(master[ariane_soc::GPIO], gpio_resp)
+    axi_err_slv #(
+      .AxiIdWidth ( ariane_axi_soc::IdWidthSlave ),
+      .req_t      ( ariane_axi_soc::req_slv_t    ),
+      .resp_t     ( ariane_axi_soc::resp_slv_t   )
+    ) i_gpio_err_slv (
+      .clk_i      ( clk_i      ),
+      .rst_ni     ( ndmreset_n ),
+      .test_i     ( test_en    ),
+      .slv_req_i  ( gpio_req   ),
+      .slv_resp_o ( gpio_resp  )
+    );
+  end
 
 
   // ------------------------------

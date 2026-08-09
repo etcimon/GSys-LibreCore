@@ -47,8 +47,10 @@ need=(
   verif/tests/custom/ai/ai_pmu_group4_smoke.S
   verif/tests/custom/ai/ai_queue_doorbell.S
   verif/tests/custom/ai/ai_aiperm_umode.S
+  verif/tests/custom/ai/ai_island_mmio_smoke.S
   core/cvxif_g6lc_ai/g6lc_ai_acc_bank.sv
   corev_apu/include/g6lc_ai_island_cfg_pkg.sv
+  corev_apu/ai_island/g6lc_ai_island_apb.sv
   verif/tests/testlist_ai_matrix.yaml
   architecture/ai-matrix/isa-encoding.md
 )

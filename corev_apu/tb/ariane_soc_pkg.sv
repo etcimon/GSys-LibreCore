@@ -45,7 +45,11 @@ package ariane_soc;
   localparam logic[63:0] TimerLength    = 64'h1000;
   localparam logic[63:0] SPILength      = 64'h800000;
   localparam logic[63:0] EthernetLength = 64'h10000;
+  // GPIO window is 4 KiB. When CVA6Cfg.AiCfg.MatrixEn the Xg6lcai island MMIO
+  // (cap/doorbell/AI-3 regions) is mapped here; otherwise an error slave.
   localparam logic[63:0] GPIOLength     = 64'h1000;
+  localparam logic[63:0] AiIslandBase   = 64'h4000_0000; // alias of GPIOBase
+  localparam logic[63:0] AiIslandLength = GPIOLength;
   localparam logic[63:0] HPSLength      = 64'h800000;
 `ifdef NEXYS_VIDEO
   localparam logic[63:0] DRAMLength     = 64'h20000000; // 512MByte of DDR on Nexys video board

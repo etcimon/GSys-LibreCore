@@ -314,7 +314,7 @@ that depended on the carve-out.
 | **P0** | this scaffold + `isa-encoding.md` + `../uncore/pcie-endpoint.md` + licensing surface + todo rows | docs only, no flist |
 | **P1** | option **B**: `AiMatrixEn`, T0/T1 `ai.mma.s8` + `ai.requant` behind `COPRO_G6LC_AI`; `g6lc64_ai` package; directed tests | **Landed** — `ai-matrix-veri` green on `work-ver-ai` |
 | **P2** | PMU events, RVFI probes, DFT threading, accumulator `tc_sram` | **Mostly landed:** PMU group 4 + RVFI + acc `tc_sram` + **aiperm gate** + queue T0 stubs + `testmode_i` threaded to acc bank. Still open: MBIST macro bind, FO4 note |
-| **P3** | T2 descriptor engine in `corev_apu/ai_island/` | **Spine landed** (standalone): cap window + AI-3 `addr_check` + `desc_engine` + `island_top`. **`ai-island-veri` PASS**. Not yet on SoC AXI flist / no GEMM DMA. |
+| **P3** | T2 descriptor engine in `corev_apu/ai_island/` | **Spine + SoC MMIO.** AXI@`0x4000_0000` when `MatrixEn`. Standalone + `ai_island_mmio_smoke`. No GEMM DMA / PLIC yet. |
 | **P3** | T2 descriptor engine in `corev_apu/` + address-check + IRQ + `corev_apu/tb` model | formal ring safety + DMA-reject test |
 | **P4** | option **D**: decouple `EnableAccelerator`, real first-pass decoder, resolve `cva6.sv:2216` | RVV compliance stays green |
 | **P5** | PCIe EP + virtio + host driver + IPv6 plane + sshd on card | host enumeration on FPGA |

@@ -184,6 +184,13 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/l3_cache/g6lc_server_prefetcher.sv                                 \
         corev_apu/l3_cache/g6lc_l3_top.sv                                            \
         corev_apu/src/g6lc_cluster.sv                                                \
+        corev_apu/include/g6lc_ai_island_cfg_pkg.sv                                  \
+        corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv                              \
+        corev_apu/ai_island/g6lc_ai_addr_check.sv                                    \
+        corev_apu/ai_island/g6lc_ai_cap_window.sv                                    \
+        corev_apu/ai_island/g6lc_ai_desc_engine.sv                                   \
+        corev_apu/ai_island/g6lc_ai_island_top.sv                                    \
+        corev_apu/ai_island/g6lc_ai_island_apb.sv                                    \
         vendor/pulp-platform/axi/src/axi_dw_converter.sv                             \
         $(wildcard corev_apu/bootrom/*.sv)                                           \
         $(wildcard corev_apu/clint/*.sv)                                             \
@@ -352,6 +359,7 @@ riscv-benchmarks          := $(shell xargs printf '\n%s' < $(riscv-benchmarks-li
 # Search here for include files (e.g.: non-standalone components)
 incdir := $(CVA6_REPO_DIR)/vendor/pulp-platform/common_cells/include/ $(CVA6_REPO_DIR)/vendor/pulp-platform/axi/include/ \
           $(CVA6_REPO_DIR)/corev_apu/include/ \
+          $(CVA6_REPO_DIR)/corev_apu/ai_island/include/ \
           $(CVA6_REPO_DIR)/corev_apu/register_interface/include/ $(CVA6_REPO_DIR)/corev_apu/tb/common/ \
           $(CVA6_REPO_DIR)/vendor/pulp-platform/axi/include/ \
           $(CVA6_REPO_DIR)/verif/core-v-verif/lib/uvm_agents/uvma_rvfi/ \
