@@ -3,28 +3,36 @@
 Append-only. One **primary** residual (or tightly coupled pair) per iteration.
 Template at bottom.
 
-**Active:** `iter-008` (dual-c.mv OpenSBI residual after cookie-green default).
+**Active:** `iter-009` (FDT match / sbi_strlen after dual-c.mv peel).
 
 ---
 
 ## Active iteration
 
-### iter-008 — Dual-c.mv OpenSBI residual (post cookie-green peels)
+### iter-009 — FDT match / sbi_strlen residual (post dual-c.mv peel)
 
 | Field | Value |
 |-------|--------|
-| **Started** | 2026-08-08 |
+| **Started** | 2026-08-09 |
 | **Bucket** | B1 |
-| **Primary ids** | `b1-dual-cmv-s3` |
-| **Hypothesis** | Bare `mini_dual_cmv_s3` green under SS serialize; OpenSBI `PEEL_CMV` fails early (`plat_hc=80`) with `mepc≈0x80004a50` mcause=2 mid-`sbi_strlen` — control-flow/pointer poison from dual-c.mv window, not only `ld a2,0(s3)` at 7316 |
-| **I2 Repro** | `PEEL_CMV=1 bash verif/regress/soft-ladder-opensbi-soak.sh` → no 51b1babe |
-| **I3 Fix** | TBD: selective recovery around LOAD→consumer vs dual RF; keep nops default |
-| **I4 Verify** | default cookie still green; PEEL_CMV only when fixed |
-| **I6 Next** | PEEL_MALLOC freelist RTL in parallel |
+| **Primary ids** | `b1-fdt-lenp-store` / fdt_match→strlen |
+| **Hypothesis** | Dual c.mv is not the residual: natural c.mv + soft stub `jal fdt_match` cookies green. Natural match dies mid-`sbi_strlen` (`mepc=0x80004a50` mcause=2). Bare `mini_strlen_rvc` + `mini_dual_cmv_strlen` PASS — OpenSBI FDT string path under DI still open. |
+| **I2 Repro** | `PEEL_FDT_MATCH=1 bash verif/regress/soft-ladder-opensbi-soak.sh` → no 51b1babe |
+| **I3 Fix** | TBD FDT/strlen DI residual; default soft stub @731e |
+| **I4 Verify** | default cookie green with natural c.mv |
+| **I6 Next** | PEEL_MALLOC freelist |
 
 ---
 
 ## Completed iterations
+
+### iter-008 — Dual-c.mv OpenSBI residual (closed: peeled)
+
+| Field | Value |
+|-------|--------|
+| **Completed** | 2026-08-09 |
+| **Result** | Isolate: PEEL_CMV + SOFT_FDT_MATCH → **51b1babe**; PEEL_CMV alone mid-strlen fail. Bare minis dual_cmv / strlen_rvc / dual_cmv_strlen **3/3 PASS**. Default: natural c.mv + soft fdt_match stub. `b1-dual-cmv-s3` **peeled**. |
+| **Next** | iter-009 FDT match / strlen |
 
 ### iter-007 — Ordered path integration + freelist soft + peels
 
@@ -91,8 +99,8 @@ See also `CONT-FULL-MAP.md` for cont.## disposition.
 | Order | id | Bucket | Note |
 |------:|----|--------|------|
 | 1 | `b1-heap-freelist-malloc` | B1 | soft malloc default; PEEL_MALLOC still red |
-| 2 | `b1-dual-cmv-s3` | B1 | **active** — OpenSBI PEEL_CMV fail; bare mini green |
-| 3 | `b1-fdt-lenp-store` | B1 | Real printf / hang-6 family |
+| 2 | `b1-fdt-lenp-store` | B1 | **active** — soft fdt_match stub; PEEL_FDT_MATCH red mid-strlen |
+| 3 | `b1-dual-cmv-s3` | B1 | **peeled** (natural c.mv default 2026-08-09) |
 | 4 | `b1-amo-spin-lock` | B1 | **rtl-fixed** (natural spins default) |
 | 5 | `b1-lrsc-cmpxchg` | B1 | **rtl-fixed** (natural LR/SC default) |
 | 6 | `b1-csr-expected-trap` | B1 | **rtl-fixed** (natural CSR probes default) |

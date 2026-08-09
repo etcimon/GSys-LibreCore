@@ -166,19 +166,35 @@ sites:
   - id: b1-dual-cmv-s3
     bucket: B1
     priority: 3
-    status: in_progress
+    status: peeled
     ladder: cont.19
-    soft_form: "nop c.mv a1/a0 @7312/7314 in platform_override path"
-    pin: "dual c.mv clobber s3 under DI"
+    soft_form: "natural c.mv @7312/7314 (SOFT_CMV=1 restores nops)"
+    pin: "historic dual c.mv s3 poison — isolate showed fail was fdt_match→strlen"
     rtl_loci:
       - core/issue_read_operands.sv
       - core/id_stage.sv
       - core/decoder.sv
     rtl_progress: >
-      2026-08-08: mini_dual_cmv_s3 PASS bare. OpenSBI PEEL_CMV=1 FAIL cookie
-      (mepc=0x80004a50 mcause=2 plat_hc=80). Keep cont.19 c.mv nops default.
-    verif_idea: "Paired c.mv back-to-back with live s3 consumer"
-    retire_when: override loop natural; nops removed
+      2026-08-09: PEEL_CMV+SOFT_FDT_MATCH cookie green; bare dual_cmv/strlen
+      minis 3/3 PASS. Default natural c.mv. Residual is soft fdt_match stub.
+    verif_idea: "Paired c.mv + strlen bridge (mini_dual_cmv_strlen)"
+    retire_when: "met for c.mv class; keep SOFT_CMV bisect only"
+
+  - id: b1-fdt-match-strlen
+    bucket: B1
+    priority: 2
+    status: in_progress
+    ladder: cont.19-44
+    soft_form: "c.li a0,0 + c.nop replaces jal fdt_match_node @731e"
+    pin: "PEEL_FDT_MATCH mepc=0x80004a50 mcause=2 mid-sbi_strlen"
+    rtl_loci:
+      - core/frontend/instr_queue.sv
+      - core/issue_read_operands.sv
+      - core/load_unit.sv
+    rtl_progress: >
+      Bare mini_strlen_rvc / mini_dual_cmv_strlen PASS; OpenSBI natural match red.
+    verif_idea: "FDT string walk under DI; PEEL_FDT_MATCH cookie"
+    retire_when: PEEL_FDT_MATCH cookie green
 
 # ---------------------------------------------------------------------------
 # B2 — Firmware policy (source profile; not permanent binary VAs)

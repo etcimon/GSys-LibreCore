@@ -55,17 +55,25 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Note | Multiple store sites (12eb2, 13128, …); root is pointer integrity under DI |
 | Retire criterion | Real `sbi_printf` / FDT walk green |
 
-### Dual `c.mv` (priority 3 — **active iter-008**)
+### Dual `c.mv` (priority 3 — **peeled iter-008**)
 
 | Item | Detail |
 |------|--------|
-| Soft evidence | Nop pair in platform_override modules loop @7312/7314 |
+| Soft evidence (retired) | Was nop pair @7312/7314; now **natural** by default |
 | Fail pin (historic) | `s3` clobber → `ld a2,0(s3)` poison at 7316 |
-| Fail pin (OpenSBI PEEL_CMV 2026-08-08) | Early fail `plat_hc=80`, `mepc≈0x80004a50` mcause=2 **mid-`sbi_strlen`** (PC into middle of `add` @4a4e) — CF/poison class, not only 7316 |
-| Bare directed | `mini_dual_cmv_s3.S` **PASS** on work-ver-smt2 (SS serialize enough for simple case) |
-| Primary RTL | Scoreboard/RF dual-commit vs in-flight LOAD; wrong-path LOAD (cont.5 no cancel); compressed dual-issue |
-| Negative | Dual-commit LOAD/ALU serialize (cont.19b); full load-WB drain (cont.20) |
-| Retire criterion | `PEEL_CMV=1` cookie green; nops removed |
+| Isolate (2026-08-09) | Natural c.mv + soft stub `jal fdt_match` @731e → **cookie green**. PEEL_CMV alone failed mid-`sbi_strlen` because natural a0/a1 *enable* match, not dual-c.mv RF poison. |
+| Bare directed | `mini_dual_cmv_s3.S`, `mini_strlen_rvc.S`, `mini_dual_cmv_strlen.S` **PASS** |
+| Residual moved to | Soft stub fdt_match / FDT lenp / strlen (`b1-fdt-lenp-store`) |
+| Retire criterion | **Met** for dual-c.mv class; `SOFT_CMV=1` bisect only |
+
+### FDT match / `sbi_strlen` (priority 2 — **active iter-009**)
+
+| Item | Detail |
+|------|--------|
+| Soft evidence | `c.li a0,0` + `c.nop` replaces `jal fdt_match_node` @731e |
+| Fail pin | `PEEL_FDT_MATCH=1` → mepc=`0x80004a50` mcause=2 mid-`sbi_strlen` |
+| Bare directed | strlen minis **green** — residual is OpenSBI FDT string path under DI |
+| Retire criterion | Natural jal fdt_match cookie green |
 
 ## Already landed in RTL (do not re-patch via monorepo-soak scripts)
 

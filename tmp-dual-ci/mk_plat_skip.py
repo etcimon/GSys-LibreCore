@@ -12,13 +12,15 @@ Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
     - natural SA/freelist spins (spin peeled)
     - natural atomic_cmpxchg LR/SC (cmpx peeled)
     - natural hart_init CSR probes (csr peeled)
+    - natural dual c.mv @7312/14 (cmv peeled 2026-08-09 isolate)
+    - soft stub fdt_match_node jal @731e (FDT/strlen residual open)
     - soft malloc/zalloc/free + heap space stubs (freelist open)
-    - nop dual c.mv @7312/14 (cmv still open on OpenSBI)
   Bisect restores:
     SOFT_SPIN=1   SA/heap spin NOP4
     SOFT_CMPX=1   ld/sd atomic_cmpxchg shim
     SOFT_CSR=1    CSR probe cut cd86→cd0e
-    PEEL_CMV=1    natural c.mv (FAIL cookie 2026-08-08 — keep nops default)
+    SOFT_CMV=1    nop dual c.mv (old cont.19 soft)
+    PEEL_FDT_MATCH=1  natural jal fdt_match (FAIL mid-sbi_strlen cookie)
     PEEL_MALLOC=1 real malloc/zalloc/free
 
 Critical fix vs cont.16: do NOT patch 0x996 with j lottery.
@@ -104,7 +106,12 @@ def _env_peel(name: str) -> bool:
     return v in ("1", "true", "yes", "on")
 
 
-PEEL_CMV = _env_peel("PEEL_CMV")
+# Default: natural dual c.mv (peeled). SOFT_CMV=1 restores cont.19 nops.
+# PEEL_CMV kept as alias for "not SOFT_CMV" for older soak scripts.
+SOFT_CMV = _env_peel("SOFT_CMV")
+PEEL_CMV = _env_peel("PEEL_CMV")  # legacy: force natural c.mv (default already)
+# Default soft-stub fdt_match jal; PEEL_FDT_MATCH=1 runs natural (cookie red).
+PEEL_FDT_MATCH = _env_peel("PEEL_FDT_MATCH")
 # Default soft-stub malloc/zalloc/free (freelist DI residual on dual-hart smt2).
 PEEL_MALLOC = _env_peel("PEEL_MALLOC")
 print(
@@ -112,7 +119,8 @@ print(
     f"SOFT_SPIN={int(_env_peel('SOFT_SPIN'))} "
     f"SOFT_CMPX={int(_env_peel('SOFT_CMPX'))} "
     f"SOFT_CSR={int(_env_peel('SOFT_CSR'))} "
-    f"PEEL_CMV={int(PEEL_CMV)} PEEL_MALLOC={int(PEEL_MALLOC)}"
+    f"SOFT_CMV={int(SOFT_CMV)} PEEL_FDT_MATCH={int(PEEL_FDT_MATCH)} "
+    f"PEEL_MALLOC={int(PEEL_MALLOC)}"
 )
 
 
@@ -658,20 +666,31 @@ print(
     f"switch_mode prologue→success cave@{hex(SUCCESS)}"
 )
 print("b9c ecall real; full banner; real putc+domain_dump; soft printf")
-# DI cont.19: nop dual c.mv unless PEEL_CMV (b1-dual-cmv-s3).
-if not PEEL_CMV:
+# cont.19 dual c.mv: natural by default (iter-008 isolate 2026-08-09:
+# PEEL_CMV + SOFT_FDT_MATCH cookie green — dual c.mv alone is not the residual;
+# natural jal fdt_match → sbi_strlen fails mepc=0x80004a50 mcause=2).
+# SOFT_CMV=1 restores c.nop pair for bisect.
+if SOFT_CMV and not PEEL_CMV:
     struct.pack_into("<H", data, vf(segs, 0x80007312), 0x0001)  # was c.mv a1,s1
     struct.pack_into("<H", data, vf(segs, 0x80007314), 0x0001)  # was c.mv a0,s2
-    print("cont.19: nop c.mv a1/a0 @7312/7314 (keep override loop)")
+    print("SOFT_CMV: nop c.mv a1/a0 @7312/7314")
 else:
-    print("PEEL_CMV: natural c.mv pair @7312/7314 (from diag)")
+    print("cont.19+: natural c.mv pair @7312/7314 (peeled)")
+# fdt_match_node jal @731e: soft-stub unless PEEL_FDT_MATCH (B1 FDT/strlen open).
+if not PEEL_FDT_MATCH:
+    struct.pack_into("<H", data, vf(segs, 0x8000731e), 0x4501)  # c.li a0,0
+    struct.pack_into("<H", data, vf(segs, 0x80007320), 0x0001)  # c.nop
+    print("soft fdt_match jal @731e (c.li a0,0 + nop; PEEL_FDT_MATCH=1 to restore)")
+else:
+    print("PEEL_FDT_MATCH: natural jal fdt_match @731e (cookie red mid-sbi_strlen)")
 
 
 DST.write_bytes(data)
 print("wrote", DST)
 print(
     "expect SI/DI: 51b1babe + BANR "
-    f"(soft_malloc={int(not PEEL_MALLOC)} soft_cmv={int(not PEEL_CMV)})"
+    f"(soft_malloc={int(not PEEL_MALLOC)} soft_cmv={int(SOFT_CMV)} "
+    f"soft_fdt_match={int(not PEEL_FDT_MATCH)})"
 )
 
 r = subprocess.run(

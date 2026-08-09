@@ -24,7 +24,7 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
 
 | Layer | Goal | Status |
 |-------|------|--------|
-| **B1 RTL** | Delete soft nops by fixing DI | AMO/LRSC/CSR **cookie-green peels**; dual-c.mv + freelist + FDT **open** |
+| **B1 RTL** | Delete soft nops by fixing DI | AMO/LRSC/CSR/**c.mv** **cookie-green peels**; freelist + FDT match/strlen **open** |
 | **B2 firmware** | Source profile instead of VA patches | Domain cut / printf / switch_mode still soft |
 | **B3 harness** | Cookie gate scripts | default soak **51b1babe** 2026-08-08 on work-ver-smt2 |
 
@@ -38,7 +38,7 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
 | **6–11** | s4=lenp / path_offset −4 / next_tag | B1 | soft printf later | Partial: STQ forward + SS serialize; **FDT residual open** (`b1-fdt-lenp-store`) | real printf |
 | **12–14** | STQ forward, store-side sticky, SpeculativeSb decouple | B1 | none | **Landed** load_unit/store_buffer | n/a |
 | **15–18** | DI illegal@2; full CF serialize; 51b1babe | B1 | lottery / cookie | **Landed** SS post-CF/ALU/LSU serialize | n/a |
-| **19** | dual `c.mv` → s3 poison | B1 | nop @7312/14 | dual-commit try **negative**; residual wrong-path LOAD? | natural c.mv |
+| **19** | dual `c.mv` → s3 poison | B1 | **natural** (peeled) | isolate: fail was fdt_match→strlen not c.mv | keep peeled |
 | **20** | peel stubs; load-WB stall **negative** | — | — | do not re-try full load-WB drain | — |
 | **21** | domain_init DI illegal@2; trap t1 | B3 | trap cave | TB trapdump **landed** | debug-only |
 | **22** | post-domain SA **stale ra** | B1 | soft SA | STQ fwd should help; **spin + ra** still soft | real SA |
@@ -105,13 +105,13 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
    # SOFT_LADDER_SPIKE=1 optional; SOFT_LADDER_COMPILE_ONLY=1 assemble only
    # or: SOFT_LADDER=1 bash verif/regress/dual-iss-regress.sh
 
-2. OpenSBI cookie (default already peels spin/cmpx/CSR; soft malloc + c.mv nops)
+2. OpenSBI cookie (default peels spin/cmpx/CSR/c.mv; soft malloc + soft fdt_match)
    bash verif/regress/soft-ladder-opensbi-soak.sh
-   # Bisect restores: SOFT_SPIN=1 SOFT_CMPX=1 SOFT_CSR=1
-   # Experimental: PEEL_CMV=1 (red)  PEEL_MALLOC=1 (freelist open)
+   # Bisect restores: SOFT_SPIN=1 SOFT_CMPX=1 SOFT_CSR=1 SOFT_CMV=1
+   # Experimental: PEEL_FDT_MATCH=1 (red mid-strlen)  PEEL_MALLOC=1 (freelist open)
    # SUCCESS = trapdump [1000] contains 51b1babe only
 
-3. dual-c.mv OpenSBI (iter-008) then PEEL_MALLOC freelist
+3. PEEL_FDT_MATCH / real printf (iter-009) then PEEL_MALLOC freelist
 4. B1 FDT lenp → real printf (drop BANR)
 5. B2 domain full walk (real ecall); switch_mode payload
 6. Empty mk_plat_skip → retire b3-mk-plat-skip-oracle
@@ -126,8 +126,8 @@ Checklist:
 [x] PEEL_SPIN / natural spins → cookie green (default)
 [x] PEEL_CMPX / natural LRSC → cookie green (default)
 [x] PEEL_CSR / natural CSR probes → cookie green (default)
-[!] PEEL_CMV → FAIL plat_hc=80 mepc≈0x80004a50 mcause=2 (mid sbi_strlen);
-    bare mini_dual_cmv_s3 PASS — keep c.mv nops default
+[x] natural c.mv + soft fdt_match stub → cookie green (iter-008 peel 2026-08-09)
+[!] PEEL_FDT_MATCH → FAIL mid sbi_strlen mepc=0x80004a50 mcause=2
 [ ] PEEL_MALLOC → real freelist (b1-heap-freelist-malloc)
 [ ] real sbi_printf (FDT lenp)
 [ ] domain full walk; switch_mode payload
