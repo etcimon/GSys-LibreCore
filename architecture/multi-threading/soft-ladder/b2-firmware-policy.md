@@ -1,7 +1,11 @@
 # B2 — Firmware policy (OpenSBI / platform)
 
-Binary `mk_plat_skip` stubs are **prototypes**. B2 lands the same *intent* in
-source under an explicit bring-up profile, then deletes hard-coded VAs.
+**Scaffold phase P5 only** (after B1 RTL peels). Binary `mk_plat_skip` stubs are
+**prototypes**. B2 lands *intentional product/policy* softs in source under an
+explicit bring-up profile, then deletes hard-coded VAs.
+
+**Never** use B2 to paper over open B1 RTL bugs (atomics, FDT walk, DI hazards).
+Those stay on the P1→P2→P4 path. See parent `README.md`.
 
 ## Target tree
 

@@ -31,7 +31,7 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **FTQ / frontend** | Mispredict reseed + demand fixes for bare-metal green | Guide `agents/guides/AGENTS-branch-prediction.md` · scaffold `architecture/branch-prediction/README.md` · RTL `core/frontend/{frontend,cva6_ftq}.sv` |
 | **Structural FO4** | sparse_ex/frontend residual close @ **2.5 GHz** (screening ≠ STA) | Package `sv-timing/AGENTS.md` · `sv-timing/architecture/MONOREPO-SOAK.md` · `FREQUENCY-CLOSURE.md` · host `AGENTS-build-platform.md` §6.1 / §7 · plan `architecture/build-platform-opensta-from-timing.md` · philosophy §2.8 in `AGENTS-coding-philosophy.md` |
 | **R3a dual-hart OpenSBI** | `fw_payload` + WSL SUCCESS; **R3b gate** `r3b-linux-image` (Image external) | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
-| **Soft ladder (DI OpenSBI)** | Oracle at `software/smt2-linux/soft-ladder/`; default cookie **51b1babe** (natural spin/cmpx/CSR/c.mv/match/malloc/strlen + **soft getprop**); peels through strlen landed; **iter-012 FDT lenp open** | `soft-ladder/{README,ITERATION,CONT-FULL-MAP,inventory,b1-rtl-residuals}.md` · `verif/regress/soft-ladder-{opensbi-soak,di-regress}.sh` · harness `work-ver-smt2-fw64*` |
+| **Soft ladder (DI OpenSBI residual scaffold)** | **P0 done:** optional suites `soft-ladder-di` / `soft-ladder-osbi` + diag `diag-soft-ladder-paths` in `defaults.ts`. Max **B1 RTL** promotion; oracle temporary. Cookie **51b1babe**; peels through strlen; **iter-012 FDT lenp open** (soft getprop holding) | `soft-ladder/README.md` (P0–P6) · `ITERATION` · `b3-sim-harness` · suites in `defaults.ts` · `AGENTS-specs-to-tests.md` |
 | **FDT topology plan** | `NrCores`×`NrHarts` (threads/core), stream vs SMT `cpu-map`, issue width non-DT; gates before `/proc/cpuinfo` | `architecture/multi-threading/fdt-topology-soft-ladder.md` · `ariane-smt2.dts` · `ariane-stream8.dts` |
 | **Ara / RVV** | Attach + DTS + directed; **VRF/cosim gate** `ara-vector-cosim` (live lmul opt) | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
 | **H / KVM** | U9 + **H-edge Spike+RTL 3/3** (`kvm-h-spike` / Variane server_math) | `architecture/server-math-hypervisor.md` · remaining-upgrade Phase B · `agents/spec/riscv-spec-II-5.*-hypervisor*.html` · impl Hypervisor row · `verif/tests/custom/kvm_h/` · suite `kvm-h-tests` |
@@ -47,22 +47,26 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
 (see also diagnosis intent in `AGENTS-build-platform.md` residual soaks;
 `verif/regress/AGENTS-regress-scripts.md`).
 
-**Active edge (soft ladder + SMT topology) — do these before optional lab tracks:**
+**Active edge (residual scaffold + SMT topology) — build-platform home, RTL-max:**
 
-| # | Item | Status / next action |
-|---|------|----------------------|
-| **SL-A** | **iter-012 FDT `lenp` / `PEEL_FDT_GETPROP`** | **Open.** Pin: mepc=`0x80012eb2` mcause=6 mtval=`0x80012b2a` (s2=check_node→next_tag ra). Default soft getprop → cookie green. |
-| | Bisects **all negative** | Dual-GPR dual-commit; full dual-commit (`fw64c`); STQ-nofwd+pipeline-busy (`fw64d`); force SI issue port1 kill (`fw64e`) — **identical pin**. Experimental gates **reverted**. |
-| | Next RTL | Corrupt `a2`/`s3` before `by_offset_`; structure-load walk; dual-fetch/`instr_queue`; RF link write. Directed bare minis PASS; OpenSBI path still red. |
-| | Priors | `soft-ladder/ITERATION.md` · `b1-rtl-residuals.md` · `fdt-topology-soft-ladder.md` · `software/smt2-linux/soft-ladder/` · soak `soft-ladder-opensbi-soak.sh` |
-| **SL-B** | Peel soft getprop + real printf | **Blocked on SL-A.** Then drop BANR; `plat_hc==2` sticky without soft FDT. |
-| **SL-C** | Topology truth (smt2) | After SL-B: OpenSBI stock DTB, `hart_count==2`, R3/R3b, `/proc/cpuinfo` processor count; plan `fdt-topology-soft-ladder.md` Phases A5–B. |
-| **SL-D** | Stream plane vs SMT | Orthogonal: `ariane-stream8` N=2 T=1 I=1; do not merge with smt2 DI residual until FDT walk trusted. |
-| **SL-E** | Optional DTS generator | `(NrCores,NrHarts,ISA,caches)` → DTS; only when third topology would triple-maintain hand DTS. |
+Phases: **P0** platform register → **P1** directed mini → **P2** B1 RTL → **P3** osbi climb/peel → **P4** retire soft → **P5** B2 policy only → **P6** generalize.  
+Full map: `architecture/multi-threading/soft-ladder/README.md`.
 
-Soft-ladder SUCCESS = trapdump **`51b1babe` only** (not harness tohost SUCCESS).  
+| # | Item | Phase | Status / next action |
+|---|------|-------|----------------------|
+| **SL-0** | **Register residual suites in build-platform** | P0 | **Done.** Optional `soft-ladder-di` + `soft-ladder-osbi` in `defaults.ts` (not `defaultSuites`); diag `diag-soft-ladder-paths`; maps in `AGENTS-specs-to-tests.md` / `AGENTS-build-platform.md` / `AGENTS-regress-scripts.md`. |
+| **SL-A** | **iter-012 FDT `lenp` / `PEEL_FDT_GETPROP`** | P1–P2 | **Open.** Pin: mepc=`0x80012eb2` mcause=6 mtval=`0x80012b2a`. Soft getprop = **holding** cookie green, not done. |
+| | Bisects **all negative** | P2 | Dual-commit; STQ-nofwd; force SI; ALU/NONE cancel-exempt — same pin; **reverted**. |
+| | Next | **P2 RTL** | Probes: namelen_ entry args **OK** (fdt=`0x8001e000`, lenp stack); by_offset entry a0=**0** a2=s3=**`0x12b2a`**. **s2/s3 clobber** between entry and first by_offset (`check_node`/`next_tag`). RTL: RF/scoreboard s-reg or spill restore under DI. Soft getprop holding. |
+| | Priors | | `soft-ladder/{README,ITERATION,b1-rtl-residuals,b3-sim-harness}.md` · oracle `software/smt2-linux/soft-ladder/` · soak script |
+| **SL-B** | Peel soft getprop + real printf | P3–P4 | **Blocked on SL-A RTL.** Then drop BANR holding; `plat_hc==2` without soft FDT. |
+| **SL-C** | Topology truth (smt2) | P6 / topology | After SL-B: stock DTB, `hart_count==2`, R3/R3b, cpuinfo; `fdt-topology-soft-ladder.md` A5–B. |
+| **SL-D** | Stream plane vs SMT | P6 | Orthogonal: stream8 N=2 T=1; do not merge with smt2 DI residual until FDT walk trusted. |
+| **SL-E** | Optional DTS generator | later | Only when third topology would triple-maintain hand DTS. |
+
+Soft-ladder SUCCESS = trapdump **`51b1babe` only** (not harness tohost SUCCESS) — suite metadata.  
 Harness preference: `SOFT_LADDER_HARNESS=work-ver-smt2-fw64` (FETCH_WIDTH≥64).  
-Oracle: `python software/smt2-linux/soft-ladder/mk_plat_skip.py`.
+Oracle (temporary): `python software/smt2-linux/soft-ladder/mk_plat_skip.py` — shrink on peels; P4 retires.
 
 ---
 

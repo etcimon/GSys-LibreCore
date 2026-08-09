@@ -181,6 +181,7 @@ Configured in `defaults.ts` `tests.suites` (not exhaustive):
 |--------------|-------------------|--------|
 | smoke | `smoke-cv64a6`, `smoke-cv32a6`, … | Fast sanity |
 | directed | `mc-stream-tests`, `mc-spo-soak`, `mc-spo-spike`, **`mc-mini-veri`**, `mc-spo-veri`, `ara-vector-path` | Optional/heavy; mini = hard Zacas golden |
+| residual OpenSBI/DI | **`soft-ladder-di`**, **`soft-ladder-osbi`** | Optional; cookie SUCCESS `51b1babe`; RTL-max peel; diag `diag-soft-ladder-paths` |
 | timings host | `sv-timing-smoke`, `sv-timing-core-sparse`, `sv-timing-autocorrect`, `sv-timing-advanced` | `--output` packages; honor `CVA6_FROM_TIMING` |
 | linux / SMT | `smt-linux-*`, `dual-hart-ci` | R3 cosim WSL path |
 | formal (verify) | `verify.formalTasks` U5 OoO `.sby` | freelist / ROB / cancel |
@@ -206,6 +207,7 @@ Full catalog: `./build.sh test --list`.
 | Dual-ISS Spike+Verilator polish | **done** (suite `dual-iss-regress` tohost golden) |
 | R3b Linux Image gate | **done** (suite `r3b-linux-image`; Image still external) |
 | CRT `mc-spo-veri` | **imafdc 9/9** + **server_math L2 9/9** + **stream8 9/9** (DeepSpec STQ; Verilator 5.008); dual-hart-ci host residual green |
+| Soft-ladder residual scaffold | Suites **`soft-ladder-di`** / **`soft-ladder-osbi`** cataloged optional; diag path-check; max B1 RTL peels — see `architecture/multi-threading/soft-ladder/README.md` |
 
 ---
 

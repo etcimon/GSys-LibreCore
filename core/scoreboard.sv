@@ -264,6 +264,8 @@ module scoreboard #(
           // Soft-ladder B1: AMO (STORE FU) still cancels — store_unit kills
           // amo_buffer via cancel_i so depth-1 does not wedge after drop.
           // Mark complete so commit can drop without waiting for WB.
+          // Soft-ladder iter-012: ALU/NONE cancel exemption was PEEL-negative
+          // (fw64f, same 12eb2/12b2a) — not that alone.
           if (mem_q[cid].sbe.fu != ariane_pkg::LOAD) begin
             mem_n[cid].cancelled = 1'b1;
             mem_n[cid].sbe.valid = 1'b1;

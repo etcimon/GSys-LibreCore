@@ -1,59 +1,101 @@
-# B3 — Sim / harness only
+# B3 — Sim / harness / suite contract (build-platform home)
 
-These soft-ladder pieces must **never** be required for production ROM or
-tape-out firmware. They define how the lab decides “green.”
+These pieces must **never** be required for production ROM or tape-out firmware.
+They define how the **residual scaffold** decides “green” and how peels isolate B1 work.
 
-## SUCCESS definition (current lab)
+Long-term home: **build-platform optional suites + docs**, not `tmp-*` oracles.
+See parent `README.md` phases **P0** (register contract) and **P3** (stack climb).
 
-| Signal | Meaning |
-|--------|---------|
-| Trapdump / mem `@0x80001000` low word contains `0x51b1babe` | Soft-ladder success cookie |
-| `@0x80001068` / nearby `0x42414e52` (`BANR`) | Soft printf exercised |
-| `coldboot_done=1` | OpenSBI coldboot flag |
-| `tohost` timeout (`2147483647`) | Common after WFI cookie — **not** automatic fail if cookie present |
-| `0x51b1dead` | Hang / error cookie |
+## SUCCESS definition (suite metadata)
 
-Document in soak scripts: **cookie wins over tohost FAIL** for soft-ladder DI runs.
+| Signal | Meaning | Applies to |
+|--------|---------|------------|
+| Trapdump / mem `@0x80001000` low word `0x51b1babe` | Soft-ladder / OpenSBI residual **success cookie** | `soft-ladder-osbi` |
+| `@0x80001068` / nearby `0x42414e52` (`BANR`) | Soft printf exercised (evidence, not sole green) | osbi |
+| `coldboot_done=1` | OpenSBI coldboot flag | osbi |
+| `tohost` timeout (`2147483647`) | Common after WFI cookie — **not** automatic fail if cookie present | osbi |
+| `0x51b1dead` | Hang / error cookie | osbi |
+| Mini tohost / PASS contract | Per-test bare-metal | `soft-ladder-di` |
 
-## Artifacts
+**Hard rule:** for OpenSBI residual, **cookie wins over tohost FAIL/SUCCESS**.  
+Harness `SUCCESS (tohost=0)` without `[1000]=…51b1babe` is **not** green for osbi.
 
-| Artifact | Role |
-|----------|------|
-| `tmp-dual-ci/mk_plat_skip.py` | Optional production soft ELF builder (oracle) |
-| `tmp-dual-ci/run_c*.py` | Historical / ad-hoc peels — do not grow without inventory id |
-| `tmp-dual-ci/veri_DI_*.err` | Trapdump evidence |
-| `CVA6_TRAP_DUMP=1` | TB trapdump |
-| Variane `+time_out=` | Bound sim |
+## Build-platform placement
 
-## Harness work (iteration backlog)
+| Artifact | Role | Status |
+|----------|------|--------|
+| `verif/regress/soft-ladder-di-regress.sh` | Suite driver: B1 minis under DI | Suite id **`soft-ladder-di`** (optional) |
+| `verif/regress/soft-ladder-opensbi-soak.sh` | Suite driver: OpenSBI cookie + `PEEL_*` | Suite id **`soft-ladder-osbi`** (optional) |
+| `build-platform/src/config/defaults.ts` | Catalog: `optional: true`, not in `defaultSuites` | **P0 done** (+ diag `diag-soft-ladder-paths`) |
+| `verif/regress/AGENTS-regress-scripts.md` | Isolation ladder + env knobs | Keep in lockstep |
+| `verif/regress/dual-iss-regress.sh` | Dual-plane; `SOFT_LADDER=1` appends B1 minis | Related, optional |
+| `software/smt2-linux/soft-ladder/mk_plat_skip.py` | Temporary binary oracle | Shrink on every peel; retire at P4 complete |
+| `CVA6_TRAP_DUMP=1` / Variane `+time_out=` | TB observability | Sim-only |
 
-1. **Codify SUCCESS** in one shell/ps1 helper used by soak (grep cookie; exit 0/1).
-2. **Optional** TB decode of cookie address without OpenSBI soft caves (long-term).
-3. **Shrink rule:** no new hard-coded VA in `mk_plat_skip` without a new `inventory.yaml` row.
-4. **Lottery / multi-hart:** keep sim-only force separate from platform multi-hart bring-up.
+### Registration sketch (P0)
 
-## Related regress
+```text
+id: soft-ladder-di
+  group: directed, target: g6lc64_smt2 (or harness-driven)
+  optional: true, openSource: true
+  tools: riscv-gcc, verilator
+  SUCCESS: mini contracts
 
-| Script | Note |
-|--------|------|
-| `verif/regress/soft-ladder-di-regress.sh` | **Ordered path step1** — B1 four minis on work-ver-smt2 |
-| `verif/regress/soft-ladder-opensbi-soak.sh` | **Step2** OpenSBI cookie; **only** `[1000]=51b1babe` is green |
-| `verif/regress/dual-iss-regress.sh` | Dual-plane; `SOFT_LADDER=1` appends B1 minis |
-| `tmp-dual-ci/mk_plat_skip.py` | Step2 peels via `PEEL_SPIN` / `PEEL_CMPX` / `PEEL_CSR` / `PEEL_CMV` |
+id: soft-ladder-osbi
+  group: directed, target: g6lc64_smt2
+  optional: true, openSource: true
+  tools: riscv-gcc, verilator
+  SUCCESS: cookie 51b1babe only
+  env contract: SOFT_LADDER_HARNESS, PEEL_*, SOFT_*
+```
+
+Optional later **diag**: path-check for oracle/ELF; cookie grep helper — compartment under
+`diagnostics.tests`, not a default `probe` gate.
+
+## Generic residual knobs
+
+| Variable | Scripts | Meaning |
+|----------|---------|---------|
+| `SOFT_LADDER_HARNESS` | di + osbi | Prefer `work-ver-smt2-fw64` (FETCH_WIDTH≥64) |
+| `PEEL_*` | osbi + oracle | Bisect natural path; not default product |
+| `SOFT_*` / default soft sites | oracle | Holding softs; inventory-tracked |
+| `DV_TARGET` / package | suites | Topology package (smt2 vs stream8) |
+
+Stack climb (narrow → wide), same isolation philosophy as `AGENTS-regress-scripts.md`:
+
+```text
+soft-ladder-di (bare minis, DI)
+        ↓
+soft-ladder-osbi (OpenSBI + cookie; peels for bisect)
+        ↓
+topology / R3 / Linux (only after FDT walk trusted)
+```
+
+## Harness work (scaffold backlog)
+
+1. ~~**P0:** Register both suites in `defaults.ts`~~ **done** (+ residual path diag).
+2. Codify cookie SUCCESS in soak exit path (already scripted; keep suite description explicit).
+3. Optional TB decode of cookie without OpenSBI soft caves (long-term observability).
+4. **Shrink rule:** no new hard-coded VA in `mk_plat_skip` without `inventory.yaml` row.
+5. Lottery / multi-hart sim force stays separate from platform multi-hart bring-up.
+6. Prefer directed minis that promote to **RTL** over growing soft defaults (P1–P2 active: FDT lenp).
+
+## Related docs
+
+| Path | Note |
+|------|------|
+| `README.md` | P0–P6 north star |
+| `b1-rtl-residuals.md` | RTL promotion targets |
+| `b2-firmware-policy.md` | P5 only |
 | `verif/regress/soft-ladder-di-residuals.md` | Test table + gate commands |
-| `verif/regress/smt-linux-boot-path.*` | SMT2 Linux path |
-
-**Note (2026-08-08):** Real freelist/`sbi_malloc` on dual-hart smt2 store-faults
-(`mepc=0x8000f0ba` mcause=6). Default `mk_plat_skip` soft-stubs malloc/zalloc/free
-(+ heap space queries). Cookie **green** with soft malloc + natural spins/cmpx/CSR.
-`PEEL_MALLOC=1` re-soaks freelist; `PEEL_CMV=1` still fails cookie. Harness
-`SUCCESS (tohost=0)` without `[1000]=…51b1babe` is **not** green.
+| `../fdt-topology-soft-ladder.md` | After FDT peel trust |
 
 ## Retirement of `mk_plat_skip`
 
-When all B1 open residuals are `rtl-fixed` and B2 intentional softs are
-`source-landed`, run stock (or profile) OpenSBI on DI:
+When all B1 open residuals are `rtl-fixed` and only intentional B2 softs remain
+`source-landed`:
 
-- Cookie or real boot progress without binary patches → mark
-  `b3-mk-plat-skip-oracle` **retired**.
-- Keep `mk_plat_skip.py` in history or behind `SOFT_LADDER=1` only.
+- Stock (or source-profile) OpenSBI on DI with cookie / real boot progress **without**
+  binary patches → mark oracle **retired**.
+- Keep `mk_plat_skip.py` as history / optional `SOFT_LADDER=1` rebuild helper only.
+- Scaffold remains: suites + minis + peel knobs for the **next** residual class.

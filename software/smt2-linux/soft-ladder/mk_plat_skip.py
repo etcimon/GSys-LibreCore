@@ -106,7 +106,9 @@ HANG = 0x8000ef4c  # sbi_hart_hang (intentional overwrite)
 SUCCESS = 0x8000ef70  # sbi_hart_switch_mode prologue
 # cont.37: was hsm_start_finish @F660; now pmu body after soft SA @2C90
 TRAP_CAVE = 0x80002D00
-A0, A5, S1, S2, S3, S4, S5, S6, T0, T1, SP, RA = 10, 15, 9, 18, 19, 20, 21, 22, 5, 6, 2, 1
+A0, A1, A2, A3, A4, A5, S1, S2, S3, S4, S5, S6, T0, T1, SP, RA = (
+    10, 11, 12, 13, 14, 15, 9, 18, 19, 20, 21, 22, 5, 6, 2, 1
+)
 
 
 def _env_peel(name: str) -> bool:
@@ -339,6 +341,8 @@ t4(0x02833023)  # sd s0, 32(t1)
 t4(0x03233423)  # sd s2, 40(t1)
 t4(0x02133823)  # sd ra, 48(t1)
 t4(0x02933C23)  # sd s1, 56(t1)
+# NOTE: do not extend past ~0x2d38 — later domain soft patches reclaim 0x2d40+.
+# PEEL_FDT needs s3/a0-a2: patch a free cave or TB GPR probe, not this body.
 wfi_t = tpc
 t4(0x10500073)
 t4(jal(0, tpc, wfi_t))
@@ -778,7 +782,88 @@ if not PEEL_FDT_GETPROP:
         "(PEEL_FDT_GETPROP=1 for natural; expect lenp mepc=0x12eb2)"
     )
 else:
-    print("PEEL_FDT_GETPROP: natural fdt getprop (FDT lenp residual open)")
+    # PEEL probe: free gap 0x2CC0..0x2D00 (after printf cave, before trap @2D00).
+    # Entry hook on fdt_get_property_by_offset_ @12e26 uses j (rd=0) so caller's
+    # ra is preserved. Logs last-call a0/a1/a2/ra/s3 + count → DRAM 0x80042e00
+    # (TB [walk]/fdtcnt] region).
+    BYOFF = 0x80012E26
+    FDT_PROBE = 0x80002CC0
+    WALK_LOG = 0x80042E00  # host DRAM+0x42e00
+    # Original first 4 bytes: c.addi16sp -48; c.sdsp s0,32(sp)
+    orig4 = struct.unpack_from("<I", data, vf(segs, BYOFF))[0]
+    # j FDT_PROBE (jal x0) — no ra clobber
+    struct.pack_into(
+        "<I", data, vf(segs, BYOFF), jal(0, BYOFF, FDT_PROBE) & 0xFFFFFFFF
+    )
+    ppc_cell = [FDT_PROBE]
+    pseq = []
+
+    def pemit(w):
+        pseq.append((ppc_cell[0], w & 0xFFFFFFFF))
+        ppc_cell[0] += 4
+
+    # t1 = 0x80042e00 (auipc+addi — lui sign-extends on RV64, cannot form 0x8…)
+    w0, w1 = auipc_addi(T1, ppc_cell[0], WALK_LOG)
+    pemit(w0)
+    pemit(w1)
+    pemit(sd(A0, T1, 0))  # +0x00 fdt (a0)
+    pemit(sd(A1, T1, 8))  # +0x08 offset (a1)
+    pemit(sd(A2, T1, 16))  # +0x10 lenp (a2)
+    pemit(sd(RA, T1, 24))  # +0x18 caller ra
+    pemit(sd(S3, T1, 40))  # +0x28 namelen_ s3
+    # call count at +0x20
+    pemit(ld(T0, T1, 32))
+    pemit(addi(T0, T0, 1))
+    pemit(sd(T0, T1, 32))
+    # original by_offset prologue (4B compressed pair)
+    pemit(orig4)
+    # resume at BYOFF+4
+    pemit(jal(0, ppc_cell[0], BYOFF + 4))
+    assert ppc_cell[0] <= 0x80002D00, f"FDT probe overflow: {ppc_cell[0]:#x}"
+    for p, w in pseq:
+        struct.pack_into("<I", data, vf(segs, p), w)
+    print(
+        f"PEEL_FDT_GETPROP: natural getprop + by_offset probe "
+        f"@{FDT_PROBE:#x}→walklog {WALK_LOG:#x} end={ppc_cell[0]:#x} orig4={orig4:#x}"
+    )
+
+    # namelen_ entry probe → walklog +0x30.. (fits TB [walk] 12-slot window).
+    # Cave after DHPO @2D48 (pmu body stub0'd).
+    # Layout: +0x30 a0 fdt, +0x38 a1, +0x40 a2 name, +0x48 a3 namelen,
+    #         +0x50 a4 lenp, +0x58 ra (count omitted — slot budget).
+    NAMELEN = 0x80013040
+    NL_PROBE = 0x80002D48
+    nl_orig4 = struct.unpack_from("<I", data, vf(segs, NAMELEN))[0]
+    struct.pack_into(
+        "<I", data, vf(segs, NAMELEN), jal(0, NAMELEN, NL_PROBE) & 0xFFFFFFFF
+    )
+    nl_cell = [NL_PROBE]
+    nlseq = []
+
+    def nemit(w):
+        nlseq.append((nl_cell[0], w & 0xFFFFFFFF))
+        nl_cell[0] += 4
+
+    w0, w1 = auipc_addi(T1, nl_cell[0], WALK_LOG + 0x30)
+    nemit(w0)
+    nemit(w1)
+    nemit(sd(A0, T1, 0))  # +0x30 fdt
+    nemit(sd(A1, T1, 8))  # +0x38 node
+    nemit(sd(A2, T1, 16))  # +0x40 name
+    nemit(sd(A3, T1, 24))  # +0x48 namelen
+    nemit(sd(A4, T1, 32))  # +0x50 lenp
+    nemit(sd(RA, T1, 40))  # +0x58 caller ra
+    nemit(nl_orig4)
+    nemit(jal(0, nl_cell[0], NAMELEN + 4))
+    for p, w in nlseq:
+        struct.pack_into("<I", data, vf(segs, p), w)
+    print(
+        f"PEEL_FDT namelen_ entry probe @{NL_PROBE:#x}→walklog+0x30 "
+        f"end={nl_cell[0]:#x} orig4={nl_orig4:#x}"
+    )
+    # Note: post-check_node probe omitted — 13064 is c.mv+bltz (2+4); relocating
+    # bltz breaks PC-relative target. Entry vs by_offset logs already pin s2/s3
+    # corruption between namelen_ entry and first by_offset (check_node/next_tag).
 
 
 DST.write_bytes(data)

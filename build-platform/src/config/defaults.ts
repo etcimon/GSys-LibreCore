@@ -639,6 +639,36 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        // Residual scaffold P1: bare DI minis (B1). Prefers work-ver-smt2-fw64 harness.
+        // Not in defaultSuites. Map: architecture/multi-threading/soft-ladder/README.md
+        id: "soft-ladder-di",
+        description:
+          "OPTIONAL residual: soft-ladder B1 directed DI minis (AMO/LRSC/CSR/c.mv + FDT minis). Prefers SOFT_LADDER_HARNESS=work-ver-smt2-fw64; COMPILE_ONLY=1 without harness. Not Zacas golden.",
+        script: "verif/regress/soft-ladder-di-regress.sh",
+        group: "directed",
+        target: "g6lc64_smt2",
+        dvTarget: "g6lc64_smt2",
+        dvSimulators: "veri-testharness",
+        tools: ["riscv-gcc"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        // Residual scaffold P3: OpenSBI cookie soak. SUCCESS = trapdump 51b1babe only.
+        // PEEL_* bisect only; soft getprop may be holding. Not defaultSuites.
+        id: "soft-ladder-osbi",
+        description:
+          "OPTIONAL residual: OpenSBI DI soft-ladder cookie soak. SUCCESS=cookie 51b1babe only (not tohost). Prefers work-ver-smt2-fw64; PEEL_* env for bisect; needs oracle ELF source + prebuilt harness.",
+        script: "verif/regress/soft-ladder-opensbi-soak.sh",
+        group: "directed",
+        target: "g6lc64_smt2",
+        dvTarget: "g6lc64_smt2",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "smt-linux-boot-path",
         description:
           "OPTIONAL: SMT Linux boot path gate + real lint of cv64a6_smt2.",
@@ -1231,6 +1261,20 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "core/include/g6lc64_smt2_config_pkg.sv",
           "corev_apu/bootrom/ariane-smt2.dts",
           "verif/regress/smt-linux-r3-cosim.sh",
+        ],
+      },
+      {
+        // Residual scaffold P0: scripts + docs present (not a sim gate).
+        id: "diag-soft-ladder-paths",
+        description:
+          "Soft-ladder residual scaffold: suite drivers + architecture map + oracle path.",
+        compartment: "residual",
+        kind: "path-check",
+        paths: [
+          "verif/regress/soft-ladder-di-regress.sh",
+          "verif/regress/soft-ladder-opensbi-soak.sh",
+          "architecture/multi-threading/soft-ladder/README.md",
+          "software/smt2-linux/soft-ladder/mk_plat_skip.py",
         ],
       },
       {

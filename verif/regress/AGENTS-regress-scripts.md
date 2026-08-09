@@ -60,8 +60,8 @@ Profile `full` also runs mini + H-edge on an existing Variane harness when prese
 | `kvm-h-tests.sh` | `kvm-h-tests` | veri+spike | `g6lc64_server_math` | CRT | H + Sstc | Optional full DV list |
 | `monorepo-soak/run-h-edge-veri.sh` | (soak helper) | veri | existing `work-ver` | CRT | H-edge | Reuses server_math TB; not a defaults suite |
 | `stability-regress.sh` | `stability-regress` | composed | see profile | see legs | residual battery | §4 entry point |
-| `soft-ladder-di-regress.sh` | `soft-ladder-di` | veri (+opt spike) | `work-ver-smt2` | bare mini | soft-ladder B1 | Ordered path step1; `SOFT_LADDER_*` env |
-| `soft-ladder-opensbi-soak.sh` | `soft-ladder-osbi` | veri | `work-ver-smt2` | OpenSBI soft ELF | soft-ladder cookie | Step2; strict `51b1babe`; `PEEL_*` |
+| `soft-ladder-di-regress.sh` | `soft-ladder-di` | veri (+opt spike) | `work-ver-smt2` / fw64 | bare mini | residual scaffold B1 | **P1** directed DI minis; register optional in `defaults.ts` (P0); `SOFT_LADDER_*` |
+| `soft-ladder-opensbi-soak.sh` | `soft-ladder-osbi` | veri | `work-ver-smt2-fw64` | OpenSBI soft/stock | residual scaffold | **P3** cookie **`51b1babe` only**; `PEEL_*` bisect; max RTL peel (see `soft-ladder/README.md`) |
 | `dual-iss-regress.sh` | `dual-iss` | dual | server_math | bare | dual plane | `SOFT_LADDER=1` appends B1 minis |
 | `stream8-smoke.sh` | `stream8-smoke` | artifact/compile | stream8 | package | stream/Zacas | Contract + mini golden |
 | `kvm-h-veri.sh` | `kvm-h-veri` | RTL | stream8 | package | H/KVM | Variane H-edge 3/3 |

@@ -68,6 +68,8 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | `stream8-smoke` | directed (optional) | `stream8-smoke.sh` + `testlist_stream8.yaml` | stream8 package + live mini; full CRT via `mc-spo-veri` 9/9 |
 | `kvm-h-veri` | directed (optional) | `kvm-h-veri.sh` | H-edge Variane 3/3 (prefers `work-ver-stream8`) |
 | `dual-hart-ci` | directed (optional) | `dual-hart-ci.sh` | SMT2/NrHarts=2 artifact + checklist |
+| `soft-ladder-di` | directed (optional residual) | `soft-ladder-di-regress.sh` + `verif/tests/custom/multicore/mini_*.{S,c}` | Soft-ladder **P1**: bare DI B1 minis (AMO/LRSC/CSR/c.mv; FDT minis via `SOFT_LADDER_TESTS`). Prefers `work-ver-smt2-fw64`. Map: `architecture/multi-threading/soft-ladder/README.md` |
+| `soft-ladder-osbi` | directed (optional residual) | `soft-ladder-opensbi-soak.sh` + oracle `software/smt2-linux/soft-ladder/` | Soft-ladder **P3**: OpenSBI DI cookie soak; **SUCCESS=`51b1babe` only** (not tohost). `PEEL_*` bisect; soft getprop may hold. RTL-max peel path |
 | `smt-linux-boot-path` | directed (optional) | `smt-linux-boot-path.{sh,ps1}` | DTS vs sparse linux-dts + CLINT/PLIC per-hart gate (no full Linux image) |
 | `smt-linux-rootfs` | linux (optional) | `smt-linux-rootfs.{sh,ps1}` + `testlist_smt_linux.yaml` + `software/smt2-linux/` | SMT OpenSBI R3a auto-build when toolchain present; sim if `CVA6_LINUX_PAYLOAD` / `fw_payload.elf` |
 | `r3b-linux-image` | linux (optional) | `verif/regress/r3b-linux-image.sh` + `fetch-linux-image-hint.sh` | R3b: contract + soft-skip without Image; optional OpenSBI rebuild with LINUX_IMAGE |
@@ -94,7 +96,8 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 |---|---|
 | Part I base RV32I / RV64I | `riscv-tests`, `riscv-arch-test`, `riscv-compliance`, `smoke-*`, `generated` |
 | M (mul/div) | `riscv-tests` (`*um*`), `riscv-arch-test`, `generated` |
-| A / Zalrsc (atomics, LR/SC) | `riscv-tests` (`*ua*`), `riscv-arch-test`, `linux` |
+| A / Zalrsc (atomics, LR/SC) | `riscv-tests` (`*ua*`), `riscv-arch-test`, `linux`, **`soft-ladder-di`** (DI AMO/LRSC minis under smt2) |
+| OpenSBI / FDT residual (DI) | **`soft-ladder-osbi`** (cookie), `soft-ladder-di` (FDT minis), `smt-linux-*` (full stack) |
 | Zacas AMOCAS.W/D/Q (I §5.9) | `mc-mini-veri` + **`zacas-policy`** (hard RTL W/D/Q + odd illegal), `mc-stream-tests` / `mc-spo-soak` / `mc-spo-spike` (directed/ISS), `mc-spo-veri` (CRT residual) |
 | F / D (floating point) | `riscv-tests` (`*uf*`/`*ud*`), `riscv-arch-test` (rv64 targets) |
 | C (compressed) | `riscv-tests` (`*uc*`), `riscv-arch-test`, `smoke-*` |

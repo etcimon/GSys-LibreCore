@@ -1,12 +1,15 @@
 # B1 — RTL / dual-issue residuals
 
-Promotion order among B1 (from `inventory.yaml` priority):
+**Scaffold phases:** P1 directed mini → **P2 RTL fix** → P3 osbi peel (see parent `README.md`).
+B1 is the **primary long-term home** for residual classes; softs only hold evidence until RTL lands.
 
-1. **AMO / spin_lock** (`b1-amo-spin-lock`)
-2. **LR/SC cmpxchg** (`b1-lrsc-cmpxchg`)
-3. **CSR expected-trap** (`b1-csr-expected-trap`)
-4. **FDT lenp store** (`b1-fdt-lenp-store`)
-5. **Dual c.mv** (`b1-dual-cmv-s3`)
+Historical promotion order among B1 (from `inventory.yaml` priority):
+
+1. **AMO / spin_lock** (`b1-amo-spin-lock`) — peeled / rtl-fixed path
+2. **LR/SC cmpxchg** (`b1-lrsc-cmpxchg`) — peeled
+3. **CSR expected-trap** (`b1-csr-expected-trap`) — peeled
+4. **FDT lenp store** (`b1-fdt-lenp-store`) — **active**
+5. **Dual c.mv** (`b1-dual-cmv-s3`) — peeled
 
 ## Investigation map
 
@@ -54,8 +57,12 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Trapdump | mepc/mcause/mtval/sp/s0/s2/ra: s2==mtval; ra=`0x12e3e`; sp/s0 show intact 48B by_offset_ frame |
 | Mechanism (updated) | Dual-commit, STQ-nofwd, force SI issue **all PEEL-negative** (same pin). s2 = check_node→next_tag ra. Not issue dual / dual-commit / STQ-fwd alone. Next: a2/s3 corrupt at call boundary, structure loads, dual-fetch/IQ, RF link write. |
 | Primary RTL | hang-6 family; frontend/`instr_queue`; LSU structure path; scoreboard RF |
-| Directed | `mini_fdt_lenp_sw.S`, `mini_fdt_s2_nest.S` |
-| Retire criterion | Natural getprop + real printf cookie green |
+| Directed | Through **`mini_fdt_opensbi_blob.c`** (real smt2 DTB extract + namelen_ shape) — **PASS** fw64. PEEL pin not in any mini. |
+| PEEL pin (authoritative) | mepc=`0x80012eb2` `sw a0,0(s2)`; mtval/s2=`0x80012b2a` |
+| Probe result | **namelen_ entry OK** (fdt/`lenp` good); **by_offset entry bad** (a0=0, a2=s3=`0x12b2a`). s2/s3 corrupted in `check_node`/`next_tag` window. |
+| RTL focus | Callee-saved **s2/s3** RF write or stack restore under DI; not getprop shape (minis green). |
+| Suite | `soft-ladder-di` / `mini_fdt_opensbi_blob`; osbi `PEEL_FDT_GETPROP=1` (+ entry probes in oracle) |
+| Retire criterion | Natural getprop + real printf cookie green; `plat_hc==2` without soft getprop |
 
 ### Dual `c.mv` (priority 3 — **peeled iter-008**)
 

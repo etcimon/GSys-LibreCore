@@ -4,23 +4,26 @@
 #
 # Soft-ladder ordered path — step 1: B1 directed DI soak.
 #
-# Tests (bare multicore mini_*.S, tohost=1 pass):
+# Tests (bare multicore mini_*.{S,c}, tohost=1 pass):
 #   mini_amoadd_w_spin   b1-amo-spin-lock
 #   mini_lrsc_d          b1-lrsc-cmpxchg
 #   mini_csr_expected_trap  b1-csr-expected-trap
 #   mini_dual_cmv_s3     b1-dual-cmv-s3
+# FDT residual (opt-in via SOFT_LADDER_TESTS):
+#   mini_fdt_walk_prop / mini_fdt_libfdt_shape / mini_fdt_large_walk
 #
-# Plane: Variane RTL preferred (g6lc64_smt2 / work-ver-smt2). Optional Spike
-# for ISA-clean tests (not Zacas). OpenSBI cookie path is separate (step 2 peels).
+# Plane: Variane RTL preferred (g6lc64_smt2 / work-ver-smt2-fw64). Optional Spike
+# for ISA-clean tests (not Zacas). OpenSBI cookie path is suite soft-ladder-osbi.
 #
 # Usage:
 #   bash verif/regress/soft-ladder-di-regress.sh
+#   # or: bun build-platform/src/cli/index.ts test soft-ladder-di
 #   SOFT_LADDER_SPIKE=1 bash verif/regress/soft-ladder-di-regress.sh
-#   SOFT_LADDER_TESTS="mini_lrsc_d mini_csr_expected_trap" bash ...
-#   SOFT_LADDER_HARNESS=work-ver-smt2 bash ...
+#   SOFT_LADDER_TESTS="mini_fdt_large_walk mini_fdt_libfdt_shape" bash ...
+#   SOFT_LADDER_HARNESS=work-ver-smt2-fw64 bash ...
 #   SOFT_LADDER_COMPILE_ONLY=1 bash ...   # assemble only
 #
-# Map: architecture/multi-threading/soft-ladder/CONT-FULL-MAP.md § ordered path
+# Map: architecture/multi-threading/soft-ladder/README.md (P1)
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -77,6 +80,8 @@ resolve_src() {
   local t="$1"
   if [[ -f "$ROOT/verif/tests/custom/multicore/${t}.S" ]]; then
     echo "$ROOT/verif/tests/custom/multicore/${t}.S"
+  elif [[ -f "$ROOT/verif/tests/custom/multicore/${t}.c" ]]; then
+    echo "$ROOT/verif/tests/custom/multicore/${t}.c"
   else
     return 1
   fi
@@ -86,9 +91,16 @@ build_elf() {
   local t="$1" src elf
   src="$(resolve_src "$t")" || return 1
   elf="$OUT/${t}.elf"
-  "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
-    -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
-    "$src" -T "$LD" -o "$elf" -march="$MARCH" -mabi="$MABI"
+  if [[ "$src" == *.c ]]; then
+    "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
+      -ffreestanding -fno-builtin -O2 \
+      -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
+      "$src" -T "$LD" -o "$elf" -march="$MARCH" -mabi="$MABI"
+  else
+    "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
+      -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
+      "$src" -T "$LD" -o "$elf" -march="$MARCH" -mabi="$MABI"
+  fi
   echo "$elf"
 }
 
@@ -187,8 +199,9 @@ for t in "${tests[@]}"; do
 done
 
 log "SUMMARY pass=${PASS} fail=${FAIL} skip=${SKIP}"
-log "Next ordered path: step2 OpenSBI peels (PEEL_SPIN / PEEL_CMPX / PEEL_CSR)"
-log "  python tmp-dual-ci/mk_plat_skip.py   # default soft"
-log "  PEEL_SPIN=1 python tmp-dual-ci/mk_plat_skip.py"
-log "See architecture/multi-threading/soft-ladder/CONT-FULL-MAP.md"
+log "Next: suite soft-ladder-osbi (cookie 51b1babe; PEEL_* bisect) — P3"
+log "  bash verif/regress/soft-ladder-opensbi-soak.sh"
+log "  PEEL_FDT_GETPROP=1 bash verif/regress/soft-ladder-opensbi-soak.sh"
+log "  oracle: python software/smt2-linux/soft-ladder/mk_plat_skip.py"
+log "See architecture/multi-threading/soft-ladder/README.md (P0–P6)"
 [[ "$FAIL" -eq 0 ]]
