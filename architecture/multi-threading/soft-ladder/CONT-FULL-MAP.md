@@ -13,20 +13,20 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
 ```text
   cont.2–14   STQ / load forward / SpeculativeSb  ──► mostly RTL-landed (R3a)
   cont.15–18  DI CF serialize / first 51b1babe   ──► SS full serialize landed
-  cont.19     dual c.mv s3 poison                ──► soft nop; RTL open (wrong-path LD?)
-  cont.20–26  peel domain/printf/ecall           ──► soft SA / soft printf
-  cont.27–32  banner / heap / cave rehome        ──► B2 softs
-  cont.33     real hart_init; CSR probe cut      ──► B1 CSR serialize (iter-006)
+  cont.19     dual c.mv s3 poison                ──► soft nop; OpenSBI PEEL_CMV FAIL
+  cont.20–26  peel domain/printf/ecall           ──► soft printf; SA real (47+)
+  cont.27–32  banner / heap                      ──► soft malloc (freelist open)
+  cont.33     hart_init CSR probes               ──► peeled (natural + CSR stall)
   cont.34–40  domain_finalize cuts               ──► B2 domain cut
-  cont.41–46  start_finish / domain ld-hart      ──► B2 + soft SA
-  cont.47–51  real SA-nolock; soft cmpx; spins   ──► B1 AMO/LRSC in progress
+  cont.41–46  start_finish / domain ld-hart      ──► B2 + soft switch_mode cookie
+  cont.47–51  SA/spins/cmpx/scratch              ──► spins+cmpx peeled; soft malloc
 ```
 
 | Layer | Goal | Status |
 |-------|------|--------|
-| **B1 RTL** | Delete soft nops by fixing DI | AMO cancel + LR/SC pair + SS serialize + STQ fwd **in tree**; CSR stall **iter-006**; dual-c.mv / FDT lenp **open** |
-| **B2 firmware** | Source profile instead of VA patches | Not started (keep binary peels) |
-| **B3 harness** | SUCCESS = cookie/trapdump only in sim | TB trapdump landed; cookies still in ELF |
+| **B1 RTL** | Delete soft nops by fixing DI | AMO/LRSC/CSR **cookie-green peels**; dual-c.mv + freelist + FDT **open** |
+| **B2 firmware** | Source profile instead of VA patches | Domain cut / printf / switch_mode still soft |
+| **B3 harness** | Cookie gate scripts | default soak **51b1babe** 2026-08-08 on work-ver-smt2 |
 
 ---
 
@@ -45,16 +45,16 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
 | **23–24** | soft SA global; natural hsm/coldboot | B1/B2 | soft SA | same as 22/47 | real SA |
 | **25–26** | peel fwft/ecall; soft printf BANR | B1/B2 | soft printf | FDT lenp family | real printf |
 | **27–30** | banner / heap / putc / domain_dump | B2 | various | peels mostly natural | source profile |
-| **31–33** | hart_init; **CSR expected-trap** | B1 | cut after memset | **iter-006** unresolved CSR stall | full probes |
+| **31–33** | hart_init; **CSR expected-trap** | B1 | natural probes default | **peeled** (CSR stall + cookie green) | keep peeled |
 | **34–35** | domain_finalize soft; real console | B2 | domain cut; jalr softs | — | source no-ops |
 | **36–40** | soft hsm_start; domain walk pins | B2 | domain cut | cont.45 peeled real hsm_start | full domain |
 | **41–43** | soft start_finish; domain@bb68 | B2 | start_finish soft | — | real finish |
 | **44** | real printf → **lenp mcause=6** | B1 | soft printf | STQ+SS partial; **open** | real printf |
 | **45** | real hsm_hart_start | B2 | — | **peeled** | n/a |
 | **46** | real ld domain_hart_ptr then exit | B2 | cut after ld | multi-iter → ecall poison | full walk |
-| **47** | real SA; **nop spin** | B1 | spin NOP4 | **iter-004** amo_buffer cancel | no spin nops |
-| **48–50** | finish thru atomic_write; soft **cmpx ld/sd** | B1 | soft cmpx | **iter-005** LR/SC pair | real lr/sc |
-| **51** | real scratch_used; switch_mode prologue | B2/B3 | switch body soft | cookie WFI | Linux handoff |
+| **47** | real SA; spins | B1 | natural spins default | **peeled** (SOFT_SPIN bisect) | keep peeled |
+| **48–50** | finish; cmpxchg | B1 | natural LR/SC default | **peeled** (SOFT_CMPX bisect) | keep peeled |
+| **51** | scratch_used; switch_mode | B2/B3 | switch cookie soft; soft malloc | cookie WFI green | Linux handoff |
 
 ---
 
@@ -105,20 +105,16 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
    # SOFT_LADDER_SPIKE=1 optional; SOFT_LADDER_COMPILE_ONLY=1 assemble only
    # or: SOFT_LADDER=1 bash verif/regress/dual-iss-regress.sh
 
-2. OpenSBI peels (one class at a time; re-soak cookie after each)
-   python tmp-dual-ci/mk_plat_skip.py                    # default soft cont.51
-   PEEL_SPIN=1 python tmp-dual-ci/mk_plat_skip.py        # real spins
-   PEEL_CMPX=1 python tmp-dual-ci/mk_plat_skip.py        # real lr/sc cmpx
-   PEEL_CSR=1  python tmp-dual-ci/mk_plat_skip.py        # CSR probes
-   PEEL_CMV=1  python tmp-dual-ci/mk_plat_skip.py        # natural c.mv
-   PEEL_ALL_B1=1 …                                       # experimental all four
-   # SUCCESS = 51b1babe in trapdump (CVA6_TRAP_DUMP=1), Variane DI
+2. OpenSBI cookie (default already peels spin/cmpx/CSR; soft malloc + c.mv nops)
+   bash verif/regress/soft-ladder-opensbi-soak.sh
+   # Bisect restores: SOFT_SPIN=1 SOFT_CMPX=1 SOFT_CSR=1
+   # Experimental: PEEL_CMV=1 (red)  PEEL_MALLOC=1 (freelist open)
+   # SUCCESS = trapdump [1000] contains 51b1babe only
 
-3. B1 FDT lenp → real printf (drop BANR) when green
-4. B1 dual-c.mv residual if PEEL_CMV fails
-5. Soft SA retirement (ra + spin already green)
-6. B2 domain full walk (real ecall); switch_mode payload
-7. Empty mk_plat_skip → retire b3-mk-plat-skip-oracle
+3. dual-c.mv OpenSBI (iter-008) then PEEL_MALLOC freelist
+4. B1 FDT lenp → real printf (drop BANR)
+5. B2 domain full walk (real ecall); switch_mode payload
+6. Empty mk_plat_skip → retire b3-mk-plat-skip-oracle
 ```
 
 Checklist:

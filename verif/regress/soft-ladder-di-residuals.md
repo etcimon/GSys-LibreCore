@@ -21,19 +21,20 @@ SOFT_LADDER=1 bash verif/regress/dual-iss-regress.sh
 
 | Inventory id | Test | Status | Suite hook |
 |--------------|------|--------|------------|
-| `b1-amo-spin-lock` | `mini_amoadd_w_spin.S` | **scaffold + gate** | soft-ladder-di-regress |
-| `b1-lrsc-cmpxchg` | `mini_lrsc_d.S` | **scaffold + gate** | soft-ladder-di-regress |
-| `b1-csr-expected-trap` | `mini_csr_expected_trap.S` | **scaffold + gate** | soft-ladder-di-regress |
-| `b1-dual-cmv-s3` | `mini_dual_cmv_s3.S` | **scaffold + gate** | soft-ladder-di-regress |
-| `b1-fdt-lenp-store` | FDT lenp / stack pointer under DI | planned | after step2 peels green |
+| `b1-amo-spin-lock` | `mini_amoadd_w_spin.S` | **gate green**; OpenSBI spins peeled | soft-ladder-di-regress |
+| `b1-lrsc-cmpxchg` | `mini_lrsc_d.S` | **gate green**; natural LR/SC default | soft-ladder-di-regress |
+| `b1-csr-expected-trap` | `mini_csr_expected_trap.S` | **gate green**; CSR probes peeled | soft-ladder-di-regress |
+| `b1-dual-cmv-s3` | `mini_dual_cmv_s3.S` | **bare green**; OpenSBI PEEL_CMV **red** | soft-ladder-di-regress |
+| `b1-heap-freelist-malloc` | soft malloc default | PEEL_MALLOC open | soft-ladder-opensbi-soak |
+| `b1-fdt-lenp-store` | FDT lenp / real printf | planned | after freelist/cmv |
 
-## OpenSBI cookie gate (step 2, B2/B3)
+## OpenSBI cookie gate (step 2)
 
 ```bash
-python tmp-dual-ci/mk_plat_skip.py
-# optional peels (one at a time):
-# PEEL_SPIN=1 PEEL_CMPX=1 PEEL_CSR=1 PEEL_CMV=1
-# Variane DI + CVA6_TRAP_DUMP=1; SUCCESS iff 51b1babe
+bash verif/regress/soft-ladder-opensbi-soak.sh   # strict 51b1babe
+# Default soft ELF: soft malloc + natural spins/cmpx/CSR + c.mv nops
+# PEEL_CMV=1   # still fails cookie (iter-008)
+# PEEL_MALLOC=1 SOFT_SPIN=1 SOFT_CMPX=1 SOFT_CSR=1  # bisect restores
 ```
 
 See `architecture/multi-threading/soft-ladder/b3-sim-harness.md`.
