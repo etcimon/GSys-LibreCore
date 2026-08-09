@@ -13,8 +13,11 @@ grow into, **without touching working silicon today**.
 >   `core/`, `corev_apu/`, `core/include/`. This directory *describes and reserves* where future work
 >   lands; it does not relocate current work. (Physically relocating RTL was explicitly deferred — see
 >   "Promotion path" below.)
-> - **`.md` only.** Per `AGENTS.md` §0.4, documentation is out of licensing scope; these READMEs carry
->   no SPDX header and change no code contract.
+> - **`.md` only.** Documentation follows its tier (`DOCS_UNDER_TIER`); `architecture/**` is tier T
+>   (MIT) and carries no inline SPDX header, and these READMEs change no code contract.
+> - **One exception to "docs decide nothing":** `ai-matrix/README.md` §7 records a licensing tier
+>   decision (tier **P case 2**, withheld from the open path) that is **irreversible once published**.
+>   Read it before creating any file under the globs it names.
 
 ---
 
@@ -46,6 +49,7 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `multi-core/` | Multi-hart tiles, coherence, interrupt scaling | SoC integration | `agents/guides/AGENTS-l2l3-cache.md`, `-soc-readiness.md` |
 | `l2-l3-cache/` | Memory-side L2 / SoC L3 (LLC) | SoC integration (not an L1 edit) | `agents/guides/AGENTS-l2l3-cache.md` |
 | `spec-extensions/` | Further RISC-V ISA features (V, Zvk, Sv57, CFI, …) | Spec-anchored | `agents/spec/INDEX.md` + relevant guide |
+| `ai-matrix/` | INT8 matrix acceleration (`Xg6lcai`) for a PCIe CPU+AI card | Offload seam (CVXIF → accelerator) for the core-attached plane; an **uncore island** for the throughput plane — **not** an `ex_stage` edit | `ai-matrix/README.md` + `ai-matrix/scaling-100tops.md` + `uncore/pcie-endpoint.md` |
 | `sv-timing/` | Structural FO4 precompile package pointer (host = build-platform `timings`) | Tooling / host adapter | `sv-timing/AGENTS.md`, `AGENTS-host.md` |
 
 Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings outs, `--from-timing` soak hand-off) is documented in [`build-platform-workspace-lifecycle.md`](build-platform-workspace-lifecycle.md) — not an RTL extension point; still scaffold-only (no flist).
@@ -62,6 +66,7 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `remaining-upgrade-sequence.md` | Post-U6 queue: multi-core, H/Sstc, U10, Ara, **U5 OoO + L3/PF** |
 | `out-of-order/README.md` | U4 slice + **U5.0–U5.2** status |
 | `l2-l3-cache/README.md` | L2 done; **L3 + server prefetcher** |
+| `ai-matrix/scaling-100tops.md` | **Sizing plan:** frozen TOPS definition, bandwidth-first model (`BW = 2/T × MAC-rate`), core-attached vs island plane split, chiplet deferral gate. **SKU decided (AI-S1): both, staged** — latency SKU first (I1→I3), throughput SKU by cluster replication (I2), one memory system serving both. |
 | `ara-vector-attach.md` | U10ᵇ Ara/RVV flist + `server_math_v` package contract |
 | `multi-threading/smt2-bringup.md` | U6.1 SMT2 enable + dual-thread Linux/OpenSBI checklist |
 | `multi-threading/soft-ladder/` | DI OpenSBI soft-ladder promotion (B1 RTL / B2 FW / B3 harness) |

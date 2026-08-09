@@ -64,7 +64,14 @@ CERN-OHL-S-2.0 you may, at no charge and with no royalty:
 ================================================================================
 
 The commercial license is offered to grant, by separate written agreement, one
-or more of the following, none of which the open path provides:
+or more of the following, none of which the open path provides.
+
+Sections 3.1 to 3.6 state the individual rights. Section 3.7 is not a further
+right but a SCOPE: it takes sections 3.1 to 3.6 over the whole of the material
+licensable under this document, for the party that Makes Products purely for
+its own internal use -- typically an AI or cloud operator running a fleet it
+never sells. A reader in that position should read section 3.7 first, then
+sections 3.2 to 3.6, then section 4.5.
 
   3.1 CLOSED PRODUCT. The right to Make and Convey a Product incorporating
       Covered Source WITHOUT providing the Complete Source of that Product and
@@ -107,14 +114,108 @@ or more of the following, none of which the open path provides:
   3.6 SUPPORT AND COLLATERAL. Maintenance, roadmap influence, and delivery of
       verification, DFT and backend collateral.
 
+  3.7 INTERNAL PRODUCTION USE -- AI AND DATACENTRE OPERATORS. The rights in
+      sections 3.1 to 3.6, taken over the WHOLE of the material licensable
+      under this document -- that is, all tier R material under section
+      4.1(i) and all tier P case 2 material under section 4.1(ii) -- in
+      respect of Products that the Licensee Makes for its own internal use
+      and does not Convey.
+
+      THE ADDRESSEE. This clause is written for the operator that designs or
+      commissions its own accelerator silicon and deploys it exclusively in
+      its own facilities: an AI or cloud company building a training or
+      inference fleet, a card or appliance used only in-house, or any
+      equivalent arrangement in which the computing capacity is sold as a
+      service and the hardware itself is never sold, leased or shipped. It
+      is the case the open path does not price, and it is the case in which
+      the LibreCore AI plane -- see section 4.5 -- is most likely to matter.
+
+      WHAT IS TRUE ABOUT THE OPEN PATH, STATED PLAINLY. Under
+      CERN-OHL-S-2.0 such an operator may Make Products in any quantity, by
+      any foundry, and operate them commercially -- including to provide
+      computing, training or inference services to third parties -- without
+      providing Complete Source and WITHOUT ANY ROYALTY on tier R material,
+      because the obligations of CERN-OHL-S-2.0 section 4 run to recipients
+      and a party that does not Convey has no recipient. Section 2 above
+      applies in full and is not narrowed by this clause. For tier R
+      material, no commercial license is REQUIRED for that activity, and
+      this document does not assert otherwise.
+
+      WHAT SUCH AN OPERATOR ACTUALLY TAKES THIS LICENSE FOR. Across the
+      whole tier R corpus, and not merely a subset of it:
+
+        (i)   closed modifications (section 3.2) -- the cache, predictor,
+              PMA/PMP, SRAM-binding, clock-gating, scan and PDK-adaptation
+              edits that an in-house tape-out requires and that a foundry
+              NDA forbids publishing;
+
+        (ii)  marking relief (section 3.3) -- NOTICE section 2 applies to
+              Making as well as Conveying, so a fleet die carries the
+              die/package and identification-register obligations even
+              though no unit is Conveyed;
+
+        (iii) warranty and IP indemnification (section 3.4) -- ordinarily
+              the operative reason, because CERN-OHL-S-2.0 sections 6.1 and
+              6.2 disclaim all warranties and require the Licensee to hold
+              the Licensor harmless, which is not a posture a production
+              fleet is usually able to accept;
+
+        (iv)  patent assurance (section 3.5) -- broader than the
+              "necessarily infringed" scope of CERN-OHL-S-2.0 section 7.1,
+              with relief from the patent-retaliation termination of
+              section 7.2 and the termination-on-breach exposure of
+              section 8.4;
+
+        (v)   support and collateral (section 3.6) -- verification, DFT and
+              backend collateral, and roadmap influence;
+
+        (vi)  optionality (section 3.1) -- the right to Convey later, on
+              disposal of a business unit, in a joint venture, or when a
+              fleet part becomes a merchant part, WITHOUT the reciprocal
+              disclosure that would otherwise attach at that moment.
+
+      WHERE THIS CLAUSE IS NOT OPTIONAL. Tier P case 2 material is not
+      offered under CERN-OHL-S-2.0 at all. A commercial license is required
+      to use it whether or not the resulting Product is ever Conveyed, and
+      internal production is therefore squarely within charge for that
+      material. See section 4.5. An operator may take this license over
+      tier P case 2 alone, or over tier R and tier P case 2 together.
+
+      Three matters are drawn to the attention of any party relying on the
+      no-conveyance position for tier R material, each of which is
+      fact-specific and is not resolved by this document:
+
+        (a) CERN-OHL-S-2.0 contains no affiliate or intra-group carve-out,
+            and "Convey" is defined at section 1.13 as "to communicate to
+            the public or distribute". Transfer of a Product between
+            separate legal entities may be a Conveyance.
+
+        (b) The Research and Development provision at CERN-OHL-S-2.0
+            section 5 is limited to entities carrying out "development,
+            testing or quality assurance" work. Volume manufacturing,
+            assembly and test by a foundry, OSAT or contract manufacturer
+            may fall outside it, in which case that entity is a recipient
+            for the purposes of section 4.
+
+        (c) Conveyance of a Product to a colocation customer, a joint
+            venture, an acquirer of a business unit, or on any disposal of
+            assets, is a Conveyance, and section 4 attaches at that time to
+            the version then Conveyed.
+
 ================================================================================
 4. SCOPE -- WHAT THIS LICENSE CAN AND CANNOT COVER
 ================================================================================
 
-  4.1 COVERED. This license covers only LibreCore-original material: the files
-      identified as tier R in .licensing-tiers, being those in which Etienne
-      Cimon holds the rights, carrying the dual SPDX expression given in
-      section 1 above.
+  4.1 COVERED. This license covers only LibreCore-original material, being
+      that in which Etienne Cimon holds the rights. Two classes qualify:
+
+        (i)  files identified as tier R in .licensing-tiers, carrying the
+             dual SPDX expression given in section 1 above, for which this
+             license is the ALTERNATIVE to CERN-OHL-S-2.0; and
+
+        (ii) files identified as tier P case 2 in .licensing-tiers, carrying
+             LicenseRef-GSys-Commercial alone, for which this license is the
+             ONLY path. See section 4.5.
 
   4.2 NOT COVERED, AND NOT NEEDED. The remainder of this repository is
       third-party material -- ETH Zurich and University of Bologna, Thales DIS
@@ -144,6 +245,28 @@ or more of the following, none of which the open path provides:
       TRADEMARKS.md section 3 and may not represent the Product as
       source-available.
 
+  4.5 COMMERCIAL-ONLY MATERIAL (TIER P, CASE 2). A subset of
+      LibreCore-original material is deliberately NOT offered under
+      CERN-OHL-S-2.0. It is classified tier P in .licensing-tiers, carries
+
+          SPDX-License-Identifier: LicenseRef-GSys-Commercial
+
+      with no "OR" alternative, and is licensed only under a separate
+      written agreement. This is a decision about what is published, not a
+      restriction on anything already published: it does not narrow the
+      rights granted in any version previously released under
+      CERN-OHL-S-2.0, which are irrevocable.
+
+      Where tier-P material is absent from a distribution, the remaining
+      tier-R material remains fully usable under the open path, and the
+      absent material is not part of the Complete Source of a Product that
+      does not contain it.
+
+      Tier P has a second, unrelated case -- third-party NDA and foundry PDK
+      material under LicenseRef-Proprietary -- which section 4.3 excludes
+      from this license entirely. The two cases are distinguished in
+      .licensing-tiers and in AGENTS-licensing.md.
+
 ================================================================================
 5. CONSIDERATION
 ================================================================================
@@ -158,6 +281,22 @@ of: per-unit shipped, per-tape-out or per-mask-set, per-design-win, or an
 annual site license. Consideration for the warranty, indemnity and support
 elements of sections 3.4 to 3.6 is priced separately from the closed-product
 and closed-modification rights of sections 3.1 to 3.2.
+
+Consideration under section 3.7 -- internal production by an AI or datacentre
+operator, across the whole tier R corpus -- is priced separately from the
+above and is ordinarily NOT per-unit, because no unit is Conveyed. Bases in
+ordinary use are: an annual fleet license scaled to deployed accelerator die
+or to installed compute capacity; a per-tape-out or per-mask-set fee; a term
+site license per design centre; or a combination. Where the operator takes
+only some of the elements enumerated in section 3.7 -- most commonly
+indemnity and support without closed modifications -- those elements are
+priced individually.
+
+Consideration for tier P case 2 material under section 4.5 is independent of
+both, because no open path exists for that material and the question of
+Conveyance does not arise. It is the only element of this document that is
+chargeable for internal production as such, rather than by election of the
+Licensee.
 
 ================================================================================
 6. CONTRIBUTIONS AND THIS LICENSE

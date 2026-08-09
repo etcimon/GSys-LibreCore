@@ -21,8 +21,16 @@ LICENSE_TIER_T=MIT
 # tier F — FPGA zero-stage bootrom, conveyed as a separate work
 LICENSE_TIER_F=GPL-2.0-or-later
 
-# tier P — material under third-party NDA / foundry PDK terms (AGENTS-technology.md)
+# tier P case 1 — material under third-party NDA / foundry PDK terms
+# (AGENTS-technology.md). This is the default for a tier-P match.
 LICENSE_TIER_P=LicenseRef-Proprietary
+
+# tier P case 2 — LibreCore-original material deliberately withheld from the
+# open path: commercial licence ONLY, no "OR CERN-OHL-S-2.0" alternative.
+# Applies to the tier-P globs declared under "tier P case 2" in
+# .licensing-tiers. Distinguished from case 1 by ownership: case 1 is someone
+# else's property, case 2 is ours and is simply not published openly.
+LICENSE_TIER_P_ORIGINAL=LicenseRef-GSys-Commercial
 
 # Documentation follows its tier rather than being out of scope. Markdown takes
 # no inline header; the license is conveyed by the root LICENSE.* files + NOTICE.

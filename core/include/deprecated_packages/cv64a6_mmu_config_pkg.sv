@@ -59,6 +59,7 @@ package cva6_config_pkg;
       XFVec: bit'(0),
       CvxifEn: bit'(1),
       CoproType: config_pkg::COPRO_NONE,
+      AiCfg: config_pkg::AiCfgOff,
       RVZiCond: bit'(0),
       RVZicntr: bit'(1),
       RVZiCbom: bit'(0),

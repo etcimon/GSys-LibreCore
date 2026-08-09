@@ -93,8 +93,54 @@ package config_pkg;
   /// Coprocessor type parameter
   typedef enum {
     COPRO_NONE,
-    COPRO_EXAMPLE
+    COPRO_EXAMPLE,
+    /// Xg6lcai AI matrix plane on the CVXIF seam (option B).
+    /// architecture/ai-matrix/README.md s2; instantiated in corev_apu/src/ariane.sv.
+    COPRO_G6LC_AI
   } copro_type_t;
+
+  /// AI matrix acceleration (Xg6lcai). Interface contract:
+  /// architecture/ai-matrix/isa-encoding.md; sizing model for the throughput
+  /// plane: architecture/ai-matrix/scaling-100tops.md.
+  ///
+  /// These knobs size the CORE-ATTACHED plane only (T0/T1: a small, fixed tile
+  /// unit at the CVXIF or accelerator seam). The scaled T2 island is uncore and
+  /// is sized by its own package, never from here -- see scaling-100tops.md s8.
+  /// Do not add cluster counts or MAC rates to this struct.
+  ///
+  /// Grouped in a nested struct rather than flattened like the U5/U6 knobs
+  /// below: a flat addition costs one line per member in each of the ~24
+  /// config packages, a nested one costs exactly one line.
+  typedef struct packed {
+    bit          MatrixEn;    // master enable: custom-2 opcode + AI CSRs
+    bit          AccelEn;     // seam D (accelerator port); 0 => seam B (CVXIF)
+    bit          TileLdEn;    // native ai.ldt/ai.stt (needs a memory port)
+    bit          RequantEn;   // funct3=100 requantise / activate group
+    bit          SparseEn;    // funct3=110 gather / expert-select group
+    bit          UmodeEn;     // allow U-mode issue (aiperm[0] reset value)
+    // Datatype options. These are GRANT gates, not encodings: aicfg carries the
+    // request, and ai.setcfg downgrades to the nearest supported value rather
+    // than trapping (isa-encoding.md s3.1), so software is portable across
+    // parts that do and do not implement them.
+    bit          Int4En;      // grant aicfg.ew=01 (4-bit elements)
+    bit          Sparse24En;  // grant aicfg.sp24 (structured 2:4 sparsity on A)
+    int unsigned TileM;       // native tile rows
+    int unsigned TileN;       // native tile columns
+    int unsigned TileK;       // native reduction depth
+    int unsigned TileCount;   // addressable tile registers
+    int unsigned AccBanks;    // accumulator banks (>= NrHarts under SMT)
+    int unsigned AccDepth;    // accumulators per bank
+    int unsigned Queues;      // T2 descriptor rings (0 disables T2)
+    int unsigned QueueDepth;  // entries per ring (power of two)
+    // T2 scheduling priority classes (isa-encoding.md s7.1, descriptor
+    // flags[19:16]). 1 = single class, i.e. plain round-robin. Bounds what the
+    // core clamps a descriptor's requested class to; the island reports the
+    // same number in its capability window.
+    int unsigned QosClasses;
+  } ai_cfg_t;
+
+  /// Default for every package that does not implement the AI plane.
+  localparam ai_cfg_t AiCfgOff = ai_cfg_t'(0);
 
   localparam NrMaxRules = 16;
 
@@ -398,6 +444,8 @@ package config_pkg;
     bit          ServerPrefetchEn;    // multi-stream + next-line at L3 boundary
     int unsigned ServerPfStreams;     // concurrent stream trackers
     int unsigned ServerPfDistance;    // next-line look-ahead (lines)
+    // Xg6lcai AI matrix plane (off in every package but g6lc64_ai)
+    ai_cfg_t     AiCfg;
   } cva6_user_cfg_t;
 
   typedef struct packed {
@@ -639,6 +687,8 @@ package config_pkg;
     int unsigned X_DUALWRITE;
     int unsigned X_ISSUE_REGISTER_SPLIT;
 
+    ai_cfg_t AiCfg;
+
   } cva6_cfg_t;
 
   /// Empty configuration to sanity check proper parameter passing. Whenever
@@ -776,6 +826,48 @@ package config_pkg;
     assert (!(Cfg.L3En && Cfg.L2LineWidth != 0 && Cfg.L3LineWidth != 0 &&
               Cfg.L3LineWidth != Cfg.L2LineWidth));
     assert (!(Cfg.ServerPrefetchEn && !Cfg.L2En && !Cfg.L3En));
+
+    // --- Xg6lcai AI matrix plane (architecture/ai-matrix/isa-encoding.md) ---
+    // Seam exclusivity. CVXIF and the accelerator port are already mutually
+    // exclusive (cva6.sv gen_err_xif_and_acc); the AI plane must pick exactly
+    // one of them, and the accelerator seam is incompatible with RVV because
+    // EnableAccelerator is derived from it (build_config_pkg).
+    assert (!(Cfg.AiCfg.MatrixEn && Cfg.AiCfg.AccelEn && Cfg.CvxifEn));
+    assert (!(Cfg.AiCfg.MatrixEn && !Cfg.AiCfg.AccelEn && !Cfg.CvxifEn));
+    assert (!(Cfg.AiCfg.AccelEn && Cfg.RVV));
+    // Native tile load/store needs a memory port. The CVXIF seam has none, so
+    // under seam B these are synthesised by the compiler (isa-encoding s3.3).
+    assert (!(Cfg.AiCfg.TileLdEn && !Cfg.AiCfg.AccelEn));
+    // Optional instruction groups and U-mode issue imply the master enable.
+    assert (!((Cfg.AiCfg.RequantEn || Cfg.AiCfg.SparseEn || Cfg.AiCfg.UmodeEn) &&
+              !Cfg.AiCfg.MatrixEn));
+    assert (!(Cfg.AiCfg.Queues > 0 && !Cfg.AiCfg.MatrixEn));
+    assert (!((Cfg.AiCfg.Int4En || Cfg.AiCfg.Sparse24En) && !Cfg.AiCfg.MatrixEn));
+    // Geometry: non-zero and power-of-two when the plane is enabled.
+    assert (!(Cfg.AiCfg.MatrixEn && (Cfg.AiCfg.TileM == 0 ||
+              2 ** $clog2(Cfg.AiCfg.TileM) != Cfg.AiCfg.TileM)));
+    assert (!(Cfg.AiCfg.MatrixEn && (Cfg.AiCfg.TileN == 0 ||
+              2 ** $clog2(Cfg.AiCfg.TileN) != Cfg.AiCfg.TileN)));
+    assert (!(Cfg.AiCfg.MatrixEn && (Cfg.AiCfg.TileK == 0 ||
+              2 ** $clog2(Cfg.AiCfg.TileK) != Cfg.AiCfg.TileK)));
+    assert (!(Cfg.AiCfg.MatrixEn && Cfg.AiCfg.TileCount == 0));
+    assert (!(Cfg.AiCfg.MatrixEn && Cfg.AiCfg.AccDepth == 0));
+    // Accumulators bank per hart so an AI-heavy hart cannot starve the control
+    // hart under SMT (architecture/ai-matrix/README.md s5).
+    assert (!(Cfg.AiCfg.MatrixEn && Cfg.AiCfg.AccBanks < Cfg.NrHarts));
+    // Rings are power-of-two and must be sized when present.
+    assert (!(Cfg.AiCfg.Queues > 0 && Cfg.AiCfg.QueueDepth == 0));
+    assert (Cfg.AiCfg.QueueDepth == 0 ||
+            2 ** $clog2(Cfg.AiCfg.QueueDepth) == Cfg.AiCfg.QueueDepth);
+    // Priority classes exist only alongside rings, and there is always at
+    // least one class when rings are present.
+    assert (!(Cfg.AiCfg.Queues > 0 && Cfg.AiCfg.QosClasses == 0));
+    assert (!(Cfg.AiCfg.Queues == 0 && Cfg.AiCfg.QosClasses > 0));
+    // The CVXIF seam must actually select the AI coprocessor, and no other
+    // coprocessor may squat the seam while the AI plane owns it.
+    assert (!(Cfg.AiCfg.MatrixEn && Cfg.CvxifEn &&
+              Cfg.CoproType != COPRO_G6LC_AI));
+    assert (!(!Cfg.AiCfg.MatrixEn && Cfg.CoproType == COPRO_G6LC_AI));
     // pragma translate_on
   endfunction
 

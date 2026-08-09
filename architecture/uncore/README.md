@@ -10,7 +10,7 @@ controller vs board/analog PHY, and *what* gates it must pass before it is wired
 >   or `pd/` script. These outlines cannot break elaboration, simulation, synthesis, or tape-out.
 > - **No RTL is moved or added by these docs.** They describe integration seams that already exist in
 >   `corev_apu/` and point at controllers fetched on demand by the `build-platform` `vendor` command.
-> - **`.md` only** — out of licensing scope per `AGENTS.md` §0.4.
+> - **`.md` only** — tier T (MIT) per `DOCS_UNDER_TIER`; no inline SPDX header, no code contract changed.
 
 ---
 
@@ -32,6 +32,7 @@ controller vs board/analog PHY, and *what* gates it must pass before it is wired
 | `ddr4-controller.md` | memory | `litedram` | Controller on-die; DDR PHY = FPGA MIG / ASIC hard macro; DIMM on board |
 | `ethernet-controller.md` | network | `verilog-ethernet`, `liteeth`, `corundum`, `ariane-ethernet` | MAC on-die; PHY = external chip |
 | `pcie-root-complex.md` | interconnect | `verilog-pcie`, `litepcie` | Glue on-die; SerDes/link = hard IP; NVMe/GPU are endpoints |
+| `pcie-endpoint.md` | interconnect | `verilog-pcie`, `litepcie` | **Inverse role:** LibreCore *is* the endpoint (CPU+AI card); BAR/config target on-die; SerDes = hard IP |
 | `storage-controllers.md` | storage | `litesata`, `litesdcard` (+ NVMe over PCIe) | Controller on-die; SerDes/level-shift external |
 | `hdmi-display.md` | display | `hdmi` | TMDS encoder on-die; connector + re-driver on board |
 

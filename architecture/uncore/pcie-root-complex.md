@@ -8,6 +8,10 @@ Add a **PCIe root complex** — the single highest-leverage uncore block. One PC
 SSDs, discrete GPUs, extra NICs, and capture/expansion cards, all as **endpoints** behind the same
 controller + a Linux driver. This is **step 2** of the uncore roadmap (right after DRAM).
 
+> **Role check.** Here LibreCore is the **host** that enumerates other devices. For the inverse — a
+> LibreCore plug-in card enumerated *by* a host — see `pcie-endpoint.md`. The two share DMA/TLP RTL
+> and the AXI bridge but differ entirely in config-space ownership, BAR handling and enumeration role.
+
 ## 2. Chosen controllers
 - **verilog-pcie** — `https://github.com/alexforencich/verilog-pcie` — **MIT**. Hand-written Verilog
   DMA/host glue over vendor PCIe hard IP; pairs with verilog-ethernet/Corundum. *Recommended primary.*

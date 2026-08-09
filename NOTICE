@@ -57,6 +57,35 @@ Source, You must display the Source Location as follows:
       information for other parties, the Source Location required by this
       Notice shall be no less prominent than that information.
 
+  (e) PRODUCTS THAT ARE MADE BUT NEVER CONVEYED. This section applies by its
+      terms to Making, and CERN-OHL-S-2.0 section 4 governs "the Making of
+      Products" as well as their Conveyance. It therefore applies to a
+      Product You Make solely for Your own internal use -- for example an
+      accelerator or server deployed only in Your own facilities and used to
+      provide computing, training or inference services to third parties --
+      even though no Complete Source obligation arises in that case because
+      there is no recipient.
+
+      This is the only obligation of this Licence that reaches purely
+      internal production of tier R material, and it is an attribution and
+      inspectability obligation, not a financial one. No royalty is owed for
+      such production.
+
+      Relief from this section is one of the things an AI or datacentre
+      operator running an in-house fleet may take a commercial license for.
+      See LICENSE.GSys-Commercial section 3.7, which is addressed to exactly
+      that reader, states the position in full across the whole tier R
+      corpus, and identifies the fact-specific questions -- group structure,
+      contract manufacture, later disposals -- on which "never Conveyed" can
+      turn. Material classified tier P case 2 is a separate matter: it is
+      not offered under this Licence at all.
+
+      Compliance with this section is self-certified. Copyright gives the
+      Licensor no audit right: CERN-OHL-S-2.0 section 6 provides none and
+      section 8.6 excludes third-party beneficiary rights. The only audit
+      hook in this project is condition 5 of the trademark grant in
+      TRADEMARKS.md section 3, and that grant may simply be declined.
+
 --------------------------------------------------------------------------------
 3. TRADEMARKS
 --------------------------------------------------------------------------------
@@ -138,5 +167,16 @@ SPDX-License-Identifier. The repository-level map is declared in
   tier F  FPGA zero-stage bootrom (separate work, GPL)
           -> corev_apu/fpga/src/bootrom/LICENSE.GPL-2.0-or-later
 
-  tier P  material under third-party NDA / foundry PDK terms, if enabled
-          -> LICENSE.Proprietary
+  tier P  withheld material, in two unrelated cases:
+
+          case 1  third-party NDA / foundry PDK terms, if enabled
+                  -> LicenseRef-Proprietary -> LICENSE.Proprietary
+
+          case 2  LibreCore-original material deliberately NOT offered under
+                  CERN-OHL-S-2.0, licensed only by written agreement
+                  -> LicenseRef-GSys-Commercial -> LICENSE.GSys-Commercial
+                     (see that document, sections 4.1(ii) and 4.5)
+
+          Case 2 restricts only what is published going forward. It does not
+          narrow any grant already made: rights in versions previously
+          released under CERN-OHL-S-2.0 are irrevocable.

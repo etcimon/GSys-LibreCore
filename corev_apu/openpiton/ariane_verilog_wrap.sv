@@ -166,6 +166,7 @@ module ariane_verilog_wrap
     CachedRegionLength:     CachedRegionLength,
     CvxifEn:                CvxifEn,
     CoproType:              config_pkg::COPRO_NONE,  // No coprocessor
+    AiCfg:                  config_pkg::AiCfgOff,    // No AI matrix plane
     NOCType:                SwapEndianess ? NOC_TYPE_L15_BIG_ENDIAN : NOC_TYPE_L15_LITTLE_ENDIAN,
     AxiAddrWidth:           40,
     AxiDataWidth:           128, // Used to calculate the mem data width of hpdc

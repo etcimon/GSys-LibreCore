@@ -134,6 +134,32 @@ package build_config_pkg;
     cfg.XFVec = CVA6Cfg.XFVec;
     cfg.CvxifEn = CVA6Cfg.CvxifEn;
     cfg.CoproType = CVA6Cfg.CoproType;
+    // Xg6lcai AI matrix plane. Copied through, then normalised so a package can
+    // leave sizing at 0 and get a legal default. When MatrixEn is 0 the whole
+    // group stays zero, which is what every non-AI package elaborates with.
+    cfg.AiCfg = CVA6Cfg.AiCfg;
+    if (CVA6Cfg.AiCfg.MatrixEn) begin
+      if (cfg.AiCfg.TileM == 0) cfg.AiCfg.TileM = unsigned'(8);
+      if (cfg.AiCfg.TileN == 0) cfg.AiCfg.TileN = unsigned'(8);
+      if (cfg.AiCfg.TileK == 0) cfg.AiCfg.TileK = unsigned'(8);
+      if (cfg.AiCfg.TileCount == 0) cfg.AiCfg.TileCount = unsigned'(8);
+      if (cfg.AiCfg.AccDepth == 0) cfg.AiCfg.AccDepth = unsigned'(4);
+      // One accumulator bank per hart: an AI-heavy hart must not be able to
+      // starve the control hart (architecture/ai-matrix/README.md s5).
+      if (cfg.AiCfg.AccBanks < CVA6Cfg.NrHarts) cfg.AiCfg.AccBanks = CVA6Cfg.NrHarts;
+      // Rings are optional; size them only if the package asked for any.
+      if (cfg.AiCfg.Queues > 0 && cfg.AiCfg.QueueDepth == 0)
+        cfg.AiCfg.QueueDepth = unsigned'(64);
+      // At least one scheduling class exists wherever rings do, so the s7.1
+      // arbiter always has a well-defined default (plain round-robin).
+      if (cfg.AiCfg.Queues > 0 && cfg.AiCfg.QosClasses == 0)
+        cfg.AiCfg.QosClasses = unsigned'(1);
+      if (cfg.AiCfg.Queues == 0) cfg.AiCfg.QosClasses = unsigned'(0);
+      // Native tile load/store requires the accelerator memory port; the CVXIF
+      // seam has none (core/cvxif_fu.sv), so force it off rather than trapping
+      // a legal-looking package at check_cfg.
+      if (!cfg.AiCfg.AccelEn) cfg.AiCfg.TileLdEn = 1'b0;
+    end
     cfg.RVZiCond = CVA6Cfg.RVZiCond;
     cfg.RVZiCbom = CVA6Cfg.RVZiCbom;
     cfg.RVZiCboz = CVA6Cfg.RVZiCboz;

@@ -5,7 +5,9 @@
 #          T  tooling/docs        -> MIT
 #          U  upstream/third-party-> unchanged, preserve verbatim
 #          F  GPL firmware        -> GPL-2.0-or-later, separate work
-#          P  NDA / foundry PDK   -> LicenseRef-Proprietary
+#          P  withheld, two cases:
+#             case 1 NDA / foundry PDK      -> LicenseRef-Proprietary
+#             case 2 commercial-only G6LC   -> LicenseRef-GSys-Commercial
 #
 # Resolution: LAST matching rule wins, so specific rules follow general ones.
 # U is asserted explicitly for whole subtrees to make E-UPSTREAMWRITE enforceable.
@@ -128,7 +130,52 @@ U   corev_apu/fpga/src/bootrom/src/gpt.*
 U   corev_apu/fpga/src/bootrom/src/bootrom_*.h
 U   corev_apu/fpga/src/bootrom/src/mmc.h
 
-# ------------------------------------------------------------------- tier P ---
+# ------------------------------------------------------------- tier P case 1 ---
+# Third-party NDA / foundry PDK material -> LicenseRef-Proprietary.
 # Enabled only by the opt-in technology pass; see AGENTS-technology.md.
 P   **/*.tech-spec.md
 P   pdk/**
+
+# ------------------------------------------------------------- tier P case 2 ---
+# LibreCore-original material deliberately WITHHELD from the open path ->
+# LicenseRef-GSys-Commercial alone, no "OR CERN-OHL-S-2.0".
+#
+# This tier is a MECHANISM that remains available; it currently classifies NO
+# path. It is kept defined so that a future subsystem can be withheld without
+# re-deriving the policy, and so LICENSE.GSys-Commercial 4.5 has a referent.
+#
+# IRREVERSIBLE, if ever used: publishing a path under CERN-OHL-S-2.0 even once
+# grants rights in that version permanently. Classify BEFORE the first commit
+# of the file, never after.
+#
+# (no tier P case 2 globs are active)
+
+# ------------------------------------------------- AI matrix plane (Xg6lcai) ---
+# DELIBERATELY ON THE NORMAL OPEN PATH. The AI implementation is tier R, i.e.
+# "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial", exactly like the rest of the
+# LibreCore delta. Withholding it as tier P case 2 was drafted and then NOT
+# adopted -- see architecture/ai-matrix/README.md s7.
+#
+# The terms are therefore left to the reader in the LICENSE files rather than
+# pre-resolved here: an integrator takes CERN-OHL-S-2.0, and an operator who
+# wants closed modifications, marking relief, indemnity or support reads
+# LICENSE.GSys-Commercial (s3.7 addresses AI and datacentre in-house
+# production directly). Election is the licensee's, and nothing here blocks
+# creating, committing or publishing these files.
+R   core/cvxif_g6lc_ai/**
+R   core/g6lc_ai_*.sv
+R   core/include/g6lc_ai_*.sv
+R   corev_apu/ai_descriptor/**
+R   corev_apu/src/g6lc_ai_*.sv
+# The scaled matrix island (architecture/ai-matrix/scaling-100tops.md): PE
+# clusters, staging/accumulator banks, sequencer, NoC and QoS arbiter.
+R   corev_apu/ai_island/**
+# Config surface, packages, device tree and tests. Listed separately from the
+# implementation above because these must stay open under ANY future posture:
+# a tier-R-only integrator has to be able to elaborate, discover and verify the
+# seam even if some later block above it were withheld.
+R   core/include/g6lc64_ai_config_pkg.sv
+R   corev_apu/include/g6lc_ai_island_cfg_pkg.sv
+R   corev_apu/bootrom/ariane-ai.dts
+T   verif/tests/custom/ai/**
+T   verif/tests/testlist_ai_matrix.yaml

@@ -34,11 +34,18 @@ model is retired.** Every file now resolves to a **tier** via `.licensing-tiers`
 | **T** | build platform, timing tooling, verification scripting, docs | `MIT` | `LICENSE.MIT` |
 | **U** | upstream / third-party | **unchanged — preserve verbatim** | `LICENSE`, `LICENSE.SiFive`, `LICENSE.Berkeley`, per-subtree |
 | **F** | FPGA zero-stage bootrom (separate work) | `GPL-2.0-or-later` | `corev_apu/fpga/src/bootrom/LICENSE.GPL-2.0-or-later` |
-| **P** | third-party NDA / foundry PDK material | `LicenseRef-Proprietary` | `LICENSE.Proprietary` |
+| **P** case 1 | third-party NDA / foundry PDK material | `LicenseRef-Proprietary` | `LICENSE.Proprietary` |
+| **P** case 2 | LibreCore-original material **withheld** from the open path | `LicenseRef-GSys-Commercial` (no `OR`) | `LICENSE.GSys-Commercial` §4.1(ii), §4.5 |
 
 `.licensing-tiers` resolution: **last matching glob wins**; the default rule is `U **`, so anything
 unclassified is treated as someone else's property and left alone. That default is deliberate and
 must not be changed.
+
+**The two tier-P cases are distinguished by ownership, not by treatment.** Case 1 is someone else's
+property that we may not publish. Case 2 is *our* property that we choose not to publish. Both are
+absent from the open path; only case 2 is something the project can license. A tier-P match resolves
+to `LICENSE_TIER_P` unless the path is listed under the *tier P case 2* heading in `.licensing-tiers`,
+in which case it resolves to `LICENSE_TIER_P_ORIGINAL`.
 
 **Markdown and documentation** (`DOCS_UNDER_TIER`) follow their tier but take **no inline header** —
 the license is conveyed by the root `LICENSE.*` files plus `NOTICE`. This keeps `AGENTS*.md` and
@@ -66,6 +73,7 @@ Before making an edit the agent MUST verify all three config files exist at the 
 | `E-GPLLINK` | A GPL-headered file entered a link set outside tier F, or a GPL-2.0-only file entered any link set with Apache/CERN-OHL material. |
 | `E-NOCLA` | A tier-R contribution lacks a CLA record (`CLA_REQUIRED_TIERS`). |
 | `E-MULTISELECT` | More than one `SELECT_*` directive enabled. |
+| `E-PWITHHELD` | A file matching an **active** *tier P case 2* glob would be **published**, or would be given a `CERN-OHL-S-2.0` header. Publication is irreversible; halt and ask. Creating and committing locally is not the trigger — conveyance is. No tier-P-case-2 glob is currently active, so this guard is dormant. |
 
 `E-UPSTREAMWRITE` is the most important guard in this file. Apache-2.0 §4(c) and Solderpad §4 make
 notice retention a **condition** of our license to the upstream work; stripping an "ETH Zurich" or
@@ -106,6 +114,89 @@ Permissive→reciprocal is a **one-way street that works**, and it is explicit a
    grant is retained.
 2. Reciprocity binds **only the LibreCore delta**. Upstream CVA6 remains permissive and can always be
    fetched pristine. This is stated plainly in `LICENSE.GSys-Commercial` §4.2 rather than hidden.
+
+## The internal-production / service-use gap (known, accepted, partially mitigated)
+
+**Reciprocity triggers on Conveyance, and nothing else.** `CERN-OHL-S-2.0` §1.13 defines *Convey* as
+"to communicate to the public or distribute", and §4's only obligation runs to *recipients*. A party
+that fabricates silicon and deploys it exclusively in its own facilities has no recipient, therefore
+no Complete Source obligation, therefore **no royalty** — even at datacentre scale, even while
+selling training/inference services built on it. `LICENSE.GSys-Commercial` §2 already says this
+plainly for private development; §3.7 now says it plainly for production.
+
+This is the hardware analogue of the AGPL/SaaS gap. CERN-OHL-S has no §13 equivalent, and **it cannot
+be given one**: the licence text may be used "in unmodified form only" (preamble), and §2.3 forbids
+restricting by contract the rights of other Licensees. Do not attempt to patch it with an addendum.
+
+**Position of record: the open path stays exactly as it is.** Tier R remains
+`CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial`. Consolidating tier R into tier P — going
+commercial-only for the whole LibreCore delta — was considered and **rejected**; so was rewriting git
+history to erase prior open releases, which in any case could not work: `origin/master` is published,
+and a grant made in a published version is irrevocable regardless of what the history later looks
+like. The response is therefore *commercial-offer framing plus a narrow tier-P carve-out*, not
+retraction.
+
+`LICENSE.GSys-Commercial` §3.7 is the offer-side expression of this. It is deliberately **addressed to
+AI and datacentre operators**, and it is a *scope* rather than a new right: it takes §3.1–3.6 over the
+**whole tier-R corpus plus tier-P case 2** for a party that Makes Products it never Conveys. It keeps
+saying plainly that tier R carries no royalty in that scenario — an offer document that implied
+otherwise would be overreach and the first thing counsel would strike — while enumerating what such an
+operator does in practice buy: closed modifications for its own tape-out, marking relief on a fleet
+die, indemnity, patent assurance, support, and the optionality to Convey later.
+
+What this project actually holds against that case, in descending order of strength:
+
+| Lever | Where | Strength |
+|---|---|---|
+| **Withhold the delta** — tier P case 2 | `.licensing-tiers`, `LICENSE.GSys-Commercial` §4.5 | **Real and the only *compulsory* one, but currently unused by choice.** Works only if applied *before* first publication, and only where a clean module boundary exists. Not applied to `Xg6lcai` — see *Applied case* below |
+| AI-operator offer framing over the whole tier-R corpus | `LICENSE.GSys-Commercial` §3.7, §5 | Converts an ambiguity into a sales conversation; election of the licensee, never compulsory |
+| Marking on **Make**, not just Convey | `NOTICE` §2, esp. §2(e) | Attribution/inspectability only; self-certified |
+| Affiliate + contract-manufacture questions | `LICENSE.GSys-Commercial` §3.7(a)–(c) | Fact-specific; disclosed, not relied upon |
+| Warranty / indemnity / patent assurance / support | `LICENSE.GSys-Commercial` §3.4–3.6 via §3.7 | Voluntary purchase |
+| Trademark badge + audit hook | `TRADEMARKS.md` §3 cond. 5 | Declinable, so worthless against a party that does not want the badge |
+| Patents | `CERN-OHL-S-2.0` §7.1 | **None** inside the open path — Make and *have Made* are already royalty-free |
+
+**Standing rule for agents.** Whenever a genuinely new, separable, high-value subsystem is added
+(accelerators, engines, novel uncore blocks), raise its tier explicitly. What is irreversible is
+**publication**, not creation: a file may be written, reviewed and committed locally while its tier is
+still being argued. `E-PWITHHELD` therefore guards the *conveyance* step, not the editor. A licence
+change is never retroactive — rights granted in a published version are irrevocable — which is exactly
+why the decision is cheap to defer and expensive to rush.
+
+The default when the argument is unresolved is the **open path** (tier R, dual-licensed), because that
+is the posture this project already takes for the whole LibreCore delta and because the reader can
+always be pointed at `LICENSE.GSys-Commercial` for the other arm. Withholding is the exception and
+must be argued for, not assumed.
+
+The complementary rule is that withholding must stay **narrow**. The config surface, the config
+package, the device tree and the tests for a withheld block stay tier R / T, so that an open-path
+integrator can still elaborate, discover and verify the seam. Withhold the implementation, never the
+interface.
+
+### Applied case: the AI matrix plane rides the open path
+
+A tier-P-case-2 carve-out for `Xg6lcai` was drafted in full and then **not adopted**. The AI
+implementation is tier **R**, dual-licensed like everything else
+(`architecture/ai-matrix/README.md` §7). Three findings decided it:
+
+1. **The boundary is not clean.** The AI delta necessarily lands inside shared files that cannot be
+   withheld: `core/csr_regfile.sv`, `core/decoder.sv`, `core/perf_counters.sv` (all tier **R**), and
+   `core/include/config_pkg.sv`, `core/include/build_config_pkg.sv`, `core/cva6.sv` (all tier **U**,
+   Thales/ETH, `Apache-2.0 WITH SHL-2.0`). Only leaf modules are separable. Contorting the RTL to move
+   the delta out of those files is the `AGENTS.md` §0.3 "breaking module boundaries" anti-pattern.
+2. **The classification inverted its own rationale.** The stated moat was "the descriptor engine, the
+   verification collateral and the software stack" — but `verif/tests/custom/ai/**` and `software/**`
+   are tier **T** (**MIT**). The draft withheld the easily reimplemented MAC array while giving away
+   the hard-to-reproduce collateral.
+3. **It bought a freeze, not a moat.** The carve-out's practical effect was to block work on an
+   unanswerable question, for a lever whose value is contingent on secrecy the tree does not keep.
+
+So the terms are **left to the reader in the LICENSE files** rather than pre-resolved per path: an
+integrator takes `CERN-OHL-S-2.0`; an operator wanting closed modifications, marking relief, indemnity,
+patent assurance or support reads `LICENSE.GSys-Commercial`, whose §3.7 already addresses AI and
+datacentre in-house production by name. Election is the licensee's. The commercial offer is unchanged
+and undiminished by this — §3.7 was always a *scope* over the tier-R corpus, not a right that depended
+on the carve-out.
 
 ## Ownership cases (apply per file, before choosing a header)
 
@@ -206,6 +297,15 @@ provenance block stating the outbound offer via the **non-SPDX** `Outbound-Licen
 // Outbound-License: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 ```
 
+**Tier P, case 2** (LibreCore-original, withheld from the open path — note the **absent** `OR`):
+```systemverilog
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: LicenseRef-GSys-Commercial
+//
+// NOT offered under CERN-OHL-S-2.0. See LICENSE.GSys-Commercial sections
+// 4.1(ii) and 4.5, and the "tier P case 2" block in .licensing-tiers.
+```
+
 **Tier T**:
 ```typescript
 // Copyright (c) 2026 Etienne Cimon
@@ -258,6 +358,7 @@ them, they win.**
 - `.licensing-policy` → `DEFAULT_TO_FILE_LICENSE` + `TIER_DIRECTED_LICENSING` +
   `TIER_MAP=.licensing-tiers` + `LICENSE_TIER_R=CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial` +
   `LICENSE_TIER_T=MIT` + `LICENSE_TIER_F=GPL-2.0-or-later` + `LICENSE_TIER_P=LicenseRef-Proprietary` +
+  `LICENSE_TIER_P_ORIGINAL=LicenseRef-GSys-Commercial` +
   `DOCS_UNDER_TIER` + `CLA_REQUIRED_TIERS=R` + `ADD_CONTRIBUTOR_NAME` + `DE_MINIMIS_GUARD` +
   `SELECT_MOST_PERMISSIVE` (fallback).
 

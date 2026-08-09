@@ -82,6 +82,7 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
    XFVec: bit'(0),
    CvxifEn: bit'(1),
    CoproType: config_pkg::COPRO_EXAMPLE,
+   AiCfg: config_pkg::AiCfgOff,
    RVZiCond: bit'(1),
    RVZicntr: bit'(1),
    RVZihpm: bit'(1),

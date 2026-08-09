@@ -6,16 +6,23 @@
 // You may obtain a copy of the License at https://solderpad.org/licenses/
 //
 // Original Author: Jean-Roch COULON - Thales
-// Server-math + RVV/Ara variant (U10ᵇ) — Etienne Cimon 2026
+// AI matrix card package (Etienne Cimon 2026)
+// Derived from g6lc64_stream8: NrCores=2, H+Sstc, Zacas W/D/Q, DeepSpec STQ,
+// HPDCACHE_WT + L2, C-light in-order -- plus the Xg6lcai AI matrix plane on the
+// CVXIF seam (option B). See architecture/ai-matrix/README.md s2 for why the
+// CVXIF seam is chosen over the accelerator port for P1-P2, and
+// architecture/ai-matrix/isa-encoding.md for the interface these knobs size.
 //
-// Select as active cva6_config_pkg ONLY when Ara (or equivalent vector IP) is on
-// the flist and EnableAccelerator is satisfied. See architecture/ara-vector-attach.md.
-// Without vector RTL, build will elaborate but vector ops need the accelerator path.
+// This package is the OPEN interface to the AI plane. It stays tier R so that a
+// party without the tier-P implementation can still elaborate, discover and
+// verify the seam; only the implementation behind it is withheld. Do not move
+// this file to tier P. See AGENTS-licensing.md and .licensing-tiers.
 
 // ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
 // The original work of the copyright holders named above remains licensed
 // under the license stated above, and that grant is unaffected.
-// Modifications (c) 2026 Etienne Cimon: server-math + RVV/Ara profile derived from the Thales config package template.
+// Modifications (c) 2026 Etienne Cimon: AI package derived from the Thales
+// config package template via g6lc64_server_math and g6lc64_stream8.
 // Etienne Cimon offers this file AS A WHOLE under the dual licence below.
 // Expressed as a non-SPDX tag because SPDX has no operator for "whole is X,
 // portions remain Y"; the machine-readable form is in REUSE.toml.
@@ -33,15 +40,16 @@ package cva6_config_pkg;
   localparam CVA6ConfigF8En = 0;
   localparam CVA6ConfigFVecEn = 0;
 
-  // Ara is mutually exclusive with CVXIF (core/cva6.sv assert CvxifEn && EnableAccelerator)
-  localparam CVA6ConfigCvxifEn = 0;
+  // Seam B: the AI coprocessor attaches through CVXIF. Mutually exclusive with
+  // the accelerator port (core/cva6.sv gen_err_xif_and_acc), hence VExtEn = 0.
+  localparam CVA6ConfigCvxifEn = 1;
   localparam CVA6ConfigCExtEn = 1;
   localparam CVA6ConfigZcbExtEn = 1;
   localparam CVA6ConfigZcmpExtEn = 0;
   localparam CVA6ConfigAExtEn = 1;
   localparam CVA6ConfigHExtEn = 1;  // U9: hypervisor for KVM/Bao
   localparam CVA6ConfigBExtEn = 1;
-  localparam CVA6ConfigVExtEn = 1;  // U10ᵇ: RVV — requires Ara/vector IP on flist
+  localparam CVA6ConfigVExtEn = 0;  // must stay 0: RVV would claim the accelerator port
   localparam CVA6ConfigRVZiCond = 1;
 
   localparam CVA6ConfigAxiIdWidth = 4;
@@ -63,6 +71,7 @@ package cva6_config_pkg;
   localparam CVA6ConfigDcacheFlushOnFenceI = 1'b0;
   localparam CVA6ConfigDcacheInvalidateOnFlush = 1'b0;
 
+  // HPDCACHE MSHR/wbuf need memId ≥4 with 8 load-buf + wbuf-8
   localparam CVA6ConfigDcacheIdWidth = 3;
   localparam CVA6ConfigMemTidWidth = 4;
 
@@ -72,8 +81,14 @@ package cva6_config_pkg;
 
   localparam CVA6ConfigNrLoadPipeRegs = 1;
   localparam CVA6ConfigNrStorePipeRegs = 0;
+  // Hang-7 bisect: NrLoadBufEntries=1 still hung (MEMCHR_LO / hart_cnt=0x80).
+  // Multi-outstanding ldbuf ID mismatch ruled out as sole cause.
   localparam CVA6ConfigNrLoadBufEntries = 8;
 
+  // Hang-7 note: RASDepth=2 is tiny vs FDT call depth; raising to 16 regressed
+  // to earlier load-misalign @ fdt_getprop (mtval=0x8001e8fb). Keep 2 until
+  // RAS/ckpt restore is validated; hang-7 residual is c.jr fallthrough after
+  // path_offset error ret (see monorepo-soak/L2-OPENSBI-HANG-PROGRESS.md).
   localparam CVA6ConfigRASDepth = 2;
   localparam CVA6ConfigBTBEntries = 32;
   localparam CVA6ConfigBHTEntries = 128;
@@ -84,11 +99,51 @@ package cva6_config_pkg;
 
   localparam CVA6ConfigPerfCounterEn = 1;
 
+  // HPDCACHE for CMO + HW prefetch (U7/U10); not deprecated std WT
   localparam config_pkg::cache_type_t CVA6ConfigDcacheType = config_pkg::HPDCACHE_WT;
 
   localparam CVA6ConfigMmuPresent = 1;
 
   localparam CVA6ConfigRvfiTrace = 1;
+
+  // Xg6lcai AI matrix plane. Sizing rationale:
+  //  - 8x8x8 s8 tile: one MMA is 512 MACs, which pipelines in ~3 stages at the
+  //    2.5 GHz structural FO4 screen without lengthening the ex_stage cone.
+  //  - TileCount 8 / AccDepth 4: enough for a double-buffered 2x2 register-block
+  //    GEMM kernel without spilling; grows only after a real kernel is profiled.
+  //  - AccBanks 1 == NrHarts here; build_config raises it if NrHarts grows, so an
+  //    AI-heavy hart can never starve the control hart on an SMT part.
+  //  - TileLdEn 0 is forced by the seam, not by choice: CVXIF has no memory port
+  //    (core/cvxif_fu.sv), so ai.ldt/ai.stt are compiler-synthesised until the
+  //    accelerator seam lands. Discoverable, not an encoding difference.
+  //  - Queues 2: one ring per privilege consumer (kernel + a user context) is the
+  //    minimum that exercises the T2 path; depth 64 descriptors = 4 KiB, one page.
+  //  - QosClasses 2: the minimum that can actually demonstrate the s7.1 scheduling
+  //    contract (a high class must preempt a low one at a work-quantum boundary).
+  //    1 would make the QoS soak vacuous.
+  //  - Int4En / Sparse24En 0: the grant path and the discovery bits exist, but this
+  //    package does not claim to implement them. ai.setcfg downgrades a 4-bit or
+  //    sparse request to 8-bit dense, so software stays portable either way
+  //    (isa-encoding.md s3.1). Turn on only with a bit-exact reference to match.
+  localparam config_pkg::ai_cfg_t ai_cfg = '{
+      MatrixEn: bit'(1),
+      AccelEn: bit'(0),  // seam B (CVXIF); flip with VExtEn=0 when seam D lands
+      TileLdEn: bit'(0),  // forced 0 by build_config while AccelEn=0
+      RequantEn: bit'(1),
+      SparseEn: bit'(1),
+      UmodeEn: bit'(1),
+      Int4En: bit'(0),
+      Sparse24En: bit'(0),
+      TileM: unsigned'(8),
+      TileN: unsigned'(8),
+      TileK: unsigned'(8),
+      TileCount: unsigned'(8),
+      AccBanks: unsigned'(1),
+      AccDepth: unsigned'(4),
+      Queues: unsigned'(2),
+      QueueDepth: unsigned'(64),
+      QosClasses: unsigned'(2)
+  };
 
   localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       XLEN: unsigned'(CVA6ConfigXlen),
@@ -96,10 +151,14 @@ package cva6_config_pkg;
       FpgaEn: bit'(0),  // for Xilinx and Altera
       FpgaAlteraEn: bit'(0),  // for Altera (only)
       TechnoCut: bit'(0),
-      SuperscalarEn: bit'(1),
-      NrIssuePorts: unsigned'(2),
+      // Hang-6 temporary: single-issue until dual residual is fixed.
+      // Dual (ports=2) fails fdt_path_offset("/cpus") BADOFFSET; single
+      // clears hang-6 (later _start_hang BADPATH is a different issue).
+      // Hang-4 stored-PC + realign 2'b01 kept for dual re-enable.
+      SuperscalarEn: bit'(0),
+      NrIssuePorts: unsigned'(1),
       ALUBypass: bit'(0),
-      NrCommitPorts: unsigned'(2),
+      NrCommitPorts: unsigned'(1),
       AxiAddrWidth: unsigned'(CVA6ConfigAxiAddrWidth),
       AxiDataWidth: unsigned'(CVA6ConfigAxiDataWidth),
       AxiIdWidth: unsigned'(CVA6ConfigAxiIdWidth),
@@ -112,7 +171,7 @@ package cva6_config_pkg;
       XF16ALT: bit'(CVA6ConfigF16AltEn),
       XF8: bit'(CVA6ConfigF8En),
       RVA: bit'(CVA6ConfigAExtEn),
-      RVZacas: bit'(1),  // Zacas AMOCAS.W/D for lock-free multi-core
+      RVZacas: bit'(1),  // Zacas AMOCAS.W/D/Q for stream8 multicore CAS
       RVB: bit'(CVA6ConfigBExtEn),
       ZKN: bit'(1),
       RVV: bit'(CVA6ConfigVExtEn),
@@ -123,8 +182,8 @@ package cva6_config_pkg;
       RVZCMP: bit'(CVA6ConfigZcmpExtEn),
       XFVec: bit'(CVA6ConfigFVecEn),
       CvxifEn: bit'(CVA6ConfigCvxifEn),
-      CoproType: config_pkg::COPRO_NONE,
-      AiCfg: config_pkg::AiCfgOff,
+      CoproType: config_pkg::COPRO_G6LC_AI,
+      AiCfg: ai_cfg,
       RVZiCond: bit'(CVA6ConfigRVZiCond),
       RVZiCbom: bit'(1),
       RVZiCboz: bit'(1),
@@ -202,10 +261,12 @@ package cva6_config_pkg;
       ZihintpauseEn: bit'(1),
       SvpbmtEn: bit'(1),
       ZawrsEn: bit'(1),
+      // L2 size 0 → build_config infers max(256 KiB, NrCores×128 KiB) for N=2 → 256 KiB
+      // Hang-7: L2En=0 bisect deadlocked on stack store in path_offset (not clean).
       L2En: bit'(1),
       L2ByteSize: unsigned'(0),
       L2SetAssoc: unsigned'(0),
-      L2LineWidth: unsigned'(0),
+      L2LineWidth: unsigned'(0),  // 512b (64 B) after infer — Zic64b-class line
       L2MshrDepth: unsigned'(0),
       L2DataBanks: unsigned'(0),
       NrHarts: unsigned'(1),
@@ -215,7 +276,7 @@ package cva6_config_pkg;
       NrCores: unsigned'(2),
       CohPolicy: config_pkg::COH_FILTERED,
       SnoopFilterEn: bit'(1),
-      SnoopFilterEntries: unsigned'(0),
+      SnoopFilterEntries: unsigned'(0),  // auto 64×NrCores
       CohInvalDepth: unsigned'(4),
       CohAxiStarveLimit: unsigned'(16),
       WayPredEn: bit'(1),
@@ -224,18 +285,24 @@ package cva6_config_pkg;
       HwPrefetchEn: bit'(1),
       HwPrefetchStreams: unsigned'(4),
       DcacheMshrDepth: unsigned'(0),
-      FtqDepth: unsigned'(8),
-      FdipEn: bit'(1),
-      FdipDistance: unsigned'(2),
-      LoopBufEn: bit'(1),
-      LoopBufEntries: unsigned'(8),
+      // Hang-5 bisect: U2 frontend off (FTQ/FDIP/LoopBuf). Dual-issue +
+      // stored-PC still hits fw_fdt_bin; isolate U2 vs base dual-issue.
+      FtqDepth: unsigned'(0),
+      FdipEn: bit'(0),
+      FdipDistance: unsigned'(0),
+      LoopBufEn: bit'(0),
+      LoopBufEntries: unsigned'(0),
       SliceOoOEn: bit'(0),
       SliceIstEntries: unsigned'(0),
       SliceAiqDepth: unsigned'(0),
       SliceBiqDepth: unsigned'(0),
       SliceMaxRunahead: unsigned'(0),
+      // U10 is C-light (in-order multi-issue); full OoO is ooo_server package
       OoOEn: bit'(0),
-      DeepSpecEn: bit'(0),
+      // Same STQ deepen as imafdc FORCE_IMAFDC smoke: DEPTH_COMMIT=4 with
+      // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+      // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+      DeepSpecEn: bit'(1),
       RobEntries: unsigned'(0),
       PrfEntries: unsigned'(0),
       IqEntries: unsigned'(0),
@@ -243,15 +310,19 @@ package cva6_config_pkg;
       LsqStoreEntries: unsigned'(0),
       MemDepPredEn: bit'(0),
       OoORetireWidth: unsigned'(0),
+      // Stream plane × multicore (U6/p6): L2 miss-edge multi-stream PF on.
+      // L3 stays optional (ooo_server enables L3 + inclusive L1/L2 back-inval).
       L3En: bit'(0),
       L3ByteSize: unsigned'(0),
       L3SetAssoc: unsigned'(0),
       L3LineWidth: unsigned'(0),
       L3MshrDepth: unsigned'(0),
       L3DataBanks: unsigned'(0),
+      // Disabled until PF R-absorb path is soak-proven on MC+L2+ROM boot;
+      // re-enable after mc-mini-veri green on server_math.
       ServerPrefetchEn: bit'(0),
-      ServerPfStreams: unsigned'(0),
-      ServerPfDistance: unsigned'(0),
+      ServerPfStreams: unsigned'(0),  // auto → max(4, 2×NrCores)
+      ServerPfDistance: unsigned'(2),
       SharedTlbDepth: int'(64),
 
       NrLoadPipeRegs: int'(CVA6ConfigNrLoadPipeRegs),
