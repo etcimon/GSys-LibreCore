@@ -1,7 +1,6 @@
 # Extension point: AI matrix acceleration (`Xg6lcai`)
 
-**Status:** scaffold (P0) · **Code prefix:** `g6lc_ai` / `Xg6lcai` · **Licensing:** tier **P case 2**
-pending decision (§7 — read before creating any file)
+**Status:** scaffold (P0) · **Code prefix:** `g6lc_ai` / `Xg6lcai` · **Licensing:** tier **R** (open, dual-licensed — §7)
 
 Feature-domain extension point for INT8 matrix acceleration on LibreCore, targeting a PCIe
 **CPU+AI card**: real application-class cores and a matrix engine sharing one address space, running
@@ -28,7 +27,7 @@ track I0–I4 (§8). Read it before sizing anything.
 4. Config knobs
 5. ISA + CSR surface
 6. Software / SBI / Linux / `.dts`
-7. Licensing — tier P case 2
+7. Licensing — the open path, terms left to the reader
 8. Phasing and acceptance
 9. Invariants and pitfalls
 
@@ -307,7 +306,7 @@ and one software stack.
 | # | Deliverable | Depends on |
 |---|---|---|
 | **I0** | TOPS definition, bandwidth model, plane split, staged SKU decision | — (done: `scaling-100tops.md`) |
-| **I1** | **one** island cluster: PE array, `tc_sram` banks, sequencer, capability window. Freezes `T`, accumulator geometry, DRAM class and the NoC cut line **for both SKUs** | P3, **AI-0** |
+| **I1** | **one** island cluster: PE array, `tc_sram` banks, sequencer, capability window. Freezes `T`, accumulator geometry, DRAM class and the NoC cut line **for both SKUs** | P3 |
 | **I3** | memory system sized to the §4 model; measured bandwidth | I1 |
 | — | **latency SKU tapes out** (1–2 clusters, ~12–25 TOPS) | I3, I4 |
 | **I2** | NoC + N clusters + per-cluster gating + QoS arbitration | I3 |

@@ -2,15 +2,16 @@
 
 **Status:** proposed, unratified · **Scope:** normative for **both** seam options B and D
 **Parent:** `README.md` (read §2 first) · **Licensing:** tier T doc; the contract it describes is
-implemented by tier **P case 2** RTL and consumed by tier **R/T** interface files
+implemented by tier **R** RTL and consumed by tier **R/T** interface files
 
 > **Why this document exists.** `README.md` §2.2 makes the encoding, the CSR map and the T2 descriptor
 > ABI **invariant across the CVXIF (B) and accelerator (D) seams**, so that the toolchain, the kernel
 > driver and the PyTorch backend survive the seam migration untouched. That only holds if the contract
 > is written down *before* either implementation exists. This is that contract.
 >
-> **This is a specification, not an implementation.** Writing it is not blocked by **AI-0**; creating
-> RTL under the tier-P-case-2 globs is.
+> **This is a specification, not an implementation.** Nothing here is licensing-blocked: **AI-0 closed
+> with the AI plane on the normal open path** (tier R), so the RTL may be written whenever the
+> contract is settled. See `README.md` §7.
 
 ## Table of contents
 1. Opcode allocation
@@ -202,7 +203,7 @@ occupies `0x5C0-0x5FF` or `0x800-0x8FF`.
 | Address | Name | Priv | Purpose |
 |---|---|---|---|
 | `0x800` | `aicfg` | URW | active geometry/dtype/accmode; layout per §3.1 |
-| `0x801` | `aistatus` | URW | `[0]` busy, `[1]` acc dirty, `[2]` queue error, `[5:4]` owning hart, `[15:8]` last error code |
+| `0x801` | `aistatus` | URW | `[0]` busy, `[1]` acc dirty, `[2]` queue error, `[5:4]` owning hart, `[7:6]` **`ais`** extension status (§5), `[15:8]` last error code |
 | `0x802` | `aiscale` | URW | pointer to the active per-channel scale table |
 | `0x803` | `aizp` | URW | pointer to the active zero-point table |
 | `0x5C0` | `aiqbase` | SRW | T2 ring base physical/effective address |
@@ -219,17 +220,38 @@ under `EnableAccelerator` (`core/csr_regfile.sv:1013-1016`, `:2104-2107`) — co
 
 ## 5. Extension state and context switching
 
-**`mstatus.xs` is currently hardwired to `Off` in this tree**
-(`core/csr_regfile.sv:1791`; `vsstatus_d.xs` likewise at `:1425`), while `mstatus.sd` **already** ORs
-`xs == Dirty` (`:2242`). So the plumbing exists and only the hardwire must be lifted, gated on
-`AiMatrixEn`:
+> **Corrected before implementation (AI-E3).** Version 1 of this document said to "un-hardwire
+> `mstatus.xs`" and make it software-writable. **That is not architecturally legal.** The privileged
+> spec states that `mstatus` has "the FS[1:0] and VS[1:0] **WARL** fields and the XS[1:0] **read-only**
+> field", that "**every additional extension with state provides a CSR field that encodes the
+> equivalent of the XS states**", and that "the XS field effectively reports the **maximum** status
+> value across all user-extension status fields". `XS` is a *summary*, never a control. No
+> implementation existed yet, so this is a correction rather than a version bump (cf. AI-E2).
 
-1. Un-hardwire `mstatus.xs` (and `vsstatus.xs` under `RVH`) when `AiMatrixEn`; keep the current forced
-   `Off` otherwise, so every existing package is bit-identical.
-2. Set `xs = Dirty` on any instruction that writes tile or accumulator state.
-3. Trap AI instructions with illegal-instruction when `xs == Off` and `AiMatrixEn` — the standard
-   "extension disabled" behaviour that lets a kernel do lazy state switching.
-4. `sd` then reports correctly with no further change.
+**`mstatus.xs` is currently hardwired to `Off`** (`core/csr_regfile.sv:1791`; `vsstatus_d.xs` likewise
+at `:1425`), which is **correct and spec-required today**: "in harts without additional user extensions
+requiring new state, the XS field is read-only zero." The hardwire is not a bug to be removed — it
+becomes wrong only once an extension with state exists. `mstatus.sd` **already** ORs `xs == Dirty`
+(`:2242`), so that half needs no change.
+
+The contract is therefore:
+
+1. **`aistatus[7:6]` (`ais`) is the extension's own status field**, using the standard Off / Initial /
+   Clean / Dirty encoding (spec Table 101). It is **URW** — this, not `XS`, is what a kernel writes to
+   do lazy state switching, and what it clears to `Off` to disable the unit for a context.
+2. **`mstatus.xs` becomes a read-only summary** = the maximum status across user extensions with
+   state. `Xg6lcai` is currently the only one, so `xs == ais`. It stays hardwired `Off` whenever
+   `AiMatrixEn == 0`, so **every existing package remains bit-identical**. Writes to `mstatus.xs` are
+   ignored (read-only), never trapped.
+3. **Hardware sets `ais = Dirty`** on any instruction that writes tile or accumulator state; `xs`
+   follows, and `sd` follows `xs` with no further change.
+4. **Trap AI instructions with illegal-instruction when `ais == Off`** (equivalently `xs == Off`, since
+   they are equal while AI is the only X extension). Test `ais`, not `xs`, so the rule stays correct if
+   a second X extension is ever added and `xs` becomes a max over both.
+5. Under `RVH`, `vsstatus.xs` is the same read-only summary for the virtualised context.
+
+**Implementation consequence:** the AI-X work is *not* "delete the `xs = Off` line". It is "make `xs` a
+read-only function of `ais`, gated on `AiMatrixEn`", which means `aistatus` must exist first.
 
 **Context-switch contract for supervisor software:** save/restore `aicfg`, `aistatus`, `aiscale`,
 `aizp`, plus tile and accumulator contents if `xs == Dirty`. **Accumulators must be zeroed or
@@ -248,7 +270,7 @@ arbitrating a shared resource.
 | group's config gate off (e.g. `AiRequantEn == 0`) | illegal-instruction |
 | `funct3 = 111`, or an unallocated `funct7` | illegal-instruction — **must not** be a silent NOP |
 | tile / accumulator index out of range | illegal-instruction |
-| `mstatus.xs == Off` | illegal-instruction |
+| `aistatus.ais == Off` (equivalently `mstatus.xs == Off`) | illegal-instruction — test `ais`, per §5 |
 | issued from U-mode with `aiperm[0] == 0` | illegal-instruction |
 | `ai.ldt`/`ai.stt` fault | ordinary load/store page/access fault, precise, with correct `tval` |
 | T2 descriptor error | **not** an exception — reported through `ai.poll` and the completion word |

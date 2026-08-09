@@ -16,8 +16,9 @@ grow into, **without touching working silicon today**.
 > - **`.md` only.** Documentation follows its tier (`DOCS_UNDER_TIER`); `architecture/**` is tier T
 >   (MIT) and carries no inline SPDX header, and these READMEs change no code contract.
 > - **One exception to "docs decide nothing":** `ai-matrix/README.md` §7 records a licensing tier
->   decision (tier **P case 2**, withheld from the open path) that is **irreversible once published**.
->   Read it before creating any file under the globs it names.
+>   decision. It closed on the **open path** — the AI plane is tier **R**, dual-licensed like the rest
+>   of the LibreCore delta — so it blocks no file creation. It is recorded there because a *different*
+>   answer would have been irreversible once published.
 
 ---
 

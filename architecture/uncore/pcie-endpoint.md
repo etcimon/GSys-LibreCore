@@ -106,9 +106,9 @@ on host root-complex support — treat as an optimisation, not a requirement.
 ## 9. Licensing note
 This outline is tier **T** (`architecture/**`, MIT, no inline header). Vendored `verilog-pcie` /
 `litepcie` are tier **U** — preserve verbatim. Card-side glue that is generic PCIe/virtio plumbing is
-tier **R**; anything that is AI-specific (descriptor rings feeding the matrix engine) falls under the
-tier **P case 2** globs in `.licensing-tiers` — see `architecture/ai-matrix/README.md` §7 before
-creating files.
+tier **R**; anything that is AI-specific (descriptor rings feeding the matrix engine) is **also tier
+R** — the AI plane rides the open path, so no glob here is withheld and nothing blocks creating files.
+See `architecture/ai-matrix/README.md` §7.
 
 ## 10. Scan pointers
 Endpoint config-space/BAR target logic, MSI-X table, DMA engine, AXI bridge, and which FPGA hard-IP

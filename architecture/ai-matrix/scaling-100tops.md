@@ -2,8 +2,8 @@
 
 **Status:** plan of record (P0 docs) · **Parent:** [`README.md`](README.md) · **Contract:**
 [`isa-encoding.md`](isa-encoding.md) · **Transport:** [`../uncore/pcie-endpoint.md`](../uncore/pcie-endpoint.md)
-**Licensing:** tier T doc (MIT, no inline header). It describes silicon that is tier **P case 2** and
-still blocked by **AI-0**.
+**Licensing:** tier T doc (MIT, no inline header). The silicon it describes is tier **R** (open,
+dual-licensed); **AI-0 closed on the open path**, so nothing here is licensing-blocked.
 
 > **Why this document exists.** `README.md` sizes a *seam*. It does not size a *machine*. A review of
 > a 100-TOPS target showed that the interesting decisions at that scale are not seam decisions at all,
@@ -336,7 +336,7 @@ is widened, so I3 moves ahead of the multi-cluster step.
 | # | Deliverable | Gate | Depends on |
 |---|---|---|---|
 | **I0** | This document: TOPS definition, bandwidth model, plane split, staged SKU decision | docs only | — (done) |
-| **I1** | **One** island cluster: PE array, banked staging + accumulator SRAM via `tc_sram`, local sequencer, capability window. **Freezes `T`, accumulator geometry, DRAM class and the NoC cut line for both SKUs.** | GEMM bit-exact vs the §3.5 rounding rule; synth smoke + FO4; area/power recorded; capability window correct on a one-cluster part | P3 (T2 spine), **AI-0** |
+| **I1** | **One** island cluster: PE array, banked staging + accumulator SRAM via `tc_sram`, local sequencer, capability window. **Freezes `T`, accumulator geometry, DRAM class and the NoC cut line for both SKUs.** | GEMM bit-exact vs the §3.5 rounding rule; synth smoke + FO4; area/power recorded; capability window correct on a one-cluster part | P3 (T2 spine) |
 | **I3** | Memory system: DRAM controller class, prefetch/staging, measured bandwidth into the capability register | measured sustained ≥ 80% of nameplate; `tok/s @ batch=1` on a real quantised model | I1 |
 | **—** | **Latency SKU tapes out here** (1–2 clusters, ~12–25 TOPS) | §12 metrics, latency column | I3, I4 |
 | **I2** | NoC + N clusters + per-cluster clock/power gating + QoS arbitration | ≥60% of peak on `M=N=K=4096`; QoS soak with two tenants; **no change to `T`, the memory system or the software stack** | I3 |
@@ -375,4 +375,4 @@ A number that is not one of these does not appear in a review.
 | Frozen contract | [`isa-encoding.md`](isa-encoding.md) |
 | Transport / card | [`../uncore/pcie-endpoint.md`](../uncore/pcie-endpoint.md) |
 | SoC readiness gates | `agents/guides/AGENTS-soc-readiness.md` |
-| Licensing (island is tier P case 2) | `AGENTS-licensing.md` · `.licensing-tiers` |
+| Licensing (island is tier R, open) | `AGENTS-licensing.md` · `.licensing-tiers` |
