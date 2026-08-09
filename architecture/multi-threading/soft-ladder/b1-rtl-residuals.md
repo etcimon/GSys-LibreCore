@@ -76,13 +76,14 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Primary RTL | Dual-issue RVC/RVI packing in tight strlen loop under OpenSBI (not bare mini) |
 | Retire criterion | `PEEL_STRLEN=1` cookie green; drop soft strlen |
 
-### Heap freelist malloc (priority 1 — **active iter-010**)
+### Heap freelist malloc (priority 1 — **peeled iter-010**)
 
 | Item | Detail |
 |------|--------|
-| Soft evidence | soft malloc/zalloc/free stubs |
-| Fail pin | `PEEL_MALLOC=1` freelist race under DI (historic mcause=6) |
-| Retire criterion | Natural malloc cookie green |
+| Soft evidence (retired) | Was soft malloc/zalloc/free; now **natural** |
+| Fail pin (historic) | freelist unlink sd mcause=6 @f0ba under spin-nop dual-hart |
+| Isolate (2026-08-09) | PEEL_MALLOC×2 cookie green; `mini_freelist_unlink` PASS |
+| Retire criterion | **Met**; `SOFT_MALLOC=1` bisect only |
 
 ## Already landed in RTL (do not re-patch via monorepo-soak scripts)
 
@@ -96,7 +97,7 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | AMO buffer cancel + AMO port0 | amo_buffer / store_unit / issue | SA spins peelable |
 | No flush after LR; LR→SC store barrier | commit / issue_read_operands | cmpxchg LR/SC peelable |
 | Unresolved CSR issue stall | issue_stage | CSR probe tail peelable |
-| Soft malloc/zalloc/free (B2/B1 bridge) | mk_plat_skip only | Cookie green until freelist RTL |
+| Soft sbi_strlen ret-imm 11 | mk_plat_skip only | Cookie green until PEEL_STRLEN RTL |
 
 ## Iteration rule for B1
 

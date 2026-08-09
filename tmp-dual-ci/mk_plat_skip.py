@@ -14,16 +14,17 @@ Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
     - natural hart_init CSR probes (csr peeled)
     - natural dual c.mv @7312/14 (cmv peeled 2026-08-09)
     - natural jal fdt_match @731e (match peeled 2026-08-09)
-    - soft sbi_strlen pointer-inc loop @4a3a (RVI add loop residual open)
-    - soft malloc/zalloc/free + heap space stubs (freelist open)
+    - soft sbi_strlen ret-imm 11 @4a3a (stock RVI add loop residual open)
+    - natural sbi_malloc/zalloc/free (freelist peeled 2026-08-09)
   Bisect restores:
     SOFT_SPIN=1   SA/heap spin NOP4
     SOFT_CMPX=1   ld/sd atomic_cmpxchg shim
     SOFT_CSR=1    CSR probe cut cd86→cd0e
     SOFT_CMV=1    nop dual c.mv (old cont.19 soft)
     SOFT_FDT_MATCH=1  stub jal fdt_match (old soft)
+    SOFT_MALLOC=1 soft malloc/zalloc/free + heap space stubs
     PEEL_STRLEN=1 natural sbi_strlen (FAIL mepc=0x4a50 mid RVI add)
-    PEEL_MALLOC=1 real malloc/zalloc/free
+    PEEL_MALLOC=1 legacy alias for natural malloc (default)
 
 Critical fix vs cont.16: do NOT patch 0x996 with j lottery.
 0x996 is fall-through after sbi_hsm_hart_start_finish — patching it caused
@@ -117,15 +118,17 @@ SOFT_FDT_MATCH = _env_peel("SOFT_FDT_MATCH")
 PEEL_FDT_MATCH = _env_peel("PEEL_FDT_MATCH")  # legacy alias: force natural match
 # Default soft simple sbi_strlen; PEEL_STRLEN=1 restores stock (cookie red).
 PEEL_STRLEN = _env_peel("PEEL_STRLEN")
-# Default soft-stub malloc/zalloc/free (freelist DI residual on dual-hart smt2).
-PEEL_MALLOC = _env_peel("PEEL_MALLOC")
+# Default: natural malloc/zalloc/free (peeled 2026-08-09, dual confirm cookie).
+# SOFT_MALLOC=1 restores NULL stubs for bisect.
+SOFT_MALLOC = _env_peel("SOFT_MALLOC")
+PEEL_MALLOC = _env_peel("PEEL_MALLOC")  # legacy: force natural (default already)
 print(
     "peel flags: "
     f"SOFT_SPIN={int(_env_peel('SOFT_SPIN'))} "
     f"SOFT_CMPX={int(_env_peel('SOFT_CMPX'))} "
     f"SOFT_CSR={int(_env_peel('SOFT_CSR'))} "
     f"SOFT_CMV={int(SOFT_CMV)} SOFT_FDT_MATCH={int(SOFT_FDT_MATCH)} "
-    f"PEEL_STRLEN={int(PEEL_STRLEN)} PEEL_MALLOC={int(PEEL_MALLOC)}"
+    f"SOFT_MALLOC={int(SOFT_MALLOC)} PEEL_STRLEN={int(PEEL_STRLEN)}"
 )
 
 
@@ -537,11 +540,9 @@ if _env_peel("SOFT_SPIN"):
 else:
     print("cont.51+: freelist/scratch spins natural (peeled)")
 
-# b1-heap-freelist-malloc (ordered path 2026-08-08): dual-hart smt2 + spin-nop
-# freelist races → sbi_malloc unlink sd mcause=6 (mepc=0xf0ba) after coldboot_done.
-# Soft-stub allocators so cookie path does not walk freelist. Coldboot already
-# completed allocations before hang site; post-coldboot NULL malloc is OK for
-# finish/switch_mode cookie. PEEL_MALLOC=1 restores real malloc/zalloc/free.
+# b1-heap-freelist-malloc: natural by default after 2026-08-09 PEEL_MALLOC×2
+# cookie green (spins peeled + AMO/LRSC RTL). Historic pin was freelist unlink
+# sd mcause=6 @f0ba under soft spin-nop dual-hart.
 def soft_ret0(va):
     """c.li a0,0; c.jr ra"""
     struct.pack_into("<H", data, vf(segs, va), 0x4501)  # c.li a0,0
@@ -553,20 +554,16 @@ def soft_ret_void(va):
     struct.pack_into("<H", data, vf(segs, va), 0x8082)
 
 
-if not PEEL_MALLOC:
+if SOFT_MALLOC and not PEEL_MALLOC:
     soft_ret0(0x8000F04C)  # sbi_malloc → NULL
     soft_ret0(0x8000F176)  # sbi_zalloc → NULL
     soft_ret_void(0x8000F1A2)  # sbi_free → ret
-    # Space queries without freelist walk (cont.42 style)
     soft_ret_imm(0x8000F2AA, 2047)  # sbi_heap_free_space
     soft_ret_imm(0x8000F2F4, 0)  # sbi_heap_used_space
     soft_ret_imm(0x80003A3C, 0)  # sbi_scratch_used_space
-    print(
-        "soft malloc/zalloc/free + heap space stubs "
-        "(b1-heap-freelist-malloc; PEEL_MALLOC=1 to restore)"
-    )
+    print("SOFT_MALLOC: malloc/zalloc/free + heap space stubs")
 else:
-    print("PEEL_MALLOC: real sbi_malloc/zalloc/free (from diag)")
+    print("cont.51+: natural sbi_malloc/zalloc/free (peeled)")
 
 # cont.42/46: real domain_finalize — natural bb20 (c.sd s9; j bb2c from diag),
 # walk through assigned-bit + scratch-table ld. Soft-skip platform jalr.
@@ -768,7 +765,7 @@ DST.write_bytes(data)
 print("wrote", DST)
 print(
     "expect SI/DI: 51b1babe + BANR "
-    f"(soft_malloc={int(not PEEL_MALLOC)} soft_cmv={int(SOFT_CMV)} "
+    f"(soft_malloc={int(SOFT_MALLOC)} soft_cmv={int(SOFT_CMV)} "
     f"soft_fdt_match={int(SOFT_FDT_MATCH)} soft_strlen={int(not PEEL_STRLEN)})"
 )
 

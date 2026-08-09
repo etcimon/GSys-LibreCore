@@ -3,28 +3,36 @@
 Append-only. One **primary** residual (or tightly coupled pair) per iteration.
 Template at bottom.
 
-**Active:** `iter-010` (PEEL_MALLOC freelist after strlen soft peel).
+**Active:** `iter-011` (PEEL_STRLEN stock sbi_strlen RVI loop).
 
 ---
 
 ## Active iteration
 
-### iter-010 — Heap freelist / PEEL_MALLOC residual
+### iter-011 — Stock sbi_strlen RVI dual-issue residual
 
 | Field | Value |
 |-------|--------|
 | **Started** | 2026-08-09 |
 | **Bucket** | B1 |
-| **Primary ids** | `b1-heap-freelist-malloc` |
-| **Hypothesis** | Soft malloc unblocked cookie; real freelist under DI still red |
-| **I2 Repro** | `PEEL_MALLOC=1 bash verif/regress/soft-ladder-opensbi-soak.sh` |
-| **I3 Fix** | TBD freelist RTL |
-| **I4 Verify** | default cookie green; PEEL_MALLOC when fixed |
-| **I6 Next** | real printf / PEEL_STRLEN RTL |
+| **Primary ids** | `b1-sbi-strlen-rvi` |
+| **Hypothesis** | Soft ret-imm 11 greened match path; stock loop `c.addi`+RVI `add a5,a4,a0` → mepc=0x4a50 mcause=2 under OpenSBI DI |
+| **I2 Repro** | `PEEL_STRLEN=1 bash verif/regress/soft-ladder-opensbi-soak.sh` |
+| **I3 Fix** | TBD RTL (RVC/RVI dual-issue PC or RF) |
+| **I4 Verify** | default cookie green; PEEL_STRLEN when fixed |
+| **I6 Next** | real printf / domain |
 
 ---
 
 ## Completed iterations
+
+### iter-010 — Heap freelist / PEEL_MALLOC (closed: peeled)
+
+| Field | Value |
+|-------|--------|
+| **Completed** | 2026-08-09 |
+| **Result** | PEEL_MALLOC×2 cookie **51b1babe** coldboot_done=1; `mini_freelist_unlink` PASS. Default natural malloc. Historic f0ba mcause=6 unblocked by AMO/spin peels. |
+| **Next** | iter-011 PEEL_STRLEN |
 
 ### iter-009 — FDT match / sbi_strlen residual (closed: match peeled, strlen soft)
 
@@ -106,10 +114,10 @@ See also `CONT-FULL-MAP.md` for cont.## disposition.
 
 | Order | id | Bucket | Note |
 |------:|----|--------|------|
-| 1 | `b1-heap-freelist-malloc` | B1 | **active** — soft malloc default; PEEL_MALLOC red |
-| 2 | `b1-sbi-strlen-rvi` | B1 | soft ret-imm 11; PEEL_STRLEN red mid-add @4a50 |
-| 3 | `b1-fdt-lenp-store` | B1 | real printf / hang-6; match path peeled |
-| 4 | `b1-dual-cmv-s3` | B1 | **peeled** (natural c.mv default) |
+| 1 | `b1-sbi-strlen-rvi` | B1 | **active** — soft ret-imm 11; PEEL_STRLEN red @4a50 |
+| 2 | `b1-fdt-lenp-store` | B1 | real printf / hang-6 family |
+| 3 | `b1-heap-freelist-malloc` | B1 | **peeled** natural malloc default |
+| 4 | `b1-dual-cmv-s3` | B1 | **peeled** natural c.mv default |
 | 5 | `b1-amo-spin-lock` | B1 | **rtl-fixed** (natural spins default) |
 | 6 | `b1-lrsc-cmpxchg` | B1 | **rtl-fixed** (natural LR/SC default) |
 | 7 | `b1-csr-expected-trap` | B1 | **rtl-fixed** (natural CSR probes default) |

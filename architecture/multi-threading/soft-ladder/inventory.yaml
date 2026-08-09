@@ -147,21 +147,20 @@ sites:
   - id: b1-heap-freelist-malloc
     bucket: B1
     priority: 1
-    status: open
+    status: peeled
     ladder: cont.49-51 / 2026-08-08 ordered-path step2
-    soft_form: >
-      Default soft: sbi_malloc/zalloc → NULL; sbi_free ret; heap free/used/scratch
-      space soft_ret_imm. PEEL_MALLOC=1 for real freelist re-soak.
-    pin: >
-      Real malloc freelist unlink sd mcause=6 (mepc=0x8000f0ba) on dual-hart smt2.
-      Soft stubs restore 51b1babe cookie (2026-08-08).
+    soft_form: "natural malloc/zalloc/free (SOFT_MALLOC=1 restores stubs)"
+    pin: "historic freelist unlink sd mcause=6 @f0ba — cleared after spin peel"
     rtl_loci:
       - core/load_unit.sv
       - core/store_buffer.sv
       - core/issue_read_operands.sv
       - core/scoreboard.sv
-    verif_idea: "Bare freelist ticket insert/remove under DI; PEEL_MALLOC cookie"
-    retire_when: PEEL_MALLOC cookie green on smt2 DI
+    rtl_progress: >
+      2026-08-09: PEEL_MALLOC cookie green ×2 (coldboot_done=1);
+      mini_freelist_unlink PASS. Default natural malloc.
+    verif_idea: "mini_freelist_unlink; PEEL_MALLOC cookie"
+    retire_when: "met; SOFT_MALLOC bisect only"
 
   - id: b1-dual-cmv-s3
     bucket: B1

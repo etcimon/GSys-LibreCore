@@ -24,7 +24,7 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
 
 | Layer | Goal | Status |
 |-------|------|--------|
-| **B1 RTL** | Delete soft nops by fixing DI | AMO/LRSC/CSR/c.mv/**fdt_match** peeled; soft strlen + freelist + printf **open** |
+| **B1 RTL** | Delete soft nops by fixing DI | AMO/LRSC/CSR/c.mv/fdt_match/**malloc** peeled; soft strlen + printf **open** |
 | **B2 firmware** | Source profile instead of VA patches | Domain cut / printf / switch_mode still soft |
 | **B3 harness** | Cookie gate scripts | default soak **51b1babe** 2026-08-08 on work-ver-smt2 |
 
@@ -105,13 +105,13 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
    # SOFT_LADDER_SPIKE=1 optional; SOFT_LADDER_COMPILE_ONLY=1 assemble only
    # or: SOFT_LADDER=1 bash verif/regress/dual-iss-regress.sh
 
-2. OpenSBI cookie (default peels spin/cmpx/CSR/c.mv/fdt_match; soft strlen + malloc)
+2. OpenSBI cookie (default peels spin/cmpx/CSR/c.mv/fdt_match/malloc; soft strlen)
    bash verif/regress/soft-ladder-opensbi-soak.sh
-   # Bisect: SOFT_SPIN SOFT_CMPX SOFT_CSR SOFT_CMV SOFT_FDT_MATCH
-   # Experimental: PEEL_STRLEN=1 (red @4a50)  PEEL_MALLOC=1 (freelist open)
+   # Bisect: SOFT_SPIN SOFT_CMPX SOFT_CSR SOFT_CMV SOFT_FDT_MATCH SOFT_MALLOC
+   # Experimental: PEEL_STRLEN=1 (red @4a50 stock strlen)
    # SUCCESS = trapdump [1000] contains 51b1babe only
 
-3. PEEL_MALLOC freelist (iter-010) then PEEL_STRLEN RTL
+3. PEEL_STRLEN RTL (iter-011) then real printf
 4. B1 FDT lenp → real printf (drop BANR)
 5. B2 domain full walk (real ecall); switch_mode payload
 6. Empty mk_plat_skip → retire b3-mk-plat-skip-oracle
@@ -128,8 +128,8 @@ Checklist:
 [x] PEEL_CSR / natural CSR probes → cookie green (default)
 [x] natural c.mv + soft fdt_match stub → cookie green (iter-008)
 [x] natural fdt_match + soft sbi_strlen ret-imm 11 → cookie green (iter-009)
+[x] natural malloc/zalloc/free → cookie green (iter-010)
 [!] PEEL_STRLEN → FAIL mid sbi_strlen mepc=0x80004a50 mcause=2
-[ ] PEEL_MALLOC → real freelist (b1-heap-freelist-malloc)
 [ ] real sbi_printf (FDT lenp)
 [ ] domain full walk; switch_mode payload
 [ ] mk_plat_skip empty → retire

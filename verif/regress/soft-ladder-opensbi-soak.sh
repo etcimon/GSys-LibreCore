@@ -9,8 +9,8 @@
 #
 # Usage:
 #   bash verif/regress/soft-ladder-opensbi-soak.sh
-#   PEEL_SPIN=1 bash verif/regress/soft-ladder-opensbi-soak.sh
-#   PEEL_SPIN=1 PEEL_CMPX=1 bash verif/regress/soft-ladder-opensbi-soak.sh
+#   PEEL_STRLEN=1 bash verif/regress/soft-ladder-opensbi-soak.sh
+#   SOFT_MALLOC=1 bash verif/regress/soft-ladder-opensbi-soak.sh
 #   SOFT_LADDER_SKIP_BUILD=1 bash ...   # reuse existing ELF
 #   SOFT_LADDER_TIME_OUT=8000000 bash ...
 #
@@ -38,7 +38,7 @@ if [[ ! -x "$HARNESS" ]]; then
 fi
 
 peels=()
-for k in PEEL_SPIN PEEL_CMPX PEEL_CSR PEEL_CMV PEEL_ALL_B1; do
+for k in PEEL_SPIN PEEL_CMPX PEEL_CSR PEEL_CMV PEEL_MALLOC PEEL_STRLEN PEEL_FDT_MATCH PEEL_ALL_B1; do
   v="${!k:-0}"
   if [[ "$v" == "1" || "$v" == "true" || "$v" == "yes" ]]; then
     peels+=("$k=1")
