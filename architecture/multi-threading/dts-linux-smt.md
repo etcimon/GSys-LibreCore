@@ -125,4 +125,6 @@ Full image CI remains optional (cva6-sdk / external payload).
 - L2/L3 DT: `architecture/l2-l3-cache/dts-l3-prefetch.md`  
 - SMT RTL: `architecture/multi-threading/smt2-bringup.md`  
 - Rootfs path: `architecture/multi-threading/smt-linux-rootfs.md`  
+- **Topology × soft ladder:** `architecture/multi-threading/fdt-topology-soft-ladder.md`
+  (threads per core, stream plane, issue width non-goal, OpenSBI→cpuinfo chain)  
 

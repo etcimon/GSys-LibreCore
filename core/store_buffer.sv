@@ -430,6 +430,8 @@ module store_buffer
     st_fwd_be_o    = be_m;
     // R3a cont.13: keep STQ forward on; nofwd + store-side sticky still −4,
     // so residual is not STQ→wbuffer *nextoffset alone.
+    // Soft-ladder iter-012: STQ-nofwd under SuperscalarEn was PEEL_FDT-negative
+    // (fw64d, same mepc=0x12eb2 mtval=0x12b2a) — re-enabled forward.
     st_fwd_valid_o = |be_m;
   end
 

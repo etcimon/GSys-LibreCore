@@ -281,8 +281,8 @@ module load_unit
   // st_pipeline_busy) advances past /cpus into sbi_trap_handler. Revert to
   // classic Ariane page-offset interlock only (+ store-side sticky so post-
   // grant loads still wait for wbuffer). Forward covers stack RAW when live.
-  // Revisit STQ-empty-all only if s2/s4 dual-issue residuals return after
-  // peeling force-SI.
+  // Soft-ladder iter-012: SS-wide st_pipeline_busy + STQ-nofwd was PEEL-negative
+  // (fw64d); restored SpeculativeSb gate (smt2 has SpeculativeSb=0).
   logic st_pipeline_busy;
   assign st_pipeline_busy = CVA6Cfg.SpeculativeSb && CVA6Cfg.SuperscalarEn &&
                             page_offset_matches_i && !st_fwd_covers &&

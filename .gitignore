@@ -65,8 +65,12 @@ Bender.lock
 monorepo-soak/*.log
 monorepo-soak/*.elf
 monorepo-soak/*-trace.txt
+monorepo-soak/logs/
 encaps.traces
 iti.traces
+
+# Soft-ladder OpenSBI oracle ELF build products
+software/smt2-linux/soft-ladder/build/
 
 
 # Local fork work clones

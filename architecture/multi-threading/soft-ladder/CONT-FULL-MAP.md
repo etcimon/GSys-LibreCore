@@ -108,10 +108,11 @@ Living status: `inventory.yaml`. Active work: `ITERATION.md`.
 2. OpenSBI cookie (default peels spin/cmpx/CSR/c.mv/match/malloc/strlen; soft getprop+printf)
    bash verif/regress/soft-ladder-opensbi-soak.sh
    # Prefer SOFT_LADDER_HARNESS=work-ver-smt2-fw64
-   # Bisect: SOFT_SPIN … SOFT_STRLEN SOFT_MALLOC; PEEL_FDT_GETPROP=1 (red FDT lenp)
+   # Oracle: software/smt2-linux/soft-ladder/mk_plat_skip.py
+   # Bisect: SOFT_SPIN … SOFT_STRLEN SOFT_MALLOC; PEEL_FDT_GETPROP=1
    # SUCCESS = trapdump [1000] contains 51b1babe only
 
-3. PEEL_FDT_GETPROP / FDT lenp RTL (iter-012) then real printf
+3. PEEL_FDT_GETPROP / FDT lenp RTL (iter-012 STQ-nofwd under SS) then real printf
 4. B1 FDT lenp → real printf (drop BANR)
 5. B2 domain full walk (real ecall); switch_mode payload
 6. Empty mk_plat_skip → retire b3-mk-plat-skip-oracle
@@ -131,7 +132,8 @@ Checklist:
 [x] natural malloc/zalloc/free → cookie green (iter-010)
 [x] PEEL_STRLEN mid-RVI fixed (FETCH_WIDTH=64); natural strlen default
 [x] soft fdt_getprop_namelen + natural strlen → cookie green
-[!] PEEL_FDT_GETPROP → FDT lenp mepc=0x80012eb2 mcause=6 (iter-012)
+[x] oracle moved tmp-dual-ci → software/smt2-linux/soft-ladder/
+[!] PEEL_FDT_GETPROP → FDT lenp; RTL STQ-nofwd under SS (re-soak)
 [ ] real sbi_printf (FDT lenp)
 [ ] domain full walk; switch_mode payload
 [ ] mk_plat_skip empty → retire

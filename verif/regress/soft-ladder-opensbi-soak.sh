@@ -4,8 +4,9 @@
 #
 # Soft-ladder ordered path — step2: OpenSBI cookie soak (Variane DI).
 #
-# Builds fw_payload via tmp-dual-ci/mk_plat_skip.py (optional PEEL_*), runs
-# work-ver-smt2 with CVA6_TRAP_DUMP=1, SUCCESS iff trapdump shows 51b1babe.
+# Builds fw_payload via software/smt2-linux/soft-ladder/mk_plat_skip.py
+# (optional PEEL_*), runs Variane DI with CVA6_TRAP_DUMP=1, SUCCESS iff
+# trapdump shows 51b1babe.
 #
 # Usage:
 #   bash verif/regress/soft-ladder-opensbi-soak.sh
@@ -26,7 +27,8 @@ if [[ ! -x "$ROOT/${HARNESS_DIR}/Variane_testharness" && -x "$ROOT/work-ver-smt2
   HARNESS_DIR=work-ver-smt2
 fi
 HARNESS="$ROOT/${HARNESS_DIR}/Variane_testharness"
-ELF="${SOFT_LADDER_ELF:-$ROOT/tmp-dual-ci/fw_payload_r3a_c15_plat_skip.elf}"
+SOFT_LADDER_DIR="${SOFT_LADDER_DIR:-$ROOT/software/smt2-linux/soft-ladder}"
+ELF="${SOFT_LADDER_ELF:-$SOFT_LADDER_DIR/build/fw_payload_r3a_c15_plat_skip.elf}"
 OUT="${SOFT_LADDER_OSBI_OUT:-/tmp/cva6-soft-ladder-osbi}"
 mkdir -p "$OUT"
 TIME_OUT="${SOFT_LADDER_TIME_OUT:-12000000}"
@@ -42,7 +44,7 @@ if [[ ! -x "$HARNESS" ]]; then
 fi
 
 peels=()
-for k in PEEL_SPIN PEEL_CMPX PEEL_CSR PEEL_CMV PEEL_MALLOC PEEL_STRLEN PEEL_FDT_MATCH PEEL_ALL_B1; do
+for k in PEEL_SPIN PEEL_CMPX PEEL_CSR PEEL_CMV PEEL_MALLOC PEEL_STRLEN PEEL_FDT_MATCH PEEL_FDT_GETPROP PEEL_ALL_B1; do
   v="${!k:-0}"
   if [[ "$v" == "1" || "$v" == "true" || "$v" == "yes" ]]; then
     peels+=("$k=1")
@@ -52,12 +54,12 @@ done
 log "peels=${peels[*]:-none} harness=${HARNESS_DIR} time_out=${TIME_OUT}"
 
 if [[ "$SKIP_BUILD" != "1" ]]; then
-  if [[ ! -f "$ROOT/tmp-dual-ci/fw_payload_diag.elf" ]]; then
-    log "missing tmp-dual-ci/fw_payload_diag.elf (source for mk_plat_skip)"
+  if [[ ! -f "$SOFT_LADDER_DIR/build/fw_payload_diag.elf" ]]; then
+    log "missing $SOFT_LADDER_DIR/build/fw_payload_diag.elf (source for mk_plat_skip)"
     exit 1
   fi
-  log "building ELF via mk_plat_skip.py"
-  python3 "$ROOT/tmp-dual-ci/mk_plat_skip.py" | tee "$OUT/mk_plat_skip.log"
+  log "building ELF via software/smt2-linux/soft-ladder/mk_plat_skip.py"
+  python3 "$SOFT_LADDER_DIR/mk_plat_skip.py" | tee "$OUT/mk_plat_skip.log"
 fi
 
 if [[ ! -f "$ELF" ]]; then

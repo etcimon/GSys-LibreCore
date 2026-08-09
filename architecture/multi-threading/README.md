@@ -52,11 +52,13 @@ core/include/g6lc64_smt2_config_pkg.sv   # NrHarts=2, SMT_HYBRID, L2
 | OpenSBI SMT2 + dual-hart SBI payload | `software/smt2-linux/` | **Landed** (R3a) |
 | Full Linux Image / cva6-sdk | `CVA6_LINUX_PAYLOAD` / `LINUX_IMAGE` | **Lab / optional R3b–c** |
 
-Bring-up: `smt2-bringup.md`. OpenSBI: `software/smt2-linux/README.md`.
+Bring-up: `smt2-bringup.md`. OpenSBI: `software/smt2-linux/README.md`.  
+**FDT / cpu-map / threads-per-core plan:** `fdt-topology-soft-ladder.md`
+(`NrCores` × `NrHarts`, stream vs SMT, soft-ladder gates before `/proc/cpuinfo`).
 
 ### Soft-ladder promotion (DI OpenSBI → codebase)
 
-Binary peels in `tmp-dual-ci/mk_plat_skip.py` are an **oracle**, not the long-term
+Binary peels in `software/smt2-linux/soft-ladder/mk_plat_skip.py` are an **oracle**, not the long-term
 contract. Promote via three buckets and a closed iteration loop:
 
 | Path | Role |

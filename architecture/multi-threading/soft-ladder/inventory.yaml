@@ -135,14 +135,15 @@ sites:
       soft sbi_printf BANR. PEEL_FDT_GETPROP=1 for natural getprop.
     pin: "PEEL_FDT_GETPROP mepc=0x80012eb2 mcause=6 mtval=0x80012b2a"
     rtl_loci:
-      - core/store_unit.sv
+      - core/store_buffer.sv
+      - core/load_unit.sv
       - core/issue_read_operands.sv
       - core/scoreboard.sv
-      - core/load_unit.sv
-      - core/frontend/frontend.sv
+      - core/store_unit.sv
     monorepo_soak_note: >
-      Same family as hang-6 dual FDT BADOFFSET and hang-7 single FDT walk
-      (L2-OPENSBI-HANG-PROGRESS.md). CF younger-cancel landed; load/CF residual open.
+      Same family as hang-6 dual FDT BADOFFSET and hang-7 single FDT walk.
+      iter-012: dual-commit negative; STQ data-forward off under SuperscalarEn
+      + st_pipeline_busy on page-offset match (store_buffer/load_unit).
     verif_idea: "Stack store of fdt lenp-like pointer under dual-issue; path_offset /cpus"
     retire_when: real sbi_printf green; soft printf cave deleted
 

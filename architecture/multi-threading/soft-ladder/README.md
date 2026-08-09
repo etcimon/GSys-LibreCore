@@ -1,7 +1,7 @@
 # Soft-ladder promotion (DI OpenSBI → codebase)
 
 > **Purpose:** Convert the R3a dual-issue OpenSBI *binary* soft ladder
-> (`tmp-dual-ci/mk_plat_skip.py`, cont.33–51 in `../smt2-bringup.md`) into a
+> (`software/smt2-linux/soft-ladder/mk_plat_skip.py`, cont.33–51 in `../smt2-bringup.md`) into a
 > **safe, iteration-focused** path that lands fixes in the right layer — not as
 > permanent ELF rewrites.
 

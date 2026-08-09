@@ -984,6 +984,8 @@ module issue_read_operands
           if (ariane_pkg::is_amo(issue_instr_i[p].op)) issue_ack_o[p] = 1'b0;
         end
       end
+      // iter-012 note: force SI (issue_ack_o[p>0]=0) was PEEL_FDT-negative
+      // (fw64e, same 12eb2/12b2a) — residual is not residual dual-issue pairs.
     end
   end
 

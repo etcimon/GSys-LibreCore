@@ -13,9 +13,11 @@ is the queue, not the design.
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
 ## Current phase
-**Post-Zacas / multi-core spo + FO4 residual close (this worktree).**  
+**Soft ladder (DI OpenSBI) + multi-threading topology path on smt2.**  
 Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual matrix
-`AGENTS-build-platform.md` §5–§7 · live RTL table `architecture/README.md`.
+`AGENTS-build-platform.md` §5–§7 · live RTL table `architecture/README.md` ·  
+**soft ladder** `architecture/multi-threading/soft-ladder/` ·  
+**topology** `architecture/multi-threading/fdt-topology-soft-ladder.md`.
 
 ### Landed plane (state + priors to retrieve)
 
@@ -29,6 +31,8 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **FTQ / frontend** | Mispredict reseed + demand fixes for bare-metal green | Guide `agents/guides/AGENTS-branch-prediction.md` · scaffold `architecture/branch-prediction/README.md` · RTL `core/frontend/{frontend,cva6_ftq}.sv` |
 | **Structural FO4** | sparse_ex/frontend residual close @ **2.5 GHz** (screening ≠ STA) | Package `sv-timing/AGENTS.md` · `sv-timing/architecture/MONOREPO-SOAK.md` · `FREQUENCY-CLOSURE.md` · host `AGENTS-build-platform.md` §6.1 / §7 · plan `architecture/build-platform-opensta-from-timing.md` · philosophy §2.8 in `AGENTS-coding-philosophy.md` |
 | **R3a dual-hart OpenSBI** | `fw_payload` + WSL SUCCESS; **R3b gate** `r3b-linux-image` (Image external) | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
+| **Soft ladder (DI OpenSBI)** | Oracle at `software/smt2-linux/soft-ladder/`; default cookie **51b1babe** (natural spin/cmpx/CSR/c.mv/match/malloc/strlen + **soft getprop**); peels through strlen landed; **iter-012 FDT lenp open** | `soft-ladder/{README,ITERATION,CONT-FULL-MAP,inventory,b1-rtl-residuals}.md` · `verif/regress/soft-ladder-{opensbi-soak,di-regress}.sh` · harness `work-ver-smt2-fw64*` |
+| **FDT topology plan** | `NrCores`×`NrHarts` (threads/core), stream vs SMT `cpu-map`, issue width non-DT; gates before `/proc/cpuinfo` | `architecture/multi-threading/fdt-topology-soft-ladder.md` · `ariane-smt2.dts` · `ariane-stream8.dts` |
 | **Ara / RVV** | Attach + DTS + directed; **VRF/cosim gate** `ara-vector-cosim` (live lmul opt) | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
 | **H / KVM** | U9 + **H-edge Spike+RTL 3/3** (`kvm-h-spike` / Variane server_math) | `architecture/server-math-hypervisor.md` · remaining-upgrade Phase B · `agents/spec/riscv-spec-II-5.*-hypervisor*.html` · impl Hypervisor row · `verif/tests/custom/kvm_h/` · suite `kvm-h-tests` |
 
@@ -40,8 +44,27 @@ Standing disciplines remain active (`AGENTS.md` §0.4–§0.6). Keep
 
 Do **not** reopen soft-skip CAS or re-litigate green mini RTL unless a hard fail reappears.
 Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-spo-veri` → OpenSBI/Linux
-(see also diagnosis intent in `AGENTS-build-platform.md` residual soaks; when written,
+(see also diagnosis intent in `AGENTS-build-platform.md` residual soaks;
 `verif/regress/AGENTS-regress-scripts.md`).
+
+**Active edge (soft ladder + SMT topology) — do these before optional lab tracks:**
+
+| # | Item | Status / next action |
+|---|------|----------------------|
+| **SL-A** | **iter-012 FDT `lenp` / `PEEL_FDT_GETPROP`** | **Open.** Pin: mepc=`0x80012eb2` mcause=6 mtval=`0x80012b2a` (s2=check_node→next_tag ra). Default soft getprop → cookie green. |
+| | Bisects **all negative** | Dual-GPR dual-commit; full dual-commit (`fw64c`); STQ-nofwd+pipeline-busy (`fw64d`); force SI issue port1 kill (`fw64e`) — **identical pin**. Experimental gates **reverted**. |
+| | Next RTL | Corrupt `a2`/`s3` before `by_offset_`; structure-load walk; dual-fetch/`instr_queue`; RF link write. Directed bare minis PASS; OpenSBI path still red. |
+| | Priors | `soft-ladder/ITERATION.md` · `b1-rtl-residuals.md` · `fdt-topology-soft-ladder.md` · `software/smt2-linux/soft-ladder/` · soak `soft-ladder-opensbi-soak.sh` |
+| **SL-B** | Peel soft getprop + real printf | **Blocked on SL-A.** Then drop BANR; `plat_hc==2` sticky without soft FDT. |
+| **SL-C** | Topology truth (smt2) | After SL-B: OpenSBI stock DTB, `hart_count==2`, R3/R3b, `/proc/cpuinfo` processor count; plan `fdt-topology-soft-ladder.md` Phases A5–B. |
+| **SL-D** | Stream plane vs SMT | Orthogonal: `ariane-stream8` N=2 T=1 I=1; do not merge with smt2 DI residual until FDT walk trusted. |
+| **SL-E** | Optional DTS generator | `(NrCores,NrHarts,ISA,caches)` → DTS; only when third topology would triple-maintain hand DTS. |
+
+Soft-ladder SUCCESS = trapdump **`51b1babe` only** (not harness tohost SUCCESS).  
+Harness preference: `SOFT_LADDER_HARNESS=work-ver-smt2-fw64` (FETCH_WIDTH≥64).  
+Oracle: `python software/smt2-linux/soft-ladder/mk_plat_skip.py`.
+
+---
 
 1. ~~**Register residual suites in build-platform**~~ **done** — `mc-mini-veri` + `mc-spo-veri`
    in `defaults.ts` (`optional: true`, not in `defaultSuites`); listed by `test --list`;
@@ -128,6 +151,25 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
     Branding/publication only if a rebrand branch merges here.
     **Priors:** `architecture/stream8-class.md` · `g6lc64_stream8_config_pkg.sv` ·
     `verif/regress/stream8-smoke.sh` · `multi-core/README.md` · `AGENTS-configuration.md`.
+
+12. **Soft ladder DI OpenSBI (active)** — promote binary peels → B1 RTL / B2 firmware / B3
+    harness. Oracle moved `tmp-dual-ci` → `software/smt2-linux/soft-ladder/`.
+    Peels landed: spin, cmpx, CSR, c.mv, fdt_match, malloc, strlen (FETCH_WIDTH=64).
+    **Open:** `b1-fdt-lenp-store` / `PEEL_FDT_GETPROP` (iter-012). Soft getprop default.
+    Bisects all negative (reverted): dual-commit, STQ-nofwd, force SI issue — same pin.
+    **Next:** a2/s3 call-boundary / structure-load / dual-fetch; then peel getprop + printf.
+    Suites: `soft-ladder-opensbi-soak.sh`, `soft-ladder-di-regress.sh`.
+    **Priors:** `architecture/multi-threading/soft-ladder/*` · `smt2-bringup.md` ·
+    `fdt-topology-soft-ladder.md` · `core/{store_buffer,load_unit,issue_read_operands,commit_stage}.sv`.
+
+13. **Multi-threading topology (cpu-map / cpuinfo / threads-per-core)** — plan landed
+    (`fdt-topology-soft-ladder.md`): `S = NrCores × NrHarts`; smt2 = 1×2 SMT; stream8 = 2×1;
+    issue width not DT-visible. **Blocked on soft-ladder SL-A/B** before trusting `plat_hc`
+    or `/proc/cpuinfo`. DTS: `ariane-smt2.dts` / `ariane-stream8.dts`; RTL mhartid/CLINT already
+    `N×T`. After FDT natural: `plat_hc==2`, R3/R3b, cpuinfo count; then stream residual;
+    optional DTS generator for hybrid N×T (S≤8).
+    **Priors:** `dts-linux-smt.md` · `smt-linux-rootfs.md` · `software/smt2-linux/` ·
+    `AGENTS-dts-validation.md` · `g6lc_cluster.sv` · `ariane_testharness.sv`.
 
 ## Standing disciplines (apply every pass, per applicability)
 Six **co-equal** upkeep rules; run each pass when it applies (none overrides the SoC prime directive):
