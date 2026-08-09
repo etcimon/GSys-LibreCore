@@ -182,13 +182,31 @@ module ariane import ariane_pkg::*; #(
         );
       end else if (CVA6Cfg.CoproType == config_pkg::COPRO_G6LC_AI) begin: gen_COPRO_G6LC_AI
         // Xg6lcai AI matrix plane, seam B (architecture/ai-matrix/README.md §2).
-        // The coprocessor RTL lands in P1 (todo AI-1); until then this arm is a
-        // deliberate tie-off. Accepting nothing is the correct degraded
-        // behaviour: every custom-2 instruction then raises illegal-instruction,
-        // exactly as isa-encoding.md §6 requires when the plane is absent.
-        // Named separately from gen_COPRO_NONE so the seam is greppable and the
-        // P1 change is a single instantiation, not a branch restructure.
-        assign cvxif_resp = '{compressed_ready: 1'b1, issue_ready: 1'b1, register_ready: 1'b1, default: '0};
+        // P1: real CVXIF coprocessor (core/cvxif_g6lc_ai/). Mask/match + T0
+        // execute; T1/T2 groups accept and stub-complete until tile SRAM / DMA.
+        g6lc_ai_coprocessor #(
+          .NrRgprPorts (CVA6Cfg.X_NUM_RS),  // per-instr RS count (CVXIF X_NUM_RS)
+          .XLEN (CVA6Cfg.XLEN),
+          .AiCfg (CVA6Cfg.AiCfg),
+          .readregflags_t (readregflags_t),
+          .writeregflags_t (writeregflags_t),
+          .id_t (id_t),
+          .hartid_t (hartid_t),
+          .x_compressed_req_t (x_compressed_req_t),
+          .x_compressed_resp_t (x_compressed_resp_t),
+          .x_issue_req_t (x_issue_req_t),
+          .x_issue_resp_t (x_issue_resp_t),
+          .x_register_t (x_register_t),
+          .x_commit_t (x_commit_t),
+          .x_result_t (x_result_t),
+          .cvxif_req_t (cvxif_req_t),
+          .cvxif_resp_t (cvxif_resp_t)
+        ) i_g6lc_ai_coprocessor (
+          .clk_i                ( clk_i                          ),
+          .rst_ni               ( rst_ni                         ),
+          .cvxif_req_i          ( cvxif_req                      ),
+          .cvxif_resp_o         ( cvxif_resp                     )
+        );
       end else begin: gen_COPRO_NONE
         assign cvxif_resp = '{compressed_ready: 1'b1, issue_ready: 1'b1, register_ready: 1'b1, default: '0};
       end

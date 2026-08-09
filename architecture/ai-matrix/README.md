@@ -137,9 +137,10 @@ and option D, and is the single largest hidden cost in the phasing below. Tracke
 | Layer | Locus | Note |
 |---|---|---|
 | CVXIF FU | `core/cvxif_fu.sv` | result/exception forwarding only |
-| CVXIF coprocessor example | `core/cvxif_example/`, `include/cvxif_instr_pkg.sv:56-64` | mask/match instruction table pattern to copy; squats **custom-3** (`0x7B`) |
-| Coprocessor selection enum | `core/include/config_pkg.sv:93-97` | add `COPRO_G6LC_AI` here |
-| Coprocessor instantiation | `corev_apu/src/ariane.sv:159-188` | add a genblock arm here |
+| CVXIF coprocessor example | `core/cvxif_example/`, `include/cvxif_instr_pkg.sv:56-64` | mask/match pattern; squats **custom-3** (`0x7B`) |
+| **Xg6lcai CVXIF coprocessor (P1)** | `core/cvxif_g6lc_ai/` | mask/match custom-2 `0x5B`; T0 execute + T1/T2 stubs |
+| Coprocessor selection enum | `core/include/config_pkg.sv:93-97` | `COPRO_G6LC_AI` present |
+| Coprocessor instantiation | `corev_apu/src/ariane.sv` `gen_COPRO_G6LC_AI` | instantiates `g6lc_ai_coprocessor` |
 | Accelerator dispatcher | `core/acc_dispatcher.sv`, genblock `core/cva6.sv:1905` | option D target |
 | First-pass decoder stub | `core/cva6_accel_first_pass_decoder_stub.sv`, flist `core/Flist.cva6:194` | replace for option D |
 | Accelerator decode hooks | `core/decoder.sv:168-171, 1854-1857, 1939-1942` | `is_accel` overrides decode |
