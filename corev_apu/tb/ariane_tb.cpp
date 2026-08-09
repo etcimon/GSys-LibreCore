@@ -961,13 +961,13 @@ done_processing:
       }
       std::cerr << std::dec << "\n";
     }
-    // R3a hang state: npc + banked CSR (NrHarts>1 uses gen_banked)
+    // R3a hang state: npc + CSR. NrHarts==1 uses gen_single (see also ~730).
     {
       auto npc0 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__i_frontend__DOT__npc_q;
-      auto mepc = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q;
-      auto mtvec = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mtvec_q;
-      auto mcause = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q;
-      auto wfi = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__wfi_q;
+      auto mepc = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_single__DOT__i_csr__DOT__mepc_q;
+      auto mtvec = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_single__DOT__i_csr__DOT__mtvec_q;
+      auto mcause = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_single__DOT__i_csr__DOT__mcause_q;
+      auto wfi = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_single__DOT__i_csr__DOT__wfi_q;
       std::cerr << std::hex << "[hangpc] npc0=0x" << (uint64_t)npc0
                 << " mepc=0x" << (uint64_t)mepc
                 << " mtvec=0x" << (uint64_t)mtvec

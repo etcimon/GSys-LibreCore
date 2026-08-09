@@ -109,6 +109,13 @@ module g6lc_smt_csr_bank
     output logic icache_en_o,
     output logic dcache_en_o,
     output logic acc_cons_en_o,
+    // Xg6lcai AI CSR sideband — must track csr_regfile (AI-E / seam B).
+    // SMT: outputs muxed by active fetch hart; inputs gated to commit hart bank.
+    output logic [CVA6Cfg.XLEN-1:0] ai_aicfg_o,
+    output logic [1:0]              ai_ais_o,
+    input  logic                    dirty_ai_state_i,
+    input  logic                    ai_setcfg_we_i,
+    input  logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata_i,
     output logic [11:0] perf_addr_o,
     output logic [CVA6Cfg.XLEN-1:0] perf_data_o,
     input  logic [CVA6Cfg.XLEN-1:0] perf_data_i,
@@ -219,6 +226,11 @@ module g6lc_smt_csr_bank
         .icache_en_o,
         .dcache_en_o,
         .acc_cons_en_o,
+        .ai_aicfg_o,
+        .ai_ais_o,
+        .dirty_ai_state_i,
+        .ai_setcfg_we_i,
+        .ai_setcfg_wdata_i,
         .perf_addr_o,
         .perf_data_o,
         .perf_data_i,
@@ -249,6 +261,8 @@ module g6lc_smt_csr_bank
     logic csr_wff_g[NH];
     logic dirty_v_g[NH];
     logic acc_ff_v_g[NH];
+    logic dirty_ai_g[NH];
+    logic ai_setcfg_we_g[NH];
 
     for (genvar h = 0; h < NH; h++) begin : gen_gate
       assign commit_sel[h] = (commit_instr_i.hart_id == HID_W'(h));
@@ -259,6 +273,9 @@ module g6lc_smt_csr_bank
       assign csr_wff_g[h] = csr_write_fflags_i & commit_sel[h];
       assign dirty_v_g[h] = dirty_v_state_i & commit_sel[h];
       assign acc_ff_v_g[h] = acc_fflags_ex_valid_i & commit_sel[h];
+      // AI dirty/setcfg from coprocessor: apply to the committing hart bank.
+      assign dirty_ai_g[h] = dirty_ai_state_i & commit_sel[h];
+      assign ai_setcfg_we_g[h] = ai_setcfg_we_i & commit_sel[h];
     end
 
     // Bank outputs
@@ -292,6 +309,8 @@ module g6lc_smt_csr_bank
     logic tvm_b[NH], tw_b[NH], vtw_b[NH], tsr_b[NH], hu_b[NH];
     logic dbg_mode_b[NH], step_b[NH];
     logic icache_b[NH], dcache_b[NH], acc_cons_b[NH];
+    logic [CVA6Cfg.XLEN-1:0] ai_aicfg_b[NH];
+    logic [1:0]              ai_ais_b[NH];
     logic [11:0] perf_addr_b[NH];
     logic [CVA6Cfg.XLEN-1:0] perf_data_b[NH];
     logic perf_we_b[NH];
@@ -390,6 +409,11 @@ module g6lc_smt_csr_bank
           .icache_en_o(icache_b[h]),
           .dcache_en_o(dcache_b[h]),
           .acc_cons_en_o(acc_cons_b[h]),
+          .ai_aicfg_o(ai_aicfg_b[h]),
+          .ai_ais_o(ai_ais_b[h]),
+          .dirty_ai_state_i(dirty_ai_g[h]),
+          .ai_setcfg_we_i(ai_setcfg_we_g[h]),
+          .ai_setcfg_wdata_i(ai_setcfg_wdata_i),
           .perf_addr_o(perf_addr_b[h]),
           .perf_data_o(perf_data_b[h]),
           .perf_data_i(perf_data_i),
@@ -470,6 +494,8 @@ module g6lc_smt_csr_bank
       icache_en_o              = icache_b[active_hart_i];
       dcache_en_o              = dcache_b[active_hart_i];
       acc_cons_en_o            = acc_cons_b[active_hart_i];
+      ai_aicfg_o               = ai_aicfg_b[active_hart_i];
+      ai_ais_o                 = ai_ais_b[active_hart_i];
       perf_addr_o              = perf_addr_b[active_hart_i];
       perf_data_o              = perf_data_b[active_hart_i];
       perf_we_o                = perf_we_b[active_hart_i];
