@@ -92,6 +92,7 @@ Each iteration is a **closed loop** (one primary residual or one peel class):
 | Path | Role |
 |------|------|
 | `README.md` (this file) | Buckets, order, iteration loop |
+| `CONT-FULL-MAP.md` | **All cont.2–51** → bucket, soft, RTL status, peel checklist |
 | `inventory.yaml` | Living soft-site registry (status + loci) |
 | `ITERATION.md` | Append-only iteration log + active iteration |
 | `b1-rtl-residuals.md` | B1 deep map → core files / test ideas |

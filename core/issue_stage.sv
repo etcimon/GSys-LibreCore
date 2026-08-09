@@ -415,9 +415,59 @@ module issue_stage
         end
       end
 
+      // Soft-ladder B1 (b1-csr-expected-trap / cont.33): after a CSR issues for
+      // a hart, do not issue anything younger on that hart until the CSR leaves
+      // the scoreboard (commit_ack or flush). OpenSBI expected-trap is:
+      //   csrrw mtvec, handler;  <probe CSR>;  csrw mtvec, old
+      // If younger ops (or the restore) race the illegal probe, mtvec is already
+      // restored when the trap is taken and __sbi_expected_trap never runs.
+      // csr_buffer already single-entries CSR FU, but non-CSR / timing under DI
+      // still allowed younger issue; this mirrors unresolved_cf for CSR.
+      logic [N_HARTS-1:0] unresolved_csr_q, issue_csr_hart, commit_csr_hart;
+
+      always_comb begin
+        issue_csr_hart = '0;
+        for (int unsigned pi = 0; pi < CVA6Cfg.NrIssuePorts; pi++) begin
+          if (issue_instr_valid_sb[pi] && issue_ack_iro[pi] &&
+              (issue_instr_sb[pi].fu == CSR)) begin
+            if (!unresolved_csr_q[issue_instr_sb[pi].hart_id]) begin
+              issue_csr_hart[issue_instr_sb[pi].hart_id] = 1'b1;
+            end
+          end
+        end
+      end
+
+      always_comb begin
+        commit_csr_hart = '0;
+        for (int unsigned ci = 0; ci < CVA6Cfg.NrCommitPorts; ci++) begin
+          if (commit_ack_i[ci] && (commit_instr_o[ci].fu == CSR)) begin
+            commit_csr_hart[commit_instr_o[ci].hart_id] = 1'b1;
+          end
+        end
+      end
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          unresolved_csr_q <= '0;
+        end else if (flush_i) begin
+          unresolved_csr_q <= '0;
+        end else begin
+          for (int unsigned h = 0; h < N_HARTS; h++) begin
+            // Commit/flush wins over re-arm (same as CF).
+            if (commit_csr_hart[h]) begin
+              unresolved_csr_q[h] <= 1'b0;
+            end else if (issue_csr_hart[h]) begin
+              unresolved_csr_q[h] <= 1'b1;
+            end
+          end
+        end
+      end
+
       for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_gate
         assign issue_instr_valid_iro[p] =
-            issue_instr_valid_sb[p] && !unresolved_cf_q[issue_instr_sb[p].hart_id];
+            issue_instr_valid_sb[p]
+            && !unresolved_cf_q[issue_instr_sb[p].hart_id]
+            && !unresolved_csr_q[issue_instr_sb[p].hart_id];
       end
     end
   end

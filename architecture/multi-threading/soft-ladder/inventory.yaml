@@ -10,10 +10,12 @@ meta:
   ladder_head: cont.51
   production_elf_builder: tmp-dual-ci/mk_plat_skip.py
   narrative: architecture/multi-threading/smt2-bringup.md
+  full_cont_map: architecture/multi-threading/soft-ladder/CONT-FULL-MAP.md
   monorepo_soak_map: architecture/multi-threading/soft-ladder/monorepo-soak-integration.md
   concurrent_baseline: "SUCCESS 200155 (hold unless noted)"
   target_config: g6lc64_smt2
   worktree_rtl_sync: "2026-08-08 from E:\\cva6 monorepo-soak landings (AMOCAS.Q, SMT hart, trapdump)"
+  rtl_commits: "a9ee4b143 soft-ladder; 47572e98c AMO cancel; 041574c0c LR/SC; iter-006 CSR stall"
 
 # ---------------------------------------------------------------------------
 # B1 — RTL / dual-issue residuals (fix in core; delete soft nops after)
@@ -119,15 +121,20 @@ sites:
   - id: b1-csr-expected-trap
     bucket: B1
     priority: 2
-    status: open
+    status: in_progress
     ladder: cont.33
     soft_form: "jal after memset @cd86 → reinit @cd0e (skip CSR probe tail)"
     pin: "probe CSR dual-issues with csrw mtvec; expected trap never sees illegal"
     rtl_loci:
+      - core/issue_stage.sv
       - core/csr_regfile.sv
       - core/csr_buffer.sv
       - core/controller.sv
       - core/commit_stage.sv
+    rtl_progress: >
+      2026-08-08 iter-006: unresolved_csr_q stalls same-hart issue after CSR
+      until commit_ack(CSR) or flush (mirrors unresolved_cf). Directed
+      mini_csr_expected_trap.S. OpenSBI CSR cut still soft until soak.
     verif_idea: "Directed illegal CSR + immediate csrw mtvec under DI"
     retire_when: full sbi_hart_init CSR probes run without cut
 

@@ -3,28 +3,36 @@
 Append-only. One **primary** residual (or tightly coupled pair) per iteration.
 Template at bottom.
 
-**Active:** `iter-005` (B1 LR/SC exclusive pair).
+**Active:** `iter-006` (B1 CSR expected-trap + full cont map).
 
 ---
 
 ## Active iteration
 
-### iter-005 — LR/SC: no flush after LR + issue barrier to SC
+### iter-006 — Full cont.## map + CSR expected-trap issue stall
 
 | Field | Value |
 |-------|--------|
 | **Started** | 2026-08-08 |
-| **Bucket** | B1 |
-| **Primary ids** | `b1-lrsc-cmpxchg` |
-| **Hypothesis** | Real OpenSBI `atomic_cmpxchg` LR/SC hangs because (1) `flush_commit` after every AMO including LR restarts the pipe and (2) intervening STORE under DI can clear `axi_riscv_lrsc` reservation so SC fails forever. Production ELF uses soft `ld/bne/sd` (cont.50). |
-| **I3 Fix** | Skip `flush_commit` for LR; `lr_sc_pair_q` blocks non-SC STORE issue until SC or flush; `is_amo_lr`/`is_amo_sc` helpers; `mini_lrsc_d.S` |
-| **I4 Verify** | Directed LR/SC when harness wired; OpenSBI peel soft cmpx still needs lab re-soak |
-| **I5 Retire** | partial — keep soft cmpx until cookie green with real `lr.d`/`sc.d` |
-| **I6 Next** | Lab re-soak real cmpxchg + real SA locks; then FDT lenp / CSR |
+| **Bucket** | B1 (+ docs map) |
+| **Primary ids** | `b1-csr-expected-trap`; map all cont.2–51 |
+| **Hypothesis** | cont.33: younger issue after CSR lets `csrw mtvec` race illegal probe so expected-trap handler never runs. Full bring-up map needed to order peels. |
+| **I3 Fix** | `unresolved_csr_q` in `issue_stage` (mirror CF stall); `CONT-FULL-MAP.md`; directed `mini_csr_expected_trap.S` + `mini_dual_cmv_s3.S` |
+| **I4 Verify** | Directed CSR trap under DI when harness wired; OpenSBI peel CSR cut pending soak |
+| **I5 Retire** | partial — keep cd86→cd0e until probe green |
+| **I6 Next** | FDT lenp (`b1-fdt-lenp-store`) or lab re-soak AMO/LRSC/CSR peels |
 
 ---
 
 ## Completed iterations
+
+### iter-005 — LR/SC: no flush after LR + issue barrier to SC
+
+| Field | Value |
+|-------|--------|
+| **Completed** | 2026-08-08 |
+| **Result** | `041574c0c` — no LR flush_commit; lr_sc_pair store barrier; mini_lrsc_d.S |
+| **Next was** | CSR + full map |
 
 ### iter-004 — AMO spin_lock residual: amo_buffer younger-cancel kill
 
@@ -62,16 +70,18 @@ Template at bottom.
 
 ## Backlog (priority order)
 
+See also `CONT-FULL-MAP.md` for cont.## disposition.
+
 | Order | id | Bucket | Note |
 |------:|----|--------|------|
-| 1 | `b1-amo-spin-lock` | B1 | Unblocks SA/heap/scratch natural locks |
-| 2 | `b1-lrsc-cmpxchg` | B1 | Unblocks real atomic_cmpxchg |
-| 3 | `b3-success-hang-cookies` | B3 | Stabilize SUCCESS definition for gates |
-| 4 | `b1-csr-expected-trap` | B1 | Full hart_init probes |
-| 5 | `b1-fdt-lenp-store` | B1 | Real printf |
-| 6 | `b2-domain-finalize-cut` | B2 | After ecall poison understood / B1 stable |
-| 7 | `b2-switch-mode-payload` | B2 | Linux handoff |
-| 8 | `b1-dual-cmv-s3` | B1 | Platform override natural |
+| 1 | `b1-amo-spin-lock` | B1 | in_progress — peel after DI soak |
+| 2 | `b1-lrsc-cmpxchg` | B1 | in_progress — peel soft cmpx after soak |
+| 3 | `b1-csr-expected-trap` | B1 | in_progress — peel CSR cut after soak |
+| 4 | `b1-fdt-lenp-store` | B1 | Real printf / hang-6 family |
+| 5 | `b1-dual-cmv-s3` | B1 | Platform override natural; test scaffold |
+| 6 | `b3-success-hang-cookies` | B3 | Stabilize SUCCESS definition for gates |
+| 7 | `b2-domain-finalize-cut` | B2 | After ecall poison understood / B1 stable |
+| 8 | `b2-switch-mode-payload` | B2 | Linux handoff |
 | 9 | `b3-mk-plat-skip-oracle` | B3 | Retire when empty |
 
 ---

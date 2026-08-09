@@ -43,6 +43,7 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Primary RTL | CSR pipeline, exception vs following CSR write |
 | Directed test sketch | `csrr` illegal; immediately `csrw mtvec, known`; check handler/mcause |
 | Retire criterion | Full CSR probe loop in hart_init under DI |
+| **iter-006 fix (in tree)** | `issue_stage` `unresolved_csr_q`: after CSR issue, no same-hart younger issue until that CSR `commit_ack` or flush. Test: `mini_csr_expected_trap.S`. |
 
 ### FDT `lenp` store (priority 2)
 

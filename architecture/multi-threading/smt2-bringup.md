@@ -2667,9 +2667,11 @@ pmu, soft printf (FDT lenp), switch_mode body/payload, domain assigned/multi-ite
 
 Binary cont.33–51 peels are inventoried for **promotion out of ELF patching**:
 
+- **Full cont.2–51 map:** `soft-ladder/CONT-FULL-MAP.md` (disposition of every cont pin)
 - Map / iteration: `soft-ladder/README.md`, `soft-ladder/inventory.yaml`, `soft-ladder/ITERATION.md`
 - Buckets: **B1** RTL DI residuals, **B2** OpenSBI/platform policy, **B3** sim harness only
 - Order: B1 first → B3 SUCCESS definition → B2 source profile → retire `tmp-dual-ci/mk_plat_skip.py`
+- RTL landed (E:\cva6): soft-ladder docs; AMO cancel; LR/SC pair; CSR unresolved stall (iter-004…006)
 
 Do not add new hard-coded VAs without an inventory id.
 
