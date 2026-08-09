@@ -32,7 +32,16 @@ module g6lc_ai_island_top
     input  logic [31:0] wdata_i,
     output logic [31:0] rdata_o,
     output logic        rvalid_o,
-    output logic        irq_o
+    output logic        irq_o,
+    // Core-sideband submit (ai.enq): uses latched descriptor + this ticket/qid.
+    // Bring-up protocol: SW programs region+desc via MMIO, then ai.enq kicks.
+    input  logic        sb_enq_valid_i,
+    input  logic [7:0]  sb_qid_i,
+    input  logic [31:0] sb_ticket_i,
+    // Completion feedback for ai.poll (in-order tickets)
+    output logic [31:0] sb_last_ticket_o,
+    output logic [15:0] sb_last_status_o,
+    output logic        sb_has_completion_o
 );
 
   localparam int unsigned NumQueues = (IslandCfg.Queues == 0) ? 1 : IslandCfg.Queues;
@@ -105,14 +114,55 @@ module g6lc_ai_island_top
       .check_ok_o    (check_ok)
   );
 
+  // Stretch core sideband pulse so a 1-cycle enq is not missed if the
+  // engine is mid-cycle. Clear on accept (ready) so we do not re-submit
+  // the same ticket when the engine returns to IDLE.
+  logic        sb_enq_sticky_q;
+  logic [7:0]  sb_qid_hold_q;
+  logic [31:0] sb_ticket_hold_q;
+
+  // Mux MMIO doorbell vs core sideband kick (sideband preferred)
+  logic                  submit_valid_mux;
+  logic [QidWidth-1:0]   submit_qid_mux;
+  logic [31:0]           submit_ticket_mux;
+  always_comb begin
+    if (sb_enq_sticky_q || sb_enq_valid_i) begin
+      submit_valid_mux  = 1'b1;
+      submit_qid_mux    = QidWidth'(sb_enq_valid_i ? sb_qid_i : sb_qid_hold_q);
+      submit_ticket_mux = sb_enq_valid_i ? sb_ticket_i : sb_ticket_hold_q;
+    end else begin
+      submit_valid_mux  = submit_pulse_q;
+      submit_qid_mux    = db_qid_q;
+      submit_ticket_mux = db_ticket_q;
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      sb_enq_sticky_q  <= 1'b0;
+      sb_qid_hold_q    <= '0;
+      sb_ticket_hold_q <= '0;
+    end else begin
+      // Accept this cycle ⇒ drop sticky (covers valid&&ready same cycle too).
+      if (submit_ready && (sb_enq_sticky_q || sb_enq_valid_i)) begin
+        sb_enq_sticky_q <= 1'b0;
+      end else if (sb_enq_valid_i) begin
+        // Engine busy: hold until ready.
+        sb_enq_sticky_q  <= 1'b1;
+        sb_qid_hold_q    <= sb_qid_i;
+        sb_ticket_hold_q <= sb_ticket_i;
+      end
+    end
+  end
+
   g6lc_ai_desc_engine #(.NumQueues(NumQueues), .AddrWidth(AddrWidth)) i_engine (
       .clk_i, .rst_ni,
       .testmode_i      (testmode_i),
       .enable_i        (enable_q),
-      .submit_valid_i  (submit_pulse_q),
+      .submit_valid_i  (submit_valid_mux),
       .submit_ready_o  (submit_ready),
-      .submit_qid_i    (db_qid_q),
-      .submit_ticket_i (db_ticket_q),
+      .submit_qid_i    (submit_qid_mux),
+      .submit_ticket_i (submit_ticket_mux),
       .submit_desc_i   (desc_bits),
       .done_valid_o    (done_valid),
       .done_ticket_o   (done_ticket),
@@ -288,6 +338,10 @@ module g6lc_ai_island_top
   assign rdata_o  = rdata_q;
   assign rvalid_o = rvalid_q;
   assign irq_o    = irq_sticky_q;
+
+  assign sb_last_ticket_o     = done_ticket_hold_q;
+  assign sb_last_status_o     = done_status_hold_q;
+  assign sb_has_completion_o  = done_sticky_q;
 
   // Silence unused
   // verilator lint_off UNUSEDSIGNAL

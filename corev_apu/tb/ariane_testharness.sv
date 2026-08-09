@@ -381,15 +381,21 @@ module ariane_testharness #(
   );
 
   // ------------------------------
-  // GPIO window (0x4000_0000)
+  // GPIO window (0x4000_0000) / AI island MMIO
   // ------------------------------
-  // When Xg6lcai MatrixEn is set, this window hosts the AI island MMIO
-  // (capability + doorbell + AI-3 regions). Otherwise keep the error slave.
+  // Module-scope sideband between cluster core0 and island (always present;
+  // idle when MatrixEn=0).
+  logic        ai_sb_enq;
+  logic [7:0]  ai_sb_qid;
+  logic [31:0] ai_sb_ticket;
+  logic [31:0] ai_isl_last_ticket;
+  logic [15:0] ai_isl_last_status;
+  logic        ai_isl_has_completion;
+  logic        ai_irq;
 
   if (CVA6Cfg.AiCfg.MatrixEn) begin : gen_ai_island
     logic         ai_penable, ai_pwrite, ai_psel, ai_pready, ai_pslverr;
     logic [31:0]  ai_paddr, ai_pwdata, ai_prdata;
-    logic         ai_irq;
 
     axi2apb_64_32 #(
         .AXI4_ADDRESS_WIDTH ( AXI_ADDRESS_WIDTH            ),
@@ -469,14 +475,19 @@ module ariane_testharness #(
         .prdata_o  ( ai_prdata  ),
         .pready_o  ( ai_pready  ),
         .pslverr_o ( ai_pslverr ),
-        .irq_o     ( ai_irq     )
+        .irq_o     ( ai_irq     ),
+        .sb_enq_valid_i      ( ai_sb_enq              ),
+        .sb_qid_i            ( ai_sb_qid              ),
+        .sb_ticket_i         ( ai_sb_ticket           ),
+        .sb_last_ticket_o    ( ai_isl_last_ticket     ),
+        .sb_last_status_o    ( ai_isl_last_status     ),
+        .sb_has_completion_o ( ai_isl_has_completion  )
     );
-    // IRQ not yet wired into PLIC (sources reserved); sticky in MMIO 0x010C.
-    // verilator lint_off UNUSEDSIGNAL
-    logic _ai_irq_unused;
-    assign _ai_irq_unused = ai_irq;
-    // verilator lint_on UNUSEDSIGNAL
   end else begin : gen_gpio_err
+    assign ai_irq = 1'b0;
+    assign ai_isl_last_ticket = '0;
+    assign ai_isl_last_status = '0;
+    assign ai_isl_has_completion = 1'b0;
     ariane_axi_soc::req_slv_t  gpio_req;
     ariane_axi_soc::resp_slv_t gpio_resp;
     `AXI_ASSIGN_TO_REQ(gpio_req, master[ariane_soc::GPIO])
@@ -708,6 +719,7 @@ module ariane_testharness #(
     .ethernet  ( master[ariane_soc::Ethernet] ),
     .timer     ( master[ariane_soc::Timer]    ),
     .irq_o     ( irqs                         ),
+    .ai_irq_i  ( ai_irq                       ),
     .rx_i      ( rx                           ),
     .tx_o      ( tx                           ),
     .eth_txck  ( ),
@@ -796,7 +808,13 @@ module ariane_testharness #(
     .l3_hit_o       (                     ),
     .l3_miss_o      (                     ),
     .pf_issue_o     (                     ),
-    .pf_train_o     (                     )
+    .pf_train_o     (                     ),
+    .ai_sb_enq_valid_o( ai_sb_enq         ),
+    .ai_sb_qid_o      ( ai_sb_qid         ),
+    .ai_sb_ticket_o   ( ai_sb_ticket      ),
+    .ai_isl_has_completion_i( ai_isl_has_completion ),
+    .ai_isl_last_ticket_i   ( ai_isl_last_ticket    ),
+    .ai_isl_last_status_i   ( ai_isl_last_status    )
   );
 
   `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)

@@ -44,7 +44,14 @@ module g6lc_cluster
     output logic l3_hit_o,
     output logic l3_miss_o,
     output logic pf_issue_o,
-    output logic pf_train_o
+    output logic pf_train_o,
+    // Xg6lcai island sideband from core 0 (tie open/0 when no island)
+    output logic        ai_sb_enq_valid_o,
+    output logic [7:0]  ai_sb_qid_o,
+    output logic [31:0] ai_sb_ticket_o,
+    input  logic        ai_isl_has_completion_i,
+    input  logic [31:0] ai_isl_last_ticket_i,
+    input  logic [15:0] ai_isl_last_status_i
 );
 
   localparam int unsigned NC = (NR_CORES < 1) ? 1 : NR_CORES;
@@ -101,6 +108,10 @@ module g6lc_cluster
   // --------------------
   rvfi_probes_t [NC-1:0] core_rvfi;
 
+  logic        [NC-1:0]        core_sb_enq;
+  logic        [NC-1:0][7:0]   core_sb_qid;
+  logic        [NC-1:0][31:0]  core_sb_ticket;
+
   for (genvar c = 0; c < NC; c++) begin : gen_core
     ariane #(
         .CVA6Cfg       (CVA6Cfg),
@@ -130,7 +141,14 @@ module g6lc_cluster
         .l3_hit_i         (l3_hit_w),
         .l3_miss_i        (l3_miss_w),
         .pf_issue_i       (pf_issue_w),
-        .pf_train_i       (pf_train_w)
+        .pf_train_i       (pf_train_w),
+        .ai_sb_enq_valid_o(core_sb_enq[c]),
+        .ai_sb_qid_o      (core_sb_qid[c]),
+        .ai_sb_ticket_o   (core_sb_ticket[c]),
+        // Broadcast island completion to every core for ai.poll
+        .ai_isl_has_completion_i(ai_isl_has_completion_i),
+        .ai_isl_last_ticket_i   (ai_isl_last_ticket_i),
+        .ai_isl_last_status_i   (ai_isl_last_status_i)
     );
 
     g6lc_l1_inv_adapter #(
@@ -147,6 +165,11 @@ module g6lc_cluster
   end
 
   assign rvfi_probes_o = core_rvfi[0];
+
+  // Single island: accept enq from core 0 (first hart wins multi-core for now)
+  assign ai_sb_enq_valid_o = core_sb_enq[0];
+  assign ai_sb_qid_o       = core_sb_qid[0];
+  assign ai_sb_ticket_o    = core_sb_ticket[0];
 
   // --------------------
   // Coherence hub

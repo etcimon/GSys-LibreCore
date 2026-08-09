@@ -97,7 +97,14 @@ module ariane import ariane_pkg::*; #(
   input  logic                         l3_hit_i,
   input  logic                         l3_miss_i,
   input  logic                         pf_issue_i,
-  input  logic                         pf_train_i
+  input  logic                         pf_train_i,
+  // Xg6lcai island sideband: ai.enq kick + ai.poll completion (tie 0 / open if no island)
+  output logic                         ai_sb_enq_valid_o,
+  output logic [7:0]                   ai_sb_qid_o,
+  output logic [31:0]                  ai_sb_ticket_o,
+  input  logic                         ai_isl_has_completion_i,
+  input  logic [31:0]                  ai_isl_last_ticket_i,
+  input  logic [15:0]                  ai_isl_last_status_i
 );
 
   //////////////////////////////////////////////////////////////////////////////
@@ -111,10 +118,14 @@ module ariane import ariane_pkg::*; #(
     logic [CVA6Cfg.XLEN-1:0] ai_aicfg;
     logic [1:0]              ai_ais;
     logic                    ai_issue_ok, ai_q_en;
+    logic [7:0]              ai_qid;
     logic                    dirty_ai_state;
     logic                    ai_setcfg_we;
     logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata;
     logic                    ai_pmu_op, ai_pmu_mma, ai_pmu_post, ai_pmu_t0, ai_pmu_busy;
+    logic                    ai_sb_enq;
+    logic [7:0]              ai_sb_qid;
+    logic [31:0]             ai_sb_ticket;
 
     cva6 #(
       .CVA6Cfg ( CVA6Cfg ),
@@ -156,6 +167,7 @@ module ariane import ariane_pkg::*; #(
       .ai_ais_o             ( ai_ais                    ),
       .ai_issue_ok_o        ( ai_issue_ok               ),
       .ai_q_en_o            ( ai_q_en                   ),
+      .ai_qid_o             ( ai_qid                    ),
       .dirty_ai_state_i     ( dirty_ai_state            ),
       .ai_setcfg_we_i       ( ai_setcfg_we              ),
       .ai_setcfg_wdata_i    ( ai_setcfg_wdata           ),
@@ -186,6 +198,9 @@ module ariane import ariane_pkg::*; #(
         assign ai_pmu_post     = 1'b0;
         assign ai_pmu_t0       = 1'b0;
         assign ai_pmu_busy     = 1'b0;
+        assign ai_sb_enq       = 1'b0;
+        assign ai_sb_qid       = '0;
+        assign ai_sb_ticket    = '0;
         cvxif_example_coprocessor #(
           .NrRgprPorts (CVA6Cfg.NrRgprPorts),
           .XLEN (CVA6Cfg.XLEN),
@@ -236,9 +251,16 @@ module ariane import ariane_pkg::*; #(
           .ais_i                ( ai_ais                         ),
           .ai_issue_ok_i        ( ai_issue_ok                    ),
           .ai_q_en_i            ( ai_q_en                        ),
+          .ai_qid_i             ( ai_qid                         ),
+          .isl_has_completion_i ( ai_isl_has_completion_i        ),
+          .isl_last_ticket_i    ( ai_isl_last_ticket_i           ),
+          .isl_last_status_i    ( ai_isl_last_status_i           ),
           .dirty_ai_state_o     ( dirty_ai_state                 ),
           .ai_setcfg_we_o       ( ai_setcfg_we                   ),
           .ai_setcfg_wdata_o    ( ai_setcfg_wdata                ),
+          .sb_enq_valid_o       ( ai_sb_enq                      ),
+          .sb_qid_o             ( ai_sb_qid                      ),
+          .sb_ticket_o          ( ai_sb_ticket                   ),
           .testmode_i           ( 1'b0                           ),
           .ai_pmu_op_o          ( ai_pmu_op                      ),
           .ai_pmu_mma_o         ( ai_pmu_mma                     ),
@@ -255,6 +277,9 @@ module ariane import ariane_pkg::*; #(
         assign ai_pmu_post     = 1'b0;
         assign ai_pmu_t0       = 1'b0;
         assign ai_pmu_busy     = 1'b0;
+        assign ai_sb_enq       = 1'b0;
+        assign ai_sb_qid       = '0;
+        assign ai_sb_ticket    = '0;
         assign cvxif_resp = '{compressed_ready: 1'b1, issue_ready: 1'b1, register_ready: 1'b1, default: '0};
       end
     end else begin: gen_no_cvxif
@@ -266,8 +291,15 @@ module ariane import ariane_pkg::*; #(
       assign ai_pmu_post     = 1'b0;
       assign ai_pmu_t0       = 1'b0;
       assign ai_pmu_busy     = 1'b0;
+      assign ai_sb_enq       = 1'b0;
+      assign ai_sb_qid       = '0;
+      assign ai_sb_ticket    = '0;
       assign cvxif_resp = '0;
     end
+
+    assign ai_sb_enq_valid_o = ai_sb_enq;
+    assign ai_sb_qid_o       = ai_sb_qid;
+    assign ai_sb_ticket_o    = ai_sb_ticket;
 
   //////////////////////////////////////////////////////////////////////////////
   // U10ᵇ RVV / accelerator path (mutually exclusive with CvxifEn)
@@ -348,6 +380,7 @@ module ariane import ariane_pkg::*; #(
       .ai_ais_o             ( /* unused */              ),
       .ai_issue_ok_o        ( /* unused */              ),
       .ai_q_en_o            ( /* unused */              ),
+      .ai_qid_o             ( /* unused */              ),
       .dirty_ai_state_i     ( 1'b0                      ),
       .ai_setcfg_we_i       ( 1'b0                      ),
       .ai_setcfg_wdata_i    ( '0                        ),
@@ -453,6 +486,10 @@ module ariane import ariane_pkg::*; #(
     assign core_noc_resp  = noc_resp_i;
     assign ara_axi_resp   = '0;
 `endif
+
+    assign ai_sb_enq_valid_o = 1'b0;
+    assign ai_sb_qid_o       = '0;
+    assign ai_sb_ticket_o    = '0;
 
   end // gen_acc
 

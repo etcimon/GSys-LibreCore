@@ -115,6 +115,7 @@ module g6lc_smt_csr_bank
     output logic [1:0]              ai_ais_o,
     output logic                    ai_issue_ok_o,
     output logic                    ai_q_en_o,
+    output logic [7:0]              ai_qid_o,
     input  logic                    dirty_ai_state_i,
     input  logic                    ai_setcfg_we_i,
     input  logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata_i,
@@ -232,6 +233,7 @@ module g6lc_smt_csr_bank
         .ai_ais_o,
         .ai_issue_ok_o,
         .ai_q_en_o,
+        .ai_qid_o,
         .dirty_ai_state_i,
         .ai_setcfg_we_i,
         .ai_setcfg_wdata_i,
@@ -317,6 +319,7 @@ module g6lc_smt_csr_bank
     logic [1:0]              ai_ais_b[NH];
     logic                    ai_issue_ok_b[NH];
     logic                    ai_q_en_b[NH];
+    logic [7:0]              ai_qid_b[NH];
     logic [11:0] perf_addr_b[NH];
     logic [CVA6Cfg.XLEN-1:0] perf_data_b[NH];
     logic perf_we_b[NH];
@@ -419,6 +422,7 @@ module g6lc_smt_csr_bank
           .ai_ais_o(ai_ais_b[h]),
           .ai_issue_ok_o(ai_issue_ok_b[h]),
           .ai_q_en_o(ai_q_en_b[h]),
+          .ai_qid_o(ai_qid_b[h]),
           .dirty_ai_state_i(dirty_ai_g[h]),
           .ai_setcfg_we_i(ai_setcfg_we_g[h]),
           .ai_setcfg_wdata_i(ai_setcfg_wdata_i),
@@ -506,6 +510,7 @@ module g6lc_smt_csr_bank
       ai_ais_o                 = ai_ais_b[active_hart_i];
       ai_issue_ok_o            = ai_issue_ok_b[active_hart_i];
       ai_q_en_o                = ai_q_en_b[active_hart_i];
+      ai_qid_o                 = ai_qid_b[active_hart_i];
       perf_addr_o              = perf_addr_b[active_hart_i];
       perf_data_o              = perf_data_b[active_hart_i];
       perf_we_o                = perf_we_b[active_hart_i];

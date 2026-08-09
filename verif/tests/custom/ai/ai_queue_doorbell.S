@@ -50,15 +50,20 @@ _start:
   mv   s2, a0
 
   # poll a0,a1: f7=1 → 0x0205D55B
+  # Retired tickets must not stay pending. Status may be 1 (T0 stub OK) or
+  # 2 (island completed empty/latched desc with AI-3/version error) — both
+  # mean the ticket left the queue. Future ticket 99 stays pending (0).
   mv   a1, s1
   .word 0x0205D55B             # ai.poll a0, a1
-  li   t0, 1
-  bne  a0, t0, fail
+  beqz a0, fail
+  li   t0, 2
+  bgtu a0, t0, fail
 
   mv   a1, s2
   .word 0x0205D55B
-  li   t0, 1
-  bne  a0, t0, fail
+  beqz a0, fail
+  li   t0, 2
+  bgtu a0, t0, fail
 
   li   a1, 99
   .word 0x0205D55B

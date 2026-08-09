@@ -36,10 +36,19 @@ module g6lc_ai_coprocessor
     input  logic [1:0]      ais_i,
     input  logic            ai_issue_ok_i,  // aiperm × privilege
     input  logic            ai_q_en_i,      // aiqctl[0]
+    input  logic [7:0]      ai_qid_i,       // aiqctl[15:8]
+    // Island completion for ai.poll
+    input  logic            isl_has_completion_i,
+    input  logic [31:0]     isl_last_ticket_i,
+    input  logic [15:0]     isl_last_status_i,
     output logic            dirty_ai_state_o,
     output logic            ai_setcfg_we_o,
     output logic [XLEN-1:0] ai_setcfg_wdata_o,
-    // DFT: bypass functional clock-gating when scan/ATPG is active
+    // Sideband kick to island (ai.enq)
+    output logic            sb_enq_valid_o,
+    output logic [7:0]      sb_qid_o,
+    output logic [31:0]     sb_ticket_o,
+    // DFT
     input  logic            testmode_i,
     // PMU group-4 probes (pulse/level → perf_counters)
     output logic            ai_pmu_op_o,
@@ -161,11 +170,18 @@ module g6lc_ai_coprocessor
       .aicfg_i       (aicfg_i),
       .ais_i         (ais_i),
       .ai_q_en_i     (ai_q_en_i),
+      .ai_qid_i      (ai_qid_i),
+      .isl_has_completion_i(isl_has_completion_i),
+      .isl_last_ticket_i   (isl_last_ticket_i),
+      .isl_last_status_i   (isl_last_status_i),
       .testmode_i    (testmode_i),
       .setcfg_we_o   (ai_setcfg_we_o),
       .setcfg_wdata_o(ai_setcfg_wdata_o),
       .dirty_o       (dirty_ai_state_o),
       .busy_o        (exec_busy),
+      .sb_enq_valid_o(sb_enq_valid_o),
+      .sb_qid_o      (sb_qid_o),
+      .sb_ticket_o   (sb_ticket_o),
       .pmu_op_o      (ai_pmu_op_o),
       .pmu_mma_o     (ai_pmu_mma_o),
       .pmu_post_o    (ai_pmu_post_o),

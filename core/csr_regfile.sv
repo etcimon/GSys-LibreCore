@@ -197,6 +197,8 @@ module csr_regfile
     output logic                    ai_issue_ok_o,
     // T2 queue enable (aiqctl[0]); enq returns all-ones when clear.
     output logic                    ai_q_en_o,
+    // Active queue id (aiqctl[15:8]) for island sideband.
+    output logic [7:0]              ai_qid_o,
     input  logic                    dirty_ai_state_i,
     input  logic                    ai_setcfg_we_i,
     input  logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata_i,
@@ -3188,6 +3190,7 @@ module csr_regfile
   assign ai_aicfg_o = CVA6Cfg.AiCfg.MatrixEn ? aicfg_q : '0;
   assign ai_ais_o   = CVA6Cfg.AiCfg.MatrixEn ? aistatus_q[7:6] : 2'b00;
   assign ai_q_en_o  = CVA6Cfg.AiCfg.MatrixEn && (CVA6Cfg.AiCfg.Queues != 0) && aiqctl_q[0];
+  assign ai_qid_o   = CVA6Cfg.AiCfg.MatrixEn ? aiqctl_q[15:8] : 8'h0;
 
   // aiperm privilege gate (isa-encoding.md §4/§6). Machine always issues.
   always_comb begin

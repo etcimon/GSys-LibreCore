@@ -21,7 +21,14 @@ module g6lc_ai_island_apb
     output logic [31:0] prdata_o,
     output logic        pready_o,
     output logic        pslverr_o,
-    output logic        irq_o
+    output logic        irq_o,
+    // Core sideband (optional; tie 0 when unused)
+    input  logic        sb_enq_valid_i,
+    input  logic [7:0]  sb_qid_i,
+    input  logic [31:0] sb_ticket_i,
+    output logic [31:0] sb_last_ticket_o,
+    output logic [15:0] sb_last_status_o,
+    output logic        sb_has_completion_o
 );
 
   logic        is_req, is_we;
@@ -42,7 +49,13 @@ module g6lc_ai_island_apb
       .wdata_i   (is_wdata),
       .rdata_o   (is_rdata),
       .rvalid_o  (is_rvalid),
-      .irq_o     (irq_o)
+      .irq_o     (irq_o),
+      .sb_enq_valid_i      (sb_enq_valid_i),
+      .sb_qid_i            (sb_qid_i),
+      .sb_ticket_i         (sb_ticket_i),
+      .sb_last_ticket_o    (sb_last_ticket_o),
+      .sb_last_status_o    (sb_last_status_o),
+      .sb_has_completion_o (sb_has_completion_o)
   );
 
   always_comb begin

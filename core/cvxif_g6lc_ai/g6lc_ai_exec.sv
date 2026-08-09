@@ -34,12 +34,21 @@ module g6lc_ai_exec
     input  logic       [XLEN-1:0] aicfg_i,
     input  logic       [     1:0] ais_i,
     input  logic                  ai_q_en_i,   // aiqctl[0] — enq enable
-    input  logic                  testmode_i,  // DFT: keep multi-cycle unit ungated
+    input  logic [7:0]            ai_qid_i,    // aiqctl[15:8]
+    // Island completion sideband for ai.poll (tie 0 when no island)
+    input  logic                  isl_has_completion_i,
+    input  logic [31:0]           isl_last_ticket_i,
+    input  logic [15:0]           isl_last_status_i,
+    input  logic                  testmode_i,  // DFT
     output logic                  setcfg_we_o,
     output logic       [XLEN-1:0] setcfg_wdata_o,
     output logic                  dirty_o,
     // Stall new issue while multi-cycle MMA is in flight
     output logic                  busy_o,
+    // Sideband kick to island (ai.enq) — uses latched MMIO descriptor
+    output logic                  sb_enq_valid_o,
+    output logic [7:0]            sb_qid_o,
+    output logic [31:0]           sb_ticket_o,
     // PMU pulses (1-cycle, group 4 — see ariane_pkg MHPMGrpAI)
     output logic                  pmu_op_o,      // any result_valid
     output logic                  pmu_mma_o,     // MMA done
@@ -208,6 +217,13 @@ module g6lc_ai_exec
   logic [31:0] rq_pack_q, rq_pack_d;
 
   logic [31:0] ticket_q, ticket_d;
+  logic        sb_enq_n, sb_enq_q;
+  logic [7:0]  sb_qid_n, sb_qid_q;
+  logic [31:0] sb_ticket_n, sb_ticket_q;
+
+  assign sb_enq_valid_o = sb_enq_q;
+  assign sb_qid_o       = sb_qid_q;
+  assign sb_ticket_o    = sb_ticket_q;
 
   // Decode indices from the instruction word (tile/acc are not RF regs)
   logic [4:0] idx_rs1, idx_rs2, idx_rd;
@@ -280,6 +296,9 @@ module g6lc_ai_exec
     mma_op_d       = mma_op_q;
     rq_pack_d      = rq_pack_q;
     ticket_d       = ticket_q;
+    sb_enq_n       = 1'b0;
+    sb_qid_n       = ai_qid_i;
+    sb_ticket_n    = ticket_q;
 
     result_n       = '0;
     hartid_n       = hartid_i;
@@ -440,11 +459,15 @@ module g6lc_ai_exec
               state_d       = ST_RELU;  // gelu path distinguished by mma_op_q
             end
             AI_ENQ: begin
-              // Instant-complete stub until P3 descriptor engine: return ticket
-              // or all-ones if queue disabled (aiqctl[0]=0). Does not block.
+              // Return ticket or all-ones if queue disabled. Sideband kick
+              // notifies the island (descriptor must already be latched via MMIO
+              // until DMA load lands). Does not block on full.
               if (ai_q_en_i) begin
-                result_n = XLEN'(ticket_q);
-                ticket_d = ticket_q + 32'd1;
+                result_n      = XLEN'(ticket_q);
+                sb_enq_n      = 1'b1;
+                sb_qid_n      = ai_qid_i;
+                sb_ticket_n   = ticket_q;
+                ticket_d      = ticket_q + 32'd1;
               end else begin
                 result_n = {XLEN{1'b1}};
               end
@@ -453,12 +476,26 @@ module g6lc_ai_exec
               pmu_t0_n = 1'b1;
             end
             AI_POLL: begin
-              // Stub: tickets already issued are complete (status=1); unknown
-              // future tickets stay pending (0). Error=2 reserved for P3.
-              if (ai_q_en_i && (registers_i[0][31:0] < ticket_q))
-                result_n = XLEN'(32'd1);
-              else
+              // 0=pending, 1=ok, 2=error.
+              // Dual-mode: when the island reports a completion covering
+              // this ticket, surface its status; otherwise fall back to the
+              // T0 local "issued ⇒ complete" stub (queue_doorbell / no-island).
+              // Note: avoid block-local variable decls inside this always_comb
+              // (some Verilator versions mishandle that branch).
+              if (!ai_q_en_i) begin
                 result_n = XLEN'(32'd0);
+              end else if (isl_has_completion_i &&
+                           registers_i[0][31:0] <= isl_last_ticket_i) begin
+                if (registers_i[0][31:0] == isl_last_ticket_i &&
+                    isl_last_status_i != 16'd0)
+                  result_n = XLEN'(32'd2);
+                else
+                  result_n = XLEN'(32'd1);
+              end else if (registers_i[0][31:0] < ticket_q) begin
+                result_n = XLEN'(32'd1);  // local stub complete
+              end else begin
+                result_n = XLEN'(32'd0);
+              end
               we_n     = 1'b1;
               valid_n  = 1'b1;
               pmu_t0_n = 1'b1;
@@ -656,6 +693,9 @@ module g6lc_ai_exec
       pmu_post_q     <= 1'b0;
       pmu_t0_q       <= 1'b0;
       ticket_q       <= '0;
+      sb_enq_q       <= 1'b0;
+      sb_qid_q       <= '0;
+      sb_ticket_q    <= '0;
       state_q        <= ST_IDLE;
       mma_acc_q      <= '0;
       mma_ta_q       <= '0;
@@ -689,6 +729,9 @@ module g6lc_ai_exec
       pmu_post_q     <= pmu_post_n;
       pmu_t0_q       <= pmu_t0_n;
       ticket_q       <= ticket_d;
+      sb_enq_q       <= sb_enq_n;
+      sb_qid_q       <= sb_qid_n;
+      sb_ticket_q    <= sb_ticket_n;
       state_q        <= state_d;
       mma_acc_q      <= mma_acc_d;
       mma_ta_q       <= mma_ta_d;
