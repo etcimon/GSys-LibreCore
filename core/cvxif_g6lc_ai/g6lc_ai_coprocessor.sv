@@ -100,14 +100,18 @@ module g6lc_ai_coprocessor
     if (is_queue_group(opcode_raw) && (AiCfg.Queues == 0)) gate_ok = 1'b0;
   end
 
+  logic exec_busy;
+  logic exec_fire;
+
   always_comb begin
     issue_resp  = issue_resp_raw;
-    issue_ready = issue_ready_raw;
+    issue_ready = issue_ready_raw && !exec_busy;
     opcode      = opcode_raw;
     if (issue_valid && issue_resp_raw.accept && !gate_ok) begin
       issue_resp.accept        = 1'b0;
       issue_resp.writeback     = '0;
       issue_resp.register_read = '0;
+      // Refuse immediately (illegal); still ready so the core can take the exception
       issue_ready              = 1'b1;
       opcode                   = AI_ILLEGAL;
     end
@@ -117,7 +121,6 @@ module g6lc_ai_coprocessor
   assign cvxif_resp_o.issue_resp     = issue_resp;
   assign cvxif_resp_o.register_ready = issue_ready;
 
-  logic exec_fire;
   assign exec_fire = issue_valid && issue_ready && issue_resp.accept;
 
   logic [XLEN-1:0] result;
@@ -149,6 +152,7 @@ module g6lc_ai_coprocessor
       .setcfg_we_o   (ai_setcfg_we_o),
       .setcfg_wdata_o(ai_setcfg_wdata_o),
       .dirty_o       (dirty_ai_state_o),
+      .busy_o        (exec_busy),
       .result_o      (result),
       .hartid_o      (res_hartid),
       .id_o          (res_id),

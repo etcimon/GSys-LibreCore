@@ -138,7 +138,7 @@ and option D, and is the single largest hidden cost in the phasing below. Tracke
 |---|---|---|
 | CVXIF FU | `core/cvxif_fu.sv` | result/exception forwarding only |
 | CVXIF coprocessor example | `core/cvxif_example/`, `include/cvxif_instr_pkg.sv:56-64` | mask/match pattern; squats **custom-3** (`0x7B`) |
-| **Xg6lcai CVXIF coprocessor (P1)** | `core/cvxif_g6lc_ai/` | mask/match custom-2 `0x5B`; T0 execute + T1/T2 stubs |
+| **Xg6lcai CVXIF coprocessor (P1)** | `core/cvxif_g6lc_ai/` | mask/match custom-2 `0x5B`; T0 + tile/acc RF + multi-cycle MMA; T2 stubs |
 | Coprocessor selection enum | `core/include/config_pkg.sv:93-97` | `COPRO_G6LC_AI` present |
 | Coprocessor instantiation | `corev_apu/src/ariane.sv` `gen_COPRO_G6LC_AI` | instantiates `g6lc_ai_coprocessor` |
 | Accelerator dispatcher | `core/acc_dispatcher.sv`, genblock `core/cva6.sv:1905` | option D target |
