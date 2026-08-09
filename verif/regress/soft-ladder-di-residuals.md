@@ -25,17 +25,18 @@ SOFT_LADDER=1 bash verif/regress/dual-iss-regress.sh
 | `b1-lrsc-cmpxchg` | `mini_lrsc_d.S` | **gate green**; natural LR/SC default | soft-ladder-di-regress |
 | `b1-csr-expected-trap` | `mini_csr_expected_trap.S` | **gate green**; CSR probes peeled | soft-ladder-di-regress |
 | `b1-dual-cmv-s3` | `mini_dual_cmv_s3.S` (+ strlen bridges) | **peeled** natural c.mv | soft-ladder-di-regress |
-| `b1-fdt-strlen` | `mini_strlen_rvc` / `mini_dual_cmv_strlen` bare green; OpenSBI PEEL_FDT_MATCH red | **active** | soft-ladder-opensbi-soak |
-| `b1-heap-freelist-malloc` | soft malloc default | PEEL_MALLOC open | soft-ladder-opensbi-soak |
-| `b1-fdt-lenp-store` | FDT lenp / real printf | planned | after fdt_match peel |
+| `b1-sbi-strlen-rvi` | `mini_strlen_rvc` bare green; OpenSBI soft ret-imm 11 | soft; PEEL_STRLEN red | soft-ladder-opensbi-soak |
+| `b1-heap-freelist-malloc` | soft malloc default | **active** PEEL_MALLOC open | soft-ladder-opensbi-soak |
+| `b1-fdt-lenp-store` | FDT lenp / real printf | planned | after PEEL_STRLEN |
 
 ## OpenSBI cookie gate (step 2)
 
 ```bash
 bash verif/regress/soft-ladder-opensbi-soak.sh   # strict 51b1babe
-# Default soft ELF: soft malloc + natural spins/cmpx/CSR/c.mv + soft fdt_match
-# PEEL_FDT_MATCH=1   # fails mid-sbi_strlen (iter-009)
-# PEEL_MALLOC=1 SOFT_SPIN=1 SOFT_CMPX=1 SOFT_CSR=1 SOFT_CMV=1  # bisect
+# Default soft ELF: soft malloc + soft strlen; natural spins/cmpx/CSR/c.mv/fdt_match
+# PEEL_STRLEN=1    # stock sbi_strlen red mid-add (iter-009 residual)
+# PEEL_MALLOC=1    # freelist (iter-010)
+# SOFT_SPIN=1 SOFT_CMPX=1 SOFT_CSR=1 SOFT_CMV=1 SOFT_FDT_MATCH=1  # bisect
 ```
 
 See `architecture/multi-threading/soft-ladder/b3-sim-harness.md`.

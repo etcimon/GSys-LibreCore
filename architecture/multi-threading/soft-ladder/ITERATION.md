@@ -3,28 +3,36 @@
 Append-only. One **primary** residual (or tightly coupled pair) per iteration.
 Template at bottom.
 
-**Active:** `iter-009` (FDT match / sbi_strlen after dual-c.mv peel).
+**Active:** `iter-010` (PEEL_MALLOC freelist after strlen soft peel).
 
 ---
 
 ## Active iteration
 
-### iter-009 — FDT match / sbi_strlen residual (post dual-c.mv peel)
+### iter-010 — Heap freelist / PEEL_MALLOC residual
 
 | Field | Value |
 |-------|--------|
 | **Started** | 2026-08-09 |
 | **Bucket** | B1 |
-| **Primary ids** | `b1-fdt-lenp-store` / fdt_match→strlen |
-| **Hypothesis** | Dual c.mv is not the residual: natural c.mv + soft stub `jal fdt_match` cookies green. Natural match dies mid-`sbi_strlen` (`mepc=0x80004a50` mcause=2). Bare `mini_strlen_rvc` + `mini_dual_cmv_strlen` PASS — OpenSBI FDT string path under DI still open. |
-| **I2 Repro** | `PEEL_FDT_MATCH=1 bash verif/regress/soft-ladder-opensbi-soak.sh` → no 51b1babe |
-| **I3 Fix** | TBD FDT/strlen DI residual; default soft stub @731e |
-| **I4 Verify** | default cookie green with natural c.mv |
-| **I6 Next** | PEEL_MALLOC freelist |
+| **Primary ids** | `b1-heap-freelist-malloc` |
+| **Hypothesis** | Soft malloc unblocked cookie; real freelist under DI still red |
+| **I2 Repro** | `PEEL_MALLOC=1 bash verif/regress/soft-ladder-opensbi-soak.sh` |
+| **I3 Fix** | TBD freelist RTL |
+| **I4 Verify** | default cookie green; PEEL_MALLOC when fixed |
+| **I6 Next** | real printf / PEEL_STRLEN RTL |
 
 ---
 
 ## Completed iterations
+
+### iter-009 — FDT match / sbi_strlen residual (closed: match peeled, strlen soft)
+
+| Field | Value |
+|-------|--------|
+| **Completed** | 2026-08-09 |
+| **Result** | Stock `sbi_strlen` RVI `add a5,a4,a0` loop → mepc=`0x4a50` mcause=2. Soft `sbi_strlen` ret-imm 11 + **natural jal fdt_match** → cookie **51b1babe**. Bare `mini_strlen_rvc`/`mini_dual_cmv_strlen` PASS. Default: natural match + soft strlen; `PEEL_STRLEN=1` red. |
+| **Next** | iter-010 freelist |
 
 ### iter-008 — Dual-c.mv OpenSBI residual (closed: peeled)
 
@@ -98,12 +106,13 @@ See also `CONT-FULL-MAP.md` for cont.## disposition.
 
 | Order | id | Bucket | Note |
 |------:|----|--------|------|
-| 1 | `b1-heap-freelist-malloc` | B1 | soft malloc default; PEEL_MALLOC still red |
-| 2 | `b1-fdt-lenp-store` | B1 | **active** — soft fdt_match stub; PEEL_FDT_MATCH red mid-strlen |
-| 3 | `b1-dual-cmv-s3` | B1 | **peeled** (natural c.mv default 2026-08-09) |
-| 4 | `b1-amo-spin-lock` | B1 | **rtl-fixed** (natural spins default) |
-| 5 | `b1-lrsc-cmpxchg` | B1 | **rtl-fixed** (natural LR/SC default) |
-| 6 | `b1-csr-expected-trap` | B1 | **rtl-fixed** (natural CSR probes default) |
+| 1 | `b1-heap-freelist-malloc` | B1 | **active** — soft malloc default; PEEL_MALLOC red |
+| 2 | `b1-sbi-strlen-rvi` | B1 | soft ret-imm 11; PEEL_STRLEN red mid-add @4a50 |
+| 3 | `b1-fdt-lenp-store` | B1 | real printf / hang-6; match path peeled |
+| 4 | `b1-dual-cmv-s3` | B1 | **peeled** (natural c.mv default) |
+| 5 | `b1-amo-spin-lock` | B1 | **rtl-fixed** (natural spins default) |
+| 6 | `b1-lrsc-cmpxchg` | B1 | **rtl-fixed** (natural LR/SC default) |
+| 7 | `b1-csr-expected-trap` | B1 | **rtl-fixed** (natural CSR probes default) |
 | 7 | `b2-domain-finalize-cut` | B2 | Domain cut / ecall multi-iter |
 | 8 | `b2-switch-mode-payload` | B2 | Linux handoff |
 | 9 | `b3-mk-plat-skip-oracle` | B3 | Shrink; not empty yet |

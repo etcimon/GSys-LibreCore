@@ -66,14 +66,23 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Residual moved to | Soft stub fdt_match / FDT lenp / strlen (`b1-fdt-lenp-store`) |
 | Retire criterion | **Met** for dual-c.mv class; `SOFT_CMV=1` bisect only |
 
-### FDT match / `sbi_strlen` (priority 2 — **active iter-009**)
+### FDT match / `sbi_strlen` (priority 2 — **match peeled; strlen soft iter-009**)
 
 | Item | Detail |
 |------|--------|
-| Soft evidence | `c.li a0,0` + `c.nop` replaces `jal fdt_match_node` @731e |
-| Fail pin | `PEEL_FDT_MATCH=1` → mepc=`0x80004a50` mcause=2 mid-`sbi_strlen` |
-| Bare directed | strlen minis **green** — residual is OpenSBI FDT string path under DI |
-| Retire criterion | Natural jal fdt_match cookie green |
+| Soft evidence | Natural `jal fdt_match` @731e; soft `sbi_strlen` @4a3a = `li a0,11; ret` |
+| Fail pin (stock strlen) | `PEEL_STRLEN=1` → mepc=`0x80004a50` mcause=2 mid RVI `add a5,a4,a0` after `c.addi` |
+| Isolate | Soft ret-imm 11 + natural match → **cookie green**; bare `mini_strlen_rvc` PASS |
+| Primary RTL | Dual-issue RVC/RVI packing in tight strlen loop under OpenSBI (not bare mini) |
+| Retire criterion | `PEEL_STRLEN=1` cookie green; drop soft strlen |
+
+### Heap freelist malloc (priority 1 — **active iter-010**)
+
+| Item | Detail |
+|------|--------|
+| Soft evidence | soft malloc/zalloc/free stubs |
+| Fail pin | `PEEL_MALLOC=1` freelist race under DI (historic mcause=6) |
+| Retire criterion | Natural malloc cookie green |
 
 ## Already landed in RTL (do not re-patch via monorepo-soak scripts)
 

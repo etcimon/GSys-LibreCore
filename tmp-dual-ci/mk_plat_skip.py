@@ -12,15 +12,17 @@ Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
     - natural SA/freelist spins (spin peeled)
     - natural atomic_cmpxchg LR/SC (cmpx peeled)
     - natural hart_init CSR probes (csr peeled)
-    - natural dual c.mv @7312/14 (cmv peeled 2026-08-09 isolate)
-    - soft stub fdt_match_node jal @731e (FDT/strlen residual open)
+    - natural dual c.mv @7312/14 (cmv peeled 2026-08-09)
+    - natural jal fdt_match @731e (match peeled 2026-08-09)
+    - soft sbi_strlen pointer-inc loop @4a3a (RVI add loop residual open)
     - soft malloc/zalloc/free + heap space stubs (freelist open)
   Bisect restores:
     SOFT_SPIN=1   SA/heap spin NOP4
     SOFT_CMPX=1   ld/sd atomic_cmpxchg shim
     SOFT_CSR=1    CSR probe cut cd86→cd0e
     SOFT_CMV=1    nop dual c.mv (old cont.19 soft)
-    PEEL_FDT_MATCH=1  natural jal fdt_match (FAIL mid-sbi_strlen cookie)
+    SOFT_FDT_MATCH=1  stub jal fdt_match (old soft)
+    PEEL_STRLEN=1 natural sbi_strlen (FAIL mepc=0x4a50 mid RVI add)
     PEEL_MALLOC=1 real malloc/zalloc/free
 
 Critical fix vs cont.16: do NOT patch 0x996 with j lottery.
@@ -110,8 +112,11 @@ def _env_peel(name: str) -> bool:
 # PEEL_CMV kept as alias for "not SOFT_CMV" for older soak scripts.
 SOFT_CMV = _env_peel("SOFT_CMV")
 PEEL_CMV = _env_peel("PEEL_CMV")  # legacy: force natural c.mv (default already)
-# Default soft-stub fdt_match jal; PEEL_FDT_MATCH=1 runs natural (cookie red).
-PEEL_FDT_MATCH = _env_peel("PEEL_FDT_MATCH")
+# Default: natural fdt_match. SOFT_FDT_MATCH=1 restores jal stub.
+SOFT_FDT_MATCH = _env_peel("SOFT_FDT_MATCH")
+PEEL_FDT_MATCH = _env_peel("PEEL_FDT_MATCH")  # legacy alias: force natural match
+# Default soft simple sbi_strlen; PEEL_STRLEN=1 restores stock (cookie red).
+PEEL_STRLEN = _env_peel("PEEL_STRLEN")
 # Default soft-stub malloc/zalloc/free (freelist DI residual on dual-hart smt2).
 PEEL_MALLOC = _env_peel("PEEL_MALLOC")
 print(
@@ -119,8 +124,8 @@ print(
     f"SOFT_SPIN={int(_env_peel('SOFT_SPIN'))} "
     f"SOFT_CMPX={int(_env_peel('SOFT_CMPX'))} "
     f"SOFT_CSR={int(_env_peel('SOFT_CSR'))} "
-    f"SOFT_CMV={int(SOFT_CMV)} PEEL_FDT_MATCH={int(PEEL_FDT_MATCH)} "
-    f"PEEL_MALLOC={int(PEEL_MALLOC)}"
+    f"SOFT_CMV={int(SOFT_CMV)} SOFT_FDT_MATCH={int(SOFT_FDT_MATCH)} "
+    f"PEEL_STRLEN={int(PEEL_STRLEN)} PEEL_MALLOC={int(PEEL_MALLOC)}"
 )
 
 
@@ -676,13 +681,87 @@ if SOFT_CMV and not PEEL_CMV:
     print("SOFT_CMV: nop c.mv a1/a0 @7312/7314")
 else:
     print("cont.19+: natural c.mv pair @7312/7314 (peeled)")
-# fdt_match_node jal @731e: soft-stub unless PEEL_FDT_MATCH (B1 FDT/strlen open).
-if not PEEL_FDT_MATCH:
+# fdt_match_node jal @731e: natural by default (iter-009). SOFT_FDT_MATCH stubs.
+if SOFT_FDT_MATCH and not PEEL_FDT_MATCH:
     struct.pack_into("<H", data, vf(segs, 0x8000731e), 0x4501)  # c.li a0,0
     struct.pack_into("<H", data, vf(segs, 0x80007320), 0x0001)  # c.nop
-    print("soft fdt_match jal @731e (c.li a0,0 + nop; PEEL_FDT_MATCH=1 to restore)")
+    print("SOFT_FDT_MATCH: stub jal fdt_match @731e (c.li a0,0 + nop)")
 else:
-    print("PEEL_FDT_MATCH: natural jal fdt_match @731e (cookie red mid-sbi_strlen)")
+    print("cont.19+: natural jal fdt_match @731e (peeled)")
+
+# sbi_strlen @4a3a: OpenSBI stock uses RVI `add a5,a4,a0` after c.addi in the
+# loop; under DI that lands mepc=0x4a50 mcause=2. Soft pointer-inc loop peels
+# fdt_match path (PEEL_FDT_MATCH+SOFT_STRLEN ret-imm green 2026-08-09).
+# PEEL_STRLEN=1 restores stock body (cookie red).
+def soft_strlen_ptr_inc(va):
+    """Correct strlen without RVI indexed add a5,a4,a0 (stock @4a4e).
+
+    All RVI for reliable patch encoding:
+      mv t0,a0; li a0,0
+    loop: lbu a5,0(t0); beqz a5,end; addi a0,a0,1; addi t0,t0,1; j loop
+    end: ret
+    """
+    def rvi_i(imm12, rs1, funct3, rd, opcode):
+        return ((imm12 & 0xFFF) << 20) | (rs1 << 15) | (funct3 << 12) | (rd << 7) | opcode
+
+    def rvi_b(imm, rs2, rs1, funct3):
+        # B-type: imm is byte offset from this insn
+        imm &= 0x1FFF
+        imm12 = (imm >> 12) & 1
+        imm10_5 = (imm >> 5) & 0x3F
+        imm4_1 = (imm >> 1) & 0xF
+        imm11 = (imm >> 11) & 1
+        return (
+            (imm12 << 31)
+            | (imm10_5 << 25)
+            | (rs2 << 20)
+            | (rs1 << 15)
+            | (funct3 << 12)
+            | (imm4_1 << 8)
+            | (imm11 << 7)
+            | 0x63
+        )
+
+    def rvi_j(imm, rd):
+        # J-type jal: imm byte offset from this insn
+        imm &= 0x1FFFFF
+        return (
+            (((imm >> 20) & 1) << 31)
+            | (((imm >> 1) & 0x3FF) << 21)
+            | (((imm >> 11) & 1) << 20)
+            | (((imm >> 12) & 0xFF) << 12)
+            | (rd << 7)
+            | 0x6F
+        )
+
+    o = vf(segs, va)
+    # 0: addi t0, a0, 0  (mv t0,a0)
+    struct.pack_into("<I", data, o + 0, rvi_i(0, A0, 0, T0, 0x13))
+    # 4: addi a0, x0, 0
+    struct.pack_into("<I", data, o + 4, rvi_i(0, 0, 0, A0, 0x13))
+    # 8: lbu a5, 0(t0)          loop
+    struct.pack_into("<I", data, o + 8, rvi_i(0, T0, 4, A5, 0x03))
+    # 12: beq a5, x0, +16 → end at +28
+    struct.pack_into("<I", data, o + 12, rvi_b(16, 0, A5, 0))
+    # 16: addi a0, a0, 1
+    struct.pack_into("<I", data, o + 16, rvi_i(1, A0, 0, A0, 0x13))
+    # 20: addi t0, t0, 1
+    struct.pack_into("<I", data, o + 20, rvi_i(1, T0, 0, T0, 0x13))
+    # 24: jal x0, -16 → back to lbu at +8
+    struct.pack_into("<I", data, o + 24, rvi_j(-16, 0))
+    # 28: jalr x0, ra, 0  (ret)
+    struct.pack_into("<I", data, o + 28, rvi_i(0, RA, 0, 0, 0x67))
+
+
+if not PEEL_STRLEN:
+    # ret-imm=11 greened PEEL_FDT_MATCH (2026-08-09). Pointer-inc RVI loop
+    # patch regressed to classic s3 poison @7316 under full natural match —
+    # keep ret-imm until strlen RTL residual fixed. "compatible" len is 11;
+    # other coldboot strlen uses are sparse with soft printf.
+    soft_ret_imm(0x80004A3A, 11)
+    print("soft sbi_strlen @4a3a ret-imm 11 (PEEL_STRLEN=1 for stock RVI loop)")
+else:
+    print("PEEL_STRLEN: natural sbi_strlen (expect mepc=0x4a50 under DI)")
 
 
 DST.write_bytes(data)
@@ -690,7 +769,7 @@ print("wrote", DST)
 print(
     "expect SI/DI: 51b1babe + BANR "
     f"(soft_malloc={int(not PEEL_MALLOC)} soft_cmv={int(SOFT_CMV)} "
-    f"soft_fdt_match={int(not PEEL_FDT_MATCH)})"
+    f"soft_fdt_match={int(SOFT_FDT_MATCH)} soft_strlen={int(not PEEL_STRLEN)})"
 )
 
 r = subprocess.run(
