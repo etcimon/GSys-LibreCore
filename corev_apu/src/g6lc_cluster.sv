@@ -49,6 +49,7 @@ module g6lc_cluster
     output logic        ai_sb_enq_valid_o,
     output logic [7:0]  ai_sb_qid_o,
     output logic [31:0] ai_sb_ticket_o,
+    output logic [CVA6Cfg.XLEN-1:0] ai_sb_desc_ptr_o,
     input  logic        ai_isl_has_completion_i,
     input  logic [31:0] ai_isl_last_ticket_i,
     input  logic [15:0] ai_isl_last_status_i
@@ -111,6 +112,7 @@ module g6lc_cluster
   logic        [NC-1:0]        core_sb_enq;
   logic        [NC-1:0][7:0]   core_sb_qid;
   logic        [NC-1:0][31:0]  core_sb_ticket;
+  logic        [NC-1:0][CVA6Cfg.XLEN-1:0] core_sb_desc_ptr;
 
   for (genvar c = 0; c < NC; c++) begin : gen_core
     ariane #(
@@ -145,6 +147,7 @@ module g6lc_cluster
         .ai_sb_enq_valid_o(core_sb_enq[c]),
         .ai_sb_qid_o      (core_sb_qid[c]),
         .ai_sb_ticket_o   (core_sb_ticket[c]),
+        .ai_sb_desc_ptr_o (core_sb_desc_ptr[c]),
         // Broadcast island completion to every core for ai.poll
         .ai_isl_has_completion_i(ai_isl_has_completion_i),
         .ai_isl_last_ticket_i   (ai_isl_last_ticket_i),
@@ -170,6 +173,7 @@ module g6lc_cluster
   assign ai_sb_enq_valid_o = core_sb_enq[0];
   assign ai_sb_qid_o       = core_sb_qid[0];
   assign ai_sb_ticket_o    = core_sb_ticket[0];
+  assign ai_sb_desc_ptr_o  = core_sb_desc_ptr[0];
 
   // --------------------
   // Coherence hub

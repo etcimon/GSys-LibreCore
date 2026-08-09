@@ -45,10 +45,12 @@ module g6lc_ai_exec
     output logic                  dirty_o,
     // Stall new issue while multi-cycle MMA is in flight
     output logic                  busy_o,
-    // Sideband kick to island (ai.enq) — uses latched MMIO descriptor
+    // Sideband kick to island (ai.enq): ticket/qid + optional desc ptr (rs1).
+    // Non-zero ptr ⇒ island DMA-fetch 64 B then run; zero ⇒ latched MMIO desc.
     output logic                  sb_enq_valid_o,
     output logic [7:0]            sb_qid_o,
     output logic [31:0]           sb_ticket_o,
+    output logic [XLEN-1:0]       sb_desc_ptr_o,
     // PMU pulses (1-cycle, group 4 — see ariane_pkg MHPMGrpAI)
     output logic                  pmu_op_o,      // any result_valid
     output logic                  pmu_mma_o,     // MMA done
@@ -220,10 +222,12 @@ module g6lc_ai_exec
   logic        sb_enq_n, sb_enq_q;
   logic [7:0]  sb_qid_n, sb_qid_q;
   logic [31:0] sb_ticket_n, sb_ticket_q;
+  logic [XLEN-1:0] sb_desc_ptr_n, sb_desc_ptr_q;
 
   assign sb_enq_valid_o = sb_enq_q;
   assign sb_qid_o       = sb_qid_q;
   assign sb_ticket_o    = sb_ticket_q;
+  assign sb_desc_ptr_o  = sb_desc_ptr_q;
 
   // Decode indices from the instruction word (tile/acc are not RF regs)
   logic [4:0] idx_rs1, idx_rs2, idx_rd;
@@ -316,6 +320,7 @@ module g6lc_ai_exec
     sb_enq_n       = 1'b0;
     sb_qid_n       = ai_qid_i;
     sb_ticket_n    = ticket_q;
+    sb_desc_ptr_n  = sb_desc_ptr_q;
 
     result_n       = '0;
     hartid_n       = hartid_i;
@@ -477,14 +482,15 @@ module g6lc_ai_exec
             end
             AI_ENQ: begin
               // Return ticket or all-ones if queue disabled. Sideband kick
-              // notifies the island (descriptor must already be latched via MMIO
-              // until DMA load lands). Does not block on full.
+              // carries rs1 as optional desc ptr (0 ⇒ use MMIO-latched desc).
+              // Does not block on full.
               if (ai_q_en_i) begin
-                result_n      = XLEN'(ticket_q);
-                sb_enq_n      = 1'b1;
-                sb_qid_n      = ai_qid_i;
-                sb_ticket_n   = ticket_q;
-                ticket_d      = ticket_q + 32'd1;
+                result_n       = XLEN'(ticket_q);
+                sb_enq_n       = 1'b1;
+                sb_qid_n       = ai_qid_i;
+                sb_ticket_n    = ticket_q;
+                sb_desc_ptr_n  = registers_i[0];
+                ticket_d       = ticket_q + 32'd1;
               end else begin
                 result_n = {XLEN{1'b1}};
               end
@@ -695,6 +701,7 @@ module g6lc_ai_exec
       sb_enq_q       <= 1'b0;
       sb_qid_q       <= '0;
       sb_ticket_q    <= '0;
+      sb_desc_ptr_q  <= '0;
       state_q        <= ST_IDLE;
       mma_acc_q      <= '0;
       mma_ta_q       <= '0;
@@ -731,6 +738,7 @@ module g6lc_ai_exec
       sb_enq_q       <= sb_enq_n;
       sb_qid_q       <= sb_qid_n;
       sb_ticket_q    <= sb_ticket_n;
+      sb_desc_ptr_q  <= sb_desc_ptr_n;
       state_q        <= state_d;
       mma_acc_q      <= mma_acc_d;
       mma_ta_q       <= mma_ta_d;

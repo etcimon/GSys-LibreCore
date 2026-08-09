@@ -48,6 +48,7 @@ module g6lc_ai_coprocessor
     output logic            sb_enq_valid_o,
     output logic [7:0]      sb_qid_o,
     output logic [31:0]     sb_ticket_o,
+    output logic [XLEN-1:0] sb_desc_ptr_o,
     // DFT
     input  logic            testmode_i,
     // PMU group-4 probes (pulse/level → perf_counters)
@@ -182,6 +183,7 @@ module g6lc_ai_coprocessor
       .sb_enq_valid_o(sb_enq_valid_o),
       .sb_qid_o      (sb_qid_o),
       .sb_ticket_o   (sb_ticket_o),
+      .sb_desc_ptr_o (sb_desc_ptr_o),
       .pmu_op_o      (ai_pmu_op_o),
       .pmu_mma_o     (ai_pmu_mma_o),
       .pmu_post_o    (ai_pmu_post_o),

@@ -102,6 +102,7 @@ module ariane import ariane_pkg::*; #(
   output logic                         ai_sb_enq_valid_o,
   output logic [7:0]                   ai_sb_qid_o,
   output logic [31:0]                  ai_sb_ticket_o,
+  output logic [CVA6Cfg.XLEN-1:0]      ai_sb_desc_ptr_o,
   input  logic                         ai_isl_has_completion_i,
   input  logic [31:0]                  ai_isl_last_ticket_i,
   input  logic [15:0]                  ai_isl_last_status_i
@@ -126,6 +127,7 @@ module ariane import ariane_pkg::*; #(
     logic                    ai_sb_enq;
     logic [7:0]              ai_sb_qid;
     logic [31:0]             ai_sb_ticket;
+    logic [CVA6Cfg.XLEN-1:0] ai_sb_desc_ptr;
 
     cva6 #(
       .CVA6Cfg ( CVA6Cfg ),
@@ -201,6 +203,7 @@ module ariane import ariane_pkg::*; #(
         assign ai_sb_enq       = 1'b0;
         assign ai_sb_qid       = '0;
         assign ai_sb_ticket    = '0;
+        assign ai_sb_desc_ptr  = '0;
         cvxif_example_coprocessor #(
           .NrRgprPorts (CVA6Cfg.NrRgprPorts),
           .XLEN (CVA6Cfg.XLEN),
@@ -261,6 +264,7 @@ module ariane import ariane_pkg::*; #(
           .sb_enq_valid_o       ( ai_sb_enq                      ),
           .sb_qid_o             ( ai_sb_qid                      ),
           .sb_ticket_o          ( ai_sb_ticket                   ),
+          .sb_desc_ptr_o        ( ai_sb_desc_ptr                 ),
           .testmode_i           ( 1'b0                           ),
           .ai_pmu_op_o          ( ai_pmu_op                      ),
           .ai_pmu_mma_o         ( ai_pmu_mma                     ),
@@ -280,6 +284,7 @@ module ariane import ariane_pkg::*; #(
         assign ai_sb_enq       = 1'b0;
         assign ai_sb_qid       = '0;
         assign ai_sb_ticket    = '0;
+        assign ai_sb_desc_ptr  = '0;
         assign cvxif_resp = '{compressed_ready: 1'b1, issue_ready: 1'b1, register_ready: 1'b1, default: '0};
       end
     end else begin: gen_no_cvxif
@@ -294,12 +299,14 @@ module ariane import ariane_pkg::*; #(
       assign ai_sb_enq       = 1'b0;
       assign ai_sb_qid       = '0;
       assign ai_sb_ticket    = '0;
+      assign ai_sb_desc_ptr  = '0;
       assign cvxif_resp = '0;
     end
 
     assign ai_sb_enq_valid_o = ai_sb_enq;
     assign ai_sb_qid_o       = ai_sb_qid;
     assign ai_sb_ticket_o    = ai_sb_ticket;
+    assign ai_sb_desc_ptr_o  = ai_sb_desc_ptr;
 
   //////////////////////////////////////////////////////////////////////////////
   // U10ᵇ RVV / accelerator path (mutually exclusive with CvxifEn)
@@ -490,6 +497,7 @@ module ariane import ariane_pkg::*; #(
     assign ai_sb_enq_valid_o = 1'b0;
     assign ai_sb_qid_o       = '0;
     assign ai_sb_ticket_o    = '0;
+    assign ai_sb_desc_ptr_o  = '0;
 
   end // gen_acc
 

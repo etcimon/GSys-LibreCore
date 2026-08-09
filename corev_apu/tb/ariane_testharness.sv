@@ -395,6 +395,7 @@ module ariane_testharness #(
   logic        ai_sb_enq;
   logic [7:0]  ai_sb_qid;
   logic [31:0] ai_sb_ticket;
+  logic [CVA6Cfg.XLEN-1:0] ai_sb_desc_ptr;
   logic [31:0] ai_isl_last_ticket;
   logic [15:0] ai_isl_last_status;
   logic        ai_isl_has_completion;
@@ -492,6 +493,7 @@ module ariane_testharness #(
         .sb_enq_valid_i      ( ai_sb_enq              ),
         .sb_qid_i            ( ai_sb_qid              ),
         .sb_ticket_i         ( ai_sb_ticket           ),
+        .sb_desc_ptr_i       ( ai_sb_desc_ptr         ),
         .sb_last_ticket_o    ( ai_isl_last_ticket     ),
         .sb_last_status_o    ( ai_isl_last_status     ),
         .sb_has_completion_o ( ai_isl_has_completion  ),
@@ -828,6 +830,7 @@ module ariane_testharness #(
     .ai_sb_enq_valid_o( ai_sb_enq         ),
     .ai_sb_qid_o      ( ai_sb_qid         ),
     .ai_sb_ticket_o   ( ai_sb_ticket      ),
+    .ai_sb_desc_ptr_o ( ai_sb_desc_ptr    ),
     .ai_isl_has_completion_i( ai_isl_has_completion ),
     .ai_isl_last_ticket_i   ( ai_isl_last_ticket    ),
     .ai_isl_last_status_i   ( ai_isl_last_status    )
