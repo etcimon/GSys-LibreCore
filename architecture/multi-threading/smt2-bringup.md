@@ -2671,7 +2671,11 @@ Binary cont.33–51 peels are inventoried for **promotion out of ELF patching**:
 - Map / iteration: `soft-ladder/README.md`, `soft-ladder/inventory.yaml`, `soft-ladder/ITERATION.md`
 - Buckets: **B1** RTL DI residuals, **B2** OpenSBI/platform policy, **B3** sim harness only
 - Order: B1 first → B3 SUCCESS definition → B2 source profile → retire `tmp-dual-ci/mk_plat_skip.py`
-- RTL landed (E:\cva6): soft-ladder docs; AMO cancel; LR/SC pair; CSR unresolved stall (iter-004…006)
+- **Gates:** `verif/regress/soft-ladder-di-regress.sh` (step1); `soft-ladder-opensbi-soak.sh` (cookie)
+- **Default soft ELF (2026-08-08 cookie green on work-ver-smt2):** natural spins + natural
+  LR/SC cmpx + natural CSR probes; **soft malloc**; **c.mv nops** (PEEL_CMV still red);
+  soft printf / domain cut / switch_mode success cave remain
+- Bisect: `SOFT_SPIN` / `SOFT_CMPX` / `SOFT_CSR` / `PEEL_MALLOC` / `PEEL_CMV`
 
 Do not add new hard-coded VAs without an inventory id.
 

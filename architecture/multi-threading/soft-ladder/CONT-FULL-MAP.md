@@ -126,10 +126,12 @@ Checklist:
 ```text
 [x] step1 soft-ladder-di-regress (4 minis) under work-ver-smt2 — PASS 4/4
 [x] step2 cookie baseline (soft malloc + natural spins/cmpx/CSR) — PASS 51b1babe
+     (confirmed final default soak: /tmp/.../veri_20260808-232820.log)
 [x] PEEL_SPIN / natural spins → cookie green (default)
 [x] PEEL_CMPX / natural LRSC → cookie green (default)
 [x] PEEL_CSR / natural CSR probes → cookie green (default)
-[!] PEEL_CMV → FAIL (mepc=0x4a50 mcause=2); keep c.mv nops
+[!] PEEL_CMV → FAIL plat_hc=80 mepc≈0x80004a50 mcause=2 (mid sbi_strlen);
+    bare mini_dual_cmv_s3 PASS — keep c.mv nops default
 [ ] PEEL_MALLOC → real freelist (b1-heap-freelist-malloc)
 [ ] real sbi_printf (FDT lenp)
 [ ] domain full walk; switch_mode payload

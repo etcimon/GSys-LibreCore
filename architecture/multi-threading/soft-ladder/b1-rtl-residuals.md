@@ -55,14 +55,17 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Note | Multiple store sites (12eb2, 13128, …); root is pointer integrity under DI |
 | Retire criterion | Real `sbi_printf` / FDT walk green |
 
-### Dual `c.mv` (priority 3)
+### Dual `c.mv` (priority 3 — **active iter-008**)
 
 | Item | Detail |
 |------|--------|
-| Soft evidence | Nop pair in platform_override modules loop |
-| Fail pin | `s3` clobber under DI |
-| Primary RTL | Dual-issue of two compressed moves; scoreboard/RF write port |
-| Retire criterion | Natural `c.mv` pair restored |
+| Soft evidence | Nop pair in platform_override modules loop @7312/7314 |
+| Fail pin (historic) | `s3` clobber → `ld a2,0(s3)` poison at 7316 |
+| Fail pin (OpenSBI PEEL_CMV 2026-08-08) | Early fail `plat_hc=80`, `mepc≈0x80004a50` mcause=2 **mid-`sbi_strlen`** (PC into middle of `add` @4a4e) — CF/poison class, not only 7316 |
+| Bare directed | `mini_dual_cmv_s3.S` **PASS** on work-ver-smt2 (SS serialize enough for simple case) |
+| Primary RTL | Scoreboard/RF dual-commit vs in-flight LOAD; wrong-path LOAD (cont.5 no cancel); compressed dual-issue |
+| Negative | Dual-commit LOAD/ALU serialize (cont.19b); full load-WB drain (cont.20) |
+| Retire criterion | `PEEL_CMV=1` cookie green; nops removed |
 
 ## Already landed in RTL (do not re-patch via monorepo-soak scripts)
 
@@ -73,6 +76,10 @@ Promotion order among B1 (from `inventory.yaml` priority):
 | Hang-7 younger cancel (skip LOAD cancel) | `scoreboard.sv` | CF fallthrough recovery |
 | Unresolved CF issue stall (per-hart) | `issue_stage.sv` | Blocks issue past unresolved CTRL_FLOW |
 | AMOCAS.Q dual_we path | commit/issue/hpdcache/ariane_pkg | Zacas feature (not soft-ladder spin) |
+| AMO buffer cancel + AMO port0 | amo_buffer / store_unit / issue | SA spins peelable |
+| No flush after LR; LR→SC store barrier | commit / issue_read_operands | cmpxchg LR/SC peelable |
+| Unresolved CSR issue stall | issue_stage | CSR probe tail peelable |
+| Soft malloc/zalloc/free (B2/B1 bridge) | mk_plat_skip only | Cookie green until freelist RTL |
 
 ## Iteration rule for B1
 

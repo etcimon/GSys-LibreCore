@@ -3,28 +3,36 @@
 Append-only. One **primary** residual (or tightly coupled pair) per iteration.
 Template at bottom.
 
-**Active:** `iter-007` (ordered-path integration: soak gate + peel flags).
+**Active:** `iter-008` (dual-c.mv OpenSBI residual after cookie-green default).
 
 ---
 
 ## Active iteration
 
-### iter-007 — Ordered path integration (step1 gate + step2 peel env)
+### iter-008 — Dual-c.mv OpenSBI residual (post cookie-green peels)
 
 | Field | Value |
 |-------|--------|
 | **Started** | 2026-08-08 |
-| **Bucket** | B1 + B3 |
-| **Primary ids** | all in_progress B1; `b3-mk-plat-skip-oracle` |
-| **Hypothesis** | Landed RTL needs a single soak command and optional OpenSBI peels without hand-editing VAs |
-| **I3 Fix** | `soft-ladder-di-regress.sh`; dual-iss `SOFT_LADDER=1`; `mk_plat_skip` `PEEL_SPIN/CMPX/CSR/CMV` |
-| **I4 Verify** | soft malloc restores cookie; SPIN/CMPX/CSR peeled green; CMV fail |
-| **I5 Retire** | spin/cmpx/csr nops removed from default mk_plat_skip |
-| **I6 Next** | PEEL_MALLOC freelist RTL; dual-c.mv OpenSBI; FDT printf |
+| **Bucket** | B1 |
+| **Primary ids** | `b1-dual-cmv-s3` |
+| **Hypothesis** | Bare `mini_dual_cmv_s3` green under SS serialize; OpenSBI `PEEL_CMV` fails early (`plat_hc=80`) with `mepc≈0x80004a50` mcause=2 mid-`sbi_strlen` — control-flow/pointer poison from dual-c.mv window, not only `ld a2,0(s3)` at 7316 |
+| **I2 Repro** | `PEEL_CMV=1 bash verif/regress/soft-ladder-opensbi-soak.sh` → no 51b1babe |
+| **I3 Fix** | TBD: selective recovery around LOAD→consumer vs dual RF; keep nops default |
+| **I4 Verify** | default cookie still green; PEEL_CMV only when fixed |
+| **I6 Next** | PEEL_MALLOC freelist RTL in parallel |
 
 ---
 
 ## Completed iterations
+
+### iter-007 — Ordered path integration + freelist soft + peels
+
+| Field | Value |
+|-------|--------|
+| **Completed** | 2026-08-08 |
+| **Result** | step1 4/4; soft malloc restores cookie; SPIN/CMPX/CSR peeled default; **final default soak cookie 51b1babe** on work-ver-smt2 (`veri_20260808-232820.log`); PEEL_CMV fail; commits through `263dc41a5` |
+| **Next** | iter-008 dual-c.mv OpenSBI |
 
 ### iter-006 — Full cont.## map + CSR expected-trap issue stall
 
@@ -82,15 +90,15 @@ See also `CONT-FULL-MAP.md` for cont.## disposition.
 
 | Order | id | Bucket | Note |
 |------:|----|--------|------|
-| 1 | `b1-amo-spin-lock` | B1 | in_progress — peel after DI soak |
-| 2 | `b1-lrsc-cmpxchg` | B1 | in_progress — peel soft cmpx after soak |
-| 3 | `b1-csr-expected-trap` | B1 | in_progress — peel CSR cut after soak |
-| 4 | `b1-fdt-lenp-store` | B1 | Real printf / hang-6 family |
-| 5 | `b1-dual-cmv-s3` | B1 | Platform override natural; test scaffold |
-| 6 | `b3-success-hang-cookies` | B3 | Stabilize SUCCESS definition for gates |
-| 7 | `b2-domain-finalize-cut` | B2 | After ecall poison understood / B1 stable |
+| 1 | `b1-heap-freelist-malloc` | B1 | soft malloc default; PEEL_MALLOC still red |
+| 2 | `b1-dual-cmv-s3` | B1 | **active** — OpenSBI PEEL_CMV fail; bare mini green |
+| 3 | `b1-fdt-lenp-store` | B1 | Real printf / hang-6 family |
+| 4 | `b1-amo-spin-lock` | B1 | **rtl-fixed** (natural spins default) |
+| 5 | `b1-lrsc-cmpxchg` | B1 | **rtl-fixed** (natural LR/SC default) |
+| 6 | `b1-csr-expected-trap` | B1 | **rtl-fixed** (natural CSR probes default) |
+| 7 | `b2-domain-finalize-cut` | B2 | Domain cut / ecall multi-iter |
 | 8 | `b2-switch-mode-payload` | B2 | Linux handoff |
-| 9 | `b3-mk-plat-skip-oracle` | B3 | Retire when empty |
+| 9 | `b3-mk-plat-skip-oracle` | B3 | Shrink; not empty yet |
 
 ---
 
