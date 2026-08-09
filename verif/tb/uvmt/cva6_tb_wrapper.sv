@@ -120,6 +120,8 @@ module cva6_tb_wrapper import uvmt_cva6_pkg::*; #(
     .cvxif_resp_i         ( cvxif_resp                   ),
     .ai_aicfg_o           ( /* unused */                 ),
     .ai_ais_o             ( /* unused */                 ),
+    .ai_issue_ok_o        ( /* unused */                 ),
+    .ai_q_en_o            ( /* unused */                 ),
     .dirty_ai_state_i     ( 1'b0                         ),
     .ai_setcfg_we_i       ( 1'b0                         ),
     .ai_setcfg_wdata_i    ( '0                           ),

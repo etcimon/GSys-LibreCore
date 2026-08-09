@@ -192,6 +192,11 @@ module csr_regfile
     // aicfg / ais are owned here; the coprocessor reads them and may write setcfg / dirty.
     output logic [CVA6Cfg.XLEN-1:0] ai_aicfg_o,
     output logic [1:0]              ai_ais_o,
+    // Privilege / policy gate for AI issue (isa-encoding.md §6 aiperm).
+    // M always allowed; S/U/VS use aiperm[1]/0]/2]. Zero when MatrixEn=0.
+    output logic                    ai_issue_ok_o,
+    // T2 queue enable (aiqctl[0]); enq returns all-ones when clear.
+    output logic                    ai_q_en_o,
     input  logic                    dirty_ai_state_i,
     input  logic                    ai_setcfg_we_i,
     input  logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata_i,
@@ -3182,6 +3187,20 @@ module csr_regfile
   // Xg6lcai sideband to CVXIF coprocessor
   assign ai_aicfg_o = CVA6Cfg.AiCfg.MatrixEn ? aicfg_q : '0;
   assign ai_ais_o   = CVA6Cfg.AiCfg.MatrixEn ? aistatus_q[7:6] : 2'b00;
+  assign ai_q_en_o  = CVA6Cfg.AiCfg.MatrixEn && (CVA6Cfg.AiCfg.Queues != 0) && aiqctl_q[0];
+
+  // aiperm privilege gate (isa-encoding.md §4/§6). Machine always issues.
+  always_comb begin
+    ai_issue_ok_o = 1'b0;
+    if (CVA6Cfg.AiCfg.MatrixEn) begin
+      unique case (priv_lvl_q)
+        riscv::PRIV_LVL_M: ai_issue_ok_o = 1'b1;
+        riscv::PRIV_LVL_S: ai_issue_ok_o = v_q ? aiperm_q[2] : aiperm_q[1];
+        riscv::PRIV_LVL_U: ai_issue_ok_o = aiperm_q[0];
+        default:           ai_issue_ok_o = 1'b0;
+      endcase
+    end
+  end
 
   // determine if mprv needs to be considered if in debug mode
   assign mprv = (CVA6Cfg.DebugEn && debug_mode_q && !dcsr_q.mprven) ? 1'b0 : mstatus_q.mprv;

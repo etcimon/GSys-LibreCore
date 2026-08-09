@@ -25,6 +25,9 @@ module g6lc_ai_acc_bank #(
 ) (
     input  logic                 clk_i,
     input  logic                 rst_ni,
+    // DFT: reserved for MBIST/ATPG mux at the PDK-mapped macro; unused on
+    // the behavioural tc_sram but keeps the scan seam threaded (AGENTS.md §0.2).
+    input  logic                 testmode_i,
     // Read port (always combo when Latency=0)
     input  logic                 r_req_i,
     input  logic [AccAddrW-1:0]  r_acc_i,
@@ -78,10 +81,9 @@ module g6lc_ai_acc_bank #(
       .rdata_o(rdata)
   );
 
-  // Silence unused when AccCount==1 and AddrWidth folds
   // verilator lint_off UNUSEDSIGNAL
-  logic _rst_touch;
-  assign _rst_touch = rst_ni;
+  logic _dft_touch;
+  assign _dft_touch = testmode_i | rst_ni;
   // verilator lint_on UNUSEDSIGNAL
 
 endmodule

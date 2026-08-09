@@ -24,3 +24,9 @@ testlist:
   - test: ai_pmu_group4_smoke
     description: PMU group-4 AI op/T0/MMA events via mhpmcounter3-5
     path: custom/ai/ai_pmu_group4_smoke.S
+  - test: ai_queue_doorbell
+    description: T0 enq/poll/qfence + aiqctl enable stub
+    path: custom/ai/ai_queue_doorbell.S
+  - test: ai_aiperm_umode
+    description: aiperm[0] gates U-mode AI issue
+    path: custom/ai/ai_aiperm_umode.S

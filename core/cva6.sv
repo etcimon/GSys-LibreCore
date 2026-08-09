@@ -374,6 +374,8 @@ module cva6
     // Xg6lcai AI CSR sideband for the CVXIF coprocessor (tie inputs 0 when unused)
     output logic [CVA6Cfg.XLEN-1:0] ai_aicfg_o,
     output logic [1:0]              ai_ais_o,
+    output logic                    ai_issue_ok_o,
+    output logic                    ai_q_en_o,
     input  logic                    dirty_ai_state_i,
     input  logic                    ai_setcfg_we_i,
     input  logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata_i,
@@ -1557,6 +1559,8 @@ module cva6
       .acc_cons_en_o           (acc_cons_en_csr),
       .ai_aicfg_o              (ai_aicfg_o),
       .ai_ais_o                (ai_ais_o),
+      .ai_issue_ok_o           (ai_issue_ok_o),
+      .ai_q_en_o               (ai_q_en_o),
       .dirty_ai_state_i        (dirty_ai_state_i),
       .ai_setcfg_we_i          (ai_setcfg_we_i),
       .ai_setcfg_wdata_i       (ai_setcfg_wdata_i),

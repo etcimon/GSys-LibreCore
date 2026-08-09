@@ -313,7 +313,8 @@ that depended on the carve-out.
 |---|---|---|
 | **P0** | this scaffold + `isa-encoding.md` + `../uncore/pcie-endpoint.md` + licensing surface + todo rows | docs only, no flist |
 | **P1** | option **B**: `AiMatrixEn`, T0/T1 `ai.mma.s8` + `ai.requant` behind `COPRO_G6LC_AI`; `g6lc64_ai` package; directed tests | **Landed** — `ai-matrix-veri` green on `work-ver-ai` |
-| **P2** | PMU events, RVFI probes, DFT threading, accumulator `tc_sram` | **Partial:** PMU group 4 + RVFI aicfg/aistatus + **acc bank on `tc_sram`** (`g6lc_ai_acc_bank.sv`). Still open: DFT/MBIST hooks, FO4 note |
+| **P2** | PMU events, RVFI probes, DFT threading, accumulator `tc_sram` | **Mostly landed:** PMU group 4 + RVFI + acc `tc_sram` + **aiperm gate** + queue T0 stubs + `testmode_i` threaded to acc bank. Still open: MBIST macro bind, FO4 note |
+| **P3** | T2 descriptor engine in `corev_apu/ai_island/` | **Scaffold:** `g6lc_ai_island_cfg_pkg.sv` + `ai_island/README.md` (not on flist). Engine + address-check (AI-3) not started |
 | **P3** | T2 descriptor engine in `corev_apu/` + address-check + IRQ + `corev_apu/tb` model | formal ring safety + DMA-reject test |
 | **P4** | option **D**: decouple `EnableAccelerator`, real first-pass decoder, resolve `cva6.sv:2216` | RVV compliance stays green |
 | **P5** | PCIe EP + virtio + host driver + IPv6 plane + sshd on card | host enumeration on FPGA |

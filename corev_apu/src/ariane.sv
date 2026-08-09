@@ -110,6 +110,7 @@ module ariane import ariane_pkg::*; #(
     // Xg6lcai CSR sideband + PMU probes (csr_regfile / perf_counters ↔ AI copro)
     logic [CVA6Cfg.XLEN-1:0] ai_aicfg;
     logic [1:0]              ai_ais;
+    logic                    ai_issue_ok, ai_q_en;
     logic                    dirty_ai_state;
     logic                    ai_setcfg_we;
     logic [CVA6Cfg.XLEN-1:0] ai_setcfg_wdata;
@@ -153,6 +154,8 @@ module ariane import ariane_pkg::*; #(
       .cvxif_resp_i         ( cvxif_resp                ),
       .ai_aicfg_o           ( ai_aicfg                  ),
       .ai_ais_o             ( ai_ais                    ),
+      .ai_issue_ok_o        ( ai_issue_ok               ),
+      .ai_q_en_o            ( ai_q_en                   ),
       .dirty_ai_state_i     ( dirty_ai_state            ),
       .ai_setcfg_we_i       ( ai_setcfg_we              ),
       .ai_setcfg_wdata_i    ( ai_setcfg_wdata           ),
@@ -231,9 +234,12 @@ module ariane import ariane_pkg::*; #(
           .cvxif_resp_o         ( cvxif_resp                     ),
           .aicfg_i              ( ai_aicfg                       ),
           .ais_i                ( ai_ais                         ),
+          .ai_issue_ok_i        ( ai_issue_ok                    ),
+          .ai_q_en_i            ( ai_q_en                        ),
           .dirty_ai_state_o     ( dirty_ai_state                 ),
           .ai_setcfg_we_o       ( ai_setcfg_we                   ),
           .ai_setcfg_wdata_o    ( ai_setcfg_wdata                ),
+          .testmode_i           ( 1'b0                           ),
           .ai_pmu_op_o          ( ai_pmu_op                      ),
           .ai_pmu_mma_o         ( ai_pmu_mma                     ),
           .ai_pmu_post_o        ( ai_pmu_post                    ),
@@ -340,6 +346,8 @@ module ariane import ariane_pkg::*; #(
       // AI plane is CVXIF-only (seam B); RVV/acc path leaves sideband idle
       .ai_aicfg_o           ( /* unused */              ),
       .ai_ais_o             ( /* unused */              ),
+      .ai_issue_ok_o        ( /* unused */              ),
+      .ai_q_en_o            ( /* unused */              ),
       .dirty_ai_state_i     ( 1'b0                      ),
       .ai_setcfg_we_i       ( 1'b0                      ),
       .ai_setcfg_wdata_i    ( '0                        ),

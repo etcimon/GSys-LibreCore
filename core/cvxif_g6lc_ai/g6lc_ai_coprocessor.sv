@@ -34,9 +34,13 @@ module g6lc_ai_coprocessor
     // CSR sideband (csr_regfile via cva6 / ariane)
     input  logic [XLEN-1:0] aicfg_i,
     input  logic [1:0]      ais_i,
+    input  logic            ai_issue_ok_i,  // aiperm × privilege
+    input  logic            ai_q_en_i,      // aiqctl[0]
     output logic            dirty_ai_state_o,
     output logic            ai_setcfg_we_o,
     output logic [XLEN-1:0] ai_setcfg_wdata_o,
+    // DFT: bypass functional clock-gating when scan/ATPG is active
+    input  logic            testmode_i,
     // PMU group-4 probes (pulse/level → perf_counters)
     output logic            ai_pmu_op_o,
     output logic            ai_pmu_mma_o,
@@ -97,10 +101,11 @@ module g6lc_ai_coprocessor
       .rd_o            (issue_rd)
   );
 
-  // Config-group gates + ais==Off (isa-encoding.md §5/§6)
+  // Config-group gates + ais==Off + aiperm (isa-encoding.md §5/§6)
   always_comb begin
     gate_ok = 1'b1;
     if (ais_i == AiOff) gate_ok = 1'b0;
+    if (!ai_issue_ok_i) gate_ok = 1'b0;
     if (is_requant_group(opcode_raw) && !AiCfg.RequantEn) gate_ok = 1'b0;
     if (is_sparse_group(opcode_raw) && !AiCfg.SparseEn) gate_ok = 1'b0;
     if (is_queue_group(opcode_raw) && (AiCfg.Queues == 0)) gate_ok = 1'b0;
@@ -155,6 +160,8 @@ module g6lc_ai_coprocessor
       .rd_i          (issue_rd),
       .aicfg_i       (aicfg_i),
       .ais_i         (ais_i),
+      .ai_q_en_i     (ai_q_en_i),
+      .testmode_i    (testmode_i),
       .setcfg_we_o   (ai_setcfg_we_o),
       .setcfg_wdata_o(ai_setcfg_wdata_o),
       .dirty_o       (dirty_ai_state_o),

@@ -33,6 +33,8 @@ module g6lc_ai_exec
     // CSR sideband
     input  logic       [XLEN-1:0] aicfg_i,
     input  logic       [     1:0] ais_i,
+    input  logic                  ai_q_en_i,   // aiqctl[0] — enq enable
+    input  logic                  testmode_i,  // DFT: keep multi-cycle unit ungated
     output logic                  setcfg_we_o,
     output logic       [XLEN-1:0] setcfg_wdata_o,
     output logic                  dirty_o,
@@ -143,15 +145,16 @@ module g6lc_ai_exec
       .AccCount(AccCount),
       .AccElems(AccElems)
   ) i_acc_bank (
-      .clk_i   (clk_i),
-      .rst_ni  (rst_ni),
-      .r_req_i (acc_r_req),
-      .r_acc_i (acc_r_acc),
-      .r_data_o(acc_r_data),
-      .w_req_i (acc_w_req),
-      .w_acc_i (acc_w_acc),
-      .w_data_i(acc_w_data),
-      .w_be_i  (acc_w_be)
+      .clk_i     (clk_i),
+      .rst_ni    (rst_ni),
+      .testmode_i(testmode_i),
+      .r_req_i   (acc_r_req),
+      .r_acc_i   (acc_r_acc),
+      .r_data_o  (acc_r_data),
+      .w_req_i   (acc_w_req),
+      .w_acc_i   (acc_w_acc),
+      .w_data_i  (acc_w_data),
+      .w_be_i    (acc_w_be)
   );
 
   // Element extract / byte-enable helpers for the wide bank word
@@ -437,19 +440,32 @@ module g6lc_ai_exec
               state_d       = ST_RELU;  // gelu path distinguished by mma_op_q
             end
             AI_ENQ: begin
-              result_n = XLEN'(ticket_q);
-              ticket_d = ticket_q + 32'd1;
+              // Instant-complete stub until P3 descriptor engine: return ticket
+              // or all-ones if queue disabled (aiqctl[0]=0). Does not block.
+              if (ai_q_en_i) begin
+                result_n = XLEN'(ticket_q);
+                ticket_d = ticket_q + 32'd1;
+              end else begin
+                result_n = {XLEN{1'b1}};
+              end
               we_n     = 1'b1;
               valid_n  = 1'b1;
               pmu_t0_n = 1'b1;
             end
             AI_POLL: begin
-              result_n = XLEN'(32'd1);
+              // Stub: tickets already issued are complete (status=1); unknown
+              // future tickets stay pending (0). Error=2 reserved for P3.
+              if (ai_q_en_i && (registers_i[0][31:0] < ticket_q))
+                result_n = XLEN'(32'd1);
+              else
+                result_n = XLEN'(32'd0);
               we_n     = 1'b1;
               valid_n  = 1'b1;
               pmu_t0_n = 1'b1;
             end
             AI_QFENCE: begin
+              // Release/acquire ordering fence for prior enqueues — T0 no-op
+              // until the P3 engine owns memory ordering.
               valid_n  = 1'b1;
               pmu_t0_n = 1'b1;
             end
