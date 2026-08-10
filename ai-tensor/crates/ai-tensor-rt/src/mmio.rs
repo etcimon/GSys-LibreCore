@@ -10,7 +10,7 @@
 
 use crate::{Caps, Device, Region, RtError};
 use ai_tensor_abi::{
-    mmio, CapRegs, Completion, Desc64, PmuSnapshot, ST_BAD_OP, ST_BAD_PTR, ST_BAD_VER,
+    mmio, CapRegs, Completion, Desc64, PmuSnapshot, ST_BAD_OP, ST_BAD_PTR, ST_BAD_QID, ST_BAD_VER,
     ST_DISABLED, ST_OK, ST_ERR, CONTRACT_VERSION, DESC_BYTES, OP_GEMM,
 };
 
@@ -186,6 +186,13 @@ impl SoftIsland {
 
         if !self.enable {
             self.complete(ticket, ST_DISABLED, false);
+            return;
+        }
+        // Island map: region windows 0x0120+q*0x20 collide with desc @0x0140 for q≥1
+        // when Queues=1 (live CAP). Reject foreign qids early.
+        let nq = self.cap.queues.max(1) as u8;
+        if qid >= nq {
+            self.complete(ticket, ST_BAD_QID, false);
             return;
         }
         if d.version != CONTRACT_VERSION {
@@ -475,6 +482,11 @@ impl Device for MmioDevice {
         if qid as usize >= NUM_QUEUES {
             return Err(RtError::BadPtr("qid"));
         }
+        // Live map: only q0 fits before desc latch @0x0140 (Queues=1).
+        let nq = self.cached_caps.queues.max(1);
+        if u32::from(qid) >= nq {
+            return Err(RtError::BadPtr("qid exceeds CAP.queues / MMIO map"));
+        }
         let base_off = mmio::REG0 + u16::from(qid) * 0x20;
         self.island
             .write32(base_off, region.base as u32);
@@ -569,6 +581,12 @@ impl Device for MmioDevice {
 
     fn irq_pending(&self) -> bool {
         self.island.irq_sticky
+    }
+
+    fn claim_done(&mut self) -> Result<(), RtError> {
+        // Clear DONE sticky + IRQ (same as poll-after-claim)
+        self.island.write32(mmio::DONE, 1);
+        Ok(())
     }
 
     fn wait(&mut self, ticket: u32) -> Result<Completion, RtError> {

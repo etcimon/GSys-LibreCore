@@ -4,7 +4,8 @@
 use ai_tensor_abi::{Completion, Desc64, DESC_BYTES};
 use ai_tensor_rt::{
     probe_cap_regs, run_builtin_suite, run_external_cosim_checks, run_gemm_s8, run_gemm_s8_auto,
-    run_gemm_s8_stream, seed_cap_island_p3, Device, MappedWindow, MmioDevice, Profile, SimDevice,
+    run_gemm_s8_stream, seed_cap_island_p3, soak_multi_queue, Device, MappedWindow, MmioDevice,
+    Profile, SimDevice,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -89,6 +90,11 @@ enum Cmd {
         k: u32,
         #[arg(long, default_value_t = 1)]
         ticket: u32,
+        #[arg(long, default_value = "sim")]
+        backend: String,
+    },
+    /// Multi-queue region isolation + IRQ/DMA wait-policy soak
+    QueueSoak {
         #[arg(long, default_value = "sim")]
         backend: String,
     },
@@ -269,6 +275,18 @@ fn main() {
                 c[0],
                 c[c.len() - 1]
             );
+        }
+        Cmd::QueueSoak { backend } => {
+            let be = backend.to_lowercase();
+            let n = if be == "sim" {
+                let mut dev = SimDevice::new();
+                soak_multi_queue(&mut dev).expect("queue soak")
+            } else {
+                let mut dev = MmioDevice::new();
+                dev.probe_caps();
+                soak_multi_queue(&mut dev).expect("queue soak")
+            };
+            println!("queue_soak_ok backend={be} checks={n}");
         }
     }
 }

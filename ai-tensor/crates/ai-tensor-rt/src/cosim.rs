@@ -104,6 +104,12 @@ pub fn run_builtin_suite() -> Result<usize, RtError> {
     if comp.status != ST_OK || tiles != 1 || c.iter().any(|&x| x != 4) {
         return Err(RtError::Msg("auto_tile 4x4 ones failed".into()));
     }
+    // Multi-queue + wait-policy soak (sim + SoftIsland)
+    let mut sim = SimDevice::new();
+    crate::soak_multi_queue(&mut sim)?;
+    let mut mmio = MmioDevice::new();
+    mmio.probe_caps();
+    crate::soak_multi_queue(&mut mmio)?;
     Ok(n)
 }
 

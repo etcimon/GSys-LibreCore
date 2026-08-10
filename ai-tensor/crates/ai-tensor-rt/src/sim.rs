@@ -4,8 +4,8 @@
 
 use crate::{Caps, Device, Region, RtError};
 use ai_tensor_abi::{
-    Completion, Desc64, OP_GEMM, PmuSnapshot, ST_BAD_OP, ST_BAD_PTR, ST_BAD_VER, ST_DISABLED,
-    ST_OK, CONTRACT_VERSION,
+    Completion, Desc64, OP_GEMM, PmuSnapshot, ST_BAD_OP, ST_BAD_PTR, ST_BAD_QID, ST_BAD_VER,
+    ST_DISABLED, ST_OK, CONTRACT_VERSION,
 };
 use std::collections::HashMap;
 
@@ -38,6 +38,12 @@ impl SimDevice {
     }
 
     pub fn with_caps(caps: Caps) -> Self {
+        // Hostless sim can exercise multi-queue AI-3 isolation even when CAP pin
+        // says Queues=1 (island MMIO map limit); keep at least 4 soft regions.
+        let mut caps = caps;
+        if caps.queues < 4 {
+            caps.queues = 4;
+        }
         Self {
             enabled: false,
             wr_cpl_en: true,
@@ -138,13 +144,12 @@ impl SimDevice {
                 status: ST_BAD_OP,
             };
         }
-        // AI-3 style checks (qid 0 for spine)
-        let q = if (qid as usize) < self.regions.len() {
+        let q = if (qid as usize) < self.regions.len() && u32::from(qid) < self.caps.queues {
             qid
         } else {
             return Completion {
                 ticket,
-                status: ST_BAD_PTR,
+                status: ST_BAD_QID,
             };
         };
         let m = d.m as u64;
@@ -273,6 +278,15 @@ impl Device for SimDevice {
 
     fn pmu(&self) -> PmuSnapshot {
         self.pmu
+    }
+
+    fn irq_pending(&self) -> bool {
+        self.irq_sticky
+    }
+
+    fn claim_done(&mut self) -> Result<(), RtError> {
+        self.irq_sticky = false;
+        Ok(())
     }
 }
 

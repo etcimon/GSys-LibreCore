@@ -40,10 +40,21 @@ Runtime chooses mode from **Caps + profile**, not from framework type.
 | **IRQ** | PLIC source (e.g. ID 8 on Variane) or MSI; level rules: clear source before complete |
 | **Hybrid** | IRQ wake + read completion word |
 
-**Ordering note (platform-specific):** completion DMA store and PLIC claim can interact on some
-bring-up configs. Caps should expose whether claim-after-DMA is trusted; recommended sequence when
-both enabled: ensure store finished → `fence` → claim. Island directed tests may disable `wr_cpl_en`
-for pure claim soaks.
+**Software `WaitPolicy`** (`policy.rs` / CLI `queue-soak`):
+
+| Policy | Use |
+|---|---|
+| `Poll` | Default spin on `poll(ticket)` |
+| `IrqThenPoll` | FLAG_IRQ jobs; wait `irq_pending` then claim |
+| `DmaThenClaim` | `wr_cpl_en=1`: spin completion word @ `ptr_done`, then `claim_done` |
+| `ClaimOnly` | Island claim soak with `wr_cpl_en=0` (no DMA word) |
+
+**Ordering:** when both DMA and PLIC/IRQ are enabled, preferred order is **DMA word visible →
+fence → claim DONE / clear IRQ**. Island directed tests may keep `wr_cpl_en=0` for pure claim.
+
+**Queues:** CAP island_p3 advertises Queues=1; MMIO region window is only q0 (`0x0120`) before
+desc latch (`0x0140`). SoftIsland returns `ST_BAD_QID` for foreign qids. Hostless **sim** keeps
+4 soft regions for isolation soak.
 
 ---
 

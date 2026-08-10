@@ -7,6 +7,7 @@ mod mmio;
 mod profile;
 mod cosim;
 mod stream;
+mod policy;
 
 pub use sim::SimDevice;
 pub use profile::Profile;
@@ -19,6 +20,7 @@ pub use stream::{
     desc_for_tile, plan_gemm_s8_stream, run_gemm_s8_stream, run_gemm_stream_plan, GemmStreamPlan,
     Queue, StreamJob,
 };
+pub use policy::{recommend_policy, soak_multi_queue, wait_with_policy, WaitPolicy};
 
 use ai_tensor_abi::{AccTile, CapRegs, Completion, Desc64, PmuSnapshot, ST_OK};
 use thiserror::Error;
@@ -55,6 +57,9 @@ pub struct Caps {
     /// Fabric data width (bits); software discovery only (not CAP word today).
     pub noc_width: u32,
     pub clusters: u32,
+    /// CAP queue count (island_p3 = 1; MMIO region window only for q0 today).
+    pub queues: u32,
+    pub queue_depth: u32,
 }
 
 impl Default for Caps {
@@ -75,6 +80,8 @@ impl Caps {
             macs_per_cycle: c.macs_per_cycle,
             noc_width,
             clusters: c.clusters,
+            queues: u32::from(c.queues.max(1)),
+            queue_depth: u32::from(c.queue_depth.max(1)),
         }
     }
 
@@ -126,9 +133,13 @@ pub trait Device: Send {
     fn pmu(&self) -> PmuSnapshot {
         PmuSnapshot::default()
     }
-    /// Level IRQ sticky (SoftIsland). Cleared with DONE write.
+    /// Level IRQ sticky (SoftIsland / sim FLAG_IRQ). Cleared with claim_done / DONE write.
     fn irq_pending(&self) -> bool {
         false
+    }
+    /// Clear DONE sticky / IRQ source (PLIC claim discipline). Default no-op.
+    fn claim_done(&mut self) -> Result<(), RtError> {
+        Ok(())
     }
     fn wait(&mut self, ticket: u32) -> Result<Completion, RtError> {
         // Sim is synchronous — poll once after submit is enough; loop for API shape.

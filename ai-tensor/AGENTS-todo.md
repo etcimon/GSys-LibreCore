@@ -75,8 +75,9 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [ ] TensorFlow custom op (same Desc64 path)
 - [x] Multi-tile desc stream (`stream.rs`: Queue, plan/run, zero-copy A/B lda/ldb)
 - [x] `run_gemm_s8_auto` → stream path; CLI `stream-gemm`
-- [ ] IRQ wait; multi-queue depth soak; claim+completion-DMA policy
+- [x] WaitPolicy (Poll/IrqThenPoll/DmaThenClaim/ClaimOnly) + `soak_multi_queue` + CLI `queue-soak`
 - [x] Host adapter: `cva6-build tensor status|doctor|test|golden|cosim` (spawn only)
+- [ ] Multi-queue concurrent depth (island single-engine still sequential DONE)
 
 ## Open design notes
 

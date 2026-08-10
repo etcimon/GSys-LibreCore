@@ -12,6 +12,7 @@ __version__ = "0.1.0"
 
 from .device import Caps, Device, Pmu, gemm_s8, pack_gemm_desc, tile_gemm
 from .golden import GoldenGemm, builtin_goldens, run_golden_suite
+from .policy import WaitPolicy, recommend_policy
 from .profile import Profile
 
 __all__ = [
@@ -20,9 +21,11 @@ __all__ = [
     "GoldenGemm",
     "Pmu",
     "Profile",
+    "WaitPolicy",
     "builtin_goldens",
     "gemm_s8",
     "pack_gemm_desc",
+    "recommend_policy",
     "run_golden_suite",
     "tile_gemm",
     "__version__",
