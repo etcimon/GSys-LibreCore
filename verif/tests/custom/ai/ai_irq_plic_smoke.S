@@ -4,6 +4,8 @@
 # Xg6lcai island completion → PLIC source 8 (irq_sources[7] → ID 8):
 #   good desc with flags.IRQ, doorbell submit, wait done, PLIC IP bit 8,
 #   claim ID 8, complete. Without IRQ flag, IP must stay clear.
+# CTL=1 enables island but leaves wr_cpl_en=0 so completion DMA is off
+# (avoids DMA-store vs PLIC-claim interaction; write path is ai_ptr_done_smoke).
 # PLIC map (CVA6 plic_regmap): prio@0x0C00_0000+4*id, ip@0x0C00_1000,
 #   ie0@0x0C00_2000, thr0@0x0C20_0000, claim0@0x0C20_0004.
 # HTIF fail codes odd only. Soft-pass on bus/illegal (non-AI package).
@@ -15,7 +17,6 @@
   .equ AI_REG0,     0x120
   .equ AI_DESC,     0x140
 
-  .equ PLIC_BASE,   0x0C000000
   .equ PLIC_PRIO8,  0x0C000020
   .equ PLIC_IP,     0x0C001000
   .equ PLIC_IE0,    0x0C002000
@@ -35,6 +36,7 @@ _start:
   andi sp, sp, -16
 
   li   s0, AI_BASE
+  # CTL[0]=enable, CTL[1]=wr_cpl_en — keep completion DMA off for claim soak
   li   t0, 1
   sw   t0, AI_CTL(s0)
 
@@ -58,7 +60,7 @@ _start:
   li   t1, PLIC_IE0
   sw   t0, 0(t1)
 
-  # ---- Job A: IRQ flag set ----
+  # ---- Job A: IRQ flag set (ptr_done in-region; no DMA write with wr_cpl=0) ----
   li   t0, (1 << 16) | 1
   sw   t0, AI_DESC+0x0(s0)
   li   t0, FLAG_IRQ

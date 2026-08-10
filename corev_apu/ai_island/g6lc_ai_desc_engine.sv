@@ -18,13 +18,17 @@ module g6lc_ai_desc_engine
     parameter int unsigned NumQueues = 2,
     parameter int unsigned AddrWidth = 64,
     parameter int unsigned QidWidth  = (NumQueues > 1) ? $clog2(NumQueues) : 1,
-    parameter int unsigned MaxPrio   = 15
+    parameter int unsigned MaxPrio   = 15,
+    // When 1: structural write path present (ports live). Runtime gate is wr_cpl_en_i.
+    parameter bit          WriteCompletion = 1'b0
 ) (
     input  logic                  clk_i,
     input  logic                  rst_ni,
     input  logic                  testmode_i,
     // Global enable (island control)
     input  logic                  enable_i,
+    // Runtime gate for completion-word DMA (CTL[1]); only used if WriteCompletion=1
+    input  logic                  wr_cpl_en_i,
     // Submit (doorbell / ai.enq host path)
     input  logic                  submit_valid_i,
     output logic                  submit_ready_o,
@@ -58,18 +62,27 @@ module g6lc_ai_desc_engine
     input  logic                  check_ok_i,
     // Status
     output logic                  busy_o,
-    output logic [15:0]           last_status_o
+    output logic [15:0]           last_status_o,
+    // Optional memory write of completion word at ptr_done (P3+)
+    // When WriteCompletion=0, wr_* are idle and ST_WR_DONE is skipped.
+    output logic                  wr_start_o,
+    output logic [AddrWidth-1:0]  wr_addr_o,
+    output logic [63:0]           wr_data_o,
+    input  logic                  wr_ready_i,
+    input  logic                  wr_done_i,
+    input  logic                  wr_err_i
 );
 
-  typedef enum logic [2:0] {
-    ST_IDLE       = 3'd0,
-    ST_PARSE      = 3'd1,
-    ST_CHK_A      = 3'd2,
-    ST_CHK_B      = 3'd3,
-    ST_CHK_C      = 3'd4,
-    ST_CHK_SCALE  = 3'd5,
-    ST_CHK_DONE   = 3'd6,
-    ST_COMPLETE   = 3'd7
+  typedef enum logic [3:0] {
+    ST_IDLE       = 4'd0,
+    ST_PARSE      = 4'd1,
+    ST_CHK_A      = 4'd2,
+    ST_CHK_B      = 4'd3,
+    ST_CHK_C      = 4'd4,
+    ST_CHK_SCALE  = 4'd5,
+    ST_CHK_DONE   = 4'd6,
+    ST_WR_DONE    = 4'd7,
+    ST_COMPLETE   = 4'd8
   } state_e;
 
   state_e state_q, state_d;
@@ -80,6 +93,7 @@ module g6lc_ai_desc_engine
   logic        irq_q, irq_d;
   logic        done_valid_q, done_valid_d;
   logic [15:0] last_status_q;
+  logic        wr_issued_q, wr_issued_d;
 
   assign busy_o         = (state_q != ST_IDLE);
   assign submit_ready_o = (state_q == ST_IDLE) && enable_i;
@@ -96,6 +110,12 @@ module g6lc_ai_desc_engine
   assign prog_limit_o = prog_ext_limit_i;
   assign prog_perm_o  = prog_ext_perm_i;
 
+  // Completion word write (only asserted in ST_WR_DONE)
+  logic wr_start_n;
+  assign wr_start_o = wr_start_n;
+  assign wr_addr_o  = AddrWidth'(desc_q.ptr_done);
+  assign wr_data_o  = make_completion(ticket_q, status_q);
+
   // Default check idle
   always_comb begin
     state_d       = state_q;
@@ -105,6 +125,8 @@ module g6lc_ai_desc_engine
     status_d      = status_q;
     irq_d         = irq_q;
     done_valid_d  = 1'b0;
+    wr_start_n    = 1'b0;
+    wr_issued_d   = wr_issued_q;
 
     check_req_o    = 1'b0;
     check_qid_o    = qid_q;
@@ -118,10 +140,11 @@ module g6lc_ai_desc_engine
         if (submit_valid_i && submit_ready_o) begin
           desc_d   = bits_to_desc(submit_desc_i);
           qid_d    = submit_qid_i;
-          ticket_d = submit_ticket_i;
-          status_d = ST_OK;
-          irq_d    = 1'b0;
-          state_d  = ST_PARSE;
+          ticket_d    = submit_ticket_i;
+          status_d    = ST_OK;
+          irq_d       = 1'b0;
+          wr_issued_d = 1'b0;
+          state_d     = ST_PARSE;
         end else if (submit_valid_i && !enable_i) begin
           // Drop with disabled status if kicked while off
           desc_d   = bits_to_desc(submit_desc_i);
@@ -194,18 +217,38 @@ module g6lc_ai_desc_engine
       end
 
       ST_CHK_DONE: begin
-        // Completion word must be writable
-        check_req_o    = 1'b1;
-        check_addr_o   = desc_q.ptr_done;
-        check_need_w_o = 1'b1;
-        if (!check_ok_i) begin
-          status_d = ST_BAD_PTR;
-          state_d  = ST_COMPLETE;
-        end else begin
-          // P3 spine: accept without executing GEMM
+        // Null ptr_done: no completion word (still OK + optional IRQ)
+        if (desc_q.ptr_done == '0) begin
           status_d = ST_OK;
           irq_d    = desc_irq(desc_q);
           state_d  = ST_COMPLETE;
+        end else begin
+          // Completion word must be writable
+          check_req_o    = 1'b1;
+          check_addr_o   = desc_q.ptr_done;
+          check_need_w_o = 1'b1;
+          if (!check_ok_i) begin
+            status_d = ST_BAD_PTR;
+            state_d  = ST_COMPLETE;
+          end else begin
+            // P3 spine: accept without executing GEMM; optional completion word
+            status_d = ST_OK;
+            irq_d    = desc_irq(desc_q);
+            if (WriteCompletion && wr_cpl_en_i) state_d = ST_WR_DONE;
+            else state_d = ST_COMPLETE;
+          end
+        end
+      end
+
+      ST_WR_DONE: begin
+        // One-shot start when store unit is ready; wait for done
+        if (!wr_issued_q && wr_ready_i) begin
+          wr_start_n  = 1'b1;
+          wr_issued_d = 1'b1;
+        end
+        if (wr_issued_q && wr_done_i) begin
+          if (wr_err_i) status_d = ST_ERR;
+          state_d = ST_COMPLETE;
         end
       end
 
@@ -233,6 +276,7 @@ module g6lc_ai_desc_engine
       irq_q          <= 1'b0;
       done_valid_q   <= 1'b0;
       last_status_q  <= '0;
+      wr_issued_q    <= 1'b0;
     end else begin
       state_q      <= state_d;
       desc_q       <= desc_d;
@@ -241,6 +285,7 @@ module g6lc_ai_desc_engine
       status_q     <= status_d;
       irq_q        <= irq_d;
       done_valid_q <= done_valid_d;
+      wr_issued_q  <= wr_issued_d;
       if (done_valid_d) last_status_q <= status_d;
     end
   end

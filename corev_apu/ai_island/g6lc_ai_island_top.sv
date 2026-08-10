@@ -6,7 +6,7 @@
 //
 // Register map (byte address, 32-bit data):
 //   0x0000..0x00FF  capability window (RO)
-//   0x0100          control  [0]=enable
+//   0x0100          control  [0]=enable [1]=wr_cpl_en (completion DMA; default 1 if DMA)
 //   0x0104          status   [0]=busy, [1]=fetch_busy, [31:16]=last_status
 //   0x0108          doorbell  [7:0]=qid, [30:8]=ticket, [31]=fetch_from_mem
 //   0x010C          done sticky (write 1 clears irq/done sticky)
@@ -80,6 +80,7 @@ module g6lc_ai_island_top
 
   // ------------------------------------------------------------------ regs
   logic              enable_q;
+  logic              wr_cpl_en_q;  // CTL[1]: completion-word DMA (runtime)
   logic [31:0]       desc_words_q[16];
   logic [QidWidth-1:0] db_qid_q;
   logic [31:0]       db_ticket_q;
@@ -192,11 +193,16 @@ module g6lc_ai_island_top
     end
   end
 
-  // ------------------------------------------------------------------ DMA desc fetch
+  // ------------------------------------------------------------------ DMA: fetch + completion store (muxed AXI)
   logic        fetch_start_q;
   logic        fetch_ready, fetch_done, fetch_err;
   desc_bits_t  fetch_desc;
   logic        fetch_err_complete_q;  // one-cycle pulse after bus error
+
+  logic        wr_start, wr_ready, wr_done, wr_err;
+  logic [AddrWidth-1:0] wr_addr;
+  logic [63:0] wr_data;
+  axi_req_t    fetch_axi_req, store_axi_req;
 
   if (EnableDmaFetch) begin : gen_dma_fetch
     g6lc_ai_desc_fetch #(
@@ -214,27 +220,69 @@ module g6lc_ai_island_top
         .done_o  (fetch_done),
         .err_o   (fetch_err),
         .desc_o  (fetch_desc),
-        .axi_req_o  (axi_dma_req_o),
+        .axi_req_o  (fetch_axi_req),
         .axi_resp_i (axi_dma_resp_i)
     );
-    assign fetch_busy = !fetch_ready || sb_fetch_pending_q;
+    g6lc_ai_mem_store #(
+        .AddrWidth (AddrWidth),
+        .DataWidth (AxiDataWidth),
+        .IdWidth   (AxiIdWidth),
+        .axi_req_t (axi_req_t),
+        .axi_resp_t(axi_resp_t)
+    ) i_store (
+        .clk_i,
+        .rst_ni,
+        .start_i (wr_start),
+        .addr_i  (wr_addr),
+        .data_i  (AxiDataWidth'(wr_data)),
+        .ready_o (wr_ready),
+        .done_o  (wr_done),
+        .err_o   (wr_err),
+        .axi_req_o  (store_axi_req),
+        .axi_resp_i (axi_dma_resp_i)
+    );
+    // Prefer store when active (engine WR_DONE); else fetch. When both idle,
+    // drive a clean zero req (no b_ready) so the DMA master cannot siphon B
+    // beats from the xbar — that was observed to break subsequent PLIC claim.
+    logic store_active;
+    assign store_active = (!wr_ready || wr_start);
+    assign axi_dma_req_o = store_active ? store_axi_req
+                         : (!fetch_ready ? fetch_axi_req : '0);
+    assign fetch_busy = !fetch_ready || sb_fetch_pending_q || !wr_ready;
   end else begin : gen_no_dma_fetch
     assign fetch_ready = 1'b1;
     assign fetch_done  = 1'b0;
     assign fetch_err   = 1'b0;
     assign fetch_desc  = '0;
     assign fetch_busy  = 1'b0;
+    assign fetch_axi_req = '0;
+    assign store_axi_req = '0;
     assign axi_dma_req_o = '0;
+    assign wr_ready = 1'b1;
+    // One-cycle delayed ack so engine sees wr_issued_q && wr_done_i
+    // (same-cycle wr_done=wr_start leaves ST_WR_DONE wedged).
+    logic wr_done_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) wr_done_q <= 1'b0;
+      else         wr_done_q <= wr_start;
+    end
+    assign wr_done = wr_done_q;
+    assign wr_err  = 1'b0;
     // verilator lint_off UNUSEDSIGNAL
     logic _ax;
-    assign _ax = |axi_dma_resp_i | sb_fetch_pending_q | |sb_desc_ptr_i;
+    assign _ax = |axi_dma_resp_i | sb_fetch_pending_q | |sb_desc_ptr_i | |wr_addr | |wr_data;
     // verilator lint_on UNUSEDSIGNAL
   end
 
-  g6lc_ai_desc_engine #(.NumQueues(NumQueues), .AddrWidth(AddrWidth)) i_engine (
+  g6lc_ai_desc_engine #(
+      .NumQueues       (NumQueues),
+      .AddrWidth       (AddrWidth),
+      .WriteCompletion (EnableDmaFetch)
+  ) i_engine (
       .clk_i, .rst_ni,
       .testmode_i      (testmode_i),
       .enable_i        (enable_q),
+      .wr_cpl_en_i     (wr_cpl_en_q),
       .submit_valid_i  (submit_valid_mux),
       .submit_ready_o  (submit_ready),
       .submit_qid_i    (submit_qid_mux),
@@ -262,7 +310,13 @@ module g6lc_ai_island_top
       .check_need_w_o  (check_need_w),
       .check_ok_i      (check_ok),
       .busy_o          (busy_engine),
-      .last_status_o   (last_status)
+      .last_status_o   (last_status),
+      .wr_start_o      (wr_start),
+      .wr_addr_o       (wr_addr),
+      .wr_data_o       (wr_data),
+      .wr_ready_i      (wr_ready),
+      .wr_done_i       (wr_done),
+      .wr_err_i        (wr_err)
   );
 
   // ------------------------------------------------------------------ writes + prog pulse
@@ -293,6 +347,7 @@ module g6lc_ai_island_top
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       enable_q            <= 1'b0;
+      wr_cpl_en_q         <= EnableDmaFetch;  // on when DMA path present
       db_qid_q            <= '0;
       db_ticket_q         <= '0;
       submit_pulse_q      <= 1'b0;
@@ -348,7 +403,8 @@ module g6lc_ai_island_top
 
       if (req_i && we_i) begin
         if (addr_i[15:0] == 16'h0100) begin
-          enable_q <= wdata_i[0];
+          enable_q    <= wdata_i[0];
+          wr_cpl_en_q <= wdata_i[1];
         end else if (addr_i[15:0] == 16'h0108) begin
           db_qid_q    <= QidWidth'(wdata_i[7:0]);
           db_ticket_q <= {9'h0, wdata_i[30:8]};
@@ -407,7 +463,7 @@ module g6lc_ai_island_top
     if (req_i && !cap_sel) begin
       rvalid_n = 1'b1;
       unique case (addr_i[15:0])
-        16'h0100: rdata_n = {31'h0, enable_q};
+        16'h0100: rdata_n = {30'h0, wr_cpl_en_q, enable_q};
         16'h0104: rdata_n = {last_status, 14'h0, fetch_busy, busy};
         16'h0108: rdata_n = {db_ticket_q[23:0], 8'(db_qid_q)};
         16'h010C: rdata_n = {31'h0, done_sticky_q};

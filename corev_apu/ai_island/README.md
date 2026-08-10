@@ -21,6 +21,7 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_addr_check.sv` | per-queue `[base,limit)` + R/W (AI-3) | **landed** |
 | `g6lc_ai_desc_engine.sv` | validate version/op + check all ptrs + complete | **landed** (no GEMM yet) |
 | `g6lc_ai_desc_fetch.sv` | AXI read-only 64 B descriptor fetch | **landed** |
+| `g6lc_ai_mem_store.sv` | AXI single-beat store (completion word) | **landed** |
 | `g6lc_ai_island_top.sv` | reg map + IRQ sticky + desc_ptr/fetch | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 |
 | AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |
@@ -35,6 +36,12 @@ When `CVA6Cfg.AiCfg.MatrixEn`, the island sits on the **GPIO window**:
 
 Non-AI packages keep the GPIO error slave. Island `irq_o` is sticky on
 `desc.flags[2]`; in Variane it is **PLIC source ID 8** (`irq_sources[7]`).
+
+Control `0x100`: bit0 = enable, bit1 = `wr_cpl_en` (completion-word DMA after
+a successful job when the DMA master is present). Default after reset is
+`wr_cpl_en = EnableDmaFetch`. Directed tests that need the write use `CTL=3`;
+PLIC-IRQ soak uses `CTL=1` (enable only) so the claim path is not mixed with
+the completion store.
 Clear level source (`AI_DONE`) **before** PLIC complete, or level-set re-arms IP.
 
 ## Verification
@@ -45,7 +52,7 @@ bash verif/regress/ai-matrix-veri.sh          # g6lc64_ai directed suite
 ```
 
 Standalone smoke: cap, good desc, AI-3 OOR/perm, bad version, disabled.  
-SoC: MMIO doorbell + AI-3; sideband enq/poll; **PLIC-8 IRQ**; **DMA desc fetch**
+SoC: MMIO doorbell + AI-3; sideband enq/poll; **PLIC-8 IRQ**; **DMA desc fetch + ptr_done write**
 (`desc_ptr` @ `0x118/11C`, doorbell bit[31]=fetch → `ai_desc_fetch_smoke`).  
 Sideband protocol: after any desc/region MMIO write, load a **different** island
 reg before `ai.enq` (same-addr load-back can STLF; kick is a core wire).
