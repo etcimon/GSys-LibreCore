@@ -44,6 +44,7 @@ version = "0.1.0"
 dependencies = [
  "ai-tensor-abi",
  "ai-tensor-ir",
+ "libc",
  "thiserror",
 ]
 

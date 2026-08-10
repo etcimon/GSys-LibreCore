@@ -4,9 +4,11 @@
 
 mod sim;
 mod mmio;
+mod profile;
 
 pub use sim::SimDevice;
-pub use mmio::{probe_cap_regs, read_pmu, MmioBus, MmioDevice, SoftIsland};
+pub use profile::Profile;
+pub use mmio::{probe_cap_regs, read_pmu, seed_cap_island_p3, MappedWindow, MmioBus, MmioDevice, SoftIsland};
 
 use ai_tensor_abi::{AccTile, CapRegs, Completion, Desc64, PmuSnapshot, ST_OK};
 use thiserror::Error;
@@ -113,6 +115,10 @@ pub trait Device: Send {
     /// Sticky last-job PMU (zeros until a GEMM completes).
     fn pmu(&self) -> PmuSnapshot {
         PmuSnapshot::default()
+    }
+    /// Level IRQ sticky (SoftIsland). Cleared with DONE write.
+    fn irq_pending(&self) -> bool {
+        false
     }
     fn wait(&mut self, ticket: u32) -> Result<Completion, RtError> {
         // Sim is synchronous — poll once after submit is enough; loop for API shape.

@@ -8,9 +8,10 @@ description = "Device runtime + hostless sim + MMIO SoftIsland backends for ai-t
 
 [features]
 default = []
-linux-mmio = []
+linux-mmio = ["dep:libc"]
 
 [dependencies]
 ai-tensor-abi = { workspace = true }
 ai-tensor-ir = { workspace = true }
 thiserror = { workspace = true }
+libc = { version = "0.2", optional = true }

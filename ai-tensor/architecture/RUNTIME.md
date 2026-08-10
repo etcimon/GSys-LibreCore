@@ -61,7 +61,9 @@ wait(ticket | irq, timeout) -> Completion
 - **sim:** no OS; direct job path (no register protocol).
 - **mmio-soft (`SoftIsland`/`MmioDevice`):** hostless register model — CAP probe, AI-3 region
   commit on perm write, desc latch, doorbell (latch or fetch), DONE claim clear, PMU sticky.
-- **linux:** map island BAR/window (`linux-mmio` feature stub); optional eventfd for IRQ.
+- **mapped-file / linux:** `MappedWindow` file-backed for CI; feature `linux-mmio` opens
+  UIO or `/dev/mem` (`AI_TENSOR_UIO`, `AI_TENSOR_MMIO_BASE=0x40000000`). SoftIsland models
+  FLAG_IRQ sticky cleared with DONE (PLIC claim discipline).
 - **cosim:** pipe to Verilator harness (slow gold).
 
 ---

@@ -567,6 +567,10 @@ impl Device for MmioDevice {
         self.island.pmu
     }
 
+    fn irq_pending(&self) -> bool {
+        self.island.irq_sticky
+    }
+
     fn wait(&mut self, ticket: u32) -> Result<Completion, RtError> {
         // SoftIsland is synchronous on doorbell — one poll after submit is enough
         for _ in 0..16 {
@@ -578,34 +582,239 @@ impl Device for MmioDevice {
     }
 }
 
-#[cfg(feature = "linux-mmio")]
-pub mod linux {
-    //! Optional real map (Linux only). Not used by default CI.
-    use super::MmioBus;
-    use crate::RtError;
 
-    /// Placeholder: open UIO/mem and implement read32/write32.
-    /// Full VFIO/UIO wiring is board-specific; keep independence of default builds.
-    pub struct MappedRegs {
-        _base: usize,
-        _len: usize,
-    }
+// ---------------------------------------------------------------------------
+// Mapped register window (file-backed always; UIO on Linux with feature)
+// ---------------------------------------------------------------------------
 
-    impl MappedRegs {
-        pub fn open_uio(_path: &str) -> Result<Self, RtError> {
-            Err(RtError::Msg(
-                "linux-mmio: UIO open not configured for this platform".into(),
-            ))
+/// 4 KiB (or larger) volatile register window as `MmioBus`.
+///
+/// - **File-backed:** portable CI / bring-up without hardware.
+/// - **Linux UIO/`/dev/mem`:** feature `linux-mmio` + `MappedWindow::open_linux`.
+pub struct MappedWindow {
+    map: MemMap,
+    len: usize,
+}
+
+enum MemMap {
+    Vec(Vec<u8>),
+    #[cfg(all(feature = "linux-mmio", target_os = "linux"))]
+    Mmap {
+        ptr: *mut u8,
+        len: usize,
+    },
+}
+
+// Safety: exclusive owner of the mapping
+unsafe impl Send for MappedWindow {}
+
+impl MappedWindow {
+    pub const ISLAND_WINDOW: usize = 4096;
+
+    /// Portable zeroed window (tests / soft bring-up).
+    pub fn zeros(len: usize) -> Self {
+        let len = len.max(Self::ISLAND_WINDOW);
+        Self {
+            map: MemMap::Vec(vec![0u8; len]),
+            len,
         }
     }
 
-    impl MmioBus for MappedRegs {
-        fn read32(&mut self, _off: u16) -> u32 {
-            0
+    /// File-backed window (create/truncate `path` to `len` bytes).
+    pub fn open_file(path: &std::path::Path, len: usize) -> Result<Self, RtError> {
+        use std::fs::OpenOptions;
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let len = len.max(Self::ISLAND_WINDOW);
+        let mut f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .map_err(|e| RtError::Msg(format!("open_file: {e}")))?;
+        f.set_len(len as u64)
+            .map_err(|e| RtError::Msg(format!("set_len: {e}")))?;
+        let mut buf = vec![0u8; len];
+        f.seek(SeekFrom::Start(0))
+            .map_err(|e| RtError::Msg(format!("seek: {e}")))?;
+        // ensure zeros
+        f.write_all(&buf)
+            .map_err(|e| RtError::Msg(format!("write: {e}")))?;
+        f.seek(SeekFrom::Start(0))
+            .map_err(|e| RtError::Msg(format!("seek2: {e}")))?;
+        let _ = f.read(&mut buf);
+        Ok(Self {
+            map: MemMap::Vec(buf),
+            len,
+        })
+    }
+
+    /// Linux: try UIO then optional `/dev/mem` (requires privileges).
+    ///
+    /// Env:
+    /// - `AI_TENSOR_UIO` — path to UIO device (default `/dev/uio0`)
+    /// - `AI_TENSOR_MMIO_BASE` — phys base for `/dev/mem` (e.g. `0x40000000`)
+    #[cfg(all(feature = "linux-mmio", target_os = "linux"))]
+    pub fn open_linux() -> Result<Self, RtError> {
+        if let Ok(p) = std::env::var("AI_TENSOR_UIO") {
+            return Self::open_uio(std::path::Path::new(&p));
         }
-        fn write32(&mut self, _off: u16, _val: u32) {}
+        if std::path::Path::new("/dev/uio0").exists() {
+            if let Ok(w) = Self::open_uio(std::path::Path::new("/dev/uio0")) {
+                return Ok(w);
+            }
+        }
+        if let Ok(base) = std::env::var("AI_TENSOR_MMIO_BASE") {
+            let base = u64::from_str_radix(base.trim_start_matches("0x"), 16)
+                .or_else(|_| base.parse::<u64>())
+                .map_err(|e| RtError::Msg(format!("bad AI_TENSOR_MMIO_BASE: {e}")))?;
+            return Self::open_dev_mem(base, Self::ISLAND_WINDOW);
+        }
+        Err(RtError::Msg(
+            "linux-mmio: set AI_TENSOR_UIO or AI_TENSOR_MMIO_BASE, or provide /dev/uio0".into(),
+        ))
+    }
+
+    #[cfg(all(feature = "linux-mmio", target_os = "linux"))]
+    pub fn open_uio(path: &std::path::Path) -> Result<Self, RtError> {
+        use std::fs::OpenOptions;
+        use std::os::unix::io::AsRawFd;
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| RtError::Msg(format!("uio open {}: {e}", path.display())))?;
+        let len = Self::ISLAND_WINDOW;
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                f.as_raw_fd(),
+                0,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(RtError::Msg(format!(
+                "mmap uio failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // leak fd intentionally while map lives — hold File in a box via forget path:
+        // keep fd open by leaking the File
+        std::mem::forget(f);
+        Ok(Self {
+            map: MemMap::Mmap {
+                ptr: ptr as *mut u8,
+                len,
+            },
+            len,
+        })
+    }
+
+    #[cfg(all(feature = "linux-mmio", target_os = "linux"))]
+    pub fn open_dev_mem(phys: u64, len: usize) -> Result<Self, RtError> {
+        use std::fs::OpenOptions;
+        use std::os::unix::io::AsRawFd;
+        let f = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/mem")
+            .map_err(|e| RtError::Msg(format!("/dev/mem open: {e}")))?;
+        let ptr = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED,
+                f.as_raw_fd(),
+                phys as i64,
+            )
+        };
+        if ptr == libc::MAP_FAILED {
+            return Err(RtError::Msg(format!(
+                "mmap /dev/mem: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        std::mem::forget(f);
+        Ok(Self {
+            map: MemMap::Mmap {
+                ptr: ptr as *mut u8,
+                len,
+            },
+            len,
+        })
+    }
+
+    fn slice(&self) -> &[u8] {
+        match &self.map {
+            MemMap::Vec(v) => v,
+            #[cfg(all(feature = "linux-mmio", target_os = "linux"))]
+            MemMap::Mmap { ptr, len } => unsafe { std::slice::from_raw_parts(*ptr, *len) },
+        }
+    }
+
+    fn slice_mut(&mut self) -> &mut [u8] {
+        match &mut self.map {
+            MemMap::Vec(v) => v,
+            #[cfg(all(feature = "linux-mmio", target_os = "linux"))]
+            MemMap::Mmap { ptr, len } => unsafe { std::slice::from_raw_parts_mut(*ptr, *len) },
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
     }
 }
+
+impl Drop for MappedWindow {
+    fn drop(&mut self) {
+        #[cfg(all(feature = "linux-mmio", target_os = "linux"))]
+        if let MemMap::Mmap { ptr, len } = self.map {
+            unsafe {
+                libc::munmap(ptr as *mut libc::c_void, len);
+            }
+        }
+    }
+}
+
+impl MmioBus for MappedWindow {
+    fn read32(&mut self, off: u16) -> u32 {
+        let o = off as usize;
+        if o + 4 > self.len {
+            return 0;
+        }
+        let s = self.slice();
+        u32::from_le_bytes(s[o..o + 4].try_into().unwrap())
+    }
+
+    fn write32(&mut self, off: u16, val: u32) {
+        let o = off as usize;
+        if o + 4 > self.len {
+            return;
+        }
+        let s = self.slice_mut();
+        s[o..o + 4].copy_from_slice(&val.to_le_bytes());
+    }
+}
+
+/// Seed a MappedWindow CAP region with island_p3 defaults (file-backed bring-up).
+pub fn seed_cap_island_p3(bus: &mut dyn MmioBus) {
+    let c = CapRegs::island_p3_sim_default();
+    let acc = 8u32 | (8 << 4) | (8 << 8);
+    bus.write32(0x00, u32::from(c.version));
+    bus.write32(0x04, c.clusters);
+    bus.write32(0x08, c.macs_per_cycle);
+    bus.write32(0x0c, c.clock_khz);
+    bus.write32(0x10, c.sram_bytes);
+    bus.write32(0x14, acc);
+    bus.write32(0x18, u32::from(c.dram_nameplate_gbps));
+    bus.write32(0x1c, u32::from(c.queues) | (u32::from(c.queue_depth) << 16));
+    bus.write32(0x28, u32::from(c.dtype_mask));
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -691,5 +900,42 @@ mod tests {
         dev.submit(0, 1, &d).unwrap();
         let c = dev.poll(1).unwrap().unwrap();
         assert_eq!(c.status, ST_DISABLED);
+    }
+
+    #[test]
+    fn irq_sticky_on_flag() {
+        let mut dev = MmioDevice::new();
+        dev.probe_caps();
+        dev.enable(true);
+        let reg = Region {
+            base: 0x1000,
+            limit: 0x1000 + (1 << 20),
+            read: true,
+            write: true,
+        };
+        dev.program_region(0, reg).unwrap();
+        let pa = dev.alloc(1).unwrap();
+        let pb = dev.alloc(1).unwrap();
+        let pc = dev.alloc(4).unwrap();
+        let pd = dev.alloc(8).unwrap();
+        let d = Desc64::gemm(1, 1, 1)
+            .with_ptrs(pa, pb, pc, pd)
+            .with_irq(true);
+        dev.write_mem(pa, &[2]).unwrap();
+        dev.write_mem(pb, &[3]).unwrap();
+        dev.submit(0, 5, &d).unwrap();
+        assert!(dev.irq_pending());
+        let c = dev.poll(5).unwrap().unwrap();
+        assert!(c.is_ok());
+        assert!(!dev.irq_pending());
+    }
+
+    #[test]
+    fn mapped_window_cap_seed() {
+        let mut w = MappedWindow::zeros(4096);
+        seed_cap_island_p3(&mut w);
+        let cap = probe_cap_regs(&mut w);
+        assert_eq!(cap.macs_per_cycle, 256);
+        assert_eq!(cap.acc_tile.m, 256);
     }
 }

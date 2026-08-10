@@ -94,7 +94,7 @@ def cmd_test(_: argparse.Namespace) -> None:
 
 
 def cmd_check_independence(_: argparse.Namespace) -> None:
-    cmd_doctor(_)
+    run([sys.executable, str(ROOT / "tools" / "check_independence.py")])
 
 
 def cmd_build_native(_: argparse.Namespace) -> None:

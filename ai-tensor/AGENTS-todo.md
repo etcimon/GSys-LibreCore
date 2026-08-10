@@ -55,11 +55,13 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] `MmioDevice`: CAP→Caps, AI-3 program, latch + fetch submit, poll+clear DONE, PMU
 - [x] CLI `mmio-gemm` + doctor CAP probe
 - [x] Feature `linux-mmio` stub for future UIO map (not default CI)
-- [ ] Real UIO/VFIO map of Variane `0x4000_0000` on Linux board
-- [ ] PLIC-8 IRQ wait path (level clear before complete)
+- [x] MappedWindow (file-backed) + linux-mmio UIO/`/dev/mem` open (feature-gated)
+- [ ] Board-validated UIO map on live Variane/FPGA
+- [x] SoftIsland FLAG_IRQ sticky + DONE clear (PLIC mirror discipline)
+- [ ] Host PLIC-8 eventfd wait on board
 - [ ] Cosim/replay against Variane harness (optional)
 - [x] Python Caps / PMU surface + torch meta
-- [ ] `tools/check_independence.py`
+- [x] `tools/check_independence.py` + `ait.py check`
 
 ## M6+ — TF / production RT
 
