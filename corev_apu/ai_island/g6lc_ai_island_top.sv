@@ -257,6 +257,7 @@ module g6lc_ai_island_top
     ) i_gemm (
         .clk_i,
         .rst_ni,
+        .testmode_i(testmode_i),
         .start_i  (gemm_start),
         .m_i      (gemm_m),
         .n_i      (gemm_n),

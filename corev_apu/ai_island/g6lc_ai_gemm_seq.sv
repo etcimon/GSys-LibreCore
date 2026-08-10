@@ -1,17 +1,17 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
-// Xg6lcai I1-lite: sequential INT8 GEMM over AXI with on-chip tile buffers.
+// Xg6lcai I1-lite: sequential INT8 GEMM over AXI with tc_sram tile banks.
 //
 //   C[i,j] (i32) = sum_t A[i,t]*B[t,j]  with A,B int8, row-major
 //   lda/ldb from descriptor; C uses ldc = n (contiguous rows).
 //
 // Phases (I1 cluster shape, tiny MaxDim):
-//   1) Load A tile into local flops  2) Load B tile  3) MAC into local C
-//   4) Store C tile. AXI only in load/store; compute is pure multi-cycle.
+//   1) Load A → tile SRAM  2) Load B → tile SRAM  3) MAC into C SRAM
+//   4) Store C. AXI only in load/store; compute is pure multi-cycle.
 //
 // Bounds: m,n,k ∈ [1, MaxDim]. Larger jobs return err without traffic.
-// Local buffers are the pre-`tc_sram` stand-in (MaxDim≤8 ⇒ ≤256 B C).
+// Banks are dual-port Latency=0 tc_sram (PDK-swap seam). MaxDim≤8.
 // Timing: multi-cycle; one outstanding AXI beat; no core critical path.
 
 module g6lc_ai_gemm_seq #(
@@ -24,6 +24,7 @@ module g6lc_ai_gemm_seq #(
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
+    input  logic        testmode_i,
     input  logic        start_i,
     input  logic [31:0] m_i,
     input  logic [31:0] n_i,
@@ -41,14 +42,15 @@ module g6lc_ai_gemm_seq #(
 );
 
   localparam int unsigned TileElems = MaxDim * MaxDim;
+  localparam int unsigned TileAddrW = (TileElems > 1) ? $clog2(TileElems) : 1;
 
   typedef enum logic [3:0] {
     ST_IDLE  = 4'd0,
     ST_CHK   = 4'd1,
-    ST_LA    = 4'd2,  // load A tile
-    ST_LB    = 4'd3,  // load B tile
-    ST_MAC   = 4'd4,  // pure compute
-    ST_STC   = 4'd5,  // store C tile
+    ST_LA    = 4'd2,
+    ST_LB    = 4'd3,
+    ST_MAC   = 4'd4,
+    ST_STC   = 4'd5,
     ST_DONE  = 4'd6
   } state_e;
 
@@ -57,7 +59,6 @@ module g6lc_ai_gemm_seq #(
   logic [15:0] lda_q, ldb_q;
   logic [AddrWidth-1:0] pa_q, pb_q, pc_q;
 
-  // Tile indices: load (i,t) or (t,j); compute (i,j,t); store (i,j)
   logic [31:0] i_q, j_q, t_q;
   logic [31:0] acc_q, acc_d;
   logic        err_q, err_d;
@@ -66,10 +67,46 @@ module g6lc_ai_gemm_seq #(
   logic        aw_sent_q, aw_sent_d;
   logic        w_sent_q, w_sent_d;
 
-  // On-chip tiles (flop array; maps to tc_sram banks at full I1)
-  logic signed [7:0]  a_mem_q [TileElems];
-  logic signed [7:0]  b_mem_q [TileElems];
-  logic        [31:0] c_mem_q [TileElems];
+  // ---- Tile SRAM ports ----
+  logic                    a_r_req, a_w_req;
+  logic [TileAddrW-1:0]    a_r_addr, a_w_addr;
+  logic [7:0]              a_r_data, a_w_data;
+  logic                    b_r_req, b_w_req;
+  logic [TileAddrW-1:0]    b_r_addr, b_w_addr;
+  logic [7:0]              b_r_data, b_w_data;
+  logic                    c_r_req, c_w_req;
+  logic [TileAddrW-1:0]    c_r_addr, c_w_addr;
+  logic [31:0]             c_r_data, c_w_data;
+
+  g6lc_ai_tile_sram #(
+      .NumWords (TileElems),
+      .DataWidth(8),
+      .ImplKey  ("g6lc_ai_tile_a")
+  ) i_tile_a (
+      .clk_i, .rst_ni, .testmode_i,
+      .r_req_i (a_r_req), .r_addr_i(a_r_addr), .r_data_o(a_r_data),
+      .w_req_i (a_w_req), .w_addr_i(a_w_addr), .w_data_i(a_w_data)
+  );
+
+  g6lc_ai_tile_sram #(
+      .NumWords (TileElems),
+      .DataWidth(8),
+      .ImplKey  ("g6lc_ai_tile_b")
+  ) i_tile_b (
+      .clk_i, .rst_ni, .testmode_i,
+      .r_req_i (b_r_req), .r_addr_i(b_r_addr), .r_data_o(b_r_data),
+      .w_req_i (b_w_req), .w_addr_i(b_w_addr), .w_data_i(b_w_data)
+  );
+
+  g6lc_ai_tile_sram #(
+      .NumWords (TileElems),
+      .DataWidth(32),
+      .ImplKey  ("g6lc_ai_tile_c")
+  ) i_tile_c (
+      .clk_i, .rst_ni, .testmode_i,
+      .r_req_i (c_r_req), .r_addr_i(c_r_addr), .r_data_o(c_r_data),
+      .w_req_i (c_w_req), .w_addr_i(c_w_addr), .w_data_i(c_w_data)
+  );
 
   assign ready_o = (state_q == ST_IDLE);
   assign done_o  = done_q;
@@ -105,16 +142,16 @@ module g6lc_ai_gemm_seq #(
     return data[8*lane +: 8];
   endfunction
 
-  function automatic int unsigned a_idx(input logic [31:0] i, t);
-    return int'(i) * MaxDim + int'(t);
+  function automatic logic [TileAddrW-1:0] a_idx(input logic [31:0] i, t);
+    return TileAddrW'(int'(i) * MaxDim + int'(t));
   endfunction
 
-  function automatic int unsigned b_idx(input logic [31:0] t, j);
-    return int'(t) * MaxDim + int'(j);
+  function automatic logic [TileAddrW-1:0] b_idx(input logic [31:0] t, j);
+    return TileAddrW'(int'(t) * MaxDim + int'(j));
   endfunction
 
-  function automatic int unsigned c_idx(input logic [31:0] i, j);
-    return int'(i) * MaxDim + int'(j);
+  function automatic logic [TileAddrW-1:0] c_idx(input logic [31:0] i, j);
+    return TileAddrW'(int'(i) * MaxDim + int'(j));
   endfunction
 
   logic [AddrWidth-1:0] a_cur, b_cur, c_store_addr;
@@ -122,7 +159,24 @@ module g6lc_ai_gemm_seq #(
   assign b_cur        = b_addr(pb_q, t_q, j_q, ldb_q);
   assign c_store_addr = c_addr(pc_q, i_q, j_q, n_q);
 
+  // Default SRAM idle; overridden in comb by phase
   always_comb begin
+    a_r_req  = 1'b0;
+    a_r_addr = '0;
+    a_w_req  = 1'b0;
+    a_w_addr = '0;
+    a_w_data = '0;
+    b_r_req  = 1'b0;
+    b_r_addr = '0;
+    b_w_req  = 1'b0;
+    b_w_addr = '0;
+    b_w_data = '0;
+    c_r_req  = 1'b0;
+    c_r_addr = '0;
+    c_w_req  = 1'b0;
+    c_w_addr = '0;
+    c_w_data = '0;
+
     axi_req_o = '0;
     axi_req_o.b_ready  = 1'b0;
     axi_req_o.r_ready  = 1'b0;
@@ -130,7 +184,6 @@ module g6lc_ai_gemm_seq #(
     axi_req_o.aw_valid = 1'b0;
     axi_req_o.w_valid  = 1'b0;
 
-    // ID=2: distinguish from desc-fetch (0) and completion store (1)
     axi_req_o.ar.id    = IdWidth'(2);
     axi_req_o.ar.len   = '0;
     axi_req_o.ar.size  = axi_pkg::size_t'($clog2(DataWidth / 8));
@@ -174,7 +227,6 @@ module g6lc_ai_gemm_seq #(
         end
       end
 
-      // ---- Load A[i,t] for i=0..m-1, t=0..k-1 ----
       ST_LA: begin
         axi_req_o.ar.addr  = {a_cur[AddrWidth-1:3], 3'b000};
         if (!ar_sent_q) begin
@@ -182,9 +234,12 @@ module g6lc_ai_gemm_seq #(
           if (axi_resp_i.ar_ready) ar_sent_d = 1'b1;
         end
         axi_req_o.r_ready = 1'b1;
+        // Write A tile when R beat lands (same cycle as capture in FF path)
         if (ar_sent_q && axi_resp_i.r_valid) begin
+          a_w_req  = 1'b1;
+          a_w_addr = a_idx(i_q, t_q);
+          a_w_data = byte_from_beat(axi_resp_i.r.data, a_cur[2:0]);
           ar_sent_d = 1'b0;
-          // index advance in FF; decide next state from current indices
           if (t_q + 1 == k_q && i_q + 1 == m_q)
             state_d = ST_LB;
           else
@@ -192,7 +247,6 @@ module g6lc_ai_gemm_seq #(
         end
       end
 
-      // ---- Load B[t,j] for t=0..k-1, j=0..n-1 ----
       ST_LB: begin
         axi_req_o.ar.addr  = {b_cur[AddrWidth-1:3], 3'b000};
         if (!ar_sent_q) begin
@@ -201,6 +255,9 @@ module g6lc_ai_gemm_seq #(
         end
         axi_req_o.r_ready = 1'b1;
         if (ar_sent_q && axi_resp_i.r_valid) begin
+          b_w_req  = 1'b1;
+          b_w_addr = b_idx(t_q, j_q);
+          b_w_data = byte_from_beat(axi_resp_i.r.data, b_cur[2:0]);
           ar_sent_d = 1'b0;
           if (j_q + 1 == n_q && t_q + 1 == k_q) begin
             state_d = ST_MAC;
@@ -210,34 +267,39 @@ module g6lc_ai_gemm_seq #(
         end
       end
 
-      // ---- MAC: one product/cycle, walk t fastest then j then i ----
       ST_MAC: begin
-        // Full reduction sum for this cycle (used to commit C when t ends)
+        // Combo read A/B from Latency=0 SRAM
+        a_r_req  = 1'b1;
+        a_r_addr = a_idx(i_q, t_q);
+        b_r_req  = 1'b1;
+        b_r_addr = b_idx(t_q, j_q);
         acc_d = acc_q
-              + 32'($signed(a_mem_q[a_idx(i_q, t_q)]))
-              * 32'($signed(b_mem_q[b_idx(t_q, j_q)]));
+              + 32'($signed(a_r_data))
+              * 32'($signed(b_r_data));
         if (t_q + 1 == k_q) begin
-          // C[i,j] = acc_d (FF block commits before clear)
+          // Commit C[i,j]
+          c_w_req  = 1'b1;
+          c_w_addr = c_idx(i_q, j_q);
+          c_w_data = acc_d;
           if (j_q + 1 == n_q && i_q + 1 == m_q) begin
             state_d   = ST_STC;
             aw_sent_d = 1'b0;
             w_sent_d  = 1'b0;
-            // leave acc_d as final sum (unused after)
           end else begin
-            // next (i,j) starts a fresh accumulator next cycle
             state_d = ST_MAC;
           end
         end
       end
 
-      // ---- Store C[i,j] ----
       ST_STC: begin
+        c_r_req  = 1'b1;
+        c_r_addr = c_idx(i_q, j_q);
         axi_req_o.aw.addr = c_store_addr;
         if (DataWidth >= 64 && c_store_addr[2]) begin
-          axi_req_o.w.data = DataWidth'({c_mem_q[c_idx(i_q, j_q)], 32'h0});
+          axi_req_o.w.data = DataWidth'({c_r_data, 32'h0});
           axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hF0};
         end else begin
-          axi_req_o.w.data = DataWidth'(c_mem_q[c_idx(i_q, j_q)]);
+          axi_req_o.w.data = DataWidth'(c_r_data);
           axi_req_o.w.strb = {{(DataWidth/8-4){1'b0}}, 4'hF};
         end
         if (!aw_sent_q) begin
@@ -282,11 +344,6 @@ module g6lc_ai_gemm_seq #(
       ar_sent_q <= 1'b0;
       aw_sent_q <= 1'b0;
       w_sent_q <= 1'b0;
-      for (int unsigned e = 0; e < TileElems; e++) begin
-        a_mem_q[e] <= '0;
-        b_mem_q[e] <= '0;
-        c_mem_q[e] <= '0;
-      end
     end else begin
       state_q   <= state_d;
       acc_q     <= acc_d;
@@ -310,9 +367,8 @@ module g6lc_ai_gemm_seq #(
         t_q   <= '0;
       end
 
-      // Capture A load + advance (i,t) with t fastest
+      // Index advance on A load accept
       if (state_q == ST_LA && ar_sent_q && axi_resp_i.r_valid) begin
-        a_mem_q[a_idx(i_q, t_q)] <= byte_from_beat(axi_resp_i.r.data, a_cur[2:0]);
         if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
           err_q <= 1'b1;
         if (t_q + 1 == k_q) begin
@@ -320,7 +376,6 @@ module g6lc_ai_gemm_seq #(
           if (i_q + 1 != m_q)
             i_q <= i_q + 1;
           else begin
-            // A complete → reset for B load (t,j)
             i_q <= '0;
             j_q <= '0;
             t_q <= '0;
@@ -329,9 +384,8 @@ module g6lc_ai_gemm_seq #(
           t_q <= t_q + 1;
       end
 
-      // Capture B load + advance (t,j) with j fastest
+      // Index advance on B load accept
       if (state_q == ST_LB && ar_sent_q && axi_resp_i.r_valid) begin
-        b_mem_q[b_idx(t_q, j_q)] <= byte_from_beat(axi_resp_i.r.data, b_cur[2:0]);
         if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
           err_q <= 1'b1;
         if (j_q + 1 == n_q) begin
@@ -339,7 +393,6 @@ module g6lc_ai_gemm_seq #(
           if (t_q + 1 != k_q)
             t_q <= t_q + 1;
           else begin
-            // B complete → reset for MAC (i,j,t)
             i_q <= '0;
             j_q <= '0;
             t_q <= '0;
@@ -348,19 +401,16 @@ module g6lc_ai_gemm_seq #(
           j_q <= j_q + 1;
       end
 
-      // MAC index walk + commit C element when t exhausts
+      // MAC index walk; C write is comb → registered in tc_sram
       if (state_q == ST_MAC) begin
         if (t_q + 1 == k_q) begin
-          // Commit full reduction (acc_d still holds the sum this cycle)
-          c_mem_q[c_idx(i_q, j_q)] <= acc_d;
           t_q   <= '0;
-          acc_q <= '0;  // next (i,j) starts at zero (overrides comb acc_d)
+          acc_q <= '0;
           if (j_q + 1 == n_q) begin
             j_q <= '0;
             if (i_q + 1 != m_q)
               i_q <= i_q + 1;
             else begin
-              // all C done → reset for store walk
               i_q <= '0;
               j_q <= '0;
             end
@@ -370,7 +420,6 @@ module g6lc_ai_gemm_seq #(
           t_q <= t_q + 1;
       end
 
-      // Store walk (i,j) with j fastest after successful B
       if (state_q == ST_STC && aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
         if (j_q + 1 == n_q) begin
           j_q <= '0;
