@@ -1,0 +1,10 @@
+[package]
+name = "ai-tensor-abi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Xg6lcai descriptor / completion / MMIO constants (pure ABI)"
+
+[dependencies]
+thiserror = { workspace = true }

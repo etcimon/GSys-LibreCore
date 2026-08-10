@@ -1,0 +1,17 @@
+[package]
+name = "ai-tensor-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Python bindings (PyO3) for ai-tensor sim runtime"
+
+[lib]
+name = "ai_tensor_native"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ai-tensor-abi = { workspace = true }
+ai-tensor-ir = { workspace = true }
+ai-tensor-rt = { workspace = true }
+pyo3 = { workspace = true, features = ["extension-module"] }

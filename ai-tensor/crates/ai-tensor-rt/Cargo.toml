@@ -1,0 +1,12 @@
+[package]
+name = "ai-tensor-rt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Device runtime + hostless sim backend for ai-tensor"
+
+[dependencies]
+ai-tensor-abi = { workspace = true }
+ai-tensor-ir = { workspace = true }
+thiserror = { workspace = true }

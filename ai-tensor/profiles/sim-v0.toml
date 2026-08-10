@@ -1,0 +1,21 @@
+# ai-tensor profile: hostless sim (default CI)
+# Phase A: CAP/PMU/tile fields match live island_p3 (AccTile/Macs=256, Noc=64).
+id = "sim-v0"
+abi_rev = "0.1.0"
+isa_doc_rev = "monorepo:architecture/ai-matrix/isa-encoding.md"
+island_rev = "none"
+backend = "sim"
+noc_width = 64
+acc_tile_m = 256
+acc_tile_n = 256
+acc_tile_k = 256
+macs_per_cycle = 256
+features = [
+  "t2_desc_v1",
+  "completion_word_v1",
+  "ai3_regions",
+  "op_gemm",
+  "pmu_v1",
+  "acc_tile_256",
+  "compute_ref",
+]

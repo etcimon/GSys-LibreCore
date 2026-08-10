@@ -1,0 +1,11 @@
+/target/
+.tools/
+*.pyc
+__pycache__/
+.venv/
+venv/
+*.so
+*.pyd
+*.dll
+.pytest_cache/
+.mypy_cache/

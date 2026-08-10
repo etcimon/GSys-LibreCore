@@ -1,0 +1,27 @@
+# Pin stub for live I1/I3-lite island (MMIO backend not yet implemented — M5).
+# AccTile/PeLanes/Macs = 256; NocWidth = 64; PMU @ 0x180; base Variane 0x4000_0000.
+id = "island-p3-v1"
+abi_rev = "0.1.0"
+isa_doc_rev = "monorepo:architecture/ai-matrix/isa-encoding.md"
+island_rev = "monorepo:ai-matrix-p1"  # track branch/tip when M5 lands
+backend = "linux-uio"                 # future; package still defaults to sim
+mmio_map = "island_p3_v1"
+mmio_base = "0x40000000"
+noc_width = 64
+acc_tile_m = 256
+acc_tile_n = 256
+acc_tile_k = 256
+macs_per_cycle = 256
+plic_source = 8
+features = [
+  "t2_desc_v1",
+  "completion_word_v1",
+  "ai3_regions",
+  "op_gemm",
+  "dma_fetch",
+  "wr_cpl_en",
+  "plic_src8",
+  "pmu_v1",
+  "acc_tile_256",
+]
+notes = "Bus micro-arch (trail C-store, multi-out AR) is RTL-only; software uses CAP/PMU."

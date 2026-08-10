@@ -1,0 +1,3 @@
+# Optional host tooling only (package logic is Rust + stdlib Python).
+# torch is optional for python/examples/torch_island_smoke.py
+# torch>=2.0

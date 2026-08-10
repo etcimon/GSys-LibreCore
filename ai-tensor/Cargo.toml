@@ -1,0 +1,39 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# ai-tensor workspace — host backend for Xg6lcai / ai_island (PyTorch/TF).
+# Independent of monorepo RTL crates; sim backend is default CI.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/ai-tensor-abi",
+    "crates/ai-tensor-ir",
+    "crates/ai-tensor-rt",
+    "crates/ai-tensor-cli",
+    "crates/ai-tensor-py",
+]
+default-members = [
+    "crates/ai-tensor-abi",
+    "crates/ai-tensor-ir",
+    "crates/ai-tensor-rt",
+    "crates/ai-tensor-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Etienne Cimon"]
+rust-version = "1.75"
+
+[workspace.dependencies]
+ai-tensor-abi = { path = "crates/ai-tensor-abi" }
+ai-tensor-ir = { path = "crates/ai-tensor-ir" }
+ai-tensor-rt = { path = "crates/ai-tensor-rt" }
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+# extension-module is enabled only when building the cdylib for CPython (see ai-tensor-py).
+pyo3 = { version = "0.22" }

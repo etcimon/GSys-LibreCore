@@ -1,0 +1,18 @@
+[package]
+name = "ai-tensor-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "ai-tensor command-line tools"
+
+[[bin]]
+name = "ai-tensor"
+path = "src/main.rs"
+
+[dependencies]
+ai-tensor-abi = { workspace = true }
+ai-tensor-ir = { workspace = true }
+ai-tensor-rt = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }

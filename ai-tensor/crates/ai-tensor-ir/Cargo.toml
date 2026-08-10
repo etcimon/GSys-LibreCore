@@ -1,0 +1,11 @@
+[package]
+name = "ai-tensor-ir"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "High-level ops lowered to Xg6lcai descriptors"
+
+[dependencies]
+ai-tensor-abi = { workspace = true }
+thiserror = { workspace = true }
