@@ -79,11 +79,23 @@ def cmd_test(ns: argparse.Namespace) -> None:
         env["AI_TENSOR_COSIM_CMD"] = default_cosim_cmd()
         log(f"AI_TENSOR_COSIM_CMD={env['AI_TENSOR_COSIM_CMD']}")
     run([cargo, "run", "-q", "-p", "ai-tensor-cli", "--", "golden-check"], env=env)
-    # Python smoke (no torch required)
+    # Python smoke + goldens (no torch required)
     env_py = os.environ.copy()
     env_py["PYTHONPATH"] = str(ROOT / "python") + os.pathsep + env_py.get("PYTHONPATH", "")
     log("+ python -m ai_tensor")
     r = subprocess.run([sys.executable, "-m", "ai_tensor"], cwd=str(ROOT), env=env_py)
+    if r.returncode != 0:
+        sys.exit(r.returncode)
+    log("+ python golden suite")
+    r = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from ai_tensor import run_golden_suite; print('py_golden', run_golden_suite())",
+        ],
+        cwd=str(ROOT),
+        env=env_py,
+    )
     if r.returncode != 0:
         sys.exit(r.returncode)
     try:

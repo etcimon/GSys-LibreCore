@@ -134,7 +134,7 @@ class Device:
       - ``mmio`` / ``mmio-soft``: SoftIsland MMIO protocol (native required)
     """
 
-    def __init__(self, backend: str = "sim"):
+    def __init__(self, backend: str = "sim", *, caps: Optional[Caps] = None):
         be = backend.lower().replace("_", "-")
         if be in ("mmio-soft", "mmio"):
             be = "mmio"
@@ -142,9 +142,10 @@ class Device:
             raise ValueError("backend must be 'sim' or 'mmio'/'mmio-soft'")
         self._native = _try_native()
         self._dev = None
-        self._caps = Caps()
+        self._caps = caps or Caps()
         self._last_pmu = Pmu()
         self.backend = be
+        self.profile_id: Optional[str] = None
 
         if be == "sim":
             if self._native is not None and hasattr(self._native, "Sim"):
@@ -153,6 +154,9 @@ class Device:
                 self._refresh_caps_native()
             else:
                 self.backend = "sim-python"
+            if caps is not None:
+                # Explicit profile/caps override wins over native defaults.
+                self._caps = caps
         else:
             if self._native is None or not hasattr(self._native, "Mmio"):
                 raise RuntimeError(
@@ -164,6 +168,36 @@ class Device:
             if hasattr(self._dev, "probe_caps"):
                 self._dev.probe_caps()
             self._refresh_caps_native()
+            if caps is not None:
+                self._caps = caps
+
+    @classmethod
+    def from_profile(cls, path: str) -> "Device":
+        """Open a device using a package profile TOML (backend + AccTile pins)."""
+        from .profile import Profile
+
+        pr = Profile.load_file(path)
+        be = pr.backend.lower().replace("_", "-")
+        if be in ("mmio-soft", "mapped", "mapped-file", "linux", "uio"):
+            be = "mmio"
+        elif be not in ("sim", "mmio"):
+            be = "sim"
+        caps = Caps(
+            acc_tile_m=pr.acc_tile_m,
+            acc_tile_n=pr.acc_tile_n,
+            acc_tile_k=pr.acc_tile_k,
+            macs_per_cycle=pr.macs_per_cycle,
+            noc_width=pr.noc_width,
+            clusters=1,
+            compute_ref=True,
+        )
+        try:
+            dev = cls(be, caps=caps)
+        except RuntimeError:
+            # SoftIsland native optional: fall back to sim with profile caps.
+            dev = cls("sim", caps=caps)
+        dev.profile_id = pr.id
+        return dev
 
     def _refresh_caps_native(self) -> None:
         if self._dev is None or not hasattr(self._dev, "caps"):

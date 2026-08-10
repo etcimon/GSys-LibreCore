@@ -11,13 +11,19 @@ from __future__ import annotations
 __version__ = "0.1.0"
 
 from .device import Caps, Device, Pmu, gemm_s8, pack_gemm_desc, tile_gemm
+from .golden import GoldenGemm, builtin_goldens, run_golden_suite
+from .profile import Profile
 
 __all__ = [
     "Caps",
     "Device",
+    "GoldenGemm",
     "Pmu",
+    "Profile",
+    "builtin_goldens",
     "gemm_s8",
     "pack_gemm_desc",
+    "run_golden_suite",
     "tile_gemm",
     "__version__",
 ]

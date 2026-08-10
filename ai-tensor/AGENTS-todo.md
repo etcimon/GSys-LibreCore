@@ -32,6 +32,7 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] `python/ai_tensor` high-level API (native optional, pure-Python fallback)
 - [x] PyO3 crate `ai-tensor-py` (`ai_tensor_native`) for optional native sim
 - [x] Surface Caps / max_tile / PMU in Python device API
+- [x] Python golden suite + Profile/`Device.from_profile` (lockstep with Rust goldens)
 - [ ] cbindgen `include/ai_tensor.h` (C ABI file) — optional; PyO3 covers M4 path
 
 ## M4 — PyTorch (high-level, pre-RTL)

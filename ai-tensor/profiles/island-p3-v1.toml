@@ -1,10 +1,10 @@
-# Pin stub for live I1/I3-lite island (MMIO backend not yet implemented — M5).
-# AccTile/PeLanes/Macs = 256; NocWidth = 64; PMU @ 0x180; base Variane 0x4000_0000.
+# Pin for live I1/I3-lite island geometry. SoftIsland MMIO is package-local (M5);
+# linux-uio is board path (feature linux-mmio / UIO). AccTile/Macs=256; NocWidth=64.
 id = "island-p3-v1"
 abi_rev = "0.1.0"
 isa_doc_rev = "monorepo:architecture/ai-matrix/isa-encoding.md"
-island_rev = "monorepo:ai-matrix-p1"  # track branch/tip when M5 lands
-backend = "linux-uio"                 # future; package still defaults to sim
+island_rev = "monorepo:ai-matrix-p1"
+backend = "linux-uio"                 # Device.from_profile falls back to sim if no native/UIO
 mmio_map = "island_p3_v1"
 mmio_base = "0x40000000"
 noc_width = 64
