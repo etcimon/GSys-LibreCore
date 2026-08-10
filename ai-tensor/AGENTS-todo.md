@@ -31,14 +31,14 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 
 - [x] `python/ai_tensor` high-level API (native optional, pure-Python fallback)
 - [x] PyO3 crate `ai-tensor-py` (`ai_tensor_native`) for optional native sim
-- [ ] Surface Caps / max_tile in Python device API
+- [x] Surface Caps / max_tile / PMU in Python device API
 - [ ] cbindgen `include/ai_tensor.h` (C ABI file) — optional; PyO3 covers M4 path
 
 ## M4 — PyTorch (high-level, pre-RTL)
 
 - [x] `ai_tensor.torch_ops.gemm_s8` / `check_close_to_torch` (no libtorch link in Rust)
 - [x] `python/examples/torch_island_smoke.py`
-- [ ] Auto-tile large matmul via IR `tile_gemm` when m/n/k > AccTile
+- [x] Auto-tile large matmul via host tile_gemm when m/n/k > AccTile
 - [ ] Official `torch.ops` C++ extension package (later; not required for sim bring-up)
 
 ## Phase A — Contract lock (hostless; absorbs I3-lite discovery)
@@ -58,7 +58,7 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [ ] Real UIO/VFIO map of Variane `0x4000_0000` on Linux board
 - [ ] PLIC-8 IRQ wait path (level clear before complete)
 - [ ] Cosim/replay against Variane harness (optional)
-- [ ] Python Caps / PMU surface + torch meta
+- [x] Python Caps / PMU surface + torch meta
 - [ ] `tools/check_independence.py`
 
 ## M6+ — TF / production RT

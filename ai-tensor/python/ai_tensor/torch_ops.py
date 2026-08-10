@@ -1,10 +1,9 @@
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 """
-High-level PyTorch helpers for island-class INT8 GEMM (sim backend).
+High-level PyTorch helpers for island-class INT8 GEMM.
 
-Does **not** require a custom libtorch extension: uses ``ai_tensor.Device`` and
-torch tensors on CPU. Suitable for validating ABI + reference compute before RTL GEMM.
+Uses ``ai_tensor.Device`` (sim or mmio-soft). Auto-tiles when m/n/k exceed AccTile.
 """
 
 from __future__ import annotations
@@ -25,23 +24,13 @@ def gemm_s8(
     *,
     device: Optional[Device] = None,
     ticket: int = 1,
+    auto_tile: bool = True,
+    backend: str = "sim",
 ) -> Tuple["torch.Tensor", dict]:
     """
-    INT8 matmul via ai-tensor sim: ``C[m,n] = A[m,k] @ B[k,n]`` with i32 accum.
+    INT8 matmul: ``C[m,n] = A[m,k] @ B[k,n]`` with i32 accum.
 
-    Parameters
-    ----------
-    a, b:
-        2-D CPU tensors. Converted to int8 (truncate) if needed.
-    ticket:
-        Software ticket written into the completion word / poll path.
-
-    Returns
-    -------
-    c:
-        int32 tensor ``[m, n]``
-    meta:
-        ``ticket``, ``status``, ``backend``
+    Returns ``(c, meta)`` where meta includes ticket, status, backend, caps, pmu, tiles.
     """
     if a.dim() != 2 or b.dim() != 2:
         raise ValueError("a and b must be 2-D")
@@ -54,20 +43,26 @@ def gemm_s8(
     k2, n = b_i.shape
     assert k == k2
 
-    dev = device or Device("sim")
-    c_list, tix, status = dev.gemm_s8(
+    dev = device or Device(backend)
+    c_list, tix, status, meta = dev.gemm_s8(
         int(m),
         int(n),
         int(k),
         a_i.reshape(-1).tolist(),
         b_i.reshape(-1).tolist(),
         ticket=ticket,
+        auto_tile=auto_tile,
     )
     if status != 0:
         raise RuntimeError(f"ai-tensor gemm failed status={status}")
 
     c = torch.tensor(c_list, dtype=torch.int32).reshape(m, n)
-    meta = {"ticket": tix, "status": status, "backend": dev.backend}
+    meta = {
+        **meta,
+        "ticket": tix,
+        "status": status,
+        "backend": dev.backend,
+    }
     return c, meta
 
 
@@ -76,9 +71,13 @@ def check_close_to_torch(
     b: "torch.Tensor",
     *,
     device: Optional[Device] = None,
+    backend: str = "sim",
+    auto_tile: bool = True,
 ) -> dict:
-    """Compare sim island path to torch int32 matmul of int8 operands."""
-    c_ait, meta = gemm_s8(a, b, device=device)
+    """Compare island path to torch int32 matmul of int8 operands."""
+    c_ait, meta = gemm_s8(
+        a, b, device=device, backend=backend, auto_tile=auto_tile
+    )
     a_i = a.detach().to(dtype=torch.int8, device="cpu").to(torch.int32)
     b_i = b.detach().to(dtype=torch.int8, device="cpu").to(torch.int32)
     c_ref = a_i @ b_i

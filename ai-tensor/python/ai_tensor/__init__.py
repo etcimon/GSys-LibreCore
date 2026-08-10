@@ -10,6 +10,14 @@ from __future__ import annotations
 
 __version__ = "0.1.0"
 
-from .device import Device, gemm_s8, pack_gemm_desc
+from .device import Caps, Device, Pmu, gemm_s8, pack_gemm_desc, tile_gemm
 
-__all__ = ["Device", "gemm_s8", "pack_gemm_desc", "__version__"]
+__all__ = [
+    "Caps",
+    "Device",
+    "Pmu",
+    "gemm_s8",
+    "pack_gemm_desc",
+    "tile_gemm",
+    "__version__",
+]
