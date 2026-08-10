@@ -8,7 +8,11 @@
 //
 // Phases:
 //   1) Load A → banked tile SRAM (bank = t % PeLanes)
-//   2) Load B → banked tile SRAM
+//      Multi-byte: one AXI beat unpacks up to min(8, PeLanes, k-t) consecutive
+//      A[i,t..] into distinct banks in one cycle (row-major).
+//   2) Load B → banked tile SRAM (bank = t % PeLanes)
+//      Beat-buffered: after AR/R, drain remaining j-bytes from the held beat
+//      without re-AR (same-bank writes, one/cycle).
 //   3) MAC: PeLanes parallel products/cycle via g6lc_ai_pe_dot
 //   4) Store C from single C bank
 //
@@ -74,6 +78,15 @@ module g6lc_ai_gemm_seq #(
   logic        ar_sent_q, ar_sent_d;
   logic        aw_sent_q, aw_sent_d;
   logic        w_sent_q, w_sent_d;
+
+  // A multi-byte unpack count (this R cycle)
+  logic [3:0]  la_n_d;
+  // B beat hold: leftover consecutive j-bytes after AR/R
+  logic [63:0] beat_q;
+  logic [2:0]  beat_lane_q, beat_lane_d;
+  logic [3:0]  beat_left_q, beat_left_d;
+  logic        beat_load_d;  // capture RDATA into beat_q
+  logic [63:0] beat_data_d;
 
   // ---- Banked A/B tile ports ----
   logic                 a_r_req  [PeLanes];
@@ -245,18 +258,24 @@ module g6lc_ai_gemm_seq #(
     axi_req_o.w.last   = 1'b1;
     axi_req_o.w.strb   = '0;
 
-    state_d   = state_q;
-    acc_d     = acc_q;
-    err_d     = err_q;
-    ar_sent_d = ar_sent_q;
-    aw_sent_d = aw_sent_q;
-    w_sent_d  = w_sent_q;
+    state_d     = state_q;
+    acc_d       = acc_q;
+    err_d       = err_q;
+    ar_sent_d   = ar_sent_q;
+    aw_sent_d   = aw_sent_q;
+    w_sent_d    = w_sent_q;
+    la_n_d      = 4'd0;
+    beat_left_d = beat_left_q;
+    beat_lane_d = beat_lane_q;
+    beat_load_d = 1'b0;
+    beat_data_d = beat_q;
 
     unique case (state_q)
       ST_IDLE: begin
-        ar_sent_d = 1'b0;
-        aw_sent_d = 1'b0;
-        w_sent_d  = 1'b0;
+        ar_sent_d   = 1'b0;
+        aw_sent_d   = 1'b0;
+        w_sent_d    = 1'b0;
+        beat_left_d = 4'd0;
         if (start_i) begin
           err_d   = 1'b0;
           state_d = ST_CHK;
@@ -270,12 +289,13 @@ module g6lc_ai_gemm_seq #(
           err_d   = 1'b1;
           state_d = ST_DONE;
         end else begin
-          ar_sent_d = 1'b0;
-          state_d   = ST_LA;
+          ar_sent_d   = 1'b0;
+          beat_left_d = 4'd0;
+          state_d     = ST_LA;
         end
       end
 
-      // Load A element-by-element into bank t%PeLanes
+      // Load A: multi-byte unpack from one beat into distinct banks (t%PeLanes)
       ST_LA: begin
         axi_req_o.ar.addr = {a_cur[AddrWidth-1:3], 3'b000};
         if (!ar_sent_q) begin
@@ -284,34 +304,82 @@ module g6lc_ai_gemm_seq #(
         end
         axi_req_o.r_ready = 1'b1;
         if (ar_sent_q && axi_resp_i.r_valid) begin
-          a_w_req [t_bank(t_q)] = 1'b1;
-          a_w_addr[t_bank(t_q)] = a_bank_addr(i_q, t_q);
-          a_w_data[t_bank(t_q)] = byte_from_beat(axi_resp_i.r.data, a_cur[2:0]);
+          // n = min(k-t, 8-lane, PeLanes) consecutive elements
+          begin
+            automatic logic [2:0]  lane0;
+            automatic logic [31:0] n_take, rem_k, rem_beat;
+            lane0    = a_cur[2:0];
+            rem_k    = k_q - t_q;
+            rem_beat = 32'(8) - 32'(lane0);
+            n_take   = rem_k;
+            if (n_take > rem_beat) n_take = rem_beat;
+            if (n_take > PeLanes)  n_take = PeLanes;
+            la_n_d = n_take[3:0];
+            for (int unsigned p = 0; p < PeLanes; p++) begin
+              if (32'(p) < n_take) begin
+                automatic logic [31:0] tt;
+                tt = t_q + 32'(p);
+                a_w_req [t_bank(tt)] = 1'b1;
+                a_w_addr[t_bank(tt)] = a_bank_addr(i_q, tt);
+                a_w_data[t_bank(tt)] = byte_from_beat(
+                    axi_resp_i.r.data, 3'(unsigned'(lane0) + p));
+              end
+            end
+          end
           ar_sent_d = 1'b0;
-          if (t_q + 1 == k_q && i_q + 1 == m_q)
+          // end-of-A if this finishes last row
+          if ((t_q + 32'(la_n_d) >= k_q) && (i_q + 1 == m_q))
             state_d = ST_LB;
           else
             state_d = ST_LA;
         end
       end
 
+      // Load B: AR/R then drain rest of beat along j (same t-bank, 1/cycle)
       ST_LB: begin
-        axi_req_o.ar.addr = {b_cur[AddrWidth-1:3], 3'b000};
-        if (!ar_sent_q) begin
-          axi_req_o.ar_valid = 1'b1;
-          if (axi_resp_i.ar_ready) ar_sent_d = 1'b1;
-        end
-        axi_req_o.r_ready = 1'b1;
-        if (ar_sent_q && axi_resp_i.r_valid) begin
+        if (beat_left_q != 4'd0) begin
+          // Drain held beat — no AXI
           b_w_req [t_bank(t_q)] = 1'b1;
           b_w_addr[t_bank(t_q)] = b_bank_addr(t_q, j_q);
-          b_w_data[t_bank(t_q)] = byte_from_beat(axi_resp_i.r.data, b_cur[2:0]);
-          ar_sent_d = 1'b0;
+          b_w_data[t_bank(t_q)] = byte_from_beat(beat_q, beat_lane_q);
+          beat_left_d = beat_left_q - 4'd1;
+          beat_lane_d = beat_lane_q + 3'd1;
           if (j_q + 1 == n_q && t_q + 1 == k_q) begin
-            state_d = ST_MAC;
-            acc_d   = '0;
+            state_d     = ST_MAC;
+            acc_d       = '0;
+            beat_left_d = 4'd0;
           end else
             state_d = ST_LB;
+        end else begin
+          axi_req_o.ar.addr = {b_cur[AddrWidth-1:3], 3'b000};
+          if (!ar_sent_q) begin
+            axi_req_o.ar_valid = 1'b1;
+            if (axi_resp_i.ar_ready) ar_sent_d = 1'b1;
+          end
+          axi_req_o.r_ready = 1'b1;
+          if (ar_sent_q && axi_resp_i.r_valid) begin
+            b_w_req [t_bank(t_q)] = 1'b1;
+            b_w_addr[t_bank(t_q)] = b_bank_addr(t_q, j_q);
+            b_w_data[t_bank(t_q)] = byte_from_beat(axi_resp_i.r.data, b_cur[2:0]);
+            ar_sent_d   = 1'b0;
+            beat_load_d = 1'b1;
+            beat_data_d = axi_resp_i.r.data[63:0];
+            // leftover bytes in beat after this lane, limited by row remainder
+            begin
+              automatic logic [31:0] left_beat, rem_row;
+              left_beat = 32'(7) - 32'(b_cur[2:0]);
+              rem_row   = n_q - j_q - 32'd1;
+              if (left_beat > rem_row) left_beat = rem_row;
+              beat_left_d = left_beat[3:0];
+              beat_lane_d = b_cur[2:0] + 3'd1;
+            end
+            if (j_q + 1 == n_q && t_q + 1 == k_q) begin
+              state_d     = ST_MAC;
+              acc_d       = '0;
+              beat_left_d = 4'd0;
+            end else
+              state_d = ST_LB;
+          end
         end
       end
 
@@ -397,14 +465,20 @@ module g6lc_ai_gemm_seq #(
       ar_sent_q <= 1'b0;
       aw_sent_q <= 1'b0;
       w_sent_q <= 1'b0;
+      beat_q <= '0;
+      beat_lane_q <= '0;
+      beat_left_q <= '0;
     end else begin
-      state_q   <= state_d;
-      acc_q     <= acc_d;
-      err_q     <= err_d;
-      ar_sent_q <= ar_sent_d;
-      aw_sent_q <= aw_sent_d;
-      w_sent_q  <= w_sent_d;
-      done_q    <= (state_q == ST_DONE);
+      state_q     <= state_d;
+      acc_q       <= acc_d;
+      err_q       <= err_d;
+      ar_sent_q   <= ar_sent_d;
+      aw_sent_q   <= aw_sent_d;
+      w_sent_q    <= w_sent_d;
+      beat_left_q <= beat_left_d;
+      beat_lane_q <= beat_lane_d;
+      if (beat_load_d) beat_q <= beat_data_d;
+      done_q      <= (state_q == ST_DONE);
 
       if (state_q == ST_IDLE && start_i) begin
         m_q   <= m_i;
@@ -418,13 +492,14 @@ module g6lc_ai_gemm_seq #(
         i_q   <= '0;
         j_q   <= '0;
         t_q   <= '0;
+        beat_left_q <= '0;
       end
 
-      // A load: walk t fastest, then i
+      // A load: advance t by la_n_d (multi-byte unpack)
       if (state_q == ST_LA && ar_sent_q && axi_resp_i.r_valid) begin
         if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
           err_q <= 1'b1;
-        if (t_q + 1 == k_q) begin
+        if (t_q + 32'(la_n_d) >= k_q) begin
           t_q <= '0;
           if (i_q + 1 != m_q)
             i_q <= i_q + 1;
@@ -434,15 +509,18 @@ module g6lc_ai_gemm_seq #(
             t_q <= '0;
           end
         end else
-          t_q <= t_q + 1;
+          t_q <= t_q + 32'(la_n_d);
       end
 
-      // B load: walk j fastest, then t
-      if (state_q == ST_LB && ar_sent_q && axi_resp_i.r_valid) begin
-        if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+      // B load: one element per cycle (AR/R or beat drain)
+      if (state_q == ST_LB &&
+          ((beat_left_q != 4'd0) || (ar_sent_q && axi_resp_i.r_valid))) begin
+        if (ar_sent_q && axi_resp_i.r_valid &&
+            (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}))
           err_q <= 1'b1;
         if (j_q + 1 == n_q) begin
           j_q <= '0;
+          beat_left_q <= '0;  // new row needs fresh AR (overrides comb drain)
           if (t_q + 1 != k_q)
             t_q <= t_q + 1;
           else begin

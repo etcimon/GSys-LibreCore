@@ -24,7 +24,7 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_mem_store.sv` | AXI single-beat store (completion word) | **landed** |
 | `g6lc_ai_tile_sram.sv` | dual-port Latency=0 `tc_sram` tile bank (A/B int8, C int32) | **landed** |
 | `g6lc_ai_pe_dot.sv` | multi-lane INT8 MAC slice (PeLanes products/cycle) | **landed** |
-| `g6lc_ai_gemm_seq.sv` | I1-lite GEMM: banked A/B tiles + PE + store C | **landed** |
+| `g6lc_ai_gemm_seq.sv` | I1-lite GEMM: banked A/B + multi-byte A unpack + B beat drain + PE | **landed** |
 
 Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=8**,
 **AccTileM/N/K=16**. Island top binds `gemm_seq.MaxDim = AccTileM` and
