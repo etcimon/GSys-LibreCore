@@ -37,7 +37,7 @@ package g6lc_ai_island_cfg_pkg;
   // I1 live RTL: AccTile*=256 / PeLanes=256 (1 MAC cycle per C at full tile).
   // Multi-bank C (j%PeLanes) → each bank MaxDim*1 words (256xi32 @256/256).
   // gemm_seq binds MaxDim/PeLanes from AccTileM / MacsPerCycle.
-  // I3-lite: multi-beat AR/AW + B oct-drain + dual-bank C-read + PMU→CAP; NoC 64.
+  // I3-lite: multi-beat AR/AW + B oct-drain + trail C-store during MAC + PMU→CAP; NoC 64.
   localparam ai_island_cfg_t AiIslandLatencyDefault = '{
       Clusters:     unsigned'(1),
       MacsPerCycle: unsigned'(256),           // PeLanes = AccTileK (full-width MAC)

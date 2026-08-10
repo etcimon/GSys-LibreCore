@@ -16,6 +16,8 @@
 //   4) Store C: dual-i32 pack on ≥64-bit bus; multi-beat INCR AW (up to
 //      MaxBurstBeats pair-beats) along a C row; dual-bank combo read so
 //      each W is one cycle when PeLanes>=2 (j and j+1 different banks).
+//      I3: trail-store completed rows during MAC (stc_i < mac_i) so C AW/W
+//      rides free AXI cycles; drain tail after last MAC row.
 //
 // C multi-banked (j % PeLanes). Beat packing parameterized by DataWidth.
 // Bursts stay within a single A row (k), B row (n), or C row (n); never cross.
@@ -63,8 +65,8 @@ module g6lc_ai_gemm_seq #(
   localparam int unsigned BytesPerBeat  = DataWidth / 8;
   localparam int unsigned BeatAlignW    = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
   localparam int unsigned BeatLaneW     = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
-  // Max beats per AR (AXI4 allows 256; 64 balances xbar buffers vs AR overhead)
-  localparam int unsigned MaxBurstBeats = 64;
+  // Max beats per AR/AW (AXI4 max 256 → len=255; keep ≤255 for 8-bit counters)
+  localparam int unsigned MaxBurstBeats = 255;
 
   typedef enum logic [3:0] {
     ST_IDLE  = 4'd0,
@@ -105,12 +107,17 @@ module g6lc_ai_gemm_seq #(
   // C dual-store: dual-bank combo read of C[j],C[j+1] → one W/cycle (PeLanes≥2).
   // Multi-beat: AW once with len=nbeats-1; stream W; advance j on B by stc_elem.
   // PeLanes==1 falls back to pair-hold (same bank for j and j+1).
+  // Trail cursor (stc_i/stc_j) is independent of MAC (i_q/j_q): store rows with
+  // stc_i < i_q while MAC advances; i_q==m means MAC finished all rows.
   logic        c_pair_hold_q, c_pair_hold_d;
   logic [31:0] c_lo_q;
   logic        c_lo_we_d;
-  logic [7:0]  stc_w_left_q, stc_w_left_d;  // remaining W beats in open AW
-  logic [7:0]  stc_elem_q, stc_elem_d;      // elements covered by open AW (B retire)
-  logic [7:0]  stc_n_d;                     // elements retired on B (stc_elem)
+  logic [8:0]  stc_w_left_q, stc_w_left_d;  // remaining W beats (1..256)
+  logic [15:0] stc_elem_q, stc_elem_d;      // elements covered by open AW
+  logic [15:0] stc_n_d;                     // elements retired on B
+  logic [31:0] stc_i_q, stc_j_q;            // store cursor (row/col)
+  logic        stc_i_en, stc_j_en;          // advance store cursor this cycle
+  logic [31:0] stc_i_d, stc_j_d;
   localparam bit DualCRead = (PeLanes >= 2);
 
   // ---- Banked A/B tile ports ----
@@ -359,7 +366,8 @@ module g6lc_ai_gemm_seq #(
   logic [AddrWidth-1:0] a_cur, b_cur, c_store_addr;
   assign a_cur        = a_addr(pa_q, i_q, t_q, lda_q);
   assign b_cur        = b_addr(pb_q, t_q, j_q, ldb_q);
-  assign c_store_addr = c_addr(pc_q, i_q, j_q, n_q);
+  // Store address uses trail cursor (not MAC i/j)
+  assign c_store_addr = c_addr(pc_q, stc_i_q, stc_j_q, n_q);
 
   always_comb begin
     // defaults: idle banks + AXI
@@ -447,6 +455,10 @@ module g6lc_ai_gemm_seq #(
     stc_w_left_d    = stc_w_left_q;
     stc_elem_d      = stc_elem_q;
     stc_n_d         = stc_elem_q;  // default: retire full open AW on B
+    stc_i_en        = 1'b0;
+    stc_j_en        = 1'b0;
+    stc_i_d         = stc_i_q;
+    stc_j_d         = stc_j_q;
 
     unique case (state_q)
       ST_IDLE: begin
@@ -694,112 +706,235 @@ module g6lc_ai_gemm_seq #(
       end
 
       // Parallel MAC: lanes cover t_q .. t_q+PeLanes-1
+      // Trail-store: when DualCRead and stc_i < i_q, stream completed rows on
+      // free AXI (MAC does not use AXI). i_q==m means MAC finished all rows.
       ST_MAC: begin
-        for (int unsigned p = 0; p < PeLanes; p++) begin
-          automatic logic [31:0] tt;
-          tt = t_q + 32'(p);
-          if (tt < k_q) begin
-            a_r_req [p] = 1'b1;
-            a_r_addr[p] = a_bank_addr(i_q, tt);
-            b_r_req [p] = 1'b1;
-            b_r_addr[p] = b_bank_addr(tt, j_q);
-            pe_a[p]     = $signed(a_r_data[p]);
-            pe_b[p]     = $signed(b_r_data[p]);
-            pe_v[p]     = 1'b1;
+        begin
+          automatic logic mac_active;
+          automatic logic can_trail;
+          automatic logic        can_pair;
+          automatic logic [31:0] pairs_rem, nbeats, beats_done, j_eff;
+          mac_active = (i_q < m_q);
+          can_trail  = DualCRead && (DataWidth >= 64) && (stc_i_q < i_q ||
+                       (i_q >= m_q && stc_i_q < m_q));
+
+          if (mac_active) begin
+            for (int unsigned p = 0; p < PeLanes; p++) begin
+              automatic logic [31:0] tt;
+              tt = t_q + 32'(p);
+              if (tt < k_q) begin
+                a_r_req [p] = 1'b1;
+                a_r_addr[p] = a_bank_addr(i_q, tt);
+                b_r_req [p] = 1'b1;
+                b_r_addr[p] = b_bank_addr(tt, j_q);
+                pe_a[p]     = $signed(a_r_data[p]);
+                pe_b[p]     = $signed(b_r_data[p]);
+                pe_v[p]     = 1'b1;
+              end
+            end
+            acc_d = pe_acc_out;
+            if (t_q + PeLanes >= k_q) begin
+              // C[i,j] complete this cycle
+              c_w_req  = 1'b1;
+              c_w_bank = c_bank(j_q);
+              c_w_addr = c_bank_addr(i_q, j_q);
+              c_w_data = pe_acc_out;
+            end
           end
-        end
-        acc_d = pe_acc_out;
-        // Advance reduction base by PeLanes
-        if (t_q + PeLanes >= k_q) begin
-          // C[i,j] complete this cycle
-          c_w_req  = 1'b1;
-          c_w_bank = c_bank(j_q);
-          c_w_addr = c_bank_addr(i_q, j_q);
-          c_w_data = pe_acc_out;
-          if (j_q + 1 == n_q && i_q + 1 == m_q) begin
+
+          // Trail C-store (same pair path as ST_STC, cursor stc_i/stc_j)
+          if (can_trail) begin
+            can_pair = !stc_j_q[0] && (stc_j_q + 1 < n_q);
+            if (can_pair) begin
+              if (!aw_sent_q) begin
+                pairs_rem = (n_q - stc_j_q) >> 1;
+                nbeats    = pairs_rem;
+                if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
+                if (nbeats == 0) nbeats = 1;
+                axi_req_o.aw.addr  = c_store_addr;
+                axi_req_o.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
+                axi_req_o.aw.size  = axi_pkg::size_t'(3);
+                axi_req_o.aw_valid = 1'b1;
+                if (axi_resp_i.aw_ready) begin
+                  aw_sent_d     = 1'b1;
+                  stc_w_left_d  = nbeats[8:0];
+                  stc_elem_d    = nbeats[15:0] << 1;
+                  w_sent_d      = 1'b0;
+                  c_pair_hold_d = 1'b0;
+                end
+              end else if (stc_w_left_q != 9'd0) begin
+                beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
+                j_eff      = stc_j_q + (beats_done << 1);
+                c_r0_req  = 1'b1;
+                c_r0_bank = c_bank(j_eff);
+                c_r0_addr = c_bank_addr(stc_i_q, j_eff);
+                c_r1_req  = 1'b1;
+                c_r1_bank = c_bank(j_eff + 32'd1);
+                c_r1_addr = c_bank_addr(stc_i_q, j_eff + 32'd1);
+                axi_req_o.w.data  = DataWidth'({c_r1_data, c_r0_data});
+                axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
+                axi_req_o.w.last  = (stc_w_left_q == 9'd1);
+                axi_req_o.w_valid = 1'b1;
+                if (axi_resp_i.w_ready) begin
+                  stc_w_left_d = stc_w_left_q - 9'd1;
+                  if (stc_w_left_q == 9'd1)
+                    w_sent_d = 1'b1;
+                end
+              end else begin
+                axi_req_o.b_ready = 1'b1;
+                stc_n_d = stc_elem_q;
+                if (axi_resp_i.b_valid) begin
+                  if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR,
+                                                axi_pkg::RESP_SLVERR})
+                    err_d = 1'b1;
+                  aw_sent_d     = 1'b0;
+                  w_sent_d      = 1'b0;
+                  c_pair_hold_d = 1'b0;
+                  stc_elem_d    = '0;
+                  // advance store cursor
+                  if (stc_j_q + 32'(stc_elem_q) >= n_q) begin
+                    stc_j_en = 1'b1;
+                    stc_j_d  = '0;
+                    stc_i_en = 1'b1;
+                    stc_i_d  = stc_i_q + 32'd1;
+                  end else begin
+                    stc_j_en = 1'b1;
+                    stc_j_d  = stc_j_q + 32'(stc_elem_q);
+                  end
+                end
+              end
+            end else begin
+              // Single i32 (odd n tail)
+              c_r0_req  = 1'b1;
+              c_r0_bank = c_bank(stc_j_q);
+              c_r0_addr = c_bank_addr(stc_i_q, stc_j_q);
+              axi_req_o.aw.addr = c_store_addr;
+              axi_req_o.aw.size = axi_pkg::size_t'(2);
+              if (DataWidth >= 64 && c_store_addr[2]) begin
+                axi_req_o.w.data = DataWidth'({c_r0_data, 32'h0});
+                axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hF0};
+              end else begin
+                axi_req_o.w.data = DataWidth'(c_r0_data);
+                axi_req_o.w.strb = {{(DataWidth/8-4){1'b0}}, 4'hF};
+              end
+              stc_n_d = 16'd1;
+              if (!aw_sent_q) begin
+                axi_req_o.aw_valid = 1'b1;
+                if (axi_resp_i.aw_ready) begin
+                  aw_sent_d  = 1'b1;
+                  stc_elem_d = 16'd1;
+                end
+              end
+              if (!w_sent_q) begin
+                axi_req_o.w_valid = 1'b1;
+                if (axi_resp_i.w_ready) w_sent_d = 1'b1;
+              end
+              axi_req_o.b_ready = 1'b1;
+              if (aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
+                if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR,
+                                              axi_pkg::RESP_SLVERR})
+                  err_d = 1'b1;
+                aw_sent_d     = 1'b0;
+                w_sent_d      = 1'b0;
+                c_pair_hold_d = 1'b0;
+                stc_elem_d    = '0;
+                if (stc_j_q + 1 >= n_q) begin
+                  stc_j_en = 1'b1;
+                  stc_j_d  = '0;
+                  stc_i_en = 1'b1;
+                  stc_i_d  = stc_i_q + 32'd1;
+                end else begin
+                  stc_j_en = 1'b1;
+                  stc_j_d  = stc_j_q + 32'd1;
+                end
+              end
+            end
+          end
+
+          // Exit: MAC done (i>=m) and store done (stc_i>=m)
+          if (i_q >= m_q && stc_i_q >= m_q && !aw_sent_q)
+            state_d = ST_DONE;
+          else if (i_q >= m_q && stc_i_q >= m_q && aw_sent_q)
+            state_d = ST_MAC;  // finish open AW/B
+          else if (!DualCRead && i_q >= m_q) begin
+            // PeLanes==1: fall back to dedicated ST_STC
             state_d       = ST_STC;
             aw_sent_d     = 1'b0;
             w_sent_d      = 1'b0;
             c_pair_hold_d = 1'b0;
-            stc_w_left_d  = 8'd0;
-            stc_elem_d    = 8'd0;
+            stc_w_left_d  = '0;
+            stc_elem_d    = '0;
           end else
             state_d = ST_MAC;
-        end else
-          state_d = ST_MAC;
+        end
       end
 
       ST_STC: begin
-        // Multi-beat pair path (≥64-bit): AW once, stream {hi,lo} W beats,
-        // retire j by stc_elem on B. Single-i32 path when j odd or last col.
+        // Fallback single-lane / non-trail path (also used if trail disabled).
+        // Multi-beat pair path (≥64-bit) on stc_i/stc_j cursor.
         begin
           automatic logic        can_pair;
           automatic logic [31:0] pairs_rem, nbeats, beats_done, j_eff;
-          can_pair = (DataWidth >= 64) && !j_q[0] && (j_q + 1 < n_q);
+          can_pair = (DataWidth >= 64) && !stc_j_q[0] && (stc_j_q + 1 < n_q);
 
           if (can_pair) begin
-            // ---- open AW for up to MaxBurstBeats pair-beats along the row ----
             if (!aw_sent_q) begin
-              pairs_rem = (n_q - j_q) >> 1;
+              pairs_rem = (n_q - stc_j_q) >> 1;
               nbeats    = pairs_rem;
               if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
               if (nbeats == 0) nbeats = 1;
-              axi_req_o.aw.addr  = c_store_addr;  // j even ⇒ 8B aligned
-              axi_req_o.aw.len   = axi_pkg::len_t'(nbeats[7:0] - 8'd1);
-              axi_req_o.aw.size  = axi_pkg::size_t'(3);  // 8-byte beats
+              axi_req_o.aw.addr  = c_store_addr;
+              axi_req_o.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
+              axi_req_o.aw.size  = axi_pkg::size_t'(3);
               axi_req_o.aw_valid = 1'b1;
               if (axi_resp_i.aw_ready) begin
-                aw_sent_d    = 1'b1;
-                stc_w_left_d = nbeats[7:0];
-                stc_elem_d   = nbeats[7:0] << 1;  // 2 i32 per beat
-                w_sent_d     = 1'b0;
+                aw_sent_d     = 1'b1;
+                stc_w_left_d  = nbeats[8:0];
+                stc_elem_d    = nbeats[15:0] << 1;
+                w_sent_d      = 1'b0;
                 c_pair_hold_d = 1'b0;
               end
-            end else if (stc_w_left_q != 8'd0) begin
-              // beats already written = nbeats - w_left; j_eff = j + 2*done
+            end else if (stc_w_left_q != 9'd0) begin
               beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
-              j_eff      = j_q + (beats_done << 1);
+              j_eff      = stc_j_q + (beats_done << 1);
               if (DualCRead) begin
-                // Same-cycle dual-bank read → W (no pair-hold)
                 c_r0_req  = 1'b1;
                 c_r0_bank = c_bank(j_eff);
-                c_r0_addr = c_bank_addr(i_q, j_eff);
+                c_r0_addr = c_bank_addr(stc_i_q, j_eff);
                 c_r1_req  = 1'b1;
                 c_r1_bank = c_bank(j_eff + 32'd1);
-                c_r1_addr = c_bank_addr(i_q, j_eff + 32'd1);
+                c_r1_addr = c_bank_addr(stc_i_q, j_eff + 32'd1);
                 axi_req_o.w.data  = DataWidth'({c_r1_data, c_r0_data});
                 axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
-                axi_req_o.w.last  = (stc_w_left_q == 8'd1);
+                axi_req_o.w.last  = (stc_w_left_q == 9'd1);
                 axi_req_o.w_valid = 1'b1;
                 if (axi_resp_i.w_ready) begin
-                  stc_w_left_d = stc_w_left_q - 8'd1;
-                  if (stc_w_left_q == 8'd1)
+                  stc_w_left_d = stc_w_left_q - 9'd1;
+                  if (stc_w_left_q == 9'd1)
                     w_sent_d = 1'b1;
                 end
               end else if (!c_pair_hold_q) begin
-                // PeLanes==1: same bank — capture lo then hi
                 c_r0_req      = 1'b1;
                 c_r0_bank     = c_bank(j_eff);
-                c_r0_addr     = c_bank_addr(i_q, j_eff);
+                c_r0_addr     = c_bank_addr(stc_i_q, j_eff);
                 c_lo_we_d     = 1'b1;
                 c_pair_hold_d = 1'b1;
               end else begin
                 c_r0_req  = 1'b1;
                 c_r0_bank = c_bank(j_eff + 32'd1);
-                c_r0_addr = c_bank_addr(i_q, j_eff + 32'd1);
+                c_r0_addr = c_bank_addr(stc_i_q, j_eff + 32'd1);
                 axi_req_o.w.data  = DataWidth'({c_r0_data, c_lo_q});
                 axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
-                axi_req_o.w.last  = (stc_w_left_q == 8'd1);
+                axi_req_o.w.last  = (stc_w_left_q == 9'd1);
                 axi_req_o.w_valid = 1'b1;
                 if (axi_resp_i.w_ready) begin
-                  stc_w_left_d  = stc_w_left_q - 8'd1;
+                  stc_w_left_d  = stc_w_left_q - 9'd1;
                   c_pair_hold_d = 1'b0;
-                  if (stc_w_left_q == 8'd1)
+                  if (stc_w_left_q == 9'd1)
                     w_sent_d = 1'b1;
                 end
               end
             end else begin
-              // all W issued — wait B, then retire stc_elem columns
               axi_req_o.b_ready = 1'b1;
               stc_n_d = stc_elem_q;
               if (axi_resp_i.b_valid) begin
@@ -808,20 +943,29 @@ module g6lc_ai_gemm_seq #(
                 aw_sent_d     = 1'b0;
                 w_sent_d      = 1'b0;
                 c_pair_hold_d = 1'b0;
-                stc_elem_d    = 8'd0;
-                if (j_q + 32'(stc_elem_q) >= n_q && i_q + 1 == m_q)
-                  state_d = ST_DONE;
-                else
-                  state_d = ST_STC;
+                stc_elem_d    = '0;
+                if (stc_j_q + 32'(stc_elem_q) >= n_q) begin
+                  stc_j_en = 1'b1;
+                  stc_j_d  = '0;
+                  stc_i_en = 1'b1;
+                  stc_i_d  = stc_i_q + 32'd1;
+                  if (stc_i_q + 1 >= m_q)
+                    state_d = ST_DONE;
+                  else
+                    state_d = ST_STC;
+                end else begin
+                  stc_j_en = 1'b1;
+                  stc_j_d  = stc_j_q + 32'(stc_elem_q);
+                  state_d  = ST_STC;
+                end
               end
             end
           end else begin
-            // Single i32 store (odd j or last column of odd-width row)
             c_r0_req  = 1'b1;
-            c_r0_bank = c_bank(j_q);
-            c_r0_addr = c_bank_addr(i_q, j_q);
+            c_r0_bank = c_bank(stc_j_q);
+            c_r0_addr = c_bank_addr(stc_i_q, stc_j_q);
             axi_req_o.aw.addr = c_store_addr;
-            axi_req_o.aw.size = axi_pkg::size_t'(2);  // 4B
+            axi_req_o.aw.size = axi_pkg::size_t'(2);
             if (DataWidth >= 64 && c_store_addr[2]) begin
               axi_req_o.w.data = DataWidth'({c_r0_data, 32'h0});
               axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hF0};
@@ -829,12 +973,12 @@ module g6lc_ai_gemm_seq #(
               axi_req_o.w.data = DataWidth'(c_r0_data);
               axi_req_o.w.strb = {{(DataWidth/8-4){1'b0}}, 4'hF};
             end
-            stc_n_d = 8'd1;
+            stc_n_d = 16'd1;
             if (!aw_sent_q) begin
               axi_req_o.aw_valid = 1'b1;
               if (axi_resp_i.aw_ready) begin
                 aw_sent_d  = 1'b1;
-                stc_elem_d = 8'd1;
+                stc_elem_d = 16'd1;
               end
             end
             if (!w_sent_q) begin
@@ -848,11 +992,21 @@ module g6lc_ai_gemm_seq #(
               aw_sent_d     = 1'b0;
               w_sent_d      = 1'b0;
               c_pair_hold_d = 1'b0;
-              stc_elem_d    = 8'd0;
-              if (j_q + 1 == n_q && i_q + 1 == m_q)
-                state_d = ST_DONE;
-              else
-                state_d = ST_STC;
+              stc_elem_d    = '0;
+              if (stc_j_q + 1 >= n_q) begin
+                stc_j_en = 1'b1;
+                stc_j_d  = '0;
+                stc_i_en = 1'b1;
+                stc_i_d  = stc_i_q + 32'd1;
+                if (stc_i_q + 1 >= m_q)
+                  state_d = ST_DONE;
+                else
+                  state_d = ST_STC;
+              end else begin
+                stc_j_en = 1'b1;
+                stc_j_d  = stc_j_q + 32'd1;
+                state_d  = ST_STC;
+              end
             end
           end
         end
@@ -884,6 +1038,8 @@ module g6lc_ai_gemm_seq #(
       c_lo_q <= '0;
       stc_w_left_q <= '0;
       stc_elem_q <= '0;
+      stc_i_q <= '0;
+      stc_j_q <= '0;
       pmu_r_q  <= '0;
       pmu_w_q  <= '0;
       pmu_cy_q <= '0;
@@ -932,6 +1088,8 @@ module g6lc_ai_gemm_seq #(
         c_pair_hold_q <= 1'b0;
         stc_w_left_q  <= '0;
         stc_elem_q    <= '0;
+        stc_i_q  <= '0;
+        stc_j_q  <= '0;
         pmu_r_q  <= '0;
         pmu_w_q  <= '0;
         pmu_cy_q <= '0;
@@ -976,34 +1134,25 @@ module g6lc_ai_gemm_seq #(
           j_q <= j_q + 32'(lb_n_d);
       end
 
-      // MAC: t_q is reduction base; advance by PeLanes, then (i,j)
-      if (state_q == ST_MAC) begin
+      // MAC: t_q is reduction base; advance by PeLanes, then (i,j).
+      // When last cell finishes, i_q := m (one past end) so trail store sees
+      // stc_i < i_q for all rows; j_q stays 0.
+      if (state_q == ST_MAC && i_q < m_q) begin
         if (t_q + PeLanes >= k_q) begin
           t_q   <= '0;
           acc_q <= '0;
           if (j_q + 1 == n_q) begin
             j_q <= '0;
-            if (i_q + 1 != m_q)
-              i_q <= i_q + 1;
-            else begin
-              i_q <= '0;
-              j_q <= '0;
-            end
+            i_q <= i_q + 1;  // becomes m when last row completes
           end else
             j_q <= j_q + 1;
         end else
           t_q <= t_q + PeLanes;
       end
 
-      // C store: advance by stc_n_d (1 or 2*nbeats) on B complete
-      if (state_q == ST_STC && aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
-        if (j_q + 32'(stc_n_d) >= n_q) begin
-          j_q <= '0;
-          if (i_q + 1 != m_q)
-            i_q <= i_q + 1;
-        end else
-          j_q <= j_q + 32'(stc_n_d);
-      end
+      // Store cursor (trail during MAC or dedicated ST_STC)
+      if (stc_i_en) stc_i_q <= stc_i_d;
+      if (stc_j_en) stc_j_q <= stc_j_d;
     end
   end
 
