@@ -29,8 +29,8 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=256**,
 **AccTileM/N/K=256** (SKU AccTile* live; 1 MAC cycle per C). C multi-banked
 (`j % PeLanes`) → each `tc_sram` is `MaxDim*1` words (256xi32 @256/256).
-I3-lite: B quad-drain + multi-beat AR/AW C-store + dual-bank C-read + PMU @0x180;
-CAP DRAM measured milli-GB/s; NoC 64b.
+I3-lite: B oct-drain (full 64b R) + multi-beat AR/AW C-store + dual-bank C-read +
+PMU @0x180; CAP DRAM measured milli-GB/s; NoC 64b.
 | `g6lc_ai_island_top.sv` | reg map + IRQ sticky + fetch/store/gemm AXI mux | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 (next) |
 | AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |

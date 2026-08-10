@@ -10,8 +10,8 @@
 //   1) Load A → banked tile SRAM (bank = t % PeLanes)
 //      Multi-byte unpack; AXI INCR burst (up to MaxBurstBeats) along the row.
 //   2) Load B → banked tile SRAM (bank = t % PeLanes)
-//      Quad-write same bank (up to 4 B/cycle, NumPorts=4) + AXI INCR along j;
-//      r_ready gated while draining a beat so mid-burst R waits.
+//      Oct-write same bank (up to 8 B/cycle, NumPorts=8) + AXI INCR along j;
+//      full 64b R beat drains in 1 cy; r_ready gated while draining leftovers.
 //   3) MAC: PeLanes parallel products/cycle via g6lc_ai_pe_dot
 //   4) Store C: dual-i32 pack on ≥64-bit bus; multi-beat INCR AW (up to
 //      MaxBurstBeats pair-beats) along a C row; dual-bank combo read so
@@ -92,9 +92,9 @@ module g6lc_ai_gemm_seq #(
   // First R of an A/B burst uses misaligned lane; later Rs are beat-aligned
   logic        burst_first_q, burst_first_d;
 
-  // A multi-byte unpack count (this R cycle); B multi-write count (1..4)
+  // A multi-byte unpack count (this R cycle); B multi-write count (1..8)
   logic [7:0]  la_n_d;
-  logic [2:0]  lb_n_d;
+  logic [3:0]  lb_n_d;
   // B beat hold: leftover consecutive j-bytes after AR/R
   logic [DataWidth-1:0] beat_q;
   logic [BeatLaneW-1:0] beat_lane_q, beat_lane_d;
@@ -127,7 +127,7 @@ module g6lc_ai_gemm_seq #(
   logic                 b_w_req  [PeLanes];
   logic [BankAddrW-1:0] b_w_addr [PeLanes];
   logic [7:0]           b_w_data [PeLanes];
-  // I3 B same-bank multi-write (w..w4): up to 4 B/cycle into one bank
+  // I3 B same-bank multi-write (w..w8): up to 8 B/cycle into one bank
   logic                 b_w2_req  [PeLanes];
   logic [BankAddrW-1:0] b_w2_addr [PeLanes];
   logic [7:0]           b_w2_data [PeLanes];
@@ -137,6 +137,18 @@ module g6lc_ai_gemm_seq #(
   logic                 b_w4_req  [PeLanes];
   logic [BankAddrW-1:0] b_w4_addr [PeLanes];
   logic [7:0]           b_w4_data [PeLanes];
+  logic                 b_w5_req  [PeLanes];
+  logic [BankAddrW-1:0] b_w5_addr [PeLanes];
+  logic [7:0]           b_w5_data [PeLanes];
+  logic                 b_w6_req  [PeLanes];
+  logic [BankAddrW-1:0] b_w6_addr [PeLanes];
+  logic [7:0]           b_w6_data [PeLanes];
+  logic                 b_w7_req  [PeLanes];
+  logic [BankAddrW-1:0] b_w7_addr [PeLanes];
+  logic [7:0]           b_w7_data [PeLanes];
+  logic                 b_w8_req  [PeLanes];
+  logic [BankAddrW-1:0] b_w8_addr [PeLanes];
+  logic [7:0]           b_w8_data [PeLanes];
 
   // C multi-bank (bank = j % PeLanes). Dual concurrent reads for pair-store:
   // j and j+1 always hit different banks when PeLanes >= 2 (live: 128).
@@ -167,7 +179,11 @@ module g6lc_ai_gemm_seq #(
         .w_req_i (a_w_req[p]), .w_addr_i(a_w_addr[p]), .w_data_i(a_w_data[p]),
         .w2_req_i(1'b0), .w2_addr_i('0), .w2_data_i('0),
         .w3_req_i(1'b0), .w3_addr_i('0), .w3_data_i('0),
-        .w4_req_i(1'b0), .w4_addr_i('0), .w4_data_i('0)
+        .w4_req_i(1'b0), .w4_addr_i('0), .w4_data_i('0),
+        .w5_req_i(1'b0), .w5_addr_i('0), .w5_data_i('0),
+        .w6_req_i(1'b0), .w6_addr_i('0), .w6_data_i('0),
+        .w7_req_i(1'b0), .w7_addr_i('0), .w7_data_i('0),
+        .w8_req_i(1'b0), .w8_addr_i('0), .w8_data_i('0)
     );
   end
 
@@ -175,7 +191,7 @@ module g6lc_ai_gemm_seq #(
     g6lc_ai_tile_sram #(
         .NumWords (BankWords),
         .DataWidth(8),
-        .NumPorts (4),  // I3: quad same-bank drain
+        .NumPorts (8),  // I3: oct same-bank drain (full 64b R beat)
         .ImplKey  ("g6lc_ai_tile_b")
     ) i_tile_b (
         .clk_i, .rst_ni, .testmode_i,
@@ -183,7 +199,11 @@ module g6lc_ai_gemm_seq #(
         .w_req_i (b_w_req[p]), .w_addr_i(b_w_addr[p]), .w_data_i(b_w_data[p]),
         .w2_req_i(b_w2_req[p]), .w2_addr_i(b_w2_addr[p]), .w2_data_i(b_w2_data[p]),
         .w3_req_i(b_w3_req[p]), .w3_addr_i(b_w3_addr[p]), .w3_data_i(b_w3_data[p]),
-        .w4_req_i(b_w4_req[p]), .w4_addr_i(b_w4_addr[p]), .w4_data_i(b_w4_data[p])
+        .w4_req_i(b_w4_req[p]), .w4_addr_i(b_w4_addr[p]), .w4_data_i(b_w4_data[p]),
+        .w5_req_i(b_w5_req[p]), .w5_addr_i(b_w5_addr[p]), .w5_data_i(b_w5_data[p]),
+        .w6_req_i(b_w6_req[p]), .w6_addr_i(b_w6_addr[p]), .w6_data_i(b_w6_data[p]),
+        .w7_req_i(b_w7_req[p]), .w7_addr_i(b_w7_addr[p]), .w7_data_i(b_w7_data[p]),
+        .w8_req_i(b_w8_req[p]), .w8_addr_i(b_w8_addr[p]), .w8_data_i(b_w8_data[p])
     );
   end
 
@@ -205,7 +225,11 @@ module g6lc_ai_gemm_seq #(
         .w_data_i(c_w_data),
         .w2_req_i(1'b0), .w2_addr_i('0), .w2_data_i('0),
         .w3_req_i(1'b0), .w3_addr_i('0), .w3_data_i('0),
-        .w4_req_i(1'b0), .w4_addr_i('0), .w4_data_i('0)
+        .w4_req_i(1'b0), .w4_addr_i('0), .w4_data_i('0),
+        .w5_req_i(1'b0), .w5_addr_i('0), .w5_data_i('0),
+        .w6_req_i(1'b0), .w6_addr_i('0), .w6_data_i('0),
+        .w7_req_i(1'b0), .w7_addr_i('0), .w7_data_i('0),
+        .w8_req_i(1'b0), .w8_addr_i('0), .w8_data_i('0)
     );
   end
 
@@ -282,7 +306,8 @@ module g6lc_ai_gemm_seq #(
 
   // Beats needed to transfer `rem` elements starting at byte offset `lane0`
   // (row-contiguous). Caps at MaxBurstBeats. Assumes PeLanes >= BytesPerBeat
-  // so each full beat is absorbed in one cycle for A (B drains multi-cycle).
+  // so each full beat is absorbed in one cycle for A; B oct-drain does the same
+  // at DataWidth=64 (up to 8 B/cycle).
   function automatic logic [7:0] beats_for_rem(
       input logic [31:0] rem,
       input logic [BeatLaneW-1:0] lane0
@@ -358,6 +383,18 @@ module g6lc_ai_gemm_seq #(
       b_w4_req[p] = 1'b0;
       b_w4_addr[p] = '0;
       b_w4_data[p] = '0;
+      b_w5_req[p] = 1'b0;
+      b_w5_addr[p] = '0;
+      b_w5_data[p] = '0;
+      b_w6_req[p] = 1'b0;
+      b_w6_addr[p] = '0;
+      b_w6_data[p] = '0;
+      b_w7_req[p] = 1'b0;
+      b_w7_addr[p] = '0;
+      b_w7_data[p] = '0;
+      b_w8_req[p] = 1'b0;
+      b_w8_addr[p] = '0;
+      b_w8_data[p] = '0;
       pe_a[p]     = '0;
       pe_b[p]     = '0;
       pe_v[p]     = 1'b0;
@@ -399,7 +436,7 @@ module g6lc_ai_gemm_seq #(
     aw_sent_d   = aw_sent_q;
     w_sent_d    = w_sent_q;
     la_n_d          = 8'd0;
-    lb_n_d          = 3'd1;
+    lb_n_d          = 4'd1;
     beat_left_d     = beat_left_q;
     beat_lane_d     = beat_lane_q;
     beat_load_d     = 1'b0;
@@ -492,7 +529,8 @@ module g6lc_ai_gemm_seq #(
         end
       end
 
-      // Load B: quad-drain (≤4/cycle) + multi-beat INCR; r_ready off while draining
+      // Load B: oct-drain (≤8/cycle = full 64b beat) + multi-beat INCR;
+      // r_ready off only if leftover beyond 8 (wider bus future)
       ST_LB: begin
         if (beat_left_q != 8'd0) begin
           // Drain held beat — hold R if a burst is still open
@@ -505,10 +543,10 @@ module g6lc_ai_gemm_seq #(
             rem_beat = 32'(beat_left_q);
             ntake    = rem_row;
             if (ntake > rem_beat) ntake = rem_beat;
-            if (ntake > 32'd4)    ntake = 32'd4;
+            if (ntake > 32'd8)    ntake = 32'd8;
             if (ntake == 0)       ntake = 32'd1;
-            lb_n_d = ntake[2:0];
-            // Port map: w=j+0, w2=j+1, w3=j+2, w4=j+3
+            lb_n_d = ntake[3:0];
+            // Port map: w=j+0 .. w8=j+7
             b_w_req [bk] = 1'b1;
             b_w_addr[bk] = b_bank_addr(t_q, j_q);
             b_w_data[bk] = byte_from_beat(beat_q, beat_lane_q);
@@ -526,6 +564,26 @@ module g6lc_ai_gemm_seq #(
               b_w4_req [bk] = 1'b1;
               b_w4_addr[bk] = b_bank_addr(t_q, j_q + 32'd3);
               b_w4_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 3));
+            end
+            if (ntake >= 32'd5) begin
+              b_w5_req [bk] = 1'b1;
+              b_w5_addr[bk] = b_bank_addr(t_q, j_q + 32'd4);
+              b_w5_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 4));
+            end
+            if (ntake >= 32'd6) begin
+              b_w6_req [bk] = 1'b1;
+              b_w6_addr[bk] = b_bank_addr(t_q, j_q + 32'd5);
+              b_w6_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 5));
+            end
+            if (ntake >= 32'd7) begin
+              b_w7_req [bk] = 1'b1;
+              b_w7_addr[bk] = b_bank_addr(t_q, j_q + 32'd6);
+              b_w7_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 6));
+            end
+            if (ntake >= 32'd8) begin
+              b_w8_req [bk] = 1'b1;
+              b_w8_addr[bk] = b_bank_addr(t_q, j_q + 32'd7);
+              b_w8_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 7));
             end
             beat_left_d = beat_left_q - ntake[7:0];
             beat_lane_d = BeatLaneW'(beat_lane_q + ntake[BeatLaneW-1:0]);
@@ -563,9 +621,9 @@ module g6lc_ai_gemm_seq #(
               rem_in_beat = 32'(BytesPerBeat) - 32'(lane0);
               ntake       = rem_row;
               if (ntake > rem_in_beat) ntake = rem_in_beat;
-              if (ntake > 32'd4)       ntake = 32'd4;
+              if (ntake > 32'd8)       ntake = 32'd8;
               if (ntake == 0)          ntake = 32'd1;
-              lb_n_d = ntake[2:0];
+              lb_n_d = ntake[3:0];
               b_w_req [bk] = 1'b1;
               b_w_addr[bk] = b_bank_addr(t_q, j_q);
               b_w_data[bk] = byte_from_beat(axi_resp_i.r.data, lane0);
@@ -586,6 +644,30 @@ module g6lc_ai_gemm_seq #(
                 b_w4_addr[bk] = b_bank_addr(t_q, j_q + 32'd3);
                 b_w4_data[bk] = byte_from_beat(
                     axi_resp_i.r.data, BeatLaneW'(lane0 + 3));
+              end
+              if (ntake >= 32'd5) begin
+                b_w5_req [bk] = 1'b1;
+                b_w5_addr[bk] = b_bank_addr(t_q, j_q + 32'd4);
+                b_w5_data[bk] = byte_from_beat(
+                    axi_resp_i.r.data, BeatLaneW'(lane0 + 4));
+              end
+              if (ntake >= 32'd6) begin
+                b_w6_req [bk] = 1'b1;
+                b_w6_addr[bk] = b_bank_addr(t_q, j_q + 32'd5);
+                b_w6_data[bk] = byte_from_beat(
+                    axi_resp_i.r.data, BeatLaneW'(lane0 + 5));
+              end
+              if (ntake >= 32'd7) begin
+                b_w7_req [bk] = 1'b1;
+                b_w7_addr[bk] = b_bank_addr(t_q, j_q + 32'd6);
+                b_w7_data[bk] = byte_from_beat(
+                    axi_resp_i.r.data, BeatLaneW'(lane0 + 6));
+              end
+              if (ntake >= 32'd8) begin
+                b_w8_req [bk] = 1'b1;
+                b_w8_addr[bk] = b_bank_addr(t_q, j_q + 32'd7);
+                b_w8_data[bk] = byte_from_beat(
+                    axi_resp_i.r.data, BeatLaneW'(lane0 + 7));
               end
               left_beat = rem_in_beat - ntake;
               rem_row   = n_q - j_q - ntake;
@@ -872,7 +954,7 @@ module g6lc_ai_gemm_seq #(
           t_q <= t_q + 32'(la_n_d);
       end
 
-      // B load: 1 or 2 elements/cycle (AR/R or dual beat drain)
+      // B load: up to 8 elements/cycle (AR/R or oct beat drain)
       if (state_q == ST_LB &&
           ((beat_left_q != 8'd0) || (ar_sent_q && axi_resp_i.r_valid))) begin
         if (ar_sent_q && axi_resp_i.r_valid &&
