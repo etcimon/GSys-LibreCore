@@ -34,18 +34,19 @@ package g6lc_ai_island_cfg_pkg;
     int unsigned WorkQuantumK;   // preemption boundary in k-steps
   } ai_island_cfg_t;
 
-  // I1-lite bring-up (live RTL): MaxDim=128, PeLanes=16 multi-MAC, one cluster.
-  // PeLanes held at 16 (synth/Verilator cost); AccTile grows toward SKU 256.
-  // Full SKU targets (Macs≈8k–12k, AccTile≈256) in AiIslandLatencySkuTarget.
+  // I1 live RTL: AccTile*=256 / PeLanes=16. Multi-bank C (j%PeLanes) keeps
+  // each tc_sram at MaxDim*ceil(MaxDim/PeLanes) words (4096xi32 @256/16);
+  // avoids a flat 65k-word C array that OOMs sim. gemm_seq binds
+  // MaxDim/PeLanes from AccTileM / MacsPerCycle.
   localparam ai_island_cfg_t AiIslandLatencyDefault = '{
       Clusters:     unsigned'(1),
       MacsPerCycle: unsigned'(16),            // PeLanes
       ClockKhz:     unsigned'(1_000_000),
-      SramBytes:    unsigned'(1024 * 1024),   // A/B banked + C (MaxDim=128) headroom
-      AccTileM:     unsigned'(128),           // MaxDim
-      AccTileN:     unsigned'(128),
-      AccTileK:     unsigned'(128),
-      NocWidth:     unsigned'(64),            // single AXI master today
+      SramBytes:    unsigned'(2 * 1024 * 1024), // A/B + multi-bank C (MaxDim=256)
+      AccTileM:     unsigned'(256),           // SKU AccTile* live freeze
+      AccTileN:     unsigned'(256),
+      AccTileK:     unsigned'(256),
+      NocWidth:     unsigned'(64),
       DramChannels: unsigned'(1),
       DramGBps:     unsigned'(0),             // not measured (I3)
       Queues:       unsigned'(2),
@@ -54,14 +55,13 @@ package g6lc_ai_island_cfg_pkg;
       WorkQuantumK: unsigned'(64)
   };
 
-  // Latency-SKU *target* (not yet elaborated): ~12–25 TOPS class at 1 GHz.
-  // Kept for docs / future package switch — do not wire until PE scales.
+  // Latency-SKU target: AccTile* = 256 frozen; full Macs/NoC/DRAM still open.
   localparam ai_island_cfg_t AiIslandLatencySkuTarget = '{
       Clusters:     unsigned'(1),
       MacsPerCycle: unsigned'(8192),
       ClockKhz:     unsigned'(1_000_000),
       SramBytes:    unsigned'(2 * 1024 * 1024),
-      AccTileM:     unsigned'(256),
+      AccTileM:     unsigned'(256),           // AccTile* freeze (matches live)
       AccTileN:     unsigned'(256),
       AccTileK:     unsigned'(256),
       NocWidth:     unsigned'(512),

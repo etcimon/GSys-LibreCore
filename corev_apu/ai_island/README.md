@@ -24,12 +24,12 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_mem_store.sv` | AXI single-beat store (completion word) | **landed** |
 | `g6lc_ai_tile_sram.sv` | dual-port Latency=0 `tc_sram` tile bank (A/B int8, C int32) | **landed** |
 | `g6lc_ai_pe_dot.sv` | multi-lane INT8 MAC slice (PeLanes products/cycle) | **landed** |
-| `g6lc_ai_gemm_seq.sv` | I1-lite GEMM: banked A/B load pack + dual-i32 C store + PE | **landed** |
+| `g6lc_ai_gemm_seq.sv` | I1 GEMM: banked A/B + multi-bank C + dual-i32 store + PE | **landed** |
 
 Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=16**,
-**AccTileM/N/K=128**. Island top binds `gemm_seq.MaxDim = AccTileM` and
-`PeLanes = MacsPerCycle` (square-tile assert). Full SKU placeholders:
-`AiIslandLatencySkuTarget` (not elaborated).
+**AccTileM/N/K=256** (SKU AccTile* live). C is multi-banked (`j % PeLanes`) so
+each `tc_sram` is `MaxDim*ceil(MaxDim/PeLanes)` words — the previous flat
+65k-word C array thrashed Verilator at AccTile=256.
 | `g6lc_ai_island_top.sv` | reg map + IRQ sticky + fetch/store/gemm AXI mux | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 (next) |
 | AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |

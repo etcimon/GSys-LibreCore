@@ -52,6 +52,7 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `spec-extensions/` | Further RISC-V ISA features (V, Zvk, Sv57, CFI, …) | Spec-anchored | `agents/spec/INDEX.md` + relevant guide |
 | `ai-matrix/` | INT8 matrix acceleration (`Xg6lcai`) for a PCIe CPU+AI card | Offload seam (CVXIF → accelerator) for the core-attached plane; an **uncore island** for the throughput plane — **not** an `ex_stage` edit | `ai-matrix/README.md` + `ai-matrix/scaling-100tops.md` + `uncore/pcie-endpoint.md` |
 | `sv-timing/` | Structural FO4 precompile package pointer (host = build-platform `timings`) | Tooling / host adapter | `sv-timing/AGENTS.md`, `AGENTS-host.md` |
+| `ai-tensor/` (package at repo root) | PyTorch/TensorFlow **backend** for `Xg6lcai` / `ai_island` (host software; not RTL) | Tooling / ML runtime | `ai-tensor/AGENTS.md`, `ai-tensor/architecture/` |
 
 Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings outs, `--from-timing` soak hand-off) is documented in [`build-platform-workspace-lifecycle.md`](build-platform-workspace-lifecycle.md) — not an RTL extension point; still scaffold-only (no flist).
 

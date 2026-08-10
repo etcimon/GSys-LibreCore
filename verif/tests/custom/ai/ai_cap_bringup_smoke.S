@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# Capability window must advertise I1-lite bring-up geometry:
-#   clusters=1, macs/cycle=16 (PeLanes), AccTile M/N/K log2 = 7 (tile=128).
+# Capability window must advertise I1 live geometry:
+#   clusters=1, macs/cycle=16 (PeLanes), AccTile M/N/K log2 = 8 (tile=256).
 # Soft-pass if island window is an error slave (non-AI package).
 
   .equ AI_BASE,        0x40000000
@@ -35,10 +35,10 @@ _start:
   li   t1, 16
   bne  t0, t1, fail
 
-  # packed log2(K)|log2(N)|log2(M) in low 12 bits — expect 7,7,7
+  # packed log2(K)|log2(N)|log2(M) in low 12 bits — expect 8,8,8
   lw   t0, CAP_BLOCK_MNK(s0)
   andi t1, t0, 0xF
-  li   t2, 7
+  li   t2, 8
   bne  t1, t2, fail
   srli t1, t0, 4
   andi t1, t1, 0xF

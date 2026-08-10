@@ -61,8 +61,11 @@ testlist:
     description: 64x64x64 all-ones GEMM (C=64)
     path: custom/ai/ai_gemm_s8_64x64_smoke.S
   - test: ai_gemm_s8_128x128_smoke
-    description: Full AccTile 128x128x128 all-ones GEMM (C=128 corners)
+    description: 128x128x128 all-ones GEMM under MaxDim=256 (C=128 corners)
     path: custom/ai/ai_gemm_s8_128x128_smoke.S
+  - test: ai_gemm_s8_256x256_smoke
+    description: Full AccTile 256x256x256 all-ones GEMM (C=256 corners; multi-bank C)
+    path: custom/ai/ai_gemm_s8_256x256_smoke.S
   - test: ai_cap_bringup_smoke
-    description: Capability window advertises I1-lite PeLanes=16 AccTile=128
+    description: Capability window advertises I1 PeLanes=16 AccTile=256
     path: custom/ai/ai_cap_bringup_smoke.S

@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# I1 rejects m=257 (> MaxDim=256) with ST_ERR.
+# Full AccTile GEMM: 256x256x256 INT8 (PeLanes=16 => 16 PE steps per C).
+#   A,B all-ones  C[i,j] = 256 for all 65536 elements.
+# Spot-check corners + mid to keep SW check time low.
+# Needs multi-bank C in g6lc_ai_gemm_seq (flat 65k bank thrashes Verilator).
 
   .equ AI_BASE,     0x40000000
   .equ AI_CTL,      0x100
@@ -11,7 +14,9 @@
   .equ AI_DSTATUS,  0x114
   .equ AI_REG0,     0x120
   .equ AI_DESC,     0x140
-  .equ ST_ERR,      1
+  .equ ST_OK,       0
+  .equ N,          256
+  .equ NN,         65536
 
   .section .text.init
   .globl _start
@@ -25,34 +30,53 @@ _start:
   li   t0, 1
   sw   t0, AI_CTL(s0)
 
+  # Region [0x80000000, 0x80200000) covers code + 256^2 A/B/C (~384 KiB data)
   li   t0, 0x80000000
   sw   t0, AI_REG0+0x0(s0)
   sw   zero, AI_REG0+0x4(s0)
-  li   t0, 0x80100000
+  li   t0, 0x80200000
   sw   t0, AI_REG0+0x8(s0)
   sw   zero, AI_REG0+0xC(s0)
   li   t0, 0x3
   sw   t0, AI_REG0+0x10(s0)
 
+  # Zero a few C slots we will check
+  la   t0, mat_c
+  sw   zero, 0(t0)
+  li   t1, 255
+  slli t1, t1, 2
+  add  t1, t0, t1
+  sw   zero, 0(t1)
+  li   t1, (128*256+128)
+  slli t1, t1, 2
+  add  t1, t0, t1
+  sw   zero, 0(t1)
+  li   t1, (255*256+255)
+  slli t1, t1, 2
+  add  t1, t0, t1
+  sw   zero, 0(t1)
+
   li   t0, (1 << 16) | 1
   sw   t0, AI_DESC+0x0(s0)
   sw   zero, AI_DESC+0x4(s0)
-  li   t0, 257                 # m > MaxDim (256)
+  li   t0, N
   sw   t0, AI_DESC+0x8(s0)
-  li   t0, 2
   sw   t0, AI_DESC+0xC(s0)
   sw   t0, AI_DESC+0x10(s0)
-  li   t0, 0x00020002
+  li   t0, 0x01000100
   sw   t0, AI_DESC+0x14(s0)
-  li   t0, 0x80010000
+  la   t0, mat_a
   sw   t0, AI_DESC+0x18(s0)
-  sw   zero, AI_DESC+0x1C(s0)
-  li   t0, 0x80011000
+  srli t1, t0, 32
+  sw   t1, AI_DESC+0x1C(s0)
+  la   t0, mat_b
   sw   t0, AI_DESC+0x20(s0)
-  sw   zero, AI_DESC+0x24(s0)
-  li   t0, 0x80012000
+  srli t1, t0, 32
+  sw   t1, AI_DESC+0x24(s0)
+  la   t0, mat_c
   sw   t0, AI_DESC+0x28(s0)
-  sw   zero, AI_DESC+0x2C(s0)
+  srli t1, t0, 32
+  sw   t1, AI_DESC+0x2C(s0)
   sw   zero, AI_DESC+0x30(s0)
   sw   zero, AI_DESC+0x34(s0)
   sw   zero, AI_DESC+0x38(s0)
@@ -61,11 +85,10 @@ _start:
   fence
   lw   zero, AI_CTL(s0)
 
-  li   t0, (13 << 8)
+  li   t0, (26 << 8)
   sw   t0, AI_DOORBELL(s0)
 
-  # Dim-err completes in a handful of cycles (no AXI traffic)
-  li   t2, 5000
+  li   t2, 50000000
 1:
   lw   t0, AI_DONE(s0)
   andi t0, t0, 1
@@ -77,11 +100,33 @@ _start:
   lw   t0, AI_DSTATUS(s0)
   slli t0, t0, 48
   srli t0, t0, 48
-  li   t1, ST_ERR
+  li   t1, ST_OK
   bne  t0, t1, fail
   lw   t0, AI_TICKET(s0)
-  li   t1, 13
+  li   t1, 26
   bne  t0, t1, fail
+
+  fence
+  # Spot-check C corners + mid == 256
+  la   t0, mat_c
+  li   t3, 256
+  lw   t2, 0(t0)
+  bne  t2, t3, fail
+  li   t1, 255
+  slli t1, t1, 2
+  add  t1, t0, t1
+  lw   t2, 0(t1)
+  bne  t2, t3, fail
+  li   t1, (128*256+128)
+  slli t1, t1, 2
+  add  t1, t0, t1
+  lw   t2, 0(t1)
+  bne  t2, t3, fail
+  li   t1, (255*256+255)
+  slli t1, t1, 2
+  add  t1, t0, t1
+  lw   t2, 0(t1)
+  bne  t2, t3, fail
 
 pass:
   li   a0, 1
@@ -100,6 +145,24 @@ trap_vec:
   la   t0, tohost
   sw   a0, 0(t0)
 5: j 5b
+
+  .section .data
+  .align 3
+  .globl mat_a
+mat_a:
+  .rept 65536
+  .byte 1
+  .endr
+  .align 3
+  .globl mat_b
+mat_b:
+  .rept 65536
+  .byte 1
+  .endr
+  .align 3
+  .globl mat_c
+mat_c:
+  .space 262144
 
   .section .tohost,"aw",@progbits
   .align 6

@@ -1,7 +1,7 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
-// Xg6lcai I1-lite: INT8 GEMM over AXI with banked tc_sram tiles + PE array.
+// Xg6lcai I1: INT8 GEMM over AXI with banked tc_sram tiles + PE array.
 //
 //   C[i,j] (i32) = sum_t A[i,t]*B[t,j]  with A,B int8, row-major
 //   lda/ldb from descriptor; C uses ldc = n (contiguous rows).
@@ -16,6 +16,10 @@
 //   3) MAC: PeLanes parallel products/cycle via g6lc_ai_pe_dot
 //   4) Store C: when j is even and j+1 < n, pack two i32 into one 64-bit
 //      AXI beat (Latency=0 C read: capture lo, then store {hi,lo}).
+//
+// C is multi-banked (bank = j % PeLanes, same depth as A/B banks) so AccTile=256
+// stays within Verilator/synth-friendly per-macro sizes (~4k words × PeLanes)
+// instead of one flat MaxDim² bank (65k words).
 //
 // Bounds: m,n,k ∈ [1, MaxDim]. Larger jobs return err without traffic.
 // Timing: multi-cycle; one outstanding AXI beat; no core critical path.
@@ -48,12 +52,10 @@ module g6lc_ai_gemm_seq #(
     input  axi_resp_t   axi_resp_i
 );
 
-  // Words per bank: MaxDim rows × ceil(MaxDim/PeLanes) cols along t (or j for B)
+  // Words per bank: MaxDim rows × ceil(MaxDim/PeLanes) cols along t (A/B) or j (C)
   localparam int unsigned KPerBank  = (MaxDim + PeLanes - 1) / PeLanes;
   localparam int unsigned BankWords = MaxDim * KPerBank;
   localparam int unsigned BankAddrW = (BankWords > 1) ? $clog2(BankWords) : 1;
-  localparam int unsigned CElems    = MaxDim * MaxDim;
-  localparam int unsigned CAddrW    = (CElems > 1) ? $clog2(CElems) : 1;
   localparam int unsigned LaneW     = (PeLanes > 1) ? $clog2(PeLanes) : 1;
 
   typedef enum logic [3:0] {
@@ -110,9 +112,12 @@ module g6lc_ai_gemm_seq #(
   logic [BankAddrW-1:0] b_w_addr [PeLanes];
   logic [7:0]           b_w_data [PeLanes];
 
+  // C multi-bank (single outstanding R or W; bank = j % PeLanes)
   logic                 c_r_req, c_w_req;
-  logic [CAddrW-1:0]    c_r_addr, c_w_addr;
+  logic [LaneW-1:0]     c_r_bank, c_w_bank;
+  logic [BankAddrW-1:0] c_r_addr, c_w_addr;
   logic [31:0]          c_r_data, c_w_data;
+  logic [31:0]          c_r_data_b [PeLanes];
 
   for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_a_banks
     g6lc_ai_tile_sram #(
@@ -138,15 +143,30 @@ module g6lc_ai_gemm_seq #(
     );
   end
 
-  g6lc_ai_tile_sram #(
-      .NumWords (CElems),
-      .DataWidth(32),
-      .ImplKey  ("g6lc_ai_tile_c")
-  ) i_tile_c (
-      .clk_i, .rst_ni, .testmode_i,
-      .r_req_i (c_r_req), .r_addr_i(c_r_addr), .r_data_o(c_r_data),
-      .w_req_i (c_w_req), .w_addr_i(c_w_addr), .w_data_i(c_w_data)
-  );
+  for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_c_banks
+    g6lc_ai_tile_sram #(
+        .NumWords (BankWords),
+        .DataWidth(32),
+        .ImplKey  ("g6lc_ai_tile_c")
+    ) i_tile_c (
+        .clk_i, .rst_ni, .testmode_i,
+        .r_req_i (c_r_req && (c_r_bank == LaneW'(p))),
+        .r_addr_i(c_r_addr),
+        .r_data_o(c_r_data_b[p]),
+        .w_req_i (c_w_req && (c_w_bank == LaneW'(p))),
+        .w_addr_i(c_w_addr),
+        .w_data_i(c_w_data)
+    );
+  end
+
+  // Latency=0 read mux (one bank selected per cycle)
+  always_comb begin
+    c_r_data = c_r_data_b[0];
+    for (int unsigned p = 1; p < PeLanes; p++) begin
+      if (c_r_bank == LaneW'(p))
+        c_r_data = c_r_data_b[p];
+    end
+  end
 
   // PE: multi-lane MAC (driven only in ST_MAC)
   logic signed [7:0] pe_a [PeLanes];
@@ -214,8 +234,15 @@ module g6lc_ai_gemm_seq #(
     return BankAddrW'(int'(j) * KPerBank + int'(t / PeLanes));
   endfunction
 
-  function automatic logic [CAddrW-1:0] c_idx(input logic [31:0] i, j);
-    return CAddrW'(int'(i) * MaxDim + int'(j));
+  // C bank map: bank = j % PeLanes; local = i * KPerBank + j / PeLanes
+  function automatic logic [LaneW-1:0] c_bank(input logic [31:0] j);
+    return LaneW'(j % PeLanes);
+  endfunction
+
+  function automatic logic [BankAddrW-1:0] c_bank_addr(
+      input logic [31:0] i, j
+  );
+    return BankAddrW'(int'(i) * KPerBank + int'(j / PeLanes));
   endfunction
 
   logic [AddrWidth-1:0] a_cur, b_cur, c_store_addr;
@@ -241,8 +268,10 @@ module g6lc_ai_gemm_seq #(
       pe_v[p]     = 1'b0;
     end
     c_r_req  = 1'b0;
+    c_r_bank = '0;
     c_r_addr = '0;
     c_w_req  = 1'b0;
+    c_w_bank = '0;
     c_w_addr = '0;
     c_w_data = '0;
 
@@ -414,7 +443,8 @@ module g6lc_ai_gemm_seq #(
         if (t_q + PeLanes >= k_q) begin
           // C[i,j] complete this cycle
           c_w_req  = 1'b1;
-          c_w_addr = c_idx(i_q, j_q);
+          c_w_bank = c_bank(j_q);
+          c_w_addr = c_bank_addr(i_q, j_q);
           c_w_data = pe_acc_out;
           if (j_q + 1 == n_q && i_q + 1 == m_q) begin
             state_d       = ST_STC;
@@ -436,14 +466,16 @@ module g6lc_ai_gemm_seq #(
           if (can_pair && !c_pair_hold_q) begin
             // Phase 0: capture C[i,j] (combo read → FF)
             c_r_req   = 1'b1;
-            c_r_addr  = c_idx(i_q, j_q);
+            c_r_bank  = c_bank(j_q);
+            c_r_addr  = c_bank_addr(i_q, j_q);
             c_lo_we_d = 1'b1;
             c_pair_hold_d = 1'b1;
             state_d   = ST_STC;
           end else if (can_pair && c_pair_hold_q) begin
             // Phase 1: C[i,j+1] + full-beat store {hi, lo}
             c_r_req  = 1'b1;
-            c_r_addr = c_idx(i_q, j_q + 32'd1);
+            c_r_bank = c_bank(j_q + 32'd1);
+            c_r_addr = c_bank_addr(i_q, j_q + 32'd1);
             axi_req_o.aw.addr = c_store_addr;  // j even ⇒ 8-byte aligned
             axi_req_o.w.data  = DataWidth'({c_r_data, c_lo_q});
             axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
@@ -471,7 +503,8 @@ module g6lc_ai_gemm_seq #(
           end else begin
             // Single i32 store
             c_r_req  = 1'b1;
-            c_r_addr = c_idx(i_q, j_q);
+            c_r_bank = c_bank(j_q);
+            c_r_addr = c_bank_addr(i_q, j_q);
             axi_req_o.aw.addr = c_store_addr;
             if (DataWidth >= 64 && c_store_addr[2]) begin
               axi_req_o.w.data = DataWidth'({c_r_data, 32'h0});
