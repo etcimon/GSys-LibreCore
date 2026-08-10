@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# 128x128x128 INT8 under MaxDim=256 (PeLanes=32 => 4 PE steps per C).
+# 128x128x128 INT8 under MaxDim=256 (PeLanes=64 => 2 PE steps per C).
 #   A,B all-ones → C[i,j] = 128 for all 16384 elements.
 # Spot-check corners + mid to keep SW check time low.
 
