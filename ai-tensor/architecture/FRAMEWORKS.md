@@ -66,13 +66,19 @@ Ship **inference custom ops** before autograd or Inductor.
 
 ## 3. TensorFlow (secondary)
 
-### 3.1 Phase M6 — custom ops
+### 3.1 Phase M6a — high-level Python (landed)
 
-- `AiTensorGemm` (and friends) via TF custom op / pluggable device C API.
-- **Same** `libai_tensor` as PyTorch.
-- Separate package `frameworks/tensorflow` so TF headers never enter core crates.
+- `ai_tensor.tf_ops.gemm_s8` / `check_close_to_tf` (optional `tensorflow` import).
+- Same `Device` / Desc64 path as PyTorch; example `python/examples/tf_island_smoke.py`.
+- Docs: `frameworks/tensorflow/README.md`.
 
-### 3.2 XLA
+### 3.2 Phase M6b — C++ custom ops (later)
+
+- `AiTensorGemm` via TF custom op / pluggable device C API.
+- Include **`include/ai_tensor.h`**; never pull TF headers into Rust crates.
+- Build out of tree under `frameworks/tensorflow/`.
+
+### 3.3 XLA
 
 Custom call only after eager custom ops are stable; not on the M0–M5 critical path.
 

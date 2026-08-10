@@ -66,17 +66,21 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] External cosim harness `tools/cosim_harness.py` + `AI_TENSOR_COSIM_CMD` protocol
   (ping + gemm job + suite; optional `AI_TENSOR_RUN_RTL` / `AI_TENSOR_RTL_CMD`)
 - [x] Wire `ait.py {golden,cosim,test}` + `run-ai-tensor.sh cosim`
-- [ ] Live Variane/ELF hard smoke (`AI_TENSOR_RTL_CMD` → directed TB/ELF) — lab opt-in
+- [x] Lab RTL adapter: `monorepo-soak/run-ai-tensor-rtl.sh` + `tools/rtl_smoke.py`
+  (soft default; `AI_TENSOR_RTL_HARD=1` → ai-matrix-veri subset)
+- [ ] Board-validated live TB with HARD=1 on CI host (lab opt-in)
 - [x] Python Caps / PMU surface + torch meta
 - [x] `tools/check_independence.py` + `ait.py check`
 
 ## M6+ — TF / production RT
 
-- [ ] TensorFlow custom op (same Desc64 path)
+- [x] TensorFlow high-level Python (`tf_ops` + example; TF optional)
+- [ ] TensorFlow C++ custom op / XLA (out-of-tree; use `include/ai_tensor.h`)
+- [x] C ABI header `include/ai_tensor.h` (Desc64 / completion / MMIO lock)
 - [x] Multi-tile desc stream (`stream.rs`: Queue, plan/run, zero-copy A/B lda/ldb)
 - [x] `run_gemm_s8_auto` → stream path; CLI `stream-gemm`
 - [x] WaitPolicy (Poll/IrqThenPoll/DmaThenClaim/ClaimOnly) + `soak_multi_queue` + CLI `queue-soak`
-- [x] Host adapter: `cva6-build tensor status|doctor|test|golden|cosim` (spawn only)
+- [x] Host adapter: `cva6-build tensor status|doctor|test|golden|cosim|queue-soak|rtl`
 - [ ] Multi-queue concurrent depth (island single-engine still sequential DONE)
 
 ## Open design notes

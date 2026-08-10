@@ -56,9 +56,10 @@ Mirror of `cva6-build timings` → `sv-timing`. Implementation:
 
 ```bash
 # from monorepo root
-bash monorepo-soak/run-ai-tensor.sh test    # independence + cargo + golden-check (+ harness)
+bash monorepo-soak/run-ai-tensor.sh test    # independence + cargo + golden + queue-soak
 bash monorepo-soak/run-ai-tensor.sh golden
 bash monorepo-soak/run-ai-tensor.sh cosim   # harness suite + CLI external checks
+bash monorepo-soak/run-ai-tensor.sh rtl     # soft lab probe (AI_TENSOR_RTL_HARD=1 for TB)
 AI_TENSOR_DIR=/path/to/ai-tensor bash monorepo-soak/run-ai-tensor.sh check
 ```
 
@@ -72,12 +73,16 @@ Still never add monorepo paths to package `Cargo.toml`.
 | External adapter | package `tools/cosim_harness.py` | `AI_TENSOR_COSIM_CMD` |
 | Monorepo spawn | `monorepo-soak/run-ai-tensor.sh` | sets env; never path-deps crates |
 | Host CLI | `cva6-build tensor …` | discovers package; spawns soak script |
-| Live RTL TB | lab only | `AI_TENSOR_RUN_RTL=1` + `AI_TENSOR_RTL_CMD=…` |
+| Live RTL TB | lab only | soft: `run-ai-tensor-rtl.sh`; hard: `AI_TENSOR_RTL_HARD=1` |
 
 Default harness path used by spawn / `ait.py test|cosim`:
 
 ```bash
 export AI_TENSOR_COSIM_CMD="python3 tools/cosim_harness.py"
+# optional hard TB (long):
+export AI_TENSOR_RUN_RTL=1 AI_TENSOR_RTL_HARD=1
+# default RTL adapter when RUN_RTL=1:
+#   bash monorepo-soak/run-ai-tensor-rtl.sh
 ```
 
 ## 7. Multi-tile desc stream (production RT)

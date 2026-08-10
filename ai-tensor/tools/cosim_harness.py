@@ -206,8 +206,15 @@ def rtl_smoke_probe() -> int:
         f"spawn={'ok' if spawn.is_file() else 'missing'}",
         f"trail_suite={'ok' if trail.is_file() else 'missing'}",
     ]
-    # Optional hard smoke: only if AI_TENSOR_RTL_CMD is set (user owns long TB rebuilds).
+    # Prefer explicit AI_TENSOR_RTL_CMD; else monorepo soft/hard adapter script.
     rtl_cmd = os.environ.get("AI_TENSOR_RTL_CMD", "").strip()
+    if not rtl_cmd:
+        script = mono / "monorepo-soak" / "run-ai-tensor-rtl.sh"
+        pkg_rtl = ROOT / "tools" / "rtl_smoke.py"
+        if script.is_file():
+            rtl_cmd = f"bash {script}"
+        elif pkg_rtl.is_file():
+            rtl_cmd = f"{sys.executable} {pkg_rtl}"
     if rtl_cmd:
         log(f"AI_TENSOR_RTL_CMD={rtl_cmd!r}")
         r = subprocess.run(["sh", "-c", rtl_cmd], cwd=str(mono))
@@ -216,7 +223,7 @@ def rtl_smoke_probe() -> int:
             return r.returncode
         print("rtl_smoke=ok " + " ".join(parts))
         return 0
-    print("rtl_smoke=skip reason=no_AI_TENSOR_RTL_CMD " + " ".join(parts))
+    print("rtl_smoke=skip reason=no_rtl_adapter " + " ".join(parts))
     return 0
 
 

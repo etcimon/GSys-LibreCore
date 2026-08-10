@@ -33,10 +33,23 @@ export function resolveAiTensorSpawnScript(ctx: PlatformContext): string | null 
   return existsSync(script) ? script : null;
 }
 
-export type TensorSpawnCmd = "check" | "test" | "golden" | "cosim";
+export type TensorSpawnCmd =
+  | "check"
+  | "test"
+  | "golden"
+  | "cosim"
+  | "queue-soak"
+  | "rtl";
 
 export function isTensorSpawnCmd(s: string): s is TensorSpawnCmd {
-  return s === "check" || s === "test" || s === "golden" || s === "cosim";
+  return (
+    s === "check" ||
+    s === "test" ||
+    s === "golden" ||
+    s === "cosim" ||
+    s === "queue-soak" ||
+    s === "rtl"
+  );
 }
 
 /**
@@ -162,6 +175,8 @@ export function formatTensorStatus(ctx: PlatformContext): Record<string, unknown
       "tensor test",
       "tensor golden",
       "tensor cosim",
+      "tensor queue-soak",
+      "tensor rtl",
     ],
   };
 }

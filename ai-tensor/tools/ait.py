@@ -79,7 +79,8 @@ def cmd_test(ns: argparse.Namespace) -> None:
         env["AI_TENSOR_COSIM_CMD"] = default_cosim_cmd()
         log(f"AI_TENSOR_COSIM_CMD={env['AI_TENSOR_COSIM_CMD']}")
     run([cargo, "run", "-q", "-p", "ai-tensor-cli", "--", "golden-check"], env=env)
-    # Python smoke + goldens (no torch required)
+    run([cargo, "run", "-q", "-p", "ai-tensor-cli", "--", "queue-soak", "--backend", "sim"])
+    # Python smoke + goldens (no torch/tf required)
     env_py = os.environ.copy()
     env_py["PYTHONPATH"] = str(ROOT / "python") + os.pathsep + env_py.get("PYTHONPATH", "")
     log("+ python -m ai_tensor")
@@ -98,6 +99,12 @@ def cmd_test(ns: argparse.Namespace) -> None:
     )
     if r.returncode != 0:
         sys.exit(r.returncode)
+    hdr = ROOT / "include" / "ai_tensor.h"
+    if hdr.is_file():
+        log(f"c_abi_header=ok path={hdr}")
+    else:
+        log("ERROR: missing include/ai_tensor.h")
+        sys.exit(1)
     try:
         import torch  # noqa: F401
 
@@ -111,6 +118,19 @@ def cmd_test(ns: argparse.Namespace) -> None:
             sys.exit(r.returncode)
     except ImportError:
         log("skip torch smoke (torch not installed)")
+    try:
+        import tensorflow  # noqa: F401
+
+        log("+ tf_island_smoke")
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "python" / "examples" / "tf_island_smoke.py")],
+            cwd=str(ROOT),
+            env=env_py,
+        )
+        if r.returncode != 0:
+            sys.exit(r.returncode)
+    except ImportError:
+        log("skip tf smoke (tensorflow not installed)")
     log("test: ok")
 
 
@@ -193,9 +213,42 @@ def main() -> None:
     p_cosim.add_argument(
         "--rtl",
         action="store_true",
-        help="set AI_TENSOR_RUN_RTL=1 (soft monorepo probe; AI_TENSOR_RTL_CMD for real TB)",
+        help="set AI_TENSOR_RUN_RTL=1 (soft monorepo probe; AI_TENSOR_RTL_HARD=1 for live TB)",
     )
     p_cosim.set_defaults(func=cmd_cosim)
+    sp.add_parser("queue-soak", help="CLI multi-queue + WaitPolicy soak").set_defaults(
+        func=lambda _: (
+            run(
+                [
+                    shutil.which("cargo") or "cargo",
+                    "run",
+                    "-q",
+                    "-p",
+                    "ai-tensor-cli",
+                    "--",
+                    "queue-soak",
+                    "--backend",
+                    "sim",
+                ]
+            ),
+            run(
+                [
+                    shutil.which("cargo") or "cargo",
+                    "run",
+                    "-q",
+                    "-p",
+                    "ai-tensor-cli",
+                    "--",
+                    "queue-soak",
+                    "--backend",
+                    "mmio",
+                ]
+            ),
+        )
+    )
+    sp.add_parser("rtl", help="lab RTL soft/hard smoke (tools/rtl_smoke.py)").set_defaults(
+        func=lambda _: run([sys.executable, str(ROOT / "tools" / "rtl_smoke.py")])
+    )
     sp.add_parser("check-independence", help="KD0 path-dep gate").set_defaults(
         func=cmd_check_independence
     )

@@ -37,7 +37,12 @@ Protocol (JSON on stdin → status line on stdout):
 Optional RTL:
 
 ```bash
-AI_TENSOR_RUN_RTL=1 AI_TENSOR_RTL_CMD='echo skip-tb' python tools/ait.py cosim --rtl
+# soft probe (default adapter discovers monorepo-soak/run-ai-tensor-rtl.sh)
+AI_TENSOR_RUN_RTL=1 python tools/ait.py cosim --rtl
+bash monorepo-soak/run-ai-tensor.sh rtl
+
+# hard: live ai-matrix-veri subset (needs work-ver-ai; long rebuild if missing)
+AI_TENSOR_RTL_HARD=1 bash monorepo-soak/run-ai-tensor-rtl.sh
 ```
 
 ## Monorepo spawn (does not link RTL into crates)

@@ -33,14 +33,16 @@ export const tensorCommand: Command = {
   summary:
     "Host adapter for standalone ai-tensor (spawn doctor/test/golden/cosim)",
   usage:
-    "bun run src/cli/index.ts tensor [status|doctor|test|golden|cosim|check] [--dry-run] [--json]",
+    "bun run src/cli/index.ts tensor [status|doctor|test|golden|cosim|queue-soak|rtl|check] [--dry-run] [--json]",
   details:
     "Spawns ai-tensor package tooling without Cargo path deps. " +
-    "Mirrors timings → sv-timing. Package owns sim/SoftIsland goldens and cosim_harness.",
+    "Mirrors timings → sv-timing. Package owns sim/SoftIsland goldens and cosim_harness. " +
+    "tensor rtl soft-probes monorepo-soak/run-ai-tensor-rtl.sh (AI_TENSOR_RTL_HARD=1 for live TB).",
   examples: [
     "bun run src/cli/index.ts tensor status",
     "bun run src/cli/index.ts tensor test",
     "bun run src/cli/index.ts tensor cosim",
+    "bun run src/cli/index.ts tensor rtl",
     "AI_TENSOR_DIR=/path/to/ai-tensor bun run src/cli/index.ts tensor doctor",
   ],
   needsContext: true,
@@ -75,7 +77,7 @@ export const tensorCommand: Command = {
         logger.warn("spawn    : monorepo-soak/run-ai-tensor.sh missing");
       }
       logger.info(`note     : ${body.note}`);
-      logger.info("commands : tensor doctor|test|golden|cosim|check");
+      logger.info("commands : tensor doctor|test|golden|cosim|queue-soak|rtl|check");
       return body.present ? 0 : 1;
     }
 
@@ -98,7 +100,7 @@ export const tensorCommand: Command = {
     }
 
     logger.error(`unknown tensor subcommand: ${sub}`);
-    logger.info("usage: tensor [status|doctor|test|golden|cosim|check]");
+    logger.info("usage: tensor [status|doctor|test|golden|cosim|queue-soak|rtl|check]");
     return 2;
   },
 };

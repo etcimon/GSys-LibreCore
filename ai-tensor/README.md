@@ -12,9 +12,11 @@ cd ai-tensor
 python tools/ait.py test
 python tools/ait.py golden
 python tools/ait.py cosim
+python tools/ait.py rtl          # soft lab probe
 
-# High-level PyTorch (optional: pip install torch)
+# High-level PyTorch / TensorFlow (optional)
 PYTHONPATH=python python python/examples/torch_island_smoke.py
+PYTHONPATH=python python python/examples/tf_island_smoke.py
 
 # CLI
 cargo run -p ai-tensor-cli -- doctor
@@ -46,7 +48,9 @@ more island RTL.
 | `crates/ai-tensor-rt` | Runtime + **sim** device |
 | `crates/ai-tensor-cli` | `ai-tensor` binary |
 | `crates/ai-tensor-py` | Optional PyO3 native module |
-| `python/ai_tensor` | High-level API + `torch_ops` |
+| `python/ai_tensor` | High-level API + `torch_ops` / `tf_ops` |
+| `include/ai_tensor.h` | C ABI (Desc64 / completion / MMIO) |
+| `frameworks/tensorflow/` | TF attachment notes (out-of-tree C++ later) |
 | `profiles/sim-v0.toml` | Version pin profile |
 
 ## Cross-connect
