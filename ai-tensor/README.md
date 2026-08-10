@@ -24,8 +24,10 @@ cargo run -p ai-tensor-cli -- sim-gemm --m 4 --n 4 --k 4
 cargo run -p ai-tensor-cli -- stream-gemm --m 4 --n 4 --k 4
 cargo run -p ai-tensor-cli -- queue-soak --backend mmio
 cargo run -p ai-tensor-cli -- irq-soak --backend mmio
-cargo run -p ai-tensor-cli -- stream-policy --policy dma --backend sim
+cargo run -p ai-tensor-cli -- stream-policy --policy dma --submit fetch --backend mmio
+cargo run -p ai-tensor-cli -- depth-soak --depth 4 --mode latch
 cargo run -p ai-tensor-cli -- golden-check
+python tools/check_c_abi.py
 ```
 
 Monorepo host (spawn only, no crate path deps):

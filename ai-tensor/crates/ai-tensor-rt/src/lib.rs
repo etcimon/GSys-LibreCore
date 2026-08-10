@@ -9,6 +9,7 @@ mod cosim;
 mod stream;
 mod policy;
 mod irq;
+mod depth;
 
 pub use sim::SimDevice;
 pub use profile::Profile;
@@ -18,14 +19,16 @@ pub use cosim::{
 };
 pub use mmio::{probe_cap_regs, read_pmu, seed_cap_island_p3, MappedWindow, MmioBus, MmioDevice, SoftIsland};
 pub use stream::{
-    desc_for_tile, plan_gemm_s8_stream, run_gemm_s8_stream, run_gemm_s8_stream_with_policy,
-    run_gemm_stream_plan, run_gemm_stream_plan_with_policy, GemmStreamPlan, Queue, StreamJob,
+    desc_for_tile, plan_gemm_s8_stream, run_gemm_s8_stream, run_gemm_s8_stream_ex,
+    run_gemm_s8_stream_with_policy, run_gemm_stream_plan, run_gemm_stream_plan_ex,
+    run_gemm_stream_plan_with_policy, GemmStreamPlan, Queue, StreamJob,
 };
 pub use policy::{recommend_policy, soak_multi_queue, wait_with_policy, WaitPolicy};
 pub use irq::{
     claim_after_irq, soak_irq_wait, wait_irq_sticky, wait_irq_then_claim, IrqContract, IrqWaitMode,
     VARIANCE_PLIC_SOURCE,
 };
+pub use depth::{soak_queue_depth, soak_ticket_sequence, SubmitMode};
 
 use ai_tensor_abi::{AccTile, CapRegs, Completion, Desc64, PmuSnapshot, ST_OK};
 use thiserror::Error;
@@ -133,6 +136,11 @@ pub trait Device: Send {
     fn write_mem(&mut self, addr: u64, data: &[u8]) -> Result<(), RtError>;
     fn read_mem(&mut self, addr: u64, out: &mut [u8]) -> Result<(), RtError>;
     fn submit(&mut self, qid: u8, ticket: u32, desc: &Desc64) -> Result<(), RtError>;
+    /// Submit via **DMA desc fetch**: write 64 B desc into device memory, set `desc_ptr`,
+    /// doorbell with bit31. Default falls back to latch `submit` (sim).
+    fn submit_fetch(&mut self, qid: u8, ticket: u32, desc: &Desc64) -> Result<(), RtError> {
+        self.submit(qid, ticket, desc)
+    }
     fn poll(&mut self, ticket: u32) -> Result<Option<Completion>, RtError>;
     /// Sticky last-job PMU (zeros until a GEMM completes).
     fn pmu(&self) -> PmuSnapshot {

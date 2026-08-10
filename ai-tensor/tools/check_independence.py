@@ -42,4 +42,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    # Optional C ABI lockstep (header vs Python constants)
+    cabi = Path(__file__).resolve().parent / "check_c_abi.py"
+    if cabi.is_file() and rc == 0:
+        import subprocess
+
+        r2 = subprocess.run([sys.executable, str(cabi)], cwd=str(ROOT))
+        if r2.returncode != 0:
+            sys.exit(r2.returncode)
+    sys.exit(rc)

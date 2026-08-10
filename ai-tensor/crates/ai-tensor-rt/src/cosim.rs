@@ -116,6 +116,12 @@ pub fn run_builtin_suite() -> Result<usize, RtError> {
     let mut mmio = MmioDevice::new();
     mmio.probe_caps();
     crate::soak_irq_wait(&mut mmio)?;
+    // Queue depth + desc-fetch path
+    let mut sim = SimDevice::new();
+    crate::soak_queue_depth(&mut sim, crate::SubmitMode::Latch, 4)?;
+    let mut mmio = MmioDevice::new();
+    mmio.probe_caps();
+    crate::soak_queue_depth(&mut mmio, crate::SubmitMode::Fetch, 3)?;
     Ok(n)
 }
 

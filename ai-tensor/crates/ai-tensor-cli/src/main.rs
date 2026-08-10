@@ -4,9 +4,9 @@
 use ai_tensor_abi::{Completion, Desc64, DESC_BYTES};
 use ai_tensor_rt::{
     probe_cap_regs, run_builtin_suite, run_external_cosim_checks, run_gemm_s8, run_gemm_s8_auto,
-    run_gemm_s8_stream, run_gemm_s8_stream_with_policy, seed_cap_island_p3, soak_irq_wait,
-    soak_multi_queue, Device, IrqContract, MappedWindow, MmioDevice, Profile, SimDevice,
-    WaitPolicy,
+    run_gemm_s8_stream, run_gemm_s8_stream_ex, seed_cap_island_p3,
+    soak_irq_wait, soak_multi_queue, soak_queue_depth, Device, IrqContract, MappedWindow,
+    MmioDevice, Profile, SimDevice, SubmitMode, WaitPolicy,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -114,6 +114,17 @@ enum Cmd {
         k: u32,
         #[arg(long, default_value = "poll")]
         policy: String,
+        #[arg(long, default_value = "latch")]
+        submit: String,
+        #[arg(long, default_value = "sim")]
+        backend: String,
+    },
+    /// Sequential single-queue depth soak (latch or fetch)
+    DepthSoak {
+        #[arg(long, default_value_t = 4)]
+        depth: u32,
+        #[arg(long, default_value = "latch")]
+        mode: String,
         #[arg(long, default_value = "sim")]
         backend: String,
     },
@@ -137,8 +148,14 @@ fn main() {
             if let Some(p) = profile {
                 let pr = Profile::load_file(&p).expect("profile");
                 println!(
-                    "profile id={} backend={} mmio_base={:?} plic={:?} features={:?}",
-                    pr.id, pr.backend, pr.mmio_base, pr.plic_source, pr.features
+                    "profile id={} backend={} mmio_base={:?} plic={:?} wait={} submit={} features={:?}",
+                    pr.id,
+                    pr.backend,
+                    pr.mmio_base,
+                    pr.plic_source,
+                    pr.wait_policy,
+                    pr.submit_mode,
+                    pr.features
                 );
             }
             let irq = IrqContract::island_p3_variane();
@@ -333,6 +350,7 @@ fn main() {
             n,
             k,
             policy,
+            submit,
             backend,
         } => {
             let (a, b) = pattern_ab(m, n, k);
@@ -345,18 +363,36 @@ fn main() {
                 },
                 _ => WaitPolicy::Poll,
             };
+            let mode = SubmitMode::from_str_loose(&submit);
             let (c, comp, tiles) = if be == "sim" {
                 let mut dev = SimDevice::new();
-                run_gemm_s8_stream_with_policy(&mut dev, m, n, k, &a, &b, 1, pol).expect("stream")
+                run_gemm_s8_stream_ex(&mut dev, m, n, k, &a, &b, 1, pol, mode).expect("stream")
             } else {
                 let mut dev = MmioDevice::new();
                 dev.probe_caps();
-                run_gemm_s8_stream_with_policy(&mut dev, m, n, k, &a, &b, 1, pol).expect("stream")
+                run_gemm_s8_stream_ex(&mut dev, m, n, k, &a, &b, 1, pol, mode).expect("stream")
             };
             println!(
-                "backend=stream-{be} policy={policy} tiles={} ticket={} status={} c00={}",
+                "backend=stream-{be} policy={policy} submit={submit} tiles={} ticket={} status={} c00={}",
                 tiles, comp.ticket, comp.status, c[0]
             );
+        }
+        Cmd::DepthSoak {
+            depth,
+            mode,
+            backend,
+        } => {
+            let be = backend.to_lowercase();
+            let m = SubmitMode::from_str_loose(&mode);
+            let n = if be == "sim" {
+                let mut dev = SimDevice::new();
+                soak_queue_depth(&mut dev, m, depth).expect("depth")
+            } else {
+                let mut dev = MmioDevice::new();
+                dev.probe_caps();
+                soak_queue_depth(&mut dev, m, depth).expect("depth")
+            };
+            println!("depth_soak_ok backend={be} mode={mode} jobs={n}");
         }
     }
 }

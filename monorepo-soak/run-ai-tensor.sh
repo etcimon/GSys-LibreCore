@@ -44,6 +44,8 @@ JSON
     cargo run -q -p ai-tensor-cli -- queue-soak --backend mmio
     cargo run -q -p ai-tensor-cli -- irq-soak --backend sim
     cargo run -q -p ai-tensor-cli -- irq-soak --backend mmio
+    cargo run -q -p ai-tensor-cli -- depth-soak --depth 4 --mode latch --backend sim
+    cargo run -q -p ai-tensor-cli -- depth-soak --depth 3 --mode fetch --backend mmio
     ;;
   rtl)
     # Soft by default; hard when AI_TENSOR_RTL_HARD=1

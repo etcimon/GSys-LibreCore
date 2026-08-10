@@ -13,6 +13,8 @@ acc_tile_n = 256
 acc_tile_k = 256
 macs_per_cycle = 256
 plic_source = 8
+wait_policy = "poll"          # poll | irq | dma — board may prefer irq with PLIC-8
+submit_mode = "latch"         # latch | fetch — fetch uses desc_ptr + doorbell bit31
 features = [
   "t2_desc_v1",
   "completion_word_v1",

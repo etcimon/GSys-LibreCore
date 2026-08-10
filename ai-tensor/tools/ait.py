@@ -188,6 +188,9 @@ def cmd_cosim(ns: argparse.Namespace) -> None:
 
 def cmd_check_independence(_: argparse.Namespace) -> None:
     run([sys.executable, str(ROOT / "tools" / "check_independence.py")])
+    cabi = ROOT / "tools" / "check_c_abi.py"
+    if cabi.is_file():
+        run([sys.executable, str(cabi)])
 
 
 def cmd_build_native(_: argparse.Namespace) -> None:

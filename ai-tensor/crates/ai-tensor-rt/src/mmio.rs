@@ -551,6 +551,20 @@ impl Device for MmioDevice {
         Ok(())
     }
 
+    fn submit_fetch(&mut self, qid: u8, ticket: u32, desc: &Desc64) -> Result<(), RtError> {
+        // Place packed desc in device memory, program desc_ptr, doorbell FETCH.
+        let packed = desc.pack();
+        let addr = self.alloc(DESC_BYTES)?;
+        self.write_mem(addr, &packed)?;
+        self.island
+            .write32(mmio::DESC_PTR_LO, addr as u32);
+        self.island
+            .write32(mmio::DESC_PTR_HI, (addr >> 32) as u32);
+        let db = ((ticket & 0x007f_ffff) << 8) | u32::from(qid) | mmio::DOORBELL_FETCH;
+        self.island.write32(mmio::DOORBELL, db);
+        Ok(())
+    }
+
     fn poll(&mut self, ticket: u32) -> Result<Option<Completion>, RtError> {
         let done = self.island.read32(mmio::DONE) & 1 != 0;
         if !done {

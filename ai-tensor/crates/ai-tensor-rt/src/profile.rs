@@ -17,6 +17,10 @@ pub struct Profile {
     pub macs_per_cycle: u32,
     pub mmio_base: Option<u64>,
     pub plic_source: Option<u32>,
+    /// poll | irq | dma — host wait preference (see WaitPolicy).
+    pub wait_policy: String,
+    /// latch | fetch — doorbell path preference.
+    pub submit_mode: String,
     pub features: Vec<String>,
     pub raw: HashMap<String, String>,
 }
@@ -36,6 +40,8 @@ impl Profile {
             acc_tile_k: 256,
             macs_per_cycle: 256,
             backend: "sim".into(),
+            wait_policy: "poll".into(),
+            submit_mode: "latch".into(),
             ..Default::default()
         };
         let mut in_features = false;
@@ -100,6 +106,8 @@ impl Profile {
                     "macs_per_cycle" => p.macs_per_cycle = v.parse().unwrap_or(256),
                     "mmio_base" => p.mmio_base = parse_u64(&v),
                     "plic_source" => p.plic_source = v.parse().ok(),
+                    "wait_policy" => p.wait_policy = v.clone(),
+                    "submit_mode" => p.submit_mode = v.clone(),
                     _ => {}
                 }
                 p.raw.insert(k, v);

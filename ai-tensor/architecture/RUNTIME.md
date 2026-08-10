@@ -65,7 +65,12 @@ desc latch (`0x0140`). SoftIsland returns `ST_BAD_QID` for foreign qids. Hostles
 | `EventFd` | Future PLIC→eventfd; same host sequencing as UIO |
 
 Island_p3 Variane: **PLIC source 8**. Always **claim DONE before PLIC complete** (level re-arm).
-Stream path accepts `WaitPolicy` via `run_gemm_s8_stream_with_policy`.
+Stream path accepts `WaitPolicy` via `run_gemm_s8_stream_with_policy` and
+`SubmitMode::{Latch,Fetch}` via `run_gemm_s8_stream_ex` / `Device::submit_fetch`.
+
+**Queue depth:** CAP `queue_depth` is a software planning hint. With one DONE sticky the host
+must **submit → wait → next** (see `soak_queue_depth`). Concurrent multi-outstanding needs a
+future completion FIFO in RTL.
 
 ---
 

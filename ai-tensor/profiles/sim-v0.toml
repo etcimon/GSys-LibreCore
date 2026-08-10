@@ -10,6 +10,8 @@ acc_tile_m = 256
 acc_tile_n = 256
 acc_tile_k = 256
 macs_per_cycle = 256
+wait_policy = "poll"
+submit_mode = "latch"
 features = [
   "t2_desc_v1",
   "completion_word_v1",

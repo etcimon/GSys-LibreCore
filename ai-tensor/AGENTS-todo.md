@@ -83,9 +83,12 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] WaitPolicy (Poll/IrqThenPoll/DmaThenClaim/ClaimOnly) + `soak_multi_queue` + CLI `queue-soak`
 - [x] Host adapter: `cva6-build tensor status|doctor|test|golden|cosim|queue-soak|rtl`
 - [x] Stream + WaitPolicy (`run_gemm_s8_stream_with_policy` / CLI `stream-policy`)
+- [x] Stream + SubmitMode latch/fetch (`run_gemm_s8_stream_ex` / `Device::submit_fetch`)
+- [x] Single-queue sequential depth soak (`depth.rs` / CLI `depth-soak`)
+- [x] Profile `wait_policy` + `submit_mode` pins
 - [x] NumPy high-level path (`numpy_ops` + example)
-- [x] Python `c_abi` constants lockstep with `include/ai_tensor.h`
-- [ ] Multi-queue concurrent depth (island single-engine still sequential DONE)
+- [x] Python `c_abi` + `tools/check_c_abi.py` lockstep with `include/ai_tensor.h`
+- [ ] Multi-outstanding concurrent depth (needs RTL completion FIFO; single DONE sticky today)
 
 ## Open design notes
 
