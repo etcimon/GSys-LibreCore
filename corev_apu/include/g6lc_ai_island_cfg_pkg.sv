@@ -34,14 +34,13 @@ package g6lc_ai_island_cfg_pkg;
     int unsigned WorkQuantumK;   // preemption boundary in k-steps
   } ai_island_cfg_t;
 
-  // I1 live RTL: AccTile*=256 / PeLanes=128. Multi-bank C (j%PeLanes) keeps
-  // each tc_sram at MaxDim*ceil(MaxDim/PeLanes) words (512xi32 @256/128);
-  // avoids a flat 65k-word C array that OOMs sim. gemm_seq binds
-  // MaxDim/PeLanes from AccTileM / MacsPerCycle. I3-lite: multi-beat AR/AW (64) +
-  // B quad-drain + dual-bank C-read + PMU; CAP DRAM [31:16]=meas; NocWidth 64.
+  // I1 live RTL: AccTile*=256 / PeLanes=256 (1 MAC cycle per C at full tile).
+  // Multi-bank C (j%PeLanes) → each bank MaxDim*1 words (256xi32 @256/256).
+  // gemm_seq binds MaxDim/PeLanes from AccTileM / MacsPerCycle.
+  // I3-lite: multi-beat AR/AW + B quad-drain + dual-bank C-read + PMU→CAP; NoC 64.
   localparam ai_island_cfg_t AiIslandLatencyDefault = '{
       Clusters:     unsigned'(1),
-      MacsPerCycle: unsigned'(128),           // PeLanes (grow toward SKU Macs)
+      MacsPerCycle: unsigned'(256),           // PeLanes = AccTileK (full-width MAC)
       ClockKhz:     unsigned'(1_000_000),
       SramBytes:    unsigned'(2 * 1024 * 1024), // A/B + multi-bank C (MaxDim=256)
       AccTileM:     unsigned'(256),           // SKU AccTile* live freeze
