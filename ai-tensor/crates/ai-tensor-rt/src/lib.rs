@@ -8,6 +8,7 @@ mod profile;
 mod cosim;
 mod stream;
 mod policy;
+mod irq;
 
 pub use sim::SimDevice;
 pub use profile::Profile;
@@ -17,10 +18,14 @@ pub use cosim::{
 };
 pub use mmio::{probe_cap_regs, read_pmu, seed_cap_island_p3, MappedWindow, MmioBus, MmioDevice, SoftIsland};
 pub use stream::{
-    desc_for_tile, plan_gemm_s8_stream, run_gemm_s8_stream, run_gemm_stream_plan, GemmStreamPlan,
-    Queue, StreamJob,
+    desc_for_tile, plan_gemm_s8_stream, run_gemm_s8_stream, run_gemm_s8_stream_with_policy,
+    run_gemm_stream_plan, run_gemm_stream_plan_with_policy, GemmStreamPlan, Queue, StreamJob,
 };
 pub use policy::{recommend_policy, soak_multi_queue, wait_with_policy, WaitPolicy};
+pub use irq::{
+    claim_after_irq, soak_irq_wait, wait_irq_sticky, wait_irq_then_claim, IrqContract, IrqWaitMode,
+    VARIANCE_PLIC_SOURCE,
+};
 
 use ai_tensor_abi::{AccTile, CapRegs, Completion, Desc64, PmuSnapshot, ST_OK};
 use thiserror::Error;

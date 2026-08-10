@@ -106,6 +106,19 @@ def cmd_test(ns: argparse.Namespace) -> None:
         log("ERROR: missing include/ai_tensor.h")
         sys.exit(1)
     try:
+        import numpy  # noqa: F401
+
+        log("+ numpy_island_smoke")
+        r = subprocess.run(
+            [sys.executable, str(ROOT / "python" / "examples" / "numpy_island_smoke.py")],
+            cwd=str(ROOT),
+            env=env_py,
+        )
+        if r.returncode != 0:
+            sys.exit(r.returncode)
+    except ImportError:
+        log("skip numpy smoke (numpy not installed)")
+    try:
         import torch  # noqa: F401
 
         log("+ torch_island_smoke")

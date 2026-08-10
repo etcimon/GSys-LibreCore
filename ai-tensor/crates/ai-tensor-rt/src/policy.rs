@@ -56,21 +56,8 @@ pub fn wait_with_policy<D: Device>(
     match policy {
         WaitPolicy::Poll | WaitPolicy::ClaimOnly => wait_poll(dev, ticket),
         WaitPolicy::IrqThenPoll => {
-            for _ in 0..10_000 {
-                if dev.irq_pending() {
-                    if let Some(c) = dev.poll(ticket)? {
-                        // PLIC discipline: claim clears IRQ with DONE write on SoftIsland
-                        let _ = dev.claim_done();
-                        return Ok(c);
-                    }
-                }
-                // Synchronous backends may complete before irq is observed if FLAG_IRQ
-                // was not set — fall through to poll once.
-                if let Some(c) = dev.poll(ticket)? {
-                    return Ok(c);
-                }
-            }
-            Err(RtError::Timeout)
+            // Soft sticky + claim (see irq.rs); board swaps in UioIrqWait under linux-mmio.
+            crate::wait_irq_then_claim(dev, ticket, 10_000)
         }
         WaitPolicy::DmaThenClaim { ptr_done, claim } => {
             for _ in 0..10_000 {

@@ -10,7 +10,7 @@
 //!
 //! Bus micro-arch (trail store, multi-out AR) stays in RTL; software only streams descs.
 
-use crate::{Device, Region, RtError};
+use crate::{wait_with_policy, Device, Region, RtError, WaitPolicy};
 use ai_tensor_abi::{Completion, Desc64, ST_OK};
 use ai_tensor_ir::{tile_gemm, GemmTile};
 
@@ -187,6 +187,15 @@ pub fn run_gemm_stream_plan<D: Device>(
     dev: &mut D,
     plan: &GemmStreamPlan,
 ) -> Result<(Vec<i32>, Completion, u32), RtError> {
+    run_gemm_stream_plan_with_policy(dev, plan, WaitPolicy::Poll)
+}
+
+/// Stream with explicit completion wait policy (Poll / IrqThenPoll / DmaThenClaim).
+pub fn run_gemm_stream_plan_with_policy<D: Device>(
+    dev: &mut D,
+    plan: &GemmStreamPlan,
+    policy: WaitPolicy,
+) -> Result<(Vec<i32>, Completion, u32), RtError> {
     let mut c = vec![0i32; (plan.m as usize) * (plan.n as usize)];
     let mut last = Completion {
         ticket: plan.jobs.first().map(|j| j.ticket).unwrap_or(0),
@@ -202,7 +211,15 @@ pub fn run_gemm_stream_plan<D: Device>(
         dev.write_mem(plan.ptr_done, &[0u8; 8])?;
 
         dev.submit(plan.qid, job.ticket, &job.desc)?;
-        let comp = dev.wait(job.ticket)?;
+        // Per-job policy: DmaThenClaim needs this tile's ptr_done.
+        let pol = match policy {
+            WaitPolicy::DmaThenClaim { claim, .. } => WaitPolicy::DmaThenClaim {
+                ptr_done: plan.ptr_done,
+                claim,
+            },
+            other => other,
+        };
+        let comp = wait_with_policy(dev, job.ticket, pol)?;
         last = comp;
         if last.status != ST_OK {
             return Ok((c, last, plan.jobs.len() as u32));
@@ -236,9 +253,29 @@ pub fn run_gemm_s8_stream<D: Device>(
     b: &[i8],
     ticket: u32,
 ) -> Result<(Vec<i32>, Completion, u32), RtError> {
+    run_gemm_s8_stream_with_policy(dev, m, n, k, a, b, ticket, WaitPolicy::Poll)
+}
+
+/// Stream GEMM with wait policy (e.g. DmaThenClaim when wr_cpl_en).
+pub fn run_gemm_s8_stream_with_policy<D: Device>(
+    dev: &mut D,
+    m: u32,
+    n: u32,
+    k: u32,
+    a: &[i8],
+    b: &[i8],
+    ticket: u32,
+    policy: WaitPolicy,
+) -> Result<(Vec<i32>, Completion, u32), RtError> {
+    let irq = matches!(policy, WaitPolicy::IrqThenPoll);
     let mut q = Queue::q0(ticket);
-    let plan = plan_gemm_s8_stream(dev, m, n, k, a, b, &mut q, false)?;
-    run_gemm_stream_plan(dev, &plan)
+    let mut plan = plan_gemm_s8_stream(dev, m, n, k, a, b, &mut q, irq)?;
+    if irq {
+        for j in &mut plan.jobs {
+            j.desc = j.desc.clone().with_irq(true);
+        }
+    }
+    run_gemm_stream_plan_with_policy(dev, &plan, policy)
 }
 
 #[cfg(test)]

@@ -4,8 +4,9 @@
 use ai_tensor_abi::{Completion, Desc64, DESC_BYTES};
 use ai_tensor_rt::{
     probe_cap_regs, run_builtin_suite, run_external_cosim_checks, run_gemm_s8, run_gemm_s8_auto,
-    run_gemm_s8_stream, seed_cap_island_p3, soak_multi_queue, Device, MappedWindow, MmioDevice,
-    Profile, SimDevice,
+    run_gemm_s8_stream, run_gemm_s8_stream_with_policy, seed_cap_island_p3, soak_irq_wait,
+    soak_multi_queue, Device, IrqContract, MappedWindow, MmioDevice, Profile, SimDevice,
+    WaitPolicy,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -98,6 +99,24 @@ enum Cmd {
         #[arg(long, default_value = "sim")]
         backend: String,
     },
+    /// Soft IRQ claim soak (PLIC discipline model; FLAG_IRQ + claim_done)
+    IrqSoak {
+        #[arg(long, default_value = "sim")]
+        backend: String,
+    },
+    /// Stream GEMM with wait policy: poll | irq | dma
+    StreamPolicy {
+        #[arg(long, default_value_t = 4)]
+        m: u32,
+        #[arg(long, default_value_t = 4)]
+        n: u32,
+        #[arg(long, default_value_t = 4)]
+        k: u32,
+        #[arg(long, default_value = "poll")]
+        policy: String,
+        #[arg(long, default_value = "sim")]
+        backend: String,
+    },
 }
 
 fn main() {
@@ -122,6 +141,11 @@ fn main() {
                     pr.id, pr.backend, pr.mmio_base, pr.plic_source, pr.features
                 );
             }
+            let irq = IrqContract::island_p3_variane();
+            println!(
+                "irq_contract plic={} clear_before_complete={} notes={}",
+                irq.plic_source, irq.clear_before_plic_complete, irq.notes
+            );
         }
         Cmd::PackGemm { m, n, k } => {
             let d = Desc64::gemm(m, n, k).with_ptrs(0x1000, 0x2000, 0x3000, 0x4000);
@@ -287,6 +311,52 @@ fn main() {
                 soak_multi_queue(&mut dev).expect("queue soak")
             };
             println!("queue_soak_ok backend={be} checks={n}");
+        }
+        Cmd::IrqSoak { backend } => {
+            let be = backend.to_lowercase();
+            if be == "sim" {
+                let mut dev = SimDevice::new();
+                soak_irq_wait(&mut dev).expect("irq soak");
+            } else {
+                let mut dev = MmioDevice::new();
+                dev.probe_caps();
+                soak_irq_wait(&mut dev).expect("irq soak");
+            }
+            let c = IrqContract::island_p3_variane();
+            println!(
+                "irq_soak_ok backend={be} plic={} mode=soft_sticky",
+                c.plic_source
+            );
+        }
+        Cmd::StreamPolicy {
+            m,
+            n,
+            k,
+            policy,
+            backend,
+        } => {
+            let (a, b) = pattern_ab(m, n, k);
+            let be = backend.to_lowercase();
+            let pol = match policy.to_lowercase().as_str() {
+                "irq" | "irq_then_poll" => WaitPolicy::IrqThenPoll,
+                "dma" | "dma_then_claim" => WaitPolicy::DmaThenClaim {
+                    ptr_done: 0, // filled per-job from plan
+                    claim: true,
+                },
+                _ => WaitPolicy::Poll,
+            };
+            let (c, comp, tiles) = if be == "sim" {
+                let mut dev = SimDevice::new();
+                run_gemm_s8_stream_with_policy(&mut dev, m, n, k, &a, &b, 1, pol).expect("stream")
+            } else {
+                let mut dev = MmioDevice::new();
+                dev.probe_caps();
+                run_gemm_s8_stream_with_policy(&mut dev, m, n, k, &a, &b, 1, pol).expect("stream")
+            };
+            println!(
+                "backend=stream-{be} policy={policy} tiles={} ticket={} status={} c00={}",
+                tiles, comp.ticket, comp.status, c[0]
+            );
         }
     }
 }

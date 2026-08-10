@@ -59,7 +59,8 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] MappedWindow (file-backed) + linux-mmio UIO/`/dev/mem` open (feature-gated)
 - [ ] Board-validated UIO map on live Variane/FPGA
 - [x] SoftIsland FLAG_IRQ sticky + DONE clear (PLIC mirror discipline)
-- [ ] Host PLIC-8 eventfd wait on board
+- [x] IRQ wait abstraction (`irq.rs`: SoftSticky + UioIrqWait under linux-mmio; PLIC-8 contract)
+- [ ] Host PLIC-8 eventfd/UIO live wait on board (driver present)
 - [x] Offline cosim goldens (sim+SoftIsland) + `golden-check` CLI
 - [x] Rust `run_gemm_s8_auto` AccTile streaming
 - [x] Monorepo spawn `monorepo-soak/run-ai-tensor.sh`
@@ -81,6 +82,9 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] `run_gemm_s8_auto` → stream path; CLI `stream-gemm`
 - [x] WaitPolicy (Poll/IrqThenPoll/DmaThenClaim/ClaimOnly) + `soak_multi_queue` + CLI `queue-soak`
 - [x] Host adapter: `cva6-build tensor status|doctor|test|golden|cosim|queue-soak|rtl`
+- [x] Stream + WaitPolicy (`run_gemm_s8_stream_with_policy` / CLI `stream-policy`)
+- [x] NumPy high-level path (`numpy_ops` + example)
+- [x] Python `c_abi` constants lockstep with `include/ai_tensor.h`
 - [ ] Multi-queue concurrent depth (island single-engine still sequential DONE)
 
 ## Open design notes

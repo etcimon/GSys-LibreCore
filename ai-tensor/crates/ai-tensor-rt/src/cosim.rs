@@ -110,6 +110,12 @@ pub fn run_builtin_suite() -> Result<usize, RtError> {
     let mut mmio = MmioDevice::new();
     mmio.probe_caps();
     crate::soak_multi_queue(&mut mmio)?;
+    // Soft IRQ claim path (PLIC discipline model)
+    let mut sim = SimDevice::new();
+    crate::soak_irq_wait(&mut sim)?;
+    let mut mmio = MmioDevice::new();
+    mmio.probe_caps();
+    crate::soak_irq_wait(&mut mmio)?;
     Ok(n)
 }
 

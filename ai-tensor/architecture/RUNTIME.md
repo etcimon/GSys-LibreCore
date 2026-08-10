@@ -56,6 +56,17 @@ fence → claim DONE / clear IRQ**. Island directed tests may keep `wr_cpl_en=0`
 desc latch (`0x0140`). SoftIsland returns `ST_BAD_QID` for foreign qids. Hostless **sim** keeps
 4 soft regions for isolation soak.
 
+**IRQ wait** (`irq.rs`):
+
+| Mode | When |
+|---|---|
+| `SoftSticky` | CI / SoftIsland — poll `irq_pending` then claim DONE |
+| `Uio` | `linux-mmio` + `/dev/uio*` — blocking read event count |
+| `EventFd` | Future PLIC→eventfd; same host sequencing as UIO |
+
+Island_p3 Variane: **PLIC source 8**. Always **claim DONE before PLIC complete** (level re-arm).
+Stream path accepts `WaitPolicy` via `run_gemm_s8_stream_with_policy`.
+
 ---
 
 ## 4. Backend trait (conceptual)
