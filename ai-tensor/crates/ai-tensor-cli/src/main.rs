@@ -3,8 +3,8 @@
 
 use ai_tensor_abi::{Completion, Desc64, DESC_BYTES};
 use ai_tensor_rt::{
-    probe_cap_regs, run_gemm_s8, seed_cap_island_p3, Device, MappedWindow, MmioDevice, Profile,
-    SimDevice,
+    probe_cap_regs, run_builtin_suite, run_gemm_s8, run_gemm_s8_auto, seed_cap_island_p3,
+    try_external_cosim_ping, Device, MappedWindow, MmioDevice, Profile, SimDevice,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -65,6 +65,19 @@ enum Cmd {
     /// Hex-dump unpack of a 64-byte descriptor file
     Unpack {
         path: PathBuf,
+    },
+    /// Run package-local cosim goldens (sim + SoftIsland)
+    GoldenCheck,
+    /// Auto-tile GEMM (dims may exceed AccTile)
+    AutoGemm {
+        #[arg(long, default_value_t = 4)]
+        m: u32,
+        #[arg(long, default_value_t = 4)]
+        n: u32,
+        #[arg(long, default_value_t = 4)]
+        k: u32,
+        #[arg(long, default_value_t = 1)]
+        ticket: u32,
     },
 }
 
@@ -187,6 +200,29 @@ fn main() {
             let bytes = std::fs::read(path).expect("read");
             let d = Desc64::unpack(&bytes).expect("unpack");
             println!("{d:?}");
+        }
+        Cmd::GoldenCheck => {
+            let n = run_builtin_suite().expect("golden suite");
+            println!("golden_ok count={n} backends=sim,mmio-soft");
+            if let Some(r) = try_external_cosim_ping() {
+                match r {
+                    Ok(s) => println!("external_cosim={s}"),
+                    Err(e) => println!("external_cosim_err={e}"),
+                }
+            } else {
+                println!("external_cosim=skipped (set AI_TENSOR_COSIM_CMD to enable)");
+            }
+        }
+        Cmd::AutoGemm { m, n, k, ticket } => {
+            let (a, b) = pattern_ab(m, n, k);
+            let mut dev = MmioDevice::new();
+            dev.probe_caps();
+            let (c, comp, tiles) =
+                run_gemm_s8_auto(&mut dev, m, n, k, &a, &b, ticket).expect("auto");
+            println!(
+                "backend=mmio-auto tiles={} ticket={} status={} c00={}",
+                tiles, comp.ticket, comp.status, c[0]
+            );
         }
     }
 }

@@ -5,9 +5,11 @@
 mod sim;
 mod mmio;
 mod profile;
+mod cosim;
 
 pub use sim::SimDevice;
 pub use profile::Profile;
+pub use cosim::{builtin_goldens, check_desc_pack_golden, run_builtin_suite, try_external_cosim_ping, GoldenGemm};
 pub use mmio::{probe_cap_regs, read_pmu, seed_cap_island_p3, MappedWindow, MmioBus, MmioDevice, SoftIsland};
 
 use ai_tensor_abi::{AccTile, CapRegs, Completion, Desc64, PmuSnapshot, ST_OK};
@@ -212,4 +214,96 @@ pub fn run_gemm_s8<D: Device>(
         out.push(v);
     }
     Ok((out, c))
+}
+
+/// GEMM with host-side AccTile streaming when dims exceed CAP tile.
+/// Accumulates partial products into C (same semantics as Python auto_tile).
+pub fn run_gemm_s8_auto<D: Device>(
+    dev: &mut D,
+    m: u32,
+    n: u32,
+    k: u32,
+    a: &[i8],
+    b: &[i8],
+    ticket: u32,
+) -> Result<(Vec<i32>, Completion, u32), RtError> {
+    let tile = dev.caps().max_tile();
+    if tile.fits(m, n, k) {
+        let (c, comp) = run_gemm_s8(dev, m, n, k, a, b, ticket)?;
+        return Ok((c, comp, 1));
+    }
+    let need_a = (m as usize)
+        .checked_mul(k as usize)
+        .ok_or(RtError::BufferOob)?;
+    let need_b = (k as usize)
+        .checked_mul(n as usize)
+        .ok_or(RtError::BufferOob)?;
+    if a.len() < need_a || b.len() < need_b {
+        return Err(RtError::BufferOob);
+    }
+
+    let tiles = ai_tensor_ir::tile_gemm(m, n, k, tile);
+    let mut c = vec![0i32; (m as usize) * (n as usize)];
+    let mut tix = ticket;
+    let mut last = Completion {
+        ticket,
+        status: ST_OK,
+    };
+    for g in &tiles {
+        // Extract A[i0:i0+tm, t0:t0+tk], B[t0:t0+tk, j0:j0+tn] row-major
+        let mut at = Vec::with_capacity((g.tm * g.tk) as usize);
+        for i in 0..g.tm {
+            let row = ((g.i0 + i) * k + g.t0) as usize;
+            at.extend_from_slice(&a[row..row + g.tk as usize]);
+        }
+        let mut bt = Vec::with_capacity((g.tk * g.tn) as usize);
+        for t_ in 0..g.tk {
+            let row = ((g.t0 + t_) * n + g.j0) as usize;
+            bt.extend_from_slice(&b[row..row + g.tn as usize]);
+        }
+        let (partial, comp) = run_gemm_s8(dev, g.tm, g.tn, g.tk, &at, &bt, tix)?;
+        if comp.status != ST_OK {
+            return Ok((c, comp, tiles.len() as u32));
+        }
+        for ii in 0..g.tm as usize {
+            for jj in 0..g.tn as usize {
+                let dst = ((g.i0 as usize + ii) * n as usize) + (g.j0 as usize + jj);
+                c[dst] = c[dst].saturating_add(partial[ii * g.tn as usize + jj]);
+            }
+        }
+        last = comp;
+        tix = tix.wrapping_add(1);
+    }
+    Ok((c, last, tiles.len() as u32))
+}
+
+#[cfg(test)]
+mod auto_tile_tests {
+    use super::*;
+    use crate::SimDevice;
+    use ai_tensor_abi::{AccTile, CapRegs};
+
+    #[test]
+    fn auto_tile_single_when_fits() {
+        let mut dev = SimDevice::new();
+        let a = vec![1i8; 16];
+        let b = vec![1i8; 16];
+        let (c, comp, ntiles) = run_gemm_s8_auto(&mut dev, 4, 4, 4, &a, &b, 1).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(ntiles, 1);
+        assert!(c.iter().all(|&x| x == 4));
+    }
+
+    #[test]
+    fn auto_tile_4x4_with_tile2() {
+        let mut caps = Caps::from_cap_regs(CapRegs::island_p3_sim_default(), 64);
+        caps.acc_tile = AccTile { m: 2, n: 2, k: 2 };
+        let mut dev = SimDevice::with_caps(caps);
+        let a = vec![1i8; 16];
+        let b = vec![1i8; 16];
+        let (c, comp, ntiles) = run_gemm_s8_auto(&mut dev, 4, 4, 4, &a, &b, 1).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(ntiles, 8); // 2x2x2
+        assert!(c.iter().all(|&x| x == 4), "{c:?}");
+    }
 }

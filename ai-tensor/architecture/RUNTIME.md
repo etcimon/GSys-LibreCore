@@ -91,3 +91,12 @@ Map island statuses to a small stable enum for frameworks (`Ok`, `BadPtr`, `Disa
 
 Runtime **sim** must not `include!` monorepo paths. Linux backend may read sysfs/DTS at runtime.
 Profiles load MMIO offsets from package data files generated or copied under the VERSIONING pin.
+
+## 9. Cosim / goldens
+
+- **Offline (CI):** `run_builtin_suite()` runs package-local INT8 vectors on **sim** and
+  **SoftIsland**; CLI `golden-check`.
+- **Auto-tile:** `run_gemm_s8_auto` streams AccTile blocks when m/n/k exceed CAP.
+- **External:** set `AI_TENSOR_COSIM_CMD` to a host command; default CI leaves it unset.
+- **Monorepo:** `bash monorepo-soak/run-ai-tensor.sh test` spawns this package only.
+

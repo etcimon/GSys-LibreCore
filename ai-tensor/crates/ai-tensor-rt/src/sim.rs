@@ -34,10 +34,14 @@ impl Default for SimDevice {
 
 impl SimDevice {
     pub fn new() -> Self {
+        Self::with_caps(Caps::default())
+    }
+
+    pub fn with_caps(caps: Caps) -> Self {
         Self {
             enabled: false,
             wr_cpl_en: true,
-            caps: Caps::default(),
+            caps,
             regions: [None, None, None, None],
             mem: vec![0u8; MEM_CAP],
             next_off: 0,

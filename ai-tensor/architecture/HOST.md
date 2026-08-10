@@ -50,3 +50,15 @@ Mirror of `cva6-build timings` → `sv-timing`.
 - Monorepo AI scaffold: [`../../architecture/ai-matrix/README.md`](../../architecture/ai-matrix/README.md)
 - Island README: [`../../corev_apu/ai_island/README.md`](../../corev_apu/ai_island/README.md)
 - sv-timing host precedent: [`../../sv-timing/AGENTS-host.md`](../../sv-timing/AGENTS-host.md)
+
+## 5. Concrete monorepo spawn
+
+```bash
+# from monorepo root
+bash monorepo-soak/run-ai-tensor.sh test    # independence + cargo + golden-check
+bash monorepo-soak/run-ai-tensor.sh golden
+AI_TENSOR_DIR=/path/to/ai-tensor bash monorepo-soak/run-ai-tensor.sh check
+```
+
+Still never add monorepo paths to package `Cargo.toml`.
+

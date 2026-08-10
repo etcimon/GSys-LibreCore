@@ -59,7 +59,10 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [ ] Board-validated UIO map on live Variane/FPGA
 - [x] SoftIsland FLAG_IRQ sticky + DONE clear (PLIC mirror discipline)
 - [ ] Host PLIC-8 eventfd wait on board
-- [ ] Cosim/replay against Variane harness (optional)
+- [x] Offline cosim goldens (sim+SoftIsland) + `golden-check` CLI
+- [x] Rust `run_gemm_s8_auto` AccTile streaming
+- [x] Monorepo spawn `monorepo-soak/run-ai-tensor.sh`
+- [ ] Live Variane/ELF cosim via `AI_TENSOR_COSIM_CMD` harness
 - [x] Python Caps / PMU surface + torch meta
 - [x] `tools/check_independence.py` + `ait.py check`
 
