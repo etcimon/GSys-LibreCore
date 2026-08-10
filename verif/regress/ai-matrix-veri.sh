@@ -49,7 +49,7 @@ VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai}"
 DEFAULT_TESTS="ai_csr_aistatus_xs ai_setcfg_readback ai_illegal_when_off ai_dot4_s8_smoke ai_mma_s8_golden ai_requant_rhe_golden ai_pmu_group4_smoke ai_queue_doorbell ai_aiperm_umode ai_island_mmio_smoke ai_enq_sideband_smoke ai_dual_enq_poll ai_irq_plic_smoke ai_desc_fetch_smoke ai_enq_fetch_smoke ai_ptr_done_smoke ai_gemm_s8_smoke ai_gemm_s8_lda_smoke ai_gemm_dim_err_smoke ai_gemm_s8_4x4_smoke ai_gemm_s8_8x8_smoke ai_gemm_s8_16x16_smoke ai_gemm_s8_32x32_smoke ai_gemm_s8_64x64_smoke ai_gemm_s8_128x128_smoke ai_gemm_s8_256x256_smoke ai_cap_bringup_smoke"
 # shellcheck disable=SC2206
 tests=( ${AI_MATRIX_VERI_TESTS:-$DEFAULT_TESTS} )
-# 256x256 GEMM ~0.3M cycles (PeLanes=128 + I3-lite dual B); headroom for suite.
+# 256x256 GEMM ~0.2-0.3M cycles (PeLanes=128 + burst A/B); headroom for suite.
 TIME_OUT="${AI_MATRIX_TIME_OUT:-8000000}"
 
 # Prefer the monorepo-proven Verilator 5.008 (Debian 5.020 hit internal faults

@@ -8,22 +8,17 @@
 //
 // Phases:
 //   1) Load A → banked tile SRAM (bank = t % PeLanes)
-//      Multi-byte: one AXI beat unpacks up to min(BytesPerBeat, PeLanes, k-t)
-//      consecutive A[i,t..] into distinct banks in one cycle (row-major).
+//      Multi-byte unpack; AXI INCR burst (up to MaxBurstBeats) along the row.
 //   2) Load B → banked tile SRAM (bank = t % PeLanes)
-//      Beat-buffered: after AR/R, drain leftover j-bytes without re-AR.
-//      I3-lite: dual-write same bank (tc_sram port0+port1) → up to 2 B
-//      elements/cycle (B is t-banked so consecutive j share a bank).
+//      Dual-write same bank (2 B/cycle) + AXI INCR burst along j; r_ready
+//      gated while draining a beat so mid-burst R waits.
 //   3) MAC: PeLanes parallel products/cycle via g6lc_ai_pe_dot
-//   4) Store C: when j is even and j+1 < n, pack two i32 into one 64-bit
-//      AXI beat (Latency=0 C read: capture lo, then store {hi,lo}).
+//   4) Store C: dual-i32 pack on 64-bit bus when j even.
 //
-// C is multi-banked (bank = j % PeLanes, same depth as A/B banks) so AccTile=256
-// stays within Verilator/synth-friendly per-macro sizes.
-// Beat packing is parameterized by DataWidth (BytesPerBeat) for wider NoC (I3).
+// C multi-banked (j % PeLanes). Beat packing parameterized by DataWidth.
+// Bursts stay within a single A row (k) or B row (n); never cross rows.
 //
-// Bounds: m,n,k ∈ [1, MaxDim]. Larger jobs return err without traffic.
-// Timing: multi-cycle; one outstanding AXI beat; no core critical path.
+// Bounds: m,n,k ∈ [1, MaxDim]. Timing: multi-cycle; one outstanding AR.
 
 module g6lc_ai_gemm_seq #(
     parameter int unsigned AddrWidth = 64,
@@ -59,9 +54,11 @@ module g6lc_ai_gemm_seq #(
   localparam int unsigned BankAddrW    = (BankWords > 1) ? $clog2(BankWords) : 1;
   localparam int unsigned LaneW        = (PeLanes > 1) ? $clog2(PeLanes) : 1;
   // AXI beat geometry (I3: wider DataWidth raises BytesPerBeat without RTL rewrite)
-  localparam int unsigned BytesPerBeat = DataWidth / 8;
-  localparam int unsigned BeatAlignW   = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
-  localparam int unsigned BeatLaneW    = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
+  localparam int unsigned BytesPerBeat  = DataWidth / 8;
+  localparam int unsigned BeatAlignW    = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
+  localparam int unsigned BeatLaneW     = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
+  // Max beats per AR (AXI4 allows 256; keep modest for I3-lite sim/synth)
+  localparam int unsigned MaxBurstBeats = 16;
 
   typedef enum logic [3:0] {
     ST_IDLE  = 4'd0,
@@ -86,6 +83,8 @@ module g6lc_ai_gemm_seq #(
   logic        ar_sent_q, ar_sent_d;
   logic        aw_sent_q, aw_sent_d;
   logic        w_sent_q, w_sent_d;
+  // First R of an A/B burst uses misaligned lane; later Rs are beat-aligned
+  logic        burst_first_q, burst_first_d;
 
   // A multi-byte unpack count (this R cycle); B dual-write count (1 or 2)
   logic [7:0]  la_n_d;
@@ -234,6 +233,28 @@ module g6lc_ai_gemm_seq #(
     return {a[AddrWidth-1:BeatAlignW], BeatAlignW'(0)};
   endfunction
 
+  // Beats needed to transfer `rem` elements starting at byte offset `lane0`
+  // (row-contiguous). Caps at MaxBurstBeats. Assumes PeLanes >= BytesPerBeat
+  // so each full beat is absorbed in one cycle for A (B drains multi-cycle).
+  function automatic logic [7:0] beats_for_rem(
+      input logic [31:0] rem,
+      input logic [BeatLaneW-1:0] lane0
+  );
+    automatic logic [31:0] first, after, more, total, epb;
+    if (rem == 0) return 8'd1;
+    first = 32'(BytesPerBeat) - 32'(lane0);
+    if (first > rem) first = rem;
+    after = rem - first;
+    epb   = 32'(BytesPerBeat);
+    if (epb > PeLanes) epb = PeLanes;
+    if (epb == 0) epb = 1;
+    more  = (after + epb - 1) / epb;
+    total = 32'd1 + more;
+    if (total > MaxBurstBeats) total = MaxBurstBeats;
+    if (total == 0) total = 1;
+    return total[7:0];
+  endfunction
+
   // Bank map: bank = t % PeLanes (or t for A / B along reduction);
   // local index = i * KPerBank + t / PeLanes  (A); for B: j * KPerBank + t / PeLanes
   function automatic logic [LaneW-1:0] t_bank(input logic [31:0] t);
@@ -321,15 +342,16 @@ module g6lc_ai_gemm_seq #(
     ar_sent_d   = ar_sent_q;
     aw_sent_d   = aw_sent_q;
     w_sent_d    = w_sent_q;
-    la_n_d        = 8'd0;
-    lb_n_d        = 2'd1;
-    beat_left_d   = beat_left_q;
-    beat_lane_d   = beat_lane_q;
-    beat_load_d   = 1'b0;
-    beat_data_d   = beat_q;
-    c_pair_hold_d = c_pair_hold_q;
-    c_lo_we_d     = 1'b0;
-    stc_n_d       = 4'd1;
+    la_n_d          = 8'd0;
+    lb_n_d          = 2'd1;
+    beat_left_d     = beat_left_q;
+    beat_lane_d     = beat_lane_q;
+    beat_load_d     = 1'b0;
+    beat_data_d     = beat_q;
+    burst_first_d   = burst_first_q;
+    c_pair_hold_d   = c_pair_hold_q;
+    c_lo_we_d       = 1'b0;
+    stc_n_d         = 4'd1;
 
     unique case (state_q)
       ST_IDLE: begin
@@ -337,6 +359,7 @@ module g6lc_ai_gemm_seq #(
         aw_sent_d     = 1'b0;
         w_sent_d      = 1'b0;
         beat_left_d   = 8'd0;
+        burst_first_d = 1'b0;
         c_pair_hold_d = 1'b0;
         if (start_i) begin
           err_d   = 1'b0;
@@ -351,26 +374,34 @@ module g6lc_ai_gemm_seq #(
           err_d   = 1'b1;
           state_d = ST_DONE;
         end else begin
-          ar_sent_d   = 1'b0;
-          beat_left_d = 8'd0;
-          state_d     = ST_LA;
+          ar_sent_d     = 1'b0;
+          beat_left_d   = 8'd0;
+          burst_first_d = 1'b0;
+          state_d       = ST_LA;
         end
       end
 
-      // Load A: multi-byte unpack from one beat into distinct banks (t%PeLanes)
+      // Load A: multi-beat INCR along row; multi-byte unpack into t%PeLanes banks
       ST_LA: begin
         axi_req_o.ar.addr = beat_align(a_cur);
         if (!ar_sent_q) begin
-          axi_req_o.ar_valid = 1'b1;
-          if (axi_resp_i.ar_ready) ar_sent_d = 1'b1;
+          begin
+            automatic logic [7:0] nb;
+            nb = beats_for_rem(k_q - t_q, a_cur[BeatAlignW-1:0]);
+            axi_req_o.ar.len   = axi_pkg::len_t'(nb - 8'd1);
+            axi_req_o.ar_valid = 1'b1;
+            if (axi_resp_i.ar_ready) begin
+              ar_sent_d     = 1'b1;
+              burst_first_d = 1'b1;
+            end
+          end
         end
         axi_req_o.r_ready = 1'b1;
         if (ar_sent_q && axi_resp_i.r_valid) begin
-          // n = min(k-t, BytesPerBeat-lane, PeLanes) consecutive elements
           begin
             automatic logic [BeatLaneW-1:0] lane0;
             automatic logic [31:0] n_take, rem_k, rem_beat;
-            lane0    = a_cur[BeatAlignW-1:0];
+            lane0    = burst_first_q ? a_cur[BeatAlignW-1:0] : BeatLaneW'(0);
             rem_k    = k_q - t_q;
             rem_beat = 32'(BytesPerBeat) - 32'(lane0);
             n_take   = rem_k;
@@ -388,8 +419,12 @@ module g6lc_ai_gemm_seq #(
               end
             end
           end
-          ar_sent_d = 1'b0;
-          // end-of-A if this finishes last row
+          burst_first_d = 1'b0;
+          // Keep AR open until r.last of this burst
+          if (axi_resp_i.r.last)
+            ar_sent_d = 1'b0;
+          else
+            ar_sent_d = 1'b1;
           if ((t_q + 32'(la_n_d) >= k_q) && (i_q + 1 == m_q))
             state_d = ST_LB;
           else
@@ -397,10 +432,11 @@ module g6lc_ai_gemm_seq #(
         end
       end
 
-      // Load B: AR/R then dual-drain leftover j-bytes (same t-bank, up to 2/cycle)
+      // Load B: dual-drain (2/cycle) + multi-beat INCR; r_ready off while draining
       ST_LB: begin
         if (beat_left_q != 8'd0) begin
-          // Drain held beat — no AXI; dual-write when 2+ left and j+1 in row
+          // Drain held beat — hold R if a burst is still open
+          axi_req_o.r_ready = 1'b0;
           begin
             automatic logic [LaneW-1:0] bk;
             automatic logic            can2;
@@ -425,16 +461,25 @@ module g6lc_ai_gemm_seq #(
               state_d     = ST_MAC;
               acc_d       = '0;
               beat_left_d = 8'd0;
+              ar_sent_d   = 1'b0;
             end else
               state_d = ST_LB;
           end
         end else begin
           axi_req_o.ar.addr = beat_align(b_cur);
           if (!ar_sent_q) begin
-            axi_req_o.ar_valid = 1'b1;
-            if (axi_resp_i.ar_ready) ar_sent_d = 1'b1;
+            begin
+              automatic logic [7:0] nb;
+              nb = beats_for_rem(n_q - j_q, b_cur[BeatAlignW-1:0]);
+              axi_req_o.ar.len   = axi_pkg::len_t'(nb - 8'd1);
+              axi_req_o.ar_valid = 1'b1;
+              if (axi_resp_i.ar_ready) begin
+                ar_sent_d     = 1'b1;
+                burst_first_d = 1'b1;
+              end
+            end
           end
-          axi_req_o.r_ready = 1'b1;
+          axi_req_o.r_ready = ar_sent_q;
           if (ar_sent_q && axi_resp_i.r_valid) begin
             begin
               automatic logic [LaneW-1:0]     bk;
@@ -442,7 +487,7 @@ module g6lc_ai_gemm_seq #(
               automatic logic [31:0]          left_beat, rem_row;
               automatic logic                 can2;
               bk    = t_bank(t_q);
-              lane0 = b_cur[BeatAlignW-1:0];
+              lane0 = burst_first_q ? b_cur[BeatAlignW-1:0] : BeatLaneW'(0);
               can2  = (j_q + 1 < n_q) && (32'(lane0) + 1 < 32'(BytesPerBeat));
               b_w_req [bk] = 1'b1;
               b_w_addr[bk] = b_bank_addr(t_q, j_q);
@@ -453,7 +498,6 @@ module g6lc_ai_gemm_seq #(
                 b_w2_data[bk] = byte_from_beat(
                     axi_resp_i.r.data, BeatLaneW'(lane0 + 1));
                 lb_n_d = 2'd2;
-                // leftover after two bytes, limited by row remainder
                 left_beat = 32'(BytesPerBeat) - 32'(lane0) - 32'd2;
                 rem_row   = n_q - j_q - 32'd2;
                 if (left_beat > rem_row) left_beat = rem_row;
@@ -467,13 +511,18 @@ module g6lc_ai_gemm_seq #(
                 beat_left_d = left_beat[7:0];
                 beat_lane_d = BeatLaneW'(lane0 + 1);
               end
-              ar_sent_d   = 1'b0;
-              beat_load_d = 1'b1;
-              beat_data_d = axi_resp_i.r.data;
+              burst_first_d = 1'b0;
+              beat_load_d   = 1'b1;
+              beat_data_d   = axi_resp_i.r.data;
+              if (axi_resp_i.r.last)
+                ar_sent_d = 1'b0;
+              else
+                ar_sent_d = 1'b1;
               if (j_q + 32'(lb_n_d) >= n_q && t_q + 1 == k_q) begin
                 state_d     = ST_MAC;
                 acc_d       = '0;
                 beat_left_d = 8'd0;
+                ar_sent_d   = 1'b0;
               end else
                 state_d = ST_LB;
             end
@@ -614,6 +663,7 @@ module g6lc_ai_gemm_seq #(
       ar_sent_q <= 1'b0;
       aw_sent_q <= 1'b0;
       w_sent_q <= 1'b0;
+      burst_first_q <= 1'b0;
       beat_q <= '0;
       beat_lane_q <= '0;
       beat_left_q <= '0;
@@ -626,6 +676,7 @@ module g6lc_ai_gemm_seq #(
       ar_sent_q     <= ar_sent_d;
       aw_sent_q     <= aw_sent_d;
       w_sent_q      <= w_sent_d;
+      burst_first_q <= burst_first_d;
       beat_left_q   <= beat_left_d;
       beat_lane_q   <= beat_lane_d;
       c_pair_hold_q <= c_pair_hold_d;
@@ -646,6 +697,7 @@ module g6lc_ai_gemm_seq #(
         j_q   <= '0;
         t_q   <= '0;
         beat_left_q   <= '0;
+        burst_first_q <= 1'b0;
         c_pair_hold_q <= 1'b0;
       end
 
@@ -674,7 +726,9 @@ module g6lc_ai_gemm_seq #(
           err_q <= 1'b1;
         if (j_q + 32'(lb_n_d) >= n_q) begin
           j_q <= '0;
-          beat_left_q <= '0;  // new row needs fresh AR (overrides comb drain)
+          beat_left_q   <= '0;  // new row needs fresh AR
+          ar_sent_q     <= 1'b0;
+          burst_first_q <= 1'b0;
           if (t_q + 1 != k_q)
             t_q <= t_q + 1;
           else begin
