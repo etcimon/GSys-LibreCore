@@ -30,9 +30,9 @@ losing intermediate completions if SW did not claim between jobs.
 
 ## Acceptance
 
-- [x] Module synthesizable; wired in top
-- [ ] Standalone `ai-island-veri` + lab HARD `mmio`/`gemm_s8` still green
-- [ ] Optional directed: N completes then N claims
+- [x] Module synthesizable; wired in top (`Makefile` flist + standalone)
+- [x] Standalone `ai-island-veri` green (incl. multi-claim directed: tickets 20→21→22)
+- [ ] Full SoC HARD rebuild + `ai_gemm_s8_smoke` (lab; long verilate)
 - Timing: push/pop same clock domain; no new async reset/clock
 
 ## Non-goals

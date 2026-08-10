@@ -206,8 +206,49 @@ int main(int argc, char **argv) {
   wait_done(st, ticket);
   expect("disabled", st == ST_DISABLED);
 
+  // Re-enable: CPL FIFO multi-claim (N completes without claim, then N claims)
+  reg_write(0x0100, 1);
+  program_region(0, 0x80010000ull, 0x80014000ull, 0x3);
+  make_ok_desc(desc);
+  load_desc_words(desc);
+  // Submit tickets 20,21,22 without claiming between
+  reg_write(0x0108, (20u << 8) | 0);
+  for (int i = 0; i < 50; i++) {
+    if (reg_read(0x010C) & 1)
+      break;
+    tick();
+  }
+  // Do not claim — leave sticky set, push more finishes
+  load_desc_words(desc);
+  reg_write(0x0108, (21u << 8) | 0);
+  for (int i = 0; i < 50; i++) {
+    tick();
+  }
+  load_desc_words(desc);
+  reg_write(0x0108, (22u << 8) | 0);
+  for (int i = 0; i < 50; i++) {
+    tick();
+  }
+  // Head should be oldest (ticket 20)
+  uint32_t sticky = reg_read(0x010C);
+  ticket = reg_read(0x0110);
+  st = (uint16_t)(reg_read(0x0114) & 0xFFFF);
+  expect("CPL FIFO head oldest", (sticky & 1) && ticket == 20 && st == ST_OK);
+  reg_write(0x010C, 1); // claim / pop
+  ticket = reg_read(0x0110);
+  st = (uint16_t)(reg_read(0x0114) & 0xFFFF);
+  sticky = reg_read(0x010C);
+  expect("CPL FIFO after pop1", (sticky & 1) && ticket == 21 && st == ST_OK);
+  reg_write(0x010C, 1);
+  ticket = reg_read(0x0110);
+  sticky = reg_read(0x010C);
+  expect("CPL FIFO after pop2", (sticky & 1) && ticket == 22);
+  reg_write(0x010C, 1);
+  sticky = reg_read(0x010C);
+  expect("CPL FIFO empty after 3 claims", (sticky & 1) == 0);
+
   if (errors == 0) {
-    std::printf("*** SUCCESS *** ai-island P3 spine (%llu cycles)\n",
+    std::printf("*** SUCCESS *** ai-island P3 spine + CPL FIFO (%llu cycles)\n",
                 (unsigned long long)cycles);
     delete dut;
     return 0;
