@@ -38,7 +38,7 @@ package g6lc_ai_island_cfg_pkg;
   // each tc_sram at MaxDim*ceil(MaxDim/PeLanes) words (512xi32 @256/128);
   // avoids a flat 65k-word C array that OOMs sim. gemm_seq binds
   // MaxDim/PeLanes from AccTileM / MacsPerCycle. I3-lite: multi-beat AR/AW (64) +
-  // dual-write B + PMU; CAP DRAM [31:16]=meas milli-GB/s; NocWidth 64 (fabric).
+  // B quad-drain + dual-bank C-read + PMU; CAP DRAM [31:16]=meas; NocWidth 64.
   localparam ai_island_cfg_t AiIslandLatencyDefault = '{
       Clusters:     unsigned'(1),
       MacsPerCycle: unsigned'(128),           // PeLanes (grow toward SKU Macs)
