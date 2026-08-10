@@ -13,12 +13,13 @@
 //      Dual-write same bank (2 B/cycle) + AXI INCR burst along j; r_ready
 //      gated while draining a beat so mid-burst R waits.
 //   3) MAC: PeLanes parallel products/cycle via g6lc_ai_pe_dot
-//   4) Store C: dual-i32 pack on 64-bit bus when j even.
+//   4) Store C: dual-i32 pack on ≥64-bit bus; multi-beat INCR AW (up to
+//      MaxBurstBeats pair-beats) along a C row — same cap as A/B AR.
 //
 // C multi-banked (j % PeLanes). Beat packing parameterized by DataWidth.
-// Bursts stay within a single A row (k) or B row (n); never cross rows.
+// Bursts stay within a single A row (k), B row (n), or C row (n); never cross.
 //
-// Bounds: m,n,k ∈ [1, MaxDim]. Timing: multi-cycle; one outstanding AR.
+// Bounds: m,n,k ∈ [1, MaxDim]. Timing: multi-cycle; one outstanding AR/AW.
 
 module g6lc_ai_gemm_seq #(
     parameter int unsigned AddrWidth = 64,
@@ -100,11 +101,14 @@ module g6lc_ai_gemm_seq #(
   logic                 beat_load_d;  // capture RDATA into beat_q
   logic [DataWidth-1:0] beat_data_d;
 
-  // C dual-store pack: hold low i32, then write {hi,lo} on 64-bit bus
+  // C dual-store pack: hold low i32, then write {hi,lo} on ≥64-bit bus.
+  // Multi-beat: AW once with len=nbeats-1; stream W; advance j on B by stc_elem.
   logic        c_pair_hold_q, c_pair_hold_d;
   logic [31:0] c_lo_q;
   logic        c_lo_we_d;
-  logic [3:0]  stc_n_d;  // 1 or 2 elements retired on B resp
+  logic [7:0]  stc_w_left_q, stc_w_left_d;  // remaining W beats in open AW
+  logic [7:0]  stc_elem_q, stc_elem_d;      // elements covered by open AW (B retire)
+  logic [7:0]  stc_n_d;                     // elements retired on B (stc_elem)
 
   // ---- Banked A/B tile ports ----
   logic                 a_r_req  [PeLanes];
@@ -340,7 +344,7 @@ module g6lc_ai_gemm_seq #(
     axi_req_o.ar.cache = axi_pkg::CACHE_MODIFIABLE;
     axi_req_o.aw.id    = IdWidth'(2);
     axi_req_o.aw.len   = '0;
-    axi_req_o.aw.size  = axi_pkg::size_t'(2);
+    axi_req_o.aw.size  = axi_pkg::size_t'(2);  // default 4B; pair path uses 8B
     axi_req_o.aw.burst = axi_pkg::BURST_INCR;
     axi_req_o.aw.cache = '0;
     axi_req_o.w.last   = 1'b1;
@@ -361,7 +365,9 @@ module g6lc_ai_gemm_seq #(
     burst_first_d   = burst_first_q;
     c_pair_hold_d   = c_pair_hold_q;
     c_lo_we_d       = 1'b0;
-    stc_n_d         = 4'd1;
+    stc_w_left_d    = stc_w_left_q;
+    stc_elem_d      = stc_elem_q;
+    stc_n_d         = stc_elem_q;  // default: retire full open AW on B
 
     unique case (state_q)
       ST_IDLE: begin
@@ -371,6 +377,8 @@ module g6lc_ai_gemm_seq #(
         beat_left_d   = 8'd0;
         burst_first_d = 1'b0;
         c_pair_hold_d = 1'b0;
+        stc_w_left_d  = 8'd0;
+        stc_elem_d    = 8'd0;
         if (start_i) begin
           err_d   = 1'b0;
           state_d = ST_CHK;
@@ -568,6 +576,8 @@ module g6lc_ai_gemm_seq #(
             aw_sent_d     = 1'b0;
             w_sent_d      = 1'b0;
             c_pair_hold_d = 1'b0;
+            stc_w_left_d  = 8'd0;
+            stc_elem_d    = 8'd0;
           end else
             state_d = ST_MAC;
         end else
@@ -575,54 +585,82 @@ module g6lc_ai_gemm_seq #(
       end
 
       ST_STC: begin
-        // Pack two i32 when j even, j+1 exists, and bus is ≥64-bit
+        // Multi-beat pair path (≥64-bit): AW once, stream {hi,lo} W beats,
+        // retire j by stc_elem on B. Single-i32 path when j odd or last col.
         begin
-          automatic logic can_pair;
+          automatic logic        can_pair;
+          automatic logic [31:0] pairs_rem, nbeats, beats_done, j_eff;
           can_pair = (DataWidth >= 64) && !j_q[0] && (j_q + 1 < n_q);
 
-          if (can_pair && !c_pair_hold_q) begin
-            // Phase 0: capture C[i,j] (combo read → FF)
-            c_r_req   = 1'b1;
-            c_r_bank  = c_bank(j_q);
-            c_r_addr  = c_bank_addr(i_q, j_q);
-            c_lo_we_d = 1'b1;
-            c_pair_hold_d = 1'b1;
-            state_d   = ST_STC;
-          end else if (can_pair && c_pair_hold_q) begin
-            // Phase 1: C[i,j+1] + full-beat store {hi, lo}
-            c_r_req  = 1'b1;
-            c_r_bank = c_bank(j_q + 32'd1);
-            c_r_addr = c_bank_addr(i_q, j_q + 32'd1);
-            axi_req_o.aw.addr = c_store_addr;  // j even ⇒ 8-byte aligned
-            axi_req_o.w.data  = DataWidth'({c_r_data, c_lo_q});
-            axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
-            stc_n_d = 4'd2;
+          if (can_pair) begin
+            // ---- open AW for up to MaxBurstBeats pair-beats along the row ----
             if (!aw_sent_q) begin
+              pairs_rem = (n_q - j_q) >> 1;
+              nbeats    = pairs_rem;
+              if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
+              if (nbeats == 0) nbeats = 1;
+              axi_req_o.aw.addr  = c_store_addr;  // j even ⇒ 8B aligned
+              axi_req_o.aw.len   = axi_pkg::len_t'(nbeats[7:0] - 8'd1);
+              axi_req_o.aw.size  = axi_pkg::size_t'(3);  // 8-byte beats
               axi_req_o.aw_valid = 1'b1;
-              if (axi_resp_i.aw_ready) aw_sent_d = 1'b1;
-            end
-            if (!w_sent_q) begin
-              axi_req_o.w_valid = 1'b1;
-              if (axi_resp_i.w_ready) w_sent_d = 1'b1;
-            end
-            axi_req_o.b_ready = 1'b1;
-            if (aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
-              if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
-                err_d = 1'b1;
-              aw_sent_d     = 1'b0;
-              w_sent_d      = 1'b0;
-              c_pair_hold_d = 1'b0;
-              if (j_q + 2 >= n_q && i_q + 1 == m_q)
-                state_d = ST_DONE;
-              else
-                state_d = ST_STC;
+              if (axi_resp_i.aw_ready) begin
+                aw_sent_d    = 1'b1;
+                stc_w_left_d = nbeats[7:0];
+                stc_elem_d   = nbeats[7:0] << 1;  // 2 i32 per beat
+                w_sent_d     = 1'b0;
+                c_pair_hold_d = 1'b0;
+              end
+            end else if (stc_w_left_q != 8'd0) begin
+              // beats already written = nbeats - w_left; j_eff = j + 2*done
+              beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
+              j_eff      = j_q + (beats_done << 1);
+              if (!c_pair_hold_q) begin
+                // capture C[i, j_eff]
+                c_r_req       = 1'b1;
+                c_r_bank      = c_bank(j_eff);
+                c_r_addr      = c_bank_addr(i_q, j_eff);
+                c_lo_we_d     = 1'b1;
+                c_pair_hold_d = 1'b1;
+              end else begin
+                // W beat: {C[i,j_eff+1], C[i,j_eff]}
+                c_r_req  = 1'b1;
+                c_r_bank = c_bank(j_eff + 32'd1);
+                c_r_addr = c_bank_addr(i_q, j_eff + 32'd1);
+                axi_req_o.w.data = DataWidth'({c_r_data, c_lo_q});
+                axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hFF};
+                axi_req_o.w.last = (stc_w_left_q == 8'd1);
+                axi_req_o.w_valid = 1'b1;
+                if (axi_resp_i.w_ready) begin
+                  stc_w_left_d  = stc_w_left_q - 8'd1;
+                  c_pair_hold_d = 1'b0;
+                  if (stc_w_left_q == 8'd1)
+                    w_sent_d = 1'b1;  // all W of this AW done
+                end
+              end
+            end else begin
+              // all W issued — wait B, then retire stc_elem columns
+              axi_req_o.b_ready = 1'b1;
+              stc_n_d = stc_elem_q;
+              if (axi_resp_i.b_valid) begin
+                if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+                  err_d = 1'b1;
+                aw_sent_d     = 1'b0;
+                w_sent_d      = 1'b0;
+                c_pair_hold_d = 1'b0;
+                stc_elem_d    = 8'd0;
+                if (j_q + 32'(stc_elem_q) >= n_q && i_q + 1 == m_q)
+                  state_d = ST_DONE;
+                else
+                  state_d = ST_STC;
+              end
             end
           end else begin
-            // Single i32 store
+            // Single i32 store (odd j or last column of odd-width row)
             c_r_req  = 1'b1;
             c_r_bank = c_bank(j_q);
             c_r_addr = c_bank_addr(i_q, j_q);
             axi_req_o.aw.addr = c_store_addr;
+            axi_req_o.aw.size = axi_pkg::size_t'(2);  // 4B
             if (DataWidth >= 64 && c_store_addr[2]) begin
               axi_req_o.w.data = DataWidth'({c_r_data, 32'h0});
               axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hF0};
@@ -630,10 +668,13 @@ module g6lc_ai_gemm_seq #(
               axi_req_o.w.data = DataWidth'(c_r_data);
               axi_req_o.w.strb = {{(DataWidth/8-4){1'b0}}, 4'hF};
             end
-            stc_n_d = 4'd1;
+            stc_n_d = 8'd1;
             if (!aw_sent_q) begin
               axi_req_o.aw_valid = 1'b1;
-              if (axi_resp_i.aw_ready) aw_sent_d = 1'b1;
+              if (axi_resp_i.aw_ready) begin
+                aw_sent_d  = 1'b1;
+                stc_elem_d = 8'd1;
+              end
             end
             if (!w_sent_q) begin
               axi_req_o.w_valid = 1'b1;
@@ -646,6 +687,7 @@ module g6lc_ai_gemm_seq #(
               aw_sent_d     = 1'b0;
               w_sent_d      = 1'b0;
               c_pair_hold_d = 1'b0;
+              stc_elem_d    = 8'd0;
               if (j_q + 1 == n_q && i_q + 1 == m_q)
                 state_d = ST_DONE;
               else
@@ -679,6 +721,8 @@ module g6lc_ai_gemm_seq #(
       beat_left_q <= '0;
       c_pair_hold_q <= 1'b0;
       c_lo_q <= '0;
+      stc_w_left_q <= '0;
+      stc_elem_q <= '0;
       pmu_r_q  <= '0;
       pmu_w_q  <= '0;
       pmu_cy_q <= '0;
@@ -693,18 +737,21 @@ module g6lc_ai_gemm_seq #(
       beat_left_q   <= beat_left_d;
       beat_lane_q   <= beat_lane_d;
       c_pair_hold_q <= c_pair_hold_d;
+      stc_w_left_q  <= stc_w_left_d;
+      stc_elem_q    <= stc_elem_d;
       if (beat_load_d) beat_q <= beat_data_d;
       if (c_lo_we_d)   c_lo_q <= c_r_data;
       done_q        <= (state_q == ST_DONE);
 
       // I3: accumulate traffic while job is running
+      // W counts data beats (w handshake), not B responses — multi-beat AW safe
       if (state_q != ST_IDLE && state_q != ST_DONE)
         pmu_cy_q <= pmu_cy_q + 32'd1;
       if (state_q != ST_IDLE && state_q != ST_DONE &&
           axi_req_o.r_ready && axi_resp_i.r_valid)
         pmu_r_q <= pmu_r_q + 32'd1;
       if (state_q != ST_IDLE && state_q != ST_DONE &&
-          axi_req_o.b_ready && axi_resp_i.b_valid)
+          axi_req_o.w_valid && axi_resp_i.w_ready)
         pmu_w_q <= pmu_w_q + 32'd1;
 
       if (state_q == ST_IDLE && start_i) begin
@@ -722,6 +769,8 @@ module g6lc_ai_gemm_seq #(
         beat_left_q   <= '0;
         burst_first_q <= 1'b0;
         c_pair_hold_q <= 1'b0;
+        stc_w_left_q  <= '0;
+        stc_elem_q    <= '0;
         pmu_r_q  <= '0;
         pmu_w_q  <= '0;
         pmu_cy_q <= '0;
@@ -785,7 +834,7 @@ module g6lc_ai_gemm_seq #(
           t_q <= t_q + PeLanes;
       end
 
-      // C store: advance by stc_n_d (1 or 2) on B complete
+      // C store: advance by stc_n_d (1 or 2*nbeats) on B complete
       if (state_q == ST_STC && aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
         if (j_q + 32'(stc_n_d) >= n_q) begin
           j_q <= '0;
