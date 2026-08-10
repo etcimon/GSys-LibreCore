@@ -52,13 +52,15 @@ module g6lc_ai_tile_sram #(
   assign wdata[1] = w_data_i;
   assign be[1]    = '1;  // full-word writes
 
+  // SimInit "none": Verilator rejects BLKLOOPINIT on large zero-init arrays
+  // (AccTile≥32 ⇒ C bank 1024×i32). GEMM always writes tiles before read.
   tc_sram #(
       .NumWords   (NumWords),
       .DataWidth  (DataWidth),
       .ByteWidth  (8),
       .NumPorts   (2),
       .Latency    (0),
-      .SimInit    ("zeros"),
+      .SimInit    ("none"),
       .PrintSimCfg(1'b0),
       .ImplKey    (ImplKey)
   ) i_sram (

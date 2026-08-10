@@ -34,17 +34,17 @@ package g6lc_ai_island_cfg_pkg;
     int unsigned WorkQuantumK;   // preemption boundary in k-steps
   } ai_island_cfg_t;
 
-  // I1-lite bring-up (live RTL): MaxDim=16, PeLanes=8 multi-MAC, one cluster.
+  // I1-lite bring-up (live RTL): MaxDim=32, PeLanes=16 multi-MAC, one cluster.
   // Discovery must match g6lc_ai_gemm_seq (binds MaxDim/PeLanes from these).
   // Full SKU targets (Macs≈8k–12k, AccTile≈256) in AiIslandLatencySkuTarget.
   localparam ai_island_cfg_t AiIslandLatencyDefault = '{
       Clusters:     unsigned'(1),
-      MacsPerCycle: unsigned'(8),            // PeLanes
+      MacsPerCycle: unsigned'(16),           // PeLanes
       ClockKhz:     unsigned'(1_000_000),
-      SramBytes:    unsigned'(16 * 1024),    // A/B banked + C (MaxDim=16) headroom
-      AccTileM:     unsigned'(16),           // MaxDim
-      AccTileN:     unsigned'(16),
-      AccTileK:     unsigned'(16),
+      SramBytes:    unsigned'(64 * 1024),    // A/B banked + C (MaxDim=32) headroom
+      AccTileM:     unsigned'(32),           // MaxDim
+      AccTileN:     unsigned'(32),
+      AccTileK:     unsigned'(32),
       NocWidth:     unsigned'(64),           // single AXI master today
       DramChannels: unsigned'(1),
       DramGBps:     unsigned'(0),            // not measured (I3)

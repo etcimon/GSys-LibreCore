@@ -26,8 +26,8 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_pe_dot.sv` | multi-lane INT8 MAC slice (PeLanes products/cycle) | **landed** |
 | `g6lc_ai_gemm_seq.sv` | I1-lite GEMM: banked A/B load pack + dual-i32 C store + PE | **landed** |
 
-Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=8**,
-**AccTileM/N/K=16**. Island top binds `gemm_seq.MaxDim = AccTileM` and
+Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=16**,
+**AccTileM/N/K=32**. Island top binds `gemm_seq.MaxDim = AccTileM` and
 `PeLanes = MacsPerCycle` (square-tile assert). Full SKU placeholders:
 `AiIslandLatencySkuTarget` (not elaborated).
 | `g6lc_ai_island_top.sv` | reg map + IRQ sticky + fetch/store/gemm AXI mux | **landed** |
