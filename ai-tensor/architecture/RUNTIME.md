@@ -58,8 +58,10 @@ poll(ticket) -> Option<Completion>
 wait(ticket | irq, timeout) -> Completion
 ```
 
-- **sim:** no OS; models AI-3 reject, ST_OK, completion write, virtual IRQ.
-- **linux:** map island BAR/window; optional eventfd for IRQ.
+- **sim:** no OS; direct job path (no register protocol).
+- **mmio-soft (`SoftIsland`/`MmioDevice`):** hostless register model — CAP probe, AI-3 region
+  commit on perm write, desc latch, doorbell (latch or fetch), DONE claim clear, PMU sticky.
+- **linux:** map island BAR/window (`linux-mmio` feature stub); optional eventfd for IRQ.
 - **cosim:** pipe to Verilator harness (slow gold).
 
 ---

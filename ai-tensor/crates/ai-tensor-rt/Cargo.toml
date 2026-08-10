@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Device runtime + hostless sim backend for ai-tensor"
+description = "Device runtime + hostless sim + MMIO SoftIsland backends for ai-tensor"
+
+[features]
+default = []
+linux-mmio = []
 
 [dependencies]
 ai-tensor-abi = { workspace = true }

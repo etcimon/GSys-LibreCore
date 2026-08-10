@@ -3,8 +3,10 @@
 //! Runtime: regions, submit, wait — **sim** backend (mandatory CI).
 
 mod sim;
+mod mmio;
 
 pub use sim::SimDevice;
+pub use mmio::{probe_cap_regs, read_pmu, MmioBus, MmioDevice, SoftIsland};
 
 use ai_tensor_abi::{AccTile, CapRegs, Completion, Desc64, PmuSnapshot, ST_OK};
 use thiserror::Error;

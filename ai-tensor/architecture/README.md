@@ -35,7 +35,7 @@ this directory is the **host backend** plan (frameworks → island). Nothing her
 | Rust workspace | **M1–M2 + Phase A** — abi (CAP/PMU), ir (tile limits), rt-sim Caps |
 | Python + PyTorch helpers | **M3–M4 partial** — sim path; Caps/tile auto not yet in Python |
 | Default profile | `sim-v0`; pin stub `island-p3-v1` (AccTile=256, Noc 64) |
-| Live island MMIO | **not yet** (M5 capability-driven) |
+| Live island MMIO | **SoftIsland hostless** (real UIO still open) |
 | Island alignment | CAP/PMU/AccTile match I3-lite; bus micro-arch stays in RTL |
 
 ## Independence

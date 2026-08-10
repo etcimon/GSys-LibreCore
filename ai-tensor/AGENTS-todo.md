@@ -49,14 +49,16 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] Profiles: `sim-v0` features + `island-p3-v1.toml` pin stub
 - [ ] Dual oracle note: optional monorepo `ai-matrix-veri` when host present
 
-## M5 — Linux / real island (capability-driven; was “UIO only”)
+## M5 — Linux / real island (capability-driven)
 
-- [ ] UIO/VFIO or bare map of island MMIO base (Variane `0x4000_0000`)
-- [ ] Program AI-3 regions; latch and/or DMA-fetch submit; poll + optional PLIC-8
-- [ ] Completion policy: `wr_cpl_en` vs claim-only (match island directed soaks)
-- [ ] Read PMU after job → framework meta (cycles, R/W beats, milli-GB/s)
-- [ ] CAP RO probe → Caps (never hardcode tile in torch path)
-- [ ] Cosim/replay backend optional (not default CI)
+- [x] SoftIsland MMIO model: CAP/CTL/regions/desc latch/doorbell/DONE/PMU
+- [x] `MmioDevice`: CAP→Caps, AI-3 program, latch + fetch submit, poll+clear DONE, PMU
+- [x] CLI `mmio-gemm` + doctor CAP probe
+- [x] Feature `linux-mmio` stub for future UIO map (not default CI)
+- [ ] Real UIO/VFIO map of Variane `0x4000_0000` on Linux board
+- [ ] PLIC-8 IRQ wait path (level clear before complete)
+- [ ] Cosim/replay against Variane harness (optional)
+- [ ] Python Caps / PMU surface + torch meta
 - [ ] `tools/check_independence.py`
 
 ## M6+ — TF / production RT
