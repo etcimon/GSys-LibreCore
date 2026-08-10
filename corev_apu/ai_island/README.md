@@ -29,9 +29,9 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=256**,
 **AccTileM/N/K=256** (SKU AccTile* live; 1 MAC cycle per C). C multi-banked
 (`j % PeLanes`) → each `tc_sram` is `MaxDim*1` words (256xi32 @256/256).
-I3-lite: B oct-drain + multi-beat AR/AW + dual-bank C-read + **trail C-store
-during MAC** (hide store behind compute) + PMU @0x180; CAP DRAM; NoC 64b.
-256³ directed: **83,705 cycles** (was ~117.4k post oct-drain / ~125.5k PeLanes256).
+I3-lite: B oct-drain + multi-beat AR/AW + dual-bank C-read + trail C-store
+during MAC + **multi-outstanding AR (depth 2)** + PMU @0x180; CAP DRAM; NoC 64b.
+256³ directed: **83,705 cy** (unchanged vs trail on zero-latency TB; multi-out ready for DRAM).
 | `g6lc_ai_island_top.sv` | reg map + IRQ sticky + fetch/store/gemm AXI mux | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 (next) |
 | AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |
