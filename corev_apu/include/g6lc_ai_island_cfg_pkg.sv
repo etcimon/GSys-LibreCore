@@ -8,8 +8,8 @@
 // budgets, NoC width and DRAM class. The core-attached plane stays on
 // config_pkg::ai_cfg_t.
 //
-// Status: P3 scaffold. Not yet referenced by a flist — instantiate when the
-// descriptor engine lands in corev_apu/ai_island/.
+// Status: P3 + I1-lite live (island on flist when MatrixEn; gemm_seq MaxDim=8).
+// Full I1 freezes AccTile*/MacsPerCycle/SramBytes below.
 
 package g6lc_ai_island_cfg_pkg;
 

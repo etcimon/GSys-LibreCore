@@ -11,6 +11,11 @@ Linux locally, reachable over IPv6-over-PCIe. Read `../README.md` (scaffold cont
 addresses, trap rules and the T2 descriptor ABI. It is normative for **both** seam options and must
 not diverge between them (§2.2). §5 below is a summary; that document is the source of truth.
 
+**Host ML backend (separate package):** [`../../ai-tensor/AGENTS.md`](../../ai-tensor/AGENTS.md) —
+PyTorch / TensorFlow attachment to this contract and to live `corev_apu/ai_island`. Architecture
+cross-connect and version pins: [`../../ai-tensor/architecture/VERSIONING.md`](../../ai-tensor/architecture/VERSIONING.md).
+Not on any flist; does not replace this scaffold.
+
 **Scaling plan of record: [`scaling-100tops.md`](scaling-100tops.md)** — what changes when the target
 is the 100-TOPS class rather than 1–5 TOPS. It supplies the bandwidth-first sizing model, the
 core-attached/island plane split (§1.1 below), the SKU question that is still open, and the island
@@ -314,7 +319,7 @@ that depended on the carve-out.
 | **P0** | this scaffold + `isa-encoding.md` + `../uncore/pcie-endpoint.md` + licensing surface + todo rows | docs only, no flist |
 | **P1** | option **B**: `AiMatrixEn`, T0/T1 `ai.mma.s8` + `ai.requant` behind `COPRO_G6LC_AI`; `g6lc64_ai` package; directed tests | **Landed** — `ai-matrix-veri` green on `work-ver-ai` |
 | **P2** | PMU events, RVFI probes, DFT threading, accumulator `tc_sram` | **Mostly landed:** PMU group 4 + RVFI + acc `tc_sram` + **aiperm gate** + queue T0 stubs + `testmode_i` threaded to acc bank. Still open: MBIST macro bind, FO4 note |
-| **P3** | T2 descriptor engine in `corev_apu/ai_island/` | **Spine + SoC MMIO.** AXI@`0x4000_0000` when `MatrixEn`. Standalone + `ai_island_mmio_smoke`. No GEMM DMA / PLIC yet. |
+| **P3** | T2 descriptor engine in `corev_apu/ai_island/` | **Spine + SoC MMIO + PLIC-8 + DMA + I1-lite GEMM.** AXI@`0x4000_0000` when `MatrixEn`. Suite includes `ai_gemm_s8_*` goldens. Full PE/`tc_sram` cluster still I1. |
 | **P3** | T2 descriptor engine in `corev_apu/` + address-check + IRQ + `corev_apu/tb` model | formal ring safety + DMA-reject test |
 | **P4** | option **D**: decouple `EnableAccelerator`, real first-pass decoder, resolve `cva6.sv:2216` | RVV compliance stays green |
 | **P5** | PCIe EP + virtio + host driver + IPv6 plane + sshd on card | host enumeration on FPGA |
@@ -329,7 +334,7 @@ and one software stack.
 | # | Deliverable | Depends on |
 |---|---|---|
 | **I0** | TOPS definition, bandwidth model, plane split, staged SKU decision | — (done: `scaling-100tops.md`) |
-| **I1** | **one** island cluster: PE array, `tc_sram` banks, sequencer, capability window. Freezes `T`, accumulator geometry, DRAM class and the NoC cut line **for both SKUs** | P3 |
+| **I1** | **one** island cluster: PE array, `tc_sram` banks, sequencer, capability window. Freezes `T`, accumulator geometry, DRAM class and the NoC cut line **for both SKUs**. **I1-lite landed:** sequential tile-buffered GEMM (`g6lc_ai_gemm_seq`, MaxDim=8) | P3 |
 | **I3** | memory system sized to the §4 model; measured bandwidth | I1 |
 | — | **latency SKU tapes out** (1–2 clusters, ~12–25 TOPS) | I3, I4 |
 | **I2** | NoC + N clusters + per-cluster gating + QoS arbitration | I3 |

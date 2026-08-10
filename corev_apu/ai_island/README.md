@@ -22,7 +22,7 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_desc_engine.sv` | validate version/op + AI-3 + `ST_GEMM` handoff | **landed** |
 | `g6lc_ai_desc_fetch.sv` | AXI read-only 64 B descriptor fetch | **landed** |
 | `g6lc_ai_mem_store.sv` | AXI single-beat store (completion word) | **landed** |
-| `g6lc_ai_gemm_seq.sv` | I1-lite sequential INT8 GEMM (MaxDim=8) over AXI | **landed** |
+| `g6lc_ai_gemm_seq.sv` | I1-lite tile-buffered INT8 GEMM (load A/B → MAC → store C; MaxDim=8) | **landed** |
 | `g6lc_ai_island_top.sv` | reg map + IRQ sticky + fetch/store/gemm AXI mux | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 (next) |
 | AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |

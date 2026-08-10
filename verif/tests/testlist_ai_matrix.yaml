@@ -39,3 +39,9 @@ testlist:
   - test: ai_gemm_s8_smoke
     description: I1-lite sequential GEMM 2x2x2 int8 golden via island doorbell
     path: custom/ai/ai_gemm_s8_smoke.S
+  - test: ai_gemm_s8_lda_smoke
+    description: I1-lite GEMM with lda>k row padding golden
+    path: custom/ai/ai_gemm_s8_lda_smoke.S
+  - test: ai_gemm_dim_err_smoke
+    description: I1-lite rejects m>MaxDim with ST_ERR and no C write
+    path: custom/ai/ai_gemm_dim_err_smoke.S
