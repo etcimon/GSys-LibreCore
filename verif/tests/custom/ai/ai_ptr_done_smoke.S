@@ -44,7 +44,7 @@ _start:
   sd   zero, 0(t0)
 
   # Good descriptor with ptr_done = &done_word
-  li   t0, (1 << 16) | 1
+  li   t0, (3 << 16) | 1  /* OP_LAYOUT (spine; no GEMM) */
   sw   t0, AI_DESC+0x0(s0)
   sw   zero, AI_DESC+0x4(s0)
   li   t0, 8

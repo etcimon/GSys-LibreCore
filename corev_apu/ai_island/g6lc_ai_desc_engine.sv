@@ -1,13 +1,13 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
-// Xg6lcai T2 descriptor engine spine (P3).
+// Xg6lcai T2 descriptor engine spine (P3 + I1-lite).
 //
 // Accepts a software-pushed 64-byte descriptor (doorbell path) on a given
 // queue, validates version/op, runs AI-3 address checks on every pointer,
-// and completes with a status word. Does **not** yet perform GEMM traffic —
-// that is I1 cluster work. The contract this unit freezes is: bad pointers
-// never reach a DMA master.
+// then for OP_GEMM hands off to the sequential GEMM unit (I1-lite). Other
+// ops complete after pointer checks (no compute). Bad pointers never reach
+// a DMA/compute master.
 //
 // Timing: multi-cycle FSM; idle when not busy. Address check is combo and
 // does not lengthen a critical path beyond one region compare.
@@ -20,7 +20,9 @@ module g6lc_ai_desc_engine
     parameter int unsigned QidWidth  = (NumQueues > 1) ? $clog2(NumQueues) : 1,
     parameter int unsigned MaxPrio   = 15,
     // When 1: structural write path present (ports live). Runtime gate is wr_cpl_en_i.
-    parameter bit          WriteCompletion = 1'b0
+    parameter bit          WriteCompletion = 1'b0,
+    // When 1: OP_GEMM enters ST_GEMM (I1-lite). When 0: P3 accept-only for GEMM.
+    parameter bit          ExecuteGemm     = 1'b0
 ) (
     input  logic                  clk_i,
     input  logic                  rst_ni,
@@ -70,7 +72,20 @@ module g6lc_ai_desc_engine
     output logic [63:0]           wr_data_o,
     input  logic                  wr_ready_i,
     input  logic                  wr_done_i,
-    input  logic                  wr_err_i
+    input  logic                  wr_err_i,
+    // I1-lite sequential GEMM (island instantiates unit; engine kicks it)
+    output logic                  gemm_start_o,
+    output logic [31:0]           gemm_m_o,
+    output logic [31:0]           gemm_n_o,
+    output logic [31:0]           gemm_k_o,
+    output logic [15:0]           gemm_lda_o,
+    output logic [15:0]           gemm_ldb_o,
+    output logic [AddrWidth-1:0]  gemm_ptr_a_o,
+    output logic [AddrWidth-1:0]  gemm_ptr_b_o,
+    output logic [AddrWidth-1:0]  gemm_ptr_c_o,
+    input  logic                  gemm_ready_i,
+    input  logic                  gemm_done_i,
+    input  logic                  gemm_err_i
 );
 
   typedef enum logic [3:0] {
@@ -81,8 +96,9 @@ module g6lc_ai_desc_engine
     ST_CHK_C      = 4'd4,
     ST_CHK_SCALE  = 4'd5,
     ST_CHK_DONE   = 4'd6,
-    ST_WR_DONE    = 4'd7,
-    ST_COMPLETE   = 4'd8
+    ST_GEMM       = 4'd7,
+    ST_WR_DONE    = 4'd8,
+    ST_COMPLETE   = 4'd9
   } state_e;
 
   state_e state_q, state_d;
@@ -94,6 +110,7 @@ module g6lc_ai_desc_engine
   logic        done_valid_q, done_valid_d;
   logic [15:0] last_status_q;
   logic        wr_issued_q, wr_issued_d;
+  logic        gemm_issued_q, gemm_issued_d;
 
   assign busy_o         = (state_q != ST_IDLE);
   assign submit_ready_o = (state_q == ST_IDLE) && enable_i;
@@ -116,6 +133,23 @@ module g6lc_ai_desc_engine
   assign wr_addr_o  = AddrWidth'(desc_q.ptr_done);
   assign wr_data_o  = make_completion(ticket_q, status_q);
 
+  // GEMM params from latched descriptor
+  logic gemm_start_n;
+  assign gemm_start_o = gemm_start_n;
+  assign gemm_m_o     = desc_q.m;
+  assign gemm_n_o     = desc_q.n;
+  assign gemm_k_o     = desc_q.k;
+  assign gemm_lda_o   = desc_q.ld_ab[15:0];
+  assign gemm_ldb_o   = desc_q.ld_ab[31:16];
+  assign gemm_ptr_a_o = AddrWidth'(desc_q.ptr_a);
+  assign gemm_ptr_b_o = AddrWidth'(desc_q.ptr_b);
+  assign gemm_ptr_c_o = AddrWidth'(desc_q.ptr_c);
+
+  // After checks (and optional GEMM): completion DMA or done pulse
+  function automatic logic want_wr_cpl(input desc_t d, input logic wr_en);
+    return WriteCompletion && wr_en && (d.ptr_done != '0);
+  endfunction
+
   // Default check idle
   always_comb begin
     state_d       = state_q;
@@ -127,6 +161,8 @@ module g6lc_ai_desc_engine
     done_valid_d  = 1'b0;
     wr_start_n    = 1'b0;
     wr_issued_d   = wr_issued_q;
+    gemm_start_n  = 1'b0;
+    gemm_issued_d = gemm_issued_q;
 
     check_req_o    = 1'b0;
     check_qid_o    = qid_q;
@@ -138,13 +174,14 @@ module g6lc_ai_desc_engine
     unique case (state_q)
       ST_IDLE: begin
         if (submit_valid_i && submit_ready_o) begin
-          desc_d   = bits_to_desc(submit_desc_i);
-          qid_d    = submit_qid_i;
-          ticket_d    = submit_ticket_i;
-          status_d    = ST_OK;
-          irq_d       = 1'b0;
-          wr_issued_d = 1'b0;
-          state_d     = ST_PARSE;
+          desc_d        = bits_to_desc(submit_desc_i);
+          qid_d         = submit_qid_i;
+          ticket_d      = submit_ticket_i;
+          status_d      = ST_OK;
+          irq_d         = 1'b0;
+          wr_issued_d   = 1'b0;
+          gemm_issued_d = 1'b0;
+          state_d       = ST_PARSE;
         end else if (submit_valid_i && !enable_i) begin
           // Drop with disabled status if kicked while off
           desc_d   = bits_to_desc(submit_desc_i);
@@ -217,13 +254,8 @@ module g6lc_ai_desc_engine
       end
 
       ST_CHK_DONE: begin
-        // Null ptr_done: no completion word (still OK + optional IRQ)
-        if (desc_q.ptr_done == '0) begin
-          status_d = ST_OK;
-          irq_d    = desc_irq(desc_q);
-          state_d  = ST_COMPLETE;
-        end else begin
-          // Completion word must be writable
+        // Null ptr_done: no completion word; else check writable before execute
+        if (desc_q.ptr_done != '0) begin
           check_req_o    = 1'b1;
           check_addr_o   = desc_q.ptr_done;
           check_need_w_o = 1'b1;
@@ -231,12 +263,38 @@ module g6lc_ai_desc_engine
             status_d = ST_BAD_PTR;
             state_d  = ST_COMPLETE;
           end else begin
-            // P3 spine: accept without executing GEMM; optional completion word
-            status_d = ST_OK;
-            irq_d    = desc_irq(desc_q);
-            if (WriteCompletion && wr_cpl_en_i) state_d = ST_WR_DONE;
-            else state_d = ST_COMPLETE;
+            // fall through to execute decision below
+            if (ExecuteGemm && desc_q.op == OP_GEMM) begin
+              gemm_issued_d = 1'b0;
+              state_d       = ST_GEMM;
+            end else begin
+              status_d = ST_OK;
+              irq_d    = desc_irq(desc_q);
+              if (want_wr_cpl(desc_q, wr_cpl_en_i)) state_d = ST_WR_DONE;
+              else state_d = ST_COMPLETE;
+            end
           end
+        end else if (ExecuteGemm && desc_q.op == OP_GEMM) begin
+          gemm_issued_d = 1'b0;
+          state_d       = ST_GEMM;
+        end else begin
+          status_d = ST_OK;
+          irq_d    = desc_irq(desc_q);
+          state_d  = ST_COMPLETE;
+        end
+      end
+
+      ST_GEMM: begin
+        if (!gemm_issued_q && gemm_ready_i) begin
+          gemm_start_n  = 1'b1;
+          gemm_issued_d = 1'b1;
+        end
+        if (gemm_issued_q && gemm_done_i) begin
+          if (gemm_err_i) status_d = ST_ERR;
+          else            status_d = ST_OK;
+          irq_d = desc_irq(desc_q);
+          if (want_wr_cpl(desc_q, wr_cpl_en_i)) state_d = ST_WR_DONE;
+          else state_d = ST_COMPLETE;
         end
       end
 
@@ -277,15 +335,17 @@ module g6lc_ai_desc_engine
       done_valid_q   <= 1'b0;
       last_status_q  <= '0;
       wr_issued_q    <= 1'b0;
+      gemm_issued_q  <= 1'b0;
     end else begin
-      state_q      <= state_d;
-      desc_q       <= desc_d;
-      qid_q        <= qid_d;
-      ticket_q     <= ticket_d;
-      status_q     <= status_d;
-      irq_q        <= irq_d;
-      done_valid_q <= done_valid_d;
-      wr_issued_q  <= wr_issued_d;
+      state_q       <= state_d;
+      desc_q        <= desc_d;
+      qid_q         <= qid_d;
+      ticket_q      <= ticket_d;
+      status_q      <= status_d;
+      irq_q         <= irq_d;
+      done_valid_q  <= done_valid_d;
+      wr_issued_q   <= wr_issued_d;
+      gemm_issued_q <= gemm_issued_d;
       if (done_valid_d) last_status_q <= status_d;
     end
   end

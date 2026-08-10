@@ -193,7 +193,7 @@ module g6lc_ai_island_top
     end
   end
 
-  // ------------------------------------------------------------------ DMA: fetch + completion store (muxed AXI)
+  // ------------------------------------------------------------------ DMA: fetch + completion store + GEMM (muxed AXI)
   logic        fetch_start_q;
   logic        fetch_ready, fetch_done, fetch_err;
   desc_bits_t  fetch_desc;
@@ -202,7 +202,13 @@ module g6lc_ai_island_top
   logic        wr_start, wr_ready, wr_done, wr_err;
   logic [AddrWidth-1:0] wr_addr;
   logic [63:0] wr_data;
-  axi_req_t    fetch_axi_req, store_axi_req;
+  axi_req_t    fetch_axi_req, store_axi_req, gemm_axi_req;
+
+  // I1-lite GEMM handshake / params (engine → unit)
+  logic        gemm_start, gemm_ready, gemm_done, gemm_err;
+  logic [31:0] gemm_m, gemm_n, gemm_k;
+  logic [15:0] gemm_lda, gemm_ldb;
+  logic [AddrWidth-1:0] gemm_ptr_a, gemm_ptr_b, gemm_ptr_c;
 
   if (EnableDmaFetch) begin : gen_dma_fetch
     g6lc_ai_desc_fetch #(
@@ -241,14 +247,41 @@ module g6lc_ai_island_top
         .axi_req_o  (store_axi_req),
         .axi_resp_i (axi_dma_resp_i)
     );
-    // Prefer store when active (engine WR_DONE); else fetch. When both idle,
-    // drive a clean zero req (no b_ready) so the DMA master cannot siphon B
-    // beats from the xbar — that was observed to break subsequent PLIC claim.
-    logic store_active;
+    g6lc_ai_gemm_seq #(
+        .AddrWidth (AddrWidth),
+        .DataWidth (AxiDataWidth),
+        .IdWidth   (AxiIdWidth),
+        .MaxDim    (8),
+        .axi_req_t (axi_req_t),
+        .axi_resp_t(axi_resp_t)
+    ) i_gemm (
+        .clk_i,
+        .rst_ni,
+        .start_i  (gemm_start),
+        .m_i      (gemm_m),
+        .n_i      (gemm_n),
+        .k_i      (gemm_k),
+        .lda_i    (gemm_lda),
+        .ldb_i    (gemm_ldb),
+        .ptr_a_i  (gemm_ptr_a),
+        .ptr_b_i  (gemm_ptr_b),
+        .ptr_c_i  (gemm_ptr_c),
+        .ready_o  (gemm_ready),
+        .done_o   (gemm_done),
+        .err_o    (gemm_err),
+        .axi_req_o  (gemm_axi_req),
+        .axi_resp_i (axi_dma_resp_i)
+    );
+    // Priority: completion store > GEMM > desc fetch. When all idle, drive a
+    // clean zero req (no b_ready) so the DMA master cannot siphon B beats from
+    // the xbar — that was observed to break subsequent PLIC claim.
+    logic store_active, gemm_active;
     assign store_active = (!wr_ready || wr_start);
+    assign gemm_active  = (!gemm_ready || gemm_start);
     assign axi_dma_req_o = store_active ? store_axi_req
+                         : gemm_active  ? gemm_axi_req
                          : (!fetch_ready ? fetch_axi_req : '0);
-    assign fetch_busy = !fetch_ready || sb_fetch_pending_q || !wr_ready;
+    assign fetch_busy = !fetch_ready || sb_fetch_pending_q || !wr_ready || !gemm_ready;
   end else begin : gen_no_dma_fetch
     assign fetch_ready = 1'b1;
     assign fetch_done  = 1'b0;
@@ -257,27 +290,40 @@ module g6lc_ai_island_top
     assign fetch_busy  = 1'b0;
     assign fetch_axi_req = '0;
     assign store_axi_req = '0;
+    assign gemm_axi_req  = '0;
     assign axi_dma_req_o = '0;
     assign wr_ready = 1'b1;
     // One-cycle delayed ack so engine sees wr_issued_q && wr_done_i
     // (same-cycle wr_done=wr_start leaves ST_WR_DONE wedged).
-    logic wr_done_q;
+    logic wr_done_q, gemm_done_q;
     always_ff @(posedge clk_i or negedge rst_ni) begin
-      if (!rst_ni) wr_done_q <= 1'b0;
-      else         wr_done_q <= wr_start;
+      if (!rst_ni) begin
+        wr_done_q   <= 1'b0;
+        gemm_done_q <= 1'b0;
+      end else begin
+        wr_done_q   <= wr_start;
+        gemm_done_q <= gemm_start;
+      end
     end
-    assign wr_done = wr_done_q;
-    assign wr_err  = 1'b0;
+    assign wr_done    = wr_done_q;
+    assign wr_err     = 1'b0;
+    assign gemm_ready = 1'b1;
+    assign gemm_done  = gemm_done_q;
+    assign gemm_err   = 1'b0;  // accept-only path when no DMA master
     // verilator lint_off UNUSEDSIGNAL
     logic _ax;
-    assign _ax = |axi_dma_resp_i | sb_fetch_pending_q | |sb_desc_ptr_i | |wr_addr | |wr_data;
+    assign _ax = |axi_dma_resp_i | sb_fetch_pending_q | |sb_desc_ptr_i
+                 | |wr_addr | |wr_data
+                 | |gemm_m | |gemm_n | |gemm_k | |gemm_lda | |gemm_ldb
+                 | |gemm_ptr_a | |gemm_ptr_b | |gemm_ptr_c;
     // verilator lint_on UNUSEDSIGNAL
   end
 
   g6lc_ai_desc_engine #(
       .NumQueues       (NumQueues),
       .AddrWidth       (AddrWidth),
-      .WriteCompletion (EnableDmaFetch)
+      .WriteCompletion (EnableDmaFetch),
+      .ExecuteGemm     (EnableDmaFetch)
   ) i_engine (
       .clk_i, .rst_ni,
       .testmode_i      (testmode_i),
@@ -316,7 +362,19 @@ module g6lc_ai_island_top
       .wr_data_o       (wr_data),
       .wr_ready_i      (wr_ready),
       .wr_done_i       (wr_done),
-      .wr_err_i        (wr_err)
+      .wr_err_i        (wr_err),
+      .gemm_start_o    (gemm_start),
+      .gemm_m_o        (gemm_m),
+      .gemm_n_o        (gemm_n),
+      .gemm_k_o        (gemm_k),
+      .gemm_lda_o      (gemm_lda),
+      .gemm_ldb_o      (gemm_ldb),
+      .gemm_ptr_a_o    (gemm_ptr_a),
+      .gemm_ptr_b_o    (gemm_ptr_b),
+      .gemm_ptr_c_o    (gemm_ptr_c),
+      .gemm_ready_i    (gemm_ready),
+      .gemm_done_i     (gemm_done),
+      .gemm_err_i      (gemm_err)
   );
 
   // ------------------------------------------------------------------ writes + prog pulse

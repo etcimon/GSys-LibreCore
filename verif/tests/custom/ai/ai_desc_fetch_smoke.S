@@ -43,7 +43,7 @@ _start:
 
   # ---- Build good desc in DRAM (desc_good) ----
   la   a0, desc_good
-  li   t0, (1 << 16) | 1
+  li   t0, (3 << 16) | 1  /* OP_LAYOUT (spine; no GEMM) */
   sw   t0, 0x00(a0)
   sw   zero, 0x04(a0)
   li   t0, 8

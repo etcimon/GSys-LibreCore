@@ -61,7 +61,7 @@ _start:
   sw   t0, 0(t1)
 
   # ---- Job A: IRQ flag set (ptr_done in-region; no DMA write with wr_cpl=0) ----
-  li   t0, (1 << 16) | 1
+  li   t0, (3 << 16) | 1  /* OP_LAYOUT (spine; no GEMM) */
   sw   t0, AI_DESC+0x0(s0)
   li   t0, FLAG_IRQ
   sw   t0, AI_DESC+0x4(s0)
