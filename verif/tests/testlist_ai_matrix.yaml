@@ -67,5 +67,5 @@ testlist:
     description: Full AccTile 256x256x256 all-ones GEMM (C=256 corners; multi-bank C)
     path: custom/ai/ai_gemm_s8_256x256_smoke.S
   - test: ai_cap_bringup_smoke
-    description: Capability window advertises I1 PeLanes=64 AccTile=256
+    description: Capability window advertises I1 PeLanes=128 AccTile=256
     path: custom/ai/ai_cap_bringup_smoke.S

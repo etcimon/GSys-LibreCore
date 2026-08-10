@@ -334,7 +334,7 @@ and one software stack.
 | # | Deliverable | Depends on |
 |---|---|---|
 | **I0** | TOPS definition, bandwidth model, plane split, staged SKU decision | — (done: `scaling-100tops.md`) |
-| **I1** | **one** island cluster: PE array, `tc_sram` banks, sequencer, capability window. Freezes `T`, accumulator geometry, DRAM class and the NoC cut line **for both SKUs**. **Landed (partial):** AccTile*=256 / PeLanes=64 multi-bank C; full Macs/NoC/DRAM open | P3 |
+| **I1** | **one** island cluster: PE array, `tc_sram` banks, sequencer, capability window. Freezes `T`, accumulator geometry, DRAM class and the NoC cut line **for both SKUs**. **Landed (partial):** AccTile*=256 / PeLanes=128 multi-bank C; full Macs/NoC/DRAM open | P3 |
 | **I3** | memory system sized to the §4 model; measured bandwidth | I1 |
 | — | **latency SKU tapes out** (1–2 clusters, ~12–25 TOPS) | I3, I4 |
 | **I2** | NoC + N clusters + per-cluster gating + QoS arbitration | I3 |

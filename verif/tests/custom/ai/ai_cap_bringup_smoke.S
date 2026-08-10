@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Etienne Cimon
 #
 # Capability window must advertise I1 live geometry:
-#   clusters=1, macs/cycle=64 (PeLanes), AccTile M/N/K log2 = 8 (tile=256).
+#   clusters=1, macs/cycle=128 (PeLanes), AccTile M/N/K log2 = 8 (tile=256).
 # Soft-pass if island window is an error slave (non-AI package).
 
   .equ AI_BASE,        0x40000000
@@ -32,7 +32,7 @@ _start:
   bne  t0, t1, fail
 
   lw   t0, CAP_MACS(s0)
-  li   t1, 64
+  li   t1, 128
   bne  t0, t1, fail
 
   # packed log2(K)|log2(N)|log2(M) in low 12 bits — expect 8,8,8
