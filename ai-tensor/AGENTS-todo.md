@@ -73,9 +73,10 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 ## M6+ — TF / production RT
 
 - [ ] TensorFlow custom op (same Desc64 path)
-- [ ] Multi-tile desc stream for large framework GEMM on single queue
-- [ ] IRQ wait; multi-queue; claim+completion-DMA policy soak
-- [ ] Host adapter: `cva6-build tensor doctor|test|probe` (see HOST.md)
+- [x] Multi-tile desc stream (`stream.rs`: Queue, plan/run, zero-copy A/B lda/ldb)
+- [x] `run_gemm_s8_auto` → stream path; CLI `stream-gemm`
+- [ ] IRQ wait; multi-queue depth soak; claim+completion-DMA policy
+- [x] Host adapter: `cva6-build tensor status|doctor|test|golden|cosim` (spawn only)
 
 ## Open design notes
 

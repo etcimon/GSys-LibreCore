@@ -15,13 +15,14 @@ become a Cargo dependency of this package.
 | Run directed ELFs (`ai-matrix-veri`) as HW soak | Does not require those ELFs to unit-test |
 | Never `path = "../core"` in package `Cargo.toml` | Enforced by check-independence |
 
-Suggested monorepo command shape (future):
+Monorepo command (landed):
 
 ```text
-cva6-build tensor setup | doctor | test | probe
+cva6-build tensor status | doctor | test | golden | cosim | check
 ```
 
-Mirror of `cva6-build timings` → `sv-timing`.
+Mirror of `cva6-build timings` → `sv-timing`. Implementation:
+`build-platform/src/tooling/tensor.ts` + `cli/commands/tensor.ts` (spawn only).
 
 ---
 
@@ -70,6 +71,7 @@ Still never add monorepo paths to package `Cargo.toml`.
 | Offline dual oracle | package CI | `run_builtin_suite` sim + SoftIsland |
 | External adapter | package `tools/cosim_harness.py` | `AI_TENSOR_COSIM_CMD` |
 | Monorepo spawn | `monorepo-soak/run-ai-tensor.sh` | sets env; never path-deps crates |
+| Host CLI | `cva6-build tensor …` | discovers package; spawns soak script |
 | Live RTL TB | lab only | `AI_TENSOR_RUN_RTL=1` + `AI_TENSOR_RTL_CMD=…` |
 
 Default harness path used by spawn / `ait.py test|cosim`:
@@ -77,4 +79,17 @@ Default harness path used by spawn / `ait.py test|cosim`:
 ```bash
 export AI_TENSOR_COSIM_CMD="python3 tools/cosim_harness.py"
 ```
+
+## 7. Multi-tile desc stream (production RT)
+
+Large GEMMs use **one queue, sequential tickets**, zero-copy A/B via `lda`/`ldb`:
+
+| API | Role |
+|---|---|
+| `Queue` | `qid` + ticket allocator |
+| `plan_gemm_s8_stream` / `run_gemm_s8_stream` | full A/B once; scratch C tile; accumulate |
+| `run_gemm_s8_auto` | delegates to stream path |
+| CLI `stream-gemm` | sim or SoftIsland backend |
+
+Framework ops should call the stream path rather than re-gathering tiles on the host.
 

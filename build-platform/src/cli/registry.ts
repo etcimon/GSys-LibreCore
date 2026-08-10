@@ -20,6 +20,7 @@ import { setupCommand } from "./commands/setup.ts";
 import { statusCommand } from "./commands/status.ts";
 import { technologyCommand } from "./commands/technology.ts";
 import { testCommand } from "./commands/test.ts";
+import { tensorCommand } from "./commands/tensor.ts";
 import { timingsCommand } from "./commands/timings.ts";
 import { toolsCommand } from "./commands/tools.ts";
 import { vendorCommand } from "./commands/vendor.ts";
@@ -40,6 +41,7 @@ export const COMMANDS: Command[] = [
   testCommand,
   verifyCommand,
   timingsCommand,
+  tensorCommand,
   cleanCommand,
   configCommand,
 ];

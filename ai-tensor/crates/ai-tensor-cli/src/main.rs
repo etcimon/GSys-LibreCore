@@ -4,7 +4,7 @@
 use ai_tensor_abi::{Completion, Desc64, DESC_BYTES};
 use ai_tensor_rt::{
     probe_cap_regs, run_builtin_suite, run_external_cosim_checks, run_gemm_s8, run_gemm_s8_auto,
-    seed_cap_island_p3, Device, MappedWindow, MmioDevice, Profile, SimDevice,
+    run_gemm_s8_stream, seed_cap_island_p3, Device, MappedWindow, MmioDevice, Profile, SimDevice,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -68,7 +68,7 @@ enum Cmd {
     },
     /// Run package-local cosim goldens (sim + SoftIsland)
     GoldenCheck,
-    /// Auto-tile GEMM (dims may exceed AccTile)
+    /// Auto-tile GEMM (dims may exceed AccTile) — multi-tile desc stream
     AutoGemm {
         #[arg(long, default_value_t = 4)]
         m: u32,
@@ -78,6 +78,19 @@ enum Cmd {
         k: u32,
         #[arg(long, default_value_t = 1)]
         ticket: u32,
+    },
+    /// Explicit multi-tile desc stream (zero-copy A/B, sequential tickets)
+    StreamGemm {
+        #[arg(long, default_value_t = 4)]
+        m: u32,
+        #[arg(long, default_value_t = 4)]
+        n: u32,
+        #[arg(long, default_value_t = 4)]
+        k: u32,
+        #[arg(long, default_value_t = 1)]
+        ticket: u32,
+        #[arg(long, default_value = "sim")]
+        backend: String,
     },
 }
 
@@ -229,6 +242,32 @@ fn main() {
             println!(
                 "backend=mmio-auto tiles={} ticket={} status={} c00={}",
                 tiles, comp.ticket, comp.status, c[0]
+            );
+        }
+        Cmd::StreamGemm {
+            m,
+            n,
+            k,
+            ticket,
+            backend,
+        } => {
+            let (a, b) = pattern_ab(m, n, k);
+            let be = backend.to_lowercase();
+            let (c, comp, tiles) = if be == "sim" {
+                let mut dev = SimDevice::new();
+                run_gemm_s8_stream(&mut dev, m, n, k, &a, &b, ticket).expect("stream")
+            } else {
+                let mut dev = MmioDevice::new();
+                dev.probe_caps();
+                run_gemm_s8_stream(&mut dev, m, n, k, &a, &b, ticket).expect("stream")
+            };
+            println!(
+                "backend=stream-{be} tiles={} ticket={} status={} c00={} c_last={}",
+                tiles,
+                comp.ticket,
+                comp.status,
+                c[0],
+                c[c.len() - 1]
             );
         }
     }

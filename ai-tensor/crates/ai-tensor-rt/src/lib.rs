@@ -6,6 +6,7 @@ mod sim;
 mod mmio;
 mod profile;
 mod cosim;
+mod stream;
 
 pub use sim::SimDevice;
 pub use profile::Profile;
@@ -14,6 +15,10 @@ pub use cosim::{
     run_external_cosim_checks, try_external_cosim_job, try_external_cosim_ping, GoldenGemm,
 };
 pub use mmio::{probe_cap_regs, read_pmu, seed_cap_island_p3, MappedWindow, MmioBus, MmioDevice, SoftIsland};
+pub use stream::{
+    desc_for_tile, plan_gemm_s8_stream, run_gemm_s8_stream, run_gemm_stream_plan, GemmStreamPlan,
+    Queue, StreamJob,
+};
 
 use ai_tensor_abi::{AccTile, CapRegs, Completion, Desc64, PmuSnapshot, ST_OK};
 use thiserror::Error;
@@ -220,7 +225,9 @@ pub fn run_gemm_s8<D: Device>(
 }
 
 /// GEMM with host-side AccTile streaming when dims exceed CAP tile.
-/// Accumulates partial products into C (same semantics as Python auto_tile).
+///
+/// Uses the multi-tile **desc stream** path (zero-copy A/B via `lda`/`ldb`,
+/// sequential tickets on q0). Same accumulate semantics as Python auto_tile.
 pub fn run_gemm_s8_auto<D: Device>(
     dev: &mut D,
     m: u32,
@@ -230,54 +237,9 @@ pub fn run_gemm_s8_auto<D: Device>(
     b: &[i8],
     ticket: u32,
 ) -> Result<(Vec<i32>, Completion, u32), RtError> {
-    let tile = dev.caps().max_tile();
-    if tile.fits(m, n, k) {
-        let (c, comp) = run_gemm_s8(dev, m, n, k, a, b, ticket)?;
-        return Ok((c, comp, 1));
-    }
-    let need_a = (m as usize)
-        .checked_mul(k as usize)
-        .ok_or(RtError::BufferOob)?;
-    let need_b = (k as usize)
-        .checked_mul(n as usize)
-        .ok_or(RtError::BufferOob)?;
-    if a.len() < need_a || b.len() < need_b {
-        return Err(RtError::BufferOob);
-    }
-
-    let tiles = ai_tensor_ir::tile_gemm(m, n, k, tile);
-    let mut c = vec![0i32; (m as usize) * (n as usize)];
-    let mut tix = ticket;
-    let mut last = Completion {
-        ticket,
-        status: ST_OK,
-    };
-    for g in &tiles {
-        // Extract A[i0:i0+tm, t0:t0+tk], B[t0:t0+tk, j0:j0+tn] row-major
-        let mut at = Vec::with_capacity((g.tm * g.tk) as usize);
-        for i in 0..g.tm {
-            let row = ((g.i0 + i) * k + g.t0) as usize;
-            at.extend_from_slice(&a[row..row + g.tk as usize]);
-        }
-        let mut bt = Vec::with_capacity((g.tk * g.tn) as usize);
-        for t_ in 0..g.tk {
-            let row = ((g.t0 + t_) * n + g.j0) as usize;
-            bt.extend_from_slice(&b[row..row + g.tn as usize]);
-        }
-        let (partial, comp) = run_gemm_s8(dev, g.tm, g.tn, g.tk, &at, &bt, tix)?;
-        if comp.status != ST_OK {
-            return Ok((c, comp, tiles.len() as u32));
-        }
-        for ii in 0..g.tm as usize {
-            for jj in 0..g.tn as usize {
-                let dst = ((g.i0 as usize + ii) * n as usize) + (g.j0 as usize + jj);
-                c[dst] = c[dst].saturating_add(partial[ii * g.tn as usize + jj]);
-            }
-        }
-        last = comp;
-        tix = tix.wrapping_add(1);
-    }
-    Ok((c, last, tiles.len() as u32))
+    // Always use stream planner: single-tile plans collapse to one job with
+    // correct strides; multi-tile reuses full A/B without host gather.
+    run_gemm_s8_stream(dev, m, n, k, a, b, ticket)
 }
 
 #[cfg(test)]

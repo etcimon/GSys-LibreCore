@@ -46,7 +46,8 @@ const VALUE_FLAGS = new Set([
   "query",
   "model",
   "q",
-  // timings (sv-timing host adapter)
+  // timings (sv-timing host adapter) / tensor (ai-tensor host adapter)
+  "dir",
   "modules",
   "target-mhz",
   "fo4-ps",

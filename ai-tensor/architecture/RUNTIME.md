@@ -67,6 +67,8 @@ wait(ticket | irq, timeout) -> Completion
 - **cosim:** offline dual oracle (sim + SoftIsland) always; optional external process via
   `AI_TENSOR_COSIM_CMD` → `tools/cosim_harness.py` (JSON stdin). Live Verilator/ELF is
   lab-only (`AI_TENSOR_RTL_CMD`), never a crate path dep.
+- **stream:** multi-tile desc stream (`run_gemm_s8_stream`) — full A/B resident, AccTile
+  jobs with strided `lda`/`ldb`, sequential tickets on one `Queue`; host accumulates C.
 
 ---
 

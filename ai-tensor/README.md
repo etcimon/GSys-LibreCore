@@ -19,8 +19,18 @@ PYTHONPATH=python python python/examples/torch_island_smoke.py
 # CLI
 cargo run -p ai-tensor-cli -- doctor
 cargo run -p ai-tensor-cli -- sim-gemm --m 4 --n 4 --k 4
+cargo run -p ai-tensor-cli -- stream-gemm --m 4 --n 4 --k 4
 cargo run -p ai-tensor-cli -- golden-check
 ```
+
+Monorepo host (spawn only, no crate path deps):
+
+```bash
+# from monorepo root
+bun run build-platform/src/cli/index.ts tensor status
+bun run build-platform/src/cli/index.ts tensor test
+```
+
 
 Default backend is **hostless sim**: packs island-compatible 64 B descriptors, AI-3 region checks,
 optional INT8 reference GEMM, completion word — enough to exercise the software path **before**
