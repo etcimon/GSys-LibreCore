@@ -14,7 +14,8 @@
 //      Beat-buffered: after AR/R, drain remaining j-bytes from the held beat
 //      without re-AR (same-bank writes, one/cycle).
 //   3) MAC: PeLanes parallel products/cycle via g6lc_ai_pe_dot
-//   4) Store C from single C bank
+//   4) Store C: when j is even and j+1 < n, pack two i32 into one 64-bit
+//      AXI beat (Latency=0 C read: capture lo, then store {hi,lo}).
 //
 // Bounds: m,n,k ∈ [1, MaxDim]. Larger jobs return err without traffic.
 // Timing: multi-cycle; one outstanding AXI beat; no core critical path.
@@ -87,6 +88,12 @@ module g6lc_ai_gemm_seq #(
   logic [3:0]  beat_left_q, beat_left_d;
   logic        beat_load_d;  // capture RDATA into beat_q
   logic [63:0] beat_data_d;
+
+  // C dual-store pack: hold low i32, then write {hi,lo} on 64-bit bus
+  logic        c_pair_hold_q, c_pair_hold_d;
+  logic [31:0] c_lo_q;
+  logic        c_lo_we_d;
+  logic [3:0]  stc_n_d;  // 1 or 2 elements retired on B resp
 
   // ---- Banked A/B tile ports ----
   logic                 a_r_req  [PeLanes];
@@ -264,18 +271,22 @@ module g6lc_ai_gemm_seq #(
     ar_sent_d   = ar_sent_q;
     aw_sent_d   = aw_sent_q;
     w_sent_d    = w_sent_q;
-    la_n_d      = 4'd0;
-    beat_left_d = beat_left_q;
-    beat_lane_d = beat_lane_q;
-    beat_load_d = 1'b0;
-    beat_data_d = beat_q;
+    la_n_d        = 4'd0;
+    beat_left_d   = beat_left_q;
+    beat_lane_d   = beat_lane_q;
+    beat_load_d   = 1'b0;
+    beat_data_d   = beat_q;
+    c_pair_hold_d = c_pair_hold_q;
+    c_lo_we_d     = 1'b0;
+    stc_n_d       = 4'd1;
 
     unique case (state_q)
       ST_IDLE: begin
-        ar_sent_d   = 1'b0;
-        aw_sent_d   = 1'b0;
-        w_sent_d    = 1'b0;
-        beat_left_d = 4'd0;
+        ar_sent_d     = 1'b0;
+        aw_sent_d     = 1'b0;
+        w_sent_d      = 1'b0;
+        beat_left_d   = 4'd0;
+        c_pair_hold_d = 1'b0;
         if (start_i) begin
           err_d   = 1'b0;
           state_d = ST_CHK;
@@ -406,9 +417,10 @@ module g6lc_ai_gemm_seq #(
           c_w_addr = c_idx(i_q, j_q);
           c_w_data = pe_acc_out;
           if (j_q + 1 == n_q && i_q + 1 == m_q) begin
-            state_d   = ST_STC;
-            aw_sent_d = 1'b0;
-            w_sent_d  = 1'b0;
+            state_d       = ST_STC;
+            aw_sent_d     = 1'b0;
+            w_sent_d      = 1'b0;
+            c_pair_hold_d = 1'b0;
           end else
             state_d = ST_MAC;
         end else
@@ -416,34 +428,80 @@ module g6lc_ai_gemm_seq #(
       end
 
       ST_STC: begin
-        c_r_req  = 1'b1;
-        c_r_addr = c_idx(i_q, j_q);
-        axi_req_o.aw.addr = c_store_addr;
-        if (DataWidth >= 64 && c_store_addr[2]) begin
-          axi_req_o.w.data = DataWidth'({c_r_data, 32'h0});
-          axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hF0};
-        end else begin
-          axi_req_o.w.data = DataWidth'(c_r_data);
-          axi_req_o.w.strb = {{(DataWidth/8-4){1'b0}}, 4'hF};
-        end
-        if (!aw_sent_q) begin
-          axi_req_o.aw_valid = 1'b1;
-          if (axi_resp_i.aw_ready) aw_sent_d = 1'b1;
-        end
-        if (!w_sent_q) begin
-          axi_req_o.w_valid = 1'b1;
-          if (axi_resp_i.w_ready) w_sent_d = 1'b1;
-        end
-        axi_req_o.b_ready = 1'b1;
-        if (aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
-          if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
-            err_d = 1'b1;
-          aw_sent_d = 1'b0;
-          w_sent_d  = 1'b0;
-          if (j_q + 1 == n_q && i_q + 1 == m_q)
-            state_d = ST_DONE;
-          else
-            state_d = ST_STC;
+        // Pack two i32 when j even, j+1 exists, and bus is ≥64-bit
+        begin
+          automatic logic can_pair;
+          can_pair = (DataWidth >= 64) && !j_q[0] && (j_q + 1 < n_q);
+
+          if (can_pair && !c_pair_hold_q) begin
+            // Phase 0: capture C[i,j] (combo read → FF)
+            c_r_req   = 1'b1;
+            c_r_addr  = c_idx(i_q, j_q);
+            c_lo_we_d = 1'b1;
+            c_pair_hold_d = 1'b1;
+            state_d   = ST_STC;
+          end else if (can_pair && c_pair_hold_q) begin
+            // Phase 1: C[i,j+1] + full-beat store {hi, lo}
+            c_r_req  = 1'b1;
+            c_r_addr = c_idx(i_q, j_q + 32'd1);
+            axi_req_o.aw.addr = c_store_addr;  // j even ⇒ 8-byte aligned
+            axi_req_o.w.data  = DataWidth'({c_r_data, c_lo_q});
+            axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
+            stc_n_d = 4'd2;
+            if (!aw_sent_q) begin
+              axi_req_o.aw_valid = 1'b1;
+              if (axi_resp_i.aw_ready) aw_sent_d = 1'b1;
+            end
+            if (!w_sent_q) begin
+              axi_req_o.w_valid = 1'b1;
+              if (axi_resp_i.w_ready) w_sent_d = 1'b1;
+            end
+            axi_req_o.b_ready = 1'b1;
+            if (aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
+              if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+                err_d = 1'b1;
+              aw_sent_d     = 1'b0;
+              w_sent_d      = 1'b0;
+              c_pair_hold_d = 1'b0;
+              if (j_q + 2 >= n_q && i_q + 1 == m_q)
+                state_d = ST_DONE;
+              else
+                state_d = ST_STC;
+            end
+          end else begin
+            // Single i32 store
+            c_r_req  = 1'b1;
+            c_r_addr = c_idx(i_q, j_q);
+            axi_req_o.aw.addr = c_store_addr;
+            if (DataWidth >= 64 && c_store_addr[2]) begin
+              axi_req_o.w.data = DataWidth'({c_r_data, 32'h0});
+              axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hF0};
+            end else begin
+              axi_req_o.w.data = DataWidth'(c_r_data);
+              axi_req_o.w.strb = {{(DataWidth/8-4){1'b0}}, 4'hF};
+            end
+            stc_n_d = 4'd1;
+            if (!aw_sent_q) begin
+              axi_req_o.aw_valid = 1'b1;
+              if (axi_resp_i.aw_ready) aw_sent_d = 1'b1;
+            end
+            if (!w_sent_q) begin
+              axi_req_o.w_valid = 1'b1;
+              if (axi_resp_i.w_ready) w_sent_d = 1'b1;
+            end
+            axi_req_o.b_ready = 1'b1;
+            if (aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
+              if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+                err_d = 1'b1;
+              aw_sent_d     = 1'b0;
+              w_sent_d      = 1'b0;
+              c_pair_hold_d = 1'b0;
+              if (j_q + 1 == n_q && i_q + 1 == m_q)
+                state_d = ST_DONE;
+              else
+                state_d = ST_STC;
+            end
+          end
         end
       end
 
@@ -468,17 +526,21 @@ module g6lc_ai_gemm_seq #(
       beat_q <= '0;
       beat_lane_q <= '0;
       beat_left_q <= '0;
+      c_pair_hold_q <= 1'b0;
+      c_lo_q <= '0;
     end else begin
-      state_q     <= state_d;
-      acc_q       <= acc_d;
-      err_q       <= err_d;
-      ar_sent_q   <= ar_sent_d;
-      aw_sent_q   <= aw_sent_d;
-      w_sent_q    <= w_sent_d;
-      beat_left_q <= beat_left_d;
-      beat_lane_q <= beat_lane_d;
+      state_q       <= state_d;
+      acc_q         <= acc_d;
+      err_q         <= err_d;
+      ar_sent_q     <= ar_sent_d;
+      aw_sent_q     <= aw_sent_d;
+      w_sent_q      <= w_sent_d;
+      beat_left_q   <= beat_left_d;
+      beat_lane_q   <= beat_lane_d;
+      c_pair_hold_q <= c_pair_hold_d;
       if (beat_load_d) beat_q <= beat_data_d;
-      done_q      <= (state_q == ST_DONE);
+      if (c_lo_we_d)   c_lo_q <= c_r_data;
+      done_q        <= (state_q == ST_DONE);
 
       if (state_q == ST_IDLE && start_i) begin
         m_q   <= m_i;
@@ -492,7 +554,8 @@ module g6lc_ai_gemm_seq #(
         i_q   <= '0;
         j_q   <= '0;
         t_q   <= '0;
-        beat_left_q <= '0;
+        beat_left_q   <= '0;
+        c_pair_hold_q <= 1'b0;
       end
 
       // A load: advance t by la_n_d (multi-byte unpack)
@@ -551,13 +614,14 @@ module g6lc_ai_gemm_seq #(
           t_q <= t_q + PeLanes;
       end
 
+      // C store: advance by stc_n_d (1 or 2) on B complete
       if (state_q == ST_STC && aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
-        if (j_q + 1 == n_q) begin
+        if (j_q + 32'(stc_n_d) >= n_q) begin
           j_q <= '0;
           if (i_q + 1 != m_q)
             i_q <= i_q + 1;
         end else
-          j_q <= j_q + 1;
+          j_q <= j_q + 32'(stc_n_d);
       end
     end
   end
