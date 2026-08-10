@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Etienne Cimon
 #
 # Capability window must advertise I1-lite bring-up geometry:
-#   clusters=1, macs/cycle=4 (PeLanes), AccTile M/N/K log2 = 3 (tile=8).
+#   clusters=1, macs/cycle=8 (PeLanes), AccTile M/N/K log2 = 4 (tile=16).
 # Soft-pass if island window is an error slave (non-AI package).
 
   .equ AI_BASE,        0x40000000
@@ -32,13 +32,13 @@ _start:
   bne  t0, t1, fail
 
   lw   t0, CAP_MACS(s0)
-  li   t1, 4
+  li   t1, 8
   bne  t0, t1, fail
 
-  # packed log2(K)|log2(N)|log2(M) in low 12 bits — expect 3,3,3
+  # packed log2(K)|log2(N)|log2(M) in low 12 bits — expect 4,4,4
   lw   t0, CAP_BLOCK_MNK(s0)
   andi t1, t0, 0xF
-  li   t2, 3
+  li   t2, 4
   bne  t1, t2, fail
   srli t1, t0, 4
   andi t1, t1, 0xF

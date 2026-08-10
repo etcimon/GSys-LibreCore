@@ -43,14 +43,17 @@ testlist:
     description: I1-lite GEMM with lda>k row padding golden
     path: custom/ai/ai_gemm_s8_lda_smoke.S
   - test: ai_gemm_dim_err_smoke
-    description: I1-lite rejects m>MaxDim with ST_ERR and no C write
+    description: I1-lite rejects m>AccTile (MaxDim) with ST_ERR
     path: custom/ai/ai_gemm_dim_err_smoke.S
   - test: ai_gemm_s8_4x4_smoke
     description: I1 multi-step PE GEMM 4x4x8 all-ones (C=8)
     path: custom/ai/ai_gemm_s8_4x4_smoke.S
   - test: ai_gemm_s8_8x8_smoke
-    description: Full MaxDim 8x8x8 all-ones GEMM (C=8)
+    description: 8x8x8 all-ones GEMM (C=8)
     path: custom/ai/ai_gemm_s8_8x8_smoke.S
+  - test: ai_gemm_s8_16x16_smoke
+    description: Full AccTile 16x16x16 all-ones GEMM (C=16)
+    path: custom/ai/ai_gemm_s8_16x16_smoke.S
   - test: ai_cap_bringup_smoke
-    description: Capability window advertises I1-lite PeLanes=4 AccTile=8
+    description: Capability window advertises I1-lite PeLanes=8 AccTile=16
     path: custom/ai/ai_cap_bringup_smoke.S
