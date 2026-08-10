@@ -72,12 +72,16 @@ module g6lc_ai_island_top
   logic        cap_sel;
   assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
 
+  // Forward declared: PMU hold lives with other regs below; default 0 until first GEMM
+  logic [31:0] pmu_gbps_x1000_q;
+
   g6lc_ai_cap_window #(.IslandCfg(IslandCfg)) i_cap (
       .clk_i, .rst_ni,
       .req_i   (cap_sel),
       .we_i    (we_i),
       .addr_i  (addr_i),
       .wdata_i (wdata_i),
+      .dram_gbps_meas_x1000_i(pmu_gbps_x1000_q),
       .rdata_o (cap_rdata),
       .rvalid_o(cap_rvalid)
   );
@@ -213,9 +217,9 @@ module g6lc_ai_island_top
   logic [31:0] gemm_m, gemm_n, gemm_k;
   logic [15:0] gemm_lda, gemm_ldb;
   logic [AddrWidth-1:0] gemm_ptr_a, gemm_ptr_b, gemm_ptr_c;
-  // I3 PMU from last GEMM job
+  // I3 PMU from last GEMM job (pmu_gbps_x1000_q declared above for CAP)
   logic [31:0] gemm_pmu_r, gemm_pmu_w, gemm_pmu_cy;
-  logic [31:0] pmu_r_hold_q, pmu_w_hold_q, pmu_cy_hold_q, pmu_gbps_x1000_q;
+  logic [31:0] pmu_r_hold_q, pmu_w_hold_q, pmu_cy_hold_q;
 
   if (EnableDmaFetch) begin : gen_dma_fetch
     g6lc_ai_desc_fetch #(

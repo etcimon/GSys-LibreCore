@@ -37,7 +37,7 @@ package g6lc_ai_island_cfg_pkg;
   // I1 live RTL: AccTile*=256 / PeLanes=128. Multi-bank C (j%PeLanes) keeps
   // each tc_sram at MaxDim*ceil(MaxDim/PeLanes) words (512xi32 @256/128);
   // avoids a flat 65k-word C array that OOMs sim. gemm_seq binds
-  // MaxDim/PeLanes from AccTileM / MacsPerCycle. I3-lite: multi-beat AR (64) + dual-write B + PMU beats/GB/s; NocWidth 64 live.
+  // MaxDim/PeLanes from AccTileM / MacsPerCycle. I3-lite: multi-beat AR (64) + dual-write B + PMU; CAP DRAM [31:16]=meas milli-GB/s; NocWidth 64.
   localparam ai_island_cfg_t AiIslandLatencyDefault = '{
       Clusters:     unsigned'(1),
       MacsPerCycle: unsigned'(128),           // PeLanes (grow toward SKU Macs)
@@ -80,6 +80,7 @@ package g6lc_ai_island_cfg_pkg;
   localparam logic [15:0] CAP_OFF_CLOCK_KHZ   = 16'h0C;
   localparam logic [15:0] CAP_OFF_SRAM_BYTES  = 16'h10;
   localparam logic [15:0] CAP_OFF_BLOCK_MNK   = 16'h14;  // packed M|N|K log2
+  // [15:0]=nameplate GB/s; [31:16]=measured milli-GB/s after first GEMM (I3)
   localparam logic [15:0] CAP_OFF_DRAM_GBPS   = 16'h18;
   localparam logic [15:0] CAP_OFF_QUEUES      = 16'h1C;
   localparam logic [15:0] CAP_OFF_QOS         = 16'h20;
