@@ -128,6 +128,21 @@ pub fn run_builtin_suite() -> Result<usize, RtError> {
     let mut mmio = MmioDevice::new();
     mmio.probe_caps();
     crate::soak_history_poll(&mut mmio, 4)?;
+    // HostRuntime drain (framework queue)
+    let mut p = crate::Profile::default();
+    p.wait_policy = "poll".into();
+    p.submit_mode = "latch".into();
+    let mut rt = crate::HostRuntime::from_profile(p);
+    let mut sim = crate::SimDevice::new();
+    crate::prepare_device(&mut sim)?;
+    let a = vec![1i8, 2, 3, 4];
+    let b = vec![5i8, 6, 7, 8];
+    rt.enqueue_gemm_s8(2, 2, 2, &a, &b)?;
+    rt.enqueue_gemm_s8(2, 2, 2, &a, &b)?;
+    let r = rt.drain(&mut sim, 0)?;
+    if r.len() != 2 || r[0].c != vec![19, 22, 43, 50] {
+        return Err(RtError::Msg("host runtime drain failed".into()));
+    }
     Ok(n)
 }
 

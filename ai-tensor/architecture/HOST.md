@@ -33,9 +33,10 @@ Mirror of `cva6-build timings` → `sv-timing`. Implementation:
 
 | Artifact | Direction | Format |
 |---|---|---|
-| Profile id / pins | host → package | env or CLI |
-| Caps / probe JSON | package → host | `schemas/probe.v1.json` (later) |
-| Job metrics | package → host | optional JSON |
+| Profile id / pins | host → package | env or CLI / TOML |
+| Caps / probe JSON | package → host | **`schemas/probe.v1.json`** (`probe` / `doctor --json`) |
+| Host job queue | package | `HostRuntime` enqueue/drain (framework path) |
+| Job metrics | package → host | PMU on `HostJobResult` / probe |
 | isa-encoding path | host → gen tool | optional sync only |
 
 ---

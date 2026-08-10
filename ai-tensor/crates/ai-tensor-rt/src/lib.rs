@@ -11,6 +11,7 @@ mod policy;
 mod irq;
 mod depth;
 mod probe;
+mod host;
 
 pub use sim::SimDevice;
 pub use profile::Profile;
@@ -31,6 +32,9 @@ pub use irq::{
 };
 pub use depth::{soak_history_poll, soak_queue_depth, soak_ticket_sequence, SubmitMode};
 pub use probe::ProbeReport;
+pub use host::{
+    prepare_device, submit_one_desc, HostGemmJob, HostJobResult, HostRuntime,
+};
 
 use ai_tensor_abi::{AccTile, CapRegs, Completion, Desc64, PmuSnapshot, ST_OK};
 use thiserror::Error;

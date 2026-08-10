@@ -88,8 +88,12 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] SoftIsland completion **history ring** + `soak_history_poll` / CLI `history-soak`
 - [x] Profile `wait_policy` + `submit_mode` pins + `to_wait_policy` / `to_submit_mode`
 - [x] Host `ProbeReport` JSON (`probe` / `doctor --json`) + Python `probe_dict`
+- [x] `schemas/probe.v1.json` schema pin
+- [x] `HostRuntime` job queue (Rust + Python) — profile submit/wait, drain FIFO
+- [x] CLI `host-run` + monorepo `tensor probe`
 - [x] NumPy high-level path (`numpy_ops` + example)
 - [x] Python `c_abi` + `tools/check_c_abi.py` lockstep with `include/ai_tensor.h`
+- [x] `frameworks/torch/README.md` (high-level landed; C++ later)
 - [ ] Multi-outstanding concurrent engine (needs RTL completion FIFO; host history is SW-only)
 
 ## Open design notes

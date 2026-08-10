@@ -3,10 +3,10 @@
 
 use ai_tensor_abi::{Completion, Desc64, DESC_BYTES};
 use ai_tensor_rt::{
-    probe_cap_regs, run_builtin_suite, run_external_cosim_checks, run_gemm_s8, run_gemm_s8_auto,
-    run_gemm_s8_stream, run_gemm_s8_stream_ex, seed_cap_island_p3, soak_history_poll, soak_irq_wait,
-    soak_multi_queue, soak_queue_depth, Device, IrqContract, MappedWindow, MmioDevice, ProbeReport,
-    Profile, SimDevice, SubmitMode, WaitPolicy,
+    prepare_device, probe_cap_regs, run_builtin_suite, run_external_cosim_checks, run_gemm_s8,
+    run_gemm_s8_auto, run_gemm_s8_stream, run_gemm_s8_stream_ex, seed_cap_island_p3,
+    soak_history_poll, soak_irq_wait, soak_multi_queue, soak_queue_depth, Device, HostRuntime,
+    IrqContract, MappedWindow, MmioDevice, ProbeReport, Profile, SimDevice, SubmitMode, WaitPolicy,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -142,6 +142,21 @@ enum Cmd {
     HistorySoak {
         #[arg(long, default_value_t = 4)]
         n: u32,
+        #[arg(long, default_value = "sim")]
+        backend: String,
+    },
+    /// Profile-driven host queue: enqueue N GEMMs and drain (framework path)
+    HostRun {
+        #[arg(long, default_value_t = 2)]
+        jobs: u32,
+        #[arg(long, default_value_t = 4)]
+        m: u32,
+        #[arg(long, default_value_t = 4)]
+        n: u32,
+        #[arg(long, default_value_t = 4)]
+        k: u32,
+        #[arg(long)]
+        profile: Option<PathBuf>,
         #[arg(long, default_value = "sim")]
         backend: String,
     },
@@ -464,6 +479,52 @@ fn main() {
                 soak_history_poll(&mut dev, n).expect("history")
             };
             println!("history_soak_ok backend={be} tickets={got}");
+        }
+        Cmd::HostRun {
+            jobs,
+            m,
+            n,
+            k,
+            profile,
+            backend,
+        } => {
+            let pr = if let Some(p) = profile {
+                Profile::load_file(&p).expect("profile")
+            } else {
+                let mut d = Profile::default();
+                d.id = "sim-v0".into();
+                d.wait_policy = "poll".into();
+                d.submit_mode = if backend.to_lowercase() == "mmio" {
+                    "fetch".into()
+                } else {
+                    "latch".into()
+                };
+                d
+            };
+            let mut rt = HostRuntime::from_profile(pr);
+            let be = backend.to_lowercase();
+            let (a, b) = pattern_ab(m, n, k);
+            for _ in 0..jobs.max(1) {
+                rt.enqueue_gemm_s8(m, n, k, &a, &b).expect("enqueue");
+            }
+            let results = if be == "sim" {
+                let mut dev = SimDevice::new();
+                prepare_device(&mut dev).expect("prep");
+                rt.drain(&mut dev, 0).expect("drain")
+            } else {
+                let mut dev = MmioDevice::new();
+                dev.probe_caps();
+                prepare_device(&mut dev).expect("prep");
+                rt.drain(&mut dev, 0).expect("drain")
+            };
+            println!(
+                "host_run_ok backend={be} jobs={} submit={:?} wait={:?} last_c00={} last_tiles={}",
+                results.len(),
+                rt.submit_mode,
+                rt.wait_policy,
+                results.last().map(|r| r.c[0]).unwrap_or(0),
+                results.last().map(|r| r.tiles).unwrap_or(0)
+            );
         }
     }
 }

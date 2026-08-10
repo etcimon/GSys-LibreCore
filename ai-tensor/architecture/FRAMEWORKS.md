@@ -20,13 +20,16 @@ No framework-private descriptor layout.
 torch.mm / tf.linalg.matmul
         │
         ▼
-ai_tensor IR (Gemm { m,n,k, dtype, ptrs })
+HostRuntime.enqueue / drain  (profile wait_policy + submit_mode)
         │
         ▼
-Desc64 + program_region + submit + wait
+ai_tensor IR (Gemm { m,n,k, dtype, ptrs }) → stream tiles
         │
         ▼
-sim | linux | … backend → ai_island
+Desc64 + program_region + submit|submit_fetch + WaitPolicy
+        │
+        ▼
+sim | SoftIsland | linux-uio → ai_island
 ```
 
 ---

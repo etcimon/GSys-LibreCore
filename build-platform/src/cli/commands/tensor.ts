@@ -17,6 +17,7 @@ import {
   formatTensorStatus,
   isTensorSpawnCmd,
   runAiTensorDoctor,
+  runAiTensorProbe,
   runAiTensorSpawn,
 } from "../../tooling/tensor.ts";
 
@@ -33,13 +34,15 @@ export const tensorCommand: Command = {
   summary:
     "Host adapter for standalone ai-tensor (spawn doctor/test/golden/cosim)",
   usage:
-    "bun run src/cli/index.ts tensor [status|doctor|test|golden|cosim|queue-soak|rtl|check] [--dry-run] [--json]",
+    "bun run src/cli/index.ts tensor [status|doctor|probe|test|golden|cosim|queue-soak|rtl|check] [--dry-run] [--json]",
   details:
     "Spawns ai-tensor package tooling without Cargo path deps. " +
     "Mirrors timings → sv-timing. Package owns sim/SoftIsland goldens and cosim_harness. " +
+    "tensor probe emits ProbeReport JSON (schemas/probe.v1.json). " +
     "tensor rtl soft-probes monorepo-soak/run-ai-tensor-rtl.sh (AI_TENSOR_RTL_HARD=1 for live TB).",
   examples: [
     "bun run src/cli/index.ts tensor status",
+    "bun run src/cli/index.ts tensor probe --json",
     "bun run src/cli/index.ts tensor test",
     "bun run src/cli/index.ts tensor cosim",
     "bun run src/cli/index.ts tensor rtl",
@@ -77,47 +80,18 @@ export const tensorCommand: Command = {
         logger.warn("spawn    : monorepo-soak/run-ai-tensor.sh missing");
       }
       logger.info(`note     : ${body.note}`);
-      logger.info("commands : tensor doctor|test|golden|cosim|queue-soak|rtl|check");
+      logger.info(
+        "commands : tensor doctor|probe|test|golden|cosim|queue-soak|rtl|check",
+      );
       return body.present ? 0 : 1;
     }
 
     if (sub === "doctor") {
-      // Prefer package ProbeReport JSON when --json (discovery for host tooling)
-      if (asJson && !dryRun) {
-        const pkg = formatTensorStatus(ctx).aiTensorRoot as string | null;
-        if (!pkg) {
-          logger.error("ai-tensor not found");
-          return 1;
-        }
-        const { run } = await import("../../platform/exec.ts");
-        const { hasBinary } = await import("../../platform/exec.ts");
-        if (process.platform === "win32" && hasBinary("wsl") && !hasBinary("cargo")) {
-          const { windowsPathToPosix } = await import("../../platform/shell.ts");
-          const pkgWsl = windowsPathToPosix(pkg, "wsl");
-          const shellCmd =
-            `cd ${JSON.stringify(pkgWsl)} && ` +
-            `cargo run -q -p ai-tensor-cli -- doctor --profile profiles/island-p3-v1.toml --json`;
-          const r = await run("wsl", ["-e", "bash", "-lc", shellCmd], { logger });
-          return r.code ?? 1;
-        }
-        const r = await run(
-          "cargo",
-          [
-            "run",
-            "-q",
-            "-p",
-            "ai-tensor-cli",
-            "--",
-            "doctor",
-            "--profile",
-            "profiles/island-p3-v1.toml",
-            "--json",
-          ],
-          { cwd: pkg, logger },
-        );
-        return r.code ?? 1;
-      }
-      return runAiTensorDoctor(ctx, { dryRun });
+      return runAiTensorDoctor(ctx, { dryRun, json: asJson });
+    }
+
+    if (sub === "probe") {
+      return runAiTensorProbe(ctx, { dryRun });
     }
 
     if (isTensorSpawnCmd(sub) || sub === "check") {
@@ -126,7 +100,9 @@ export const tensorCommand: Command = {
     }
 
     logger.error(`unknown tensor subcommand: ${sub}`);
-    logger.info("usage: tensor [status|doctor|test|golden|cosim|queue-soak|rtl|check]");
+    logger.info(
+      "usage: tensor [status|doctor|probe|test|golden|cosim|queue-soak|rtl|check]",
+    );
     return 2;
   },
 };

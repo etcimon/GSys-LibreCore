@@ -7,6 +7,7 @@ from pathlib import Path
 from .c_abi import PLIC_SOURCE_ISLAND_P3, pack_desc64, verify_header_present
 from .device import Device, pack_gemm_desc
 from .golden import run_golden_suite
+from .host import HostRuntime
 from .probe import probe_dict
 from .profile import Profile
 
@@ -43,6 +44,10 @@ def main() -> None:
         )
         pr = probe_dict(device=ddev, profile=p)
         print(f"probe package={pr['package']} plic={pr['plic_source']} backend={pr['backend']}")
+        hr = HostRuntime.from_profile(p)
+        r = hr.run_one_gemm_s8(2, 2, 2, [1, 2, 3, 4], [5, 6, 7, 8], device=ddev)
+        assert r.c == [19, 22, 43, 50]
+        print(f"host_runtime ticket={r.ticket} tiles={r.tiles}")
     print("ok")
 
 

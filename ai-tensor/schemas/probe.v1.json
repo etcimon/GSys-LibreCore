@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gsys.local/ai-tensor/schemas/probe.v1.json",
+  "title": "ai-tensor ProbeReport v1",
+  "description": "Host discovery document emitted by ai-tensor-cli probe / doctor --json",
+  "type": "object",
+  "required": [
+    "package",
+    "abi_rev",
+    "profile_id",
+    "backend",
+    "wait_policy",
+    "submit_mode",
+    "caps",
+    "irq"
+  ],
+  "properties": {
+    "package": { "type": "string", "const": "ai-tensor" },
+    "abi_rev": { "type": "string" },
+    "profile_id": { "type": "string" },
+    "backend": { "type": "string" },
+    "wait_policy": {
+      "type": "string",
+      "enum": ["poll", "irq", "dma", "claim", "irq_then_poll", "dma_then_claim", "claim_only"]
+    },
+    "submit_mode": {
+      "type": "string",
+      "enum": ["latch", "fetch", "dma", "dma_fetch"]
+    },
+    "mmio_base": {
+      "oneOf": [
+        { "type": "string", "pattern": "^0x[0-9a-fA-F]+$" },
+        { "type": "null" }
+      ]
+    },
+    "plic_source": {
+      "oneOf": [{ "type": "integer", "minimum": 0 }, { "type": "null" }]
+    },
+    "caps": {
+      "type": "object",
+      "required": [
+        "acc_tile_m",
+        "acc_tile_n",
+        "acc_tile_k",
+        "macs_per_cycle",
+        "noc_width",
+        "clusters",
+        "queues",
+        "queue_depth"
+      ],
+      "properties": {
+        "acc_tile_m": { "type": "integer", "minimum": 1 },
+        "acc_tile_n": { "type": "integer", "minimum": 1 },
+        "acc_tile_k": { "type": "integer", "minimum": 1 },
+        "macs_per_cycle": { "type": "integer", "minimum": 0 },
+        "noc_width": { "type": "integer", "minimum": 8 },
+        "clusters": { "type": "integer", "minimum": 1 },
+        "queues": { "type": "integer", "minimum": 1 },
+        "queue_depth": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "pmu": {
+      "type": "object",
+      "properties": {
+        "r_beats": { "type": "integer", "minimum": 0 },
+        "w_beats": { "type": "integer", "minimum": 0 },
+        "cycles": { "type": "integer", "minimum": 0 },
+        "gbps_x1000": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "irq": {
+      "type": "object",
+      "required": ["plic_source", "clear_before_plic_complete"],
+      "properties": {
+        "plic_source": { "type": "integer", "minimum": 0 },
+        "clear_before_plic_complete": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "features": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": true
+}

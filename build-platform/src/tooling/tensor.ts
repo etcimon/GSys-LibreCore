@@ -94,10 +94,39 @@ export async function runAiTensorSpawn(
   return r.code ?? 1;
 }
 
+/** Run package cargo CLI (WSL when Windows lacks cargo). */
+async function runPackageCargo(
+  ctx: PlatformContext,
+  pkg: string,
+  cargoArgs: string[],
+  opts: { dryRun?: boolean } = {},
+): Promise<number> {
+  const { logger } = ctx;
+  if (opts.dryRun || ctx.dryRun) {
+    logger.warn(`dry-run: cargo ${cargoArgs.join(" ")} in ${pkg}`);
+    return 0;
+  }
+  const useWsl =
+    process.platform === "win32" && hasBinary("wsl") && !hasBinary("cargo");
+  if (useWsl) {
+    const pkgWsl = windowsPathToPosix(pkg, "wsl");
+    const quoted = cargoArgs.map((a) => JSON.stringify(a)).join(" ");
+    const shellCmd = `cd ${JSON.stringify(pkgWsl)} && cargo ${quoted}`;
+    const r = await run("wsl", ["-e", "bash", "-lc", shellCmd], { logger });
+    return r.code ?? 1;
+  }
+  if (!hasBinary("cargo")) {
+    logger.error("cargo not found on PATH (install Rust or use WSL)");
+    return 1;
+  }
+  const r = await run("cargo", cargoArgs, { cwd: pkg, logger });
+  return r.code ?? 1;
+}
+
 /** Package-local doctor: independence + cargo doctor. */
 export async function runAiTensorDoctor(
   ctx: PlatformContext,
-  opts: { dryRun?: boolean } = {},
+  opts: { dryRun?: boolean; json?: boolean } = {},
 ): Promise<number> {
   const { logger } = ctx;
   const pkg = resolveAiTensorRoot(ctx);
@@ -108,6 +137,24 @@ export async function runAiTensorDoctor(
   if (opts.dryRun || ctx.dryRun) {
     logger.warn(`dry-run: would run doctor in ${pkg}`);
     return 0;
+  }
+
+  if (opts.json) {
+    return runPackageCargo(
+      ctx,
+      pkg,
+      [
+        "run",
+        "-q",
+        "-p",
+        "ai-tensor-cli",
+        "--",
+        "probe",
+        "--profile",
+        "profiles/island-p3-v1.toml",
+      ],
+      opts,
+    );
   }
 
   // Prefer WSL on Windows when cargo lives there (common monorepo layout).
@@ -139,12 +186,9 @@ export async function runAiTensorDoctor(
     logger,
   });
   if ((r1.code ?? 1) !== 0) return r1.code ?? 1;
-  if (!hasBinary("cargo")) {
-    logger.error("cargo not found on PATH (install Rust or use WSL)");
-    return 1;
-  }
-  const r2 = await run(
-    "cargo",
+  return runPackageCargo(
+    ctx,
+    pkg,
     [
       "run",
       "-q",
@@ -155,9 +199,27 @@ export async function runAiTensorDoctor(
       "--profile",
       "profiles/island-p3-v1.toml",
     ],
-    { cwd: pkg, logger },
+    opts,
   );
-  return r2.code ?? 1;
+}
+
+/** Emit ProbeReport JSON only. */
+export async function runAiTensorProbe(
+  ctx: PlatformContext,
+  opts: { dryRun?: boolean; profile?: string } = {},
+): Promise<number> {
+  const pkg = resolveAiTensorRoot(ctx);
+  if (!pkg) {
+    ctx.logger.error("ai-tensor not found");
+    return 1;
+  }
+  const profile = opts.profile ?? "profiles/island-p3-v1.toml";
+  return runPackageCargo(
+    ctx,
+    pkg,
+    ["run", "-q", "-p", "ai-tensor-cli", "--", "probe", "--profile", profile],
+    opts,
+  );
 }
 
 export function formatTensorStatus(ctx: PlatformContext): Record<string, unknown> {

@@ -77,7 +77,11 @@ sequential tickets remain `poll(ticket)`-able after DONE sticky advances (`soak_
 Not a HW FIFO — board path still has one sticky DONE until RTL grows a queue.
 
 **Host probe:** `ProbeReport::to_json` / CLI `probe` / `doctor --json` — CAP, PMU, IRQ contract,
-profile wait/submit pins for monorepo discovery.
+profile wait/submit pins for monorepo discovery. Schema: `schemas/probe.v1.json`.
+
+**HostRuntime:** framework-facing FIFO of GEMM jobs; drain uses profile `submit_mode` +
+`wait_policy` and multi-tile stream. Engine still one-at-a-time; queue is host-side only.
+CLI: `host-run --jobs N`.
 
 ---
 
