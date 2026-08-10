@@ -34,9 +34,30 @@ package g6lc_ai_island_cfg_pkg;
     int unsigned WorkQuantumK;   // preemption boundary in k-steps
   } ai_island_cfg_t;
 
-  // Latency-SKU default: one cluster, ~12–25 TOPS class at 1 GHz when
-  // MacsPerCycle ≈ 8k–12k. Numbers are placeholders until I1 freezes them.
+  // I1-lite bring-up (live RTL): MaxDim=8, PeLanes=4 multi-MAC, one cluster.
+  // Discovery must match what g6lc_ai_gemm_seq can execute today. Full SKU
+  // targets (Macs≈8k–12k, AccTile≈256, multi-MB SRAM) land when the PE/tile
+  // geometry scales — see AiIslandLatencySkuTarget.
   localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters:     unsigned'(1),
+      MacsPerCycle: unsigned'(4),           // PeLanes
+      ClockKhz:     unsigned'(1_000_000),
+      SramBytes:    unsigned'(4 * 1024),    // A/B banked + C (MaxDim=8) headroom
+      AccTileM:     unsigned'(8),           // MaxDim
+      AccTileN:     unsigned'(8),
+      AccTileK:     unsigned'(8),
+      NocWidth:     unsigned'(64),          // single AXI master today
+      DramChannels: unsigned'(1),
+      DramGBps:     unsigned'(0),           // not measured (I3)
+      Queues:       unsigned'(2),
+      QueueDepth:   unsigned'(64),
+      QosClasses:   unsigned'(2),
+      WorkQuantumK: unsigned'(64)
+  };
+
+  // Latency-SKU *target* (not yet elaborated): ~12–25 TOPS class at 1 GHz.
+  // Kept for docs / future package switch — do not wire until PE scales.
+  localparam ai_island_cfg_t AiIslandLatencySkuTarget = '{
       Clusters:     unsigned'(1),
       MacsPerCycle: unsigned'(8192),
       ClockKhz:     unsigned'(1_000_000),
