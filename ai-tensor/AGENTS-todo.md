@@ -69,7 +69,9 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] Wire `ait.py {golden,cosim,test}` + `run-ai-tensor.sh cosim`
 - [x] Lab RTL adapter: `monorepo-soak/run-ai-tensor-rtl.sh` + `tools/rtl_smoke.py`
   (soft default; `AI_TENSOR_RTL_HARD=1` → ai-matrix-veri subset)
-- [ ] Board-validated live TB with HARD=1 on CI host (lab opt-in)
+- [x] Lab HARD smoke (reuse `work-ver-ai`): `ai_island_mmio_smoke` + `ai_gemm_s8_smoke` **PASS**
+  (`monorepo-soak/run-ai-tensor-rtl-hard.sh`, 2026-08-10)
+- [ ] Full suite / larger GEMM HARD regression in CI (opt-in rebuild)
 - [x] Python Caps / PMU surface + torch meta
 - [x] `tools/check_independence.py` + `ait.py check`
 

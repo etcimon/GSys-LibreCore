@@ -59,6 +59,9 @@ Clear level source (`AI_DONE`) **before** PLIC complete, or level-set re-arms IP
 ```bash
 bash verif/regress/ai-island-veri.sh          # standalone spine
 bash verif/regress/ai-matrix-veri.sh          # g6lc64_ai directed suite
+# Host package lab bridge (soft / hard):
+bash monorepo-soak/run-ai-tensor.sh rtl
+bash monorepo-soak/run-ai-tensor-rtl-hard.sh  # mmio + gemm_s8 on work-ver-ai
 ```
 
 Standalone smoke: cap, good desc, AI-3 OOR/perm, bad version, disabled.  

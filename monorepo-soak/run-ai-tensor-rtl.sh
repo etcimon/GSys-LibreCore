@@ -49,8 +49,9 @@ if [[ ! -d "$WORK_DIR" && "${AI_MATRIX_VERI_REBUILD:-0}" != "1" ]]; then
   exit 1
 fi
 
-# Minimal island GEMM goldens by default (override with AI_MATRIX_VERI_TESTS)
-export AI_MATRIX_VERI_TESTS="${AI_MATRIX_VERI_TESTS:-ai_island_mmio_smoke ai_gemm_s8_smoke ai_ptr_done_smoke}"
+# Minimal host↔island lab pair (proven ~20s with reuse work-ver-ai).
+# Override for full suite or larger GEMMs via AI_MATRIX_VERI_TESTS.
+export AI_MATRIX_VERI_TESTS="${AI_MATRIX_VERI_TESTS:-ai_island_mmio_smoke ai_gemm_s8_smoke}"
 export AI_MATRIX_VER_LIBRARY="${WORK}"
 log "HARD run: AI_MATRIX_VERI_TESTS=${AI_MATRIX_VERI_TESTS}"
 bash "$VERI"

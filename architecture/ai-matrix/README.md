@@ -16,7 +16,10 @@ PyTorch / TensorFlow attachment to this contract and to live `corev_apu/ai_islan
 cross-connect and version pins: [`../../ai-tensor/architecture/VERSIONING.md`](../../ai-tensor/architecture/VERSIONING.md).
 Offline dual-oracle goldens (sim + SoftIsland) + external harness
 `ai-tensor/tools/cosim_harness.py` (`AI_TENSOR_COSIM_CMD`); monorepo spawn
-`monorepo-soak/run-ai-tensor.sh {test,golden,cosim}`. Not on any flist; does not replace this scaffold.
+`monorepo-soak/run-ai-tensor.sh {test,golden,cosim}`; lab HARD
+`monorepo-soak/run-ai-tensor-rtl-hard.sh` (mmio+gemm_s8 on `work-ver-ai`).
+Completion FIFO future RTL: [`completion-fifo.md`](completion-fifo.md).
+Not on any flist; does not replace this scaffold.
 
 **Scaling plan of record: [`scaling-100tops.md`](scaling-100tops.md)** — what changes when the target
 is the 100-TOPS class rather than 1–5 TOPS. It supplies the bandwidth-first sizing model, the

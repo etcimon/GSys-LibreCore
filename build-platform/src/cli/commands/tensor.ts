@@ -18,6 +18,7 @@ import {
   isTensorSpawnCmd,
   runAiTensorDoctor,
   runAiTensorProbe,
+  runAiTensorRtlHard,
   runAiTensorSpawn,
 } from "../../tooling/tensor.ts";
 
@@ -34,18 +35,17 @@ export const tensorCommand: Command = {
   summary:
     "Host adapter for standalone ai-tensor (spawn doctor/test/golden/cosim)",
   usage:
-    "bun run src/cli/index.ts tensor [status|doctor|probe|test|golden|cosim|queue-soak|rtl|check] [--dry-run] [--json]",
+    "bun run src/cli/index.ts tensor [status|doctor|probe|test|golden|cosim|queue-soak|rtl|rtl-hard|check] [--dry-run] [--json]",
   details:
     "Spawns ai-tensor package tooling without Cargo path deps. " +
     "Mirrors timings → sv-timing. Package owns sim/SoftIsland goldens and cosim_harness. " +
     "tensor probe emits ProbeReport JSON (schemas/probe.v1.json). " +
-    "tensor rtl soft-probes monorepo-soak/run-ai-tensor-rtl.sh (AI_TENSOR_RTL_HARD=1 for live TB).",
+    "tensor rtl soft-probes; tensor rtl-hard runs mmio+gemm_s8 on work-ver-ai.",
   examples: [
     "bun run src/cli/index.ts tensor status",
-    "bun run src/cli/index.ts tensor probe --json",
+    "bun run src/cli/index.ts tensor probe",
     "bun run src/cli/index.ts tensor test",
-    "bun run src/cli/index.ts tensor cosim",
-    "bun run src/cli/index.ts tensor rtl",
+    "bun run src/cli/index.ts tensor rtl-hard",
     "AI_TENSOR_DIR=/path/to/ai-tensor bun run src/cli/index.ts tensor doctor",
   ],
   needsContext: true,
@@ -81,7 +81,7 @@ export const tensorCommand: Command = {
       }
       logger.info(`note     : ${body.note}`);
       logger.info(
-        "commands : tensor doctor|probe|test|golden|cosim|queue-soak|rtl|check",
+        "commands : tensor doctor|probe|test|golden|cosim|queue-soak|rtl|rtl-hard|check",
       );
       return body.present ? 0 : 1;
     }
@@ -94,6 +94,10 @@ export const tensorCommand: Command = {
       return runAiTensorProbe(ctx, { dryRun });
     }
 
+    if (sub === "rtl-hard") {
+      return runAiTensorRtlHard(ctx, { dryRun });
+    }
+
     if (isTensorSpawnCmd(sub) || sub === "check") {
       const cmd = sub === "check" ? "check" : sub;
       return runAiTensorSpawn(ctx, cmd, { dryRun });
@@ -101,7 +105,7 @@ export const tensorCommand: Command = {
 
     logger.error(`unknown tensor subcommand: ${sub}`);
     logger.info(
-      "usage: tensor [status|doctor|probe|test|golden|cosim|queue-soak|rtl|check]",
+      "usage: tensor [status|doctor|probe|test|golden|cosim|queue-soak|rtl|rtl-hard|check]",
     );
     return 2;
   },

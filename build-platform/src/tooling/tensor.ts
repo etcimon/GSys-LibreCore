@@ -52,6 +52,33 @@ export function isTensorSpawnCmd(s: string): s is TensorSpawnCmd {
   );
 }
 
+/** Lab HARD RTL: mmio + gemm_s8 on work-ver-ai (opt-in). */
+export async function runAiTensorRtlHard(
+  ctx: PlatformContext,
+  opts: { dryRun?: boolean } = {},
+): Promise<number> {
+  const { logger } = ctx;
+  const script = join(ctx.repoRoot, "monorepo-soak", "run-ai-tensor-rtl-hard.sh");
+  if (!existsSync(script)) {
+    logger.error("monorepo-soak/run-ai-tensor-rtl-hard.sh missing");
+    return 1;
+  }
+  logger.info(`tensor rtl-hard: ${script}`);
+  if (opts.dryRun || ctx.dryRun) {
+    logger.warn("dry-run: not executing HARD RTL");
+    return 0;
+  }
+  const r = await runRegressScript(script, [], {
+    cwd: ctx.repoRoot,
+    env: {
+      AI_TENSOR_DIR: resolveAiTensorRoot(ctx) ?? undefined,
+      AI_TENSOR_MONOREPO: ctx.repoRoot,
+    },
+    logger,
+  });
+  return r.code ?? 1;
+}
+
 /**
  * Spawn package tests via monorepo-soak adapter (bash / WSL on Windows).
  * Never imports package crates.

@@ -83,11 +83,16 @@ Default harness path used by spawn / `ait.py test|cosim`:
 
 ```bash
 export AI_TENSOR_COSIM_CMD="python3 tools/cosim_harness.py"
-# optional hard TB (long):
-export AI_TENSOR_RUN_RTL=1 AI_TENSOR_RTL_HARD=1
-# default RTL adapter when RUN_RTL=1:
-#   bash monorepo-soak/run-ai-tensor-rtl.sh
+# soft probe:
+bash monorepo-soak/run-ai-tensor.sh rtl
+# lab HARD (reuse work-ver-ai; ~20s for mmio+gemm_s8):
+bash monorepo-soak/run-ai-tensor-rtl-hard.sh
+# rebuild TB (long):
+AI_MATRIX_VERI_REBUILD=1 bash monorepo-soak/run-ai-tensor-rtl-hard.sh
 ```
+
+**Lab HARD status (hostless CI gate):** with `work-ver-ai/Variane_testharness` present,
+`ai_island_mmio_smoke` + `ai_gemm_s8_smoke` pass under `g6lc64_ai` (no rebuild).
 
 ## 7. Multi-tile desc stream (production RT)
 
