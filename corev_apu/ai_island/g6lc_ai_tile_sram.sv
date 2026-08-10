@@ -4,11 +4,11 @@
 // Xg6lcai island tile bank — PDK-swap seam via tc_sram.
 //
 // Dual-port Latency=0 (same pattern as core g6lc_ai_acc_bank):
-//   port 0 read  → combo when req && !we
-//   port 1 write → registered at posedge
+//   port 0: read (combo) OR second write when w2_req (I3-lite B drain)
+//   port 1: primary write
 //
-// Used for I1 A/B staging (int8 words) and C accumulator (int32 words).
-// Behavioural generic cell; CVA6_TECH_OPT maps to foundry macros.
+// r_req and w2_req are mutually exclusive (caller). Used for I1 A/B staging
+// (int8) and C accumulator (int32). CVA6_TECH_OPT maps to foundry macros.
 
 module g6lc_ai_tile_sram #(
     parameter int unsigned NumWords  = 64,
@@ -22,14 +22,18 @@ module g6lc_ai_tile_sram #(
     input  logic                 rst_ni,
     // DFT: reserved for MBIST/ATPG at the PDK-mapped macro
     input  logic                 testmode_i,
-    // Read port
+    // Read port (port 0 when not dual-writing)
     input  logic                 r_req_i,
     input  logic [AddrWidth-1:0] r_addr_i,
     output logic [DataWidth-1:0] r_data_o,
-    // Write port
+    // Primary write port (port 1)
     input  logic                 w_req_i,
     input  logic [AddrWidth-1:0] w_addr_i,
-    input  logic [DataWidth-1:0] w_data_i
+    input  logic [DataWidth-1:0] w_data_i,
+    // Optional second write on port 0 (I3-lite: B same-bank dual drain)
+    input  logic                 w2_req_i,
+    input  logic [AddrWidth-1:0] w2_addr_i,
+    input  logic [DataWidth-1:0] w2_data_i
 );
 
   logic [1:0]                 req;
@@ -39,11 +43,12 @@ module g6lc_ai_tile_sram #(
   logic [1:0][BeWidth-1:0]    be;
   logic [1:0][DataWidth-1:0]  rdata;
 
-  assign req[0]   = r_req_i;
-  assign we[0]    = 1'b0;
-  assign addr[0]  = r_addr_i;
-  assign wdata[0] = '0;
-  assign be[0]    = '0;
+  // Port 0: read if r_req, else second write if w2_req
+  assign req[0]   = r_req_i | w2_req_i;
+  assign we[0]    = w2_req_i;
+  assign addr[0]  = w2_req_i ? w2_addr_i : r_addr_i;
+  assign wdata[0] = w2_data_i;
+  assign be[0]    = w2_req_i ? '1 : '0;
   assign r_data_o = rdata[0];
 
   assign req[1]   = w_req_i;
@@ -53,7 +58,7 @@ module g6lc_ai_tile_sram #(
   assign be[1]    = '1;  // full-word writes
 
   // SimInit "none": Verilator rejects BLKLOOPINIT on large zero-init arrays
-  // (AccTile≥32 ⇒ C bank 1024×i32). GEMM always writes tiles before read.
+  // (AccTile>=32 => C bank 1024xi32). GEMM always writes tiles before read.
   tc_sram #(
       .NumWords   (NumWords),
       .DataWidth  (DataWidth),
