@@ -14,7 +14,8 @@
 //      gated while draining a beat so mid-burst R waits.
 //   3) MAC: PeLanes parallel products/cycle via g6lc_ai_pe_dot
 //   4) Store C: dual-i32 pack on ≥64-bit bus; multi-beat INCR AW (up to
-//      MaxBurstBeats pair-beats) along a C row — same cap as A/B AR.
+//      MaxBurstBeats pair-beats) along a C row; dual-bank combo read so
+//      each W is one cycle when PeLanes>=2 (j and j+1 different banks).
 //
 // C multi-banked (j % PeLanes). Beat packing parameterized by DataWidth.
 // Bursts stay within a single A row (k), B row (n), or C row (n); never cross.
@@ -101,14 +102,16 @@ module g6lc_ai_gemm_seq #(
   logic                 beat_load_d;  // capture RDATA into beat_q
   logic [DataWidth-1:0] beat_data_d;
 
-  // C dual-store pack: hold low i32, then write {hi,lo} on ≥64-bit bus.
+  // C dual-store: dual-bank combo read of C[j],C[j+1] → one W/cycle (PeLanes≥2).
   // Multi-beat: AW once with len=nbeats-1; stream W; advance j on B by stc_elem.
+  // PeLanes==1 falls back to pair-hold (same bank for j and j+1).
   logic        c_pair_hold_q, c_pair_hold_d;
   logic [31:0] c_lo_q;
   logic        c_lo_we_d;
   logic [7:0]  stc_w_left_q, stc_w_left_d;  // remaining W beats in open AW
   logic [7:0]  stc_elem_q, stc_elem_d;      // elements covered by open AW (B retire)
   logic [7:0]  stc_n_d;                     // elements retired on B (stc_elem)
+  localparam bit DualCRead = (PeLanes >= 2);
 
   // ---- Banked A/B tile ports ----
   logic                 a_r_req  [PeLanes];
@@ -129,12 +132,22 @@ module g6lc_ai_gemm_seq #(
   logic [BankAddrW-1:0] b_w2_addr [PeLanes];
   logic [7:0]           b_w2_data [PeLanes];
 
-  // C multi-bank (single outstanding R or W; bank = j % PeLanes)
-  logic                 c_r_req, c_w_req;
-  logic [LaneW-1:0]     c_r_bank, c_w_bank;
-  logic [BankAddrW-1:0] c_r_addr, c_w_addr;
-  logic [31:0]          c_r_data, c_w_data;
+  // C multi-bank (bank = j % PeLanes). Dual concurrent reads for pair-store:
+  // j and j+1 always hit different banks when PeLanes >= 2 (live: 128).
+  logic                 c_r0_req, c_r1_req, c_w_req;
+  logic [LaneW-1:0]     c_r0_bank, c_r1_bank, c_w_bank;
+  logic [BankAddrW-1:0] c_r0_addr, c_r1_addr, c_w_addr;
+  logic [31:0]          c_r0_data, c_r1_data, c_w_data;
   logic [31:0]          c_r_data_b [PeLanes];
+  // Alias for single-element paths (single store / MAC write uses r0)
+  logic                 c_r_req;
+  logic [LaneW-1:0]     c_r_bank;
+  logic [BankAddrW-1:0] c_r_addr;
+  logic [31:0]          c_r_data;
+  assign c_r_req  = c_r0_req;
+  assign c_r_bank = c_r0_bank;
+  assign c_r_addr = c_r0_addr;
+  assign c_r_data = c_r0_data;
 
   for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_a_banks
     g6lc_ai_tile_sram #(
@@ -169,8 +182,10 @@ module g6lc_ai_gemm_seq #(
         .ImplKey  ("g6lc_ai_tile_c")
     ) i_tile_c (
         .clk_i, .rst_ni, .testmode_i,
-        .r_req_i (c_r_req && (c_r_bank == LaneW'(p))),
-        .r_addr_i(c_r_addr),
+        // Dual-read: r0 and r1 select different banks (pair j, j+1)
+        .r_req_i ((c_r0_req && (c_r0_bank == LaneW'(p))) ||
+                  (c_r1_req && (c_r1_bank == LaneW'(p)))),
+        .r_addr_i((c_r1_req && (c_r1_bank == LaneW'(p))) ? c_r1_addr : c_r0_addr),
         .r_data_o(c_r_data_b[p]),
         .w_req_i (c_w_req && (c_w_bank == LaneW'(p))),
         .w_addr_i(c_w_addr),
@@ -179,12 +194,15 @@ module g6lc_ai_gemm_seq #(
     );
   end
 
-  // Latency=0 read mux (one bank selected per cycle)
+  // Latency=0 dual read mux
   always_comb begin
-    c_r_data = c_r_data_b[0];
+    c_r0_data = c_r_data_b[0];
+    c_r1_data = c_r_data_b[0];
     for (int unsigned p = 1; p < PeLanes; p++) begin
-      if (c_r_bank == LaneW'(p))
-        c_r_data = c_r_data_b[p];
+      if (c_r0_bank == LaneW'(p))
+        c_r0_data = c_r_data_b[p];
+      if (c_r1_bank == LaneW'(p))
+        c_r1_data = c_r_data_b[p];
     end
   end
 
@@ -323,9 +341,12 @@ module g6lc_ai_gemm_seq #(
       pe_b[p]     = '0;
       pe_v[p]     = 1'b0;
     end
-    c_r_req  = 1'b0;
-    c_r_bank = '0;
-    c_r_addr = '0;
+    c_r0_req  = 1'b0;
+    c_r0_bank = '0;
+    c_r0_addr = '0;
+    c_r1_req  = 1'b0;
+    c_r1_bank = '0;
+    c_r1_addr = '0;
     c_w_req  = 1'b0;
     c_w_bank = '0;
     c_w_addr = '0;
@@ -614,27 +635,43 @@ module g6lc_ai_gemm_seq #(
               // beats already written = nbeats - w_left; j_eff = j + 2*done
               beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
               j_eff      = j_q + (beats_done << 1);
-              if (!c_pair_hold_q) begin
-                // capture C[i, j_eff]
-                c_r_req       = 1'b1;
-                c_r_bank      = c_bank(j_eff);
-                c_r_addr      = c_bank_addr(i_q, j_eff);
+              if (DualCRead) begin
+                // Same-cycle dual-bank read → W (no pair-hold)
+                c_r0_req  = 1'b1;
+                c_r0_bank = c_bank(j_eff);
+                c_r0_addr = c_bank_addr(i_q, j_eff);
+                c_r1_req  = 1'b1;
+                c_r1_bank = c_bank(j_eff + 32'd1);
+                c_r1_addr = c_bank_addr(i_q, j_eff + 32'd1);
+                axi_req_o.w.data  = DataWidth'({c_r1_data, c_r0_data});
+                axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
+                axi_req_o.w.last  = (stc_w_left_q == 8'd1);
+                axi_req_o.w_valid = 1'b1;
+                if (axi_resp_i.w_ready) begin
+                  stc_w_left_d = stc_w_left_q - 8'd1;
+                  if (stc_w_left_q == 8'd1)
+                    w_sent_d = 1'b1;
+                end
+              end else if (!c_pair_hold_q) begin
+                // PeLanes==1: same bank — capture lo then hi
+                c_r0_req      = 1'b1;
+                c_r0_bank     = c_bank(j_eff);
+                c_r0_addr     = c_bank_addr(i_q, j_eff);
                 c_lo_we_d     = 1'b1;
                 c_pair_hold_d = 1'b1;
               end else begin
-                // W beat: {C[i,j_eff+1], C[i,j_eff]}
-                c_r_req  = 1'b1;
-                c_r_bank = c_bank(j_eff + 32'd1);
-                c_r_addr = c_bank_addr(i_q, j_eff + 32'd1);
-                axi_req_o.w.data = DataWidth'({c_r_data, c_lo_q});
-                axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hFF};
-                axi_req_o.w.last = (stc_w_left_q == 8'd1);
+                c_r0_req  = 1'b1;
+                c_r0_bank = c_bank(j_eff + 32'd1);
+                c_r0_addr = c_bank_addr(i_q, j_eff + 32'd1);
+                axi_req_o.w.data  = DataWidth'({c_r0_data, c_lo_q});
+                axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
+                axi_req_o.w.last  = (stc_w_left_q == 8'd1);
                 axi_req_o.w_valid = 1'b1;
                 if (axi_resp_i.w_ready) begin
                   stc_w_left_d  = stc_w_left_q - 8'd1;
                   c_pair_hold_d = 1'b0;
                   if (stc_w_left_q == 8'd1)
-                    w_sent_d = 1'b1;  // all W of this AW done
+                    w_sent_d = 1'b1;
                 end
               end
             end else begin
@@ -656,16 +693,16 @@ module g6lc_ai_gemm_seq #(
             end
           end else begin
             // Single i32 store (odd j or last column of odd-width row)
-            c_r_req  = 1'b1;
-            c_r_bank = c_bank(j_q);
-            c_r_addr = c_bank_addr(i_q, j_q);
+            c_r0_req  = 1'b1;
+            c_r0_bank = c_bank(j_q);
+            c_r0_addr = c_bank_addr(i_q, j_q);
             axi_req_o.aw.addr = c_store_addr;
             axi_req_o.aw.size = axi_pkg::size_t'(2);  // 4B
             if (DataWidth >= 64 && c_store_addr[2]) begin
-              axi_req_o.w.data = DataWidth'({c_r_data, 32'h0});
+              axi_req_o.w.data = DataWidth'({c_r0_data, 32'h0});
               axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hF0};
             end else begin
-              axi_req_o.w.data = DataWidth'(c_r_data);
+              axi_req_o.w.data = DataWidth'(c_r0_data);
               axi_req_o.w.strb = {{(DataWidth/8-4){1'b0}}, 4'hF};
             end
             stc_n_d = 8'd1;
