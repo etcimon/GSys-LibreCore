@@ -13,6 +13,7 @@ use ai_tensor_abi::{
     mmio, CapRegs, Completion, Desc64, PmuSnapshot, ST_BAD_OP, ST_BAD_PTR, ST_BAD_QID, ST_BAD_VER,
     ST_DISABLED, ST_OK, ST_ERR, CONTRACT_VERSION, DESC_BYTES, OP_GEMM,
 };
+use std::collections::VecDeque;
 
 const MEM_BASE: u64 = 0x1000;
 const MEM_CAP: usize = 16 * 1024 * 1024;
@@ -74,6 +75,9 @@ pub struct SoftIsland {
     next_off: usize,
     // last completion for Device::poll convenience
     last_comp: Option<Completion>,
+    /// Software completion history (CAP.queue_depth). Models a future HW FIFO so
+    /// sequential tickets remain pollable after DONE sticky advances.
+    comp_history: VecDeque<Completion>,
 }
 
 impl Default for SoftIsland {
@@ -111,6 +115,7 @@ impl SoftIsland {
             mem: vec![0u8; MEM_CAP],
             next_off: 0,
             last_comp: None,
+            comp_history: VecDeque::new(),
         }
     }
 
@@ -119,6 +124,23 @@ impl SoftIsland {
         c.wr_cpl_en = self.wr_cpl_en;
         c.compute_ref = true;
         c
+    }
+
+    fn history_cap(&self) -> usize {
+        self.cap.queue_depth.max(1) as usize
+    }
+
+    fn push_history(&mut self, c: Completion) {
+        self.comp_history.push_back(c);
+        let cap = self.history_cap().max(4);
+        while self.comp_history.len() > cap {
+            self.comp_history.pop_front();
+        }
+    }
+
+    /// Find a past completion by ticket (does not clear DONE sticky).
+    pub fn history_lookup(&self, ticket: u32) -> Option<Completion> {
+        self.comp_history.iter().rev().find(|c| c.ticket == ticket).copied()
     }
 
     fn cap_word(&self, word_idx: u16) -> u32 {
@@ -289,7 +311,9 @@ impl SoftIsland {
         if irq {
             self.irq_sticky = true;
         }
-        self.last_comp = Some(Completion { ticket, status });
+        let c = Completion { ticket, status };
+        self.last_comp = Some(c);
+        self.push_history(c);
     }
 
     fn doorbell(&mut self, val: u32) {
@@ -567,26 +591,26 @@ impl Device for MmioDevice {
 
     fn poll(&mut self, ticket: u32) -> Result<Option<Completion>, RtError> {
         let done = self.island.read32(mmio::DONE) & 1 != 0;
-        if !done {
-            return Ok(None);
-        }
-        let t = self.island.read32(mmio::TICKET);
-        let st = (self.island.read32(mmio::DSTATUS) & 0xffff) as u16;
-        if t != ticket {
-            // Different ticket — still return if sticky holds this job's result
+        if done {
+            let t = self.island.read32(mmio::TICKET);
+            let st = (self.island.read32(mmio::DSTATUS) & 0xffff) as u16;
+            if t == ticket {
+                // SW clears done sticky after claim (PLIC-like discipline)
+                self.island.write32(mmio::DONE, 1);
+                return Ok(Some(Completion {
+                    ticket: t,
+                    status: st,
+                }));
+            }
+            // Sticky is a different ticket — fall through to history
             if let Some(c) = self.island.last_comp {
                 if c.ticket == ticket {
                     return Ok(Some(c));
                 }
             }
-            return Ok(None);
         }
-        // SW clears done sticky after claim (PLIC-like discipline)
-        self.island.write32(mmio::DONE, 1);
-        Ok(Some(Completion {
-            ticket: t,
-            status: st,
-        }))
+        // Completion history: sequential tickets remain pollable after sticky moves on
+        Ok(self.island.history_lookup(ticket))
     }
 
     fn pmu(&self) -> PmuSnapshot {

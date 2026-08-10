@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 //! Minimal profile TOML subset (no serde required).
 
-use crate::RtError;
+use crate::{RtError, SubmitMode, WaitPolicy};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -123,6 +123,25 @@ fn parse_u64(s: &str) -> Option<u64> {
         u64::from_str_radix(h, 16).ok()
     } else {
         s.parse().ok()
+    }
+}
+
+impl Profile {
+    /// Map profile string to runtime WaitPolicy (dma needs ptr filled by caller).
+    pub fn to_wait_policy(&self) -> WaitPolicy {
+        match self.wait_policy.to_ascii_lowercase().as_str() {
+            "irq" | "irq_then_poll" => WaitPolicy::IrqThenPoll,
+            "dma" | "dma_then_claim" => WaitPolicy::DmaThenClaim {
+                ptr_done: 0,
+                claim: true,
+            },
+            "claim" | "claim_only" => WaitPolicy::ClaimOnly,
+            _ => WaitPolicy::Poll,
+        }
+    }
+
+    pub fn to_submit_mode(&self) -> SubmitMode {
+        SubmitMode::from_str_loose(&self.submit_mode)
     }
 }
 

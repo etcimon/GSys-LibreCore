@@ -10,6 +10,7 @@ mod stream;
 mod policy;
 mod irq;
 mod depth;
+mod probe;
 
 pub use sim::SimDevice;
 pub use profile::Profile;
@@ -28,7 +29,8 @@ pub use irq::{
     claim_after_irq, soak_irq_wait, wait_irq_sticky, wait_irq_then_claim, IrqContract, IrqWaitMode,
     VARIANCE_PLIC_SOURCE,
 };
-pub use depth::{soak_queue_depth, soak_ticket_sequence, SubmitMode};
+pub use depth::{soak_history_poll, soak_queue_depth, soak_ticket_sequence, SubmitMode};
+pub use probe::ProbeReport;
 
 use ai_tensor_abi::{AccTile, CapRegs, Completion, Desc64, PmuSnapshot, ST_OK};
 use thiserror::Error;

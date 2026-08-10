@@ -14,6 +14,7 @@ from .c_abi import PLIC_SOURCE_ISLAND_P3, completion_make, pack_desc64, verify_h
 from .device import Caps, Device, Pmu, gemm_s8, pack_gemm_desc, tile_gemm
 from .golden import GoldenGemm, builtin_goldens, run_golden_suite
 from .policy import WaitPolicy, recommend_policy
+from .probe import probe_dict
 from .profile import Profile
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "gemm_s8",
     "pack_desc64",
     "pack_gemm_desc",
+    "probe_dict",
     "recommend_policy",
     "run_golden_suite",
     "tile_gemm",

@@ -122,6 +122,12 @@ pub fn run_builtin_suite() -> Result<usize, RtError> {
     let mut mmio = MmioDevice::new();
     mmio.probe_caps();
     crate::soak_queue_depth(&mut mmio, crate::SubmitMode::Fetch, 3)?;
+    // Multi-ticket history observability
+    let mut sim = SimDevice::new();
+    crate::soak_history_poll(&mut sim, 4)?;
+    let mut mmio = MmioDevice::new();
+    mmio.probe_caps();
+    crate::soak_history_poll(&mut mmio, 4)?;
     Ok(n)
 }
 

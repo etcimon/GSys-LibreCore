@@ -26,6 +26,8 @@ cargo run -p ai-tensor-cli -- queue-soak --backend mmio
 cargo run -p ai-tensor-cli -- irq-soak --backend mmio
 cargo run -p ai-tensor-cli -- stream-policy --policy dma --submit fetch --backend mmio
 cargo run -p ai-tensor-cli -- depth-soak --depth 4 --mode latch
+cargo run -p ai-tensor-cli -- history-soak --n 4 --backend mmio
+cargo run -p ai-tensor-cli -- probe --profile profiles/island-p3-v1.toml
 cargo run -p ai-tensor-cli -- golden-check
 python tools/check_c_abi.py
 ```

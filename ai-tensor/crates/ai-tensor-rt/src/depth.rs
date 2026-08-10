@@ -106,6 +106,55 @@ pub fn soak_queue_depth<D: Device>(
     Ok(ok)
 }
 
+/// Fire `n` sequential jobs **without waiting between submits**, then poll each
+/// ticket from history (SoftIsland ring / sim HashMap). Engine still runs
+/// jobs synchronously on submit; this validates multi-ticket observability.
+pub fn soak_history_poll<D: Device>(dev: &mut D, n: u32) -> Result<u32, RtError> {
+    let n = n.max(1).min(8);
+    dev.enable(true);
+    dev.set_wr_cpl_en(true);
+    let reg = Region {
+        base: 0x1000,
+        limit: 0x1000 + (1 << 24),
+        read: true,
+        write: true,
+    };
+    dev.program_region(0, reg)?;
+    let mut tickets = Vec::new();
+    let mut q = Queue::q0(400);
+    for i in 0..n {
+        let pa = dev.alloc(4)?;
+        let pb = dev.alloc(4)?;
+        let pc = dev.alloc(16)?;
+        let pd = dev.alloc(8)?;
+        dev.write_mem(pa, &[1, 2, 3, 4])?;
+        dev.write_mem(pb, &[5, 6, 7, 8])?;
+        dev.write_mem(pc, &[0u8; 16])?;
+        let desc = Desc64::gemm(2, 2, 2).with_ptrs(pa, pb, pc, pd);
+        let t = q.next_ticket();
+        // claim previous sticky so DONE advances; history retains older tickets
+        if i > 0 {
+            let _ = dev.claim_done();
+        }
+        dev.submit(0, t, &desc)?;
+        tickets.push(t);
+    }
+    // Poll all tickets (may be in history, not only sticky)
+    let mut ok = 0u32;
+    for t in tickets {
+        match dev.poll(t)? {
+            Some(c) if c.status == ST_OK && c.ticket == t => ok += 1,
+            Some(c) => {
+                return Err(RtError::Msg(format!("history poll bad {c:?}")));
+            }
+            None => {
+                return Err(RtError::Msg(format!("history poll miss ticket={t}")));
+            }
+        }
+    }
+    Ok(ok)
+}
+
 /// N sequential tickets without checking C (latency of submit path only).
 pub fn soak_ticket_sequence<D: Device>(dev: &mut D, n: u32) -> Result<Vec<Completion>, RtError> {
     let mut out = Vec::new();
@@ -161,5 +210,20 @@ mod tests {
         let v = soak_ticket_sequence(&mut dev, 5).unwrap();
         assert_eq!(v.len(), 5);
         assert!(v.iter().all(|c| c.is_ok()));
+    }
+
+    #[test]
+    fn history_poll_sim() {
+        let mut dev = SimDevice::new();
+        let n = soak_history_poll(&mut dev, 4).unwrap();
+        assert_eq!(n, 4);
+    }
+
+    #[test]
+    fn history_poll_mmio() {
+        let mut dev = MmioDevice::new();
+        dev.probe_caps();
+        let n = soak_history_poll(&mut dev, 4).unwrap();
+        assert_eq!(n, 4);
     }
 }

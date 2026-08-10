@@ -85,10 +85,12 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] Stream + WaitPolicy (`run_gemm_s8_stream_with_policy` / CLI `stream-policy`)
 - [x] Stream + SubmitMode latch/fetch (`run_gemm_s8_stream_ex` / `Device::submit_fetch`)
 - [x] Single-queue sequential depth soak (`depth.rs` / CLI `depth-soak`)
-- [x] Profile `wait_policy` + `submit_mode` pins
+- [x] SoftIsland completion **history ring** + `soak_history_poll` / CLI `history-soak`
+- [x] Profile `wait_policy` + `submit_mode` pins + `to_wait_policy` / `to_submit_mode`
+- [x] Host `ProbeReport` JSON (`probe` / `doctor --json`) + Python `probe_dict`
 - [x] NumPy high-level path (`numpy_ops` + example)
 - [x] Python `c_abi` + `tools/check_c_abi.py` lockstep with `include/ai_tensor.h`
-- [ ] Multi-outstanding concurrent depth (needs RTL completion FIFO; single DONE sticky today)
+- [ ] Multi-outstanding concurrent engine (needs RTL completion FIFO; host history is SW-only)
 
 ## Open design notes
 

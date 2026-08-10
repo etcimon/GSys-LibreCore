@@ -20,6 +20,8 @@ class Profile:
     macs_per_cycle: int = 256
     mmio_base: Optional[int] = None
     plic_source: Optional[int] = None
+    wait_policy: str = "poll"
+    submit_mode: str = "latch"
     features: List[str] = field(default_factory=list)
     raw: Dict[str, str] = field(default_factory=dict)
 
@@ -82,4 +84,8 @@ class Profile:
                 p.mmio_base = int(v, 0)
             elif k == "plic_source":
                 p.plic_source = int(v, 0)
+            elif k == "wait_policy":
+                p.wait_policy = v
+            elif k == "submit_mode":
+                p.submit_mode = v
         return p

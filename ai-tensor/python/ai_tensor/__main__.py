@@ -7,6 +7,7 @@ from pathlib import Path
 from .c_abi import PLIC_SOURCE_ISLAND_P3, pack_desc64, verify_header_present
 from .device import Device, pack_gemm_desc
 from .golden import run_golden_suite
+from .probe import probe_dict
 from .profile import Profile
 
 
@@ -37,8 +38,11 @@ def main() -> None:
         ddev = Device.from_profile(str(prof))
         print(
             f"profile id={p.id} backend={p.backend} device={ddev.backend} "
-            f"tile={ddev.caps().acc_tile_m}x{ddev.caps().acc_tile_n}x{ddev.caps().acc_tile_k}"
+            f"tile={ddev.caps().acc_tile_m}x{ddev.caps().acc_tile_n}x{ddev.caps().acc_tile_k} "
+            f"wait={p.wait_policy} submit={p.submit_mode}"
         )
+        pr = probe_dict(device=ddev, profile=p)
+        print(f"probe package={pr['package']} plic={pr['plic_source']} backend={pr['backend']}")
     print("ok")
 
 

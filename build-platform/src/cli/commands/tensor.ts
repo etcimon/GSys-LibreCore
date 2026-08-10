@@ -82,14 +82,40 @@ export const tensorCommand: Command = {
     }
 
     if (sub === "doctor") {
-      if (asJson) {
-        logger.raw(
-          JSON.stringify(
-            { root: formatTensorStatus(ctx).aiTensorRoot, sub: "doctor" },
-            null,
-            2,
-          ) + "\n",
+      // Prefer package ProbeReport JSON when --json (discovery for host tooling)
+      if (asJson && !dryRun) {
+        const pkg = formatTensorStatus(ctx).aiTensorRoot as string | null;
+        if (!pkg) {
+          logger.error("ai-tensor not found");
+          return 1;
+        }
+        const { run } = await import("../../platform/exec.ts");
+        const { hasBinary } = await import("../../platform/exec.ts");
+        if (process.platform === "win32" && hasBinary("wsl") && !hasBinary("cargo")) {
+          const { windowsPathToPosix } = await import("../../platform/shell.ts");
+          const pkgWsl = windowsPathToPosix(pkg, "wsl");
+          const shellCmd =
+            `cd ${JSON.stringify(pkgWsl)} && ` +
+            `cargo run -q -p ai-tensor-cli -- doctor --profile profiles/island-p3-v1.toml --json`;
+          const r = await run("wsl", ["-e", "bash", "-lc", shellCmd], { logger });
+          return r.code ?? 1;
+        }
+        const r = await run(
+          "cargo",
+          [
+            "run",
+            "-q",
+            "-p",
+            "ai-tensor-cli",
+            "--",
+            "doctor",
+            "--profile",
+            "profiles/island-p3-v1.toml",
+            "--json",
+          ],
+          { cwd: pkg, logger },
         );
+        return r.code ?? 1;
       }
       return runAiTensorDoctor(ctx, { dryRun });
     }

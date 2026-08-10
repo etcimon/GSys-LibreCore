@@ -72,6 +72,13 @@ Stream path accepts `WaitPolicy` via `run_gemm_s8_stream_with_policy` and
 must **submit → wait → next** (see `soak_queue_depth`). Concurrent multi-outstanding needs a
 future completion FIFO in RTL.
 
+**Completion history (SoftIsland):** a software ring of last `queue_depth` completions so
+sequential tickets remain `poll(ticket)`-able after DONE sticky advances (`soak_history_poll`).
+Not a HW FIFO — board path still has one sticky DONE until RTL grows a queue.
+
+**Host probe:** `ProbeReport::to_json` / CLI `probe` / `doctor --json` — CAP, PMU, IRQ contract,
+profile wait/submit pins for monorepo discovery.
+
 ---
 
 ## 4. Backend trait (conceptual)

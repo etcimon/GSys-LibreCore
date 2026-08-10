@@ -19,6 +19,9 @@ Monorepo command (landed):
 
 ```text
 cva6-build tensor status | doctor | test | golden | cosim | check
+# package-local discovery JSON:
+cargo run -p ai-tensor-cli -- probe --profile profiles/island-p3-v1.toml
+cargo run -p ai-tensor-cli -- doctor --profile profiles/island-p3-v1.toml --json
 ```
 
 Mirror of `cva6-build timings` → `sv-timing`. Implementation:

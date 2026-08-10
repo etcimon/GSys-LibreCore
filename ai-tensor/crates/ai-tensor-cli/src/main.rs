@@ -4,9 +4,9 @@
 use ai_tensor_abi::{Completion, Desc64, DESC_BYTES};
 use ai_tensor_rt::{
     probe_cap_regs, run_builtin_suite, run_external_cosim_checks, run_gemm_s8, run_gemm_s8_auto,
-    run_gemm_s8_stream, run_gemm_s8_stream_ex, seed_cap_island_p3,
-    soak_irq_wait, soak_multi_queue, soak_queue_depth, Device, IrqContract, MappedWindow,
-    MmioDevice, Profile, SimDevice, SubmitMode, WaitPolicy,
+    run_gemm_s8_stream, run_gemm_s8_stream_ex, seed_cap_island_p3, soak_history_poll, soak_irq_wait,
+    soak_multi_queue, soak_queue_depth, Device, IrqContract, MappedWindow, MmioDevice, ProbeReport,
+    Profile, SimDevice, SubmitMode, WaitPolicy,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -24,6 +24,16 @@ enum Cmd {
     Doctor {
         #[arg(long)]
         profile: Option<PathBuf>,
+        /// Emit ProbeReport JSON (host discovery)
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// Host probe JSON only (same as doctor --json)
+    Probe {
+        #[arg(long)]
+        profile: Option<PathBuf>,
+        #[arg(long, default_value = "sim")]
+        backend: String,
     },
     /// Pack a minimal GEMM descriptor to hex
     PackGemm {
@@ -128,41 +138,90 @@ enum Cmd {
         #[arg(long, default_value = "sim")]
         backend: String,
     },
+    /// Multi-ticket completion history poll soak
+    HistorySoak {
+        #[arg(long, default_value_t = 4)]
+        n: u32,
+        #[arg(long, default_value = "sim")]
+        backend: String,
+    },
 }
 
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Doctor { profile } => {
+        Cmd::Doctor { profile, json } => {
+            let pr = if let Some(ref p) = profile {
+                Profile::load_file(p).expect("profile")
+            } else {
+                let mut d = Profile::default();
+                d.id = "sim-v0".into();
+                d.backend = "sim".into();
+                d.wait_policy = "poll".into();
+                d.submit_mode = "latch".into();
+                d
+            };
+            let mut dev = MmioDevice::new();
+            let caps = dev.probe_caps();
+            let pmu = dev.pmu();
+            let rep = ProbeReport::from_parts(&pr, caps, pmu, "mmio-soft");
+            if json {
+                println!("{}", rep.to_json());
+                return;
+            }
             println!("ai-tensor 0.1.0");
             println!("default_profile=sim-v0");
             println!("backends=sim,mmio-soft,mapped-file (linux-uio: feature linux-mmio)");
             println!("abi_rev=0.1.0");
             println!("desc_bytes={DESC_BYTES}");
-            let mut dev = MmioDevice::new();
-            let c = dev.probe_caps();
             println!(
-                "soft_cap.acc_tile={}x{}x{} macs={} noc={}",
-                c.acc_tile.m, c.acc_tile.n, c.acc_tile.k, c.macs_per_cycle, c.noc_width
+                "soft_cap.acc_tile={}x{}x{} macs={} noc={} queues={} depth={}",
+                caps.acc_tile.m,
+                caps.acc_tile.n,
+                caps.acc_tile.k,
+                caps.macs_per_cycle,
+                caps.noc_width,
+                caps.queues,
+                caps.queue_depth
             );
-            if let Some(p) = profile {
-                let pr = Profile::load_file(&p).expect("profile");
-                println!(
-                    "profile id={} backend={} mmio_base={:?} plic={:?} wait={} submit={} features={:?}",
-                    pr.id,
-                    pr.backend,
-                    pr.mmio_base,
-                    pr.plic_source,
-                    pr.wait_policy,
-                    pr.submit_mode,
-                    pr.features
-                );
-            }
+            println!(
+                "profile id={} backend={} mmio_base={:?} plic={:?} wait={} submit={} features={:?}",
+                pr.id,
+                pr.backend,
+                pr.mmio_base,
+                pr.plic_source,
+                pr.wait_policy,
+                pr.submit_mode,
+                pr.features
+            );
             let irq = IrqContract::island_p3_variane();
             println!(
                 "irq_contract plic={} clear_before_complete={} notes={}",
                 irq.plic_source, irq.clear_before_plic_complete, irq.notes
             );
+        }
+        Cmd::Probe { profile, backend } => {
+            let pr = if let Some(p) = profile {
+                Profile::load_file(&p).expect("profile")
+            } else {
+                let mut d = Profile::default();
+                d.id = "sim-v0".into();
+                d.wait_policy = "poll".into();
+                d.submit_mode = "latch".into();
+                d
+            };
+            let be = backend.to_lowercase();
+            let (caps, pmu, label) = if be == "sim" {
+                let mut dev = SimDevice::new();
+                dev.enable(true);
+                (dev.caps(), dev.pmu(), "sim")
+            } else {
+                let mut dev = MmioDevice::new();
+                let c = dev.probe_caps();
+                (c, dev.pmu(), "mmio-soft")
+            };
+            let rep = ProbeReport::from_parts(&pr, caps, pmu, label);
+            println!("{}", rep.to_json());
         }
         Cmd::PackGemm { m, n, k } => {
             let d = Desc64::gemm(m, n, k).with_ptrs(0x1000, 0x2000, 0x3000, 0x4000);
@@ -393,6 +452,18 @@ fn main() {
                 soak_queue_depth(&mut dev, m, depth).expect("depth")
             };
             println!("depth_soak_ok backend={be} mode={mode} jobs={n}");
+        }
+        Cmd::HistorySoak { n, backend } => {
+            let be = backend.to_lowercase();
+            let got = if be == "sim" {
+                let mut dev = SimDevice::new();
+                soak_history_poll(&mut dev, n).expect("history")
+            } else {
+                let mut dev = MmioDevice::new();
+                dev.probe_caps();
+                soak_history_poll(&mut dev, n).expect("history")
+            };
+            println!("history_soak_ok backend={be} tickets={got}");
         }
     }
 }
