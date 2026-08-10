@@ -1,17 +1,18 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
-// Xg6lcai I1-lite: sequential INT8 GEMM over AXI with tc_sram tile banks.
+// Xg6lcai I1-lite: INT8 GEMM over AXI with banked tc_sram tiles + PE array.
 //
 //   C[i,j] (i32) = sum_t A[i,t]*B[t,j]  with A,B int8, row-major
 //   lda/ldb from descriptor; C uses ldc = n (contiguous rows).
 //
-// Phases (I1 cluster shape, tiny MaxDim):
-//   1) Load A → tile SRAM  2) Load B → tile SRAM  3) MAC into C SRAM
-//   4) Store C. AXI only in load/store; compute is pure multi-cycle.
+// Phases:
+//   1) Load A → banked tile SRAM (bank = t % PeLanes)
+//   2) Load B → banked tile SRAM
+//   3) MAC: PeLanes parallel products/cycle via g6lc_ai_pe_dot
+//   4) Store C from single C bank
 //
 // Bounds: m,n,k ∈ [1, MaxDim]. Larger jobs return err without traffic.
-// Banks are dual-port Latency=0 tc_sram (PDK-swap seam). MaxDim≤8.
 // Timing: multi-cycle; one outstanding AXI beat; no core critical path.
 
 module g6lc_ai_gemm_seq #(
@@ -19,6 +20,7 @@ module g6lc_ai_gemm_seq #(
     parameter int unsigned DataWidth = 64,
     parameter int unsigned IdWidth   = 4,
     parameter int unsigned MaxDim    = 8,
+    parameter int unsigned PeLanes   = 4,  // parallel MACs / cycle (power of 2 preferred)
     parameter type         axi_req_t  = logic,
     parameter type         axi_resp_t = logic
 ) (
@@ -41,8 +43,13 @@ module g6lc_ai_gemm_seq #(
     input  axi_resp_t   axi_resp_i
 );
 
-  localparam int unsigned TileElems = MaxDim * MaxDim;
-  localparam int unsigned TileAddrW = (TileElems > 1) ? $clog2(TileElems) : 1;
+  // Words per bank: MaxDim rows × ceil(MaxDim/PeLanes) cols along t (or j for B)
+  localparam int unsigned KPerBank  = (MaxDim + PeLanes - 1) / PeLanes;
+  localparam int unsigned BankWords = MaxDim * KPerBank;
+  localparam int unsigned BankAddrW = (BankWords > 1) ? $clog2(BankWords) : 1;
+  localparam int unsigned CElems    = MaxDim * MaxDim;
+  localparam int unsigned CAddrW    = (CElems > 1) ? $clog2(CElems) : 1;
+  localparam int unsigned LaneW     = (PeLanes > 1) ? $clog2(PeLanes) : 1;
 
   typedef enum logic [3:0] {
     ST_IDLE  = 4'd0,
@@ -59,6 +66,7 @@ module g6lc_ai_gemm_seq #(
   logic [15:0] lda_q, ldb_q;
   logic [AddrWidth-1:0] pa_q, pb_q, pc_q;
 
+  // i,j element indices; t is reduction base (multiple of PeLanes during MAC)
   logic [31:0] i_q, j_q, t_q;
   logic [31:0] acc_q, acc_d;
   logic        err_q, err_d;
@@ -67,45 +75,71 @@ module g6lc_ai_gemm_seq #(
   logic        aw_sent_q, aw_sent_d;
   logic        w_sent_q, w_sent_d;
 
-  // ---- Tile SRAM ports ----
-  logic                    a_r_req, a_w_req;
-  logic [TileAddrW-1:0]    a_r_addr, a_w_addr;
-  logic [7:0]              a_r_data, a_w_data;
-  logic                    b_r_req, b_w_req;
-  logic [TileAddrW-1:0]    b_r_addr, b_w_addr;
-  logic [7:0]              b_r_data, b_w_data;
-  logic                    c_r_req, c_w_req;
-  logic [TileAddrW-1:0]    c_r_addr, c_w_addr;
-  logic [31:0]             c_r_data, c_w_data;
+  // ---- Banked A/B tile ports ----
+  logic                 a_r_req  [PeLanes];
+  logic [BankAddrW-1:0] a_r_addr [PeLanes];
+  logic [7:0]           a_r_data [PeLanes];
+  logic                 a_w_req  [PeLanes];
+  logic [BankAddrW-1:0] a_w_addr [PeLanes];
+  logic [7:0]           a_w_data [PeLanes];
+
+  logic                 b_r_req  [PeLanes];
+  logic [BankAddrW-1:0] b_r_addr [PeLanes];
+  logic [7:0]           b_r_data [PeLanes];
+  logic                 b_w_req  [PeLanes];
+  logic [BankAddrW-1:0] b_w_addr [PeLanes];
+  logic [7:0]           b_w_data [PeLanes];
+
+  logic                 c_r_req, c_w_req;
+  logic [CAddrW-1:0]    c_r_addr, c_w_addr;
+  logic [31:0]          c_r_data, c_w_data;
+
+  for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_a_banks
+    g6lc_ai_tile_sram #(
+        .NumWords (BankWords),
+        .DataWidth(8),
+        .ImplKey  ("g6lc_ai_tile_a")
+    ) i_tile_a (
+        .clk_i, .rst_ni, .testmode_i,
+        .r_req_i (a_r_req[p]), .r_addr_i(a_r_addr[p]), .r_data_o(a_r_data[p]),
+        .w_req_i (a_w_req[p]), .w_addr_i(a_w_addr[p]), .w_data_i(a_w_data[p])
+    );
+  end
+
+  for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_b_banks
+    g6lc_ai_tile_sram #(
+        .NumWords (BankWords),
+        .DataWidth(8),
+        .ImplKey  ("g6lc_ai_tile_b")
+    ) i_tile_b (
+        .clk_i, .rst_ni, .testmode_i,
+        .r_req_i (b_r_req[p]), .r_addr_i(b_r_addr[p]), .r_data_o(b_r_data[p]),
+        .w_req_i (b_w_req[p]), .w_addr_i(b_w_addr[p]), .w_data_i(b_w_data[p])
+    );
+  end
 
   g6lc_ai_tile_sram #(
-      .NumWords (TileElems),
-      .DataWidth(8),
-      .ImplKey  ("g6lc_ai_tile_a")
-  ) i_tile_a (
-      .clk_i, .rst_ni, .testmode_i,
-      .r_req_i (a_r_req), .r_addr_i(a_r_addr), .r_data_o(a_r_data),
-      .w_req_i (a_w_req), .w_addr_i(a_w_addr), .w_data_i(a_w_data)
-  );
-
-  g6lc_ai_tile_sram #(
-      .NumWords (TileElems),
-      .DataWidth(8),
-      .ImplKey  ("g6lc_ai_tile_b")
-  ) i_tile_b (
-      .clk_i, .rst_ni, .testmode_i,
-      .r_req_i (b_r_req), .r_addr_i(b_r_addr), .r_data_o(b_r_data),
-      .w_req_i (b_w_req), .w_addr_i(b_w_addr), .w_data_i(b_w_data)
-  );
-
-  g6lc_ai_tile_sram #(
-      .NumWords (TileElems),
+      .NumWords (CElems),
       .DataWidth(32),
       .ImplKey  ("g6lc_ai_tile_c")
   ) i_tile_c (
       .clk_i, .rst_ni, .testmode_i,
       .r_req_i (c_r_req), .r_addr_i(c_r_addr), .r_data_o(c_r_data),
       .w_req_i (c_w_req), .w_addr_i(c_w_addr), .w_data_i(c_w_data)
+  );
+
+  // PE: multi-lane MAC (driven only in ST_MAC)
+  logic signed [7:0] pe_a [PeLanes];
+  logic signed [7:0] pe_b [PeLanes];
+  logic              pe_v [PeLanes];
+  logic       [31:0] pe_acc_out;
+
+  g6lc_ai_pe_dot #(.Lanes(PeLanes)) i_pe (
+      .a_i     (pe_a),
+      .b_i     (pe_b),
+      .valid_i (pe_v),
+      .acc_i   (acc_q),
+      .acc_o   (pe_acc_out)
   );
 
   assign ready_o = (state_q == ST_IDLE);
@@ -142,16 +176,26 @@ module g6lc_ai_gemm_seq #(
     return data[8*lane +: 8];
   endfunction
 
-  function automatic logic [TileAddrW-1:0] a_idx(input logic [31:0] i, t);
-    return TileAddrW'(int'(i) * MaxDim + int'(t));
+  // Bank map: bank = t % PeLanes (or t for A / B along reduction);
+  // local index = i * KPerBank + t / PeLanes  (A); for B: j * KPerBank + t / PeLanes
+  function automatic logic [LaneW-1:0] t_bank(input logic [31:0] t);
+    return LaneW'(t % PeLanes);
   endfunction
 
-  function automatic logic [TileAddrW-1:0] b_idx(input logic [31:0] t, j);
-    return TileAddrW'(int'(t) * MaxDim + int'(j));
+  function automatic logic [BankAddrW-1:0] a_bank_addr(
+      input logic [31:0] i, t
+  );
+    return BankAddrW'(int'(i) * KPerBank + int'(t / PeLanes));
   endfunction
 
-  function automatic logic [TileAddrW-1:0] c_idx(input logic [31:0] i, j);
-    return TileAddrW'(int'(i) * MaxDim + int'(j));
+  function automatic logic [BankAddrW-1:0] b_bank_addr(
+      input logic [31:0] t, j
+  );
+    return BankAddrW'(int'(j) * KPerBank + int'(t / PeLanes));
+  endfunction
+
+  function automatic logic [CAddrW-1:0] c_idx(input logic [31:0] i, j);
+    return CAddrW'(int'(i) * MaxDim + int'(j));
   endfunction
 
   logic [AddrWidth-1:0] a_cur, b_cur, c_store_addr;
@@ -159,18 +203,23 @@ module g6lc_ai_gemm_seq #(
   assign b_cur        = b_addr(pb_q, t_q, j_q, ldb_q);
   assign c_store_addr = c_addr(pc_q, i_q, j_q, n_q);
 
-  // Default SRAM idle; overridden in comb by phase
   always_comb begin
-    a_r_req  = 1'b0;
-    a_r_addr = '0;
-    a_w_req  = 1'b0;
-    a_w_addr = '0;
-    a_w_data = '0;
-    b_r_req  = 1'b0;
-    b_r_addr = '0;
-    b_w_req  = 1'b0;
-    b_w_addr = '0;
-    b_w_data = '0;
+    // defaults: idle banks + AXI
+    for (int unsigned p = 0; p < PeLanes; p++) begin
+      a_r_req[p]  = 1'b0;
+      a_r_addr[p] = '0;
+      a_w_req[p]  = 1'b0;
+      a_w_addr[p] = '0;
+      a_w_data[p] = '0;
+      b_r_req[p]  = 1'b0;
+      b_r_addr[p] = '0;
+      b_w_req[p]  = 1'b0;
+      b_w_addr[p] = '0;
+      b_w_data[p] = '0;
+      pe_a[p]     = '0;
+      pe_b[p]     = '0;
+      pe_v[p]     = 1'b0;
+    end
     c_r_req  = 1'b0;
     c_r_addr = '0;
     c_w_req  = 1'b0;
@@ -183,7 +232,6 @@ module g6lc_ai_gemm_seq #(
     axi_req_o.ar_valid = 1'b0;
     axi_req_o.aw_valid = 1'b0;
     axi_req_o.w_valid  = 1'b0;
-
     axi_req_o.ar.id    = IdWidth'(2);
     axi_req_o.ar.len   = '0;
     axi_req_o.ar.size  = axi_pkg::size_t'($clog2(DataWidth / 8));
@@ -227,18 +275,18 @@ module g6lc_ai_gemm_seq #(
         end
       end
 
+      // Load A element-by-element into bank t%PeLanes
       ST_LA: begin
-        axi_req_o.ar.addr  = {a_cur[AddrWidth-1:3], 3'b000};
+        axi_req_o.ar.addr = {a_cur[AddrWidth-1:3], 3'b000};
         if (!ar_sent_q) begin
           axi_req_o.ar_valid = 1'b1;
           if (axi_resp_i.ar_ready) ar_sent_d = 1'b1;
         end
         axi_req_o.r_ready = 1'b1;
-        // Write A tile when R beat lands (same cycle as capture in FF path)
         if (ar_sent_q && axi_resp_i.r_valid) begin
-          a_w_req  = 1'b1;
-          a_w_addr = a_idx(i_q, t_q);
-          a_w_data = byte_from_beat(axi_resp_i.r.data, a_cur[2:0]);
+          a_w_req [t_bank(t_q)] = 1'b1;
+          a_w_addr[t_bank(t_q)] = a_bank_addr(i_q, t_q);
+          a_w_data[t_bank(t_q)] = byte_from_beat(axi_resp_i.r.data, a_cur[2:0]);
           ar_sent_d = 1'b0;
           if (t_q + 1 == k_q && i_q + 1 == m_q)
             state_d = ST_LB;
@@ -248,16 +296,16 @@ module g6lc_ai_gemm_seq #(
       end
 
       ST_LB: begin
-        axi_req_o.ar.addr  = {b_cur[AddrWidth-1:3], 3'b000};
+        axi_req_o.ar.addr = {b_cur[AddrWidth-1:3], 3'b000};
         if (!ar_sent_q) begin
           axi_req_o.ar_valid = 1'b1;
           if (axi_resp_i.ar_ready) ar_sent_d = 1'b1;
         end
         axi_req_o.r_ready = 1'b1;
         if (ar_sent_q && axi_resp_i.r_valid) begin
-          b_w_req  = 1'b1;
-          b_w_addr = b_idx(t_q, j_q);
-          b_w_data = byte_from_beat(axi_resp_i.r.data, b_cur[2:0]);
+          b_w_req [t_bank(t_q)] = 1'b1;
+          b_w_addr[t_bank(t_q)] = b_bank_addr(t_q, j_q);
+          b_w_data[t_bank(t_q)] = byte_from_beat(axi_resp_i.r.data, b_cur[2:0]);
           ar_sent_d = 1'b0;
           if (j_q + 1 == n_q && t_q + 1 == k_q) begin
             state_d = ST_MAC;
@@ -267,28 +315,36 @@ module g6lc_ai_gemm_seq #(
         end
       end
 
+      // Parallel MAC: lanes cover t_q .. t_q+PeLanes-1
       ST_MAC: begin
-        // Combo read A/B from Latency=0 SRAM
-        a_r_req  = 1'b1;
-        a_r_addr = a_idx(i_q, t_q);
-        b_r_req  = 1'b1;
-        b_r_addr = b_idx(t_q, j_q);
-        acc_d = acc_q
-              + 32'($signed(a_r_data))
-              * 32'($signed(b_r_data));
-        if (t_q + 1 == k_q) begin
-          // Commit C[i,j]
+        for (int unsigned p = 0; p < PeLanes; p++) begin
+          automatic logic [31:0] tt;
+          tt = t_q + 32'(p);
+          if (tt < k_q) begin
+            a_r_req [p] = 1'b1;
+            a_r_addr[p] = a_bank_addr(i_q, tt);
+            b_r_req [p] = 1'b1;
+            b_r_addr[p] = b_bank_addr(tt, j_q);
+            pe_a[p]     = $signed(a_r_data[p]);
+            pe_b[p]     = $signed(b_r_data[p]);
+            pe_v[p]     = 1'b1;
+          end
+        end
+        acc_d = pe_acc_out;
+        // Advance reduction base by PeLanes
+        if (t_q + PeLanes >= k_q) begin
+          // C[i,j] complete this cycle
           c_w_req  = 1'b1;
           c_w_addr = c_idx(i_q, j_q);
-          c_w_data = acc_d;
+          c_w_data = pe_acc_out;
           if (j_q + 1 == n_q && i_q + 1 == m_q) begin
             state_d   = ST_STC;
             aw_sent_d = 1'b0;
             w_sent_d  = 1'b0;
-          end else begin
+          end else
             state_d = ST_MAC;
-          end
-        end
+        end else
+          state_d = ST_MAC;
       end
 
       ST_STC: begin
@@ -323,10 +379,7 @@ module g6lc_ai_gemm_seq #(
         end
       end
 
-      ST_DONE: begin
-        state_d = ST_IDLE;
-      end
-
+      ST_DONE: state_d = ST_IDLE;
       default: state_d = ST_IDLE;
     endcase
   end
@@ -367,7 +420,7 @@ module g6lc_ai_gemm_seq #(
         t_q   <= '0;
       end
 
-      // Index advance on A load accept
+      // A load: walk t fastest, then i
       if (state_q == ST_LA && ar_sent_q && axi_resp_i.r_valid) begin
         if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
           err_q <= 1'b1;
@@ -384,7 +437,7 @@ module g6lc_ai_gemm_seq #(
           t_q <= t_q + 1;
       end
 
-      // Index advance on B load accept
+      // B load: walk j fastest, then t
       if (state_q == ST_LB && ar_sent_q && axi_resp_i.r_valid) begin
         if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
           err_q <= 1'b1;
@@ -401,9 +454,9 @@ module g6lc_ai_gemm_seq #(
           j_q <= j_q + 1;
       end
 
-      // MAC index walk; C write is comb → registered in tc_sram
+      // MAC: t_q is reduction base; advance by PeLanes, then (i,j)
       if (state_q == ST_MAC) begin
-        if (t_q + 1 == k_q) begin
+        if (t_q + PeLanes >= k_q) begin
           t_q   <= '0;
           acc_q <= '0;
           if (j_q + 1 == n_q) begin
@@ -417,7 +470,7 @@ module g6lc_ai_gemm_seq #(
           end else
             j_q <= j_q + 1;
         end else
-          t_q <= t_q + 1;
+          t_q <= t_q + PeLanes;
       end
 
       if (state_q == ST_STC && aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin

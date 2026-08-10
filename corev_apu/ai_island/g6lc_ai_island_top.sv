@@ -252,6 +252,7 @@ module g6lc_ai_island_top
         .DataWidth (AxiDataWidth),
         .IdWidth   (AxiIdWidth),
         .MaxDim    (8),
+        .PeLanes   (4),
         .axi_req_t (axi_req_t),
         .axi_resp_t(axi_resp_t)
     ) i_gemm (
