@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# Full AccTile GEMM: 256x256x256 INT8 (PeLanes=16 => 16 PE steps per C).
+# Full AccTile GEMM: 256x256x256 INT8 (PeLanes=32 => 8 PE steps per C).
 #   A,B all-ones  C[i,j] = 256 for all 65536 elements.
 # Spot-check corners + mid to keep SW check time low.
-# Needs multi-bank C in g6lc_ai_gemm_seq (flat 65k bank thrashes Verilator).
+# Multi-bank C (j%PeLanes) required for MaxDim=256 under Verilator.
 
   .equ AI_BASE,     0x40000000
   .equ AI_CTL,      0x100

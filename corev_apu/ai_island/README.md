@@ -26,10 +26,10 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_pe_dot.sv` | multi-lane INT8 MAC slice (PeLanes products/cycle) | **landed** |
 | `g6lc_ai_gemm_seq.sv` | I1 GEMM: banked A/B + multi-bank C + dual-i32 store + PE | **landed** |
 
-Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=16**,
+Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=32**,
 **AccTileM/N/K=256** (SKU AccTile* live). C is multi-banked (`j % PeLanes`) so
-each `tc_sram` is `MaxDim*ceil(MaxDim/PeLanes)` words — the previous flat
-65k-word C array thrashed Verilator at AccTile=256.
+each `tc_sram` is `MaxDim*ceil(MaxDim/PeLanes)` words (2048×i32 @256/32).
+PeLanes growth cuts MAC steps; A/B load still AXI-beat limited (I3).
 | `g6lc_ai_island_top.sv` | reg map + IRQ sticky + fetch/store/gemm AXI mux | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 (next) |
 | AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |

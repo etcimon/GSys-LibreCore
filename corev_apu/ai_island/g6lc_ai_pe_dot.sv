@@ -7,7 +7,8 @@
 //
 // Pure combinational; synthesizable. Lanes is the replication unit for the
 // sequential GEMM engine (banked A/B tiles feed one product per lane/cycle).
-// Timing: short MAC tree; keep Lanes modest (≤8) at I1-lite.
+// Timing: MAC tree depth ~Lanes; live I1 uses PeLanes=32 - pipeline later if
+// critical path exceeds island timing budget.
 
 module g6lc_ai_pe_dot #(
     parameter int unsigned Lanes = 4
