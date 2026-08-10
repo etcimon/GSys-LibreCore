@@ -3,8 +3,8 @@
 
 use ai_tensor_abi::{Completion, Desc64, DESC_BYTES};
 use ai_tensor_rt::{
-    probe_cap_regs, run_builtin_suite, run_gemm_s8, run_gemm_s8_auto, seed_cap_island_p3,
-    try_external_cosim_ping, Device, MappedWindow, MmioDevice, Profile, SimDevice,
+    probe_cap_regs, run_builtin_suite, run_external_cosim_checks, run_gemm_s8, run_gemm_s8_auto,
+    seed_cap_island_p3, Device, MappedWindow, MmioDevice, Profile, SimDevice,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -204,13 +204,20 @@ fn main() {
         Cmd::GoldenCheck => {
             let n = run_builtin_suite().expect("golden suite");
             println!("golden_ok count={n} backends=sim,mmio-soft");
-            if let Some(r) = try_external_cosim_ping() {
-                match r {
-                    Ok(s) => println!("external_cosim={s}"),
-                    Err(e) => println!("external_cosim_err={e}"),
+            match run_external_cosim_checks() {
+                None => {
+                    println!(
+                        "external_cosim=skipped (set AI_TENSOR_COSIM_CMD=python3 tools/cosim_harness.py)"
+                    );
                 }
-            } else {
-                println!("external_cosim=skipped (set AI_TENSOR_COSIM_CMD to enable)");
+                Some(Ok((ping, job))) => {
+                    println!("external_cosim_ping={ping}");
+                    println!("external_cosim_job={job}");
+                }
+                Some(Err(e)) => {
+                    eprintln!("external_cosim_err={e}");
+                    std::process::exit(1);
+                }
             }
         }
         Cmd::AutoGemm { m, n, k, ticket } => {

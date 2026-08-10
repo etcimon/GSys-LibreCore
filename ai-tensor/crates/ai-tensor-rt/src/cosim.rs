@@ -3,10 +3,12 @@
 //! Offline cosim goldens: package-local vectors that both SoftIsland and sim must match.
 //!
 //! Optional external harness: set `AI_TENSOR_COSIM_CMD` to a shell command that receives
-//! a JSON job on stdin and prints `c_hex=... status=...` (not required for CI).
+//! a JSON job on stdin and prints a status line (see `tools/cosim_harness.py`).
 
 use crate::{run_gemm_s8, run_gemm_s8_auto, Device, MmioDevice, RtError, SimDevice};
 use ai_tensor_abi::{Completion, Desc64, ST_OK};
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 /// One offline golden vector (INT8 GEMM → i32).
 #[derive(Debug, Clone)]
@@ -20,7 +22,7 @@ pub struct GoldenGemm {
     pub c: &'static [i32],
 }
 
-/// Built-in suite (matches directed-style small goldens).
+/// Built-in suite (keep in lockstep with `tools/cosim_harness.py` BUILTIN).
 pub fn builtin_goldens() -> &'static [GoldenGemm] {
     &[
         GoldenGemm {
@@ -49,6 +51,15 @@ pub fn builtin_goldens() -> &'static [GoldenGemm] {
             a: &[1; 12],
             b: &[1; 8],
             c: &[4, 4, 4, 4, 4, 4],
+        },
+        GoldenGemm {
+            name: "2x3x2_mixed",
+            m: 2,
+            n: 3,
+            k: 2,
+            a: &[1, -1, 2, 0],
+            b: &[3, 4, 5, -2, 1, 0],
+            c: &[5, 3, 5, 6, 8, 10],
         },
     ]
 }
@@ -96,43 +107,91 @@ pub fn run_builtin_suite() -> Result<usize, RtError> {
     Ok(n)
 }
 
-/// Pack a golden job as JSON line (for external harness adapters).
-#[allow(dead_code)]
+/// Pack a golden as full JSON job (includes a/b/c_expect for external harness).
 pub fn golden_job_json(g: &GoldenGemm) -> String {
+    let a = join_i8(g.a);
+    let b = join_i8(g.b);
+    let c = join_i32(g.c);
     format!(
-        r#"{{"name":"{}","m":{},"n":{},"k":{},"op":"gemm_s8"}}"#,
-        g.name, g.m, g.n, g.k
+        r#"{{"op":"gemm_s8","name":"{}","m":{},"n":{},"k":{},"a":[{}],"b":[{}],"c_expect":[{}]}}"#,
+        g.name, g.m, g.n, g.k, a, b, c
     )
+}
+
+fn join_i8(xs: &[i8]) -> String {
+    xs.iter()
+        .map(|x| x.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn join_i32(xs: &[i32]) -> String {
+    xs.iter()
+        .map(|x| x.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn run_external_cosim_stdin(stdin_json: &str) -> Result<String, RtError> {
+    let cmd = std::env::var("AI_TENSOR_COSIM_CMD")
+        .map_err(|_| RtError::Msg("AI_TENSOR_COSIM_CMD unset".into()))?;
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(&cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| RtError::Msg(format!("cosim spawn: {e}")))?;
+    if let Some(mut sin) = child.stdin.take() {
+        writeln!(sin, "{stdin_json}").map_err(|e| RtError::Msg(format!("cosim stdin: {e}")))?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| RtError::Msg(format!("cosim wait: {e}")))?;
+    if !out.status.success() {
+        return Err(RtError::Msg(format!(
+            "cosim exit {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Optional: invoke external cosim command if `AI_TENSOR_COSIM_CMD` is set.
 /// Command is not run in default CI. Returns None if env unset.
 pub fn try_external_cosim_ping() -> Option<Result<String, RtError>> {
-    let cmd = std::env::var("AI_TENSOR_COSIM_CMD").ok()?;
+    if std::env::var("AI_TENSOR_COSIM_CMD").is_err() {
+        return None;
+    }
+    Some(run_external_cosim_stdin(r#"{"ping":true}"#))
+}
+
+/// Optional: send first built-in golden as a full gemm job to the external harness.
+pub fn try_external_cosim_job() -> Option<Result<String, RtError>> {
+    if std::env::var("AI_TENSOR_COSIM_CMD").is_err() {
+        return None;
+    }
+    let g = &builtin_goldens()[0];
+    Some(run_external_cosim_stdin(&golden_job_json(g)))
+}
+
+/// Run external ping + one gemm job when harness env is set.
+pub fn run_external_cosim_checks() -> Option<Result<(String, String), RtError>> {
+    if std::env::var("AI_TENSOR_COSIM_CMD").is_err() {
+        return None;
+    }
     Some((|| {
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| RtError::Msg(format!("cosim spawn: {e}")))?;
-        use std::io::Write;
-        if let Some(mut sin) = child.stdin.take() {
-            let _ = writeln!(sin, r#"{{"ping":true}}"#);
+        let ping = run_external_cosim_stdin(r#"{"ping":true}"#)?;
+        if !ping.contains("pong") && !ping.contains("ok") {
+            return Err(RtError::Msg(format!("cosim ping unexpected: {ping}")));
         }
-        let out = child
-            .wait_with_output()
-            .map_err(|e| RtError::Msg(format!("cosim wait: {e}")))?;
-        if !out.status.success() {
-            return Err(RtError::Msg(format!(
-                "cosim exit {:?}: {}",
-                out.status.code(),
-                String::from_utf8_lossy(&out.stderr)
-            )));
+        let job = run_external_cosim_stdin(&golden_job_json(&builtin_goldens()[0]))?;
+        if !job.contains("status=0") {
+            return Err(RtError::Msg(format!("cosim job not ok: {job}")));
         }
-        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        Ok((ping, job))
     })())
 }
 
@@ -157,11 +216,19 @@ mod tests {
     #[test]
     fn builtin_sim_and_mmio() {
         let n = run_builtin_suite().expect("suite");
-        assert_eq!(n, 3);
+        assert_eq!(n, 4);
     }
 
     #[test]
     fn desc_pack() {
         check_desc_pack_golden().unwrap();
+    }
+
+    #[test]
+    fn golden_job_json_shape() {
+        let j = golden_job_json(&builtin_goldens()[0]);
+        assert!(j.contains(r#""op":"gemm_s8""#));
+        assert!(j.contains(r#""name":"2x2_manual""#));
+        assert!(j.contains("c_expect"));
     }
 }

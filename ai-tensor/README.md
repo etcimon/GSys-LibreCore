@@ -8,8 +8,10 @@ Architecture (M0): [`architecture/README.md`](architecture/README.md) · Agent e
 
 ```bash
 cd ai-tensor
-# Rust tests + Python smoke
+# Rust tests + goldens (+ cosim harness) + Python smoke
 python tools/ait.py test
+python tools/ait.py golden
+python tools/ait.py cosim
 
 # High-level PyTorch (optional: pip install torch)
 PYTHONPATH=python python python/examples/torch_island_smoke.py
@@ -17,6 +19,7 @@ PYTHONPATH=python python python/examples/torch_island_smoke.py
 # CLI
 cargo run -p ai-tensor-cli -- doctor
 cargo run -p ai-tensor-cli -- sim-gemm --m 4 --n 4 --k 4
+cargo run -p ai-tensor-cli -- golden-check
 ```
 
 Default backend is **hostless sim**: packs island-compatible 64 B descriptors, AI-3 region checks,

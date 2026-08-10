@@ -64,7 +64,9 @@ wait(ticket | irq, timeout) -> Completion
 - **mapped-file / linux:** `MappedWindow` file-backed for CI; feature `linux-mmio` opens
   UIO or `/dev/mem` (`AI_TENSOR_UIO`, `AI_TENSOR_MMIO_BASE=0x40000000`). SoftIsland models
   FLAG_IRQ sticky cleared with DONE (PLIC claim discipline).
-- **cosim:** pipe to Verilator harness (slow gold).
+- **cosim:** offline dual oracle (sim + SoftIsland) always; optional external process via
+  `AI_TENSOR_COSIM_CMD` → `tools/cosim_harness.py` (JSON stdin). Live Verilator/ELF is
+  lab-only (`AI_TENSOR_RTL_CMD`), never a crate path dep.
 
 ---
 

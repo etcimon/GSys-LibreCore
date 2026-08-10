@@ -9,7 +9,10 @@ mod cosim;
 
 pub use sim::SimDevice;
 pub use profile::Profile;
-pub use cosim::{builtin_goldens, check_desc_pack_golden, run_builtin_suite, try_external_cosim_ping, GoldenGemm};
+pub use cosim::{
+    builtin_goldens, check_desc_pack_golden, golden_job_json, run_builtin_suite,
+    run_external_cosim_checks, try_external_cosim_job, try_external_cosim_ping, GoldenGemm,
+};
 pub use mmio::{probe_cap_regs, read_pmu, seed_cap_island_p3, MappedWindow, MmioBus, MmioDevice, SoftIsland};
 
 use ai_tensor_abi::{AccTile, CapRegs, Completion, Desc64, PmuSnapshot, ST_OK};

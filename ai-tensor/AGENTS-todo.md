@@ -47,7 +47,7 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] A2 Caps + sim fake CAP values (AccTile=256, NocWidth=64)
 - [x] A3 IR tile limits + tiling helper
 - [x] Profiles: `sim-v0` features + `island-p3-v1.toml` pin stub
-- [ ] Dual oracle note: optional monorepo `ai-matrix-veri` when host present
+- [x] Dual oracle: package offline sim+SoftIsland; external harness + lab `AI_TENSOR_RTL_CMD`
 
 ## M5 — Linux / real island (capability-driven)
 
@@ -62,7 +62,10 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] Offline cosim goldens (sim+SoftIsland) + `golden-check` CLI
 - [x] Rust `run_gemm_s8_auto` AccTile streaming
 - [x] Monorepo spawn `monorepo-soak/run-ai-tensor.sh`
-- [ ] Live Variane/ELF cosim via `AI_TENSOR_COSIM_CMD` harness
+- [x] External cosim harness `tools/cosim_harness.py` + `AI_TENSOR_COSIM_CMD` protocol
+  (ping + gemm job + suite; optional `AI_TENSOR_RUN_RTL` / `AI_TENSOR_RTL_CMD`)
+- [x] Wire `ait.py {golden,cosim,test}` + `run-ai-tensor.sh cosim`
+- [ ] Live Variane/ELF hard smoke (`AI_TENSOR_RTL_CMD` → directed TB/ELF) — lab opt-in
 - [x] Python Caps / PMU surface + torch meta
 - [x] `tools/check_independence.py` + `ait.py check`
 

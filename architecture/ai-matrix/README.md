@@ -14,7 +14,9 @@ not diverge between them (§2.2). §5 below is a summary; that document is the s
 **Host ML backend (separate package):** [`../../ai-tensor/AGENTS.md`](../../ai-tensor/AGENTS.md) —
 PyTorch / TensorFlow attachment to this contract and to live `corev_apu/ai_island`. Architecture
 cross-connect and version pins: [`../../ai-tensor/architecture/VERSIONING.md`](../../ai-tensor/architecture/VERSIONING.md).
-Not on any flist; does not replace this scaffold.
+Offline dual-oracle goldens (sim + SoftIsland) + external harness
+`ai-tensor/tools/cosim_harness.py` (`AI_TENSOR_COSIM_CMD`); monorepo spawn
+`monorepo-soak/run-ai-tensor.sh {test,golden,cosim}`. Not on any flist; does not replace this scaffold.
 
 **Scaling plan of record: [`scaling-100tops.md`](scaling-100tops.md)** — what changes when the target
 is the 100-TOPS class rather than 1–5 TOPS. It supplies the bandwidth-first sizing model, the
