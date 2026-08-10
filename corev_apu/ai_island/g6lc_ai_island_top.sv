@@ -15,7 +15,11 @@
 //   0x0118/0x011C   desc_ptr lo/hi (fetch source when doorbell[31]=1)
 //   0x0120+q*0x20   region: +0 base_lo, +4 base_hi, +8 limit_lo,
 //                            +c limit_hi, +10 perm (write commits region)
-//   0x0140..0x017F  descriptor latch (16×32-bit)
+//   0x0140..0x017F  descriptor latch (16x32-bit)
+//   0x0180          PMU R beats (RO, sticky last GEMM)
+//   0x0184          PMU W beats (RO, sticky last GEMM)
+//   0x0188          PMU active cycles (RO, sticky last GEMM)
+//   0x018C          PMU sustained GB/s x1000 (RO, from last GEMM)
 
 module g6lc_ai_island_top
   import g6lc_ai_island_cfg_pkg::*;
@@ -209,6 +213,9 @@ module g6lc_ai_island_top
   logic [31:0] gemm_m, gemm_n, gemm_k;
   logic [15:0] gemm_lda, gemm_ldb;
   logic [AddrWidth-1:0] gemm_ptr_a, gemm_ptr_b, gemm_ptr_c;
+  // I3 PMU from last GEMM job
+  logic [31:0] gemm_pmu_r, gemm_pmu_w, gemm_pmu_cy;
+  logic [31:0] pmu_r_hold_q, pmu_w_hold_q, pmu_cy_hold_q, pmu_gbps_x1000_q;
 
   if (EnableDmaFetch) begin : gen_dma_fetch
     g6lc_ai_desc_fetch #(
@@ -284,6 +291,9 @@ module g6lc_ai_island_top
         .ready_o  (gemm_ready),
         .done_o   (gemm_done),
         .err_o    (gemm_err),
+        .pmu_r_beats_o(gemm_pmu_r),
+        .pmu_w_beats_o(gemm_pmu_w),
+        .pmu_cycles_o (gemm_pmu_cy),
         .axi_req_o  (gemm_axi_req),
         .axi_resp_i (axi_dma_resp_i)
     );
@@ -325,6 +335,9 @@ module g6lc_ai_island_top
     assign gemm_ready = 1'b1;
     assign gemm_done  = gemm_done_q;
     assign gemm_err   = 1'b0;  // accept-only path when no DMA master
+    assign gemm_pmu_r  = '0;
+    assign gemm_pmu_w  = '0;
+    assign gemm_pmu_cy = '0;
     // verilator lint_off UNUSEDSIGNAL
     logic _ax;
     assign _ax = |axi_dma_resp_i | sb_fetch_pending_q | |sb_desc_ptr_i
@@ -433,6 +446,10 @@ module g6lc_ai_island_top
       fetch_err_complete_q <= 1'b0;
       fetch_src_sb_q      <= 1'b0;
       fetch_addr_q        <= '0;
+      pmu_r_hold_q        <= '0;
+      pmu_w_hold_q        <= '0;
+      pmu_cy_hold_q       <= '0;
+      pmu_gbps_x1000_q    <= '0;
       for (int unsigned i = 0; i < 16; i++) desc_words_q[i] <= '0;
       for (int unsigned q = 0; q < NumQueues; q++) begin
         base_q[q]  <= '0;
@@ -443,6 +460,19 @@ module g6lc_ai_island_top
       submit_pulse_q       <= 1'b0;
       fetch_start_q        <= 1'b0;
       fetch_err_complete_q <= 1'b0;
+
+      // I3: latch GEMM PMU at job done (milli-GB/s = bytes*ClockKhz/cycles/1000)
+      if (EnableDmaFetch && gemm_done) begin
+        pmu_r_hold_q  <= gemm_pmu_r;
+        pmu_w_hold_q  <= gemm_pmu_w;
+        pmu_cy_hold_q <= gemm_pmu_cy;
+        if (gemm_pmu_cy != 0) begin
+          pmu_gbps_x1000_q <=
+              ((gemm_pmu_r + gemm_pmu_w) * 32'(AxiDataWidth / 8) *
+               32'(IslandCfg.ClockKhz)) / gemm_pmu_cy / 32'd1000;
+        end else
+          pmu_gbps_x1000_q <= '0;
+      end
 
       // Engine completion
       if (done_valid) begin
@@ -544,6 +574,10 @@ module g6lc_ai_island_top
         16'h0114: rdata_n = {16'h0, done_status_hold_q};
         16'h0118: rdata_n = desc_ptr_q[31:0];
         16'h011C: rdata_n = desc_ptr_q[63:32];
+        16'h0180: rdata_n = pmu_r_hold_q;
+        16'h0184: rdata_n = pmu_w_hold_q;
+        16'h0188: rdata_n = pmu_cy_hold_q;
+        16'h018C: rdata_n = pmu_gbps_x1000_q;
         default: begin
           if (addr_i[15:0] >= 16'h0140 && addr_i[15:0] < 16'h0180)
             rdata_n = desc_words_q[addr_i[5:2]];

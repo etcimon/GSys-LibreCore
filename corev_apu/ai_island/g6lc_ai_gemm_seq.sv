@@ -44,6 +44,10 @@ module g6lc_ai_gemm_seq #(
     output logic        ready_o,
     output logic        done_o,
     output logic        err_o,
+    // I3 PMU: sticky after last job (cleared on next start)
+    output logic [31:0] pmu_r_beats_o,
+    output logic [31:0] pmu_w_beats_o,
+    output logic [31:0] pmu_cycles_o,
     output axi_req_t    axi_req_o,
     input  axi_resp_t   axi_resp_i
 );
@@ -57,8 +61,8 @@ module g6lc_ai_gemm_seq #(
   localparam int unsigned BytesPerBeat  = DataWidth / 8;
   localparam int unsigned BeatAlignW    = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
   localparam int unsigned BeatLaneW     = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
-  // Max beats per AR (AXI4 allows 256; keep modest for I3-lite sim/synth)
-  localparam int unsigned MaxBurstBeats = 16;
+  // Max beats per AR (AXI4 allows 256; 64 balances xbar buffers vs AR overhead)
+  localparam int unsigned MaxBurstBeats = 64;
 
   typedef enum logic [3:0] {
     ST_IDLE  = 4'd0,
@@ -194,9 +198,15 @@ module g6lc_ai_gemm_seq #(
       .acc_o   (pe_acc_out)
   );
 
-  assign ready_o = (state_q == ST_IDLE);
-  assign done_o  = done_q;
-  assign err_o   = err_q;
+  // I3 PMU accumulators (active while not IDLE/DONE)
+  logic [31:0] pmu_r_q, pmu_w_q, pmu_cy_q;
+
+  assign ready_o       = (state_q == ST_IDLE);
+  assign done_o        = done_q;
+  assign err_o         = err_q;
+  assign pmu_r_beats_o = pmu_r_q;
+  assign pmu_w_beats_o = pmu_w_q;
+  assign pmu_cycles_o  = pmu_cy_q;
 
   function automatic logic [AddrWidth-1:0] a_addr(
       input logic [AddrWidth-1:0] base,
@@ -669,6 +679,9 @@ module g6lc_ai_gemm_seq #(
       beat_left_q <= '0;
       c_pair_hold_q <= 1'b0;
       c_lo_q <= '0;
+      pmu_r_q  <= '0;
+      pmu_w_q  <= '0;
+      pmu_cy_q <= '0;
     end else begin
       state_q       <= state_d;
       acc_q         <= acc_d;
@@ -683,6 +696,16 @@ module g6lc_ai_gemm_seq #(
       if (beat_load_d) beat_q <= beat_data_d;
       if (c_lo_we_d)   c_lo_q <= c_r_data;
       done_q        <= (state_q == ST_DONE);
+
+      // I3: accumulate traffic while job is running
+      if (state_q != ST_IDLE && state_q != ST_DONE)
+        pmu_cy_q <= pmu_cy_q + 32'd1;
+      if (state_q != ST_IDLE && state_q != ST_DONE &&
+          axi_req_o.r_ready && axi_resp_i.r_valid)
+        pmu_r_q <= pmu_r_q + 32'd1;
+      if (state_q != ST_IDLE && state_q != ST_DONE &&
+          axi_req_o.b_ready && axi_resp_i.b_valid)
+        pmu_w_q <= pmu_w_q + 32'd1;
 
       if (state_q == ST_IDLE && start_i) begin
         m_q   <= m_i;
@@ -699,6 +722,9 @@ module g6lc_ai_gemm_seq #(
         beat_left_q   <= '0;
         burst_first_q <= 1'b0;
         c_pair_hold_q <= 1'b0;
+        pmu_r_q  <= '0;
+        pmu_w_q  <= '0;
+        pmu_cy_q <= '0;
       end
 
       // A load: advance t by la_n_d (multi-byte unpack)

@@ -66,6 +66,9 @@ testlist:
   - test: ai_gemm_s8_256x256_smoke
     description: Full AccTile 256x256x256 all-ones GEMM (C=256 corners; multi-bank C)
     path: custom/ai/ai_gemm_s8_256x256_smoke.S
+  - test: ai_bw_pmu_smoke
+    description: I3 GEMM AXI PMU R/W beats + milli-GB/s after 32x32
+    path: custom/ai/ai_bw_pmu_smoke.S
   - test: ai_cap_bringup_smoke
     description: Capability window advertises I1 PeLanes=128 AccTile=256
     path: custom/ai/ai_cap_bringup_smoke.S
