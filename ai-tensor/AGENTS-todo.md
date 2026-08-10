@@ -96,7 +96,8 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] NumPy high-level path (`numpy_ops` + example)
 - [x] Python `c_abi` + `tools/check_c_abi.py` lockstep with `include/ai_tensor.h`
 - [x] `frameworks/torch/README.md` (high-level landed; C++ later)
-- [ ] Multi-outstanding concurrent engine (needs RTL completion FIFO; host history is SW-only)
+- [x] Island CPL FIFO RTL (`g6lc_ai_cpl_fifo` + top; SoftIsland claim=pop head)
+- [ ] Multi-outstanding **compute** (engine still one-at-a-time; FIFO holds finishes)
 
 ## Open design notes
 

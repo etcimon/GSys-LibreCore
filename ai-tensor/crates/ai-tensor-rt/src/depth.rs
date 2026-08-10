@@ -106,9 +106,9 @@ pub fn soak_queue_depth<D: Device>(
     Ok(ok)
 }
 
-/// Fire `n` sequential jobs **without waiting between submits**, then poll each
-/// ticket from history (SoftIsland ring / sim HashMap). Engine still runs
-/// jobs synchronously on submit; this validates multi-ticket observability.
+/// Fire `n` sequential jobs **without claim between submits**, then claim each
+/// CPL FIFO head in order (oldest-first). Matches `g6lc_ai_cpl_fifo` semantics:
+/// DONE sticky = !empty; claim pops head.
 pub fn soak_history_poll<D: Device>(dev: &mut D, n: u32) -> Result<u32, RtError> {
     let n = n.max(1).min(8);
     dev.enable(true);
@@ -122,7 +122,7 @@ pub fn soak_history_poll<D: Device>(dev: &mut D, n: u32) -> Result<u32, RtError>
     dev.program_region(0, reg)?;
     let mut tickets = Vec::new();
     let mut q = Queue::q0(400);
-    for i in 0..n {
+    for _ in 0..n {
         let pa = dev.alloc(4)?;
         let pb = dev.alloc(4)?;
         let pc = dev.alloc(16)?;
@@ -132,23 +132,22 @@ pub fn soak_history_poll<D: Device>(dev: &mut D, n: u32) -> Result<u32, RtError>
         dev.write_mem(pc, &[0u8; 16])?;
         let desc = Desc64::gemm(2, 2, 2).with_ptrs(pa, pb, pc, pd);
         let t = q.next_ticket();
-        // claim previous sticky so DONE advances; history retains older tickets
-        if i > 0 {
-            let _ = dev.claim_done();
-        }
+        // No intermediate claim — completions queue in CPL FIFO
         dev.submit(0, t, &desc)?;
         tickets.push(t);
     }
-    // Poll all tickets (may be in history, not only sticky)
+    // Claim/poll FIFO head in order (oldest first)
     let mut ok = 0u32;
     for t in tickets {
         match dev.poll(t)? {
             Some(c) if c.status == ST_OK && c.ticket == t => ok += 1,
             Some(c) => {
-                return Err(RtError::Msg(format!("history poll bad {c:?}")));
+                return Err(RtError::Msg(format!(
+                    "CPL FIFO head expected ticket={t} got {c:?}"
+                )));
             }
             None => {
-                return Err(RtError::Msg(format!("history poll miss ticket={t}")));
+                return Err(RtError::Msg(format!("CPL FIFO miss ticket={t}")));
             }
         }
     }

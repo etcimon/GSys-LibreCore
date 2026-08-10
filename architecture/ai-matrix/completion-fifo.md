@@ -1,35 +1,39 @@
-# Island completion FIFO (future RTL)
+# Island completion FIFO
 
-**Status:** scaffold / design note · **Not compiled** · Complements host
+**Status:** **RTL landed** (`g6lc_ai_cpl_fifo.sv` + `g6lc_ai_island_top`) · Complements host
 `SoftIsland` completion history and `HostRuntime` drain.
 
 ## Problem
 
-`g6lc_ai_island_top` keeps a **single** DONE sticky (`done_sticky_q` + ticket/status
-hold). Host software therefore must **submit → wait → next**. Concurrent
-multi-outstanding tickets need a hardware completion FIFO.
+The island used a **single** DONE sticky (overwrite). Host software therefore risked
+losing intermediate completions if SW did not claim between jobs.
 
-## Host today (software)
+## Implementation
+
+| Item | Value |
+|---|---|
+| Module | `corev_apu/ai_island/g6lc_ai_cpl_fifo.sv` |
+| Depth | `min(IslandCfg.QueueDepth, 16)` (min 4 if QueueDepth=0) |
+| Push | engine `done_valid` or DMA fetch error |
+| Pop | write `0x10C` bit0 (claim) |
+| `0x10C` sticky | `!empty` |
+| `0x110/0x114` | FIFO **head** (oldest unclaimed) |
+| `irq_o` | sticky && head.irq |
+
+## Host software
 
 | Mechanism | Role |
 |---|---|
-| SoftIsland `comp_history` | Ring of last `queue_depth` completions for poll-by-ticket |
-| `soak_history_poll` | Validates multi-ticket observability after sticky moves |
-| `HostRuntime` | Host FIFO of jobs; still drains one engine job at a time |
-
-## Proposed RTL (when scheduled)
-
-1. Parameter `CplFifoDepth` (default = CAP `queue_depth`, e.g. 4).
-2. On engine `done_valid`: push `{ticket, status}` into FIFO; assert sticky if non-empty.
-3. DONE claim (write `0x10C`): pop head (or clear sticky only when empty).
-4. Optional MMIO: read sideband history index (debug); keep ABI of `0x110/0x114` as **head**.
-5. CAP: advertise `queue_depth` = FIFO depth (already exposed).
+| SoftIsland FIFO head + history | Mirrors claim/pop semantics |
+| `soak_history_poll` | Multi-ticket observability |
+| `HostRuntime` | Host job queue; engine still single-outstanding compute |
 
 ## Acceptance
 
-- Directed: N sequential doorbells without host wait between submits, then claim N times.
-- No change to single-job smokes (`ai_gemm_s8_smoke`, PLIC-8).
-- Timing: FIFO push on same edge as today sticky set; no new async clock.
+- [x] Module synthesizable; wired in top
+- [ ] Standalone `ai-island-veri` + lab HARD `mmio`/`gemm_s8` still green
+- [ ] Optional directed: N completes then N claims
+- Timing: push/pop same clock domain; no new async reset/clock
 
 ## Non-goals
 

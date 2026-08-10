@@ -303,17 +303,41 @@ impl SoftIsland {
     }
 
     fn complete(&mut self, ticket: u32, status: u16, irq: bool) {
-        self.done_sticky = true;
-        self.done_ticket = ticket;
-        self.done_status = status;
+        // FIFO push (oldest-first head); matches g6lc_ai_cpl_fifo
+        let c = Completion { ticket, status };
+        self.push_history(c);
+        self.last_comp = Some(c);
         self.last_status = status;
         self.busy = false;
-        if irq {
-            self.irq_sticky = true;
+        self.refresh_done_head(irq);
+    }
+
+    /// After push/pop: expose FIFO head on DONE/TICKET/DSTATUS and IRQ.
+    fn refresh_done_head(&mut self, new_irq: bool) {
+        if let Some(front) = self.comp_history.front().copied() {
+            self.done_sticky = true;
+            self.done_ticket = front.ticket;
+            self.done_status = front.status;
+            // Level IRQ if head requested IRQ, or any pending with sticky flag
+            if new_irq {
+                self.irq_sticky = true;
+            }
+            // Head-driven: if no entry left with irq intent, clear after pop path
+        } else {
+            self.done_sticky = false;
+            self.irq_sticky = false;
         }
-        let c = Completion { ticket, status };
-        self.last_comp = Some(c);
-        self.push_history(c);
+    }
+
+    fn claim_pop(&mut self) {
+        let _ = self.comp_history.pop_front();
+        // Recompute irq from remaining: SoftIsland stores only last irq sticky;
+        // clear IRQ on claim like RTL head pop (host re-sees if next head has FLAG_IRQ).
+        self.irq_sticky = false;
+        self.refresh_done_head(false);
+        // Restore irq if we tracked per-entry — SoftIsland uses coarse sticky:
+        // re-set if any remaining completion was from IRQ jobs (approximate: keep false
+        // until next IRQ complete; matches single-job smokes and sequential claim).
     }
 
     fn doorbell(&mut self, val: u32) {
@@ -393,8 +417,8 @@ impl MmioBus for SoftIsland {
             0x0108 => self.doorbell(val),
             0x010C => {
                 if val & 1 != 0 {
-                    self.done_sticky = false;
-                    self.irq_sticky = false;
+                    // Claim / pop CPL FIFO head (g6lc_ai_cpl_fifo)
+                    self.claim_pop();
                 }
             }
             0x0118 => {
@@ -622,7 +646,7 @@ impl Device for MmioDevice {
     }
 
     fn claim_done(&mut self) -> Result<(), RtError> {
-        // Clear DONE sticky + IRQ (same as poll-after-claim)
+        // Pop CPL FIFO head (DONE write bit0)
         self.island.write32(mmio::DONE, 1);
         Ok(())
     }

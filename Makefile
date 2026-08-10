@@ -194,6 +194,7 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/ai_island/g6lc_ai_tile_sram.sv                                     \
         corev_apu/ai_island/g6lc_ai_pe_dot.sv                                        \
         corev_apu/ai_island/g6lc_ai_gemm_seq.sv                                      \
+        corev_apu/ai_island/g6lc_ai_cpl_fifo.sv                                       \
         corev_apu/ai_island/g6lc_ai_island_top.sv                                    \
         corev_apu/ai_island/g6lc_ai_island_apb.sv                                    \
         vendor/pulp-platform/axi/src/axi_dw_converter.sv                             \

@@ -9,9 +9,10 @@
 //   0x0100          control  [0]=enable [1]=wr_cpl_en (completion DMA; default 1 if DMA)
 //   0x0104          status   [0]=busy, [1]=fetch_busy, [31:16]=last_status
 //   0x0108          doorbell  [7:0]=qid, [30:8]=ticket, [31]=fetch_from_mem
-//   0x010C          done sticky (write 1 clears irq/done sticky)
-//   0x0110          done ticket (RO)
-//   0x0114          done status (RO)
+//   0x010C          done sticky (write 1 = claim/pop CPL FIFO head)
+//   0x0110          done ticket (RO) — CPL FIFO head
+//   0x0114          done status (RO) — CPL FIFO head
+//   Completion FIFO depth = min(QueueDepth, 16) (see g6lc_ai_cpl_fifo / completion-fifo.md)
 //   0x0118/0x011C   desc_ptr lo/hi (fetch source when doorbell[31]=1)
 //   0x0120+q*0x20   region: +0 base_lo, +4 base_hi, +8 limit_lo,
 //                            +c limit_hi, +10 perm (write commits region)
@@ -65,6 +66,12 @@ module g6lc_ai_island_top
 
   localparam int unsigned NumQueues = (IslandCfg.Queues == 0) ? 1 : IslandCfg.Queues;
   localparam int unsigned QidWidth  = (NumQueues > 1) ? $clog2(NumQueues) : 1;
+  // Completion FIFO: host may claim multiple finishes; engine still single-outstanding.
+  localparam int unsigned CplFifoDepth =
+      (IslandCfg.QueueDepth == 0) ? 4 :
+      (IslandCfg.QueueDepth > 16) ? 16 : IslandCfg.QueueDepth;
+  localparam int unsigned CplCntW =
+      (CplFifoDepth <= 1) ? 1 : $clog2(CplFifoDepth + 1);
 
   // ------------------------------------------------------------------ cap
   logic [31:0] cap_rdata;
@@ -93,11 +100,38 @@ module g6lc_ai_island_top
   logic [QidWidth-1:0] db_qid_q;
   logic [31:0]       db_ticket_q;
   logic              submit_pulse_q;
-  logic              done_sticky_q;
-  logic              irq_sticky_q;
+  // Completion FIFO (replaces single done sticky overwrite)
+  logic              cpl_push, cpl_pop;
+  logic [31:0]       cpl_push_ticket;
+  logic [15:0]       cpl_push_status;
+  logic              cpl_push_irq;
+  logic              cpl_empty, cpl_full;
   logic [31:0]       done_ticket_hold_q;
   logic [15:0]       done_status_hold_q;
+  logic              done_sticky_q;   // !cpl_empty
+  logic              head_irq;
+  logic [CplCntW-1:0] cpl_count;
   logic [63:0]       desc_ptr_q;
+
+  g6lc_ai_cpl_fifo #(
+      .Depth(CplFifoDepth),
+      .CntW (CplCntW)
+  ) i_cpl_fifo (
+      .clk_i,
+      .rst_ni,
+      .push_i   (cpl_push),
+      .ticket_i (cpl_push_ticket),
+      .status_i (cpl_push_status),
+      .irq_i    (cpl_push_irq),
+      .pop_i    (cpl_pop),
+      .empty_o  (cpl_empty),
+      .full_o   (cpl_full),
+      .ticket_o (done_ticket_hold_q),
+      .status_o (done_status_hold_q),
+      .head_irq_o(head_irq),
+      .count_o  (cpl_count)
+  );
+  assign done_sticky_q = ~cpl_empty;
 
   logic [63:0] base_q [NumQueues];
   logic [63:0] limit_q[NumQueues];
@@ -441,10 +475,6 @@ module g6lc_ai_island_top
       db_qid_q            <= '0;
       db_ticket_q         <= '0;
       submit_pulse_q      <= 1'b0;
-      done_sticky_q       <= 1'b0;
-      irq_sticky_q        <= 1'b0;
-      done_ticket_hold_q  <= '0;
-      done_status_hold_q  <= '0;
       desc_ptr_q          <= '0;
       fetch_start_q       <= 1'b0;
       fetch_err_complete_q <= 1'b0;
@@ -478,14 +508,6 @@ module g6lc_ai_island_top
           pmu_gbps_x1000_q <= '0;
       end
 
-      // Engine completion
-      if (done_valid) begin
-        done_sticky_q      <= 1'b1;
-        done_ticket_hold_q <= done_ticket;
-        done_status_hold_q <= done_status;
-        if (done_irq) irq_sticky_q <= 1'b1;
-      end
-
       // Sideband kick with non-zero ptr ⇒ start DMA (identity held in sticky FF)
       if (EnableDmaFetch && sb_enq_valid_i && (sb_desc_ptr_i != '0) && fetch_ready) begin
         fetch_addr_q   <= sb_desc_ptr_i;
@@ -496,9 +518,6 @@ module g6lc_ai_island_top
       // DMA fetch completion: load latch + submit, or bus-error complete
       if (EnableDmaFetch && fetch_done) begin
         if (fetch_err) begin
-          done_sticky_q        <= 1'b1;
-          done_ticket_hold_q   <= fetch_src_sb_q ? sb_ticket_hold_q : db_ticket_q;
-          done_status_hold_q   <= ST_ERR;
           fetch_err_complete_q <= 1'b1;
         end else begin
           for (int unsigned i = 0; i < 16; i++)
@@ -523,11 +542,6 @@ module g6lc_ai_island_top
           end else if (!(EnableDmaFetch && wdata_i[31] && (desc_ptr_q != '0))) begin
             submit_pulse_q <= 1'b1;
           end
-        end else if (addr_i[15:0] == 16'h010C) begin
-          if (wdata_i[0]) begin
-            done_sticky_q <= 1'b0;
-            irq_sticky_q  <= 1'b0;
-          end
         end else if (addr_i[15:0] == 16'h0118) begin
           desc_ptr_q[31:0] <= wdata_i;
         end else if (addr_i[15:0] == 16'h011C) begin
@@ -551,6 +565,31 @@ module g6lc_ai_island_top
           end
         end
       end
+    end
+  end
+
+  // Completion FIFO push/pop (combinational one-cycle pulses into i_cpl_fifo)
+  always_comb begin
+    cpl_push         = 1'b0;
+    cpl_pop          = 1'b0;
+    cpl_push_ticket  = '0;
+    cpl_push_status  = '0;
+    cpl_push_irq     = 1'b0;
+    // Engine completion
+    if (done_valid) begin
+      cpl_push        = 1'b1;
+      cpl_push_ticket = done_ticket;
+      cpl_push_status = done_status;
+      cpl_push_irq    = done_irq;
+    end else if (EnableDmaFetch && fetch_done && fetch_err) begin
+      cpl_push        = 1'b1;
+      cpl_push_ticket = fetch_src_sb_q ? sb_ticket_hold_q : db_ticket_q;
+      cpl_push_status = ST_ERR;
+      cpl_push_irq    = 1'b0;
+    end
+    // DONE claim: pop head (PLIC discipline)
+    if (req_i && we_i && (addr_i[15:0] == 16'h010C) && wdata_i[0]) begin
+      cpl_pop = 1'b1;
     end
   end
 
@@ -623,7 +662,8 @@ module g6lc_ai_island_top
 
   assign rdata_o  = rdata_q;
   assign rvalid_o = rvalid_q;
-  assign irq_o    = irq_sticky_q;
+  // Level IRQ while head completion requested IRQ (claim pops head)
+  assign irq_o = done_sticky_q && head_irq;
 
   assign sb_last_ticket_o     = done_ticket_hold_q;
   assign sb_last_status_o     = done_status_hold_q;
@@ -631,9 +671,12 @@ module g6lc_ai_island_top
 
   // Silence unused
   // verilator lint_off UNUSEDSIGNAL
-  logic _sr, _fec;
-  assign _sr  = submit_ready;
-  assign _fec = fetch_err_complete_q;
+  logic _sr, _fec, _full;
+  logic [CplCntW-1:0] _cnt;
+  assign _sr   = submit_ready;
+  assign _fec  = fetch_err_complete_q;
+  assign _full = cpl_full;
+  assign _cnt  = cpl_count;
   // verilator lint_on UNUSEDSIGNAL
 
 endmodule
