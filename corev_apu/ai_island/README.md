@@ -24,11 +24,12 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_mem_store.sv` | AXI single-beat store (completion word) | **landed** |
 | `g6lc_ai_tile_sram.sv` | dual-port Latency=0 `tc_sram` tile bank (A/B int8, C int32) | **landed** |
 | `g6lc_ai_pe_dot.sv` | multi-lane INT8 MAC slice (PeLanes products/cycle) | **landed** |
-| `g6lc_ai_gemm_seq.sv` | I1-lite GEMM: banked A/B tiles + PE + store C (MaxDim=8, PeLanes=4) | **landed** |
+| `g6lc_ai_gemm_seq.sv` | I1-lite GEMM: banked A/B tiles + PE + store C | **landed** |
 
-Capability window (`g6lc_ai_island_cfg_pkg::AiIslandLatencyDefault`) advertises
-**MacsPerCycle=4**, **AccTileM/N/K=8** — the live PE/tile geometry. Full SKU
-placeholders live in `AiIslandLatencySkuTarget` (not elaborated).
+Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=4**,
+**AccTileM/N/K=8**. Island top binds `gemm_seq.MaxDim = AccTileM` and
+`PeLanes = MacsPerCycle` (square-tile assert). Full SKU placeholders:
+`AiIslandLatencySkuTarget` (not elaborated).
 | `g6lc_ai_island_top.sv` | reg map + IRQ sticky + fetch/store/gemm AXI mux | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 (next) |
 | AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |

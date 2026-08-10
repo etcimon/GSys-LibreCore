@@ -48,6 +48,9 @@ testlist:
   - test: ai_gemm_s8_4x4_smoke
     description: I1 multi-step PE GEMM 4x4x8 all-ones (C=8)
     path: custom/ai/ai_gemm_s8_4x4_smoke.S
+  - test: ai_gemm_s8_8x8_smoke
+    description: Full MaxDim 8x8x8 all-ones GEMM (C=8)
+    path: custom/ai/ai_gemm_s8_8x8_smoke.S
   - test: ai_cap_bringup_smoke
     description: Capability window advertises I1-lite PeLanes=4 AccTile=8
     path: custom/ai/ai_cap_bringup_smoke.S

@@ -247,12 +247,25 @@ module g6lc_ai_island_top
         .axi_req_o  (store_axi_req),
         .axi_resp_i (axi_dma_resp_i)
     );
+    // Geometry from IslandCfg (single source with capability window).
+    // I1-lite assumes square AccTileM=N=K; PeLanes = MacsPerCycle.
+    // pragma translate_off
+    initial begin
+      assert (IslandCfg.AccTileM == IslandCfg.AccTileN
+              && IslandCfg.AccTileN == IslandCfg.AccTileK)
+      else $error("g6lc_ai_island: AccTileM/N/K must be equal (I1-lite square tile)");
+      assert (IslandCfg.MacsPerCycle >= 1 && IslandCfg.AccTileM >= 1)
+      else $error("g6lc_ai_island: MacsPerCycle and AccTileM must be >= 1");
+      assert (IslandCfg.MacsPerCycle <= IslandCfg.AccTileK)
+      else $error("g6lc_ai_island: MacsPerCycle must be <= AccTileK");
+    end
+    // pragma translate_on
     g6lc_ai_gemm_seq #(
         .AddrWidth (AddrWidth),
         .DataWidth (AxiDataWidth),
         .IdWidth   (AxiIdWidth),
-        .MaxDim    (8),
-        .PeLanes   (4),
+        .MaxDim    (IslandCfg.AccTileM),
+        .PeLanes   (IslandCfg.MacsPerCycle),
         .axi_req_t (axi_req_t),
         .axi_resp_t(axi_resp_t)
     ) i_gemm (
