@@ -3,8 +3,16 @@
 Cross-cutting: `../../agents/guides/AGENTS-soc-readiness.md`. Program: U6.1 in
 `../router-core-upgrade-program.md`.
 
+**AI attunement (co-equal with soft-ladder):** dual-hart correctness is not only about
+`cpuinfo` — it is the software-visible substrate for **multi-thread host + island AI**
+work (`ai-tensor` / PyTorch / virt-ai-pcie / HARD). Map:
+[`smt2-ai-tensor-linux.md`](smt2-ai-tensor-linux.md) · queue: `AGENTS-todo.md` **SL-T** / **AI-S3**.
+
 ## Intent
 N hardware threads over shared pipeline resources; per-hart arch state; fair arbitration.
+When AI is enabled, those threads must also own **isolated AI CSR sideband state** and
+must not corrupt FDT/OpenSBI under dual-issue before Linux can host concurrent tensor
+workers.
 
 ## Current state (codebase)
 | Item | Status |
@@ -14,13 +22,15 @@ N hardware threads over shared pipeline resources; per-hart arch state; fair arb
 | Pipeline `hart_id` tagging | **Live** — `fetch_entry_t` + `scoreboard_entry_t.hart_id`; decoder stamps active hart |
 | Banked RF | **Live** — `core/smt/g6lc_smt_regfile.sv` (NrHarts=1 → single `ariane_regfile`) |
 | Dual PC bank | **Live** — `core/smt/g6lc_smt_pc_bank.sv` + frontend restore |
-| Banked CSR | **Live** — `g6lc_smt_csr_bank.sv` (commit by `hart_id`; priv mux by active; AI sideband must be per-bank when `AiCfg` present) |
+| Banked CSR | **Live** — `g6lc_smt_csr_bank.sv` (commit by `hart_id`; priv mux by active; **AI aicfg/ais sideband banked**) |
 | Fine-grain switch | **Live** — IF + unissued flush only; EX drains; BP preserved |
 | Per-hart WFI halt | **Live** — sticky `smt_hart_halt` from `halt_csr` |
 | Per-hart RAS | **Live** — `ras.sv` banks when `NrHarts>1` |
 | Per-hart GHR | **Live** — `g6lc_bp_ghist` + gshare GHR banks |
 | Shared BHT/BTB | Shared tables (cross-hart pollution possible) |
 | `g6lc_thread_select.sv` + `g6lc_hart_state.sv` | **Live** under `core/smt/` |
+| Soft-ladder DI residual | **Active** — iter-012 RTL landed; hold cookie chase on `work-ver-smt2-slfix` |
+| AI / PyTorch host path | **Live soft** on `g6lc64_ai` + virt-ai-pcie; **SMT2 multi-thread pytorch** after SL-C |
 
 ### Model: fine-grain SMT (drain-friendly)
 On thread switch: flush **IF** and drop **unissued** decode; restore banked NPC; **do not** clear scoreboard/EX or BP. Outgoing-hart ops retire with CSR/RF keyed by instruction `hart_id`. Active fetch hart owns RAS/GHR bank and privilege mux. See `smt2-bringup.md`.
@@ -84,9 +94,37 @@ contract. Promote via three buckets and a closed iteration loop:
 
 DI OpenSBI residual (`PEEL_FDT_GETPROP`) is primarily dual-issue + stack/CF integrity on **hart 0** during coldboot; SMT peer must not share RF/CSR banks or global issue stalls.
 
+## AI attunement (SMT × island × host)
+
+SMT does **not** implement GEMM; it makes multi-hart software and per-hart AI control
+state correct. Island compute stays in `corev_apu/ai_island/**` and host stacks in
+`ai-tensor/`. Attunement rules:
+
+| Rule | Why |
+|------|-----|
+| **Per-hart AI CSR banks** | `aicfg` / `aistatus.ais` / dirty-setcfg sideband live in `g6lc_smt_csr_bank` (mux by active fetch; writes gated by commit hart) — no shared sticky AI state across threads |
+| **Island is SoC-shared** | MMIO/DMA queues are **not** per-hart RF; concurrency uses descriptor QoS / multi-queue isolation (`ai-matrix/isa-encoding.md` §7.1), not mhartid alone |
+| **Soft-ladder before topology trust** | Do not claim dual-hart pytorch/Linux green until FDT/`plat_hc` is honest under DI (`soft-ladder` SL-A…C) |
+| **Package split is intentional** | Residual DI: `g6lc64_smt2`. Tensor soft/HARD default: `g6lc64_ai` + `virt-ai-pcie`. Unified dual-hart+AI board is a later package (after SL-C) |
+| **TB probes follow hierarchy** | Variane hangpc CSR probes for smt2 use **banked hart0** paths (`gen_banked.gen_csr[0]`); single-hart packages keep `gen_single` in their own rebuilds |
+| **Fast iteration** | Suite `smt2-ai-tensor-track` default **fast** — climb only on failure class |
+
+### Doc map (AI-attuned)
+
+| Doc | Role |
+|------|------|
+| [`smt2-bringup.md`](smt2-bringup.md) | SMT enable + dual-hart Linux CI sketch |
+| [`soft-ladder/`](soft-ladder/) | DI OpenSBI residual promotion (B1→B3) |
+| [`fdt-topology-soft-ladder.md`](fdt-topology-soft-ladder.md) | `NrCores`×`NrHarts` DTS / cpu-map |
+| [`smt2-ai-tensor-linux.md`](smt2-ai-tensor-linux.md) | **Staged T0–T6 track** + speed contract + lab status |
+| [`../ai-matrix/hard-tests.md`](../ai-matrix/hard-tests.md) | AI HARD narrow/ci/peak surfaces |
+| [`../../ai-tensor/AGENTS.md`](../../ai-tensor/AGENTS.md) | Host PyTorch / Device ABI |
+
 ## Invariants
 Per-hart precise traps and isolation; RVWMO per and across harts; no starvation (enforced by `SmtStarveLimit` under hybrid).
+AI sideband and RF banks remain **per-hart**; island queues remain **SoC-isolated**, not RF-banked.
 
 ## Status vs scaffold
-**Fine-grain dual-PC + CSR/RF/RAS/GHR banks + drain-on-switch.** Production default remains `NrHarts=1`.  
-**Linux path:** boot-path + rootfs preflight in-repo; full rootfs needs external images.
+**Fine-grain dual-PC + CSR/RF/RAS/GHR banks + drain-on-switch + AI CSR sideband.** Production default remains `NrHarts=1`.  
+**Linux path:** boot-path + rootfs preflight in-repo; full rootfs needs external images.  
+**AI path:** soft pytorch green on virt-ai-pcie; multi-thread host workers gated on soft-ladder topology trust.

@@ -16,6 +16,14 @@ but by **parallel tensor work** on the AI card/island.
 
 **Branch of record for this track:** `smt2-ai-tensor-linux` (from `E:\cva6` master).
 
+### AI attunement (one paragraph)
+
+SMT2 attunes to AI by guaranteeing **two trustworthy software harts** and **per-hart AI
+CSR banks**, then exercising the **same** ai-tensor ABI (virt-card soft → HARD narrow) under
+dual-CPU affinity once Linux is up. Island GEMM/CPL/queues are shared SoC resources;
+attunement does **not** mean “two copies of the island,” it means concurrent host
+submission and multi-queue isolation without OpenSBI/FDT corruption under DI.
+
 Do **not** treat PyTorch success on a single-hart package as SMT2 green.
 
 ---
@@ -190,12 +198,21 @@ SMT2_REBUILD=1 bash verif/regress/smt2-ai-tensor-track.sh paths
 | Item | State |
 |------|--------|
 | Soft-ladder P0 suites | Done |
-| Fast track driver | **`smt2-ai-tensor-track.sh`** — `fast` 21/0; `di` FDT minis **5/5 PASS** on fw64/slfix |
+| Fast track driver | **`smt2-ai-tensor-track.sh`** — `fast` 21/0; `di` FDT minis **5/5 PASS** |
 | Tensor soft (T4) | **PASS** `tensor pytorch` Device virt-card (torch optional; 2 tests) |
-| iter-012 harness | **`work-ver-smt2-slfix`** built (TB hangpc uses banked CSR hart0 path) |
-| Hold (T0) on slfix | **Partial (best so far):** reused oracle ELF + slfix → `plat_hc=2`/`coldboot_done=1`, no cookie @3e6 cy. **Cold `mk_plat_skip` rebuild** on same harness regressed to `plat_hc=80` + AXI R-error — prefer `SOFT_LADDER_SKIP_BUILD=1` until oracle peels revalidated. |
-| PEEL (T1) | Pending after hold cookie green |
+| AI CSR SMT banking | **Landed** in `g6lc_smt_csr_bank` (active-hart mux / commit-hart gate) |
+| iter-012 harness | **`work-ver-smt2-slfix`** live (banked TB CSR probes) |
+| Hold (T0) on slfix | **Partial:** skip-build ELF → `plat_hc=2` / `coldboot_done=1`, **no `51b1babe`** @3e6 cy. Cold oracle rebuild regressed (`plat_hc=80`, R-error) — **keep `SOFT_LADDER_SKIP_BUILD=1`**. Next: longer hold (8–12e6) + cookie-site triage. |
+| PEEL (T1) | Pending cookie green on hold |
 | Dual-hart Linux + dual pytorch workers | **Not started** — blocked on hold cookie + SL-C + Image |
+
+### Package / board attunement
+
+| Use case | Package | Board / harness | Notes |
+|----------|---------|-----------------|-------|
+| DI residual / soft-ladder | `g6lc64_smt2` | `work-ver-smt2-slfix` (prefer) | FETCH_WIDTH≥64; banked CSR TB |
+| Tensor soft / HARD narrow | `g6lc64_ai` | `virt-ai-pcie` / `work-ver-ai` | NrHarts=1 today; not SMT proof |
+| Future dual-hart + AI Linux | TBD hybrid / smt2+island board | ariane-smt2 + AI DTS | After SL-C |
 
 ### Lab notes (2026-08-11)
 
@@ -203,7 +220,8 @@ SMT2_REBUILD=1 bash verif/regress/smt2-ai-tensor-track.sh paths
 bash verif/regress/smt2-ai-tensor-track.sh fast     # green
 bash verif/regress/smt2-ai-tensor-track.sh di       # 5/5 FDT minis green
 cva6-build tensor pytorch --board virt-ai-pcie --core g6lc64_ai  # green (Device)
-SOFT_LADDER_HARNESS=work-ver-smt2-slfix … hold     # plat_hc=2, cookie miss
+SOFT_LADDER_HARNESS=work-ver-smt2-slfix SOFT_LADDER_SKIP_BUILD=1 \
+  SOFT_LADDER_TIME_OUT=8000000 bash verif/regress/smt2-ai-tensor-track.sh hold
 ```
 
 Update `AGENTS-todo.md` SL-T when T5 first greened on real dual-hart Linux.
