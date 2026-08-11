@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+// Copyright (c) 2026 Etienne Cimon
+//
+// Generic g6lc,ai-matrix device-tree node — documentation / template only.
+//
+// SCAFFOLD: not on any flist and not compiled into a bootrom. Generators under
+// build-platform (`mb select` → writeGeneratedArtifacts) expand this shape into
+// board-specific fragments:
+//   corev-mb/boards/<id>/generated/<id>_ai.dtsi
+//
+// Golden full tree (committed, SoC-accurate): corev_apu/bootrom/ariane-ai.dts
+// Host path contract: architecture/ai-matrix/board-uio-eventfd.md
+// Defaults: AiIslandBase 0x4000_0000, PLIC source 8, AccTile 256, queues 1.
+//
+// Include under /soc { ... } only when AiMatrixEn=1 (g6lc64_ai). Never advertise
+// xg6lcai / this node on packages that leave the GPIO window as an error slave.
+
+// Example expansion (values match AI_BOARD_DEFAULTS / island-p3-v1):
+//
+//   ai_matrix: ai-matrix@40000000 {
+//     compatible = "g6lc,ai-matrix";
+//     reg = <0x0 0x40000000 0x0 0x1000>;
+//     interrupt-parent = <&PLIC0>;
+//     interrupts = <8>;
+//     g6lc,board-id = "<boardid>";
+//     g6lc,uio-primary = "island0";
+//     g6lc,acc-tile-m = <256>;
+//     g6lc,acc-tile-n = <256>;
+//     g6lc,acc-tile-k = <256>;
+//     g6lc,macs-per-cycle = <256>;
+//     g6lc,queues = <1>;
+//     g6lc,queue-depth = <8>;
+//     g6lc,noc-width = <64>;
+//     status = "okay";
+//   };
+
+ai_matrix: ai-matrix@40000000 {
+  compatible = "g6lc,ai-matrix";
+  reg = <0x0 0x40000000 0x0 0x1000>;
+  interrupt-parent = <&PLIC0>;
+  interrupts = <8>;
+  /* Board generators fill g6lc,board-id and g6lc,uio-primary. */
+  g6lc,acc-tile-m = <256>;
+  g6lc,acc-tile-n = <256>;
+  g6lc,acc-tile-k = <256>;
+  g6lc,macs-per-cycle = <256>;
+  g6lc,queues = <1>;
+  g6lc,queue-depth = <8>;
+  g6lc,noc-width = <64>;
+  status = "okay";
+};

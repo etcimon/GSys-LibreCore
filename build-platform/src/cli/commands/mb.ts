@@ -28,6 +28,7 @@ import { childEnv, type PlatformContext } from "../../context.ts";
 import { hasBinary, run } from "../../platform/exec.ts";
 import { createPcbPartsClient, type PcbPartsTool } from "../../tooling/pcbparts.ts";
 import { checkoutStatuses, syncControllers } from "../../tooling/vendor.ts";
+import { aiCoreHints, resolveAiBoard } from "../../tooling/ai-board.ts";
 import {
   BoardSpecError,
   boardPaths,
@@ -61,6 +62,7 @@ export const mbCommand: Command = {
     "bun run src/cli/index.ts mb select genesys2",
     "bun run src/cli/index.ts mb check genesys2",
     "bun run src/cli/index.ts mb create my-board --core cv64a6_imafdc_sv39 --class custom",
+    "bun run src/cli/index.ts mb create ai-card --ai --class custom",
     "bun run src/cli/index.ts mb expand my-board --add usb_host:2,pcie_x1:1 --online",
     "bun run src/cli/index.ts mb parts --query 'gigabit ethernet rgmii phy' --online",
     "bun run src/cli/index.ts mb test genesys2",
@@ -221,11 +223,23 @@ async function cmdSelect(
     logger.info("No vendor controllers requested by this board.");
   }
 
-  // 4) Generate the (non-compiled) board package + board.mk.
+  // 4) Generate the (non-compiled) board package + board.mk (+ AI artifacts when enabled).
   const gen = await writeGeneratedArtifacts(ctx, spec, { dryRun });
   logger.heading("Generated artifacts");
   logger.info(`  ${gen.wrote ? "wrote" : "[dry-run]"} ${gen.packageFile}`);
   logger.info(`  ${gen.wrote ? "wrote" : "[dry-run]"} ${gen.makefileSnippet}`);
+  if (gen.aiDtsFile) logger.info(`  ${gen.wrote ? "wrote" : "[dry-run]"} ${gen.aiDtsFile}`);
+  if (gen.aiProfileFile) logger.info(`  ${gen.wrote ? "wrote" : "[dry-run]"} ${gen.aiProfileFile}`);
+  if (gen.aiEnvFile) logger.info(`  ${gen.wrote ? "wrote" : "[dry-run]"} ${gen.aiEnvFile}`);
+
+  const ai = resolveAiBoard(spec);
+  for (const hint of aiCoreHints(spec, ai)) logger.warn(hint);
+  if (ai) {
+    logger.heading("AI island");
+    logger.info(`  board_id=${ai.boardid}  mmio=${"0x" + ai.mmioBase.toString(16)}  plic=${ai.plicSource}`);
+    logger.info(`  UIO primary id=${ai.primaryUioId} path=${ai.primaryUioPath}`);
+    logger.info(`  source ${gen.aiEnvFile ?? "generated/ai-tensor.env"} for AI_TENSOR_* discovery`);
+  }
 
   logger.heading("Next");
   if (spec.skidl === "custom") logger.info(`  design the PCB:  mb design ${spec.boardid} [--online] [--fix]`);
@@ -292,6 +306,7 @@ async function cmdCreate(
   const dryRun = ctx.dryRun || flagBool(flags, "dry-run");
   const xlenStr = flagString(flags, "xlen");
   const xlen = xlenStr === "32" ? 32 : xlenStr === "64" ? 64 : undefined;
+  const ai = flagBool(flags, "ai");
   const result = await scaffoldBoard(ctx, boardid, {
     name: flagString(flags, "name"),
     vendor: flagString(flags, "vendor"),
@@ -299,14 +314,18 @@ async function cmdCreate(
     coreConfig: flagString(flags, "core"),
     xlen,
     dryRun,
+    ai,
   });
-  logger.heading(`Scaffold board ${boardid}`);
+  logger.heading(`Scaffold board ${boardid}${ai ? " (AI island)" : ""}`);
   for (const f of result.created) logger.info(`  ${dryRun ? "[dry-run] would create" : "created"} ${f}`);
   if (dryRun && result.created.length === 0) logger.info(`  [dry-run] would create ${paths.specFile}`);
   logger.heading("Next");
-  logger.info(`  1. edit ${paths.specFile} (interfaces, phys, apu.controllers)`);
+  logger.info(`  1. edit ${paths.specFile} (interfaces, phys, apu.controllers${ai ? ", ai.uioConnectors" : ""})`);
   logger.info(`  2. write the target: corev-mb/architecture/${boardid}/README.md`);
   logger.info(`  3. mb select ${boardid}   then   mb design ${boardid} --online`);
+  if (ai) {
+    logger.info(`  4. source generated/ai-tensor.env after select for AI_TENSOR_BOARD_ID / UIO`);
+  }
   return 0;
 }
 

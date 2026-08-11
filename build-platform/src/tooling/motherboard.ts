@@ -24,6 +24,17 @@ import { isAbsolute, join } from "node:path";
 
 import type { MotherboardSkidlMode, ResolvedBuildConfig } from "../config/schema.ts";
 import type { PlatformContext } from "../context.ts";
+import {
+  generateAiBoardPackageDisabled,
+  generateAiBoardPackageParams,
+  generateAiDtsFragment,
+  generateAiTensorEnv,
+  generateAiTensorProfile,
+  resolveAiBoard,
+  starterAiSpec,
+  validateBoardAi,
+  type BoardAiSpec,
+} from "./ai-board.ts";
 
 // ---------------------------------------------------------------------------
 // Board spec (board.json) shape
@@ -105,6 +116,12 @@ export interface BoardSpec {
   interfaces: BoardInterface[];
   phys: BoardPhy[];
   references?: BoardReferences;
+  /**
+   * Optional AI island / UIO host path. When present and not disabled, `mb select`
+   * emits AI DTS/profile/env artifacts and MbAi_* board-package localparams.
+   * See build-platform/src/tooling/ai-board.ts and architecture/ai-matrix/board-uio-eventfd.md.
+   */
+  ai?: BoardAiSpec;
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +304,10 @@ function validateBoardSpec(raw: unknown, boardid: string): string[] {
 
   if (s.interfaces !== undefined && !Array.isArray(s.interfaces)) issues.push("interfaces must be an array.");
   if (s.phys !== undefined && !Array.isArray(s.phys)) issues.push("phys must be an array.");
+
+  // Optional AI island / UIO connectors (custom AI boards).
+  issues.push(...validateBoardAi(s.ai, boardid));
+
   return issues;
 }
 
@@ -424,6 +445,13 @@ export function generateBoardPackage(spec: BoardSpec): string {
     if (i.phy) lines.push(`  localparam string MbIf_${tok}_Phy = "${i.phy.replace(/"/g, "'")}";`);
   }
   lines.push("");
+  const ai = resolveAiBoard(spec);
+  if (ai) {
+    lines.push(generateAiBoardPackageParams(ai));
+  } else {
+    lines.push(generateAiBoardPackageDisabled());
+  }
+  lines.push("");
   lines.push(`endpackage : ${pkg}`);
   lines.push("");
   return lines.join("\n");
@@ -448,6 +476,10 @@ export interface GenerateResult {
   packageFile: string;
   makefileSnippet: string;
   wrote: boolean;
+  /** Present when board.json enables AI island. */
+  aiDtsFile?: string;
+  aiProfileFile?: string;
+  aiEnvFile?: string;
 }
 
 /** Write the generated artifacts under the (gitignored) generated/ dir. */
@@ -459,13 +491,41 @@ export async function writeGeneratedArtifacts(
   const paths = boardPaths(ctx, spec.boardid);
   const pkg = generateBoardPackage(spec);
   const mk = generateBoardMakefile(spec);
+  const ai = resolveAiBoard(spec);
+  const aiDtsFile = ai
+    ? join(paths.generatedDir, `${toIdent(spec.boardid)}_ai.dtsi`)
+    : undefined;
+  const aiProfileFile = ai
+    ? join(paths.generatedDir, `${toIdent(spec.boardid)}_ai.profile.toml`)
+    : undefined;
+  const aiEnvFile = ai ? join(paths.generatedDir, "ai-tensor.env") : undefined;
+
   if (opts.dryRun) {
-    return { packageFile: paths.packageFile, makefileSnippet: paths.makefileSnippet, wrote: false };
+    return {
+      packageFile: paths.packageFile,
+      makefileSnippet: paths.makefileSnippet,
+      wrote: false,
+      aiDtsFile,
+      aiProfileFile,
+      aiEnvFile,
+    };
   }
   await mkdir(paths.generatedDir, { recursive: true });
   await writeFile(paths.packageFile, pkg, "utf8");
   await writeFile(paths.makefileSnippet, mk, "utf8");
-  return { packageFile: paths.packageFile, makefileSnippet: paths.makefileSnippet, wrote: true };
+  if (ai && aiDtsFile && aiProfileFile && aiEnvFile) {
+    await writeFile(aiDtsFile, generateAiDtsFragment(ai), "utf8");
+    await writeFile(aiProfileFile, generateAiTensorProfile(ai), "utf8");
+    await writeFile(aiEnvFile, generateAiTensorEnv(ai), "utf8");
+  }
+  return {
+    packageFile: paths.packageFile,
+    makefileSnippet: paths.makefileSnippet,
+    wrote: true,
+    aiDtsFile,
+    aiProfileFile,
+    aiEnvFile,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -532,32 +592,69 @@ export interface ScaffoldOptions {
   coreConfig?: string;
   xlen?: 32 | 64;
   dryRun?: boolean;
+  /**
+   * When true, pin core to g6lc64_ai (xlen 64), attach starter AI UIO connectors,
+   * and seed board.json ai{} for AI island / ai-tensor discovery.
+   */
+  ai?: boolean;
 }
 
 /** Build a starter BoardSpec for a brand-new (custom) board. */
 export function starterSpec(boardid: string, opts: ScaffoldOptions): BoardSpec {
-  const xlen = opts.xlen ?? 64;
-  return {
+  const ai = Boolean(opts.ai);
+  const xlen: 32 | 64 = ai ? 64 : (opts.xlen ?? 64);
+  const coreConfig =
+    opts.coreConfig ??
+    (ai ? "g6lc64_ai" : xlen === 32 ? "cv32a6_imac_sv32" : "cv64a6_imafdc_sv39");
+  const extensions =
+    xlen === 32
+      ? ["i", "m", "a", "c", "zicsr", "zifencei"]
+      : ["i", "m", "a", "f", "d", "c", "zicsr", "zifencei"];
+  const summary = ai
+    ? `Custom AI-island board scaffold (g6lc64_ai + Xg6lcai). Advertise xg6lcai only when AiMatrixEn=1. Edit board.json ai.uioConnectors and corev-mb/architecture/${boardid}/README.md.`
+    : "New custom board scaffold — edit board.json and corev-mb/architecture/" + boardid + "/README.md.";
+  const interfaces: BoardInterface[] = [];
+  if (ai) {
+    interfaces.push(
+      {
+        id: "uart0",
+        domain: "peripheral",
+        kind: "uart",
+        count: 1,
+        notes: "Console UART (ns16550-class).",
+      },
+      {
+        id: "ai0",
+        domain: "accelerator",
+        kind: "uio-mmio",
+        count: 1,
+        notes: "Xg6lcai island CAP/CTL MMIO via UIO (board.json ai.uioConnectors).",
+      },
+    );
+  }
+  const spec: BoardSpec = {
     boardid,
     name: opts.name ?? boardid,
     vendor: opts.vendor ?? "custom",
     status: "custom",
     class: opts.class ?? "custom",
     skidl: opts.skidl ?? "custom",
-    summary: "New custom board scaffold — edit board.json and corev-mb/architecture/" + boardid + "/README.md.",
+    summary,
     core: {
-      config: opts.coreConfig ?? (xlen === 32 ? "cv32a6_imac_sv32" : "cv64a6_imafdc_sv39"),
+      config: coreConfig,
       xlen,
-      extensions:
-        xlen === 32
-          ? ["i", "m", "a", "c", "zicsr", "zifencei"]
-          : ["i", "m", "a", "f", "d", "c", "zicsr", "zifencei"],
+      extensions,
+      ...(ai ? { isaString: "rv64imafdc_xg6lcai" } : {}),
     },
     apu: { axiDataWidth: xlen, noc: "axi4", socket: { enabled: false }, controllers: [] },
-    interfaces: [],
+    interfaces,
     phys: [],
     references: { spec: [], vendorDocs: [] },
   };
+  if (ai) {
+    spec.ai = starterAiSpec(boardid);
+  }
+  return spec;
 }
 
 /** Create the board dir + board.json (+ a design.py stub for custom SKiDL). */

@@ -192,6 +192,8 @@ describe("motherboard engine", () => {
     expect(sv).toContain("localparam bit MbCtrl_litedram_En = 1'b0;");
     expect(sv).toContain("MbIf_ETH0_En");
     expect(sv).toContain('MbIf_ETH0_Phy = "RTL8211E";');
+    // Non-AI boards stay MbAi_En=0 (additive optional ai{}).
+    expect(sv).toContain("localparam bit MbAi_En = 1'b0;");
     expect(sv).toContain("endpackage : testboard_board_pkg");
   });
 
@@ -242,6 +244,18 @@ describe("motherboard engine", () => {
     expect(res.dryRun).toBe(false);
     expect(existsSync(paths.specFile)).toBe(true);
     expect(existsSync(paths.designFile)).toBe(true);
+  });
+
+  test("scaffoldBoard --ai pins g6lc64_ai and starter ai{}", async () => {
+    const ctx = makeCtx(tmp);
+    const res = await scaffoldBoard(ctx, "aiboard", { skidl: "custom", ai: true });
+    expect(res.spec.core.config).toBe("g6lc64_ai");
+    expect(res.spec.core.xlen).toBe(64);
+    expect(res.spec.ai?.enabled).toBe(true);
+    expect(res.spec.ai?.uioConnectors?.island0?.kind).toBe("uio-mmio");
+    expect(res.spec.interfaces.some((i) => i.id === "ai0")).toBe(true);
+    const sv = generateBoardPackage(res.spec);
+    expect(sv).toContain("localparam bit MbAi_En = 1'b1;");
   });
 });
 

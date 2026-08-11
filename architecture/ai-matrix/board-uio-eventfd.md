@@ -102,12 +102,93 @@ GEMM, PLIC smoke ELFs.
 
 ---
 
-## 6. Related pins
+## 6. Motherboard (`mb`) integration
+
+Custom boards can opt into the same hardware contract via optional `board.json`
+`ai{}`. Genesys2 and other non-AI boards stay unchanged (no `ai` key →
+`MbAi_En=0`). Engine: `build-platform/src/tooling/ai-board.ts` (defaults +
+generators) hooked from `motherboard.ts` on validate / package / select.
+
+### 6.1 `board.json` `ai{}` schema
+
+| Field | Default | Notes |
+|---|---|---|
+| `enabled` | `true` if object present | `false` suppresses all AI artifacts |
+| `mmioBase` / `mmioSize` | `0x40000000` / `0x1000` | `AiIslandBase` window |
+| `plicSource` | `8` | PLIC ID for island IRQ |
+| `accTile{M,N,K}` / `macsPerCycle` | `256` | I1 geometry |
+| `queues` / `queueDepth` / `nocWidth` | `1` / `8` / `64` | DTS advertisement |
+| `profileId` | `island-p3-v1` | ai-tensor profile pin |
+| `primaryUio` | first `uio-mmio` id | Connector id for `AI_TENSOR_UIO` |
+| `features[]` | island-p3-v1 set | Copied into generated profile TOML |
+| `uioConnectors` | one `island0` uio-mmio if omitted | **Keyed by id** |
+
+Example connector map (see `corev-mb/boards/ai-card/board.json`):
+
+```json
+"ai": {
+  "enabled": true,
+  "uioConnectors": {
+    "island0": { "kind": "uio-mmio", "path": "/dev/uio0", "target": "island0" },
+    "island0_irq": { "kind": "eventfd", "target": "island0" }
+  }
+}
+```
+
+Allowed `kind` values: `uio-mmio`, `eventfd`, `devmem`, `soft-sticky`. Soft
+warn if `core.config` is not `g6lc64_ai`.
+
+### 6.2 Generated artifacts (`mb select` / `writeGeneratedArtifacts`)
+
+All under `corev-mb/boards/<id>/generated/` (**gitignored**, non-compiled):
+
+| File | Content |
+|---|---|
+| `<id>_board_pkg.sv` | `MbAi_En`, `MbAi_MmioBase`, `MbAi_PlicSource`, per-connector enables |
+| `<id>_ai.dtsi` | `ai-matrix@base` fragment with `g6lc,board-id`, geometry, `uio-primary` |
+| `<id>_ai.profile.toml` | board-local ai-tensor profile (`board_id`, `uio_primary`, PLIC, features) |
+| `ai-tensor.env` | shell exports for discovery (below) |
+
+Generic node shape (docs only): `architecture/ai-matrix/dts/g6lc-ai-matrix.dtsi`.
+Golden full tree remains `corev_apu/bootrom/ariane-ai.dts`.
+
+### 6.3 `AI_TENSOR_BOARD_ID` discovery
+
+After `mb select <ai-board>`:
+
+```bash
+source corev-mb/boards/<id>/generated/ai-tensor.env
+# export AI_TENSOR_BOARD_ID=<id>
+# export AI_TENSOR_UIO=/dev/uio0
+# export AI_TENSOR_MMIO_BASE=0x40000000
+# export AI_TENSOR_PLIC_SOURCE=8
+```
+
+`AI_TENSOR_BOARD_ID` is the `board.json` `boardid`. UIO path comes from the
+primary connector (`primaryUio` or first `uio-mmio`). Custom boards get UIO
+connectors **by id** so multi-island cards can name `island0`, `island1`, …
+
+### 6.4 Scaffold
+
+```text
+mb create my-ai --ai --class custom   # g6lc64_ai + starterAiSpec + ai0 interface
+mb select my-ai                       # emit package + AI artifacts
+```
+
+Example committed board: `corev-mb/boards/ai-card/` · target doc:
+`corev-mb/architecture/ai-card/README.md`.
+
+---
+
+## 7. Related pins
 
 | Artifact | Role |
 |---|---|
 | `ai-tensor/profiles/island-p3-v1.toml` | mmio_base, plic_source=8, backend linux-uio |
 | `architecture/ai-matrix/completion-fifo.md` | DONE claim = pop |
 | `architecture/ai-matrix/isa-encoding.md` | descriptor / FLAG_IRQ |
+| `architecture/ai-matrix/dts/g6lc-ai-matrix.dtsi` | generic DTS node template (not on flist) |
+| `build-platform/src/tooling/ai-board.ts` | `AI_BOARD_DEFAULTS` + generators |
+| `corev-mb/boards/ai-card/board.json` | example custom AI board |
 | `verif/tests/custom/ai/ai_irq_plic_smoke.S` | PLIC-8 directed |
 | `monorepo-soak/run-ai-tensor.sh event-fd-soak` | hostless EventFd CI |

@@ -107,6 +107,13 @@ Key fields:
   the board PHYs and how to (re)discover them on pcbparts.dev.
 - **`references`**: `{ spec[], vendorDocs[], oshwBoard }` — spec anchors + **licensed vendor
   documentation** references (kept as citations, never copied in violation of a license).
+- **`ai` (optional)**: AI island / UIO host path. When present and not `enabled:false`, `mb select`
+  emits board-local DTS fragment, ai-tensor profile TOML, `ai-tensor.env`, and `MbAi_*` package
+  localparams. Schema and defaults live in `build-platform/src/tooling/ai-board.ts`
+  (`AI_BOARD_DEFAULTS`: MMIO `0x40000000`, PLIC 8, AccTile 256). `uioConnectors` is an object
+  **keyed by connector id** (`uio-mmio` / `eventfd` / …). Example board: `corev-mb/boards/ai-card/`.
+  Host contract: `architecture/ai-matrix/board-uio-eventfd.md` §6. Scaffold with
+  `mb create <id> --ai`. Genesys2 omits `ai` and keeps `MbAi_En=0`.
 
 ---
 

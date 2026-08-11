@@ -1,0 +1,85 @@
+{
+  "boardid": "ai-card",
+  "name": "GSys LibreCore AI card (custom)",
+  "vendor": "GSys",
+  "status": "custom",
+  "class": "custom",
+  "skidl": "custom",
+  "summary": "Example custom AI-island board using g6lc64_ai + default UIO connectors (island0 uio-mmio / island0_irq eventfd). Xg6lcai must only be advertised when AiMatrixEn=1. Host path: architecture/ai-matrix/board-uio-eventfd.md.",
+  "core": {
+    "config": "g6lc64_ai",
+    "xlen": 64,
+    "extensions": ["i", "m", "a", "f", "d", "c", "zicsr", "zifencei"],
+    "isaString": "rv64imafdc_xg6lcai"
+  },
+  "apu": {
+    "axiDataWidth": 64,
+    "noc": "axi4",
+    "socket": { "enabled": false },
+    "controllers": []
+  },
+  "interfaces": [
+    {
+      "id": "uart0",
+      "domain": "peripheral",
+      "kind": "uart",
+      "count": 1,
+      "notes": "Console UART (ns16550-class)."
+    },
+    {
+      "id": "ai0",
+      "domain": "accelerator",
+      "kind": "uio-mmio",
+      "count": 1,
+      "notes": "Xg6lcai island CAP/CTL MMIO via UIO (see ai.uioConnectors)."
+    }
+  ],
+  "phys": [],
+  "references": {
+    "spec": [],
+    "vendorDocs": [
+      "architecture/ai-matrix/board-uio-eventfd.md",
+      "architecture/ai-matrix/isa-encoding.md",
+      "corev_apu/bootrom/ariane-ai.dts"
+    ]
+  },
+  "ai": {
+    "enabled": true,
+    "mmioBase": "0x40000000",
+    "mmioSize": "0x1000",
+    "plicSource": 8,
+    "accTileM": 256,
+    "accTileN": 256,
+    "accTileK": 256,
+    "macsPerCycle": 256,
+    "queues": 1,
+    "queueDepth": 8,
+    "nocWidth": 64,
+    "profileId": "island-p3-v1",
+    "primaryUio": "island0",
+    "features": [
+      "t2_desc_v1",
+      "completion_word_v1",
+      "ai3_regions",
+      "op_gemm",
+      "dma_fetch",
+      "wr_cpl_en",
+      "plic_src8",
+      "pmu_v1",
+      "acc_tile_256"
+    ],
+    "uioConnectors": {
+      "island0": {
+        "kind": "uio-mmio",
+        "target": "island0",
+        "path": "/dev/uio0",
+        "notes": "Primary CAP/CTL MMIO window via UIO (AI_TENSOR_UIO)"
+      },
+      "island0_irq": {
+        "kind": "eventfd",
+        "target": "island0",
+        "notes": "IRQ completion wake — PLIC source 8 / eventfd handoff (AI_TENSOR_EVENTFD)"
+      }
+    }
+  }
+}
