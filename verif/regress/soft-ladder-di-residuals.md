@@ -23,7 +23,8 @@ SOFT_LADDER=1 bash verif/regress/dual-iss-regress.sh
 |--------------|------|--------|------------|
 | `b1-amo-spin-lock` | `mini_amoadd_w_spin.S` | **gate green**; OpenSBI spins peeled | soft-ladder-di-regress |
 | `b1-lrsc-cmpxchg` | `mini_lrsc_d.S` | **opt-in** (2nd SC-without-LR may fail on fw64; natural LR/SC still default in osbi) | soft-ladder-di-regress (`SOFT_LADDER_TESTS=…`) |
-| `b1-csr-expected-trap` | `mini_csr_expected_trap.S` | **gate green**; CSR probes peeled | soft-ladder-di-regress |
+| `b1-csr-expected-trap` | `mini_csr_expected_trap.S` + **`mini_csr_pmp_probe.S`** | **gate green** on slfix (simple + OpenSBI a3 multi-pmp shape). Hold still softs full `sbi_hart_init`. | soft-ladder-di-regress |
+| `b1-plat-ops-jalr` | hold SOFT_PLAT_OPS | **active holding** — irqchip/ipi/timer/tlb `c.jalr` → FDT; soft `c.li a0,0` | soft-ladder-osbi held ELF |
 | `b1-dual-cmv-s3` | `mini_dual_cmv_s3.S` (+ strlen bridges) | **peeled** natural c.mv | soft-ladder-di-regress |
 | `b1-sbi-strlen-rvi` | `mini_strlen_rvc` + natural strlen | **peeled** (FETCH_WIDTH=64) | soft-ladder-di-regress |
 | `b1-heap-freelist-malloc` | `mini_freelist_unlink` + natural malloc | **peeled** | soft-ladder-di-regress / osbi |

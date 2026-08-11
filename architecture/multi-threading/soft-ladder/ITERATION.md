@@ -43,8 +43,9 @@ Template at bottom.
 | | **B/C/D** j SUCCESS at domain_fin / start_finish | **FAIL** (never reached without hart_init progress) |
 | **Conclusion I4f** | (1) Cookie cave OK. (2) Stock residual on slfix: **`sbi_hart_init` CSR feature probes** (cont.33 family; `unresolved_csr_q` present but probes still die). (3) After soft-skip hart_init: **platform ops `c.jalr a5`** into FDT (irqchip@`17e0` first → mepc=`0x2047a`, then ipi/timer/tlb). |
 | **I4g Holding cookie green (2026-08-11)** | **`SOFT_HART_INIT` + `SOFT_PLAT_OPS`** → **`51b1babe`**. Artifact `*.held.elf`. Track `hold` auto-prefers held (builds peels from pin if missing). Reconfirm: track hold 20/0 @3e6. |
-| **I4h CSR mini (2026-08-11)** | `mini_csr_expected_trap` **PASS** on `work-ver-smt2-slfix` — simple csrrw/illegal/csrw serialize OK under iter-012. OpenSBI hart_init multi-pmp probe loop still needs stock peel (not covered by mini alone). |
-| **I6 Next** | (a) Directed mini for OpenSBI-like multi-CSR pmp probe + stack flag. (b) Platform ops ptr integrity (jalr→FDT). (c) PEEL_FDT_GETPROP. (d) SL-B after stock peels. |
+| **I4h CSR minis (2026-08-11)** | `mini_csr_expected_trap` **PASS**. New **`mini_csr_pmp_probe`** (a3 trap_info + multi pmpcfg/pmpaddr + dual illegal) **PASS** on `slfix`. Directed CSR expected-trap shape is green under iter-012. |
+| **I4i Platform ops residual** | With SOFT_HART_INIT only: hang mepc=`0x8002047a` (irqchip@`17e0`). SOFT_HART_INIT+irqchip only: mepc=`0x80020072` (next plat jalr, ipi family). Full `SOFT_PLAT_OPS` → cookie green. Ops `c.jalr a5` targets land in FDT — corrupt/uninitialized `platform->ops` after soft FDT path. |
+| **I6 Next** | (a) Why platform ops fn-ptrs are FDT under soft getprop (fdt_irqchip_init / generic ops). (b) Natural hart_init still soft-skipped for hold — re-bisect if full pmp loop hangs only in OpenSBI (mini green). (c) PEEL_FDT_GETPROP. (d) SL-B. |
 
 ## Completed iterations
 
