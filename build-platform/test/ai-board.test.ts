@@ -14,6 +14,7 @@ import { Logger } from "../src/util/log.ts";
 import {
   AI_BOARD_DEFAULTS,
   generateAiDtsFragment,
+  generateAiTensorEnv,
   resolveAiBoard,
   starterAiSpec,
   validateBoardAi,
@@ -133,6 +134,45 @@ describe("ai-board resolve / validate", () => {
     );
     expect(r!.connectors.map((c) => c.id).sort()).toEqual(["island0", "island0_irq"]);
     expect(r!.primaryUioPath).toBe("/dev/uio1");
+  });
+
+  test("resolveAiBoard accepts soft-sticky primary (virt-ai-pcie CI path)", () => {
+    const r = resolveAiBoard(
+      baseSpec({
+        boardid: "virt-ai-pcie",
+        ai: {
+          enabled: true,
+          primaryUio: "island0",
+          uioConnectors: {
+            island0: {
+              kind: "soft-sticky",
+              path: "virt://virt-ai-pcie/island0",
+              target: "island0",
+            },
+            island0_irq: {
+              kind: "eventfd",
+              path: "virt://virt-ai-pcie/island0_irq",
+              target: "island0",
+            },
+          },
+        },
+      }),
+    );
+    expect(r).not.toBeNull();
+    expect(r!.primaryUioId).toBe("island0");
+    expect(r!.primaryUioPath).toBe("virt://virt-ai-pcie/island0");
+    expect(r!.connectors.find((c) => c.id === "island0")?.kind).toBe("soft-sticky");
+    const env = generateAiTensorEnv(r!);
+    expect(env).toContain("AI_TENSOR_BOARD_ID=virt-ai-pcie");
+    expect(env).toContain("AI_TENSOR_UIO=virt://virt-ai-pcie/island0");
+    expect(validateBoardAi(r && {
+      enabled: true,
+      primaryUio: "island0",
+      uioConnectors: {
+        island0: { kind: "soft-sticky", path: "virt://virt-ai-pcie/island0" },
+        island0_irq: { kind: "eventfd", path: "virt://virt-ai-pcie/island0_irq" },
+      },
+    }, "virt-ai-pcie")).toEqual([]);
   });
 
   test("generateAiDtsFragment contains board-id and plic", () => {

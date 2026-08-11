@@ -40,7 +40,8 @@ export type TensorSpawnCmd =
   | "cosim"
   | "queue-soak"
   | "event-fd-soak"
-  | "rtl";
+  | "rtl"
+  | "virt-card";
 
 export function isTensorSpawnCmd(s: string): s is TensorSpawnCmd {
   return (
@@ -50,7 +51,8 @@ export function isTensorSpawnCmd(s: string): s is TensorSpawnCmd {
     s === "cosim" ||
     s === "queue-soak" ||
     s === "event-fd-soak" ||
-    s === "rtl"
+    s === "rtl" ||
+    s === "virt-card"
   );
 }
 
@@ -268,6 +270,7 @@ export function formatTensorStatus(ctx: PlatformContext): Record<string, unknown
       "tensor cosim",
       "tensor queue-soak",
       "tensor event-fd-soak",
+      "tensor virt-card",
       "tensor rtl",
     ],
   };

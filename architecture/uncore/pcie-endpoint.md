@@ -110,7 +110,20 @@ tier **R**; anything that is AI-specific (descriptor rings feeding the matrix en
 R** — the AI plane rides the open path, so no glob here is withheld and nothing blocks creating files.
 See `architecture/ai-matrix/README.md` §7.
 
-## 10. Scan pointers
+## 10. Hostless virtual board (`virt-ai-pcie`)
+
+Before a real FPGA/ASIC card exists, CI uses a **virtual** motherboard board that models the same
+BAR/virtio/SSH/BAR4 roles over localhost TCP and a soft UIO/eventfd userspace driver (no kernel, no
+PCIe PHY):
+
+- Board: `corev-mb/boards/virt-ai-pcie/board.json` (`class: virtual`, `skidl: omitted`)
+- Target doc: `corev-mb/architecture/virt-ai-pcie/README.md`
+- Driver: `ai-tensor/tools/virt_ai_card/` · smoke: `monorepo-soak/run-virt-ai-card.sh`
+- Host contract: `architecture/ai-matrix/board-uio-eventfd.md` §7
+
+Promotion to a physical card keeps connector ids and switches soft-sticky → live UIO + endpoint IP.
+
+## 11. Scan pointers
 Endpoint config-space/BAR target logic, MSI-X table, DMA engine, AXI bridge, and which FPGA hard-IP
 wrappers ship. Confirm endpoint (not just root-complex) coverage before vendoring. Pin a SHA before
 `vendored`.

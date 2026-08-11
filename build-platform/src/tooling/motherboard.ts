@@ -41,7 +41,8 @@ import {
 // ---------------------------------------------------------------------------
 
 export type BoardStatus = "reference" | "analysis" | "third-party" | "custom";
-export type BoardClass = "fpga" | "asic-soc" | "custom";
+/** Board form-factor class. `virtual` = hostless sim (no PCB / no hard PHY). */
+export type BoardClass = "fpga" | "asic-soc" | "custom" | "virtual";
 
 export interface BoardCoreReq {
   /** CVA6 target config package name (e.g. "cv64a6_imafdc_sv39"). */
@@ -251,7 +252,7 @@ export async function loadBoardSpec(ctx: PlatformContext, boardid: string): Prom
 }
 
 const STATUSES: readonly BoardStatus[] = ["reference", "analysis", "third-party", "custom"];
-const CLASSES: readonly BoardClass[] = ["fpga", "asic-soc", "custom"];
+const CLASSES: readonly BoardClass[] = ["fpga", "asic-soc", "custom", "virtual"];
 const SKIDL_MODES: readonly MotherboardSkidlMode[] = ["omitted", "reference", "custom"];
 
 function validateBoardSpec(raw: unknown, boardid: string): string[] {

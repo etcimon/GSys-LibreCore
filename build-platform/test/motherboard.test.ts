@@ -257,6 +257,50 @@ describe("motherboard engine", () => {
     const sv = generateBoardPackage(res.spec);
     expect(sv).toContain("localparam bit MbAi_En = 1'b1;");
   });
+
+  test("class virtual + status custom loads (virt-ai-pcie shape)", async () => {
+    const ctx = makeCtx(tmp);
+    const virt = sampleSpec({
+      boardid: "virt-ai-pcie",
+      name: "Virtual PCIe AI card (sim)",
+      vendor: "GSys",
+      status: "custom",
+      class: "virtual",
+      skidl: "omitted",
+      core: {
+        config: "g6lc64_ai",
+        xlen: 64,
+        extensions: ["i", "m", "a", "f", "d", "c"],
+        isaString: "rv64imafdc_xg6lcai",
+      },
+      ai: {
+        enabled: true,
+        primaryUio: "island0",
+        uioConnectors: {
+          island0: {
+            kind: "soft-sticky",
+            path: "virt://virt-ai-pcie/island0",
+            target: "island0",
+          },
+          island0_irq: {
+            kind: "eventfd",
+            path: "virt://virt-ai-pcie/island0_irq",
+            target: "island0",
+          },
+        },
+      },
+    });
+    writeBoard(tmp, "virt-ai-pcie", virt);
+    const spec = await loadBoardSpec(ctx, "virt-ai-pcie");
+    expect(spec.class).toBe("virtual");
+    expect(spec.status).toBe("custom");
+    expect(spec.skidl).toBe("omitted");
+    expect(spec.ai?.uioConnectors?.island0?.kind).toBe("soft-sticky");
+    const pkg = generateBoardPackage(spec);
+    expect(pkg).toContain("localparam bit MbAi_En = 1'b1;");
+    expect(pkg).toContain('BoardClass    = "virtual"');
+    expect(pkg).toContain("soft-sticky");
+  });
 });
 
 describe("pcbparts client (offline paths)", () => {

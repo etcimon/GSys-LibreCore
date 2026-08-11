@@ -1,0 +1,121 @@
+{
+  "boardid": "virt-ai-pcie",
+  "name": "Virtual PCIe AI card (sim)",
+  "vendor": "GSys",
+  "status": "custom",
+  "class": "virtual",
+  "skidl": "omitted",
+  "summary": "Hostless stand-in for the PCIe endpoint CPU+AI card (architecture/uncore/pcie-endpoint.md + ai-matrix). No PCB, no kernel, no real PCIe: soft-sticky UIO + eventfd userspace path for CI (ai-tensor/tools/virt_ai_card). Models virtio-net/SSH workload push and BAR4 bulk tensor transfer over localhost TCP.",
+  "core": {
+    "config": "g6lc64_ai",
+    "xlen": 64,
+    "extensions": ["i", "m", "a", "f", "d", "c", "zicsr", "zifencei"],
+    "isaString": "rv64imafdc_xg6lcai"
+  },
+  "apu": {
+    "axiDataWidth": 64,
+    "noc": "axi4",
+    "socket": { "enabled": false },
+    "controllers": [
+      {
+        "id": "verilog-pcie",
+        "variant": "endpoint",
+        "enable": false,
+        "note": "Planned PCIe endpoint (verilog-pcie) — virtual board does not fetch PHY/controller; real card promotion enables this."
+      }
+    ]
+  },
+  "interfaces": [
+    {
+      "id": "pcie_ep",
+      "domain": "interconnect",
+      "kind": "pcie-endpoint",
+      "controller": "verilog-pcie",
+      "count": 1,
+      "notes": "Simulated PCIe endpoint (BAR0 mgmt/AI CAP, BAR2 virtio, BAR4 bulk). Hostless: VirtualPcieLink TCP."
+    },
+    {
+      "id": "virtio_net",
+      "domain": "network",
+      "kind": "virtio-net",
+      "count": 1,
+      "notes": "Control/data path model for SSH/Ray-style workload push (JSON over TCP in virt_ai_card)."
+    },
+    {
+      "id": "ssh",
+      "domain": "peripheral",
+      "kind": "ssh-control",
+      "count": 1,
+      "notes": "Card-side agent stand-in for ssh/job submit (card_agent.py)."
+    },
+    {
+      "id": "bar4_bulk",
+      "domain": "memory",
+      "kind": "bar4-bulk",
+      "count": 1,
+      "notes": "Resizable BAR4 bulk tensor window (process-local buffer or socket copy)."
+    },
+    {
+      "id": "ai0",
+      "domain": "accelerator",
+      "kind": "uio-soft",
+      "count": 1,
+      "notes": "Soft UIO CAP/CTL window (VirtualUioDevice); primary connector island0 soft-sticky."
+    }
+  ],
+  "phys": [],
+  "features": ["virtual_pcie", "virtio_ssh", "soft_uio"],
+  "references": {
+    "spec": [],
+    "vendorDocs": [
+      "architecture/uncore/pcie-endpoint.md",
+      "architecture/ai-matrix/board-uio-eventfd.md",
+      "architecture/ai-matrix/README.md",
+      "ai-tensor/tools/virt_ai_card/README.md",
+      "corev-mb/architecture/virt-ai-pcie/README.md"
+    ]
+  },
+  "ai": {
+    "enabled": true,
+    "mmioBase": "0x40000000",
+    "mmioSize": "0x1000",
+    "plicSource": 8,
+    "accTileM": 256,
+    "accTileN": 256,
+    "accTileK": 256,
+    "macsPerCycle": 256,
+    "queues": 1,
+    "queueDepth": 8,
+    "nocWidth": 64,
+    "profileId": "island-p3-v1",
+    "primaryUio": "island0",
+    "features": [
+      "t2_desc_v1",
+      "completion_word_v1",
+      "ai3_regions",
+      "op_gemm",
+      "dma_fetch",
+      "wr_cpl_en",
+      "plic_src8",
+      "pmu_v1",
+      "acc_tile_256",
+      "virtual_pcie",
+      "virtio_ssh",
+      "soft_uio"
+    ],
+    "uioConnectors": {
+      "island0": {
+        "kind": "soft-sticky",
+        "target": "island0",
+        "path": "virt://virt-ai-pcie/island0",
+        "notes": "CI primary: hostless soft-sticky CAP/CTL (VirtualUioDevice). AI_TENSOR_UIO=virt://virt-ai-pcie/island0"
+      },
+      "island0_irq": {
+        "kind": "eventfd",
+        "target": "island0",
+        "path": "virt://virt-ai-pcie/island0_irq",
+        "notes": "Virtual eventfd (threading.Event + counter). Claim DONE @0x10C before clear/rearm (PLIC-8 discipline)."
+      }
+    }
+  }
+}

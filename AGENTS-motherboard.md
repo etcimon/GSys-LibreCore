@@ -92,7 +92,7 @@ Flags: `--online` (allow pcbparts.dev network), `--fix`, `--add`, `--query`, `--
 Key fields:
 
 - **`status`**: `reference` | `analysis` | `third-party` | `custom`.
-- **`class`**: `fpga` | `asic-soc` | `custom`.
+- **`class`**: `fpga` | `asic-soc` | `custom` | `virtual` (hostless sim / no PCB; e.g. `virt-ai-pcie`).
 - **`skidl`**: `omitted` (no PCB authored — third-party/dev board) | `reference` (study an OSHW
   board read-only) | `custom` (design it in-tree with SKiDL; the only mode `mb design` runs).
 - **`core`**: `{ config, xlen, extensions[], isaString }` — the CVA6 target config the board

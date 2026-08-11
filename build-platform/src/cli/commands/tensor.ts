@@ -35,16 +35,18 @@ export const tensorCommand: Command = {
   summary:
     "Host adapter for standalone ai-tensor (spawn doctor/test/golden/cosim)",
   usage:
-    "bun run src/cli/index.ts tensor [status|doctor|probe|test|golden|cosim|queue-soak|rtl|rtl-hard|check] [--dry-run] [--json]",
+    "bun run src/cli/index.ts tensor [status|doctor|probe|test|golden|cosim|queue-soak|rtl|rtl-hard|virt-card|check] [--dry-run] [--json]",
   details:
     "Spawns ai-tensor package tooling without Cargo path deps. " +
     "Mirrors timings → sv-timing. Package owns sim/SoftIsland goldens and cosim_harness. " +
     "tensor probe emits ProbeReport JSON (schemas/probe.v1.json). " +
-    "tensor rtl soft-probes; tensor rtl-hard runs mmio+gemm_s8 on work-ver-ai.",
+    "tensor rtl soft-probes; tensor rtl-hard runs mmio+gemm_s8 on work-ver-ai; " +
+    "tensor virt-card runs hostless virt-ai-pcie soft UIO/eventfd smoke.",
   examples: [
     "bun run src/cli/index.ts tensor status",
     "bun run src/cli/index.ts tensor probe",
     "bun run src/cli/index.ts tensor test",
+    "bun run src/cli/index.ts tensor virt-card",
     "bun run src/cli/index.ts tensor rtl-hard",
     "AI_TENSOR_DIR=/path/to/ai-tensor bun run src/cli/index.ts tensor doctor",
   ],
@@ -81,7 +83,7 @@ export const tensorCommand: Command = {
       }
       logger.info(`note     : ${body.note}`);
       logger.info(
-        "commands : tensor doctor|probe|test|golden|cosim|queue-soak|rtl|rtl-hard|check",
+        "commands : tensor doctor|probe|test|golden|cosim|queue-soak|rtl|rtl-hard|virt-card|check",
       );
       return body.present ? 0 : 1;
     }

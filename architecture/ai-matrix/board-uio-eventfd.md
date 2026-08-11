@@ -180,7 +180,46 @@ Example committed board: `corev-mb/boards/ai-card/` · target doc:
 
 ---
 
-## 7. Related pins
+## 7. Virtual board / `virt-ai-pcie`
+
+Hostless stand-in for the **PCIe endpoint CPU+AI card** (no kernel, no real
+PCIe, no PCB). Board class is `virtual`; primary connector is **soft-sticky**.
+
+| Item | Value |
+|---|---|
+| Board | `corev-mb/boards/virt-ai-pcie/board.json` |
+| Architecture target | `corev-mb/architecture/virt-ai-pcie/README.md` |
+| Userspace driver | `ai-tensor/tools/virt_ai_card/` (`VirtualUioDevice`, `VirtualEventFd`) |
+| Transport | `VirtualPcieLink` localhost TCP (virtio-net/SSH + BAR4 bulk model) |
+| Primary UIO path | `virt://virt-ai-pcie/island0` |
+| IRQ path | `virt://virt-ai-pcie/island0_irq` (eventfd) |
+| Smoke | `python3 ai-tensor/tools/virt_ai_card/smoke.py` · `monorepo-soak/run-virt-ai-card.sh` |
+
+```json
+"uioConnectors": {
+  "island0": {
+    "kind": "soft-sticky",
+    "path": "virt://virt-ai-pcie/island0",
+    "target": "island0"
+  },
+  "island0_irq": {
+    "kind": "eventfd",
+    "path": "virt://virt-ai-pcie/island0_irq",
+    "target": "island0"
+  }
+}
+```
+
+Claim order is identical to §2: wait → **claim DONE @0x10C** → clear/rearm.
+Promotion to a lab board switches `island0` to `uio-mmio` `/dev/uio0` and enables
+a real PCIe endpoint (`architecture/uncore/pcie-endpoint.md`).
+
+`mb select virt-ai-pcie` emits the same AI artifact set with
+`AI_TENSOR_UIO=virt://virt-ai-pcie/island0`.
+
+---
+
+## 8. Related pins
 
 | Artifact | Role |
 |---|---|
@@ -190,5 +229,8 @@ Example committed board: `corev-mb/boards/ai-card/` · target doc:
 | `architecture/ai-matrix/dts/g6lc-ai-matrix.dtsi` | generic DTS node template (not on flist) |
 | `build-platform/src/tooling/ai-board.ts` | `AI_BOARD_DEFAULTS` + generators |
 | `corev-mb/boards/ai-card/board.json` | example custom AI board |
+| `corev-mb/boards/virt-ai-pcie/board.json` | virtual PCIe AI card (soft-sticky CI) |
+| `ai-tensor/tools/virt_ai_card/` | VirtualUioDevice + TCP host/card agents |
 | `verif/tests/custom/ai/ai_irq_plic_smoke.S` | PLIC-8 directed |
 | `monorepo-soak/run-ai-tensor.sh event-fd-soak` | hostless EventFd CI |
+| `monorepo-soak/run-virt-ai-card.sh` | hostless virt-ai-pcie smoke |

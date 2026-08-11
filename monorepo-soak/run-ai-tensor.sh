@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
 # Thin monorepo adapter: spawn ai-tensor package tests without linking crates into RTL.
-# Usage: bash monorepo-soak/run-ai-tensor.sh [check|test|golden|cosim|queue-soak|event-fd-soak|rtl]
+# Usage: bash monorepo-soak/run-ai-tensor.sh [check|test|golden|cosim|queue-soak|event-fd-soak|rtl|virt-card]
 #
 # Env:
 #   AI_TENSOR_DIR          package root (default: $ROOT/ai-tensor)
@@ -58,6 +58,10 @@ JSON
     # Soft by default; hard when AI_TENSOR_RTL_HARD=1
     bash "$ROOT/monorepo-soak/run-ai-tensor-rtl.sh"
     ;;
+  virt-card)
+    # Hostless virtual PCIe AI card (soft UIO/eventfd; no kernel / real PCIe)
+    bash "$ROOT/monorepo-soak/run-virt-ai-card.sh"
+    ;;
   test)
     python3 tools/check_independence.py
     cargo test --workspace --exclude ai-tensor-py
@@ -67,7 +71,7 @@ JSON
     cargo run -q -p ai-tensor-cli -- doctor --profile profiles/island-p3-v1.toml
     ;;
   *)
-    echo "usage: $0 [check|test|golden|cosim|queue-soak|event-fd-soak|rtl]"
+    echo "usage: $0 [check|test|golden|cosim|queue-soak|event-fd-soak|rtl|virt-card]"
     exit 2
     ;;
 esac
