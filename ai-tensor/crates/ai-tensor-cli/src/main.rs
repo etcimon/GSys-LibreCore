@@ -5,8 +5,8 @@ use ai_tensor_abi::{Completion, Desc64, DESC_BYTES};
 use ai_tensor_rt::{
     prepare_device, probe_cap_regs, run_builtin_suite, run_external_cosim_checks, run_gemm_s8,
     run_gemm_s8_auto, run_gemm_s8_stream, run_gemm_s8_stream_ex, seed_cap_island_p3,
-    soak_history_poll, soak_irq_wait, soak_multi_queue, soak_queue_depth, Device, HostRuntime,
-    IrqContract, MappedWindow, MmioDevice, ProbeReport, Profile, SimDevice, SubmitMode, WaitPolicy,
+    soak_eventfd_fifo_multi, soak_eventfd_wait, soak_history_poll, soak_irq_wait, soak_multi_queue, soak_queue_depth, Device, HostRuntime,
+    EventFdWait, IrqContract, MappedWindow, MmioDevice, ProbeReport, Profile, SimDevice, SubmitMode, WaitPolicy,
 };
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -112,6 +112,11 @@ enum Cmd {
     /// Soft IRQ claim soak (PLIC discipline model; FLAG_IRQ + claim_done)
     IrqSoak {
         #[arg(long, default_value = "sim")]
+        backend: String,
+    },
+    /// EventFd-shaped IRQ wait soak (hostless soft; board: AI_TENSOR_EVENTFD)
+    EventFdSoak {
+        #[arg(long, default_value = "mmio")]
         backend: String,
     },
     /// Stream GEMM with wait policy: poll | irq | dma
@@ -417,6 +422,23 @@ fn main() {
             println!(
                 "irq_soak_ok backend={be} plic={} mode=soft_sticky",
                 c.plic_source
+            );
+        }
+        Cmd::EventFdSoak { backend } => {
+            let be = backend.to_lowercase();
+            if be == "sim" {
+                let mut dev = SimDevice::new();
+                soak_eventfd_wait(&mut dev).expect("eventfd soak");
+            } else {
+                let mut dev = MmioDevice::new();
+                dev.probe_caps();
+                soak_eventfd_fifo_multi(&mut dev).expect("eventfd fifo soak");
+            }
+            let c = IrqContract::island_p3_eventfd();
+            println!(
+                "eventfd_soak_ok backend={be} plic={} mode=eventfd soft={}",
+                c.plic_source,
+                EventFdWait::soft().is_soft()
             );
         }
         Cmd::StreamPolicy {

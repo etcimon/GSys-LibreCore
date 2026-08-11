@@ -62,19 +62,20 @@ desc latch (`0x0140`). SoftIsland returns `ST_BAD_QID` for foreign qids. Hostles
 |---|---|
 | `SoftSticky` | CI / SoftIsland — poll `irq_pending` then claim DONE |
 | `Uio` | `linux-mmio` + `/dev/uio*` — blocking read event count |
-| `EventFd` | Future PLIC→eventfd; same host sequencing as UIO |
+| EventFd | Hostless soft counter + board PLIC eventfd (EventFdWait); claim before re-enable |
 
 Island_p3 Variane: **PLIC source 8**. Always **claim DONE before PLIC complete** (level re-arm).
 Stream path accepts `WaitPolicy` via `run_gemm_s8_stream_with_policy` and
 `SubmitMode::{Latch,Fetch}` via `run_gemm_s8_stream_ex` / `Device::submit_fetch`.
 
-**Queue depth:** CAP `queue_depth` is a software planning hint. With one DONE sticky the host
-must **submit → wait → next** (see `soak_queue_depth`). Concurrent multi-outstanding needs a
-future completion FIFO in RTL.
+**Queue depth / CPL FIFO:** CAP queue_depth bounds SoftIsland history and matches island
+g6lc_ai_cpl_fifo (oldest-first claim). Engine is still single-outstanding; FIFO holds finishes.
+EventFdWait + head.irq re-arm after claim (soak_eventfd_fifo_multi).
 
-**Completion history (SoftIsland):** a software ring of last `queue_depth` completions so
-sequential tickets remain `poll(ticket)`-able after DONE sticky advances (`soak_history_poll`).
-Not a HW FIFO — board path still has one sticky DONE until RTL grows a queue.
+**Completion history (SoftIsland):** ring of last queue_depth completions with per-entry IRQ;
+poll(ticket) after head advances (soak_history_poll). RTL DONE claim = pop FIFO head.
+
+
 
 **Host probe:** `ProbeReport::to_json` / CLI `probe` / `doctor --json` — CAP, PMU, IRQ contract,
 profile wait/submit pins for monorepo discovery. Schema: `schemas/probe.v1.json`.

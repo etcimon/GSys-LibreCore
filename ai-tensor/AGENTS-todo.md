@@ -60,7 +60,8 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [ ] Board-validated UIO map on live Variane/FPGA
 - [x] SoftIsland FLAG_IRQ sticky + DONE clear (PLIC mirror discipline)
 - [x] IRQ wait abstraction (`irq.rs`: SoftSticky + UioIrqWait under linux-mmio; PLIC-8 contract)
-- [ ] Host PLIC-8 eventfd/UIO live wait on board (driver present)
+- [x] Host EventFd wait abstraction + hostless soft soak / FIFO re-arm (EventFdWait, CLI event-fd-soak)
+- [ ] Host PLIC-8 eventfd/UIO **live board** wait (kernel driver + /dev/uio* or eventfd wire)
 - [x] Offline cosim goldens (sim+SoftIsland) + `golden-check` CLI
 - [x] Rust `run_gemm_s8_auto` AccTile streaming
 - [x] Monorepo spawn `monorepo-soak/run-ai-tensor.sh`
@@ -71,7 +72,8 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
   (soft default; `AI_TENSOR_RTL_HARD=1` → ai-matrix-veri subset)
 - [x] Lab HARD smoke (reuse `work-ver-ai`): `ai_island_mmio_smoke` + `ai_gemm_s8_smoke` **PASS**
   (`monorepo-soak/run-ai-tensor-rtl-hard.sh`, 2026-08-10)
-- [ ] Full suite / larger GEMM HARD regression in CI (opt-in rebuild)
+- [x] HARD suite CI post-FIFO (run-ai-matrix-hard-suite.sh ci) 27/27 on work-ver-ai
+- [ ] Full suite incl. 128/256 GEMM HARD (optional long)
 - [x] Python Caps / PMU surface + torch meta
 - [x] `tools/check_independence.py` + `ait.py check`
 

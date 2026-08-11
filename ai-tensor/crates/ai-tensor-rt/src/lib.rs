@@ -27,8 +27,9 @@ pub use stream::{
 };
 pub use policy::{recommend_policy, soak_multi_queue, wait_with_policy, WaitPolicy};
 pub use irq::{
-    claim_after_irq, soak_irq_wait, wait_irq_sticky, wait_irq_then_claim, IrqContract, IrqWaitMode,
-    VARIANCE_PLIC_SOURCE,
+    claim_after_irq, soak_eventfd_fifo_multi, soak_eventfd_wait, soak_irq_wait,
+    wait_eventfd_then_claim, wait_irq_sticky, wait_irq_then_claim, EventFdWait, IrqContract,
+    IrqWaitMode, VARIANCE_PLIC_SOURCE,
 };
 pub use depth::{soak_history_poll, soak_queue_depth, soak_ticket_sequence, SubmitMode};
 pub use probe::ProbeReport;

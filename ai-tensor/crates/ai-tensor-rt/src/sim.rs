@@ -273,7 +273,13 @@ impl Device for SimDevice {
     }
 
     fn poll(&mut self, ticket: u32) -> Result<Option<Completion>, RtError> {
-        Ok(self.completions.get(&ticket).copied())
+        let c = self.completions.get(&ticket).copied();
+        // Single sticky IRQ model: observing a completion is enough to drop level.
+        // SoftIsland CPL FIFO uses head.irq re-arm instead (MmioDevice).
+        if c.is_some() {
+            self.irq_sticky = false;
+        }
+        Ok(c)
     }
 
     fn pmu(&self) -> PmuSnapshot {

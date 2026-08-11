@@ -75,9 +75,9 @@ pub struct SoftIsland {
     next_off: usize,
     // last completion for Device::poll convenience
     last_comp: Option<Completion>,
-    /// Software completion history (CAP.queue_depth). Models a future HW FIFO so
-    /// sequential tickets remain pollable after DONE sticky advances.
-    comp_history: VecDeque<Completion>,
+    /// Software completion history (CAP.queue_depth). Models g6lc_ai_cpl_fifo:
+    /// oldest-first head; per-entry IRQ for head-driven irq after claim/pop.
+    comp_history: VecDeque<(Completion, bool)>,
 }
 
 impl Default for SoftIsland {
@@ -130,8 +130,8 @@ impl SoftIsland {
         self.cap.queue_depth.max(1) as usize
     }
 
-    fn push_history(&mut self, c: Completion) {
-        self.comp_history.push_back(c);
+    fn push_history(&mut self, c: Completion, irq: bool) {
+        self.comp_history.push_back((c, irq));
         let cap = self.history_cap().max(4);
         while self.comp_history.len() > cap {
             self.comp_history.pop_front();
@@ -140,7 +140,11 @@ impl SoftIsland {
 
     /// Find a past completion by ticket (does not clear DONE sticky).
     pub fn history_lookup(&self, ticket: u32) -> Option<Completion> {
-        self.comp_history.iter().rev().find(|c| c.ticket == ticket).copied()
+        self.comp_history
+            .iter()
+            .rev()
+            .find(|(c, _)| c.ticket == ticket)
+            .map(|(c, _)| *c)
     }
 
     fn cap_word(&self, word_idx: u16) -> u32 {
@@ -305,24 +309,21 @@ impl SoftIsland {
     fn complete(&mut self, ticket: u32, status: u16, irq: bool) {
         // FIFO push (oldest-first head); matches g6lc_ai_cpl_fifo
         let c = Completion { ticket, status };
-        self.push_history(c);
+        self.push_history(c, irq);
         self.last_comp = Some(c);
         self.last_status = status;
         self.busy = false;
-        self.refresh_done_head(irq);
+        self.refresh_done_head();
     }
 
     /// After push/pop: expose FIFO head on DONE/TICKET/DSTATUS and IRQ.
-    fn refresh_done_head(&mut self, new_irq: bool) {
-        if let Some(front) = self.comp_history.front().copied() {
+    /// RTL: irq_o = !empty && head.irq
+    fn refresh_done_head(&mut self) {
+        if let Some((front, irq)) = self.comp_history.front().copied() {
             self.done_sticky = true;
             self.done_ticket = front.ticket;
             self.done_status = front.status;
-            // Level IRQ if head requested IRQ, or any pending with sticky flag
-            if new_irq {
-                self.irq_sticky = true;
-            }
-            // Head-driven: if no entry left with irq intent, clear after pop path
+            self.irq_sticky = irq;
         } else {
             self.done_sticky = false;
             self.irq_sticky = false;
@@ -331,13 +332,7 @@ impl SoftIsland {
 
     fn claim_pop(&mut self) {
         let _ = self.comp_history.pop_front();
-        // Recompute irq from remaining: SoftIsland stores only last irq sticky;
-        // clear IRQ on claim like RTL head pop (host re-sees if next head has FLAG_IRQ).
-        self.irq_sticky = false;
-        self.refresh_done_head(false);
-        // Restore irq if we tracked per-entry — SoftIsland uses coarse sticky:
-        // re-set if any remaining completion was from IRQ jobs (approximate: keep false
-        // until next IRQ complete; matches single-job smokes and sequential claim).
+        self.refresh_done_head();
     }
 
     fn doorbell(&mut self, val: u32) {
