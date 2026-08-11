@@ -1,9 +1,14 @@
 # Scaling `Xg6lcai` to the 100-TOPS class — sizing model and consequent decisions
 
-**Status:** plan of record (P0 docs) · **Parent:** [`README.md`](README.md) · **Contract:**
-[`isa-encoding.md`](isa-encoding.md) · **Transport:** [`../uncore/pcie-endpoint.md`](../uncore/pcie-endpoint.md)
+**Status:** plan of record · **RTL progress:** I1 partial + I3-lite live (see [`README.md`](README.md) §0) ·
+**Parent:** [`README.md`](README.md) · **Contract:** [`isa-encoding.md`](isa-encoding.md) ·
+**HARD map:** [`hard-tests.md`](hard-tests.md) · **Transport:** [`../uncore/pcie-endpoint.md`](../uncore/pcie-endpoint.md)  
 **Licensing:** tier T doc (MIT, no inline header). The silicon it describes is tier **R** (open,
 dual-licensed); **AI-0 closed on the open path**, so nothing here is licensing-blocked.
+
+> **Where we are vs this plan (2026-08-11).** I0 + staged SKU (**AI-S1**) closed. Single-cluster
+> AccTile 256 + CPL FIFO + HARD narrow/ci/peak green. **Next executable work:** measure I3 bandwidth
+> against §4, then I2 multi-cluster — without breaking single-cluster HARD bit-identity.
 
 > **Why this document exists.** `README.md` sizes a *seam*. It does not size a *machine*. A review of
 > a 100-TOPS target showed that the interesting decisions at that scale are not seam decisions at all,

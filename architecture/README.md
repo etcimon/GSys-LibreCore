@@ -50,9 +50,9 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `multi-core/` | Multi-hart tiles, coherence, interrupt scaling | SoC integration | `agents/guides/AGENTS-l2l3-cache.md`, `-soc-readiness.md` |
 | `l2-l3-cache/` | Memory-side L2 / SoC L3 (LLC) | SoC integration (not an L1 edit) | `agents/guides/AGENTS-l2l3-cache.md` |
 | `spec-extensions/` | Further RISC-V ISA features (V, Zvk, Sv57, CFI, …) | Spec-anchored | `agents/spec/INDEX.md` + relevant guide |
-| `ai-matrix/` | INT8 matrix acceleration (`Xg6lcai`) for a PCIe CPU+AI card | Offload seam (CVXIF → accelerator) for the core-attached plane; an **uncore island** for the throughput plane — **not** an `ex_stage` edit | `ai-matrix/README.md` + `scaling-100tops.md` + `frameworks-virt-pcie.md` + `uncore/pcie-endpoint.md` |
+| `ai-matrix/` | INT8 matrix acceleration (`Xg6lcai`) for a PCIe CPU+AI card | **Live P1–P3 / I1 partial** — CVXIF plane + `ai_island` T2; next **I3 BW → I2 clusters** | `ai-matrix/README.md` §0 progress table + `hard-tests.md` + `scaling-100tops.md` + `frameworks-virt-pcie.md` + `uncore/pcie-endpoint.md` |
 | `sv-timing/` | Structural FO4 precompile package pointer (host = build-platform `timings`) | Tooling / host adapter | `sv-timing/AGENTS.md`, `AGENTS-host.md` |
-| `ai-tensor/` (package at repo root) | PyTorch/TensorFlow **backend** for `Xg6lcai` / `ai_island` (host software; not RTL) | Tooling / ML runtime | `ai-tensor/AGENTS.md`; host gate `tensor pytorch --board virt-ai-pcie --core g6lc64_ai` |
+| `ai-tensor/` (package at repo root) | PyTorch/TensorFlow **backend** for `Xg6lcai` / `ai_island` (host software; not RTL) | **Live** soft virt-card + HARD virt-impl | `ai-tensor/AGENTS.md`; `tensor virt-impl --impl hard --suite narrow` |
 
 Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings outs, `--from-timing` soak hand-off) is documented in [`build-platform-workspace-lifecycle.md`](build-platform-workspace-lifecycle.md) — not an RTL extension point; still scaffold-only (no flist).
 
@@ -69,6 +69,8 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `out-of-order/README.md` | U4 slice + **U5.0–U5.2** status |
 | `l2-l3-cache/README.md` | L2 done; **L3 + server prefetcher** |
 | `ai-matrix/scaling-100tops.md` | **Sizing plan:** frozen TOPS definition, bandwidth-first model (`BW = 2/T × MAC-rate`), core-attached vs island plane split, chiplet deferral gate. **SKU decided (AI-S1): both, staged** — latency SKU first (I1→I3), throughput SKU by cluster replication (I2), one memory system serving both. |
+| `ai-matrix/hard-tests.md` | **HARD / directed ELF map:** narrow\|smoke\|ci\|peak surfaces, green results, I0–I4 coverage vs clustering next step. |
+| `ai-matrix/frameworks-virt-pcie.md` | Host multi-phase: soft virt-ai-pcie → SV HARD → optional `--from-timing`. |
 | `ara-vector-attach.md` | U10ᵇ Ara/RVV flist + `server_math_v` package contract |
 | `multi-threading/smt2-bringup.md` | U6.1 SMT2 enable + dual-thread Linux/OpenSBI checklist |
 | `multi-threading/soft-ladder/` | DI OpenSBI soft-ladder promotion (B1 RTL / B2 FW / B3 harness) |

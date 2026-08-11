@@ -95,6 +95,8 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
   (soft Device/PyTorch → SV HARD work-ver-ai → sv-timing FO4 via `--from-timing`/`--use-emit`)
 - [x] Monorepo soak: `run-ai-tensor-pytorch.sh` / `run-ai-tensor-virt-impl.sh` / frameworks / regress
 - [x] Docs: monorepo `architecture/ai-matrix/frameworks-virt-pcie.md` §2.1a + HOST/FRAMEWORKS updates
+- [x] Monorepo HARD catalog + progress table: `architecture/ai-matrix/hard-tests.md`, README §0
+- [x] Working gate: `tensor virt-impl --impl hard --suite narrow --require-hard` (soft+SV PASS)
 - [x] Stream + WaitPolicy (`run_gemm_s8_stream_with_policy` / CLI `stream-policy`)
 - [x] Stream + SubmitMode latch/fetch (`run_gemm_s8_stream_ex` / `Device::submit_fetch`)
 - [x] Single-queue sequential depth soak (`depth.rs` / CLI `depth-soak`)

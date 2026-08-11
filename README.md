@@ -46,10 +46,11 @@ level of the stack legible to an AI agent.
 > | **Multi-core (U6.2)** | **Live** — `NrCores` 1…8, `g6lc_cluster`, coherence hub, scaled CLINT/PLIC; L1 inv adapters | [`multi-core/`](architecture/multi-core/) |
 > | **L2 / L3 / stream PF** | L2 **done**; L3 + server multi-stream prefetcher **done (config-gated)**; inclusive back-inval live | [`l2-l3-cache/`](architecture/l2-l3-cache/) |
 > | **Stream plane** | **Stream8 class green** — `g6lc64_stream8`, `mc-spo-veri` 9/9, AMOCAS W/D/Q, H-edge 3/3; optional suite (not default CI) | [`stream8-class.md`](architecture/stream8-class.md) |
+> | **AI matrix / island (`Xg6lcai`)** | **P1–P3 / I1 partial live** — CVXIF + `ai_island` T2 @ `0x4000_0000`, AccTile 256, CPL FIFO, HARD narrow/ci/peak green; **ai-tensor** soft virt-ai-pcie + `tensor virt-impl` soft→HARD; **next I3 BW measure → I2 clustering** | [`ai-matrix/`](architecture/ai-matrix/) · [`hard-tests.md`](architecture/ai-matrix/hard-tests.md) |
 >
 > Defaults keep **netlist identity** for small targets: `OoOEn=0`, `SliceOoOEn=0`,
-> `NrHarts=1`, `L2En=0` / `L3En=0`, `DeepSpecEn=0`. Production profiles opt in via
-> `g6lc64_{smt2,ooo,ooo_server,server_math,stream8}_config_pkg.sv`.
+> `NrHarts=1`, `L2En=0` / `L3En=0`, `DeepSpecEn=0`, `AiMatrixEn=0`. Production profiles opt in via
+> `g6lc64_{smt2,ooo,ooo_server,server_math,stream8,ai}_config_pkg.sv`.
 >
 > **Toward production-ready (honest estimate, not a tape-out gate):**
 >

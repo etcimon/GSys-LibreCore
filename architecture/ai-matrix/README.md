@@ -1,28 +1,32 @@
 # Extension point: AI matrix acceleration (`Xg6lcai`)
 
-**Status:** scaffold (P0) · **Code prefix:** `g6lc_ai` / `Xg6lcai` · **Licensing:** tier **R** (open, dual-licensed — §7)
+**Status:** **live RTL + host stack (P1–P3 / I1 partial)** · **Code prefix:** `g6lc_ai` / `Xg6lcai` ·
+**Licensing:** tier **R** (open, dual-licensed — §7) · **Config package:** `g6lc64_ai`
 
-Feature-domain extension point for INT8 matrix acceleration on LibreCore, targeting a PCIe
-**CPU+AI card**: real application-class cores and a matrix engine sharing one address space, running
-Linux locally, reachable over IPv6-over-PCIe. Read `../README.md` (scaffold contract) and
-`../../AGENTS.md` §0 first. Transport side: `../uncore/pcie-endpoint.md`.
+Feature-domain for INT8 matrix acceleration on LibreCore: PCIe **CPU+AI card** with application-class
+cores and a matrix island sharing one address space. Read `../README.md` (scaffold contract) and
+`../../AGENTS.md` §0 first. Transport: `../uncore/pcie-endpoint.md`.
 
-**Frozen interface contract: [`isa-encoding.md`](isa-encoding.md)** — opcodes, operand classes, CSR
-addresses, trap rules and the T2 descriptor ABI. It is normative for **both** seam options and must
-not diverge between them (§2.2). §5 below is a summary; that document is the source of truth.
+| Doc | Role |
+|---|---|
+| [`isa-encoding.md`](isa-encoding.md) | Frozen ISA / CSR / Desc64 contract |
+| [`scaling-100tops.md`](scaling-100tops.md) | I0–I4 sizing; **next: I3 measure → I2 clusters** |
+| [`hard-tests.md`](hard-tests.md) | **HARD suites + directed ELF catalog + green results** |
+| [`frameworks-virt-pcie.md`](frameworks-virt-pcie.md) | soft virt-ai-pcie + `tensor virt-impl` soft→HARD→timing |
+| [`completion-fifo.md`](completion-fifo.md) | CPL FIFO RTL + multi-claim |
+| [`board-uio-eventfd.md`](board-uio-eventfd.md) | PLIC-8 / UIO / eventfd board contract |
+| [`../../ai-tensor/AGENTS.md`](../../ai-tensor/AGENTS.md) | Host ML backend package |
 
-**Host ML backend (separate package):** [`../../ai-tensor/AGENTS.md`](../../ai-tensor/AGENTS.md) —
-PyTorch / TensorFlow attachment to this contract and to live `corev_apu/ai_island`. Architecture
-cross-connect and version pins: [`../../ai-tensor/architecture/VERSIONING.md`](../../ai-tensor/architecture/VERSIONING.md).
-Offline dual-oracle goldens (sim + SoftIsland) + external harness
-`ai-tensor/tools/cosim_harness.py` (`AI_TENSOR_COSIM_CMD`); monorepo spawn
-`monorepo-soak/run-ai-tensor.sh {test,golden,cosim}`; lab HARD
-`monorepo-soak/run-ai-tensor-rtl-hard.sh` (mmio+gemm_s8 on `work-ver-ai`).
-Board UIO/eventfd contract: [board-uio-eventfd.md](board-uio-eventfd.md). Completion FIFO RTL + HARD: [completion-fifo.md](completion-fifo.md) (SoC HARD CI suite 27/27 green post-FIFO; monorepo-soak/run-ai-matrix-hard-suite.sh).
-**Frameworks via virtual PCIe board:** [frameworks-virt-pcie.md](frameworks-virt-pcie.md) —
-`tensor pytorch|frameworks|regress --board virt-ai-pcie --core g6lc64_ai` validates ai-tensor
-Device/PyTorch against ai_island features through soft UIO + VirtualPcieLink (hostless).
-Not on any flist; does not replace this scaffold.
+**Host gates (build-platform):**
+
+```text
+tensor pytorch --board virt-ai-pcie --core g6lc64_ai              # soft
+tensor virt-impl --impl hard --suite narrow --require-hard        # soft + SV HARD
+tensor rtl-hard --suite narrow|smoke|ci|peak                      # SV only
+```
+
+> Architecture docs under this tree remain **non-flist** design of record. Live RTL lives under
+> `core/` (CVXIF plane) and `corev_apu/ai_island/` (T2 island) — see §3 and [`hard-tests.md`](hard-tests.md).
 
 **Scaling plan of record: [`scaling-100tops.md`](scaling-100tops.md)** — what changes when the target
 is the 100-TOPS class rather than 1–5 TOPS. It supplies the bandwidth-first sizing model, the
@@ -34,6 +38,7 @@ track I0–I4 (§8). Read it before sizing anything.
 > records decisions; it moves no RTL.
 
 ## Table of contents
+0. **AI RTL feature progress (current)**
 1. Intent, the three-tier model, and the two-plane split at scale
 2. Seam decision (evidence-based) — **the load-bearing section**
 3. Code map / loci as they exist today
@@ -43,6 +48,38 @@ track I0–I4 (§8). Read it before sizing anything.
 7. Licensing — the open path, terms left to the reader
 8. Phasing and acceptance
 9. Invariants and pitfalls
+
+---
+
+## 0. AI RTL feature progress (current)
+
+Honest status of **implemented silicon/software**, not the scaffold-only state of early P0.
+
+| Feature / plane | Locus | Progress | Verification |
+|---|---|---|---|
+| **CVXIF seam B** `COPRO_G6LC_AI` | `core/` + `ariane.sv` | **Live** | directed CSR/T0/T1 suite |
+| **Config** `g6lc64_ai` / `AiMatrixEn` | `core/include/*` | **Live** | package elaborate + veri target |
+| **CSR** `aicfg` / `aistatus.ais` → `mstatus.xs` | `csr_regfile` | **Live** | `ai_csr_*` / illegal-when-off |
+| **T2 island MMIO** @ `0x4000_0000` | `corev_apu/ai_island/` | **Live** | **HARD** `ai_island_mmio_smoke` ~1144 cy |
+| **CPL FIFO** multi-claim | `g6lc_ai_cpl_fifo` | **Live** | `ai_cpl_fifo_multi_claim` HARD |
+| **PLIC-8 IRQ** | island top + SoC | **Live** | `ai_irq_plic_smoke` |
+| **Desc DMA fetch/store** | island engine | **Live** | `ai_desc_fetch_*` / enq/fetch smokes |
+| **I1-lite INT8 GEMM** AccTile/PeLanes **256** | island compute | **Live (lite)** | **HARD** gemm_s8 1067 cy; 256³ ~83.7k cy peak |
+| **PMU / CAP geometry** | CAP + PMU windows | **Live** | cap/bw_pmu smokes |
+| **I3-lite bus** (trail C-store, multi-out AR, …) | island fabric | **Live** | scale gemm + PMU |
+| **NoC width 64b** | island | **Floor (live)** | wider NoC deferred |
+| **I2 multi-cluster / NoC/QoS** | island package | **Not started** | staging rule: measure I3 BW first |
+| **I3 full memory bandwidth model** | DRAM/channels | **Open** | PMU present; model soak open |
+| **PCIe EP + virtio (P5)** | uncore | **Virtual only** | `virt-ai-pcie` soft board + TCP agent |
+| **ai-tensor host** sim/SoftIsland/virt-card | `ai-tensor/` | **Live** | golden + queue/event-fd soaks |
+| **PyTorch soft path** | `torch_ops` + virt-card | **Live** | `test_torch_virt_ai_island` (torch optional) |
+| **soft→HARD virt-impl** | build-platform `tensor` | **Live** | `virt-impl --impl hard --suite narrow` **PASS** |
+| **Kernel UIO/eventfd** | Linux driver | **Open** | contract in board-uio-eventfd |
+| **I4 PD / UPF / thermal** | backend | **Open** | — |
+
+**Next program step (scaling):** freeze AccTile/`T`/CAP; **measure I3 bandwidth** against
+`scaling-100tops.md` §4; then **I2 cluster replication** without regressing narrow/ci HARD on the
+single-cluster path. Detail: [`hard-tests.md`](hard-tests.md) §5 · [`scaling-100tops.md`](scaling-100tops.md) §11.
 
 ---
 
@@ -342,11 +379,13 @@ and one software stack.
 | # | Deliverable | Depends on |
 |---|---|---|
 | **I0** | TOPS definition, bandwidth model, plane split, staged SKU decision | — (done: `scaling-100tops.md`) |
-| **I1** | **one** island cluster: PE array, `tc_sram` banks, sequencer, capability window. Freezes `T`, accumulator geometry, DRAM class and the NoC cut line **for both SKUs**. **Landed (partial):** AccTile*=256 / PeLanes=256 + I3-lite B oct-drain + trail C-store + multi-out AR + multi-beat AR/AW + dual-bank C-read + PMU; NoC still 64b | P3 |
-| **I3** | memory system sized to the §4 model; measured bandwidth | I1 |
+| **I1** | **one** island cluster: PE array, `tc_sram` banks, sequencer, capability window. Freezes `T`, accumulator geometry, DRAM class and the NoC cut line **for both SKUs**. **Landed (partial):** AccTile*=256 / PeLanes=256 + I3-lite bus + PMU + CPL FIFO; HARD narrow/ci/peak green; full PE/`tc_sram` density still open | P3 |
+| **I3** | memory system sized to the §4 model; **measured** bandwidth (**next critical gate**) | I1 |
 | — | **latency SKU tapes out** (1–2 clusters, ~12–25 TOPS) | I3, I4 |
-| **I2** | NoC + N clusters + per-cluster gating + QoS arbitration | I3 |
+| **I2** | NoC + N clusters + per-cluster gating + QoS arbitration (**after I3 measure**) | I3 |
 | **I4** | floorplan, UPF domains, thermal cap loop, STA | I1, re-run after I2 |
+
+**HARD map:** [`hard-tests.md`](hard-tests.md). **Host multi-phase:** [`frameworks-virt-pcie.md`](frameworks-virt-pcie.md) §2.1a.
 
 **Ordering rule:** the bandwidth target is fixed *and measured* before the cluster count grows. This is
 affordable because at `T = 512` the 100-TOPS SKU needs only ~195 GB/s, while the latency SKU must buy

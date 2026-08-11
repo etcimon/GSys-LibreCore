@@ -35,7 +35,8 @@ cargo run -p ai-tensor-cli -- doctor --profile profiles/island-p3-v1.toml --json
 Mirror of `cva6-build timings` → `sv-timing` and `diag --from-timing`. Implementation:
 `build-platform/src/tooling/tensor.ts` + `cli/commands/tensor.ts` (spawn only).
 Board env from `board.json` `ai{}` / `ai-board.ts`; PyTorch suite map:
-monorepo `architecture/ai-matrix/frameworks-virt-pcie.md`.
+monorepo `architecture/ai-matrix/frameworks-virt-pcie.md`.  
+HARD directed ELF / suite catalog: monorepo `architecture/ai-matrix/hard-tests.md`.
 
 ---
 
