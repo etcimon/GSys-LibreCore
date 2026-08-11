@@ -51,6 +51,7 @@ Profile `full` also runs mini + H-edge on an existing Variane harness when prese
 
 | Script | Suite id | Plane | Default target | Stack | Domain | Notes |
 |--------|----------|-------|----------------|-------|--------|-------|
+| `smt2-ai-tensor-track.sh` | `smt2-ai-tensor-track` | artifact→veri→host (staged) | `g6lc64_smt2` + tensor host | bare→OpenSBI→Linux→pytorch | SMT2×AI | **Default profile `fast`** (seconds). Climb: `di`/`hold`/`peel`/`dual`/`tensor`/`mt-soft`/`hard`/`full`. No rebuild unless `SMT2_REBUILD=1`. Map: `smt2-ai-tensor-linux.md` |
 | `mc-spo-soak.sh` | `mc-spo-soak` | artifact (+ optional lint) | `cv64a6_ooo_server` | source | stream×spo | Assemble smoke; `MC_SPO_LINT=0` / `MC_SPO_ROUNDS` |
 | `mc-spo-spike.sh` | `mc-spo-spike` | spike | `g6lc64_server_math` | CRT via cva6.py | stream×spo/CF/CAS list | `MC_SPO_SPIKE_TESTS`, `ISS_TIMEOUT`, `OUT_DIR=/tmp/...` |
 | `mc-mini-veri.sh` | `mc-mini-veri` | veri | `cv64a6_imafdc_sv39` | bare | I$ + **hard AMOCAS** | `MC_MINI_VERI_REBUILD`, `MC_MINI_VERI_TESTS` |

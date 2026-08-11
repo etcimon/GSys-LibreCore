@@ -59,6 +59,7 @@ CI job (optional, not default verify):
 | SBI | OpenSBI domain with 2 harts |
 | Linux | boot to prompt; `cat /proc/cpuinfo` shows 2 (`CVA6_LINUX_PAYLOAD` / cva6-sdk) |
 | **AI / PyTorch (after soft-ladder SL-C)** | Soft: `cva6-build tensor pytorch --board virt-ai-pcie`; multi-thread: taskset both harts — see **`smt2-ai-tensor-linux.md`** |
+| **Fast iteration driver** | `bash verif/regress/smt2-ai-tensor-track.sh` (default **fast**); suite `smt2-ai-tensor-track` |
 
 ### Soft-ladder residual (DI OpenSBI) + AI coupling
 

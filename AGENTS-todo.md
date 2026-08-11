@@ -64,7 +64,7 @@ Full map: `architecture/multi-threading/soft-ladder/README.md`.
 | **SL-C** | Topology truth (smt2) | P6 / topology | After SL-B: stock DTB, `hart_count==2`, R3/R3b, cpuinfo; gates **before** multi-thread PyTorch. |
 | **SL-D** | Stream plane vs SMT | P6 | Orthogonal: stream8 N=2 T=1; do not merge with smt2 DI residual until FDT walk trusted. |
 | **SL-E** | Optional DTS generator | later | Only when third topology would triple-maintain hand DTS. |
-| **SL-T** | **SMT2 × ai-tensor / PyTorch on Linux** | after SL-C | Soft path: `tensor pytorch --board virt-ai-pcie`. Live: dual-hart OpenSBI/Linux + UIO/eventfd + taskset workers; map `smt2-ai-tensor-linux.md`. |
+| **SL-T** | **SMT2 × ai-tensor / PyTorch on Linux** | after SL-C | **Branch `smt2-ai-tensor-linux`.** Fast track: `bash verif/regress/smt2-ai-tensor-track.sh` (default **fast**). Climb: `di`→`hold`→`peel`→`dual`→`tensor`→`mt-soft`→`hard`. Soft pytorch: `tensor` profile. Live dual-hart pytorch workers after SL-C + Image. Map: `smt2-ai-tensor-linux.md`. |
 
 Soft-ladder SUCCESS = trapdump **`51b1babe` only** (not harness tohost SUCCESS) — suite metadata.  
 Harness preference: `SOFT_LADDER_HARNESS=work-ver-smt2-fw64` (FETCH_WIDTH≥64).  
