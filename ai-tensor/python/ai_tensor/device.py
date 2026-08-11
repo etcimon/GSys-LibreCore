@@ -1,9 +1,10 @@
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
-"""Device facade: native sim/mmio-soft, pure-Python fallback + host tiling."""
+"""Device facade: native sim/mmio-soft, virt-card PCIe virtual, pure-Python fallback."""
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -125,6 +126,44 @@ def _try_native():
         return None
 
 
+def _normalize_backend(backend: str) -> str:
+    be = backend.lower().replace("_", "-")
+    if be in ("mmio-soft", "mmio"):
+        return "mmio"
+    if be in (
+        "virt-card",
+        "virt",
+        "virt-ai",
+        "virt-ai-pcie",
+        "pcie-virt",
+        "virtual-pcie",
+    ):
+        return "virt-card"
+    if be == "sim":
+        return "sim"
+    raise ValueError(
+        "backend must be 'sim', 'mmio'/'mmio-soft', or 'virt-card' "
+        f"(got {backend!r})"
+    )
+
+
+def _env_backend_default() -> str:
+    """Resolve default backend from env (board-aware)."""
+    be = os.environ.get("AI_TENSOR_BACKEND", "").strip()
+    if be:
+        try:
+            return _normalize_backend(be)
+        except ValueError:
+            pass
+    board = os.environ.get("AI_TENSOR_BOARD_ID", "").strip().lower()
+    if board in ("virt-ai-pcie", "virt-ai", "virt_ai_pcie"):
+        return "virt-card"
+    uio = os.environ.get("AI_TENSOR_UIO", "").strip()
+    if uio.startswith("virt://"):
+        return "virt-card"
+    return "sim"
+
+
 class Device:
     """
     Host device facade.
@@ -132,20 +171,31 @@ class Device:
     backend:
       - ``sim``: direct sim (native or pure-Python)
       - ``mmio`` / ``mmio-soft``: SoftIsland MMIO protocol (native required)
+      - ``virt-card``: virtual PCIe AI board (soft UIO/eventfd; local or TCP agent)
     """
 
-    def __init__(self, backend: str = "sim", *, caps: Optional[Caps] = None):
-        be = backend.lower().replace("_", "-")
-        if be in ("mmio-soft", "mmio"):
-            be = "mmio"
-        if be not in ("sim", "mmio"):
-            raise ValueError("backend must be 'sim' or 'mmio'/'mmio-soft'")
+    def __init__(
+        self,
+        backend: Optional[str] = None,
+        *,
+        caps: Optional[Caps] = None,
+        board_id: Optional[str] = None,
+        virt_mode: Optional[str] = None,
+    ):
+        if backend is None or backend == "":
+            be = _env_backend_default()
+        else:
+            be = _normalize_backend(backend)
         self._native = _try_native()
         self._dev = None
+        self._virt = None
         self._caps = caps or Caps()
         self._last_pmu = Pmu()
         self.backend = be
         self.profile_id: Optional[str] = None
+        self.board_id: Optional[str] = board_id or os.environ.get(
+            "AI_TENSOR_BOARD_ID"
+        )
 
         if be == "sim":
             if self._native is not None and hasattr(self._native, "Sim"):
@@ -156,6 +206,27 @@ class Device:
                 self.backend = "sim-python"
             if caps is not None:
                 # Explicit profile/caps override wins over native defaults.
+                self._caps = caps
+        elif be == "virt-card":
+            from .virt_card import VirtCardSession
+
+            self._virt = VirtCardSession(
+                mode=virt_mode,
+                board_id=self.board_id,
+            )
+            self.backend = f"virt-card-{self._virt.caps.mode}"
+            self.board_id = self._virt.board_id
+            d = self._virt.as_caps_dict()
+            self._caps = Caps(
+                acc_tile_m=int(d.get("acc_tile_m", 256)),
+                acc_tile_n=int(d.get("acc_tile_n", 256)),
+                acc_tile_k=int(d.get("acc_tile_k", 256)),
+                macs_per_cycle=int(d.get("macs_per_cycle", 256)),
+                noc_width=int(d.get("noc_width", 64)),
+                clusters=int(d.get("clusters", 1)),
+                compute_ref=True,
+            )
+            if caps is not None:
                 self._caps = caps
         else:
             if self._native is None or not hasattr(self._native, "Mmio"):
@@ -171,6 +242,47 @@ class Device:
             if caps is not None:
                 self._caps = caps
 
+    def close(self) -> None:
+        """Release virt-card agent/client when used."""
+        if self._virt is not None:
+            self._virt.close()
+            self._virt = None
+
+    def __enter__(self) -> "Device":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    @classmethod
+    def from_env(cls, *, backend: Optional[str] = None) -> "Device":
+        """
+        Open from ``AI_TENSOR_*`` env (board id, backend, UIO, AccTile pins).
+
+        Used by build-platform ``tensor frameworks|regress`` after exporting
+        board-derived env (``AI_TENSOR_BOARD_ID``, ``AI_TENSOR_BACKEND``, …).
+        """
+        return cls(backend=backend)
+
+    @classmethod
+    def from_board(
+        cls,
+        board_id: str = "virt-ai-pcie",
+        *,
+        virt_mode: Optional[str] = None,
+        caps: Optional[Caps] = None,
+    ) -> "Device":
+        """Open virt-card (or env backend) for a named board id."""
+        os.environ.setdefault("AI_TENSOR_BOARD_ID", board_id)
+        be = "virt-card"
+        if board_id not in ("virt-ai-pcie", "virt-ai", "virt_ai_pcie"):
+            # Non-virtual boards default to mmio if native present, else sim.
+            try:
+                return cls("mmio", caps=caps, board_id=board_id)
+            except RuntimeError:
+                return cls("sim", caps=caps, board_id=board_id)
+        return cls(be, caps=caps, board_id=board_id, virt_mode=virt_mode)
+
     @classmethod
     def from_profile(cls, path: str) -> "Device":
         """Open a device using a package profile TOML (backend + AccTile pins)."""
@@ -180,6 +292,30 @@ class Device:
         be = pr.backend.lower().replace("_", "-")
         if be in ("mmio-soft", "mapped", "mapped-file", "linux", "uio"):
             be = "mmio"
+        elif be in (
+            "virt-card",
+            "virt",
+            "virt-ai-pcie",
+            "pcie-virt",
+            "virtual-pcie",
+            "linux-uio",
+        ):
+            # Generated board profiles use backend=linux-uio; virt boards map
+            # soft-sticky UIO paths to virt-card.
+            board = getattr(pr, "board_id", None) or os.environ.get(
+                "AI_TENSOR_BOARD_ID", ""
+            )
+            uio = getattr(pr, "uio_primary", None) or os.environ.get(
+                "AI_TENSOR_UIO", ""
+            )
+            if (
+                str(board).startswith("virt")
+                or str(uio).startswith("virt://")
+                or be in ("virt-card", "virt", "virt-ai-pcie", "pcie-virt", "virtual-pcie")
+            ):
+                be = "virt-card"
+            else:
+                be = "mmio"
         elif be not in ("sim", "mmio"):
             be = "sim"
         caps = Caps(
@@ -249,14 +385,19 @@ class Device:
         caps = self.caps()
         meta: Dict[str, Any] = {
             "backend": self.backend,
+            "board_id": self.board_id,
             "caps": caps.as_dict(),
             "tiles": 1,
             "auto_tile": False,
         }
+        if self._virt is not None:
+            meta["virt"] = self._virt.as_caps_dict()
 
         if caps.fits(m, n, k) or not auto_tile:
             c, tix, status = self._gemm_one(m, n, k, a8, b8, ticket)
             meta["pmu"] = self.pmu().as_dict()
+            meta["backend"] = self.backend
+            meta["board_id"] = self.board_id
             return c, tix, status, meta
 
         # Host-side tiling (AccTile stream); accumulate partials into C
@@ -283,6 +424,8 @@ class Device:
                     c[(i0 + ii) * n + (j0 + jj)] += partial[ii * tn + jj]
             tix = last_ticket + 1
         meta["pmu"] = self.pmu().as_dict()
+        meta["backend"] = self.backend
+        meta["board_id"] = self.board_id
         return c, last_ticket, status, meta
 
     def _gemm_one(
@@ -294,6 +437,8 @@ class Device:
         b8: List[int],
         ticket: int,
     ) -> Tuple[List[int], int, int]:
+        if self._virt is not None:
+            return self._virt.gemm_s8(m, n, k, a8, b8, ticket)
         if self._dev is not None:
             return self._dev.gemm_s8(m, n, k, a8, b8, ticket)
         return _python_gemm_s8(m, n, k, a8, b8, ticket)

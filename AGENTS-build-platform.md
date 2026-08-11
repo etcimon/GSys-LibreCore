@@ -183,6 +183,7 @@ Configured in `defaults.ts` `tests.suites` (not exhaustive):
 | directed | `mc-stream-tests`, `mc-spo-soak`, `mc-spo-spike`, **`mc-mini-veri`**, `mc-spo-veri`, `ara-vector-path` | Optional/heavy; mini = hard Zacas golden |
 | residual OpenSBI/DI | **`soft-ladder-di`**, **`soft-ladder-osbi`** | Optional; cookie SUCCESS `51b1babe`; RTL-max peel; diag `diag-soft-ladder-paths` |
 | timings host | `sv-timing-smoke`, `sv-timing-core-sparse`, `sv-timing-autocorrect`, `sv-timing-advanced` | `--output` packages; honor `CVA6_FROM_TIMING` |
+| ai-tensor host | `tensor status\|doctor\|test\|virt-card\|frameworks\|pytorch\|regress` | Spawn-only; `--board virt-ai-pcie --core g6lc64_ai [--from-timing DIR]`; map `architecture/ai-matrix/frameworks-virt-pcie.md` |
 | linux / SMT | `smt-linux-*`, `dual-hart-ci` | R3 cosim WSL path |
 | formal (verify) | `verify.formalTasks` U5 OoO `.sby` | freelist / ROB / cancel |
 

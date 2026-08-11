@@ -50,9 +50,9 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `multi-core/` | Multi-hart tiles, coherence, interrupt scaling | SoC integration | `agents/guides/AGENTS-l2l3-cache.md`, `-soc-readiness.md` |
 | `l2-l3-cache/` | Memory-side L2 / SoC L3 (LLC) | SoC integration (not an L1 edit) | `agents/guides/AGENTS-l2l3-cache.md` |
 | `spec-extensions/` | Further RISC-V ISA features (V, Zvk, Sv57, CFI, …) | Spec-anchored | `agents/spec/INDEX.md` + relevant guide |
-| `ai-matrix/` | INT8 matrix acceleration (`Xg6lcai`) for a PCIe CPU+AI card | Offload seam (CVXIF → accelerator) for the core-attached plane; an **uncore island** for the throughput plane — **not** an `ex_stage` edit | `ai-matrix/README.md` + `ai-matrix/scaling-100tops.md` + `uncore/pcie-endpoint.md` |
+| `ai-matrix/` | INT8 matrix acceleration (`Xg6lcai`) for a PCIe CPU+AI card | Offload seam (CVXIF → accelerator) for the core-attached plane; an **uncore island** for the throughput plane — **not** an `ex_stage` edit | `ai-matrix/README.md` + `scaling-100tops.md` + `frameworks-virt-pcie.md` + `uncore/pcie-endpoint.md` |
 | `sv-timing/` | Structural FO4 precompile package pointer (host = build-platform `timings`) | Tooling / host adapter | `sv-timing/AGENTS.md`, `AGENTS-host.md` |
-| `ai-tensor/` (package at repo root) | PyTorch/TensorFlow **backend** for `Xg6lcai` / `ai_island` (host software; not RTL) | Tooling / ML runtime | `ai-tensor/AGENTS.md`, `ai-tensor/architecture/` |
+| `ai-tensor/` (package at repo root) | PyTorch/TensorFlow **backend** for `Xg6lcai` / `ai_island` (host software; not RTL) | Tooling / ML runtime | `ai-tensor/AGENTS.md`; host gate `tensor pytorch --board virt-ai-pcie --core g6lc64_ai` |
 
 Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings outs, `--from-timing` soak hand-off) is documented in [`build-platform-workspace-lifecycle.md`](build-platform-workspace-lifecycle.md) — not an RTL extension point; still scaffold-only (no flist).
 

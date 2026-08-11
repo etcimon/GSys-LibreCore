@@ -19,13 +19,19 @@ Monorepo command (landed):
 
 ```text
 cva6-build tensor status | doctor | test | golden | cosim | check
+cva6-build tensor virt-card | frameworks | pytorch | regress
+# board + ai_island core (like diag core selection + from-timing):
+cva6-build tensor pytorch --board virt-ai-pcie --core g6lc64_ai
+cva6-build tensor regress --board virt-ai-pcie --core g6lc64_ai [--from-timing DIR]
 # package-local discovery JSON:
 cargo run -p ai-tensor-cli -- probe --profile profiles/island-p3-v1.toml
 cargo run -p ai-tensor-cli -- doctor --profile profiles/island-p3-v1.toml --json
 ```
 
-Mirror of `cva6-build timings` → `sv-timing`. Implementation:
+Mirror of `cva6-build timings` → `sv-timing` and `diag --from-timing`. Implementation:
 `build-platform/src/tooling/tensor.ts` + `cli/commands/tensor.ts` (spawn only).
+Board env from `board.json` `ai{}` / `ai-board.ts`; PyTorch suite map:
+monorepo `architecture/ai-matrix/frameworks-virt-pcie.md`.
 
 ---
 
@@ -64,6 +70,9 @@ bash monorepo-soak/run-ai-tensor.sh test    # independence + cargo + golden + qu
 bash monorepo-soak/run-ai-tensor.sh golden
 bash monorepo-soak/run-ai-tensor.sh cosim   # harness suite + CLI external checks
 bash monorepo-soak/run-ai-tensor.sh rtl     # soft lab probe (AI_TENSOR_RTL_HARD=1 for TB)
+bash monorepo-soak/run-ai-tensor.sh virt-card
+bash monorepo-soak/run-ai-tensor.sh pytorch # structured PyTorch / Device virt-ai-pcie suite
+bash monorepo-soak/run-ai-tensor.sh regress # virt-card + frameworks + pytorch
 AI_TENSOR_DIR=/path/to/ai-tensor bash monorepo-soak/run-ai-tensor.sh check
 ```
 

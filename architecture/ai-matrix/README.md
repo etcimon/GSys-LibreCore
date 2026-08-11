@@ -19,6 +19,9 @@ Offline dual-oracle goldens (sim + SoftIsland) + external harness
 `monorepo-soak/run-ai-tensor.sh {test,golden,cosim}`; lab HARD
 `monorepo-soak/run-ai-tensor-rtl-hard.sh` (mmio+gemm_s8 on `work-ver-ai`).
 Board UIO/eventfd contract: [board-uio-eventfd.md](board-uio-eventfd.md). Completion FIFO RTL + HARD: [completion-fifo.md](completion-fifo.md) (SoC HARD CI suite 27/27 green post-FIFO; monorepo-soak/run-ai-matrix-hard-suite.sh).
+**Frameworks via virtual PCIe board:** [frameworks-virt-pcie.md](frameworks-virt-pcie.md) —
+`tensor pytorch|frameworks|regress --board virt-ai-pcie --core g6lc64_ai` validates ai-tensor
+Device/PyTorch against ai_island features through soft UIO + VirtualPcieLink (hostless).
 Not on any flist; does not replace this scaffold.
 
 **Scaling plan of record: [`scaling-100tops.md`](scaling-100tops.md)** — what changes when the target

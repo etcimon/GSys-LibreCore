@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
 # Thin monorepo adapter: spawn ai-tensor package tests without linking crates into RTL.
-# Usage: bash monorepo-soak/run-ai-tensor.sh [check|test|golden|cosim|queue-soak|event-fd-soak|rtl|virt-card]
+# Usage: bash monorepo-soak/run-ai-tensor.sh [check|test|golden|cosim|queue-soak|event-fd-soak|rtl|virt-card|frameworks|pytorch|regress]
 #
 # Env:
 #   AI_TENSOR_DIR          package root (default: $ROOT/ai-tensor)
@@ -62,6 +62,18 @@ JSON
     # Hostless virtual PCIe AI card (soft UIO/eventfd; no kernel / real PCIe)
     bash "$ROOT/monorepo-soak/run-virt-ai-card.sh"
     ;;
+  frameworks)
+    # PyTorch/TF/numpy via Device (default backend virt-card / board virt-ai-pcie)
+    bash "$ROOT/monorepo-soak/run-ai-tensor-frameworks.sh"
+    ;;
+  pytorch)
+    # Structured PyTorch unittest: ai_island features through virt-ai-pcie
+    bash "$ROOT/monorepo-soak/run-ai-tensor-pytorch.sh"
+    ;;
+  regress)
+    # virt-card smoke + frameworks (local + tcp device) for build-platform tensor regress
+    bash "$ROOT/monorepo-soak/run-ai-tensor-regress.sh"
+    ;;
   test)
     python3 tools/check_independence.py
     cargo test --workspace --exclude ai-tensor-py
@@ -71,7 +83,7 @@ JSON
     cargo run -q -p ai-tensor-cli -- doctor --profile profiles/island-p3-v1.toml
     ;;
   *)
-    echo "usage: $0 [check|test|golden|cosim|queue-soak|event-fd-soak|rtl|virt-card]"
+    echo "usage: $0 [check|test|golden|cosim|queue-soak|event-fd-soak|rtl|virt-card|frameworks|pytorch|regress]"
     exit 2
     ;;
 esac

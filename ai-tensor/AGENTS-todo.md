@@ -88,6 +88,11 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] `run_gemm_s8_auto` → stream path; CLI `stream-gemm`
 - [x] WaitPolicy (Poll/IrqThenPoll/DmaThenClaim/ClaimOnly) + `soak_multi_queue` + CLI `queue-soak`
 - [x] Host adapter: `cva6-build tensor status|doctor|test|golden|cosim|queue-soak|rtl`
+- [x] `Device(backend=virt-card)` + `VirtCardSession` (local VirtualUioDevice / TCP CardAgent)
+- [x] Structured PyTorch suite `python/tests/test_torch_virt_ai_island.py` (ai_island features via virt-ai-pcie)
+- [x] Host: `tensor pytorch|frameworks|regress --board virt-ai-pcie --core g6lc64_ai [--from-timing DIR]`
+- [x] Monorepo soak: `run-ai-tensor-pytorch.sh` / frameworks / regress
+- [x] Docs: monorepo `architecture/ai-matrix/frameworks-virt-pcie.md` + HOST/FRAMEWORKS updates
 - [x] Stream + WaitPolicy (`run_gemm_s8_stream_with_policy` / CLI `stream-policy`)
 - [x] Stream + SubmitMode latch/fetch (`run_gemm_s8_stream_ex` / `Device::submit_fetch`)
 - [x] Single-queue sequential depth soak (`depth.rs` / CLI `depth-soak`)

@@ -12,6 +12,12 @@ __version__ = "0.1.0"
 
 from .c_abi import PLIC_SOURCE_ISLAND_P3, completion_make, pack_desc64, verify_header_present
 from .device import Caps, Device, Pmu, gemm_s8, pack_gemm_desc, tile_gemm
+
+# virt_card is lazy-imported via Device; re-export session type for advanced use.
+try:
+    from .virt_card import VirtCardSession
+except Exception:  # pragma: no cover
+    VirtCardSession = None  # type: ignore
 from .golden import GoldenGemm, builtin_goldens, run_golden_suite
 from .host import HostJobResult, HostRuntime
 from .policy import WaitPolicy, recommend_policy
@@ -38,5 +44,6 @@ __all__ = [
     "run_golden_suite",
     "tile_gemm",
     "verify_header_present",
+    "VirtCardSession",
     "__version__",
 ]

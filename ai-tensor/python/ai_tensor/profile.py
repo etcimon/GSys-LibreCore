@@ -13,6 +13,8 @@ from typing import Dict, List, Optional
 class Profile:
     id: str = ""
     backend: str = "sim"
+    board_id: Optional[str] = None
+    uio_primary: Optional[str] = None
     noc_width: int = 64
     acc_tile_m: int = 256
     acc_tile_n: int = 256
@@ -70,6 +72,10 @@ class Profile:
                 p.id = v
             elif k == "backend":
                 p.backend = v
+            elif k == "board_id":
+                p.board_id = v
+            elif k == "uio_primary":
+                p.uio_primary = v
             elif k == "noc_width":
                 p.noc_width = int(v, 0)
             elif k == "acc_tile_m":

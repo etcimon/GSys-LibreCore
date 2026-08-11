@@ -62,8 +62,17 @@ Ship **inference custom ops** before autograd or Inductor.
 
 ### 2.3 Testing
 
-- Sim backend in CI (no FPGA).
-- Optional monorepo soak: same op against Variane / FPGA with pin `linux-v*`.
+- Sim backend in CI (no FPGA): `python/examples/torch_island_smoke.py`.
+- **Virtual PCIe AI board (hostless, preferred monorepo gate):** structured unittest
+  `python/tests/test_torch_virt_ai_island.py` through `Device(backend=virt-card)` /
+  board `virt-ai-pcie` (soft UIO + optional TCP CardAgent). Covers INT8 GEMM golden,
+  AccTile host stream, multi-ticket, env/`AI_TENSOR_CORE=g6lc64_ai` selection, local+tcp.
+  - Package: `PYTHONPATH=python:tools python python/tests/test_torch_virt_ai_island.py`
+  - Host: `cva6-build tensor pytorch --board virt-ai-pcie --core g6lc64_ai`
+  - Full gate: `cva6-build tensor regress --board virt-ai-pcie --core g6lc64_ai`
+  - Map: monorepo `architecture/ai-matrix/frameworks-virt-pcie.md`
+- Optional monorepo HARD: `tensor rtl-hard` / Variane ELFs (orthogonal to frameworks path).
+- Without torch wheels, Device-only cases still PASS; `AI_TENSOR_REQUIRE_TORCH=1` hard-fails.
 
 ---
 

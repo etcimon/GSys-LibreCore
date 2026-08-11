@@ -18,6 +18,9 @@ python tools/ait.py rtl          # soft lab probe
 PYTHONPATH=python python python/examples/torch_island_smoke.py
 PYTHONPATH=python python python/examples/tf_island_smoke.py
 
+# Structured PyTorch validation via virtual PCIe board (virt-card / ai_island features)
+PYTHONPATH=python:tools python python/tests/test_torch_virt_ai_island.py
+
 # CLI
 cargo run -p ai-tensor-cli -- doctor
 cargo run -p ai-tensor-cli -- sim-gemm --m 4 --n 4 --k 4
@@ -36,10 +39,16 @@ python tools/check_c_abi.py
 Monorepo host (spawn only, no crate path deps):
 
 ```bash
-# from monorepo root
+# from monorepo root — select virt board + ai_island core package
 bun run build-platform/src/cli/index.ts tensor status
-bun run build-platform/src/cli/index.ts tensor test
+bun run build-platform/src/cli/index.ts tensor pytorch \
+  --board virt-ai-pcie --core g6lc64_ai
+bun run build-platform/src/cli/index.ts tensor regress \
+  --board virt-ai-pcie --core g6lc64_ai
+# optional: --from-timing <timings-out-dir>  (diag-style preflight)
 ```
+
+Test map: `../architecture/ai-matrix/frameworks-virt-pcie.md`.
 
 
 Default backend is **hostless sim**: packs island-compatible 64 B descriptors, AI-3 region checks,
@@ -55,8 +64,11 @@ more island RTL.
 | `crates/ai-tensor-rt` | Runtime + **sim** device |
 | `crates/ai-tensor-cli` | `ai-tensor` binary |
 | `crates/ai-tensor-py` | Optional PyO3 native module |
-| `python/ai_tensor` | High-level API + `torch_ops` / `tf_ops` |
+| `python/ai_tensor` | High-level API + `torch_ops` / `tf_ops` / `virt_card` |
+| `python/tests/test_torch_virt_ai_island.py` | Structured PyTorch + Device suite via virt-ai-pcie |
+| `tools/virt_ai_card/` | Virtual PCIe UIO / CardAgent / HostClient |
 | `include/ai_tensor.h` | C ABI (Desc64 / completion / MMIO) |
+| `frameworks/torch/` | Torch attachment notes |
 | `frameworks/tensorflow/` | TF attachment notes (out-of-tree C++ later) |
 | `profiles/sim-v0.toml` | Version pin profile |
 

@@ -32,6 +32,7 @@ Directed SoC smoke: `ai_irq_plic_smoke` (claim DONE **before** PLIC complete).
 |---|---|---|
 | SoftSticky | Hostless CI | default |
 | EventFd (soft) | Hostless EventFd API shape | `EventFdWait::soft()` / CLI `event-fd-soak` |
+| **virt-ai-pcie soft UIO** | Virtual PCIe board CI | `AI_TENSOR_UIO=virt://…`, `Device(virt-card)`; see [frameworks-virt-pcie.md](frameworks-virt-pcie.md) |
 | EventFd (linux) | Board driver feeds eventfd | `linux-mmio`, `AI_TENSOR_EVENTFD=<fd>` |
 | UIO | `/dev/uio*` map + IRQ read | `linux-mmio`, `AI_TENSOR_UIO=/dev/uio0` |
 | `/dev/mem` | privileged phys map | `AI_TENSOR_MMIO_BASE=0x40000000` |
