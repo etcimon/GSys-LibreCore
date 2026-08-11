@@ -34,7 +34,7 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **FTQ / frontend** | Mispredict reseed + demand fixes for bare-metal green | Guide `agents/guides/AGENTS-branch-prediction.md` · scaffold `architecture/branch-prediction/README.md` · RTL `core/frontend/{frontend,cva6_ftq}.sv` |
 | **Structural FO4** | sparse_ex/frontend residual close @ **2.5 GHz** (screening ≠ STA) | Package `sv-timing/AGENTS.md` · `sv-timing/architecture/MONOREPO-SOAK.md` · `FREQUENCY-CLOSURE.md` · host `AGENTS-build-platform.md` §6.1 / §7 · plan `architecture/build-platform-opensta-from-timing.md` · philosophy §2.8 in `AGENTS-coding-philosophy.md` |
 | **R3a dual-hart OpenSBI** | `fw_payload` + WSL SUCCESS; **R3b gate** `r3b-linux-image` (Image external) | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
-| **Soft ladder (DI OpenSBI residual scaffold)** | **P0 done** + **iter-012 RTL landed** (LOAD cancel under SS, `unresolved_sp_q`). Harness **`work-ver-smt2-slfix`**. DI FDT minis **5/5**. Hold: **`plat_hc=2`** but cookie miss @3e6 (skip-build ELF). Suite **`smt2-ai-tensor-track`** (default **fast**). | `soft-ladder/README.md` · `ITERATION` · `smt2-ai-tensor-linux.md` · `defaults.ts` |
+| **Soft ladder (DI OpenSBI residual scaffold)** | **P0 done** + **iter-012 RTL landed**. Harness **`work-ver-smt2-slfix`**. DI FDT minis **5/5**. Hold @8e6 (good oracle): **`plat_hc=2`/`coldboot_done=1`**, cookie miss (post-coldboot hang `_start_warm`/mcause=2). Oracle pin md5 `bc7ed11d…`. Suite **`smt2-ai-tensor-track`**. | `soft-ladder/README.md` · `ITERATION` · `smt2-ai-tensor-linux.md` · `defaults.ts` |
 | **FDT topology plan** | `NrCores`×`NrHarts` (threads/core), stream vs SMT `cpu-map`, issue width non-DT; gates before `/proc/cpuinfo` **and before multi-thread PyTorch** | `fdt-topology-soft-ladder.md` · `ariane-smt2.dts` · `ariane-stream8.dts` |
 | **SMT2 × ai-tensor / PyTorch** | Soft pytorch **PASS** (Device virt-card). Fast track live. Multi-thread host workers **blocked** on soft-ladder hold cookie + SL-C + Linux Image. AI CSR banked on SMT. | `smt2-ai-tensor-linux.md` · `multi-threading/README.md` · `ai-tensor/AGENTS.md` · HARD `ai-matrix/hard-tests.md` |
 | **Ara / RVV** | Attach + DTS + directed; **VRF/cosim gate** `ara-vector-cosim` (live lmul opt) | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
@@ -59,11 +59,13 @@ Full map: `architecture/multi-threading/soft-ladder/README.md`.
 | # | Item | Phase | Status / next action |
 |---|------|-------|----------------------|
 | **SL-0** | **Register residual suites in build-platform** | P0 | **Done.** Optional `soft-ladder-di` + `soft-ladder-osbi` in `defaults.ts` (not `defaultSuites`); diag `diag-soft-ladder-paths`; maps in `AGENTS-specs-to-tests.md` / `AGENTS-build-platform.md` / `AGENTS-regress-scripts.md`. |
-| **SL-A** | **iter-012 FDT `lenp` / hold cookie** | P1–P2 | **Open (RTL+harness landed).** Pin historic PEEL mepc=`0x12eb2`/mtval=`0x12b2a`. **Hold @ slfix:** `plat_hc=2`/`coldboot_done=1`, cookie miss @3e6; prefer `SOFT_LADDER_SKIP_BUILD=1`. |
+| **SL-A** | **iter-012 FDT `lenp` / hold cookie** | P1–P2 | **Open.** PEEL pin historic mepc=`0x12eb2`/mtval=`0x12b2a`. **Hold lab 2026-08-11:** restored known-good oracle + `slfix` @8e6 → **`plat_hc=2`/`coldboot_done=1`**, **no `51b1babe`**; hangpc `npc0=0x8000032e` (`_start_warm`) mepc=0 mcause=2. |
 | | Bisects **all negative** | P2 | Dual-commit; STQ-nofwd; force SI; ALU cancel-exempt — same pin; **reverted**. |
 | | Directed (P1) | P1 | **5/5 green** FDT shape + `mini_fdt_next_tag_lbu` on fw64/slfix. |
 | | **P2 RTL + TB** | P2 | LOAD cancel under SS; `unresolved_sp_q`; TB banked CSR hangpc; **`work-ver-smt2-slfix`**. |
-| | **Next** | P2/P3 | **Longer hold** (8–12e6, skip-build ELF) → find why cookie not written despite plat_hc=2 → then PEEL. |
+| | **Oracle discipline** | P2 | **Known-good** `fw_payload_r3a_c15_plat_skip.elf` md5 `bc7ed11d…` (Aug-9 soft-ladder). Cold `mk_plat_skip` → `871e7cb6…` → `plat_hc=80` + R-error — keep as `*.cold-regress-20260811`; **never overwrite good without backup**. `SOFT_LADDER_SKIP_BUILD=1`. |
+| | **Harness bisect** | P2 | `slfix` (iter-012): past FDT. `fw64` (pre-iter-012) + good ELF @8e6: still PEEL pin mepc=`0x12eb2` mcause=6. **iter-012 advances FDT; residual is post-coldboot cookie path.** |
+| | **Next** | P2/P3 | Cookie chase: why `start_finish`/`0x996`/success cave not reached after `coldboot_done=1` (warm-start / switch_mode soft path). Then PEEL. |
 | | Priors | | `soft-ladder/*` · `smt2-ai-tensor-linux.md` · `multi-threading/README.md` (AI attunement) |
 | **SL-B** | Peel soft getprop + real printf | P3–P4 | **Blocked on hold cookie green**, then PEEL. |
 | **SL-C** | Topology truth (smt2) | P6 / topology | After SL-B: stock DTB, `hart_count==2`, R3/R3b, cpuinfo; **gate multi-thread PyTorch**. |
@@ -72,8 +74,8 @@ Full map: `architecture/multi-threading/soft-ladder/README.md`.
 | **SL-T** | **SMT2 × ai-tensor / PyTorch** | parallel + after SL-C | **Active on `smt2-ai-tensor-linux`.** Driver: `smt2-ai-tensor-track.sh` (`fast`→`di`→`hold`→`peel`→`dual`→`tensor`→`mt-soft`→`hard`). T4 soft pytorch **green**. T5 dual workers need SL-C + Image. AI CSR banked. Map: `smt2-ai-tensor-linux.md`. |
 
 Soft-ladder SUCCESS = trapdump **`51b1babe` only** (not harness tohost SUCCESS) — suite metadata.  
-Harness preference: **`work-ver-smt2-slfix`** then `work-ver-smt2-fw64` (FETCH_WIDTH≥64).  
-Oracle: `SOFT_LADDER_SKIP_BUILD=1` with known-good `software/smt2-linux/soft-ladder/build/` — cold rebuild currently regresses.
+Harness preference: **`work-ver-smt2-slfix`** (iter-012) for hold/cookie; `fw64` is PEEL-pin reference only.  
+Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`** for `fw_payload_r3a_c15_plat_skip.elf` — cold rebuild regresses.
 
 **AI matrix card (`Xg6lcai`) + licensing — live track (not scaffold-only):**
 

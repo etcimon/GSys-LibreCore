@@ -33,7 +33,8 @@ Template at bottom.
 | **I3b RTL (2026-08-09, soft-ladder branch)** | **(1)** `scoreboard.sv`: under `SuperscalarEn`, **cancel younger LOADs** on mispredict (same-hart only when `NrHarts>1`). SI keeps cont.5 LOAD exemption. Rationale: PEEL s2/s3 ← ra-link / 0 from wrong-path load RF-writes after RAS-miss/JAL; `after_flu_wb` is branch-tid so correct-path epilogue re-issues. **(2)** `issue_stage.sv`: per-hart **`unresolved_sp_q`** — after GPR write to **x2 (sp)** under SS, stall that hart until sp-writer commits (peer SMT continues). Targets `fdt_next_tag` frame save/restore races. |
 | **I3c SMT / AI co-req on E rebuild** | `g6lc_smt_csr_bank.sv`: wire `ai_aicfg`/`ai_ais`/dirty/setcfg (active-hart mux, commit-hart gate) so `g6lc64_smt2` elaborates with AI-E CSR sideband. Multi-threading invariant: AI bank state is per-hart CSR bank, not a shared sticky. |
 | **I4d Harness** | Rebuild `work-ver-smt2-slfix` on full tree (`E:\cva6`) — soft-ladder worktree lacks hpdcache submodule for verilate. |
-| **I6 Next** | Soak PEEL + holding on `work-ver-smt2-slfix`; if still red, full namelen mini / load-path further. Soft getprop holding until PEEL green. |
+| **I4e Hold @8e6 (2026-08-11, `smt2-ai-tensor-linux`)** | Restored known-good oracle md5 **`bc7ed11d…`** (cold rebuild `871e7cb6…` regressed to `plat_hc=80`/R-error). **`slfix`:** `plat_hc=2` `coldboot_done=1` `last_hartidx=1` @8e6, **no cookie**; hangpc `npc0=0x8000032e` (`_start_warm` hart-table scan) mepc=0 mcause=2. **`fw64`:** same ELF still PEEL pin mepc=`0x12eb2` mcause=6. **iter-012 advances FDT; cookie residual is post-coldboot.** AI attunement docs: `multi-threading/README.md` · `smt2-ai-tensor-linux.md` · `AGENTS-todo` SL-A/SL-T. |
+| **I6 Next** | Cookie path: `start_finish` → `0x996` → success cave after `coldboot_done=1` (secondary warm-start / soft switch_mode). Keep soft getprop until PEEL green. Do not cold-rebuild oracle without backup. |
 
 ## Completed iterations
 

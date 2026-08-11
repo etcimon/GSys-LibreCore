@@ -29,7 +29,7 @@ workers.
 | Per-hart GHR | **Live** — `g6lc_bp_ghist` + gshare GHR banks |
 | Shared BHT/BTB | Shared tables (cross-hart pollution possible) |
 | `g6lc_thread_select.sv` + `g6lc_hart_state.sv` | **Live** under `core/smt/` |
-| Soft-ladder DI residual | **Active** — iter-012 RTL landed; hold cookie chase on `work-ver-smt2-slfix` |
+| Soft-ladder DI residual | **Active** — iter-012 advances FDT (`plat_hc=2` on `slfix`); **cookie** residual post-coldboot (`_start_warm` / success cave) |
 | AI / PyTorch host path | **Live soft** on `g6lc64_ai` + virt-ai-pcie; **SMT2 multi-thread pytorch** after SL-C |
 
 ### Model: fine-grain SMT (drain-friendly)

@@ -202,7 +202,9 @@ SMT2_REBUILD=1 bash verif/regress/smt2-ai-tensor-track.sh paths
 | Tensor soft (T4) | **PASS** `tensor pytorch` Device virt-card (torch optional; 2 tests) |
 | AI CSR SMT banking | **Landed** in `g6lc_smt_csr_bank` (active-hart mux / commit-hart gate) |
 | iter-012 harness | **`work-ver-smt2-slfix`** live (banked TB CSR probes) |
-| Hold (T0) on slfix | **Partial:** skip-build ELF → `plat_hc=2` / `coldboot_done=1`, **no `51b1babe`** @3e6 cy. Cold oracle rebuild regressed (`plat_hc=80`, R-error) — **keep `SOFT_LADDER_SKIP_BUILD=1`**. Next: longer hold (8–12e6) + cookie-site triage. |
+| Hold (T0) on slfix | **Partial (FDT green, cookie red):** good oracle + `slfix` @**8e6** → `plat_hc=2` / `coldboot_done=1` / `last_hartidx=1`, **no `51b1babe`**. hangpc `npc0=0x8000032e` (`_start_warm`) mepc=0 mcause=2 wfi. Residual **post-coldboot** (not FDT). |
+| Oracle ELF | **Pin** md5 `bc7ed11dab17454fd147e4927ba07fef` (Aug-9). Cold rebuild `871e7cb6…` → `plat_hc=80` + AXI R-error (`*.cold-regress-20260811`). Always `SOFT_LADDER_SKIP_BUILD=1`. |
+| fw64 hold bisect | Same good ELF @8e6 on **pre-iter-012** `fw64` → PEEL pin mepc=`0x12eb2` mcause=6 `plat_hc=80`. Confirms iter-012 advances FDT under soft getprop. |
 | PEEL (T1) | Pending cookie green on hold |
 | Dual-hart Linux + dual pytorch workers | **Not started** — blocked on hold cookie + SL-C + Image |
 
@@ -210,7 +212,8 @@ SMT2_REBUILD=1 bash verif/regress/smt2-ai-tensor-track.sh paths
 
 | Use case | Package | Board / harness | Notes |
 |----------|---------|-----------------|-------|
-| DI residual / soft-ladder | `g6lc64_smt2` | `work-ver-smt2-slfix` (prefer) | FETCH_WIDTH≥64; banked CSR TB |
+| DI residual / soft-ladder | `g6lc64_smt2` | `work-ver-smt2-slfix` (prefer) | FETCH_WIDTH≥64; banked CSR TB; hold/cookie plane |
+| PEEL pin reference | `g6lc64_smt2` | `work-ver-smt2-fw64` | pre-iter-012; FDT pin still red |
 | Tensor soft / HARD narrow | `g6lc64_ai` | `virt-ai-pcie` / `work-ver-ai` | NrHarts=1 today; not SMT proof |
 | Future dual-hart + AI Linux | TBD hybrid / smt2+island board | ariane-smt2 + AI DTS | After SL-C |
 
@@ -220,8 +223,12 @@ SMT2_REBUILD=1 bash verif/regress/smt2-ai-tensor-track.sh paths
 bash verif/regress/smt2-ai-tensor-track.sh fast     # green
 bash verif/regress/smt2-ai-tensor-track.sh di       # 5/5 FDT minis green
 cva6-build tensor pytorch --board virt-ai-pcie --core g6lc64_ai  # green (Device)
+# hold (restored good oracle; do NOT cold rebuild):
 SOFT_LADDER_HARNESS=work-ver-smt2-slfix SOFT_LADDER_SKIP_BUILD=1 \
   SOFT_LADDER_TIME_OUT=8000000 bash verif/regress/smt2-ai-tensor-track.sh hold
+# → plat_hc=2 coldboot_done=1; cookie miss; hang _start_warm / mcause=2
 ```
+
+**Next residual (cookie):** post-coldboot path to success cave (`0x996` / soft `switch_mode`) while secondary sits in `_start_warm` — not longer cycle budget alone.
 
 Update `AGENTS-todo.md` SL-T when T5 first greened on real dual-hart Linux.
