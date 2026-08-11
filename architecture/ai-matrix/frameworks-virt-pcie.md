@@ -53,8 +53,9 @@ Related:
 | Virtual PCIe / SSH stand-in | `--virt-mode tcp` CardAgent | pcie-endpoint virtio-SSH |
 | Core package selection | `--core g6lc64_ai` → `AI_TENSOR_CORE` | `g6lc64_ai_config_pkg` + island |
 
-Live HARD RTL remains `tensor rtl-hard` / `run-ai-matrix-hard-suite.sh` on
-`work-ver-ai` — **orthogonal** to this hostless frameworks gate.
+**Default `tensor pytorch` is still host-only** (soft virt-card). To also exercise
+**SV `ai_island` RTL HARD** and/or **sv-timing**, use the **virtual implementation**
+structure (`--impl` / `--rtl-hard` / `tensor virt-impl`) in §2.1a.
 
 ---
 
@@ -63,7 +64,7 @@ Live HARD RTL remains `tensor rtl-hard` / `run-ai-matrix-hard-suite.sh` on
 ### 2.1 Preferred: build-platform `tensor` (no mb required)
 
 ```bash
-# from monorepo root (build-platform)
+# from monorepo root (build-platform) — soft host only
 bun run src/cli/index.ts tensor pytorch \
   --board virt-ai-pcie \
   --core g6lc64_ai
@@ -72,12 +73,6 @@ bun run src/cli/index.ts tensor pytorch \
 bun run src/cli/index.ts tensor regress \
   --board virt-ai-pcie \
   --core g6lc64_ai
-
-# optional timings preflight (same semantics as diag --from-timing)
-bun run src/cli/index.ts tensor pytorch \
-  --board virt-ai-pcie \
-  --core g6lc64_ai \
-  --from-timing workspace/build/sv-timing/host-g6lc64_ai
 ```
 
 `--board` loads `corev-mb/boards/<id>/board.json` `ai{}` and exports
@@ -85,6 +80,62 @@ bun run src/cli/index.ts tensor pytorch \
 `--core` sets `AI_TENSOR_CORE` / `CVA6_CORE_CONFIG` to the **ai_island** package
 (`g6lc64_ai`). Defaults for `pytorch`/`regress`/`frameworks`: board
 `virt-ai-pcie`, core `g6lc64_ai` when unset.
+
+### 2.1a Virtual implementation structure (soft + optional SV HARD + sv-timing)
+
+Multi-phase gate that answers three different questions without conflating them:
+
+| Phase | What runs | Answers |
+|---|---|---|
+| **soft** | `test_torch_virt_ai_island.py` + `run-virt-ai-card.sh` | Does **ai-tensor** / PyTorch match the island **contract** on virt-ai-pcie? |
+| **hard** | `run-ai-tensor-rtl-hard.sh` → `ai_island_mmio_smoke` + `ai_gemm_s8_smoke` on **work-ver-ai** | Does **SV ai_island** RTL pass the lab HARD pair under `g6lc64_ai`? |
+| **timing** | re-check env package after host `applyFromTimingFlags` + FO4 dashboard | Is a **sv-timing** precompile package structurally valid for this core? (**not STA**) |
+
+```text
+  tensor pytorch|virt-impl --board virt-ai-pcie --core g6lc64_ai
+           │
+           ├─[--impl soft]──────────► soft only          (default CI)
+           ├─[--impl hard|--rtl-hard]► soft → hard
+           └─[--impl full --from-timing DIR]
+                                      soft → hard → timing
+```
+
+```bash
+# Soft + SV HARD (needs work-ver-ai; soft-skips hard if missing unless --require-hard)
+bun run src/cli/index.ts tensor pytorch \
+  --board virt-ai-pcie --core g6lc64_ai --rtl-hard
+
+# Full virtual implementation + sv-timing package (like test --from-timing)
+bun run src/cli/index.ts tensor virt-impl \
+  --impl full \
+  --board virt-ai-pcie \
+  --core g6lc64_ai \
+  --from-timing workspace/build/sv-timing/host-g6lc64_ai
+
+# Same via pytorch:
+bun run src/cli/index.ts tensor pytorch \
+  --impl full \
+  --board virt-ai-pcie --core g6lc64_ai \
+  --from-timing workspace/build/sv-timing/host-g6lc64_ai \
+  --require-hard
+
+# Expert: export corrected flist env (does not auto-merge into core/)
+bun run src/cli/index.ts tensor virt-impl --impl hard \
+  --from-timing workspace/build/sv-timing/host-g6lc64_ai --use-emit
+```
+
+| Flag / env | Role |
+|---|---|
+| `--impl soft\|hard\|full\|hard-only` | Phase set (`hard` = soft+hard; `full` adds timing) |
+| `--rtl-hard` | Include HARD after soft (pytorch convenience) |
+| `--require-hard` | Fail if `work-ver-ai` missing (else soft-skip hard) |
+| `--from-timing DIR` | Host: `applyFromTimingFlags` + FO4 dashboard; child: `CVA6_FROM_TIMING` |
+| `--use-emit` | Expert corrected flist env (`CVA6_TIMINGS_USE_EMIT=1`); needs `--from-timing` |
+| `--require-timing` | Fail timing phase if no FROM_TIMING |
+
+**Orchestrator:** `monorepo-soak/run-ai-tensor-virt-impl.sh`  
+**Honest split:** soft never loads Verilator; hard never runs PyTorch inside the TB;
+timing never claims STA sign-off.
 
 ### 2.2 Optional: `mb select` then tensor
 
@@ -118,10 +169,12 @@ AI_TENSOR_REQUIRE_TORCH=1 bash monorepo-soak/run-ai-tensor-pytorch.sh   # fail i
 | `ai-tensor/python/examples/torch_virt_card_smoke.py` | Thin smoke example |
 | `ai-tensor/tools/frameworks_regress.py` | Multi-framework harness (device/numpy/torch/tf) |
 | `ai-tensor/tools/virt_ai_card/` | Virtual UIO, eventfd, CardAgent, HostClient |
-| `monorepo-soak/run-ai-tensor-pytorch.sh` | Monorepo adapter for pytorch suite |
+| `monorepo-soak/run-ai-tensor-pytorch.sh` | Monorepo adapter for pytorch suite (soft) |
+| `monorepo-soak/run-ai-tensor-virt-impl.sh` | **Multi-phase** soft → HARD → timing orchestrator |
+| `monorepo-soak/run-ai-tensor-rtl-hard.sh` | SV HARD mmio+gemm_s8 on work-ver-ai |
 | `monorepo-soak/run-ai-tensor-frameworks.sh` | Frameworks harness adapter |
 | `monorepo-soak/run-ai-tensor-regress.sh` | Full hostless gate |
-| `build-platform` `tensor pytorch\|frameworks\|regress` | Host CLI + `--board`/`--core`/`--from-timing` |
+| `build-platform` `tensor pytorch\|virt-impl\|frameworks\|regress` | Host CLI + `--board`/`--core`/`--impl`/`--from-timing` |
 
 ### 3.1 PyTorch suite classes
 
@@ -159,14 +212,19 @@ Package never path-depends monorepo crates (KD0). Spawn only via soak scripts.
 
 | Gate | Command | Expect |
 |---|---|---|
-| Device virt-card | `tensor pytorch --board virt-ai-pcie --core g6lc64_ai` | Device local+tcp golden PASS; torch classes if installed |
+| Device virt-card (soft) | `tensor pytorch --board virt-ai-pcie --core g6lc64_ai` | Device local+tcp golden PASS; torch classes if installed |
 | Frameworks | `tensor frameworks --board virt-ai-pcie --core g6lc64_ai` | device (+ numpy/torch/tf soft-skip) |
 | Full hostless | `tensor regress --board virt-ai-pcie --core g6lc64_ai` | virt smoke + frameworks + pytorch |
-| Lab HARD RTL | `tensor rtl-hard` | mmio + gemm_s8 on work-ver-ai (orthogonal) |
+| Soft + SV HARD | `tensor pytorch --rtl-hard --board virt-ai-pcie --core g6lc64_ai` | soft PASS + HARD mmio/gemm_s8 (or hard SKIP if no work-ver) |
+| Full virt-impl + timing | `tensor virt-impl --impl full --from-timing <pkg> --core g6lc64_ai` | soft → hard → timing; FO4 dashboard on host |
+| Lab HARD only | `tensor rtl-hard` | mmio + gemm_s8 on work-ver-ai |
 
 **Pass criteria for frameworks path:** all run Device cases green; when torch is
 present, every `TestAiIsland*` case matches torch int32 matmul of int8 inputs
 and reports `board_id=virt-ai-pcie` with AccTile/Macs 256.
+
+**Pass criteria for HARD phase:** `ai_island_mmio_smoke` + `ai_gemm_s8_smoke` SUCCESS
+under `AI_TENSOR_CORE=g6lc64_ai` / `work-ver-ai` (same as historical lab gate).
 
 ---
 

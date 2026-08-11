@@ -29,10 +29,59 @@ import {
 } from "../platform/shell.ts";
 import { findHostPython } from "../python/venv.ts";
 import {
-  resolveFromTimingDir,
-  validateTimingsOutDir,
+  applyFromTimingFlags,
+  formatTimingsDashboardLines,
+  summarizeTimingsPackage,
+  writeTimingsDashboard,
 } from "./timings.ts";
 import { boardPaths, loadBoardSpec } from "./motherboard.ts";
+
+/** Virtual implementation phases: soft host, SV HARD, sv-timing package. */
+export type TensorImplPhase = "soft" | "hard" | "timing";
+
+export type TensorImplMode = "soft" | "hard" | "full" | "hard-only";
+
+export function parseImplMode(raw?: string): TensorImplMode {
+  const s = (raw ?? "soft").trim().toLowerCase();
+  if (s === "hard" || s === "rtl" || s === "rtl-hard") return "hard";
+  if (s === "full" || s === "all") return "full";
+  if (s === "hard-only" || s === "rtl-only") return "hard-only";
+  return "soft";
+}
+
+export function implModeToPhases(
+  mode: TensorImplMode,
+  opts: { rtlHard?: boolean; fromTiming?: boolean } = {},
+): TensorImplPhase[] {
+  let phases: TensorImplPhase[];
+  switch (mode) {
+    case "hard":
+      phases = ["soft", "hard"];
+      break;
+    case "hard-only":
+      phases = ["hard"];
+      break;
+    case "full":
+      phases = ["soft", "hard", "timing"];
+      break;
+    default:
+      phases = ["soft"];
+  }
+  if (opts.rtlHard && !phases.includes("hard")) {
+    phases = [...phases, "hard"];
+  }
+  if (opts.fromTiming && !phases.includes("timing") && mode === "full") {
+    // full already has timing
+  } else if (opts.fromTiming && mode === "full") {
+    /* ok */
+  } else if (opts.fromTiming && mode !== "soft" && !phases.includes("timing")) {
+    // When HARD is requested with --from-timing, still run timing echo phase
+    if (phases.includes("hard")) phases = [...phases, "timing"];
+  }
+  // Explicit: --from-timing alone on soft mode still exports env + host dashboard;
+  // timing phase only when hard/full so soft CI stays cheap.
+  return phases;
+}
 
 /** Resolve package root: repo-root/ai-tensor or AI_TENSOR_DIR. */
 export function resolveAiTensorRoot(ctx: PlatformContext): string | null {
@@ -59,6 +108,7 @@ export type TensorSpawnCmd =
   | "virt-card"
   | "frameworks"
   | "pytorch"
+  | "virt-impl"
   | "regress";
 
 export function isTensorSpawnCmd(s: string): s is TensorSpawnCmd {
@@ -73,6 +123,7 @@ export function isTensorSpawnCmd(s: string): s is TensorSpawnCmd {
     s === "virt-card" ||
     s === "frameworks" ||
     s === "pytorch" ||
+    s === "virt-impl" ||
     s === "regress"
   );
 }
@@ -91,7 +142,23 @@ export interface TensorRunOptions {
   virtMode?: string;
   /** timings precompile out-dir (structural validate; like diag --from-timing). */
   fromTiming?: string;
+  /** Expert: point child env at corrected flist (requires --from-timing). */
+  useEmit?: boolean;
   requireEmit?: boolean;
+  /**
+   * Virtual implementation mode:
+   *   soft      — Device/PyTorch virt-card only (default)
+   *   hard      — soft + SV ai_island RTL HARD
+   *   full      — soft + HARD + sv-timing phase (needs --from-timing for timing PASS)
+   *   hard-only — SV HARD only
+   */
+  impl?: string;
+  /** Include RTL HARD phase (alias for --impl hard when starting from soft). */
+  rtlHard?: boolean;
+  /** Fail if HARD work-ver missing (default soft-skip hard phase). */
+  requireHard?: boolean;
+  /** Fail if timing phase lacks FROM_TIMING (full mode). */
+  requireTiming?: boolean;
   /** Extra args after frameworks_regress.py (frameworks only). */
   extraArgs?: string[];
 }
@@ -205,27 +272,64 @@ export async function loadTensorBoardEnv(
   }
 }
 
-/** Preflight --from-timing like diag/test/verify. */
+/**
+ * Preflight --from-timing like test/verify: validate package, optional --use-emit,
+ * structural FO4 soak dashboard (not STA). Live RTL flists are not replaced unless
+ * expert --use-emit is set.
+ */
 export function preflightFromTiming(
   ctx: PlatformContext,
   opts: TensorRunOptions,
-): { ok: boolean; dir?: string; code?: number } {
-  if (!opts.fromTiming) return { ok: true };
-  const v = validateTimingsOutDir(ctx, {
+): {
+  ok: boolean;
+  dir?: string;
+  code?: number;
+  env: Record<string, string>;
+} {
+  if (!opts.fromTiming) return { ok: true, env: {} };
+  if (opts.useEmit && !opts.fromTiming) {
+    ctx.logger.error("--use-emit requires --from-timing <dir>");
+    return { ok: false, code: 2, env: {} };
+  }
+  const ft = applyFromTimingFlags(ctx, {
     fromTiming: opts.fromTiming,
-    requireEmit: opts.requireEmit === true,
+    useEmit: opts.useEmit === true,
+    requireEmit: opts.requireEmit === true || opts.useEmit === true,
   });
-  if (!v.ok) {
-    ctx.logger.error(`--from-timing structure invalid: ${v.dir}`);
-    for (const issue of v.issues.filter((i) => i.level === "error")) {
+  if (!ft.ok) {
+    ctx.logger.error(`--from-timing structure invalid: ${ft.dir ?? opts.fromTiming}`);
+    for (const issue of ft.issues.filter((i) => i.level === "error")) {
       ctx.logger.error(`  [${issue.code}] ${issue.message}`);
     }
-    return { ok: false, dir: v.dir, code: 1 };
+    ctx.logger.info("Fix the out-dir or run: timings validate --from-timing <dir>");
+    return { ok: false, dir: ft.dir, code: 1, env: {} };
   }
   ctx.logger.success(
-    `--from-timing OK: ${v.dir} (${v.fileCount} files; live RTL not replaced)`,
+    `--from-timing OK: ${ft.dir} (report=${ft.validation?.reportKind ?? "?"}; live RTL not replaced by default)`,
   );
-  return { ok: true, dir: resolveFromTimingDir(ctx, opts.fromTiming) };
+  if (opts.useEmit && ft.emitFlist) {
+    ctx.logger.warn(`expert --use-emit: ${ft.emitFlist}`);
+    ctx.logger.info(
+      "CVA6_TIMINGS_USE_EMIT=1: child may overlay emit flist (R8); HARD still uses work-ver-ai by default",
+    );
+  }
+  for (const issue of ft.issues.filter((i) => i.level === "warn")) {
+    ctx.logger.warn(`  [${issue.code}] ${issue.message}`);
+  }
+  // Structural FO4 dashboard (same as `test --from-timing`)
+  try {
+    const dash = summarizeTimingsPackage(ctx, ft.dir!);
+    writeTimingsDashboard(ft.dir!, dash);
+    ctx.logger.heading("Soak dashboard (structural FO4 — not STA)");
+    for (const line of formatTimingsDashboardLines(dash)) {
+      ctx.logger.info(line);
+    }
+  } catch (err) {
+    ctx.logger.warn(
+      `timings dashboard skipped: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return { ok: true, dir: ft.dir, env: ft.env };
 }
 
 /** Build env for any tensor spawn (board + core + from-timing + package). */
@@ -262,16 +366,15 @@ export async function buildTensorChildEnv(
     AI_TENSOR_COSIM_CMD:
       process.env.AI_TENSOR_COSIM_CMD ?? "python3 tools/cosim_harness.py",
     ...boardEnv,
+    ...ft.env,
     AI_TENSOR_CORE: core,
     CVA6_CORE_CONFIG: core,
   };
   if (opts.backend) env.AI_TENSOR_BACKEND = opts.backend;
   if (opts.virtMode) env.AI_TENSOR_VIRT_MODE = opts.virtMode;
   if (opts.apu) env.AI_TENSOR_APU = opts.apu;
-  if (ft.dir) {
-    env.CVA6_FROM_TIMING = ft.dir;
-    env.FROM_TIMING = ft.dir;
-  }
+  if (opts.requireHard) env.AI_TENSOR_REQUIRE_HARD = "1";
+  if (opts.requireTiming) env.AI_TENSOR_REQUIRE_TIMING = "1";
   // Default virt-card for frameworks/regress when board is virtual and backend unset
   if (
     !env.AI_TENSOR_BACKEND &&
@@ -281,6 +384,92 @@ export async function buildTensorChildEnv(
     env.AI_TENSOR_BACKEND = "virt-card";
   }
   return { env, boardId, core };
+}
+
+/**
+ * Multi-phase virtual implementation gate:
+ *   soft   — PyTorch/Device via virt-ai-pcie
+ *   hard   — SV ai_island RTL HARD (work-ver-ai mmio+gemm_s8)
+ *   timing — re-check --from-timing package in child (host already validated)
+ *
+ * Prefer: tensor virt-impl | tensor pytorch --impl hard|full --from-timing DIR
+ */
+export async function runAiTensorVirtImpl(
+  ctx: PlatformContext,
+  opts: TensorRunOptions = {},
+): Promise<number> {
+  const { logger } = ctx;
+  const script = join(ctx.repoRoot, "monorepo-soak", "run-ai-tensor-virt-impl.sh");
+  if (!existsSync(script)) {
+    logger.error("monorepo-soak/run-ai-tensor-virt-impl.sh missing");
+    return 1;
+  }
+
+  const opts2: TensorRunOptions = { ...opts };
+  if (
+    !opts2.board &&
+    !process.env.AI_TENSOR_BOARD_ID &&
+    !ctx.config.motherboard?.activeBoard
+  ) {
+    opts2.board = "virt-ai-pcie";
+  }
+  if (
+    !opts2.core &&
+    !process.env.AI_TENSOR_CORE &&
+    !process.env.CVA6_CORE_CONFIG
+  ) {
+    opts2.core = "g6lc64_ai";
+  }
+
+  const mode = parseImplMode(opts2.impl);
+  let phases = implModeToPhases(mode, {
+    rtlHard: opts2.rtlHard === true,
+    fromTiming: !!opts2.fromTiming,
+  });
+  // full / hard + --from-timing: include timing echo phase after host preflight
+  if (
+    opts2.fromTiming &&
+    (mode === "full" || mode === "hard" || opts2.rtlHard) &&
+    !phases.includes("timing")
+  ) {
+    phases = [...phases, "timing"];
+  }
+
+  let env: Record<string, string | undefined>;
+  let boardId: string | undefined;
+  let core: string;
+  try {
+    ({ env, boardId, core } = await buildTensorChildEnv(ctx, opts2));
+  } catch {
+    return 1;
+  }
+  env.AI_TENSOR_IMPL_PHASES = phases.join(",");
+
+  logger.heading("ai-tensor virtual implementation test");
+  logger.info(`  phases  : ${phases.join(" → ")}`);
+  logger.info(`  board   : ${boardId ?? "?"}`);
+  logger.info(`  core    : ${core} (ai_island package selection)`);
+  logger.info(`  backend : ${env.AI_TENSOR_BACKEND ?? "?"}`);
+  if (env.CVA6_FROM_TIMING) {
+    logger.info(`  timing  : ${env.CVA6_FROM_TIMING} (sv-timing structural FO4)`);
+  } else if (phases.includes("timing")) {
+    logger.warn("  timing  : phase requested but no --from-timing (will soft-skip unless --require-timing)");
+  }
+  logger.info(
+    "  note    : soft = host software; hard = SV RTL; timing ≠ STA sign-off",
+  );
+
+  if (opts2.dryRun || ctx.dryRun) {
+    logger.warn("dry-run: not executing virt-impl phases");
+    return 0;
+  }
+
+  const r = await runRegressScript(script, [], {
+    cwd: ctx.repoRoot,
+    env,
+    logger,
+  });
+  return r.code ?? 1;
 }
 
 /** Lab HARD RTL: mmio + gemm_s8 on work-ver-ai (opt-in). */
@@ -368,6 +557,27 @@ export async function runAiTensorSpawn(
     return 1;
   }
 
+  // Multi-phase pytorch / virt-impl before dry-run early-return so --rtl-hard previews phases
+  if (cmd === "pytorch") {
+    const mode = parseImplMode(opts2.impl);
+    const wantHard =
+      opts2.rtlHard === true ||
+      mode === "hard" ||
+      mode === "full" ||
+      mode === "hard-only";
+    const wantTiming = mode === "full" || (wantHard && !!opts2.fromTiming);
+    if (wantHard || wantTiming || mode !== "soft") {
+      return runAiTensorVirtImpl(ctx, {
+        ...opts2,
+        impl: opts2.impl ?? (wantHard ? "hard" : "soft"),
+        rtlHard: wantHard,
+      });
+    }
+  }
+  if (cmd === "virt-impl") {
+    return runAiTensorVirtImpl(ctx, opts2);
+  }
+
   logger.info(`tensor spawn: ${script} ${cmd}`);
   logger.info(`  AI_TENSOR_DIR=${pkg}`);
   if (boardId) logger.info(`  board=${boardId} backend=${env.AI_TENSOR_BACKEND ?? "?"}`);
@@ -402,7 +612,7 @@ export async function runAiTensorSpawn(
     }
     logger.info(
       "  pytorch suite: ai-tensor/python/tests/test_torch_virt_ai_island.py " +
-        "(Device always; full torch cases if torch installed)",
+        "(Device always; full torch cases if torch installed; use --rtl-hard for SV)",
     );
     const r = await runRegressScript(pt, opts.extraArgs ?? [], {
       cwd: ctx.repoRoot,
@@ -573,7 +783,8 @@ export function formatTensorStatus(ctx: PlatformContext): Record<string, unknown
     coreConfig: ctx.config.soc.coreConfig,
     note:
       "spawn only — no Cargo path dep into monorepo; see ai-tensor/architecture/HOST.md. " +
-      "tensor pytorch|frameworks|regress --board virt-ai-pcie --core g6lc64_ai [--from-timing DIR]",
+      "tensor pytorch|virt-impl|regress --board virt-ai-pcie --core g6lc64_ai " +
+      "[--impl soft|hard|full] [--rtl-hard] [--from-timing DIR] [--use-emit]",
     commands: [
       "tensor status",
       "tensor doctor",
@@ -585,8 +796,10 @@ export function formatTensorStatus(ctx: PlatformContext): Record<string, unknown
       "tensor virt-card",
       "tensor frameworks",
       "tensor pytorch",
+      "tensor virt-impl",
       "tensor regress",
       "tensor rtl",
+      "tensor rtl-hard",
     ],
   };
 }

@@ -19,9 +19,13 @@ Monorepo command (landed):
 
 ```text
 cva6-build tensor status | doctor | test | golden | cosim | check
-cva6-build tensor virt-card | frameworks | pytorch | regress
+cva6-build tensor virt-card | frameworks | pytorch | virt-impl | regress
 # board + ai_island core (like diag core selection + from-timing):
 cva6-build tensor pytorch --board virt-ai-pcie --core g6lc64_ai
+# multi-phase virtual implementation (soft Device/PyTorch → SV HARD → sv-timing):
+cva6-build tensor pytorch --rtl-hard --board virt-ai-pcie --core g6lc64_ai
+cva6-build tensor virt-impl --impl full --board virt-ai-pcie --core g6lc64_ai \
+  --from-timing workspace/build/sv-timing/host-g6lc64_ai
 cva6-build tensor regress --board virt-ai-pcie --core g6lc64_ai [--from-timing DIR]
 # package-local discovery JSON:
 cargo run -p ai-tensor-cli -- probe --profile profiles/island-p3-v1.toml

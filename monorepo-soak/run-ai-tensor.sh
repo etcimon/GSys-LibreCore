@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
 # Thin monorepo adapter: spawn ai-tensor package tests without linking crates into RTL.
-# Usage: bash monorepo-soak/run-ai-tensor.sh [check|test|golden|cosim|queue-soak|event-fd-soak|rtl|virt-card|frameworks|pytorch|regress]
+# Usage: bash monorepo-soak/run-ai-tensor.sh [check|test|golden|cosim|queue-soak|event-fd-soak|rtl|virt-card|frameworks|pytorch|virt-impl|regress]
 #
 # Env:
 #   AI_TENSOR_DIR          package root (default: $ROOT/ai-tensor)
@@ -68,7 +68,16 @@ JSON
     ;;
   pytorch)
     # Structured PyTorch unittest: ai_island features through virt-ai-pcie
-    bash "$ROOT/monorepo-soak/run-ai-tensor-pytorch.sh"
+    # Multi-phase when AI_TENSOR_IMPL_PHASES or AI_TENSOR_RTL_HARD set
+    if [[ -n "${AI_TENSOR_IMPL_PHASES:-}" || "${AI_TENSOR_RTL_HARD:-0}" == "1" ]]; then
+      export AI_TENSOR_IMPL_PHASES="${AI_TENSOR_IMPL_PHASES:-soft,hard}"
+      bash "$ROOT/monorepo-soak/run-ai-tensor-virt-impl.sh"
+    else
+      bash "$ROOT/monorepo-soak/run-ai-tensor-pytorch.sh"
+    fi
+    ;;
+  virt-impl)
+    bash "$ROOT/monorepo-soak/run-ai-tensor-virt-impl.sh"
     ;;
   regress)
     # virt-card smoke + frameworks (local + tcp device) for build-platform tensor regress
@@ -83,7 +92,7 @@ JSON
     cargo run -q -p ai-tensor-cli -- doctor --profile profiles/island-p3-v1.toml
     ;;
   *)
-    echo "usage: $0 [check|test|golden|cosim|queue-soak|event-fd-soak|rtl|virt-card|frameworks|pytorch|regress]"
+    echo "usage: $0 [check|test|golden|cosim|queue-soak|event-fd-soak|rtl|virt-card|frameworks|pytorch|virt-impl|regress]"
     exit 2
     ;;
 esac
