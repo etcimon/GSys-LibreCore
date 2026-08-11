@@ -18,7 +18,7 @@ Offline dual-oracle goldens (sim + SoftIsland) + external harness
 `ai-tensor/tools/cosim_harness.py` (`AI_TENSOR_COSIM_CMD`); monorepo spawn
 `monorepo-soak/run-ai-tensor.sh {test,golden,cosim}`; lab HARD
 `monorepo-soak/run-ai-tensor-rtl-hard.sh` (mmio+gemm_s8 on `work-ver-ai`).
-Completion FIFO RTL + HARD: [`completion-fifo.md`](completion-fifo.md) (SoC HARD mmio+gemm_s8 green post-FIFO).
+Completion FIFO RTL + HARD: [completion-fifo.md](completion-fifo.md) (SoC HARD mmio+multi-claim+gemm_s8 green post-FIFO; suite runner monorepo-soak/run-ai-matrix-hard-suite.sh).
 Not on any flist; does not replace this scaffold.
 
 **Scaling plan of record: [`scaling-100tops.md`](scaling-100tops.md)** — what changes when the target
