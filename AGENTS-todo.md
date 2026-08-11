@@ -58,7 +58,7 @@ Full map: `architecture/multi-threading/soft-ladder/README.md`.
 | **SL-A** | **iter-012 FDT `lenp` / `PEEL_FDT_GETPROP`** | P1–P2 | **Open (RTL landed, soak pending).** Pin: mepc=`0x80012eb2` mcause=6 mtval=`0x80012b2a` (= check_node→next_tag **link**). Soft getprop holding cookie green historically. |
 | | Bisects **all negative** | P2 | Dual-commit; STQ-nofwd; force SI; ALU/NONE cancel-exempt — same pin; **reverted**. |
 | | Directed (P1) | P1 | Shape minis green + `mini_fdt_next_tag_lbu` in `soft-ladder-di` default. PEEL pin not in stack-only minis. |
-| | **P2 RTL (landed)** | P2 | `scoreboard.sv`: cancel younger **LOAD** under `SuperscalarEn` (same-hart SMT). `issue_stage.sv`: per-hart **`unresolved_sp_q`** (sp-write barrier). Rebuild `work-ver-smt2-slfix` → PEEL/holding re-soak. |
+| | **P2 RTL (landed)** | P2 | `scoreboard.sv` LOAD cancel under SS + `issue_stage` **`unresolved_sp_q`**. Harness **`work-ver-smt2-slfix`** built (TB banked CSR probes). **Hold on slfix:** `plat_hc=2`/`coldboot_done=1` but cookie miss (3e6 cy). DI FDT minis 5/5 green. |
 | | Priors | | `soft-ladder/{README,ITERATION,b1-rtl-residuals}.md` · oracle `software/smt2-linux/soft-ladder/` · `architecture/multi-threading/smt2-ai-tensor-linux.md` |
 | **SL-B** | Peel soft getprop + real printf | P3–P4 | **Blocked on SL-A PEEL green** after rebuild soak. Then `plat_hc==2` without soft FDT. |
 | **SL-C** | Topology truth (smt2) | P6 / topology | After SL-B: stock DTB, `hart_count==2`, R3/R3b, cpuinfo; gates **before** multi-thread PyTorch. |

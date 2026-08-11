@@ -185,15 +185,25 @@ SMT2_REBUILD=1 bash verif/regress/smt2-ai-tensor-track.sh paths
 
 ---
 
-## 6. Status
+## 6. Status (branch `smt2-ai-tensor-linux`)
 
 | Item | State |
 |------|--------|
 | Soft-ladder P0 suites | Done |
-| iter-012 RTL (LOAD cancel DI + sp barrier) | **Landed** (`0bb3972ed`); PEEL soak pending rebuild |
-| SMT AI CSR bank sideband | **Landed** |
-| Soft pytorch suite | **Live** |
-| Fast track driver | **`smt2-ai-tensor-track.sh`** (this branch) |
-| Dual-hart Linux + dual pytorch workers | **Not started** — blocked on SL-A PEEL + SL-C + Image |
+| Fast track driver | **`smt2-ai-tensor-track.sh`** — `fast` 21/0; `di` FDT minis **5/5 PASS** on fw64/slfix |
+| Tensor soft (T4) | **PASS** `tensor pytorch` Device virt-card (torch optional; 2 tests) |
+| iter-012 harness | **`work-ver-smt2-slfix`** built (TB hangpc uses banked CSR hart0 path) |
+| Hold (T0) on slfix | **Partial:** `plat_hc=2` + `coldboot_done=1` but **no `51b1babe` cookie** within 3e6 cycles (mcause=2 / hangpc). FDT walk looks healthier than PEEL pin (lenp stays stack). Needs longer soak / ELF rebuild / residual triage. |
+| PEEL (T1) | Pending after hold cookie green |
+| Dual-hart Linux + dual pytorch workers | **Not started** — blocked on hold cookie + SL-C + Image |
+
+### Lab notes (2026-08-11)
+
+```text
+bash verif/regress/smt2-ai-tensor-track.sh fast     # green
+bash verif/regress/smt2-ai-tensor-track.sh di       # 5/5 FDT minis green
+cva6-build tensor pytorch --board virt-ai-pcie --core g6lc64_ai  # green (Device)
+SOFT_LADDER_HARNESS=work-ver-smt2-slfix … hold     # plat_hc=2, cookie miss
+```
 
 Update `AGENTS-todo.md` SL-T when T5 first greened on real dual-hart Linux.

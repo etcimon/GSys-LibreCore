@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# SMT2 × ai-tensor staged track — optimized for development iteration speed.
+# SMT2 × ai-tensor staged track - optimized for development iteration speed.
 #
 # Default profile **fast** stays on the host / artifact plane (seconds):
 # path checks, dual-hart artifacts, soft-ladder assemble-only. Climb only with
@@ -13,7 +13,7 @@
 #   di       T0b  soft-ladder-di mini subset on prebuilt harness (minutes)
 #   hold     T0   soft-ladder-osbi holding cookie (reuse ELF; long if cold)
 #   peel     T1   PEEL_FDT_GETPROP=1 (bisect only; not default)
-#   dual     T2–T3 dual-hart-ci (skip R3) + optional LIVE bare dual-park
+#   dual     T2-T3 dual-hart-ci (skip R3) + optional LIVE bare dual-park
 #   tensor   T4   cva6-build tensor pytorch soft (no Variane)
 #   mt-soft  T5   tensor soft + dual-worker smoke script (host-only)
 #   hard     T6   tensor virt-impl --impl hard --suite narrow (RTL HARD)
@@ -82,9 +82,32 @@ pick_harness() {
 }
 
 have_bun_tensor() {
-  command -v bun >/dev/null 2>&1 || return 1
   [[ -f build-platform/src/cli/index.ts ]] || return 1
-  return 0
+  if command -v bun >/dev/null 2>&1; then
+    return 0
+  fi
+  # Windows host install (WSL common)
+  for b in \
+    "${HOME}/.bun/bin/bun" \
+    "/mnt/c/Users/${USER}/.bun/bin/bun.exe" \
+    /mnt/c/Users/*/.bun/bin/bun.exe; do
+    if [[ -x "$b" ]]; then
+      export PATH="$(dirname "$b"):${PATH}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+tensor_cli() {
+  # Prefer native bun; fall back to bun.exe under WSL.
+  if command -v bun >/dev/null 2>&1; then
+    bun build-platform/src/cli/index.ts "$@"
+  elif command -v bun.exe >/dev/null 2>&1; then
+    bun.exe build-platform/src/cli/index.ts "$@"
+  else
+    return 127
+  fi
 }
 
 run_soft_ladder_di() {
@@ -166,7 +189,7 @@ run_tensor_pytorch() {
   local core="${SMT2_TENSOR_CORE:-g6lc64_ai}"
   log "tensor pytorch --board $board --core $core"
   set +e
-  bun build-platform/src/cli/index.ts tensor pytorch --board "$board" --core "$core" \
+  tensor_cli tensor pytorch --board "$board" --core "$core" \
     2>&1 | tee "$OUT/tensor-pytorch.log"
   local rc=${PIPESTATUS[0]}
   set -e
@@ -186,7 +209,7 @@ run_tensor_hard_narrow() {
   local core="${SMT2_TENSOR_CORE:-g6lc64_ai}"
   log "tensor virt-impl --impl hard --suite narrow --require-hard"
   set +e
-  bun build-platform/src/cli/index.ts tensor virt-impl \
+  tensor_cli tensor virt-impl \
     --impl hard --suite narrow --require-hard \
     --board "$board" --core "$core" \
     2>&1 | tee "$OUT/tensor-hard-narrow.log"
@@ -211,10 +234,10 @@ run_mt_soft_workers() {
   local core="${SMT2_TENSOR_CORE:-g6lc64_ai}"
   log "mt-soft: sequential dual invoke (stand-in for taskset 0/1 until Linux Image)"
   set +e
-  bun build-platform/src/cli/index.ts tensor pytorch --board "$board" --core "$core" \
+  tensor_cli tensor pytorch --board "$board" --core "$core" \
     >"$OUT/tensor-worker0.log" 2>&1
   local r0=$?
-  bun build-platform/src/cli/index.ts tensor pytorch --board "$board" --core "$core" \
+  tensor_cli tensor pytorch --board "$board" --core "$core" \
     >"$OUT/tensor-worker1.log" 2>&1
   local r1=$?
   set -e
@@ -266,7 +289,7 @@ stage_fast() {
   log "=== stage: fast dual-hart artifacts (no live sim) ==="
   export DUAL_HART_LIVE=0
   export DUAL_HART_SKIP_R3=1
-  # dual-hart-ci still runs boot-path; keep it — seconds–minute range
+  # dual-hart-ci still runs boot-path; keep it - seconds-minute range
   run_dual_hart
   log "=== stage: soft-ladder-di COMPILE_ONLY (seconds) ==="
   run_soft_ladder_di 1
@@ -316,12 +339,14 @@ stage_full() {
   run_tensor_pytorch
 }
 
-# Optional rebuild — never default
+# Optional rebuild - never default
 if [[ "$REBUILD" == "1" ]]; then
   log "SMT2_REBUILD=1: make verilate target=g6lc64_smt2 ver-library=work-ver-smt2-slfix"
-  log "(this is the slow path — minutes to hours; not part of fast)"
-  make verilate target=g6lc64_smt2 ver-library=work-ver-smt2-slfix XLEN=64 \
-    2>&1 | tee "$OUT/rebuild.log" || bad "rebuild"
+  log "(this is the slow path - minutes to hours; not part of fast)"
+  if ! make verilate target=g6lc64_smt2 ver-library=work-ver-smt2-slfix XLEN=64 \
+      2>&1 | tee "$OUT/rebuild.log"; then
+    bad "rebuild"
+  fi
 fi
 
 log "profile=$PROFILE out=$OUT"
