@@ -1,7 +1,7 @@
 #!/bin/bash
 # SPDX-License-Identifier: MIT
 # Thin monorepo adapter: spawn ai-tensor package tests without linking crates into RTL.
-# Usage: bash monorepo-soak/run-ai-tensor.sh [check|test|golden|cosim|queue-soak|rtl]
+# Usage: bash monorepo-soak/run-ai-tensor.sh [check|test|golden|cosim|queue-soak|event-fd-soak|rtl]
 #
 # Env:
 #   AI_TENSOR_DIR          package root (default: $ROOT/ai-tensor)
@@ -47,6 +47,12 @@ JSON
     cargo run -q -p ai-tensor-cli -- depth-soak --depth 4 --mode latch --backend sim
     cargo run -q -p ai-tensor-cli -- depth-soak --depth 3 --mode fetch --backend mmio
     cargo run -q -p ai-tensor-cli -- history-soak --n 4 --backend mmio
+    cargo run -q -p ai-tensor-cli -- event-fd-soak --backend sim
+    cargo run -q -p ai-tensor-cli -- event-fd-soak --backend mmio
+    ;;
+  event-fd-soak)
+    cargo run -q -p ai-tensor-cli -- event-fd-soak --backend sim
+    cargo run -q -p ai-tensor-cli -- event-fd-soak --backend mmio
     ;;
   rtl)
     # Soft by default; hard when AI_TENSOR_RTL_HARD=1
@@ -61,7 +67,7 @@ JSON
     cargo run -q -p ai-tensor-cli -- doctor --profile profiles/island-p3-v1.toml
     ;;
   *)
-    echo "usage: $0 [check|test|golden|cosim|queue-soak|rtl]"
+    echo "usage: $0 [check|test|golden|cosim|queue-soak|event-fd-soak|rtl]"
     exit 2
     ;;
 esac

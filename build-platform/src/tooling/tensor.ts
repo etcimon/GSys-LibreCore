@@ -39,6 +39,7 @@ export type TensorSpawnCmd =
   | "golden"
   | "cosim"
   | "queue-soak"
+  | "event-fd-soak"
   | "rtl";
 
 export function isTensorSpawnCmd(s: string): s is TensorSpawnCmd {
@@ -48,6 +49,7 @@ export function isTensorSpawnCmd(s: string): s is TensorSpawnCmd {
     s === "golden" ||
     s === "cosim" ||
     s === "queue-soak" ||
+    s === "event-fd-soak" ||
     s === "rtl"
   );
 }
@@ -265,6 +267,7 @@ export function formatTensorStatus(ctx: PlatformContext): Record<string, unknown
       "tensor golden",
       "tensor cosim",
       "tensor queue-soak",
+      "tensor event-fd-soak",
       "tensor rtl",
     ],
   };

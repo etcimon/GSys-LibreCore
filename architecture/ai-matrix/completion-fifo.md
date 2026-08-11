@@ -39,6 +39,7 @@ losing intermediate completions if SW did not claim between jobs.
 - [x] Full SoC HARD rebuild + `ai_island_mmio_smoke` + `ai_gemm_s8_smoke` (lab; 2026-08-10)
 - [x] SoC directed multi-claim (ai_cpl_fifo_multi_claim, tickets 20->21->22) HARD PASS (~20k cy)
 - [x] HARD suite CI (AI_MATRIX_HARD_SUITE=ci): 27/27 PASS on work-ver-ai post-FIFO (2026-08-11)
+- [x] Peak HARD GEMM 128x128 (21938 cy) + 256x256 (83705 cy) PASS (AI_MATRIX_HARD_SUITE=peak, 2026-08-11)
 - Timing: push/pop same clock domain; no new async reset/clock
 
 ## Non-goals

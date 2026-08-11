@@ -8,11 +8,13 @@
 #   bash monorepo-soak/run-ai-matrix-hard-suite.sh           # full DEFAULT_TESTS
 #   AI_MATRIX_HARD_SUITE=ci bash monorepo-soak/run-ai-matrix-hard-suite.sh
 #   AI_MATRIX_HARD_SUITE=smoke bash monorepo-soak/run-ai-matrix-hard-suite.sh
+#   AI_MATRIX_HARD_SUITE=peak bash monorepo-soak/run-ai-matrix-hard-suite.sh
 #
 # Suites:
 #   full  — ai-matrix-veri DEFAULT_TESTS (incl. 256x256 GEMM)
 #   ci    — host/FIFO/IRQ/desc + gemm up to 64x64 (no 128/256)
 #   smoke — mmio + multi-claim + gemm_s8 (fast lab pair + FIFO)
+#   peak  — large GEMM only: 128x128 + 256x256 (long wall time)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export AI_TENSOR_RTL_HARD=1
@@ -22,7 +24,6 @@ export AI_MATRIX_VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai}"
 SUITE="${AI_MATRIX_HARD_SUITE:-full}"
 case "$SUITE" in
   full)
-    # Omit AI_MATRIX_VERI_TESTS so ai-matrix-veri.sh uses DEFAULT_TESTS.
     unset AI_MATRIX_VERI_TESTS || true
     ;;
   ci)
@@ -31,8 +32,12 @@ case "$SUITE" in
   smoke)
     export AI_MATRIX_VERI_TESTS="ai_island_mmio_smoke ai_cpl_fifo_multi_claim ai_gemm_s8_smoke"
     ;;
+  peak)
+    export AI_MATRIX_VERI_TESTS="ai_gemm_s8_128x128_smoke ai_gemm_s8_256x256_smoke"
+    export AI_MATRIX_TIME_OUT="${AI_MATRIX_TIME_OUT:-16000000}"
+    ;;
   *)
-    echo "unknown AI_MATRIX_HARD_SUITE=${SUITE} (full|ci|smoke)" >&2
+    echo "unknown AI_MATRIX_HARD_SUITE=${SUITE} (full|ci|smoke|peak)" >&2
     exit 2
     ;;
 esac
