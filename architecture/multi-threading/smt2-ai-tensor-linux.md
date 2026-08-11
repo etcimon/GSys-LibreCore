@@ -193,7 +193,7 @@ SMT2_REBUILD=1 bash verif/regress/smt2-ai-tensor-track.sh paths
 | Fast track driver | **`smt2-ai-tensor-track.sh`** — `fast` 21/0; `di` FDT minis **5/5 PASS** on fw64/slfix |
 | Tensor soft (T4) | **PASS** `tensor pytorch` Device virt-card (torch optional; 2 tests) |
 | iter-012 harness | **`work-ver-smt2-slfix`** built (TB hangpc uses banked CSR hart0 path) |
-| Hold (T0) on slfix | **Partial:** `plat_hc=2` + `coldboot_done=1` but **no `51b1babe` cookie** within 3e6 cycles (mcause=2 / hangpc). FDT walk looks healthier than PEEL pin (lenp stays stack). Needs longer soak / ELF rebuild / residual triage. |
+| Hold (T0) on slfix | **Partial (best so far):** reused oracle ELF + slfix → `plat_hc=2`/`coldboot_done=1`, no cookie @3e6 cy. **Cold `mk_plat_skip` rebuild** on same harness regressed to `plat_hc=80` + AXI R-error — prefer `SOFT_LADDER_SKIP_BUILD=1` until oracle peels revalidated. |
 | PEEL (T1) | Pending after hold cookie green |
 | Dual-hart Linux + dual pytorch workers | **Not started** — blocked on hold cookie + SL-C + Image |
 
