@@ -41,8 +41,9 @@ Template at bottom.
 | | **L** SOFT_CSR cut `cd86→cd0e` (reinit) | **FAIL** — reinit path not a valid skip on this ELF |
 | | **N/P** stub `hart_init` ret0 / skip probes then ret0 | **banr** soft printf runs; hang **mepc=`0x8002047a`** mcause=2 — **FDT/rodata string executed as code** (`compatible`/`riscv,aplic` bytes); npc `_wait_for_boot_hart` |
 | | **B/C/D** j SUCCESS at domain_fin / start_finish | **FAIL** (never reached without hart_init progress) |
-| **Conclusion I4f** | (1) Cookie cave OK. (2) Stock residual on slfix: **`sbi_hart_init` CSR feature probes** (cont.33 family; `unresolved_csr_q` present but probes still die). (3) After soft-skip hart_init: **post-init jalr/fn-ptr into FDT** residual before `start_finish`/`0x996`. (4) Keep soft getprop; do not cold-rebuild oracle. |
-| **I6 Next** | (a) Soft hold: `SOFT_HART_INIT` ret0 + chase mepc=`0x8002047a` (who jalr’s FDT). (b) RTL: re-verify CSR expected-trap serialize under iter-012 (issue-window / trap-flush / banked mtvec). (c) Then PEEL_FDT_GETPROP. |
+| **Conclusion I4f** | (1) Cookie cave OK. (2) Stock residual on slfix: **`sbi_hart_init` CSR feature probes** (cont.33 family; `unresolved_csr_q` present but probes still die). (3) After soft-skip hart_init: **platform ops `c.jalr a5`** into FDT (irqchip@`17e0` first → mepc=`0x2047a`, then ipi/timer/tlb). |
+| **I4g Holding cookie green (2026-08-11)** | **`SOFT_HART_INIT` + `SOFT_PLAT_OPS`** (irqchip/ipi/timer/tlb `c.li a0,0`) on pin ELF → **`51b1babe`** @8e6 `slfix`, `plat_hc=2`, BANR. Artifact: `build/fw_payload_r3a_c15_plat_skip.held.elf` (pin md5 `bc7ed11d…` unchanged). `mk_plat_skip`: `SOFT_HART_INIT` implies plat peels. |
+| **I6 Next** | (a) RTL: CSR expected-trap under iter-012 → peel `SOFT_HART_INIT`. (b) Why platform ops fn-ptrs land in FDT (corrupt `platform->ops` / missing fdt irq parse under DI?). (c) PEEL_FDT_GETPROP. (d) Promote held path → SL-B. |
 
 ## Completed iterations
 

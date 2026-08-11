@@ -14,6 +14,8 @@
 #   SOFT_MALLOC=1 bash verif/regress/soft-ladder-opensbi-soak.sh
 #   SOFT_LADDER_SKIP_BUILD=1 bash ...   # reuse existing ELF
 #   SOFT_LADDER_TIME_OUT=8000000 bash ...
+#   SOFT_LADDER_ELF=.../fw_payload_r3a_c15_plat_skip.held.elf  # cookie-hold peels
+#   SOFT_HART_INIT=1 SOFT_LADDER_SKIP_BUILD=0  # rebuild oracle with holding peels
 #
 # Map: architecture/multi-threading/soft-ladder/CONT-FULL-MAP.md §6
 

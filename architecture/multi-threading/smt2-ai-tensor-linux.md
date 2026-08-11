@@ -202,8 +202,8 @@ SMT2_REBUILD=1 bash verif/regress/smt2-ai-tensor-track.sh paths
 | Tensor soft (T4) | **PASS** `tensor pytorch` Device virt-card (torch optional; 2 tests) |
 | AI CSR SMT banking | **Landed** in `g6lc_smt_csr_bank` (active-hart mux / commit-hart gate) |
 | iter-012 harness | **`work-ver-smt2-slfix`** live (banked TB CSR probes) |
-| Hold (T0) on slfix | **Partial (FDT green, cookie red).** Cookie cave **works** (j SUCCESS @`0x82c`/`0xcd86` → `51b1babe`). Stock hang in **`sbi_hart_init` CSR probes**; soft-skip hart_init → BANR then illegal mepc=`0x8002047a` (FDT bytes as code). Note: `coldboot_done=1` is **early** (pre-hart_init). |
-| Oracle ELF | **Pin** md5 `bc7ed11dab17454fd147e4927ba07fef`. Cold rebuild `871e7cb6…` → `plat_hc=80`/R-error. Always `SOFT_LADDER_SKIP_BUILD=1`. |
+| Hold (T0) on slfix | **Holding cookie green** (`SOFT_HART_INIT`+`SOFT_PLAT_OPS` → **`51b1babe`**, `plat_hc=2`, BANR). Stock still red: hart_init CSR probes + platform jalr→FDT. `coldboot_done` is early (pre-hart_init). |
+| Oracle ELF | **Pin** md5 `bc7ed11dab17454fd147e4927ba07fef`. **Held** `fw_payload_r3a_c15_plat_skip.held.elf`. `SOFT_LADDER_SKIP_BUILD=1`; optional `SOFT_LADDER_ELF=…held.elf`. |
 | fw64 hold bisect | Good ELF @8e6 on pre-iter-012 `fw64` → PEEL pin mepc=`0x12eb2` mcause=6. |
 | PEEL (T1) | Pending cookie green on stock (or held) path |
 | Dual-hart Linux + dual pytorch workers | **Not started** — blocked on hold cookie + SL-C + Image |
@@ -229,6 +229,7 @@ SOFT_LADDER_HARNESS=work-ver-smt2-slfix SOFT_LADDER_SKIP_BUILD=1 \
 # → plat_hc=2 coldboot_done=1; cookie miss; hang _start_warm / mcause=2
 ```
 
-**Next residual (cookie):** (1) `sbi_hart_init` CSR expected-trap probes under DI/iter-012; (2) after soft-skip, jalr target `0x8002047a` (FDT/rodata). Success cave itself is fine.
+**Holding cookie:** `SOFT_HART_INIT=1` (implies `SOFT_PLAT_OPS`) when rebuilding oracle, or use `…/build/fw_payload_r3a_c15_plat_skip.held.elf`.  
+**Stock residual:** peel hart_init CSR + platform ops fn-ptrs (irqchip/ipi/timer/tlb) without soft peels.
 
 Update `AGENTS-todo.md` SL-T when T5 first greened on real dual-hart Linux.

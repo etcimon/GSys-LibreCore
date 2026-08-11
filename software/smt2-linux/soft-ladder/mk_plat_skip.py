@@ -21,7 +21,9 @@ Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
     SOFT_SPIN=1   SA/heap spin NOP4
     SOFT_CMPX=1   ld/sd atomic_cmpxchg shim
     SOFT_CSR=1    skip hart_init CSR probes @cd86 → a0=0; j epilogue
-    SOFT_HART_INIT=1  sbi_hart_init entry → li a0,0; ret (holding; chase 0x2047a)
+    SOFT_HART_INIT=1  sbi_hart_init ret0 + SOFT_PLAT_OPS (cookie hold on slfix)
+    SOFT_PLAT_OPS=1   c.li a0,0 at irqchip/ipi/timer/tlb platform jalr
+    SOFT_PLAT_OPS_OFF=1  with SOFT_HART_INIT: do not also peel platform jalr
     SOFT_CMV=1    nop dual c.mv (old cont.19 soft)
     SOFT_FDT_MATCH=1  stub jal fdt_match (old soft)
     SOFT_STRLEN=1 soft sbi_strlen ret-imm 11 (pre-FETCH_WIDTH=64)
@@ -140,6 +142,7 @@ print(
     f"SOFT_CMPX={int(_env_peel('SOFT_CMPX'))} "
     f"SOFT_CSR={int(_env_peel('SOFT_CSR'))} "
     f"SOFT_HART_INIT={int(_env_peel('SOFT_HART_INIT'))} "
+    f"SOFT_PLAT_OPS={int(_env_peel('SOFT_PLAT_OPS'))} "
     f"SOFT_CMV={int(SOFT_CMV)} SOFT_FDT_MATCH={int(SOFT_FDT_MATCH)} "
     f"SOFT_STRLEN={int(SOFT_STRLEN)} SOFT_MALLOC={int(SOFT_MALLOC)} "
     f"PEEL_FDT_GETPROP={int(PEEL_FDT_GETPROP)}"
@@ -608,9 +611,8 @@ print("cont.35: real console_init; c.li a0,0 @ab6a (skip device jalr)")
 # cont.33 hart_init CSR probes: natural by default (cookie green 2026-08-08
 # PEEL_CSR soak on pre-iter-012). SOFT_CSR=1: after memset @cd86, a0=0 and
 # return via epilogue @cd14 (skip expected-trap probes + reinit). Lab 2026-08-11
-# on work-ver-smt2-slfix: stock hang inside probes; SOFT_CSR/SOFT_HART_INIT
-# advance to BANR then residual mepc=0x8002047a (FDT-as-code). Prefer
-# SOFT_HART_INIT for full skip. Do not use cd86→cd0e reinit cut (hangs).
+# on work-ver-smt2-slfix: stock hang inside probes; SOFT_HART_INIT full skip.
+# Do not use cd86→cd0e reinit cut (hangs).
 if _env_peel("SOFT_HART_INIT"):
     # li a0,0; ret at sbi_hart_init entry
     struct.pack_into("<I", data, vf(segs, 0x8000CCCC), addi(A0, 0, 0))
@@ -624,6 +626,37 @@ elif _env_peel("SOFT_CSR"):
     print("SOFT_CSR: skip CSR probes @cd86 → a0=0; j epilogue cd14")
 else:
     print("cont.33+: hart_init CSR probe tail natural (peeled)")
+
+# Lab 2026-08-11 (slfix + SOFT_HART_INIT): hang mepc=0x8002047a / 0x80020072
+# = FDT/rodata executed as code via platform ops c.jalr a5 (irqchip @17e0 first).
+# Soft-skip platform driver init callbacks (c.li a0,0) — same pattern as
+# console @ab6a / domain @bac4. Cookie green with SOFT_HART_INIT + these.
+# SOFT_PLAT_OPS=1 alone is insufficient (still die in hart_init CSR probes).
+# SOFT_HART_INIT implies SOFT_PLAT_OPS unless SOFT_PLAT_OPS=0.
+_soft_plat = _env_peel("SOFT_PLAT_OPS") or (
+    _env_peel("SOFT_HART_INIT") and not _env_peel("SOFT_PLAT_OPS_OFF")
+)
+if _soft_plat:
+    # c.li a0,0 replaces c.jalr a5 at platform ops call sites
+    _plat_jalr = (
+        0x800017E0,  # sbi_irqchip_init ops->init
+        0x800016A8,
+        0x80001778,
+        0x800017C2,  # sbi_ipi_init
+        0x80005424,
+        0x80005492,
+        0x800054AE,  # sbi_timer_init
+        0x80005AD0,
+        0x80005B70,  # sbi_tlb_init
+    )
+    for _va in _plat_jalr:
+        struct.pack_into("<H", data, vf(segs, _va), 0x4501)
+    print(
+        "SOFT_PLAT_OPS: c.li a0,0 @ irqchip/ipi/timer/tlb platform jalr sites "
+        f"({len(_plat_jalr)} sites)"
+    )
+else:
+    print("platform irqchip/ipi/timer/tlb jalr natural (console/domain already soft)")
 # peeled (not stubbed): 0x470A sse, 0x2EAA dbtr, 0x17CC irqchip, 0x165C ipi,
 # cont.25: 0xC364 fwft, 0x8F22 ecall_init;
 # 0x5A5C tlb, 0x53EC timer, 0xC656 pmp_configure; cont.33: 0xCCCC hart_init
