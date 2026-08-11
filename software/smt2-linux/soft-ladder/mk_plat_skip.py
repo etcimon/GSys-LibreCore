@@ -20,7 +20,8 @@ Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
   Bisect restores:
     SOFT_SPIN=1   SA/heap spin NOP4
     SOFT_CMPX=1   ld/sd atomic_cmpxchg shim
-    SOFT_CSR=1    CSR probe cut cd86→cd0e
+    SOFT_CSR=1    skip hart_init CSR probes @cd86 → a0=0; j epilogue
+    SOFT_HART_INIT=1  sbi_hart_init entry → li a0,0; ret (holding; chase 0x2047a)
     SOFT_CMV=1    nop dual c.mv (old cont.19 soft)
     SOFT_FDT_MATCH=1  stub jal fdt_match (old soft)
     SOFT_STRLEN=1 soft sbi_strlen ret-imm 11 (pre-FETCH_WIDTH=64)
@@ -138,6 +139,7 @@ print(
     f"SOFT_SPIN={int(_env_peel('SOFT_SPIN'))} "
     f"SOFT_CMPX={int(_env_peel('SOFT_CMPX'))} "
     f"SOFT_CSR={int(_env_peel('SOFT_CSR'))} "
+    f"SOFT_HART_INIT={int(_env_peel('SOFT_HART_INIT'))} "
     f"SOFT_CMV={int(SOFT_CMV)} SOFT_FDT_MATCH={int(SOFT_FDT_MATCH)} "
     f"SOFT_STRLEN={int(SOFT_STRLEN)} SOFT_MALLOC={int(SOFT_MALLOC)} "
     f"PEEL_FDT_GETPROP={int(PEEL_FDT_GETPROP)}"
@@ -604,12 +606,22 @@ struct.pack_into("<H", data, vf(segs, 0x8000AB6A), 0x4501)
 print("cont.35: real console_init; c.li a0,0 @ab6a (skip device jalr)")
 
 # cont.33 hart_init CSR probes: natural by default (cookie green 2026-08-08
-# PEEL_CSR soak). SOFT_CSR=1 restores cd86→cd0e cut for bisect.
-if _env_peel("SOFT_CSR"):
+# PEEL_CSR soak on pre-iter-012). SOFT_CSR=1: after memset @cd86, a0=0 and
+# return via epilogue @cd14 (skip expected-trap probes + reinit). Lab 2026-08-11
+# on work-ver-smt2-slfix: stock hang inside probes; SOFT_CSR/SOFT_HART_INIT
+# advance to BANR then residual mepc=0x8002047a (FDT-as-code). Prefer
+# SOFT_HART_INIT for full skip. Do not use cd86→cd0e reinit cut (hangs).
+if _env_peel("SOFT_HART_INIT"):
+    # li a0,0; ret at sbi_hart_init entry
+    struct.pack_into("<I", data, vf(segs, 0x8000CCCC), addi(A0, 0, 0))
+    struct.pack_into("<I", data, vf(segs, 0x8000CCD0), jalr(0, RA, 0))
+    print("SOFT_HART_INIT: sbi_hart_init entry → li a0,0; ret")
+elif _env_peel("SOFT_CSR"):
+    struct.pack_into("<I", data, vf(segs, 0x8000CD86), addi(A0, 0, 0))
     struct.pack_into(
-        "<I", data, vf(segs, 0x8000CD86), jal(0, 0x8000CD86, 0x8000CD0E) & 0xFFFFFFFF
+        "<I", data, vf(segs, 0x8000CD8A), jal(0, 0x8000CD8A, 0x8000CD14) & 0xFFFFFFFF
     )
-    print("SOFT_CSR: skip CSR probes cd86→cd0e reinit")
+    print("SOFT_CSR: skip CSR probes @cd86 → a0=0; j epilogue cd14")
 else:
     print("cont.33+: hart_init CSR probe tail natural (peeled)")
 # peeled (not stubbed): 0x470A sse, 0x2EAA dbtr, 0x17CC irqchip, 0x165C ipi,
