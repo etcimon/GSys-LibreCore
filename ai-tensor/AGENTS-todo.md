@@ -62,6 +62,7 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] IRQ wait abstraction (`irq.rs`: SoftSticky + UioIrqWait under linux-mmio; PLIC-8 contract)
 - [x] Host EventFd wait abstraction + hostless soft soak / FIFO re-arm (EventFdWait, CLI event-fd-soak)
 - [x] Monorepo spawn: run-ai-tensor.sh event-fd-soak (+ queue-soak includes it)
+- [x] Board contract + DTS: monorepo architecture/ai-matrix/board-uio-eventfd.md + ariane-ai.dts
 - [ ] Host PLIC-8 eventfd/UIO **live board** wait (kernel driver + /dev/uio* or eventfd wire)
 - [x] Offline cosim goldens (sim+SoftIsland) + `golden-check` CLI
 - [x] Rust `run_gemm_s8_auto` AccTile streaming

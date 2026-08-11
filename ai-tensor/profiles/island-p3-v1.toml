@@ -27,3 +27,4 @@ features = [
   "acc_tile_256",
 ]
 notes = "Bus micro-arch (trail C-store, multi-out AR) is RTL-only; software uses CAP/PMU."
+# Board map: monorepo architecture/ai-matrix/board-uio-eventfd.md + ariane-ai.dts
