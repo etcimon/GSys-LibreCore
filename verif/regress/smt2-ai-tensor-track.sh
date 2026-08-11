@@ -11,8 +11,8 @@
 # Profiles (narrow → wide):
 #   fast     T0a  paths + dual-hart artifacts + soft-ladder COMPILE_ONLY
 #   di       T0b  soft-ladder-di mini subset on prebuilt harness (minutes)
-#   hold     T0   soft-ladder-osbi holding cookie (reuse ELF; long if cold)
-#   peel     T1   PEEL_FDT_GETPROP=1 (bisect only; not default)
+#   hold     T0   soft-ladder-osbi holding cookie (prefers *.held.elf; long if cold)
+#   peel     T1   PEEL_FDT_GETPROP=1 on pin ELF (bisect only; not default)
 #   dual     T2-T3 dual-hart-ci (skip R3) + optional LIVE bare dual-park
 #   tensor   T4   cva6-build tensor pytorch soft (no Variane)
 #   mt-soft  T5   tensor soft + dual-worker smoke script (host-only)
@@ -30,6 +30,7 @@
 #   SMT2_TRACK / $1          profile name (default: fast)
 #   SOFT_LADDER_HARNESS      prefer work-ver-smt2-slfix then fw64 then smt2
 #   SOFT_LADDER_SKIP_BUILD=1 reuse patched OpenSBI ELF (default 1 for hold/peel)
+#   SOFT_LADDER_ELF          override payload; hold defaults to *.held.elf when present
 #   SOFT_LADDER_TIME_OUT     default 3e6 hold / 2e6 peel (shorter than 12e6 soak)
 #   SOFT_LADDER_MAX_CYCLES   di mini cycles (default 80000 for speed)
 #   SOFT_LADDER_TESTS        override di list (default: FDT-focused subset)
@@ -132,6 +133,78 @@ run_soft_ladder_di() {
   fi
 }
 
+ensure_held_oracle() {
+  # Holding peels (SOFT_HART_INIT + SOFT_PLAT_OPS) on pin → *.held.elf.
+  # Prefer existing held; else binary-patch pin with the same peels as mk_plat_skip.
+  local pin="software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.elf"
+  local held="software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.held.elf"
+  if [[ -f "$held" ]]; then
+    echo "$held"
+    return 0
+  fi
+  if [[ ! -f "$pin" ]]; then
+    return 1
+  fi
+  log "building held oracle from pin (SOFT_HART_INIT + SOFT_PLAT_OPS peels)"
+  if ! python3 - "$pin" "$held" <<'PY'
+import struct, sys
+from pathlib import Path
+
+pin, held = Path(sys.argv[1]), Path(sys.argv[2])
+data = bytearray(pin.read_bytes())
+e_phoff = struct.unpack_from("<Q", data, 32)[0]
+e_phentsize = struct.unpack_from("<H", data, 54)[0]
+e_phnum = struct.unpack_from("<H", data, 56)[0]
+segs = []
+for i in range(e_phnum):
+    o = e_phoff + i * e_phentsize
+    if struct.unpack_from("<I", data, o)[0] != 1:
+        continue
+    p_offset, p_vaddr, _, p_filesz, _, _ = struct.unpack_from("<QQQQQQ", data, o + 8)
+    segs.append((p_offset, p_vaddr, p_filesz))
+
+def vf(va):
+    for off, v, fs in segs:
+        if v <= va < v + fs:
+            return off + (va - v)
+    raise ValueError(hex(va))
+
+def addi(rd, rs1, imm12):
+    if imm12 < 0:
+        imm12 = (1 << 12) + imm12
+    return ((imm12 & 0xFFF) << 20) | (rs1 << 15) | (rd << 7) | 0x13
+
+def jalr(rd, rs1, imm12=0):
+    if imm12 < 0:
+        imm12 = (1 << 12) + imm12
+    return ((imm12 & 0xFFF) << 20) | (rs1 << 15) | (rd << 7) | 0x67
+
+# SOFT_HART_INIT: sbi_hart_init entry -> li a0,0; ret
+struct.pack_into("<I", data, vf(0x8000CCCC), addi(10, 0, 0))
+struct.pack_into("<I", data, vf(0x8000CCD0), jalr(0, 1, 0))
+# SOFT_PLAT_OPS: c.li a0,0 at platform c.jalr a5 sites
+for va in (
+    0x800017E0,
+    0x800016A8,
+    0x80001778,
+    0x800017C2,
+    0x80005424,
+    0x80005492,
+    0x800054AE,
+    0x80005AD0,
+    0x80005B70,
+):
+    struct.pack_into("<H", data, vf(va), 0x4501)
+held.write_bytes(data)
+print("wrote", held)
+PY
+  then
+    echo "$held"
+    return 0
+  fi
+  return 1
+}
+
 run_soft_ladder_osbi() {
   local peel="${1:-0}"
   local h
@@ -140,21 +213,36 @@ run_soft_ladder_osbi() {
     return 0
   fi
   if [[ ! -f software/smt2-linux/soft-ladder/build/fw_payload_diag.elf && \
-        ! -f software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.elf ]]; then
+        ! -f software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.elf && \
+        ! -f software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.held.elf ]]; then
     skp "soft-ladder-osbi (missing oracle ELF under software/smt2-linux/soft-ladder/build/)"
     return 0
   fi
   export SOFT_LADDER_HARNESS="$h"
   export SOFT_LADDER_OUT="${OUT}/soft-ladder-osbi"
+  export SOFT_LADDER_OSBI_OUT="${OUT}/soft-ladder-osbi"
   export SOFT_LADDER_SKIP_BUILD="${SOFT_LADDER_SKIP_BUILD:-1}"
   if [[ "$peel" == "1" ]]; then
     export PEEL_FDT_GETPROP=1
+    # PEEL uses pin (natural) ELF — not held peels.
+    if [[ -z "${SOFT_LADDER_ELF:-}" ]]; then
+      export SOFT_LADDER_ELF="software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.elf"
+    fi
     export SOFT_LADDER_TIME_OUT="${SOFT_LADDER_TIME_OUT:-2000000}"
-    log "soft-ladder-osbi PEEL harness=$h time_out=$SOFT_LADDER_TIME_OUT skip_build=$SOFT_LADDER_SKIP_BUILD"
+    log "soft-ladder-osbi PEEL harness=$h elf=$SOFT_LADDER_ELF time_out=$SOFT_LADDER_TIME_OUT skip_build=$SOFT_LADDER_SKIP_BUILD"
   else
     unset PEEL_FDT_GETPROP || true
+    # HOLD: prefer cookie-hold peels (SOFT_HART_INIT + SOFT_PLAT_OPS).
+    if [[ -z "${SOFT_LADDER_ELF:-}" ]]; then
+      if held="$(ensure_held_oracle)"; then
+        export SOFT_LADDER_ELF="$held"
+      else
+        export SOFT_LADDER_ELF="software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.elf"
+        log "hold: no held oracle; using pin (expect cookie red on slfix stock)"
+      fi
+    fi
     export SOFT_LADDER_TIME_OUT="${SOFT_LADDER_TIME_OUT:-3000000}"
-    log "soft-ladder-osbi HOLD harness=$h time_out=$SOFT_LADDER_TIME_OUT skip_build=$SOFT_LADDER_SKIP_BUILD"
+    log "soft-ladder-osbi HOLD harness=$h elf=$SOFT_LADDER_ELF time_out=$SOFT_LADDER_TIME_OUT skip_build=$SOFT_LADDER_SKIP_BUILD"
   fi
   set +e
   bash verif/regress/soft-ladder-opensbi-soak.sh

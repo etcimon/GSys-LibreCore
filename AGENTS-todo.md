@@ -65,7 +65,8 @@ Full map: `architecture/multi-threading/soft-ladder/README.md`.
 | | **P2 RTL + TB** | P2 | LOAD cancel under SS; `unresolved_sp_q`; TB banked CSR hangpc; **`work-ver-smt2-slfix`**. `unresolved_csr_q` present — probes still red stock. |
 | | **Oracle discipline** | P2 | Pin md5 **`bc7ed11dab17454fd147e4927ba07fef`**. Held: **`fw_payload_r3a_c15_plat_skip.held.elf`**. `SOFT_LADDER_SKIP_BUILD=1`; optional `SOFT_LADDER_ELF=…held.elf`. |
 | | **Cookie chase I4f–g** | P2 | Cave OK. Stock: **`sbi_hart_init` CSR probes**. Soft-skip → platform **`c.jalr a5`** (irqchip@`17e0`→FDT). **Hold green:** `SOFT_HART_INIT`+plat peels → **`51b1babe`**. |
-| | **Next** | P2/P3 | RTL peel hart_init CSR; fix platform ops ptrs; PEEL_FDT_GETPROP; SL-B. |
+| | **Track hold** | P2 | **`smt2-ai-tensor-track.sh hold` green** (held ELF auto). `mini_csr_expected_trap` PASS on slfix. |
+| **Next** | P2/P3 | Stock peel: OpenSBI multi-pmp CSR loop mini + platform ops; PEEL_FDT_GETPROP; SL-B. |
 | | Priors | | `ITERATION` I4g · `mk_plat_skip.py` · held ELF · `smt2-ai-tensor-linux.md` |
 | **SL-B** | Peel soft getprop + real printf | P3–P4 | Hold cookie green (soft). Next: PEEL stock path; retire soft peels. |
 | **SL-C** | Topology truth (smt2) | P6 / topology | After SL-B: stock DTB, `hart_count==2`, R3/R3b, cpuinfo; **gate multi-thread PyTorch**. |

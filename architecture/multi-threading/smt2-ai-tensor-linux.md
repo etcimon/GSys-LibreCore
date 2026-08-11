@@ -202,7 +202,7 @@ SMT2_REBUILD=1 bash verif/regress/smt2-ai-tensor-track.sh paths
 | Tensor soft (T4) | **PASS** `tensor pytorch` Device virt-card (torch optional; 2 tests) |
 | AI CSR SMT banking | **Landed** in `g6lc_smt_csr_bank` (active-hart mux / commit-hart gate) |
 | iter-012 harness | **`work-ver-smt2-slfix`** live (banked TB CSR probes) |
-| Hold (T0) on slfix | **Holding cookie green** (`SOFT_HART_INIT`+`SOFT_PLAT_OPS` → **`51b1babe`**, `plat_hc=2`, BANR). Stock still red: hart_init CSR probes + platform jalr→FDT. `coldboot_done` is early (pre-hart_init). |
+| Hold (T0) on slfix | **Green via track:** `smt2-ai-tensor-track.sh hold` → held ELF → **`51b1babe`** `plat_hc=2` BANR (20/0). Stock pin still red without peels. Mini `mini_csr_expected_trap` **PASS** on slfix (simple expected-trap OK; OpenSBI hart_init probe loop still residual). |
 | Oracle ELF | **Pin** md5 `bc7ed11dab17454fd147e4927ba07fef`. **Held** `fw_payload_r3a_c15_plat_skip.held.elf`. `SOFT_LADDER_SKIP_BUILD=1`; optional `SOFT_LADDER_ELF=…held.elf`. |
 | fw64 hold bisect | Good ELF @8e6 on pre-iter-012 `fw64` → PEEL pin mepc=`0x12eb2` mcause=6. |
 | PEEL (T1) | Pending cookie green on stock (or held) path |
@@ -224,12 +224,13 @@ bash verif/regress/smt2-ai-tensor-track.sh fast     # green
 bash verif/regress/smt2-ai-tensor-track.sh di       # 5/5 FDT minis green
 cva6-build tensor pytorch --board virt-ai-pcie --core g6lc64_ai  # green (Device)
 # hold (restored good oracle; do NOT cold rebuild):
-SOFT_LADDER_HARNESS=work-ver-smt2-slfix SOFT_LADDER_SKIP_BUILD=1 \
-  SOFT_LADDER_TIME_OUT=8000000 bash verif/regress/smt2-ai-tensor-track.sh hold
-# → plat_hc=2 coldboot_done=1; cookie miss; hang _start_warm / mcause=2
+# Holding cookie (auto-prefers *.held.elf; builds peels from pin if missing):
+bash verif/regress/smt2-ai-tensor-track.sh hold
+# PEEL pin (natural, expected red until RTL peels CSR/plat):
+bash verif/regress/smt2-ai-tensor-track.sh peel
 ```
 
-**Holding cookie:** `SOFT_HART_INIT=1` (implies `SOFT_PLAT_OPS`) when rebuilding oracle, or use `…/build/fw_payload_r3a_c15_plat_skip.held.elf`.  
-**Stock residual:** peel hart_init CSR + platform ops fn-ptrs (irqchip/ipi/timer/tlb) without soft peels.
+**Holding cookie:** track `hold` uses `fw_payload_r3a_c15_plat_skip.held.elf` (or builds peels from pin).  
+**Stock residual:** peel `sbi_hart_init` CSR + platform ops jalr without soft peels; then PEEL_FDT_GETPROP.
 
 Update `AGENTS-todo.md` SL-T when T5 first greened on real dual-hart Linux.

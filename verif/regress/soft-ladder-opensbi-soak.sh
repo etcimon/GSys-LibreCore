@@ -30,7 +30,20 @@ if [[ ! -x "$ROOT/${HARNESS_DIR}/Variane_testharness" && -x "$ROOT/work-ver-smt2
 fi
 HARNESS="$ROOT/${HARNESS_DIR}/Variane_testharness"
 SOFT_LADDER_DIR="${SOFT_LADDER_DIR:-$ROOT/software/smt2-linux/soft-ladder}"
-ELF="${SOFT_LADDER_ELF:-$SOFT_LADDER_DIR/build/fw_payload_r3a_c15_plat_skip.elf}"
+# Default pin ELF. Prefer held (SOFT_HART_INIT+PLAT peels) when SOFT_LADDER_HOLD=1
+# or when SOFT_LADDER_ELF is unset and held exists (hold track path).
+_HELD="$SOFT_LADDER_DIR/build/fw_payload_r3a_c15_plat_skip.held.elf"
+_PIN="$SOFT_LADDER_DIR/build/fw_payload_r3a_c15_plat_skip.elf"
+if [[ -n "${SOFT_LADDER_ELF:-}" ]]; then
+  ELF="$SOFT_LADDER_ELF"
+elif [[ "${SOFT_LADDER_HOLD:-0}" == "1" && -f "$_HELD" ]]; then
+  ELF="$_HELD"
+elif [[ -z "${PEEL_FDT_GETPROP:-}" && -f "$_HELD" && "${SOFT_LADDER_PREFER_HELD:-1}" == "1" ]]; then
+  # Non-PEEL soaks prefer held when present (cookie green on slfix).
+  ELF="$_HELD"
+else
+  ELF="$_PIN"
+fi
 OUT="${SOFT_LADDER_OSBI_OUT:-/tmp/cva6-soft-ladder-osbi}"
 mkdir -p "$OUT"
 TIME_OUT="${SOFT_LADDER_TIME_OUT:-12000000}"
@@ -53,7 +66,7 @@ for k in PEEL_SPIN PEEL_CMPX PEEL_CSR PEEL_CMV PEEL_MALLOC PEEL_STRLEN PEEL_FDT_
     export "$k=1"
   fi
 done
-log "peels=${peels[*]:-none} harness=${HARNESS_DIR} time_out=${TIME_OUT}"
+log "peels=${peels[*]:-none} harness=${HARNESS_DIR} elf=$(basename "$ELF") time_out=${TIME_OUT}"
 
 if [[ "$SKIP_BUILD" != "1" ]]; then
   if [[ ! -f "$SOFT_LADDER_DIR/build/fw_payload_diag.elf" ]]; then

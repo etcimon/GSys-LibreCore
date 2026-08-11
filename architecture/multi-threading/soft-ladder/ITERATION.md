@@ -42,8 +42,9 @@ Template at bottom.
 | | **N/P** stub `hart_init` ret0 / skip probes then ret0 | **banr** soft printf runs; hang **mepc=`0x8002047a`** mcause=2 — **FDT/rodata string executed as code** (`compatible`/`riscv,aplic` bytes); npc `_wait_for_boot_hart` |
 | | **B/C/D** j SUCCESS at domain_fin / start_finish | **FAIL** (never reached without hart_init progress) |
 | **Conclusion I4f** | (1) Cookie cave OK. (2) Stock residual on slfix: **`sbi_hart_init` CSR feature probes** (cont.33 family; `unresolved_csr_q` present but probes still die). (3) After soft-skip hart_init: **platform ops `c.jalr a5`** into FDT (irqchip@`17e0` first → mepc=`0x2047a`, then ipi/timer/tlb). |
-| **I4g Holding cookie green (2026-08-11)** | **`SOFT_HART_INIT` + `SOFT_PLAT_OPS`** (irqchip/ipi/timer/tlb `c.li a0,0`) on pin ELF → **`51b1babe`** @8e6 `slfix`, `plat_hc=2`, BANR. Artifact: `build/fw_payload_r3a_c15_plat_skip.held.elf` (pin md5 `bc7ed11d…` unchanged). `mk_plat_skip`: `SOFT_HART_INIT` implies plat peels. |
-| **I6 Next** | (a) RTL: CSR expected-trap under iter-012 → peel `SOFT_HART_INIT`. (b) Why platform ops fn-ptrs land in FDT (corrupt `platform->ops` / missing fdt irq parse under DI?). (c) PEEL_FDT_GETPROP. (d) Promote held path → SL-B. |
+| **I4g Holding cookie green (2026-08-11)** | **`SOFT_HART_INIT` + `SOFT_PLAT_OPS`** → **`51b1babe`**. Artifact `*.held.elf`. Track `hold` auto-prefers held (builds peels from pin if missing). Reconfirm: track hold 20/0 @3e6. |
+| **I4h CSR mini (2026-08-11)** | `mini_csr_expected_trap` **PASS** on `work-ver-smt2-slfix` — simple csrrw/illegal/csrw serialize OK under iter-012. OpenSBI hart_init multi-pmp probe loop still needs stock peel (not covered by mini alone). |
+| **I6 Next** | (a) Directed mini for OpenSBI-like multi-CSR pmp probe + stack flag. (b) Platform ops ptr integrity (jalr→FDT). (c) PEEL_FDT_GETPROP. (d) SL-B after stock peels. |
 
 ## Completed iterations
 
