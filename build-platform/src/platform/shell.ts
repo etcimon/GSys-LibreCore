@@ -470,6 +470,34 @@ ${e.OSBI_HARTS ? `export OSBI_HARTS=${JSON.stringify(e.OSBI_HARTS)}` : "true"}
 ${e.OSBI_LOG_COMMITS ? `export OSBI_LOG_COMMITS=${JSON.stringify(e.OSBI_LOG_COMMITS)}` : "true"}
 ${e.CVA6_REQUIRE_OSBI_BOOT ? `export CVA6_REQUIRE_OSBI_BOOT=${JSON.stringify(e.CVA6_REQUIRE_OSBI_BOOT)}` : "true"}
 ${e.SPIKE ? `export SPIKE=${JSON.stringify(e.SPIKE)}` : "true"}
+# ai-tensor / virt-impl / ai_island HARD (narrow Verilator surfaces + board env).
+# WSL does not inherit Bun child env — re-export AI_* / CVA6_FROM_TIMING explicitly.
+${e.AI_TENSOR_DIR ? `export AI_TENSOR_DIR=${JSON.stringify(windowsPathToPosix(e.AI_TENSOR_DIR, "wsl"))}` : "true"}
+${e.AI_TENSOR_MONOREPO ? `export AI_TENSOR_MONOREPO=${JSON.stringify(windowsPathToPosix(e.AI_TENSOR_MONOREPO, "wsl"))}` : "true"}
+${e.AI_TENSOR_BOARD_ID ? `export AI_TENSOR_BOARD_ID=${JSON.stringify(e.AI_TENSOR_BOARD_ID)}` : "true"}
+${e.AI_TENSOR_BACKEND ? `export AI_TENSOR_BACKEND=${JSON.stringify(e.AI_TENSOR_BACKEND)}` : "true"}
+${e.AI_TENSOR_CORE ? `export AI_TENSOR_CORE=${JSON.stringify(e.AI_TENSOR_CORE)}` : "true"}
+${e.AI_TENSOR_UIO ? `export AI_TENSOR_UIO=${JSON.stringify(e.AI_TENSOR_UIO)}` : "true"}
+${e.AI_TENSOR_EVENTFD ? `export AI_TENSOR_EVENTFD=${JSON.stringify(e.AI_TENSOR_EVENTFD)}` : "true"}
+${e.AI_TENSOR_VIRT_MODE ? `export AI_TENSOR_VIRT_MODE=${JSON.stringify(e.AI_TENSOR_VIRT_MODE)}` : "true"}
+${e.AI_TENSOR_IMPL_PHASES ? `export AI_TENSOR_IMPL_PHASES=${JSON.stringify(e.AI_TENSOR_IMPL_PHASES)}` : "true"}
+${e.AI_TENSOR_RTL_SUITE ? `export AI_TENSOR_RTL_SUITE=${JSON.stringify(e.AI_TENSOR_RTL_SUITE)}` : "true"}
+${e.AI_TENSOR_RTL_TARGET ? `export AI_TENSOR_RTL_TARGET=${JSON.stringify(e.AI_TENSOR_RTL_TARGET)}` : "true"}
+${e.AI_TENSOR_REQUIRE_HARD ? `export AI_TENSOR_REQUIRE_HARD=${JSON.stringify(e.AI_TENSOR_REQUIRE_HARD)}` : "true"}
+${e.AI_TENSOR_REQUIRE_TIMING ? `export AI_TENSOR_REQUIRE_TIMING=${JSON.stringify(e.AI_TENSOR_REQUIRE_TIMING)}` : "true"}
+${e.AI_TENSOR_REQUIRE_TORCH ? `export AI_TENSOR_REQUIRE_TORCH=${JSON.stringify(e.AI_TENSOR_REQUIRE_TORCH)}` : "true"}
+${e.AI_TENSOR_RTL_HARD ? `export AI_TENSOR_RTL_HARD=${JSON.stringify(e.AI_TENSOR_RTL_HARD)}` : "true"}
+${e.AI_TENSOR_COSIM_CMD ? `export AI_TENSOR_COSIM_CMD=${JSON.stringify(e.AI_TENSOR_COSIM_CMD)}` : "true"}
+${e.AI_MATRIX_VERI_TESTS ? `export AI_MATRIX_VERI_TESTS=${JSON.stringify(e.AI_MATRIX_VERI_TESTS)}` : "true"}
+${e.AI_MATRIX_VER_LIBRARY ? `export AI_MATRIX_VER_LIBRARY=${JSON.stringify(e.AI_MATRIX_VER_LIBRARY)}` : "true"}
+${e.AI_MATRIX_VERI_REBUILD ? `export AI_MATRIX_VERI_REBUILD=${JSON.stringify(e.AI_MATRIX_VERI_REBUILD)}` : "true"}
+${e.AI_MATRIX_TIME_OUT ? `export AI_MATRIX_TIME_OUT=${JSON.stringify(e.AI_MATRIX_TIME_OUT)}` : "true"}
+${e.AI_MATRIX_HARD_SUITE ? `export AI_MATRIX_HARD_SUITE=${JSON.stringify(e.AI_MATRIX_HARD_SUITE)}` : "true"}
+${e.CVA6_CORE_CONFIG ? `export CVA6_CORE_CONFIG=${JSON.stringify(e.CVA6_CORE_CONFIG)}` : "true"}
+${e.CVA6_FROM_TIMING ? `export CVA6_FROM_TIMING=${JSON.stringify(windowsPathToPosix(e.CVA6_FROM_TIMING, "wsl"))}` : "true"}
+${e.FROM_TIMING ? `export FROM_TIMING=${JSON.stringify(windowsPathToPosix(e.FROM_TIMING, "wsl"))}` : "true"}
+${e.CVA6_TIMINGS_USE_EMIT ? `export CVA6_TIMINGS_USE_EMIT=${JSON.stringify(e.CVA6_TIMINGS_USE_EMIT)}` : "true"}
+${e.CVA6_TIMINGS_EMIT_FLIST ? `export CVA6_TIMINGS_EMIT_FLIST=${JSON.stringify(windowsPathToPosix(e.CVA6_TIMINGS_EMIT_FLIST, "wsl"))}` : "true"}
 # Managed workspace Spike often reports bare "1.1.1-dev"; do not fail on monorepo git walk.
 export CVA6_SPIKE_VERSION_RELAXED="\${CVA6_SPIKE_VERSION_RELAXED:-1}"
 export G6LC_SPIKE_VERSION_RELAXED="\${G6LC_SPIKE_VERSION_RELAXED:-1}"

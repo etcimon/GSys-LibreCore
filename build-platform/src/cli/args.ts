@@ -65,11 +65,17 @@ const VALUE_FLAGS = new Set([
   "top",
   "golden",
   "inject-sta-fixture",
-  // tensor multi-phase / board path
+  // tensor multi-phase / board path / narrow HARD surface (diag-like)
   "impl",
   "backend",
   "virt-mode",
   "apu",
+  "suite",
+  "rtl-suite",
+  "tests",
+  "ver-library",
+  "time-out",
+  "timeout",
   // clean (workspace lifecycle)
   "older-than",
   "compartment",

@@ -41,6 +41,165 @@ export type TensorImplPhase = "soft" | "hard" | "timing";
 
 export type TensorImplMode = "soft" | "hard" | "full" | "hard-only";
 
+/**
+ * Narrow Verilator HARD surfaces for ai_island — analogous to diag compartments.
+ * Each profile owns DV_TARGET / ver-library / directed ELF list / cycle timeout
+ * (like `diagnostics.tests[].verilator` owns target/top/flist/budget).
+ *
+ * Suites align with monorepo-soak/run-ai-matrix-hard-suite.sh:
+ *   narrow — pytorch virt-impl default (mmio + gemm_s8 only)
+ *   smoke  — + multi-claim FIFO
+ *   ci     — full CI without 128/256 peak
+ *   peak   — large GEMMs only
+ *   full   — DEFAULT_TESTS in ai-matrix-veri.sh
+ */
+export type TensorRtlSuite = "narrow" | "smoke" | "ci" | "peak" | "full";
+
+export interface TensorRtlSurface {
+  id: TensorRtlSuite;
+  description: string;
+  /** DV_TARGET / make verilate target (config package). */
+  target: string;
+  /** work-ver-* library directory name. */
+  verLibrary: string;
+  /** Directed ELF basenames under verif/tests/custom/ai/ (empty = full DEFAULT_TESTS). */
+  tests: string[];
+  /** Max cycles passed as AI_MATRIX_TIME_OUT. */
+  timeOut: number;
+  /** Optional Verilator notes for operators (not lint args — sim surface). */
+  notes?: string;
+}
+
+/** Catalog of narrow HARD surfaces (diag-style ownership of Verilator sim config). */
+export const TENSOR_RTL_SURFACES: Record<TensorRtlSuite, TensorRtlSurface> = {
+  narrow: {
+    id: "narrow",
+    description:
+      "Minimal host↔island pair for pytorch virt-impl (mmio CAP/CTL + INT8 gemm_s8).",
+    target: "g6lc64_ai",
+    verLibrary: "work-ver-ai",
+    tests: ["ai_island_mmio_smoke", "ai_gemm_s8_smoke"],
+    timeOut: 8_000_000,
+    notes: "Default for --rtl-hard / --impl hard; ~20s with reuse work-ver-ai.",
+  },
+  smoke: {
+    id: "smoke",
+    description: "Lab smoke: mmio + CPL multi-claim + gemm_s8.",
+    target: "g6lc64_ai",
+    verLibrary: "work-ver-ai",
+    tests: [
+      "ai_island_mmio_smoke",
+      "ai_cpl_fifo_multi_claim",
+      "ai_gemm_s8_smoke",
+    ],
+    timeOut: 8_000_000,
+  },
+  ci: {
+    id: "ci",
+    description:
+      "CI HARD suite (no 128/256 peak GEMMs); matches AI_MATRIX_HARD_SUITE=ci.",
+    target: "g6lc64_ai",
+    verLibrary: "work-ver-ai",
+    tests: [
+      "ai_csr_aistatus_xs",
+      "ai_setcfg_readback",
+      "ai_illegal_when_off",
+      "ai_dot4_s8_smoke",
+      "ai_mma_s8_golden",
+      "ai_requant_rhe_golden",
+      "ai_pmu_group4_smoke",
+      "ai_queue_doorbell",
+      "ai_aiperm_umode",
+      "ai_island_mmio_smoke",
+      "ai_cpl_fifo_multi_claim",
+      "ai_enq_sideband_smoke",
+      "ai_dual_enq_poll",
+      "ai_irq_plic_smoke",
+      "ai_desc_fetch_smoke",
+      "ai_enq_fetch_smoke",
+      "ai_ptr_done_smoke",
+      "ai_gemm_s8_smoke",
+      "ai_gemm_s8_lda_smoke",
+      "ai_gemm_dim_err_smoke",
+      "ai_gemm_s8_4x4_smoke",
+      "ai_gemm_s8_8x8_smoke",
+      "ai_gemm_s8_16x16_smoke",
+      "ai_gemm_s8_32x32_smoke",
+      "ai_gemm_s8_64x64_smoke",
+      "ai_bw_pmu_smoke",
+      "ai_cap_bringup_smoke",
+    ],
+    timeOut: 8_000_000,
+  },
+  peak: {
+    id: "peak",
+    description: "Peak GEMM only: 128×128 + 256×256 (long).",
+    target: "g6lc64_ai",
+    verLibrary: "work-ver-ai",
+    tests: ["ai_gemm_s8_128x128_smoke", "ai_gemm_s8_256x256_smoke"],
+    timeOut: 16_000_000,
+  },
+  full: {
+    id: "full",
+    description: "Full ai-matrix-veri DEFAULT_TESTS (incl. 256×256).",
+    target: "g6lc64_ai",
+    verLibrary: "work-ver-ai",
+    tests: [], // empty → leave AI_MATRIX_VERI_TESTS unset for script default
+    timeOut: 8_000_000,
+  },
+};
+
+export function parseRtlSuite(raw?: string): TensorRtlSuite {
+  const s = (raw ?? "narrow").trim().toLowerCase();
+  if (s === "smoke" || s === "ci" || s === "peak" || s === "full" || s === "narrow") {
+    return s;
+  }
+  // aliases
+  if (s === "hard" || s === "default" || s === "pytorch") return "narrow";
+  if (s === "lab") return "smoke";
+  return "narrow";
+}
+
+export function resolveRtlSurface(
+  opts: {
+    suite?: string;
+    target?: string;
+    verLibrary?: string;
+    tests?: string;
+    timeOut?: number;
+  },
+): TensorRtlSurface {
+  const base = { ...TENSOR_RTL_SURFACES[parseRtlSuite(opts.suite)] };
+  if (opts.target?.trim()) base.target = opts.target.trim();
+  if (opts.verLibrary?.trim()) base.verLibrary = opts.verLibrary.trim();
+  if (opts.tests?.trim()) {
+    base.tests = opts.tests
+      .split(/[,\s]+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+  }
+  if (opts.timeOut != null && opts.timeOut > 0) base.timeOut = opts.timeOut;
+  return base;
+}
+
+/** Export HARD surface into child env (ai-matrix-veri / virt-impl hard phase). */
+export function rtlSurfaceToEnv(surface: TensorRtlSurface): Record<string, string> {
+  const env: Record<string, string> = {
+    DV_TARGET: surface.target,
+    CVA6_CORE_CONFIG: surface.target,
+    AI_TENSOR_CORE: surface.target,
+    AI_MATRIX_VER_LIBRARY: surface.verLibrary,
+    AI_MATRIX_TIME_OUT: String(surface.timeOut),
+    AI_TENSOR_RTL_SUITE: surface.id,
+    AI_TENSOR_RTL_TARGET: surface.target,
+  };
+  if (surface.tests.length > 0) {
+    env.AI_MATRIX_VERI_TESTS = surface.tests.join(" ");
+  }
+  // full suite: omit AI_MATRIX_VERI_TESTS so ai-matrix-veri uses DEFAULT_TESTS
+  return env;
+}
+
 export function parseImplMode(raw?: string): TensorImplMode {
   const s = (raw ?? "soft").trim().toLowerCase();
   if (s === "hard" || s === "rtl" || s === "rtl-hard") return "hard";
@@ -159,6 +318,21 @@ export interface TensorRunOptions {
   requireHard?: boolean;
   /** Fail if timing phase lacks FROM_TIMING (full mode). */
   requireTiming?: boolean;
+  /**
+   * Narrow HARD suite id (diag-style surface): narrow|smoke|ci|peak|full.
+   * Default narrow for pytorch --rtl-hard.
+   */
+  rtlSuite?: string;
+  /** Override DV_TARGET / make verilate target (default g6lc64_ai). */
+  target?: string;
+  /** Override work-ver library name (default work-ver-ai). */
+  verLibrary?: string;
+  /** Explicit directed test list (comma/space); overrides suite tests. */
+  tests?: string;
+  /** Max sim cycles (AI_MATRIX_TIME_OUT). */
+  timeOut?: number;
+  /** Rebuild Variane harness (AI_MATRIX_VERI_REBUILD=1). */
+  rebuild?: boolean;
   /** Extra args after frameworks_regress.py (frameworks only). */
   extraArgs?: string[];
 }
@@ -375,6 +549,23 @@ export async function buildTensorChildEnv(
   if (opts.apu) env.AI_TENSOR_APU = opts.apu;
   if (opts.requireHard) env.AI_TENSOR_REQUIRE_HARD = "1";
   if (opts.requireTiming) env.AI_TENSOR_REQUIRE_TIMING = "1";
+  // Diag-style narrow Verilator HARD surface (suite / target / tests / library)
+  const surface = resolveRtlSurface({
+    suite: opts.rtlSuite,
+    target: opts.target ?? core,
+    verLibrary: opts.verLibrary,
+    tests: opts.tests,
+    timeOut: opts.timeOut,
+  });
+  Object.assign(env, rtlSurfaceToEnv(surface));
+  // Prefer explicit --core / board core over surface target when user set core
+  if (opts.core?.trim() || boardCore) {
+    env.AI_TENSOR_CORE = core;
+    env.CVA6_CORE_CONFIG = core;
+    env.DV_TARGET = core;
+    env.AI_TENSOR_RTL_TARGET = core;
+  }
+  if (opts.rebuild) env.AI_MATRIX_VERI_REBUILD = "1";
   // Default virt-card for frameworks/regress when board is virtual and backend unset
   if (
     !env.AI_TENSOR_BACKEND &&
@@ -445,18 +636,41 @@ export async function runAiTensorVirtImpl(
   }
   env.AI_TENSOR_IMPL_PHASES = phases.join(",");
 
+  const surface = resolveRtlSurface({
+    suite: opts2.rtlSuite,
+    target: opts2.target ?? core,
+    verLibrary: opts2.verLibrary,
+    tests: opts2.tests,
+    timeOut: opts2.timeOut,
+  });
+
   logger.heading("ai-tensor virtual implementation test");
   logger.info(`  phases  : ${phases.join(" → ")}`);
   logger.info(`  board   : ${boardId ?? "?"}`);
-  logger.info(`  core    : ${core} (ai_island package selection)`);
+  logger.info(`  core    : ${core} (ai_island package / DV_TARGET)`);
   logger.info(`  backend : ${env.AI_TENSOR_BACKEND ?? "?"}`);
+  if (phases.includes("hard") || phases.includes("soft") === false) {
+    logger.info(
+      `  rtl     : suite=${surface.id} target=${env.DV_TARGET ?? surface.target} ` +
+        `library=${env.AI_MATRIX_VER_LIBRARY ?? surface.verLibrary}`,
+    );
+    const tests =
+      env.AI_MATRIX_VERI_TESTS && env.AI_MATRIX_VERI_TESTS.length > 0
+        ? env.AI_MATRIX_VERI_TESTS
+        : "(ai-matrix-veri DEFAULT_TESTS)";
+    logger.info(`  tests   : ${tests}`);
+    logger.info(`  timeout : ${env.AI_MATRIX_TIME_OUT ?? surface.timeOut} cy`);
+    if (env.AI_MATRIX_VERI_REBUILD === "1") {
+      logger.warn("  rebuild : AI_MATRIX_VERI_REBUILD=1 (long Verilator build)");
+    }
+  }
   if (env.CVA6_FROM_TIMING) {
     logger.info(`  timing  : ${env.CVA6_FROM_TIMING} (sv-timing structural FO4)`);
   } else if (phases.includes("timing")) {
     logger.warn("  timing  : phase requested but no --from-timing (will soft-skip unless --require-timing)");
   }
   logger.info(
-    "  note    : soft = host software; hard = SV RTL; timing ≠ STA sign-off",
+    "  note    : soft = host software; hard = SV RTL (narrow like diag); timing ≠ STA",
   );
 
   if (opts2.dryRun || ctx.dryRun) {
@@ -472,7 +686,7 @@ export async function runAiTensorVirtImpl(
   return r.code ?? 1;
 }
 
-/** Lab HARD RTL: mmio + gemm_s8 on work-ver-ai (opt-in). */
+/** Lab HARD RTL: narrow suite on work-ver-ai (opt-in; diag-style surface). */
 export async function runAiTensorRtlHard(
   ctx: PlatformContext,
   opts: TensorRunOptions = {},
@@ -483,13 +697,32 @@ export async function runAiTensorRtlHard(
     logger.error("monorepo-soak/run-ai-tensor-rtl-hard.sh missing");
     return 1;
   }
+  const opts2: TensorRunOptions = {
+    ...opts,
+    // rtl-hard alone defaults to narrow pair unless suite/tests set
+    rtlSuite: opts.rtlSuite ?? "narrow",
+    core: opts.core ?? opts.target ?? "g6lc64_ai",
+  };
   let env: Record<string, string | undefined>;
   try {
-    ({ env } = await buildTensorChildEnv(ctx, opts));
+    ({ env } = await buildTensorChildEnv(ctx, opts2));
   } catch {
     return 1;
   }
+  const surface = resolveRtlSurface({
+    suite: opts2.rtlSuite,
+    target: opts2.target ?? opts2.core,
+    verLibrary: opts2.verLibrary,
+    tests: opts2.tests,
+    timeOut: opts2.timeOut,
+  });
   logger.info(`tensor rtl-hard: ${script}`);
+  logger.info(
+    `  suite=${surface.id} target=${env.DV_TARGET} library=${env.AI_MATRIX_VER_LIBRARY}`,
+  );
+  logger.info(
+    `  tests=${env.AI_MATRIX_VERI_TESTS || "(DEFAULT_TESTS)"} timeout=${env.AI_MATRIX_TIME_OUT}`,
+  );
   if (opts.dryRun || ctx.dryRun) {
     logger.warn("dry-run: not executing HARD RTL");
     return 0;

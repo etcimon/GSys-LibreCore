@@ -42,10 +42,17 @@ function collectRunOptions(args: CommandArgs): TensorRunOptions {
   const dryRun = flagBool(args.flags, "dry-run");
   const fromTiming =
     flagStr(args.flags, "from-timing") ?? flagString(args.flags, "from-timing");
+  const timeOutRaw =
+    flagStr(args.flags, "time-out") ?? flagStr(args.flags, "timeout");
+  const timeOut =
+    timeOutRaw && Number.isFinite(Number(timeOutRaw))
+      ? Number(timeOutRaw)
+      : undefined;
   return {
     dryRun,
     board: flagStr(args.flags, "board"),
     core: flagStr(args.flags, "core"),
+    target: flagStr(args.flags, "target"),
     apu: flagStr(args.flags, "apu"),
     backend: flagStr(args.flags, "backend"),
     virtMode: flagStr(args.flags, "virt-mode"),
@@ -59,6 +66,13 @@ function collectRunOptions(args: CommandArgs): TensorRunOptions {
       flagBool(args.flags, "require-hard") ||
       flagBool(args.flags, "require-rtl"),
     requireTiming: flagBool(args.flags, "require-timing"),
+    // diag-style narrow HARD surface
+    rtlSuite:
+      flagStr(args.flags, "rtl-suite") ?? flagStr(args.flags, "suite"),
+    verLibrary: flagStr(args.flags, "ver-library"),
+    tests: flagStr(args.flags, "tests"),
+    timeOut,
+    rebuild: flagBool(args.flags, "rebuild"),
     // remaining positionals after subcommand → frameworks_regress extra args
     extraArgs: args.positionals.slice(1),
   };
@@ -70,11 +84,13 @@ export const tensorCommand: Command = {
     "Host adapter for standalone ai-tensor (spawn doctor/test/frameworks/virt-impl)",
   usage:
     "bun run src/cli/index.ts tensor [status|doctor|probe|test|golden|cosim|queue-soak|rtl|rtl-hard|virt-card|frameworks|pytorch|virt-impl|regress|check] " +
-    "[--board ID] [--core CFG] [--impl soft|hard|full] [--rtl-hard] " +
-    "[--from-timing DIR] [--use-emit] [--backend sim|mmio|virt-card] [--virt-mode auto|local|tcp] [--dry-run] [--json]",
+    "[--board ID] [--core|--target CFG] [--impl soft|hard|full] [--rtl-hard] " +
+    "[--suite|--rtl-suite narrow|smoke|ci|peak|full] [--tests LIST] [--ver-library DIR] " +
+    "[--from-timing DIR] [--use-emit] [--backend sim|mmio|virt-card] [--dry-run] [--json]",
   details:
     "Spawns ai-tensor package tooling without Cargo path deps.\n" +
     "Mirrors timings → sv-timing and diag/test --from-timing preflight.\n" +
+    "HARD RTL uses **narrow Verilator surfaces** (diag-style ownership of target/tests/library).\n" +
     "\n" +
     "  tensor status         locate package + spawn script\n" +
     "  tensor doctor         independence + cargo doctor\n" +
@@ -82,37 +98,43 @@ export const tensorCommand: Command = {
     "  tensor test|golden|cosim|queue-soak|event-fd-soak|rtl\n" +
     "  tensor virt-card      hostless virt-ai-pcie soft UIO/eventfd smoke\n" +
     "  tensor frameworks     PyTorch/TF/numpy Device regress (board propagates)\n" +
-    "  tensor pytorch        structured unittest: ai_island features via virt-ai-pcie\n" +
-    "                        with optional multi-phase: --rtl-hard / --impl hard|full\n" +
-    "  tensor virt-impl      multi-phase virtual implementation structure:\n" +
-    "                          soft  = Device/PyTorch virt-card (host software)\n" +
-    "                          hard  = SV ai_island RTL HARD (work-ver-ai mmio+gemm_s8)\n" +
-    "                          timing= sv-timing package re-check (needs --from-timing)\n" +
-    "  tensor regress        virt-card + frameworks + pytorch (local + TCP agent)\n" +
-    "  tensor rtl-hard       work-ver-ai mmio+gemm_s8 HARD only (lab)\n" +
+    "  tensor pytorch        structured unittest via virt-ai-pcie (+ optional HARD)\n" +
+    "  tensor virt-impl      multi-phase: soft → SV HARD → sv-timing\n" +
+    "  tensor regress        virt-card + frameworks + pytorch (local + TCP)\n" +
+    "  tensor rtl-hard       SV HARD only (default suite=narrow)\n" +
     "\n" +
+    "Board / core:\n" +
     "  --board <id>          corev-mb board (default virt-ai-pcie for pytorch/virt-impl)\n" +
-    "  --core <cfg>          ai_island core package (default g6lc64_ai)\n" +
-    "  --impl soft|hard|full virtual implementation phases (default soft)\n" +
-    "  --rtl-hard            include SV HARD phase after soft pytorch\n" +
-    "  --require-hard        fail if work-ver-ai missing (else soft-skip hard)\n" +
-    "  --from-timing <dir>   preflight + FO4 dashboard of timings out-dir (like test)\n" +
-    "  --use-emit            expert: export corrected flist env (requires --from-timing)\n" +
-    "  --require-timing      fail if timing phase has no FROM_TIMING\n" +
-    "  --backend / --virt-mode  Device path for soft phase\n" +
+    "  --core|--target <cfg> DV_TARGET / ai_island package (default g6lc64_ai)\n" +
+    "\n" +
+    "Phases:\n" +
+    "  --impl soft|hard|full|hard-only   virtual implementation phases\n" +
+    "  --rtl-hard                        include HARD after soft (pytorch)\n" +
+    "  --require-hard                    fail if work-ver library missing\n" +
+    "\n" +
+    "Narrow HARD surface (like diag compartment verilator{}):\n" +
+    "  --suite|--rtl-suite narrow|smoke|ci|peak|full\n" +
+    "                        narrow = mmio+gemm_s8 (default for --rtl-hard)\n" +
+    "                        smoke  = + multi-claim FIFO\n" +
+    "                        ci/peak/full = AI_MATRIX_HARD_SUITE maps\n" +
+    "  --tests <list>        override directed ELFs (comma/space)\n" +
+    "  --ver-library <dir>   work-ver-* name (default work-ver-ai)\n" +
+    "  --time-out <cycles>   AI_MATRIX_TIME_OUT\n" +
+    "  --rebuild             AI_MATRIX_VERI_REBUILD=1 (long)\n" +
+    "\n" +
+    "  --from-timing <dir>   FO4 package preflight + dashboard (like test)\n" +
+    "  --use-emit            expert corrected flist env\n" +
     "\n" +
     "Docs: architecture/ai-matrix/frameworks-virt-pcie.md\n" +
-    "Note: soft ≠ SV RTL; hard = real island TB; --from-timing is structural FO4 not STA.",
+    "Note: soft ≠ SV RTL; hard = real island TB; --from-timing is FO4 not STA.",
   examples: [
-    "bun run src/cli/index.ts tensor status",
     "bun run src/cli/index.ts tensor pytorch --board virt-ai-pcie --core g6lc64_ai",
-    "bun run src/cli/index.ts tensor pytorch --board virt-ai-pcie --core g6lc64_ai --rtl-hard",
-    "bun run src/cli/index.ts tensor pytorch --impl full --board virt-ai-pcie --core g6lc64_ai --from-timing workspace/build/sv-timing/host-g6lc64_ai",
-    "bun run src/cli/index.ts tensor virt-impl --impl hard --board virt-ai-pcie --core g6lc64_ai --from-timing workspace/build/sv-timing/host-g6lc64_ai",
-    "bun run src/cli/index.ts tensor virt-impl --impl full --require-hard --from-timing workspace/build/sv-timing/host-g6lc64_ai",
+    "bun run src/cli/index.ts tensor pytorch --rtl-hard --suite narrow --board virt-ai-pcie --core g6lc64_ai",
+    "bun run src/cli/index.ts tensor virt-impl --impl hard --suite smoke --require-hard",
+    "bun run src/cli/index.ts tensor rtl-hard --suite narrow --target g6lc64_ai --ver-library work-ver-ai",
+    "bun run src/cli/index.ts tensor rtl-hard --tests ai_island_mmio_smoke,ai_gemm_s8_smoke",
+    "bun run src/cli/index.ts tensor virt-impl --impl full --suite narrow --from-timing workspace/build/sv-timing/host-cv64a6_imafdc_sv39",
     "bun run src/cli/index.ts tensor frameworks --board virt-ai-pcie --core g6lc64_ai",
-    "bun run src/cli/index.ts tensor regress --board virt-ai-pcie --core g6lc64_ai",
-    "bun run src/cli/index.ts tensor rtl-hard --core g6lc64_ai --from-timing workspace/build/sv-timing/host-g6lc64_ai",
   ],
   needsContext: true,
   async run(args: CommandArgs): Promise<number> {

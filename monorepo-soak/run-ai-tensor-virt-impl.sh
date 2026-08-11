@@ -70,10 +70,54 @@ run_soft() {
 }
 
 run_hard() {
-  phase_begin "hard (SV ai_island RTL on work-ver-ai)"
+  phase_begin "hard (SV ai_island RTL — narrow Verilator surface)"
   WORK="${AI_MATRIX_VER_LIBRARY:-work-ver-ai}"
   WORK_DIR="${ROOT}/${WORK}"
-  log "ver_library=${WORK} present=$([ -d "$WORK_DIR" ] && echo yes || echo no)"
+  # Diag-style surface: suite / target / tests / library (from build-platform)
+  SUITE="${AI_TENSOR_RTL_SUITE:-narrow}"
+  TARGET="${DV_TARGET:-${AI_TENSOR_RTL_TARGET:-${AI_TENSOR_CORE:-g6lc64_ai}}}"
+  # Default narrow pair when suite unset and tests unset
+  if [[ -z "${AI_MATRIX_VERI_TESTS:-}" ]]; then
+    case "$SUITE" in
+      smoke)
+        export AI_MATRIX_VERI_TESTS="ai_island_mmio_smoke ai_cpl_fifo_multi_claim ai_gemm_s8_smoke"
+        ;;
+      ci|peak|full)
+        # Prefer monorepo hard-suite script for named suites
+        log "delegating suite=${SUITE} → run-ai-matrix-hard-suite.sh"
+        export AI_MATRIX_HARD_SUITE="$SUITE"
+        export AI_MATRIX_VER_LIBRARY="${WORK}"
+        export AI_MATRIX_VERI_REBUILD="${AI_MATRIX_VERI_REBUILD:-0}"
+        export DV_TARGET="$TARGET"
+        export CVA6_CORE_CONFIG="$TARGET"
+        if [[ ! -d "$WORK_DIR" && "${AI_MATRIX_VERI_REBUILD:-0}" != "1" ]]; then
+          if [[ "${AI_TENSOR_REQUIRE_HARD:-0}" == "1" ]]; then
+            log "ERROR: ${WORK} missing and AI_TENSOR_REQUIRE_HARD=1"
+            phase_end "hard" "FAIL (no work-ver)"
+            FAIL=1
+            return 1
+          fi
+          log "soft-skip hard: ${WORK} missing"
+          phase_end "hard" "SKIP"
+          SKIP+=("hard")
+          return 0
+        fi
+        if ! bash "$ROOT/monorepo-soak/run-ai-matrix-hard-suite.sh"; then
+          phase_end "hard" "FAIL"
+          FAIL=1
+          return 1
+        fi
+        phase_end "hard" "PASS"
+        PASS+=("hard")
+        return 0
+        ;;
+      narrow|*)
+        export AI_MATRIX_VERI_TESTS="ai_island_mmio_smoke ai_gemm_s8_smoke"
+        ;;
+    esac
+  fi
+  log "suite=${SUITE} target=${TARGET} ver_library=${WORK} present=$([ -d "$WORK_DIR" ] && echo yes || echo no)"
+  log "tests=${AI_MATRIX_VERI_TESTS}"
   log "from-timing=${CVA6_FROM_TIMING:-${FROM_TIMING:-none}}"
   if [[ -n "${CVA6_TIMINGS_USE_EMIT:-}" ]]; then
     log "use-emit flist=${CVA6_TIMINGS_EMIT_FLIST:-?} (expert; live RTL still default)"
@@ -93,11 +137,10 @@ run_hard() {
   fi
 
   export AI_TENSOR_RTL_HARD=1
-  export AI_MATRIX_VERI_TESTS="${AI_MATRIX_VERI_TESTS:-ai_island_mmio_smoke ai_gemm_s8_smoke}"
   export AI_MATRIX_VER_LIBRARY="${WORK}"
-  # Propagate core package into veri if supported via env
-  export target="${target:-$AI_TENSOR_CORE}"
-  export CVA6_CORE_CONFIG="${CVA6_CORE_CONFIG:-$AI_TENSOR_CORE}"
+  export DV_TARGET="$TARGET"
+  export CVA6_CORE_CONFIG="$TARGET"
+  export AI_TENSOR_CORE="$TARGET"
 
   if ! bash "$ROOT/monorepo-soak/run-ai-tensor-rtl-hard.sh"; then
     phase_end "hard" "FAIL"

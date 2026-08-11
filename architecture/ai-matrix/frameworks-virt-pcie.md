@@ -129,13 +129,31 @@ bun run src/cli/index.ts tensor virt-impl --impl hard \
 | `--impl soft\|hard\|full\|hard-only` | Phase set (`hard` = soft+hard; `full` adds timing) |
 | `--rtl-hard` | Include HARD after soft (pytorch convenience) |
 | `--require-hard` | Fail if `work-ver-ai` missing (else soft-skip hard) |
+| `--suite\|--rtl-suite narrow\|smoke\|ci\|peak\|full` | **Narrow HARD surface** (diag-style target/tests/library) |
+| `--target\|--core g6lc64_ai` | `DV_TARGET` / config package for Verilator sim |
+| `--tests LIST` | Override directed ELF basenames |
+| `--ver-library work-ver-ai` | Variane library dir |
+| `--time-out N` | `AI_MATRIX_TIME_OUT` cycles |
+| `--rebuild` | `AI_MATRIX_VERI_REBUILD=1` |
 | `--from-timing DIR` | Host: `applyFromTimingFlags` + FO4 dashboard; child: `CVA6_FROM_TIMING` |
 | `--use-emit` | Expert corrected flist env (`CVA6_TIMINGS_USE_EMIT=1`); needs `--from-timing` |
 | `--require-timing` | Fail timing phase if no FROM_TIMING |
 
+**HARD surfaces** (`TENSOR_RTL_SURFACES` in `build-platform/src/tooling/tensor.ts`) mirror
+diag’s per-test `verilator{}` ownership: each suite pins `target`, `verLibrary`, `tests`,
+`timeOut` instead of a monolithic sim config.
+
+| Suite | Tests | Use |
+|---|---|---|
+| `narrow` (default) | `ai_island_mmio_smoke` + `ai_gemm_s8_smoke` | pytorch `--rtl-hard` |
+| `smoke` | + `ai_cpl_fifo_multi_claim` | lab FIFO path |
+| `ci` / `peak` / `full` | hard-suite maps | longer gates |
+
 **Orchestrator:** `monorepo-soak/run-ai-tensor-virt-impl.sh`  
 **Honest split:** soft never loads Verilator; hard never runs PyTorch inside the TB;
-timing never claims STA sign-off.
+timing never claims STA sign-off.  
+**WSL note:** `runRegressUnderWsl` re-exports `AI_TENSOR_*` / `AI_MATRIX_*` / `CVA6_FROM_TIMING`
+explicitly (Bun Windows env is not inherited).
 
 ### 2.2 Optional: `mb select` then tensor
 
