@@ -55,13 +55,14 @@ Historical promotion order among B1 (from `inventory.yaml` priority):
 | Soft evidence | Soft `fdt_getprop_namelen` + `fdt_get_property_namelen` → NULL; soft printf BANR |
 | Fail pin | `PEEL_FDT_GETPROP=1`: mepc=`0x80012eb2` `sw a0,0(s2)` mcause=6 mtval=`0x80012b2a` (s2=code = ra of `check_node→next_tag`) |
 | Trapdump | mepc/mcause/mtval/sp/s0/s2/ra: s2==mtval; ra=`0x12e3e`; sp/s0 show intact 48B by_offset_ frame |
-| Mechanism (updated) | Dual-commit, STQ-nofwd, force SI issue **all PEEL-negative** (same pin). s2 = check_node→next_tag ra. Not issue dual / dual-commit / STQ-fwd alone. Next: a2/s3 corrupt at call boundary, structure loads, dual-fetch/IQ, RF link write. |
-| Primary RTL | hang-6 family; frontend/`instr_queue`; LSU structure path; scoreboard RF |
-| Directed | Through **`mini_fdt_opensbi_blob.c`** (real smt2 DTB extract + namelen_ shape) — **PASS** fw64. PEEL pin not in any mini. |
+| Mechanism (updated) | Dual-commit, STQ-nofwd, force SI issue **all PEEL-negative** (same pin). s2 = check_node→next_tag ra. Not issue dual / dual-commit / STQ-fwd alone. **mtval=`0x12b2a` is the link address of `jal next_tag` inside `check_node`** — s3 ends up holding **ra residue**. |
+| Primary RTL | hang-6 family; frontend/`instr_queue`; LSU **byte-load** structure path; scoreboard RF / link write |
+| Directed | **Shape minis PASS** on `work-ver-smt2-fw64` (2026-08-09): `mini_fdt_lenp_sw`, `mini_fdt_s2_nest`, `mini_fdt_check_prop_nest` (stack/call graph only). `mini_fdt_opensbi_blob.c` real blob shape PASS historically. **PEEL pin not in any mini** — need mini with real `fdt_next_tag` lbu/or loop. |
 | PEEL pin (authoritative) | mepc=`0x80012eb2` `sw a0,0(s2)`; mtval/s2=`0x80012b2a` |
 | Probe result | **namelen_ entry OK** (fdt/`lenp` good); **by_offset entry bad** (a0=0, a2=s3=`0x12b2a`). s2/s3 corrupted in `check_node`/`next_tag` window. |
-| RTL focus | Callee-saved **s2/s3** RF write or stack restore under DI; not getprop shape (minis green). |
-| Suite | `soft-ladder-di` / `mini_fdt_opensbi_blob`; osbi `PEEL_FDT_GETPROP=1` (+ entry probes in oracle) |
+| RTL focus | (1) multi-`lbu` + shift/or tag assemble under DI+FW64; (2) RF **link (x1)** vs s3 WAW/forward; (3) not pure stack restore (minis green). SS full post-op serialize already landed. |
+| **RTL landing (iter-012)** | `scoreboard.sv`: cancel younger **LOAD** on bmiss when `SuperscalarEn` (same-hart if SMT). `issue_stage.sv`: per-hart **sp-write issue barrier** (`unresolved_sp_q`) under SS. Soak: rebuild `work-ver-smt2-slfix` then PEEL. |
+| Suite | `soft-ladder-di` (FDT shape in **default** tests); osbi `PEEL_FDT_GETPROP=1` (+ entry probes in oracle) |
 | Retire criterion | Natural getprop + real printf cookie green; `plat_hc==2` without soft getprop |
 
 ### Dual `c.mv` (priority 3 — **peeled iter-008**)

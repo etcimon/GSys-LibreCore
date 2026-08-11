@@ -55,14 +55,16 @@ Full map: `architecture/multi-threading/soft-ladder/README.md`.
 | # | Item | Phase | Status / next action |
 |---|------|-------|----------------------|
 | **SL-0** | **Register residual suites in build-platform** | P0 | **Done.** Optional `soft-ladder-di` + `soft-ladder-osbi` in `defaults.ts` (not `defaultSuites`); diag `diag-soft-ladder-paths`; maps in `AGENTS-specs-to-tests.md` / `AGENTS-build-platform.md` / `AGENTS-regress-scripts.md`. |
-| **SL-A** | **iter-012 FDT `lenp` / `PEEL_FDT_GETPROP`** | P1–P2 | **Open.** Pin: mepc=`0x80012eb2` mcause=6 mtval=`0x80012b2a`. Soft getprop = **holding** cookie green, not done. |
+| **SL-A** | **iter-012 FDT `lenp` / `PEEL_FDT_GETPROP`** | P1–P2 | **Open (RTL landed, soak pending).** Pin: mepc=`0x80012eb2` mcause=6 mtval=`0x80012b2a` (= check_node→next_tag **link**). Soft getprop holding cookie green historically. |
 | | Bisects **all negative** | P2 | Dual-commit; STQ-nofwd; force SI; ALU/NONE cancel-exempt — same pin; **reverted**. |
-| | Next | **P2 RTL** | Probes: namelen_ entry args **OK** (fdt=`0x8001e000`, lenp stack); by_offset entry a0=**0** a2=s3=**`0x12b2a`**. **s2/s3 clobber** between entry and first by_offset (`check_node`/`next_tag`). RTL: RF/scoreboard s-reg or spill restore under DI. Soft getprop holding. |
-| | Priors | | `soft-ladder/{README,ITERATION,b1-rtl-residuals,b3-sim-harness}.md` · oracle `software/smt2-linux/soft-ladder/` · soak script |
-| **SL-B** | Peel soft getprop + real printf | P3–P4 | **Blocked on SL-A RTL.** Then drop BANR holding; `plat_hc==2` without soft FDT. |
-| **SL-C** | Topology truth (smt2) | P6 / topology | After SL-B: stock DTB, `hart_count==2`, R3/R3b, cpuinfo; `fdt-topology-soft-ladder.md` A5–B. |
+| | Directed (P1) | P1 | Shape minis green + `mini_fdt_next_tag_lbu` in `soft-ladder-di` default. PEEL pin not in stack-only minis. |
+| | **P2 RTL (landed)** | P2 | `scoreboard.sv`: cancel younger **LOAD** under `SuperscalarEn` (same-hart SMT). `issue_stage.sv`: per-hart **`unresolved_sp_q`** (sp-write barrier). Rebuild `work-ver-smt2-slfix` → PEEL/holding re-soak. |
+| | Priors | | `soft-ladder/{README,ITERATION,b1-rtl-residuals}.md` · oracle `software/smt2-linux/soft-ladder/` · `architecture/multi-threading/smt2-ai-tensor-linux.md` |
+| **SL-B** | Peel soft getprop + real printf | P3–P4 | **Blocked on SL-A PEEL green** after rebuild soak. Then `plat_hc==2` without soft FDT. |
+| **SL-C** | Topology truth (smt2) | P6 / topology | After SL-B: stock DTB, `hart_count==2`, R3/R3b, cpuinfo; gates **before** multi-thread PyTorch. |
 | **SL-D** | Stream plane vs SMT | P6 | Orthogonal: stream8 N=2 T=1; do not merge with smt2 DI residual until FDT walk trusted. |
 | **SL-E** | Optional DTS generator | later | Only when third topology would triple-maintain hand DTS. |
+| **SL-T** | **SMT2 × ai-tensor / PyTorch on Linux** | after SL-C | Soft path: `tensor pytorch --board virt-ai-pcie`. Live: dual-hart OpenSBI/Linux + UIO/eventfd + taskset workers; map `smt2-ai-tensor-linux.md`. |
 
 Soft-ladder SUCCESS = trapdump **`51b1babe` only** (not harness tohost SUCCESS) — suite metadata.  
 Harness preference: `SOFT_LADDER_HARNESS=work-ver-smt2-fw64` (FETCH_WIDTH≥64).  

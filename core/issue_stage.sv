@@ -463,11 +463,71 @@ module issue_stage
         end
       end
 
+      // Soft-ladder iter-012 + SMT2 stack integrity (DI OpenSBI FDT):
+      // After a write to x2 (sp) for a hart under SuperscalarEn, do not issue
+      // younger ops on *that* hart until the sp-writer commits (or flush).
+      // fdt_next_tag / check_node frames are c.addi16sp + c.sdsp/c.ldsp chains;
+      // if younger stack ops race an incomplete sp update under DI, callee-saved
+      // restore can load the wrong slot (observed: s3 ← ra-link at 0x12b2a).
+      // Per-hart gate: peer SMT threads keep issuing (SmtPolicy / concurrent).
+      // SI (!SuperscalarEn): inert (unresolved_sp held 0).
+      logic [N_HARTS-1:0] unresolved_sp_q, issue_sp_hart, commit_sp_hart;
+
+      always_comb begin
+        issue_sp_hart = '0;
+        if (CVA6Cfg.SuperscalarEn) begin
+          for (int unsigned pi = 0; pi < CVA6Cfg.NrIssuePorts; pi++) begin
+            // GPR write to x2 only (not FP); rd is architectural dest.
+            if (issue_instr_valid_sb[pi] && issue_ack_iro[pi] &&
+                (issue_instr_sb[pi].rd == 5'd2) &&
+                !(CVA6Cfg.FpPresent &&
+                  ariane_pkg::is_rd_fpr(issue_instr_sb[pi].op))) begin
+              if (!unresolved_sp_q[issue_instr_sb[pi].hart_id]) begin
+                issue_sp_hart[issue_instr_sb[pi].hart_id] = 1'b1;
+              end
+            end
+          end
+        end
+      end
+
+      always_comb begin
+        commit_sp_hart = '0;
+        if (CVA6Cfg.SuperscalarEn) begin
+          for (int unsigned ci = 0; ci < CVA6Cfg.NrCommitPorts; ci++) begin
+            if (commit_ack_i[ci] && (commit_instr_o[ci].rd == 5'd2) &&
+                !(CVA6Cfg.FpPresent &&
+                  ariane_pkg::is_rd_fpr(commit_instr_o[ci].op))) begin
+              commit_sp_hart[commit_instr_o[ci].hart_id] = 1'b1;
+            end
+          end
+        end
+      end
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          unresolved_sp_q <= '0;
+        end else if (flush_i) begin
+          unresolved_sp_q <= '0;
+        end else if (CVA6Cfg.SuperscalarEn) begin
+          for (int unsigned h = 0; h < N_HARTS; h++) begin
+            if (commit_sp_hart[h]) begin
+              unresolved_sp_q[h] <= 1'b0;
+            end else if (issue_sp_hart[h]) begin
+              unresolved_sp_q[h] <= 1'b1;
+            end
+          end
+        end else begin
+          unresolved_sp_q <= '0;
+        end
+      end
+
       for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_gate
         assign issue_instr_valid_iro[p] =
             issue_instr_valid_sb[p]
             && !unresolved_cf_q[issue_instr_sb[p].hart_id]
-            && !unresolved_csr_q[issue_instr_sb[p].hart_id];
+            && !unresolved_csr_q[issue_instr_sb[p].hart_id]
+            && !(CVA6Cfg.SuperscalarEn &&
+                 unresolved_sp_q[issue_instr_sb[p].hart_id]);
       end
     end
   end

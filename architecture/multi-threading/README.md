@@ -14,7 +14,7 @@ N hardware threads over shared pipeline resources; per-hart arch state; fair arb
 | Pipeline `hart_id` tagging | **Live** — `fetch_entry_t` + `scoreboard_entry_t.hart_id`; decoder stamps active hart |
 | Banked RF | **Live** — `core/smt/g6lc_smt_regfile.sv` (NrHarts=1 → single `ariane_regfile`) |
 | Dual PC bank | **Live** — `core/smt/g6lc_smt_pc_bank.sv` + frontend restore |
-| Banked CSR | **Live** — `g6lc_smt_csr_bank.sv` (commit by `hart_id`; priv mux by active) |
+| Banked CSR | **Live** — `g6lc_smt_csr_bank.sv` (commit by `hart_id`; priv mux by active; AI sideband must be per-bank when `AiCfg` present) |
 | Fine-grain switch | **Live** — IF + unissued flush only; EX drains; BP preserved |
 | Per-hart WFI halt | **Live** — sticky `smt_hart_halt` from `halt_csr` |
 | Per-hart RAS | **Live** — `ras.sv` banks when `NrHarts>1` |
@@ -72,6 +72,17 @@ contract. Promote via three buckets and a closed iteration loop:
 | `soft-ladder/monorepo-soak-integration.md` | monorepo-soak patches × cont.## × RTL sync |
 
 **Order:** B1 RTL first → B3 harness SUCCESS → B2 firmware profile → retire binary patcher.
+
+### Soft-ladder × SMT RTL seams (iter-012)
+
+| Mechanism | File | SMT rule |
+|-----------|------|----------|
+| Younger cancel on mispredict | `core/scoreboard.sv` | Same-hart only when `NrHarts>1`; DI cancels LOADs too |
+| Unresolved CF / CSR / **SP** | `core/issue_stage.sv` | Per-hart stall bits — peer thread keeps issuing |
+| Banked RF write hart | `issue_read_operands` + `g6lc_smt_regfile` | `whart` from commit instr (never hardwire 0) |
+| Banked CSR + AI | `g6lc_smt_csr_bank` | AI aicfg/ais mux by **active** hart; dirty/setcfg to **commit** hart |
+
+DI OpenSBI residual (`PEEL_FDT_GETPROP`) is primarily dual-issue + stack/CF integrity on **hart 0** during coldboot; SMT peer must not share RF/CSR banks or global issue stalls.
 
 ## Invariants
 Per-hart precise traps and isolation; RVWMO per and across harts; no starvation (enforced by `SmtStarveLimit` under hybrid).

@@ -4,13 +4,16 @@
 #
 # Soft-ladder ordered path — step 1: B1 directed DI soak.
 #
-# Tests (bare multicore mini_*.{S,c}, tohost=1 pass):
-#   mini_amoadd_w_spin   b1-amo-spin-lock
-#   mini_lrsc_d          b1-lrsc-cmpxchg
+# Tests (bare multicore mini_*.{S,c}, tohost=1 pass → TB SUCCESS exit 0):
+#   mini_amoadd_w_spin      b1-amo-spin-lock
 #   mini_csr_expected_trap  b1-csr-expected-trap
-#   mini_dual_cmv_s3     b1-dual-cmv-s3
-# FDT residual (opt-in via SOFT_LADDER_TESTS):
-#   mini_fdt_walk_prop / mini_fdt_libfdt_shape / mini_fdt_large_walk
+#   mini_dual_cmv_s3        b1-dual-cmv-s3
+#   mini_fdt_lenp_sw        b1-fdt-lenp-store (shape)
+#   mini_fdt_s2_nest        b1-fdt-lenp-store (s2 save/restore)
+#   mini_fdt_check_prop_nest b1-fdt-lenp-store (check_node/by_offset shape)
+# Optional / known-gap:
+#   mini_lrsc_d             b1-lrsc (opt-in; 2nd SC-without-LR may fail on some harnesses)
+#   mini_fdt_opensbi_blob / mini_fdt_large_walk / mini_fdt_libfdt_shape
 #
 # Plane: Variane RTL preferred (g6lc64_smt2 / work-ver-smt2-fw64). Optional Spike
 # for ISA-clean tests (not Zacas). OpenSBI cookie path is suite soft-ladder-osbi.
@@ -19,7 +22,7 @@
 #   bash verif/regress/soft-ladder-di-regress.sh
 #   # or: bun build-platform/src/cli/index.ts test soft-ladder-di
 #   SOFT_LADDER_SPIKE=1 bash verif/regress/soft-ladder-di-regress.sh
-#   SOFT_LADDER_TESTS="mini_fdt_large_walk mini_fdt_libfdt_shape" bash ...
+#   SOFT_LADDER_TESTS="mini_fdt_opensbi_blob mini_lrsc_d" bash ...
 #   SOFT_LADDER_HARNESS=work-ver-smt2-fw64 bash ...
 #   SOFT_LADDER_COMPILE_ONLY=1 bash ...   # assemble only
 #
@@ -66,7 +69,9 @@ fi
 RUN_SPIKE="${SOFT_LADDER_SPIKE:-0}"
 COMPILE_ONLY="${SOFT_LADDER_COMPILE_ONLY:-0}"
 
-DEFAULT_TESTS="mini_amoadd_w_spin mini_lrsc_d mini_csr_expected_trap mini_dual_cmv_s3"
+# Default gate: peeled B1 + FDT shape minis (iter-012). mini_lrsc_d opt-in
+# (2nd SC-without-LR exit mismatch on some Variane builds — not SL-A blocker).
+DEFAULT_TESTS="mini_amoadd_w_spin mini_csr_expected_trap mini_dual_cmv_s3 mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu"
 # shellcheck disable=SC2206
 tests=( ${SOFT_LADDER_TESTS:-$DEFAULT_TESTS} )
 

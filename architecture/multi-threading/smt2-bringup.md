@@ -58,6 +58,18 @@ CI job (optional, not default verify):
 | Bare-metal | `smt_dual_park.S` (hart1 WFI; hart0 self-check) |
 | SBI | OpenSBI domain with 2 harts |
 | Linux | boot to prompt; `cat /proc/cpuinfo` shows 2 (`CVA6_LINUX_PAYLOAD` / cva6-sdk) |
+| **AI / PyTorch (after soft-ladder SL-C)** | Soft: `cva6-build tensor pytorch --board virt-ai-pcie`; multi-thread: taskset both harts — see **`smt2-ai-tensor-linux.md`** |
+
+### Soft-ladder residual (DI OpenSBI) + AI coupling
+
+| Track | Doc |
+|-------|-----|
+| Soft-ladder B1/B2/B3 | `soft-ladder/README.md`, `ITERATION.md` |
+| FDT / topology gates | `fdt-topology-soft-ladder.md` |
+| **SMT2 × ai-tensor / PyTorch Linux** | **`smt2-ai-tensor-linux.md`** (T0–T6) |
+
+iter-012 RTL (LOAD cancel under DI, per-hart sp issue barrier) targets PEEL_FDT_GETPROP so
+dual-hart topology can be trusted before multi-thread PyTorch on Linux.
 
 Combine with **H** (`server_math`) only after SMT bare-metal is green — KVM-on-SMT is out of scope for bring-up.
 

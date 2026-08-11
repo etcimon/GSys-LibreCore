@@ -21,13 +21,19 @@ Template at bottom.
 | **I3 Fix** | Soft getprop default (holding). PEEL free-cave probes in oracle (not silicon fix). |
 | **I4 Verify** | default cookie **51b1babe** with soft getprop |
 | **Bisects (all negative)** | dual-commit; STQ-nofwd; force SI; ALU cancel-exempt — same pin; reverted. |
-| **Directed** | minis through **`mini_fdt_opensbi_blob.c`** — all PASS fw64 |
+| **Directed (2026-08-09 lab on soft-ladder @2c06e6fb0 + work-ver-smt2-fw64)** | **7/7 soft-ladder-di PASS** incl. FDT shape + **`mini_fdt_next_tag_lbu`** (4×lbu BE tag assemble + s2/s3 preserve). `mini_fdt_check_prop_nest` fixed (valid `a2`; compare `s2`↔`s3` post-nest). **Gap:** PEEL pin still not in minis — needs longer OpenSBI namelen_ graph (check_node×next_tag×by_offset with real DTB offsets), not just 3 tags. |
 | **Probe (PEEL)** | **namelen_ entry** walk+0x30: a0=`0x8001e000` fdt, a4=`0x80046f2c` lenp, a3=10. **by_offset entry** walk+0: a0=**0**, a1=8, a2=s3=**`0x80012b2a`**, ra=`0x800130b6`, count=1. |
-| **Conclusion** | s2 (fdt→0) and s3 (lenp→code `0x12b2a`) corrupted **inside** namelen_ after entry, before first by_offset. |
-| **RTL focus** | s2/s3 RF write or spill restore under DI on check_node/next_tag path. |
-| **Scaffold** | P0 suites; probes @`0x2cc0`/`0x2d48` when PEEL_FDT_GETPROP=1. |
+| **OpenSBI map** | `namelen_`: `mv s2,a0; mv s3,a4; jal check_node; … mv a0,s2; mv a2,s3; jal by_offset`. `check_node@12b26 jal next_tag` → ra **`0x12b2a`**. `by_offset` fail `sw a0,0(s2)@12eb2`. mtval=`0x12b2a` = **check_node's next_tag link**, not stack. |
+| **Conclusion** | s2 (fdt→0) and s3 (lenp→code `0x12b2a`) corrupted **inside** namelen_ after entry, before first by_offset. Stack save/restore alone is insufficient to repro (minis green). |
+| **RTL focus** | (1) `fdt_next_tag` **byte-load / tag-assemble** path under DI+FETCH_WIDTH=64 (hang-6/7 family). (2) RF write of **link (ra)** colliding with s3. (3) Scoreboard result bus / dual-commit not primary (bisect−). Existing SS full-serialize after ALU/CF/LSU already in `issue_read_operands.sv`. |
+| **Scaffold** | P0 suites; probes @`0x2cc0`/`0x2d48` when PEEL_FDT_GETPROP=1. DI default tests now include FDT shape minis. |
 | **Oracle path** | `software/smt2-linux/soft-ladder/` |
-| **I6 Next** | **P2 RTL** on scoreboard/RF s-reg for that window. Soft getprop holding. **No git commit unless asked.** |
+| **I4b Holding (reconfirmed)** | default soft getprop soak **CLASSIFY=SUCCESS** cookie `51b1babe`, `plat_hc=2`, `coldboot_done=1` on soft-ladder + `work-ver-smt2-fw64` (2026-08-09). |
+| **I4c PEEL (reconfirmed red)** | `PEEL_FDT_GETPROP=1`: trapdump mepc=`0x80012eb2` mcause=6 mtval=`0x80012b2a` s2=`0x12b2a`; walk: namelen entry fdt/lenp **OK**, by_offset a2=s3=`0x12b2a`, ra=`0x130b6`, count=1; `plat_hc=80`. |
+| **I3b RTL (2026-08-09, soft-ladder branch)** | **(1)** `scoreboard.sv`: under `SuperscalarEn`, **cancel younger LOADs** on mispredict (same-hart only when `NrHarts>1`). SI keeps cont.5 LOAD exemption. Rationale: PEEL s2/s3 ← ra-link / 0 from wrong-path load RF-writes after RAS-miss/JAL; `after_flu_wb` is branch-tid so correct-path epilogue re-issues. **(2)** `issue_stage.sv`: per-hart **`unresolved_sp_q`** — after GPR write to **x2 (sp)** under SS, stall that hart until sp-writer commits (peer SMT continues). Targets `fdt_next_tag` frame save/restore races. |
+| **I3c SMT / AI co-req on E rebuild** | `g6lc_smt_csr_bank.sv`: wire `ai_aicfg`/`ai_ais`/dirty/setcfg (active-hart mux, commit-hart gate) so `g6lc64_smt2` elaborates with AI-E CSR sideband. Multi-threading invariant: AI bank state is per-hart CSR bank, not a shared sticky. |
+| **I4d Harness** | Rebuild `work-ver-smt2-slfix` on full tree (`E:\cva6`) — soft-ladder worktree lacks hpdcache submodule for verilate. |
+| **I6 Next** | Soak PEEL + holding on `work-ver-smt2-slfix`; if still red, full namelen mini / load-path further. Soft getprop holding until PEEL green. |
 
 ## Completed iterations
 

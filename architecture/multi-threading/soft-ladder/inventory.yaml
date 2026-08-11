@@ -140,11 +140,20 @@ sites:
       - core/issue_read_operands.sv
       - core/scoreboard.sv
       - core/store_unit.sv
+      - core/frontend/instr_queue.sv
     monorepo_soak_note: >
       Same family as hang-6 dual FDT BADOFFSET and hang-7 single FDT walk.
       iter-012: dual-commit negative; STQ data-forward off under SuperscalarEn
       + st_pipeline_busy on page-offset match (store_buffer/load_unit).
-    verif_idea: "Stack store of fdt lenp-like pointer under dual-issue; path_offset /cpus"
+    rtl_progress: >
+      2026-08-09 soft-ladder worktree: FDT shape minis (lenp_sw, s2_nest,
+      check_prop_nest) PASS on work-ver-smt2-fw64 after fixing nest mini
+      (valid a2; compare s2 to s3 post-nest). PEEL pin still requires OpenSBI
+      fdt_next_tag structure-load path — stack-only nest does not repro.
+      mtval=0x12b2a is check_node jal-next_tag link (ra residue into s3).
+    verif_idea: >
+      mini_fdt_check_prop_nest + mini_fdt_opensbi_blob in soft-ladder-di;
+      next: inline next_tag lbu/or loop mini; PEEL_FDT_GETPROP walklog
     retire_when: real sbi_printf green; soft printf cave deleted
 
   - id: b1-heap-freelist-malloc

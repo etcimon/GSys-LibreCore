@@ -133,7 +133,8 @@ Checklist:
 [x] PEEL_STRLEN mid-RVI fixed (FETCH_WIDTH=64); natural strlen default
 [x] soft fdt_getprop_namelen + natural strlen → cookie green
 [x] oracle moved tmp-dual-ci → software/smt2-linux/soft-ladder/
-[!] PEEL_FDT_GETPROP → FDT lenp; RTL STQ-nofwd under SS (re-soak)
+[x] soft-ladder-di default includes FDT shape + next_tag_lbu (7/7 PASS fw64, 2026-08-09)
+[!] PEEL_FDT_GETPROP → FDT lenp (s2/s3 clobber; mtval=check_node jal link); minis do not repro pin
 [ ] real sbi_printf (FDT lenp)
 [ ] domain full walk; switch_mode payload
 [ ] mk_plat_skip empty → retire

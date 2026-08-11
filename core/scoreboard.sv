@@ -255,18 +255,23 @@ module scoreboard #(
         // NrHarts==1 → hart_id always 0 → identity (cancel all younger).
         if (CVA6Cfg.NrHarts <= 1 ||
             mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
-          // R3a cont.5: do not younger-cancel LOAD. Cancelled ld s4 in
-          // fdt_getprop left RF as a3 (lenp=s0-108) → misalign at
-          // fw_platform_init ld a5,0(s4). Correct-path epilogue LDs must
-          // commit. Wrong-path loads: CF stall + flush_if limit issue;
-          // residual wrong-path RF write is preferred over silent drop of
-          // callee-saved restores. STORE still cancels (STQ).
-          // Soft-ladder B1: AMO (STORE FU) still cancels — store_unit kills
-          // amo_buffer via cancel_i so depth-1 does not wedge after drop.
-          // Mark complete so commit can drop without waiting for WB.
-          // Soft-ladder iter-012: ALU/NONE cancel exemption was PEEL-negative
-          // (fw64f, same 12eb2/12b2a) — not that alone.
-          if (mem_q[cid].sbe.fu != ariane_pkg::LOAD) begin
+          // Younger-cancel policy (soft-ladder iter-012 / hang-6–7 / R3a cont.5):
+          //
+          // Historical cont.5: *never* cancel LOAD — a cancelled ld s4 in
+          // fdt_getprop left RF as a3 after a *false* cancel window that used
+          // FLU_WB tid (wrong). after_flu_wb is now branch-tid based (below),
+          // so correct-path epilogue loads re-issue after mispredict reseed.
+          //
+          // Soft-ladder PEEL_FDT_GETPROP (mepc=0x12eb2 mcause=6 mtval=0x12b2a):
+          // under SuperscalarEn, wrong-path LOADs after RAS-miss / JAL still
+          // RF-write when not cancelled — callee-saved s2/s3 observed holding
+          // the check_node→next_tag *link* (ra residue) or 0. Prefer cancel of
+          // younger LOADs on DI; SI keeps cont.5 exemption for legacy soaks.
+          //
+          // STORE/AMO still cancel (STQ / amo_buffer.cancel_i). Mark complete
+          // so commit can drop without waiting for WB.
+          // NrHarts>1: same-hart filter above preserves peer SMT windows.
+          if (mem_q[cid].sbe.fu != ariane_pkg::LOAD || CVA6Cfg.SuperscalarEn) begin
             mem_n[cid].cancelled = 1'b1;
             mem_n[cid].sbe.valid = 1'b1;
           end
