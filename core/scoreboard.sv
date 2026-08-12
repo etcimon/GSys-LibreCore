@@ -321,6 +321,13 @@ module scoreboard #(
   // Combinational cancel mask for OoO recovery (includes same-cycle bmiss window)
   // FSE S5: same-hart filter as the sequential cancelled sticky bits.
   // Also driven without SpeculativeSb so LSU/issue see same-cycle bmiss drops.
+  //
+  // Soft-ladder I4m–r / hang-6: load_unit flushes ldbuf slots on this mask in
+  // the *same* cycle as bmiss. Sequential sticky cancel (above) already drops
+  // younger LOADs under SuperscalarEn so wrong-path RF writes cannot leave
+  // ra/s2/s3 residue across multi-call FDT (next_tag 2nd entry, getprop).
+  // The same-cycle mask must match that policy — previously it always skipped
+  // LOAD, so ldbuf still completed wrong-path byte-loads before sticky latch.
   always_comb begin : gen_cancelled_mask
     cancelled_mask_o = '0;
     for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
@@ -333,8 +340,8 @@ module scoreboard #(
         if (cid == issue_pointer[0]) break;
         if (CVA6Cfg.NrHarts <= 1 ||
             mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
-          // Same-cycle cancel window: skip LOAD (see sequential cancel).
-          if (mem_q[cid].sbe.fu != ariane_pkg::LOAD) begin
+          // Match sequential younger-cancel: under SS include LOAD; SI keep cont.5.
+          if (mem_q[cid].sbe.fu != ariane_pkg::LOAD || CVA6Cfg.SuperscalarEn) begin
             cancelled_mask_o[cid] = 1'b1;
           end
         end
