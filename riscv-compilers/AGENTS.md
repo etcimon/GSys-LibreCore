@@ -24,6 +24,7 @@
 | **Transitional shadows** | [`agents/README.md`](agents/README.md) | `agents/<id>.md` — pre-emancipation only; becomes a pointer or is deleted |
 | **Transitional readings** | [`architecture/README.md`](architecture/README.md) | `architecture/<id>/` — workspace before the reading moves in-tree |
 | **Human entry** | [`README.md`](README.md) | Developer quickstart; usable without knowing this repository |
+| **Terms** | [`LICENSE`](LICENSE) | This folder's surface is **public domain (CC0 1.0)**; submodules and their IP are untouched |
 
 ---
 
@@ -168,3 +169,9 @@ precondition, and none treats RISC-V support as a measure of a submodule's worth
 permanent governance layer, not a registry that submodules must stay registered in, and not a place to
 reimplement a compiler; it is a means of making a foreign tree self-describing, after which its own
 success is measured by how little of it remains relevant.
+
+The folder's own surface is dedicated to the **public domain** under CC0 1.0 ([`LICENSE`](LICENSE)) so it can
+be lifted, adapted or embedded anywhere without conditions. That dedication is strictly scoped to files
+authored here: a submodule checkout and everything in it stays under its own licence, no patent or trademark
+rights are granted by anyone, and material an agent writes into a submodule tree is the author's and that
+project's concern. Reading a submodule, or generating notes about it, never changes its terms.

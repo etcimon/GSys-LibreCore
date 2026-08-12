@@ -149,6 +149,20 @@ promotion worked. A second pass then begins normally: name a thesis, open only w
 to open, change the tree in its own idiom, correct the note for the area touched, run the green command,
 record the outcome.
 
+## Terms
+
+Everything this folder provides — this README, the guiders, the ladder, the method and posture files, the
+transitional directory conventions — is dedicated to the **public domain** under CC0 1.0
+([`LICENSE`](LICENSE)). Take it, adapt it, embed it in your own project or product, with no conditions and no
+attribution required.
+
+The dedication stops at the folder boundary, deliberately. A submodule you check out here remains a separate
+work under **its own licence**, and nothing about placing it here, reading it, or generating notes about it
+relicenses it, creates a derivative work of it, or waives anyone's patents or trademarks. Documents an agent
+writes into a submodule tree belong to whoever ran the process and to that project's terms, not to this file.
+No third-party IP — upstream projects, specifications, toolchains, silicon — is conveyed or cleared by
+anything here.
+
 ## Current state
 
 Empty. No submodules are admitted, which is the correct initial state — the folder acquires content the
