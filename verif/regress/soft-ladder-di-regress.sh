@@ -6,7 +6,8 @@
 #
 # Tests (bare multicore mini_*.{S,c}, tohost=1 pass → TB SUCCESS exit 0):
 #   mini_amoadd_w_spin      b1-amo-spin-lock
-#   mini_csr_expected_trap  b1-csr-expected-trap
+#   mini_csr_expected_trap  b1-csr-expected-trap (simple)
+#   mini_csr_pmp_probe      OpenSBI hart_init multi-pmp + a3 trap_info shape
 #   mini_dual_cmv_s3        b1-dual-cmv-s3
 #   mini_fdt_lenp_sw        b1-fdt-lenp-store (shape)
 #   mini_fdt_s2_nest        b1-fdt-lenp-store (s2 save/restore)
@@ -71,7 +72,7 @@ COMPILE_ONLY="${SOFT_LADDER_COMPILE_ONLY:-0}"
 
 # Default gate: peeled B1 + FDT shape minis (iter-012). mini_lrsc_d opt-in
 # (2nd SC-without-LR exit mismatch on some Variane builds — not SL-A blocker).
-DEFAULT_TESTS="mini_amoadd_w_spin mini_csr_expected_trap mini_dual_cmv_s3 mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu"
+DEFAULT_TESTS="mini_amoadd_w_spin mini_csr_expected_trap mini_csr_pmp_probe mini_dual_cmv_s3 mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu"
 # shellcheck disable=SC2206
 tests=( ${SOFT_LADDER_TESTS:-$DEFAULT_TESTS} )
 

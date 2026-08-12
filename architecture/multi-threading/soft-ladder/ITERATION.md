@@ -33,7 +33,19 @@ Template at bottom.
 | **I3b RTL (2026-08-09, soft-ladder branch)** | **(1)** `scoreboard.sv`: under `SuperscalarEn`, **cancel younger LOADs** on mispredict (same-hart only when `NrHarts>1`). SI keeps cont.5 LOAD exemption. Rationale: PEEL s2/s3 ← ra-link / 0 from wrong-path load RF-writes after RAS-miss/JAL; `after_flu_wb` is branch-tid so correct-path epilogue re-issues. **(2)** `issue_stage.sv`: per-hart **`unresolved_sp_q`** — after GPR write to **x2 (sp)** under SS, stall that hart until sp-writer commits (peer SMT continues). Targets `fdt_next_tag` frame save/restore races. |
 | **I3c SMT / AI co-req on E rebuild** | `g6lc_smt_csr_bank.sv`: wire `ai_aicfg`/`ai_ais`/dirty/setcfg (active-hart mux, commit-hart gate) so `g6lc64_smt2` elaborates with AI-E CSR sideband. Multi-threading invariant: AI bank state is per-hart CSR bank, not a shared sticky. |
 | **I4d Harness** | Rebuild `work-ver-smt2-slfix` on full tree (`E:\cva6`) — soft-ladder worktree lacks hpdcache submodule for verilate. |
-| **I6 Next** | Soak PEEL + holding on `work-ver-smt2-slfix`; if still red, full namelen mini / load-path further. Soft getprop holding until PEEL green. |
+| **I4e Hold @8e6 (2026-08-11, `smt2-ai-tensor-linux`)** | Restored known-good oracle md5 **`bc7ed11d…`** (cold rebuild `871e7cb6…` regressed to `plat_hc=80`/R-error). **`slfix`:** `plat_hc=2` `coldboot_done=1` `last_hartidx=1` @8e6, **no cookie**; hangpc `npc0=0x8000032e` (`_start_warm`) mepc=0 mcause=2. **`fw64`:** same ELF still PEEL pin mepc=`0x12eb2` mcause=6. **iter-012 advances FDT; residual post-coldboot.** |
+| **I4f Cookie chase (2026-08-11)** | Binary probes on good oracle + `slfix` (j SUCCESS / stubs). **Note:** `coldboot_done` is set **early** in `sbi_init` (@`0x828`, before `hart_init`) — it does **not** mean cookie path ran. |
+| | **A** j SUCCESS @`0x82c` (post-`coldboot_done`) | **COOKIE GREEN** `51b1babe` — success cave SW works on slfix |
+| | **E** j SUCCESS @`0x840` (after `sbi_hart_init`) | **FAIL** — hang **inside** `sbi_hart_init` (never returns) |
+| | **K** j SUCCESS @`0xcd86` (CSR probe entry after memset) | **COOKIE GREEN** — hang is in **CSR expected-trap probe tail** (or later in hart_init after probes) |
+| | **L** SOFT_CSR cut `cd86→cd0e` (reinit) | **FAIL** — reinit path not a valid skip on this ELF |
+| | **N/P** stub `hart_init` ret0 / skip probes then ret0 | **banr** soft printf runs; hang **mepc=`0x8002047a`** mcause=2 — **FDT/rodata string executed as code** (`compatible`/`riscv,aplic` bytes); npc `_wait_for_boot_hart` |
+| | **B/C/D** j SUCCESS at domain_fin / start_finish | **FAIL** (never reached without hart_init progress) |
+| **Conclusion I4f** | (1) Cookie cave OK. (2) Stock residual on slfix: **`sbi_hart_init` CSR feature probes** (cont.33 family; `unresolved_csr_q` present but probes still die). (3) After soft-skip hart_init: **platform ops `c.jalr a5`** into FDT (irqchip@`17e0` first → mepc=`0x2047a`, then ipi/timer/tlb). |
+| **I4g Holding cookie green (2026-08-11)** | **`SOFT_HART_INIT` + `SOFT_PLAT_OPS`** → **`51b1babe`**. Artifact `*.held.elf`. Track `hold` auto-prefers held (builds peels from pin if missing). Reconfirm: track hold 20/0 @3e6. |
+| **I4h CSR minis (2026-08-11)** | `mini_csr_expected_trap` **PASS**. New **`mini_csr_pmp_probe`** (a3 trap_info + multi pmpcfg/pmpaddr + dual illegal) **PASS** on `slfix`. Directed CSR expected-trap shape is green under iter-012. |
+| **I4i Platform ops residual** | With SOFT_HART_INIT only: hang mepc=`0x8002047a` (irqchip@`17e0`). SOFT_HART_INIT+irqchip only: mepc=`0x80020072` (next plat jalr, ipi family). Full `SOFT_PLAT_OPS` → cookie green. Ops `c.jalr a5` targets land in FDT — corrupt/uninitialized `platform->ops` after soft FDT path. |
+| **I6 Next** | (a) Why platform ops fn-ptrs are FDT under soft getprop (fdt_irqchip_init / generic ops). (b) Natural hart_init still soft-skipped for hold — re-bisect if full pmp loop hangs only in OpenSBI (mini green). (c) PEEL_FDT_GETPROP. (d) SL-B. |
 
 ## Completed iterations
 

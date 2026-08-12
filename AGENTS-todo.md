@@ -13,11 +13,14 @@ is the queue, not the design.
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
 ## Current phase
-**Soft ladder (DI OpenSBI) + multi-threading topology path on smt2.**  
+**SMT2 × AI attunement:** soft-ladder DI residual + dual-hart topology **and** ai-tensor /
+PyTorch staged track (branch **`smt2-ai-tensor-linux`**).  
 Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual matrix
 `AGENTS-build-platform.md` §5–§7 · live RTL table `architecture/README.md` ·  
 **soft ladder** `architecture/multi-threading/soft-ladder/` ·  
-**topology** `architecture/multi-threading/fdt-topology-soft-ladder.md`.
+**topology** `architecture/multi-threading/fdt-topology-soft-ladder.md` ·  
+**AI×SMT track** `architecture/multi-threading/smt2-ai-tensor-linux.md` ·  
+**multi-threading map** `architecture/multi-threading/README.md` (AI attunement §).
 
 ### Landed plane (state + priors to retrieve)
 
@@ -31,8 +34,9 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **FTQ / frontend** | Mispredict reseed + demand fixes for bare-metal green | Guide `agents/guides/AGENTS-branch-prediction.md` · scaffold `architecture/branch-prediction/README.md` · RTL `core/frontend/{frontend,cva6_ftq}.sv` |
 | **Structural FO4** | sparse_ex/frontend residual close @ **2.5 GHz** (screening ≠ STA) | Package `sv-timing/AGENTS.md` · `sv-timing/architecture/MONOREPO-SOAK.md` · `FREQUENCY-CLOSURE.md` · host `AGENTS-build-platform.md` §6.1 / §7 · plan `architecture/build-platform-opensta-from-timing.md` · philosophy §2.8 in `AGENTS-coding-philosophy.md` |
 | **R3a dual-hart OpenSBI** | `fw_payload` + WSL SUCCESS; **R3b gate** `r3b-linux-image` (Image external) | `architecture/multi-threading/smt2-bringup.md` · `smt-linux-rootfs.md` · `dts-linux-smt.md` · `software/smt2-linux/` · suites `smt-linux-*` / `opensbi-linux-boot` · `AGENTS-dts-validation.md` |
-| **Soft ladder (DI OpenSBI residual scaffold)** | **P0 done:** optional suites `soft-ladder-di` / `soft-ladder-osbi` + diag `diag-soft-ladder-paths` in `defaults.ts`. Max **B1 RTL** promotion; oracle temporary. Cookie **51b1babe**; peels through strlen; **iter-012 FDT lenp open** (soft getprop holding) | `soft-ladder/README.md` (P0–P6) · `ITERATION` · `b3-sim-harness` · suites in `defaults.ts` · `AGENTS-specs-to-tests.md` |
-| **FDT topology plan** | `NrCores`×`NrHarts` (threads/core), stream vs SMT `cpu-map`, issue width non-DT; gates before `/proc/cpuinfo` | `architecture/multi-threading/fdt-topology-soft-ladder.md` · `ariane-smt2.dts` · `ariane-stream8.dts` |
+| **Soft ladder (DI OpenSBI residual scaffold)** | **P0 done** + **iter-012 RTL**. FDT minis **5/5**. **Holding cookie green** (`SOFT_HART_INIT`+plat peels → `51b1babe` on `slfix`). Stock residual: hart_init CSR + platform jalr→FDT. | `ITERATION` I4g · `mk_plat_skip.py` · held ELF · `smt2-ai-tensor-linux.md` |
+| **FDT topology plan** | `NrCores`×`NrHarts` (threads/core), stream vs SMT `cpu-map`, issue width non-DT; gates before `/proc/cpuinfo` **and before multi-thread PyTorch** | `fdt-topology-soft-ladder.md` · `ariane-smt2.dts` · `ariane-stream8.dts` |
+| **SMT2 × ai-tensor / PyTorch** | Soft pytorch **PASS** (Device virt-card). Fast track live. Multi-thread host workers **blocked** on soft-ladder hold cookie + SL-C + Linux Image. AI CSR banked on SMT. | `smt2-ai-tensor-linux.md` · `multi-threading/README.md` · `ai-tensor/AGENTS.md` · HARD `ai-matrix/hard-tests.md` |
 | **Ara / RVV** | Attach + DTS + directed; **VRF/cosim gate** `ara-vector-cosim` (live lmul opt) | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
 | **H / KVM** | U9 + **H-edge Spike+RTL 3/3** (`kvm-h-spike` / Variane server_math) | `architecture/server-math-hypervisor.md` · remaining-upgrade Phase B · `agents/spec/riscv-spec-II-5.*-hypervisor*.html` · impl Hypervisor row · `verif/tests/custom/kvm_h/` · suite `kvm-h-tests` |
 
@@ -55,20 +59,24 @@ Full map: `architecture/multi-threading/soft-ladder/README.md`.
 | # | Item | Phase | Status / next action |
 |---|------|-------|----------------------|
 | **SL-0** | **Register residual suites in build-platform** | P0 | **Done.** Optional `soft-ladder-di` + `soft-ladder-osbi` in `defaults.ts` (not `defaultSuites`); diag `diag-soft-ladder-paths`; maps in `AGENTS-specs-to-tests.md` / `AGENTS-build-platform.md` / `AGENTS-regress-scripts.md`. |
-| **SL-A** | **iter-012 FDT `lenp` / `PEEL_FDT_GETPROP`** | P1–P2 | **Open (RTL landed, soak pending).** Pin: mepc=`0x80012eb2` mcause=6 mtval=`0x80012b2a` (= check_node→next_tag **link**). Soft getprop holding cookie green historically. |
-| | Bisects **all negative** | P2 | Dual-commit; STQ-nofwd; force SI; ALU/NONE cancel-exempt — same pin; **reverted**. |
-| | Directed (P1) | P1 | Shape minis green + `mini_fdt_next_tag_lbu` in `soft-ladder-di` default. PEEL pin not in stack-only minis. |
-| | **P2 RTL (landed)** | P2 | `scoreboard.sv`: cancel younger **LOAD** under `SuperscalarEn` (same-hart SMT). `issue_stage.sv`: per-hart **`unresolved_sp_q`** (sp-write barrier). Rebuild `work-ver-smt2-slfix` → PEEL/holding re-soak. |
-| | Priors | | `soft-ladder/{README,ITERATION,b1-rtl-residuals}.md` · oracle `software/smt2-linux/soft-ladder/` · `architecture/multi-threading/smt2-ai-tensor-linux.md` |
-| **SL-B** | Peel soft getprop + real printf | P3–P4 | **Blocked on SL-A PEEL green** after rebuild soak. Then `plat_hc==2` without soft FDT. |
-| **SL-C** | Topology truth (smt2) | P6 / topology | After SL-B: stock DTB, `hart_count==2`, R3/R3b, cpuinfo; gates **before** multi-thread PyTorch. |
-| **SL-D** | Stream plane vs SMT | P6 | Orthogonal: stream8 N=2 T=1; do not merge with smt2 DI residual until FDT walk trusted. |
-| **SL-E** | Optional DTS generator | later | Only when third topology would triple-maintain hand DTS. |
-| **SL-T** | **SMT2 × ai-tensor / PyTorch on Linux** | after SL-C | Soft path: `tensor pytorch --board virt-ai-pcie`. Live: dual-hart OpenSBI/Linux + UIO/eventfd + taskset workers; map `smt2-ai-tensor-linux.md`. |
+| **SL-A** | **iter-012 FDT + hold cookie** | P1–P2 | **Holding cookie green** (`SOFT_HART_INIT`+`SOFT_PLAT_OPS` → **`51b1babe`** on `slfix`). Stock red: hart_init CSR + platform jalr→FDT. PEEL pin mepc=`0x12eb2` on `fw64`. |
+| | Bisects **all negative** | P2 | Dual-commit; STQ-nofwd; force SI; ALU cancel-exempt — same pin; **reverted**. |
+| | Directed (P1) | P1 | **5/5 green** FDT shape + `mini_fdt_next_tag_lbu` on fw64/slfix. |
+| | **P2 RTL + TB** | P2 | LOAD cancel under SS; `unresolved_sp_q`; TB banked CSR hangpc; **`work-ver-smt2-slfix`**. `unresolved_csr_q` present — probes still red stock. |
+| | **Oracle discipline** | P2 | Pin md5 **`bc7ed11dab17454fd147e4927ba07fef`**. Held: **`fw_payload_r3a_c15_plat_skip.held.elf`**. `SOFT_LADDER_SKIP_BUILD=1`; optional `SOFT_LADDER_ELF=…held.elf`. |
+| | **Cookie chase I4f–g** | P2 | Cave OK. Stock: **`sbi_hart_init` CSR probes**. Soft-skip → platform **`c.jalr a5`** (irqchip@`17e0`→FDT). **Hold green:** `SOFT_HART_INIT`+plat peels → **`51b1babe`**. |
+| | **Track hold** | P2 | **`hold` green** (held ELF). `mini_csr_expected_trap` + **`mini_csr_pmp_probe` PASS** on slfix. |
+| **Next** | P2/P3 | Platform ops→FDT root cause; optional natural hart_init re-soak; PEEL_FDT_GETPROP; SL-B. |
+| | Priors | | `ITERATION` I4g · `mk_plat_skip.py` · held ELF · `smt2-ai-tensor-linux.md` |
+| **SL-B** | Peel soft getprop + real printf | P3–P4 | Hold cookie green (soft). Next: PEEL stock path; retire soft peels. |
+| **SL-C** | Topology truth (smt2) | P6 / topology | After SL-B: stock DTB, `hart_count==2`, R3/R3b, cpuinfo; **gate multi-thread PyTorch**. |
+| **SL-D** | Stream plane vs SMT | P6 | Orthogonal stream8; do not merge with smt2 DI until FDT trusted. |
+| **SL-E** | Optional DTS generator | later | Third topology would force generator. |
+| **SL-T** | **SMT2 × ai-tensor / PyTorch** | parallel + after SL-C | **Active on `smt2-ai-tensor-linux`.** Driver: `smt2-ai-tensor-track.sh` (`fast`→`di`→`hold`→`peel`→`dual`→`tensor`→`mt-soft`→`hard`). T4 soft pytorch **green**. T5 dual workers need SL-C + Image. AI CSR banked. Map: `smt2-ai-tensor-linux.md`. |
 
 Soft-ladder SUCCESS = trapdump **`51b1babe` only** (not harness tohost SUCCESS) — suite metadata.  
-Harness preference: `SOFT_LADDER_HARNESS=work-ver-smt2-fw64` (FETCH_WIDTH≥64).  
-Oracle (temporary): `python software/smt2-linux/soft-ladder/mk_plat_skip.py` — shrink on peels; P4 retires.
+Harness preference: **`work-ver-smt2-slfix`** (iter-012) for hold/cookie; `fw64` is PEEL-pin reference only.  
+Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`**. Holding cookie: `SOFT_LADDER_ELF=software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.held.elf` or rebuild with `SOFT_HART_INIT=1`.
 
 **AI matrix card (`Xg6lcai`) + licensing — live track (not scaffold-only):**
 
@@ -95,7 +103,7 @@ Transport: `architecture/uncore/pcie-endpoint.md`.
 | **AI-S0** | ~~Size the 100-TOPS class~~ | I0 | **Done — `architecture/ai-matrix/scaling-100tops.md`.** Froze the definition (100 TOPS ≙ dense INT8, peak, 2 ops/MAC, no sparsity/INT4 multiplier); derived DRAM BW = (2/T)×MAC-rate ⇒ 391 GB/s at blocking T=256; machine balance ≈125 MAC/byte. Reversed three draft positions: chiplets **deferred** behind a die-size gate, island knobs **out of** `cva6_cfg_t`, on-die SRAM **8–32 MB** not 32–128 MB. |
 | **AI-S1** | ~~SKU decision: latency/decode vs throughput/serving~~ | I0 | **Closed — BOTH, STAGED: latency SKU first, throughput SKU by cluster replication** (`scaling-100tops.md` §5.1). Rationale: at `T=512` the throughput SKU needs only 195 GB/s of GEMM bandwidth, while the latency SKU must buy ~400 GB/s anyway for batch-1 weight streaming — **so the expensive subsystem is built and measured first and covers both**, and adding compute later is pure cluster replication. Track order changes to I1 → I3 → (latency tape-out) → I2. Five binding conditions in §5.1: `T`/accumulator/DRAM frozen at I1; cluster is the only replication unit and the NoC cut line is set at I1; capability window ships at I1; cluster-**cooperative** blocking from the first cluster (independent per-cluster blocking collapses effective `T` to 64 and demands ~1.6 TB/s); both SKUs quoted with §12 metrics. |
 | **AI-S2** | Seam decoupled from throughput target | I0 | **Recorded.** ~99.7% of island arithmetic never crosses a core seam, so the card SKU may ship on **seam B**; option D is now a small-SKU/latency feature. **Consequence: AI-2 is off the card's critical path** (still blocks the vector track). `README.md` §2 amendment. |
-| **AI-S3** | Island RTL: cluster → memory → (latency SKU) → NoC/N clusters → PD | I1, I3, I2, I4 | **I1 partial + I3-lite live; HARD + host green.** AccTile/PeLanes 256; CPL FIFO multi-claim; peak 256³ **83.7k cy**. HARD suites: **narrow** (mmio+gemm_s8) / **ci 27/27** / **peak** — map `architecture/ai-matrix/hard-tests.md`. **`tensor virt-impl --impl hard --suite narrow --require-hard` PASS** (soft Device + SV 2/2). virt-ai-pcie + ai-tensor pytorch path; board-uio-eventfd + ariane-ai.dts. **Next (scaling):** **I3 measured bandwidth** to §4 model, then **I2 cluster replication** without regressing narrow/ci single-cluster HARD; kernel UIO; wider NoC. Do **not** grow AccTile with TOPS. |
+| **AI-S3** | Island RTL: cluster → memory → (latency SKU) → NoC/N clusters → PD | I1, I3, I2, I4 | **I1 partial + I3-lite live; HARD + host green.** AccTile/PeLanes 256; CPL FIFO multi-claim; peak 256³ **83.7k cy**. HARD suites: **narrow** / **ci 27/27** / **peak** — `hard-tests.md`. **`tensor virt-impl --impl hard --suite narrow --require-hard` PASS**. virt-ai-pcie + pytorch soft. **SMT attunement:** dual-hart multi-thread host workers tracked under **SL-T** (`smt2-ai-tensor-linux.md`) — do not claim multi-CPU AI green until soft-ladder SL-C. **Next (scaling):** I3 measured BW → I2 cluster replication; kernel UIO; NoC. Do **not** grow AccTile with TOPS. |
 | **AI-5** | **`cv32a65x` lint baseline is stale — pre-existing, NOT AI** | — | **Open, unrelated to this track; do not attribute it to AiCfg.** `verify --lint` reports **190 warnings vs baseline 146** (`build-platform/src/config/defaults.ts:1185`) and fails the gate; `cv64a6_imafdc_sv39` drifts the other way (410 vs baseline 483, passes). Attribution measured with the platform's exact `lintArgs`: the entire AI config surface accounts for **0** warnings — the only `config_pkg`-family citation is the pre-existing `build_config_pkg.sv:287` `AXI_USER_EN` WIDTHEXPAND. Top contributors are `core/ooo/g6lc_rob.sv` (**27**), `cva6_hpdcache_if_adapter.sv` (**17**), `csr_regfile.sv` (**16**) — i.e. U5 OoO + cache work. The baseline comment itself says it was last re-measured 2026-08-06; commits have landed since. Action: re-measure and ratchet both baselines, or fix `g6lc_rob.sv`'s ASCRANGE/WIDTHEXPAND. |
 | **AI-S4** | Card power/thermal envelope | I4 / P5 | **Open.** Estimated 60–80 W typical / 100–150 W peak ⇒ the 75 W slot budget is insufficient: 8-pin aux, boot-time power negotiation, and a mandatory DVFS/throttle cap loop. `architecture/uncore/pcie-endpoint.md` §3.1. All figures unmeasured — replace at I4. |
 

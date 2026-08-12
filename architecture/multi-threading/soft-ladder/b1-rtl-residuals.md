@@ -47,6 +47,7 @@ Historical promotion order among B1 (from `inventory.yaml` priority):
 | Directed test sketch | `csrr` illegal; immediately `csrw mtvec, known`; check handler/mcause |
 | Retire criterion | Full CSR probe loop in hart_init under DI |
 | **iter-006 fix (in tree)** | `issue_stage` `unresolved_csr_q`: after CSR issue, no same-hart younger issue until that CSR `commit_ack` or flush. Test: `mini_csr_expected_trap.S`. |
+| **iter-012+ lab (2026-08-11)** | `mini_csr_expected_trap` + **`mini_csr_pmp_probe`** (OpenSBI a3 trap_info + multi pmp) **PASS** on `work-ver-smt2-slfix`. Hold still uses `SOFT_HART_INIT` (OpenSBI full body) + `SOFT_PLAT_OPS` (irqchip/ipi/timer/tlb jalr→FDT). |
 
 ### FDT `lenp` / getprop (priority 2 — **active iter-012**)
 

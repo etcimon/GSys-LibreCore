@@ -723,6 +723,22 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        // SMT2 × ai-tensor staged track — default profile is **fast** (artifact /
+        // compile-only). Climb with SMT2_TRACK=di|hold|peel|dual|tensor|mt-soft|hard|full.
+        // Map: architecture/multi-threading/smt2-ai-tensor-linux.md
+        id: "smt2-ai-tensor-track",
+        description:
+          "OPTIONAL: SMT2×ai-tensor staged track (default profile=fast: paths+dual-hart artifacts+soft-ladder COMPILE_ONLY). Env SMT2_TRACK=di|hold|peel|dual|tensor|mt-soft|hard|full. No Verilator rebuild unless SMT2_REBUILD=1. Not defaultSuites.",
+        script: "verif/regress/smt2-ai-tensor-track.sh",
+        group: "directed",
+        target: "g6lc64_smt2",
+        dvTarget: "g6lc64_smt2",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "smt-linux-boot-path",
         description:
           "OPTIONAL: SMT Linux boot path gate + real lint of cv64a6_smt2.",
@@ -1329,6 +1345,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "verif/regress/soft-ladder-opensbi-soak.sh",
           "architecture/multi-threading/soft-ladder/README.md",
           "software/smt2-linux/soft-ladder/mk_plat_skip.py",
+        ],
+      },
+      {
+        id: "diag-smt2-ai-tensor-track",
+        description:
+          "SMT2×ai-tensor staged track driver + architecture map (fast iteration).",
+        compartment: "residual",
+        kind: "path-check",
+        paths: [
+          "verif/regress/smt2-ai-tensor-track.sh",
+          "architecture/multi-threading/smt2-ai-tensor-linux.md",
+          "architecture/multi-threading/smt2-bringup.md",
+          "ai-tensor/AGENTS.md",
         ],
       },
       {

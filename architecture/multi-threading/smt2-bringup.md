@@ -59,6 +59,7 @@ CI job (optional, not default verify):
 | SBI | OpenSBI domain with 2 harts |
 | Linux | boot to prompt; `cat /proc/cpuinfo` shows 2 (`CVA6_LINUX_PAYLOAD` / cva6-sdk) |
 | **AI / PyTorch (after soft-ladder SL-C)** | Soft: `cva6-build tensor pytorch --board virt-ai-pcie`; multi-thread: taskset both harts — see **`smt2-ai-tensor-linux.md`** |
+| **Fast iteration driver** | `bash verif/regress/smt2-ai-tensor-track.sh` (default **fast**); suite `smt2-ai-tensor-track` |
 
 ### Soft-ladder residual (DI OpenSBI) + AI coupling
 
@@ -70,6 +71,15 @@ CI job (optional, not default verify):
 
 iter-012 RTL (LOAD cancel under DI, per-hart sp issue barrier) targets PEEL_FDT_GETPROP so
 dual-hart topology can be trusted before multi-thread PyTorch on Linux.
+
+### AI attunement (short)
+
+| Concern | SMT answer |
+|---------|------------|
+| AI CSR state | Banked in `g6lc_smt_csr_bank` (per-hart); dirty/setcfg gated by commit hart |
+| Island MMIO / GEMM | Shared SoC; multi-queue / QoS, not per-hart RF |
+| Host pytorch | Soft on `g6lc64_ai`+virt-ai-pcie today; dual-hart workers after SL-C |
+| Dev loop | `smt2-ai-tensor-track.sh` default **fast** |
 
 Combine with **H** (`server_math`) only after SMT bare-metal is green — KVM-on-SMT is out of scope for bring-up.
 

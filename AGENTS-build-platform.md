@@ -181,7 +181,7 @@ Configured in `defaults.ts` `tests.suites` (not exhaustive):
 |--------------|-------------------|--------|
 | smoke | `smoke-cv64a6`, `smoke-cv32a6`, … | Fast sanity |
 | directed | `mc-stream-tests`, `mc-spo-soak`, `mc-spo-spike`, **`mc-mini-veri`**, `mc-spo-veri`, `ara-vector-path` | Optional/heavy; mini = hard Zacas golden |
-| residual OpenSBI/DI | **`soft-ladder-di`**, **`soft-ladder-osbi`** | Optional; cookie SUCCESS `51b1babe`; RTL-max peel; diag `diag-soft-ladder-paths` |
+| residual OpenSBI/DI | **`soft-ladder-di`**, **`soft-ladder-osbi`**, **`smt2-ai-tensor-track`** | Optional; cookie SUCCESS `51b1babe`; RTL-max peel; fast SMT2×ai-tensor track; diags `diag-soft-ladder-paths` / `diag-smt2-ai-tensor-track` |
 | timings host | `sv-timing-smoke`, `sv-timing-core-sparse`, `sv-timing-autocorrect`, `sv-timing-advanced` | `--output` packages; honor `CVA6_FROM_TIMING` |
 | ai-tensor host | `tensor status\|doctor\|test\|virt-card\|frameworks\|pytorch\|virt-impl\|regress\|rtl-hard` | Spawn-only; `--board virt-ai-pcie --core g6lc64_ai [--impl soft\|hard\|full] [--rtl-hard] [--suite narrow\|smoke\|ci\|peak\|full] [--tests LIST] [--ver-library work-ver-ai] [--from-timing DIR]`; HARD catalog `architecture/ai-matrix/hard-tests.md`; multi-phase `frameworks-virt-pcie.md` |
 | linux / SMT | `smt-linux-*`, `dual-hart-ci` | R3 cosim WSL path |
@@ -209,6 +209,7 @@ Full catalog: `./build.sh test --list`.
 | R3b Linux Image gate | **done** (suite `r3b-linux-image`; Image still external) |
 | CRT `mc-spo-veri` | **imafdc 9/9** + **server_math L2 9/9** + **stream8 9/9** (DeepSpec STQ; Verilator 5.008); dual-hart-ci host residual green |
 | Soft-ladder residual scaffold | Suites **`soft-ladder-di`** / **`soft-ladder-osbi`** cataloged optional; diag path-check; max B1 RTL peels — see `architecture/multi-threading/soft-ladder/README.md` |
+| SMT2 × ai-tensor track | Suite **`smt2-ai-tensor-track`** (default profile **fast**); map `architecture/multi-threading/smt2-ai-tensor-linux.md` |
 
 ---
 
