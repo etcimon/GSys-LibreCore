@@ -134,6 +134,18 @@ module branch_unit #(
           resolved_branch_o.ckpt_restore  = 1'b1;
         end
       end
+      // I4t (smt2): JALR whose EX target is 0 is a stale-rs1 / cancelled-ld-ra
+      // artifact (I4o hart0 mepc=0). I4q only skipped the NPC write, so
+      // is_mispredict still flushed IF and younger-cancelled the *correct*
+      // sequential/RAS path — hold then died in spin_lock / ecall with
+      // cookie 51b1c001 (success-cave lui 0x51b1c without addi -0x542).
+      // Drop the mispredict; SI (NrHarts==1) is unchanged (const-fold).
+      if (CVA6Cfg.NrHarts > 1 &&
+          fu_data_i.operation == ariane_pkg::JALR &&
+          !(|target_address)) begin
+        resolved_branch_o.is_mispredict = 1'b0;
+        resolved_branch_o.ckpt_restore  = 1'b0;
+      end
       // to resolve the branch in ID
       resolve_branch_o = 1'b1;
     end

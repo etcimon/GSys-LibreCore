@@ -271,7 +271,21 @@ module scoreboard #(
           // STORE/AMO still cancel (STQ / amo_buffer.cancel_i). Mark complete
           // so commit can drop without waiting for WB.
           // NrHarts>1: same-hart filter above preserves peer SMT windows.
-          if (mem_q[cid].sbe.fu != ariane_pkg::LOAD || CVA6Cfg.SuperscalarEn) begin
+          //
+          // I4m: still cancel younger SS LOAD, but *not* link restores
+          // (rd==x1/x5). I4m soak: still mepc=0 — exempting ld ra was not
+          // enough (prologue `sd ra` is STORE and still cancelled).
+          // I4n: also do not cancel non-AMO STORE of rs2==x1/x5 (stack save
+          // of ra). AMO still cancels (amo_buffer). SI stays cont.5.
+          if (!(CVA6Cfg.SuperscalarEn &&
+                mem_q[cid].sbe.fu == ariane_pkg::STORE &&
+                !ariane_pkg::is_amo(mem_q[cid].sbe.op) &&
+                (mem_q[cid].sbe.rs2[4:0] == 5'd1 ||
+                 mem_q[cid].sbe.rs2[4:0] == 5'd5)) &&
+              (mem_q[cid].sbe.fu != ariane_pkg::LOAD ||
+               (CVA6Cfg.SuperscalarEn &&
+                mem_q[cid].sbe.rd != 5'd1 &&
+                mem_q[cid].sbe.rd != 5'd5))) begin
             mem_n[cid].cancelled = 1'b1;
             mem_n[cid].sbe.valid = 1'b1;
           end
@@ -310,7 +324,10 @@ module scoreboard #(
   // Classic mispredict only. Cancel-younger on matching taken Jump without
   // NPC reseed kills correct target-path ops; with reseed it double-pushes
   // RAS on re-fetched calls. Hang-6 residual needs selective fallthrough kill.
-  assign bmiss = resolved_branch_i.valid && resolved_branch_i.is_mispredict;
+  // I4t: JALR-to-0 is not a real redirect on SMT (see branch_unit). A bmiss
+  // here younger-cancels the correct path (I4q hold → 51b1c001 / spin_lock).
+  assign bmiss = resolved_branch_i.valid && resolved_branch_i.is_mispredict
+                 && !(CVA6Cfg.NrHarts > 1 && !(|resolved_branch_i.target_address));
   // R3a: cancel window starts after the *branch* tid, not FLU_WB. FLU_WB can
   // be a same-cycle mult/ALU result (ex_stage flu mux) while the branch still
   // resolves — using FLU_WB+1 then cancels older correct-path ops (frame SDs).
@@ -340,8 +357,17 @@ module scoreboard #(
         if (cid == issue_pointer[0]) break;
         if (CVA6Cfg.NrHarts <= 1 ||
             mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
-          // Match sequential younger-cancel: under SS include LOAD; SI keep cont.5.
-          if (mem_q[cid].sbe.fu != ariane_pkg::LOAD || CVA6Cfg.SuperscalarEn) begin
+          // Match sequential younger-cancel (I4m/n: SS LOAD except x1/x5;
+          // SS non-AMO STORE of rs2 x1/x5).
+          if (!(CVA6Cfg.SuperscalarEn &&
+                mem_q[cid].sbe.fu == ariane_pkg::STORE &&
+                !ariane_pkg::is_amo(mem_q[cid].sbe.op) &&
+                (mem_q[cid].sbe.rs2[4:0] == 5'd1 ||
+                 mem_q[cid].sbe.rs2[4:0] == 5'd5)) &&
+              (mem_q[cid].sbe.fu != ariane_pkg::LOAD ||
+               (CVA6Cfg.SuperscalarEn &&
+                mem_q[cid].sbe.rd != 5'd1 &&
+                mem_q[cid].sbe.rd != 5'd5))) begin
             cancelled_mask_o[cid] = 1'b1;
           end
         end

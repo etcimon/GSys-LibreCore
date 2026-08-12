@@ -276,7 +276,9 @@ module frontend
           // JALR as mispredicted (cf==NoCF) and redirects to rs1 (ra). Marking
           // Return with an invalid RAS top previously allowed wrong-path fetch
           // into fdt_path_offset alias (jal memchr with a0=-4).
-          if (ras_predict.valid) begin
+          // I4m: RAS valid with ra==0 is still garbage (empty slot / cancelled
+          // ld ra). Treat like invalid so EX redirects to architectural ra.
+          if (ras_predict.valid && |ras_predict.ra) begin
             predict_address = ras_predict.ra;
             cf_type[i] = ariane_pkg::Return;
           end else begin
@@ -326,7 +328,11 @@ module frontend
     // Check that we encountered a control flow and that for a return the RAS
     // contains a valid prediction.
     for (int i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++)
-    bp_valid |= ((cf_type[i] != NoCF & cf_type[i] != Return) | ((cf_type[i] == Return) & ras_predict.valid));
+    bp_valid |= ((cf_type[i] != NoCF & cf_type[i] != Return) |
+                 ((cf_type[i] == Return) & ras_predict.valid & |ras_predict.ra));
+    // I4p: never redirect fetch to PC=0 (empty DRAM → illegal). SMT2 I4o
+    // saw hart0 mepc=0; BTB/RAS target 0 is never a useful OpenSBI fetch.
+    if (CVA6Cfg.NrHarts > 1 && predict_address == '0) bp_valid = 1'b0;
   end
   // Classic EX mispredict only. Matching taken Jump must NOT reseed NPC or
   // feed TAGE mispredict_i: reseed re-fetches calls → double RAS push
@@ -335,7 +341,11 @@ module frontend
   // (icache clear on bp_valid, CF issue stall). Post-bp IQ sequential drop
   // was tried (Jump-only) but regressed bare smt_dual_concurrent — do not rearm
   // without a concurrent soak.
-  assign is_mispredict = resolved_branch_i.valid & resolved_branch_i.is_mispredict;
+  // I4t: even if EX still raises is_mispredict on JALR-to-0, do not kill
+  // FTQ/I$ or reseed NPC. Scoreboard/controller consume the branch_unit
+  // clear; this is the frontend half of the same SMT hygiene.
+  assign is_mispredict = resolved_branch_i.valid & resolved_branch_i.is_mispredict
+                         & ~(CVA6Cfg.NrHarts > 1 & ~(|resolved_branch_i.target_address));
 
   // Cache interface
   // Gate ICache requests and NPC updates during fence.i
@@ -560,7 +570,8 @@ module frontend
   // only update mispredicted branches e.g. no returns from the RAS
   assign btb_update.valid = resolved_branch_i.valid
                                 & resolved_branch_i.is_mispredict
-                                & (resolved_branch_i.cf_type == ariane_pkg::JumpR);
+                                & (resolved_branch_i.cf_type == ariane_pkg::JumpR)
+                                & (|resolved_branch_i.target_address);
   assign btb_update.pc = resolved_branch_i.pc;
   assign btb_update.target_address = resolved_branch_i.target_address;
 
@@ -612,15 +623,20 @@ module frontend
     // steps to the *following* fetch block so when CF-hold lifts we do not push
     // the target twice (same pattern as set_pc_commit reseed below).
     if (is_mispredict) begin
-      if (CVA6Cfg.FtqDepth != 0) begin
-        logic [CVA6Cfg.VLEN-1:0] mp_target;
-        mp_target = resolved_branch_i.target_address;
-        npc_d = {
-          mp_target[CVA6Cfg.VLEN-1:CVA6Cfg.FETCH_ALIGN_BITS] + 1,
-          {CVA6Cfg.FETCH_ALIGN_BITS{1'b0}}
-        };
-      end else begin
-        npc_d = resolved_branch_i.target_address;
+      // I4q (smt2): EX may resolve JALR/Return to 0 (rs1/ra stale or x0).
+      // Fetching 0 is empty DRAM → illegal (I4o hart0 mepc=0). Keep npc_q;
+      // commit still retires the CF. SI unchanged.
+      if (!(CVA6Cfg.NrHarts > 1 && resolved_branch_i.target_address == '0)) begin
+        if (CVA6Cfg.FtqDepth != 0) begin
+          logic [CVA6Cfg.VLEN-1:0] mp_target;
+          mp_target = resolved_branch_i.target_address;
+          npc_d = {
+            mp_target[CVA6Cfg.VLEN-1:CVA6Cfg.FETCH_ALIGN_BITS] + 1,
+            {CVA6Cfg.FETCH_ALIGN_BITS{1'b0}}
+          };
+        end else begin
+          npc_d = resolved_branch_i.target_address;
+        end
       end
     end
     // 4. Return from environment call

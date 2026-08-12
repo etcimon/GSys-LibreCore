@@ -62,7 +62,7 @@ Historical promotion order among B1 (from `inventory.yaml` priority):
 | PEEL pin (authoritative) | mepc=`0x80012eb2` `sw a0,0(s2)`; mtval/s2=`0x80012b2a` |
 | Probe result | **namelen_ entry OK** (fdt/`lenp` good); **by_offset entry bad** (a0=0, a2=s3=`0x12b2a`). s2/s3 corrupted in `check_node`/`next_tag` window. |
 | RTL focus | (1) multi-`lbu` + shift/or tag assemble under DI+FW64; (2) RF **link (x1)** vs s3 WAW/forward; (3) not pure stack restore (minis green). SS full post-op serialize already landed. |
-| **RTL landing (iter-012)** | `scoreboard.sv`: cancel younger **LOAD** on bmiss when `SuperscalarEn` (same-hart if SMT). `issue_stage.sv`: per-hart **sp-write issue barrier** (`unresolved_sp_q`) under SS. Soak: rebuild `work-ver-smt2-slfix` then PEEL. |
+| **RTL landing (iter-012 / I4s–I4u)** | `scoreboard.sv`: cancel younger **LOAD** on bmiss when `SuperscalarEn` (sticky **and** same-cycle `cancelled_mask`; same-hart if SMT). `issue_stage.sv`: per-hart **sp-write issue barrier** (`unresolved_sp_q`) under SS. **I4t:** JALR target 0 is **not** `is_mispredict`/`bmiss`. **I4u:** PC-bank snapshots only on switch (no continuous `npc_q` poison). Pin `bc7ed11d…`; do not cold-`mk` from drifted diag. |
 | Suite | `soft-ladder-di` (FDT shape in **default** tests); osbi `PEEL_FDT_GETPROP=1` (+ entry probes in oracle) |
 | Retire criterion | Natural getprop + real printf cookie green; `plat_hc==2` without soft getprop |
 

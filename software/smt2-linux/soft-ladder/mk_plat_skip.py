@@ -16,12 +16,13 @@ Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
     - natural jal fdt_match @731e (match peeled 2026-08-09)
     - natural sbi_strlen (mid-RVI fixed via FETCH_WIDTH=64 DI+RVC)
     - soft fdt_getprop_namelen / fdt_get_property_namelen (FDT lenp residual)
+    - soft fdt_next_tag ret0 (I4j: stock IAF @129f4; soft_nt → cookie green on slfix)
     - natural sbi_malloc/zalloc/free (freelist peeled 2026-08-09)
   Bisect restores:
     SOFT_SPIN=1   SA/heap spin NOP4
     SOFT_CMPX=1   ld/sd atomic_cmpxchg shim
     SOFT_CSR=1    skip hart_init CSR probes @cd86 → a0=0; j epilogue
-    SOFT_HART_INIT=1  sbi_hart_init ret0 + SOFT_PLAT_OPS (cookie hold on slfix)
+    SOFT_HART_INIT=1  sbi_hart_init ret0 + SOFT_PLAT_OPS (legacy hold; prefer soft next_tag)
     SOFT_PLAT_OPS=1   c.li a0,0 at irqchip/ipi/timer/tlb platform jalr
     SOFT_PLAT_OPS_OFF=1  with SOFT_HART_INIT: do not also peel platform jalr
     SOFT_CMV=1    nop dual c.mv (old cont.19 soft)
@@ -29,6 +30,8 @@ Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
     SOFT_STRLEN=1 soft sbi_strlen ret-imm 11 (pre-FETCH_WIDTH=64)
     SOFT_MALLOC=1 soft malloc/zalloc/free + heap space stubs
     PEEL_FDT_GETPROP=1 natural getprop (FAIL FDT lenp mepc=0x12eb2)
+    SOFT_FDT_NEXT_TAG=1  stub fdt_next_tag ret0 (I4j hold preferred; default soft)
+    PEEL_FDT_NEXT_TAG=1  force natural next_tag (stock IAF @129f4 on I4s)
     PEEL_MALLOC=1 legacy alias for natural malloc (default)
 
 Critical fix vs cont.16: do NOT patch 0x996 with j lottery.
@@ -132,6 +135,21 @@ SOFT_STRLEN = _env_peel("SOFT_STRLEN")
 PEEL_STRLEN = _env_peel("PEEL_STRLEN")
 # Default soft fdt getprop (FDT lenp residual). PEEL_FDT_GETPROP=1 natural.
 PEEL_FDT_GETPROP = _env_peel("PEEL_FDT_GETPROP")
+# I4j (2026-08-12): stock residual is IAF at fdt_next_tag@129f4 after
+# fdt_offset_ptr; SOFT_FDT_NEXT_TAG ret0 → cookie green with natural hart_init
+# + natural plat ops on pin bc7ed11d + slfix I4s. Default soft when unset.
+# PEEL_FDT_NEXT_TAG=1 or SOFT_FDT_NEXT_TAG=0 forces natural.
+def _env_soft_default_on(name: str) -> bool:
+    v = os.environ.get(name)
+    if v is None:
+        return True
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+SOFT_FDT_NEXT_TAG = _env_soft_default_on("SOFT_FDT_NEXT_TAG")
+PEEL_FDT_NEXT_TAG = _env_peel("PEEL_FDT_NEXT_TAG")
+if PEEL_FDT_NEXT_TAG:
+    SOFT_FDT_NEXT_TAG = False
 # Default: natural malloc/zalloc/free (peeled 2026-08-09, dual confirm cookie).
 # SOFT_MALLOC=1 restores NULL stubs for bisect.
 SOFT_MALLOC = _env_peel("SOFT_MALLOC")
@@ -145,7 +163,9 @@ print(
     f"SOFT_PLAT_OPS={int(_env_peel('SOFT_PLAT_OPS'))} "
     f"SOFT_CMV={int(SOFT_CMV)} SOFT_FDT_MATCH={int(SOFT_FDT_MATCH)} "
     f"SOFT_STRLEN={int(SOFT_STRLEN)} SOFT_MALLOC={int(SOFT_MALLOC)} "
-    f"PEEL_FDT_GETPROP={int(PEEL_FDT_GETPROP)}"
+    f"PEEL_FDT_GETPROP={int(PEEL_FDT_GETPROP)} "
+    f"SOFT_FDT_NEXT_TAG={int(SOFT_FDT_NEXT_TAG)} "
+    f"PEEL_FDT_NEXT_TAG={int(PEEL_FDT_NEXT_TAG)}"
 )
 
 
@@ -822,8 +842,11 @@ else:
 if not PEEL_FDT_GETPROP:
     soft_ret0(0x800136F0)  # fdt_getprop_namelen → NULL
     soft_ret0(0x80013622)  # fdt_get_property_namelen → NULL
+    # I4q: surviving PC=0 lets platform call by_offset directly (not only namelen_).
+    soft_ret0(0x80012E26)  # fdt_get_property_by_offset_ → NULL
     print(
         "soft fdt_getprop_namelen @136f0 + fdt_get_property_namelen @3622 "
+        "+ by_offset @12e26 "
         "(PEEL_FDT_GETPROP=1 for natural; expect lenp mepc=0x12eb2)"
     )
 else:
@@ -910,6 +933,21 @@ else:
     # bltz breaks PC-relative target. Entry vs by_offset logs already pin s2/s3
     # corruption between namelen_ entry and first by_offset (check_node/next_tag).
 
+# FDT next_tag: soft ret0 by default (I4j). Stock natural → IAF mepc=…129f4.
+# Soft next_tag alone greened stock pin (natural hart_init + natural plat) on
+# slfix I4s — preferred hold over SOFT_HART_INIT+PLAT.
+if SOFT_FDT_NEXT_TAG:
+    soft_ret0(0x800129D4)  # fdt_next_tag → a0=0
+    print(
+        "SOFT_FDT_NEXT_TAG: ret0 @129d4 "
+        "(I4j hold preferred; PEEL_FDT_NEXT_TAG=1 / SOFT_FDT_NEXT_TAG=0 natural)"
+    )
+else:
+    print(
+        "natural fdt_next_tag "
+        "(expect IAF @129f4 on stock pin unless SOFT_HART_INIT hold)"
+    )
+
 
 DST.write_bytes(data)
 print("wrote", DST)
@@ -917,7 +955,8 @@ print(
     "expect SI/DI: 51b1babe + BANR "
     f"(soft_malloc={int(SOFT_MALLOC)} soft_cmv={int(SOFT_CMV)} "
     f"soft_fdt_match={int(SOFT_FDT_MATCH)} soft_strlen={int(SOFT_STRLEN)} "
-    f"soft_fdt_getprop={int(not PEEL_FDT_GETPROP)})"
+    f"soft_fdt_getprop={int(not PEEL_FDT_GETPROP)} "
+    f"soft_fdt_next_tag={int(SOFT_FDT_NEXT_TAG)})"
 )
 
 r = subprocess.run(

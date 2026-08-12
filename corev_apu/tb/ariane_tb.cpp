@@ -456,6 +456,20 @@ done_processing:
       top->rtc_i ^= 1;
     }
     main_time++;
+    // I4q: first time frontend NPC is 0 after leaving boot (smt2 hart0 illegal).
+    if (std::getenv("CVA6_TRAP_DUMP") != nullptr) {
+      static int saw_nonzero_npc = 0;
+      static int logged_zero_npc = 0;
+#if (VERILATOR_VERSION_INTEGER >= 5000000)
+      uint64_t npc_now = (uint64_t)top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__i_frontend__DOT__npc_q;
+      unsigned act_now = (unsigned)top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__i_smt_thread_select__DOT__gen_smt__DOT__active_q;
+      if (npc_now != 0) saw_nonzero_npc = 1;
+      if (saw_nonzero_npc && npc_now == 0 && !logged_zero_npc) {
+        logged_zero_npc = 1;
+        std::cerr << "[first0] t=" << main_time << " act=" << act_now << "\n";
+      }
+#endif
+    }
     // Honor -m / +max-cycles= (parsed above). Without this the TB never times
     // out on bare-metal/OpenSBI images that lack a tohost handshake.
     if (main_time >= max_cycles)
@@ -961,18 +975,36 @@ done_processing:
       }
       std::cerr << std::dec << "\n";
     }
-    // R3a hang state: npc + CSR. NrHarts>=1: probe hart0 bank (gen_banked.gen_csr[0]) (see also ~730).
+    // R3a hang state: live NPC + per-hart CSR/RF (smt2 = 1 core × 2 banks).
+    // I4o: npc0=0x32e is _start_warm hart-id scan; mepc=0 is a separate illegal.
     {
       auto npc0 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__i_frontend__DOT__npc_q;
-      auto mepc = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q;
+      auto mepc0 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q;
       auto mtvec = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mtvec_q;
-      auto mcause = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q;
-      auto wfi = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__wfi_q;
+      auto mcause0 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q;
+      auto wfi0 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__wfi_q;
+      auto mepc1 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__mepc_q;
+      auto mcause1 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__mcause_q;
+      auto wfi1 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__wfi_q;
+      auto active = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__i_smt_thread_select__DOT__gen_smt__DOT__active_q;
+      const auto &rf0 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem;
+      const auto &rf1 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__1__KET____DOT__i_rf_bank__DOT__mem;
+      auto gpr64 = [](const auto &rf, int n) -> uint64_t {
+        return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
+      };
+      uint64_t ra0 = gpr64(rf0, 1), ra1 = gpr64(rf1, 1);
+      uint64_t sp0 = gpr64(rf0, 2), sp1 = gpr64(rf1, 2);
       std::cerr << std::hex << "[hangpc] npc0=0x" << (uint64_t)npc0
-                << " mepc=0x" << (uint64_t)mepc
+                << " act=" << (unsigned)active
+                << " mepc0=0x" << (uint64_t)mepc0
+                << " mcause0=0x" << (uint64_t)mcause0
+                << " wfi0=" << (unsigned)wfi0
+                << " mepc1=0x" << (uint64_t)mepc1
+                << " mcause1=0x" << (uint64_t)mcause1
+                << " wfi1=" << (unsigned)wfi1
+                << " ra0=0x" << ra0 << " ra1=0x" << ra1
+                << " sp0=0x" << sp0 << " sp1=0x" << sp1
                 << " mtvec=0x" << (uint64_t)mtvec
-                << " mcause=0x" << (uint64_t)mcause
-                << " wfi=" << (unsigned)wfi
                 << std::dec << "\n";
     }
     // R3a fdtcnt probe BSS log @ DRAM+0x42e00 (VA 0x80042e00):

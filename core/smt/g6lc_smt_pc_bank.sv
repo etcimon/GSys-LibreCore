@@ -44,20 +44,23 @@ module g6lc_smt_pc_bank
         end
       end else begin
         prev_hart_q <= active_hart_i;
-        // Continuous snapshot of the live NPC into the current active bank so a
-        // spontaneous switch always has a fresh resume PC. On the switch cycle
-        // active_hart_i has already flipped — save live NPC under prev_hart_q.
-        if (switch_i) begin
+        // I4u: snapshot *only* on switch, into the outgoing bank (prev_hart).
+        // Continuous snapshot of npc_q into active_hart is unsafe: on the
+        // cycle after a switch, npc_q can still hold the *previous* hart's
+        // stream for one beat (restore writes npc_d; npc_q updates next).
+        // That poisons the incoming bank with the outgoing PC — hart1 then
+        // executes boot-hart code with a reset SP (I4q hold sp1=0x20 / I4t
+        // ecall_unregister mcause=4). I4p still applies: never bank 0.
+        if (switch_i && |npc_live_i) begin
           npc_bank_q[prev_hart_q] <= npc_live_i;
-        end else begin
-          npc_bank_q[active_hart_i] <= npc_live_i;
         end
       end
     end
 
     // Combinational restore target for the cycle of the switch (new active).
-    assign restore_o     = switch_i;
-    assign npc_restore_o = npc_bank_q[active_hart_i];
+    assign restore_o = switch_i;
+    assign npc_restore_o = (|npc_bank_q[active_hart_i]) ? npc_bank_q[active_hart_i]
+                                                        : boot_addr_i;
   end
 
 endmodule

@@ -135,10 +135,28 @@ run_soft_ladder_di() {
 
 ensure_held_oracle() {
   # Holding peels (SOFT_HART_INIT + SOFT_PLAT_OPS) on pin → *.held.elf.
-  # Prefer existing held; else binary-patch pin with the same peels as mk_plat_skip.
+  # Prefer existing held unless FORCE_HELD_REBUILD=1.
+  # Pin must stay md5 bc7ed11d… — never rebuild pin via mk_plat_skip from
+  # a drifted fw_payload_diag.elf (yields plat_hc=80 cold-regress).
   local pin="software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.elf"
+  local pin_bak="software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.pin-bc7ed11d.elf"
   local held="software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.held.elf"
-  if [[ -f "$held" ]]; then
+  local want_pin="bc7ed11dab17454fd147e4927ba07fef"
+  if [[ -f "$pin_bak" ]]; then
+    local bak_md
+    bak_md=$(md5sum "$pin_bak" | awk '{print $1}')
+    if [[ "$bak_md" == "$want_pin" ]]; then
+      cp "$pin_bak" "$pin"
+    fi
+  fi
+  if [[ -f "$pin" ]]; then
+    local pin_md
+    pin_md=$(md5sum "$pin" | awk '{print $1}')
+    if [[ "$pin_md" != "$want_pin" ]]; then
+      log "WARN pin md5 $pin_md != $want_pin (cold-regress risk); prefer $pin_bak"
+    fi
+  fi
+  if [[ -f "$held" && "${FORCE_HELD_REBUILD:-0}" != "1" ]]; then
     echo "$held"
     return 0
   fi
