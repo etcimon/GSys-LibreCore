@@ -62,6 +62,13 @@ inventory and recorded as the green command. A change lands with a test the harn
 style the harness expects, and the pass ends with that command executed and its result recorded — green,
 or a failure characterised precisely enough that the next pass starts from a fact.
 
+**Validation has dimensions, and the cell matters.** A compiler's green state is meaningless without saying
+*what* was green: which host it was built on, which target it emitted for, which optimisation and feature
+options were in effect, and which stage of the bootstrap was reached. A pass records the cell it ran, and a
+change that plausibly affects other cells says so rather than implying coverage it does not have — the
+characteristic compiler defect is not a failure in the cell that was tested but a wrong answer in one that
+was not.
+
 **Upstreamable form as the default posture.** Prefer the change the maintainers would accept: their
 layout, their idiom, their naming, their test style. This is not deference for its own sake; a change
 shaped like the project is a change the project's own reviewers and future refactors will preserve,
@@ -102,7 +109,8 @@ unusable as history.
 Before calling a pass complete, state each of these or say why it does not apply: the thesis the pass
 set out to prove and whether it holds; the invariants the change touched and how they are still
 maintained; whether anything ABI- or artifact-visible moved, and if so who is affected; what the
-recorded green command reported, verbatim in outcome if not in output; the test that now covers the
+recorded green command reported and on which cell — host, target, options, bootstrap stage — together with
+which other cells are plausibly affected and untested; the test that now covers the
 change and the harness that runs it; whether the change is in the project's idiom or is a recorded
 divergence; which in-tree architectural notes and which lines of the tree's own guider were corrected;
 and what the next blocked question is. A pass that cannot answer the ABI question or the green-command

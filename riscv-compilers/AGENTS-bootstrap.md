@@ -60,9 +60,11 @@ the **test harness**: how the project itself decides it works, at what granulari
 run alone.
 
 Then record the distinguished item, the **green command**: the tree's own invocation — configure, build,
-test, in whatever form the project uses — quoted verbatim and annotated with what it actually did when
-run, how long it took, and which part could not be made to work here. A green command that has never
-been executed is recorded as *unverified* and is a queue item, not a fact.
+test, in whatever form the project uses — quoted verbatim and annotated with the **cell** it exercised
+(which host, which target, which options, which bootstrap stage), what it actually did when run, how long
+it took, and which part could not be made to work here. A green command that has never been executed is
+recorded as *unverified* and is a queue item, not a fact; one recorded without its cell claims coverage it
+does not have.
 
 ### B2 — Reading (Logisplain analysis)
 
@@ -184,6 +186,7 @@ languages:       <census: language -> role>
 build_spine:     <configure/build driver>
 bootstrap:       <prior-compiler / self-hosting / none>
 green_command:   <verbatim invocation>
+green_cell:      <host, target, options, bootstrap stage it exercised>
 green_state:     verified <date, result> | unverified
 fingerprint:     { files: <n>, entry_points: [<path>], harness: <path> }
 riscv_affinity:  none | latent | declared | active
@@ -213,7 +216,8 @@ Index of `architecture/` with one line per note. Detail lives there; this file o
 | test harness / one test | <path> |
 
 ## 4. Green command
-Verbatim invocation, what it produces, observed duration, and any part that does not work here.
+Verbatim invocation, the cell it covers (host, target, options, bootstrap stage), what it produces,
+observed duration, and any part that does not work here.
 
 ## 5. Invariants (what a change must not break)
 Each item traceable to a note in `architecture/`.

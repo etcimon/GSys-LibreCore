@@ -78,6 +78,13 @@ scatters them through its implementation must be understood before it can be mov
 understanding. A reading that has resolved neither has not yet made the tree portable *or* buildable, and a
 guider written on top of it will send the next agent into the same wall.
 
+Where a library additionally has a generation or bootstrap relation — checked-in generated sources, a code
+generator run at configure time, bindings derived from a schema or a foreign header, or a component that must
+be built by an earlier version of itself — that relation deserves the same sustained attention a compiler's
+bootstrap does, and for the same reason: it determines what "building it" means, it creates ordering
+constraints that make a first build succeed or fail, and it is the mechanism by which an edit to a source file
+fails to reach the artifact because the generated copy is what actually compiled.
+
 ---
 
 ## 4. What the reading must produce
