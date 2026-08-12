@@ -58,6 +58,11 @@ own tree, the invocation, the identity it was green against, and the concrete re
 insufficient. An unexplained toolchain requirement is an invisible dependency and is treated as an open blocker.
 _Priors: `AGENTS-toolchain-link.md` §3–§4._
 
+**S5 — Selectivity.** When a host repository tracks this folder, checkouts, toolchains, and session
+scratches stay out of the host; the admission table above is updated only on an explicit ledger pass.
+Live workspace state (if any) belongs in untracked `TODO-scratch.md`.
+_Priors: `AGENTS-selectivity.md`._
+
 ---
 
 ## Pass log

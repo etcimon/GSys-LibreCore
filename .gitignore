@@ -77,3 +77,19 @@ software/smt2-linux/soft-ladder/build/
 .g6lc-forks/
 .g6lc-forks-win/
 
+# riscv-dev: ignore first-level dirs except scaffold agents/ + architecture/
+# (generic: any nested checkout or toolchain extract; see riscv-dev/AGENTS-selectivity.md)
+/riscv-dev/*/
+!/riscv-dev/agents/
+!/riscv-dev/architecture/
+# Mode C shadows stay untracked; only the directory READMEs are scaffold
+/riscv-dev/agents/*
+!/riscv-dev/agents/README.md
+/riscv-dev/architecture/*/
+# Generic local process files (not package names)
+/riscv-dev/TODO-scratch.md
+/riscv-dev/TODO-scratch.*.md
+/riscv-dev/setenv.ps1
+/riscv-dev/setenv.sh
+/riscv-dev/modules.json
+/riscv-dev/.gitignore

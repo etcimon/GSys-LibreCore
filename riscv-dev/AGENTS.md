@@ -22,6 +22,7 @@
 | **Backing toolchain (optional)** | [`AGENTS-toolchain-link.md`](AGENTS-toolchain-link.md) | How a library may be backed by a compiler without depending on it |
 | **Target dossier (inert)** | [`AGENTS-riscv-target.md`](AGENTS-riscv-target.md) | RISC-V porting material, available on engagement, governing nothing |
 | **Scaffold ledger** | [`AGENTS-todo.md`](AGENTS-todo.md) | Which submodules are at which rung; goes quiet as each is emancipated |
+| **Selectivity** | [`AGENTS-selectivity.md`](AGENTS-selectivity.md) | Host track vs untracked checkouts/scratches; scaffold-preserving edits |
 | **Transitional shadows** | [`agents/README.md`](agents/README.md) | `agents/<id>.md` — pre-emancipation only |
 | **Transitional readings** | [`architecture/README.md`](architecture/README.md) | `architecture/<id>/` — workspace before the notes move in-tree |
 | **Human entry** | [`README.md`](README.md) | Developer quickstart; usable without knowing this repository |
@@ -73,6 +74,11 @@ this folder to be understood.
 10. **Prose over fragments; state kept where the work is.** Understanding is written as cohesive
     paragraphs ([`AGENTS-logisplain.md`](AGENTS-logisplain.md)); before emancipation state lives in this
     folder's ledger, after it in the submodule's own queue, and this folder's row shrinks to a pointer.
+11. **Selectivity when a host repository tracks this folder.** The host records the *scaffold*, not
+    the checkouts, not session scratches, and not local toolchains. Checkouts default to nested
+    clones (`nested-clone`), not host git submodules. Tracked guiders receive only generic edits;
+    package-specific state waits in untracked `TODO-scratch.md` or in `<id>/`. Full rules:
+    [`AGENTS-selectivity.md`](AGENTS-selectivity.md).
 
 ---
 
@@ -87,10 +93,13 @@ riscv-dev/
   AGENTS-toolchain-link.md  ← optional backing-compiler relation, by pin and invocation only
   AGENTS-riscv-target.md    ← inert porting dossier (copied in-tree only when affinity engages)
   AGENTS-todo.md            ← scaffold ledger: rung per submodule; quiet once emancipated
+  AGENTS-selectivity.md     ← host track/untracked + scaffold-preserving rules
   README.md                 ← human entry point
+  TODO-scratch.md           ← UNTRACKED session board (create locally; not the ledger)
+  toolchains/               ← UNTRACKED local compiler extracts
   agents/                   ← TRANSITIONAL shadows only (see agents/README.md)
   architecture/             ← TRANSITIONAL readings only (see architecture/README.md)
-  <id>/                     ← the submodule checkout — and, after B4, the real home of:
+  <id>/                     ← checkout (host-untracked nested clone by default) — after B4, home of:
                                 <id>/AGENTS.md            (its own guider)
                                 <id>/AGENTS-*.md          (its own condensed method/posture/porting)
                                 <id>/AGENTS-todo.md       (its own queue)
@@ -133,7 +142,8 @@ exists.
 | Whether a submodule is really independent yet | `AGENTS-bootstrap.md` §4 (three questions) |
 | Building or testing anything | the `green_command` in the submodule's own guider |
 | Porting, target capability, architecture-conditional code | `AGENTS-riscv-target.md` — only on `declared`/`active` affinity, or by prompt |
-| Which submodules exist and at which rung | `AGENTS-todo.md` |
+| Which submodules exist and at which rung | `AGENTS-todo.md` (formal) or untracked `TODO-scratch.md` (this workspace) |
+| What the host git may record | `AGENTS-selectivity.md` |
 
 ---
 

@@ -20,3 +20,7 @@ which is itself the open item.
 The steady state of this directory is therefore **empty or nearly so**. An `agents/` directory that has grown a
 guide per submodule and kept them is a scaffold that has quietly become a governance layer, which is the outcome
 the ladder exists to prevent.
+
+When a host repository tracks this scaffold, `agents/<id>.md` shadows are **untracked in the host** by
+default ([`../AGENTS-selectivity.md`](../AGENTS-selectivity.md)). Only this README is a permanent
+tracked file here. Do not commit package-specific shadows into the host unless a ledger pass says so.

@@ -26,7 +26,13 @@ can go upstream if the project wants it.
 
 ## How to use it
 
-Add the library as a submodule under this folder, choosing a short lowercase id for its directory. Ask an agent
+Place a checkout under this folder using a short lowercase id. **If this folder already lives inside
+another git repository**, clone into `<id>/` as a nested repository and do **not** register it as a
+submodule of that host unless you explicitly want the host to pin it — see
+[`AGENTS-selectivity.md`](AGENTS-selectivity.md). Session notes go in untracked `TODO-scratch.md`;
+the tracked ledger [`AGENTS-todo.md`](AGENTS-todo.md) is updated only when you ask to admit ids.
+
+Ask an agent
 to run the bootstrap in [`AGENTS-bootstrap.md`](AGENTS-bootstrap.md) for that id: it will admit the tree,
 inventory it empirically — interface, dependencies, configuration surface, test matrix, green command — read it,
 write the notes, derive the in-tree guider, and open the queue. Read what it wrote; the open questions are
@@ -64,7 +70,11 @@ Suppose the library is a serialisation and wire-format package — call it `acme
 surface, and a test suite whose dimensions you have not looked at yet. Add it and run one prompt:
 
 ```text
-git submodule add https://github.com/<org>/acme-serde.git riscv-dev/acme-serde
+# default when riscv-dev is already inside a host repo (does not touch host .gitmodules):
+git clone https://github.com/<org>/acme-serde.git riscv-dev/acme-serde
+
+# only if you explicitly want the *host* to record the pin:
+# git submodule add https://github.com/<org>/acme-serde.git riscv-dev/acme-serde
 ```
 
 ```text
