@@ -6,8 +6,10 @@ of the ladder each has reached, and then to go quiet: once a submodule is emanci
 `AGENTS-todo.md` and its row here shrinks to a pointer. A long, detailed row in this file is a sign that
 material which belongs in a submodule is still being held outside it.
 
-**Retrieval contract:** every open item cites where its priors live. Before emancipation those are the
-transitional `architecture/<id>/` notes; after it, the submodule's own `architecture/` and guider.
+**Retrieval contract:** every open item cites where its priors live. By default that is the submodule's own
+`<id>/architecture/` notes and its in-tree guider — untracked there unless the developer opted into a branch
+([`AGENTS-bootstrap.md`](AGENTS-bootstrap.md) §6) — and only for a checkout that cannot be written to is it the
+staged copy under this folder's `architecture/<id>/`.
 
 | Layer | Open first | Role |
 |---|---|---|

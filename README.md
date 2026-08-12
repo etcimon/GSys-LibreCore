@@ -330,10 +330,29 @@ Before opening a PR: read [`AGENTS.md` §0](AGENTS.md), then run `g6lc-build ver
 | `software/` | OpenSBI / Linux reference software and payloads |
 | `vendor/` | vendored third-party IP (Ara, PULP tech cells, …) |
 | `architecture/` | design notes and non-compiled scaffolding |
+| `riscv-compilers/`, `riscv-dev/` | agentic bootstrap scaffolds for third-party submodules (see below) |
 | `agents/`, `AGENTS*.md` | the agent-facing guide layer |
 | `docs/`, `tutorials/` | documentation, including [`docs/heritage.md`](docs/heritage.md) |
 
 Files and directories under `core/` are for the core **only** and must not depend on the APU.
+
+### Agentic bootstrap for submodules — `riscv-compilers/` and `riscv-dev/`
+
+Two optional scaffolds let you drop a third-party project in as a git submodule and get an **agent-legible
+development surface for it**: `riscv-compilers/` for compilers and toolchain components, `riscv-dev/` for
+libraries and runtimes. An agent reads the checkout, writes architectural notes addressed to the next change —
+loci, invariants, extension points, open questions — into `<submodule>/architecture/`, derives a self-contained
+`AGENTS.md` family and queue beside them, and records the project's *own* build-and-test command as the gate for
+"done". After that the submodule is developed through its own in-tree documents and the scaffold is out of the
+picture.
+
+By default nothing is committed: the surface is written into the checkout and left **untracked**, excluded
+through the submodule's own local exclude file, so you can harness it privately without adding anything to that
+project's history or to this repository. Advancing a project's **RISC-V support** — codegen, ABI, capability
+detection, porting — is one supported use, engaged only when a submodule's recorded affinity or your prompt asks
+for it; nothing is target-driven by default. Start at
+[`riscv-compilers/README.md`](riscv-compilers/README.md) or [`riscv-dev/README.md`](riscv-dev/README.md), each
+of which carries a ready-to-run promotion prompt.
 
 ---
 

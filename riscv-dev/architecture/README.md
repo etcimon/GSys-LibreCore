@@ -2,12 +2,14 @@
 
 The architectural notes produced by analysis belong **inside the submodule**, at `<id>/architecture/`, indexed
 by that tree's own `architecture/README.md` and routed to by that tree's own `AGENTS.md`. They are written for
-the code they describe, versioned with it, and corrected in the same commit that invalidates them; that is what
-turns analysis into a development substrate the project owns
-([`../AGENTS-logisplain.md`](../AGENTS-logisplain.md) §5).
+the code they describe and corrected whenever the tree invalidates them; that is what turns analysis into a
+development substrate the project owns ([`../AGENTS-logisplain.md`](../AGENTS-logisplain.md) §5). By default
+they are written there and left **untracked** ([`../AGENTS-bootstrap.md`](../AGENTS-bootstrap.md) §6 mode A),
+so the analysis sits beside the code without entering the library's history or this repository's; committing it
+on a branch inside the submodule is the opt-in.
 
-This directory exists for the interval in which that is not yet possible — a read-only pin, an undecided
-branch, an unfinished promotion — and for nothing else. While in use, `architecture/<id>/` holds exactly what
+This directory exists only for the interval in which even an untracked write is impossible — a read-only pin,
+an undecided branch, an unfinished promotion — and for nothing else. While in use, `architecture/<id>/` holds exactly what
 the in-tree set will hold, in the form given by [`../AGENTS-bootstrap.md`](../AGENTS-bootstrap.md) §5.4, so
 relocation is a move rather than a rewrite. At emancipation (B7) the directory for that submodule is removed.
 

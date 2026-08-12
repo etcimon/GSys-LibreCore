@@ -83,9 +83,12 @@ voice rather than falling silent.
 
 ### B3 — Architectural notes (the development substrate, written **for the tree**)
 
-Commit the analysis as an `architecture/` note set **inside the submodule** — `<id>/architecture/` — with
-`<id>/architecture/README.md` as its index. Where the checkout cannot yet be written to, the same set is
-staged at the scaffold's `architecture/<id>/` and moved in at the first opportunity (§6).
+Write the analysis as an `architecture/` note set **inside the submodule** — `<id>/architecture/` — with
+`<id>/architecture/README.md` as its index. **That is the default and only normal home for the analysis**: by
+default the notes are written there and left untracked (§6 mode A), so they sit beside the code they describe
+without entering anyone's history; committing them on a branch is the opt-in (mode B). Only when the checkout
+cannot be written to at all is the same set staged at the scaffold's `architecture/<id>/`, and it is moved in at
+the first opportunity (mode C).
 
 The note set is written to *facilitate development*, not to document for its own sake, and that intent
 changes what each note contains. A note names its **area** of the system, states in prose how that area
