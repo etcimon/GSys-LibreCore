@@ -16,16 +16,30 @@ Ordered-path soft/peel env (2026-08-08 cookie soaks on work-ver-smt2):
     - natural jal fdt_match @731e (match peeled 2026-08-09)
     - natural sbi_strlen (mid-RVI fixed via FETCH_WIDTH=64 DI+RVC)
     - soft fdt_getprop_namelen / fdt_get_property_namelen (FDT lenp residual)
+    - soft fdt_next_tag ret0 until I4s same-cycle LOAD cancel dual-confirms natural;
+      SOFT_FDT_NEXT_TAG=0 peels to natural (post-rebuild soak); SOFT_FDT_NEXT_TAG=1 force stub
     - natural sbi_malloc/zalloc/free (freelist peeled 2026-08-09)
+    - natural sbi_hart_init CSR probes (I4k pmp write-illegal peels discovery)
   Bisect restores:
     SOFT_SPIN=1   SA/heap spin NOP4
     SOFT_CMPX=1   ld/sd atomic_cmpxchg shim
-    SOFT_CSR=1    CSR probe cut cd86→cd0e
+    SOFT_CSR=1    skip hart_init CSR probes @cd86 → a0=0; j epilogue
+    SOFT_HART_INIT=1  sbi_hart_init ret0 + SOFT_PLAT_OPS (legacy hold; prefer soft next_tag)
+    SOFT_PLAT_OPS=1   c.li a0,0 at irqchip/ipi/timer/tlb platform jalr
+    SOFT_PLAT_OPS_OFF=1  with SOFT_HART_INIT: do not also peel platform jalr
+    SOFT_PMP8_CUT=1   lab: natural pmpaddr0-7 then j SUCCESS @d15e (I4j)
     SOFT_CMV=1    nop dual c.mv (old cont.19 soft)
     SOFT_FDT_MATCH=1  stub jal fdt_match (old soft)
     SOFT_STRLEN=1 soft sbi_strlen ret-imm 11 (pre-FETCH_WIDTH=64)
     SOFT_MALLOC=1 soft malloc/zalloc/free + heap space stubs
     PEEL_FDT_GETPROP=1 natural getprop (FAIL FDT lenp mepc=0x12eb2)
+    SOFT_FDT_NEXT_TAG=1  stub fdt_next_tag ret0 (pre-I4r soft hold / bisect rollback)
+    PEEL_FDT_NEXT_TAG=1  legacy alias: force natural next_tag (default already)
+    SOFT_FDT_NEXT_TAG_JR_END=1  I4o bisect: jal 12a5e at jr a5
+    SOFT_FDT_NEXT_TAG_BEGIN_END=1  I4p bisect: table tag1 → 12a5e
+    SOFT_FDT_NEXT_TAG_SKIP_ALIGN=1  I4q bisect: 12b04 → 12a5e
+    SOFT_FDT_NEXT_TAG_ONCE=1  I4r bisect: first natural; 2nd+ ret0 (cave@2CC0)
+    SOFT_FDT_NEXT_NODE_LOOP_END=1  I4r bisect: next_node loop @12bc4 li a0,9
     PEEL_MALLOC=1 legacy alias for natural malloc (default)
 
 Critical fix vs cont.16: do NOT patch 0x996 with j lottery.
@@ -129,6 +143,27 @@ SOFT_STRLEN = _env_peel("SOFT_STRLEN")
 PEEL_STRLEN = _env_peel("PEEL_STRLEN")
 # Default soft fdt getprop (FDT lenp residual). PEEL_FDT_GETPROP=1 natural.
 PEEL_FDT_GETPROP = _env_peel("PEEL_FDT_GETPROP")
+# Default soft fdt_next_tag ret0 until natural peels green on rebuilt slstd
+# (I4s same-cycle LOAD cancel). Set SOFT_FDT_NEXT_TAG=0 or PEEL_FDT_NEXT_TAG=1
+# for natural. Finer softs remain bisect-only.
+# Soft default when SOFT_FDT_NEXT_TAG unset: treat as soft (1) for hold safety.
+def _env_soft_default_on(name):
+    import os
+    v = os.environ.get(name)
+    if v is None:
+        return True  # default soft on
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+SOFT_FDT_NEXT_TAG = _env_soft_default_on("SOFT_FDT_NEXT_TAG")
+# Explicit peel-to-natural wins over soft default
+PEEL_FDT_NEXT_TAG = _env_peel("PEEL_FDT_NEXT_TAG")
+if PEEL_FDT_NEXT_TAG:
+    SOFT_FDT_NEXT_TAG = False
+SOFT_FDT_NEXT_TAG_JR_END = _env_peel("SOFT_FDT_NEXT_TAG_JR_END")
+SOFT_FDT_NEXT_TAG_BEGIN_END = _env_peel("SOFT_FDT_NEXT_TAG_BEGIN_END")
+SOFT_FDT_NEXT_TAG_SKIP_ALIGN = _env_peel("SOFT_FDT_NEXT_TAG_SKIP_ALIGN")
+SOFT_FDT_NEXT_TAG_ONCE = _env_peel("SOFT_FDT_NEXT_TAG_ONCE")
+SOFT_FDT_NEXT_NODE_LOOP_END = _env_peel("SOFT_FDT_NEXT_NODE_LOOP_END")
 # Default: natural malloc/zalloc/free (peeled 2026-08-09, dual confirm cookie).
 # SOFT_MALLOC=1 restores NULL stubs for bisect.
 SOFT_MALLOC = _env_peel("SOFT_MALLOC")
@@ -138,9 +173,19 @@ print(
     f"SOFT_SPIN={int(_env_peel('SOFT_SPIN'))} "
     f"SOFT_CMPX={int(_env_peel('SOFT_CMPX'))} "
     f"SOFT_CSR={int(_env_peel('SOFT_CSR'))} "
+    f"SOFT_HART_INIT={int(_env_peel('SOFT_HART_INIT'))} "
+    f"SOFT_PLAT_OPS={int(_env_peel('SOFT_PLAT_OPS'))} "
+    f"SOFT_PMP8_CUT={int(_env_peel('SOFT_PMP8_CUT'))} "
     f"SOFT_CMV={int(SOFT_CMV)} SOFT_FDT_MATCH={int(SOFT_FDT_MATCH)} "
     f"SOFT_STRLEN={int(SOFT_STRLEN)} SOFT_MALLOC={int(SOFT_MALLOC)} "
-    f"PEEL_FDT_GETPROP={int(PEEL_FDT_GETPROP)}"
+    f"PEEL_FDT_GETPROP={int(PEEL_FDT_GETPROP)} "
+    f"SOFT_FDT_NEXT_TAG={int(SOFT_FDT_NEXT_TAG)} "
+    f"PEEL_FDT_NEXT_TAG={int(PEEL_FDT_NEXT_TAG)} "
+    f"SOFT_FDT_NEXT_TAG_JR_END={int(SOFT_FDT_NEXT_TAG_JR_END)} "
+    f"SOFT_FDT_NEXT_TAG_BEGIN_END={int(SOFT_FDT_NEXT_TAG_BEGIN_END)} "
+    f"SOFT_FDT_NEXT_TAG_SKIP_ALIGN={int(SOFT_FDT_NEXT_TAG_SKIP_ALIGN)} "
+    f"SOFT_FDT_NEXT_TAG_ONCE={int(SOFT_FDT_NEXT_TAG_ONCE)} "
+    f"SOFT_FDT_NEXT_NODE_LOOP_END={int(SOFT_FDT_NEXT_NODE_LOOP_END)}"
 )
 
 
@@ -257,6 +302,20 @@ def bne(rs1, rs2, pc, target):
         | (rs2 << 20)
         | (rs1 << 15)
         | (1 << 12)
+        | (((imm >> 1) & 0xF) << 8)
+        | (((imm >> 11) & 1) << 7)
+        | 0x63
+    )
+
+
+def beq(rs1, rs2, pc, target):
+    imm = (target - pc) & 0x1FFF
+    return (
+        (((imm >> 12) & 1) << 31)
+        | (((imm >> 5) & 0x3F) << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (0 << 12)
         | (((imm >> 1) & 0xF) << 8)
         | (((imm >> 11) & 1) << 7)
         | 0x63
@@ -604,14 +663,76 @@ struct.pack_into("<H", data, vf(segs, 0x8000AB6A), 0x4501)
 print("cont.35: real console_init; c.li a0,0 @ab6a (skip device jalr)")
 
 # cont.33 hart_init CSR probes: natural by default (cookie green 2026-08-08
-# PEEL_CSR soak). SOFT_CSR=1 restores cd86→cd0e cut for bisect.
-if _env_peel("SOFT_CSR"):
+# PEEL_CSR soak on pre-iter-012). SOFT_CSR=1: after memset @cd86, a0=0 and
+# return via epilogue @cd14 (skip expected-trap probes + reinit). Lab 2026-08-11
+# on work-ver-smt2-slfix: stock hang inside probes; SOFT_HART_INIT full skip.
+# Do not use cd86→cd0e reinit cut (hangs).
+#
+# I4j (2026-08-11) SOFT_PMP8_CUT lab matrix (SOFT_PLAT_OPS always on):
+#   natural pmpaddr0-7 → d15e green (j SUCCESS cookie 51b1babe)
+#   d15e→e298 (mhpm tail) FAIL mepc=0x8 mcause=2
+#   d15e→ret0/cd14 or ef06: coldboot_done=1 plat_hc=2 BANR but NO cookie
+#     (hang secondary _wait_for_boot_hart; HSM/switch_mode cookie never written)
+#   B1: csr_regfile decodes PMPADDR0-63 always; NrPMP=8 should illegal ≥8 so
+#     OpenSBI discovery stops (mini_csr_pmp_probe still green on directed shape).
+if _env_peel("SOFT_HART_INIT"):
+    # li a0,0; ret at sbi_hart_init entry
+    struct.pack_into("<I", data, vf(segs, 0x8000CCCC), addi(A0, 0, 0))
+    struct.pack_into("<I", data, vf(segs, 0x8000CCD0), jalr(0, RA, 0))
+    print("SOFT_HART_INIT: sbi_hart_init entry → li a0,0; ret")
+elif _env_peel("SOFT_PMP8_CUT"):
+    # Natural probes through pmpaddr0-7 (count==8 at s1+16), then lab cookie.
+    # Pin VA: 0x8000D15E = first insn after successful pmpaddr7 restore match.
     struct.pack_into(
-        "<I", data, vf(segs, 0x8000CD86), jal(0, 0x8000CD86, 0x8000CD0E) & 0xFFFFFFFF
+        "<I",
+        data,
+        vf(segs, 0x8000D15E),
+        jal(0, 0x8000D15E, SUCCESS) & 0xFFFFFFFF,
     )
-    print("SOFT_CSR: skip CSR probes cd86→cd0e reinit")
+    print(
+        "SOFT_PMP8_CUT: natural pmpaddr0-7 then j SUCCESS @d15e "
+        "(lab isolation; not hold)"
+    )
+elif _env_peel("SOFT_CSR"):
+    struct.pack_into("<I", data, vf(segs, 0x8000CD86), addi(A0, 0, 0))
+    struct.pack_into(
+        "<I", data, vf(segs, 0x8000CD8A), jal(0, 0x8000CD8A, 0x8000CD14) & 0xFFFFFFFF
+    )
+    print("SOFT_CSR: skip CSR probes @cd86 → a0=0; j epilogue cd14")
 else:
     print("cont.33+: hart_init CSR probe tail natural (peeled)")
+
+# Lab 2026-08-11 (slfix + SOFT_HART_INIT): hang mepc=0x8002047a / 0x80020072
+# = FDT/rodata executed as code via platform ops c.jalr a5 (irqchip @17e0 first).
+# Soft-skip platform driver init callbacks (c.li a0,0) — same pattern as
+# console @ab6a / domain @bac4. Cookie green with SOFT_HART_INIT + these.
+# SOFT_PLAT_OPS=1 alone is insufficient (still die in hart_init CSR probes).
+# SOFT_HART_INIT / SOFT_PMP8_CUT imply SOFT_PLAT_OPS unless SOFT_PLAT_OPS_OFF=1.
+_soft_plat = _env_peel("SOFT_PLAT_OPS") or (
+    (_env_peel("SOFT_HART_INIT") or _env_peel("SOFT_PMP8_CUT"))
+    and not _env_peel("SOFT_PLAT_OPS_OFF")
+)
+if _soft_plat:
+    # c.li a0,0 replaces c.jalr a5 at platform ops call sites
+    _plat_jalr = (
+        0x800017E0,  # sbi_irqchip_init ops->init
+        0x800016A8,
+        0x80001778,
+        0x800017C2,  # sbi_ipi_init
+        0x80005424,
+        0x80005492,
+        0x800054AE,  # sbi_timer_init
+        0x80005AD0,
+        0x80005B70,  # sbi_tlb_init
+    )
+    for _va in _plat_jalr:
+        struct.pack_into("<H", data, vf(segs, _va), 0x4501)
+    print(
+        "SOFT_PLAT_OPS: c.li a0,0 @ irqchip/ipi/timer/tlb platform jalr sites "
+        f"({len(_plat_jalr)} sites)"
+    )
+else:
+    print("platform irqchip/ipi/timer/tlb jalr natural (console/domain already soft)")
 # peeled (not stubbed): 0x470A sse, 0x2EAA dbtr, 0x17CC irqchip, 0x165C ipi,
 # cont.25: 0xC364 fwft, 0x8F22 ecall_init;
 # 0x5A5C tlb, 0x53EC timer, 0xC656 pmp_configure; cont.33: 0xCCCC hart_init
@@ -781,7 +902,105 @@ if not PEEL_FDT_GETPROP:
         "soft fdt_getprop_namelen @136f0 + fdt_get_property_namelen @3622 "
         "(PEEL_FDT_GETPROP=1 for natural; expect lenp mepc=0x12eb2)"
     )
+# FDT next_tag soft ladder (I4m–r). Default natural after hang-6 RTL completion
+# (same-cycle LOAD cancel + link-issue barrier). Softs are bisect/rollback only.
+# Priority: explicit soft modes > SOFT_FDT_NEXT_TAG ret0 > natural.
+if SOFT_FDT_NEXT_TAG_JR_END:
+    # Natural offset_ptr + BE assemble + *nextoff=-11; skip table/indirect jr.
+    # Overwrites c.jr a5 (2B) + first half of next insn with jal x0,12a5e (4B).
+    JR = 0x80012A48
+    END_EPI = 0x80012A5E  # ld s1; li s2,9; epilogue → return FDT_END
+    struct.pack_into(
+        "<I", data, vf(segs, JR), jal(0, JR, END_EPI) & 0xFFFFFFFF
+    )
+    print(
+        "SOFT_FDT_NEXT_TAG_JR_END: jal 12a5e @12a48 "
+        "(I4o soft dispatch; PEEL_FDT_NEXT_TAG=1 full natural red)"
+    )
+elif SOFT_FDT_NEXT_TAG_BEGIN_END:
+    # I4p: keep natural c.jr a5 + table load/add; only tag1 (FDT_BEGIN_NODE)
+    # relative entry → END epilogue so first structure walk returns FDT_END
+    # without BEGIN name-scan. Proves jr microarch OK; residual is case body.
+    TABLE = 0x800224C0
+    END_EPI = 0x80012A5E
+    rel = (END_EPI - TABLE) & 0xFFFFFFFF
+    struct.pack_into("<I", data, vf(segs, TABLE + 4), rel)  # tag index 1
+    print(
+        "SOFT_FDT_NEXT_TAG_BEGIN_END: table[1]→12a5e @224c4 "
+        "(I4p; natural c.jr; PEEL_FDT_NEXT_TAG=1 full natural red)"
+    )
+elif SOFT_FDT_NEXT_TAG_SKIP_ALIGN:
+    # I4q: natural assemble+jr+BEGIN name-scan to 12b04; skip align path
+    # (12b04→12a76 offset_ptr with a2=subw). Cookie green (Z dual).
+    ALIGN_JOIN = 0x80012B04
+    END_EPI = 0x80012A5E
+    struct.pack_into(
+        "<I",
+        data,
+        vf(segs, ALIGN_JOIN),
+        jal(0, ALIGN_JOIN, END_EPI) & 0xFFFFFFFF,
+    )
+    print(
+        "SOFT_FDT_NEXT_TAG_SKIP_ALIGN: jal 12a5e @12b04 "
+        "(I4q; natural name-scan; PEEL_FDT_NEXT_TAG=1 full natural red)"
+    )
+elif SOFT_FDT_NEXT_TAG_ONCE:
+    # I4r (B6b): first entry fully natural (BEGIN+align+ret); 2nd+ ret0.
+    # Cave @0x2CC0 conflicts with PEEL_FDT_GETPROP probe — exclusive.
+    if PEEL_FDT_GETPROP:
+        raise SystemExit(
+            "SOFT_FDT_NEXT_TAG_ONCE conflicts with PEEL_FDT_GETPROP (shared cave 0x2CC0)"
+        )
+    CAVE = 0x80002CC0
+    CNT = 0x80042F00  # after walklog 0x42e00
+    ENTRY = 0x800129D4
+    RESUME = 0x800129D8  # after overwritten 4B prologue
+    # Hook entry → cave
+    struct.pack_into(
+        "<I", data, vf(segs, ENTRY), jal(0, ENTRY, CAVE) & 0xFFFFFFFF
+    )
+    # Cave: auipc/addi t0=CNT; lw t1,0(t0); beqz t1,inc; c.li a0,0; c.jr ra;
+    #       inc: li t1,1; sw t1,0(t0); c.addi16sp -64; c.sdsp s0,48; jal RESUME
+    pc = CAVE
+    w0, w1 = auipc_addi(T0, pc, CNT)
+    seq = [
+        (pc, w0),
+        (pc + 4, w1),
+        (pc + 8, (0 << 20) | (T0 << 15) | (2 << 12) | (T1 << 7) | 0x03),  # lw t1,0(t0)
+        (pc + 12, beq(T1, 0, pc + 12, pc + 20) & 0xFFFFFFFF),
+        (pc + 16, 0x80824501),  # c.li a0,0; c.jr ra
+        (pc + 20, addi(T1, 0, 1)),
+        (pc + 24, sw(T1, T0, 0)),
+        (pc + 28, 0xF8227139),  # c.addi16sp -64; c.sdsp s0,48(sp)
+        (pc + 32, jal(0, pc + 32, RESUME) & 0xFFFFFFFF),
+    ]
+    for va, w in seq:
+        struct.pack_into("<I", data, vf(segs, va), w & 0xFFFFFFFF)
+    print(
+        "SOFT_FDT_NEXT_TAG_ONCE: first natural next_tag; 2nd+ ret0 "
+        f"(cave@{CAVE:#x} cnt@{CNT:#x}; I4r multi-call residual)"
+    )
+elif SOFT_FDT_NEXT_NODE_LOOP_END:
+    # I4r B12: next_node loop jal @12bc4 → li a0,9 (FDT_END) then fall into tag switch.
+    # First next_node next_tag @12b9a stays natural; walk stops at first loop iter.
+    LOOP_JAL = 0x80012BC4
+    struct.pack_into("<I", data, vf(segs, LOOP_JAL), addi(A0, 0, 9) & 0xFFFFFFFF)
+    print(
+        "SOFT_FDT_NEXT_NODE_LOOP_END: li a0,9 @12bc4 "
+        "(I4r; first next_node tag natural)"
+    )
+elif SOFT_FDT_NEXT_TAG:
+    soft_ret0(0x800129D4)  # fdt_next_tag → a0=0
+    print(
+        "SOFT_FDT_NEXT_TAG: ret0 @129d4 "
+        "(rollback/bisect; default is natural after I4r hang-6 RTL)"
+    )
 else:
+    print(
+        "natural fdt_next_tag "
+        "(SOFT_FDT_NEXT_TAG=1 ret0; ONCE/JR_END/BEGIN_END/SKIP_ALIGN/LOOP_END bisect)"
+    )
+if PEEL_FDT_GETPROP:
     # PEEL probe: free gap 0x2CC0..0x2D00 (after printf cave, before trap @2D00).
     # Entry hook on fdt_get_property_by_offset_ @12e26 uses j (rd=0) so caller's
     # ra is preserved. Logs last-call a0/a1/a2/ra/s3 + count → DRAM 0x80042e00
@@ -872,7 +1091,13 @@ print(
     "expect SI/DI: 51b1babe + BANR "
     f"(soft_malloc={int(SOFT_MALLOC)} soft_cmv={int(SOFT_CMV)} "
     f"soft_fdt_match={int(SOFT_FDT_MATCH)} soft_strlen={int(SOFT_STRLEN)} "
-    f"soft_fdt_getprop={int(not PEEL_FDT_GETPROP)})"
+    f"soft_fdt_getprop={int(not PEEL_FDT_GETPROP)} "
+    f"soft_fdt_next_tag={int(SOFT_FDT_NEXT_TAG)} "
+    f"soft_fdt_next_tag_jr_end={int(SOFT_FDT_NEXT_TAG_JR_END)} "
+    f"soft_fdt_next_tag_begin_end={int(SOFT_FDT_NEXT_TAG_BEGIN_END)} "
+    f"soft_fdt_next_tag_skip_align={int(SOFT_FDT_NEXT_TAG_SKIP_ALIGN)} "
+    f"soft_fdt_next_tag_once={int(SOFT_FDT_NEXT_TAG_ONCE)} "
+    f"soft_fdt_next_node_loop_end={int(SOFT_FDT_NEXT_NODE_LOOP_END)})"
 )
 
 r = subprocess.run(
