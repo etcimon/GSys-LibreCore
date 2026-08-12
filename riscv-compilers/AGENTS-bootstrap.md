@@ -119,6 +119,11 @@ condensed self-contained form, never linked upward to this folder or this reposi
 reference it makes resolves **inside its own tree**: no `../`, no superproject path, no assumption that a
 parent guider exists. A surface that fails either rule is not yet emancipated.
 
+**Where it is kept is a separate question from where it lives.** By default the surface is written into the
+checkout but **left untracked** — present for development, invisible to both the submodule's history and the
+superproject's — so a developer can work this way without committing anything into a project that did not ask
+for it. Committing it on a branch is an opt-in. See §6.
+
 ### B5 — Queue (in-tree state)
 
 Create `<id>/AGENTS-todo.md`: the **advancement thesis** in one sentence, the **current state** including
@@ -136,10 +141,12 @@ by-product of this loop; they are the substrate that makes each pass cheaper tha
 
 ### B7 — Emancipation
 
-Verify independence against §4, then reduce the scaffold's footprint: the transitional
-`architecture/<id>/` is removed once its content lives in-tree, the shadow `agents/<id>.md` becomes a
-one-line pointer or is deleted, and the ledger row in [`AGENTS-todo.md`](AGENTS-todo.md) shrinks to a
-pointer at the submodule's own queue. From this point the scaffold is **contextually insignificant** to
+Verify independence against §4, then reduce the scaffold's footprint: any transitional
+`architecture/<id>/` is removed once its content lives in the checkout, the shadow `agents/<id>.md` becomes
+a one-line pointer or is deleted, and the ledger row in [`AGENTS-todo.md`](AGENTS-todo.md) shrinks to a
+pointer at the submodule's own queue. Emancipation does **not** require the surface to be committed: an
+untracked in-tree surface (§6, mode A) satisfies the independence test as long as it is complete and
+self-contained. From this point the scaffold is **contextually insignificant** to
 that submodule and must not be re-imposed. If a later pass finds it needs the scaffold, the defect is a
 gap in the in-tree surface: complete the missing material in-tree rather than restoring the dependency.
 
@@ -165,6 +172,11 @@ its architectural notes live **in-tree**, such that the scaffold holds nothing t
 answer is no, the submodule is still mid-transition and the missing material is a queue item; the remedy
 is always to complete the in-tree surface, never to document the dependency.
 
+Independence is about *location and resolution*, not about version control: a surface that sits in the
+checkout untracked (§6, mode A) passes all three questions, because it is in the tree, it resolves within
+it, and the scaffold holds nothing. What fails the test is a surface that is *outside* the tree, or one that
+reaches upward to be understood.
+
 ---
 
 ## 5. Templates for the in-tree surface
@@ -188,6 +200,7 @@ bootstrap:       <prior-compiler / self-hosting / none>
 green_command:   <verbatim invocation>
 green_cell:      <host, target, options, bootstrap stage it exercised>
 green_state:     verified <date, result> | unverified
+persistence:     untracked-local | branch <name> | scaffold-staged        # §6; default untracked-local
 fingerprint:     { files: <n>, entry_points: [<path>], harness: <path> }
 riscv_affinity:  none | latent | declared | active
 authored_at:     <ISO date>
@@ -285,13 +298,61 @@ completed passes with what each established.
 
 ---
 
-## 6. Transitional artifacts in the scaffold
+## 6. Persistence — where the surface is kept (default: untracked in the checkout)
 
-The scaffold's `architecture/<id>/` and `agents/<id>.md` exist **only** while the in-tree surface cannot
-yet be written — a read-only pin, an unfinished promotion, or a checkout whose branch is not yet decided.
-They are staging, not the destination: they hold the same material in the same form, so relocating them
-in-tree is a move rather than a rewrite, and they are removed or reduced to a pointer at B7. Any material
-that would be *lost* by deleting the scaffold is, by definition, material that has not yet been moved.
+The surface always **lives in the checkout**; how durably it is kept there is a separate, explicit choice
+recorded as `persistence` in the provenance block. There are three modes, and the default is the first.
+
+### Mode A — `untracked-local` (default)
+
+The surface is written into the submodule and deliberately **left untracked**, so a developer can use it to
+develop the project without adding anything to the project's history or to the superproject's. The submodule
+is told to ignore the paths through its **own** local exclude file — not through its tracked `.gitignore`,
+which belongs to the upstream maintainers:
+
+```bash
+# resolve the submodule's real git dir (a submodule's .git is a file pointing into .git/modules/…)
+gitdir=$(git -C <id> rev-parse --git-dir)
+printf '/AGENTS.md\n/AGENTS-*.md\n/AGENTS-todo.md\n/architecture/\n' >> "$gitdir/info/exclude"
+
+# keep the superproject quiet about the submodule being "dirty" with untracked content,
+# in LOCAL config so .gitmodules (a tracked file) is not touched
+git config submodule.<path-to-id>.ignore untracked
+```
+
+Three consequences must be handled rather than discovered. **Name collisions**: before writing, check
+whether the tree already uses `AGENTS.md` or `architecture/`; if it does, choose a non-colliding prefix (for
+example `AGENTS-<id>.md` and `agentic-notes/`), use it consistently, and record the choice in the guider so
+the next agent looks in the right place. **Cleanability**: excluded files *are* removed by `git clean -xdf`,
+so a routine deep clean inside the submodule destroys the surface; either clean with the paths preserved
+(`git clean -xdf -e AGENTS.md -e 'AGENTS-*.md' -e architecture`) or keep a mirror somewhere the developer
+chooses. **Portability of effort**: the surface does not travel with a fresh clone, so if it becomes valuable
+to more than one person, that is the moment to consider mode B rather than a moment to be surprised.
+
+### Mode B — `branch <name>` (opt-in)
+
+The surface is committed inside the submodule on a working branch — conventionally `agentic-surface` — which
+makes it survive cleans, travel with the checkout, and become reviewable, and which is the precondition for
+ever offering it upstream. It is opt-in precisely because it writes into a repository whose maintainers did
+not ask for it: choose it when the fork is yours, when several people share the surface, or when the notes
+have become too valuable to lose. Never commit it onto a branch that tracks upstream directly.
+
+### Mode C — `scaffold-staged` (fallback)
+
+When the checkout cannot be written to at all — a read-only pin, an unfinished promotion, an undecided
+branch — the identical material is staged at the scaffold's `architecture/<id>/` and `agents/<id>.md`. This is
+the only case in which those directories should be populated. They hold the same material in the same form,
+so relocating them into the checkout is a move rather than a rewrite, and they are removed or reduced to a
+pointer at B7. Any material that would be *lost* by deleting the scaffold is, by definition, material that
+has not yet been moved.
+
+### Switching modes
+
+Modes are a property of the developer's situation, not of the submodule, and they change freely: A becomes B
+by committing the same files on a branch and removing the exclude lines; B becomes A by keeping the files and
+dropping the commits; C becomes A or B as soon as the checkout is writable. Whichever mode is in effect is
+recorded in the provenance block, because an agent that does not know whether the surface is tracked cannot
+reason about whether it will still be there.
 
 ---
 
@@ -308,7 +369,10 @@ two is itself a staleness signal.
 
 ## 8. Anti-patterns
 
-Writing a guider before the notes exist produces a surface that encodes assumptions and is worse than
+Committing the surface into a submodule as a reflex, when the developer only wanted it locally, writes into
+a project that did not ask for it and shows up in someone else's diff; conversely, relying on the untracked
+default without noting the clean risk loses the whole reading to a routine `git clean -xdf`. Writing a guider
+before the notes exist produces a surface that encodes assumptions and is worse than
 none, because it will be trusted. Importing a plausible pipeline description from general ecosystem
 knowledge rather than from the tree hides exactly the local peculiarities that make a change fail.
 Recording a green command that was never run turns an open question into a false fact. Writing an in-tree

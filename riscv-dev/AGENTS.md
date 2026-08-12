@@ -44,6 +44,11 @@ this folder to be understood.
 2. **Carry by value, never by link.** Whatever a submodule needs from this folder's posture — method,
    standard, porting material — is written **into** the submodule in condensed self-contained form at B4.
    An in-tree guider that says "see `../AGENTS-philosophy.md`" has been tethered, not emancipated.
+2a. **Untracked by default.** The surface lives in the checkout but is **not committed** unless asked: it is
+   excluded through the submodule's own local exclude file so a developer can use it to develop the library
+   without writing anything into the library's history or the superproject's. Committing it on a working
+   branch is opt-in, and staging it in this scaffold is a fallback for read-only checkouts
+   ([`AGENTS-bootstrap.md`](AGENTS-bootstrap.md) §6). Independence does not depend on which mode is in use.
 3. **The checkout is authoritative.** Never record a fact that was not read out of the tree or observed by
    running it. What is unknown is written down as unknown.
 4. **Analysis precedes surface.** The notes exist before the guider, and the guider only routes. A guider
@@ -89,6 +94,7 @@ riscv-dev/
                                 <id>/AGENTS-*.md          (its own condensed method/posture/porting)
                                 <id>/AGENTS-todo.md       (its own queue)
                                 <id>/architecture/        (its own notes)
+                              written there but UNTRACKED by default (AGENTS-bootstrap.md §6 mode A)
 ```
 
 The folder ships with **no submodules**; empty `agents/` and `architecture/` is the correct initial state,

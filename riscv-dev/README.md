@@ -94,7 +94,17 @@ and say WHICH matrix cell it exercised — configuration, feature set, platform 
 here, how long it took, and anything that would not work. A green state without a named cell is not a
 green state. If it cannot be run, record it unverified and make that the first blocked question.
 
-Deposit the output INSIDE the submodule, on a branch named agentic-surface, and commit there:
+Deposit the output INSIDE the submodule but leave it UNTRACKED — persistence mode A in
+riscv-dev/AGENTS-bootstrap.md §6, the default. Do not commit anything into the acme-serde checkout and do not
+touch its .gitignore. Instead append the surface paths to the submodule's own local exclude file
+(gitdir=$(git -C riscv-dev/acme-serde rev-parse --git-dir); append /AGENTS.md, /AGENTS-*.md, /AGENTS-todo.md
+and /architecture/ to "$gitdir/info/exclude"), and set submodule.riscv-dev/acme-serde.ignore=untracked in LOCAL
+git config so the superproject does not report the submodule as dirty. Libraries often already have an
+architecture/ or docs/architecture/ tree, so check first and fall back to a non-colliding prefix, used
+consistently and recorded in the guider. Record persistence: untracked-local in the provenance block, and warn
+me that `git clean -xdf` inside the submodule would delete the surface.
+
+The files to write are:
   acme-serde/architecture/         notes: index; an overview carrying one representative journey traced
                                    inward from a public entry point to whatever the library treats as
                                    primitive; an interface note stating the promise and where its boundary
@@ -115,9 +125,10 @@ close.
 
 Hard constraint: the in-tree surface must be self-contained. No `../`, no reference to this scaffold or the
 repository around it, no assumed parent guider — carry by value anything it needs. Then run the three
-independence questions in riscv-dev/AGENTS-bootstrap.md §4 and report the answers. If the checkout cannot
-be committed to, stage the identical material under riscv-dev/architecture/acme-serde/ and
-riscv-dev/agents/acme-serde.md and tell me rather than tethering the tree to this folder.
+independence questions in riscv-dev/AGENTS-bootstrap.md §4 and report the answers; an untracked surface passes
+them as long as it is complete and self-contained. If the checkout cannot be written to at all, fall back to
+persistence mode C — stage the identical material under riscv-dev/architecture/acme-serde/ and
+riscv-dev/agents/acme-serde.md — and tell me rather than tethering the tree to this folder.
 
 If the library turns out to need a compiler that is itself under development, record that relation as a pin
 plus an invocation per riscv-dev/AGENTS-toolchain-link.md — never as a path into a sibling folder.
@@ -133,6 +144,16 @@ that every later pass updates. The library-specific weight sits in three of the 
 boundary, the dependency and environment surface, and the build-and-test matrix — because those three decide
 whether any subsequent change can be validated at all, and a promotion that leaves them vague has produced a
 description rather than a development surface.
+
+By default none of this enters version control. The surface sits in the library's working tree, excluded
+through the submodule's own local exclude file rather than its tracked `.gitignore`, with the superproject told
+to ignore untracked content there — so you can develop the library with a full agentic surface while neither
+its history nor this repository records that you did. The costs are that `git clean -xdf` removes it, which
+matters more for a library with a generated build tree than for most projects, and that it does not travel with
+a fresh clone; when either starts to matter, add `persistence: branch agentic-surface` to the prompt and the
+same files are committed inside the submodule instead. A read-only checkout falls back to staging in this
+folder. All three modes are in [`AGENTS-bootstrap.md`](AGENTS-bootstrap.md) §6, and none of them changes
+whether the tree counts as independent.
 
 Substitute any real library for `acme-serde` and the prompt is unchanged except for the id, the upstream and
 the recorded purpose; that invariance is the point of writing the ladder generically. Once the tree is

@@ -81,7 +81,17 @@ command, with what it actually did here, how long it took, and any part that cou
 it cannot be run in this environment, record it as unverified and make that the first blocked question —
 do not write it down as if it worked.
 
-Deposit the output INSIDE the submodule, on a branch named agentic-surface, and commit there:
+Deposit the output INSIDE the submodule but leave it UNTRACKED — persistence mode A in
+riscv-compilers/AGENTS-bootstrap.md §6, the default. Do not commit anything into the ldc2 checkout and do
+not touch its .gitignore. Instead, append the surface paths to the submodule's own local exclude file
+(gitdir=$(git -C riscv-compilers/ldc2 rev-parse --git-dir); append /AGENTS.md, /AGENTS-*.md, /AGENTS-todo.md
+and /architecture/ to "$gitdir/info/exclude"), and set submodule.riscv-compilers/ldc2.ignore=untracked in
+LOCAL git config so the superproject does not report the submodule as dirty. Before writing, check whether
+the tree already uses AGENTS.md or architecture/; if it does, switch to a non-colliding prefix, use it
+consistently, and say so in the guider. Record persistence: untracked-local in the provenance block, and warn
+me in your summary that `git clean -xdf` inside the submodule would delete the surface.
+
+The files to write are:
   ldc2/architecture/          notes: index, overview carrying one representative journey traced from the
                               driver's argument handling to an emitted artifact, one note per stage or
                               subsystem that journey passed through, a build-and-bootstrap note holding
@@ -101,9 +111,11 @@ must move with it, then what the analysis did not close.
 
 Hard constraint: the in-tree surface must be self-contained. No `../`, no reference to this scaffold or to
 the repository around it, no assumption that a parent guider exists — carry anything it needs by value.
-Then run the three independence questions in riscv-compilers/AGENTS-bootstrap.md §4 and report the answers.
-If the checkout cannot be committed to, stage the identical material under riscv-compilers/architecture/ldc2/
-and riscv-compilers/agents/ldc2.md and tell me, instead of tethering the tree to this folder.
+Then run the three independence questions in riscv-compilers/AGENTS-bootstrap.md §4 and report the answers;
+an untracked surface passes them as long as it is complete and self-contained. If the checkout cannot be
+written to at all, fall back to persistence mode C — stage the identical material under
+riscv-compilers/architecture/ldc2/ and riscv-compilers/agents/ldc2.md — and tell me, instead of tethering the
+tree to this folder.
 
 Finally, update riscv-compilers/AGENTS-todo.md with the rung reached, and stop. Do not change compiler
 behaviour in this pass; promotion is the deliverable.
@@ -116,6 +128,16 @@ directory map, a development path, a short list of invariants and non-goals, and
 later pass updates. If your repository contains other packages built to that shape, comparing against one
 of them is the quickest way to judge whether the result is finished; nothing in the submodule should refer
 to them.
+
+By default none of this enters version control. The surface sits in the `ldc2/` working tree, excluded through
+the submodule's own local exclude file rather than its tracked `.gitignore`, with the superproject told to
+ignore untracked content in that submodule — so you can develop the compiler with a full agentic surface while
+neither LDC's history nor this repository records that you did. The two costs are that a `git clean -xdf` inside
+the submodule removes it and that it does not travel with a fresh clone; when either starts to matter, add
+`persistence: branch agentic-surface` to the prompt and the same files are committed inside the submodule
+instead. A read-only checkout falls back to staging in this folder. All three modes are described in
+[`AGENTS-bootstrap.md`](AGENTS-bootstrap.md) §6, and none of them changes whether the tree counts as
+independent.
 
 LDC is a deliberately hard test of the prompt rather than an easy demonstration. It mixes languages, it
 carries a front end whose provenance is a real question, it depends on a large external backend whose

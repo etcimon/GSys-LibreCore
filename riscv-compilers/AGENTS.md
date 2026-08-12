@@ -45,6 +45,11 @@ be understood.
    method, engineering standard, target material — is **written into** the submodule in condensed,
    self-contained form at B4. An in-tree `AGENTS.md` that says "see `../AGENTS-philosophy.md`" has not
    been emancipated; it has been tethered.
+2a. **Untracked by default.** The surface lives in the checkout but is **not committed** unless asked: it is
+   excluded through the submodule's own local exclude file so a developer can use it to develop the project
+   without writing anything into the project's history or the superproject's. Committing it on a working
+   branch is opt-in, and staging it in this scaffold is a fallback for read-only checkouts
+   ([`AGENTS-bootstrap.md`](AGENTS-bootstrap.md) §6). Independence does not depend on which mode is in use.
 3. **The checkout is authoritative.** Never record a fact about a submodule that was not read out of its
    files or observed by running it. A plausible fact about a language, a build system, or a compiler
    pipeline is not a fact about *this* tree. What is unknown is written down as unknown.
@@ -90,6 +95,7 @@ riscv-compilers/
                               <id>/AGENTS-*.md          (its own condensed method/posture/target)
                               <id>/AGENTS-todo.md       (its own queue)
                               <id>/architecture/        (its own reading)
+                            written there but UNTRACKED by default (AGENTS-bootstrap.md §6 mode A)
 ```
 
 The folder ships with **no submodules**, and an empty `agents/` and `architecture/` is the correct
