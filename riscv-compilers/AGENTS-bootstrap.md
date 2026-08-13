@@ -357,6 +357,18 @@ dropping the commits; C becomes A or B as soon as the checkout is writable. Whic
 recorded in the provenance block, because an agent that does not know whether the surface is tracked cannot
 reason about whether it will still be there.
 
+### Host-repository axis (orthogonal to A/B/C)
+
+When *this folder* is tracked by a surrounding git repository, a further choice applies to **paths the
+host can see**. That choice is specified generically in [`AGENTS-selectivity.md`](AGENTS-selectivity.md):
+the host tracks the scaffold documents; it does not, by default, register `<id>/` checkouts as host
+submodules, and it does not commit session scratches or toolchain extracts. Mode C shadows
+(`agents/<id>.md`, `architecture/<id>/`) stay **untracked in the host** even though they sit next to
+tracked `agents/README.md` / `architecture/README.md`. Writing B0 rows into `AGENTS-todo.md` is an
+explicit ledger pass, not a side effect of cloning.
+
+Mechanism at B0 should say `nested-clone` (default under a host) or `host-submodule` (only if asked).
+
 ---
 
 ## 7. Status vocabulary

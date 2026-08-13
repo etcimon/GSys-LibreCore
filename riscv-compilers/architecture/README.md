@@ -15,6 +15,9 @@ exactly what the in-tree set will hold, in exactly the form given by
 [`../AGENTS-bootstrap.md`](../AGENTS-bootstrap.md) §5.4, so relocation is a move rather than a rewrite.
 At emancipation (B7) the directory for that submodule is removed.
 
+When a host tracks this scaffold, `architecture/<id>/` is **untracked in the host**
+([`../AGENTS-selectivity.md`](../AGENTS-selectivity.md)). Only this README is permanently tracked here.
+
 ## What a note is
 
 A note is **addressed to the next change**, not to a reader. It names an area of the system, explains in

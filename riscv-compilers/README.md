@@ -23,8 +23,13 @@ upstream if the project wants it.
 
 ## How to use it
 
-Add the compiler as a submodule under this folder, choosing a short lowercase id for its directory. Ask an
-agent to run the bootstrap in [`AGENTS-bootstrap.md`](AGENTS-bootstrap.md) for that id: it will admit the
+Place a checkout under this folder using a short lowercase id. **If this folder already lives inside
+another git repository**, clone into `<id>/` as a nested repository and do **not** register it as a
+submodule of that host unless you explicitly want the host to pin it — see
+[`AGENTS-selectivity.md`](AGENTS-selectivity.md). Session notes go in untracked `TODO-scratch.md`;
+the tracked ledger [`AGENTS-todo.md`](AGENTS-todo.md) is updated only when you ask to admit ids.
+
+Ask an agent to run the bootstrap in [`AGENTS-bootstrap.md`](AGENTS-bootstrap.md) for that id: it will admit the
 tree, inventory it empirically, read it, write the architectural notes, derive the in-tree guider, and open
 the queue. Read what it wrote — the notes are the honest record of what is understood and what is not, and
 the open questions are usually the most useful part. Then work in passes: each pass names one thesis,
@@ -43,7 +48,8 @@ Read [`AGENTS.md`](AGENTS.md) for the contract this folder holds itself to, and
 [`AGENTS-philosophy.md`](AGENTS-philosophy.md) for the standard a compiler change is held to. Ignore
 [`AGENTS-riscv-target.md`](AGENTS-riscv-target.md) until a submodule actually has a target question;
 it is written to be inert. [`AGENTS-todo.md`](AGENTS-todo.md) tells you which submodules exist and how far
-each has come.
+each has come. When this folder sits inside another repository, [`AGENTS-selectivity.md`](AGENTS-selectivity.md)
+says what that host may record.
 
 The sibling folder [`../riscv-dev/`](../riscv-dev/) does the same thing for libraries and runtimes, and can
 be backed by a compiler promoted here.
@@ -54,7 +60,11 @@ Take `https://github.com/ldc-developers/ldc.git` as the tree to promote, occupyi
 run one prompt:
 
 ```text
-git submodule add https://github.com/ldc-developers/ldc.git riscv-compilers/ldc2
+# default when riscv-compilers is already inside a host repo (does not touch host .gitmodules):
+git clone https://github.com/ldc-developers/ldc.git riscv-compilers/ldc2
+
+# only if you explicitly want the *host* to record the pin:
+# git submodule add https://github.com/ldc-developers/ldc.git riscv-compilers/ldc2
 ```
 
 ```text

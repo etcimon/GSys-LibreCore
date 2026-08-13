@@ -18,6 +18,7 @@ staged copy under this folder's `architecture/<id>/`.
 | How it is read | [`AGENTS-logisplain.md`](AGENTS-logisplain.md) | Analysis method; notes addressed to the next change |
 | What kind of change | [`AGENTS-philosophy.md`](AGENTS-philosophy.md) | Engineering posture, finished-pass checklist |
 | Target material (inert) | [`AGENTS-riscv-target.md`](AGENTS-riscv-target.md) | Engaged only on `declared`/`active` affinity or by prompt |
+| What the host may record | [`AGENTS-selectivity.md`](AGENTS-selectivity.md) | Track scaffold only; checkouts and scratches stay local |
 
 ---
 
@@ -53,6 +54,11 @@ is only ever needed by one submodule, it belongs in that submodule's own notes. 
 is what stops the scaffold from re-accumulating governance it is supposed to shed.
 _Priors: `AGENTS.md` §0.2 (carry by value), §5 (non-goals)._
 
+**S5 — Selectivity.** When a host repository tracks this folder, checkouts, toolchains, and session
+scratches stay out of the host; the admission table above is updated only on an explicit ledger pass.
+Live workspace state (if any) belongs in untracked `TODO-scratch.md`.
+_Priors: `AGENTS-selectivity.md`._
+
 ---
 
 ## Pass log
@@ -60,3 +66,4 @@ _Priors: `AGENTS.md` §0.2 (carry by value), §5 (non-goals)._
 | date | pass | outcome |
 |---|---|---|
 | 2026-08-12 | Scaffold authored: guider, ladder (B0–B7), analysis method, philosophy, inert target dossier, transitional-directory conventions, human README. | Ready for first admission; no submodules present. |
+| 2026-08-12 | Host selectivity: `AGENTS-selectivity.md`, nested-clone default, generic host-ignore pattern. Ledger still empty. | S5 added; no ids admitted. |

@@ -94,3 +94,21 @@ software/smt2-linux/soft-ladder/build/
 /riscv-dev/modules.json
 /riscv-dev/local-semver.json
 /riscv-dev/.gitignore
+
+# riscv-compilers: ignore first-level dirs except scaffold agents/ + architecture/
+# (generic: any nested checkout or toolchain extract; see riscv-compilers/AGENTS-selectivity.md)
+/riscv-compilers/*/
+!/riscv-compilers/agents/
+!/riscv-compilers/architecture/
+# Mode C shadows stay untracked; only the directory READMEs are scaffold
+/riscv-compilers/agents/*
+!/riscv-compilers/agents/README.md
+/riscv-compilers/architecture/*/
+# Generic local process files (not compiler names)
+/riscv-compilers/TODO-scratch.md
+/riscv-compilers/TODO-scratch.*.md
+/riscv-compilers/setenv.ps1
+/riscv-compilers/setenv.sh
+/riscv-compilers/modules.json
+/riscv-compilers/local-semver.json
+/riscv-compilers/.gitignore
