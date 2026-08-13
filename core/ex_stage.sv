@@ -321,7 +321,11 @@ module ex_stage
   end
 
   // 1. ALU(s) (combinatorial)
-  assign alu_data[0] = one_cycle_data;
+  // I4ak: if port0 is ALU, compute *port0* — do not let a later one-cycle
+  // port (branch/CSR/AES/ALU) steal ALU0 via one_cycle_data. Branch compare
+  // still uses one_cycle_data when port0 is not ALU. SS usually issues only
+  // one FLU op; this keeps result and tid paired if a second leaks through.
+  assign alu_data[0] = alu_valid_i[0] ? fu_data_i[0] : one_cycle_data;
 
   // Secondary ALU input: first issue port asserting alu2_valid (priority low→high)
   if (CVA6Cfg.NrALUs >= 2) begin : gen_alu2_data_sel
@@ -402,14 +406,21 @@ module ex_stage
   assign flu_valid_o = |one_cycle_select | mult_valid;
 
   // result MUX
+  // I4ak: |alu_valid_i used to retire alu_result[0] under one_cycle_data's
+  // tid. If port0 is ALU and a later port is also one-cycle, ALU0 must
+  // write port0's tid (fdt_get_name `addi s1,a0,1` = "/cpus"+1 is the
+  // I4ae–j s0 poison if that result lands in next_node's s0). Port1+ ALU
+  // uses ALU2 / FPU_WB.
   always_comb begin
     // Branch result as default case
     flu_result_o   = {{CVA6Cfg.XLEN - CVA6Cfg.VLEN{1'b0}}, branch_result};
     flu_trans_id_o = one_cycle_data.trans_id;
-    // ALU result
-    if (|alu_valid_i) begin
-      flu_result_o = alu_result[0];
-      // CSR result
+    if (alu_valid_i[0]) begin
+      flu_result_o   = alu_result[0];
+      flu_trans_id_o = fu_data_i[0].trans_id;
+    end else if (|alu_valid_i) begin
+      flu_result_o   = alu_result[0];
+      flu_trans_id_o = one_cycle_data.trans_id;
     end else if (|csr_valid_i) begin
       flu_result_o = csr_result;
     end else if (mult_valid) begin

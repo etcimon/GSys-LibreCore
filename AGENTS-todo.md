@@ -66,8 +66,8 @@ Full map: `architecture/multi-threading/soft-ladder/README.md`.
 | | **Oracle discipline** | P2 | Pin md5 **`bc7ed11dab17454fd147e4927ba07fef`** (backup `*.pin-bc7ed11d.elf`). Held: rebuild with `rebuild_held_from_pin.sh` only — **do not** `mk_plat_skip` from current diag (`8169b747…` → cold-regress `plat_hc=80`). |
 | | **Cookie chase I4f–g** | P2 | Cave OK. Stock: **`sbi_hart_init` CSR probes**. Soft-skip → platform **`c.jalr a5`** (irqchip@`17e0`→FDT). **Hold green:** `SOFT_HART_INIT`+plat peels → **`51b1babe`**. |
 | | **Track hold** | P2 | **`hold` dual-confirm green** held `8b6b310e…` on slfix (`plat_hc=2` BANR). `mini_csr_expected_trap` + **`mini_csr_pmp_probe` PASS**. |
-| **Next** | P2/P3 | **I4u hold restored:** I4s ELF `8b6b310e` cookie **`51b1babe`** on slfix `28b3dfa7`. **Nat** past `129e8` into `sbi_hsm_init` wait; hart0 IAF **`mepc=0x8fffffff8`** mcause=1. Next RTL: that CF target. Hold stays I4s peels (no by_offset stub). |
-| | Priors | | `ITERATION` I4t · `branch_unit.sv` · pin `bc7ed11d` · held `c06e9bd3` |
+| **Next** | P2/P3 | **I4at soaked** hold green / nat same as I4as (`npc=129f0` jal offset_ptr). **I4au next:** `unresolved_cf` sticky or frontend not taking the jal. I4as was the mover (`ra=8`→`12bc8`). |
+| | Priors | | `ITERATION` I4v · `branch_unit.sv` · pin `bc7ed11d` · held `8b6b310e` |
 | **SL-B** | Peel soft getprop + real printf | P3–P4 | Hold cookie green (soft). Next: PEEL stock path; retire soft peels. |
 | **SL-C** | Topology truth (smt2) | P6 / topology | After SL-B: stock DTB, `hart_count==2`, R3/R3b, cpuinfo; **gate multi-thread PyTorch**. |
 | **SL-D** | Stream plane vs SMT | P6 | Orthogonal stream8; do not merge with smt2 DI until FDT trusted. |

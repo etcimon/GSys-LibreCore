@@ -994,6 +994,7 @@ done_processing:
       };
       uint64_t ra0 = gpr64(rf0, 1), ra1 = gpr64(rf1, 1);
       uint64_t sp0 = gpr64(rf0, 2), sp1 = gpr64(rf1, 2);
+      uint64_t s00 = gpr64(rf0, 8), s01 = gpr64(rf1, 8);
       std::cerr << std::hex << "[hangpc] npc0=0x" << (uint64_t)npc0
                 << " act=" << (unsigned)active
                 << " mepc0=0x" << (uint64_t)mepc0
@@ -1004,6 +1005,7 @@ done_processing:
                 << " wfi1=" << (unsigned)wfi1
                 << " ra0=0x" << ra0 << " ra1=0x" << ra1
                 << " sp0=0x" << sp0 << " sp1=0x" << sp1
+                << " s00=0x" << s00 << " s01=0x" << s01
                 << " mtvec=0x" << (uint64_t)mtvec
                 << std::dec << "\n";
     }

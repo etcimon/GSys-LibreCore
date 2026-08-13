@@ -30,6 +30,13 @@ module instr_realign
     input logic rst_ni,
     // Fetch flush request - CONTROLLER
     input logic flush_i,
+    // I4ab: SMT hart of this fetch (banks unaligned leftover)
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] hart_i,
+    // I4ad: keep leftover across kill_s2 while trap_hold (mtvec line + tail).
+    // I4ac gated the flush *input* with ~trap_hold and held pre-trap leftover
+    // into bootrom (plat_hc=80). Exception entry pulses clear_unaligned_i.
+    input logic keep_unaligned_i,
+    input logic clear_unaligned_i,
     // 32-bit block is valid - CACHE
     input logic valid_i,
     // Instruction is unaligned - FRONTEND
@@ -59,8 +66,23 @@ module instr_realign
   logic unaligned_d, unaligned_q;
   // register to save the unaligned address
   logic [CVA6Cfg.VLEN-1:0] unaligned_address_d, unaligned_address_q;
+  // I4ab: per-hart leftover. A shared flop was cleared on SMT switch
+  // flush_if, so hart0's completing half of csrr mtval (@ff0e) was lost
+  // and the resume decoded as illegal (I4z nat).
+  localparam int unsigned NH = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
+  logic [NH-1:0]              unaligned_bank_q;
+  logic [NH-1:0][15:0]        unaligned_instr_bank_q;
+  logic [NH-1:0][CVA6Cfg.VLEN-1:0] unaligned_address_bank_q;
+  assign unaligned_q         = unaligned_bank_q[hart_i];
+  assign unaligned_instr_q   = unaligned_instr_bank_q[hart_i];
+  assign unaligned_address_q = unaligned_address_bank_q[hart_i];
+  // I4ad: a leftover is only completable if it is the start of an RVI
+  // ([1:0]==11). Flag=1 with data=0 assembled {0x3430, 0} = 0x34300000
+  // (compressed 0 / illegal) at expected_trap@ff0e.
+  logic leftover_rvi;
+  assign leftover_rvi = unaligned_q && (unaligned_instr_q[1:0] == 2'b11);
   // we have an unaligned instruction
-  assign serving_unaligned_o = unaligned_q;
+  assign serving_unaligned_o = (CVA6Cfg.FETCH_WIDTH == 64) ? leftover_rvi : unaligned_q;
 
   // Instruction re-alignment
   if (CVA6Cfg.FETCH_WIDTH == 32) begin : realign_bp_32
@@ -134,11 +156,15 @@ module instr_realign
           valid_o[0]  = valid_i;
           valid_o[1]  = valid_i;
 
-          unaligned_d = unaligned_q;
+          unaligned_d = leftover_rvi;
 
           // last instruction was unaligned
           // TODO how are jumps + unaligned managed?
-          if (unaligned_q) begin
+          // I4ae: complete only from a *later* 8B block. Replaying the
+          // mtvec line (ff08) with leftover=0x2773 assembled
+          // {mcause_lo, 0x2773}=0x27732773 at ff0e (illegal csr 0x277).
+          if (leftover_rvi &&
+              (address_i[CVA6Cfg.VLEN-1:3] != unaligned_address_q[CVA6Cfg.VLEN-1:3])) begin
             // for 64 bit there exist the following options:
             //     64  48  32  16  0
             //     | 3 | 2 | 1 | 0 | <- instruction slot
@@ -240,9 +266,15 @@ module instr_realign
                 if (instr_is_compressed[3]) begin
                   valid_o[2] = valid_i;
                 end else begin
+                  // I4aa: I + C + RVI-start (OpenSBI __sbi_expected_trap:
+                  // csrr mcause; c.sd; csrr mtval). Do not present
+                  // {RVI_lo, C} as one 32-bit at +4 — that made ff0e illegal.
+                  instr_o[1]          = {16'b0, data_i[47:32]};
+                  addr_o[1]           = {address_i[CVA6Cfg.VLEN-1:3], 3'b100};
+                  valid_o[2]          = 1'b0;
                   unaligned_d         = 1'b1;
-                  unaligned_instr_d   = instr_o[3];
-                  unaligned_address_d = addr_o[3];
+                  unaligned_instr_d   = data_i[63:48];
+                  unaligned_address_d = {address_i[CVA6Cfg.VLEN-1:3], 3'b110};
                 end
               end
             end
@@ -253,7 +285,8 @@ module instr_realign
         // Hang-6: old code treated data as unshifted and used data_i[63:32] as a
         // live instruction — wrong after the frontend shift (dual-issue FETCH_WIDTH=64).
         2'b01: begin
-          if (unaligned_q) begin
+          if (leftover_rvi &&
+              (address_i[CVA6Cfg.VLEN-1:3] != unaligned_address_q[CVA6Cfg.VLEN-1:3])) begin
             // Complete spanning RVI; up to two more halfwords follow.
             instr_o[0] = {data_i[15:0], unaligned_instr_q};
             addr_o[0]  = unaligned_address_q;
@@ -360,19 +393,24 @@ module instr_realign
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (~rst_ni) begin
-      unaligned_q         <= 1'b0;
-      unaligned_address_q <= '0;
-      unaligned_instr_q   <= '0;
+      unaligned_bank_q         <= '0;
+      unaligned_address_bank_q <= '0;
+      unaligned_instr_bank_q   <= '0;
     end else begin
       if (valid_i) begin
-        unaligned_address_q <= unaligned_address_d;
-        unaligned_instr_q   <= unaligned_instr_d;
+        unaligned_address_bank_q[hart_i] <= unaligned_address_d;
+        unaligned_instr_bank_q[hart_i]   <= unaligned_instr_d;
       end
 
-      if (flush_i) begin
-        unaligned_q <= 1'b0;
+      // I4ad: exception entry (clear) outranks keep. Other flushes still
+      // drop leftover (boot / mispredict). trap_hold keep covers the
+      // establish cycle *and* the gap before the completing fetch.
+      if (clear_unaligned_i) begin
+        unaligned_bank_q[hart_i] <= 1'b0;
+      end else if (flush_i && !keep_unaligned_i) begin
+        unaligned_bank_q[hart_i] <= 1'b0;
       end else if (valid_i) begin
-        unaligned_q <= unaligned_d;
+        unaligned_bank_q[hart_i] <= unaligned_d;
       end
     end
   end

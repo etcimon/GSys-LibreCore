@@ -120,6 +120,14 @@ module frontend
 
   // indicates whether we come out of reset (then we need to load boot_addr_i)
   logic                                       npc_rst_load_q;
+  // I4z (smt2): keep fetching mtvec until that 8B block is *registered*.
+  // I4w nat skipped jal@0x3d8 and retired csrr@3e0/sd@3e4 — the first trap
+  // fetch was killed (flush/stale bp_valid) after NPC had already stepped.
+  logic                                       trap_fetch_q;
+  logic                                       trap_tail_q;
+  logic [                   CVA6Cfg.VLEN-1:0] trap_pc_q;
+  logic                                       trap_fetch_hit;
+  logic                                       trap_hold;
 
   logic                                       replay;
   logic [                   CVA6Cfg.VLEN-1:0] replay_addr;
@@ -174,6 +182,9 @@ module frontend
       .clk_i              (clk_i),
       .rst_ni             (rst_ni),
       .flush_i            (icache_dreq_o.kill_s2),
+      .hart_i             (smt_hart_i),
+      .keep_unaligned_i   (trap_hold),
+      .clear_unaligned_i  (CVA6Cfg.NrHarts > 1 & ex_valid_i),
       .valid_i            (icache_valid_q),
       .serving_unaligned_o(serving_unaligned),
       .address_i          (icache_vaddr_q),
@@ -332,7 +343,15 @@ module frontend
                  ((cf_type[i] == Return) & ras_predict.valid & |ras_predict.ra));
     // I4p: never redirect fetch to PC=0 (empty DRAM → illegal). SMT2 I4o
     // saw hart0 mepc=0; BTB/RAS target 0 is never a useful OpenSBI fetch.
-    if (CVA6Cfg.NrHarts > 1 && predict_address == '0) bp_valid = 1'b0;
+    // I4ah: also drop a predicted JALR/RAS/BTB target that is not executable.
+    // I4v only filters *resolve* (bmiss / NPC / BTB train). A stale BTB hit
+    // on fdt_next_tag `jr a5` still fetched .rodata/FDT @0x8001f801, and
+    // after I4ag that target is not a mispredict — so the FDT stream was
+    // never flushed and s0 landed as 0x8001f801 at lw@12c0a.
+    if (CVA6Cfg.NrHarts > 1 &&
+        (predict_address == '0 ||
+         !config_pkg::is_inside_execute_regions(CVA6Cfg, 64'(predict_address))))
+      bp_valid = 1'b0;
   end
   // Classic EX mispredict only. Matching taken Jump must NOT reseed NPC or
   // feed TAGE mispredict_i: reseed re-fetches calls → double RAS push
@@ -341,11 +360,15 @@ module frontend
   // (icache clear on bp_valid, CF issue stall). Post-bp IQ sequential drop
   // was tried (Jump-only) but regressed bare smt_dual_concurrent — do not rearm
   // without a concurrent soak.
-  // I4t: even if EX still raises is_mispredict on JALR-to-0, do not kill
-  // FTQ/I$ or reseed NPC. Scoreboard/controller consume the branch_unit
-  // clear; this is the frontend half of the same SMT hygiene.
+  // I4t/I4v/I4x: suppress only *JALR* mispredicts to page-0 / non-execute.
+  // I4w nat: trap-vector jal@3d8 (cf=Jump → 0x2d00 cave) lost its flush when
+  // this filter applied to every CF — fallthrough sd@3e4 with garbage t1.
   assign is_mispredict = resolved_branch_i.valid & resolved_branch_i.is_mispredict
-                         & ~(CVA6Cfg.NrHarts > 1 & ~(|resolved_branch_i.target_address));
+                         & ~(CVA6Cfg.NrHarts > 1
+                             & (resolved_branch_i.cf_type == ariane_pkg::JumpR)
+                             & (!(|resolved_branch_i.target_address[CVA6Cfg.VLEN-1:12])
+                                 | ~config_pkg::is_inside_execute_regions(
+                                        CVA6Cfg, 64'(resolved_branch_i.target_address))));
 
   // Cache interface
   // Gate ICache requests and NPC updates during fence.i
@@ -551,7 +574,12 @@ module frontend
   assign icache_dreq_o.kill_s1 = is_mispredict | flush_i | replay;
   // if we have a valid branch-prediction we need to only kill the last cache request
   // also if we killed the first stage we also need to kill the second stage (inclusive flush)
-  assign icache_dreq_o.kill_s2 = icache_dreq_o.kill_s1 | bp_valid;
+  // I4z: do not let a stale bp_valid kill the in-flight mtvec line.
+  assign trap_hold = CVA6Cfg.NrHarts > 1 & (trap_fetch_q | trap_tail_q);
+  // I4ad: also protect trap_tail (completing half of straddling RVI).
+  // I4z only masked trap_fetch; stale bp then killed the ff10 fill.
+  assign icache_dreq_o.kill_s2 = icache_dreq_o.kill_s1
+                                 | (bp_valid & ~trap_hold);
 
   // Update Control Flow Predictions
   bht_update_t bht_update;
@@ -571,7 +599,9 @@ module frontend
   assign btb_update.valid = resolved_branch_i.valid
                                 & resolved_branch_i.is_mispredict
                                 & (resolved_branch_i.cf_type == ariane_pkg::JumpR)
-                                & (|resolved_branch_i.target_address);
+                                & (|resolved_branch_i.target_address[CVA6Cfg.VLEN-1:12])
+                                & config_pkg::is_inside_execute_regions(
+                                      CVA6Cfg, 64'(resolved_branch_i.target_address));
   assign btb_update.pc = resolved_branch_i.pc;
   assign btb_update.target_address = resolved_branch_i.target_address;
 
@@ -603,12 +633,15 @@ module frontend
       npc_d         = npc_q;
     end
     // 0. Branch Prediction
-    if (bp_valid) begin
+    // I4ad: do not let a stale taken-CF steal the completing half either.
+    if (bp_valid && !trap_hold) begin
       fetch_address = predict_address;
       npc_d = predict_address;
     end
     // 1. Default assignment
-    if (if_ready) begin
+    // I4y: do not step NPC while IF is flushed.
+    // I4z: do not step while the mtvec line is still outstanding.
+    if (if_ready && !flush_i && !(CVA6Cfg.NrHarts > 1 && trap_fetch_q)) begin
       npc_d = {
         fetch_address[CVA6Cfg.VLEN-1:CVA6Cfg.FETCH_ALIGN_BITS] + 1, {CVA6Cfg.FETCH_ALIGN_BITS{1'b0}}
       };
@@ -623,10 +656,11 @@ module frontend
     // steps to the *following* fetch block so when CF-hold lifts we do not push
     // the target twice (same pattern as set_pc_commit reseed below).
     if (is_mispredict) begin
-      // I4q (smt2): EX may resolve JALR/Return to 0 (rs1/ra stale or x0).
-      // Fetching 0 is empty DRAM → illegal (I4o hart0 mepc=0). Keep npc_q;
-      // commit still retires the CF. SI unchanged.
-      if (!(CVA6Cfg.NrHarts > 1 && resolved_branch_i.target_address == '0)) begin
+      // I4q/I4v (smt2): do not reseed NPC to page-0 or a non-execute target.
+      if (!(CVA6Cfg.NrHarts > 1 &&
+            (!(|resolved_branch_i.target_address[CVA6Cfg.VLEN-1:12]) ||
+             !config_pkg::is_inside_execute_regions(
+                  CVA6Cfg, 64'(resolved_branch_i.target_address))))) begin
         if (CVA6Cfg.FtqDepth != 0) begin
           logic [CVA6Cfg.VLEN-1:0] mp_target;
           mp_target = resolved_branch_i.target_address;
@@ -705,10 +739,20 @@ module frontend
       end
     end
     // 8. U6.1 SMT coarse-grain switch: restore banked NPC for newly active hart.
-    // Highest precedence after reset so switch is not lost to speculative bp.
-    if (CVA6Cfg.NrHarts > 1 && smt_restore_i) begin
+    // Must *not* outrank exception/eret/CSR-flush: I4w nat skipped mtvec
+    // jal@0x3d8 and fetched the next 8B block (csrr@3e0 / sd@3e4) because a
+    // same-cycle or next-cycle restore overwrote trap_vector_base.
+    if (CVA6Cfg.NrHarts > 1 && smt_restore_i &&
+        !ex_valid_i && !eret_i && !set_pc_commit_i &&
+        !(CVA6Cfg.DebugEn && set_debug_pc_i) && !trap_hold) begin
       npc_d         = smt_npc_restore_i;
       fetch_address = smt_npc_restore_i;
+    end
+    // I4z: hold fetch on mtvec until that block is registered (beats restore
+    // and if_ready step). SI (NrHarts==1) never arms trap_fetch_q.
+    if (CVA6Cfg.NrHarts > 1 && trap_fetch_q) begin
+      npc_d         = trap_pc_q;
+      fetch_address = trap_pc_q;
     end
 
     // I$ address: direct path, or FTQ head / FDIP prefetch when U2 is on
@@ -726,6 +770,32 @@ module frontend
   logic [CVA6Cfg.FETCH_WIDTH-1:0] icache_data;
   // re-align the cache line
   assign icache_data = icache_dreq_i.data >> {shamt, 4'b0};
+
+  assign trap_fetch_hit = trap_fetch_q && icache_valid_q &&
+      (icache_vaddr_q[CVA6Cfg.VLEN-1:CVA6Cfg.FETCH_ALIGN_BITS]
+       == trap_pc_q[CVA6Cfg.VLEN-1:CVA6Cfg.FETCH_ALIGN_BITS]);
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      trap_fetch_q <= 1'b0;
+      trap_tail_q  <= 1'b0;
+      trap_pc_q    <= '0;
+    end else if (CVA6Cfg.NrHarts > 1 && ex_valid_i) begin
+      trap_fetch_q <= 1'b1;
+      trap_tail_q  <= 1'b0;
+      trap_pc_q    <= trap_vector_base_i;
+    end else if (trap_fetch_hit) begin
+      // I4aa: first mtvec line is in. Allow NPC to step for a straddling
+      // RVI (expected_trap csrr@ff0e) but keep restore off until a *later*
+      // fetch block is registered (one beat was not enough on an I$ miss).
+      trap_fetch_q <= 1'b0;
+      trap_tail_q  <= 1'b1;
+    end else if (trap_tail_q && icache_valid_q &&
+                 (icache_vaddr_q[CVA6Cfg.VLEN-1:CVA6Cfg.FETCH_ALIGN_BITS]
+                  != trap_pc_q[CVA6Cfg.VLEN-1:CVA6Cfg.FETCH_ALIGN_BITS])) begin
+      trap_tail_q <= 1'b0;
+    end
+  end
 
   // U2 loop-buffer inject: present as a 1-cycle I$ response without a request.
   // lbuf_consume already folds ready/halt; keep Ftq/Loop gates for generate elision.
@@ -756,7 +826,8 @@ module frontend
       // icache_valid_q still presents next cycle and re-enters instr_queue.
       // Seen as: (1) ret RAS-miss → fallthrough jal@alias; (2) jal fdt_next_tag
       // @0x80012b0a with EX Jump predict correct yet sequential bne@0x80012b10.
-      if (flush_i || is_mispredict || bp_valid) begin
+      if (flush_i || is_mispredict ||
+          (bp_valid && !trap_hold)) begin
         icache_valid_q    <= 1'b0;
         icache_ex_valid_q <= ariane_pkg::FE_NONE;
       end else begin

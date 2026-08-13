@@ -167,14 +167,24 @@ package cva6_config_pkg;
       NrNonIdempotentRules: unsigned'(2),
       NonIdempotentAddrBase: 1024'({64'b0, 64'b0}),
       NonIdempotentLength: 1024'({64'b0, 64'b0}),
-      // I4k: include the RV64 sign-extended DRAM alias (0xffff_ffff_8000_0000)
-      // as well as 0x8000_0000. Soft-ladder stock IAF mepc=0xffff_ffff_8001_29f4
-      // (fdt_next_tag after fdt_offset_ptr) is PMA-reject of that alias: execute
-      // window was only 0x8000_0000..0xC000_0000. Same physical DRAM; I$ PMA
-      // zero-extends PLEN then range-checks. Cached alias keeps I$ hits coherent.
-      NrExecuteRegionRules: unsigned'(4),
-      ExecuteRegionAddrBase: 1024'({64'hffff_ffff_8000_0000, 64'h8000_0000, 64'h1_0000, 64'h0}),
-      ExecuteRegionLength: 1024'({64'h4000_0000, 64'h4000_0000, 64'h1_0000, 64'h1000}),
+      // I4l: RV64 sign-extended DRAM alias (0xffff_ffff_8000_0000) so
+      // fdt_next_tag after fdt_offset_ptr is not an IAF at …8001_29f4.
+      // I4w: execute is *text*, not all of DRAM. 32 MiB still covered
+      // .rodata/FDT @0x8001e000 — I4ae nat s0=0x8001f801 is that window.
+      // I4ag: identity/sign-ext execute is .text only (ends 0x1d918);
+      // separate 4 KiB windows for fw_payload @0x80200000. I4v then
+      // refuses JALR into FDT/rodata. Cached stays 1 GiB.
+      NrExecuteRegionRules: unsigned'(6),
+      ExecuteRegionAddrBase: 1024'({
+        64'hffff_ffff_8020_0000, 64'h8020_0000,
+        64'hffff_ffff_8000_0000, 64'h8000_0000,
+        64'h1_0000, 64'h0
+      }),
+      ExecuteRegionLength: 1024'({
+        64'h1000, 64'h1000,
+        64'h1e000, 64'h1e000,
+        64'h1_0000, 64'h1000
+      }),
       NrCachedRegionRules: unsigned'(2),
       CachedRegionAddrBase: 1024'({64'hffff_ffff_8000_0000, 64'h8000_0000}),
       CachedRegionLength: 1024'({64'h4000_0000, 64'h4000_0000}),

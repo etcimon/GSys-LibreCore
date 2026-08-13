@@ -160,8 +160,11 @@ module commit_stage
   logic [CVA6Cfg.XLEN-1:0] casq_hi_data_q;
   logic [4:0] casq_hi_rd_q;
   logic casq_dual_now;
+  // I4am: leftover dual_we/ack must not retarget waddr[1] = rd|1 on a
+  // normal retire (s1=x9 vs s0=x8 is rd[0]). Only AMOCAS.Q owns that path.
   assign casq_dual_now = CVA6Cfg.RVA && CVA6Cfg.RVZacas &&
-                        amo_resp_i.dual_we && amo_resp_i.ack;
+                        amo_resp_i.dual_we && amo_resp_i.ack &&
+                        (commit_instr_i[0].op == ariane_pkg::AMO_CASQ);
   // -------------------
   // Commit Instruction
   // -------------------
@@ -180,7 +183,13 @@ module commit_stage
     commit_lsu_o = 1'b0;
     commit_csr_o = 1'b0;
     // amos will commit on port 0
-    wdata_o[0] = (CVA6Cfg.RVA && amo_resp_i.ack) ? amo_resp_i.result[CVA6Cfg.XLEN-1:0] : commit_instr_i[0].result;
+    // I4ar: leftover amo_resp.ack must not substitute amo result on a
+    // non-AMO retire. I4am gated casq dual_we the same way; I4ao filters
+    // commit_instr.result so a stale ack would still poison RF (cookie
+    // 51b1c001 / s0). Only an actual AMO owns this mux.
+    wdata_o[0] = (CVA6Cfg.RVA && amo_resp_i.ack && instr_0_is_amo)
+                     ? amo_resp_i.result[CVA6Cfg.XLEN-1:0]
+                     : commit_instr_i[0].result;
     csr_op_o = ADD;  // this corresponds to a CSR NOP
     csr_wdata_o = {CVA6Cfg.XLEN{1'b0}};
     fence_i_o = 1'b0;
@@ -415,6 +424,25 @@ module commit_stage
         end
       end
     end
+    // I4am/n: unaligned ALU→s0 (addi / add rs1!=x0). Soak-negative —
+    // write is not those. I4ao: any committed GPR write to x8 whose
+    // result[3:0]!=0 cannot be an ABI frame pointer (16B). Covers LOAD
+    // of `"/cpus"+1` and `c.mv s0,rs2` (ADD rs1=x0). SMT+SS only.
+    // I4as: page0 / small integer cannot be a return address — suppress
+    // we_gpr to x1 when result[VLEN-1:12]==0 (nat ra0=8 after I4ao).
+    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
+      for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
+        if (we_gpr_o[p] &&
+            commit_instr_i[p].rd[4:0] == 5'd8 &&
+            commit_instr_i[p].result[3:0] != 4'b0)
+          we_gpr_o[p] = 1'b0;
+        if (we_gpr_o[p] &&
+            commit_instr_i[p].rd[4:0] == 5'd1 &&
+            commit_instr_i[p].result[CVA6Cfg.XLEN-1:12] == '0)
+          we_gpr_o[p] = 1'b0;
+      end
+    end
+
     if (CVA6Cfg.RVZCMP) begin
       for (int i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin
         commit_macro_ack_o[i] = commit_instr_i[i].is_macro_instr ? commit_macro_ack[i] : commit_ack_o[i];

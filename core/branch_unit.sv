@@ -134,15 +134,15 @@ module branch_unit #(
           resolved_branch_o.ckpt_restore  = 1'b1;
         end
       end
-      // I4t (smt2): JALR whose EX target is 0 is a stale-rs1 / cancelled-ld-ra
-      // artifact (I4o hart0 mepc=0). I4q only skipped the NPC write, so
-      // is_mispredict still flushed IF and younger-cancelled the *correct*
-      // sequential/RAS path — hold then died in spin_lock / ecall with
-      // cookie 51b1c001 (success-cave lui 0x51b1c without addi -0x542).
-      // Drop the mispredict; SI (NrHarts==1) is unchanged (const-fold).
+      // I4t/I4v (smt2): JALR to an unusable fetch target is a stale-rs1
+      // artifact (I4o PC=0; I4u nat hart0 IAF mepc=0x8fffffff8). I4q/I4t
+      // only dropped target==0; 0x8fffffff8 is PMA-outside every execute
+      // window so the fetch is an honest IAF. Also reject page 0 (reset
+      // hole is an execute rule but never a useful jalr). SI unchanged.
       if (CVA6Cfg.NrHarts > 1 &&
           fu_data_i.operation == ariane_pkg::JALR &&
-          !(|target_address)) begin
+          (!(|target_address[CVA6Cfg.VLEN-1:12]) ||
+           !config_pkg::is_inside_execute_regions(CVA6Cfg, 64'(target_address)))) begin
         resolved_branch_o.is_mispredict = 1'b0;
         resolved_branch_o.ckpt_restore  = 1'b0;
       end

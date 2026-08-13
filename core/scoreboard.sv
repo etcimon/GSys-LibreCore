@@ -277,15 +277,42 @@ module scoreboard #(
           // enough (prologue `sd ra` is STORE and still cancelled).
           // I4n: also do not cancel non-AMO STORE of rs2==x1/x5 (stack save
           // of ra). AMO still cancels (amo_buffer). SI stays cont.5.
+          // I4ai: STORE rs2==x8 (fp save). I4aj: ALU rd==x8 && rs1==x2
+          // (fp setup). I4al: LOAD rd==x8 && rs1==x2 only (`ld s0,off(sp)` /
+          // c.ldsp). I4ao: s0 poison was a committed unaligned we_gpr (keep
+          // that commit filter). I4ap: also keep `addi t0,t0,imm` (rd==x5
+          // && rs1==x5 && use_imm) — success-cave `addi t0,t0,-0x542`
+          // completes `lui t0,0x51b1c` → `51b1babe`. I4n already keeps
+          // ld/sd of x5; ALU addi t0 was still cancelled. I4aq: also keep
+          // LOAD rs1==x8 (`lw s1,-72(s0)` @12c0a) — I4al only kept ld *into*
+          // s0 from sp. I4at: keep CTRL_FLOW rd==x1 (`jal`/`jalr` that write
+          // ra) — I4as nat is stuck refetching `jal offset_ptr` @129f0.
+          // I4af stays reverted.
           if (!(CVA6Cfg.SuperscalarEn &&
                 mem_q[cid].sbe.fu == ariane_pkg::STORE &&
                 !ariane_pkg::is_amo(mem_q[cid].sbe.op) &&
                 (mem_q[cid].sbe.rs2[4:0] == 5'd1 ||
-                 mem_q[cid].sbe.rs2[4:0] == 5'd5)) &&
+                 mem_q[cid].sbe.rs2[4:0] == 5'd5 ||
+                 mem_q[cid].sbe.rs2[4:0] == 5'd8)) &&
+              !(CVA6Cfg.SuperscalarEn &&
+                mem_q[cid].sbe.fu == ariane_pkg::CTRL_FLOW &&
+                mem_q[cid].sbe.rd == 5'd1) &&
+              !(CVA6Cfg.SuperscalarEn &&
+                mem_q[cid].sbe.fu == ariane_pkg::ALU &&
+                mem_q[cid].sbe.rd == 5'd8 &&
+                mem_q[cid].sbe.rs1[4:0] == 5'd2) &&
+              !(CVA6Cfg.SuperscalarEn &&
+                mem_q[cid].sbe.fu == ariane_pkg::ALU &&
+                mem_q[cid].sbe.rd == 5'd5 &&
+                mem_q[cid].sbe.rs1[4:0] == 5'd5 &&
+                mem_q[cid].sbe.use_imm) &&
               (mem_q[cid].sbe.fu != ariane_pkg::LOAD ||
                (CVA6Cfg.SuperscalarEn &&
                 mem_q[cid].sbe.rd != 5'd1 &&
-                mem_q[cid].sbe.rd != 5'd5))) begin
+                mem_q[cid].sbe.rd != 5'd5 &&
+                mem_q[cid].sbe.rs1[4:0] != 5'd8 &&
+                !(mem_q[cid].sbe.rd == 5'd8 &&
+                  mem_q[cid].sbe.rs1[4:0] == 5'd2)))) begin
             mem_n[cid].cancelled = 1'b1;
             mem_n[cid].sbe.valid = 1'b1;
           end
@@ -324,10 +351,14 @@ module scoreboard #(
   // Classic mispredict only. Cancel-younger on matching taken Jump without
   // NPC reseed kills correct target-path ops; with reseed it double-pushes
   // RAS on re-fetched calls. Hang-6 residual needs selective fallthrough kill.
-  // I4t: JALR-to-0 is not a real redirect on SMT (see branch_unit). A bmiss
-  // here younger-cancels the correct path (I4q hold → 51b1c001 / spin_lock).
+  // I4t/I4v/I4x: only JALR-to-unusable-target is not a bmiss. A taken Jump
+  // (trap-vector jal@3d8) must still cancel IQ fallthrough.
   assign bmiss = resolved_branch_i.valid && resolved_branch_i.is_mispredict
-                 && !(CVA6Cfg.NrHarts > 1 && !(|resolved_branch_i.target_address));
+                 && !(CVA6Cfg.NrHarts > 1 &&
+                      resolved_branch_i.cf_type == ariane_pkg::JumpR &&
+                      (!(|resolved_branch_i.target_address[CVA6Cfg.VLEN-1:12]) ||
+                       !config_pkg::is_inside_execute_regions(
+                            CVA6Cfg, 64'(resolved_branch_i.target_address))));
   // R3a: cancel window starts after the *branch* tid, not FLU_WB. FLU_WB can
   // be a same-cycle mult/ALU result (ex_stage flu mux) while the branch still
   // resolves — using FLU_WB+1 then cancels older correct-path ops (frame SDs).
@@ -357,17 +388,32 @@ module scoreboard #(
         if (cid == issue_pointer[0]) break;
         if (CVA6Cfg.NrHarts <= 1 ||
             mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
-          // Match sequential younger-cancel (I4m/n: SS LOAD except x1/x5;
-          // SS non-AMO STORE of rs2 x1/x5).
+          // Match sequential younger-cancel (I4m/n/ai/aj/al/ap/at).
           if (!(CVA6Cfg.SuperscalarEn &&
                 mem_q[cid].sbe.fu == ariane_pkg::STORE &&
                 !ariane_pkg::is_amo(mem_q[cid].sbe.op) &&
                 (mem_q[cid].sbe.rs2[4:0] == 5'd1 ||
-                 mem_q[cid].sbe.rs2[4:0] == 5'd5)) &&
+                 mem_q[cid].sbe.rs2[4:0] == 5'd5 ||
+                 mem_q[cid].sbe.rs2[4:0] == 5'd8)) &&
+              !(CVA6Cfg.SuperscalarEn &&
+                mem_q[cid].sbe.fu == ariane_pkg::CTRL_FLOW &&
+                mem_q[cid].sbe.rd == 5'd1) &&
+              !(CVA6Cfg.SuperscalarEn &&
+                mem_q[cid].sbe.fu == ariane_pkg::ALU &&
+                mem_q[cid].sbe.rd == 5'd8 &&
+                mem_q[cid].sbe.rs1[4:0] == 5'd2) &&
+              !(CVA6Cfg.SuperscalarEn &&
+                mem_q[cid].sbe.fu == ariane_pkg::ALU &&
+                mem_q[cid].sbe.rd == 5'd5 &&
+                mem_q[cid].sbe.rs1[4:0] == 5'd5 &&
+                mem_q[cid].sbe.use_imm) &&
               (mem_q[cid].sbe.fu != ariane_pkg::LOAD ||
                (CVA6Cfg.SuperscalarEn &&
                 mem_q[cid].sbe.rd != 5'd1 &&
-                mem_q[cid].sbe.rd != 5'd5))) begin
+                mem_q[cid].sbe.rd != 5'd5 &&
+                mem_q[cid].sbe.rs1[4:0] != 5'd8 &&
+                !(mem_q[cid].sbe.rd == 5'd8 &&
+                  mem_q[cid].sbe.rs1[4:0] == 5'd2)))) begin
             cancelled_mask_o[cid] = 1'b1;
           end
         end
