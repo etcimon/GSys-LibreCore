@@ -92,4 +92,5 @@ software/smt2-linux/soft-ladder/build/
 /riscv-dev/setenv.ps1
 /riscv-dev/setenv.sh
 /riscv-dev/modules.json
+/riscv-dev/local-semver.json
 /riscv-dev/.gitignore
