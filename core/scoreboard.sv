@@ -311,6 +311,12 @@ module scoreboard #(
           //
           // EXTRACT E0: keep predicate lives in g6lc_sb_keep (I4m–cf).
           // Do not add G0 here. SI still cont.5 LOAD-only keep.
+          // I13: B cancels younger by program order only (FDT getprop
+          // kept wrong-path LOADs of a0/s*). A keeps the exemption list.
+`ifdef G6LC_FETCH_B
+          mem_n[cid].cancelled = 1'b1;
+          mem_n[cid].sbe.valid = 1'b1;
+`else
           if (!g6lc_sb_keep::keep(
                   CVA6Cfg,
                   mem_q[cid].sbe.fu,
@@ -329,6 +335,7 @@ module scoreboard #(
             mem_n[cid].cancelled = 1'b1;
             mem_n[cid].sbe.valid = 1'b1;
           end
+`endif
         end
         cid = cid + 1'b1;
       end
@@ -406,6 +413,10 @@ module scoreboard #(
         if (CVA6Cfg.NrHarts <= 1 ||
             mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
           // EXTRACT E0: same keep as sequential cancel.
+          // I13: B mask matches sequential cancel (no exemption list).
+`ifdef G6LC_FETCH_B
+          cancelled_mask_o[cid] = 1'b1;
+`else
           if (!g6lc_sb_keep::keep(
                   CVA6Cfg,
                   mem_q[cid].sbe.fu,
@@ -423,6 +434,7 @@ module scoreboard #(
                   resolved_branch_i.cf_type)) begin
             cancelled_mask_o[cid] = 1'b1;
           end
+`endif
         end
         cid = cid + 1'b1;
       end

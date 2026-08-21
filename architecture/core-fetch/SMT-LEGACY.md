@@ -57,8 +57,11 @@ IRO G1gg, issue G1gq, scoreboard unusable-bmiss) skip under `G6LC_FETCH_B`; A un
 
 Sibling **arm** also skips on B: `g1ik/ln/lz`, `g1hx/hy` latches, `g1lo_cap` / `g1lo_v_q`,
 scoreboard `g1mf` / `sb_load00`, I$ `user[33:0]` sibling half (`g6lc_icache` G1iw/jl).
-Rewrite was already off; capture still ran and is now A-only. Do not extend
-`g6lc_sb_keep::keep` on B.
+Rewrite was already off; capture still ran and is now A-only.
+
+`g6lc_sb_keep::keep` / `keep_prefix` on younger-cancel skip under `G6LC_FETCH_B`
+(I13; FDT getprop kept wrong-path LOADs of a0/s*). `keep_alloc_link`, `addi_sp`
+RAW, and `cmv_abi_ptr` are unchanged this pass. Do not extend the keep list on B.
 
 ## 2. Not on the default flist — oracle frontend (4 files)
 
