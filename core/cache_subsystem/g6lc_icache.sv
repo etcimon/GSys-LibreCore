@@ -512,7 +512,8 @@ module g6lc_icache
   // compressed Branch on user[16:0]
   // for same-cycle recover. G1iv
   // stashed this — MINI-FAIL. Not a
-  // stash. SMT+SS.
+  // stash. SMT+SS. I1: B has no sibling user.
+`ifndef G6LC_FETCH_B
   logic [ICACHE_OFFSET_WIDTH-1:0] g1iw_off;
   logic [CVA6Cfg.FETCH_WIDTH-1:0] g1iw_other;
   logic                            g1iw_br;
@@ -544,6 +545,7 @@ module g6lc_icache
       (g1iw_other[22:18] == 5'd0) &&
       (g1iw_other[27:23] != 5'd0) &&
       (g1iw_other[17:16] == 2'b10);
+`endif
   // G1ki sticky last sibling pair on
   // user[33] across vaddr change —
   // HOLD-FAIL no cookie @600000
@@ -558,10 +560,13 @@ module g6lc_icache
       dreq_o.data = mem_rtrn_i.data[{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_WIDTH];
       dreq_o.user = CVA6Cfg.FETCH_USER_EN ? mem_rtrn_i.user[{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_USER_WIDTH] : '0;
     end
+    // I1 / SPEC §7: B never smuggles a sibling I$ half on user[]. A keeps G1iw/jl.
+`ifndef G6LC_FETCH_B
     if (g1iw_br)
       dreq_o.user[16:0] = {1'b1, g1iw_other[15:0]};
     if (g1jl_cjalr)
       dreq_o.user[33:17] = {1'b1, g1iw_other[31:16]};
+`endif
   end
 
   ///////////////////////////////////////////////////////

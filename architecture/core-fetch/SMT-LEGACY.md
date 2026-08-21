@@ -54,7 +54,11 @@ Porting one into `fetch_B` is a regression — [`NEGATIVE.md`](NEGATIVE.md), [`L
 `id_stage` already skips sib_cjalr `decoded_hd`, G1gw/gy expand, and G1be/cy splice under
 `G6LC_FETCH_B`. Shared-pipeline recover calls (mash, resolve `jalr_usable`, `cf_unissued`,
 IRO G1gg, issue G1gq, scoreboard unusable-bmiss) skip under `G6LC_FETCH_B`; A unchanged.
-Do not extend `g6lc_sb_keep::keep` on B.
+
+Sibling **arm** also skips on B: `g1ik/ln/lz`, `g1hx/hy` latches, `g1lo_cap` / `g1lo_v_q`,
+scoreboard `g1mf` / `sb_load00`, I$ `user[33:0]` sibling half (`g6lc_icache` G1iw/jl).
+Rewrite was already off; capture still ran and is now A-only. Do not extend
+`g6lc_sb_keep::keep` on B.
 
 ## 2. Not on the default flist — oracle frontend (4 files)
 

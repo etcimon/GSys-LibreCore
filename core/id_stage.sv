@@ -476,6 +476,8 @@ module id_stage #(
     g1ln_id_arm = '0;
     g1ln_id_rd  = '0;
     g1lz_hit    = '0;
+    // I1: B never arms sibling c.jalr recover. A keeps G1ik/ln/lz.
+`ifndef G6LC_FETCH_B
     if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
       for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
         g1lz_hit[i] = g6lc_sib_cjalr::lz_hit(
@@ -511,6 +513,7 @@ module id_stage #(
         end
       end
     end
+`endif
   end
   always_comb begin
     decoded_hd = decoded_instruction;
@@ -744,6 +747,7 @@ module id_stage #(
         g1hx_v_q <= 1'b0;
       g1hy_v_q <= 1'b0;
     end else if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
+`ifndef G6LC_FETCH_B
       for (int unsigned s = 0; s < CVA6Cfg.NrIssuePorts; s++) begin
         if (g6lc_sib_cjalr::aligned_br_op(
                 CVA6Cfg, issue_q[s].valid,
@@ -774,6 +778,7 @@ module id_stage #(
           g1hy_line_q <= fetch_entry_i[s].address[CVA6Cfg.VLEN-1:3];
         end
       end
+`endif
     end
   end
   always_comb begin
@@ -787,6 +792,7 @@ module id_stage #(
     g1mf_sb       = '0;
     if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
         CVA6Cfg.FETCH_WIDTH >= 64) begin
+`ifndef G6LC_FETCH_B
       for (int unsigned s = 0; s < CVA6Cfg.NrIssuePorts; s++) begin
         if (g6lc_sib_cjalr::load00(
                 CVA6Cfg, issue_q[s].valid,
@@ -878,6 +884,7 @@ module id_stage #(
           g1mf_sb[h]       = 1'b1;
         end
       end
+`endif
     end
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -898,6 +905,8 @@ module id_stage #(
       // retiring 00 LOAD on leftover
       // jal flush was skipped. Not
       // consume. Not G1lk. SMT+SS.
+      // I1: B does not keep a sibling-LOAD latch across flush.
+`ifndef G6LC_FETCH_B
       else if (CVA6Cfg.FETCH_WIDTH >= 64) begin
         for (int unsigned h = 0; h < CVA6Cfg.NrHarts; h++) begin
           if (g1lo_cap[h] && (g1md_cmt[h] || g1mf_sb[h])) begin
@@ -908,8 +917,12 @@ module id_stage #(
           end
         end
       end
+`else
+      else g1lo_v_q <= '0;
+`endif
     end else if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
                  CVA6Cfg.FETCH_WIDTH >= 64) begin
+`ifndef G6LC_FETCH_B
       for (int unsigned h = 0; h < CVA6Cfg.NrHarts; h++) begin
         if (g1lo_cap[h] &&
             (g1md_cmt[h] || g1mf_sb[h] ||
@@ -952,6 +965,7 @@ module id_stage #(
           end
         end
       end
+`endif
     end
   end
 

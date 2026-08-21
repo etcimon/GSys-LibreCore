@@ -492,6 +492,7 @@ module scoreboard #(
     g1mf_a3_o   = '0;
     if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
         CVA6Cfg.FETCH_WIDTH >= 64) begin
+`ifndef G6LC_FETCH_B
       for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
         if (g6lc_sib_cjalr::sb_load00(
                 CVA6Cfg, mem_q[i].issued, mem_q[i].cancelled,
@@ -506,6 +507,7 @@ module scoreboard #(
           g1mf_a3_o[mem_q[i].sbe.hart_id]   = mem_q[i].sbe.pc[3];
         end
       end
+`endif
     end
   end
 

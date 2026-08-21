@@ -159,7 +159,7 @@ One window: `FETCH_WIDTH` bits + exception sideband (`gpaddr`/`tinst`/`gva` pass
 | `g6lc_{present,sib_cjalr,fe_keep,fe_kill,lj_hide,iq_hide,leftover,rvc_enc}` | Stay with `smt_legacy`. Never instantiated on B. Inventory: [`SMT-LEGACY.md`](SMT-LEGACY.md) |
 | `g6lc_jalr_usable` on resolve | **I11:** skip under `G6LC_FETCH_B` (`branch_unit` / IRO G1gg / issue G1gq). A keeps. Predict-only is `bp_fire` |
 | `id_stage` recover latches / `make_cjalr16` | `smt_legacy` only; B ID sees memory bytes |
-| I$ sibling `user` channel | dead on B |
+| I$ sibling `user` channel | **dead on B** (`G6LC_FETCH_B` skips G1iw/jl overlay in `g6lc_icache`) |
 | `g6lc_smt_*` banks, `thread_select`, `issue_barrier`, `sb_keep` | `core/smt_legacy/` (not fetch) |
 | `core/fetch_B/` | **B workspace** — default `Flist.cva6` via `-f Flist.fetch_B` |
 
