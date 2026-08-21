@@ -320,11 +320,11 @@ module ex_stage
       end
     end
   end
-  // G1u: pair branch_unit / flu tid with the branch port, not a later
-  // one-cycle steal (ALU/CSR). SI: identity on one_cycle_data.
+  // I14: branch_unit fu_data is the CF issue port, never a later one-cycle
+  // steal. SI const-folds to fu_data_i[0]. Same pick as IRO pc/compressed/bp.
   always_comb begin
-    branch_data = one_cycle_data;
-    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
+    branch_data = fu_data_i[0];
+    if (CVA6Cfg.SuperscalarEn) begin
       for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
         if (branch_valid_i[p]) branch_data = fu_data_i[p];
       end
@@ -333,11 +333,10 @@ module ex_stage
   end
 
   // 1. ALU(s) (combinatorial)
-  // I4ak: if port0 is ALU, compute *port0* — do not let a later one-cycle
-  // port (branch/CSR/AES/ALU) steal ALU0 via one_cycle_data. Branch compare
-  // still uses one_cycle_data when port0 is not ALU. SS usually issues only
-  // one FLU op; this keeps result and tid paired if a second leaks through.
-  assign alu_data[0] = alu_valid_i[0] ? fu_data_i[0] : one_cycle_data;
+  // I14: a CF's compare uses that port's operands. I4ak: else if port0 is
+  // ALU, compute port0 — do not let a later one-cycle steal ALU0.
+  assign alu_data[0] = (|branch_valid_i) ? branch_data :
+                       (alu_valid_i[0] ? fu_data_i[0] : one_cycle_data);
 
   // Secondary ALU input: first issue port asserting alu2_valid (priority low→high)
   if (CVA6Cfg.NrALUs >= 2) begin : gen_alu2_data_sel
@@ -427,8 +426,8 @@ module ex_stage
     // Branch result as default case
     flu_result_o   = {{CVA6Cfg.XLEN - CVA6Cfg.VLEN{1'b0}}, branch_result};
     flu_trans_id_o = one_cycle_data.trans_id;
-    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 && |branch_valid_i) begin
-      // G1u: do not let ALU/mult steal the jal link WB (mini P6 0x65).
+    if (|branch_valid_i) begin
+      // I14: flu tid/result of a CF is that port, not a sibling ALU/mult.
       flu_result_o   = {{CVA6Cfg.XLEN - CVA6Cfg.VLEN{1'b0}}, branch_result};
       flu_trans_id_o = branch_data.trans_id;
     end else if (alu_valid_i[0]) begin

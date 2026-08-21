@@ -550,12 +550,30 @@ module g6lc_issue_barrier
     end
   end
 
+  // I13: registered unresolved_csr_q misses a same-cycle pair
+  // (csrrw mtvec + probe CSR). Stall younger ports on the older CSR.
+  logic [CVA6Cfg.NrIssuePorts-1:0] stall_csr_older;
+  always_comb begin
+    stall_csr_older = '0;
+    if (CVA6Cfg.SuperscalarEn) begin
+      for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
+        for (int unsigned o = 0; o < p; o++) begin
+          if (issue_valid_sb_i[o] && issue_instr_sb_i[o].fu == CSR &&
+              issue_valid_sb_i[p] &&
+              issue_instr_sb_i[p].hart_id == issue_instr_sb_i[o].hart_id)
+            stall_csr_older[p] = 1'b1;
+        end
+      end
+    end
+  end
+
   for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_gate
     assign issue_valid_o[p] =
         issue_valid_sb_i[p]
         && !(unresolved_cf_q[issue_instr_sb_i[p].hart_id] &&
              !prefix_through_cf[p] && !leftover_jump_through_cf[p])
         && !unresolved_csr_q[issue_instr_sb_i[p].hart_id]
+        && !stall_csr_older[p]
         && !(CVA6Cfg.SuperscalarEn &&
              unresolved_sp_q[issue_instr_sb_i[p].hart_id])
         && !stall_store_ra_id[p]

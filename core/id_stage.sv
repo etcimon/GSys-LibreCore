@@ -228,6 +228,12 @@ module id_stage #(
           (fetch_entry_i[i].instruction[22:18] == 5'd0) &&
           (fetch_entry_i[i].instruction[27:23] != 5'd0) &&
           (fetch_entry_i[i].instruction[17:16] == 2'b10);
+      // I1: B never synthesises a JALR. G1gw/gy matched c.srli
+      // (shamt=32, [15:12]=1001 [6:2]=0) at pc[2:1]==01 because they
+      // omitted the C2 quadrant. A/slfix keeps the recover.
+`ifdef G6LC_FETCH_B
+      assign instruction_rvc[i] = instruction_rvc_raw[i];
+`else
       assign instruction_rvc[i] =
           (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
            (fetch_entry_i[i].address[2:1] == 2'b01) &&
@@ -237,6 +243,7 @@ module id_stage #(
                           : fetch_entry_i[i].instruction[27:23]),
                  3'b000, 5'b00001, riscv::OpcodeJalr}
               : instruction_rvc_raw[i];
+`endif
     end
 
     if (CVA6Cfg.SuperscalarEn) begin
@@ -423,7 +430,11 @@ module id_stage #(
         .mcbze_i,
         .scbze_i,
         .hcbze_i,
+`ifdef G6LC_FETCH_B
+        .smt_hart_id_i             (fetch_entry_i[i].hart_id),
+`else
         .smt_hart_id_i             (smt_hart_id_i),
+`endif
         .instruction_o             (decoded_instruction[i]),
         .orig_instr_o              (orig_instr[i]),
         .is_control_flow_instr_o   (is_control_flow_instr[i]),
@@ -504,6 +515,8 @@ module id_stage #(
   always_comb begin
     decoded_hd = decoded_instruction;
     is_cf_hd   = is_control_flow_instr;
+    // I1: B issues the decoder's class. sib_cjalr / G1hd–ij stay A only.
+`ifndef G6LC_FETCH_B
     if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
       for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
         if (g6lc_sib_cjalr::mid_cjalr(
@@ -677,6 +690,7 @@ module id_stage #(
         // looks like c.beqz/c.bnez).
       end
     end
+`endif
   end
   logic        g1hx_v_q;
   logic [15:0] g1hx_hw_q;
@@ -988,6 +1002,9 @@ module id_stage #(
       end
       issue_n = compacted;
 
+      // I6: B issues IQ order. G1be/cy/em/ev splice an older fetch in
+      // front of a parked branch — A-only (smt_legacy).
+`ifndef G6LC_FETCH_B
       // G1be: ID[0] is a Branch and fetch[0] is an older same-line
       // NoCF dest (c.li@0x4d0 vs beq@0x4d4). Insert the prefix at
       // port 0, shift the Branch to port 1. Only when port 1 is
@@ -1093,6 +1110,7 @@ module id_stage #(
         };
         fetch_entry_ready_o[0] = 1'b1;
       end
+`endif
 
       // Fill empty tail from fetch ports as a *strict prefix* starting at
       // fetch port 0. Never skip a stalled/invalid earlier fetch port to take

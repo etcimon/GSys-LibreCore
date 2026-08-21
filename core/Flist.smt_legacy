@@ -1,0 +1,31 @@
+//////////////////////////////////////////////////////////////////////////////
+//
+// Copyright 2026 Etienne Cimon
+//
+// SPDX-License-Identifier: MIT
+//
+///////////////////////////////////////////////////////////////////////////////
+//
+// Opt-in g1* frontend oracle (handoff A), retired from core/frontend.
+// Mutually exclusive with the default applied fetch (core/frontend +
+// G6LC_FETCH_B + core/smt/g6lc_fetch_{pkg,dbg}).
+//
+// Rebuild the oracle harness:
+//   1. drop +define+G6LC_FETCH_B and core/smt/g6lc_fetch_{pkg,dbg}.sv
+//   2. comment core/instr_realign.sv and
+//              core/frontend/{frontend,instr_queue,instr_scan}.sv
+//   3. add     -f Flist.smt_legacy
+//   4. leave   predictors (btb/bht/ras/g6lc_bp_*) and
+//              g6lc_way_predictor / g6lc_rrip_repl in Flist.cva6
+//
+// Do not compile both frontends. SMT banks and recover packages live here.
+//
+///////////////////////////////////////////////////////////////////////////////
+
++incdir+${CVA6_REPO_DIR}/core/include/
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include/
+
+${CVA6_REPO_DIR}/core/smt_legacy/instr_realign.sv
+${CVA6_REPO_DIR}/core/smt_legacy/instr_scan.sv
+${CVA6_REPO_DIR}/core/smt_legacy/instr_queue.sv
+${CVA6_REPO_DIR}/core/smt_legacy/frontend.sv

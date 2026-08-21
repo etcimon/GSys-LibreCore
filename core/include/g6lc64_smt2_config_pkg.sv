@@ -178,16 +178,19 @@ package cva6_config_pkg;
       // I4ag: identity/sign-ext execute is .text only (ends 0x1d918);
       // separate 4 KiB windows for fw_payload @0x80200000. I4v then
       // refuses JALR into FDT/rodata. Cached stays 1 GiB.
-      NrExecuteRegionRules: unsigned'(6),
+      // Page-0 is not text: a resolved ret@hsm to 0x81c was fetchable
+      // and decoded as garbage (nat HSM). Bootrom stays @0x10000.
+      // I11: resolve is still unfiltered; I19 only suppresses predict.
+      NrExecuteRegionRules: unsigned'(5),
       ExecuteRegionAddrBase: 1024'({
         64'hffff_ffff_8020_0000, 64'h8020_0000,
         64'hffff_ffff_8000_0000, 64'h8000_0000,
-        64'h1_0000, 64'h0
+        64'h1_0000
       }),
       ExecuteRegionLength: 1024'({
         64'h1000, 64'h1000,
         64'h1e000, 64'h1e000,
-        64'h1_0000, 64'h1000
+        64'h1_0000
       }),
       NrCachedRegionRules: unsigned'(2),
       CachedRegionAddrBase: 1024'({64'hffff_ffff_8000_0000, 64'h8000_0000}),

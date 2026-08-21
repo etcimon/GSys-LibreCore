@@ -46,6 +46,7 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `branch-prediction/` | More / smarter predictors (gshare, TAGE, loop, indirect) | Microarchitectural, in-core | `agents/guides/AGENTS-branch-prediction.md` |
 | `speculative-execution/` | **FSE** deep window + recovery plan (`full-speculation-architecture.md`, `UPDATE-PLAN.md`); `DeepSpecEn` S1 | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` |
 | `out-of-order/` | Slice-OoO (MLP) then full rename/ROB/LSQ multi-issue OoO | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` + `router-core-upgrade-program.md` |
+| `core-fetch/` | Instruction supply: default = applied fetch in `core/frontend`; tree in `core/smt/`; g1\* oracle in `core/smt_legacy/`; R6–R11 in `core/fetch_B/` | Microarchitectural, in-core | `firmware-boot-principles.md`, `core-fetch/SPEC.md` |
 | `multi-threading/` | Simultaneous multithreading (hart-state replication) | New micro-arch (green-field) | `agents/guides/AGENTS-soc-readiness.md` |
 | `multi-core/` | Multi-hart tiles, coherence, interrupt scaling | SoC integration | `agents/guides/AGENTS-l2l3-cache.md`, `-soc-readiness.md` |
 | `l2-l3-cache/` | Memory-side L2 / SoC L3 (LLC) | SoC integration (not an L1 edit) | `agents/guides/AGENTS-l2l3-cache.md` |
@@ -72,8 +73,10 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `ai-matrix/hard-tests.md` | **HARD / directed ELF map:** narrow\|smoke\|ci\|peak surfaces, green results, I0–I4 coverage vs clustering next step. |
 | `ai-matrix/frameworks-virt-pcie.md` | Host multi-phase: soft virt-ai-pcie → SV HARD → optional `--from-timing`. |
 | `ara-vector-attach.md` | U10ᵇ Ara/RVV flist + `server_math_v` package contract |
+| `firmware-boot-principles.md` | Handoff then fetch-as-A: I1–I28, peels/P1–P4 for capabilities |
+| `core-fetch/` | Fetch spec; after `smt_legacy`, A for capability A/B |
 | `multi-threading/smt2-bringup.md` | U6.1 SMT2 enable + dual-thread Linux/OpenSBI checklist |
-| `multi-threading/soft-ladder/` | DI OpenSBI soft-ladder promotion (B1 RTL / B2 FW / B3 harness). **`CONTRACT.md`**: G1 recover vs all-feature / `NrCores` scale (named envelopes, union soak, no mega-package) |
+| `multi-threading/soft-ladder/` | Evidence (tag `g1-archive`). A/`smt_legacy` soak notes; **`CONTRACT.md`** envelopes |
 | `server-math-hypervisor.md` | U9/U10 detail: vstimecmp, server config, RVV enable order |
 | `Architecture-research-todo-drafts.md` | Earlier research roadmap that the program above refines for a power-bound target. |
 
@@ -81,8 +84,10 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 
 | Area | Where it lives | Default |
 |------|----------------|---------|
-| U1 prediction fabric | `core/frontend/cva6_bp_*.sv` | TAGE_LITE on primary 64b target |
-| U2 FTQ / FDIP / loop buffer | `core/frontend/g6lc_ftq.sv` etc. | On primary 64b target |
+| U1 prediction fabric | `core/frontend/` **or** `core/fetch/` (A/B swap; predictors identical) | TAGE_LITE on primary 64b target |
+| U2 FTQ / FDIP / loop buffer | same tree as U1 | On primary 64b target |
+| Fetch handoff A → `smt_legacy` | `core/frontend/` + `g6lc_{present,sib_cjalr,…}` | slfix oracle until fetch hold matches |
+| Fetch (handoff B, then **A**) | `core/fetch/` + `Flist.fetch` | pin `sbi_scratch_init` @`3912`; **after retirement**, capability A/B + peels |
 | U3 way-pred / RRIP | `core/cache_subsystem/g6lc_way_predictor.sv`, `g6lc_rrip_repl.sv`, hpdcache | Target-dependent |
 | U4 slice-OoO | `core/cva6_slice_*.sv` | **Off** (`SliceOoOEn=0`) |
 | U5 full OoO | `core/ooo/*` | **Production gated** (`OoOEn`; identity when 0) |

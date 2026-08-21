@@ -60,29 +60,10 @@ module branch_unit #(
     // set the jump base, for JALR we need to look at the register, for all other control flow instructions we can take the current PC
     automatic logic [CVA6Cfg.VLEN-1:0] jump_base;
     automatic logic [CVA6Cfg.VLEN-1:0] instr_pc;
-    automatic logic [63:0] instr_pc64;
-    // G1r: SMT+SS CF PC is the issuing instr (IRO operand_c), not the
-    // shared EX pc_i flop. SI / no-carry: identity on pc_i.
-    instr_pc64 = g6lc_cf_pc::pc(
-        CVA6Cfg,
-        (fu_data_i.fu == ariane_pkg::CTRL_FLOW),
-        64'(pc_i),
-        64'(fu_data_i.operand_c)
-    );
-    instr_pc = instr_pc64[CVA6Cfg.VLEN-1:0];
+    // I14: pc_i is the CF issue port (IRO / ex_stage pick). Not operand_c.
+    instr_pc = pc_i;
     // TODO(zarubaf): The ALU can be used to calculate the branch target
     jump_base = (fu_data_i.operation == ariane_pkg::JALR) ? fu_data_i.operand_a[CVA6Cfg.VLEN-1:0] : instr_pc;
-    // G1gp: JALR resolve uses usable RF
-    // (operand_b, stashed at IRO) when
-    // operand_a is unusable. Not G1gg
-    // mux-only. Not G1gf stall. SMT+SS.
-    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
-        fu_data_i.operation == ariane_pkg::JALR &&
-        !g6lc_jalr_usable::usable(
-            CVA6Cfg, CVA6Cfg.VLEN, 64'(fu_data_i.operand_a)) &&
-        g6lc_jalr_usable::usable(
-            CVA6Cfg, CVA6Cfg.VLEN, 64'(fu_data_i.operand_b)))
-      jump_base = fu_data_i.operand_b[CVA6Cfg.VLEN-1:0];
 
     resolve_branch_o = 1'b0;
     resolved_branch_o.target_address = {CVA6Cfg.VLEN{1'b0}};

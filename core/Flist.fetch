@@ -1,0 +1,50 @@
+//////////////////////////////////////////////////////////////////////////////
+//
+// Copyright 2026 Etienne Cimon
+//
+// SPDX-License-Identifier: MIT
+//
+///////////////////////////////////////////////////////////////////////////////
+//
+// Manifest for the retired fetch tree now at core/smt/ (pkg + dbg + supply
+// copies). Default Flist.cva6 already applies those copies to core/frontend
+// and core/instr_realign and lists pkg/dbg — do not also -f this file.
+//
+// Mutually exclusive with Flist.smt_legacy (g1* oracle). Do not compile
+// core/smt/frontend.sv together with core/frontend/frontend.sv.
+//
+///////////////////////////////////////////////////////////////////////////////
+
++incdir+${CVA6_REPO_DIR}/core/include/
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include/
+
+// Geometry / value-table package (before modules that call it)
+${CVA6_REPO_DIR}/core/smt/g6lc_fetch_pkg.sv
+
+// Instruction supply
+${CVA6_REPO_DIR}/core/smt/instr_realign.sv
+${CVA6_REPO_DIR}/core/smt/instr_scan.sv
+${CVA6_REPO_DIR}/core/smt/instr_queue.sv
+
+// Branch prediction
+${CVA6_REPO_DIR}/core/smt/btb.sv
+${CVA6_REPO_DIR}/core/smt/bht.sv
+${CVA6_REPO_DIR}/core/smt/bht2lvl.sv
+${CVA6_REPO_DIR}/core/smt/ras.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_bp_gshare.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_bp_ghist.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_bp_ckpt.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_bp_tage_table.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_bp_tage.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_bp_loop.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_bp_ittage.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_bp_statcor.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_bp_top.sv
+
+// Decoupled fetch (FtqDepth != 0)
+${CVA6_REPO_DIR}/core/smt/g6lc_ftq.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_fdip.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_loop_buffer.sv
+
+${CVA6_REPO_DIR}/core/smt/frontend.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_fetch_dbg.sv

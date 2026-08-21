@@ -35,6 +35,10 @@ U   util/**
 # LibreCore-original RTL: sole-authorship modules (Case A).
 R   core/ooo/**
 R   core/smt/**
+R   core/smt/g6lc_fetch_pkg.sv
+R   core/smt/g6lc_fetch_dbg.sv
+R   core/smt_legacy/g6lc_*.sv
+R   core/smt_legacy/frontend.sv
 R   core/g6lc_slice_*.sv
 R   core/g6lc_bp_*.sv
 R   core/frontend/g6lc_bp_*.sv

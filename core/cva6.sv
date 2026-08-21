@@ -440,8 +440,6 @@ module cva6
   exception_t ex_commit;  // exception from commit stage
   bp_resolve_t resolved_branch;
   bp_resolve_t resolved_branch_fe;
-  logic                    g1gq_redir;
-  logic [CVA6Cfg.VLEN-1:0] g1gq_tgt;
   logic [CVA6Cfg.NrHarts-1:0] g1mf_v;
   logic [CVA6Cfg.NrHarts-1:0][4:0] g1mf_rd;
   logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:4] g1mf_line;
@@ -803,6 +801,13 @@ module cva6
   logic [CVA6Cfg.NrHarts-1:0][4:0] g1lq_rd;
   logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:4] g1lq_line;
   logic [CVA6Cfg.NrHarts-1:0] g1lq_a3;
+`ifdef G6LC_FETCH_B
+  assign g1fh_csr_a0 = 1'b0;
+  assign g1lq_v = '0;
+  assign g1lq_rd = '0;
+  assign g1lq_line = '0;
+  assign g1lq_a3 = '0;
+`endif
   frontend #(
       .CVA6Cfg(CVA6Cfg),
       .bp_resolve_t(bp_resolve_t),
@@ -819,6 +824,9 @@ module cva6
       .halt_i             (halt_ctrl),
       .halt_frontend_i    (halt_frontend),
       .set_pc_commit_i    (set_pc_ctrl_pcgen),
+`ifdef G6LC_FETCH_B
+      .commit_hart_i      (whart_commit_id[0]),
+`endif
       .pc_commit_i        (pc_commit),
       .ex_valid_i         (ex_commit.valid),
       .resolved_branch_i  (resolved_branch_fe),
@@ -836,12 +844,15 @@ module cva6
       .icache_dreq_i      (icache_dreq_cache_if),
       .fetch_entry_o      (fetch_entry_if_id),
       .fetch_entry_valid_o(fetch_valid_if_id),
-      .fetch_entry_ready_i(fetch_ready_id_if),
+      .fetch_entry_ready_i(fetch_ready_id_if)
+`ifndef G6LC_FETCH_B
+      ,
       .g1fh_csr_a0_o      (g1fh_csr_a0),
       .g1lq_v_o           (g1lq_v),
       .g1lq_rd_o          (g1lq_rd),
       .g1lq_line_o        (g1lq_line),
       .g1lq_a3_o          (g1lq_a3)
+`endif
   );
 
   g6lc_smt_pc_bank #(
@@ -853,8 +864,14 @@ module cva6
       .npc_live_i      (smt_npc_live),
       .active_hart_i   (smt_active_hart),
       .switch_i        (smt_switch),
+`ifdef G6LC_FETCH_B
+      // I10: snapshot npc_live only. t0 immediate rewind is A-only (LEDGER I4bl).
+      .npc_alt_valid_i (1'b0),
+      .npc_alt_i       ('0),
+`else
       .npc_alt_valid_i (smt_t0_rewind),
       .npc_alt_i       (smt_t0_alt),
+`endif
       .npc_restore_o(smt_npc_restore),
       .restore_o    (smt_pc_restore)
   );
@@ -988,6 +1005,10 @@ module cva6
       && (smt_t0_alt[CVA6Cfg.VLEN-1:12] == smt_npc_live[CVA6Cfg.VLEN-1:12])
       && (smt_t0_alt < smt_npc_live)
       && ((smt_npc_live - smt_t0_alt) <= {{CVA6Cfg.VLEN - 5{1'b0}}, 5'd16});
+`ifdef G6LC_FETCH_B
+  logic unused_t0_bank;
+  assign unused_t0_bank = smt_t0_rewind | (|smt_t0_alt);
+`endif
   assign smt_miss_clear  = ~dcache_miss_cache_perf & ~icache_miss_cache_perf & ~stall_issue;
   assign smt_long_block  = flush_ctrl_ex;
 
@@ -1279,9 +1300,6 @@ module cva6
       .decoded_instr_ack_o     (issue_instr_issue_id),
       .g1fh_csr_a0_i           (g1fh_csr_a0),
       .g1fh_hart_i             (smt_active_hart),
-      .npc_i                   (smt_npc_live),
-      .g1gq_redir_o            (g1gq_redir),
-      .g1gq_tgt_o              (g1gq_tgt),
       .g1mf_v_o                (g1mf_v),
       .g1mf_rd_o               (g1mf_rd),
       .g1mf_line_o             (g1mf_line),
@@ -1370,19 +1388,11 @@ module cva6
       .orig_instr_aes_bits  (orig_instr_aes)
   );
 
-  // G1gq: late JALR redirect after commit. Keep
-  // EX resolved_branch for issue/SB; frontend
-  // and controller see the salvage target.
-  always_comb begin
-    resolved_branch_fe = resolved_branch;
-    if (g1gq_redir) begin
-      resolved_branch_fe.valid          = 1'b1;
-      resolved_branch_fe.is_mispredict  = 1'b1;
-      resolved_branch_fe.is_taken       = 1'b1;
-      resolved_branch_fe.cf_type        = ariane_pkg::JumpR;
-      resolved_branch_fe.target_address = g1gq_tgt;
-    end
-  end
+  // I8: the front end sees exactly the resolved branch. G1gq forged a second
+  // "mispredict" here from a commit-time register-file peek, so the front end and
+  // the scoreboard disagreed about what resolved. Reverted — redirect sources are
+  // enumerated in architecture/core-fetch/SPEC.md §5.
+  assign resolved_branch_fe = resolved_branch;
 
   // ---------
   // EX

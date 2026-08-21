@@ -38,6 +38,12 @@ ${CVA6_REPO_DIR}/vendor/pulp-platform/fpga-support/rtl/SyncDpRam_ind_r_w.sv
 +incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/include/
 +incdir+${CVA6_REPO_DIR}/common/local/util/
 
+// Default instruction supply is the former core/fetch tree (applied to
+// core/frontend + core/instr_realign). Drop this define and swap frontend
+// files for the smt_legacy oracle (Flist.smt_legacy).
++define+G6LC_FETCH_B
+${CVA6_REPO_DIR}/core/smt/g6lc_fetch_pkg.sv
+
 // Floating point unit
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_pkg.sv
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_cast_multi.sv
@@ -143,18 +149,20 @@ ${CVA6_REPO_DIR}/core/aes.sv
 // Note: depends on fpnew_pkg, above
 ${CVA6_REPO_DIR}/core/fpu_wrap.sv
 // EXTRACT E2–E9 + leftover packages (before branch_unit / controller / compressed_decoder)
-${CVA6_REPO_DIR}/core/smt/g6lc_rvc_enc.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_jalr_usable.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_cf_unissued.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_fe_keep.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_fe_kill.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_iq_hide.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_sib_cjalr.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_present.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_leftover.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_lj_hide.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_rvc_enc.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_jalr_usable.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_cf_unissued.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_fe_keep.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_fe_kill.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_iq_hide.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_sib_cjalr.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_present.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_leftover.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_lj_hide.sv
 // G1r: per-instr CF PC (before branch_unit)
-${CVA6_REPO_DIR}/core/smt/g6lc_cf_pc.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_cf_pc.sv
+// I14: CF issue-port pick (before branch_unit / IRO / ex_stage)
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_ex_id.sv
 ${CVA6_REPO_DIR}/core/branch_unit.sv
 ${CVA6_REPO_DIR}/core/compressed_decoder.sv
 ${CVA6_REPO_DIR}/core/macro_decoder.sv
@@ -168,7 +176,7 @@ ${CVA6_REPO_DIR}/core/ex_stage.sv
 ${CVA6_REPO_DIR}/core/instr_realign.sv
 ${CVA6_REPO_DIR}/core/id_stage.sv
 // G1h: IRO calls g6lc_sb_keep::cmv_abi_ptr / exec_region_base
-${CVA6_REPO_DIR}/core/smt/g6lc_sb_keep.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_sb_keep.sv
 ${CVA6_REPO_DIR}/core/issue_read_operands.sv
 ${CVA6_REPO_DIR}/core/g6lc_slice_ist.sv
 ${CVA6_REPO_DIR}/core/g6lc_slice_steer.sv
@@ -176,12 +184,12 @@ ${CVA6_REPO_DIR}/core/g6lc_slice_iq.sv
 ${CVA6_REPO_DIR}/core/g6lc_slice_rmt.sv
 ${CVA6_REPO_DIR}/core/g6lc_slice_dispatch.sv
 // U6.1 SMT (thread select / hart state / banked RF / dual PC / banked CSR)
-${CVA6_REPO_DIR}/core/smt/g6lc_thread_select.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_hart_state.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_smt_regfile.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_smt_pc_bank.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_smt_csr_bank.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_issue_barrier.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_thread_select.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_hart_state.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_smt_regfile.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_smt_pc_bank.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_smt_csr_bank.sv
+${CVA6_REPO_DIR}/core/smt_legacy/g6lc_issue_barrier.sv
 // U5 experimental OoO (rename/IQ/ROB/LSQ/memdep; gated by OoOEn in issue_stage)
 ${CVA6_REPO_DIR}/core/ooo/g6lc_ooo_pkg.sv
 ${CVA6_REPO_DIR}/core/ooo/g6lc_rat.sv
@@ -238,6 +246,7 @@ ${CVA6_REPO_DIR}/core/frontend/ras.sv
 ${CVA6_REPO_DIR}/core/frontend/instr_scan.sv
 ${CVA6_REPO_DIR}/core/frontend/instr_queue.sv
 ${CVA6_REPO_DIR}/core/frontend/frontend.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_fetch_dbg.sv
 
 // Cache subsystem
 ${CVA6_REPO_DIR}/core/cache_subsystem/wt_dcache_ctrl.sv

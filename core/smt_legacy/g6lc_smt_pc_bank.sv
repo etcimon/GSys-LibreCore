@@ -57,7 +57,8 @@ module g6lc_smt_pc_bank
         // That poisons the incoming bank with the outgoing PC — hart1 then
         // executes boot-hart code with a reset SP (I4q hold sp1=0x20 / I4t
         // ecall_unregister mcause=4). I4p still applies: never bank 0.
-        // I4bl: aligned addi or lui-line-start t0 rewind (npc_alt_valid).
+        // I10: snapshot only on switch into the outgoing bank. Never bank 0.
+        // npc_alt is A-only t0 rewind (tied off under G6LC_FETCH_B).
         if (switch_i) begin
           if (npc_alt_valid_i && |npc_alt_i)
             npc_bank_q[prev_hart_q] <= npc_alt_i;

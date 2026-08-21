@@ -171,6 +171,7 @@ module issue_read_operands
   logic               [        CVA6Cfg.VLEN-1:0]                   pc_n;
   logic               [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] branch_hart_n;
   logic                                                            is_compressed_instr_n;
+  logic                                                            is_zcmt_n;
   branchpredict_sbe_t                                              branch_predict_n;
   logic               [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] imm_forward_rs3;
 
@@ -971,24 +972,8 @@ module issue_read_operands
           {CVA6Cfg.XLEN - CVA6Cfg.VLEN{issue_instr_i[i].pc[CVA6Cfg.VLEN-1]}}, issue_instr_i[i].pc
         };
       end
-      // G1r: carry this CF's PC in operand_c so branch_unit next_pc /
-      // non-JALR jump_base are not the shared EX pc_o (G1p). Mini P6
-      // jal retired P5's 0x14c. SMT+SS only. SI: operand_c stays 0.
-      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
-          issue_instr_i[i].fu == CTRL_FLOW) begin
-        fu_data_n[i].operand_c = {
-          {CVA6Cfg.XLEN - CVA6Cfg.VLEN{issue_instr_i[i].pc[CVA6Cfg.VLEN-1]}},
-          issue_instr_i[i].pc
-        };
-        // G1hg: carry orig 16-bit in
-        // operand_c_hi so EX can recover a
-        // mid-line Branch that is exact
-        // c.jalr. Not G1he all Branch.
-        // SMT+SS. SI: stays 0.
-        fu_data_n[i].operand_c_hi = {
-          {CVA6Cfg.XLEN - 32{1'b0}}, orig_instr_i[i]
-        };
-      end
+      // I14: CF PC / compressed / bp ride the issue-port identity pick
+      // (below), not operand_c. operand_c stays the Zacas/FP third source.
 
       // use the zimm as operand a
       if (issue_instr_i[i].use_zimm) begin
@@ -1009,15 +994,8 @@ module issue_read_operands
         fu_data_n[i].operand_b_hi = casq_new_hi_q;
         fu_data_n[i].operand_c_hi = casq_exp_hi_q;
       end
-      // G1gp: carry RF rs1 in operand_b so EX
-      // jalr resolve can salvage a usable
-      // target when operand_a is unusable.
-      // Not G1gg mux-only. Not G1gf stall.
-      // SMT+SS. JALR is CTRL_FLOW so use_imm
-      // does not occupy operand_b.
-      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
-          issue_instr_i[i].op == ariane_pkg::JALR)
-        fu_data_n[i].operand_b = operand_a_regfile[i];
+      // I17: JALR base is forwarded rs1 (operand_a). Do not stash a
+      // second copy in operand_b.
     end
   end
 
@@ -1492,53 +1470,32 @@ module issue_read_operands
   // ----------------------
 
   always_comb begin
-    // G1p: do not zero the EX PC on a non-CF issue cycle. pc_o used to
-    // default to 0 every cycle; a jal then retired next_pc=4 and I4as
-    // dropped we_gpr to ra (RF stayed the previous link — mini P6 0x65
-    // P5 0x14c). SMT+SS: hold and capture only an acked CF. SI keeps
-    // the old default-0 path (const-fold).
-    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
-      pc_n                  = pc_o;
-      is_compressed_instr_n = is_compressed_instr_o;
-      branch_predict_n      = branch_predict_o;
-      branch_hart_n         = branch_hart_o;
+    // I14: EX identity is the CF issue port this cycle (same pick as
+    // branch_valid_n / ex_stage branch_data). No G1p hold of the last CF.
+    // SI (one port) const-folds to port 0. No CF → zeros; branch_unit is
+    // silent when |branch_valid is 0.
+    pc_n                  = '0;
+    is_compressed_instr_n = 1'b0;
+    is_zcmt_n             = 1'b0;
+    branch_predict_n      = {cf_t'(0), {CVA6Cfg.VLEN{1'b0}}};
+    branch_hart_n         = '0;
+    if (CVA6Cfg.SuperscalarEn) begin
       for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
-        if (issue_instr_valid_i[p] && issue_ack_o[p] &&
-            issue_instr_i[p].fu == CTRL_FLOW) begin
+        if (branch_valid_n[p]) begin
           pc_n                  = issue_instr_i[p].pc;
           is_compressed_instr_n = issue_instr_i[p].is_compressed;
+          is_zcmt_n             = issue_instr_i[p].is_zcmt;
           branch_predict_n      = issue_instr_i[p].bp;
           branch_hart_n         = issue_instr_i[p].hart_id;
         end
       end
-      if (issue_instr_valid_i[0] && issue_ack_o[0] &&
-          issue_instr_i[0].fu == CTRL_FLOW) begin
-        pc_n                  = issue_instr_i[0].pc;
-        is_compressed_instr_n = issue_instr_i[0].is_compressed;
-        branch_predict_n      = issue_instr_i[0].bp;
-        branch_hart_n         = issue_instr_i[0].hart_id;
-      end
-    end else begin
-      pc_n = '0;
-      is_compressed_instr_n = 1'b0;
-      branch_predict_n = {cf_t'(0), {CVA6Cfg.VLEN{1'b0}}};
-      branch_hart_n = '0;
-      if (CVA6Cfg.SuperscalarEn) begin
-        for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
-          if (issue_instr_i[p].fu == CTRL_FLOW) begin
-            pc_n                  = issue_instr_i[p].pc;
-            is_compressed_instr_n = issue_instr_i[p].is_compressed;
-            branch_predict_n      = issue_instr_i[p].bp;
-            branch_hart_n         = issue_instr_i[p].hart_id;
-          end
-        end
-      end
-      if (issue_instr_i[0].fu == CTRL_FLOW) begin
-        pc_n                  = issue_instr_i[0].pc;
-        is_compressed_instr_n = issue_instr_i[0].is_compressed;
-        branch_predict_n      = issue_instr_i[0].bp;
-        branch_hart_n         = issue_instr_i[0].hart_id;
-      end
+    end
+    if (branch_valid_n[0]) begin
+      pc_n                  = issue_instr_i[0].pc;
+      is_compressed_instr_n = issue_instr_i[0].is_compressed;
+      is_zcmt_n             = issue_instr_i[0].is_zcmt;
+      branch_predict_n      = issue_instr_i[0].bp;
+      branch_hart_n         = issue_instr_i[0].hart_id;
     end
     x_transaction_rejected_n = 1'b0;
     if (issue_instr_i[0].fu == CVXIF) begin
@@ -1574,10 +1531,7 @@ module issue_read_operands
       branch_hart_o <= branch_hart_n;
       is_compressed_instr_o <= is_compressed_instr_n;
       branch_predict_o <= branch_predict_n;
-      if (issue_instr_i[0].fu == CTRL_FLOW) begin
-        if (CVA6Cfg.RVZCMT) is_zcmt_o <= issue_instr_i[0].is_zcmt;
-        else is_zcmt_o <= '0;
-      end
+      is_zcmt_o <= (CVA6Cfg.RVZCMT) ? is_zcmt_n : 1'b0;
       x_transaction_rejected_o <= x_transaction_rejected_n;
     end
   end
