@@ -92,7 +92,14 @@ module scoreboard #(
     // Issue pointer - RVFI
     output logic [ CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rvfi_issue_pointer_o,
     // Commit pointer - RVFI
-    output logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rvfi_commit_pointer_o
+    output logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rvfi_commit_pointer_o,
+    // G1mf: result-valid aligned-00 RVI
+    // LOAD (issued, not cancelled) for
+    // ID g1lo. Flop only — not G1lm.
+    output logic [CVA6Cfg.NrHarts-1:0] g1mf_v_o,
+    output logic [CVA6Cfg.NrHarts-1:0][4:0] g1mf_rd_o,
+    output logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:4] g1mf_line_o,
+    output logic [CVA6Cfg.NrHarts-1:0] g1mf_a3_o
 );
 
   // this is the FIFO struct of the issue queue
@@ -176,7 +183,15 @@ module scoreboard #(
 
     // if we got an acknowledge from the issue stage, put this scoreboard entry in the queue
     for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
-      if (decoded_instr_valid_i[i] && decoded_instr_ack_o[i] && !flush_unissued_instr_i) begin
+      // G1t: link-jal is not unissued fallthrough. IRO flush_i is
+      // flush_unissued — without this the jal is popped and never
+      // allocated (mini P6 0x65). SI: alloc is !flush_unissued.
+      if (decoded_instr_valid_i[i] && decoded_instr_ack_o[i] &&
+          g6lc_sb_keep::alloc(
+              CVA6Cfg,
+              flush_unissued_instr_i,
+              decoded_instr_i[i].fu,
+              decoded_instr_i[i].rd[4:0])) begin
         // the decoded instruction we put in there is valid (1st bit)
         // increase the issue counter and advance issue pointer
         num_issue += 'd1;
@@ -191,6 +206,20 @@ module scoreboard #(
         mem_n[issue_pointer[i]].sbe.p_rs2 = '0;
         mem_n[issue_pointer[i]].sbe.p_rd  = '0;
         mem_n[issue_pointer[i]].sbe.ooo_renamed = 1'b0;
+        // G1v: link-jal result is pc+ilen, not the J-imm. Flu may still
+        // overwrite. SMT+SS only. SI: result stays the immediate.
+        if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+            g6lc_sb_keep::link_jal(
+                CVA6Cfg.SuperscalarEn,
+                decoded_instr_i[i].fu,
+                decoded_instr_i[i].rd[4:0])) begin
+          mem_n[issue_pointer[i]].sbe.result = g6lc_sb_keep::link(
+              64'(decoded_instr_i[i].pc),
+              decoded_instr_i[i].is_compressed);
+          // G1x: retire pc+ilen without waiting for flu. EX still
+          // resolves the jump. SI: valid stays 0 until WB.
+          mem_n[issue_pointer[i]].sbe.valid = 1'b1;
+        end
       end
     end
 
@@ -219,7 +248,15 @@ module scoreboard #(
         end else begin
           mem_n[trans_id_i[i]].sbe.valid = 1'b1;
         end
-        mem_n[trans_id_i[i]].sbe.result = wbdata_i[i];
+        // G1w: flu of a link-jal sets valid (above) but must not replace
+        // G1v's alloc-time pc+ilen with a stale next_pc (mini P6 0x14c).
+        // SI / no-link: take wbdata (identity).
+        if (!g6lc_sb_keep::keep_alloc_link(
+                CVA6Cfg,
+                mem_q[trans_id_i[i]].sbe.fu,
+                mem_q[trans_id_i[i]].sbe.rd[4:0],
+                64'(mem_q[trans_id_i[i]].sbe.result)))
+          mem_n[trans_id_i[i]].sbe.result = wbdata_i[i];
         // save the target address of a branch (needed for debug in commit stage)
         if (CVA6Cfg.DebugEn) begin
           mem_n[trans_id_i[i]].sbe.bp.predict_address = resolved_branch_i.target_address;
@@ -272,47 +309,23 @@ module scoreboard #(
           // so commit can drop without waiting for WB.
           // NrHarts>1: same-hart filter above preserves peer SMT windows.
           //
-          // I4m: still cancel younger SS LOAD, but *not* link restores
-          // (rd==x1/x5). I4m soak: still mepc=0 — exempting ld ra was not
-          // enough (prologue `sd ra` is STORE and still cancelled).
-          // I4n: also do not cancel non-AMO STORE of rs2==x1/x5 (stack save
-          // of ra). AMO still cancels (amo_buffer). SI stays cont.5.
-          // I4ai: STORE rs2==x8 (fp save). I4aj: ALU rd==x8 && rs1==x2
-          // (fp setup). I4al: LOAD rd==x8 && rs1==x2 only (`ld s0,off(sp)` /
-          // c.ldsp). I4ao: s0 poison was a committed unaligned we_gpr (keep
-          // that commit filter). I4ap: also keep `addi t0,t0,imm` (rd==x5
-          // && rs1==x5 && use_imm) — success-cave `addi t0,t0,-0x542`
-          // completes `lui t0,0x51b1c` → `51b1babe`. I4n already keeps
-          // ld/sd of x5; ALU addi t0 was still cancelled. I4aq: also keep
-          // LOAD rs1==x8 (`lw s1,-72(s0)` @12c0a) — I4al only kept ld *into*
-          // s0 from sp. I4at: keep CTRL_FLOW rd==x1 (`jal`/`jalr` that write
-          // ra) — I4as nat is stuck refetching `jal offset_ptr` @129f0.
-          // I4af stays reverted.
-          if (!(CVA6Cfg.SuperscalarEn &&
-                mem_q[cid].sbe.fu == ariane_pkg::STORE &&
-                !ariane_pkg::is_amo(mem_q[cid].sbe.op) &&
-                (mem_q[cid].sbe.rs2[4:0] == 5'd1 ||
-                 mem_q[cid].sbe.rs2[4:0] == 5'd5 ||
-                 mem_q[cid].sbe.rs2[4:0] == 5'd8)) &&
-              !(CVA6Cfg.SuperscalarEn &&
-                mem_q[cid].sbe.fu == ariane_pkg::CTRL_FLOW &&
-                mem_q[cid].sbe.rd == 5'd1) &&
-              !(CVA6Cfg.SuperscalarEn &&
-                mem_q[cid].sbe.fu == ariane_pkg::ALU &&
-                mem_q[cid].sbe.rd == 5'd8 &&
-                mem_q[cid].sbe.rs1[4:0] == 5'd2) &&
-              !(CVA6Cfg.SuperscalarEn &&
-                mem_q[cid].sbe.fu == ariane_pkg::ALU &&
-                mem_q[cid].sbe.rd == 5'd5 &&
-                mem_q[cid].sbe.rs1[4:0] == 5'd5 &&
-                mem_q[cid].sbe.use_imm) &&
-              (mem_q[cid].sbe.fu != ariane_pkg::LOAD ||
-               (CVA6Cfg.SuperscalarEn &&
-                mem_q[cid].sbe.rd != 5'd1 &&
-                mem_q[cid].sbe.rd != 5'd5 &&
-                mem_q[cid].sbe.rs1[4:0] != 5'd8 &&
-                !(mem_q[cid].sbe.rd == 5'd8 &&
-                  mem_q[cid].sbe.rs1[4:0] == 5'd2)))) begin
+          // EXTRACT E0: keep predicate lives in g6lc_sb_keep (I4m–cf).
+          // Do not add G0 here. SI still cont.5 LOAD-only keep.
+          if (!g6lc_sb_keep::keep(
+                  CVA6Cfg,
+                  mem_q[cid].sbe.fu,
+                  mem_q[cid].sbe.op,
+                  mem_q[cid].sbe.rd[4:0],
+                  mem_q[cid].sbe.rs1[4:0],
+                  mem_q[cid].sbe.rs2[4:0],
+                  mem_q[cid].sbe.use_imm) &&
+              !g6lc_sb_keep::keep_prefix(
+                  CVA6Cfg,
+                  mem_q[cid].sbe.fu,
+                  mem_q[cid].sbe.rd[4:0],
+                  64'(mem_q[cid].sbe.pc),
+                  64'(resolved_branch_i.pc),
+                  resolved_branch_i.cf_type)) begin
             mem_n[cid].cancelled = 1'b1;
             mem_n[cid].sbe.valid = 1'b1;
           end
@@ -351,14 +364,13 @@ module scoreboard #(
   // Classic mispredict only. Cancel-younger on matching taken Jump without
   // NPC reseed kills correct target-path ops; with reseed it double-pushes
   // RAS on re-fetched calls. Hang-6 residual needs selective fallthrough kill.
-  // I4t/I4v/I4x: only JALR-to-unusable-target is not a bmiss. A taken Jump
-  // (trap-vector jal@3d8) must still cancel IQ fallthrough.
+  // EXTRACT E2: JALR-to-unusable is not a bmiss. Taken Jump still cancels.
   assign bmiss = resolved_branch_i.valid && resolved_branch_i.is_mispredict
                  && !(CVA6Cfg.NrHarts > 1 &&
                       resolved_branch_i.cf_type == ariane_pkg::JumpR &&
-                      (!(|resolved_branch_i.target_address[CVA6Cfg.VLEN-1:12]) ||
-                       !config_pkg::is_inside_execute_regions(
-                            CVA6Cfg, 64'(resolved_branch_i.target_address))));
+                      !g6lc_jalr_usable::usable(
+                           CVA6Cfg, CVA6Cfg.VLEN,
+                           64'(resolved_branch_i.target_address)));
   // R3a: cancel window starts after the *branch* tid, not FLU_WB. FLU_WB can
   // be a same-cycle mult/ALU result (ex_stage flu mux) while the branch still
   // resolves — using FLU_WB+1 then cancels older correct-path ops (frame SDs).
@@ -388,32 +400,22 @@ module scoreboard #(
         if (cid == issue_pointer[0]) break;
         if (CVA6Cfg.NrHarts <= 1 ||
             mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
-          // Match sequential younger-cancel (I4m/n/ai/aj/al/ap/at).
-          if (!(CVA6Cfg.SuperscalarEn &&
-                mem_q[cid].sbe.fu == ariane_pkg::STORE &&
-                !ariane_pkg::is_amo(mem_q[cid].sbe.op) &&
-                (mem_q[cid].sbe.rs2[4:0] == 5'd1 ||
-                 mem_q[cid].sbe.rs2[4:0] == 5'd5 ||
-                 mem_q[cid].sbe.rs2[4:0] == 5'd8)) &&
-              !(CVA6Cfg.SuperscalarEn &&
-                mem_q[cid].sbe.fu == ariane_pkg::CTRL_FLOW &&
-                mem_q[cid].sbe.rd == 5'd1) &&
-              !(CVA6Cfg.SuperscalarEn &&
-                mem_q[cid].sbe.fu == ariane_pkg::ALU &&
-                mem_q[cid].sbe.rd == 5'd8 &&
-                mem_q[cid].sbe.rs1[4:0] == 5'd2) &&
-              !(CVA6Cfg.SuperscalarEn &&
-                mem_q[cid].sbe.fu == ariane_pkg::ALU &&
-                mem_q[cid].sbe.rd == 5'd5 &&
-                mem_q[cid].sbe.rs1[4:0] == 5'd5 &&
-                mem_q[cid].sbe.use_imm) &&
-              (mem_q[cid].sbe.fu != ariane_pkg::LOAD ||
-               (CVA6Cfg.SuperscalarEn &&
-                mem_q[cid].sbe.rd != 5'd1 &&
-                mem_q[cid].sbe.rd != 5'd5 &&
-                mem_q[cid].sbe.rs1[4:0] != 5'd8 &&
-                !(mem_q[cid].sbe.rd == 5'd8 &&
-                  mem_q[cid].sbe.rs1[4:0] == 5'd2)))) begin
+          // EXTRACT E0: same keep as sequential cancel.
+          if (!g6lc_sb_keep::keep(
+                  CVA6Cfg,
+                  mem_q[cid].sbe.fu,
+                  mem_q[cid].sbe.op,
+                  mem_q[cid].sbe.rd[4:0],
+                  mem_q[cid].sbe.rs1[4:0],
+                  mem_q[cid].sbe.rs2[4:0],
+                  mem_q[cid].sbe.use_imm) &&
+              !g6lc_sb_keep::keep_prefix(
+                  CVA6Cfg,
+                  mem_q[cid].sbe.fu,
+                  mem_q[cid].sbe.rd[4:0],
+                  64'(mem_q[cid].sbe.pc),
+                  64'(resolved_branch_i.pc),
+                  resolved_branch_i.cf_type)) begin
             cancelled_mask_o[cid] = 1'b1;
           end
         end
@@ -474,6 +476,33 @@ module scoreboard #(
   //RVFI
   assign rvfi_issue_pointer_o  = issue_pointer[CVA6Cfg.NrIssuePorts-1:0];
   assign rvfi_commit_pointer_o = commit_pointer_q;
+
+  // G1mf: last result-valid aligned-00
+  // RVI LOAD per hart (sbe.valid is WB
+  // done, before commit_ack). SMT+SS.
+  always_comb begin
+    g1mf_v_o    = '0;
+    g1mf_rd_o   = '0;
+    g1mf_line_o = '0;
+    g1mf_a3_o   = '0;
+    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+        CVA6Cfg.FETCH_WIDTH >= 64) begin
+      for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+        if (g6lc_sib_cjalr::sb_load00(
+                CVA6Cfg, mem_q[i].issued, mem_q[i].cancelled,
+                mem_q[i].sbe.valid, mem_q[i].sbe.ex.valid,
+                mem_q[i].sbe.is_compressed,
+                mem_q[i].sbe.pc[2:1] == 2'b00,
+                mem_q[i].sbe.fu == ariane_pkg::LOAD,
+                mem_q[i].sbe.rd[4:0] != 5'd0)) begin
+          g1mf_v_o[mem_q[i].sbe.hart_id]    = 1'b1;
+          g1mf_rd_o[mem_q[i].sbe.hart_id]   = mem_q[i].sbe.rd[4:0];
+          g1mf_line_o[mem_q[i].sbe.hart_id] = mem_q[i].sbe.pc[CVA6Cfg.VLEN-1:4];
+          g1mf_a3_o[mem_q[i].sbe.hart_id]   = mem_q[i].sbe.pc[3];
+        end
+      end
+    end
+  end
 
   //pragma translate_off
   initial begin

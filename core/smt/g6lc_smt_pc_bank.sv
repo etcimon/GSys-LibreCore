@@ -20,6 +20,10 @@ module g6lc_smt_pc_bank
     // Thread select
     input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] active_hart_i,
     input  logic switch_i,
+    // I4bi: when set, snapshot npc_alt_i for the outgoing hart (cookie+size)
+    // instead of fetch-ahead npc_live. Unused when NrHarts==1.
+    input  logic npc_alt_valid_i,
+    input  logic [CVA6Cfg.VLEN-1:0] npc_alt_i,
     // Restored NPC for the newly active hart (valid when restore_o)
     output logic [CVA6Cfg.VLEN-1:0] npc_restore_o,
     output logic restore_o
@@ -31,6 +35,8 @@ module g6lc_smt_pc_bank
   if (NH <= 1) begin : gen_single
     assign npc_restore_o = '0;
     assign restore_o     = 1'b0;
+    logic _unused_alt;
+    assign _unused_alt = npc_alt_valid_i | (|npc_alt_i);
   end else begin : gen_banked
     logic [NH-1:0][CVA6Cfg.VLEN-1:0] npc_bank_q;
     logic [HID_W-1:0] prev_hart_q;
@@ -51,8 +57,12 @@ module g6lc_smt_pc_bank
         // That poisons the incoming bank with the outgoing PC — hart1 then
         // executes boot-hart code with a reset SP (I4q hold sp1=0x20 / I4t
         // ecall_unregister mcause=4). I4p still applies: never bank 0.
-        if (switch_i && |npc_live_i) begin
-          npc_bank_q[prev_hart_q] <= npc_live_i;
+        // I4bl: aligned addi or lui-line-start t0 rewind (npc_alt_valid).
+        if (switch_i) begin
+          if (npc_alt_valid_i && |npc_alt_i)
+            npc_bank_q[prev_hart_q] <= npc_alt_i;
+          else if (|npc_live_i)
+            npc_bank_q[prev_hart_q] <= npc_live_i;
         end
       end
     end

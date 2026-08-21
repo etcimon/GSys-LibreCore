@@ -125,13 +125,13 @@ module controller
       // and if stage
       flush_if_o             = 1'b1;
     end
-    // I4x (smt2 hang-6 / I4w nat): a *predicted-correct* taken Jump still
-    // leaves sequential bytes in the IQ (jal@mtvec+4 dump sd). Kill unissued
-    // only — do not flush_if (that discards the already-fetched target).
-    if (CVA6Cfg.NrHarts > 1 && resolved_branch_i.valid &&
-        resolved_branch_i.is_taken &&
-        resolved_branch_i.cf_type == ariane_pkg::Jump &&
-        !resolved_branch_i.is_mispredict) begin
+    // EXTRACT E3: I4x/bz/ce predicted-correct Jump/Return/JumpR IQ kill.
+    if (g6lc_cf_unissued::flush(
+            CVA6Cfg,
+            resolved_branch_i.valid,
+            resolved_branch_i.is_mispredict,
+            resolved_branch_i.is_taken,
+            resolved_branch_i.cf_type)) begin
       flush_unissued_instr_o = 1'b1;
     end
 

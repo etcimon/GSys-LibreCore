@@ -12,7 +12,9 @@
 #   mini_fdt_lenp_sw        b1-fdt-lenp-store (shape)
 #   mini_fdt_s2_nest        b1-fdt-lenp-store (s2 save/restore)
 #   mini_fdt_check_prop_nest b1-fdt-lenp-store (check_node/by_offset shape)
+#   mini_fdt_a0_is_fdt      COMPLETION.md stage 0 (a0=fdt vs a0=9)
 # Optional / known-gap:
+#   mini_sib_cjalr          CONTRACT.md Phase 1 (ld@00 + sibling c.jalr@01; opt-in until slfix soak)
 #   mini_lrsc_d             b1-lrsc (opt-in; 2nd SC-without-LR may fail on some harnesses)
 #   mini_fdt_opensbi_blob / mini_fdt_large_walk / mini_fdt_libfdt_shape
 #
@@ -23,7 +25,7 @@
 #   bash verif/regress/soft-ladder-di-regress.sh
 #   # or: bun build-platform/src/cli/index.ts test soft-ladder-di
 #   SOFT_LADDER_SPIKE=1 bash verif/regress/soft-ladder-di-regress.sh
-#   SOFT_LADDER_TESTS="mini_fdt_opensbi_blob mini_lrsc_d" bash ...
+#   SOFT_LADDER_TESTS="mini_sib_cjalr mini_fdt_opensbi_blob mini_lrsc_d" bash ...
 #   SOFT_LADDER_HARNESS=work-ver-smt2-fw64 bash ...
 #   SOFT_LADDER_COMPILE_ONLY=1 bash ...   # assemble only
 #
@@ -72,7 +74,7 @@ COMPILE_ONLY="${SOFT_LADDER_COMPILE_ONLY:-0}"
 
 # Default gate: peeled B1 + FDT shape minis (iter-012). mini_lrsc_d opt-in
 # (2nd SC-without-LR exit mismatch on some Variane builds — not SL-A blocker).
-DEFAULT_TESTS="mini_amoadd_w_spin mini_csr_expected_trap mini_csr_pmp_probe mini_dual_cmv_s3 mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu"
+DEFAULT_TESTS="mini_amoadd_w_spin mini_csr_expected_trap mini_csr_pmp_probe mini_dual_cmv_s3 mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu mini_fdt_a0_is_fdt"
 # shellcheck disable=SC2206
 tests=( ${SOFT_LADDER_TESTS:-$DEFAULT_TESTS} )
 

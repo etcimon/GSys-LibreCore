@@ -508,6 +508,48 @@ module g6lc_icache
       .empty_o()
   );
 
+  // G1iw: other 8-byte half [15:0]
+  // compressed Branch on user[16:0]
+  // for same-cycle recover. G1iv
+  // stashed this — MINI-FAIL. Not a
+  // stash. SMT+SS.
+  logic [ICACHE_OFFSET_WIDTH-1:0] g1iw_off;
+  logic [CVA6Cfg.FETCH_WIDTH-1:0] g1iw_other;
+  logic                            g1iw_br;
+  assign g1iw_off = cl_offset_q ^
+      {{(ICACHE_OFFSET_WIDTH - 4) {1'b0}}, 4'h8};
+  assign g1iw_other = cmp_en_q
+      ? cl_rdata[hit_idx][{g1iw_off, 3'b0}+:CVA6Cfg.FETCH_WIDTH]
+      : mem_rtrn_i.data[{g1iw_off, 3'b0}+:CVA6Cfg.FETCH_WIDTH];
+  assign g1iw_br = CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+      CVA6Cfg.ICACHE_LINE_WIDTH >= 128 &&
+      CVA6Cfg.FETCH_WIDTH >= 64 &&
+      CVA6Cfg.FETCH_USER_WIDTH >= 17 &&
+      (g1iw_other[1:0] == 2'b01) &&
+      ((g1iw_other[15:13] == 3'b110) ||
+       (g1iw_other[15:13] == 3'b111));
+  // G1jj sibling-half [31:16] exact
+  // c.jalr on user[33:17] — MINI-FAIL
+  // lottery tohost 2 @200615. Do not
+  // re-land (any sibling +2; yanks live
+  // mid-line jalr).
+  // G1jl: only the pair (sibling [15:0]
+  // compressed Branch AND [31:16] exact
+  // c.jalr). G1jk PC-matches present.
+  // Not G1iv [15:0] stash. SMT+SS.
+  logic g1jl_cjalr;
+  assign g1jl_cjalr = g1iw_br &&
+      CVA6Cfg.FETCH_USER_WIDTH >= 34 &&
+      (g1iw_other[31:28] == 4'b1001) &&
+      (g1iw_other[22:18] == 5'd0) &&
+      (g1iw_other[27:23] != 5'd0) &&
+      (g1iw_other[17:16] == 2'b10);
+  // G1ki sticky last sibling pair on
+  // user[33] across vaddr change —
+  // HOLD-FAIL no cookie @600000
+  // [1000]=51b1c001 no BANR. Do not
+  // re-land (sticky yanked success-
+  // cave addi). Not G1iv. Not G1jj.
   always_comb begin
     if (cmp_en_q) begin
       dreq_o.data = cl_sel[hit_idx];
@@ -516,6 +558,10 @@ module g6lc_icache
       dreq_o.data = mem_rtrn_i.data[{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_WIDTH];
       dreq_o.user = CVA6Cfg.FETCH_USER_EN ? mem_rtrn_i.user[{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_USER_WIDTH] : '0;
     end
+    if (g1iw_br)
+      dreq_o.user[16:0] = {1'b1, g1iw_other[15:0]};
+    if (g1jl_cjalr)
+      dreq_o.user[33:17] = {1'b1, g1iw_other[31:16]};
   end
 
   ///////////////////////////////////////////////////////

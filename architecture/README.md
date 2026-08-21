@@ -73,7 +73,7 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `ai-matrix/frameworks-virt-pcie.md` | Host multi-phase: soft virt-ai-pcie → SV HARD → optional `--from-timing`. |
 | `ara-vector-attach.md` | U10ᵇ Ara/RVV flist + `server_math_v` package contract |
 | `multi-threading/smt2-bringup.md` | U6.1 SMT2 enable + dual-thread Linux/OpenSBI checklist |
-| `multi-threading/soft-ladder/` | DI OpenSBI soft-ladder promotion (B1 RTL / B2 FW / B3 harness) |
+| `multi-threading/soft-ladder/` | DI OpenSBI soft-ladder promotion (B1 RTL / B2 FW / B3 harness). **`CONTRACT.md`**: G1 recover vs all-feature / `NrCores` scale (named envelopes, union soak, no mega-package) |
 | `server-math-hypervisor.md` | U9/U10 detail: vstimecmp, server config, RVV enable order |
 | `Architecture-research-todo-drafts.md` | Earlier research roadmap that the program above refines for a power-bound target. |
 

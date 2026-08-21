@@ -217,11 +217,14 @@ module load_unit
 
   // page offset is defined as the lower 12 bits, feed through for address checker
   assign page_offset_o = lsu_ctrl_i.vaddr[11:0];
-  // R3a: use load **vaddr** as STQ key (always). Shared MMU dtlb_ppn/paddr is
+  // R3a: use load **vaddr** as STQ key. Shared MMU dtlb_ppn/paddr is
   // also used by the store path — sampling ppn while a store translates desyncs
   // the key and misses stack RAW (next_tag ld s2 → 0 → by_offset sw 0(s2)
   // store-access-fault mcause=6 @ 0x80012e9c). Bare OpenSBI: VA==PA for DRAM.
-  assign load_paddr_valid_o = 1'b1;
+  // G1m: valid only while a load is at the LSU head. Always-1 advertised
+  // idle/store vaddrs to STQ (false page-offset match + sticky + forward).
+  // P4 c.lw then waited ~200k and retired leftover data (a5=0x010dfeec).
+  assign load_paddr_valid_o = valid_i;
   assign load_paddr_o = CVA6Cfg.PLEN'(lsu_ctrl_i.vaddr);
   // feed-through the virtual address for VA translation
   assign vaddr_o = lsu_ctrl_i.vaddr;
@@ -538,14 +541,19 @@ module load_unit
 
   // decoupled rvalid process
   always_comb begin : rvalid_output
+    // G1l: leftover D$ rvalid with rid of a free slot must not pop or
+    // retire (stale trans_id / rdata → P4 c.lw a5=0x010dfeec while
+    // DRAM[fdt+0x28]=1). NrLoadBufEntries>1 so no fall-through same-cycle
+    // grant+rvalid. Flush-phantom is already handled above.
     //  read the pending load buffer
-    ldbuf_r    = req_port_i.data_rvalid;
+    ldbuf_r    = req_port_i.data_rvalid && ldbuf_valid_q[ldbuf_rindex];
     trans_id_o = ldbuf_q[ldbuf_rindex].trans_id;
     valid_o    = 1'b0;
     ex_o.valid = 1'b0;
 
     // we got an rvalid and its corresponding request was not flushed
-    if (req_port_i.data_rvalid && !ldbuf_flushed_q[ldbuf_rindex]) begin
+    if (req_port_i.data_rvalid && ldbuf_valid_q[ldbuf_rindex] &&
+        !ldbuf_flushed_q[ldbuf_rindex]) begin
       // if the response corresponds to the last request, check that we are not killing it
       if ((ldbuf_last_id_q != ldbuf_rindex) || !req_port_o.kill_req) valid_o = 1'b1;
       // the output is also valid if we got an exception. An exception arrives one cycle after

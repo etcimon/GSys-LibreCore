@@ -9,6 +9,7 @@
 
 Cross-cutting: `../../../agents/guides/AGENTS-soc-readiness.md` §0 · `AGENTS-coding-philosophy.md` ·
 `AGENTS-build-platform.md` · `build-platform/AGENTS.md` · `verif/regress/AGENTS-regress-scripts.md`.
+G1 genericity / least-coupled SMT2: `CONTRACT.md`.
 
 ---
 
@@ -135,8 +136,8 @@ Each iteration is a **closed loop** over **one residual class**:
 | Step | Action | Exit criterion |
 |------|--------|----------------|
 | **I1 Scope** | Pick one `inventory.yaml` id; state B1/B2/B3 + hypothesis | id `in_progress` |
-| **I2 Repro** | Prefer **directed mini** under DI; else PEEL path with pin (mepc/mcause/mtval) | Repro in `ITERATION.md` |
-| **I3 Fix** | **Prefer `core/**` (B1).** Harness-only if B3 contract; firmware only if intentional B2 policy | Diff limited to owner layer |
+| **I2 Repro** | Prefer **directed mini** under DI with **fail-codes**; else PEEL path with pin (mepc/mcause/mtval) | Repro in `ITERATION.md` |
+| **I3 Fix** | **Prefer `core/**` (B1), one generic class** from `COMPLETION.md` §2 — not a per-register / per-VA keep. Harness-only if B3; firmware only if intentional B2 | Diff limited to owner layer |
 | **I4 Verify** | Minis green on cataloged suite path; then osbi cookie if stack-relevant | Gate green |
 | **I5 Retire** | Remove `mk_plat_skip` site(s); inventory `rtl-fixed` / `source-landed` | Soft site gone or documented policy |
 | **I6 Log** | Append `ITERATION.md`; next id or stop | — |
@@ -152,7 +153,7 @@ Each iteration is a **closed loop** over **one residual class**:
 ### Safety rails
 
 1. **No silent soft→source.** Every retired binary patch lists RTL/source commit or inventory note.
-2. **One residual class per iteration** (e.g. FDT getprop, not getprop+domain+printf).
+2. **One residual class per iteration** (e.g. FDT getprop, not getprop+domain+printf). From I4cf onward the class is a **generic RTL rule** (`COMPLETION.md` G0–G4), not another `c.mv` / single-opcode keep.
 3. **Binary ladder optional.** Prefer rebuild-from-source once B2 profile exists; prefer **RTL** so neither is needed.
 4. **Hard-coded VAs are debt.** B2/source and new suite helpers use symbols where possible.
 5. **Do not regress concurrent SUCCESS baselines** without an explicit note.
@@ -167,6 +168,8 @@ Each iteration is a **closed loop** over **one residual class**:
 | Path | Role |
 |------|------|
 | `README.md` (this file) | North star, phases P0–P6, scaffold contract, iteration loop |
+| `COMPLETION.md` | Generic classes G0–G5 through SL-C/SL-T. G0 waits on EXTRACT E0. |
+| `EXTRACT.md` | **Standing next-action:** designated `core/smt/g6lc_*` extracts **before** G0. E0 = `g6lc_sb_keep`. |
 | `CONT-FULL-MAP.md` | All cont.2–51 → bucket, soft, RTL status, peel checklist |
 | `inventory.yaml` | Living soft-site registry (status + loci) |
 | `ITERATION.md` | Append-only iteration log + active iteration |
@@ -184,14 +187,16 @@ Oracle (temporary): `software/smt2-linux/soft-ladder/` on authoritative tree.
 ## 6. How to start the next unit of work
 
 ```text
-1. P0 if needed: ensure soft-ladder-di / soft-ladder-osbi are listed optional in
-   build-platform defaults.ts and documented in AGENTS-regress-scripts.md
-2. inventory.yaml → highest priority open B1 id
-3. I2: directed mini on DI harness (work-ver-smt2-fw64*) before inventing more softs
-4. I3: RTL in core/** ; verify minis; then osbi natural or PEEL bisect
-5. I5: shrink mk_plat_skip; inventory status
-6. Only if residual is true product policy → B2 source profile (P5)
+1. Read EXTRACT.md — E0 soaked; E1–E3 combined extract; then G0 on the barrier.
+2. P0 if needed: soft-ladder-di / soft-ladder-osbi listed optional in defaults.ts
+3. inventory.yaml → highest priority open B1 id (today: b1-fdt-lenp-store)
+4. I2: directed mini with fail-codes on slfix (stage 0: mini_fdt_a0_is_fdt)
+5. I3: ONE generic class from COMPLETION.md §2; hold-safe; SI identity
+6. I4: mini green → hold cookie → PEEL/nat. Hold-FAIL or peel-identical+mini-green → revert
+7. I5: shrink mk_plat_skip only after PEEL cookie (stage 3)
+8. Only if residual is true product policy → B2 source profile (P5)
 ```
 
 Active iteration and backlog: `ITERATION.md`.  
-Queue edge: `AGENTS-todo.md` (SL-A…E + platform registration).
+Completion stages (G0…SL-T): `COMPLETION.md`.  
+Queue edge: `AGENTS-todo.md` (SL-A…E + SL-T).

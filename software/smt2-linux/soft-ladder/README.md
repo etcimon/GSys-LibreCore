@@ -7,7 +7,8 @@
 It is the **interim oracle** for dual-issue OpenSBI bring-up, not production
 firmware.
 
-Promotion map: `architecture/multi-threading/soft-ladder/`.
+Promotion map: `architecture/multi-threading/soft-ladder/`
+(`CONTRACT.md` = G1 genericity / later-axis soak; OpenSBI stays software).
 
 Formerly lived at repo-root `tmp-dual-ci/` (moved 2026-08-09).
 
@@ -26,6 +27,13 @@ Formerly lived at repo-root `tmp-dual-ci/` (moved 2026-08-09).
 2. **Prefer shrink over grow** — each B1/B2 landing should delete sites here.
 3. **SUCCESS** = `51b1babe` in trapdump (`b3-sim-harness.md`); harness
    `*** SUCCESS *** (tohost=0)` alone is not green.
+4. **Soak** via `soak.sh` / `soak_common.sh` (no per-increment wrapper).
+   Rebuild: `rebuild_slfix.sh [tag]`. Mini: `run_mini_p3split.sh` or
+   `run_mini_trace.sh` (`CVA6_TRACE_FILE`). There is no testharness
+   checkpoint. `g6lc_tb.cpp` + `CVA6_SOAK_EXIT=1` stops hold/nat at
+   the cookie, peel at the known pin (`CVA6_PIN_MEPC`). Mini-first;
+   soak after the mini moves or `SOAK_WHAT=hold`. See
+   `architecture/multi-threading/soft-ladder/b3-sim-harness.md`.
 
 ## Build (lab)
 

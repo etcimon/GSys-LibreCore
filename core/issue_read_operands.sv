@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 08.04.2017
 // Description: Issues instruction from the scoreboard and fetches the operands
 //              This also includes all the forwarding logic
@@ -143,7 +144,11 @@ module issue_read_operands
     // Information dedicated to RVFI - RVFI
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs2_o,
     // Original instruction bits for AES
-    output logic [5:0] orig_instr_aes_bits
+    output logic [5:0] orig_instr_aes_bits,
+    // G1gq: extra RF peek of commit JALR rs1
+    input logic [4:0] g1gq_raddr_i,
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] g1gq_rhart_i,
+    output logic [CVA6Cfg.XLEN-1:0] g1gq_rdata_o
 );
 
   localparam OPERANDS_PER_INSTR = CVA6Cfg.NrRgprPorts / CVA6Cfg.NrIssuePorts;
@@ -643,6 +648,123 @@ module issue_read_operands
           stall_rs3[i] = 1'b1;
         end
       end
+      // G1o: stall STORE rs2==ra while a same-hart link-jal is
+      // still_issued. G1ae: also when that jal is cancelled
+      // (still_issued=0, sbe.valid=1 — cancel sets valid). TRACE after
+      // G1ad: sd ra fetched with stale ra; jal wrote pc+4 only at
+      // commit. Combinational; no sticky bit (not G1i). SMT+SS only.
+      // G1ai: also stall while a same-hart addi sp is still in the SB
+      // or on an earlier issue port. TRACE: sd @0x4b8 fetched with
+      // sp=0x80008000; 0x68 used 0x80007ff0. c.sdsp may miss RAW.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          issue_instr_i[i].fu == ariane_pkg::STORE &&
+          issue_instr_i[i].rs2[4:0] == 5'd1) begin
+        for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
+          if ((fwd_i.still_issued[k] || fwd_i.sbe[k].valid) &&
+              fwd_i.sbe[k].hart_id == issue_instr_i[i].hart_id) begin
+            if (fwd_i.sbe[k].fu == ariane_pkg::CTRL_FLOW &&
+                fwd_i.sbe[k].rd[4:0] == 5'd1) begin
+              stall_raw[i] = 1'b1;
+              stall_rs2[i] = 1'b1;
+            end
+            if (g6lc_sb_keep::addi_sp(
+                    fwd_i.sbe[k].fu,
+                    fwd_i.sbe[k].rd[4:0],
+                    fwd_i.sbe[k].rs1[4:0])) begin
+              stall_raw[i] = 1'b1;
+              stall_rs1[i] = 1'b1;
+            end
+          end
+        end
+        for (int unsigned e = 0; e < i; e++) begin
+          if (issue_instr_valid_i[e] &&
+              issue_instr_i[e].hart_id == issue_instr_i[i].hart_id &&
+              g6lc_sb_keep::addi_sp(
+                  issue_instr_i[e].fu,
+                  issue_instr_i[e].rd[4:0],
+                  issue_instr_i[e].rs1[4:0])) begin
+            stall_raw[i] = 1'b1;
+            stall_rs1[i] = 1'b1;
+          end
+        end
+      end
+      // G1an: stall a use while a same-hart cancelled-valid LOAD
+      // of that rs is still in the SB. raw_checker only sees
+      // still_issued (issued & ~cancelled); cancel + valid leaves
+      // the consumer reading stale RF. Do not stall still_issued
+      // (that path already forwards). TRACE G1am: c.ldsp t3 left
+      // t3=0xed. Earlier-port LOAD dest too. SMT+SS. Combinational.
+      // Not G1i/G1af/G1aj/G1ak.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
+        for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
+          if (!fwd_i.still_issued[k] && fwd_i.sbe[k].valid &&
+              fwd_i.sbe[k].hart_id == issue_instr_i[i].hart_id &&
+              fwd_i.sbe[k].fu == ariane_pkg::LOAD &&
+              fwd_i.sbe[k].rd[4:0] != 5'd0) begin
+            if (fwd_i.sbe[k].rd == issue_instr_i[i].rs1) begin
+              stall_raw[i] = 1'b1;
+              stall_rs1[i] = 1'b1;
+            end
+            if (fwd_i.sbe[k].rd == issue_instr_i[i].rs2) begin
+              stall_raw[i] = 1'b1;
+              stall_rs2[i] = 1'b1;
+            end
+          end
+        end
+        for (int unsigned e = 0; e < i; e++) begin
+          if (issue_instr_valid_i[e] &&
+              issue_instr_i[e].hart_id == issue_instr_i[i].hart_id &&
+              issue_instr_i[e].fu == ariane_pkg::LOAD &&
+              issue_instr_i[e].rd[4:0] != 5'd0) begin
+            if (issue_instr_i[e].rd == issue_instr_i[i].rs1) begin
+              stall_raw[i] = 1'b1;
+              stall_rs1[i] = 1'b1;
+            end
+            if (issue_instr_i[e].rd == issue_instr_i[i].rs2) begin
+              stall_raw[i] = 1'b1;
+              stall_rs2[i] = 1'b1;
+            end
+          end
+        end
+      end
+      // G1ea: stall a use while a same-hart CSR to that rs is
+      // in the SB. idx_hzd can pick an older jalr/ALU writer
+      // of a0 (71e4 return=1) so c.mv s1,a0 forwards stale 1
+      // and 7be skips scratch_init. CSR is never forwarded
+      // (rs1_is_not_csr). G1dz rdata mux did not change this.
+      // Not G1an LOAD. Not leftover keep. SMT+SS.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
+        for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
+          if ((fwd_i.still_issued[k] || fwd_i.sbe[k].valid) &&
+              fwd_i.sbe[k].hart_id == issue_instr_i[i].hart_id &&
+              fwd_i.sbe[k].fu == ariane_pkg::CSR &&
+              fwd_i.sbe[k].rd[4:0] != 5'd0) begin
+            if (fwd_i.sbe[k].rd == issue_instr_i[i].rs1) begin
+              stall_raw[i] = 1'b1;
+              stall_rs1[i] = 1'b1;
+            end
+            if (fwd_i.sbe[k].rd == issue_instr_i[i].rs2) begin
+              stall_raw[i] = 1'b1;
+              stall_rs2[i] = 1'b1;
+            end
+          end
+        end
+        for (int unsigned e = 0; e < i; e++) begin
+          if (issue_instr_valid_i[e] &&
+              issue_instr_i[e].hart_id == issue_instr_i[i].hart_id &&
+              issue_instr_i[e].fu == ariane_pkg::CSR &&
+              issue_instr_i[e].rd[4:0] != 5'd0) begin
+            if (issue_instr_i[e].rd == issue_instr_i[i].rs1) begin
+              stall_raw[i] = 1'b1;
+              stall_rs1[i] = 1'b1;
+            end
+            if (issue_instr_i[e].rd == issue_instr_i[i].rs2) begin
+              stall_raw[i] = 1'b1;
+              stall_rs2[i] = 1'b1;
+            end
+          end
+        end
+      end
       end
     end
 
@@ -708,6 +830,9 @@ module issue_read_operands
         end
       end
     end
+    // G1gf stall jalr until rs1 usable —
+    // HOLD-FAIL no cookie (hung OpenSBI jalr).
+    // Do not re-land (G0/G1i class).
   end
 
   // third operand from fp regfile or gp regfile if NR_RGPR_PORTS == 3
@@ -770,8 +895,67 @@ module issue_read_operands
       if (forward_rs1[i]) begin
         fu_data_n[i].operand_a = rs1_res[i];
       end
+      // I4by: offset_ptr `c.add a0,a1` (rd==x10 && rs1==x10 && rs2==x11 &&
+      // !use_imm). No a0-dest between last `lbu 38(a0)` and that add. A
+      // forwarded page-0 a0 (wrong-port / leftover `c.li a0,0`) makes
+      // fdt+offset = 9 (PEEL c.lw@129f8 mtval=9). Fall back to RF.
+      // SMT+SS only. SI: NrHarts==1 const-folds the guard.
+      // G0 LOAD/STORE small_nz forward drop hold-FAIL 2026-08-15 — reverted.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          forward_rs1[i] &&
+          issue_instr_i[i].fu == ariane_pkg::ALU &&
+          !issue_instr_i[i].use_imm &&
+          issue_instr_i[i].rd == 5'd10 &&
+          issue_instr_i[i].rs1[4:0] == 5'd10 &&
+          issue_instr_i[i].rs2[4:0] == 5'd11 &&
+          rs1_res[i][CVA6Cfg.XLEN-1:12] == '0) begin
+        fu_data_n[i].operand_a = operand_a_regfile[i];
+      end
+      // G1k: LOAD address. P4 c.lw of fdt+0x28 retired a5=0x010dfeec
+      // (DRAM word is 1). Architectural a0 was s2+0x28; a leftover
+      // non-cached forward (magic/assemble) can still feed the LSU.
+      // If RF is already a cached pointer, do not replace it with a
+      // non-cached forward. Not G0 (no stall). Not G1i. SMT+SS only.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          forward_rs1[i] &&
+          issue_instr_i[i].fu == ariane_pkg::LOAD &&
+          config_pkg::is_inside_cacheable_regions(
+              CVA6Cfg, 64'(operand_a_regfile[i])) &&
+          !config_pkg::is_inside_cacheable_regions(
+              CVA6Cfg, 64'(rs1_res[i]))) begin
+        fu_data_n[i].operand_a = operand_a_regfile[i];
+      end
+      // G1gg: jalr prefers usable RF rs1 over
+      // an unusable forward. No stall (G1gf
+      // HOLD-FAIL hung OpenSBI). Not G0. SMT+SS.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          issue_instr_i[i].op == ariane_pkg::JALR &&
+          forward_rs1[i] &&
+          !g6lc_jalr_usable::usable(
+              CVA6Cfg, CVA6Cfg.VLEN, 64'(rs1_res[i])) &&
+          g6lc_jalr_usable::usable(
+              CVA6Cfg, CVA6Cfg.VLEN, 64'(operand_a_regfile[i]))) begin
+        fu_data_n[i].operand_a = operand_a_regfile[i];
+      end
       if (forward_rs2[i]) begin
         fu_data_n[i].operand_b = rs2_res[i];
+      end
+      // G1h: c.mv a0↔s* (rd/rs2 ABI pointer copy). A forwarded
+      // execute-region base (boot 0x80000000) made s0=_start, so
+      // offset_ptr's 2nd load_be32 assembled _start+8 (mini 0x32,
+      // leftover a0=0xB7010100). Fall back to RF. Not G0 (no stall).
+      // SMT+SS only. SI: NrHarts==1 const-folds the guard.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          forward_rs2[i] &&
+          issue_instr_i[i].fu == ariane_pkg::ALU &&
+          g6lc_sb_keep::cmv_abi_ptr(
+              issue_instr_i[i].rd,
+              issue_instr_i[i].rs1[4:0],
+              issue_instr_i[i].rs2[4:0],
+              issue_instr_i[i].use_imm) &&
+          g6lc_sb_keep::exec_region_base(
+              CVA6Cfg, 64'(rs2_res[i]))) begin
+        fu_data_n[i].operand_b = operand_b_regfile[i];
       end
       if ((CVA6Cfg.FpPresent || (CVA6Cfg.CvxifEn && OPERANDS_PER_INSTR == 3) ||
            (CVA6Cfg.RVZacas && ariane_pkg::is_amo_cas(issue_instr_i[i].op))) && forward_rs3[i]) begin
@@ -785,6 +969,24 @@ module issue_read_operands
       if (issue_instr_i[i].use_pc) begin
         fu_data_n[i].operand_a = {
           {CVA6Cfg.XLEN - CVA6Cfg.VLEN{issue_instr_i[i].pc[CVA6Cfg.VLEN-1]}}, issue_instr_i[i].pc
+        };
+      end
+      // G1r: carry this CF's PC in operand_c so branch_unit next_pc /
+      // non-JALR jump_base are not the shared EX pc_o (G1p). Mini P6
+      // jal retired P5's 0x14c. SMT+SS only. SI: operand_c stays 0.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          issue_instr_i[i].fu == CTRL_FLOW) begin
+        fu_data_n[i].operand_c = {
+          {CVA6Cfg.XLEN - CVA6Cfg.VLEN{issue_instr_i[i].pc[CVA6Cfg.VLEN-1]}},
+          issue_instr_i[i].pc
+        };
+        // G1hg: carry orig 16-bit in
+        // operand_c_hi so EX can recover a
+        // mid-line Branch that is exact
+        // c.jalr. Not G1he all Branch.
+        // SMT+SS. SI: stays 0.
+        fu_data_n[i].operand_c_hi = {
+          {CVA6Cfg.XLEN - 32{1'b0}}, orig_instr_i[i]
         };
       end
 
@@ -807,6 +1009,15 @@ module issue_read_operands
         fu_data_n[i].operand_b_hi = casq_new_hi_q;
         fu_data_n[i].operand_c_hi = casq_exp_hi_q;
       end
+      // G1gp: carry RF rs1 in operand_b so EX
+      // jalr resolve can salvage a usable
+      // target when operand_a is unusable.
+      // Not G1gg mux-only. Not G1gf stall.
+      // SMT+SS. JALR is CTRL_FLOW so use_imm
+      // does not occupy operand_b.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          issue_instr_i[i].op == ariane_pkg::JALR)
+        fu_data_n[i].operand_b = operand_a_regfile[i];
     end
   end
 
@@ -862,6 +1073,8 @@ module issue_read_operands
     end
     // if we got a flush request, de-assert the valid flag, otherwise we will start this
     // functional unit with the wrong inputs
+    // G1t: flush_i is flush_unissued. Do not kill an acked link-jal —
+    // SB allocates it and EX must still compute the link.
     if (flush_i) begin
       alu_valid_n    = '0;
       aes_valid_n    = '0;
@@ -870,7 +1083,17 @@ module issue_read_operands
       fpu_valid_n    = '0;
       alu2_valid_n   = '0;
       csr_valid_n    = '0;
-      branch_valid_n = '0;
+      if (!(CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1)) begin
+        branch_valid_n = '0;
+      end else begin
+        for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+          if (!g6lc_sb_keep::link_jal(
+                  CVA6Cfg.SuperscalarEn,
+                  issue_instr_i[i].fu,
+                  issue_instr_i[i].rd[4:0]))
+            branch_valid_n[i] = 1'b0;
+        end
+      end
     end
   end
   // FU select, assert the correct valid out signal (in the next cycle)
@@ -1009,9 +1232,15 @@ module issue_read_operands
   // ----------------------
   // Integer Register File
   // ----------------------
+  // G1gq: one extra combo read of commit JALR rs1 (SMT+SS).
+  localparam int unsigned G1GQ_RF_PORTS =
+      (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) ?
+          (CVA6Cfg.NrRgprPorts + 1) : CVA6Cfg.NrRgprPorts;
   logic [  CVA6Cfg.NrRgprPorts-1:0][CVA6Cfg.XLEN-1:0] rdata;
   logic [  CVA6Cfg.NrRgprPorts-1:0][             4:0] raddr_pack;
   logic [  CVA6Cfg.NrRgprPorts-1:0][             4:0] raddr_pack_base;
+  logic [G1GQ_RF_PORTS-1:0][CVA6Cfg.XLEN-1:0]         g1gq_rdata;
+  logic [G1GQ_RF_PORTS-1:0][4:0]                      g1gq_raddr;
 
   // pack signals
   logic [CVA6Cfg.NrCommitPorts-1:0][             4:0] waddr_pack;
@@ -1053,6 +1282,11 @@ module issue_read_operands
     end else begin
       casq_phase_d = 1'b0;
     end
+    g1gq_raddr = '0;
+    for (int unsigned p = 0; p < CVA6Cfg.NrRgprPorts; p++)
+      g1gq_raddr[p] = raddr_pack[p];
+    if (G1GQ_RF_PORTS > CVA6Cfg.NrRgprPorts)
+      g1gq_raddr[CVA6Cfg.NrRgprPorts] = g1gq_raddr_i;
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -1093,14 +1327,14 @@ module issue_read_operands
     ariane_regfile_fpga #(
         .CVA6Cfg      (CVA6Cfg),
         .DATA_WIDTH   (CVA6Cfg.XLEN),
-        .NR_READ_PORTS(CVA6Cfg.NrRgprPorts),
+        .NR_READ_PORTS(G1GQ_RF_PORTS),
         .ZERO_REG_ZERO(1)
     ) i_ariane_regfile_fpga (
         .clk_i,
         .rst_ni,
         .test_en_i(1'b0),
-        .raddr_i  (raddr_pack),
-        .rdata_o  (rdata),
+        .raddr_i  (g1gq_raddr),
+        .rdata_o  (g1gq_rdata),
         .waddr_i  (waddr_pack),
         .wdata_i  (wdata_pack),
         .we_i     (we_pack)
@@ -1110,7 +1344,7 @@ module issue_read_operands
     // contention). NrHarts==1 collapses to a single ariane_regfile (identity).
     localparam int unsigned SMT_HID_W =
         (CVA6Cfg.NrHarts <= 1) ? 1 : $clog2(CVA6Cfg.NrHarts);
-    logic [CVA6Cfg.NrRgprPorts-1:0][SMT_HID_W-1:0] rhart_pack;
+    logic [G1GQ_RF_PORTS-1:0][SMT_HID_W-1:0] rhart_pack;
     logic [CVA6Cfg.NrCommitPorts-1:0][SMT_HID_W-1:0] whart_pack;
     // Tag reads from issuing instr hart_id; writes from commit instr hart_id.
     // (Previously whart was stuck at 0 — peer commits corrupted primary RF.)
@@ -1123,6 +1357,8 @@ module issue_read_operands
             rhart_pack[p*OPERANDS_PER_INSTR+k] = issue_instr_i[p].hart_id;
           end
         end
+        if (G1GQ_RF_PORTS > CVA6Cfg.NrRgprPorts)
+          rhart_pack[CVA6Cfg.NrRgprPorts] = g1gq_rhart_i;
         for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++) begin
           whart_pack[c] = whart_i[c];
         end
@@ -1131,16 +1367,16 @@ module issue_read_operands
     g6lc_smt_regfile #(
         .CVA6Cfg      (CVA6Cfg),
         .DATA_WIDTH   (CVA6Cfg.XLEN),
-        .NR_READ_PORTS(CVA6Cfg.NrRgprPorts),
+        .NR_READ_PORTS(G1GQ_RF_PORTS),
         .NR_HARTS     (CVA6Cfg.NrHarts),
         .ZERO_REG_ZERO(1)
     ) i_ariane_regfile (
         .clk_i,
         .rst_ni,
         .test_en_i(1'b0),
-        .raddr_i  (raddr_pack),
+        .raddr_i  (g1gq_raddr),
         .rhart_i  (rhart_pack),
-        .rdata_o  (rdata),
+        .rdata_o  (g1gq_rdata),
         .waddr_i  (waddr_pack),
         .wdata_i  (wdata_pack),
         .we_i     (we_pack),
@@ -1148,6 +1384,12 @@ module issue_read_operands
     );
   end
 
+  assign rdata = g1gq_rdata[CVA6Cfg.NrRgprPorts-1:0];
+  if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin : gen_g1gq_rdata
+    assign g1gq_rdata_o = g1gq_rdata[CVA6Cfg.NrRgprPorts];
+  end else begin : gen_g1gq_rdata_si
+    assign g1gq_rdata_o = '0;
+  end
   // -----------------------------
   // Floating-Point Register File
   // -----------------------------
@@ -1250,26 +1492,53 @@ module issue_read_operands
   // ----------------------
 
   always_comb begin
-    pc_n = '0;
-    is_compressed_instr_n = 1'b0;
-    branch_predict_n = {cf_t'(0), {CVA6Cfg.VLEN{1'b0}}};
-    branch_hart_n = '0;
-    // Youngest control-flow among issued ports wins PC/BP forwarding
-    if (CVA6Cfg.SuperscalarEn) begin
+    // G1p: do not zero the EX PC on a non-CF issue cycle. pc_o used to
+    // default to 0 every cycle; a jal then retired next_pc=4 and I4as
+    // dropped we_gpr to ra (RF stayed the previous link — mini P6 0x65
+    // P5 0x14c). SMT+SS: hold and capture only an acked CF. SI keeps
+    // the old default-0 path (const-fold).
+    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
+      pc_n                  = pc_o;
+      is_compressed_instr_n = is_compressed_instr_o;
+      branch_predict_n      = branch_predict_o;
+      branch_hart_n         = branch_hart_o;
       for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
-        if (issue_instr_i[p].fu == CTRL_FLOW) begin
+        if (issue_instr_valid_i[p] && issue_ack_o[p] &&
+            issue_instr_i[p].fu == CTRL_FLOW) begin
           pc_n                  = issue_instr_i[p].pc;
           is_compressed_instr_n = issue_instr_i[p].is_compressed;
           branch_predict_n      = issue_instr_i[p].bp;
           branch_hart_n         = issue_instr_i[p].hart_id;
         end
       end
-    end
-    if (issue_instr_i[0].fu == CTRL_FLOW) begin
-      pc_n                  = issue_instr_i[0].pc;
-      is_compressed_instr_n = issue_instr_i[0].is_compressed;
-      branch_predict_n      = issue_instr_i[0].bp;
-      branch_hart_n         = issue_instr_i[0].hart_id;
+      if (issue_instr_valid_i[0] && issue_ack_o[0] &&
+          issue_instr_i[0].fu == CTRL_FLOW) begin
+        pc_n                  = issue_instr_i[0].pc;
+        is_compressed_instr_n = issue_instr_i[0].is_compressed;
+        branch_predict_n      = issue_instr_i[0].bp;
+        branch_hart_n         = issue_instr_i[0].hart_id;
+      end
+    end else begin
+      pc_n = '0;
+      is_compressed_instr_n = 1'b0;
+      branch_predict_n = {cf_t'(0), {CVA6Cfg.VLEN{1'b0}}};
+      branch_hart_n = '0;
+      if (CVA6Cfg.SuperscalarEn) begin
+        for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
+          if (issue_instr_i[p].fu == CTRL_FLOW) begin
+            pc_n                  = issue_instr_i[p].pc;
+            is_compressed_instr_n = issue_instr_i[p].is_compressed;
+            branch_predict_n      = issue_instr_i[p].bp;
+            branch_hart_n         = issue_instr_i[p].hart_id;
+          end
+        end
+      end
+      if (issue_instr_i[0].fu == CTRL_FLOW) begin
+        pc_n                  = issue_instr_i[0].pc;
+        is_compressed_instr_n = issue_instr_i[0].is_compressed;
+        branch_predict_n      = issue_instr_i[0].bp;
+        branch_hart_n         = issue_instr_i[0].hart_id;
+      end
     end
     x_transaction_rejected_n = 1'b0;
     if (issue_instr_i[0].fu == CVXIF) begin

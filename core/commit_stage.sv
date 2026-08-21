@@ -204,6 +204,22 @@ module commit_stage
     // Must not wait on LSU/AMO readiness (store path used to stall even on drop).
     if (commit_drop_i[0] && !halt_i) begin
       commit_ack_o[0] = 1'b1;
+      // G1s: a cancelled jal/jalr still retires ra. Keep already has
+      // CTRL_FLOW rd==ra; P6 0x65 means RF stayed P5 0x14c so the link
+      // never wrote. SMT+SS; page-0 results stay dropped (I4as).
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          commit_instr_i[0].fu == ariane_pkg::CTRL_FLOW &&
+          commit_instr_i[0].rd[4:0] == 5'd1 &&
+          |commit_instr_i[0].result[CVA6Cfg.XLEN-1:12])
+        we_gpr_o[0] = 1'b1;
+      // G1an: cancelled LOAD still writes rd. G1s analog.
+      // TRACE G1am: c.ldsp t3 dest stayed 0xed. SMT+SS.
+      // IRO stalls the use until this retire. Not G1i/G1af.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          commit_instr_i[0].fu == ariane_pkg::LOAD &&
+          commit_instr_i[0].valid &&
+          commit_instr_i[0].rd[4:0] != 5'd0)
+        we_gpr_o[0] = 1'b1;
     end else if (commit_instr_i[0].valid && !halt_i) begin
       // we will not commit the instruction if we took an exception
       if (commit_instr_i[0].ex.valid || break_from_trigger_i) begin
@@ -402,7 +418,15 @@ module commit_stage
 
           commit_ack_o[1] = 1'b1;
 
-          if (!commit_drop_i[1]) begin
+          if (!commit_drop_i[1] ||
+              (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+               commit_instr_i[1].fu == ariane_pkg::CTRL_FLOW &&
+               commit_instr_i[1].rd[4:0] == 5'd1 &&
+               |commit_instr_i[1].result[CVA6Cfg.XLEN-1:12]) ||
+              (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+               commit_instr_i[1].fu == ariane_pkg::LOAD &&
+               commit_instr_i[1].valid &&
+               commit_instr_i[1].rd[4:0] != 5'd0)) begin
             if (CVA6Cfg.FpPresent && ariane_pkg::is_rd_fpr(commit_instr_i[1].op))
               we_fpr_o[1] = 1'b1;
             else we_gpr_o[1] = 1'b1;
@@ -425,20 +449,32 @@ module commit_stage
       end
     end
     // I4am/n: unaligned ALU→s0 (addi / add rs1!=x0). Soak-negative —
-    // write is not those. I4ao: any committed GPR write to x8 whose
-    // result[3:0]!=0 cannot be an ABI frame pointer (16B). Covers LOAD
-    // of `"/cpus"+1` and `c.mv s0,rs2` (ADD rs1=x0). SMT+SS only.
+    // write is not those. I4ao: suppress we_gpr to x8 when the result
+    // is byte-unaligned (`"/cpus"+1`). G1j: [3:0] also dropped 8B-aligned
+    // FDT (`0x80001048`) so `c.mv s0,a0` never took (mini 0x39). SMT+SS.
     // I4as: page0 / small integer cannot be a return address — suppress
     // we_gpr to x1 when result[VLEN-1:12]==0 (nat ra0=8 after I4ao).
+    // G1q: do not apply that to CTRL_FLOW. P6 jal issued (mini 0x6a no)
+    // but RF ra stayed P5 0x14c; a page-0 jal result (J-imm / next_pc=4)
+    // must not drop the link write. ALU ra=8 still suppressed.
+    // I4ca (reverted): page-0 non-zero `c.add a0,a1` commit filter
+    // hold-FAIL `51b1c001` / coldboot_done=0.
+    // I4cc: leftover casq dual_we / hi-pending retargets waddr to rd|1.
+    // Do not write a0 unless this retire's rd is a0 (PEEL a0=9).
     if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
       for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
         if (we_gpr_o[p] &&
             commit_instr_i[p].rd[4:0] == 5'd8 &&
-            commit_instr_i[p].result[3:0] != 4'b0)
+            commit_instr_i[p].result[2:0] != 3'b0)
           we_gpr_o[p] = 1'b0;
         if (we_gpr_o[p] &&
             commit_instr_i[p].rd[4:0] == 5'd1 &&
+            commit_instr_i[p].fu != ariane_pkg::CTRL_FLOW &&
             commit_instr_i[p].result[CVA6Cfg.XLEN-1:12] == '0)
+          we_gpr_o[p] = 1'b0;
+        if (we_gpr_o[p] &&
+            waddr_o[p] == 5'd10 &&
+            commit_instr_i[p].rd[4:0] != 5'd10)
           we_gpr_o[p] = 1'b0;
       end
     end

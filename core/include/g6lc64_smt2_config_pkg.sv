@@ -60,7 +60,11 @@ package cva6_config_pkg;
   localparam CVA6ConfigDcacheFlushOnFenceI = 1'b0;
   localparam CVA6ConfigDcacheInvalidateOnFlush = 1'b0;
 
-  localparam CVA6ConfigDcacheIdWidth = 1;
+  // G1n: hang-7 raised NrLoadBufEntries to 8; 1-bit D$ rid truncated
+  // ldbuf_windex (load_unit data_id → wt_dcache_ctrl id_q). P4 c.lw of
+  // the 0x70 line then retired another slot's rdata (a5=0x010dfeec).
+  // Match server_math / stream8 (clog2(8)=3). WT miss still uses RdTxId.
+  localparam CVA6ConfigDcacheIdWidth = 3;
   localparam CVA6ConfigMemTidWidth = 2;
 
   localparam CVA6ConfigWtDcacheWbufDepth = 8;

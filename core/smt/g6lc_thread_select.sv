@@ -32,12 +32,23 @@ module g6lc_thread_select
     // Hold switches (e.g. active hart still executing bootrom). Keeps active_hart
     // stable so PC-bank save/restore cannot corrupt a bootrom→DRAM jump.
     input  logic hold_i,
+    // I4ba: ID has a hart-tagged unissued instruction.
+    // I4bc: IQ head valid while ID is empty.
+    // I4bd tried I$ present ∪ IQ while ID empty; hold-FAIL (`51b1c001`).
+    input  logic id_uniss_i,
+    input  logic iq_valid_i,
+    // I4bg: ALU rd==x5 use_imm just issued (lui/addi t0).
+    input  logic t0_imm_i,
+    // I4br: frontend I4z mtvec fetch/tail — no switch (narrower than flush).
+    input  logic trap_hold_i,
     input  logic [CVA6Cfg.NrHarts-1:0] hart_ready_i,
     input  logic [CVA6Cfg.NrHarts-1:0] hart_dmiss_i,
     input  logic [CVA6Cfg.NrHarts-1:0] hart_imiss_i,
     input  logic [CVA6Cfg.NrHarts-1:0] hart_block_i,
     output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] active_hart_o,
     output logic switch_o,
+    // I4bi: t0_extra was set on the do_switch cycle (valid with switch_o).
+    output logic t0_extra_o,
     output logic switch_on_miss_o,
     output logic switch_on_quantum_o,
     output logic switch_on_starve_o
@@ -54,11 +65,13 @@ module g6lc_thread_select
   if (NH <= 1) begin : gen_single_hart
     assign active_hart_o       = '0;
     assign switch_o            = 1'b0;
+    assign t0_extra_o          = 1'b0;
     assign switch_on_miss_o    = 1'b0;
     assign switch_on_quantum_o = 1'b0;
     assign switch_on_starve_o  = 1'b0;
     logic _unused_boot;
-    assign _unused_boot = fetch_fire_i | issue_fire_i | flush_i | hold_i;
+    assign _unused_boot = fetch_fire_i | issue_fire_i | flush_i | hold_i |
+                          id_uniss_i | iq_valid_i | t0_imm_i | trap_hold_i;
   end else begin : gen_smt
 
     logic [HID_W-1:0] active_q, active_d;
@@ -72,8 +85,11 @@ module g6lc_thread_select
     // (OpenSBI FDT/strchr never progressed on RTL while Spike was fine).
     logic [3:0] activate_age_q, activate_age_d;
     logic [7:0] stall_age_q, stall_age_d;
+    logic [3:0] uniss_pend_q, uniss_pend_d;
+    logic       t0_extra_q, t0_extra_d;
     localparam logic [3:0] MISS_SWITCH_BLACKOUT = 4'd16;
     localparam logic [7:0] MISS_STALL_THRESH = 8'd32;
+    localparam logic [3:0] SMT_UNISS_WAIT = 4'd47;
 
     logic [NH-1:0] miss_or_block;
     logic          active_stalled;
@@ -141,6 +157,7 @@ module g6lc_thread_select
       reason_miss    = 1'b0;
       reason_quantum = 1'b0;
       reason_starve  = 1'b0;
+      t0_extra_d     = t0_extra_q;
       next_peer      = peer_any;
       for (int unsigned h = 0; h < NH; h++) starve_d[h] = starve_q[h];
 
@@ -193,6 +210,40 @@ module g6lc_thread_select
         end
       endcase
 
+      // I4bc: delay only when IQ has a head and ID is empty (tail sitting
+      // in IQ). Do not wait on fetch_valid alone (I4bb) or I$ present (I4bd).
+      uniss_pend_d = '0;
+      if (do_switch && iq_valid_i && !id_uniss_i &&
+          (uniss_pend_q < SMT_UNISS_WAIT) && !hold_i) begin
+        do_switch      = 1'b0;
+        reason_miss    = 1'b0;
+        reason_quantum = 1'b0;
+        reason_starve  = 1'b0;
+        uniss_pend_d   = uniss_pend_q + 4'd1;
+      end
+
+      // I4bg: after lui/addi t0, suppress *quantum/starve* only so one more
+      // fetch can take the cave tail. Miss-switch still fires (I4bh
+      // also-miss lost the nat cookie).
+      if (t0_extra_q && do_switch && (reason_quantum || reason_starve)) begin
+        do_switch      = 1'b0;
+        reason_quantum = 1'b0;
+        reason_starve  = 1'b0;
+      end
+      if (t0_imm_i) t0_extra_d = 1'b1;
+      else if (do_switch) t0_extra_d = 1'b0;
+      else if (fetch_fire_i && t0_extra_q) t0_extra_d = 1'b0;
+
+      // I4br: do not switch while I4z is pinning fetch at mtvec. A switch
+      // flush_unissued after trap_fetch lifts still drops jal@3d8 (I4bq).
+      // Not flush_i (I4y hold-FAIL). trap_hold is exception fetch+tail only.
+      if (trap_hold_i) begin
+        do_switch      = 1'b0;
+        reason_miss    = 1'b0;
+        reason_quantum = 1'b0;
+        reason_starve  = 1'b0;
+      end
+
       // Hold wins over policy: no switch. Also *freeze* quantum/starve aging —
       // otherwise the parked primary's starve hits ST_MAX during peer bootrom
       // and, the cycle peer exits bootrom (hold drops), starve immediately
@@ -243,6 +294,7 @@ module g6lc_thread_select
 
     // Delayed switch pulse: fires when active_q already equals the incoming hart.
     logic switch_q;
+    logic t0_bank_q;
     logic reason_miss_q, reason_quantum_q, reason_starve_q;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -252,6 +304,9 @@ module g6lc_thread_select
         quantum_q        <= '0;
         activate_age_q   <= '0;
         stall_age_q      <= '0;
+        uniss_pend_q     <= '0;
+        t0_extra_q       <= 1'b0;
+        t0_bank_q        <= 1'b0;
         switch_q         <= 1'b0;
         reason_miss_q    <= 1'b0;
         reason_quantum_q <= 1'b0;
@@ -263,6 +318,9 @@ module g6lc_thread_select
         quantum_q        <= quantum_d;
         activate_age_q   <= activate_age_d;
         stall_age_q      <= stall_age_d;
+        uniss_pend_q     <= uniss_pend_d;
+        t0_extra_q       <= t0_extra_d;
+        t0_bank_q        <= do_switch & t0_extra_q;
         switch_q         <= do_switch;
         reason_miss_q    <= do_switch & reason_miss;
         reason_quantum_q <= do_switch & reason_quantum;
@@ -273,6 +331,7 @@ module g6lc_thread_select
 
     assign active_hart_o       = active_q;
     assign switch_o            = switch_q;
+    assign t0_extra_o          = t0_bank_q;
     assign switch_on_miss_o    = reason_miss_q;
     assign switch_on_quantum_o = reason_quantum_q;
     assign switch_on_starve_o  = reason_starve_q;

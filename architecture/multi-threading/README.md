@@ -29,7 +29,7 @@ workers.
 | Per-hart GHR | **Live** — `g6lc_bp_ghist` + gshare GHR banks |
 | Shared BHT/BTB | Shared tables (cross-hart pollution possible) |
 | `g6lc_thread_select.sv` + `g6lc_hart_state.sv` | **Live** under `core/smt/` |
-| Soft-ladder DI residual | **Active** — iter-012 advances FDT (`plat_hc=2` on `slfix`); **cookie** residual post-coldboot (`_start_warm` / success cave) |
+| Soft-ladder DI residual | **Active** — E0–E3 + G1 soaked. G0 reverted. Mini P10 green; **P9=19** (second peel-walk). PEEL `129f8`/4/9. Not I4cg. |
 | AI / PyTorch host path | **Live soft** on `g6lc64_ai` + virt-ai-pcie; **SMT2 multi-thread pytorch** after SL-C |
 
 ### Model: fine-grain SMT (drain-friendly)
@@ -88,7 +88,7 @@ contract. Promote via three buckets and a closed iteration loop:
 | Mechanism | File | SMT rule |
 |-----------|------|----------|
 | Younger cancel on mispredict | `core/scoreboard.sv` | Same-hart only when `NrHarts>1`; DI cancels LOADs too |
-| Unresolved CF / CSR / **SP** | `core/issue_stage.sv` | Per-hart stall bits — peer thread keeps issuing |
+| Unresolved CF / CSR / **SP** | `core/issue_stage.sv` | Per-hart stall bits — peer thread keeps issuing. I4au: CF also clears on same-hart CTRL_FLOW commit; no arm on `flush_unissued` |
 | Banked RF write hart | `issue_read_operands` + `g6lc_smt_regfile` | `whart` from commit instr (never hardwire 0) |
 | Banked CSR + AI | `g6lc_smt_csr_bank` | AI aicfg/ais mux by **active** hart; dirty/setcfg to **commit** hart |
 

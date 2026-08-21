@@ -133,7 +133,7 @@ sites:
     soft_form: >
       Soft fdt_getprop_namelen + fdt_get_property_namelen (NULL);
       soft sbi_printf BANR. PEEL_FDT_GETPROP=1 for natural getprop.
-    pin: "PEEL_FDT_GETPROP mepc=0x80012eb2 mcause=6 mtval=0x80012b2a"
+    pin: "PEEL live mepc=0x800129f8 mcause=4 mtval=9 (a0=offset); historic 12eb2 is R2 after G0"
     rtl_loci:
       - core/store_buffer.sv
       - core/load_unit.sv
@@ -148,12 +148,12 @@ sites:
     rtl_progress: >
       2026-08-09 soft-ladder worktree: FDT shape minis (lenp_sw, s2_nest,
       check_prop_nest) PASS on work-ver-smt2-fw64 after fixing nest mini
-      (valid a2; compare s2 to s3 post-nest). PEEL pin still requires OpenSBI
-      fdt_next_tag structure-load path — stack-only nest does not repro.
-      mtval=0x12b2a is check_node jal-next_tag link (ra residue into s3).
+      (valid a2; compare s2 to s3 post-nest). Live PEEL is 129f8/4/9
+      (a0=offset). Historic 12eb2/12b2a is R2 after G0. I4cf last c.mv
+      keep. Next: COMPLETION.md stage 0, not I4cg.
     verif_idea: >
-      mini_fdt_check_prop_nest + mini_fdt_opensbi_blob in soft-ladder-di;
-      next: inline next_tag lbu/or loop mini; PEEL_FDT_GETPROP walklog
+      mini_fdt_a0_is_fdt Spike PASS / slfix FAIL 19.
+      EXTRACT E0 g6lc_sb_keep landed. Soak then E1/G0. Not I4cg.
     retire_when: real sbi_printf green; soft printf cave deleted
 
   - id: b1-heap-freelist-malloc

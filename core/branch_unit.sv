@@ -59,8 +59,30 @@ module branch_unit #(
   always_comb begin : mispredict_handler
     // set the jump base, for JALR we need to look at the register, for all other control flow instructions we can take the current PC
     automatic logic [CVA6Cfg.VLEN-1:0] jump_base;
+    automatic logic [CVA6Cfg.VLEN-1:0] instr_pc;
+    automatic logic [63:0] instr_pc64;
+    // G1r: SMT+SS CF PC is the issuing instr (IRO operand_c), not the
+    // shared EX pc_i flop. SI / no-carry: identity on pc_i.
+    instr_pc64 = g6lc_cf_pc::pc(
+        CVA6Cfg,
+        (fu_data_i.fu == ariane_pkg::CTRL_FLOW),
+        64'(pc_i),
+        64'(fu_data_i.operand_c)
+    );
+    instr_pc = instr_pc64[CVA6Cfg.VLEN-1:0];
     // TODO(zarubaf): The ALU can be used to calculate the branch target
-    jump_base = (fu_data_i.operation == ariane_pkg::JALR) ? fu_data_i.operand_a[CVA6Cfg.VLEN-1:0] : pc_i;
+    jump_base = (fu_data_i.operation == ariane_pkg::JALR) ? fu_data_i.operand_a[CVA6Cfg.VLEN-1:0] : instr_pc;
+    // G1gp: JALR resolve uses usable RF
+    // (operand_b, stashed at IRO) when
+    // operand_a is unusable. Not G1gg
+    // mux-only. Not G1gf stall. SMT+SS.
+    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+        fu_data_i.operation == ariane_pkg::JALR &&
+        !g6lc_jalr_usable::usable(
+            CVA6Cfg, CVA6Cfg.VLEN, 64'(fu_data_i.operand_a)) &&
+        g6lc_jalr_usable::usable(
+            CVA6Cfg, CVA6Cfg.VLEN, 64'(fu_data_i.operand_b)))
+      jump_base = fu_data_i.operand_b[CVA6Cfg.VLEN-1:0];
 
     resolve_branch_o = 1'b0;
     resolved_branch_o.target_address = {CVA6Cfg.VLEN{1'b0}};
@@ -75,14 +97,14 @@ module branch_unit #(
     resolved_branch_o.trans_id = fu_data_i.trans_id;
     // calculate next PC, depending on whether the instruction is compressed or not this may be different
     // TODO(zarubaf): We already calculate this a couple of times, maybe re-use?
-    next_pc                          = pc_i + ((is_compressed_instr_i) ? {{CVA6Cfg.VLEN-2{1'b0}}, 2'h2} : {{CVA6Cfg.VLEN-3{1'b0}}, 3'h4});
+    next_pc                          = instr_pc + ((is_compressed_instr_i) ? {{CVA6Cfg.VLEN-2{1'b0}}, 2'h2} : {{CVA6Cfg.VLEN-3{1'b0}}, 3'h4});
     // calculate target address simple 64 bit addition
     target_address = $unsigned($signed(jump_base) + $signed(fu_data_i.imm[CVA6Cfg.VLEN-1:0]));
     // on a JALR we are supposed to reset the LSB to 0 (according to the specification)
     if (fu_data_i.operation == ariane_pkg::JALR) target_address[0] = 1'b0;
     // we need to put the branch target address into rd, this is the result of this unit
     branch_result_o = next_pc;
-    resolved_branch_o.pc = pc_i;
+    resolved_branch_o.pc = instr_pc;
     // There are only three sources of mispredicts:
     // 1. Branches
     // 2. Jumps to register addresses
@@ -134,18 +156,67 @@ module branch_unit #(
           resolved_branch_o.ckpt_restore  = 1'b1;
         end
       end
-      // I4t/I4v (smt2): JALR to an unusable fetch target is a stale-rs1
-      // artifact (I4o PC=0; I4u nat hart0 IAF mepc=0x8fffffff8). I4q/I4t
-      // only dropped target==0; 0x8fffffff8 is PMA-outside every execute
-      // window so the fetch is an honest IAF. Also reject page 0 (reset
-      // hole is an execute rule but never a useful jalr). SI unchanged.
+      // EXTRACT E2: I4t/I4v JALR to unusable target is not a mispredict.
       if (CVA6Cfg.NrHarts > 1 &&
           fu_data_i.operation == ariane_pkg::JALR &&
-          (!(|target_address[CVA6Cfg.VLEN-1:12]) ||
-           !config_pkg::is_inside_execute_regions(CVA6Cfg, 64'(target_address)))) begin
+          !g6lc_jalr_usable::usable(CVA6Cfg, CVA6Cfg.VLEN, 64'(target_address))) begin
         resolved_branch_o.is_mispredict = 1'b0;
         resolved_branch_o.ckpt_restore  = 1'b0;
       end
+      // E2+: G1gs / G1hf / G1hg in g6lc_jalr_usable (bit-identical).
+      // G1he / G1ig — MINI-FAIL. Do not re-land.
+      if (g6lc_jalr_usable::jalr_cf_jumpr(
+              CVA6Cfg, fu_data_i.operation == ariane_pkg::JALR))
+        resolved_branch_o.cf_type = ariane_pkg::JumpR;
+      if (g6lc_jalr_usable::mid_nbranch(
+              CVA6Cfg, instr_pc[2:1] == 2'b01,
+              ariane_pkg::op_is_branch(fu_data_i.operation))) begin
+        automatic logic [63:0] g1hf_tgt;
+        g1hf_tgt = g6lc_jalr_usable::pick_usable(
+            CVA6Cfg, CVA6Cfg.VLEN, 64'(fu_data_i.operand_a),
+            64'(fu_data_i.operand_b));
+        if (g6lc_jalr_usable::usable(
+                CVA6Cfg, CVA6Cfg.VLEN, g1hf_tgt)) begin
+          resolved_branch_o.cf_type = ariane_pkg::JumpR;
+          resolved_branch_o.is_taken = 1'b1;
+          resolved_branch_o.target_address = g1hf_tgt[CVA6Cfg.VLEN-1:0];
+          resolved_branch_o.target_address[0] = 1'b0;
+          if (branch_predict_i.cf == ariane_pkg::NoCF ||
+              (resolved_branch_o.target_address !=
+               branch_predict_i.predict_address)) begin
+            resolved_branch_o.is_mispredict = 1'b1;
+            resolved_branch_o.ckpt_restore  = 1'b1;
+          end
+        end
+      end
+      if (g6lc_jalr_usable::mid_cjalr_branch(
+              CVA6Cfg, instr_pc[2:1] == 2'b01,
+              ariane_pkg::op_is_branch(fu_data_i.operation),
+              fu_data_i.operand_c_hi[15:0])) begin
+        automatic logic [63:0] g1hg_tgt;
+        g1hg_tgt = g6lc_jalr_usable::pick_usable(
+            CVA6Cfg, CVA6Cfg.VLEN, 64'(fu_data_i.operand_a),
+            64'(fu_data_i.operand_b));
+        if (g6lc_jalr_usable::usable(
+                CVA6Cfg, CVA6Cfg.VLEN, g1hg_tgt)) begin
+          resolved_branch_o.cf_type = ariane_pkg::JumpR;
+          resolved_branch_o.is_taken = 1'b1;
+          resolved_branch_o.target_address = g1hg_tgt[CVA6Cfg.VLEN-1:0];
+          resolved_branch_o.target_address[0] = 1'b0;
+          if (branch_predict_i.cf == ariane_pkg::NoCF ||
+              (resolved_branch_o.target_address !=
+               branch_predict_i.predict_address)) begin
+            resolved_branch_o.is_mispredict = 1'b1;
+            resolved_branch_o.ckpt_restore  = 1'b1;
+          end
+        end
+      end
+      // G1ig mid-line 01 Branch leftover-PC
+      // target JumpR — MINI-FAIL FDT hang
+      // @400000. Do not re-land (G1he
+      // class; yanks live mid-line Branch
+      // whose imm lands on [2:1]==11).
+      // Isolated P4 stays.
       // to resolve the branch in ID
       resolve_branch_o = 1'b1;
     end

@@ -853,6 +853,10 @@ module compressed_decoder #(
                   // c.jalr -> jalr x1, rs1, 0
                   instr_o = {12'b0, instr_i[11:7], 3'b000, 5'b00001, riscv::OpcodeJalr};
                 end
+              // G1gv mid-line C2 c.add→c.jalr —
+              // MINI-FAIL FDT printed 46 @616.
+              // Do not re-land (real c.add at
+              // pc[2:1]==01).
               end
             end
           end
@@ -936,7 +940,18 @@ module compressed_decoder #(
       end
 
       // normal instruction
-      default: is_compressed_o = 1'b0;
+      default: begin
+        is_compressed_o = 1'b0;
+        // E5: G1ba/G1gu mash recover in g6lc_rvc_enc (bit-identical).
+        // G1gt any-RVI — MINI-FAIL. Do not re-land.
+        if (g6lc_rvc_enc::mash_c1li(CVA6Cfg, instr_i)) begin
+          is_compressed_o = 1'b1;
+          instr_o         = g6lc_rvc_enc::expand_c1li(instr_i);
+        end else if (g6lc_rvc_enc::mash_cjalr(CVA6Cfg, instr_i)) begin
+          is_compressed_o = 1'b1;
+          instr_o         = g6lc_rvc_enc::expand_cjalr(instr_i);
+        end
+      end
     endcase
 
     // Check if the instruction was illegal, if it was then output the offending instruction (zero-extended)

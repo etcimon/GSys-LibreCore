@@ -28,7 +28,7 @@ SOFT_LADDER=1 bash verif/regress/dual-iss-regress.sh
 | `b1-dual-cmv-s3` | `mini_dual_cmv_s3.S` (+ strlen bridges) | **peeled** natural c.mv | soft-ladder-di-regress |
 | `b1-sbi-strlen-rvi` | `mini_strlen_rvc` + natural strlen | **peeled** (FETCH_WIDTH=64) | soft-ladder-di-regress |
 | `b1-heap-freelist-malloc` | `mini_freelist_unlink` + natural malloc | **peeled** | soft-ladder-di-regress / osbi |
-| `b1-fdt-lenp-store` | `mini_fdt_{lenp_sw,s2_nest,check_prop_nest}` shape **PASS**; soft getprop holds; **PEEL red** | **active** iter-012 — need structure-load mini | soft-ladder-di + soft-ladder-opensbi-soak |
+| `b1-fdt-lenp-store` | `mini_fdt_{lenp_sw,s2_nest,check_prop_nest,next_tag_lbu}` shape **PASS**; **`mini_fdt_a0_is_fdt`** stage 0 (P0–P9 fail-codes). Soft getprop holds; **PEEL `129f8`/4/9** | **active** — COMPLETION.md G0 after this mini | soft-ladder-di + soft-ladder-opensbi-soak |
 
 ## OpenSBI cookie gate (step 2)
 

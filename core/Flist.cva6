@@ -142,6 +142,19 @@ ${CVA6_REPO_DIR}/core/alu_wrapper.sv
 ${CVA6_REPO_DIR}/core/aes.sv
 // Note: depends on fpnew_pkg, above
 ${CVA6_REPO_DIR}/core/fpu_wrap.sv
+// EXTRACT E2–E9 + leftover packages (before branch_unit / controller / compressed_decoder)
+${CVA6_REPO_DIR}/core/smt/g6lc_rvc_enc.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_jalr_usable.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_cf_unissued.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_fe_keep.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_fe_kill.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_iq_hide.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_sib_cjalr.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_present.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_leftover.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_lj_hide.sv
+// G1r: per-instr CF PC (before branch_unit)
+${CVA6_REPO_DIR}/core/smt/g6lc_cf_pc.sv
 ${CVA6_REPO_DIR}/core/branch_unit.sv
 ${CVA6_REPO_DIR}/core/compressed_decoder.sv
 ${CVA6_REPO_DIR}/core/macro_decoder.sv
@@ -154,6 +167,8 @@ ${CVA6_REPO_DIR}/core/decoder.sv
 ${CVA6_REPO_DIR}/core/ex_stage.sv
 ${CVA6_REPO_DIR}/core/instr_realign.sv
 ${CVA6_REPO_DIR}/core/id_stage.sv
+// G1h: IRO calls g6lc_sb_keep::cmv_abi_ptr / exec_region_base
+${CVA6_REPO_DIR}/core/smt/g6lc_sb_keep.sv
 ${CVA6_REPO_DIR}/core/issue_read_operands.sv
 ${CVA6_REPO_DIR}/core/g6lc_slice_ist.sv
 ${CVA6_REPO_DIR}/core/g6lc_slice_steer.sv
@@ -166,6 +181,7 @@ ${CVA6_REPO_DIR}/core/smt/g6lc_hart_state.sv
 ${CVA6_REPO_DIR}/core/smt/g6lc_smt_regfile.sv
 ${CVA6_REPO_DIR}/core/smt/g6lc_smt_pc_bank.sv
 ${CVA6_REPO_DIR}/core/smt/g6lc_smt_csr_bank.sv
+${CVA6_REPO_DIR}/core/smt/g6lc_issue_barrier.sv
 // U5 experimental OoO (rename/IQ/ROB/LSQ/memdep; gated by OoOEn in issue_stage)
 ${CVA6_REPO_DIR}/core/ooo/g6lc_ooo_pkg.sv
 ${CVA6_REPO_DIR}/core/ooo/g6lc_rat.sv

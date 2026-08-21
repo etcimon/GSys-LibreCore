@@ -113,7 +113,7 @@ tensor_cli() {
 
 run_soft_ladder_di() {
   local compile_only="${1:-0}"
-  local tests="${SOFT_LADDER_TESTS:-mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu mini_dual_cmv_s3 mini_csr_pmp_probe}"
+  local tests="${SOFT_LADDER_TESTS:-mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu mini_fdt_a0_is_fdt mini_dual_cmv_s3 mini_csr_pmp_probe}"
   local h
   export SOFT_LADDER_OUT="${OUT}/soft-ladder-di"
   export SOFT_LADDER_MAX_CYCLES="${SOFT_LADDER_MAX_CYCLES:-80000}"

@@ -105,8 +105,8 @@ CVA6's own device trees (the files an edit must keep consistent):
 | L3 `cache-level=<3>`, `next-level-cache` | `"cache"` | *(generic cache + SiFive LLC patterns)* | `#memorymodel`, `#ext:zic64b` | `corev_apu/l3_cache/*`, `L3En`/`L3ByteSize` (auto) | same sketch (`l3-cache` node) |
 | `cpu@N` `riscv,cboz-block-size` / `cbom-block-size` | — | `riscv/cpus.yaml` | `#cmo` (I-4.20) | `RVZiCboz`/`RVZiCbom`, store_unit multi-beat | server_math / ooo packages enable CBO |
 | Server prefetch (no DT node) | — | — | microarch | `g6lc_server_prefetcher`, `ServerPrefetchEn` | *(not DT-visible; PMU group 2)* |
-| Hypervisor / Sstc host | `"riscv"` | `riscv/extensions.yaml` (`h`, `sstc`) | `#hypervisor`, Sstc | `RVH`, `SstcEn`, `csr_regfile` | `riscv,isa-extensions` include `h`,`sstc` on server_math |
-| Vector RVV 1.0 host (U10ᵇ) | `"riscv"` | `riscv/extensions.yaml` (`v`, `zve64d`) | `#ext:v` (I-9); depends Zve64d+Zvl128b | `RVV` / `EnableAccelerator`, `g6lc_ara_attach` (VLEN=4096) | **only** `ariane-server-math-v.dts` advertises `v`+`zve64d`+`imafdcv…`; smt2/linux/default trees must not |
+| Hypervisor / Sstc host | `"riscv"` | `riscv/extensions.yaml` (`h`, `sstc`) | `#hypervisor`, Sstc | `RVH`, `SstcEn`, `csr_regfile` (SMT: per-hart in `g6lc_smt_csr_bank`) | `h` **iff** `RVH=1`: `_v` advertises `h`; **stream8 RTL has `RVH=1` but `ariane-stream8.dts` omits `h` today** (add token when KVM should see H); **smt2 `RVH=0` — do not add `h`** (`CONTRACT.md` §6.5). `sstc` already on smt2/stream |
+| Vector RVV 1.0 host (U10ᵇ) | `"riscv"` | `riscv/extensions.yaml` (`v`, `zve64d`) | `#ext:v` (I-9); depends Zve64d+Zvl128b | `RVV` / `EnableAccelerator`, `g6lc_ara_attach` (VLEN=4096) | **only** `ariane-server-math-v.dts` advertises `v`+`zve64d`+`imafdcv…`; smt2 / stream8 / linux / default trees must not (`CONTRACT.md` §6) |
 | `memory@<base>` | `device_type="memory"` | *(generic — no vendor binding)* | `#sec:intro-memory` (I-1.4), `#pma` (II-3.6) | `Axi*Width` + cacheable region rules (`check_cfg`) | `memory@80000000` |
 | `soc` bus | `"simple-bus"` | *(generic)* | `#pma` (region attributes) | `corev_apu/` AXI interconnect | `soc { … "simple-bus"; }` |
 

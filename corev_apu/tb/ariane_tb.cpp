@@ -474,6 +474,25 @@ done_processing:
     // out on bare-metal/OpenSBI images that lack a tohost handshake.
     if (main_time >= max_cycles)
       break;
+    // Soft-ladder osbi: SUCCESS is DRAM cookie 51b1babe @+0x1000, then WFI.
+    // CVA6_COOKIE_EXIT=1 stops at the cookie so hold/nat soaks do not burn
+    // the remaining +max-cycles. Trapdump/hangpc still run after the loop.
+    // Poll every 4096 cycles. Mini tohost at the same VA is never 51b1babe.
+    // G1de: "0" disables. Presence-only treated =0 as on.
+    const char *_ce = std::getenv("CVA6_COOKIE_EXIT");
+    if (_ce && _ce[0] && _ce[0] != '0' &&
+        main_time > 10000 && (main_time & 4095ULL) == 0) {
+      auto *cbytes = reinterpret_cast<const uint8_t *>(MEM);
+      uint64_t cw = 0;
+      for (int i = 0; i < 8; i++)
+        cw |= (uint64_t)cbytes[0x1000 + i] << (8 * i);
+      if ((cw & 0xffffffffULL) == 0x51b1babeULL ||
+          ((cw >> 32) & 0xffffffffULL) == 0x51b1babeULL) {
+        std::cerr << std::hex << "[cookie-exit] t=" << std::dec << main_time
+                  << " [1000]=0x" << std::hex << cw << std::dec << "\n";
+        break;
+      }
+    }
     if (probe && main_time == 500) {
       std::cerr << std::hex << "[preload] @500"
                 << " MEM[0]=0x" << mem_half(0)

@@ -439,6 +439,13 @@ module cva6
   logic v;
   exception_t ex_commit;  // exception from commit stage
   bp_resolve_t resolved_branch;
+  bp_resolve_t resolved_branch_fe;
+  logic                    g1gq_redir;
+  logic [CVA6Cfg.VLEN-1:0] g1gq_tgt;
+  logic [CVA6Cfg.NrHarts-1:0] g1mf_v;
+  logic [CVA6Cfg.NrHarts-1:0][4:0] g1mf_rd;
+  logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:4] g1mf_line;
+  logic [CVA6Cfg.NrHarts-1:0] g1mf_a3;
   logic [CVA6Cfg.VLEN-1:0] pc_commit;
   logic eret;
   logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack;
@@ -693,11 +700,16 @@ module cva6
   logic [1:0] irq_active;
   assign irq_active = irq_i[smt_active_hart];
   logic                    smt_switch;
+  logic                    smt_t0_extra;
+  logic                    smt_t0_rewind;
+  logic [CVA6Cfg.VLEN-1:0] smt_t0_alt;
   logic                    smt_switch_hold;  // suppress switches in bootrom page
+  logic                    smt_trap_hold;    // I4br: I4z mtvec fetch/tail
   logic                    smt_switch_on_miss;
   logic                    smt_switch_on_quantum;
   logic                    smt_switch_on_starve;
   logic [CVA6Cfg.NrHarts-1:0] smt_hart_ready;
+  logic [CVA6Cfg.NrHarts-1:0] smt_hart_ready_sel;
   logic [CVA6Cfg.NrHarts-1:0] smt_hart_dmiss;
   logic [CVA6Cfg.NrHarts-1:0] smt_hart_imiss;
   logic [CVA6Cfg.NrHarts-1:0] smt_hart_block;
@@ -786,6 +798,11 @@ module cva6
   logic [CVA6Cfg.VLEN-1:0] smt_npc_restore;
   logic                    smt_pc_restore;
 
+  logic g1fh_csr_a0;
+  logic [CVA6Cfg.NrHarts-1:0] g1lq_v;
+  logic [CVA6Cfg.NrHarts-1:0][4:0] g1lq_rd;
+  logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:4] g1lq_line;
+  logic [CVA6Cfg.NrHarts-1:0] g1lq_a3;
   frontend #(
       .CVA6Cfg(CVA6Cfg),
       .bp_resolve_t(bp_resolve_t),
@@ -804,7 +821,7 @@ module cva6
       .set_pc_commit_i    (set_pc_ctrl_pcgen),
       .pc_commit_i        (pc_commit),
       .ex_valid_i         (ex_commit.valid),
-      .resolved_branch_i  (resolved_branch),
+      .resolved_branch_i  (resolved_branch_fe),
       .eret_i             (eret),
       .epc_i              (epc_commit_pcgen),
       .trap_vector_base_i (trap_vector_base_commit_pcgen),
@@ -814,11 +831,17 @@ module cva6
       .smt_restore_i      (smt_pc_restore),
       .smt_npc_restore_i  (smt_npc_restore),
       .npc_q_o            (smt_npc_live),
+      .smt_trap_hold_o    (smt_trap_hold),
       .icache_dreq_o      (icache_dreq_if_cache),
       .icache_dreq_i      (icache_dreq_cache_if),
       .fetch_entry_o      (fetch_entry_if_id),
       .fetch_entry_valid_o(fetch_valid_if_id),
-      .fetch_entry_ready_i(fetch_ready_id_if)
+      .fetch_entry_ready_i(fetch_ready_id_if),
+      .g1fh_csr_a0_o      (g1fh_csr_a0),
+      .g1lq_v_o           (g1lq_v),
+      .g1lq_rd_o          (g1lq_rd),
+      .g1lq_line_o        (g1lq_line),
+      .g1lq_a3_o          (g1lq_a3)
   );
 
   g6lc_smt_pc_bank #(
@@ -827,9 +850,11 @@ module cva6
       .clk_i,
       .rst_ni,
       .boot_addr_i  (boot_addr_i[CVA6Cfg.VLEN-1:0]),
-      .npc_live_i   (smt_npc_live),
-      .active_hart_i(smt_active_hart),
-      .switch_i     (smt_switch),
+      .npc_live_i      (smt_npc_live),
+      .active_hart_i   (smt_active_hart),
+      .switch_i        (smt_switch),
+      .npc_alt_valid_i (smt_t0_rewind),
+      .npc_alt_i       (smt_t0_alt),
       .npc_restore_o(smt_npc_restore),
       .restore_o    (smt_pc_restore)
   );
@@ -860,6 +885,16 @@ module cva6
       .fetch_entry_i      (fetch_entry_if_id),
       .fetch_entry_valid_i(fetch_valid_if_id),
       .fetch_entry_ready_o(fetch_ready_id_if),
+      .g1lq_v_i           (g1lq_v),
+      .g1lq_rd_i          (g1lq_rd),
+      .g1lq_line_i        (g1lq_line),
+      .g1lq_a3_i          (g1lq_a3),
+      .commit_instr_i     (commit_instr_id_commit),
+      .commit_ack_i       (commit_ack),
+      .g1mf_v_i           (g1mf_v),
+      .g1mf_rd_i          (g1mf_rd),
+      .g1mf_line_i        (g1mf_line),
+      .g1mf_a3_i          (g1mf_a3),
 
       .issue_entry_o      (issue_entry_id_issue),
       .issue_entry_o_prev (issue_entry_id_issue_prev),
@@ -917,6 +952,42 @@ module cva6
   assign smt_hart_enable = '1;
   assign smt_fetch_fire  = |(fetch_valid_if_id & fetch_ready_id_if);
   assign smt_issue_fire  = |issue_instr_issue_id;
+  // I4bg: ALU lui/addi to t0 (rd==x5, use_imm) just issued.
+  // I4bi: also remember PC+size so a later switch can bank that, not npc_q.
+  logic smt_t0_imm;
+  logic [CVA6Cfg.VLEN-1:0] smt_t0_next_q, smt_t0_next_d;
+  always_comb begin
+    smt_t0_imm = 1'b0;
+    smt_t0_next_d = smt_t0_next_q;
+    for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
+      if (issue_instr_issue_id[p] &&
+          issue_entry_id_issue[p].fu == ALU &&
+          issue_entry_id_issue[p].rd == 5'd5 &&
+          issue_entry_id_issue[p].use_imm) begin
+        smt_t0_imm = 1'b1;
+        smt_t0_next_d = issue_entry_id_issue[p].pc +
+            (issue_entry_id_issue[p].is_compressed
+                 ? {{CVA6Cfg.VLEN - 2{1'b0}}, 2'b10}
+                 : {{CVA6Cfg.VLEN - 3{1'b0}}, 3'b100});
+      end
+    end
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) smt_t0_next_q <= '0;
+    else if (CVA6Cfg.NrHarts > 1 && smt_t0_imm) smt_t0_next_q <= smt_t0_next_d;
+  end
+  // I4bk: fetch-aligned t0_next ([2:0]==0) after addi t0 → bank that PC.
+  // I4bl: mid-block after RVI lui t0 ([2:0]==4) → bank 8B line start so
+  // lui+addi re-fetch together (I4bj banked +4 and hold-failed 51b1c001).
+  // I4bp cave-lui-only line-start reverted (nat lost 51b1d000; peel still 3e4).
+  assign smt_t0_alt = (smt_t0_next_q[2:0] == 3'b100)
+                          ? {smt_t0_next_q[CVA6Cfg.VLEN-1:3], 3'b000}
+                          : smt_t0_next_q;
+  assign smt_t0_rewind = |smt_t0_next_q
+      && ((smt_t0_next_q[2:0] == 3'b000) || (smt_t0_next_q[2:0] == 3'b100))
+      && (smt_t0_alt[CVA6Cfg.VLEN-1:12] == smt_npc_live[CVA6Cfg.VLEN-1:12])
+      && (smt_t0_alt < smt_npc_live)
+      && ((smt_npc_live - smt_t0_alt) <= {{CVA6Cfg.VLEN - 5{1'b0}}, 5'd16});
   assign smt_miss_clear  = ~dcache_miss_cache_perf & ~icache_miss_cache_perf & ~stall_issue;
   assign smt_long_block  = flush_ctrl_ex;
 
@@ -989,7 +1060,11 @@ module cva6
     assign active_needs_boot =
         active_needs_boot_raw & (smt_boot_hold_cnt_q < SMT_BOOT_HOLD_CAP);
     assign first_act_excl = (smt_first_act_excl_q != '0);
-    assign cold_excl = (smt_cold_q < SMT_COLD_EXCL);
+    // G1df: COLD_EXCL does not outlive boot-hart WFI.
+    // G1dg MINI-FAIL: do not also lift after DRAM+grace
+    // (hart1 interleaved the shared boot path).
+    // Do not lower 200000. Not G3 switch-to-sp0. SMT.
+    assign cold_excl = (smt_cold_q < SMT_COLD_EXCL) && ~smt_hart_halt[0];
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         smt_boot_done_q      <= 1'b0;
@@ -1043,8 +1118,20 @@ module cva6
         | (smt_dram_grace_q < SMT_DRAM_GRACE)
         | active_needs_boot
         | first_act_excl;
+    // G1di: after boot-hart WFI, unseen harts stay not-ready.
+    // Late reset-vector fetch amoswaps _boot_status 2→1 (fw_boot_hart
+    // returns -1) and the secondary waits forever. TRACE: status 1→2
+    // @20480 → 1 @22528. Not G3 switch-to-sp0. Not G1dg DRAM+grace.
+    always_comb begin
+      smt_hart_ready_sel = smt_hart_ready;
+      if (smt_boot_done_q && smt_hart_halt[0]) begin
+        for (int unsigned h = 0; h < CVA6Cfg.NrHarts; h++)
+          if (!smt_hart_seen_q[h]) smt_hart_ready_sel[h] = 1'b0;
+      end
+    end
   end else begin : gen_smt_boot_hold_off
     assign smt_switch_hold = 1'b0;
+    assign smt_hart_ready_sel = smt_hart_ready;
   end
 
 
@@ -1069,12 +1156,17 @@ module cva6
       .issue_fire_i        (smt_issue_fire),
       .flush_i             (flush_ctrl_if),
       .hold_i              (smt_switch_hold),
-      .hart_ready_i        (smt_hart_ready),
+      .id_uniss_i          (issue_entry_valid_id_issue[0]),
+      .iq_valid_i          (fetch_valid_if_id[0]),
+      .t0_imm_i            (smt_t0_imm),
+      .trap_hold_i         (smt_trap_hold),
+      .hart_ready_i        (smt_hart_ready_sel),
       .hart_dmiss_i        (smt_hart_dmiss),
       .hart_imiss_i        (smt_hart_imiss),
       .hart_block_i        (smt_hart_block),
       .active_hart_o       (smt_active_hart),
       .switch_o            (smt_switch),
+      .t0_extra_o          (smt_t0_extra),
       .switch_on_miss_o    (smt_switch_on_miss),
       .switch_on_quantum_o (smt_switch_on_quantum),
       .switch_on_starve_o  (smt_switch_on_starve)
@@ -1185,6 +1277,15 @@ module cva6
       .decoded_instr_valid_i   (issue_entry_valid_id_issue),
       .is_ctrl_flow_i          (is_ctrl_fow_id_issue),
       .decoded_instr_ack_o     (issue_instr_issue_id),
+      .g1fh_csr_a0_i           (g1fh_csr_a0),
+      .g1fh_hart_i             (smt_active_hart),
+      .npc_i                   (smt_npc_live),
+      .g1gq_redir_o            (g1gq_redir),
+      .g1gq_tgt_o              (g1gq_tgt),
+      .g1mf_v_o                (g1mf_v),
+      .g1mf_rd_o               (g1mf_rd),
+      .g1mf_line_o             (g1mf_line),
+      .g1mf_a3_o               (g1mf_a3),
       // Functional Units
       .rs1_forwarding_o        (rs1_forwarding_id_ex),
       .rs2_forwarding_o        (rs2_forwarding_id_ex),
@@ -1268,6 +1369,20 @@ module cva6
       .rvfi_rs2_o           (rvfi_rs2),
       .orig_instr_aes_bits  (orig_instr_aes)
   );
+
+  // G1gq: late JALR redirect after commit. Keep
+  // EX resolved_branch for issue/SB; frontend
+  // and controller see the salvage target.
+  always_comb begin
+    resolved_branch_fe = resolved_branch;
+    if (g1gq_redir) begin
+      resolved_branch_fe.valid          = 1'b1;
+      resolved_branch_fe.is_mispredict  = 1'b1;
+      resolved_branch_fe.is_taken       = 1'b1;
+      resolved_branch_fe.cf_type        = ariane_pkg::JumpR;
+      resolved_branch_fe.target_address = g1gq_tgt;
+    end
+  end
 
   // ---------
   // EX
@@ -1698,7 +1813,7 @@ module cva6
       .eret_i                (eret),
       .ex_valid_i            (ex_commit.valid),
       .set_debug_pc_i        (set_debug_pc),
-      .resolved_branch_i     (resolved_branch),
+      .resolved_branch_i     (resolved_branch_fe),
       .flush_csr_i           (flush_csr_ctrl),
       .fence_i_i             (fence_i_commit_controller),
       .fence_i               (fence_commit_controller),

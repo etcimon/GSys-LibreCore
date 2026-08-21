@@ -56,6 +56,9 @@ module issue_stage
     input logic [CVA6Cfg.NrIssuePorts-1:0] is_ctrl_flow_i,
     // Handshake's acknowledge with decode stage - ID_STAGE
     output logic [CVA6Cfg.NrIssuePorts-1:0] decoded_instr_ack_o,
+    // G1fh: IQ dest-FIFO / presented CSR-to-a0
+    input logic g1fh_csr_a0_i,
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] g1fh_hart_i,
     // rs1 forwarding - EX_STAGE
     output [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.VLEN-1:0] rs1_forwarding_o,
     // rs2 forwarding - EX_STAGE
@@ -185,7 +188,16 @@ module issue_stage
     // Information dedicated to RVFI - RVFI
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs2_o,
     // Original instruction bits for AES
-    output logic [5:0] orig_instr_aes_bits
+    output logic [5:0] orig_instr_aes_bits,
+    // G1gq: commit-time JALR redirect to RF[rs1]
+    input logic [CVA6Cfg.VLEN-1:0] npc_i,
+    output logic g1gq_redir_o,
+    output logic [CVA6Cfg.VLEN-1:0] g1gq_tgt_o,
+    // G1mf: SB result-valid 00 RVI LOAD
+    output logic [CVA6Cfg.NrHarts-1:0] g1mf_v_o,
+    output logic [CVA6Cfg.NrHarts-1:0][4:0] g1mf_rd_o,
+    output logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:4] g1mf_line_o,
+    output logic [CVA6Cfg.NrHarts-1:0] g1mf_a3_o
 );
   // ---------------------------------------------------
   // Scoreboard (SB) <-> Issue and Read Operands (IRO)
@@ -258,7 +270,11 @@ module issue_stage
       .x_we_i,
       .x_rd_i,
       .rvfi_issue_pointer_o,
-      .rvfi_commit_pointer_o
+      .rvfi_commit_pointer_o,
+      .g1mf_v_o,
+      .g1mf_rd_o,
+      .g1mf_line_o,
+      .g1mf_a3_o
   );
 
   // ---------------------------------------------------------
@@ -351,185 +367,30 @@ module issue_stage
     assign ooo_lsq_stall_o    = 1'b0;
     assign ooo_stl_forward_o  = 1'b0;
 
-    // Hang-7 / hang-6 residual: do not issue past an unresolved CTRL_FLOW,
-    // even when SpeculativeSb is forced on with SuperscalarEn (build_config_pkg).
-    //
-    // History: stall was gated on !SpeculativeSb so dual-issue (SpeculativeSb=1)
-    // could issue fallthrough past RAS-miss Return / predicted Jump before
-    // resolve — younger cancel recovered some paths but FDT walks still saw
-    // pointer corruption (BADOFFSET / memchr-low). Classic Ariane stalls issue
-    // until resolve; keep SpeculativeSb younger-cancel as a second line of
-    // defense without re-opening the issue window early.
-    //
-    // Clear only on resolve or full SB flush — not flush_unissued alone (that
-    // fires same cycle as resolve and would re-open too early).
-    begin : gen_unresolved_cf_stall
-      // Per-hart unresolved CF (R3a 2026-08-07):
-      // - Arm when **any** issue port accepts CTRL_FLOW for that hart (port-0-only
-      //   missed ALU||JAL on port 1 under dual-issue).
-      // - Gate only instructions of the stalled hart so peer SMT harts keep
-      //   issuing (global all-ports stall hung smt_dual_concurrent).
-      // - Clear on same-hart resolve or full SB flush.
-      // NrHarts==1 → single bit, identical netlist intent to classic stall.
-      localparam int unsigned N_HARTS = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
-      logic [N_HARTS-1:0] unresolved_cf_q, issue_cf_hart;
-      logic [N_HARTS-1:0] resolve_cf_hart;
-
-      // Detect CF accept from SB path (not gated iro) so the cycle that issues
-      // CTRL_FLOW still sees valid_sb && ack before the stall latches.
-      always_comb begin
-        issue_cf_hart = '0;
-        for (int unsigned pi = 0; pi < CVA6Cfg.NrIssuePorts; pi++) begin
-          if (issue_instr_valid_sb[pi] && issue_ack_iro[pi] &&
-              (issue_instr_sb[pi].fu == CTRL_FLOW)) begin
-            // hart_id width is HART_ID_BITS (1 when NrHarts==1)
-            if (!unresolved_cf_q[issue_instr_sb[pi].hart_id]) begin
-              issue_cf_hart[issue_instr_sb[pi].hart_id] = 1'b1;
-            end
-          end
-        end
-      end
-
-      always_comb begin
-        resolve_cf_hart = '0;
-        // resolve_branch_i is the in-order resolve pulse; hart from EX resolve bus
-        if (resolve_branch_i) begin
-          resolve_cf_hart[resolved_branch_i.hart_id] = 1'b1;
-        end
-      end
-
-      always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-          unresolved_cf_q <= '0;
-        end else if (flush_i) begin
-          unresolved_cf_q <= '0;
-        end else begin
-          for (int unsigned h = 0; h < N_HARTS; h++) begin
-            // resolve wins same-cycle over re-arm (matches prior else-if order)
-            if (resolve_cf_hart[h]) begin
-              unresolved_cf_q[h] <= 1'b0;
-            end else if (issue_cf_hart[h]) begin
-              unresolved_cf_q[h] <= 1'b1;
-            end
-          end
-        end
-      end
-
-      // Soft-ladder B1 (b1-csr-expected-trap / cont.33): after a CSR issues for
-      // a hart, do not issue anything younger on that hart until the CSR leaves
-      // the scoreboard (commit_ack or flush). OpenSBI expected-trap is:
-      //   csrrw mtvec, handler;  <probe CSR>;  csrw mtvec, old
-      // If younger ops (or the restore) race the illegal probe, mtvec is already
-      // restored when the trap is taken and __sbi_expected_trap never runs.
-      // csr_buffer already single-entries CSR FU, but non-CSR / timing under DI
-      // still allowed younger issue; this mirrors unresolved_cf for CSR.
-      logic [N_HARTS-1:0] unresolved_csr_q, issue_csr_hart, commit_csr_hart;
-
-      always_comb begin
-        issue_csr_hart = '0;
-        for (int unsigned pi = 0; pi < CVA6Cfg.NrIssuePorts; pi++) begin
-          if (issue_instr_valid_sb[pi] && issue_ack_iro[pi] &&
-              (issue_instr_sb[pi].fu == CSR)) begin
-            if (!unresolved_csr_q[issue_instr_sb[pi].hart_id]) begin
-              issue_csr_hart[issue_instr_sb[pi].hart_id] = 1'b1;
-            end
-          end
-        end
-      end
-
-      always_comb begin
-        commit_csr_hart = '0;
-        for (int unsigned ci = 0; ci < CVA6Cfg.NrCommitPorts; ci++) begin
-          if (commit_ack_i[ci] && (commit_instr_o[ci].fu == CSR)) begin
-            commit_csr_hart[commit_instr_o[ci].hart_id] = 1'b1;
-          end
-        end
-      end
-
-      always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-          unresolved_csr_q <= '0;
-        end else if (flush_i) begin
-          unresolved_csr_q <= '0;
-        end else begin
-          for (int unsigned h = 0; h < N_HARTS; h++) begin
-            // Commit/flush wins over re-arm (same as CF).
-            if (commit_csr_hart[h]) begin
-              unresolved_csr_q[h] <= 1'b0;
-            end else if (issue_csr_hart[h]) begin
-              unresolved_csr_q[h] <= 1'b1;
-            end
-          end
-        end
-      end
-
-      // Soft-ladder iter-012 + SMT2 stack integrity (DI OpenSBI FDT):
-      // After a write to x2 (sp) for a hart under SuperscalarEn, do not issue
-      // younger ops on *that* hart until the sp-writer commits (or flush).
-      // fdt_next_tag / check_node frames are c.addi16sp + c.sdsp/c.ldsp chains;
-      // if younger stack ops race an incomplete sp update under DI, callee-saved
-      // restore can load the wrong slot (observed: s3 ← ra-link at 0x12b2a).
-      // Per-hart gate: peer SMT threads keep issuing (SmtPolicy / concurrent).
-      // SI (!SuperscalarEn): inert (unresolved_sp held 0).
-      logic [N_HARTS-1:0] unresolved_sp_q, issue_sp_hart, commit_sp_hart;
-
-      always_comb begin
-        issue_sp_hart = '0;
-        if (CVA6Cfg.SuperscalarEn) begin
-          for (int unsigned pi = 0; pi < CVA6Cfg.NrIssuePorts; pi++) begin
-            // GPR write to x2 only (not FP); rd is architectural dest.
-            if (issue_instr_valid_sb[pi] && issue_ack_iro[pi] &&
-                (issue_instr_sb[pi].rd == 5'd2) &&
-                !(CVA6Cfg.FpPresent &&
-                  ariane_pkg::is_rd_fpr(issue_instr_sb[pi].op))) begin
-              if (!unresolved_sp_q[issue_instr_sb[pi].hart_id]) begin
-                issue_sp_hart[issue_instr_sb[pi].hart_id] = 1'b1;
-              end
-            end
-          end
-        end
-      end
-
-      always_comb begin
-        commit_sp_hart = '0;
-        if (CVA6Cfg.SuperscalarEn) begin
-          for (int unsigned ci = 0; ci < CVA6Cfg.NrCommitPorts; ci++) begin
-            if (commit_ack_i[ci] && (commit_instr_o[ci].rd == 5'd2) &&
-                !(CVA6Cfg.FpPresent &&
-                  ariane_pkg::is_rd_fpr(commit_instr_o[ci].op))) begin
-              commit_sp_hart[commit_instr_o[ci].hart_id] = 1'b1;
-            end
-          end
-        end
-      end
-
-      always_ff @(posedge clk_i or negedge rst_ni) begin
-        if (!rst_ni) begin
-          unresolved_sp_q <= '0;
-        end else if (flush_i) begin
-          unresolved_sp_q <= '0;
-        end else if (CVA6Cfg.SuperscalarEn) begin
-          for (int unsigned h = 0; h < N_HARTS; h++) begin
-            if (commit_sp_hart[h]) begin
-              unresolved_sp_q[h] <= 1'b0;
-            end else if (issue_sp_hart[h]) begin
-              unresolved_sp_q[h] <= 1'b1;
-            end
-          end
-        end else begin
-          unresolved_sp_q <= '0;
-        end
-      end
-
-      for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_gate
-        assign issue_instr_valid_iro[p] =
-            issue_instr_valid_sb[p]
-            && !unresolved_cf_q[issue_instr_sb[p].hart_id]
-            && !unresolved_csr_q[issue_instr_sb[p].hart_id]
-            && !(CVA6Cfg.SuperscalarEn &&
-                 unresolved_sp_q[issue_instr_sb[p].hart_id]);
-      end
-    end
+    // EXTRACT E1: CF / CSR / SP barriers in g6lc_issue_barrier (I4s/au, cont.33).
+    // G1i unresolved_a0 hold-FAIL — reverted. Peer SMT still issues.
+    g6lc_issue_barrier #(
+        .CVA6Cfg(CVA6Cfg),
+        .scoreboard_entry_t(scoreboard_entry_t),
+        .bp_resolve_t(bp_resolve_t)
+    ) i_g6lc_issue_barrier (
+        .clk_i,
+        .rst_ni,
+        .flush_i,
+        .flush_unissued_instr_i,
+        .issue_valid_sb_i(issue_instr_valid_sb),
+        .issue_ack_iro_i (issue_ack_iro),
+        .issue_instr_sb_i(issue_instr_sb),
+        .decoded_instr_i,
+        .decoded_instr_valid_i,
+        .resolve_branch_i,
+        .resolved_branch_i,
+        .commit_ack_i,
+        .commit_instr_i  (commit_instr_o),
+        .g1fh_csr_a0_i,
+        .g1fh_hart_i,
+        .issue_valid_o   (issue_instr_valid_iro)
+    );
   end
 
   // ---------------------------------------------------------
@@ -611,7 +472,66 @@ module issue_stage
       .stall_issue_o,
       .rvfi_rs1_o              (rvfi_rs1_o),
       .rvfi_rs2_o              (rvfi_rs2_o),
-      .orig_instr_aes_bits     (orig_instr_aes_bits)
+      .orig_instr_aes_bits     (orig_instr_aes_bits),
+      .g1gq_raddr_i            (g1gq_raddr),
+      .g1gq_rhart_i            (g1gq_rhart),
+      .g1gq_rdata_o            (g1gq_rdata)
   );
+
+  // G1gq: committed JALR redirects to RF[rs1] when
+  // an earlier JumpR resolve was unusable and npc
+  // is not already on that target line. Not G1gf
+  // stall. Not G1gg/G1gp issue. SMT+SS.
+  // G1gr commit JALR redirect without EX
+  // JumpR pend — MINI-FAIL FDT printed 42
+  // (P3 0x2a offset_ptr NULL) @782. Do not
+  // re-land (too wide: yanks live jalr).
+  logic [4:0] g1gq_raddr;
+  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] g1gq_rhart;
+  logic [CVA6Cfg.XLEN-1:0] g1gq_rdata;
+  logic g1gq_pend_q;
+  logic g1gq_ack_jalr;
+  // G1jf prev-cycle aligned-00 + this-cycle
+  // 01 Branch commit JumpR — MINI-FAIL
+  // FDT hang @400000. Do not re-land
+  // (yanks live in-order 00-then-01
+  // Branch). Isolated P4 stays.
+  always_comb begin
+    g1gq_raddr = 5'd0;
+    g1gq_rhart = '0;
+    g1gq_ack_jalr = 1'b0;
+    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
+      for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++) begin
+        if (commit_ack_i[c] && (commit_instr_o[c].op == ariane_pkg::JALR)) begin
+          g1gq_ack_jalr = 1'b1;
+          g1gq_raddr = commit_instr_o[c].rs1[4:0];
+          g1gq_rhart = commit_instr_o[c].hart_id;
+        end
+      end
+    end
+  end
+  assign g1gq_tgt_o = g1gq_rdata[CVA6Cfg.VLEN-1:0];
+  assign g1gq_redir_o = CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+      g1gq_pend_q && g1gq_ack_jalr &&
+      g6lc_jalr_usable::usable(CVA6Cfg, CVA6Cfg.VLEN, 64'(g1gq_rdata)) &&
+      (npc_i[CVA6Cfg.VLEN-1:CVA6Cfg.FETCH_ALIGN_BITS] !=
+       g1gq_tgt_o[CVA6Cfg.VLEN-1:CVA6Cfg.FETCH_ALIGN_BITS]);
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni)
+      g1gq_pend_q <= 1'b0;
+    else if (flush_i)
+      g1gq_pend_q <= 1'b0;
+    else if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+             resolved_branch_i.valid &&
+             (resolved_branch_i.cf_type == ariane_pkg::JumpR)) begin
+      if (!g6lc_jalr_usable::usable(
+              CVA6Cfg, CVA6Cfg.VLEN,
+              64'(resolved_branch_i.target_address)))
+        g1gq_pend_q <= 1'b1;
+      else
+        g1gq_pend_q <= 1'b0;
+    end else if (g1gq_redir_o)
+      g1gq_pend_q <= 1'b0;
+  end
 
 endmodule

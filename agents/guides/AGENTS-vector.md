@@ -123,6 +123,13 @@ Directed tests under `verif/tests/custom/vector/`:
 ## 7. Invariants and pitfalls
 
 - **CVXIF ↔ RVV mutex** — never enable both; the core asserts.
+- **Superscalar ↔ accelerator mutex** — `cva6.sv` `$fatal` (`translate_off`) if
+  `SuperscalarEn && EnableAccelerator`. `g6lc64_server_math_v` currently sets both
+  (`AGENTS-todo.md` **AI-2**). Lift that on the **vector/AI track**, not by
+  editing SMT recover. Dual-issue + live Ara is blocked until AI-2.
+- **SMT recover does not take Ara ports** — `g6lc_sib_cjalr` / living G1\* stay
+  scalar fetch (`CONTRACT.md` §6). No `vl`/`vtype`/acc-busy into frontend recover.
+  smt2 stays `RVV=0`; `_v` and stream8 `T=1` const-fold sibling recover off.
 - **Stub attach** — elaborates and lints, but `acc_resp=0` means vector issue never completes; do not
   run functional vector tests against the stub.
 - **ISA advertising** — lying in DTS/`riscv,isa` about `v` breaks Linux bring-up harder than leaving V off.
@@ -134,6 +141,7 @@ Directed tests under `verif/tests/custom/vector/`:
 
 ## Related
 
+- `architecture/multi-threading/soft-ladder/CONTRACT.md` §6 — SMT recover vs RVV/stream packages
 - `architecture/ara-vector-attach.md` — operator attach status and flist steps
 - `agents/vendor/AGENTS-vendor-ara.md` — vendor code-agent for the Ara tree
 - `AGENTS-specs-to-impl.md` / `AGENTS-specs-to-tests.md` — living status rows for Vector / Ara

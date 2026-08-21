@@ -450,12 +450,16 @@ module g6lc_smt_csr_bank
       assign hart_halt_o[h] = halt_b[h];
     end
 
-    // Mux by active hart
+    // Mux by active hart (fetch/decode privilege view).
+    // G1dz: csr_rdata / csr_exception are commit results.
+    // Mux by committing hart, not fetch-active. TRACE: hart0
+    // csrr mhartid @7ac retired a0=1 (bank 1) so 7be would
+    // skip scratch_init. Not leftover keep. Not +8 hold.
     always_comb begin
       flush_o                  = flush_b[active_hart_i];
       halt_csr_o               = halt_b[active_hart_i];
-      csr_rdata_o              = csr_rdata_b[active_hart_i];
-      csr_exception_o          = csr_ex_b[active_hart_i];
+      csr_rdata_o              = csr_rdata_b[commit_instr_i.hart_id];
+      csr_exception_o          = csr_ex_b[commit_instr_i.hart_id];
       epc_o                    = epc_b[active_hart_i];
       eret_o                   = eret_b[active_hart_i];
       trap_vector_base_o       = tvec_b[active_hart_i];

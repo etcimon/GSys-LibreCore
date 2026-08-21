@@ -10,6 +10,8 @@ Sequence: `../remaining-upgrade-sequence.md`.
 ## Intent
 N coherent CVA6 cores: shared LLC, write-invalidate coherence, scaled CLINT/PLIC,
 unique `mhartid`, SMP Linux. Not dual-only — **parameterized 2–8**.
+SMT fetch recover (`g6lc_sib_cjalr`) is **per core** (`[NrHarts]`); raising N
+does not re-open G1\* — `../multi-threading/soft-ladder/CONTRACT.md` §8.
 
 ## Current state
 | Item | Status |

@@ -31,6 +31,11 @@ Harness `SUCCESS (tohost=0)` without `[1000]=…51b1babe` is **not** green for o
 | `verif/regress/dual-iss-regress.sh` | Dual-plane; `SOFT_LADDER=1` appends B1 minis | Related, optional |
 | `software/smt2-linux/soft-ladder/mk_plat_skip.py` | Temporary binary oracle | Shrink on every peel; retire at P4 complete |
 | `CVA6_TRAP_DUMP=1` / Variane `+time_out=` | TB observability | Sim-only |
+| `CVA6_COOKIE_EXIT=1` | Stop at DRAM `51b1babe` @+0x1000 (no checkpoint/resume). `=0` disables (G1de). | osbi hold/nat |
+| `CVA6_SOAK_EXIT=1` | Also stop on pin mepc/mcause and dual-WFI (not `51b1c001`) | osbi peel + fail-fast |
+| `+quiet_axi` | Drop AXI R/B `$warning` flood (I/O) | all slfix soaks |
+| `g6lc_tb.cpp` | LibreCore testharness fork (`Makefile` `TB_CPP` for `g6lc*` targets) | slfix verilate |
+| `soak_common.sh` / `soak.sh` | Generic slfix soak: soak-exit + parallel hold/nat/peel | all future osbi soaks |
 
 ### Registration sketch (P0)
 
@@ -70,6 +75,60 @@ soft-ladder-osbi (OpenSBI + cookie; peels for bisect)
         ↓
 topology / R3 / Linux (only after FDT walk trusted)
 ```
+
+## Iteration optimization (testharness)
+
+These are **sim-only**. They do not change RTL, SUCCESS (`51b1babe` only), or
+the no-checkpoint rule. Use them so the next increment does not wait on a
+full `+max-cycles` peel.
+
+| Capability | How | When |
+|------------|-----|------|
+| Cookie-exit | `CVA6_COOKIE_EXIT=1` — stop at DRAM `51b1babe` @+0x1000. `=0` disables. | hold / nat (default) |
+| Soak-exit | `CVA6_SOAK_EXIT=1` — cookie + pin `mepc`/`mcause` + dual-WFI | peel fail-fast (default) |
+| Pin localize | `CVA6_PIN_MEPC` / `CVA6_PIN_MCAUSE` (default `0x800129f8` / `4`) | peel class |
+| Quiet AXI | `+quiet_axi` — drop R/B `$warning` flood | all slfix soaks |
+| Parallel soak | `soak.sh` `SOAK_PARALLEL=1` hold+nat+peel | every osbi confirm |
+| TB-only relink | `relink_tb.sh` (~10 s) after `g6lc_tb.cpp` only | no RTL |
+| Force RTL rebuild | `rebuild_slfix.sh [tag]` (unlinks generated model) | after `.sv` |
+| Mini + TRACE | `run_mini_p3split.sh` / `run_mini_trace.sh` | directed first |
+| Classify | `[cookie-exit]` or `[1000]=` optional `0x` + `51b1babe` | avoid G1x false FAIL |
+| Optional trace | `CVA6_TRACE=1` / `CVA6_TRACE_SPEC` / `CVA6_TRACE_FILE` | localize a mini/OpenSBI window **without a new TB edit** |
+
+**Do not** stop on `51b1c001` (success-cave `lui` at t≈24k, before `addi`).
+
+### Parameterized localization
+
+`g6lc_tb_trace.h` + `g6lc_tb.cpp`. Off unless a trace env is set (poll-only
+otherwise). Spec is a line or `CVA6_TRACE_SPEC` `;`-list:
+
+```text
+exit cookie off=0x1000 val=0x51b1babe
+exit pin mepc=0x800129f8 mcause=4
+exit wfi after=200000 hits=8
+exit npc lo=0x800006c2 tag=fail_phase
+log npc lo=0x800002b8 hi=0x800002c2 max=24 gpr=ra,t2 tag=p6jal
+log commit lo=0x80000490 hi=0x8000055c max=32 gpr=ra,s0,a0 tag=offset_ptr
+log mem off=0x1000 max=8
+log gpr lo=0x800002be hi=0x800002c2 gpr=ra,t2 max=16
+log gpr gpr=ra,t2 max=40 tag=gchg
+```
+
+Example (mini P6 window):
+
+```text
+CVA6_TRACE=1 \
+CVA6_TRACE_FILE=software/smt2-linux/soft-ladder/trace-default.spec \
+  run_mini_p3split.sh
+```
+
+Lines are `[trace] t=… tag=… loc=0x… x1=…`. Cap with `max=`. Commit-PC sample
+is compiled in only when a `log commit` rule exists. `log gpr` with no
+`lo`/`hi` logs an RF write edge on the named GPRs (use this when the
+packed commit-PC extract misses).
+
+Fork: `corev_apu/tb/g6lc_tb.cpp` (`Makefile` `TB_CPP` on `g6lc*` targets).
+Stock Variane: `TB_CPP=corev_apu/tb/ariane_tb.cpp`.
 
 ## Harness work (scaffold backlog)
 

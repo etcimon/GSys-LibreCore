@@ -2,6 +2,8 @@
 
 Plan of record extension to `router-core-upgrade-program.md`. Ordered by **prerequisites** and
 **perf/W for server/router Linux**. Detail: `server-math-hypervisor.md`.
+All-feature enable + `NrCores` scale vs SMT fetch recover:
+`multi-threading/soft-ladder/CONTRACT.md` §8 (named envelopes, union soak, no mega-package).
 
 ---
 

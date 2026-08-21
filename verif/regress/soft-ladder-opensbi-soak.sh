@@ -86,16 +86,21 @@ LOG="$OUT/veri_$(date +%Y%m%d-%H%M%S).log"
 log "run $HARNESS +time_out=$TIME_OUT +tohost_addr=$TOHOST $ELF"
 log "log=$LOG"
 export CVA6_TRAP_DUMP=1
+# g6lc_tb.cpp soak-exit: cookie / fail-cookie / pin / dual-WFI.
+# Set CVA6_SOAK_EXIT=0 CVA6_COOKIE_EXIT=0 to burn the full +time_out.
+export CVA6_COOKIE_EXIT="${CVA6_COOKIE_EXIT:-1}"
+export CVA6_SOAK_EXIT="${CVA6_SOAK_EXIT:-1}"
+export CVA6_PIN_MEPC="${CVA6_PIN_MEPC:-0x800129f8}"
+export CVA6_PIN_MCAUSE="${CVA6_PIN_MCAUSE:-4}"
 set +e
 "$HARNESS" +time_out="$TIME_OUT" +max-cycles="$TIME_OUT" +debug_disable \
-  +tohost_addr="$TOHOST" "$ELF" >"$LOG" 2>&1
+  +quiet_axi +tohost_addr="$TOHOST" "$ELF" >"$LOG" 2>&1
 rc=$?
 set -e
 
 # Cookie is authoritative (b3-sim-harness). Do NOT treat harness "*** SUCCESS ***"
 # as green — OpenSBI often ends with tohost=0 after +time_out without cookie.
-if grep -qE '\[1000\]=51b1babe\b|\[1000\]=0*51b1babe\b' "$LOG" \
-   || grep -qE '\[trapdump\].*\[1000\]=51b1babe' "$LOG"; then
+if grep -qE '\[cookie-exit\]|\[1000\]=(0x)?[0-9a-fA-F]*51b1babe' "$LOG"; then
   log "CLASSIFY=SUCCESS cookie 51b1babe (rc=$rc)"
   grep -E '\[trapdump\]|\[hangpc\]|51b1|coldboot' "$LOG" | tail -20 || true
   exit 0

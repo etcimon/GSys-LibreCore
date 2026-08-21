@@ -100,6 +100,9 @@ module store_buffer
     logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;  // FSE S4: for younger-only cancel
     logic valid;  // this entry is valid, we need this for checking if the address offset matches
     logic wait_rvalid;  // need to wait for rvalid...
+    // G1ah: this spec entry already forwarded to a load. SMT+SS flush/cancel
+    // must not drop it (0x68 saw 0x2c8; epi ld retired P5 0x14c).
+    logic fwd_keep;
   }
       speculative_queue_n[DEPTH_SPEC-1:0],
       speculative_queue_q[DEPTH_SPEC-1:0],
@@ -140,6 +143,9 @@ module store_buffer
       speculative_queue_n[speculative_write_pointer_q].cbo_op = cbo_op_i;
       speculative_queue_n[speculative_write_pointer_q].trans_id = trans_id_i;
       speculative_queue_n[speculative_write_pointer_q].wait_rvalid = 1'b0;
+      speculative_queue_n[speculative_write_pointer_q].fwd_keep =
+          CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          load_paddr_valid_i && pa_eq(paddr_i, load_paddr_i);
       // advance the write pointer
       speculative_write_pointer_n = speculative_write_pointer_q + 1'b1;
       speculative_status_cnt++;
@@ -157,9 +163,22 @@ module store_buffer
 
     speculative_status_cnt_n = speculative_status_cnt;
 
+    // G1ah: a spec store that a live load already forwarded from must
+    // drain. Mark those entries before cancel/flush compact.
+    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 && load_paddr_valid_i) begin
+      for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+        if (speculative_queue_n[i].valid &&
+            pa_eq(speculative_queue_n[i].address, load_paddr_i)) begin
+          speculative_queue_n[i].fwd_keep = 1'b1;
+        end
+      end
+    end
+
     // FSE S4: younger-only cancel — keep older stores, drop cancelled TIDs.
+    // G1ah SMT+SS: also keep fwd_keep (and on flush, only those).
     // Snapshot then rewrite dense [0 .. live) so pointers match status_cnt.
-    if (|cancelled_mask_i && !flush_i) begin
+    if ((|cancelled_mask_i && !flush_i) ||
+        (flush_i && CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1)) begin
       automatic logic [$clog2(DEPTH_SPEC)-1:0] src, dst;
       automatic logic [$clog2(DEPTH_SPEC):0] live, old_cnt;
       automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.PLEN-1:0] a_addr;
@@ -167,7 +186,7 @@ module store_buffer
       automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] a_be;
       automatic logic [DEPTH_SPEC-1:0][1:0] a_sz;
       automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] a_tid;
-      automatic logic [DEPTH_SPEC-1:0] a_wr;
+      automatic logic [DEPTH_SPEC-1:0] a_wr, a_fk;
       automatic cbo_t a_cbo[DEPTH_SPEC];
       old_cnt = speculative_status_cnt_n;
       live = '0;
@@ -178,12 +197,16 @@ module store_buffer
       a_sz   = '0;
       a_tid  = '0;
       a_wr   = '0;
+      a_fk   = '0;
       for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
       for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
         if (k < unsigned'(old_cnt)) begin
           src = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
           if (speculative_queue_n[src].valid &&
-              !cancelled_mask_i[speculative_queue_n[src].trans_id]) begin
+              ((CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+                speculative_queue_n[src].fwd_keep) ||
+               (!flush_i &&
+                !cancelled_mask_i[speculative_queue_n[src].trans_id]))) begin
             a_addr[dst] = speculative_queue_n[src].address;
             a_data[dst] = speculative_queue_n[src].data;
             a_be[dst]   = speculative_queue_n[src].be;
@@ -191,6 +214,7 @@ module store_buffer
             a_cbo[dst]  = speculative_queue_n[src].cbo_op;
             a_tid[dst]  = speculative_queue_n[src].trans_id;
             a_wr[dst]   = speculative_queue_n[src].wait_rvalid;
+            a_fk[dst]   = speculative_queue_n[src].fwd_keep;
             dst  = dst + 1'b1;
             live = live + 1'b1;
           end
@@ -198,6 +222,7 @@ module store_buffer
       end
       for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
         speculative_queue_n[k].valid = 1'b0;
+        speculative_queue_n[k].fwd_keep = 1'b0;
         if (k < unsigned'(live)) begin
           speculative_queue_n[k].address     = a_addr[k];
           speculative_queue_n[k].data        = a_data[k];
@@ -206,21 +231,18 @@ module store_buffer
           speculative_queue_n[k].cbo_op      = a_cbo[k];
           speculative_queue_n[k].trans_id    = a_tid[k];
           speculative_queue_n[k].wait_rvalid = a_wr[k];
+          speculative_queue_n[k].fwd_keep    = a_fk[k];
           speculative_queue_n[k].valid       = 1'b1;
         end
       end
       speculative_read_pointer_n  = '0;
       speculative_write_pointer_n = dst;
       speculative_status_cnt_n    = live;
-    end
-
-    // when we flush evict the speculative stores
-    if (flush_i) begin
-      // reset all valid flags
+    end else if (flush_i) begin
+      // SI / no G1ah: evict all speculative stores
       for (int unsigned i = 0; i < DEPTH_SPEC; i++) speculative_queue_n[i].valid = 1'b0;
 
       speculative_write_pointer_n = speculative_read_pointer_q;
-      // also reset the status count
       speculative_status_cnt_n = 'b0;
     end
 
@@ -344,6 +366,11 @@ module store_buffer
   logic                    page_offset_sticky_v_q;
   logic                    page_offset_sticky_po_v_q;  // [11:0]-only sticky
   logic [11:0]             page_offset_sticky_po_q;
+  // G1ao: last live STQ forward, replayed to the next same-PA load.
+  logic                          g1ao_hold_v_q, g1ao_hold_hit;
+  logic [CVA6Cfg.PLEN-1:0]       g1ao_hold_pa_q;
+  logic [CVA6Cfg.XLEN-1:0]       g1ao_hold_data_q;
+  logic [(CVA6Cfg.XLEN/8)-1:0]   g1ao_hold_be_q, st_fwd_live_be;
 
   // Exact paddr equality helper
   function automatic logic pa_eq(input logic [CVA6Cfg.PLEN-1:0] a,
@@ -376,10 +403,15 @@ module store_buffer
       page_offset_matches_now = 1'b1;
     end
 
-    page_offset_matches_o = page_offset_matches_now ||
-        (page_offset_sticky_po_v_q && (page_offset_sticky_po_q == page_offset_i)) ||
-        (page_offset_sticky_v_q && load_paddr_valid_i &&
-         pa_eq(page_offset_sticky_pa_q, load_paddr_i));
+    // G1m: interlock only for a live load (load_paddr_valid). Idle/store
+    // heads were matching their own [11:0] and arming sticky.
+    page_offset_matches_o = load_paddr_valid_i &&
+        (page_offset_matches_now ||
+         (page_offset_sticky_po_v_q && (page_offset_sticky_po_q == page_offset_i)) ||
+         (page_offset_sticky_v_q &&
+          pa_eq(page_offset_sticky_pa_q, load_paddr_i)) ||
+         (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          g1ao_hold_v_q && pa_eq(g1ao_hold_pa_q, load_paddr_i)));
   end
 
   // Forward only on full paddr match (never on [11:0] alone).
@@ -426,6 +458,18 @@ module store_buffer
       end
     end
 
+    st_fwd_live_be = be_m;
+    g1ao_hold_hit  = 1'b0;
+    // G1ao: if the live STQ already drained, replay the last
+    // forward to a same-PA load. ld t1 took 0x2c8; ld t3 of
+    // 8(sp) missed. SMT+SS. Not G1af (all spec nofwd).
+    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+        !(|be_m) && g1ao_hold_v_q && load_paddr_valid_i &&
+        pa_eq(g1ao_hold_pa_q, load_paddr_i)) begin
+      data_m        = g1ao_hold_data_q;
+      be_m          = g1ao_hold_be_q;
+      g1ao_hold_hit = 1'b1;
+    end
     st_fwd_data_o  = data_m;
     st_fwd_be_o    = be_m;
     // R3a cont.13: keep STQ forward on; nofwd + store-side sticky still −4,
@@ -476,6 +520,34 @@ module store_buffer
     end else begin
       page_offset_sticky_v_q    <= 1'b0;
       page_offset_sticky_po_v_q <= 1'b0;
+    end
+  end
+
+  // G1ao: capture a live STQ forward; replay once to a later same-PA
+  // load after the store drains. Clear on flush, a newer store to
+  // that PA, a different-PA load, or after the replay is consumed.
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_g1ao_hold
+    if (~rst_ni) begin
+      g1ao_hold_v_q    <= 1'b0;
+      g1ao_hold_pa_q   <= '0;
+      g1ao_hold_data_q <= '0;
+      g1ao_hold_be_q   <= '0;
+    end else if (flush_i ||
+                 !(CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1)) begin
+      g1ao_hold_v_q <= 1'b0;
+    end else if (valid_i && g1ao_hold_v_q &&
+                 pa_eq(paddr_i, g1ao_hold_pa_q)) begin
+      g1ao_hold_v_q <= 1'b0;
+    end else if (load_paddr_valid_i && |st_fwd_live_be) begin
+      g1ao_hold_v_q    <= 1'b1;
+      g1ao_hold_pa_q   <= load_paddr_i;
+      g1ao_hold_data_q <= st_fwd_data_o;
+      g1ao_hold_be_q   <= st_fwd_live_be;
+    end else if (load_paddr_valid_i && g1ao_hold_hit) begin
+      g1ao_hold_v_q <= 1'b0;
+    end else if (load_paddr_valid_i && g1ao_hold_v_q &&
+                 !pa_eq(g1ao_hold_pa_q, load_paddr_i)) begin
+      g1ao_hold_v_q <= 1'b0;
     end
   end
 

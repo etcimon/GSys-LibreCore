@@ -703,6 +703,16 @@ xrun-check-benchmarks:
 
 xrun-ci: xrun-asm-tests xrun-amo-tests xrun-mul-tests xrun-fp-tests xrun-benchmarks
 
+# testharness C++: LibreCore soak-exit fork for g6lc* targets.
+# Override: make verilate TB_CPP=corev_apu/tb/ariane_tb.cpp
+ifeq ($(origin TB_CPP), undefined)
+  ifneq ($(findstring g6lc,$(target)),)
+    TB_CPP := corev_apu/tb/g6lc_tb.cpp
+  else
+    TB_CPP := corev_apu/tb/ariane_tb.cpp
+  endif
+endif
+
 # verilator-specific
 verilate_command := $(verilator) --no-timing verilator_config.vlt                                                \
                     -f core/Flist.cva6                                                                           \
@@ -741,7 +751,7 @@ verilate_command := $(verilator) --no-timing verilator_config.vlt               
                     $(list_incdir) --top-module ariane_testharness                                               \
                     --threads-dpi none                                                                           \
                     --Mdir $(ver-library) -O3                                                                    \
-                    --exe corev_apu/tb/ariane_tb.cpp corev_apu/tb/dpi/SimDTM.cc corev_apu/tb/dpi/SimJTAG.cc      \
+                    --exe $(TB_CPP) corev_apu/tb/dpi/SimDTM.cc corev_apu/tb/dpi/SimJTAG.cc                       \
                     corev_apu/tb/dpi/remote_bitbang.cc corev_apu/tb/dpi/msim_helper.cc
 
 # User Verilator, at some point in the future this will be auto-generated

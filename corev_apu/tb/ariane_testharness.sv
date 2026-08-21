@@ -843,16 +843,19 @@ module ariane_testharness #(
   // Simulation Helper Functions
   // -------------
   // check for response errors
+  // +quiet_axi skips the $warning flood (soft-ladder nat/peel I/O).
   always_ff @(posedge clk_i) begin : p_assert
-    if (axi_ariane_req.r_ready &&
-      axi_ariane_resp.r_valid &&
-      axi_ariane_resp.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
-      $warning("R Response Errored");
-    end
-    if (axi_ariane_req.b_ready &&
-      axi_ariane_resp.b_valid &&
-      axi_ariane_resp.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
-      $warning("B Response Errored");
+    if (!$test$plusargs("quiet_axi")) begin
+      if (axi_ariane_req.r_ready &&
+        axi_ariane_resp.r_valid &&
+        axi_ariane_resp.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
+        $warning("R Response Errored");
+      end
+      if (axi_ariane_req.b_ready &&
+        axi_ariane_resp.b_valid &&
+        axi_ariane_resp.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
+        $warning("B Response Errored");
+      end
     end
   end
 

@@ -302,6 +302,7 @@ module ex_stage
   assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid_i;
 
   fu_data_t one_cycle_data;
+  fu_data_t branch_data;
   logic [CVA6Cfg.VLEN-1:0] rs1_forwarding;
   logic [CVA6Cfg.VLEN-1:0] rs2_forwarding;
   always_comb begin
@@ -317,6 +318,17 @@ module ex_stage
           rs2_forwarding = rs2_forwarding_i[p];
         end
       end
+    end
+  end
+  // G1u: pair branch_unit / flu tid with the branch port, not a later
+  // one-cycle steal (ALU/CSR). SI: identity on one_cycle_data.
+  always_comb begin
+    branch_data = one_cycle_data;
+    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
+      for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
+        if (branch_valid_i[p]) branch_data = fu_data_i[p];
+      end
+      if (branch_valid_i[0]) branch_data = fu_data_i[0];
     end
   end
 
@@ -372,7 +384,7 @@ module ex_stage
       .rst_ni,
       .v_i,
       .debug_mode_i,
-      .fu_data_i         (one_cycle_data),
+      .fu_data_i         (branch_data),
       .pc_i,
       .hart_id_i         (branch_hart_i),
       .is_zcmt_i,
@@ -415,7 +427,11 @@ module ex_stage
     // Branch result as default case
     flu_result_o   = {{CVA6Cfg.XLEN - CVA6Cfg.VLEN{1'b0}}, branch_result};
     flu_trans_id_o = one_cycle_data.trans_id;
-    if (alu_valid_i[0]) begin
+    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 && |branch_valid_i) begin
+      // G1u: do not let ALU/mult steal the jal link WB (mini P6 0x65).
+      flu_result_o   = {{CVA6Cfg.XLEN - CVA6Cfg.VLEN{1'b0}}, branch_result};
+      flu_trans_id_o = branch_data.trans_id;
+    end else if (alu_valid_i[0]) begin
       flu_result_o   = alu_result[0];
       flu_trans_id_o = fu_data_i[0].trans_id;
     end else if (|alu_valid_i) begin

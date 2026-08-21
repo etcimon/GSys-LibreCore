@@ -53,6 +53,9 @@ R   corev_apu/src/g6lc_axi_2to1_mux.sv
 R   corev_apu/src/g6lc_ara_attach.sv
 R   corev_apu/src/g6lc_cluster.sv
 
+# Testharness soak-exit helper (MIT). g6lc_tb.cpp stays Apache (fork of ariane_tb).
+T   corev_apu/tb/g6lc_tb_trace.h
+
 # LibreCore-original reference device trees (hardware description; NOT tier T).
 R   corev_apu/bootrom/ariane-linux.dts
 R   corev_apu/bootrom/ariane-smt2.dts

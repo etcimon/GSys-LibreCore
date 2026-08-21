@@ -75,11 +75,17 @@ Config knobs stay in `config_pkg::cva6_cfg_t` + `check_cfg` — no hard-coded st
 - No default-on stream8 in CI `defaultSuites`.  
 - No Linux Image / R3b hard gate (remains external).  
 - No OpenROAD LEF or real-STA FO4 table edit without lab tools.
+- No smt2 sibling recover (`g6lc_sib_cjalr` / living G1\*) on this `T=1` package.
+  Dual-issue re-enable is present-at-npc + catalog keep (`CONTRACT.md` §6 / Phase 4b),
+  not OpenSBI `7ba`. Optional `NrHarts=2` is a new hybrid package, not a stream8 tweak.
+  This package is already `RVH=1`; H-edge is `kvm-h-veri`, not G1\*. DTS `h` token
+  is still omitted — add it only when KVM should see H (`CONTRACT.md` §6.5).
 
 ## Open first
 
 | Layer | Path |
 |-------|------|
+| SMT recover vs stream I=2 | `architecture/multi-threading/soft-ladder/CONTRACT.md` §6 |
 | Multi-core | `architecture/multi-core/README.md` |
 | OoO packages | `architecture/out-of-order/README.md` |
 | L2/L3 | `architecture/l2-l3-cache/README.md` |

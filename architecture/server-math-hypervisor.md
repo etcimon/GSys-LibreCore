@@ -42,6 +42,10 @@ Sstc (`stimecmp`/`vstimecmp`), Unpriv Vector, CMO `#cmo`, B-bitmanip.
 | `hgeie` / `hgeip` multi-guest EIDs | Stub (always 0) |
 
 Default shipping configs keep **`HExtEn=0`**. Enable via server package.
+`g6lc64_smt2` is **`HExtEn=0`**; stream8 / server_math{,_v} are **`HExtEn=1`**.
+Turning H on smt2 is a **package + DTS `h` + H-edge soak**, not a living-G1
+recover edit — `architecture/multi-threading/soft-ladder/CONTRACT.md` §6.5
+(EXTRACT must not inject over an I$ guest page fault).
 
 ## U10 — AVX-like server math (RISC-V mapping) — **C-light production**
 

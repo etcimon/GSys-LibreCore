@@ -119,6 +119,12 @@ Soft ladder **targets smt2**: dual-issue + dual-thread. FDT walk bugs under DI
 block OpenSBI from finishing `fw_platform_init` → `hart_count` stays `0x80`
 (ELF default) → `cpuinfo`/HSM never see real topology.
 
+Living G1\* sibling recover is gated `SuperscalarEn && NrHarts>1` — **off** on
+stream8. Enabling stream dual-issue (`I=2`, still `T=1`) is a **present-at-npc
+/ catalog-keep** class (`CONTRACT.md` §6), not SMT recover. Do not copy smt2
+OpenSBI peels onto stream8. `v` / `zve*` stay off `ariane-stream8.dts` unless
+a `_v` package sets `RVV=1` (`AGENTS-dts-validation.md`).
+
 ---
 
 ## 3. OpenSBI FDT walk → `hart_count` → HSM
@@ -145,7 +151,8 @@ block OpenSBI from finishing `fw_platform_init` → `hart_count` stays `0x80`
 | `plat_hc=0x80` | `fw_platform_init` never wrote real count | FDT walk / soft getprop |
 | `plat_hc=1` with 2× `cpu@` | Walk truncated / single-hart soft | Partial peel |
 | `plat_hc=2`, cookie `51b1babe` | Discovery OK for smt2 | Soft ladder green |
-| PEEL_FDT_GETPROP mepc=`0x12eb2` | `lenp` store residual (iter-012) | B1 open |
+| PEEL_FDT_GETPROP mepc=`0x129f8` | `offset_ptr` load a0=9 (iter-012 live) | B1 open — `COMPLETION.md` G0 |
+| historic PEEL mepc=`0x12eb2` | `lenp` store residual (R2 after G0) | B1 after stage 1 |
 
 **Critical:** Soft `fdt_getprop*` → NULL unblocks cookie with **incomplete**
 property reads. That can leave platform with stub/default hart topology.
@@ -182,10 +189,10 @@ Do **not** jump to multi-core topology soaks until DI FDT walk is honest.
 ```text
 Phase A — Soft ladder B1 (current)
   A1. Default cookie green (soft getprop OK)          [x]
-  A2. PEEL_FDT_GETPROP natural getprop green          [ ]  iter-012
-  A3. Real printf (drop BANR)                         [ ]
-  A4. Domain / switch_mode peels                      [ ]
-  A5. plat_hc sticky == 2 on smt2 without soft getprop [ ]
+  A2. PEEL_FDT_GETPROP natural getprop green          [ ]  COMPLETION.md G0–G1
+  A3. Real printf (drop BANR)                         [ ]  COMPLETION.md G2
+  A4. Domain / switch_mode peels                      [ ]  COMPLETION.md G4
+  A5. plat_hc sticky == 2 on smt2 without soft getprop [ ]  stage 3–4
 
 Phase B — Topology truth (smt2 first)
   B1. OpenSBI stock generic + ariane-smt2.dtb
@@ -204,18 +211,19 @@ Phase D — Parameterized generator (optional, tape-out hygiene)
       — single template, no hand-synced ariane-{smt2,stream8,...}.dts drift
   D2. validate-cva6-dts for generated product
   D3. Hybrid N×T package only after S≤8 and soft ladder green on smt2+stream
+      Core scale + all-feature: `soft-ladder/CONTRACT.md` §8 (union soak;
+      recover is per-core, not a cluster port)
 ```
 
 ### B1 residual note (iter-012)
 
-Fail pin under natural getprop: `sw a0,0(s2)` with `s2 = ra` of
-`check_node→next_tag`. **All closed bisects PEEL-negative** (same pin): dual-GPR
-dual-commit, full dual-commit serialize, STQ-nofwd under SS, force SI issue
-port kill. Experimental gates **reverted**. Residual is not dual-issue /
-dual-commit / STQ-forward alone — suspect corrupt `a2`/`s3` (lenp) before
-`by_offset_`, structure-load walk, dual-fetch/IQ, or RF link write. Soft getprop
-remains the production soft-ladder default until A2 is green. See
-`soft-ladder/ITERATION.md` and `AGENTS-todo.md` SL-A.
+Live PEEL pin: `c.lw@129f8` mcause=4 mtval=9 (`a0` is FDT offset/tag/`strlen`,
+not `fdt+offset`). Historic `12eb2` (`s2` = `check_node→next_tag` ra) is R2
+after G0. I4x and fdt `c.mv` increment families are **closed** at I4cf. Next
+work is `soft-ladder/COMPLETION.md` (one mini with fail-codes, then generic
+pointer-liveness), not another register keep. Soft getprop remains the
+production default until A2 is green. See `ITERATION.md` and `AGENTS-todo.md`
+SL-B.
 
 ---
 
