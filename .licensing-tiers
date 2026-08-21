@@ -39,6 +39,8 @@ R   core/smt/g6lc_fetch_pkg.sv
 R   core/smt/g6lc_fetch_dbg.sv
 R   core/smt_legacy/g6lc_*.sv
 R   core/smt_legacy/frontend.sv
+R   core/fetch_B/g6lc_fetch_pkg.sv
+R   core/fetch_B/g6lc_fetch_dbg.sv
 R   core/g6lc_slice_*.sv
 R   core/g6lc_bp_*.sv
 R   core/frontend/g6lc_bp_*.sv

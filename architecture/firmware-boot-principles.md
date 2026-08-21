@@ -43,7 +43,9 @@ Hold/peel cookie-matched. Layout after retirement:
 | Role | opt-in cookie oracle | default instruction supply |
 
 Do not compile both frontends. Do not use `g6lc64_di1` as the soak; do not stub TB `mepc`/`gpr` to 0.
-`core/fetch_B/` is a **post-commit** dev copy of `core/smt` (the retired fetch tree) for R6–R11.
+`core/fetch_B/` is a dev copy of `core/smt` at retirement `3745cfb06` for R6–R11
+(`sbi_console_init`, HSM start, `sbi_hart_switch_mode`). `Flist.fetch_B`; do not
+compile with default `core/frontend`. Nat still has no `ret@1826e` / console.
 
 **Live handoff pin:** B hold and peel are **cookie-green** (fetchb `ec1239ef`).
 Hold: `[1000]=51b1babe` cave WFI `@0xef98` `plat_hc=2` BANR. Peel:

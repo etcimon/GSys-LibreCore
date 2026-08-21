@@ -35,7 +35,7 @@ Normative why: [`../firmware-boot-principles.md`](../firmware-boot-principles.md
 | `core/frontend/` + `core/instr_realign.sv` | Default supply (**A**): copies of the retired fetch tree |
 | `core/smt/` | That fetch tree (`g6lc_fetch_pkg`/`dbg` + supply copies). Not dual-compiled with `core/frontend` |
 | `core/smt_legacy/` | g1\* oracle frontend + recover packages + SMT banks |
-| `core/fetch_B/` | **After** the retirement commit: dev copy of `core/smt` for R6–R11 |
+| `core/fetch_B/` | Dev copy of `core/smt` at `3745cfb06` for R6–R11 (`Flist.fetch_B`). Do not compile with `core/frontend` |
 
 Default `Flist.cva6`: `+define+G6LC_FETCH_B`, pkg/dbg from `core/smt/`, frontend files in
 `core/frontend`. Oracle: drop the define and pkg/dbg, comment B frontend/realign/scan/queue,
