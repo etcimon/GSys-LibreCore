@@ -1,9 +1,10 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
-// Fetch geometry and value-table combos for core/fetch (capability A after
-// smt_legacy retirement). No g1*/I4* names. Hosts call; muxes stay in the
-// frontend/realign. Timing: same compares already on NPC / leftover / kill.
+// Fetch geometry and value-table combos for core/fetch_B (R6-R11 workspace).
+// Frozen A pkg is core/smt/g6lc_fetch_pkg.sv. No g1*/I4* names. Hosts call;
+// muxes stay in the frontend/realign. Timing: same compares already on NPC /
+// leftover / kill.
 
 package g6lc_fetch_pkg;
   import config_pkg::*;

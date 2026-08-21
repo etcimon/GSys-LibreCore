@@ -31,7 +31,8 @@
 -f ${CVA6_REPO_DIR}/core/Flist.cva6
 
 ${CVA6_REPO_DIR}/core/include/g6lc_pkg.sv
-// EXTRACT E0–E9 + leftover + jal-x0 hide live under core/smt/; listed
-// in Flist.cva6 (packages before branch_unit; modules in the SMT block).
+// EXTRACT E0–E9 + leftover + jal-x0 hide live under core/smt_legacy/;
+// listed in Flist.cva6 (packages before branch_unit; SMT banks in the
+// SMT block). Fetch pkg/dbg for the R6-R11 workspace is Flist.fetch_B.
 
 // end of manifest

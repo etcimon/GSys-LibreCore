@@ -36,16 +36,17 @@ added as B increments with the same peels and soak.
 
 Hold/peel cookie-matched. Layout after retirement:
 
-| | Oracle (was handoff A) | Default (was handoff B, now capability **A**) |
+| | Oracle (g1\* / `smt_legacy`) | Default workspace B (`fetch_B`; frozen A is `core/frontend`) |
 |--|--|--|
-| RTL | `core/smt_legacy/` (g1\* frontend copies + recover + SMT banks) + `Flist.smt_legacy` | `core/frontend/` + `core/instr_realign.sv` (applied fetch copies) + `core/smt/g6lc_fetch_{pkg,dbg}` + `G6LC_FETCH_B` |
+| RTL | `core/smt_legacy/` (g1\* frontend copies + recover + SMT banks) + `Flist.smt_legacy` | Frozen A: `core/frontend/` + `core/instr_realign.sv` + `core/smt/g6lc_fetch_{pkg,dbg}`. Default B: `core/fetch_B/` + `Flist.fetch_B` + `G6LC_FETCH_B` |
 | Harness | `work-ver-smt2-slfix` | `work-ver-smt2-fetchb` |
-| Role | opt-in cookie oracle | default instruction supply |
+| Role | opt-in cookie oracle | default instruction supply (`fetch_B`); A is frozen |
 
 Do not compile both frontends. Do not use `g6lc64_di1` as the soak; do not stub TB `mepc`/`gpr` to 0.
-`core/fetch_B/` is a dev copy of `core/smt` at retirement `3745cfb06` for R6–R11
-(`sbi_console_init`, HSM start, `sbi_hart_switch_mode`). `Flist.fetch_B`; do not
-compile with default `core/frontend`. Nat still has no `ret@1826e` / console.
+`core/smt/` is pkg+dbg only (duplicates of `core/frontend` / `instr_realign` removed).
+`core/fetch_B/` is the R6–R11 workspace (byte copy of retired fetch at `3745cfb06`)
+for `sbi_console_init`, HSM start, `sbi_hart_switch_mode`. Predictors stay in
+`core/frontend`. Nat still has no `ret@1826e` / console.
 
 **Live handoff pin:** B hold and peel are **cookie-green** (fetchb `ec1239ef`).
 Hold: `[1000]=51b1babe` cave WFI `@0xef98` `plat_hc=2` BANR. Peel:
@@ -80,12 +81,12 @@ probe returns `a0=0xaf5` (FDT totalsize). Walk continues (`jal@137ea`→
 ## 0.2 Phase 2 — **after** `smt_legacy` retirement: fetch is A, capabilities are B
 
 This is the standing process. Soft-ladder buckets and P1–P4 are unchanged; only the **RTL home** is
-`core/fetch/` (plus issue/LSU when the capability is not fetch).
+`core/fetch_B/` (plus issue/LSU when the capability is not fetch). Frozen A is `core/frontend`.
 
 | Soft-ladder | After retirement |
 |-------------|------------------|
-| **A** | Frozen `core/fetch/` (last green) + last green peels |
-| **B** | A + **one** capability or one VALUES row |
+| **A** | Frozen `core/frontend/` + `core/smt` pkg/dbg (last green) + last green peels |
+| **B** | `core/fetch_B/` + **one** capability or one VALUES row |
 | **P1 mini** | Directed fail-codes on **A**'s package (`g6lc64_smt2` or the envelope being enabled) |
 | **P2 RTL** | One class in fetch combos / `fetch_en_t` — or issue/RAW if not fetch |
 | **P3 integration** | `soak.sh` hold+nat+peel; cookie `51b1babe`; `CVA6_COOKIE_EXIT` |

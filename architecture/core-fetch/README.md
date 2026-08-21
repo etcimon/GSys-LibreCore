@@ -1,8 +1,9 @@
-# Instruction supply plane (`core/fetch/`)
+# Instruction supply plane (`core/fetch_B/`)
 
-**Two phases.** Handoff first: this tree is B against the g1\* frontend. **After** that frontend is
-retired to **`smt_legacy`**, **this tree is A**. New capabilities are A/B on fetch with the **same
-peels and hold-soak** as soft-ladder (P1 mini → P2 one class → P3 OpenSBI → P4 retire soft).
+**Two phases.** Handoff first: fetch was B against the g1\* frontend. **After** that frontend was
+retired to **`smt_legacy`**, applied fetch in `core/frontend` is frozen **A**. New capabilities are
+A/B on **`core/fetch_B`** with the **same peels and hold-soak** as soft-ladder (P1 mini → P2 one
+class → P3 OpenSBI → P4 retire soft).
 
 Normative why: [`../firmware-boot-principles.md`](../firmware-boot-principles.md).
 
@@ -21,25 +22,26 @@ Normative why: [`../firmware-boot-principles.md`](../firmware-boot-principles.md
 
 ## Handoff sizes (g1\* vs fetch)
 
-| | g1\* `core/frontend` + recover | `core/fetch` (handoff B → later A) |
+| | g1\* `core/smt_legacy` + recover | `core/fetch_B` (workspace B; frozen A is `core/frontend`) |
 |--|--|--|
 | Lines | ~10236 | **3832** (37%) |
 | `frontend.sv` | 4082 | **905** |
 | `g1*` in frontend | 1065 | 0 |
-| Predictors | identical | identical |
+| Predictors | identical | identical (`core/frontend` still compiled) |
 
-## Layout after retirement (default = former fetch B)
+## Layout after retirement + duplicate drop
 
 | Path | Role |
 |---|---|
-| `core/frontend/` + `core/instr_realign.sv` | Default supply (**A**): copies of the retired fetch tree |
-| `core/smt/` | That fetch tree (`g6lc_fetch_pkg`/`dbg` + supply copies). Not dual-compiled with `core/frontend` |
+| `core/frontend/` + `core/instr_realign.sv` | Frozen **A** (applied fetch at `3745cfb06`). Predictors still compiled from here |
+| `core/smt/` | **pkg + dbg only** (`g6lc_fetch_{pkg,dbg}`). Not compiled while `Flist.fetch_B` is default |
 | `core/smt_legacy/` | g1\* oracle frontend + recover packages + SMT banks |
-| `core/fetch_B/` | Dev copy of `core/smt` at `3745cfb06` for R6–R11 (`Flist.fetch_B`). Do not compile with `core/frontend` |
+| `core/fetch_B/` | **R6–R11 workspace** (`Flist.fetch_B`): supply + pkg/dbg. Default compile. Do not compile with `core/frontend` supply |
 
-Default `Flist.cva6`: `+define+G6LC_FETCH_B`, pkg/dbg from `core/smt/`, frontend files in
-`core/frontend`. Oracle: drop the define and pkg/dbg, comment B frontend/realign/scan/queue,
-`-f Flist.smt_legacy`. Do not compile both frontends.
+Default `Flist.cva6`: `+define+G6LC_FETCH_B` and `-f Flist.fetch_B`; predictors stay in
+`core/frontend`. Frozen A: drop that include, restore `core/smt` pkg/dbg + `core/instr_realign`
++ `core/frontend/{frontend,instr_queue,instr_scan}` (`Flist.fetch`). Oracle: drop the define
+and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 
 ## Status
 
@@ -52,7 +54,7 @@ Default `Flist.cva6`: `+define+G6LC_FETCH_B`, pkg/dbg from `core/smt/`, frontend
 | Peel cookie | **yes** `[1000]=51b1babe` `[1008]=51b1d000` |
 | Nat (pin `bc7ed11d`) | **not yet** — R5/I2 ok; `13884`/`12544` commit (`a0=0x82200000`→probe `0xaf5`); FDT walk continues, no `ret@1826e`. No leftover-keep / I17 / PMA |
 | Split B into `g6lc_fetch_{align,window,order,redirect}` | after that pin; bit-identical extract |
-| g1\* frontend → `smt_legacy` | **retired**: `core/smt_legacy/` (oracle + recover + banks); fetch tree is `core/smt/`; copies applied to `core/frontend` |
+| g1\* frontend → `smt_legacy` | **retired**: `core/smt_legacy/` (oracle + recover + banks); `core/smt/` is pkg/dbg only; frozen A in `core/frontend`; workspace is `core/fetch_B` |
 | Capability A/B (peels + soak on fetch) | **after** that retirement; see principles §0.2 |
 | `g6lc_fetch_pkg.sv` + `g6lc_fetch_dbg.sv` | **landed** (kill + leftover + L2 `window_accept`; snap for n-wide/SMT/spec; `+fetch_snap`) |
 | `instr_realign` leftover | **landed** (`leftover_complete` / `leftover_next` / `rvi_prefix`; `start_hw0=1`) |
@@ -81,7 +83,10 @@ Default `Flist.cva6`: `+define+G6LC_FETCH_B`, pkg/dbg from `core/smt/`, frontend
 | I10 snap in-flight | **landed** (`snap_pc`; hold **cookie** `51b1babe`; peel `51b1babe`+`51b1d000`) |
 | I13 same-cycle CSR | **landed** (`stall_csr_older` in `g6lc_issue_barrier`; fetchb `856d8292`; hold **cookie**; nat tselect handler now `mret`s; still no `ret@cd22`) |
 | L3 `packet_upto_cf` / L4 `redirect_rehold` | **landed** fetchb `63fa23a9` (IQ + one frontend assign). Hold **cookie**. Dbg: `window_expected`/`wr=`/`age=`/`hm=` (n-wide/spec observe; live not an IQ drop) |
-| `Flist.smt_legacy` | **landed** (opt-in A oracle; do not compile with `Flist.fetch`) |
+| `Flist.smt_legacy` | **landed** (opt-in A oracle; do not compile with `Flist.fetch` / `Flist.fetch_B`) |
+| `core/smt/` duplicate drop | **landed** (20 supply/predictor copies removed; pkg+dbg remain) |
+| `Flist.fetch_B` default | **landed** (R6–R11 workspace; predictors stay in `core/frontend`) |
 
-Until `smt_legacy` exists, do not start stream I=2 / n-wide / `RVH` as fetch-A experiments. Envelope
-tweaks then go through `fetch_geo_t` / `fetch_en_t`. `NrCores`, RVV, Ara, L2 do not add fetch ports.
+`smt_legacy` is the opt-in oracle. Do not start stream I=2 / n-wide / `RVH` as fetch-A experiments
+until the R4 FDT walk / R6–R11 pin on `fetch_B` is cookie-green. Envelope tweaks go through
+`fetch_geo_t` / `fetch_en_t`. `NrCores`, RVV, Ara, L2 do not add fetch ports.

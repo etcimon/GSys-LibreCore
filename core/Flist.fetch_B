@@ -6,19 +6,19 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 //
-// Dev copy of the retired fetch tree (core/smt at 3745cfb06) for R6-R11:
-// sbi_console_init, HSM hart start, sbi_hart_switch_mode / cookie cave.
+// R6-R11 workspace: instruction supply for sbi_console_init, HSM hart start,
+// sbi_hart_switch_mode / cookie cave. Byte copy of retired fetch at
+// 3745cfb06; further fetch RTL goes here, not core/frontend or core/smt.
 //
-// Mutually exclusive with default core/frontend and with Flist.fetch /
-// Flist.smt_legacy. To try this tree:
-//   1. keep +define+G6LC_FETCH_B
-//   2. comment core/instr_realign.sv and
-//              core/frontend/{frontend,instr_queue,instr_scan}.sv
-//              plus core/smt/g6lc_fetch_{pkg,dbg}.sv
-//   3. add -f Flist.fetch_B
+// Default Flist.cva6 includes this file (G6LC_FETCH_B). Mutually exclusive
+// with frozen A (core/frontend + core/instr_realign + core/smt pkg/dbg)
+// and with Flist.smt_legacy. Do not compile two frontends.
 //
-// Do not compile two frontends. Predictors in this tree duplicate
-// core/frontend btb/bht/ras/g6lc_bp_*; this flist uses the copies here.
+// Predictors stay in core/frontend (identical at the byte-copy). Copies
+// under this directory are not on the flist — do not also list them.
+//
+// To soak frozen A instead, see Flist.fetch. Oracle: drop G6LC_FETCH_B
+// and this include, add -f Flist.smt_legacy, leave predictors.
 //
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -29,21 +29,5 @@ ${CVA6_REPO_DIR}/core/fetch_B/g6lc_fetch_pkg.sv
 ${CVA6_REPO_DIR}/core/fetch_B/instr_realign.sv
 ${CVA6_REPO_DIR}/core/fetch_B/instr_scan.sv
 ${CVA6_REPO_DIR}/core/fetch_B/instr_queue.sv
-${CVA6_REPO_DIR}/core/fetch_B/btb.sv
-${CVA6_REPO_DIR}/core/fetch_B/bht.sv
-${CVA6_REPO_DIR}/core/fetch_B/bht2lvl.sv
-${CVA6_REPO_DIR}/core/fetch_B/ras.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_bp_gshare.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_bp_ghist.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_bp_ckpt.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_bp_tage_table.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_bp_tage.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_bp_loop.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_bp_ittage.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_bp_statcor.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_bp_top.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_ftq.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_fdip.sv
-${CVA6_REPO_DIR}/core/fetch_B/g6lc_loop_buffer.sv
 ${CVA6_REPO_DIR}/core/fetch_B/frontend.sv
 ${CVA6_REPO_DIR}/core/fetch_B/g6lc_fetch_dbg.sv

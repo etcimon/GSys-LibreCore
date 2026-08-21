@@ -38,11 +38,13 @@ ${CVA6_REPO_DIR}/vendor/pulp-platform/fpga-support/rtl/SyncDpRam_ind_r_w.sv
 +incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/include/
 +incdir+${CVA6_REPO_DIR}/common/local/util/
 
-// Default instruction supply is the former core/fetch tree (applied to
-// core/frontend + core/instr_realign). Drop this define and swap frontend
-// files for the smt_legacy oracle (Flist.smt_legacy).
+// Default instruction supply is the R6-R11 workspace (Flist.fetch_B).
+// Frozen A: core/frontend + core/instr_realign + core/smt/g6lc_fetch_{pkg,dbg}.
+// Oracle: drop this define and -f Flist.fetch_B, add -f Flist.smt_legacy;
+// leave predictors here. Do not compile two frontends.
 +define+G6LC_FETCH_B
-${CVA6_REPO_DIR}/core/smt/g6lc_fetch_pkg.sv
+// ${CVA6_REPO_DIR}/core/smt/g6lc_fetch_pkg.sv
+-f ${CVA6_REPO_DIR}/core/Flist.fetch_B
 
 // Floating point unit
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_pkg.sv
@@ -173,7 +175,7 @@ ${CVA6_REPO_DIR}/core/csr_regfile.sv
 ${CVA6_REPO_DIR}/core/trigger_module.sv
 ${CVA6_REPO_DIR}/core/decoder.sv
 ${CVA6_REPO_DIR}/core/ex_stage.sv
-${CVA6_REPO_DIR}/core/instr_realign.sv
+// ${CVA6_REPO_DIR}/core/instr_realign.sv
 ${CVA6_REPO_DIR}/core/id_stage.sv
 // G1h: IRO calls g6lc_sb_keep::cmv_abi_ptr / exec_region_base
 ${CVA6_REPO_DIR}/core/smt_legacy/g6lc_sb_keep.sv
@@ -224,7 +226,7 @@ ${CVA6_REPO_DIR}/core/cva6_accel_first_pass_decoder_stub.sv
 ${CVA6_REPO_DIR}/core/acc_dispatcher.sv
 ${CVA6_REPO_DIR}/core/cva6_fifo_v3.sv
 
-// What is "frontend"?
+// What is "frontend"? Predictors stay here. Supply is Flist.fetch_B.
 ${CVA6_REPO_DIR}/core/frontend/btb.sv
 ${CVA6_REPO_DIR}/core/frontend/bht.sv
 ${CVA6_REPO_DIR}/core/frontend/bht2lvl.sv
@@ -243,10 +245,10 @@ ${CVA6_REPO_DIR}/core/frontend/g6lc_loop_buffer.sv
 ${CVA6_REPO_DIR}/core/cache_subsystem/g6lc_way_predictor.sv
 ${CVA6_REPO_DIR}/core/cache_subsystem/g6lc_rrip_repl.sv
 ${CVA6_REPO_DIR}/core/frontend/ras.sv
-${CVA6_REPO_DIR}/core/frontend/instr_scan.sv
-${CVA6_REPO_DIR}/core/frontend/instr_queue.sv
-${CVA6_REPO_DIR}/core/frontend/frontend.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_fetch_dbg.sv
+// ${CVA6_REPO_DIR}/core/frontend/instr_scan.sv
+// ${CVA6_REPO_DIR}/core/frontend/instr_queue.sv
+// ${CVA6_REPO_DIR}/core/frontend/frontend.sv
+// ${CVA6_REPO_DIR}/core/smt/g6lc_fetch_dbg.sv
 
 // Cache subsystem
 ${CVA6_REPO_DIR}/core/cache_subsystem/wt_dcache_ctrl.sv

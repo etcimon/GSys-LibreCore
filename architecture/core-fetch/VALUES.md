@@ -4,8 +4,8 @@ Companion to [`SPEC.md`](SPEC.md). Maps every A present/keep/kill/rewrite **valu
 `always_comb` (or DELETE / not-fetch). Increment ids are traceability only; they do not appear in B.
 
 Handoff: map g1\* present/keep/kill onto fetch combos; leftover fabricate stays in **`smt_legacy`**.
-**After** that retirement, this table is how **A** (`core/fetch`) grows a capability: add a row, not
-a fifth combo. Peels and hold-soak stay P1–P4.
+**After** that retirement, this table is how **B** (`core/fetch_B`) grows a capability: add a row,
+not a fifth combo. Frozen A is `core/frontend`. Peels and hold-soak stay P1–P4.
 
 ---
 
@@ -27,7 +27,7 @@ arch_redirect   L4  one encoder                    I8–I12
 kill_s1/s2      —   misp|flush|replay ; | bp_valid
 ```
 
-B today (`core/fetch/frontend.sv` — kill + L2 window + I8 `arch_src` + I19 `bp_fire` + thin `next_block`):
+B today (`core/fetch_B/frontend.sv` — kill + L2 window + I8 `arch_src` + I19 `bp_fire` + thin `next_block`):
 
 ```text
 kill_s1         = g6lc_fetch_pkg::kill_s1(is_mispredict, flush_i, replay)
@@ -168,7 +168,7 @@ typedef struct packed {
 
 ## 4. Sim-only debug (`g6lc_fetch_dbg.sv`) — **landed**
 
-`core/fetch/g6lc_fetch_pkg.sv` (synth) + `g6lc_fetch_dbg.sv` (bind, `translate_off`). Frontend
+`core/fetch_B/g6lc_fetch_pkg.sv` (synth) + `g6lc_fetch_dbg.sv` (bind, `translate_off`). Frontend
 calls `kill_s1`/`kill_s2`, `window_accept`/`same_win` on redirect, and a thin `next_block`.
 Snap does not assign kill/NPC/bytes.
 
@@ -216,8 +216,8 @@ A/B TRACE: compare snaps. Truth is I$ `data` + `ilen_of`, not A's rewritten half
 2. Fit it in one of the four combos or mark DELETE / RAW.
 3. If it needs a new **input** on align/accept/redirect, that is a fetch review (port freeze).
 4. Mini first; hold TRACE of `fetch_snap_t`; cookie last.
-5. Fail → revert that increment. During handoff, slfix/`smt_legacy` is unchanged. After retirement,
-   last-green **fetch** is A and is unchanged.
+5. Fail → revert that increment. Frozen A (`core/frontend` + `core/smt` pkg/dbg) is unchanged.
+   Edit **`core/fetch_B`** only.
 
 Live B pin (fetchb `6348c84e`, snap `rpc`): `sbi_scratch_init` @`3912` **commits**. IAF
 `0x80047000` is EX resolve of `rpc=0xbcba` (`c.srli` in memory) — **not fetch**.

@@ -46,7 +46,7 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `branch-prediction/` | More / smarter predictors (gshare, TAGE, loop, indirect) | Microarchitectural, in-core | `agents/guides/AGENTS-branch-prediction.md` |
 | `speculative-execution/` | **FSE** deep window + recovery plan (`full-speculation-architecture.md`, `UPDATE-PLAN.md`); `DeepSpecEn` S1 | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` |
 | `out-of-order/` | Slice-OoO (MLP) then full rename/ROB/LSQ multi-issue OoO | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` + `router-core-upgrade-program.md` |
-| `core-fetch/` | Instruction supply: default = applied fetch in `core/frontend`; tree in `core/smt/`; g1\* oracle in `core/smt_legacy/`; R6–R11 in `core/fetch_B/` | Microarchitectural, in-core | `firmware-boot-principles.md`, `core-fetch/SPEC.md` |
+| `core-fetch/` | Instruction supply: frozen A = `core/frontend` + `core/smt` pkg/dbg; default B = `core/fetch_B/`; g1\* oracle in `core/smt_legacy/` | Microarchitectural, in-core | `firmware-boot-principles.md`, `core-fetch/SPEC.md` |
 | `multi-threading/` | Simultaneous multithreading (hart-state replication) | New micro-arch (green-field) | `agents/guides/AGENTS-soc-readiness.md` |
 | `multi-core/` | Multi-hart tiles, coherence, interrupt scaling | SoC integration | `agents/guides/AGENTS-l2l3-cache.md`, `-soc-readiness.md` |
 | `l2-l3-cache/` | Memory-side L2 / SoC L3 (LLC) | SoC integration (not an L1 edit) | `agents/guides/AGENTS-l2l3-cache.md` |
@@ -74,7 +74,7 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `ai-matrix/frameworks-virt-pcie.md` | Host multi-phase: soft virt-ai-pcie → SV HARD → optional `--from-timing`. |
 | `ara-vector-attach.md` | U10ᵇ Ara/RVV flist + `server_math_v` package contract |
 | `firmware-boot-principles.md` | Handoff then fetch-as-A: I1–I28, peels/P1–P4 for capabilities |
-| `core-fetch/` | Fetch spec; after `smt_legacy`, A for capability A/B |
+| `core-fetch/` | Fetch spec; frozen A is `core/frontend`; workspace B is `core/fetch_B` |
 | `multi-threading/smt2-bringup.md` | U6.1 SMT2 enable + dual-thread Linux/OpenSBI checklist |
 | `multi-threading/soft-ladder/` | Evidence (tag `g1-archive`). A/`smt_legacy` soak notes; **`CONTRACT.md`** envelopes |
 | `server-math-hypervisor.md` | U9/U10 detail: vstimecmp, server config, RVV enable order |
@@ -84,10 +84,10 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 
 | Area | Where it lives | Default |
 |------|----------------|---------|
-| U1 prediction fabric | `core/frontend/` **or** `core/fetch/` (A/B swap; predictors identical) | TAGE_LITE on primary 64b target |
-| U2 FTQ / FDIP / loop buffer | same tree as U1 | On primary 64b target |
-| Fetch handoff A → `smt_legacy` | `core/frontend/` + `g6lc_{present,sib_cjalr,…}` | slfix oracle until fetch hold matches |
-| Fetch (handoff B, then **A**) | `core/fetch/` + `Flist.fetch` | pin `sbi_scratch_init` @`3912`; **after retirement**, capability A/B + peels |
+| U1 prediction fabric | `core/frontend/` (compiled) + copies in `core/fetch_B/` (not on flist) | TAGE_LITE on primary 64b target |
+| U2 FTQ / FDIP / loop buffer | `core/frontend/` | On primary 64b target |
+| Fetch oracle (`smt_legacy`) | `core/smt_legacy/` + `g6lc_{present,sib_cjalr,…}` | opt-in `Flist.smt_legacy` |
+| Fetch frozen A / workspace B | A: `core/frontend` + `core/smt` pkg/dbg; B: `core/fetch_B/` + `Flist.fetch_B` | default B; pin R4 FDT walk / R6–R11 |
 | U3 way-pred / RRIP | `core/cache_subsystem/g6lc_way_predictor.sv`, `g6lc_rrip_repl.sv`, hpdcache | Target-dependent |
 | U4 slice-OoO | `core/cva6_slice_*.sv` | **Off** (`SliceOoOEn=0`) |
 | U5 full OoO | `core/ooo/*` | **Production gated** (`OoOEn`; identity when 0) |
@@ -115,7 +115,7 @@ target; it is a plan of record, applied only if/when the project chooses the "re
 | `core/cache/` | `cache_subsystem/` | `cache/l2/`, `cache/coherence/` |
 | `core/mmu/`, `core/pmp/` | `cva6_mmu/`, `pmp/` | more `Sv*` modes |
 | `core/csr/` | `csr_regfile.sv`, `perf_counters.sv`, `trigger_module.sv` | new CSR groups |
-| `core/smt/` | `g6lc_thread_select`, `g6lc_hart_state`, `g6lc_smt_regfile` | U6.1 select + banked RF; dual PC/CSR still open |
+| `core/smt/` | `g6lc_fetch_{pkg,dbg}` only (supply copies removed) | fetch A package; banks live in `core/smt_legacy/` |
 | `core/multicore/` *(new)* | — | tile wrapper, coherence hub |
 | `core/ooo/` *(new)* | — | slice queues, rename/ROB/IQ/LSQ |
 | `core/rvfi/` | `cva6_rvfi*.sv` | trace for new features |

@@ -1,7 +1,8 @@
 # Negative results — indexed by mechanism
 
-**Read this before changing B (`core/fetch/`) or proposing a fetch/redirect/squash patch.** These
-classes failed on **A**. Porting one into B is a regression, not a shortcut. A remains `smt_legacy`.
+**Read this before changing B (`core/fetch_B/`) or proposing a fetch/redirect/squash patch.** These
+classes failed on **A**. Porting one into B is a regression, not a shortcut. Frozen A is
+`core/frontend`; the g1\* oracle is `smt_legacy`.
 
 Distillation of 314 `HOLD-FAIL` / `MINI-FAIL` notes from A’s `frontend.sv` / `instr_queue.sv` /
 `id_stage.sv` / `instr_realign.sv` / issue / commit / `core/smt/*.sv`. Raw text: tag **`g1-archive`**

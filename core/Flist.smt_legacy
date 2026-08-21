@@ -7,15 +7,13 @@
 ///////////////////////////////////////////////////////////////////////////////
 //
 // Opt-in g1* frontend oracle (handoff A), retired from core/frontend.
-// Mutually exclusive with the default applied fetch (core/frontend +
-// G6LC_FETCH_B + core/smt/g6lc_fetch_{pkg,dbg}).
+// Mutually exclusive with default Flist.fetch_B and with frozen A
+// (core/frontend + core/smt/g6lc_fetch_{pkg,dbg}).
 //
 // Rebuild the oracle harness:
-//   1. drop +define+G6LC_FETCH_B and core/smt/g6lc_fetch_{pkg,dbg}.sv
-//   2. comment core/instr_realign.sv and
-//              core/frontend/{frontend,instr_queue,instr_scan}.sv
-//   3. add     -f Flist.smt_legacy
-//   4. leave   predictors (btb/bht/ras/g6lc_bp_*) and
+//   1. drop +define+G6LC_FETCH_B and -f Flist.fetch_B
+//   2. add     -f Flist.smt_legacy
+//   3. leave   predictors (btb/bht/ras/g6lc_bp_*) and
 //              g6lc_way_predictor / g6lc_rrip_repl in Flist.cva6
 //
 // Do not compile both frontends. SMT banks and recover packages live here.

@@ -6,45 +6,26 @@
 //
 ///////////////////////////////////////////////////////////////////////////////
 //
-// Manifest for the retired fetch tree now at core/smt/ (pkg + dbg + supply
-// copies). Default Flist.cva6 already applies those copies to core/frontend
-// and core/instr_realign and lists pkg/dbg — do not also -f this file.
+// Frozen-A fetch package: pkg + dbg only (core/smt/). Supply copies that
+// used to live here were applied to core/frontend + core/instr_realign and
+// removed so they cannot dual-compile.
 //
-// Mutually exclusive with Flist.smt_legacy (g1* oracle). Do not compile
-// core/smt/frontend.sv together with core/frontend/frontend.sv.
+// Default Flist.cva6 compiles the R6-R11 workspace (Flist.fetch_B), not
+// this file. To soak frozen A instead:
+//   1. keep +define+G6LC_FETCH_B
+//   2. drop -f Flist.fetch_B
+//   3. restore core/smt/g6lc_fetch_{pkg,dbg}.sv,
+//              core/instr_realign.sv, and
+//              core/frontend/{frontend,instr_queue,instr_scan}.sv
+//   4. leave predictors in core/frontend
+//
+// Mutually exclusive with Flist.fetch_B and Flist.smt_legacy.
+// Do not compile two frontends.
 //
 ///////////////////////////////////////////////////////////////////////////////
 
 +incdir+${CVA6_REPO_DIR}/core/include/
 +incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include/
 
-// Geometry / value-table package (before modules that call it)
 ${CVA6_REPO_DIR}/core/smt/g6lc_fetch_pkg.sv
-
-// Instruction supply
-${CVA6_REPO_DIR}/core/smt/instr_realign.sv
-${CVA6_REPO_DIR}/core/smt/instr_scan.sv
-${CVA6_REPO_DIR}/core/smt/instr_queue.sv
-
-// Branch prediction
-${CVA6_REPO_DIR}/core/smt/btb.sv
-${CVA6_REPO_DIR}/core/smt/bht.sv
-${CVA6_REPO_DIR}/core/smt/bht2lvl.sv
-${CVA6_REPO_DIR}/core/smt/ras.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_bp_gshare.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_bp_ghist.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_bp_ckpt.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_bp_tage_table.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_bp_tage.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_bp_loop.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_bp_ittage.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_bp_statcor.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_bp_top.sv
-
-// Decoupled fetch (FtqDepth != 0)
-${CVA6_REPO_DIR}/core/smt/g6lc_ftq.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_fdip.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_loop_buffer.sv
-
-${CVA6_REPO_DIR}/core/smt/frontend.sv
 ${CVA6_REPO_DIR}/core/smt/g6lc_fetch_dbg.sv

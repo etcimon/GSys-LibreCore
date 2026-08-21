@@ -1,9 +1,10 @@
-# Generic instruction-supply specification (`core/fetch/`) — B
+# Generic instruction-supply specification (`core/fetch_B/`) — B
 
-**Status:** During **handoff**, this tree is B vs the g1\* frontend. **After** that frontend is
-retired to `core/smt_legacy/`, **this tree is A** and capabilities are added as B (same peels and
-P1–P4). Module names match (`frontend`, `instr_queue`, `instr_realign`, …). Live drop-in is still
-one `frontend.sv` + realign + queue (905+167+396 L) until `sbi_scratch_init` is closed.
+**Status:** Handoff is retired. Frozen **A** is `core/frontend` + `core/instr_realign` (applied
+fetch at `3745cfb06`) with pkg/dbg in `core/smt/`. **B** is `core/fetch_B/` (`Flist.fetch_B`,
+default compile) — same peels and P1–P4. Module names match (`frontend`, `instr_queue`,
+`instr_realign`, …). Live drop-in is still one `frontend.sv` + realign + queue until
+`sbi_console_init` / R6–R11 close.
 
 Implements **I1**–**I12** of [`../firmware-boot-principles.md`](../firmware-boot-principles.md).
 Value catalog: [`VALUES.md`](VALUES.md).
@@ -62,7 +63,7 @@ miss mid-line straddles). Else leftover stays pending (I3). Kill does not change
 Formal (when split out): `A_decode_pure`, `A_no_fabricate`, `A_pc_monotonic`, `A_leftover_adjacent`,
 `A_leftover_rvi`, `A_leftover_hart`, `A_kill_inert`, `A_no_loss`.
 
-Live B: `core/fetch/instr_realign.sv` — `carry_ok = leftover_complete(...)`;
+Live B: `core/fetch_B/instr_realign.sv` — `carry_ok = leftover_complete(...)`;
 `hw_compressed = (ilen_of==2)`; cursor over `NrHalfWords`. A non-next valid window
 still **drops** leftover (`leftover_drop`; I4az / `plat_hc=80` if kept). Kill **and
 flush** are inert (`leftover_update = valid && !kill`). Spec leftover hold
@@ -148,18 +149,21 @@ One window: `FETCH_WIDTH` bits + exception sideband (`gpaddr`/`tinst`/`gva` pass
 
 ---
 
-## 8. Migration — retire g1\* to `smt_legacy`, then fetch is A
+## 8. Migration — done; workspace is `fetch_B`
 
-| A (today) | Fate |
+| Path | Fate |
 |---|---|
-| `core/frontend/*.sv` + `core/instr_realign.sv` | **Keep compiling as A** until B hold matches. Then **move** to `core/smt_legacy/` + `Flist.smt_legacy` (opt-in oracle). Same module names, not in default flist |
+| `core/frontend/*.sv` + `core/instr_realign.sv` | Frozen **A** (applied fetch). Predictors still compiled from here |
+| `core/smt/` | **pkg + dbg only**. Not on the default flist while `Flist.fetch_B` is included |
+| `core/smt_legacy/` | g1\* oracle frontend + recover + SMT banks (`Flist.smt_legacy`) |
 | `g6lc_{present,sib_cjalr,fe_keep,fe_kill,lj_hide,iq_hide,leftover,rvc_enc}` | Stay with `smt_legacy`. Never instantiated on B |
 | `g6lc_jalr_usable` on resolve | Already removed (CF-0 / I11). Predict-only or absent on B |
 | `id_stage` recover latches / `make_cjalr16` | `smt_legacy` only; B ID sees memory bytes |
-| I$ sibling `user` channel | dead on B; delete from `g6lc_icache` when A is retired |
-| `g6lc_smt_*` banks, `thread_select`, `issue_barrier`, `sb_keep` | **not** in the swap; keep in `core/smt/` |
+| I$ sibling `user` channel | dead on B |
+| `g6lc_smt_*` banks, `thread_select`, `issue_barrier`, `sb_keep` | `core/smt_legacy/` (not fetch) |
+| `core/fetch_B/` | **B workspace** — default `Flist.cva6` via `-f Flist.fetch_B` |
 
-B wiring (already used): `Flist.fetch`, `+define+G6LC_FETCH_B`, g1 ports tied in `cva6.sv`.
+B wiring: `Flist.fetch_B`, `+define+G6LC_FETCH_B`, g1 ports tied in `cva6.sv`.
 
 Sizes: A fetch plane ~10.2k L → B 3.8k L (−63%). Spec extract (align/window/order/redirect modules)
 is extra cleanup, not a size target.
@@ -173,12 +177,11 @@ is extra cleanup, not a size target.
 3. Align I8 (SMT restore vs trap) on B if TRACE shows it; bounded trap hold (I9, I23).
 4. Bit-identical extract: `g6lc_fetch_pkg` + align/window/order/redirect; `g6lc_fetch_dbg.sv`
    `translate_off`.
-5. When fetch hold cookie = slfix: default flist = `Flist.fetch`; g1\* frontend → `core/smt_legacy/`.
-   **Fetch is now A.** `Flist.smt_legacy` is landed (opt-in oracle, files not yet
-   moved). Nat pin still hangs in `sbi_hsm_init` on B; do not copy A's nat
-   cookie if it is `plat_hc=80` fabricate.
+5. Hold cookie matched; g1\* frontend → `core/smt_legacy/`. Frozen A is `core/frontend`.
+   Default flist is `Flist.fetch_B`. Nat pin still hangs in the R4 FDT walk (`jal@1826a`);
+   do not copy A's nat cookie if it is `plat_hc=80` fabricate.
 6. **Capability A/B** (same peels / `soak.sh`): one `fetch_en_t` or VALUES row per increment
-   (stream I=2 leftover mini, n-wide `geo.issue`, `RVH` exception-suppress, …). Do not touch the
-   issue throttle (RC1/RC4) until 5.
+   **in `core/fetch_B`** (stream I=2 leftover mini, n-wide `geo.issue`, `RVH`
+   exception-suppress, …). Do not touch the issue throttle (RC1/RC4) until R6–R11.
 
 ISA red lines stay off. `NEGATIVE.md` classes stay out of B.
