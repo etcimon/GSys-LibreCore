@@ -118,6 +118,7 @@ per-hart leftover/switch (`en.restore`).
 | Spare `kill_s2` of in-flight | `fe_kill` `G1cq/hs/jn` | DELETE | — |
 | Fabricate sibling `c.jalr` | `G1kk…mf` `sib_cjalr` | DELETE | — (RC3) |
 | Mid-line 16-bit expanded as `jalr` without C2 check | `G1gw` `G1gy` `G1hd`–`ij` | DELETE on B (`G6LC_FETCH_B` identity expand) | I1; A keeps recover |
+| Mash / `jalr_usable` on resolve / `cf_unissued` / G1gg / G1gq / SB bmiss | E2/E3/E5 `g6lc_rvc_enc` `g6lc_jalr_usable` | DELETE on B | `G6LC_FETCH_B` skips; A keeps; I1/I11/I17. Inventory [`SMT-LEGACY.md`](SMT-LEGACY.md) |
 | ID splice older fetch in front of a parked branch | `G1be` `G1cy` `G1em` `G1ev` | DELETE on B | I6; IQ drain is the order |
 | Hide leftover jal / opcode IQ hide | `lj_hide` `G1dc…ex` | DELETE | `slot_live` observe only |
 | Sibling I$ `user[33]` | `G1iw/jj/jl/ki` | DELETE | — |

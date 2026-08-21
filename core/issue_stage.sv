@@ -511,6 +511,14 @@ module issue_stage
     end
   end
   assign g1gq_tgt_o = g1gq_rdata[CVA6Cfg.VLEN-1:0];
+  // I11: B never redirects from an "unusable" JumpR resolve. A keeps G1gq.
+`ifdef G6LC_FETCH_B
+  assign g1gq_redir_o = 1'b0;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) g1gq_pend_q <= 1'b0;
+    else g1gq_pend_q <= 1'b0;
+  end
+`else
   assign g1gq_redir_o = CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
       g1gq_pend_q && g1gq_ack_jalr &&
       g6lc_jalr_usable::usable(CVA6Cfg, CVA6Cfg.VLEN, 64'(g1gq_rdata)) &&
@@ -533,5 +541,6 @@ module issue_stage
     end else if (g1gq_redir_o)
       g1gq_pend_q <= 1'b0;
   end
+`endif
 
 endmodule

@@ -20,15 +20,15 @@ workers.
 | `NrHarts` in `cva6_cfg_t` | **Live** — legal values 1 or 2 (`check_cfg`); default **1** |
 | `SmtPolicy` / `SmtFetchQuantum` / `SmtStarveLimit` | **Live** — RR / switch-on-miss / hybrid (default hybrid) |
 | Pipeline `hart_id` tagging | **Live** — `fetch_entry_t` + `scoreboard_entry_t.hart_id`; decoder stamps active hart |
-| Banked RF | **Live** — `core/smt/g6lc_smt_regfile.sv` (NrHarts=1 → single `ariane_regfile`) |
-| Dual PC bank | **Live** — `core/smt/g6lc_smt_pc_bank.sv` + frontend restore |
-| Banked CSR | **Live** — `g6lc_smt_csr_bank.sv` (commit by `hart_id`; priv mux by active; **AI aicfg/ais sideband banked**) |
+| Banked RF | **Live** — `core/smt_legacy/g6lc_smt_regfile.sv` (NrHarts=1 → single `ariane_regfile`) |
+| Dual PC bank | **Live** — `core/smt_legacy/g6lc_smt_pc_bank.sv` + frontend restore |
+| Banked CSR | **Live** — `core/smt_legacy/g6lc_smt_csr_bank.sv` (commit by `hart_id`; priv mux by active; **AI aicfg/ais sideband banked**) |
 | Fine-grain switch | **Live** — IF + unissued flush only; EX drains; BP preserved |
 | Per-hart WFI halt | **Live** — sticky `smt_hart_halt` from `halt_csr` |
 | Per-hart RAS | **Live** — `ras.sv` banks when `NrHarts>1` |
 | Per-hart GHR | **Live** — `g6lc_bp_ghist` + gshare GHR banks |
 | Shared BHT/BTB | Shared tables (cross-hart pollution possible) |
-| `g6lc_thread_select.sv` + `g6lc_hart_state.sv` | **Live** under `core/smt/` |
+| `g6lc_thread_select.sv` + `g6lc_hart_state.sv` | **Live** under `core/smt_legacy/` — inventory [`../core-fetch/SMT-LEGACY.md`](../core-fetch/SMT-LEGACY.md) |
 | Soft-ladder DI residual | **Active** — E0–E3 + G1 soaked. G0 reverted. Mini P10 green; **P9=19** (second peel-walk). PEEL `129f8`/4/9. Not I4cg. |
 | AI / PyTorch host path | **Live soft** on `g6lc64_ai` + virt-ai-pcie; **SMT2 multi-thread pytorch** after SL-C |
 

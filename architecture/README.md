@@ -46,7 +46,7 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `branch-prediction/` | More / smarter predictors (gshare, TAGE, loop, indirect) | Microarchitectural, in-core | `agents/guides/AGENTS-branch-prediction.md` |
 | `speculative-execution/` | **FSE** deep window + recovery plan (`full-speculation-architecture.md`, `UPDATE-PLAN.md`); `DeepSpecEn` S1 | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` |
 | `out-of-order/` | Slice-OoO (MLP) then full rename/ROB/LSQ multi-issue OoO | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` + `router-core-upgrade-program.md` |
-| `core-fetch/` | Instruction supply: frozen A = `core/frontend` + `core/smt` pkg/dbg; default B = `core/fetch_B/`; g1\* oracle in `core/smt_legacy/` | Microarchitectural, in-core | `firmware-boot-principles.md`, `core-fetch/SPEC.md` |
+| `core-fetch/` | Instruction supply: frozen A = `core/frontend` + `core/smt` pkg/dbg; default B = `core/fetch_B/`; g1\* oracle in `core/smt_legacy/` | Microarchitectural, in-core | `firmware-boot-principles.md`, `core-fetch/SPEC.md`, `core-fetch/SMT-LEGACY.md` |
 | `multi-threading/` | Simultaneous multithreading (hart-state replication) | New micro-arch (green-field) | `agents/guides/AGENTS-soc-readiness.md` |
 | `multi-core/` | Multi-hart tiles, coherence, interrupt scaling | SoC integration | `agents/guides/AGENTS-l2l3-cache.md`, `-soc-readiness.md` |
 | `l2-l3-cache/` | Memory-side L2 / SoC L3 (LLC) | SoC integration (not an L1 edit) | `agents/guides/AGENTS-l2l3-cache.md` |

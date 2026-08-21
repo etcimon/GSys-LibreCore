@@ -13,6 +13,7 @@ Normative why: [`../firmware-boot-principles.md`](../firmware-boot-principles.md
 | [`VALUES.md`](VALUES.md) | Value reference table (present/keep/kill/rewrite → B combos) + `fetch_geo_t` / `fetch_en_t` / sim debug |
 | [`LEDGER.md`](LEDGER.md) | Every kept increment: subsumed into a B combo, or frozen in `smt_legacy` |
 | [`NEGATIVE.md`](NEGATIVE.md) | **Read first.** Mechanisms that failed; do not port into B |
+| [`SMT-LEGACY.md`](SMT-LEGACY.md) | What default B still compiles from `smt_legacy` vs recover vs oracle frontend |
 
 ## The rule
 
@@ -86,6 +87,7 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | `Flist.smt_legacy` | **landed** (opt-in A oracle; do not compile with `Flist.fetch` / `Flist.fetch_B`) |
 | `core/smt/` duplicate drop | **landed** (20 supply/predictor copies removed; pkg+dbg remain) |
 | `Flist.fetch_B` default | **landed** (R6–R11 workspace; predictors stay in `core/frontend`) |
+| B skip recover on shared ID/EX | **landed** (`G6LC_FETCH_B`: no mash, no resolve `jalr_usable`, no `cf_unissued`, no G1gg/G1gq, no SB unusable-bmiss drop). A unchanged. Next pin still R4 FDT walk |
 
 `smt_legacy` is the opt-in oracle. Do not start stream I=2 / n-wide / `RVH` as fetch-A experiments
 until the R4 FDT walk / R6–R11 pin on `fetch_B` is cookie-green. Envelope tweaks go through

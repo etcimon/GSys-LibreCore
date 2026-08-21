@@ -365,12 +365,17 @@ module scoreboard #(
   // NPC reseed kills correct target-path ops; with reseed it double-pushes
   // RAS on re-fetched calls. Hang-6 residual needs selective fallthrough kill.
   // EXTRACT E2: JALR-to-unusable is not a bmiss. Taken Jump still cancels.
+  // I11: B never drops a mispredict because the target looks unusable.
+`ifdef G6LC_FETCH_B
+  assign bmiss = resolved_branch_i.valid && resolved_branch_i.is_mispredict;
+`else
   assign bmiss = resolved_branch_i.valid && resolved_branch_i.is_mispredict
                  && !(CVA6Cfg.NrHarts > 1 &&
                       resolved_branch_i.cf_type == ariane_pkg::JumpR &&
                       !g6lc_jalr_usable::usable(
                            CVA6Cfg, CVA6Cfg.VLEN,
                            64'(resolved_branch_i.target_address)));
+`endif
   // R3a: cancel window starts after the *branch* tid, not FLU_WB. FLU_WB can
   // be a same-cycle mult/ALU result (ex_stage flu mux) while the branch still
   // resolves — using FLU_WB+1 then cancels older correct-path ops (frame SDs).

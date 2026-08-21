@@ -47,6 +47,8 @@ Do not compile both frontends. Do not use `g6lc64_di1` as the soak; do not stub 
 `core/fetch_B/` is the R6–R11 workspace (byte copy of retired fetch at `3745cfb06`)
 for `sbi_console_init`, HSM start, `sbi_hart_switch_mode`. Predictors stay in
 `core/frontend`. Nat still has no `ret@1826e` / console.
+`smt_legacy` inventory (banks required on B vs recover vs oracle frontend):
+[`core-fetch/SMT-LEGACY.md`](core-fetch/SMT-LEGACY.md).
 
 **Live handoff pin:** B hold and peel are **cookie-green** (fetchb `ec1239ef`).
 Hold: `[1000]=51b1babe` cave WFI `@0xef98` `plat_hc=2` BANR. Peel:

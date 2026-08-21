@@ -48,6 +48,10 @@ Layers: [`SPEC.md`](SPEC.md) §0.
 
 ## 2. Frozen in `smt_legacy` — program-specific, must not enter B
 
+Which of those files default B still **compiles**, vs oracle-only frontend copies:
+[`SMT-LEGACY.md`](SMT-LEGACY.md). Recover packages stay on `Flist.cva6` so A can call them;
+`fetch_B` supply does not.
+
 | Increments | What they did | Why deleted |
 |---|---|---|
 | `G1kk`, `G1kl`, `G1kz`, `G1le`, `G1lf`, `G1lh`, `G1li`, `G1lq`, `G1lr`, `G1ls`, `G1lt`, `G1lu`, `G1lo`, `G1lp`, `G1lz`, `G1ln`, `G1md`, `G1me`, `G1mf`, `G1ma`, `G1mb`, `G1mc`, `G1ks`, `G1kt`, `G1ko`, `G1kq`, `G1kr`, `G1kw`, `G1kn`, `G1ky`, `G1lj`, `G1ll`, `G1lv`, `G1km` | Latch an aligned load's destination register and use it to synthesise an indirect-jump encoding at a sibling offset | Violates **I1**, **I2**. The instruction handed to decode is not the instruction in memory. RC3. |

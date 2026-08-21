@@ -944,6 +944,8 @@ module compressed_decoder #(
         is_compressed_o = 1'b0;
         // E5: G1ba/G1gu mash recover in g6lc_rvc_enc (bit-identical).
         // G1gt any-RVI — MINI-FAIL. Do not re-land.
+        // I1: B never rewrites a 32-bit word as a mashed C encoding.
+`ifndef G6LC_FETCH_B
         if (g6lc_rvc_enc::mash_c1li(CVA6Cfg, instr_i)) begin
           is_compressed_o = 1'b1;
           instr_o         = g6lc_rvc_enc::expand_c1li(instr_i);
@@ -951,6 +953,7 @@ module compressed_decoder #(
           is_compressed_o = 1'b1;
           instr_o         = g6lc_rvc_enc::expand_cjalr(instr_i);
         end
+`endif
       end
     endcase
 

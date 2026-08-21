@@ -7,6 +7,8 @@
 ///////////////////////////////////////////////////////////////////////////////
 //
 // Opt-in g1* frontend oracle (handoff A), retired from core/frontend.
+// This file is ONLY the four frontend copies. SMT banks and recover
+// packages stay on default Flist.cva6 (see architecture/core-fetch/SMT-LEGACY.md).
 // Mutually exclusive with default Flist.fetch_B and with frozen A
 // (core/frontend + core/smt/g6lc_fetch_{pkg,dbg}).
 //
@@ -16,7 +18,7 @@
 //   3. leave   predictors (btb/bht/ras/g6lc_bp_*) and
 //              g6lc_way_predictor / g6lc_rrip_repl in Flist.cva6
 //
-// Do not compile both frontends. SMT banks and recover packages live here.
+// Do not compile both frontends.
 //
 ///////////////////////////////////////////////////////////////////////////////
 

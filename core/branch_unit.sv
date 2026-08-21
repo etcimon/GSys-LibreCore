@@ -138,6 +138,8 @@ module branch_unit #(
         end
       end
       // EXTRACT E2: I4t/I4v JALR to unusable target is not a mispredict.
+      // I11: B never filters resolve by value. A keeps recover.
+`ifndef G6LC_FETCH_B
       if (CVA6Cfg.NrHarts > 1 &&
           fu_data_i.operation == ariane_pkg::JALR &&
           !g6lc_jalr_usable::usable(CVA6Cfg, CVA6Cfg.VLEN, 64'(target_address))) begin
@@ -192,6 +194,7 @@ module branch_unit #(
           end
         end
       end
+`endif
       // G1ig mid-line 01 Branch leftover-PC
       // target JumpR — MINI-FAIL FDT hang
       // @400000. Do not re-land (G1he

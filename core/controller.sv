@@ -126,6 +126,9 @@ module controller
       flush_if_o             = 1'b1;
     end
     // EXTRACT E3: I4x/bz/ce predicted-correct Jump/Return/JumpR IQ kill.
+    // B already ends the packet at the first predicted CF (`packet_upto_cf`)
+    // and kills in-flight on `bp_fire`. A keeps the extra unissued flush.
+`ifndef G6LC_FETCH_B
     if (g6lc_cf_unissued::flush(
             CVA6Cfg,
             resolved_branch_i.valid,
@@ -134,6 +137,7 @@ module controller
             resolved_branch_i.cf_type)) begin
       flush_unissued_instr_o = 1'b1;
     end
+`endif
 
     // ---------------------------------
     // FENCE

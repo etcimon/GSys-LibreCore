@@ -929,6 +929,8 @@ module issue_read_operands
       // G1gg: jalr prefers usable RF rs1 over
       // an unusable forward. No stall (G1gf
       // HOLD-FAIL hung OpenSBI). Not G0. SMT+SS.
+      // I17: B never picks forwarded vs RF by inspecting the value.
+`ifndef G6LC_FETCH_B
       if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
           issue_instr_i[i].op == ariane_pkg::JALR &&
           forward_rs1[i] &&
@@ -938,6 +940,7 @@ module issue_read_operands
               CVA6Cfg, CVA6Cfg.VLEN, 64'(operand_a_regfile[i]))) begin
         fu_data_n[i].operand_a = operand_a_regfile[i];
       end
+`endif
       if (forward_rs2[i]) begin
         fu_data_n[i].operand_b = rs2_res[i];
       end
