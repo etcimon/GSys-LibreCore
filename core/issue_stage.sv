@@ -189,10 +189,14 @@ module issue_stage
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs2_o,
     // Original instruction bits for AES
     output logic [5:0] orig_instr_aes_bits,
-    // G1gq: commit-time JALR redirect to RF[rs1]
+    // G1gq: commit-time JALR redirect to RF[rs1].
+    // I8: B has no second FE redirect; cva6.sv dropped these pins at
+    // 3745cfb06. A/oracle keeps the ports.
+`ifndef G6LC_FETCH_B
     input logic [CVA6Cfg.VLEN-1:0] npc_i,
     output logic g1gq_redir_o,
     output logic [CVA6Cfg.VLEN-1:0] g1gq_tgt_o,
+`endif
     // G1mf: SB result-valid 00 RVI LOAD
     output logic [CVA6Cfg.NrHarts-1:0] g1mf_v_o,
     output logic [CVA6Cfg.NrHarts-1:0][4:0] g1mf_rd_o,
@@ -510,15 +514,14 @@ module issue_stage
       end
     end
   end
-  assign g1gq_tgt_o = g1gq_rdata[CVA6Cfg.VLEN-1:0];
   // I11: B never redirects from an "unusable" JumpR resolve. A keeps G1gq.
 `ifdef G6LC_FETCH_B
-  assign g1gq_redir_o = 1'b0;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) g1gq_pend_q <= 1'b0;
     else g1gq_pend_q <= 1'b0;
   end
 `else
+  assign g1gq_tgt_o = g1gq_rdata[CVA6Cfg.VLEN-1:0];
   assign g1gq_redir_o = CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
       g1gq_pend_q && g1gq_ack_jalr &&
       g6lc_jalr_usable::usable(CVA6Cfg, CVA6Cfg.VLEN, 64'(g1gq_rdata)) &&

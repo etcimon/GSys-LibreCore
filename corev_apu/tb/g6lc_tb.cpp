@@ -73,7 +73,7 @@ static vluint64_t main_time = 0;
 // does not reject them. Use +permissive…+permissive-off if you need more.
 static const char *verilog_plusargs[] = {
     "jtag_rbb_enable", "time_out", "debug_disable", "tohost_addr", "elf_file",
-    "quiet_axi", nullptr};
+    "quiet_axi", "fetch_snap", "fetch_snap_lo", "fetch_snap_hi", nullptr};
 
 extern dtm_t* dtm;
 extern remote_bitbang_t * jtag;

@@ -53,7 +53,7 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | OpenSBI `mtvec=_trap_handler` | **yes** |
 | Hold cookie | **yes** fetchb `ec1239ef` `[1000]=51b1babe` cave WFI `@0xef98` `plat_hc=2` BANR |
 | Peel cookie | **yes** `[1000]=51b1babe` `[1008]=51b1d000` |
-| Nat (pin `bc7ed11d`) | **R4 data, not L1** — TRACE `drop=0` `ok=1`; probe `0x8001e000`→`0xaf5`; then `a0=-11` (BADSTRUCTURE); later `a0=0x82200000`. No `ret@1826e`. Rebuild `b333c2b5f` then re-TRACE |
+| Nat (pin `bc7ed11d`) | **R4 walk started.** Keep-skip fetchb: `a0=-11` / `0x82200000` **gone**. `fdt_path_offset` of ELF FDT returns 0 to `fw_platform_init`. Residual: `fdt_get_property_by_offset_` `sw a0,0(s2)` mepc=`0x12eb2` mcause=6 mtval=`0x12b2a` hang WFI `@0x2d38`. Not leftover-keep |
 | Split B into `g6lc_fetch_{align,window,order,redirect}` | after that pin; bit-identical extract |
 | g1\* frontend → `smt_legacy` | **retired**: `core/smt_legacy/` (oracle + recover + banks); `core/smt/` is pkg/dbg only; frozen A in `core/frontend`; workspace is `core/fetch_B` |
 | Capability A/B (peels + soak on fetch) | **after** that retirement; see principles §0.2 |
@@ -86,7 +86,7 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | L3 `packet_upto_cf` / L4 `redirect_rehold` | **landed** fetchb `63fa23a9` (IQ + one frontend assign). Hold **cookie**. Dbg: `window_expected`/`wr=`/`age=`/`hm=` (n-wide/spec observe; live not an IQ drop) |
 | `Flist.smt_legacy` | **landed** (opt-in A oracle; do not compile with `Flist.fetch` / `Flist.fetch_B`) |
 | `core/smt/` duplicate drop | **landed** (20 supply/predictor copies removed; pkg+dbg remain) |
-| `Flist.fetch_B` default | **landed** (R6–R11 workspace; predictors stay in `core/frontend`) |
+| `Flist.fetch_B` default | **landed** (R6–R11 workspace; predictors stay in `core/frontend`). Include **after** `config_pkg`/`ariane_pkg` (top-of-file `-f` is PKGNODECL on a clean parse) |
 | B skip recover on shared ID/EX | **landed** (`G6LC_FETCH_B`: no mash, no resolve `jalr_usable`, no `cf_unissued`, no G1gg/G1gq, no SB unusable-bmiss drop). A unchanged. Next pin still R4 FDT walk |
 | B skip sib_cjalr arm + I$ user half | **landed** (ID `g1lo`/`g1hx`/`g1mf` capture; `g6lc_icache` G1iw/jl). Rewrite was already off; capture was still live |
 | B skip SB keep on younger-cancel | **landed** (I13; both sticky and same-cycle mask). A keeps E0 list. Next pin still R4 FDT walk |
@@ -98,7 +98,9 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | B skip G1t jal flush spare | **landed** (SB alloc `!flush_unissued`; IRO `branch_valid='0`) |
 | B skip IRO G1o/ai | **landed**. G1an/G1ea stay |
 | Recover strip (shared ID/EX/issue/SB) | **done** for B. Remaining live: G1an, G1ea, I13 CF/CSR barriers, SMT banks |
-| R4 FDT TRACE | **L1 holds** (`drop=0` `ok=1`). Residual is `a0=-11` then `a0=0x82200000`, not leftover. Rebuild fetchb @ `b333c2b5f` and re-TRACE |
+| B hide G1gq issue ports | **landed** (I8: `cva6.sv` dropped `npc_i`/`g1gq_*` at `3745cfb06`; PINMISSING on clean parse) |
+| `+fetch_snap` HTIF allowlist | **landed** (`g6lc_tb.cpp`) |
+| R4 FDT TRACE (keep-skip) | **`a0=-11` / `0x82200000` gone.** path_offset of `0x8001e000` returns 0. Residual is getprop `sw` misalign (`s2`/`s3` clobber across `fdt_next_tag` in `fdt_get_property_namelen_`). Not leftover-keep |
 
 `smt_legacy` is the opt-in oracle. Do not start stream I=2 / n-wide / `RVH` as fetch-A experiments
 until the R4 FDT walk / R6–R11 pin on `fetch_B` is cookie-green. Envelope tweaks go through

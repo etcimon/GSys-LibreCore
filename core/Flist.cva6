@@ -42,9 +42,10 @@ ${CVA6_REPO_DIR}/vendor/pulp-platform/fpga-support/rtl/SyncDpRam_ind_r_w.sv
 // Frozen A: core/frontend + core/instr_realign + core/smt/g6lc_fetch_{pkg,dbg}.
 // Oracle: drop this define and -f Flist.fetch_B, add -f Flist.smt_legacy;
 // leave predictors here. Do not compile two frontends.
+// Define early; include the flist after config_pkg/ariane_pkg (same slot
+// as frozen-A supply). A top-of-file -f reparse hits PKGNODECL.
 +define+G6LC_FETCH_B
 // ${CVA6_REPO_DIR}/core/smt/g6lc_fetch_pkg.sv
--f ${CVA6_REPO_DIR}/core/Flist.fetch_B
 
 // Floating point unit
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_pkg.sv
@@ -249,6 +250,7 @@ ${CVA6_REPO_DIR}/core/frontend/ras.sv
 // ${CVA6_REPO_DIR}/core/frontend/instr_queue.sv
 // ${CVA6_REPO_DIR}/core/frontend/frontend.sv
 // ${CVA6_REPO_DIR}/core/smt/g6lc_fetch_dbg.sv
+-f ${CVA6_REPO_DIR}/core/Flist.fetch_B
 
 // Cache subsystem
 ${CVA6_REPO_DIR}/core/cache_subsystem/wt_dcache_ctrl.sv
