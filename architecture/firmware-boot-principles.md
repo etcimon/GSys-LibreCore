@@ -86,7 +86,9 @@ R4 TRACE after keep-skip (lab fetchb recover-strip, pin `bc7ed11d`):
 mtval=`0x12b2a` hang WFI `@0x2d38` (`sbi_pmu_init` trap dump). Pin hook
 `j@12e26`→`2cc0` **runs**. At `jal@130b2`, `s2` (FDT) is already 0 and
 `s3` (lenp) is `0x12b2a` (code residue of `fdt_check_node_offset_`+`0x20`)
-— clobber across `fdt_next_tag@129d4`. Not leftover-keep / PMA /
+— clobber across `fdt_next_tag@129d4`. 2nd call's `ld s3/s2` retired
+`0x12b2a`/`0` from stale stack (1st call's `sd ra` slot). B STQ flush
+now keeps `!cancelled` spec stores. Not leftover-keep / PMA /
 always-JumpR. `Flist.smt_legacy` is the opt-in A oracle.
 
 ---

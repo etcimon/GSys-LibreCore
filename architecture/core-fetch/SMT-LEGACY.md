@@ -68,8 +68,8 @@ opcode/rd issue stalls, IRO store-ra/addi-sp. A unchanged.
 **Still live on B (not recover):** SMT banks / `thread_select`; I13
 `unresolved_cf` / `unresolved_csr` / `stall_csr_older`; I14 `g6lc_ex_id`;
 IRO G1an (cancelled LOAD vs `raw_checker`) and G1ea (CSR never forwarded).
-Do not extend the keep list. Next pin: getprop `sw a0,0(s2)` (`mepc=0x12eb2`
-mcause=6) — `s2`/`s3` clobber across `fdt_next_tag` after keep-skip.
+Do not extend the keep list. B STQ flush keeps `!cancelled` spec stores
+(older frame `sd s2/s3`). Next: re-TRACE getprop `sw` / `ret@1826e`.
 
 ## 2. Not on the default flist — oracle frontend (4 files)
 

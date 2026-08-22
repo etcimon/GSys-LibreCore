@@ -175,7 +175,10 @@ module store_buffer
     end
 
     // FSE S4: younger-only cancel — keep older stores, drop cancelled TIDs.
-    // G1ah SMT+SS: also keep fwd_keep (and on flush, only those).
+    // G1ah SMT+SS: also keep fwd_keep. A on flush keeps only fwd_keep.
+    // I13: B keeps !cancelled on flush too — keep-skip cancelled wrong-path
+    // stores, but a mispredict flush was dropping older frame `sd s2/s3`
+    // still in the spec queue (getprop `sw` mepc=0x12eb2 mcause=6).
     // Snapshot then rewrite dense [0 .. live) so pointers match status_cnt.
     if ((|cancelled_mask_i && !flush_i) ||
         (flush_i && CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1)) begin
@@ -203,10 +206,17 @@ module store_buffer
         if (k < unsigned'(old_cnt)) begin
           src = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
           if (speculative_queue_n[src].valid &&
+`ifdef G6LC_FETCH_B
+              ((CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+                speculative_queue_n[src].fwd_keep) ||
+               !cancelled_mask_i[speculative_queue_n[src].trans_id])
+`else
               ((CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
                 speculative_queue_n[src].fwd_keep) ||
                (!flush_i &&
-                !cancelled_mask_i[speculative_queue_n[src].trans_id]))) begin
+                !cancelled_mask_i[speculative_queue_n[src].trans_id]))
+`endif
+              ) begin
             a_addr[dst] = speculative_queue_n[src].address;
             a_data[dst] = speculative_queue_n[src].data;
             a_be[dst]   = speculative_queue_n[src].be;

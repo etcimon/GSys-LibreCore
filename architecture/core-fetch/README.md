@@ -100,7 +100,8 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | Recover strip (shared ID/EX/issue/SB) | **done** for B. Remaining live: G1an, G1ea, I13 CF/CSR barriers, SMT banks |
 | B hide G1gq issue ports | **landed** (I8: `cva6.sv` dropped `npc_i`/`g1gq_*` at `3745cfb06`; PINMISSING on clean parse) |
 | `+fetch_snap` HTIF allowlist | **landed** (`g6lc_tb.cpp`) |
-| R4 FDT TRACE (keep-skip) | **`a0=-11` / `0x82200000` gone.** path_offset of `0x8001e000` returns 0. Residual is getprop `sw` misalign (`s2`/`s3` clobber across `fdt_next_tag` in `fdt_get_property_namelen_`). Not leftover-keep |
+| R4 FDT TRACE (keep-skip) | **`a0=-11` / `0x82200000` gone.** path_offset of `0x8001e000` returns 0. Residual was getprop `sw` misalign: 2nd `fdt_next_tag` `ld s2/s3` saw stale stack (`0` / `0x12b2a`) |
+| B STQ flush keeps older stores | **landed** (`G6LC_FETCH_B`: spec queue on flush keeps `!cancelled` + `fwd_keep`; A still flush→fwd_keep only). Not leftover-keep |
 
 `smt_legacy` is the opt-in oracle. Do not start stream I=2 / n-wide / `RVH` as fetch-A experiments
 until the R4 FDT walk / R6–R11 pin on `fetch_B` is cookie-green. Envelope tweaks go through
