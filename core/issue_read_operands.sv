@@ -896,6 +896,10 @@ module issue_read_operands
       if (forward_rs1[i]) begin
         fu_data_n[i].operand_a = rs1_res[i];
       end
+      // I17: B never picks forwarded vs RF by inspecting the value.
+      // I4by / G1k / G1gg / G1h stay A-only (LEDGER). FDT offset_ptr /
+      // c.lw fdt+0x28 / c.mv a0↔s* were the named sites.
+`ifndef G6LC_FETCH_B
       // I4by: offset_ptr `c.add a0,a1` (rd==x10 && rs1==x10 && rs2==x11 &&
       // !use_imm). No a0-dest between last `lbu 38(a0)` and that add. A
       // forwarded page-0 a0 (wrong-port / leftover `c.li a0,0`) makes
@@ -929,8 +933,6 @@ module issue_read_operands
       // G1gg: jalr prefers usable RF rs1 over
       // an unusable forward. No stall (G1gf
       // HOLD-FAIL hung OpenSBI). Not G0. SMT+SS.
-      // I17: B never picks forwarded vs RF by inspecting the value.
-`ifndef G6LC_FETCH_B
       if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
           issue_instr_i[i].op == ariane_pkg::JALR &&
           forward_rs1[i] &&
@@ -949,6 +951,7 @@ module issue_read_operands
       // offset_ptr's 2nd load_be32 assembled _start+8 (mini 0x32,
       // leftover a0=0xB7010100). Fall back to RF. Not G0 (no stall).
       // SMT+SS only. SI: NrHarts==1 const-folds the guard.
+`ifndef G6LC_FETCH_B
       if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
           forward_rs2[i] &&
           issue_instr_i[i].fu == ariane_pkg::ALU &&
@@ -961,6 +964,7 @@ module issue_read_operands
               CVA6Cfg, 64'(rs2_res[i]))) begin
         fu_data_n[i].operand_b = operand_b_regfile[i];
       end
+`endif
       if ((CVA6Cfg.FpPresent || (CVA6Cfg.CvxifEn && OPERANDS_PER_INSTR == 3) ||
            (CVA6Cfg.RVZacas && ariane_pkg::is_amo_cas(issue_instr_i[i].op))) && forward_rs3[i]) begin
         if (CVA6Cfg.RVZacas && ariane_pkg::is_amo_cas(issue_instr_i[i].op))

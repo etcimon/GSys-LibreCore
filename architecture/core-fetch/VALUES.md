@@ -121,6 +121,7 @@ per-hart leftover/switch (`en.restore`).
 | Mash / `jalr_usable` on resolve / `cf_unissued` / G1gg / G1gq / SB bmiss | E2/E3/E5 `g6lc_rvc_enc` `g6lc_jalr_usable` | DELETE on B | `G6LC_FETCH_B` skips; A keeps; I1/I11/I17. Inventory [`SMT-LEGACY.md`](SMT-LEGACY.md) |
 | Sibling `c.jalr` arm / I$ `user[]` half | `G1iw/jl` `g1lo` `g1hx/hy` `g1mf` `sb_load00` | DELETE on B | `G6LC_FETCH_B` skips capture; rewrite already skipped; SPEC §7 |
 | SB younger-cancel exemption list | `g6lc_sb_keep::keep` / `keep_prefix` (FDT getprop LOAD keep) | DELETE on B | I13: cancel younger by program order; A keeps E0 list |
+| IRO value-inspecting forward | `I4by` `G1k` `G1h` `G1gg` | DELETE on B | I17: forward is transparent; FDT `offset_ptr` / `c.lw` / `c.mv a0↔s*` |
 | ID splice older fetch in front of a parked branch | `G1be` `G1cy` `G1em` `G1ev` | DELETE on B | I6; IQ drain is the order |
 | Hide leftover jal / opcode IQ hide | `lj_hide` `G1dc…ex` | DELETE | `slot_live` observe only |
 | Sibling I$ `user[33]` | `G1iw/jj/jl/ki` | DELETE | — |

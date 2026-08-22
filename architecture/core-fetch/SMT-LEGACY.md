@@ -60,8 +60,9 @@ scoreboard `g1mf` / `sb_load00`, I$ `user[33:0]` sibling half (`g6lc_icache` G1i
 Rewrite was already off; capture still ran and is now A-only.
 
 `g6lc_sb_keep::keep` / `keep_prefix` on younger-cancel skip under `G6LC_FETCH_B`
-(I13; FDT getprop kept wrong-path LOADs of a0/s*). `keep_alloc_link`, `addi_sp`
-RAW, and `cmv_abi_ptr` are unchanged this pass. Do not extend the keep list on B.
+(I13; FDT getprop kept wrong-path LOADs of a0/s*). IRO I4by / G1k / G1h / G1gg
+value-inspecting forwards also skip (I17). `keep_alloc_link` and `addi_sp` RAW
+are unchanged. Do not extend the keep list on B.
 
 ## 2. Not on the default flist — oracle frontend (4 files)
 

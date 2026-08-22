@@ -90,6 +90,7 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | B skip recover on shared ID/EX | **landed** (`G6LC_FETCH_B`: no mash, no resolve `jalr_usable`, no `cf_unissued`, no G1gg/G1gq, no SB unusable-bmiss drop). A unchanged. Next pin still R4 FDT walk |
 | B skip sib_cjalr arm + I$ user half | **landed** (ID `g1lo`/`g1hx`/`g1mf` capture; `g6lc_icache` G1iw/jl). Rewrite was already off; capture was still live |
 | B skip SB keep on younger-cancel | **landed** (I13; both sticky and same-cycle mask). A keeps E0 list. Next pin still R4 FDT walk |
+| B skip IRO value-inspect forwards | **landed** (I17: I4by / G1k / G1h / G1gg). A keeps. Next pin still R4 FDT walk |
 
 `smt_legacy` is the opt-in oracle. Do not start stream I=2 / n-wide / `RVH` as fetch-A experiments
 until the R4 FDT walk / R6–R11 pin on `fetch_B` is cookie-green. Envelope tweaks go through
