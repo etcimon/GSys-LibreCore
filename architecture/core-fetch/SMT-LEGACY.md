@@ -59,10 +59,16 @@ Sibling **arm** also skips on B: `g1ik/ln/lz`, `g1hx/hy` latches, `g1lo_cap` / `
 scoreboard `g1mf` / `sb_load00`, I$ `user[33:0]` sibling half (`g6lc_icache` G1iw/jl).
 Rewrite was already off; capture still ran and is now A-only.
 
-`g6lc_sb_keep::keep` / `keep_prefix` on younger-cancel skip under `G6LC_FETCH_B`
-(I13; FDT getprop kept wrong-path LOADs of a0/s*). IRO I4by / G1k / G1h / G1gg
-value-inspecting forwards also skip (I17). `keep_alloc_link` and `addi_sp` RAW
-are unchanged. Do not extend the keep list on B.
+Shared-pipeline recover is **skipped on B** (`G6LC_FETCH_B`): mash, resolve
+`jalr_usable`, `cf_unissued`, sib_cjalr rewrite **and** arm, I$ `user[]`,
+`keep`/`keep_prefix` cancel, IRO value-inspect (I4by/G1k/G1h/G1gg), G1v/w/x
+jal-link, G1t flush spare, leftover jal-x0 issue (G1dt/G1gh), G1fh sticky,
+opcode/rd issue stalls, IRO store-ra/addi-sp. A unchanged.
+
+**Still live on B (not recover):** SMT banks / `thread_select`; I13
+`unresolved_cf` / `unresolved_csr` / `stall_csr_older`; I14 `g6lc_ex_id`;
+IRO G1an (cancelled LOAD vs `raw_checker`) and G1ea (CSR never forwarded).
+Do not extend the keep list. Next pin: R4 FDT walk (`jal@1826a` → `13884`).
 
 ## 2. Not on the default flist — oracle frontend (4 files)
 

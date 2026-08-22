@@ -657,6 +657,8 @@ module issue_read_operands
       // G1ai: also stall while a same-hart addi sp is still in the SB
       // or on an earlier issue port. TRACE: sd @0x4b8 fetched with
       // sp=0x80008000; 0x68 used 0x80007ff0. c.sdsp may miss RAW.
+      // LEDGER: ra/sp-specific forms deleted on B (general RAW stays).
+`ifndef G6LC_FETCH_B
       if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
           issue_instr_i[i].fu == ariane_pkg::STORE &&
           issue_instr_i[i].rs2[4:0] == 5'd1) begin
@@ -689,6 +691,7 @@ module issue_read_operands
           end
         end
       end
+`endif
       // G1an: stall a use while a same-hart cancelled-valid LOAD
       // of that rs is still in the SB. raw_checker only sees
       // still_issued (issued & ~cancelled); cancel + valid leaves
@@ -1068,6 +1071,9 @@ module issue_read_operands
       fpu_valid_n    = '0;
       alu2_valid_n   = '0;
       csr_valid_n    = '0;
+`ifdef G6LC_FETCH_B
+      branch_valid_n = '0;
+`else
       if (!(CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1)) begin
         branch_valid_n = '0;
       end else begin
@@ -1079,6 +1085,7 @@ module issue_read_operands
             branch_valid_n[i] = 1'b0;
         end
       end
+`endif
     end
   end
   // FU select, assert the correct valid out signal (in the next cycle)

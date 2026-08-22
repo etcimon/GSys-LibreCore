@@ -391,6 +391,8 @@ module g6lc_issue_barrier
   logic [CVA6Cfg.NrIssuePorts-1:0] leftover_jump_through_cf;
   always_comb begin
     leftover_jump_through_cf = '0;
+    // I6: B does not special-case leftover Jump through unresolved CF.
+`ifndef G6LC_FETCH_B
     if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
       for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
         if (issue_valid_sb_i[p] &&
@@ -405,6 +407,7 @@ module g6lc_issue_barrier
           leftover_jump_through_cf[p] = 1'b1;
       end
     end
+`endif
   end
 
   // G1gh: leftover jal x0 (pc[2:1]==11, rd=0)
@@ -451,6 +454,8 @@ module g6lc_issue_barrier
   logic [CVA6Cfg.NrIssuePorts-1:0] stall_leftover_jal_x0;
   always_comb begin
     stall_leftover_jal_x0 = '0;
+    // I6: B does not stall leftover jal x0 for a same-hart jalr (lj_hide).
+`ifndef G6LC_FETCH_B
     if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
       for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
         if (issue_valid_sb_i[p] &&
@@ -464,6 +469,7 @@ module g6lc_issue_barrier
           stall_leftover_jal_x0[p] = 1'b1;
       end
     end
+`endif
   end
 
   // G1fh: a0-Branch waits until a seen CSR-to-a0 commits.
@@ -516,6 +522,9 @@ module g6lc_issue_barrier
   logic [CVA6Cfg.NrIssuePorts-1:0] stall_branch_csr_a0_seen;
   always_comb begin
     stall_branch_csr_a0_seen = '0;
+    // I6/RAW: B does not stall an a0-Branch until a sticky CSR-to-a0
+    // commit (G1fh). Combinational G1em/G1ev against ID/issue stay.
+`ifndef G6LC_FETCH_B
     if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
       for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
         if (issue_valid_sb_i[p] &&
@@ -526,6 +535,7 @@ module g6lc_issue_barrier
           stall_branch_csr_a0_seen[p] = 1'b1;
       end
     end
+`endif
   end
 
   // G1bh: keep_prefix may issue while the same-line Branch is
@@ -568,6 +578,16 @@ module g6lc_issue_barrier
   end
 
   for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_gate
+    // I13: B keeps CF/CSR barriers + same-cycle CSR stall.
+    // Opcode/rd-specific stalls (sp, store-ra, a0-Branch, leftover jal,
+    // keep_prefix) stay A-only (LEDGER deleted forms).
+`ifdef G6LC_FETCH_B
+    assign issue_valid_o[p] =
+        issue_valid_sb_i[p]
+        && !unresolved_cf_q[issue_instr_sb_i[p].hart_id]
+        && !unresolved_csr_q[issue_instr_sb_i[p].hart_id]
+        && !stall_csr_older[p];
+`else
     assign issue_valid_o[p] =
         issue_valid_sb_i[p]
         && !(unresolved_cf_q[issue_instr_sb_i[p].hart_id] &&
@@ -583,6 +603,7 @@ module g6lc_issue_barrier
         && !stall_branch_alu_a0[p]
         && !stall_branch_csr_a0_seen[p]
         && !stall_leftover_jal_x0[p];
+`endif
   end
 
 endmodule

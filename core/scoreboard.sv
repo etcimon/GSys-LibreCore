@@ -186,12 +186,18 @@ module scoreboard #(
       // G1t: link-jal is not unissued fallthrough. IRO flush_i is
       // flush_unissued — without this the jal is popped and never
       // allocated (mini P6 0x65). SI: alloc is !flush_unissued.
+      // I14: B does not special-case link-jal on flush_unissued.
       if (decoded_instr_valid_i[i] && decoded_instr_ack_o[i] &&
+`ifdef G6LC_FETCH_B
+          !flush_unissued_instr_i
+`else
           g6lc_sb_keep::alloc(
               CVA6Cfg,
               flush_unissued_instr_i,
               decoded_instr_i[i].fu,
-              decoded_instr_i[i].rd[4:0])) begin
+              decoded_instr_i[i].rd[4:0])
+`endif
+      ) begin
         // the decoded instruction we put in there is valid (1st bit)
         // increase the issue counter and advance issue pointer
         num_issue += 'd1;
@@ -208,6 +214,8 @@ module scoreboard #(
         mem_n[issue_pointer[i]].sbe.ooo_renamed = 1'b0;
         // G1v: link-jal result is pc+ilen, not the J-imm. Flu may still
         // overwrite. SMT+SS only. SI: result stays the immediate.
+        // I14: B waits for flu. A keeps G1v/x (RC4 alias patch).
+`ifndef G6LC_FETCH_B
         if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
             g6lc_sb_keep::link_jal(
                 CVA6Cfg.SuperscalarEn,
@@ -220,6 +228,7 @@ module scoreboard #(
           // resolves the jump. SI: valid stays 0 until WB.
           mem_n[issue_pointer[i]].sbe.valid = 1'b1;
         end
+`endif
       end
     end
 
@@ -251,12 +260,17 @@ module scoreboard #(
         // G1w: flu of a link-jal sets valid (above) but must not replace
         // G1v's alloc-time pc+ilen with a stale next_pc (mini P6 0x14c).
         // SI / no-link: take wbdata (identity).
+        // I14/I17: B always takes flu. A keeps G1w (|result[63:12]|).
+`ifdef G6LC_FETCH_B
+        mem_n[trans_id_i[i]].sbe.result = wbdata_i[i];
+`else
         if (!g6lc_sb_keep::keep_alloc_link(
                 CVA6Cfg,
                 mem_q[trans_id_i[i]].sbe.fu,
                 mem_q[trans_id_i[i]].sbe.rd[4:0],
                 64'(mem_q[trans_id_i[i]].sbe.result)))
           mem_n[trans_id_i[i]].sbe.result = wbdata_i[i];
+`endif
         // save the target address of a branch (needed for debug in commit stage)
         if (CVA6Cfg.DebugEn) begin
           mem_n[trans_id_i[i]].sbe.bp.predict_address = resolved_branch_i.target_address;

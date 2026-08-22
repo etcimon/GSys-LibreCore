@@ -91,6 +91,13 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | B skip sib_cjalr arm + I$ user half | **landed** (ID `g1lo`/`g1hx`/`g1mf` capture; `g6lc_icache` G1iw/jl). Rewrite was already off; capture was still live |
 | B skip SB keep on younger-cancel | **landed** (I13; both sticky and same-cycle mask). A keeps E0 list. Next pin still R4 FDT walk |
 | B skip IRO value-inspect forwards | **landed** (I17: I4by / G1k / G1h / G1gg). A keeps. Next pin still R4 FDT walk |
+| B skip G1v/w/x jal-link alloc/keep | **landed** (I14; flu writes `ra`). A keeps |
+| B skip leftover jal-x0 issue gates | **landed** (I6: G1dt / G1gh in `g6lc_issue_barrier`). A keeps |
+| B skip G1fh sticky a0-Branch stall | **landed** (`stall_branch_csr_a0_seen`) |
+| B issue gate = CF/CSR/I13 only | **landed** (drop sp / store-ra / a0-Branch / prefix / leftover-jal) |
+| B skip G1t jal flush spare | **landed** (SB alloc `!flush_unissued`; IRO `branch_valid='0`) |
+| B skip IRO G1o/ai | **landed**. G1an/G1ea stay |
+| Recover strip (shared ID/EX/issue/SB) | **done** for B. Remaining live: G1an, G1ea, I13 CF/CSR barriers, SMT banks. **Next: TRACE R4 FDT walk** `jal@1826a` / `13884` / `12544` |
 
 `smt_legacy` is the opt-in oracle. Do not start stream I=2 / n-wide / `RVH` as fetch-A experiments
 until the R4 FDT walk / R6–R11 pin on `fetch_B` is cookie-green. Envelope tweaks go through

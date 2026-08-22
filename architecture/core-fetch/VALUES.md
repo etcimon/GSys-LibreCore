@@ -122,6 +122,12 @@ per-hart leftover/switch (`en.restore`).
 | Sibling `c.jalr` arm / I$ `user[]` half | `G1iw/jl` `g1lo` `g1hx/hy` `g1mf` `sb_load00` | DELETE on B | `G6LC_FETCH_B` skips capture; rewrite already skipped; SPEC §7 |
 | SB younger-cancel exemption list | `g6lc_sb_keep::keep` / `keep_prefix` (FDT getprop LOAD keep) | DELETE on B | I13: cancel younger by program order; A keeps E0 list |
 | IRO value-inspecting forward | `I4by` `G1k` `G1h` `G1gg` | DELETE on B | I17: forward is transparent; FDT `offset_ptr` / `c.lw` / `c.mv a0↔s*` |
+| Jal link stuffed at SB alloc / kept over flu | `G1v` `G1x` `G1w` `keep_alloc_link` | DELETE on B | I14: flu is the link; A keeps RC4 patch |
+| Leftover jal x0 issue gates | `G1dt` `G1gh` `leftover_jump_through_cf` `stall_leftover_jal_x0` | DELETE on B | I6: no opcode IQ hide; A keeps lj_hide |
+| Sticky a0-Branch vs CSR-to-a0 until commit | `G1fh` `stall_branch_csr_a0_seen` | DELETE on B | combinational G1em/G1ev stay; sticky seen is recover |
+| Opcode/rd-specific issue stalls | `unresolved_sp` store-ra G1ay/em/ev prefix leftover-jal | DELETE on B | I13: only `unresolved_cf` / `unresolved_csr` / `stall_csr_older` |
+| G1t link-jal on `flush_unissued` | `alloc` / IRO `branch_valid` spare | DELETE on B | I14: flush kills all FU valids; SI alloc is `!flush_unissued` |
+| IRO store-ra / addi-sp stalls | `G1o` `G1ae` `G1ai` | DELETE on B | LEDGER generalised RAW; G1an/G1ea stay |
 | ID splice older fetch in front of a parked branch | `G1be` `G1cy` `G1em` `G1ev` | DELETE on B | I6; IQ drain is the order |
 | Hide leftover jal / opcode IQ hide | `lj_hide` `G1dc…ex` | DELETE | `slot_live` observe only |
 | Sibling I$ `user[33]` | `G1iw/jj/jl/ki` | DELETE | — |
