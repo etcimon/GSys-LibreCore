@@ -53,7 +53,7 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | OpenSBI `mtvec=_trap_handler` | **yes** |
 | Hold cookie | **yes** fetchb `ec1239ef` `[1000]=51b1babe` cave WFI `@0xef98` `plat_hc=2` BANR |
 | Peel cookie | **yes** `[1000]=51b1babe` `[1008]=51b1d000` |
-| Nat (pin `bc7ed11d`) | **not yet** — R5/I2 ok; `13884`/`12544` commit (`a0=0x82200000`→probe `0xaf5`); FDT walk continues, no `ret@1826e`. No leftover-keep / I17 / PMA |
+| Nat (pin `bc7ed11d`) | **R4 data, not L1** — TRACE `drop=0` `ok=1`; probe `0x8001e000`→`0xaf5`; then `a0=-11` (BADSTRUCTURE); later `a0=0x82200000`. No `ret@1826e`. Rebuild `b333c2b5f` then re-TRACE |
 | Split B into `g6lc_fetch_{align,window,order,redirect}` | after that pin; bit-identical extract |
 | g1\* frontend → `smt_legacy` | **retired**: `core/smt_legacy/` (oracle + recover + banks); `core/smt/` is pkg/dbg only; frozen A in `core/frontend`; workspace is `core/fetch_B` |
 | Capability A/B (peels + soak on fetch) | **after** that retirement; see principles §0.2 |
@@ -97,7 +97,8 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | B issue gate = CF/CSR/I13 only | **landed** (drop sp / store-ra / a0-Branch / prefix / leftover-jal) |
 | B skip G1t jal flush spare | **landed** (SB alloc `!flush_unissued`; IRO `branch_valid='0`) |
 | B skip IRO G1o/ai | **landed**. G1an/G1ea stay |
-| Recover strip (shared ID/EX/issue/SB) | **done** for B. Remaining live: G1an, G1ea, I13 CF/CSR barriers, SMT banks. **Next: TRACE R4 FDT walk** `jal@1826a` / `13884` / `12544` |
+| Recover strip (shared ID/EX/issue/SB) | **done** for B. Remaining live: G1an, G1ea, I13 CF/CSR barriers, SMT banks |
+| R4 FDT TRACE | **L1 holds** (`drop=0` `ok=1`). Residual is `a0=-11` then `a0=0x82200000`, not leftover. Rebuild fetchb @ `b333c2b5f` and re-TRACE |
 
 `smt_legacy` is the opt-in oracle. Do not start stream I=2 / n-wide / `RVH` as fetch-A experiments
 until the R4 FDT walk / R6–R11 pin on `fetch_B` is cookie-green. Envelope tweaks go through

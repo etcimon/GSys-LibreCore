@@ -76,10 +76,18 @@ probe returns `a0=0xaf5` (FDT totalsize). Walk continues (`jal@137ea`→
 `13410`, nested probe ra=`1342c`). Never `ret@1826e`/`72a4`. Global at
 `0x80040d60` is file-0, runtime `0x82200000` (not in ELF; 2 MiB past
 `0x80200000`). Shared-pipeline recover is skipped on B (`G6LC_FETCH_B`;
-[`core-fetch/SMT-LEGACY.md`](core-fetch/SMT-LEGACY.md)). Next pin: TRACE that
-R4 walk (`+fetch_snap` / commit around `1826a`/`13884`/`12544`/`137ea`),
-not leftover-keep / I17 / PMA / always-JumpR.
-`Flist.smt_legacy` is the opt-in A oracle.
+[`core-fetch/SMT-LEGACY.md`](core-fetch/SMT-LEGACY.md)).
+
+R4 TRACE (lab fetchb `9aa8a9272`, pin `bc7ed11d`, `+fetch_snap` `137e0–13820`):
+**L1 holds** — `drop=1` count 0, `[fetch_slot] ok=0` count 0. `c.jr`@`1380e`
+`hw=8082` `cf=4` I1 ok. First `fdt_path_offset` probe of `0x8001e000` returns
+`a0=0xaf5`. Then `a0=0` @`137e8`, nested `jal` returns **`a0=-11`**
+(`FDT_ERR_BADSTRUCTURE`) @`137ee` back to `138a6`. Later nested `1341c`
+commits with **`a0=0x82200000`** (BSS global, not ELF FDT). Never `ret@1826e`.
+Hang `npc=0xf798` `plat_hc=2` `[1000]=51b1c001`. Not leftover-keep / PMA /
+always-JumpR. Next: rebuild fetchb at `b333c2b5f` (keep-skip / I17 identity)
+and re-TRACE whether `a0=-11` / `0x82200000` remain. `Flist.smt_legacy` is
+the opt-in A oracle.
 
 ---
 
