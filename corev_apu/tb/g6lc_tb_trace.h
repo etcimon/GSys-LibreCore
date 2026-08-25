@@ -195,26 +195,31 @@ inline void g6lc_parse_file(const char *path, std::vector<G6lcTraceRule> *out) {
 }
 
 inline void g6lc_default_exits(std::vector<G6lcTraceRule> *out, uint64_t pin_mepc,
-                               uint64_t pin_mcause) {
+                               uint64_t pin_mcause, int cookie_on = 1,
+                               int wfi_on = 1) {
   G6lcTraceRule r;
-  g6lc_rule_init(&r);
-  r.kind = G6LC_EXIT_COOKIE;
-  r.off = 0x1000;
-  r.val = 0x51b1babeULL;
-  std::snprintf(r.tag, sizeof(r.tag), "cookie");
-  out->push_back(r);
+  if (cookie_on) {
+    g6lc_rule_init(&r);
+    r.kind = G6LC_EXIT_COOKIE;
+    r.off = 0x1000;
+    r.val = 0x51b1babeULL;
+    std::snprintf(r.tag, sizeof(r.tag), "cookie");
+    out->push_back(r);
+  }
   g6lc_rule_init(&r);
   r.kind = G6LC_EXIT_PIN;
   r.lo = pin_mepc;
   r.val = pin_mcause;
   std::snprintf(r.tag, sizeof(r.tag), "pin");
   out->push_back(r);
-  g6lc_rule_init(&r);
-  r.kind = G6LC_EXIT_WFI;
-  r.after = 200000;
-  r.hits = 8;
-  std::snprintf(r.tag, sizeof(r.tag), "wfi");
-  out->push_back(r);
+  if (wfi_on) {
+    g6lc_rule_init(&r);
+    r.kind = G6LC_EXIT_WFI;
+    r.after = 200000;
+    r.hits = 8;
+    std::snprintf(r.tag, sizeof(r.tag), "wfi");
+    out->push_back(r);
+  }
 }
 
 inline bool g6lc_in_win(uint64_t pc, uint64_t lo, uint64_t hi) {

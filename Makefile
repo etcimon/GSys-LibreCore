@@ -115,6 +115,12 @@ ifndef TARGET_CFG
 	export TARGET_CFG = $(target)
 endif
 
+# g6lc_tb C++ probe path: Ara/RVV configs (server_math_v) use gen_acc wrapper.
+# build_config_pkg.sv sets EnableAccelerator = CVA6Cfg.RVV.
+ifneq (,$(findstring server_math_v,$(target)))
+  CFLAGS := $(CFLAGS) -DG6LC_CVA6_GEN_ACC
+endif
+
 # HPDcache directory
 HPDCACHE_DIR ?= $(CVA6_REPO_DIR)/core/cache_subsystem/hpdcache
 export HPDCACHE_DIR
@@ -715,7 +721,7 @@ endif
 
 # verilator-specific
 verilate_command := $(verilator) --no-timing verilator_config.vlt                                                \
-                    -f core/Flist.cva6                                                                           \
+                    -f $(flist)                                                                                  \
                     core/cva6_rvfi.sv                                                                            \
                     $(filter-out %.vhd, $(ariane_pkg))                                                           \
                     $(filter-out core/fpu_wrap.sv, $(filter-out %.vhd, $(filter-out %_config_pkg.sv, $(src))))   \

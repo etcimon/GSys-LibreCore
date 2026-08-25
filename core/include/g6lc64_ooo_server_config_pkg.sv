@@ -171,7 +171,7 @@ package cva6_config_pkg;
       NrCachedRegionRules: unsigned'(1),
       CachedRegionAddrBase: 1024'({64'h8000_0000}),
       CachedRegionLength: 1024'({64'h40000000}),
-      MaxOutstandingStores: unsigned'(24),
+      MaxOutstandingStores: unsigned'(16),  // check_cfg: DeepSpecEn caps STQ CAM at 16 (v1)
       DebugEn: bit'(1),
       SDTRIG: bit'(0),
       Mcontrol6: bit'(0),

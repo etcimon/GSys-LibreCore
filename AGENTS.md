@@ -233,6 +233,21 @@ never churns the RTL hierarchy or breaks a flist. Governance: `AGENTS-technology
 - **Applicability.** Only when armed. A guarded RTL wrapper runs the licensing (§0.4) + coding-philosophy
   (§0.5) passes on that wrapper; the NDA PDK itself is never in-repo, so it has no license footprint here.
 
+### 0.8 Remote testharness execution (standing workflow rule)
+
+All Verilator-based CVA6 builds, regressions, and soaks — including `soft-ladder`/`smt2` harnesses,
+`mc-*` soaks, and `build-platform` diag-driven Verilator suites — must run through the remote
+testharness proxy (`verif/regress/remote/testharness_proxy.py`) against the configured remote host.
+Do not run `make verilate`, `soft-ladder-build-harness.sh`, `soft-ladder-opensbi-soak.sh`, or any
+`Variane_testharness` invocation directly on the Windows host or in WSL except for a one-off local
+diagnostic that is explicitly noted as such. This ensures a single toolchain version, avoids Windows
+OpenSSH/ControlMaster and `rsync` availability issues, preserves build products on the remote host for
+reuse, and keeps the CI pipeline deterministic.
+
+Configure the proxy with environment variables (`TH_REMOTE_HOST`, `TH_REMOTE_ROOT`, `TH_SSH_BIN`,
+`TH_RSYNC_BIN`, `TH_SSH_PASSPHRASE`, `TH_SSH_PASSPHRASE_FILE`). Store credentials only in untracked
+files (e.g. `~/.config/librecore/th-remote.pass`), never in the repository.
+
 ---
 
 ## 1. Why this substructure exists (reasoning)

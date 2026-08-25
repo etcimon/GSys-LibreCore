@@ -15,3 +15,6 @@ bun.lockb
 # Platform run logs and caches
 /.cache/
 *.log
+
+# Remote testharness credentials (never commit)
+.remote-ssh-creds

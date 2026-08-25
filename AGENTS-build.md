@@ -79,6 +79,136 @@ Concrete examples:
 - **Todo tracking**: `AGENTS-todo.md` phase 12; open residual items in
   `AGENTS-build-platform.md` §7; FO4 scale notes in §6.1 there.
 
+## Remote testharness
+
+For hosts where local Verilator builds are impractical, `verif/regress/remote/testharness_proxy.py`
+(or `verif/regress/remote-testharness.sh`) runs simulations on a remote builder (`ovh_calltorch` by
+default) while keeping the per-test payload minimal.
+
+### First-time flow
+
+```bash
+bash verif/regress/remote-testharness.sh doctor    # probe local + remote
+bash verif/regress/remote-testharness.sh setup     # provision toolchains once
+bash verif/regress/remote-testharness.sh sync      # rsync minimal repo subset
+bash verif/regress/remote-testharness.sh build B                   # build stock (fetch_B) harness
+bash verif/regress/remote-testharness.sh build legacy              # build smt_legacy oracle
+bash verif/regress/remote-testharness.sh build B --output-cache    # seed/restore cached Mdir
+```
+
+### Per-test run (only the ELF is uploaded)
+
+```bash
+bash verif/regress/remote-testharness.sh run /path/to/mini.elf --flavour B
+```
+
+### A/B OpenSBI cookie soak
+
+```bash
+bash verif/regress/remote-testharness.sh soak --flavour B
+bash verif/regress/remote-testharness.sh soak --flavour legacy
+```
+
+### Remote Python scripts (multi-threaded)
+
+Upload one or more local Python scripts and run them on the builder with a
+remote `concurrent.futures.ThreadPoolExecutor`:
+
+```bash
+bash verif/regress/remote-testharness.sh py --threads 4 script1.py script2.py
+```
+
+Each script runs in its own `python3` process; the runner collects
+`output/<stem>.log`, `summary.json`, and `summary.txt`. Options:
+
+| Option | Meaning |
+|--------|---------|
+| `--threads N` | worker count for the remote thread pool (default 1) |
+| `--data PATH` | upload a file or directory for scripts to read (repeatable) |
+| `--env KEY=VALUE` | set an env var for every script (repeatable) |
+| `--pull` | copy `output/` back to `remote-runs/<tag>/output/` |
+
+Inside the scripts, useful env vars are set:
+
+- `TH_PROXY_THREADS`
+- `TH_PROXY_TAG`
+- `TH_RUN_DIR`
+- `TH_DATA_DIR`
+- `TH_OUT_DIR`
+- `TH_SCRIPT` / `TH_SCRIPT_NAME`
+
+### Build caching
+
+`build` automatically enables `ccache` and `mold` when they are present on the remote host:
+
+| Flag | Effect |
+|------|--------|
+| `--cache` (default) | Detect and use `ccache` / `mold` if available. |
+| `--no-cache` | Force the system linker and disable `ccache` auto-detection. |
+| `--output-cache` | Seed the full Verilator `Mdir` from a content-keyed cache under `/opt/testharness/cache/builds/` and archive it after a successful build. The cache key is a SHA-256 of the RTL/TB sources, `Makefile`, flists, and `verilator_config.vlt`, so switching branches invalidates it safely. |
+
+Relevant environment variables:
+
+| Variable | Meaning |
+|----------|---------|
+| `TH_SSH_BIN` / `TH_RSYNC_BIN` | Override the `ssh` / `rsync` binaries (e.g. Windows Git-Bash, WSL wrapper). |
+| `TH_SSH_CONFIG` / `TH_SSH_KEY` / `TH_SSH_PASSPHRASE*` | SSH config file, identity, or passphrase source. |
+| `TH_REMOTE_HOST` | Default `ovh_calltorch`; passed to `--host`. |
+| `TH_REMOTE_ROOT` | Remote root directory (default `/opt/testharness`). |
+| `TH_TARGET` | Default Verilator target (default `g6lc64_smt2`). |
+| `TH_BUILD_JOBS` | Parallel build jobs during `setup` toolchain provisioning (capped to 8). |
+| `build --jobs N` | Parallel `make -j` value for `build` (default `$(nproc)`). |
+
+### Logging and debugging
+
+- `-v` / `--verbose` prints every remote command, rsync invocation, and key timing.
+- `-d` / `--debug` adds sub-second timing, ssh-agent state, and ControlMaster setup.
+
+### Credentials
+
+The SSH key passphrase is read from `$TH_SSH_PASSPHRASE`, then `~/.config/librecore/th-remote.pass`,
+then `~/.ssh/th-remote.pass`. The default `ovh_calltorch` key is `~/.ssh/id_ed25519`. The passphrase
+is loaded into `ssh-agent` once per invocation; a persistent ControlMaster socket is used for all
+subsequent traffic. Nothing is committed to the repository.
+
+### Layout on the remote host
+
+```text
+/opt/testharness/
+  toolchains/          verilator, riscv-gcc, spike (provisioned once)
+  repo/                rsync'd RTL + build sources
+  work/                verilator --Mdir libraries (one per flavour)
+  runs/<tag>/          per-test ELF + log
+  cache/               downloads
+```
+
+For the soft-ladder rationale, see `architecture/multi-threading/soft-ladder/firmware-boot-principles.md` §4.
+
+### Build-platform `remote` command
+
+The build-platform also exposes the proxy through the `remote` command, with
+passphrase caching in a gitignored file.
+
+```bash
+bun run src/cli/index.ts remote --remote-ssh ovh_calltorch doctor
+bun run src/cli/index.ts remote setup
+bun run src/cli/index.ts remote sync
+bun run src/cli/index.ts remote build B
+bun run src/cli/index.ts remote soak --flavour B
+bun run src/cli/index.ts remote shell
+```
+
+First use for a host prompts for the SSH key passphrase (or password) and stores
+it in `build-platform/.remote-ssh-creds` (mode `0600`, gitignored). You can also
+seed the cache non-interactively:
+
+```bash
+bun run src/cli/index.ts remote --remote-ssh ovh_calltorch --remote-ssh-pass pwrd128 build B
+```
+
+The command reads `~/.ssh/config` to resolve the host, user, and `IdentityFile`
+when they are not supplied on the command line.
+
 ## Relationship to the rest of AGENTS governance
 
 - **Licensing**: `build-platform/` follows `AGENTS-licensing.md` (LicenseRef-Proprietary

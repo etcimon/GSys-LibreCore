@@ -131,9 +131,11 @@ sites:
     status: in_progress
     ladder: cont.44 / iter-012
     soft_form: >
-      Soft fdt_getprop_namelen + fdt_get_property_namelen (NULL);
-      soft sbi_printf BANR. PEEL_FDT_GETPROP=1 for natural getprop.
-    pin: "PEEL live mepc=0x800129f8 mcause=4 mtval=9 (a0=offset); historic 12eb2 is R2 after G0"
+      Natural fdt_getprop (PEEL_FDT_GETPROP=1) and natural fdt_next_tag
+      (PEEL_FDT_NEXT_TAG=1) are each green in isolation on G6LC_FETCH_B. Combined
+      natural FDT walk (both peels) re-exposes 0x12eb2/12b2a. Soft next_tag
+      or soft getprop keeps the hold. Soft sbi_printf BANR remains.
+    pin: "G6LC_FETCH_B combined natural: mepc=0x80012eb2 mcause=6 mtval=0x80012b2a, s2=ra from check_node jal next_tag; smt_legacy 129f8/4/9"
     rtl_loci:
       - core/store_buffer.sv
       - core/load_unit.sv
@@ -151,6 +153,16 @@ sites:
       (valid a2; compare s2 to s3 post-nest). Live PEEL is 129f8/4/9
       (a0=offset). Historic 12eb2/12b2a is R2 after G0. I4cf last c.mv
       keep. Next: COMPLETION.md stage 0, not I4cg.
+      2026-08-22 master 4bab99ca0: core/store_buffer.sv keeps non-cancelled
+      speculative stores on mispredict/flush under G6LC_FETCH_B. PEEL_FDT_GETPROP=1
+      OpenSBI soak green on work-ver-smt2-fw64-B (cookie 51b1babe, plat_hc=2,
+      coldboot_done=1, [1008]=51b1d000). Default (soft getprop) also green.
+      mini_fdt_a0_is_fdt and mini_fdt_lenp_sw PASS on B. A/slfix still
+      129f8/4/9.
+      2026-08-24 WSL: default mk and PEEL_FDT_GETPROP SUCCESS t=81920.
+      Combined still 12eb2. I4cd I$ HOLD-FAIL reverted. I4dn IPI-seen kept.
+      I4ce G1ao-on-cancel reverted (peel-identical). mini_stq_flush_fwd PASS.
+      Not I4az / not I4cg.
     verif_idea: >
       mini_fdt_a0_is_fdt Spike PASS / slfix FAIL 19.
       EXTRACT E0 g6lc_sb_keep landed. Soak then E1/G0. Not I4cg.

@@ -63,6 +63,7 @@ Profile `full` also runs mini + H-edge on an existing Variane harness when prese
 | `stability-regress.sh` | `stability-regress` | composed | see profile | see legs | residual battery | §4 entry point |
 | `soft-ladder-di-regress.sh` | `soft-ladder-di` | veri (+opt spike) | `work-ver-smt2` / fw64 | bare mini | residual scaffold B1 | **P1** directed DI minis; register optional in `defaults.ts` (P0); `SOFT_LADDER_*` |
 | `soft-ladder-opensbi-soak.sh` | `soft-ladder-osbi` | veri | `work-ver-smt2-fw64` | OpenSBI soft/stock | residual scaffold | **P3** cookie **`51b1babe` only**; `PEEL_*` bisect; max RTL peel (see `soft-ladder/README.md`) |
+| `remote/testharness_proxy.py` | `remote-testharness` | veri (remote) + py | `work-ver-smt2-fw64-*` | bare→OpenSBI + remote Python | remote harness | SSH+rsync proxy for `ovh_calltorch`; minimal per-test ELF upload; `py` subcommand for remote Python with `concurrent.futures` thread pool; see `AGENTS-build.md` §Remote testharness |
 | `dual-iss-regress.sh` | `dual-iss` | dual | server_math | bare | dual plane | `SOFT_LADDER=1` appends B1 minis |
 | `stream8-smoke.sh` | `stream8-smoke` | artifact/compile | stream8 | package | stream/Zacas | Contract + mini golden |
 | `kvm-h-veri.sh` | `kvm-h-veri` | RTL | stream8 | package | H/KVM | Variane H-edge 3/3 |

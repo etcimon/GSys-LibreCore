@@ -440,6 +440,12 @@ module cva6
   exception_t ex_commit;  // exception from commit stage
   bp_resolve_t resolved_branch;
   bp_resolve_t resolved_branch_fe;
+`ifndef G6LC_FETCH_B
+  // G1gq: A-only commit-time JALR salvage redirect. Dropped from B at
+  // 3745cfb06; issue_stage still declares the ports under the same guard.
+  logic                    g1gq_redir;
+  logic [CVA6Cfg.VLEN-1:0] g1gq_tgt;
+`endif
   logic [CVA6Cfg.NrHarts-1:0] g1mf_v;
   logic [CVA6Cfg.NrHarts-1:0][4:0] g1mf_rd;
   logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:4] g1mf_line;
@@ -1098,6 +1104,10 @@ module cva6
       end else begin
         if (smt_cold_q != 18'h3ffff)
           smt_cold_q <= smt_cold_q + 18'd1;
+        // I4dn: an incoming IPI is the hart's first real activation request
+        // from the boot hart. Mark it seen so smt_hart_ready_sel unmasks it.
+        for (int unsigned h = 0; h < CVA6Cfg.NrHarts; h++)
+          if (ipi_i[h]) smt_hart_seen_q[h] <= 1'b1;
         if (commit_outside_rom) begin
           smt_boot_done_q <= 1'b1;
           if (commit_ack[0])
@@ -1139,13 +1149,14 @@ module cva6
         | (smt_dram_grace_q < SMT_DRAM_GRACE)
         | active_needs_boot
         | first_act_excl;
-    // G1di: after boot-hart WFI, unseen harts stay not-ready.
+    // G1di: once the boot hart has left ROM, unseen harts stay not-ready.
+    // They become ready when explicitly seen (first switch) or woken by IPI.
     // Late reset-vector fetch amoswaps _boot_status 2→1 (fw_boot_hart
     // returns -1) and the secondary waits forever. TRACE: status 1→2
     // @20480 → 1 @22528. Not G3 switch-to-sp0. Not G1dg DRAM+grace.
     always_comb begin
       smt_hart_ready_sel = smt_hart_ready;
-      if (smt_boot_done_q && smt_hart_halt[0]) begin
+      if (smt_boot_done_q) begin
         for (int unsigned h = 0; h < CVA6Cfg.NrHarts; h++)
           if (!smt_hart_seen_q[h]) smt_hart_ready_sel[h] = 1'b0;
       end
@@ -1304,6 +1315,12 @@ module cva6
       .g1mf_rd_o               (g1mf_rd),
       .g1mf_line_o             (g1mf_line),
       .g1mf_a3_o               (g1mf_a3),
+`ifndef G6LC_FETCH_B
+      // G1gq salvage redirect: A/oracle only (ports guarded in issue_stage.sv).
+      .npc_i                   (smt_npc_live),
+      .g1gq_redir_o            (g1gq_redir),
+      .g1gq_tgt_o              (g1gq_tgt),
+`endif
       // Functional Units
       .rs1_forwarding_o        (rs1_forwarding_id_ex),
       .rs2_forwarding_o        (rs2_forwarding_id_ex),
@@ -1392,7 +1409,23 @@ module cva6
   // "mispredict" here from a commit-time register-file peek, so the front end and
   // the scoreboard disagreed about what resolved. Reverted — redirect sources are
   // enumerated in architecture/core-fetch/SPEC.md §5.
+`ifdef G6LC_FETCH_B
   assign resolved_branch_fe = resolved_branch;
+`else
+  // A/oracle keeps G1gq: late JALR redirect after commit. EX resolved_branch
+  // still feeds issue/SB; only the front end and controller see the salvage
+  // target. Restored verbatim from 3745cfb06^ so the oracle stays faithful.
+  always_comb begin
+    resolved_branch_fe = resolved_branch;
+    if (g1gq_redir) begin
+      resolved_branch_fe.valid          = 1'b1;
+      resolved_branch_fe.is_mispredict  = 1'b1;
+      resolved_branch_fe.is_taken       = 1'b1;
+      resolved_branch_fe.cf_type        = ariane_pkg::JumpR;
+      resolved_branch_fe.target_address = g1gq_tgt;
+    end
+  end
+`endif
 
   // ---------
   // EX

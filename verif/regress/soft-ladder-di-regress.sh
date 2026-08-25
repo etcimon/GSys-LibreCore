@@ -13,6 +13,9 @@
 #   mini_fdt_s2_nest        b1-fdt-lenp-store (s2 save/restore)
 #   mini_fdt_check_prop_nest b1-fdt-lenp-store (check_node/by_offset shape)
 #   mini_fdt_a0_is_fdt      COMPLETION.md stage 0 (a0=fdt vs a0=9)
+#   mini_stq_flush_fwd      I4ca overlapping ra/s3 slot
+#   mini_fdt_namelen_walk   combined namelen→check_node→next_tag→by_offset
+#   mini_fdt_nt_frame32     TRACE: 64B next_tag after 32B check_node (1st ra aliases 2nd s3)
 # Optional / known-gap:
 #   mini_sib_cjalr          CONTRACT.md Phase 1 (ld@00 + sibling c.jalr@01; opt-in until slfix soak)
 #   mini_lrsc_d             b1-lrsc (opt-in; 2nd SC-without-LR may fail on some harnesses)
@@ -29,7 +32,15 @@
 #   SOFT_LADDER_HARNESS=work-ver-smt2-fw64 bash ...
 #   SOFT_LADDER_COMPILE_ONLY=1 bash ...   # assemble only
 #
+# Fetch flavour (A/B on the same minis — firmware-boot-principles.md F-loop):
+#   SOFT_LADDER_FETCH=B      bash ...   # B: core/fetch_B — DEFAULT build
+#   SOFT_LADDER_FETCH=legacy bash ...   # A: smt_legacy g1* oracle (opt-in)
+# core/Flist.cva6 already sets '+define+G6LC_FETCH_B' and '-f Flist.fetch_B',
+# so a stock harness IS the B flavour.
+# Explicit SOFT_LADDER_HARNESS always wins over the flavour default.
+#
 # Map: architecture/multi-threading/soft-ladder/README.md (P1)
+#      architecture/multi-threading/soft-ladder/firmware-boot-principles.md
 
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -65,16 +76,42 @@ MABI="${SOFT_LADDER_MABI:-lp64d}"
 SPIKE_ISA="${SOFT_LADDER_SPIKE_ISA:-rv64imafdc_zicsr_zifencei}"
 MAX_CYCLES="${SOFT_LADDER_MAX_CYCLES:-400000}"
 SPIKE_STEPS="${SOFT_LADDER_SPIKE_STEPS:-400000}"
-HARNESS_DIR="${SOFT_LADDER_HARNESS:-work-ver-smt2-fw64}"
-if [[ ! -x "$ROOT/${HARNESS_DIR}/Variane_testharness" && -x "$ROOT/work-ver-smt2/Variane_testharness" ]]; then
-  HARNESS_DIR=work-ver-smt2
+# Fetch flavour: B = core/fetch_B (stock Flist.cva6 default), legacy = the
+# smt_legacy g1* oracle (opt-in flist swap). Same config and same minis on both;
+# only the frontend Flist differs in the harness build.
+FETCH="${SOFT_LADDER_FETCH:-B}"
+case "$FETCH" in
+  B|b|fetch_b|fetchb) FETCH=B; FETCH_DEFAULT_HARNESS=work-ver-smt2-fw64-B ;;
+  legacy|a|A|oracle) FETCH=legacy; FETCH_DEFAULT_HARNESS=work-ver-smt2-fw64-legacy ;;
+  *) echo "[soft-ladder-di] bad SOFT_LADDER_FETCH=$FETCH (B|legacy)" >&2; exit 2 ;;
+esac
+HARNESS_DIR="${SOFT_LADDER_HARNESS:-$FETCH_DEFAULT_HARNESS}"
+# Absolute harness path (remote /opt/testharness/work/...) vs relative local default.
+if [[ "$HARNESS_DIR" = /* ]]; then
+  HARNESS="$HARNESS_DIR/Variane_testharness"
+else
+  HARNESS="$ROOT/${HARNESS_DIR}/Variane_testharness"
+fi
+if [[ ! -x "$HARNESS" ]]; then
+  if [[ "$FETCH" == "legacy" ]]; then
+    # Never silently fall back to a stock (fetch_B) harness for an oracle run —
+    # that would report a fetch_B result as g1* oracle evidence.
+    echo "[soft-ladder-di] missing oracle harness $HARNESS" >&2
+    echo "[soft-ladder-di] build it from a flist with Flist.fetch_B swapped for" >&2
+    echo "[soft-ladder-di]   -f core/Flist.smt_legacy  (and no +define+G6LC_FETCH_B)" >&2
+    exit 2
+  fi
+  if [[ -x "$ROOT/work-ver-smt2/Variane_testharness" ]]; then
+    HARNESS_DIR=work-ver-smt2
+    HARNESS="$ROOT/${HARNESS_DIR}/Variane_testharness"
+  fi
 fi
 RUN_SPIKE="${SOFT_LADDER_SPIKE:-0}"
 COMPILE_ONLY="${SOFT_LADDER_COMPILE_ONLY:-0}"
 
 # Default gate: peeled B1 + FDT shape minis (iter-012). mini_lrsc_d opt-in
 # (2nd SC-without-LR exit mismatch on some Variane builds — not SL-A blocker).
-DEFAULT_TESTS="mini_amoadd_w_spin mini_csr_expected_trap mini_csr_pmp_probe mini_dual_cmv_s3 mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu mini_fdt_a0_is_fdt"
+DEFAULT_TESTS="mini_amoadd_w_spin mini_csr_expected_trap mini_csr_pmp_probe mini_dual_cmv_s3 mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu mini_fdt_a0_is_fdt mini_stq_flush_fwd mini_fdt_namelen_walk mini_fdt_nt_frame32"
 # shellcheck disable=SC2206
 tests=( ${SOFT_LADDER_TESTS:-$DEFAULT_TESTS} )
 
@@ -127,7 +164,7 @@ spike_tohost_pass() {
 veri_tohost_pass() {
   local elf="$1" vlog="$2"
   local th harness
-  harness="$ROOT/${HARNESS_DIR}/Variane_testharness"
+  harness="$HARNESS"
   [[ -x "$harness" ]] || return 2
   th="$(${CROSS_COMPILE}nm "$elf" 2>/dev/null | awk '$3=="tohost"{print $1; exit}')"
   if [[ -z "$th" ]]; then
@@ -145,7 +182,7 @@ veri_tohost_pass() {
 }
 
 log "ordered-path step1: B1 directed DI soak"
-log "harness=${HARNESS_DIR} spike=${RUN_SPIKE} tests=${tests[*]}"
+log "fetch=${FETCH} harness=${HARNESS_DIR} spike=${RUN_SPIKE} tests=${tests[*]}"
 cva6_tools_report || true
 
 if ! cva6_have_riscv_gcc 2>/dev/null; then
@@ -186,11 +223,11 @@ for t in "${tests[@]}"; do
     fi
   fi
 
-  vlog="$OUT/veri_${t}.log"
+  vlog="$OUT/veri_${FETCH}_${t}.log"
   vr=0
   veri_tohost_pass "$elf" "$vlog" || vr=$?
   if [[ $vr -eq 2 ]]; then
-    log "SKIP $t veri (no ${HARNESS_DIR}/Variane_testharness)"
+    log "SKIP $t veri (no $HARNESS)"
     SKIP=$((SKIP + 1))
     # compile succeeded; count as soft pass for gate when no harness rebuild budget
     continue
@@ -206,7 +243,7 @@ for t in "${tests[@]}"; do
   PASS=$((PASS + 1))
 done
 
-log "SUMMARY pass=${PASS} fail=${FAIL} skip=${SKIP}"
+log "SUMMARY fetch=${FETCH} pass=${PASS} fail=${FAIL} skip=${SKIP}"
 log "Next: suite soft-ladder-osbi (cookie 51b1babe; PEEL_* bisect) — P3"
 log "  bash verif/regress/soft-ladder-opensbi-soak.sh"
 log "  PEEL_FDT_GETPROP=1 bash verif/regress/soft-ladder-opensbi-soak.sh"

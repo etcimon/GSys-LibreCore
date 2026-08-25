@@ -13,6 +13,7 @@ const GLOBAL_FLAGS: [string, string][] = [
   ["--log-level <lvl>", "Set level: silent|error|warn|info|debug|trace."],
   ["--config <path>", "Use an explicit .config.ts instead of the repo-root one."],
   ["--json", "Emit machine-readable JSON where supported."],
+  ["--remote-ssh <host>", "Use a remote ssh host (via verif/regress/remote/testharness_proxy.py)."],
 ];
 
 export interface CliInfo {

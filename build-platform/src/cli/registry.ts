@@ -25,6 +25,7 @@ import { timingsCommand } from "./commands/timings.ts";
 import { toolsCommand } from "./commands/tools.ts";
 import { vendorCommand } from "./commands/vendor.ts";
 import { verifyCommand } from "./commands/verify.ts";
+import { remoteCommand } from "./commands/remote.ts";
 
 export const COMMANDS: Command[] = [
   statusCommand,
@@ -44,6 +45,7 @@ export const COMMANDS: Command[] = [
   tensorCommand,
   cleanCommand,
   configCommand,
+  remoteCommand,
 ];
 
 export function findCommand(name: string): Command | undefined {

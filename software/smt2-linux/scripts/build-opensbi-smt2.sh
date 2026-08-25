@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-SMT2="$ROOT/software/smt2-linux"
+SMT2="${G6LC_SMT2:-$ROOT/software/smt2-linux}"
 OUT="${SMT2_LINUX_OUT:-$ROOT/build-platform/workspace/smt2-linux}"
 SRC="${OPENSBI_SRC:-$OUT/opensbi}"
 mkdir -p "$OUT"
@@ -27,8 +27,9 @@ fi
 export CROSS_COMPILE
 echo "[build-opensbi-smt2] CROSS_COMPILE=$CROSS_COMPILE"
 
-DTB="$OUT/ariane-smt2.dtb"
-python3 "$SMT2/scripts/dts_to_dtb.py" -i "$ROOT/corev_apu/bootrom/ariane-smt2.dts" -o "$DTB"
+DTS="${G6LC_DTS:-$ROOT/corev_apu/bootrom/ariane-smt2.dts}"
+DTB="${G6LC_DTB:-$OUT/ariane-smt2.dtb}"
+python3 "$SMT2/scripts/dts_to_dtb.py" -i "$DTS" -o "$DTB"
 
 make -C "$SMT2/payload" clean || true
 make -C "$SMT2/payload" CROSS_COMPILE="$CROSS_COMPILE"

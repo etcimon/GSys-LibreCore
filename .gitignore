@@ -112,3 +112,37 @@ software/smt2-linux/soft-ladder/build/
 /riscv-compilers/modules.json
 /riscv-compilers/local-semver.json
 /riscv-compilers/.gitignore
+
+# Remote testharness credentials and outputs - never commit (AGENTS-build.md)
+*.pass
+th-remote.pass
+/remote-runs/
+
+# Ad-hoc probe scripts + their pulled outputs (the p<N>_ ladder). Every finding
+# these produced is recorded in architecture/multi-threading/soft-ladder/ITERATION.md;
+# the scripts themselves are single-use scaffolding, not product. Promote a probe
+# by moving it under verif/regress/ with a real name instead of tracking it here.
+/p[0-9]*_*.py
+/p[0-9]*_*.sh
+/p[0-9]*-output/
+/*.zip
+/.aside-untracked-*/
+
+# Scratch RTL copies and editor backups (never a build input)
+*.sv.bak
+/core/fetch/
+
+# Per-target config packages emitted by the build (target name is local)
+/core/include/cva6_config_pkg.sv
+/core/include/work-ver-*_config_pkg.sv
+
+# Soft-ladder directed-mini / TRACE scratch output dirs
+software/smt2-linux/soft-ladder/_mini_out/
+software/smt2-linux/soft-ladder/_trace_fdt2/
+
+# Remote-proxy one-shot probe scripts (the proxy itself is tracked)
+/verif/regress/remote/analyze_*.py
+/verif/regress/remote/check_proc.py
+/verif/regress/remote/create_trace_*.py
+/verif/regress/remote/run_fetch_snap_*.py
+/verif/regress/remote/start_fetch_snap*.py

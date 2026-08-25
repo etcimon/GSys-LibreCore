@@ -22,6 +22,7 @@ G1 genericity / least-coupled SMT2: `CONTRACT.md`.
 | **RTL first, soft last** | Every residual class is tried as **B1 directed mini → RTL fix → peel** before any permanent B2 firmware soft. Soft nops/shims only buy time to *find* the RTL bug. |
 | **SUCCESS is suite metadata** | Soft-ladder green = trapdump cookie **`51b1babe` only** (not harness tohost SUCCESS). Encode that in suite docs / soak exit criteria, not tribal knowledge. |
 | **Oracle retires** | `mk_plat_skip.py` shrinks as peels land; end state is stock or **source** OpenSBI profile + RTL that runs it under DI. |
+| **Boot stage is the progress unit** | Residual *classes* say what to repair; **boot stages F0–F6** say what to attempt next, gated by an A/B pair (`smt_legacy` g1\* oracle vs `fetch_B`). See `firmware-boot-principles.md`. |
 
 ---
 
@@ -118,6 +119,7 @@ Target shape (implement / keep aligned with `defaults.ts` + `AGENTS-regress-scri
 | Knob class | Examples | Scaffold meaning |
 |------------|----------|------------------|
 | Package / harness | `SOFT_LADDER_HARNESS=work-ver-smt2-fw64`, `DV_TARGET=g6lc64_smt2` | Topology + FETCH_WIDTH / DI package |
+| **Fetch flavour** | `SOFT_LADDER_FETCH=legacy` (A, g1\* oracle) · `SOFT_LADDER_FETCH=B` (`core/fetch_B`) | Same config/ELF both sides — an A-green/B-red pair is a **fetch** divergence by construction (`firmware-boot-principles.md` F-P2). Never falls back across flavours. |
 | Stack height | bare mini · soft OpenSBI · stock OpenSBI · Linux | Climb only after lower green |
 | SUCCESS mode | cookie `51b1babe` · hang `51b1dead` · tohost (minis only) | Suite metadata; osbi ≠ mini |
 | Peel matrix | `PEEL_FDT_GETPROP`, `PEEL_SPIN`, … | **Bisect only** — default path maximizes natural ops |
@@ -168,6 +170,7 @@ Each iteration is a **closed loop** over **one residual class**:
 | Path | Role |
 |------|------|
 | `README.md` (this file) | North star, phases P0–P6, scaffold contract, iteration loop |
+| `firmware-boot-principles.md` | **Boot-stage ladder F0–F6** + A/B blame truth table. Decides *which stage* to attempt next. |
 | `COMPLETION.md` | Generic classes G0–G5 through SL-C/SL-T. G0 waits on EXTRACT E0. |
 | `EXTRACT.md` | **Standing next-action:** designated `core/smt/g6lc_*` extracts **before** G0. E0 = `g6lc_sb_keep`. |
 | `CONT-FULL-MAP.md` | All cont.2–51 → bucket, soft, RTL status, peel checklist |
@@ -187,16 +190,22 @@ Oracle (temporary): `software/smt2-linux/soft-ladder/` on authoritative tree.
 ## 6. How to start the next unit of work
 
 ```text
+0. Read firmware-boot-principles.md — pick the lowest un-green boot stage (F0-F6).
 1. Read EXTRACT.md — E0 soaked; E1–E3 combined extract; then G0 on the barrier.
 2. P0 if needed: soft-ladder-di / soft-ladder-osbi listed optional in defaults.ts
 3. inventory.yaml → highest priority open B1 id (today: b1-fdt-lenp-store)
-4. I2: directed mini with fail-codes on slfix (stage 0: mini_fdt_a0_is_fdt)
-5. I3: ONE generic class from COMPLETION.md §2; hold-safe; SI identity
-6. I4: mini green → hold cookie → PEEL/nat. Hold-FAIL or peel-identical+mini-green → revert
-7. I5: shrink mk_plat_skip only after PEEL cookie (stage 3)
-8. Only if residual is true product policy → B2 source profile (P5)
+4. A/B the stage, then read the blame truth table before touching any RTL:
+     SOFT_LADDER_FETCH=legacy bash verif/regress/soft-ladder-opensbi-soak.sh
+     SOFT_LADDER_FETCH=B      bash verif/regress/soft-ladder-opensbi-soak.sh
+   A-green + B-red → core/fetch_B (one L1-L4 combo). A-red → generic class / B2.
+5. I2: directed mini with fail-codes on slfix (stage 0: mini_fdt_a0_is_fdt)
+6. I3: ONE generic class from COMPLETION.md §2; hold-safe; SI identity
+7. I4: mini green → hold cookie → PEEL/nat. Hold-FAIL or peel-identical+mini-green → revert
+8. I5: shrink mk_plat_skip only after PEEL cookie (stage 3)
+9. Only if residual is true product policy → B2 source profile (P5)
 ```
 
 Active iteration and backlog: `ITERATION.md`.  
+Boot stages (F0…F6) and A/B blame: `firmware-boot-principles.md`.  
 Completion stages (G0…SL-T): `COMPLETION.md`.  
 Queue edge: `AGENTS-todo.md` (SL-A…E + SL-T).

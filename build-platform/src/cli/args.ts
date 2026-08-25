@@ -82,6 +82,10 @@ const VALUE_FLAGS = new Set([
   "execution",
   // build/verify expert emit
   "use-emit",
+  // remote testharness (verif/regress/remote/testharness_proxy.py)
+  "remote-ssh",
+  "remote-ssh-pass",
+  "remote-ssh-identity",
 ]);
 
 const SHORT_ALIASES: Record<string, string> = {

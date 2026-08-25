@@ -196,6 +196,10 @@ package g6lc_sb_keep;
             (cfg.NrHarts > 1 && link_jal(cfg.SuperscalarEn, fu, rd));
   endfunction
 
+  // I4cf keep_stack_frame on fetch_B HOLD-FAIL plat_hc=80 npc=0x141d0
+  // (default cookie). Do not re-land. TRACE still names 2nd next_tag
+  // ld s3,24(sp) @12a66 = 0x12b2a (1st sd ra alias). Not full keep().
+
   function automatic logic keep(
       input cva6_cfg_t cfg,
       input fu_t       fu,

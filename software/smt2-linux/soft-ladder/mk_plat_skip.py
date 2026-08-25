@@ -97,6 +97,7 @@ cont.51: real sbi_scratch_used_space (nop spin). Soft switch_mode natural
 """
 from pathlib import Path
 import os
+import shutil
 import struct
 import subprocess
 
@@ -959,9 +960,17 @@ print(
     f"soft_fdt_next_tag={int(SOFT_FDT_NEXT_TAG)})"
 )
 
+# Pick whichever RISC-V objdump is available: local Linux name vs xPack name.
+_OBJDUMP = (
+    os.environ.get("RISCV_OBJDUMP")
+    or shutil.which("riscv64-unknown-elf-objdump")
+    or shutil.which("riscv-none-elf-objdump")
+    or "riscv64-unknown-elf-objdump"
+)
+
 r = subprocess.run(
     [
-        "riscv64-unknown-elf-objdump",
+        _OBJDUMP,
         "-d",
         str(DST),
         "--start-address=0x80000750",
@@ -973,7 +982,7 @@ r = subprocess.run(
 print(r.stdout)
 r = subprocess.run(
     [
-        "riscv64-unknown-elf-objdump",
+        _OBJDUMP,
         "-d",
         str(DST),
         "--start-address=0x80000990",
