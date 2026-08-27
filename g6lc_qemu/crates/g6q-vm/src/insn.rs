@@ -526,6 +526,48 @@ pub enum Insn {
         rs2: u8,
         aqrl: u8,
     },
+
+    // Zba (address generation)
+    Sh1add {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sh2add {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sh3add {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    AddUw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sh1addUw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sh2addUw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Sh3addUw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    SlliUw {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
 }
 
 fn u8_field(w: u32, hi: u32, lo: u32) -> u8 {
@@ -774,10 +816,18 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 rs1,
                 imm: i_imm(w) as i32,
             },
-            0x1 => Insn::Slliw {
-                rd,
-                rs1,
-                shamt: shamt(w, 32),
+            0x1 => match (w >> 26) & 0x3f {
+                0x00 => Insn::Slliw {
+                    rd,
+                    rs1,
+                    shamt: shamt(w, 32),
+                },
+                0x02 => Insn::SlliUw {
+                    rd,
+                    rs1,
+                    shamt: shamt(w, 64),
+                },
+                _ => Insn::Illegal(w),
             },
             0x5 => match funct7 {
                 0x00 => Insn::Srliw {
@@ -809,6 +859,7 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
             0x2 => match funct7 {
                 0x00 => Insn::Slt { rd, rs1, rs2 },
                 0x01 => Insn::Mulhsu { rd, rs1, rs2 },
+                0x10 => Insn::Sh1add { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x3 => match funct7 {
@@ -819,6 +870,7 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
             0x4 => match funct7 {
                 0x00 => Insn::Xor { rd, rs1, rs2 },
                 0x01 => Insn::Div { rd, rs1, rs2 },
+                0x10 => Insn::Sh2add { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x5 => match funct7 {
@@ -830,6 +882,7 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
             0x6 => match funct7 {
                 0x00 => Insn::Or { rd, rs1, rs2 },
                 0x01 => Insn::Rem { rd, rs1, rs2 },
+                0x10 => Insn::Sh3add { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x7 => match funct7 {
@@ -844,17 +897,33 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 0x00 => Insn::Addw { rd, rs1, rs2 },
                 0x20 => Insn::Subw { rd, rs1, rs2 },
                 0x01 => Insn::Mulw { rd, rs1, rs2 },
+                0x04 => Insn::AddUw { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
-            0x1 => Insn::Sllw { rd, rs1, rs2 },
-            0x4 => Insn::Divw { rd, rs1, rs2 },
+            0x1 => match funct7 {
+                0x00 => Insn::Sllw { rd, rs1, rs2 },
+                _ => Insn::Illegal(w),
+            },
+            0x2 => match funct7 {
+                0x10 => Insn::Sh1addUw { rd, rs1, rs2 },
+                _ => Insn::Illegal(w),
+            },
+            0x4 => match funct7 {
+                0x00 => Insn::Divw { rd, rs1, rs2 },
+                0x10 => Insn::Sh2addUw { rd, rs1, rs2 },
+                _ => Insn::Illegal(w),
+            },
             0x5 => match funct7 {
                 0x00 => Insn::Srlw { rd, rs1, rs2 },
                 0x20 => Insn::Sraw { rd, rs1, rs2 },
                 0x01 => Insn::Divuw { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
-            0x6 => Insn::Remw { rd, rs1, rs2 },
+            0x6 => match funct7 {
+                0x00 => Insn::Remw { rd, rs1, rs2 },
+                0x10 => Insn::Sh3addUw { rd, rs1, rs2 },
+                _ => Insn::Illegal(w),
+            },
             0x7 => Insn::Remuw { rd, rs1, rs2 },
             _ => Insn::Illegal(w),
         },

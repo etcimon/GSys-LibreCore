@@ -281,7 +281,15 @@ impl Hart {
             | Insn::Divw { rd, .. }
             | Insn::Divuw { rd, .. }
             | Insn::Remw { rd, .. }
-            | Insn::Remuw { rd, .. } => rd,
+            | Insn::Remuw { rd, .. }
+            | Insn::Sh1add { rd, .. }
+            | Insn::Sh2add { rd, .. }
+            | Insn::Sh3add { rd, .. }
+            | Insn::AddUw { rd, .. }
+            | Insn::Sh1addUw { rd, .. }
+            | Insn::Sh2addUw { rd, .. }
+            | Insn::Sh3addUw { rd, .. }
+            | Insn::SlliUw { rd, .. } => rd,
             Insn::LrW { rd, .. }
             | Insn::LrD { rd, .. }
             | Insn::ScW { rd, .. }
@@ -700,6 +708,60 @@ impl Hart {
                 let b = self.regs.get(rs2) as u32;
                 let v = if b == 0 { a } else { a % b };
                 self.regs.set(rd, (v as i32 as i64) as u64);
+                Ok(nx)
+            }
+
+            Insn::Sh1add { rd, rs1, rs2 } => {
+                let v = self.regs.get(rs1).wrapping_add(self.regs.get(rs2) << 1);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Sh2add { rd, rs1, rs2 } => {
+                let v = self.regs.get(rs1).wrapping_add(self.regs.get(rs2) << 2);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Sh3add { rd, rs1, rs2 } => {
+                let v = self.regs.get(rs1).wrapping_add(self.regs.get(rs2) << 3);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+
+            Insn::AddUw { rd, rs1, rs2 } => {
+                let v = self
+                    .regs
+                    .get(rs2)
+                    .wrapping_add(self.regs.get(rs1) as u32 as u64);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Sh1addUw { rd, rs1, rs2 } => {
+                let v = self
+                    .regs
+                    .get(rs2)
+                    .wrapping_add((self.regs.get(rs1) as u32 as u64) << 1);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Sh2addUw { rd, rs1, rs2 } => {
+                let v = self
+                    .regs
+                    .get(rs2)
+                    .wrapping_add((self.regs.get(rs1) as u32 as u64) << 2);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Sh3addUw { rd, rs1, rs2 } => {
+                let v = self
+                    .regs
+                    .get(rs2)
+                    .wrapping_add((self.regs.get(rs1) as u32 as u64) << 3);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::SlliUw { rd, rs1, shamt } => {
+                let v = (self.regs.get(rs1) as u32 as u64) << (shamt & 0x3f);
+                self.regs.set(rd, v);
                 Ok(nx)
             }
 
@@ -1146,6 +1208,12 @@ mod tests {
         m.write_le::<4>(addr, w.into()).unwrap();
     }
 
+    fn write_slli_uw(m: &mut PhysMem, addr: u64, rd: u32, rs1: u32, shamt: u32) {
+        // slli.uw: funct6=0b000010 in 31:26, shamt in 25:20, f3=001, op=0x1b.
+        let w = 0x02 << 26 | shamt << 20 | rs1 << 15 | 0x1 << 12 | rd << 7 | 0x1b;
+        m.write_le::<4>(addr, w.into()).unwrap();
+    }
+
     fn write_r(m: &mut PhysMem, addr: u64, op: u32, rd: u32, f3: u32, rs1: u32, rs2: u32, f7: u32) {
         let w = f7 << 25 | rs2 << 20 | rs1 << 15 | f3 << 12 | rd << 7 | op;
         m.write_le::<4>(addr, w.into()).unwrap();
@@ -1424,6 +1492,52 @@ mod tests {
         assert_eq!(m.read_le::<4>(0x9000_0000).unwrap(), 0xabcd_1234);
         // Second cas expected 0, old is 0xabcd_1234 -> fails, rd gets old.
         assert_eq!(h.regs.get(13), 0xabcd_1234u64 as i32 as i64 as u64);
+    }
+
+    #[test]
+    fn zba_shifts_and_adds_compute_indexed_addresses() {
+        let mut h = hart();
+        let mut m = mem();
+        h.regs.set(1, 10);
+        h.regs.set(2, 3);
+        // sh1add x3, x1, x2 -> 10 + (3 << 1) = 16
+        write_r(&mut m, 0x8000_0000, 0x33, 3, 2, 1, 2, 0x10);
+        // sh2add x4, x1, x2 -> 10 + (3 << 2) = 22
+        write_r(&mut m, 0x8000_0004, 0x33, 4, 4, 1, 2, 0x10);
+        // sh3add x5, x1, x2 -> 10 + (3 << 3) = 34
+        write_r(&mut m, 0x8000_0008, 0x33, 5, 6, 1, 2, 0x10);
+        write_i(&mut m, 0x8000_000c, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 10), Halt::StepLimit);
+        assert_eq!(h.regs.get(3), 16);
+        assert_eq!(h.regs.get(4), 22);
+        assert_eq!(h.regs.get(5), 34);
+    }
+
+    #[test]
+    fn zba_unsigned_word_ops_zero_extend_low_word() {
+        let mut h = hart();
+        let mut m = mem();
+        h.regs.set(1, 0xffff_0000_0000_1234); // low word 0x1234
+        h.regs.set(2, 10);
+        // add.uw x3, x1, x2 -> 10 + 0x1234
+        write_r(&mut m, 0x8000_0000, 0x3b, 3, 0, 1, 2, 0x04);
+        // sh1add.uw x4, x1, x2 -> 10 + (0x1234 << 1)
+        write_r(&mut m, 0x8000_0004, 0x3b, 4, 2, 1, 2, 0x10);
+        // sh2add.uw x5, x1, x2 -> 10 + (0x1234 << 2)
+        write_r(&mut m, 0x8000_0008, 0x3b, 5, 4, 1, 2, 0x10);
+        // sh3add.uw x6, x1, x2 -> 10 + (0x1234 << 3)
+        write_r(&mut m, 0x8000_000c, 0x3b, 6, 6, 1, 2, 0x10);
+        // slli.uw x7, x1, 4 -> 0x1234 << 4
+        write_slli_uw(&mut m, 0x8000_0010, 7, 1, 4);
+        write_i(&mut m, 0x8000_0014, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 10), Halt::StepLimit);
+        assert_eq!(h.regs.get(3), 0x1234 + 10);
+        assert_eq!(h.regs.get(4), (0x1234 << 1) + 10);
+        assert_eq!(h.regs.get(5), (0x1234 << 2) + 10);
+        assert_eq!(h.regs.get(6), (0x1234 << 3) + 10);
+        assert_eq!(h.regs.get(7), 0x1234 << 4);
     }
 
     #[test]
