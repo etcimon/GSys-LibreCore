@@ -886,6 +886,16 @@ impl Hart {
                 Ok(self.regs.pc)
             }
             Insn::Wfi => Ok(nx),
+            Insn::CboInval { rs1 }
+            | Insn::CboClean { rs1 }
+            | Insn::CboFlush { rs1 }
+            | Insn::CboZero { rs1 } => {
+                // The native bring-up model has no data cache, so these are
+                // architecturally no-ops; the address must still translate.
+                let vaddr = self.regs.get(rs1);
+                self.translate(mem, vaddr, 5)?;
+                Ok(nx)
+            }
             Insn::Illegal(w) => {
                 self.fault_addr = w as u64;
                 self.take_trap(2);

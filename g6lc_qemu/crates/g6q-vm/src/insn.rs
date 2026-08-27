@@ -300,6 +300,20 @@ pub enum Insn {
     Sret,
     Wfi,
 
+    // Zicbom / Zicboz (native model: no cache; cbo.zero writes a 64-byte block)
+    CboInval {
+        rs1: u8,
+    },
+    CboFlush {
+        rs1: u8,
+    },
+    CboClean {
+        rs1: u8,
+    },
+    CboZero {
+        rs1: u8,
+    },
+
     // RV64M
     Mul {
         rd: u8,
@@ -879,6 +893,13 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
         },
         0x0f => match funct3 {
             0x0 => Insn::Fence,
+            0x2 if rd == 0 => match w >> 20 {
+                0x000 => Insn::CboInval { rs1 },
+                0x001 => Insn::CboClean { rs1 },
+                0x002 => Insn::CboFlush { rs1 },
+                0x004 => Insn::CboZero { rs1 },
+                _ => Insn::Illegal(w),
+            },
             _ => Insn::Illegal(w),
         },
         _ => Insn::Illegal(w),
@@ -1033,5 +1054,24 @@ mod tests {
     #[test]
     fn decoding_is_deterministic() {
         assert_eq!(decode(0x12345678, 64), decode(0x12345678, 64));
+    }
+
+    #[test]
+    fn zicbo_instructions_decode() {
+        // cbo.inval base(rs1=2): op=0x0f, f3=0x2, rd=0, funct12=0x000
+        let w = (2 << 15) | (0x2 << 12) | 0x0f;
+        assert!(matches!(decode(w, 64), Insn::CboInval { rs1: 2 }));
+
+        // cbo.clean base(rs1=3): funct12=0x001
+        let w = (0x001 << 20) | (3 << 15) | (0x2 << 12) | 0x0f;
+        assert!(matches!(decode(w, 64), Insn::CboClean { rs1: 3 }));
+
+        // cbo.flush base(rs1=4): funct12=0x002
+        let w = (0x002 << 20) | (4 << 15) | (0x2 << 12) | 0x0f;
+        assert!(matches!(decode(w, 64), Insn::CboFlush { rs1: 4 }));
+
+        // cbo.zero base(rs1=5): funct12=0x004
+        let w = (0x004 << 20) | (5 << 15) | (0x2 << 12) | 0x0f;
+        assert!(matches!(decode(w, 64), Insn::CboZero { rs1: 5 }));
     }
 }
