@@ -42,6 +42,8 @@ pub struct Hart {
     pub fault_addr: u64,
     /// Control and status registers.
     pub csr: Csr,
+    /// Length of the instruction currently being executed (2 or 4 bytes).
+    pub inst_len: u8,
 }
 
 impl Hart {
@@ -55,6 +57,7 @@ impl Hart {
         Self {
             regs: Regs::new(pc),
             csr: Csr::new(hartid),
+            inst_len: 4,
             ..Self::default()
         }
     }
@@ -74,8 +77,43 @@ impl Hart {
             }
         };
 
-        let w = match mem.read_le::<4>(pc_paddr) {
-            Ok(v) => v as u32,
+        // Fetch 2 bytes and determine instruction length.
+        let (w, inst_len) = match mem.read_le::<2>(pc_paddr) {
+            Ok(v) => {
+                let h = v as u16;
+                if h & 0b11 != 0b11 {
+                    // 16-bit compressed
+                    (h as u32, 2)
+                } else if (h >> 2) & 0b111 != 0b111 {
+                    // 32-bit standard; fetch the upper halfword.
+                    let paddr2 = match self.translate(mem, pc.wrapping_add(2), 12) {
+                        Ok(p) => p,
+                        Err(ExecError::Trap(c)) => {
+                            self.fault_addr = pc;
+                            self.take_trap(c);
+                            return None;
+                        }
+                    };
+                    match mem.read_le::<2>(paddr2) {
+                        Ok(v2) => (((v2 as u32) << 16) | (h as u32), 4),
+                        Err(MemError::Misaligned) => {
+                            self.fault_addr = self.regs.pc;
+                            self.take_trap(0);
+                            return None;
+                        }
+                        Err(MemError::OutOfBounds) | Err(MemError::Invalid) => {
+                            self.fault_addr = self.regs.pc;
+                            self.take_trap(1);
+                            return None;
+                        }
+                    }
+                } else {
+                    // 48/64-bit and reserved encodings are not supported.
+                    self.fault_addr = self.regs.pc;
+                    self.take_trap(2);
+                    return None;
+                }
+            }
             Err(MemError::Misaligned) => {
                 self.fault_addr = self.regs.pc;
                 self.take_trap(0);
@@ -87,6 +125,7 @@ impl Hart {
                 return None;
             }
         };
+        self.inst_len = inst_len;
 
         // Deliver M-mode software interrupt if globally and specifically enabled.
         if self.csr.mode() == 3
@@ -327,7 +366,7 @@ impl Hart {
     }
 
     fn execute(&mut self, insn: Insn, mem: &mut PhysMem, xlen: u8) -> Result<u64, ExecError> {
-        let nx = self.regs.next_pc();
+        let nx = self.regs.pc.wrapping_add(self.inst_len as u64);
         // For variable shifts the mask depends on XLEN; 32-bit words always use 5 bits.
         let sh_mask = if xlen == 64 { 0x3f } else { 0x1f };
         match insn {
@@ -1053,7 +1092,7 @@ impl Hart {
             self.store_le::<8>(mem, addr, new)?;
             self.regs.set(rd, old);
         }
-        Ok(self.regs.next_pc())
+        Ok(self.regs.pc.wrapping_add(self.inst_len as u64))
     }
 
     fn amocas<const N: usize>(
@@ -1094,7 +1133,7 @@ impl Hart {
                 },
             );
         }
-        Ok(self.regs.next_pc())
+        Ok(self.regs.pc.wrapping_add(self.inst_len as u64))
     }
 
     fn mret(&mut self) {
@@ -1418,17 +1457,66 @@ mod tests {
     }
 
     #[test]
-    fn compressed_cannot_be_fetched_from_16bit() {
-        // This is a 32-bit-only decoder for the bring-up; C extension lands in a later pass.
-        // An attempt to fetch a compressed instruction from an odd halfword address is a
-        // memory error because the fetch is 4-byte aligned and may read a half-compressed
-        // pair. This test documents the bring-up limitation.
+    fn compressed_executes_from_halfword_address() {
+        // With the C extension, a 16-bit instruction may start on any 2-byte boundary and
+        // advances the PC by 2 rather than 4.
         let mut h = hart();
-        h.regs.pc = 0x8000_0002;
         let mut m = mem();
+        h.regs.pc = 0x8000_0002;
+        // c.li x5, 3 -> op=01, funct3=010, rd=5, imm=3
+        let c_li = 0x4000u16 | (5 << 7) | (3 << 2) | 0b01;
+        m.write_le::<2>(0x8000_0002, c_li as u64).unwrap();
         assert_eq!(h.step(&mut m, 64), None);
-        assert_eq!(h.csr.mcause, 0);
-        assert_eq!(h.regs.pc, 0x7000_0000);
+        assert_eq!(h.regs.get(5), 3);
+        assert_eq!(h.regs.pc, 0x8000_0004);
+    }
+
+    #[test]
+    fn compressed_all_zero_halfword_is_illegal() {
+        let mut h = hart();
+        let mut m = mem();
+        h.regs.pc = 0x8000_0002;
+        m.write_le::<2>(0x8000_0002, 0).unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.csr.mcause, 2);
+    }
+
+    #[test]
+    fn compressed_control_flow_and_stack_ops() {
+        let mut h = hart();
+        let mut m = mem();
+        h.regs.set(2, 0x8000_0800); // sp
+
+        // c.li x10, 7
+        m.write_le::<2>(
+            0x8000_0000,
+            (0x4000u16 | (10 << 7) | (7 << 2) | 0b01) as u64,
+        )
+        .unwrap();
+        // c.mv x11, x10 -> op=10, funct3=100, bit12=0, rd=11, rs2=10
+        m.write_le::<2>(
+            0x8000_0002,
+            (0x8000u16 | (11 << 7) | (10 << 2) | 0b10) as u64,
+        )
+        .unwrap();
+        // c.add x11, x10 -> bit12=1
+        m.write_le::<2>(
+            0x8000_0004,
+            (0x8000u16 | (1 << 12) | (11 << 7) | (10 << 2) | 0b10) as u64,
+        )
+        .unwrap();
+        // c.sdsp x11, 0(sp) -> op=10, funct3=111, uimm=0, rs2=11
+        m.write_le::<2>(0x8000_0006, (0xe000u16 | (11 << 2) | 0b10) as u64)
+            .unwrap();
+        // c.ldsp x12, 0(sp) -> op=10, funct3=011, rd=12
+        m.write_le::<2>(0x8000_0008, (0x6000u16 | (12 << 7) | 0b10) as u64)
+            .unwrap();
+
+        assert_eq!(h.run(&mut m, 64, 5), Halt::StepLimit);
+        assert_eq!(h.regs.get(10), 7);
+        assert_eq!(h.regs.get(11), 14);
+        assert_eq!(h.regs.get(12), 14);
+        assert_eq!(h.regs.pc, 0x8000_000a);
     }
 
     #[test]

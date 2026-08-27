@@ -28,6 +28,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod c;
 pub mod csr;
 pub mod device;
 pub mod exec;

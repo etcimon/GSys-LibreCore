@@ -685,8 +685,16 @@ fn shamt(w: u32, xlen: u32) -> u8 {
     ((w >> 20) & mask) as u8
 }
 
-/// Decode one 32-bit instruction.
+/// Decode one 32-bit or 16-bit (compressed) instruction.
 pub fn decode(w: u32, xlen: u32) -> Insn {
+    if w & 0b11 != 0b11 {
+        return crate::c::decode_c((w & 0xffff) as u16, xlen);
+    }
+    if (w >> 2) & 0b111 == 0b111 {
+        // 48/64-bit and reserved encodings are not supported.
+        return Insn::Illegal(w);
+    }
+
     let opcode = w & 0x7f;
     let rd = u8_field(w, 11, 7);
     let rs1 = u8_field(w, 19, 15);
