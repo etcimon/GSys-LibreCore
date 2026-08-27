@@ -82,10 +82,64 @@ impl Region {
     }
 }
 
+use crate::device::MmioDevice;
+
+/// A memory-mapped device entry.
+#[derive(Debug, Clone)]
+pub struct Device {
+    /// Device base address.
+    pub base: u64,
+    /// Device address length.
+    pub len: u64,
+    /// Device instance.
+    pub kind: DeviceKind,
+}
+
+impl Device {
+    /// Create a device entry.
+    pub fn new(base: u64, len: u64, kind: DeviceKind) -> Self {
+        Self { base, len, kind }
+    }
+
+    fn contains(&self, addr: u64, n: usize) -> bool {
+        let end = match addr.checked_add(n as u64) {
+            Some(e) => e,
+            None => return false,
+        };
+        addr >= self.base && end <= self.base.saturating_add(self.len)
+    }
+}
+
+/// Supported device types.
+#[derive(Debug, Clone)]
+pub enum DeviceKind {
+    /// Core-local interruptor.
+    Clint(crate::device::Clint),
+    /// NS16550a transmit-only UART.
+    Uart(crate::device::Uart),
+}
+
+impl DeviceKind {
+    fn load(&self, offset: u64, width: usize) -> u64 {
+        match self {
+            DeviceKind::Clint(c) => c.load(offset, width),
+            DeviceKind::Uart(u) => u.load(offset, width),
+        }
+    }
+
+    fn store(&mut self, offset: u64, width: usize, value: u64) {
+        match self {
+            DeviceKind::Clint(c) => c.store(offset, width, value),
+            DeviceKind::Uart(u) => u.store(offset, width, value),
+        }
+    }
+}
+
 /// The physical address space.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct PhysMem {
     regions: Vec<Region>,
+    devices: Vec<Device>,
 }
 
 impl PhysMem {
@@ -94,20 +148,66 @@ impl PhysMem {
         Self::default()
     }
 
-    /// Add a region. Regions must not overlap.
+    /// Add a memory region. Regions and devices must not overlap.
     pub fn add(&mut self, r: Region) {
-        // A physical memory with overlapping regions is ambiguous; assert at insertion.
         for e in &self.regions {
             assert!(
                 r.base >= e.base + e.len || r.base + r.len <= e.base,
                 "memory regions may not overlap: {r:?} vs {e:?}"
             );
         }
+        for d in &self.devices {
+            assert!(
+                r.base >= d.base + d.len || r.base + r.len <= d.base,
+                "memory region overlaps device: {r:?} vs {d:?}"
+            );
+        }
         self.regions.push(r);
         self.regions.sort_by_key(|r| r.base);
     }
 
-    /// Total installed bytes.
+    /// Add a memory-mapped device.
+    pub fn add_device(&mut self, d: Device) {
+        for e in &self.regions {
+            assert!(
+                d.base >= e.base + e.len || d.base + d.len <= e.base,
+                "device overlaps memory region: {d:?} vs {e:?}"
+            );
+        }
+        for e in &self.devices {
+            assert!(
+                d.base >= e.base + e.len || d.base + d.len <= e.base,
+                "devices may not overlap: {d:?} vs {e:?}"
+            );
+        }
+        self.devices.push(d);
+    }
+
+    /// Borrow the CLINT, if installed.
+    pub fn clint(&self) -> Option<&crate::device::Clint> {
+        self.devices.iter().find_map(|d| match &d.kind {
+            DeviceKind::Clint(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// Borrow the CLINT mutably.
+    pub fn clint_mut(&mut self) -> Option<&mut crate::device::Clint> {
+        self.devices.iter_mut().find_map(|d| match &mut d.kind {
+            DeviceKind::Clint(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// Borrow the UART, if installed.
+    pub fn uart(&self) -> Option<&crate::device::Uart> {
+        self.devices.iter().find_map(|d| match &d.kind {
+            DeviceKind::Uart(u) => Some(u),
+            _ => None,
+        })
+    }
+
+    /// Total installed memory bytes.
     pub fn size(&self) -> u64 {
         self.regions.iter().map(|r| r.len).sum()
     }
@@ -120,6 +220,14 @@ impl PhysMem {
         self.regions.iter_mut().find(|r| r.contains(addr, n))
     }
 
+    fn device_for(&self, addr: u64, n: usize) -> Option<&Device> {
+        self.devices.iter().find(|d| d.contains(addr, n))
+    }
+
+    fn device_for_mut(&mut self, addr: u64, n: usize) -> Option<&mut Device> {
+        self.devices.iter_mut().find(|d| d.contains(addr, n))
+    }
+
     /// Read `N` bytes at `addr`, little-endian.
     pub fn read_le<const N: usize>(&self, addr: u64) -> Result<u64, MemError> {
         match N {
@@ -128,6 +236,9 @@ impl PhysMem {
         }
         if addr % N as u64 != 0 {
             return Err(MemError::Misaligned);
+        }
+        if let Some(d) = self.device_for(addr, N) {
+            return Ok(d.kind.load(addr - d.base, N));
         }
         let r = self.region_for(addr, N).ok_or(MemError::OutOfBounds)?;
         let bytes = r.read::<N>(addr);
@@ -146,6 +257,10 @@ impl PhysMem {
         }
         if addr % N as u64 != 0 {
             return Err(MemError::Misaligned);
+        }
+        if let Some(d) = self.device_for_mut(addr, N) {
+            d.kind.store(addr - d.base, N, val);
+            return Ok(());
         }
         let r = self.region_for_mut(addr, N).ok_or(MemError::OutOfBounds)?;
         let mut bytes = [0u8; N];
