@@ -127,6 +127,49 @@ pub struct CommitRecord {
 }
 
 impl CommitRecord {
+    /// Serialize to a canonical JSON object.
+    pub fn to_json(&self) -> Json {
+        Json::obj(vec![
+            ("order", Json::Int(self.order as i64)),
+            ("hart", Json::Int(self.hart as i64)),
+            ("pc_rdata", Json::Int(self.pc_rdata as i64)),
+            ("pc_wdata", Json::Int(self.pc_wdata as i64)),
+            ("insn", Json::Int(self.insn as i64)),
+            ("trap", Json::Bool(self.trap)),
+            ("rd_addr", Json::Int(self.rd_addr as i64)),
+            ("rd_wdata", Json::Int(self.rd_wdata as i64)),
+        ])
+    }
+
+    /// Parse from JSON.
+    pub fn from_json(j: &Json) -> Option<Self> {
+        let Json::Obj(o) = j else {
+            return None;
+        };
+        let get_u64 = |k: &str| match o.get(k)? {
+            Json::Int(i) => Some(*i as u64),
+            _ => None,
+        };
+        let get_u32 = |k: &str| match o.get(k)? {
+            Json::Int(i) => Some(*i as u32),
+            _ => None,
+        };
+        let get_u8 = |k: &str| match o.get(k)? {
+            Json::Int(i) => Some(*i as u8),
+            _ => None,
+        };
+        Some(Self {
+            order: get_u64("order")?,
+            hart: get_u32("hart")?,
+            pc_rdata: get_u64("pc_rdata")?,
+            pc_wdata: get_u64("pc_wdata")?,
+            insn: get_u32("insn")?,
+            trap: matches!(o.get("trap")?, Json::Bool(true)),
+            rd_addr: get_u8("rd_addr")?,
+            rd_wdata: get_u64("rd_wdata")?,
+        })
+    }
+
     /// Compare against a reference record, returning every differing field.
     ///
     /// Comparison is field-by-field rather than whole-struct so the divergence report can
@@ -188,6 +231,43 @@ pub fn first_divergence(
         ));
     }
     None
+}
+
+/// Records as a JSON array.
+pub fn records_to_json(records: &[CommitRecord]) -> Json {
+    Json::arr(records.iter().map(CommitRecord::to_json))
+}
+
+/// Parse a JSON array of records.
+pub fn records_from_json(j: &Json) -> Option<Vec<CommitRecord>> {
+    let Json::Arr(items) = j else {
+        return None;
+    };
+    items.iter().map(CommitRecord::from_json).collect()
+}
+
+/// Run a D1 tandem comparison and return a report.
+pub fn tandem_report(under_test: &[CommitRecord], reference: &[CommitRecord]) -> Json {
+    match first_divergence(under_test, reference) {
+        Some((idx, diffs)) => Json::obj(vec![
+            ("divergence", Json::Bool(true)),
+            ("index", Json::Int(idx as i64)),
+            (
+                "diffs",
+                Json::arr(diffs.iter().map(|d| {
+                    Json::obj(vec![
+                        ("field", Json::Str(d.field.clone())),
+                        ("lhs", Json::Str(d.lhs.clone())),
+                        ("rhs", Json::Str(d.rhs.clone())),
+                    ])
+                })),
+            ),
+        ]),
+        None => Json::obj(vec![
+            ("divergence", Json::Bool(false)),
+            ("records", Json::Int(under_test.len() as i64)),
+        ]),
+    }
 }
 
 /// Why a diagnosis run is or is not permitted.
