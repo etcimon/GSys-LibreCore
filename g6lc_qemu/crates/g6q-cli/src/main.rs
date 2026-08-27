@@ -674,6 +674,12 @@ mod tests {
 /// memory map (DRAM, CLINT, PLIC, UART), and runs one hart. The map is still
 /// hard-coded and will be replaced by the resolved `TargetModel` in a later pass.
 fn cmd_run(args: &Args) -> Result<(), String> {
+    let backend = args.value_or("backend", "native");
+    if backend != "native" {
+        return Err(format!(
+            "`--backend {backend}` is not implemented; use `native`"
+        ));
+    }
     let image = args
         .value("image")
         .ok_or("run --backend native needs --image FILE")?;
