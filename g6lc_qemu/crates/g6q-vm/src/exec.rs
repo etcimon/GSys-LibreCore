@@ -88,6 +88,16 @@ impl Hart {
             }
         };
 
+        // Deliver M-mode software interrupt if globally and specifically enabled.
+        if self.csr.mode() == 3
+            && ((self.csr.mstatus >> 3) & 1) != 0
+            && ((self.csr.mie >> 3) & 1) != 0
+            && ((self.csr.mip >> 3) & 1) != 0
+        {
+            self.fault_addr = 0;
+            self.take_trap(0x8000_0000_0000_0003);
+            return None;
+        }
         // Deliver M-mode timer interrupt if globally and specifically enabled.
         if self.csr.mode() == 3
             && ((self.csr.mstatus >> 3) & 1) != 0
@@ -96,6 +106,17 @@ impl Hart {
         {
             self.fault_addr = 0;
             self.take_trap(0x8000_0000_0000_0007);
+            return None;
+        }
+        // Deliver S-mode software interrupt if delegated and enabled.
+        if self.csr.mode() <= 1
+            && ((self.csr.mstatus >> 1) & 1) != 0
+            && ((self.csr.mie >> 1) & 1) != 0
+            && ((self.csr.mip >> 1) & 1) != 0
+            && ((self.csr.mideleg >> 1) & 1) != 0
+        {
+            self.fault_addr = 0;
+            self.take_trap(0x8000_0000_0000_0001);
             return None;
         }
         // Deliver S-mode timer interrupt if delegated and enabled.
@@ -161,6 +182,17 @@ impl Hart {
                 }
             } else {
                 self.csr.mip &= !((1u64 << 7) | (1u64 << 5));
+            }
+            if c.sw_pending(0) {
+                if (self.csr.mideleg >> 1) & 1 != 0 {
+                    self.csr.mip |= 1u64 << 1;
+                    self.csr.mip &= !(1u64 << 3);
+                } else {
+                    self.csr.mip |= 1u64 << 3;
+                    self.csr.mip &= !(1u64 << 1);
+                }
+            } else {
+                self.csr.mip &= !((1u64 << 3) | (1u64 << 1));
             }
         }
         if let Some(p) = mem.plic() {
@@ -1400,6 +1432,60 @@ mod tests {
         assert_eq!(h.step(&mut m, 64), None);
         assert_eq!(h.csr.mcause, 0x8000_0000_0000_0007);
         assert_eq!(h.regs.pc, 0x7000_0000);
+    }
+
+    #[test]
+    fn m_mode_software_interrupt_uses_mtvec() {
+        use crate::device::Clint;
+        use crate::mem::{Device, DeviceKind};
+        let mut h = hart();
+        let mut m = mem();
+        m.add_device(Device::new(
+            0x0200_0000,
+            0x10000,
+            DeviceKind::Clint(Clint::new(1)),
+        ));
+        if let Some(c) = m.clint_mut() {
+            c.msip[0] = 1;
+        }
+        h.csr.mie = 1u64 << 3;
+        h.csr.mstatus = (1u64 << 3) | (3u64 << 11);
+        h.csr.mtvec = 0x7000_0000;
+        // no-op to be interrupted
+        write_u(&mut m, 0x8000_0000, 0x37, 0, 0);
+
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.csr.mcause, 0x8000_0000_0000_0003);
+        assert_eq!(h.regs.pc, 0x7000_0000);
+    }
+
+    #[test]
+    fn s_mode_software_interrupt_uses_stvec() {
+        use crate::device::Clint;
+        use crate::mem::{Device, DeviceKind};
+        let mut h = hart();
+        let mut m = mem();
+        m.add_device(Device::new(
+            0x0200_0000,
+            0x10000,
+            DeviceKind::Clint(Clint::new(1)),
+        ));
+        if let Some(c) = m.clint_mut() {
+            c.msip[0] = 1;
+        }
+        h.csr.set_mode(1);
+        h.csr.mideleg = 1 << 1;
+        h.csr.mie = 1u64 << 1;
+        h.csr.mstatus = (1u64 << 1) | (1u64 << 8);
+        h.csr.stvec = 0x6000_0000;
+        // no-op to be interrupted
+        write_u(&mut m, 0x8000_0000, 0x37, 0, 0);
+
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.csr.scause, 0x8000_0000_0000_0001);
+        assert_eq!(h.regs.pc, 0x6000_0000);
     }
 
     #[test]

@@ -54,6 +54,11 @@ impl Clint {
         i < self.harts && self.mtime >= self.mtimecmp[i]
     }
 
+    /// True if hart `i` has a pending software interrupt.
+    pub fn sw_pending(&self, i: usize) -> bool {
+        i < self.harts && self.msip[i] & 1 != 0
+    }
+
     fn hart_addr(&self, offset: u64) -> Option<usize> {
         // MSIP: 0x0000, 4 bytes per hart
         // MTIMECMP: 0x4000, 8 bytes per hart
