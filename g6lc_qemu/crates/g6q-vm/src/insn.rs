@@ -882,6 +882,177 @@ pub enum Insn {
         rd: u8,
         rs1: u8,
     },
+
+    // D (double-precision floating-point)
+    Fld {
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+    Fsd {
+        rs1: u8,
+        rs2: u8,
+        imm: i32,
+    },
+    FmaddD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        rs3: u8,
+        rm: u8,
+    },
+    FmsubD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        rs3: u8,
+        rm: u8,
+    },
+    FnmsubD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        rs3: u8,
+        rm: u8,
+    },
+    FnmaddD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        rs3: u8,
+        rm: u8,
+    },
+    FaddD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        rm: u8,
+    },
+    FsubD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        rm: u8,
+    },
+    FmulD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        rm: u8,
+    },
+    FdivD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        rm: u8,
+    },
+    FsqrtD {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FsgnjD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    FsgnjnD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    FsgnjxD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    FminD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    FmaxD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    FcvtSD {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FcvtDS {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FcvtWD {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FcvtWuD {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FcvtLD {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FcvtLuD {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FmvXD {
+        rd: u8,
+        rs1: u8,
+    },
+    FeqD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    FltD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    FleD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    FclassD {
+        rd: u8,
+        rs1: u8,
+    },
+    FcvtDW {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FcvtDWu {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FcvtDL {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FcvtDLu {
+        rd: u8,
+        rs1: u8,
+        rm: u8,
+    },
+    FmvDX {
+        rd: u8,
+        rs1: u8,
+    },
 }
 
 fn u8_field(w: u32, hi: u32, lo: u32) -> u8 {
@@ -965,8 +1136,15 @@ fn decode_fp(w: u32, xlen: u32) -> Insn {
     let funct7 = u8_field(w, 31, 25);
 
     match funct7 {
-        0x00 | 0x04 | 0x08 | 0x0c if rm_legal(funct3) => match funct7 {
+        // FADD.S/D, FSUB.S/D, FMUL.S/D, FDIV.S/D
+        0x00 | 0x01 | 0x04 | 0x05 | 0x08 | 0x09 | 0x0c | 0x0d if rm_legal(funct3) => match funct7 {
             0x00 => Insn::FaddS {
+                rd,
+                rs1,
+                rs2,
+                rm: funct3,
+            },
+            0x01 => Insn::FaddD {
                 rd,
                 rs1,
                 rs2,
@@ -978,7 +1156,19 @@ fn decode_fp(w: u32, xlen: u32) -> Insn {
                 rs2,
                 rm: funct3,
             },
+            0x05 => Insn::FsubD {
+                rd,
+                rs1,
+                rs2,
+                rm: funct3,
+            },
             0x08 => Insn::FmulS {
+                rd,
+                rs1,
+                rs2,
+                rm: funct3,
+            },
+            0x09 => Insn::FmulD {
                 rd,
                 rs1,
                 rs2,
@@ -990,45 +1180,127 @@ fn decode_fp(w: u32, xlen: u32) -> Insn {
                 rs2,
                 rm: funct3,
             },
+            0x0d => Insn::FdivD {
+                rd,
+                rs1,
+                rs2,
+                rm: funct3,
+            },
             _ => unreachable!(),
         },
-        0x2c if rm_legal(funct3) && rs2 == 0x0 => Insn::FsqrtS {
-            rd,
-            rs1,
-            rm: funct3,
+        0x2c | 0x2d if rm_legal(funct3) && rs2 == 0x0 => match funct7 {
+            0x2c => Insn::FsqrtS {
+                rd,
+                rs1,
+                rm: funct3,
+            },
+            0x2d => Insn::FsqrtD {
+                rd,
+                rs1,
+                rm: funct3,
+            },
+            _ => unreachable!(),
         },
-        0x10 => match funct3 {
-            0x0 => Insn::FsgnjS { rd, rs1, rs2 },
-            0x1 => Insn::FsgnjnS { rd, rs1, rs2 },
-            0x2 => Insn::FsgnjxS { rd, rs1, rs2 },
+        // FSGNJ/N/X.S/D
+        0x10 | 0x11 => match (funct3, funct7) {
+            (0x0, 0x10) => Insn::FsgnjS { rd, rs1, rs2 },
+            (0x0, 0x11) => Insn::FsgnjD { rd, rs1, rs2 },
+            (0x1, 0x10) => Insn::FsgnjnS { rd, rs1, rs2 },
+            (0x1, 0x11) => Insn::FsgnjnD { rd, rs1, rs2 },
+            (0x2, 0x10) => Insn::FsgnjxS { rd, rs1, rs2 },
+            (0x2, 0x11) => Insn::FsgnjxD { rd, rs1, rs2 },
             _ => Insn::Illegal(w),
         },
-        0x14 => match funct3 {
-            0x0 => Insn::FminS { rd, rs1, rs2 },
-            0x1 => Insn::FmaxS { rd, rs1, rs2 },
+        // FMIN/FMAX.S/D
+        0x14 | 0x15 => match (funct3, funct7) {
+            (0x0, 0x14) => Insn::FminS { rd, rs1, rs2 },
+            (0x0, 0x15) => Insn::FminD { rd, rs1, rs2 },
+            (0x1, 0x14) => Insn::FmaxS { rd, rs1, rs2 },
+            (0x1, 0x15) => Insn::FmaxD { rd, rs1, rs2 },
             _ => Insn::Illegal(w),
         },
-        0x30 => {
+        // FCVT.{W,WU,L,LU}.S/D (floating-point to integer)
+        0x30 | 0x31 => {
             if !rm_legal(funct3) {
                 return Insn::Illegal(w);
             }
+            let is_d = funct7 == 0x31;
             match rs2 {
-                0x0 => Insn::FcvtWS {
+                0x0 => {
+                    if is_d {
+                        Insn::FcvtWD {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FcvtWS {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    }
+                }
+                0x1 => {
+                    if is_d {
+                        Insn::FcvtWuD {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FcvtWuS {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    }
+                }
+                0x2 if xlen == 64 => {
+                    if is_d {
+                        Insn::FcvtLD {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FcvtLS {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    }
+                }
+                0x3 if xlen == 64 => {
+                    if is_d {
+                        Insn::FcvtLuD {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FcvtLuS {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    }
+                }
+                _ => Insn::Illegal(w),
+            }
+        }
+        // FCVT.S.D / FCVT.D.S
+        0x20 | 0x21 => {
+            if !rm_legal(funct3) {
+                return Insn::Illegal(w);
+            }
+            match (funct7, rs2) {
+                (0x20, 0x1) => Insn::FcvtSD {
                     rd,
                     rs1,
                     rm: funct3,
                 },
-                0x1 => Insn::FcvtWuS {
-                    rd,
-                    rs1,
-                    rm: funct3,
-                },
-                0x2 if xlen == 64 => Insn::FcvtLS {
-                    rd,
-                    rs1,
-                    rm: funct3,
-                },
-                0x3 if xlen == 64 => Insn::FcvtLuS {
+                (0x21, 0x0) => Insn::FcvtDS {
                     rd,
                     rs1,
                     rm: funct3,
@@ -1036,46 +1308,112 @@ fn decode_fp(w: u32, xlen: u32) -> Insn {
                 _ => Insn::Illegal(w),
             }
         }
-        0x34 => {
+        // FCVT.S/D.{W,WU,L,LU} (integer to floating-point)
+        0x34 | 0x35 => {
             if !rm_legal(funct3) {
                 return Insn::Illegal(w);
             }
+            let is_d = funct7 == 0x35;
             match rs2 {
-                0x0 => Insn::FcvtSW {
-                    rd,
-                    rs1,
-                    rm: funct3,
-                },
-                0x1 => Insn::FcvtSWu {
-                    rd,
-                    rs1,
-                    rm: funct3,
-                },
-                0x2 if xlen == 64 => Insn::FcvtSL {
-                    rd,
-                    rs1,
-                    rm: funct3,
-                },
-                0x3 if xlen == 64 => Insn::FcvtSLu {
-                    rd,
-                    rs1,
-                    rm: funct3,
-                },
+                0x0 => {
+                    if is_d {
+                        Insn::FcvtDW {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FcvtSW {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    }
+                }
+                0x1 => {
+                    if is_d {
+                        Insn::FcvtDWu {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FcvtSWu {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    }
+                }
+                0x2 if xlen == 64 => {
+                    if is_d {
+                        Insn::FcvtDL {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FcvtSL {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    }
+                }
+                0x3 if xlen == 64 => {
+                    if is_d {
+                        Insn::FcvtDLu {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FcvtSLu {
+                            rd,
+                            rs1,
+                            rm: funct3,
+                        }
+                    }
+                }
                 _ => Insn::Illegal(w),
             }
         }
-        0x50 => match funct3 {
-            0x0 => Insn::FleS { rd, rs1, rs2 },
-            0x1 => Insn::FltS { rd, rs1, rs2 },
-            0x2 => Insn::FeqS { rd, rs1, rs2 },
+        // FEQ/FLT/FLE.S/D
+        0x50 | 0x51 => match (funct3, funct7) {
+            (0x0, 0x50) => Insn::FleS { rd, rs1, rs2 },
+            (0x0, 0x51) => Insn::FleD { rd, rs1, rs2 },
+            (0x1, 0x50) => Insn::FltS { rd, rs1, rs2 },
+            (0x1, 0x51) => Insn::FltD { rd, rs1, rs2 },
+            (0x2, 0x50) => Insn::FeqS { rd, rs1, rs2 },
+            (0x2, 0x51) => Insn::FeqD { rd, rs1, rs2 },
             _ => Insn::Illegal(w),
         },
-        0x38 => match (funct3, rs2) {
-            (0x0, 0x0) => Insn::FmvXW { rd, rs1 },
-            (0x1, 0x1) => Insn::FclassS { rd, rs1 },
+        // FMV.X.W / FCLASS.S / FMV.X.D / FCLASS.D
+        0x38 | 0x39 => match (funct3, rs2) {
+            (0x0, 0x0) => {
+                if funct7 == 0x39 {
+                    Insn::FmvXD { rd, rs1 }
+                } else {
+                    Insn::FmvXW { rd, rs1 }
+                }
+            }
+            (0x1, 0x0) => {
+                if funct7 == 0x39 {
+                    Insn::FclassD { rd, rs1 }
+                } else {
+                    Insn::FclassS { rd, rs1 }
+                }
+            }
             _ => Insn::Illegal(w),
         },
-        0x3c if funct3 == 0x0 && rs2 == 0x0 => Insn::FmvWX { rd, rs1 },
+        // FMV.W.X / FMV.D.X
+        0x3c | 0x3d if funct3 == 0x0 && rs2 == 0x0 => {
+            if funct7 == 0x3d {
+                Insn::FmvDX { rd, rs1 }
+            } else {
+                Insn::FmvWX { rd, rs1 }
+            }
+        }
         _ => Insn::Illegal(w),
     }
 }
@@ -1514,10 +1852,20 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 rs1,
                 imm: i_imm(w) as i32,
             },
+            0x3 => Insn::Fld {
+                rd,
+                rs1,
+                imm: i_imm(w) as i32,
+            },
             _ => Insn::Illegal(w),
         },
         0x27 => match funct3 {
             0x2 => Insn::Fsw {
+                rs1,
+                rs2,
+                imm: s_imm(w) as i32,
+            },
+            0x3 => Insn::Fsd {
                 rs1,
                 rs2,
                 imm: s_imm(w) as i32,
@@ -1527,39 +1875,88 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
         0x43 | 0x47 | 0x4b | 0x4f => {
             let rs3 = u8_field(w, 31, 27);
             let fmt = u8_field(w, 26, 25);
-            if fmt != 0x0 {
-                // Single-precision (fmt=00) only in this pass.
+            if fmt > 0x1 || !rm_legal(funct3) {
+                // Single- and double-precision (fmt=00/01) only in this pass.
                 return Insn::Illegal(w);
             }
+            let is_d = fmt == 0x1;
             match opcode {
-                0x43 => Insn::FmaddS {
-                    rd,
-                    rs1,
-                    rs2,
-                    rs3,
-                    rm: funct3,
-                },
-                0x47 => Insn::FmsubS {
-                    rd,
-                    rs1,
-                    rs2,
-                    rs3,
-                    rm: funct3,
-                },
-                0x4b => Insn::FnmsubS {
-                    rd,
-                    rs1,
-                    rs2,
-                    rs3,
-                    rm: funct3,
-                },
-                0x4f => Insn::FnmaddS {
-                    rd,
-                    rs1,
-                    rs2,
-                    rs3,
-                    rm: funct3,
-                },
+                0x43 => {
+                    if is_d {
+                        Insn::FmaddD {
+                            rd,
+                            rs1,
+                            rs2,
+                            rs3,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FmaddS {
+                            rd,
+                            rs1,
+                            rs2,
+                            rs3,
+                            rm: funct3,
+                        }
+                    }
+                }
+                0x47 => {
+                    if is_d {
+                        Insn::FmsubD {
+                            rd,
+                            rs1,
+                            rs2,
+                            rs3,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FmsubS {
+                            rd,
+                            rs1,
+                            rs2,
+                            rs3,
+                            rm: funct3,
+                        }
+                    }
+                }
+                0x4b => {
+                    if is_d {
+                        Insn::FnmsubD {
+                            rd,
+                            rs1,
+                            rs2,
+                            rs3,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FnmsubS {
+                            rd,
+                            rs1,
+                            rs2,
+                            rs3,
+                            rm: funct3,
+                        }
+                    }
+                }
+                0x4f => {
+                    if is_d {
+                        Insn::FnmaddD {
+                            rd,
+                            rs1,
+                            rs2,
+                            rs3,
+                            rm: funct3,
+                        }
+                    } else {
+                        Insn::FnmaddS {
+                            rd,
+                            rs1,
+                            rs2,
+                            rs3,
+                            rm: funct3,
+                        }
+                    }
+                }
                 _ => Insn::Illegal(w),
             }
         }

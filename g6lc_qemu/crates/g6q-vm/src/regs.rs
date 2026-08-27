@@ -94,6 +94,19 @@ impl Fregs {
     pub fn get_s_raw(&self, i: u8) -> u32 {
         self.get(i) as u32
     }
+
+    /// Read a raw 64-bit FPR value as a double-precision value.
+    ///
+    /// Double values fill the whole register; a register holding a NaN-boxed
+    /// single-precision value naturally decodes as a quiet NaN.
+    pub fn get_d(&self, i: u8) -> u64 {
+        self.get(i)
+    }
+
+    /// Write a raw 64-bit FPR value as a double-precision value.
+    pub fn set_d(&mut self, i: u8, v: u64) {
+        self.set(i, v);
+    }
 }
 
 #[cfg(test)]
@@ -106,6 +119,16 @@ impl Fregs {
     /// Convenience: pack an `f32` into a 32-bit register.
     pub fn set_f32(&mut self, i: u8, v: f32) {
         self.set_s(i, v.to_bits());
+    }
+
+    /// Convenience: unpack a 64-bit register as `f64`.
+    pub fn get_f64(&self, i: u8) -> f64 {
+        f64::from_bits(self.get_d(i))
+    }
+
+    /// Convenience: pack an `f64` into a 64-bit register.
+    pub fn set_f64(&mut self, i: u8, v: f64) {
+        self.set_d(i, v.to_bits());
     }
 }
 
