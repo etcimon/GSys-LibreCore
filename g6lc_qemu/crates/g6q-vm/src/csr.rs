@@ -50,6 +50,13 @@ pub enum IrqBit {
     Sexternal = 1 << 9,
 }
 
+/// Bits that appear in `sstatus` (subset of `mstatus`).
+const SSTATUS_MASK: u64 =
+    (1u64 << 1) | (1u64 << 5) | (1u64 << 8) | (1u64 << 18) | (1u64 << 19) | (1u64 << 63);
+
+/// S-mode interrupt bits in `mie`/`mip`/`mideleg`.
+const S_IRQ_MASK: u64 = (1u64 << 1) | (1u64 << 5) | (1u64 << 9);
+
 /// A privileged-mode CSR bank.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Csr {
@@ -79,12 +86,6 @@ pub struct Csr {
     pub mtval: u64,
     /// Machine scratch.
     pub mscratch: u64,
-    /// Supervisor status.
-    pub sstatus: u64,
-    /// Supervisor interrupt enable.
-    pub sie: u64,
-    /// Supervisor interrupt pending.
-    pub sip: u64,
     /// Supervisor trap vector.
     pub stvec: u64,
     /// Supervisor exception program counter.
@@ -146,9 +147,9 @@ impl Csr {
             0x342 => Ok(self.mcause),
             0x343 => Ok(self.mtval),
             0x340 => Ok(self.mscratch),
-            0x100 => Ok(self.sstatus),
-            0x104 => Ok(self.sie),
-            0x144 => Ok(self.sip),
+            0x100 => Ok(self.mstatus & SSTATUS_MASK),
+            0x104 => Ok(self.mie & self.mideleg & S_IRQ_MASK),
+            0x144 => Ok(self.mip & self.mideleg & S_IRQ_MASK),
             0x105 => Ok(self.stvec),
             0x141 => Ok(self.sepc),
             0x142 => Ok(self.scause),
@@ -206,15 +207,18 @@ impl Csr {
                 Ok(())
             }
             0x100 => {
-                self.sstatus = val;
+                self.mstatus = (self.mstatus & !SSTATUS_MASK) | (val & SSTATUS_MASK);
                 Ok(())
             }
             0x104 => {
-                self.sie = val;
+                let mask = self.mideleg & S_IRQ_MASK;
+                self.mie = (self.mie & !mask) | (val & mask);
                 Ok(())
             }
             0x144 => {
-                self.sip = val;
+                // SSIP (bit 1) is writable when delegated; other sip bits are read-only.
+                let mask = self.mideleg & (1u64 << 1);
+                self.mip = (self.mip & !mask) | (val & mask);
                 Ok(())
             }
             0x105 => {
