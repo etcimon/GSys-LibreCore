@@ -246,6 +246,12 @@ pub fn records_from_json(j: &Json) -> Option<Vec<CommitRecord>> {
     items.iter().map(CommitRecord::from_json).collect()
 }
 
+/// Parse a JSON text into a record array.
+pub fn records_from_str(text: &str) -> Result<Vec<CommitRecord>, String> {
+    let j = Json::parse(text).map_err(|e| format!("invalid JSON: {e}"))?;
+    records_from_json(&j).ok_or_else(|| "expected a JSON array of records".to_string())
+}
+
 /// Run a D1 tandem comparison and return a report.
 pub fn tandem_report(under_test: &[CommitRecord], reference: &[CommitRecord]) -> Json {
     match first_divergence(under_test, reference) {

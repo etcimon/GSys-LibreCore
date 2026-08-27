@@ -142,6 +142,7 @@ fn dispatch(verb: &str, args: &Args) -> Result<(), String> {
         "gen" => cmd_gen(args),
         "conform" => cmd_conform(args),
         "run" => cmd_run(args),
+        "tandem" => cmd_tandem(args),
         v if VERBS.iter().any(|x| x.name == v) => {
             let stage = VERBS.iter().find(|x| x.name == v).map_or("?", |x| x.stage);
             // Demonstrate the model plumbing so the skeleton is visibly wired, then be
@@ -697,4 +698,31 @@ fn parse_addr(s: &str) -> Result<u64, String> {
         s.parse::<u64>()
             .map_err(|_| format!("address must be decimal or 0x-prefixed hex: `{s}`"))
     }
+}
+
+/// `tandem` — compare an under-test record stream with a reference.
+fn cmd_tandem(args: &Args) -> Result<(), String> {
+    let under = args
+        .value("under-test")
+        .ok_or("tandem needs --under-test FILE")?;
+    let reference = args
+        .value("reference")
+        .ok_or("tandem needs --reference FILE")?;
+
+    let lhs = std::fs::read_to_string(under).map_err(|e| format!("cannot read {under}: {e}"))?;
+    let rhs =
+        std::fs::read_to_string(reference).map_err(|e| format!("cannot read {reference}: {e}"))?;
+
+    let under_test = g6q_diag::records_from_str(&lhs)?;
+    let reference = g6q_diag::records_from_str(&rhs)?;
+
+    let report = g6q_diag::tandem_report(&under_test, &reference);
+    print!("{}", report.to_pretty());
+
+    if let Json::Obj(o) = &report {
+        if let Some(Json::Bool(false)) = o.get("divergence") {
+            return Ok(());
+        }
+    }
+    Err("tandem divergence detected".to_string())
 }
