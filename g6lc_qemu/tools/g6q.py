@@ -31,9 +31,11 @@ from env_common import (  # noqa: E402
     apply_env,
     cargo_bin,
     cargo_home,
+    contained_env,
+    have_contained_toolchain,
     out_dir,
     package_root,
-    rustup_bin,
+    rustup_home,
     target_dir,
     toolchain_channel,
     tools_dir,
@@ -81,29 +83,38 @@ _RUSTUP_WIN = "https://win.rustup.rs/x86_64"
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
-    root = package_root()
     tools_dir().mkdir(parents=True, exist_ok=True)
 
-    if cargo_bin().is_file() and not args.force:
+    if have_contained_toolchain() and not args.force:
         log(f"contained cargo already present: {cargo_bin()}")
     else:
         channel = toolchain_channel()
         log(f"installing contained rustup + toolchain {channel} into {tools_dir()}")
-        env = apply_env()
+        # Installation must be contained unconditionally; see env_common.contained_env.
+        env = contained_env()
+        # rustup-init takes ONE value per --component; a second bare word is parsed as a
+        # positional and rejected.
+        components = ["--component", "rustfmt", "--component", "clippy"]
         if _WINDOWS:
             init = tools_dir() / "rustup-init.exe"
             _download(_RUSTUP_WIN, init)
             run([init, "-y", "--no-modify-path", "--profile", "minimal",
-                 "--default-toolchain", channel, "--component", "rustfmt", "clippy"],
-                env=env)
+                 "--default-toolchain", channel, *components], env=env)
         else:
             init = tools_dir() / "rustup-init.sh"
             _download(_RUSTUP_UNIX, init)
             init.chmod(init.stat().st_mode | stat.S_IEXEC)
             run(["sh", str(init), "-y", "--no-modify-path", "--profile", "minimal",
-                 "--default-toolchain", channel, "--component", "rustfmt", "clippy"],
-                env=env)
+                 "--default-toolchain", channel, *components], env=env)
 
+        if not have_contained_toolchain():
+            err(f"setup finished but no cargo at {cargo_bin()}; refusing to claim success")
+            return 1
+
+    # Prove containment rather than assume it: a toolchain that silently landed in the
+    # user's home directory would defeat the point of this command.
+    log(f"RUSTUP_HOME = {rustup_home()}")
+    log(f"CARGO_HOME  = {cargo_home()}")
     log("setup complete; next: python tools/g6q.py check")
     return 0
 

@@ -1,6 +1,6 @@
 # Extension point: `g6lc_qemu` — generated emulation and SV diagnosis
 
-**Status:** **Q0 — scaffold + package skeleton landed** · **Code prefix:** `g6lc_qemu` / `g6q` ·
+**Status:** **Q1 — ingest, `TargetModel` and conformance landed** · **Code prefix:** `g6lc_qemu` / `g6q` ·
 **Licensing:** tier **T** (MIT) · **Package:** [`../../g6lc_qemu/`](../../g6lc_qemu/)
 
 Feature-domain for **emulating GSys LibreCore** rather than simulating it: a self-contained Rust
@@ -241,8 +241,8 @@ Enforcement: the profile is stamped into every artifact, trace and JSON result, 
 
 | Stage | Deliverable | Exit gate |
 |---|---|---|
-| **Q0** | This tree + `g6lc_qemu/` package skeleton + registration | `python tools/g6q.py check` green on fixtures |
-| **Q1** | Ingest + `TargetModel` + conformance | all 7 `g6lc64_*` + `cv*a6*` packages round-trip; stub-Ara flagged |
+| **Q0** ✅ | This tree + `g6lc_qemu/` package skeleton + registration | `python tools/g6q.py check` green on fixtures |
+| **Q1** ✅ | Ingest + `TargetModel` + conformance | 21 packages round-trip (0 unresolved); 7 DTS parse; stub-Ara, undeclared-H, stub-L2 and an AI topology mismatch all flagged unaided |
 | **Q2** | **B0** stock-QEMU driver + OpenSBI payload | OpenSBI banner on stock `qemu-system-riscv64 -M virt` |
 | **Q3** | **B3** Rust VM + faithful devices + `st_rvfi` | boots OpenSBI to S-mode; tandem-clean vs Spike |
 | **Q4** | **B1** generated `g6lc-soc` machine | buildroot Linux shell; memory map self-check byte-identical |

@@ -12,6 +12,7 @@ dependencies = [
  "g6q-emit-args",
  "g6q-emit-qemu",
  "g6q-flist",
+ "g6q-ingest",
  "g6q-svcfg",
  "g6q-vm",
 ]
@@ -48,6 +49,16 @@ dependencies = [
 [[package]]
 name = "g6q-flist"
 version = "0.1.0"
+
+[[package]]
+name = "g6q-ingest"
+version = "0.1.0"
+dependencies = [
+ "g6q-core",
+ "g6q-dts",
+ "g6q-flist",
+ "g6q-svcfg",
+]
 
 [[package]]
 name = "g6q-svcfg"

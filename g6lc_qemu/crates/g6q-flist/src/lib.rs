@@ -62,6 +62,16 @@ pub struct Expansion {
     pub incdirs: Vec<String>,
     /// `+define+` tokens in effect.
     pub defines: Vec<String>,
+    /// Nested manifests that could not be read, with the reason.
+    ///
+    /// An unresolvable include is **not** fatal: aborting the parent manifest would drop
+    /// every file after the failure, and every unit in those files would then look
+    /// absent — reported as a stub, which reads as a fact about the design rather than a
+    /// gap in the inputs. Recording and continuing keeps the partial evidence usable and
+    /// makes the gap visible.
+    pub missing: Vec<String>,
+    /// Variable names left unexpanded because no binding was supplied.
+    pub unresolved_vars: Vec<String>,
 }
 
 impl Expansion {
@@ -86,6 +96,25 @@ impl Expansion {
     pub fn file_count(&self) -> usize {
         self.files.len()
     }
+
+    /// Whether some of the manifest could not be read.
+    ///
+    /// When true, a unit not found in [`Expansion::files`] means **unknown**, not
+    /// absent: the file that would have proved it may be in a part that failed to load.
+    pub fn is_incomplete(&self) -> bool {
+        !self.missing.is_empty() || !self.unresolved_vars.is_empty()
+    }
+}
+
+/// Whether a unit is compiled, or whether the evidence is inconclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// The implementing source is in the compiled set.
+    Present,
+    /// The implementing source is genuinely not compiled.
+    Absent,
+    /// The manifest is incomplete, so absence proves nothing.
+    Unknown,
 }
 
 /// Whether a named unit is compiled, and on what evidence.
@@ -98,6 +127,8 @@ pub struct Membership {
     pub unit: String,
     /// Whether the implementing source is in the compiled set.
     pub present: bool,
+    /// Present, genuinely absent, or inconclusive.
+    pub presence: Presence,
     /// Human-readable justification.
     pub evidence: String,
 }
@@ -117,6 +148,7 @@ pub fn membership(
         return Membership {
             unit: unit.to_string(),
             present: true,
+            presence: Presence::Present,
             evidence: format!("implementing source in the compiled set: {hit}"),
         };
     }
@@ -124,12 +156,28 @@ pub fn membership(
         return Membership {
             unit: unit.to_string(),
             present: false,
+            presence: Presence::Absent,
             evidence: format!("only a stub is compiled: {hit}"),
+        };
+    }
+    // Absence only means something when the manifest was fully read.
+    if exp.is_incomplete() {
+        return Membership {
+            unit: unit.to_string(),
+            present: false,
+            presence: Presence::Unknown,
+            evidence: format!(
+                "not found, but the manifest is incomplete ({} unreadable include(s), \
+                 {} unbound variable(s)) so absence proves nothing",
+                exp.missing.len(),
+                exp.unresolved_vars.len()
+            ),
         };
     }
     Membership {
         unit: unit.to_string(),
         present: false,
+        presence: Presence::Absent,
         evidence: "no implementing source in the compiled set".to_string(),
     }
 }
@@ -184,7 +232,16 @@ fn expand_into(
             };
             let nested = expand_vars(next, vars, strict)?;
             let npath = join(&base, &nested);
-            expand_into(&npath, vars, strict, acc, visited)?;
+            // Record and continue. Aborting here would discard every file after the
+            // failure and make the units in them look absent rather than unknown.
+            if let Err(e) = expand_into(&npath, vars, strict, acc, visited) {
+                acc.missing.push(format!("{}: {e}", norm(&npath)));
+                for v in unbound_vars(next, vars) {
+                    if !acc.unresolved_vars.contains(&v) {
+                        acc.unresolved_vars.push(v);
+                    }
+                }
+            }
             i += 2;
             continue;
         }
@@ -264,6 +321,34 @@ fn join(base: &Path, value: &str) -> PathBuf {
 fn norm(p: &Path) -> String {
     let s = p.to_string_lossy().replace('\\', "/");
     s.strip_prefix("//?/").map_or(s.clone(), str::to_string)
+}
+
+/// Variable names referenced by a token for which no binding was supplied.
+fn unbound_vars(token: &str, vars: &BTreeMap<String, String>) -> Vec<String> {
+    let chars: Vec<char> = token.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '$' {
+            i += 1;
+            continue;
+        }
+        let mut j = if chars.get(i + 1) == Some(&'{') {
+            i + 2
+        } else {
+            i + 1
+        };
+        let mut name = String::new();
+        while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '_') {
+            name.push(chars[j]);
+            j += 1;
+        }
+        if !name.is_empty() && !vars.contains_key(&name) {
+            out.push(name);
+        }
+        i = j.max(i + 1);
+    }
+    out
 }
 
 fn expand_vars(
@@ -427,6 +512,57 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_include_is_recorded_and_does_not_discard_the_rest() {
+        // The failure this guards: aborting on a bad include dropped every file after
+        // it, so units in those files looked absent and were reported as stubs -- a
+        // tooling gap presented as a fact about the design.
+        let d = tmpdir("partial");
+        fs::write(
+            d.join("top.f"),
+            "${ROOT}/before.sv\n-f ${UNSET_DIR}/nested.f\n${ROOT}/after.sv\n",
+        )
+        .unwrap();
+        let exp = expand(&d.join("top.f"), &vars(&[("ROOT", "/p")]), false).unwrap();
+
+        assert_eq!(
+            exp.files,
+            ["/p/before.sv", "/p/after.sv"],
+            "files after the failure kept"
+        );
+        assert_eq!(exp.missing.len(), 1);
+        assert!(exp.is_incomplete());
+        assert!(
+            exp.unresolved_vars.contains(&"UNSET_DIR".to_string()),
+            "{:?}",
+            exp.unresolved_vars
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn absence_is_unknown_when_the_manifest_is_incomplete() {
+        let incomplete = Expansion {
+            files: vec!["/p/a.sv".into()],
+            missing: vec!["/p/nested.f: not found".into()],
+            ..Expansion::default()
+        };
+        let m = membership(&incomplete, "unit", &["unit_top.sv"], &[]);
+        assert_eq!(m.presence, Presence::Unknown);
+        assert!(m.evidence.contains("proves nothing"), "{}", m.evidence);
+
+        let complete = Expansion {
+            files: vec!["/p/a.sv".into()],
+            ..Expansion::default()
+        };
+        let m = membership(&complete, "unit", &["unit_top.sv"], &[]);
+        assert_eq!(
+            m.presence,
+            Presence::Absent,
+            "a complete manifest gives a real answer"
+        );
+    }
+
+    #[test]
     fn a_missing_filelist_is_an_error() {
         let d = tmpdir("missing");
         let err = expand(&d.join("nope.f"), &BTreeMap::new(), true).unwrap_err();
@@ -441,8 +577,8 @@ mod tests {
                 "/p/core/unit/impl.sv".into(),
                 "/p/core/stub_decoder.sv".into(),
             ],
-            incdirs: vec![],
             defines: vec!["SUPPLY_B".into(), "WIDTH=4".into()],
+            ..Expansion::default()
         };
         assert!(exp.has_define("SUPPLY_B"));
         assert!(exp.has_define("WIDTH"));

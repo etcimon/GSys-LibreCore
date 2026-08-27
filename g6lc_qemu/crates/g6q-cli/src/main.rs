@@ -11,10 +11,11 @@
 #![forbid(unsafe_code)]
 
 mod args;
+mod resolve;
 
 use args::Args;
 use g6q_core::model::Profile;
-use g6q_core::{Inputs, Json, Report, Row, TargetModel, SCHEMA_VERSION, STAGE};
+use g6q_core::{Inputs, Json, Report, Row, TargetModel, Verdict, SCHEMA_VERSION, STAGE};
 
 /// Package version, from Cargo.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -134,6 +135,8 @@ fn dispatch(verb: &str, args: &Args) -> Result<(), String> {
             println!("this verb reports what the binary itself was built with.");
             Ok(())
         }
+        "gen" => cmd_gen(args),
+        "conform" => cmd_conform(args),
         v if VERBS.iter().any(|x| x.name == v) => {
             let stage = VERBS.iter().find(|x| x.name == v).map_or("?", |x| x.stage);
             // Demonstrate the model plumbing so the skeleton is visibly wired, then be
@@ -154,6 +157,193 @@ fn dispatch(verb: &str, args: &Args) -> Result<(), String> {
         }
         other => Err(format!("unknown verb `{other}`; try `g6lc-qemu help`")),
     }
+}
+
+/// `gen` — ingest the three inputs and emit the model.
+fn cmd_gen(args: &Args) -> Result<(), String> {
+    let resolved = resolve::resolve(args)?;
+    if args.flag("verbose") {
+        for n in &resolved.notes {
+            eprintln!("  {n}");
+        }
+    }
+    let model = g6q_ingest::assemble(&resolved.sources);
+
+    // Legality is a separate question from conformance: an illegal configuration is one
+    // the design would refuse to elaborate, and emulating it would be reporting on a
+    // machine that does not build.
+    if let Some(pkg) = &resolved.sources.config {
+        let legality = g6q_ingest::validate_config(pkg);
+        for v in legality.violations() {
+            eprintln!(
+                "g6lc-qemu: illegal configuration: {} -- {}",
+                v.rule,
+                v.violation.as_deref().unwrap_or("")
+            );
+        }
+        if !legality.is_legal() && args.value_or("conform", "warn") == "strict" {
+            return Err("configuration is illegal; refusing under --conform strict".into());
+        }
+    }
+
+    let emit = args.value_or("emit", "model");
+    let text = match emit {
+        "model" => model.to_json().to_pretty(),
+        "conformance" => model.conformance.to_json().to_pretty(),
+        other => {
+            return Err(format!(
+                "`--emit {other}` is specified in architecture/CLI.md but lands at a later \
+                 stage; `model` and `conformance` are available now"
+            ))
+        }
+    };
+
+    match args.value("emit-model").or_else(|| args.value("json-out")) {
+        Some(path) => {
+            write_out(path, &text)?;
+            eprintln!("g6lc-qemu: wrote {path}");
+        }
+        None => print!("{text}"),
+    }
+
+    enforce_conformance(args, &model)
+}
+
+/// Write an output file, creating its directory.
+///
+/// Output paths routinely name a directory that does not exist yet (`out/…` is the
+/// default emission root and is gitignored, so a fresh clone has no such directory).
+/// Failing there would look like a tool error for what is a perfectly ordinary request.
+fn write_out(path: &str, text: &str) -> Result<(), String> {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+    }
+    std::fs::write(path, text).map_err(|e| format!("cannot write {path}: {e}"))
+}
+
+/// `conform` — report where the three inputs disagree.
+fn cmd_conform(args: &Args) -> Result<(), String> {
+    let resolved = resolve::resolve(args)?;
+    let model = g6q_ingest::assemble(&resolved.sources);
+
+    if args.flag("json") || args.value("json-out").is_some() {
+        let text = model.conformance.to_json().to_pretty();
+        match args.value("json-out") {
+            Some(p) => write_out(p, &text)?,
+            None => print!("{text}"),
+        }
+        return enforce_conformance(args, &model);
+    }
+
+    println!(
+        "target: {}  profile: {}",
+        model.target_id,
+        model.profile.as_str()
+    );
+    for n in &resolved.notes {
+        println!("  {n}");
+    }
+    println!();
+
+    let width = model
+        .conformance
+        .rows
+        .iter()
+        .map(|r| r.capability.len())
+        .max()
+        .unwrap_or(10);
+
+    let mut counts = std::collections::BTreeMap::new();
+    for row in &model.conformance.rows {
+        *counts.entry(row.verdict.as_str()).or_insert(0usize) += 1;
+        // Quiet mode shows only the rows that mean something is wrong.
+        let interesting = row.verdict != Verdict::Live && row.verdict != Verdict::Absent;
+        if args.flag("quiet") && !interesting {
+            continue;
+        }
+        let mark = if row.verdict.refused_under_strict() {
+            "!"
+        } else {
+            " "
+        };
+        let also = if row.also.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " (+{})",
+                row.also
+                    .iter()
+                    .map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        };
+        println!(
+            "{mark} {:<width$}  {:<13}{}",
+            row.capability,
+            row.verdict.as_str(),
+            also,
+            width = width
+        );
+        if interesting && args.flag("verbose") {
+            println!("    {}", row.note);
+        }
+    }
+
+    // Hart topology is a count, not a capability, so it gets its own line rather than a
+    // capability row -- but it is exactly the kind of config/tree disagreement this
+    // command exists to surface.
+    if let Some(agrees) = model.soc.hart_topology_agrees() {
+        let declared = model.soc.harts_declared.unwrap_or(0);
+        if !agrees {
+            println!(
+                "! topology: design has {} logical hart(s), device tree declares {} -- \
+                 software will see {}",
+                model.soc.harts_total, declared, declared
+            );
+        } else if !args.flag("quiet") {
+            println!(
+                "  topology: {} logical hart(s), matching the device tree",
+                model.soc.harts_total
+            );
+        }
+    }
+
+    println!();
+    let summary: Vec<String> = counts.iter().map(|(k, v)| format!("{v} {k}")).collect();
+    println!("{}", summary.join(", "));
+    println!(
+        "strict conformance: {}",
+        if model.conformance.passes_strict() {
+            "pass"
+        } else {
+            "FAIL"
+        }
+    );
+    println!("\nnot verification evidence; a hypothesis and a checkpoint only");
+
+    enforce_conformance(args, &model)
+}
+
+/// Apply `--conform strict`.
+fn enforce_conformance(args: &Args, model: &TargetModel) -> Result<(), String> {
+    let mode = args.value_or("conform", "warn");
+    if mode != "strict" || model.conformance.passes_strict() {
+        return Ok(());
+    }
+    let blocking: Vec<String> = model
+        .conformance
+        .blocking()
+        .iter()
+        .map(|r| format!("{} ({})", r.capability, r.verdict.as_str()))
+        .collect();
+    Err(format!(
+        "refusing under --conform strict: {}",
+        blocking.join(", ")
+    ))
 }
 
 /// A tiny model that exercises the crate wiring end to end.
@@ -238,9 +428,30 @@ mod tests {
 
     #[test]
     fn an_unimplemented_verb_says_so_rather_than_succeeding_silently() {
-        let args = Args::parse(["gen", "--target", "x"]);
+        let args = Args::parse(["run", "--target", "x"]);
+        let err = dispatch("run", &args).unwrap_err();
+        assert!(err.contains("stage Q2"), "{err}");
+    }
+
+    #[test]
+    fn gen_and_conform_are_implemented_and_do_not_report_a_future_stage() {
+        // They must fail for a real reason (no inputs), never with "lands at stage ...".
+        for verb in ["gen", "conform"] {
+            let args = Args::parse([verb, "--target", "nonexistent-target"]);
+            if let Err(e) = dispatch(verb, &args) {
+                assert!(!e.contains("lands at stage"), "{verb}: {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_unsupported_emit_names_what_is_available() {
+        let args = Args::parse(["gen", "--target", "t", "--emit", "qemu-machine"]);
         let err = dispatch("gen", &args).unwrap_err();
-        assert!(err.contains("stage Q1"), "{err}");
+        assert!(
+            err.contains("model") && err.contains("conformance"),
+            "{err}"
+        );
     }
 
     #[test]

@@ -79,6 +79,28 @@ def have_contained_toolchain() -> bool:
     return cargo_bin().is_file()
 
 
+def contained_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment that ALWAYS points at the contained toolchain.
+
+    This is what installation must use. `apply_env` deliberately leaves the environment
+    alone when `.tools/` is absent so a developer with a system Rust can build without
+    running `setup` first -- but that is precisely the state `setup` runs in, and using
+    it there would install into the user's global `~/.rustup` and `~/.cargo` instead of
+    into this package. Containment is the whole point of `setup`, so it gets its own,
+    unconditional environment.
+    """
+    env = dict(base if base is not None else os.environ)
+    env["RUSTUP_HOME"] = str(rustup_home())
+    env["CARGO_HOME"] = str(cargo_home())
+    bin_dir = str(cargo_home() / "bin")
+    sep = os.pathsep
+    existing = env.get("PATH", "")
+    if bin_dir not in existing.split(sep):
+        env["PATH"] = bin_dir + sep + existing
+    env.setdefault("CARGO_TERM_COLOR", "never")
+    return env
+
+
 def apply_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """Environment for spawning cargo/rustc.
 

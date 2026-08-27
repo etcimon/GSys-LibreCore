@@ -97,10 +97,11 @@ g6lc_qemu/
     flist_expand.py          ← generic ${VAR} / nested -f expander (no project names baked in)
     check_independence.py    ← KD0 + E-GPLLINK enforcement
   crates/
-    g6q-svcfg/               ← SystemVerilog config-package reader
-    g6q-flist/               ← flist expansion + membership facts
-    g6q-dts/                 ← device tree read / overlay / mutate / emit
-    g6q-core/                ← TargetModel IR, conformance report, JSON
+    g6q-svcfg/               ← SystemVerilog config-package reader + legality rules
+    g6q-flist/               ← flist expansion + membership facts (Present/Absent/Unknown)
+    g6q-dts/                 ← device tree parse + semantic extraction
+    g6q-core/                ← TargetModel IR, conformance report, JSON (dependency-free)
+    g6q-ingest/              ← assembles the model from the three readers + capability table
     g6q-emit-args/           ← B0: stock-QEMU argv + DTB
     g6q-emit-qemu/           ← B1/B2: QEMU C emitters (text out only)
     g6q-vm/                  ← B3: native Rust virtual machine
@@ -165,7 +166,9 @@ This is the local completion gate. Nothing outside this package substitutes for 
 |---|---|
 | Change architecture | `architecture/*.md` + a note in `AGENTS-todo.md` |
 | Add a config field to the model | `crates/g6q-svcfg` (reader) + `crates/g6q-core` (IR) + `schemas/target-model.schema.json` + a fixture |
+| **Add / retarget a capability** | `crates/g6q-ingest/data/capabilities.ini` — **data, not code**; override at run time with `--capabilities FILE` |
 | Add a conformance rule | `crates/g6q-core` + `schemas/conformance.schema.json` + a fixture case |
+| Change how the model is assembled | `crates/g6q-ingest` (keeps `g6q-core` dependency-free) |
 | Add a DTS property understood semantically | `crates/g6q-dts` + a fixture |
 | Add / change a QEMU emitter | `crates/g6q-emit-qemu` — **text out only**, banner + SPDX on every emitted file |
 | Add a stock-QEMU capability mapping | `crates/g6q-emit-args` |

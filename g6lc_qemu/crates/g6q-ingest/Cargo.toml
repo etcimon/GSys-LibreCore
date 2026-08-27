@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 [package]
-name = "g6q-cli"
-description = "The g6lc-qemu command-line tool."
+name = "g6q-ingest"
+description = "Assembles a TargetModel from the configuration, manifest and device tree readers."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,17 +13,8 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
-[[bin]]
-name = "g6lc-qemu"
-path = "src/main.rs"
-
 [dependencies]
 g6q-core = { workspace = true }
-g6q-ingest = { workspace = true }
 g6q-svcfg = { workspace = true }
 g6q-flist = { workspace = true }
 g6q-dts = { workspace = true }
-g6q-emit-args = { workspace = true }
-g6q-emit-qemu = { workspace = true }
-g6q-vm = { workspace = true }
-g6q-diag = { workspace = true }

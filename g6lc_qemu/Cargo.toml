@@ -18,6 +18,7 @@ members = [
     "crates/g6q-flist",
     "crates/g6q-dts",
     "crates/g6q-core",
+    "crates/g6q-ingest",
     "crates/g6q-emit-args",
     "crates/g6q-emit-qemu",
     "crates/g6q-vm",
@@ -38,6 +39,7 @@ g6q-svcfg = { path = "crates/g6q-svcfg" }
 g6q-flist = { path = "crates/g6q-flist" }
 g6q-dts = { path = "crates/g6q-dts" }
 g6q-core = { path = "crates/g6q-core" }
+g6q-ingest = { path = "crates/g6q-ingest" }
 g6q-emit-args = { path = "crates/g6q-emit-args" }
 g6q-emit-qemu = { path = "crates/g6q-emit-qemu" }
 g6q-vm = { path = "crates/g6q-vm" }

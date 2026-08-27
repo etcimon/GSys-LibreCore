@@ -32,7 +32,7 @@ registration files is touched.
 
 ---
 
-## Q1 — Ingest, `TargetModel`, conformance
+## Q1 — Ingest, `TargetModel`, conformance ✅ *(complete)*
 
 **Deliverable** `g6q-svcfg` (config-package reader + `check_cfg` validator), `g6q-flist` (expander +
 membership facts), `g6q-dts` (read/overlay/mutate/emit/validate), `g6q-core` (IR + JSON + conformance).
@@ -53,6 +53,23 @@ Verbs `gen --emit model` and `conform` become real.
 
 **Citable as:** a statement about *the repository's own consistency*. The conformance report is
 genuinely useful output on its own — it is the first stage that pays for itself.
+
+**Outcome.** Gate met. 21 configuration packages parse (165 fields, 0 unresolved, all legal);
+7 device trees parse with topologies matching their documented `N×T` shapes; `gen` is byte-identical
+on re-run. The report reproduces the stub-vector and undeclared-H cases unaided, and adds two that
+were not previously flagged: the second-level cache is enabled on every target while its RTL is on
+no manifest, and `g6lc64_ai` declares one `cpu@` node against a two-core configuration.
+
+Three refinements the soak forced, all recorded in `g6lc_qemu/AGENTS-todo.md`:
+
+- **Presence is three-valued.** A unit missing from an *incomplete* manifest is `unresolved`, not
+  `stub`. "Could not tell" is a gap in the inputs; "is a stub" is a claim about the design, and
+  conflating them turns a tooling problem into a fabricated hardware finding.
+- **Legality splits user-level from derived.** Several of the design's assertions run after its own
+  inference, where `0` means *infer* — applying them to source values fails valid packages.
+- **The capability table is data**, not code (`g6q-ingest/data/capabilities.ini`, overridable with
+  `--capabilities`), because field names, path fragments and device-tree tokens belong to a design
+  rather than to the emulator.
 
 ---
 

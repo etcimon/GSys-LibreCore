@@ -158,25 +158,43 @@ pub struct Soc {
     pub intc_targets: u32,
     /// Interrupt contexts consumed per hart, typically one per privilege level served.
     pub contexts_per_hart: u32,
-    /// Total logical harts: cores multiplied by threads per core.
+    /// Total logical harts the configuration describes: cores × threads per core.
     pub harts_total: u32,
+    /// Harts the device tree declares to software, when a tree was read.
+    ///
+    /// Kept separate from [`Soc::harts_total`] because the two answer different
+    /// questions — what the hardware has, and what the operating system will be told it
+    /// has. A mismatch means the guest silently runs on fewer processors than the design
+    /// provides, which is invisible in either input on its own.
+    pub harts_declared: Option<u32>,
 }
 
 impl Soc {
     /// Maximum logical harts the interrupt controller can serve.
     ///
     /// This is the constraint that silently caps how many CPUs a guest can be given, so
-    /// it is computed rather than assumed.
-    pub fn max_harts(&self) -> u32 {
-        if self.contexts_per_hart == 0 {
-            return 0;
+    /// it is computed rather than assumed. `None` when the controller's context count is
+    /// not known from the inputs — reporting `0` there would state a limit the inputs do
+    /// not support, and would make every configuration look over budget.
+    pub fn max_harts(&self) -> Option<u32> {
+        if self.contexts_per_hart == 0 || self.intc_targets == 0 {
+            return None;
         }
-        self.intc_targets / self.contexts_per_hart
+        Some(self.intc_targets / self.contexts_per_hart)
     }
 
     /// Whether the configured hart count fits the interrupt controller.
+    ///
+    /// True when the limit is unknown: an unknown budget is not a violated one.
     pub fn hart_count_fits(&self) -> bool {
-        self.harts_total <= self.max_harts()
+        self.max_harts().is_none_or(|m| self.harts_total <= m)
+    }
+
+    /// Whether the device tree tells software about every hart the design has.
+    ///
+    /// `None` when no tree was read.
+    pub fn hart_topology_agrees(&self) -> Option<bool> {
+        self.harts_declared.map(|d| d == self.harts_total)
     }
 
     /// Any pair of overlapping peripheral windows. Empty is the expected result.
@@ -214,10 +232,22 @@ impl Soc {
                         "contexts_per_hart",
                         Json::Int(self.contexts_per_hart as i64),
                     ),
-                    ("max_harts", Json::Int(self.max_harts() as i64)),
+                    (
+                        "max_harts",
+                        self.max_harts().map_or(Json::Null, |m| Json::Int(m as i64)),
+                    ),
                 ]),
             ),
             ("harts_total", Json::Int(self.harts_total as i64)),
+            (
+                "harts_declared",
+                self.harts_declared
+                    .map_or(Json::Null, |h| Json::Int(h as i64)),
+            ),
+            (
+                "hart_topology_agrees",
+                self.hart_topology_agrees().map_or(Json::Null, Json::Bool),
+            ),
         ])
     }
 }
@@ -385,10 +415,28 @@ mod tests {
             harts_total: 8,
             ..Soc::default()
         };
-        assert_eq!(soc.max_harts(), 8);
+        assert_eq!(soc.max_harts(), Some(8));
         assert!(soc.hart_count_fits());
         soc.harts_total = 9;
         assert!(!soc.hart_count_fits());
+    }
+
+    #[test]
+    fn an_unknown_budget_is_reported_as_unknown_not_as_zero() {
+        // Reporting 0 would state a limit the inputs do not support and would make every
+        // configuration look over budget.
+        let soc = Soc {
+            intc_targets: 0,
+            contexts_per_hart: 2,
+            harts_total: 4,
+            ..Soc::default()
+        };
+        assert_eq!(soc.max_harts(), None);
+        assert!(
+            soc.hart_count_fits(),
+            "an unknown budget is not a violated one"
+        );
+        assert!(soc.to_json().to_pretty().contains("\"max_harts\": null"));
     }
 
     #[test]
@@ -398,7 +446,7 @@ mod tests {
             contexts_per_hart: 0,
             ..Soc::default()
         };
-        assert_eq!(soc.max_harts(), 0);
+        assert_eq!(soc.max_harts(), None);
     }
 
     #[test]

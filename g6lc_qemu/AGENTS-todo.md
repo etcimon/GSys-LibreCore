@@ -20,17 +20,31 @@ contract, the pin in `pins.toml` plus the document it names.
 
 ## Current stage
 
-**Q0 — scaffold + skeleton. Complete.**
+**Q1 — ingest, `TargetModel`, conformance. Complete.**
 
-The package exists, is independent, and compiles. No ingest, no emission, no execution yet: every
-crate is a documented stub with a real module boundary and at least one unit test. The next pass is
-Q1 (ingest + IR + conformance), which is the stage everything else depends on.
+The three readers work against real input, the model assembles from them, and `gen` / `conform` are
+live. Nothing is emitted or executed yet.
+
+Verified against a real design tree (opt-in soaks, `G6Q_DESIGN_ROOT`): **21 configuration packages**
+parse at 165 fields with **0 unresolved** and all legal; **7 device trees** parse with topologies
+matching their documented `cores × threads` shapes; model generation is **byte-identical** on re-run.
+
+Findings the conformance report produces unaided, each an inputs disagreement rather than a rule
+written for it:
+
+| Target | Finding |
+|---|---|
+| vector-enabled target | `stub` **+** `overdeclared` — enabled in configuration, vector manifest not in the build, tree still advertises the tokens |
+| all targets | second-level cache `stub` — enabled in configuration, its RTL on no manifest |
+| two targets | hypervisor `undeclared` — live in RTL, token deliberately omitted from the tree |
+| all targets | NAPOT pages `undeclared` |
+| accelerator target | **topology**: 2 logical harts in configuration, 1 `cpu@` node in the tree — software would see one |
 
 | Stage | State |
 |---|---|
 | **Q0** scaffold, package surface, Rust skeleton | **done** |
-| **Q1** ingest + `TargetModel` + conformance | next |
-| **Q2** B0 stock-QEMU driver + firmware chain | open |
+| **Q1** ingest + `TargetModel` + conformance | **done** |
+| **Q2** B0 stock-QEMU driver + firmware chain | next |
 | **Q3** B3 native VM + tandem records | open |
 | **Q4** B1 generated QEMU machine | open |
 | **Q5** D1 tandem / replay / checkpoint | open |
@@ -43,12 +57,27 @@ Q1 (ingest + IR + conformance), which is the stage everything else depends on.
 
 ## Open items
 
-**G1 — Q1 ingest.** Implement `g6q-svcfg` (config-package reader + legality validator), `g6q-flist`
-(expander + membership facts), `g6q-dts` (read / overlay / mutate / emit / validate) and `g6q-core`
-(IR + conformance + canonical JSON). Exit gate: every target package in the host design round-trips
-to golden JSON; an illegal configuration is rejected; the conformance report produces `stub`,
-`undeclared` and `overdeclared` verdicts without any rule being hand-coded per capability.
+**G1 — Q1 ingest. Closed.** Readers, model assembly, capability table, `gen` and `conform` are live
+and soaked against a real tree. Remaining Q1-adjacent work is device-tree *mutation* (`--dts-set`,
+`--dts-del`, overlay merge, blob emission) and `--dts-validate`, which land with the command-line
+surface that needs them at Q2.
 *Priors: `architecture/INGEST.md`, `architecture/IR.md`.*
+
+**G9 — Interrupt-controller capacity is not read.** `intc_targets` currently counts the contexts a
+**board wires**, taken from the controller's `interrupts-extended` list. The controller's hardware
+capacity lives in the design's SoC package, which the `apu` plane does not read yet. Until it does,
+`max_harts` describes what the board connects, not what the silicon could serve. The model reports
+`null` rather than `0` when the number is unknown, so nothing downstream mistakes ignorance for a
+limit. Close this when the SoC-package reader lands.
+*Priors: `architecture/INGEST.md` §1 (planes).*
+
+**G10 — Capability table coverage.** `crates/g6q-ingest/data/capabilities.ini` covers the extension
+and unit surface reached so far. It is data and is expected to grow; two rules keep it honest. A
+capability with no separate compilation unit must have **no** `impl` entry, or manifest membership
+will report it as a stub. A capability the device tree cannot express must have **no** `dts` entry —
+giving privilege modes extension tokens produced a false `undeclared` on every target until it was
+removed.
+*Priors: `crates/g6q-ingest/data/capabilities.ini` header.*
 
 **G2 — Reader strategy escalation.** The Q0/Q1 config reader is deliberately narrow: it understands
 `localparam` scalars, enum identifiers, named struct-literal members and simple arithmetic, and it
@@ -105,3 +134,18 @@ lives in the host, not here, and the package must keep working without it.
 | Date | Pass | Outcome |
 |---|---|---|
 | 2026-08-27 | Q0: package surface (`AGENTS*`, `README`, `LICENSE`, `pins.toml`), in-tree `architecture/`, Python spine (`g6q.py`, `env_common.py`, `flist_expand.py`, `check_independence.py`), Cargo workspace + nine std-only crate skeletons, synthetic fixtures, JSON schemas. | Package independent and compiling; `check` green on fixtures. Q1 unblocked. |
+| 2026-08-27 | Q1: configuration reader + legality rules; manifest membership with a three-valued presence; device-tree parser + semantic extraction; `g6q-ingest` (10th crate) with the data-driven capability table; `gen` and `conform` implemented. Contained toolchain provisioned by `setup`. | 174 tests green on the package's **own** toolchain; 21 packages and 7 trees soaked; model byte-identical on re-run. Q2 unblocked. |
+
+### Defects found and fixed while soaking Q1
+
+| Defect | Why it mattered |
+|---|---|
+| POSIX absolute paths were treated as relative on one host | every membership query silently missed — a tooling gap that reads as a design fact |
+| Unterminated preprocessor directives swallowed the declaration after them | one real package parsed to an **empty** configuration, silently |
+| String lists split on raw commas | every vendor-prefixed `compatible` and `mmu-type` was cut in half |
+| An unreadable nested manifest aborted the whole manifest | dropped the core file set, so core units reported `stub` rather than "unknown" |
+| Manifest gaps rendered as `stub` | "could not tell" presented as a claim about the design; now `unresolved` |
+| Post-inference legality rules applied to source values | flagged valid packages (`0` means *infer* for cache size and issue width) |
+| `setup` used the run-time environment | would have installed the toolchain into the user's home instead of the package |
+| Unknown interrupt budget reported as `0` | stated a limit the inputs do not support; now `null` |
+| Privilege modes given device-tree tokens | false `undeclared` on every target |

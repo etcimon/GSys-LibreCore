@@ -9,15 +9,34 @@
 //! advertised is invisible to the operating system
 //! ([`architecture/INGEST.md`] §4).
 //!
+//! # Modules
+//!
+//! * [`tree`] — node/property model and the source parser
+//! * [`facts`] — semantic extraction: what the tree claims about the hardware
+//!
+//! The extension-token model lives here at the crate root because it is what the
+//! conformance report depends on most directly.
+//!
 //! # Stage
 //!
-//! Q0 provides the extension-token model — the part the conformance report depends on —
-//! plus token editing and rendering. Q1 adds full node/property parsing, overlay merge,
-//! path mutation and blob emission.
+//! Q1 provides parsing and extraction. Overlay merge, path mutation and blob emission
+//! land with the command-line surface that needs them.
 //!
 //! [`architecture/INGEST.md`]: ../../../architecture/INGEST.md
 
 #![forbid(unsafe_code)]
+
+pub mod facts;
+pub mod tree;
+
+pub use facts::{extract, DeviceFact, Facts};
+pub use tree::{parse, Node, Prop};
+
+/// Parse a device tree from a file and extract the facts the model consumes.
+pub fn read_facts_file(path: &std::path::Path) -> std::io::Result<Facts> {
+    let text = std::fs::read_to_string(path)?;
+    Ok(extract(&parse(&text)))
+}
 
 /// The set of ISA extension tokens a device tree advertises to software.
 ///
