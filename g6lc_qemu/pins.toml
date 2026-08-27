@@ -1,0 +1,93 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# pins.toml — pinned external revisions and consumed contracts.
+#
+# Rule (AGENTS.md §1.9): external contracts are consumed BY PIN, never reinterpreted.
+# When an upstream contract changes, bump the pin here AND the affected schema / ABI
+# version in the same pass. Silently reinterpreting bits is the failure this file exists
+# to prevent.
+
+[package]
+version       = "0.1.0"
+stage         = "Q0"
+schema_version = "1"
+
+# --------------------------------------------------------------------- toolchain ---
+[toolchain]
+# Mirrors rust-toolchain.toml. The contained rustup in .tools/ installs this channel.
+rust = "1.85.0"
+# Minimum host Python for tools/g6q.py.
+python_min = "3.9"
+
+# ------------------------------------------------------------------ emission host ---
+# QEMU is a SEPARATE WORK. It is fetched on demand into the gitignored ./qemu tree and
+# receives generated GPL-2.0 C. Nothing in crates/** links or includes it
+# (AGENTS-licensing.md §2).
+[qemu]
+url      = "https://gitlab.com/qemu-project/qemu.git"
+ref      = "v10.0.0"           # emission target; bump deliberately
+plugin_api = 4                  # QEMU TCG plugin API version assumed by emitted plugins
+status   = "not-fetched"        # Q0: no emission implemented yet
+
+# ---------------------------------------------------------------------- firmware ---
+[opensbi]
+url      = "https://github.com/riscv-software-src/opensbi.git"
+ref      = "v1.5"               # >= 1.4 required
+platform = "generic"            # no vendor platform C
+fw_text_start = "0x80000000"
+status   = "not-fetched"
+
+# ------------------------------------------------------- contracts consumed by pin ---
+# Each entry names a document (in the host design, or upstream) whose content this
+# package models. `rev` is the revision the current implementation was written against.
+# A mismatch is a review item, not an automatic failure — but it must be looked at.
+
+[contracts.trace_record]
+name = "RVFI-shaped commit record (st_rvfi)"
+kind = "host-design"
+path = "verif/core-v-verif/.../riscv_dpi.cc + corev_apu/tb/common/spike.sv"
+rev  = "unpinned"               # set when D1 lands (Q3/Q5)
+
+[contracts.soc_map]
+name = "SoC peripheral map"
+kind = "host-design"
+path = "corev_apu/tb/ariane_soc_pkg.sv"
+rev  = "read-at-runtime"        # ingested, not transcribed
+
+[contracts.core_config]
+name = "Core configuration struct + legality rules"
+kind = "host-design"
+path = "core/include/config_pkg.sv (cva6_cfg_t, check_cfg)"
+rev  = "read-at-runtime"
+
+[contracts.pmu_events]
+name = "PMU event matrix {group[7:5], idx[4:0]}"
+kind = "host-design"
+path = "core/perf_counters.sv + core/include/ariane_pkg.sv"
+rev  = "read-at-runtime"
+
+[contracts.ai_isa]
+name = "Accelerator ISA / CSR / 64-byte descriptor contract"
+kind = "host-design"
+path = "architecture/ai-matrix/isa-encoding.md"
+rev  = "unpinned"               # set when Q6 lands
+
+[contracts.ai_island_mmio]
+name = "Accelerator island MMIO / CTL / completion / IRQ"
+kind = "host-design"
+path = "corev_apu/ai_island/README.md + include/g6lc_ai_desc_pkg.sv"
+rev  = "unpinned"               # set when Q6 lands
+
+[contracts.dts_validation]
+name = "Device-tree node/property cross-validation rows"
+kind = "host-design"
+path = "AGENTS-dts-validation.md §3"
+rev  = "unpinned"               # set when --dts-validate lands (Q1)
+
+# ------------------------------------------------------------------- dependencies ---
+# Deliberately empty. The Rust workspace declares NO external crates so that
+# `cargo test --workspace` runs offline (AGENTS.md §3). Adding one requires a recorded
+# decision in AGENTS-todo.md (G4), an exact version below, a permissive licence, and a
+# note on offline behaviour. Never a floating range. Never GPL/LGPL.
+[dependencies]

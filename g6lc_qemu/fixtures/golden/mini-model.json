@@ -1,0 +1,86 @@
+{
+  "_comment": [
+    "SYNTHETIC GOLDEN OUTPUT for fixtures/mini (see ../README.md).",
+    "This is the model the mini fixture set must produce once ingest lands at Q1.",
+    "It is committed at Q0 as the target the readers are written against: the two",
+    "deliberate disagreements between the configuration package, the manifest and",
+    "the device tree appear here as `stub` (+ `overdeclared`) and `undeclared`.",
+    "The `_comment` key is stripped before comparison."
+  ],
+  "schema_version": "1",
+  "generated_by": {
+    "tool": "g6lc-qemu",
+    "version": "0.1.0"
+  },
+  "target": {
+    "id": "mini",
+    "plane": "soc",
+    "profile": "g6lc-soc",
+    "faithful": true
+  },
+  "isa": {
+    "xlen": 64,
+    "base": "rv64i",
+    "isa_string": "rv64imac",
+    "mmu_mode": "sv39",
+    "extensions": {
+      "i": "live",
+      "m": "live",
+      "a": "live",
+      "c": "live",
+      "v": "stub",
+      "h": "undeclared"
+    }
+  },
+  "soc": {
+    "dram": {
+      "base": "0x80000000",
+      "len": "0x10000000"
+    },
+    "intc": {
+      "sources": 30,
+      "targets": 16,
+      "contexts_per_hart": 2,
+      "max_harts": 8
+    },
+    "harts_total": 4,
+    "peripherals": [
+      { "id": "clint", "base": "0x2000000", "len": "0xc0000", "model": "example,clint0", "irq": null },
+      { "id": "intc", "base": "0xc000000", "len": "0x4000000", "model": "example,intc0", "irq": null },
+      { "id": "uart", "base": "0x10000000", "len": "0x1000", "model": "ns16550a", "irq": 1 }
+    ]
+  },
+  "conformance": {
+    "evidence": false,
+    "passes_strict": false,
+    "rows": [
+      {
+        "capability": "vector",
+        "config": { "enabled": true },
+        "flist": { "present": false },
+        "dts": { "declared": true },
+        "verdict": "stub",
+        "also": ["overdeclared"],
+        "note": "configuration enables the capability but the compiled design has no implementation"
+      },
+      {
+        "capability": "hypervisor",
+        "config": { "enabled": true },
+        "flist": { "present": true },
+        "dts": { "declared": false },
+        "verdict": "undeclared",
+        "also": [],
+        "note": "live in the design but not advertised to software"
+      },
+      {
+        "capability": "atomics",
+        "config": { "enabled": true },
+        "flist": { "present": true },
+        "dts": { "declared": true },
+        "verdict": "live",
+        "also": [],
+        "note": "enabled, compiled and declared"
+      }
+    ]
+  }
+}

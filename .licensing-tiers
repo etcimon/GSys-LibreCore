@@ -99,6 +99,11 @@ U   corev_apu/clint/clint.sv
 # ------------------------------------------------------------------- tier T ---
 T   build-platform/**
 T   sv-timing/**
+# g6lc_qemu: MIT generator that EMITS GPL-2.0 C for QEMU without linking it. Only the
+# generator is tracked and tier T; the emitted C and the QEMU checkout it targets are a
+# separate GPL work under gitignored g6lc_qemu/{out,qemu}/ and are never committed here.
+# See g6lc_qemu/AGENTS-licensing.md and architecture/g6lc-qemu/README.md s3 (E-GPLLINK).
+T   g6lc_qemu/**
 T   corev-mb/lib/**
 T   docs/**
 T   architecture/**

@@ -1,0 +1,52 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# g6lc_qemu workspace — a generator that turns a design description into emulation.
+#
+# INVARIANTS (AGENTS.md, AGENTS-licensing.md):
+#   * NO external dependencies. Everything is std-only so `cargo test --workspace`
+#     runs offline on a fresh host. Adding a crate requires a recorded decision in
+#     AGENTS-todo.md (G4) plus an exact pin in pins.toml. Never GPL/LGPL.
+#   * NO crate links, includes or binds QEMU (E-GPLLINK). Emission is text-out only.
+#   * First-party path dependencies only; nothing may escape this package.
+# Enforced by tools/check_independence.py, which runs as part of `g6q check`.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/g6q-svcfg",
+    "crates/g6q-flist",
+    "crates/g6q-dts",
+    "crates/g6q-core",
+    "crates/g6q-emit-args",
+    "crates/g6q-emit-qemu",
+    "crates/g6q-vm",
+    "crates/g6q-diag",
+    "crates/g6q-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Etienne Cimon"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+# First-party only. There is deliberately no third-party section.
+g6q-svcfg = { path = "crates/g6q-svcfg" }
+g6q-flist = { path = "crates/g6q-flist" }
+g6q-dts = { path = "crates/g6q-dts" }
+g6q-core = { path = "crates/g6q-core" }
+g6q-emit-args = { path = "crates/g6q-emit-args" }
+g6q-emit-qemu = { path = "crates/g6q-emit-qemu" }
+g6q-vm = { path = "crates/g6q-vm" }
+g6q-diag = { path = "crates/g6q-diag" }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

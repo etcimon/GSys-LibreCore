@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gsys.dev/g6lc_qemu/schemas/conformance.schema.json",
+  "title": "g6lc_qemu conformance report",
+  "description": "Where the configuration, the build manifest and the device tree disagree. This is the package's first-class output and is useful with no emulator attached: it answers, mechanically, whether a design's own three descriptions of itself agree.",
+  "type": "object",
+  "required": ["rows", "passes_strict", "evidence"],
+  "additionalProperties": false,
+  "properties": {
+    "rows": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/row" }
+    },
+    "passes_strict": {
+      "description": "False when any row carries a verdict that --conform strict refuses.",
+      "type": "boolean"
+    },
+    "evidence": {
+      "description": "Always false. Output of this package is a hypothesis and a checkpoint, never verification evidence.",
+      "const": false
+    }
+  },
+  "$defs": {
+    "verdict": {
+      "oneOf": [
+        { "const": "live", "description": "Enabled in configuration, compiled into the design, declared to software." },
+        { "const": "stub", "description": "Enabled in configuration, but the compiled RTL is a stub. Refused under strict." },
+        { "const": "absent", "description": "Disabled and consistently absent." },
+        { "const": "undeclared", "description": "Live in the design but not advertised: the guest will not use it. Permitted with a warning." },
+        { "const": "overdeclared", "description": "Advertised to software but not live in the design: a guest-visible lie. Refused under strict." },
+        { "const": "unresolved", "description": "A reader could not determine the value. Refused under strict; never silently defaulted." },
+        { "const": "synthetic", "description": "Forced by a command-line override. Emulated, but taints every downstream artifact." }
+      ]
+    },
+    "row": {
+      "type": "object",
+      "required": ["capability", "config", "flist", "dts", "verdict", "also", "note"],
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "description": "Capability name, e.g. vector, hypervisor, instruction-supply.",
+          "type": "string"
+        },
+        "config": {
+          "type": "object",
+          "required": ["enabled"],
+          "additionalProperties": true,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "field": { "type": "string" }
+          }
+        },
+        "flist": {
+          "type": "object",
+          "required": ["present"],
+          "additionalProperties": true,
+          "properties": {
+            "present": { "type": "boolean" },
+            "evidence": { "type": "string" }
+          }
+        },
+        "dts": {
+          "type": "object",
+          "required": ["declared"],
+          "additionalProperties": true,
+          "properties": {
+            "declared": { "type": "boolean" },
+            "tokens": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "verdict": { "$ref": "#/$defs/verdict" },
+        "also": {
+          "description": "Secondary observations. A stub row that is also overdeclared reports both, because they are two problems with two different fixes: the build manifest, and the device tree.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/verdict" }
+        },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

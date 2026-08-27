@@ -128,6 +128,15 @@ th-remote.pass
 /*.zip
 /.aside-untracked-*/
 
+# g6lc_qemu: contained toolchain + Cargo output. `out/` holds emitted artifacts
+# (DTBs, argv, firmware, generated QEMU C) and `qemu/` is the QEMU checkout that
+# emission targets — both are SEPARATE GPL WORKS and are never tracked here
+# (g6lc_qemu/AGENTS-licensing.md §2).
+/g6lc_qemu/.tools/
+/g6lc_qemu/target/
+/g6lc_qemu/out/
+/g6lc_qemu/qemu/
+
 # Scratch RTL copies and editor backups (never a build input)
 *.sv.bak
 /core/fetch/

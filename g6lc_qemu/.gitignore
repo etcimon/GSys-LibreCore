@@ -1,0 +1,33 @@
+# Contained toolchain / env (never commit)
+.tools/
+.venv/
+
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+
+# Emitted artifacts. `out/` holds generated DTBs, argv, firmware and emitted C;
+# `qemu/` is the QEMU checkout that emission targets. Both are SEPARATE WORKS under
+# their own terms and are never tracked here (AGENTS-licensing.md §2).
+/out/
+/qemu/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Logs / local
+*.log
+.env
+.env.local

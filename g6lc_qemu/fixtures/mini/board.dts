@@ -1,0 +1,85 @@
+// SYNTHETIC FIXTURE. Invented content (see ../README.md).
+// SPDX-License-Identifier: MIT
+//
+// A small device tree for the mini fixture target. Two deliberate disagreements with
+// target_config_pkg.sv, because those are what the conformance tests are about:
+//
+//   * "v" is advertised here, but the vector unit is absent from manifest.f
+//     -> the capability is `stub`, and additionally `overdeclared`.
+//   * the design has HasHypervisor=1'b1, but no "h" token appears here
+//     -> the capability is `undeclared`: real, but invisible to software.
+
+/dts-v1/;
+
+/ {
+  #address-cells = <2>;
+  #size-cells = <2>;
+  compatible = "example,mini-board";
+  model = "example,mini-board";
+
+  chosen {
+    stdout-path = "/soc/uart@10000000:115200";
+  };
+
+  cpus {
+    #address-cells = <1>;
+    #size-cells = <0>;
+    timebase-frequency = <32768>;
+
+    CPU0: cpu@0 {
+      device_type = "cpu";
+      compatible = "riscv";
+      reg = <0>;
+      status = "okay";
+      riscv,isa-base = "rv64i";
+      riscv,isa-extensions = "i", "m", "a", "c", "zicsr", "v";
+      mmu-type = "riscv,sv39";
+      tlb-split;
+
+      CPU0_intc: interrupt-controller {
+        #interrupt-cells = <1>;
+        interrupt-controller;
+        compatible = "riscv,cpu-intc";
+      };
+    };
+  };
+
+  memory@80000000 {
+    device_type = "memory";
+    reg = <0x0 0x80000000 0x0 0x10000000>;
+  };
+
+  soc {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    compatible = "simple-bus";
+    ranges;
+
+    clint@2000000 {
+      compatible = "example,clint0";
+      interrupts-extended = <&CPU0_intc 3>, <&CPU0_intc 7>;
+      reg = <0x0 0x2000000 0x0 0xc0000>;
+    };
+
+    INTC0: interrupt-controller@c000000 {
+      compatible = "example,intc0";
+      #address-cells = <0>;
+      #interrupt-cells = <1>;
+      interrupt-controller;
+      interrupts-extended = <&CPU0_intc 11>, <&CPU0_intc 9>;
+      reg = <0x0 0xc000000 0x0 0x4000000>;
+      riscv,ndev = <30>;
+    };
+
+    uart@10000000 {
+      compatible = "ns16550a";
+      reg = <0x0 0x10000000 0x0 0x1000>;
+      clock-frequency = <50000000>;
+      current-speed = <115200>;
+      interrupt-parent = <&INTC0>;
+      interrupts = <1>;
+      reg-shift = <2>;
+      reg-io-width = <4>;
+    };
+  };
+};

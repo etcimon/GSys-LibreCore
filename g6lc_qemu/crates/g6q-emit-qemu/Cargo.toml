@@ -1,0 +1,17 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6q-emit-qemu"
+description = "B1/B2 backends: QEMU machine, device and plugin C emitters (text out only)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+g6q-core = { workspace = true }

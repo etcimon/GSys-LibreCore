@@ -53,6 +53,7 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `spec-extensions/` | Further RISC-V ISA features (V, Zvk, Sv57, CFI, …) | Spec-anchored | `agents/spec/INDEX.md` + relevant guide |
 | `ai-matrix/` | INT8 matrix acceleration (`Xg6lcai`) for a PCIe CPU+AI card | **Live P1–P3 / I1 partial** — CVXIF plane + `ai_island` T2; next **I3 BW → I2 clusters** | `ai-matrix/README.md` §0 progress table + `hard-tests.md` + `scaling-100tops.md` + `frameworks-virt-pcie.md` + `uncore/pcie-endpoint.md` |
 | `sv-timing/` | Structural FO4 precompile package pointer (host = build-platform `timings`) | Tooling / host adapter | `sv-timing/AGENTS.md`, `AGENTS-host.md` |
+| `g6lc-qemu/` | Generated emulation (stock-QEMU / QEMU C / native Rust) + SV diagnosis (RVFI tandem, PMU/uarch) from configs ⇄ flists ⇄ DTS | **Q0 scaffold + package skeleton** — tooling, tier T (MIT) | `g6lc-qemu/README.md`; package `g6lc_qemu/AGENTS.md` |
 | `ai-tensor/` (package at repo root) | PyTorch/TensorFlow **backend** for `Xg6lcai` / `ai_island` (host software; not RTL) | **Live** soft virt-card + HARD virt-impl | `ai-tensor/AGENTS.md`; `tensor virt-impl --impl hard --suite narrow` |
 
 Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings outs, `--from-timing` soak hand-off) is documented in [`build-platform-workspace-lifecycle.md`](build-platform-workspace-lifecycle.md) — not an RTL extension point; still scaffold-only (no flist).
@@ -63,6 +64,7 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 
 | Document | Scope |
 |---|---|
+| `g6lc-qemu/README.md` | **Host plan:** `g6lc_qemu` generator — configs ⇄ flists ⇄ DTS → four emulation backends + D1 tandem / D2 uarch. Q0–Q9 in `g6lc-qemu/staging.md`. **Never evidence** (see `multi-threading/testharness-proxy.md`). |
 | `build-platform-workspace-lifecycle.md` | **Host plan:** granular `cva6-build clean` (purpose/age) + `--from-timing` validate/consume for soaks/diag/sim; workspace artifact taxonomy. |
 | `build-platform-opensta-from-timing.md` | **Host plan:** precompiled timings packages → SDC seeds → Yosys/OpenSTA/OpenROAD validation + FO4↔STA correlate loop (S0–S5). |
 | `router-core-upgrade-program.md` | Active 8-upgrade program (perf/W-ranked). **Progress ~U6.2 partial:** U1–U4, multi-issue, U7ᵃ/ᵇ, U6.0–U6.1, U6.2 multi-core 1–8 hub; H + AVX-like sequenced in `remaining-upgrade-sequence.md`; U5 remain. |

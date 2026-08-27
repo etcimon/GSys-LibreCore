@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gsys.dev/g6lc_qemu/schemas/target-model.schema.json",
+  "title": "g6lc_qemu TargetModel",
+  "description": "The single interface between ingest and every backend. No emitter, virtual machine or diagnosis model reads a design file directly; they all read this. Consumers MUST read schema_version before the payload. Addresses and sizes are strings because a JSON number cannot carry a 64-bit address without loss.",
+  "type": "object",
+  "required": ["schema_version", "generated_by", "target", "isa", "soc", "conformance"],
+  "additionalProperties": false,
+  "properties": {
+    "_comment": {
+      "description": "Ignored by consumers; permitted so fixtures can explain themselves.",
+      "type": ["string", "array"]
+    },
+    "schema_version": {
+      "description": "Bumped on any field rename or semantic change. Never reinterpret silently.",
+      "const": "1"
+    },
+    "generated_by": {
+      "type": "object",
+      "required": ["tool", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "tool": { "const": "g6lc-qemu" },
+        "version": { "type": "string" },
+        "rev": { "type": ["string", "null"] }
+      }
+    },
+    "provenance": {
+      "description": "Where the facts came from, so a model attached to a bug report is self-describing and a stale one is detectable.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "design_root": { "type": ["string", "null"] },
+        "design_rev": { "type": ["string", "null"] },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "sha256"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string" },
+              "sha256": { "type": "string" }
+            }
+          }
+        },
+        "defines": { "type": "array", "items": { "type": "string" } },
+        "overrides": {
+          "description": "Command-line forcings. Their presence makes downstream artifacts synthetic.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["field", "value", "origin"],
+            "additionalProperties": false,
+            "properties": {
+              "field": { "type": "string" },
+              "value": { "type": "string" },
+              "origin": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "required": ["id", "plane", "profile", "faithful"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "plane": { "enum": ["core", "apu", "soc"] },
+        "profile": {
+          "description": "g6lc-soc is byte-faithful to the design and is the only profile a diagnosis may cite. g6lc-virt adds virtio so an operating system can boot and is software-valid, hardware-invalid.",
+          "enum": ["g6lc-soc", "g6lc-virt"]
+        },
+        "faithful": {
+          "description": "False as soon as any override deviates from the design's own description. Travels with every artifact.",
+          "type": "boolean"
+        }
+      }
+    },
+    "isa": {
+      "type": "object",
+      "required": ["xlen", "base", "extensions"],
+      "additionalProperties": false,
+      "properties": {
+        "xlen": { "type": "integer", "enum": [32, 64] },
+        "base": { "type": "string" },
+        "isa_string": { "type": "string" },
+        "mmu_mode": { "type": ["string", "null"] },
+        "extensions": {
+          "description": "Token to verdict. A verdict, never a bare boolean: `true` cannot express 'enabled but the unit is a stub'.",
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/verdict" }
+        },
+        "vendor_ids": {
+          "description": "Read from the same place the design reads them. Never fabricated.",
+          "type": "object",
+          "additionalProperties": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "csr": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "implemented": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["addr", "name"],
+            "additionalProperties": false,
+            "properties": {
+              "addr": { "$ref": "#/$defs/hex" },
+              "name": { "type": "string" },
+              "gate": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "uarch": {
+      "description": "Structure sizes. Carried in full: fields the readers do not semantically understand still land in `raw`, so a later backend can use them without a re-ingest.",
+      "type": "object"
+    },
+    "soc": {
+      "type": "object",
+      "required": ["peripherals", "intc", "harts_total"],
+      "additionalProperties": false,
+      "properties": {
+        "peripherals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "base", "len"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "base": { "$ref": "#/$defs/hex" },
+              "len": { "$ref": "#/$defs/hex" },
+              "model": { "type": ["string", "null"] },
+              "irq": { "type": ["integer", "null"] }
+            }
+          }
+        },
+        "dram": {
+          "type": ["object", "null"],
+          "required": ["base", "len"],
+          "additionalProperties": false,
+          "properties": {
+            "base": { "$ref": "#/$defs/hex" },
+            "len": { "$ref": "#/$defs/hex" }
+          }
+        },
+        "intc": {
+          "type": "object",
+          "required": ["sources", "targets", "contexts_per_hart"],
+          "additionalProperties": false,
+          "properties": {
+            "sources": { "type": "integer", "minimum": 0 },
+            "targets": { "type": "integer", "minimum": 0 },
+            "contexts_per_hart": { "type": "integer", "minimum": 0 },
+            "max_harts": {
+              "description": "targets / contexts_per_hart. The constraint that silently caps how many CPUs a guest can be given, so it is computed rather than assumed.",
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "harts_total": {
+          "description": "Logical harts: cores multiplied by threads per core. Issue width is not a hart.",
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "accel": { "type": "object" },
+    "pmu": {
+      "description": "Group to index to symbolic event name, derived from the design's own counter module so an added event appears without an edit.",
+      "type": "object"
+    },
+    "flist": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "supply": { "type": ["string", "null"] },
+        "files": { "type": "integer", "minimum": 0 },
+        "defines": { "type": "array", "items": { "type": "string" } },
+        "membership": { "type": "object" }
+      }
+    },
+    "conformance": { "$ref": "conformance.schema.json" }
+  },
+  "$defs": {
+    "hex": {
+      "description": "A lowercase 0x-prefixed address or size.",
+      "type": "string",
+      "pattern": "^0x[0-9a-f]+$"
+    },
+    "verdict": {
+      "enum": ["live", "stub", "absent", "undeclared", "overdeclared", "unresolved", "synthetic"]
+    }
+  }
+}
