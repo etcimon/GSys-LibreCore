@@ -32,6 +32,8 @@ pub enum Halt {
     TimeSlice,
 }
 
+use crate::csr::Csr;
+
 /// The state of one hart and its progress.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hart {
@@ -45,13 +47,21 @@ pub struct Hart {
     pub records: Vec<CommitRecord>,
     /// Address reserved by the most recent `lr` on this hart.
     pub reservation: Option<u64>,
+    /// Control and status registers.
+    pub csr: Csr,
 }
 
 impl Hart {
-    /// Create a hart with the given initial PC.
+    /// Create a hart with the given initial PC and hart ID.
     pub fn new(pc: u64) -> Self {
+        Self::with_hartid(pc, 0)
+    }
+
+    /// Create a hart with an explicit hart ID.
+    pub fn with_hartid(pc: u64, hartid: u64) -> Self {
         Self {
             regs: Regs::new(pc),
+            csr: Csr::new(hartid),
             ..Self::default()
         }
     }
@@ -667,21 +677,93 @@ impl Hart {
                 self.amo::<8, _>(mem, rd, rs1, rs2, |a, b| a.max(b))
             }
 
-            Insn::Fence
-            | Insn::FenceI
-            | Insn::Csrrw { .. }
-            | Insn::Csrrs { .. }
-            | Insn::Csrrc { .. }
-            | Insn::Csrrwi { .. }
-            | Insn::Csrrsi { .. }
-            | Insn::Csrrci { .. } => {
-                // Zicsr and fences are treated as no-ops for the RV64I bring-up. They
-                // still advance the program counter and produce a record so the trace is
-                // deterministic, but they do not touch CSR state yet.
+            Insn::Fence | Insn::FenceI => Ok(nx),
+            Insn::Csrrw { rd, rs1, csr } => {
+                let old = self
+                    .csr
+                    .read(csr)
+                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                let new = self.regs.get(rs1);
+                self.csr
+                    .write(csr, new)
+                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                self.regs.set(rd, old);
+                Ok(nx)
+            }
+            Insn::Csrrs { rd, rs1, csr } => {
+                let old = self
+                    .csr
+                    .read(csr)
+                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                if rs1 != 0 {
+                    self.csr
+                        .read_set(csr, self.regs.get(rs1))
+                        .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                }
+                self.regs.set(rd, old);
+                Ok(nx)
+            }
+            Insn::Csrrc { rd, rs1, csr } => {
+                let old = self
+                    .csr
+                    .read(csr)
+                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                if rs1 != 0 {
+                    self.csr
+                        .read_clear(csr, self.regs.get(rs1))
+                        .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                }
+                self.regs.set(rd, old);
+                Ok(nx)
+            }
+            Insn::Csrrwi { rd, uimm, csr } => {
+                let old = self
+                    .csr
+                    .read(csr)
+                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                self.csr
+                    .write(csr, uimm as u64)
+                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                self.regs.set(rd, old);
+                Ok(nx)
+            }
+            Insn::Csrrsi { rd, uimm, csr } => {
+                let old = self
+                    .csr
+                    .read(csr)
+                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                if uimm != 0 {
+                    self.csr
+                        .read_set(csr, uimm as u64)
+                        .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                }
+                self.regs.set(rd, old);
+                Ok(nx)
+            }
+            Insn::Csrrci { rd, uimm, csr } => {
+                let old = self
+                    .csr
+                    .read(csr)
+                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                if uimm != 0 {
+                    self.csr
+                        .read_clear(csr, uimm as u64)
+                        .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                }
+                self.regs.set(rd, old);
                 Ok(nx)
             }
             Insn::Ecall => Err(ExecError::Halt(Halt::Ecall)),
             Insn::Ebreak => Err(ExecError::Halt(Halt::Ebreak)),
+            Insn::Mret => {
+                self.mret();
+                Ok(self.regs.pc)
+            }
+            Insn::Sret => {
+                self.sret();
+                Ok(self.regs.pc)
+            }
+            Insn::Wfi => Ok(nx),
             Insn::Illegal(w) => Err(ExecError::Halt(Halt::Illegal(w))),
         }
     }
@@ -712,6 +794,30 @@ impl Hart {
             self.regs.set(rd, old);
         }
         Ok(self.regs.next_pc())
+    }
+
+    fn mret(&mut self) {
+        let mstatus = self.csr.mstatus;
+        let mpp = (mstatus >> 11) & 0x3;
+        let mpie = (mstatus >> 7) & 1;
+        let new_mstatus = (mstatus & !(0x3 << 11))      // MPP = U
+            | (mpie << 3)                              // MIE <- MPIE
+            | (1u64 << 7); // MPIE = 1
+        self.csr.mstatus = new_mstatus;
+        self.csr.set_mode(mpp as u8);
+        self.regs.pc = self.csr.mepc;
+    }
+
+    fn sret(&mut self) {
+        let mstatus = self.csr.mstatus;
+        let spp = (mstatus >> 8) & 1;
+        let spie = (mstatus >> 5) & 1;
+        let new_mstatus = (mstatus & !(1u64 << 8))      // SPP = U
+            | (spie << 1)                              // SIE <- SPIE
+            | (1u64 << 5); // SPIE = 1
+        self.csr.mstatus = new_mstatus;
+        self.csr.set_mode(spp as u8);
+        self.regs.pc = self.csr.sepc;
     }
 
     fn record(&mut self, pc_rdata: u64, pc_wdata: u64, insn: u32, rd_addr: u8, rd_wdata: u64) {

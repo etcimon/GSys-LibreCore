@@ -1,0 +1,301 @@
+// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+
+//! Control and status register bank.
+//!
+//! Q3 implements the M-mode and S-mode CSRs required for an SBI payload:
+//! mstatus, misa, mie, mip, mtvec, mepc, mcause, mtval, mscratch, satp,
+//! mtime/mtimecmp, mvendorid, marchid, mimpid, mhartid.
+
+use crate::mem::PhysMem;
+
+/// A CSR access error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CsrError {
+    /// CSR address does not exist.
+    Invalid,
+    /// CSR is read-only and a write was attempted.
+    ReadOnly,
+    /// CSR is not implemented at this stage.
+    Unimplemented,
+}
+
+impl std::fmt::Display for CsrError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CsrError::Invalid => write!(f, "invalid CSR"),
+            CsrError::ReadOnly => write!(f, "read-only CSR"),
+            CsrError::Unimplemented => write!(f, "unimplemented CSR"),
+        }
+    }
+}
+
+impl std::error::Error for CsrError {}
+
+/// MIP/MIE interrupt-pending / enable bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u64)]
+pub enum IrqBit {
+    /// Software interrupt.
+    Mswi = 1 << 3,
+    /// Timer interrupt.
+    Mtimer = 1 << 7,
+    /// External interrupt.
+    Mexternal = 1 << 11,
+    /// S-mode software.
+    Sswi = 1 << 1,
+    /// S-mode timer.
+    Stimer = 1 << 5,
+    /// S-mode external.
+    Sexternal = 1 << 9,
+}
+
+/// A privileged-mode CSR bank.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Csr {
+    /// Hart ID.
+    pub hartid: u64,
+    /// ISA register (read-only for our purposes).
+    pub misa: u64,
+    /// Machine status.
+    pub mstatus: u64,
+    /// Machine interrupt enable.
+    pub mie: u64,
+    /// Machine interrupt pending.
+    pub mip: u64,
+    /// Machine trap vector.
+    pub mtvec: u64,
+    /// Machine exception program counter.
+    pub mepc: u64,
+    /// Machine trap cause.
+    pub mcause: u64,
+    /// Machine trap value.
+    pub mtval: u64,
+    /// Machine scratch.
+    pub mscratch: u64,
+    /// Supervisor status.
+    pub sstatus: u64,
+    /// Supervisor interrupt enable.
+    pub sie: u64,
+    /// Supervisor interrupt pending.
+    pub sip: u64,
+    /// Supervisor trap vector.
+    pub stvec: u64,
+    /// Supervisor exception program counter.
+    pub sepc: u64,
+    /// Supervisor trap cause.
+    pub scause: u64,
+    /// Supervisor trap value.
+    pub stval: u64,
+    /// Supervisor scratch.
+    pub sscratch: u64,
+    /// Supervisor address translation.
+    pub satp: u64,
+    /// Wall-clock time (lower half).
+    pub mtime: u64,
+    /// Wall-clock time (upper half).
+    pub mtimeh: u64,
+    /// Timer compare.
+    pub mtimecmp: u64,
+    /// Vendor ID.
+    pub mvendorid: u64,
+    /// Architecture ID.
+    pub marchid: u64,
+    /// Implementation ID.
+    pub mimpid: u64,
+}
+
+impl Csr {
+    /// Create a bank for hart `hartid` with a fixed ISA string.
+    pub fn new(hartid: u64) -> Self {
+        Self {
+            hartid,
+            // RV64IMA with supervisor/user, plus Sstc/Svpbmt bits we will not emulate yet.
+            misa: (1u64 << 63) | (1 << 0) | (1 << 3) | (1 << 8) | (1 << 18) | (1 << 20),
+            mvendorid: 0,
+            marchid: 0,
+            mimpid: 0,
+            ..Self::default()
+        }
+    }
+
+    /// Read a CSR by address.
+    pub fn read(&self, addr: u16) -> Result<u64, CsrError> {
+        match addr {
+            0xF11 => Ok(self.mvendorid),
+            0xF12 => Ok(self.marchid),
+            0xF13 => Ok(self.mimpid),
+            0xF14 => Ok(self.hartid),
+            0xF15 => Ok(0), // mconfigptr
+            0x301 => Ok(self.misa),
+            0x300 => Ok(self.mstatus),
+            0x304 => Ok(self.mie),
+            0x344 => Ok(self.mip),
+            0x305 => Ok(self.mtvec),
+            0x341 => Ok(self.mepc),
+            0x342 => Ok(self.mcause),
+            0x343 => Ok(self.mtval),
+            0x340 => Ok(self.mscratch),
+            0x100 => Ok(self.sstatus),
+            0x104 => Ok(self.sie),
+            0x144 => Ok(self.sip),
+            0x105 => Ok(self.stvec),
+            0x141 => Ok(self.sepc),
+            0x142 => Ok(self.scause),
+            0x143 => Ok(self.stval),
+            0x140 => Ok(self.sscratch),
+            0x180 => Ok(self.satp),
+            0x701 => Ok(self.mtime),
+            0x741 => Ok(self.mtimecmp),
+            0xB81 => Ok(self.mtimeh),
+            _ => Err(CsrError::Unimplemented),
+        }
+    }
+
+    /// Write a CSR by address.
+    pub fn write(&mut self, addr: u16, val: u64) -> Result<(), CsrError> {
+        match addr {
+            0x300 => {
+                self.mstatus = val;
+                Ok(())
+            }
+            0x304 => {
+                self.mie = val;
+                Ok(())
+            }
+            0x344 => {
+                self.mip = val;
+                Ok(())
+            }
+            0x305 => {
+                self.mtvec = val;
+                Ok(())
+            }
+            0x341 => {
+                self.mepc = val;
+                Ok(())
+            }
+            0x342 => {
+                self.mcause = val;
+                Ok(())
+            }
+            0x343 => {
+                self.mtval = val;
+                Ok(())
+            }
+            0x340 => {
+                self.mscratch = val;
+                Ok(())
+            }
+            0x100 => {
+                self.sstatus = val;
+                Ok(())
+            }
+            0x104 => {
+                self.sie = val;
+                Ok(())
+            }
+            0x144 => {
+                self.sip = val;
+                Ok(())
+            }
+            0x105 => {
+                self.stvec = val;
+                Ok(())
+            }
+            0x141 => {
+                self.sepc = val;
+                Ok(())
+            }
+            0x142 => {
+                self.scause = val;
+                Ok(())
+            }
+            0x143 => {
+                self.stval = val;
+                Ok(())
+            }
+            0x140 => {
+                self.sscratch = val;
+                Ok(())
+            }
+            0x180 => {
+                self.satp = val;
+                Ok(())
+            }
+            0x701 => {
+                self.mtime = val;
+                Ok(())
+            }
+            0x741 => {
+                self.mtimecmp = val;
+                Ok(())
+            }
+            0xB81 => {
+                self.mtimeh = val;
+                Ok(())
+            }
+            0xF11 | 0xF12 | 0xF13 | 0xF14 | 0xF15 | 0x301 => Err(CsrError::ReadOnly),
+            _ => Err(CsrError::Unimplemented),
+        }
+    }
+
+    /// Read a CSR and set bits from `mask`.
+    pub fn read_set(&mut self, addr: u16, mask: u64) -> Result<u64, CsrError> {
+        let old = self.read(addr)?;
+        self.write(addr, old | mask)?;
+        Ok(old)
+    }
+
+    /// Read a CSR and clear bits from `mask`.
+    pub fn read_clear(&mut self, addr: u16, mask: u64) -> Result<u64, CsrError> {
+        let old = self.read(addr)?;
+        self.write(addr, old & !mask)?;
+        Ok(old)
+    }
+
+    /// Current privilege mode (0=U,1=S,3=M). Stored in mstatus MPP/SPP for traps.
+    pub fn mode(&self) -> u8 {
+        ((self.mstatus >> 11) & 0x3) as u8
+    }
+
+    /// Set privilege mode.
+    pub fn set_mode(&mut self, mode: u8) {
+        self.mstatus = (self.mstatus & !(0x3 << 11)) | ((mode as u64 & 0x3) << 11);
+    }
+
+    /// Advance wall-clock time from the memory map (CLINT). Not directly called in tests.
+    pub fn tick(&mut self, _mem: &mut PhysMem) {
+        self.mtime = self.mtime.wrapping_add(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_only_csrs_reject_writes() {
+        let mut c = Csr::new(0);
+        assert!(c.write(0x301, 0).is_err());
+        assert!(c.read(0x301).is_ok());
+    }
+
+    #[test]
+    fn read_set_and_clear_are_wmask_ops() {
+        let mut c = Csr::new(0);
+        assert_eq!(c.read_set(0x300, 0b11).unwrap() & 0b11, 0);
+        assert_eq!(c.read(0x300).unwrap() & 0b11, 0b11);
+        assert_eq!(c.read_clear(0x300, 0b10).unwrap() & 0b11, 0b11);
+        assert_eq!(c.read(0x300).unwrap() & 0b11, 0b01);
+    }
+
+    #[test]
+    fn mpp_is_privilege_mode() {
+        let mut c = Csr::new(0);
+        c.set_mode(3);
+        assert_eq!(c.mode(), 3);
+        c.set_mode(1);
+        assert_eq!(c.mode(), 1);
+    }
+}

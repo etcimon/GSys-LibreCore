@@ -296,6 +296,9 @@ pub enum Insn {
     FenceI,
     Ecall,
     Ebreak,
+    Mret,
+    Sret,
+    Wfi,
 
     // RV64M
     Mul {
@@ -861,6 +864,9 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 (0x00, 0x00) if rd == 0 => Insn::Ecall,
                 (0x00, 0x01) if rd == 0 => Insn::Ebreak,
                 (0x00, 0x02) => Insn::FenceI,
+                (0x18, 0x02) if rd == 0 && rs1 == 0 => Insn::Mret,
+                (0x08, 0x02) if rd == 0 && rs1 == 0 => Insn::Sret,
+                (0x10, 0x05) if rd == 0 && rs1 == 0 => Insn::Wfi,
                 _ => Insn::Illegal(w),
             },
             0x1 => Insn::Csrrw { rd, rs1, csr },

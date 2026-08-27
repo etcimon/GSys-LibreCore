@@ -28,6 +28,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod csr;
 pub mod exec;
 pub mod insn;
 pub mod mem;
