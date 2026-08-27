@@ -45,7 +45,7 @@ written for it:
 | **Q0** scaffold, package surface, Rust skeleton | **done** |
 | **Q1** ingest + `TargetModel` + conformance | **done** |
 | **Q2** B0 stock-QEMU driver + firmware chain | **done** — emission complete; boot gate pending host tooling (§Q2) |
-| **Q3** B3 native VM + tandem records | **in progress** — RV64I/M/A interpreter, CSR bank, mret/sret, Zicsr, CLINT/UART, D1 tandem report library green; F/D/C/B/Zicbo/Zacas, full trap delivery, PLIC, Sv39, CLI `run`/`tandem` next |
+| **Q3** B3 native VM + tandem records | **in progress** — RV64I/M/A interpreter, CSR bank, mret/sret, Zicsr, CLINT/UART, M-mode timer traps, mret/sret tests, D1 report library green; F/D/C/B/Zicbo/Zacas, PLIC, ecall/ebreak traps, Sv39, CLI `run`/`tandem` next |
 | **Q4** B1 generated QEMU machine | open |
 | **Q5** D1 tandem / replay / checkpoint | **in progress** — comparison + report library green; CLI `tandem` verb, checkpoint/replay and JSON record I/O next |
 | **Q6** accelerator ISA + device + in-guest runtime | open |
