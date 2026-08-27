@@ -71,6 +71,16 @@ impl Hart {
     /// Returns the halt reason when something stops the hart. The hart advances by one
     /// instruction on success and appends a [`CommitRecord`].
     pub fn step(&mut self, mem: &mut PhysMem, xlen: u8) -> Option<Halt> {
+        // Deliver M-mode timer interrupt if globally and specifically enabled.
+        if self.csr.mode() == 3
+            && ((self.csr.mstatus >> 3) & 1) != 0
+            && ((self.csr.mie >> 7) & 1) != 0
+            && ((self.csr.mip >> 7) & 1) != 0
+        {
+            self.take_trap(0x8000_0000_0000_0007);
+            return None;
+        }
+
         let w = match mem.read_le::<4>(self.regs.pc) {
             Ok(v) => v as u32,
             Err(_) => return Some(Halt::MemFault),
@@ -828,7 +838,6 @@ impl Hart {
         self.regs.pc = self.csr.sepc;
     }
 
-    #[allow(dead_code)]
     fn take_trap(&mut self, cause: u64) {
         let prev_mode = self.csr.mode();
         self.csr.mepc = self.regs.pc;
@@ -1208,6 +1217,32 @@ mod tests {
         assert_eq!(h.csr.mode(), 1);
         assert_eq!((h.csr.mstatus >> 1) & 1, 1, "SIE restored from SPIE");
         assert_eq!((h.csr.mstatus >> 8) & 1, 0, "SPP reset to U");
+    }
+
+    #[test]
+    fn timer_interrupt_delivers_to_mtvec() {
+        use crate::device::Clint;
+        use crate::mem::{Device, DeviceKind};
+        let mut h = hart();
+        let mut m = mem();
+        m.add_device(Device::new(
+            0x0200_0000,
+            0x10000,
+            DeviceKind::Clint(Clint::new(1)),
+        ));
+        if let Some(c) = m.clint_mut() {
+            c.mtimecmp[0] = 0;
+        }
+        h.csr.mie = 1u64 << 7;
+        h.csr.mstatus = (1u64 << 3) | (3u64 << 11);
+        h.csr.mtvec = 0x7000_0000;
+        // lui x0, 0 at 0x8000_0000 (no-op), second step sees MTIP and traps
+        write_u(&mut m, 0x8000_0000, 0x37, 0, 0);
+
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.csr.mcause, 0x8000_0000_0000_0007);
+        assert_eq!(h.regs.pc, 0x7000_0000);
     }
 
     #[test]
