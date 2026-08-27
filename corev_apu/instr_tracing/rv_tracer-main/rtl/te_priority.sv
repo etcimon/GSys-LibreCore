@@ -160,6 +160,7 @@ module te_priority (
     always_comb begin
         // init
         tc_resync_br_d = tc_resync_br_q;
+        tc_reported_d = tc_reported_q;
 
         if (reported_update) begin
             tc_reported_d = reported_status;

@@ -13,6 +13,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Angela Gonzalez, PlanV Technology
+// Modified by: Etienne Cimon (comb defaults; Verilator LATCH)
 // Date: 26/02/2024
 //
 // Description: Memory Management Unit for CVA6, contains TLB and
@@ -376,6 +377,7 @@ module cva6_mmu
   // The instruction interface is a simple request response interface
   always_comb begin : instr_interface
     // MMU disabled: just pass through
+    final_fetch_ppn = '0;
     icache_areq_o.fetch_valid = icache_areq_i.fetch_req;
     icache_areq_o.fetch_paddr = CVA6Cfg.PLEN'(icache_areq_i.fetch_vaddr[((CVA6Cfg.PLEN > CVA6Cfg.VLEN) ? CVA6Cfg.VLEN -1: CVA6Cfg.PLEN -1 ):0]);
     // two potential exception sources:

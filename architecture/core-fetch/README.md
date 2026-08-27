@@ -60,10 +60,12 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | `g6lc_fetch_pkg.sv` + `g6lc_fetch_dbg.sv` | **landed** (kill + leftover + L2 `window_accept`; snap for n-wide/SMT/spec; `+fetch_snap`) |
 | `instr_realign` leftover | **landed** (`leftover_complete` / `leftover_next` / `rvi_prefix`; `start_hw0=1`) |
 | L2 redirect window | **landed** (`redirect_hit` / `redirect_accept` = `window_accept` + `same_win`) |
+| `icache_ret_ok` inflight same_win | **reverted** (MINI-FAIL stock hang / bnez_jal_split tohost=12) |
+| `bp_pend` / `bp_ret_ok` | **landed** (filter sequential return only while predicted redirect pending) |
 | I4 per-hart leftover | **landed** (`instr_realign` carry banks `[hart_i]`; kill inert) |
 | I8 restore vs trap | **landed** (`arch_src_sel` + `fetch_address = arch_pc`; no restore-first I$ mux) |
 | I7 all-or-nothing IQ | **landed** (`packet_accept`; no partial enqueue) |
-| I19 predict-only PMA | **landed** (`bp_fire = bp_valid && predict_fetchable`; never on resolve) |
+| I19 predict-only PMA | **landed** (`bp_fire = bp_valid && predict_fetchable && cf_consumed`; never on resolve) |
 | I3 leftover pending | **landed** (`leftover_pending_o` / snap; drop on valid non-next) |
 | `+fetch_snap_lo/hi` | **landed** (allowlisted in `g6lc_tb.cpp`; snap prints `rpc`/`tgt`) |
 | L1 `hw_off` | **landed** (realign cursor start from pkg) |

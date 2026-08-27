@@ -511,6 +511,8 @@ done_processing:
       static int trace_on = 0;
       static int have_log = 0;
       static int have_commit = 0;
+      static int have_hold = 0;
+      static int have_wrack = 0;
       static unsigned poll_mask = 2047;
       static int wfi_hits = 0;
       static std::vector<G6lcTraceRule> rules;
@@ -547,7 +549,10 @@ done_processing:
           g6lc_parse_file(p, &rules);
         for (const auto &r : rules) {
           if (r.kind >= G6LC_LOG_NPC) have_log = 1;
-          if (r.kind == G6LC_LOG_COMMIT) have_commit = 1;
+          if (r.kind == G6LC_LOG_COMMIT || r.kind == G6LC_LOG_HOLD)
+            have_commit = 1;
+          if (r.kind == G6LC_LOG_HOLD) have_hold = 1;
+          if (r.kind == G6LC_LOG_WRACK) have_wrack = 1;
         }
         spec_ready = 1;
       }
@@ -570,19 +575,38 @@ done_processing:
         unsigned wfi0 = (unsigned)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__wfi_q);
         unsigned wfi1 = (unsigned)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__wfi_q);
         uint64_t cpc = 0;
+        uint64_t cpc1 = 0;
         unsigned cack = 0;
+        unsigned cdrop = 0;
         if (have_commit) {
-          // G1fg: commit_instr_o is 2×464 (VlWide 928).
-          // Port-0 pc is the entry MSB [W-1 -: 64] = [463:400].
-          // Hardcoded [464:401] (old 465-bit) never matched.
+          // G1fg: commit_instr_o is [NrCommitPorts-1:0] scoreboard_entry_t,
+          // packed from bit 0. sbe.pc is the struct MSB (VLEN=64).
+          // Verilator VlWide pads to 32-bit words (2×465 sits in 960 bits),
+          // so (words*32)/2 is NOT sbe width — W=480 overshoots into the
+          // next port and the MSB-64 is not a DRAM PC. Scanning that
+          // padded slice from lo then hits bp.predict_address (shared
+          // address-FIFO head, e.g. 0x80012888) before sbe.pc (0x80012990).
+          // Derive sbe_w from mem_q: 16 × {issued,cancelled,fpr,sbe}.
           const auto &ci = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT____Vcellout__i_scoreboard__commit_instr_o);
-          int words = (int)(sizeof(ci) / sizeof(ci[0]));
-          int W = (words * 32) / 2;
-          int pc0 = W - 64;
-          for (int i = 0; i < 64; i++)
-            if ((ci[(pc0 + i) / 32] >> ((pc0 + i) % 32)) & 1u)
-              cpc |= (uint64_t)1 << i;
+          const auto &mq_w = top->rootp->G6LC_CVA6_C0(
+              issue_stage_i__DOT__i_scoreboard__DOT__mem_q);
+          int mwords_w = (int)(sizeof(mq_w) / sizeof(mq_w[0]));
+          int sbe_w = (mwords_w * 32) / 16 - 3;
+          auto bits64 = [&](int base) -> uint64_t {
+            uint64_t v = 0;
+            for (int i = 0; i < 64; i++)
+              if ((ci[(base + i) / 32] >> ((base + i) % 32)) & 1u)
+                v |= (uint64_t)1 << i;
+            return v;
+          };
+          auto port_pc = [&](int port) -> uint64_t {
+            if (sbe_w < 64) return 0;
+            return bits64((port + 1) * sbe_w - 64);
+          };
+          cpc = port_pc(0);
+          cpc1 = port_pc(1);
           cack = (unsigned)top->rootp->G6LC_CVA6_C0(commit_ack);
+          cdrop = (unsigned)top->rootp->G6LC_CVA6_C0(commit_drop_id_commit);
         }
         auto gpr = [&](unsigned hart, int n) -> uint64_t {
           if (hart == 0) {
@@ -605,6 +629,145 @@ done_processing:
                     << " t0=0x" << gpr(1, 5) << " t1=0x" << gpr(1, 6) << " t2=0x" << gpr(1, 7)
                     << std::dec << "\n";
           boot_wait_logs1++;
+        }
+        // Trapping visit: dump ID/SB handshake. id_pc uses the same
+        // sbe_w as commit (do not scan from lo — bp tgt leak).
+        static int idsb_logs = 0;
+        if (trace_on && main_time >= 103000 && main_time <= 103700 &&
+            idsb_logs < 250) {
+          unsigned flu = (unsigned)top->rootp->G6LC_CVA6_C0(flush_unissued_instr_ctrl_id);
+          unsigned fif = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_if);
+          unsigned fid = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_id);
+          unsigned fex = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_ex);
+          unsigned dv = (unsigned)top->rootp->G6LC_CVA6_C0(issue_entry_valid_id_issue);
+          unsigned dack = (unsigned)top->rootp->G6LC_CVA6_C0(issue_instr_issue_id);
+          const auto &ie = top->rootp->G6LC_CVA6_C0(issue_entry_id_issue);
+          const auto &mq_id = top->rootp->G6LC_CVA6_C0(
+              issue_stage_i__DOT__i_scoreboard__DOT__mem_q);
+          int sbe_id = (int)(sizeof(mq_id) / sizeof(mq_id[0])) * 32 / 16 - 3;
+          auto ibits64 = [&](int base) -> uint64_t {
+            uint64_t v = 0;
+            for (int i = 0; i < 64; i++)
+              if ((ie[(base + i) / 32] >> ((base + i) % 32)) & 1u)
+                v |= (uint64_t)1 << i;
+            return v;
+          };
+          auto id_pc = [&](int port) -> uint64_t {
+            if (sbe_id < 64) return 0;
+            return ibits64((port + 1) * sbe_id - 64);
+          };
+          uint64_t ipc0 = id_pc(0);
+          uint64_t ipc1 = id_pc(1);
+          uint64_t pcex = (uint64_t)top->rootp->G6LC_CVA6_C0(pc_id_ex);
+          unsigned iptr = (unsigned)top->rootp->G6LC_CVA6_C0(
+              issue_stage_i__DOT__i_scoreboard__DOT__issue_pointer_q);
+          unsigned cptr = (unsigned)top->rootp->G6LC_CVA6_C0(
+              issue_stage_i__DOT__i_scoreboard__DOT__commit_pointer_q);
+          auto in_tail_pc = [](uint64_t pc) -> bool {
+            uint64_t p = pc & 0xffffffffULL;
+            return p >= 0x80012900ULL && p <= 0x80012a20ULL;
+          };
+          if ((dv || dack || flu || fif || fex) &&
+              (in_tail_pc(ipc0) || in_tail_pc(ipc1) || in_tail_pc(pcex))) {
+            unsigned alloc = dv & dack & (flu ? 0u : 3u);
+            std::cerr << std::hex << "[id_sb] t=" << std::dec << main_time
+                      << std::hex << " pc0=0x" << ipc0 << " pc1=0x" << ipc1
+                      << " pcex=0x" << pcex
+                      << " dv=" << dv << " ack=" << dack << " alloc=" << alloc
+                      << " flu=" << flu << " fif=" << fif << " fid=" << fid
+                      << " fex=" << fex
+                      << " ip=" << iptr << " cp=" << cptr
+                      << std::dec << "\n";
+            idsb_logs++;
+          }
+          // Per-slot sbe.pc: sb_mem_t is {issued,cancelled,fpr,sbe} with
+          // sbe.pc at the sbe MSB. Slot index is the trans_id. Do not scan
+          // the whole entry (jal bp.predict_address is 12888 too).
+          const auto &mq = top->rootp->G6LC_CVA6_C0(
+              issue_stage_i__DOT__i_scoreboard__DOT__mem_q);
+          int mwords = (int)(sizeof(mq) / sizeof(mq[0]));
+          int nent = 16;
+          int EW = (mwords * 32) / nent;
+          auto mbit = [&](int b) -> unsigned {
+            if (b < 0 || b >= mwords * 32) return 0;
+            return (mq[b / 32] >> (b % 32)) & 1u;
+          };
+          auto mbits64 = [&](int lo) -> uint64_t {
+            uint64_t v = 0;
+            for (int i = 0; i < 64; i++)
+              if (mbit(lo + i)) v |= (uint64_t)1 << i;
+            return v;
+          };
+          bool snap = (main_time == 103624 || main_time == 103628 ||
+                       main_time == 103632 || main_time == 103636 ||
+                       main_time == 103640 || main_time == 103644);
+          if ((cack || cdrop) && main_time >= 103620 && main_time <= 103650) {
+            std::cerr << "[sb_iss] t=" << main_time
+                      << " ip=" << iptr << " cp=" << cptr
+                      << " ack=" << cack << " drop=" << cdrop
+                      << std::hex << " c0=0x" << cpc << " c1=0x" << cpc1
+                      << " iss=";
+            for (int e = 0; e < nent; e++) {
+              int ehi = (e + 1) * EW;
+              if (mbit(ehi - 1))
+                std::cerr << e << ":0x" << mbits64(ehi - 67) << ",";
+            }
+            std::cerr << std::dec << "\n";
+            idsb_logs++;
+          }
+          if (snap) {
+            std::cerr << "[sb_pc] t=" << main_time
+                      << " ip=" << iptr << " cp=" << cptr
+                      << " EW=" << EW << "\n";
+            for (int e = 0; e < nent; e++) {
+              int elo = e * EW;
+              int ehi = elo + EW;
+              unsigned iss = mbit(ehi - 1);
+              unsigned can = mbit(ehi - 2);
+              uint64_t pc3 = mbits64(ehi - 67);
+              uint64_t pcm = mbits64(ehi - 64);
+              std::cerr << std::dec << "[sb_pc] t=" << main_time
+                        << " e=" << e << " iss=" << iss << " can=" << can
+                        << std::hex << " pc=0x" << pc3 << " msb=0x" << pcm
+                        << std::dec << "\n";
+            }
+          }
+        }
+        // Leftover-complete 12958 vs sequential 12960. replay_addr /
+        // serving_unaligned / is_mispredict DCE; k1 = misp|flush|replay.
+        // npc_q and icache_vaddr_q are flops (not DCE).
+        if (trace_on && main_time >= 103000 && main_time <= 103700) {
+          unsigned fifk = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_if);
+          unsigned repl = (unsigned)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__replay);
+          unsigned k1 = (unsigned)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__kill_s1);
+          unsigned k2 = (unsigned)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__kill_s2);
+          unsigned bpf = (unsigned)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__bp_fire);
+          unsigned pend = (unsigned)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__leftover_pending);
+          unsigned qfull = (unsigned)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__i_instr_queue__DOT__instr_queue_full);
+          uint64_t knpc = (uint64_t)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__npc_q);
+          uint64_t kvaddr = (uint64_t)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__icache_vaddr_q);
+          unsigned misp = k1 && !repl && !fifk;
+          uint64_t knpc32 = knpc & 0xffffffffULL;
+          bool in_tail = knpc32 >= 0x80012900ULL && knpc32 <= 0x80012a20ULL;
+          if ((misp || repl || k1 || k2 || bpf || pend) &&
+              (in_tail || repl || pend)) {
+            std::cerr << "[kill] t=" << main_time
+                      << " misp=" << misp << " replay=" << repl
+                      << " fif=" << fifk << " bp=" << bpf
+                      << " k1=" << k1 << " k2=" << k2
+                      << " pend=" << pend << " full=" << qfull
+                      << std::hex << " npc=0x" << knpc
+                      << " vq=0x" << kvaddr << std::dec
+                      << "\n";
+          }
         }
         bool do_exit = false;
         for (auto &r : rules) {
@@ -650,18 +813,111 @@ done_processing:
               break;
             }
           } else if (trace_on && r.seen < r.maxn) {
+            if (r.after != 0 && main_time < r.after)
+              continue;
             bool hit = false;
             uint64_t loc = npc;
             if (r.kind == G6LC_LOG_NPC && g6lc_in_win(npc, r.lo, r.hi)) {
-              hit = r.last_npc != (npc & 0xffffffffULL);
+              // Poll as well so a stuck npc still samples after= hang window.
+              hit = r.last_npc != (npc & 0xffffffffULL) || poll;
               loc = npc;
-            } else if (r.kind == G6LC_LOG_COMMIT && (cack & 1u) &&
-                       g6lc_in_win(cpc, r.lo, r.hi)) {
-              hit = true;
-              loc = cpc;
+            } else if (r.kind == G6LC_LOG_COMMIT && (cack || cdrop)) {
+              // Both commit ports. Architectural ack hides I13 drop
+              // (commit_ack = macro_ack & ~drop) so 12976–12992 vanished.
+              uint64_t pcs[2] = {cpc, cpc1};
+              for (int p = 0; p < 2; p++) {
+                unsigned ack_p = (cack >> p) & 1u;
+                unsigned drop_p = (cdrop >> p) & 1u;
+                if ((ack_p || drop_p) && g6lc_in_win(pcs[p], r.lo, r.hi) &&
+                    r.seen < r.maxn) {
+                  std::cerr << std::hex << "[trace] t=" << std::dec << main_time
+                            << " tag=" << r.tag << std::hex << " loc=0x" << pcs[p]
+                            << " p=" << p << " ack=" << cack << " drop=" << cdrop;
+                  if (r.gpr_mask) {
+                    for (int n = 1; n < 32; n++)
+                      if (r.gpr_mask & (1u << n))
+                        std::cerr << " x" << std::dec << n << std::hex << "=0x"
+                                  << gpr(r.hart, n);
+                  }
+                  std::cerr << std::dec << "\n";
+                  r.seen++;
+                }
+              }
+              continue;
             } else if (r.kind == G6LC_LOG_MEM && poll) {
               hit = true;
               loc = rd64((size_t)r.off);
+            } else if (r.kind == G6LC_LOG_HOLD && have_hold) {
+              // Ports (load_paddr_i, st_fwd_*) are not public in the
+              // Verilator v5.008 model. Internals g1ao_hold_* are.
+              unsigned hv = (unsigned)top->rootp->G6LC_CVA6_C0(
+                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_v_q);
+              unsigned hh = (unsigned)top->rootp->G6LC_CVA6_C0(
+                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_hit);
+              unsigned hbe = (unsigned)top->rootp->G6LC_CVA6_C0(
+                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_be_q);
+              uint64_t hpa = (uint64_t)top->rootp->G6LC_CVA6_C0(
+                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_pa_q);
+              uint64_t hdata = (uint64_t)top->rootp->G6LC_CVA6_C0(
+                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_data_q);
+              bool in_win = (cack & 1u) && g6lc_in_win(cpc, r.lo, r.hi);
+              uint64_t filt = r.off;
+              bool pa_hit = (filt == 0) ||
+                            ((hpa & 0xffffffffULL) == (filt & 0xffffffffULL));
+              bool live = hv || hh;
+              bool chg = hv != r.last_hold_v || hh != r.last_hold_hit ||
+                         hpa != r.last_hold_pa || hdata != r.last_hold_data;
+              bool fall = r.last_hold_v && !hv;
+              if (in_win || ((live || fall) && pa_hit && chg) ||
+                  (live && pa_hit && poll)) {
+                loc = in_win ? cpc : hpa;
+                std::cerr << std::hex << "[trace] t=" << std::dec << main_time
+                          << " tag=" << r.tag << std::hex << " loc=0x" << loc
+                          << " v=" << hv << " hit=" << hh << " be=0x" << hbe
+                          << " pa=0x" << hpa << " data=0x" << hdata
+                          << std::dec << "\n";
+                r.seen++;
+                r.last_npc = npc & 0xffffffffULL;
+                r.last_hold_v = hv;
+                r.last_hold_hit = hh;
+                r.last_hold_pa = hpa;
+                r.last_hold_data = hdata;
+                continue;
+              }
+              r.last_hold_v = hv;
+              r.last_hold_hit = hh;
+              r.last_hold_pa = hpa;
+              r.last_hold_data = hdata;
+#ifdef G6LC_TRACE_WT_WBUFFER
+            } else if (r.kind == G6LC_LOG_WRACK && have_wrack) {
+              unsigned wreq = (unsigned)top->rootp->G6LC_CVA6_C0(
+                  gen_cache_wt__DOT__i_cache_subsystem__DOT__i_wt_dcache__DOT__wr_req);
+              unsigned wack = (unsigned)top->rootp->G6LC_CVA6_C0(
+                  gen_cache_wt__DOT__i_cache_subsystem__DOT__i_wt_dcache__DOT__wr_ack);
+              unsigned wbe = (unsigned)top->rootp->G6LC_CVA6_C0(
+                  gen_cache_wt__DOT__i_cache_subsystem__DOT__i_wt_dcache__DOT__wr_data_be);
+              uint64_t wdata = (uint64_t)top->rootp->G6LC_CVA6_C0(
+                  gen_cache_wt__DOT__i_cache_subsystem__DOT__i_wt_dcache__DOT__wr_data);
+              bool live = wreq != 0;
+              bool chg = wreq != r.last_wr_req || wack != r.last_wr_ack ||
+                         wdata != r.last_wr_data;
+              if ((live && chg) || (live && poll)) {
+                loc = wdata;
+                std::cerr << std::hex << "[trace] t=" << std::dec << main_time
+                          << " tag=" << r.tag << std::hex << " loc=0x" << loc
+                          << " req=0x" << wreq << " ack=" << wack
+                          << " be=0x" << wbe << " data=0x" << wdata
+                          << std::dec << "\n";
+                r.seen++;
+                r.last_wr_req = wreq;
+                r.last_wr_ack = wack;
+                r.last_wr_data = wdata;
+                continue;
+              }
+              r.last_wr_req = wreq;
+              r.last_wr_ack = wack;
+              r.last_wr_data = wdata;
+#endif
             } else if (r.kind == G6LC_LOG_GPR) {
               bool any_pc = (r.lo == 0 && r.hi == ~0ULL);
               if (any_pc && r.gpr_mask) {
@@ -1226,7 +1482,10 @@ done_processing:
       uint64_t t00 = gpr64(rf0, 5), t01 = gpr64(rf1, 5);
       uint64_t t10 = gpr64(rf0, 6), t11 = gpr64(rf1, 6);
       uint64_t t20 = gpr64(rf0, 7), t21 = gpr64(rf1, 7);
+      uint64_t a00 = gpr64(rf0, 10), a01 = gpr64(rf1, 10);
+      uint64_t a30 = gpr64(rf0, 13), a31 = gpr64(rf1, 13);
       uint64_t a40 = gpr64(rf0, 14), a41 = gpr64(rf1, 14);
+      uint64_t a50 = gpr64(rf0, 15), a51 = gpr64(rf1, 15);
       std::cerr << std::hex << "[hangpc] npc0=0x" << (uint64_t)npc0
                 << " act=" << (unsigned)active
                 << " mepc0=0x" << (uint64_t)mepc0
@@ -1239,13 +1498,47 @@ done_processing:
                 << " t00=0x" << t00 << " t01=0x" << t01
                 << " t10=0x" << t10 << " t11=0x" << t11
                 << " t20=0x" << t20 << " t21=0x" << t21
+                << " a00=0x" << a00 << " a01=0x" << a01
+                << " a30=0x" << a30 << " a31=0x" << a31
                 << " a40=0x" << a40 << " a41=0x" << a41
+                << " a50=0x" << a50 << " a51=0x" << a51
                 << " ra0=0x" << ra0 << " ra1=0x" << ra1
                 << " sp0=0x" << sp0 << " sp1=0x" << sp1
                 << " s00=0x" << s00 << " s01=0x" << s01
                 << " mtvec=0x" << (uint64_t)mtvec
                 << std::dec << "\n";
     }
+    // S4: _v / Ara is NrCores=2; C0 hangpc can be the lottery loser.
+    // G6LC_CVA6_GEN_ACC is Makefile-only for server_math_v (smt2 stays C0).
+#if defined(G6LC_CVA6_GEN_ACC)
+    {
+      auto npc0 = top->rootp->G6LC_CVA6_C1(i_frontend__DOT__npc_q);
+      auto mepc0 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q);
+      auto mcause0 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q);
+      auto wfi0 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__wfi_q);
+      auto mepc1 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__mepc_q);
+      auto mcause1 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__mcause_q);
+      auto wfi1 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__wfi_q);
+      auto active = top->rootp->G6LC_CVA6_C1(i_smt_thread_select__DOT__gen_smt__DOT__active_q);
+      const auto &rf0 = top->rootp->G6LC_CVA6_C1(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem);
+      const auto &rf1 = top->rootp->G6LC_CVA6_C1(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__1__KET____DOT__i_rf_bank__DOT__mem);
+      auto gpr64 = [](const auto &rf, int n) -> uint64_t {
+        return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
+      };
+      std::cerr << std::hex << "[hangpc1] npc0=0x" << (uint64_t)npc0
+                << " act=" << (unsigned)active
+                << " mepc0=0x" << (uint64_t)mepc0
+                << " mcause0=0x" << (uint64_t)mcause0
+                << " wfi0=" << (unsigned)wfi0
+                << " mepc1=0x" << (uint64_t)mepc1
+                << " mcause1=0x" << (uint64_t)mcause1
+                << " wfi1=" << (unsigned)wfi1
+                << " ra0=0x" << gpr64(rf0, 1) << " ra1=0x" << gpr64(rf1, 1)
+                << " sp0=0x" << gpr64(rf0, 2) << " sp1=0x" << gpr64(rf1, 2)
+                << " s00=0x" << gpr64(rf0, 8) << " s01=0x" << gpr64(rf1, 8)
+                << std::dec << "\n";
+    }
+#endif
     // R3a fdtcnt probe BSS log @ DRAM+0x42e00 (VA 0x80042e00):
     //   +0x00 next_tag entry count
     //   +0x08 last structure offset (a1 into fdt_next_tag)

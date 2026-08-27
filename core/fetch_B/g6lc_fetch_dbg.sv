@@ -144,7 +144,6 @@ module g6lc_fetch_dbg
     snap.cf_mask        = '0;
     slot_cf_any         = 1'b0;
     slot_same_win       = '0;
-    slot_bytes_ok       = '0;
     for (int unsigned k = 0; k < Slots; k++) begin
       snap.live_mask[k] = slot_live(slot_v_i[k], snap.accept,
           slot_ge_expected(k == 0 && serving_unaligned_i,
@@ -187,7 +186,7 @@ module g6lc_fetch_dbg
       hi = 0;
       mem_hw = '0;
       if (slot_same_win[k] && !(k == 0 && serving_unaligned_i)) begin
-        hi = unsigned'((64'(slot_pc_i[k]) - 64'(vaddr_q_i)) >> 1);
+        hi = 32'((64'(slot_pc_i[k]) - 64'(vaddr_q_i)) >> 1);
         if (hi < HwPerW) begin
           mem_hw = data_q_i[16*hi+:16];
           slot_bytes_ok[k] = (mem_hw == slot_instr_i[k][15:0]);

@@ -23,7 +23,9 @@ enum G6lcTraceKind {
   G6LC_LOG_NPC,
   G6LC_LOG_COMMIT,
   G6LC_LOG_MEM,
-  G6LC_LOG_GPR
+  G6LC_LOG_GPR,
+  G6LC_LOG_HOLD,
+  G6LC_LOG_WRACK
 };
 
 struct G6lcTraceRule {
@@ -36,6 +38,15 @@ struct G6lcTraceRule {
   uint64_t last_npc;
   uint64_t last_gpr[32];
   unsigned last_gpr_valid;
+  unsigned last_hold_v;
+  unsigned last_hold_hit;
+  unsigned last_hold_ldv;
+  uint64_t last_hold_pa;
+  uint64_t last_hold_data;
+  uint64_t last_hold_lpa;
+  unsigned last_wr_req;
+  unsigned last_wr_ack;
+  uint64_t last_wr_data;
 };
 
 inline int g6lc_gpr_idx(const char *n) {
@@ -152,6 +163,12 @@ inline bool g6lc_parse_rule(const char *line, G6lcTraceRule *r) {
     } else if (std::strcmp(what, "gpr") == 0) {
       r->kind = G6LC_LOG_GPR;
       std::snprintf(r->tag, sizeof(r->tag), "gpr");
+    } else if (std::strcmp(what, "hold") == 0) {
+      r->kind = G6LC_LOG_HOLD;
+      std::snprintf(r->tag, sizeof(r->tag), "hold");
+    } else if (std::strcmp(what, "wrack") == 0) {
+      r->kind = G6LC_LOG_WRACK;
+      std::snprintf(r->tag, sizeof(r->tag), "wrack");
     } else
       return false;
   } else

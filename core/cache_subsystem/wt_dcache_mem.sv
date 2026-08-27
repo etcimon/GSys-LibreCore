@@ -127,6 +127,7 @@ module wt_dcache_mem
 
   logic cmp_en_d, cmp_en_q;
   logic rd_acked;
+  logic wr_denied;
   logic [NumPorts-1:0] bank_collision, rd_req_masked, rd_req_prio;
 
   ///////////////////////////////////////////////////////
@@ -153,12 +154,19 @@ module wt_dcache_mem
     end
   end
 
-  assign vld_wdata     = wr_vld_bits_i;
-  assign vld_addr      = (wr_cl_vld_i) ? wr_cl_idx_i : rd_idx_i[vld_sel_d];
+  // Same-cycle deny-inval: drop valid on the hit way when wr_ack is
+  // denied (load vs word-write same bank). Delayed-by-1 (nackinv-d1)
+  // hung packed namelen (h0 cap @40000); keep this pairing.
+  assign vld_wdata     = wr_denied ? '0 : wr_vld_bits_i;
+  assign vld_addr      = (wr_cl_vld_i) ? wr_cl_idx_i :
+                         (wr_denied)   ? wr_idx_i :
+                                         rd_idx_i[vld_sel_d];
   assign rd_tag        = rd_tag_i[vld_sel_q];  //delayed by one cycle
   assign bank_off_d    = (wr_cl_vld_i) ? wr_cl_off_i : rd_off_i[vld_sel_d];
   assign bank_idx_d    = (wr_cl_vld_i) ? wr_cl_idx_i : rd_idx_i[vld_sel_d];
-  assign vld_req       = (wr_cl_vld_i) ? wr_cl_we_i : (rd_acked) ? '1 : '0;
+  assign vld_req       = (wr_cl_vld_i) ? wr_cl_we_i :
+                         (wr_denied)   ? wr_req_i :
+                         (rd_acked)    ? '1 : '0;
 
 
   // priority masking
@@ -187,11 +195,12 @@ module wt_dcache_mem
   assign rd_acked = rd_req & ~wr_cl_vld_i;
 
   always_comb begin : p_bank_req
-    vld_we   = wr_cl_vld_i;
-    bank_req = '0;
-    wr_ack_o = '0;
-    bank_we  = '0;
-    bank_idx = '{default: wr_idx_i};
+    vld_we    = wr_cl_vld_i;
+    wr_denied = 1'b0;
+    bank_req  = '0;
+    wr_ack_o  = '0;
+    bank_we   = '0;
+    bank_idx  = '{default: wr_idx_i};
 
     for (int k = 0; k < NumPorts; k++) begin
       bank_collision[k] = rd_off_i[k][CVA6Cfg.DCACHE_OFFSET_WIDTH-1:CVA6Cfg.XLEN_ALIGN_BYTES] == wr_off_i[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:CVA6Cfg.XLEN_ALIGN_BYTES];
@@ -218,6 +227,9 @@ module wt_dcache_mem
           );
           bank_we =
               dcache_cl_bin2oh(wr_off_i[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:CVA6Cfg.XLEN_ALIGN_BYTES]);
+        end else begin
+          wr_denied = 1'b1;
+          vld_we    = 1'b1;
         end
       end
     end

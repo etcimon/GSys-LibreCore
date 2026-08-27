@@ -7,6 +7,7 @@
 // You may obtain a copy of the License at https://solderpad.org/licenses/
 //
 // Authors: Cesar Fuguet
+// Modified by: Etienne Cimon (width casts; I$ miss resp comb defaults)
 // Date: February, 2023
 // Description: AXI arbiter for the CVA6 cache subsystem integrating standard
 //              CVA6's instruction cache and the Core-V High-Performance
@@ -144,9 +145,11 @@ module cva6_hpdcache_subsystem_axi_arbiter
 
   assign icache_miss_req_w = icache_miss_valid_i, icache_miss_ready_o = icache_miss_req_wok;
 
-  assign icache_miss_req_wdata.mem_req_addr = icache_miss_i.paddr;
-  assign icache_miss_req_wdata.mem_req_len = icache_miss_i.nc ? 0 : ICACHE_MEM_REQ_CL_LEN - 1;
-  assign icache_miss_req_wdata.mem_req_size = icache_miss_i.nc ? ICACHE_WORD_SIZE : ICACHE_MEM_REQ_CL_SIZE;
+  assign icache_miss_req_wdata.mem_req_addr = AxiAddrWidth'(icache_miss_i.paddr);
+  assign icache_miss_req_wdata.mem_req_len = hpdcache_pkg::hpdcache_mem_len_t'(
+      icache_miss_i.nc ? 0 : ICACHE_MEM_REQ_CL_LEN - 1);
+  assign icache_miss_req_wdata.mem_req_size = hpdcache_pkg::hpdcache_mem_size_t'(
+      icache_miss_i.nc ? ICACHE_WORD_SIZE : ICACHE_MEM_REQ_CL_SIZE);
   assign icache_miss_req_wdata.mem_req_id = icache_miss_i.tid;
   assign icache_miss_req_wdata.mem_req_command = hpdcache_pkg::HPDCACHE_MEM_READ;
   assign icache_miss_req_wdata.mem_req_atomic = hpdcache_pkg::hpdcache_mem_atomic_e'(0);
@@ -223,18 +226,14 @@ module cva6_hpdcache_subsystem_axi_arbiter
 
   //  In the case of uncacheable accesses, the Icache expects the data to be right-aligned
   always_comb begin : icache_miss_resp_data_comb
+    icache_miss_rdata = icache_miss_resp_data_rdata;
     if (!icache_miss_req_rdata.mem_req_cacheable) begin
-      automatic logic [ICACHE_UC_WORD_INDEX - 1:0] icache_miss_word_index;
+      automatic logic [ICACHE_UC_WORD_INDEX-1:0] icache_miss_word_index;
       automatic logic [63:0] icache_miss_word;
-      if (CVA6Cfg.AxiDataWidth > 64) begin
-        icache_miss_word_index = icache_miss_req_rdata.mem_req_addr[3+:ICACHE_UC_WORD_INDEX];
-      end else begin
-        icache_miss_word_index = 0;
-      end
+      icache_miss_word_index = (CVA6Cfg.AxiDataWidth > 64) ?
+          icache_miss_req_rdata.mem_req_addr[3+:ICACHE_UC_WORD_INDEX] : '0;
       icache_miss_word  = icache_miss_resp_data_rdata[icache_miss_word_index*64+:64];
       icache_miss_rdata = {{CVA6Cfg.ICACHE_LINE_WIDTH - 64{1'b0}}, icache_miss_word};
-    end else begin
-      icache_miss_rdata = icache_miss_resp_data_rdata;
     end
   end
 

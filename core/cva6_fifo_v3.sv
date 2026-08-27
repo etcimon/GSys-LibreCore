@@ -12,6 +12,7 @@
 // Author: Florian Zaruba <zarubaf@iis.ee.ethz.ch>
 // Additional contributions by:
 //                 Angela Gonzalez - PlanV Technologies
+// Modified by: Etienne Cimon (comb defaults; Verilator LATCH)
 
 module cva6_fifo_v3 #(
     parameter bit FALL_THROUGH = 1'b0,  // fifo is in fall-through mode
@@ -73,16 +74,21 @@ module cva6_fifo_v3 #(
 
   // read and write queue logic
   always_comb begin : read_write_comb
-    // default assignment
-    read_pointer_n  = read_pointer_q;
-    write_pointer_n = write_pointer_q;
-    status_cnt_n    = status_cnt_q;
-    if (FPGA_EN && FPGA_ALTERA) data_ft_n = data_ft_q;
-    if (FPGA_EN && FPGA_ALTERA) first_word_n = first_word_q;
+    // default assignment — every comb net on all paths (FPGA_EN=0 still
+    // elaborated the FPGA signals and Verilator inferred latches).
+    read_pointer_n         = read_pointer_q;
+    write_pointer_n        = write_pointer_q;
+    status_cnt_n           = status_cnt_q;
+    data_ft_n              = data_ft_q;
+    first_word_n           = first_word_q;
+    fifo_ram_we            = '0;
+    fifo_ram_write_address = '0;
+    fifo_ram_wdata         = '0;
+    fifo_ram_read_address  = '0;
+    mem_n                  = mem_q;
+    gate_clock             = 1'b1;
+    data_o                 = (DEPTH == 0) ? data_i : mem_q[read_pointer_q];
     if (FPGA_EN) begin
-      fifo_ram_we            = '0;
-      fifo_ram_write_address = '0;
-      fifo_ram_wdata         = '0;
       if (DEPTH == 0) begin
         data_o = data_i;
       end else begin

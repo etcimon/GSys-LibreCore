@@ -163,6 +163,10 @@ sites:
       Combined still 12eb2. I4cd I$ HOLD-FAIL reverted. I4dn IPI-seen kept.
       I4ce G1ao-on-cancel reverted (peel-identical). mini_stq_flush_fwd PASS.
       Not I4az / not I4cg.
+      2026-08-25: MT evidence is proxy-only
+      (architecture/multi-threading/testharness-proxy.md). I4dp 2-hart +
+      8-hart Linux 200M-cap tohost=0 must not regress. Classify from
+      runs/<tag>/run-*.log.
     verif_idea: >
       mini_fdt_a0_is_fdt Spike PASS / slfix FAIL 19.
       EXTRACT E0 g6lc_sb_keep landed. Soak then E1/G0. Not I4cg.

@@ -432,7 +432,7 @@ module csr_regfile
   // CSR Read logic
   // ----------------
   assign mstatus_extended = CVA6Cfg.IS_XLEN64 ? mstatus_q[CVA6Cfg.XLEN-1:0] :
-                              {mstatus_q.sd, mstatus_q.wpri3[7:0], mstatus_q[22:0]};
+                              {{CVA6Cfg.XLEN - 32{1'b0}}, mstatus_q.sd, mstatus_q.wpri3[7:0], mstatus_q[22:0]};
   assign mstatush = {24'h0, mstatus_q.mpv, mstatus_q.gva, mstatus_q.mbe, mstatus_q.sbe, 4'h0};
   if (CVA6Cfg.RVH) begin
     if (CVA6Cfg.IS_XLEN64) begin : gen_vsstatus_64read
@@ -445,11 +445,15 @@ module csr_regfile
   end
 
   always_comb begin : csr_read_process
+    logic [3:0]  pmpcfg_index;
+    logic [11:0] pmpaddr_index;
     // a read access exception can only occur if we attempt to read a CSR which does not exist
     read_access_exception = 1'b0;
     virtual_read_access_exception = 1'b0;
     csr_rdata = '0;
     perf_addr_o = csr_addr.address[11:0];
+    pmpcfg_index  = '0;
+    pmpaddr_index = '0;
 
     if (csr_read) begin
       unique case (conv_csr_addr.address)
@@ -666,7 +670,7 @@ module csr_regfile
         end
         riscv::CSR_SENVCFG: begin
           if (CVA6Cfg.RVS) begin
-            csr_rdata = '0 | fiom_q;
+            csr_rdata = {{CVA6Cfg.XLEN - 1{1'b0}}, fiom_q};
             if (CVA6Cfg.RVZiCbom) begin
               csr_rdata[5:4] = scbie_q;
               csr_rdata[6]   = scbcfe_q;
@@ -756,7 +760,7 @@ module csr_regfile
         // machine mode registers
         riscv::CSR_MSTATUS: csr_rdata = mstatus_extended;
         riscv::CSR_MSTATUSH:
-        if (CVA6Cfg.IS_XLEN32) csr_rdata = mstatush;
+        if (CVA6Cfg.IS_XLEN32) csr_rdata = CVA6Cfg.XLEN'(mstatush);
         else read_access_exception = 1'b1;
         riscv::CSR_MISA: csr_rdata = IsaCode;
         riscv::CSR_MEDELEG:
@@ -786,7 +790,7 @@ module csr_regfile
         riscv::CSR_MENVCFG: begin
           csr_rdata = '0;
           if (CVA6Cfg.RVU) begin
-            csr_rdata = '0 | fiom_q;
+            csr_rdata = {{CVA6Cfg.XLEN - 1{1'b0}}, fiom_q};
           end
           if (CVA6Cfg.RVZiCbom) begin
             csr_rdata[5:4] = mcbie_q;
@@ -826,18 +830,18 @@ module csr_regfile
         // Counters and Timers
         riscv::CSR_MCYCLE: csr_rdata = cycle_q[CVA6Cfg.XLEN-1:0];
         riscv::CSR_MCYCLEH:
-        if (CVA6Cfg.IS_XLEN32) csr_rdata = cycle_q[63:32];
+        if (CVA6Cfg.IS_XLEN32) csr_rdata = CVA6Cfg.XLEN'(cycle_q[63:32]);
         else read_access_exception = 1'b1;
         riscv::CSR_MINSTRET: csr_rdata = instret_q[CVA6Cfg.XLEN-1:0];
         riscv::CSR_MINSTRETH:
-        if (CVA6Cfg.IS_XLEN32) csr_rdata = instret_q[63:32];
+        if (CVA6Cfg.IS_XLEN32) csr_rdata = CVA6Cfg.XLEN'(instret_q[63:32]);
         else read_access_exception = 1'b1;
         riscv::CSR_CYCLE:
         if (CVA6Cfg.RVZicntr) csr_rdata = cycle_q[CVA6Cfg.XLEN-1:0];
         else read_access_exception = 1'b1;
         riscv::CSR_CYCLEH:
         if (CVA6Cfg.RVZicntr)
-          if (CVA6Cfg.IS_XLEN32) csr_rdata = cycle_q[63:32];
+          if (CVA6Cfg.IS_XLEN32) csr_rdata = CVA6Cfg.XLEN'(cycle_q[63:32]);
           else read_access_exception = 1'b1;
         else read_access_exception = 1'b1;
         riscv::CSR_INSTRET:
@@ -845,7 +849,7 @@ module csr_regfile
         else read_access_exception = 1'b1;
         riscv::CSR_INSTRETH:
         if (CVA6Cfg.RVZicntr)
-          if (CVA6Cfg.IS_XLEN32) csr_rdata = instret_q[63:32];
+          if (CVA6Cfg.IS_XLEN32) csr_rdata = CVA6Cfg.XLEN'(instret_q[63:32]);
           else read_access_exception = 1'b1;
         else read_access_exception = 1'b1;
         // `time`/`timeh` become real CSRs once the platform mtime value is wired
@@ -1093,14 +1097,15 @@ module csr_regfile
                 riscv::CSR_PMPCFG14,
                 riscv::CSR_PMPCFG15: begin
           // index is calculated using PMPCFG0 as the offset
-          automatic logic [3:0] index = csr_addr.address[11:0] - riscv::CSR_PMPCFG0;
+          pmpcfg_index = 4'(csr_addr.address[11:0] - riscv::CSR_PMPCFG0);
 
           // if index is not even and XLEN==64, raise exception
-          if (CVA6Cfg.IS_XLEN64 && index[0] == 1'b1) read_access_exception = 1'b1;
+          if (CVA6Cfg.IS_XLEN64 && pmpcfg_index[0] == 1'b1) read_access_exception = 1'b1;
           else begin
-            // The following line has no effect. It's here just to prevent the synthesizer from crashing
-            if (CVA6Cfg.IS_XLEN64) index = (index >> 1) << 1;
-            csr_rdata = pmpcfg_q[index*4+:CVA6Cfg.XLEN/8];
+            // Force even index on XLEN64 in the slice (odd already trapped). Do
+            // not re-assign the comb local — that inferred a latch on `index`.
+            csr_rdata = pmpcfg_q[(CVA6Cfg.IS_XLEN64 ? {pmpcfg_index[3:1], 1'b0}
+                                                    : pmpcfg_index)*4+:CVA6Cfg.XLEN/8];
           end
         end
         // PMPADDR
@@ -1169,14 +1174,14 @@ module csr_regfile
                 riscv::CSR_PMPADDR62,
                 riscv::CSR_PMPADDR63: begin
           // index is calculated using PMPADDR0 as the offset
-          automatic logic [11:0] index = csr_addr.address[11:0] - riscv::CSR_PMPADDR0;
+          pmpaddr_index = csr_addr.address[11:0] - riscv::CSR_PMPADDR0;
           // Important: we only support granularity 8 bytes (G=1)
           // -> last bit of pmpaddr must be set 0/1 based on the mode:
           // NA4, NAPOT: 1
           // TOR, OFF:   0
-          if (pmpcfg_q[index].addr_mode[1] == 1'b1)
-            csr_rdata = {pmpaddr_q[index][CVA6Cfg.PLEN-3:1], 1'b1};
-          else csr_rdata = {pmpaddr_q[index][CVA6Cfg.PLEN-3:1], 1'b0};
+          if (pmpcfg_q[pmpaddr_index].addr_mode[1] == 1'b1)
+            csr_rdata = CVA6Cfg.XLEN'({pmpaddr_q[pmpaddr_index][CVA6Cfg.PLEN-3:1], 1'b1});
+          else csr_rdata = CVA6Cfg.XLEN'({pmpaddr_q[pmpaddr_index][CVA6Cfg.PLEN-3:1], 1'b0});
         end
         default: read_access_exception = 1'b1;
       endcase
@@ -1866,17 +1871,17 @@ module csr_regfile
             mstatus_d.vs = riscv::Off;
           end
           if (!CVA6Cfg.RVS) begin
-            mstatus_d.sie  = riscv::Off;
-            mstatus_d.spie = riscv::Off;
-            mstatus_d.spp  = riscv::Off;
-            mstatus_d.sum  = riscv::Off;
-            mstatus_d.mxr  = riscv::Off;
-            mstatus_d.tvm  = riscv::Off;
-            mstatus_d.tsr  = riscv::Off;
+            mstatus_d.sie  = 1'b0;
+            mstatus_d.spie = 1'b0;
+            mstatus_d.spp  = 1'b0;
+            mstatus_d.sum  = 1'b0;
+            mstatus_d.mxr  = 1'b0;
+            mstatus_d.tvm  = 1'b0;
+            mstatus_d.tsr  = 1'b0;
           end
           if (!CVA6Cfg.RVU) begin
-            mstatus_d.tw   = riscv::Off;
-            mstatus_d.mprv = riscv::Off;
+            mstatus_d.tw   = 1'b0;
+            mstatus_d.mprv = 1'b0;
           end
           if ((!CVA6Cfg.RVH & mstatus_d.mpp == riscv::PRIV_LVL_HS) |
               (!CVA6Cfg.RVS & mstatus_d.mpp == riscv::PRIV_LVL_S) |
@@ -2061,11 +2066,11 @@ module csr_regfile
         // performance counters
         riscv::CSR_MCYCLE: cycle_d[CVA6Cfg.XLEN-1:0] = csr_wdata;
         riscv::CSR_MCYCLEH:
-        if (CVA6Cfg.IS_XLEN32) cycle_d[63:32] = csr_wdata;
+        if (CVA6Cfg.IS_XLEN32) cycle_d[63:32] = csr_wdata[31:0];
         else update_access_exception = 1'b1;
         riscv::CSR_MINSTRET: instret_d[CVA6Cfg.XLEN-1:0] = csr_wdata;
         riscv::CSR_MINSTRETH:
-        if (CVA6Cfg.IS_XLEN32) instret_d[63:32] = csr_wdata;
+        if (CVA6Cfg.IS_XLEN32) instret_d[63:32] = csr_wdata[31:0];
         else update_access_exception = 1'b1;
         //Event Selector
         riscv::CSR_MHPM_EVENT_3,
@@ -2390,7 +2395,7 @@ module csr_regfile
     if (CVA6Cfg.RVS || CVA6Cfg.RVF || CVA6Cfg.AiCfg.MatrixEn) begin
       mstatus_d.sd = (mstatus_d.xs == riscv::Dirty) | (mstatus_d.fs == riscv::Dirty);
     end else begin
-      mstatus_d.sd = riscv::Off;
+      mstatus_d.sd = 1'b0;
     end
     if (CVA6Cfg.RVH) begin
       vsstatus_d.sd = (vsstatus_d.xs == riscv::Dirty) | (vsstatus_d.fs == riscv::Dirty);
@@ -2542,7 +2547,7 @@ module csr_regfile
         mstatus_d.mpie = mstatus_q.mie;
         // save the previous privilege mode
         mstatus_d.mpp = priv_lvl_q;
-        mcause_d = (break_from_trigger) ? 32'h00000003 : ex_i.cause;
+        mcause_d = (break_from_trigger) ? CVA6Cfg.XLEN'(32'h00000003) : ex_i.cause;
         // set epc
         mepc_d = {{CVA6Cfg.XLEN - CVA6Cfg.VLEN{pc_i[CVA6Cfg.VLEN-1]}}, pc_i};
         // set mtval or stval
@@ -2969,9 +2974,9 @@ module csr_regfile
           if (csr_addr_i inside {[riscv::CSR_HPM_COUNTER_3 : riscv::CSR_HPM_COUNTER_31]} |
               csr_addr_i inside {[riscv::CSR_HPM_COUNTER_3H : riscv::CSR_HPM_COUNTER_31H]}) begin
             if (priv_lvl_o == riscv::PRIV_LVL_S && CVA6Cfg.RVS) begin
-              privilege_violation = ~mcounteren_q[csr_addr_i[4:0]];
+              privilege_violation = ~mcounteren_q[{1'b0, csr_addr_i[4:0]}];
             end else if (priv_lvl_o == riscv::PRIV_LVL_U && CVA6Cfg.RVU) begin
-              privilege_violation = ~mcounteren_q[csr_addr_i[4:0]] | ~scounteren_q[csr_addr_i[4:0]];
+              privilege_violation = ~mcounteren_q[{1'b0, csr_addr_i[4:0]}] | ~scounteren_q[{1'b0, csr_addr_i[4:0]}];
             end else if (priv_lvl_o == riscv::PRIV_LVL_M) begin
               privilege_violation = 1'b0;
             end
@@ -2981,9 +2986,9 @@ module csr_regfile
           if (csr_addr_i inside {[riscv::CSR_CYCLE : riscv::CSR_INSTRET]} |
               csr_addr_i inside {[riscv::CSR_CYCLEH : riscv::CSR_INSTRETH]}) begin
             if (priv_lvl_o == riscv::PRIV_LVL_S && CVA6Cfg.RVS) begin
-              privilege_violation = ~mcounteren_q[csr_addr_i[4:0]];
+              privilege_violation = ~mcounteren_q[{1'b0, csr_addr_i[4:0]}];
             end else if (priv_lvl_o == riscv::PRIV_LVL_U && CVA6Cfg.RVU) begin
-              privilege_violation = ~mcounteren_q[csr_addr_i[4:0]] | ~scounteren_q[csr_addr_i[4:0]];
+              privilege_violation = ~mcounteren_q[{1'b0, csr_addr_i[4:0]}] | ~scounteren_q[{1'b0, csr_addr_i[4:0]}];
             end else if (priv_lvl_o == riscv::PRIV_LVL_M) begin
               privilege_violation = 1'b0;
             end

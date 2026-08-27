@@ -7,6 +7,7 @@
 // You may obtain a copy of the License at https://solderpad.org/licenses/
 //
 // Authors: Cesar Fuguet
+// Modified by: Etienne Cimon (ICACHE_RDTXID sized localparam)
 // Date: February, 2023
 // Description: CVA6 cache subsystem integrating standard CVA6's
 //              instruction cache and the Core-V High-Performance L1
@@ -144,7 +145,8 @@ module cva6_hpdcache_subsystem
   logic icache_miss_resp_valid;
   icache_rtrn_t icache_miss_resp;
 
-  localparam int ICACHE_RDTXID = 1 << (CVA6Cfg.MEM_TID_WIDTH - 1);
+  localparam logic [CVA6Cfg.MEM_TID_WIDTH-1:0] ICACHE_RDTXID =
+      {1'b1, {CVA6Cfg.MEM_TID_WIDTH - 1{1'b0}}};
 
   g6lc_icache #(
       .CVA6Cfg(CVA6Cfg),

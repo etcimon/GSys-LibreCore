@@ -10,6 +10,7 @@
 //
 // Author: Matthias Baer <baermatt@student.ethz.ch>
 // Author: Igor Loi <igor.loi@unibo.it>
+// Modified by: Etienne Cimon (XLEN-cast ADDUW/SHnADDUW/xperm/rol; Verilator width)
 // Author: Andreas Traber <atraber@student.ethz.ch>
 // Author: Lukas Mueller <lukasmue@student.ethz.ch>
 // Author: Florian Zaruba <zaruabf@iis.ee.ethz.ch>
@@ -91,12 +92,12 @@ module alu
     if (CVA6Cfg.RVB) begin
       if (CVA6Cfg.IS_XLEN64) begin
         unique case (fu_data_i.operation)
-          SH1ADDUW:    operand_a_bitmanip = operand_a[31:0] << 1;
-          SH2ADDUW:    operand_a_bitmanip = operand_a[31:0] << 2;
-          SH3ADDUW:    operand_a_bitmanip = operand_a[31:0] << 3;
-          CTZW:        operand_a_bitmanip = operand_a_rev32;
-          ADDUW, CLZW: operand_a_bitmanip = operand_a[31:0];
-          CPOPW:       operand_a_cpop = fu_data_cpop_i.operand_a[31:0];
+          SH1ADDUW:    operand_a_bitmanip = CVA6Cfg.XLEN'(operand_a[31:0]) << 1;
+          SH2ADDUW:    operand_a_bitmanip = CVA6Cfg.XLEN'(operand_a[31:0]) << 2;
+          SH3ADDUW:    operand_a_bitmanip = CVA6Cfg.XLEN'(operand_a[31:0]) << 3;
+          CTZW:        operand_a_bitmanip = CVA6Cfg.XLEN'(operand_a_rev32);
+          ADDUW, CLZW: operand_a_bitmanip = CVA6Cfg.XLEN'(operand_a[31:0]);
+          CPOPW:       operand_a_cpop = CVA6Cfg.XLEN'(fu_data_cpop_i.operand_a[31:0]);
           default:     ;
         endcase
       end
@@ -271,7 +272,9 @@ module alu
     genvar i, m, n, q;
     for (i = 0; i < (CVA6Cfg.XLEN / 8); i++) begin : brev8_xperm8_gen
       // Generating xperm8_result by extracting bytes from operand a based on indices from operand b
-      assign xperm8_result[i << 3 +: 8] = (operand_b[i << 3 +: 8] < (CVA6Cfg.XLEN / 8)) ? operand_a[operand_b[i << 3 +: 8] << 3 +: 8] : 8'b0;
+      assign xperm8_result[i << 3 +: 8] = (operand_b[i << 3 +: 8] < 8'(CVA6Cfg.XLEN / 8))
+          ? operand_a[{operand_b[i << 3 +: 8][$clog2(CVA6Cfg.XLEN)-4:0], 3'b0} +: 8]
+          : 8'b0;
       // Generate brev8_reversed by reversing bits within each byte
       for (m = 0; m < 8; m++) begin : reverse_bits
         // Reversing the order of bits within a single byte
@@ -280,7 +283,9 @@ module alu
     end
     for (q = 0; q < (CVA6Cfg.XLEN / 4); q++) begin : xperm4_gen
       // Generating xperm4_result by extracting nibbles from operand a based on indices from operand b
-      assign xperm4_result[q << 2 +: 4] = (operand_b[q << 2 +: 4] < (CVA6Cfg.XLEN / 4)) ? operand_a[{2'b0, operand_b[q << 2 +: 4]} << 2 +: 4] : 4'b0;
+      assign xperm4_result[q << 2 +: 4] = (8'(operand_b[q << 2 +: 4]) < 8'(CVA6Cfg.XLEN / 4))
+          ? operand_a[{operand_b[q << 2 +: 4], 2'b0} +: 4]
+          : 4'b0;
     end
     if (CVA6Cfg.IS_XLEN32) begin
       // Generate zip and unzip results
@@ -319,7 +324,7 @@ module alu
       // Adder Operations
       ADD, SUB, ADDUW, SH1ADD, SH2ADD, SH3ADD: result_o = adder_result;
       // Shift Operations
-      SLL, SRL, SRA: result_o = CVA6Cfg.IS_XLEN64 ? shift_result : shift_result32;
+      SLL, SRL, SRA: result_o = CVA6Cfg.IS_XLEN64 ? shift_result : CVA6Cfg.XLEN'(shift_result32);
       // Comparison Operations
       SLTS, SLTU: result_o = {{CVA6Cfg.XLEN - 1{1'b0}}, less};
       default: ;  // default case to suppress unique warning
@@ -327,11 +332,11 @@ module alu
 
     if (CVA6Cfg.RVB) begin
       // Index for Bitwise Rotation
-      bit_indx = 1 << (operand_b & (CVA6Cfg.XLEN - 1));
+      bit_indx = CVA6Cfg.XLEN'(1) << operand_b[$clog2(CVA6Cfg.XLEN)-1:0];
       if (CVA6Cfg.IS_XLEN64) begin
         // rolw, roriw, rorw
-        rolw = ({{CVA6Cfg.XLEN-32{1'b0}},operand_a[31:0]} << operand_b[4:0]) | ({{CVA6Cfg.XLEN-32{1'b0}},operand_a[31:0]} >> (CVA6Cfg.XLEN-32-operand_b[4:0]));
-        rorw = ({{CVA6Cfg.XLEN-32{1'b0}},operand_a[31:0]} >> operand_b[4:0]) | ({{CVA6Cfg.XLEN-32{1'b0}},operand_a[31:0]} << (CVA6Cfg.XLEN-32-operand_b[4:0]));
+        rolw = (operand_a[31:0] << operand_b[4:0]) | (operand_a[31:0] >> (5'd0 - operand_b[4:0]));
+        rorw = (operand_a[31:0] >> operand_b[4:0]) | (operand_a[31:0] << (5'd0 - operand_b[4:0]));
         unique case (fu_data_i.operation)
           CLZW, CTZW:
           result_o = (lz_tz_wempty) ? 32 : {{CVA6Cfg.XLEN - 5{1'b0}}, lz_tz_wcount};  // change
@@ -368,10 +373,10 @@ module alu
 
         // Bitwise Rotation
         ROL:
-        result_o = CVA6Cfg.IS_XLEN64 ? ((operand_a << operand_b[5:0]) | (operand_a >> (CVA6Cfg.XLEN-operand_b[5:0]))) : ((operand_a << operand_b[4:0]) | (operand_a >> (CVA6Cfg.XLEN-operand_b[4:0])));
+        result_o = CVA6Cfg.IS_XLEN64 ? ((operand_a << operand_b[5:0]) | (operand_a >> (6'd0 - operand_b[5:0]))) : ((operand_a << operand_b[4:0]) | (operand_a >> (5'd0 - operand_b[4:0])));
 
         ROR, RORI:
-        result_o = CVA6Cfg.IS_XLEN64 ? ((operand_a >> operand_b[5:0]) | (operand_a << (CVA6Cfg.XLEN-operand_b[5:0]))) : ((operand_a >> operand_b[4:0]) | (operand_a << (CVA6Cfg.XLEN-operand_b[4:0])));
+        result_o = CVA6Cfg.IS_XLEN64 ? ((operand_a >> operand_b[5:0]) | (operand_a << (6'd0 - operand_b[5:0]))) : ((operand_a >> operand_b[4:0]) | (operand_a << (5'd0 - operand_b[4:0])));
 
         ORCB: result_o = orcbw_result;
         REV8: result_o = rev8w_result;
@@ -394,9 +399,9 @@ module alu
     if (CVA6Cfg.ZKN && CVA6Cfg.RVB) begin
       unique case (fu_data_i.operation)
         PACK:
-        result_o = CVA6Cfg.IS_XLEN32 ? ({operand_b[15:0], operand_a[15:0]}) : ({operand_b[31:0], operand_a[31:0]});
+        result_o = CVA6Cfg.IS_XLEN32 ? CVA6Cfg.XLEN'({operand_b[15:0], operand_a[15:0]}) : {operand_b[31:0], operand_a[31:0]};
         PACK_H:
-        result_o = CVA6Cfg.IS_XLEN32 ? ({16'b0, operand_b[7:0], operand_a[7:0]}) : ({48'b0, operand_b[7:0], operand_a[7:0]});
+        result_o = CVA6Cfg.IS_XLEN32 ? CVA6Cfg.XLEN'({16'b0, operand_b[7:0], operand_a[7:0]}) : {48'b0, operand_b[7:0], operand_a[7:0]};
         BREV8: result_o = brev8_reversed;
         XPERM8: result_o = xperm8_result;
         XPERM4: result_o = xperm4_result;
@@ -405,8 +410,8 @@ module alu
       if (fu_data_i.operation == PACK_W && CVA6Cfg.IS_XLEN64)
         result_o = {{32{operand_b[15]}}, {operand_b[15:0]}, {operand_a[15:0]}};
       if (CVA6Cfg.IS_XLEN32) begin
-        if (fu_data_i.operation == UNZIP) result_o = unzip_gen;
-        if (fu_data_i.operation == ZIP) result_o = zip_gen;
+        if (fu_data_i.operation == UNZIP) result_o = CVA6Cfg.XLEN'(unzip_gen);
+        if (fu_data_i.operation == ZIP) result_o = CVA6Cfg.XLEN'(zip_gen);
       end
     end
   end

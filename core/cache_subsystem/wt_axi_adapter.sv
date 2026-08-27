@@ -162,9 +162,9 @@ module wt_axi_adapter
     axi_rd_blen  = '0;
 
     if (dcache_data.paddr[2] == 1'b0) begin
-      axi_wr_user = {{64 - CVA6Cfg.AxiUserWidth{1'b0}}, dcache_data.user};
+      axi_wr_user = {{$bits(axi_wr_user) - CVA6Cfg.AxiUserWidth{1'b0}}, dcache_data.user};
     end else begin
-      axi_wr_user = {dcache_data.user, {64 - CVA6Cfg.AxiUserWidth{1'b0}}};
+      axi_wr_user = {dcache_data.user, {$bits(axi_wr_user) - CVA6Cfg.AxiUserWidth{1'b0}}};
     end
 
     // arbiter mux
@@ -281,7 +281,7 @@ module wt_axi_adapter
                 AMO_AND: begin
                   // in this case we need to invert the data to get a "CLR"
                   axi_wr_data[0] = ~{(CVA6Cfg.AxiDataWidth / CVA6Cfg.XLEN) {dcache_data.data}};
-                  axi_wr_user = ~{(CVA6Cfg.AxiDataWidth / CVA6Cfg.XLEN) {dcache_data.user}};
+                  axi_wr_user = ~{AxiNumWords{dcache_data.user}};
                   if (mbe_i) begin
                     axi_wr_atop = {
                       axi_pkg::ATOP_ATOMICLOAD, axi_pkg::ATOP_BIG_END, axi_pkg::ATOP_CLR
@@ -366,13 +366,7 @@ module wt_axi_adapter
                   // reversed (slang -Wrange-select-reversed). Full beat BE is fine.
                   // Wider AXI: enable the 8-byte lane selected by paddr[msb:3].
                   if (CVA6Cfg.AxiDataWidth >= 64 && dcache_data.size[1:0] == 2'b10) begin
-                    if (CVA6Cfg.AxiDataWidth == 64) begin
-                      axi_wr_be[0][7:0] = '1;
-                    end else begin
-                      axi_wr_be[0][dcache_data.paddr[$clog2(
-                          CVA6Cfg.AxiDataWidth/8
-                      )-1:3]*8+:8] = '1;
-                    end
+                    axi_wr_be[0][7:0] = '1;
                   end
                 end
                 default:  ;  // Do nothing

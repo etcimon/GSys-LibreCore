@@ -12,6 +12,7 @@
 // Date: 13.09.2018
 // Description: miss controller for WT dcache. Note that the current assumption
 // is that the port with the highest index issues writes instead of reads.
+// Modified by: Etienne Cimon (Verilator width)
 
 
 module wt_dcache_missunit
@@ -178,7 +179,7 @@ module wt_dcache_missunit
 
   assign cache_en_o = enable_q;
   assign cnt_d = (flush_en) ? cnt_q + 1 : '0;
-  assign flush_done = (cnt_q == CVA6Cfg.DCACHE_NUM_WORDS - 1);
+  assign flush_done = (cnt_q == $bits(cnt_q)'(CVA6Cfg.DCACHE_NUM_WORDS - 1));
 
   // Per-port load vs in-flight store-TX collision. LZC always prefers lower
   // indices (load ports) over the write-buffer port (NumPorts-1). If a load is
@@ -321,7 +322,7 @@ module wt_dcache_missunit
       end else begin
         amo_data = amo_data_a;
       end
-      if (CVA6Cfg.DATA_USER_EN) begin
+      if (CVA6Cfg.DATA_USER_EN != 0) begin
         amo_user = amo_data;
       end else begin
         amo_user = '0;

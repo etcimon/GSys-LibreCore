@@ -53,6 +53,19 @@ core/include/g6lc64_smt2_config_pkg.sv   # NrHarts=2, SMT_HYBRID, L2
 ## Sanctioned seam
 `NrHarts==1` remains behaviourally identity. Optional next: banked BHT/BTB; dual-commit multi-hart same cycle.
 
+## Harness of record (execution)
+
+All SMT / soft-ladder / dual-hart / 8-hart **evidence** (Spike ISS, Variane soaks,
+peels, TRACE, I4dp Linux 200M-cap) is produced only through
+`verif/regress/remote/testharness_proxy.py`. Plan:
+[`testharness-proxy.md`](testharness-proxy.md). Local WSL `work-ver-*` and
+`p<N>` scripts are not pins. Classify from `runs/<tag>/run-*.log`, not proxy rc.
+
+**Linux-boot scale** (OpenSBI observation ladder, `smt_legacy` oracle only,
+fetch_B’s four combos, named envelopes for N/T/I/RVV/stream):
+[`linux-boot-scale.md`](linux-boot-scale.md). Do not merge packages; do not
+churn `core/frontend`.
+
 ## Linux / rootfs track
 
 | Stage | Doc / suite | Status |

@@ -118,7 +118,7 @@ Line numbers are cited only where stable/known; otherwise the file is cited at m
 | CSRs (ch2, `#priv-csrs`) | implemented | `core/csr_regfile.sv`, `core/csr_buffer.sv`, `core/smt/g6lc_smt_csr_bank.sv` (G1dz: `csr_rdata`/`csr_exception` mux by commit hart) | — |
 | Reset (3.4, `#reset`) | implemented | `core/cva6.sv`, `core/csr_regfile.sv` (reset values) | — |
 | NMI (3.5, `#nmi`) | partial / config | `core/csr_regfile.sv`, `core/controller.sv` | `Smrnmi` |
-| PMA — physical memory attributes (3.6, `#pma`) | implemented | region rules in target pkg + `core/cva6.sv`, checked in `check_cfg` | `Nr{Cached,Execute,NonIdempotent}RegionRules` |
+| PMA — physical memory attributes (3.6, `#pma`) | implemented | region rules in target pkg + `core/cva6.sv`, checked in `check_cfg`. smt2 I4ag + `_v` S4: execute is `.text` (`0x1e000`) + payload `@0x80200000` (4 KiB smt2 / 32 MiB `_v`), not 1 GiB DRAM — I4v then refuses JALR into FDT/stack (`0x80046f2c`). S4 HPD: D$ loads of execute-region are uncacheable (`cva6_hpdcache_if_adapter` load PMA) so a `.text` jtab HIT cannot race I$ of the same 64 B L2 line | `Nr{Cached,Execute,NonIdempotent}RegionRules` |
 | PMP — physical memory protection (3.7, `#pmp`) | implemented | `core/pmp/` | `NrPMPEntries` |
 | Sv32 (4.3) | config | `core/cva6_mmu/` | `vm_mode_t` |
 | Sv39 (4.4, `#sv39`) | config | `core/cva6_mmu/` | `vm_mode_t` (`ModeSv39`) |

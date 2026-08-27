@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon (ZCMP/ZCMT port-0 slice; Verilator WIDTHTRUNC)
 // Date: 15.04.2017
 // Description: Instruction decode, contains the logic for decode,
 //              issue and read operands.
@@ -273,9 +274,9 @@ module id_stage #(
           .is_double_rd_macro_instr_o(is_double_rd_macro_instr)
       );
     end else begin
-      assign instruction_zcmp         = instruction_rvc;
-      assign is_illegal_zcmp          = is_illegal_rvc;
-      assign is_compressed_zcmp       = is_compressed_rvc;
+      assign instruction_zcmp         = instruction_rvc[0];
+      assign is_illegal_zcmp          = is_illegal_rvc[0];
+      assign is_compressed_zcmp       = is_compressed_rvc[0];
       assign stall_macro_deco_zcmp    = '0;
       assign is_last_macro_instr      = '0;
       assign is_double_rd_macro_instr = '0;
@@ -306,9 +307,9 @@ module id_stage #(
           .jump_address_o (jump_address)
       );
     end else begin
-      assign instruction_zcmt      = instruction_rvc;
-      assign is_illegal_zcmt       = is_illegal_rvc;
-      assign is_compressed_zcmt    = is_compressed_rvc;
+      assign instruction_zcmt      = instruction_rvc[0];
+      assign is_illegal_zcmt       = is_illegal_rvc[0];
+      assign is_compressed_zcmt    = is_compressed_rvc[0];
       assign stall_macro_deco_zcmt = '0;
       assign jump_address          = '0;
     end

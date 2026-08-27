@@ -104,8 +104,8 @@ module mult
           operand_a = sext32to64(fu_data_i.operand_a[31:0]);
           operand_b = sext32to64(fu_data_i.operand_b[31:0]);
         end else begin
-          operand_a = fu_data_i.operand_a[31:0];
-          operand_b = fu_data_i.operand_b[31:0];
+          operand_a = CVA6Cfg.XLEN'(fu_data_i.operand_a[31:0]);
+          operand_b = CVA6Cfg.XLEN'(fu_data_i.operand_b[31:0]);
         end
 
         // save whether we want sign extend the result or not, this is done for all word operations
@@ -143,7 +143,7 @@ module mult
 
   // Result multiplexer
   // if it was a signed word operation the bit will be set and the result will be sign extended accordingly
-  assign div_result = (CVA6Cfg.IS_XLEN64 && word_op_q) ? sext32to64(result) : result;
+  assign div_result = (CVA6Cfg.IS_XLEN64 && word_op_q) ? sext32to64(result[31:0]) : result;
 
   // ---------------------
   // Registers

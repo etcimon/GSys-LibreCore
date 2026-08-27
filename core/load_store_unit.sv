@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon (acc MMU misaligned exception pack)
 // Date: 19.04.2017
 // Description: Load Store Unit, handles address calculation and memory interface signals
 
@@ -470,7 +471,8 @@ module load_store_unit
         end
         ACC: begin
           // MMU input
-          misaligned_exception             = acc_mmu_req_i.acc_mmu_misaligned_ex;
+          misaligned_exception             = '0;
+          misaligned_exception.valid       = acc_mmu_req_i.acc_mmu_misaligned_ex;
           st_translation_req               = acc_mmu_req_i.acc_mmu_is_store;
           translation_req                  = acc_mmu_req_i.acc_mmu_req;
           mmu_vaddr                        = acc_mmu_req_i.acc_mmu_vaddr;

@@ -12,6 +12,7 @@
 // Date: 25.04.2017
 // Description: Store queue persists store requests and pushes them to memory
 //              if they are no longer speculative
+// Modified by: Etienne Cimon (comb defaults; Verilator LATCH)
 
 
 module store_buffer
@@ -125,7 +126,28 @@ module store_buffer
   // ----------------------------------------
   always_comb begin : core_if
     automatic logic [$clog2(DEPTH_SPEC):0] speculative_status_cnt;
+    automatic logic [$clog2(DEPTH_SPEC)-1:0] src, dst;
+    automatic logic [$clog2(DEPTH_SPEC):0] live, old_cnt;
+    automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.PLEN-1:0] a_addr;
+    automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] a_data;
+    automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] a_be;
+    automatic logic [DEPTH_SPEC-1:0][1:0] a_sz;
+    automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] a_tid;
+    automatic logic [DEPTH_SPEC-1:0] a_wr, a_fk;
+    automatic cbo_t a_cbo[DEPTH_SPEC];
     speculative_status_cnt      = speculative_status_cnt_q;
+    src     = '0;
+    dst     = '0;
+    live    = '0;
+    old_cnt = '0;
+    a_addr  = '0;
+    a_data  = '0;
+    a_be    = '0;
+    a_sz    = '0;
+    a_tid   = '0;
+    a_wr    = '0;
+    a_fk    = '0;
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
 
     // default assignments
     speculative_read_pointer_n  = speculative_read_pointer_q;
@@ -182,15 +204,6 @@ module store_buffer
     // Snapshot then rewrite dense [0 .. live) so pointers match status_cnt.
     if ((|cancelled_mask_i && !flush_i) ||
         (flush_i && CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1)) begin
-      automatic logic [$clog2(DEPTH_SPEC)-1:0] src, dst;
-      automatic logic [$clog2(DEPTH_SPEC):0] live, old_cnt;
-      automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.PLEN-1:0] a_addr;
-      automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] a_data;
-      automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] a_be;
-      automatic logic [DEPTH_SPEC-1:0][1:0] a_sz;
-      automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] a_tid;
-      automatic logic [DEPTH_SPEC-1:0] a_wr, a_fk;
-      automatic cbo_t a_cbo[DEPTH_SPEC];
       old_cnt = speculative_status_cnt_n;
       live = '0;
       dst  = '0;
@@ -257,7 +270,7 @@ module store_buffer
     end
 
     // we are ready if the speculative and the commit queue have a space left
-    ready_o = (speculative_status_cnt_n < (DEPTH_SPEC)) || commit_i;
+    ready_o = (speculative_status_cnt_n < $bits(speculative_status_cnt_n)'(DEPTH_SPEC)) || commit_i;
   end
 
   // ----------------------------------------
@@ -289,7 +302,7 @@ module store_buffer
     automatic logic [$clog2(DEPTH_COMMIT):0] commit_status_cnt;
     commit_status_cnt      = commit_status_cnt_q;
 
-    commit_ready_o         = (commit_status_cnt_q < DEPTH_COMMIT);
+    commit_ready_o         = (commit_status_cnt_q < $bits(commit_status_cnt_q)'(DEPTH_COMMIT));
     // no store is pending if we don't have any element in the commit queue e.g.: it is empty
     no_st_pending_o        = (commit_status_cnt_q == 0);
     // default assignments
@@ -432,6 +445,8 @@ module store_buffer
     automatic logic [$clog2(DEPTH_SPEC)-1:0]   sidx;
     data_m = '0;
     be_m   = '0;
+    cidx   = '0;
+    sidx   = '0;
 
     if (load_paddr_valid_i) begin
       for (int unsigned k = 0; k < DEPTH_COMMIT; k++) begin
@@ -604,7 +619,7 @@ module store_buffer
   else $error("[Commit Queue] You are trying to commit and flush in the same cycle");
 
   speculative_buffer_overflow :
-  assert property (@(posedge clk_i) rst_ni && (speculative_status_cnt_q == DEPTH_SPEC) |-> !valid_i)
+  assert property (@(posedge clk_i) rst_ni && (speculative_status_cnt_q == $bits(speculative_status_cnt_q)'(DEPTH_SPEC)) |-> !valid_i)
   else
     $error("[Speculative Queue] You are trying to push new data although the buffer is not ready");
 
@@ -613,7 +628,7 @@ module store_buffer
   else $error("[Speculative Queue] You are committing although there are no stores to commit");
 
   commit_buffer_overflow :
-  assert property (@(posedge clk_i) rst_ni && (commit_status_cnt_q == DEPTH_COMMIT) |-> !commit_i)
+  assert property (@(posedge clk_i) rst_ni && (commit_status_cnt_q == $bits(commit_status_cnt_q)'(DEPTH_COMMIT)) |-> !commit_i)
   else $error("[Commit Queue] You are trying to commit a store although the buffer is full");
   //pragma translate_on
 endmodule

@@ -1090,8 +1090,18 @@ module cva6
     // G1df: COLD_EXCL does not outlive boot-hart WFI.
     // G1dg MINI-FAIL: do not also lift after DRAM+grace
     // (hart1 interleaved the shared boot path).
-    // Do not lower 200000. Not G3 switch-to-sp0. SMT.
-    assign cold_excl = (smt_cold_q < SMT_COLD_EXCL) && ~smt_hart_halt[0];
+    // SL-C: IPI-seen peer also lifts cold_excl (I4dn). OpenSBI lottery
+    // must run the secondary while _boot_status==1; waiting for cookie
+    // WFI is status==2 and re-entry amoswaps 2→1 (G1di). Do not lower
+    // 200000. Not G3 switch-to-sp0. SMT.
+    logic peer_ipi_seen;
+    always_comb begin
+      peer_ipi_seen = 1'b0;
+      for (int unsigned h = 1; h < CVA6Cfg.NrHarts; h++)
+        if (smt_hart_seen_q[h]) peer_ipi_seen = 1'b1;
+    end
+    assign cold_excl = (smt_cold_q < SMT_COLD_EXCL) && ~smt_hart_halt[0] &&
+                       ~peer_ipi_seen;
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         smt_boot_done_q      <= 1'b0;
@@ -1120,9 +1130,11 @@ module cva6
         // Count consecutive cycles the active hart still needs first DRAM exit.
         if (smt_switch) begin
           smt_boot_hold_cnt_q <= '0;
-          // Arm one-shot exclusive for a never-before-active incoming hart.
-          // smt_switch pulses with active already equal to the incoming hart.
-          if (!smt_hart_seen_q[smt_active_hart] && smt_boot_done_q &&
+          // Arm one-shot exclusive for a hart that has not yet left ROM.
+          // I4dn may already have set seen_q via IPI; !seen would skip
+          // exclusive and RR would yank hart1 mid-lottery. smt_switch
+          // pulses with active already equal to the incoming hart.
+          if (!smt_hart_left_rom_q[smt_active_hart] && smt_boot_done_q &&
               (smt_dram_grace_q >= SMT_DRAM_GRACE)) begin
             smt_hart_seen_q[smt_active_hart] <= 1'b1;
             smt_first_act_excl_q             <= SMT_FIRST_ACT_EXCL;

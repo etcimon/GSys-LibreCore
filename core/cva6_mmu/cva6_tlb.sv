@@ -13,6 +13,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Angela Gonzalez PlanV Technology
+// Modified by: Etienne Cimon (comb defaults; Verilator LATCH)
 // Date: 26/02/2024
 //
 // Description: Translation Lookaside Buffer, parameterizable to Sv32 or Sv39,
@@ -97,7 +98,7 @@ module cva6_tlb
   logic [TLB_ENTRIES-1:0] napot_tag_match;
   pte_cva6_t patched_pte;
   logic [TLB_ENTRIES-1:0] vpn0_napot_match;
-  assign v_st_enbl = (CVA6Cfg.RVH) ? {v_i, g_st_enbl_i, s_st_enbl_i} : '1;
+  assign v_st_enbl = (CVA6Cfg.RVH) ? $bits(v_st_enbl)'({v_i, g_st_enbl_i, s_st_enbl_i}) : '1;
   //-------------
   // Translation
   //-------------
@@ -194,6 +195,7 @@ module cva6_tlb
     match_stage    = '{default: 0};
     g_content      = '{default: 0};
     lu_gpaddr_o    = '{default: 0};
+    patched_pte    = '{default: 0};
 
     for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
       // First level match, this may be a giga page, check the ASID flags as well
@@ -276,8 +278,8 @@ module cva6_tlb
     end
   end
 
-  logic [HYP_EXT:0] asid_to_be_flushed_is0;  // indicates that the ASID provided by SFENCE.VMA (rs2) is 0, active high
-  logic [HYP_EXT:0] vaddr_to_be_flushed_is0;  // indicates that the VADDR provided by SFENCE.VMA (rs1) is 0, active high
+  logic asid_to_be_flushed_is0;  // ASID from SFENCE.VMA (rs2) is 0, active high
+  logic vaddr_to_be_flushed_is0;  // VADDR from SFENCE.VMA (rs1) is 0, active high
   logic vmid_to_be_flushed_is0;  // indicates that the VMID provided is 0, active high
   logic gpaddr_to_be_flushed_is0;  // indicates that the GPADDR provided is 0, active high
   logic flush_addr_napot_match;
@@ -296,10 +298,17 @@ module cva6_tlb
   // Update and Flush
   // ------------------
   always_comb begin : update_flush
-    tags_n    = tags_q;
-    content_n = content_q;
+    tags_n                 = tags_q;
+    content_n              = content_q;
+    temp_stored_vpn        = '0;
+    flush_vpn_masked       = '0;
+    stored_vpn_masked      = '0;
+    flush_addr_napot_match = 1'b0;
+    flush_addr_matches     = 1'b0;
+    vpn_to_store           = '0;
 
     for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
+      gppn[i] = '0;
 
 
       if (CVA6Cfg.RVH) begin
@@ -318,7 +327,7 @@ module cva6_tlb
       end
 
       if (tags_q[i].is_napot_64k && CVA6Cfg.SvnapotEn) begin
-        temp_stored_vpn = {tags_q[i].vpn[2], tags_q[i].vpn[1], tags_q[i].vpn[0]};
+        temp_stored_vpn = CVA6Cfg.VpnLen'({tags_q[i].vpn[2], tags_q[i].vpn[1], tags_q[i].vpn[0]});
         // Mask the lower 4 bits of the VPN (addr[15:12]) for comparison
         flush_vpn_masked = vaddr_to_be_flushed_i[CVA6Cfg.VpnLen+11:12] & ~'hF;
         stored_vpn_masked = temp_stored_vpn & ~'hF;
@@ -406,6 +415,7 @@ module cva6_tlb
   logic [2*(TLB_ENTRIES-1)-1:0] plru_tree_q, plru_tree_n;
   always_comb begin : plru_replacement
     plru_tree_n = plru_tree_q;
+    replace_en  = '0;
     // The PLRU-tree indexing:
     // lvl0        0
     //            / \
@@ -433,6 +443,9 @@ module cva6_tlb
         int unsigned i = 0; i < TLB_ENTRIES; i++
     ) begin
       automatic int unsigned idx_base, shift, new_index;
+      idx_base  = 0;
+      shift     = 0;
+      new_index = 0;
       // we got a hit so update the pointer as it was least recently used
       if (lu_hit[i] & lu_access_i) begin
         // Set the nodes to the values we would expect
@@ -463,7 +476,10 @@ module cva6_tlb
     for (int unsigned i = 0; i < TLB_ENTRIES; i += 1) begin
       automatic logic en;
       automatic int unsigned idx_base, shift, new_index;
-      en = 1'b1;
+      en        = 1'b1;
+      idx_base  = 0;
+      shift     = 0;
+      new_index = 0;
       for (int unsigned lvl = 0; lvl < $clog2(TLB_ENTRIES); lvl++) begin
         idx_base = $unsigned((2 ** lvl) - 1);
         // lvl0 <=> MSB, lvl1 <=> MSB-1, ...
@@ -516,7 +532,7 @@ module cva6_tlb
   function int countSetBits(logic [TLB_ENTRIES-1:0] vector);
     automatic int count = 0;
     foreach (vector[idx]) begin
-      count += vector[idx];
+      count += int'(vector[idx]);
     end
     return count;
   endfunction

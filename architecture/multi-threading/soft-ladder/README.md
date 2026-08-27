@@ -21,6 +21,7 @@ G1 genericity / least-coupled SMT2: `CONTRACT.md`.
 | **Generic residual scaffold** | Same axes as the rest of residual work: **plane** (spike/veri) · **package/target** · **stack height** (bare → OpenSBI → Linux) · **SUCCESS contract** · **peel matrix** for isolation. Soft-ladder is one *profile* of that scaffold. |
 | **RTL first, soft last** | Every residual class is tried as **B1 directed mini → RTL fix → peel** before any permanent B2 firmware soft. Soft nops/shims only buy time to *find* the RTL bug. |
 | **SUCCESS is suite metadata** | Soft-ladder green = trapdump cookie **`51b1babe` only** (not harness tohost SUCCESS). Encode that in suite docs / soak exit criteria, not tribal knowledge. |
+| **Proxy is the harness of record** | Spike, Variane soaks, peels, TRACE, and I4dp Linux-cap runs go through `verif/regress/remote/testharness_proxy.py` only. Plan: [`../testharness-proxy.md`](../testharness-proxy.md). Classify from `runs/<tag>/run-*.log`. |
 | **Oracle retires** | `mk_plat_skip.py` shrinks as peels land; end state is stock or **source** OpenSBI profile + RTL that runs it under DI. |
 | **Boot stage is the progress unit** | Residual *classes* say what to repair; **boot stages F0–F6** say what to attempt next, gated by an A/B pair (`smt_legacy` g1\* oracle vs `fetch_B`). See `firmware-boot-principles.md`. |
 
@@ -118,7 +119,7 @@ Target shape (implement / keep aligned with `defaults.ts` + `AGENTS-regress-scri
 
 | Knob class | Examples | Scaffold meaning |
 |------------|----------|------------------|
-| Package / harness | `SOFT_LADDER_HARNESS=work-ver-smt2-fw64`, `DV_TARGET=g6lc64_smt2` | Topology + FETCH_WIDTH / DI package |
+| Package / harness | Remote `work-ver-smt2-fw64-B` via proxy (`SOFT_LADDER_HARNESS` on the builder), `DV_TARGET=g6lc64_smt2` | Topology + FETCH_WIDTH / DI package. **Do not** cite a local WSL Mdir. |
 | **Fetch flavour** | `SOFT_LADDER_FETCH=legacy` (A, g1\* oracle) · `SOFT_LADDER_FETCH=B` (`core/fetch_B`) | Same config/ELF both sides — an A-green/B-red pair is a **fetch** divergence by construction (`firmware-boot-principles.md` F-P2). Never falls back across flavours. |
 | Stack height | bare mini · soft OpenSBI · stock OpenSBI · Linux | Climb only after lower green |
 | SUCCESS mode | cookie `51b1babe` · hang `51b1dead` · tohost (minis only) | Suite metadata; osbi ≠ mini |
@@ -170,7 +171,7 @@ Each iteration is a **closed loop** over **one residual class**:
 | Path | Role |
 |------|------|
 | `README.md` (this file) | North star, phases P0–P6, scaffold contract, iteration loop |
-| `firmware-boot-principles.md` | **Boot-stage ladder F0–F6** + A/B blame truth table. Decides *which stage* to attempt next. |
+| [`../../firmware-boot-principles.md`](../../firmware-boot-principles.md) | **Boot-stage ladder F0–F6** + A/B blame. Decides *which stage* to attempt next. |
 | `COMPLETION.md` | Generic classes G0–G5 through SL-C/SL-T. G0 waits on EXTRACT E0. |
 | `EXTRACT.md` | **Standing next-action:** designated `core/smt/g6lc_*` extracts **before** G0. E0 = `g6lc_sb_keep`. |
 | `CONT-FULL-MAP.md` | All cont.2–51 → bucket, soft, RTL status, peel checklist |
@@ -179,6 +180,8 @@ Each iteration is a **closed loop** over **one residual class**:
 | `b1-rtl-residuals.md` | B1 deep map → core files / directed tests |
 | `b2-firmware-policy.md` | B2 OpenSBI/platform profile sketch (P5) |
 | `b3-sim-harness.md` | B3 SUCCESS / suite / peel knobs (P0+P3) |
+| [`../testharness-proxy.md`](../testharness-proxy.md) | **Harness of record:** proxy-only Spike/soak/peel/TRACE/I4dp |
+| [`../linux-boot-scale.md`](../linux-boot-scale.md) | OpenSBI O0–O8 × fetch_B four combos × named envelopes (N/T/I/RVV/stream) |
 | `monorepo-soak-integration.md` | monorepo-soak × cont.## apply/skip + RTL sync set |
 
 Upstream narrative: `../smt2-bringup.md` (cont.33–51).  
@@ -190,22 +193,27 @@ Oracle (temporary): `software/smt2-linux/soft-ladder/` on authoritative tree.
 ## 6. How to start the next unit of work
 
 ```text
-0. Read firmware-boot-principles.md — pick the lowest un-green boot stage (F0-F6).
+0. Read ../testharness-proxy.md — doctor the proxy; no local Variane evidence.
+   Read ../../firmware-boot-principles.md — pick the lowest un-green boot stage (F0-F6).
 1. Read EXTRACT.md — E0 soaked; E1–E3 combined extract; then G0 on the barrier.
 2. P0 if needed: soft-ladder-di / soft-ladder-osbi listed optional in defaults.ts
 3. inventory.yaml → highest priority open B1 id (today: b1-fdt-lenp-store)
-4. A/B the stage, then read the blame truth table before touching any RTL:
-     SOFT_LADDER_FETCH=legacy bash verif/regress/soft-ladder-opensbi-soak.sh
-     SOFT_LADDER_FETCH=B      bash verif/regress/soft-ladder-opensbi-soak.sh
+4. A/B the stage **through the proxy**, then read the blame truth table before touching RTL:
+     python3 verif/regress/remote/testharness_proxy.py soak --flavour legacy
+     python3 verif/regress/remote/testharness_proxy.py soak --flavour B
    A-green + B-red → core/fetch_B (one L1-L4 combo). A-red → generic class / B2.
-5. I2: directed mini with fail-codes on slfix (stage 0: mini_fdt_a0_is_fdt)
+   Classify from the soak log, not the proxy rc ([`../testharness-proxy.md`](../testharness-proxy.md)).
+5. I2: directed mini with fail-codes; `run <elf> --flavour B --tag b1-… --pull` (stage 0: mini_fdt_a0_is_fdt)
 6. I3: ONE generic class from COMPLETION.md §2; hold-safe; SI identity
-7. I4: mini green → hold cookie → PEEL/nat. Hold-FAIL or peel-identical+mini-green → revert
+7. I4: mini green → soak hold cookie → PEEL/nat, all via proxy. Hold-FAIL or peel-identical+mini-green → revert
 8. I5: shrink mk_plat_skip only after PEEL cookie (stage 3)
-9. Only if residual is true product policy → B2 source profile (P5)
+9. I4dp hygiene if the class touches SMT ready / IPI / fetch / STQ (2-hart + 8-hart 200M-cap logs)
+10. Only if residual is true product policy → B2 source profile (P5)
 ```
 
 Active iteration and backlog: `ITERATION.md`.  
-Boot stages (F0…F6) and A/B blame: `firmware-boot-principles.md`.  
+Boot stages (F0…F6) and A/B blame: [`../../firmware-boot-principles.md`](../../firmware-boot-principles.md).  
+Execution: [`../testharness-proxy.md`](../testharness-proxy.md).  
 Completion stages (G0…SL-T): `COMPLETION.md`.  
-Queue edge: `AGENTS-todo.md` (SL-A…E + SL-T).
+Queue edge: `AGENTS-todo.md` (SL-A…E + SL-P + SL-N + SL-T).  
+Linux-boot scale: [`../linux-boot-scale.md`](../linux-boot-scale.md).

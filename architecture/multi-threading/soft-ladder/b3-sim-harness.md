@@ -3,6 +3,12 @@
 These pieces must **never** be required for production ROM or tape-out firmware.
 They define how the **residual scaffold** decides “green” and how peels isolate B1 work.
 
+**Harness of record:** all Spike / Variane soak / peel / TRACE / I4dp Linux-cap
+evidence is produced through `verif/regress/remote/testharness_proxy.py` only.
+Plan: [`../testharness-proxy.md`](../testharness-proxy.md). Classify from
+`runs/<tag>/run-*.log` (a long `run` may return rc=255 on SSH drop). Harness
+`tohost=0` is **not** soft-ladder SUCCESS.
+
 Long-term home: **build-platform optional suites + docs**, not `tmp-*` oracles.
 See parent `README.md` phases **P0** (register contract) and **P3** (stack climb).
 
@@ -30,7 +36,7 @@ Harness `SUCCESS (tohost=0)` without `[1000]=…51b1babe` is **not** green for o
 | `verif/regress/AGENTS-regress-scripts.md` | Isolation ladder + env knobs | Keep in lockstep |
 | `verif/regress/dual-iss-regress.sh` | Dual-plane; `SOFT_LADDER=1` appends B1 minis | Related, optional |
 | `software/smt2-linux/soft-ladder/mk_plat_skip.py` | Temporary binary oracle | Shrink on every peel; retire at P4 complete |
-| `CVA6_TRAP_DUMP=1` / Variane `+time_out=` | TB observability | Sim-only |
+| `CVA6_TRAP_DUMP=1` / Variane `+time_out=` | TB observability. `[hangpc]` is C0 SMT banks; `_v` also `[hangpc1]` (core1) when built with `G6LC_CVA6_GEN_ACC` | Sim-only |
 | `CVA6_COOKIE_EXIT=1` | Stop at DRAM `51b1babe` @+0x1000 (no checkpoint/resume). `=0` disables (G1de). | osbi hold/nat |
 | `CVA6_SOAK_EXIT=1` | Also stop on pin mepc/mcause and dual-WFI (not `51b1c001`) | osbi peel + fail-fast |
 | `+quiet_axi` | Drop AXI R/B `$warning` flood (I/O) | all slfix soaks |
@@ -61,7 +67,7 @@ Optional later **diag**: path-check for oracle/ELF; cookie grep helper — compa
 
 | Variable | Scripts | Meaning |
 |----------|---------|---------|
-| `SOFT_LADDER_HARNESS` | di + osbi | Prefer `work-ver-smt2-fw64` (FETCH_WIDTH≥64) |
+| `SOFT_LADDER_HARNESS` | di + osbi (on the **builder**) | Remote `work-ver-smt2-fw64-B`; set by proxy `soak` / `run --verlib`. Do not cite a local WSL Mdir. |
 | `PEEL_*` | osbi + oracle | Bisect natural path; not default product |
 | `SOFT_*` / default soft sites | oracle | Holding softs; inventory-tracked |
 | `DV_TARGET` / package | suites | Topology package (smt2 vs stream8) |
@@ -138,6 +144,7 @@ Stock Variane: `TB_CPP=corev_apu/tb/ariane_tb.cpp`.
 4. **Shrink rule:** no new hard-coded VA in `mk_plat_skip` without `inventory.yaml` row.
 5. Lottery / multi-hart sim force stays separate from platform multi-hart bring-up.
 6. Prefer directed minis that promote to **RTL** over growing soft defaults (P1–P2 active: FDT lenp).
+7. **Proxy-only evidence** ([`../testharness-proxy.md`](../testharness-proxy.md)): Spike/soak/peel/TRACE/I4dp via `testharness_proxy.py`. Close in-proxy: `spike` subcommand; `run` `+tohost_addr` / `CVA6_*`; `soak --tag --pull`; flavour catalog for server-math-v / ooo-server. Do not close these with WSL `p<N>` scripts.
 
 ## Related docs
 

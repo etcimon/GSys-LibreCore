@@ -337,6 +337,9 @@ module rv_tracer #(
         // init
         branch_valid = '0;
         branch_taken = '0;
+        address = '0;
+        updiscon = '0;
+        turn_on_tracer_d = turn_on_tracer_q;
         
         privchange_d = privchange_q;
         // context_change_d = context_change_q;
@@ -879,7 +882,7 @@ module rv_tracer #(
             enc_activated_q <= '0;
             enc_deactivated_q <= '0;
             //packets_lost_q <= '0; // non mandatory
-            enc_config_q <= te_pkg::DELTA_ADDRESS; // 3'b0
+            enc_config_q <= $bits(enc_config_q)'(te_pkg::DELTA_ADDRESS); // 3'b0
             enc_config_change_q <= '0;
             branch_taken_q <= '0;
             branch_q <= '0;

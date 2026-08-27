@@ -238,11 +238,15 @@ the DTS triple (`package ⇔ .dts ⇔ spec`) is per package.
 |---------|---|---|---|-----|-------|-----|-----|-----------------|
 | `g6lc64_smt2` | 1 | 2 | 2 | 0 | 1 | **0** | BHT | **on** (living soup) |
 | `g6lc64_stream8` | 2 | 1 | **1** | 0 | 1 | **1** | TAGE_LITE | **off** (`NrHarts=1`) |
-| `g6lc64_server_math_v` | 1 | 1 | 2 | **1** | **0** | **1** | (server) | **off** (`NrHarts=1`) |
+| `g6lc64_server_math_v` | **2** | **2** | 2 | **1** | **0** | **1** | (server) | leftover banks on; sibling layer 2 follows T=2 |
+| `g6lc64_ooo_server` | **4** | **2** | **4** | 0 | 1 | **1** | (ooo) | leftover banks on; I=4 is L3 `geo.issue`, not a hart |
 
 `S = N×T` software harts. Issue width is **not** a Linux hart.
 `ariane-smt2.dts` = one core, two threads. `ariane-stream8.dts` = two cores,
 one thread. Same `cpu@` count, different `cpu-map` (`fdt-topology-soft-ladder.md`).
+Live Linux-cap packages (`_v` N=2 T=2, `ooo_server` N=4 T=2 I=4) are the
+I4dp bar — see [`../linux-boot-scale.md`](../linux-boot-scale.md). Do not
+plan ooo_server as T=1.
 
 Stream8 already has **`RVH=1`** (H-edge 3/3 on `kvm-h-veri`) plus `RVZacas`,
 `DeepSpecEn`, L2, snoop — ISA/cluster, not fetch recover. Catalog G1 **keep**
@@ -391,8 +395,8 @@ From `remaining-upgrade-sequence.md`, `stream8-class.md`, `multi-core/README.md`
 |----------|-------------------|---|---|---|---|---|-------|-------|---------|
 | **SMT / soft-ladder** | `g6lc64_smt2` | 1 | 2 | 2 | 0→1 (§6.5) | 0 | 1 | BHT, L2 | **on** |
 | **Stream / CRT** | `g6lc64_stream8` | 2…8 | 1 | 1→2 (§6.2) | 1 | 0 | 1 | TAGE, DeepSpec, Zacas, L2, snoop | **off** |
-| **Server math + RVV** | `g6lc64_server_math_v` | 1–2 | 1 | 2 | 1 | **1** | **0** | Ara; AI-2 if SS+accel | **off** |
-| **OoO server** | `g6lc64_ooo_server` | 4 | 1 | 2+ | 1 | 0 | 1 | `OoOEn`, L3, HWPF | **off** |
+| **Server math + RVV** | `g6lc64_server_math_v` | **2** | **2** | 2 | 1 | **1** | **0** | Ara; I4dp Linux-cap bar | leftover on (T=2) |
+| **OoO server** | `g6lc64_ooo_server` | **4** | **2** | **4** | 1 | 0 | 1 | `OoOEn`, L3, HWPF; I4dp 8-hart cap | leftover on (T=2); n-wide = L3 |
 | **AI card** | `g6lc64_ai` | (stream-class) | 1 | 1 | 1 | 0 | 1 | `ai_island` MMIO + CVXIF AI | **off** |
 | **Hybrid (future)** | *new pkg* | 2–4 | 2 | 2 | cfg | 0 xor V | xor | `S=N×T≤8` | **on** per core |
 | **Router (scaffold)** | proposed `cv64a6_router` | 1 then 2 | 1 then 2 | 2 | cfg | 0 | 1 | HPDCACHE, Zic64b 64 B lines | on iff `T=2` |

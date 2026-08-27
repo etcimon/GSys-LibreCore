@@ -284,7 +284,7 @@ package build_config_pkg;
     cfg.FETCH_USER_WIDTH = CVA6Cfg.FetchUserWidth;
     cfg.FETCH_USER_EN = CVA6Cfg.FetchUserEn;
     // Non-zero enables (DataUserEn/FetchUserEn are int unsigned enables).
-    cfg.AXI_USER_EN = (CVA6Cfg.DataUserEn != 0) || (CVA6Cfg.FetchUserEn != 0);
+    cfg.AXI_USER_EN = ((CVA6Cfg.DataUserEn != 0) || (CVA6Cfg.FetchUserEn != 0)) ? 1 : 0;
 
     // Front-end bus: enough bits for NrIssuePorts compressed (16b) or full (32b)
     // instructions, rounded up to the next supported power-of-two width.

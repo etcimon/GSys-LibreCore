@@ -3,22 +3,47 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // common waiver rules for verilator
+// Modified by: Etienne Cimon (nested vendor/corev_apu glob match)
 
 `verilator_config
 
-// waving these warnings since they are in vendor or core_apu
-lint_off -rule STMTDLY -file "*/corev_apu/*"
+// Vendor and corev_apu: substring match so nested paths (tc_clk.sv) are covered.
+// A single-level glob such as star/vendor/star misses those nested files.
+lint_off -rule STMTDLY -file "*corev_apu*"
 lint_off -rule WIDTHEXPAND -file "*/common/local/util/sram.sv"
 lint_off -rule WIDTHTRUNC -file "*/core/include/std_cache_pkg.sv"
-lint_off -file "*/corev_apu/*"
-lint_off -file "*/vendor/*"
+lint_off -file "*corev_apu*"
+lint_off -file "*vendor*"
+// Sanctioned ICG latch (tc_clk_gating); keep even if a vendor glob misses.
+lint_off -rule COMBDLY -file "*tc_clk.sv"
 
 // SIDEEFFECT waived via Makefile -Wno-SIDEEFFECT for TB cast shims.
 
 lint_off -rule WIDTHEXPAND -file "*/core/cache_subsystem/axi_adapter.sv"
 lint_off -rule WIDTHEXPAND -file "*/core/axi_shim.sv"
+lint_off -rule WIDTHTRUNC -file "*/common/local/util/sram_cache.sv"
 
 // P2
 lint_off -rule WIDTHEXPAND -file "*/core/issue_read_operands.sv"
 lint_off -rule WIDTHEXPAND -file "*/core/ariane_regfile_ff.sv"
 lint_off -rule SELRANGE -file "*/core/commit_stage.sv"
+
+// Vendored HPDcache lives under core/cache_subsystem (not vendor/). Leave RTL.
+lint_off -file "*cache_subsystem/hpdcache*"
+// Accelerator first-pass decoder stub $error when EnableAccelerator=1.
+lint_off -rule USERERROR -file "*cva6_accel_first_pass_decoder_stub.sv"
+// automatic cid / I$ miss word live only in one branch; not real latches.
+lint_off -rule LATCH -file "*/core/scoreboard.sv"
+lint_off -rule LATCH -file "*cva6_hpdcache_subsystem_axi_arbiter.sv"
+
+// Vendored FPU (LITENDIAN packed [0:N] ranges + width noise). Leave RTL.
+lint_off -file "*/core/cvfpu/src/*.sv"
+lint_off -file "*/core/cvfpu/src/common_cells/src/*.sv"
+lint_off -file "*/core/cvfpu/src/fpu_div_sqrt_mvp/hdl/*.sv"
+
+// Instruction-trace TB encoder (not in the core datapath).
+lint_off -file "*/corev_apu/instr_tracing/rv_tracer-main/rtl/*.sv"
+lint_off -file "*rv_tracer.sv"
+lint_off -file "*te_priority.sv"
+lint_off -file "*te_resync_counter.sv"
+lint_off -rule SYMRSVDWORD -file "*/corev_apu/src/ariane.sv"

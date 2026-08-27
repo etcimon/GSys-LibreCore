@@ -6,6 +6,8 @@ Companion to [`SPEC.md`](SPEC.md). Maps every A present/keep/kill/rewrite **valu
 Handoff: map g1\* present/keep/kill onto fetch combos; leftover fabricate stays in **`smt_legacy`**.
 **After** that retirement, this table is how **B** (`core/fetch_B`) grows a capability: add a row,
 not a fifth combo. Frozen A is `core/frontend`. Peels and hold-soak stay P1–P4.
+Linux-boot / N×T×I / RVV / stream: use these four combos only —
+[`../multi-threading/linux-boot-scale.md`](../multi-threading/linux-boot-scale.md).
 
 ---
 
@@ -31,7 +33,10 @@ B today (`core/fetch_B/frontend.sv` — kill + L2 window + I8 `arch_src` + I19 `
 
 ```text
 kill_s1         = g6lc_fetch_pkg::kill_s1(is_mispredict, flush_i, replay)
-bp_fire         = bp_valid && predict_fetchable(target)   // I19; not on resolve
+bp_fire         = bp_valid && predict_fetchable(target) && cf_consumed
+                  // I19; not on resolve. cf_consumed = IQ accepted a CF slot
+                  // (ras_push already). Else leftover-complete jal is dropped
+                  // via icache_valid_q while npc already went to the target.
 kill_s2         = g6lc_fetch_pkg::kill_s2(kill_s1, bp_fire)
 redirect_hit    = window_accept(icache_valid_q, 0, same_win(vaddr, redirect_pc))
 redirect_accept = window_accept(if_ready, kill_s2, same_win(fetch_addr, redirect_pc))
@@ -52,6 +57,12 @@ iq push         = packet_accept(overflow)   // I7 all-or-nothing
 iq.hart         = packet_hart(en, smt_hart) // L3; decode from entry, not active
 iq.upto_cf      = packet_upto_cf(taken, slots)  // L3; first predicted CF ends packet
 redirect_hold   = redirect_rehold(!ftq, pend, lost, hit)
+bp_pend         = set on bp_fire; clear on flush/misp or same_win(return, tgt)
+icache_take     = (dreq.valid|lbuf) && bp_ret_ok(pend, same_win(vaddr, tgt))
+                  && !replay
+                  // L2: drop sequential 12ad0 after leftover jal; not inflight same_win
+                  // exact vaddr==tgt MINI-FAIL; start_pc extra-shift SIGSEGV
+                  // leftover_ret_ok / leftover_take_ok MINI-FAIL (unbounded leftover hold)
 stall_csr_older = younger issue port waits if an older port is CSR  // I13; not fetch
 ```
 
@@ -104,7 +115,16 @@ per-hart leftover/switch (`en.restore`).
 | Do not replace the live I$ window | `fe_keep` `G1y/aq/bl…` | L2 | `window_accept` + `same_win` |
 | All-or-nothing window | `G1az/cx/ej/bm` `I7` | L2 | `packet_accept` — IQ pushes none if any needed FIFO is full |
 | Oldest-PC issue | `G1be/cy` `I6` | L3 | IQ drain rotate; no opcode head |
+| IQ oldest push-order drain | callee 12888 before sds | DELETE | MINI-FAIL `s4-v-i6ord-minis`: all 10 hang @40000 illegal npc=`0x10048`. Do not re-land |
+| IQ port 1 fallthrough-only + ID one-fill | mixed-packet dual-issue | DELETE | Hygiene PASS identical; v4 pin **unchanged** 12974→12888. Not the hang. Reverted |
+| Hold IQ-push of bp target until CF drained | callee pushed while jal still in IQ | DELETE | SIGSEGV rc=-11 all 10 minis (`s4-v-tgthold-minis`). Do not re-land. Not delay-until-alloc / icache_ret_ok |
+| leftover_ret_ok: take only leftover_next while pending + npc hold | 12966 twice (12960 before bltu@12956) | DELETE | MINI-FAIL `s4-v-lohold-minis`: 2jr hang @40000 illegal; stock hang; osbi rc=255. Reverted. Do not hold fetch on leftover (I4az/G1bq). 12970 fetched not committed |
+| leftover_foreign: zero IQ-push of leftover_drop foreign window + npc=carry+2 no kill | same 12966 twice | DELETE | SIGSEGV rc=-11 all 10 `s4-v-lofor-minis`. Reverted. Do not re-land. Hang starts at kill_s2 of leftover-complete 12958 |
+| leftover_ret_ok take-only (no npc hold) + replay clears icache_valid_q | same 12966 twice | DELETE | MINI-FAIL `s4-v-lretake-minis`: 2jr hang @40000 illegal; stock hang. Do not gate sequential HIT on leftover_pending |
+| fetch_B IQ FIFO DEPTH 4→8 | leftover-complete 4-slot replay t=125002 full=8 | L3 | Hygiene PASS. Early visits 12956-before-12966. Trapping visit still 12966 twice (12960 before 12956). Keep. Do not bump to 16. Parameterize via `CVA6Cfg` later |
 | Packet ends at first predicted CF | IQ `branch_mask` | L3 | `packet_upto_cf` — n-wide `geo.slots`; BTB-miss jalr stays NoCF |
+| CF predict target is per IQ slot | address FIFO head on every port | DELETE | SIGSEGV rc=-11 all 10 minis after widening `instr_data_t` with `tgt` (Verilator 5.008 FIFO dtype). Do not re-land |
+| JAL EX mismatch vs IQ addr FIFO | `target != predict_address` | DELETE | B `cf==NoCF`-only Jump mispredict: hygiene PASS, v4 pin **unchanged** IAF `0xfffffff58001e000` t=125120 (cmt still 12974 then 12994). Not the hang. Reverted |
 | Re-present killed redirect | `redirect_hold` | L4 | `redirect_rehold` (`!ftq && pend && lost && !hit`) |
 | L2 live[] expected | dbg used npc (starve) | L2 observe | `window_expected` = hold ? redirect : vaddr; leftover slot0 always ge |
 | Packet carries fetch hart | decoder `smt_hart_id_i` (active) | L3 | `packet_hart` at IQ push; B decode from `fetch_entry.hart_id` |
@@ -114,6 +134,12 @@ per-hart leftover/switch (`en.restore`).
 | Do not switch mid-trap | `I4br` `I23` | L4 | `smt_trap_hold_o` |
 | Sequential step is one window | `G1fu…gd` +2 HOLD-FAIL | L4 | `next_block` |
 | Predict may filter; resolve never | `I4t/v/ah` `I11` `I19` | L4 | `predict_fetchable` on `bp_fire` only; misp unfiltered |
+| Redirect only after IQ consumed the CF | ras_push already consumed-gated | L4 | `bp_fire &&= cf_consumed`; do not classify on consume (G1br) |
+| Epoch squash younger IQ on mispredict | global `flush_if` emptied prologue | DELETE | MINI-FAIL `s4-v-epoch-minis`: 2jr hang @40000; osbi/split/nested tohost=12; frame32 tohost=1. G1z class — squashed **all** mispredicts including jalr with last_bp=0 |
+| Epoch squash Jump/Return only, last_bp!=0 | same, jalr drained IQ | DELETE | MINI-FAIL `s4-v-epoch-jr-minis`: 2jr tohost=1 @542 a00=3; stock tohost=4 @819 a00=9; osbi tohost=12 store-fault; split tohost=12; frame32 hang @40000. Still G1z. Do not re-land |
+| Delay bp_fire until SB CF alloc | consume-only lost 12976 | DELETE | MINI-FAIL `s4-v-cfalloc-minis`: hang @40000 IAF npc=0x20; split/jal_sd/beqz/nested tohost=12 @370. Do not re-land |
+| Register only the outstanding I$ window | bp_fire kill_s2 lost sequential 12ad0 | DELETE | MINI-FAIL `s4-v-retok-minis`: stock/osbi/alias hang; frame32 tohost=136; bnez_jal_split tohost=12 |
+| Drop sequential I$ return only while bp_pend | 12ad0 leftover_drop after leftover jal | L2 | `bp_ret_ok(pend, same_win)`; exact `vaddr==tgt` MINI-FAIL; `start_pc` extra-shift SIGSEGV |
 | jalr/jr is CF even without BTB | R5 | DELETE on B | HOLD-FAIL `018aeebb`: `sp1=0` `mepc1=0x348/2` — JumpR with target 0 |
 | Spare `kill_s2` of in-flight | `fe_kill` `G1cq/hs/jn` | DELETE | — |
 | Fabricate sibling `c.jalr` | `G1kk…mf` `sib_cjalr` | DELETE | — (RC3) |

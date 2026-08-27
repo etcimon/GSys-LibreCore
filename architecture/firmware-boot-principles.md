@@ -118,10 +118,11 @@ Adding a **capability** (this is the point of Phase 2):
 | Stream I=1 → I=2 | `geo.issue=2`, `en.restore=0` | stream leftover mini + stream FDT shape; **not** smt2 7ba; catalog G1 keep may arm — soak keep, not recover |
 | n-wide 2→4 | `geo.issue=4`; L3 loop | sibling mini only if `T>1`; barrier/keep re-soak |
 | `NrCores` 1→N | no fetch edit | DTS `cpu-map`, CLINT `S=N×T`, `stream8-smoke` |
-| `NrHarts` 2→4 | `geo.harts`; leftover banks | G3 `sp==0` mini; `check_cfg` |
+| `NrHarts` 2→4 | `geo.harts`; leftover banks | G3 `sp==0` mini; `check_cfg` (`MAX=2` today — see `linux-boot-scale.md` S8) |
 | `RVH` | inject suppressed on I$ exception; no H ports | H-edge on **that** package; DTS `h` iff `RVH=1` |
 | RVV / Ara | no fetch ports | `_v` package after AI-2; DTS `v` only there |
 | DeepSpec / OoO | flush/mispredict levels; maybe `hold_max` | `ooo-l3-tests`; no `mem_q` scan in fetch |
+| n-wide 2→4 / stream I=2 / Linux Image | **L3 `geo.issue` or L1 leftover only** | [`multi-threading/linux-boot-scale.md`](multi-threading/linux-boot-scale.md) S4–S7; `_v`/`ooo_server` are the live Linux-cap envelopes |
 
 B fails hold → revert **that** capability increment; A (last green fetch) is untouched. A new fetch
 **port** is a review. Peels never hide an open B1 hole (soft-ladder P5).
@@ -245,6 +246,11 @@ Testable without OpenSBI. Against `CVA6Cfg` only — never a literal address, re
 | **E5** | Spike committed-stream vs B | instruction oracle |
 
 Firmware soak is a **gate**, not a search signal. Cookie is not a new peel site.
+
+A/B soaks, directed minis used as firmware evidence, Spike ISS (E5), and I4dp
+Linux 200M-cap runs go through `verif/regress/remote/testharness_proxy.py` only
+([`multi-threading/testharness-proxy.md`](multi-threading/testharness-proxy.md)).
+Classify from `runs/<tag>/run-*.log`, not the proxy process rc.
 
 ---
 

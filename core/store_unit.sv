@@ -173,7 +173,7 @@ module store_unit
   assign paddr_to_sb = (state_q == CBOZ_ISSUE || state_q == CBOZ_WAIT)
                            ? (cboz_base_q + CVA6Cfg.PLEN'(cboz_beat_q * CBOZ_STRIDE))
                            : (CVA6Cfg.RVZiCboz && cbo_op_q == ariane_pkg::CBO_ZERO)
-                                 ? (paddr_i & ~CVA6Cfg.PLEN'(CBOZ_LINE_B - 1))
+                                 ? (paddr_i & ~(CVA6Cfg.PLEN'(CBOZ_LINE_B) - CVA6Cfg.PLEN'(1)))
                                  : paddr_i;
 
   // output assignments
@@ -221,7 +221,7 @@ module store_unit
         // Further beats use CBOZ_WAIT → CBOZ_ISSUE (no ready↔valid combo loop).
         if (CVA6Cfg.RVZiCboz && cbo_op_q == ariane_pkg::CBO_ZERO) begin
           st_valid_without_flush = 1'b1;
-          cboz_base_d = paddr_i & ~CVA6Cfg.PLEN'(CBOZ_LINE_B - 1);
+          cboz_base_d = paddr_i & ~(CVA6Cfg.PLEN'(CBOZ_LINE_B) - CVA6Cfg.PLEN'(1));
           if (!flush_i) st_valid = 1'b1;
           if (CBOZ_BEATS <= 1 || flush_i) begin
             valid_o     = 1'b1;

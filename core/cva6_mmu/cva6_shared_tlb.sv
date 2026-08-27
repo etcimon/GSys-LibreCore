@@ -19,6 +19,7 @@
 //              to be used with sv32, sv39 and sv39x4.
 
 /* verilator lint_off WIDTH */
+/* verilator lint_off SELRANGE */
 
 module cva6_shared_tlb #(
     parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
@@ -663,7 +664,7 @@ module cva6_shared_tlb #(
 
       if (CVA6Cfg.RVH) begin
         if (shared_tag_rd[i].v_st_enbl[0]) begin
-          gppn_i[CVA6Cfg.GPPNW-1:0] = pte[i][0].ppn[CVA6Cfg.GPPNW-1:0];
+          gppn_i[CVA6Cfg.VpnLen-1:0] = pte[i][0].ppn[CVA6Cfg.VpnLen-1:0];
 
           if (shared_tag_rd[i].is_page[1][0]) gppn_i[VPN_SEG_W-1:0] = shared_tag_rd[i].vpn[0];
           if (shared_tag_rd[i].is_page[0][0])

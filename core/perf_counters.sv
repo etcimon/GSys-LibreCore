@@ -287,19 +287,19 @@ module perf_counters
     end
 
     //Read
-    if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3)) && (addr_i < ( csr_addr_t'(riscv::CSR_MHPM_COUNTER_3) + MHPMCounterNum)) ) begin
+    if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3)) && (addr_i < ( csr_addr_t'(riscv::CSR_MHPM_COUNTER_3) + csr_addr_t'(MHPMCounterNum))) ) begin
       if (riscv::XLEN == 32) begin
-        data_o = generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3+1][31:0];
+        data_o = CVA6Cfg.XLEN'(generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3+1][31:0]);
       end else begin
         data_o = generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3+1];
       end
-    end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H)) && (addr_i < ( csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H) + MHPMCounterNum)) ) begin
+    end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H)) && (addr_i < ( csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H) + csr_addr_t'(MHPMCounterNum))) ) begin
       if (riscv::XLEN == 32) begin
-        data_o = generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32];
+        data_o = CVA6Cfg.XLEN'(generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32]);
       end else begin
         read_access_exception = 1'b1;
       end
-    end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_EVENT_3)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_EVENT_3) + MHPMCounterNum)) ) begin
+    end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_EVENT_3)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_EVENT_3) + csr_addr_t'(MHPMCounterNum))) ) begin
       // Pack architectural mhpmeventN: selector in low bits; OF/filter when Sscofpmf.
       data_o = CVA6Cfg.XLEN'(mhpmevent_q[addr_i-riscv::CSR_MHPM_EVENT_3+1]);
       if (CVA6Cfg.SscofpmfEn && CVA6Cfg.IS_XLEN64) begin
@@ -308,15 +308,15 @@ module perf_counters
         data_o[61] = sinh_q[addr_i-riscv::CSR_MHPM_EVENT_3+1];
         data_o[60] = uinh_q[addr_i-riscv::CSR_MHPM_EVENT_3+1];
       end
-    end else if( (addr_i >= csr_addr_t'(riscv::CSR_HPM_COUNTER_3)) && (addr_i < (csr_addr_t'(riscv::CSR_HPM_COUNTER_3) + MHPMCounterNum)) ) begin
+    end else if( (addr_i >= csr_addr_t'(riscv::CSR_HPM_COUNTER_3)) && (addr_i < (csr_addr_t'(riscv::CSR_HPM_COUNTER_3) + csr_addr_t'(MHPMCounterNum))) ) begin
       if (riscv::XLEN == 32) begin
-        data_o = generic_counter_q[addr_i-riscv::CSR_HPM_COUNTER_3+1][31:0];
+        data_o = CVA6Cfg.XLEN'(generic_counter_q[addr_i-riscv::CSR_HPM_COUNTER_3+1][31:0]);
       end else begin
         data_o = generic_counter_q[addr_i-riscv::CSR_HPM_COUNTER_3+1];
       end
-    end else if( (addr_i > csr_addr_t'(riscv::CSR_HPM_COUNTER_3H)) && (addr_i < (csr_addr_t'(riscv::CSR_HPM_COUNTER_3H) + MHPMCounterNum)) ) begin
+    end else if( (addr_i > csr_addr_t'(riscv::CSR_HPM_COUNTER_3H)) && (addr_i < (csr_addr_t'(riscv::CSR_HPM_COUNTER_3H) + csr_addr_t'(MHPMCounterNum))) ) begin
       if (riscv::XLEN == 32) begin
-        data_o = generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32];
+        data_o = CVA6Cfg.XLEN'(generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32]);
       end else begin
         read_access_exception = 1'b1;
       end
@@ -324,19 +324,19 @@ module perf_counters
 
     //Write
     if (we_i) begin
-      if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_COUNTER_3) + MHPMCounterNum)) ) begin
+      if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_COUNTER_3) + csr_addr_t'(MHPMCounterNum))) ) begin
         if (riscv::XLEN == 32) begin
-          generic_counter_d[addr_i-riscv::CSR_MHPM_COUNTER_3+1][31:0] = data_i;
+          generic_counter_d[addr_i-riscv::CSR_MHPM_COUNTER_3+1][31:0] = data_i[31:0];
         end else begin
           generic_counter_d[addr_i-riscv::CSR_MHPM_COUNTER_3+1] = data_i;
         end
-      end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H) + MHPMCounterNum)) ) begin
+      end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H) + csr_addr_t'(MHPMCounterNum))) ) begin
         if (riscv::XLEN == 32) begin
-          generic_counter_d[addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32] = data_i;
+          generic_counter_d[addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32] = data_i[31:0];
         end else begin
           update_access_exception = 1'b1;
         end
-      end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_EVENT_3)) && (addr_i < csr_addr_t'(riscv::CSR_MHPM_EVENT_3) + MHPMCounterNum) ) begin
+      end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_EVENT_3)) && (addr_i < csr_addr_t'(riscv::CSR_MHPM_EVENT_3) + csr_addr_t'(MHPMCounterNum)) ) begin
         // WARL: selector always writable; OF/filter only with Sscofpmf.
         // Writing 0 to OF clears it (spec); writing 1 is ignored (sticky set).
         mhpmevent_d[addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[MHPMEventWidth-1:0];

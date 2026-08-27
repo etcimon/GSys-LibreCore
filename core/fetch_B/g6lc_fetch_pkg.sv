@@ -278,6 +278,18 @@ package g6lc_fetch_pkg;
     predict_fetchable = is_inside_execute_regions(cfg, target);
   endfunction
 
+  // L4: redirect only if IQ accepted a CF slot. ras_push/ras_pop already
+  // require consumed. Without this, bp_fire drops icache_valid_q while a
+  // leftover-complete jal is still unissued. Does not classify CF
+  // (NEGATIVE G1br). Timing: OR of slots already on the consume path.
+  function automatic logic cf_consumed(
+      input logic [7:0] valid,
+      input logic [7:0] taken,
+      input logic [7:0] consumed
+  );
+    cf_consumed = |(valid & taken & consumed);
+  endfunction
+
   // L2 expected PC for live[] / prefix drop. Not npc (npc has already
   // next_block'd). Leftover slot0 is the previous window — always ge.
   function automatic logic [63:0] window_expected(
@@ -296,6 +308,26 @@ package g6lc_fetch_pkg;
     slot_ge_expected = lo_head || (pc >= exp);
   endfunction
 
+  // Prefix drop must not eat a direct jal/call when RAS returns into the
+  // same window (jal@12990 vs beqz@12994). Return/branch/addi still drop
+  // (12970 +16/ret vs next_tag@12974). Scan bits already on this cone.
+  function automatic logic slot_keep_link(
+      input logic ge,
+      input logic link
+  );
+    slot_keep_link = ge || link;
+  endfunction
+
+  // Latch on I$ take: predicted-target window uses tgt (mid-window
+  // prefix drop). Sequential uses the return vaddr. Not npc.
+  function automatic logic [63:0] present_expected(
+      input logic pend,
+      input logic [63:0] tgt,
+      input logic [63:0] vaddr
+  );
+    present_expected = pend ? tgt : vaddr;
+  endfunction
+
   // Re-present a killed redirect (no FTQ). Not a stall: NPC holds the
   // target only while that request was lost. I9 observe; I23 bound is
   // dbg-only (do not silent-release — NEGATIVE unbounded vs early lift).
@@ -306,6 +338,13 @@ package g6lc_fetch_pkg;
       input logic hit
   );
     redirect_rehold = !ftq && pend && lost && !hit;
+  endfunction
+
+  // L2: after bp_fire, keep sequential HIT; drop only a return that is
+  // not the predicted window (NEGATIVE icache_ret_ok gated every return).
+  // Exact vaddr==tgt MINI-FAIL (s4-v-bppc-minis): I$ vaddr is window-aligned.
+  function automatic logic bp_ret_ok(input logic pend, input logic same);
+    bp_ret_ok = !pend || same;
   endfunction
 
   // L3: keep through the first taken CF inclusive. Width is geo.slots

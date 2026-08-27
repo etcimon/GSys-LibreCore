@@ -535,7 +535,7 @@ module commit_stage
 
     if (CVA6Cfg.SDTRIG && !CVA6Cfg.DebugEn && break_from_trigger_i) begin
       exception_o.valid = 1'b1;
-      exception_o.cause = 32'h00000003;
+      exception_o.cause = CVA6Cfg.XLEN'(32'h00000003);
     end
   end
 

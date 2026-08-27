@@ -83,9 +83,14 @@ Hold bound = `geo.hold_max` (`SLOTS`, or FTQ depth). Unbounded hold is the large
 class.
 
 Live B: `redirect_hit` / `redirect_accept` are `window_accept` + `same_win` (no `[VLEN-1:ALIGN]`
-literals). `live_mask` is observed in `g6lc_fetch_dbg` (`slot_live` + `window_expected` +
-`slot_ge_expected`); **not** an IQ drop — `accept` includes `kill_s2`, which would eat taken
-jumps. `wr=` is I$ valid ∩ ¬same_win. Do not use `npc` as L2 expected (npc has `next_block`'d).
+literals). `live[]` masks IQ `instruction_valid` with `slot_keep_link` (`pc>=exp` **or**
+direct jal/call). Return/branch/addi still drop (`12970` vs `next_tag@12974`).
+`present_expected` is latched on I$ take (`bp_pend ? tgt : vaddr`). `accept` is 1 here —
+do not AND `kill_s2` (eats taken jumps). Leftover slot0 is always ge. `wr=` is I$ valid ∩
+¬same_win. Do not use `npc` as L2 expected (npc has `next_block`'d). Not I$ extra-shift
+(NEGATIVE `start_pc`) and not exact `vaddr==tgt` (NEGATIVE `bp_pend` exact-PC).
+`bp_ret_ge` (`vaddr>=tgt` + hold `seq_base` on tgt) is the same class as exact-PC
+(stock/osbi/frame/alias/split MINI-FAIL) — do not re-land.
 
 ---
 
@@ -138,7 +143,8 @@ stole hart1's bootrom `jr s0`.
 
 Opaque hint `{taken, target, cf_type, confidence}`. Suppression is I19 only. Per-hart RAS/GHR/ckpt
 (I20). `g6lc_cf_legal(regime, target)` at priority 8 only — never on resolve. `BPType` is not a
-fetch input.
+fetch input. `bp_fire` also requires the CF slot was consumed (IQ accept); classification is
+independent of consume (NEGATIVE G1br).
 
 ---
 

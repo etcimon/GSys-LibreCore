@@ -284,7 +284,6 @@ module instr_queue
     end
   end
 
-  // a slot is popped when its issue port fires as part of the prefix
   always_comb begin : gen_pop
     pop_instr = '0;
     for (int unsigned f = 0; f < NrFifo; f++) begin
@@ -324,9 +323,11 @@ module instr_queue
   // ----------------------
   for (genvar i = 0; i < NrFifo; i++) begin : gen_instr_fifo
     // do not save an instruction if we could not save its branch target
+    // DEPTH=4 replay'd leftover-complete 4-slot packets (s4-v-kill2
+    // t=125002 replay=1 full=8). Dual-issue drain vs 4-wide leftover.
     cva6_fifo_v3 #(
         .FPGA_ALTERA(CVA6Cfg.FpgaAlteraEn),
-        .DEPTH(ariane_pkg::FETCH_FIFO_DEPTH),
+        .DEPTH(8),
         .dtype(instr_data_t),
         .FPGA_EN(CVA6Cfg.FpgaEn)
     ) i_fifo_instr_data (

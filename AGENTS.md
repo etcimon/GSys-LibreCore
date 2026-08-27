@@ -240,9 +240,13 @@ All Verilator-based CVA6 builds, regressions, and soaks — including `soft-ladd
 testharness proxy (`verif/regress/remote/testharness_proxy.py`) against the configured remote host.
 Do not run `make verilate`, `soft-ladder-build-harness.sh`, `soft-ladder-opensbi-soak.sh`, or any
 `Variane_testharness` invocation directly on the Windows host or in WSL except for a one-off local
-diagnostic that is explicitly noted as such. This ensures a single toolchain version, avoids Windows
-OpenSSH/ControlMaster and `rsync` availability issues, preserves build products on the remote host for
-reuse, and keeps the CI pipeline deterministic.
+diagnostic that is explicitly noted as such.
+
+**Multi-threading is stricter:** Spike ISS, Variane soaks, peels, TRACE, and I4dp Linux 200M-cap
+runs used as SMT / soft-ladder evidence are **proxy-only**. Local WSL `work-ver-*` and `p<N>`
+scripts are not pins. Classify from `runs/<tag>/run-*.log` (a long `run` may return rc=255 on SSH
+drop). Harness `tohost=0` is I4dp boot green, not cookie SUCCESS. Plan:
+`architecture/multi-threading/testharness-proxy.md`.
 
 Configure the proxy with environment variables (`TH_REMOTE_HOST`, `TH_REMOTE_ROOT`, `TH_SSH_BIN`,
 `TH_RSYNC_BIN`, `TH_SSH_PASSPHRASE`, `TH_SSH_PASSPHRASE_FILE`). Store credentials only in untracked

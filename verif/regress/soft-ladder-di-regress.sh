@@ -16,6 +16,21 @@
 #   mini_stq_flush_fwd      I4ca overlapping ra/s3 slot
 #   mini_fdt_namelen_walk   combined namelen→check_node→next_tag→by_offset
 #   mini_fdt_nt_frame32     TRACE: 64B next_tag after 32B check_node (1st ra aliases 2nd s3)
+#   mini_fdt_nt_stock       S1 stock interior (offset_ptr 16B + c.lw + jr BEGIN/PROP)
+#   mini_fdt_nt_cpus        S1 named BEGIN_NODE "cpus" per-byte offset_ptr on 32/64 nest
+#   mini_stq_alias_jal      S1 16×thunk16 then 2× on the same nest (no FDT tags)
+#   mini_fdt_nt_set         S1 D$ set conflict (opt-in; PASS @1463)
+#   mini_fdt_nt_osbi        S1 trampoline into stock next_tag@129d4 (opt-in)
+#   mini_wt_delay_ld        S1 same-PA store then delayed load (opt-in; PASS @1583)
+#   mini_fdt_nt_osbi_sw     S1 software 144B namelen (opt-in; PASS @10714)
+#   mini_fdt_nt_osbi_pro    S1 namelen.bin prologue bisect (opt-in; five now PASS)
+#   mini_fdt_nt_osbi_cut    S1 packed namelen ret after 2nd jal next_tag (hangs)
+#   mini_fdt_nt_osbi_cutbo  S1 packed namelen ret before jal by_offset (hangs)
+#   mini_fdt_nt_osbi_bochk  S1 full namelen; by_offset is s3/s2 checker (s3 dead)
+#   mini_fdt_nt_osbi_tight  S1 5 c.sdsp then stock tail, no extra CF, low VA (s3)
+#   mini_fdt_nt_osbi_tightva S1 same tail at 1306a / jal@1307e (hangs)
+#   mini_fdt_nt_osbi_tightnop{1,2,4}  S1 nop drain (1–2 s3; 4 s2)
+#   mini_fdt_nt_osbi_tightn{0-4}      S1 mid-store count (0 hang; 1–3 PASS; 4 hang)
 # Optional / known-gap:
 #   mini_sib_cjalr          CONTRACT.md Phase 1 (ld@00 + sibling c.jalr@01; opt-in until slfix soak)
 #   mini_lrsc_d             b1-lrsc (opt-in; 2nd SC-without-LR may fail on some harnesses)
@@ -111,7 +126,7 @@ COMPILE_ONLY="${SOFT_LADDER_COMPILE_ONLY:-0}"
 
 # Default gate: peeled B1 + FDT shape minis (iter-012). mini_lrsc_d opt-in
 # (2nd SC-without-LR exit mismatch on some Variane builds — not SL-A blocker).
-DEFAULT_TESTS="mini_amoadd_w_spin mini_csr_expected_trap mini_csr_pmp_probe mini_dual_cmv_s3 mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu mini_fdt_a0_is_fdt mini_stq_flush_fwd mini_fdt_namelen_walk mini_fdt_nt_frame32"
+DEFAULT_TESTS="mini_amoadd_w_spin mini_csr_expected_trap mini_csr_pmp_probe mini_dual_cmv_s3 mini_fdt_lenp_sw mini_fdt_s2_nest mini_fdt_check_prop_nest mini_fdt_next_tag_lbu mini_fdt_a0_is_fdt mini_stq_flush_fwd mini_fdt_namelen_walk mini_fdt_nt_frame32 mini_fdt_nt_stock mini_fdt_nt_cpus mini_stq_alias_jal mini_fdt_nt_osbi"
 # shellcheck disable=SC2206
 tests=( ${SOFT_LADDER_TESTS:-$DEFAULT_TESTS} )
 
@@ -133,18 +148,21 @@ resolve_src() {
 }
 
 build_elf() {
-  local t="$1" src elf
+  local t="$1" src elf ld="$LD"
   src="$(resolve_src "$t")" || return 1
   elf="$OUT/${t}.elf"
+  if [[ "$t" == mini_fdt_nt_osbi* ]]; then
+    ld="$ROOT/verif/tests/custom/multicore/mini_fdt_nt_osbi.ld"
+  fi
   if [[ "$src" == *.c ]]; then
     "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
       -ffreestanding -fno-builtin -O2 \
       -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
-      "$src" -T "$LD" -o "$elf" -march="$MARCH" -mabi="$MABI"
+      "$src" -T "$ld" -o "$elf" -march="$MARCH" -mabi="$MABI"
   else
     "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \
       -I"$ROOT/verif/tests/custom/env" -I"$COMMON" \
-      "$src" -T "$LD" -o "$elf" -march="$MARCH" -mabi="$MABI"
+      "$src" -T "$ld" -o "$elf" -march="$MARCH" -mabi="$MABI"
   fi
   echo "$elf"
 }

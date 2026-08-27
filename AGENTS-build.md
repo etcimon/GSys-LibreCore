@@ -85,6 +85,10 @@ For hosts where local Verilator builds are impractical, `verif/regress/remote/te
 (or `verif/regress/remote-testharness.sh`) runs simulations on a remote builder (`ovh_calltorch` by
 default) while keeping the per-test payload minimal.
 
+**Multi-threading / soft-ladder:** the proxy is the **harness of record**, not an opt-in when WSL
+is slow. Spike ISS, soaks, peels, TRACE, and I4dp Linux-cap evidence go through it only.
+Classify from `runs/<tag>/run-*.log`. Plan: `architecture/multi-threading/testharness-proxy.md`.
+
 ### First-time flow
 
 ```bash
@@ -182,7 +186,8 @@ subsequent traffic. Nothing is committed to the repository.
   cache/               downloads
 ```
 
-For the soft-ladder rationale, see `architecture/multi-threading/soft-ladder/firmware-boot-principles.md` §4.
+For the soft-ladder execution rule, see `architecture/multi-threading/testharness-proxy.md`.
+A/B blame: `architecture/firmware-boot-principles.md`.
 
 ### Build-platform `remote` command
 

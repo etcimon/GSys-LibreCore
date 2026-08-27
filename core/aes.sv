@@ -4,6 +4,7 @@
 // You may obtain a copy of the License at https://solderpad.org/licenses/
 //
 // Author: Munail Waqar, 10xEngineers
+// Modified by: Etienne Cimon (XLEN-cast AES32/SHA256 results; Verilator WIDTHEXPAND)
 // Date: 03.05.2025
 // Description: The Zkn extension including its subsets accelerates cryptographic workloads by introducing dedicated
 // scalar instructions compliant with the RISC-V Scalar Cryptography specification. The subsets include:
@@ -192,20 +193,20 @@ module aes
     if (CVA6Cfg.ZKN && CVA6Cfg.RVB) begin
       if (CVA6Cfg.IS_XLEN32) begin
         unique case (fu_data_i.operation)
-          AES32ESI: result_o = aes32esi_gen;
-          AES32ESMI: result_o = aes32esmi_gen;
-          AES32DSI: result_o = aes32dsi_gen;
-          AES32DSMI: result_o = aes32dsmi_gen;
-          SHA256SIG0: result_o = sha256sig0_gen;
-          SHA256SIG1: result_o = sha256sig1_gen;
-          SHA256SUM0: result_o = sha256sum0_gen;
-          SHA256SUM1: result_o = sha256sum1_gen;
-          SHA512SIG0H: result_o = sha512sig0h_gen;
-          SHA512SIG0L: result_o = sha512sig0l_gen;
-          SHA512SIG1H: result_o = sha512sig1h_gen;
-          SHA512SIG1L: result_o = sha512sig1l_gen;
-          SHA512SUM0R: result_o = sha512sum0r_gen;
-          SHA512SUM1R: result_o = sha512sum1r_gen;
+          AES32ESI: result_o = CVA6Cfg.XLEN'(aes32esi_gen);
+          AES32ESMI: result_o = CVA6Cfg.XLEN'(aes32esmi_gen);
+          AES32DSI: result_o = CVA6Cfg.XLEN'(aes32dsi_gen);
+          AES32DSMI: result_o = CVA6Cfg.XLEN'(aes32dsmi_gen);
+          SHA256SIG0: result_o = CVA6Cfg.XLEN'(sha256sig0_gen);
+          SHA256SIG1: result_o = CVA6Cfg.XLEN'(sha256sig1_gen);
+          SHA256SUM0: result_o = CVA6Cfg.XLEN'(sha256sum0_gen);
+          SHA256SUM1: result_o = CVA6Cfg.XLEN'(sha256sum1_gen);
+          SHA512SIG0H: result_o = CVA6Cfg.XLEN'(sha512sig0h_gen);
+          SHA512SIG0L: result_o = CVA6Cfg.XLEN'(sha512sig0l_gen);
+          SHA512SIG1H: result_o = CVA6Cfg.XLEN'(sha512sig1h_gen);
+          SHA512SIG1L: result_o = CVA6Cfg.XLEN'(sha512sig1l_gen);
+          SHA512SUM0R: result_o = CVA6Cfg.XLEN'(sha512sum0r_gen);
+          SHA512SUM1R: result_o = CVA6Cfg.XLEN'(sha512sum1r_gen);
           default: ;
         endcase
       end

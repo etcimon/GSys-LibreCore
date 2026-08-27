@@ -48,7 +48,7 @@ module g6lc_icache
     parameter type icache_req_t = logic,
     parameter type icache_rtrn_t = logic,
     /// ID to be used for read transactions
-    parameter logic [CVA6Cfg.MEM_TID_WIDTH-1:0] RdTxId = 0
+    parameter logic [CVA6Cfg.MEM_TID_WIDTH-1:0] RdTxId = '0
 ) (
     input logic clk_i,
     input logic rst_ni,
@@ -173,8 +173,8 @@ module g6lc_icache
 
   if (CVA6Cfg.NOCType == config_pkg::NOC_TYPE_AXI4_ATOP) begin : gen_axi_offset
     // if we generate a noncacheable access, the word will be at offset 0 or 4 in the cl coming from memory
-    assign cl_offset_d = ( dreq_o.ready & dreq_i.req)      ? (dreq_i.vaddr >> CVA6Cfg.FETCH_ALIGN_BITS) << CVA6Cfg.FETCH_ALIGN_BITS :
-                         ( paddr_is_nc  & mem_data_req_o ) ? {{ICACHE_OFFSET_WIDTH-1{1'b0}}, cl_offset_q[2]}<<2 : // needed since we transfer 32bit over a 64bit AXI bus in this case
+    assign cl_offset_d = ( dreq_o.ready & dreq_i.req)      ? ICACHE_OFFSET_WIDTH'((dreq_i.vaddr >> CVA6Cfg.FETCH_ALIGN_BITS) << CVA6Cfg.FETCH_ALIGN_BITS) :
+                         ( paddr_is_nc  & mem_data_req_o ) ? {{ICACHE_OFFSET_WIDTH-3{1'b0}}, cl_offset_q[2], 2'b0} : // needed since we transfer 32bit over a 64bit AXI bus in this case
         cl_offset_q;
     // request word address instead of cl address in case of NC access
     assign mem_data_o.paddr = (paddr_is_nc) ? {cl_tag_d, vaddr_q[CVA6Cfg.ICACHE_INDEX_WIDTH-1:3], 3'b0} :                                         // align to 64bit
@@ -496,7 +496,7 @@ module g6lc_icache
   for (genvar i = 0; i < CVA6Cfg.ICACHE_SET_ASSOC; i++) begin : gen_tag_cmpsel
     assign cl_hit[i] = (cl_tag_rdata[i] == cl_tag_d) & vld_rdata[i];
     assign cl_sel[i] = cl_rdata[i][{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_WIDTH];
-    assign cl_user[i] = CVA6Cfg.FETCH_USER_EN ? cl_ruser[i][{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_USER_WIDTH] : '0;
+    assign cl_user[i] = (CVA6Cfg.FETCH_USER_EN != 32'd0) ? cl_ruser[i][{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_USER_WIDTH] : '0;
   end
 
 
@@ -555,10 +555,10 @@ module g6lc_icache
   always_comb begin
     if (cmp_en_q) begin
       dreq_o.data = cl_sel[hit_idx];
-      dreq_o.user = CVA6Cfg.FETCH_USER_EN ? cl_user[hit_idx] : '0;
+      dreq_o.user = (CVA6Cfg.FETCH_USER_EN != 32'd0) ? cl_user[hit_idx] : '0;
     end else begin
       dreq_o.data = mem_rtrn_i.data[{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_WIDTH];
-      dreq_o.user = CVA6Cfg.FETCH_USER_EN ? mem_rtrn_i.user[{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_USER_WIDTH] : '0;
+      dreq_o.user = (CVA6Cfg.FETCH_USER_EN != 32'd0) ? mem_rtrn_i.user[{cl_offset_q, 3'b0}+:CVA6Cfg.FETCH_USER_WIDTH] : '0;
     end
     // I1 / SPEC §7: B never smuggles a sibling I$ half on user[]. A keeps G1iw/jl.
 `ifndef G6LC_FETCH_B

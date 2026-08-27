@@ -56,8 +56,18 @@ module raw_checker
     assign same_hart = (CVA6Cfg.NrHarts <= 1) || (rd_hart_i[i] == rs_hart_i);
     assign same_rd_as_rs[i] =
         same_hart && (rs_fpr_i == rd_fpr_i[i]) && (rs_i == rd_i[i]) && still_issued_i[i];
-    assign same_rd_as_rs_before[i] = (i < issue_pointer_i) && same_rd_as_rs[i];
-    assign same_rd_as_rs_after[i] = (i >= issue_pointer_i) && same_rd_as_rs[i];
+    // Last SB index compared with a TRANS_ID_BITS pointer is range-constant
+    // (i_max < ptr is never, i_max >= ptr is always). Split it out so Verilator
+    // does not CMPCONST the tautology; mid indices keep the live compare.
+    if (i == CVA6Cfg.NR_SB_ENTRIES - 1) begin : gen_last
+      assign same_rd_as_rs_before[i] = 1'b0;
+      assign same_rd_as_rs_after[i]  = same_rd_as_rs[i];
+    end else begin : gen_mid
+      assign same_rd_as_rs_before[i] =
+          (CVA6Cfg.TRANS_ID_BITS'(i) < issue_pointer_i) && same_rd_as_rs[i];
+      assign same_rd_as_rs_after[i] =
+          (CVA6Cfg.TRANS_ID_BITS'(i) >= issue_pointer_i) && same_rd_as_rs[i];
+    end
   end
 
   always_comb begin
@@ -66,10 +76,10 @@ module raw_checker
 
     for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
       if (same_rd_as_rs_before[i]) begin
-        last_before_idx = i;
+        last_before_idx = CVA6Cfg.TRANS_ID_BITS'(i);
       end
       if (same_rd_as_rs_after[i]) begin
-        last_after_idx = i;
+        last_after_idx = CVA6Cfg.TRANS_ID_BITS'(i);
       end
     end
   end

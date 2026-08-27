@@ -90,6 +90,10 @@ export CXX="${CXX:-g++}" CC="${CC:-gcc}"
 OBJCACHE="${SOFT_LADDER_BUILD_OBJCACHE:-}"
 LINK="${SOFT_LADDER_BUILD_LINK:-$CXX}"
 BUILD_LDFLAGS="${SOFT_LADDER_BUILD_LDFLAGS:-}"
+# wrack TRACE (`log wrack`) pokes i_wt_dcache.wr_ack, which Verilator
+# inlines unless public. Do not force -DG6LC_TRACE_WT_WBUFFER here:
+# nackinv-d1 / wrprio-all incremental rebuilds fail with "no member wr_ack".
+# Opt-in: SOFT_LADDER_BUILD_CXXFLAGS=-DG6LC_TRACE_WT_WBUFFER (needs public).
 BUILD_CXXFLAGS="${SOFT_LADDER_BUILD_CXXFLAGS:-}"
 LINKER="${SOFT_LADDER_BUILD_LINKER:-}"
 

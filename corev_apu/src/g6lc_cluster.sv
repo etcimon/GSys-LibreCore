@@ -114,14 +114,52 @@ module g6lc_cluster
   logic        [NC-1:0][31:0]  core_sb_ticket;
   logic        [NC-1:0][CVA6Cfg.XLEN-1:0] core_sb_desc_ptr;
 
+  // S4: multi-core SMT (N>1,T>1) secondary cores race OpenSBI's shared
+  // lottery/stack (G1dg class *across cores*, not SMT). Hold c>0 clock-gated
+  // until IPI (HSM) or BOOT_HOLD_CYC (same 200000 as SMT_COLD_EXCL).
+  // stream8 is T=1 so this localparam is 0. Core 0 always runs.
+  // ICG IS_FUNCTIONAL: correctness, not power. test_en tied 0 until
+  // testmode_i is threaded (DFT). Same clk; en_i is registered.
+  localparam bit BOOT_HOLD = (NC > 1) && (CVA6Cfg.NrHarts > 1);
+  localparam logic [17:0] BOOT_HOLD_CYC = 18'd200000;
+  logic [17:0] boot_hold_q;
+  logic [NC-1:0] ipi_seen_q;
+  logic [NC-1:0] core_clk;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      boot_hold_q <= '0;
+      ipi_seen_q  <= '0;
+    end else begin
+      if (BOOT_HOLD && (boot_hold_q != 18'h3ffff))
+        boot_hold_q <= boot_hold_q + 18'd1;
+      for (int unsigned c = 0; c < NC; c++) begin
+        if (|ipi_i[c]) ipi_seen_q[c] <= 1'b1;
+      end
+    end
+  end
+
   for (genvar c = 0; c < NC; c++) begin : gen_core
+    if (BOOT_HOLD && (c != 0)) begin : gen_boot_icg
+      logic rel;
+      assign rel = (boot_hold_q >= BOOT_HOLD_CYC) || ipi_seen_q[c];
+      tc_clk_gating #(
+          .IS_FUNCTIONAL(1'b1)
+      ) i_boot_icg (
+          .clk_i,
+          .en_i     (rel),
+          .test_en_i(1'b0),
+          .clk_o    (core_clk[c])
+      );
+    end else begin : gen_boot_feed
+      assign core_clk[c] = clk_i;
+    end
     ariane #(
         .CVA6Cfg       (CVA6Cfg),
         .rvfi_probes_t (rvfi_probes_t),
         .noc_req_t     (axi_req_t),
         .noc_resp_t    (axi_resp_t)
     ) i_ariane (
-        .clk_i,
+        .clk_i            (core_clk[c]),
         .rst_ni,
         .boot_addr_i      (boot_addr_i),
         // mhartid base: core_index × NrHarts (SMT banks add +h in csr bank)
@@ -178,6 +216,8 @@ module g6lc_cluster
   // --------------------
   // Coherence hub
   // --------------------
+  // S4: SKIP_HUB identity (s4-v-skiphub-minis) same stock HANG @40000 —
+  // not the hub. Keep NC>1 hub on _v.
   if (NC <= 1 && IDENTITY_FAST) begin : gen_single
     assign hub_mem_req   = core_req[0];
     assign core_resp[0]  = hub_mem_resp;

@@ -171,7 +171,7 @@ module frontend
   // re-aligned instruction and address (coming from cache - combinationally)
   logic [NrInstr-1:0][31:0] instr;
   logic [NrInstr-1:0][CVA6Cfg.VLEN-1:0] addr;
-  logic [NrInstr-1:0] instruction_valid;
+  logic [NrInstr-1:0] instruction_valid_raw, instruction_valid;
   // BHT, BTB and RAS prediction
   bht_prediction_t [NrInstr-1:0] bht_prediction;
   btb_prediction_t [NrInstr-1:0] btb_prediction;
@@ -218,10 +218,31 @@ module frontend
       .leftover_pending_o (leftover_pending),
       .address_i          (icache_vaddr_q),
       .data_i             (icache_data_q),
-      .valid_o            (instruction_valid),
+      .valid_o            (instruction_valid_raw),
       .addr_o             (addr),
       .instr_o            (instr)
   );
+
+  // L2 live[]: drop slots with pc < present_exp. Same-window sequential
+  // HIT of 12970 while jal targets 12974 must not issue the +16/ret prefix.
+  // Keep direct jal/call (not ret/branch): RAS return to 12994 stole the
+  // jal@12990 window and live[] ate the jal (beqz retired a0=FDT).
+  // Not I$ extra-shift (SIGSEGV). Not exact vaddr==tgt / bp_ret_ge (MINI-FAIL).
+  // accept=1: do not AND kill_s2 (eats taken jumps).
+  logic [63:0] present_exp_q;
+  always_comb begin
+    for (int unsigned i = 0; i < NrInstr; i++) begin
+      instruction_valid[i] = g6lc_fetch_pkg::slot_live(
+          instruction_valid_raw[i],
+          1'b1,
+          g6lc_fetch_pkg::slot_keep_link(
+              g6lc_fetch_pkg::slot_ge_expected(
+                  (i == 0) && serving_unaligned,
+                  64'(addr[i]),
+                  present_exp_q),
+              rvi_jump[i] | rvc_jump[i] | rvi_call[i] | rvc_call[i]));
+    end
+  end
 
   // --------------------
   // Branch Prediction
@@ -329,13 +350,26 @@ module frontend
   end
 
   // I19: act on a prediction only if the target is fetchable. Resolve is unfiltered.
+  // L4: also require IQ consumed the CF (ras_push already does). Else bp_fire
+  // drops icache_valid_q while leftover-complete jal is still unissued.
+  logic [7:0] cf_v8, cf_t8, cf_c8;
+  always_comb begin
+    cf_v8 = '0;
+    cf_t8 = '0;
+    cf_c8 = '0;
+    cf_v8[NrInstr-1:0] = instruction_valid;
+    cf_c8[NrInstr-1:0] = instr_queue_consumed;
+    for (int i = 0; i < NrInstr; i++) cf_t8[i] = (cf_type[i] != NoCF);
+  end
   logic bp_fire;
   assign bp_fire = bp_valid
-      && g6lc_fetch_pkg::predict_fetchable(CVA6Cfg, 64'(predict_address));
+      && g6lc_fetch_pkg::predict_fetchable(CVA6Cfg, 64'(predict_address))
+      && g6lc_fetch_pkg::cf_consumed(cf_v8, cf_t8, cf_c8);
+
+  assign is_mispredict = resolved_branch_i.valid & resolved_branch_i.is_mispredict;
 
   // Classic EX mispredict only. A matching taken Jump must not reseed the NPC:
   // re-fetching a call pushes the RAS twice.
-  assign is_mispredict = resolved_branch_i.valid & resolved_branch_i.is_mispredict;
 
   // ------------------------------------------------------------------
   // Redirect arbitration
@@ -435,6 +469,26 @@ module frontend
   assign redirect_accept = g6lc_fetch_pkg::window_accept(
       if_ready, kill_s2,
       g6lc_fetch_pkg::same_win(CVA6Cfg, 64'(fetch_address), 64'(redirect_pc_q)));
+
+  // L2: predicted redirect does not set redirect_pend (arch only). kill_s2
+  // can lose the sequential inflight (OpenSBI 12ad0 leftover_drop of jal).
+  // Pend only filters that return; sequential HIT with pend=0 is unchanged.
+  logic bp_pend_q;
+  logic [CVA6Cfg.VLEN-1:0] bp_tgt_q;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      bp_pend_q <= 1'b0;
+      bp_tgt_q  <= '0;
+    end else if (flush_i || is_mispredict) begin
+      bp_pend_q <= 1'b0;
+    end else if (bp_fire) begin
+      bp_pend_q <= 1'b1;
+      bp_tgt_q  <= predict_address;
+    end else if (bp_pend_q && icache_dreq_i.valid &&
+        g6lc_fetch_pkg::same_win(CVA6Cfg, 64'(icache_dreq_i.vaddr), 64'(bp_tgt_q)))
+      bp_pend_q <= 1'b0;
+  end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -706,6 +760,19 @@ module frontend
   // loop-buffer inject: present as a 1-cycle I$ response without a request
   assign lbuf_inject = FtqEn && CVA6Cfg.LoopBufEn && lbuf_consume;
 
+  logic icache_take;
+  // Do not register the next I$ return while IQ is replaying an
+  // overflowed leftover-complete packet (s4-v-iq8-twice: 12960 taken
+  // while 12958 replay'd). Not leftover_ret_ok (no leftover_pending).
+  // leftover_take_ok MINI-FAIL s4-v-lotake-minis ALL 10 hang @40000
+  // (unbounded leftover hold; 2jr npc=0xd0c8). Reverted.
+  assign icache_take = (icache_dreq_i.valid | lbuf_inject)
+      && g6lc_fetch_pkg::bp_ret_ok(bp_pend_q,
+          g6lc_fetch_pkg::same_win(CVA6Cfg,
+              64'(icache_dreq_i.valid ? icache_dreq_i.vaddr : ftq_head_vaddr),
+              64'(bp_tgt_q)))
+      && !replay;
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       npc_rst_load_q    <= 1'b1;
@@ -720,6 +787,7 @@ module frontend
       icache_ex_valid_q <= ariane_pkg::FE_NONE;
       btb_q             <= '0;
       bht_q             <= '0;
+      present_exp_q     <= '0;
     end else begin
       npc_rst_load_q <= 1'b0;
       npc_q          <= npc_d;
@@ -732,8 +800,8 @@ module frontend
         icache_ex_valid_q <= ariane_pkg::FE_NONE;
       end else begin
         // prefer the real I$ return, else inject the loop buffer into the same pipe
-        icache_valid_q <= icache_dreq_i.valid | lbuf_inject;
-        if (icache_dreq_i.valid || lbuf_inject) begin
+        icache_valid_q <= icache_take;
+        if (icache_take) begin
           icache_data_q     <= icache_dreq_i.valid ? icache_data : lbuf_data;
           icache_vaddr_q    <= icache_dreq_i.valid ? icache_dreq_i.vaddr : ftq_head_vaddr;
           icache_ex_valid_q <= icache_dreq_i.valid ? fe_exception(icache_dreq_i.ex.cause)
@@ -745,6 +813,9 @@ module frontend
           // save the uppermost prediction
           btb_q <= btb_prediction[NrInstr-1];
           bht_q <= bht_prediction[NrInstr-1];
+          present_exp_q <= g6lc_fetch_pkg::present_expected(
+              bp_pend_q, 64'(bp_tgt_q),
+              64'(icache_dreq_i.valid ? icache_dreq_i.vaddr : ftq_head_vaddr));
         end
       end
     end

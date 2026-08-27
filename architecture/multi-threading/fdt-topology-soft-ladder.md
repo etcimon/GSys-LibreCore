@@ -12,6 +12,7 @@ discovery** behave as LibreCore is parameterized by:
 | SMT plane | `g6lc64_smt2` | Single core, `T=2` |
 
 Cross-refs: `dts-linux-smt.md`, `smt2-bringup.md`, `soft-ladder/`,
+`linux-boot-scale.md` (OpenSBI × envelopes; live `_v` N=2 T=2, `ooo_server` N=4 T=2),
 `AGENTS-dts-validation.md`, `software/smt2-linux/README.md`.
 
 ---
@@ -189,8 +190,8 @@ Do **not** jump to multi-core topology soaks until DI FDT walk is honest.
 ```text
 Phase A — Soft ladder B1 (current)
   A1. Default cookie green (soft getprop OK)          [x]
-  A2. PEEL_FDT_GETPROP natural getprop green          [ ]  COMPLETION.md G0–G1
-  A3. Real printf (drop BANR)                         [ ]  COMPLETION.md G2
+  A2. PEEL_FDT_GETPROP natural getprop green          [x]  pin-bc7ed11d + nackinv/VOID-keep
+  A3. Real printf (drop BANR)                         [~]  pin+plat-ops babe; hold BANR (hart leftover @12ad8)
   A4. Domain / switch_mode peels                      [ ]  COMPLETION.md G4
   A5. plat_hc sticky == 2 on smt2 without soft getprop [ ]  stage 3–4
 
@@ -217,13 +218,12 @@ Phase D — Parameterized generator (optional, tape-out hygiene)
 
 ### B1 residual note (iter-012)
 
-Live PEEL pin: `c.lw@129f8` mcause=4 mtval=9 (`a0` is FDT offset/tag/`strlen`,
-not `fdt+offset`). Historic `12eb2` (`s2` = `check_node→next_tag` ra) is R2
-after G0. I4x and fdt `c.mv` increment families are **closed** at I4cf. Next
-work is `soft-ladder/COMPLETION.md` (one mini with fail-codes, then generic
-pointer-liveness), not another register keep. Soft getprop remains the
-production default until A2 is green. See `ITERATION.md` and `AGENTS-todo.md`
-SL-B.
+A2 green (pin-bc7ed11d natural getprop). A3 pin+plat-ops real printf cookie;
+canonical hold keeps BANR (`SOFT_HART_INIT`). Historic `12eb2`/`129f8` closed.
+Hart+printf leftover-RVI `@12ad8` is hold-printf only. SL-C: I4dn IPI
+mini PASS; pin cookie `sp1=0` because lottery never MSIP. Side `ipi-tab`
+`3314827d` dual-confirm cookie `51b1babe` **and** `sp1=0x80045f10`. Do not
+lower `SMT_COLD_EXCL`. See `ITERATION.md` and `AGENTS-todo.md` SL-B / SL-C.
 
 ---
 

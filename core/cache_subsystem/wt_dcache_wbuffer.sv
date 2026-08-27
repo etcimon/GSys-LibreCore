@@ -11,6 +11,7 @@
 // Author: Michael Schaffner <schaffner@iis.ee.ethz.ch>, ETH Zurich
 // Date: 13.09.2018
 // Description: coalescing write buffer for WT dcache
+// Modified by: Etienne Cimon (Verilator width)
 //
 // A couple of notes:
 //
@@ -45,6 +46,11 @@
 //    (checked==0) when the ACK races in, the TX is still freed (do not hold rtrn forever — that
 //    deadlocks load misses via tx_rdwr_collision); the word is dropped from the buffer / retransmitted
 //    if re-dirtied. Memory already holds the written bytes.
+//    Exception: OpenSBI ecall extension objects at 0x80040xxx (list/time/rfence/ipi,
+//    not namelen stack 0x80046xxx). VOID ACK keeps the word until tag-check, then wr_req
+//    the hit way. Unfiltered VOID-late hung pin @12aa8; dropping these words leaves
+//    L1 at ELF BSS 0 (hold IPI walk a5=0 on ecall_rfence.next).
+//    Widening to 0x80040–0x80045 (console_tbuf) did not unhang hold printf; reverted.
 //
 // 4) we handle NC writes using the writebuffer circuitry. upon an NC request, the writebuffer will first be drained.
 //    then, only the NC word is written into the write buffer and no further write requests are acknowledged until that
@@ -127,13 +133,15 @@ module wt_dcache_wbuffer
   function automatic logic [(CVA6Cfg.XLEN/8)-1:0] to_byte_enable4(
       input logic [CVA6Cfg.XLEN_ALIGN_BYTES-1:0] offset, input logic [1:0] size);
     logic [3:0] be;
+    logic [1:0] off4;
+    off4 = offset[1:0];
     be = '0;
     unique case (size)
-      2'b00:   be[offset] = '1;  // byte
-      2'b01:   be[offset+:2] = '1;  // hword
-      default: be = '1;  // word
+      2'b00:   be[off4] = 1'b1;  // byte
+      2'b01:   be[off4+:2] = 2'b11;  // hword
+      default: be = 4'b1111;  // word
     endcase  // size
-    return be;
+    return (CVA6Cfg.XLEN / 8)'(be);
   endfunction : to_byte_enable4
 
   // openpiton requires the data to be replicated in case of smaller sizes than dwords
@@ -197,6 +205,10 @@ module wt_dcache_wbuffer
   logic [DCACHE_CL_IDX_WIDTH-1:0] wr_cl_idx_q, wr_cl_idx_d;
 
   logic [CVA6Cfg.PLEN-1:0] debug_paddr[CVA6Cfg.WtDcacheWbufDepth-1:0];
+  logic [CVA6Cfg.WtDcacheWbufDepth-1:0] void_keep_d, void_keep_q;
+  logic [CVA6Cfg.PLEN-1:0] wr_paddr_check;
+  logic [(CVA6Cfg.XLEN/8)-1:0] ack_be;
+  logic check_wr;
 
   wbuffer_t wbuffer_check_mux, wbuffer_dirty_mux;
 
@@ -280,7 +292,7 @@ module wt_dcache_wbuffer
   ) : repData32(
       wbuffer_dirty_mux.data, bdirty_off, miss_size_o[1:0]
   );
-  if (CVA6Cfg.DATA_USER_EN) begin
+  if (CVA6Cfg.DATA_USER_EN != 0) begin
     assign miss_wuser_o = CVA6Cfg.IS_XLEN64 ? repData64(
         wbuffer_dirty_mux.user, bdirty_off, miss_size_o[1:0]
     ) : repData32(
@@ -334,15 +346,23 @@ module wt_dcache_wbuffer
     // best-effort (do not wait on wr_ack — that stalls the return FIFO under
     // load pressure). Always pop the rtrn FIFO; `if (evict)` clears txblock/valid.
     // Memory already holds the written bytes (write-through).
+    // VOID-kept ecall objects wr_req on the later tag-check (check_wr), not here.
     if (!rtrn_empty) begin
       if (tx_stat_q[rtrn_id].vld) begin
         tx_stat_d[rtrn_id].vld = 1'b0;
-        if (wbuffer_q[rtrn_ptr].checked && (|wr_data_be_o) && (|wbuffer_q[rtrn_ptr].hit_oh)) begin
+        if (!check_wr && wbuffer_q[rtrn_ptr].checked && (|ack_be) &&
+            (|wbuffer_q[rtrn_ptr].hit_oh)) begin
           wr_req_o = wbuffer_q[rtrn_ptr].hit_oh;
+        end else if (!check_wr && check_en_q1 && (check_ptr_q1 == rtrn_ptr) &&
+                     (|ack_be) && (|rd_hit_oh_q)) begin
+          wr_req_o = rd_hit_oh_q;
         end
       end
       // Always pop: a stuck return ID deadlocks the store-ACK path.
       evict = 1'b1;
+    end
+    if (check_wr) begin
+      wr_req_o = rd_hit_oh_q;
     end
 
     // allocate a new entry
@@ -396,14 +416,23 @@ module wt_dcache_wbuffer
   assign rtrn_ptr = tx_stat_q[rtrn_id].ptr;
   // if we wrote into a word while it was in-flight, we cannot write the dirty bytes to the cache
   // when the TX returns
-  assign wr_data_be_o = tx_stat_q[rtrn_id].be & (~wbuffer_q[rtrn_ptr].dirty);
+  assign ack_be = tx_stat_q[rtrn_id].be & (~wbuffer_q[rtrn_ptr].dirty);
   assign wr_paddr = {
     {CVA6Cfg.XLEN_ALIGN_BYTES{1'b0}}, wbuffer_q[rtrn_ptr].wtag << CVA6Cfg.XLEN_ALIGN_BYTES
   };
-  assign wr_idx_o = wr_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
-  assign wr_off_o = wr_paddr[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0];
-  assign wr_data_o = wbuffer_q[rtrn_ptr].data;
-  assign wr_user_o = wbuffer_q[rtrn_ptr].user;
+  assign wr_paddr_check = {
+    {CVA6Cfg.XLEN_ALIGN_BYTES{1'b0}}, wbuffer_q[check_ptr_q1].wtag << CVA6Cfg.XLEN_ALIGN_BYTES
+  };
+  assign check_wr = check_en_q1 && void_keep_q[check_ptr_q1] &&
+                    (|wbuffer_q[check_ptr_q1].valid) && (|rd_hit_oh_q);
+  assign wr_data_be_o = check_wr ? wbuffer_q[check_ptr_q1].valid : ack_be;
+  assign wr_idx_o = check_wr ?
+                    wr_paddr_check[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
+                    wr_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
+  assign wr_off_o = check_wr ? wr_paddr_check[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0] :
+                               wr_paddr[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0];
+  assign wr_data_o = check_wr ? wbuffer_q[check_ptr_q1].data : wbuffer_q[rtrn_ptr].data;
+  assign wr_user_o = check_wr ? wbuffer_q[check_ptr_q1].user : wbuffer_q[rtrn_ptr].user;
 
 
   ///////////////////////////////////////////////////////
@@ -523,6 +552,7 @@ module wt_dcache_wbuffer
   always_comb begin : p_buffer
     wbuffer_d           = wbuffer_q;
     ni_pending_d        = ni_pending_q;
+    void_keep_d         = void_keep_q;
     dirty_rd_en         = 1'b0;
     req_port_o.data_gnt = 1'b0;
     wbuffer_wren        = 1'b0;
@@ -532,6 +562,13 @@ module wt_dcache_wbuffer
       if (|wbuffer_q[check_ptr_q1].valid) begin
         wbuffer_d[check_ptr_q1].checked = 1'b1;
         wbuffer_d[check_ptr_q1].hit_oh  = rd_hit_oh_q;
+      end
+      if (void_keep_q[check_ptr_q1]) begin
+        void_keep_d[check_ptr_q1] = 1'b0;
+        wbuffer_d[check_ptr_q1].valid = '0;
+        wbuffer_d[check_ptr_q1].txblock = '0;
+        wbuffer_d[check_ptr_q1].checked = 1'b0;
+        ni_pending_d[check_ptr_q1] = 1'b0;
       end
     end
 
@@ -550,11 +587,13 @@ module wt_dcache_wbuffer
         if (tx_stat_q[rtrn_id].be[k]) begin
           wbuffer_d[rtrn_ptr].txblock[k] = 1'b0;
           if (!wbuffer_q[rtrn_ptr].dirty[k]) begin
-            wbuffer_d[rtrn_ptr].valid[k] = 1'b0;
-
-            // NOTE: this is not strictly needed, but makes it much
-            // easier to debug, since no invalid data remains in the buffer
-            // wbuffer_d[rtrn_ptr].data[k*8 +:8] = '0;
+            // Keep VOID ACK of 0x80040xxx until tag-check (see header note 3).
+            if (!wbuffer_d[rtrn_ptr].checked && (wr_paddr[31:12] == 20'h80040)) begin
+              void_keep_d[rtrn_ptr] = 1'b1;
+              wbuffer_d[rtrn_ptr].txblock[k] = 1'b1;
+            end else begin
+              wbuffer_d[rtrn_ptr].valid[k] = 1'b0;
+            end
           end
         end
       end
@@ -562,6 +601,7 @@ module wt_dcache_wbuffer
       if (wbuffer_d[rtrn_ptr].valid == 0) begin
         wbuffer_d[rtrn_ptr].checked = 1'b0;
         ni_pending_d[rtrn_ptr] = 1'b0;
+        void_keep_d[rtrn_ptr] = 1'b0;
       end
     end
 
@@ -585,6 +625,7 @@ module wt_dcache_wbuffer
 
         req_port_o.data_gnt = 1'b1;
         ni_pending_d[wr_ptr] = is_ni;
+        void_keep_d[wr_ptr] = 1'b0;
 
         wbuffer_d[wr_ptr].checked = 1'b0;
         wbuffer_d[wr_ptr].wtag = {
@@ -598,7 +639,7 @@ module wt_dcache_wbuffer
             wbuffer_d[wr_ptr].valid[k]     = 1'b1;
             wbuffer_d[wr_ptr].dirty[k]     = 1'b1;
             wbuffer_d[wr_ptr].data[k*8+:8] = req_port_i.data_wdata[k*8+:8];
-            if (CVA6Cfg.DATA_USER_EN) begin
+            if (CVA6Cfg.DATA_USER_EN != 0) begin
               wbuffer_d[wr_ptr].user[k*8+:8] = req_port_i.data_wuser[k*8+:8];
             end
           end
@@ -625,10 +666,12 @@ module wt_dcache_wbuffer
       rd_hit_oh_q  <= '0;
       wr_cl_vld_q  <= '0;
       wr_cl_idx_q  <= '0;
+      void_keep_q  <= '0;
     end else begin
       wbuffer_q    <= wbuffer_d;
       tx_stat_q    <= tx_stat_d;
       ni_pending_q <= ni_pending_d;
+      void_keep_q  <= void_keep_d;
       check_ptr_q  <= check_ptr_d;
       check_ptr_q1 <= check_ptr_q;
       check_en_q   <= check_en_d;

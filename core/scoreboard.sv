@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon (commit-pointer width casts)
 // Date: 08.04.2017
 // Description: Scoreboard - keeps track of all decoded, issued and committed instructions
 
@@ -462,7 +463,7 @@ module scoreboard #(
     assign num_commit = commit_ack_i[0];
   end
 
-  assign commit_pointer_n[0] = (flush_i) ? '0 : commit_pointer_q[0] + num_commit;
+  assign commit_pointer_n[0] = (flush_i) ? '0 : commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(num_commit);
 
   always_comb begin : assign_issue_pointer_n
     issue_pointer_n = issue_pointer[num_issue];
@@ -471,7 +472,7 @@ module scoreboard #(
 
   // precompute offsets for commit slots
   for (genvar k = 1; k < CVA6Cfg.NrCommitPorts; k++) begin : gen_cnt_incr
-    assign commit_pointer_n[k] = (flush_i) ? '0 : commit_pointer_n[0] + unsigned'(k);
+    assign commit_pointer_n[k] = (flush_i) ? '0 : commit_pointer_n[0] + CVA6Cfg.TRANS_ID_BITS'(k);
   end
 
   // Forwarding logic

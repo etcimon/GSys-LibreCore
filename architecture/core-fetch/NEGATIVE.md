@@ -180,6 +180,11 @@ architectural stream needed. One-shot steals sometimes survived; continuous forc
 | Leftover-shaped fetch vs window-aligned NPC | `lo11_npc00`, `lo_pc_npc00` | `MINI-FAIL sib P0 1 @407, FDT 0x10 @423`; `plat_hc=80 mepc 0xb0/2` |
 | Hold on an aligned RVI load at window-aligned NPC | `lo_ld_stay` | `51b1c001 @250000 plat_hc=80` |
 | NPC-based leftover slot0 hide | `leftover_slot0_off_npc00` | `MINI-FAIL sib 4 @448, lottery hang, FDT 17` |
+| Register I$ return only if inflight same_win | `icache_ret_ok` | `MINI-FAIL` stock/osbi hang @40000; frame32 tohost=136; `bnez_jal_split` tohost=12 |
+| `bp_pend` exact `vaddr==tgt` (not same_win) | `s4-v-bppc-minis` | 2jr hang @40000; stock tohost=3; osbi IAF `@46f2c`; split-jal tohost=12 |
+| `bp_ret_ge` (`vaddr>=tgt`) + hold fetch on tgt | `s4-v-retge-minis` | 2jr PASS @528; stock/frame/alias HANG @40000; osbi tohost=12; split tohost=12; jal_sd_ra tohost=1 |
+| `start_pc` extra-shift data to tgt in same window | `s4-v-startpc-minis` | SIGSEGV rc=-11 all minis |
+| IQ `live[]` with `kill_s2` in accept | (pre-S4 observe-only) | eats taken jumps; `accept` must stay 1 |
 
 **Design consequence:** `SPEC.md` §3 compares the delivered window tag against `expected_pc` and
 rejects mismatches wholesale; §5 owns `expected_pc` exclusively. Nothing else may steer the fetch
@@ -272,7 +277,8 @@ it. `is_branch → queue consume → gating → is_branch` is a loop.*
 | `G1bs` | `no cookie-exit` (widened to any dest, then branch) |
 
 **Design consequence:** layering in `SPEC.md` §0 — L2/L3 may only clear `valid`; classification is
-computed once in L1/`instr_scan` and never revisited.
+computed once in L1/`instr_scan` and never revisited. Gating **`bp_fire`** (L4 action) on
+consumed is not this loop: `cf_type` does not depend on consume (`ras_push` already does).
 
 ---
 

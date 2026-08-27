@@ -6,6 +6,7 @@
 // You may obtain a copy of the License at https://solderpad.org/licenses/
 //
 // Original Author: Jean-Roch COULON - Thales
+// Modified by: Etienne Cimon (void-cast read_symbol; Verilator IGNOREDRETURN)
 //
 `ifndef READ_SYMBOL_T
 `define READ_SYMBOL_T
@@ -53,7 +54,7 @@ module rvfi_tracer #(
         if (!$value$plusargs("elf_file=%s", binary)) binary = "";
         if (binary != "") begin
             read_elf(binary);
-            read_symbol("tohost", TOHOST_ADDR);
+            void'(read_symbol("tohost", TOHOST_ADDR));
         end
         $display("*** [rvf_tracer] INFO: Loading binary : %s", binary);
         $display("*** [rvf_tracer] INFO: tohost_addr: %h", TOHOST_ADDR);

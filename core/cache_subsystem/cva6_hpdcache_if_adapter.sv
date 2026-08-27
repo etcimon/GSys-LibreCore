@@ -7,6 +7,7 @@
 // You may obtain a copy of the License at https://solderpad.org/licenses/
 //
 // Authors: Cesar Fuguet
+// Modified by: Etienne Cimon
 // Date: February, 2023
 // Description: Interface adapter for the CVA6 core
 module cva6_hpdcache_if_adapter
@@ -78,14 +79,21 @@ module cva6_hpdcache_if_adapter
     //  LOAD request
     //  {{{
     if (IsLoadPort == 1'b1) begin : load_port_gen
-      assign hpdcache_req_is_uncacheable = !config_pkg::is_inside_cacheable_regions(
-          CVA6Cfg,
-          {
-            {64 - CVA6Cfg.DCACHE_TAG_WIDTH{1'b0}}
-            , cva6_req_i.address_tag
-            , {CVA6Cfg.DCACHE_INDEX_WIDTH{1'b0}}
-          }
-      );
+      // S4: D$ loads of execute-region .text are uncached. 2jr hang is
+      // HPD HIT of a jtab line I$ already holds (lw@0x90 and jtab@0xa8
+      // share 64 B line 0x80; 2jr_fencei / 2jr_pad / 2jr_data PASS).
+      // I$/D$ nline stalls negative. Full paddr at tag time. Timing:
+      // extra execute PMA compares on the load-pma cone; no new flop.
+      // Etienne Cimon 2026.
+      logic [63:0] load_paddr;
+      assign load_paddr = {
+        {64 - CVA6Cfg.DCACHE_TAG_WIDTH - CVA6Cfg.DCACHE_INDEX_WIDTH{1'b0}},
+        cva6_req_i.address_tag,
+        cva6_req_i.address_index
+      };
+      assign hpdcache_req_is_uncacheable =
+          !config_pkg::is_inside_cacheable_regions(CVA6Cfg, load_paddr) ||
+          config_pkg::is_inside_execute_regions(CVA6Cfg, load_paddr);
 
       //    Request forwarding
       assign hpdcache_req_valid_o = cva6_req_i.data_req;
@@ -93,7 +101,7 @@ module cva6_hpdcache_if_adapter
       assign hpdcache_req.wdata = '0;
       assign hpdcache_req.op = hpdcache_pkg::HPDCACHE_REQ_LOAD;
       assign hpdcache_req.be = cva6_req_i.data_be;
-      assign hpdcache_req.size = cva6_req_i.data_size;
+      assign hpdcache_req.size = hpdcache_pkg::hpdcache_req_size_t'(cva6_req_i.data_size);
       assign hpdcache_req.sid = hpdcache_req_sid_i;
       assign hpdcache_req.tid = cva6_req_i.data_id;
       assign hpdcache_req.need_rsp = 1'b1;
@@ -262,8 +270,8 @@ module cva6_hpdcache_if_adapter
       assign hpdcache_req_is_uncacheable = !config_pkg::is_inside_cacheable_regions(
           CVA6Cfg,
           {
-            {64 - CVA6Cfg.DCACHE_TAG_WIDTH{1'b0}}
-            , hpdcache_req.addr_tag,
+            {64 - CVA6Cfg.DCACHE_TAG_WIDTH - CVA6Cfg.DCACHE_INDEX_WIDTH{1'b0}},
+            hpdcache_req.addr_tag,
             {CVA6Cfg.DCACHE_INDEX_WIDTH{1'b0}}
           }
       );
@@ -292,7 +300,7 @@ module cva6_hpdcache_if_adapter
               wdata: amo_data,
               op: amo_op,
               be: amo_data_be,
-              size: cva6_amo_req_i.size,
+              size: hpdcache_pkg::hpdcache_req_size_t'(cva6_amo_req_i.size),
               sid: hpdcache_req_sid_i,
               tid: '1,
               need_rsp: 1'b1,
@@ -310,7 +318,7 @@ module cva6_hpdcache_if_adapter
               wdata: cva6_req_i.data_wdata,
               op: store_op,
               be: cva6_req_i.data_be,
-              size: cva6_req_i.data_size,
+              size: hpdcache_pkg::hpdcache_req_size_t'(cva6_req_i.data_size),
               sid: hpdcache_req_sid_i,
               tid: '0,
               need_rsp:
@@ -474,7 +482,7 @@ module cva6_hpdcache_if_adapter
         hpdcache_req_casd.tid = '1;
         hpdcache_req_casd.need_rsp = 1'b1;
         hpdcache_req_casd.phys_indexed = 1'b1;
-        hpdcache_req_casd.size = 2'b11;  // dword
+        hpdcache_req_casd.size = hpdcache_pkg::hpdcache_req_size_t'(2'b11);  // dword
         hpdcache_req_casd.be = 8'hff;
         hpdcache_req_casd.pma.uncacheable = 1'b1;  // force UC path
         hpdcache_req_casd.pma.io = 1'b0;

@@ -51,7 +51,7 @@ module g6lc_way_predictor
 
   always_comb begin
     way_oh_o = '0;
-    if (NR_WAYS == 1) way_oh_o = 1'b1;
+    if (NR_WAYS == 1) way_oh_o = '1;
     else if (mem_q[idx].valid) way_oh_o[way_o] = 1'b1;
     else way_oh_o[0] = 1'b1;  // cold start: try way 0
   end

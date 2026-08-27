@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Stefan Mach, ETH Zurich
+// Modified by: Etienne Cimon (FLen-cast vector splat; Verilator WIDTHEXPAND)
 // Date: 12.04.2018
 // Description: Wrapper for the floating-point unit
 
@@ -404,20 +405,20 @@ module fpu_wrap
       if (fpu_vec_op_d && vec_replication) begin
         if (replicate_c) begin
           unique case (fpu_dstfmt_d)
-            fpnew_pkg::FP32: operand_c_d = CVA6Cfg.RVD ? {2{operand_c_i[31:0]}} : operand_c_i;
+            fpnew_pkg::FP32: operand_c_d = CVA6Cfg.RVD ? {2{operand_c_i[31:0]}} : CVA6Cfg.FLen'(operand_c_i);
             fpnew_pkg::FP16, fpnew_pkg::FP16ALT:
-            operand_c_d = CVA6Cfg.RVD ? {4{operand_c_i[15:0]}} : {2{operand_c_i[15:0]}};
+            operand_c_d = CVA6Cfg.RVD ? {4{operand_c_i[15:0]}} : CVA6Cfg.FLen'({2{operand_c_i[15:0]}});
             fpnew_pkg::FP8:
-            operand_c_d = CVA6Cfg.RVD ? {8{operand_c_i[7:0]}} : {4{operand_c_i[7:0]}};
+            operand_c_d = CVA6Cfg.RVD ? {8{operand_c_i[7:0]}} : CVA6Cfg.FLen'({4{operand_c_i[7:0]}});
             default: ;  // Do nothing
           endcase  // fpu_dstfmt_d
         end else begin
           unique case (fpu_dstfmt_d)
-            fpnew_pkg::FP32: operand_b_d = CVA6Cfg.RVD ? {2{operand_b_i[31:0]}} : operand_b_i;
+            fpnew_pkg::FP32: operand_b_d = CVA6Cfg.RVD ? {2{operand_b_i[31:0]}} : CVA6Cfg.FLen'(operand_b_i);
             fpnew_pkg::FP16, fpnew_pkg::FP16ALT:
-            operand_b_d = CVA6Cfg.RVD ? {4{operand_b_i[15:0]}} : {2{operand_b_i[15:0]}};
+            operand_b_d = CVA6Cfg.RVD ? {4{operand_b_i[15:0]}} : CVA6Cfg.FLen'({2{operand_b_i[15:0]}});
             fpnew_pkg::FP8:
-            operand_b_d = CVA6Cfg.RVD ? {8{operand_b_i[7:0]}} : {4{operand_b_i[7:0]}};
+            operand_b_d = CVA6Cfg.RVD ? {8{operand_b_i[7:0]}} : CVA6Cfg.FLen'({4{operand_b_i[7:0]}});
             default: ;  // Do nothing
           endcase  // fpu_dstfmt_d
         end

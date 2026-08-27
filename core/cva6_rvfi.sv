@@ -7,6 +7,7 @@
 //
 // Original Author: Yannick Casamatta - Thales
 // Date: 09/01/2024
+// Modified by: Etienne Cimon (RVFI CSR XLEN-cast; Verilator WIDTHTRUNC)
 
 
 module cva6_rvfi
@@ -559,15 +560,18 @@ module cva6_rvfi
   //----------------------------------------------------------------------------------------------------------
   // Changing verible formating to fix vivado synthesis errors and warnings
   // verilog_format: off
+  // Zero-extend with XLEN'(src). `{ {XLEN-$bits(src)}, src }` is integer concat
+  // (32+src bits), which Verilator WIDTHTRUNCs into the XLEN CSR fields.
   `define CONNECT_RVFI_FULL(CSR_ENABLE_COND, CSR_NAME, CSR_SOURCE_NAME) \
   always_ff @(posedge clk_i) begin \
       if (CSR_ENABLE_COND) begin \
-          rvfi_csr_o.``CSR_NAME``.rdata <= {{CVA6Cfg.XLEN - $bits(CSR_SOURCE_NAME)}, CSR_SOURCE_NAME}; \
+          rvfi_csr_o.``CSR_NAME``.rdata <= CVA6Cfg.XLEN'(CSR_SOURCE_NAME); \
       end \
   end \
-  assign rvfi_csr_o.``CSR_NAME``.wdata = CSR_ENABLE_COND ? { {{CVA6Cfg.XLEN-$bits(CSR_SOURCE_NAME)}, CSR_SOURCE_NAME} } : 0; \
-  assign rvfi_csr_o.``CSR_NAME``.rmask = CSR_ENABLE_COND ? 1 : 0; \
-  assign rvfi_csr_o.``CSR_NAME``.wmask = (rvfi_csr_o.``CSR_NAME``.rdata != {{CVA6Cfg.XLEN - $bits(CSR_SOURCE_NAME)}, CSR_SOURCE_NAME}) && CSR_ENABLE_COND;
+  assign rvfi_csr_o.``CSR_NAME``.wdata = CSR_ENABLE_COND ? CVA6Cfg.XLEN'(CSR_SOURCE_NAME) : '0; \
+  assign rvfi_csr_o.``CSR_NAME``.rmask = CSR_ENABLE_COND ? CVA6Cfg.XLEN'(1'b1) : '0; \
+  assign rvfi_csr_o.``CSR_NAME``.wmask = CVA6Cfg.XLEN'( \
+      (rvfi_csr_o.``CSR_NAME``.rdata != CVA6Cfg.XLEN'(CSR_SOURCE_NAME)) && CSR_ENABLE_COND);
 
   `define CONNECT_RVFI_SAME(CSR_ENABLE_COND, CSR_NAME) \
           `CONNECT_RVFI_FULL(CSR_ENABLE_COND, CSR_NAME, csr.``CSR_NAME``_q)

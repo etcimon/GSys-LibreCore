@@ -47,7 +47,7 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `speculative-execution/` | **FSE** deep window + recovery plan (`full-speculation-architecture.md`, `UPDATE-PLAN.md`); `DeepSpecEn` S1 | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` |
 | `out-of-order/` | Slice-OoO (MLP) then full rename/ROB/LSQ multi-issue OoO | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` + `router-core-upgrade-program.md` |
 | `core-fetch/` | Instruction supply: frozen A = `core/frontend` + `core/smt` pkg/dbg; default B = `core/fetch_B/`; g1\* oracle in `core/smt_legacy/` | Microarchitectural, in-core | `firmware-boot-principles.md`, `core-fetch/SPEC.md`, `core-fetch/SMT-LEGACY.md` |
-| `multi-threading/` | Simultaneous multithreading (hart-state replication) | New micro-arch (green-field) | `agents/guides/AGENTS-soc-readiness.md` |
+| `multi-threading/` | Simultaneous multithreading (hart-state replication) | New micro-arch (green-field) | `agents/guides/AGENTS-soc-readiness.md` · **execution:** `multi-threading/testharness-proxy.md` |
 | `multi-core/` | Multi-hart tiles, coherence, interrupt scaling | SoC integration | `agents/guides/AGENTS-l2l3-cache.md`, `-soc-readiness.md` |
 | `l2-l3-cache/` | Memory-side L2 / SoC L3 (LLC) | SoC integration (not an L1 edit) | `agents/guides/AGENTS-l2l3-cache.md` |
 | `spec-extensions/` | Further RISC-V ISA features (V, Zvk, Sv57, CFI, …) | Spec-anchored | `agents/spec/INDEX.md` + relevant guide |
@@ -76,6 +76,8 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `firmware-boot-principles.md` | Handoff then fetch-as-A: I1–I28, peels/P1–P4 for capabilities |
 | `core-fetch/` | Fetch spec; frozen A is `core/frontend`; workspace B is `core/fetch_B` |
 | `multi-threading/smt2-bringup.md` | U6.1 SMT2 enable + dual-thread Linux/OpenSBI checklist |
+| `multi-threading/testharness-proxy.md` | **Harness of record** for SMT Spike/soak/peel/TRACE/I4dp (proxy-only; classify from log) |
+| `multi-threading/linux-boot-scale.md` | OpenSBI steps × fetch_B four combos × named envelopes (N/T/I/RVV/stream); `_v`/`ooo_server` Linux-cap bar |
 | `multi-threading/soft-ladder/` | Evidence (tag `g1-archive`). A/`smt_legacy` soak notes; **`CONTRACT.md`** envelopes |
 | `server-math-hypervisor.md` | U9/U10 detail: vstimecmp, server config, RVV enable order |
 | `Architecture-research-todo-drafts.md` | Earlier research roadmap that the program above refines for a power-bound target. |

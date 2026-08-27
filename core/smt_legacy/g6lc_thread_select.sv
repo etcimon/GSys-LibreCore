@@ -83,13 +83,13 @@ module g6lc_thread_select
     // Also require *sustained* stall (stall_age) before miss-switch: counting
     // only activate_age caused dual-ready thrash every ~8 cycles on I$ misses
     // (OpenSBI FDT/strchr never progressed on RTL while Spike was fine).
-    logic [3:0] activate_age_q, activate_age_d;
+    logic [4:0] activate_age_q, activate_age_d;
     logic [7:0] stall_age_q, stall_age_d;
-    logic [3:0] uniss_pend_q, uniss_pend_d;
+    logic [5:0] uniss_pend_q, uniss_pend_d;
     logic       t0_extra_q, t0_extra_d;
-    localparam logic [3:0] MISS_SWITCH_BLACKOUT = 4'd16;
+    localparam logic [4:0] MISS_SWITCH_BLACKOUT = 5'd16;
     localparam logic [7:0] MISS_STALL_THRESH = 8'd32;
-    localparam logic [3:0] SMT_UNISS_WAIT = 4'd47;
+    localparam logic [5:0] SMT_UNISS_WAIT = 6'd47;
 
     logic [NH-1:0] miss_or_block;
     logic          active_stalled;
@@ -143,7 +143,7 @@ module g6lc_thread_select
       active_d       = active_q;
       rr_ptr_d       = rr_ptr_q;
       quantum_d      = quantum_q;
-      activate_age_d = (activate_age_q == 4'hF) ? 4'hF : (activate_age_q + 4'd1);
+      activate_age_d = (activate_age_q == 5'h1F) ? 5'h1F : (activate_age_q + 5'd1);
       // Sustained-stall counter for miss-switch (resets when active fetches).
       if (active_stalled) begin
         if (stall_age_q != 8'hff)
@@ -219,7 +219,7 @@ module g6lc_thread_select
         reason_miss    = 1'b0;
         reason_quantum = 1'b0;
         reason_starve  = 1'b0;
-        uniss_pend_d   = uniss_pend_q + 4'd1;
+        uniss_pend_d   = uniss_pend_q + 6'd1;
       end
 
       // I4bg: after lui/addi t0, suppress *quantum/starve* only so one more

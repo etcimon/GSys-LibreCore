@@ -58,8 +58,8 @@ module te_resync_counter #(
 
     // assignments
     // both for packet and cycle mode
-    assign et_resync_max_o = counter_d == MAX_VALUE;
-    assign gt_resync_max_o = counter_d > MAX_VALUE && ~resync_rst_i;
+    assign et_resync_max_o = counter_d == $bits(counter_d)'(MAX_VALUE);
+    assign gt_resync_max_o = counter_d > $bits(counter_d)'(MAX_VALUE) && ~resync_rst_i;
     
     always_comb begin
         // init
@@ -77,14 +77,14 @@ module te_resync_counter #(
 
             // summing the packets counted
             for (int i = 0; i < n_packets; i++) begin
-                if (counter_d <= MAX_VALUE) begin
+                if (counter_d <= $bits(counter_d)'(MAX_VALUE)) begin
                     counter_d += 1;
                 end
             end
         end
 
         // cycle mode
-        if (MODE == te_pkg::CYCLE_MODE && trace_enabled_i && counter_d <= MAX_VALUE) begin
+        if (MODE == te_pkg::CYCLE_MODE && trace_enabled_i && counter_d <= $bits(counter_d)'(MAX_VALUE)) begin
             counter_d += 1;
         end
 

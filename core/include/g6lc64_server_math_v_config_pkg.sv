@@ -74,7 +74,11 @@ package cva6_config_pkg;
   localparam CVA6ConfigNrStorePipeRegs = 0;
   localparam CVA6ConfigNrLoadBufEntries = 8;
 
-  localparam CVA6ConfigRASDepth = 2;
+  // S4: RAS=16 + TAGE_LITE + ckpt=16 SIGSEGV'd Variane (rc=-11). Live is
+  // BHT + FtqDepth=0 (TAGE off). smt2 is RAS=16 + BHT + ckpt=0. TRACE
+  // s4-slc-trace: slc returned to 14182 then IAF fetch-0 (ra stayed
+  // 14182) — RAS=2 underflow / unfiltered SRC_MISP to 0. Raise to 16.
+  localparam CVA6ConfigRASDepth = 16;
   localparam CVA6ConfigBTBEntries = 32;
   localparam CVA6ConfigBHTEntries = 128;
 
@@ -141,7 +145,10 @@ package cva6_config_pkg;
       ExceptionAddress: 64'h808,
       RASDepth: unsigned'(CVA6ConfigRASDepth),
       BTBEntries: unsigned'(CVA6ConfigBTBEntries),
-      BPType: config_pkg::TAGE_LITE,
+      // S4: 2jr closed with execute-region D$ uncached. TAGE_LITE+prefetch
+      // (s4-v-tage-minis) SIGSEGV rc=-11 all minis even with RAS=2 —
+      // keep BHT. Restore TAGE_LITE only after Variane SIGSEGV is gone.
+      BPType: config_pkg::BHT,
       BHTEntries: unsigned'(CVA6ConfigBHTEntries),
       BHTHist: unsigned'(3),
       BPGhistLen: unsigned'(24),
@@ -152,6 +159,8 @@ package cva6_config_pkg;
       BPIndirectEn: bit'(1),
       BPIndirectEntries: unsigned'(32),
       BPStatCorEn: bit'(1),
+      // Hang-7 pair with RAS=2. Ckpt=0 diagnostic (s4-v-ckpt0-minis)
+      // same stock HANG @40000 ld ra@e0 as ckpt=16 — not the hang.
       BPCkptDepth: unsigned'(16),
       DmBaseAddress: 64'h0,
       TvalEn: bit'(CVA6ConfigTvalEn),
@@ -165,9 +174,27 @@ package cva6_config_pkg;
       NrNonIdempotentRules: unsigned'(2),
       NonIdempotentAddrBase: 1024'({64'b0, 64'b0}),
       NonIdempotentLength: 1024'({64'b0, 64'b0}),
-      NrExecuteRegionRules: unsigned'(3),
-      ExecuteRegionAddrBase: 1024'({64'h8000_0000, 64'h1_0000, 64'h0}),
-      ExecuteRegionLength: 1024'({64'h40000000, 64'h10000, 64'h1000}),
+      // S4 / I4ag analog: 1 GiB execute made OpenSBI scratch/stack
+      // (mepc=ra=0x80046f2c, past .bss/_fw_end) a legal fetch. Boot hart
+      // then illegal-decoded zeros with mtvec still _start_hang
+      // (coldboot_done=0, pre-sbi_init fw_platform_init). I4v only
+      // suppresses JumpR into *non*-execute; widen-DRAM hid the ra poison.
+      // .text of fw_payload_r3a_v4 ends 0x1d870; .rodata/FDT at 0x8001e000
+      // must stay non-X. Payload/Image at 0x80200000 gets 32 MiB (R3a is
+      // 0x178; Linux Image must fit below 0x82200000 — I4w 0x82200000 was
+      // payload|bit25). Sign-ext aliases match smt2 I4l. No page-0 window.
+      // Cached stays 1 GiB. Config constants only; no new combo/flop.
+      NrExecuteRegionRules: unsigned'(5),
+      ExecuteRegionAddrBase: 1024'({
+        64'hffff_ffff_8020_0000, 64'h8020_0000,
+        64'hffff_ffff_8000_0000, 64'h8000_0000,
+        64'h1_0000
+      }),
+      ExecuteRegionLength: 1024'({
+        64'h200_0000, 64'h200_0000,
+        64'h1e000, 64'h1e000,
+        64'h1_0000
+      }),
       NrCachedRegionRules: unsigned'(1),
       CachedRegionAddrBase: 1024'({64'h8000_0000}),
       CachedRegionLength: 1024'({64'h40000000}),
@@ -221,10 +248,10 @@ package cva6_config_pkg;
       WayPredEn: bit'(1),
       WayPredEntries: unsigned'(128),
       ReplPolicy: config_pkg::REPL_RRIP,
-      HwPrefetchEn: bit'(1),
+      HwPrefetchEn: bit'(0),  // pair with BHT; TAGE+prefetch SIGSEGV rc=-11
       HwPrefetchStreams: unsigned'(4),
       DcacheMshrDepth: unsigned'(0),
-      FtqDepth: unsigned'(8),
+      FtqDepth: unsigned'(0),  // S4: with BHT/Fdip=0, FTQ skips nt_begin (stock HANG @140). smt2 is 0. Restore 8 with TAGE.
       FdipEn: bit'(0),
       FdipDistance: unsigned'(2),
       LoopBufEn: bit'(0),

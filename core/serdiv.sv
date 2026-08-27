@@ -10,6 +10,7 @@
 //
 // Author: Michael Schaffner <schaffner@iis.ee.ethz.ch>, ETH Zurich
 //         Andreas Traber    <traber@iis.ee.ethz.ch>, ETH Zurich
+// Modified by: Etienne Cimon (shift_a WIDTH-cast; Verilator width)
 //
 // Date: 18.10.2018
 // Description: simple 64bit serial divider
@@ -124,7 +125,7 @@ module serdiv
       .empty_o(lzc_b_no_one)
   );
 
-  assign shift_a = (lzc_a_no_one) ? WIDTH : {1'b0, lzc_a_result};
+  assign shift_a = (lzc_a_no_one) ? $bits(shift_a)'(WIDTH) : {1'b0, lzc_a_result};
   assign div_shift = {1'b0, lzc_b_result} - shift_a;
 
   assign op_b = op_b_i <<< div_shift;
