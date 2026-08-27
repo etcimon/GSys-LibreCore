@@ -631,6 +631,41 @@ mod tests {
         let args = Args::parse(["tandem", "--under-test", "x"]);
         assert!(cmd_tandem(&args).is_err());
     }
+
+    #[test]
+    fn tandem_reports_no_divergence_for_identical_records() {
+        use std::io::Write;
+        let mut tmp = std::env::temp_dir();
+        tmp.push("g6q-tandem-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let lhs = tmp.join("lhs.json");
+        let rhs = tmp.join("rhs.json");
+        let records = g6q_diag::records_to_json(&[g6q_diag::CommitRecord {
+            order: 0,
+            hart: 0,
+            pc_rdata: 0x8000_0000,
+            pc_wdata: 0x8000_0004,
+            insn: 0x1234_5678,
+            trap: false,
+            rd_addr: 0,
+            rd_wdata: 0,
+        }]);
+        let text = records.to_pretty();
+        let mut f = std::fs::File::create(&lhs).unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+        let mut f = std::fs::File::create(&rhs).unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+
+        let args = Args::parse([
+            "tandem",
+            "--under-test",
+            lhs.to_str().unwrap(),
+            "--reference",
+            rhs.to_str().unwrap(),
+        ]);
+        assert!(cmd_tandem(&args).is_ok());
+    }
 }
 
 /// `run --backend native` — a raw-image native VM execution.
