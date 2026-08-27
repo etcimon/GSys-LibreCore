@@ -828,6 +828,23 @@ impl Hart {
         self.regs.pc = self.csr.sepc;
     }
 
+    #[allow(dead_code)]
+    fn take_trap(&mut self, cause: u64) {
+        let prev_mode = self.csr.mode();
+        self.csr.mepc = self.regs.pc;
+        self.csr.mcause = cause;
+        self.csr.mtval = 0;
+        let mstatus = self.csr.mstatus;
+        let mie = (mstatus >> 3) & 1;
+        let new_mstatus = (mstatus & !((1u64 << 7) | (1u64 << 3) | (0x3u64 << 11)))
+            | (mie << 7)                        // MPIE <- MIE
+            | ((prev_mode as u64) << 11); // MPP <- previous mode
+        self.csr.mstatus = new_mstatus;
+        self.csr.set_mode(3);
+        let base = self.csr.mtvec & !0b11u64;
+        self.regs.pc = base;
+    }
+
     fn record(&mut self, pc_rdata: u64, pc_wdata: u64, insn: u32, rd_addr: u8, rd_wdata: u64) {
         self.records.push(CommitRecord {
             order: self.instret,
@@ -1089,6 +1106,11 @@ mod tests {
         m.write_le::<4>(addr, w.into()).unwrap();
     }
 
+    fn write_priv(m: &mut PhysMem, addr: u64, funct7: u32, rs2: u32) {
+        let w = (funct7 << 25) | (rs2 << 20) | 0x73;
+        m.write_le::<4>(addr, w.into()).unwrap();
+    }
+
     #[test]
     fn lr_sc_and_amo_word_update_memory() {
         let mut h = hart();
@@ -1151,6 +1173,41 @@ mod tests {
         assert_eq!(h.run(&mut m, 64, 20), Halt::Ecall);
         let out = m.uart().map(|u| u.output.clone()).unwrap_or_default();
         assert_eq!(out, b"Hi");
+    }
+
+    #[test]
+    fn mret_restores_pc_and_privilege() {
+        let mut h = hart();
+        let mut m = mem();
+        h.csr.mepc = 0x8000_0ff0;
+        h.csr.set_mode(3);
+        h.csr.mstatus = (1u64 << 7) | (1u64 << 3) | (3u64 << 11);
+        // mret at 0x8000_0000; target is a no-op lui x0,0
+        write_priv(&mut m, 0x8000_0000, 0x18, 0x02);
+        write_u(&mut m, 0x8000_0ff0, 0x37, 0, 0);
+
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.pc, 0x8000_0ff0);
+        assert_eq!(h.csr.mode(), 3);
+        assert_eq!((h.csr.mstatus >> 3) & 1, 1, "MIE restored from MPIE");
+        assert_eq!((h.csr.mstatus >> 11) & 0x3, 0, "MPP reset to U");
+    }
+
+    #[test]
+    fn sret_restores_pc_and_privilege() {
+        let mut h = hart();
+        let mut m = mem();
+        h.csr.sepc = 0x8000_1000;
+        h.csr.set_mode(1);
+        h.csr.mstatus = (1u64 << 5) | (1u64 << 1) | (1u64 << 8);
+        // sret
+        write_priv(&mut m, 0x8000_0000, 0x08, 0x02);
+
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.pc, 0x8000_1000);
+        assert_eq!(h.csr.mode(), 1);
+        assert_eq!((h.csr.mstatus >> 1) & 1, 1, "SIE restored from SPIE");
+        assert_eq!((h.csr.mstatus >> 8) & 1, 0, "SPP reset to U");
     }
 
     #[test]

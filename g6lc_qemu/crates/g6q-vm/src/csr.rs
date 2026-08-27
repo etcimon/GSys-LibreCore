@@ -53,6 +53,8 @@ pub enum IrqBit {
 /// A privileged-mode CSR bank.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Csr {
+    /// Current privilege mode (0=U, 1=S, 3=M). Kept separate from mstatus.MPP.
+    pub mode: u8,
     /// Hart ID.
     pub hartid: u64,
     /// ISA register (read-only for our purposes).
@@ -110,8 +112,10 @@ impl Csr {
     pub fn new(hartid: u64) -> Self {
         Self {
             hartid,
+            mode: 3,
             // RV64IMA with supervisor/user, plus Sstc/Svpbmt bits we will not emulate yet.
             misa: (1u64 << 63) | (1 << 0) | (1 << 3) | (1 << 8) | (1 << 18) | (1 << 20),
+            mstatus: 3u64 << 11, // MPP = M
             mvendorid: 0,
             marchid: 0,
             mimpid: 0,
@@ -254,14 +258,14 @@ impl Csr {
         Ok(old)
     }
 
-    /// Current privilege mode (0=U,1=S,3=M). Stored in mstatus MPP/SPP for traps.
+    /// Current privilege mode (0=U,1=S,3=M). Stored independently of mstatus.MPP.
     pub fn mode(&self) -> u8 {
-        ((self.mstatus >> 11) & 0x3) as u8
+        self.mode
     }
 
-    /// Set privilege mode.
+    /// Set current privilege mode; the caller updates mstatus.MPP/SPP if a trap changed it.
     pub fn set_mode(&mut self, mode: u8) {
-        self.mstatus = (self.mstatus & !(0x3 << 11)) | ((mode as u64 & 0x3) << 11);
+        self.mode = mode & 0x3;
     }
 
     /// Advance wall-clock time from the memory map (CLINT). Not directly called in tests.
