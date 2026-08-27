@@ -10,7 +10,7 @@
 use g6q_diag::CommitRecord;
 
 use crate::insn::{decode, Insn};
-use crate::mem::PhysMem;
+use crate::mem::{MemError, PhysMem};
 use crate::regs::Regs;
 use crate::Clock;
 
@@ -20,12 +20,6 @@ use crate::Clock;
 pub enum Halt {
     /// Reached the requested instruction limit.
     StepLimit,
-    /// An illegal or unimplemented instruction (CSR access or future use).
-    Illegal(u32),
-    /// A memory access fault.
-    MemFault,
-    /// Deterministic time boundary reached without finishing.
-    TimeSlice,
 }
 
 use crate::csr::Csr;
@@ -67,6 +61,18 @@ impl Hart {
     /// Returns the halt reason when something stops the hart. The hart advances by one
     /// instruction on success and appends a [`CommitRecord`].
     pub fn step(&mut self, mem: &mut PhysMem, xlen: u8) -> Option<Halt> {
+        let w = match mem.read_le::<4>(self.regs.pc) {
+            Ok(v) => v as u32,
+            Err(MemError::Misaligned) => {
+                self.take_trap(0);
+                return None;
+            }
+            Err(MemError::OutOfBounds) | Err(MemError::Invalid) => {
+                self.take_trap(1);
+                return None;
+            }
+        };
+
         // Deliver M-mode timer interrupt if globally and specifically enabled.
         if self.csr.mode() == 3
             && ((self.csr.mstatus >> 3) & 1) != 0
@@ -86,10 +92,6 @@ impl Hart {
             return None;
         }
 
-        let w = match mem.read_le::<4>(self.regs.pc) {
-            Ok(v) => v as u32,
-            Err(_) => return Some(Halt::MemFault),
-        };
         let insn = decode(w, xlen as u32);
 
         // Capture architectural state before execution changes it.
@@ -98,11 +100,9 @@ impl Hart {
 
         let pc_wdata = match self.execute(insn, mem, xlen) {
             Ok(pc) => pc,
-            Err(ExecError::Mem) => return Some(Halt::MemFault),
-            Err(ExecError::Halt(h)) => {
-                // Record the instruction before reporting the halt.
-                self.record(pc_rdata, pc_rdata.wrapping_add(4), w, rd_addr, 0);
-                return Some(h);
+            Err(ExecError::Trap(c)) => {
+                self.take_trap(c);
+                return None;
             }
         };
 
@@ -291,68 +291,68 @@ impl Hart {
             }
             Insn::Lb { rd, rs1, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
-                let v = mem.read_sext::<1>(addr).map_err(|_| ExecError::Mem)?;
+                let v = mem.read_sext::<1>(addr).map_err(|_| ExecError::Trap(5))?;
                 self.regs.set(rd, v as u64);
                 Ok(nx)
             }
             Insn::Lh { rd, rs1, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
-                let v = mem.read_sext::<2>(addr).map_err(|_| ExecError::Mem)?;
+                let v = mem.read_sext::<2>(addr).map_err(|_| ExecError::Trap(5))?;
                 self.regs.set(rd, v as u64);
                 Ok(nx)
             }
             Insn::Lw { rd, rs1, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
-                let v = mem.read_sext::<4>(addr).map_err(|_| ExecError::Mem)?;
+                let v = mem.read_sext::<4>(addr).map_err(|_| ExecError::Trap(5))?;
                 self.regs.set(rd, v as u64);
                 Ok(nx)
             }
             Insn::Lbu { rd, rs1, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
-                let v = mem.read_le::<1>(addr).map_err(|_| ExecError::Mem)?;
+                let v = mem.read_le::<1>(addr).map_err(|_| ExecError::Trap(5))?;
                 self.regs.set(rd, v);
                 Ok(nx)
             }
             Insn::Lhu { rd, rs1, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
-                let v = mem.read_le::<2>(addr).map_err(|_| ExecError::Mem)?;
+                let v = mem.read_le::<2>(addr).map_err(|_| ExecError::Trap(5))?;
                 self.regs.set(rd, v);
                 Ok(nx)
             }
             Insn::Lwu { rd, rs1, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
-                let v = mem.read_le::<4>(addr).map_err(|_| ExecError::Mem)?;
+                let v = mem.read_le::<4>(addr).map_err(|_| ExecError::Trap(5))?;
                 self.regs.set(rd, v);
                 Ok(nx)
             }
             Insn::Ld { rd, rs1, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
-                let v = mem.read_le::<8>(addr).map_err(|_| ExecError::Mem)?;
+                let v = mem.read_le::<8>(addr).map_err(|_| ExecError::Trap(5))?;
                 self.regs.set(rd, v);
                 Ok(nx)
             }
             Insn::Sb { rs1, rs2, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
                 mem.write_le::<1>(addr, self.regs.get(rs2))
-                    .map_err(|_| ExecError::Mem)?;
+                    .map_err(|_| ExecError::Trap(7))?;
                 Ok(nx)
             }
             Insn::Sh { rs1, rs2, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
                 mem.write_le::<2>(addr, self.regs.get(rs2))
-                    .map_err(|_| ExecError::Mem)?;
+                    .map_err(|_| ExecError::Trap(7))?;
                 Ok(nx)
             }
             Insn::Sw { rs1, rs2, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
                 mem.write_le::<4>(addr, self.regs.get(rs2))
-                    .map_err(|_| ExecError::Mem)?;
+                    .map_err(|_| ExecError::Trap(7))?;
                 Ok(nx)
             }
             Insn::Sd { rs1, rs2, imm } => {
                 let addr = self.regs.get(rs1).wrapping_add(imm as u64);
                 mem.write_le::<8>(addr, self.regs.get(rs2))
-                    .map_err(|_| ExecError::Mem)?;
+                    .map_err(|_| ExecError::Trap(7))?;
                 Ok(nx)
             }
             Insn::Addi { rd, rs1, imm } => {
@@ -624,14 +624,14 @@ impl Hart {
 
             Insn::LrW { rd, rs1, .. } => {
                 let addr = self.regs.get(rs1);
-                let v = mem.read_sext::<4>(addr).map_err(|_| ExecError::Mem)?;
+                let v = mem.read_sext::<4>(addr).map_err(|_| ExecError::Trap(5))?;
                 self.reservation = Some(addr);
                 self.regs.set(rd, v as u64);
                 Ok(nx)
             }
             Insn::LrD { rd, rs1, .. } => {
                 let addr = self.regs.get(rs1);
-                let v = mem.read_le::<8>(addr).map_err(|_| ExecError::Mem)?;
+                let v = mem.read_le::<8>(addr).map_err(|_| ExecError::Trap(5))?;
                 self.reservation = Some(addr);
                 self.regs.set(rd, v);
                 Ok(nx)
@@ -640,7 +640,7 @@ impl Hart {
                 let addr = self.regs.get(rs1);
                 if self.reservation == Some(addr) {
                     mem.write_le::<4>(addr, self.regs.get(rs2))
-                        .map_err(|_| ExecError::Mem)?;
+                        .map_err(|_| ExecError::Trap(7))?;
                     self.regs.set(rd, 0);
                 } else {
                     self.regs.set(rd, 1);
@@ -652,7 +652,7 @@ impl Hart {
                 let addr = self.regs.get(rs1);
                 if self.reservation == Some(addr) {
                     mem.write_le::<8>(addr, self.regs.get(rs2))
-                        .map_err(|_| ExecError::Mem)?;
+                        .map_err(|_| ExecError::Trap(7))?;
                     self.regs.set(rd, 0);
                 } else {
                     self.regs.set(rd, 1);
@@ -709,76 +709,56 @@ impl Hart {
 
             Insn::Fence | Insn::FenceI => Ok(nx),
             Insn::Csrrw { rd, rs1, csr } => {
-                let old = self
-                    .csr
-                    .read(csr)
-                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                let old = self.csr.read(csr).map_err(|_| ExecError::Trap(2))?;
                 let new = self.regs.get(rs1);
-                self.csr
-                    .write(csr, new)
-                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                self.csr.write(csr, new).map_err(|_| ExecError::Trap(2))?;
                 self.regs.set(rd, old);
                 Ok(nx)
             }
             Insn::Csrrs { rd, rs1, csr } => {
-                let old = self
-                    .csr
-                    .read(csr)
-                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                let old = self.csr.read(csr).map_err(|_| ExecError::Trap(2))?;
                 if rs1 != 0 {
                     self.csr
                         .read_set(csr, self.regs.get(rs1))
-                        .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                        .map_err(|_| ExecError::Trap(2))?;
                 }
                 self.regs.set(rd, old);
                 Ok(nx)
             }
             Insn::Csrrc { rd, rs1, csr } => {
-                let old = self
-                    .csr
-                    .read(csr)
-                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                let old = self.csr.read(csr).map_err(|_| ExecError::Trap(2))?;
                 if rs1 != 0 {
                     self.csr
                         .read_clear(csr, self.regs.get(rs1))
-                        .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                        .map_err(|_| ExecError::Trap(2))?;
                 }
                 self.regs.set(rd, old);
                 Ok(nx)
             }
             Insn::Csrrwi { rd, uimm, csr } => {
-                let old = self
-                    .csr
-                    .read(csr)
-                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                let old = self.csr.read(csr).map_err(|_| ExecError::Trap(2))?;
                 self.csr
                     .write(csr, uimm as u64)
-                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                    .map_err(|_| ExecError::Trap(2))?;
                 self.regs.set(rd, old);
                 Ok(nx)
             }
             Insn::Csrrsi { rd, uimm, csr } => {
-                let old = self
-                    .csr
-                    .read(csr)
-                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                let old = self.csr.read(csr).map_err(|_| ExecError::Trap(2))?;
                 if uimm != 0 {
                     self.csr
                         .read_set(csr, uimm as u64)
-                        .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                        .map_err(|_| ExecError::Trap(2))?;
                 }
                 self.regs.set(rd, old);
                 Ok(nx)
             }
             Insn::Csrrci { rd, uimm, csr } => {
-                let old = self
-                    .csr
-                    .read(csr)
-                    .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                let old = self.csr.read(csr).map_err(|_| ExecError::Trap(2))?;
                 if uimm != 0 {
                     self.csr
                         .read_clear(csr, uimm as u64)
-                        .map_err(|_| ExecError::Halt(Halt::Illegal(0)))?;
+                        .map_err(|_| ExecError::Trap(2))?;
                 }
                 self.regs.set(rd, old);
                 Ok(nx)
@@ -821,16 +801,18 @@ impl Hart {
     {
         let addr = self.regs.get(rs1);
         let old = if N == 4 {
-            mem.read_le::<4>(addr).map_err(|_| ExecError::Mem)?
+            mem.read_le::<4>(addr).map_err(|_| ExecError::Trap(5))?
         } else {
-            mem.read_le::<8>(addr).map_err(|_| ExecError::Mem)?
+            mem.read_le::<8>(addr).map_err(|_| ExecError::Trap(5))?
         };
         let new = op(old, self.regs.get(rs2));
         if N == 4 {
-            mem.write_le::<4>(addr, new).map_err(|_| ExecError::Mem)?;
+            mem.write_le::<4>(addr, new)
+                .map_err(|_| ExecError::Trap(7))?;
             self.regs.set(rd, old as i32 as i64 as u64);
         } else {
-            mem.write_le::<8>(addr, new).map_err(|_| ExecError::Mem)?;
+            mem.write_le::<8>(addr, new)
+                .map_err(|_| ExecError::Trap(7))?;
             self.regs.set(rd, old);
         }
         Ok(self.regs.next_pc())
@@ -892,8 +874,8 @@ impl Hart {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExecError {
-    Mem,
-    Halt(Halt),
+    /// A synchronous exception, carrying the `mcause` value.
+    Trap(u64),
 }
 
 #[cfg(test)]
@@ -1085,7 +1067,9 @@ mod tests {
         let mut h = hart();
         h.regs.pc = 0x8000_0002;
         let mut m = mem();
-        assert_eq!(h.step(&mut m, 64), Some(Halt::MemFault));
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.csr.mcause, 0);
+        assert_eq!(h.regs.pc, 0x7000_0000);
     }
 
     #[test]
