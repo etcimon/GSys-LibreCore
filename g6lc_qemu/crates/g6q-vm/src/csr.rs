@@ -98,6 +98,10 @@ pub struct Csr {
     pub sscratch: u64,
     /// Supervisor address translation.
     pub satp: u64,
+    /// Floating-point accrued exception flags.
+    pub fflags: u64,
+    /// Floating-point dynamic rounding mode.
+    pub frm: u64,
     /// Wall-clock time (lower half).
     pub mtime: u64,
     /// Wall-clock time (upper half).
@@ -118,9 +122,18 @@ impl Csr {
         Self {
             hartid,
             mode: 3,
-            // RV64IMASC with supervisor/user (MXL=2 at bit 63, A=0, C=2, I=8, M=12, S=18, U=20).
-            misa: (2u64 << 62) | (1 << 0) | (1 << 2) | (1 << 8) | (1 << 12) | (1 << 18) | (1 << 20),
-            mstatus: 3u64 << 11, // MPP = M
+            // RV64IMAFDC with supervisor/user (MXL=2 at bit 63, A=0, C=2, D=3,
+            // F=5, I=8, M=12, S=18, U=20).  Only F is implemented this pass.
+            misa: (2u64 << 62)
+                | (1 << 0)
+                | (1 << 2)
+                | (1 << 5)
+                | (1 << 8)
+                | (1 << 12)
+                | (1 << 18)
+                | (1 << 20),
+            // FS = Dirty, MPP = M, SD = 1 (derived from dirty FS).
+            mstatus: (1u64 << 63) | (3u64 << 13) | (3u64 << 11),
             mvendorid: 0,
             marchid: 0,
             mimpid: 0,
@@ -156,6 +169,9 @@ impl Csr {
             0x143 => Ok(self.stval),
             0x140 => Ok(self.sscratch),
             0x180 => Ok(self.satp),
+            0x001 => Ok(self.fflags),
+            0x002 => Ok(self.frm),
+            0x003 => Ok((self.frm << 5) | self.fflags),
             0x701 => Ok(self.mtime),
             0x741 => Ok(self.mtimecmp),
             0xB81 => Ok(self.mtimeh),
@@ -163,11 +179,19 @@ impl Csr {
         }
     }
 
+    /// Compose the 32-bit `fcsr` value from `frm` and `fflags`.
+    pub fn fcsr(&self) -> u64 {
+        (self.frm << 5) | self.fflags
+    }
+
     /// Write a CSR by address.
     pub fn write(&mut self, addr: u16, val: u64) -> Result<(), CsrError> {
         match addr {
             0x300 => {
-                self.mstatus = val;
+                // SD (bit 63) is read-only; it is set when FS (13:14) is dirty.
+                let fs = (val >> 13) & 3;
+                let sd = if fs == 3 { 1u64 << 63 } else { 0 };
+                self.mstatus = (val & !(1u64 << 63)) | sd;
                 Ok(())
             }
             0x304 => {
@@ -207,7 +231,10 @@ impl Csr {
                 Ok(())
             }
             0x100 => {
-                self.mstatus = (self.mstatus & !SSTATUS_MASK) | (val & SSTATUS_MASK);
+                let mstatus = (self.mstatus & !SSTATUS_MASK) | (val & SSTATUS_MASK);
+                let fs = (mstatus >> 13) & 3;
+                let sd = if fs == 3 { 1u64 << 63 } else { 0 };
+                self.mstatus = (mstatus & !(1u64 << 63)) | sd;
                 Ok(())
             }
             0x104 => {
@@ -243,6 +270,19 @@ impl Csr {
             }
             0x180 => {
                 self.satp = val;
+                Ok(())
+            }
+            0x001 => {
+                self.fflags = val & 0x1f;
+                Ok(())
+            }
+            0x002 => {
+                self.frm = val & 0x07;
+                Ok(())
+            }
+            0x003 => {
+                self.fflags = val & 0x1f;
+                self.frm = (val >> 5) & 0x07;
                 Ok(())
             }
             0x701 => {

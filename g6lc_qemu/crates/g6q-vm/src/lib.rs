@@ -40,7 +40,7 @@ pub mod regs;
 pub use exec::{Halt, Hart};
 pub use insn::{decode, Insn};
 pub use mem::{MemError, PhysMem, Region};
-pub use regs::Regs;
+pub use regs::{Fregs, Regs};
 
 /// Deterministic clock (re-exported from the Q0 scaffold).
 pub type Clock = DeterministicClock;

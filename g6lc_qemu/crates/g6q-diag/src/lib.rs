@@ -120,10 +120,14 @@ pub struct CommitRecord {
     pub insn: u32,
     /// Whether the instruction trapped.
     pub trap: bool,
-    /// Destination register index, zero when none.
+    /// Integer destination register index, zero when none.
     pub rd_addr: u8,
-    /// Value written to the destination register.
+    /// Value written to the integer destination register.
     pub rd_wdata: u64,
+    /// Floating-point destination register index, zero when none.
+    pub frd_addr: u8,
+    /// Value written to the floating-point destination register.
+    pub frd_wdata: u64,
 }
 
 impl CommitRecord {
@@ -138,6 +142,8 @@ impl CommitRecord {
             ("trap", Json::Bool(self.trap)),
             ("rd_addr", Json::Int(self.rd_addr as i64)),
             ("rd_wdata", Json::Int(self.rd_wdata as i64)),
+            ("frd_addr", Json::Int(self.frd_addr as i64)),
+            ("frd_wdata", Json::Int(self.frd_wdata as i64)),
         ])
     }
 
@@ -167,6 +173,8 @@ impl CommitRecord {
             trap: matches!(o.get("trap")?, Json::Bool(true)),
             rd_addr: get_u8("rd_addr")?,
             rd_wdata: get_u64("rd_wdata")?,
+            frd_addr: get_u8("frd_addr").unwrap_or(0),
+            frd_wdata: get_u64("frd_wdata").unwrap_or(0),
         })
     }
 
@@ -196,6 +204,8 @@ impl CommitRecord {
         cmp!(trap, "{}");
         cmp!(rd_addr, "{}");
         cmp!(rd_wdata, "{:#x}");
+        cmp!(frd_addr, "{}");
+        cmp!(frd_wdata, "{:#x}");
         out
     }
 

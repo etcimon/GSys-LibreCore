@@ -650,6 +650,8 @@ mod tests {
             trap: false,
             rd_addr: 0,
             rd_wdata: 0,
+            frd_addr: 0,
+            frd_wdata: 0,
         }]);
         let text = records.to_pretty();
         let mut f = std::fs::File::create(&lhs).unwrap();

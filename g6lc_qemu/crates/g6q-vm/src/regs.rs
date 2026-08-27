@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 
-//! Architectural register file and program counter.
+//! Architectural register files and program counter.
 
 /// 32 general-purpose registers, with `x0` hard-wired to zero.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -43,6 +43,69 @@ impl Regs {
     /// Program counter of the next sequential instruction.
     pub fn next_pc(&self) -> u64 {
         self.pc.wrapping_add(4)
+    }
+}
+
+/// 32 floating-point registers, each FLEN = 64 bits.
+///
+/// Single-precision values are stored NaN-boxed in the lower 32 bits with the
+/// upper 32 bits set to all ones, matching the RISC-V convention for FLEN > 32.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Fregs {
+    f: [u64; 32],
+}
+
+impl Fregs {
+    /// Create an FP register file with all registers set to the canonical
+    /// 64-bit quiet-NaN bit pattern.
+    pub fn new() -> Self {
+        Self {
+            f: [0xffff_ffff_7fc0_0000; 32],
+        }
+    }
+
+    /// Read a raw 64-bit FPR value.
+    pub fn get(&self, i: u8) -> u64 {
+        self.f[i as usize]
+    }
+
+    /// Write a raw 64-bit FPR value.
+    pub fn set(&mut self, i: u8, v: u64) {
+        self.f[i as usize] = v;
+    }
+
+    /// Read the lower 32 bits, treating an un-NaN-boxed value as the
+    /// canonical 32-bit quiet NaN.
+    pub fn get_s(&self, i: u8) -> u32 {
+        let v = self.get(i);
+        if v >> 32 == 0xffff_ffff {
+            v as u32
+        } else {
+            0x7fc0_0000
+        }
+    }
+
+    /// Write a 32-bit value, NaN-boxed into a 64-bit FPR.
+    pub fn set_s(&mut self, i: u8, v: u32) {
+        self.set(i, 0xffff_ffff_0000_0000 | (v as u64));
+    }
+
+    /// Read the lower 32 bits as raw bits without NaN-boxing checks.
+    pub fn get_s_raw(&self, i: u8) -> u32 {
+        self.get(i) as u32
+    }
+}
+
+#[cfg(test)]
+impl Fregs {
+    /// Convenience: unpack a 32-bit register as `f32`.
+    pub fn get_f32(&self, i: u8) -> f32 {
+        f32::from_bits(self.get_s(i))
+    }
+
+    /// Convenience: pack an `f32` into a 32-bit register.
+    pub fn set_f32(&mut self, i: u8, v: f32) {
+        self.set_s(i, v.to_bits());
     }
 }
 

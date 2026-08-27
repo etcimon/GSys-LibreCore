@@ -11,6 +11,7 @@ use g6q_diag::CommitRecord;
 
 use crate::insn::{decode, Insn};
 use crate::mem::{MemError, PhysMem};
+use crate::regs::Fregs;
 use crate::regs::Regs;
 use crate::Clock;
 
@@ -28,8 +29,10 @@ use crate::mmu;
 /// The state of one hart and its progress.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hart {
-    /// Architectural register file.
+    /// Architectural integer register file.
     pub regs: Regs,
+    /// Architectural floating-point register file.
+    pub fregs: Fregs,
     /// Deterministic clock.
     pub clock: Clock,
     /// Retired-instruction count.
@@ -56,6 +59,7 @@ impl Hart {
     pub fn with_hartid(pc: u64, hartid: u64) -> Self {
         Self {
             regs: Regs::new(pc),
+            fregs: Fregs::new(),
             csr: Csr::new(hartid),
             inst_len: 4,
             ..Self::default()
@@ -205,7 +209,21 @@ impl Hart {
             }
         };
 
-        self.record(pc_rdata, pc_wdata, w, rd_addr, self.regs.get(rd_addr));
+        let frd_addr = self.fresult_reg(&insn);
+        let frd_wdata = if frd_addr != 0 {
+            self.fregs.get(frd_addr)
+        } else {
+            0
+        };
+        self.record(
+            pc_rdata,
+            pc_wdata,
+            w,
+            rd_addr,
+            self.regs.get(rd_addr),
+            frd_addr,
+            frd_wdata,
+        );
         self.regs.pc = pc_wdata;
         self.instret += 1;
         self.clock.retire(1);
@@ -360,7 +378,16 @@ impl Hart {
             | Insn::OrcB { rd, .. }
             | Insn::SextB { rd, .. }
             | Insn::SextH { rd, .. }
-            | Insn::ZextH { rd, .. } => rd,
+            | Insn::ZextH { rd, .. }
+            | Insn::FcvtWS { rd, .. }
+            | Insn::FcvtWuS { rd, .. }
+            | Insn::FcvtLS { rd, .. }
+            | Insn::FcvtLuS { rd, .. }
+            | Insn::FmvXW { rd, .. }
+            | Insn::FeqS { rd, .. }
+            | Insn::FltS { rd, .. }
+            | Insn::FleS { rd, .. }
+            | Insn::FclassS { rd, .. } => rd,
             Insn::LrW { rd, .. }
             | Insn::LrD { rd, .. }
             | Insn::ScW { rd, .. }
@@ -385,6 +412,33 @@ impl Hart {
             | Insn::AmomaxuD { rd, .. }
             | Insn::AmocasW { rd, .. }
             | Insn::AmocasD { rd, .. } => rd,
+            _ => 0,
+        }
+    }
+
+    fn fresult_reg(&self, insn: &Insn) -> u8 {
+        // Returns the FP destination register for FP-writing instructions.
+        match *insn {
+            Insn::Flw { rd, .. }
+            | Insn::FmaddS { rd, .. }
+            | Insn::FmsubS { rd, .. }
+            | Insn::FnmsubS { rd, .. }
+            | Insn::FnmaddS { rd, .. }
+            | Insn::FaddS { rd, .. }
+            | Insn::FsubS { rd, .. }
+            | Insn::FmulS { rd, .. }
+            | Insn::FdivS { rd, .. }
+            | Insn::FsqrtS { rd, .. }
+            | Insn::FsgnjS { rd, .. }
+            | Insn::FsgnjnS { rd, .. }
+            | Insn::FsgnjxS { rd, .. }
+            | Insn::FminS { rd, .. }
+            | Insn::FmaxS { rd, .. }
+            | Insn::FcvtSW { rd, .. }
+            | Insn::FcvtSWu { rd, .. }
+            | Insn::FcvtSL { rd, .. }
+            | Insn::FcvtSLu { rd, .. }
+            | Insn::FmvWX { rd, .. } => rd,
             _ => 0,
         }
     }
@@ -1235,11 +1289,552 @@ impl Hart {
                 self.translate(mem, vaddr, 5)?;
                 Ok(nx)
             }
+
+            // F (single-precision floating-point)
+            Insn::Flw { .. }
+            | Insn::Fsw { .. }
+            | Insn::FmaddS { .. }
+            | Insn::FmsubS { .. }
+            | Insn::FnmsubS { .. }
+            | Insn::FnmaddS { .. }
+            | Insn::FaddS { .. }
+            | Insn::FsubS { .. }
+            | Insn::FmulS { .. }
+            | Insn::FdivS { .. }
+            | Insn::FsqrtS { .. }
+            | Insn::FsgnjS { .. }
+            | Insn::FsgnjnS { .. }
+            | Insn::FsgnjxS { .. }
+            | Insn::FminS { .. }
+            | Insn::FmaxS { .. }
+            | Insn::FcvtWS { .. }
+            | Insn::FcvtWuS { .. }
+            | Insn::FcvtLS { .. }
+            | Insn::FcvtLuS { .. }
+            | Insn::FmvXW { .. }
+            | Insn::FeqS { .. }
+            | Insn::FltS { .. }
+            | Insn::FleS { .. }
+            | Insn::FclassS { .. }
+            | Insn::FcvtSW { .. }
+            | Insn::FcvtSWu { .. }
+            | Insn::FcvtSL { .. }
+            | Insn::FcvtSLu { .. }
+            | Insn::FmvWX { .. } => self.execute_fp(insn, nx, xlen, mem),
+
             Insn::Illegal(w) => {
                 self.fault_addr = w as u64;
                 self.take_trap(2);
                 Ok(self.regs.pc)
             }
+        }
+    }
+
+    // F (single-precision floating-point) helpers and execution.
+
+    fn fp_rm(&self, rm: u8) -> u8 {
+        if rm == 0x7 {
+            self.csr.frm as u8
+        } else {
+            rm
+        }
+    }
+
+    fn f32_get(&self, i: u8) -> f32 {
+        f32::from_bits(self.fregs.get_s(i))
+    }
+
+    fn f32_set_raw(&mut self, i: u8, bits: u32) {
+        self.fregs.set_s(i, bits);
+    }
+
+    /// Store an f32 result, canonicalizing a produced NaN.
+    fn f32_set_arith(&mut self, i: u8, v: f32) {
+        let bits = if v.is_nan() { 0x7fc0_0000 } else { v.to_bits() };
+        self.fregs.set_s(i, bits);
+    }
+
+    fn set_fflag(&mut self, flag: u64) {
+        self.csr.fflags |= flag & 0x1f;
+    }
+
+    fn sext32(v: u32) -> u64 {
+        (v as i32) as i64 as u64
+    }
+
+    fn round_ties_even_f32(v: f32) -> f32 {
+        let r = v.round();
+        if (r - v).abs() == 0.5 {
+            let r_int = r as i64;
+            if r_int % 2 != 0 {
+                if v > 0.0 {
+                    r - 1.0
+                } else {
+                    r + 1.0
+                }
+            } else {
+                r
+            }
+        } else {
+            r
+        }
+    }
+
+    fn f32_minmax(a: f32, b: f32, max: bool) -> f32 {
+        if a.is_nan() && b.is_nan() {
+            f32::from_bits(0x7fc0_0000)
+        } else if a.is_nan() {
+            b
+        } else if b.is_nan() {
+            a
+        } else if a == 0.0 && b == 0.0 {
+            if max {
+                if a.is_sign_positive() {
+                    a
+                } else {
+                    b
+                }
+            } else if a.is_sign_negative() {
+                a
+            } else {
+                b
+            }
+        } else if max {
+            if a > b {
+                a
+            } else {
+                b
+            }
+        } else if a < b {
+            a
+        } else {
+            b
+        }
+    }
+
+    fn f32_to_i64(&mut self, v: f32, rm: u8, width: u8, unsign: bool) -> u64 {
+        // Clamp and convert. The spec saturates out-of-range/NaN values and
+        // sets the invalid flag. Inexact results set the NX flag.
+        let limit_bits = if unsign { width } else { width - 1 };
+        let max: i128 = (1i128 << limit_bits) - 1;
+        let min: i128 = if unsign { 0 } else { -(1i128 << (width - 1)) };
+
+        if v.is_nan() {
+            self.set_fflag(0x10); // NV
+            max as u64
+        } else if v.is_infinite() {
+            self.set_fflag(0x10); // NV
+            if v.is_sign_negative() {
+                if unsign {
+                    0
+                } else {
+                    min as u64
+                }
+            } else {
+                max as u64
+            }
+        } else {
+            let rounded = match rm {
+                0x0 => Self::round_ties_even_f32(v), // RNE
+                0x1 => v.trunc(),                    // RTZ
+                0x2 => v.floor(),                    // RDN
+                0x3 => v.ceil(),                     // RUP
+                0x4 => v.round(),                    // RMM
+                _ => v.trunc(),                      // reserved, treat as RTZ
+            };
+            let r = rounded as i128;
+            if r > max {
+                self.set_fflag(0x10); // NV
+                max as u64
+            } else if r < min {
+                self.set_fflag(0x10); // NV
+                min as u64
+            } else {
+                if (rounded as f64) != (v as f64) {
+                    self.set_fflag(0x01); // NX
+                }
+                if r < 0 && unsign {
+                    0
+                } else {
+                    r as u64
+                }
+            }
+        }
+    }
+
+    fn i64_to_f32(&mut self, v: u64, _rm: u8, unsign: bool, xlen: u8, width: u8) -> f32 {
+        let source = if width == 32 {
+            if unsign {
+                (v as u32) as i128
+            } else {
+                (v as u32) as i32 as i128
+            }
+        } else if unsign {
+            v as i128
+        } else if xlen == 32 {
+            (v as i32) as i128
+        } else {
+            (v as i64) as i128
+        };
+        let result = source as f32;
+        // Detect inexact: round-trip differs or value lost precision.
+        if (result as i128) != source {
+            self.set_fflag(0x01); // NX
+        }
+        result
+    }
+
+    fn fclass_s(v: f32) -> u64 {
+        let bits = v.to_bits();
+        let sign = bits & 0x8000_0000;
+        let exp = (bits >> 23) & 0xff;
+        let frac = bits & 0x007f_ffff;
+        if exp == 0xff {
+            if frac == 0 {
+                if sign != 0 {
+                    1 << 0 // -inf
+                } else {
+                    1 << 7 // +inf
+                }
+            } else if (frac & 0x0040_0000) != 0 {
+                1 << 9 // quiet NaN
+            } else {
+                1 << 8 // signaling NaN
+            }
+        } else if exp == 0 {
+            if frac == 0 {
+                if sign != 0 {
+                    1 << 3 // -0
+                } else {
+                    1 << 4 // +0
+                }
+            } else if sign != 0 {
+                1 << 2 // negative subnormal
+            } else {
+                1 << 5 // positive subnormal
+            }
+        } else if sign != 0 {
+            1 << 1 // negative normal
+        } else {
+            1 << 6 // positive normal
+        }
+    }
+
+    fn execute_fp(
+        &mut self,
+        insn: Insn,
+        nx: u64,
+        xlen: u8,
+        mem: &mut PhysMem,
+    ) -> Result<u64, ExecError> {
+        match insn {
+            Insn::Flw { rd, rs1, imm } => {
+                let addr = self.regs.get(rs1).wrapping_add(imm as u64);
+                let v = self.load_le::<4>(mem, addr)?;
+                self.fregs.set_s(rd, v as u32);
+                Ok(nx)
+            }
+            Insn::Fsw { rs1, rs2, imm } => {
+                let addr = self.regs.get(rs1).wrapping_add(imm as u64);
+                let v = self.fregs.get_s(rs2);
+                self.store_le::<4>(mem, addr, v as u64)?;
+                Ok(nx)
+            }
+
+            // Fused multiply-add
+            Insn::FmaddS {
+                rd,
+                rs1,
+                rs2,
+                rs3,
+                rm: _,
+            } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let c = self.f32_get(rs3);
+                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
+                    self.set_fflag(0x10); // NV for inf * 0
+                }
+                let r = a.mul_add(b, c);
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+            Insn::FmsubS {
+                rd,
+                rs1,
+                rs2,
+                rs3,
+                rm: _,
+            } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let c = self.f32_get(rs3);
+                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
+                    self.set_fflag(0x10); // NV
+                }
+                let r = a.mul_add(b, -c);
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+            Insn::FnmsubS {
+                rd,
+                rs1,
+                rs2,
+                rs3,
+                rm: _,
+            } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let c = self.f32_get(rs3);
+                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
+                    self.set_fflag(0x10); // NV
+                }
+                let r = -(a * b) + c;
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+            Insn::FnmaddS {
+                rd,
+                rs1,
+                rs2,
+                rs3,
+                rm: _,
+            } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let c = self.f32_get(rs3);
+                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
+                    self.set_fflag(0x10); // NV
+                }
+                let r = -(a * b) - c;
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+
+            // Basic arithmetic
+            Insn::FaddS {
+                rd,
+                rs1,
+                rs2,
+                rm: _,
+            } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let r = a + b;
+                self.f32_set_arith(rd, r);
+                if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
+                    self.set_fflag(0x04); // OF
+                }
+                Ok(nx)
+            }
+            Insn::FsubS {
+                rd,
+                rs1,
+                rs2,
+                rm: _,
+            } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let r = a - b;
+                self.f32_set_arith(rd, r);
+                if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
+                    self.set_fflag(0x04); // OF
+                }
+                Ok(nx)
+            }
+            Insn::FmulS {
+                rd,
+                rs1,
+                rs2,
+                rm: _,
+            } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let r = a * b;
+                self.f32_set_arith(rd, r);
+                if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
+                    self.set_fflag(0x04); // OF
+                }
+                Ok(nx)
+            }
+            Insn::FdivS {
+                rd,
+                rs1,
+                rs2,
+                rm: _,
+            } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                if b == 0.0 && !a.is_nan() {
+                    self.set_fflag(0x08); // DZ
+                }
+                let r = a / b;
+                self.f32_set_arith(rd, r);
+                if r.is_infinite() && !a.is_infinite() {
+                    self.set_fflag(0x04); // OF
+                }
+                Ok(nx)
+            }
+            Insn::FsqrtS { rd, rs1, rm: _ } => {
+                let a = self.f32_get(rs1);
+                let r = if a < 0.0 {
+                    self.set_fflag(0x10); // NV
+                    f32::from_bits(0x7fc0_0000)
+                } else {
+                    a.sqrt()
+                };
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+
+            // Sign injection
+            Insn::FsgnjS { rd, rs1, rs2 } => {
+                let a = self.fregs.get_s(rs1);
+                let b = self.fregs.get_s(rs2);
+                let r = (a & 0x7fff_ffff) | (b & 0x8000_0000);
+                self.f32_set_raw(rd, r);
+                Ok(nx)
+            }
+            Insn::FsgnjnS { rd, rs1, rs2 } => {
+                let a = self.fregs.get_s(rs1);
+                let b = self.fregs.get_s(rs2);
+                let r = (a & 0x7fff_ffff) | (!(b & 0x8000_0000) & 0x8000_0000);
+                self.f32_set_raw(rd, r);
+                Ok(nx)
+            }
+            Insn::FsgnjxS { rd, rs1, rs2 } => {
+                let a = self.fregs.get_s(rs1);
+                let b = self.fregs.get_s(rs2);
+                let r = a ^ (b & 0x8000_0000);
+                self.f32_set_raw(rd, r);
+                Ok(nx)
+            }
+
+            // Min/max
+            Insn::FminS { rd, rs1, rs2 } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let r = Self::f32_minmax(a, b, false);
+                if a.is_nan() || b.is_nan() {
+                    self.set_fflag(0x10); // NV (simplified: any NaN)
+                }
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+            Insn::FmaxS { rd, rs1, rs2 } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let r = Self::f32_minmax(a, b, true);
+                if a.is_nan() || b.is_nan() {
+                    self.set_fflag(0x10); // NV
+                }
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+
+            // FP -> integer conversion
+            Insn::FcvtWS { rd, rs1, rm } => {
+                let a = self.f32_get(rs1);
+                let r = self.f32_to_i64(a, self.fp_rm(rm), 32, false);
+                self.regs.set(rd, Self::sext32(r as u32));
+                Ok(nx)
+            }
+            Insn::FcvtWuS { rd, rs1, rm } => {
+                let a = self.f32_get(rs1);
+                let r = self.f32_to_i64(a, self.fp_rm(rm), 32, true);
+                self.regs.set(rd, r & 0xffff_ffff);
+                Ok(nx)
+            }
+            Insn::FcvtLS { rd, rs1, rm } => {
+                let a = self.f32_get(rs1);
+                let r = self.f32_to_i64(a, self.fp_rm(rm), 64, false);
+                self.regs.set(rd, r);
+                Ok(nx)
+            }
+            Insn::FcvtLuS { rd, rs1, rm } => {
+                let a = self.f32_get(rs1);
+                let r = self.f32_to_i64(a, self.fp_rm(rm), 64, true);
+                self.regs.set(rd, r);
+                Ok(nx)
+            }
+
+            // FP -> integer move
+            Insn::FmvXW { rd, rs1 } => {
+                let r = self.fregs.get_s(rs1);
+                self.regs.set(rd, Self::sext32(r));
+                Ok(nx)
+            }
+
+            // Comparisons
+            Insn::FeqS { rd, rs1, rs2 } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let r = if a == b { 1 } else { 0 };
+                self.regs.set(rd, r);
+                Ok(nx)
+            }
+            Insn::FltS { rd, rs1, rs2 } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let r = if a < b { 1 } else { 0 };
+                if a.is_nan() || b.is_nan() {
+                    self.set_fflag(0x10); // NV
+                }
+                self.regs.set(rd, r);
+                Ok(nx)
+            }
+            Insn::FleS { rd, rs1, rs2 } => {
+                let a = self.f32_get(rs1);
+                let b = self.f32_get(rs2);
+                let r = if a <= b { 1 } else { 0 };
+                if a.is_nan() || b.is_nan() {
+                    self.set_fflag(0x10); // NV
+                }
+                self.regs.set(rd, r);
+                Ok(nx)
+            }
+
+            // Classification
+            Insn::FclassS { rd, rs1 } => {
+                let a = self.f32_get(rs1);
+                self.regs.set(rd, Self::fclass_s(a));
+                Ok(nx)
+            }
+
+            // Integer -> FP conversion
+            Insn::FcvtSW { rd, rs1, rm } => {
+                let a = self.regs.get(rs1);
+                let r = self.i64_to_f32(a, self.fp_rm(rm), false, xlen, 32);
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+            Insn::FcvtSWu { rd, rs1, rm } => {
+                let a = self.regs.get(rs1);
+                let r = self.i64_to_f32(a, self.fp_rm(rm), true, xlen, 32);
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+            Insn::FcvtSL { rd, rs1, rm } => {
+                let a = self.regs.get(rs1);
+                let r = self.i64_to_f32(a, self.fp_rm(rm), false, xlen, 64);
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+            Insn::FcvtSLu { rd, rs1, rm } => {
+                let a = self.regs.get(rs1);
+                let r = self.i64_to_f32(a, self.fp_rm(rm), true, xlen, 64);
+                self.f32_set_arith(rd, r);
+                Ok(nx)
+            }
+
+            // Integer -> FP move
+            Insn::FmvWX { rd, rs1 } => {
+                let r = self.regs.get(rs1) as u32;
+                self.fregs.set_s(rd, r);
+                Ok(nx)
+            }
+
+            _ => unreachable!(),
         }
     }
 
@@ -1424,7 +2019,17 @@ impl Hart {
         }
     }
 
-    fn record(&mut self, pc_rdata: u64, pc_wdata: u64, insn: u32, rd_addr: u8, rd_wdata: u64) {
+    #[allow(clippy::too_many_arguments)]
+    fn record(
+        &mut self,
+        pc_rdata: u64,
+        pc_wdata: u64,
+        insn: u32,
+        rd_addr: u8,
+        rd_wdata: u64,
+        frd_addr: u8,
+        frd_wdata: u64,
+    ) {
         self.records.push(CommitRecord {
             order: self.instret,
             hart: 0,
@@ -1434,6 +2039,8 @@ impl Hart {
             trap: false,
             rd_addr,
             rd_wdata,
+            frd_addr,
+            frd_wdata,
         });
     }
 }
@@ -1752,6 +2359,45 @@ mod tests {
     fn write_priv(m: &mut PhysMem, addr: u64, funct7: u32, rs2: u32) {
         let w = (funct7 << 25) | (rs2 << 20) | 0x73;
         m.write_le::<4>(addr, w.into()).unwrap();
+    }
+
+    fn write_fp_i(m: &mut PhysMem, addr: u64, rd: u32, rs1: u32, imm: i64) {
+        // FLW: opcode 0x07, funct3=0x2.
+        write_i(m, addr, 0x07, rd, 0x2, rs1, imm);
+    }
+
+    fn write_fp_s(m: &mut PhysMem, addr: u64, rs1: u32, rs2: u32, imm: i64) {
+        // FSW: opcode 0x27, funct3=0x2.
+        write_s(m, addr, 0x27, 0x2, rs1, rs2, imm);
+    }
+
+    fn write_fp_r(m: &mut PhysMem, addr: u64, rd: u32, f3: u32, rs1: u32, rs2: u32, f7: u32) {
+        // OP-FP: opcode 0x53.
+        write_r(m, addr, 0x53, rd, f3, rs1, rs2, f7);
+    }
+
+    fn write_fp_r4(
+        m: &mut PhysMem,
+        addr: u64,
+        op: u32,
+        rd: u32,
+        rs1: u32,
+        rs2: u32,
+        rs3: u32,
+        rm: u32,
+    ) {
+        // R4-type: fmt=00 (single) in bits 26:25.
+        let w = (rs3 << 27) | (rs2 << 20) | (rs1 << 15) | (rm << 12) | (rd << 7) | op;
+        m.write_le::<4>(addr, w.into()).unwrap();
+    }
+
+    fn write_csr(m: &mut PhysMem, addr: u64, rd: u32, rs1: u32, csr: u32) {
+        // CSRRW: opcode 0x73, funct3=0x1, csr in bits 31:20.
+        write_i(m, addr, 0x73, rd, 0x1, rs1, csr as i64);
+    }
+
+    fn nan_box(bits: u32) -> u64 {
+        0xffff_ffff_0000_0000 | (bits as u64)
     }
 
     #[test]
@@ -2331,6 +2977,173 @@ mod tests {
 
         assert_eq!(h.step(&mut m, 64), None);
         assert_eq!(h.regs.pc, 4);
+    }
+
+    #[test]
+    fn f_load_store_and_move_preserve_bits() {
+        let mut h = hart();
+        let mut m = mem();
+        h.csr.mstatus |= 1 << 13; // FS = Initial
+        m.add(Region::new(0x9000_0000, 0x1000));
+        h.regs.set(10, 0x9000_0000);
+        m.write_le::<4>(0x9000_0000, 0x4040_0000).unwrap(); // 3.0
+
+        // flw f1, 0(x10)
+        write_fp_i(&mut m, 0x8000_0000, 1, 10, 0);
+        // fsw f1, 4(x10)
+        write_fp_s(&mut m, 0x8000_0004, 10, 1, 4);
+        // fmv.x.w x1, f1
+        write_fp_r(&mut m, 0x8000_0008, 1, 0, 1, 0, 0x38);
+        // fmv.w.x f2, x1
+        write_fp_r(&mut m, 0x8000_000c, 2, 0, 1, 0, 0x3c);
+
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.fregs.get_f32(1), 3.0f32);
+        assert_eq!(m.read_le::<4>(0x9000_0004).unwrap(), 0x4040_0000);
+        assert_eq!(h.regs.get(1), 0x0000_0000_4040_0000);
+        assert_eq!(h.fregs.get_s(2), 0x4040_0000);
+    }
+
+    #[test]
+    fn f_basic_arithmetic_and_fma() {
+        let mut h = hart();
+        let mut m = mem();
+        h.csr.mstatus |= 1 << 13;
+        h.regs.set(1, 0x4040_0000); // 3.0
+        h.regs.set(2, 0x4000_0000); // 2.0
+
+        // fmv.w.x f1, x1; fmv.w.x f2, x2
+        write_fp_r(&mut m, 0x8000_0000, 1, 0, 1, 0, 0x3c);
+        write_fp_r(&mut m, 0x8000_0004, 2, 0, 2, 0, 0x3c);
+        // fadd.s f3, f1, f2
+        write_fp_r(&mut m, 0x8000_0008, 3, 0, 1, 2, 0x00);
+        // fsub.s f4, f3, f2
+        write_fp_r(&mut m, 0x8000_000c, 4, 0, 3, 2, 0x04);
+        // fmul.s f5, f3, f2
+        write_fp_r(&mut m, 0x8000_0010, 5, 0, 3, 2, 0x08);
+        // fdiv.s f6, f5, f2
+        write_fp_r(&mut m, 0x8000_0014, 6, 0, 5, 2, 0x0c);
+        // fsqrt.s f7, f5
+        write_fp_r(&mut m, 0x8000_0018, 7, 0, 5, 0, 0x2c);
+
+        for _ in 0..8 {
+            assert_eq!(h.step(&mut m, 64), None);
+        }
+
+        assert!((h.fregs.get_f32(3) - 5.0).abs() < 1e-6);
+        assert!((h.fregs.get_f32(4) - 3.0).abs() < 1e-6);
+        assert!((h.fregs.get_f32(5) - 10.0).abs() < 1e-6);
+        assert!((h.fregs.get_f32(6) - 5.0).abs() < 1e-6);
+        assert!((h.fregs.get_f32(7) - 10.0f32.sqrt()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn f_fma_computes_mul_add() {
+        let mut h = hart();
+        let mut m = mem();
+        h.csr.mstatus |= 1 << 13;
+        h.regs.set(1, 0x4040_0000); // 3.0
+        h.regs.set(2, 0x4000_0000); // 2.0
+
+        write_fp_r(&mut m, 0x8000_0000, 1, 0, 1, 0, 0x3c);
+        write_fp_r(&mut m, 0x8000_0004, 2, 0, 2, 0, 0x3c);
+        // fmadd.s f3, f1, f2, f1 -> 3*2+3 = 9
+        write_fp_r4(&mut m, 0x8000_0008, 0x43, 3, 1, 2, 1, 0);
+        // fmsub.s f4, f1, f2, f1 -> 3*2-3 = 3
+        write_fp_r4(&mut m, 0x8000_000c, 0x47, 4, 1, 2, 1, 0);
+
+        for _ in 0..4 {
+            assert_eq!(h.step(&mut m, 64), None);
+        }
+
+        assert!((h.fregs.get_f32(3) - 9.0).abs() < 1e-6);
+        assert!((h.fregs.get_f32(4) - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn f_sign_injection_min_max_and_compare() {
+        let mut h = hart();
+        let mut m = mem();
+        h.csr.mstatus |= 1 << 13;
+        h.regs.set(1, 0x4040_0000); // 3.0
+        h.regs.set(2, 0xc000_0000u64); // -2.0
+
+        write_fp_r(&mut m, 0x8000_0000, 1, 0, 1, 0, 0x3c);
+        write_fp_r(&mut m, 0x8000_0004, 2, 0, 2, 0, 0x3c);
+        // fsgnj.s f3, f1, f2 -> -3.0
+        write_fp_r(&mut m, 0x8000_0008, 3, 0x0, 1, 2, 0x10);
+        // fmin.s f4, f1, f2 -> -2.0
+        write_fp_r(&mut m, 0x8000_000c, 4, 0, 1, 2, 0x14);
+        // fmax.s f5, f1, f2 -> 3.0
+        write_fp_r(&mut m, 0x8000_0010, 5, 0x1, 1, 2, 0x14);
+        // feq.s x3, f1, f2 -> 0
+        write_fp_r(&mut m, 0x8000_0014, 3, 0x2, 1, 2, 0x50);
+        // flt.s x4, f2, f1 -> 1
+        write_fp_r(&mut m, 0x8000_0018, 4, 0x1, 2, 1, 0x50);
+
+        for _ in 0..7 {
+            assert_eq!(h.step(&mut m, 64), None);
+        }
+
+        assert!((h.fregs.get_f32(3) + 3.0).abs() < 1e-6);
+        assert!((h.fregs.get_f32(4) + 2.0).abs() < 1e-6);
+        assert!((h.fregs.get_f32(5) - 3.0).abs() < 1e-6);
+        assert_eq!(h.regs.get(3), 0);
+        assert_eq!(h.regs.get(4), 1);
+    }
+
+    #[test]
+    fn f_classify_converts_and_csr_round_trip() {
+        let mut h = hart();
+        let mut m = mem();
+        h.csr.mstatus |= 1 << 13;
+        h.regs.set(1, 0x4040_0000); // 3.0
+        h.regs.set(2, 5);
+
+        write_fp_r(&mut m, 0x8000_0000, 1, 0, 1, 0, 0x3c);
+        // fcvt.s.w f2, x2 -> 5.0
+        write_fp_r(&mut m, 0x8000_0004, 2, 0, 2, 0, 0x34);
+        // fcvt.w.s x3, f2 -> 5
+        write_fp_r(&mut m, 0x8000_0008, 3, 0, 2, 0, 0x30);
+        // fclass.s x4, f1 -> 1<<6 (positive normal)
+        write_fp_r(&mut m, 0x8000_000c, 4, 0x1, 1, 0x1, 0x38);
+        // csrrw x5, fcsr, x2 -> old fcsr, then fcsr = (5 & 0xff) (frm=0, fflags=5)
+        write_csr(&mut m, 0x8000_0010, 5, 2, 0x003);
+
+        for _ in 0..5 {
+            assert_eq!(h.step(&mut m, 64), None);
+        }
+
+        assert!((h.fregs.get_f32(2) - 5.0).abs() < 1e-6);
+        assert_eq!(h.regs.get(3), 5);
+        assert_eq!(h.regs.get(4), 1 << 6);
+        assert_eq!(h.csr.fcsr(), 5);
+        assert_eq!(h.regs.get(5), 0); // initial fcsr is 0
+    }
+
+    #[test]
+    fn f_commit_records_carry_fp_writes() {
+        let mut h = hart();
+        let mut m = mem();
+        h.csr.mstatus |= 1 << 13;
+        h.regs.set(1, 0x4040_0000);
+
+        write_fp_r(&mut m, 0x8000_0000, 1, 0, 1, 0, 0x3c);
+        // fmv.x.w x2, f1
+        write_fp_r(&mut m, 0x8000_0004, 2, 0, 1, 0, 0x38);
+
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.records.last().unwrap().frd_addr, 1);
+        assert_eq!(h.records.last().unwrap().frd_wdata, nan_box(0x4040_0000));
+
+        assert_eq!(h.step(&mut m, 64), None);
+        let r = h.records.last().unwrap();
+        assert_eq!(r.rd_addr, 2);
+        assert_eq!(r.rd_wdata, 0x0000_0000_4040_0000);
+        assert_eq!(r.frd_addr, 0);
     }
 
     #[test]
