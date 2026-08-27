@@ -45,7 +45,7 @@ written for it:
 | **Q0** scaffold, package surface, Rust skeleton | **done** |
 | **Q1** ingest + `TargetModel` + conformance | **done** |
 | **Q2** B0 stock-QEMU driver + firmware chain | **done** — emission complete; boot gate pending host tooling (§Q2) |
-| **Q3** B3 native VM + tandem records | **in progress** — RV64I/M/A interpreter, CSR bank, mret/sret, Zicsr, CLINT/UART/PLIC with M/S-mode software + timer + external delivery, ecall/ebreak/illegal + load/store/fetch M-mode/S-mode traps with mepc/mcause/mtval, medeleg/mideleg, sstatus/sie/sip views, Sv39 page-table walker with 4K/2M/1G leaves, per-access translation, Zicbom/Zicboz no-op decoding, Zacas amocas.w/d, Zba sh[123]add/add.uw/slli.uw, Zbs bset/bclr/binv/bext, mret/sret tests, `run --backend native`, `tandem` CLI, D1 report library green; F/D/C/Zbb next |
+| **Q3** B3 native VM + tandem records | **in progress** — RV64I/M/A interpreter, CSR bank, mret/sret, Zicsr, CLINT/UART/PLIC with M/S-mode software + timer + external delivery, ecall/ebreak/illegal + load/store/fetch M-mode/S-mode traps with mepc/mcause/mtval, medeleg/mideleg, sstatus/sie/sip views, Sv39 page-table walker with 4K/2M/1G leaves, per-access translation, Zicbom/Zicboz no-op decoding, Zacas amocas.w/d, Zba sh[123]add/add.uw/slli.uw, Zbs bset/bclr/binv/bext, RVC compressed (16-bit fetch, RV32C/RV64C expansion, control flow, stack-relative loads/stores), mret/sret tests, `run --backend native`, `tandem` CLI, D1 report library green; F/D/Zbb next |
 | **Q4** B1 generated QEMU machine | open |
 | **Q5** D1 tandem / replay / checkpoint | **in progress** — comparison + report library green; CLI `tandem` verb, checkpoint/replay and JSON record I/O next |
 | **Q6** accelerator ISA + device + in-guest runtime | open |
