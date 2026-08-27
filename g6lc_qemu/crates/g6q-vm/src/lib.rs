@@ -28,6 +28,25 @@
 
 #![forbid(unsafe_code)]
 
+pub mod exec;
+pub mod insn;
+pub mod mem;
+pub mod regs;
+
+pub use exec::{Halt, Hart};
+pub use insn::{decode, Insn};
+pub use mem::{MemError, PhysMem, Region};
+pub use regs::Regs;
+
+/// Deterministic clock (re-exported from the Q0 scaffold).
+pub type Clock = DeterministicClock;
+
+impl Default for DeterministicClock {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
 /// Execution tiers, in the order they are implemented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tier {

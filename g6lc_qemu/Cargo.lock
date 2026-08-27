@@ -69,4 +69,5 @@ name = "g6q-vm"
 version = "0.1.0"
 dependencies = [
  "g6q-core",
+ "g6q-diag",
 ]

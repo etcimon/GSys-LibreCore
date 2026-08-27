@@ -45,7 +45,7 @@ written for it:
 | **Q0** scaffold, package surface, Rust skeleton | **done** |
 | **Q1** ingest + `TargetModel` + conformance | **done** |
 | **Q2** B0 stock-QEMU driver + firmware chain | **done** — emission complete; boot gate pending host tooling (§Q2) |
-| **Q3** B3 native VM + tandem records | open |
+| **Q3** B3 native VM + tandem records | **in progress** — RV64I decoder, register file, flat memory and interpreter green; M/A/F/D/C/Zicsr + Sv39 next |
 | **Q4** B1 generated QEMU machine | open |
 | **Q5** D1 tandem / replay / checkpoint | open |
 | **Q6** accelerator ISA + device + in-guest runtime | open |
