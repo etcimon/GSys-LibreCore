@@ -43,6 +43,8 @@ pub struct Hart {
     pub instret: u64,
     /// Records produced so far.
     pub records: Vec<CommitRecord>,
+    /// Address reserved by the most recent `lr` on this hart.
+    pub reservation: Option<u64>,
 }
 
 impl Hart {
@@ -144,6 +146,41 @@ impl Hart {
             | Insn::Csrrwi { rd, .. }
             | Insn::Csrrsi { rd, .. }
             | Insn::Csrrci { rd, .. } => rd,
+            Insn::Mul { rd, .. }
+            | Insn::Mulh { rd, .. }
+            | Insn::Mulhsu { rd, .. }
+            | Insn::Mulhu { rd, .. }
+            | Insn::Div { rd, .. }
+            | Insn::Divu { rd, .. }
+            | Insn::Rem { rd, .. }
+            | Insn::Remu { rd, .. }
+            | Insn::Mulw { rd, .. }
+            | Insn::Divw { rd, .. }
+            | Insn::Divuw { rd, .. }
+            | Insn::Remw { rd, .. }
+            | Insn::Remuw { rd, .. } => rd,
+            Insn::LrW { rd, .. }
+            | Insn::LrD { rd, .. }
+            | Insn::ScW { rd, .. }
+            | Insn::ScD { rd, .. }
+            | Insn::AmoaddW { rd, .. }
+            | Insn::AmoaddD { rd, .. }
+            | Insn::AmoswapW { rd, .. }
+            | Insn::AmoswapD { rd, .. }
+            | Insn::AmoxorW { rd, .. }
+            | Insn::AmoxorD { rd, .. }
+            | Insn::AmoorW { rd, .. }
+            | Insn::AmoorD { rd, .. }
+            | Insn::AmoandW { rd, .. }
+            | Insn::AmoandD { rd, .. }
+            | Insn::AmominW { rd, .. }
+            | Insn::AmominD { rd, .. }
+            | Insn::AmomaxW { rd, .. }
+            | Insn::AmomaxD { rd, .. }
+            | Insn::AmominuW { rd, .. }
+            | Insn::AmominuD { rd, .. }
+            | Insn::AmomaxuW { rd, .. }
+            | Insn::AmomaxuD { rd, .. } => rd,
             _ => 0,
         }
     }
@@ -438,6 +475,198 @@ impl Hart {
                 self.regs.set(rd, (v as i64) as u64);
                 Ok(nx)
             }
+            Insn::Mul { rd, rs1, rs2 } => {
+                self.regs
+                    .set(rd, self.regs.get(rs1).wrapping_mul(self.regs.get(rs2)));
+                Ok(nx)
+            }
+            Insn::Mulh { rd, rs1, rs2 } => {
+                let p = (self.regs.get(rs1) as i128).wrapping_mul(self.regs.get(rs2) as i128);
+                self.regs.set(rd, (p >> 64) as u64);
+                Ok(nx)
+            }
+            Insn::Mulhsu { rd, rs1, rs2 } => {
+                let p =
+                    (self.regs.get(rs1) as i128).wrapping_mul(self.regs.get(rs2) as u128 as i128);
+                self.regs.set(rd, (p >> 64) as u64);
+                Ok(nx)
+            }
+            Insn::Mulhu { rd, rs1, rs2 } => {
+                let p = (self.regs.get(rs1) as u128).wrapping_mul(self.regs.get(rs2) as u128);
+                self.regs.set(rd, (p >> 64) as u64);
+                Ok(nx)
+            }
+            Insn::Div { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1) as i64;
+                let b = self.regs.get(rs2) as i64;
+                let v = if b == 0 {
+                    -1i64 as u64
+                } else if a == i64::MIN && b == -1 {
+                    a as u64
+                } else {
+                    (a / b) as u64
+                };
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Divu { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1);
+                let b = self.regs.get(rs2);
+                let v = if b == 0 { u64::MAX } else { a / b };
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Rem { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1) as i64;
+                let b = self.regs.get(rs2) as i64;
+                let v = if b == 0 {
+                    a as u64
+                } else if a == i64::MIN && b == -1 {
+                    0
+                } else {
+                    (a % b) as u64
+                };
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Remu { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1);
+                let b = self.regs.get(rs2);
+                let v = if b == 0 { a } else { a % b };
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Mulw { rd, rs1, rs2 } => {
+                let v = (self.regs.get(rs1) as i32).wrapping_mul(self.regs.get(rs2) as i32);
+                self.regs.set(rd, (v as i64) as u64);
+                Ok(nx)
+            }
+            Insn::Divw { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1) as i32;
+                let b = self.regs.get(rs2) as i32;
+                let v: u32 = if b == 0 {
+                    u32::MAX
+                } else if a == i32::MIN && b == -1 {
+                    a as u32
+                } else {
+                    (a / b) as u32
+                };
+                self.regs.set(rd, (v as i32 as i64) as u64);
+                Ok(nx)
+            }
+            Insn::Divuw { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1) as u32;
+                let b = self.regs.get(rs2) as u32;
+                let v = if b == 0 { u32::MAX } else { a / b };
+                self.regs.set(rd, (v as i32 as i64) as u64);
+                Ok(nx)
+            }
+            Insn::Remw { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1) as i32;
+                let b = self.regs.get(rs2) as i32;
+                let v: u32 = if b == 0 {
+                    a as u32
+                } else if a == i32::MIN && b == -1 {
+                    0
+                } else {
+                    (a % b) as u32
+                };
+                self.regs.set(rd, (v as i32 as i64) as u64);
+                Ok(nx)
+            }
+            Insn::Remuw { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1) as u32;
+                let b = self.regs.get(rs2) as u32;
+                let v = if b == 0 { a } else { a % b };
+                self.regs.set(rd, (v as i32 as i64) as u64);
+                Ok(nx)
+            }
+
+            Insn::LrW { rd, rs1, .. } => {
+                let addr = self.regs.get(rs1);
+                let v = mem.read_sext::<4>(addr).map_err(|_| ExecError::Mem)?;
+                self.reservation = Some(addr);
+                self.regs.set(rd, v as u64);
+                Ok(nx)
+            }
+            Insn::LrD { rd, rs1, .. } => {
+                let addr = self.regs.get(rs1);
+                let v = mem.read_le::<8>(addr).map_err(|_| ExecError::Mem)?;
+                self.reservation = Some(addr);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::ScW { rd, rs1, rs2, .. } => {
+                let addr = self.regs.get(rs1);
+                if self.reservation == Some(addr) {
+                    mem.write_le::<4>(addr, self.regs.get(rs2))
+                        .map_err(|_| ExecError::Mem)?;
+                    self.regs.set(rd, 0);
+                } else {
+                    self.regs.set(rd, 1);
+                }
+                self.reservation = None;
+                Ok(nx)
+            }
+            Insn::ScD { rd, rs1, rs2, .. } => {
+                let addr = self.regs.get(rs1);
+                if self.reservation == Some(addr) {
+                    mem.write_le::<8>(addr, self.regs.get(rs2))
+                        .map_err(|_| ExecError::Mem)?;
+                    self.regs.set(rd, 0);
+                } else {
+                    self.regs.set(rd, 1);
+                }
+                self.reservation = None;
+                Ok(nx)
+            }
+            Insn::AmoaddW { rd, rs1, rs2, .. } => self.amo::<4, _>(mem, rd, rs1, rs2, |a, b| {
+                (a as u32).wrapping_add(b as u32) as u64
+            }),
+            Insn::AmoswapW { rd, rs1, rs2, .. } => {
+                self.amo::<4, _>(mem, rd, rs1, rs2, |_a, b| b as u32 as u64)
+            }
+            Insn::AmoxorW { rd, rs1, rs2, .. } => {
+                self.amo::<4, _>(mem, rd, rs1, rs2, |a, b| ((a as u32) ^ (b as u32)) as u64)
+            }
+            Insn::AmoorW { rd, rs1, rs2, .. } => {
+                self.amo::<4, _>(mem, rd, rs1, rs2, |a, b| ((a as u32) | (b as u32)) as u64)
+            }
+            Insn::AmoandW { rd, rs1, rs2, .. } => {
+                self.amo::<4, _>(mem, rd, rs1, rs2, |a, b| ((a as u32) & (b as u32)) as u64)
+            }
+            Insn::AmominW { rd, rs1, rs2, .. } => {
+                self.amo::<4, _>(mem, rd, rs1, rs2, |a, b| (a as i32).min(b as i32) as u64)
+            }
+            Insn::AmomaxW { rd, rs1, rs2, .. } => {
+                self.amo::<4, _>(mem, rd, rs1, rs2, |a, b| (a as i32).max(b as i32) as u64)
+            }
+            Insn::AmominuW { rd, rs1, rs2, .. } => {
+                self.amo::<4, _>(mem, rd, rs1, rs2, |a, b| (a as u32).min(b as u32) as u64)
+            }
+            Insn::AmomaxuW { rd, rs1, rs2, .. } => {
+                self.amo::<4, _>(mem, rd, rs1, rs2, |a, b| (a as u32).max(b as u32) as u64)
+            }
+            Insn::AmoaddD { rd, rs1, rs2, .. } => {
+                self.amo::<8, _>(mem, rd, rs1, rs2, |a, b| a.wrapping_add(b))
+            }
+            Insn::AmoswapD { rd, rs1, rs2, .. } => self.amo::<8, _>(mem, rd, rs1, rs2, |_a, b| b),
+            Insn::AmoxorD { rd, rs1, rs2, .. } => self.amo::<8, _>(mem, rd, rs1, rs2, |a, b| a ^ b),
+            Insn::AmoorD { rd, rs1, rs2, .. } => self.amo::<8, _>(mem, rd, rs1, rs2, |a, b| a | b),
+            Insn::AmoandD { rd, rs1, rs2, .. } => self.amo::<8, _>(mem, rd, rs1, rs2, |a, b| a & b),
+            Insn::AmominD { rd, rs1, rs2, .. } => {
+                self.amo::<8, _>(mem, rd, rs1, rs2, |a, b| (a as i64).min(b as i64) as u64)
+            }
+            Insn::AmomaxD { rd, rs1, rs2, .. } => {
+                self.amo::<8, _>(mem, rd, rs1, rs2, |a, b| (a as i64).max(b as i64) as u64)
+            }
+            Insn::AmominuD { rd, rs1, rs2, .. } => {
+                self.amo::<8, _>(mem, rd, rs1, rs2, |a, b| a.min(b))
+            }
+            Insn::AmomaxuD { rd, rs1, rs2, .. } => {
+                self.amo::<8, _>(mem, rd, rs1, rs2, |a, b| a.max(b))
+            }
+
             Insn::Fence
             | Insn::FenceI
             | Insn::Csrrw { .. }
@@ -455,6 +684,34 @@ impl Hart {
             Insn::Ebreak => Err(ExecError::Halt(Halt::Ebreak)),
             Insn::Illegal(w) => Err(ExecError::Halt(Halt::Illegal(w))),
         }
+    }
+
+    fn amo<const N: usize, F>(
+        &mut self,
+        mem: &mut PhysMem,
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        op: F,
+    ) -> Result<u64, ExecError>
+    where
+        F: FnOnce(u64, u64) -> u64,
+    {
+        let addr = self.regs.get(rs1);
+        let old = if N == 4 {
+            mem.read_le::<4>(addr).map_err(|_| ExecError::Mem)?
+        } else {
+            mem.read_le::<8>(addr).map_err(|_| ExecError::Mem)?
+        };
+        let new = op(old, self.regs.get(rs2));
+        if N == 4 {
+            mem.write_le::<4>(addr, new).map_err(|_| ExecError::Mem)?;
+            self.regs.set(rd, old as i32 as i64 as u64);
+        } else {
+            mem.write_le::<8>(addr, new).map_err(|_| ExecError::Mem)?;
+            self.regs.set(rd, old);
+        }
+        Ok(self.regs.next_pc())
     }
 
     fn record(&mut self, pc_rdata: u64, pc_wdata: u64, insn: u32, rd_addr: u8, rd_wdata: u64) {
@@ -656,6 +913,95 @@ mod tests {
         h.regs.pc = 0x8000_0002;
         let mut m = mem();
         assert_eq!(h.step(&mut m, 64), Some(Halt::MemFault));
+    }
+
+    #[test]
+    fn mul_div_rem_32_and_64() {
+        let mut h = hart();
+        let mut m = mem();
+
+        h.regs.set(1, 7);
+        h.regs.set(2, 3);
+        h.regs.set(3, 0xffff_ffff_ffff_fff9); // -7
+
+        // mul x4, x1, x2 -> 21
+        write_r(&mut m, 0x8000_0000, 0x33, 4, 0, 1, 2, 0x01);
+        // div x5, x1, x2 -> 2
+        write_r(&mut m, 0x8000_0004, 0x33, 5, 4, 1, 2, 0x01);
+        // rem x6, x1, x2 -> 1
+        write_r(&mut m, 0x8000_0008, 0x33, 6, 6, 1, 2, 0x01);
+        // div x7, x3, x2 -> -2
+        write_r(&mut m, 0x8000_000c, 0x33, 7, 4, 3, 2, 0x01);
+        // mulw x8, x1, x2 -> 21
+        write_r(&mut m, 0x8000_0010, 0x3b, 8, 0, 1, 2, 0x01);
+        // divuw x9, x1, x2 -> 2
+        write_r(&mut m, 0x8000_0014, 0x3b, 9, 5, 1, 2, 0x01);
+        write_i(&mut m, 0x8000_0018, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 20), Halt::Ecall);
+        assert_eq!(h.regs.get(4), 21);
+        assert_eq!(h.regs.get(5), 2);
+        assert_eq!(h.regs.get(6), 1);
+        assert_eq!(h.regs.get(7), -2i64 as u64);
+        assert_eq!(h.regs.get(8), 21);
+        assert_eq!(h.regs.get(9), 2);
+    }
+
+    #[test]
+    fn division_by_zero_returns_all_ones() {
+        let mut h = hart();
+        let mut m = mem();
+
+        h.regs.set(1, 5);
+        // div x2, x1, x0 -> x0=0, result -1
+        write_r(&mut m, 0x8000_0000, 0x33, 2, 4, 1, 0, 0x01);
+        // divu x3, x1, x0 -> result u64::MAX
+        write_r(&mut m, 0x8000_0004, 0x33, 3, 5, 1, 0, 0x01);
+        write_i(&mut m, 0x8000_0008, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 10), Halt::Ecall);
+        assert_eq!(h.regs.get(2), -1i64 as u64);
+        assert_eq!(h.regs.get(3), u64::MAX);
+    }
+
+    fn write_amo(m: &mut PhysMem, addr: u64, rd: u32, f3: u32, rs1: u32, rs2: u32, funct5: u32) {
+        let w = (funct5 << 27) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | 0x2f;
+        m.write_le::<4>(addr, w.into()).unwrap();
+    }
+
+    #[test]
+    fn lr_sc_and_amo_word_update_memory() {
+        let mut h = hart();
+        let mut m = mem();
+        m.add(Region::new(0x9000_0000, 0x1000));
+        h.regs.set(10, 0x9000_0000);
+        h.regs.set(11, 5);
+
+        // lr.w x1, 0(x10) -> x1 = 0
+        write_amo(&mut m, 0x8000_0000, 1, 2, 10, 0, 0x02);
+        // amoadd.w x2, x11, 0(x10) -> x2 = 0, mem = 5
+        write_amo(&mut m, 0x8000_0004, 2, 2, 10, 11, 0x00);
+        // amoswap.w x3, x11, 0(x10) -> x3 = 5, mem = 5
+        write_amo(&mut m, 0x8000_0008, 3, 2, 10, 11, 0x01);
+        // sc.w x4, x11, 0(x10) -> x4 = 0, mem = 5 (reservation from lr still active)
+        write_amo(&mut m, 0x8000_000c, 4, 2, 10, 11, 0x03);
+        // lr.d x5, 0(x10) -> x5 = 5, new reservation
+        write_amo(&mut m, 0x8000_0010, 5, 3, 10, 0, 0x02);
+        // sc.d x6, x11, 0(x10) -> x6 = 0
+        write_amo(&mut m, 0x8000_0014, 6, 3, 10, 11, 0x03);
+        // sc.w x7, x11, 0x10(x10) -> x7 = 1 (no reservation)
+        write_amo(&mut m, 0x8000_0018, 7, 2, 10, 11, 0x03);
+        // offset is 0 because I-type S is encoded with rs2 as value? Wait sc encoding uses rs2 directly, not offset. So address is x10 + 0.
+        write_i(&mut m, 0x8000_001c, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 20), Halt::Ecall);
+        assert_eq!(h.regs.get(1), 0);
+        assert_eq!(h.regs.get(2), 0);
+        assert_eq!(h.regs.get(3), 5);
+        assert_eq!(h.regs.get(4), 0);
+        assert_eq!(h.regs.get(5), 5);
+        assert_eq!(h.regs.get(6), 0);
+        assert_eq!(h.regs.get(7), 1);
     }
 
     #[test]

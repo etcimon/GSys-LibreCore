@@ -296,6 +296,205 @@ pub enum Insn {
     FenceI,
     Ecall,
     Ebreak,
+
+    // RV64M
+    Mul {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Mulh {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Mulhsu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Mulhu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Div {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Divu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Rem {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Remu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Mulw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Divw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Divuw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Remw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Remuw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+
+    // RV64A (single-hart model; LR/SC reservation is one address per hart)
+    LrW {
+        rd: u8,
+        rs1: u8,
+        aqrl: u8,
+    },
+    LrD {
+        rd: u8,
+        rs1: u8,
+        aqrl: u8,
+    },
+    ScW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    ScD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmoaddW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmoswapW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmoxorW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmoorW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmoandW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmominW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmomaxW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmominuW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmomaxuW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmoaddD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmoswapD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmoxorD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmoorD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmoandD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmominD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmomaxD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmominuD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmomaxuD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
 }
 
 fn u8_field(w: u32, hi: u32, lo: u32) -> u8 {
@@ -568,36 +767,95 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
             0x0 => match funct7 {
                 0x00 => Insn::Add { rd, rs1, rs2 },
                 0x20 => Insn::Sub { rd, rs1, rs2 },
+                0x01 => Insn::Mul { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
-            0x1 => Insn::Sll { rd, rs1, rs2 },
-            0x2 => Insn::Slt { rd, rs1, rs2 },
-            0x3 => Insn::Sltu { rd, rs1, rs2 },
-            0x4 => Insn::Xor { rd, rs1, rs2 },
+            0x1 => match funct7 {
+                0x00 => Insn::Sll { rd, rs1, rs2 },
+                0x01 => Insn::Mulh { rd, rs1, rs2 },
+                _ => Insn::Illegal(w),
+            },
+            0x2 => match funct7 {
+                0x00 => Insn::Slt { rd, rs1, rs2 },
+                0x01 => Insn::Mulhsu { rd, rs1, rs2 },
+                _ => Insn::Illegal(w),
+            },
+            0x3 => match funct7 {
+                0x00 => Insn::Sltu { rd, rs1, rs2 },
+                0x01 => Insn::Mulhu { rd, rs1, rs2 },
+                _ => Insn::Illegal(w),
+            },
+            0x4 => match funct7 {
+                0x00 => Insn::Xor { rd, rs1, rs2 },
+                0x01 => Insn::Div { rd, rs1, rs2 },
+                _ => Insn::Illegal(w),
+            },
             0x5 => match funct7 {
                 0x00 => Insn::Srl { rd, rs1, rs2 },
                 0x20 => Insn::Sra { rd, rs1, rs2 },
+                0x01 => Insn::Divu { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
-            0x6 => Insn::Or { rd, rs1, rs2 },
-            0x7 => Insn::And { rd, rs1, rs2 },
+            0x6 => match funct7 {
+                0x00 => Insn::Or { rd, rs1, rs2 },
+                0x01 => Insn::Rem { rd, rs1, rs2 },
+                _ => Insn::Illegal(w),
+            },
+            0x7 => match funct7 {
+                0x00 => Insn::And { rd, rs1, rs2 },
+                0x01 => Insn::Remu { rd, rs1, rs2 },
+                _ => Insn::Illegal(w),
+            },
             _ => Insn::Illegal(w),
         },
         0x3b => match funct3 {
             0x0 => match funct7 {
                 0x00 => Insn::Addw { rd, rs1, rs2 },
                 0x20 => Insn::Subw { rd, rs1, rs2 },
+                0x01 => Insn::Mulw { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x1 => Insn::Sllw { rd, rs1, rs2 },
+            0x4 => Insn::Divw { rd, rs1, rs2 },
             0x5 => match funct7 {
                 0x00 => Insn::Srlw { rd, rs1, rs2 },
                 0x20 => Insn::Sraw { rd, rs1, rs2 },
+                0x01 => Insn::Divuw { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
-            0x4 | 0x6 | 0x7 => Insn::Illegal(w), // no xorw / orw / andw
+            0x6 => Insn::Remw { rd, rs1, rs2 },
+            0x7 => Insn::Remuw { rd, rs1, rs2 },
             _ => Insn::Illegal(w),
         },
+        0x2f => {
+            let aqrl = u8_field(w, 26, 25);
+            let funct5 = u8_field(w, 31, 27);
+            match (funct3, funct5) {
+                (0x2, 0x02) => Insn::LrW { rd, rs1, aqrl },
+                (0x3, 0x02) => Insn::LrD { rd, rs1, aqrl },
+                (0x2, 0x03) => Insn::ScW { rd, rs1, rs2, aqrl },
+                (0x3, 0x03) => Insn::ScD { rd, rs1, rs2, aqrl },
+                (0x2, 0x00) => Insn::AmoaddW { rd, rs1, rs2, aqrl },
+                (0x3, 0x00) => Insn::AmoaddD { rd, rs1, rs2, aqrl },
+                (0x2, 0x01) => Insn::AmoswapW { rd, rs1, rs2, aqrl },
+                (0x3, 0x01) => Insn::AmoswapD { rd, rs1, rs2, aqrl },
+                (0x2, 0x04) => Insn::AmoxorW { rd, rs1, rs2, aqrl },
+                (0x3, 0x04) => Insn::AmoxorD { rd, rs1, rs2, aqrl },
+                (0x2, 0x08) => Insn::AmoandW { rd, rs1, rs2, aqrl },
+                (0x3, 0x08) => Insn::AmoandD { rd, rs1, rs2, aqrl },
+                (0x2, 0x0c) => Insn::AmoorW { rd, rs1, rs2, aqrl },
+                (0x3, 0x0c) => Insn::AmoorD { rd, rs1, rs2, aqrl },
+                (0x2, 0x10) => Insn::AmominW { rd, rs1, rs2, aqrl },
+                (0x3, 0x10) => Insn::AmominD { rd, rs1, rs2, aqrl },
+                (0x2, 0x14) => Insn::AmomaxW { rd, rs1, rs2, aqrl },
+                (0x3, 0x14) => Insn::AmomaxD { rd, rs1, rs2, aqrl },
+                (0x2, 0x18) => Insn::AmominuW { rd, rs1, rs2, aqrl },
+                (0x3, 0x18) => Insn::AmominuD { rd, rs1, rs2, aqrl },
+                (0x2, 0x1c) => Insn::AmomaxuW { rd, rs1, rs2, aqrl },
+                (0x3, 0x1c) => Insn::AmomaxuD { rd, rs1, rs2, aqrl },
+                _ => Insn::Illegal(w),
+            }
+        }
         0x73 => match funct3 {
             0x0 => match (funct7, rs2) {
                 (0x00, 0x00) if rd == 0 => Insn::Ecall,
