@@ -336,7 +336,31 @@ impl Hart {
             | Insn::Bclri { rd, .. }
             | Insn::Bexti { rd, .. }
             | Insn::Binvi { rd, .. }
-            | Insn::Bseti { rd, .. } => rd,
+            | Insn::Bseti { rd, .. }
+            | Insn::Andn { rd, .. }
+            | Insn::Orn { rd, .. }
+            | Insn::Xnor { rd, .. }
+            | Insn::Clz { rd, .. }
+            | Insn::Ctz { rd, .. }
+            | Insn::Cpop { rd, .. }
+            | Insn::Clzw { rd, .. }
+            | Insn::Ctzw { rd, .. }
+            | Insn::Cpopw { rd, .. }
+            | Insn::Min { rd, .. }
+            | Insn::Minu { rd, .. }
+            | Insn::Max { rd, .. }
+            | Insn::Maxu { rd, .. }
+            | Insn::Rol { rd, .. }
+            | Insn::Ror { rd, .. }
+            | Insn::Rori { rd, .. }
+            | Insn::Rolw { rd, .. }
+            | Insn::Rorw { rd, .. }
+            | Insn::Roriw { rd, .. }
+            | Insn::Rev8 { rd, .. }
+            | Insn::OrcB { rd, .. }
+            | Insn::SextB { rd, .. }
+            | Insn::SextH { rd, .. }
+            | Insn::ZextH { rd, .. } => rd,
             Insn::LrW { rd, .. }
             | Insn::LrD { rd, .. }
             | Insn::ScW { rd, .. }
@@ -858,6 +882,158 @@ impl Hart {
                 let sh = (shamt & 0x3f) as u32;
                 let v = self.regs.get(rs1) | (1u64 << sh);
                 self.regs.set(rd, v);
+                Ok(nx)
+            }
+
+            // Zbb (basic bit-manipulation)
+            Insn::Andn { rd, rs1, rs2 } => {
+                self.regs.set(rd, self.regs.get(rs1) & !self.regs.get(rs2));
+                Ok(nx)
+            }
+            Insn::Orn { rd, rs1, rs2 } => {
+                self.regs.set(rd, self.regs.get(rs1) | !self.regs.get(rs2));
+                Ok(nx)
+            }
+            Insn::Xnor { rd, rs1, rs2 } => {
+                self.regs
+                    .set(rd, !(self.regs.get(rs1) ^ self.regs.get(rs2)));
+                Ok(nx)
+            }
+            Insn::Clz { rd, rs1 } => {
+                self.regs.set(rd, self.regs.get(rs1).leading_zeros() as u64);
+                Ok(nx)
+            }
+            Insn::Ctz { rd, rs1 } => {
+                self.regs
+                    .set(rd, self.regs.get(rs1).trailing_zeros() as u64);
+                Ok(nx)
+            }
+            Insn::Cpop { rd, rs1 } => {
+                self.regs.set(rd, self.regs.get(rs1).count_ones() as u64);
+                Ok(nx)
+            }
+            Insn::Clzw { rd, rs1 } => {
+                self.regs
+                    .set(rd, (self.regs.get(rs1) as u32).leading_zeros() as u64);
+                Ok(nx)
+            }
+            Insn::Ctzw { rd, rs1 } => {
+                self.regs
+                    .set(rd, (self.regs.get(rs1) as u32).trailing_zeros() as u64);
+                Ok(nx)
+            }
+            Insn::Cpopw { rd, rs1 } => {
+                self.regs
+                    .set(rd, (self.regs.get(rs1) as u32).count_ones() as u64);
+                Ok(nx)
+            }
+            Insn::Min { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1) as i64;
+                let b = self.regs.get(rs2) as i64;
+                self.regs.set(rd, if a < b { a as u64 } else { b as u64 });
+                Ok(nx)
+            }
+            Insn::Minu { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1);
+                let b = self.regs.get(rs2);
+                self.regs.set(rd, if a < b { a } else { b });
+                Ok(nx)
+            }
+            Insn::Max { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1) as i64;
+                let b = self.regs.get(rs2) as i64;
+                self.regs.set(rd, if a > b { a as u64 } else { b as u64 });
+                Ok(nx)
+            }
+            Insn::Maxu { rd, rs1, rs2 } => {
+                let a = self.regs.get(rs1);
+                let b = self.regs.get(rs2);
+                self.regs.set(rd, if a > b { a } else { b });
+                Ok(nx)
+            }
+            Insn::Rol { rd, rs1, rs2 } => {
+                let sh = (self.regs.get(rs2) & sh_mask) as u32;
+                let v = if xlen == 64 {
+                    self.regs.get(rs1).rotate_left(sh)
+                } else {
+                    ((self.regs.get(rs1) as u32).rotate_left(sh) as i32) as i64 as u64
+                };
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Ror { rd, rs1, rs2 } => {
+                let sh = (self.regs.get(rs2) & sh_mask) as u32;
+                let v = if xlen == 64 {
+                    self.regs.get(rs1).rotate_right(sh)
+                } else {
+                    ((self.regs.get(rs1) as u32).rotate_right(sh) as i32) as i64 as u64
+                };
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Rori { rd, rs1, shamt } => {
+                let sh = (shamt as u64) & sh_mask;
+                let v = if xlen == 64 {
+                    self.regs.get(rs1).rotate_right(sh as u32)
+                } else {
+                    ((self.regs.get(rs1) as u32).rotate_right(sh as u32) as i32) as i64 as u64
+                };
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Rolw { rd, rs1, rs2 } => {
+                let sh = self.regs.get(rs2) & 0x1f;
+                let v = (self.regs.get(rs1) as u32).rotate_left(sh as u32) as i32 as i64 as u64;
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Rorw { rd, rs1, rs2 } => {
+                let sh = self.regs.get(rs2) & 0x1f;
+                let v = (self.regs.get(rs1) as u32).rotate_right(sh as u32) as i32 as i64 as u64;
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Roriw { rd, rs1, shamt } => {
+                let sh = (shamt as u64) & 0x1f;
+                let v = (self.regs.get(rs1) as u32).rotate_right(sh as u32) as i32 as i64 as u64;
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Rev8 { rd, rs1 } => {
+                let v = self.regs.get(rs1);
+                let r = if xlen == 64 {
+                    v.to_be()
+                } else {
+                    (v as u32).to_be() as u64
+                };
+                self.regs.set(rd, r);
+                Ok(nx)
+            }
+            Insn::OrcB { rd, rs1 } => {
+                let v = self.regs.get(rs1);
+                let bytes = if xlen == 64 { 8 } else { 4 };
+                let mut r = 0u64;
+                for i in 0..bytes {
+                    let b = (v >> (i * 8)) & 0xff;
+                    if b != 0 {
+                        r |= 0xff << (i * 8);
+                    }
+                }
+                self.regs.set(rd, r);
+                Ok(nx)
+            }
+            Insn::SextB { rd, rs1 } => {
+                let v = self.regs.get(rs1) as i8 as i64 as u64;
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::SextH { rd, rs1 } => {
+                let v = self.regs.get(rs1) as i16 as i64 as u64;
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::ZextH { rd, rs1 } => {
+                self.regs.set(rd, self.regs.get(rs1) & 0xffff);
                 Ok(nx)
             }
 
@@ -1744,6 +1920,130 @@ mod tests {
         assert_eq!(h.regs.get(5), (0x1234 << 2) + 10);
         assert_eq!(h.regs.get(6), (0x1234 << 3) + 10);
         assert_eq!(h.regs.get(7), 0x1234 << 4);
+    }
+
+    #[test]
+    fn zbb_basic_bit_manipulation() {
+        let mut h = hart();
+        let mut m = mem();
+        // Inputs: x1/x2 for logical-with-negate, x22-x31 hold constants.
+        h.regs.set(1, 0x0f0f);
+        h.regs.set(2, 0x00ff);
+        h.regs.set(22, 0x0000_0000_0000_8000);
+        h.regs.set(23, 0x0f0f_0f0f_0f0f_0f0f);
+        h.regs.set(24, 0x0000_0000_0000_00ff);
+        h.regs.set(25, 4);
+        h.regs.set(26, 0x0102_0304_0506_0708);
+        h.regs.set(27, 0x0000_0000_0000_0102);
+        h.regs.set(28, 0x80);
+        h.regs.set(29, 0x0000_0000_0000_1234);
+        h.regs.set(30, 0xffff_ffff_ffff_1234);
+        h.regs.set(31, 0x0f0f_0f0f);
+
+        // andn x3, x1, x2 -> 0x0f0f & ~0x00ff = 0x0f00
+        write_r(&mut m, 0x8000_0000, 0x33, 3, 7, 1, 2, 0x20);
+        // orn x4, x1, x2 -> 0x0f0f | ~0x00ff = 0xffff_ffff_ffff_ff0f
+        write_r(&mut m, 0x8000_0004, 0x33, 4, 6, 1, 2, 0x20);
+        // xnor x5, x1, x2 -> ~(0x0f0f ^ 0x00ff) = 0xffff_ffff_ffff_f00f
+        write_r(&mut m, 0x8000_0008, 0x33, 5, 4, 1, 2, 0x20);
+
+        // clz x6, x22 -> 48
+        write_i(&mut m, 0x8000_000c, 0x13, 6, 1, 22, 0x600);
+        // ctz x7, x22 -> 15
+        write_i(&mut m, 0x8000_0010, 0x13, 7, 1, 22, 0x601);
+
+        // cpop x8, x23 -> 32
+        write_i(&mut m, 0x8000_0014, 0x13, 8, 1, 23, 0x602);
+
+        // rol x9, x24, x25 -> 0xff0
+        write_r(&mut m, 0x8000_0018, 0x33, 9, 1, 24, 25, 0x30);
+        // ror x10, x9, x25 -> 0xff
+        write_r(&mut m, 0x8000_001c, 0x33, 10, 5, 9, 25, 0x30);
+        // rori x11, x9, 4 -> 0xff
+        write_i(&mut m, 0x8000_0020, 0x13, 11, 5, 9, 0x604);
+
+        // rev8 x12, x26 -> 0x0807_0605_0403_0201
+        write_i(&mut m, 0x8000_0024, 0x13, 12, 5, 26, 0x6b8);
+
+        // orc.b x13, x27 -> 0xffff
+        write_i(&mut m, 0x8000_0028, 0x13, 13, 5, 27, 0x287);
+
+        // sext.b x14, x28 -> 0xffff...ff80
+        write_i(&mut m, 0x8000_002c, 0x13, 14, 1, 28, 0x604);
+        // sext.h x15, x22 -> 0xffff...8000
+        write_i(&mut m, 0x8000_0030, 0x13, 15, 1, 22, 0x605);
+        // zext.h x16, x22 -> 0x8000
+        write_r(&mut m, 0x8000_0034, 0x3b, 16, 4, 22, 0, 0x04);
+
+        // min x17, x30, x29 (signed: x30 negative, x29 positive) -> x30 (negative)
+        write_r(&mut m, 0x8000_0038, 0x33, 17, 4, 30, 29, 0x05);
+        // max x18, x30, x29 -> x29
+        write_r(&mut m, 0x8000_003c, 0x33, 18, 6, 30, 29, 0x05);
+        // minu x19, x30, x29 (unsigned: x30 huge) -> x29
+        write_r(&mut m, 0x8000_0040, 0x33, 19, 5, 30, 29, 0x05);
+        // maxu x20, x30, x29 -> x30
+        write_r(&mut m, 0x8000_0044, 0x33, 20, 7, 30, 29, 0x05);
+
+        // clzw x21, x22 -> 16
+        write_i(&mut m, 0x8000_0048, 0x1b, 21, 1, 22, 0x600);
+        // ctzw x22, x22 -> 15
+        write_i(&mut m, 0x8000_004c, 0x1b, 22, 1, 22, 0x601);
+        // cpopw x23, x31 -> 16
+        write_i(&mut m, 0x8000_0050, 0x1b, 23, 1, 31, 0x602);
+
+        write_i(&mut m, 0x8000_0054, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 40), Halt::StepLimit);
+        assert_eq!(h.regs.get(3), 0x0f00, "andn");
+        assert_eq!(h.regs.get(4), 0xffff_ffff_ffff_ff0f, "orn");
+        assert_eq!(h.regs.get(5), !(0x0f0f ^ 0x00ff), "xnor");
+        assert_eq!(h.regs.get(6), 48, "clz");
+        assert_eq!(h.regs.get(7), 15, "ctz");
+        assert_eq!(h.regs.get(8), 32, "cpop");
+        assert_eq!(h.regs.get(9), 0xff0, "rol");
+        assert_eq!(h.regs.get(10), 0xff, "ror");
+        assert_eq!(h.regs.get(11), 0xff, "rori");
+        assert_eq!(h.regs.get(12), 0x0807_0605_0403_0201, "rev8");
+        assert_eq!(h.regs.get(13), 0xffff, "orc.b");
+        assert_eq!(h.regs.get(14), 0xffff_ffff_ffff_ff80, "sext.b");
+        assert_eq!(h.regs.get(15), 0xffff_ffff_ffff_8000, "sext.h");
+        assert_eq!(h.regs.get(16), 0x8000, "zext.h");
+        assert_eq!(h.regs.get(17), 0xffff_ffff_ffff_1234, "min");
+        assert_eq!(h.regs.get(18), 0x0000_0000_0000_1234, "max");
+        assert_eq!(h.regs.get(19), 0x0000_0000_0000_1234, "minu");
+        assert_eq!(h.regs.get(20), 0xffff_ffff_ffff_1234, "maxu");
+        assert_eq!(h.regs.get(21), 16, "clzw");
+        assert_eq!(h.regs.get(22), 15, "ctzw");
+        assert_eq!(h.regs.get(23), 16, "cpopw");
+    }
+
+    #[test]
+    fn zbb_word_rotates() {
+        let mut h = hart();
+        let mut m = mem();
+        h.regs.set(24, 0x7fff_ffff);
+        h.regs.set(25, 1);
+        // rolw x26, x24, x25 -> 0xffff_fffe, sign-extended
+        write_r(&mut m, 0x8000_0000, 0x3b, 26, 1, 24, 25, 0x30);
+        // rorw x27, x26, x25 -> 0x7fff_ffff
+        write_r(&mut m, 0x8000_0004, 0x3b, 27, 5, 26, 25, 0x30);
+        // roriw x28, x27, 1 -> 0xbfff_ffff, sign-extended
+        write_i(&mut m, 0x8000_0008, 0x1b, 28, 5, 27, 0x601);
+
+        write_i(&mut m, 0x8000_000c, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 10), Halt::StepLimit);
+        assert_eq!(
+            h.regs.get(26),
+            0xffff_ffff_ffff_fffe,
+            "rolw sign-extends negative result"
+        );
+        assert_eq!(h.regs.get(27), 0x7fff_ffff, "rorw round-trips to positive");
+        assert_eq!(
+            h.regs.get(28),
+            0xffff_ffff_bfff_ffff,
+            "roriw sign-extends negative result"
+        );
     }
 
     #[test]

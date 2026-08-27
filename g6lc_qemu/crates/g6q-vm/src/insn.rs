@@ -610,6 +610,117 @@ pub enum Insn {
         rs1: u8,
         shamt: u8,
     },
+
+    // Zbb (basic bit-manipulation)
+    Andn {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Orn {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Xnor {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Clz {
+        rd: u8,
+        rs1: u8,
+    },
+    Ctz {
+        rd: u8,
+        rs1: u8,
+    },
+    Cpop {
+        rd: u8,
+        rs1: u8,
+    },
+    Clzw {
+        rd: u8,
+        rs1: u8,
+    },
+    Ctzw {
+        rd: u8,
+        rs1: u8,
+    },
+    Cpopw {
+        rd: u8,
+        rs1: u8,
+    },
+    Min {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Minu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Max {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Maxu {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Rol {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Ror {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Rori {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Rev8 {
+        rd: u8,
+        rs1: u8,
+    },
+    OrcB {
+        rd: u8,
+        rs1: u8,
+    },
+    SextB {
+        rd: u8,
+        rs1: u8,
+    },
+    SextH {
+        rd: u8,
+        rs1: u8,
+    },
+    ZextH {
+        rd: u8,
+        rs1: u8,
+    },
+    Rolw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Rorw {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Roriw {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
 }
 
 fn u8_field(w: u32, hi: u32, lo: u32) -> u8 {
@@ -861,26 +972,46 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                     rs1,
                     shamt: shamt(w, xlen),
                 },
-                _ => Insn::Illegal(w),
-            },
-            0x5 => match (w >> 26) & 0x3f {
-                0x00 => Insn::Srli {
-                    rd,
-                    rs1,
-                    shamt: shamt(w, xlen),
-                },
-                0x10 => Insn::Srai {
-                    rd,
-                    rs1,
-                    shamt: shamt(w, xlen),
-                },
-                0x12 => Insn::Bexti {
-                    rd,
-                    rs1,
-                    shamt: shamt(w, xlen),
+                0x18 => match (w >> 20) & 0x3f {
+                    0x00 => Insn::Clz { rd, rs1 },
+                    0x01 => Insn::Ctz { rd, rs1 },
+                    0x02 => Insn::Cpop { rd, rs1 },
+                    0x04 => Insn::SextB { rd, rs1 },
+                    0x05 => Insn::SextH { rd, rs1 },
+                    _ => Insn::Illegal(w),
                 },
                 _ => Insn::Illegal(w),
             },
+            0x5 => {
+                let imm12 = (w >> 20) & 0xfff;
+                match (w >> 26) & 0x3f {
+                    0x00 => Insn::Srli {
+                        rd,
+                        rs1,
+                        shamt: shamt(w, xlen),
+                    },
+                    0x10 => Insn::Srai {
+                        rd,
+                        rs1,
+                        shamt: shamt(w, xlen),
+                    },
+                    0x12 => Insn::Bexti {
+                        rd,
+                        rs1,
+                        shamt: shamt(w, xlen),
+                    },
+                    0x18 => Insn::Rori {
+                        rd,
+                        rs1,
+                        shamt: shamt(w, xlen),
+                    },
+                    _ if imm12 == 0x287 => Insn::OrcB { rd, rs1 },
+                    _ if imm12 == (if xlen == 64 { 0x6b8 } else { 0x698 }) => {
+                        Insn::Rev8 { rd, rs1 }
+                    }
+                    _ => Insn::Illegal(w),
+                }
+            }
             _ => Insn::Illegal(w),
         },
         0x1b => match funct3 {
@@ -900,15 +1031,26 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                     rs1,
                     shamt: shamt(w, 64),
                 },
+                0x18 => match (w >> 20) & 0x3f {
+                    0x00 => Insn::Clzw { rd, rs1 },
+                    0x01 => Insn::Ctzw { rd, rs1 },
+                    0x02 => Insn::Cpopw { rd, rs1 },
+                    _ => Insn::Illegal(w),
+                },
                 _ => Insn::Illegal(w),
             },
-            0x5 => match funct7 {
+            0x5 => match (w >> 26) & 0x3f {
                 0x00 => Insn::Srliw {
                     rd,
                     rs1,
                     shamt: shamt(w, 32),
                 },
-                0x20 => Insn::Sraiw {
+                0x10 => Insn::Sraiw {
+                    rd,
+                    rs1,
+                    shamt: shamt(w, 32),
+                },
+                0x18 => Insn::Roriw {
                     rd,
                     rs1,
                     shamt: shamt(w, 32),
@@ -930,6 +1072,7 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 0x14 => Insn::Bset { rd, rs1, rs2 },
                 0x24 => Insn::Bclr { rd, rs1, rs2 },
                 0x34 => Insn::Binv { rd, rs1, rs2 },
+                0x30 => Insn::Rol { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x2 => match funct7 {
@@ -947,6 +1090,9 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 0x00 => Insn::Xor { rd, rs1, rs2 },
                 0x01 => Insn::Div { rd, rs1, rs2 },
                 0x10 => Insn::Sh2add { rd, rs1, rs2 },
+                0x05 => Insn::Min { rd, rs1, rs2 },
+                0x20 => Insn::Xnor { rd, rs1, rs2 },
+                0x04 if xlen == 32 && rs2 == 0 => Insn::ZextH { rd, rs1 },
                 _ => Insn::Illegal(w),
             },
             0x5 => match funct7 {
@@ -954,17 +1100,23 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 0x20 => Insn::Sra { rd, rs1, rs2 },
                 0x01 => Insn::Divu { rd, rs1, rs2 },
                 0x24 => Insn::Bext { rd, rs1, rs2 },
+                0x30 => Insn::Ror { rd, rs1, rs2 },
+                0x05 => Insn::Minu { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x6 => match funct7 {
                 0x00 => Insn::Or { rd, rs1, rs2 },
                 0x01 => Insn::Rem { rd, rs1, rs2 },
                 0x10 => Insn::Sh3add { rd, rs1, rs2 },
+                0x05 => Insn::Max { rd, rs1, rs2 },
+                0x20 => Insn::Orn { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x7 => match funct7 {
                 0x00 => Insn::And { rd, rs1, rs2 },
                 0x01 => Insn::Remu { rd, rs1, rs2 },
+                0x05 => Insn::Maxu { rd, rs1, rs2 },
+                0x20 => Insn::Andn { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             _ => Insn::Illegal(w),
@@ -979,6 +1131,7 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
             },
             0x1 => match funct7 {
                 0x00 => Insn::Sllw { rd, rs1, rs2 },
+                0x30 => Insn::Rolw { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x2 => match funct7 {
@@ -988,12 +1141,14 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
             0x4 => match funct7 {
                 0x00 => Insn::Divw { rd, rs1, rs2 },
                 0x10 => Insn::Sh2addUw { rd, rs1, rs2 },
+                0x04 if rs2 == 0 => Insn::ZextH { rd, rs1 },
                 _ => Insn::Illegal(w),
             },
             0x5 => match funct7 {
                 0x00 => Insn::Srlw { rd, rs1, rs2 },
                 0x20 => Insn::Sraw { rd, rs1, rs2 },
                 0x01 => Insn::Divuw { rd, rs1, rs2 },
+                0x30 => Insn::Rorw { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x6 => match funct7 {
