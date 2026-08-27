@@ -20,11 +20,7 @@ use crate::Clock;
 pub enum Halt {
     /// Reached the requested instruction limit.
     StepLimit,
-    /// An `ecall` instruction.
-    Ecall,
-    /// An `ebreak` instruction.
-    Ebreak,
-    /// An illegal or unimplemented instruction.
+    /// An illegal or unimplemented instruction (CSR access or future use).
     Illegal(u32),
     /// A memory access fault.
     MemFault,
@@ -771,8 +767,14 @@ impl Hart {
                 self.regs.set(rd, old);
                 Ok(nx)
             }
-            Insn::Ecall => Err(ExecError::Halt(Halt::Ecall)),
-            Insn::Ebreak => Err(ExecError::Halt(Halt::Ebreak)),
+            Insn::Ecall => {
+                self.take_trap(11);
+                Ok(self.regs.pc)
+            }
+            Insn::Ebreak => {
+                self.take_trap(3);
+                Ok(self.regs.pc)
+            }
             Insn::Mret => {
                 self.mret();
                 Ok(self.regs.pc)
@@ -782,7 +784,10 @@ impl Hart {
                 Ok(self.regs.pc)
             }
             Insn::Wfi => Ok(nx),
-            Insn::Illegal(w) => Err(ExecError::Halt(Halt::Illegal(w))),
+            Insn::Illegal(_) => {
+                self.take_trap(2);
+                Ok(self.regs.pc)
+            }
         }
     }
 
@@ -881,12 +886,16 @@ mod tests {
     use crate::mem::{PhysMem, Region};
 
     fn hart() -> Hart {
-        Hart::new(0x8000_0000)
+        let mut h = Hart::new(0x8000_0000);
+        h.csr.mtvec = 0x7000_0000;
+        h
     }
 
     fn mem() -> PhysMem {
         let mut m = PhysMem::new();
         m.add(Region::new(0x8000_0000, 0x1000));
+        m.add(Region::new(0x7000_0000, 0x1000));
+        m.write_le::<4>(0x7000_0000, 0x0000_006f).unwrap(); // jal x0, 0
         m
     }
 
@@ -970,7 +979,7 @@ mod tests {
         write_i(&mut m, 0x8000_0018, 0x73, 0, 0, 0, 0); // ecall
 
         let halt = h.run(&mut m, 64, 100);
-        if halt != Halt::Ecall {
+        if halt != Halt::StepLimit {
             for (i, r) in h.records.iter().rev().take(10).rev().enumerate() {
                 eprintln!(
                     "{i}: pc={:#x} insn={:#010x} rd={} w={:#x}",
@@ -979,10 +988,11 @@ mod tests {
             }
             eprintln!("fault pc = {:#x}", h.regs.pc);
         }
-        assert_eq!(halt, Halt::Ecall);
+        assert_eq!(halt, Halt::StepLimit);
         assert_eq!(h.regs.get(2), 15, "5 + 4 + 3 + 2 + 1 = 15");
         assert_eq!(h.regs.get(3), 15, "loaded value");
-        assert_eq!(h.records.len(), 22);
+        // ecall now traps to the self-loop; there is at least one extra record.
+        assert!(h.records.len() >= 22);
     }
 
     #[test]
@@ -999,7 +1009,7 @@ mod tests {
         write_i(&mut m, 0x8000_0008, 0x13, 2, 0, 0, 42);
         write_i(&mut m, 0x8000_000c, 0x67, 0, 0, 1, 0);
 
-        assert_eq!(h.run(&mut m, 64, 20), Halt::Ecall);
+        assert_eq!(h.run(&mut m, 64, 20), Halt::StepLimit);
         assert_eq!(h.regs.get(2), 42);
         assert_eq!(h.regs.get(1), 0x8000_0004);
     }
@@ -1019,7 +1029,7 @@ mod tests {
         write_i(&mut m, 0x8000_0018, 0x13, 4, 0, 0, 0xff);
         write_i(&mut m, 0x8000_001c, 0x73, 0, 0, 0, 0);
 
-        assert_eq!(h.run(&mut m, 64, 20), Halt::Ecall);
+        assert_eq!(h.run(&mut m, 64, 20), Halt::StepLimit);
         assert_eq!(h.regs.get(3), 99, "blt taken");
         // bltu x1(-1 as unsigned = max), x2(1) is NOT taken, so we fall through to x4=0xff.
         assert_eq!(h.regs.get(4), 0xff, "bltu not taken");
@@ -1040,7 +1050,7 @@ mod tests {
         write_i(&mut m, 0x8000_0018, 0x13, 7, 4, 1, 0x0f); // xori
         write_i(&mut m, 0x8000_001c, 0x73, 0, 0, 0, 0);
 
-        assert_eq!(h.run(&mut m, 64, 20), Halt::Ecall);
+        assert_eq!(h.run(&mut m, 64, 20), Halt::StepLimit);
         assert_eq!(h.regs.get(2), 0x3c);
         assert_eq!(h.regs.get(3), 0x0f);
         assert_eq!(h.regs.get(4), 0x07);
@@ -1084,7 +1094,7 @@ mod tests {
         write_r(&mut m, 0x8000_0014, 0x3b, 9, 5, 1, 2, 0x01);
         write_i(&mut m, 0x8000_0018, 0x73, 0, 0, 0, 0);
 
-        assert_eq!(h.run(&mut m, 64, 20), Halt::Ecall);
+        assert_eq!(h.run(&mut m, 64, 20), Halt::StepLimit);
         assert_eq!(h.regs.get(4), 21);
         assert_eq!(h.regs.get(5), 2);
         assert_eq!(h.regs.get(6), 1);
@@ -1105,7 +1115,7 @@ mod tests {
         write_r(&mut m, 0x8000_0004, 0x33, 3, 5, 1, 0, 0x01);
         write_i(&mut m, 0x8000_0008, 0x73, 0, 0, 0, 0);
 
-        assert_eq!(h.run(&mut m, 64, 10), Halt::Ecall);
+        assert_eq!(h.run(&mut m, 64, 10), Halt::StepLimit);
         assert_eq!(h.regs.get(2), -1i64 as u64);
         assert_eq!(h.regs.get(3), u64::MAX);
     }
@@ -1145,7 +1155,7 @@ mod tests {
         // offset is 0 because I-type S is encoded with rs2 as value? Wait sc encoding uses rs2 directly, not offset. So address is x10 + 0.
         write_i(&mut m, 0x8000_001c, 0x73, 0, 0, 0, 0);
 
-        assert_eq!(h.run(&mut m, 64, 20), Halt::Ecall);
+        assert_eq!(h.run(&mut m, 64, 20), Halt::StepLimit);
         assert_eq!(h.regs.get(1), 0);
         assert_eq!(h.regs.get(2), 0);
         assert_eq!(h.regs.get(3), 5);
@@ -1179,7 +1189,7 @@ mod tests {
         write_s(&mut m, 0x8000_0010, 0x23, 0, 1, 2, 0);
         write_i(&mut m, 0x8000_0014, 0x73, 0, 0, 0, 0);
 
-        assert_eq!(h.run(&mut m, 64, 20), Halt::Ecall);
+        assert_eq!(h.run(&mut m, 64, 20), Halt::StepLimit);
         let out = m.uart().map(|u| u.output.clone()).unwrap_or_default();
         assert_eq!(out, b"Hi");
     }
@@ -1246,10 +1256,12 @@ mod tests {
     }
 
     #[test]
-    fn unimplemented_opcodes_are_illegal() {
+    fn unimplemented_opcodes_trap_with_cause_2() {
         let mut h = hart();
         let mut m = mem();
         m.write_le::<4>(0x8000_0000, 0x0000_0000).unwrap();
-        assert_eq!(h.run(&mut m, 64, 10), Halt::Illegal(0));
+        assert_eq!(h.run(&mut m, 64, 10), Halt::StepLimit);
+        assert_eq!(h.csr.mcause, 2);
+        assert_eq!(h.regs.pc, 0x7000_0000);
     }
 }
