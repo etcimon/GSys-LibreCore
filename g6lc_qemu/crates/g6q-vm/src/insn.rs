@@ -568,6 +568,48 @@ pub enum Insn {
         rs1: u8,
         shamt: u8,
     },
+
+    // Zbs (single-bit)
+    Bclr {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Bext {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Binv {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Bset {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    Bclri {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Bexti {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Binvi {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
+    Bseti {
+        rd: u8,
+        rs1: u8,
+        shamt: u8,
+    },
 }
 
 fn u8_field(w: u32, hi: u32, lo: u32) -> u8 {
@@ -790,18 +832,41 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 rs1,
                 imm: i_imm(w),
             },
-            0x1 => Insn::Slli {
-                rd,
-                rs1,
-                shamt: shamt(w, xlen),
+            0x1 => match (w >> 26) & 0x3f {
+                0x00 => Insn::Slli {
+                    rd,
+                    rs1,
+                    shamt: shamt(w, xlen),
+                },
+                0x0a => Insn::Bseti {
+                    rd,
+                    rs1,
+                    shamt: shamt(w, xlen),
+                },
+                0x12 => Insn::Bclri {
+                    rd,
+                    rs1,
+                    shamt: shamt(w, xlen),
+                },
+                0x1a => Insn::Binvi {
+                    rd,
+                    rs1,
+                    shamt: shamt(w, xlen),
+                },
+                _ => Insn::Illegal(w),
             },
-            0x5 => match funct7 {
+            0x5 => match (w >> 26) & 0x3f {
                 0x00 => Insn::Srli {
                     rd,
                     rs1,
                     shamt: shamt(w, xlen),
                 },
-                0x20 => Insn::Srai {
+                0x10 => Insn::Srai {
+                    rd,
+                    rs1,
+                    shamt: shamt(w, xlen),
+                },
+                0x12 => Insn::Bexti {
                     rd,
                     rs1,
                     shamt: shamt(w, xlen),
@@ -817,7 +882,7 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 imm: i_imm(w) as i32,
             },
             0x1 => match (w >> 26) & 0x3f {
-                0x00 => Insn::Slliw {
+                0x00 if w & (1 << 25) == 0 => Insn::Slliw {
                     rd,
                     rs1,
                     shamt: shamt(w, 32),
@@ -854,6 +919,9 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
             0x1 => match funct7 {
                 0x00 => Insn::Sll { rd, rs1, rs2 },
                 0x01 => Insn::Mulh { rd, rs1, rs2 },
+                0x14 => Insn::Bset { rd, rs1, rs2 },
+                0x24 => Insn::Bclr { rd, rs1, rs2 },
+                0x34 => Insn::Binv { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x2 => match funct7 {
@@ -877,6 +945,7 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 0x00 => Insn::Srl { rd, rs1, rs2 },
                 0x20 => Insn::Sra { rd, rs1, rs2 },
                 0x01 => Insn::Divu { rd, rs1, rs2 },
+                0x24 => Insn::Bext { rd, rs1, rs2 },
                 _ => Insn::Illegal(w),
             },
             0x6 => match funct7 {

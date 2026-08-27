@@ -289,7 +289,15 @@ impl Hart {
             | Insn::Sh1addUw { rd, .. }
             | Insn::Sh2addUw { rd, .. }
             | Insn::Sh3addUw { rd, .. }
-            | Insn::SlliUw { rd, .. } => rd,
+            | Insn::SlliUw { rd, .. }
+            | Insn::Bclr { rd, .. }
+            | Insn::Bext { rd, .. }
+            | Insn::Binv { rd, .. }
+            | Insn::Bset { rd, .. }
+            | Insn::Bclri { rd, .. }
+            | Insn::Bexti { rd, .. }
+            | Insn::Binvi { rd, .. }
+            | Insn::Bseti { rd, .. } => rd,
             Insn::LrW { rd, .. }
             | Insn::LrD { rd, .. }
             | Insn::ScW { rd, .. }
@@ -761,6 +769,55 @@ impl Hart {
             }
             Insn::SlliUw { rd, rs1, shamt } => {
                 let v = (self.regs.get(rs1) as u32 as u64) << (shamt & 0x3f);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+
+            Insn::Bclr { rd, rs1, rs2 } => {
+                let sh = (self.regs.get(rs2) & 0x3f) as u32;
+                let v = self.regs.get(rs1) & !(1u64 << sh);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Bext { rd, rs1, rs2 } => {
+                let sh = (self.regs.get(rs2) & 0x3f) as u32;
+                let v = (self.regs.get(rs1) >> sh) & 1;
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Binv { rd, rs1, rs2 } => {
+                let sh = (self.regs.get(rs2) & 0x3f) as u32;
+                let v = self.regs.get(rs1) ^ (1u64 << sh);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Bset { rd, rs1, rs2 } => {
+                let sh = (self.regs.get(rs2) & 0x3f) as u32;
+                let v = self.regs.get(rs1) | (1u64 << sh);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Bclri { rd, rs1, shamt } => {
+                let sh = (shamt & 0x3f) as u32;
+                let v = self.regs.get(rs1) & !(1u64 << sh);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Bexti { rd, rs1, shamt } => {
+                let sh = (shamt & 0x3f) as u32;
+                let v = (self.regs.get(rs1) >> sh) & 1;
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Binvi { rd, rs1, shamt } => {
+                let sh = (shamt & 0x3f) as u32;
+                let v = self.regs.get(rs1) ^ (1u64 << sh);
+                self.regs.set(rd, v);
+                Ok(nx)
+            }
+            Insn::Bseti { rd, rs1, shamt } => {
+                let sh = (shamt & 0x3f) as u32;
+                let v = self.regs.get(rs1) | (1u64 << sh);
                 self.regs.set(rd, v);
                 Ok(nx)
             }
@@ -1512,6 +1569,67 @@ mod tests {
         assert_eq!(h.regs.get(3), 16);
         assert_eq!(h.regs.get(4), 22);
         assert_eq!(h.regs.get(5), 34);
+    }
+
+    #[test]
+    fn zbs_single_bit_operations() {
+        let mut h = hart();
+        let mut m = mem();
+        h.regs.set(1, 0x0000_0000_0000_00f0);
+        h.regs.set(2, 4);
+        // bset x3, x1, x2 -> set bit 4
+        write_r(&mut m, 0x8000_0000, 0x33, 3, 1, 1, 2, 0x14);
+        // bclr x4, x1, x2 -> clear bit 4
+        write_r(&mut m, 0x8000_0004, 0x33, 4, 1, 1, 2, 0x24);
+        // binv x5, x1, x2 -> invert bit 4
+        write_r(&mut m, 0x8000_0008, 0x33, 5, 1, 1, 2, 0x34);
+        // bext x6, x1, x2 -> extract bit 4
+        write_r(&mut m, 0x8000_000c, 0x33, 6, 5, 1, 2, 0x24);
+        // bseti x7, x1, 0 -> set bit 0
+        m.write_le::<4>(
+            0x8000_0010,
+            (0x0a << 26 | 1 << 15 | 1 << 12 | 7 << 7 | 0x13) as u64,
+        )
+        .unwrap();
+        write_i(&mut m, 0x8000_0014, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 10), Halt::StepLimit);
+        assert_eq!(h.regs.get(3), 0x0000_0000_0000_00f0 | (1 << 4));
+        assert_eq!(h.regs.get(4), 0x0000_0000_0000_00f0 & !(1 << 4));
+        assert_eq!(h.regs.get(5), 0x0000_0000_0000_00f0 ^ (1 << 4));
+        assert_eq!(h.regs.get(6), 1); // bit 4 of 0xf0 is 1
+        assert_eq!(h.regs.get(7), 0x0000_0000_0000_00f0 | 1);
+    }
+
+    #[test]
+    fn zbs_single_bit_immediates() {
+        let mut h = hart();
+        let mut m = mem();
+        h.regs.set(1, 0x0000_0000_0000_0001);
+
+        fn enc_zbs_imm(op: u32, f3: u32, funct6: u32, rd: u32, rs1: u32, shamt: u32) -> u32 {
+            funct6 << 26 | shamt << 20 | rs1 << 15 | f3 << 12 | rd << 7 | op
+        }
+
+        // bseti x2, x1, 5: set bit 5
+        m.write_le::<4>(0x8000_0000, enc_zbs_imm(0x13, 1, 0x0a, 2, 1, 5).into())
+            .unwrap();
+        // bclri x3, x1, 0: clear bit 0
+        m.write_le::<4>(0x8000_0004, enc_zbs_imm(0x13, 1, 0x12, 3, 1, 0).into())
+            .unwrap();
+        // binvi x4, x1, 1: invert bit 1 -> 3
+        m.write_le::<4>(0x8000_0008, enc_zbs_imm(0x13, 1, 0x1a, 4, 1, 1).into())
+            .unwrap();
+        // bexti x5, x1, 0: extract bit 0 -> 1
+        m.write_le::<4>(0x8000_000c, enc_zbs_imm(0x13, 5, 0x12, 5, 1, 0).into())
+            .unwrap();
+        write_i(&mut m, 0x8000_0010, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 10), Halt::StepLimit);
+        assert_eq!(h.regs.get(2), 0x21);
+        assert_eq!(h.regs.get(3), 0);
+        assert_eq!(h.regs.get(4), 3);
+        assert_eq!(h.regs.get(5), 1);
     }
 
     #[test]
