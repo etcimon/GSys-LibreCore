@@ -65,6 +65,10 @@ pub struct Csr {
     pub mie: u64,
     /// Machine interrupt pending.
     pub mip: u64,
+    /// Machine exception delegation.
+    pub medeleg: u64,
+    /// Machine interrupt delegation.
+    pub mideleg: u64,
     /// Machine trap vector.
     pub mtvec: u64,
     /// Machine exception program counter.
@@ -135,6 +139,8 @@ impl Csr {
             0x300 => Ok(self.mstatus),
             0x304 => Ok(self.mie),
             0x344 => Ok(self.mip),
+            0x302 => Ok(self.medeleg),
+            0x303 => Ok(self.mideleg),
             0x305 => Ok(self.mtvec),
             0x341 => Ok(self.mepc),
             0x342 => Ok(self.mcause),
@@ -169,6 +175,14 @@ impl Csr {
             }
             0x344 => {
                 self.mip = val;
+                Ok(())
+            }
+            0x302 => {
+                self.medeleg = val;
+                Ok(())
+            }
+            0x303 => {
+                self.mideleg = val;
                 Ok(())
             }
             0x305 => {

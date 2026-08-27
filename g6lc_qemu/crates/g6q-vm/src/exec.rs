@@ -922,18 +922,47 @@ impl Hart {
 
     fn take_trap(&mut self, cause: u64) {
         let prev_mode = self.csr.mode();
-        self.csr.mepc = self.regs.pc;
-        self.csr.mcause = cause;
-        self.csr.mtval = self.fault_addr;
-        let mstatus = self.csr.mstatus;
-        let mie = (mstatus >> 3) & 1;
-        let new_mstatus = (mstatus & !((1u64 << 7) | (1u64 << 3) | (0x3u64 << 11)))
-            | (mie << 7)                        // MPIE <- MIE
-            | ((prev_mode as u64) << 11); // MPP <- previous mode
-        self.csr.mstatus = new_mstatus;
-        self.csr.set_mode(3);
-        let base = self.csr.mtvec & !0b11u64;
-        self.regs.pc = base;
+        let idx = if (cause >> 63) & 1 != 0 {
+            cause & 0xfff
+        } else {
+            cause
+        };
+        let delegated = if (cause >> 63) & 1 != 0 {
+            (self.csr.mideleg >> idx) & 1 != 0
+        } else {
+            (self.csr.medeleg >> idx) & 1 != 0
+        };
+
+        if delegated && prev_mode <= 1 {
+            // S-mode trap.
+            self.csr.sepc = self.regs.pc;
+            self.csr.scause = cause;
+            self.csr.stval = self.fault_addr;
+            let mstatus = self.csr.mstatus;
+            let sie = (mstatus >> 1) & 1;
+            let spp = if prev_mode == 0 { 0 } else { 1 };
+            let new_mstatus = (mstatus & !((1u64 << 5) | (1u64 << 1) | (1u64 << 8)))
+                | (sie << 5)            // SPIE <- SIE
+                | (spp << 8); // SPP <- previous mode
+            self.csr.mstatus = new_mstatus;
+            self.csr.set_mode(1);
+            let base = self.csr.stvec & !0b11u64;
+            self.regs.pc = base;
+        } else {
+            // M-mode trap.
+            self.csr.mepc = self.regs.pc;
+            self.csr.mcause = cause;
+            self.csr.mtval = self.fault_addr;
+            let mstatus = self.csr.mstatus;
+            let mie = (mstatus >> 3) & 1;
+            let new_mstatus = (mstatus & !((1u64 << 7) | (1u64 << 3) | (0x3u64 << 11)))
+                | (mie << 7)                    // MPIE <- MIE
+                | ((prev_mode as u64) << 11); // MPP <- previous mode
+            self.csr.mstatus = new_mstatus;
+            self.csr.set_mode(3);
+            let base = self.csr.mtvec & !0b11u64;
+            self.regs.pc = base;
+        }
     }
 
     fn record(&mut self, pc_rdata: u64, pc_wdata: u64, insn: u32, rd_addr: u8, rd_wdata: u64) {
@@ -973,6 +1002,8 @@ mod tests {
         m.add(Region::new(0x8000_0000, 0x1000));
         m.add(Region::new(0x7000_0000, 0x1000));
         m.write_le::<4>(0x7000_0000, 0x0000_006f).unwrap(); // jal x0, 0
+        m.add(Region::new(0x6000_0000, 0x1000));
+        m.write_le::<4>(0x6000_0000, 0x0000_006f).unwrap(); // jal x0, 0
         m
     }
 
@@ -1382,6 +1413,29 @@ mod tests {
         assert_eq!(h.step(&mut m, 64), None);
         assert_eq!(h.csr.mcause, 5);
         assert_eq!(h.csr.mtval, 0);
+    }
+
+    #[test]
+    fn medeleg_routes_u_ecall_to_smode_trap() {
+        let mut h = hart();
+        let mut m = mem();
+        // ecall at 0x8000_0000 while in U mode.
+        m.write_le::<4>(0x8000_0000, 0x0000_0073).unwrap();
+        h.csr.set_mode(0);
+        h.csr.medeleg = 1 << 8; // U-mode ecall
+        h.csr.stvec = 0x6000_0000;
+        h.csr.mstatus = 1u64 << 1; // SIE = 1, so SPIE captures it
+
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.csr.mode(), 1);
+        assert_eq!(h.regs.pc, 0x6000_0000);
+        assert_eq!(h.csr.scause, 8);
+        assert_eq!(h.csr.sepc, 0x8000_0000);
+        assert_eq!(h.csr.stval, 0);
+        // SPP = U (0), SPIE = previous SIE (1), SIE = 0.
+        assert_eq!((h.csr.mstatus >> 8) & 1, 0);
+        assert_eq!((h.csr.mstatus >> 5) & 1, 1);
+        assert_eq!((h.csr.mstatus >> 1) & 1, 0);
     }
 
     #[test]
