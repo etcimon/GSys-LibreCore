@@ -181,6 +181,14 @@ impl Plic {
             claimed: vec![0; num_targets as usize],
         }
     }
+
+    /// Whether `target` has any enabled, pending, unclaimed interrupt.
+    pub fn any_pending(&self, target: u32) -> bool {
+        if (target as usize) >= self.num_targets as usize {
+            return false;
+        }
+        (self.enable[target as usize] & self.pending & !self.claimed[target as usize]) != 0
+    }
 }
 
 impl MmioDevice for Plic {

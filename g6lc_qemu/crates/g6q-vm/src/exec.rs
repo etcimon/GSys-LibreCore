@@ -76,6 +76,15 @@ impl Hart {
             self.take_trap(0x8000_0000_0000_0007);
             return None;
         }
+        // Deliver M-mode external interrupt if globally and specifically enabled.
+        if self.csr.mode() == 3
+            && ((self.csr.mstatus >> 3) & 1) != 0
+            && ((self.csr.mie >> 11) & 1) != 0
+            && ((self.csr.mip >> 11) & 1) != 0
+        {
+            self.take_trap(0x8000_0000_0000_0011);
+            return None;
+        }
 
         let w = match mem.read_le::<4>(self.regs.pc) {
             Ok(v) => v as u32,
@@ -107,6 +116,13 @@ impl Hart {
                 self.csr.mip |= 1u64 << 7;
             } else {
                 self.csr.mip &= !(1u64 << 7);
+            }
+        }
+        if let Some(p) = mem.plic() {
+            if p.any_pending(0) {
+                self.csr.mip |= 1u64 << 11;
+            } else {
+                self.csr.mip &= !(1u64 << 11);
             }
         }
 
@@ -1253,6 +1269,34 @@ mod tests {
         assert_eq!(h.step(&mut m, 64), None);
         assert_eq!(h.step(&mut m, 64), None);
         assert_eq!(h.csr.mcause, 0x8000_0000_0000_0007);
+        assert_eq!(h.regs.pc, 0x7000_0000);
+    }
+
+    #[test]
+    fn external_interrupt_delivers_to_mtvec() {
+        use crate::device::Plic;
+        use crate::mem::{Device, DeviceKind};
+        let mut h = hart();
+        let mut m = mem();
+        m.add_device(Device::new(
+            0x0c00_0000,
+            0x40_0000,
+            DeviceKind::Plic(Plic::new(30, 16)),
+        ));
+        if let Some(p) = m.plic_mut() {
+            p.priority[5] = 1;
+            p.enable[0] = 1 << 5;
+            p.pending = 1 << 5;
+        }
+        h.csr.mie = 1u64 << 11;
+        h.csr.mstatus = (1u64 << 3) | (3u64 << 11);
+        h.csr.mtvec = 0x7000_0000;
+        // no-op to be interrupted
+        write_u(&mut m, 0x8000_0000, 0x37, 0, 0);
+
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.csr.mcause, 0x8000_0000_0000_0011);
         assert_eq!(h.regs.pc, 0x7000_0000);
     }
 
