@@ -103,7 +103,7 @@ an emulator and a toolchain on the host.
 
 ---
 
-## Q3 — B3: native Rust VM + `st_rvfi` ◐ *(RV64I/M/A, CSR bank, mret/sret, D1 report green; F/D/C/B, devices, Sv39, CLI `run`/`tandem` next)*
+## Q3 — B3: native Rust VM + `st_rvfi` ◐ *(RV64I/M/A, CSR bank, mret/sret, CLINT/UART, D1 report green; F/D/C/B, full traps, PLIC, Sv39, CLI `run`/`tandem` next)*
 
 **Deliverable** `g6q-vm`: T0 decode-cached interpreter for the target's resolved ISA; faithful
 `g6lc-soc` devices (ROM, DRAM, CLINT with deterministic `mtime`, PLIC `NumSources=30`/`NumTargets=16`,
