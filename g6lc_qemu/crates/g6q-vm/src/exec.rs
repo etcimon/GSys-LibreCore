@@ -883,6 +883,12 @@ mod tests {
         m.write_le::<4>(addr, w.into()).unwrap();
     }
 
+    fn write_u(m: &mut PhysMem, addr: u64, op: u32, rd: u32, imm: u32) {
+        // U-type: the immediate is the upper 20 bits of a 32-bit word.
+        let w = (imm << 12) | (rd << 7) | op;
+        m.write_le::<4>(addr, w.into()).unwrap();
+    }
+
     fn write_s(m: &mut PhysMem, addr: u64, op: u32, f3: u32, rs1: u32, rs2: u32, imm: i64) {
         // S-type: imm[11:5] in [31:25], imm[4:0] in [11:7].
         let imm12 = ((imm as i32) & 0xfff) as u32;
@@ -1116,6 +1122,35 @@ mod tests {
         assert_eq!(h.regs.get(5), 5);
         assert_eq!(h.regs.get(6), 0);
         assert_eq!(h.regs.get(7), 1);
+    }
+
+    #[test]
+    fn uart_mmio_writes_collect_output() {
+        use crate::device::Uart;
+        use crate::mem::{Device, DeviceKind};
+        let mut h = hart();
+        let mut m = mem();
+        m.add_device(Device::new(
+            0x1000_0000,
+            0x100,
+            DeviceKind::Uart(Uart::new()),
+        ));
+
+        // lui x1, 0x10000  -> x1 = 0x1000_0000
+        write_u(&mut m, 0x8000_0000, 0x37, 1, 0x10000);
+        // addi x2, x0, 'H'
+        write_i(&mut m, 0x8000_0004, 0x13, 2, 0, 0, b'H' as i64);
+        // sb x2, 0(x1)
+        write_s(&mut m, 0x8000_0008, 0x23, 0, 1, 2, 0);
+        // addi x2, x0, 'i'
+        write_i(&mut m, 0x8000_000c, 0x13, 2, 0, 0, b'i' as i64);
+        // sb x2, 0(x1)
+        write_s(&mut m, 0x8000_0010, 0x23, 0, 1, 2, 0);
+        write_i(&mut m, 0x8000_0014, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 20), Halt::Ecall);
+        let out = m.uart().map(|u| u.output.clone()).unwrap_or_default();
+        assert_eq!(out, b"Hi");
     }
 
     #[test]
