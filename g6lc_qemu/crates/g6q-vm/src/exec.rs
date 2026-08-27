@@ -303,7 +303,9 @@ impl Hart {
             | Insn::AmominuW { rd, .. }
             | Insn::AmominuD { rd, .. }
             | Insn::AmomaxuW { rd, .. }
-            | Insn::AmomaxuD { rd, .. } => rd,
+            | Insn::AmomaxuD { rd, .. }
+            | Insn::AmocasW { rd, .. }
+            | Insn::AmocasD { rd, .. } => rd,
             _ => 0,
         }
     }
@@ -784,6 +786,9 @@ impl Hart {
                 self.amo::<8, _>(mem, rd, rs1, rs2, |a, b| a.max(b))
             }
 
+            Insn::AmocasW { rd, rs1, rs2, .. } => self.amocas::<4>(mem, rd, rs1, rs2),
+            Insn::AmocasD { rd, rs1, rs2, .. } => self.amocas::<8>(mem, rd, rs1, rs2),
+
             Insn::Fence | Insn::FenceI => Ok(nx),
             Insn::Csrrw { rd, rs1, csr } => {
                 let old = self.csr.read(csr).map_err(|_| {
@@ -928,6 +933,47 @@ impl Hart {
         } else {
             self.store_le::<8>(mem, addr, new)?;
             self.regs.set(rd, old);
+        }
+        Ok(self.regs.next_pc())
+    }
+
+    fn amocas<const N: usize>(
+        &mut self,
+        mem: &mut PhysMem,
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    ) -> Result<u64, ExecError> {
+        let addr = self.regs.get(rs1);
+        let old = if N == 4 {
+            self.load_le::<4>(mem, addr)?
+        } else {
+            self.load_le::<8>(mem, addr)?
+        };
+        let expected = self.regs.get(rd);
+        let new = self.regs.get(rs2);
+        let swap = if N == 4 {
+            (old as u32) == (expected as u32)
+        } else {
+            old == expected
+        };
+        if swap {
+            if N == 4 {
+                self.store_le::<4>(mem, addr, new as u32 as u64)?;
+                self.regs.set(rd, old as i32 as i64 as u64);
+            } else {
+                self.store_le::<8>(mem, addr, new)?;
+                self.regs.set(rd, old);
+            }
+        } else {
+            self.regs.set(
+                rd,
+                if N == 4 {
+                    old as i32 as i64 as u64
+                } else {
+                    old
+                },
+            );
         }
         Ok(self.regs.next_pc())
     }
@@ -1352,6 +1398,51 @@ mod tests {
         assert_eq!(h.regs.get(5), 5);
         assert_eq!(h.regs.get(6), 0);
         assert_eq!(h.regs.get(7), 1);
+    }
+
+    #[test]
+    fn amocas_word_swaps_when_expected_and_fails_when_not() {
+        let mut h = hart();
+        let mut m = mem();
+        m.add(Region::new(0x9000_0000, 0x1000));
+        m.write_le::<4>(0x9000_0000, 0x1234_5678).unwrap();
+        h.regs.set(10, 0x9000_0000);
+        h.regs.set(11, 0x1234_5678u64 as i32 as i64 as u64); // expected (will sign-extend)
+        h.regs.set(12, 0xabcd_1234u64 as i32 as i64 as u64); // new
+
+        // amocas.w x11, x12, 0(x10) -> rd=11, rs1=10, rs2=12, funct5=0x05
+        write_amo(&mut m, 0x8000_0000, 11, 2, 10, 12, 0x05);
+        // amocas.w x13, x11, 0(x10): expected in x13 is wrong
+        h.regs.set(13, 0);
+        // rd=13, rs1=10, rs2=11 (expected in rd=13, new in rs2=11)
+        write_amo(&mut m, 0x8000_0004, 13, 2, 10, 11, 0x05);
+        write_i(&mut m, 0x8000_0008, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 10), Halt::StepLimit);
+        // First cas should swap: rd gets old (0x1234_5678 sign-extended), mem becomes 0xabcd_1234.
+        assert_eq!(h.regs.get(11), 0x1234_5678u64 as i32 as i64 as u64);
+        assert_eq!(m.read_le::<4>(0x9000_0000).unwrap(), 0xabcd_1234);
+        // Second cas expected 0, old is 0xabcd_1234 -> fails, rd gets old.
+        assert_eq!(h.regs.get(13), 0xabcd_1234u64 as i32 as i64 as u64);
+    }
+
+    #[test]
+    fn amocas_doubleword_swaps_when_expected() {
+        let mut h = hart();
+        let mut m = mem();
+        m.add(Region::new(0x9000_0000, 0x1000));
+        m.write_le::<8>(0x9000_0000, 0x0123_4567_89ab_cdef).unwrap();
+        h.regs.set(10, 0x9000_0000);
+        h.regs.set(11, 0x0123_4567_89ab_cdef);
+        h.regs.set(12, 0xfedc_ba98_7654_3210);
+
+        // amocas.d x11, x12, 0(x10)
+        write_amo(&mut m, 0x8000_0000, 11, 3, 10, 12, 0x05);
+        write_i(&mut m, 0x8000_0004, 0x73, 0, 0, 0, 0);
+
+        assert_eq!(h.run(&mut m, 64, 10), Halt::StepLimit);
+        assert_eq!(h.regs.get(11), 0x0123_4567_89ab_cdef);
+        assert_eq!(m.read_le::<8>(0x9000_0000).unwrap(), 0xfedc_ba98_7654_3210);
     }
 
     #[test]

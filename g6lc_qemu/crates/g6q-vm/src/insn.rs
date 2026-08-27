@@ -512,6 +512,20 @@ pub enum Insn {
         rs2: u8,
         aqrl: u8,
     },
+
+    // Zacas
+    AmocasW {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
+    AmocasD {
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+        aqrl: u8,
+    },
 }
 
 fn u8_field(w: u32, hi: u32, lo: u32) -> u8 {
@@ -870,6 +884,8 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
                 (0x3, 0x18) => Insn::AmominuD { rd, rs1, rs2, aqrl },
                 (0x2, 0x1c) => Insn::AmomaxuW { rd, rs1, rs2, aqrl },
                 (0x3, 0x1c) => Insn::AmomaxuD { rd, rs1, rs2, aqrl },
+                (0x2, 0x05) => Insn::AmocasW { rd, rs1, rs2, aqrl },
+                (0x3, 0x05) => Insn::AmocasD { rd, rs1, rs2, aqrl },
                 _ => Insn::Illegal(w),
             }
         }
