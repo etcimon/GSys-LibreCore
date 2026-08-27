@@ -768,7 +768,8 @@ impl Hart {
                 Ok(nx)
             }
             Insn::Ecall => {
-                self.take_trap(11);
+                // U=8, S=9, H=10, M=11.
+                self.take_trap(8 + self.csr.mode() as u64);
                 Ok(self.regs.pc)
             }
             Insn::Ebreak => {
