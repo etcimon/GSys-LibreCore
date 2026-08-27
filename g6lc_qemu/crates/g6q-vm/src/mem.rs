@@ -117,6 +117,8 @@ pub enum DeviceKind {
     Clint(crate::device::Clint),
     /// NS16550a transmit-only UART.
     Uart(crate::device::Uart),
+    /// Platform-level interrupt controller.
+    Plic(crate::device::Plic),
 }
 
 impl DeviceKind {
@@ -124,6 +126,7 @@ impl DeviceKind {
         match self {
             DeviceKind::Clint(c) => c.load(offset, width),
             DeviceKind::Uart(u) => u.load(offset, width),
+            DeviceKind::Plic(p) => p.load(offset, width),
         }
     }
 
@@ -131,6 +134,7 @@ impl DeviceKind {
         match self {
             DeviceKind::Clint(c) => c.store(offset, width, value),
             DeviceKind::Uart(u) => u.store(offset, width, value),
+            DeviceKind::Plic(p) => p.store(offset, width, value),
         }
     }
 }
@@ -203,6 +207,22 @@ impl PhysMem {
     pub fn uart(&self) -> Option<&crate::device::Uart> {
         self.devices.iter().find_map(|d| match &d.kind {
             DeviceKind::Uart(u) => Some(u),
+            _ => None,
+        })
+    }
+
+    /// Borrow the PLIC, if installed.
+    pub fn plic(&self) -> Option<&crate::device::Plic> {
+        self.devices.iter().find_map(|d| match &d.kind {
+            DeviceKind::Plic(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    /// Borrow the PLIC mutably.
+    pub fn plic_mut(&mut self) -> Option<&mut crate::device::Plic> {
+        self.devices.iter_mut().find_map(|d| match &mut d.kind {
+            DeviceKind::Plic(p) => Some(p),
             _ => None,
         })
     }

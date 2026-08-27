@@ -12,6 +12,12 @@ pub trait MmioDevice: std::fmt::Debug {
     fn load(&self, offset: u64, width: usize) -> u64;
     /// Store `value` (low `width*8` bits) at `offset`.
     fn store(&mut self, offset: u64, width: usize, value: u64);
+    /// Claims the highest-priority pending interrupt for target `i` (PLIC-style), or `None`.
+    fn claim(&mut self, _target: u32) -> Option<u32> {
+        None
+    }
+    /// Completes an interrupt for target `i` (PLIC-style).
+    fn complete(&mut self, _target: u32, _irq: u32) {}
 }
 
 /// Core-local interruptor.
@@ -140,6 +146,104 @@ impl MmioDevice for Uart {
     }
 }
 
+/// Platform-level interrupt controller (simplified 30/16 geometry).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plic {
+    /// Number of interrupt sources.
+    pub num_sources: u32,
+    /// Number of interrupt targets (contexts).
+    pub num_targets: u32,
+    /// Priority per source.
+    pub priority: Vec<u32>,
+    /// Pending bit mask.
+    pub pending: u32,
+    /// Enable bit mask per target.
+    pub enable: Vec<u32>,
+    /// Priority threshold per target.
+    pub threshold: Vec<u32>,
+    /// Last claimed interrupt per target.
+    pub claim: Vec<u32>,
+    /// Sources currently claimed but not completed (per target).
+    pub claimed: Vec<u32>,
+}
+
+impl Plic {
+    /// Create a PLIC with the given number of sources and targets.
+    pub fn new(num_sources: u32, num_targets: u32) -> Self {
+        Self {
+            num_sources,
+            num_targets,
+            priority: vec![0; num_sources as usize + 1],
+            pending: 0,
+            enable: vec![0; num_targets as usize],
+            threshold: vec![0; num_targets as usize],
+            claim: vec![0; num_targets as usize],
+            claimed: vec![0; num_targets as usize],
+        }
+    }
+}
+
+impl MmioDevice for Plic {
+    fn load(&self, offset: u64, width: usize) -> u64 {
+        if width != 4 {
+            return 0;
+        }
+        if offset == 0x0200_0004 {
+            // claim/complete for target 0
+            self.claim[0] as u64
+        } else if (0x0..0x1000).contains(&offset) {
+            let i = (offset / 4) as usize;
+            if i < self.priority.len() {
+                self.priority[i] as u64
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+
+    fn store(&mut self, offset: u64, width: usize, value: u64) {
+        if width != 4 {
+            return;
+        }
+        if (0x0..0x1000).contains(&offset) {
+            let i = (offset / 4) as usize;
+            if i < self.priority.len() {
+                self.priority[i] = (value & 0xff) as u32;
+            }
+        } else if offset == 0x0200_0004 {
+            self.claim[0] = 0;
+        }
+    }
+
+    fn claim(&mut self, target: u32) -> Option<u32> {
+        if target as usize >= self.num_targets as usize {
+            return None;
+        }
+        let mask = self.enable[target as usize] & self.pending & !self.claimed[target as usize];
+        if mask == 0 {
+            return None;
+        }
+        // Return lowest set source id as a placeholder.
+        let irq = mask.trailing_zeros();
+        if irq > self.num_sources {
+            return None;
+        }
+        self.claim[target as usize] = irq;
+        self.claimed[target as usize] |= 1u32 << irq;
+        Some(irq)
+    }
+
+    fn complete(&mut self, target: u32, irq: u32) {
+        if (target as usize) < self.num_targets as usize {
+            self.pending &= !(1u32 << irq);
+            self.claimed[target as usize] &= !(1u32 << irq);
+            self.claim[target as usize] = 0;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,5 +264,17 @@ mod tests {
         u.store(0x0, 1, b'X' as u64);
         assert_eq!(u.output, vec![b'X']);
         assert_eq!(u.load(0x5, 1), 0x60);
+    }
+
+    #[test]
+    fn plic_claims_highest_enabled_pending() {
+        let mut p = Plic::new(30, 16);
+        p.priority[5] = 1;
+        p.enable[0] = 1 << 5;
+        p.pending = 1 << 5;
+        assert_eq!(p.claim(0), Some(5));
+        assert_eq!(p.claim(0), None);
+        p.complete(0, 5);
+        assert_eq!(p.pending & (1 << 5), 0);
     }
 }
