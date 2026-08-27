@@ -103,7 +103,7 @@ an emulator and a toolchain on the host.
 
 ---
 
-## Q3 — B3: native Rust VM + `st_rvfi` ◐ *(RV64I/M/A, CSR bank, mret/sret, CLINT/UART/PLIC with M/S-mode software + timer + external delivery, ecall/ebreak/illegal + load/store/fetch M-mode/S-mode traps with mepc/mcause/mtval, medeleg/mideleg, sstatus/sie/sip views, Sv39 page-table walker with 4K/2M/1G leaves, per-access translation, Zicbom/Zicboz no-op decoding, mret/sret tests, `run --backend native`, `tandem` CLI, D1 report green; F/D/C/B/Zacas next)*
+## Q3 — B3: native Rust VM + `st_rvfi` ◐ *(RV64I/M/A, CSR bank, mret/sret, CLINT/UART/PLIC with M/S-mode software + timer + external delivery, ecall/ebreak/illegal + load/store/fetch M-mode/S-mode traps with mepc/mcause/mtval, medeleg/mideleg, sstatus/sie/sip views, Sv39 page-table walker with 4K/2M/1G leaves, per-access translation, Zicbom/Zicboz no-op decoding, Zacas amocas.w/d, mret/sret tests, `run --backend native`, `tandem` CLI, D1 report green; F/D/C/B next)*
 
 **Deliverable** `g6q-vm`: T0 decode-cached interpreter for the target's resolved ISA; faithful
 `g6lc-soc` devices (ROM, DRAM, CLINT with deterministic `mtime`, PLIC `NumSources=30`/`NumTargets=16`,
