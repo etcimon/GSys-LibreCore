@@ -9,6 +9,7 @@
 //! silently does nothing is worse than one that says it is not built yet.
 
 #![forbid(unsafe_code)]
+#![allow(clippy::items_after_test_module)]
 
 mod args;
 mod resolve;
@@ -16,6 +17,9 @@ mod resolve;
 use args::Args;
 use g6q_core::model::Profile;
 use g6q_core::{Inputs, Json, Report, Row, TargetModel, Verdict, SCHEMA_VERSION, STAGE};
+use g6q_vm::device::{Clint, Plic, Uart};
+use g6q_vm::mem::{Device, DeviceKind, PhysMem, Region};
+use g6q_vm::Hart;
 
 /// Package version, from Cargo.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -137,6 +141,7 @@ fn dispatch(verb: &str, args: &Args) -> Result<(), String> {
         }
         "gen" => cmd_gen(args),
         "conform" => cmd_conform(args),
+        "run" => cmd_run(args),
         v if VERBS.iter().any(|x| x.name == v) => {
             let stage = VERBS.iter().find(|x| x.name == v).map_or("?", |x| x.stage);
             // Demonstrate the model plumbing so the skeleton is visibly wired, then be
@@ -535,9 +540,10 @@ mod tests {
 
     #[test]
     fn an_unimplemented_verb_says_so_rather_than_succeeding_silently() {
-        let args = Args::parse(["run", "--target", "x"]);
-        let err = dispatch("run", &args).unwrap_err();
-        assert!(err.contains("stage Q2"), "{err}");
+        // `run` is now implemented; use a verb that is still stubbed.
+        let args = Args::parse(["diag", "--target", "x"]);
+        let err = dispatch("diag", &args).unwrap_err();
+        assert!(err.contains("stage Q5"), "{err}");
     }
 
     #[test]
@@ -611,5 +617,84 @@ mod tests {
         assert_eq!(m.provenance.overrides.len(), 1);
         assert_eq!(m.provenance.overrides[0].0, "HartsPerCore");
         assert!(!m.diagnosable());
+    }
+}
+
+/// `run --backend native` — a raw-image native VM execution.
+///
+/// This is intentionally minimal: it loads a flat binary, sets up the faithful
+/// memory map (DRAM, CLINT, PLIC, UART), and runs one hart. The map is still
+/// hard-coded and will be replaced by the resolved `TargetModel` in a later pass.
+fn cmd_run(args: &Args) -> Result<(), String> {
+    let image = args
+        .value("image")
+        .ok_or("run --backend native needs --image FILE")?;
+    let steps = args
+        .value_or("steps", "1000000")
+        .parse::<u64>()
+        .map_err(|_| "--steps must be a positive integer".to_string())?;
+    let base = parse_addr(args.value_or("base", "0x80000000"))?;
+
+    let mut mem = PhysMem::new();
+    mem.add(Region::new(base, 0x1000_0000));
+    mem.add_device(Device::new(
+        0x0200_0000,
+        0x10000,
+        DeviceKind::Clint(Clint::new(1)),
+    ));
+    mem.add_device(Device::new(
+        0x0c00_0000,
+        0x40_0000,
+        DeviceKind::Plic(Plic::new(30, 16)),
+    ));
+    mem.add_device(Device::new(
+        0x1000_0000,
+        0x100,
+        DeviceKind::Uart(Uart::new()),
+    ));
+
+    let bytes = std::fs::read(image).map_err(|e| format!("cannot read {image}: {e}"))?;
+    for (i, b) in bytes.iter().enumerate() {
+        mem.write_le::<1>(base + i as u64, *b as u64)
+            .map_err(|e| format!("cannot load binary: {e}"))?;
+    }
+
+    let mut hart = Hart::new(base);
+    hart.csr.mtvec = 0x9000_0000;
+    // A default trap handler that self-loops so an unhandled ecall does not run away.
+    mem.add(Region::new(0x9000_0000, 0x1000));
+    mem.write_le::<4>(0x9000_0000, 0x0000_006f)
+        .map_err(|e| format!("trap handler: {e}"))?;
+
+    let halt = hart.run(&mut mem, 64, steps);
+
+    if let Some(u) = mem.uart() {
+        let out = String::from_utf8_lossy(&u.output);
+        if !out.is_empty() {
+            print!("{out}");
+        }
+    }
+
+    if args.flag("record") {
+        let records = g6q_diag::records_to_json(&hart.records).to_pretty();
+        let path = args.value_or("record-out", "out/records.json");
+        std::fs::write(path, records).map_err(|e| format!("cannot write {path}: {e}"))?;
+        eprintln!("g6lc-qemu: wrote {path}");
+    }
+
+    if args.flag("verbose") {
+        eprintln!("g6lc-qemu: native run halted: {halt:?}");
+        eprintln!("  instructions retired: {}", hart.instret);
+    }
+
+    Ok(())
+}
+
+fn parse_addr(s: &str) -> Result<u64, String> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16).map_err(|_| format!("bad hex address `{s}`"))
+    } else {
+        s.parse::<u64>()
+            .map_err(|_| format!("address must be decimal or 0x-prefixed hex: `{s}`"))
     }
 }
