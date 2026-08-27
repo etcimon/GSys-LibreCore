@@ -102,7 +102,7 @@ module instr_queue
   // input stream
   logic [NrFifo-1:0] taken, branch_mask, valid, fifo_pos;
   logic instr_overflow;
-  fifo_idx_t idx_is_d, idx_is_q, shamt, replay_sel;
+  fifo_idx_t idx_is_d, idx_is_q, shamt;
   // output stream: one-hot select rotated by issue port
   logic [NrFifo-1:0] idx_ds_d, idx_ds_q;
   logic [NrIssue:0][NrFifo-1:0] idx_ds;
@@ -206,9 +206,12 @@ module instr_queue
   // target FIFO was full (then nothing of the packet is accepted at all).
   assign address_overflow = full_address & push_address;
   assign replay_o = instr_overflow | address_overflow;
-  // restart at the first instruction we could not push
-  assign replay_sel = shamt & IdxMask;
-  assign replay_addr_o = address_overflow ? addr_i[0] : addr_i[replay_sel];
+  // Replay the I$ window (exception_addr_i = icache_vaddr_q), not slot0.
+  // Leftover-complete slot0 is the carry PC in the previous window
+  // (s4-v-norepl-npc: overflow replay'd 12956 then npc 12960/12968).
+  // Completing window is vaddr 12958. I7 all-or-nothing so replay_sel
+  // was always 0 on overflow. Not leftover_pending hold / I$ take drop.
+  assign replay_addr_o = exception_addr_i;
 
   // ----------------------
   // Downstream interface

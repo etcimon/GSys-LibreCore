@@ -222,15 +222,31 @@ module g6lc_fetch_dbg
       $error("g6lc_fetch_dbg: restore outranked exception");
     if (rst_ni && snap.leftover_drop && snap.leftover)
       $error("g6lc_fetch_dbg: leftover drop and complete in one cycle");
+    // live[] prefix-drop + keep_link jal can zero slot 0 and keep slot 1
+    // (s4-v-20m $stop t=2474812). One contiguous run: leading/trailing
+    // zeros OK (s4-v-slotfix 2jr 1100 is not a hole).
     if (rst_ni && En.align && icache_valid_q_i) begin
-      for (int unsigned k = 1; k < Slots; k++) begin
-        if (slot_v_i[k] && !slot_v_i[k-1])
-          $error("g6lc_fetch_dbg: slot hole at %0d", k);
+      automatic logic seen_live, seen_gap;
+      automatic int unsigned first_live;
+      automatic logic [63:0] expect_pc;
+      seen_live  = 1'b0;
+      seen_gap   = 1'b0;
+      first_live = Slots;
+      expect_pc  = '0;
+      for (int unsigned k = 0; k < Slots; k++) begin
+        if (slot_v_i[k]) begin
+          if (seen_gap)
+            $error("g6lc_fetch_dbg: slot hole at %0d", k);
+          if (first_live == Slots) first_live = k;
+          seen_live = 1'b1;
+        end else if (seen_live) begin
+          seen_gap = 1'b1;
+        end
       end
-      if (slot_v_i[0]) begin
-        automatic logic [63:0] expect_pc;
-        expect_pc = 64'(slot_pc_i[0]) + pc_ilen(CVA6Cfg, slot_instr_i[0][15:0]);
-        for (int unsigned k = 1; k < Slots; k++) begin
+      if (first_live < Slots) begin
+        expect_pc = 64'(slot_pc_i[first_live])
+            + pc_ilen(CVA6Cfg, slot_instr_i[first_live][15:0]);
+        for (int unsigned k = first_live + 1; k < Slots; k++) begin
           if (slot_v_i[k]) begin
             if (64'(slot_pc_i[k]) != expect_pc)
               $error("g6lc_fetch_dbg: slot pc step k=%0d got %x want %x",

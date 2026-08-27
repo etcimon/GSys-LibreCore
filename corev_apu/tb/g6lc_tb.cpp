@@ -633,7 +633,7 @@ done_processing:
         // Trapping visit: dump ID/SB handshake. id_pc uses the same
         // sbe_w as commit (do not scan from lo — bp tgt leak).
         static int idsb_logs = 0;
-        if (trace_on && main_time >= 103000 && main_time <= 103700 &&
+        if (trace_on && main_time >= 103000 && main_time <= 180000 &&
             idsb_logs < 250) {
           unsigned flu = (unsigned)top->rootp->G6LC_CVA6_C0(flush_unissued_instr_ctrl_id);
           unsigned fif = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_if);
@@ -665,7 +665,10 @@ done_processing:
               issue_stage_i__DOT__i_scoreboard__DOT__commit_pointer_q);
           auto in_tail_pc = [](uint64_t pc) -> bool {
             uint64_t p = pc & 0xffffffffULL;
-            return p >= 0x80012900ULL && p <= 0x80012a20ULL;
+            return (p >= 0x80012c00ULL && p <= 0x80012c70ULL)
+                || (p >= 0x80012b10ULL && p <= 0x80012b20ULL)
+                || (p >= 0x80017fd0ULL && p <= 0x80018010ULL)
+                || (p >= 0x80013940ULL && p <= 0x80013990ULL);
           };
           if ((dv || dack || flu || fif || fex) &&
               (in_tail_pc(ipc0) || in_tail_pc(ipc1) || in_tail_pc(pcex))) {
@@ -701,7 +704,9 @@ done_processing:
           bool snap = (main_time == 103624 || main_time == 103628 ||
                        main_time == 103632 || main_time == 103636 ||
                        main_time == 103640 || main_time == 103644);
-          if ((cack || cdrop) && main_time >= 103620 && main_time <= 103650) {
+          if ((cack || cdrop) &&
+              ((main_time >= 103620 && main_time <= 103650) ||
+               (main_time >= 157900 && main_time <= 157930))) {
             std::cerr << "[sb_iss] t=" << main_time
                       << " ip=" << iptr << " cp=" << cptr
                       << " ack=" << cack << " drop=" << cdrop
@@ -736,7 +741,7 @@ done_processing:
         // Leftover-complete 12958 vs sequential 12960. replay_addr /
         // serving_unaligned / is_mispredict DCE; k1 = misp|flush|replay.
         // npc_q and icache_vaddr_q are flops (not DCE).
-        if (trace_on && main_time >= 103000 && main_time <= 103700) {
+        if (trace_on && main_time >= 103000 && main_time <= 180000) {
           unsigned fifk = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_if);
           unsigned repl = (unsigned)top->rootp->G6LC_CVA6_C0(
               i_frontend__DOT__replay);
@@ -754,18 +759,24 @@ done_processing:
               i_frontend__DOT__npc_q);
           uint64_t kvaddr = (uint64_t)top->rootp->G6LC_CVA6_C0(
               i_frontend__DOT__icache_vaddr_q);
+          uint64_t btgt = (uint64_t)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__bp_tgt_q);
           unsigned misp = k1 && !repl && !fifk;
           uint64_t knpc32 = knpc & 0xffffffffULL;
-          bool in_tail = knpc32 >= 0x80012900ULL && knpc32 <= 0x80012a20ULL;
-          if ((misp || repl || k1 || k2 || bpf || pend) &&
-              (in_tail || repl || pend)) {
+          bool in_tail = (knpc32 >= 0x80012c00ULL && knpc32 <= 0x80012c70ULL)
+              || (knpc32 >= 0x80012b10ULL && knpc32 <= 0x80012b20ULL)
+              || (knpc32 >= 0x80017fd0ULL && knpc32 <= 0x80018010ULL)
+              || (knpc32 >= 0x80013940ULL && knpc32 <= 0x80013990ULL)
+              || (knpc32 >= 0x80017f10ULL && knpc32 <= 0x80017f90ULL);
+          if ((misp || repl || k1 || k2 || bpf || pend) && in_tail) {
             std::cerr << "[kill] t=" << main_time
                       << " misp=" << misp << " replay=" << repl
                       << " fif=" << fifk << " bp=" << bpf
                       << " k1=" << k1 << " k2=" << k2
                       << " pend=" << pend << " full=" << qfull
                       << std::hex << " npc=0x" << knpc
-                      << " vq=0x" << kvaddr << std::dec
+                      << " vq=0x" << kvaddr
+                      << " tgt=0x" << btgt << std::dec
                       << "\n";
           }
         }

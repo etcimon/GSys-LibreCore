@@ -204,14 +204,18 @@ module frontend
   // address will always be 16 bit aligned, make this explicit here
   assign shamt = CVA6Cfg.RVC ? icache_dreq_i.vaddr[IdxW:1] : '0;
 
-  // Re-align instructions. Kill and flush are inert on leftover.
+  // Re-align: flush and kill_s1 (misp/replay) are inert on leftover so a
+  // killed window can retry the carry. bp_fire (kill_s2 only) must still
+  // retire a leftover-complete jal, else the next leftover (strncmp jal_lo
+  // after strlen jal@17fc6) is never stored and RAS misses 17fda
+  // (s4-v-nien node_is_enabled -48). Not G1bq (do not spare I$ kill_s2).
   instr_realign #(
       .CVA6Cfg(CVA6Cfg)
   ) i_instr_realign (
       .clk_i              (clk_i),
       .rst_ni             (rst_ni),
       .flush_i            (flush_i),
-      .kill_i             (kill_s2),
+      .kill_i             (kill_s1),
       .hart_i             (smt_hart_i),
       .valid_i            (icache_valid_q),
       .serving_unaligned_o(serving_unaligned),
@@ -336,6 +340,18 @@ module frontend
       if (taken_rvc_cf[i] || taken_rvi_cf[i]) begin
         predict_address = addr[i] + (taken_rvc_cf[i] ? rvc_imm[i] : rvi_imm[i]);
       end
+    end
+    // Leftover-complete RVI jal is slot0 at carry_pc. Later slots in the
+    // completing window stay valid for realign but must not win cf_select:
+    // jal@17fd6 predicted 17fda (link) not strncmp 49d6 (s4-v-nockpt
+    // tgt=17fda); RAS missed; node_is_enabled -48@17f16. G1do on B.
+    // Not G1aa / NoCF ckpt_restore (pin unchanged).
+    if (serving_unaligned && instruction_valid[0] && rvi_jump[0]) begin
+      cf_type[0] = ariane_pkg::Jump;
+      taken_rvi_cf[0] = 1'b1;
+      predict_address = addr[0] + rvi_imm[0];
+      ras_push = rvi_call[0] && instr_queue_consumed[0];
+      if (rvi_call[0]) ras_update = addr[0] + 4;
     end
   end
 
@@ -473,21 +489,39 @@ module frontend
   // L2: predicted redirect does not set redirect_pend (arch only). kill_s2
   // can lose the sequential inflight (OpenSBI 12ad0 leftover_drop of jal).
   // Pend only filters that return; sequential HIT with pend=0 is unchanged.
+  // Mispredict retargets pend to the resolve target (17fda) so the
+  // previous predicted window (17f16) is not taken after flush cleared
+  // pend. TTL lifts if the target I$ never returns (not redirect_pend
+  // take: that gated every I$ until hit; 2jr mepc=0xaa).
+  // stale_ret_ok extra same_win on take SIGSEGV rc=-11 s4-v-stale-minis.
   logic bp_pend_q;
   logic [CVA6Cfg.VLEN-1:0] bp_tgt_q;
+  logic [2:0] bp_misp_ttl_q;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      bp_pend_q <= 1'b0;
-      bp_tgt_q  <= '0;
-    end else if (flush_i || is_mispredict) begin
-      bp_pend_q <= 1'b0;
+      bp_pend_q     <= 1'b0;
+      bp_tgt_q      <= '0;
+      bp_misp_ttl_q <= '0;
+    end else if (is_mispredict) begin
+      bp_pend_q     <= 1'b1;
+      bp_tgt_q      <= resolved_branch_i.target_address;
+      bp_misp_ttl_q <= 3'd7;
+    end else if (flush_i) begin
+      bp_pend_q     <= 1'b0;
+      bp_misp_ttl_q <= '0;
     end else if (bp_fire) begin
-      bp_pend_q <= 1'b1;
-      bp_tgt_q  <= predict_address;
+      bp_pend_q     <= 1'b1;
+      bp_tgt_q      <= predict_address;
+      bp_misp_ttl_q <= '0;
     end else if (bp_pend_q && icache_dreq_i.valid &&
-        g6lc_fetch_pkg::same_win(CVA6Cfg, 64'(icache_dreq_i.vaddr), 64'(bp_tgt_q)))
-      bp_pend_q <= 1'b0;
+        g6lc_fetch_pkg::same_win(CVA6Cfg, 64'(icache_dreq_i.vaddr), 64'(bp_tgt_q))) begin
+      bp_pend_q     <= 1'b0;
+      bp_misp_ttl_q <= '0;
+    end else if (bp_misp_ttl_q != 3'd0) begin
+      if (bp_misp_ttl_q == 3'd1) bp_pend_q <= 1'b0;
+      bp_misp_ttl_q <= bp_misp_ttl_q - 3'd1;
+    end
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -766,6 +800,8 @@ module frontend
   // while 12958 replay'd). Not leftover_ret_ok (no leftover_pending).
   // leftover_take_ok MINI-FAIL s4-v-lotake-minis ALL 10 hang @40000
   // (unbounded leftover hold; 2jr npc=0xd0c8). Reverted.
+  // serving_unaligned && take==next_block SIGSEGV rc=-11 s4-v-lotake1
+  // (2jr+stock). Reverted. Do not drop I$ on leftover-complete present.
   assign icache_take = (icache_dreq_i.valid | lbuf_inject)
       && g6lc_fetch_pkg::bp_ret_ok(bp_pend_q,
           g6lc_fetch_pkg::same_win(CVA6Cfg,

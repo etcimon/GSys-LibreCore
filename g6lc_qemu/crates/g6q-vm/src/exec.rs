@@ -95,6 +95,14 @@ impl Hart {
         self.regs.pc = pc_wdata;
         self.instret += 1;
         self.clock.retire(1);
+        if let Some(c) = mem.clint_mut() {
+            c.tick();
+            if c.timer_pending(0) {
+                self.csr.mip |= 1u64 << 7;
+            } else {
+                self.csr.mip &= !(1u64 << 7);
+            }
+        }
 
         None
     }

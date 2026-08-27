@@ -65,8 +65,9 @@ Formal (when split out): `A_decode_pure`, `A_no_fabricate`, `A_pc_monotonic`, `A
 
 Live B: `core/fetch_B/instr_realign.sv` — `carry_ok = leftover_complete(...)`;
 `hw_compressed = (ilen_of==2)`; cursor over `NrHalfWords`. A non-next valid window
-still **drops** leftover (`leftover_drop`; I4az / `plat_hc=80` if kept). Kill **and
-flush** are inert (`leftover_update = valid && !kill`). Spec leftover hold
+still **drops** leftover (`leftover_drop`; I4az / `plat_hc=80` if kept). Flush and
+`kill_s1` (misp/replay) are inert; leftover-complete **does** update on `bp_fire`
+so the next leftover jal can be captured (`realign.kill_i = kill_s1`). Spec leftover hold
 (`spec_req` skips drop) **reverted** — `spec_req` is sequential-fetch high.
 Snap prints `h=` / `drop=` (no frontend combo).
 

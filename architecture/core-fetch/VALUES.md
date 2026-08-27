@@ -50,16 +50,28 @@ fetch_address   = arch_valid ? arch_pc : (redirect_hold ? redirect_pc : seq_base
                   // I8 on the I$ port — not restore-first
 npc_q_o         = snap_pc(restore && inflight, inflight_addr, npc_q)
                   // I10: bank accepted I$ addr, not next_block past a killed window
-realign.flush_i = flush_i          // leftover_update: flush is inert (like kill)
-realign.kill_i  = kill_s2          // leftover_update: kill does not consume
+realign.flush_i = flush_i          // leftover_update: flush is inert
+realign.kill_i  = kill_s1          // misp/replay keep carry; bp_fire retires
+                                   // leftover-complete (strlen then strncmp jal)
 realign.hart_i  = smt_hart_i       // I4 banks
 iq push         = packet_accept(overflow)   // I7 all-or-nothing
+iq.replay_addr  = exception_addr            // I$ window, not slot0 carry
+lo_jal          = serving_unaligned && rvi_jump[0]
+                  // cf=Jump, predict=addr+imm, ras_push link. G1do on B.
+                  // leftover jal@17fd6 predicted 17fda (link) not 49d6.
+                  // leftover-complete slot0 is previous-window carry
+                  // (NEGATIVE: replay addr_i[0] → npc 12956 mid-window)
 iq.hart         = packet_hart(en, smt_hart) // L3; decode from entry, not active
 iq.upto_cf      = packet_upto_cf(taken, slots)  // L3; first predicted CF ends packet
 redirect_hold   = redirect_rehold(!ftq, pend, lost, hit)
-bp_pend         = set on bp_fire; clear on flush/misp or same_win(return, tgt)
+bp_pend         = set on bp_fire (tgt=predict) or is_mispredict (tgt=resolve,
+                  ttl=7); clear on flush (not misp), same_win(return, tgt),
+                  or misp ttl. stale_ret_ok extra take-compare SIGSEGV
+                  rc=-11 s4-v-stale-minis — do not re-land.
 icache_take     = (dreq.valid|lbuf) && bp_ret_ok(pend, same_win(vaddr, tgt))
                   && !replay
+                  // redirect_pend same_win MINI-FAIL s4-v-redir-minis
+                  // (2jr hang @40000 illegal mepc=0xaa; osbi FAIL). Reverted.
                   // L2: drop sequential 12ad0 after leftover jal; not inflight same_win
                   // exact vaddr==tgt MINI-FAIL; start_pc extra-shift SIGSEGV
                   // leftover_ret_ok / leftover_take_ok MINI-FAIL (unbounded leftover hold)
@@ -227,7 +239,8 @@ Do not AND `live` into IQ while `accept` includes `kill_s2`.
 Window filter also matches **slot PC / rpc / tgt**, so `+fetch_snap_lo/hi` around a pin
 does not miss a mispredict whose `fa` already left the window.
 
-SVA (sim): slot valids are a prefix (no holes); consecutive live PCs step by `pc_ilen`;
+SVA (sim): live slots are one contiguous run (prefix-drop / keep_link may
+zero slot 0; trailing zeros OK). Consecutive live PCs step by `pc_ilen`;
 same-window bytes match I$ (I1). `issue>1 && order |-> !(port1 && !port0)` unchanged.
 
 `arch_src` is I8 via `arch_src_sel`: 1=EX, 2=DEBUG, 3=ERET, 4=COMMIT, 5=RESTORE, 6=MISP.
