@@ -33,6 +33,7 @@ pub mod device;
 pub mod exec;
 pub mod insn;
 pub mod mem;
+pub mod mmu;
 pub mod regs;
 
 pub use exec::{Halt, Hart};
