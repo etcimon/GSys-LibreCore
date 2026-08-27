@@ -82,6 +82,32 @@ fn every_board_tree_parses_and_yields_facts() {
                 }
             }
         }
+
+        // The binary form must carry the same facts, so the tool can hand a blob to an
+        // emulator without an external device-tree compiler.
+        let tree = g6q_dts::parse(&text);
+        let blob = g6q_dts::to_blob(&tree, 0, &[]);
+        match g6q_dts::from_blob(&blob) {
+            Ok(back) => {
+                let round = extract(&back);
+                if round.extensions != facts.extensions {
+                    failures.push(format!("{name}: extensions changed through the blob"));
+                }
+                if round.cpu_count != facts.cpu_count {
+                    failures.push(format!("{name}: cpu count changed through the blob"));
+                }
+                if round.mmu_mode != facts.mmu_mode {
+                    failures.push(format!(
+                        "{name}: mmu-type changed through the blob ({:?} -> {:?})",
+                        facts.mmu_mode, round.mmu_mode
+                    ));
+                }
+                if round.memory != facts.memory {
+                    failures.push(format!("{name}: memory changed through the blob"));
+                }
+            }
+            Err(e) => failures.push(format!("{name}: blob did not parse back ({e})")),
+        }
     }
 
     println!("\n{} device tree(s) read", trees.len());

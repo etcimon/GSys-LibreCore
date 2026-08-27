@@ -71,6 +71,27 @@ pub struct Capability {
     pub dts_tokens: Vec<String>,
     /// Device-tree node base name that advertises this capability, if any.
     pub dts_node: Option<String>,
+    /// Stock-QEMU `-cpu` properties.
+    ///
+    /// `None` means "same as the device-tree tokens", which is true of most extensions.
+    /// `Some(empty)` means the stock model cannot express it at all — and that gap is
+    /// precisely what the B0 capability delta exists to report.
+    pub qemu_props: Option<Vec<String>>,
+}
+
+impl Capability {
+    /// The stock-QEMU properties this capability maps to.
+    pub fn qemu_properties(&self) -> &[String] {
+        match &self.qemu_props {
+            Some(v) => v,
+            None => &self.dts_tokens,
+        }
+    }
+
+    /// Whether a stock model can express this capability at all.
+    pub fn expressible_in_stock_qemu(&self) -> bool {
+        !self.qemu_properties().is_empty()
+    }
 }
 
 /// A parsed capability table.
@@ -138,6 +159,16 @@ pub fn parse(text: &str) -> Table {
                 flist,
                 dts_tokens: list(fields.get("dts").map(String::as_str), ','),
                 dts_node: fields.get("node").map(|s| s.trim().to_string()),
+                // A bare `-` means "not expressible", which is distinct from
+                // "unspecified": the first is a fact worth reporting, the second falls
+                // back to the device-tree tokens.
+                qemu_props: fields.get("qemu").map(|s| {
+                    if s.trim() == "-" {
+                        Vec::new()
+                    } else {
+                        list(Some(s.as_str()), ',')
+                    }
+                }),
             });
             fields.clear();
         };

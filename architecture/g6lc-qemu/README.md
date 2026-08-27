@@ -243,7 +243,7 @@ Enforcement: the profile is stamped into every artifact, trace and JSON result, 
 |---|---|---|
 | **Q0** ✅ | This tree + `g6lc_qemu/` package skeleton + registration | `python tools/g6q.py check` green on fixtures |
 | **Q1** ✅ | Ingest + `TargetModel` + conformance | 21 packages round-trip (0 unresolved); 7 DTS parse; stub-Ara, undeclared-H, stub-L2 and an AI topology mismatch all flagged unaided |
-| **Q2** | **B0** stock-QEMU driver + OpenSBI payload | OpenSBI banner on stock `qemu-system-riscv64 -M virt` |
+| **Q2** ◐ | **B0** stock-QEMU driver + OpenSBI payload | argv + capability delta + `dts`/`dtb` emission done (no external device-tree compiler needed); **boot unverified** — no emulator/toolchain on the authoring host |
 | **Q3** | **B3** Rust VM + faithful devices + `st_rvfi` | boots OpenSBI to S-mode; tandem-clean vs Spike |
 | **Q4** | **B1** generated `g6lc-soc` machine | buildroot Linux shell; memory map self-check byte-identical |
 | **Q5** | **D1** tandem, replay, checkpoint → Verilator resume | reproduces a known soak signature in seconds |

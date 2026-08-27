@@ -50,6 +50,62 @@ pub struct Resolved {
     pub sources: Sources,
     /// Human-readable notes about which paths were used or missing.
     pub notes: Vec<String>,
+    /// The device tree that was read, when one was.
+    pub dts_path: Option<PathBuf>,
+}
+
+/// Boot options from the command line.
+pub fn boot_options(args: &Args) -> g6q_emit_args::BootOptions {
+    let mut forwards = Vec::new();
+    for f in args.values("net-fwd") {
+        if let Some((h, g)) = f.split_once(':') {
+            if let (Ok(h), Ok(g)) = (h.parse(), g.parse()) {
+                forwards.push((h, g));
+            }
+        }
+    }
+    if let Some(p) = args.value("ssh-port").and_then(|p| p.parse().ok()) {
+        forwards.push((p, 22));
+    }
+
+    let firmware = match args.value("fw") {
+        Some(p) => g6q_emit_args::Firmware::File(p.to_string()),
+        None if args.value_or("fw-mode", "payload") == "none" => g6q_emit_args::Firmware::None,
+        None => g6q_emit_args::Firmware::Default,
+    };
+
+    g6q_emit_args::BootOptions {
+        firmware,
+        kernel: args.value("kernel").map(str::to_string),
+        initrd: args.value("initrd").map(str::to_string),
+        append: args.value("append").map(str::to_string),
+        dtb: args.value("dtb").map(str::to_string),
+        elf: args.value("elf").map(str::to_string),
+        drives: args
+            .values("drive")
+            .iter()
+            .cloned()
+            .chain(args.value("rootfs").map(str::to_string))
+            .collect(),
+        netdev_user: args.value_or("netdev", "none") == "user" || !forwards.is_empty(),
+        port_forwards: forwards,
+        serial: args.value("serial").map(str::to_string),
+        smp: args.value("smp").and_then(|s| s.parse().ok()),
+        memory_bytes: args.value("mem-size").and_then(parse_size),
+        deterministic: args.flag("deterministic") || args.value("tandem").is_some(),
+    }
+}
+
+/// Parse `512M`, `2G`, or a plain byte count.
+fn parse_size(text: &str) -> Option<u64> {
+    let t = text.trim();
+    let (num, mult) = match t.chars().last()? {
+        'G' | 'g' => (&t[..t.len() - 1], 1024 * 1024 * 1024u64),
+        'M' | 'm' => (&t[..t.len() - 1], 1024 * 1024),
+        'K' | 'k' => (&t[..t.len() - 1], 1024),
+        _ => (t, 1),
+    };
+    num.trim().parse::<u64>().ok().map(|n| n * mult)
 }
 
 fn first_existing(root: &Path, candidates: &[&str]) -> Option<PathBuf> {
@@ -202,6 +258,7 @@ pub fn resolve(args: &Args) -> Result<Resolved, String> {
         out.sources.dts = Some(g6q_dts::extract(&g6q_dts::parse(&text)));
         out.sources.sources.push((norm(p), digest(&text)));
         out.notes.push(format!("device tree: {}", p.display()));
+        out.dts_path = Some(p.clone());
     } else {
         out.notes.push("device tree: none supplied".into());
     }
@@ -329,6 +386,37 @@ mod tests {
         let r = resolve(&Args::parse(["gen", "--target", "nonexistent"])).unwrap();
         assert!(r.sources.config.is_none());
         assert!(r.notes.iter().any(|n| n.contains("none supplied")));
+    }
+
+    #[test]
+    fn sizes_parse_with_and_without_units() {
+        assert_eq!(parse_size("2G"), Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(parse_size("512M"), Some(512 * 1024 * 1024));
+        assert_eq!(parse_size("4096"), Some(4096));
+        assert_eq!(parse_size("nonsense"), None);
+    }
+
+    #[test]
+    fn ssh_port_is_sugar_for_a_forward_and_implies_networking() {
+        let boot = boot_options(&Args::parse(["run", "--ssh-port", "2222"]));
+        assert_eq!(boot.port_forwards, vec![(2222, 22)]);
+        assert!(
+            boot.netdev_user,
+            "a forward is meaningless without networking"
+        );
+    }
+
+    #[test]
+    fn a_rootfs_counts_as_a_drive() {
+        let boot = boot_options(&Args::parse(["run", "--rootfs", "disk.img"]));
+        assert_eq!(boot.drives, vec!["disk.img".to_string()]);
+    }
+
+    #[test]
+    fn tandem_forces_deterministic_time() {
+        // A non-deterministic oracle is not an oracle.
+        let boot = boot_options(&Args::parse(["tandem", "--tandem", "spike"]));
+        assert!(boot.deterministic);
     }
 
     #[test]

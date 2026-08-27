@@ -190,10 +190,12 @@ fn cmd_gen(args: &Args) -> Result<(), String> {
     let text = match emit {
         "model" => model.to_json().to_pretty(),
         "conformance" => model.conformance.to_json().to_pretty(),
+        "args" => emit_args(args, &resolved, &model)?,
+        "dts" | "dtb" => return emit_device_tree(args, &resolved, emit),
         other => {
             return Err(format!(
                 "`--emit {other}` is specified in architecture/CLI.md but lands at a later \
-                 stage; `model` and `conformance` are available now"
+                 stage; available now: model, conformance, args, dts, dtb"
             ))
         }
     };
@@ -207,6 +209,111 @@ fn cmd_gen(args: &Args) -> Result<(), String> {
     }
 
     enforce_conformance(args, &model)
+}
+
+/// `--emit args` — the stock-emulator invocation plus what it does not cover.
+fn emit_args(
+    args: &Args,
+    resolved: &resolve::Resolved,
+    model: &TargetModel,
+) -> Result<String, String> {
+    let boot = resolve::boot_options(args);
+    g6q_emit_args::check_profile(model, &boot)?;
+
+    let stock = g6q_emit_args::StockTarget {
+        machine: args.value_or("stock-machine", "virt").to_string(),
+        cpu_base: args.value_or("stock-cpu", "rv64").to_string(),
+    };
+
+    // The property mapping is table data, not tool knowledge.
+    let table = resolved
+        .sources
+        .table
+        .clone()
+        .unwrap_or_else(g6q_ingest::capability::Table::default_table);
+    let properties_for = |token: &str| -> Vec<String> {
+        for cap in &table.entries {
+            if cap.dts_tokens.iter().any(|t| t == token) {
+                return cap.qemu_properties().to_vec();
+            }
+        }
+        vec![token.to_string()]
+    };
+
+    let argv = g6q_emit_args::build_argv(model, &stock, &boot, &properties_for);
+
+    // Everything the stock model cannot express. Reporting it is the point of B0: it
+    // says precisely what an early boot is *not* testing.
+    let mut delta: Vec<String> = Vec::new();
+    for cap in &table.entries {
+        let live = model
+            .conformance
+            .rows
+            .iter()
+            .any(|r| r.capability == cap.name && r.verdict == Verdict::Live);
+        if live && !cap.expressible_in_stock_qemu() {
+            delta.push(cap.name.clone());
+        }
+    }
+    if model.soc.hart_topology_agrees() == Some(false) {
+        delta.push("hart-topology".into());
+    }
+    delta.push(format!(
+        "memory-map ({} peripherals)",
+        model.soc.peripherals.len()
+    ));
+    delta.sort();
+
+    let j = Json::obj([
+        ("binary", Json::str("qemu-system-riscv64")),
+        ("argv", Json::arr(argv.iter().map(Json::str))),
+        ("command_line", Json::str(argv.join(" "))),
+        ("profile", Json::str(model.profile.as_str())),
+        (
+            "capability_delta",
+            Json::obj([
+                ("stock_machine", Json::str(&stock.machine)),
+                ("not_expressible", Json::arr(delta.iter().map(Json::str))),
+            ]),
+        ),
+        ("evidence", Json::Bool(false)),
+    ]);
+    Ok(j.to_pretty())
+}
+
+/// `--emit dts|dtb` — write the resolved device tree.
+fn emit_device_tree(args: &Args, resolved: &resolve::Resolved, form: &str) -> Result<(), String> {
+    let Some(path) = &resolved.dts_path else {
+        return Err("no device tree was resolved; supply --dts or --repo-root".into());
+    };
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let tree = g6q_dts::parse(&text);
+
+    let out = args
+        .value("emit-model")
+        .or_else(|| args.value("json-out"))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("out/emit/{form}.{form}"));
+
+    if form == "dts" {
+        write_out(&out, &text)?;
+    } else {
+        // Written here rather than shelled out to a device-tree compiler: requiring one
+        // would make the package's standalone claim conditional on another toolchain.
+        let blob = g6q_dts::to_blob(&tree, 0, &[]);
+        if let Some(parent) = std::path::Path::new(&out).parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+            }
+        }
+        std::fs::write(&out, &blob).map_err(|e| format!("cannot write {out}: {e}"))?;
+        eprintln!("g6lc-qemu: wrote {out} ({} bytes)", blob.len());
+        return Ok(());
+    }
+    eprintln!("g6lc-qemu: wrote {out}");
+    Ok(())
 }
 
 /// Write an output file, creating its directory.

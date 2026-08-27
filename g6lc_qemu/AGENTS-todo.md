@@ -44,7 +44,7 @@ written for it:
 |---|---|
 | **Q0** scaffold, package surface, Rust skeleton | **done** |
 | **Q1** ingest + `TargetModel` + conformance | **done** |
-| **Q2** B0 stock-QEMU driver + firmware chain | next |
+| **Q2** B0 stock-QEMU driver + firmware chain | **done** — emission complete; boot gate pending host tooling (§Q2) |
 | **Q3** B3 native VM + tandem records | open |
 | **Q4** B1 generated QEMU machine | open |
 | **Q5** D1 tandem / replay / checkpoint | open |
@@ -54,6 +54,33 @@ written for it:
 | **Q9** capability matrix | open |
 
 ---
+
+### Q2 status — emission complete, boot gate pending host tooling
+
+Landed and tested offline:
+
+- **`--emit args`** — full invocation from the model: machine, processor properties from
+  live capabilities only, processor count, memory, firmware mode, disks, networking with port
+  forwards, serial, deterministic time. Plus the **capability delta**: what a stock model cannot
+  express (vendor extensions, the coprocessor seam, the memory map, and a hart-topology mismatch
+  when there is one).
+- **`--emit dts` / `--emit dtb`** — a flattened-tree writer *and* reader, so no external
+  device-tree compiler is needed. All 7 real trees round-trip with their facts intact.
+- Disks and networking are **refused on the faithful machine**, which genuinely has neither.
+
+**Not verified, and cannot be on this host:** no emulator, no device-tree compiler and no
+cross-toolchain are installed, so the Q2 exit gate — firmware banner and a shell on a stock
+binary — has not been demonstrated. Two consequences worth stating plainly:
+
+- **`qemu` property names in the capability table are unvalidated.** Most default to the
+  device-tree token, which is usually right. Check `-cpu help` on the pinned release before
+  trusting a boot. A wrong name fails at start-up rather than silently, which is the better
+  failure.
+- **The firmware chain (`g6q fw`) is not implemented.** It needs a cross-toolchain to be
+  meaningful, and building it blind against the in-tree profile would be guesswork.
+
+Closing Q2 needs an emulator and a toolchain on the host, then: validate the property names,
+implement `fw`, and run the two boots.
 
 ## Open items
 

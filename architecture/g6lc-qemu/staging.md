@@ -73,7 +73,7 @@ Three refinements the soak forced, all recorded in `g6lc_qemu/AGENTS-todo.md`:
 
 ---
 
-## Q2 — B0: stock-QEMU driver + OpenSBI
+## Q2 — B0: stock-QEMU driver + OpenSBI ✅ *(emission complete; boot gate pending host tooling)*
 
 **Deliverable** `g6q-emit-args`: generated `.dtb`, `-cpu rv64,<props>`, machine/kernel/initrd/append
 argv, plus the **capability delta report** (what stock `virt` cannot express). `g6q fw` drives the
@@ -86,6 +86,20 @@ is non-empty and accurate (it must list the memory map, PLIC geometry and the ab
 **Why this is early:** it debugs DTS generation, the firmware chain, payload layout and rootfs
 plumbing *before* any C emitter exists, and it gives the project a working Linux-in-seconds loop from
 stage two rather than stage five.
+
+**Progress.** `--emit args` builds the full invocation from the model — processor properties from
+**live capabilities only** (a stub is never turned on, or the guest would exercise a feature the
+design under test does not provide), plus the capability delta. `--emit dts` / `--emit dtb` work
+through an in-tree flattened-tree writer *and* reader, so **no external device-tree compiler is
+required**; all seven real trees round-trip with their facts intact. Disks and networking are
+refused on the faithful machine, which genuinely has neither.
+
+**Blocked on host tooling, and honestly so.** No emulator, device-tree compiler or cross-toolchain
+is installed where this was written, so the exit gate above has *not* been demonstrated and `g6q fw`
+is not implemented — building the firmware chain blind against the in-tree profile would be
+guesswork. The `qemu` property names in the capability table are likewise unvalidated; most default
+to the device-tree token, and a wrong one fails at start-up rather than silently. Closing Q2 needs
+an emulator and a toolchain on the host.
 
 ---
 

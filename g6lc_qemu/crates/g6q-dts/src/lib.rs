@@ -26,9 +26,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod blob;
 pub mod facts;
 pub mod tree;
 
+pub use blob::{from_blob, to_blob, BlobError};
 pub use facts::{extract, DeviceFact, Facts};
 pub use tree::{parse, Node, Prop};
 

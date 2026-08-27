@@ -13,14 +13,20 @@
 //! microarchitectural parameters. Stating that precisely is what makes an early boot
 //! honest rather than misleading.
 //!
-//! # Stage
+//! # Modules
 //!
-//! Q0 implements the delta computation, which is the part with a correctness question in
-//! it. Q2 adds the argv builder and device-tree blob generation.
+//! * [`invoke`] — the argument vector, processor properties and profile checks
+//!
+//! The delta computation lives at the crate root because it is the part with the
+//! correctness question in it.
 //!
 //! [`architecture/EMIT.md`]: ../../../architecture/EMIT.md
 
 #![forbid(unsafe_code)]
+
+pub mod invoke;
+
+pub use invoke::{build_argv, check_profile, cpu_argument, BootOptions, Firmware, StockTarget};
 
 use g6q_core::model::{Profile, TargetModel};
 use g6q_core::Json;
