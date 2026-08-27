@@ -118,8 +118,8 @@ impl Csr {
         Self {
             hartid,
             mode: 3,
-            // RV64IMA with supervisor/user, plus Sstc/Svpbmt bits we will not emulate yet.
-            misa: (1u64 << 63) | (1 << 0) | (1 << 3) | (1 << 8) | (1 << 18) | (1 << 20),
+            // RV64IMA with supervisor/user (MXL=2 at bit 63, A=0, I=8, M=12, S=18, U=20).
+            misa: (2u64 << 62) | (1 << 0) | (1 << 8) | (1 << 12) | (1 << 18) | (1 << 20),
             mstatus: 3u64 << 11, // MPP = M
             mvendorid: 0,
             marchid: 0,
