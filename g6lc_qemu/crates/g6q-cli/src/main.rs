@@ -619,6 +619,18 @@ mod tests {
         assert_eq!(m.provenance.overrides[0].0, "HartsPerCore");
         assert!(!m.diagnosable());
     }
+
+    #[test]
+    fn native_run_rejects_run_without_image() {
+        let args = Args::parse(["run"]);
+        assert!(cmd_run(&args).is_err());
+    }
+
+    #[test]
+    fn tandem_rejects_missing_reference() {
+        let args = Args::parse(["tandem", "--under-test", "x"]);
+        assert!(cmd_tandem(&args).is_err());
+    }
 }
 
 /// `run --backend native` — a raw-image native VM execution.
