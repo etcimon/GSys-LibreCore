@@ -102,6 +102,13 @@ impl DeterministicClock {
         }
     }
 
+    /// Create a clock with a pre-existing retired-instruction count.
+    pub fn with_instret(instret_per_tick: u64, instret: u64) -> Self {
+        let mut c = Self::new(instret_per_tick);
+        c.retire(instret);
+        c
+    }
+
     /// Retire `n` instructions.
     pub fn retire(&mut self, n: u64) {
         self.instret = self.instret.saturating_add(n);
@@ -110,6 +117,11 @@ impl DeterministicClock {
     /// Total retired instructions.
     pub fn instret(&self) -> u64 {
         self.instret
+    }
+
+    /// Retirement ratio: one clock tick per this many retired instructions.
+    pub fn instret_per_tick(&self) -> u64 {
+        self.instret_per_tick
     }
 
     /// The current timer value.

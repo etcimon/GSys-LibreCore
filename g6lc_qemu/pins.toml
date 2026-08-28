@@ -28,7 +28,7 @@ python_min = "3.9"
 url      = "https://gitlab.com/qemu-project/qemu.git"
 ref      = "v10.0.0"           # emission target; bump deliberately
 plugin_api = 4                  # QEMU TCG plugin API version assumed by emitted plugins
-status   = "not-fetched"        # Q0: no emission implemented yet
+status   = "fetched"            # updated by `g6q fetch-qemu`; path is gitignored ./qemu
 
 # ---------------------------------------------------------------------- firmware ---
 [opensbi]
@@ -78,6 +78,18 @@ name = "Accelerator island MMIO / CTL / completion / IRQ"
 kind = "host-design"
 path = "corev_apu/ai_island/README.md + include/g6lc_ai_desc_pkg.sv"
 rev  = "unpinned"               # set when Q6 lands
+
+[contracts.ai_island_cap]
+name = "Accelerator island capability window (clusters, MACs/cycle, AccTile, NoC, DRAM, queues, QoS)"
+kind = "host-design"
+path = "corev_apu/include/g6lc_ai_island_cfg_pkg.sv"
+rev  = "read-at-runtime"        # ingested into TargetModel.soc.ai_island.config
+
+[contracts.ai_host_transport]
+name = "Host<->card transport for pushed accelerator work (BAR/virtio/doorbell roles)"
+kind = "host-design"
+path = "architecture/uncore/pcie-endpoint.md"
+rev  = "unpinned"               # NOT modelled yet; see architecture/AI_BRIDGE.md §6
 
 [contracts.dts_validation]
 name = "Device-tree node/property cross-validation rows"

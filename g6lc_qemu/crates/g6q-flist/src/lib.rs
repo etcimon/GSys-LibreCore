@@ -117,6 +117,17 @@ pub enum Presence {
     Unknown,
 }
 
+impl Presence {
+    /// Stable wire name used in JSON and reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Presence::Present => "present",
+            Presence::Absent => "absent",
+            Presence::Unknown => "unknown",
+        }
+    }
+}
+
 /// Whether a named unit is compiled, and on what evidence.
 ///
 /// This is the shape ingest hands to the conformance report: a boolean is not enough,

@@ -7,24 +7,35 @@
 //! produced as a `g6q_diag::CommitRecord` so that the same engine can serve B3 and D1
 //! from one path.
 
+use std::fmt::Write;
+
 use g6q_diag::CommitRecord;
 
-use crate::insn::{decode, Insn};
+use crate::insn::{decode_with_ai, Insn};
 use crate::mem::{MemError, PhysMem};
 use crate::regs::Fregs;
 use crate::regs::Regs;
 use crate::Clock;
 
 /// Why execution stopped.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(missing_docs)]
 pub enum Halt {
     /// Reached the requested instruction limit.
     StepLimit,
+    /// A replay diverged from the reference at the given record index.
+    ReplayDivergence(usize, Vec<g6q_diag::FieldDiff>),
+}
+
+/// Result of a floating-point operation, including the accrued `fflags` mask.
+#[derive(Debug, Clone, Copy)]
+struct FpResult<T: Copy> {
+    value: T,
+    flags: u64,
 }
 
 use crate::csr::Csr;
-use crate::mmu;
+use crate::mmu::{self, Mmu};
 
 /// The state of one hart and its progress.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -37,6 +48,8 @@ pub struct Hart {
     pub clock: Clock,
     /// Retired-instruction count.
     pub instret: u64,
+    /// Monotonic record counter, increments for every committed or trapped instruction.
+    pub record_order: u64,
     /// Records produced so far.
     pub records: Vec<CommitRecord>,
     /// Address reserved by the most recent `lr` on this hart.
@@ -47,6 +60,12 @@ pub struct Hart {
     pub csr: Csr,
     /// Length of the instruction currently being executed (2 or 4 bytes).
     pub inst_len: u8,
+    /// AI instruction set (match/mask values), when the model provides one.
+    pub ai_instr_set: Option<g6q_core::model::AiInstrSet>,
+    /// AI island model (config, descriptor layout, instruction set).
+    pub ai_model: Option<g6q_core::model::AiIslandModel>,
+    /// Model-derived MMU geometry; bare by default.
+    pub mmu: Mmu,
 }
 
 impl Hart {
@@ -62,8 +81,18 @@ impl Hart {
             fregs: Fregs::new(),
             csr: Csr::new(hartid),
             inst_len: 4,
+            ai_instr_set: None,
+            ai_model: None,
+            mmu: Mmu::default(),
             ..Self::default()
         }
+    }
+
+    /// Create a hart with the MMU geometry derived from a model ISA.
+    pub fn with_isa(pc: u64, isa: &g6q_core::model::Isa) -> Self {
+        let mut h = Self::new(pc);
+        h.mmu = Mmu::from_isa(isa);
+        h
     }
 
     /// Fetch, decode and execute one instruction.
@@ -195,7 +224,7 @@ impl Hart {
             return None;
         }
 
-        let insn = decode(w, xlen as u32);
+        let insn = decode_with_ai(w, xlen as u32, self.ai_instr_set.as_ref());
 
         // Capture architectural state before execution changes it.
         let pc_rdata = pc;
@@ -219,6 +248,9 @@ impl Hart {
             pc_rdata,
             pc_wdata,
             w,
+            false,
+            0,
+            false,
             rd_addr,
             self.regs.get(rd_addr),
             frd_addr,
@@ -265,8 +297,57 @@ impl Hart {
                 self.csr.mip &= !((1u64 << 11) | (1u64 << 9));
             }
         }
+        if let Some(a) = mem.ai_island() {
+            if a.irq_pending {
+                self.csr.mip |= 1u64 << 11;
+            }
+        }
 
         None
+    }
+
+    /// Run until a halt or `limit` steps, comparing each retired record against a
+    /// reference stream.  The first diverging record returns `Halt::ReplayDivergence`.
+    pub fn run_replay(
+        &mut self,
+        mem: &mut PhysMem,
+        xlen: u8,
+        limit: u64,
+        reference: &[g6q_diag::CommitRecord],
+    ) -> Halt {
+        for _ in 0..limit {
+            if let Some(h) = self.step(mem, xlen) {
+                return h;
+            }
+            let i = self.records.len() - 1;
+            if let Some(r) = reference.get(i) {
+                let d = self.records[i].diff(r);
+                if !d.is_empty() {
+                    return Halt::ReplayDivergence(i, d);
+                }
+            } else {
+                // Reference ended before we did: the replay is longer.
+                return Halt::ReplayDivergence(
+                    i,
+                    vec![g6q_diag::FieldDiff {
+                        field: "stream-length".into(),
+                        lhs: (i + 1).to_string(),
+                        rhs: reference.len().to_string(),
+                    }],
+                );
+            }
+        }
+        if self.records.len() != reference.len() {
+            return Halt::ReplayDivergence(
+                self.records.len(),
+                vec![g6q_diag::FieldDiff {
+                    field: "stream-length".into(),
+                    lhs: self.records.len().to_string(),
+                    rhs: reference.len().to_string(),
+                }],
+            );
+        }
+        Halt::StepLimit
     }
 
     /// Run until a halt or `limit` steps.
@@ -277,6 +358,81 @@ impl Hart {
             }
         }
         Halt::StepLimit
+    }
+
+    /// Capture the architectural state of this hart as a D1 checkpoint.
+    pub fn checkpoint(&self, mem: &PhysMem) -> g6q_diag::Checkpoint {
+        g6q_diag::Checkpoint {
+            record_order: self.record_order,
+            x: self.regs.to_array().to_vec(),
+            pc: self.regs.pc,
+            f: self.fregs.to_array().to_vec(),
+            fcsr: self.csr.fflags | (self.csr.frm << 5),
+            prv: self.csr.mode,
+            instret: self.instret,
+            reservation: self.reservation,
+            fault_addr: self.fault_addr,
+            csr: self
+                .csr
+                .to_pairs()
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            clock_instret: self.clock.instret(),
+            clock_instret_per_tick: self.clock.instret_per_tick(),
+            memory: mem
+                .snapshot()
+                .into_iter()
+                .map(|(base, len, data)| g6q_diag::MemRegion {
+                    base,
+                    len,
+                    data: data
+                        .iter()
+                        .fold(String::with_capacity(data.len() * 2), |mut s, b| {
+                            write!(s, "{b:02x}").unwrap();
+                            s
+                        }),
+                })
+                .collect(),
+            devices: mem.device_snapshots(),
+        }
+    }
+
+    /// Restore hart and memory state from a checkpoint.
+    pub fn restore(&mut self, mem: &mut PhysMem, cp: &g6q_diag::Checkpoint) {
+        assert_eq!(cp.x.len(), 32, "checkpoint x register count");
+        assert_eq!(cp.f.len(), 32, "checkpoint f register count");
+        let mut xarr = [0u64; 32];
+        xarr.copy_from_slice(&cp.x);
+        self.regs.from_array(&xarr);
+        self.regs.pc = cp.pc;
+        let mut farr = [0u64; 32];
+        farr.copy_from_slice(&cp.f);
+        self.fregs.from_array(&farr);
+        self.csr.from_pairs(&cp.csr);
+        self.csr.fflags = cp.fcsr & 0x1f;
+        self.csr.frm = (cp.fcsr >> 5) & 0x7;
+        self.csr.mode = cp.prv;
+        self.instret = cp.instret;
+        self.record_order = cp.record_order;
+        self.reservation = cp.reservation;
+        self.fault_addr = cp.fault_addr;
+        self.clock = crate::Clock::with_instret(cp.clock_instret_per_tick, cp.clock_instret);
+        let decoded: Vec<(u64, u64, Vec<u8>)> = cp
+            .memory
+            .iter()
+            .map(|r| {
+                let mut data = Vec::with_capacity(r.data.len() / 2);
+                for chunk in r.data.as_bytes().chunks(2) {
+                    let s = std::str::from_utf8(chunk).unwrap_or("00");
+                    data.push(u8::from_str_radix(s, 16).unwrap_or(0));
+                }
+                assert_eq!(data.len(), r.len as usize);
+                (r.base, r.len, data)
+            })
+            .collect();
+        mem.restore(&decoded);
+        mem.restore_devices(&cp.devices);
     }
 
     fn result_reg(&self, insn: &Insn) -> u8 {
@@ -1385,6 +1541,12 @@ impl Hart {
             | Insn::FmvWX { .. }
             | Insn::FmvDX { .. } => self.execute_fp(insn, nx, xlen, mem),
 
+            // AI-island queue instructions are handled outside the integer
+            // execution unit because they touch the shared `AiIsland` device.
+            Insn::AiEnq { rd, rs1 } => self.execute_ai_enq(rd, rs1, mem, nx),
+            Insn::AiPoll { rd, rs1 } => self.execute_ai_poll(rd, rs1, mem, nx),
+            Insn::AiQfence => self.execute_ai_qfence(mem, nx),
+
             Insn::Illegal(w) => {
                 self.fault_addr = w as u64;
                 self.take_trap(2);
@@ -1393,7 +1555,17 @@ impl Hart {
         }
     }
 
-    // F (single-precision floating-point) helpers and execution.
+    // F/D (single- and double-precision floating-point) helpers and execution.
+
+    const FFLAG_NX: u64 = 1 << 0;
+    const FFLAG_UF: u64 = 1 << 1;
+    const FFLAG_OF: u64 = 1 << 2;
+    const FFLAG_DZ: u64 = 1 << 3;
+    const FFLAG_NV: u64 = 1 << 4;
+
+    /// Canonical floating-point quiet-NaN bit patterns.
+    const F32_CANONICAL_NAN: u32 = 0x7fc0_0000;
+    const F64_CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
 
     fn fp_rm(&self, rm: u8) -> u8 {
         if rm == 0x7 {
@@ -1411,10 +1583,15 @@ impl Hart {
         self.fregs.set_s(i, bits);
     }
 
-    /// Store an f32 result, canonicalizing a produced NaN.
-    fn f32_set_arith(&mut self, i: u8, v: f32) {
-        let bits = if v.is_nan() { 0x7fc0_0000 } else { v.to_bits() };
+    /// Store an f32 arithmetic/conversion result (raw bits + flags), canonicalizing a produced NaN.
+    fn f32_set_arith_bits(&mut self, i: u8, res: FpResult<u32>) {
+        let bits = if f32::from_bits(res.value).is_nan() {
+            Self::F32_CANONICAL_NAN
+        } else {
+            res.value
+        };
         self.fregs.set_s(i, bits);
+        self.csr.fflags |= res.flags & 0x1f;
     }
 
     fn set_fflag(&mut self, flag: u64) {
@@ -1425,27 +1602,12 @@ impl Hart {
         (v as i32) as i64 as u64
     }
 
-    fn round_ties_even_f32(v: f32) -> f32 {
-        let r = v.round();
-        if (r - v).abs() == 0.5 {
-            let r_int = r as i64;
-            if r_int % 2 != 0 {
-                if v > 0.0 {
-                    r - 1.0
-                } else {
-                    r + 1.0
-                }
-            } else {
-                r
-            }
-        } else {
-            r
-        }
-    }
-
-    fn f32_minmax(a: f32, b: f32, max: bool) -> f32 {
-        if a.is_nan() && b.is_nan() {
-            f32::from_bits(0x7fc0_0000)
+    fn f32_minmax(a: f32, b: f32, max: bool) -> (f32, bool) {
+        let a_snan = a.is_nan() && Self::f32_is_snan(a.to_bits());
+        let b_snan = b.is_nan() && Self::f32_is_snan(b.to_bits());
+        let nv = a_snan || b_snan;
+        let r = if a.is_nan() && b.is_nan() {
+            f32::from_bits(Self::F32_CANONICAL_NAN)
         } else if a.is_nan() {
             b
         } else if b.is_nan() {
@@ -1472,79 +1634,8 @@ impl Hart {
             a
         } else {
             b
-        }
-    }
-
-    fn f32_to_i64(&mut self, v: f32, rm: u8, width: u8, unsign: bool) -> u64 {
-        // Clamp and convert. The spec saturates out-of-range/NaN values and
-        // sets the invalid flag. Inexact results set the NX flag.
-        let limit_bits = if unsign { width } else { width - 1 };
-        let max: i128 = (1i128 << limit_bits) - 1;
-        let min: i128 = if unsign { 0 } else { -(1i128 << (width - 1)) };
-
-        if v.is_nan() {
-            self.set_fflag(0x10); // NV
-            max as u64
-        } else if v.is_infinite() {
-            self.set_fflag(0x10); // NV
-            if v.is_sign_negative() {
-                if unsign {
-                    0
-                } else {
-                    min as u64
-                }
-            } else {
-                max as u64
-            }
-        } else {
-            let rounded = match rm {
-                0x0 => Self::round_ties_even_f32(v), // RNE
-                0x1 => v.trunc(),                    // RTZ
-                0x2 => v.floor(),                    // RDN
-                0x3 => v.ceil(),                     // RUP
-                0x4 => v.round(),                    // RMM
-                _ => v.trunc(),                      // reserved, treat as RTZ
-            };
-            let r = rounded as i128;
-            if r > max {
-                self.set_fflag(0x10); // NV
-                max as u64
-            } else if r < min {
-                self.set_fflag(0x10); // NV
-                min as u64
-            } else {
-                if (rounded as f64) != (v as f64) {
-                    self.set_fflag(0x01); // NX
-                }
-                if r < 0 && unsign {
-                    0
-                } else {
-                    r as u64
-                }
-            }
-        }
-    }
-
-    fn i64_to_f32(&mut self, v: u64, _rm: u8, unsign: bool, xlen: u8, width: u8) -> f32 {
-        let source = if width == 32 {
-            if unsign {
-                (v as u32) as i128
-            } else {
-                (v as u32) as i32 as i128
-            }
-        } else if unsign {
-            v as i128
-        } else if xlen == 32 {
-            (v as i32) as i128
-        } else {
-            (v as i64) as i128
         };
-        let result = source as f32;
-        // Detect inexact: round-trip differs or value lost precision.
-        if (result as i128) != source {
-            self.set_fflag(0x01); // NX
-        }
-        result
+        (r, nv)
     }
 
     fn fclass_s(v: f32) -> u64 {
@@ -1593,17 +1684,15 @@ impl Hart {
         self.fregs.set_d(i, bits);
     }
 
-    /// Canonical double quiet NaN bit pattern.
-    const F64_CANONICAL_NAN: u64 = 0x7ff8_0000_0000_0000;
-
-    /// Store an f64 result, canonicalizing a produced NaN.
-    fn f64_set_arith(&mut self, i: u8, v: f64) {
-        let bits = if v.is_nan() {
+    /// Store an f64 arithmetic/conversion result (raw bits + flags), canonicalizing a produced NaN.
+    fn f64_set_arith_bits(&mut self, i: u8, res: FpResult<u64>) {
+        let bits = if f64::from_bits(res.value).is_nan() {
             Self::F64_CANONICAL_NAN
         } else {
-            v.to_bits()
+            res.value
         };
         self.fregs.set_d(i, bits);
+        self.csr.fflags |= res.flags & 0x1f;
     }
 
     fn round_ties_even_f64(v: f64) -> f64 {
@@ -1624,8 +1713,11 @@ impl Hart {
         }
     }
 
-    fn f64_minmax(a: f64, b: f64, max: bool) -> f64 {
-        if a.is_nan() && b.is_nan() {
+    fn f64_minmax(a: f64, b: f64, max: bool) -> (f64, bool) {
+        let a_snan = a.is_nan() && Self::f64_is_snan(a.to_bits());
+        let b_snan = b.is_nan() && Self::f64_is_snan(b.to_bits());
+        let nv = a_snan || b_snan;
+        let r = if a.is_nan() && b.is_nan() {
             f64::from_bits(Self::F64_CANONICAL_NAN)
         } else if a.is_nan() {
             b
@@ -1653,79 +1745,8 @@ impl Hart {
             a
         } else {
             b
-        }
-    }
-
-    fn f64_to_i64(&mut self, v: f64, rm: u8, width: u8, unsign: bool) -> u64 {
-        // Clamp and convert. The spec saturates out-of-range/NaN values and
-        // sets the invalid flag. Inexact results set the NX flag.
-        let limit_bits = if unsign { width } else { width - 1 };
-        let max: i128 = (1i128 << limit_bits) - 1;
-        let min: i128 = if unsign { 0 } else { -(1i128 << (width - 1)) };
-
-        if v.is_nan() {
-            self.set_fflag(0x10); // NV
-            max as u64
-        } else if v.is_infinite() {
-            self.set_fflag(0x10); // NV
-            if v.is_sign_negative() {
-                if unsign {
-                    0
-                } else {
-                    min as u64
-                }
-            } else {
-                max as u64
-            }
-        } else {
-            let rounded = match rm {
-                0x0 => Self::round_ties_even_f64(v), // RNE
-                0x1 => v.trunc(),                    // RTZ
-                0x2 => v.floor(),                    // RDN
-                0x3 => v.ceil(),                     // RUP
-                0x4 => v.round(),                    // RMM
-                _ => v.trunc(),                      // reserved, treat as RTZ
-            };
-            let r = rounded as i128;
-            if r > max {
-                self.set_fflag(0x10); // NV
-                max as u64
-            } else if r < min {
-                self.set_fflag(0x10); // NV
-                min as u64
-            } else {
-                if rounded != v {
-                    self.set_fflag(0x01); // NX
-                }
-                if r < 0 && unsign {
-                    0
-                } else {
-                    r as u64
-                }
-            }
-        }
-    }
-
-    fn i64_to_f64(&mut self, v: u64, _rm: u8, unsign: bool, xlen: u8, width: u8) -> f64 {
-        let source = if width == 32 {
-            if unsign {
-                (v as u32) as i128
-            } else {
-                (v as u32) as i32 as i128
-            }
-        } else if unsign {
-            v as i128
-        } else if xlen == 32 {
-            (v as i32) as i128
-        } else {
-            (v as i64) as i128
         };
-        let result = source as f64;
-        // Detect inexact: round-trip differs or value lost precision.
-        if (result as i128) != source {
-            self.set_fflag(0x01); // NX
-        }
-        result
+        (r, nv)
     }
 
     fn fclass_d(v: f64) -> u64 {
@@ -1764,6 +1785,1058 @@ impl Hart {
         }
     }
 
+    // FP helpers for conversions, canonicalisation and rounding-mode handling.
+
+    /// True if the raw f32 bits are a signaling NaN.
+    fn f32_is_snan(bits: u32) -> bool {
+        (bits & 0x7f80_0000) == 0x7f80_0000 && bits != 0x7f80_0000 && (bits & 0x0040_0000) == 0
+    }
+
+    /// True if the raw f64 bits are a signaling NaN.
+    fn f64_is_snan(bits: u64) -> bool {
+        (bits & 0x7ff0_0000_0000_0000) == 0x7ff0_0000_0000_0000
+            && bits != 0x7ff0_0000_0000_0000
+            && (bits & 0x0008_0000_0000_0000) == 0
+    }
+
+    /// The next larger f32 (toward +inf) — `f32::next_up` is only stable in 1.86+.
+    fn f32_next_up(v: f32) -> f32 {
+        let bits = v.to_bits();
+        if v.is_nan() || bits == f32::NEG_INFINITY.to_bits() {
+            return v;
+        }
+        let abs = bits & 0x7fff_ffff;
+        let next = if abs == 0 {
+            0x0000_0001 // smallest positive subnormal
+        } else if bits == abs {
+            bits + 1
+        } else {
+            bits - 1
+        };
+        f32::from_bits(next)
+    }
+
+    /// The next smaller f32 (toward -inf).
+    fn f32_next_down(v: f32) -> f32 {
+        let bits = v.to_bits();
+        if v.is_nan() || bits == f32::INFINITY.to_bits() {
+            return v;
+        }
+        let abs = bits & 0x7fff_ffff;
+        let next = if abs == 0 {
+            0x8000_0001 // smallest negative subnormal
+        } else if bits == abs {
+            bits - 1
+        } else {
+            bits + 1
+        };
+        f32::from_bits(next)
+    }
+
+    /// The next larger f64 (toward +inf).
+    fn f64_next_up(v: f64) -> f64 {
+        let bits = v.to_bits();
+        if v.is_nan() || bits == f64::NEG_INFINITY.to_bits() {
+            return v;
+        }
+        let abs = bits & 0x7fff_ffff_ffff_ffff;
+        let next = if abs == 0 {
+            0x0000_0000_0000_0001
+        } else if bits == abs {
+            bits + 1
+        } else {
+            bits - 1
+        };
+        f64::from_bits(next)
+    }
+
+    /// The next smaller f64 (toward -inf).
+    fn f64_next_down(v: f64) -> f64 {
+        let bits = v.to_bits();
+        if v.is_nan() || bits == f64::INFINITY.to_bits() {
+            return v;
+        }
+        let abs = bits & 0x7fff_ffff_ffff_ffff;
+        let next = if abs == 0 {
+            0x8000_0000_0000_0001
+        } else if bits == abs {
+            bits - 1
+        } else {
+            bits + 1
+        };
+        f64::from_bits(next)
+    }
+
+    /// Convert an f64 value to f32 bits with the requested rounding mode and exception flags.
+    ///
+    /// If `allow_infinite` is true, an `v` that is already ±inf is treated as a source value and
+    /// does not raise OF.  If false, a produced ±inf means overflow and OF+NX is raised.
+    fn round_f64_to_f32(v: f64, rm: u8, allow_infinite: bool) -> FpResult<u32> {
+        if v.is_nan() {
+            let bits = v.to_bits();
+            let nv = if Self::f64_is_snan(bits) {
+                Self::FFLAG_NV
+            } else {
+                0
+            };
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: nv,
+            };
+        }
+        if v.is_infinite() {
+            let inf = if v.is_sign_negative() {
+                f32::NEG_INFINITY
+            } else {
+                f32::INFINITY
+            };
+            return FpResult {
+                value: inf.to_bits(),
+                flags: if allow_infinite {
+                    0
+                } else {
+                    Self::FFLAG_OF | Self::FFLAG_NX
+                },
+            };
+        }
+
+        let sign_neg = v.is_sign_negative();
+        let max_f = f32::MAX as f64;
+
+        if v.abs() > max_f {
+            let r = v as f32;
+            let inf_bits = if sign_neg {
+                f32::NEG_INFINITY.to_bits()
+            } else {
+                f32::INFINITY.to_bits()
+            };
+            let max_bits = if sign_neg {
+                (-f32::MAX).to_bits()
+            } else {
+                f32::MAX.to_bits()
+            };
+            let bits = match rm {
+                0x0 | 0x4 => r.to_bits(), // RNE / RMM: nearest (Rust cast is RNE; ties match RMM here)
+                0x1 | 0x2 if !sign_neg => max_bits, // RTZ / RDN for positive
+                0x1 | 0x3 if sign_neg => max_bits, // RTZ / RUP for negative
+                0x3 if !sign_neg => inf_bits, // RUP for positive
+                0x2 if sign_neg => inf_bits, // RDN for negative
+                _ => r.to_bits(),
+            };
+            return FpResult {
+                value: bits,
+                flags: Self::FFLAG_OF | Self::FFLAG_NX,
+            };
+        }
+
+        let r = v as f32;
+        if f64::from(r) == v {
+            return FpResult {
+                value: r.to_bits(),
+                flags: 0,
+            };
+        }
+
+        let lower = if f64::from(r) < v {
+            r
+        } else {
+            Self::f32_next_down(r)
+        };
+        let upper = if f64::from(r) < v {
+            Self::f32_next_up(r)
+        } else {
+            r
+        };
+
+        let result = match rm {
+            0x0 => r, // RNE: Rust cast already gives nearest-even
+            0x1 => {
+                // RTZ: toward zero (smaller magnitude)
+                if v >= 0.0 {
+                    lower
+                } else {
+                    upper
+                }
+            }
+            0x2 => lower,                          // RDN: toward -inf
+            0x3 => upper,                          // RUP: toward +inf
+            0x4 => Self::f32_rmm(v, lower, upper), // RMM
+            _ => r,                                // reserved
+        };
+
+        let mut flags = 0;
+        let result_f = f64::from(result);
+        if result_f != v {
+            flags |= Self::FFLAG_NX;
+        }
+        if (result == 0.0 && v != 0.0) || result.is_subnormal() {
+            flags |= Self::FFLAG_UF;
+        }
+        FpResult {
+            value: result.to_bits(),
+            flags,
+        }
+    }
+
+    /// RMM (round to nearest, ties away from zero) between two bracketing f32 values.
+    fn f32_rmm(v: f64, lower: f32, upper: f32) -> f32 {
+        let lower_f = f64::from(lower);
+        let upper_f = f64::from(upper);
+        let d_low = v - lower_f;
+        let d_high = upper_f - v;
+        if d_low < d_high {
+            lower
+        } else if d_high < d_low {
+            upper
+        } else {
+            // Tie: away from zero.
+            if v > 0.0 {
+                upper
+            } else {
+                lower
+            }
+        }
+    }
+
+    /// Convert a signed/unsigned integer to f32 bits, honouring the rounding mode.
+    fn int_to_f32(source: i128, rm: u8) -> FpResult<u32> {
+        if source == 0 {
+            return FpResult {
+                value: 0x0000_0000,
+                flags: 0,
+            };
+        }
+        let v = source as f64;
+        // For |source| > f64::MAX, the `as f64` saturates to ±inf and we must
+        // still produce an overflowed f32. Saturated to inf also raises OF/NX.
+        if v.is_infinite() {
+            let sign_neg = source < 0;
+            let bits = match rm {
+                0x1 | 0x2 if !sign_neg => f32::MAX.to_bits(),
+                0x1 | 0x3 if sign_neg => (-f32::MAX).to_bits(),
+                0x3 if !sign_neg => f32::INFINITY.to_bits(),
+                0x2 if sign_neg => f32::NEG_INFINITY.to_bits(),
+                _ if !sign_neg => f32::INFINITY.to_bits(),
+                _ => f32::NEG_INFINITY.to_bits(),
+            };
+            return FpResult {
+                value: bits,
+                flags: Self::FFLAG_OF | Self::FFLAG_NX,
+            };
+        }
+        let mut r = Self::round_f64_to_f32(v, rm, false);
+        if r.flags & Self::FFLAG_OF != 0 {
+            return r;
+        }
+        // If the rounded f32 value does not recover the original integer, the
+        // conversion was inexact (already marked NX by round_f64_to_f32).  If it
+        // does recover it but source > f32::MAX, we would have overflowed above.
+        let back = f64::from(f32::from_bits(r.value)) as i128;
+        if back != source && r.flags == 0 {
+            r.flags |= Self::FFLAG_NX;
+        }
+        r
+    }
+
+    /// Convert a signed/unsigned integer to f64 bits, honouring the rounding mode.
+    fn int_to_f64(source: i128, rm: u8) -> FpResult<u64> {
+        if source == 0 {
+            return FpResult {
+                value: 0x0000_0000_0000_0000,
+                flags: 0,
+            };
+        }
+        // f64 can represent all 64-bit signed/unsigned integers exactly when they
+        // are within its precision (up to 2^53).  Beyond that we must round.
+        let v = source as f64;
+        if v.is_infinite() {
+            // source did not fit in f64 at all; rounded to ±inf.
+            let sign_neg = source < 0;
+            let bits = match rm {
+                0x1 | 0x2 if !sign_neg => f64::MAX.to_bits(),
+                0x1 | 0x3 if sign_neg => (-f64::MAX).to_bits(),
+                0x3 if !sign_neg => f64::INFINITY.to_bits(),
+                0x2 if sign_neg => f64::NEG_INFINITY.to_bits(),
+                _ if !sign_neg => f64::INFINITY.to_bits(),
+                _ => f64::NEG_INFINITY.to_bits(),
+            };
+            return FpResult {
+                value: bits,
+                flags: Self::FFLAG_OF | Self::FFLAG_NX,
+            };
+        }
+        let result = Self::f64_round_directed(v, v, rm);
+        let mut flags = 0;
+        if (result as i128) != source {
+            flags |= Self::FFLAG_NX;
+            // Detect overflow: the rounded f64 is too large for the original integer
+            // magnitude and the conversion is inexact.  Mark OF too.
+            if source.unsigned_abs() > f64::MAX as u128 {
+                flags |= Self::FFLAG_OF;
+            }
+        }
+        FpResult {
+            value: result.to_bits(),
+            flags,
+        }
+    }
+
+    /// Error-free transformation of the sum of two f64 values.
+    /// Returns `(s, e)` such that `a + b = s + e` exactly for finite `s`.
+    fn two_sum(a: f64, b: f64) -> (f64, f64) {
+        let s = a + b;
+        let v = s - b;
+        let w = s - v;
+        let da = a - v;
+        let db = b - w;
+        (s, da + db)
+    }
+
+    /// Split a f64 value into a high and low part for exact multiplication.
+    fn split(a: f64) -> (f64, f64) {
+        let c = (1u64 << 27) as f64 + 1.0;
+        let t = c * a;
+        let x = t - a;
+        let hi = t - x;
+        let lo = a - hi;
+        (hi, lo)
+    }
+
+    /// Error-free transformation of the product of two f64 values.
+    /// Returns `(p, e)` such that `a * b = p + e` exactly for non-overflowing products
+    /// in the normal range.  Large operands or subnormal results may produce a non-exact
+    /// `e`; callers must guard against those cases.
+    fn two_prod(a: f64, b: f64) -> (f64, f64) {
+        let p = a * b;
+        let (a_hi, a_lo) = Self::split(a);
+        let (b_hi, b_lo) = Self::split(b);
+        let err = ((a_hi * b_hi - p) + a_hi * b_lo + a_lo * b_hi) + a_lo * b_lo;
+        (p, err)
+    }
+
+    /// Round an exact value represented as `hi + lo` (two f64s) to a single f64 using `rm`.
+    /// `hi` is the rounded-to-nearest result and `lo` is the exact error (|lo| <= 0.5 ulp).
+    fn f64_round_two(hi: f64, lo: f64, rm: u8) -> FpResult<u64> {
+        if lo == 0.0 || (rm == 0x0 || rm > 0x4) {
+            // RNE, or the exact result is exactly representable as hi.
+            return FpResult {
+                value: hi.to_bits(),
+                flags: if lo == 0.0 { 0 } else { Self::FFLAG_NX },
+            };
+        }
+
+        let (lower, upper) = if lo > 0.0 {
+            (hi, Self::f64_next_up(hi))
+        } else {
+            (Self::f64_next_down(hi), hi)
+        };
+        let ulp = upper - lower; // always positive
+        let tie = 2.0 * lo.abs() == ulp;
+
+        let result = match rm {
+            0x1 => {
+                // RTZ: toward zero -- the candidate with smaller magnitude.
+                if hi.is_sign_positive() {
+                    lower
+                } else {
+                    upper
+                }
+            }
+            0x2 => lower, // RDN: toward -inf -- the smaller value.
+            0x3 => upper, // RUP: toward +inf -- the larger value.
+            0x4 => {
+                // RMM: round to nearest, ties away from zero.
+                if tie {
+                    if hi.is_sign_positive() {
+                        upper
+                    } else {
+                        lower
+                    }
+                } else {
+                    hi
+                }
+            }
+            _ => hi,
+        };
+
+        let mut flags = Self::FFLAG_NX;
+        if result == 0.0 || result.is_subnormal() {
+            flags |= Self::FFLAG_UF;
+        }
+        FpResult {
+            value: result.to_bits(),
+            flags,
+        }
+    }
+
+    /// Apply a directed rounding mode to an already rounded-to-nearest f64 value.
+    /// Used for f64 conversions where the source is an exact real (or an f64).
+    fn f64_round_directed(v: f64, r: f64, rm: u8) -> f64 {
+        if r == v || rm == 0x0 || rm > 0x4 {
+            return r;
+        }
+        let lower = if r < v { r } else { Self::f64_next_down(r) };
+        let upper = if r < v { Self::f64_next_up(r) } else { r };
+        match rm {
+            0x1 => {
+                // RTZ: toward zero
+                if v >= 0.0 {
+                    lower
+                } else {
+                    upper
+                }
+            }
+            0x2 => lower,
+            0x3 => upper,
+            0x4 => Self::f64_rmm(v, lower, upper),
+            _ => r,
+        }
+    }
+
+    fn f64_rmm(v: f64, lower: f64, upper: f64) -> f64 {
+        let d_low = v - lower;
+        let d_high = upper - v;
+        let tie = d_low == d_high;
+        if d_low < d_high || (tie && v < 0.0) {
+            lower
+        } else {
+            upper
+        }
+    }
+
+    /// Convert an f32 value to a signed/unsigned integer of `width` bits.
+    fn f32_to_int(v: f64, rm: u8, width: u8, unsign: bool) -> FpResult<u64> {
+        if v.is_nan() {
+            let limit_bits = if unsign { width } else { width - 1 };
+            return FpResult {
+                value: (1u128 << limit_bits).saturating_sub(1) as u64,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        if v.is_infinite() {
+            let (max, min) = Self::int_limits(width, unsign);
+            let value = if v.is_sign_negative() {
+                if unsign {
+                    0
+                } else {
+                    min
+                }
+            } else {
+                max
+            };
+            return FpResult {
+                value: value as u64,
+                flags: Self::FFLAG_NV,
+            };
+        }
+
+        let rounded = Self::f64_round_to_int(v, rm);
+        let (max, min) = Self::int_limits(width, unsign);
+        if rounded > max as f64 {
+            FpResult {
+                value: max as u64,
+                flags: Self::FFLAG_NV,
+            }
+        } else if rounded < min as f64 {
+            FpResult {
+                value: min as u64,
+                flags: Self::FFLAG_NV,
+            }
+        } else {
+            let r = rounded as i128;
+            let value = if r < 0 && unsign { 0 } else { r as u64 };
+            let mut flags = 0;
+            if rounded != v {
+                flags |= Self::FFLAG_NX;
+            }
+            FpResult { value, flags }
+        }
+    }
+
+    /// Convert an f64 value to a signed/unsigned integer of `width` bits.
+    fn f64_to_int(v: f64, rm: u8, width: u8, unsign: bool) -> FpResult<u64> {
+        if v.is_nan() {
+            let limit_bits = if unsign { width } else { width - 1 };
+            return FpResult {
+                value: (1u128 << limit_bits).saturating_sub(1) as u64,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        if v.is_infinite() {
+            let (max, min) = Self::int_limits(width, unsign);
+            let value = if v.is_sign_negative() {
+                if unsign {
+                    0
+                } else {
+                    min
+                }
+            } else {
+                max
+            };
+            return FpResult {
+                value: value as u64,
+                flags: Self::FFLAG_NV,
+            };
+        }
+
+        let rounded = Self::f64_round_to_int(v, rm);
+        let (max, min) = Self::int_limits(width, unsign);
+        if rounded > max as f64 {
+            FpResult {
+                value: max as u64,
+                flags: Self::FFLAG_NV,
+            }
+        } else if rounded < min as f64 {
+            FpResult {
+                value: min as u64,
+                flags: Self::FFLAG_NV,
+            }
+        } else {
+            let r = rounded as i128;
+            let value = if r < 0 && unsign { 0 } else { r as u64 };
+            let mut flags = 0;
+            if rounded != v {
+                flags |= Self::FFLAG_NX;
+            }
+            FpResult { value, flags }
+        }
+    }
+
+    /// Produce the correctly rounded overflow result for f64 arithmetic.
+    fn f64_overflow(sign_neg: bool, rm: u8) -> FpResult<u64> {
+        let to_inf = match rm {
+            0x0 | 0x4 => true, // RNE / RMM -> infinity
+            0x1 => false,      // RTZ -> max finite
+            0x2 => sign_neg,   // RDN -> infinity if negative, max finite if positive
+            0x3 => !sign_neg,  // RUP -> infinity if positive, max finite if negative
+            _ => true,
+        };
+        let value = if to_inf {
+            if sign_neg {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            }
+        } else if sign_neg {
+            -f64::MAX
+        } else {
+            f64::MAX
+        };
+        FpResult {
+            value: value.to_bits(),
+            flags: Self::FFLAG_OF | Self::FFLAG_NX,
+        }
+    }
+
+    /// Round a finite f64 to an integer using the requested rounding mode.
+    fn f64_round_to_int(v: f64, rm: u8) -> f64 {
+        match rm {
+            0x0 => Self::round_ties_even_f64(v), // RNE
+            0x1 => v.trunc(),                    // RTZ
+            0x2 => v.floor(),                    // RDN
+            0x3 => v.ceil(),                     // RUP
+            0x4 => v.round(),                    // RMM
+            _ => v.trunc(),                      // reserved
+        }
+    }
+
+    /// Signed/unsigned limits for an integer of `width` bits.
+    fn int_limits(width: u8, unsign: bool) -> (i128, i128) {
+        let max = (1i128 << (if unsign { width } else { width - 1 })) - 1;
+        let min = if unsign { 0 } else { -(1i128 << (width - 1)) };
+        (max, min)
+    }
+
+    /// Extract the integer value represented in an X register, with the requested width/sign.
+    fn int_source(v: u64, xlen: u8, width: u8, unsign: bool) -> i128 {
+        if width == 32 {
+            if unsign {
+                (v as u32) as i128
+            } else {
+                (v as u32) as i32 as i128
+            }
+        } else if unsign {
+            v as i128
+        } else if xlen == 32 {
+            (v as i32) as i128
+        } else {
+            (v as i64) as i128
+        }
+    }
+
+    /// Widen f32 to f64. Widening is exact except for NaN canonicalisation.
+    fn round_f32_to_f64(v: f32) -> FpResult<u64> {
+        if v.is_nan() {
+            let nv = if Self::f32_is_snan(v.to_bits()) {
+                Self::FFLAG_NV
+            } else {
+                0
+            };
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: nv,
+            };
+        }
+        FpResult {
+            value: f64::from(v).to_bits(),
+            flags: 0,
+        }
+    }
+
+    // FP arithmetic helpers for f32 (computed in f64 and rounded to f32) and f64 (host).
+
+    /// Canonicalise a NaN-producing f32 arithmetic/conversion and record NV if any source was
+    /// signaling.  `a` and `b` are the raw source f32 values (or 0 for unary ops).
+    fn f32_nan_result(a: f32, b: f32) -> FpResult<u32> {
+        let a_snan = a.is_nan() && Self::f32_is_snan(a.to_bits());
+        let b_snan = b.is_nan() && b != 0.0 && Self::f32_is_snan(b.to_bits());
+        FpResult {
+            value: Self::F32_CANONICAL_NAN,
+            flags: if a_snan || b_snan { Self::FFLAG_NV } else { 0 },
+        }
+    }
+
+    /// Canonicalise a NaN-producing f64 arithmetic/conversion and record NV if any source was
+    /// signaling.
+    fn f64_nan_result(a: f64, b: f64) -> FpResult<u64> {
+        let a_snan = a.is_nan() && Self::f64_is_snan(a.to_bits());
+        let b_snan = b.is_nan() && b != 0.0 && Self::f64_is_snan(b.to_bits());
+        FpResult {
+            value: Self::F64_CANONICAL_NAN,
+            flags: if a_snan || b_snan { Self::FFLAG_NV } else { 0 },
+        }
+    }
+
+    /// Compute `a + b` for f32, rounding to `rm`.
+    fn f32_add(a: f32, b: f32, rm: u8) -> FpResult<u32> {
+        if a.is_nan() || b.is_nan() {
+            return Self::f32_nan_result(a, b);
+        }
+        if a.is_infinite() && b.is_infinite() && (a.is_sign_negative() != b.is_sign_negative()) {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let ai = f64::from(a);
+        let bi = f64::from(b);
+        let exact = ai + bi;
+        if exact.is_nan() {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        Self::round_f64_to_f32(exact, rm, a.is_infinite() || b.is_infinite())
+    }
+
+    /// Compute `a - b` for f32, rounding to `rm`.
+    fn f32_sub(a: f32, b: f32, rm: u8) -> FpResult<u32> {
+        if a.is_nan() || b.is_nan() {
+            return Self::f32_nan_result(a, b);
+        }
+        if a.is_infinite() && b.is_infinite() && (a.is_sign_negative() == b.is_sign_negative()) {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let ai = f64::from(a);
+        let bi = f64::from(b);
+        let exact = ai - bi;
+        if exact.is_nan() {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        Self::round_f64_to_f32(exact, rm, a.is_infinite() || b.is_infinite())
+    }
+
+    /// Compute `a * b` for f32, rounding to `rm`.
+    fn f32_mul(a: f32, b: f32, rm: u8) -> FpResult<u32> {
+        if a.is_nan() || b.is_nan() {
+            return Self::f32_nan_result(a, b);
+        }
+        if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let ai = f64::from(a);
+        let bi = f64::from(b);
+        let exact = ai * bi;
+        if exact.is_nan() {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        Self::round_f64_to_f32(exact, rm, a.is_infinite() || b.is_infinite())
+    }
+
+    /// Compute `a / b` for f32, rounding to `rm`.
+    fn f32_div(a: f32, b: f32, rm: u8) -> FpResult<u32> {
+        if a.is_nan() || b.is_nan() {
+            return Self::f32_nan_result(a, b);
+        }
+        if a == 0.0 && b == 0.0 {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        if a.is_infinite() && b.is_infinite() {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let mut flags = 0;
+        if b == 0.0 {
+            flags |= Self::FFLAG_DZ;
+        }
+        let ai = f64::from(a);
+        let bi = f64::from(b);
+        let exact = ai / bi;
+        if exact.is_nan() {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let mut res = Self::round_f64_to_f32(exact, rm, a.is_infinite() || b.is_infinite());
+        res.flags |= flags;
+        res
+    }
+
+    /// Compute `sqrt(a)` for f32, rounding to `rm`.
+    fn f32_sqrt(a: f32, rm: u8) -> FpResult<u32> {
+        if a.is_nan() {
+            return Self::f32_nan_result(a, 0.0);
+        }
+        if a < 0.0 && a != -0.0 {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        if a.is_infinite() && a.is_sign_negative() {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let exact = f64::from(a).sqrt();
+        if exact.is_nan() {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        Self::round_f64_to_f32(exact, rm, a.is_infinite())
+    }
+
+    /// Compute a fused multiply-add variant for f32: `prod = a*b`, then `prod +/- c`.
+    ///
+    /// The full multiply-add is performed in f64 with one `mul_add` rounding, then
+    /// rounded to f32, so the final f32 rounding is the only rounding that matters.
+    /// `neg_p` negates the product; `neg_s` negates the summand.
+    fn f32_fma(a: f32, b: f32, c: f32, rm: u8, neg_p: bool, neg_s: bool) -> FpResult<u32> {
+        if a.is_nan() || b.is_nan() || c.is_nan() {
+            let mut r = Self::f32_nan_result(a, b);
+            if c.is_nan() && Self::f32_is_snan(c.to_bits()) {
+                r.flags |= Self::FFLAG_NV;
+            }
+            return r;
+        }
+        if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let mut ai = f64::from(a);
+        let bi = f64::from(b);
+        let mut ci = f64::from(c);
+        if neg_p {
+            ai = -ai;
+        }
+        if neg_s {
+            ci = -ci;
+        }
+        let exact = ai.mul_add(bi, ci);
+        if exact.is_nan() {
+            // NaN here means inf + (-inf) or vice versa, which is invalid.
+            return FpResult {
+                value: Self::F32_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let input_inf = a.is_infinite() || b.is_infinite() || c.is_infinite();
+        Self::round_f64_to_f32(exact, rm, input_inf)
+    }
+
+    /// Compute `a + b` for f64, honouring the dynamic rounding mode and setting NX/OF/UF.
+    fn f64_add(a: f64, b: f64, rm: u8) -> FpResult<u64> {
+        if a.is_nan() || b.is_nan() {
+            return Self::f64_nan_result(a, b);
+        }
+        if a.is_infinite() && b.is_infinite() && (a.is_sign_negative() != b.is_sign_negative()) {
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        if a.is_infinite() || b.is_infinite() {
+            let r = a + b;
+            return FpResult {
+                value: r.to_bits(),
+                flags: 0,
+            };
+        }
+
+        let s = a + b;
+        if s.is_infinite() {
+            return Self::f64_overflow(s.is_sign_negative(), rm);
+        }
+
+        let (hi, lo) = Self::two_sum(a, b);
+        if lo.is_nan() {
+            // two_sum is only expected to fail when s overflowed, which is handled above.
+            return Self::f64_arith_finish(s, false, false);
+        }
+        Self::f64_round_two(hi, lo, rm)
+    }
+
+    /// Compute `a - b` for f64, honouring the dynamic rounding mode and setting NX/OF/UF.
+    fn f64_sub(a: f64, b: f64, rm: u8) -> FpResult<u64> {
+        if a.is_nan() || b.is_nan() {
+            return Self::f64_nan_result(a, b);
+        }
+        if a.is_infinite() && b.is_infinite() && (a.is_sign_negative() == b.is_sign_negative()) {
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        if a.is_infinite() || b.is_infinite() {
+            let r = a - b;
+            return FpResult {
+                value: r.to_bits(),
+                flags: 0,
+            };
+        }
+
+        let s = a - b;
+        if s.is_infinite() {
+            return Self::f64_overflow(s.is_sign_negative(), rm);
+        }
+
+        let (hi, lo) = Self::two_sum(a, -b);
+        if lo.is_nan() {
+            return Self::f64_arith_finish(s, false, false);
+        }
+        Self::f64_round_two(hi, lo, rm)
+    }
+
+    /// Compute `a * b` for f64, honouring the dynamic rounding mode and setting NX/OF/UF.
+    fn f64_mul(a: f64, b: f64, rm: u8) -> FpResult<u64> {
+        if a.is_nan() || b.is_nan() {
+            return Self::f64_nan_result(a, b);
+        }
+        if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        if a.is_infinite() || b.is_infinite() {
+            let r = a * b;
+            return FpResult {
+                value: r.to_bits(),
+                flags: 0,
+            };
+        }
+
+        let p = a * b;
+        if p.is_infinite() {
+            return Self::f64_overflow(p.is_sign_negative(), rm);
+        }
+        if p.is_subnormal() || p == 0.0 {
+            // two_prod is not reliable in the subnormal/underflow range; fall back to the
+            // rounded product and flag underflow when the result is tiny and non-zero.
+            let mut flags = 0;
+            if p.is_subnormal() && (a != 0.0 && b != 0.0) {
+                flags |= Self::FFLAG_UF;
+            }
+            if p == 0.0 && (a != 0.0 && b != 0.0) {
+                flags |= Self::FFLAG_UF | Self::FFLAG_NX;
+            }
+            return FpResult {
+                value: p.to_bits(),
+                flags,
+            };
+        }
+
+        let (hi, lo) = Self::two_prod(a, b);
+        if lo.is_nan() {
+            // split overflow or other split failure: use the rounded product.
+            return Self::f64_arith_finish(p, false, false);
+        }
+        Self::f64_round_two(hi, lo, rm)
+    }
+
+    /// Compute `a / b` for f64, with improved flag detection.
+    fn f64_div(a: f64, b: f64, _rm: u8) -> FpResult<u64> {
+        if a.is_nan() || b.is_nan() {
+            return Self::f64_nan_result(a, b);
+        }
+        if a == 0.0 && b == 0.0 {
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        if a.is_infinite() && b.is_infinite() {
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let r = a / b;
+        Self::f64_arith_finish(r, b == 0.0, a.is_infinite() || b.is_infinite())
+    }
+
+    /// Compute `sqrt(a)` for f64, with improved flag detection.
+    fn f64_sqrt(a: f64, _rm: u8) -> FpResult<u64> {
+        if a.is_nan() {
+            return Self::f64_nan_result(a, 0.0);
+        }
+        if a < 0.0 && a != -0.0 {
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        if a.is_infinite() && a.is_sign_negative() {
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let r = a.sqrt();
+        Self::f64_arith_finish(r, false, a.is_infinite())
+    }
+
+    /// Compute a fused multiply-add variant for f64.
+    ///
+    /// Uses the host `mul_add` intrinsic to perform one f64 rounding instead of
+    /// two separate operations. Dynamic rounding modes are still not honored for
+    /// f64 because the host f64 path has no wider accumulator.
+    fn f64_fma(a: f64, b: f64, c: f64, _rm: u8, neg_p: bool, neg_s: bool) -> FpResult<u64> {
+        if a.is_nan() || b.is_nan() || c.is_nan() {
+            let mut r = Self::f64_nan_result(a, b);
+            if c.is_nan() && Self::f64_is_snan(c.to_bits()) {
+                r.flags |= Self::FFLAG_NV;
+            }
+            return r;
+        }
+        if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let a = if neg_p { -a } else { a };
+        let c = if neg_s { -c } else { c };
+        let r = a.mul_add(b, c);
+        if r.is_nan() {
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let input_inf = a.is_infinite() || b.is_infinite() || c.is_infinite();
+        Self::f64_arith_finish(r, false, input_inf)
+    }
+
+    /// Finalise an f64 host arithmetic result: canonicalise NaN, set OF/DZ/NV where detectable.
+    ///
+    /// This does not attempt to set NX/UF because the host f64 path cannot recover the exact
+    /// real result for double-precision operations without a wider accumulator.
+    fn f64_arith_finish(r: f64, div_by_zero: bool, input_inf: bool) -> FpResult<u64> {
+        if r.is_nan() {
+            // Host produced NaN from an unhandled invalid combination; mark NV.
+            return FpResult {
+                value: Self::F64_CANONICAL_NAN,
+                flags: Self::FFLAG_NV,
+            };
+        }
+        let mut flags = 0;
+        if div_by_zero {
+            flags |= Self::FFLAG_DZ;
+        }
+        if r.is_infinite() && !input_inf {
+            flags |= Self::FFLAG_OF | Self::FFLAG_NX;
+        }
+        FpResult {
+            value: r.to_bits(),
+            flags,
+        }
+    }
+
+    fn execute_ai_enq(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        mem: &mut PhysMem,
+        nx: u64,
+    ) -> Result<u64, ExecError> {
+        let desc_addr = self.regs.get(rs1);
+        if let Some(ai) = mem.ai_island_mut() {
+            let hart = self.csr.hartid as u32;
+            let ticket = ai.queue_enq(desc_addr, hart).unwrap_or(0);
+            self.regs.set(rd, ticket);
+            Ok(nx)
+        } else {
+            self.fault_addr = 0;
+            self.take_trap(2);
+            Ok(self.regs.pc)
+        }
+    }
+
+    fn execute_ai_poll(
+        &mut self,
+        rd: u8,
+        rs1: u8,
+        mem: &mut PhysMem,
+        nx: u64,
+    ) -> Result<u64, ExecError> {
+        let ticket = self.regs.get(rs1);
+        if let Some(ai) = mem.ai_island_mut() {
+            let status = ai.queue_poll(ticket).unwrap_or(0);
+            self.regs.set(rd, status);
+            Ok(nx)
+        } else {
+            self.fault_addr = 0;
+            self.take_trap(2);
+            Ok(self.regs.pc)
+        }
+    }
+
+    fn execute_ai_qfence(&mut self, mem: &mut PhysMem, nx: u64) -> Result<u64, ExecError> {
+        if let Some(ai) = mem.ai_island_mut() {
+            ai.queue_qfence();
+            Ok(nx)
+        } else {
+            self.fault_addr = 0;
+            self.take_trap(2);
+            Ok(self.regs.pc)
+        }
+    }
+
     fn execute_fp(
         &mut self,
         insn: Insn,
@@ -1791,16 +2864,13 @@ impl Hart {
                 rs1,
                 rs2,
                 rs3,
-                rm: _,
+                rm,
             } => {
                 let a = self.f32_get(rs1);
                 let b = self.f32_get(rs2);
                 let c = self.f32_get(rs3);
-                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
-                    self.set_fflag(0x10); // NV for inf * 0
-                }
-                let r = a.mul_add(b, c);
-                self.f32_set_arith(rd, r);
+                let res = Self::f32_fma(a, b, c, self.fp_rm(rm), false, false);
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FmsubS {
@@ -1808,16 +2878,13 @@ impl Hart {
                 rs1,
                 rs2,
                 rs3,
-                rm: _,
+                rm,
             } => {
                 let a = self.f32_get(rs1);
                 let b = self.f32_get(rs2);
                 let c = self.f32_get(rs3);
-                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
-                    self.set_fflag(0x10); // NV
-                }
-                let r = a.mul_add(b, -c);
-                self.f32_set_arith(rd, r);
+                let res = Self::f32_fma(a, b, c, self.fp_rm(rm), false, true);
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FnmsubS {
@@ -1825,16 +2892,13 @@ impl Hart {
                 rs1,
                 rs2,
                 rs3,
-                rm: _,
+                rm,
             } => {
                 let a = self.f32_get(rs1);
                 let b = self.f32_get(rs2);
                 let c = self.f32_get(rs3);
-                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
-                    self.set_fflag(0x10); // NV
-                }
-                let r = -(a * b) + c;
-                self.f32_set_arith(rd, r);
+                let res = Self::f32_fma(a, b, c, self.fp_rm(rm), true, false);
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FnmaddS {
@@ -1842,92 +2906,49 @@ impl Hart {
                 rs1,
                 rs2,
                 rs3,
-                rm: _,
+                rm,
             } => {
                 let a = self.f32_get(rs1);
                 let b = self.f32_get(rs2);
                 let c = self.f32_get(rs3);
-                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
-                    self.set_fflag(0x10); // NV
-                }
-                let r = -(a * b) - c;
-                self.f32_set_arith(rd, r);
+                let res = Self::f32_fma(a, b, c, self.fp_rm(rm), true, true);
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
 
             // Basic arithmetic
-            Insn::FaddS {
-                rd,
-                rs1,
-                rs2,
-                rm: _,
-            } => {
+            Insn::FaddS { rd, rs1, rs2, rm } => {
                 let a = self.f32_get(rs1);
                 let b = self.f32_get(rs2);
-                let r = a + b;
-                self.f32_set_arith(rd, r);
-                if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
-                    self.set_fflag(0x04); // OF
-                }
+                let res = Self::f32_add(a, b, self.fp_rm(rm));
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
-            Insn::FsubS {
-                rd,
-                rs1,
-                rs2,
-                rm: _,
-            } => {
+            Insn::FsubS { rd, rs1, rs2, rm } => {
                 let a = self.f32_get(rs1);
                 let b = self.f32_get(rs2);
-                let r = a - b;
-                self.f32_set_arith(rd, r);
-                if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
-                    self.set_fflag(0x04); // OF
-                }
+                let res = Self::f32_sub(a, b, self.fp_rm(rm));
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
-            Insn::FmulS {
-                rd,
-                rs1,
-                rs2,
-                rm: _,
-            } => {
+            Insn::FmulS { rd, rs1, rs2, rm } => {
                 let a = self.f32_get(rs1);
                 let b = self.f32_get(rs2);
-                let r = a * b;
-                self.f32_set_arith(rd, r);
-                if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
-                    self.set_fflag(0x04); // OF
-                }
+                let res = Self::f32_mul(a, b, self.fp_rm(rm));
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
-            Insn::FdivS {
-                rd,
-                rs1,
-                rs2,
-                rm: _,
-            } => {
+            Insn::FdivS { rd, rs1, rs2, rm } => {
                 let a = self.f32_get(rs1);
                 let b = self.f32_get(rs2);
-                if b == 0.0 && !a.is_nan() {
-                    self.set_fflag(0x08); // DZ
-                }
-                let r = a / b;
-                self.f32_set_arith(rd, r);
-                if r.is_infinite() && !a.is_infinite() {
-                    self.set_fflag(0x04); // OF
-                }
+                let res = Self::f32_div(a, b, self.fp_rm(rm));
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
-            Insn::FsqrtS { rd, rs1, rm: _ } => {
+            Insn::FsqrtS { rd, rs1, rm } => {
                 let a = self.f32_get(rs1);
-                let r = if a < 0.0 {
-                    self.set_fflag(0x10); // NV
-                    f32::from_bits(0x7fc0_0000)
-                } else {
-                    a.sqrt()
-                };
-                self.f32_set_arith(rd, r);
+                let res = Self::f32_sqrt(a, self.fp_rm(rm));
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
 
@@ -1958,47 +2979,57 @@ impl Hart {
             Insn::FminS { rd, rs1, rs2 } => {
                 let a = self.f32_get(rs1);
                 let b = self.f32_get(rs2);
-                let r = Self::f32_minmax(a, b, false);
-                if a.is_nan() || b.is_nan() {
-                    self.set_fflag(0x10); // NV (simplified: any NaN)
-                }
-                self.f32_set_arith(rd, r);
+                let (r, nv) = Self::f32_minmax(a, b, false);
+                self.f32_set_arith_bits(
+                    rd,
+                    FpResult {
+                        value: r.to_bits(),
+                        flags: if nv { Self::FFLAG_NV } else { 0 },
+                    },
+                );
                 Ok(nx)
             }
             Insn::FmaxS { rd, rs1, rs2 } => {
                 let a = self.f32_get(rs1);
                 let b = self.f32_get(rs2);
-                let r = Self::f32_minmax(a, b, true);
-                if a.is_nan() || b.is_nan() {
-                    self.set_fflag(0x10); // NV
-                }
-                self.f32_set_arith(rd, r);
+                let (r, nv) = Self::f32_minmax(a, b, true);
+                self.f32_set_arith_bits(
+                    rd,
+                    FpResult {
+                        value: r.to_bits(),
+                        flags: if nv { Self::FFLAG_NV } else { 0 },
+                    },
+                );
                 Ok(nx)
             }
 
             // FP -> integer conversion
             Insn::FcvtWS { rd, rs1, rm } => {
                 let a = self.f32_get(rs1);
-                let r = self.f32_to_i64(a, self.fp_rm(rm), 32, false);
-                self.regs.set(rd, Self::sext32(r as u32));
+                let res = Self::f32_to_int(a as f64, self.fp_rm(rm), 32, false);
+                self.set_fflag(res.flags);
+                self.regs.set(rd, Self::sext32(res.value as u32));
                 Ok(nx)
             }
             Insn::FcvtWuS { rd, rs1, rm } => {
                 let a = self.f32_get(rs1);
-                let r = self.f32_to_i64(a, self.fp_rm(rm), 32, true);
-                self.regs.set(rd, r & 0xffff_ffff);
+                let res = Self::f32_to_int(a as f64, self.fp_rm(rm), 32, true);
+                self.set_fflag(res.flags);
+                self.regs.set(rd, res.value & 0xffff_ffff);
                 Ok(nx)
             }
             Insn::FcvtLS { rd, rs1, rm } => {
                 let a = self.f32_get(rs1);
-                let r = self.f32_to_i64(a, self.fp_rm(rm), 64, false);
-                self.regs.set(rd, r);
+                let res = Self::f32_to_int(a as f64, self.fp_rm(rm), 64, false);
+                self.set_fflag(res.flags);
+                self.regs.set(rd, res.value);
                 Ok(nx)
             }
             Insn::FcvtLuS { rd, rs1, rm } => {
                 let a = self.f32_get(rs1);
-                let r = self.f32_to_i64(a, self.fp_rm(rm), 64, true);
-                self.regs.set(rd, r);
+                let res = Self::f32_to_int(a as f64, self.fp_rm(rm), 64, true);
+                self.set_fflag(res.flags);
+                self.regs.set(rd, res.value);
                 Ok(nx)
             }
 
@@ -2022,7 +3053,7 @@ impl Hart {
                 let b = self.f32_get(rs2);
                 let r = if a < b { 1 } else { 0 };
                 if a.is_nan() || b.is_nan() {
-                    self.set_fflag(0x10); // NV
+                    self.set_fflag(Self::FFLAG_NV); // NV
                 }
                 self.regs.set(rd, r);
                 Ok(nx)
@@ -2032,7 +3063,7 @@ impl Hart {
                 let b = self.f32_get(rs2);
                 let r = if a <= b { 1 } else { 0 };
                 if a.is_nan() || b.is_nan() {
-                    self.set_fflag(0x10); // NV
+                    self.set_fflag(Self::FFLAG_NV); // NV
                 }
                 self.regs.set(rd, r);
                 Ok(nx)
@@ -2048,26 +3079,30 @@ impl Hart {
             // Integer -> FP conversion
             Insn::FcvtSW { rd, rs1, rm } => {
                 let a = self.regs.get(rs1);
-                let r = self.i64_to_f32(a, self.fp_rm(rm), false, xlen, 32);
-                self.f32_set_arith(rd, r);
+                let source = Self::int_source(a, xlen, 32, false);
+                let res = Self::int_to_f32(source, self.fp_rm(rm));
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FcvtSWu { rd, rs1, rm } => {
                 let a = self.regs.get(rs1);
-                let r = self.i64_to_f32(a, self.fp_rm(rm), true, xlen, 32);
-                self.f32_set_arith(rd, r);
+                let source = Self::int_source(a, xlen, 32, true);
+                let res = Self::int_to_f32(source, self.fp_rm(rm));
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FcvtSL { rd, rs1, rm } => {
                 let a = self.regs.get(rs1);
-                let r = self.i64_to_f32(a, self.fp_rm(rm), false, xlen, 64);
-                self.f32_set_arith(rd, r);
+                let source = Self::int_source(a, xlen, 64, false);
+                let res = Self::int_to_f32(source, self.fp_rm(rm));
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FcvtSLu { rd, rs1, rm } => {
                 let a = self.regs.get(rs1);
-                let r = self.i64_to_f32(a, self.fp_rm(rm), true, xlen, 64);
-                self.f32_set_arith(rd, r);
+                let source = Self::int_source(a, xlen, 64, true);
+                let res = Self::int_to_f32(source, self.fp_rm(rm));
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
 
@@ -2100,16 +3135,13 @@ impl Hart {
                 rs1,
                 rs2,
                 rs3,
-                rm: _,
+                rm,
             } => {
                 let a = self.f64_get(rs1);
                 let b = self.f64_get(rs2);
                 let c = self.f64_get(rs3);
-                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
-                    self.set_fflag(0x10); // NV for inf * 0
-                }
-                let r = a.mul_add(b, c);
-                self.f64_set_arith(rd, r);
+                let res = Self::f64_fma(a, b, c, self.fp_rm(rm), false, false);
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FmsubD {
@@ -2117,16 +3149,13 @@ impl Hart {
                 rs1,
                 rs2,
                 rs3,
-                rm: _,
+                rm,
             } => {
                 let a = self.f64_get(rs1);
                 let b = self.f64_get(rs2);
                 let c = self.f64_get(rs3);
-                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
-                    self.set_fflag(0x10); // NV
-                }
-                let r = a.mul_add(b, -c);
-                self.f64_set_arith(rd, r);
+                let res = Self::f64_fma(a, b, c, self.fp_rm(rm), false, true);
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FnmsubD {
@@ -2134,16 +3163,13 @@ impl Hart {
                 rs1,
                 rs2,
                 rs3,
-                rm: _,
+                rm,
             } => {
                 let a = self.f64_get(rs1);
                 let b = self.f64_get(rs2);
                 let c = self.f64_get(rs3);
-                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
-                    self.set_fflag(0x10); // NV
-                }
-                let r = -(a * b) + c;
-                self.f64_set_arith(rd, r);
+                let res = Self::f64_fma(a, b, c, self.fp_rm(rm), true, false);
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FnmaddD {
@@ -2151,92 +3177,49 @@ impl Hart {
                 rs1,
                 rs2,
                 rs3,
-                rm: _,
+                rm,
             } => {
                 let a = self.f64_get(rs1);
                 let b = self.f64_get(rs2);
                 let c = self.f64_get(rs3);
-                if (a.is_infinite() && b == 0.0) || (b.is_infinite() && a == 0.0) {
-                    self.set_fflag(0x10); // NV
-                }
-                let r = -(a * b) - c;
-                self.f64_set_arith(rd, r);
+                let res = Self::f64_fma(a, b, c, self.fp_rm(rm), true, true);
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
 
             // Basic arithmetic
-            Insn::FaddD {
-                rd,
-                rs1,
-                rs2,
-                rm: _,
-            } => {
+            Insn::FaddD { rd, rs1, rs2, rm } => {
                 let a = self.f64_get(rs1);
                 let b = self.f64_get(rs2);
-                let r = a + b;
-                self.f64_set_arith(rd, r);
-                if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
-                    self.set_fflag(0x04); // OF
-                }
+                let res = Self::f64_add(a, b, self.fp_rm(rm));
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
-            Insn::FsubD {
-                rd,
-                rs1,
-                rs2,
-                rm: _,
-            } => {
+            Insn::FsubD { rd, rs1, rs2, rm } => {
                 let a = self.f64_get(rs1);
                 let b = self.f64_get(rs2);
-                let r = a - b;
-                self.f64_set_arith(rd, r);
-                if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
-                    self.set_fflag(0x04); // OF
-                }
+                let res = Self::f64_sub(a, b, self.fp_rm(rm));
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
-            Insn::FmulD {
-                rd,
-                rs1,
-                rs2,
-                rm: _,
-            } => {
+            Insn::FmulD { rd, rs1, rs2, rm } => {
                 let a = self.f64_get(rs1);
                 let b = self.f64_get(rs2);
-                let r = a * b;
-                self.f64_set_arith(rd, r);
-                if r.is_infinite() && !a.is_infinite() && !b.is_infinite() {
-                    self.set_fflag(0x04); // OF
-                }
+                let res = Self::f64_mul(a, b, self.fp_rm(rm));
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
-            Insn::FdivD {
-                rd,
-                rs1,
-                rs2,
-                rm: _,
-            } => {
+            Insn::FdivD { rd, rs1, rs2, rm } => {
                 let a = self.f64_get(rs1);
                 let b = self.f64_get(rs2);
-                if b == 0.0 && !a.is_nan() {
-                    self.set_fflag(0x08); // DZ
-                }
-                let r = a / b;
-                self.f64_set_arith(rd, r);
-                if r.is_infinite() && !a.is_infinite() {
-                    self.set_fflag(0x04); // OF
-                }
+                let res = Self::f64_div(a, b, self.fp_rm(rm));
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
-            Insn::FsqrtD { rd, rs1, rm: _ } => {
+            Insn::FsqrtD { rd, rs1, rm } => {
                 let a = self.f64_get(rs1);
-                let r = if a < 0.0 {
-                    self.set_fflag(0x10); // NV
-                    f64::from_bits(Self::F64_CANONICAL_NAN)
-                } else {
-                    a.sqrt()
-                };
-                self.f64_set_arith(rd, r);
+                let res = Self::f64_sqrt(a, self.fp_rm(rm));
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
 
@@ -2267,72 +3250,71 @@ impl Hart {
             Insn::FminD { rd, rs1, rs2 } => {
                 let a = self.f64_get(rs1);
                 let b = self.f64_get(rs2);
-                let r = Self::f64_minmax(a, b, false);
-                if a.is_nan() || b.is_nan() {
-                    self.set_fflag(0x10); // NV (simplified: any NaN)
-                }
-                self.f64_set_arith(rd, r);
+                let (r, nv) = Self::f64_minmax(a, b, false);
+                self.f64_set_arith_bits(
+                    rd,
+                    FpResult {
+                        value: r.to_bits(),
+                        flags: if nv { Self::FFLAG_NV } else { 0 },
+                    },
+                );
                 Ok(nx)
             }
             Insn::FmaxD { rd, rs1, rs2 } => {
                 let a = self.f64_get(rs1);
                 let b = self.f64_get(rs2);
-                let r = Self::f64_minmax(a, b, true);
-                if a.is_nan() || b.is_nan() {
-                    self.set_fflag(0x10); // NV
-                }
-                self.f64_set_arith(rd, r);
+                let (r, nv) = Self::f64_minmax(a, b, true);
+                self.f64_set_arith_bits(
+                    rd,
+                    FpResult {
+                        value: r.to_bits(),
+                        flags: if nv { Self::FFLAG_NV } else { 0 },
+                    },
+                );
                 Ok(nx)
             }
 
             // FP -> FP conversion
-            Insn::FcvtSD { rd, rs1, rm: _ } => {
+            Insn::FcvtSD { rd, rs1, rm } => {
                 let a = self.f64_get(rs1);
-                if a.is_nan() {
-                    self.f32_set_arith(rd, f32::from_bits(0x7fc0_0000));
-                } else {
-                    let r = a as f32;
-                    let r64 = f64::from(r);
-                    if r64 != a {
-                        self.set_fflag(0x01); // NX
-                    }
-                    if r.is_infinite() && !a.is_infinite() {
-                        self.set_fflag(0x04); // OF
-                    }
-                    self.f32_set_arith(rd, r);
-                }
+                let res = Self::round_f64_to_f32(a, self.fp_rm(rm), true);
+                self.f32_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FcvtDS { rd, rs1, rm: _ } => {
                 let a = self.f32_get(rs1);
-                let r = f64::from(a);
-                self.f64_set_arith(rd, r);
+                let res = Self::round_f32_to_f64(a);
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
 
             // FP -> integer conversion
             Insn::FcvtWD { rd, rs1, rm } => {
                 let a = self.f64_get(rs1);
-                let r = self.f64_to_i64(a, self.fp_rm(rm), 32, false);
-                self.regs.set(rd, Self::sext32(r as u32));
+                let res = Self::f64_to_int(a, self.fp_rm(rm), 32, false);
+                self.set_fflag(res.flags);
+                self.regs.set(rd, Self::sext32(res.value as u32));
                 Ok(nx)
             }
             Insn::FcvtWuD { rd, rs1, rm } => {
                 let a = self.f64_get(rs1);
-                let r = self.f64_to_i64(a, self.fp_rm(rm), 32, true);
-                self.regs.set(rd, r & 0xffff_ffff);
+                let res = Self::f64_to_int(a, self.fp_rm(rm), 32, true);
+                self.set_fflag(res.flags);
+                self.regs.set(rd, res.value & 0xffff_ffff);
                 Ok(nx)
             }
             Insn::FcvtLD { rd, rs1, rm } => {
                 let a = self.f64_get(rs1);
-                let r = self.f64_to_i64(a, self.fp_rm(rm), 64, false);
-                self.regs.set(rd, r);
+                let res = Self::f64_to_int(a, self.fp_rm(rm), 64, false);
+                self.set_fflag(res.flags);
+                self.regs.set(rd, res.value);
                 Ok(nx)
             }
             Insn::FcvtLuD { rd, rs1, rm } => {
                 let a = self.f64_get(rs1);
-                let r = self.f64_to_i64(a, self.fp_rm(rm), 64, true);
-                self.regs.set(rd, r);
+                let res = Self::f64_to_int(a, self.fp_rm(rm), 64, true);
+                self.set_fflag(res.flags);
+                self.regs.set(rd, res.value);
                 Ok(nx)
             }
 
@@ -2356,7 +3338,7 @@ impl Hart {
                 let b = self.f64_get(rs2);
                 let r = if a < b { 1 } else { 0 };
                 if a.is_nan() || b.is_nan() {
-                    self.set_fflag(0x10); // NV
+                    self.set_fflag(Self::FFLAG_NV); // NV
                 }
                 self.regs.set(rd, r);
                 Ok(nx)
@@ -2366,7 +3348,7 @@ impl Hart {
                 let b = self.f64_get(rs2);
                 let r = if a <= b { 1 } else { 0 };
                 if a.is_nan() || b.is_nan() {
-                    self.set_fflag(0x10); // NV
+                    self.set_fflag(Self::FFLAG_NV); // NV
                 }
                 self.regs.set(rd, r);
                 Ok(nx)
@@ -2382,26 +3364,30 @@ impl Hart {
             // Integer -> FP conversion
             Insn::FcvtDW { rd, rs1, rm } => {
                 let a = self.regs.get(rs1);
-                let r = self.i64_to_f64(a, self.fp_rm(rm), false, xlen, 32);
-                self.f64_set_arith(rd, r);
+                let source = Self::int_source(a, xlen, 32, false);
+                let res = Self::int_to_f64(source, self.fp_rm(rm));
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FcvtDWu { rd, rs1, rm } => {
                 let a = self.regs.get(rs1);
-                let r = self.i64_to_f64(a, self.fp_rm(rm), true, xlen, 32);
-                self.f64_set_arith(rd, r);
+                let source = Self::int_source(a, xlen, 32, true);
+                let res = Self::int_to_f64(source, self.fp_rm(rm));
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FcvtDL { rd, rs1, rm } => {
                 let a = self.regs.get(rs1);
-                let r = self.i64_to_f64(a, self.fp_rm(rm), false, xlen, 64);
-                self.f64_set_arith(rd, r);
+                let source = Self::int_source(a, xlen, 64, false);
+                let res = Self::int_to_f64(source, self.fp_rm(rm));
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
             Insn::FcvtDLu { rd, rs1, rm } => {
                 let a = self.regs.get(rs1);
-                let r = self.i64_to_f64(a, self.fp_rm(rm), true, xlen, 64);
-                self.f64_set_arith(rd, r);
+                let source = Self::int_source(a, xlen, 64, true);
+                let res = Self::int_to_f64(source, self.fp_rm(rm));
+                self.f64_set_arith_bits(rd, res);
                 Ok(nx)
             }
 
@@ -2502,7 +3488,7 @@ impl Hart {
     /// On a translation failure `fault_addr` is set to the original virtual
     /// address and `ExecError::Trap(cause)` is returned.
     fn translate(&mut self, mem: &PhysMem, vaddr: u64, cause: u64) -> Result<u64, ExecError> {
-        match mmu::translate(mem, self.csr.satp, vaddr) {
+        match mmu::translate(mem, &self.mmu, self.csr.satp, vaddr) {
             Ok(paddr) => Ok(paddr),
             Err(_) => {
                 self.fault_addr = vaddr;
@@ -2603,23 +3589,30 @@ impl Hart {
         pc_rdata: u64,
         pc_wdata: u64,
         insn: u32,
+        trap: bool,
+        cause: u64,
+        halt: bool,
         rd_addr: u8,
         rd_wdata: u64,
         frd_addr: u8,
         frd_wdata: u64,
     ) {
         self.records.push(CommitRecord {
-            order: self.instret,
+            order: self.record_order,
             hart: 0,
             pc_rdata,
             pc_wdata,
             insn,
-            trap: false,
+            trap,
+            cause,
+            prv: self.csr.mode(),
+            halt,
             rd_addr,
             rd_wdata,
             frd_addr,
             frd_wdata,
         });
+        self.record_order += 1;
     }
 }
 
@@ -2638,6 +3631,7 @@ mod tests {
     fn hart() -> Hart {
         let mut h = Hart::new(0x8000_0000);
         h.csr.mtvec = 0x7000_0000;
+        h.mmu = Mmu::sv39();
         h
     }
 
@@ -2649,6 +3643,135 @@ mod tests {
         m.add(Region::new(0x6000_0000, 0x1000));
         m.write_le::<4>(0x6000_0000, 0x0000_006f).unwrap(); // jal x0, 0
         m
+    }
+
+    #[test]
+    fn checkpoint_captures_and_restores_pc_and_registers() {
+        let mut h = hart();
+        let m = mem();
+        h.regs.set(1, 0x1234);
+        h.fregs.set_d(1, 0x1122_3344_5566_7788);
+        h.csr.mscratch = 0xabcd;
+        let cp = h.checkpoint(&m);
+        assert_eq!(cp.pc, 0x8000_0000);
+        assert_eq!(cp.x[1], 0x1234);
+        assert_eq!(cp.f[1], 0x1122_3344_5566_7788);
+        assert!(cp.csr.iter().any(|(k, v)| k == "mscratch" && *v == 0xabcd));
+        assert_eq!(cp.memory.len(), 3);
+
+        let mut h2 = Hart::new(0);
+        let mut m2 = PhysMem::new();
+        m2.add(Region::new(0x8000_0000, 0x1000));
+        m2.add(Region::new(0x7000_0000, 0x1000));
+        m2.add(Region::new(0x6000_0000, 0x1000));
+        h2.restore(&mut m2, &cp);
+        assert_eq!(h2.regs.pc, 0x8000_0000);
+        assert_eq!(h2.regs.get(1), 0x1234);
+        assert_eq!(h2.fregs.get_d(1), 0x1122_3344_5566_7788);
+        assert_eq!(h2.csr.mscratch, 0xabcd);
+        assert_eq!(m2.read_le::<4>(0x7000_0000).unwrap(), 0x0000_006f);
+    }
+
+    #[test]
+    fn checkpoint_captures_and_restores_devices() {
+        use crate::device::{Clint, Plic, Uart};
+        use crate::mem::{Device, DeviceKind};
+        let h = hart();
+        let mut m = PhysMem::new();
+        m.add(Region::new(0x8000_0000, 0x1000));
+        m.add_device(Device::new(
+            0x0200_0000,
+            0x10000,
+            DeviceKind::Clint(Clint::new(2)),
+        ));
+        m.add_device(Device::new(
+            0x0c00_0000,
+            0x40_0000,
+            DeviceKind::Plic(Plic::new(30, 16)),
+        ));
+        m.add_device(Device::new(
+            0x1000_0000,
+            0x100,
+            DeviceKind::Uart(Uart::new()),
+        ));
+
+        // Drive some device state.
+        m.write_le::<1>(0x1000_0000, b'A' as u64).unwrap();
+        m.clint_mut().unwrap().mtime = 0x1234_5678_9abc_def0;
+        m.clint_mut().unwrap().msip[0] = 1;
+        m.clint_mut().unwrap().mtimecmp[1] = 0xdeadbeef;
+        m.plic_mut().unwrap().pending = 0b1010;
+        m.plic_mut().unwrap().enable[0] = 0b1111;
+
+        let cp = h.checkpoint(&m);
+        assert_eq!(cp.devices.len(), 3);
+        assert!(cp.devices.iter().any(|d| d.kind == "clint"));
+        assert!(cp.devices.iter().any(|d| d.kind == "plic"));
+        assert!(cp.devices.iter().any(|d| d.kind == "uart"));
+
+        // Rebuild an empty memory map and restore.
+        let mut h2 = Hart::new(0x8000_0000);
+        let mut m2 = PhysMem::new();
+        m2.add(Region::new(0x8000_0000, 0x1000));
+        m2.add_device(Device::new(
+            0x0200_0000,
+            0x10000,
+            DeviceKind::Clint(Clint::new(2)),
+        ));
+        m2.add_device(Device::new(
+            0x0c00_0000,
+            0x40_0000,
+            DeviceKind::Plic(Plic::new(30, 16)),
+        ));
+        m2.add_device(Device::new(
+            0x1000_0000,
+            0x100,
+            DeviceKind::Uart(Uart::new()),
+        ));
+        h2.restore(&mut m2, &cp);
+
+        assert_eq!(m2.uart().unwrap().output, vec![b'A']);
+        assert_eq!(m2.clint().unwrap().mtime, 0x1234_5678_9abc_def0);
+        assert_eq!(m2.clint().unwrap().msip[0], 1);
+        assert_eq!(m2.clint().unwrap().mtimecmp[1], 0xdeadbeef);
+        assert_eq!(m2.plic().unwrap().pending, 0b1010);
+        assert_eq!(m2.plic().unwrap().enable[0], 0b1111);
+    }
+
+    #[test]
+    fn run_replay_matches_a_reference_record_stream() {
+        let mut h = hart();
+        let mut m = mem();
+
+        // Run a few steps to generate a reference.
+        assert_eq!(h.run(&mut m, 64, 4), Halt::StepLimit);
+        let reference = h.records.clone();
+
+        // A fresh hart at the same starting state should replay identically.
+        let mut h2 = hart();
+        let mut m2 = mem();
+        assert_eq!(
+            h2.run_replay(&mut m2, 64, reference.len() as u64, &reference),
+            Halt::StepLimit
+        );
+
+        // A reference with a deliberately wrong pc_wdata should diverge at the first record.
+        let mut wrong = reference.clone();
+        wrong[0].pc_wdata = 0xdeadbeef;
+        let mut h3 = hart();
+        let mut m3 = mem();
+        assert!(matches!(
+            h3.run_replay(&mut m3, 64, wrong.len() as u64, &wrong),
+            Halt::ReplayDivergence(0, _)
+        ));
+
+        // A run that is longer than the reference should diverge on length.
+        let mut h4 = hart();
+        let mut m4 = mem();
+        assert!(matches!(
+            h4.run_replay(&mut m4, 64, 100, &reference[..2]),
+            Halt::ReplayDivergence(2, _)
+        ));
     }
 
     fn write_i(m: &mut PhysMem, addr: u64, op: u32, rd: u32, f3: u32, rs1: u32, imm: i64) {
@@ -3846,5 +4969,376 @@ mod tests {
         assert_eq!(h.run(&mut m, 64, 10), Halt::StepLimit);
         assert_eq!(h.csr.mcause, 2);
         assert_eq!(h.regs.pc, 0x7000_0000);
+    }
+
+    #[test]
+    fn f32_arith_flags_and_nan_cases() {
+        // Overflow: finite operands producing an infinite result.
+        let r = Hart::f32_mul(f32::MAX, 2.0f32, 0x0);
+        assert_eq!(r.value, f32::INFINITY.to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_OF, Hart::FFLAG_OF);
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+
+        // Divide by zero.
+        let r = Hart::f32_div(1.0f32, 0.0f32, 0x0);
+        assert_eq!(r.value, f32::INFINITY.to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_DZ, Hart::FFLAG_DZ);
+
+        // 0/0 is invalid.
+        let r = Hart::f32_div(0.0f32, 0.0f32, 0x0);
+        assert_eq!(r.value, Hart::F32_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+
+        // inf - inf is invalid.
+        let r = Hart::f32_sub(f32::INFINITY, f32::INFINITY, 0x0);
+        assert_eq!(r.value, Hart::F32_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+
+        // inf * 0 is invalid.
+        let r = Hart::f32_mul(f32::INFINITY, 0.0f32, 0x0);
+        assert_eq!(r.value, Hart::F32_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+
+        // sqrt of a negative number is invalid.
+        let r = Hart::f32_sqrt(-1.0f32, 0x0);
+        assert_eq!(r.value, Hart::F32_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+
+        // min/max: quiet NaN with a number returns the number and no NV.
+        let qnan = f32::from_bits(0x7fc0_0000);
+        let (v, nv) = Hart::f32_minmax(qnan, 1.0f32, false);
+        assert_eq!(v, 1.0f32);
+        assert!(!nv);
+
+        // min/max: signaling NaN with a number returns the number and NV.
+        let snan = f32::from_bits(0x7f80_0001);
+        let (v, nv) = Hart::f32_minmax(snan, 1.0f32, false);
+        assert_eq!(v, 1.0f32);
+        assert!(nv);
+
+        // min/max of two quiet NaNs returns the canonical quiet NaN and no NV.
+        let (v, nv) = Hart::f32_minmax(qnan, qnan, false);
+        assert_eq!(v.to_bits(), Hart::F32_CANONICAL_NAN);
+        assert!(!nv);
+    }
+
+    #[test]
+    fn f64_arith_flags_and_fma_cases() {
+        // Overflow.
+        let r = Hart::f64_mul(f64::MAX, 2.0f64, 0x0);
+        assert_eq!(r.value, f64::INFINITY.to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_OF, Hart::FFLAG_OF);
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+
+        // Divide by zero.
+        let r = Hart::f64_div(1.0f64, 0.0f64, 0x0);
+        assert_eq!(r.value, f64::INFINITY.to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_DZ, Hart::FFLAG_DZ);
+
+        // 0/0 is invalid.
+        let r = Hart::f64_div(0.0f64, 0.0f64, 0x0);
+        assert_eq!(r.value, Hart::F64_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+
+        // inf - inf is invalid.
+        let r = Hart::f64_sub(f64::INFINITY, f64::INFINITY, 0x0);
+        assert_eq!(r.value, Hart::F64_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+
+        // Exact fma: 2*3 + 4 = 10.
+        let r = Hart::f64_fma(2.0f64, 3.0f64, 4.0f64, 0x0, false, false);
+        assert_eq!(r.value, 10.0f64.to_bits());
+        assert_eq!(r.flags, 0);
+
+        // Negated-product fma: -(2*3) + 4 = -2.
+        let r = Hart::f64_fma(2.0f64, 3.0f64, 4.0f64, 0x0, true, false);
+        assert_eq!(r.value, (-2.0f64).to_bits());
+        assert_eq!(r.flags, 0);
+
+        // Negated-summand fma: 2*3 + (-4) = 2.
+        let r = Hart::f64_fma(2.0f64, 3.0f64, 4.0f64, 0x0, false, true);
+        assert_eq!(r.value, 2.0f64.to_bits());
+        assert_eq!(r.flags, 0);
+
+        // Both negated: -(2*3) + (-4) = -10.
+        let r = Hart::f64_fma(2.0f64, 3.0f64, 4.0f64, 0x0, true, true);
+        assert_eq!(r.value, (-10.0f64).to_bits());
+        assert_eq!(r.flags, 0);
+
+        // FMA overflow: MAX * 2 + 0 -> inf.
+        let r = Hart::f64_fma(f64::MAX, 2.0f64, 0.0f64, 0x0, false, false);
+        assert_eq!(r.value, f64::INFINITY.to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_OF, Hart::FFLAG_OF);
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+
+        // FMA invalid: inf * 0 + 1.
+        let r = Hart::f64_fma(f64::INFINITY, 0.0f64, 1.0f64, 0x0, false, false);
+        assert_eq!(r.value, Hart::F64_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+
+        // FMA inf - inf.
+        let r = Hart::f64_fma(f64::INFINITY, 1.0f64, f64::NEG_INFINITY, 0x0, false, false);
+        assert_eq!(r.value, Hart::F64_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+
+        // min/max with quiet and signaling NaNs.
+        let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+        let snan = f64::from_bits(0x7ff0_0000_0000_0001);
+        let (v, nv) = Hart::f64_minmax(qnan, 1.0f64, false);
+        assert_eq!(v, 1.0f64);
+        assert!(!nv);
+        let (v, nv) = Hart::f64_minmax(snan, 1.0f64, false);
+        assert_eq!(v, 1.0f64);
+        assert!(nv);
+        let (v, nv) = Hart::f64_minmax(qnan, qnan, false);
+        assert_eq!(v.to_bits(), Hart::F64_CANONICAL_NAN);
+        assert!(!nv);
+    }
+
+    #[test]
+    fn f64_directed_rounding_sets_nx_and_picks_the_right_bracket() {
+        // 1.0 + 2^-53 is exactly the tie between 1.0 and next_up(1.0).
+        let ulp = Hart::f64_next_up(1.0f64) - 1.0f64;
+        let half_ulp = ulp / 2.0;
+
+        // RNE: tie to even -> 1.0, inexact (NX).
+        let r = Hart::f64_add(1.0f64, half_ulp, 0x0);
+        assert_eq!(r.value, 1.0f64.to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+
+        // RUP: toward +inf -> next_up, inexact.
+        let r = Hart::f64_add(1.0f64, half_ulp, 0x3);
+        assert_eq!(r.value, Hart::f64_next_up(1.0f64).to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+
+        // RTZ: toward zero -> 1.0, inexact.
+        let r = Hart::f64_add(1.0f64, half_ulp, 0x1);
+        assert_eq!(r.value, 1.0f64.to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+
+        // A value strictly between 1.0 and the tie: all except RUP round to 1.0.
+        let tiny = half_ulp / 2.0;
+        let r = Hart::f64_add(1.0f64, tiny, 0x3);
+        assert_eq!(r.value, Hart::f64_next_up(1.0f64).to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+
+        // Negative tie: RDN/RMM keep the value away from zero, RUP/RTZ move toward zero.
+        let r = Hart::f64_sub(-1.0f64, half_ulp, 0x2); // RDN
+        assert_eq!(r.value, (-Hart::f64_next_up(1.0f64)).to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+
+        let r = Hart::f64_sub(-1.0f64, half_ulp, 0x3); // RUP
+        assert_eq!(r.value, (-1.0f64).to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+
+        // Multiplication with a non-tie inexact product.
+        let a = Hart::f64_next_up(1.0f64); // 1 + ulp
+        let r = Hart::f64_mul(a, a, 0x2); // RDN
+                                          // a*a = 1 + 2*ulp + ulp^2; the next f64 down from 1+2*ulp is 1+ulp.
+        assert_eq!(
+            r.value,
+            Hart::f64_next_up(Hart::f64_next_up(1.0f64)).to_bits()
+        );
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+    }
+
+    #[test]
+    fn fp_conversion_rounding_and_nan_cases() {
+        // f64 -> f32 overflow.
+        let r = Hart::round_f64_to_f32(f64::MAX, 0x0, false);
+        assert_eq!(r.value, f32::INFINITY.to_bits());
+        assert_eq!(r.flags & Hart::FFLAG_OF, Hart::FFLAG_OF);
+        assert_eq!(r.flags & Hart::FFLAG_NX, Hart::FFLAG_NX);
+
+        // f64 -> f32 of a source inf does not overflow when allow_infinite is true.
+        let r = Hart::round_f64_to_f32(f64::INFINITY, 0x0, true);
+        assert_eq!(r.value, f32::INFINITY.to_bits());
+        assert_eq!(r.flags, 0);
+
+        // f64 -> f32 of a quiet NaN canonicalises and raises no NV.
+        let qnan = f64::from_bits(0x7ff8_0000_0000_0000);
+        let r = Hart::round_f64_to_f32(qnan, 0x0, true);
+        assert_eq!(r.value, Hart::F32_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, 0);
+
+        // f64 -> f32 of a signaling NaN canonicalises and raises NV.
+        let snan = f64::from_bits(0x7ff0_0000_0000_0001);
+        let r = Hart::round_f64_to_f32(snan, 0x0, true);
+        assert_eq!(r.value, Hart::F32_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+
+        // f32 -> f64 widening is exact.
+        let r = Hart::round_f32_to_f64(1.5f32);
+        assert_eq!(r.value, 1.5f64.to_bits());
+        assert_eq!(r.flags, 0);
+
+        // f32 -> f64 of a quiet NaN canonicalises.
+        let qnan = f32::from_bits(0x7fc0_0000);
+        let r = Hart::round_f32_to_f64(qnan);
+        assert_eq!(r.value, Hart::F64_CANONICAL_NAN);
+        assert_eq!(r.flags, 0);
+
+        // f32 -> f64 of a signaling NaN canonicalises and raises NV.
+        let snan = f32::from_bits(0x7f80_0001);
+        let r = Hart::round_f32_to_f64(snan);
+        assert_eq!(r.value, Hart::F64_CANONICAL_NAN);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+
+        // Integer to f32 conversion: small integer is exact.
+        let r = Hart::int_to_f32(42, 0x0);
+        assert_eq!(r.value, 42.0f32.to_bits());
+        assert_eq!(r.flags, 0);
+
+        // f32 -> unsigned 32-bit integer with RTZ is inexact.
+        let r = Hart::f32_to_int(f64::from(42.9f32), 0x1, 32, true);
+        assert_eq!(r.value, 42);
+        assert_eq!(r.flags, Hart::FFLAG_NX);
+
+        // f64 -> signed 64-bit integer overflow saturates and raises NV.
+        let r = Hart::f64_to_int(f64::MAX, 0x0, 64, false);
+        assert_eq!(r.value, i64::MAX as u64);
+        assert_eq!(r.flags & Hart::FFLAG_NV, Hart::FFLAG_NV);
+    }
+
+    #[test]
+    fn ai_queue_enq_poll_qfence_execute() {
+        use crate::device::AiIsland;
+        use crate::mem::{Device, DeviceKind};
+        let mut h = hart();
+        let mut m = mem();
+        let mut ai_island = AiIsland::new();
+        let ai_model = g6q_core::model::AiIslandModel {
+            config: g6q_core::model::AiIslandConfig {
+                queue_depth: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ai_island.set_ai_model(&ai_model);
+        m.add_device(Device::new(
+            0x3000_0000,
+            0x1000,
+            DeviceKind::AiIsland(ai_island),
+        ));
+
+        h.ai_instr_set = Some(g6q_core::model::AiInstrSet {
+            opcode_custom2: 0x5B,
+            mask_f7f3op: 0xFE00707F,
+            match_enq: 0x0000505B,
+            match_poll: 0x0200505B,
+            match_qfence: 0x0400505B,
+            ..Default::default()
+        });
+        h.ai_model = Some(ai_model);
+
+        // x10 = 0x8000_0000 (descriptor pointer)
+        h.regs.set(10, 0x8000_0000);
+        // ai.enq x5, x10 -> rd=5, rs1=10: (10<<15)|(5<<12)|(5<<7)|0x5B
+        m.write_le::<4>(0x8000_0000, (10 << 15) | (5 << 12) | (5 << 7) | 0x5B)
+            .unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.get(5), 0);
+
+        // ai.qfence
+        m.write_le::<4>(0x8000_0004, (2 << 25) | (5 << 12) | 0x5B)
+            .unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+
+        // ai.poll x6, x5 -> rd=6, rs1=5: f7=1
+        m.write_le::<4>(
+            0x8000_0008,
+            (1 << 25) | (5 << 15) | (5 << 12) | (6 << 7) | 0x5B,
+        )
+        .unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.get(6), 0);
+
+        if let Some(ai) = m.ai_island_mut() {
+            let events = ai.drain_events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].descriptor_addr, 0x8000_0000);
+            assert!(events[0].done);
+        }
+    }
+
+    #[test]
+    fn ai_queue_full_and_ticket_sequence() {
+        use crate::device::AiIsland;
+        use crate::mem::{Device, DeviceKind};
+        let mut h = hart();
+        let mut m = mem();
+        let mut ai_island = AiIsland::new();
+        let ai_model = g6q_core::model::AiIslandModel {
+            config: g6q_core::model::AiIslandConfig {
+                queue_depth: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ai_island.set_ai_model(&ai_model);
+        m.add_device(Device::new(
+            0x3000_0000,
+            0x1000,
+            DeviceKind::AiIsland(ai_island),
+        ));
+
+        h.ai_instr_set = Some(g6q_core::model::AiInstrSet {
+            opcode_custom2: 0x5B,
+            mask_f7f3op: 0xFE00707F,
+            match_enq: 0x0000505B,
+            match_poll: 0x0200505B,
+            match_qfence: 0x0400505B,
+            ..Default::default()
+        });
+        h.ai_model = Some(ai_model);
+
+        // x10 = 0x8000_0000 (descriptor pointer)
+        h.regs.set(10, 0x8000_0000);
+
+        // Enqueue two descriptors.
+        for i in 0..2 {
+            h.regs.set(10, 0x8000_0000 + i as u64 * 0x1000);
+            m.write_le::<4>(
+                0x8000_0000 + i as u64 * 4,
+                (10 << 15) | (5 << 12) | (5 << 7) | 0x5B,
+            )
+            .unwrap();
+            assert_eq!(h.step(&mut m, 64), None);
+            assert_eq!(h.regs.get(5), i as u64);
+        }
+
+        // Third enqueue should fail (queue full) and return 0.
+        m.write_le::<4>(0x8000_0008, (10 << 15) | (5 << 12) | (5 << 7) | 0x5B)
+            .unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.get(5), 0);
+
+        if let Some(ai) = m.ai_island_mut() {
+            assert_eq!(ai.inflight_total(), 2);
+            let events = ai.drain_events();
+            assert_eq!(events.len(), 2);
+
+            // Run qfence: all complete.
+            m.write_le::<4>(0x8000_000c, (2 << 25) | (5 << 12) | 0x5B)
+                .unwrap();
+            assert_eq!(h.step(&mut m, 64), None);
+
+            // Poll first ticket.
+            h.regs.set(5, 0);
+            m.write_le::<4>(
+                0x8000_0010,
+                (1 << 25) | (5 << 15) | (5 << 12) | (6 << 7) | 0x5B,
+            )
+            .unwrap();
+            assert_eq!(h.step(&mut m, 64), None);
+            assert_eq!(h.regs.get(6), 0);
+
+            let counters = g6q_diag::ai_tensor::tensor_counters(&events);
+            let by_name: std::collections::BTreeMap<_, _> = counters
+                .iter()
+                .map(|c| (c.name.as_str(), c.value))
+                .collect();
+            assert_eq!(by_name["ai.tensor.queue_entries"], 2);
+        }
     }
 }

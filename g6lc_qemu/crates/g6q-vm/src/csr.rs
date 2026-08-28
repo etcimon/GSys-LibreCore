@@ -117,6 +117,75 @@ pub struct Csr {
 }
 
 impl Csr {
+    /// Snapshot the entire bank as a stable (name, value) list.
+    pub fn to_pairs(&self) -> Vec<(&'static str, u64)> {
+        vec![
+            ("mode", self.mode as u64),
+            ("hartid", self.hartid),
+            ("misa", self.misa),
+            ("mstatus", self.mstatus),
+            ("mie", self.mie),
+            ("mip", self.mip),
+            ("medeleg", self.medeleg),
+            ("mideleg", self.mideleg),
+            ("mtvec", self.mtvec),
+            ("mepc", self.mepc),
+            ("mcause", self.mcause),
+            ("mtval", self.mtval),
+            ("mscratch", self.mscratch),
+            ("stvec", self.stvec),
+            ("sepc", self.sepc),
+            ("scause", self.scause),
+            ("stval", self.stval),
+            ("sscratch", self.sscratch),
+            ("satp", self.satp),
+            ("fflags", self.fflags),
+            ("frm", self.frm),
+            ("mtime", self.mtime),
+            ("mtimeh", self.mtimeh),
+            ("mtimecmp", self.mtimecmp),
+            ("mvendorid", self.mvendorid),
+            ("marchid", self.marchid),
+            ("mimpid", self.mimpid),
+        ]
+    }
+
+    /// Restore the bank from a (name, value) list.  Unknown names are ignored.
+    pub fn from_pairs(&mut self, pairs: &[(String, u64)]) {
+        for (name, value) in pairs {
+            match name.as_str() {
+                "mode" => self.mode = *value as u8,
+                "hartid" => self.hartid = *value,
+                "misa" => self.misa = *value,
+                "mstatus" => self.mstatus = *value,
+                "mie" => self.mie = *value,
+                "mip" => self.mip = *value,
+                "medeleg" => self.medeleg = *value,
+                "mideleg" => self.mideleg = *value,
+                "mtvec" => self.mtvec = *value,
+                "mepc" => self.mepc = *value,
+                "mcause" => self.mcause = *value,
+                "mtval" => self.mtval = *value,
+                "mscratch" => self.mscratch = *value,
+                "stvec" => self.stvec = *value,
+                "sepc" => self.sepc = *value,
+                "scause" => self.scause = *value,
+                "stval" => self.stval = *value,
+                "sscratch" => self.sscratch = *value,
+                "satp" => self.satp = *value,
+                "fflags" => self.fflags = *value,
+                "frm" => self.frm = *value,
+                "mtime" => self.mtime = *value,
+                "mtimeh" => self.mtimeh = *value,
+                "mtimecmp" => self.mtimecmp = *value,
+                "mvendorid" => self.mvendorid = *value,
+                "marchid" => self.marchid = *value,
+                "mimpid" => self.mimpid = *value,
+                _ => {}
+            }
+        }
+    }
+
     /// Create a bank for hart `hartid` with a fixed ISA string.
     pub fn new(hartid: u64) -> Self {
         Self {

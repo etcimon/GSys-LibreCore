@@ -15,6 +15,19 @@ pub enum Insn {
     /// Illegal / unimplemented instruction.
     Illegal(u32),
 
+    /// AI-island queue: enqueue a descriptor pointer from `rs1`, write ticket to `rd`.
+    AiEnq {
+        rd: u8,
+        rs1: u8,
+    },
+    /// AI-island queue: poll the ticket in `rs1`, write status to `rd`.
+    AiPoll {
+        rd: u8,
+        rs1: u8,
+    },
+    /// AI-island queue: fence until outstanding descriptors complete.
+    AiQfence,
+
     // RV64I base
     Lui {
         rd: u8,
@@ -1425,6 +1438,11 @@ fn shamt(w: u32, xlen: u32) -> u8 {
 
 /// Decode one 32-bit or 16-bit (compressed) instruction.
 pub fn decode(w: u32, xlen: u32) -> Insn {
+    decode_with_ai(w, xlen, None)
+}
+
+/// Decode with an optional AI-island instruction set.
+pub fn decode_with_ai(w: u32, xlen: u32, ai: Option<&g6q_core::model::AiInstrSet>) -> Insn {
     if w & 0b11 != 0b11 {
         return crate::c::decode_c((w & 0xffff) as u16, xlen);
     }
@@ -1440,6 +1458,21 @@ pub fn decode(w: u32, xlen: u32) -> Insn {
     let funct3 = u8_field(w, 14, 12);
     let funct7 = u8_field(w, 31, 25);
     let csr = u16_field(w, 31, 20);
+
+    if let Some(ai) = ai {
+        if opcode == ai.opcode_custom2 {
+            let masked = w & ai.mask_f7f3op;
+            if masked == ai.match_enq {
+                return Insn::AiEnq { rd, rs1 };
+            }
+            if masked == ai.match_poll {
+                return Insn::AiPoll { rd, rs1 };
+            }
+            if masked == ai.match_qfence {
+                return Insn::AiQfence;
+            }
+        }
+    }
 
     match opcode {
         0x37 => Insn::Lui { rd, imm: u_imm(w) },
@@ -2108,6 +2141,40 @@ mod tests {
     #[test]
     fn unknown_opcodes_are_illegal() {
         assert!(matches!(decode(0x00, 64), Insn::Illegal(_)));
+    }
+
+    #[test]
+    fn ai_queue_instructions_decode_when_instr_set_is_provided() {
+        let ai = g6q_core::model::AiInstrSet {
+            opcode_custom2: 0x5B,
+            mask_f7f3op: 0xFE00707F,
+            match_enq: 0x0000505B,
+            match_poll: 0x0200505B,
+            match_qfence: 0x0400505B,
+            ..Default::default()
+        };
+        let rs1 = 10;
+        let rd = 5;
+        let enq = (rs1 << 15) | (5 << 12) | (rd << 7) | 0x5B;
+        assert!(matches!(
+            decode_with_ai(enq, 64, Some(&ai)),
+            Insn::AiEnq { rd: 5, rs1: 10 }
+        ));
+
+        let poll = (1 << 25) | (rs1 << 15) | (5 << 12) | (rd << 7) | 0x5B;
+        assert!(matches!(
+            decode_with_ai(poll, 64, Some(&ai)),
+            Insn::AiPoll { rd: 5, rs1: 10 }
+        ));
+
+        let qfence = (2 << 25) | (5 << 12) | 0x5B;
+        assert!(matches!(
+            decode_with_ai(qfence, 64, Some(&ai)),
+            Insn::AiQfence
+        ));
+
+        // Without an AI set, custom-2 is illegal.
+        assert!(matches!(decode(enq, 64), Insn::Illegal(_)));
     }
 
     #[test]

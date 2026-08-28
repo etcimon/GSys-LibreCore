@@ -74,25 +74,142 @@ pub fn boot_options(args: &Args) -> g6q_emit_args::BootOptions {
         None => g6q_emit_args::Firmware::Default,
     };
 
+    let os = args.value_or("os", "firmware-smoke").to_string();
+    let distro_root = default_distro_root(args, &os);
+    let kernel = args
+        .value("kernel")
+        .map(str::to_string)
+        .or_else(|| find_distro_file(&distro_root, "kernel", &os));
+    let initrd = args
+        .value("initrd")
+        .map(str::to_string)
+        .or_else(|| find_distro_file(&distro_root, "initrd", &os));
+    let rootfs = args.value("rootfs").map(str::to_string);
+    let mut drives: Vec<String> = args.values("drive").to_vec();
+    if let Some(r) = rootfs.or_else(|| find_distro_file(&distro_root, "rootfs", &os)) {
+        drives.push(r);
+    }
     g6q_emit_args::BootOptions {
+        os: os.clone(),
         firmware,
-        kernel: args.value("kernel").map(str::to_string),
-        initrd: args.value("initrd").map(str::to_string),
+        kernel,
+        initrd,
         append: args.value("append").map(str::to_string),
         dtb: args.value("dtb").map(str::to_string),
         elf: args.value("elf").map(str::to_string),
-        drives: args
-            .values("drive")
-            .iter()
-            .cloned()
-            .chain(args.value("rootfs").map(str::to_string))
-            .collect(),
+        drives,
+        drive_format: args
+            .value("rootfs-format")
+            .map(str::to_string)
+            .unwrap_or_else(|| default_drive_format(&os)),
         netdev_user: args.value_or("netdev", "none") == "user" || !forwards.is_empty(),
         port_forwards: forwards,
+        console: args.value_or("console", "uart").to_string(),
+        virtio: args
+            .value("virtio")
+            .map(|s| s.split(',').map(str::to_string).collect())
+            .unwrap_or_default(),
         serial: args.value("serial").map(str::to_string),
-        smp: args.value("smp").and_then(|s| s.parse().ok()),
+        smp: args.value("smp").and_then(parse_smp),
+        maxcpus: args.value("maxcpus").and_then(|s| s.parse().ok()),
         memory_bytes: args.value("mem-size").and_then(parse_size),
         deterministic: args.flag("deterministic") || args.value("tandem").is_some(),
+        icount: parse_icount(args.value("icount")),
+        mttcg: parse_mttcg(args.value("tcg-tuning")),
+        debug: args.value("debug").map(str::to_string),
+        debug_file: args.value("debug-file").map(str::to_string),
+        plugin: args.value("plugin").map(str::to_string),
+    }
+}
+
+/// Resolve the distro search directory.
+///
+/// If the caller supplied `--distro-root`, use that. Otherwise, if `os` is a named
+/// distro, fall back to `out/dist/<os>` relative to the current working directory.
+fn default_distro_root(args: &Args, os: &str) -> std::path::PathBuf {
+    if let Some(r) = args.value("distro-root") {
+        return std::path::PathBuf::from(r);
+    }
+    match os {
+        "buildroot" | "ubuntu" | "debian" | "fedora" => {
+            std::path::PathBuf::from(format!("out/dist/{os}"))
+        }
+        _ => std::path::PathBuf::from("out/dist"),
+    }
+}
+
+/// Candidates for distro image files inside a `--distro-root` directory.
+fn distro_candidates(kind: &str, os: &str) -> Vec<String> {
+    match kind {
+        "kernel" => vec![
+            "vmlinuz".into(),
+            "Image".into(),
+            "zImage".into(),
+            "uImage".into(),
+            "kernel".into(),
+        ],
+        "initrd" => vec![
+            "initrd.img".into(),
+            "initrd".into(),
+            "initrd.gz".into(),
+            "initramfs".into(),
+        ],
+        "rootfs" => vec![
+            format!("{os}.qcow2"),
+            format!("{os}.raw"),
+            "rootfs.qcow2".into(),
+            "rootfs.raw".into(),
+            "rootfs.img".into(),
+        ],
+        _ => vec![],
+    }
+}
+
+/// Search `root` for the first existing candidate of `kind`.
+fn find_distro_file(root: &std::path::Path, kind: &str, os: &str) -> Option<String> {
+    for name in distro_candidates(kind, os) {
+        let p = root.join(&name);
+        if p.is_file() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Default disk image format for an OS shorthand.
+fn default_drive_format(os: &str) -> String {
+    match os {
+        "ubuntu" | "debian" | "fedora" => "qcow2".into(),
+        _ => "raw".into(),
+    }
+}
+
+/// Parse `--smp auto|N`; "auto" maps to the model default (`None`).
+fn parse_smp(text: &str) -> Option<u32> {
+    if text.eq_ignore_ascii_case("auto") {
+        None
+    } else {
+        text.parse().ok()
+    }
+}
+
+/// Parse `--icount off|N` into the backend enum.
+fn parse_icount(text: Option<&str>) -> g6q_emit_args::Icount {
+    match text {
+        None => g6q_emit_args::Icount::Off,
+        Some("off") => g6q_emit_args::Icount::Off,
+        Some(t) => t
+            .parse()
+            .map_or(g6q_emit_args::Icount::Off, g6q_emit_args::Icount::Shift),
+    }
+}
+
+/// Parse `--tcg-tuning default|tuned` into an explicit MTTCG preference.
+fn parse_mttcg(text: Option<&str>) -> Option<bool> {
+    match text {
+        Some("tuned") => Some(true),
+        Some("default") | None => None,
+        Some(_) => None,
     }
 }
 
@@ -131,10 +248,19 @@ pub fn resolve(args: &Args) -> Result<Resolved, String> {
         target.clone()
     };
     out.sources.plane = args.value_or("plane", "soc").to_string();
-    out.sources.profile = match args.value_or("machine", "g6lc-soc") {
-        "g6lc-virt" => Profile::Virt,
-        _ => Profile::Soc,
+    let machine = args.value_or("machine", "g6lc-soc");
+    let os = args.value_or("os", "firmware-smoke");
+    let distro = matches!(os, "buildroot" | "ubuntu" | "debian" | "fedora");
+    out.sources.profile = if machine == "g6lc-virt" || distro {
+        Profile::Virt
+    } else {
+        Profile::Soc
     };
+    if distro && machine != "g6lc-virt" {
+        out.notes.push(format!(
+            "os={os} implies the virtualised profile (g6lc-virt)"
+        ));
+    }
 
     // --- capability table -------------------------------------------------------
     out.sources.table = Some(match args.value("capabilities") {
@@ -255,7 +381,45 @@ pub fn resolve(args: &Args) -> Result<Resolved, String> {
     if let Some(p) = &dts_path {
         let text = std::fs::read_to_string(p)
             .map_err(|e| format!("cannot read device tree {}: {e}", p.display()))?;
-        out.sources.dts = Some(g6q_dts::extract(&g6q_dts::parse(&text)));
+        let mut tree = g6q_dts::parse(&text);
+
+        // Apply overlays first, then per-property mutations, before extracting facts.
+        for overlay in args.values("dts-overlay") {
+            let op = PathBuf::from(overlay);
+            let otext = std::fs::read_to_string(&op)
+                .map_err(|e| format!("cannot read overlay {}: {e}", op.display()))?;
+            let otree = g6q_dts::parse(&otext);
+            g6q_dts::merge(&mut tree, &otree);
+            out.sources.sources.push((norm(&op), digest(&otext)));
+            out.sources.overrides.push((
+                overlay.to_string(),
+                String::new(),
+                "--dts-overlay".to_string(),
+            ));
+        }
+
+        // Apply command-line mutations before the tree is turned into facts.
+        for spec in args.values("dts-set") {
+            let Some((path, value)) = spec.split_once('=') else {
+                return Err(format!("--dts-set requires PATH=VALUE, got {spec}"));
+            };
+            g6q_dts::set_prop(&mut tree, path, value)
+                .map_err(|e| format!("--dts-set {spec}: {e}"))?;
+            out.sources.overrides.push((
+                path.to_string(),
+                value.to_string(),
+                "--dts-set".to_string(),
+            ));
+        }
+        for spec in args.values("dts-del") {
+            let _ =
+                g6q_dts::del_prop(&mut tree, spec).map_err(|e| format!("--dts-del {spec}: {e}"))?;
+            out.sources
+                .overrides
+                .push((spec.to_string(), String::new(), "--dts-del".to_string()));
+        }
+
+        out.sources.dts = Some(g6q_dts::extract(&tree));
         out.sources.sources.push((norm(p), digest(&text)));
         out.notes.push(format!("device tree: {}", p.display()));
         out.dts_path = Some(p.clone());
@@ -266,7 +430,9 @@ pub fn resolve(args: &Args) -> Result<Resolved, String> {
     // --- overrides -------------------------------------------------------------------
     for ov in args.values("cfg-override") {
         let (f, v) = ov.split_once('=').unwrap_or((ov.as_str(), ""));
-        out.sources.overrides.push((f.to_string(), v.to_string()));
+        out.sources
+            .overrides
+            .push((f.to_string(), v.to_string(), "--cfg-override".to_string()));
     }
 
     Ok(out)
@@ -299,7 +465,7 @@ fn norm(p: &Path) -> String {
 /// Not a cryptographic digest: the package has no dependencies and a hand-rolled SHA-256
 /// is not worth the surface area at this stage. It is a stable content fingerprint, and
 /// the field says which it is.
-fn digest(text: &str) -> String {
+pub(crate) fn digest(text: &str) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in text.as_bytes() {
         h ^= *b as u64;
@@ -311,6 +477,7 @@ fn digest(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use g6q_emit_args::Icount;
 
     #[test]
     fn device_tree_candidates_are_ordered_specific_first() {
@@ -369,7 +536,10 @@ mod tests {
     fn overrides_are_collected() {
         let args = Args::parse(["gen", "--target", "t", "--cfg-override", "NrHarts=2"]);
         let r = resolve(&args).unwrap();
-        assert_eq!(r.sources.overrides, vec![("NrHarts".into(), "2".into())]);
+        assert_eq!(
+            r.sources.overrides,
+            vec![("NrHarts".into(), "2".into(), "--cfg-override".into())]
+        );
     }
 
     #[test]
@@ -420,9 +590,85 @@ mod tests {
     }
 
     #[test]
+    fn distro_os_forces_virt_profile_and_qcow2_format() {
+        let r = resolve(&Args::parse([
+            "run",
+            "--os",
+            "ubuntu",
+            "--rootfs",
+            "disk.qcow2",
+        ]))
+        .unwrap();
+        assert_eq!(r.sources.profile, Profile::Virt);
+        let boot = boot_options(&Args::parse([
+            "run",
+            "--os",
+            "ubuntu",
+            "--rootfs",
+            "disk.qcow2",
+        ]));
+        assert_eq!(boot.drive_format, "qcow2");
+        assert_eq!(boot.os, "ubuntu");
+    }
+
+    #[test]
+    fn distro_root_searches_for_missing_images() {
+        let dir = std::env::temp_dir().join(format!("g6q-distro-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("vmlinuz"), b"").unwrap();
+        std::fs::write(dir.join("initrd.img"), b"").unwrap();
+        std::fs::write(dir.join("rootfs.qcow2"), b"").unwrap();
+
+        let boot = boot_options(&Args::parse([
+            "run",
+            "--os",
+            "ubuntu",
+            "--distro-root",
+            dir.to_str().unwrap(),
+        ]));
+        assert_eq!(
+            boot.kernel,
+            Some(dir.join("vmlinuz").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            boot.initrd,
+            Some(dir.join("initrd.img").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            boot.drives,
+            vec![dir.join("rootfs.qcow2").to_string_lossy().into_owned()]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_content_marker_is_stable_and_distinguishing() {
         assert_eq!(digest("abc"), digest("abc"));
         assert_ne!(digest("abc"), digest("abd"));
         assert!(digest("abc").starts_with("fnv1a64:"));
+    }
+
+    #[test]
+    fn smp_auto_maps_to_model_default() {
+        assert_eq!(parse_smp("auto"), None);
+        assert_eq!(parse_smp("4"), Some(4));
+        assert_eq!(parse_smp("nonsense"), None);
+    }
+
+    #[test]
+    fn icount_parses_off_or_a_shift() {
+        assert_eq!(parse_icount(None), Icount::Off);
+        assert_eq!(parse_icount(Some("off")), Icount::Off);
+        assert_eq!(parse_icount(Some("0")), Icount::Shift(0));
+        assert_eq!(parse_icount(Some("3")), Icount::Shift(3));
+        assert_eq!(parse_icount(Some("nonsense")), Icount::Off);
+    }
+
+    #[test]
+    fn tcg_tuning_parses_to_mttcg_preference() {
+        assert_eq!(parse_mttcg(None), None);
+        assert_eq!(parse_mttcg(Some("default")), None);
+        assert_eq!(parse_mttcg(Some("tuned")), Some(true));
     }
 }

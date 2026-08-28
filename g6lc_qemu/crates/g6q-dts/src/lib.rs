@@ -28,10 +28,12 @@
 
 pub mod blob;
 pub mod facts;
+pub mod mutate;
 pub mod tree;
 
 pub use blob::{from_blob, to_blob, BlobError};
 pub use facts::{extract, DeviceFact, Facts};
+pub use mutate::{del as del_prop, merge, set as set_prop, MutateError};
 pub use tree::{parse, Node, Prop};
 
 /// Parse a device tree from a file and extract the facts the model consumes.

@@ -26,7 +26,9 @@
 
 pub mod invoke;
 
-pub use invoke::{build_argv, check_profile, cpu_argument, BootOptions, Firmware, StockTarget};
+pub use invoke::{
+    build_argv, check_profile, cpu_argument, BootOptions, Firmware, Icount, StockTarget,
+};
 
 use g6q_core::model::{Profile, TargetModel};
 use g6q_core::Json;
@@ -152,8 +154,7 @@ mod tests {
             id: id.into(),
             base,
             len,
-            model: None,
-            irq: None,
+            ..Peripheral::default()
         }
     }
 

@@ -7,6 +7,7 @@
 //! importantly, states what that invocation does **not** cover.
 
 use g6q_core::model::{Profile, TargetModel};
+use g6q_core::Json;
 
 /// Firmware wiring for the guest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -20,6 +21,34 @@ pub enum Firmware {
     File(String),
 }
 
+impl Firmware {
+    /// Render as a JSON string.
+    pub fn to_json(&self) -> Json {
+        match self {
+            Self::None => Json::str("none"),
+            Self::Default => Json::str("default"),
+            Self::File(p) => Json::str(p),
+        }
+    }
+}
+
+/// Virtual instruction-counter mode.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Icount {
+    /// No `-icount` option.
+    #[default]
+    Off,
+    /// `-icount shift=N,align=off,sleep=off`.
+    Shift(u32),
+}
+
+impl Icount {
+    /// Whether the counter is active.
+    pub fn is_on(&self) -> bool {
+        !matches!(self, Icount::Off)
+    }
+}
+
 /// What to boot and how.
 #[derive(Debug, Clone, Default)]
 pub struct BootOptions {
@@ -29,6 +58,8 @@ pub struct BootOptions {
     pub kernel: Option<String>,
     /// Initial ramdisk.
     pub initrd: Option<String>,
+    /// OS shorthand (`firmware-smoke`, `baremetal`, `buildroot`, `ubuntu`, ...).
+    pub os: String,
     /// Kernel command line.
     pub append: Option<String>,
     /// Device tree blob to hand the guest.
@@ -37,18 +68,91 @@ pub struct BootOptions {
     pub elf: Option<String>,
     /// Disk images; each implies a virtio transport.
     pub drives: Vec<String>,
+    /// Disk image format for the drives. Empty means `raw` for every drive.
+    pub drive_format: String,
     /// Whether to attach user-mode networking.
     pub netdev_user: bool,
     /// Host-to-guest port forwards as `(host, guest)`.
     pub port_forwards: Vec<(u16, u16)>,
     /// Serial destination.
     pub serial: Option<String>,
-    /// Override the processor count; otherwise the model's hart total is used.
+    /// Console transport: `uart` or `virtio`.
+    pub console: String,
+    /// Extra virtio devices to attach: `rng` enables `virtio-rng-device`;
+    /// `console` is implied by `console=virtio`.
+    pub virtio: Vec<String>,
+    /// Override the processor count; `None` uses the model's hart total.
     pub smp: Option<u32>,
+    /// Override the processor hotplug ceiling; `None` follows `smp`.
+    pub maxcpus: Option<u32>,
     /// Override memory size in bytes; otherwise the model's memory window is used.
     pub memory_bytes: Option<u64>,
     /// Emit a deterministic instruction-counted clock.
     pub deterministic: bool,
+    /// Explicit `-icount` setting. If `Off`, `--deterministic` forces `Shift(0)`.
+    pub icount: Icount,
+    /// Request multi-threaded TCG. `None` leaves the default, `Some(true)` forces
+    /// multi-thread, `Some(false)` forces single-thread.
+    pub mttcg: Option<bool>,
+    /// QEMU `-d` debug log categories, if any.
+    pub debug: Option<String>,
+    /// QEMU `-D` debug log file, if any.
+    pub debug_file: Option<String>,
+    /// Path to a TCG plugin `.so` to load, if any.
+    pub plugin: Option<String>,
+}
+
+impl BootOptions {
+    /// Render as a canonical JSON object.
+    pub fn to_json(&self) -> Json {
+        let opt_str = |s: Option<&str>| s.map(Json::str).unwrap_or(Json::Null);
+        let opt_int = |s: Option<u64>| s.map(|n| Json::Int(n as i64)).unwrap_or(Json::Null);
+        Json::obj(vec![
+            ("firmware", self.firmware.to_json()),
+            ("kernel", opt_str(self.kernel.as_deref())),
+            ("initrd", opt_str(self.initrd.as_deref())),
+            ("os", Json::str(&self.os)),
+            ("append", opt_str(self.append.as_deref())),
+            ("dtb", opt_str(self.dtb.as_deref())),
+            ("elf", opt_str(self.elf.as_deref())),
+            ("drives", Json::arr(self.drives.iter().map(Json::str))),
+            ("drive_format", Json::str(&self.drive_format)),
+            ("netdev_user", Json::Bool(self.netdev_user)),
+            (
+                "port_forwards",
+                Json::arr(
+                    self.port_forwards
+                        .iter()
+                        .map(|(h, g)| Json::arr([Json::Int(*h as i64), Json::Int(*g as i64)])),
+                ),
+            ),
+            ("serial", opt_str(self.serial.as_deref())),
+            ("console", Json::str(&self.console)),
+            ("virtio", Json::arr(self.virtio.iter().map(Json::str))),
+            ("smp", opt_int(self.smp.map(|n| n as u64))),
+            ("maxcpus", opt_int(self.maxcpus.map(|n| n as u64))),
+            ("memory_bytes", opt_int(self.memory_bytes)),
+            ("deterministic", Json::Bool(self.deterministic)),
+            (
+                "icount",
+                match &self.icount {
+                    Icount::Off => Json::str("off"),
+                    Icount::Shift(n) => Json::str(format!("shift={n}")),
+                },
+            ),
+            (
+                "mttcg",
+                match self.mttcg {
+                    None => Json::Null,
+                    Some(true) => Json::Bool(true),
+                    Some(false) => Json::Bool(false),
+                },
+            ),
+            ("debug", opt_str(self.debug.as_deref())),
+            ("debug_file", opt_str(self.debug_file.as_deref())),
+            ("plugin", opt_str(self.plugin.as_deref())),
+        ])
+    }
 }
 
 /// The stock machine an invocation targets.
@@ -102,6 +206,45 @@ pub fn cpu_argument(
     }
 }
 
+/// Build the `-smp` argument value.
+///
+/// If the design's core / thread-per-core topology divides `smp` evenly, emit the
+/// topology form so the guest sees a plausible socket/core/thread hierarchy.
+/// Otherwise emit a flat count, optionally with a hotplug ceiling.
+fn smp_argument(
+    smp: u32,
+    maxcpus: u32,
+    cores: Option<u32>,
+    threads_per_core: Option<u32>,
+) -> String {
+    let topology = match (cores, threads_per_core) {
+        (Some(c), Some(t)) if c > 0 && t > 0 && (c * t) > 0 => {
+            let sockets = smp / (c * t);
+            let rem = smp % (c * t);
+            if rem == 0 && sockets > 0 {
+                if maxcpus == smp {
+                    Some(format!("cores={c},threads={t},sockets={sockets}"))
+                } else {
+                    Some(format!(
+                        "cores={c},threads={t},sockets={sockets},maxcpus={maxcpus}"
+                    ))
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+
+    if let Some(s) = topology {
+        s
+    } else if maxcpus == smp {
+        smp.to_string()
+    } else {
+        format!("{smp},maxcpus={maxcpus}")
+    }
+}
+
 /// Render a byte count the way an emulator's `-m` expects.
 fn memory_argument(bytes: u64) -> String {
     const M: u64 = 1024 * 1024;
@@ -122,16 +265,28 @@ pub fn build_argv(
     boot: &BootOptions,
     properties_for: &dyn Fn(&str) -> Vec<String>,
 ) -> Vec<String> {
-    let mut a: Vec<String> = vec![
-        "-M".into(),
-        stock.machine.clone(),
-        "-cpu".into(),
-        cpu_argument(model, &stock.cpu_base, properties_for),
-    ];
+    let mut cpu_arg = cpu_argument(model, &stock.cpu_base, properties_for);
+    if model.pmu.counter_count > 0
+        && model
+            .isa
+            .extensions
+            .iter()
+            .any(|(t, v)| t == "zihpm" && v == "live")
+    {
+        cpu_arg.push_str(&format!(",pmu-mask={:#x}", model.pmu.counter_mask()));
+    }
+
+    let mut a: Vec<String> = vec!["-M".into(), stock.machine.clone(), "-cpu".into(), cpu_arg];
 
     let smp = boot.smp.unwrap_or(model.soc.harts_total.max(1));
+    let maxcpus = boot.maxcpus.unwrap_or(smp).max(smp);
     a.push("-smp".into());
-    a.push(smp.to_string());
+    a.push(smp_argument(
+        smp,
+        maxcpus,
+        model.soc.cores,
+        model.soc.threads_per_core,
+    ));
 
     let mem = boot
         .memory_bytes
@@ -162,14 +317,23 @@ pub fn build_argv(
             a.push(v.clone());
         }
     }
-    if let Some(append) = &boot.append {
+    let append = match &boot.append {
+        Some(a) => Some(a.clone()),
+        None => os_append(&boot.os),
+    };
+    if let Some(append) = append {
         a.push("-append".into());
-        a.push(append.clone());
+        a.push(append);
     }
 
     for (i, drive) in boot.drives.iter().enumerate() {
+        let fmt = if boot.drive_format.is_empty() {
+            "raw"
+        } else {
+            &boot.drive_format
+        };
         a.push("-drive".into());
-        a.push(format!("file={drive},format=raw,if=none,id=hd{i}"));
+        a.push(format!("file={drive},format={fmt},if=none,id=hd{i}"));
         a.push("-device".into());
         a.push(format!("virtio-blk-device,drive=hd{i}"));
     }
@@ -185,17 +349,80 @@ pub fn build_argv(
         a.push("virtio-net-device,netdev=net0".into());
     }
 
+    let serial = boot.serial.clone().unwrap_or_else(|| "stdio".into());
     a.push("-serial".into());
-    a.push(boot.serial.clone().unwrap_or_else(|| "stdio".into()));
+    a.push(serial.clone());
 
-    if boot.deterministic {
-        // Instruction-counted time; required before any tandem or replay run.
-        a.push("-icount".into());
-        a.push("shift=0,align=off,sleep=off".into());
+    if boot.console == "virtio" {
+        a.push("-device".into());
+        a.push("virtio-serial-device".into());
+        a.push("-device".into());
+        a.push("virtconsole,chardev=serial0".into());
+    }
+
+    for v in &boot.virtio {
+        if v.as_str() == "rng" {
+            a.push("-object".into());
+            a.push("rng-random,id=rng0".into());
+            a.push("-device".into());
+            a.push("virtio-rng-device,rng=rng0".into());
+        }
+    }
+
+    // icount is incompatible with MTTCG; resolve the combination before either is emitted.
+    let icount = match &boot.icount {
+        Icount::Off if boot.deterministic => Icount::Shift(0),
+        other => other.clone(),
+    };
+    let mttcg = if icount.is_on() {
+        // icount mode runs on a single TCG thread; ignore a conflicting request.
+        Some(false)
+    } else {
+        boot.mttcg
+    };
+
+    match mttcg {
+        Some(true) if smp > 1 => a.extend(["-accel".into(), "tcg,thread=multi".into()]),
+        Some(false) => a.extend(["-accel".into(), "tcg,thread=single".into()]),
+        _ => {}
+    }
+
+    match icount {
+        Icount::Shift(n) => {
+            a.push("-icount".into());
+            a.push(format!("shift={n},align=off,sleep=off"));
+        }
+        Icount::Off => {}
+    }
+
+    if let Some(debug) = &boot.debug {
+        a.push("-d".into());
+        a.push(debug.clone());
+    }
+    if let Some(debug_file) = &boot.debug_file {
+        a.push("-D".into());
+        a.push(debug_file.clone());
+    }
+
+    if let Some(plugin) = &boot.plugin {
+        a.push("-plugin".into());
+        a.push(plugin.clone());
     }
 
     a.push("-nographic".into());
     a
+}
+
+/// Default kernel command line for a known OS shorthand.
+///
+/// These are software conventions, not design constants. They are only used when the user
+/// did not supply an explicit `--append`.
+fn os_append(os: &str) -> Option<String> {
+    match os {
+        "buildroot" => Some("root=/dev/vda rw console=ttyS0".into()),
+        "ubuntu" | "debian" | "fedora" => Some("root=/dev/vda rw console=ttyS0".into()),
+        _ => None,
+    }
 }
 
 /// Whether the requested boot needs facilities the faithful profile does not have.
@@ -203,7 +430,10 @@ pub fn build_argv(
 /// Disks and networking do not exist on the faithful machine; asking for them silently
 /// would produce a result that looks like a hardware answer and is not one.
 pub fn requires_virt_profile(boot: &BootOptions) -> bool {
-    !boot.drives.is_empty() || boot.netdev_user
+    !boot.drives.is_empty()
+        || boot.netdev_user
+        || boot.console == "virtio"
+        || !boot.virtio.is_empty()
 }
 
 /// Check the boot request against the model's profile.
@@ -232,6 +462,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
+            timebase_hz: 1_000_000,
             ..Isa::default()
         };
         m.soc = Soc {
@@ -395,6 +626,21 @@ mod tests {
     }
 
     #[test]
+    fn a_plugin_path_is_emitted_in_argv() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            plugin: Some("out/emit/t/contrib/plugins/g6lc-t.so".into()),
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("-plugin"), "{joined}");
+        assert!(
+            joined.contains("out/emit/t/contrib/plugins/g6lc-t.so"),
+            "{joined}"
+        );
+    }
+
+    #[test]
     fn argv_construction_is_deterministic() {
         let m = model_with(&[("zbb", "live"), ("zba", "live")], 2, Some((0, 1 << 30)));
         let b = BootOptions {
@@ -405,5 +651,170 @@ mod tests {
         let one = build_argv(&m, &StockTarget::default(), &b, &ident);
         let two = build_argv(&m, &StockTarget::default(), &b, &ident);
         assert_eq!(one, two);
+    }
+
+    #[test]
+    fn pmu_mask_is_appended_when_zihpm_live() {
+        let mut m = model_with(&[("zihpm", "live")], 1, None);
+        m.pmu.counter_count = 6;
+        let argv = build_argv(&m, &StockTarget::default(), &BootOptions::default(), &ident);
+        let joined = argv.join(" ");
+        assert!(joined.contains("pmu-mask=0x1f8"), "{joined}");
+    }
+
+    #[test]
+    fn smp_uses_topology_when_the_model_has_one() {
+        let mut m = model_with(&[], 4, None);
+        m.soc.cores = Some(2);
+        m.soc.threads_per_core = Some(2);
+        let argv = build_argv(&m, &StockTarget::default(), &BootOptions::default(), &ident);
+        let joined = argv.join(" ");
+        assert!(
+            joined.contains("-smp cores=2,threads=2,sockets=1"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn maxcpus_adds_a_hotplug_ceiling() {
+        let mut m = model_with(&[], 4, None);
+        m.soc.cores = Some(2);
+        m.soc.threads_per_core = Some(2);
+        let boot = BootOptions {
+            maxcpus: Some(8),
+            ..BootOptions::default()
+        };
+        let argv = build_argv(&m, &StockTarget::default(), &boot, &ident);
+        let joined = argv.join(" ");
+        assert!(
+            joined.contains("-smp cores=2,threads=2,sockets=1,maxcpus=8"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn deterministic_time_uses_icount_and_single_thread_tcg() {
+        let m = model_with(&[], 2, None);
+        let boot = BootOptions {
+            deterministic: true,
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(
+            joined.contains("-icount shift=0,align=off,sleep=off"),
+            "{joined}"
+        );
+        assert!(joined.contains("-accel tcg,thread=single"), "{joined}");
+        assert!(!joined.contains("thread=multi"), "{joined}");
+    }
+
+    #[test]
+    fn explicit_icount_overrides_shift() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            icount: Icount::Shift(3),
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(
+            joined.contains("-icount shift=3,align=off,sleep=off"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn tuned_tuning_requests_mttcg() {
+        let m = model_with(&[], 4, None);
+        let boot = BootOptions {
+            mttcg: Some(true),
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("-accel tcg,thread=multi"), "{joined}");
+    }
+
+    #[test]
+    fn icount_suppresses_mttcg_request() {
+        let m = model_with(&[], 4, None);
+        let boot = BootOptions {
+            icount: Icount::Shift(0),
+            mttcg: Some(true),
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("-icount"), "{joined}");
+        assert!(joined.contains("-accel tcg,thread=single"), "{joined}");
+        assert!(!joined.contains("thread=multi"), "{joined}");
+    }
+
+    #[test]
+    fn os_default_appends_a_root_argument() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            os: "buildroot".into(),
+            drives: vec!["disk.img".into()],
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(
+            joined.contains("root=/dev/vda rw console=ttyS0"),
+            "{joined}"
+        );
+    }
+
+    #[test]
+    fn explicit_append_overrides_os_default() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            os: "ubuntu".into(),
+            append: Some("root=/dev/vda1".into()),
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("root=/dev/vda1"), "{joined}");
+        assert!(!joined.contains("console=ttyS0"), "{joined}");
+    }
+
+    #[test]
+    fn rootfs_format_is_used_for_drives() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            drives: vec!["disk.qcow2".into()],
+            drive_format: "qcow2".into(),
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("format=qcow2"), "{joined}");
+    }
+
+    #[test]
+    fn virtio_console_is_a_virt_transport() {
+        let mut virt = model_with(&[], 1, None);
+        virt.profile = Profile::Virt;
+        let boot = BootOptions {
+            console: "virtio".into(),
+            ..BootOptions::default()
+        };
+        assert!(check_profile(&virt, &boot).is_ok());
+        let joined = build_argv(&virt, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("virtio-serial-device"), "{joined}");
+        assert!(joined.contains("virtconsole"), "{joined}");
+
+        // A faithful machine has no virtio transports.
+        let m = model_with(&[], 1, None);
+        assert!(check_profile(&m, &boot).is_err());
+    }
+
+    #[test]
+    fn virtio_rng_emits_a_random_source() {
+        let mut virt = model_with(&[], 1, None);
+        virt.profile = Profile::Virt;
+        let boot = BootOptions {
+            virtio: vec!["rng".into()],
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&virt, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("rng-random,id=rng0"), "{joined}");
+        assert!(joined.contains("virtio-rng-device"), "{joined}");
     }
 }

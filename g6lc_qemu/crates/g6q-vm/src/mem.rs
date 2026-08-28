@@ -82,6 +82,8 @@ impl Region {
     }
 }
 
+use g6q_core::Json;
+
 use crate::device::MmioDevice;
 
 /// A memory-mapped device entry.
@@ -119,6 +121,8 @@ pub enum DeviceKind {
     Uart(crate::device::Uart),
     /// Platform-level interrupt controller.
     Plic(crate::device::Plic),
+    /// AI-island / matrix accelerator stub.
+    AiIsland(crate::device::AiIsland),
 }
 
 impl DeviceKind {
@@ -127,6 +131,7 @@ impl DeviceKind {
             DeviceKind::Clint(c) => c.load(offset, width),
             DeviceKind::Uart(u) => u.load(offset, width),
             DeviceKind::Plic(p) => p.load(offset, width),
+            DeviceKind::AiIsland(a) => a.load(offset, width),
         }
     }
 
@@ -135,6 +140,35 @@ impl DeviceKind {
             DeviceKind::Clint(c) => c.store(offset, width, value),
             DeviceKind::Uart(u) => u.store(offset, width, value),
             DeviceKind::Plic(p) => p.store(offset, width, value),
+            DeviceKind::AiIsland(a) => a.store(offset, width, value),
+        }
+    }
+
+    /// Human-readable device tag for checkpoint naming.
+    fn tag(&self) -> &'static str {
+        match self {
+            DeviceKind::Clint(_) => "clint",
+            DeviceKind::Uart(_) => "uart",
+            DeviceKind::Plic(_) => "plic",
+            DeviceKind::AiIsland(_) => "ai-island",
+        }
+    }
+
+    fn snapshot(&self) -> Vec<(String, Json)> {
+        match self {
+            DeviceKind::Clint(c) => c.snapshot(),
+            DeviceKind::Uart(u) => u.snapshot(),
+            DeviceKind::Plic(p) => p.snapshot(),
+            DeviceKind::AiIsland(a) => a.snapshot(),
+        }
+    }
+
+    fn restore(&mut self, state: &[(String, Json)]) {
+        match self {
+            DeviceKind::Clint(c) => c.restore(state),
+            DeviceKind::Uart(u) => u.restore(state),
+            DeviceKind::Plic(p) => p.restore(state),
+            DeviceKind::AiIsland(a) => a.restore(state),
         }
     }
 }
@@ -219,6 +253,32 @@ impl PhysMem {
         })
     }
 
+    /// Snapshot every installed device as a list of `DeviceSnapshot` records.
+    pub fn device_snapshots(&self) -> Vec<g6q_diag::DeviceSnapshot> {
+        self.devices
+            .iter()
+            .map(|d| g6q_diag::DeviceSnapshot {
+                base: d.base,
+                kind: d.kind.tag().to_string(),
+                state: d.kind.snapshot(),
+            })
+            .collect()
+    }
+
+    /// Restore device state from a list of `DeviceSnapshot` records.
+    ///
+    /// Devices are matched by base address and kind.  The address space is assumed to already
+    /// contain the same device instances (restore is normally paired with `Hart::restore`).
+    pub fn restore_devices(&mut self, snapshots: &[g6q_diag::DeviceSnapshot]) {
+        for snap in snapshots {
+            if let Some(d) = self.devices.iter_mut().find(|d| d.base == snap.base) {
+                if d.kind.tag() == snap.kind {
+                    d.kind.restore(&snap.state);
+                }
+            }
+        }
+    }
+
     /// Borrow the PLIC mutably.
     pub fn plic_mut(&mut self) -> Option<&mut crate::device::Plic> {
         self.devices.iter_mut().find_map(|d| match &mut d.kind {
@@ -227,9 +287,56 @@ impl PhysMem {
         })
     }
 
+    /// Borrow the AI island, if installed.
+    pub fn ai_island(&self) -> Option<&crate::device::AiIsland> {
+        self.devices.iter().find_map(|d| match &d.kind {
+            DeviceKind::AiIsland(a) => Some(a),
+            _ => None,
+        })
+    }
+
+    /// Borrow the AI island mutably.
+    pub fn ai_island_mut(&mut self) -> Option<&mut crate::device::AiIsland> {
+        self.devices.iter_mut().find_map(|d| match &mut d.kind {
+            DeviceKind::AiIsland(a) => Some(a),
+            _ => None,
+        })
+    }
+
     /// Total installed memory bytes.
     pub fn size(&self) -> u64 {
         self.regions.iter().map(|r| r.len).sum()
+    }
+
+    /// Snapshot every installed memory region as a list of (base, len, data).
+    pub fn snapshot(&self) -> Vec<(u64, u64, Vec<u8>)> {
+        self.regions
+            .iter()
+            .map(|r| (r.base, r.len, r.data.clone()))
+            .collect()
+    }
+
+    /// Replace all installed memory regions with the given snapshot.
+    ///
+    /// This is only safe if the caller has also re-initialised devices; it is intended
+    /// for checkpoint restore where the caller rebuilds the address space from the model.
+    pub fn restore(&mut self, snapshot: &[(u64, u64, Vec<u8>)]) {
+        self.regions = snapshot
+            .iter()
+            .map(|(base, len, data)| {
+                assert_eq!(
+                    data.len(),
+                    *len as usize,
+                    "checkpoint region length mismatch"
+                );
+                Region {
+                    base: *base,
+                    len: *len,
+                    data: data.clone(),
+                }
+            })
+            .collect();
+        self.regions.sort_by_key(|r| r.base);
     }
 
     fn region_for(&self, addr: u64, n: usize) -> Option<&Region> {

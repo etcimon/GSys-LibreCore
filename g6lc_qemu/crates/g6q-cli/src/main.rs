@@ -17,9 +17,11 @@ mod resolve;
 use args::Args;
 use g6q_core::model::Profile;
 use g6q_core::{Inputs, Json, Report, Row, TargetModel, Verdict, SCHEMA_VERSION, STAGE};
-use g6q_vm::device::{Clint, Plic, Uart};
+use g6q_diag::ai_tensor::TensorTrace;
+use g6q_vm::device::{AiIsland, Clint, Plic, Uart};
 use g6q_vm::mem::{Device, DeviceKind, PhysMem, Region};
-use g6q_vm::Hart;
+use g6q_vm::{Halt, Hart};
+use std::path::Path;
 
 /// Package version, from Cargo.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -142,6 +144,7 @@ fn dispatch(verb: &str, args: &Args) -> Result<(), String> {
         "gen" => cmd_gen(args),
         "conform" => cmd_conform(args),
         "run" => cmd_run(args),
+        "fw" => cmd_fw(args),
         "tandem" => cmd_tandem(args),
         v if VERBS.iter().any(|x| x.name == v) => {
             let stage = VERBS.iter().find(|x| x.name == v).map_or("?", |x| x.stage);
@@ -173,7 +176,17 @@ fn cmd_gen(args: &Args) -> Result<(), String> {
             eprintln!("  {n}");
         }
     }
-    let model = g6q_ingest::assemble(&resolved.sources);
+    let mut model = g6q_ingest::assemble(&resolved.sources);
+
+    if let Some(v) = args.value("virtio-mmio") {
+        model.soc.virtio_mmio = v
+            .parse::<u32>()
+            .map_err(|_| "--virtio-mmio must be a non-negative integer".to_string())?;
+    }
+
+    if let Some(v) = args.value("bootrom") {
+        model.soc.bootrom = Some(parse_bootrom(v)?);
+    }
 
     // Legality is a separate question from conformance: an illegal configuration is one
     // the design would refuse to elaborate, and emulating it would be reporting on a
@@ -197,11 +210,17 @@ fn cmd_gen(args: &Args) -> Result<(), String> {
         "model" => model.to_json().to_pretty(),
         "conformance" => model.conformance.to_json().to_pretty(),
         "args" => emit_args(args, &resolved, &model)?,
+        "qemu-machine" => return emit_qemu_machine(args, &model),
+        "qemu" => return emit_qemu_all(args, &model),
+        "qemu-plugin" => return emit_qemu_plugin(args, &model),
+        "qemu-pmu-plugin" => return emit_qemu_pmu_plugin(args, &model),
+        "matrix" => return emit_matrix(args, &resolved),
         "dts" | "dtb" => return emit_device_tree(args, &resolved, emit),
         other => {
             return Err(format!(
                 "`--emit {other}` is specified in architecture/CLI.md but lands at a later \
-                 stage; available now: model, conformance, args, dts, dtb"
+                 stage; available now: model, conformance, args, matrix, dts, dtb, qemu, \
+                 qemu-machine, qemu-plugin, qemu-pmu-plugin"
             ))
         }
     };
@@ -223,8 +242,11 @@ fn emit_args(
     resolved: &resolve::Resolved,
     model: &TargetModel,
 ) -> Result<String, String> {
-    let boot = resolve::boot_options(args);
+    let mut boot = resolve::boot_options(args);
     g6q_emit_args::check_profile(model, &boot)?;
+    if args.flag("plugin") || args.value("plugin").is_some() {
+        boot.plugin = Some(plugin_path(args, model));
+    }
 
     let stock = g6q_emit_args::StockTarget {
         machine: args.value_or("stock-machine", "virt").to_string(),
@@ -243,7 +265,10 @@ fn emit_args(
                 return cap.qemu_properties().to_vec();
             }
         }
-        vec![token.to_string()]
+        // No capability row for this token: it is either a base MISA letter (i, m)
+        // or a non-QEMU property. Stock `-cpu rv64` already carries the base ISA,
+        // so emit nothing rather than an invalid property.
+        Vec::new()
     };
 
     let argv = g6q_emit_args::build_argv(model, &stock, &boot, &properties_for);
@@ -287,6 +312,134 @@ fn emit_args(
     Ok(j.to_pretty())
 }
 
+/// `--emit qemu-machine` — generate the B1 QEMU machine, CPU, FDT and build wiring.
+fn emit_qemu_machine(args: &Args, model: &TargetModel) -> Result<(), String> {
+    let digest = resolve::digest(&model.to_json().to_pretty());
+    let mut emission = g6q_emit_qemu::machine::emit_machine(model, VERSION, &digest);
+    let cpu_emission = g6q_emit_qemu::cpu::emit_cpu(model, VERSION, &digest);
+    for f in &cpu_emission.files {
+        emission.push(f.clone());
+    }
+    let dtb_emission = g6q_emit_qemu::dts::emit_dtb(model, VERSION, &digest);
+    for f in &dtb_emission.files {
+        emission.push(f.clone());
+    }
+    let build_emission = g6q_emit_qemu::build::emit_build_wiring(model, VERSION, &digest);
+    for f in &build_emission.files {
+        emission.push(f.clone());
+    }
+
+    let base = args
+        .value("emit-dir")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("out/emit/{}", model.target_id)));
+
+    for f in &emission.files {
+        let path = base.join(&f.path);
+        let text = &f.contents;
+        write_out(path.to_str().unwrap_or(&f.path), text)?;
+        eprintln!("g6lc-qemu: wrote {}", path.display());
+    }
+
+    Ok(())
+}
+
+/// `--emit qemu-plugin` — generate the B2 QEMU TCG plugin.
+fn emit_qemu_plugin(args: &Args, model: &TargetModel) -> Result<(), String> {
+    let digest = resolve::digest(&model.to_json().to_pretty());
+    let emission = g6q_emit_qemu::plugin::emit_plugin(model, VERSION, &digest);
+
+    let base = args
+        .value("emit-dir")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("out/emit/{}", model.target_id)));
+
+    for f in &emission.files {
+        let path = base.join(&f.path);
+        let text = &f.contents;
+        write_out(path.to_str().unwrap_or(&f.path), text)?;
+        eprintln!("g6lc-qemu: wrote {}", path.display());
+    }
+
+    Ok(())
+}
+
+/// `--emit qemu-pmu-plugin` — generate the B2 QEMU PMU counter plugin.
+fn emit_qemu_pmu_plugin(args: &Args, model: &TargetModel) -> Result<(), String> {
+    let digest = resolve::digest(&model.to_json().to_pretty());
+    let emission = g6q_emit_qemu::pmu::emit_pmu_plugin(model, VERSION, &digest);
+
+    let base = args
+        .value("emit-dir")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("out/emit/{}", model.target_id)));
+
+    for f in &emission.files {
+        let path = base.join(&f.path);
+        let text = &f.contents;
+        write_out(path.to_str().unwrap_or(&f.path), text)?;
+        eprintln!("g6lc-qemu: wrote {}", path.display());
+    }
+
+    Ok(())
+}
+
+/// `--emit matrix` — print the capability matrix (input probes + verdicts) as JSON.
+fn emit_matrix(args: &Args, resolved: &resolve::Resolved) -> Result<(), String> {
+    let matrix = g6q_ingest::matrix::build(&resolved.sources);
+    let text = matrix.to_pretty();
+
+    match args.value("emit-model").or_else(|| args.value("json-out")) {
+        Some(path) => {
+            write_out(path, &text)?;
+            eprintln!("g6lc-qemu: wrote {path}");
+        }
+        None => print!("{text}"),
+    }
+
+    Ok(())
+}
+
+/// `--emit qemu` — generate all B1/B2 QEMU artifacts (machine, CPU, FDT, build wiring, plugin).
+fn emit_qemu_all(args: &Args, model: &TargetModel) -> Result<(), String> {
+    let digest = resolve::digest(&model.to_json().to_pretty());
+    let mut emission = g6q_emit_qemu::machine::emit_machine(model, VERSION, &digest);
+    let cpu_emission = g6q_emit_qemu::cpu::emit_cpu(model, VERSION, &digest);
+    for f in &cpu_emission.files {
+        emission.push(f.clone());
+    }
+    let dtb_emission = g6q_emit_qemu::dts::emit_dtb(model, VERSION, &digest);
+    for f in &dtb_emission.files {
+        emission.push(f.clone());
+    }
+    let build_emission = g6q_emit_qemu::build::emit_build_wiring(model, VERSION, &digest);
+    for f in &build_emission.files {
+        emission.push(f.clone());
+    }
+    let plugin_emission = g6q_emit_qemu::plugin::emit_plugin(model, VERSION, &digest);
+    for f in &plugin_emission.files {
+        emission.push(f.clone());
+    }
+    let pmu_emission = g6q_emit_qemu::pmu::emit_pmu_plugin(model, VERSION, &digest);
+    for f in &pmu_emission.files {
+        emission.push(f.clone());
+    }
+
+    let base = args
+        .value("emit-dir")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(format!("out/emit/{}", model.target_id)));
+
+    for f in &emission.files {
+        let path = base.join(&f.path);
+        let text = &f.contents;
+        write_out(path.to_str().unwrap_or(&f.path), text)?;
+        eprintln!("g6lc-qemu: wrote {}", path.display());
+    }
+
+    Ok(())
+}
+
 /// `--emit dts|dtb` — write the resolved device tree.
 fn emit_device_tree(args: &Args, resolved: &resolve::Resolved, form: &str) -> Result<(), String> {
     let Some(path) = &resolved.dts_path else {
@@ -294,7 +447,25 @@ fn emit_device_tree(args: &Args, resolved: &resolve::Resolved, form: &str) -> Re
     };
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let tree = g6q_dts::parse(&text);
+    let mut tree = g6q_dts::parse(&text);
+
+    // Apply overlays first, then per-property mutations.
+    for overlay in args.values("dts-overlay") {
+        let otext = std::fs::read_to_string(overlay)
+            .map_err(|e| format!("cannot read overlay {overlay}: {e}"))?;
+        let otree = g6q_dts::parse(&otext);
+        g6q_dts::merge(&mut tree, &otree);
+    }
+
+    for spec in args.values("dts-set") {
+        let Some((path, value)) = spec.split_once('=') else {
+            return Err(format!("--dts-set requires PATH=VALUE, got {spec}"));
+        };
+        g6q_dts::set_prop(&mut tree, path, value).map_err(|e| format!("--dts-set {spec}: {e}"))?;
+    }
+    for spec in args.values("dts-del") {
+        g6q_dts::del_prop(&mut tree, spec).map_err(|e| format!("--dts-del {spec}: {e}"))?;
+    }
 
     let out = args
         .value("emit-model")
@@ -303,7 +474,7 @@ fn emit_device_tree(args: &Args, resolved: &resolve::Resolved, form: &str) -> Re
         .unwrap_or_else(|| format!("out/emit/{form}.{form}"));
 
     if form == "dts" {
-        write_out(&out, &text)?;
+        write_out(&out, &tree.to_dts(""))?;
     } else {
         // Written here rather than shelled out to a device-tree compiler: requiring one
         // would make the package's standalone claim conditional on another toolchain.
@@ -560,12 +731,30 @@ mod tests {
 
     #[test]
     fn an_unsupported_emit_names_what_is_available() {
-        let args = Args::parse(["gen", "--target", "t", "--emit", "qemu-machine"]);
+        let args = Args::parse(["gen", "--target", "t", "--emit", "qemu-cpu"]);
         let err = dispatch("gen", &args).unwrap_err();
         assert!(
             err.contains("model") && err.contains("conformance"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn gen_qemu_emit_writes_all_qemu_artifacts() {
+        let args = Args::parse(["gen", "--target", "t", "--emit", "qemu"]);
+        assert!(dispatch("gen", &args).is_ok());
+    }
+
+    #[test]
+    fn gen_qemu_pmu_plugin_is_available() {
+        let args = Args::parse(["gen", "--target", "t", "--emit", "qemu-pmu-plugin"]);
+        assert!(dispatch("gen", &args).is_ok());
+    }
+
+    #[test]
+    fn gen_matrix_is_available() {
+        let args = Args::parse(["gen", "--target", "t", "--emit", "matrix"]);
+        assert!(dispatch("gen", &args).is_ok());
     }
 
     #[test]
@@ -627,6 +816,48 @@ mod tests {
     }
 
     #[test]
+    fn run_args_backend_builds_stock_qemu_argv() {
+        let args = Args::parse(["run", "--backend", "args", "--target", "t"]);
+        assert!(cmd_run(&args).is_ok());
+    }
+
+    #[test]
+    fn run_args_with_plugin_includes_plugin_path() {
+        let args = Args::parse(["run", "--backend", "args", "--target", "t", "--plugin"]);
+        assert!(cmd_run(&args).is_ok());
+    }
+
+    #[test]
+    fn run_qemu_dry_run_does_not_require_a_binary() {
+        let args = Args::parse([
+            "run",
+            "--backend",
+            "qemu",
+            "--target",
+            "t",
+            "--dry-run",
+            "--qemu-path",
+            "/nonexistent/qemu",
+        ]);
+        assert!(cmd_run(&args).is_ok());
+    }
+
+    #[test]
+    fn run_qemu_record_sets_plugin_and_trace_arg() {
+        let args = Args::parse([
+            "run",
+            "--backend",
+            "qemu",
+            "--target",
+            "t",
+            "--record",
+            "/tmp/run.rec",
+            "--dry-run",
+        ]);
+        assert!(cmd_run(&args).is_ok());
+    }
+
+    #[test]
     fn tandem_rejects_missing_reference() {
         let args = Args::parse(["tandem", "--under-test", "x"]);
         assert!(cmd_tandem(&args).is_err());
@@ -648,6 +879,9 @@ mod tests {
             pc_wdata: 0x8000_0004,
             insn: 0x1234_5678,
             trap: false,
+            cause: 0,
+            prv: 0,
+            halt: false,
             rd_addr: 0,
             rd_wdata: 0,
             frd_addr: 0,
@@ -668,20 +902,171 @@ mod tests {
         ]);
         assert!(cmd_tandem(&args).is_ok());
     }
+
+    #[test]
+    fn tandem_accepts_record_file_objects() {
+        use std::io::Write;
+        let mut tmp = std::env::temp_dir();
+        tmp.push("g6q-tandem-rf-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let lhs = tmp.join("lhs.json");
+        let rhs = tmp.join("rhs.json");
+        let mut m = g6q_core::TargetModel::new("mini");
+        m.target_id = "mini".to_string();
+        let records = vec![g6q_diag::CommitRecord {
+            order: 0,
+            hart: 0,
+            pc_rdata: 0x8000_0000,
+            pc_wdata: 0x8000_0004,
+            insn: 0x1234_5678,
+            trap: false,
+            cause: 0,
+            prv: 0,
+            halt: false,
+            rd_addr: 0,
+            rd_wdata: 0,
+            frd_addr: 0,
+            frd_wdata: 0,
+        }];
+        let file = g6q_diag::RecordFile::from_model_and_records(&m, records);
+        let text = file.to_json().to_pretty();
+        let mut f = std::fs::File::create(&lhs).unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+        let mut f = std::fs::File::create(&rhs).unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+
+        let args = Args::parse([
+            "tandem",
+            "--under-test",
+            lhs.to_str().unwrap(),
+            "--reference",
+            rhs.to_str().unwrap(),
+        ]);
+        assert!(cmd_tandem(&args).is_ok());
+    }
+
+    #[test]
+    fn tandem_loads_dasm_under_test() {
+        use std::io::Write;
+        let mut tmp = std::env::temp_dir();
+        tmp.push("g6q-tandem-dasm-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let dasm = tmp.join("trace_rvfi_hart_0.dasm");
+        let json = tmp.join("ref.json");
+
+        let dasm_text = "core   0: 0x1000 (0x00000293) DASM(0x00000293)\n\
+                         3 0x1000 (0x00000293) x5 0x0000000000000001\n";
+        std::fs::File::create(&dasm)
+            .unwrap()
+            .write_all(dasm_text.as_bytes())
+            .unwrap();
+
+        let mut m = g6q_core::TargetModel::new("mini");
+        m.target_id = "mini".to_string();
+        let records = vec![g6q_diag::CommitRecord {
+            order: 0,
+            hart: 0,
+            pc_rdata: 0x1000,
+            pc_wdata: 0x1004,
+            insn: 0x0000_0293,
+            trap: false,
+            cause: 0,
+            prv: 3,
+            halt: false,
+            rd_addr: 5,
+            rd_wdata: 1,
+            frd_addr: 0,
+            frd_wdata: 0,
+        }];
+        let file = g6q_diag::RecordFile::from_model_and_records(&m, records);
+        let text = file.to_json().to_pretty();
+        std::fs::File::create(&json)
+            .unwrap()
+            .write_all(text.as_bytes())
+            .unwrap();
+
+        let args = Args::parse([
+            "tandem",
+            "--under-test",
+            dasm.to_str().unwrap(),
+            "--reference",
+            json.to_str().unwrap(),
+        ]);
+        assert!(cmd_tandem(&args).is_ok());
+    }
 }
 
-/// `run --backend native` — a raw-image native VM execution.
+/// `fw` — fetch, build or inspect firmware wiring.
 ///
-/// This is intentionally minimal: it loads a flat binary, sets up the faithful
-/// memory map (DRAM, CLINT, PLIC, UART), and runs one hart. The map is still
-/// hard-coded and will be replaced by the resolved `TargetModel` in a later pass.
+/// For now this is the inspect/fetch boundary: it can parse and print the requested
+/// firmware layout from the command line. Building firmware from source is the next Q2
+/// pass.
+fn cmd_fw(args: &Args) -> Result<(), String> {
+    match args.positionals.get(1).map(String::as_str) {
+        Some("fetch") | Some("build") => {
+            return Err(format!(
+                "fw {} is specified in architecture/CLI.md but lands at a later Q2 stage",
+                args.positionals[1]
+            ))
+        }
+        _ => {}
+    }
+
+    if args.flag("fw-print-region") {
+        let path = args
+            .value("fw")
+            .or_else(|| args.value("elf"))
+            .or_else(|| args.value("fw-payload"))
+            .ok_or("--fw-print-region needs one of --fw, --elf or --fw-payload")?;
+        let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+        let j = Json::obj(vec![
+            ("path", Json::str(path)),
+            ("bytes", Json::Int(bytes.len() as i64)),
+            (
+                "note",
+                Json::str("raw size; ELF parsing and segment layout are a later Q2 pass"),
+            ),
+        ]);
+        print!("{}", j.to_pretty());
+    }
+
+    let boot = resolve::boot_options(args);
+    print!("{}", boot.to_json().to_pretty());
+    Ok(())
+}
+
+/// Find the first peripheral whose id or model matches one of the aliases.
+fn find_peripheral<'a>(
+    model: &'a TargetModel,
+    aliases: &[&str],
+) -> Option<&'a g6q_core::model::Peripheral> {
+    model.soc.peripherals.iter().find(|p| {
+        let id = p.id.to_lowercase();
+        let model = p.model.as_deref().unwrap_or("").to_lowercase();
+        aliases.iter().any(|a| id.contains(a) || model.contains(a))
+    })
+}
+
+/// `run` — execute a design using the native VM, stock QEMU, or just show argv.
+///
+/// `run --backend native` is the flat-image Rust VM harness.
+/// `run --backend args` prints the B0 stock-QEMU argv.
+/// `run --backend qemu` spawns `qemu-system-riscv64` (or `--qemu-path`).
 fn cmd_run(args: &Args) -> Result<(), String> {
     let backend = args.value_or("backend", "native");
-    if backend != "native" {
-        return Err(format!(
-            "`--backend {backend}` is not implemented; use `native`"
-        ));
+    match backend {
+        "native" => run_native(args),
+        "args" => run_args(args),
+        "qemu" => run_qemu(args),
+        other => Err(format!(
+            "`--backend {other}` is not implemented; use native, args or qemu"
+        )),
     }
+}
+
+fn run_native(args: &Args) -> Result<(), String> {
     let image = args
         .value("image")
         .ok_or("run --backend native needs --image FILE")?;
@@ -689,25 +1074,103 @@ fn cmd_run(args: &Args) -> Result<(), String> {
         .value_or("steps", "1000000")
         .parse::<u64>()
         .map_err(|_| "--steps must be a positive integer".to_string())?;
-    let base = parse_addr(args.value_or("base", "0x80000000"))?;
+
+    // Resolve what we can from the command line and derive reset / memory / xlen from the
+    // model rather than a hard-coded constant.  Native can still run with no target at all,
+    // in which case the defaults take over.
+    let resolved = resolve::resolve(args)?;
+    let model = g6q_ingest::assemble(&resolved.sources);
+    if !model.conformance.passes_strict() {
+        eprintln!("g6lc-qemu: warning: model does not pass strict conformance");
+    }
+
+    let (base, dram_len) = model.soc.dram.unwrap_or((0x8000_0000, 0x1000_0000));
+    let base = if let Some(b) = args.value("base") {
+        parse_addr(b)?
+    } else {
+        base
+    };
+    let xlen = if model.isa.xlen == 0 {
+        eprintln!("g6lc-qemu: warning: xlen not in model; defaulting to 64");
+        64
+    } else if model.isa.xlen != 32 && model.isa.xlen != 64 {
+        return Err(format!(
+            "unsupported xlen {}; must be 32 or 64",
+            model.isa.xlen
+        ));
+    } else {
+        model.isa.xlen
+    };
 
     let mut mem = PhysMem::new();
-    mem.add(Region::new(base, 0x1000_0000));
+    mem.add(Region::new(base, dram_len));
+
+    // Place CLINT, PLIC and UART from the model's peripheral list when it provides them;
+    // otherwise fall back to the conventional addresses the tests and fixtures use.
+    let clint = find_peripheral(&model, &["clint"])
+        .map(|p| (p.base, p.len))
+        .unwrap_or((0x0200_0000, 0x10000));
+    let plic = find_peripheral(&model, &["intc", "plic"])
+        .map(|p| (p.base, p.len))
+        .unwrap_or((0x0c00_0000, 0x40_0000));
+    let uart = find_peripheral(&model, &["uart", "serial"])
+        .map(|p| (p.base, p.len))
+        .unwrap_or((0x1000_0000, 0x100));
+
+    let harts = model.soc.harts_total.max(1) as usize;
     mem.add_device(Device::new(
-        0x0200_0000,
-        0x10000,
-        DeviceKind::Clint(Clint::new(1)),
+        clint.0,
+        clint.1,
+        DeviceKind::Clint(Clint::new(harts)),
     ));
+    let plic_sources = model.soc.intc_sources.max(1);
+    let plic_contexts = model.soc.intc_targets.max(1);
     mem.add_device(Device::new(
-        0x0c00_0000,
-        0x40_0000,
-        DeviceKind::Plic(Plic::new(30, 16)),
+        plic.0,
+        plic.1,
+        DeviceKind::Plic(Plic::new(plic_sources, plic_contexts)),
     ));
-    mem.add_device(Device::new(
-        0x1000_0000,
-        0x100,
-        DeviceKind::Uart(Uart::new()),
-    ));
+    mem.add_device(Device::new(uart.0, uart.1, DeviceKind::Uart(Uart::new())));
+
+    let mut hart = Hart::with_isa(base, &model.isa);
+
+    // Wire an AI island when the model exposes one.
+    if let Some(ai) = &model.soc.ai_island {
+        let ai_base = find_peripheral(&model, &["ai-island"])
+            .map(|p| (p.base, p.len))
+            .unwrap_or((0x3000_0000, 0x1000));
+        let mut ai_island = AiIsland::new();
+        ai_island.set_ai_model(ai);
+        let unsourced = ai_island.cap_unsourced();
+        if !unsourced.is_empty() {
+            // Tracked, not silent: a capability the guest reads as zero is
+            // indistinguishable from a real answer, so name the ones we cannot source.
+            let names: Vec<&str> = unsourced.iter().map(|(n, _)| n.as_str()).collect();
+            eprintln!(
+                "g6lc-qemu: warning: {} AI capability word(s) cannot be sourced from the \
+                 model and are absent from the window: {}",
+                names.len(),
+                names.join(", ")
+            );
+        }
+        if !ai.config.placement_resolved() {
+            // Loud, because a guest cannot address an island whose windows are unplaced,
+            // and the failure would otherwise look like a descriptor or driver bug.
+            eprintln!(
+                "g6lc-qemu: warning: AI-island MMIO placement is unresolved \
+                 (capability and descriptor window bases were not found in the design's \
+                 configuration package); the descriptor window falls back to offset 0 and \
+                 the capability window is not decoded"
+            );
+        }
+        mem.add_device(Device::new(
+            ai_base.0,
+            ai_base.1,
+            DeviceKind::AiIsland(ai_island),
+        ));
+        hart.ai_instr_set = Some(ai.instr_set.clone());
+        hart.ai_model = Some(ai.clone());
+    }
 
     let bytes = std::fs::read(image).map_err(|e| format!("cannot read {image}: {e}"))?;
     for (i, b) in bytes.iter().enumerate() {
@@ -715,14 +1178,19 @@ fn cmd_run(args: &Args) -> Result<(), String> {
             .map_err(|e| format!("cannot load binary: {e}"))?;
     }
 
-    let mut hart = Hart::new(base);
     hart.csr.mtvec = 0x9000_0000;
     // A default trap handler that self-loops so an unhandled ecall does not run away.
     mem.add(Region::new(0x9000_0000, 0x1000));
     mem.write_le::<4>(0x9000_0000, 0x0000_006f)
         .map_err(|e| format!("trap handler: {e}"))?;
 
-    let halt = hart.run(&mut mem, 64, steps);
+    let halt = if let Some(path) = args.value("replay") {
+        let file = g6q_diag::read_record_file(path)
+            .map_err(|e| format!("cannot read replay {path}: {e}"))?;
+        hart.run_replay(&mut mem, xlen as u8, steps, &file.records)
+    } else {
+        hart.run(&mut mem, xlen as u8, steps)
+    };
 
     if let Some(u) = mem.uart() {
         let out = String::from_utf8_lossy(&u.output);
@@ -731,11 +1199,47 @@ fn cmd_run(args: &Args) -> Result<(), String> {
         }
     }
 
-    if args.flag("record") {
-        let records = g6q_diag::records_to_json(&hart.records).to_pretty();
-        let path = args.value_or("record-out", "out/records.json");
-        std::fs::write(path, records).map_err(|e| format!("cannot write {path}: {e}"))?;
+    if let Halt::ReplayDivergence(idx, diffs) = &halt {
+        return Err(format!(
+            "replay diverged at record {idx}: {}",
+            diffs
+                .iter()
+                .map(|d| format!("{}: {} != {}", d.field, d.lhs, d.rhs))
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+
+    if let Some(path) = args.value("record") {
+        let mut m = model.clone();
+        m.target_id = args.value("target").unwrap_or("native").to_string();
+        let file = g6q_diag::RecordFile::from_model_and_records(&m, hart.records.clone());
+        g6q_diag::write_record_file(path, &file)
+            .map_err(|e| format!("cannot write {path}: {e}"))?;
         eprintln!("g6lc-qemu: wrote {path}");
+    }
+
+    if let Some(path) = args.value("checkpoint") {
+        let cp = hart.checkpoint(&mem);
+        g6q_diag::write_checkpoint(path, &cp).map_err(|e| format!("cannot write {path}: {e}"))?;
+        eprintln!("g6lc-qemu: wrote {path}");
+    }
+
+    if let Some(path) = args.value("tensor") {
+        if let Some(ai) = mem.ai_island_mut() {
+            let trace = TensorTrace {
+                events: ai.drain_events(),
+            };
+            let header = Json::obj([
+                ("profile", Json::Str(model.target_id.clone())),
+                ("profile_tainted", Json::Bool(!model.faithful)),
+                ("evidence", Json::Bool(false)),
+            ]);
+            let body = Json::obj([("header", header), ("events", trace.to_json())]);
+            std::fs::write(path, body.to_pretty())
+                .map_err(|e| format!("cannot write {path}: {e}"))?;
+            eprintln!("g6lc-qemu: wrote {path}");
+        }
     }
 
     if args.flag("verbose") {
@@ -744,6 +1248,110 @@ fn cmd_run(args: &Args) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn run_args(args: &Args) -> Result<(), String> {
+    let resolved = resolve::resolve(args)?;
+    let model = g6q_ingest::assemble(&resolved.sources);
+    if !model.conformance.passes_strict() {
+        eprintln!("g6lc-qemu: warning: model does not pass strict conformance");
+    }
+    let text = emit_args(args, &resolved, &model)?;
+    if let Some(path) = args.value("json-out") {
+        write_out(path, &text)?;
+        eprintln!("g6lc-qemu: wrote {path}");
+    } else {
+        print!("{text}");
+    }
+    Ok(())
+}
+
+fn run_qemu(args: &Args) -> Result<(), String> {
+    let resolved = resolve::resolve(args)?;
+    let model = g6q_ingest::assemble(&resolved.sources);
+    if !model.conformance.passes_strict() {
+        eprintln!("g6lc-qemu: warning: model does not pass strict conformance");
+    }
+
+    let mut boot = resolve::boot_options(args);
+    g6q_emit_args::check_profile(&model, &boot)?;
+    let record = args.value("record").map(str::to_string);
+    if let Some(record_path) = &record {
+        let plugin_so = args
+            .value("plugin")
+            .map(str::to_string)
+            .unwrap_or_else(|| plugin_path(args, &model));
+        let trace_tmp = format!("{record_path}.g6q-trace-tmp");
+        boot.plugin = Some(format!("{plugin_so},trace={trace_tmp}"));
+    } else if args.flag("plugin") || args.value("plugin").is_some() {
+        boot.plugin = Some(plugin_path(args, &model));
+    }
+
+    let table = resolved
+        .sources
+        .table
+        .clone()
+        .unwrap_or_else(g6q_ingest::capability::Table::default_table);
+    let properties_for = |token: &str| -> Vec<String> {
+        for cap in &table.entries {
+            if cap.dts_tokens.iter().any(|t| t == token) {
+                return cap.qemu_properties().to_vec();
+            }
+        }
+        // No capability row for this token: it is either a base MISA letter (i, m)
+        // or a non-QEMU property. Stock `-cpu rv64` already carries the base ISA,
+        // so emit nothing rather than an invalid property.
+        Vec::new()
+    };
+
+    let stock = g6q_emit_args::StockTarget {
+        machine: args.value_or("stock-machine", "virt").to_string(),
+        cpu_base: args.value_or("stock-cpu", "rv64").to_string(),
+    };
+    let argv = g6q_emit_args::build_argv(&model, &stock, &boot, &properties_for);
+
+    let binary = args.value_or("qemu-path", "qemu-system-riscv64");
+
+    if args.flag("dry-run") {
+        println!("{} {}", binary, argv.join(" "));
+        return Ok(());
+    }
+
+    let mut cmd = std::process::Command::new(binary);
+    cmd.args(&argv);
+    let status = cmd
+        .status()
+        .map_err(|e| format!("failed to spawn `{binary}`: {e}"))?;
+    if !status.success() {
+        return Err(format!("`{binary}` exited with status {status}"));
+    }
+
+    if let Some(record_path) = record {
+        let trace_tmp = format!("{record_path}.g6q-trace-tmp");
+        if std::path::Path::new(&trace_tmp).exists() {
+            std::fs::copy(&trace_tmp, &record_path)
+                .map_err(|e| format!("cannot copy trace {trace_tmp} to {record_path}: {e}"))?;
+            std::fs::remove_file(&trace_tmp)
+                .map_err(|e| format!("cannot remove temporary trace {trace_tmp}: {e}"))?;
+            eprintln!("g6lc-qemu: wrote {record_path}");
+        } else {
+            eprintln!("g6lc-qemu: warning: no trace produced at {trace_tmp}; was the plugin loaded and did QEMU exit cleanly?");
+        }
+    }
+
+    Ok(())
+}
+
+/// Default plugin `.so` path, or the user-supplied one after `--plugin`.
+fn plugin_path(args: &Args, model: &TargetModel) -> String {
+    if let Some(p) = args.value("plugin") {
+        return p.to_string();
+    }
+    let name = g6q_emit_qemu::machine::machine_name(&model.target_id);
+    format!(
+        "out/emit/{}/contrib/plugins/g6lc-{}.so",
+        model.target_id, name
+    )
 }
 
 fn parse_addr(s: &str) -> Result<u64, String> {
@@ -755,6 +1363,33 @@ fn parse_addr(s: &str) -> Result<u64, String> {
     }
 }
 
+fn parse_bootrom(s: &str) -> Result<(u64, u64), String> {
+    let (base, len) = s
+        .split_once(':')
+        .or_else(|| s.split_once(','))
+        .ok_or_else(|| "--bootrom must be BASE:LEN or BASE,LEN (e.g. 0x1000:0xf000)".to_string())?;
+    Ok((parse_addr(base.trim())?, parse_addr(len.trim())?))
+}
+
+/// Parse either a plain record array or a `RecordFile` object.
+fn load_records(text: &str) -> Result<Vec<g6q_diag::CommitRecord>, String> {
+    let j = Json::parse(text).map_err(|e| format!("invalid JSON: {e}"))?;
+    if let Some(rf) = g6q_diag::RecordFile::from_json(&j) {
+        return Ok(rf.records);
+    }
+    g6q_diag::records_from_json(&j)
+        .ok_or_else(|| "expected a JSON array of records or a record file".to_string())
+}
+
+/// `tandem` — compare an under-test record stream with a reference.
+fn load_records_from_file(path: &str) -> Result<Vec<g6q_diag::CommitRecord>, String> {
+    if path.ends_with(".dasm") {
+        return g6q_diag::rvfi::parse_dasm_file(Path::new(path));
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    load_records(&text)
+}
+
 /// `tandem` — compare an under-test record stream with a reference.
 fn cmd_tandem(args: &Args) -> Result<(), String> {
     let under = args
@@ -764,12 +1399,8 @@ fn cmd_tandem(args: &Args) -> Result<(), String> {
         .value("reference")
         .ok_or("tandem needs --reference FILE")?;
 
-    let lhs = std::fs::read_to_string(under).map_err(|e| format!("cannot read {under}: {e}"))?;
-    let rhs =
-        std::fs::read_to_string(reference).map_err(|e| format!("cannot read {reference}: {e}"))?;
-
-    let under_test = g6q_diag::records_from_str(&lhs)?;
-    let reference = g6q_diag::records_from_str(&rhs)?;
+    let under_test = load_records_from_file(under)?;
+    let reference = load_records_from_file(reference)?;
 
     let report = g6q_diag::tandem_report(&under_test, &reference);
     print!("{}", report.to_pretty());

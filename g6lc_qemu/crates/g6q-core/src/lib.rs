@@ -26,10 +26,12 @@
 pub mod conform;
 pub mod json;
 pub mod model;
+pub mod pmu;
 
 pub use conform::{Inputs, Report, Row, Verdict};
 pub use json::Json;
 pub use model::{Isa, Peripheral, Profile, Provenance, Soc, TargetModel, SCHEMA_VERSION};
+pub use pmu::{parse_pmu_table, PmuEvent, PmuTable};
 
 /// Stage marker for the package as a whole.
 ///

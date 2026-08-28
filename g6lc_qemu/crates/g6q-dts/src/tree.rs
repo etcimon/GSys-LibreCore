@@ -65,6 +65,30 @@ impl Prop {
             Prop::Other(t) => t.clone(),
         }
     }
+
+    /// Render this property as a single source line (without trailing newline).
+    pub fn to_dts(&self, name: &str, _indent: &str) -> String {
+        match self {
+            Prop::Flag => format!("{name};\n"),
+            Prop::Strings(v) if v.is_empty() => format!("{name} = \"\";\n"),
+            Prop::Strings(v) => format!(
+                "{name} = {};\n",
+                v.iter()
+                    .map(|s| format!("\"{s}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Prop::Cells(v) if v.is_empty() => format!("{name} = <>;\n"),
+            Prop::Cells(v) => format!(
+                "{name} = <{}>;\n",
+                v.iter()
+                    .map(|c| format!("{c:#x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+            Prop::Other(t) => format!("{name} = {t};\n"),
+        }
+    }
 }
 
 /// A device tree node.
@@ -127,6 +151,34 @@ impl Node {
     /// The first `compatible` string.
     pub fn compatible(&self) -> Option<&str> {
         self.prop("compatible").and_then(Prop::first_string)
+    }
+
+    /// Render this node and its descendants as device tree source.
+    pub fn to_dts(&self, indent: &str) -> String {
+        let mut out = String::new();
+        if self.name == "/" {
+            out.push_str("/dts-v1/;\n\n");
+            out.push_str("/ ");
+        } else if let Some(label) = &self.label {
+            out.push_str(&format!("{label}: {} ", self.name));
+        } else {
+            out.push_str(&format!("{} ", self.name));
+        }
+        out.push_str("{\n");
+        let inner = format!("{indent}    ");
+        for (name, prop) in &self.props {
+            out.push_str(&prop.to_dts(name, &inner));
+        }
+        for child in &self.children {
+            for line in child.to_dts(&inner).lines() {
+                out.push_str(&inner);
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        out.push_str(indent);
+        out.push_str("};\n");
+        out
     }
 }
 
@@ -463,5 +515,17 @@ mod tests {
     #[test]
     fn parsing_is_deterministic() {
         assert_eq!(parse(SRC), parse(SRC));
+    }
+
+    #[test]
+    fn rendering_round_trips() {
+        let root = parse(SRC);
+        let rendered = root.to_dts("");
+        let reparsed = parse(&rendered);
+        // The structural content must survive; labels and ordering may shift.
+        assert_eq!(root.props, reparsed.props);
+        assert_eq!(root.children.len(), reparsed.children.len());
+        assert!(reparsed.child("cpus").is_some());
+        assert!(reparsed.child("soc").is_some());
     }
 }

@@ -23,6 +23,12 @@
     "base": "rv64i",
     "isa_string": "rv64imac",
     "mmu_mode": "sv39",
+    "timebase_hz": 1000000,
+    "paddr_bits": 56,
+    "vaddr_bits": 39,
+    "page_table_levels": 3,
+    "vpn_bits": 9,
+    "satp_mode": 8,
     "extensions": {
       "i": "live",
       "m": "live",
@@ -45,9 +51,9 @@
     },
     "harts_total": 4,
     "peripherals": [
-      { "id": "clint", "base": "0x2000000", "len": "0xc0000", "model": "example,clint0", "irq": null },
-      { "id": "intc", "base": "0xc000000", "len": "0x4000000", "model": "example,intc0", "irq": null },
-      { "id": "uart", "base": "0x10000000", "len": "0x1000", "model": "ns16550a", "irq": 1 }
+      { "id": "clint", "base": "0x2000000", "len": "0xc0000", "model": "example,clint0", "irq": null, "reg_shift": null, "reg_io_width": null, "clock_frequency": null, "current_speed": null },
+      { "id": "intc", "base": "0xc000000", "len": "0x4000000", "model": "example,intc0", "irq": null, "reg_shift": null, "reg_io_width": null, "clock_frequency": null, "current_speed": null },
+      { "id": "uart", "base": "0x10000000", "len": "0x1000", "model": "ns16550a", "irq": 1, "reg_shift": 2, "reg_io_width": 4, "clock_frequency": 50000000, "current_speed": 115200 }
     ]
   },
   "conformance": {

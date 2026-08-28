@@ -72,6 +72,45 @@ impl Json {
         out
     }
 
+    /// Look up a key in an object. Returns `Json::Null` if the value is not an object
+    /// or the key is absent.
+    pub fn get(&self, key: &str) -> &Self {
+        match self {
+            Json::Obj(m) => m.get(key).unwrap_or(&Json::Null),
+            _ => &Json::Null,
+        }
+    }
+
+    /// Whether this is an empty array or object.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Json::Arr(v) => v.is_empty(),
+            Json::Obj(m) => m.is_empty(),
+            _ => false,
+        }
+    }
+
+    /// If this is an array, return its items.
+    pub fn as_array(&self) -> Option<&[Self]> {
+        match self {
+            Json::Arr(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// If this is `null`, return true.
+    pub fn is_null(&self) -> bool {
+        matches!(self, Json::Null)
+    }
+
+    /// If this is a string, return its value.
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            Json::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// Parse a JSON text into a [`Json`] value.
     ///
     /// This is a small, zero-dependency parser sufficient for the package's own

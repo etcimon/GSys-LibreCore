@@ -24,10 +24,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod derive;
 pub mod legality;
 pub mod parse;
 pub mod value;
 
+pub use derive::{derive, Derivation};
 pub use legality::{validate, Rule};
 pub use parse::{read_package, Package};
 pub use value::Value;

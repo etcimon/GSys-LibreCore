@@ -26,6 +26,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod build;
+pub mod cpu;
+pub mod dts;
+pub mod machine;
+pub mod plugin;
+pub mod pmu;
+
 /// SPDX identifier every emitted file carries.
 ///
 /// Deliberately GPL: the emitted file becomes part of QEMU, a separate work.

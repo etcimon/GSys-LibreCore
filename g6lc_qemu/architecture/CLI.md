@@ -75,7 +75,7 @@ Global: `--json-out FILE`, `-v/--verbose`, `-q/--quiet`, `--dry-run`, `--out-dir
 | `--accel on\|off\|auto` | `auto` from config | accelerator device presence |
 | `--accel-cfg FILE` | the design's island configuration package | capability geometry |
 | `--l2 auto\|off\|SIZE` / `--l3 auto\|off\|SIZE` | `auto` | cache levels |
-| `--bootrom FILE\|none` | `none` | zero-stage ROM |
+| `--bootrom BASE:LEN\|none` | `none` | zero-stage boot ROM window (e.g. `0x1000:0xf000`) |
 
 ## 4. Firmware
 
@@ -106,16 +106,17 @@ Secondary harts park until the supervisor interface starts them; `--sbi-extensio
 
 | Option | Default | Notes |
 |---|---|---|
-| `--os PROFILE` | `firmware-smoke` | `baremetal`, `firmware-smoke`, `buildroot`, `ubuntu`, `debian`, `fedora`, `custom` |
+| `--os PROFILE` | `firmware-smoke` | `buildroot`/`ubuntu`/`debian`/`fedora` imply `g6lc-virt`, `qcow2` rootfs format, and a `root=/dev/vda` append unless overridden |
+|| `--distro-root DIR` | `out/dist/<os>` | search directory for `vmlinuz`/`Image`, `initrd.img`, and `rootfs.qcow2`; explicit `--kernel`/`--initrd`/`--rootfs` win |
 | `--kernel FILE` | environment | kernel image |
 | `--initrd FILE` | — | initial ramdisk |
 | `--rootfs FILE` / `--rootfs-format raw\|qcow2` | — | **implies `--machine g6lc-virt`** |
 | `--drive FILE[,if=virtio,format=…]` (repeatable) | — | virt profile only |
 | `--append "STR"` | from the device tree | merged into the boot arguments |
-| `--maxcpus N` | total harts | bounded by interrupt-controller contexts |
-| `--console uart\|virtio`, `--serial stdio\|file:…\|tcp:…\|null` | `uart`, `stdio` | |
+| `--maxcpus N` | see §6 |  |
+| `--console uart\|virtio`, `--serial stdio\|file:…\|tcp:…\|null` | `uart`, `stdio` | `virtio` adds `virtio-serial-device` + `virtconsole`; implies virt profile |
 | `--netdev user\|tap\|none`, `--net-fwd H:G`, `--ssh-port N` | `none` | networking implies the virt profile |
-| `--virtio blk,net,rng,9p,console` | — | virt profile only |
+| `--virtio blk,net,rng,9p,console` | — | virt profile only; `rng` currently wires `virtio-rng-device` |
 | `--elf FILE`, `--exit-on-tohost` | — | bare-metal harness semantics |
 | `--timeout SECONDS`, `--max-instret N` | none | bounded runs for CI |
 
@@ -129,10 +130,17 @@ time rather than silently switching profiles.
 | `--backend args\|qemu\|rust` | `qemu` if available, else `rust` | B0 / B1+B2 / B3 |
 | `--qemu-bin PATH` / `--qemu-src DIR` | discovered / `qemu/` | stock binary; emission target |
 | `--accel tcg` | `tcg` | only value; host-hypervisor acceleration is a recorded non-goal |
-| `--smp auto\|N` | `auto` = cores × threads-per-core | multi-threaded translation |
-| `--tcg-tuning default\|tuned` | `tuned` | cache / chaining sizing from the model |
-| `--icount N\|off` | off; forced by `--deterministic` | |
+| `--smp auto\|N` | `auto` = cores × threads-per-core | multi-threaded translation; "auto" uses the model |
+|| `--maxcpus N` | `smp` | CPU hotplug ceiling, at least `smp` |
+| `--tcg-tuning default\|tuned` | `default` | `tuned` forces `-accel tcg,thread=multi` when `smp > 1`; incompatible with `--icount` |
+| `--icount N\|off` | off; forced by `--deterministic` | `N` is the `shift` value; `off` disables; icount forces single-threaded TCG |
 | `--deterministic` | off; implied by `--tandem` / `--record` | fixed tick ratio, seeded devices |
+| `--debug CATEGORIES` | — | `-d` log categories for QEMU (`unimp`, `guest_errors`, ...); repeatable |
+| `--debug-file FILE` | — | `-D` log path for QEMU debug output |
+| `--plugin PATH` | — | load a TCG plugin (default `out/emit/<target>/contrib/plugins/g6lc-<id>.so`) |
+| `--record FILE` | — | write a stamped `RecordFile` (B3 native; B1+B2 QEMU auto-loads the trace plugin) |
+|| `--checkpoint FILE` | — | write a resumable `Checkpoint` of the native run |
+|| `--replay FILE` | — | replay the native run against a `RecordFile`, fail on divergence |
 | `--gdb PORT`, `--trace-uart FILE` | — | |
 
 ## 7. Diagnosis
@@ -143,7 +151,8 @@ time rather than silently switching profiles.
 | `--rvfi-out FILE` | — | commit-record trace |
 | `--tandem <ref>\|none`, `--tandem-ref PATH` | `none` | implies `--diag d1 --deterministic --conform strict` |
 | `--stop-on-divergence` | on with `--tandem` | non-zero exit + `divergence.json` |
-| `--record FILE` / `--replay FILE` | — | memory-mapped I/O + interrupt record/replay |
+| `--record FILE` / `--replay FILE` | — | commit-record trace (record) / record-file playback (replay); QEMU `RecordFile` produced by `--record` with `--backend qemu` |
+|| `--tensor FILE` | — | AI-island tensor event trace (`g6q run --backend native` writes it from B3, `g6q run --backend qemu` uses the B2 plugin `tensor=` arg); D2 `ai.tensor.*` counters derive from this stream |
 | `--checkpoint-at instret=N\|pc=ADDR\|uart="STR"` | — | trigger |
 | `--checkpoint-out DIR` | — | resumable state, **faithful profile only** |
 | `--pmu-out FILE`, `--uarch-out FILE` | — | counters; structure profile |
@@ -155,7 +164,7 @@ Every diagnosis artifact carries `"evidence": false`.
 
 | Option | Values |
 |---|---|
-| `--emit` | `model`, `args`, `dtb`, `dts`, `qemu-machine`, `qemu-plugin`, `all` |
+| `--emit` | `model`, `conformance`, `args`, `matrix`, `dts`, `dtb`, `qemu`, `qemu-machine`, `qemu-plugin`, `qemu-pmu-plugin` |
 | `--emit-dir DIR` | default `out/emit/<target>/` |
 | `--check` | re-emit to a temporary directory and diff; non-zero on drift |
 
@@ -168,6 +177,9 @@ g6q run     --target <id> --repo-root /path/to/design --os firmware-smoke --buil
 g6q run     --target <id> --machine g6lc-virt --os ubuntu --kernel Image \
             --rootfs rootfs.img --netdev user --ssh-port 2222 --smp 8
 g6q tandem  --target <id> --elf test.elf --tandem spike --tandem-ref $(which spike)
+g6q run     --target mini --backend qemu --stock-machine g6lc-mini --qemu-path ./qemu/build/qemu-system-riscv64 \
+            --kernel ./smoke.elf --record trace.json
+g6q tandem  --under-test trace.json --reference golden.json
 g6q diag    --target <id> --replay boot.rec --checkpoint-at instret=12000000 \
             --checkpoint-out ckpt/
 ```

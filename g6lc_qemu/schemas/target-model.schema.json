@@ -58,6 +58,20 @@
               "origin": { "type": "string" }
             }
           }
+        },
+        "derivations": {
+          "description": "Fields the design's own build step derives from the written package (masked dependencies, implied extensions, inferred widths, raised floors). NOT overrides: these are what the design elaborates, so they do not taint the model.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["field", "change", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "field": { "type": "string" },
+              "change": { "type": "string" },
+              "reason": { "type": "string" }
+            }
+          }
         }
       }
     },
@@ -87,6 +101,12 @@
         "base": { "type": "string" },
         "isa_string": { "type": "string" },
         "mmu_mode": { "type": ["string", "null"] },
+        "timebase_hz": { "type": "integer", "minimum": 1 },
+        "paddr_bits": { "type": "integer", "minimum": 0 },
+        "vaddr_bits": { "type": "integer", "minimum": 0 },
+        "page_table_levels": { "type": "integer", "minimum": 0 },
+        "vpn_bits": { "type": "integer", "minimum": 0 },
+        "satp_mode": { "type": "integer", "minimum": 0 },
         "extensions": {
           "description": "Token to verdict. A verdict, never a bare boolean: `true` cannot express 'enabled but the unit is a stub'.",
           "type": "object",
@@ -138,7 +158,11 @@
               "base": { "$ref": "#/$defs/hex" },
               "len": { "$ref": "#/$defs/hex" },
               "model": { "type": ["string", "null"] },
-              "irq": { "type": ["integer", "null"] }
+              "irq": { "type": ["integer", "null"] },
+              "reg_shift": { "type": ["integer", "null"] },
+              "reg_io_width": { "type": ["integer", "null"] },
+              "clock_frequency": { "type": ["integer", "null"] },
+              "current_speed": { "type": ["integer", "null"] }
             }
           }
         },
@@ -170,13 +194,153 @@
           "description": "Logical harts: cores multiplied by threads per core. Issue width is not a hart.",
           "type": "integer",
           "minimum": 0
+        },
+        "virtio_mmio": {
+          "description": "Number of virtio-mmio transports the virt profile adds to the SoC memory map.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "bootrom": {
+          "description": "Memory-mapped boot ROM used by the generated QEMU machine. Null means no MROM (direct kernel reset).",
+          "type": ["object", "null"],
+          "required": ["base", "len"],
+          "additionalProperties": false,
+          "properties": {
+            "base": { "$ref": "#/$defs/hex" },
+            "len": { "$ref": "#/$defs/hex" }
+          }
+        },
+        "bootargs": {
+          "description": "Kernel boot arguments advertised in the device tree chosen node.",
+          "type": ["string", "null"]
+        },
+        "stdout_path": {
+          "description": "Console path advertised in the device tree chosen node.",
+          "type": ["string", "null"]
+        },
+        "cores": {
+          "description": "Number of physical cores, when known from the design.",
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "threads_per_core": {
+          "description": "Number of hardware threads per core, when known from the design.",
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "ai_island": {
+          "description": "AI-island model, when the design exposes one.",
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "config": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "cap_version": { "type": "integer", "minimum": 0 },
+                "clusters": { "type": "integer", "minimum": 1 },
+                "macs_per_cycle": { "type": "integer", "minimum": 1 },
+                "clock_khz": { "type": "integer", "minimum": 1 },
+                "sram_bytes": { "type": "integer", "minimum": 0 },
+                "acc_tile_m": { "type": "integer", "minimum": 1 },
+                "acc_tile_n": { "type": "integer", "minimum": 1 },
+                "acc_tile_k": { "type": "integer", "minimum": 1 },
+                "noc_width": { "type": "integer", "minimum": 1 },
+                "dram_channels": { "type": "integer", "minimum": 0 },
+                "dram_gbps": { "type": "integer", "minimum": 0 },
+                "queues": { "type": "integer", "minimum": 0 },
+                "queue_depth": { "type": "integer", "minimum": 0 },
+                "qos_classes": { "type": "integer", "minimum": 0 },
+                "work_quantum_k": { "type": "integer", "minimum": 0 },
+                "cap_offsets": {
+                  "type": "object",
+                  "additionalProperties": { "type": "integer", "minimum": 0 }
+                },
+                "cap_base": {
+                  "description": "Base of the capability window inside the island MMIO region. Null means the design does not publish the placement; it does not mean zero.",
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
+                "desc_base": {
+                  "description": "Base of the descriptor latch window inside the island MMIO region. Descriptor field offsets are relative to this. Null means unresolved.",
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                }
+              }
+            },
+            "desc_layout": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "desc_bytes": { "type": "integer", "minimum": 0 },
+                "version": {
+                  "description": "Descriptor version the island implements. Null means the package does not publish it, so a bring-up fallback is in use.",
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
+                "fields": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "object",
+                    "properties": {
+                      "offset": { "type": "integer", "minimum": 0 },
+                      "size": { "type": "integer", "minimum": 0 },
+                      "bit_low": { "type": "integer", "minimum": 0 },
+                      "bit_high": { "type": "integer", "minimum": 0 }
+                    }
+                  }
+                },
+                "ops": {
+                  "type": "object",
+                  "additionalProperties": { "type": "integer", "minimum": 0 }
+                },
+                "statuses": {
+                  "type": "object",
+                  "additionalProperties": { "type": "integer", "minimum": 0 }
+                }
+              }
+            },
+            "instr_set": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "opcode_custom2": { "type": "integer", "minimum": 0 },
+                "mask_f7f3op": { "type": "integer", "minimum": 0 },
+                "csr_aiqbase": { "type": "integer", "minimum": 0 },
+                "csr_aiqctl": { "type": "integer", "minimum": 0 },
+                "csr_aiqhead": { "type": "integer", "minimum": 0 },
+                "match_enq": { "type": "integer", "minimum": 0 },
+                "match_poll": { "type": "integer", "minimum": 0 },
+                "match_qfence": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
         }
       }
     },
     "accel": { "type": "object" },
     "pmu": {
       "description": "Group to index to symbolic event name, derived from the design's own counter module so an added event appears without an edit.",
-      "type": "object"
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "counter_count": { "type": "integer", "minimum": 0 },
+        "counter_mask": { "type": "integer", "minimum": 0 },
+        "idx_width": { "type": "integer", "minimum": 0 },
+        "grp_width": { "type": "integer", "minimum": 0 },
+        "events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/pmu_event" }
+        },
+        "groups": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "unresolved": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
     },
     "flist": {
       "type": "object",
@@ -198,6 +362,17 @@
     },
     "verdict": {
       "enum": ["live", "stub", "absent", "undeclared", "overdeclared", "unresolved", "synthetic"]
+    },
+    "pmu_event": {
+      "type": "object",
+      "required": ["name", "group", "index", "mhpmevent"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string" },
+        "group": { "type": "integer", "minimum": 0 },
+        "index": { "type": "integer", "minimum": 0 },
+        "mhpmevent": { "type": "integer", "minimum": 0 }
+      }
     }
   }
 }

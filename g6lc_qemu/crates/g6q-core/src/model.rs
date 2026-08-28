@@ -15,6 +15,7 @@
 
 use crate::conform::Report;
 use crate::json::Json;
+use crate::pmu::PmuTable;
 
 /// Schema version of the emitted model document.
 ///
@@ -68,6 +69,14 @@ pub struct Provenance {
     pub defines: Vec<String>,
     /// `(field, value, origin)` for every command-line override.
     pub overrides: Vec<(String, String, String)>,
+    /// `(field, change, reason)` for every derivation the design's build step applies.
+    ///
+    /// These are **not** overrides and do not taint the model: they are what the design
+    /// itself elaborates from the written package. They are recorded because a reader
+    /// comparing the model against the package would otherwise see an unexplained
+    /// difference, and because a derivation the emulator applies wrongly is invisible
+    /// unless it is stated.
+    pub derivations: Vec<(String, String, String)>,
 }
 
 impl Provenance {
@@ -101,12 +110,22 @@ impl Provenance {
                     ])
                 })),
             ),
+            (
+                "derivations",
+                Json::arr(self.derivations.iter().map(|(f, c, r)| {
+                    Json::obj([
+                        ("field", Json::str(f)),
+                        ("change", Json::str(c)),
+                        ("reason", Json::str(r)),
+                    ])
+                })),
+            ),
         ])
     }
 }
 
 /// One memory-mapped peripheral.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Peripheral {
     /// Short identifier, e.g. `"clint"`, `"uart"`.
     pub id: String,
@@ -118,6 +137,14 @@ pub struct Peripheral {
     pub model: Option<String>,
     /// External interrupt line, when the device has one.
     pub irq: Option<u32>,
+    /// `reg-shift` for 16550-style UARTs, in bytes.
+    pub reg_shift: Option<u32>,
+    /// `reg-io-width` for 16550-style UARTs, in bytes.
+    pub reg_io_width: Option<u32>,
+    /// `clock-frequency` for peripheral baud-rate generation, in Hz.
+    pub clock_frequency: Option<u64>,
+    /// `current-speed` for 16550-style UARTs, in baud.
+    pub current_speed: Option<u64>,
 }
 
 impl Peripheral {
@@ -129,6 +156,25 @@ impl Peripheral {
             ("len", Json::addr(self.len)),
             ("model", self.model.as_deref().map_or(Json::Null, Json::str)),
             ("irq", self.irq.map_or(Json::Null, |i| Json::Int(i as i64))),
+            (
+                "reg_shift",
+                self.reg_shift.map_or(Json::Null, |i| Json::Int(i as i64)),
+            ),
+            (
+                "reg_io_width",
+                self.reg_io_width
+                    .map_or(Json::Null, |i| Json::Int(i as i64)),
+            ),
+            (
+                "clock_frequency",
+                self.clock_frequency
+                    .map_or(Json::Null, |i| Json::Int(i as i64)),
+            ),
+            (
+                "current_speed",
+                self.current_speed
+                    .map_or(Json::Null, |i| Json::Int(i as i64)),
+            ),
         ])
     }
 
@@ -142,6 +188,268 @@ impl Peripheral {
         let (a0, a1) = self.range();
         let (b0, b1) = other.range();
         a0 < b1 && b0 < a1
+    }
+}
+
+/// AI-island capability and clustering configuration, derived from
+/// `g6lc_ai_island_cfg_pkg.sv`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AiIslandConfig {
+    /// Capability window contract version.
+    pub cap_version: u16,
+    /// Number of island clusters (replication unit).
+    pub clusters: u32,
+    /// Dense INT8 MACs per cycle per cluster.
+    pub macs_per_cycle: u32,
+    /// Island clock in kHz.
+    pub clock_khz: u32,
+    /// Per-cluster staging + weight SRAM in bytes.
+    pub sram_bytes: u64,
+    /// Island blocking M row.
+    pub acc_tile_m: u32,
+    /// Island blocking N row.
+    pub acc_tile_n: u32,
+    /// Island blocking K row.
+    pub acc_tile_k: u32,
+    /// NoC width in bits.
+    pub noc_width: u32,
+    /// Number of DRAM channels.
+    pub dram_channels: u32,
+    /// Nameplate aggregate DRAM bandwidth in GB/s (0 when not measured).
+    pub dram_gbps: u32,
+    /// T2 rings visible to the island.
+    pub queues: u32,
+    /// Depth of each queue (power of two expected).
+    pub queue_depth: u32,
+    /// Number of QoS classes.
+    pub qos_classes: u32,
+    /// Preemption boundary in k-steps.
+    pub work_quantum_k: u32,
+    /// Capability window offsets by name, from `CAP_OFF_*` localparams.
+    pub cap_offsets: std::collections::BTreeMap<String, u64>,
+    /// Base of the capability window inside the island MMIO region, when the design
+    /// states it.
+    ///
+    /// `None` means *not resolved*, which is different from zero. The capability
+    /// *offsets* come from the configuration package, but the *placement* of the window
+    /// is decided by the island's address decode — so a design that does not publish the
+    /// base leaves this unresolved rather than defaulting, per [`INGEST.md`] §2.1.
+    pub cap_base: Option<u64>,
+    /// Base of the descriptor latch window inside the island MMIO region, when stated.
+    ///
+    /// Descriptor field offsets are relative to this base. As with [`Self::cap_base`],
+    /// absence is reported rather than assumed: guessing a base would place the whole
+    /// descriptor at the wrong address and make every field look individually plausible.
+    pub desc_base: Option<u64>,
+}
+
+impl AiIslandConfig {
+    /// Render as a JSON object.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("cap_version", Json::Int(self.cap_version as i64)),
+            ("clusters", Json::Int(self.clusters as i64)),
+            ("macs_per_cycle", Json::Int(self.macs_per_cycle as i64)),
+            ("clock_khz", Json::Int(self.clock_khz as i64)),
+            ("sram_bytes", Json::Int(self.sram_bytes as i64)),
+            ("acc_tile_m", Json::Int(self.acc_tile_m as i64)),
+            ("acc_tile_n", Json::Int(self.acc_tile_n as i64)),
+            ("acc_tile_k", Json::Int(self.acc_tile_k as i64)),
+            ("noc_width", Json::Int(self.noc_width as i64)),
+            ("dram_channels", Json::Int(self.dram_channels as i64)),
+            ("dram_gbps", Json::Int(self.dram_gbps as i64)),
+            ("queues", Json::Int(self.queues as i64)),
+            ("queue_depth", Json::Int(self.queue_depth as i64)),
+            ("qos_classes", Json::Int(self.qos_classes as i64)),
+            ("work_quantum_k", Json::Int(self.work_quantum_k as i64)),
+            (
+                "cap_offsets",
+                Json::obj(
+                    self.cap_offsets
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), Json::Int(*v as i64))),
+                ),
+            ),
+            (
+                "cap_base",
+                self.cap_base.map_or(Json::Null, |v| Json::Int(v as i64)),
+            ),
+            (
+                "desc_base",
+                self.desc_base.map_or(Json::Null, |v| Json::Int(v as i64)),
+            ),
+        ])
+    }
+
+    /// Whether the island's MMIO placement is fully resolved.
+    ///
+    /// Reported so a caller can distinguish "the guest cannot address this island" from
+    /// "the island has no capabilities", which are very different findings.
+    pub fn placement_resolved(&self) -> bool {
+        self.cap_base.is_some() && self.desc_base.is_some()
+    }
+}
+
+/// A field inside a packed AI descriptor (`desc_t`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DescField {
+    /// Byte offset inside the descriptor.
+    pub offset: u64,
+    /// Size in bytes.
+    pub size: u64,
+    /// Low bit inside the packed `desc_bits_t`.
+    pub bit_low: u64,
+    /// High bit inside the packed `desc_bits_t`.
+    pub bit_high: u64,
+}
+
+impl DescField {
+    /// Render as JSON.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("offset", Json::Int(self.offset as i64)),
+            ("size", Json::Int(self.size as i64)),
+            ("bit_low", Json::Int(self.bit_low as i64)),
+            ("bit_high", Json::Int(self.bit_high as i64)),
+        ])
+    }
+}
+
+/// Bit position of the data-type selector inside the descriptor flag word.
+///
+/// This is a **packed subfield the design does not publish** as a named constant
+/// (`architecture/RTL_FEEDBACK.md` ask F5). It lives here, once, so the diagnosis crate
+/// and the plugin emitter cannot drift apart; when the design publishes the packing this
+/// becomes an ingested field and both consumers follow automatically.
+pub const DTYPE_SHIFT: u32 = 8;
+
+/// Mask of the data-type selector, after shifting by [`DTYPE_SHIFT`].
+pub const DTYPE_MASK: u32 = 0x3f;
+
+/// AI descriptor layout and constants, derived from `g6lc_ai_desc_pkg.sv`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AiDescLayout {
+    /// Descriptor size in bytes.
+    pub desc_bytes: u64,
+    /// The descriptor version the island implements, when the package names it.
+    ///
+    /// `None` means unresolved. The reference package validates a version in RTL without
+    /// publishing the accepted value as a named constant, so a device that wants to
+    /// report "bad version" has nothing to compare against. Absence is recorded rather
+    /// than defaulted so the fallback is visible instead of looking model-derived.
+    pub version: Option<u64>,
+    /// Field name -> layout.
+    pub fields: std::collections::BTreeMap<String, DescField>,
+    /// Op-code name -> value.
+    pub ops: std::collections::BTreeMap<String, u64>,
+    /// Status-code name -> value.
+    pub statuses: std::collections::BTreeMap<String, u64>,
+}
+
+impl AiDescLayout {
+    /// Render as JSON.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("desc_bytes", Json::Int(self.desc_bytes as i64)),
+            (
+                "version",
+                self.version.map_or(Json::Null, |v| Json::Int(v as i64)),
+            ),
+            (
+                "fields",
+                Json::obj(self.fields.iter().map(|(k, v)| (k.as_str(), v.to_json()))),
+            ),
+            (
+                "ops",
+                Json::obj(
+                    self.ops
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), Json::Int(*v as i64))),
+                ),
+            ),
+            (
+                "statuses",
+                Json::obj(
+                    self.statuses
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), Json::Int(*v as i64))),
+                ),
+            ),
+        ])
+    }
+
+    /// Byte offset for a known descriptor field.
+    pub fn offset(&self, name: &str) -> Option<u64> {
+        self.fields.get(name).map(|f| f.offset)
+    }
+
+    /// Op code value.
+    pub fn op(&self, name: &str) -> Option<u64> {
+        self.ops.get(name).copied()
+    }
+
+    /// Status code value.
+    pub fn status(&self, name: &str) -> Option<u64> {
+        self.statuses.get(name).copied()
+    }
+}
+
+/// AI instruction set and queue CSRs, derived from `g6lc_ai_instr_pkg.sv`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AiInstrSet {
+    /// Custom-2 major opcode (`0x5B` on the reference design).
+    pub opcode_custom2: u32,
+    /// Mask that keeps funct7+funct3+opcode for custom instructions.
+    pub mask_f7f3op: u32,
+    /// `aiqbase` CSR number.
+    pub csr_aiqbase: u16,
+    /// `aiqctl` CSR number.
+    pub csr_aiqctl: u16,
+    /// `aiqhead` CSR number.
+    pub csr_aiqhead: u16,
+    /// Match value for `ai.enq`.
+    pub match_enq: u32,
+    /// Match value for `ai.poll`.
+    pub match_poll: u32,
+    /// Match value for `ai.qfence`.
+    pub match_qfence: u32,
+}
+
+impl AiInstrSet {
+    /// Render as JSON.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("opcode_custom2", Json::Int(self.opcode_custom2 as i64)),
+            ("mask_f7f3op", Json::Int(self.mask_f7f3op as i64)),
+            ("csr_aiqbase", Json::Int(self.csr_aiqbase as i64)),
+            ("csr_aiqctl", Json::Int(self.csr_aiqctl as i64)),
+            ("csr_aiqhead", Json::Int(self.csr_aiqhead as i64)),
+            ("match_enq", Json::Int(self.match_enq as i64)),
+            ("match_poll", Json::Int(self.match_poll as i64)),
+            ("match_qfence", Json::Int(self.match_qfence as i64)),
+        ])
+    }
+}
+
+/// The complete AI-island model: configuration, descriptor layout and instruction set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AiIslandModel {
+    /// Cluster/queue capability configuration.
+    pub config: AiIslandConfig,
+    /// Descriptor field and constant layout.
+    pub desc_layout: AiDescLayout,
+    /// Queue CSRs and custom instruction encodings.
+    pub instr_set: AiInstrSet,
+}
+
+impl AiIslandModel {
+    /// Render as JSON.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("config", self.config.to_json()),
+            ("desc_layout", self.desc_layout.to_json()),
+            ("instr_set", self.instr_set.to_json()),
+        ])
     }
 }
 
@@ -167,6 +475,26 @@ pub struct Soc {
     /// has. A mismatch means the guest silently runs on fewer processors than the design
     /// provides, which is invisible in either input on its own.
     pub harts_declared: Option<u32>,
+    /// Number of virtio-mmio transports the virt profile adds to the SoC memory map.
+    ///
+    /// Zero means no transports are added (the faithful SoC view). A non-zero value is
+    /// a machine-profile choice, not an RTL constant, and is emitted only when present.
+    pub virtio_mmio: u32,
+    /// Memory-mapped boot ROM (MROM) used by the generated QEMU machine.
+    ///
+    /// `None` means the machine has no MROM and uses a direct kernel reset vector.
+    /// A `Some((base, len))` value is emitted as the platform reset-vector region.
+    pub bootrom: Option<(u64, u64)>,
+    /// Kernel boot arguments advertised in the device tree `chosen` node.
+    pub bootargs: Option<String>,
+    /// Console path advertised in the device tree `chosen` node.
+    pub stdout_path: Option<String>,
+    /// Number of physical cores, when known from the design.
+    pub cores: Option<u32>,
+    /// Number of hardware threads per core, when known from the design.
+    pub threads_per_core: Option<u32>,
+    /// AI-island model, when the design has one.
+    pub ai_island: Option<AiIslandModel>,
 }
 
 impl Soc {
@@ -248,6 +576,43 @@ impl Soc {
                 "hart_topology_agrees",
                 self.hart_topology_agrees().map_or(Json::Null, Json::Bool),
             ),
+            (
+                "virtio_mmio",
+                if self.virtio_mmio == 0 {
+                    Json::Null
+                } else {
+                    Json::Int(self.virtio_mmio as i64)
+                },
+            ),
+            (
+                "bootrom",
+                self.bootrom.map_or(Json::Null, |(b, l)| {
+                    Json::obj([("base", Json::addr(b)), ("len", Json::addr(l))])
+                }),
+            ),
+            (
+                "bootargs",
+                self.bootargs.as_deref().map_or(Json::Null, Json::str),
+            ),
+            (
+                "stdout_path",
+                self.stdout_path.as_deref().map_or(Json::Null, Json::str),
+            ),
+            (
+                "cores",
+                self.cores.map_or(Json::Null, |c| Json::Int(c as i64)),
+            ),
+            (
+                "threads_per_core",
+                self.threads_per_core
+                    .map_or(Json::Null, |t| Json::Int(t as i64)),
+            ),
+            (
+                "ai_island",
+                self.ai_island
+                    .as_ref()
+                    .map_or(Json::Null, AiIslandModel::to_json),
+            ),
         ])
     }
 }
@@ -266,6 +631,18 @@ pub struct Isa {
     pub isa_string: String,
     /// Address-translation mode name, when the design has an MMU.
     pub mmu_mode: Option<String>,
+    /// `timebase-frequency` advertised to software, in Hz.
+    pub timebase_hz: u64,
+    /// C10: physical address width, derived from the MMU geometry.
+    pub paddr_bits: u8,
+    /// C10: virtual address width for the selected MMU mode.
+    pub vaddr_bits: u8,
+    /// C10: page-table walk levels.
+    pub page_table_levels: u8,
+    /// C10: bits per VPN level.
+    pub vpn_bits: u8,
+    /// C10: SATP mode field value (0 = bare, 1 = sv32, 8 = sv39, 9 = sv48).
+    pub satp_mode: u8,
 }
 
 impl Isa {
@@ -287,7 +664,36 @@ impl Isa {
                 "mmu_mode",
                 self.mmu_mode.as_deref().map_or(Json::Null, Json::str),
             ),
+            ("timebase_hz", Json::Int(self.timebase_hz as i64)),
+            ("paddr_bits", Json::Int(self.paddr_bits as i64)),
+            ("vaddr_bits", Json::Int(self.vaddr_bits as i64)),
+            (
+                "page_table_levels",
+                Json::Int(self.page_table_levels as i64),
+            ),
+            ("vpn_bits", Json::Int(self.vpn_bits as i64)),
+            ("satp_mode", Json::Int(self.satp_mode as i64)),
         ])
+    }
+}
+
+/// Microarchitectural sizing values, carried as a raw map so a D2 model can
+/// interpret them without forcing every field into a typed struct up front.
+///
+/// Values are intentionally design-native: what the package names is the key,
+/// and what the package writes is the value. A later pass can add typed getters
+/// for the structures that matter to diagnosis.
+#[derive(Debug, Clone, Default)]
+pub struct Uarch {
+    /// `(field, value)` from the design's configuration, limited to scalars so the
+    /// map does not accidentally carry large arrays.
+    pub raw: std::collections::BTreeMap<String, Json>,
+}
+
+impl Uarch {
+    /// Render as JSON.
+    pub fn to_json(&self) -> Json {
+        Json::obj(self.raw.iter().map(|(k, v)| (k.as_str(), v.clone())))
     }
 }
 
@@ -308,6 +714,10 @@ pub struct TargetModel {
     pub isa: Isa,
     /// System-on-chip view.
     pub soc: Soc,
+    /// Microarchitectural sizing (D2 structure models).
+    pub uarch: Uarch,
+    /// PMU event table (D2 counters and generated DTB PMU mapping).
+    pub pmu: PmuTable,
     /// Conformance verdicts.
     pub conformance: Report,
 }
@@ -315,13 +725,15 @@ pub struct TargetModel {
 impl TargetModel {
     /// A model with the given target id, faithful by default.
     pub fn new(target_id: impl Into<String>) -> Self {
-        Self {
+        let mut m = Self {
             target_id: target_id.into(),
             plane: "soc".to_string(),
             profile: Profile::Soc,
             faithful: true,
             ..Default::default()
-        }
+        };
+        m.isa.timebase_hz = 1_000_000;
+        m
     }
 
     /// Record a deviation from the design's own description.
@@ -336,6 +748,97 @@ impl TargetModel {
     /// Whether diagnosis may be run without an explicit taint override.
     pub fn diagnosable(&self) -> bool {
         self.profile.diagnosable() && self.faithful
+    }
+
+    /// Conformance rows for topology the design's own arithmetic forbids.
+    ///
+    /// These are not capability rows — nothing here is about whether some RTL was
+    /// compiled. They are cross-input findings about *how many harts* the machine claims,
+    /// which is exactly the class of disagreement this package exists to report:
+    ///
+    /// * a configuration may describe more logical harts than the interrupt controller
+    ///   has contexts to serve, which is illegal rather than slow;
+    /// * a device tree may declare a different number of processors than the design has,
+    ///   in which case the guest and the firmware disagree with the hardware.
+    ///
+    /// Both are `Overdeclared` when software is told the larger number, because that is a
+    /// guest-visible claim the design cannot honour, and `--conform strict` refuses it.
+    pub fn topology_rows(&self) -> Vec<crate::conform::Row> {
+        use crate::conform::{Inputs, Row, Verdict};
+        let mut rows = Vec::new();
+        let total = self.soc.harts_total;
+
+        // 1. Interrupt-controller context budget.
+        match self.soc.max_harts() {
+            None => rows.push(Row {
+                capability: "interrupt-contexts".into(),
+                inputs: Inputs::new(true, true, false),
+                verdict: Verdict::Unresolved,
+                also: Vec::new(),
+                note: "the interrupt-controller context budget could not be determined, \
+                       so the legal hart count is unknown; reporting it as zero would \
+                       make every configuration look over budget"
+                    .into(),
+            }),
+            Some(max) if total > max => rows.push(Row {
+                capability: "interrupt-contexts".into(),
+                inputs: Inputs::new(true, false, true),
+                verdict: Verdict::Overdeclared,
+                also: Vec::new(),
+                note: format!(
+                    "the configuration describes {total} logical harts but the interrupt \
+                     controller can serve at most {max} ({} contexts each from {} \
+                     targets); the surplus harts cannot receive interrupts",
+                    self.soc.contexts_per_hart, self.soc.intc_targets
+                ),
+            }),
+            Some(max) => rows.push(Row {
+                capability: "interrupt-contexts".into(),
+                inputs: Inputs::new(true, true, true),
+                verdict: Verdict::Live,
+                also: Vec::new(),
+                note: format!("{total} logical harts within a budget of {max}"),
+            }),
+        }
+
+        // 2. What the tree tells software, against what the design has.
+        //
+        // Only reported when a tree was actually read: no tree is not a finding.
+        if let Some(declared) = self.soc.harts_declared {
+            let row = match declared.cmp(&total) {
+                std::cmp::Ordering::Equal => Row {
+                    capability: "hart-topology".into(),
+                    inputs: Inputs::new(true, true, true),
+                    verdict: Verdict::Live,
+                    also: Vec::new(),
+                    note: format!("the tree declares {declared} processors, matching the design"),
+                },
+                std::cmp::Ordering::Greater => Row {
+                    capability: "hart-topology".into(),
+                    inputs: Inputs::new(true, false, true),
+                    verdict: Verdict::Overdeclared,
+                    also: Vec::new(),
+                    note: format!(
+                        "the tree declares {declared} processors but the design provides \
+                         {total}; firmware that trusts the tree will start harts that do \
+                         not exist"
+                    ),
+                },
+                std::cmp::Ordering::Less => Row {
+                    capability: "hart-topology".into(),
+                    inputs: Inputs::new(true, true, false),
+                    verdict: Verdict::Undeclared,
+                    also: Vec::new(),
+                    note: format!(
+                        "the design provides {total} logical harts but the tree declares \
+                         only {declared}; the guest will silently run on fewer processors"
+                    ),
+                },
+            };
+            rows.push(row);
+        }
+
+        rows
     }
 
     /// Render the canonical model document.
@@ -361,6 +864,8 @@ impl TargetModel {
             ),
             ("isa", self.isa.to_json()),
             ("soc", self.soc.to_json()),
+            ("uarch", self.uarch.to_json()),
+            ("pmu", self.pmu.to_json()),
             ("conformance", self.conformance.to_json()),
         ])
     }
@@ -376,8 +881,7 @@ mod tests {
             id: id.into(),
             base,
             len,
-            model: None,
-            irq: None,
+            ..Peripheral::default()
         }
     }
 
@@ -419,6 +923,91 @@ mod tests {
         assert!(soc.hart_count_fits());
         soc.harts_total = 9;
         assert!(!soc.hart_count_fits());
+    }
+
+    #[test]
+    fn a_hart_count_over_the_interrupt_budget_is_a_blocking_finding() {
+        use crate::conform::Verdict;
+        let mut m = TargetModel::new("t");
+        m.soc.intc_targets = 16;
+        m.soc.contexts_per_hart = 2;
+        m.soc.harts_total = 8;
+        let rows = m.topology_rows();
+        let irq = rows
+            .iter()
+            .find(|r| r.capability == "interrupt-contexts")
+            .expect("row present");
+        assert_eq!(irq.verdict, Verdict::Live, "eight fits a budget of eight");
+
+        // Nine harts against the same controller is illegal, not merely tight.
+        m.soc.harts_total = 9;
+        let rows = m.topology_rows();
+        let irq = rows
+            .iter()
+            .find(|r| r.capability == "interrupt-contexts")
+            .unwrap();
+        assert_eq!(irq.verdict, Verdict::Overdeclared);
+        assert!(irq.verdict.refused_under_strict());
+        assert!(
+            irq.note.contains('9') && irq.note.contains('8'),
+            "{}",
+            irq.note
+        );
+    }
+
+    #[test]
+    fn an_unknown_interrupt_budget_is_unresolved_not_a_pass() {
+        use crate::conform::Verdict;
+        let mut m = TargetModel::new("t");
+        m.soc.harts_total = 4;
+        // No targets/contexts read: the budget is unknown.
+        let rows = m.topology_rows();
+        let irq = rows
+            .iter()
+            .find(|r| r.capability == "interrupt-contexts")
+            .unwrap();
+        assert_eq!(irq.verdict, Verdict::Unresolved);
+        assert!(irq.verdict.refused_under_strict());
+    }
+
+    #[test]
+    fn a_tree_that_disagrees_with_the_design_about_processors_is_reported() {
+        use crate::conform::Verdict;
+        let mut m = TargetModel::new("t");
+        m.soc.intc_targets = 16;
+        m.soc.contexts_per_hart = 2;
+        m.soc.harts_total = 2;
+
+        // No tree read: silence, not a finding.
+        assert!(!m
+            .topology_rows()
+            .iter()
+            .any(|r| r.capability == "hart-topology"));
+
+        // Tree agrees.
+        m.soc.harts_declared = Some(2);
+        let row = |m: &TargetModel| {
+            m.topology_rows()
+                .into_iter()
+                .find(|r| r.capability == "hart-topology")
+                .unwrap()
+        };
+        assert_eq!(row(&m).verdict, Verdict::Live);
+
+        // Tree claims a processor the design does not have: firmware would start it.
+        m.soc.harts_declared = Some(3);
+        let r = row(&m);
+        assert_eq!(r.verdict, Verdict::Overdeclared);
+        assert!(r.verdict.refused_under_strict());
+
+        // Tree hides a processor: legal, but the guest runs on fewer.
+        m.soc.harts_declared = Some(1);
+        let r = row(&m);
+        assert_eq!(r.verdict, Verdict::Undeclared);
+        assert!(
+            !r.verdict.refused_under_strict(),
+            "under-declaring is permitted with a warning"
+        );
     }
 
     #[test]

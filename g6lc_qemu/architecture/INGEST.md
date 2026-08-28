@@ -1,7 +1,8 @@
 # INGEST — readers
 
 Index: [`README.md`](README.md) · Output: [`IR.md`](IR.md).
-Crates: `g6q-svcfg`, `g6q-flist`, `g6q-dts`, and the PMU table reader in `g6q-core`.
+Crates: `g6q-svcfg`, `g6q-flist`, `g6q-dts`, `g6q-ingest`, with the PMU table reader and the
+microarchitectural raw map in `g6q-core`.
 
 Ingest is the only part of the package that touches the design's files, and it is strictly
 **read-only** — never an edit, never a copyright or SPDX line
@@ -44,6 +45,51 @@ The reader therefore resolves:
 **It fails loudly.** Anything it cannot resolve becomes `unresolved` in the model rather than
 silently defaulting, and `--conform strict` treats `unresolved` as fatal. A reader that guesses is
 worse than a reader that stops, because a guessed configuration produces a *plausible* wrong emulator.
+
+### 2.0a The written package is not the elaborated configuration
+
+A configuration package is an *input* to the design's build step, not the configuration the design
+elaborates. That step masks dependent flags, implies others, infers widths written as zero, and
+raises floors. Reading a package literally is therefore a correctness bug rather than a
+simplification:
+
+| Written | Elaborated | Consequence of believing the package |
+|---|---|---|
+| an extension enabled while its dependency is off | extension masked **off** | the emulator executes instructions the hardware traps — a guest-visible lie |
+| an extension implied by another | implied one **on** | the emulator refuses instructions the hardware has |
+| a width of `0`, meaning "infer" | inferred from another field | the emulator models a machine that cannot issue anything |
+| a floor below its minimum | raised | the emulator models fewer resources than exist |
+
+So ingest runs the derivations first (`g6q_svcfg::derive`) and only then builds the model. Every
+derivation that changed something is recorded in `provenance.derivations` with the field, the change
+and the reason.
+
+Two properties worth stating, because both are load-bearing:
+
+- **A derivation is not an override.** It is the design's own behaviour, so it does *not* mark the
+  model unfaithful. Only a command-line forcing does that.
+- **Derivation is idempotent.** Applying it to an already-elaborated package reports no changes, so a
+  caller can distinguish "already elaborated" from "needs elaborating".
+
+A derivation this reader cannot reproduce is not guessed. It stays absent, and the corresponding
+legality rule is already reported as **unchecked** rather than as a pass
+([`../AGENTS.md`](../AGENTS.md) directive 2).
+
+#### Scope: corrections are mirrored, computed-only fields are not
+
+The build step does two different things, and only one of them is reproduced here.
+
+| | Reproduced | Why |
+|---|---|---|
+| **Corrections** — a field the package *writes* that the build step then masks, implies, infers or raises | **yes**, all known ones | believing the written value models a machine the design does not build, and the ISA cases are guest-visible lies |
+| **Computed-only** — a field the package never writes, that the build step calculates from others | **partially** | `paddr_bits`, `vaddr_bits`, `page_table_levels`, `vpn_bits`, and `satp_mode` are now derived from `mmu_mode` + `xlen` and consumed by the B3 native VM; the remaining fields are still deferred until a consumer exists, and adding unconsumed fields would be scaffolding |
+
+The computed-only fields, listed so the state of each is explicit rather than discovered later:
+
+- **Now derived and consumed**: `paddr_bits`, `vaddr_bits`, `page_table_levels`, `vpn_bits`, and `satp_mode` are derived from `mmu_mode` + `xlen` and used by the B3 native VM page-table walk.
+- **Still deferred**: floating-point presence and width, the non-standard-extension flag, the four transprecision vector flags, the write-back port count, and guest-physical address widths.
+
+The native VM's translation walk is now sized by the model rather than by an assumed Sv39 scheme; the remaining fields stay deferred until a consumer needs them, as described in [`../AGENTS.md`](../AGENTS.md) §1.2.
 
 ### 2.2 Field discovery is data-driven
 
@@ -119,7 +165,11 @@ FAIL / WARN / GAP vocabulary, so it can agree with whatever validation the desig
 ## 5. PMU event table
 
 The design's performance-counter module holds an event matrix indexed by `{group, index}`. The reader
-extracts group → index → symbolic event name.
+inspects `core/perf_counters.sv` for the `event_group[grp][idx] = <probe>` matrix and
+`core/include/ariane_pkg.sv` for the group constants, index width, and the AI group index names. It
+strips SystemVerilog comments and preserves string literals, then extracts each `localparam`
+statement individually so a `;` inside a comment or a constant after `endfunction` is not swallowed.
+It extracts group → index → symbolic event name, preserving the `{group[7:5], idx[4:0]}` encoding.
 
 This single table then feeds three consumers that must agree:
 
@@ -128,7 +178,7 @@ This single table then feeds three consumers that must agree:
 3. the model's `pmu` block, so a report can name events rather than print indices.
 
 Because it is derived, a new event added to the design's counter module appears in the emulator
-without an edit here.
+without an edit here. Legacy group 0 is kept unchanged; AI group 4 is read from the package.
 
 ---
 

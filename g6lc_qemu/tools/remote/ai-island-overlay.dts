@@ -1,0 +1,17 @@
+// SYNTHETIC REMOTE-TEST OVERLAY. Invented content.
+// SPDX-License-Identifier: MIT
+//
+// Adds an AI-island peripheral at 0x4000_0000 for the mini fixture so that
+// the B1/B2 emitters produce a QEMU device and a plugin-visible region.
+
+/dts-v1/;
+
+/ {
+  soc {
+    ai_island@40000000 {
+      compatible = "g6lc,ai-island";
+      reg = <0x0 0x40000000 0x0 0x1000>;
+      interrupts = <2>;
+    };
+  };
+};

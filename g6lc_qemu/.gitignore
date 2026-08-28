@@ -11,6 +11,7 @@ Cargo.lock.bak
 # `qemu/` is the QEMU checkout that emission targets. Both are SEPARATE WORKS under
 # their own terms and are never tracked here (AGENTS-licensing.md §2).
 /out/
+**/out/
 /qemu/
 
 # Editor / OS

@@ -44,6 +44,18 @@ impl Regs {
     pub fn next_pc(&self) -> u64 {
         self.pc.wrapping_add(4)
     }
+
+    /// All 32 integer registers, including the always-zero x0.
+    pub fn to_array(&self) -> [u64; 32] {
+        let mut out = [0u64; 32];
+        out[1..32].copy_from_slice(&self.x);
+        out
+    }
+
+    /// Restore from a 32-element array.  Writes to x0 are discarded.
+    pub fn from_array(&mut self, arr: &[u64; 32]) {
+        self.x.copy_from_slice(&arr[1..32]);
+    }
 }
 
 /// 32 floating-point registers, each FLEN = 64 bits.
@@ -106,6 +118,16 @@ impl Fregs {
     /// Write a raw 64-bit FPR value as a double-precision value.
     pub fn set_d(&mut self, i: u8, v: u64) {
         self.set(i, v);
+    }
+
+    /// All 32 FP registers.
+    pub fn to_array(&self) -> [u64; 32] {
+        self.f
+    }
+
+    /// Restore from a 32-element array.
+    pub fn from_array(&mut self, arr: &[u64; 32]) {
+        self.f = *arr;
     }
 }
 

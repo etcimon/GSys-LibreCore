@@ -30,6 +30,15 @@ Emits **no code**. It composes an invocation of an unmodified `qemu-system-riscv
 - a device tree blob, generated from the model or from the design's own tree with overlays applied;
 - a `-cpu` property string built from the resolved extension set;
 - machine, memory, firmware, kernel, initrd, append, console, drive and network arguments;
+- an `-smp` count and optional `maxcpus` hotplug ceiling, with topology from the model when it is known;
+- an `-icount` shift when determinism is requested, and an explicit `-accel tcg,thread=single|multi`
+  choice that respects the fact that MTTCG is incompatible with instruction counting;
+- `-drive` entries with a configurable `raw`/`qcow2` format and a `virtio-blk-device` transport per disk;
+- a `-serial` line and an optional `virtio` console (`virtio-serial-device` + `virtconsole`);
+- optional extra virtio devices such as `virtio-rng-device` from the `--virtio` list;
+- an OS shorthand (`--os`) that selects the `g6lc-virt` profile for distros, a default drive format,
+  a default kernel command line, and an optional `--distro-root` search for `kernel`/`initrd`/`rootfs`
+  image files unless the caller names them explicitly;
 - a **capability delta report**.
 
 The delta report is the deliverable, not a footnote. Stock generic machines have a different memory
@@ -77,6 +86,24 @@ the design's own SoC package. A machine that drifts fails at construction, not a
 
 It asserts only under the faithful profile; under the virt profile it reports the deltas instead.
 
+### 3.3 CPU and device-tree PMU mapping
+
+The generated FDT includes an OpenSBI-compatible `/pmu` node when the model exposes at least one
+programmable counter. It carries:
+
+- `compatible = "riscv,pmu"`;
+- `interrupts-extended` to each hart's `riscv,cpu-intc` with local interrupt 13 when `sscofpmf` is live;
+- `riscv,event-to-mhpmcounters` mapping the generic SBI events `cycles` (0x01) and `instructions`
+  (0x02) to the fixed `mcycle` (bit 0) and `minstret` (bit 1) counters;
+- `riscv,raw-event-to-mhpmcounters` with one 5-cell row per ingested design event, encoding the
+  64-bit `mhpmevent` selector, an all-ones select mask, and the programmable-counter bitmap from
+  `PmuTable::counter_mask()`. Reserved events are filtered out.
+
+The generated CPU sets `cpu->cfg.ext_zihpm`, `cpu->cfg.ext_sscofpmf`, and `cpu->cfg.pmu_mask` from the
+model; when counters are absent it explicitly disables `ext_zihpm` and sets `pmu_mask` to 0 so the
+QEMU defaults do not override the model. The B0 stock-QEMU driver appends `,pmu-mask=0x...` to the
+`-cpu` argument when `zihpm` is live.
+
 ---
 
 ## 4. B2 — TCG plugins
@@ -85,9 +112,72 @@ Three plugins against the pinned plugin API version:
 
 | Plugin | Tier | Emits |
 |---|---|---|
-| trace | D1 | RVFI-shaped commit records |
+| trace | D1 | RVFI-shaped commit records as a `RecordFile` object; numeric fields (no hex-string indirection) |
+| tensor | D2 | `AiTensorEvent`s for descriptor submissions/completions; a `tensor.json` stream separate from commit records |
 | microarchitecture | D2 | predictor / TLB / cache models sized from the model |
-| counters | D2 | performance counters, groups and indices from the model's PMU table |
+| counters | D2 | `g6lc-<target>-pmu.c`: a TCG plugin that samples instructions and writes per-hart PMU-style counters; driven by the published `PmuTable` (names, groups, `mhpmevent` selectors) |
+
+The trace plugin is model-derived: it counts loads, stores, MMIO and AI-island accesses using the
+machine's base and length from `TargetModel`, and writes records in the `CommitRecord` schema.  This
+is the same artifact the B3 native VM writes, so both can feed `tandem`.
+
+The tensor plugin is model-derived in its *placement*: it uses the AI-island base and length from
+`TargetModel` to recognise accesses to the island window.
+
+**Descriptor reassembly is conditional on the geometry being resolved**, and the condition is emitted
+as `G6LC_AI_DESC_DECODE`:
+
+| `G6LC_AI_DESC_DECODE` | When | The stream carries |
+|---|---|---|
+| `1` | descriptor size, field offsets **and** the latch-window base are all resolved | **submissions** — one event per doorbell write, with the descriptor decoded |
+| `0` | any of those is unresolved | **accesses** — hart, addresses, direction, width |
+
+When decoding, the plugin shadows the descriptor latch window per hart, records each store into it,
+and emits one event when the doorbell field is written. Store *values* come from the pinned plugin
+API's `qemu_plugin_mem_get_value`; without it the reassembly would be impossible, which is why the
+plugin API version is a pin rather than an assumption.
+
+Every offset it uses is emitted as a `G6LC_AI_OFF_<FIELD>` / `G6LC_AI_SZ_<FIELD>` macro generated
+from `desc_layout`. The one packing constant that is not ingested — the data-type position inside the
+flag word — is emitted from a single shared Rust constant so this plugin and the D2 derivation cannot
+drift apart (recorded as ask F5 in [`RTL_FEEDBACK.md`](RTL_FEEDBACK.md)).
+
+**The emitted record uses the same keys as the native artifact**, including fields the layout does not
+name, which are emitted as zero rather than omitted. That is deliberate: a consumer must not be able
+to tell which backend produced an event, or comparing routes is meaningless. A test asserts the key
+set, and a second asserts that no decoder is emitted at all when the geometry is unresolved — dead
+generated code is not left behind for a `#if` to hide.
+
+This matters because the two backends must agree byte-for-byte about the descriptor. B3 resolves its
+window from the ingested layout; an emitter that hard-coded a stride would silently disagree with it,
+and the disagreement would surface as a phantom RTL bug.
+
+### The queue-instruction path
+
+A guest can submit work **without ever storing to the latch window**: the custom enqueue instruction
+takes a descriptor pointer in a register, and the descriptor itself sits in guest memory. Those
+submissions are invisible to a memory callback on the island region, so the plugin recognises the
+*instruction* instead.
+
+At translation time it masks each instruction with `G6LC_AI_ENQ_MASK` and compares against
+`G6LC_AI_ENQ_MATCH` — both emitted from the ingested instruction set, so a design that moves the
+encoding moves this with it. On a match it extracts `rs1` and registers an execution callback, which
+reads that register, reads `G6LC_AI_DESC_BYTES` from the descriptor address in guest memory, and
+emits the same submission record as the MMIO path.
+
+Three pinned-API facts this depends on, all verified against the fetched header rather than assumed:
+register enumeration and reading, and a virtual-address guest memory read. The callback must be
+registered asking for register access rather than the cheaper no-registers mode, or the register read
+returns nothing.
+
+`G6LC_AI_ENQ_DECODE` gates the whole path, and is `0` unless **both** the instruction encoding and the
+descriptor geometry are resolved. A zero mask would match every instruction, so an un-ingested
+instruction set disables the path rather than defaulting it — and without a descriptor size there is
+nothing to read from guest memory.
+
+One transcription is deliberate and worth naming: the plugin carries the canonical RISC-V register
+names in index order, because QEMU exposes registers under ABI names rather than as `xN`. That is an
+ISA-level naming fact rather than a design contract, and both spellings are tried.
 
 Plugins are preferred over fork-side instrumentation because they need no QEMU source change and have
 a stable ABI. Same header and determinism rules as §3.

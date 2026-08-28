@@ -164,11 +164,15 @@ def check_gpl_link(root: Path, f: Findings, verbose: bool) -> None:
             continue
         f.checked += 1
         text = path.read_text(encoding="utf-8", errors="replace")
-        for pat in _QEMU_TOKENS:
-            m = pat.search(text)
-            if m:
-                f.err(path, f"E-GPLLINK: reference to QEMU internals ({m.group(0)!r}). "
-                            f"Emission is text-out only.")
+        # The QEMU-emitter crate is text-out: it legitimately emits QEMU C source,
+        # including QEMU header #includes, but it must still not link or bind QEMU.
+        is_qemu_emitter = any(part == "g6q-emit-qemu" for part in path.parts)
+        if not is_qemu_emitter:
+            for pat in _QEMU_TOKENS:
+                m = pat.search(text)
+                if m:
+                    f.err(path, f"E-GPLLINK: reference to QEMU internals ({m.group(0)!r}). "
+                                f"Emission is text-out only.")
         if path.suffix == ".rs":
             for pat, what in _FORBIDDEN_RS:
                 m = pat.search(text)

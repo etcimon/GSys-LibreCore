@@ -10,6 +10,8 @@ in `../pins.toml` and its content is *ingested at runtime*, never transcribed in
 | [`INGEST.md`](INGEST.md) | Readers — config packages, flists, device trees, PMU event table |
 | [`IR.md`](IR.md) | `TargetModel` JSON IR and the conformance report |
 | [`EMIT.md`](EMIT.md) | Emitter contract for B0–B3, including the GPL-out rule |
+| [`AI_BRIDGE.md`](AI_BRIDGE.md) | Accelerator scale-out, the pushed-work reach path, and the host bridge boundary |
+| [`RTL_FEEDBACK.md`](RTL_FEEDBACK.md) | Findings that flow back into the design: open asks, what they unblock, the cluster-debug workflow, and the change-set aggregation policy |
 | [`DIAG.md`](DIAG.md) | D1 tandem and D2 microarchitectural tiers, and their error bars |
 | [`CLI.md`](CLI.md) | Complete command-line surface |
 

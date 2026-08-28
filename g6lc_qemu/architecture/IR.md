@@ -37,14 +37,13 @@ diagnosis model and no emitter reads a design file directly.
   "csr": { "implemented": [ { "addr": "0x…", "name": "…", "gate": "<config field>" } ] },
 
   "uarch": {
-    "issue":  { "superscalar": true, "issue_ports": 2, "commit_ports": 2, "scoreboard": 16 },
-    "bp":     { "type": "…", "btb": 32, "bht": 128, "ras": 8, "…": null },
-    "tlb":    { "itlb": 16, "dtlb": 16, "shared": false },
-    "cache":  { "l1i": {}, "l1d": {}, "l2": {}, "l3": {} },
-    "smt":    { "harts_per_core": 1, "policy": "…", "quantum": 1, "starve_limit": 0 },
-    "cores":  { "count": 1, "coherence": "…", "snoop_filter": false },
-    "spec":   { "slice_ooo": false, "full_ooo": false, "deep_spec": false },
-    "raw":    { "<carried field>": "<value>" }
+    "BTBEntries": 64,
+    "BHTEntries": 512,
+    "RASDepth": 8,
+    "IcacheByteSize": 16384,
+    "DcacheByteSize": 16384,
+    "L2En": 1,
+    "L2ByteSize": 262144
   },
 
   "soc": {
@@ -61,7 +60,17 @@ diagnosis model and no emitter reads a design file directly.
     "device": { "base": "0x…", "len": "0x…", "irq": 8, "descriptor_bytes": 64, "caps": {} }
   },
 
-  "pmu": { "groups": { "0": { "1": "l1i_miss" } }, "grp_width": 3, "idx_width": 5 },
+  "pmu": {
+    "counter_count": 6,
+    "counter_mask": 504,
+    "idx_width": 5,
+    "grp_width": 3,
+    "events": [
+      { "name": "legacy.01_l1_i_cache_misses", "group": 0, "index": 1, "mhpmevent": 1 }
+    ],
+    "groups": { "0": "legacy" },
+    "unresolved": []
+  },
 
   "flist": { "supply": "…", "files": 0, "defines": [], "membership": { "<fact>": "…" } },
 
@@ -118,7 +127,19 @@ a verdict.
 Defaults: `--conform warn` for `run` (you want to boot a partially conformant machine while bringing
 it up) and `--conform strict` for `diag` / `tandem` (you never want to publish a diagnosis from one).
 
-## 4. Why this is a product, not plumbing
+## 4. Capability matrix
+
+`g6q gen --emit matrix` (or `--emit matrix --json-out FILE`) prints a JSON matrix with one row per
+capability from `g6q-ingest/data/capabilities.ini`. Each row exposes the input evidence used to
+derive the verdict: the `config` probe and its resolved value, the `flist` probe type plus
+`implementing`/`stubs` path fragments and the `flist` evidence string, the `dts` tokens/node and
+whether the tree advertised the feature, and the stock-QEMU `qemu` properties or the delta they
+cannot express. The `verdict` is the same value the conformance report carries.
+
+The matrix is a diagnostic view: it does not change the verdict, but it makes the verdict
+inspectable.
+
+## 5. Why this is a product, not plumbing
 
 `g6q conform` is useful with no emulator attached. It answers, mechanically, a question that is
 otherwise answered by reading three sets of files and remembering how they relate: *does this design's

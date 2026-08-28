@@ -1,7 +1,11 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 
-//! Sv39 page-table walk for the native VM.
+//! Model-driven page-table walk for the native VM.
+//!
+//! The walk is parameterised by the MMU geometry in [`Mmu`]: SATP mode value,
+//! virtual/physical address widths, page-table levels, and bits per VPN level. This
+//! keeps the B3 native VM honest to the model instead of hard-coding Sv39.
 
 use crate::mem::PhysMem;
 
@@ -10,7 +14,7 @@ use crate::mem::PhysMem;
 pub enum MmuError {
     /// SATP mode is 0 (bare), so no translation was performed.
     Bare,
-    /// SATP mode is not supported.
+    /// SATP mode is not supported by this MMU geometry.
     Unsupported,
     /// The virtual address is not canonical.
     BadVaddr,
@@ -34,39 +38,134 @@ impl std::fmt::Display for MmuError {
 
 impl std::error::Error for MmuError {}
 
-/// Translate `vaddr` through an Sv39 page table.
+/// MMU geometry: the page-table walk parameters derived from the model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mmu {
+    /// SATP mode field for this scheme (0 = bare, 1 = sv32, 8 = sv39, 9 = sv48).
+    pub satp_mode: u64,
+    /// Virtual address width in bits.
+    pub vaddr_bits: u8,
+    /// Physical address width in bits.
+    pub paddr_bits: u8,
+    /// Page-table levels.
+    pub levels: u8,
+    /// Bits per VPN level.
+    pub vpn_bits: u8,
+    /// Page offset bits (always 12 for the base RISC-V schemes).
+    pub page_bits: u8,
+}
+
+impl Default for Mmu {
+    /// Default to bare translation (no MMU).
+    fn default() -> Self {
+        Self {
+            satp_mode: 0,
+            vaddr_bits: 0,
+            paddr_bits: 0,
+            levels: 0,
+            vpn_bits: 0,
+            page_bits: 12,
+        }
+    }
+}
+
+impl Mmu {
+    /// Build an MMU from the model's `Isa` fields.
+    pub fn from_isa(isa: &g6q_core::model::Isa) -> Self {
+        if isa.page_table_levels == 0 {
+            Self::default()
+        } else {
+            Self {
+                satp_mode: isa.satp_mode as u64,
+                vaddr_bits: isa.vaddr_bits,
+                paddr_bits: isa.paddr_bits,
+                levels: isa.page_table_levels,
+                vpn_bits: isa.vpn_bits,
+                page_bits: 12,
+            }
+        }
+    }
+
+    /// A 64-bit Sv39 MMU, useful for tests that do not want to build a model.
+    pub fn sv39() -> Self {
+        Self {
+            satp_mode: 8,
+            vaddr_bits: 39,
+            paddr_bits: 56,
+            levels: 3,
+            vpn_bits: 9,
+            page_bits: 12,
+        }
+    }
+
+    /// A 64-bit Sv48 MMU.
+    pub fn sv48() -> Self {
+        Self {
+            satp_mode: 9,
+            vaddr_bits: 48,
+            paddr_bits: 56,
+            levels: 4,
+            vpn_bits: 9,
+            page_bits: 12,
+        }
+    }
+
+    /// A 32-bit Sv32 MMU.
+    pub fn sv32() -> Self {
+        Self {
+            satp_mode: 1,
+            vaddr_bits: 32,
+            paddr_bits: 34,
+            levels: 2,
+            vpn_bits: 10,
+            page_bits: 12,
+        }
+    }
+
+    /// Whether the address is canonical for this mode.
+    fn canonical(&self, vaddr: u64) -> bool {
+        if self.vaddr_bits == 0 {
+            return true;
+        }
+        let sign = (vaddr >> (self.vaddr_bits - 1)) & 1;
+        let high = vaddr >> self.vaddr_bits;
+        if sign != 0 {
+            high == !0u64
+        } else {
+            high == 0
+        }
+    }
+}
+
+/// Translate `vaddr` through a page table described by `mmu` and `satp`.
 ///
 /// If `satp` mode is `0` (bare) this immediately returns the virtual address.
-/// If `satp` mode is `8` (Sv39) it walks a three-level page table and returns
-/// the physical address.  Larger page sizes are supported when a valid, valid
-/// leaf PTE is found at level 1 or 2.
-pub fn translate(mem: &PhysMem, satp: u64, vaddr: u64) -> Result<u64, MmuError> {
+/// Otherwise the mode must match `mmu.satp_mode`; the function then walks the
+/// configured number of levels with the configured `vpn_bits` and `page_bits`.
+///
+/// The implementation is valid for Sv32, Sv39, and Sv48; larger page sizes are
+/// supported when a valid leaf PTE is found at an inner level.
+pub fn translate(mem: &PhysMem, mmu: &Mmu, satp: u64, vaddr: u64) -> Result<u64, MmuError> {
     let mode = satp >> 60;
     if mode == 0 {
         return Ok(vaddr);
     }
-    if mode != 8 {
+    if mode != mmu.satp_mode {
         return Err(MmuError::Unsupported);
     }
-
-    // Sv39 virtual addresses are 39 bits and sign-extended from bit 38.
-    let sign = (vaddr >> 38) & 1;
-    if sign != 0 && vaddr >> 39 != !0u64 {
-        return Err(MmuError::BadVaddr);
+    if mmu.levels == 0 || mmu.vpn_bits == 0 {
+        return Err(MmuError::Unsupported);
     }
-    if sign == 0 && vaddr >> 39 != 0 {
+    if !mmu.canonical(vaddr) {
         return Err(MmuError::BadVaddr);
     }
 
-    let vpn = [
-        (vaddr >> 12) & 0x1ff,
-        (vaddr >> 21) & 0x1ff,
-        (vaddr >> 30) & 0x1ff,
-    ];
-    let mut a = (satp & 0x0000_00ff_ffff_ffff) << 12; // PPN field
+    let mut a = (satp & ((1u64 << 44) - 1)) << 12; // PPN field is 44 bits in satp.
 
-    for level in (0..=2).rev() {
-        let pte_addr = a + (vpn[level] << 3);
+    for level in (0..mmu.levels).rev() {
+        let vpn =
+            ((vaddr >> mmu.page_bits) >> (level * mmu.vpn_bits)) & ((1u64 << mmu.vpn_bits) - 1);
+        let pte_addr = a + (vpn << 3);
         let pte = match mem.read_le::<8>(pte_addr) {
             Ok(v) => v,
             Err(_) => return Err(MmuError::Access),
@@ -76,24 +175,90 @@ pub fn translate(mem: &PhysMem, satp: u64, vaddr: u64) -> Result<u64, MmuError> 
         let r = (pte >> 1) & 1 != 0;
         let w = (pte >> 2) & 1 != 0;
         let x = (pte >> 3) & 1 != 0;
-        let ppn = (pte >> 10) & 0x0000_00ff_ffff_ffff; // 44 bits
+        let ppn = (pte >> 10) & ((1u64 << 44) - 1);
 
         if !v || (!r && w) {
             return Err(MmuError::PageFault);
         }
 
         if r || w || x {
-            // Leaf PTE.
-            let ignore_bits = level * 9;
+            // Leaf PTE: the PPN is aligned to the page size at this level.
+            let ignore_bits = level * mmu.vpn_bits;
             let mask = (1u64 << ignore_bits) - 1;
             let aligned_ppn = ppn & !mask;
-            let offset_mask = (1u64 << (12 + ignore_bits)) - 1;
-            return Ok((aligned_ppn << 12) | (vaddr & offset_mask));
+            let offset_mask = (1u64 << (mmu.page_bits + ignore_bits)) - 1;
+            let paddr = (aligned_ppn << mmu.page_bits) | (vaddr & offset_mask);
+            // Mask to the physical address width.
+            let paddr_mask = if mmu.paddr_bits == 0 || mmu.paddr_bits >= 64 {
+                !0u64
+            } else {
+                (1u64 << mmu.paddr_bits) - 1
+            };
+            return Ok(paddr & paddr_mask);
         }
 
-        a = ppn << 12;
+        a = ppn << mmu.page_bits;
     }
 
     // Walked off the bottom without a leaf.
     Err(MmuError::PageFault)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mem::{PhysMem, Region};
+
+    fn sv39_pte(ppn: u64, flags: u64) -> u64 {
+        (ppn << 10) | flags
+    }
+
+    #[test]
+    fn bare_mode_returns_virtual_address() {
+        let m = Mmu::default();
+        let mem = PhysMem::new();
+        assert_eq!(translate(&mem, &m, 0, 0x1234).unwrap(), 0x1234);
+    }
+
+    #[test]
+    fn sv39_one_gigabyte_page_maps_vaddr_to_paddr() {
+        let m = Mmu::sv39();
+        let mut mem = PhysMem::new();
+        // Page table at 0x9000_0000. PTE 0 maps VPN 0 -> a 1 GiB leaf at paddr 0x8000_0000.
+        let ppn = 0x8000_0000u64 >> 12; // 0x80000
+        let pte = sv39_pte(ppn, 0xF);
+        let pt_base = 0x9000_0000u64;
+        let pt_ppn = pt_base >> 12;
+        mem.add(Region::new(pt_base, 0x1000));
+        mem.write_le::<8>(pt_base, pte).unwrap();
+
+        let satp = (8u64 << 60) | pt_ppn;
+        let vaddr = 0x0u64; // VPN0 = 0, offset 0
+        assert_eq!(translate(&mem, &m, satp, vaddr).unwrap(), 0x8000_0000);
+    }
+
+    #[test]
+    fn non_canonical_address_is_rejected() {
+        let m = Mmu::sv39();
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x9000_0000, 0x1000));
+        mem.write_le::<8>(0x9000_0000, sv39_pte(0x80000, 0xF))
+            .unwrap();
+        let satp = (8u64 << 60) | (0x9000_0000u64 >> 12);
+        // bit 38 set but bits 39..63 not all ones
+        assert!(matches!(
+            translate(&mem, &m, satp, 0x4000_0000_0000_0000),
+            Err(MmuError::BadVaddr)
+        ));
+    }
+
+    #[test]
+    fn mismatching_satp_mode_is_unsupported() {
+        let m = Mmu::sv39();
+        let mem = PhysMem::new();
+        assert!(matches!(
+            translate(&mem, &m, 9u64 << 60, 0),
+            Err(MmuError::Unsupported)
+        ));
+    }
 }

@@ -96,6 +96,8 @@ g6lc_qemu/
     env_common.py            ← contained-toolchain paths
     flist_expand.py          ← generic ${VAR} / nested -f expander (no project names baked in)
     check_independence.py    ← KD0 + E-GPLLINK enforcement
+    g6q_remote.py            ← remote QEMU build/test proxy (separate GPL work stays remote)
+    ai_tensor_bridge.py      ← host bridge over the tensor artifact contract (AI_BRIDGE.md §5)
   crates/
     g6q-svcfg/               ← SystemVerilog config-package reader + legality rules
     g6q-flist/               ← flist expansion + membership facts (Present/Absent/Unknown)
@@ -140,10 +142,13 @@ python tools/g6q.py setup       # contained rustup/cargo (+venv) under .tools/
 python tools/g6q.py doctor      # host probe: rust, python, qemu, dtc, spike
 python tools/g6q.py build
 python tools/g6q.py test
-python tools/g6q.py check       # GREEN COMMAND: independence + fmt + clippy + test + golden
+python tools/g6q.py check       # GREEN COMMAND: independence + fmt + clippy + test
 python tools/g6q.py run -- --help
 python tools/g6q.py flist --in entry.f --set ROOT=/abs/project --out portable.f
-python tools/g6q.py clean       # cargo target + out/
+python tools/g6q.py fetch-qemu   # clone the pinned QEMU source into gitignored qemu/
+python tools/g6q.py install-qemu # stage generated B1/B2 sources into qemu/
+python tools/g6q.py build-qemu   # configure + build qemu/ (or --dry-run to preview)
+python tools/g6q.py clean        # cargo target + out/
 python tools/g6q.py clean --all # + .tools/ (re-run setup after)
 ```
 
@@ -176,6 +181,8 @@ This is the local completion gate. Nothing outside this package substitutes for 
 | Add a diagnosis model or PMU event | `crates/g6q-diag` — sized from the model, never hard-coded |
 | Add a CLI verb or option | `crates/g6q-cli` + `architecture/CLI.md` |
 | Add package automation | `tools/g6q.py` (**not** the shell wrappers) |
+| Change how host-pushed accelerator work is packed or retrieved | `tools/ai_tensor_bridge.py` + `architecture/AI_BRIDGE.md`
+| Wire package into a host build-platform / CI harness | host adapter (outside this tree); package boundary is `tools/g6q.py`, `tools/ai_tensor_bridge.py` and `tools/g6q_remote.py`. The host calls them; they never call back into the host, import from it, or require a host path to pass `check`. | — descriptor geometry comes from the ingested model, never a literal |
 | Independence regression | `tools/check_independence.py` |
 
 ---
@@ -192,6 +199,10 @@ This is the local completion gate. Nothing outside this package substitutes for 
 - [ ] Fixtures-only success criteria preserved (no monorepo path required)
 - [ ] `architecture/` still accurate for user-visible behaviour changes
 - [ ] Machine profile stamped into any new artifact type
+- [ ] A constant the design does not publish is recorded as an ask in
+      `architecture/RTL_FEEDBACK.md` and left visibly unresolved — never quietly defaulted
+- [ ] Where the design publishes a *set* of names (capabilities, fields, ops), a test pins that set
+      so an added name surfaces as a tracked gap instead of becoming a guest-visible zero
 
 ---
 

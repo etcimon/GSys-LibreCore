@@ -32,6 +32,7 @@ first.
 | [`backends.md`](backends.md) | B0–B3 emission targets, the `g6lc-soc` / `g6lc-virt` machine split, MTTCG |
 | [`diagnosis.md`](diagnosis.md) | **D1** tandem (`st_rvfi`) and **D2** microarchitectural + PMU tiers |
 | [`ai-island.md`](ai-island.md) | `Xg6lcai` CPU model, generated island device, ai-tensor **in-guest** |
+| [`../../g6lc_qemu/architecture/AI_BRIDGE.md`](../../g6lc_qemu/architecture/AI_BRIDGE.md) | **Package-side**: host-**pushed** accelerator work — descriptor packing from the ingested layout, local (B3) vs remote (B1+B2) execution routes, the tensor artifact contract, and the transport boundary that stays unmodelled until `contracts.ai_host_transport` is pinned |
 | [`cli.md`](cli.md) | Complete command-line surface: target / DTS / APU / OpenSBI / OS / diag |
 | [`os-linux-matrix.md`](os-linux-matrix.md) | OpenSBI modes, OS profiles (incl. Ubuntu), the Q9 capability matrix |
 | [`staging.md`](staging.md) | Q0–Q9 stages with entry / exit gates |

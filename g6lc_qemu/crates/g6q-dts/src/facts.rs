@@ -23,6 +23,14 @@ pub struct DeviceFact {
     pub len: Option<u64>,
     /// First interrupt number, when present.
     pub irq: Option<u32>,
+    /// `reg-shift` for 16550-style UARTs, in bytes.
+    pub reg_shift: Option<u32>,
+    /// `reg-io-width` for 16550-style UARTs, in bytes.
+    pub reg_io_width: Option<u32>,
+    /// `clock-frequency` for peripheral baud-rate generation.
+    pub clock_frequency: Option<u64>,
+    /// `current-speed` for 16550-style UARTs, in baud.
+    pub current_speed: Option<u64>,
 }
 
 /// What the tree says about the machine.
@@ -59,8 +67,12 @@ pub struct Facts {
     pub devices: Vec<DeviceFact>,
     /// Kernel boot arguments from `chosen`.
     pub bootargs: Option<String>,
+    /// Console path from `chosen/stdout-path`.
+    pub stdout_path: Option<String>,
     /// Whether a performance-monitor mapping is present.
     pub has_pmu_map: bool,
+    /// `timebase-frequency` from `cpus`, in Hz.
+    pub timebase_hz: u64,
 }
 
 impl Facts {
@@ -108,6 +120,10 @@ fn cells_of(node: &Node, prop: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn cell_u32_of(node: &Node, prop: &str) -> Option<u32> {
+    node.prop(prop).and_then(Prop::u64).map(|v| v as u32)
+}
+
 /// Extract the facts the model consumes from a parsed tree.
 pub fn extract(root: &Node) -> Facts {
     let mut f = Facts::default();
@@ -140,6 +156,11 @@ pub fn extract(root: &Node) -> Facts {
                 .map(|p| p.has("riscv,event-to-mhpmevent"))
                 .unwrap_or(false);
         }
+
+        f.timebase_hz = cpus
+            .prop("timebase-frequency")
+            .and_then(Prop::u64)
+            .unwrap_or(1_000_000);
 
         // Topology: cpu-map / clusterN / coreN / threadN
         if let Some(map) = cpus.child("cpu-map") {
@@ -210,6 +231,16 @@ pub fn extract(root: &Node) -> Facts {
                 base,
                 len,
                 irq,
+                reg_shift: cell_u32_of(node, "reg-shift"),
+                reg_io_width: cell_u32_of(node, "reg-io-width"),
+                clock_frequency: cell_u32_of(node, "clock-frequency")
+                    .map(|v| v as u64)
+                    .or_else(|| {
+                        node.prop("clock-frequency")
+                            .and_then(Prop::first_string)
+                            .and_then(|s| s.parse::<u64>().ok())
+                    }),
+                current_speed: cell_u32_of(node, "current-speed").map(|v| v as u64),
             });
         }
     }
@@ -218,6 +249,10 @@ pub fn extract(root: &Node) -> Facts {
     if let Some(chosen) = root.child("chosen") {
         f.bootargs = chosen
             .prop("bootargs")
+            .and_then(Prop::first_string)
+            .map(str::to_string);
+        f.stdout_path = chosen
+            .prop("stdout-path")
             .and_then(Prop::first_string)
             .map(str::to_string);
     }
@@ -235,7 +270,10 @@ mod tests {
 / {
   #address-cells = <2>;
   #size-cells = <2>;
-  chosen { bootargs = "console=ttyS0"; };
+  chosen {
+    bootargs = "console=ttyS0";
+    stdout-path = "/soc/uart";
+  };
   cpus {
     #address-cells = <1>;
     #size-cells = <0>;
@@ -341,7 +379,17 @@ mod tests {
     fn chosen_and_pmu_are_noticed() {
         let f = facts();
         assert_eq!(f.bootargs.as_deref(), Some("console=ttyS0"));
+        assert_eq!(f.stdout_path.as_deref(), Some("/soc/uart"));
         assert!(f.has_pmu_map);
+    }
+
+    #[test]
+    fn timebase_frequency_is_read_from_cpus() {
+        let f = facts();
+        assert_eq!(
+            f.timebase_hz, 1_000_000,
+            "timebase-frequency defaults to 1 MHz"
+        );
     }
 
     #[test]

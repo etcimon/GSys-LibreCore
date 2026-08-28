@@ -48,6 +48,12 @@ vendor CSRs.
 project's existing record shape rather than inventing one is what lets this package slot into an
 existing tandem flow as an additional participant instead of forming a separate universe.
 
+The generated B2 trace plugin (`g6lc-<target>.so`) produces the same `RecordFile` object.  QEMU
+records are ordered by `order`, carry the machine profile in `header.profile`, and are written
+numerically so they load without a custom parser.  When `run --backend qemu --record FILE` is used,
+the CLI automatically loads the plugin with a `trace=` argument, copies the temporary plugin output
+to `FILE` after QEMU exits, and removes the temporary file.
+
 ### 2.2 Divergence bisection
 
 ```
@@ -85,6 +91,26 @@ resumed cycle-exact run produces the finding; the emulator produced the pointer.
 
 **Checkpoints are faithful-profile only.** A virt-profile checkpoint contains device state with no
 hardware counterpart and cannot be resumed.
+
+### 2.4 RTL/RVFI text trace ingestion
+
+The CVA6 `rvfi_tracer` writes `trace_rvfi_hart_<hart>.dasm` with one line per retired instruction:
+
+```text
+core   0: 0x1000 (0x00000293) DASM(0x00000293)
+3 0x1000 (0x00000293) x5 0x0000000000000001
+```
+
+`g6q-diag/src/rvfi.rs` parses this text, maps exception names to `mcause` values, and derives
+`pc_wdata` from the next record's `pc_rdata` (the last record uses `pc + instruction size`, with
+`halt` set for `wfi`/`ebreak`).  It produces the same `CommitRecord` vector used by the tandem
+path, so `tandem --under-test trace_rvfi_hart_0.dasm --reference qemu.json` can compare RTL against
+QEMU without an intermediate conversion step.
+
+Because the dasm format omits `pc_wdata`, source register values, and the CSR bundle, the comparison
+is a structural one: it validates PC, instruction word, privilege mode, destination register writes
+and the trap cause.  Full RVFI parity (memory masks/data, source registers, CSRs) requires either an
+extended dasm format or a structured RVFI dump from the simulator.
 
 ---
 
@@ -125,6 +151,44 @@ table**, ingested per [`INGEST.md`](INGEST.md) §5, so:
   the overflow interrupt) are modelled, because a profiler exercises them immediately and a wrong
   overflow path looks like a kernel bug;
 - an event added to the design's counter module appears here without an edit.
+
+### 4.2 Microarchitectural structure counters
+
+`g6q-diag::uarch::structure_counters` reads the `uarch.raw` map produced by ingest and emits
+`Counter` values for the structures listed in §3: BTB/BHT/RAS, fetch and issue queues, scoreboard,
+load/store buffers, cache sizes and TLB depths. The counter names are stable (`uarch.btb.entries`,
+`uarch.l1d.size_bytes`, `uarch.scoreboard.entries`, etc.); the values are the design's own
+configured or derived scalars. A field the design leaves at `0` to mean "infer" is skipped rather
+than reported as zero.
+
+All structure-size counters are `Fidelity::Exact` for the configured geometry. A counter the
+emulator derives from these later (hit rates, occupancy, stall indicators) is `Modelled` or `Weak`.
+
+### 4.1 AI tensor and queue events
+
+The AI-island is a D2 source, not a D1 architectural path.  Its `AiTensorEvent`s are emitted from:
+
+1. the B3 native VM `AiIsland` device when the guest writes the descriptor MMIO window and
+   doorbells with the version/op field;
+2. the B2 QEMU plugin when it observes stores into the same window;
+3. either backend when a queue ring entry is enqueued and the hardware-completed descriptor is
+   dequeued.
+
+A tensor event carries the descriptor address, dimensions, data type, input/output pointers,
+ticket, completion status and the operation class.  It is written to a `tensor.json` stream that is
+separate from the commit-record trace so the two can be compared, replayed and bisected
+independently.
+
+D2 counters sized from `g6lc_ai_island_cfg_pkg.sv`:
+
+| Counter | Derivation | Fidelity |
+|---|---|---|
+| `ai.tensor.ops` | one per submitted descriptor | exact (counted at submission) |
+| `ai.tensor.bytes` | A/B/C buffer sizes from descriptor `m`, `n`, `k`, `ld_ab` and `dtype` width | modelled — guest may touch only part of the declared buffers |
+| `ai.tensor.macs` | `m * n * k` for GEMM/CONV-like ops; `0` for layout/prefetch | modelled — assumes dense, full-tile execution |
+| `ai.queue.entries` | enqueued minus completed per queue | exact in B3; approximate in the plugin (memory accesses only) |
+
+These are **synthetic** efficiency signals, not verification evidence.
 
 ---
 

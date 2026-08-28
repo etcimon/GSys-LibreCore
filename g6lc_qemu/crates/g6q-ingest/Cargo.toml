@@ -18,3 +18,4 @@ g6q-core = { workspace = true }
 g6q-svcfg = { workspace = true }
 g6q-flist = { workspace = true }
 g6q-dts = { workspace = true }
+g6q-diag = { workspace = true }

@@ -44,6 +44,7 @@ name = "g6q-emit-qemu"
 version = "0.1.0"
 dependencies = [
  "g6q-core",
+ "g6q-dts",
 ]
 
 [[package]]
@@ -55,6 +56,7 @@ name = "g6q-ingest"
 version = "0.1.0"
 dependencies = [
  "g6q-core",
+ "g6q-diag",
  "g6q-dts",
  "g6q-flist",
  "g6q-svcfg",
