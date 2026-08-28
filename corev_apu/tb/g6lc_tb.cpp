@@ -741,7 +741,8 @@ done_processing:
         // Leftover-complete 12958 vs sequential 12960. replay_addr /
         // serving_unaligned / is_mispredict DCE; k1 = misp|flush|replay.
         // npc_q and icache_vaddr_q are flops (not DCE).
-        if (trace_on && main_time >= 103000 && main_time <= 180000) {
+        if (trace_on && ((main_time >= 103000 && main_time <= 180000) ||
+                         (main_time >= 2448000 && main_time <= 2453000))) {
           unsigned fifk = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_if);
           unsigned repl = (unsigned)top->rootp->G6LC_CVA6_C0(
               i_frontend__DOT__replay);
@@ -753,6 +754,8 @@ done_processing:
               i_frontend__DOT__bp_fire);
           unsigned pend = (unsigned)top->rootp->G6LC_CVA6_C0(
               i_frontend__DOT__leftover_pending);
+          unsigned lov = (unsigned)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__leftover_valid);
           unsigned qfull = (unsigned)top->rootp->G6LC_CVA6_C0(
               i_frontend__DOT__i_instr_queue__DOT__instr_queue_full);
           uint64_t knpc = (uint64_t)top->rootp->G6LC_CVA6_C0(
@@ -761,22 +764,29 @@ done_processing:
               i_frontend__DOT__icache_vaddr_q);
           uint64_t btgt = (uint64_t)top->rootp->G6LC_CVA6_C0(
               i_frontend__DOT__bp_tgt_q);
+          uint64_t lpc = (uint64_t)top->rootp->G6LC_CVA6_C0(
+              i_frontend__DOT__leftover_pc);
           unsigned misp = k1 && !repl && !fifk;
           uint64_t knpc32 = knpc & 0xffffffffULL;
           bool in_tail = (knpc32 >= 0x80012c00ULL && knpc32 <= 0x80012c70ULL)
               || (knpc32 >= 0x80012b10ULL && knpc32 <= 0x80012b20ULL)
+              || (knpc32 >= 0x80012950ULL && knpc32 <= 0x80012972ULL)
               || (knpc32 >= 0x80017fd0ULL && knpc32 <= 0x80018010ULL)
               || (knpc32 >= 0x80013940ULL && knpc32 <= 0x80013990ULL)
-              || (knpc32 >= 0x80017f10ULL && knpc32 <= 0x80017f90ULL);
-          if ((misp || repl || k1 || k2 || bpf || pend) && in_tail) {
+              || (knpc32 >= 0x80017f10ULL && knpc32 <= 0x80017f90ULL)
+              || (knpc32 >= 0x80005d6eULL && knpc32 <= 0x80006320ULL)
+              || (knpc32 >= 0x8000eeecULL && knpc32 <= 0x8000eeffULL);
+          if ((misp || repl || k1 || k2 || bpf || pend || lov) && in_tail) {
             std::cerr << "[kill] t=" << main_time
                       << " misp=" << misp << " replay=" << repl
                       << " fif=" << fifk << " bp=" << bpf
                       << " k1=" << k1 << " k2=" << k2
-                      << " pend=" << pend << " full=" << qfull
+                      << " pend=" << pend << " lov=" << lov
+                      << " full=" << qfull
                       << std::hex << " npc=0x" << knpc
                       << " vq=0x" << kvaddr
-                      << " tgt=0x" << btgt << std::dec
+                      << " tgt=0x" << btgt
+                      << " lpc=0x" << lpc << std::dec
                       << "\n";
           }
         }

@@ -69,7 +69,10 @@ still **drops** leftover (`leftover_drop`; I4az / `plat_hc=80` if kept). Flush a
 `kill_s1` (misp/replay) are inert; leftover-complete **does** update on `bp_fire`
 so the next leftover jal can be captured (`realign.kill_i = kill_s1`). Spec leftover hold
 (`spec_req` skips drop) **reverted** — `spec_req` is sequential-fetch high.
-Snap prints `h=` / `drop=` (no frontend combo).
+I7 is all-or-nothing except leftover-complete slot0 (`leftover_slot0_push`): if the
+carry insn fits and later slots overflow, push slot0, consume leftover, replay the rest
+at the first unpushed PC. Holding leftover-complete (`pipe_keep` / leftover_replay_hold)
+**MINI-FAIL** osbi mepc=129b8. 12958 illegal **closed**. Snap prints `h=` / `drop=` (no frontend combo).
 
 ---
 

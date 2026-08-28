@@ -46,6 +46,8 @@ module instr_queue
     input logic [CVA6Cfg.INSTR_PER_FETCH-1:0][CVA6Cfg.VLEN-1:0] addr_i,
     // Instruction is valid - instr_realign
     input logic [CVA6Cfg.INSTR_PER_FETCH-1:0] valid_i,
+    // Leftover-complete in slot0 (serving_unaligned) — I7 slot0 push
+    input logic leftover_complete_i,
     // Handshake's ready with CACHE - CACHE
     output logic ready_o,
     // Indicates instructions consumed, or popped by ID_STAGE - FRONTEND
@@ -102,6 +104,9 @@ module instr_queue
   // input stream
   logic [NrFifo-1:0] taken, branch_mask, valid, fifo_pos;
   logic instr_overflow;
+  logic [NrFifo-1:0] slot0_pos;
+  logic slot0_full, lo_partial, rest_found;
+  logic [CVA6Cfg.VLEN-1:0] rest_addr;
   fifo_idx_t idx_is_d, idx_is_q, shamt;
   // output stream: one-hot select rotated by issue port
   logic [NrFifo-1:0] idx_ds_d, idx_ds_q;
@@ -169,11 +174,29 @@ module instr_queue
   assign fifo_pos = rotate_left(valid, idx_is_q);
   assign instr_overflow = |(instr_queue_full & fifo_pos);
   // I7: if any needed slot cannot enqueue, push none (then replay).
-  assign push_instr = fifo_pos
-      & {NrFifo{g6lc_fetch_pkg::packet_accept(instr_overflow)}};
+  // Leftover-complete slot0 is the previous window's carry: if it fits
+  // and later slots overflow, push slot0 and replay the rest
+  // (s4-v-lorepl-kill t=2452203). Not pipe_keep (osbi 129b8).
+  assign slot0_pos = rotate_left({{(NrFifo - 1) {1'b0}}, valid[0]}, idx_is_q);
+  assign slot0_full = |(instr_queue_full & slot0_pos);
+  assign lo_partial = g6lc_fetch_pkg::leftover_slot0_push(
+      leftover_complete_i, valid[0], slot0_full, instr_overflow);
+  assign push_instr = lo_partial ? slot0_pos
+      : (fifo_pos & {NrFifo{g6lc_fetch_pkg::packet_accept(instr_overflow)}});
   assign push_instr_fifo = push_instr
       & {NrFifo{g6lc_fetch_pkg::packet_accept(address_overflow)}};
   assign consumed_o = rotate_right(push_instr_fifo, idx_is_q);
+
+  always_comb begin : gen_rest_addr
+    rest_addr = exception_addr_i;
+    rest_found = 1'b0;
+    for (int unsigned i = 1; i < NrFifo; i++) begin
+      if (valid[i] && !rest_found) begin
+        rest_addr = addr_i[i];
+        rest_found = 1'b1;
+      end
+    end
+  end
 
   always_comb begin : gen_shamt
     shamt = '0;
@@ -211,7 +234,10 @@ module instr_queue
   // (s4-v-norepl-npc: overflow replay'd 12956 then npc 12960/12968).
   // Completing window is vaddr 12958. I7 all-or-nothing so replay_sel
   // was always 0 on overflow. Not leftover_pending hold / I$ take drop.
-  assign replay_addr_o = exception_addr_i;
+  // Leftover-complete slot0 push: replay the first unpushed rest PC
+  // (ld ra@1295a), not the completing window (would leftover_drop).
+  assign replay_addr_o = (lo_partial && rest_found && |push_instr_fifo)
+      ? rest_addr : exception_addr_i;
 
   // ----------------------
   // Downstream interface

@@ -53,9 +53,13 @@ npc_q_o         = snap_pc(restore && inflight, inflight_addr, npc_q)
 realign.flush_i = flush_i          // leftover_update: flush is inert
 realign.kill_i  = kill_s1          // misp/replay keep carry; bp_fire retires
                                    // leftover-complete (strlen then strncmp jal)
+                                   // leftover_drop npc/IQ-zero MINI-FAIL s4-v-lodrop-minis
+                                   // (2jr hang @40000; osbi hang; jal_sd FAIL). Reverted.
 realign.hart_i  = smt_hart_i       // I4 banks
 iq push         = packet_accept(overflow)   // I7 all-or-nothing
 iq.replay_addr  = exception_addr            // I$ window, not slot0 carry
+                  // leftover_drop replay_addr=carry+2 SIGSEGV s4-v-repc-minis.
+                  // leftover_drop npc/IQ-zero MINI-FAIL s4-v-lodrop-minis.
 lo_jal          = serving_unaligned && rvi_jump[0]
                   // cf=Jump, predict=addr+imm, ras_push link. G1do on B.
                   // leftover jal@17fd6 predicted 17fda (link) not 49d6.
@@ -126,12 +130,20 @@ per-hart leftover/switch (`en.restore`).
 | 16-bit at mid-window npc | `G1gx/ia/fu/bf/ed` present | L1 | cursor from `address_i` |
 | Do not replace the live I$ window | `fe_keep` `G1y/aq/bl…` | L2 | `window_accept` + `same_win` |
 | All-or-nothing window | `G1az/cx/ej/bm` `I7` | L2 | `packet_accept` — IQ pushes none if any needed FIFO is full |
+| Leftover-complete slot0 push on rest overflow | pin t=2452203 leftover-complete overflow drops valid_q | L2 | `leftover_slot0_push` — A_no_loss carry. Replay rest at first unpushed PC. Not pipe_keep / leftover_replay_hold (osbi 129b8) |
+| Hold registered I$ window while IQ replay | leftover-complete 12950 dropped; 12958 issued as start | L2 | `pipe_keep(take, replay, valid_q)` — not leftover_drop npc/replay_addr mux (MINI-FAIL / SIGSEGV) |
 | Oldest-PC issue | `G1be/cy` `I6` | L3 | IQ drain rotate; no opcode head |
 | IQ oldest push-order drain | callee 12888 before sds | DELETE | MINI-FAIL `s4-v-i6ord-minis`: all 10 hang @40000 illegal npc=`0x10048`. Do not re-land |
 | IQ port 1 fallthrough-only + ID one-fill | mixed-packet dual-issue | DELETE | Hygiene PASS identical; v4 pin **unchanged** 12974→12888. Not the hang. Reverted |
 | Hold IQ-push of bp target until CF drained | callee pushed while jal still in IQ | DELETE | SIGSEGV rc=-11 all 10 minis (`s4-v-tgthold-minis`). Do not re-land. Not delay-until-alloc / icache_ret_ok |
 | leftover_ret_ok: take only leftover_next while pending + npc hold | 12966 twice (12960 before bltu@12956) | DELETE | MINI-FAIL `s4-v-lohold-minis`: 2jr hang @40000 illegal; stock hang; osbi rc=255. Reverted. Do not hold fetch on leftover (I4az/G1bq). 12970 fetched not committed |
 | leftover_foreign: zero IQ-push of leftover_drop foreign window + npc=carry+2 no kill | same 12966 twice | DELETE | SIGSEGV rc=-11 all 10 `s4-v-lofor-minis`. Reverted. Do not re-land. Hang starts at kill_s2 of leftover-complete 12958 |
+| leftover_drop replay_addr=carry+2 (combo leftover_pc on NPC mux) | IQ overflow leftover_drop of slliw vs vaddr 12958 | DELETE | SIGSEGV rc=-11 all 10 `s4-v-repc-minis`. Reverted. Do not mux leftover onto npc/replay_addr |
+| leftover_drop replay_addr=flop leftover_nxt | same | DELETE | SIGSEGV rc=-11 all 10 `s4-v-repc2-minis` (JTAG listen then crash). Reverted |
+| pipe_keep: hold icache_valid_q while IQ replay | leftover-complete 12950 dropped | DELETE | MINI-FAIL `s4-v-pipekeep-minis`: osbi illegal mepc=`129b8` mtval=`0x60a200c7`; beqz/nested HANG @40000. Reverted. Held leftover_drop windows |
+| leftover_retake: take leftover_complete I$ during replay | same 12958 leftover_drop | L2 | `!replay \|\| (lo_v && leftover_next)`. Hygiene PASS identical; pin unchanged. Keep. Does not block leftover_drop when `!replay` |
+| leftover_replay_hold: npc at vaddr after leftover-complete overflow drop | pin t=2452203 drop valid_q | DELETE | MINI-FAIL `s4-v-lrep-minis`: osbi `129b8`; jal_sd tohost=1 @442. Reverted. Same osbi veto as pipe_keep |
+| pipe_keep leftover-complete only (`serving_unaligned`) | pin t=2452203 drop valid_q of leftover-complete 12958 | DELETE | MINI-FAIL `s4-v-pklo-minis`: osbi illegal mepc=`129b8` mtval=`0x60a200c7`. Reverted. Do not hold leftover-complete across replay |
 | leftover_ret_ok take-only (no npc hold) + replay clears icache_valid_q | same 12966 twice | DELETE | MINI-FAIL `s4-v-lretake-minis`: 2jr hang @40000 illegal; stock hang. Do not gate sequential HIT on leftover_pending |
 | fetch_B IQ FIFO DEPTH 4→8 | leftover-complete 4-slot replay t=125002 full=8 | L3 | Hygiene PASS. Early visits 12956-before-12966. Trapping visit still 12966 twice (12960 before 12956). Keep. Do not bump to 16. Parameterize via `CVA6Cfg` later |
 | Packet ends at first predicted CF | IQ `branch_mask` | L3 | `packet_upto_cf` — n-wide `geo.slots`; BTB-miss jalr stays NoCF |

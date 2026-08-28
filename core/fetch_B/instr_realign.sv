@@ -43,6 +43,10 @@ module instr_realign
     output logic serving_unaligned_o,
     // Leftover valid but not completing this window (I3 keep)
     output logic leftover_pending_o,
+    // Carry valid (completing or not) — replay may retake leftover_next
+    output logic leftover_valid_o,
+    // Carry PC (reset 0; leftover_retake gates on leftover_valid_o)
+    output logic [CVA6Cfg.VLEN-1:0] leftover_pc_o,
     // 32-bit block address - CACHE
     input logic [CVA6Cfg.VLEN-1:0] address_i,
     // 32-bit block - CACHE
@@ -92,6 +96,8 @@ module instr_realign
       1'b1);
   assign serving_unaligned_o = carry_ok;
   assign leftover_pending_o = g6lc_fetch_pkg::leftover_pending(carry_valid_q, carry_ok);
+  assign leftover_valid_o = carry_valid_q;
+  assign leftover_pc_o = carry_addr_q;
 
   for (genvar j = 0; j < NrHalfWords; j++) begin : gen_halfword
     assign hw[j] = data_i[16*j+:16];

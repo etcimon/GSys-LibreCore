@@ -194,7 +194,9 @@ module frontend
 
   logic bp_valid;
   logic [NrInstr-1:0] is_branch, is_call, is_jump, is_return, is_jalr;
-  logic serving_unaligned, leftover_pending;
+  logic serving_unaligned, leftover_pending, leftover_valid;
+  logic leftover_slot0_push, leftover_kill;
+  logic [CVA6Cfg.VLEN-1:0] leftover_pc;
   // I$ request fields are kept as local wires: the request struct is then only
   // driven, never read back inside this module
   logic kill_s1, kill_s2, spec_req;
@@ -204,8 +206,8 @@ module frontend
   // address will always be 16 bit aligned, make this explicit here
   assign shamt = CVA6Cfg.RVC ? icache_dreq_i.vaddr[IdxW:1] : '0;
 
-  // Re-align: flush and kill_s1 (misp/replay) are inert on leftover so a
-  // killed window can retry the carry. bp_fire (kill_s2 only) must still
+  // Re-align: leftover_kill is misp/flush/replay except leftover-complete
+  // slot0 push (I7 overflow of rest). bp_fire (kill_s2 only) must still
   // retire a leftover-complete jal, else the next leftover (strncmp jal_lo
   // after strlen jal@17fc6) is never stored and RAS misses 17fda
   // (s4-v-nien node_is_enabled -48). Not G1bq (do not spare I$ kill_s2).
@@ -215,11 +217,13 @@ module frontend
       .clk_i              (clk_i),
       .rst_ni             (rst_ni),
       .flush_i            (flush_i),
-      .kill_i             (kill_s1),
+      .kill_i             (leftover_kill),
       .hart_i             (smt_hart_i),
       .valid_i            (icache_valid_q),
       .serving_unaligned_o(serving_unaligned),
       .leftover_pending_o (leftover_pending),
+      .leftover_valid_o   (leftover_valid),
+      .leftover_pc_o      (leftover_pc),
       .address_i          (icache_vaddr_q),
       .data_i             (icache_data_q),
       .valid_o            (instruction_valid_raw),
@@ -744,6 +748,10 @@ module frontend
   assign kill_s2 = g6lc_fetch_pkg::kill_s2(kill_s1, bp_fire);
   assign icache_dreq_o.kill_s1 = kill_s1;
   assign icache_dreq_o.kill_s2 = kill_s2;
+  // Leftover-complete slot0 pushed on I7 overflow: consume carry
+  // (leftover_update) while I$ kill_s1 still replays the rest.
+  assign leftover_slot0_push = serving_unaligned & instr_queue_consumed[0] & replay;
+  assign leftover_kill = is_mispredict | flush_i | (replay & ~leftover_slot0_push);
 
   // I10: bank the accepted I$ address when switch kills it, not next_block.
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -797,17 +805,21 @@ module frontend
   logic icache_take;
   // Do not register the next I$ return while IQ is replaying an
   // overflowed leftover-complete packet (s4-v-iq8-twice: 12960 taken
-  // while 12958 replay'd). Not leftover_ret_ok (no leftover_pending).
-  // leftover_take_ok MINI-FAIL s4-v-lotake-minis ALL 10 hang @40000
-  // (unbounded leftover hold; 2jr npc=0xd0c8). Reverted.
-  // serving_unaligned && take==next_block SIGSEGV rc=-11 s4-v-lotake1
-  // (2jr+stock). Reverted. Do not drop I$ on leftover-complete present.
+  // while 12958 replay'd), except leftover_complete of a still-pending
+  // carry (leftover_retake). leftover_take_ok MINI-FAIL s4-v-lotake-minis
+  // (gated all take; 2jr hang). pipe_keep MINI-FAIL s4-v-pipekeep-minis
+  // (held leftover_drop; osbi illegal 129b8). serving_unaligned &&
+  // take==next_block SIGSEGV s4-v-lotake1. Not leftover_drop npc mux.
   assign icache_take = (icache_dreq_i.valid | lbuf_inject)
       && g6lc_fetch_pkg::bp_ret_ok(bp_pend_q,
           g6lc_fetch_pkg::same_win(CVA6Cfg,
               64'(icache_dreq_i.valid ? icache_dreq_i.vaddr : ftq_head_vaddr),
               64'(bp_tgt_q)))
-      && !replay;
+      && g6lc_fetch_pkg::leftover_retake(
+          replay, leftover_valid,
+          g6lc_fetch_pkg::leftover_next(
+              64'(icache_dreq_i.valid ? icache_dreq_i.vaddr : ftq_head_vaddr),
+              64'(leftover_pc)));
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -1045,6 +1057,7 @@ module frontend
       .predict_address_i  (predict_address),
       .cf_type_i          (cf_type),
       .valid_i            (instruction_valid),     // from re-aligner
+      .leftover_complete_i(serving_unaligned),
       .consumed_o         (instr_queue_consumed),
       .ready_o            (instr_queue_ready),
       .replay_o           (replay),

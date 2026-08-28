@@ -236,6 +236,32 @@ package g6lc_fetch_pkg;
     leftover_update = valid && !kill;
   endfunction
 
+  // During IQ replay, still take a leftover_complete I$ return
+  // (carry+2). Does not block leftover_drop when !replay (I4az).
+  // leftover_take_ok gated ALL take on leftover_pending — MINI-FAIL hang.
+  // pipe_keep held leftover_drop windows — MINI-FAIL osbi/beqz/nested.
+  // lo_v gates leftover_next so carry X cannot reach take (0 && X = 0).
+  function automatic logic leftover_retake(
+      input logic replay,
+      input logic lo_v,
+      input logic next_win
+  );
+    leftover_retake = !replay || (lo_v && next_win);
+  endfunction
+
+  // I7 exception: leftover-complete slot0 is the previous window's
+  // carry (A_no_loss). If it fits and the rest overflow, push slot0
+  // and replay the rest. pipe_keep / leftover_replay_hold MINI-FAIL
+  // osbi 129b8. Not leftover_drop npc mux.
+  function automatic logic leftover_slot0_push(
+      input logic complete,
+      input logic slot0_v,
+      input logic slot0_full,
+      input logic overflow
+  );
+    leftover_slot0_push = complete && slot0_v && !slot0_full && overflow;
+  endfunction
+
   // I10: NPC steps on I$ accept (next_block). Switch flush kills that
   // in-flight window, so the restart PC is the accepted address, not
   // fetch-ahead npc. Not I4av (unissued decode) or I4aw (same-page guess).
