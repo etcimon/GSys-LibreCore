@@ -308,9 +308,7 @@ Deliberately **not** done, with reasons:
 
 Open follow-ups (reopen conditions recorded):
 - Capability-window reads answered from `config.cap_offsets` rather than device defaults (Q7).
-- Per-thread-context queue heads; multi-core ring selection (Q8).
 - Transport modelling once `contracts.ai_host_transport` is pinned (Q8).
-- Accelerator plane row in the capability matrix (Q9).
 
 ### Change set B3 — model-derived AI-island device (Q6/Q7/Q8, landed)
 

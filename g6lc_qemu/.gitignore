@@ -2,6 +2,9 @@
 .tools/
 .venv/
 
+# The capability table is data, not a local config, and is embedded by the build.
+!crates/g6q-ingest/data/capabilities.ini
+
 # Rust
 /target/
 **/target/

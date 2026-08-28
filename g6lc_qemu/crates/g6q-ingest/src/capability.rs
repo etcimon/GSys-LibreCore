@@ -255,8 +255,18 @@ mod tests {
         let v = t.get("vector").unwrap();
         assert!(v.dts_tokens.contains(&"v".to_string()));
         assert!(v.dts_tokens.contains(&"zve64d".to_string()));
-        let ai = t.get("matrix-accelerator").unwrap();
-        assert_eq!(ai.dts_node.as_deref(), Some("ai-matrix"));
+        let mx = t.get("matrix-accelerator").unwrap();
+        assert!(mx.dts_tokens.contains(&"xg6lcai".to_string()));
+        assert!(
+            mx.dts_node.is_none(),
+            "the matrix is an ISA token, not a device node"
+        );
+        let ai = t.get("ai-island").unwrap();
+        assert_eq!(ai.dts_node.as_deref(), Some("ai-island"));
+        assert!(
+            ai.dts_tokens.is_empty(),
+            "the island is a device node, not an ISA token"
+        );
     }
 
     #[test]

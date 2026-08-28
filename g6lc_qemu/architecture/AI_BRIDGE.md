@@ -277,9 +277,9 @@ and diagnosis tiers D1/D2 keep their existing meanings.
 | **Q8** | one ring per hart from `config.queues`; island-wide tickets | landed |
 | **Q6** | `config.cap_base` / `config.desc_base` ingested when published; unresolved reported loudly (§3.1) | landed |
 | **Q6** | the design publishing the island register-map placement in the configuration package | open — **ask on the design**, §3.1 |
-| **Q8** | conformance rule rejecting `S` above the interrupt-context cap, and accumulator banks below thread count | open |
+| **Q8** | conformance rule rejecting `S` above the interrupt-context cap, and accumulator banks below thread count | landed — `g6q-core/src/model.rs` enforces the interrupt-context cap as a blocking finding; `g6q-svcfg/src/derive.rs` raises `AccBanks` to `NrHarts` (the build step normalises rather than asserts, see `AGENTS-todo.md` Q1 C7) |
 | **Q8** | host↔card transport once `contracts.ai_host_transport` is pinned | blocked on pin |
-| **Q9** | capability matrix row for the accelerator plane | open |
+| **Q9** | capability matrix row for the accelerator plane | landed — `crates/g6q-ingest/data/capabilities.ini` now has `[matrix-accelerator]` (core-attached `Xg6lcai` token) and `[ai-island]` (uncore `ai-island` node) as two rows, both with the stock-QEMU delta |
 
 Deferred items are tracked in [`../AGENTS-todo.md`](../AGENTS-todo.md); a deferral with no reopen
 condition recorded there is a defect.
