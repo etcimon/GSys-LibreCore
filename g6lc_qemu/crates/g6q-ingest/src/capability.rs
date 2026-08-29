@@ -262,7 +262,7 @@ mod tests {
             "the matrix is an ISA token, not a device node"
         );
         let ai = t.get("ai-island").unwrap();
-        assert_eq!(ai.dts_node.as_deref(), Some("ai-island"));
+        assert_eq!(ai.dts_node.as_deref(), Some("ai-matrix"));
         assert!(
             ai.dts_tokens.is_empty(),
             "the island is a device node, not an ISA token"

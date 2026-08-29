@@ -49,7 +49,13 @@ _TOOLS = Path(__file__).resolve().parent
 if str(_TOOLS) not in sys.path:
     sys.path.insert(0, str(_TOOLS))
 
-from env_common import package_root
+from env_common import apply_env, out_dir, package_root, riscv_toolchain_bin
+from platform_constants import host_tool, xpack_riscv
+
+# remote/payload_flags is not a package dependency; it is loaded from the same tree.
+if (package_root() / "tools" / "remote").is_dir():
+    sys.path.insert(0, str(package_root() / "tools" / "remote"))
+from payload_flags import compile_flags
 
 # --------------------------------------------------------------------------- defaults
 
@@ -71,6 +77,7 @@ _REMOTE_KEY = os.environ.get("G6Q_REMOTE_KEY")
 
 DEFAULT_SSH = shlex.split(os.environ.get("G6Q_SSH_BIN", "ssh"))
 DEFAULT_RSYNC = shlex.split(os.environ.get("G6Q_RSYNC_BIN", "rsync"))
+_EXE = ".exe" if _WINDOWS else ""
 
 # On Windows the OpenSSH tools do not support SSH_ASKPASS scripts and rsync is
 # rarely on PATH. Fall back to WSL ssh/rsync so a passphrase-protected key can
@@ -290,7 +297,60 @@ def _remote(host: str, sock: Path | None, cmd: list[str], check: bool = True, ca
 
 
 _BASE_PATH = "/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin"
-_TOOLCHAIN_PATH = "/opt/testharness/toolchains/xpack-riscv-none-elf-gcc-14.2.0-3/bin"
+
+
+def _xpack_remote_bin_dir() -> str:
+    """Remote xPack toolchain bin directory, derived from platform-constants.toml."""
+    ref = xpack_riscv()["ref"]
+    return f"/opt/testharness/toolchains/xpack-riscv-none-elf-gcc-{ref}/bin"
+
+
+# Prefixes used by the contained xPack toolchain and common system packages.
+_RISCV_CC_PREFIXES = ["riscv-none-elf-", "riscv64-unknown-elf-", "riscv64-none-elf-", "riscv64-linux-gnu-"]
+
+
+def _local_riscv_cc() -> str | None:
+    """Find a RISC-V cross-compiler in the contained toolchain or on PATH."""
+    bin_dir = riscv_toolchain_bin()
+    candidates: list[Path] = []
+    if bin_dir is not None:
+        candidates.extend(
+            bin_dir / f"{prefix}gcc{_EXE}" for prefix in _RISCV_CC_PREFIXES
+        )
+    for cc in candidates:
+        if cc.is_file():
+            return str(cc)
+    path = apply_env().get("PATH", os.environ.get("PATH", ""))
+    for prefix in _RISCV_CC_PREFIXES:
+        cc = shutil.which(f"{prefix}gcc", path=path)
+        if cc:
+            return cc
+    return None
+
+
+def _compile_payload_local(payload_extra: list[str], local_elf: Path) -> int:
+    """Compile the AI-tensor smoke payload locally using the contained toolchain."""
+    cc = _local_riscv_cc()
+    if not cc:
+        err("no local RISC-V cross-toolchain found; run `python tools/g6q.py setup-riscv`")
+        return 1
+    payload_dir = package_root() / "tools" / "remote" / "payload"
+    payload_src = payload_dir / "ai_island_smoke.S"
+    payload_lds = payload_dir / "ai_island_smoke.lds"
+    cmd = [
+        cc,
+        "-march=rv64imac",
+        "-mabi=lp64",
+        "-nostdlib",
+        *payload_extra,
+        "-T",
+        str(payload_lds),
+        str(payload_src),
+        "-o",
+        str(local_elf),
+    ]
+    log(f"local payload compile: {local_elf}")
+    return subprocess.run(cmd, check=False).returncode
 
 
 def _env(extra: str | None = None, append_path: bool = False, quote: bool = False) -> str:
@@ -382,6 +442,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             res = _remote(host, sock, [f"{_env(append_path=True)}which {tool}"], check=False)
             status = "ok" if res.returncode == 0 else "MISSING"
             log(f"  remote {tool}: {status}")
+
+        # Remote RISC-V cross-compiler probes (xpack, then common system packages)
+        for prefix in _RISCV_CC_PREFIXES:
+            res = _remote(
+                host,
+                sock,
+                [
+                    f"{_env(extra=_xpack_remote_bin_dir(), append_path=True)}"
+                    f"which {prefix}gcc"
+                ],
+                check=False,
+            )
+            status = "ok" if res.returncode == 0 else "MISSING"
+            log(f"  remote {prefix}gcc: {status}")
 
         # Remote directories
         _remote_mkdir(host, sock, root)
@@ -537,6 +611,9 @@ def cmd_test(args: argparse.Namespace) -> int:
         return 0
     _remote_mkdir(host, None, runs)
 
+    if args.ai_island and not args.plugin_tensor:
+        args.plugin_tensor = "tensor.json"
+
     if args.smoke:
         timeout = args.timeout or 20
         log_file = f"{runs}/opensbi-smoke.log"
@@ -572,7 +649,7 @@ def cmd_test(args: argparse.Namespace) -> int:
         if args.plugin_tensor:
             plugin_arg += f",tensor={args.plugin_tensor}"
         build_cmd = (
-            f"{_env(extra=_TOOLCHAIN_PATH, append_path=True)}"
+            f"{_env(extra=_xpack_remote_bin_dir(), append_path=True)}"
             f"ninja -C {root}/{BUILD_DIR} contrib-plugins"
         )
         run_cmd = (
@@ -600,20 +677,42 @@ def cmd_test(args: argparse.Namespace) -> int:
                 log(f"  {line}")
         log(f"plugin smoke log at {host}:{log_file}")
 
-    def _pull_tensor_artifact() -> None:
+    def _pull_tensor_artifact() -> Path | None:
         if not args.plugin_tensor:
-            return
+            return None
         remote_tensor = args.plugin_tensor
         if not remote_tensor.startswith("/"):
             remote_tensor = f"{runs}/{remote_tensor}"
         local_tensor = package_root() / "out" / "remote_runs" / tag / "tensor.json"
         if args.dry_run:
             log(f"dry-run: would pull {host}:{remote_tensor} to {local_tensor}")
-            return
+            return None
         local_tensor.parent.mkdir(parents=True, exist_ok=True)
         with _control_socket(host) as sock:
             _rsync_from_remote(host, sock, remote_tensor, local_tensor)
         log(f"pulled tensor trace to {local_tensor}")
+        return local_tensor
+
+    def _report_tops(local_tensor: Path | None) -> None:
+        if not local_tensor or not args.model:
+            return
+        try:
+            res = _run(
+                [
+                    sys.executable,
+                    str(package_root() / "tools" / "ai_tensor_bridge.py"),
+                    "results",
+                    "--tops",
+                    "--model",
+                    args.model,
+                    str(local_tensor),
+                ],
+                check=False,
+            )
+            if res.returncode != 0:
+                err(f"TOPS report failed: {res.stderr or res.stdout}")
+        except Exception as exc:
+            err(f"cannot report TOPS: {exc}")
 
     def _pull_trace_artifact() -> None:
         if not args.plugin_trace:
@@ -634,6 +733,24 @@ def cmd_test(args: argparse.Namespace) -> int:
         ai_base = args.ai_base
         ai_len = args.ai_len
         uart_base = args.uart_base
+        payload_extra: list[str] = []
+        if not args.model:
+            err("--ai-island requires --model to derive the payload and TOPS report")
+            return 1
+        try:
+            import json
+            with open(args.model, "r", encoding="utf-8") as f:
+                model = json.load(f)
+            payload_extra = compile_flags(
+                model,
+                ai_m=args.ai_m,
+                ai_n=args.ai_n,
+                ai_k=args.ai_k,
+                done_ptr=args.ai_done_ptr,
+            )
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            err(f"cannot derive payload flags from {args.model}: {exc}")
+            return 1
         plugin_so = f"{root}/{BUILD_DIR}/contrib/plugins/lib{machine}.so"
         log_file = f"{runs}/ai-island-smoke.log"
         plugin_arg = ""
@@ -654,29 +771,40 @@ def cmd_test(args: argparse.Namespace) -> int:
                 package_root() / "tools" / "remote" / "payload",
                 f"{root}/{PAYLOAD_DIR}",
             )
-            cc_cmd = (
-                f'{_env(extra=f"{_TOOLCHAIN_PATH}:/opt/testharness/toolchains/riscv-*/bin", append_path=True, quote=True)}'
-                'for c in riscv-none-elf-gcc riscv64-unknown-elf-gcc riscv64-none-elf-gcc riscv64-linux-gnu-gcc; '
-                'do command -v $c && exit 0; done; exit 1'
-            )
-            cc_res = _remote(host, sock, [cc_cmd], check=False, capture=True)
-            if cc_res.returncode != 0 or not cc_res.stdout.strip():
-                err("no RISC-V cross compiler found on the remote builder")
-                return 1
-            cc = cc_res.stdout.strip().splitlines()[0].strip()
+
+            use_local_cc = getattr(args, "local_riscv", False)
+            if not use_local_cc:
+                cc_cmd = (
+                    f'{_env(extra=f"{_xpack_remote_bin_dir()}:/opt/testharness/toolchains/riscv-*/bin", append_path=True, quote=True)}'
+                    'for c in riscv-none-elf-gcc riscv64-unknown-elf-gcc riscv64-none-elf-gcc riscv64-linux-gnu-gcc; '
+                    'do command -v $c && exit 0; done; exit 1'
+                )
+                cc_res = _remote(host, sock, [cc_cmd], check=False, capture=True)
+                use_local_cc = cc_res.returncode != 0 or not cc_res.stdout.strip()
+
             if args.dry_run:
                 log(f"dry-run: {build_cmd}")
-                log(f"dry-run: compile payload with {cc}")
+                log(f"dry-run: compile payload {'locally' if use_local_cc else 'on remote'}")
                 log(f"dry-run: run {machine} with payload and {plugin_so}")
                 return 0
+
             _remote(host, sock, [build_cmd])
-            compile_cmd = (
-                f"{_env(extra=_TOOLCHAIN_PATH, append_path=True, quote=True)}"
-                f"{cc} -march=rv64imac -mabi=lp64 -nostdlib "
-                f"-DAI_BASE={ai_base} -DUART_BASE={uart_base} "
-                f"-T {payload_lds} {payload_src} -o {payload_elf}"
-            )
-            _remote(host, sock, [compile_cmd])
+
+            if use_local_cc:
+                local_elf = out_dir() / "ai_island_smoke.elf"
+                if _compile_payload_local(payload_extra, local_elf) != 0:
+                    err("local payload compile failed")
+                    return 1
+                _rsync_to_remote(host, sock, local_elf, payload_elf)
+            else:
+                cc = cc_res.stdout.strip().splitlines()[0].strip()
+                compile_cmd = (
+                    f"{_env(extra=_xpack_remote_bin_dir(), append_path=True, quote=True)}"
+                    f"{cc} -march=rv64imac -mabi=lp64 -nostdlib "
+                    f"{' '.join(payload_extra)} "
+                    f"-T {payload_lds} {payload_src} -o {payload_elf}"
+                )
+                _remote(host, sock, [compile_cmd])
             if args.plugin_trace:
                 _remote(host, sock, [f"mkdir -p $(dirname {shlex.quote(args.plugin_trace)})"])
             if args.plugin_tensor:
@@ -708,7 +836,8 @@ def cmd_test(args: argparse.Namespace) -> int:
         if ai_ok and ai_count > 0:
             log(f"AI-island smoke PASSED (ai_island_count={ai_count})")
             log(f"AI-island log at {host}:{log_file}")
-            _pull_tensor_artifact()
+            local_tensor = _pull_tensor_artifact()
+            _report_tops(local_tensor)
             _pull_trace_artifact()
             return 0
         else:
@@ -716,7 +845,6 @@ def cmd_test(args: argparse.Namespace) -> int:
             log(f"AI-island log at {host}:{log_file}")
             return 1
 
-    _pull_tensor_artifact()
     return 0
 
 
@@ -768,8 +896,13 @@ def cmd_remote_build(args: argparse.Namespace) -> int:
             plugin=args.test_plugin,
             ai_island=args.test_ai,
             machine=args.machine,
+            model=args.model,
             ai_base=args.ai_base,
             ai_len=args.ai_len,
+            ai_done_ptr=args.ai_done_ptr,
+            ai_m=args.ai_m,
+            ai_n=args.ai_n,
+            ai_k=args.ai_k,
             uart_base=args.uart_base,
             tag=args.tag,
             dry_run=args.dry_run,
@@ -846,9 +979,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--plugin", action="store_true", help="run generated plugin smoke test")
     p.add_argument("--ai-island", action="store_true", help="run AI-island smoke test")
     p.add_argument("--machine", default=None, help="g6lc machine name (default: g6lc-unnamed)")
+    p.add_argument("--model", default=None, help="ingested TargetModel JSON to derive payload flags")
     p.add_argument("--ai-base", default="0x40000000", help="AI-island MMIO base")
     p.add_argument("--ai-len", default="0x1000", help="AI-island MMIO length")
+    p.add_argument("--ai-done-ptr", default=None, type=int, help="completion word pointer")
+    p.add_argument("--ai-m", default=1, type=int, help="GEMM m dimension for the smoke")
+    p.add_argument("--ai-n", default=1, type=int, help="GEMM n dimension for the smoke")
+    p.add_argument("--ai-k", default=1, type=int, help="GEMM k dimension for the smoke")
     p.add_argument("--uart-base", default="0x10000000", help="UART MMIO base")
+    p.add_argument("--local-riscv", action="store_true", help="compile the RISC-V payload locally with the contained toolchain")
     p.add_argument("--tag", default=None, help="test tag")
     p.add_argument("--timeout", type=int, default=None, help="smoke timeout in seconds")
     p.add_argument("--qemu-debug", default=None, help="QEMU -d categories")
@@ -874,8 +1013,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--test-plugin", action="store_true", help="also run plugin smoke")
     p.add_argument("--test-ai", action="store_true", help="also run AI-island smoke")
     p.add_argument("--machine", default=None, help="g6lc machine name for tests (default: g6lc-unnamed)")
+    p.add_argument("--model", default=None, help="ingested TargetModel JSON to derive payload flags")
     p.add_argument("--ai-base", default="0x40000000", help="AI-island MMIO base")
     p.add_argument("--ai-len", default="0x1000", help="AI-island MMIO length")
+    p.add_argument("--ai-done-ptr", default=None, type=int, help="completion word pointer")
+    p.add_argument("--ai-m", default=1, type=int, help="GEMM m dimension for the smoke")
+    p.add_argument("--ai-n", default=1, type=int, help="GEMM n dimension for the smoke")
+    p.add_argument("--ai-k", default=1, type=int, help="GEMM k dimension for the smoke")
     p.add_argument("--uart-base", default="0x10000000", help="UART MMIO base")
     p.add_argument("--tag", default=None, help="test tag")
     p.add_argument("--timeout", type=int, default=None, help="smoke timeout")

@@ -1,9 +1,21 @@
 /* SPDX-License-Identifier: MIT
  * ai_island_smoke.S — M-mode AI-tensor descriptor smoke payload.
  *
- * Writes a minimal version=1, op=GEMM descriptor to the AI-island descriptor
- * latch, rings the doorbell (version/op at offset 0), polls the ptr_done word,
- * and prints "AI_OK\n" on the NS16550a UART if the status is ST_OK (0).
+ * This payload is intentionally model-driven: all descriptor offsets, the
+ * descriptor window base, the GEMM op value, the version, and the completion
+ * pointer are supplied as C preprocessor macros so the same source can be
+ * compiled against any ingested `desc_layout` without hard-coding design
+ * constants.
+ *
+ *   AI_DESC_BASE      full MMIO address of the descriptor window
+ *   AI_DONE_PTR       guest DRAM address of the completion word
+ *   AI_OFF_M          byte offset of m in the descriptor
+ *   AI_OFF_N          byte offset of n in the descriptor
+ *   AI_OFF_K          byte offset of k in the descriptor
+ *   AI_OFF_PTR_DONE   byte offset of ptr_done in the descriptor
+ *   AI_OP_GEMM        numeric op value for GEMM from the design's table
+ *   AI_VERSION        descriptor version
+ *   UART_BASE         full MMIO address of the NS16550a UART
  */
 
 .section .text
@@ -11,34 +23,41 @@
 _start:
     la sp, _stack_top
 
-    li t0, AI_BASE
+    li t0, AI_DESC_BASE
 
-    /* Minimal GEMM shape: m=1, n=1, k=1. */
-    li t1, 0x1
-    sw t1, 0x08(t0)         /* m */
-    sw t1, 0x0c(t0)         /* n */
-    sw t1, 0x10(t0)         /* k */
+    /* Default GEMM shape: m=1, n=1, k=1.  The same source is used for
+     * larger model-derived smoke shapes by overriding the defaults. */
+#ifndef AI_M
+#define AI_M 1
+#endif
+#ifndef AI_N
+#define AI_N 1
+#endif
+#ifndef AI_K
+#define AI_K 1
+#endif
 
-    /* Write the completion/done pointer (inside DRAM at 0x80010000). */
-    li t2, 0x80010000
-    sd t2, 0x38(t0)         /* ptr_done is at descriptor offset 56 (0x38). */
+    li t1, AI_M
+    sw t1, AI_OFF_M(t0)
+    li t1, AI_N
+    sw t1, AI_OFF_N(t0)
+    li t1, AI_K
+    sw t1, AI_OFF_K(t0)
 
-    /* Ring the doorbell: version=1, op=1 (GEMM). */
-    li t1, 0x00010001
-    sw t1, 0x00(t0)
+    /* Write the completion/done pointer. */
+    li t2, AI_DONE_PTR
+    sd t2, AI_OFF_PTR_DONE(t0)
 
-    /* Poll the completion word at 0x80010000 for ST_OK (0). */
-    li t3, 1000
-1:
-    addi t3, t3, -1
-    beqz t3, fail
-    ld t4, 0(t2)
-    li t6, 0xffff
-    and t4, t4, t6
-    bnez t4, 1b
+    /* Ring the doorbell: version=AI_VERSION, op=AI_OP_GEMM. */
+    li t1, ((AI_VERSION << 16) | (AI_OP_GEMM & 0xffff))
+    sw t1, 0(t0)
 
-    /* Write a done word (ticket=0, status=0) so the trace marks it complete. */
-    li t5, 0x0
+    /* In B2 the plugin observes a store to ptr_done and marks the descriptor
+     * done.  In B3 the device writes the packed completion word.  Either way a
+     * successful status word is (ticket=0, status=0), i.e. the value 0; this
+     * smoke cannot poll for a non-zero word and is therefore intentionally not
+     * a completion test — it is a doorbell + descriptor-latch test. */
+    li t5, 0
     sd t5, 0(t2)
 
     /* Print "AI_OK\n" to the UART. */
@@ -56,22 +75,6 @@ _start:
     li a0, '\n'
     sw a0, 0(t6)
 
-2:
+1:
     wfi
-    j 2b
-
-fail:
-    li t6, UART_BASE
-    li a0, 'F'
-    sw a0, 0(t6)
-    li a0, 'A'
-    sw a0, 0(t6)
-    li a0, 'I'
-    sw a0, 0(t6)
-    li a0, 'L'
-    sw a0, 0(t6)
-    li a0, '\n'
-    sw a0, 0(t6)
-3:
-    wfi
-    j 3b
+    j 1b

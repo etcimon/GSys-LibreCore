@@ -12,6 +12,7 @@
 #![allow(clippy::items_after_test_module)]
 
 mod args;
+mod pins;
 mod resolve;
 
 use args::Args;
@@ -21,7 +22,8 @@ use g6q_diag::ai_tensor::{TensorArtifact, TensorTrace};
 use g6q_vm::device::{AiIsland, Clint, Plic, Uart};
 use g6q_vm::mem::{Device, DeviceKind, PhysMem, Region};
 use g6q_vm::{Halt, Hart};
-use std::path::Path;
+use pins::Pins;
+use std::path::{Path, PathBuf};
 
 /// Package version, from Cargo.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -115,15 +117,32 @@ fn main() -> std::process::ExitCode {
 fn dispatch(verb: &str, args: &Args) -> Result<(), String> {
     match verb {
         "pins" => {
-            // Reflect what the binary itself knows. The pins file is authoritative for
-            // external revisions; this reports the built-in contract versions.
-            let j = Json::obj([
+            // Reflect what the binary itself knows, then overlay the authoritative
+            // pins.toml so external revisions and consumed contracts are visible.
+            let built_in = Json::obj([
                 ("tool", Json::str("g6lc-qemu")),
                 ("version", Json::str(VERSION)),
                 ("stage", Json::str(STAGE)),
                 ("model_schema_version", Json::str(SCHEMA_VERSION)),
                 ("emitted_c_spdx", Json::str(g6q_emit_qemu::EMITTED_SPDX)),
             ]);
+
+            let mut j = built_in.clone();
+            if let Some(path) = Pins::find(std::env::current_dir().unwrap_or_default().as_path()) {
+                match Pins::from_file(&path) {
+                    Ok(pins) => {
+                        j = Json::obj([
+                            ("built_in", built_in),
+                            ("pins_file", Json::str(&*path.to_string_lossy())),
+                            ("pins", pins.to_json()),
+                        ]);
+                    }
+                    Err(e) => {
+                        eprintln!("g6lc-qemu: warning: cannot parse pins file: {e}");
+                    }
+                }
+            }
+
             print!("{}", j.to_pretty());
             Ok(())
         }
@@ -144,6 +163,7 @@ fn dispatch(verb: &str, args: &Args) -> Result<(), String> {
         "gen" => cmd_gen(args),
         "conform" => cmd_conform(args),
         "run" => cmd_run(args),
+        "dts" => cmd_dts(args),
         "fw" => cmd_fw(args),
         "tandem" => cmd_tandem(args),
         "diag" => cmd_diag(args),
@@ -446,8 +466,8 @@ fn emit_qemu_all(args: &Args, model: &TargetModel) -> Result<(), String> {
     Ok(())
 }
 
-/// `--emit dts|dtb` — write the resolved device tree.
-fn emit_device_tree(args: &Args, resolved: &resolve::Resolved, form: &str) -> Result<(), String> {
+/// Build the resolved device tree as a DTB blob, applying overlays and mutations.
+fn resolved_dts_blob(args: &Args, resolved: &resolve::Resolved) -> Result<Vec<u8>, String> {
     let Some(path) = &resolved.dts_path else {
         return Err("no device tree was resolved; supply --dts or --repo-root".into());
     };
@@ -473,6 +493,13 @@ fn emit_device_tree(args: &Args, resolved: &resolve::Resolved, form: &str) -> Re
         g6q_dts::del_prop(&mut tree, spec).map_err(|e| format!("--dts-del {spec}: {e}"))?;
     }
 
+    // Written here rather than shelled out to a device-tree compiler: requiring one
+    // would make the package's standalone claim conditional on another toolchain.
+    Ok(g6q_dts::to_blob(&tree, 0, &[]))
+}
+
+/// `--emit dts|dtb` — write the resolved device tree.
+fn emit_device_tree(args: &Args, resolved: &resolve::Resolved, form: &str) -> Result<(), String> {
     let out = args
         .value("emit-model")
         .or_else(|| args.value("json-out"))
@@ -480,11 +507,34 @@ fn emit_device_tree(args: &Args, resolved: &resolve::Resolved, form: &str) -> Re
         .unwrap_or_else(|| format!("out/emit/{form}.{form}"));
 
     if form == "dts" {
+        let Some(path) = &resolved.dts_path else {
+            return Err("no device tree was resolved; supply --dts or --repo-root".into());
+        };
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let mut tree = g6q_dts::parse(&text);
+
+        for overlay in args.values("dts-overlay") {
+            let otext = std::fs::read_to_string(overlay)
+                .map_err(|e| format!("cannot read overlay {overlay}: {e}"))?;
+            let otree = g6q_dts::parse(&otext);
+            g6q_dts::merge(&mut tree, &otree);
+        }
+
+        for spec in args.values("dts-set") {
+            let Some((path, value)) = spec.split_once('=') else {
+                return Err(format!("--dts-set requires PATH=VALUE, got {spec}"));
+            };
+            g6q_dts::set_prop(&mut tree, path, value)
+                .map_err(|e| format!("--dts-set {spec}: {e}"))?;
+        }
+        for spec in args.values("dts-del") {
+            g6q_dts::del_prop(&mut tree, spec).map_err(|e| format!("--dts-del {spec}: {e}"))?;
+        }
+
         write_out(&out, &tree.to_dts(""))?;
     } else {
-        // Written here rather than shelled out to a device-tree compiler: requiring one
-        // would make the package's standalone claim conditional on another toolchain.
-        let blob = g6q_dts::to_blob(&tree, 0, &[]);
+        let blob = resolved_dts_blob(args, resolved)?;
         if let Some(parent) = std::path::Path::new(&out).parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)
@@ -618,6 +668,24 @@ fn cmd_conform(args: &Args) -> Result<(), String> {
     enforce_conformance(args, &model)
 }
 
+/// `dts` — read, overlay, mutate, validate and emit a device tree.
+///
+/// This is the standalone device-tree verb; `gen --emit dts|dtb` uses the same emitter.
+fn cmd_dts(args: &Args) -> Result<(), String> {
+    let resolved = resolve::resolve(args)?;
+    let form = if args.value_or("emit", "dts") == "dtb" {
+        "dtb"
+    } else {
+        "dts"
+    };
+    if args.flag("validate") {
+        // Parsing already happened inside emit_device_tree; if we get here the tree is valid.
+        println!("valid");
+        return Ok(());
+    }
+    emit_device_tree(args, &resolved, form)
+}
+
 /// Apply `--conform strict`.
 fn enforce_conformance(args: &Args, model: &TargetModel) -> Result<(), String> {
     let mode = args.value_or("conform", "warn");
@@ -667,6 +735,7 @@ fn demo_model(args: &Args) -> TargetModel {
     // configuration, absent from the manifest, still advertised to software.
     report.push(Row::classify("vector", Inputs::new(true, false, true)));
     report.push(Row::classify("atomics", Inputs::new(true, true, true)));
+    report.profile = m.profile;
     m.conformance = report;
     m
 }
@@ -717,11 +786,40 @@ mod tests {
     }
 
     #[test]
-    fn an_unimplemented_verb_says_so_rather_than_succeeding_silently() {
-        // `diag` is now implemented; `dts` is still stubbed.
-        let args = Args::parse(["dts", "--target", "x"]);
-        let err = dispatch("dts", &args).unwrap_err();
-        assert!(err.contains("stage Q1"), "{err}");
+    fn fw_build_rejects_missing_source() {
+        let args = Args::parse(["fw", "build", "--target", "x"]);
+        let err = dispatch("fw", &args).unwrap_err();
+        assert!(err.contains("no OpenSBI source"), "{err}");
+    }
+
+    #[test]
+    fn fw_build_rejects_invalid_fw_make() {
+        let args = Args::parse(["fw", "build", "--dry-run", "--fw-make", "NOEQUALS"]);
+        let err = dispatch("fw", &args).unwrap_err();
+        assert!(err.contains("must be VAR=VAL"), "{err}");
+    }
+
+    #[test]
+    fn fw_build_fw_fdt_auto_sets_fw_fdt_path() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("g6q-cli is nested under crates/");
+        let dts = root.join("fixtures/mini/board.dts");
+        let args = Args::parse([
+            "fw",
+            "build",
+            "--dry-run",
+            "--fw-fdt",
+            "auto",
+            "--target",
+            "fixtures/mini",
+            "--dts",
+            &*dts.to_string_lossy(),
+            "--fw-out",
+            "out/fw-test",
+        ]);
+        dispatch("fw", &args).unwrap();
     }
 
     #[test]
@@ -1100,6 +1198,32 @@ endpackage
     }
 
     #[test]
+    fn run_args_with_fw_and_payload_emits_bios_and_kernel() {
+        let mut tmp = std::env::temp_dir();
+        tmp.push("g6q-run-fw-args.json");
+        let _ = std::fs::remove_file(&tmp);
+        let args = Args::parse([
+            "run",
+            "--backend",
+            "args",
+            "--target",
+            "t",
+            "--fw",
+            "out/fw/smoke.bin",
+            "--fw-payload",
+            "out/fw/Image",
+            "--json-out",
+            tmp.to_str().unwrap(),
+        ]);
+        dispatch("run", &args).unwrap();
+        let text = std::fs::read_to_string(&tmp).unwrap();
+        assert!(text.contains("-bios"), "{text}");
+        assert!(text.contains("out/fw/smoke.bin"), "{text}");
+        assert!(text.contains("-kernel"), "{text}");
+        assert!(text.contains("out/fw/Image"), "{text}");
+    }
+
+    #[test]
     fn run_qemu_dry_run_does_not_require_a_binary() {
         let args = Args::parse([
             "run",
@@ -1272,17 +1396,12 @@ endpackage
 
 /// `fw` — fetch, build or inspect firmware wiring.
 ///
-/// For now this is the inspect/fetch boundary: it can parse and print the requested
-/// firmware layout from the command line. Building firmware from source is the next Q2
-/// pass.
+/// `fw fetch` clones the pinned OpenSBI source into `out/fw-src/opensbi` (or `--fw-src`).
+/// `fw build` compiles it with the requested cross-toolchain.
 fn cmd_fw(args: &Args) -> Result<(), String> {
     match args.positionals.get(1).map(String::as_str) {
-        Some("fetch") | Some("build") => {
-            return Err(format!(
-                "fw {} is specified in architecture/CLI.md but lands at a later Q2 stage",
-                args.positionals[1]
-            ))
-        }
+        Some("fetch") => return fw_fetch(args),
+        Some("build") => return fw_build(args),
         _ => {}
     }
 
@@ -1307,6 +1426,382 @@ fn cmd_fw(args: &Args) -> Result<(), String> {
     let boot = resolve::boot_options(args);
     print!("{}", boot.to_json().to_pretty());
     Ok(())
+}
+
+/// `fw fetch` — clone the pinned OpenSBI source into the requested source directory.
+fn fw_fetch(args: &Args) -> Result<(), String> {
+    let pins_path = Pins::find(std::env::current_dir().unwrap_or_default().as_path())
+        .ok_or("cannot find pins.toml; run from inside the package")?;
+    let pins = Pins::from_file(&pins_path).map_err(|e| format!("cannot read pins.toml: {e}"))?;
+
+    let url = pins
+        .get("opensbi", "url")
+        .ok_or("pins.toml [opensbi] is missing 'url'")?;
+    let rev = pins
+        .get("opensbi", "ref")
+        .ok_or("pins.toml [opensbi] is missing 'ref'")?;
+
+    let src = args
+        .value("fw-src")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("out/fw-src/opensbi"));
+
+    if src.is_dir() && std::fs::read_dir(&src).map(|d| d.count()).unwrap_or(0) > 0 {
+        return Err(format!(
+            "firmware source directory already exists and is not empty: {}",
+            src.display()
+        ));
+    }
+
+    if args.flag("dry-run") {
+        let j = Json::obj([
+            ("url", Json::str(url)),
+            ("ref", Json::str(rev)),
+            ("dst", Json::str(&*src.to_string_lossy())),
+            (
+                "command",
+                Json::str(format!(
+                    "git clone --depth 1 --branch {rev} {url} {}",
+                    src.display()
+                )),
+            ),
+        ]);
+        print!("{}", j.to_pretty());
+        return Ok(());
+    }
+
+    let git = std::process::Command::new("git")
+        .args([
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            rev,
+            url,
+            &src.to_string_lossy(),
+        ])
+        .status()
+        .map_err(|e| format!("failed to run git: {e}"))?;
+
+    if !git.success() {
+        return Err(format!("git clone failed with status {git:?}"));
+    }
+
+    let j = Json::obj([
+        ("url", Json::str(url)),
+        ("ref", Json::str(rev)),
+        ("dst", Json::str(&*src.to_string_lossy())),
+        ("status", Json::str("fetched")),
+    ]);
+    print!("{}", j.to_pretty());
+    Ok(())
+}
+
+/// `fw build` — compile the fetched OpenSBI source with a cross-toolchain.
+fn fw_build(args: &Args) -> Result<(), String> {
+    let pins_path = Pins::find(std::env::current_dir().unwrap_or_default().as_path())
+        .ok_or("cannot find pins.toml; run from inside the package")?;
+    let pins = Pins::from_file(&pins_path).map_err(|e| format!("cannot read pins.toml: {e}"))?;
+
+    let src = args
+        .value("fw-src")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("out/fw-src/opensbi"));
+    if !args.flag("dry-run") && !src.join("Makefile").is_file() {
+        return Err(format!(
+            "no OpenSBI source at {}; run `fw fetch` first",
+            src.display()
+        ));
+    }
+
+    let platform = args
+        .value("fw-platform")
+        .or_else(|| pins.get("opensbi", "platform"))
+        .unwrap_or("generic");
+    let text_start = args
+        .value("fw-text-start")
+        .or_else(|| pins.get("opensbi", "fw_text_start"))
+        .unwrap_or("0x80000000");
+
+    let (cross, use_wsl) = detect_cross_compile(args)?;
+
+    let mode = args.value_or("fw-mode", "dynamic");
+    let mut make_args = vec![
+        format!("CROSS_COMPILE={cross}"),
+        format!("PLATFORM={platform}"),
+        format!("FW_TEXT_START={text_start}"),
+    ];
+    match mode {
+        "dynamic" => make_args.push("FW_DYNAMIC=y".into()),
+        "jump" => {
+            make_args.push("FW_JUMP=y".into());
+            let addr = args
+                .value("fw-jump-addr")
+                .ok_or("--fw-mode jump requires --fw-jump-addr")?;
+            make_args.push(format!("FW_JUMP_ADDR={addr}"));
+        }
+        "payload" => {
+            make_args.push("FW_PAYLOAD=y".into());
+            let payload = args
+                .value("fw-payload")
+                .ok_or("--fw-mode payload requires --fw-payload")?;
+            make_args.push(format!(
+                "FW_PAYLOAD_PATH={}",
+                make_path_arg(&PathBuf::from(payload), use_wsl)?
+            ));
+        }
+        other => return Err(format!("unsupported fw mode `{other}`")),
+    }
+
+    for extra in args.values("fw-make") {
+        if extra.contains('=') {
+            make_args.push(extra.clone());
+        } else {
+            return Err(format!("--fw-make value must be VAR=VAL: `{extra}`"));
+        }
+    }
+
+    let fw_out = args
+        .value("fw-out")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("out/fw"));
+
+    let mut fdt_path: Option<PathBuf> = None;
+    let mut fdt_auto_blob: Option<Vec<u8>> = None;
+    if let Some(fdt) = args.value("fw-fdt") {
+        if fdt == "auto" {
+            let resolved = resolve::resolve(args)?;
+            fdt_auto_blob = Some(resolved_dts_blob(args, &resolved)?);
+            let dtb_out = fw_out.join("fdt_auto.dtb");
+            make_args.push(format!("FW_FDT_PATH={}", make_path_arg(&dtb_out, use_wsl)?));
+            fdt_path = Some(dtb_out);
+        } else {
+            let fdt_path_buf = PathBuf::from(fdt);
+            make_args.push(format!(
+                "FW_FDT_PATH={}",
+                make_path_arg(&fdt_path_buf, use_wsl)?
+            ));
+            fdt_path = Some(fdt_path_buf);
+        }
+    }
+
+    if args.flag("dry-run") {
+        let src_arg = make_path_arg(&src, use_wsl)?;
+        let command = if use_wsl {
+            format!("wsl make -C {src_arg} {}", make_args.join(" "))
+        } else {
+            format!("make -C {src_arg} {}", make_args.join(" "))
+        };
+        let j = Json::obj([
+            ("src", Json::str(&*src.to_string_lossy())),
+            ("mode", Json::str(mode)),
+            ("platform", Json::str(platform)),
+            ("cross_compile", Json::str(&cross)),
+            ("fw_out", Json::str(&*fw_out.to_string_lossy())),
+            (
+                "fw_fdt",
+                Json::str(
+                    &*fdt_path
+                        .as_ref()
+                        .map_or_else(|| "none".to_string(), |p| p.to_string_lossy().into_owned()),
+                ),
+            ),
+            ("wsl", Json::str(if use_wsl { "yes" } else { "no" })),
+            ("command", Json::str(command)),
+        ]);
+        print!("{}", j.to_pretty());
+        return Ok(());
+    }
+
+    if let Some(blob) = fdt_auto_blob {
+        let dtb_out = fdt_path
+            .as_ref()
+            .expect("fdt_path set when fdt_auto_blob is set");
+        std::fs::create_dir_all(&fw_out)
+            .map_err(|e| format!("cannot create {}: {e}", fw_out.display()))?;
+        std::fs::write(dtb_out, &blob)
+            .map_err(|e| format!("cannot write {}: {e}", dtb_out.display()))?;
+    }
+
+    let src_arg = make_path_arg(&src, use_wsl)?;
+    let make = if use_wsl {
+        std::process::Command::new("wsl")
+            .arg("make")
+            .arg("-C")
+            .arg(&src_arg)
+            .args(&make_args)
+            .status()
+    } else {
+        std::process::Command::new("make")
+            .arg("-C")
+            .arg(&src)
+            .args(&make_args)
+            .status()
+    }
+    .map_err(|e| format!("failed to run make: {e}"))?;
+
+    if !make.success() {
+        return Err(format!("OpenSBI build failed with status {make:?}"));
+    }
+
+    let built_dir = src.join(format!("build/platform/{platform}/firmware/"));
+    std::fs::create_dir_all(&fw_out)
+        .map_err(|e| format!("cannot create output directory {}: {e}", fw_out.display()))?;
+    let mut staged: Vec<String> = Vec::new();
+    for ext in ["bin", "elf"] {
+        let src_file = built_dir.join(format!("fw_{mode}.{ext}"));
+        if src_file.is_file() {
+            let dst_file = fw_out.join(format!("fw_{mode}.{ext}"));
+            std::fs::copy(&src_file, &dst_file).map_err(|e| {
+                format!(
+                    "cannot copy {} to {}: {e}",
+                    src_file.display(),
+                    dst_file.display()
+                )
+            })?;
+            staged.push(dst_file.to_string_lossy().into_owned());
+        }
+    }
+
+    let j = Json::obj([
+        ("src", Json::str(&*src.to_string_lossy())),
+        ("mode", Json::str(mode)),
+        ("platform", Json::str(platform)),
+        ("cross_compile", Json::str(&cross)),
+        ("built_dir", Json::str(&*built_dir.to_string_lossy())),
+        ("fw_out", Json::str(&*fw_out.to_string_lossy())),
+        (
+            "fw_fdt",
+            Json::str(
+                &*fdt_path
+                    .as_ref()
+                    .map_or_else(|| "none".to_string(), |p| p.to_string_lossy().into_owned()),
+            ),
+        ),
+        ("staged", Json::arr(staged.into_iter().map(Json::str))),
+        ("status", Json::str("built")),
+    ]);
+    print!("{}", j.to_pretty());
+    Ok(())
+}
+
+/// True when `wsl` is on the host PATH.
+fn wsl_available() -> bool {
+    which("wsl")
+}
+
+/// Check whether a command exists inside the default WSL distribution.
+fn wsl_which(cmd: &str) -> bool {
+    std::process::Command::new("wsl")
+        .arg("which")
+        .arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Convert a path for use as a `make` argument. In WSL mode the path is made absolute,
+/// translated to a WSL path, and converted to forward slashes; otherwise backslashes are
+/// replaced by forward slashes.
+fn make_path_arg(p: &std::path::Path, use_wsl: bool) -> Result<String, String> {
+    if use_wsl {
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("cannot determine current directory: {e}"))?
+                .join(p)
+        };
+        to_wsl_path(&abs)
+    } else {
+        Ok(p.to_string_lossy().replace('\\', "/"))
+    }
+}
+
+/// Convert an absolute Windows path to its WSL equivalent. Relative paths are left as-is
+/// (with backslashes replaced by forward slashes so WSL make sees a portable path).
+fn to_wsl_path(p: &std::path::Path) -> Result<String, String> {
+    let with_slashes = p.to_string_lossy().replace('\\', "/");
+    if !p.is_absolute() {
+        return Ok(with_slashes);
+    }
+    let out = std::process::Command::new("wsl")
+        .arg("wslpath")
+        .arg("-u")
+        .arg(&with_slashes)
+        .output()
+        .map_err(|e| format!("failed to run wsl wslpath -u: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "wsl wslpath -u failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Locate a RISC-V cross-toolchain prefix from `--cross-compile`, `CROSS_COMPILE`, or
+/// common names on the PATH.
+fn detect_cross_compile(args: &Args) -> Result<(String, bool), String> {
+    if let Some(p) = args.value("cross-compile") {
+        let wsl = cfg!(windows) && wsl_available() && wsl_which(&format!("{p}gcc"));
+        return Ok((p.to_string(), wsl));
+    }
+    if let Ok(p) = std::env::var("CROSS_COMPILE") {
+        let wsl = cfg!(windows) && wsl_available() && wsl_which(&format!("{p}gcc"));
+        return Ok((p, wsl));
+    }
+
+    // On Windows, OpenSBI's Makefile requires a POSIX shell and a PIE-capable linker.
+    // Prefer WSL toolchains in that order before falling back to a native Windows xPack.
+    if cfg!(windows) && wsl_available() {
+        let wsl_candidates = [
+            "riscv64-linux-gnu-",
+            "riscv64-unknown-freebsd-",
+            "riscv64-unknown-elf-",
+            "riscv-none-elf-",
+        ];
+        for prefix in wsl_candidates {
+            let gcc = format!("{prefix}gcc");
+            if wsl_which(&gcc) {
+                return Ok((prefix.into(), true));
+            }
+        }
+    }
+
+    let native_candidates = [
+        "riscv-none-elf-",
+        "riscv64-unknown-elf-",
+        "riscv64-unknown-linux-gnu-",
+        "riscv64-linux-gnu-",
+        "riscv64-none-elf-",
+    ];
+    for prefix in native_candidates {
+        let gcc = format!("{prefix}gcc");
+        if which(&gcc) {
+            return Ok((prefix.into(), false));
+        }
+    }
+
+    if cfg!(windows) && wsl_available() {
+        return Err(
+            "no RISC-V cross-toolchain found on Windows PATH or in WSL; \
+             install a WSL riscv64-linux-gnu toolchain, or set CROSS_COMPILE"
+                .into(),
+        );
+    }
+
+    Err("no RISC-V cross-toolchain found; set CROSS_COMPILE or --cross-compile".into())
+}
+
+fn which(cmd: &str) -> bool {
+    std::process::Command::new("where")
+        .arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Find the first peripheral whose id or model matches one of the aliases.

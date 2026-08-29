@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: MIT
+#
+# platform-constants.toml — pinned external download links and platform constants
+# used by tools/g6q.py for contained and standalone host tooling setup.
+#
+# This is the single source of truth for URLs that g6q.py downloads directly.
+# Keep the [xpack_riscv] ref in sync with pins.toml [riscv_toolchain].ref.
+
+[rustup]
+unix_url = "https://sh.rustup.rs"
+win_url = "https://win.rustup.rs/x86_64"
+
+[xpack_riscv]
+repo = "https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack"
+ref = "14.2.0-3"
+
+[host_tools]
+
+[host_tools.opensbi_toolchain]
+cmd = "riscv64-linux-gnu-gcc"
+
+# Standalone PIE-capable RISC-V Linux toolchain for OpenSBI (Bootlin, glibc).
+# Extraction produces a single top-level directory; binaries live under <dir>/bin.
+[host_tools.opensbi_toolchain.standalone.linux_x64]
+url = "https://toolchains.bootlin.com/downloads/releases/toolchains/riscv64-lp64d/tarballs/riscv64-lp64d--glibc--stable-2024.05-1.tar.bz2"
+archive = "tar.bz2"
+install_dir = ".tools/riscv64-glibc"
+strip_components = 1
+bin_dir = "bin"
+bin_prefix = "riscv64-linux-gnu-"
+
+[host_tools.qemu]
+cmd = "qemu-system-riscv64"
+
+# Windows 64-bit QEMU installer (Inno Setup). g6q.py runs it silently with /S /D=<dir>.
+# This is a fallback when no WSL/package manager is available on Windows.
+[host_tools.qemu.standalone.win_x64]
+url = "https://qemu.weilnetz.de/w64/qemu-w64-setup-20260805.exe"
+archive = "exe"
+install_dir = ".tools/qemu"
+
+[host_tools.dtc]
+cmd = "dtc"
+
+# dtc source build fallback on POSIX hosts without a package manager.
+[host_tools.dtc.build_from_source.linux_x64]
+url = "https://git.kernel.org/pub/scm/utils/dtc/dtc.git/snapshot/dtc-1.7.2.tar.gz"
+archive = "tar.gz"
+install_dir = ".tools/dtc-src"
+strip_components = 1
+requires = ["make", "bison", "flex"]
+build_cmd = "make NO_PYTHON=1"
+
+[host_tools.dtc.build_from_source.darwin_x64]
+url = "https://git.kernel.org/pub/scm/utils/dtc/dtc.git/snapshot/dtc-1.7.2.tar.gz"
+archive = "tar.gz"
+install_dir = ".tools/dtc-src"
+strip_components = 1
+requires = ["make", "bison", "flex"]
+build_cmd = "make NO_PYTHON=1"
+
+[host_tools.dtc.build_from_source.darwin_arm64]
+url = "https://git.kernel.org/pub/scm/utils/dtc/dtc.git/snapshot/dtc-1.7.2.tar.gz"
+archive = "tar.gz"
+install_dir = ".tools/dtc-src"
+strip_components = 1
+requires = ["make", "bison", "flex"]
+build_cmd = "make NO_PYTHON=1"
+
+# dtc source build on Windows using the detected MSVC environment (meson + ninja).
+# Requires meson to be available on PATH (e.g. `pip install meson` in a venv).
+[host_tools.dtc.build_from_source.win_x64]
+url = "https://git.kernel.org/pub/scm/utils/dtc/dtc.git/snapshot/dtc-1.7.2.tar.gz"
+archive = "tar.gz"
+install_dir = ".tools/dtc-src"
+strip_components = 1
+build_env = "msvc"
+requires = ["meson", "ninja", "bison", "flex"]
+build_steps = [
+  "meson setup build --wipe --prefix .",
+  "meson compile -C build",
+  "meson install -C build",
+]
+
+[host_tools.spike]
+cmd = "spike"
+build_hint = "https://github.com/riscv-software-src/riscv-isa-sim"

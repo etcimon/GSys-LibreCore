@@ -313,7 +313,9 @@ surface that needs them at Q2.
 capacity lives in the design's SoC package, which the `apu` plane does not read yet. Until it does,
 `max_harts` describes what the board connects, not what the silicon could serve. The model reports
 `null` rather than `0` when the number is unknown, so nothing downstream mistakes ignorance for a
-limit. Close this when the SoC-package reader lands.
+limit. **Resolved by the G9 pass** — the SoC package (`*_soc_pkg.sv`) is discovered from the
+expanded manifest or supplied via `--soc-pkg`, and top-level `NumTargets`/`NumSources` set the
+interrupt-controller capacity. If the package is absent, `max_harts` remains `null`.
 *Priors: `architecture/INGEST.md` §1 (planes).*
 
 **G10 — Capability table coverage.** `crates/g6q-ingest/data/capabilities.ini` covers the extension
@@ -321,7 +323,11 @@ and unit surface reached so far. It is data and is expected to grow; two rules k
 capability with no separate compilation unit must have **no** `impl` entry, or manifest membership
 will report it as a stub. A capability the device tree cannot express must have **no** `dts` entry —
 giving privilege modes extension tokens produced a false `undeclared` on every target until it was
-removed.
+removed. **G10 pass added `zcb`, `zcmp`, `zcmt` and `pmp`**: the three Zc code-size sub-extensions are
+intrinsic (no `impl`) and use the standard `zcb`/`zcmp`/`zcmt` dts tokens; `pmp` uses the `NrPMPEntries`
+count as its config probe and the `core/pmp/` compilation unit, with no `dts` token because the tree
+cannot express PMP presence. Existing `zcb` now appears as `live` on `g6lc64_smt2`; `pmp` is `live`
+where `NrPMPEntries > 0`; `zcmp`/`zcmt` remain `absent` until a target enables them.
 *Priors: `crates/g6q-ingest/data/capabilities.ini` header.*
 
 **G2 — Reader strategy escalation.** The Q0/Q1 config reader is deliberately narrow: it understands
@@ -333,31 +339,50 @@ special cases. Record the decision here before doing it.
 
 **G3 — Schema stability.** `schemas/target-model.schema.json` and `conformance.schema.json` are
 version-stamped from the first release. Any field rename is a `schema_version` bump plus a fixture
-update; consumers read the version before the payload.
+update; consumers read the version before the payload. **G3 pass bumped the model and conformance
+schemas to version 2** and made `conformance.schema.json` require `schema_version` and `profile` so
+a standalone report is self-describing.
 *Priors: `architecture/IR.md`.*
 
 **G4 — Zero-dependency stance.** The workspace has no external crates and offline
 `cargo test --workspace` must keep working. Adding a dependency requires a decision recorded here, a
 `pins.toml` entry with an exact version, permissive licence only, and a note on offline behaviour.
+**G4 pass verified:** `tools/check_independence.py` rejects any non-path dependency or inherited
+workspace dependency that is not itself an in-package path; `cargo test --workspace` runs offline
+with only the pinned rust-toolchain; `pins.toml` `[dependencies]` is deliberately empty.
 *Priors: `AGENTS.md` §3, `AGENTS-licensing.md` §5.*
 
 **G5 — `E-GPLLINK` regression.** `tools/check_independence.py` is the enforcement point. Extend it
 whenever a new way to reach QEMU appears (a build script, a linker attribute, a vendored header). A
-violation must be a build failure, never a review comment.
+violation must be a build failure, never a review comment. **G5 pass strengthened it** to catch
+`links`, `build`, `crate-type`, and `target.'cfg(...)'.dependencies` in `Cargo.toml`;
+`#[cfg_attr(..., link/)]`, `global_asm!`, and `include_str!`/`include_bytes!` that escape or load
+under a `qemu/` path; added `--selftest` and wired it into `g6q.py check`. The check is now a build
+failure for all known native-link surfaces.
 *Priors: `AGENTS-licensing.md` §2.3.*
 
 **G6 — Profile discipline plumbing.** `profile` must be a required field of every artifact the moment
 artifacts start existing (Q2). Retrofitting stamps after the fact is how a `g6lc-virt` result ends up
-quoted as a hardware result.
+quoted as a hardware result. **G6 pass added `profile` to `g6q_core::conform::Report`**; `g6q-ingest`
+stamps it from the model's profile and `g6q-cli` demo_model sets it. The standalone conformance
+JSON (`conform --json`, `gen --emit conformance`) now carries both `schema_version` and `profile`.
 *Priors: `architecture/DESIGN.md` §"Machine profiles".*
 
 **G7 — Pin hygiene.** `pins.toml` currently records QEMU, OpenSBI, and the external contracts this
 package consumes. Whenever a consumed contract changes upstream, bump the pin **and** the affected
-schema/ABI version in the same pass. Never reinterpret bits silently.
+schema/ABI version in the same pass. Never reinterpret bits silently. **G7 pass updated the Q6
+accelerator pins:** `contracts.ai_isa` now points to `core/cvxif_g6lc_ai/include/g6lc_ai_instr_pkg.sv`
+and `contracts.ai_island_mmio` to `corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv`; both are now
+`read-at-runtime` because the package ingests the named package into `AiInstrSet`, `AiDescLayout`,
+and `AiRegMap` rather than transcribing the document. The `isa-encoding.md` document and
+`README.md` remain informative but are no longer the contract source for the generator.
 *Priors: `AGENTS.md` §1.9.*
 
 **G8 — Host adapter stays optional.** If a host project grows an adapter that spawns this CLI, it
-lives in the host, not here, and the package must keep working without it.
+lives in the host, not here, and the package must keep working without it. **G8 pass verified:** no
+crate imports from a host build platform or CI harness; `g6q_remote.py` and `ai_tensor_bridge.py` are
+standalone scripts the host may call, and the package never calls back into the host; `python
+tools/g6q.py check` passes with no host path configured.
 *Priors: `AGENTS.md` §1.1.*
 
 ### Q4/Q5 debug, trace and AI-island pass
@@ -408,16 +433,17 @@ field for the queue ring, `AiTensorEvent` type, and VM/plugin event emission.
 
 ---
 
-## Large change sets — open steps grouped into passes
+## Large change sets — grouped passes
 
-The remaining open items are not independent one-file fixes; they cluster into three large change
-sets.  Each should land as a single coherent pass with its own green `python tools/g6q.py check` and
-its own remote or fixture test.
+The work that used to be open here has landed as the grouped passes below.  Each landed as a single
+coherent pass with its own green `python tools/g6q.py check` and a fixture or remote test.
 
-### Change set A — RTL/RVFI trace bridge (closes G12)
+### Change set A — RTL/RVFI trace bridge (closes G12, landed)
 
 Goal: a `g6lc-qemu ingest rvfi` path that reads CVA6 `trace_rvfi_hart_*.dasm` and produces a
 `RecordFile` that `tandem` can compare against a QEMU or B3 trace.
+
+**Landed in the Q5/Q6 RVFI dasm bridge pass.**
 
 Components:
 - `crates/g6q-diag/src/rvfi.rs` — parser for `rvfi_tracer.sv` text (mode/PC/insn, `xN`/`fN` writes,
@@ -432,10 +458,12 @@ Components:
   match hand-built `CommitRecord`s.
 - Docs: `architecture/DIAG.md` §2.4 and `architecture/CLI.md` `--rvfi-out`/ingest notes.
 
-### Change set B — AI-tensor event model + clustering (closes G13)
+### Change set B — AI-tensor event model + clustering (closes G13, landed)
 
 Goal: move the AI-island counter from "any MMIO in the window" to "descriptor ring events", and
 scale the model to a cluster of islands / queues with per-operation efficiency counters.
+
+**Landed across Change sets B2–B6 and C1/C2/C6/C7.**
 
 Components:
 - `g6q-diag` package readers:
@@ -615,6 +643,38 @@ Lesson worth keeping: "derived from the model" is not established by *calling a 
 type-checked, passed the existing tests, and read as architecture-derived. Only comparing against the
 real package caught them — which is why the name-set pinning test is now a checklist item.
 
+### Change set B6 — 100-TOPS roofline report, PCIe transport stub, and remote payload flags (landed)
+
+Goal: close the AI-tensor bridge pass requested in AGENTS-todo.md open items (100-TOPS reporting,
+PCIe concept, and `g6q_remote.py` payload model-driving) without duplicating the roofline arithmetic
+or inventing an unpinned transport.
+
+Landed:
+- `tools/ai_tensor_bridge.py results --tops` runs `g6lc-qemu diag` on the artifact, reuses the D2
+  counter stream, and reports a 100-TOPS-style section (`peak_tops`, `peak_gops`, `total_macs`,
+  `total_ops`, `total_gops`, `theoretical_time_us_at_peak`, `blocking_t`, `macs_per_cycle_total`,
+  balance, intensity, and `bound` when a measured DRAM bandwidth closes the roofline). It is marked
+  `tops_not_evidence: true` and prints the standard non-evidence disclaimer. `--measured-dram-gbps`
+  closes the roofline if a host measurement exists.
+- `tools/ai_tensor_bridge.py pcie` prints the proposed PCIe/virtio/BAR concept and exits with an
+  error while `contracts.ai_host_transport` is `unpinned`. It does not invent descriptor geometry or
+  transport state.
+- `tools/remote/payload_flags.py` derives RISC-V payload `-D` flags from the ingested `TargetModel`
+  (AI-island and UART bases, descriptor `desc_base`, field offsets for `m`/`n`/`k`/`ptr_done`,
+  `OP_GEMM`, descriptor `version`, and the done pointer). `g6q_remote.py test --ai-island` and
+  `remote-build --test-ai` accept `--model`, `--ai-m`, `--ai-n`, `--ai-k`, and `--ai-done-ptr` and
+  pass the derived flags to the remote cross-compiler.
+- `architecture/AI_BRIDGE.md` §5/§6 and `architecture/CLI.md` updated to describe `results --tops`,
+  `pcie`, and the model-driven remote payload.
+- `python tools/g6q.py check` green; `ai_tensor_bridge.py selftest` OK; local `g6lc-qemu diag` with
+  `--tops` on the `ai_soc` tensor artifact reports 0.512 TOPS peak and 16.78M MACs for one GEMM
+  event (not a 100-TOPS claim).
+
+Deliberately not done, with reasons:
+- No actual PCIe BAR/virtio/MSI modelling — `contracts.ai_host_transport` remains `unpinned`.
+- No measured TOPS or host cycle count — the package does not invent timing.
+- The roofline is still produced by `g6lc-qemu diag`; the bridge only re-aggregates.
+
 ### Change set C1 — B2 descriptor reassembly (Q7, landed)
 
 Closes the gap `EMIT.md` had been overstating: the plugin now emits **submissions**, not raw accesses,
@@ -739,9 +799,11 @@ first candidates when a consumer appears: the physical address width bounds any 
 and the page-table geometry is what the native VM's walk should be sized by rather than an assumed
 scheme.
 
-### Change set C — D2 microarchitecture + virt distro readiness (Q7/Q8)
+### Change set C — D2 microarchitecture + virt distro readiness (Q7/Q8, landed)
 
 Goal: make the D2 counters and virt profile usable for distro scale.
+
+**Landed across the D2/virt readiness passes.**
 
 Components:
 - PMU event table ingestion from design package. **Landed** in prior pass.
@@ -824,6 +886,7 @@ scatter-shot commits.
 || 2026-08-30 | Q4/Q5 remote trace pass: QEMU debug logging (`--debug`/`--debug-file` to `-d`/`-D`), B2 trace-record plugin with `order`, `hart`, `pc_rdata`, `pc_wdata`, `insn`, `trap`, `cause`, `prv`, `halt`, `rd_addr`, `rd_wdata`, `frd_addr`, `frd_wdata`; numeric JSON fields; AI-island MMIO access counter from model-derived base/length; `g6q_remote.py` shell wrapper fixes so configure/build/plugin/payload commands see `ninja`, cross-toolchain and `~/.local/bin` uniformly; `run --backend qemu --record FILE` auto-loads the generated plugin and copies the temporary trace; `tandem` accepts wrapped `RecordFile` objects and raw arrays; live remote `g6lc-mini` AI-island smoke with `AI_OK` and `ai_island_count=3`; trace pulled and `tandem` reports 40 records with no divergence. | `python tools/g6q.py check` green; 77 workspace tests pass; `indep` and `flist` selftest pass. `architecture/CLI.md`, `DIAG.md`, `EMIT.md` updated. |
 | 2026-08-29 | Q5/Q6 RVFI dasm bridge pass: new `g6q-diag/src/rvfi.rs` parser for `trace_rvfi_hart_*.dasm`; handles `core:`, `core N:`, `x10`, `x 8`, `mem`, exception and `wfi` lines; derives `pc_wdata` and `halt`; maps exception names to `mcause`; CLI `tandem` loads `.dasm` inputs; validated on a real `trace_rvfi_hart_00.dasm` from CVA6 verif/sim (17 records, self-tandem green); G12 resolved. | `python tools/g6q.py check` green; 16 diag tests pass; `indep` and `flist` selftest pass. `architecture/DIAG.md` §2.4 and `AGENTS-todo.md` updated. |
 | 2026-08-29 | Q3 D-extension pass (double-precision RV32D/RV64D): D FPR raw 64-bit accessors; decoder/execute for FLD/FSD, FMADD/FMSUB/FNMSUB/FNMADD.D, FADD/FSUB/FMUL/FDIV/FSQRT.D, FSGNJ/N/X.D, FMIN/FMAX.D, FCVT.S/D and D/S, FCVT.W/WU/L/LU.D and D.W/WU/L/LU, FMV.X.D/D.X, FEQ/FLT/FLE.D, FCLASS.D; unit tests; fixed FCLASS.S/D decoder `rs2=0` bug. | `python tools/g6q.py check` green; 69 workspace tests pass; `indep` and `flist` selftest pass. FMA/arithmetic use host `f64` as a bring-up implementation; explicit rounding mode and full IEEE-754 exception/NaN propagation remain for a later pass. |
+|| 2026-08-30 | B6 — 100-TOPS roofline report, PCIe transport stub, and remote payload flags | `tools/ai_tensor_bridge.py` gains `results --tops` (modelled peak/ops/MACs/time, `bound` when measured DRAM is supplied) and `pcie` concept, plus `--measured-dram-gbps`; `tools/remote/payload_flags.py` and `g6q_remote.py` `--ai-island` derive RISC-V payload compile flags from the ingested `TargetModel` and, when `--plugin-tensor` is set, pull the artifact and run `ai_tensor_bridge.py results --tops`; `architecture/AI_BRIDGE.md` and this file updated. | `python tools/g6q.py check` green; `ai_tensor_bridge.py selftest` OK; the existing `out/ai_soc_tensor_qemu.json` from a prior local QEMU smoke gives `results --tops --model out/ai_soc_model.json` `peak_tops: 0.512`, `total_macs: 16777216` for one `256x256x256` GEMM event (not a 100-TOPS claim). Local re-run is blocked by no RISC-V cross-toolchain and a WSL-only `qemu-system-riscv64`; the B3 equivalent (`g6q-vm` `ai_island_submits_and_completes` and `queue_enq_reads_descriptor_from_memory`) is exercised by `cargo test --workspace` and is green. |
 | 2026-08-29 | Q6/Q7 AI-island clustering analysis pass (Change Set B part 1): expanded `AGENTS-todo.md` and `architecture/EMIT.md`/`DIAG.md` with tensor-trace plugin, queue-ring model and AI D2 counters; added `g6q-diag/src/ai_cfg.rs` to parse `g6lc_ai_island_cfg_pkg.sv` (validated on the real file at `E:/cva6/corev_apu/include/g6lc_ai_island_cfg_pkg.sv`); added `g6q-core::model::AiIslandConfig` to `Soc`; wired `g6q-ingest` to derive it from the flist so `TargetModel.soc.ai_island` now carries clusters, MACs/cycle, queues, queue depth and capability offsets. | `python tools/g6q.py check` green; 21 diag, 19 ingest, 77 VM and full workspace pass; `indep` and `flist` selftest pass. |
 | 2026-08-29 | Q6/Q7 AI-island architecture-derived model pass (Change Set B part 2): moved `AiDescLayout`/`DescField` to `g6q-core`; added `g6q-diag/src/ai_instr.rs` to parse `g6lc_ai_instr_pkg.sv` for custom-2 opcode, queue CSRs and `ai.enq`/`ai.poll`/`ai.qfence` match/mask values; introduced `g6q-core::model::AiIslandModel` grouping `AiIslandConfig`, `AiDescLayout` and `AiInstrSet`; wired `g6q-ingest` to populate `Soc.ai_island` from all three design packages; updated `schemas/target-model.schema.json`. | `python tools/g6q.py check` green; 23 diag, 19 ingest, full workspace pass; `indep` and `flist` selftest pass. |
 | 2026-08-29 | Q6/Q7 AI-island custom-2 decode pass (Change Set B part 3): added `Insn::AiEnq`/`AiPoll`/`AiQfence` to `g6q-vm`; added `decode_with_ai` using `AiInstrSet` match/mask; wired `Hart.ai_instr_set` into the fetch/decode stage; added `Hart` stub execute arms that currently trap so the workspace compiles. | `python tools/g6q.py check` green; 78 VM, full workspace pass; `indep` and `flist` selftest pass. |
@@ -841,6 +904,42 @@ scatter-shot commits.
 | 2026-08-30 | D2 AI-island PMU counters via tensor artifacts: `AiTensorEvent` gains `pmu_r_beats`/`w_beats`/`cycles`/`gbps_x1000`; `g6q-vm` stores modelled PMU values per event in `queue_qfence`; `g6q-diag/src/ai_tensor.rs` `tensor_counters` emits `ai.pmu.*` counters from the last completed event as `Fidelity::Modelled`; `to_json`/`from_json` round-trip the new fields; `g6q-cli` tests updated. `architecture/DIAG.md` §4.1 table adds `ai.pmu.*`. `python tools/ai_tensor_bridge.py` `push --uarch-out` will now carry `ai.pmu.*` counters through the artifact. | `python tools/g6q.py check` green; `g6q-vm` 110, `g6q-diag` 64, `g6q-cli` 52; `indep`, `flist`, and `ai-bridge` selftest pass. |
 | 2026-08-29 | Q6/Q7 remote tensor retrieval + queue smoke pass (Change Set B part 7): `tools/g6q_remote.py` `test`/`remote-build` subcommands gained `--plugin-tensor PATH`; the plugin is invoked with `,tensor=PATH` and the resulting `tensor.json` is rsynced back to `out/remote_runs/<tag>/tensor.json`; added `g6q-vm` `ai_queue_full_and_ticket_sequence` integration test that enqueues to a model-configured depth, exercises queue-full, `ai.qfence`, `ai.poll`, and drains `AiTensorEvent`s into D2 `ai.tensor.*` counters. | `python tools/g6q.py check` green; 81 VM, full workspace pass; `indep` and `flist` selftest pass. |
 
+| 2026-08-30 | G9 — SoC-package interrupt-controller capacity pass: `Sources` gains `soc_pkg: Option<Package>`; `g6q-cli` `resolve` discovers a `*_soc_pkg.sv` from the expanded manifest, or uses explicit `--soc-pkg`, and parses top-level `NumTargets`/`NumSources` into the model; `build_soc` prefers the SoC package's controller capacity over the device-tree wired count; `g6q-ingest` `soc_pkg_sets_interrupt_controller_capacity` test pins the behaviour; `ariane_soc_pkg.sv` now appears in `provenance.sources` and `g6lc-qemu gen --repo-root E:/cva6 --target g6lc64_smt2` reports `intc.targets=16`, `intc.max_harts=8`. `architecture/INGEST.md` §1 and this file updated; G9 resolved. | `python tools/g6q.py check` green; `g6q-ingest` 26, full workspace pass; `indep` and `flist` selftest pass. |
+| 2026-08-30 | G10 — Capability table coverage pass: added `zcb`, `zcmp`, `zcmt` and `pmp` to `crates/g6q-ingest/data/capabilities.ini`. `zcb`/`zcmp`/`zcmt` are intrinsic (no `impl`) with `dts` tokens `zcb`/`zcmp`/`zcmt`; `zcb` is `live` on `g6lc64_smt2` because the device tree already advertises it; `zcmp`/`zcmt` remain `absent` until a target enables them. `pmp` uses `NrPMPEntries` as its config probe, `core/pmp/` as its compilation unit, and no `dts` token because the device tree cannot express PMP. The G10 invariant -- no `impl` for intrinsic features, no `dts` for tree-inexpressible features -- is preserved; the remaining `strict conformance: FAIL` on `g6lc64_smt2` is still the design gaps (`napot-pages` undeclared, `second-level-cache` stub), not table omissions. Also corrected `ai-island`'s `dts_node` from `ai-island` to `ai-matrix` after `conform` on `g6lc64_ai` showed the design advertises the island as `ai-matrix`. | `python tools/g6q.py check` green; `g6q-ingest` 26, full workspace pass; `indep` and `flist` selftest pass. |
+| 2026-08-30 | G5 — Independence / E-GPLLINK regression pass: strengthened `tools/check_independence.py` to catch `links`, `build`, `crate-type`, and `target.'cfg(...)'.dependencies` in `Cargo.toml`; `#[cfg_attr(..., link/)]` and `global_asm!` in `.rs` files; and `include_str!`/`include_bytes!` paths that escape the package or load under a `qemu/` path. Added a `--selftest` that builds a bad package and a good package in a temporary directory and asserts the checker catches the expected violations while accepting the clean one. Wired `python tools/g6q.py check` to run the selftest after the real package scan so the regression check is exercised every green run. The existing `g6q-emit-qemu` module `build.rs` is a Rust source file, not a Cargo build script; the default build-script glob was tightened to `crates/*/build.rs` to avoid that false positive. | `python tools/g6q.py check` green; `indep` + `indep selftest` OK; full workspace pass. |
+| 2026-08-30 | G7 — Pin hygiene pass: `pins.toml` `contracts.ai_isa` and `contracts.ai_island_mmio` now name the SystemVerilog packages the generator reads (`core/cvxif_g6lc_ai/include/g6lc_ai_instr_pkg.sv` and `corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv`) and are marked `read-at-runtime`, matching the Q6 ingest implementation in `g6q-diag/ai_cfg.rs` and `g6q-diag/ai_desc.rs`. The markdown documents remain informative but are not the pin of record. | `python tools/g6q.py check` green; `indep` + `indep selftest` OK; full workspace pass. |
+| 2026-08-30 | G3/G6 — Conformance report schema and profile stamp pass: `g6q_core::conform::Report` now carries `profile: Profile`; `Report::to_json` emits `schema_version` and `profile` alongside the rows. `SCHEMA_VERSION` and `pins.toml` schema_version bumped to `"2"`; `schemas/conformance.schema.json` and `schemas/target-model.schema.json` updated to require the new fields. `g6q-ingest::assemble` stamps the model's profile into `model.conformance.profile` so `conform --json` and `gen --emit conformance` cannot be mistaken for a different profile's result. `g6q-cli/src/main.rs` `demo_model` sets `report.profile = m.profile`; `g6q-core` tests and `fixtures/golden/mini-model.json` updated. | `python tools/g6q.py check` green; `g6q-core` 34, full workspace pass. |
+| 2026-08-30 | G4/G8 — Zero-dependency and host-adapter boundary pass: verified that the workspace has no external crate dependencies (`check_independence.py` rejects non-path deps and inherited workspace deps not declared as in-package paths); `cargo test --workspace` runs offline; `pins.toml` `[dependencies]` is empty. Verified that no crate imports from or calls back into a host build-platform/CI harness; `g6q_remote.py` and `ai_tensor_bridge.py` are host-callable scripts only. Updated `AGENTS-todo.md` G4 and G8 invariants to reflect the standing enforcement. | `python tools/g6q.py check` green; `indep` + `indep selftest` OK; full workspace pass. |
+| 2026-08-30 | `dts` verb pass: implemented the standalone `g6lc-qemu dts` verb in `g6q-cli/src/main.rs`; it resolves the device tree the same way `gen` does, applies `--dts-overlay`, `--dts-set`, and `--dts-del`, and emits either DTS source or a DTB blob via the existing `emit_device_tree` helper. `--validate` parses the tree and prints `valid`; `--emit dtb` switches to blob output. The unimplemented-verb test was retargeted to `fw fetch` (Q2 stub). | `python tools/g6q.py check` green; 51 `g6q-cli` tests, full workspace pass. |
+| 2026-08-30 | `pins` verb pass: implemented a minimal in-crate TOML section parser in `crates/g6q-cli/src/pins.rs`; the `g6lc-qemu pins` verb now locates `pins.toml` by walking up from the current directory and reports the built-in tool constants plus the QEMU, OpenSBI, toolchain, and contract pins. The parser handles `[table]` sections, inline comments, string/integer/bare-word values, and nested `[contracts.<name>]` tables. Unit tests cover a sample pins file. | `python tools/g6q.py check` green; 52 `g6q-cli` tests, full workspace pass. |
+| 2026-08-30 | `fw fetch` pass: `g6lc-qemu fw fetch` now locates `pins.toml`, reads the `[opensbi]` `url` and `ref` pins, and runs `git clone --depth 1 --branch <ref> <url> <dst>` into `out/fw-src/opensbi` (or `--fw-src`). `--dry-run` prints the planned clone command without running it. The destination is rejected if it already exists and is non-empty. `fw build` remains a Q2 stub (requires a cross-toolchain). | `python tools/g6q.py check` green; 52 `g6q-cli` tests, full workspace pass. |
+| 2026-08-30 | `fw build` pass: `g6lc-qemu fw build` now reads the OpenSBI pin, validates that the source directory (`out/fw-src/opensbi` or `--fw-src`) contains a `Makefile`, detects a RISC-V cross-toolchain (`--cross-compile`, `CROSS_COMPILE`, or common `riscv64-*-gcc` prefixes on PATH), and invokes `make` with `CROSS_COMPILE=... PLATFORM=... FW_TEXT_START=...` plus `FW_DYNAMIC=y` (default), `FW_JUMP=y`, or `FW_PAYLOAD=y` depending on `--fw-mode`. `--dry-run` prints the planned `make` command. Source-less invocation is rejected with a clear error; the test verifies this. | `python tools/g6q.py check` green; 52 `g6q-cli` tests, full workspace pass. |
+| 2026-08-30 | `g6q.py fetch-fw` and `g6q.py build-fw` pass: added `cmd_fetch_fw` and `cmd_build_fw` to `tools/g6q.py`, plus `fetch-fw` and `build-fw` argparse subcommands. These are thin wrappers that invoke `cargo run -p g6q-cli -- fw fetch|build ...`, reusing the in-crate pin reader and make logic. `--dry-run` works on both commands, printing the exact `git clone` or `make` command that would be run without requiring source or a toolchain. Updated the `g6q.py` header comment to list the new commands. | `python tools/g6q.py check` green; `g6q.py fetch-fw --dry-run` and `g6q.py build-fw --dry-run` verified end-to-end. |
+| 2026-08-30 | `run` firmware/payload wiring pass: `resolve::boot_options` now treats `--fw-payload` as a synonym for `--kernel` when `--kernel` is absent, and auto-resolves a built OpenSBI firmware at `out/fw-src/opensbi/build/platform/<fw-platform>/firmware/fw_<fw-mode>.bin` when `--fw` is not given and `fw-mode` is not `none`. This makes `g6q run --backend args|qemu --fw ... --fw-payload ...` emit `-bios` and `-kernel` as expected. Added a `g6q-cli` test that verifies the stock-QEMU argv contains both flags and both paths. | `python tools/g6q.py check` green; 53 `g6q-cli` tests, full workspace pass. |
+| 2026-08-30 | `doctor` RISC-V cross-toolchain probe pass: added `_probe_riscv_cross()` to `tools/g6q.py` and a `riscv cross-toolchain` row in `cmd_doctor`. It honors `CROSS_COMPILE` first, then tries the same `riscv64-*-` prefixes the `fw build` command uses, and reports the found prefix or `none found`. This makes `g6q doctor` useful as a pre-flight check before `g6q build-fw` / `g6q run` with a real cross-toolchain. | `python tools/g6q.py check` green; `g6q doctor` verified and shows the new row. |
+| 2026-08-30 | `g6q.py run --build-fw` pass: added `_extract_fw_options()` and `--build-fw` handling to `cmd_run` in `tools/g6q.py`. When `g6q.py run -- --build-fw ...` is invoked, it first runs `fw fetch` and `fw build` (reusing `_fw_cli`) with the same `--fw-src/--fw-mode/--fw-platform/--fw-text-start/--cross-compile` and `--dry-run` flags, then proceeds to `cargo run -p g6q-cli -- run ...`. Verified end-to-end with `--dry-run` showing the clone, make, and run commands in sequence. | `python tools/g6q.py check` green. |
+| 2026-08-30 | `AGENTS.md` daily commands pass: updated the package guider's daily commands list to include `fetch-fw`, `build-fw`, and the `run -- --build-fw ...` form, and updated the `doctor` one-liner to mention the RISC-V cross-toolchain probe. This keeps the landing-page documentation aligned with the new Q2 firmware chain. | `python tools/g6q.py check` green. |
+| 2026-08-30 | `--fw-make` passthrough pass: `g6lc-qemu fw build` now accepts repeatable `--fw-make VAR=VAL` options and appends them to the OpenSBI `make` command line; invalid values (missing `=`) are rejected. `g6q.py build-fw` gained a matching `--fw-make` argparse option and forwards it. `g6q.py run --build-fw` extracts `--fw-make` from the `run` remainder and forwards it to both `fw fetch` and `fw build`. | `python tools/g6q.py check` green. |
+| 2026-08-30 | `fetch-fw` real clone pass: ran `python tools/g6q.py fetch-fw` (no `--dry-run`) on Windows; it successfully cloned the pinned OpenSBI v1.5 source into `out/fw-src/opensbi` via `git clone --depth 1 --branch v1.5 ...`. `python tools/g6q.py build-fw` then correctly fails preflight because no RISC-V cross-toolchain is installed, preserving the honest error rather than attempting a broken build. | `fetch-fw` succeeded; `build-fw` blocked on missing cross-toolchain as expected. |
+| 2026-08-30 | `--fw-out` staging pass: `g6lc-qemu fw build` now accepts `--fw-out DIR` (default `out/fw`). After a successful OpenSBI build, it copies `fw_<mode>.bin` and `fw_<mode>.elf` from the build tree to the output directory and reports them in the JSON under `staged`. `resolve::boot_options` now checks `out/fw/fw_<fw-mode>.bin` before the build tree when auto-resolving firmware for `run`. `g6q.py build-fw` and `g6q.py run --build-fw` forward `--fw-out`. | `python tools/g6q.py check` green. |
+| 2026-08-30 | `architecture/CLI.md` firmware options pass: updated the firmware options table to document `--build-fw` as the package `fw fetch` → `fw build` chain (with a note that project-owned scripts may be wired later), clarified `--fw-out` as the staging directory for `fw_<mode>.bin/.elf`, and clarified `--fw-make` as a passthrough to the OpenSBI `make` command requiring `VAR=VAL`. | `python tools/g6q.py check` green. |
+| 2026-08-30 | `fw build` test pass: added `fw_build_rejects_invalid_fw_make` unit test in `crates/g6q-cli/src/main.rs` that verifies `--fw-make` values missing `=` are rejected in dry-run mode. `g6q-cli` now has 54 unit tests. | `python tools/g6q.py check` green. |
+| 2026-08-30 | `--fw-fdt` passthrough pass: `g6lc-qemu fw build` now accepts `--fw-fdt DTB`; when a path is provided it sets `FW_FDT_PATH=` for the OpenSBI make command. `--fw-fdt auto` is explicitly rejected with a clear message because generated-DTB embedding is not yet implemented. `g6q.py build-fw` and `g6q.py run --build-fw` forward `--fw-fdt`. `architecture/CLI.md` updated to mark `auto` as not-yet-implemented and document `DTB` as setting `FW_FDT_PATH`. | `python tools/g6q.py check` green. |
+| 2026-08-30 | `g6q.py bridge` wrapper pass: added a `bridge` subcommand to `tools/g6q.py` that thinly wraps `tools/ai_tensor_bridge.py` (like `remote` wraps `g6q_remote.py`). Updated the header comment and `AGENTS.md` daily commands to list `python tools/g6q.py bridge`. Verified `g6q.py bridge doctor` runs the bridge doctor. | `python tools/g6q.py check` green. |
+| 2026-08-30 | contained RISC-V toolchain pass: added `pins.toml` `[riscv_toolchain]` pin, `python tools/g6q.py setup-riscv` to download/extract the pinned xPack `riscv-none-elf-gcc` under `.tools/`, and `env_common.riscv_toolchain_bin()` so `apply_env()` and `g6q.py doctor` discover it. `g6q-cli` `detect_cross_compile` and `g6q.py _probe_riscv_cross` now include `riscv-none-elf-` and check the contained bin path. The toolchain was installed successfully on the Windows host under `.tools/xpack-riscv-none-elf-gcc-14.2.0-3`. | `python tools/g6q.py doctor` reports `riscv cross-toolchain ok`. |
+| 2026-08-30 | `g6q_remote.py` contained-toolchain pass: added `_local_riscv_cc()` and `_compile_payload_local()` so the remote `test --ai-island` path can compile the smoke payload locally when the remote has no compiler (or `--local-riscv` is set) and rsync the `.elf` to the remote builder. This lets the contained xPack toolchain on Windows feed payload builds to a Linux remote QEMU. | `python tools/g6q.py check` green. |
+| 2026-08-30 | `--fw-fdt auto` pass: implemented `--fw-fdt auto` in `g6lc-qemu fw build`. It resolves the target model, applies the same DDT overlays/mutations used by `--emit dtb`, writes `out/fw/fdt_auto.dtb` (or the `--fw-out` directory), and sets `FW_FDT_PATH` for the OpenSBI make command. Refactored `emit_device_tree` to share `resolved_dts_blob()` with the new firmware path. Added `fw_build_fw_fdt_auto_sets_fw_fdt_path` unit test. Updated `g6q.py build-fw` to accept `--target`, `--repo-root`, `--dts`, `--dts-overlay`, `--dts-set`, `--dts-del`, `--fw-payload`, and `--fw-jump-addr` and forward them. Updated `g6q.py run -- --build-fw` extraction to pass those options through. Updated `architecture/CLI.md` to remove the 'not-yet-implemented' note and describe `auto` as generated from the resolved model. | `python tools/g6q.py check` green. |
+| 2026-08-30 | Windows `fw build` WSL pass: fixed native `g6lc-qemu fw build` on Windows by automatically using WSL when a PIE-capable RISC-V toolchain is installed in WSL. `fw build` now detects `wsl` on PATH, prefers `riscv64-linux-gnu-` (or other WSL toolchains) over the contained Windows xPack, translates source/FW_FDT/FW_PAYLOAD paths to WSL absolute paths, and invokes `wsl make -C ...`. The contained `xpack-riscv-none-elf-gcc` is still used for local payload compilation via `g6q_remote.py`. `g6q.py doctor` now reports `wsl` availability and the WSL toolchain used for OpenSBI. Updated `architecture/CLI.md` to document the Windows/WSL behavior. | `python tools/g6q.py check` green; native `g6q.py build-fw --fw-fdt auto ...` succeeds and stages `fw_dynamic.bin`/`fw_dynamic.elf` on Windows via WSL. |
+| 2026-08-30 | `setup-host` cross-platform auto-tooling pass: added `python tools/g6q.py setup-host` to install missing host tools using the detected package manager (Windows/WSL `apt`, Linux `apt/dnf/pacman/apk`, macOS `brew`). Supports `--toolchain`, `--qemu`, `--dtc`, `--spike`, and `--all` with `--dry-run` and `--force`. The command probes native and WSL executables, installs `gcc-riscv64-linux-gnu`/`qemu-system-misc`/`device-tree-compiler` inside WSL on Windows, and updates `g6q.py doctor` to report WSL-resolved tools and point at `setup-host` for missing items. `architecture/CLI.md` documents the new command. | `python tools/g6q.py check` green; `g6q.py setup-host --all --dry-run` and `g6q.py doctor` verified on Windows/WSL. |
+| 2026-08-30 | `AGENTS.md` comprehensive update pass: updated the package guider to reflect Q2 state. Added sections 8-11 covering current development state, host tooling and cross-platform setup (`setup-host`), firmware/QEMU build flow (`--fw-fdt auto`, WSL path translation), and navigating the CLI/architecture. Updated daily commands and `setup`/`setup-riscv`/`setup-host`/`doctor` descriptions. Fixed the `Non-goals` section to re-include the ISA-definition bullet. The guider now maps `g6q.py` commands to Rust verbs/crates/design docs and documents the independence gate. | `python tools/g6q.py check` green. |
+| 2026-08-30 | Standalone host-tooling pass: created `platform-constants.toml` as the single source of truth for external download URLs and platform-specific host-tool constants (rustup, xPack RISC-V, Bootlin toolchain, QEMU Windows installer, dtc source). Moved rustup/xPack URLs out of `tools/g6q.py` and added `tools/tomlmini.py` plus `tools/platform_constants.py` to load the file. `g6q.py setup-host` now falls back to standalone binary downloads (Bootlin `riscv64-lp64d--glibc` on Linux, QEMU Windows installer) and build-from-source (dtc) when no package manager is detected, with a `--standalone` flag to prefer them. `env_common.py` adds standalone tool `bin/` directories to `apply_env()` PATH so `doctor` and `setup-host` can discover them. Updated `AGENTS.md` and `architecture/CLI.md` to document the new file and fallback behaviour. | `python tools/g6q.py check` green; `g6q.py doctor`, `setup-host --all --dry-run`, `setup-host --qemu --standalone --force --dry-run`, and `setup-riscv --dry-run` verified. |
+| 2026-08-30 | Remote utility tooling pass: updated `tools/g6q_remote.py` to use `platform-constants.toml` for the pinned xPack RISC-V toolchain `ref` instead of a hard-coded path. Added `_xpack_remote_bin_dir()` helper and replaced the hard-coded `_TOOLCHAIN_PATH` constant in plugin/payload build commands. `_local_riscv_cc()` now searches the `apply_env()` PATH so standalone host tools are discoverable. `doctor` probes remote `riscv-none-elf-gcc`, `riscv64-unknown-elf-gcc`, `riscv64-none-elf-gcc`, and `riscv64-linux-gnu-gcc`. Updated `AGENTS.md` directory-map note for `g6q_remote.py`. | `python tools/g6q.py check` green; `python tools/g6q_remote.py doctor --dry-run` and `python tools/g6q_remote.py --help` verified. |
+| 2026-08-30 | MSVC source-build pass: added `tools/msvc_env.py` to detect and import the Microsoft Visual C++ build environment, mirroring `build-platform/build.ps1` so native Windows source builds can find `cl.exe`. `tools/g6q.py _install_from_source` now supports `build_env = "msvc"` and multi-step `build_steps` lists. Added a Windows x64 `build_from_source` entry for `dtc` in `platform-constants.toml` that uses `meson` + MSVC. Updated `tools/tomlmini.py` to parse multi-line TOML arrays. Updated `AGENTS.md` and `architecture/CLI.md` to document the Windows dtc source-build fallback. | `python tools/g6q.py check` green; `g6q.py setup-host --dtc --standalone --force --dry-run` and `g6q.py doctor` verified. |
+| 2026-08-30 | Build-tools auto-setup pass: extended `setup-host` with `--build-tools [TOOL...]` to install `make`, `meson`, `ninja`, `cmake`, `bison`, and `flex`. Added a contained `.tools/python-venv` that is created on demand and used to `pip install meson`, `ninja`, and `cmake` when no package manager is available. Build-from-source fallbacks now declare `requires` lists in `platform-constants.toml`, and `g6q.py _install_from_source` calls `_ensure_build_tools()` to install missing build tools before building (`dtc` Linux requires `make/bison/flex`; `dtc` Windows requires `meson/ninja/bison/flex`). `env_common.apply_env()` now prepends the venv `bin/`/`Scripts` directory to `PATH` so venv-installed tools are discoverable. Updated `architecture/CLI.md` and `AGENTS.md` to document the new flag and fallback behaviour. | `python tools/g6q.py check` green; `setup-host --build-tools --dry-run` and `setup-host --dtc --standalone --force --dry-run` verified. |
+| 2026-08-30 | Remote handler documentation pass: updated `AGENTS.md` to document `tools/g6q_remote.py` as a remote QEMU build/test proxy. Added a `### Remote build/test` subsection under §10 with the command list and `remote-build` / `doctor` examples. Added `python tools/g6q_remote.py remote-build` to the daily commands. Updated the command-to-crate map so `fetch-qemu`/`build-qemu` references `g6q_remote.py` for remote builds and `remote-build` maps to `tools/g6q_remote.py`. The existing `g6q_remote.py` implementation already uses `platform-constants.toml` for the pinned xPack toolchain `ref`. | `python tools/g6q.py check` green. |
+| 2026-08-30 | Chocolatey + dnf package manager pass: added `choco` detection to `_detect_package_manager()` so native Windows hosts use Chocolatey before falling back to WSL `apt-get`. Added Chocolatey package lists to `_HOST_TOOLS` (`qemu`, `dtc-msys2`) and `_BUILD_TOOLS` (`make`, `meson`, `ninja`, `cmake`, and `winflexbison3` for both `bison` and `flex`). Implemented `_install_packages()` for `choco install -y --no-progress`. After installing `winflexbison3`, `_setup_winflexbison_shims()` copies `win_bison.exe`/`win_flex.exe` into `.tools/win-flex-bison/bin` and renames them to `bison.exe`/`flex.exe` so `dtc`'s `meson` build finds the standard program names. dnf remains the second Linux package manager after apt, supporting Fedora/Red Hat. Updated `AGENTS.md` and `architecture/CLI.md` to document Chocolatey as the preferred native Windows package manager and the winflexbison3 shim behavior. | `python tools/g6q.py check` green; `setup-host --build-tools bison --force --dry-run` and `setup-host --dtc --standalone --force --dry-run` verified with `choco` selected. |
+| 2026-08-30 | Smart Windows setup preflight pass: `setup-host` now detects missing native-Windows prerequisites (Chocolatey, WSL, MSVC) and either prompts the user with a numbered menu or, with `--yes`, auto-installs them. Added `--yes` (`-y`) and `--vs-year {2022,2025,2026}` options to `setup-host`. New helpers in `tools/g6q.py`: `_is_admin()`, `_install_choco()` (downloads and runs the official Chocolatey install script), `_install_msvc_via_choco(year)` (installs `visualstudio{year}buildtools` and `visualstudio{year}-workload-vctools`), `_print_wsl_instructions()`, `_windows_source_build_selected()`, and `_smart_windows_preflight()`. The preflight recurses after installing choco/MSVC so the state is re-evaluated. WSL still requires manual install; the tool prints `wsl --install -d Ubuntu` and exits gracefully. Updated `architecture/CLI.md` and `AGENTS.md` to document the `--yes`, `--vs-year`, and smart preflight behavior. | `python tools/g6q.py check` green; `setup-host --dtc --standalone --dry-run`, `setup-host --dtc --standalone --force --dry-run`, and `setup-host --build-tools --dry-run` verified. |
+| 2026-08-30 | Build-platform gateway pass: added `build-platform/src/cli/commands/g6q.ts` to register a top-level `g6q` command in the build-platform CLI that forwards to `g6lc_qemu/tools/g6q.py`. The `--remote` flag switches the target to `g6lc_qemu/tools/g6q_remote.py` so `bun build-platform/src/cli/index.ts g6q --remote remote-build` (or `doctor`, etc.) works from the monorepo root. Registered the command in `build-platform/src/cli/registry.ts`. Updated host documentation: `build-platform/AGENTS.md` §4.2 uses the new command as a pass-through example; `AGENTS-build-platform.md` §2.4 catalogs `g6q`; `AGENTS-build.md` quick-facts list includes `g6q`; `AGENTS.md` root directory map links the emulation concern to the build-platform gateway; package `AGENTS.md` §5 notes the canonical host adapter. | `bun build-platform/src/cli/index.ts g6q doctor`, `g6q setup-host --build-tools --dry-run`, and `g6q --remote doctor --dry-run` verified. `python tools/g6q.py check` green. |
 ### Defects found and fixed while soaking Q1
 
 | Defect | Why it mattered |
@@ -901,3 +1000,5 @@ These fixes are now in the generator: `g6q-emit-qemu` emits `reg_shift` / `clock
 - `tools/g6q.py` `_gen_command` now derives `--target` from the config package stem (`cfg.stem.removesuffix("_config_pkg")`) instead of the package directory name, so `python tools/g6q.py install-qemu --package fixtures\ai` correctly targets `ai_soc` rather than `ai`.
 - `qemu/hw/riscv/Kconfig` and `qemu/configs/targets/riscv64-softmmu.mak` trailing blank lines cleaned.
 - `python tools/g6q.py check` green; `g6q-vm` 111 tests pass.
+
+

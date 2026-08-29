@@ -191,6 +191,7 @@ What the bridge owns:
 | `pack` | pack a descriptor image using **the model's own** field offsets, sizes and op table |
 | `push` | run one execution on a chosen route, retrieve the tensor artifact; with `--uarch-out` (native route only) it also runs `g6lc-qemu diag` and writes D2 counters, optionally with `--measured-dram-gbps` in GB/s; the counters include `ai.pmu.*` modelled PMU values from the tensor artifact |
 | `results` | summarise the artifact: event count, completion count, op/hart/status/cluster histograms; with `--model` it resolves op/status codes to the design's names, reports the SKU `clusters` count, and with `--per-event` it emits a PyTorch-friendly `outputs` list of completed operations with shapes, `cluster`, `dtype`, and A/B/C pointers; when the artifact carries `flags_layout`, `dtype` is recovered from `flags` when the event does not carry the field |
+| `results --tops` | add a 100-TOPS-style roofline section from `g6lc-qemu diag`: `peak_tops`, `peak_gops`, `total_macs`, `total_ops`, the theoretical time the observed MACs would take at peak utilisation, and the `Compute`/`Bandwidth`/`Unresolved` `bound` derived from the D2 `balance_mac_per_byte` and `tiled_input_intensity_mac_per_byte` counters; this is a modelled bound, not a measurement, and is marked `tops_not_evidence` |
 | `diag` | run `g6lc-qemu diag` and feed it an optional `--measured-dram-gbps` host measurement; the bridge converts GB/s to milli-GB/s and passes it through `--measured-dram-gbps-x1000`, closing the F11 roofline loop from the host side |
 || `compare` | first-divergence diff between two artifacts, for regression triage |
 
@@ -213,8 +214,13 @@ names, and `results --model <model.json> --per-event` to recover the completed o
 A/B/C tensor pointers and shapes. The consumer still owns the host-side tensor data: the bridge
 gives it the guest-side metadata it needs to line up a reference kernel against the accelerator's
 claimed work.
-the B3 native run, a local QEMU run, and a remote QEMU run produce the same shape, stamped with the
-machine profile and `"evidence": false` per [`DIAG.md`](DIAG.md).
+
+The B3 native run, a local QEMU run, and a remote QEMU run produce the same shape, stamped with the
+machine profile and `"evidence": false` per [`DIAG.md`](DIAG.md). For the remote route,
+`tools/g6q_remote.py test --ai-island --model <model.json>` derives the RISC-V payload compile
+flags from the model (descriptor window base, field offsets, `OP_GEMM`, `UART_BASE`, and the test
+shape), pulls the tensor artifact back, and optionally runs `ai_tensor_bridge.py results --tops`
+so the remote run reports the same modelled TOPS as a local run.
 
 ## 6. Transport: why it is absent
 
@@ -264,6 +270,10 @@ the normal ingest route applies: an SoC package or DTB entry publishes the BAR/v
 `TargetModel` grows the fields, and the B1/B2 emitters generate the glue. Hard-coding a BAR table,
 virtio device id, or a 1000-TOPS claim before that pin is set would be exactly the divergence
 [`../AGENTS.md`](../AGENTS.md) §1.9 forbids.
+
+`tools/ai_tensor_bridge.py pcie` exposes the concept without committing to it: it prints the proposed
+BAR/virtio/MSI outline and exits with an error when the contract is `unpinned`. This gives host
+adapters a stable place to hook the push path once the design publishes the transport contract.
 
 ## 7. Stage placement (no new axis)
 

@@ -40,6 +40,8 @@ pub struct Sources {
     pub profile: Profile,
     /// Parsed configuration package.
     pub config: Option<Package>,
+    /// Parsed SoC/peripheral package (e.g. ariane_soc_pkg.sv).
+    pub soc_pkg: Option<Package>,
     /// Expanded build manifest.
     pub flist: Option<Expansion>,
     /// Device-tree facts.
@@ -169,7 +171,12 @@ pub fn assemble(src: &Sources) -> TargetModel {
 
     if let Some(pkg) = config {
         model.isa = build_isa(Some(pkg), src.dts.as_ref(), &table);
-        model.soc = build_soc(pkg, src.dts.as_ref(), src.flist.as_ref());
+        model.soc = build_soc(
+            pkg,
+            src.soc_pkg.as_ref(),
+            src.dts.as_ref(),
+            src.flist.as_ref(),
+        );
         model.uarch = build_uarch(pkg);
         model.pmu = build_pmu(src.flist.as_ref());
     } else if let Some(facts) = &src.dts {
@@ -237,6 +244,10 @@ pub fn assemble(src: &Sources) -> TargetModel {
     for row in model.topology_rows() {
         model.conformance.push(row);
     }
+
+    // Stamp the machine profile into the conformance report so a standalone `conform --json`
+    // or `gen --emit conformance` cannot be mistaken for a different profile's result.
+    model.conformance.profile = model.profile;
 
     model
 }
@@ -344,8 +355,50 @@ fn derive_mmu_geometry(isa: &mut Isa) {
     }
 }
 
-fn build_soc(pkg: &Package, facts: Option<&Facts>, flist: Option<&g6q_flist::Expansion>) -> Soc {
+/// Find the first file in a manifest that looks like a SoC package.
+///
+/// This is intentionally a suffix match (`*_soc_pkg.sv`) rather than a hard-coded
+/// `ariane_soc_pkg.sv`, so the package stays project-agnostic.
+pub fn find_soc_pkg(flist: &g6q_flist::Expansion) -> Option<&str> {
+    flist
+        .files
+        .iter()
+        .find(|f| {
+            std::path::Path::new(f)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.ends_with("_soc_pkg.sv"))
+        })
+        .map(|s| s.as_str())
+}
+
+fn build_soc(
+    pkg: &Package,
+    soc_pkg: Option<&Package>,
+    facts: Option<&Facts>,
+    flist: Option<&g6q_flist::Expansion>,
+) -> Soc {
     let mut soc = facts.map(soc_from_dts).unwrap_or_default();
+
+    // The SoC/peripheral package carries the interrupt controller's hardware
+    // capacity (e.g. ariane_soc_pkg.sv has NumTargets/NumSources). The device
+    // tree only tells us how many contexts the *board* wires, which can be fewer
+    // than the controller's real capacity; prefer the package when it is present
+    // and non-zero. Leave the field at zero when neither source publishes it so
+    // the model reports "unknown" rather than inventing a limit.
+    if let Some(sp) = soc_pkg {
+        if let Some(v) = sp.params.get("NumTargets").and_then(Value::as_int) {
+            if v > 0 {
+                soc.intc_targets = v as u32;
+            }
+        }
+        if let Some(v) = sp.params.get("NumSources").and_then(Value::as_int) {
+            if v > 0 {
+                soc.intc_sources = v as u32;
+            }
+        }
+    }
+
     let harts = pkg.int_or("NrHarts", 1).max(1) as u32;
     let cores = pkg.int_or("NrCores", 1).max(1) as u32;
     // What the design has, versus what the tree tells software it has.
@@ -726,6 +779,31 @@ mod tests {
         assert_eq!(m.soc.intc_sources, 30);
         assert_eq!(m.soc.peripherals.len(), 2);
         assert!(m.soc.overlapping().is_empty());
+    }
+
+    #[test]
+    fn soc_pkg_sets_interrupt_controller_capacity() {
+        let src = Sources {
+            target_id: "t".into(),
+            config: Some(pkg("NrHarts: 1, NrCores: 1")),
+            soc_pkg: Some(read_package(
+                "package ariane_soc; localparam int unsigned NumTargets = 16; localparam int unsigned NumSources = 30; endpackage",
+            )),
+            table: Some(table()),
+            ..Sources::default()
+        };
+        let m = assemble(&src);
+        assert_eq!(m.soc.intc_targets, 16, "SoC package NumTargets");
+        assert_eq!(m.soc.intc_sources, 30, "SoC package NumSources");
+        assert_eq!(
+            m.soc.max_harts(),
+            Some(8),
+            "16 targets / 2 contexts per hart"
+        );
+        assert!(
+            m.soc.hart_count_fits(),
+            "one hart fits an 8-hart controller"
+        );
     }
 
     #[test]

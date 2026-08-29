@@ -47,7 +47,7 @@ mod tests {
     fn re_exports_are_wired() {
         let m = TargetModel::new("t");
         assert_eq!(m.profile, Profile::Soc);
-        assert_eq!(SCHEMA_VERSION, "1");
+        assert_eq!(SCHEMA_VERSION, "2");
         assert_eq!(STAGE, "Q0");
     }
 

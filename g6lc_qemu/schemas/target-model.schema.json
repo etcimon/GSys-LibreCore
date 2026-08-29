@@ -13,7 +13,7 @@
     },
     "schema_version": {
       "description": "Bumped on any field rename or semantic change. Never reinterpret silently.",
-      "const": "1"
+      "const": "2"
     },
     "generated_by": {
       "type": "object",

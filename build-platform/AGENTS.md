@@ -151,6 +151,12 @@ existing config breaks. This is the core "minimal customization" mechanism.
 
 Help text and dispatch pick it up automatically (registry is the single source).
 
+For a pass-through command that delegates to a Python package, see
+`src/cli/commands/g6q.ts` as the canonical example: it resolves the package
+script from the repo root, picks a Python interpreter, forwards raw `argv`,
+and supports an internal `--remote` flag to switch between `g6q.py` and
+`g6q_remote.py`.
+
 ### 4.3 Add a managed tool
 1. Add its install path convention to `src/tooling/locations.ts` (`ToolLocations`).
 2. Add a version pin to `schema.ts` `ToolVersions` + `defaults.ts`.

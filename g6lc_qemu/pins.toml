@@ -11,7 +11,7 @@
 [package]
 version       = "0.1.0"
 stage         = "Q0"
-schema_version = "1"
+schema_version = "2"
 
 # --------------------------------------------------------------------- toolchain ---
 [toolchain]
@@ -36,6 +36,14 @@ url      = "https://github.com/riscv-software-src/opensbi.git"
 ref      = "v1.5"               # >= 1.4 required
 platform = "generic"            # no vendor platform C
 fw_text_start = "0x80000000"
+status   = "fetched"            # updated by `g6q fetch-fw`; path is gitignored out/fw-src/opensbi
+
+# ----------------------------------------------------------------- riscv toolchain ---
+[riscv_toolchain]
+name     = "xpack-riscv-none-elf-gcc"
+url      = "https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack"
+ref      = "14.2.0-3"           # xPack release version; bump deliberately
+prefix   = "riscv-none-elf-"    # CROSS_COMPILE prefix of the installed toolchain
 status   = "not-fetched"
 
 # ------------------------------------------------------- contracts consumed by pin ---
@@ -70,14 +78,14 @@ rev  = "read-at-runtime"
 [contracts.ai_isa]
 name = "Accelerator ISA / CSR / 64-byte descriptor contract"
 kind = "host-design"
-path = "architecture/ai-matrix/isa-encoding.md"
-rev  = "unpinned"               # set when Q6 lands
+path = "core/cvxif_g6lc_ai/include/g6lc_ai_instr_pkg.sv"
+rev  = "read-at-runtime"        # ingested as AiInstrSet; the 64-byte descriptor geometry is in ai_island_mmio
 
 [contracts.ai_island_mmio]
 name = "Accelerator island MMIO / CTL / completion / IRQ"
 kind = "host-design"
-path = "corev_apu/ai_island/README.md + include/g6lc_ai_desc_pkg.sv"
-rev  = "unpinned"               # set when Q6 lands
+path = "corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv"
+rev  = "read-at-runtime"        # ingested as AiDescLayout and AiRegMap
 
 [contracts.ai_island_cap]
 name = "Accelerator island capability window (clusters, MACs/cycle, AccTile, NoC, DRAM, queues, QoS)"

@@ -68,9 +68,20 @@ pub fn boot_options(args: &Args) -> g6q_emit_args::BootOptions {
         forwards.push((p, 22));
     }
 
+    let fw_mode = args.value_or("fw-mode", "payload");
+    let fw_platform = args.value_or("fw-platform", "generic");
+    let staged_fw = format!("out/fw/fw_{fw_mode}.bin");
+    let built_fw =
+        format!("out/fw-src/opensbi/build/platform/{fw_platform}/firmware/fw_{fw_mode}.bin");
     let firmware = match args.value("fw") {
         Some(p) => g6q_emit_args::Firmware::File(p.to_string()),
-        None if args.value_or("fw-mode", "payload") == "none" => g6q_emit_args::Firmware::None,
+        None if fw_mode == "none" => g6q_emit_args::Firmware::None,
+        None if std::path::Path::new(&staged_fw).is_file() => {
+            g6q_emit_args::Firmware::File(staged_fw)
+        }
+        None if std::path::Path::new(&built_fw).is_file() => {
+            g6q_emit_args::Firmware::File(built_fw)
+        }
         None => g6q_emit_args::Firmware::Default,
     };
 
@@ -79,6 +90,7 @@ pub fn boot_options(args: &Args) -> g6q_emit_args::BootOptions {
     let kernel = args
         .value("kernel")
         .map(str::to_string)
+        .or_else(|| args.value("fw-payload").map(str::to_string))
         .or_else(|| find_distro_file(&distro_root, "kernel", &os));
     let initrd = args
         .value("initrd")
@@ -365,6 +377,26 @@ pub fn resolve(args: &Args) -> Result<Resolved, String> {
         out.sources.flist = Some(combined);
     } else {
         out.notes.push("manifest: none supplied".into());
+    }
+
+    // --- SoC/peripheral package ----------------------------------------------------
+    let soc_pkg_path = match args.value("soc-pkg") {
+        Some(p) => Some(PathBuf::from(p)),
+        None => out
+            .sources
+            .flist
+            .as_ref()
+            .and_then(g6q_ingest::find_soc_pkg)
+            .map(PathBuf::from),
+    };
+    if let Some(p) = &soc_pkg_path {
+        let text = std::fs::read_to_string(p)
+            .map_err(|e| format!("cannot read SoC package {}: {e}", p.display()))?;
+        out.sources.soc_pkg = Some(g6q_svcfg::read_package(&text));
+        out.sources.sources.push((norm(p), digest(&text)));
+        out.notes.push(format!("soc package: {}", p.display()));
+    } else {
+        out.notes.push("soc package: none supplied".into());
     }
 
     // --- device tree ---------------------------------------------------------------

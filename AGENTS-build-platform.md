@@ -78,6 +78,7 @@ Source of truth: `build-platform/src/cli/registry.ts` (`COMMANDS` order).
 | `test` | `<id…>` · `--suite` · `--group` · `--all` · `--open-source` · `--list` · `--from-timing` · `--use-emit` | `verif/regress` suites (skip missing tools) |
 | `verify` | `--lint` · `--formal` · `--sim` · `--synth` · `--target` · `--tools` · `--from-timing` · `--use-emit` · `--json` | AGENTS.md §0.2 multi-stage gate |
 | `timings` | `status\|**doctor**\|lab-run\|sta-handoff\|fo4-golden\|…` · `-o` · `--from-timing` · `--try-tools` · `--liberty` | Host adapter; **doctor** = readiness + FO4 retune checklist; **lab-run** = offline S0 report |
+| g6q | [--remote] <subcommand> [args…] | Gateway to g6lc_qemu/tools/g6q.py; --remote calls g6q_remote.py for remote build/test proxy |
 | `clean` | `status\|build\|diag\|…\|timings\|sta\|**svt**\|**svt-tools**\|sim\|all` · `--older-than` · **`--execution`** · `--target` · `--yes` | Free space (allowlisted); **svt** = package Cargo target |
 | `config` | (see above) | |
 

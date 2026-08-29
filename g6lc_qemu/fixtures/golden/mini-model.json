@@ -7,7 +7,7 @@
     "the device tree appear here as `stub` (+ `overdeclared`) and `undeclared`.",
     "The `_comment` key is stripped before comparison."
   ],
-  "schema_version": "1",
+  "schema_version": "2",
   "generated_by": {
     "tool": "g6lc-qemu",
     "version": "0.1.0"
@@ -57,6 +57,8 @@
     ]
   },
   "conformance": {
+    "schema_version": "2",
+    "profile": "g6lc-soc",
     "evidence": false,
     "passes_strict": false,
     "rows": [

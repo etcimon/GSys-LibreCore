@@ -21,7 +21,7 @@ use crate::pmu::PmuTable;
 ///
 /// Consumers read this before the payload. A field rename is a bump plus a fixture
 /// update, never a silent reinterpretation.
-pub const SCHEMA_VERSION: &str = "1";
+pub const SCHEMA_VERSION: &str = "2";
 
 /// Which machine is being described.
 ///
@@ -1394,7 +1394,7 @@ mod tests {
         m.conformance
             .push(Row::classify("zacas", Inputs::new(true, true, true)));
         let text = m.to_json().to_pretty();
-        assert!(text.contains("\"schema_version\": \"1\""), "{text}");
+        assert!(text.contains("\"schema_version\": \"2\""), "{text}");
         assert!(text.contains("\"profile\": \"g6lc-soc\""), "{text}");
         assert!(text.contains("\"faithful\": true"), "{text}");
         assert!(text.contains("example-target"), "{text}");

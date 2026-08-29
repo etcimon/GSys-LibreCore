@@ -26,7 +26,7 @@ build and regression flow from a single top-level `.config.ts`.
 - **Commands** (see [`AGENTS-build-platform.md`](AGENTS-build-platform.md) §2 for full structure):
   - **Observe / provision / docs:** `status`, `doctor`, `probe`, `diag`, `man`, `setup`, `tools`, `config`
   - **Uncore / board / foundry:** `vendor`, `mb`, `tech`
-  - **Build / test / gate:** `build`, `test`, `verify`, `timings`, `clean`
+  - **Build / test / gate:** `build`, `test`, `verify`, `timings`, `clean`, `g6q`
   - **Structural timing host:** `timings` (`status` / `flist` / `analyze` / `correct` / `compile` / …) — spawns independent `sv-timing/` (see `sv-timing/AGENTS-host.md`; not STA sign-off)
   - **Lifecycle plan:** `architecture/build-platform-workspace-lifecycle.md`
 - **Human docs:** `docs/website/` pages under Build Platform + sv-timing mirror this surface.

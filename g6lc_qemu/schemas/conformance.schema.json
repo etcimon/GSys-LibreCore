@@ -4,9 +4,17 @@
   "title": "g6lc_qemu conformance report",
   "description": "Where the configuration, the build manifest and the device tree disagree. This is the package's first-class output and is useful with no emulator attached: it answers, mechanically, whether a design's own three descriptions of itself agree.",
   "type": "object",
-  "required": ["rows", "passes_strict", "evidence"],
+  "required": ["schema_version", "profile", "rows", "passes_strict", "evidence"],
   "additionalProperties": false,
   "properties": {
+    "schema_version": {
+      "description": "Bumped on any field rename or semantic change. Never reinterpret silently.",
+      "const": "2"
+    },
+    "profile": {
+      "description": "g6lc-soc is byte-faithful to the design and is the only profile a diagnosis may cite. g6lc-virt adds virtio so an operating system can boot and is software-valid, hardware-invalid.",
+      "enum": ["g6lc-soc", "g6lc-virt"]
+    },
     "rows": {
       "type": "array",
       "items": { "$ref": "#/$defs/row" }

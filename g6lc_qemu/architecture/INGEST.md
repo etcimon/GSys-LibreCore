@@ -15,10 +15,16 @@ Ingest is the only part of the package that touches the design's files, and it i
 | `--plane` | Reads | Produces |
 |---|---|---|
 | `core` | core configuration package(s), the shared configuration struct + legality rules, the PMU event matrix, core flists | ISA, CSR, microarchitecture facts, PMU table, instruction-supply selection |
-| `apu` | SoC/peripheral package, SoC flist, accelerator island configuration and descriptor package | memory map, peripherals, interrupt-controller geometry, accelerator MMIO + descriptor ABI |
+| `apu` | SoC/peripheral package (`*_soc_pkg.sv`), SoC flist, accelerator island configuration and descriptor package | memory map, peripherals, interrupt-controller geometry (`NumTargets`/`NumSources`), accelerator MMIO + descriptor ABI |
 | `soc` (default) | both | the complete machine |
 
 Device trees are read alongside either plane and cross-checked against both.
+
+The SoC package is discovered by a suffix match (`*_soc_pkg.sv`) on the expanded manifest, or by
+an explicit `--soc-pkg` path. When it is found, top-level `localparam`s such as `NumTargets` and
+`NumSources` set the interrupt-controller capacity, which is the *silicon* capacity rather than the
+board's wired subset. If no SoC package is found, the model falls back to the device tree and the
+`max_harts` budget is reported as `null` (unknown), never zero.
 
 `--plane core` is useful alone: it is what an ISA-only run needs, and what the accelerator's
 core-attached instruction model needs without pulling in the island device.

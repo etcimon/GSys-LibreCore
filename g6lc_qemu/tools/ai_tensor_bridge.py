@@ -30,18 +30,21 @@
 #   doctor    report which execution routes are available
 #   pack      pack a descriptor from name=value pairs using the model's layout
 #   push      run one execution and retrieve the tensor artifact
-#   results   summarise a tensor artifact
+#   results   summarise a tensor artifact (with optional 100-TOPS roofline report)
 #   compare   diff two tensor artifacts
+#   pcie      report the PCIe host-transport concept and contract status
 #   selftest  offline checks (no model, no QEMU, no network)
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import platform
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 _TOOLS = Path(__file__).resolve().parent
@@ -392,6 +395,155 @@ def compare_artifacts(lhs: TensorArtifact, rhs: TensorArtifact) -> list:
     return diffs
 
 
+# ------------------------------------------------------------------------------- roofline / 100-TOPS report
+
+
+def _sources_from_model(model: dict | None) -> dict:
+    """Infer the source files needed to re-ingest this model for `g6lc-qemu diag`.
+
+    The model's provenance carries the paths it was built from; when the caller has not
+    supplied a repo root, the bridge can hand those exact paths back to `diag` so the
+    fixture case still works.  Inference is by filename suffix, because the provenance
+    stream does not label roles.
+    """
+    out = {}
+    if not model:
+        return out
+    provenance = (model.get("provenance") or {}).get("sources") or []
+    for entry in provenance:
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if not path:
+            continue
+        p = Path(path)
+        if p.suffix == ".dts" and "dts" not in out:
+            out["dts"] = path
+        elif p.suffix == ".sv" and ("_config_pkg" in p.stem or "_cfg_pkg" in p.stem) and "config_pkg" not in out:
+            out["config_pkg"] = path
+        elif p.suffix in (".f",) and p.is_file():
+            out.setdefault("flists", []).append(path)
+    return out
+
+
+def _diag_for_artifact(
+    artifact_path: str,
+    target_id: str,
+    model: dict | None,
+    repo_root: str | None,
+    measured_dram_gbps: float | None,
+    uarch_out: str | None,
+) -> dict:
+    """Run `g6lc-qemu diag` on the artifact and return a map of counter name -> value.
+
+    This keeps the roofline arithmetic in one place: Rust derives the D2 counters, the
+    bridge only re-aggregates what is *present* in the counter stream and in the artifact.
+    """
+    binary = cli_binary()
+    if not binary:
+        raise LayoutError("g6lc-qemu binary not found; run `g6q build` first")
+
+    uarch_path = Path(uarch_out) if uarch_out else Path(tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, prefix="g6q_bridge_uarch_"
+    ).name)
+
+    cmd: list = [str(binary), "diag", "--target", target_id, "--tensor", str(artifact_path), "--uarch-out", str(uarch_path)]
+    if repo_root:
+        cmd += ["--repo-root", repo_root]
+    else:
+        srcs = _sources_from_model(model)
+        if srcs.get("config_pkg"):
+            cmd += ["--config-pkg", srcs["config_pkg"]]
+        for flist in srcs.get("flists") or []:
+            cmd += ["--flist", flist]
+        if srcs.get("dts"):
+            cmd += ["--dts", srcs["dts"]]
+    if measured_dram_gbps is not None:
+        v = int(round(measured_dram_gbps * 1000.0))
+        if v < 0:
+            raise LayoutError("--measured-dram-gbps must be non-negative")
+        cmd += ["--measured-dram-gbps-x1000", str(v)]
+
+    res = _run(cmd, check=False)
+    if res.returncode != 0:
+        raise LayoutError(f"diag failed: {res.stderr or res.stdout or '(no output)'}")
+
+    try:
+        raw = json.loads(uarch_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise LayoutError(f"cannot read uarch counters from {uarch_path}: {exc}") from exc
+
+    out: dict = {}
+    for row in raw:
+        out[row.get("name")] = row.get("value")
+    return out
+
+
+def _event_macs(ev: dict) -> int:
+    m = ev.get("m") or 0
+    n = ev.get("n") or 0
+    k = ev.get("k") or 0
+    return int(m) * int(n) * int(k)
+
+
+def _tops_report(counters: dict, events: list, model_cfg: dict | None) -> dict:
+    """A 100-TOPS-oriented report that stays on the modelled side of the line.
+
+    Everything here is either a raw D2 counter (from `g6lc-qemu diag`) or a simple
+    aggregate over the artifact (counts, sums).  We do NOT re-derive the roofline; we
+    report the model's own peak and the theoretical time the *observed* MACs would take
+    at that peak.  Achieved TOPS can only come from measured cycles, which the package
+    does not invent.
+    """
+    peak_ops = counters.get("ai.roofline.peak_ops_per_sec")
+    macs_per_cycle_total = counters.get("ai.roofline.macs_per_cycle_total")
+    clock_khz = (model_cfg or {}).get("clock_khz") or counters.get("ai.island.clock_khz")
+    blocking_t = counters.get("ai.roofline.blocking_t")
+    balance = counters.get("ai.roofline.balance_mac_per_byte")
+    intensity = counters.get("ai.roofline.tiled_input_intensity_mac_per_byte")
+
+    total_macs = 0
+    total_ops = 0
+    tensor_macs = counters.get("ai.tensor.macs")
+    tensor_ops = counters.get("ai.tensor.ops")
+
+    for ev in events:
+        if ev.get("done"):
+            total_macs += _event_macs(ev)
+    total_ops = total_macs * 2
+
+    out: dict = {}
+    if peak_ops is not None:
+        out["peak_tops"] = float(peak_ops) / 1e12
+        out["peak_gops"] = float(peak_ops) / 1e9
+        # The time the total MACs would take at full utilisation.  This is a thought
+        # experiment, not a measurement; it says "if the machine ran at peak, the
+        # workload in this artifact would take X microseconds".
+        if total_ops and peak_ops:
+            out["theoretical_time_us_at_peak"] = (float(total_ops) / float(peak_ops)) * 1e6
+    if macs_per_cycle_total is not None:
+        out["macs_per_cycle_total"] = macs_per_cycle_total
+    if clock_khz is not None:
+        out["clock_ghz"] = float(clock_khz) / 1_000_000.0
+    if blocking_t is not None:
+        out["blocking_t"] = blocking_t
+    if balance is not None:
+        out["balance_mac_per_byte"] = balance
+    if intensity is not None:
+        out["tiled_input_intensity_mac_per_byte"] = intensity
+    if balance is not None and intensity is not None:
+        # A simple interpretation of the two D2 counters: when the observed input
+        # intensity is above the machine balance, the workload is compute-bound at
+        # the modelled peak; otherwise it is DRAM-bandwidth-bound.
+        out["bound"] = "Compute" if intensity >= balance else "Bandwidth"
+    out["total_macs"] = total_macs
+    out["total_ops"] = total_ops
+    out["total_gops"] = float(total_ops) / 1e9
+    if tensor_macs is not None:
+        out["tensor_macs_counter"] = tensor_macs
+    if tensor_ops is not None:
+        out["tensor_ops_counter"] = tensor_ops
+    return out
+
+
 # ------------------------------------------------------------------------------- routes
 
 
@@ -540,21 +692,100 @@ def cmd_results(args: argparse.Namespace) -> int:
         return 1
     layout: DescLayout | None = None
     clusters: int | None = None
+    model: dict | None = None
+    model_cfg: dict | None = None
+    target_id: str | None = None
     if args.model:
         try:
             model = json.loads(Path(args.model).read_text(encoding="utf-8"))
             layout = DescLayout.from_model(model)
             cfg = (model.get("soc") or {}).get("ai_island", {}).get("config", {})
             clusters = cfg.get("clusters")
+            model_cfg = cfg
+            target_id = ((model.get("target") or {}).get("id")) or args.target
         except (OSError, json.JSONDecodeError, LayoutError) as exc:
             err(f"cannot load model {args.model}: {exc}")
             return 1
+    if not target_id:
+        target_id = args.target
+
     summary = artifact.summary(layout, clusters)
     if args.per_event:
         summary["outputs"] = artifact.pytorch_summary(layout)
+
+    if args.tops:
+        if not target_id:
+            err("--tops needs a target; pass --model or --target")
+            return 1
+        try:
+            counters = _diag_for_artifact(
+                args.artifact,
+                target_id,
+                model,
+                args.repo_root,
+                args.measured_dram_gbps,
+                args.uarch_out,
+            )
+            summary["tops"] = _tops_report(counters, artifact.events, model_cfg)
+            summary["tops_not_evidence"] = True
+        except LayoutError as exc:
+            err(str(exc))
+            return 1
+    elif args.uarch_out:
+        err("--uarch-out only takes effect with --tops")
+        return 1
+
     print(json.dumps(summary, indent=2, sort_keys=True))
     if summary["profile_tainted"]:
         log("NOTE: the producing machine profile is tainted; this is not a hardware result")
+    if args.tops:
+        log("NOTE: tops values are modelled peaks, not measured silicon performance")
+    return 0
+
+
+def _contract_rev(text: str, name: str) -> str | None:
+    """Return the `rev` value for a contract section in pins.toml, or None."""
+    import re
+
+    pattern = re.compile(
+        rf"\[contracts\.{re.escape(name)}\][^\[]*?^\s*rev\s*=\s*\"([^\"]+)\"",
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(text)
+    return m.group(1) if m else None
+
+
+def cmd_pcie(args: argparse.Namespace) -> int:
+    """Report the PCIe host-transport concept and refuse to model it until it is pinned.
+
+    The LibreCore accelerator is a PCIe endpoint (`architecture/uncore/pcie-endpoint.md`):
+    the host root complex pushes descriptor work through a doorbell and a resizable BAR.
+    This subcommand exists so callers can discover the current contract pin state before
+    asking the bridge to push over a transport that has not been published.
+    """
+    pins = package_root() / "pins.toml"
+    if not pins.is_file():
+        err("pins.toml not found; the package has no contract tracking")
+        return 1
+    text = pins.read_text(encoding="utf-8")
+    rev = _contract_rev(text, "ai_host_transport")
+
+    concept = {
+        "role": "PCIe endpoint on the accelerator card; host provides the root complex",
+        "control_plane": "virtio-pci management function (BAR0, 4 KiB)",
+        "doorbell": "BAR0 offset 0, 32-bit (version|op) — same encoding as the guest-visible descriptor doorbell",
+        "bulk_plane": "resizable BAR4 for descriptor + A/B/C/scale tensor pages (min 1 MiB, target 64 MiB)",
+        "completion": "host polls BAR2 status/ticket mapping or receives MSI from the card",
+        "note": "all BAR sizes, device IDs, and MSI details are conceptual until pinned",
+    }
+    print(json.dumps(concept, indent=2, sort_keys=True))
+    if rev == "unpinned" or not rev:
+        err(
+            "contracts.ai_host_transport is not pinned; the bridge cannot push over PCIe "
+            "until the host design publishes BAR/virtio/MSI details (architecture/AI_BRIDGE.md §6)"
+        )
+        return 1
+    log(f"contracts.ai_host_transport is pinned to rev={rev}; B1/B2 PCIe support is not yet implemented")
     return 0
 
 
@@ -821,11 +1052,25 @@ def main(argv: list | None = None) -> int:
 
     p = sub.add_parser("results", help="summarise a tensor artifact")
     p.add_argument("artifact")
-    p.add_argument("--model", default=None, help="model JSON to resolve op/status names")
+    p.add_argument("--model", default=None, help="model JSON to resolve op/status names and roofline")
+    p.add_argument("--target", default=None, help="target id; inferred from --model if present")
+    p.add_argument("--repo-root", default=None, help="design tree root for diag re-ingest")
+    p.add_argument("--uarch-out", default=None, help="write D2 uarch counters here when --tops is used")
     p.add_argument(
         "--per-event",
         action="store_true",
         help="include one PyTorch-friendly output record per completed event",
+    )
+    p.add_argument(
+        "--tops",
+        action="store_true",
+        help="add a 100-TOPS-style roofline report from g6lc-qemu diag (modelled, not measured)",
+    )
+    p.add_argument(
+        "--measured-dram-gbps",
+        type=float,
+        default=None,
+        help="host-measured DRAM bandwidth in GB/s; closes the roofline for --tops",
     )
     p.set_defaults(fn=cmd_results)
 
@@ -833,6 +1078,9 @@ def main(argv: list | None = None) -> int:
     p.add_argument("lhs")
     p.add_argument("rhs")
     p.set_defaults(fn=cmd_compare)
+
+    p = sub.add_parser("pcie", help="report the PCIe host-transport concept and contract pin state")
+    p.set_defaults(fn=cmd_pcie)
 
     p = sub.add_parser("diag", help="run g6lc-qemu diag with an optional host-measured bandwidth")
     p.add_argument("--target", default=None)

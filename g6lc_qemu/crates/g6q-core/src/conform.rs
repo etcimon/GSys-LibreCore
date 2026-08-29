@@ -192,6 +192,9 @@ impl Row {
 pub struct Report {
     /// Capability rows, in insertion order.
     pub rows: Vec<Row>,
+    /// Machine profile that produced the report. Every standalone conformance artifact must
+    /// carry this stamp so a `g6lc-virt` report cannot be quoted as a hardware result.
+    pub profile: crate::model::Profile,
 }
 
 impl Report {
@@ -221,6 +224,8 @@ impl Report {
     /// Render as JSON.
     pub fn to_json(&self) -> Json {
         Json::obj([
+            ("schema_version", Json::str(crate::SCHEMA_VERSION)),
+            ("profile", Json::str(self.profile.as_str())),
             ("rows", Json::arr(self.rows.iter().map(Row::to_json))),
             ("passes_strict", Json::Bool(self.passes_strict())),
             // Diagnosis output is never verification evidence (`architecture/DIAG.md` §6).
@@ -296,6 +301,8 @@ mod tests {
         assert_eq!(rep.blocking().len(), 1);
 
         let text = rep.to_json().to_pretty();
+        assert!(text.contains("\"schema_version\": \"2\""), "{text}");
+        assert!(text.contains("\"profile\": \"g6lc-soc\""), "{text}");
         assert!(text.contains("\"evidence\": false"), "{text}");
         assert!(text.contains("\"passes_strict\": false"), "{text}");
     }

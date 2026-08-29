@@ -33,6 +33,7 @@ Global: `--json-out FILE`, `-v/--verbose`, `-q/--quiet`, `--dry-run`, `--out-dir
 | `--repo-root PATH` | auto-detect upward | — (never required, §10) |
 | `--target ID` | required unless `--config-pkg` | the design's per-target configuration package |
 | `--config-pkg FILE` | derived from `--target` | direct file, for standalone use |
+| `--soc-pkg FILE` | discovered from the flist (`*_soc_pkg.sv`) | the SoC/peripheral package (e.g. `ariane_soc_pkg.sv`) |
 | `--plane core\|apu\|soc` | `soc` | [`INGEST.md`](INGEST.md) §1 |
 | `--flist FILE` (repeatable) | derived from `--target` | the manifests themselves |
 | `--extra-flist FILE` | none | optional units (vector, alternate supply, gate-level) |
@@ -86,18 +87,23 @@ Global: `--json-out FILE`, `-v/--verbose`, `-q/--quiet`, `--dry-run`, `--out-dir
 | `--fw-src DIR` / `--fw-ref TAG` | `out/fw-src`, pin from `../pins.toml` | build from source |
 | `--fw-platform ID` | `generic` | no vendor platform code |
 | `--fw-text-start ADDR` | from the pin | link address |
-| `--fw-fdt DTB\|auto` | `auto` (the tree just generated) | embedded device tree |
+| `--fw-fdt DTB\|auto` | `auto` (generated from the resolved model) | embedded device tree; `DTB` sets `FW_FDT_PATH` for OpenSBI; `auto` writes `out/fw/fdt_auto.dtb` and passes it |
 | `--fw-payload FILE` | environment | kernel image or S-mode ELF |
 | `--fw-jump-addr` / `--fw-jump-fdt-addr` | mode-dependent | |
-| `--fw-make VAR=VAL` (repeatable) | — | passthrough to the firmware build |
+| `--fw-make VAR=VAL` (repeatable) | — | passthrough to the OpenSBI `make` command; values must contain `=` |
 | `--fw-allow-no-pie` | off | non-PIE toolchain path |
-| `--build-fw` | off | drive the design project's own firmware scripts when present |
-| `--fw-out DIR` | `out/fw` | honours the project's output variable when set |
+| `--build-fw` | off | run `fw fetch` then `fw build` before the main command; project-owned scripts may be wired later |
+| `--fw-out DIR` | `out/fw` | staging directory for built `fw_<mode>.bin` and `fw_<mode>.elf` |
 | `--sbi-extension NAME=on\|off` | all discovered | limit or report supervisor-interface extensions |
 | `--fw-print-region` | off | dump firmware / device-tree / payload layout before boot |
 
 Firmware integration **composes** with the design project's existing scripts when they are present and
 falls back to its own fetch/build when standalone. It never reimplements the project's profile.
+
+On Windows, `fw build` automatically uses WSL (and a WSL-installed PIE-capable `riscv64-linux-gnu-` or
+`riscv64-unknown-elf-` toolchain) when `wsl` is on PATH, because OpenSBI's Makefile requires POSIX
+utilities and a linker that supports PIE. The contained Windows `xpack-riscv-none-elf-gcc` remains
+available for local payload compilation.
 
 Secondary harts park until the supervisor interface starts them; `--sbi-extension hsm=off` and
 `--maxcpus 1` exist specifically to reproduce the two classic bring-up failures.
@@ -169,7 +175,41 @@ Every diagnosis artifact carries `"evidence": false`.
 | `--emit-dir DIR` | default `out/emit/<target>/` |
 | `--check` | re-emit to a temporary directory and diff; non-zero on drift |
 
-## 9. Examples
+## 9. Host tooling setup
+
+These are implemented in `tools/g6q.py` rather than the Rust `g6lc-qemu` binary because they touch the host environment.
+
+| Command | Purpose |
+|---|---|
+| `g6q setup` | contained rustup/cargo under `.tools/` |
+| `g6q setup-riscv` | contained xPack `riscv-none-elf-gcc` for small payloads |
+| `g6q setup-host` | auto-install OpenSBI toolchain, QEMU, DTC, or Spike using the detected package manager |
+
+`setup-host` detects the platform/package manager:
+
+- **Windows:** WSL with `apt-get` (tools run inside WSL, because OpenSBI needs a POSIX shell and a PIE-capable linker).
+- **Linux:** `apt`, `dnf`, `pacman`, or `apk`.
+- **macOS:** `brew`.
+
+Flags:
+
+- `--toolchain` (default) — PIE-capable RISC-V toolchain for OpenSBI (`gcc-riscv64-linux-gnu` on apt/dnf, `riscv64-linux-gnu-gcc` on pacman; brew requires a manual tap).
+- `--qemu` — `qemu-system-riscv64`.
+- `--dtc` — `dtc` / `device-tree-compiler`.
+- `--spike` — prints build-from-source instructions (no distribution packages yet).
+- `--all` — all of the above.
+- `--build-tools` [TOOL ...] — install build dependencies (`meson`, `ninja`, `cmake`, `bison`, `flex`, `make`). With no tools listed, installs all of them.
+- `--standalone` — prefer standalone binary downloads / source builds over the package manager.
+- `--yes` (`-y`) — non-interactive: automatically install missing platform dependencies (Chocolatey, MSVC Build Tools).
+- `--vs-year` `{2022,2025,2026}` — Visual Studio / Build Tools year for Windows auto-install (default `2022`).
+- `--dry-run` — print the plan without installing.
+- `--force` — reinstall even if already present.
+
+On Windows, `setup-host` runs a smart preflight: if Chocolatey, WSL, or MSVC is missing for the selected operation it either prompts for the desired fix (install Chocolatey, install MSVC via Chocolatey, or show WSL instructions) or, with `--yes`, installs them automatically.
+
+`g6q doctor` reports each tool and points at `setup-host --<tool>` when something is missing.
+
+## 10. Examples
 
 ```bash
 g6q conform --target <id> --repo-root /path/to/design
@@ -185,7 +225,7 @@ g6q diag    --target <id> --replay boot.rec --checkpoint-at instret=12000000 \
             --checkpoint-out ckpt/
 ```
 
-## 10. Standalone operation
+## 11. Standalone operation
 
 No option above requires a host project. `--repo-root` derives paths from a target id as a
 convenience; without it, `--config-pkg`, `--flist` + `--set`, `--soc-map`, `--dts`/`--dtb`, `--fw` and

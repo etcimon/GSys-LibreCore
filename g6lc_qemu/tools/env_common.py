@@ -61,6 +61,16 @@ def target_dir() -> Path:
     return package_root() / "target"
 
 
+def riscv_toolchain_bin() -> Path | None:
+    """The bin directory of the contained xPack RISC-V toolchain, if installed."""
+    candidates = sorted(tools_dir().glob("xpack-riscv-none-elf-gcc-*"), reverse=True)
+    for c in candidates:
+        bin_dir = c / "bin"
+        if bin_dir.is_dir():
+            return bin_dir
+    return None
+
+
 def toolchain_channel() -> str:
     """Read the pinned channel out of rust-toolchain.toml without a TOML parser."""
     path = package_root() / "rust-toolchain.toml"
@@ -101,8 +111,41 @@ def contained_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+def host_tool_bin_dirs() -> list[Path]:
+    """Bin directories of standalone host tools installed under .tools/.
+
+    Scans .tools/ for tool installations that are not part of the Rust/xPack setup:
+    Bootlin RISC-V toolchains, the QEMU Windows install tree, and dtc source builds.
+    """
+    dirs: list[Path] = []
+    t = tools_dir()
+    if not t.is_dir():
+        return dirs
+    for sub in t.iterdir():
+        if not sub.is_dir():
+            continue
+        # Skip the Rust toolchain homes; those are prepended separately.
+        if sub.name in ("rustup", "cargo", "python-venv"):
+            continue
+        # QEMU Windows installer drops executables in the root of .tools/qemu.
+        if sub.name == "qemu":
+            dirs.append(sub)
+            continue
+        # dtc source build leaves the binary in the source root.
+        if sub.name == "dtc-src" and (
+            (sub / "dtc").is_file() or (sub / "dtc.exe").is_file()
+        ):
+            dirs.append(sub)
+            continue
+        # Anything with a bin/ directory (xpack, Bootlin, etc.).
+        bin_dir = sub / "bin"
+        if bin_dir.is_dir() and any(bin_dir.iterdir()):
+            dirs.append(bin_dir)
+    return dirs
+
+
 def apply_env(base: dict[str, str] | None = None) -> dict[str, str]:
-    """Environment for spawning cargo/rustc.
+    """Environment for spawning cargo/rustc and resolving host tools.
 
     When the contained toolchain exists, point `RUSTUP_HOME` / `CARGO_HOME` at it and
     prepend its bin directory. When it does not, **leave the caller's environment
@@ -120,6 +163,23 @@ def apply_env(base: dict[str, str] | None = None) -> dict[str, str]:
         existing = env.get("PATH", "")
         if bin_dir not in existing.split(sep):
             env["PATH"] = bin_dir + sep + existing
+    if (riscv_bin := riscv_toolchain_bin()) is not None:
+        sep = os.pathsep
+        existing = env.get("PATH", "")
+        if str(riscv_bin) not in existing.split(sep):
+            env["PATH"] = str(riscv_bin) + sep + existing
+    if (v := python_venv()).is_dir():
+        vbin = v / ("Scripts" if _WINDOWS else "bin")
+        if vbin.is_dir():
+            sep = os.pathsep
+            existing = env.get("PATH", "")
+            if str(vbin) not in existing.split(sep):
+                env["PATH"] = str(vbin) + sep + existing
+    for tool_bin in host_tool_bin_dirs():
+        sep = os.pathsep
+        existing = env.get("PATH", "")
+        if str(tool_bin) not in existing.split(sep):
+            env["PATH"] = str(tool_bin) + sep + existing
     # Deterministic output from the tools themselves.
     env.setdefault("CARGO_TERM_COLOR", "never")
     return env
