@@ -2071,10 +2071,23 @@ fn run_qemu(args: &Args) -> Result<(), String> {
         Vec::new()
     };
 
-    let stock = g6q_emit_args::StockTarget {
-        machine: args.value_or("stock-machine", "virt").to_string(),
-        cpu_base: args.value_or("stock-cpu", "rv64").to_string(),
-    };
+    // Use the generated B1 machine by default; --stock-machine / --stock-cpu select B0 stock QEMU.
+    let (machine, cpu_base) =
+        if args.value("stock-machine").is_some() || args.value("stock-cpu").is_some() {
+            (
+                args.value_or("stock-machine", "virt").to_string(),
+                args.value_or("stock-cpu", "rv64").to_string(),
+            )
+        } else {
+            (
+                format!(
+                    "g6lc-{}",
+                    g6q_emit_qemu::machine::machine_name(&model.target_id)
+                ),
+                String::new(),
+            )
+        };
+    let stock = g6q_emit_args::StockTarget { machine, cpu_base };
     let argv = g6q_emit_args::build_argv(&model, &stock, &boot, &properties_for);
 
     let binary = args.value_or("qemu-path", "qemu-system-riscv64");

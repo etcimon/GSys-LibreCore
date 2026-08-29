@@ -265,18 +265,23 @@ pub fn build_argv(
     boot: &BootOptions,
     properties_for: &dyn Fn(&str) -> Vec<String>,
 ) -> Vec<String> {
-    let mut cpu_arg = cpu_argument(model, &stock.cpu_base, properties_for);
-    if model.pmu.counter_count > 0
-        && model
-            .isa
-            .extensions
-            .iter()
-            .any(|(t, v)| t == "zihpm" && v == "live")
-    {
-        cpu_arg.push_str(&format!(",pmu-mask={:#x}", model.pmu.counter_mask()));
-    }
+    let mut a: Vec<String> = vec!["-M".into(), stock.machine.clone()];
 
-    let mut a: Vec<String> = vec!["-M".into(), stock.machine.clone(), "-cpu".into(), cpu_arg];
+    // A generated B1 machine has its own CPU type and must not take a stock -cpu argument.
+    if !stock.cpu_base.is_empty() {
+        let mut cpu_arg = cpu_argument(model, &stock.cpu_base, properties_for);
+        if model.pmu.counter_count > 0
+            && model
+                .isa
+                .extensions
+                .iter()
+                .any(|(t, v)| t == "zihpm" && v == "live")
+        {
+            cpu_arg.push_str(&format!(",pmu-mask={:#x}", model.pmu.counter_mask()));
+        }
+        a.push("-cpu".into());
+        a.push(cpu_arg);
+    }
 
     let smp = boot.smp.unwrap_or(model.soc.harts_total.max(1));
     let maxcpus = boot.maxcpus.unwrap_or(smp).max(smp);

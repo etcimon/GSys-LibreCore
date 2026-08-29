@@ -1001,4 +1001,9 @@ These fixes are now in the generator: `g6q-emit-qemu` emits `reg_shift` / `clock
 - `qemu/hw/riscv/Kconfig` and `qemu/configs/targets/riscv64-softmmu.mak` trailing blank lines cleaned.
 - `python tools/g6q.py check` green; `g6q-vm` 111 tests pass.
 
+### Q4 continuation - B1 default for `run --backend qemu`
 
+- `g6q-cli` `run --backend qemu` now targets the generated B1 machine (`g6lc-<target>`) by default. `--stock-machine` and `--stock-cpu` are still accepted to force the B0 stock-QEMU driver (`-M virt -cpu rv64...`).
+- `g6q-emit-args/src/invoke.rs` `build_argv` omits the `-cpu` argument when `StockTarget.cpu_base` is empty, so a generated machine that brings its own CPU type does not receive a conflicting stock `-cpu` line.
+- `architecture/CLI.md` updated: the execution table notes that `--backend qemu` targets the generated B1 machine and that `--stock-machine`/`--stock-cpu` select B0; the examples show the new default and an explicit stock override.
+- `python tools/g6q.py check` green; `g6q run --backend qemu --dry-run` shows `-M g6lc-unnamed -smp 1 -m 128M ...` with no `-cpu`; `g6q run --backend args` still prints the B0 stock argv (`-M virt -cpu rv64 ...`).

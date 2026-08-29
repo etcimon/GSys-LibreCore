@@ -133,7 +133,7 @@ time rather than silently switching profiles.
 
 | Option | Default | Notes |
 |---|---|---|
-| `--backend args\|qemu\|rust` | `qemu` if available, else `rust` | B0 / B1+B2 / B3 |
+| `--backend args\|qemu\|rust` | `qemu` if available, else `rust` | B0 / B1+B2 / B3; `--backend qemu` targets the generated `g6lc-<target>` B1 machine; use `--stock-machine` / `--stock-cpu` to force the B0 stock target |
 | `--qemu-bin PATH` / `--qemu-src DIR` | discovered / `qemu/` | stock binary; emission target |
 | `--accel tcg` | `tcg` | only value; host-hypervisor acceleration is a recorded non-goal |
 | `--smp auto\|N` | `auto` = cores × threads-per-core | multi-threaded translation; "auto" uses the model |
@@ -218,8 +218,11 @@ g6q run     --target <id> --repo-root /path/to/design --os firmware-smoke --buil
 g6q run     --target <id> --machine g6lc-virt --os ubuntu --kernel Image \
             --rootfs rootfs.img --netdev user --ssh-port 2222 --smp 8
 g6q tandem  --target <id> --elf test.elf --tandem spike --tandem-ref $(which spike)
-g6q run     --target mini --backend qemu --stock-machine g6lc-mini --qemu-path ./qemu/build/qemu-system-riscv64 \
+g6q run     --target mini --backend qemu --qemu-path ./qemu/build/qemu-system-riscv64 \
             --kernel ./smoke.elf --record trace.json
+# Explicit B0 stock-QEMU override:
+g6q run     --target mini --backend qemu --stock-machine virt --stock-cpu rv64 \
+            --qemu-path qemu-system-riscv64 --kernel ./smoke.elf
 g6q tandem  --under-test trace.json --reference golden.json
 g6q diag    --target <id> --replay boot.rec --checkpoint-at instret=12000000 \
             --checkpoint-out ckpt/
