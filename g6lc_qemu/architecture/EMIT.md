@@ -97,7 +97,9 @@ emits a `virtio,mmio` compatible node per transport with `reg`, `interrupts`, `i
 
 This is the B1 bridge to the B0 stock-QEMU virtio devices: a run with `--machine g6lc-virt` and
 `--drive rootfs.img` produces a `g6lc-ai_soc` machine that accepts `-device virtio-blk-device` on the
-generated transports.
+generated transports. The network half is exercised with `g6q.py build-qemu --slirp` (which enables
+libslirp and therefore the `user` netdev backend) and then `-netdev user,id=net0 -device
+virtio-net-device,netdev=net0`.
 
 ### 3.4 CPU and device-tree PMU mapping
 

@@ -361,6 +361,10 @@ def cmd_build_qemu(args: argparse.Namespace) -> int:
     # by default; they are not needed for the riscv64-softmmu boot gate.
     configure_args += " --disable-libvduse --disable-vduse-blk-export"
     configure_args += " --disable-vhost-user --disable-vhost-user-blk-server"
+    if args.slirp:
+        # libslirp gives us the 'user' netdev backend that B0 virtio-net wiring
+        # expects. It is a meson wrap, so this is an opt-in fetch.
+        configure_args += " --enable-slirp"
     if args.debug:
         configure_args += " --enable-debug"
     if args.mingw:
@@ -734,6 +738,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--target", default="riscv64-softmmu",
                    help="QEMU target list (default: riscv64-softmmu)")
     p.add_argument("--debug", action="store_true", help="pass --enable-debug to configure")
+    p.add_argument("--slirp", action="store_true",
+                   help="enable libslirp user-mode networking (requires network during configure)")
     p.add_argument("--mingw", action="store_true", help="hint a MinGW cross build")
     p.add_argument("--configure-only", action="store_true", help="configure, do not build")
     p.add_argument("--clean", action="store_true", help="remove the build directory first")

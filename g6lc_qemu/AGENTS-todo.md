@@ -752,7 +752,7 @@ Components:
   - `g6q-emit-qemu` FDT emitter emits Linux-compatible `virtio,mmio` nodes with `reg`, `interrupts`, `interrupt-parent`, and `dma-coherent` for each transport.
   - `g6lc-qemu gen` defaults `Soc.virtio_mmio = 8` when `--machine g6lc-virt` is requested, so the virt profile does not require an explicit `--virtio-mmio` count.
   - `python tools/g6q.py install-qemu` accepts `--machine` and `--virtio-mmio` and passes them through to `g6lc-qemu gen`.
-  - A local `ninja -C qemu/build` with the AI fixture installed in `g6lc-virt` profile produces a `qemu-system-riscv64` that accepts `-device virtio-blk-device,drive=hd0` on `-M g6lc-ai_soc` without error.
+  - A local `ninja -C qemu/build` with the AI fixture installed in `g6lc-virt` profile produces a `qemu-system-riscv64` that accepts both `-device virtio-blk-device,drive=hd0` and `-netdev user,id=net0 -device virtio-net-device,netdev=net0` on `-M g6lc-ai_soc` without error. `tools/g6q.py build-qemu` gains an opt-in `--slirp` flag to enable libslirp (and therefore the `user` netdev backend) by passing `--enable-slirp` to QEMU's configure.
 - MTTCG determinism hooks (icount, inter-hart quantum) — **already landed** in Q8 B0 driver (`g6q-emit-args/src/invoke.rs`); `-icount` with `shift=N,align=off,sleep=off` and the `-accel tcg,thread=single|multi` resolution are wired and tested.
 
 These are intentionally larger than a single session and are listed here so work is not started in
