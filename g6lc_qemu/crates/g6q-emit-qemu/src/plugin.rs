@@ -34,6 +34,7 @@ const EVENT_FIELDS: &[&str] = &[
     "ptr_c",
     "ptr_scale",
     "ptr_done",
+    "cluster",
 ];
 
 /// Emit the descriptor shadow buffer and the submission decoder.
@@ -42,10 +43,45 @@ const EVENT_FIELDS: &[&str] = &[
 /// emits a submission event when the doorbell field is written. That mirrors what the
 /// device model does, which is the point: the two routes must produce the same artifact
 /// from the same design geometry, or comparing them is meaningless.
-fn emit_descriptor_decoder(body: &mut String, layout: &g6q_core::model::AiDescLayout) {
+fn emit_descriptor_decoder(body: &mut String, island: &g6q_core::model::AiIslandModel) {
+    let layout = &island.desc_layout;
     body.push_str("/* Per-hart descriptor shadow, filled by stores into the latch window. */\n");
     body.push_str("static uint8_t g6lc_desc_shadow[G6LC_HARTS_TOTAL][G6LC_AI_DESC_BYTES];\n");
-    body.push_str("static uint64_t g6lc_desc_seen[G6LC_HARTS_TOTAL];\n\n");
+    body.push_str("static uint64_t g6lc_desc_seen[G6LC_HARTS_TOTAL];\n");
+    body.push_str(
+        "/* Buffered tensor events, written at exit so completion can update done/status. */\n",
+    );
+    body.push_str("typedef struct G6lcTensorEvent {\n");
+    body.push_str("    uint64_t order;\n");
+    body.push_str("    uint32_t hart;\n");
+    body.push_str("    uint64_t descriptor_addr;\n");
+    body.push_str("    uint64_t op;\n");
+    body.push_str("    uint64_t version;\n");
+    body.push_str("    uint64_t flags;\n");
+    body.push_str("    uint64_t m;\n");
+    body.push_str("    uint64_t n;\n");
+    body.push_str("    uint64_t k;\n");
+    body.push_str("    uint64_t ld_ab;\n");
+    body.push_str("    uint64_t ptr_a;\n");
+    body.push_str("    uint64_t ptr_b;\n");
+    body.push_str("    uint64_t ptr_c;\n");
+    body.push_str("    uint64_t ptr_scale;\n");
+    body.push_str("    uint64_t ptr_done;\n");
+    body.push_str("    uint64_t dtype;\n");
+    body.push_str("    uint64_t cluster;\n");
+    body.push_str("    uint32_t ticket;\n");
+    body.push_str("    uint16_t status;\n");
+    body.push_str("    bool done;\n");
+    body.push_str(
+        "    /* PMU fields are modelled by B3; B2 has no time model, so they stay 0. */\n",
+    );
+    body.push_str("    uint32_t pmu_r_beats;\n");
+    body.push_str("    uint32_t pmu_w_beats;\n");
+    body.push_str("    uint32_t pmu_cycles;\n");
+    body.push_str("    uint32_t pmu_gbps_x1000;\n");
+    body.push_str("} G6lcTensorEvent;\n");
+    body.push_str("static GArray *g6lc_tensor_events[G6LC_HARTS_TOTAL];\n");
+    body.push_str("static uint32_t g6lc_next_ticket[G6LC_HARTS_TOTAL];\n");
 
     body.push_str("/* Little-endian read out of the shadow; bounds-checked. */\n");
     body.push_str("static uint64_t g6lc_desc_u64(uint32_t hart, uint64_t off, uint64_t size)\n{\n");
@@ -74,6 +110,7 @@ fn emit_descriptor_decoder(body: &mut String, layout: &g6q_core::model::AiDescLa
     body.push_str("/* Emit one submission event, shaped exactly like the native artifact. */\n");
     body.push_str("static void g6lc_desc_submit(uint32_t hart, uint64_t desc_addr)\n{\n");
     body.push_str("    if (!g6lc_tensor_file) { return; }\n");
+
     for name in EVENT_FIELDS {
         let upper = name.to_uppercase();
         if layout.fields.contains_key(*name) {
@@ -88,24 +125,75 @@ fn emit_descriptor_decoder(body: &mut String, layout: &g6q_core::model::AiDescLa
     body.push_str(
         "    uint64_t f_dtype = (f_flags >> G6LC_AI_DTYPE_SHIFT) & G6LC_AI_DTYPE_MASK;\n",
     );
+    body.push_str("    if (g6lc_tensor_events[hart] == NULL) {\n");
+    body.push_str("        g6lc_tensor_events[hart] = g_array_sized_new(FALSE, TRUE, sizeof(G6lcTensorEvent), 4);\n");
+    body.push_str("    }\n");
+    body.push_str("    G6lcTensorEvent ev = {0};\n");
+    body.push_str("    ev.order = g6lc_tensor_order++;\n");
+    body.push_str("    ev.hart = hart;\n");
+    body.push_str("    ev.descriptor_addr = desc_addr - G6LC_AI_ISLAND_BASE;\n");
+    body.push_str("    ev.op = f_op;\n");
+    body.push_str("    ev.version = f_version;\n");
+    body.push_str("    ev.flags = f_flags;\n");
+    body.push_str("    ev.m = f_m;\n");
+    body.push_str("    ev.n = f_n;\n");
+    body.push_str("    ev.k = f_k;\n");
+    body.push_str("    ev.ld_ab = f_ld_ab;\n");
+    body.push_str("    ev.ptr_a = f_ptr_a;\n");
+    body.push_str("    ev.ptr_b = f_ptr_b;\n");
+    body.push_str("    ev.ptr_c = f_ptr_c;\n");
+    body.push_str("    ev.ptr_scale = f_ptr_scale;\n");
+    body.push_str("    ev.ptr_done = f_ptr_done;\n");
+    body.push_str("    ev.dtype = f_dtype;\n");
+    body.push_str("    ev.cluster = f_cluster;\n");
+    body.push_str("    if (ev.cluster == 0 && G6LC_AI_QUEUE_CLUSTER_MAP_LEN > 0) {\n");
+    body.push_str("        ev.cluster = g6lc_queue_cluster_map[hart % G6LC_AI_QUEUES];\n");
+    body.push_str("    }\n");
+    body.push_str("    ev.ticket = g6lc_next_ticket[hart]++;\n");
+    body.push_str("    ev.status = 0;\n");
+    body.push_str("    ev.done = false;\n");
+    body.push_str("    ev.pmu_r_beats = 0;\n");
+    body.push_str("    ev.pmu_w_beats = 0;\n");
+    body.push_str("    ev.pmu_cycles = 0;\n");
+    body.push_str("    ev.pmu_gbps_x1000 = 0;\n");
+    body.push_str("    g_array_append_val(g6lc_tensor_events[hart], ev);\n");
+    body.push_str("}\n\n");
+
+    body.push_str("/* Write one buffered tensor event in the native artifact order. */\n");
+    body.push_str("static void g6lc_tensor_event_write(const G6lcTensorEvent *e)\n{\n");
+    body.push_str("    if (!g6lc_tensor_file) { return; }\n");
     body.push_str("    if (!g6lc_tensor_first_record) {\n");
     body.push_str("        fprintf(g6lc_tensor_file, \",\\n\");\n");
     body.push_str("    }\n");
     body.push_str("    g6lc_tensor_first_record = false;\n");
-    body.push_str("    fprintf(g6lc_tensor_file,\n");
-    body.push_str("        \"{\\\"order\\\":%\" PRIu64 \",\\\"hart\\\":%u,\\\"descriptor_addr\\\":%\" PRIu64\n");
-    body.push_str("        \",\\\"op\\\":%\" PRIu64 \",\\\"version\\\":%\" PRIu64 \",\\\"flags\\\":%\" PRIu64\n");
-    body.push_str(
-        "        \",\\\"m\\\":%\" PRIu64 \",\\\"n\\\":%\" PRIu64 \",\\\"k\\\":%\" PRIu64\n",
-    );
-    body.push_str("        \",\\\"ld_ab\\\":%\" PRIu64 \",\\\"ptr_a\\\":%\" PRIu64 \",\\\"ptr_b\\\":%\" PRIu64\n");
-    body.push_str("        \",\\\"ptr_c\\\":%\" PRIu64 \",\\\"ptr_scale\\\":%\" PRIu64\n");
-    body.push_str("        \",\\\"ptr_done\\\":%\" PRIu64 \",\\\"dtype\\\":%\" PRIu64\n");
-    body.push_str("        \",\\\"ticket\\\":0,\\\"status\\\":0,\\\"done\\\":false}\",\n");
-    body.push_str("        g6lc_tensor_order++, hart, desc_addr,\n");
-    body.push_str("        f_op, f_version, f_flags, f_m, f_n, f_k, f_ld_ab,\n");
-    body.push_str("        f_ptr_a, f_ptr_b, f_ptr_c, f_ptr_scale, f_ptr_done, f_dtype);\n");
+    body.push_str(r#"    fprintf(g6lc_tensor_file, "{\"order\":%" PRIu64 ",\"hart\":%u,\"descriptor_addr\":%" PRIu64 ",\"op\":%" PRIu64 ",\"version\":%" PRIu64 ",\"flags\":%" PRIu64 ",\"m\":%" PRIu64 ",\"n\":%" PRIu64 ",\"k\":%" PRIu64 ",\"ld_ab\":%" PRIu64 ",\"ptr_a\":%" PRIu64 ",\"ptr_b\":%" PRIu64 ",\"ptr_c\":%" PRIu64 ",\"ptr_scale\":%" PRIu64 ",\"ptr_done\":%" PRIu64 ",\"dtype\":%" PRIu64 ",\"cluster\":%" PRIu64 ",\"ticket\":%u,\"status\":%u,\"done\":%s,\"pmu_r_beats\":%u,\"pmu_w_beats\":%u,\"pmu_cycles\":%u,\"pmu_gbps_x1000\":%u}", e->order, e->hart, e->descriptor_addr, e->op, e->version, e->flags, e->m, e->n, e->k, e->ld_ab, e->ptr_a, e->ptr_b, e->ptr_c, e->ptr_scale, e->ptr_done, e->dtype, e->cluster, e->ticket, e->status, e->done ? "true" : "false", e->pmu_r_beats, e->pmu_w_beats, e->pmu_cycles, e->pmu_gbps_x1000);"#);
+    body.push('\n');
     body.push_str("    fflush(g6lc_tensor_file);\n");
+    body.push_str("}\n\n");
+    body.push_str("/* Mark an in-flight event done when the guest writes its ptr_done word. */\n");
+    body.push_str("static void g6lc_tensor_complete_by_ptr_done(uint32_t hart, uint64_t paddr, uint64_t word)\n{\n");
+    body.push_str("    if (hart >= G6LC_HARTS_TOTAL) { return; }\n");
+    body.push_str("    GArray *arr = g6lc_tensor_events[hart];\n");
+    body.push_str("    if (!arr) { return; }\n");
+    body.push_str("    for (gsize i = 0; i < arr->len; ++i) {\n");
+    body.push_str("        G6lcTensorEvent *e = &g_array_index(arr, G6lcTensorEvent, i);\n");
+    body.push_str("        if (e->done || e->ptr_done != paddr) { continue; }\n");
+    body.push_str("#if G6LC_AI_COMPLETION_DECODE == 1\n");
+    body.push_str("        uint32_t read_ticket = (uint32_t)(\n");
+    body.push_str("            (word >> G6LC_AI_COMPLETION_TICKET_BIT_LOW) &\n");
+    body.push_str("            ((1ULL << (G6LC_AI_COMPLETION_TICKET_BIT_HIGH - G6LC_AI_COMPLETION_TICKET_BIT_LOW + 1)) - 1));\n");
+    body.push_str("        uint16_t read_status = (uint16_t)(\n");
+    body.push_str("            (word >> G6LC_AI_COMPLETION_STATUS_BIT_LOW) &\n");
+    body.push_str("            ((1ULL << (G6LC_AI_COMPLETION_STATUS_BIT_HIGH - G6LC_AI_COMPLETION_STATUS_BIT_LOW + 1)) - 1));\n");
+    body.push_str("        if (read_ticket == e->ticket && read_status == G6LC_AI_ST_OK) {\n");
+    body.push_str("            e->done = true;\n");
+    body.push_str("            e->status = read_status;\n");
+    body.push_str("        }\n");
+    body.push_str("#else\n");
+    body.push_str("        e->done = true;\n");
+    body.push_str("        e->status = G6LC_AI_ST_OK;\n");
+    body.push_str("#endif\n");
+    body.push_str("    }\n");
     body.push_str("}\n\n");
 }
 
@@ -187,6 +275,69 @@ fn emit_queue_instruction_path(body: &mut String) {
     body.push_str("}\n\n");
 }
 
+/// Emit the queue-fence completion path.
+///
+/// A queue-fence instruction marks all in-flight tensor events for the current
+/// hart as completed. It is recognised by the same architecture-derived encoding
+/// as the enqueue instruction, but it does not need register access.
+fn emit_qfence_instruction_path(body: &mut String) {
+    body.push_str("/* Mark every in-flight tensor event for this hart as completed. */\n");
+    body.push_str("static void g6lc_ai_qfence_exec(unsigned int vcpu_index, void *userdata)\n{\n");
+    body.push_str("    (void)userdata;\n");
+    body.push_str("    if (vcpu_index >= G6LC_HARTS_TOTAL) { return; }\n");
+    body.push_str("    if (!g6lc_tensor_events[vcpu_index]) { return; }\n");
+    body.push_str("    for (gsize i = 0; i < g6lc_tensor_events[vcpu_index]->len; ++i) {\n");
+    body.push_str("        G6lcTensorEvent *e = &g_array_index(g6lc_tensor_events[vcpu_index], G6lcTensorEvent, i);\n");
+    body.push_str("        e->done = true;\n");
+    body.push_str("        e->status = G6LC_AI_ST_OK;\n");
+    body.push_str("    }\n");
+    body.push_str("}\n\n");
+}
+
+/// Emit the `ai.poll` completion path.
+///
+/// `ai.poll rd, rs1` carries a ticket in `rs1`. When the instruction is retired the
+/// plugin reads the completion word at the event's `ptr_done`, and if it contains the
+/// matching ticket and `ST_OK` the event is marked done. This is a heuristic: the guest
+/// polls only when it expects completion, and the word itself is the island's own format
+/// as published by `make_completion`.
+fn emit_poll_instruction_path(body: &mut String) {
+    body.push_str("/* On ai.poll, read the completion word for the polled ticket. */\n");
+    body.push_str("static void g6lc_ai_poll_exec(unsigned int vcpu_index, void *userdata)\n{\n");
+    body.push_str("    if (!g6lc_tensor_file || vcpu_index >= G6LC_HARTS_TOTAL) { return; }\n");
+    body.push_str("    if (!g6lc_tensor_events[vcpu_index]) { return; }\n");
+    body.push_str("    uint8_t rs1 = (uint8_t)(uintptr_t)userdata;\n");
+    body.push_str("    uint64_t ticket = 0;\n");
+    body.push_str("    if (!g6lc_read_xreg(rs1, &ticket)) { return; }\n");
+    body.push_str("    for (gsize i = 0; i < g6lc_tensor_events[vcpu_index]->len; ++i) {\n");
+    body.push_str("        G6lcTensorEvent *e = &g_array_index(g6lc_tensor_events[vcpu_index], G6lcTensorEvent, i);\n");
+    body.push_str(
+        "        if (e->done || e->ticket != (uint32_t)ticket || e->ptr_done == 0) { continue; }\n",
+    );
+    body.push_str("        GByteArray *buf = g_byte_array_new();\n");
+    body.push_str(
+        "        if (qemu_plugin_read_memory_vaddr(e->ptr_done, buf, 8) && buf->len == 8) {\n",
+    );
+    body.push_str("            uint64_t word = 0;\n");
+    body.push_str("            for (int b = 0; b < 8; ++b) { word |= ((uint64_t)buf->data[b]) << (b * 8); }\n");
+    body.push_str("            uint32_t read_ticket = (uint32_t)(\n");
+    body.push_str("                (word >> G6LC_AI_COMPLETION_TICKET_BIT_LOW) &\n");
+    body.push_str("                ((1ULL << (G6LC_AI_COMPLETION_TICKET_BIT_HIGH - G6LC_AI_COMPLETION_TICKET_BIT_LOW + 1)) - 1));\n");
+    body.push_str("            uint16_t read_status = (uint16_t)(\n");
+    body.push_str("                (word >> G6LC_AI_COMPLETION_STATUS_BIT_LOW) &\n");
+    body.push_str("                ((1ULL << (G6LC_AI_COMPLETION_STATUS_BIT_HIGH - G6LC_AI_COMPLETION_STATUS_BIT_LOW + 1)) - 1));\n");
+    body.push_str(
+        "            if (read_ticket == (uint32_t)ticket && read_status == G6LC_AI_ST_OK) {\n",
+    );
+    body.push_str("                e->done = true;\n");
+    body.push_str("                e->status = read_status;\n");
+    body.push_str("            }\n");
+    body.push_str("        }\n");
+    body.push_str("        g_byte_array_free(buf, TRUE);\n");
+    body.push_str("    }\n");
+    body.push_str("}\n\n");
+}
+
 /// Emit a B2 TCG instrumentation plugin.
 pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission {
     let name = machine_name(&model.target_id);
@@ -197,11 +348,20 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("#include \"qemu/qemu-plugin.h\"\n");
     body.push_str("#include <stdio.h>\n");
     body.push_str("#include <string.h>\n");
+    body.push_str("#include <inttypes.h>\n");
     body.push('\n');
 
     body.push_str(&format!(
         "#define G6LC_TARGET_ID \"{target}\"\n",
         target = model.target_id
+    ));
+    body.push_str(&format!(
+        "#define G6LC_PROFILE \"{profile}\"\n",
+        profile = model.profile.as_str()
+    ));
+    body.push_str(&format!(
+        "#define G6LC_PROFILE_TAINTED \"{tainted}\"\n",
+        tainted = if model.diagnosable() { "false" } else { "true" }
     ));
     body.push_str(&format!(
         "#define G6LC_HARTS_TOTAL {harts}\n",
@@ -236,8 +396,9 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     let layout = island.map(|i| &i.desc_layout);
     let desc_bytes = layout.map_or(0, |l| l.desc_bytes);
     let desc_base = island.and_then(|i| i.config.desc_base);
-    let can_decode =
-        desc_bytes > 0 && desc_base.is_some() && layout.is_some_and(|l| !l.fields.is_empty());
+    let can_decode = desc_bytes > 0
+        && desc_base.is_some()
+        && layout.is_some_and(|l| !l.fields.is_empty() && l.flags_layout.is_some());
     body.push_str(&format!(
         "#define G6LC_AI_DESC_DECODE {}\n",
         if can_decode { 1 } else { 0 }
@@ -265,15 +426,99 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
                 f.size
             ));
         }
+        let st_ok = l.status("ST_OK").unwrap_or(0);
+        body.push_str(&format!("#define G6LC_AI_ST_OK {st_ok}U\n"));
+        if let Some(f) = l.flags_layout {
+            body.push_str(&format!("#define G6LC_AI_DTYPE_SHIFT {}\n", f.dtype_shift));
+            body.push_str(&format!(
+                "#define G6LC_AI_DTYPE_MASK 0x{:x}U\n",
+                f.dtype_mask
+            ));
+            body.push_str(&format!(
+                "#define G6LC_AI_PRIO_SHIFT {}\n",
+                f.priority_shift
+            ));
+            body.push_str(&format!(
+                "#define G6LC_AI_PRIO_MASK 0x{:x}U\n",
+                f.priority_mask
+            ));
+            body.push_str(&format!("#define G6LC_AI_IRQ_BIT {}\n", f.irq_bit));
+        }
     }
+    // Completion word layout. Derived from `make_completion` when the package publishes it.
+    // Without it, the plugin cannot decode the `ptr_done` word on `ai.poll`.
+    let completion = layout.as_ref().and_then(|l| l.completion);
+    if let Some(c) = completion {
+        body.push_str(&format!(
+            "#define G6LC_AI_COMPLETION_TICKET_BIT_LOW {}\n",
+            c.ticket_bit_low
+        ));
+        body.push_str(&format!(
+            "#define G6LC_AI_COMPLETION_TICKET_BIT_HIGH {}\n",
+            c.ticket_bit_high
+        ));
+        body.push_str(&format!(
+            "#define G6LC_AI_COMPLETION_STATUS_BIT_LOW {}\n",
+            c.status_bit_low
+        ));
+        body.push_str(&format!(
+            "#define G6LC_AI_COMPLETION_STATUS_BIT_HIGH {}\n",
+            c.status_bit_high
+        ));
+        body.push_str("#define G6LC_AI_COMPLETION_DECODE 1\n");
+    }
+
+    // Queue dispatch: a `cluster` descriptor field wins, then a published
+    // queue-to-cluster map.  Without either source the event records `cluster` as
+    // unresolved (0), just like the B3 path.
+    if let Some(i) = island {
+        body.push_str(&format!(
+            "#define G6LC_AI_QUEUES {}\n",
+            i.config.queues.max(1)
+        ));
+        if let Some(map) = &i.config.queue_cluster_map {
+            body.push_str(&format!(
+                "#define G6LC_AI_QUEUE_CLUSTER_MAP_LEN {}\n",
+                map.len()
+            ));
+            let entries = map
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            body.push_str(&format!(
+                "static const uint32_t g6lc_queue_cluster_map[{}] = {{ {entries} }};\n",
+                map.len()
+            ));
+        } else {
+            body.push_str("#define G6LC_AI_QUEUE_CLUSTER_MAP_LEN 0\n");
+        }
+    } else {
+        body.push_str("#define G6LC_AI_QUEUES 1\n");
+        body.push_str("#define G6LC_AI_QUEUE_CLUSTER_MAP_LEN 0\n");
+    }
+
     // Custom enqueue encoding, for submissions that never touch the latch window.
     // Emitted only when the design's instruction set was ingested; a zero mask would
     // match every instruction, so absence disables the path rather than defaulting it.
     let instr = island.map(|i| &i.instr_set);
     let enq_decode = can_decode && instr.is_some_and(|s| s.mask_f7f3op != 0 && s.match_enq != 0);
+    let qfence_decode =
+        can_decode && instr.is_some_and(|s| s.mask_f7f3op != 0 && s.match_qfence != 0);
+    let poll_decode = can_decode
+        && completion.is_some()
+        && instr.is_some_and(|s| s.mask_f7f3op != 0 && s.match_poll != 0);
     body.push_str(&format!(
         "#define G6LC_AI_ENQ_DECODE {}\n",
         if enq_decode { 1 } else { 0 }
+    ));
+    body.push_str(&format!(
+        "#define G6LC_AI_QFENCE_DECODE {}\n",
+        if qfence_decode { 1 } else { 0 }
+    ));
+    body.push_str(&format!(
+        "#define G6LC_AI_POLL_DECODE {}\n",
+        if poll_decode { 1 } else { 0 }
     ));
     if let Some(s) = instr {
         body.push_str(&format!(
@@ -284,15 +529,23 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
             "#define G6LC_AI_ENQ_MATCH 0x{:08x}U\n",
             s.match_enq
         ));
+        body.push_str(&format!(
+            "#define G6LC_AI_QFENCE_MASK 0x{:08x}U\n",
+            s.mask_f7f3op
+        ));
+        body.push_str(&format!(
+            "#define G6LC_AI_QFENCE_MATCH 0x{:08x}U\n",
+            s.match_qfence
+        ));
+        body.push_str(&format!(
+            "#define G6LC_AI_POLL_MASK 0x{:08x}U\n",
+            s.mask_f7f3op
+        ));
+        body.push_str(&format!(
+            "#define G6LC_AI_POLL_MATCH 0x{:08x}U\n",
+            s.match_poll
+        ));
     }
-    body.push_str(&format!(
-        "#define G6LC_AI_DTYPE_SHIFT {}\n",
-        g6q_core::model::DTYPE_SHIFT
-    ));
-    body.push_str(&format!(
-        "#define G6LC_AI_DTYPE_MASK 0x{:x}U\n",
-        g6q_core::model::DTYPE_MASK
-    ));
     body.push('\n');
 
     body.push_str(
@@ -312,7 +565,11 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("#if G6LC_AI_ISLAND_LEN != 0\n");
     body.push_str("static FILE *g6lc_tensor_file;\n");
     body.push_str("static uint64_t g6lc_tensor_order;\n");
-    body.push_str("static bool g6lc_tensor_first_record;\n\n");
+    body.push_str("static bool g6lc_tensor_first_record;\n");
+    body.push_str("#if G6LC_AI_DESC_DECODE != 1\n\n");
+    body.push_str(
+        "/* Geometry unresolved: emit raw AI-island memory accesses as tensor events. */\n",
+    );
     body.push_str("static void g6lc_tensor_write(\n");
     body.push_str("    uint32_t hart, uint64_t vaddr, uint64_t paddr,\n");
     body.push_str("    bool is_store, uint8_t size)\n{\n");
@@ -321,19 +578,24 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("        fprintf(g6lc_tensor_file, \",\\n\");\n");
     body.push_str("    }\n");
     body.push_str("    g6lc_tensor_first_record = false;\n");
-    body.push_str("    fprintf(g6lc_tensor_file,\n");
-    body.push_str("        \"{\\\"order\\\":%\\\" PRIu64 \\\",\\\"hart\\\":%u,\\\"vaddr\\\":%\\\" PRIu64 \\\",\\\"paddr\\\":%\\\" PRIu64 \\\",\\\"is_store\\\":%s,\\\"size\\\":%u}\",\n");
-    body.push_str("        g6lc_tensor_order++, hart, vaddr, paddr,\n");
-    body.push_str("        is_store ? \"true\" : \"false\", (uint32_t)size);\n");
+    body.push_str(r#"    fprintf(g6lc_tensor_file, "{\"order\":%" PRIu64 ",\"hart\":%u,\"vaddr\":%" PRIu64 ",\"paddr\":%" PRIu64 ",\"is_store\":%s,\"size\":%u}", g6lc_tensor_order++, hart, vaddr, paddr, is_store ? "true" : "false", (uint32_t)size);"#);
+    body.push('\n');
     body.push_str("    fflush(g6lc_tensor_file);\n");
     body.push_str("}\n");
+    body.push_str("#endif\n");
     body.push_str("#endif\n\n");
 
     if can_decode {
-        emit_descriptor_decoder(&mut body, layout.expect("can_decode implies a layout"));
+        emit_descriptor_decoder(&mut body, island.expect("can_decode implies an island"));
     }
     if enq_decode {
         emit_queue_instruction_path(&mut body);
+    }
+    if qfence_decode {
+        emit_qfence_instruction_path(&mut body);
+    }
+    if poll_decode {
+        emit_poll_instruction_path(&mut body);
     }
 
     body.push_str(
@@ -445,9 +707,31 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("    if (haddr && qemu_plugin_hwaddr_is_io(haddr)) {\n");
     body.push_str("        g6lc_mmio_count[vcpu_index]++;\n");
     body.push_str("    }\n");
+    body.push_str("    bool is_io = haddr && qemu_plugin_hwaddr_is_io(haddr);\n");
+    body.push_str(
+        "    uint64_t paddr = (haddr && !is_io) ? qemu_plugin_hwaddr_phys_addr(haddr) : vaddr;\n",
+    );
+    body.push_str("#if G6LC_AI_DESC_DECODE == 1\n");
+    body.push_str("    uint64_t store_word = 0;\n");
+    body.push_str("    if (g6lc_is_store) {\n");
+    body.push_str("        qemu_plugin_mem_value val = qemu_plugin_mem_get_value(meminfo);\n");
+    body.push_str("        switch (val.type) {\n");
+    body.push_str("        case QEMU_PLUGIN_MEM_VALUE_U8:  store_word = val.data.u8;  break;\n");
+    body.push_str("        case QEMU_PLUGIN_MEM_VALUE_U16: store_word = val.data.u16; break;\n");
+    body.push_str("        case QEMU_PLUGIN_MEM_VALUE_U32: store_word = val.data.u32; break;\n");
+    body.push_str("        case QEMU_PLUGIN_MEM_VALUE_U64: store_word = val.data.u64; break;\n");
+    body.push_str("        case QEMU_PLUGIN_MEM_VALUE_U128:\n");
+    body.push_str("            store_word = val.data.u128.low; break;\n");
+    body.push_str("        default: store_word = 0; break;\n");
+    body.push_str("        }\n");
+    body.push_str("    }\n");
+    body.push_str("    /* Guest writes to a ptr_done address complete that descriptor. */\n");
+    body.push_str("    if (g6lc_is_store) {\n");
+    body.push_str("        g6lc_tensor_complete_by_ptr_done(vcpu_index, paddr, store_word);\n");
+    body.push_str("    }\n");
+    body.push_str("#endif\n");
     body.push_str("#if G6LC_AI_ISLAND_LEN != 0\n");
-    body.push_str("    if (haddr) {\n");
-    body.push_str("        uint64_t paddr = qemu_plugin_hwaddr_phys_addr(haddr);\n");
+    body.push_str("    {\n");
     body.push_str("        uint64_t off = paddr - G6LC_AI_ISLAND_BASE;\n");
     body.push_str("        if (off < G6LC_AI_ISLAND_LEN) {\n");
     body.push_str("            g6lc_ai_island_count[vcpu_index]++;\n");
@@ -459,37 +743,14 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
         body.push_str("                off < G6LC_AI_DESC_BASE + G6LC_AI_DESC_BYTES) {\n");
         body.push_str("                uint64_t doff = off - G6LC_AI_DESC_BASE;\n");
         body.push_str(
-            "                qemu_plugin_mem_value val = qemu_plugin_mem_get_value(meminfo);\n",
+            "                g6lc_desc_store(vcpu_index, doff, g6lc_size, store_word);\n",
         );
-        body.push_str("                uint64_t raw = 0;\n");
-        body.push_str("                switch (val.type) {\n");
-        body.push_str(
-            "                case QEMU_PLUGIN_MEM_VALUE_U8:  raw = val.data.u8;  break;\n",
-        );
-        body.push_str(
-            "                case QEMU_PLUGIN_MEM_VALUE_U16: raw = val.data.u16; break;\n",
-        );
-        body.push_str(
-            "                case QEMU_PLUGIN_MEM_VALUE_U32: raw = val.data.u32; break;\n",
-        );
-        body.push_str(
-            "                case QEMU_PLUGIN_MEM_VALUE_U64: raw = val.data.u64; break;\n",
-        );
-        body.push_str("                case QEMU_PLUGIN_MEM_VALUE_U128:\n");
-        body.push_str("                    raw = val.data.u128.low; break;\n");
-        body.push_str("                default: raw = 0; break;\n");
-        body.push_str("                }\n");
-        body.push_str("                g6lc_desc_store(vcpu_index, doff, g6lc_size, raw);\n");
         body.push_str(
             "                /* The doorbell is the version/op word at descriptor offset 0. */\n",
         );
         body.push_str("                if (doff == 0) {\n");
         body.push_str("                    g6lc_desc_submit(vcpu_index, paddr);\n");
         body.push_str("                }\n");
-        body.push_str("            } else {\n");
-        body.push_str("                g6lc_tensor_write(\n");
-        body.push_str("                    vcpu_index, vaddr, paddr,\n");
-        body.push_str("                    g6lc_is_store, g6lc_size);\n");
         body.push_str("            }\n");
     } else {
         // Geometry unresolved: report accesses. Emitting a decoder here would need a
@@ -558,6 +819,29 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
         body.push_str("                (void *)(uintptr_t)rs1);\n");
         body.push_str("        }\n");
     }
+    if qfence_decode {
+        body.push_str("        /* Recognise the queue fence by the design's own encoding.\n");
+        body.push_str("         * It only needs to mark in-flight events, so it is registered\n");
+        body.push_str("         * with QEMU_PLUGIN_CB_NO_REGS. */\n");
+        body.push_str(
+            "        if ((info->data & G6LC_AI_QFENCE_MASK) == G6LC_AI_QFENCE_MATCH) {\n",
+        );
+        body.push_str("            qemu_plugin_register_vcpu_insn_exec_cb(\n");
+        body.push_str(
+            "                insn, g6lc_ai_qfence_exec, QEMU_PLUGIN_CB_NO_REGS, NULL);\n",
+        );
+        body.push_str("        }\n");
+    }
+    if poll_decode {
+        body.push_str("        /* Recognise the queue poll by the design's own encoding.\n");
+        body.push_str("         * It reads the polled ticket and then the completion word. */\n");
+        body.push_str("        if ((info->data & G6LC_AI_POLL_MASK) == G6LC_AI_POLL_MATCH) {\n");
+        body.push_str("            uint8_t rs1 = (uint8_t)((info->data >> 15) & 0x1f);\n");
+        body.push_str("            qemu_plugin_register_vcpu_insn_exec_cb(\n");
+        body.push_str("                insn, g6lc_ai_poll_exec, QEMU_PLUGIN_CB_R_REGS,\n");
+        body.push_str("                (void *)(uintptr_t)rs1);\n");
+        body.push_str("        }\n");
+    }
     body.push_str("        qemu_plugin_register_vcpu_insn_exec_cb(\n");
     body.push_str("            insn, g6lc_vcpu_insn_exec, QEMU_PLUGIN_CB_NO_REGS, info);\n");
     body.push_str("        qemu_plugin_register_vcpu_mem_cb(\n");
@@ -582,10 +866,28 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("    }\n");
     body.push_str("#if G6LC_AI_ISLAND_LEN != 0\n");
     body.push_str("    if (g6lc_tensor_file) {\n");
+    body.push_str("#if G6LC_AI_DESC_DECODE == 1\n");
+    body.push_str("        for (uint32_t h = 0; h < G6LC_HARTS_TOTAL; ++h) {\n");
+    body.push_str("            if (g6lc_tensor_events[h]) {\n");
+    body.push_str("                for (gsize i = 0; i < g6lc_tensor_events[h]->len; ++i) {\n");
+    body.push_str("                    G6lcTensorEvent *ev = &g_array_index(g6lc_tensor_events[h], G6lcTensorEvent, i);\n");
+    body.push_str("                    g6lc_tensor_event_write(ev);\n");
+    body.push_str("                }\n");
+    body.push_str("            }\n");
+    body.push_str("        }\n");
+    body.push_str("#endif\n");
     body.push_str("        fprintf(g6lc_tensor_file, \"\\n]}\\n\");\n");
     body.push_str("        fclose(g6lc_tensor_file);\n");
     body.push_str("        g6lc_tensor_file = NULL;\n");
     body.push_str("    }\n");
+    body.push_str("#if G6LC_AI_DESC_DECODE == 1\n");
+    body.push_str("    for (uint32_t h = 0; h < G6LC_HARTS_TOTAL; ++h) {\n");
+    body.push_str("        if (g6lc_tensor_events[h]) {\n");
+    body.push_str("            g_array_free(g6lc_tensor_events[h], TRUE);\n");
+    body.push_str("            g6lc_tensor_events[h] = NULL;\n");
+    body.push_str("        }\n");
+    body.push_str("    }\n");
+    body.push_str("#endif\n");
     body.push_str("#endif\n");
     body.push_str("    if (g6lc_trace_insns) {\n");
     body.push_str("        g_ptr_array_free(g6lc_trace_insns, TRUE);\n");
@@ -624,8 +926,8 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("            if (g6lc_trace_file) {\n");
     body.push_str("                g6lc_trace_first_record = true;\n");
     body.push_str("                fprintf(g6lc_trace_file,\n");
-    body.push_str("                    \"{\\\"header\\\":{\\\"profile\\\":\\\"g6lc-%s\\\",\\\"profile_tainted\\\":false,\\\"evidence\\\":false},\\\"records\\\":[\\n\",\n");
-    body.push_str("                    G6LC_TARGET_ID);\n");
+    body.push_str("                    \"{\\\"header\\\":{\\\"profile\\\":\\\"%s\\\",\\\"profile_tainted\\\":%s,\\\"evidence\\\":false},\\\"records\\\":[\\n\",\n");
+    body.push_str("                    G6LC_PROFILE, G6LC_PROFILE_TAINTED);\n");
     body.push_str("            }\n");
     body.push_str("        }\n");
     body.push_str("#if G6LC_AI_ISLAND_LEN != 0\n");
@@ -636,14 +938,27 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("                g6lc_tensor_first_record = true;\n");
     body.push_str("                g6lc_tensor_order = 0;\n");
     body.push_str("                fprintf(g6lc_tensor_file,\n");
-    body.push_str("                    \"{\\\"header\\\":{\\\"profile\\\":\\\"g6lc-%s\\\",\\\"profile_tainted\\\":false,\\\"evidence\\\":false},\\\"events\\\":[\\n\",\n");
-    body.push_str("                    G6LC_TARGET_ID);\n");
+    body.push_str("                    \"{\\\"header\\\":{\\\"profile\\\":\\\"%s\\\",\\\"profile_tainted\\\":%s,\\\"evidence\\\":false}\",\n");
+    body.push_str("                    G6LC_PROFILE, G6LC_PROFILE_TAINTED);\n");
+    body.push_str("#if G6LC_AI_DESC_DECODE == 1\n");
+    body.push_str("                fprintf(g6lc_tensor_file,\n");
+    body.push_str("                    \",\\\"flags_layout\\\":{\\\"dtype_shift\\\":%u,\\\"dtype_mask\\\":%u,\\\"priority_shift\\\":%u,\\\"priority_mask\\\":%u,\\\"irq_bit\\\":%u}\",\n");
+    body.push_str("                    G6LC_AI_DTYPE_SHIFT, G6LC_AI_DTYPE_MASK,\n");
+    body.push_str("                    G6LC_AI_PRIO_SHIFT, G6LC_AI_PRIO_MASK, G6LC_AI_IRQ_BIT);\n");
+    body.push_str("#endif\n");
+    body.push_str("                fprintf(g6lc_tensor_file, \",\\\"events\\\":[\\n\");\n");
     body.push_str("            }\n");
     body.push_str("        }\n");
     body.push_str("#endif\n");
     body.push_str("    }\n");
     body.push_str("    g6lc_trace_insns = g_ptr_array_new();\n");
-    body.push_str("    g_ptr_array_set_free_func(g6lc_trace_insns, g_free);\n\n");
+    body.push_str("    g_ptr_array_set_free_func(g6lc_trace_insns, g_free);\n");
+    body.push_str("#if G6LC_AI_DESC_DECODE == 1\n");
+    body.push_str("    for (uint32_t h = 0; h < G6LC_HARTS_TOTAL; ++h) {\n");
+    body.push_str("        g6lc_tensor_events[h] = NULL;\n");
+    body.push_str("        g6lc_next_ticket[h] = 0;\n");
+    body.push_str("    }\n");
+    body.push_str("#endif\n\n");
     body.push_str("    qemu_plugin_register_vcpu_init_cb(id, g6lc_vcpu_init);\n");
     body.push_str("    qemu_plugin_register_vcpu_idle_cb(id, g6lc_vcpu_idle);\n");
     body.push_str("    qemu_plugin_register_vcpu_resume_cb(id, g6lc_vcpu_resume);\n");
@@ -696,6 +1011,8 @@ mod tests {
         assert!(f.contents.contains("qemu_plugin_hwaddr_is_io"));
         assert!(f.contents.contains("g6lc_mmio_count"));
         assert!(f.contents.contains("G6LC_TARGET_ID"));
+        assert!(f.contents.contains("G6LC_PROFILE"));
+        assert!(f.contents.contains("G6LC_PROFILE_TAINTED"));
         assert!(f.contents.contains("g6lc_tensor_file"));
         assert!(f.contents.contains("g6lc_tensor_write"));
         assert!(f.contents.contains("tensor="));
@@ -704,7 +1021,9 @@ mod tests {
     /// A model that resolves the descriptor geometry, mirroring the reference package:
     /// packed field offsets, and a latch window the island places at a stated base.
     fn model_with_island() -> TargetModel {
-        use g6q_core::model::{AiDescLayout, AiIslandConfig, AiIslandModel, DescField, Peripheral};
+        use g6q_core::model::{
+            AiDescLayout, AiIslandConfig, AiIslandModel, DescField, DescFlagsLayout, Peripheral,
+        };
         let mut m = TargetModel::new("g6lc64_ai");
         m.soc.harts_total = 2;
         m.soc.peripherals.push(Peripheral {
@@ -760,7 +1079,23 @@ mod tests {
                 desc_bytes: 64,
                 version: Some(1),
                 fields,
-                ..Default::default()
+                ops: std::collections::BTreeMap::new(),
+                statuses: [("ST_OK".into(), 0)].into_iter().collect(),
+                completion: Some(g6q_core::model::CompletionLayout {
+                    ticket_bit_low: 0,
+                    ticket_bit_high: 31,
+                    status_bit_low: 32,
+                    status_bit_high: 47,
+                }),
+                flags_layout: Some(DescFlagsLayout {
+                    dtype_shift: 8,
+                    dtype_mask: 0x3f,
+                    priority_shift: 16,
+                    priority_mask: 0x0f,
+                    irq_bit: 2,
+                    dtype_combined: true,
+                    ..Default::default()
+                }),
             },
         });
         m
@@ -800,6 +1135,8 @@ mod tests {
         assert!(c.contains("#define G6LC_AI_OFF_PTR_DONE 56"));
         assert!(c.contains("#define G6LC_AI_SZ_PTR_DONE 8"));
         assert!(c.contains("#define G6LC_AI_OFF_LD_AB 20"));
+        // Status code for completion comes from the layout, not a literal.
+        assert!(c.contains("#define G6LC_AI_ST_OK 0U"));
         // No literal stride from the old hand-written surface.
         assert!(!c.contains("G6LC_AI_OFF_PTR_DONE 0x40"));
     }
@@ -814,10 +1151,22 @@ mod tests {
         assert!(c.contains("g6lc_desc_shadow"));
         assert!(c.contains("g6lc_desc_store"));
         assert!(c.contains("g6lc_desc_submit"));
-        // The dtype packing is emitted from the single shared constant.
+        // The dtype packing is emitted from the ingested flags layout.
+        let flags = model_with_island()
+            .soc
+            .ai_island
+            .as_ref()
+            .unwrap()
+            .desc_layout
+            .flags_layout
+            .unwrap();
         assert!(c.contains(&format!(
             "#define G6LC_AI_DTYPE_SHIFT {}",
-            g6q_core::model::DTYPE_SHIFT
+            flags.dtype_shift
+        )));
+        assert!(c.contains(&format!(
+            "#define G6LC_AI_DTYPE_MASK 0x{:x}U",
+            flags.dtype_mask
         )));
     }
 
@@ -888,14 +1237,148 @@ mod tests {
             "ptr_scale",
             "ptr_done",
             "dtype",
+            "cluster",
             "ticket",
             "status",
             "done",
+            "pmu_r_beats",
+            "pmu_w_beats",
+            "pmu_cycles",
+            "pmu_gbps_x1000",
         ] {
             assert!(
                 c.contains(&format!("\\\"{key}\\\"")),
                 "emitted plugin is missing artifact key {key:?}"
             );
         }
+        assert!(
+            c.contains("\\\"done\\\":%s"),
+            "done must be emitted as a JSON string"
+        );
+        assert!(c.contains("e->done ? \"true\" : \"false\""));
+        assert!(
+            c.contains("e->pmu_r_beats, e->pmu_w_beats, e->pmu_cycles, e->pmu_gbps_x1000"),
+            "PMU fields must be passed to fprintf"
+        );
+        for pmu in ["pmu_r_beats", "pmu_w_beats", "pmu_cycles", "pmu_gbps_x1000"] {
+            assert!(
+                c.contains(&format!("ev.{pmu} = 0")),
+                "PMU field {pmu:?} must be zeroed at submission"
+            );
+        }
+        assert!(!c.contains("\\\"done\\\":false"));
+        assert!(c.contains("g6lc_tensor_event_write"));
+        assert!(c.contains("g6lc_tensor_complete_by_ptr_done"));
+        assert!(c.contains("g6lc_next_ticket[h] = 0"));
+        assert!(c.contains("ev.ticket = g6lc_next_ticket[hart]"));
+        assert!(c.contains("g6lc_tensor_events[h] = NULL"));
+        assert!(c.contains("g_array_free(g6lc_tensor_events[h], TRUE)"));
+        assert!(c.contains("G6LC_PROFILE"));
+        assert!(c.contains("G6LC_PROFILE_TAINTED"));
+        assert!(c.contains("\\\"profile_tainted\\\":%s"));
+        assert!(c.contains("G6LC_AI_ST_OK"));
+        assert!(c.contains("e->status = G6LC_AI_ST_OK"));
+    }
+
+    #[test]
+    fn cluster_dispatch_uses_queue_cluster_map_when_descriptor_lacks_cluster() {
+        let mut m = model_with_island();
+        if let Some(ai) = m.soc.ai_island.as_mut() {
+            ai.config.queue_cluster_map = Some(vec![0, 1]);
+        }
+        let e = emit_plugin(&m, "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        // The plugin emits the map and a fallback in g6lc_desc_submit.
+        assert!(c.contains("#define G6LC_AI_QUEUES 2"));
+        assert!(c.contains("#define G6LC_AI_QUEUE_CLUSTER_MAP_LEN 2"));
+        assert!(c.contains("static const uint32_t g6lc_queue_cluster_map[2] = { 0, 1 }"));
+        assert!(c.contains("if (ev.cluster == 0 && G6LC_AI_QUEUE_CLUSTER_MAP_LEN > 0)"));
+        assert!(c.contains("g6lc_queue_cluster_map[hart % G6LC_AI_QUEUES]"));
+    }
+
+    #[test]
+    fn the_qfence_instruction_path_uses_the_ingested_encoding() {
+        let e = emit_plugin(&model_with_island(), "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        assert!(c.contains("#define G6LC_AI_QFENCE_DECODE 1"));
+        // Mask and match come from the model's instruction set, not from a literal here.
+        assert!(c.contains("#define G6LC_AI_QFENCE_MASK 0xfe00707fU"));
+        assert!(c.contains("#define G6LC_AI_QFENCE_MATCH 0x0400505bU"));
+        assert!(c.contains("(info->data & G6LC_AI_QFENCE_MASK) == G6LC_AI_QFENCE_MATCH"));
+        // Queue fences do not need register access.
+        assert!(c.contains("QEMU_PLUGIN_CB_NO_REGS"));
+        assert!(c.contains("g6lc_ai_qfence_exec"));
+    }
+
+    #[test]
+    fn the_qfence_path_is_absent_without_an_ingested_encoding() {
+        let mut m = model_with_island();
+        if let Some(ai) = m.soc.ai_island.as_mut() {
+            ai.instr_set = Default::default();
+        }
+        let e = emit_plugin(&m, "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        assert!(c.contains("#define G6LC_AI_QFENCE_DECODE 0"));
+        assert!(!c.contains("g6lc_ai_qfence_exec"));
+    }
+
+    #[test]
+    fn the_poll_instruction_path_uses_the_ingested_encoding() {
+        let e = emit_plugin(&model_with_island(), "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        assert!(c.contains("#define G6LC_AI_POLL_DECODE 1"));
+        // Mask and match come from the model's instruction set, not from a literal here.
+        assert!(c.contains("#define G6LC_AI_POLL_MASK 0xfe00707fU"));
+        assert!(c.contains("#define G6LC_AI_POLL_MATCH 0x0200505bU"));
+        assert!(c.contains("(info->data & G6LC_AI_POLL_MASK) == G6LC_AI_POLL_MATCH"));
+        // Poll needs the ticket from rs1 and reads the completion word.
+        assert!(c.contains("QEMU_PLUGIN_CB_R_REGS"));
+        assert!(c.contains("g6lc_ai_poll_exec"));
+        assert!(c.contains("qemu_plugin_read_memory_vaddr"));
+        // Completion bit ranges come from the ingested make_completion layout.
+        assert!(c.contains("G6LC_AI_COMPLETION_TICKET_BIT_LOW"));
+        assert!(c.contains("G6LC_AI_COMPLETION_STATUS_BIT_HIGH"));
+    }
+
+    #[test]
+    fn the_poll_path_is_absent_without_completion_layout() {
+        // The ai.poll path cannot decode the completion word unless the package publishes
+        // the layout through make_completion.
+        let mut m = model_with_island();
+        if let Some(ai) = m.soc.ai_island.as_mut() {
+            ai.desc_layout.completion = None;
+        }
+        let e = emit_plugin(&m, "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        assert!(c.contains("#define G6LC_AI_POLL_DECODE 0"));
+        assert!(!c.contains("g6lc_ai_poll_exec"));
+    }
+
+    #[test]
+    fn the_ptr_done_completion_path_decodes_when_layout_resolved() {
+        let e = emit_plugin(&model_with_island(), "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        assert!(c.contains("#define G6LC_AI_COMPLETION_DECODE 1"));
+        assert!(c.contains("g6lc_tensor_complete_by_ptr_done(vcpu_index, paddr, store_word)"));
+        // The store-value path extracts a 64-bit word from the QEMU mem_value.
+        assert!(c.contains("qemu_plugin_mem_value val = qemu_plugin_mem_get_value(meminfo)"));
+        assert!(c.contains("case QEMU_PLUGIN_MEM_VALUE_U64: store_word = val.data.u64; break;"));
+        // It decodes ticket and status from the word using the ingested layout.
+        assert!(c.contains("G6LC_AI_COMPLETION_TICKET_BIT_LOW"));
+        assert!(c.contains("G6LC_AI_COMPLETION_STATUS_BIT_HIGH"));
+        assert!(c.contains("if (read_ticket == e->ticket && read_status == G6LC_AI_ST_OK)"));
+    }
+
+    #[test]
+    fn the_ptr_done_completion_path_falls_back_without_layout() {
+        let mut m = model_with_island();
+        if let Some(ai) = m.soc.ai_island.as_mut() {
+            ai.desc_layout.completion = None;
+        }
+        let e = emit_plugin(&m, "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        assert!(!c.contains("#define G6LC_AI_COMPLETION_DECODE"));
+        assert!(c.contains("g6lc_tensor_complete_by_ptr_done(vcpu_index, paddr, store_word)"));
+        assert!(c.contains("#else\n        e->done = true;"));
     }
 }

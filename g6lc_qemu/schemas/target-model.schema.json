@@ -248,10 +248,51 @@
                 "noc_width": { "type": "integer", "minimum": 1 },
                 "dram_channels": { "type": "integer", "minimum": 0 },
                 "dram_gbps": { "type": "integer", "minimum": 0 },
+                "measured_dram_gbps_x1000": {
+                  "description": "Measured sustained DRAM bandwidth in milli-GB/s, from the cap window. Null means no measurement.",
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
                 "queues": { "type": "integer", "minimum": 0 },
                 "queue_depth": { "type": "integer", "minimum": 0 },
                 "qos_classes": { "type": "integer", "minimum": 0 },
                 "work_quantum_k": { "type": "integer", "minimum": 0 },
+                "dtype_mask": {
+                  "description": "Data-type grant bits the cap window reports. Null means the design does not publish the value.",
+                  "type": ["integer", "null"],
+                  "minimum": 0
+                },
+                "block_mnk": {
+                  "description": "Packed block_mnk capability word layout. Null means the design does not publish the bit layout.",
+                  "type": ["object", "null"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "m_low": { "type": "integer", "minimum": 0 },
+                    "m_width": { "type": "integer", "minimum": 1 },
+                    "n_low": { "type": "integer", "minimum": 0 },
+                    "n_width": { "type": "integer", "minimum": 1 },
+                    "k_low": { "type": "integer", "minimum": 0 },
+                    "k_width": { "type": "integer", "minimum": 1 }
+                  },
+                  "required": ["m_low", "m_width", "n_low", "n_width", "k_low", "k_width"]
+                },
+                "cap_packed": {
+                  "description": "Packed capability words whose bit layout is not a single flat value. Object keys are capability names; each value is a list of fields from LSB to MSB.",
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "name": { "type": "string" },
+                        "low": { "type": "integer", "minimum": 0 },
+                        "width": { "type": "integer", "minimum": 1 }
+                      },
+                      "required": ["name", "low", "width"]
+                    }
+                  }
+                },
                 "cap_offsets": {
                   "type": "object",
                   "additionalProperties": { "type": "integer", "minimum": 0 }
@@ -265,6 +306,16 @@
                   "description": "Base of the descriptor latch window inside the island MMIO region. Descriptor field offsets are relative to this. Null means unresolved.",
                   "type": ["integer", "null"],
                   "minimum": 0
+                },
+                "queue_cluster_map": {
+                  "description": "Queue-to-cluster map when the design publishes it. The i-th queue dispatches to cluster map[i mod map.len()]. Null means unresolved.",
+                  "type": ["array", "null"],
+                  "items": { "type": "integer", "minimum": 0 }
+                },
+                "pmu_offsets": {
+                  "description": "Island PMU register offsets by name, from PMU_OFF_* localparams. These are the design's own measured counters, the only quantities that can contradict the modelled roofline bound. Empty when the design publishes the register map only as comments.",
+                  "type": "object",
+                  "additionalProperties": { "type": "integer", "minimum": 0 }
                 }
               }
             },
@@ -297,6 +348,56 @@
                 "statuses": {
                   "type": "object",
                   "additionalProperties": { "type": "integer", "minimum": 0 }
+                },
+                "flags_layout": {
+                  "description": "Packed flags word layout derived from desc_prio/desc_irq, the per-field arithmetic-type accessors, and comments. Null means the design does not publish the layout.",
+                  "type": ["object", "null"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "dtype_shift": { "type": "integer", "minimum": 0 },
+                    "dtype_mask": { "type": "integer", "minimum": 0 },
+                    "priority_shift": { "type": "integer", "minimum": 0 },
+                    "priority_mask": { "type": "integer", "minimum": 0 },
+                    "irq_bit": { "type": "integer", "minimum": 0 },
+                    "dtype_combined": {
+                      "description": "True when dtype_shift/dtype_mask came from a combined 'type fields' comment rather than a per-field accessor, so the extracted value mixes several ABI subfields and must not be reported as a data type.",
+                      "type": "boolean"
+                    },
+                    "accmode": {
+                      "description": "Accumulate-mode selector, when the design publishes a desc_accmode accessor. Null means unresolved.",
+                      "type": ["object", "null"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "shift": { "type": "integer", "minimum": 0 },
+                        "mask": { "type": "integer", "minimum": 0 }
+                      }
+                    },
+                    "ew": {
+                      "description": "Element-width (sub-byte) selector, when the design publishes a desc_ew accessor. While null, no backend may claim a sub-byte effective-throughput multiplier.",
+                      "type": ["object", "null"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "shift": { "type": "integer", "minimum": 0 },
+                        "mask": { "type": "integer", "minimum": 0 }
+                      }
+                    },
+                    "sp24_bit": {
+                      "description": "Bit index of the structured 2:4 sparsity request, when the design publishes a desc_sp24 accessor. Null means unresolved.",
+                      "type": ["integer", "null"],
+                      "minimum": 0
+                    }
+                  }
+                },
+                "completion": {
+                  "description": "Completion word bit layout derived from make_completion. Null means the design does not publish the layout and the ai.poll path cannot decode it.",
+                  "type": ["object", "null"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "ticket_bit_low": { "type": "integer", "minimum": 0 },
+                    "ticket_bit_high": { "type": "integer", "minimum": 0 },
+                    "status_bit_low": { "type": "integer", "minimum": 0 },
+                    "status_bit_high": { "type": "integer", "minimum": 0 }
+                  }
                 }
               }
             },

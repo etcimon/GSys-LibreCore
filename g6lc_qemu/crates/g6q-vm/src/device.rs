@@ -10,6 +10,8 @@ use std::fmt::Write;
 
 use g6q_core::Json;
 
+use crate::mem::PhysMem;
+
 fn json_u64(v: u64) -> Json {
     Json::Int(v as i64)
 }
@@ -801,6 +803,29 @@ pub struct AiIsland {
     pub event_order: u64,
     /// Architecture-derived AI island model, when available.
     pub ai_model: Option<g6q_core::model::AiIslandModel>,
+    /// PMU sticky state from the last completed GEMM job. Filled from the roofline model
+    /// because the B3 VM does not simulate time; the values are `Fidelity::Modelled`.
+    /// Read AXI beats (64-bit data width) for the last GEMM.
+    pub pmu_r_beats: u32,
+    /// Write AXI beats (64-bit data width) for the last GEMM.
+    pub pmu_w_beats: u32,
+    /// Cycles the roofline model estimates for the last GEMM.
+    pub pmu_cycles: u32,
+    /// Sustained DRAM bandwidth in 1/1000 GB/s from the last GEMM, or zero if unresolved.
+    pub pmu_gbps_x1000: u32,
+}
+
+/// Ceiling of log2 of a positive 32-bit value; matches SystemVerilog `$clog2`.
+///
+/// `$clog2(0) = 0` in the reference cap-window implementation, so the helper returns 0 for 0.
+fn clog2_u32(v: u32) -> u32 {
+    if v == 0 {
+        0
+    } else if v.is_power_of_two() {
+        v.trailing_zeros()
+    } else {
+        32 - v.leading_zeros()
+    }
 }
 
 impl AiIsland {
@@ -834,6 +859,34 @@ impl AiIsland {
         } else {
             self.codes.bad_ver
         };
+        // The MMIO shadow path also emits a tensor event, shaped like the B2 plugin's
+        // submission record, so the two backends can be compared on the same smoke.
+        // The smoke payload does not set the flag word; keep dtype at zero.  When a
+        // design publishes a flags layout, consumers can recover it from ev.flags.
+        let dtype = 0u8;
+        let ev = g6q_diag::ai_tensor::AiTensorEvent {
+            order: self.event_order,
+            hart: 0,
+            descriptor_addr: self.regmap.version_op,
+            op: self.op,
+            version: self.version,
+            m: self.m,
+            n: self.n,
+            k: self.k,
+            ld_ab: self.ld_ab,
+            ptr_a: self.ptr_a,
+            ptr_b: self.ptr_b,
+            ptr_c: self.ptr_c,
+            ptr_scale: self.ptr_scale,
+            ptr_done: self.ptr_done,
+            ticket: self.ticket.saturating_sub(1),
+            status: self.status,
+            done: self.ptr_done != 0 && self.status == self.codes.ok,
+            dtype,
+            ..Default::default()
+        };
+        self.events.push(ev);
+        self.event_order += 1;
     }
 
     /// Adopt an architecture-derived model: placement, window, codes and rings.
@@ -855,6 +908,71 @@ impl AiIsland {
         let rings = (model.config.queues as usize).max(1);
         self.queues = (0..rings).map(|_| AiQueue::new(depth)).collect();
         self.ai_model = Some(model.clone());
+    }
+
+    /// Compute modelled PMU values for a completed tensor event without mutating state.
+    ///
+    /// The B3 VM does not simulate cycle time, so the cycle count and sustained bandwidth
+    /// come from the roofline model. The beat counts are the AXI beats implied by the
+    /// operand and accumulator sizes (64-bit data width). This is deliberately a *modelled*
+    /// value, not a measurement, and is documented as such.
+    fn pmu_values_for_event(
+        ev: &g6q_diag::ai_tensor::AiTensorEvent,
+        cfg: &g6q_core::model::AiIslandConfig,
+    ) -> (u32, u32, u32, u32) {
+        let m = ev.m as u64;
+        let n = ev.n as u64;
+        let k = ev.k as u64;
+
+        // 64-bit AXI data width = 8 bytes per beat.
+        let r_bytes = m.saturating_mul(k).saturating_add(k.saturating_mul(n));
+        let w_bytes = 4u64.saturating_mul(m).saturating_mul(n);
+        let r_beats = (r_bytes / 8).min(u32::MAX as u64) as u32;
+        let w_beats = (w_bytes / 8).min(u32::MAX as u64) as u32;
+
+        // Cycles from the roofline bound (compute or memory, whichever is larger).
+        let (cycles, gbps) = if let Some(rl) = g6q_diag::roofline::gemm(cfg, m, n, k) {
+            let cycles = rl.bound_cycles().unwrap_or(rl.mac_bound_cycles);
+            let gbps = if cycles > 0 {
+                // milli-GB/s = bytes * ClockKhz / cycles / 1000, matching the RTL formula.
+                // Saturate to the 32-bit field width; callers cap to their own bit width.
+                let total_bytes = r_bytes.saturating_add(w_bytes);
+                total_bytes
+                    .saturating_mul(cfg.clock_khz as u64)
+                    .saturating_div(cycles)
+                    .saturating_div(1000)
+                    .min(u32::MAX as u64) as u32
+            } else {
+                0
+            };
+            (cycles.min(u32::MAX as u64) as u32, gbps)
+        } else {
+            (0, 0)
+        };
+
+        (r_beats, w_beats, cycles, gbps)
+    }
+
+    /// Read a PMU value by the short name the ingested package uses.
+    fn pmu_value(&self, name: &str) -> u32 {
+        match name {
+            "r_beats" => self.pmu_r_beats,
+            "w_beats" => self.pmu_w_beats,
+            "cycles" => self.pmu_cycles,
+            "gbps_x1000" => self.pmu_gbps_x1000,
+            _ => 0,
+        }
+    }
+
+    /// Read a PMU register by offset, if the model has published this offset.
+    fn pmu_load(&self, offset: u64) -> Option<u64> {
+        let model = self.ai_model.as_ref()?;
+        for (name, off) in &model.config.pmu_offsets {
+            if *off == offset {
+                return Some(self.pmu_value(name) as u64);
+            }
+        }
+        None
     }
 
     /// Set the depth of every ring explicitly (tests and bring-up).
@@ -886,47 +1004,239 @@ impl AiIsland {
         (hart as usize) % self.queues.len().max(1)
     }
 
-    /// Enqueue a descriptor, emit a tensor event, and return the assigned ticket.
-    pub fn queue_enq(&mut self, desc_addr: u64, hart: u32) -> Option<u64> {
+    /// Read a queue-mode CSR for the ring assigned to `hart`.
+    ///
+    /// The CSR numbers come from the ingested `AiInstrSet`.  Returns `None` when the CSR is not
+    /// one of `aiqbase`/`aiqctl`/`aiqhead` or the island has no model.
+    pub fn queue_csr_read(&self, hart: u32, csr: u16) -> Option<u64> {
+        let set = &self.ai_model.as_ref()?.instr_set;
+        if csr != set.csr_aiqbase && csr != set.csr_aiqctl && csr != set.csr_aiqhead {
+            return None;
+        }
+        let ring = self.ring_for_hart(hart);
+        let q = self.queues.get(ring)?;
+        Some(match csr {
+            _ if csr == set.csr_aiqbase => q.base,
+            _ if csr == set.csr_aiqctl => q.ctl,
+            _ if csr == set.csr_aiqhead => q.head,
+            _ => unreachable!(),
+        })
+    }
+
+    /// Write a queue-mode CSR for the ring assigned to `hart` and return the old value.
+    ///
+    /// The `aiqhead` value is normalised to `queue.depth` so the guest-visible head stays in the
+    /// ring.  Writing `aiqbase`/`aiqctl` simply records the value; the B3 model does not yet drive
+    /// enqueues from the ring memory because the design has not published the queue-enable layout.
+    pub fn queue_csr_write(&mut self, hart: u32, csr: u16, value: u64) -> Option<u64> {
+        let set = &self.ai_model.as_ref()?.instr_set;
+        if csr != set.csr_aiqbase && csr != set.csr_aiqctl && csr != set.csr_aiqhead {
+            return None;
+        }
+        let ring = self.ring_for_hart(hart);
+        let q = self.queues.get_mut(ring)?;
+        Some(match csr {
+            _ if csr == set.csr_aiqbase => {
+                let old = q.base;
+                q.base = value;
+                old
+            }
+            _ if csr == set.csr_aiqctl => {
+                let old = q.ctl;
+                q.ctl = value;
+                old
+            }
+            _ if csr == set.csr_aiqhead => {
+                let old = q.head;
+                q.head = value % q.depth.max(1);
+                old
+            }
+            _ => unreachable!(),
+        })
+    }
+
+    /// Read a descriptor image from guest memory and produce a tensor event.
+    ///
+    /// Every offset and size comes from the ingested `desc_layout`; a field the layout does not
+    /// name is left at its default. The data type is recovered from `flags` when `flags_layout`
+    /// is present. Cluster dispatch comes from a `cluster` descriptor field, then a published
+    /// `queue_cluster_map`, then stays unresolved (zero). This is the B3 path: the guest points
+    /// at a descriptor in memory, not at a set of MMIO shadow registers.
+    pub fn read_descriptor_event(
+        mem: &PhysMem,
+        desc_addr: u64,
+        hart: u32,
+        model: &g6q_core::model::AiIslandModel,
+    ) -> Option<g6q_diag::ai_tensor::AiTensorEvent> {
+        let layout = &model.desc_layout;
+        if layout.desc_bytes == 0 || layout.fields.is_empty() {
+            return None;
+        }
+        let mut ev = g6q_diag::ai_tensor::AiTensorEvent::default();
+        let mut cluster_from_desc: Option<u64> = None;
+        for (name, field) in &layout.fields {
+            let addr = desc_addr.wrapping_add(field.offset);
+            let val = match field.size {
+                2 => mem.read_le::<2>(addr).ok()?,
+                4 => mem.read_le::<4>(addr).ok()?,
+                8 => mem.read_le::<8>(addr).ok()?,
+                _ => continue,
+            };
+            match name.as_str() {
+                "version" => ev.version = val as u16,
+                "op" => ev.op = val as u16,
+                "flags" => ev.flags = val as u32,
+                "m" => ev.m = val as u32,
+                "n" => ev.n = val as u32,
+                "k" => ev.k = val as u32,
+                "ld_ab" => ev.ld_ab = val as u32,
+                "ptr_a" => ev.ptr_a = val,
+                "ptr_b" => ev.ptr_b = val,
+                "ptr_c" => ev.ptr_c = val,
+                "ptr_scale" => ev.ptr_scale = val,
+                "ptr_done" => ev.ptr_done = val,
+                "cluster" => cluster_from_desc = Some(val),
+                _ => {}
+            }
+        }
+        if let Some(fl) = layout.flags_layout {
+            ev.dtype = ((ev.flags >> fl.dtype_shift) & fl.dtype_mask) as u8;
+        }
+
+        ev.cluster = cluster_from_desc
+            .map(|c| c as u32)
+            .or_else(|| {
+                let queue_id = hart % model.config.queues.max(1);
+                model.config.cluster_for_queue(queue_id)
+            })
+            .unwrap_or(0);
+        Some(ev)
+    }
+
+    /// Enqueue a descriptor, using a caller-supplied event if one was read from memory.
+    pub fn queue_enq_with_event(
+        &mut self,
+        desc_addr: u64,
+        hart: u32,
+        event: Option<g6q_diag::ai_tensor::AiTensorEvent>,
+    ) -> Option<u64> {
         let ring = self.ring_for_hart(hart);
         let ticket = self.next_ticket;
         let issued = self.queues[ring].enqueue_with_ticket(ticket, desc_addr)?;
         self.next_ticket = self.next_ticket.wrapping_add(1);
-        let mut ev = g6q_diag::ai_tensor::AiTensorEvent {
-            order: self.event_order,
-            hart,
-            descriptor_addr: desc_addr,
-            ticket: issued as u32,
-            done: false,
+        let mut ev = event.unwrap_or_else(|| g6q_diag::ai_tensor::AiTensorEvent {
+            version: self.version,
+            op: self.op,
             ..Default::default()
-        };
-        ev.version = self.version;
-        ev.op = self.op;
+        });
+        ev.order = self.event_order;
+        ev.hart = hart;
+        ev.descriptor_addr = desc_addr;
+        // Cluster is set by read_descriptor_event from a `cluster` field or queue_cluster_map;
+        // the MMIO shadow path keeps it at zero, which the tensor artifact records as unresolved.
+        ev.ticket = issued as u32;
+        ev.done = false;
+        ev.status = 0;
         self.events.push(ev);
         self.event_order += 1;
         Some(issued)
     }
 
+    /// Enqueue a descriptor, emitting a default tensor event from the MMIO shadow state.
+    pub fn queue_enq(&mut self, desc_addr: u64, hart: u32) -> Option<u64> {
+        self.queue_enq_with_event(desc_addr, hart, None)
+    }
+
     /// Poll a ticket on whichever ring holds it.
+    ///
+    /// Returns the packed completion word when the entry is done, or the conventional
+    /// `0xffff_ffff` sentinel while it is still pending.  The completion word uses the same
+    /// `make_completion` layout the island would write to `ptr_done`.
     pub fn queue_poll(&mut self, ticket: u64) -> Option<u64> {
-        for q in self.queues.iter_mut() {
-            if q.entries.iter().any(|e| e.ticket == ticket) {
-                return q.poll(ticket);
+        Some(self.queue_poll_details(ticket).0)
+    }
+
+    /// Poll a ticket and return both the completion word and the descriptor's `ptr_done`.
+    ///
+    /// The second return value is zero when the ticket was never issued or the descriptor
+    /// did not publish a `ptr_done`. The caller (B3 `execute_ai_poll`) can write the word back
+    /// to guest memory when the entry is done and `ptr_done` is known.
+    pub fn queue_poll_details(&mut self, ticket: u64) -> (u64, u64) {
+        let mut found = false;
+        let mut done = false;
+        let mut status: u64 = 0;
+        for q in &self.queues {
+            if let Some(e) = q.entries.iter().find(|e| e.ticket == ticket) {
+                found = true;
+                done = e.done;
+                status = e.status as u64;
+                break;
             }
         }
+        let mut ptr_done: u64 = 0;
+        if found {
+            // The tensor event carries the descriptor image, including `ptr_done`.
+            if let Some(ev) = self.events.iter().find(|e| e.ticket == ticket as u32) {
+                ptr_done = ev.ptr_done;
+            }
+            if done {
+                return (self.pack_completion_word(ticket, status), ptr_done);
+            }
+            return (0xffff_ffff, ptr_done);
+        }
         // Unknown ticket: already retired, or never issued.
-        Some(self.codes.ok as u64)
+        (self.pack_completion_word(ticket, self.codes.ok as u64), 0)
     }
 
     /// Fence every ring, completing all in-flight entries.
-    pub fn queue_qfence(&mut self) -> usize {
+    ///
+    /// Returns a list of `(ptr_done, completion_word)` pairs the caller should write to guest
+    /// memory. The writes are returned rather than performed here because `AiIsland` may be
+    /// borrowed from the same `PhysMem` that owns the memory to be written.
+    pub fn queue_qfence(&mut self) -> Vec<(u64, u64)> {
         let n: usize = self.queues.iter_mut().map(AiQueue::qfence).sum();
         let ok = self.codes.ok;
+        let cfg = self
+            .ai_model
+            .as_ref()
+            .map(|m| m.config.clone())
+            .unwrap_or_default();
+        // The PMU is sticky state from the *last* completed GEMM. Compute it for every
+        // event this fence completes, store the per-event values, and leave the device
+        // state as the last completed event so `pmuread` matches RTL sticky semantics.
+        let mut last_pmu = (0u32, 0u32, 0u32, 0u32);
+        let len = self.events.len();
+        for i in 0..n {
+            if let Some(ev) = self.events.get_mut(len.saturating_sub(1).saturating_sub(i)) {
+                last_pmu = Self::pmu_values_for_event(ev, &cfg);
+                (
+                    ev.pmu_r_beats,
+                    ev.pmu_w_beats,
+                    ev.pmu_cycles,
+                    ev.pmu_gbps_x1000,
+                ) = last_pmu;
+            }
+        }
+        (
+            self.pmu_r_beats,
+            self.pmu_w_beats,
+            self.pmu_cycles,
+            self.pmu_gbps_x1000,
+        ) = last_pmu;
         for ev in self.events.iter_mut().rev().take(n) {
             ev.done = true;
             ev.status = ok;
         }
-        n
+        self.events
+            .iter()
+            .rev()
+            .take(n)
+            .filter(|ev| ev.ptr_done != 0)
+            .map(|ev| {
+                let word = self.pack_completion_word(ev.ticket as u64, ev.status as u64);
+                (ev.ptr_done, word)
+            })
+            .collect()
     }
 
     /// Capability words the guest may read, as offset -> value.
@@ -962,21 +1272,63 @@ impl AiIsland {
             "macs_cycle" | "macs_per_cycle" => Some(cfg.macs_per_cycle as u64),
             "clock_khz" => Some(cfg.clock_khz as u64),
             "sram_bytes" => Some(cfg.sram_bytes),
-            "dram_gbps" => Some(cfg.dram_gbps as u64),
-            "queues" => Some(cfg.queues as u64),
             "qos" | "qos_classes" => Some(cfg.qos_classes as u64),
             "quantum" | "work_quantum_k" => Some(cfg.work_quantum_k as u64),
-            "queue_depth" => Some(cfg.queue_depth as u64),
             "acc_tile_m" => Some(cfg.acc_tile_m as u64),
             "acc_tile_n" => Some(cfg.acc_tile_n as u64),
             "acc_tile_k" => Some(cfg.acc_tile_k as u64),
             "noc_width" => Some(cfg.noc_width as u64),
             "dram_channels" => Some(cfg.dram_channels as u64),
-            // Words whose value is a *packed encoding* rather than a single field.
-            // Packing them here would transcribe a bit-layout contract that the design
-            // owns, so they stay unsourced until the model carries the layout.
-            //   block_mnk  - packed tile dimensions
-            //   dtype_mask - grant bits per data type
+            "dtype_mask" => cfg.dtype_mask.map(|v| v as u64),
+            "block_mnk" => Self::pack_block_mnk(cfg),
+            // Packed words have a field list in the model.
+            _ => Self::pack_cap_packed(cfg, name),
+        }
+    }
+
+    fn pack_block_mnk(cfg: &g6q_core::model::AiIslandConfig) -> Option<u64> {
+        let layout = cfg.block_mnk?;
+        let m = clog2_u32(cfg.acc_tile_m);
+        let n = clog2_u32(cfg.acc_tile_n);
+        let k = clog2_u32(cfg.acc_tile_k);
+        Some(
+            ((m as u64) << layout.m_low)
+                | ((n as u64) << layout.n_low)
+                | ((k as u64) << layout.k_low),
+        )
+    }
+
+    fn pack_cap_packed(cfg: &g6q_core::model::AiIslandConfig, name: &str) -> Option<u64> {
+        let fields = cfg.cap_packed.words.get(name)?;
+        let mut word: u64 = 0;
+        for field in fields {
+            let value = Self::packed_field_value(cfg, &field.name)?;
+            let mask = if field.width == 64 {
+                !0u64
+            } else {
+                (1u64 << field.width) - 1
+            };
+            word |= (value & mask) << field.low;
+        }
+        Some(word)
+    }
+
+    fn packed_field_value(cfg: &g6q_core::model::AiIslandConfig, name: &str) -> Option<u64> {
+        if name == "_meas_milli" {
+            // The cap window's `meas_milli` half reports sustained GB/s from the last GEMM,
+            // in units of 1/1000 GB/s, saturated to 16 bits to match the RTL packing.
+            // When no measurement is supplied the field is zero (not yet measured).
+            return Some(cfg.measured_dram_gbps_x1000.unwrap_or(0).min(0xFFFF) as u64);
+        }
+        if name.starts_with('_') {
+            // Other design-side fields not in the config struct are zero.
+            return Some(0);
+        }
+        match name {
+            "dram_gbps" => Some(cfg.dram_gbps as u64),
+            "queues" => Some(cfg.queues as u64),
+            "queue_depth" => Some(cfg.queue_depth as u64),
+            "dtype_mask" => cfg.dtype_mask.map(|v| v as u64),
             _ => None,
         }
     }
@@ -1010,6 +1362,39 @@ impl AiIsland {
             .map(|(_, v)| v)
     }
 
+    /// Pack the completion word the island would write to `ptr_done`.
+    ///
+    /// The bit layout comes from the ingested `make_completion` function. When the package
+    /// does not publish it, the device falls back to `{status, ticket}` with status in the
+    /// upper 32 bits — the same layout the reference package uses, but recorded as a fallback
+    /// so an unparsed design does not silently produce a different word.
+    pub fn completion_word(&self) -> u64 {
+        self.pack_completion_word(self.ticket as u64, self.status as u64)
+    }
+
+    fn pack_completion_word(&self, ticket: u64, status: u64) -> u64 {
+        if let Some(c) = self
+            .ai_model
+            .as_ref()
+            .and_then(|m| m.desc_layout.completion)
+        {
+            let mut word = 0u64;
+            let place = |word: &mut u64, value: u64, low: u64, high: u64| {
+                let mask = if high == 63 {
+                    !0u64
+                } else {
+                    (1u64 << (high - low + 1)) - 1
+                };
+                *word |= (value & mask) << low;
+            };
+            place(&mut word, ticket, c.ticket_bit_low, c.ticket_bit_high);
+            place(&mut word, status, c.status_bit_low, c.status_bit_high);
+            word
+        } else {
+            (status << 32) | ticket
+        }
+    }
+
     /// Drain and return the accumulated tensor events.
     pub fn drain_events(&mut self) -> Vec<g6q_diag::ai_tensor::AiTensorEvent> {
         std::mem::take(&mut self.events)
@@ -1026,6 +1411,10 @@ impl MmioDevice for AiIsland {
         if let Some(v) = self.cap_read(offset) {
             return v;
         }
+        // PMU sticky registers are read-only and sit outside the descriptor latch.
+        if let Some(v) = self.pmu_load(offset) {
+            return v;
+        }
         let r = self.regmap;
         match offset {
             o if o == r.version_op => ((self.op as u64) << 16) | (self.version as u64),
@@ -1040,7 +1429,7 @@ impl MmioDevice for AiIsland {
             o if o == r.ptr_scale => self.ptr_scale,
             o if o == r.ptr_done => self.ptr_done,
             o if o == r.status => self.status as u64,
-            o if o == r.completion => ((self.status as u64) << 32) | (self.ticket as u64),
+            o if o == r.completion => self.completion_word(),
             _ => 0,
         }
     }
@@ -1099,7 +1488,7 @@ impl MmioDevice for AiIsland {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -1172,8 +1561,11 @@ mod tests {
 
     /// A layout whose offsets deliberately differ from the bring-up fallback, so a test
     /// that passes can only be reading the model.
-    fn model_with_layout() -> g6q_core::model::AiIslandModel {
-        use g6q_core::model::{AiDescLayout, AiIslandConfig, AiIslandModel, DescField};
+    pub(crate) fn model_with_layout() -> g6q_core::model::AiIslandModel {
+        use g6q_core::model::{
+            AiDescLayout, AiIslandConfig, AiIslandModel, CapBlockMnk, CapPackedField,
+            CapPackedWords, DescField,
+        };
         let mut fields = std::collections::BTreeMap::new();
         let mut put = |name: &str, offset: u64, size: u64| {
             fields.insert(
@@ -1206,13 +1598,59 @@ mod tests {
         let mut cap_offsets = std::collections::BTreeMap::new();
         cap_offsets.insert("clusters".to_string(), 0x04u64);
         cap_offsets.insert("macs_cycle".to_string(), 0x08u64);
-        cap_offsets.insert("queue_depth".to_string(), 0x0cu64);
+        cap_offsets.insert("queues".to_string(), 0x0cu64);
+        cap_offsets.insert("dram_gbps".to_string(), 0x10u64);
+        cap_offsets.insert("block_mnk".to_string(), 0x14u64);
+        let mut cap_packed = CapPackedWords::default();
+        cap_packed.words.insert(
+            "queues".to_string(),
+            vec![
+                CapPackedField {
+                    name: "queues".to_string(),
+                    low: 0,
+                    width: 16,
+                },
+                CapPackedField {
+                    name: "queue_depth".to_string(),
+                    low: 16,
+                    width: 16,
+                },
+            ],
+        );
+        cap_packed.words.insert(
+            "dram_gbps".to_string(),
+            vec![
+                CapPackedField {
+                    name: "dram_gbps".to_string(),
+                    low: 0,
+                    width: 16,
+                },
+                CapPackedField {
+                    name: "_meas_milli".to_string(),
+                    low: 16,
+                    width: 16,
+                },
+            ],
+        );
         AiIslandModel {
             config: AiIslandConfig {
                 clusters: 8,
                 macs_per_cycle: 4096,
                 queues: 2,
                 queue_depth: 3,
+                dram_gbps: 400,
+                acc_tile_m: 256,
+                acc_tile_n: 256,
+                acc_tile_k: 256,
+                block_mnk: Some(CapBlockMnk {
+                    m_low: 0,
+                    m_width: 4,
+                    n_low: 4,
+                    n_width: 4,
+                    k_low: 8,
+                    k_width: 4,
+                }),
+                cap_packed,
                 cap_offsets,
                 // Placement as the island decode states it: capability window at the
                 // bottom of the region, descriptor latch window higher up.
@@ -1226,9 +1664,38 @@ mod tests {
                 fields,
                 ops: Default::default(),
                 statuses,
+                flags_layout: Some(g6q_core::model::DescFlagsLayout {
+                    dtype_shift: 8,
+                    dtype_mask: 0x3f,
+                    priority_shift: 16,
+                    priority_mask: 0x0f,
+                    irq_bit: 2,
+                    dtype_combined: true,
+                    ..Default::default()
+                }),
+                completion: Some(g6q_core::model::CompletionLayout {
+                    ticket_bit_low: 0,
+                    ticket_bit_high: 31,
+                    status_bit_low: 32,
+                    status_bit_high: 47,
+                }),
             },
             ..Default::default()
         }
+    }
+
+    /// A completion layout with status in the lower 16 bits and ticket in the upper 48 bits,
+    /// so a test can prove the device packs the word from the ingested layout rather than
+    /// from a hard-coded `{status, ticket}` convention.
+    fn model_with_swapped_completion() -> g6q_core::model::AiIslandModel {
+        let mut m = model_with_layout();
+        m.desc_layout.completion = Some(g6q_core::model::CompletionLayout {
+            ticket_bit_low: 16,
+            ticket_bit_high: 63,
+            status_bit_low: 0,
+            status_bit_high: 15,
+        });
+        m
     }
 
     #[test]
@@ -1250,6 +1717,24 @@ mod tests {
         // status/completion sit after the descriptor, derived from base + desc_bytes.
         assert_eq!(a.regmap.status, 0x140 + 64);
         assert_eq!(a.regmap.completion, 0x140 + 72);
+    }
+
+    #[test]
+    fn ai_island_completion_word_uses_ingested_layout() {
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model_with_swapped_completion());
+        // ticket = 0xabcd_1234, status = 0x5a6b (not ST_OK, just to show packing).
+        a.ticket = 0xabcd_1234;
+        a.status = 0x5a6b;
+        let word = a.completion_word();
+        let ticket = (word >> 16) & ((1u64 << (63 - 16 + 1)) - 1);
+        let status = word & ((1u64 << 16) - 1);
+        assert_eq!(ticket, 0xabcd_1234, "ticket packed at bits 63:16");
+        assert_eq!(status, 0x5a6b, "status packed at bits 15:0");
+
+        // Also works when read through the MMIO completion register.
+        let r = a.regmap.completion;
+        assert_eq!(a.load(r, 8), word);
     }
 
     #[test]
@@ -1315,7 +1800,8 @@ mod tests {
         // Polling finds the ticket on whichever ring holds it.
         assert_eq!(a.queue_poll(t).unwrap(), 0xffff_ffff);
         a.queue_qfence();
-        assert_eq!(a.queue_poll(t).unwrap(), 0);
+        // queue_poll returns the packed completion word once the entry is done.
+        assert_eq!(a.queue_poll(t).unwrap(), t);
     }
 
     #[test]
@@ -1327,15 +1813,39 @@ mod tests {
         assert_eq!(a.cap_base, Some(0x000));
         assert_eq!(a.cap_read(0x04), Some(8), "clusters");
         assert_eq!(a.cap_read(0x08), Some(4096), "macs/cycle");
-        assert_eq!(a.cap_read(0x0c), Some(3), "queue depth");
+        // The queues word is packed {queue_depth, queues}: 3 << 16 | 2.
+        assert_eq!(a.cap_read(0x0c), Some(0x0003_0002), "queues");
+        // dram_gbps is packed {meas_milli, dram_gbps}: 0 << 16 | 400.
+        assert_eq!(a.cap_read(0x10), Some(400), "dram_gbps");
+        // The block_mnk word is packed from log2(AccTileM/N/K) using the ingested layout.
+        assert_eq!(a.cap_read(0x14), Some(0x888), "block_mnk");
         assert_eq!(a.load(0x04, 8), 8, "readable through the MMIO surface");
         // An offset the model never named is not invented.
-        assert!(a.cap_read(0x10).is_none());
+        assert!(a.cap_read(0x18).is_none());
 
         // The window follows the base wherever the design puts it.
         a.cap_base = Some(0x200);
         assert!(a.cap_read(0x04).is_none());
         assert_eq!(a.cap_read(0x204), Some(8));
+    }
+
+    #[test]
+    fn the_measured_dram_half_is_published_when_supplied() {
+        let mut a = AiIsland::new();
+        let mut model = model_with_layout();
+        // 40 GB/s in milli-GB/s units, fitting the cap window's 16-bit measured half.
+        model.config.measured_dram_gbps_x1000 = Some(40_000);
+        a.set_ai_model(&model);
+
+        // dram_gbps word is packed {meas_milli[31:16], dram_gbps[15:0]}.
+        let expected = (40_000u64 << 16) | 400;
+        assert_eq!(a.cap_read(0x10), Some(expected));
+
+        // A value above the 16-bit half saturates, matching the RTL cap window.
+        model.config.measured_dram_gbps_x1000 = Some(320_500);
+        a.set_ai_model(&model);
+        let saturated = (0xFFFFu64 << 16) | 400;
+        assert_eq!(a.cap_read(0x10), Some(saturated));
     }
 
     #[test]
@@ -1351,7 +1861,9 @@ mod tests {
     /// nothing would look wrong.
     #[test]
     fn every_published_capability_name_is_accounted_for() {
-        use g6q_core::model::{AiIslandConfig, AiIslandModel};
+        use g6q_core::model::{
+            AiIslandConfig, AiIslandModel, CapBlockMnk, CapPackedField, CapPackedWords,
+        };
         // The `CAP_OFF_*` suffixes of the reference package, lowercased by the reader.
         let published = [
             "version",
@@ -1370,6 +1882,37 @@ mod tests {
         for (i, name) in published.iter().enumerate() {
             cap_offsets.insert(name.to_string(), (i as u64) * 4);
         }
+        let mut cap_packed = CapPackedWords::default();
+        cap_packed.words.insert(
+            "queues".to_string(),
+            vec![
+                CapPackedField {
+                    name: "queues".to_string(),
+                    low: 0,
+                    width: 16,
+                },
+                CapPackedField {
+                    name: "queue_depth".to_string(),
+                    low: 16,
+                    width: 16,
+                },
+            ],
+        );
+        cap_packed.words.insert(
+            "dram_gbps".to_string(),
+            vec![
+                CapPackedField {
+                    name: "dram_gbps".to_string(),
+                    low: 0,
+                    width: 16,
+                },
+                CapPackedField {
+                    name: "_meas_milli".to_string(),
+                    low: 16,
+                    width: 16,
+                },
+            ],
+        );
         let model = AiIslandModel {
             config: AiIslandConfig {
                 cap_version: 1,
@@ -1379,8 +1922,22 @@ mod tests {
                 sram_bytes: 1 << 21,
                 dram_gbps: 400,
                 queues: 2,
+                queue_depth: 64,
                 qos_classes: 4,
                 work_quantum_k: 64,
+                dtype_mask: Some(1),
+                acc_tile_m: 256,
+                acc_tile_n: 256,
+                acc_tile_k: 256,
+                block_mnk: Some(CapBlockMnk {
+                    m_low: 0,
+                    m_width: 4,
+                    n_low: 4,
+                    n_width: 4,
+                    k_low: 8,
+                    k_width: 4,
+                }),
+                cap_packed,
                 cap_offsets,
                 cap_base: Some(0),
                 desc_base: Some(0x140),
@@ -1399,17 +1956,54 @@ mod tests {
             "a published capability name was silently dropped"
         );
 
-        // Only the packed encodings may be unsourced; anything else is a mapping bug.
-        assert_eq!(
-            unsourced,
-            vec!["block_mnk".to_string(), "dtype_mask".to_string()],
-            "unexpected unsourced capabilities"
+        // Once the model carries a packed layout, every published name must source.
+        assert!(
+            unsourced.is_empty(),
+            "unexpected unsourced capabilities: {:?}",
+            unsourced
         );
 
         // The names that previously did not map must now answer.
         assert_eq!(a.cap_read(8 * 4), Some(4), "qos");
         assert_eq!(a.cap_read(9 * 4), Some(64), "quantum");
         assert_eq!(a.cap_read(6 * 4), Some(400), "dram_gbps");
+        assert_eq!(a.cap_read(7 * 4), Some(0x0040_0002), "queues");
+        assert_eq!(a.cap_read(5 * 4), Some(0x888), "block_mnk");
+        assert_eq!(a.cap_read(10 * 4), Some(1), "dtype_mask");
+    }
+
+    #[test]
+    fn queue_qfence_writes_completion_words_to_memory() {
+        use crate::mem::{PhysMem, Region};
+
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model_with_layout());
+
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x9000_0000, 0x1000));
+
+        // Enqueue with an explicit ptr_done so the completion has somewhere to land.
+        let ev = g6q_diag::ai_tensor::AiTensorEvent {
+            ptr_done: 0x9000_0000,
+            ..Default::default()
+        };
+        a.queue_enq_with_event(0x8000_0000, 0, Some(ev));
+
+        // qfence returns the writes; the caller (B3 execute_ai_qfence) writes to PhysMem.
+        let writes = a.queue_qfence();
+        assert_eq!(writes.len(), 1);
+        let (addr, word) = writes[0];
+        assert_eq!(addr, 0x9000_0000);
+        let _ = mem.write_le::<8>(addr, word);
+
+        let readback = mem.read_le::<8>(0x9000_0000).unwrap();
+        assert_eq!(readback, word);
+
+        // The completion word uses the ingested layout: status in bits [32:47], ticket in [0:31].
+        let ticket = readback & ((1u64 << 32) - 1);
+        let status = (readback >> 32) & 0xffff;
+        assert_eq!(ticket, 0);
+        assert_eq!(status, a.codes.ok as u64);
     }
 
     #[test]
@@ -1423,5 +2017,159 @@ mod tests {
         assert_eq!(a.status, a.codes.ok);
         a.store(a.regmap.version_op, 4, 0x0001_0001);
         assert_eq!(a.status, a.codes.bad_ver);
+    }
+
+    #[test]
+    fn queue_enq_reads_descriptor_from_memory() {
+        use crate::mem::{Device, DeviceKind, PhysMem, Region};
+
+        let model = model_with_layout();
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x8000_0000, 0x1000));
+
+        // Pack a descriptor using the ingested layout.
+        let base = 0x8000_0000u64;
+        for (name, field) in &model.desc_layout.fields {
+            let addr = base + field.offset;
+            let value = match name.as_str() {
+                "version" => 2u64,
+                "op" => 1,
+                "flags" => 0x0100,
+                "m" => 8,
+                "n" => 8,
+                "k" => 8,
+                "ld_ab" => 8,
+                "ptr_a" => 0x9000_0000,
+                "ptr_b" => 0x9000_1000,
+                "ptr_c" => 0x9000_2000,
+                "ptr_scale" => 0,
+                "ptr_done" => 0xa000_0000,
+                _ => 0,
+            };
+            match field.size {
+                2 => mem.write_le::<2>(addr, value).unwrap(),
+                4 => mem.write_le::<4>(addr, value).unwrap(),
+                8 => mem.write_le::<8>(addr, value).unwrap(),
+                _ => {}
+            }
+        }
+
+        let ev = AiIsland::read_descriptor_event(&mem, base, 0, &model).unwrap();
+        assert_eq!(ev.version, 2);
+        assert_eq!(ev.op, 1);
+        assert_eq!(ev.flags, 0x0100);
+        assert_eq!(ev.m, 8);
+        assert_eq!(ev.n, 8);
+        assert_eq!(ev.k, 8);
+        assert_eq!(ev.ptr_a, 0x9000_0000);
+        assert_eq!(ev.ptr_done, 0xa000_0000);
+        // dtype is recovered from flags using the ingested flags_layout.
+        assert_eq!(ev.dtype, 1);
+
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model);
+        mem.add_device(Device::new(0x3000_0000, 0x1000, DeviceKind::AiIsland(a)));
+    }
+
+    #[test]
+    fn cluster_dispatch_uses_descriptor_field_or_queue_cluster_map() {
+        use crate::mem::{PhysMem, Region};
+        use g6q_core::model::DescField;
+
+        let base_model = model_with_layout();
+
+        // Path 1: a `cluster` field in the descriptor wins.
+        let mut with_field = base_model.clone();
+        with_field.desc_layout.fields.remove("ptr_done");
+        with_field.desc_layout.fields.insert(
+            "cluster".to_string(),
+            DescField {
+                offset: 56,
+                size: 4,
+                bit_low: 0,
+                bit_high: 31,
+            },
+        );
+        // cluster at offset 56, value 3.
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x8000_0000, 0x1000));
+        mem.write_le::<4>(0x8000_0000 + 56, 3).unwrap();
+        let ev = AiIsland::read_descriptor_event(&mem, 0x8000_0000, 0, &with_field).unwrap();
+        assert_eq!(ev.cluster, 3);
+
+        // Path 2: no `cluster` field, but a queue_cluster_map resolves from hart/queue.
+        let mut with_map = base_model.clone();
+        with_map.config.queue_cluster_map = Some(vec![0, 5]);
+        let mut mem2 = PhysMem::new();
+        mem2.add(Region::new(0x8000_0000, 0x1000));
+        // hart 0 -> queue 0 -> cluster 0
+        let ev0 = AiIsland::read_descriptor_event(&mem2, 0x8000_0000, 0, &with_map).unwrap();
+        assert_eq!(ev0.cluster, 0);
+        // hart 1 -> queue 1 -> cluster 5
+        let ev1 = AiIsland::read_descriptor_event(&mem2, 0x8000_0000, 1, &with_map).unwrap();
+        assert_eq!(ev1.cluster, 5);
+
+        // Path 3: neither source -> unresolved (zero) but explicitly, not invented.
+        let mut unresolved = base_model.clone();
+        unresolved.config.clusters = 4;
+        let ev2 = AiIsland::read_descriptor_event(&mem, 0x8000_0000, 3, &unresolved).unwrap();
+        assert_eq!(ev2.cluster, 0);
+    }
+
+    #[test]
+    fn pmu_registers_are_modelled_after_qfence() {
+        use g6q_diag::ai_tensor::AiTensorEvent;
+
+        let mut a = AiIsland::new();
+        let mut model = model_with_layout();
+        // The test helper does not set a clock; a non-zero clock is required for the B3
+        // model to compute a sustained bandwidth from the roofline.
+        model.config.clock_khz = 1_000_000;
+        model
+            .config
+            .pmu_offsets
+            .insert("r_beats".to_string(), 0x180);
+        model
+            .config
+            .pmu_offsets
+            .insert("w_beats".to_string(), 0x184);
+        model.config.pmu_offsets.insert("cycles".to_string(), 0x188);
+        model
+            .config
+            .pmu_offsets
+            .insert("gbps_x1000".to_string(), 0x18c);
+        a.set_ai_model(&model);
+
+        // Before any job, PMU reads back zero.
+        assert_eq!(a.load(0x180, 4), 0);
+        assert_eq!(a.load(0x18c, 4), 0);
+
+        // Enqueue and complete a 4x4x4 GEMM.
+        let ev = AiTensorEvent {
+            m: 4,
+            n: 4,
+            k: 4,
+            ptr_done: 0x9000_0000,
+            ..Default::default()
+        };
+        a.queue_enq_with_event(0x8000_0000, 0, Some(ev));
+        a.queue_qfence();
+
+        // PMU values are modelled, non-zero, and read back by the published offsets.
+        let r_beats = a.load(0x180, 4);
+        let w_beats = a.load(0x184, 4);
+        let cycles = a.load(0x188, 4);
+        let gbps = a.load(0x18c, 4);
+
+        assert!(r_beats > 0, "r_beats should be non-zero");
+        assert!(w_beats > 0, "w_beats should be non-zero");
+        assert!(cycles > 0, "cycles should be non-zero");
+        assert!(gbps > 0, "gbps_x1000 should be non-zero");
+
+        // Sanity-check the beat arithmetic: 64-bit beats = bytes / 8.
+        // r_bytes = 4*4 + 4*4 = 32; r_beats = 4.
+        assert_eq!(r_beats, 4);
+        // w_bytes = 4 * 4 * 4 = 64; w_beats = 8.
+        assert_eq!(w_beats, 8);
     }
 }

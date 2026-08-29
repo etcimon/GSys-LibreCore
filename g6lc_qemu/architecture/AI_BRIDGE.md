@@ -72,7 +72,7 @@ asked of the model**, not a knob in the emulator:
 | `config.queues`, `config.queue_depth` | number of rings and per-ring depth; queue-full is observable |
 | `config.clusters` | replication unit; the device model routes by queue, it does **not** replicate compute |
 | `config.acc_tile_m` / `_n` / `_k` | the blocking a descriptor may legally request; oversize is an error, not a silent clamp |
-| `config.macs_per_cycle`, `config.noc_width`, `config.dram_channels`, `config.dram_gbps` | **reported, never simulated** — they size a machine the emulator does not time |
+| `config.macs_per_cycle`, `config.noc_width`, `config.dram_channels`, `config.dram_gbps`, `config.measured_dram_gbps_x1000` | **reported, never simulated** — they size a machine the emulator does not time; `measured_dram_gbps_x1000` overrides `dram_gbps` in the roofline when supplied |
 | `config.qos_classes`, `config.work_quantum_k` | admitted and stamped; arbitration fairness is not modelled |
 | `config.cap_offsets` | where a guest reads geometry, so one guest binary works across parts |
 
@@ -148,7 +148,7 @@ The ring-per-hart rule is the load-bearing one: a threaded or multi-core guest t
 concurrently must not serialise onto one ring by accident, because that would hide precisely the
 contention the guest software is being tested for.
 
-`config.macs_per_cycle` and `config.dram_gbps` being present in the IR and absent from the timing
+`config.macs_per_cycle`, `config.dram_gbps` and `config.measured_dram_gbps_x1000` being present in the IR and absent from the timing
 model is not an oversight; it is directive 6 of [`../AGENTS.md`](../AGENTS.md) applied to the
 accelerator. A cycle-informative model that reported a bandwidth number would be quoted as one.
 
@@ -189,9 +189,10 @@ What the bridge owns:
 | Step | Behaviour |
 |---|---|
 | `pack` | pack a descriptor image using **the model's own** field offsets, sizes and op table |
-| `push` | run one execution on a chosen route, retrieve the tensor artifact |
-| `results` | summarise the artifact: event count, completion count, op/hart/status histograms |
-| `compare` | first-divergence diff between two artifacts, for regression triage |
+| `push` | run one execution on a chosen route, retrieve the tensor artifact; with `--uarch-out` (native route only) it also runs `g6lc-qemu diag` and writes D2 counters, optionally with `--measured-dram-gbps` in GB/s; the counters include `ai.pmu.*` modelled PMU values from the tensor artifact |
+| `results` | summarise the artifact: event count, completion count, op/hart/status/cluster histograms; with `--model` it resolves op/status codes to the design's names, reports the SKU `clusters` count, and with `--per-event` it emits a PyTorch-friendly `outputs` list of completed operations with shapes, `cluster`, `dtype`, and A/B/C pointers; when the artifact carries `flags_layout`, `dtype` is recovered from `flags` when the event does not carry the field |
+| `diag` | run `g6lc-qemu diag` and feed it an optional `--measured-dram-gbps` host measurement; the bridge converts GB/s to milli-GB/s and passes it through `--measured-dram-gbps-x1000`, closing the F11 roofline loop from the host side |
+|| `compare` | first-divergence diff between two artifacts, for regression triage |
 
 Two things the bridge deliberately does **not** do, because both would duplicate a contract:
 
@@ -206,7 +207,12 @@ Two things the bridge deliberately does **not** do, because both would duplicate
 Also not owned: scheduling policy, framework installation, workload selection, result archival.
 Those belong to whichever project consumes the artifact.
 
-Because the artifact is the contract, all three execution routes are interchangeable to a caller:
+Because the artifact is the contract, all three execution routes are interchangeable to a caller.
+A Python/PyTorch consumer uses `results --model <model.json>` to map raw op/status codes onto
+names, and `results --model <model.json> --per-event` to recover the completed operations with
+A/B/C tensor pointers and shapes. The consumer still owns the host-side tensor data: the bridge
+gives it the guest-side metadata it needs to line up a reference kernel against the accelerator's
+claimed work.
 the B3 native run, a local QEMU run, and a remote QEMU run produce the same shape, stamped with the
 machine profile and `"evidence": false` per [`DIAG.md`](DIAG.md).
 
@@ -268,14 +274,19 @@ and diagnosis tiers D1/D2 keep their existing meanings.
 |---|---|---|
 | **Q6** | accelerator ISA decode gated on the ingested instruction set | landed |
 | **Q6** | island device model, queue ring, tickets, completion | landed |
-| **Q6** | in-guest reach through B3; tensor artifact from B3 | landed |
+| **Q6** | in-guest reach through B3; tensor artifact from B3; B3 `ai.enq` reads the descriptor from guest memory using `desc_layout` and `flags_layout`; B3 `ai.qfence` writes the completion word to `ptr_done` | landed |
+|| **Q6** | B3 queue CSRs `aiqbase`/`aiqctl`/`aiqhead` from `AiInstrSet`; CSR read-modify-write instructions routed to the island per hart; head normalised to queue depth | landed |
 | **Q7** | D2 `ai.tensor.*` counters, marked synthetic | landed |
 | **Q7** | B2 plugin tensor artifact; remote retrieval of it | landed |
 | **Q7** | host bridge over the artifact contract (§5) | landed |
+| **Q7** | `flags_layout` carried by the tensor artifact and used by the bridge to recover `dtype` from `flags` | landed |
 | **Q6** | MMIO window and status codes resolved from the ingested descriptor layout | landed |
 | **Q7** | capability-window values answered from `config.cap_offsets` | landed (placement open, below) |
 | **Q8** | one ring per hart from `config.queues`; island-wide tickets | landed |
 | **Q6** | `config.cap_base` / `config.desc_base` ingested when published; unresolved reported loudly (§3.1) | landed |
+| **Q7** | descriptor word-order validation: `bits_to_desc` / `desc_to_bits` / `desc_t` byte-offset comments cross-checked in `g6q-diag` | landed |
+| **Q7** | cluster dispatch: `AiIslandConfig.queue_cluster_map` parsed from the config package, B3 `g6q-vm` and B2 generated plugin both use a `cluster` descriptor field or the map, and fall back to unresolved (0) when neither is published | landed — F6 still open until the design publishes one source |
+| **Q7** | arithmetic-type subfields of `flags` (`dtype`/`accmode`/`ew`/`sp24`) read from per-field accessors, with a combined comment marked `dtype_combined` so the blob is never reported as a data type | landed — F10 open until the design publishes the accessors; until then sub-byte and sparse work is **not expressible**, so no effective-throughput multiplier may be claimed |
 | **Q6** | the design publishing the island register-map placement in the configuration package | open — **ask on the design**, §3.1 |
 | **Q8** | conformance rule rejecting `S` above the interrupt-context cap, and accumulator banks below thread count | landed — `g6q-core/src/model.rs` enforces the interrupt-context cap as a blocking finding; `g6q-svcfg/src/derive.rs` raises `AccBanks` to `NrHarts` (the build step normalises rather than asserts, see `AGENTS-todo.md` Q1 C7) |
 | **Q8** | host↔card transport once `contracts.ai_host_transport` is pinned | blocked on pin |

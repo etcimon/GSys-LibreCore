@@ -53,6 +53,8 @@ pub struct Mmu {
     pub vpn_bits: u8,
     /// Page offset bits (always 12 for the base RISC-V schemes).
     pub page_bits: u8,
+    /// PTE size in bytes: 4 for XLEN=32 (Sv32), 8 for XLEN=64 (Sv39/Sv48).
+    pub pte_bytes: u8,
 }
 
 impl Default for Mmu {
@@ -65,6 +67,7 @@ impl Default for Mmu {
             levels: 0,
             vpn_bits: 0,
             page_bits: 12,
+            pte_bytes: 4,
         }
     }
 }
@@ -82,6 +85,7 @@ impl Mmu {
                 levels: isa.page_table_levels,
                 vpn_bits: isa.vpn_bits,
                 page_bits: 12,
+                pte_bytes: if isa.xlen == 32 { 4 } else { 8 },
             }
         }
     }
@@ -95,6 +99,7 @@ impl Mmu {
             levels: 3,
             vpn_bits: 9,
             page_bits: 12,
+            pte_bytes: 8,
         }
     }
 
@@ -107,6 +112,7 @@ impl Mmu {
             levels: 4,
             vpn_bits: 9,
             page_bits: 12,
+            pte_bytes: 8,
         }
     }
 
@@ -119,6 +125,7 @@ impl Mmu {
             levels: 2,
             vpn_bits: 10,
             page_bits: 12,
+            pte_bytes: 4,
         }
     }
 
@@ -146,7 +153,13 @@ impl Mmu {
 /// The implementation is valid for Sv32, Sv39, and Sv48; larger page sizes are
 /// supported when a valid leaf PTE is found at an inner level.
 pub fn translate(mem: &PhysMem, mmu: &Mmu, satp: u64, vaddr: u64) -> Result<u64, MmuError> {
-    let mode = satp >> 60;
+    // RV32 satp has a single mode bit at bit 31 and a 22-bit PPN;
+    // RV64 satp has a 4-bit mode at bits 63:60 and a 44-bit PPN.
+    let (mode, ppn_mask) = if mmu.vaddr_bits <= 32 {
+        (satp >> 31, (1u64 << 22) - 1)
+    } else {
+        (satp >> 60, (1u64 << 44) - 1)
+    };
     if mode == 0 {
         return Ok(vaddr);
     }
@@ -160,15 +173,22 @@ pub fn translate(mem: &PhysMem, mmu: &Mmu, satp: u64, vaddr: u64) -> Result<u64,
         return Err(MmuError::BadVaddr);
     }
 
-    let mut a = (satp & ((1u64 << 44) - 1)) << 12; // PPN field is 44 bits in satp.
+    let mut a = (satp & ppn_mask) << 12;
 
     for level in (0..mmu.levels).rev() {
         let vpn =
             ((vaddr >> mmu.page_bits) >> (level * mmu.vpn_bits)) & ((1u64 << mmu.vpn_bits) - 1);
-        let pte_addr = a + (vpn << 3);
-        let pte = match mem.read_le::<8>(pte_addr) {
-            Ok(v) => v,
-            Err(_) => return Err(MmuError::Access),
+        let pte_addr = a + (vpn * mmu.pte_bytes as u64);
+        let pte = match mmu.pte_bytes {
+            4 => match mem.read_le::<4>(pte_addr) {
+                Ok(v) => v,
+                Err(_) => return Err(MmuError::Access),
+            },
+            8 => match mem.read_le::<8>(pte_addr) {
+                Ok(v) => v,
+                Err(_) => return Err(MmuError::Access),
+            },
+            _ => return Err(MmuError::Unsupported),
         };
 
         let v = pte & 1 != 0;
@@ -210,6 +230,14 @@ mod tests {
     use crate::mem::{PhysMem, Region};
 
     fn sv39_pte(ppn: u64, flags: u64) -> u64 {
+        (ppn << 10) | flags
+    }
+
+    fn sv32_pte(ppn: u64, flags: u64) -> u64 {
+        (ppn << 10) | flags
+    }
+
+    fn sv48_pte(ppn: u64, flags: u64) -> u64 {
         (ppn << 10) | flags
     }
 
@@ -259,6 +287,135 @@ mod tests {
         assert!(matches!(
             translate(&mem, &m, 9u64 << 60, 0),
             Err(MmuError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn sv32_four_kilobyte_page_maps_vaddr_to_paddr() {
+        let m = Mmu::sv32();
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x9000_0000, 0x2000));
+        // Level-1 table at 0x9000_0000, level-0 table at 0x9000_1000.
+        let pt_ppn = 0x9000_0000u64 >> 12;
+        let l0_ppn = 0x9000_1000u64 >> 12;
+        mem.write_le::<4>(0x9000_0000, sv32_pte(l0_ppn, 0x1))
+            .unwrap();
+        let ppn = 0x8000_0000u64 >> 12;
+        mem.write_le::<4>(0x9000_1000, sv32_pte(ppn, 0xF)).unwrap();
+        let satp = (1u64 << 31) | pt_ppn; // Sv32 satp is ppn in the low 22 bits.
+        let vaddr = 0x0u64;
+        assert_eq!(translate(&mem, &m, satp, vaddr).unwrap(), 0x8000_0000);
+    }
+
+    #[test]
+    fn sv32_four_megabyte_leaf_maps_vaddr_to_paddr() {
+        let m = Mmu::sv32();
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x9000_0000, 0x1000));
+        let pt_ppn = 0x9000_0000u64 >> 12;
+        let ppn = 0x8000_0000u64 >> 12;
+        // vaddr 0x1234 is inside the first 4 MiB megapage (VPN[1] == 0).
+        mem.write_le::<4>(0x9000_0000, sv32_pte(ppn, 0xF)).unwrap();
+        let satp = (1u64 << 31) | pt_ppn;
+        let vaddr = 0x1234u64;
+        assert_eq!(
+            translate(&mem, &m, satp, vaddr).unwrap(),
+            0x8000_0000 + 0x1234
+        );
+    }
+
+    #[test]
+    fn sv39_two_megabyte_leaf_maps_vaddr_to_paddr() {
+        let m = Mmu::sv39();
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x9000_0000, 0x2000));
+        // Root at 0x9000_0000, level-1 leaf table at 0x9000_1000.
+        let pt_ppn = 0x9000_0000u64 >> 12;
+        let l1_ppn = 0x9000_1000u64 >> 12;
+        mem.write_le::<8>(0x9000_0000, sv39_pte(l1_ppn, 0x1))
+            .unwrap();
+        let ppn = 0x8000_0000u64 >> 12;
+        mem.write_le::<8>(0x9000_1000, sv39_pte(ppn, 0xF)).unwrap();
+        let satp = (8u64 << 60) | pt_ppn;
+        let vaddr = 0x0u64;
+        assert_eq!(translate(&mem, &m, satp, vaddr).unwrap(), 0x8000_0000);
+    }
+
+    #[test]
+    fn sv48_four_kilobyte_page_maps_vaddr_to_paddr() {
+        let m = Mmu::sv48();
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x9000_0000, 0x4000));
+        // Root -> l2 -> l1 -> l0, then a 4 KiB leaf.
+        let pt_ppn = 0x9000_0000u64 >> 12;
+        let l2_ppn = 0x9000_1000u64 >> 12;
+        let l1_ppn = 0x9000_2000u64 >> 12;
+        let l0_ppn = 0x9000_3000u64 >> 12;
+        mem.write_le::<8>(0x9000_0000, sv48_pte(l2_ppn, 0x1))
+            .unwrap();
+        mem.write_le::<8>(0x9000_1000, sv48_pte(l1_ppn, 0x1))
+            .unwrap();
+        mem.write_le::<8>(0x9000_2000, sv48_pte(l0_ppn, 0x1))
+            .unwrap();
+        let ppn = 0x8000_0000u64 >> 12;
+        mem.write_le::<8>(0x9000_3000, sv48_pte(ppn, 0xF)).unwrap();
+        let satp = (9u64 << 60) | pt_ppn;
+        let vaddr = 0x0u64;
+        assert_eq!(translate(&mem, &m, satp, vaddr).unwrap(), 0x8000_0000);
+    }
+
+    #[test]
+    fn sv48_one_gigabyte_leaf_maps_vaddr_to_paddr() {
+        let m = Mmu::sv48();
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x9000_0000, 0x2000));
+        // Root -> l2, then a 1 GiB leaf.
+        let pt_ppn = 0x9000_0000u64 >> 12;
+        let l2_ppn = 0x9000_1000u64 >> 12;
+        mem.write_le::<8>(0x9000_0000, sv48_pte(l2_ppn, 0x1))
+            .unwrap();
+        let ppn = 0x8000_0000u64 >> 12;
+        mem.write_le::<8>(0x9000_1000, sv48_pte(ppn, 0xF)).unwrap();
+        let satp = (9u64 << 60) | pt_ppn;
+        let vaddr = 0x0u64;
+        assert_eq!(translate(&mem, &m, satp, vaddr).unwrap(), 0x8000_0000);
+    }
+
+    #[test]
+    fn sv48_two_megabyte_leaf_maps_vaddr_to_paddr() {
+        let m = Mmu::sv48();
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x9000_0000, 0x3000));
+        // Root -> l2 -> l1 leaf.
+        let pt_ppn = 0x9000_0000u64 >> 12;
+        let l2_ppn = 0x9000_1000u64 >> 12;
+        let l1_ppn = 0x9000_2000u64 >> 12;
+        mem.write_le::<8>(0x9000_0000, sv48_pte(l2_ppn, 0x1))
+            .unwrap();
+        mem.write_le::<8>(0x9000_1000, sv48_pte(l1_ppn, 0x1))
+            .unwrap();
+        let ppn = 0x8000_0000u64 >> 12;
+        mem.write_le::<8>(0x9000_2000, sv48_pte(ppn, 0xF)).unwrap();
+        let satp = (9u64 << 60) | pt_ppn;
+        let vaddr = 0x1234u64;
+        assert_eq!(
+            translate(&mem, &m, satp, vaddr).unwrap(),
+            0x8000_0000 + 0x1234
+        );
+    }
+
+    #[test]
+    fn sv48_non_canonical_address_is_rejected() {
+        let m = Mmu::sv48();
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(0x9000_0000, 0x1000));
+        mem.write_le::<8>(0x9000_0000, sv48_pte(0x80000, 0xF))
+            .unwrap();
+        let satp = (9u64 << 60) | (0x9000_0000u64 >> 12);
+        // bit 47 set but bits 48..63 not all ones
+        assert!(matches!(
+            translate(&mem, &m, satp, 0x0000_8000_0000_0000),
+            Err(MmuError::BadVaddr)
         ));
     }
 }

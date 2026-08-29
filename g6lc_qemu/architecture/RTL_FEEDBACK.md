@@ -29,9 +29,19 @@ emulator work it gates rather than against an abstract tidiness argument.
 |---|---|---|---|---|
 | **F1** | The island's MMIO **placement** is decided in the address decode (RTL), while the capability *offsets* are published in a package. The emulator ingests offsets and cannot resolve bases. | Publish the island register-map placement as localparams beside the existing capability offsets: capability window base, descriptor latch base, and the control/status/doorbell/completion/queue-region/counter offsets. | `contracts.ai_island_cap` | A guest cannot address the island. The pushed path (`AI_BRIDGE.md` §2) is end-to-end exercisable only against a model that states the bases. |
 | **F2** | The accepted **descriptor version** is validated in RTL but never published as a named constant, so nothing can be compared against. | Publish the accepted descriptor version in the descriptor package. | `contracts.ai_island_mmio` | `FALLBACK_DESC_VERSION` in the device model, and any honest "bad version" reporting. |
-| **F3** | Two capability words are **packed encodings** (tile dimensions; data-type grant bits) whose bit layout lives only in RTL comments. | Publish the shift/width of each packed subfield as localparams. | `contracts.ai_island_cap` | Two capability words stay absent from the guest-visible window; `cap_unsourced()` reports them. |
-| **F4** | The descriptor is latched through a **word-indexed window**, so a host image and the device agree only if both use the same base *and* the same word ordering. Nothing states the ordering independently of the packing function. | Confirm that descriptor field offsets are byte offsets into the latch window, or publish the word map. | `contracts.ai_island_mmio` | Byte-for-byte agreement between the native device, the generated device model, and a host-packed image. |
-| **F5** | The **data-type selector is a packed subfield of the descriptor flag word**, and its position is published nowhere — it exists only as a shift and mask agreed by convention. | Publish the shift and width of the data-type selector (and any other flag subfields) as localparams. | `contracts.ai_island_mmio` | The constant currently lives once in `g6q_core::model` so the D2 derivation and the generated plugin cannot drift; it becomes ingested when published. |
+| **F3** | Two capability words are **packed encodings** (tile dimensions; data-type grant bits) whose bit layout lives only in RTL comments. The `DtypeMask` value is a cap-window parameter, not a config-package field, and `block_mnk` is a concatenation of `$clog2` calls inside the case arm. | Publish the shift/width of each packed subfield as localparams, and move `DtypeMask` into `ai_island_cfg_t` or a named package constant. | `contracts.ai_island_cap` | `dtype_mask`, `block_mnk`, `dram_gbps` and `queues` are now sourced by reading the cap-window module, which is fragile because the packings are `always_comb` expressions and `DtypeMask` may be overridden at instantiation. The guest-visible window is complete, but a design-side localparam is needed for each packed word. |
+| **F4** | The descriptor is latched through a **word-indexed window**, so a host image and the device agree only if both use the same base *and* the same word ordering. `g6q-diag` now validates the ordering: it parses `bits_to_desc`, `desc_to_bits`, and the `desc_t` struct byte-offset comments and reports a conflict if they disagree. The emulator currently assumes the `+0xNN` comments are byte offsets and `bits_to_desc[high:low]/8` gives the field offset. | Confirm that descriptor field offsets are byte offsets into the latch window, or publish the word map. | `contracts.ai_island_mmio` | Byte-for-byte agreement between the native device, the generated device model, and a host-packed image. |
+| **F5** | The **data-type selector is a packed subfield of the descriptor flag word**, and its position is published nowhere — it exists only as a shift and mask agreed by convention. | Publish the shift and width of the data-type selector (and any other flag subfields) as localparams. | `contracts.ai_island_mmio` | `g6q-diag` now parses the comment and the `desc_prio`/`desc_irq` helpers in `g6lc_ai_desc_pkg.sv` into `AiDescLayout.flags_layout`; `g6q-emit-qemu` emits `G6LC_AI_DTYPE_SHIFT`/`MASK` from the ingested layout and requires it for descriptor decode; `TensorArtifact`/`TensorTrace` carry `flags_layout` so D2 decoding uses the ingested layout and the `g6q_core` fallback constants have been removed. |
+| **F7** | The **capability-window layout published in the plan of record disagrees with the shipped RTL** from offset `0x14` onward. `scaling-100tops.md` §8 documents `0x14` = DRAM bandwidth, `0x18` = dtype/element-width mask, `0x1C` = {queue count, QoS count}; the shipped `g6lc_ai_cap_window.sv` decodes `0x14` = packed `block_mnk`, `0x18` = {nameplate, measured} DRAM, `0x1C` = {queue_depth, queues}, `0x20` = QoS, `0x24` = quantum, `0x28` = dtype mask. A host partitioner written against §8 would read the tile geometry as a bandwidth number and the bandwidth as a dtype mask. The emulator ingests the RTL `CAP_OFF_*` names, so it is aligned with silicon and can act as referee. | Correct §8 of `scaling-100tops.md` to the shipped word map (or move the RTL to the documented one) and state which is normative. | `contracts.ai_island_cap` | Any host that discovers geometry from the document rather than from the ingested model. The bug is silent: every word reads back plausibly. |
+| **F8** | The capability word at `0x04` is documented as **"cluster count present / cluster count enabled"** (two fields), but the RTL emits a single `32'(IslandCfg.Clusters)`. `scaling-100tops.md` §7 and §10 both require per-cluster clock/power gating to be *discoverable* so a defective or unpowered cluster degrades throughput visibly. With one field, software cannot tell a 8-cluster part with 2 gated off from a 6-cluster part. | Split `0x04` into present/enabled halves, or publish an enabled-cluster bitmap word. | `contracts.ai_island_cap` | Honest per-cluster attribution in the tensor artifact, and dispatch that targets only *enabled* clusters (F6 becomes ambiguous without it). Also gates the §12 `TOPS/W` metric, which is per-SKU and therefore per-enabled-cluster. |
+| **F9** | The island publishes **measured** PMU counters — R beats, W beats, active cycles and sustained GB/s×1000 — but only as comments in the `g6lc_ai_island_top.sv` register map (`0x180`–`0x18C`). They are not localparams, so the emulator cannot ingest their offsets and cannot line its own modelled bound up against the design's measurements. `AiIslandConfig::pmu_offsets` and the `PMU_OFF_*` reader now exist, and `g6q-vm/src/device.rs` maps them: on `queue_qfence` the device computes modelled beat counts, a bound cycle count from `g6q-diag::roofline`, and a modelled milli-GB/s figure (`bytes * ClockKhz / cycles / 1000`); these are returned by `MmioDevice::load` when the address matches a published offset. The **emulator side of the comparison is ready**; `AiIslandConfig::pmu_offsets` stays empty against the live package. | Publish the PMU register offsets as localparams beside `CAP_OFF_*`, and state the units of each (beats, cycles, milli-GB/s). | `contracts.ai_island_cap` | The whole performance-feedback loop: the §12 acceptance metrics (`BW_measured` ≥ 80% of nameplate, `TOPS_sustained@AI`) are RTL-measured, while the roofline bound is modelled. Without ingested offsets the two can only be compared by hand, as §3.1 does. |
+| **F12** | The GEMM unit **bounds every dimension by the accumulator tile** — `m, n, k ∈ [1, MaxDim]`, checked in `g6lc_ai_gemm_seq.sv` `ST_CHK` and rejected with an error status — but nothing states that limit as a descriptor-level contract. It is discoverable only indirectly, by reading `CAP_OFF_BLOCK_MNK` and knowing that the packed `log2` tile dimensions double as the maximum shape. Consequently the plan's own acceptance gate, `M = N = K = 4096` (§12), **cannot be submitted as one descriptor**: it exceeds the live limit 16× per dimension and needs host-side blocking into 16³ pieces. `g6q-diag::roofline` now reports `shape_fits_blocking` so a bound never silently describes work the contract would refuse. | State in `isa-encoding.md` §7 that each dimension is bounded by the corresponding capability tile, and say whether hardware or software owns blocking beyond it. If hardware is meant to stream, `ST_CHK` is the wrong check. | `contracts.ai_island_mmio` | Every §12 metric measured on a shape larger than the tile, and the PyTorch partitioner's tiling decision — which currently has no published limit to tile against. |
+| **F13** | The plan's bandwidth derivation (§4, `bytes/MAC = 2/T`) **counts input bytes only**, and at the shapes this engine accepts the omission inverts the conclusion. With `s32` accumulators the C writeback is `4·m·n`, which at `m = n = k = T` is **twice** the input traffic — so total traffic is 3× the §4 figure and true arithmetic intensity is a third of it (42 rather than 128 MAC/byte at `T = 256`). §4's model is sound for a large-`K` streaming reduction, where the writeback amortises as `4/K`; it is optimistic for a whole-matrix-resident engine, which is what `g6lc_ai_gemm_seq.sv` implements (load all A, load all B, MAC, store C). | Extend §4 with the writeback term and state the `K` at which it becomes negligible, or state that §4 describes only the streaming regime. | `contracts.ai_island_cap` | Any bandwidth sizing done from §4 at small `K`. The 391 GB/s figure for `T = 256` is an input-only number; with the writeback the same row asks for materially more. |
+| **F11** | The island's **DRAM class is unpublished** (`DramGBps = 0`, "not measured (I3)"), so no roofline can be computed for the live part: `g6q-diag::roofline` returns the MAC bound but reports the bandwidth bound and machine balance as unresolved. The emulator now ingests `measured_dram_gbps_x1000` and the cap window publishes the measured half at `0x18`, so the **emulator side of the loop is closed**; the RTL still needs to drive that value from a real measurement. | Populate `DramGBps` with the measured sustained figure once I3 lands, or drive `dram_gbps_meas_x1000_i` from the measured PMU so the cap window returns a non-zero measured half. | `contracts.ai_island_cap` | Every bandwidth-side number: `balance_mac_per_byte`, `dram_bound_cycles`, `bound_cycles`, and any statement about whether a shape is compute- or bandwidth-bound. Until then the emulator can only bound the arithmetic, which is the half that is *not* in question. |
+| **F10** | The descriptor `flags` word carries **four distinct arithmetic-type subfields** — `dtype[9:8]`, `accmode[11:10]`, `ew[13:12]`, `sp24[14]` per `isa-encoding.md` §7 — but `g6lc_ai_desc_pkg.sv` publishes accessors only for `desc_prio` and `desc_irq`. The single comment `flags[13:8] type fields (dtype/accmode/ew/sp24)` both **understates the span** (`sp24` at bit 14 is outside it) and **conflates three fields into one**. Reading it as a data type yields a plausible-looking wrong value: an INT4 request (`ew=01`) reads back as `dtype = 16`. `g6q-diag` now prefers per-field accessors and, when only the comment exists, marks the span `dtype_combined` so no backend reports the blob as a type. | Publish `desc_dtype`, `desc_accmode`, `desc_ew` and `desc_sp24` accessors (or localparam shift/width pairs) in the descriptor package, matching §7. | `contracts.ai_island_mmio` | **The 100-TOPS effective-throughput story.** `scaling-100tops.md` §2 reports dense INT8 and effective INT4 2:4 as two separate numbers, and §9 defect 1 exists precisely so INT4 is requestable at all. While `ew` and `sp24` are unresolved the emulator cannot express a sub-byte or sparse request, the PyTorch bridge cannot ask for one, and no D2 counter may apply a sub-byte or sparsity multiplier. Note the engine also does not yet *consume* these fields (`DtypeMask = 0x0001`, s8 dense only), so publishing them is the first step, not the last. |
+| **F6** | The **cluster that executes a descriptor** is not exposed to software. `Clusters` is published as a SKU capability, but no field or queue mapping says which cluster a submission targets, so a tensor event cannot label its cluster. `g6q-core` `AiIslandConfig` now carries `queue_cluster_map`; `g6q-diag/ai_cfg.rs` parses it from a `QueueClusterMap` struct field or top-level localparam; `g6q-vm` `read_descriptor_event` first uses a `cluster` descriptor field, then the `queue_cluster_map`, and only leaves `cluster` unresolved (0) when neither source is published. | Publish either a `cluster` field in the descriptor, a queue-to-cluster map, or a CSR that returns the dispatch target. | `contracts.ai_island_mmio` | Per-cluster tensor event attribution, queue-to-cluster validation, and PyTorch-side comparison of cluster-parallel results. |
+
+|| **F14** | The cap window's **measured DRAM half is only 16 bits** (`meas_milli[31:16]`) and is saturated to `0xFFFF`. If the units are genuinely 1/1000 GB/s, the largest representable value is 65.535 GB/s — far below the 400 GB/s target and the live nameplate `DramGBps = 0`. The live `g6lc_ai_cap_window.sv` saturates `dram_gbps_meas_x1000_i > 32'h0000_FFFF` to `16'hFFFF`, so a 400 GB/s measurement would read back as 65.535 GB/s (or as a saturated flag, depending on interpretation). | Clarify the units and range of `meas_milli` and either widen the field, change the unit, or document that `0xFFFF` means "at or above the 16-bit maximum" so software does not treat it as a precise 65.535 GB/s. | `contracts.ai_island_cap` | The measured-vs-nameplate comparison in the roofline and the host-visible `CAP_OFF_DRAM_GBPS` word. A saturated 16-bit field cannot distinguish a 70 GB/s measurement from a 400 GB/s one. |
 
 **Status discipline:** an ask stays here until the design publishes the constant *or* the ask is
 withdrawn with a reason. Removing a row because the emulator worked around it locally is the failure
@@ -48,7 +58,97 @@ F2 version ──────► honest bad-version reporting
 F3 packing ──────► complete capability window ──► one guest binary across parts
 F4 word map ─────► host image == device == emitted model
 F5 flag packing ─► ingested dtype instead of a shared Rust constant
+F6 cluster dispatch ─► per-cluster tensor events and queue validation
+F7 cap doc vs RTL ─► a host may discover geometry from the document at all
+F8 clusters enabled ─► per-cluster attribution ──► F6 is unambiguous
+F9 PMU offsets ──► modelled D2 estimate can be diffed against RTL measurement
+F10 arith subfields ─► sub-byte / sparse work is expressible ──► effective-TOPS
+                       accounting (scaling-100tops.md §2) is possible at all
+F11 measured DRAM ─► the bandwidth half of the roofline exists ──► "compute-bound"
+                     or "bandwidth-bound" becomes a statement rather than a guess
+F14 measured range ──► the cap window can report a 400 GB/s measurement without saturating
+F12 shape limit ──► a host knows when to tile ──► the §12 4096³ gate is runnable
+F13 writeback term ─► bandwidth sizing at small K is not 3x optimistic
 ```
+
+### 3.1 Why F10 and F9 gate the 100-TOPS programme
+
+The island's stated target is 100 × 10¹² dense INT8 ops/s, with sub-byte and 2:4-sparse modes
+reported **separately** rather than folded into the headline (`scaling-100tops.md` §2). That makes two
+of the asks above load-bearing rather than tidiness:
+
+- **F10 decides whether the second number can exist.** Effective INT4 2:4 throughput is a function of
+  `ew` and `sp24`. Both currently live in bits the design does not name, inside a comment span that
+  also holds `dtype` and `accmode`. Until they are published, a request for sub-byte work is
+  indistinguishable from a mis-set `dtype`, so the emulator refuses to model it — which is correct,
+  and is also why the number cannot be quoted.
+- **F9 decides whether any modelled number can be checked.** The acceptance metrics are *measured*
+  quantities (`BW_measured`, `TOPS_sustained@AI`). The emulator's D2 layer produces *modelled* ones.
+  A modelled number that is never diffed against the measurement is not feedback; it is decoration.
+
+The live geometry makes the size of the gap concrete. `AiIslandLatencyDefault` is one cluster at 256
+MAC/cycle and 1 GHz, i.e. **0.512 TOPS** by the §2 definition; the §5.1 throughput SKU is 8 clusters ×
+4096 MAC/cycle at 1.5 GHz, i.e. **98.3 TOPS** — a **192×** gap, of which 128× is MAC width and 1.5× is
+clock. The published `256³` directed result of **83,705 cycles** against an ideal of 65,536
+(`16,777,216` MAC ÷ 256 MAC/cycle) is **78% MAC utilisation**, so roughly 18,000 cycles are
+sequencing and memory rather than arithmetic. Those overhead cycles do **not** shrink when the array
+widens: at the 8192 MAC/cycle latency-SKU target the same GEMM needs only 2,048 MAC cycles, so on
+today's memory path utilisation would fall to about 10%. That is exactly the failure mode
+`scaling-100tops.md` §11 orders the track to make structurally impossible ("growing the MAC array
+ahead of the memory system produces a part that cannot reach its own peak") — and it is a prediction
+the emulator can state, and F9 is what lets the RTL contradict it.
+
+`g6q-diag::roofline` computes all of the above from the ingested configuration, and its tests pin the
+plan's own worked numbers so the model tracks the design rather than a retyped table: the 8-cluster
+SKU comes out at 98.3 TOPS with a machine balance of ~123 MAC/byte (§4 says ~125), the `T = 512` row
+is compute-bound, the `T = 128` row is bandwidth-bound (§4 asks 781 GB/s for it), and the arithmetic
+intensity of a `T`-blocked GEMM is `T / 2` regardless of shape. Against the live configuration the
+same module reports the MAC bound and **refuses** the bandwidth bound when no measured value is
+supplied, because F11 leaves `DramGBps` at zero. If a measured `measured_dram_gbps_x1000` is supplied,
+the roofline closes and the cap window publishes it in the upper 16 bits of `CAP_OFF_DRAM_GBPS` —
+but F14 notes that the 16-bit half saturates at 65.535 GB/s (in 1/1000 units), so the 400 GB/s target
+cannot be reported precisely through that field.
+
+| Quantity | Live config | Throughput SKU (§5.1) |
+|---|---|---|
+| MAC/cycle | 256 | 32 768 |
+| Peak, §2 definition | 0.512 TOPS | 98.3 TOPS |
+| Blocking `T` | 256 | 512 |
+| Input-only intensity (§4's number) | 128 MAC/byte | 256 MAC/byte |
+| Intensity incl. `s32` writeback (F13) | **42 MAC/byte** at `256³` | — |
+| Machine balance | **unresolved** (F11) | ~123 MAC/byte |
+| Max submittable shape (F12) | 256 per dimension | 512 per dimension |
+| `256³` MAC bound | 65 536 cycles | — |
+| `256³` measured (design side) | 83 705 cycles → **78%** | — |
+
+### 3.2 What reading the GEMM unit changed about the model
+
+The first version of the roofline applied §4's `2 / T` directly. Reading
+`g6lc_ai_gemm_seq.sv` showed that this is right only at the one shape it was first tested on,
+and the module now carries a corrected model. The correction is recorded because it is a
+statement about the *design*, not only about the emulator:
+
+| | §4's model | `g6lc_ai_gemm_seq.sv` as built |
+|---|---|---|
+| Dataflow | `T × T` output block, streaming the reduction | load **all** of A, then **all** of B, MAC, store C |
+| Valid shape range | any `m, n, k` | `m, n, k ≤ MaxDim` only (F12) |
+| Input bytes | `macs · 2 / T` | `m·k + k·n`, each operand read once |
+| Writeback | not counted | `4 · m · n`, i.e. 2× the inputs at `m = n = k = T` (F13) |
+
+The two agree exactly at `m = n = k = T`, which is why a maximal-shape test cannot distinguish
+them. They diverge in both directions: below `T` the `2 / T` figure is *lower* than the bytes
+the operands themselves occupy, and above `T` the resident schedule cannot run at all. The
+module therefore reports `max(compulsory_read, tiled_read) + writeback`, which needs no
+dataflow assumption and is correct at both ends.
+
+**The consequence for the climb to 100 TOPS is not the array width.** The measured `256³` point
+spends 22% of its cycles outside the MAC array, and the traffic it generates is dominated by the
+`s32` writeback rather than by operand reads. Both of those are memory-system properties. Widening
+`MacsPerCycle` from 256 toward the 8192 latency-SKU target shrinks only the 78% that is already
+arithmetic, so on today's load/store path it would move utilisation to roughly 10% and leave the
+delivered throughput almost unchanged. The optimisation that pays is in `ST_LA`/`ST_LB`/`ST_STC`
+and the burst behaviour around them — which is the order `scaling-100tops.md` §11 already
+prescribes (I3 before I2), now with a number attached.
 
 F1 is load-bearing: until it lands, every other accelerator result is against a model that states
 its own bases rather than against the design's. Note that the B2 plugin now *gates itself* on F1:

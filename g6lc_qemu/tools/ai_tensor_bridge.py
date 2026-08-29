@@ -164,6 +164,20 @@ class DescLayout:
             known = ", ".join(sorted(self.ops)) or "(none ingested)"
             raise LayoutError(f"unknown op {name!r}; the model declares: {known}") from exc
 
+    def op_name(self, value: int) -> str | None:
+        """Best-effort name for an op code; None if the code is not in the layout."""
+        for name, v in self.ops.items():
+            if v == value:
+                return name
+        return None
+
+    def status_name(self, value: int) -> str | None:
+        """Best-effort name for a status code; None if the code is not in the layout."""
+        for name, v in self.statuses.items():
+            if v == value:
+                return name
+        return None
+
     def pack(self, values: dict) -> bytes:
         """Pack a descriptor image, little-endian, using only model-supplied geometry."""
         buf = bytearray(self.desc_bytes)
@@ -197,9 +211,15 @@ class TensorArtifact:
     backend produced a result except by reading the stamped header.
     """
 
-    def __init__(self, header: dict, events: list) -> None:
+    def __init__(
+        self,
+        header: dict,
+        events: list,
+        flags_layout: dict | None = None,
+    ) -> None:
         self.header = header
         self.events = events
+        self.flags_layout = flags_layout or {}
 
     @classmethod
     def load(cls, path: str | Path) -> "TensorArtifact":
@@ -207,7 +227,11 @@ class TensorArtifact:
         if isinstance(raw, list):
             # A bare event array is accepted; the header is then simply unknown.
             return cls({}, raw)
-        return cls(raw.get("header") or {}, raw.get("events") or [])
+        return cls(
+            raw.get("header") or {},
+            raw.get("events") or [],
+            raw.get("flags_layout"),
+        )
 
     @property
     def profile(self) -> str:
@@ -217,32 +241,124 @@ class TensorArtifact:
     def tainted(self) -> bool:
         return bool(self.header.get("profile_tainted", False))
 
-    def summary(self) -> dict:
+    def _dtype_for_event(self, ev: dict) -> int:
+        """Return `dtype`, recovering it from `flags` when the layout is present.
+
+        The B2/B3 emitter writes `dtype` explicitly, but older artifacts and bare
+        event arrays may carry only `flags`.  When `flags_layout` is present, derive
+        the data type from the packed flag word using the ingested shift/mask.
+        """
+        dtype = ev.get("dtype")
+        if dtype not in (None, 0, "?"):
+            return int(dtype)
+        flags = ev.get("flags")
+        if flags is None or not self.flags_layout:
+            return int(dtype) if dtype is not None else 0
+        shift = int(self.flags_layout.get("dtype_shift", 0))
+        mask = int(self.flags_layout.get("dtype_mask", 0))
+        return (int(flags) >> shift) & mask
+
+    def summary(self, layout: DescLayout | None = None, clusters: int | None = None) -> dict:
         """Aggregates that are *present* in the stream.
 
         Deliberately excludes `ai.tensor.bytes` / `ai.tensor.macs`: those are modelled
         quantities owned by `g6q-diag` (see the module docstring, limit 2).
+
+        When a `DescLayout` is supplied, op and status codes are resolved to the names
+        the design's package publishes, which is what a Python/PyTorch consumer needs to
+        map the raw stream onto `torch.nn.functional` calls or reference kernels.
         """
         ops: dict = {}
+        op_names: dict = {}
         harts: dict = {}
         statuses: dict = {}
+        status_names: dict = {}
+        dtypes: dict = {}
+        by_cluster: dict = {}
         done = 0
         for ev in self.events:
-            ops[str(ev.get("op", "?"))] = ops.get(str(ev.get("op", "?")), 0) + 1
+            op = ev.get("op", "?")
+            ops[str(op)] = ops.get(str(op), 0) + 1
+            if layout:
+                name = layout.op_name(int(op)) if isinstance(op, int) else None
+                if name:
+                    op_names[name] = op_names.get(name, 0) + 1
+
+            status = ev.get("status", "?")
+            statuses[str(status)] = statuses.get(str(status), 0) + 1
+            if layout:
+                name = layout.status_name(int(status)) if isinstance(status, int) else None
+                if name:
+                    status_names[name] = status_names.get(name, 0) + 1
+
             harts[str(ev.get("hart", "?"))] = harts.get(str(ev.get("hart", "?")), 0) + 1
-            statuses[str(ev.get("status", "?"))] = statuses.get(str(ev.get("status", "?")), 0) + 1
+
+            dtype = self._dtype_for_event(ev)
+            dtypes[str(dtype)] = dtypes.get(str(dtype), 0) + 1
+
+            cluster = ev.get("cluster", 0)
+            by_cluster[str(cluster)] = by_cluster.get(str(cluster), 0) + 1
+
             if ev.get("done"):
                 done += 1
-        return {
+
+        out: dict = {
             "profile": self.profile,
             "profile_tainted": self.tainted,
             "evidence": bool(self.header.get("evidence", False)),
             "events": len(self.events),
             "done": done,
+            "inflight": len(self.events) - done,
             "by_op": ops,
-            "by_hart": harts,
             "by_status": statuses,
+            "by_hart": harts,
+            "by_dtype": dtypes,
+            "by_cluster": by_cluster,
         }
+        if clusters is not None:
+            out["clusters"] = clusters
+        if op_names:
+            out["by_op_name"] = op_names
+        if status_names:
+            out["by_status_name"] = status_names
+        return out
+
+    def pytorch_summary(self, layout: DescLayout | None = None) -> list:
+        """Return one entry per completed tensor operation.
+
+        This is the shape a Python/PyTorch consumer needs: resolved op and status names,
+        input/output shapes, dtype code, and the guest pointers for A/B/C.  The consumer
+        cannot dereference guest pointers, but it can compare this metadata against a
+        reference implementation run on the host.
+        """
+        out: list = []
+        for ev in self.events:
+            if not ev.get("done"):
+                continue
+            op_code = ev.get("op", 0)
+            status_code = ev.get("status", 0)
+            op_name = layout.op_name(op_code) if layout else None
+            status_name = layout.status_name(status_code) if layout else None
+            entry = {
+                "order": ev.get("order"),
+                "hart": ev.get("hart"),
+                "op_code": op_code,
+                "op_name": op_name,
+                "status_code": status_code,
+                "status_name": status_name,
+                "shape_m": ev.get("m"),
+                "shape_n": ev.get("n"),
+                "shape_k": ev.get("k"),
+                "dtype": self._dtype_for_event(ev),
+                "cluster": ev.get("cluster", 0),
+                "ptr_a": ev.get("ptr_a"),
+                "ptr_b": ev.get("ptr_b"),
+                "ptr_c": ev.get("ptr_c"),
+                "ptr_done": ev.get("ptr_done"),
+                "ticket": ev.get("ticket"),
+            }
+            out.append(entry)
+        return out
 
 
 def compare_artifacts(lhs: TensorArtifact, rhs: TensorArtifact) -> list:
@@ -395,7 +511,25 @@ def cmd_push(args: argparse.Namespace) -> int:
     if route is None:
         err(f"unknown route {args.route!r}; available: {', '.join(sorted(ROUTES))}")
         return 1
-    return route(args)
+    rc = route(args)
+    if rc != 0:
+        return rc
+    if args.uarch_out:
+        if args.route != "native":
+            err("--uarch-out is only supported with --route native")
+            return 1
+        if not Path(args.tensor_out).is_file():
+            err(f"tensor artifact not found: {args.tensor_out}")
+            return 1
+        diag_args = argparse.Namespace(
+            target=args.target,
+            repo_root=args.repo_root,
+            tensor=[args.tensor_out],
+            measured_dram_gbps=args.measured_dram_gbps,
+            uarch_out=args.uarch_out,
+        )
+        return cmd_diag(diag_args)
+    return 0
 
 
 def cmd_results(args: argparse.Namespace) -> int:
@@ -404,7 +538,20 @@ def cmd_results(args: argparse.Namespace) -> int:
     except (OSError, json.JSONDecodeError) as exc:
         err(f"cannot read {args.artifact}: {exc}")
         return 1
-    summary = artifact.summary()
+    layout: DescLayout | None = None
+    clusters: int | None = None
+    if args.model:
+        try:
+            model = json.loads(Path(args.model).read_text(encoding="utf-8"))
+            layout = DescLayout.from_model(model)
+            cfg = (model.get("soc") or {}).get("ai_island", {}).get("config", {})
+            clusters = cfg.get("clusters")
+        except (OSError, json.JSONDecodeError, LayoutError) as exc:
+            err(f"cannot load model {args.model}: {exc}")
+            return 1
+    summary = artifact.summary(layout, clusters)
+    if args.per_event:
+        summary["outputs"] = artifact.pytorch_summary(layout)
     print(json.dumps(summary, indent=2, sort_keys=True))
     if summary["profile_tainted"]:
         log("NOTE: the producing machine profile is tainted; this is not a hardware result")
@@ -427,13 +574,46 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_diag(args: argparse.Namespace) -> int:
+    """Run g6lc-qemu diag with an optional host-side measured DRAM bandwidth.
+
+    This is the host/bridge side of the F11 loop: the emulator accepts a measured
+    bandwidth and closes the roofline bound even when the design has not published one.
+    """
+    binary = cli_binary()
+    if not binary:
+        err("g6lc-qemu binary not found; run `g6q build` first")
+        return 1
+    out = Path(args.uarch_out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmd: list = [str(binary), "diag", "--uarch-out", str(out)]
+    if args.target:
+        cmd += ["--target", args.target]
+    if args.repo_root:
+        cmd += ["--repo-root", args.repo_root]
+    for tensor in args.tensor or []:
+        cmd += ["--tensor", tensor]
+    if args.measured_dram_gbps is not None:
+        v = int(round(args.measured_dram_gbps * 1000.0))
+        if v < 0:
+            err("--measured-dram-gbps must be non-negative")
+            return 1
+        cmd += ["--measured-dram-gbps-x1000", str(v)]
+    res = _run(cmd, check=False)
+    if res.returncode != 0:
+        err("diag failed")
+        return res.returncode
+    log(f"uarch counters at {out}")
+    return 0
+
+
 # --------------------------------------------------------------------------- selftest
 
 
 _SELFTEST_MODEL = {
     "soc": {
         "ai_island": {
-            "config": {"cap_base": 0, "desc_base": 0x140},
+            "config": {"cap_base": 0, "desc_base": 0x140, "clusters": 2},
             "desc_layout": {
                 "desc_bytes": 16,
                 "fields": {
@@ -508,27 +688,80 @@ def cmd_selftest(args: argparse.Namespace) -> int:
         pass
 
     # Artifact handling: both shapes, and the header stamp.
+    # The first event omits dtype and carries only flags; the flags_layout recovers it.
+    flags_layout = {"dtype_shift": 8, "dtype_mask": 0x3F}
     stamped = TensorArtifact(
         {"profile": "g6lc-soc", "profile_tainted": False, "evidence": False},
         [
-            {"order": 0, "hart": 0, "op": 1, "status": 0, "done": True},
-            {"order": 1, "hart": 1, "op": 1, "status": 0, "done": False},
+            {
+                "order": 0,
+                "hart": 0,
+                "op": 1,
+                "status": 0,
+                "done": True,
+                "m": 4,
+                "n": 4,
+                "k": 4,
+                "flags": 0x0100,
+                "cluster": 0,
+                "ptr_a": 0x9000_0000,
+                "ptr_b": 0x9000_1000,
+                "ptr_c": 0x9000_2000,
+            },
+            {
+                "order": 1,
+                "hart": 1,
+                "op": 1,
+                "status": 0,
+                "done": False,
+                "m": 4,
+                "n": 4,
+                "k": 4,
+                "dtype": 2,
+                "cluster": 1,
+            },
         ],
+        flags_layout,
     )
     summary = stamped.summary()
     check("event count", summary["events"] == 2)
     check("done count", summary["done"] == 1)
+    check("inflight count", summary["inflight"] == 1)
     check("op histogram", summary["by_op"] == {"1": 2})
     check("hart histogram", summary["by_hart"] == {"0": 1, "1": 1})
+    check("cluster histogram", summary["by_cluster"] == {"0": 1, "1": 1})
+    check(
+        "dtype is recovered from flags when flags_layout is present",
+        summary["by_dtype"] == {"1": 1, "2": 1},
+        str(summary["by_dtype"]),
+    )
     check("evidence is never asserted", summary["evidence"] is False)
     check(
         "modelled counters are not re-derived here",
         "ai.tensor.macs" not in summary and "ai.tensor.bytes" not in summary,
     )
 
+    # With a layout and a cluster count, op/status names resolve and the SKU cluster count is reported.
+    resolved = stamped.summary(layout, clusters=2)
+    check("by_op_name resolves through layout", resolved.get("by_op_name") == {"OP_GEMM": 2})
+    check("by_status_name resolves through layout", resolved.get("by_status_name") == {"ST_OK": 2})
+    check("cluster count from model is reported", resolved.get("clusters") == 2)
+
+    # PyTorch-friendly output list contains only completed events with shapes, cluster and pointers.
+    outputs = stamped.pytorch_summary(layout)
+    check("pytorch_summary returns only completed events", len(outputs) == 1)
+    if outputs:
+        check("pytorch_summary resolves op name", outputs[0]["op_name"] == "OP_GEMM")
+        check("pytorch_summary resolves status name", outputs[0]["status_name"] == "ST_OK")
+        check("pytorch_summary carries ptr_c", outputs[0]["ptr_c"] == 0x9000_2000)
+        check("pytorch_summary recovers dtype from flags", outputs[0]["dtype"] == 1)
+        check("pytorch_summary carries cluster", outputs[0]["cluster"] == 0)
+
     # Comparison reports a first divergence, and agreement is silent.
     check("identical artifacts agree", compare_artifacts(stamped, stamped) == [])
-    other = TensorArtifact(stamped.header, [dict(stamped.events[0], status=1)])
+    other = TensorArtifact(
+        stamped.header, [dict(stamped.events[0], status=1)], stamped.flags_layout
+    )
     diffs = compare_artifacts(stamped, other)
     check("divergence is reported", any(d["field"] == "status" for d in diffs), str(diffs))
 
@@ -566,22 +799,53 @@ def main(argv: list | None = None) -> int:
     p.add_argument("--route", default="native", choices=sorted(ROUTES))
     p.add_argument("--image", default=None, help="flat guest image for the native route")
     p.add_argument("--target", default=None)
+    p.add_argument("--repo-root", default=None)
     p.add_argument("--steps", type=int, default=None)
     p.add_argument("--tensor-out", default="out/bridge/tensor.json")
     p.add_argument("--remote-tensor", default="tensor.json")
     p.add_argument("--machine", default=None)
     p.add_argument("--tag", default=None)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument(
+        "--measured-dram-gbps",
+        type=float,
+        default=None,
+        help="host-measured DRAM bandwidth in GB/s; passed to diag if --uarch-out is set",
+    )
+    p.add_argument(
+        "--uarch-out",
+        default=None,
+        help="after a successful run, run g6lc-qemu diag and write counters here (native only)",
+    )
     p.set_defaults(fn=cmd_push)
 
     p = sub.add_parser("results", help="summarise a tensor artifact")
     p.add_argument("artifact")
+    p.add_argument("--model", default=None, help="model JSON to resolve op/status names")
+    p.add_argument(
+        "--per-event",
+        action="store_true",
+        help="include one PyTorch-friendly output record per completed event",
+    )
     p.set_defaults(fn=cmd_results)
 
     p = sub.add_parser("compare", help="diff two tensor artifacts")
     p.add_argument("lhs")
     p.add_argument("rhs")
     p.set_defaults(fn=cmd_compare)
+
+    p = sub.add_parser("diag", help="run g6lc-qemu diag with an optional host-measured bandwidth")
+    p.add_argument("--target", default=None)
+    p.add_argument("--repo-root", default=None)
+    p.add_argument("--tensor", action="append", default=[], help="tensor artifact(s) to merge")
+    p.add_argument(
+        "--measured-dram-gbps",
+        type=float,
+        default=None,
+        help="host-measured DRAM bandwidth in GB/s (e.g. 320.5); multiplied by 1000 for the CLI",
+    )
+    p.add_argument("--uarch-out", default="out/bridge/uarch.json")
+    p.set_defaults(fn=cmd_diag)
 
     p = sub.add_parser("selftest", help="offline checks; no model, QEMU or network")
     p.set_defaults(fn=cmd_selftest)

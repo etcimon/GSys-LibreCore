@@ -19,6 +19,10 @@ pub fn parse_ai_island_cfg_pkg(text: &str) -> Result<AiIslandConfig, String> {
 
     let mut cfg = AiIslandConfig::default();
     for (field, raw) in split_member_list(&default) {
+        if field == "QueueClusterMap" {
+            cfg.queue_cluster_map = parse_array_literal(&raw).ok();
+            continue;
+        }
         let v = eval_field(&raw)?;
         match field.as_str() {
             "Clusters" => cfg.clusters = v as u32,
@@ -51,21 +55,96 @@ pub fn parse_ai_island_cfg_pkg(text: &str) -> Result<AiIslandConfig, String> {
     // placement unresolved here: the reader will not parse an address decoder, and it will
     // not guess, because a guessed base puts the whole descriptor at the wrong address
     // while every individual field still looks plausible.
+    let mut ai_cap_base: Option<u64> = None;
+    let mut ai_desc_base: Option<u64> = None;
     for line in cleaned.split(';') {
         let line = line.trim();
         if let Some((name, value)) = parse_localparam_hex_scalar(line) {
             if let Some(short) = name.strip_prefix("CAP_OFF_") {
                 cfg.cap_offsets.insert(short.to_lowercase(), value);
             }
+            // The island's own measured PMU counters. These are the only quantities that can
+            // contradict the modelled bound in `roofline`, so they are ingested the same way
+            // and left empty -- never defaulted -- when the design publishes them only as
+            // register-map comments (ask F9).
+            if let Some(short) = name.strip_prefix("PMU_OFF_") {
+                cfg.pmu_offsets.insert(short.to_lowercase(), value);
+            }
             match name {
-                "CAP_BASE" | "REG_OFF_CAP" | "AI_CAP_BASE" => cfg.cap_base = Some(value),
-                "DESC_BASE" | "REG_OFF_DESC" | "AI_DESC_BASE" => cfg.desc_base = Some(value),
+                "CAP_BASE" | "REG_OFF_CAP" => cfg.cap_base = Some(value),
+                "DESC_BASE" | "REG_OFF_DESC" => cfg.desc_base = Some(value),
+                "AI_CAP_BASE" => ai_cap_base = Some(value),
+                "AI_DESC_BASE" => ai_desc_base = Some(value),
                 _ => {}
+            }
+        }
+    }
+    // When the package publishes the absolute island and descriptor bases, convert to
+    // island-relative offsets.  The capability window is at the island base, so its
+    // offset is zero; the descriptor window is above it.
+    if let (Some(cap), Some(desc)) = (ai_cap_base, ai_desc_base) {
+        if desc > cap {
+            cfg.cap_base = Some(0);
+            cfg.desc_base = Some(desc - cap);
+        }
+    }
+
+    // Queue-to-cluster map may be published as a top-level localparam array.
+    if cfg.queue_cluster_map.is_none() {
+        for stmt in cleaned.split(';') {
+            let stmt = stmt.trim();
+            if !stmt.contains("QueueClusterMap") && !stmt.contains("QUEUE_TO_CLUSTER") {
+                continue;
+            }
+            if let Some(eq) = stmt.find('=') {
+                let raw = &stmt[eq + 1..];
+                if let Ok(m) = parse_array_literal(raw) {
+                    cfg.queue_cluster_map = Some(m);
+                    break;
+                }
             }
         }
     }
 
     Ok(cfg)
+}
+
+/// Parse a SystemVerilog packed array literal like `'{0, 1, 2}`.
+fn parse_array_literal(raw: &str) -> Result<Vec<u32>, String> {
+    let s = raw.trim();
+    let s = s.strip_prefix("'").unwrap_or(s);
+    if !s.starts_with('{') {
+        return Err("array literal does not start with {".to_string());
+    }
+    // Find matching closing brace.
+    let mut depth = 0;
+    let mut in_str = false;
+    let mut end = None;
+    for (i, c) in s.char_indices() {
+        match c {
+            '{' if !in_str => depth += 1,
+            '}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i);
+                    break;
+                }
+            }
+            '"' => in_str = !in_str,
+            _ => {}
+        }
+    }
+    let end = end.ok_or("unterminated array literal")?;
+    let inner = &s[1..end];
+    let mut out = Vec::new();
+    for item in split_top_level(inner, ',') {
+        let item = item.trim();
+        if item.is_empty() {
+            continue;
+        }
+        out.push(parse_atom(item)? as u32);
+    }
+    Ok(out)
 }
 
 fn strip_sv_comments(text: &str) -> String {
@@ -235,27 +314,35 @@ fn split_top_level_assign(s: &str) -> Option<(&str, &str)> {
 
 fn parse_localparam_hex_scalar(line: &str) -> Option<(&str, u64)> {
     let line = line.trim();
-    if !line.starts_with("localparam logic [15:0]") {
-        return None;
-    }
-    let rest = line.strip_prefix("localparam logic [15:0]")?.trim();
+    // Accept any `localparam logic [A:B] NAME = Wx'y...;` or `localparam logic [A:B] NAME = y;`.
+    // Width and base prefix are not trusted for the numeric value: we strip them.
+    let rest = line.strip_prefix("localparam logic [")?;
+    let rest = rest.split_once("]")?.1.trim();
     let (name, value) = split_top_level_assign(rest)?;
     let name = name
         .split(|c: char| !(c.is_alphanumeric() || c == '_'))
         .filter(|t| !t.is_empty())
         .next_back()?;
-    let value = value.trim();
-    if value.starts_with("16'h") {
-        let v = value.strip_prefix("16'h")?;
-        let v = v.trim_end_matches(';');
-        u64::from_str_radix(v.trim(), 16).ok().map(|n| (name, n))
-    } else if value.starts_with("16'd") {
-        let v = value.strip_prefix("16'd")?;
-        let v = v.trim_end_matches(';');
-        v.parse().ok().map(|n: u64| (name, n))
+    let value = value.trim().trim_end_matches(';');
+    // Strip a width/base prefix like `64'h`, `16'd`, `32'h`, or a plain `0x` prefix.
+    // Track which base was declared so a hex value composed only of digits is not
+    // mistaken for decimal.
+    let (base, value) = if let Some((_, v)) = value.split_once("'h") {
+        (16, v)
+    } else if let Some((_, v)) = value.split_once("'d") {
+        (10, v)
+    } else if let Some((_, v)) = value.split_once("'b") {
+        (2, v)
+    } else if let Some(v) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        (16, v)
     } else {
-        None
-    }
+        (10, value)
+    };
+    let value = value.replace('_', "");
+    u64::from_str_radix(&value, base).ok().map(|n| (name, n))
 }
 
 fn eval_field(raw: &str) -> Result<i64, String> {
@@ -320,6 +407,38 @@ mod tests {
         assert!(cfg.queue_depth > 0);
         assert!(cfg.clusters > 0);
         assert!(cfg.cap_offsets.contains_key("version"));
+        // F9: the island's PMU registers exist (island_top 0x180-0x18C) but are published
+        // only as comments, so nothing can be ingested. If this starts failing because the
+        // design added PMU_OFF_* localparams, that is the good outcome -- close F9.
+        assert!(
+            cfg.pmu_offsets.is_empty(),
+            "if PMU_OFF_* is now published, close F9 in RTL_FEEDBACK.md"
+        );
+    }
+
+    #[test]
+    fn published_pmu_offsets_are_ingested() {
+        let text = r#"
+package g6lc_ai_island_cfg_pkg;
+  localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters: unsigned'(1),
+      Queues: unsigned'(1),
+      QueueDepth: unsigned'(8)
+  };
+  localparam logic [15:0] CAP_OFF_VERSION   = 16'h00;
+  localparam logic [15:0] PMU_OFF_R_BEATS   = 16'h180;
+  localparam logic [15:0] PMU_OFF_W_BEATS   = 16'h184;
+  localparam logic [15:0] PMU_OFF_CYCLES    = 16'h188;
+  localparam logic [15:0] PMU_OFF_GBPS_X1000 = 16'h18C;
+endpackage
+"#;
+        let cfg = parse_ai_island_cfg_pkg(text).unwrap();
+        assert_eq!(cfg.pmu_offsets.get("r_beats"), Some(&0x180));
+        assert_eq!(cfg.pmu_offsets.get("w_beats"), Some(&0x184));
+        assert_eq!(cfg.pmu_offsets.get("cycles"), Some(&0x188));
+        assert_eq!(cfg.pmu_offsets.get("gbps_x1000"), Some(&0x18c));
+        // A PMU offset must not leak into the capability table.
+        assert!(!cfg.cap_offsets.contains_key("r_beats"));
     }
 
     #[test]
@@ -424,5 +543,86 @@ endpackage
         assert!(cfg.placement_resolved());
         // A base must not leak into the offset table.
         assert!(!cfg.cap_offsets.contains_key("base"));
+    }
+
+    #[test]
+    fn parses_queue_cluster_map_from_struct_field() {
+        let text = r#"
+package g6lc_ai_island_cfg_pkg;
+  typedef struct packed {
+    int unsigned Clusters;
+    int unsigned Queues;
+    int unsigned QueueDepth;
+    int unsigned QueueClusterMap [0:1];
+  } ai_island_cfg_t;
+
+  localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters:       unsigned'(1),
+      Queues:         unsigned'(2),
+      QueueDepth:     unsigned'(64),
+      QueueClusterMap: '{0, 1}
+  };
+endpackage
+"#;
+        let cfg = parse_ai_island_cfg_pkg(text).unwrap();
+        assert_eq!(cfg.queue_cluster_map, Some(vec![0, 1]));
+    }
+
+    #[test]
+    fn parses_64_bit_ai_island_placement() {
+        let text = r#"
+package g6lc_ai_island_cfg_pkg;
+  typedef struct packed {
+    int unsigned Clusters;
+    int unsigned MacsPerCycle;
+    int unsigned ClockKhz;
+    int unsigned SramBytes;
+    int unsigned AccTileM;
+    int unsigned AccTileN;
+    int unsigned AccTileK;
+    int unsigned NocWidth;
+    int unsigned DramChannels;
+    int unsigned DramGBps;
+    int unsigned Queues;
+    int unsigned QueueDepth;
+    int unsigned QosClasses;
+    int unsigned WorkQuantumK;
+  } ai_island_cfg_t;
+  localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters: 1, MacsPerCycle: 256, ClockKhz: 1000000, SramBytes: 2097152,
+      AccTileM: 256, AccTileN: 256, AccTileK: 256, NocWidth: 64,
+      DramChannels: 1, DramGBps: 0, Queues: 2, QueueDepth: 64,
+      QosClasses: 2, WorkQuantumK: 64
+  };
+  localparam logic [63:0] AI_CAP_BASE  = 64'h3000_0000;
+  localparam logic [63:0] AI_DESC_BASE = 64'h3000_0140;
+endpackage
+"#;
+        let cfg = parse_ai_island_cfg_pkg(text).unwrap();
+        assert_eq!(cfg.cap_base, Some(0));
+        assert_eq!(cfg.desc_base, Some(0x140));
+    }
+
+    #[test]
+    fn parses_queue_cluster_map_from_top_level_localparam() {
+        let text = r#"
+package g6lc_ai_island_cfg_pkg;
+  typedef struct packed {
+    int unsigned Clusters;
+    int unsigned Queues;
+    int unsigned QueueDepth;
+  } ai_island_cfg_t;
+
+  localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters:   unsigned'(1),
+      Queues:     unsigned'(2),
+      QueueDepth: unsigned'(64)
+  };
+
+  localparam int unsigned QueueClusterMap [0:1] = '{0, 1};
+endpackage
+"#;
+        let cfg = parse_ai_island_cfg_pkg(text).unwrap();
+        assert_eq!(cfg.queue_cluster_map, Some(vec![0, 1]));
     }
 }

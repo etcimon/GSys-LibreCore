@@ -28,14 +28,16 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ai_cap;
 pub mod ai_cfg;
 pub mod ai_desc;
 pub mod ai_instr;
 pub mod ai_tensor;
+pub mod roofline;
 pub mod rvfi;
 pub mod uarch;
 
-pub use uarch::structure_counters;
+pub use uarch::{ai_island_counters, model_counters, structure_counters};
 
 use g6q_core::model::TargetModel;
 use g6q_core::Json;
@@ -48,6 +50,9 @@ pub enum Fidelity {
     /// Architectural state, traps, memory contents, retired-instruction counts and counts
     /// of architectural events. A mismatch is a bug in one of the two implementations.
     Exact,
+    /// A value measured by the design's own PMU or diagnostic harness. Comparable for
+    /// equality with a later measurement, but not a prediction of a future run.
+    Measured,
     /// Structure hit and miss rates. Same geometry and policy as the design, but no
     /// pipeline timing and no speculative-path pollution: expect the shape to match and
     /// the absolute rate to differ.
@@ -64,6 +69,7 @@ impl Fidelity {
     pub fn as_str(self) -> &'static str {
         match self {
             Fidelity::Exact => "exact",
+            Fidelity::Measured => "measured",
             Fidelity::Modelled => "modelled",
             Fidelity::Weak => "weak",
             Fidelity::Synthetic => "synthetic",
@@ -72,7 +78,7 @@ impl Fidelity {
 
     /// Whether a value of this fidelity may be compared for equality with hardware.
     pub fn comparable_for_equality(self) -> bool {
-        matches!(self, Fidelity::Exact)
+        matches!(self, Fidelity::Exact | Fidelity::Measured)
     }
 }
 
@@ -721,6 +727,7 @@ mod tests {
     #[test]
     fn only_exact_quantities_may_be_compared_with_hardware() {
         assert!(Fidelity::Exact.comparable_for_equality());
+        assert!(Fidelity::Measured.comparable_for_equality());
         assert!(!Fidelity::Modelled.comparable_for_equality());
         assert!(!Fidelity::Weak.comparable_for_equality());
         assert!(!Fidelity::Synthetic.comparable_for_equality());

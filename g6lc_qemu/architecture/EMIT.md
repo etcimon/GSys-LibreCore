@@ -148,9 +148,73 @@ to tell which backend produced an event, or comparing routes is meaningless. A t
 set, and a second asserts that no decoder is emitted at all when the geometry is unresolved — dead
 generated code is not left behind for a `#if` to hide.
 
+The generated C is compiled with `-Wall -Werror`, so the emitter avoids non-portable constructs: it
+uses `<inttypes.h>` `PRIu64` for `uint64_t` fields (instead of `%llu`, whose width varies by glibc),
+guards the unresolved-geometry `g6lc_tensor_write` fallback with `#if G6LC_AI_DESC_DECODE != 1`, and
+keeps `store_word` under `#if G6LC_AI_DESC_DECODE == 1` so no variable is set but unused.
+
+Cluster dispatch is emitted with the same precedence as the B3 path. The plugin first uses a
+`cluster` descriptor field if the layout publishes one; otherwise it falls back to the ingested
+`queue_cluster_map`, indexing by `hart % queues`. The map is emitted as a C array and the queues count
+as `G6LC_AI_QUEUES` so the B2 and B3 event streams agree even when the design does not expose
+per-descriptor cluster routing.
+
 This matters because the two backends must agree byte-for-byte about the descriptor. B3 resolves its
 window from the ingested layout; an emitter that hard-coded a stride would silently disagree with it,
 and the disagreement would surface as a phantom RTL bug.
+
+### Completion
+
+The plugin does not know when the accelerator finishes a descriptor, but it can observe the three
+completion signals that the design exposes to software: the `ai.qfence` custom instruction, the
+`ai.poll` custom instruction, and a guest write to the descriptor's `ptr_done` word.
+
+- Each tensor event is buffered in `g6lc_tensor_events[hart]`. Submission sets `done = false` and
+  `status = 0`, and assigns a per-hart `ticket` from `g6lc_next_ticket[hart]` so the B2 stream agrees
+  with the B3 `AiIsland` ticket sequence.
+- `G6LC_AI_ST_OK` is emitted from the ingested `ST_OK` status code (defaulting to `0` only when the
+  package does not publish it), so completion status matches the B3 device model rather than a
+  hard-coded success value.
+- `ai.qfence` is recognised at translation time with `G6LC_AI_QFENCE_MASK` / `G6LC_AI_QFENCE_MATCH`
+  emitted from the ingested instruction set. Its execution callback marks every in-flight event for
+  that hart as `done = true` / `status = G6LC_AI_ST_OK`.
+- `ai.poll` is recognised with `G6LC_AI_POLL_MASK` / `G6LC_AI_POLL_MATCH`. Its callback reads the
+  polled `rs1` ticket, finds the matching in-flight event, and reads `8` bytes from the event's
+  `ptr_done`. The completion word is decoded using
+  `G6LC_AI_COMPLETION_TICKET_BIT_LOW/HIGH` and `G6LC_AI_COMPLETION_STATUS_BIT_LOW/HIGH`
+  emitted from the ingested `make_completion` layout. If the word contains the matching ticket and
+  `G6LC_AI_ST_OK`, the event is marked `done = true` / `status = G6LC_AI_ST_OK`.
+- B3 `AiIsland::queue_poll` also returns the packed completion word when the entry is done, using
+  the same `AiIsland::pack_completion_word` path. While pending it returns `0xffff_ffff`; an unknown
+  ticket returns the completion word with `ST_OK` so retired work is still reported as complete.
+- `g6lc_tensor_complete_by_ptr_done` scans the hart's in-flight events on every guest store. When
+  the ingested `make_completion` layout resolves, it reads the stored 64-bit word, extracts ticket
+  and status using `G6LC_AI_COMPLETION_*`, and marks the matching event `done = true` only when the
+  ticket matches and the status is `G6LC_AI_ST_OK`. Without the layout, it falls back to marking
+  any in-flight event whose `ptr_done` equals the store address as done.
+- At `g6lc_atexit` the buffered events are written through `g6lc_tensor_event_write`, which emits
+  `ticket`, `status`, and `done` as a JSON boolean (`true`/`false`). The artifact header is the same
+  `ArtifactHeader` shape as B3, including `profile` from `G6LC_PROFILE` and `profile_tainted` from
+  `G6LC_PROFILE_TAINTED`, which is derived from `model.diagnosable()` at emit time.
+
+The artifact is a `TensorArtifact` object (`{"header":..., "events":[...]}`), so the same
+`TensorArtifact::from_file` and `TensorArtifact::compare` paths can consume B2 and B3 output.
+
+### Tensor PMU fields (B2/B3 parity)
+
+`g6lc_tensor_event_write` also emits the four `AiTensorEvent` PMU members:
+
+- `pmu_r_beats`
+- `pmu_w_beats`
+- `pmu_cycles`
+- `pmu_gbps_x1000`
+
+B2 has no accelerator execution timing model, so these fields are written as `0` for every
+submission and completion. They are **not** a real measurement source. B3 derives them from the
+descriptor shape and the roofline model, as documented in [`DIAG.md`](DIAG.md), and emits them
+through the same artifact keys. Keeping the field shape identical across both backends lets
+`TensorArtifact::compare`, `AiTensorEvent::from_json`, and the bridge consumer handle B2 and B3
+output without branching on backend.
 
 ### The queue-instruction path
 

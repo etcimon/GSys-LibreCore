@@ -17,7 +17,7 @@ mod resolve;
 use args::Args;
 use g6q_core::model::Profile;
 use g6q_core::{Inputs, Json, Report, Row, TargetModel, Verdict, SCHEMA_VERSION, STAGE};
-use g6q_diag::ai_tensor::TensorTrace;
+use g6q_diag::ai_tensor::{TensorArtifact, TensorTrace};
 use g6q_vm::device::{AiIsland, Clint, Plic, Uart};
 use g6q_vm::mem::{Device, DeviceKind, PhysMem, Region};
 use g6q_vm::{Halt, Hart};
@@ -146,6 +146,7 @@ fn dispatch(verb: &str, args: &Args) -> Result<(), String> {
         "run" => cmd_run(args),
         "fw" => cmd_fw(args),
         "tandem" => cmd_tandem(args),
+        "diag" => cmd_diag(args),
         v if VERBS.iter().any(|x| x.name == v) => {
             let stage = VERBS.iter().find(|x| x.name == v).map_or("?", |x| x.stage);
             // Demonstrate the model plumbing so the skeleton is visibly wired, then be
@@ -712,10 +713,10 @@ mod tests {
 
     #[test]
     fn an_unimplemented_verb_says_so_rather_than_succeeding_silently() {
-        // `run` is now implemented; use a verb that is still stubbed.
-        let args = Args::parse(["diag", "--target", "x"]);
-        let err = dispatch("diag", &args).unwrap_err();
-        assert!(err.contains("stage Q5"), "{err}");
+        // `diag` is now implemented; `dts` is still stubbed.
+        let args = Args::parse(["dts", "--target", "x"]);
+        let err = dispatch("dts", &args).unwrap_err();
+        assert!(err.contains("stage Q1"), "{err}");
     }
 
     #[test]
@@ -755,6 +756,272 @@ mod tests {
     fn gen_matrix_is_available() {
         let args = Args::parse(["gen", "--target", "t", "--emit", "matrix"]);
         assert!(dispatch("gen", &args).is_ok());
+    }
+
+    #[test]
+    fn diag_emits_uarch_counters_without_reporting_a_future_stage() {
+        let mut tmp = std::env::temp_dir();
+        tmp.push("g6q-diag-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let out = tmp.join("uarch.json");
+        let path = out.to_str().unwrap();
+        let args = Args::parse(["diag", "--target", "t", "--uarch-out", path]);
+        assert!(dispatch("diag", &args).is_ok());
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(text.starts_with('['), "{text}");
+    }
+
+    #[test]
+    fn diag_measured_dram_gbps_x1000_closes_the_roofline() {
+        let mut tmp = std::env::temp_dir();
+        tmp.push("g6q-diag-measured-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Build a tiny repo root that has an AI island so the roofline counters are emitted.
+        let cfg_dir = tmp.join("core").join("include");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let config_pkg = cfg_dir.join("mini_config_pkg.sv");
+        std::fs::write(
+            &config_pkg,
+            r#"package mini_config_pkg;
+typedef struct packed {
+  int unsigned XLEN;
+  bit RVC;
+  bit RVM;
+  bit RVA;
+  int unsigned NrHarts;
+  int unsigned NrCores;
+} mini_cfg_t;
+localparam mini_cfg_t cva6_cfg = '{
+  XLEN: 64,
+  RVC: 1'b1,
+  RVM: 1'b1,
+  RVA: 1'b1,
+  NrHarts: 1,
+  NrCores: 1
+};
+endpackage
+"#,
+        )
+        .unwrap();
+
+        let flist = tmp.join("Flist.ariane");
+        std::fs::write(
+            &flist,
+            "${CVA6_REPO_DIR}/g6lc_ai_island_cfg_pkg.sv\n\
+             ${CVA6_REPO_DIR}/g6lc_ai_desc_pkg.sv\n\
+             ${CVA6_REPO_DIR}/g6lc_ai_instr_pkg.sv\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            tmp.join("g6lc_ai_island_cfg_pkg.sv"),
+            include_str!("../../../fixtures/ai/g6lc_ai_island_cfg_pkg.sv"),
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("g6lc_ai_desc_pkg.sv"),
+            include_str!("../../../fixtures/ai/g6lc_ai_desc_pkg.sv"),
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.join("g6lc_ai_instr_pkg.sv"),
+            include_str!("../../../fixtures/ai/g6lc_ai_instr_pkg.sv"),
+        )
+        .unwrap();
+
+        let dts_dir = tmp.join("corev_apu").join("bootrom");
+        std::fs::create_dir_all(&dts_dir).unwrap();
+        let dts = dts_dir.join("ariane-mini.dts");
+        std::fs::write(
+            &dts,
+            "/dts-v1/;\n\
+             / {\n\
+               #address-cells = <2>;\n\
+               #size-cells = <2>;\n\
+               cpus {\n\
+                 #address-cells = <1>;\n\
+                 #size-cells = <0>;\n\
+                 timebase-frequency = <32768>;\n\
+                 cpu@0 {\n\
+                   device_type = \"cpu\";\n\
+                   compatible = \"riscv\";\n\
+                   reg = <0>;\n\
+                   status = \"okay\";\n\
+                   riscv,isa-base = \"rv64i\";\n\
+                   riscv,isa-extensions = \"i\", \"m\", \"a\", \"c\";\n\
+                   mmu-type = \"riscv,sv39\";\n\
+                   interrupt-controller {\n\
+                     #interrupt-cells = <1>;\n\
+                     interrupt-controller;\n\
+                     compatible = \"riscv,cpu-intc\";\n\
+                   };\n\
+                 };\n\
+               };\n\
+               memory@80000000 {\n\
+                 device_type = \"memory\";\n\
+                 reg = <0x0 0x80000000 0x0 0x10000000>;\n\
+               };\n\
+             };\n",
+        )
+        .unwrap();
+
+        let out = tmp.join("uarch.json");
+        let repo = tmp.to_str().unwrap();
+        let path = out.to_str().unwrap();
+        let args = Args::parse([
+            "diag",
+            "--repo-root",
+            repo,
+            "--target",
+            "mini",
+            "--measured-dram-gbps-x1000",
+            "320500",
+            "--uarch-out",
+            path,
+        ]);
+        assert!(
+            dispatch("diag", &args).is_ok(),
+            "diag with measured DRAM should succeed"
+        );
+
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            text.contains("ai.island.measured_dram_gbps_x1000"),
+            "measured counter missing: {text}"
+        );
+        assert!(
+            text.contains("ai.roofline.balance_mac_per_byte"),
+            "roofline balance should close with a measured bandwidth: {text}"
+        );
+    }
+
+    #[test]
+    fn diag_merges_tensor_trace_counters() {
+        let mut tmp = std::env::temp_dir();
+        tmp.push("g6q-diag-tensor-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let tensor_path = tmp.join("tensor.json");
+        let out_path = tmp.join("uarch.json");
+        let ev = g6q_diag::ai_tensor::AiTensorEvent {
+            order: 0,
+            hart: 0,
+            descriptor_addr: 0x8000_0000,
+            op: 1,
+            version: 1,
+            flags: 0,
+            m: 4,
+            n: 4,
+            k: 4,
+            ld_ab: 4,
+            ptr_a: 0x9000_0000,
+            ptr_b: 0x9000_1000,
+            ptr_c: 0x9000_2000,
+            ptr_scale: 0,
+            ptr_done: 0xa000_0000,
+            dtype: 0,
+            cluster: 0,
+            ticket: 1,
+            status: 0,
+            done: true,
+            ..Default::default()
+        };
+        let trace = g6q_diag::ai_tensor::TensorTrace {
+            events: vec![ev],
+            flags_layout: None,
+        };
+        std::fs::write(&tensor_path, trace.to_json().to_pretty()).unwrap();
+
+        let args = Args::parse([
+            "diag",
+            "--target",
+            "t",
+            "--tensor",
+            tensor_path.to_str().unwrap(),
+            "--uarch-out",
+            out_path.to_str().unwrap(),
+        ]);
+        assert!(dispatch("diag", &args).is_ok());
+
+        let text = std::fs::read_to_string(&out_path).unwrap();
+        assert!(text.contains("ai.tensor.ops"), "{text}");
+        assert!(text.contains("ai.tensor.macs"), "{text}");
+    }
+
+    #[test]
+    fn diag_compares_two_tensor_artifacts() {
+        let mut tmp = std::env::temp_dir();
+        tmp.push("g6q-diag-compare-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let left_path = tmp.join("left.json");
+        let right_path = tmp.join("right.json");
+        let out_path = tmp.join("uarch.json");
+
+        let ev = g6q_diag::ai_tensor::AiTensorEvent {
+            order: 0,
+            hart: 0,
+            descriptor_addr: 0x8000_0000,
+            op: 1,
+            version: 1,
+            flags: 0,
+            m: 4,
+            n: 4,
+            k: 4,
+            ld_ab: 4,
+            ptr_a: 0x9000_0000,
+            ptr_b: 0x9000_1000,
+            ptr_c: 0x9000_2000,
+            ptr_scale: 0,
+            ptr_done: 0xa000_0000,
+            dtype: 0,
+            cluster: 0,
+            ticket: 1,
+            status: 0,
+            done: true,
+            ..Default::default()
+        };
+        let header = g6q_diag::ArtifactHeader {
+            profile: "g6lc-soc".into(),
+            tainted: false,
+        };
+        let left = g6q_diag::ai_tensor::TensorArtifact::new(
+            header.clone(),
+            g6q_diag::ai_tensor::TensorTrace {
+                events: vec![ev],
+                flags_layout: None,
+            },
+        );
+        let mut ev2 = ev;
+        ev2.done = false;
+        let right = g6q_diag::ai_tensor::TensorArtifact::new(
+            header,
+            g6q_diag::ai_tensor::TensorTrace {
+                events: vec![ev2],
+                flags_layout: None,
+            },
+        );
+        std::fs::write(&left_path, left.to_json().to_pretty()).unwrap();
+        std::fs::write(&right_path, right.to_json().to_pretty()).unwrap();
+
+        let args = Args::parse([
+            "diag",
+            "--target",
+            "t",
+            "--tensor",
+            left_path.to_str().unwrap(),
+            "--tensor",
+            right_path.to_str().unwrap(),
+            "--uarch-out",
+            out_path.to_str().unwrap(),
+        ]);
+        let err = dispatch("diag", &args).unwrap_err();
+        assert!(err.contains("divergence"), "{err}");
     }
 
     #[test]
@@ -1227,16 +1494,16 @@ fn run_native(args: &Args) -> Result<(), String> {
 
     if let Some(path) = args.value("tensor") {
         if let Some(ai) = mem.ai_island_mut() {
-            let trace = TensorTrace {
+            let mut trace = TensorTrace {
                 events: ai.drain_events(),
+                flags_layout: None,
             };
-            let header = Json::obj([
-                ("profile", Json::Str(model.target_id.clone())),
-                ("profile_tainted", Json::Bool(!model.faithful)),
-                ("evidence", Json::Bool(false)),
-            ]);
-            let body = Json::obj([("header", header), ("events", trace.to_json())]);
-            std::fs::write(path, body.to_pretty())
+            if let Some(island) = model.soc.ai_island.as_ref() {
+                trace.flags_layout = island.desc_layout.flags_layout;
+            }
+            let header = g6q_diag::ArtifactHeader::from_model(&model);
+            let artifact = TensorArtifact::new(header, trace);
+            std::fs::write(path, artifact.to_json().to_pretty())
                 .map_err(|e| format!("cannot write {path}: {e}"))?;
             eprintln!("g6lc-qemu: wrote {path}");
         }
@@ -1411,4 +1678,61 @@ fn cmd_tandem(args: &Args) -> Result<(), String> {
         }
     }
     Err("tandem divergence detected".to_string())
+}
+
+/// `diag` — emit D2 microarchitectural counters from the resolved target.
+fn cmd_diag(args: &Args) -> Result<(), String> {
+    let resolved = resolve::resolve(args)?;
+    let mut model = g6q_ingest::assemble(&resolved.sources);
+
+    if !model.diagnosable() && !args.flag("allow-virt-diag") {
+        return Err(
+            "the virt profile is not diagnosable by default; use --allow-virt-diag to taint output"
+                .into(),
+        );
+    }
+
+    // A host-supplied measured DRAM bandwidth closes the roofline even when the design has
+    // not yet published one. This is the F11 loop from the host side.
+    if let Some(v) = args.value("measured-dram-gbps-x1000") {
+        let measured: u32 = v.parse().map_err(|_| {
+            format!("--measured-dram-gbps-x1000 must be a non-negative integer, got {v}")
+        })?;
+        if let Some(ref mut ai) = model.soc.ai_island {
+            ai.config.measured_dram_gbps_x1000 = Some(measured);
+        }
+    }
+
+    let mut counters = g6q_diag::model_counters(&model);
+
+    let tensor_paths: Vec<&str> = args.values("tensor").iter().map(String::as_str).collect();
+    match tensor_paths.as_slice() {
+        [] => {}
+        [path] => {
+            let artifact = g6q_diag::ai_tensor::TensorArtifact::from_file(path)?;
+            counters.extend(g6q_diag::ai_tensor::tensor_counters(&artifact.trace.events));
+        }
+        [left, right] => {
+            let left = g6q_diag::ai_tensor::TensorArtifact::from_file(left)?;
+            let right = g6q_diag::ai_tensor::TensorArtifact::from_file(right)?;
+            if let Some(diff) = left.compare(&right) {
+                return Err(format!("tensor artifact divergence: {diff}"));
+            }
+            counters.extend(g6q_diag::ai_tensor::tensor_counters(&left.trace.events));
+        }
+        _ => return Err("diag --tensor accepts one or two artifacts".into()),
+    }
+
+    let arr = Json::arr(counters.iter().map(|c| c.to_json()).collect::<Vec<_>>());
+    let text = arr.to_pretty();
+
+    if let Some(path) = args.value("uarch-out") {
+        write_out(path, &text)?;
+        eprintln!("g6lc-qemu: wrote {path}");
+    } else {
+        print!("{text}");
+    }
+
+    eprintln!("\nnot verification evidence; a hypothesis and a checkpoint only");
+    Ok(())
 }

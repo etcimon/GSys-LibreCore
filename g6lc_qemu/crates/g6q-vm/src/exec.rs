@@ -630,6 +630,34 @@ impl Hart {
         }
     }
 
+    /// Read an AI queue CSR if the model provides one and the island is installed.
+    ///
+    /// Returns `Some(value)` for `aiqbase`/`aiqctl`/`aiqhead`, `None` for all other CSR numbers
+    /// so the standard `CsrBank` keeps control of the rest of the CSR space.
+    fn ai_queue_csr_read(&self, mem: &PhysMem, csr: u16) -> Option<u64> {
+        let set = self.ai_instr_set.as_ref()?;
+        if set.csr_aiqbase == 0 && set.csr_aiqctl == 0 && set.csr_aiqhead == 0 {
+            return None;
+        }
+        if csr != set.csr_aiqbase && csr != set.csr_aiqctl && csr != set.csr_aiqhead {
+            return None;
+        }
+        mem.ai_island()?.queue_csr_read(self.csr.hartid as u32, csr)
+    }
+
+    /// Write an AI queue CSR if the model provides one and the island is installed.
+    fn ai_queue_csr_write(&mut self, mem: &mut PhysMem, csr: u16, value: u64) -> Option<u64> {
+        let set = self.ai_instr_set.as_ref()?;
+        if set.csr_aiqbase == 0 && set.csr_aiqctl == 0 && set.csr_aiqhead == 0 {
+            return None;
+        }
+        if csr != set.csr_aiqbase && csr != set.csr_aiqctl && csr != set.csr_aiqhead {
+            return None;
+        }
+        mem.ai_island_mut()?
+            .queue_csr_write(self.csr.hartid as u32, csr, value)
+    }
+
     fn execute(&mut self, insn: Insn, mem: &mut PhysMem, xlen: u8) -> Result<u64, ExecError> {
         let nx = self.regs.pc.wrapping_add(self.inst_len as u64);
         // For variable shifts the mask depends on XLEN; 32-bit words always use 5 bits.
@@ -1366,6 +1394,12 @@ impl Hart {
 
             Insn::Fence | Insn::FenceI => Ok(nx),
             Insn::Csrrw { rd, rs1, csr } => {
+                if let Some(old) = self.ai_queue_csr_read(mem, csr) {
+                    let new = self.regs.get(rs1);
+                    self.ai_queue_csr_write(mem, csr, new);
+                    self.regs.set(rd, old);
+                    return Ok(nx);
+                }
                 let old = self.csr.read(csr).map_err(|_| {
                     self.fault_addr = 0;
                     ExecError::Trap(2)
@@ -1379,6 +1413,16 @@ impl Hart {
                 Ok(nx)
             }
             Insn::Csrrs { rd, rs1, csr } => {
+                if let Some(old) = self.ai_queue_csr_read(mem, csr) {
+                    let new = if rs1 != 0 {
+                        old | self.regs.get(rs1)
+                    } else {
+                        old
+                    };
+                    self.ai_queue_csr_write(mem, csr, new);
+                    self.regs.set(rd, old);
+                    return Ok(nx);
+                }
                 let old = self.csr.read(csr).map_err(|_| {
                     self.fault_addr = 0;
                     ExecError::Trap(2)
@@ -1393,6 +1437,16 @@ impl Hart {
                 Ok(nx)
             }
             Insn::Csrrc { rd, rs1, csr } => {
+                if let Some(old) = self.ai_queue_csr_read(mem, csr) {
+                    let new = if rs1 != 0 {
+                        old & !self.regs.get(rs1)
+                    } else {
+                        old
+                    };
+                    self.ai_queue_csr_write(mem, csr, new);
+                    self.regs.set(rd, old);
+                    return Ok(nx);
+                }
                 let old = self.csr.read(csr).map_err(|_| {
                     self.fault_addr = 0;
                     ExecError::Trap(2)
@@ -1407,6 +1461,11 @@ impl Hart {
                 Ok(nx)
             }
             Insn::Csrrwi { rd, uimm, csr } => {
+                if let Some(old) = self.ai_queue_csr_read(mem, csr) {
+                    self.ai_queue_csr_write(mem, csr, uimm as u64);
+                    self.regs.set(rd, old);
+                    return Ok(nx);
+                }
                 let old = self.csr.read(csr).map_err(|_| {
                     self.fault_addr = 0;
                     ExecError::Trap(2)
@@ -1419,6 +1478,12 @@ impl Hart {
                 Ok(nx)
             }
             Insn::Csrrsi { rd, uimm, csr } => {
+                if let Some(old) = self.ai_queue_csr_read(mem, csr) {
+                    let new = if uimm != 0 { old | uimm as u64 } else { old };
+                    self.ai_queue_csr_write(mem, csr, new);
+                    self.regs.set(rd, old);
+                    return Ok(nx);
+                }
                 let old = self.csr.read(csr).map_err(|_| {
                     self.fault_addr = 0;
                     ExecError::Trap(2)
@@ -1433,6 +1498,12 @@ impl Hart {
                 Ok(nx)
             }
             Insn::Csrrci { rd, uimm, csr } => {
+                if let Some(old) = self.ai_queue_csr_read(mem, csr) {
+                    let new = if uimm != 0 { old & !(uimm as u64) } else { old };
+                    self.ai_queue_csr_write(mem, csr, new);
+                    self.regs.set(rd, old);
+                    return Ok(nx);
+                }
                 let old = self.csr.read(csr).map_err(|_| {
                     self.fault_addr = 0;
                     ExecError::Trap(2)
@@ -2795,9 +2866,14 @@ impl Hart {
         nx: u64,
     ) -> Result<u64, ExecError> {
         let desc_addr = self.regs.get(rs1);
+        let hart = self.csr.hartid as u32;
+        let event = self
+            .ai_model
+            .as_ref()
+            .and_then(|m| crate::device::AiIsland::read_descriptor_event(mem, desc_addr, hart, m));
         if let Some(ai) = mem.ai_island_mut() {
             let hart = self.csr.hartid as u32;
-            let ticket = ai.queue_enq(desc_addr, hart).unwrap_or(0);
+            let ticket = ai.queue_enq_with_event(desc_addr, hart, event).unwrap_or(0);
             self.regs.set(rd, ticket);
             Ok(nx)
         } else {
@@ -2816,8 +2892,13 @@ impl Hart {
     ) -> Result<u64, ExecError> {
         let ticket = self.regs.get(rs1);
         if let Some(ai) = mem.ai_island_mut() {
-            let status = ai.queue_poll(ticket).unwrap_or(0);
-            self.regs.set(rd, status);
+            let (word, ptr_done) = ai.queue_poll_details(ticket);
+            // The island writes the completion word to ptr_done only when the entry is done;
+            // while pending the guest just sees the 0xffff_ffff sentinel.
+            if ptr_done != 0 && word != 0xffff_ffff {
+                let _ = mem.write_le::<8>(ptr_done, word);
+            }
+            self.regs.set(rd, word);
             Ok(nx)
         } else {
             self.fault_addr = 0;
@@ -2827,14 +2908,17 @@ impl Hart {
     }
 
     fn execute_ai_qfence(&mut self, mem: &mut PhysMem, nx: u64) -> Result<u64, ExecError> {
-        if let Some(ai) = mem.ai_island_mut() {
-            ai.queue_qfence();
-            Ok(nx)
+        let writes = if let Some(ai) = mem.ai_island_mut() {
+            ai.queue_qfence()
         } else {
             self.fault_addr = 0;
             self.take_trap(2);
-            Ok(self.regs.pc)
+            return Ok(self.regs.pc);
+        };
+        for (addr, word) in writes {
+            let _ = mem.write_le::<8>(addr, word);
         }
+        Ok(nx)
     }
 
     fn execute_fp(
@@ -4692,6 +4776,59 @@ mod tests {
     }
 
     #[test]
+    fn sv32_four_megabyte_page_fetches_and_advances_pc() {
+        let mut h = Hart::new(0x8000_0000);
+        h.csr.mtvec = 0x7000_0000;
+        h.mmu = Mmu::sv32();
+        let mut m = PhysMem::new();
+        m.add(Region::new(0x8000_0000, 0x1000));
+
+        // Page table at 0x9000_0000 with a 4 MiB level-1 leaf.
+        let pt_base = 0x9000_0000u64;
+        m.add(Region::new(pt_base, 0x1000));
+        let ppn = 0x8000_0000u64 >> 12;
+        let pte = (ppn << 10) | 0xF;
+        m.write_le::<4>(pt_base, pte).unwrap();
+
+        // Program at 0x8000_0000: lui x0, 0
+        m.write_le::<4>(0x8000_0000, 0x0000_0037).unwrap();
+
+        h.csr.satp = (1u64 << 31) | (pt_base >> 12);
+        h.regs.pc = 0;
+
+        assert_eq!(h.step(&mut m, 32), None);
+        assert_eq!(h.regs.pc, 4);
+    }
+
+    #[test]
+    fn sv48_one_gigabyte_page_fetches_and_advances_pc() {
+        let mut h = Hart::new(0x8000_0000);
+        h.csr.mtvec = 0x7000_0000;
+        h.mmu = Mmu::sv48();
+        let mut m = PhysMem::new();
+        m.add(Region::new(0x8000_0000, 0x1000));
+
+        // Root at 0x9000_0000, l2 table at 0x9000_1000, 1 GiB leaf at l2[0].
+        let pt_base = 0x9000_0000u64;
+        let l2_base = 0x9000_1000u64;
+        m.add(Region::new(pt_base, 0x2000));
+        let l2_ppn = l2_base >> 12;
+        m.write_le::<8>(pt_base, (l2_ppn << 10) | 0x1).unwrap();
+
+        let ppn = 0x8000_0000u64 >> 12;
+        m.write_le::<8>(l2_base, (ppn << 10) | 0xF).unwrap();
+
+        // Program at 0x8000_0000: lui x0, 0
+        m.write_le::<4>(0x8000_0000, 0x0000_0037).unwrap();
+
+        h.csr.satp = (9u64 << 60) | (pt_base >> 12);
+        h.regs.pc = 0;
+
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.pc, 4);
+    }
+
+    #[test]
     fn f_load_store_and_move_preserve_bits() {
         let mut h = hart();
         let mut m = mem();
@@ -5262,6 +5399,186 @@ mod tests {
     }
 
     #[test]
+    fn ai_enq_reads_descriptor_and_qfence_writes_completion() {
+        use crate::device::AiIsland;
+        use crate::mem::{Device, DeviceKind, Region};
+
+        let mut h = hart();
+        let mut m = mem();
+        let mut ai_island = AiIsland::new();
+        let ai_model = crate::device::tests::model_with_layout();
+        ai_island.set_ai_model(&ai_model);
+        m.add_device(Device::new(
+            0x3000_0000,
+            0x1000,
+            DeviceKind::AiIsland(ai_island),
+        ));
+
+        h.ai_instr_set = Some(g6q_core::model::AiInstrSet {
+            opcode_custom2: 0x5B,
+            mask_f7f3op: 0xFE00707F,
+            match_enq: 0x0000505B,
+            match_poll: 0x0200505B,
+            match_qfence: 0x0400505B,
+            ..Default::default()
+        });
+        h.ai_model = Some(ai_model);
+
+        // Descriptor at 0x9000_0000, completion sink at 0xa000_0000.
+        let desc_addr = 0x9000_0000u64;
+        let done_addr = 0xa000_0000u64;
+        m.add(Region::new(desc_addr, 0x1000));
+        m.add(Region::new(done_addr, 0x1000));
+
+        // Pack a descriptor using the ingested layout.
+        let model = &h.ai_model.as_ref().unwrap().desc_layout;
+        for (name, field) in &model.fields {
+            let addr = desc_addr + field.offset;
+            let value = match name.as_str() {
+                "version" => 1u64,
+                "op" => 1,
+                "flags" => 0x0000_0100, // dtype = 1
+                "m" => 4,
+                "n" => 4,
+                "k" => 4,
+                "ptr_a" => 0x9000_1000,
+                "ptr_b" => 0x9000_2000,
+                "ptr_c" => 0x9000_3000,
+                "ptr_done" => done_addr,
+                _ => 0,
+            };
+            match field.size {
+                2 => m.write_le::<2>(addr, value).unwrap(),
+                4 => m.write_le::<4>(addr, value).unwrap(),
+                8 => m.write_le::<8>(addr, value).unwrap(),
+                _ => {}
+            }
+        }
+
+        // Point x10 at the descriptor.
+        h.regs.set(10, desc_addr);
+
+        // ai.enq x5, x10 -> rd=5, rs1=10: (10<<15)|(5<<12)|(5<<7)|0x5B
+        m.write_le::<4>(0x8000_0000, (10 << 15) | (5 << 12) | (5 << 7) | 0x5B)
+            .unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.get(5), 0);
+
+        // ai.qfence
+        m.write_le::<4>(0x8000_0004, (2 << 25) | (5 << 12) | 0x5B)
+            .unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+
+        // The island should have written the completion word to ptr_done.
+        let word = m.read_le::<8>(done_addr).unwrap();
+        let ticket = word & ((1u64 << 32) - 1);
+        let status = (word >> 32) & 0xffff;
+        assert_eq!(ticket, 0);
+        assert_eq!(status, 0);
+
+        // The tensor event carries the descriptor's fields, not the MMIO shadow state.
+        if let Some(ai) = m.ai_island_mut() {
+            let events = ai.drain_events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].descriptor_addr, desc_addr);
+            assert_eq!(events[0].op, 1);
+            assert_eq!(events[0].dtype, 1);
+            assert_eq!(events[0].ptr_done, done_addr);
+            assert!(events[0].done);
+        }
+    }
+
+    #[test]
+    fn ai_poll_writes_completion_word_to_ptr_done() {
+        use crate::device::AiIsland;
+        use crate::mem::{Device, DeviceKind, Region};
+
+        let mut h = hart();
+        let mut m = mem();
+        let mut ai_island = AiIsland::new();
+        let ai_model = crate::device::tests::model_with_layout();
+        ai_island.set_ai_model(&ai_model);
+        m.add_device(Device::new(
+            0x3000_0000,
+            0x1000,
+            DeviceKind::AiIsland(ai_island),
+        ));
+
+        h.ai_instr_set = Some(g6q_core::model::AiInstrSet {
+            opcode_custom2: 0x5B,
+            mask_f7f3op: 0xFE00707F,
+            match_enq: 0x0000505B,
+            match_poll: 0x0200505B,
+            match_qfence: 0x0400505B,
+            ..Default::default()
+        });
+        h.ai_model = Some(ai_model);
+
+        let desc_addr = 0x9000_0000u64;
+        let done_addr = 0xa000_0000u64;
+        m.add(Region::new(desc_addr, 0x1000));
+        m.add(Region::new(done_addr, 0x1000));
+
+        // Pack a descriptor using the ingested layout.
+        let model = &h.ai_model.as_ref().unwrap().desc_layout;
+        for (name, field) in &model.fields {
+            let addr = desc_addr + field.offset;
+            let value = match name.as_str() {
+                "version" => 1u64,
+                "op" => 1,
+                "flags" => 0x0000_0100,
+                "m" => 4,
+                "n" => 4,
+                "k" => 4,
+                "ptr_a" => 0x9000_1000,
+                "ptr_b" => 0x9000_2000,
+                "ptr_c" => 0x9000_3000,
+                "ptr_done" => done_addr,
+                _ => 0,
+            };
+            match field.size {
+                2 => m.write_le::<2>(addr, value).unwrap(),
+                4 => m.write_le::<4>(addr, value).unwrap(),
+                8 => m.write_le::<8>(addr, value).unwrap(),
+                _ => {}
+            }
+        }
+
+        h.regs.set(10, desc_addr);
+
+        // ai.enq x5, x10
+        m.write_le::<4>(0x8000_0000, (10 << 15) | (5 << 12) | (5 << 7) | 0x5B)
+            .unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.get(5), 0);
+
+        // ai.qfence to mark the entry done.
+        m.write_le::<4>(0x8000_0004, (2 << 25) | (5 << 12) | 0x5B)
+            .unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+
+        // Overwrite the completion word at ptr_done with a dummy sentinel so the
+        // poll write is observable.
+        m.write_le::<8>(done_addr, 0xdead_beef_dead_beef).unwrap();
+
+        // ai.poll x6, x5 -> rd=6, rs1=5
+        m.write_le::<4>(
+            0x8000_0008,
+            (1 << 25) | (5 << 15) | (5 << 12) | (6 << 7) | 0x5B,
+        )
+        .unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+
+        // The poll should have re-written the completion word.
+        let word = m.read_le::<8>(done_addr).unwrap();
+        let ticket = word & ((1u64 << 32) - 1);
+        let status = (word >> 32) & 0xffff;
+        assert_eq!(ticket, 0);
+        assert_eq!(status, 0);
+        assert_eq!(h.regs.get(6), word);
+    }
+
+    #[test]
     fn ai_queue_full_and_ticket_sequence() {
         use crate::device::AiIsland;
         use crate::mem::{Device, DeviceKind};
@@ -5339,6 +5656,72 @@ mod tests {
                 .map(|c| (c.name.as_str(), c.value))
                 .collect();
             assert_eq!(by_name["ai.tensor.queue_entries"], 2);
+        }
+    }
+
+    #[test]
+    fn ai_queue_csrs_read_and_write() {
+        use crate::device::AiIsland;
+        use crate::mem::{Device, DeviceKind};
+        let mut h = hart();
+        let mut m = mem();
+        let mut ai_island = AiIsland::new();
+        let mut ai_model = g6q_core::model::AiIslandModel {
+            config: g6q_core::model::AiIslandConfig {
+                queue_depth: 4,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        ai_model.instr_set = g6q_core::model::AiInstrSet {
+            opcode_custom2: 0x5B,
+            mask_f7f3op: 0xFE00707F,
+            csr_aiqbase: 0x5C0,
+            csr_aiqctl: 0x5C1,
+            csr_aiqhead: 0x5C2,
+            match_enq: 0x0000505B,
+            match_poll: 0x0200505B,
+            match_qfence: 0x0400505B,
+        };
+        ai_island.set_ai_model(&ai_model);
+        m.add_device(Device::new(
+            0x3000_0000,
+            0x1000,
+            DeviceKind::AiIsland(ai_island),
+        ));
+        h.ai_instr_set = Some(ai_model.instr_set.clone());
+        h.ai_model = Some(ai_model);
+
+        // x10 = base, x11 = ctl, x12 = head
+        h.regs.set(10, 0x9000_0000);
+        h.regs.set(11, 0x1);
+        h.regs.set(12, 7); // will be wrapped to 7 % 4 = 3
+
+        // csrrw x1, aiqbase, x10
+        write_csr(&mut m, 0x8000_0000, 1, 10, 0x5C0);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.get(1), 0); // old base
+
+        // csrrw x2, aiqctl, x11
+        write_csr(&mut m, 0x8000_0004, 2, 11, 0x5C1);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.get(2), 0); // old ctl
+
+        // csrrw x3, aiqhead, x12
+        write_csr(&mut m, 0x8000_0008, 3, 12, 0x5C2);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.get(3), 0); // old head
+
+        // csrrw x4, aiqhead, x0  (read back current head, write zero)
+        write_csr(&mut m, 0x8000_000c, 4, 0, 0x5C2);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.get(4), 3); // previous head was 7 % 4
+
+        if let Some(ai) = m.ai_island() {
+            let q = &ai.queues[ai.ring_for_hart(0)];
+            assert_eq!(q.base, 0x9000_0000, "aiqbase");
+            assert_eq!(q.ctl, 0x1, "aiqctl");
+            assert_eq!(q.head, 0, "aiqhead");
         }
     }
 }

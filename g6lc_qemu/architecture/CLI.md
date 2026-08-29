@@ -157,6 +157,7 @@ time rather than silently switching profiles.
 | `--checkpoint-out DIR` | — | resumable state, **faithful profile only** |
 | `--pmu-out FILE`, `--uarch-out FILE` | — | counters; structure profile |
 | `--allow-virt-diag` | off | required to diagnose under the virt profile; taints output |
+|| `--measured-dram-gbps-x1000 N` | — | host-supplied measured DRAM bandwidth in 1/1000 GB/s; closes the roofline even when the design has not published it |
 
 Every diagnosis artifact carries `"evidence": false`.
 

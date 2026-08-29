@@ -384,9 +384,28 @@ fn build_ai_island_model(flist: &g6q_flist::Expansion) -> Option<g6q_core::model
     let desc_text = std::fs::read_to_string(desc_path).ok()?;
     let instr_text = std::fs::read_to_string(instr_path).ok()?;
 
-    let config = g6q_diag::ai_cfg::parse_ai_island_cfg_pkg(&cfg_text).ok()?;
+    let mut config = g6q_diag::ai_cfg::parse_ai_island_cfg_pkg(&cfg_text).ok()?;
     let desc_layout = g6q_diag::ai_desc::parse_ai_desc_pkg(&desc_text).ok()?;
     let instr_set = g6q_diag::ai_instr::parse_ai_instr_pkg(&instr_text).ok()?;
+
+    // The data-type grant mask and packed block_mnk layout are parameters/expressions
+    // in the cap window module, not fields of the config package, so the model is
+    // incomplete unless the flist also names the module and the values can be read from it.
+    if let Some(cap_path) = flist
+        .files
+        .iter()
+        .find(|f| f.ends_with("g6lc_ai_cap_window.sv"))
+    {
+        if let Ok(cap_text) = std::fs::read_to_string(cap_path) {
+            config.dtype_mask = g6q_diag::ai_cap::parse_cap_window_dtype_mask(&cap_text);
+            config.block_mnk = g6q_diag::ai_cap::parse_cap_window_block_mnk(&cap_text);
+            if let Some(packed) =
+                g6q_diag::ai_cap::parse_cap_window_packed(&cap_text, &config.cap_offsets)
+            {
+                config.cap_packed = packed;
+            }
+        }
+    }
 
     Some(g6q_core::model::AiIslandModel {
         config,
@@ -768,5 +787,86 @@ mod tests {
             assemble(&src).to_json().to_pretty()
         };
         assert_eq!(build(), build());
+    }
+
+    #[test]
+    fn ai_island_ingestion_carries_queue_cluster_map() {
+        // The end-to-end ingest path must carry the queue-to-cluster map the
+        // configuration package publishes, or the B3/B2 backends cannot agree.
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixture = crate_dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("fixtures")
+            .join("ai");
+        let mut flist = Expansion::default();
+        for name in [
+            "g6lc_ai_island_cfg_pkg.sv",
+            "g6lc_ai_desc_pkg.sv",
+            "g6lc_ai_instr_pkg.sv",
+        ] {
+            flist
+                .files
+                .push(fixture.join(name).to_string_lossy().into_owned());
+        }
+        let model = build_ai_island_model(&flist).expect("fixture parses");
+        assert_eq!(model.config.queues, 2);
+        assert_eq!(model.config.queue_cluster_map, Some(vec![0, 1]));
+        assert_eq!(model.desc_layout.desc_bytes, 64);
+        assert_eq!(model.desc_layout.offset("ptr_done"), Some(56));
+        assert_eq!(model.instr_set.match_enq, 0x0000_505B);
+        assert_eq!(model.instr_set.match_qfence, 0x0400_505B);
+    }
+
+    /// A package that publishes the per-field arithmetic-type accessors makes sub-byte and
+    /// sparse work expressible end to end.
+    ///
+    /// This is the ingest side of `RTL_FEEDBACK.md` F10. The fixture publishes
+    /// `desc_dtype`/`desc_accmode`/`desc_ew`/`desc_sp24` (the shape the emulator asks the
+    /// design for) *and* a stale combined comment, so this also proves the accessor wins.
+    #[test]
+    fn published_arith_type_accessors_make_sub_byte_requests_expressible() {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixture = crate_dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("fixtures")
+            .join("ai");
+        let mut flist = Expansion::default();
+        for name in [
+            "g6lc_ai_island_cfg_pkg.sv",
+            "g6lc_ai_desc_pkg.sv",
+            "g6lc_ai_instr_pkg.sv",
+        ] {
+            flist
+                .files
+                .push(fixture.join(name).to_string_lossy().into_owned());
+        }
+        let model = build_ai_island_model(&flist).expect("fixture parses");
+        let f = model
+            .desc_layout
+            .flags_layout
+            .expect("fixture publishes a flags layout");
+
+        assert!(
+            f.arith_type_resolved(),
+            "the fixture publishes all four accessors"
+        );
+        // The accessor narrowed dtype to 2 bits; the stale comment would have said 6.
+        assert!(!f.dtype_combined);
+        assert_eq!(f.dtype_mask, 0x3);
+        assert_eq!(f.ew.unwrap().shift, 12);
+        assert_eq!(f.sp24_bit, Some(14));
+
+        // An INT4 2:4-sparse request is now distinguishable from dense INT8.
+        let dense_int8 = 0u32;
+        let sparse_int4 = (1u32 << 12) | (1u32 << 14);
+        assert_eq!(f.ew.unwrap().extract(dense_int8), 0);
+        assert_eq!(f.ew.unwrap().extract(sparse_int4), 1, "ew = 01 is 4-bit");
+        assert_eq!((sparse_int4 >> f.sp24_bit.unwrap()) & 1, 1);
     }
 }

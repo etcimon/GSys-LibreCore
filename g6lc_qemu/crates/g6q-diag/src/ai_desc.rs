@@ -17,8 +17,15 @@ pub use g6q_core::model::{AiDescLayout, DescField};
 /// Parse an AI descriptor package from source text.
 ///
 /// This is intentionally narrow: it reads `localparam` scalars that match the
-/// `OP_*`, `ST_*` and `DescBytes` naming used by the package, and the `bits_to_desc`
-/// function body to recover field bit ranges.
+/// `OP_*`, `ST_*` and `DescBytes` naming used by the package, the `bits_to_desc`
+/// function body to recover field bit ranges, and `make_completion` to recover the
+/// completion word layout.
+///
+/// It also validates the descriptor word order. When the package publishes both
+/// `bits_to_desc` and `desc_to_bits`, they must agree. When the `desc_t` struct carries
+/// byte-offset comments like `// +0x08`, those offsets must match the bit-derived layout.
+/// A mismatch is reported as an error rather than silently accepted, so a drift between
+/// the packed function and the struct comments surfaces as an unresolved model.
 pub fn parse_ai_desc_pkg(text: &str) -> Result<AiDescLayout, String> {
     let mut layout = AiDescLayout::default();
     let cleaned = strip_sv_comments(text);
@@ -60,6 +67,18 @@ pub fn parse_ai_desc_pkg(text: &str) -> Result<AiDescLayout, String> {
                 },
             );
         }
+    }
+
+    // Third pass: cross-check bits_to_desc against desc_to_bits and desc_t offsets.
+    validate_word_order(text, &layout)?;
+
+    // Fourth pass: packed flags layout from helper functions and comments.
+    // Use the raw text: `strip_sv_comments` removes the `//` lines we need.
+    layout.flags_layout = parse_flags_layout(text);
+
+    // Fifth pass: completion word layout from make_completion.
+    if let Some(body) = extract_function_body(&cleaned, "make_completion") {
+        layout.completion = parse_completion_layout(&body);
     }
 
     Ok(layout)
@@ -151,35 +170,34 @@ fn parse_sv_int(s: &str) -> Option<i64> {
 }
 
 fn extract_function_body(text: &str, name: &str) -> Option<String> {
-    let needle = format!("function automatic desc_t {name}");
-    let start = text.find(&needle)?;
-    let after_sig = text[start..]
-        .find('(')
-        .and_then(|_| text[start..].find(';'))?;
-    let body_start = start + after_sig + 1;
-    let mut depth = 0;
-    let mut out = String::new();
-    for c in text[body_start..].chars() {
-        match c {
-            'b' => {
-                // cheap begin/end tracking
-                if text[body_start..body_start + out.len() + 1].ends_with("begin") {
-                    depth += 1;
-                }
-            }
-            'd' => {
-                if depth > 0 && text[body_start..body_start + out.len() + 1].ends_with("end") {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
+    // Walk "function automatic" declarations and return the full text of the one
+    // whose name appears just before the opening '(' (signature and body). This lets
+    // callers recover parameter widths from the signature as well as the return value.
+    let mut start = 0;
+    let needle = "function automatic";
+    while let Some(pos) = text[start..].find(needle) {
+        let after = start + pos + needle.len();
+        let rest = &text[after..];
+        if let Some(paren) = rest.find('(') {
+            let sig = &rest[..paren];
+            let tokens: Vec<_> = sig.split_whitespace().collect();
+            if let Some(last) = tokens.last() {
+                let found = last.trim_end_matches(';');
+                if found == name {
+                    let func_start = start + pos;
+                    if let Some(end) = text[func_start..].find("endfunction") {
+                        return Some(
+                            text[func_start..func_start + end + "endfunction".len()]
+                                .trim()
+                                .to_string(),
+                        );
                     }
                 }
             }
-            _ => {}
         }
-        out.push(c);
+        start = after;
     }
-    Some(out)
+    None
 }
 
 fn parse_assignment_range(stmt: &str) -> Option<(&str, u64, u64)> {
@@ -195,6 +213,344 @@ fn parse_assignment_range(stmt: &str) -> Option<(&str, u64, u64)> {
     let high = high.trim().parse().ok()?;
     let low = low.trim().parse().ok()?;
     Some((field, high, low))
+}
+
+/// Parse `b[<high>:<low>] = d.<field>;` assignments from `desc_to_bits`.
+fn parse_desc_to_bits(stmt: &str) -> Option<(String, (u64, u64))> {
+    let stmt = stmt.trim();
+    let bracket_start = stmt.find('[')?;
+    let bracket_end = stmt.find(']')?;
+    let range = &stmt[bracket_start + 1..bracket_end];
+    let (high, low) = range.split_once(':')?;
+    let high = high.trim().parse().ok()?;
+    let low = low.trim().parse().ok()?;
+    let eq_pos = stmt.find('=')?;
+    let field = stmt[eq_pos + 1..]
+        .trim()
+        .trim_start_matches("d.")
+        .trim_end_matches(';');
+    Some((field.to_string(), (high, low)))
+}
+
+/// Extract byte offsets from `desc_t` field comments like `// +0x08`.
+fn parse_desc_t_offsets(text: &str) -> Option<std::collections::BTreeMap<String, (u64, u64)>> {
+    let start = text.find("typedef struct packed")?;
+    let rest = &text[start..];
+    let end = rest.find("} desc_t;")?;
+    let body = &rest[..end];
+    let mut offsets = std::collections::BTreeMap::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if !line.starts_with("logic [") {
+            continue;
+        }
+        let bracket_open = line.find('[')?;
+        let bracket_close = line.find(']')?;
+        let range = &line[bracket_open + 1..bracket_close];
+        let (high, low) = range.split_once(':')?;
+        let high = high.trim().parse::<u64>().ok()?;
+        let low = low.trim().parse::<u64>().ok()?;
+        let size = (high.max(low) - high.min(low) + 1) / 8;
+
+        let after = &line[bracket_close + 1..].trim();
+        let name = after.split_whitespace().next()?.trim_end_matches(';');
+
+        let comment_start = line.find("//")?;
+        let comment = &line[comment_start + 2..];
+        let offset = parse_offset_comment(comment)?;
+        offsets.insert(name.to_string(), (offset, size));
+    }
+    Some(offsets)
+}
+
+fn parse_offset_comment(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if let Some(v) = s.strip_prefix("+0x").or_else(|| s.strip_prefix("+ 0x")) {
+        let end = v.find(|c: char| !c.is_ascii_hexdigit()).unwrap_or(v.len());
+        return u64::from_str_radix(&v[..end], 16).ok();
+    }
+    if let Some(v) = s.strip_prefix('+') {
+        let v = v.trim();
+        let end = v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len());
+        return v[..end].parse().ok();
+    }
+    None
+}
+
+/// Validate the descriptor layout against the package's own `desc_t` comments and the
+/// round-trip between `bits_to_desc` and `desc_to_bits`.
+fn validate_word_order(text: &str, layout: &AiDescLayout) -> Result<(), String> {
+    // Cross-check bits_to_desc against desc_to_bits when both are present.
+    if let (Some(bits_to_desc), Some(desc_to_bits)) = (
+        extract_function_body(text, "bits_to_desc"),
+        extract_function_body(text, "desc_to_bits"),
+    ) {
+        let to_desc: std::collections::BTreeMap<String, (u64, u64)> = bits_to_desc
+            .split(';')
+            .filter_map(parse_assignment_range)
+            .map(|(f, h, l)| (f.to_string(), (h, l)))
+            .collect();
+        let to_bits: std::collections::BTreeMap<String, (u64, u64)> = desc_to_bits
+            .split(';')
+            .filter_map(parse_desc_to_bits)
+            .collect();
+        for (field, (high, low)) in &to_desc {
+            if let Some((h, l)) = to_bits.get(field) {
+                if h != high || l != low {
+                    return Err(format!(
+                        "descriptor word-order conflict: field `{field}` is {high}:{low} in bits_to_desc but {h}:{l} in desc_to_bits"
+                    ));
+                }
+            }
+        }
+    }
+
+    // Cross-check the bit-derived layout against the desc_t byte-offset comments.
+    if let Some(offsets) = parse_desc_t_offsets(text) {
+        for (name, field) in &layout.fields {
+            if let Some((offset, size)) = offsets.get(name) {
+                if field.offset != *offset || field.size != *size {
+                    return Err(format!(
+                        "descriptor byte-offset conflict: field `{name}` is offset {} size {} from bit ranges, but the desc_t comment says offset {offset} size {size}",
+                        field.offset, field.size
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Parse `make_completion` parameter widths from its signature text.
+fn parse_function_params(text: &str) -> std::collections::BTreeMap<String, u64> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(paren_open) = text.find('(') else {
+        return out;
+    };
+    let Some(paren_close) = text.find(')') else {
+        return out;
+    };
+    let decl = &text[paren_open + 1..paren_close];
+    for param in decl.split(',') {
+        let param = param.trim();
+        // input logic [31:0] ticket
+        let Some(bracket_open) = param.find('[') else {
+            continue;
+        };
+        let Some(bracket_close) = param.find(']') else {
+            continue;
+        };
+        let range = &param[bracket_open + 1..bracket_close];
+        let Some((high, low)) = range.split_once(':') else {
+            continue;
+        };
+        let Ok(high) = high.trim().parse::<u64>() else {
+            continue;
+        };
+        let Ok(low) = low.trim().parse::<u64>() else {
+            continue;
+        };
+        let width = high.max(low) - high.min(low) + 1;
+        if let Some(name) = param[bracket_close + 1..].split_whitespace().next() {
+            out.insert(name.trim().to_string(), width);
+        }
+    }
+    out
+}
+
+/// Width of a concatenation element: a sized literal like `16'h0` or a named parameter.
+fn element_width(elem: &str, params: &std::collections::BTreeMap<String, u64>) -> Option<u64> {
+    let elem = elem.trim();
+    if let Some(apo) = elem.find('\'') {
+        // Sized literal: the part before the apostrophe is the bit width.
+        let prefix = &elem[..apo].trim();
+        if prefix.is_empty() {
+            // Unsized literal ('0) has no known width.
+            return None;
+        }
+        return prefix.parse().ok();
+    }
+    params.get(elem).copied()
+}
+
+/// Parse the `return { ... };` statement inside `make_completion`.
+///
+/// SystemVerilog concatenation lists elements from MSB to LSB, so the first element
+/// occupies the highest bit range. The total width is the sum of element widths.
+fn parse_completion_layout(body: &str) -> Option<g6q_core::model::CompletionLayout> {
+    let stmt = body
+        .split(';')
+        .map(str::trim)
+        .find(|s| s.starts_with("return"))?;
+    let open = stmt.find('{')?;
+    let close = stmt.rfind('}')?;
+    let inner = &stmt[open + 1..close];
+    let elements: Vec<_> = inner.split(',').map(str::trim).collect();
+
+    // The body text starts with the function signature (return type and inputs), so we
+    // can recover the parameter widths from the text before the first semicolon.
+    let params = parse_function_params(body);
+
+    let mut total = 0u64;
+    let mut widths = Vec::with_capacity(elements.len());
+    for elem in &elements {
+        let w = element_width(elem, &params)?;
+        widths.push(w);
+        total += w;
+    }
+
+    let mut high = total.saturating_sub(1);
+    let mut layout = g6q_core::model::CompletionLayout::default();
+    for (elem, width) in elements.iter().zip(widths.iter()) {
+        let low = high.saturating_sub(*width - 1);
+        if *elem == "ticket" {
+            layout.ticket_bit_low = low;
+            layout.ticket_bit_high = high;
+        } else if *elem == "status" {
+            layout.status_bit_low = low;
+            layout.status_bit_high = high;
+        }
+        high = low.saturating_sub(1);
+    }
+
+    Some(layout)
+}
+
+/// Parse the packed `flags` word layout.
+///
+/// The reference package does not publish localparams for these subfields, but it does expose
+/// `desc_prio` (`d.flags[19:16]`) and `desc_irq` (`d.flags[2]`) helper functions, and a comment
+/// that says `flags[13:8] type fields (dtype/...)`.  This function recovers what it can; fields
+/// not found are left at zero and the layout is still returned so consumers can tell the package
+/// was at least examined.
+///
+/// The arithmetic-type subfields are read from per-field accessors when the package publishes
+/// them (`desc_dtype`, `desc_accmode`, `desc_ew`, `desc_sp24`). **An accessor always wins over
+/// the comment**, because the comment states one combined span for several ABI fields and
+/// extracting it as a data type yields a plausible-looking wrong value. When only the comment
+/// exists, `dtype_combined` records that the recovered span is a blob.
+fn parse_flags_layout(text: &str) -> Option<g6q_core::model::DescFlagsLayout> {
+    use g6q_core::model::FlagField;
+
+    let mut layout = g6q_core::model::DescFlagsLayout::default();
+    let mut found = false;
+
+    // Helper functions `desc_prio` and `desc_irq` return explicit bit ranges.
+    if let Some(body) = extract_function_body(text, "desc_prio") {
+        if let Some((_, high, low)) = body.split(';').find_map(parse_return_range) {
+            layout.priority_shift = low;
+            layout.priority_mask = (1u32 << (high - low + 1)) - 1;
+            found = true;
+        }
+    }
+    if let Some(body) = extract_function_body(text, "desc_irq") {
+        if let Some(bit) = body.split(';').find_map(parse_return_bit) {
+            layout.irq_bit = bit;
+            found = true;
+        }
+    }
+
+    // Per-field arithmetic-type accessors, when the package publishes them.
+    let field_from_fn = |name: &str| -> Option<FlagField> {
+        let body = extract_function_body(text, name)?;
+        let (_, high, low) = body.split(';').find_map(parse_return_range)?;
+        Some(FlagField::from_range(high, low))
+    };
+
+    if let Some(f) = field_from_fn("desc_dtype") {
+        layout.dtype_shift = f.shift;
+        layout.dtype_mask = f.mask;
+        layout.dtype_combined = false;
+        found = true;
+    } else if let Some((high, low)) = parse_dtype_comment(text) {
+        // Fallback: a combined `flags[hi:lo] type fields` comment. Recorded as combined so
+        // no consumer reports the blob as a data type.
+        layout.dtype_shift = low;
+        layout.dtype_mask = (1u32 << (high - low + 1)) - 1;
+        layout.dtype_combined = true;
+        found = true;
+    }
+
+    if let Some(f) = field_from_fn("desc_accmode") {
+        layout.accmode = Some(f);
+        found = true;
+    }
+    if let Some(f) = field_from_fn("desc_ew") {
+        layout.ew = Some(f);
+        found = true;
+    }
+    if let Some(body) = extract_function_body(text, "desc_sp24") {
+        if let Some(bit) = body.split(';').find_map(parse_return_bit) {
+            layout.sp24_bit = Some(bit);
+            found = true;
+        }
+    }
+
+    if found {
+        Some(layout)
+    } else {
+        None
+    }
+}
+
+fn parse_return_range(stmt: &str) -> Option<(&str, u32, u32)> {
+    // `return d.flags[19:16];`
+    let stmt = stmt.trim();
+    if !stmt.starts_with("return") {
+        return None;
+    }
+    let bracket_open = stmt.find('[')?;
+    let bracket_close = stmt.find(']')?;
+    let range = &stmt[bracket_open + 1..bracket_close];
+    let (high, low) = range.split_once(':')?;
+    let high = high.trim().parse::<u32>().ok()?;
+    let low = low.trim().parse::<u32>().ok()?;
+    Some(("", high, low))
+}
+
+fn parse_return_bit(stmt: &str) -> Option<u32> {
+    // `return d.flags[2];`
+    let stmt = stmt.trim();
+    if !stmt.starts_with("return") {
+        return None;
+    }
+    let bracket_open = stmt.find('[')?;
+    let bracket_close = stmt.find(']')?;
+    stmt[bracket_open + 1..bracket_close]
+        .trim()
+        .parse::<u32>()
+        .ok()
+}
+
+fn parse_dtype_comment(text: &str) -> Option<(u32, u32)> {
+    // `// flags[19:16] priority, flags[13:8] type fields (dtype/...)`
+    // We want the `type fields` range. A line may contain multiple `flags[...]`
+    // clauses, so test the text immediately after each closing `]`.
+    for line in text.lines() {
+        let mut search = 0;
+        while let Some(start) = line[search..].find("flags[") {
+            let start = search + start;
+            let close = line[start..].find(']')?;
+            let close = start + close;
+            let range = &line[start + 6..close];
+            if let Some((high, low)) = range.split_once(':') {
+                let high = high.trim().parse::<u32>().ok()?;
+                let low = low.trim().parse::<u32>().ok()?;
+                let after = &line[close + 1..];
+                let after = if let Some(next) = after.find("flags[") {
+                    &after[..next]
+                } else {
+                    after
+                };
+                if after.contains("type") || after.contains("dtype") {
+                    return Some((high, low));
+                }
+            }
+            search = close + 1;
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -242,6 +598,21 @@ package g6lc_ai_desc_pkg;
     d.ptr_done  = b[511:448];
     return d;
   endfunction
+
+  // flags[19:16] priority, flags[13:8] type fields (dtype/accmode/ew/sp24)
+  function automatic logic [3:0] desc_prio(input desc_t d);
+    return d.flags[19:16];
+  endfunction
+
+  function automatic logic desc_irq(input desc_t d);
+    return d.flags[2];
+  endfunction
+
+  function automatic logic [63:0] make_completion(
+      input logic [31:0] ticket, input logic [15:0] status
+  );
+    return {16'h0, status, ticket};
+  endfunction
 endpackage
 "#;
         let layout = parse_ai_desc_pkg(text).unwrap();
@@ -262,5 +633,268 @@ endpackage
         assert_eq!(layout.offset("ptr_c"), Some(40));
         assert_eq!(layout.offset("ptr_scale"), Some(48));
         assert_eq!(layout.offset("ptr_done"), Some(56));
+
+        let c = layout.completion.unwrap();
+        assert_eq!(c.ticket_bit_low, 0);
+        assert_eq!(c.ticket_bit_high, 31);
+        assert_eq!(c.status_bit_low, 32);
+        assert_eq!(c.status_bit_high, 47);
+
+        let f = layout.flags_layout.unwrap();
+        assert_eq!(f.dtype_shift, 8);
+        assert_eq!(f.dtype_mask, 0x3f);
+        assert_eq!(f.priority_shift, 16);
+        assert_eq!(f.priority_mask, 0x0f);
+        assert_eq!(f.irq_bit, 2);
+        // The reference package publishes only a *combined* type-field comment, so the
+        // arithmetic-type subfields stay unresolved and the span is marked as a blob.
+        assert!(f.dtype_combined, "a comment span is not a data type");
+        assert_eq!(f.accmode, None);
+        assert_eq!(f.ew, None);
+        assert_eq!(f.sp24_bit, None);
+        assert!(!f.arith_type_resolved());
+    }
+
+    /// Per-field accessors resolve the arithmetic-type subfields individually.
+    ///
+    /// This is the shape the descriptor ABI actually defines (`isa-encoding.md` §7:
+    /// `dtype[9:8]`, `accmode[11:10]`, `ew[13:12]`, `sp24[14]`). Until the design publishes
+    /// them, `ew` and `sp24` are invisible and sub-byte / sparse work cannot be requested.
+    #[test]
+    fn per_field_accessors_resolve_arith_type_and_beat_the_comment() {
+        let text = r#"
+package g6lc_ai_desc_pkg;
+  localparam int unsigned DescBytes = 64;
+  localparam logic [15:0] OP_GEMM   = 16'd1;
+  localparam logic [15:0] ST_OK     = 16'd0;
+
+  typedef struct packed {
+    logic [63:0] ptr_done;
+    logic [63:0] ptr_scale;
+    logic [63:0] ptr_c;
+    logic [63:0] ptr_b;
+    logic [63:0] ptr_a;
+    logic [31:0] ld_ab;
+    logic [31:0] k;
+    logic [31:0] n;
+    logic [31:0] m;
+    logic [31:0] flags;
+    logic [15:0] op;
+    logic [15:0] version;
+  } desc_t;
+
+  function automatic desc_t bits_to_desc(input desc_bits_t b);
+    desc_t d;
+    d.version   = b[15:0];
+    d.op        = b[31:16];
+    d.flags     = b[63:32];
+    d.m         = b[95:64];
+    d.n         = b[127:96];
+    d.k         = b[159:128];
+    d.ld_ab     = b[191:160];
+    d.ptr_a     = b[255:192];
+    d.ptr_b     = b[319:256];
+    d.ptr_c     = b[383:320];
+    d.ptr_scale = b[447:384];
+    d.ptr_done  = b[511:448];
+    return d;
+  endfunction
+
+  // A stale combined comment is still present: flags[13:8] type fields (dtype/accmode/ew)
+  function automatic logic [1:0] desc_dtype(input desc_t d);
+    return d.flags[9:8];
+  endfunction
+
+  function automatic logic [1:0] desc_accmode(input desc_t d);
+    return d.flags[11:10];
+  endfunction
+
+  function automatic logic [1:0] desc_ew(input desc_t d);
+    return d.flags[13:12];
+  endfunction
+
+  function automatic logic desc_sp24(input desc_t d);
+    return d.flags[14];
+  endfunction
+
+  function automatic logic [3:0] desc_prio(input desc_t d);
+    return d.flags[19:16];
+  endfunction
+
+  function automatic logic desc_irq(input desc_t d);
+    return d.flags[2];
+  endfunction
+
+  function automatic logic [63:0] make_completion(
+      input logic [31:0] ticket, input logic [15:0] status
+  );
+    return {16'h0, status, ticket};
+  endfunction
+endpackage
+"#;
+        let layout = parse_ai_desc_pkg(text).unwrap();
+        let f = layout.flags_layout.unwrap();
+
+        // The accessor wins over the comment: dtype is the narrow 2-bit field, not the blob.
+        assert_eq!(f.dtype_shift, 8);
+        assert_eq!(f.dtype_mask, 0x3, "accessor must beat the combined comment");
+        assert!(!f.dtype_combined);
+
+        assert_eq!(f.accmode.unwrap().shift, 10);
+        assert_eq!(f.accmode.unwrap().mask, 0x3);
+        assert_eq!(f.ew.unwrap().shift, 12);
+        assert_eq!(f.ew.unwrap().mask, 0x3);
+        assert_eq!(f.sp24_bit, Some(14));
+        assert!(f.arith_type_resolved());
+
+        // A descriptor asking for 4-bit elements is now distinguishable from INT8.
+        // flags = ew(01) << 12 = 0x1000; the combined-comment reading would have called
+        // this "dtype = 16", which is a plausible-looking wrong answer.
+        let flags = 0x1000u32;
+        assert_eq!(f.ew.unwrap().extract(flags), 1, "ew = 01 is 4-bit");
+        assert_eq!((flags >> f.dtype_shift) & f.dtype_mask, 0, "dtype stays 00");
+    }
+
+    /// The live design package must not silently look like it resolves the type fields.
+    ///
+    /// It publishes `desc_prio`/`desc_irq` and a combined comment only, so `ew`/`sp24` stay
+    /// `None`. If this starts failing because the design added the accessors, that is the
+    /// good outcome — update the assertion and the F10 row in `RTL_FEEDBACK.md`.
+    #[test]
+    fn the_real_desc_package_leaves_arith_type_unresolved() {
+        let path = std::path::Path::new(r"E:/cva6/corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv");
+        if !path.exists() {
+            return;
+        }
+        let text = std::fs::read_to_string(path).unwrap();
+        let layout = parse_ai_desc_pkg(&text).unwrap();
+        let f = layout
+            .flags_layout
+            .expect("prio/irq accessors are published");
+        assert_eq!(f.irq_bit, 2);
+        assert_eq!(f.priority_shift, 16);
+        assert!(
+            !f.arith_type_resolved(),
+            "if the design now publishes desc_dtype/desc_accmode/desc_ew/desc_sp24, close F10"
+        );
+    }
+
+    #[test]
+    fn validates_word_order_against_desc_t_comments_and_desc_to_bits() {
+        let text = r#"
+package g6lc_ai_desc_pkg;
+  localparam int unsigned DescBytes  = 64;
+  localparam logic [15:0] OP_GEMM    = 16'd1;
+  localparam logic [15:0] ST_OK      = 16'd0;
+
+  typedef struct packed {
+    logic [63:0] ptr_done;     // +0x38
+    logic [63:0] ptr_scale;    // +0x30
+    logic [63:0] ptr_c;        // +0x28
+    logic [63:0] ptr_b;        // +0x20
+    logic [63:0] ptr_a;        // +0x18
+    logic [31:0] ld_ab;        // +0x14
+    logic [31:0] k;            // +0x10
+    logic [31:0] n;            // +0x0C
+    logic [31:0] m;            // +0x08
+    logic [31:0] flags;        // +0x04
+    logic [15:0] op;           // +0x02
+    logic [15:0] version;      // +0x00
+  } desc_t;
+
+  function automatic desc_t bits_to_desc(input desc_bits_t b);
+    desc_t d;
+    d.version   = b[15:0];
+    d.op        = b[31:16];
+    d.flags     = b[63:32];
+    d.m         = b[95:64];
+    d.n         = b[127:96];
+    d.k         = b[159:128];
+    d.ld_ab     = b[191:160];
+    d.ptr_a     = b[255:192];
+    d.ptr_b     = b[319:256];
+    d.ptr_c     = b[383:320];
+    d.ptr_scale = b[447:384];
+    d.ptr_done  = b[511:448];
+    return d;
+  endfunction
+
+  function automatic desc_bits_t desc_to_bits(input desc_t d);
+    desc_bits_t b;
+    b = '0;
+    b[15:0]    = d.version;
+    b[31:16]   = d.op;
+    b[63:32]   = d.flags;
+    b[95:64]   = d.m;
+    b[127:96]  = d.n;
+    b[159:128] = d.k;
+    b[191:160] = d.ld_ab;
+    b[255:192] = d.ptr_a;
+    b[319:256] = d.ptr_b;
+    b[383:320] = d.ptr_c;
+    b[447:384] = d.ptr_scale;
+    b[511:448] = d.ptr_done;
+    return b;
+  endfunction
+
+  function automatic logic [63:0] make_completion(
+      input logic [31:0] ticket, input logic [15:0] status
+  );
+    return {16'h0, status, ticket};
+  endfunction
+endpackage
+"#;
+        let layout = parse_ai_desc_pkg(text).unwrap();
+        assert_eq!(layout.offset("ptr_done"), Some(56));
+        assert_eq!(layout.offset("version"), Some(0));
+    }
+
+    #[test]
+    fn rejects_desc_t_comment_mismatch() {
+        let text = r#"
+package g6lc_ai_desc_pkg;
+  localparam int unsigned DescBytes  = 64;
+
+  typedef struct packed {
+    logic [15:0] version;      // +0x02
+  } desc_t;
+
+  function automatic desc_t bits_to_desc(input desc_bits_t b);
+    desc_t d;
+    d.version = b[15:0];
+    return d;
+  endfunction
+endpackage
+"#;
+        let err = parse_ai_desc_pkg(text).unwrap_err();
+        assert!(err.contains("byte-offset conflict"), "{err}");
+    }
+
+    #[test]
+    fn rejects_bits_to_desc_desc_to_bits_mismatch() {
+        let text = r#"
+package g6lc_ai_desc_pkg;
+  localparam int unsigned DescBytes  = 64;
+
+  typedef struct packed {
+    logic [15:0] version;
+  } desc_t;
+
+  function automatic desc_t bits_to_desc(input desc_bits_t b);
+    desc_t d;
+    d.version = b[15:0];
+    return d;
+  endfunction
+
+  function automatic desc_bits_t desc_to_bits(input desc_t d);
+    desc_bits_t b;
+    b = '0;
+    b[31:16] = d.version;
+    return b;
+  endfunction
+endpackage
+"#;
+        let err = parse_ai_desc_pkg(text).unwrap_err();
+        assert!(err.contains("word-order conflict"), "{err}");
     }
 }

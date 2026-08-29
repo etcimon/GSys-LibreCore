@@ -164,15 +164,77 @@ than reported as zero.
 All structure-size counters are `Fidelity::Exact` for the configured geometry. A counter the
 emulator derives from these later (hit rates, occupancy, stall indicators) is `Modelled` or `Weak`.
 
+### 4.3 AI-island analytic bound (roofline)
+
+`g6q-diag::roofline` is the one place the package produces a *performance* number, and it does so
+without simulating time. It applies the bandwidth model of the design's own scaling plan to the
+**ingested** island geometry: given a GEMM shape plus the published cluster count, MAC rate, blocking
+factor, clock and DRAM class, it states the two bounds the shape cannot beat and which one binds.
+
+| Quantity | Derivation | Fidelity |
+|---|---|---|
+| `ai.roofline.mac_bound_cycles` | `m·n·k / (clusters × macs_per_cycle)` | `Modelled` |
+| `ai.roofline.blocking_t` | `min(acc_tile_m, acc_tile_n)` — the accumulator's output block, **not** a PE array dimension | `Modelled` |
+| `ai.roofline.dram_read_bytes` | `max(m·k + k·n, macs × 2 / T)` — the compulsory-read floor or the tiled re-read model, whichever is larger | `Modelled` |
+| `ai.roofline.dram_write_bytes` | `4 · m · n`, the `s32` accumulator writeback the plan's derivation omits | `Modelled` |
+| `ai.roofline.intensity_mac_per_byte` | `macs / total bytes`, so it accounts for the writeback and the small-shape floor | `Modelled` |
+| `ai.roofline.tiled_input_intensity_mac_per_byte` | `T / 2` — the input-only figure the plan reasons with, kept for comparison | `Modelled` |
+| `ai.roofline.shape_fits_blocking` | whether every dimension is within its accumulator tile; beyond that the descriptor is rejected and software must tile | `Modelled` |
+| `ai.roofline.balance_mac_per_byte` | MAC-rate ÷ DRAM-bandwidth; every kernel below this is bandwidth-bound | `Modelled` |
+| `ai.roofline.peak_ops_per_sec` | `clusters × macs_per_cycle × 2 × clock` — dense, peak, no sparsity or sub-byte multiplier | `Modelled` |
+
+**The read model takes the larger of two figures, and that is load-bearing.** The compulsory floor
+`m·k + k·n` is what the operands themselves occupy, with no dataflow assumption in it. The tiled
+figure `macs × 2 / T` is the plan's re-read model. Below `T` the tiled figure falls *under* the
+floor, which would understate a small shape; above `T` the floor understates the re-reads. The two
+coincide exactly at `m = n = k = T`, so a bound tested only at the maximal shape cannot tell them
+apart — [`RTL_FEEDBACK.md`](RTL_FEEDBACK.md) §3.2 records why that matters here.
+
+Four rules keep it a bound rather than a claim:
+
+1. **Nothing here is `Exact`.** The geometry is the design's and the arithmetic is exact, but the
+   value is a ceiling, so every counter is `Modelled` and therefore not comparable for equality with
+   hardware. A test asserts that for every counter the module emits.
+2. **An unmeasured DRAM class produces no bandwidth bound.** The live configuration publishes
+   `DramGBps = 0` ("not measured"), so `dram_bound_cycles` and `balance_mac_per_byte` are absent —
+   not zero, not infinite, and not omitted silently. A part whose memory system is unmeasured has no
+   computable roofline, which is precisely why the design's own track measures bandwidth before it
+   adds clusters. If a `measured_dram_gbps_x1000` value is supplied, it takes precedence over the
+   nameplate and the bandwidth bound closes; the cap window publishes this value in the upper 16 bits
+   of `CAP_OFF_DRAM_GBPS` (saturated to `0xFFFF`, which is F14's range limit).
+3. **Utilisation requires a measurement the package cannot produce.**
+   `Roofline::utilisation_percent` takes a measured cycle count from the design side — an RTL
+   testbench or the island's PMU counters, whose offsets are ingested into
+   `AiIslandConfig::pmu_offsets` when published (ask F9). The package has no way to invent one, so a
+   utilisation figure can never be self-referential.
+4. **A bound for an unsubmittable shape is labelled as such.** The descriptor contract bounds each
+   dimension by its accumulator tile, so `shape_fits_blocking` travels with every result. Without it
+   a caller could compute a confident bound for work the island would reject (ask F12).
+
+The shape-independent rows (blocking factor, intensity, balance, peak) are properties of the part
+rather than of a kernel, so they are emitted alongside the other island counters with no shape
+argument. The shape-dependent rows need an explicit `m, n, k`.
+
+**Why this belongs in a diagnostic package at all.** The island's stated target is two orders of
+magnitude above the live configuration, and the documented failure mode for that climb is widening
+the MAC array ahead of the memory system. That mistake is invisible in a functional model — every
+descriptor still completes with `ST_OK` — and immediate in a bound. Deriving the bound from ingested
+values rather than from numbers retyped out of the plan is what makes it track the design.
+[`RTL_FEEDBACK.md`](RTL_FEEDBACK.md) §3.1 works the current numbers through.
+
 ### 4.1 AI tensor and queue events
 
 The AI-island is a D2 source, not a D1 architectural path.  Its `AiTensorEvent`s are emitted from:
 
-1. the B3 native VM `AiIsland` device when the guest writes the descriptor MMIO window and
-   doorbells with the version/op field;
-2. the B2 QEMU plugin when it observes stores into the same window;
-3. either backend when a queue ring entry is enqueued and the hardware-completed descriptor is
-   dequeued.
+1. the B3 native VM `AiIsland` device when the guest executes `ai.enq` with a descriptor pointer:
+   the device reads the descriptor image from guest memory using the ingested `desc_layout` and
+   derives `dtype` from `flags` using `flags_layout`;
+2. the B2 QEMU plugin when it observes stores into the descriptor latch window;
+3. either backend when a queue ring entry is enqueued; `ai.qfence` in B3 marks the in-flight
+   descriptors done and writes the packed completion word to each `ptr_done` in guest memory using
+   the ingested `make_completion` layout. A completed `ai.poll` in B3 also writes that word back to
+   `ptr_done` so the guest-visible value is consistent even if `ai.qfence` and `ai.poll` are retired
+   separately.
 
 A tensor event carries the descriptor address, dimensions, data type, input/output pointers,
 ticket, completion status and the operation class.  It is written to a `tensor.json` stream that is
@@ -184,9 +246,14 @@ D2 counters sized from `g6lc_ai_island_cfg_pkg.sv`:
 | Counter | Derivation | Fidelity |
 |---|---|---|
 | `ai.tensor.ops` | one per submitted descriptor | exact (counted at submission) |
+| `ai.tensor.completes` | events with `done = true` | exact in B3 at artifact close; approximate in B2 (qfence and ptr_done store heuristics) |
 | `ai.tensor.bytes` | A/B/C buffer sizes from descriptor `m`, `n`, `k`, `ld_ab` and `dtype` width | modelled — guest may touch only part of the declared buffers |
 | `ai.tensor.macs` | `m * n * k` for GEMM/CONV-like ops; `0` for layout/prefetch | modelled — assumes dense, full-tile execution |
-| `ai.queue.entries` | enqueued minus completed per queue | exact in B3; approximate in the plugin (memory accesses only) |
+| `ai.tensor.queue_entries` | total events in the stream | exact at artifact close; approximate in the plugin (memory accesses only) |
+| `ai.pmu.r_beats` | AXI read beats for the last completed event (64-bit data width) | modelled from the event shape; B3 stores the per-event value, B2 stores it when it can correlate a completion |
+| `ai.pmu.w_beats` | AXI write beats for the last completed event (s32 accumulator writeback, 64-bit data width) | modelled from the event shape |
+| `ai.pmu.cycles` | bound cycle count for the last completed event | modelled from `g6q-diag::roofline::gemm` |
+| `ai.pmu.gbps_x1000` | sustained DRAM bandwidth in 1/1000 GB/s for the last completed event | modelled from `bytes * ClockKhz / cycles / 1000`; becomes `measured` when the design publishes and drives the PMU registers |
 
 These are **synthetic** efficiency signals, not verification evidence.
 

@@ -456,7 +456,9 @@ def _add_contrib_plugin(qemu_dir: Path, target_id: str) -> None:
     if not path.is_file():
         return
     text = path.read_text(encoding="utf-8")
-    name = f"g6lc-{target_id}"
+    # The emitted plugin file uses the C-sanitised target id (e.g. 'ai-soc' -> 'ai_soc').
+    safe_id = target_id.replace('-', '_').replace('.', '_')
+    name = f"g6lc-{safe_id}"
     if name in text:
         log(f"already present in {path}: {name}")
         return
@@ -501,7 +503,7 @@ def _gen_command(gen_bin: Path, pkg: Path, target: str | None, dts_overlay: str 
     dts = _find_one(pkg, "*.dts")
     if not dts:
         raise ValueError(f"no .dts in {pkg}")
-    resolved_target = target or pkg.name
+    resolved_target = target or cfg.stem.removesuffix("_config_pkg").removesuffix("_cfg_pkg")
     cmd = [
         str(gen_bin),
         "gen",

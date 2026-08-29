@@ -191,6 +191,90 @@ impl Peripheral {
     }
 }
 
+/// One field inside a packed capability word.
+///
+/// The `name` is the `AiIslandConfig` field that supplies the value (e.g. `queues`), or a
+/// placeholder for fields that are not modeled (e.g. a measured counter). The `low` and `width`
+/// are the bit position inside the 32-bit capability word.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapPackedField {
+    /// Field name. A leading underscore means the value is not in the config struct.
+    pub name: String,
+    /// Low bit inside the packed word.
+    pub low: u32,
+    /// Width in bits.
+    pub width: u32,
+}
+
+impl CapPackedField {
+    /// Render as a JSON object.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("name", Json::str(self.name.clone())),
+            ("low", Json::Int(self.low as i64)),
+            ("width", Json::Int(self.width as i64)),
+        ])
+    }
+}
+
+/// Packed capability words whose bit layout is not a single flat value.
+///
+/// The map is keyed by the capability name (the lowercased `CAP_OFF_*` suffix). Each entry is a
+/// list of fields ordered from LSB to MSB. Unknown field names are treated as zero so measured or
+/// reserved upper fields do not need a model value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CapPackedWords {
+    /// Map from capability name to the ordered list of packed fields.
+    pub words: std::collections::BTreeMap<String, Vec<CapPackedField>>,
+}
+
+impl CapPackedWords {
+    /// Render as a JSON object keyed by capability name.
+    pub fn to_json(&self) -> Json {
+        Json::obj(self.words.iter().map(|(k, v)| {
+            (
+                k.as_str(),
+                Json::arr(v.iter().map(|f| f.to_json()).collect::<Vec<_>>()),
+            )
+        }))
+    }
+}
+
+/// Bit layout of the packed `block_mnk` capability word.
+///
+/// Each field records the low bit and width of `log2(AccTileM|N|K)` inside the 32-bit word.
+/// Width is present because the cap window could widen or narrow the field; the model does not
+/// assume it is always four bits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CapBlockMnk {
+    /// Low bit of the M field.
+    pub m_low: u32,
+    /// Width in bits of the M field.
+    pub m_width: u32,
+    /// Low bit of the N field.
+    pub n_low: u32,
+    /// Width in bits of the N field.
+    pub n_width: u32,
+    /// Low bit of the K field.
+    pub k_low: u32,
+    /// Width in bits of the K field.
+    pub k_width: u32,
+}
+
+impl CapBlockMnk {
+    /// Render as a JSON object.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("m_low", Json::Int(self.m_low as i64)),
+            ("m_width", Json::Int(self.m_width as i64)),
+            ("n_low", Json::Int(self.n_low as i64)),
+            ("n_width", Json::Int(self.n_width as i64)),
+            ("k_low", Json::Int(self.k_low as i64)),
+            ("k_width", Json::Int(self.k_width as i64)),
+        ])
+    }
+}
+
 /// AI-island capability and clustering configuration, derived from
 /// `g6lc_ai_island_cfg_pkg.sv`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -217,6 +301,10 @@ pub struct AiIslandConfig {
     pub dram_channels: u32,
     /// Nameplate aggregate DRAM bandwidth in GB/s (0 when not measured).
     pub dram_gbps: u32,
+    /// Measured sustained aggregate DRAM bandwidth in milli-GB/s, when a measurement is
+    /// available. This is the value the cap window returns in its `meas_milli` half, and it
+    /// takes precedence over the nameplate in the roofline when present.
+    pub measured_dram_gbps_x1000: Option<u32>,
     /// T2 rings visible to the island.
     pub queues: u32,
     /// Depth of each queue (power of two expected).
@@ -225,8 +313,34 @@ pub struct AiIslandConfig {
     pub qos_classes: u32,
     /// Preemption boundary in k-steps.
     pub work_quantum_k: u32,
+    /// Bit layout of the packed `block_mnk` capability word, when the design publishes it.
+    ///
+    /// The cap window packs `log2(AccTileM)`, `log2(AccTileN)` and `log2(AccTileK)` into one
+    /// 32-bit word. The generator reads the concatenation order and widths from
+    /// `g6lc_ai_cap_window.sv`; if the module does not publish a recognizable case arm, this
+    /// stays `None` and the word is reported through `cap_unsourced`.
+    pub block_mnk: Option<CapBlockMnk>,
+    /// Other packed capability words (e.g. `dram_gbps`, `queues`) whose bit layout the cap
+    /// window declares by concatenation. Each word is a list of fields from LSB to MSB.
+    pub cap_packed: CapPackedWords,
+    /// Data-type grant bits the cap window reports, when the design publishes them.
+    ///
+    /// This value lives as a module parameter in `g6lc_ai_cap_window.sv`; the generator reads it
+    /// from there because the `ai_island_cfg_t` package does not carry it. If even the cap window
+    /// does not publish it, this stays `None` and the word is reported through `cap_unsourced`.
+    pub dtype_mask: Option<u32>,
     /// Capability window offsets by name, from `CAP_OFF_*` localparams.
     pub cap_offsets: std::collections::BTreeMap<String, u64>,
+    /// Island PMU register offsets by name, from `PMU_OFF_*` localparams.
+    ///
+    /// These are the island's own *measured* counters (bus beats, active cycles, sustained
+    /// bandwidth). They are the only quantities that can contradict the modelled bound in
+    /// `g6q-diag::roofline`, which is why ingesting them matters: a modelled number never
+    /// diffed against a measurement is decoration rather than feedback.
+    ///
+    /// Empty when the design publishes the register map only as comments, which is the
+    /// current state — recorded as ask F9 in `architecture/RTL_FEEDBACK.md`.
+    pub pmu_offsets: std::collections::BTreeMap<String, u64>,
     /// Base of the capability window inside the island MMIO region, when the design
     /// states it.
     ///
@@ -241,6 +355,12 @@ pub struct AiIslandConfig {
     /// absence is reported rather than assumed: guessing a base would place the whole
     /// descriptor at the wrong address and make every field look individually plausible.
     pub desc_base: Option<u64>,
+    /// Queue-to-cluster map, when the design publishes it.
+    ///
+    /// The `i`-th entry is the cluster that queue `i` dispatches to; shorter lists wrap.
+    /// If the design does not publish a dispatch map, this stays `None` and the B3 path
+    /// falls back to a `cluster` field in the descriptor or leaves the event unresolved.
+    pub queue_cluster_map: Option<Vec<u32>>,
 }
 
 impl AiIslandConfig {
@@ -258,14 +378,36 @@ impl AiIslandConfig {
             ("noc_width", Json::Int(self.noc_width as i64)),
             ("dram_channels", Json::Int(self.dram_channels as i64)),
             ("dram_gbps", Json::Int(self.dram_gbps as i64)),
+            (
+                "measured_dram_gbps_x1000",
+                self.measured_dram_gbps_x1000
+                    .map_or(Json::Null, |v| Json::Int(v as i64)),
+            ),
             ("queues", Json::Int(self.queues as i64)),
             ("queue_depth", Json::Int(self.queue_depth as i64)),
             ("qos_classes", Json::Int(self.qos_classes as i64)),
             ("work_quantum_k", Json::Int(self.work_quantum_k as i64)),
             (
+                "dtype_mask",
+                self.dtype_mask.map_or(Json::Null, |v| Json::Int(v as i64)),
+            ),
+            (
+                "block_mnk",
+                self.block_mnk.map_or(Json::Null, |c| c.to_json()),
+            ),
+            ("cap_packed", self.cap_packed.to_json()),
+            (
                 "cap_offsets",
                 Json::obj(
                     self.cap_offsets
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), Json::Int(*v as i64))),
+                ),
+            ),
+            (
+                "pmu_offsets",
+                Json::obj(
+                    self.pmu_offsets
                         .iter()
                         .map(|(k, v)| (k.as_str(), Json::Int(*v as i64))),
                 ),
@@ -278,7 +420,21 @@ impl AiIslandConfig {
                 "desc_base",
                 self.desc_base.map_or(Json::Null, |v| Json::Int(v as i64)),
             ),
+            (
+                "queue_cluster_map",
+                self.queue_cluster_map.as_ref().map_or(Json::Null, |m| {
+                    Json::arr(m.iter().map(|v| Json::Int(*v as i64)))
+                }),
+            ),
         ])
+    }
+
+    /// Resolve a queue id to a cluster using the published map, if any.
+    pub fn cluster_for_queue(&self, queue_id: u32) -> Option<u32> {
+        self.queue_cluster_map.as_ref().map(|m| {
+            let idx = (queue_id as usize) % m.len();
+            m[idx]
+        })
     }
 
     /// Whether the island's MMIO placement is fully resolved.
@@ -315,16 +471,163 @@ impl DescField {
     }
 }
 
-/// Bit position of the data-type selector inside the descriptor flag word.
-///
-/// This is a **packed subfield the design does not publish** as a named constant
-/// (`architecture/RTL_FEEDBACK.md` ask F5). It lives here, once, so the diagnosis crate
-/// and the plugin emitter cannot drift apart; when the design publishes the packing this
-/// becomes an ingested field and both consumers follow automatically.
-pub const DTYPE_SHIFT: u32 = 8;
+/// One packed subfield of the descriptor `flags` word.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FlagField {
+    /// Low bit position inside `flags`.
+    pub shift: u32,
+    /// Mask of the field, after shifting.
+    pub mask: u32,
+}
 
-/// Mask of the data-type selector, after shifting by [`DTYPE_SHIFT`].
-pub const DTYPE_MASK: u32 = 0x3f;
+impl FlagField {
+    /// Build from an inclusive bit range.
+    pub fn from_range(high: u32, low: u32) -> Self {
+        let width = high.saturating_sub(low) + 1;
+        let mask = if width >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << width) - 1
+        };
+        Self { shift: low, mask }
+    }
+
+    /// Extract this field from a `flags` word.
+    pub fn extract(&self, flags: u32) -> u32 {
+        (flags >> self.shift) & self.mask
+    }
+
+    /// Render as JSON.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("shift", Json::Int(self.shift as i64)),
+            ("mask", Json::Int(self.mask as i64)),
+        ])
+    }
+
+    /// Parse from JSON.
+    pub fn from_json(json: &Json) -> Option<Self> {
+        fn u32_from(j: &Json) -> Option<u32> {
+            match j {
+                Json::Int(i) if *i >= 0 => Some(*i as u32),
+                _ => None,
+            }
+        }
+        Some(Self {
+            shift: u32_from(json.get("shift"))?,
+            mask: u32_from(json.get("mask"))?,
+        })
+    }
+}
+
+/// Packed subfields of the descriptor `flags` word.
+///
+/// The reference package does not publish these as named localparams, so the reader parses
+/// the comment and helper functions (`desc_prio`, `desc_irq`) in the package. `None` means
+/// the package did not expose a recognizable flags layout.
+///
+/// The arithmetic-type subfields (`dtype`, `accmode`, `ew`, `sp24`) are separate ABI fields.
+/// A package that publishes a per-field accessor resolves them individually; a package that
+/// only carries a combined `flags[hi:lo] type fields` comment resolves them as one blob, and
+/// `dtype_combined` records that so no consumer reports a combined value as a data type.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DescFlagsLayout {
+    /// Low bit of the data-type selector inside `flags`.
+    pub dtype_shift: u32,
+    /// Mask of the data-type selector, after shifting.
+    pub dtype_mask: u32,
+    /// Low bit of the priority field inside `flags`.
+    pub priority_shift: u32,
+    /// Mask of the priority field, after shifting.
+    pub priority_mask: u32,
+    /// Bit index of the completion-interrupt flag inside `flags`.
+    pub irq_bit: u32,
+    /// True when `dtype_shift`/`dtype_mask` came from a *combined* type-field comment rather
+    /// than a per-field accessor, so the extracted value mixes several ABI subfields.
+    ///
+    /// A consumer must not report a combined value as a data type: it is a plausible-looking
+    /// wrong answer, which is worse than an unresolved one.
+    pub dtype_combined: bool,
+    /// Accumulate-mode selector, when the package publishes it as its own accessor.
+    pub accmode: Option<FlagField>,
+    /// Element-width selector, when the package publishes it as its own accessor.
+    ///
+    /// This is the sub-byte (INT4) lever. While it is unresolved the emulator cannot express
+    /// a sub-byte request, so no backend may claim a sub-byte effective-throughput multiplier.
+    pub ew: Option<FlagField>,
+    /// Bit index of the structured 2:4 sparsity request, when the package publishes it.
+    pub sp24_bit: Option<u32>,
+}
+
+impl DescFlagsLayout {
+    /// Render as JSON.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("dtype_shift", Json::Int(self.dtype_shift as i64)),
+            ("dtype_mask", Json::Int(self.dtype_mask as i64)),
+            ("priority_shift", Json::Int(self.priority_shift as i64)),
+            ("priority_mask", Json::Int(self.priority_mask as i64)),
+            ("irq_bit", Json::Int(self.irq_bit as i64)),
+            ("dtype_combined", Json::Bool(self.dtype_combined)),
+            ("accmode", self.accmode.map_or(Json::Null, |f| f.to_json())),
+            ("ew", self.ew.map_or(Json::Null, |f| f.to_json())),
+            (
+                "sp24_bit",
+                self.sp24_bit.map_or(Json::Null, |b| Json::Int(b as i64)),
+            ),
+        ])
+    }
+
+    /// Parse from JSON. Any missing or negative *required* field makes the layout unresolved;
+    /// the arithmetic-type subfields are optional and stay `None` when absent.
+    pub fn from_json(json: &Json) -> Option<Self> {
+        fn u32_from(j: &Json) -> Option<u32> {
+            match j {
+                Json::Int(i) if *i >= 0 => Some(*i as u32),
+                _ => None,
+            }
+        }
+        Some(Self {
+            dtype_shift: u32_from(json.get("dtype_shift"))?,
+            dtype_mask: u32_from(json.get("dtype_mask"))?,
+            priority_shift: u32_from(json.get("priority_shift"))?,
+            priority_mask: u32_from(json.get("priority_mask"))?,
+            irq_bit: u32_from(json.get("irq_bit"))?,
+            dtype_combined: matches!(json.get("dtype_combined"), Json::Bool(true)),
+            accmode: FlagField::from_json(json.get("accmode")),
+            ew: FlagField::from_json(json.get("ew")),
+            sp24_bit: u32_from(json.get("sp24_bit")),
+        })
+    }
+
+    /// True when every arithmetic-type subfield the ABI defines is individually resolved.
+    ///
+    /// Only then can a backend honestly distinguish an INT8 request from a sub-byte or
+    /// sparse one, which is what an effective-throughput claim depends on.
+    pub fn arith_type_resolved(&self) -> bool {
+        !self.dtype_combined
+            && self.accmode.is_some()
+            && self.ew.is_some()
+            && self.sp24_bit.is_some()
+    }
+}
+
+/// Layout of the completion word the island writes to `ptr_done`.
+///
+/// Derived from the `make_completion` function in `g6lc_ai_desc_pkg.sv`. Each field gives
+/// the bit range the function assigns to the ticket and status. When the package does not
+/// publish the function, this is `None` and the B2 `ai.poll` path cannot decode the word.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompletionLayout {
+    /// Low bit of the ticket field inside the 64-bit completion word.
+    pub ticket_bit_low: u64,
+    /// High bit of the ticket field inside the 64-bit completion word.
+    pub ticket_bit_high: u64,
+    /// Low bit of the status field inside the 64-bit completion word.
+    pub status_bit_low: u64,
+    /// High bit of the status field inside the 64-bit completion word.
+    pub status_bit_high: u64,
+}
 
 /// AI descriptor layout and constants, derived from `g6lc_ai_desc_pkg.sv`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -344,6 +647,10 @@ pub struct AiDescLayout {
     pub ops: std::collections::BTreeMap<String, u64>,
     /// Status-code name -> value.
     pub statuses: std::collections::BTreeMap<String, u64>,
+    /// Packed `flags` word layout, when the package exposes it through comments or helpers.
+    pub flags_layout: Option<DescFlagsLayout>,
+    /// Completion word layout, when the package publishes it through `make_completion`.
+    pub completion: Option<CompletionLayout>,
 }
 
 impl AiDescLayout {
@@ -374,6 +681,21 @@ impl AiDescLayout {
                         .iter()
                         .map(|(k, v)| (k.as_str(), Json::Int(*v as i64))),
                 ),
+            ),
+            (
+                "flags_layout",
+                self.flags_layout.map_or(Json::Null, |f| f.to_json()),
+            ),
+            (
+                "completion",
+                self.completion.map_or(Json::Null, |c| {
+                    Json::obj([
+                        ("ticket_bit_low", Json::Int(c.ticket_bit_low as i64)),
+                        ("ticket_bit_high", Json::Int(c.ticket_bit_high as i64)),
+                        ("status_bit_low", Json::Int(c.status_bit_low as i64)),
+                        ("status_bit_high", Json::Int(c.status_bit_high as i64)),
+                    ])
+                }),
             ),
         ])
     }

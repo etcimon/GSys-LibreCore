@@ -27,6 +27,9 @@ that hazard is what the test is about, not because it was observed in a particul
 | `mini/manifest-nested.f` | the included manifest, which points back at the top | the cycle guard |
 | `mini/board.dts` | a small device tree | extension tokens, including one deliberately overdeclared |
 | `golden/mini-model.json` | the model the above should produce | canonical rendering and schema stability |
+| `ai/g6lc_ai_island_cfg_pkg.sv` | a minimal AI-island configuration package with `QueueClusterMap` | ingest of queue-to-cluster dispatch |
+| `ai/g6lc_ai_desc_pkg.sv` | a packed descriptor package with `desc_t`, `bits_to_desc`, `desc_to_bits`, `make_completion`, per-field `desc_dtype`/`desc_accmode`/`desc_ew`/`desc_sp24` accessors **and** a stale combined type comment | descriptor layout, completion geometry, and the accessor-beats-comment rule for the arithmetic-type subfields |
+| `ai/g6lc_ai_instr_pkg.sv` | a minimal custom-instruction package with `ai.enq`/`ai.poll`/`ai.qfence` encodings | instruction-set ingestion |
 
 ## Rules for adding a fixture
 
@@ -36,3 +39,8 @@ that hazard is what the test is about, not because it was observed in a particul
   not a silent behaviour change.
 - Keep them small. A fixture is a specification, and a specification nobody reads is not
   one.
+- A fixture may deliberately publish something the live design does not yet, when that
+  something is an open ask in `../architecture/RTL_FEEDBACK.md`. Then the reader's forward
+  path is tested here, while a separate test pins what the live package actually publishes
+  today — so "the design has not published it" and "the emulator cannot read it" stay
+  distinguishable. `ai/g6lc_ai_desc_pkg.sv` does this for the F10 type accessors.
