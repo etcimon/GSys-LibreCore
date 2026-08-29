@@ -707,10 +707,12 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("    if (haddr && qemu_plugin_hwaddr_is_io(haddr)) {\n");
     body.push_str("        g6lc_mmio_count[vcpu_index]++;\n");
     body.push_str("    }\n");
+    body.push_str("#if G6LC_AI_DESC_DECODE == 1 || G6LC_AI_ISLAND_LEN != 0\n");
     body.push_str("    bool is_io = haddr && qemu_plugin_hwaddr_is_io(haddr);\n");
     body.push_str(
         "    uint64_t paddr = (haddr && !is_io) ? qemu_plugin_hwaddr_phys_addr(haddr) : vaddr;\n",
     );
+    body.push_str("#endif\n");
     body.push_str("#if G6LC_AI_DESC_DECODE == 1\n");
     body.push_str("    uint64_t store_word = 0;\n");
     body.push_str("    if (g6lc_is_store) {\n");
