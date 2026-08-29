@@ -566,11 +566,16 @@ Open, with reopen conditions:
 - **Ingest gap:** the model carries capability *offsets* but no window *base*. Until the design
   package exposes one, `cap_base` stays `None` and the window is undecoded. Inventing a base would
   put a guest-visible address in `device.rs`.
-- Conformance rules for `S` above the interrupt-context cap, and accumulator banks below thread
-  count (both are design asserts the emulator should mirror).
-- B2 descriptor reassembly, so the plugin stream carries submissions rather than accesses.
 - Firmware topology invariants (processor-node count and firmware hart count both equal `S`) as
   emitted-artifact checks; the design's own two-thread bring-up is not green here.
+
+Resolved since this section was opened:
+- Conformance rules for `S` above the interrupt-context cap, and accumulator banks below thread
+  count (`g6q-core::TargetModel::topology_rows` and `g6q-svcfg::derive::derive` both mirror the
+  design's own assertions; tests cover the over-budget and raise-to-thread-count cases).
+- B2 descriptor reassembly (`g6q-emit-qemu` plugin now emits submissions for both the MMIO-latch
+  and queue-instruction paths; `AGENTS-todo.md` Q7/Q8 pass rows document the landed Change Sets
+  C1 and C6).
 
 ### Change set B4 — island MMIO placement, ingested or reported (Q6, landed)
 
