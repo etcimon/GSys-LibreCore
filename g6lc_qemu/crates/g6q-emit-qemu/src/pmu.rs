@@ -26,6 +26,8 @@ pub fn emit_pmu_plugin(model: &TargetModel, version: &str, digest: &str) -> Emis
     let mut body = String::new();
     body.push_str("#include <stdint.h>\n");
     body.push_str("#include <stdio.h>\n");
+    body.push_str("#include <string.h>\n");
+    body.push_str("#include <inttypes.h>\n");
     body.push_str("#include <glib.h>\n");
     body.push_str("#include <qemu-plugin.h>\n\n");
 
@@ -53,17 +55,33 @@ pub fn emit_pmu_plugin(model: &TargetModel, version: &str, digest: &str) -> Emis
     }
     body.push_str("};\n\n");
 
-    body.push_str("/* Per-hart, per-event accumulator. Index 0 is always cycles (synthetic). */\n");
+    body.push_str("/* Per-hart base counters and the published event table. */\n");
     body.push_str("static uint64_t g6lc_pmu_value[G6LC_HARTS_TOTAL][G6LC_PMU_EVENTS];\n");
     body.push_str("static uint64_t g6lc_pmu_cycle[G6LC_HARTS_TOTAL];\n");
     body.push_str("static uint64_t g6lc_pmu_insn[G6LC_HARTS_TOTAL];\n");
     body.push_str("static FILE *g6lc_pmu_file;\n\n");
 
+    body.push_str("/* The plugin cannot read the guest's mhpmevent, so cycles and instructions\n");
+    body.push_str(" * are synthetic (one per retired insn).  Other event rows stay at zero\n");
+    body.push_str(" * unless a later pass maps them to a sampled signal. */\n");
+    body.push_str("static uint64_t g6lc_pmu_event_value(uint32_t hart, uint32_t event_idx)\n{\n");
+    body.push_str("    const char *name = g6lc_pmu_event_name[event_idx];\n");
+    body.push_str("    if (strcmp(name, \"cycles\") == 0 || strcmp(name, \"mcycle\") == 0) {\n");
+    body.push_str("        return g6lc_pmu_cycle[hart];\n");
+    body.push_str("    }\n");
+    body.push_str("    if (strcmp(name, \"instructions\") == 0 ||\n");
+    body.push_str("        strcmp(name, \"minstret\") == 0 ||\n");
+    body.push_str("        strcmp(name, \"retired_instructions\") == 0) {\n");
+    body.push_str("        return g6lc_pmu_insn[hart];\n");
+    body.push_str("    }\n");
+    body.push_str("    return g6lc_pmu_value[hart][event_idx];\n");
+    body.push_str("}\n\n");
+
     body.push_str("static void g6lc_pmu_insn_exec(unsigned int vcpu_index, void *userdata)\n{\n");
     body.push_str("    (void)userdata;\n");
     body.push_str("    if (vcpu_index < G6LC_HARTS_TOTAL) {\n");
     body.push_str("        g6lc_pmu_insn[vcpu_index]++;\n");
-    body.push_str("        g6lc_pmu_value[vcpu_index][0]++;\n");
+    body.push_str("        g6lc_pmu_cycle[vcpu_index]++;\n");
     body.push_str("    }\n");
     body.push_str("}\n\n");
 
@@ -86,11 +104,11 @@ pub fn emit_pmu_plugin(model: &TargetModel, version: &str, digest: &str) -> Emis
     body.push_str("        fprintf(g6lc_pmu_file, \"{\\\"header\\\":{\\\"profile\\\":\\\"g6lc-%s\\\",\\\"counter_count\\\":%u},\\\"harts\\\":[\\n\", G6LC_TARGET_ID, G6LC_PMU_COUNTERS);\n");
     body.push_str("        for (uint32_t h = 0; h < G6LC_HARTS_TOTAL; ++h) {\n");
     body.push_str("            if (h != 0) { fprintf(g6lc_pmu_file, \",\\n\"); }\n");
-    body.push_str("            fprintf(g6lc_pmu_file, \"  {\\\"hart\\\":%u,\\\"cycles\\\":%\\\"PRIu64\\\",\\\"instructions\\\":%\\\"PRIu64\\\",\\\"events\\\":[\", h, g6lc_pmu_cycle[h], g6lc_pmu_insn[h]);\n");
+    body.push_str("            fprintf(g6lc_pmu_file, \"  {\\\"hart\\\":%u,\\\"cycles\\\":%\" PRIu64 \",\\\"instructions\\\":%\" PRIu64 \",\\\"events\\\":[\", h, g6lc_pmu_cycle[h], g6lc_pmu_insn[h]);\n");
     body.push_str("            for (uint32_t e = 0; e < G6LC_PMU_EVENTS; ++e) {\n");
     body.push_str("                if (e != 0) { fprintf(g6lc_pmu_file, \",\"); }\n");
-    body.push_str("                fprintf(g6lc_pmu_file, \"{\\\"name\\\":\\\"%s\\\",\\\"selector\\\":%u,\\\"value\\\":%\\\"PRIu64\\\"}\",\n");
-    body.push_str("                    g6lc_pmu_event_name[e], g6lc_pmu_event_selector[e], g6lc_pmu_value[h][e]);\n");
+    body.push_str("                fprintf(g6lc_pmu_file, \"{\\\"name\\\":\\\"%s\\\",\\\"selector\\\":%u,\\\"value\\\":%\" PRIu64 \"}\",\n");
+    body.push_str("                    g6lc_pmu_event_name[e], g6lc_pmu_event_selector[e], g6lc_pmu_event_value(h, e));\n");
     body.push_str("            }\n");
     body.push_str("            fprintf(g6lc_pmu_file, \"]}\");\n");
     body.push_str("        }\n");
@@ -100,7 +118,9 @@ pub fn emit_pmu_plugin(model: &TargetModel, version: &str, digest: &str) -> Emis
     body.push_str("    }\n");
     body.push_str("    for (uint32_t i = 0; i < G6LC_HARTS_TOTAL; ++i) {\n");
     body.push_str("        g_autofree gchar *msg = g_strdup_printf(\n");
-    body.push_str("            \"[g6lc-%s] hart %u: pmu_cycles=%\\\"PRIu64\\\" pmu_insns=%\\\"PRIu64\\\"\\n\",\n");
+    body.push_str(
+        "            \"[g6lc-%s] hart %u: pmu_cycles=%\" PRIu64 \" pmu_insns=%\" PRIu64 \"\\n\",\n",
+    );
     body.push_str("            G6LC_TARGET_ID, i, g6lc_pmu_cycle[i], g6lc_pmu_insn[i]);\n");
     body.push_str("        qemu_plugin_outs(msg);\n");
     body.push_str("    }\n");
@@ -155,5 +175,37 @@ mod tests {
         assert!(f.contents.contains("g6lc_pmu_event_name"));
         assert!(f.contents.contains("g6lc_pmu_value"));
         assert!(f.path.contains("-pmu.c"));
+    }
+
+    #[test]
+    fn emitted_pmu_plugin_uses_portable_inttypes() {
+        let m = g6q_core::model::TargetModel::new("g6lc64_test");
+        let e = emit_pmu_plugin(&m, "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        assert!(c.contains("#include <inttypes.h>"));
+        assert!(c.contains("%\" PRIu64 \""));
+        assert!(!c.contains("%\"PRIu64\""));
+    }
+
+    #[test]
+    fn emitted_pmu_plugin_maps_cycles_and_instructions() {
+        let mut m = g6q_core::model::TargetModel::new("g6lc64_test");
+        m.pmu.events.push(g6q_core::pmu::PmuEvent {
+            name: "instructions".into(),
+            group: 0,
+            index: 0,
+            mhpmevent: 0x00000002,
+        });
+        m.pmu.events.push(g6q_core::pmu::PmuEvent {
+            name: "cycles".into(),
+            group: 0,
+            index: 1,
+            mhpmevent: 0x00000001,
+        });
+        let e = emit_pmu_plugin(&m, "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        assert!(c.contains("g6lc_pmu_event_value(h, e)"));
+        assert!(c.contains("\"instructions\""));
+        assert!(c.contains("\"cycles\""));
     }
 }

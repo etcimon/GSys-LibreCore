@@ -450,7 +450,7 @@ def _wiring_sections(text: str) -> dict[str, str]:
     return {p: "\n".join(lines).strip() for p, lines in sections.items() if lines}
 
 
-def _add_contrib_plugin(qemu_dir: Path, target_id: str) -> None:
+def _add_contrib_plugin(qemu_dir: Path, target_id: str, suffix: str = "") -> None:
     """Ensure the generated plugin is listed in contrib/plugins/meson.build."""
     path = qemu_dir / "contrib" / "plugins" / "meson.build"
     if not path.is_file():
@@ -458,7 +458,7 @@ def _add_contrib_plugin(qemu_dir: Path, target_id: str) -> None:
     text = path.read_text(encoding="utf-8")
     # The emitted plugin file uses the C-sanitised target id (e.g. 'ai-soc' -> 'ai_soc').
     safe_id = target_id.replace('-', '_').replace('.', '_')
-    name = f"g6lc-{safe_id}"
+    name = f"g6lc-{safe_id}{suffix}"
     if name in text:
         log(f"already present in {path}: {name}")
         return
@@ -618,6 +618,7 @@ def cmd_install_qemu(args: argparse.Namespace) -> int:
 
     if not args.dry_run:
         _add_contrib_plugin(qemu_dir, target_id)
+        _add_contrib_plugin(qemu_dir, target_id, suffix="-pmu")
         with (qemu_dir / ".g6lc_qemu_install").open(
                 "w", encoding="utf-8", newline="\n") as f:
             f.write(f"target: {target_id}\npackage: {args.package}\n")

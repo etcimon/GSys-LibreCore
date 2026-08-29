@@ -216,6 +216,29 @@ through the same artifact keys. Keeping the field shape identical across both ba
 `TensorArtifact::compare`, `AiTensorEvent::from_json`, and the bridge consumer handle B2 and B3
 output without branching on backend.
 
+### PMU counter plugin
+
+`g6lc-<target>-pmu.c` is the B2 counters plugin. It is emitted from the same `PmuTable` that feeds
+B1's FDT and CPU properties (`architecture/EMIT.md` §3.3), so the event names and `mhpmevent`
+selectors the guest sees in the device tree are the same ones the plugin prints in its output file.
+
+At translate time it registers an instruction-execution callback on every TB. The callback
+increments per-hart `g6lc_pmu_insn` and `g6lc_pmu_cycle`. At exit it writes a JSON file with:
+
+- `header.profile` and `header.counter_count` from the model;
+- one hart object with `cycles`, `instructions`, and an `events` array;
+- one row per published event with `name`, `selector`, and a `value`.
+
+The value is resolved by name: `cycles`/`mcycle` map to the synthetic cycle counter,
+`instructions`/`minstret`/`retired_instructions` map to the instruction counter, and every other
+event is zero because the plugin cannot read the guest's `mhpmevent` CSRs. That is honest for a
+sampling/scaffold plugin: the *published table* is present, but the *measured counts* for most
+events are not. A later pass can replace the name mapping with a QEMU helper or a tandem reference
+that reads the live `mhpmevent` selector.
+
+The emitted C uses `<inttypes.h>` `PRIu64` for `uint64_t` formatting and compiles under QEMU's
+`-Werror` flags.
+
 ### The queue-instruction path
 
 A guest can submit work **without ever storing to the latch window**: the custom enqueue instruction
