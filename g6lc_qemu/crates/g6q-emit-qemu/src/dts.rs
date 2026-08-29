@@ -10,7 +10,7 @@
 //! source string, so there is no intermediate source parse and phandle numbers
 //! stay under the emitter's control.
 
-use crate::{Emission, EmittedFile};
+use crate::{machine::merged_peripherals, Emission, EmittedFile};
 use g6q_core::model::{Peripheral, TargetModel};
 use g6q_dts::{Node, Prop};
 use std::fmt::Write as _;
@@ -246,7 +246,7 @@ fn build_dts(model: &TargetModel) -> Node {
     let plic_phandle = 1u64;
     let ctxs = model.soc.contexts_per_hart.max(1) as usize;
 
-    if let Some(plic) = model.soc.peripherals.iter().find(is_intc) {
+    if let Some(plic) = model.soc.peripherals.iter().find(|p| is_intc(p)) {
         let mut plic_node = Node {
             name: node_name(plic),
             ..Node::default()
@@ -284,23 +284,29 @@ fn build_dts(model: &TargetModel) -> Node {
         soc.children.push(plic_node);
     }
 
-    for p in &model.soc.peripherals {
+    for p in merged_peripherals(model) {
         if is_intc(&p) {
             continue;
         }
         let mut dev = Node {
-            name: node_name(p),
+            name: node_name(&p),
             ..Node::default()
         };
-        let compatible = if is_clint(p) {
+        let compatible = if is_clint(&p) {
             "sifive,clint0"
+        } else if is_virtio_mmio(&p) {
+            "virtio,mmio"
         } else {
             p.model.as_deref().unwrap_or("")
         };
         dev.props.insert("compatible".into(), s(compatible));
+
+        if is_virtio_mmio(&p) {
+            dev.props.insert("dma-coherent".into(), Prop::Flag);
+        }
         dev.props.insert("reg".into(), addr_size_reg(p.base, p.len));
 
-        if is_clint(p) {
+        if is_clint(&p) {
             // RISC-V CLINT wires M-mode software (3) and M-mode timer (7)
             // to each hart's CPU interrupt controller.
             let mut ie: Vec<u64> = Vec::new();
@@ -320,7 +326,7 @@ fn build_dts(model: &TargetModel) -> Node {
         }
 
         // NS16550a-specific descriptors that stock firmware expects.
-        if is_ns16550(p) {
+        if is_ns16550(&p) {
             if let Some(clock) = p.clock_frequency {
                 dev.props.insert("clock-frequency".into(), cell(clock));
             }
@@ -416,7 +422,7 @@ fn build_pmu_node(model: &TargetModel) -> Option<Node> {
     Some(pmu)
 }
 
-fn is_intc(p: &&Peripheral) -> bool {
+fn is_intc(p: &Peripheral) -> bool {
     let id = p.id.to_lowercase();
     if id == "intc" || id == "plic" || id.starts_with("plic") || id == "interrupt-controller" {
         return true;
@@ -452,6 +458,14 @@ fn is_clint(p: &Peripheral) -> bool {
 fn is_ns16550(p: &Peripheral) -> bool {
     let model = p.model.as_deref().unwrap_or("").to_lowercase();
     model.contains("ns16550")
+}
+
+fn is_virtio_mmio(p: &Peripheral) -> bool {
+    p.model
+        .as_deref()
+        .unwrap_or("")
+        .to_lowercase()
+        .contains("virtio-mmio")
 }
 
 fn plic_compatible(p: &&Peripheral) -> &'static str {
@@ -733,6 +747,38 @@ mod tests {
         assert_eq!(raw[0], 0);
         assert_eq!(raw[1], 1); // mhpmevent selector
         assert_eq!(raw[4], 0x1f8); // counter bitmap
+    }
+
+    #[test]
+    fn virtio_mmio_nodes_use_the_linux_compatible_and_dma_coherent() {
+        let mut m = TargetModel::new("t");
+        m.soc.dram = Some((0x8000_0000, 0x1000_0000));
+        m.soc.harts_total = 1;
+        m.soc.contexts_per_hart = 1;
+        m.soc.intc_sources = 4;
+        m.soc.intc_targets = 4;
+        m.soc.virtio_mmio = 2;
+        let e = emit_dtb(&m, "0.1.0", "sha256:abc");
+        let c = e.files.iter().find(|f| f.path.ends_with(".c")).unwrap();
+        let blob = extract_blob(&c.contents);
+        let root = g6q_dts::from_blob(&blob).expect("valid blob");
+        let soc = root.child("soc").expect("soc");
+
+        // Base is the next 4 KiB after DRAM end (0x90000000).
+        let v0 = soc.child("virtio0@90000000").expect("virtio0 node");
+        let v1 = soc.child("virtio1@90001000").expect("virtio1 node");
+
+        assert_eq!(
+            v0.prop("compatible").and_then(|p| p.first_string()),
+            Some("virtio,mmio")
+        );
+        assert!(v0.prop("dma-coherent").is_some());
+        assert!(v0.prop("interrupts").is_some());
+        assert!(v0.prop("interrupt-parent").is_some());
+        assert_eq!(
+            v1.prop("compatible").and_then(|p| p.first_string()),
+            Some("virtio,mmio")
+        );
     }
 
     fn extract_blob(c: &str) -> Vec<u8> {

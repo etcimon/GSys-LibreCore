@@ -485,13 +485,24 @@ def _find_one(pkg: Path, pattern: str) -> Path | None:
     return found[0] if found else None
 
 
-def _gen_command(gen_bin: Path, pkg: Path, target: str | None, dts_overlay: str | None) -> list[str]:
+def _gen_command(
+    gen_bin: Path,
+    pkg: Path,
+    target: str | None,
+    dts_overlay: str | None,
+    machine: str | None = None,
+    virtio_mmio: str | None = None,
+) -> list[str]:
     if _is_repo_root(pkg):
         cmd = [str(gen_bin), "gen", "--emit", "qemu", "--repo-root", str(pkg)]
         if target:
             cmd.extend(["--target", target])
         if dts_overlay:
             cmd.extend(["--dts-overlay", dts_overlay])
+        if machine:
+            cmd.extend(["--machine", machine])
+        if virtio_mmio:
+            cmd.extend(["--virtio-mmio", virtio_mmio])
         return cmd
 
     cfg = _find_one(pkg, "*_config_pkg.sv")
@@ -520,6 +531,10 @@ def _gen_command(gen_bin: Path, pkg: Path, target: str | None, dts_overlay: str 
     ]
     if dts_overlay:
         cmd.extend(["--dts-overlay", dts_overlay])
+    if machine:
+        cmd.extend(["--machine", machine])
+    if virtio_mmio:
+        cmd.extend(["--virtio-mmio", virtio_mmio])
     return cmd
 
 
@@ -546,8 +561,14 @@ def cmd_install_qemu(args: argparse.Namespace) -> int:
             return res
 
     try:
-        gen_cmd = _gen_command(package_root() / "target" / "debug" / "g6lc-qemu",
-                               pkg, args.target, args.dts_overlay)
+        gen_cmd = _gen_command(
+            package_root() / "target" / "debug" / "g6lc-qemu",
+            pkg,
+            args.target,
+            args.dts_overlay,
+            args.machine,
+            args.virtio_mmio,
+        )
     except ValueError as e:
         err(str(e))
         return 1
@@ -725,6 +746,10 @@ def main(argv: list[str] | None = None) -> int:
                    help="package directory to generate from (default: fixtures/mini)")
     p.add_argument("--target", default=None,
                    help="override the emitted target id")
+    p.add_argument("--machine", default=None,
+                   help="machine profile: g6lc-soc (default) or g6lc-virt")
+    p.add_argument("--virtio-mmio", default=None,
+                   help="number of virtio-mmio transports (g6lc-virt defaults to 8)")
     p.add_argument("--dts-overlay", default=None,
                    help="overlay .dts to apply before generation")
     p.add_argument("--dry-run", action="store_true",

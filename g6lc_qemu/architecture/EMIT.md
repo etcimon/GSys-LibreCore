@@ -86,7 +86,20 @@ the design's own SoC package. A machine that drifts fails at construction, not a
 
 It asserts only under the faithful profile; under the virt profile it reports the deltas instead.
 
-### 3.3 CPU and device-tree PMU mapping
+### 3.3 Virtio transports (B1 virt profile)
+
+When `Soc.virtio_mmio` is non-zero — the default under `g6lc-virt` unless overridden — the generated
+machine places that many 4 KiB `virtio-mmio` transports at the next free page after the design's own
+peripherals and DRAM. Each transport is created with `qdev_new("virtio-mmio")`, mapped via
+`sysbus_mmio_map`, and its IRQ wired to the PLIC at the next available source. The generated FDT
+emits a `virtio,mmio` compatible node per transport with `reg`, `interrupts`, `interrupt-parent`, and
+`dma-coherent`.
+
+This is the B1 bridge to the B0 stock-QEMU virtio devices: a run with `--machine g6lc-virt` and
+`--drive rootfs.img` produces a `g6lc-ai_soc` machine that accepts `-device virtio-blk-device` on the
+generated transports.
+
+### 3.4 CPU and device-tree PMU mapping
 
 The generated FDT includes an OpenSBI-compatible `/pmu` node when the model exposes at least one
 programmable counter. It carries:

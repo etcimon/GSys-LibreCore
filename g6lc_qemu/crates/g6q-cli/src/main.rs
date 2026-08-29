@@ -183,6 +183,11 @@ fn cmd_gen(args: &Args) -> Result<(), String> {
         model.soc.virtio_mmio = v
             .parse::<u32>()
             .map_err(|_| "--virtio-mmio must be a non-negative integer".to_string())?;
+    } else if model.profile == Profile::Virt && model.soc.virtio_mmio == 0 {
+        // A virt profile needs at least a few virtio-mmio transports for block,
+        // network, console and rng. This is a machine-profile default, not an RTL
+        // constant, and is reported in the model JSON.
+        model.soc.virtio_mmio = 8;
     }
 
     if let Some(v) = args.value("bootrom") {

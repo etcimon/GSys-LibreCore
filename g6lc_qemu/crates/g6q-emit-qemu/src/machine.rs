@@ -27,14 +27,12 @@ pub fn machine_name(target_id: &str) -> String {
         .collect()
 }
 
-/// Emit the machine C file for a model.
-pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emission {
-    let name = machine_name(&model.target_id);
-    let upper = name.to_uppercase();
-    let mut emission = Emission::new();
-
-    // Merge any virtio-mmio transports requested by the machine profile.
-    let mut all_peripherals = model.soc.peripherals.clone();
+/// Merge any virtio-mmio transports requested by the machine profile into the
+/// design's own peripheral list. The base is the next 4 KiB-aligned page after
+/// the end of DRAM and every design peripheral, and each transport occupies one
+/// page. This is a machine-profile choice, not an RTL constant.
+pub(crate) fn merged_peripherals(model: &TargetModel) -> Vec<g6q_core::model::Peripheral> {
+    let mut all = model.soc.peripherals.clone();
     if model.soc.virtio_mmio != 0 {
         let mut max_end = model.soc.dram.map_or(0, |(b, l)| b + l);
         for p in &model.soc.peripherals {
@@ -50,7 +48,7 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
             .max()
             .unwrap_or(0);
         for i in 0..model.soc.virtio_mmio {
-            all_peripherals.push(g6q_core::model::Peripheral {
+            all.push(g6q_core::model::Peripheral {
                 id: format!("virtio{i}"),
                 base: base + (i as u64) * 0x1000,
                 len: 0x1000,
@@ -60,6 +58,16 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
             });
         }
     }
+    all
+}
+
+/// Emit the machine C file for a model.
+pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emission {
+    let name = machine_name(&model.target_id);
+    let upper = name.to_uppercase();
+    let mut emission = Emission::new();
+
+    let all_peripherals = merged_peripherals(model);
 
     // Decide whether the model constants are actually referenced, to avoid
     // -Werror=unused-const-variable warnings.
@@ -307,6 +315,9 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
         body.push_str("                                g6lc_peripherals[i].len);\n");
         body.push_str("            qdev_prop_set_string(dev, \"name\",\n");
         body.push_str("                                  g6lc_peripherals[i].model);\n");
+        body.push_str("        }\n");
+        body.push_str("        if (strcmp(qom, \"virtio-mmio\") == 0) {\n");
+        body.push_str("            dev = qdev_new(\"virtio-mmio\");\n");
         body.push_str("        }\n");
         body.push_str("        if (strcmp(qom, \"serial-mm\") == 0) {\n");
         body.push_str("            dev = qdev_new(qom);\n");
@@ -669,5 +680,13 @@ mod tests {
         assert!(f.contents.contains("\"virtio1\""));
         assert!(f.contents.contains("\"virtio-mmio\""));
         assert!(f.contents.contains("return \"virtio-mmio\""));
+        assert!(
+            f.contents.contains("qdev_new(\"virtio-mmio\")"),
+            "generated machine must instantiate the virtio-mmio transport"
+        );
+        assert!(
+            f.contents.contains("sysbus_connect_irq") && f.contents.contains("virtio"),
+            "virtio-mmio transport must have an IRQ wired to the PLIC"
+        );
     }
 }
