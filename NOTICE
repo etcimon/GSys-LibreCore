@@ -157,9 +157,10 @@ SPDX-License-Identifier. The repository-level map is declared in
           -> CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
           -> LICENSE.CERN-OHL-S, LICENSE.GSys-Commercial
 
-  tier T  build platform, static-timing tooling, verification scripting, docs
+  tier T  build platform, static-timing tooling, verification scripting, docs,
+          and the quantum_ai cycle-function research package
           -> MIT
-          -> LICENSE.MIT
+          -> LICENSE.MIT, quantum_ai/LICENSE
 
   tier U  upstream / third-party material, unchanged
           -> LICENSE, LICENSE.SiFive, LICENSE.Berkeley, and per-subtree LICENSEs

@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+[package]
+name = "qrc_env"
+version = "0.1.0"
+edition = "2021"
+description = "Quantum-reversible C ABI + environmental intuition (simulated)"
+license = "MIT"
+authors = ["Etienne Cimon"]
+
+[lib]
+name = "qrc_env"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1

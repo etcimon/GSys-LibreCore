@@ -1,0 +1,11 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+# Build / packaging artifacts (research package; not source).
+# The quantum_programming_theory.zip archive is kept as an easy download.
+*.zip
+!quantum_programming_theory.zip
+**/target/
+*.exe
+*.pdb
+*.dll
+*.lib

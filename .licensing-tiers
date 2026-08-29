@@ -115,6 +115,19 @@ T   verif/sv-timing-tests/**
 T   verif/sim/**
 # Linux / OpenSBI reference software and payload (not-quite-RTL).
 T   software/**
+# quantum_ai: the cycle-function research package. Sole-authorship (Case A)
+# original work by the active contributor -> MIT, like the rest of tier T.
+#   quantum_ai/cycle_function_intuition_thesis_final.pdf  the theory of record
+#   quantum_ai/intuition_synthetics/**                    reference C ABI + Rust sim
+#   quantum_ai/quantum_programming_theory/**              derivation + figures
+# Provenance note, recorded in REUSE.toml rather than re-litigated per file: the
+# prose body of quantum_programming_theory/index.html is a rebuilt transcript of
+# the contributor's own AI-assistant session. The MIT grant here covers the
+# assembled document, its stylesheet, its scripts and the build script that
+# emits it; no third-party copyright is asserted over the quoted dialogue.
+# Nothing in this subtree is RTL, so it is never tier R.
+T   quantum_ai/**
+
 # Repo-root control surface, bootstrap wrappers and CI.
 T   .config.ts
 T   build.sh
