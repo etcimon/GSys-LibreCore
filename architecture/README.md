@@ -81,6 +81,7 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `multi-threading/testharness-proxy.md` | **Harness of record** for SMT Spike/soak/peel/TRACE/I4dp (proxy-only; classify from log) |
 | `multi-threading/linux-boot-scale.md` | OpenSBI steps × fetch_B four combos × named envelopes (N/T/I/RVV/stream); `_v`/`ooo_server` Linux-cap bar |
 | `multi-threading/soft-ladder/` | Evidence (tag `g1-archive`). A/`smt_legacy` soak notes; **`CONTRACT.md`** envelopes |
+| `dcache-ack-before-check.md` | **SL-W micro-arch note:** the WT D$ write-through L1-stale class behind the S1 residual — the two failure modes (staleness vs forward progress), why all ~60 logged candidates hit both, the untried decoupled-fixup axis, and the acceptance gates |
 | `server-math-hypervisor.md` | U9/U10 detail: vstimecmp, server config, RVV enable order |
 | `Architecture-research-todo-drafts.md` | Earlier research roadmap that the program above refines for a power-bound target. |
 

@@ -14,8 +14,12 @@
 // with frozen A (core/frontend + core/instr_realign + core/smt pkg/dbg)
 // and with Flist.smt_legacy. Do not compile two frontends.
 //
-// Predictors stay in core/frontend (identical at the byte-copy). Copies
-// under this directory are not on the flist — do not also list them.
+// Predictors stay in core/frontend and are listed by Flist.cva6, not here.
+// The 16 uncompiled predictor copies that used to sit in this directory were
+// dropped (they were byte-identical to core/frontend apart from CRLF and
+// mojibake, and were a silent "edited the wrong copy" trap). This directory
+// now contains exactly the six files listed below: if a file is here, it is
+// compiled. Do not re-add a predictor copy; edit core/frontend instead.
 //
 // To soak frozen A instead, see Flist.fetch. Oracle: drop G6LC_FETCH_B
 // and this include, add -f Flist.smt_legacy, leave predictors.

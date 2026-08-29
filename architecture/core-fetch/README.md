@@ -37,7 +37,7 @@ Normative why: [`../firmware-boot-principles.md`](../firmware-boot-principles.md
 | `core/frontend/` + `core/instr_realign.sv` | Frozen **A** (applied fetch at `3745cfb06`). Predictors still compiled from here |
 | `core/smt/` | **pkg + dbg only** (`g6lc_fetch_{pkg,dbg}`). Not compiled while `Flist.fetch_B` is default |
 | `core/smt_legacy/` | g1\* oracle frontend + recover packages + SMT banks |
-| `core/fetch_B/` | **R6–R11 workspace** (`Flist.fetch_B`): supply + pkg/dbg. Default compile. Do not compile with `core/frontend` supply |
+| `core/fetch_B/` | **R6–R11 workspace** (`Flist.fetch_B`): supply + pkg/dbg. Default compile. Do not compile with `core/frontend` supply. **Duplicate drop landed** — the directory now holds exactly the six compiled files; if a file is here it is on the flist |
 
 Default `Flist.cva6`: `+define+G6LC_FETCH_B` and `-f Flist.fetch_B`; predictors stay in
 `core/frontend`. Frozen A: drop that include, restore `core/smt` pkg/dbg + `core/instr_realign`
@@ -88,6 +88,7 @@ and `Flist.fetch_B`, `-f Flist.smt_legacy`. Do not compile both frontends.
 | L3 `packet_upto_cf` / L4 `redirect_rehold` | **landed** fetchb `63fa23a9` (IQ + one frontend assign). Hold **cookie**. Dbg: `window_expected`/`wr=`/`age=`/`hm=` (n-wide/spec observe; live not an IQ drop) |
 | `Flist.smt_legacy` | **landed** (opt-in A oracle; do not compile with `Flist.fetch` / `Flist.fetch_B`) |
 | `core/smt/` duplicate drop | **landed** (20 supply/predictor copies removed; pkg+dbg remain) |
+| `core/fetch_B/` duplicate drop | **landed** (16 uncompiled predictor copies removed, 2043 L; they were byte-identical to `core/frontend` apart from CRLF + mojibake, on no flist, and a silent wrong-copy trap). Compiled B plane is now **2364 L** across the six `Flist.fetch_B` files. Predictors stay in `core/frontend` |
 | `Flist.fetch_B` default | **landed** (R6–R11 workspace; predictors stay in `core/frontend`). Include **after** `config_pkg`/`ariane_pkg` (top-of-file `-f` is PKGNODECL on a clean parse) |
 | B skip recover on shared ID/EX | **landed** (`G6LC_FETCH_B`: no mash, no resolve `jalr_usable`, no `cf_unissued`, no G1gg/G1gq, no SB unusable-bmiss drop). A unchanged. Next pin still R4 FDT walk |
 | B skip sib_cjalr arm + I$ user half | **landed** (ID `g1lo`/`g1hx`/`g1mf` capture; `g6lc_icache` G1iw/jl). Rewrite was already off; capture was still live |

@@ -52,6 +52,11 @@
 //    L1 at ELF BSS 0 (hold IPI walk a5=0 on ecall_rfence.next).
 //    Widening to 0x80040–0x80045 (console_tbuf) did not unhang hold printf; reverted.
 //
+//    That window is named VoidKeepEn / VoidKeepTag below; VoidKeepEn = 0 compiles
+//    the containment out and restores stock upstream ACK handling. Do not widen it
+//    without a proxy run: every address-agnostic form of the fix is recorded
+//    reverted in architecture/multi-threading/linux-boot-scale.md S1.
+//
 // 4) we handle NC writes using the writebuffer circuitry. upon an NC request, the writebuffer will first be drained.
 //    then, only the NC word is written into the write buffer and no further write requests are acknowledged until that
 //    word has been evicted from the write buffer.
@@ -205,6 +210,29 @@ module wt_dcache_wbuffer
   logic [DCACHE_CL_IDX_WIDTH-1:0] wr_cl_idx_q, wr_cl_idx_d;
 
   logic [CVA6Cfg.PLEN-1:0] debug_paddr[CVA6Cfg.WtDcacheWbufDepth-1:0];
+
+  // VOID-keep window (header note 3). This is containment for the
+  // ACK-before-check stale-L1 class, not a general fix: a write ACK that races
+  // ahead of its tag check frees the TX and drops the word, so the clean bytes
+  // never reach the L1 data array while a stale copy of that line may still be
+  // resident. Main memory is correct, L1 is not, and a later load hits the
+  // stale way.
+  //
+  // Holding every VOID-ACK word until its tag check either deadlocks the return
+  // FIFO or hangs the firmware; the address-agnostic variants are all recorded
+  // reverted in architecture/multi-threading/linux-boot-scale.md S1 (ackinv,
+  // voidchk2, keep/keepv/keep1..7, snoopd, wr1). The only known-green
+  // containment is this narrow window over the OpenSBI ecall-extension objects
+  // (list/time/rfence/ipi at 0x80040xxx, not the namelen stack at 0x80046xxx).
+  // Widening it to 0x80040-0x80045 (console_tbuf) was tried and reverted.
+  //
+  // Because the window is workload-scoped it is an open item, not a design: it
+  // is the only hard-coded workload address in synthesizable core RTL and it
+  // must be replaced by an address-agnostic mechanism before this core supports
+  // another memory map or another firmware. Tracked as SL-W in AGENTS-todo.md.
+  localparam bit VoidKeepEn = 1'b1;
+  localparam logic [19:0] VoidKeepTag = 20'h80040;
+
   logic [CVA6Cfg.WtDcacheWbufDepth-1:0] void_keep_d, void_keep_q;
   logic [CVA6Cfg.PLEN-1:0] wr_paddr_check;
   logic [(CVA6Cfg.XLEN/8)-1:0] ack_be;
@@ -587,8 +615,10 @@ module wt_dcache_wbuffer
         if (tx_stat_q[rtrn_id].be[k]) begin
           wbuffer_d[rtrn_ptr].txblock[k] = 1'b0;
           if (!wbuffer_q[rtrn_ptr].dirty[k]) begin
-            // Keep VOID ACK of 0x80040xxx until tag-check (see header note 3).
-            if (!wbuffer_d[rtrn_ptr].checked && (wr_paddr[31:12] == 20'h80040)) begin
+            // Keep a VOID ACK inside the VoidKeepTag window until tag-check
+            // (see header note 3 and the VoidKeepEn declaration above).
+            if (VoidKeepEn && !wbuffer_d[rtrn_ptr].checked &&
+                (wr_paddr[31:12] == VoidKeepTag)) begin
               void_keep_d[rtrn_ptr] = 1'b1;
               wbuffer_d[rtrn_ptr].txblock[k] = 1'b1;
             end else begin

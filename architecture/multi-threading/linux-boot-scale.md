@@ -299,6 +299,18 @@ dropped the word write). Not a 5th combo. I4cf keep-on-cancel HOLD-FAIL — do
 not re-land. Overlay remains load-bearing for h0 hart1 sticky; do not force
 replay=0.
 
+**Containment is named, not fixed (SL-W).** The kept VOID-keep window is now
+`VoidKeepEn` / `VoidKeepTag` in `core/cache_subsystem/wt_dcache_wbuffer.sv`
+(header note 3 plus the declaration) instead of a bare `20'h80040` at the use
+site. Behaviour is unchanged — `VoidKeepEn = 1'b1` and the compare is the same
+20 bits — so this is not a candidate and needs no re-soak. What it buys is that
+the **only hard-coded workload address in synthesizable `core/**` RTL** is
+discoverable, carries its reverted alternatives, and can be switched off
+(`VoidKeepEn = 0` restores stock upstream ACK handling). It remains an **open
+item**, not a design: the window is OpenSBI-specific, so it does not survive
+another firmware or another memory map, and no S4 / S6 / S7 envelope may rely on
+it. General fix and acceptance gates: **SL-W** in `AGENTS-todo.md`.
+
 **Do next (still S1, still not I4cg / D$ fill / I4cf):** **nackinv
 kept** (same-cycle; nackinv-d1 hung h0 @40000). Pin ELF `pin-bc7ed11d`
 **cookie `51b1babe` t=108544** `plat_hc=2` `coldboot_done=1`. Hold
