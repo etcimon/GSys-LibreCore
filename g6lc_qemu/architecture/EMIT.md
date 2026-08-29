@@ -60,7 +60,7 @@ Generated C, targeting the pinned QEMU revision (`../pins.toml`).
 | virt machine | the faithful machine plus virtio transports and a configurable RAM window |
 | accelerator device | register map, capability window, doorbell, completion path and interrupt line from the model |
 | CPU variants | one per target id: extension gating, vendor identification registers, custom CSRs |
-| custom instruction translation | decode/translate for any vendor extension the model declares |
+| custom instruction translation | `target/riscv/g6lc-<target>-ai.decode` + `target/riscv/insn_trans/trans_g6lc_<target>_ai.c.inc` for queue instructions declared by the model's `AiInstrSet` |
 | **memory-map self-check** | generated assertions that the constructed machine equals the model |
 | build wiring | a makefile / build-system fragment |
 
@@ -118,6 +118,75 @@ The generated CPU sets `cpu->cfg.ext_zihpm`, `cpu->cfg.ext_sscofpmf`, and `cpu->
 model; when counters are absent it explicitly disables `ext_zihpm` and sets `pmu_mask` to 0 so the
 QEMU defaults do not override the model. The B0 stock-QEMU driver appends `,pmu-mask=0x...` to the
 `-cpu` argument when `zihpm` is live.
+
+### 3.5 Custom queue-instruction decoder (B1)
+
+When `Soc.ai_island.instr_set` is present, B1 emits:
+
+- `target/riscv/g6lc-<target>-ai.decode` — a `decodetree` source that matches `ai.enq`, `ai.qfence`
+  and `ai.poll` using the `opcode_custom2`, `mask_f7f3op` and `match_*` values ingested from the
+  design's own instruction package.  The patterns use `.....` for register fields so the decoder
+  covers the whole `mask_f7f3op` space, matching the B3 VM decoder.
+- `target/riscv/insn_trans/trans_g6lc_<target>_ai.c.inc` — `trans_` functions for the three
+  queue instructions that call `gen_helper_g6lc_ai_*` helpers.  The helpers are declared in
+  `target/riscv/g6lc-<target>-ai-helpers.h` and implemented in
+  `target/riscv/g6lc-<target>-ai-helpers.c`.
+- `target/riscv/g6lc-<target>-ai-helpers.h` — `DEF_HELPER` declarations for `ai.enq`, `ai.qfence`
+  and `ai.poll`.
+- `target/riscv/g6lc-<target>-ai-helpers.c` — helper implementations that delegate to the
+  generated AI-island device.
+
+`install-qemu` wires the decoder, translation, helpers, and AI-island device into the QEMU build.
+
+### 3.6 AI-island sysbus device (B1)
+
+**One emission guard for the whole set.** `ai_island::resolved()` requires an ingested instruction
+encoding (`mask_f7f3op`, `opcode_custom2`) *and* resolved descriptor geometry (`desc_bytes`, a
+`ptr_done` offset). `trans.rs`, `machine.rs` and `build.rs` all call it. This is not tidiness: the
+helpers `#include` the device's header and the machine calls `g6lc_ai_island_create`, so emitting
+either half alone leaves the QEMU tree unbuildable — and the wiring fragment would list a file that
+does not exist, which fails at meson-configure time with no useful message.
+
+When the guard passes, B1 emits:
+
+- `hw/riscv/g6lc-<target>-ai-island.h` — device state, queue-entry type, and the public
+  `g6lc_ai_island_*` API. Also the completion-word macro (below) and, **only when the design
+  publishes them**, `G6LC_AI_ST_OK`, `G6LC_AI_ST_BAD_VER` and `G6LC_AI_DESC_VERSION`.
+- `hw/riscv/g6lc-<target>-ai-island.c` — a `MemoryRegion`-based device that:
+  - answers the capability window from a generated `g6lc_ai_cap_words[]` table built by
+    `AiIslandConfig::cap_words()` — the **same** IR function the native VM uses, so B1 and B3
+    cannot answer the same offset differently. An offset the model never names is absent from the
+    table, not answered as zero (zero is a legal capability value);
+  - maintains `queues` × `queue_depth` `G6lcAIQueueEntry` slots, one ring per hart wrapping when
+    there are fewer rings than harts, with island-wide ticket allocation;
+  - `enq` checks the descriptor version against `G6LC_AI_DESC_VERSION` (only when the accepted
+    version, its field offset *and* `ST_BAD_VER` are all published), reads `ptr_done` at the
+    ingested offset, and returns the ticket — or **`0`** when the ring is full;
+  - `qfence` completes every in-flight entry and writes the completion word to each `ptr_done`;
+  - `poll` returns `G6LC_AI_POLL_PENDING` while pending, otherwise writes the completion word to
+    `ptr_done`, retires the entry, and returns the same word.
+
+**Completion-word packing is not re-derived here.** `AiDescLayout::pack_completion_word()` in
+`g6q-core` is the single implementation; the emitter calls it with all-ones probes to recover the
+ticket and status shift/mask, and emits those as `G6LC_AI_TICKET_*` / `G6LC_AI_STATUS_*`. So the
+in-target device, the plugin's decoder and the native VM all produce and consume one layout,
+derived from the descriptor package's own `make_completion`.
+
+**`POLL_PENDING` is an emulator convention, not a design constant.** The package publishes
+completion *statuses*, which only exist once an entry is done; there is no published "not yet"
+encoding. The value is named once in `ai_island.rs` and shared with the native VM, and the ask is
+recorded in `RTL_FEEDBACK.md`. It is deliberately **not** reused as the ring-full return, because a
+caller could not then distinguish a rejected submission from an incomplete one.
+
+**Unresolved placement stays unresolved.** The window *bases* come from the island's address decode
+(RTL), which the reader cannot consume — see Change set B4. The machine passes them as
+`(bool decoded, uint64_t base)` pairs; when a base is absent the device `warn_report`s at creation
+and the capability window is **not decoded at all**. A guessed base relocates the whole window while
+every individual field still looks correctly placed relative to its neighbours, so the failure would
+present as a driver bug anywhere except where it is.
+
+When the guard does *not* pass, the machine falls back to `unimplemented-device` for the `ai-island`
+peripheral, so the window still exists for the B2 plugin to observe.
 
 ---
 
@@ -267,19 +336,44 @@ encoding moves this with it. On a match it extracts `rs1` and registers an execu
 reads that register, reads `G6LC_AI_DESC_BYTES` from the descriptor address in guest memory, and
 emits the same submission record as the MMIO path.
 
-Three pinned-API facts this depends on, all verified against the fetched header rather than assumed:
-register enumeration and reading, and a virtual-address guest memory read. The callback must be
-registered asking for register access rather than the cheaper no-registers mode, or the register read
-returns nothing.
-
 `G6LC_AI_ENQ_DECODE` gates the whole path, and is `0` unless **both** the instruction encoding and the
 descriptor geometry are resolved. A zero mask would match every instruction, so an un-ingested
 instruction set disables the path rather than defaulting it — and without a descriptor size there is
 nothing to read from guest memory.
 
+The two submission paths report **different address spaces**, and conflating them was a real defect:
+the latch path's descriptor is inside the island window and reports a window-relative offset, while an
+instruction-submitted descriptor is in DRAM and has no window offset. `g6lc_desc_submit_at()` takes
+the address to report, and each caller supplies the right one.
+
 One transcription is deliberate and worth naming: the plugin carries the canonical RISC-V register
 names in index order, because QEMU exposes registers under ABI names rather than as `xN`. That is an
 ISA-level naming fact rather than a design contract, and both spellings are tried.
+
+#### Known limitation on the pinned QEMU: the register read cannot succeed
+
+`qemu_plugin_get_registers()` is built from `gdb_get_register_list()`, which walks **only the
+dynamically-registered gdbstub features** (`cpu->gdb_regs`). A target's *core* register file — the
+RISC-V GPRs, described by `gdb_core_xml_file` — is never in that list. On QEMU v10.0.0 the list for
+`riscv64` is 92 CSRs and no `xN`/ABI-named GPR at all, so `rs1` is unreachable and **the
+instruction-submission path records nothing**.
+
+Two lessons, both worth keeping:
+
+- Change set C6 stated these APIs were "verified against the fetched pinned header, not assumed".
+  The *header* was verified; the *behaviour* was not. A declaration proves a symbol exists, not that
+  it answers.
+- The failure was silent. An empty tensor artifact reads as "the guest submitted no work", which is
+  indistinguishable from a correct run of a program that submits none.
+
+So the plugin now warns once, naming the API and the reason, and points at the two backends that do
+implement the path. The register list is also re-fetched on a lookup miss rather than cached, because
+it *grows*: at vCPU-init time it holds only the CSR features, and caching that miss would disable
+every register read for the rest of the run.
+
+**B2 is a trace backend for this path, not an execution backend.** The generated in-target device
+(§3.6) reads registers natively through its helper and has no such limitation; it and the native VM
+are the execution references for queue-instruction work.
 
 Plugins are preferred over fork-side instrumentation because they need no QEMU source change and have
 a stable ABI. Same header and determinism rules as §3.

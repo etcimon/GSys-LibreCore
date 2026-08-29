@@ -390,13 +390,33 @@ fn c_b_imm(w: u16) -> i64 {
     sext(val, 9)
 }
 
-/// c.lui expanded 20-bit `lui` immediate (bits [17:12] placed in the U-immediate).
+/// c.lui expanded `lui` immediate (bits [17:12] of the 32-bit word).
+///
+/// The 6-bit signed nzimm is placed in bits [17:12] of the expanded 32-bit result,
+/// with bits [11:0] zero and bit 31 filled by sign extension. That is exactly the
+/// same shape as a normal `lui` U-immediate.
 fn c_lui_imm(w: u16) -> i64 {
     let b = |i: u32| ((w >> i) & 1) as u64;
     let lo = ((w >> 2) & 0x1f) as u64;
 
     // The 18-bit signed nzimm has bits [17:12] encoded and [11:0] zero.
     let imm18 = (b(12) << 17) | (lo << 12);
-    let sext18 = ((imm18 as i64) << 46) >> 46;
-    sext18 << 12
+    ((imm18 as i64) << 46) >> 46
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn c_lui_imm_places_nzimm_in_bits_17_12() {
+        // c.lui x1, 0x10 -> result 0x00010000, not double-shifted to 0x10000000.
+        assert_eq!(c_lui_imm(0x60c1), 0x10000);
+
+        // c.lui x1, 1 -> result 0x1000.
+        assert_eq!(c_lui_imm(0x6085), 0x1000);
+
+        // c.lui x3, 31 -> result 0x1f000.
+        assert_eq!(c_lui_imm(0x61fd), 0x1f000);
+    }
 }

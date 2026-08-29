@@ -668,6 +668,33 @@ mod tests {
     }
 
     #[test]
+    fn dtb_cpu_node_count_matches_harts_total() {
+        let mut m = TargetModel::new("t");
+        m.soc.dram = Some((0x8000_0000, 0x1000_0000));
+        m.soc.harts_total = 4;
+        m.soc.cores = Some(2);
+        m.soc.threads_per_core = Some(2);
+        m.soc.contexts_per_hart = 1;
+        m.soc.intc_sources = 4;
+        m.soc.intc_targets = 4;
+        let e = emit_dtb(&m, "0.1.0", "sha256:abc");
+        let c = e.files.iter().find(|f| f.path.ends_with(".c")).unwrap();
+        let blob = extract_blob(&c.contents);
+        let root = g6q_dts::from_blob(&blob).expect("valid blob");
+        let cpus = root.child("cpus").expect("cpus");
+        let cpu_nodes: Vec<_> = cpus
+            .children
+            .iter()
+            .filter(|n| n.name.starts_with("cpu@"))
+            .collect();
+        assert_eq!(
+            cpu_nodes.len(),
+            m.soc.harts_total as usize,
+            "FDT must have one processor node per logical hart"
+        );
+    }
+
+    #[test]
     fn stdout_path_is_derived_from_a_uart_peripheral() {
         let mut m = TargetModel::new("t");
         m.soc.dram = Some((0x8000_0000, 0x1000_0000));

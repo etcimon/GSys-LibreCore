@@ -26,12 +26,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ai_island;
 pub mod build;
 pub mod cpu;
 pub mod dts;
 pub mod machine;
 pub mod plugin;
 pub mod pmu;
+pub mod trans;
 
 /// SPDX identifier every emitted file carries.
 ///

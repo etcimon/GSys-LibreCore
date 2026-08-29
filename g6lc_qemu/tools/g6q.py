@@ -175,6 +175,9 @@ def _extract_archive(archive: Path, dest: Path, archive_type: str,
         if dest.exists():
             shutil.rmtree(dest)
         top[0].rename(dest)
+        # The scratch directory is now empty but still there; leaving one behind per
+        # extraction slowly fills .tools/ with `.<archive>.extract` stubs.
+        shutil.rmtree(extract_tmp, ignore_errors=True)
     else:
         if dest.exists():
             shutil.rmtree(dest)
@@ -1222,7 +1225,12 @@ def cmd_fetch_qemu(args: argparse.Namespace) -> int:
 
     if qemu_dir.joinpath(".git").is_dir():
         log(f"fetching into existing {qemu_dir}")
-        run([git, "-C", qemu_dir, "fetch", "origin", ref], check=False)
+        res = run([git, "-C", qemu_dir, "fetch", "origin", ref], check=False)
+        if res.returncode != 0:
+            # Not fatal: the ref may already be present locally. But it must be said,
+            # because the alternative is a silent checkout of a stale revision that then
+            # gets reported as the pinned one.
+            err(f"fetch of {ref} failed; continuing with the local revision only")
     else:
         qemu_dir.mkdir(parents=True, exist_ok=True)
         log(f"cloning {url} into {qemu_dir}")
@@ -1244,7 +1252,9 @@ def cmd_fetch_qemu(args: argparse.Namespace) -> int:
         return res.returncode
 
     # Record the pin so the workspace can see which source revision is being used.
-    (qemu_dir / ".g6lc_qemu_pin").write_text(f"{ref}\n{url}\n", encoding="utf-8")
+    # LF only: this file lives inside the QEMU source tree.
+    with (qemu_dir / ".g6lc_qemu_pin").open("w", encoding="utf-8", newline="\n") as f:
+        f.write(f"{ref}\n{url}\n")
     log(f"QEMU ready at {qemu_dir} on ref {ref}")
     return 0
 
@@ -1409,6 +1419,24 @@ def _find_target_id(out_dir: Path) -> str | None:
     return None
 
 
+def _wiring_block_present(existing: str, block: str) -> bool:
+    """Is this wiring block already applied to `existing`?
+
+    Compared line-by-line with surrounding whitespace stripped, and every non-blank,
+    non-comment line must be present as a *whole line*. A plain `block in existing`
+    substring test failed both ways: it re-appended the block whenever the emitter changed
+    indentation or line wrapping (producing duplicate meson/Kconfig entries), and it
+    skipped a real append when the same text happened to appear inside a comment.
+    """
+    have = {ln.strip() for ln in existing.splitlines()}
+    wanted = [
+        ln.strip()
+        for ln in block.splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    return bool(wanted) and all(ln in have for ln in wanted)
+
+
 def _wiring_sections(text: str) -> dict[str, str]:
     """Parse build-wiring-*.txt into {target_file: append_block}."""
     sections: dict[str, list[str]] = {}
@@ -1442,7 +1470,8 @@ def _add_contrib_plugin(qemu_dir: Path, target_id: str, suffix: str = "") -> Non
     # The emitted plugin file uses the C-sanitised target id (e.g. 'ai-soc' -> 'ai_soc').
     safe_id = target_id.replace('-', '_').replace('.', '_')
     name = f"g6lc-{safe_id}{suffix}"
-    if name in text:
+    needle = f"contrib_plugins += '{name}'"
+    if needle in text:
         log(f"already present in {path}: {name}")
         return
     # Insert before the 'if get_option('plugins')' block so the list is grown
@@ -1456,6 +1485,129 @@ def _add_contrib_plugin(qemu_dir: Path, target_id: str, suffix: str = "") -> Non
     with path.open("w", encoding="utf-8", newline="\n") as f:
         f.write(text)
     log(f"added {name} to {path}")
+
+
+def _safe_c_id(target_id: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "_", target_id)
+
+
+def _patch_helper_h(qemu_dir: Path, target_id: str) -> None:
+    """Ensure generated AI helper declarations are visible to helper-info.c.inc."""
+    path = qemu_dir / "target" / "riscv" / "helper.h"
+    if not path.is_file():
+        return
+    safe = _safe_c_id(target_id)
+    include = f'#include "target/riscv/g6lc-{safe}-ai-helpers.h"'
+    text = path.read_text(encoding="utf-8")
+    if include in text:
+        log(f"already present in {path}: {include}")
+        return
+    with path.open("a", encoding="utf-8", newline="\n") as f:
+        if text and not text.endswith("\n"):
+            f.write("\n")
+        f.write(include + "\n")
+    log(f"added {include} to {path}")
+
+
+def _patch_translate_c(qemu_dir: Path, target_id: str) -> None:
+    """Wire the generated decoder and trans_ routines into translate.c."""
+    path = qemu_dir / "target" / "riscv" / "translate.c"
+    if not path.is_file():
+        return
+    safe = _safe_c_id(target_id)
+    decode_inc = f'#include "decode-g6lc-{safe}-ai.c.inc"'
+    trans_inc = f'#include "insn_trans/trans_g6lc_{safe}_ai.c.inc"'
+    decoder_entry = f"    {{ always_true_p, decode_g6lc_{safe}_ai }},"
+
+    text = path.read_text(encoding="utf-8")
+    if decode_inc in text and trans_inc in text and decoder_entry in text:
+        log(f"all g6lc AI hooks already present in {path}")
+        return
+
+    if decode_inc not in text:
+        marker = '#include "decode-XVentanaCondOps.c.inc"'
+        if marker in text:
+            text = text.replace(
+                marker,
+                marker + "\n" + decode_inc,
+            )
+            log(f"added {decode_inc} to {path}")
+
+    if trans_inc not in text:
+        marker = '#include "insn_trans/trans_xventanacondops.c.inc"'
+        if marker in text:
+            text = text.replace(
+                marker,
+                marker + "\n" + trans_inc,
+            )
+            log(f"added {trans_inc} to {path}")
+
+    if decoder_entry not in text:
+        marker = "{ has_XVentanaCondOps_p, decode_XVentanaCodeOps},"
+        if marker in text:
+            text = text.replace(
+                marker,
+                marker + "\n" + decoder_entry,
+            )
+            log(f"added decoder_table entry for g6lc {target_id} AI in {path}")
+
+    with path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
+def _patch_target_meson_build(qemu_dir: Path, target_id: str) -> None:
+    """Add the generated CPU, helpers and decode file to target/riscv/meson.build."""
+    path = qemu_dir / "target" / "riscv" / "meson.build"
+    if not path.is_file():
+        return
+    safe = _safe_c_id(target_id)
+    upper = safe.upper()
+    marker = f"g6lc-{safe}-ai-helpers.c"
+    text = path.read_text(encoding="utf-8")
+    if marker in text:
+        log(f"already present in {path}: {marker}")
+        return
+    block = (
+        f"\n"
+        f"riscv_ss.add(when: 'CONFIG_G6LC_{upper}', if_true: files(\n"
+        f"        'cpu_g6lc_{safe}.c',\n"
+        f"        'g6lc-{safe}-ai-helpers.c',\n"
+        f"    ))\n"
+        f"g6lc_{safe}_ai_decode = decodetree.process("
+        f"'g6lc-{safe}-ai.decode', "
+        f"extra_args: '--static-decode=decode_g6lc_{safe}_ai')\n"
+        f"riscv_ss.add(when: 'CONFIG_G6LC_{upper}', "
+        f"if_true: g6lc_{safe}_ai_decode)\n"
+    )
+    text = text.rstrip() + "\n" + block
+    with path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    log(f"added g6lc {target_id} AI CPU/decoder/helpers to {path}")
+
+
+def _patch_hw_riscv_meson_build(qemu_dir: Path, target_id: str) -> None:
+    """Add the generated AI-island device file to hw/riscv/meson.build."""
+    path = qemu_dir / "hw" / "riscv" / "meson.build"
+    if not path.is_file():
+        return
+    safe = _safe_c_id(target_id)
+    upper = safe.upper()
+    marker = f"g6lc-{safe}-ai-island.c"
+    text = path.read_text(encoding="utf-8")
+    if marker in text:
+        log(f"already present in {path}: {marker}")
+        return
+    block = (
+        f"\nriscv_ss.add(when: 'CONFIG_G6LC_{upper}', if_true: files(\n"
+        f"        'g6lc-{safe}-machine.c',\n"
+        f"        'g6lc-{safe}-dtb.c',\n"
+        f"        'g6lc-{safe}-ai-island.c',\n"
+        f"    ))\n"
+    )
+    text = text.rstrip() + "\n" + block
+    with path.open("w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    log(f"added g6lc {target_id} AI island device to {path}")
 
 
 def _is_repo_root(pkg: Path) -> bool:
@@ -1584,14 +1736,16 @@ def cmd_install_qemu(args: argparse.Namespace) -> int:
     for src_dir, dst_dir in source_map.items():
         if not src_dir.is_dir():
             continue
-        dst_dir.mkdir(parents=True, exist_ok=True)
-        for f in src_dir.iterdir():
+        for f in src_dir.rglob("*"):
             if f.is_file():
+                rel = f.relative_to(src_dir)
+                dest = dst_dir / rel
                 if args.dry_run:
-                    log(f"dry-run: would copy {f} -> {dst_dir / f.name}")
+                    log(f"dry-run: would copy {f} -> {dest}")
                 else:
-                    shutil.copy2(f, dst_dir / f.name)
-                    log(f"copied {dst_dir / f.name}")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(f, dest)
+                    log(f"copied {dest}")
 
     # Apply build-wiring appends.
     wiring_files = list((emit_dir / "build").glob("build-wiring-*.txt"))
@@ -1611,7 +1765,7 @@ def cmd_install_qemu(args: argparse.Namespace) -> int:
             log(f"dry-run: would append to {target_path}:\n{block}")
             continue
         existing = target_path.read_text(encoding="utf-8")
-        if block in existing:
+        if _wiring_block_present(existing, block):
             log(f"already present in {target_path}: {block.splitlines()[0]}")
         else:
             with target_path.open("a", encoding="utf-8", newline="\n") as f:
@@ -1623,6 +1777,13 @@ def cmd_install_qemu(args: argparse.Namespace) -> int:
     if not args.dry_run:
         _add_contrib_plugin(qemu_dir, target_id)
         _add_contrib_plugin(qemu_dir, target_id, suffix="-pmu")
+        safe = _safe_c_id(target_id)
+        if (qemu_dir / "target" / "riscv" / f"g6lc-{safe}-ai-helpers.h").is_file():
+            _patch_helper_h(qemu_dir, target_id)
+            _patch_translate_c(qemu_dir, target_id)
+            _patch_target_meson_build(qemu_dir, target_id)
+            if (qemu_dir / "hw" / "riscv" / f"g6lc-{safe}-ai-island.c").is_file():
+                _patch_hw_riscv_meson_build(qemu_dir, target_id)
         with (qemu_dir / ".g6lc_qemu_install").open(
                 "w", encoding="utf-8", newline="\n") as f:
             f.write(f"target: {target_id}\npackage: {args.package}\n")

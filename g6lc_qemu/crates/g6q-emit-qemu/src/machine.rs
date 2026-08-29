@@ -100,10 +100,17 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     body.push_str("#include \"hw/riscv/riscv_hart.h\"\n");
     body.push_str("#include \"hw/riscv/boot.h\"\n");
     body.push_str(&format!("#include \"hw/riscv/g6lc-{name}-dtb.h\"\n"));
+    // Gated on the *device emitter's* condition, not merely on an island being present:
+    // including a header that was not emitted makes the QEMU tree unbuildable.
+    let ai_device = crate::ai_island::resolved(model).is_some();
+    if ai_device {
+        body.push_str(&format!("#include \"hw/riscv/g6lc-{name}-ai-island.h\"\n"));
+    }
     body.push_str("#include \"target/riscv/cpu.h\"\n");
     body.push_str("#include \"target/riscv/cpu-qom.h\"\n");
     body.push_str("#include \"exec/memory.h\"\n");
     body.push_str("#include \"system/device_tree.h\"\n");
+    body.push_str("#include <libfdt.h>\n");
     if !all_peripherals.is_empty() {
         body.push_str("#include \"system/system.h\"\n");
     }
@@ -245,6 +252,22 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     }
     body.push_str("}\n\n");
 
+    body.push_str(&format!(
+        "static void g6lc_{name}_machine_fdt_check(const void *fdt)\n{{\n"
+    ));
+    body.push_str("    int cpus_off = fdt_path_offset(fdt, \"/cpus\");\n");
+    body.push_str("    g_assert(cpus_off >= 0);\n");
+    body.push_str("    int count = 0;\n");
+    body.push_str("    int node;\n");
+    body.push_str("    fdt_for_each_subnode(node, fdt, cpus_off) {\n");
+    body.push_str("        const char *n = fdt_get_name(fdt, node, NULL);\n");
+    body.push_str("        if (n && strncmp(n, \"cpu@\", 4) == 0) {\n");
+    body.push_str("            count++;\n");
+    body.push_str("        }\n");
+    body.push_str("    }\n");
+    body.push_str("    g_assert(count == (int)g6lc_harts_total);\n");
+    body.push_str("}\n\n");
+
     // Peripheral device creation, driven by the design's model field.
     if !all_peripherals.is_empty() {
         body.push_str("static const char *g6lc_qom_type_for_model(const char *model)\n{\n");
@@ -259,6 +282,13 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
         body.push_str("        return NULL;\n");
         body.push_str("    if (strstr(model, \"plic\") || strstr(model, \"intc\"))\n");
         body.push_str("        return \"riscv.sifive.plic\";\n");
+        if ai_device {
+            body.push_str(
+                "    /* The generated AI-island device owns this window; see pass 2. */\n",
+            );
+            body.push_str("    if (strstr(model, \"ai-island\"))\n");
+            body.push_str("        return NULL;\n");
+        }
         body.push_str("    if (strstr(model, \"ai-island\") || strstr(model, \"ai-matrix\"))\n");
         body.push_str("        return \"unimplemented-device\";\n");
         body.push_str("    return NULL;\n");
@@ -306,6 +336,31 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
             "        const char *qom = g6lc_qom_type_for_model(g6lc_peripherals[i].model);\n",
         );
         body.push_str("        DeviceState *dev = NULL;\n");
+        if ai_device {
+            let ai = model.soc.ai_island.as_ref().unwrap();
+            // The window *bases* are decided by the island's address decode, which the
+            // reader cannot consume (Change set B4). Absence is passed through as a
+            // "not decoded" flag rather than substituted with a plausible address: a wrong
+            // base relocates the whole window while every field still looks correctly
+            // placed relative to its neighbours.
+            let (cap_decoded, cap_base) = match ai.config.cap_base {
+                Some(b) => ("true", b),
+                None => ("false", 0),
+            };
+            let (desc_decoded, desc_base) = match ai.config.desc_base {
+                Some(b) => ("true", b),
+                None => ("false", 0),
+            };
+            body.push_str("        if (strstr(g6lc_peripherals[i].model, \"ai-island\")) {\n");
+            body.push_str("            g6lc_ai_island_create(g6lc_peripherals[i].base,\n");
+            body.push_str("                                  g6lc_peripherals[i].len,\n");
+            body.push_str(&format!(
+                "                                  {cap_decoded}, {cap_base}ULL,\n\
+                 \x20                                 {desc_decoded}, {desc_base}ULL);\n"
+            ));
+            body.push_str("            continue;\n");
+            body.push_str("        }\n");
+        }
         body.push_str("        if (!qom || strcmp(qom, \"riscv.sifive.plic\") == 0) {\n");
         body.push_str("            continue;\n");
         body.push_str("        }\n");
@@ -486,6 +541,9 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     body.push_str("    uint64_t fdt_addr = riscv_compute_fdt_addr(\n");
     body.push_str("        dram_base, dram_size, machine, &info);\n");
     body.push_str("    riscv_load_fdt(fdt_addr, machine->fdt);\n\n");
+    body.push_str("    g6lc_");
+    body.push_str(&name);
+    body.push_str("_machine_fdt_check(machine->fdt);\n\n");
 
     body.push_str("    /* Realize the model's hart array. */\n");
     body.push_str("    object_initialize_child(OBJECT(machine), \"harts\",\n");
@@ -643,6 +701,9 @@ mod tests {
         assert!(f.contents.contains("0xf000ULL"));
         assert!(f.contents.contains("riscv_find_and_load_firmware"));
         assert!(f.contents.contains("riscv_setup_rom_reset_vec"));
+        assert!(f.contents.contains("g6lc_g6lc64_test_machine_fdt_check"));
+        assert!(f.contents.contains("fdt_path_offset(fdt, \"/cpus\")"));
+        assert!(f.contents.contains("fdt_for_each_subnode"));
     }
 
     #[test]

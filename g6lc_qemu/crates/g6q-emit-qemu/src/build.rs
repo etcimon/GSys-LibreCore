@@ -17,6 +17,9 @@ pub fn emit_build_wiring(model: &TargetModel, version: &str, digest: &str) -> Em
     let name = machine_name(&model.target_id);
     let upper = name.to_uppercase();
     let mut emission = Emission::new();
+    // Gated on the emitters' own condition so the wiring never lists a file that was not
+    // emitted (which fails at meson configure time, before any compiler error).
+    let ai_device = crate::ai_island::resolved(model).is_some();
 
     // A single human- and machine-readable integration guide.
     let mut body = String::new();
@@ -41,14 +44,42 @@ pub fn emit_build_wiring(model: &TargetModel, version: &str, digest: &str) -> Em
     ));
     body.push_str(&format!("        'g6lc-{name}-machine.c',\n"));
     body.push_str(&format!("        'g6lc-{name}-dtb.c',\n"));
+    if ai_device {
+        body.push_str(&format!("        'g6lc-{name}-ai-island.c',\n"));
+    }
     body.push_str("    ))\n\n");
 
     body.push_str("# 4. Append to target/riscv/meson.build\n");
-    body.push_str(&format!(
-        "riscv_ss.add(when: 'CONFIG_G6LC_{upper}', if_true: files('cpu_g6lc_{name}.c'))\n\n"
-    ));
-
-    body.push_str("# 5. Plugin build wiring\n");
+    if ai_device {
+        body.push_str(&format!(
+            "riscv_ss.add(when: 'CONFIG_G6LC_{upper}', if_true: files(\n"
+        ));
+        body.push_str(&format!("        'cpu_g6lc_{name}.c',\n"));
+        body.push_str(&format!("        'g6lc-{name}-ai-helpers.c',\n"));
+        body.push_str("    ))\n");
+        body.push_str(&format!(
+            "g6lc_{name}_ai_decode = decodetree.process('g6lc-{name}-ai.decode', extra_args: '--static-decode=decode_g6lc_{name}_ai')\n",
+        ));
+        body.push_str(&format!(
+            "riscv_ss.add(when: 'CONFIG_G6LC_{upper}', if_true: g6lc_{name}_ai_decode)\n\n",
+        ));
+        body.push_str("# 5. Append to target/riscv/helper.h\n");
+        body.push_str(&format!(
+            "#include \"target/riscv/g6lc-{name}-ai-helpers.h\"\n\n"
+        ));
+        body.push_str("# 6. Append to target/riscv/translate.c\n");
+        body.push_str("#   after the other decode-*.c.inc includes and the decoder_table array:\n");
+        body.push_str(&format!("#include \"decode-g6lc-{name}-ai.c.inc\"\n"));
+        body.push_str(&format!(
+            "#   {{ always_true_p, decode_g6lc_{name}_ai }}, /* end of decoder_table */\n\n",
+        ));
+        body.push_str("# 7. Plugin build wiring\n");
+    } else {
+        body.push_str(&format!(
+            "riscv_ss.add(when: 'CONFIG_G6LC_{upper}', if_true: files('cpu_g6lc_{name}.c'))\n\n"
+        ));
+        body.push_str("# 5. Plugin build wiring\n");
+    }
     body.push_str("#    contrib/plugins/g6lc-");
     body.push_str(&name);
     body.push_str(".c is copied by the installer;\n");

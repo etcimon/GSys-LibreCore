@@ -146,6 +146,7 @@ time rather than silently switching profiles.
 | `--plugin PATH` | — | load a TCG plugin (default `out/emit/<target>/contrib/plugins/g6lc-<id>.so`) |
 | `--record FILE` | — | write a stamped `RecordFile` (B3 native; B1+B2 QEMU auto-loads the trace plugin) |
 || `--checkpoint FILE` | — | write a resumable `Checkpoint` of the native run |
+|| `--restore FILE` | — | resume a native run from a `Checkpoint`; `--image` is optional when this is given |
 || `--replay FILE` | — | replay the native run against a `RecordFile`, fail on divergence |
 | `--gdb PORT`, `--trace-uart FILE` | — | |
 

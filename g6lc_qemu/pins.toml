@@ -29,6 +29,14 @@ url      = "https://gitlab.com/qemu-project/qemu.git"
 ref      = "v10.0.0"           # emission target; bump deliberately
 plugin_api = 4                  # QEMU TCG plugin API version assumed by emitted plugins
 status   = "fetched"            # updated by `g6q fetch-qemu`; path is gitignored ./qemu
+# Known limitation of this pin, measured not assumed (see architecture/EMIT.md §4):
+# qemu_plugin_get_registers() is built from gdb_get_register_list(), which walks only the
+# dynamically-registered gdbstub features (cpu->gdb_regs). A target's CORE register file
+# (the RISC-V GPRs, described by gdb_core_xml_file) is never in that list, so a plugin
+# cannot read xN. The B2 queue-instruction submission path is therefore inoperable on this
+# pin and warns once; B1's in-target device and B3 implement that path instead. Re-test
+# when this pin is bumped: if the core registers become visible, the B2 path works unchanged.
+plugin_exposes_core_regs = false
 
 # ---------------------------------------------------------------------- firmware ---
 [opensbi]

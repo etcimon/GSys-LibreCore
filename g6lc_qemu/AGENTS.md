@@ -333,7 +333,20 @@ Commands: `doctor`, `sync`, `configure`, `build`, `pull`, `run`, `test`, `clean`
 ```bash
 python tools/g6q_remote.py doctor       # probe ssh/rsync and remote toolchain
 python tools/g6q_remote.py remote-build # sync, configure, build, pull, smoke
+python tools/g6q_remote.py build --step-timeout 3600   # ceiling for one remote step
 ```
+
+Every remote step has a wall-clock ceiling (`--step-timeout SECONDS`, `0` to disable). A wedged
+builder must make the pass **fail**, not hang: an SSH session that never returns is
+indistinguishable from a slow one, and a pass that neither succeeds nor fails is the worst outcome
+for an automated gate. Defaults are per step (configure 30 min, build 2 h, run 15 min).
+
+In-guest payloads are linked with `PAYLOAD_LINK_FLAGS` (`-nostdlib -nostartfiles -static -no-pie
+-Wl,--build-id=none`). These are load-bearing, not hygiene — see the linker-script comment in
+`tools/remote/payload/ai_island_smoke.lds`: a Linux-targeting cross compiler otherwise emits a
+dynamic executable whose LOAD segment lands *below* DRAM base, and the payload then hangs with no
+output at all. A bare-metal toolchain hides the problem, so it only surfaces when the builder's
+toolchain changes.
 
 ---
 

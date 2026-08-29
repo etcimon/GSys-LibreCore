@@ -73,6 +73,13 @@ def compile_flags(
     if version is None:
         version = 1  # deliberate fallback; see g6q-vm/src/device.rs
 
+    # Queue-instruction encodings from the design's own instruction package, when it is present.
+    instr = ai.get("instr_set") or {}
+    for k in ("match_enq", "match_poll", "match_qfence"):
+        if instr.get(k) is None:
+            instr = None
+            break
+
     # The smoke payload uses the four scalar shape fields and the done pointer.
     needed = {
         "m": "AI_OFF_M",
@@ -90,6 +97,25 @@ def compile_flags(
         "AI_K": str(int(ai_k)),
         "UART_BASE": f"0x{uart_base:x}",
     }
+    if instr:
+        flags["AI_ENQ_MATCH"] = f"0x{int(instr['match_enq']):x}"
+        flags["AI_POLL_MATCH"] = f"0x{int(instr['match_poll']):x}"
+        flags["AI_QFENCE_MATCH"] = f"0x{int(instr['match_qfence']):x}"
+
+    desc_bytes = int(layout.get("desc_bytes") or 64)
+    # The in-memory descriptor sits immediately below the completion word. If that would
+    # fall below DRAM base the payload would build its descriptor outside RAM, so refuse
+    # rather than emit `0x-...`, which is not a valid C literal and fails with an
+    # assembler error that says nothing about the real cause.
+    desc_addr = ptr_done - desc_bytes
+    if desc_addr < dram_base:
+        raise ValueError(
+            f"no room for a {desc_bytes}-byte descriptor below the completion word at "
+            f"0x{ptr_done:x} (DRAM base 0x{dram_base:x}); pass a higher --ai-done-ptr"
+        )
+    flags["AI_DESC_BYTES"] = str(desc_bytes)
+    flags["AI_DESC_ADDR"] = f"0x{desc_addr:x}"
+
     for field, macro in needed.items():
         off = _field_offset(fields, field)
         if off is None:
@@ -97,3 +123,20 @@ def compile_flags(
         flags[macro] = str(off)
 
     return [f"-D{k}={v}" for k, v in flags.items()]
+
+
+def _main() -> None:
+    import json
+    import sys
+
+    if len(sys.argv) < 2:
+        print("usage: payload_flags.py MODEL_JSON", file=sys.stderr)
+        raise SystemExit(1)
+    with open(sys.argv[1], "r", encoding="utf-8") as f:
+        model = json.load(f)
+    for flag in compile_flags(model):
+        print(flag)
+
+
+if __name__ == "__main__":
+    _main()

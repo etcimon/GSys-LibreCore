@@ -108,7 +108,7 @@ fn emit_descriptor_decoder(body: &mut String, island: &g6q_core::model::AiIsland
 
     // Accessor expressions, one per event field, resolved at emit time.
     body.push_str("/* Emit one submission event, shaped exactly like the native artifact. */\n");
-    body.push_str("static void g6lc_desc_submit(uint32_t hart, uint64_t desc_addr)\n{\n");
+    body.push_str("static void g6lc_desc_submit_at(uint32_t hart, uint64_t reported_addr)\n{\n");
     body.push_str("    if (!g6lc_tensor_file) { return; }\n");
 
     for name in EVENT_FIELDS {
@@ -131,7 +131,7 @@ fn emit_descriptor_decoder(body: &mut String, island: &g6q_core::model::AiIsland
     body.push_str("    G6lcTensorEvent ev = {0};\n");
     body.push_str("    ev.order = g6lc_tensor_order++;\n");
     body.push_str("    ev.hart = hart;\n");
-    body.push_str("    ev.descriptor_addr = desc_addr - G6LC_AI_ISLAND_BASE;\n");
+    body.push_str("    ev.descriptor_addr = reported_addr;\n");
     body.push_str("    ev.op = f_op;\n");
     body.push_str("    ev.version = f_version;\n");
     body.push_str("    ev.flags = f_flags;\n");
@@ -207,9 +207,55 @@ fn emit_descriptor_decoder(body: &mut String, island: &g6q_core::model::AiIsland
 /// The recognition is entirely architecture-derived: the mask and match value come from
 /// the ingested instruction set, so a design that moves the encoding moves this with it.
 fn emit_queue_instruction_path(body: &mut String) {
-    body.push_str("/* Register handles for the current vCPU, resolved once on first use. */\n");
-    body.push_str("static GArray *g6lc_regs;\n");
-    body.push_str("static bool g6lc_regs_ready;\n\n");
+    body.push_str("/* Exec callback for a recognised enqueue instruction. */\n");
+    body.push_str("static void g6lc_ai_enq_exec(unsigned int vcpu_index, void *userdata)\n{\n");
+    body.push_str("    if (!g6lc_tensor_file || vcpu_index >= G6LC_HARTS_TOTAL) { return; }\n");
+    body.push_str("    uint8_t rs1 = (uint8_t)(uintptr_t)userdata;\n");
+    body.push_str("    uint64_t desc_addr = 0;\n");
+    body.push_str(
+        "    if (!g6lc_read_xreg(vcpu_index, rs1, &desc_addr) || desc_addr == 0) { return; }\n",
+    );
+    body.push_str("    /* The descriptor lives in guest memory, not in the MMIO window. */\n");
+    body.push_str("    GByteArray *buf = g_byte_array_new();\n");
+    body.push_str(
+        "    if (qemu_plugin_read_memory_vaddr(desc_addr, buf, G6LC_AI_DESC_BYTES) &&\n        buf->len >= G6LC_AI_DESC_BYTES) {\n",
+    );
+    body.push_str("        memcpy(g6lc_desc_shadow[vcpu_index], buf->data, G6LC_AI_DESC_BYTES);\n");
+    body.push_str("        /* Guest-physical descriptor address, matching the native artifact.\n");
+    body.push_str("         * The MMIO-latch path reports an island-window offset; a descriptor\n");
+    body.push_str("         * submitted by pointer is in DRAM and has no window offset, so the\n");
+    body.push_str("         * address is reported as-is rather than relative to the island. */\n");
+    body.push_str("        g6lc_desc_submit_at(vcpu_index, desc_addr);\n");
+    body.push_str("    }\n");
+    body.push_str("    g_byte_array_free(buf, TRUE);\n");
+    body.push_str("}\n\n");
+}
+
+/// Emit the per-vCPU register-access helpers used by the queue-instruction callbacks.
+///
+/// Kept separate from the enqueue path because the `ai.poll` path needs them too: gating
+/// them on the enqueue path alone produced a plugin that would not compile for a design
+/// that publishes a poll encoding but no enqueue encoding.
+fn emit_register_access(body: &mut String) {
+    body.push_str("/* Per-vCPU register handles.\n");
+    body.push_str(" *\n");
+    body.push_str(
+        " * The list is per-vCPU (a single global array would be wrong under MTTCG) and\n",
+    );
+    body.push_str(
+        " * it *grows*: at vCPU-init time qemu_plugin_get_registers() returns only the\n",
+    );
+    body.push_str(" * CSR features, so the general-purpose registers this path needs are simply\n");
+    body.push_str(
+        " * absent from it. A cached list is therefore only authoritative for the names\n",
+    );
+    body.push_str(" * it actually contains, and a lookup miss re-fetches instead of failing.\n");
+    body.push_str(" *\n");
+    body.push_str(" * Caching a miss is the trap: the failure mode is that queue-instruction\n");
+    body.push_str(" * events are silently absent from the artifact, which reads as \"the guest\n");
+    body.push_str(" * submitted no work\" rather than as a plugin defect.\n");
+    body.push_str(" */\n");
+    body.push_str("static GArray *g6lc_regs[G6LC_HARTS_TOTAL];\n\n");
 
     // Canonical RISC-V register names, index order. This is an ISA-level naming fact,
     // not a design contract, and QEMU exposes registers under these names rather than
@@ -221,20 +267,14 @@ fn emit_queue_instruction_path(body: &mut String) {
     body.push_str("    \"s8\", \"s9\", \"s10\", \"s11\", \"t3\", \"t4\", \"t5\", \"t6\"\n");
     body.push_str("};\n\n");
 
-    body.push_str("/* Read x[idx] for the current vCPU. Returns false when unavailable. */\n");
-    body.push_str("static bool g6lc_read_xreg(uint8_t idx, uint64_t *out)\n{\n");
-    body.push_str("    if (idx == 0) { *out = 0; return true; }\n");
-    body.push_str("    if (idx >= 32) { return false; }\n");
-    body.push_str("    if (!g6lc_regs_ready) {\n");
-    body.push_str("        g6lc_regs = qemu_plugin_get_registers();\n");
-    body.push_str("        g6lc_regs_ready = true;\n");
-    body.push_str("    }\n");
-    body.push_str("    if (!g6lc_regs) { return false; }\n");
+    body.push_str("/* Find and read x[idx] in one register list. */\n");
+    body.push_str("static bool g6lc_find_xreg(GArray *regs, uint8_t idx, uint64_t *out)\n{\n");
     body.push_str("    char alt[8];\n");
+    body.push_str("    if (!regs) { return false; }\n");
     body.push_str("    snprintf(alt, sizeof(alt), \"x%u\", (unsigned)idx);\n");
-    body.push_str("    for (guint r = 0; r < g6lc_regs->len; r++) {\n");
+    body.push_str("    for (guint r = 0; r < regs->len; r++) {\n");
     body.push_str(
-        "        qemu_plugin_reg_descriptor *d =\n            &g_array_index(g6lc_regs, qemu_plugin_reg_descriptor, r);\n",
+        "        qemu_plugin_reg_descriptor *d =\n            &g_array_index(regs, qemu_plugin_reg_descriptor, r);\n",
     );
     body.push_str("        if (!d->name) { continue; }\n");
     body.push_str("        if (strcmp(d->name, g6lc_xreg_names[idx]) != 0 &&\n");
@@ -257,21 +297,77 @@ fn emit_queue_instruction_path(body: &mut String) {
     body.push_str("    return false;\n");
     body.push_str("}\n\n");
 
-    body.push_str("/* Exec callback for a recognised enqueue instruction. */\n");
-    body.push_str("static void g6lc_ai_enq_exec(unsigned int vcpu_index, void *userdata)\n{\n");
-    body.push_str("    if (!g6lc_tensor_file || vcpu_index >= G6LC_HARTS_TOTAL) { return; }\n");
-    body.push_str("    uint8_t rs1 = (uint8_t)(uintptr_t)userdata;\n");
-    body.push_str("    uint64_t desc_addr = 0;\n");
-    body.push_str("    if (!g6lc_read_xreg(rs1, &desc_addr) || desc_addr == 0) { return; }\n");
-    body.push_str("    /* The descriptor lives in guest memory, not in the MMIO window. */\n");
-    body.push_str("    GByteArray *buf = g_byte_array_new();\n");
-    body.push_str(
-        "    if (qemu_plugin_read_memory_vaddr(desc_addr, buf, G6LC_AI_DESC_BYTES) &&\n        buf->len >= G6LC_AI_DESC_BYTES) {\n",
-    );
-    body.push_str("        memcpy(g6lc_desc_shadow[vcpu_index], buf->data, G6LC_AI_DESC_BYTES);\n");
-    body.push_str("        g6lc_desc_submit(vcpu_index, desc_addr);\n");
+    body.push_str("/* Resolve this vCPU's register list; safe to call more than once. */\n");
+    body.push_str("static void g6lc_resolve_regs(unsigned int vcpu_index)\n{\n");
+    body.push_str("    if (vcpu_index >= G6LC_HARTS_TOTAL || g6lc_regs[vcpu_index]) { return; }\n");
+    body.push_str("    GArray *regs = qemu_plugin_get_registers();\n");
+    body.push_str("    if (regs && regs->len > 0) {\n");
+    body.push_str("        g6lc_regs[vcpu_index] = regs;\n");
+    body.push_str("    } else if (regs) {\n");
+    body.push_str("        g_array_free(regs, TRUE);\n");
     body.push_str("    }\n");
-    body.push_str("    g_byte_array_free(buf, TRUE);\n");
+    body.push_str("}\n\n");
+
+    body.push_str("/* Read x[idx] for one vCPU. Returns false when unavailable. */\n");
+    body.push_str(
+        "static bool g6lc_read_xreg(unsigned int vcpu_index, uint8_t idx, uint64_t *out)\n{\n",
+    );
+    body.push_str("    GArray *fresh;\n");
+    body.push_str("    if (idx == 0) { *out = 0; return true; }\n");
+    body.push_str("    if (idx >= 32 || vcpu_index >= G6LC_HARTS_TOTAL) { return false; }\n");
+    body.push_str("    if (g6lc_find_xreg(g6lc_regs[vcpu_index], idx, out)) { return true; }\n");
+    body.push_str("    /* Miss: the cached list predates the general-purpose register feature.\n");
+    body.push_str("     * Re-fetch and adopt the new list only if it actually answers. */\n");
+    body.push_str("    fresh = qemu_plugin_get_registers();\n");
+    body.push_str("    if (!fresh) { return false; }\n");
+    body.push_str("    if (g6lc_find_xreg(fresh, idx, out)) {\n");
+    body.push_str("        if (g6lc_regs[vcpu_index]) {\n");
+    body.push_str("            g_array_free(g6lc_regs[vcpu_index], TRUE);\n");
+    body.push_str("        }\n");
+    body.push_str("        g6lc_regs[vcpu_index] = fresh;\n");
+    body.push_str("        return true;\n");
+    body.push_str("    }\n");
+    body.push_str("    g_array_free(fresh, TRUE);\n");
+    body.push_str("    g6lc_warn_no_gpr(idx);\n");
+    body.push_str("    return false;\n");
+    body.push_str("}\n\n");
+}
+
+/// Emit a one-time warning for a register the plugin API cannot reach.
+///
+/// On the pinned QEMU, `qemu_plugin_get_registers()` is built from `gdb_get_register_list()`,
+/// which walks only the *dynamically registered* gdbstub features (`cpu->gdb_regs`). A
+/// target's **core** registers — the RISC-V general-purpose file, described by
+/// `gdb_core_xml_file` — are never in that list, so `rs1` is unreachable and the
+/// queue-instruction submission path yields nothing.
+///
+/// Without this warning the artifact is simply empty, which reads as "the guest submitted no
+/// work" rather than "this backend cannot observe the submission". The in-target B1 device
+/// has no such limitation and is the execution reference for the queue path.
+fn emit_gpr_warning(body: &mut String) {
+    body.push_str("/* Warn once when the plugin API cannot reach a general-purpose register. */\n");
+    body.push_str("static void g6lc_warn_no_gpr(uint8_t idx)\n{\n");
+    body.push_str("    static bool warned;\n");
+    body.push_str("    if (warned) { return; }\n");
+    body.push_str("    warned = true;\n");
+    body.push_str("    fprintf(stderr,\n");
+    body.push_str(
+        "            \"[g6lc-\" G6LC_TARGET_ID \"] queue-instruction submissions cannot be \"\n",
+    );
+    body.push_str(
+        "            \"recorded: x%u is not exposed by qemu_plugin_get_registers() on this \"\n",
+    );
+    body.push_str(
+        "            \"QEMU (it lists only dynamically-registered gdbstub features, not the \"\n",
+    );
+    body.push_str(
+        "            \"target's core register file). The tensor artifact will be empty for \"\n",
+    );
+    body.push_str(
+        "            \"work submitted by instruction; use the generated in-target device \"\n",
+    );
+    body.push_str("            \"(B1) or the native VM (B3) for that path.\\n\",\n");
+    body.push_str("            (unsigned)idx);\n");
     body.push_str("}\n\n");
 }
 
@@ -308,7 +404,7 @@ fn emit_poll_instruction_path(body: &mut String) {
     body.push_str("    if (!g6lc_tensor_events[vcpu_index]) { return; }\n");
     body.push_str("    uint8_t rs1 = (uint8_t)(uintptr_t)userdata;\n");
     body.push_str("    uint64_t ticket = 0;\n");
-    body.push_str("    if (!g6lc_read_xreg(rs1, &ticket)) { return; }\n");
+    body.push_str("    if (!g6lc_read_xreg(vcpu_index, rs1, &ticket)) { return; }\n");
     body.push_str("    for (gsize i = 0; i < g6lc_tensor_events[vcpu_index]->len; ++i) {\n");
     body.push_str("        G6lcTensorEvent *e = &g_array_index(g6lc_tensor_events[vcpu_index], G6lcTensorEvent, i);\n");
     body.push_str(
@@ -588,6 +684,10 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     if can_decode {
         emit_descriptor_decoder(&mut body, island.expect("can_decode implies an island"));
     }
+    if enq_decode || poll_decode {
+        emit_gpr_warning(&mut body);
+        emit_register_access(&mut body);
+    }
     if enq_decode {
         emit_queue_instruction_path(&mut body);
     }
@@ -751,7 +851,14 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
             "                /* The doorbell is the version/op word at descriptor offset 0. */\n",
         );
         body.push_str("                if (doff == 0) {\n");
-        body.push_str("                    g6lc_desc_submit(vcpu_index, paddr);\n");
+        body.push_str(
+            "                    /* Latch path: the descriptor is in the island window, so\n\
+             \x20                    * the event carries the window-relative offset. */\n",
+        );
+        body.push_str(
+            "                    g6lc_desc_submit_at(vcpu_index,\n\
+             \x20                                       paddr - G6LC_AI_ISLAND_BASE);\n",
+        );
         body.push_str("                }\n");
         body.push_str("            }\n");
     } else {
@@ -778,6 +885,12 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("    if (vcpu_index < G6LC_HARTS_TOTAL) {\n");
     body.push_str("        g6lc_init_count[vcpu_index]++;\n");
     body.push_str("    }\n");
+    if enq_decode || poll_decode {
+        body.push_str(
+            "    /* The only context qemu-plugin.h sanctions for resolving registers. */\n",
+        );
+        body.push_str("    g6lc_resolve_regs(vcpu_index);\n");
+    }
     body.push_str("}\n\n");
 
     body.push_str("static void g6lc_vcpu_idle(qemu_plugin_id_t id, unsigned int vcpu_index)\n{\n");
@@ -1127,6 +1240,21 @@ mod tests {
     }
 
     #[test]
+    fn an_unreachable_gpr_is_reported_rather_than_silently_dropping_events() {
+        let m = model_with_island();
+        let e = emit_plugin(&m, "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        assert!(c.contains("g6lc_warn_no_gpr"));
+        assert!(
+            c.contains("qemu_plugin_get_registers() on this"),
+            "the warning must name the API that cannot answer"
+        );
+        // The register list grows, so a lookup miss must re-fetch rather than be cached.
+        assert!(c.contains("fresh = qemu_plugin_get_registers();"));
+        assert!(c.contains("g6lc_find_xreg(g6lc_regs[vcpu_index], idx, out)"));
+    }
+
+    #[test]
     fn descriptor_offsets_in_the_plugin_come_from_the_layout() {
         let e = emit_plugin(&model_with_island(), "0.1.0", "sha256:abc");
         let c = &e.files[0].contents;
@@ -1153,6 +1281,10 @@ mod tests {
         assert!(c.contains("g6lc_desc_shadow"));
         assert!(c.contains("g6lc_desc_store"));
         assert!(c.contains("g6lc_desc_submit"));
+        // The latch path reports a window-relative offset; the instruction path reports a
+        // guest-physical address. Conflating them put a DRAM descriptor at a bogus offset.
+        assert!(c.contains("paddr - G6LC_AI_ISLAND_BASE"));
+        assert!(c.contains("g6lc_desc_submit_at(vcpu_index, desc_addr)"));
         // The dtype packing is emitted from the ingested flags layout.
         let flags = model_with_island()
             .soc

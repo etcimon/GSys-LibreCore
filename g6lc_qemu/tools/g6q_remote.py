@@ -216,17 +216,30 @@ def _run(
     env: dict[str, str] | None = None,
     check: bool = True,
     capture: bool = False,
+    timeout: float | None = None,
 ) -> subprocess.CompletedProcess:
     log("+ " + " ".join(str(c) for c in cmd))
     env = _remote_env(env)
-    return subprocess.run(
-        [str(c) for c in cmd],
-        cwd=str(cwd) if cwd else None,
-        env=env,
-        check=check,
-        capture_output=capture,
-        text=True,
-    )
+    try:
+        return subprocess.run(
+            [str(c) for c in cmd],
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            check=check,
+            capture_output=capture,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # A hung remote step must fail the pass rather than block it forever. The
+        # returned object keeps the caller's `res.returncode` contract.
+        err(f"timed out after {timeout}s: {' '.join(str(c) for c in cmd)}")
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            (exc.stdout or "") if capture else None,
+            (exc.stderr or "") if capture else None,
+        )
 
 
 def _ssh_base(host: str, control: Path | None) -> list[str]:
@@ -266,6 +279,20 @@ def _control_socket(host: str) -> Iterator[Path]:
     sock = Path(os.environ.get("G6Q_SSH_CONTROL", f"/tmp/g6q-remote-{os.getuid()}-{host}.sock"))
     if sock.parent and not sock.parent.exists():
         sock.parent.mkdir(parents=True, exist_ok=True)
+    if sock.exists():
+        # A socket left by a crashed run is not a usable master: every command through it
+        # hangs or fails with a stale-connection error that reads like an auth problem.
+        check = subprocess.run(
+            [str(c) for c in _ssh_base(host, None)]
+            + ["-O", "check", "-o", f"ControlPath={sock}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=_remote_env(None),
+            check=False,
+        )
+        if check.returncode != 0:
+            log(f"removing stale control socket {sock}")
+            sock.unlink(missing_ok=True)
     # Open the master connection in the background.
     cmd = _ssh_base(host, None) + ["-M", "-N", "-o", f"ControlPath={sock}"]
     env = _remote_env(None)
@@ -291,10 +318,47 @@ def _control_socket(host: str) -> Iterator[Path]:
                 proc.kill()
 
 
-def _remote(host: str, sock: Path | None, cmd: list[str], check: bool = True, capture: bool = False) -> subprocess.CompletedProcess:
+def _remote(
+    host: str,
+    sock: Path | None,
+    cmd: list[str],
+    check: bool = True,
+    capture: bool = False,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess:
     ssh = _ssh_base(host, sock)
-    return _run(ssh + cmd, check=check, capture=capture)
+    return _run(ssh + cmd, check=check, capture=capture, timeout=timeout)
 
+
+def _step_timeout(args: argparse.Namespace, default: float) -> float:
+    """Wall-clock ceiling for one remote step, in seconds.
+
+    Every remote step gets a ceiling because the alternative is a pass that neither
+    succeeds nor fails: `configure`, `ninja` and a QEMU run can all block indefinitely on
+    a wedged builder, and an SSH session that never returns looks identical to a slow one.
+    `--step-timeout 0` disables the ceiling for a deliberately long soak.
+    """
+    override = getattr(args, "step_timeout", None)
+    if override is None:
+        return default
+    return None if override <= 0 else float(override)
+
+
+# Link flags every in-guest payload is built with, regardless of toolchain.
+#
+# `-static -no-pie --build-id=none` are load-bearing, not hygiene: a Linux-targeting cross
+# compiler (riscv64-linux-gnu-gcc) otherwise emits a dynamic executable whose program
+# headers cannot fit in front of .text at DRAM base, so the linker places the LOAD segment
+# one page *below* it. QEMU then loads nothing and the reset vector jumps into unmapped
+# memory — the payload hangs with no output. A bare-metal toolchain hides the problem, so
+# the failure only appears when the builder's toolchain changes.
+PAYLOAD_LINK_FLAGS = [
+    "-nostdlib",
+    "-nostartfiles",
+    "-static",
+    "-no-pie",
+    "-Wl,--build-id=none",
+]
 
 _BASE_PATH = "/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin"
 
@@ -341,7 +405,7 @@ def _compile_payload_local(payload_extra: list[str], local_elf: Path) -> int:
         cc,
         "-march=rv64imac",
         "-mabi=lp64",
-        "-nostdlib",
+        *PAYLOAD_LINK_FLAGS,
         *payload_extra,
         "-T",
         str(payload_lds),
@@ -509,7 +573,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
         return 0
     _remote_mkdir(host, None, remote_build)
     with _control_socket(host) as sock:
-        res = _remote(host, sock, [full], check=False)
+        res = _remote(host, sock, [full], check=False, timeout=_step_timeout(args, 1800))
     if res.returncode != 0:
         err("remote configure failed")
         return res.returncode
@@ -536,7 +600,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         log(f"build: {cmd}")
         if args.dry_run:
             return 0
-        res = _remote(host, sock, [cmd], check=False)
+        res = _remote(host, sock, [cmd], check=False, timeout=_step_timeout(args, 7200))
     if res.returncode != 0:
         err("remote build failed")
         return res.returncode
@@ -553,15 +617,17 @@ def cmd_pull(args: argparse.Namespace) -> int:
         log(f"dry-run: would rsync {host}:{remote_bin} to {local_bin}")
         return 0
     local_bin.parent.mkdir(parents=True, exist_ok=True)
-    if local_bin.exists():
-        local_bin.unlink()
+    # Keep the previous binary until the new one has arrived: deleting first turns a
+    # transport failure into "no local emulator at all".
+    staging = local_bin.with_suffix(local_bin.suffix + ".incoming")
+    staging.unlink(missing_ok=True)
     with _control_socket(host) as sock:
-        _rsync_from_remote(host, sock, remote_bin, local_bin)
-    # rsync from a file path copies into the parent; fix the filename.
-    pulled = local_bin.parent / QEMU_BINARY
-    if pulled != local_bin and pulled.exists():
-        pulled.rename(local_bin)
-    pulled.chmod(pulled.stat().st_mode | 0o111)
+        _rsync_from_remote(host, sock, remote_bin, staging)
+    if not staging.is_file():
+        err(f"pull produced no file at {staging}; remote binary missing or rsync failed")
+        return 1
+    staging.chmod(staging.stat().st_mode | 0o111)
+    staging.replace(local_bin)
     log(f"pulled {local_bin}")
     return 0
 
@@ -582,7 +648,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 0
     _remote_mkdir(host, None, runs)
     with _control_socket(host) as sock:
-        res = _remote(host, sock, [full], check=False)
+        res = _remote(host, sock, [full], check=False, timeout=_step_timeout(args, 900))
     log(f"run log at {host}:{log_file}")
     return res.returncode
 
@@ -800,7 +866,8 @@ def cmd_test(args: argparse.Namespace) -> int:
                 cc = cc_res.stdout.strip().splitlines()[0].strip()
                 compile_cmd = (
                     f"{_env(extra=_xpack_remote_bin_dir(), append_path=True, quote=True)}"
-                    f"{cc} -march=rv64imac -mabi=lp64 -nostdlib "
+                    f"{cc} -march=rv64imac -mabi=lp64 "
+                    f"{' '.join(PAYLOAD_LINK_FLAGS)} "
                     f"{' '.join(payload_extra)} "
                     f"-T {payload_lds} {payload_src} -o {payload_elf}"
                 )
@@ -925,6 +992,12 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--host", default=DEFAULT_HOST, help="remote SSH host (default: ovh_calltorch)")
     p.add_argument("--root", default=DEFAULT_ROOT, help="remote work root (default: /opt/testharness/g6lc-qemu)")
     p.add_argument("--dry-run", action="store_true", help="print what would be run")
+    p.add_argument(
+        "--step-timeout",
+        type=int,
+        default=None,
+        help="wall-clock ceiling per remote step in seconds (0 disables; default per step)",
+    )
 
 
 def _add_build_opts(p: argparse.ArgumentParser) -> None:

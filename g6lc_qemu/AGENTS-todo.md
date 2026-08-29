@@ -46,15 +46,122 @@ written for it:
 | **Q1** ingest + `TargetModel` + conformance | **done** — `timebase-frequency` extracted from DTS into `Facts.timebase_hz`, carried in `Isa.timebase_hz`; `chosen/bootargs` extracted into `Facts.bootargs`, carried in `Soc.bootargs`; `cpu-map` topology (`cores`, `threads_per_core`) extracted from DTS and config into `Soc`; all consumed by the B1 FDT emitter; `g6q-dts` path mutation module (`set`/`del`/`merge`) supports `--dts-set PATH=VALUE`, `--dts-del PATH`, and `--dts-overlay FILE` with missing-node creation, quote stripping, and value parsing for both string and cell-list properties; `resolve.rs` and `gen --emit dts|dtb` apply overlays then per-property mutations before fact extraction / output; `Node::to_dts` added for source rendering; schema updated |
 | **Q2** B0 stock-QEMU driver + firmware chain | **done** — B0 argv/delta emission complete; `run` now supports `--backend args` (print stock-QEMU argv) and `--backend qemu` (spawn `qemu-system-riscv64` with `--qemu-path`, `--dry-run`); `fw` verb implemented with `Firmware`/`BootOptions` JSON inspection and `--fw-print-region` raw-size report; `python tools/g6q.py fetch-qemu` implemented with `--url`/`--ref`/`--full`/`--dry-run` overrides and `--depth 1` shallow default; the pinned QEMU v10.0.0 source is now in `qemu/` (gitignored, separate GPL work); `pins.toml` status updated to `fetched`; `python tools/g6q.py build-qemu` added with `--target`, `--debug`, `--mingw`, `--configure-only`, `--clean`, and `--dry-run`; it probes for python/bash/ninja and prints the configure/ninja commands in dry-run mode; `python tools/g6q.py install-qemu` added with `--package` and `--dry-run`; it builds `g6lc-qemu`, runs `gen --emit qemu`, copies C/FDT/plugin source files into the QEMU tree, and appends build-wiring fragments to `hw/riscv/Kconfig`, `configs/targets/riscv64-softmmu.mak`, `hw/riscv/meson.build`, and `target/riscv/meson.build`; plugin wiring still requires manual `contrib/plugins/meson.build` edit; `build-qemu` now runs WSL/bash out-of-tree `configure` and `ninja` on Windows and defaults to `--disable-libvduse --disable-vduse-blk-export --disable-vhost-user --disable-vhost-user-blk-server` to avoid NTFS/WSL symlink issues; host `qemu-system-riscv64` built and `--version` succeeds; **host-QEMU boot gate passed** with `g6lc-g6lc64_smt2` machine and the in-tree OpenSBI `fw_payload.elf` (`software/smt2-linux/scripts/build-opensbi-smt2.sh`) under WSL: OpenSBI v1.5 platform banner and `SMT2-OSBI-OK` observed; `g6lc-qemu run --backend qemu` currently requires explicit `--stock-machine g6lc-g6lc64_smt2 --stock-cpu g6lc-g6lc64_smt2` until the default is switched to the generated B1 machine. |
 | **Q3** B3 native VM + tandem records | **in progress** — RV64I/M/A interpreter, CSR bank, mret/sret, Zicsr, CLINT/UART/PLIC with M/S-mode software + timer + external delivery, ecall/ebreak/illegal + load/store/fetch M-mode/S-mode traps with mepc/mcause/mtval, medeleg/mideleg, sstatus/sie/sip views, Sv39 page-table walker with 4K/2M/1G leaves, per-access translation, Zicbom/Zicboz no-op decoding, Zacas amocas.w/d, Zba sh[123]add/add.uw/slli.uw, Zbs bset/bclr/binv/bext, Zbb andn/orn/xnor, clz/ctz/cpop, clzw/ctzw/cpopw, min/max/minu/maxu, rol/ror/rori, rolw/rorw/roriw, rev8, orc.b, sext.b/sext.h, zext.h (RV32/RV64), RVC compressed (16-bit fetch, RV32C/RV64C expansion, control flow, stack-relative loads/stores), mret/sret tests, `run --backend native`, `tandem` CLI, D1 report library green; commit record extended with trap `cause`, `prv` and `halt` fields and a separate `record_order` counter so future trap and checkpoint records have their own index; F single-precision and D double-precision opcodes implemented; FP hardening pass done — explicit IEEE-754 rounding, OF/UF/NX/NV/DZ flag tracking and NaN canonicalisation cover all F/D <-> integer and F <-> D conversions; f32 arithmetic and FMA are rounded from an f64 intermediate; f32 FMA now uses one `f64::mul_add` rounding before the f32 final rounding; f64 FMA uses one host `f64::mul_add` rounding; f64 arithmetic improves OF/DZ/NV reporting; min/max/compare/sign-injection handle sNaN/qNaN and signed zero; FP edge-case unit tests added; `run --backend native` now resolves the target, assembles a `TargetModel`, and derives the reset vector, `xlen`, CLINT/PLIC/UART base addresses and PLIC source/target counts from the model, with hard-coded fallback addresses only when the model is silent; `chosen/stdout-path` extracted from DTS into `Facts.stdout_path`, carried in `Soc.stdout_path`, emitted in B1 FDT when present and otherwise derived from a UART peripheral; f64 add/sub/mul now honour RNE/RTZ/RDN/RUP/RMM using `two_sum`/`two_prod` error-free transforms and `f64_round_two`, set NX for inexact results and OF/UF for overflow/underflow, and produce directed-overflow rounding (e.g. RTZ/RDN round to max finite); unit test `f64_directed_rounding_sets_nx_and_picks_the_right_bracket` covers ties and brackets; div/sqrt/fma still use host single rounding and ignore rm; remaining: full directed rounding for f64 div/sqrt/fma and exact UF for subnormal products/FMA (requires a wider accumulator) |
-| **Q4** B1/B2 generated QEMU machine and plugin | **in progress** — B1: machine/CPU/build-wiring emitters; machine emitter now supports `Soc.virtio_mmio` and the `--virtio-mmio N` CLI option; B1: model-driven MROM via `Soc.bootrom` and `--bootrom BASE:LEN`; B1: generated FDT as `hw/riscv/g6lc-<target>-dtb.c/h` embedded blob with model-derived `/cpus/timebase-frequency`, `/cpus/cpu-map` cluster/core/thread topology using numeric phandles, `/chosen/bootargs` and `/chosen/stdout-path` derived from a UART peripheral, `/memory`, `/soc/plic`, `/soc/clint` and memory-mapped peripherals; CLINT `interrupts-extended` wired to each hart's CPU intc with M-mode software (3) and M-mode timer (7); PLIC `interrupts-extended` and `interrupt-parent` use numeric phandles; `machine_init` loads the FDT (or user `-dtb`) and places it via `riscv_compute_fdt_addr`/`riscv_load_fdt`; `gen --emit qemu-machine` and `gen --emit qemu` include the FDT artifacts; B2: `gen --emit qemu-plugin` writes `contrib/plugins/g6lc-<target>.c` for the v4+ TCG plugin API; `gen --emit qemu` generates all B1/B2 artifacts; all GPL-header; build-wiring updated to QEMU v10's `configs/targets/riscv64-softmmu.mak` path and the `minikconf`-safe syntax (`bool` with no prompt, `depends on RISCV32 || RISCV64`, `riscv_ss.add(when: ...)`); `python tools/g6q.py install-qemu` can stage the generated sources and append the easy build wiring into a fetched `qemu/` checkout; **B1 generated machine and CPU now compile against QEMU v10.0.0** (`cpu-qom.h`, `RISCV_CPU_TYPE_NAME`, `TYPE_RISCV_CPU_BASE`, `misa_mxl_max`, `riscv_cpu_set_misa_ext`, `object_property_set_*` + `sysbus_realize` for the hart array, `qapi/error.h` for `error_fatal`, `system/device_tree.h` for `load_device_tree`, `<stddef.h>` in the embedded DTB C); `python tools/g6q.py build-qemu` produces a working `qemu-system-riscv64`; `qemu-system-riscv64 -M g6lc-unnamed -m 256 -nographic -bios default` now boots OpenSBI v1.5.1, prints the platform banner, and reports a valid `Domain0 Next Address` (0x80200000); also booted `g6lc-g6lc64_smt2` with the SMT2 `fw_payload.elf` and observed `SMT2-OSBI-OK` after the OpenSBI v1.5 banner; the B2 plugin now guards `is_io`/`paddr` with `#if G6LC_AI_DESC_DECODE == 1 || G6LC_AI_ISLAND_LEN != 0` so targets without an AI island build with `-Werror` clean. |
-| **Q5** D1 tandem / replay / checkpoint | **in progress** — comparison + report library green; CLI `tandem` verb; `RecordFile` with artifact header + `read_record_file`/`write_record_file`; `run --record FILE` writes a stamped record file; `tandem` accepts both record files and plain record arrays; `architecture/CLI.md` updated to `--bootrom BASE:LEN` and `--record FILE`; `g6q-diag` `Checkpoint` type added with hart state, physical memory and device-state schema; `g6q-vm` `Hart::checkpoint`/`restore` and `PhysMem::snapshot`/`restore` round-trip; `run --backend native --checkpoint FILE` writes a resumable checkpoint; `architecture/CLI.md` updated; full CLINT/PLIC/UART state captured and restored via `MmioDevice::snapshot`/`restore`; `Halt::ReplayDivergence` and `Hart::run_replay` added with record-by-record diff; `run --backend native --replay FILE` replays against a `RecordFile` and fails on divergence; Q5 core D1 checkpoint/replay stack complete |
-| **Q6** accelerator ISA + device + in-guest runtime | **in progress — scaffold** |
+| **Q4** B1/B2 generated QEMU machine and plugin | **in progress** — B1: machine/CPU/build-wiring emitters; machine emitter now supports `Soc.virtio_mmio` and the `--virtio-mmio N` CLI option; B1: model-driven MROM via `Soc.bootrom` and `--bootrom BASE:LEN`; B1: generated FDT as `hw/riscv/g6lc-<target>-dtb.c/h` embedded blob with model-derived `/cpus/timebase-frequency`, `/cpus/cpu-map` cluster/core/thread topology using numeric phandles, `/chosen/bootargs` and `/chosen/stdout-path` derived from a UART peripheral, `/memory`, `/soc/plic`, `/soc/clint` and memory-mapped peripherals; CLINT `interrupts-extended` wired to each hart's CPU intc with M-mode software (3) and M-mode timer (7); PLIC `interrupts-extended` and `interrupt-parent` use numeric phandles; `machine_init` loads the FDT (or user `-dtb`) and places it via `riscv_compute_fdt_addr`/`riscv_load_fdt`; `gen --emit qemu-machine` and `gen --emit qemu` include the FDT artifacts; B2: `gen --emit qemu-plugin` writes `contrib/plugins/g6lc-<target>.c` for the v4+ TCG plugin API; `gen --emit qemu` generates all B1/B2 artifacts; all GPL-header; build-wiring updated to QEMU v10's `configs/targets/riscv64-softmmu.mak` path and the `minikconf`-safe syntax (`bool` with no prompt, `depends on RISCV32 || RISCV64`, `riscv_ss.add(when: ...)`); `python tools/g6q.py install-qemu` can stage the generated sources and append the easy build wiring into a fetched `qemu/` checkout; **B1 generated machine and CPU now compile against QEMU v10.0.0**; B1 also emits `target/riscv/g6lc-<target>-ai.decode` and `target/riscv/insn_trans/trans_g6lc_<target>_ai.c.inc` from the ingested `AiInstrSet` for custom-2 queue instructions; **the generated `trans_` functions are no longer stubs** — see the Q4/Q6 B1 queue-instruction pass below: they call `helper_g6lc_ai_{enq,qfence,poll}`, which delegate to a generated `hw/riscv/g6lc-<target>-ai-island.c` sysbus device, and the whole set (decode + trans + helpers + device + machine wiring) is emitted behind one shared guard. Historical note on the CPU emitter: (`cpu-qom.h`, `RISCV_CPU_TYPE_NAME`, `TYPE_RISCV_CPU_BASE`, `misa_mxl_max`, `riscv_cpu_set_misa_ext`, `object_property_set_*` + `sysbus_realize` for the hart array, `qapi/error.h` for `error_fatal`, `system/device_tree.h` for `load_device_tree`, `<stddef.h>` in the embedded DTB C); `python tools/g6q.py build-qemu` produces a working `qemu-system-riscv64`; `qemu-system-riscv64 -M g6lc-unnamed -m 256 -nographic -bios default` now boots OpenSBI v1.5.1, prints the platform banner, and reports a valid `Domain0 Next Address` (0x80200000); also booted `g6lc-g6lc64_smt2` with the SMT2 `fw_payload.elf` and observed `SMT2-OSBI-OK` after the OpenSBI v1.5 banner; the B2 plugin now guards `is_io`/`paddr` with `#if G6LC_AI_DESC_DECODE == 1 || G6LC_AI_ISLAND_LEN != 0` so targets without an AI island build with `-Werror` clean. **Q4 topology invariants pass:** `g6q-emit-qemu` FDT emitter unit test asserts the generated DTB has one `cpu@{h}` node per `harts_total`; the generated B1 machine now emits `g6lc_<target>_machine_fdt_check` that counts `cpu@*` subnodes at runtime and asserts the count equals `g6lc_harts_total`; `g6q-cli` `fw build` resolves `PLATFORM_HART_COUNT` from the model or DTS and reports it in the build JSON. |
+| **Q5** D1 tandem / replay / checkpoint | **in progress** — comparison + report library green; CLI `tandem` verb; `RecordFile` with artifact header + `read_record_file`/`write_record_file`; `run --record FILE` writes a stamped record file; `tandem` accepts both record files and plain record arrays; `architecture/CLI.md` updated to `--bootrom BASE:LEN` and `--record FILE`; `g6q-diag` `Checkpoint` type added with hart state, physical memory and device-state schema; `g6q-vm` `Hart::checkpoint`/`restore` and `PhysMem::snapshot`/`restore` round-trip; `run --backend native --checkpoint FILE` writes a resumable checkpoint; `run --backend native --restore FILE` now resumes from that checkpoint and makes `--image` optional; `architecture/CLI.md` updated; full CLINT/PLIC/UART state captured and restored via `MmioDevice::snapshot`/`restore`; `Halt::ReplayDivergence` and `Hart::run_replay` added with record-by-record diff; `run --backend native --replay FILE` replays against a `RecordFile` and fails on divergence; Q5 core D1 checkpoint/replay stack complete |
+| **Q6** accelerator ISA + device + in-guest runtime | **in progress** — B3 native VM decodes and executes `ai.enq`/`ai.qfence`/`ai.poll` from an ingested `AiInstrSet`; `g6q-vm/src/insn.rs` adds `Insn::AiEnq/AiPoll/AiQfence` gated on the model; `g6q-vm/src/device.rs` adds `AiIsland::read_descriptor_event`, `queue_enq_with_event`, `queue_poll_details`, and `queue_qfence`; `g6q-vm/src/exec.rs` reads descriptors from guest memory, marks entries, writes completion words to `ptr_done`, and sets `rd`; the in-guest payload `tools/remote/payload/ai_island_queue_smoke.S` is assembled from model-derived `match_*`/descriptor-offset flags and prints `AI_OK` under `run --backend native`; `run --record` and `run --tensor` produce a D1 record file and a D2 tensor artifact; `tandem` and `diag` run cleanly over these artifacts; **B1 queue-instruction execution is complete** — `g6lc-<t>-ai.decode`, `trans_g6lc_<t>_ai.c.inc`, `g6lc-<t>-ai-helpers.{h,c}` and the `hw/riscv/g6lc-<t>-ai-island.{h,c}` device are generated behind one shared guard and execute `ai.enq`/`ai.qfence`/`ai.poll` in-target; verified to `AI_OK` on `g6lc-ai` from both an ELF and a raw image, with B3 agreeing on the same strengthened payload. The B2 plugin **cannot** record instruction-submitted work on the pinned QEMU (`qemu_plugin_get_registers()` does not expose the core GPRs) and now says so once instead of emitting an empty artifact; it remains the trace backend for this path |
 | **Q7** D2 microarchitectural + PMU | **in progress** — PMU event table and `Uarch` raw map landed; D2 structure-size counters (`uarch.*`) scaffolded; **PMU FDT/CPU mapping landed**: OpenSBI-compatible `/pmu` node with `riscv,event-to-mhpmcounters` (fixed `mcycle`/`minstret`), `riscv,raw-event-to-mhpmcounters` from ingested design events, `interrupts-extended` for Sscofpmf LCOFIP, and generated QEMU CPU `ext_zihpm`/`ext_sscofpmf`/`pmu_mask`; B0 `-cpu` appends `pmu-mask` when `zihpm` is live; **B2 PMU counter plugin landed**: `g6q-emit-qemu/src/pmu.rs` generates `contrib/plugins/g6lc-<target>-pmu.c` from the published `PmuTable` (event names, groups, and `mhpmevent` selectors), registers per-hart instruction counters and a per-hart/per-event counter array, and writes a counters JSON at exit; `gen --emit qemu-pmu-plugin` is wired; `gen --emit qemu` includes it. |
 | **Q8** MTTCG scale + virt profile + distro | **in progress** — B0 stock-QEMU driver now derives `-smp` from `harts_total` or the model's core/threads-per-core topology, emits `maxcpus` as a hotplug ceiling, parses `--icount N|off` and `--tcg-tuning default|tuned`, forces single-threaded TCG when icount is on (MTTCG and icount are mutually exclusive), allows explicit multi-threaded TCG with `tuned`, parses `--rootfs-format raw|qcow2`, `--console uart|virtio`, `--virtio rng`, `--os buildroot|ubuntu|debian|fedora` (forces `g6lc-virt`, `qcow2` default, and a default `root=/dev/vda` append), and `--distro-root` (searches for `vmlinuz/Image`, `initrd.img`, and `rootfs.qcow2`). `architecture/CLI.md` and `EMIT.md` updated. Q8 surface complete |
 | **Q9** capability matrix | **done** — `g6q-ingest/src/matrix.rs` builds a JSON matrix from `Sources` and the capability table, one row per capability with `config` probe/value, `flist` probe/evidence, `dts` tokens/node/declared, `qemu` properties/delta, and the conformance `verdict`; `gen --emit matrix` wired in `g6q-cli/src/main.rs`; `g6q-core/src/json.rs` added `get`, `is_null`, `is_empty`, `as_array`, and `as_string` accessors; `g6q-flist/src/lib.rs` added `Presence::as_str`; tests cover matrix shape and the unsupported-QEMU delta. `architecture/CLI.md` and `architecture/IR.md` updated. |
 || **Q10** computed-only MMU geometry | **done** — `g6q-core/src/model.rs` `Isa` gains `paddr_bits`, `vaddr_bits`, `page_table_levels`, `vpn_bits`, and `satp_mode`; `g6q-ingest/src/lib.rs` derives these from `mmu_mode` + `xlen` for `sv32`, `sv39`, and `sv48`; `g6q-vm/src/mmu.rs` is now model-driven: a `Mmu` struct is built from `Isa` and used by `translate(mem, mmu, satp, vaddr)`, supporting bare, Sv32, Sv39, and Sv48 geometry; `g6q-vm/src/exec.rs` `Hart` stores a `Mmu`, `Hart::with_isa` derives it from the model, and `Hart::new` defaults to bare; CLI `run` uses `Hart::with_isa`; unit tests cover bare, Sv39 1 GiB leaf, non-canonical detection, and mode mismatch. `architecture/INGEST.md` and `schemas/target-model.schema.json` updated. |
 
-### Remote build and AI-island scaffold (this pass)
+### Q4/Q6 — B1 queue-instruction execution: helpers, in-target device, and ABI unification (this pass)
+
+Closes the Q4/Q6 follow-up that was recorded as *"the generated `trans_` routines are stubs, so
+actual B1 execution of `custom2` queue instructions still requires helper functions and an AI-island
+device."* The helper/device half existed as unlanded work; this pass finished it **and removed the
+directive-§1.2 violations it had introduced**, which were the same defect class Change set B5 was
+written about — a backend that looks architecture-derived while typing its own constants.
+
+**One source of truth for the accelerator ABI (the structural change).** B1 was becoming a *third*
+implementation of the completion word and the capability window, alongside B2's decoder and B3's
+device. Both moved into the IR:
+
+- `g6q-core::model::AiDescLayout::pack_completion_word(ticket, status)` — packs from the ingested
+  `make_completion` layout, with the fallback named once as `FALLBACK_COMPLETION_STATUS_SHIFT`. Also
+  hardened: a malformed bit range now contributes nothing instead of wrapping into another field.
+- `g6q-core::model::AiIslandConfig::{cap_words, cap_value, cap_unsourced}` + `clog2_u32` — moved out
+  of `g6q-vm` verbatim. `g6q-vm::AiIsland` now delegates; all 112 of its tests still pass, which is
+  the point of moving rather than reimplementing.
+
+**B1 `ai_island.rs` is now model-derived throughout.** Replaced: the hard-coded
+`status<<32 | ticket` macro (whose comment said `status[47:32]` while the code wrote `[63:32]`);
+literal `0` for `ST_OK` at three sites; `cap_offsets` fallbacks of `0`/`4`/`8` and an invented
+16-byte window width that answered 3 of ~12 capability words — a guest reading an un-emitted word
+got `0`, which is a *legal* capability value; and `desc_bytes.max(64)` / `ptr_done = desc_bytes - 8`
+invented geometry. The capability window is now a generated table from `cap_words()`, the version
+check is emitted only when the accepted version, its field offset and `ST_BAD_VER` are *all*
+published, and an empty window emits no table and no lookup (a zero-length array is not valid C).
+
+**Fixed defects found while finishing it:**
+
+- `machine.rs` passed `desc_layout.desc_bytes.max(64)` as `desc_base` — **a size used as an
+  address**. Bases are now passed as `(bool decoded, uint64_t base)` pairs; unresolved means the
+  window is not decoded and the device `warn_report`s, per Change set B4.
+- Three different emission guards (`trans.rs` required `mask_f7f3op != 0`, `ai_island.rs` did not,
+  `machine.rs`/`build.rs` used `ai_island.is_some()`), and `trans::emit` called `ai_island::emit`
+  unconditionally. A model with an opcode but no mask emitted a device with no callers; the machine
+  would `#include` a header that was never emitted. All four now call `ai_island::resolved()`.
+- B1 `enq` returned `0xffffffff` on a full ring — the same value `poll` returns for *pending*. Now
+  `0`, matching B3, with the pending sentinel emitted as one named macro. Recorded as ask **F15**:
+  neither value is published by the design.
+- `warn_report` was used without `qemu/error-report.h`.
+
+**The payload's ELF link was silently broken, and the ledger's diagnosis of it was wrong.**
+`tools/remote/payload/ai_island_smoke.lds` did not discard `.interp`/`.dynamic`/`.note`, so
+`riscv64-linux-gnu-gcc` produced a dynamic executable whose program headers could not fit in front
+of `.text` at DRAM base — the linker placed the LOAD segment one page *below* it (`0x7ffff000`).
+QEMU loaded nothing and the reset vector jumped into unmapped memory: `-kernel <elf>` hung with **no
+output at all**. `objcopy -O binary` hid it by discarding everything but `.text`, and a bare-metal
+toolchain hides it by not emitting those sections — so it only appeared when the builder's toolchain
+changed. The earlier remote AI-island failure attributed to unresolved `cap_base`/`desc_base` is
+this. Fixed in the linker script plus `PAYLOAD_LINK_FLAGS` (`-static -no-pie --build-id=none`) in
+`g6q_remote.py`, so local and remote compiles share one hardened link.
+
+**The queue smoke was trivially satisfiable.** It only checked `x6 != 0xffffffff`, so any value —
+including `0` from an early `!island` return — passed. It now poisons `ptr_done` with a sentinel and
+asserts three things: the entry is not pending, the island **overwrote the sentinel**, and the word
+returned in `rd` **equals the word written to memory**. It also `#error`s with a readable message
+when a model-derived macro is missing, instead of emitting a wall of "illegal operands".
+
+**B2 queue-instruction submissions cannot work on the pinned QEMU, and now say so.** The path
+recorded nothing. Root cause: `qemu_plugin_get_registers()` is built from `gdb_get_register_list()`,
+which walks only *dynamically-registered* gdbstub features (`cpu->gdb_regs`); a target's **core**
+register file is never in that list. On v10.0.0 the `riscv64` list is 92 CSRs and no GPR, so `rs1` is
+unreachable. Change set C6 claimed these APIs were "verified against the fetched pinned header" — the
+header was verified, the behaviour was not. Fixed what can be fixed: registers are resolved in the
+vCPU-init callback and **re-fetched on a lookup miss** (the list grows, and caching the miss disabled
+every register read for the run), the limitation is warned once naming the API and pointing at B1/B3,
+and `descriptor_addr` no longer subtracts the island base for a DRAM descriptor (the latch path
+reports a window offset, the instruction path a guest-physical address).
+
+**`install-qemu` re-entrancy.** Build-wiring appends used `if block in existing`, which both
+re-appended on any emitter whitespace change and skipped a real append on a coincidental comment
+match. Replaced with `_wiring_block_present()`, a whole-line comparison ignoring blanks and comments.
+This was not theoretical: `hw/riscv/meson.build` and `target/riscv/meson.build` each carried only the
+`g6lc-ai` block while `Kconfig` and `riscv64-softmmu.mak` carried all four targets, so three
+generated machines were on disk and in the config but **never compiled**. After the fix, installing a
+second target appended correctly and both machines build.
+
+**Other stability fixes:** remote `configure`/`build`/`run` gained wall-clock ceilings
+(`--step-timeout`, `0` disables) so a wedged builder fails instead of blocking; `_control_socket`
+validates the ControlMaster with `ssh -O check` and removes a stale socket; `cmd_pull` stages to a
+temp file and verifies it arrived before replacing the local binary (it previously deleted the
+binary first, then called `chmod` on a path it had just renamed away); `payload_flags.py` refuses a
+descriptor address below DRAM base instead of emitting `0x-...`; `fetch-qemu` reports a failed `git
+fetch` instead of silently checking out a stale revision, writes `.g6lc_qemu_pin` LF-only, and
+`_extract_archive` no longer leaks a scratch directory per extraction.
+
+Verified (local, `fixtures/ai` + `E:\cva6` repo root, QEMU v10.0.0 built under WSL):
+
+| Check | Result |
+|---|---|
+| `python tools/g6q.py check` | green — 56 `g6q-emit-qemu`, 40 `g6q-core`, 112 `g6q-vm`, 68/45/30/55/11/26/52 elsewhere |
+| B1 machine + device + helpers compile | `hw_riscv_g6lc-ai-ai-island.c.o`, `target_riscv_g6lc-ai-ai-helpers.c.o`, `decode-g6lc-ai-ai.c.inc` |
+| Payload ELF LOAD segment | single segment at `0x80000000` (was `0x7ffff000`) |
+| B1 `-kernel <elf>` | `AI_OK` (previously no output) |
+| B1 `-kernel <bin>` | `AI_OK` |
+| B1 + B2 plugin attached | `AI_OK`, plus the one-time GPR-unreachable warning |
+| **B3 native VM, same strengthened payload** | `AI_OK` — B1/B3 agree on pending-vs-done, the `ptr_done` write, and register-vs-memory word equality |
+| Multi-target install | `g6lc-ai` **and** `g6lc-g6lc64_smt2` both registered and built |
+| OpenSBI on `g6lc-g6lc64_smt2` | `OpenSBI v1.5.1`, `Platform Name: GSys LibreCore g6lc64_smt2` (explicit `-bios`; the default lookup needs an installed datadir) |
+
+Not done, deliberately:
+
+- No attempt to recover `rs1` in B2 by shadowing DRAM stores — that would infer a descriptor address
+  from traffic rather than read it, which is the guessing this package exists to avoid.
+- `POLL_PENDING` and the ring-full return stay emulator conventions until **F15** is answered.
+
+### Remote build and AI-island scaffold (earlier pass)
 
 - Added `tools/g6q_remote.py` — a testharness-style remote QEMU build proxy for the `ovh_calltorch` / `/opt/testharness/g6lc-qemu` layout. Subcommands: `doctor`, `sync`, `configure`, `build`, `pull`, `run`, `test`, `clean`, plus a convenience `remote-build` that does sync → configure → build → pull and an optional OpenSBI smoke test. Uses rsync over a persistent SSH ControlMaster, ccache, and `ninja -j$(nproc)` for incremental builds.
 - Wired into `tools/g6q.py` as `python tools/g6q.py remote -- <subcommand>` and `python tools/g6q.py remote-build -- <options>`.
@@ -566,10 +673,83 @@ Open, with reopen conditions:
 - **Ingest gap:** the model carries capability *offsets* but no window *base*. Until the design
   package exposes one, `cap_base` stays `None` and the window is undecoded. Inventing a base would
   put a guest-visible address in `device.rs`.
-- Firmware topology invariants (processor-node count and firmware hart count both equal `S`) as
-  emitted-artifact checks; the design's own two-thread bring-up is not green here.
 
 Resolved since this section was opened:
+- Firmware topology invariants (processor-node count and firmware hart count both equal `S`) as
+  emitted-artifact checks:
+  * `g6q-emit-qemu/src/dts.rs` test `dtb_cpu_node_count_matches_harts_total` asserts the generated
+    FDT has one `cpu@{h}` node per logical hart.
+  * `g6q-emit-qemu/src/machine.rs` emits a `g6lc_<target>_machine_fdt_check` runtime self-check
+    that counts `cpu@*` subnodes under `/cpus` and `g_assert`s the count equals `g6lc_harts_total`.
+  * `g6q-cli/src/main.rs` `fw_build` derives `PLATFORM_HART_COUNT` from the resolved model or DTS
+    and reports it in the build JSON, so OpenSBI builds for the same hart count the FDT declares.
+  * **Live build-and-boot gate passed:** `python tools/g6q.py install-qemu/build-qemu` for both
+    `g6lc-target` and `g6lc-g6lc64_smt2` succeeded; `qemu-system-riscv64 -M g6lc-target` booted
+    OpenSBI v1.5.1 with `Platform HART Count: 1`, and `-M g6lc-g6lc64_smt2` booted with
+    `Platform HART Count: 2` and `Domain0 HARTs: 0*,1*`, confirming the two-thread SMT bring-up.
+- Q6 in-guest AI smoke through the B3 native VM:
+  * Fixed `g6q-vm/src/c.rs` `c_lui_imm` which shifted the `c.lui` nzimm left by 12 twice, producing
+    `0x10000000` for a `c.lui x1, 0x10` instead of `0x10000`. Added `c_lui_imm_places_nzimm_in_bits_17_12`
+    unit test with known machine words (0x60c1, 0x6085, 0x61fd).
+  * The `tools/remote/payload/ai_island_smoke.S` payload compiles with model-derived flags from
+    `payload_flags.py` and runs to `AI_OK` under `g6lc-qemu run --backend native --image out/ai_island_smoke.bin`
+    for `fixtures/ai`; the tensor artifact records one `op=1`, `version=1`, `done=true` event.
+- B1/B2 QEMU `g6lc-ai` machine from the same fixture:
+  * `python tools/g6q.py install-qemu --package fixtures/ai --target ai` and `build-qemu` produced a
+    `g6lc-ai` machine and `libg6lc-ai.so` / `libg6lc-ai-pmu.so` plugins.
+  * The generated `qemu-system-riscv64 -M g6lc-ai -kernel out/ai_island_smoke.bin -bios none ...
+    -plugin qemu/build/contrib/plugins/libg6lc-ai.so` runs to `AI_OK`, confirming the B1 FDT/SoC
+    wiring matches the B3 model and the B2 plugin attaches to the AI-island window.
+  * Fixed `tools/g6q.py _add_contrib_plugin` which used a substring match (`name in text`) and
+    therefore thought `g6lc-ai` was already listed when `g6lc-ai_soc` and `g6lc-ai-pmu` were present.
+    It now checks for the exact `contrib_plugins += '<name>'` line.
+- Q7 D2 diagnosis over `fixtures/ai`:
+  * `g6lc-qemu diag --uarch-out out/ai_uarch.json ...` with the AI fixture emits
+    `ai.island.*` geometry counters (Exact) plus roofline counters (Modelled).
+  * Merging the B3 native `out/ai_smoke_tensor.json` with `--tensor` adds
+    `ai.tensor.ops`/`completes`/`bytes`/`macs`/`queue_entries` (Synthetic) and
+    `ai.pmu.*` (Modelled) to the same counter array, closing the Q7 D2/Q6 runtime loop.
+- Q7 B2 PMU plugin over the AI smoke:
+  * `libg6lc-ai-pmu.so,out=/.../ai_qemu_pmu.json` attached to the `g6lc-ai` machine and ran
+    the payload to `AI_OK`; the generated `out/ai_qemu_pmu.json` has one hart with
+    `cycles: 39`, `instructions: 39` and the PMU event table (currently one `unresolved`
+    placeholder event), confirming the Q7 B2 PMU plugin emits the counter artifact contract.
+- Q6 in-guest queue-instruction smoke:
+  * `payload_flags.py` now exports `AI_ENQ_MATCH`, `AI_POLL_MATCH`, `AI_QFENCE_MATCH`,
+    `AI_DESC_BYTES`, and `AI_DESC_ADDR` (queue path: a descriptor in guest DRAM) when the
+    model's `soc.ai_island.instr_set` is published.
+  * New payload `tools/remote/payload/ai_island_queue_smoke.S` uses the design's own
+    `ai.enq`/`ai.qfence`/`ai.poll` encodings (assembled via `.word` with the model's
+    `match_*` values) to build a descriptor in DRAM, submit it, fence, and poll.
+  * Compiled with WSL `riscv64-linux-gnu-gcc` and run through B3 native VM:
+
+        cargo run -p g6q-cli -- run --backend native \
+          --config-pkg fixtures/ai/ai_soc_config_pkg.sv \
+          --flist fixtures/ai/manifest.f --dts fixtures/ai/board.dts \
+          --target ai --image out/ai_island_queue_smoke.bin --steps 200 \
+          --record out/ai_queue_record.json --tensor out/ai_queue_tensor.json
+
+    prints `AI_OK`; `out/ai_queue_tensor.json` records `descriptor_addr = 0x8000ffc0`,
+    `ptr_done = 0x80010000`, `m=n=k=1`, `op=1`, `version=1`, `done=true`,
+    `status=0`, plus the roofline counters.
+- Q8 DTS parser bug fix:
+  * `fixtures/ai/board.dts` `stdout-path = "/soc/uart@10000000:115200";` misparsed because
+    `parse_body` treated the `:` and trailing `;` inside the quoted string as structural tokens,
+    turning the property name into `115200"`. `g6q-dts/src/tree.rs::parse_body` is now quote- and
+    escape-aware, and a unit test (`colons_and_semicolons_inside_strings_do_not_misparse`) pins
+    the fix.
+  * `g6lc-qemu gen --emit dtb ...` for `fixtures/ai` now produces a DTB whose `fdtdump` shows
+    `chosen { stdout-path = "/soc/uart@10000000:115200"; }`.
+- Q5 D1 replay / tandem over the AI smoke:
+  * `g6lc-qemu run --backend native ... --record out/ai_native_record.json` recorded 100,000
+    instructions and printed `AI_OK`.
+  * `g6lc-qemu run --backend native ... --replay out/ai_native_record.json` replayed to `AI_OK`
+    with no divergence.
+  * Two fresh `run --record` invocations compared with `tandem --under-test r1 --reference r2`
+    report `"divergence": false` / `"records": 100000`, confirming the B3 VM is deterministic.
+  * QEMU B2 `libg6lc-ai.so,trace=...` produced a 39-record trace (`out/ai_qemu_trace.json`)
+    from the same payload, but its `prv` field is fixed at `0` because the plugin API does not
+    expose current privilege; it is therefore a smoke trace, not a D1 reference.
 - Conformance rules for `S` above the interrupt-context cap, and accumulator banks below thread
   count (`g6q-core::TargetModel::topology_rows` and `g6q-svcfg::derive::derive` both mirror the
   design's own assertions; tests cover the over-budget and raise-to-thread-count cases).
@@ -843,6 +1023,7 @@ scatter-shot commits.
 
 | Date | Pass | Outcome |
 |---|---|---|
+| 2026-08-29 | **Q4/Q6 B1 queue-instruction execution + accelerator-ABI unification** (see the section above for the full account) | `g6q-core` gains `AiDescLayout::pack_completion_word` (+ `FALLBACK_COMPLETION_STATUS_SHIFT`) and `AiIslandConfig::{cap_words,cap_value,cap_unsourced}` + `clog2_u32`, moved out of `g6q-vm` so B1/B2/B3 share one implementation of the completion word and the capability window; `g6q-vm` delegates; new `g6q-emit-qemu/src/{trans,ai_island}.rs` emit the decoder, `trans_` routines, helpers and an in-target AI-island device behind a single `ai_island::resolved()` guard also used by `machine.rs` and `build.rs`; removed the hard-coded completion layout, literal `ST_OK`, invented `cap_offsets`/window width, invented descriptor geometry, and `machine.rs` passing a *size* (`desc_bytes`) as the `desc_base` *address*; ring-full return separated from the poll-pending sentinel (ask **F15**); payload linker script + `PAYLOAD_LINK_FLAGS` fix an ELF whose LOAD segment landed below DRAM base (the real cause of the remote AI-island failure previously blamed on unresolved island placement); queue smoke strengthened to assert the `ptr_done` write and register-vs-memory agreement, with `#error` guards for missing model macros; B2 register access moved to the vCPU-init contract, re-fetched on miss, `descriptor_addr` corrected per submission path, and the pinned-QEMU GPR limitation warned once; `install-qemu` wiring guards made whole-line (three generated machines were in `Kconfig`/`.mak` but absent from both `meson.build` files, so they were never compiled); remote `configure`/`build`/`run` timeouts, ControlMaster staleness check, safe `pull`, and several `g6q.py` robustness fixes. `architecture/EMIT.md` §3.5/§3.6/§4, `architecture/RTL_FEEDBACK.md` **F15** updated. | `python tools/g6q.py check` green; `g6q-emit-qemu` 56, `g6q-core` 40, `g6q-vm` 112 tests pass. Live: B1 `-kernel` ELF **and** raw image → `AI_OK`; B1+B2 plugin → `AI_OK` + one-time warning; B3 native, same payload → `AI_OK`; `g6lc-ai` and `g6lc-g6lc64_smt2` both build; OpenSBI v1.5.1 banner on `g6lc-g6lc64_smt2`. |
 | 2026-08-30 | B2 PMU counter plugin (Change Set C part 3) | `g6q-emit-qemu/src/pmu.rs` now generates a buildable `g6lc-<target>-pmu.c` with `<inttypes.h>`, `PRIu64` formatting, and a `g6lc_pmu_event_value` helper that maps `cycles`/`instructions`/`minstret`/`mcycle` events to synthetic per-hart counts; other published events stay zero unless a later pass maps them. `g6q.py install-qemu` wires both `g6lc-<target>` and `g6lc-<target>-pmu` into `qemu/contrib/plugins/meson.build`. The `g6lc-ai_soc-pmu` plugin builds and writes a counters JSON (`{header, harts:[{hart,cycles,instructions,events:[{name,selector,value}]}]}`) when run with `out=FILE`. `python tools/g6q.py check` green; `g6q-emit-qemu` 38 tests pass; local `ninja -C qemu/build` and `qemu-system-riscv64 -plugin .../libg6lc-ai_soc-pmu.so,out=...` pass on the AI smoke payload. `architecture/EMIT.md` §B2.x and `AGENTS-todo.md` updated. |
 | 2026-08-30 | F6 cluster dispatch modelled from `queue_cluster_map` or `cluster` descriptor field | `g6q-core` `AiIslandConfig` adds `queue_cluster_map`; `schemas/target-model.schema.json` accepts the array; `g6q-diag/ai_cfg.rs` parses `QueueClusterMap` from the config struct or a top-level localparam; `g6q-vm` `read_descriptor_event` and the B2 `g6q-emit-qemu` plugin both resolve `cluster` from a `cluster` descriptor field, then `queue_cluster_map`, then leave it unresolved (0); tests in `g6q-diag`, `g6q-vm`, and `g6q-emit-qemu` cover all three sources; `architecture/RTL_FEEDBACK.md` F6, `AI_BRIDGE.md`, and `EMIT.md` updated. | `python tools/g6q.py check` green; `g6q-diag` 47, `g6q-vm` 108, `g6q-emit-qemu` 36 tests pass. |
 | 2026-08-30 | Roofline traffic model corrected against `g6lc_ai_gemm_seq.sv` (F12, F13) | Read the live GEMM unit rather than trusting the plan's model, which invalidated part of the previous pass. Two design facts: (a) the engine is **whole-matrix-resident** (load all A → all B → MAC → store C), not `T`-blocked streaming, and `ST_CHK` **rejects** `m`, `n` or `k` > `MaxDim`, so the plan's own §12 acceptance shape `4096³` cannot be submitted as one descriptor — ask **F12**; (b) §4's `bytes/MAC = 2/T` counts **inputs only**, and the `s32` writeback `4·m·n` is *twice* the input traffic at `m = n = k = T`, making true intensity 42 rather than 128 MAC/byte — ask **F13**. `roofline.rs` now reports `compulsory_read_bytes` (`m·k + k·n`, no dataflow assumption), `tiled_read_bytes` (§4's model), `dram_read_bytes = max` of the two, `dram_write_bytes`, `shape_fits_blocking`, and separates total `intensity_mac_per_byte` from `tiled_input_intensity_mac_per_byte`. The old model was correct *only* at `m = n = k = T` — the one shape the first pass tested. New tests pin the small-shape floor, the writeback dominance, the blocking limit, and the maximal-shape coincidence that hid the bug. `RTL_FEEDBACK.md` §3.2 tabulates plan-vs-built; `DIAG.md` §4.3 gains the max-of-two rule and a fourth discipline. | `python tools/g6q.py check` green; `g6q-diag` 61 tests pass. |
@@ -1012,3 +1193,42 @@ These fixes are now in the generator: `g6q-emit-qemu` emits `reg_shift` / `clock
 - `g6q-emit-args/src/invoke.rs` `build_argv` omits the `-cpu` argument when `StockTarget.cpu_base` is empty, so a generated machine that brings its own CPU type does not receive a conflicting stock `-cpu` line.
 - `architecture/CLI.md` updated: the execution table notes that `--backend qemu` targets the generated B1 machine and that `--stock-machine`/`--stock-cpu` select B0; the examples show the new default and an explicit stock override.
 - `python tools/g6q.py check` green; `g6q run --backend qemu --dry-run` shows `-M g6lc-unnamed -smp 1 -m 128M ...` with no `-cpu`; `g6q run --backend args` still prints the B0 stock argv (`-M virt -cpu rv64 ...`).
+
+### Q4 continuation — B1 custom AI instruction build integration
+
+- `g6q-emit-qemu/src/trans.rs` now emits:
+  - `target/riscv/g6lc-<target>-ai-helpers.h` (unguarded `DEF_HELPER_*` fragment for QEMU `helper-proto`/`helper-gen`/`helper-info` expansion),
+  - `target/riscv/g6lc-<target>-ai-helpers.c` (stub implementations),
+  - `target/riscv/insn_trans/trans_g6lc_<target>_ai.c.inc` (translation fragment for `ai.enq`/`ai.qfence`/`ai.poll`),
+  - `target/riscv/g6lc-<target>-ai.decode` (decodetree source driven by `AiInstrSet`).
+- `g6q-emit-qemu/src/build.rs` build wiring adds the helper source and the `decodetree.process()` custom decoder to `target/riscv/meson.build`.
+- `tools/g6q.py` `install-qemu` now:
+  - copies generated sources recursively (so `insn_trans/` is staged),
+  - appends `#include "target/riscv/g6lc-<target>-ai-helpers.h"` to `target/riscv/helper.h`,
+  - inserts the decode and translation includes into `target/riscv/translate.c`,
+  - appends the `decoder_table[]` entry `{ always_true_p, decode_g6lc_<target>_ai },`.
+- The generated decoder reuses `!extern &r` from `target/riscv/insn32.decode` to avoid decodetree fixed-bit overlap and `bits left unspecified` errors.
+- `python tools/g6q.py check` green; `python tools/g6q.py install-qemu --package fixtures\ai --target ai` followed by `python tools/g6q.py build-qemu` produced a linked `qemu-system-riscv64`. A WSL smoke run of `./qemu/build/qemu-system-riscv64 -M ?` shows `g6lc-ai` and `-M g6lc-ai -cpu ?` shows `g6lc-ai`; `-M g6lc-ai -cpu g6lc-ai -nographic -bios none` starts and runs (no firmware loaded).
+- The generated helpers are still stubs that return `0`/no-op; functional queue semantics and an AI-island sysbus device are the next open item.
+
+### B1 functional AI-island sysbus device and helpers pass
+
+- `g6q-emit-qemu/src/ai_island.rs` (new module) emits `hw/riscv/g6lc-<target>-ai-island.{h,c}` from the ingested `AiIslandModel`.
+- The generated device owns per-queue `G6lcAIQueueEntry` arrays, allocates sequential tickets, reads `ptr_done` from the descriptor image using the ingested `desc_layout.ptr_done` offset, writes 64-bit completion words with `G6LC_AI_COMPLETION(ticket, status)`, and exposes a `cap_base` MMIO capability window with version/clusters/macs-per-cycle.
+- `g6q-emit-qemu/src/trans.rs` `emit_helpers_c` now emits functional helpers that call `g6lc_ai_island_enq/qfence/poll` on the global island instance, and `emit` wires the new `ai_island` emitter.
+- `g6q-emit-qemu/src/machine.rs` maps `ai-island` peripherals to `g6lc_ai_island_create(...)` instead of `unimplemented-device`, passing `cap_base` and `desc_base` from the model.
+- `g6q-emit-qemu/src/build.rs` adds `g6lc-<target>-ai-island.c` to the `hw/riscv/meson.build` build-wiring fragment.
+- `tools/g6q.py` `install-qemu` copies the new device files and `_patch_hw_riscv_meson_build` appends the device to `hw/riscv/meson.build` when present.
+- Removed stale hand-maintained `qemu/hw/riscv/g6lc-ai-island.{c,h}` and the duplicate meson block; the package-generated `g6lc-ai-ai-island.{c,h}` is now the sole source.
+- The in-guest payload `tools/remote/payload/ai_island_queue_smoke.S` was reassembled with the model-derived `match_*` encodings (`0x0000505B`, `0x0200505B`, `0x0400505B`) and a 0x80020000 descriptor.
+- `python tools/g6q.py check` green; `python tools/g6q.py install-qemu --package fixtures\ai --target ai` and `python tools/g6q.py build-qemu` produced a linked `qemu-system-riscv64`.
+- A WSL smoke run of `./qemu/build/qemu-system-riscv64 -M g6lc-ai -cpu g6lc-ai -m 128M -nographic -bios none -kernel tools/remote/payload/ai_island_queue_smoke.elf` prints `AI_OK`, confirming `ai.enq` returns a ticket, `ai.qfence` drains the queue and writes the completion word, and `ai.poll` returns the completion.
+- `architecture/EMIT.md` §B1 updated to document the new device and helper emission.
+
+### B1 hardening — package-only build wiring and generated C formatting
+
+- `tools/g6q.py` `_patch_target_meson_build` now appends `cpu_g6lc_<target>.c` together with `g6lc-<target>-ai-helpers.c` and the `decodetree` decode rule to `target/riscv/meson.build`, removing the need for a manual second meson line.
+- `g6q-emit-qemu/src/trans.rs` and `g6q-emit-qemu/src/ai_island.rs` switched from `\n\` string continuations to raw-string `r###"..."###` format literals so the emitted C keeps its indentation (no more column-zero `return`/`if` in generated helpers and device).
+- Re-ran `python tools/g6q.py install-qemu --package fixtures\ai --target ai` after `git checkout --` the patched QEMU build files; the generated `qemu/` tree is now entirely package-originated and has no duplicate meson blocks.
+- `python tools/g6q.py build-qemu` and the in-guest `AI_OK` smoke still pass; `python tools/g6q.py check` is green.
+- No git commit was made.

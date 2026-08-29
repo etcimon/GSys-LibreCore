@@ -354,6 +354,7 @@ fn emit_qemu_machine(args: &Args, model: &TargetModel) -> Result<(), String> {
     for f in &build_emission.files {
         emission.push(f.clone());
     }
+    g6q_emit_qemu::trans::emit(model, VERSION, &digest, &mut emission);
 
     let base = args
         .value("emit-dir")
@@ -450,6 +451,7 @@ fn emit_qemu_all(args: &Args, model: &TargetModel) -> Result<(), String> {
     for f in &pmu_emission.files {
         emission.push(f.clone());
     }
+    g6q_emit_qemu::trans::emit(model, VERSION, &digest, &mut emission);
 
     let base = args
         .value("emit-dir")
@@ -496,6 +498,25 @@ fn resolved_dts_blob(args: &Args, resolved: &resolve::Resolved) -> Result<Vec<u8
     // Written here rather than shelled out to a device-tree compiler: requiring one
     // would make the package's standalone claim conditional on another toolchain.
     Ok(g6q_dts::to_blob(&tree, 0, &[]))
+}
+
+/// Derive the logical hart count for an OpenSBI build when the caller points at a
+/// design or a device tree. This makes the firmware's `PLATFORM_HART_COUNT` match
+/// the processor-node count in the generated FDT.
+fn fw_build_hart_count(args: &Args) -> Option<u32> {
+    if args.value("target").is_none()
+        && args.value("config-pkg").is_none()
+        && args.value("repo-root").is_none()
+        && args.value("dts").is_none()
+    {
+        return None;
+    }
+    let resolved = resolve::resolve(args).ok()?;
+    if resolved.sources.config.is_none() && resolved.sources.dts.is_none() {
+        return None;
+    }
+    let model = g6q_ingest::assemble(&resolved.sources);
+    Some(model.soc.harts_total.max(1))
 }
 
 /// `--emit dts|dtb` — write the resolved device tree.
@@ -820,6 +841,27 @@ mod tests {
             "out/fw-test",
         ]);
         dispatch("fw", &args).unwrap();
+    }
+
+    #[test]
+    fn fw_build_hart_count_matches_the_resolved_model() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("g6q-cli is nested under crates/");
+        let dts = root.join("fixtures/mini/board.dts");
+        let args = Args::parse([
+            "fw",
+            "build",
+            "--dry-run",
+            "--fw-fdt",
+            "auto",
+            "--target",
+            "fixtures/mini",
+            "--dts",
+            &*dts.to_string_lossy(),
+        ]);
+        assert_eq!(fw_build_hart_count(&args), Some(1));
     }
 
     #[test]
@@ -1531,6 +1573,14 @@ fn fw_build(args: &Args) -> Result<(), String> {
         format!("PLATFORM={platform}"),
         format!("FW_TEXT_START={text_start}"),
     ];
+
+    // Match the firmware's hart count to the model or device tree when available.
+    // OpenSBI's generic platform uses this to size its internal hart arrays.
+    let platform_hart_count = fw_build_hart_count(args);
+    if let Some(harts) = platform_hart_count {
+        make_args.push(format!("PLATFORM_HART_COUNT={harts}"));
+    }
+
     match mode {
         "dynamic" => make_args.push("FW_DYNAMIC=y".into()),
         "jump" => {
@@ -1606,6 +1656,10 @@ fn fw_build(args: &Args) -> Result<(), String> {
                         .map_or_else(|| "none".to_string(), |p| p.to_string_lossy().into_owned()),
                 ),
             ),
+            (
+                "platform_hart_count",
+                platform_hart_count.map_or(Json::Null, |h| Json::Int(h as i64)),
+            ),
             ("wsl", Json::str(if use_wsl { "yes" } else { "no" })),
             ("command", Json::str(command)),
         ]);
@@ -1677,6 +1731,10 @@ fn fw_build(args: &Args) -> Result<(), String> {
                     .as_ref()
                     .map_or_else(|| "none".to_string(), |p| p.to_string_lossy().into_owned()),
             ),
+        ),
+        (
+            "platform_hart_count",
+            platform_hart_count.map_or(Json::Null, |h| Json::Int(h as i64)),
         ),
         ("staged", Json::arr(staged.into_iter().map(Json::str))),
         ("status", Json::str("built")),
@@ -1834,9 +1892,11 @@ fn cmd_run(args: &Args) -> Result<(), String> {
 }
 
 fn run_native(args: &Args) -> Result<(), String> {
-    let image = args
-        .value("image")
-        .ok_or("run --backend native needs --image FILE")?;
+    let image = args.value("image");
+    let restore = args.value("restore");
+    if image.is_none() && restore.is_none() {
+        return Err("run --backend native needs --image FILE or --restore CHECKPOINT".into());
+    }
     let steps = args
         .value_or("steps", "1000000")
         .parse::<u64>()
@@ -1939,10 +1999,12 @@ fn run_native(args: &Args) -> Result<(), String> {
         hart.ai_model = Some(ai.clone());
     }
 
-    let bytes = std::fs::read(image).map_err(|e| format!("cannot read {image}: {e}"))?;
-    for (i, b) in bytes.iter().enumerate() {
-        mem.write_le::<1>(base + i as u64, *b as u64)
-            .map_err(|e| format!("cannot load binary: {e}"))?;
+    if let Some(image) = image {
+        let bytes = std::fs::read(image).map_err(|e| format!("cannot read {image}: {e}"))?;
+        for (i, b) in bytes.iter().enumerate() {
+            mem.write_le::<1>(base + i as u64, *b as u64)
+                .map_err(|e| format!("cannot load binary: {e}"))?;
+        }
     }
 
     hart.csr.mtvec = 0x9000_0000;
@@ -1950,6 +2012,13 @@ fn run_native(args: &Args) -> Result<(), String> {
     mem.add(Region::new(0x9000_0000, 0x1000));
     mem.write_le::<4>(0x9000_0000, 0x0000_006f)
         .map_err(|e| format!("trap handler: {e}"))?;
+
+    if let Some(path) = restore {
+        let cp = g6q_diag::read_checkpoint(path)
+            .map_err(|e| format!("cannot read checkpoint {path}: {e}"))?;
+        hart.restore(&mut mem, &cp);
+        eprintln!("g6lc-qemu: restored {path}");
+    }
 
     let halt = if let Some(path) = args.value("replay") {
         let file = g6q_diag::read_record_file(path)

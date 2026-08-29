@@ -444,6 +444,121 @@ impl AiIslandConfig {
     pub fn placement_resolved(&self) -> bool {
         self.cap_base.is_some() && self.desc_base.is_some()
     }
+
+    /// Capability words the guest may read, as window-relative offset -> value.
+    ///
+    /// This lives in the IR rather than in a backend because *every* backend has to answer
+    /// the same window: the native VM answers it directly, the generated QEMU device
+    /// answers it from an emitted table, and a divergence between them is indistinguishable
+    /// from a design bug. Words this configuration cannot source are omitted, not zeroed —
+    /// zero is a legal capability value, so a zero would look like a real answer.
+    pub fn cap_words(&self) -> Vec<(u64, u64)> {
+        let mut out: Vec<(u64, u64)> = self
+            .cap_offsets
+            .iter()
+            .filter_map(|(name, off)| self.cap_value(name).map(|v| (*off, v)))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    /// Source one capability word from the configuration, by the design's own name.
+    ///
+    /// Returning `None` means *this configuration cannot source that word*, which callers
+    /// report through [`Self::cap_unsourced`].
+    pub fn cap_value(&self, name: &str) -> Option<u64> {
+        // Names are the package's `CAP_OFF_*` suffixes, lowercased by the reader.
+        match name {
+            "version" => Some(self.cap_version as u64),
+            "clusters" => Some(self.clusters as u64),
+            "macs_cycle" | "macs_per_cycle" => Some(self.macs_per_cycle as u64),
+            "clock_khz" => Some(self.clock_khz as u64),
+            "sram_bytes" => Some(self.sram_bytes),
+            "qos" | "qos_classes" => Some(self.qos_classes as u64),
+            "quantum" | "work_quantum_k" => Some(self.work_quantum_k as u64),
+            "acc_tile_m" => Some(self.acc_tile_m as u64),
+            "acc_tile_n" => Some(self.acc_tile_n as u64),
+            "acc_tile_k" => Some(self.acc_tile_k as u64),
+            "noc_width" => Some(self.noc_width as u64),
+            "dram_channels" => Some(self.dram_channels as u64),
+            "dtype_mask" => self.dtype_mask.map(|v| v as u64),
+            "block_mnk" => self.pack_block_mnk(),
+            // Packed words have a field list in the model.
+            _ => self.pack_cap_packed(name),
+        }
+    }
+
+    /// Capability words the model names but this configuration cannot source, with offsets.
+    ///
+    /// This exists so a capability added to the design shows up as a tracked gap instead of
+    /// silently disappearing from the guest-visible window.
+    pub fn cap_unsourced(&self) -> Vec<(String, u64)> {
+        let mut out: Vec<(String, u64)> = self
+            .cap_offsets
+            .iter()
+            .filter(|(name, _)| self.cap_value(name).is_none())
+            .map(|(name, off)| (name.clone(), *off))
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn pack_block_mnk(&self) -> Option<u64> {
+        let layout = self.block_mnk?;
+        Some(
+            ((clog2_u32(self.acc_tile_m) as u64) << layout.m_low)
+                | ((clog2_u32(self.acc_tile_n) as u64) << layout.n_low)
+                | ((clog2_u32(self.acc_tile_k) as u64) << layout.k_low),
+        )
+    }
+
+    fn pack_cap_packed(&self, name: &str) -> Option<u64> {
+        let fields = self.cap_packed.words.get(name)?;
+        let mut word: u64 = 0;
+        for field in fields {
+            let value = self.packed_field_value(&field.name)?;
+            let mask = if field.width >= 64 {
+                !0u64
+            } else {
+                (1u64 << field.width) - 1
+            };
+            word |= (value & mask) << field.low;
+        }
+        Some(word)
+    }
+
+    fn packed_field_value(&self, name: &str) -> Option<u64> {
+        if name == "_meas_milli" {
+            // The cap window's `meas_milli` half reports sustained GB/s from the last GEMM,
+            // in units of 1/1000 GB/s, saturated to 16 bits to match the RTL packing.
+            // When no measurement is supplied the field is zero (not yet measured).
+            return Some(self.measured_dram_gbps_x1000.unwrap_or(0).min(0xFFFF) as u64);
+        }
+        if name.starts_with('_') {
+            // Other design-side fields not in the config struct are zero.
+            return Some(0);
+        }
+        match name {
+            "dram_gbps" => Some(self.dram_gbps as u64),
+            "queues" => Some(self.queues as u64),
+            "queue_depth" => Some(self.queue_depth as u64),
+            "dtype_mask" => self.dtype_mask.map(|v| v as u64),
+            _ => None,
+        }
+    }
+}
+
+/// Ceiling of log2 of a positive 32-bit value; matches SystemVerilog `$clog2`.
+///
+/// `$clog2(0) = 0` in the reference cap-window implementation, so the helper returns 0 for 0.
+pub fn clog2_u32(v: u32) -> u32 {
+    if v == 0 {
+        0
+    } else if v.is_power_of_two() {
+        v.trailing_zeros()
+    } else {
+        32 - v.leading_zeros()
+    }
 }
 
 /// A field inside a packed AI descriptor (`desc_t`).
@@ -714,6 +829,44 @@ impl AiDescLayout {
     pub fn status(&self, name: &str) -> Option<u64> {
         self.statuses.get(name).copied()
     }
+
+    /// Pack the completion word the island writes to `ptr_done`.
+    ///
+    /// The bit layout comes from the ingested `make_completion` function. It lives here, in
+    /// the IR, because the native VM, the TCG plugin's decoder and the generated in-target
+    /// device must produce and consume *the same* word; three implementations of one bit
+    /// layout is how a completion mismatch gets misattributed to the RTL.
+    ///
+    /// When the package does not publish `make_completion`, the fallback in
+    /// [`FALLBACK_COMPLETION_STATUS_SHIFT`] is used. It is named rather than inlined so an
+    /// unparsed design is visibly on a fallback instead of looking model-derived.
+    pub fn pack_completion_word(&self, ticket: u64, status: u64) -> u64 {
+        let Some(c) = self.completion else {
+            return (status << FALLBACK_COMPLETION_STATUS_SHIFT) | ticket;
+        };
+        place_field(ticket, c.ticket_bit_low, c.ticket_bit_high)
+            | place_field(status, c.status_bit_low, c.status_bit_high)
+    }
+}
+
+/// Status shift used only when the descriptor package does not publish `make_completion`.
+///
+/// The reference package places status above the ticket in a 64-bit word. This is a
+/// deliberate, named fallback: only a design-side constant can remove it.
+pub const FALLBACK_COMPLETION_STATUS_SHIFT: u64 = 32;
+
+/// Mask `value` to `[high:low]` and shift it into place inside a 64-bit word.
+fn place_field(value: u64, low: u64, high: u64) -> u64 {
+    if high < low || high > 63 {
+        return 0;
+    }
+    let width = high - low + 1;
+    let mask = if width >= 64 {
+        !0u64
+    } else {
+        (1u64 << width) - 1
+    };
+    (value & mask) << low
 }
 
 /// AI instruction set and queue CSRs, derived from `g6lc_ai_instr_pkg.sv`.
@@ -1211,6 +1364,119 @@ mod tests {
     fn profile_names_are_stable() {
         assert_eq!(Profile::Soc.as_str(), "g6lc-soc");
         assert_eq!(Profile::Virt.as_str(), "g6lc-virt");
+    }
+
+    #[test]
+    fn the_completion_word_follows_the_ingested_layout() {
+        // A layout deliberately unlike the fallback, so a passing assertion can only be
+        // reading the model: ticket at 63:16, status at 15:0.
+        let l = AiDescLayout {
+            completion: Some(CompletionLayout {
+                ticket_bit_low: 16,
+                ticket_bit_high: 63,
+                status_bit_low: 0,
+                status_bit_high: 15,
+            }),
+            ..AiDescLayout::default()
+        };
+        assert_eq!(l.pack_completion_word(0x1234, 0x5), 0x1234_0005);
+    }
+
+    #[test]
+    fn the_completion_word_falls_back_only_when_unpublished() {
+        let l = AiDescLayout::default();
+        assert_eq!(
+            l.pack_completion_word(7, 2),
+            (2u64 << FALLBACK_COMPLETION_STATUS_SHIFT) | 7
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_completion_field_contributes_nothing() {
+        let l = AiDescLayout {
+            completion: Some(CompletionLayout {
+                ticket_bit_low: 0,
+                ticket_bit_high: 31,
+                // A malformed range must not panic or wrap into the ticket bits.
+                status_bit_low: 40,
+                status_bit_high: 32,
+            }),
+            ..AiDescLayout::default()
+        };
+        assert_eq!(l.pack_completion_word(0xff, 0xff), 0xff);
+    }
+
+    #[test]
+    fn capability_words_come_from_the_configuration() {
+        let mut cfg = AiIslandConfig {
+            cap_version: 3,
+            clusters: 8,
+            macs_per_cycle: 4096,
+            acc_tile_m: 256,
+            acc_tile_n: 256,
+            acc_tile_k: 256,
+            queues: 4,
+            queue_depth: 64,
+            block_mnk: Some(CapBlockMnk {
+                m_low: 0,
+                m_width: 4,
+                n_low: 4,
+                n_width: 4,
+                k_low: 8,
+                k_width: 4,
+            }),
+            ..AiIslandConfig::default()
+        };
+        cfg.cap_packed.words.insert(
+            "queues".into(),
+            vec![
+                CapPackedField {
+                    name: "queues".into(),
+                    low: 0,
+                    width: 16,
+                },
+                CapPackedField {
+                    name: "queue_depth".into(),
+                    low: 16,
+                    width: 16,
+                },
+            ],
+        );
+        cfg.cap_offsets.insert("version".into(), 0x00);
+        cfg.cap_offsets.insert("clusters".into(), 0x04);
+        cfg.cap_offsets.insert("block_mnk".into(), 0x14);
+        cfg.cap_offsets.insert("queues".into(), 0x18);
+
+        assert_eq!(cfg.cap_value("version"), Some(3));
+        // log2(256) = 8 in each of the three nibbles.
+        assert_eq!(cfg.cap_value("block_mnk"), Some(0x888));
+        assert_eq!(cfg.cap_value("queues"), Some((64 << 16) | 4));
+        assert_eq!(
+            cfg.cap_words(),
+            vec![(0x00, 3), (0x04, 8), (0x14, 0x888), (0x18, (64 << 16) | 4)]
+        );
+        assert!(cfg.cap_unsourced().is_empty());
+    }
+
+    #[test]
+    fn an_unsourceable_capability_is_reported_not_zeroed() {
+        let mut cfg = AiIslandConfig::default();
+        cfg.cap_offsets
+            .insert("a_word_no_reader_knows".into(), 0x20);
+        assert_eq!(cfg.cap_value("a_word_no_reader_knows"), None);
+        assert!(cfg.cap_words().is_empty(), "must omit, not answer zero");
+        assert_eq!(
+            cfg.cap_unsourced(),
+            vec![("a_word_no_reader_knows".to_string(), 0x20)]
+        );
+    }
+
+    #[test]
+    fn clog2_matches_systemverilog() {
+        assert_eq!(clog2_u32(0), 0);
+        assert_eq!(clog2_u32(1), 0);
+        assert_eq!(clog2_u32(256), 8);
+        assert_eq!(clog2_u32(257), 9);
     }
 
     #[test]

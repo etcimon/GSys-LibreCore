@@ -815,19 +815,6 @@ pub struct AiIsland {
     pub pmu_gbps_x1000: u32,
 }
 
-/// Ceiling of log2 of a positive 32-bit value; matches SystemVerilog `$clog2`.
-///
-/// `$clog2(0) = 0` in the reference cap-window implementation, so the helper returns 0 for 0.
-fn clog2_u32(v: u32) -> u32 {
-    if v == 0 {
-        0
-    } else if v.is_power_of_two() {
-        v.trailing_zeros()
-    } else {
-        32 - v.leading_zeros()
-    }
-}
-
 impl AiIsland {
     /// Create a fresh AI island, disabled, with one ring and fallback geometry.
     pub fn new() -> Self {
@@ -1245,92 +1232,12 @@ impl AiIsland {
     /// single guest binary run against parts of different sizes, so answering from
     /// anything other than the model would defeat its purpose.
     pub fn cap_words(&self) -> Vec<(u64, u64)> {
-        let Some(model) = self.ai_model.as_ref() else {
-            return Vec::new();
-        };
-        let cfg = &model.config;
-        let mut out = Vec::new();
-        for (name, off) in &cfg.cap_offsets {
-            if let Some(value) = Self::cap_value(cfg, name) {
-                out.push((*off, value));
-            }
-        }
-        out.sort_unstable();
-        out
-    }
-
-    /// Source one capability word from the configuration, by the package's own name.
-    ///
-    /// Returning `None` means *this device cannot source that word*, which is reported
-    /// through [`AiIsland::cap_unsourced`] rather than answered as zero: zero is a legal
-    /// capability value, so a zero here would be indistinguishable from a real answer.
-    fn cap_value(cfg: &g6q_core::model::AiIslandConfig, name: &str) -> Option<u64> {
-        // Names are the package's `CAP_OFF_*` suffixes, lowercased by the reader.
-        match name {
-            "version" => Some(cfg.cap_version as u64),
-            "clusters" => Some(cfg.clusters as u64),
-            "macs_cycle" | "macs_per_cycle" => Some(cfg.macs_per_cycle as u64),
-            "clock_khz" => Some(cfg.clock_khz as u64),
-            "sram_bytes" => Some(cfg.sram_bytes),
-            "qos" | "qos_classes" => Some(cfg.qos_classes as u64),
-            "quantum" | "work_quantum_k" => Some(cfg.work_quantum_k as u64),
-            "acc_tile_m" => Some(cfg.acc_tile_m as u64),
-            "acc_tile_n" => Some(cfg.acc_tile_n as u64),
-            "acc_tile_k" => Some(cfg.acc_tile_k as u64),
-            "noc_width" => Some(cfg.noc_width as u64),
-            "dram_channels" => Some(cfg.dram_channels as u64),
-            "dtype_mask" => cfg.dtype_mask.map(|v| v as u64),
-            "block_mnk" => Self::pack_block_mnk(cfg),
-            // Packed words have a field list in the model.
-            _ => Self::pack_cap_packed(cfg, name),
-        }
-    }
-
-    fn pack_block_mnk(cfg: &g6q_core::model::AiIslandConfig) -> Option<u64> {
-        let layout = cfg.block_mnk?;
-        let m = clog2_u32(cfg.acc_tile_m);
-        let n = clog2_u32(cfg.acc_tile_n);
-        let k = clog2_u32(cfg.acc_tile_k);
-        Some(
-            ((m as u64) << layout.m_low)
-                | ((n as u64) << layout.n_low)
-                | ((k as u64) << layout.k_low),
-        )
-    }
-
-    fn pack_cap_packed(cfg: &g6q_core::model::AiIslandConfig, name: &str) -> Option<u64> {
-        let fields = cfg.cap_packed.words.get(name)?;
-        let mut word: u64 = 0;
-        for field in fields {
-            let value = Self::packed_field_value(cfg, &field.name)?;
-            let mask = if field.width == 64 {
-                !0u64
-            } else {
-                (1u64 << field.width) - 1
-            };
-            word |= (value & mask) << field.low;
-        }
-        Some(word)
-    }
-
-    fn packed_field_value(cfg: &g6q_core::model::AiIslandConfig, name: &str) -> Option<u64> {
-        if name == "_meas_milli" {
-            // The cap window's `meas_milli` half reports sustained GB/s from the last GEMM,
-            // in units of 1/1000 GB/s, saturated to 16 bits to match the RTL packing.
-            // When no measurement is supplied the field is zero (not yet measured).
-            return Some(cfg.measured_dram_gbps_x1000.unwrap_or(0).min(0xFFFF) as u64);
-        }
-        if name.starts_with('_') {
-            // Other design-side fields not in the config struct are zero.
-            return Some(0);
-        }
-        match name {
-            "dram_gbps" => Some(cfg.dram_gbps as u64),
-            "queues" => Some(cfg.queues as u64),
-            "queue_depth" => Some(cfg.queue_depth as u64),
-            "dtype_mask" => cfg.dtype_mask.map(|v| v as u64),
-            _ => None,
-        }
+        // Delegated to the IR so the generated QEMU device answers the same window from an
+        // emitted table; see `g6q_core::model::AiIslandConfig::cap_words`.
+        self.ai_model
+            .as_ref()
+            .map(|m| m.config.cap_words())
+            .unwrap_or_default()
     }
 
     /// Capability words the model names but this device cannot source, with their offsets.
@@ -1338,18 +1245,10 @@ impl AiIsland {
     /// This exists so a capability added to the design shows up as a tracked gap instead
     /// of silently disappearing from the guest-visible window.
     pub fn cap_unsourced(&self) -> Vec<(String, u64)> {
-        let Some(model) = self.ai_model.as_ref() else {
-            return Vec::new();
-        };
-        let cfg = &model.config;
-        let mut out: Vec<(String, u64)> = cfg
-            .cap_offsets
-            .iter()
-            .filter(|(name, _)| Self::cap_value(cfg, name).is_none())
-            .map(|(name, off)| (name.clone(), *off))
-            .collect();
-        out.sort();
-        out
+        self.ai_model
+            .as_ref()
+            .map(|m| m.config.cap_unsourced())
+            .unwrap_or_default()
     }
 
     /// Read a capability word by window offset, if the window is placed and decoded.
@@ -1364,34 +1263,18 @@ impl AiIsland {
 
     /// Pack the completion word the island would write to `ptr_done`.
     ///
-    /// The bit layout comes from the ingested `make_completion` function. When the package
-    /// does not publish it, the device falls back to `{status, ticket}` with status in the
-    /// upper 32 bits — the same layout the reference package uses, but recorded as a fallback
-    /// so an unparsed design does not silently produce a different word.
+    /// The bit layout comes from the ingested `make_completion` function, packed by
+    /// [`g6q_core::model::AiDescLayout::pack_completion_word`] so the native VM, the TCG
+    /// plugin's decoder and the generated in-target device cannot drift apart.
     pub fn completion_word(&self) -> u64 {
         self.pack_completion_word(self.ticket as u64, self.status as u64)
     }
 
     fn pack_completion_word(&self, ticket: u64, status: u64) -> u64 {
-        if let Some(c) = self
-            .ai_model
-            .as_ref()
-            .and_then(|m| m.desc_layout.completion)
-        {
-            let mut word = 0u64;
-            let place = |word: &mut u64, value: u64, low: u64, high: u64| {
-                let mask = if high == 63 {
-                    !0u64
-                } else {
-                    (1u64 << (high - low + 1)) - 1
-                };
-                *word |= (value & mask) << low;
-            };
-            place(&mut word, ticket, c.ticket_bit_low, c.ticket_bit_high);
-            place(&mut word, status, c.status_bit_low, c.status_bit_high);
-            word
-        } else {
-            (status << 32) | ticket
+        match self.ai_model.as_ref() {
+            Some(m) => m.desc_layout.pack_completion_word(ticket, status),
+            // No ingested layout at all: use the IR's named fallback, not a second literal.
+            None => g6q_core::model::AiDescLayout::default().pack_completion_word(ticket, status),
         }
     }
 

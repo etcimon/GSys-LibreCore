@@ -209,10 +209,32 @@ pub fn parse(text: &str) -> Node {
 fn parse_body(c: &[char], i: &mut usize, parent: &mut Node) {
     let mut token = String::new();
     let mut pending_label: Option<String> = None;
+    let mut in_string = false;
+    let mut escaped = false;
 
     while *i < c.len() {
         let ch = c[*i];
+        if in_string {
+            if escaped {
+                token.push(ch);
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+                token.push(ch);
+            } else {
+                token.push(ch);
+            }
+            *i += 1;
+            continue;
+        }
         match ch {
+            '"' => {
+                in_string = true;
+                token.push(ch);
+                *i += 1;
+            }
             '}' => {
                 *i += 1;
                 // consume a trailing `;`
@@ -480,6 +502,17 @@ mod tests {
         assert_eq!(
             dev.prop("mmu-type").unwrap().first_string(),
             Some("riscv,sv39")
+        );
+    }
+
+    #[test]
+    fn colons_and_semicolons_inside_strings_do_not_misparse() {
+        // `stdout-path` values carry a colon and the surrounding node names carry @ and ;.
+        let root = parse("/ { chosen { stdout-path = \"/soc/uart@10000000:115200\"; }; };");
+        let chosen = root.child("chosen").unwrap();
+        assert_eq!(
+            chosen.prop("stdout-path").unwrap().first_string(),
+            Some("/soc/uart@10000000:115200")
         );
     }
 
