@@ -4,9 +4,17 @@
 #
 # g6q_remote.py — remote QEMU build + test proxy for g6lc_qemu.
 #
-# Mirrors the host monorepo's testharness_proxy.py layout for the QEMU build only:
-#   default host  : ovh_calltorch  (env G6Q_REMOTE_HOST)
-#   default root  : /opt/testharness/g6lc-qemu  (env G6Q_REMOTE_ROOT)
+# Environment overrides (use these on a fresh host; the fallbacks are the original
+# ovh_calltorch testharness layout):
+#   G6Q_REMOTE_HOST        SSH host (default: ovh_calltorch)
+#   G6Q_REMOTE_ROOT        Remote work root (default: /opt/testharness/g6lc-qemu)
+#   G6Q_REMOTE_KEY         SSH private key path
+#   G6Q_REMOTE_PASS        Passphrase for the key (preferred over G6Q_REMOTE_CREDS)
+#   G6Q_REMOTE_CREDS       File whose first line is the passphrase
+#   G6Q_REMOTE_XPACK_BIN   Remote xPack toolchain .../bin directory
+#   G6Q_SSH_BIN            SSH command (default: ssh; supports wsl ssh)
+#   G6Q_RSYNC_BIN          Rsync command (default: rsync; supports wsl rsync)
+#   G6Q_SSH_CONTROL        Path to the SSH ControlMaster socket
 #
 # The remote tree is laid out as:
 #   <remote_root>/repo/qemu/    rsync'd QEMU source with emitted g6lc-*.c
@@ -55,7 +63,7 @@ from platform_constants import host_tool, xpack_riscv
 # remote/payload_flags is not a package dependency; it is loaded from the same tree.
 if (package_root() / "tools" / "remote").is_dir():
     sys.path.insert(0, str(package_root() / "tools" / "remote"))
-from payload_flags import compile_flags
+from payload_flags import compile_flags, generate_payload_lds
 
 # --------------------------------------------------------------------------- defaults
 
@@ -271,7 +279,11 @@ def _rsync_base(host: str, control: Path | None) -> list[str]:
 
 @contextmanager
 def _control_socket(host: str) -> Iterator[Path]:
-    """Open a persistent SSH ControlMaster socket for the invocation."""
+    """Open a persistent SSH ControlMaster socket for the invocation.
+
+    If a valid socket already exists, reuse it.  Otherwise start a new master
+    and fail loudly if it cannot establish the socket.
+    """
     if _WINDOWS:
         # Windows cannot use Unix-domain control sockets; fall back to per-call SSH.
         yield None
@@ -279,43 +291,60 @@ def _control_socket(host: str) -> Iterator[Path]:
     sock = Path(os.environ.get("G6Q_SSH_CONTROL", f"/tmp/g6q-remote-{os.getuid()}-{host}.sock"))
     if sock.parent and not sock.parent.exists():
         sock.parent.mkdir(parents=True, exist_ok=True)
+    master: subprocess.Popen | None = None
     if sock.exists():
         # A socket left by a crashed run is not a usable master: every command through it
         # hangs or fails with a stale-connection error that reads like an auth problem.
-        check = subprocess.run(
+        check = _run(
             [str(c) for c in _ssh_base(host, None)]
             + ["-O", "check", "-o", f"ControlPath={sock}"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=_remote_env(None),
+            capture=True,
             check=False,
+            timeout=10,
         )
-        if check.returncode != 0:
-            log(f"removing stale control socket {sock}")
-            sock.unlink(missing_ok=True)
+        if check.returncode == 0:
+            log(f"reusing control socket {sock}")
+            try:
+                yield sock
+            finally:
+                # Existing master keeps running; we did not start this one.
+                pass
+            return
+        log(f"removing stale control socket {sock}")
+        sock.unlink(missing_ok=True)
     # Open the master connection in the background.
     cmd = _ssh_base(host, None) + ["-M", "-N", "-o", f"ControlPath={sock}"]
     env = _remote_env(None)
-    proc = subprocess.Popen(
+    master = subprocess.Popen(
         [str(c) for c in cmd],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         env=env,
     )
     try:
-        # Give the master a moment to establish.
-        for _ in range(10):
-            if sock.exists():
+        # Give the master a moment to establish (5 s is generous for a LAN hop).
+        for _ in range(25):
+            if sock.exists() and master.poll() is None:
                 break
             time.sleep(0.2)
+        if not sock.exists() or master.poll() is not None:
+            if master.poll() is None:
+                master.terminate()
+                try:
+                    master.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    master.kill()
+            err(f"SSH ControlMaster to {host} failed to create {sock}")
+            raise RuntimeError(f"SSH ControlMaster to {host} failed")
+        log(f"opened control socket {sock}")
         yield sock
     finally:
-        if proc.poll() is None:
-            proc.terminate()
+        if master is not None and master.poll() is None:
+            master.terminate()
             try:
-                proc.wait(timeout=5)
+                master.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                master.kill()
 
 
 def _remote(
@@ -364,7 +393,14 @@ _BASE_PATH = "/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin"
 
 
 def _xpack_remote_bin_dir() -> str:
-    """Remote xPack toolchain bin directory, derived from platform-constants.toml."""
+    """Remote xPack toolchain bin directory.
+
+    Environment override `G6Q_REMOTE_XPACK_BIN` wins; otherwise derive from
+    `platform-constants.toml`.
+    """
+    override = os.environ.get("G6Q_REMOTE_XPACK_BIN")
+    if override:
+        return override
     ref = xpack_riscv()["ref"]
     return f"/opt/testharness/toolchains/xpack-riscv-none-elf-gcc-{ref}/bin"
 
@@ -392,15 +428,14 @@ def _local_riscv_cc() -> str | None:
     return None
 
 
-def _compile_payload_local(payload_extra: list[str], local_elf: Path) -> int:
+def _compile_payload_local(payload_stem: str, payload_extra: list[str], local_elf: Path, payload_lds: Path) -> int:
     """Compile the AI-tensor smoke payload locally using the contained toolchain."""
     cc = _local_riscv_cc()
     if not cc:
         err("no local RISC-V cross-toolchain found; run `python tools/g6q.py setup-riscv`")
         return 1
     payload_dir = package_root() / "tools" / "remote" / "payload"
-    payload_src = payload_dir / "ai_island_smoke.S"
-    payload_lds = payload_dir / "ai_island_smoke.lds"
+    payload_src = payload_dir / f"{payload_stem}.S"
     cmd = [
         cc,
         "-march=rv64imac",
@@ -429,8 +464,11 @@ def _env(extra: str | None = None, append_path: bool = False, quote: bool = Fals
     return f"export PATH={p}; "
 
 
-def _remote_mkdir(host: str, sock: Path | None, path: str) -> None:
-    _remote(host, sock, ["mkdir", "-p", path])
+def _remote_mkdir(host: str, sock: Path | None, path: str, timeout: float | None = None) -> None:
+    res = _remote(host, sock, ["mkdir", "-p", path], check=False, timeout=timeout)
+    if res.returncode != 0:
+        raise RuntimeError(f"mkdir {path} on {host} failed (rc={res.returncode})")
+
 
 
 def _rsync_to_remote(
@@ -440,6 +478,7 @@ def _rsync_to_remote(
     remote_path: str,
     excludes: list[str] | None = None,
     dry_run: bool = False,
+    timeout: float | None = None,
 ) -> None:
     base = _rsync_base(host, sock)
     if dry_run:
@@ -451,7 +490,9 @@ def _rsync_to_remote(
     else:
         src = str(local) + "/"
     base += [src, f"{host}:{remote_path}/"]
-    _run(base)
+    res = _run(base, check=False, timeout=timeout)
+    if res.returncode != 0:
+        raise RuntimeError(f"rsync to {host}:{remote_path} failed (rc={res.returncode})")
 
 
 def _rsync_from_remote(
@@ -460,6 +501,7 @@ def _rsync_from_remote(
     remote_path: str,
     local: Path,
     dry_run: bool = False,
+    timeout: float | None = None,
 ) -> None:
     base = _rsync_base(host, sock)
     if dry_run:
@@ -470,7 +512,9 @@ def _rsync_from_remote(
     else:
         dst = str(local)
     base += [f"{host}:{remote_path}", dst]
-    _run(base)
+    res = _run(base, check=False, timeout=timeout)
+    if res.returncode != 0:
+        raise RuntimeError(f"rsync from {host}:{remote_path} failed (rc={res.returncode})")
 
 
 # --------------------------------------------------------------------------- subcommands
@@ -495,15 +539,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     with _control_socket(host) as sock:
         # Remote connectivity
-        try:
-            _remote(host, sock, ["uname", "-a"])
-        except subprocess.CalledProcessError as e:
-            err(f"cannot reach {host}: {e}")
+        res = _remote(host, sock, ["uname", "-a"], check=False, timeout=_step_timeout(args, 60))
+        if res.returncode != 0:
+            err(f"cannot reach {host}: rc={res.returncode}")
             return 1
 
         # Remote toolchain probes
         for tool in ["python3", "ninja", "gcc", "g++", "ccache"]:
-            res = _remote(host, sock, [f"{_env(append_path=True)}which {tool}"], check=False)
+            res = _remote(host, sock, [f"{_env(append_path=True)}which {tool}"], check=False, timeout=_step_timeout(args, 30))
             status = "ok" if res.returncode == 0 else "MISSING"
             log(f"  remote {tool}: {status}")
 
@@ -517,6 +560,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     f"which {prefix}gcc"
                 ],
                 check=False,
+                timeout=_step_timeout(args, 30),
             )
             status = "ok" if res.returncode == 0 else "MISSING"
             log(f"  remote {prefix}gcc: {status}")
@@ -538,9 +582,9 @@ def cmd_sync(args: argparse.Namespace) -> int:
     if args.dry_run:
         log(f"dry-run: would rsync {qemu_src} to {host}:{remote_qemu}")
         return 0
-    _remote_mkdir(host, None, remote_qemu)
+    _remote_mkdir(host, None, remote_qemu, timeout=_step_timeout(args, 60))
     with _control_socket(host) as sock:
-        _rsync_to_remote(host, sock, qemu_src, remote_qemu, SYNC_EXCLUDES)
+        _rsync_to_remote(host, sock, qemu_src, remote_qemu, SYNC_EXCLUDES, timeout=_step_timeout(args, 1800))
     log(f"synced qemu/ to {host}:{remote_qemu}")
     return 0
 
@@ -622,7 +666,7 @@ def cmd_pull(args: argparse.Namespace) -> int:
     staging = local_bin.with_suffix(local_bin.suffix + ".incoming")
     staging.unlink(missing_ok=True)
     with _control_socket(host) as sock:
-        _rsync_from_remote(host, sock, remote_bin, staging)
+        _rsync_from_remote(host, sock, remote_bin, staging, timeout=_step_timeout(args, 180))
     if not staging.is_file():
         err(f"pull produced no file at {staging}; remote binary missing or rsync failed")
         return 1
@@ -672,10 +716,13 @@ def cmd_test(args: argparse.Namespace) -> int:
     debug = _qemu_debug_flags(args)
     if args.ai_island and not getattr(args, "qemu_debug", None):
         debug = " -d unimp"
+    if getattr(args, "queue", False) and not args.ai_island:
+        err("--queue requires --ai-island")
+        return 1
     if args.dry_run:
         log(f"dry-run: would create {host}:{runs} and run selected remote tests")
         return 0
-    _remote_mkdir(host, None, runs)
+    _remote_mkdir(host, None, runs, timeout=_step_timeout(args, 60))
 
     if args.ai_island and not args.plugin_tensor:
         args.plugin_tensor = "tensor.json"
@@ -691,12 +738,12 @@ def cmd_test(args: argparse.Namespace) -> int:
             if args.dry_run:
                 log(f"dry-run: {cmd}")
                 return 0
-            _remote(host, sock, [cmd])
+            _remote(host, sock, [cmd], timeout=_step_timeout(args, timeout + 30))
             grep_cmd = (
                 f'{_env(append_path=True, quote=True)}'
                 f'grep -E "OpenSBI|Platform Name|Domain0 Next Address|Base ISA" {log_file}'
             )
-            summary = _remote(host, sock, [grep_cmd], check=False, capture=True)
+            summary = _remote(host, sock, [grep_cmd], check=False, capture=True, timeout=_step_timeout(args, 60))
         log("OpenSBI smoke summary:")
         for line in summary.stdout.splitlines():
             log(f"  {line}")
@@ -726,17 +773,17 @@ def cmd_test(args: argparse.Namespace) -> int:
             if args.dry_run:
                 log(f"dry-run: {build_cmd}; {run_cmd}")
                 return 0
-            _remote(host, sock, [build_cmd])
+            _remote(host, sock, [build_cmd], timeout=_step_timeout(args, 600))
             if args.plugin_trace:
-                _remote(host, sock, [f"mkdir -p $(dirname {shlex.quote(args.plugin_trace)})"])
+                _remote(host, sock, [f"mkdir -p $(dirname {shlex.quote(args.plugin_trace)})"], timeout=_step_timeout(args, 30))
             if args.plugin_tensor:
-                _remote(host, sock, [f"mkdir -p $(dirname {shlex.quote(args.plugin_tensor)})"])
-            _remote(host, sock, [run_cmd])
+                _remote(host, sock, [f"mkdir -p $(dirname {shlex.quote(args.plugin_tensor)})"], timeout=_step_timeout(args, 30))
+            _remote(host, sock, [run_cmd], timeout=_step_timeout(args, 60))
             grep_cmd = (
                 f'{_env(append_path=True, quote=True)}'
                 f'grep -E "g6lc|plugin" {log_file}'
             )
-            summary = _remote(host, sock, [grep_cmd], check=False, capture=True)
+            summary = _remote(host, sock, [grep_cmd], check=False, capture=True, timeout=_step_timeout(args, 60))
         if summary.stdout:
             log("plugin smoke output:")
             for line in summary.stdout.splitlines()[:20]:
@@ -755,7 +802,7 @@ def cmd_test(args: argparse.Namespace) -> int:
             return None
         local_tensor.parent.mkdir(parents=True, exist_ok=True)
         with _control_socket(host) as sock:
-            _rsync_from_remote(host, sock, remote_tensor, local_tensor)
+            _rsync_from_remote(host, sock, remote_tensor, local_tensor, timeout=_step_timeout(args, 120))
         log(f"pulled tensor trace to {local_tensor}")
         return local_tensor
 
@@ -792,10 +839,14 @@ def cmd_test(args: argparse.Namespace) -> int:
             return
         local_trace.parent.mkdir(parents=True, exist_ok=True)
         with _control_socket(host) as sock:
-            _rsync_from_remote(host, sock, remote_trace, local_trace)
+            _rsync_from_remote(host, sock, remote_trace, local_trace, timeout=_step_timeout(args, 120))
         log(f"pulled trace file to {local_trace}")
 
     if args.ai_island:
+        if getattr(args, "queue", False):
+            payload_stem = "ai_island_queue_smoke"
+        else:
+            payload_stem = "ai_island_smoke"
         ai_base = args.ai_base
         ai_len = args.ai_len
         uart_base = args.uart_base
@@ -818,24 +869,34 @@ def cmd_test(args: argparse.Namespace) -> int:
             err(f"cannot derive payload flags from {args.model}: {exc}")
             return 1
         plugin_so = f"{root}/{BUILD_DIR}/contrib/plugins/lib{machine}.so"
-        log_file = f"{runs}/ai-island-smoke.log"
+        log_file = f"{runs}/{payload_stem.replace('_', '-')}.log"
         plugin_arg = ""
         if args.plugin_trace:
             plugin_arg += f",trace={args.plugin_trace}"
         if args.plugin_tensor:
             plugin_arg += f",tensor={args.plugin_tensor}"
         build_cmd = f"{_env()}ninja -C {root}/{BUILD_DIR} contrib-plugins"
-        payload_src = f"{root}/{PAYLOAD_DIR}/ai_island_smoke.S"
+        payload_src = f"{root}/{PAYLOAD_DIR}/{payload_stem}.S"
         payload_lds = f"{root}/{PAYLOAD_DIR}/ai_island_smoke.lds"
-        payload_elf = f"{runs}/ai_island_smoke.elf"
+        payload_elf = f"{runs}/{payload_stem}.elf"
+        local_lds = out_dir() / "ai_island_smoke.lds"
+        generate_payload_lds(model, local_lds)
 
         with _control_socket(host) as sock:
-            _remote_mkdir(host, sock, f"{root}/{PAYLOAD_DIR}")
+            _remote_mkdir(host, sock, f"{root}/{PAYLOAD_DIR}", timeout=_step_timeout(args, 60))
             _rsync_to_remote(
                 host,
                 sock,
                 package_root() / "tools" / "remote" / "payload",
                 f"{root}/{PAYLOAD_DIR}",
+                timeout=_step_timeout(args, 120),
+            )
+            _rsync_to_remote(
+                host,
+                sock,
+                local_lds,
+                payload_lds,
+                timeout=_step_timeout(args, 120),
             )
 
             use_local_cc = getattr(args, "local_riscv", False)
@@ -845,7 +906,7 @@ def cmd_test(args: argparse.Namespace) -> int:
                     'for c in riscv-none-elf-gcc riscv64-unknown-elf-gcc riscv64-none-elf-gcc riscv64-linux-gnu-gcc; '
                     'do command -v $c && exit 0; done; exit 1'
                 )
-                cc_res = _remote(host, sock, [cc_cmd], check=False, capture=True)
+                cc_res = _remote(host, sock, [cc_cmd], check=False, capture=True, timeout=_step_timeout(args, 60))
                 use_local_cc = cc_res.returncode != 0 or not cc_res.stdout.strip()
 
             if args.dry_run:
@@ -854,14 +915,14 @@ def cmd_test(args: argparse.Namespace) -> int:
                 log(f"dry-run: run {machine} with payload and {plugin_so}")
                 return 0
 
-            _remote(host, sock, [build_cmd])
+            _remote(host, sock, [build_cmd], timeout=_step_timeout(args, 600))
 
             if use_local_cc:
-                local_elf = out_dir() / "ai_island_smoke.elf"
-                if _compile_payload_local(payload_extra, local_elf) != 0:
+                local_elf = out_dir() / f"{payload_stem}.elf"
+                if _compile_payload_local(payload_stem, payload_extra, local_elf, local_lds) != 0:
                     err("local payload compile failed")
                     return 1
-                _rsync_to_remote(host, sock, local_elf, payload_elf)
+                _rsync_to_remote(host, sock, local_elf, payload_elf, timeout=_step_timeout(args, 120))
             else:
                 cc = cc_res.stdout.strip().splitlines()[0].strip()
                 compile_cmd = (
@@ -871,18 +932,18 @@ def cmd_test(args: argparse.Namespace) -> int:
                     f"{' '.join(payload_extra)} "
                     f"-T {payload_lds} {payload_src} -o {payload_elf}"
                 )
-                _remote(host, sock, [compile_cmd])
+                _remote(host, sock, [compile_cmd], timeout=_step_timeout(args, 120))
             if args.plugin_trace:
-                _remote(host, sock, [f"mkdir -p $(dirname {shlex.quote(args.plugin_trace)})"])
+                _remote(host, sock, [f"mkdir -p $(dirname {shlex.quote(args.plugin_trace)})"], timeout=_step_timeout(args, 30))
             if args.plugin_tensor:
-                _remote(host, sock, [f"mkdir -p $(dirname {shlex.quote(args.plugin_tensor)})"])
+                _remote(host, sock, [f"mkdir -p $(dirname {shlex.quote(args.plugin_tensor)})"], timeout=_step_timeout(args, 30))
             run_cmd = (
                 f"{remote_bin} -M {machine} -m 256 -nographic {debug} "
                 f"-bios none -kernel {payload_elf} -plugin {plugin_so}{plugin_arg} "
                 f"> {log_file} 2>&1 & sleep 5; kill %1 2>/dev/null || true"
             )
-            _remote(host, sock, [run_cmd])
-            summary = _remote(host, sock, ["cat", log_file], check=False, capture=True)
+            _remote(host, sock, [run_cmd], timeout=_step_timeout(args, 60))
+            summary = _remote(host, sock, ["cat", log_file], check=False, capture=True, timeout=_step_timeout(args, 30))
         if summary.returncode == 0 and summary.stdout:
             log("AI-island smoke log:")
             for line in summary.stdout.splitlines()[:40]:
@@ -900,15 +961,19 @@ def cmd_test(args: argparse.Namespace) -> int:
             # atexit summary is not flushed (QEMU is killed after the sleep).
             if "g6lc,ai-island:" in line and ("unimplemented device read" in line or "unimplemented device write" in line):
                 ai_count += 1
-        if ai_ok and ai_count > 0:
-            log(f"AI-island smoke PASSED (ai_island_count={ai_count})")
+        smoke_name = payload_stem.replace('_', '-')
+        if ai_ok and (getattr(args, "queue", False) or ai_count > 0):
+            if getattr(args, "queue", False):
+                log(f"{smoke_name} PASSED")
+            else:
+                log(f"{smoke_name} PASSED (ai_island_count={ai_count})")
             log(f"AI-island log at {host}:{log_file}")
             local_tensor = _pull_tensor_artifact()
             _report_tops(local_tensor)
             _pull_trace_artifact()
             return 0
         else:
-            err(f"AI-island smoke FAILED: AI_OK={ai_ok}, ai_island_count={ai_count}")
+            err(f"{smoke_name} FAILED: AI_OK={ai_ok}, ai_island_count={ai_count}")
             log(f"AI-island log at {host}:{log_file}")
             return 1
 
@@ -930,7 +995,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
         return 0
     with _control_socket(host) as sock:
         for p in what:
-            _remote(host, sock, ["rm", "-rf", p])
+            _remote(host, sock, ["rm", "-rf", p], timeout=_step_timeout(args, 120))
     log(f"cleaned {', '.join(what)} on {host}")
     return 0
 
@@ -1051,6 +1116,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--smoke", action="store_true", help="run OpenSBI smoke test")
     p.add_argument("--plugin", action="store_true", help="run generated plugin smoke test")
     p.add_argument("--ai-island", action="store_true", help="run AI-island smoke test")
+    p.add_argument("--queue", action="store_true", help="use the queue-instruction smoke payload (requires --ai-island)")
     p.add_argument("--machine", default=None, help="g6lc machine name (default: g6lc-unnamed)")
     p.add_argument("--model", default=None, help="ingested TargetModel JSON to derive payload flags")
     p.add_argument("--ai-base", default="0x40000000", help="AI-island MMIO base")

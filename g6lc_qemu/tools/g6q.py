@@ -1712,7 +1712,7 @@ def cmd_install_qemu(args: argparse.Namespace) -> int:
         log(f"dry-run: would run: {' '.join(gen_cmd)}")
         log("dry-run: would copy generated sources from out/emit/<target>/ to qemu/")
         log("dry-run: would append build-wiring fragments to qemu/hw/riscv/Kconfig, default-configs, meson.build")
-        log("dry-run: plugin wiring requires manual edit of qemu/contrib/plugins/meson.build")
+        log("dry-run: would append generated plugins to qemu/contrib/plugins/meson.build")
         return 0
 
     gen_bin = package_root() / "target" / "debug" / "g6lc-qemu"

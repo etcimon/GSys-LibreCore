@@ -36,8 +36,9 @@ pub use pmu::{parse_pmu_table, PmuEvent, PmuTable};
 /// Stage marker for the package as a whole.
 ///
 /// Surfaced by the command-line tool so that output is never mistaken for a more complete
-/// implementation than exists.
-pub const STAGE: &str = "Q0";
+/// implementation than exists.  The active pass is the Q4/Q6 B1/B2/B3 queue-instruction
+/// path; earlier stages are live and later stages are wired and self-describing.
+pub const STAGE: &str = "Q4/Q6";
 
 #[cfg(test)]
 mod tests {
@@ -48,7 +49,7 @@ mod tests {
         let m = TargetModel::new("t");
         assert_eq!(m.profile, Profile::Soc);
         assert_eq!(SCHEMA_VERSION, "2");
-        assert_eq!(STAGE, "Q0");
+        assert_eq!(STAGE, "Q4/Q6");
     }
 
     #[test]

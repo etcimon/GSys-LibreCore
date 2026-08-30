@@ -11,12 +11,16 @@
  *   AI_OFF_N          byte offset of n in the descriptor
  *   AI_OFF_K          byte offset of k in the descriptor
  *   AI_OFF_PTR_DONE   byte offset of ptr_done in the descriptor
- *   AI_OP_GEMM        numeric op value for GEMM from the design's table
- *   AI_VERSION        descriptor version
- *   AI_ENQ_MATCH      32-bit encoding of ai.enq with rs1=0, rd=0
- *   AI_POLL_MATCH     32-bit encoding of ai.poll with rs1=0, rd=0
- *   AI_QFENCE_MATCH   32-bit encoding of ai.qfence
- *   UART_BASE         full MMIO address of the NS16550a UART
+ *   AI_OP_GEMM                   numeric op value for GEMM from the design's table
+ *   AI_VERSION                   descriptor version
+ *   AI_ENQ_MATCH                 32-bit encoding of ai.enq with rs1=0, rd=0
+ *   AI_POLL_MATCH                32-bit encoding of ai.poll with rs1=0, rd=0
+ *   AI_QFENCE_MATCH              32-bit encoding of ai.qfence
+ *   AI_ST_OK                     numeric status value meaning "completed OK"
+ *   AI_COMPLETION_TICKET_MASK    mask of the ticket field in the completion word
+ *   AI_COMPLETION_STATUS_SHIFT   shift of the status field in the completion word
+ *   AI_COMPLETION_STATUS_MASK    mask of the status field after shifting
+ *   UART_BASE                    full MMIO address of the NS16550a UART
  */
 
 /*
@@ -34,13 +38,25 @@
 #error "AI_QFENCE_MATCH undefined: the model has no ingested ai.qfence encoding"
 #endif
 #ifndef AI_DESC_ADDR
-#error "AI_DESC_ADDR undefined: the model has no ingested descriptor size"
+#error "AI_DESC_ADDR undefined: the model has no ingested descriptor address"
 #endif
 #ifndef AI_DONE_PTR
 #error "AI_DONE_PTR undefined: no completion pointer was supplied"
 #endif
 #ifndef AI_OFF_PTR_DONE
 #error "AI_OFF_PTR_DONE undefined: the descriptor layout has no ptr_done field"
+#endif
+#ifndef AI_ST_OK
+#error "AI_ST_OK undefined: the model does not publish an ST_OK status code"
+#endif
+#ifndef AI_COMPLETION_TICKET_MASK
+#error "AI_COMPLETION_TICKET_MASK undefined: the model does not publish a completion layout"
+#endif
+#ifndef AI_COMPLETION_STATUS_SHIFT
+#error "AI_COMPLETION_STATUS_SHIFT undefined: the model does not publish a completion layout"
+#endif
+#ifndef AI_COMPLETION_STATUS_MASK
+#error "AI_COMPLETION_STATUS_MASK undefined: the model does not publish a completion layout"
 #endif
 
 /*
@@ -106,6 +122,18 @@ _start:
     /* 3. The word returned by ai.poll must equal the word written to ptr_done, i.e. the
      *    register path and the memory path must agree on the completion-word packing. */
     bne t5, x6, fail
+
+    /* 4. The completion word contains the ticket the queue returned in x5. */
+    li t2, AI_COMPLETION_TICKET_MASK
+    and t3, x6, t2
+    bne t3, x5, fail
+
+    /* 5. The status field inside the completion word equals ST_OK. */
+    li t2, AI_ST_OK
+    srli t3, x6, AI_COMPLETION_STATUS_SHIFT
+    li t4, AI_COMPLETION_STATUS_MASK
+    and t3, t3, t4
+    bne t3, t2, fail
 
     /* Print "AI_OK\n" to the UART. */
     li t6, UART_BASE

@@ -3,10 +3,11 @@
 
 //! `g6lc-qemu` — the command-line tool.
 //!
-//! The full option surface is specified in `architecture/CLI.md`. At stage Q0 the verbs
-//! are registered and self-describing but not implemented: each one reports the stage
-//! that will deliver it rather than pretending to work. That is deliberate — a verb that
-//! silently does nothing is worse than one that says it is not built yet.
+//! The full option surface is specified in `architecture/CLI.md`. At stage Q4/Q6 the
+//! B1/B2/B3 queue-instruction path is live, earlier verbs are implemented, and later
+//! verbs are wired and self-describing: each one reports the stage that will deliver it
+//! rather than pretending to work. That is deliberate — a verb that silently does nothing
+//! is worse than one that says it is not built yet.
 
 #![forbid(unsafe_code)]
 #![allow(clippy::items_after_test_module)]

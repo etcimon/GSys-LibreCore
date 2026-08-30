@@ -10,7 +10,7 @@
 
 [package]
 version       = "0.1.0"
-stage         = "Q0"
+stage         = "Q4/Q6"         # active pass: B1/B2/B3 queue-instruction path
 schema_version = "2"
 
 # --------------------------------------------------------------------- toolchain ---

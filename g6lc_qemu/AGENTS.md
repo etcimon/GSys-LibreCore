@@ -228,31 +228,40 @@ This is the local completion gate. Nothing outside this package substitutes for 
 
 ---
 
-## 8. Current development state (Q2)
+## 8. Current development state (Q4/Q6)
 
-The package is in **Q2** — firmware bring-up and host tooling are solid, and the B0/B1/B2/B3/D1/D2 pipeline is scaffolded.
+The package is past Q2; the active pass is **Q4/Q6** — the B1/B2/B3 queue-instruction and
+AI-island path. Earlier stages (ingest, IR, B0 argv, B3 native VM, D1/D2 scaffolding) are live.
 
-Implemented:
+Implemented in the current pass:
 
-- **Ingest:** SystemVerilog config packages, flist expansion, DTS parse/overlays/mutations, SoC package and PMU facts.
-- **IR:** `TargetModel` with `g6lc-soc` (faithful) and `g6lc-virt` (distro) profiles; conformance report.
-- **Emission:**
-  - **B0** stock-QEMU argv + DTB.
-  - **B1/B2** text-only C emission into a QEMU checkout.
-  - **B3** native Rust VM in `g6q-vm`.
-- **Diagnosis:** D1 tandem record format and D2 microarchitectural/PMU counters.
-- **CLI:** `g6lc-qemu` plus `tools/g6q.py` for setup, build, test, and host automation.
-- **Firmware:** `fetch-fw`, `build-fw`, `--fw-fdt auto`, and the OpenSBI build path on Windows (WSL).
-- **Host tooling:** `setup`, `setup-riscv`, `setup-host`, and `doctor`.
+- **B1** generated QEMU machine/CPU/AI-island device, instruction decode, `trans_` functions, and
+  helpers; builds and boots `g6lc-ai` and `g6lc-g6lc64_smt2`.
+- **B2** plugin attaches, emits trace/tensor/PMU artifacts, and reports its own limitations
+  (`qemu_plugin_get_registers()` does not expose the RISC-V GPRs on the pinned QEMU).
+- **B3** native VM decodes and executes `ai.enq`/`ai.qfence`/`ai.poll`, reads descriptors from
+  guest memory, writes completion words back, and produces tensor records.
+- Model-driven in-guest payloads (`ai_island_smoke.S`, `ai_island_queue_smoke.S`) compile from
+  ingested descriptor/instruction geometry. The linker script is also model-driven:
+  `payload_flags.py MODEL --lds-out PATH` writes an `ai_island_smoke.lds` with `soc.dram.base` and
+  `soc.dram.len` so the payload is linked at the same DRAM base the native VM / QEMU machine uses.
+- `tools/g6q_remote.py` syncs, builds, and tests QEMU B1/B2 on a remote builder with step
+  timeouts and ControlMaster reuse; `g6q_remote.py test --ai-island --queue` runs the
+  queue-instruction smoke payload instead of the MMIO doorbell payload.
 
 Still open or gated:
 
-- Full QEMU B1/B2 build and runtime smoke (needs `g6q fetch-qemu` / `build-qemu` and a host with time/space).
-- Spike tandem (tandem wiring exists; Spike must be built from source).
-- AI-island host bridge is wired but depends on design-published MMIO windows.
-- Cycle-accurate or performance numbers remain out of scope.
+- AI-island MMIO `cap_base`/`desc_base`, queue-full/poll-pending return encodings, packed
+  capability layouts, and other constants are design-side asks in
+  `architecture/RTL_FEEDBACK.md` (F1–F15). The emulator keeps them visibly unresolved rather
+  than silently defaulting.
+- B2 queue-instruction submission register recovery is limited on the pinned QEMU; B1/B3 cover
+  the same path.
+- PCIe/virtio host transport for pushed accelerator work remains unpinned.
+- Cycle-accurate or latency-derived numbers remain out of scope.
 
-Every completed pass is recorded in [`AGENTS-todo.md`](AGENTS-todo.md). Treat that file as the authoritative changelog.
+Every completed pass is recorded in [`AGENTS-todo.md`](AGENTS-todo.md). Treat that file as the
+authoritative changelog.
 
 ---
 
@@ -334,19 +343,37 @@ Commands: `doctor`, `sync`, `configure`, `build`, `pull`, `run`, `test`, `clean`
 python tools/g6q_remote.py doctor       # probe ssh/rsync and remote toolchain
 python tools/g6q_remote.py remote-build # sync, configure, build, pull, smoke
 python tools/g6q_remote.py build --step-timeout 3600   # ceiling for one remote step
+python tools/g6q_remote.py test --ai-island --queue --model out/ai_soc_model.json  # queue-instruction smoke
 ```
+
+Remote connection and toolchain discovery are controlled by environment variables. Fresh hosts
+should set `G6Q_REMOTE_HOST` and `G6Q_REMOTE_ROOT`; the defaults below are the original
+`ovh_calltorch` testharness layout and are only retained for backwards compatibility.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `G6Q_REMOTE_HOST` | `ovh_calltorch` | SSH host for the builder |
+| `G6Q_REMOTE_ROOT` | `/opt/testharness/g6lc-qemu` | Remote work root (`<root>/repo/qemu`, `<root>/build/qemu`, `<root>/runs`) |
+| `G6Q_REMOTE_KEY` | — | Path to SSH private key (passphrase via `G6Q_REMOTE_PASS` or first line of `G6Q_REMOTE_CREDS`) |
+| `G6Q_REMOTE_XPACK_BIN` | derived from `platform-constants.toml` | Remote xPack `.../bin` directory; overrides the pinned toolchain path |
+| `G6Q_SSH_BIN` | `ssh` | SSH command (supports `wsl ssh` on Windows) |
+| `G6Q_RSYNC_BIN` | `rsync` | Rsync command (supports `wsl rsync` on Windows) |
+| `G6Q_SSH_CONTROL` | `/tmp/g6q-remote-<uid>-<host>.sock` | SSH ControlMaster socket path |
 
 Every remote step has a wall-clock ceiling (`--step-timeout SECONDS`, `0` to disable). A wedged
 builder must make the pass **fail**, not hang: an SSH session that never returns is
 indistinguishable from a slow one, and a pass that neither succeeds nor fails is the worst outcome
-for an automated gate. Defaults are per step (configure 30 min, build 2 h, run 15 min).
+for an automated gate. Defaults are per step (configure 30 min, build 2 h, run 15 min, rsync 30 min,
+doctor/toolchain probes 60 s/30 s, smoke timeout = `--timeout` + 30 s).
 
 In-guest payloads are linked with `PAYLOAD_LINK_FLAGS` (`-nostdlib -nostartfiles -static -no-pie
--Wl,--build-id=none`). These are load-bearing, not hygiene — see the linker-script comment in
-`tools/remote/payload/ai_island_smoke.lds`: a Linux-targeting cross compiler otherwise emits a
-dynamic executable whose LOAD segment lands *below* DRAM base, and the payload then hangs with no
-output at all. A bare-metal toolchain hides the problem, so it only surfaces when the builder's
-toolchain changes.
+-Wl,--build-id=none`) and a model-generated linker script. These are load-bearing, not hygiene —
+see the linker-script comment in `tools/remote/payload/ai_island_smoke.lds`: a Linux-targeting cross
+compiler otherwise emits a dynamic executable whose LOAD segment lands *below* DRAM base, and the
+payload then hangs with no output at all. A bare-metal toolchain hides the problem, so it only
+surfaces when the builder's toolchain changes. `payload_flags.py MODEL --lds-out PATH` generates a
+linker script with `soc.dram.base` / `soc.dram.len` from the model, and `tools/g6q_remote.py`
+uses it automatically for both local and remote payload compiles.
 
 ---
 
