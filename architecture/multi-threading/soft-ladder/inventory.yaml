@@ -7,7 +7,7 @@
 # Update this file whenever a soft site is peeled, fixed, or reclassified.
 
 meta:
-  ladder_head: cont.51
+  ladder_head: cont.S4
   production_elf_builder: tmp-dual-ci/mk_plat_skip.py
   narrative: architecture/multi-threading/smt2-bringup.md
   full_cont_map: architecture/multi-threading/soft-ladder/CONT-FULL-MAP.md
@@ -128,14 +128,15 @@ sites:
   - id: b1-fdt-lenp-store
     bucket: B1
     priority: 2
-    status: in_progress
-    ladder: cont.44 / iter-012
+    status: deferred
+    ladder: cont.44 / iter-012 (superseded by S4/iter-013)
     soft_form: >
-      Natural fdt_getprop (PEEL_FDT_GETPROP=1) and natural fdt_next_tag
-      (PEEL_FDT_NEXT_TAG=1) are each green in isolation on G6LC_FETCH_B. Combined
-      natural FDT walk (both peels) re-exposes 0x12eb2/12b2a. Soft next_tag
-      or soft getprop keeps the hold. Soft sbi_printf BANR remains.
-    pin: "G6LC_FETCH_B combined natural: mepc=0x80012eb2 mcause=6 mtval=0x80012b2a, s2=ra from check_node jal next_tag; smt_legacy 129f8/4/9"
+      OpenSBI is the class test. `mini_fdt_opensbi_blob` Variane PASS,
+      `PEEL_FDT_GETPROP=1` in isolation green, but combined natural FDT
+      walk on S4 fails at 0x80012958 / mepc=0 -> `sbi_hart_hang`. The
+      residual is a fetch_B/IQ leftover + SMT switch/CF interaction, not an
+      isolated `fdt_getprop` or `lenp` store.
+    pin: "historical; FDT getprop/lenp class superseded by fetch_B/IQ leftover S4 (mepc=0x80012958 mcause=2 jump-to-0 / sbi_hart_hang @eef4)"
     rtl_loci:
       - core/store_buffer.sv
       - core/load_unit.sv
@@ -167,10 +168,34 @@ sites:
       (architecture/multi-threading/testharness-proxy.md). I4dp 2-hart +
       8-hart Linux 200M-cap tohost=0 must not regress. Classify from
       runs/<tag>/run-*.log.
+      2026-08-27: S4 fetch_B/IQ leftover now owns the live pin; this id
+      superseded by b1-s4-fetch-b-iq-leftover (iter-013).
     verif_idea: >
       mini_fdt_a0_is_fdt Spike PASS / slfix FAIL 19.
       EXTRACT E0 g6lc_sb_keep landed. Soak then E1/G0. Not I4cg.
     retire_when: real sbi_printf green; soft printf cave deleted
+
+  - id: b1-s4-fetch-b-iq-leftover
+    bucket: B1
+    priority: 1
+    status: in_progress
+    ladder: cont.S4 / iter-013
+    soft_form: >
+      OpenSBI is the class test. `mini_fdt_opensbi_blob` Variane PASS,
+      `PEEL_FDT_GETPROP=1` in isolation green, but combined natural FDT walk
+      on S4 fails at 0x80012958 / mepc=0 -> `sbi_hart_hang`. Residual is a
+      fetch_B / instr_queue / frontend leftover + SMT switch / control-flow
+      interaction, not an isolated `fdt_getprop` or `lenp` store.
+    pin: "mepc=0x80012958 mcause=2 / mepc=0 after `sbi_trap_redirect` / `sbi_hart_hang` @eef4"
+    rtl_loci:
+      - core/frontend/frontend.sv
+      - core/frontend/instr_queue.sv
+      - core/frontend/instr_realign.sv
+      - core/controller.sv
+      - core/scoreboard.sv
+      - core/smt_legacy/g6lc_thread_select.sv
+    verif_idea: "s4-v-los0-* minis vs OpenSBI on work-ver-smt2-fw64 / slfix"
+    retire_when: natural OpenSBI FDT walk reaches cookie 51b1babe without PEEL_FDT_GETPROP, SOFT_HART_INIT, or SOFT_PLAT_OPS
 
   - id: b1-heap-freelist-malloc
     bucket: B1
@@ -245,7 +270,7 @@ sites:
     status: open
     ladder: cont.26-50
     soft_form: "jal sbi_printf → BANR cave @2C98"
-    depends_on: [b1-fdt-lenp-store]
+    depends_on: [b1-s4-fetch-b-iq-leftover]
     source_target: "CVA6_SOFT_PRINTF or fix B1 then real printf"
     retire_when: real printf or source stub not binary cave
 

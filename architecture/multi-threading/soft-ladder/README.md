@@ -50,8 +50,10 @@ Do **not** skip phases. Earlier phases make later ones cheaper and keep silicon 
   └───────────────────────────────┬──────────────────────────────────────────┘
                                   ▼
   ┌──────────────────────────────────────────────────────────────────────────┐
-  │ P1  Directed isolate   Bare / mini tests that pin the residual class     │
-  │     under DI (g6lc64_smt2 / work-ver-smt2-fw64*). Suite: soft-ladder-di. │
+  │ P1  Directed isolate + OpenSBI fail-code class   Bare / mini tests *or*  │
+  │     a single OpenSBI soak with a stable fail-code (mepc/mcause/mtval)    │
+  │     that identifies the residual class. The OpenSBI path is the          │
+  │     authoritative test when minis pass but the combined firmware does not.│
   └───────────────────────────────┬──────────────────────────────────────────┘
                                   ▼
   ┌──────────────────────────────────────────────────────────────────────────┐
@@ -85,7 +87,7 @@ Do **not** skip phases. Earlier phases make later ones cheaper and keep silicon 
 | Phase | Why |
 |-------|-----|
 | **P0 first** | Without a cataloged suite, work reverts to lab-only scripts and the binary oracle becomes the “product.” Build-platform is how residual gates stay discoverable (`test --list`, preflight tools, optional). |
-| **P1 before P2** | Minis are the **RTL promotion vehicle**: if a mini cannot hit the pin, the OpenSBI failure is stack-size/context (still B1 investigation), not “accept soft forever.” |
+| **P1 before P2** | Minis are the first attempt. If a mini is green but the natural OpenSBI path still fails with a *reproducible fail-code*, that fail-code is the class; do not force an artificial mini regression. OpenSBI is the integration test; only then consider permanent softs. |
 | **P2 before peel** | Peeling without RTL locks in soft debt and invalidates topology / `plat_hc` truth. |
 | **P3 after RTL** | Full OpenSBI is the **integration** gate, not the first place to invent permanent softs. |
 | **P5 last for firmware** | B2 is policy once the core is honest; it must not become a second binary ladder in source form. |
@@ -149,7 +151,7 @@ Each iteration is a **closed loop** over **one residual class**:
 
 | Bucket | Minimum gate |
 |--------|----------------|
-| **B1** | Directed mini under **DI** via `soft-ladder-di` (or equivalent); no *new* soft nop for that op as the “fix” |
+| **B1** | Directed mini under **DI** via `soft-ladder-di` *or* a stable OpenSBI fail-code reproducible on `work-ver-smt2-slfix`; no *new* soft nop for that op as the “fix” |
 | **B2** | Source rebuild **without** binary patch; cookie green *or* explicit intentional soft in inventory |
 | **B3** | Suite docs + soak exit code match SUCCESS definition; cookies not required in production image |
 
@@ -197,7 +199,7 @@ Oracle (temporary): `software/smt2-linux/soft-ladder/` on authoritative tree.
    Read ../../firmware-boot-principles.md — pick the lowest un-green boot stage (F0-F6).
 1. Read EXTRACT.md — E0 soaked; E1–E3 combined extract; then G0 on the barrier.
 2. P0 if needed: soft-ladder-di / soft-ladder-osbi listed optional in defaults.ts
-3. inventory.yaml → highest priority open B1 id (today: b1-fdt-lenp-store)
+3. inventory.yaml → highest priority open B1 id (today: b1-s4-fetch-b-iq-leftover)
 4. A/B the stage **through the proxy**, then read the blame truth table before touching RTL:
      python3 verif/regress/remote/testharness_proxy.py soak --flavour legacy
      python3 verif/regress/remote/testharness_proxy.py soak --flavour B

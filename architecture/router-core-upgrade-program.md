@@ -148,7 +148,7 @@ where `U8ᵃ` = PMU events + counters only (so every later change is *measurable
 | U7ᵇ Zicboz / Zicbop / Svpbmt / Zawrs | **done (partial depth)** | see `agents/spec` CVA6 status lines |
 | U7ᶜ full `cbo.zero` line | **done** | multi-beat expand in `store_unit` (`CBOZ_EXPAND`) |
 | U6.0 L2 | **done (off)** | `corev_apu/l2_cache/`, `L2En=0` default |
-| U6.1 SMT2 | **done (fine)** | PC/CSR/RF/RAS/GHR banks; IF-only switch drain; `smt2` pkg + bring-up notes |
+| U6.1 SMT2 | **fine-grain banks done; product closeout open** | PC/CSR/RF/RAS/GHR banks; IF-only switch drain; `smt2` pkg + bring-up notes; open: dual-commit, banked BHT/BTB, FP reg banking, idle clock gate, `Zawrs`/wait-for-peer, `SMT2` default SKU, retire `SMT_COLD_EXCL`/`SMT_FIRST_ACT_EXCL` |
 | U6.2 multi-core | **partial→integrated** | cluster+HPDC/WT inv+CLINT×N in harness; PLIC multi-context + `.dts` remain |
 | U9.0–U9.2 Hypervisor Sstc×H | **done** | vstimecmp/STCE/VSTIP/htimedelta + VS litmus + virtual-instr STCE |
 | U10 server math profile | **C-light done** | `g6lc64_server_math{,_v}`; HPDCACHE+HWPF+L2 auto; `server-math-tests`; Ara open |

@@ -47,7 +47,7 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `speculative-execution/` | **FSE** deep window + recovery plan (`full-speculation-architecture.md`, `UPDATE-PLAN.md`); `DeepSpecEn` S1 | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` |
 | `out-of-order/` | Slice-OoO (MLP) then full rename/ROB/LSQ multi-issue OoO | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` + `router-core-upgrade-program.md` |
 | `core-fetch/` | Instruction supply: frozen A = `core/frontend` + `core/smt` pkg/dbg; default B = `core/fetch_B/`; g1\* oracle in `core/smt_legacy/` | Microarchitectural, in-core | `firmware-boot-principles.md`, `core-fetch/SPEC.md`, `core-fetch/SMT-LEGACY.md` |
-| `multi-threading/` | Simultaneous multithreading (hart-state replication) | New micro-arch (green-field) | `agents/guides/AGENTS-soc-readiness.md` · **execution:** `multi-threading/testharness-proxy.md` |
+| `multi-threading/` | Simultaneous multithreading (U6.1) | **Landed (fine-grain banks)**; live gap is dual-issue + fetch_B/IQ leftover + OpenSBI firmware, not missing PC/CSR/RF/RAS/GHR banks | `agents/guides/AGENTS-soc-readiness.md` · **execution:** `multi-threading/testharness-proxy.md` |
 | `multi-core/` | Multi-hart tiles, coherence, interrupt scaling | SoC integration | `agents/guides/AGENTS-l2l3-cache.md`, `-soc-readiness.md` |
 | `l2-l3-cache/` | Memory-side L2 / SoC L3 (LLC) | SoC integration (not an L1 edit) | `agents/guides/AGENTS-l2l3-cache.md` |
 | `spec-extensions/` | Further RISC-V ISA features (V, Zvk, Sv57, CFI, …) | Spec-anchored | `agents/spec/INDEX.md` + relevant guide |
@@ -67,7 +67,7 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `g6lc-qemu/README.md` | **Host plan:** `g6lc_qemu` generator — configs ⇄ flists ⇄ DTS → four emulation backends + D1 tandem / D2 uarch. Q0–Q9 in `g6lc-qemu/staging.md`. **Never evidence** (see `multi-threading/testharness-proxy.md`). |
 | `build-platform-workspace-lifecycle.md` | **Host plan:** granular `cva6-build clean` (purpose/age) + `--from-timing` validate/consume for soaks/diag/sim; workspace artifact taxonomy. |
 | `build-platform-opensta-from-timing.md` | **Host plan:** precompiled timings packages → SDC seeds → Yosys/OpenSTA/OpenROAD validation + FO4↔STA correlate loop (S0–S5). |
-| `router-core-upgrade-program.md` | Active 8-upgrade program (perf/W-ranked). **Progress ~U6.2 partial:** U1–U4, multi-issue, U7ᵃ/ᵇ, U6.0–U6.1, U6.2 multi-core 1–8 hub; H + AVX-like sequenced in `remaining-upgrade-sequence.md`; U5 remain. |
+| `router-core-upgrade-program.md` | Active 8-upgrade program (perf/W-ranked). **Progress ~U6.2 partial:** U1–U4, multi-issue, U7ᵃ/ᵇ, U6.0; **U6.1 fine-grain banks landed, product closeout open**; U6.2 multi-core 1–8 hub; H + AVX-like sequenced in `remaining-upgrade-sequence.md`; U5 remain. |
 | `remaining-upgrade-sequence.md` | Post-U6 queue: multi-core, H/Sstc, U10, Ara, **U5 OoO + L3/PF** |
 | `out-of-order/README.md` | U4 slice + **U5.0–U5.2** status |
 | `l2-l3-cache/README.md` | L2 done; **L3 + server prefetcher** |
@@ -77,7 +77,7 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `ara-vector-attach.md` | U10ᵇ Ara/RVV flist + `server_math_v` package contract |
 | `firmware-boot-principles.md` | Handoff then fetch-as-A: I1–I28, peels/P1–P4 for capabilities |
 | `core-fetch/` | Fetch spec; frozen A is `core/frontend`; workspace B is `core/fetch_B` |
-| `multi-threading/smt2-bringup.md` | U6.1 SMT2 enable + dual-thread Linux/OpenSBI checklist |
+| `multi-threading/smt2-bringup.md` | U6.1 SMT2 bring-up — dual-thread Linux/OpenSBI checklist; live gap is fetch_B/IQ leftover, not banked state |
 | `multi-threading/testharness-proxy.md` | **Harness of record** for SMT Spike/soak/peel/TRACE/I4dp (proxy-only; classify from log) |
 | `multi-threading/linux-boot-scale.md` | OpenSBI steps × fetch_B four combos × named envelopes (N/T/I/RVV/stream); `_v`/`ooo_server` Linux-cap bar |
 | `multi-threading/soft-ladder/` | Evidence (tag `g1-archive`). A/`smt_legacy` soak notes; **`CONTRACT.md`** envelopes |

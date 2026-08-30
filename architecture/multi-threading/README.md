@@ -29,7 +29,7 @@ workers.
 | Per-hart GHR | **Live** — `g6lc_bp_ghist` + gshare GHR banks |
 | Shared BHT/BTB | Shared tables (cross-hart pollution possible) |
 | `g6lc_thread_select.sv` + `g6lc_hart_state.sv` | **Live** under `core/smt_legacy/` — inventory [`../core-fetch/SMT-LEGACY.md`](../core-fetch/SMT-LEGACY.md) |
-| Soft-ladder DI residual | **Active** — E0–E3 + G1 soaked. G0 reverted. Mini P10 green; **P9=19** (second peel-walk). PEEL `129f8`/4/9. Not I4cg. |
+| Soft-ladder DI residual | **Active** — S4 fetch_B/IQ leftover (`12958` → jump-to-0 / `sbi_hart_hang`). E0–E3 + G1 landed. PEEL `129f8`/4/9 and `12958` are the live pins. |
 | AI / PyTorch host path | **Live soft** on `g6lc64_ai` + virt-ai-pcie; **SMT2 multi-thread pytorch** after SL-C |
 
 ### Model: fine-grain SMT (drain-friendly)
@@ -41,6 +41,7 @@ On thread switch: flush **IF** and drop **unissued** decode; restore banked NPC;
 3. **Anti-starvation** (`SmtStarveLimit`, default 16) — force switch if a ready peer has been idle that many cycles.
 4. **Banked integer RF** — per-hart private 32-entry banks eliminate cross-hart write-port conflicts.
 5. **L2 MSHR merge + data banks (U6.0)** — sized for dual-hart MLP.
+6. **Boot-crutch retirement (`SMT_COLD_EXCL`, `SMT_FIRST_ACT_EXCL`)** — temporary; not a product feature. Retire when `plat_hc==2` and `coldboot_done==1` are stable on natural OpenSBI.
 
 ### Enable
 ```
@@ -51,7 +52,7 @@ core/include/g6lc64_smt2_config_pkg.sv   # NrHarts=2, SMT_HYBRID, L2
 `mhartid` for thread *h* = `hart_id_i + h`.
 
 ## Sanctioned seam
-`NrHarts==1` remains behaviourally identity. Optional next: banked BHT/BTB; dual-commit multi-hart same cycle.
+`NrHarts==1` remains behaviourally identity. Optional next / SMT2 product closeout: retire `SMT_COLD_EXCL`/`SMT_FIRST_ACT_EXCL`, dual-commit two harts same cycle, banked BHT/BTB, FP register banking, idle-thread clock gate, `Zawrs`/wait-for-peer, and `SMT2` as a default SKU (not only an experimental package).
 
 ## Harness of record (execution)
 
@@ -96,7 +97,7 @@ contract. Promote via three buckets and a closed iteration loop:
 
 **Order:** B1 RTL first → B3 harness SUCCESS → B2 firmware profile → retire binary patcher.
 
-### Soft-ladder × SMT RTL seams (iter-012)
+### Soft-ladder × SMT RTL seams (iter-013 / S4)
 
 | Mechanism | File | SMT rule |
 |-----------|------|----------|
@@ -127,6 +128,7 @@ state correct. Island compute stays in `corev_apu/ai_island/**` and host stacks 
 | Doc | Role |
 |------|------|
 | [`smt2-bringup.md`](smt2-bringup.md) | SMT enable + dual-hart Linux CI sketch |
+| [`smt2-product-closeout.md`](smt2-product-closeout.md) | Post-cookie SMT2 product closeout + FDT `smt,*` compensation properties |
 | [`soft-ladder/`](soft-ladder/) | DI OpenSBI residual promotion (B1→B3) |
 | [`fdt-topology-soft-ladder.md`](fdt-topology-soft-ladder.md) | `NrCores`×`NrHarts` DTS / cpu-map |
 | [`smt2-ai-tensor-linux.md`](smt2-ai-tensor-linux.md) | **Staged T0–T6 track** + speed contract + lab status |
@@ -139,5 +141,6 @@ AI sideband and RF banks remain **per-hart**; island queues remain **SoC-isolate
 
 ## Status vs scaffold
 **Fine-grain dual-PC + CSR/RF/RAS/GHR banks + drain-on-switch + AI CSR sideband.** Production default remains `NrHarts=1`.  
+**SMT2 product closeout is open:** cookie green is a gate, not completeness; the remaining items are listed in `smt2-product-closeout.md`.  
 **Linux path:** boot-path + rootfs preflight in-repo; full rootfs needs external images.  
 **AI path:** soft pytorch green on virt-ai-pcie; multi-thread host workers gated on soft-ladder topology trust.

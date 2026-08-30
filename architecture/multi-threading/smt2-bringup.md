@@ -69,8 +69,9 @@ CI job (optional, not default verify):
 | FDT / topology gates | `fdt-topology-soft-ladder.md` |
 | **SMT2 × ai-tensor / PyTorch Linux** | **`smt2-ai-tensor-linux.md`** (T0–T6) |
 
-iter-012 RTL (LOAD cancel under DI, per-hart sp issue barrier) targets PEEL_FDT_GETPROP so
-dual-hart topology can be trusted before multi-thread PyTorch on Linux.
+iter-013 RTL (fetch_B / IQ leftover, 12958 straddling-illegal, jump-to-0 in
+`sbi_trap_redirect`) targets the S4 natural FDT walk; soft getprop and BANR
+remain holding gates until the SMT2/IQ interaction is closed.
 
 ### AI attunement (short)
 
@@ -87,6 +88,8 @@ Combine with **H** (`server_math`) only after SMT bare-metal is green — KVM-on
 
 - BHT/BTB tables are **shared** (only RAS + GHR banked) — mild cross-hart BP pollution  
 - Dual-commit of two different harts in the same cycle is not specialized (single CSR port)  
+- `SMT_COLD_EXCL` / `SMT_FIRST_ACT_EXCL` are temporary shared-boot-crutches; they must be retired once natural OpenSBI coldboot is stable (`plat_hc == 2`, `coldboot_done == 1`)  
+- FDT `/soc/smt-product-closeout` properties expose missing product-closeout items to OpenSBI/Linux; see `smt2-product-closeout.md` and `fdt-topology-soft-ladder.md` §10  
 - Full KVM-on-SMT not a bring-up target; use H package separately  
 
 ## Debug tips
@@ -146,7 +149,7 @@ Also open: dual-WFI without IPI; OpenSBI dual-hart + Linux R3 Image lab.
 
 **HYBRID miss thrash fix:** miss-switch requires sustained stall (`stall_age >= 32`) + blackout 16; smt2 Q=128, starve=64. Stopped dual-ready thrash every ~8 cycles (OpenSBI stuck in sbi_strchr).
 
-**SMT cold-boot exclusive:** SMT_COLD_EXCL=200000 holds switches so hart 0 alone owns early OpenSBI (shared temp stack / lottery). Concurrent burn extended past this window.
+**SMT cold-boot exclusive:** SMT_COLD_EXCL=200000 holds switches so hart 0 alone owns early OpenSBI (shared temp stack / lottery). Concurrent burn extended past this window. This is a boot-time crutch, not a product feature. Retirement gate: drop `SMT_COLD_EXCL` and `SMT_FIRST_ACT_EXCL` once stock `fw_payload` on `g6lc64_smt2` reaches `plat_hc == 2`, `coldboot_done == 1`, and natural FDT/printf/domain progression without any `SOFT_*` peels.
 
 **R3a RTL status:** hart 0 still reaches _start_hang ~9k commits without ever returning from w_platform_init (dasm: call@6965 → hang@9255, no fter_plat); FDT magic@0x8001e000 OK; no RVFI exceptions; bare dual moswap lottery PASS; Spike R3a PASS. Next: stack/ra corruption or FDT path failure mode inside w_platform_init on CVA6.
 

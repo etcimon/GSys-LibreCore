@@ -1,15 +1,15 @@
 # Soft-ladder promotion — iteration log
 
-Append-only. One **primary** residual (or tightly coupled pair) per iteration.
+Append-only. One **primary** residual (or tightly coupled pair) per iteration. Iterations are superseded, never erased.
 Template at bottom.
 
-**Active:** `iter-012` (FDT lenp / getprop — soft getprop; natural strlen peeled).
+**Active:** `iter-013` — fetch_B/IQ leftover (S4) → jump-to-0 / `sbi_hart_hang`.
 
 ---
 
 ## Active iteration
 
-### iter-012 — FDT `lenp` / getprop residual
+### iter-012 — FDT `lenp` / getprop (superseded; live S4/iter-013 pin now owns this section)
 
 | Field | Value |
 |-------|--------|
@@ -1934,6 +1934,25 @@ Template at bottom.
 | **S4 WFI is trap_error (2026-08-27)** | `@eef4` is `sbi_hart_hang`. `jal@630c` is trap_error hang; `6310` is also `bnez a5,6310` join after **`sbi_trap_redirect` failed (-2)** (string `1fb58`). TRACE `s4-v-hang`: t=2452964 hang from `sbi_hart_init` ra=`cd26` a0=`-1` (other hart?); t=2456818 **mtvec `@500`** ra=`12994` (jal@12990 offset_ptr); t=2457096 trap_handler. `csrr mepc` t=2456910 **t0=0**. Redirect path ⇒ **mcause>11** (page/guest fault) not illegal. Hangpc mepc=0 mcause=1 at WFI is after trap_error. a00=`0x34` is printf leftover. |
 | **I6 Next** | Who fetches/jumps to **PC 0** (mepc=0, redirect failed). offset_ptr ra=`12994`. Not leftover_replay_hold / pipe_keep / leftover_drop hold / leftover_foreign / leftover_drop replay_addr / leftover_take_ok / leftover_ret_ok / G1aa / I4v. Keep leftover_slot0_push / leftover_retake. Not peel. Not G1dg. |
 
+### iter-013 — fetch_B / IQ leftover → jump-to-0 / `sbi_hart_hang` (S4)
+
+| Field | Value |
+|-------|--------|
+| **Started** | 2026-08-27 |
+| **Bucket** | B1 |
+| **Primary ids** | `b1-s4-fetch-b-iq-leftover` |
+| **Hypothesis** | `FETCH_WIDTH=64` leftover-RVI + `core/frontend/instr_queue` slot0 push / `replay_addr` rest path on G6LC_FETCH_B lands a jump to PC 0 under `sbi_trap_redirect` (`mepc=0`, `ra=0x12994`). |
+| **I2 Repro** | `work-ver-smt2-fw64` / `work-ver-smt2-slfix` s4-v-los0-* (PEEL_FDT_GETPROP=0); 12958 illegal closed, then WFI `@eef4` `sbi_hart_hang` from trap redirect. |
+| **I3 Fix** | Keep `leftover_retake` + `leftover-complete slot0 push` + `replay_addr = icache_vaddr_q`; do not re-land `pipe_keep`, `leftover_replay_hold`, `leftover_drop hold`. Target fetch_B / IQ / thread-switch control-flow. |
+| **I4 Verify** | 8M: `plat_hc=4` `coldboot_done=1`, no pin-exit, cookie not reached. Soft getprop / BANR remain holding gates. |
+| **I5 Retire** | `b1-fdt-lenp-store` → `deferred`; new `b1-s4-fetch-b-iq-leftover` → `in_progress`; no new `mk_plat_skip` peel. |
+| **I6 Next** | G0 pointer-liveness / address-use on fetch_B leftover; stop speculative fetch_B queue edits until directed. |
+
+#### Notes
+- S4 day-by-day detail lives in the `iter-012` section above (it was appended before the residual was reclassified as `iter-013`).
+- `12958` illegal is closed; the live pin is `mepc=0` after `sbi_trap_redirect` (`ra=0x12994`, offset_ptr jump).
+- Soft getprop and `SOFT_HART_INIT`/`SOFT_PLAT_OPS` are intentional holding gates only.
+
 ## Completed iterations
 
 ### iter-011 — Stock sbi_strlen mid-RVI residual (closed: FETCH_WIDTH=64 + peel)
@@ -1942,7 +1961,7 @@ Template at bottom.
 |-------|--------|
 | **Completed** | 2026-08-09 |
 | **Result** | FETCH_WIDTH=64 fixes mid-RVI. Natural strlen default; soft `fdt_getprop_namelen` + soft printf keep cookie. Soft strlen ret-imm is bisect-only (`SOFT_STRLEN=1`). |
-| **Next** | iter-012 FDT getprop/lenp |
+| **Next** | iter-013 fetch_B/IQ leftover / jump-to-0 |
 
 ### iter-010 — Heap freelist / PEEL_MALLOC (closed: peeled)
 

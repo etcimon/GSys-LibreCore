@@ -73,7 +73,7 @@ hard     tensor virt-impl --impl hard --suite narrow                  [RTL HARD]
 | **T0a** | `fast` | — | `bash verif/regress/smt2-ai-tensor-track.sh` | seconds |
 | **T0b** | `di` | harness optional | `…/smt2-ai-tensor-track.sh di` | minutes |
 | **T0** | `hold` | harness + oracle ELF | `… hold` | long |
-| **T1** | `peel` | iter-012 RTL harness | `… peel` | long |
+| **T1** | `peel` | iter-013 RTL harness | `… peel` | long |
 | **T2–T3** | `dual` | packages/DTS | `… dual` (`DUAL_HART_LIVE=1` for Variane) | minutes+ |
 | **T4** | `tensor` | bun + ai-tensor | `… tensor` | host |
 | **T5** | `mt-soft` | T4 green | `… mt-soft` | host |
@@ -143,7 +143,7 @@ Only enable when the corresponding stage is green:
 |---------|------------------|------------|
 | `NrHarts=2`, SMT_HYBRID | `g6lc64_smt2` | dual software harts |
 | DI + FETCH_WIDTH≥64 | smt2 + fw64/slfix harness | soft-ladder DI residual |
-| Soft-ladder iter-012 RTL | scoreboard LOAD cancel + sp barrier | PEEL FDT / honest topology |
+| Soft-ladder iter-013 RTL | scoreboard LOAD cancel + sp barrier + fetch_B/IQ leftover | PEEL FDT / honest topology |
 | Dual-hart DTS | `ariane-smt2.dts` | OpenSBI/Linux topology |
 | R3b Image (lab) | `CVA6_LINUX_PAYLOAD` / external Image | real `/proc/cpuinfo` |
 | AI island / card | `g6lc64_ai` + island or virt-ai-pcie soft | tensor path |
@@ -201,7 +201,7 @@ SMT2_REBUILD=1 bash verif/regress/smt2-ai-tensor-track.sh paths
 | Fast track driver | **`smt2-ai-tensor-track.sh`** — `fast` 21/0; `di` FDT minis **5/5 PASS** |
 | Tensor soft (T4) | **PASS** `tensor pytorch` Device virt-card (torch optional; 2 tests) |
 | AI CSR SMT banking | **Landed** in `g6lc_smt_csr_bank` (active-hart mux / commit-hart gate) |
-| iter-012 harness | **`work-ver-smt2-slfix`** live (banked TB CSR probes) |
+| iter-013 harness | **`work-ver-smt2-slfix`** live (banked TB CSR probes) |
 | Hold (T0) on slfix | **Green via track:** `smt2-ai-tensor-track.sh hold` → held ELF → **`51b1babe`** `plat_hc=2` BANR (20/0). Stock pin still red without peels. Mini `mini_csr_expected_trap` **PASS** on slfix (simple expected-trap OK; OpenSBI hart_init probe loop still residual). |
 | Oracle ELF | **Pin** md5 `bc7ed11dab17454fd147e4927ba07fef`. **Held** `fw_payload_r3a_c15_plat_skip.held.elf`. `SOFT_LADDER_SKIP_BUILD=1`; optional `SOFT_LADDER_ELF=…held.elf`. |
 | fw64 hold bisect | Good ELF @8e6 on pre-iter-012 `fw64` → PEEL pin mepc=`0x12eb2` mcause=6. |

@@ -12,7 +12,7 @@ All-feature enable + `NrCores` scale vs SMT fetch recover:
 | Track | Status |
 |-------|--------|
 | U1–U4, multi-issue, U7ᵃ/ᵇ/ᶜ, U6.0–U6.2 integrated | **Done / partial** |
-| **U6.1 dual-PC / CSR + follow-ons** | **Done (fine-grain)** — PC/CSR/RF/RAS/GHR banks; IF-only switch; `smt2-bringup.md` |
+| **U6.1 dual-PC / CSR + follow-ons** | **Banks landed (fine-grain); product closeout open** — PC/CSR/RF/RAS/GHR banks; IF-only switch; *open:* dual-commit same cycle, banked BHT/BTB, FP reg banking, idle-thread clock gate, `Zawrs`/wait-for-peer, `SMT2` default SKU, boot-crutch retirement. |
 | **U9.0 Hypervisor Sstc×H** | **Done** — `vstimecmp` + `henvcfg.STCE` + VSTIP |
 | **U9.1 htimedelta** | **Done** — guest time = mtime + htimedelta; TIME under V |
 | **U9.2 VS litmus / trap polish** | **Done** — virtual-instr STCE, VSTIP mip, VS mret litmus; G-stage paths present |
