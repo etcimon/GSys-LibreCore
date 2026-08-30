@@ -281,6 +281,8 @@ package build_config_pkg;
 
     cfg.DATA_USER_EN = CVA6Cfg.DataUserEn;
     cfg.WtDcacheWbufDepth = CVA6Cfg.WtDcacheWbufDepth;
+    cfg.WtDcacheFixupDepth = CVA6Cfg.WtDcacheFixupDepth;
+    cfg.WtDcacheFixupVoidKeepEn = CVA6Cfg.WtDcacheFixupVoidKeepEn;
     cfg.FETCH_USER_WIDTH = CVA6Cfg.FetchUserWidth;
     cfg.FETCH_USER_EN = CVA6Cfg.FetchUserEn;
     // Non-zero enables (DataUserEn/FetchUserEn are int unsigned enables).

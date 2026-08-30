@@ -52,9 +52,9 @@ module g6lc_fetch_dbg
 
   localparam fetch_geo_t Geo = geo(CVA6Cfg);
   localparam fetch_en_t  En  = en(CVA6Cfg);
-  localparam int unsigned Slots = CVA6Cfg.INSTR_PER_FETCH;
-  localparam int unsigned Issue = CVA6Cfg.NrIssuePorts;
-  localparam int unsigned HwPerW = CVA6Cfg.FETCH_WIDTH / 16;
+  localparam int unsigned Slots = Geo.slots;
+  localparam int unsigned Issue = Geo.issue;
+  localparam int unsigned HwPerW = Geo.hw_per_w;
 
   typedef struct packed {
     logic [CVA6Cfg.VLEN-1:0] npc;

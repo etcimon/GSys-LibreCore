@@ -776,6 +776,10 @@ module cva6
   dcache_req_o_t [1:0] dcache_req_ports_cache_acc;
   logic dcache_commit_wbuffer_empty;
   logic dcache_commit_wbuffer_not_ni;
+  logic dcache_pm_void_ack;
+  logic dcache_pm_fixup_write;
+  logic dcache_pm_fixup_inval;
+  logic dcache_pm_fixup_full;
 
   //RVFI
   lsu_ctrl_t rvfi_lsu_ctrl;
@@ -1814,6 +1818,10 @@ module cva6
         .ai_pmu_post_i      (ai_pmu_post_i),
         .ai_pmu_t0_i        (ai_pmu_t0_i),
         .ai_pmu_busy_i      (ai_pmu_busy_i),
+        .dcache_wbuf_void_ack_i    (dcache_pm_void_ack),
+        .dcache_wbuf_fixup_write_i (dcache_pm_fixup_write),
+        .dcache_wbuf_fixup_inval_i (dcache_pm_fixup_inval),
+        .dcache_wbuf_fixup_full_i  (dcache_pm_fixup_full),
         // TODO this is more complex that that
         // If superscalar then we additionally have to check [1] when transaction 0 succeeded
         .if_empty_i         (~fetch_valid_if_id[0]),
@@ -1965,6 +1973,11 @@ module cva6
         // write buffer status
         .wbuffer_empty_o   (dcache_commit_wbuffer_empty),
         .wbuffer_not_ni_o  (dcache_commit_wbuffer_not_ni),
+        // SL-W PMU events
+        .pm_void_ack_o     (dcache_pm_void_ack),
+        .pm_fixup_write_o  (dcache_pm_fixup_write),
+        .pm_fixup_inval_o  (dcache_pm_fixup_inval),
+        .pm_fixup_full_o   (dcache_pm_fixup_full),
         // memory side
         .noc_req_o         (noc_req_o),
         .noc_resp_i        (noc_resp_i),
@@ -2041,6 +2054,10 @@ module cva6
         .inval_ready_o(inval_ready)
     );
     assign miss_vld_bits = '0;
+    assign dcache_pm_void_ack    = 1'b0;
+    assign dcache_pm_fixup_write = 1'b0;
+    assign dcache_pm_fixup_inval = 1'b0;
+    assign dcache_pm_fixup_full  = 1'b0;
   end else begin : gen_cache_wb
     std_cache_subsystem #(
         // note: this only works with one cacheable region
@@ -2094,6 +2111,10 @@ module cva6
     assign dcache_commit_wbuffer_not_ni = 1'b1;
     assign inval_ready                  = 1'b1;
     assign miss_vld_bits                = '0;
+    assign dcache_pm_void_ack           = 1'b0;
+    assign dcache_pm_fixup_write        = 1'b0;
+    assign dcache_pm_fixup_inval        = 1'b0;
+    assign dcache_pm_fixup_full         = 1'b0;
   end
 
   // ----------------

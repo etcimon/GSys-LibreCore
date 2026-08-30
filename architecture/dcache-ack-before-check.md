@@ -1,12 +1,15 @@
 # WT D$ ACK-before-check — the L1-stale class (SL-W)
 
-**Status:** micro-arch note of record for the S1 residual. Not a candidate list — the candidates
-are exhausted (see below). This file exists to separate the two failure modes that every logged
-attempt conflated, and to state the one design axis that has **not** been tried.
+**Status:** micro-arch note of record for the S1 residual. The post-ACK fixup queue is implemented
+in `wt_dcache_wbuffer.sv` and plumbed through `wt_dcache`/`wt_dcache_mem`; it is disabled by default
+(`WtDcacheFixupDepth=0`) and leaves the `VoidKeepEn`/`VoidKeepTag` containment unchanged until proxy
+gate 6 is passed. The explicit `inv_req`/`inv_ack` invalidation port and the four SL-W PMU events are
+in place. Core and SMT2 path/payload/cap diagnostics pass; SMT2 Verilator lint still shows the
+pre-existing internal `Different default drivers` error on `we_gpr_commit_id`.
 
 Evidence of record: [`multi-threading/linux-boot-scale.md`](multi-threading/linux-boot-scale.md) §S1
 (~60 tagged proxy runs; do not duplicate rows here).
-RTL: `core/cache_subsystem/wt_dcache_wbuffer.sv` (header note 3, `VoidKeepEn` / `VoidKeepTag`).
+RTL: `core/cache_subsystem/wt_dcache_wbuffer.sv` (post-ACK fixup queue, `VoidKeepEn`/`VoidKeepTag` containment), `wt_dcache.sv` (`inv_req`/`inv_ack` plumbing + PMU pass-through), `wt_dcache_mem.sv` (explicit way invalidation), `perf_counters.sv` (group 5 SL-W events), `ariane_pkg.sv` (`MHPMGrpSLW`).
 Queue entry: **SL-W** in [`../AGENTS-todo.md`](../AGENTS-todo.md).
 Execution: proxy-only ([`multi-threading/testharness-proxy.md`](multi-threading/testharness-proxy.md)).
 
@@ -107,6 +110,64 @@ the refill ordering.
 `coldboot_done=1`; hold t=126976, `plat_hc=2` + BANR) but it does not generalise: VOID ACK-before-check
 still leaves L1 at ELF/BSS for every address outside the window (`ecall_time.next = 0`). No S4 / S6 /
 S7 envelope may depend on it.
+
+### 3.1 Implemented micro-architecture
+
+The queue lives inside `wt_dcache_wbuffer.sv` and owns **no wbuffer state**. It is parameterized by
+`CVA6Cfg.WtDcacheFixupDepth`; depth `0` removes the queue and leaves the legacy `VoidKeepEn`/
+`VoidKeepTag` containment bit-identical.
+
+**Entry (`fixup_t`):** `paddr`, `be[(XLEN/8)-1:0]`, `data[XLEN-1:0]`, `user[DCACHE_USER_WIDTH-1:0]`,
+`state`. State machine:
+
+- `PEND` — pushed on VOID ACK; waits for the line's cache index to have **no refill in flight**
+  (`wr_cl_vld_d`/`wr_cl_vld_q` for that index). This is the `nack2idx` finding made explicit.
+- `CHECK` — issues a tag-only `rd_req_o` to the cache; two cycles later `rd_hit_oh_q`/`rd_vld_bits_i`
+  are captured.
+- `RETIRE` — on a hit, drives `wr_req_o` with the fixup `data`/`be`/`user` to the hit way; on a miss
+  the entry is discarded (memory is authoritative). On full-queue fallback, a hit becomes an
+  explicit line invalidation (see below).
+
+**Push.** In `p_tx_stat`, when a store ACK returns and the wbuffer word is `!checked` and the ACK is
+not captured by `VoidKeepEn`/`VoidKeepTag`, push the `{paddr, be, data, user}` to the fixup queue
+instead of dropping. The wbuffer entry is freed exactly as today, so forwarding, `empty_o`, TX
+allocation and NI/NC handling are unchanged.
+
+**Full fallback.** If the queue is full when a VOID ACK arrives, the bypass slot is used first; if
+that is also occupied, `p_tx_stat` now asserts `fixup_hold` to keep the wbuffer return FIFO entry
+and the TX block set until the bypass frees and the entry can be pushed. The wbuffer word stays
+valid/dirty (retransmission is safe; memory already holds the written bytes), and the `pm_fixup_full`
+event is recorded. This is option (a) from the micro-arch note: it closes the second-overflow gap
+without a separate wbuffer invalidate path, but it must be bounded by a small `WtDcacheFixupDepth`
+and verified against the FDT hold class so the stall does not re-enter forward-progress mode (b).
+Gate-6 is the first proxy run with `WtDcacheFixupVoidKeepEn = 0` and `WtDcacheFixupDepth > 0`. A local WSL Verilator 5.020 build for `g6lc64_smt2` reaches the Verilator code-generation phase but then hits an internal fault (the Debian 5.020 behavior the Makefile already flags); the lint and elaboration pass through the queue logic, so the next evidence must come from a pinned-5.008 build or the proxy.
+
+**Refill ordering.** A `PEND` entry may not move to `CHECK` while any of `wr_cl_vld_d`/`wr_cl_vld_q`
+matches its line index. This keeps the queue ordered with respect to cache refills.
+
+**Port arbitration.**
+
+- The word-write port (`wr_req_o` / `wr_idx_o` / `wr_off_o` / `wr_data_o` / `wr_data_be_o`) is shared
+  between `check_wr` (the legacy `VoidKeepEn` path), fixup `RETIRE`, and `p_tx_stat` ACK writes.
+  Priority in the RTL mux is `check_wr` > fixup retire > `p_tx_stat`.
+- The tag-read port (`rd_req_o` / `rd_tag_o` / `rd_idx_o` / `rd_off_o`) is shared between wbuffer
+  `tocheck` and fixup `PEND` entries. The wbuffer has priority; fixup reads issue only when no wbuffer
+  word is pending (`!(|tocheck) && !check_en_q && !check_en_q1`).
+
+**Invalidate path.** Option 1 (explicit invalidation port) is implemented. `wt_dcache_wbuffer` outputs
+`inv_req_o`, `inv_idx_o`, `inv_way_oh_o`, `inv_vld_bits_o`; `wt_dcache` passes them to
+`wt_dcache_mem`, which drives `vld_we` with `vld_wdata = inv_vld_bits_i & ~inv_way_oh_i` for the
+selected way. `inv_req` has priority over the existing `wr_denied` path and over single-word writes;
+only a cache-line refill (`wr_cl_vld_i`) blocks it.
+
+**Config and observability.** `WtDcacheFixupDepth` is in `config_pkg::cva6_cfg_t` and
+`build_config_pkg` (default `0` until gate 6; suggested `2` or `4`). PMU events are in
+`core/perf_counters.sv` group `MHPMGrpSLW` (`ariane_pkg.sv`): `DCACHE_WBUF_VOID_ACK` (push),
+`DCACHE_WBUF_FIXUP_WRITE` (retire on hit), `DCACHE_WBUF_FIXUP_INVAL` (full fallback), and
+`DCACHE_WBUF_FIXUP_FULL` (slot exhaustion).
+
+**Verification transition.** Keep `VoidKeepEn = 1` while wiring M1–M3. Once gate 6 is green with
+`VoidKeepEn = 0`, remove `VoidKeepEn`/`VoidKeepTag` entirely.
 
 ---
 

@@ -20,6 +20,8 @@ package cva6_config_pkg;
   localparam CVA6ConfigDataUserWidth = 64;  // axi_pkg.sv
 
   localparam CVA6ConfigWtDcacheWbufDepth = 2;  // wtcache
+  localparam CVA6ConfigWtDcacheFixupDepth = 0;
+  localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b1;
 
   localparam CVA6ConfigSuperscalarEn = 0;  // superscalar
 
@@ -126,6 +128,8 @@ package cva6_config_pkg;
       DcacheInvalidateOnFlush: bit'(0),
       DataUserEn: unsigned'(0),
       WtDcacheWbufDepth: int'(2),
+      WtDcacheFixupDepth: int'(CVA6ConfigWtDcacheFixupDepth),
+      WtDcacheFixupVoidKeepEn: bit'(CVA6ConfigWtDcacheFixupVoidKeepEn),
       FetchUserWidth: unsigned'(64),
       FetchUserEn: unsigned'(0),
       InstrTlbEntries: int'(2),

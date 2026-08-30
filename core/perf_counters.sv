@@ -80,6 +80,11 @@ module perf_counters
     input logic ai_pmu_post_i,    // requant / relu / gelu complete pulse
     input logic ai_pmu_t0_i,      // T0 single-cycle complete pulse
     input logic ai_pmu_busy_i,    // multi-cycle unit busy (level → cycle count)
+    // Group 5: SL-W write-buffer post-ACK fixup queue (tie 0 when WtDcacheFixupDepth=0)
+    input logic dcache_wbuf_void_ack_i,
+    input logic dcache_wbuf_fixup_write_i,
+    input logic dcache_wbuf_fixup_inval_i,
+    input logic dcache_wbuf_fixup_full_i,
     // from frontend
     input logic if_empty_i,
     // from PC Gen
@@ -225,7 +230,15 @@ module perf_counters
       event_group[MHPMGrpAI][5'd4] = ai_pmu_busy_i;
     end
 
-    // Groups 5..7 reserved.
+    // Group 5: SL-W write-buffer post-ACK fixup queue.
+    if (CVA6Cfg.WtDcacheFixupDepth != 0) begin
+      event_group[MHPMGrpSLW][5'd0] = dcache_wbuf_void_ack_i;
+      event_group[MHPMGrpSLW][5'd1] = dcache_wbuf_fixup_write_i;
+      event_group[MHPMGrpSLW][5'd2] = dcache_wbuf_fixup_inval_i;
+      event_group[MHPMGrpSLW][5'd3] = dcache_wbuf_fixup_full_i;
+    end
+
+    // Groups 6..7 reserved.
 
     for (int unsigned i = 1; i <= MHPMCounterNum; i++) begin
       events[i] = event_group[event_grp_sel[i]][event_idx_sel[i]];

@@ -68,6 +68,10 @@ package cva6_config_pkg;
   localparam CVA6ConfigMemTidWidth = 2;
 
   localparam CVA6ConfigWtDcacheWbufDepth = 8;
+  // SL-W gate-6: post-ACK fixup queue enabled with a small depth to exercise
+  // the full-queue hold path under SMT2 OpenSBI without over-committing area.
+  localparam CVA6ConfigWtDcacheFixupDepth = 2;
+  localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b0;
 
   localparam CVA6ConfigNrScoreboardEntries = 8;
 
@@ -215,6 +219,8 @@ package cva6_config_pkg;
       DcacheInvalidateOnFlush: unsigned'(CVA6ConfigDcacheInvalidateOnFlush),
       DataUserEn: unsigned'(CVA6ConfigDataUserEn),
       WtDcacheWbufDepth: int'(CVA6ConfigWtDcacheWbufDepth),
+      WtDcacheFixupDepth: int'(CVA6ConfigWtDcacheFixupDepth),
+      WtDcacheFixupVoidKeepEn: bit'(CVA6ConfigWtDcacheFixupVoidKeepEn),
       FetchUserWidth: unsigned'(CVA6ConfigFetchUserWidth),
       FetchUserEn: unsigned'(CVA6ConfigFetchUserEn),
       InstrTlbEntries: int'(16),

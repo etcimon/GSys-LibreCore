@@ -72,6 +72,13 @@ module wt_dcache_mem
     input logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] wr_user_i,
     input logic [(CVA6Cfg.XLEN/8)-1:0] wr_data_be_i,
 
+    // explicit line invalidation for SL-W fixup queue
+    input logic inv_req_i,
+    output logic inv_ack_o,
+    input logic [DCACHE_CL_IDX_WIDTH-1:0] inv_idx_i,
+    input logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] inv_way_oh_i,
+    input logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] inv_vld_bits_i,
+
     // forwarded wbuffer
     input wbuffer_t [CVA6Cfg.WtDcacheWbufDepth-1:0] wbuffer_data_i
 );
@@ -157,16 +164,24 @@ module wt_dcache_mem
   // Same-cycle deny-inval: drop valid on the hit way when wr_ack is
   // denied (load vs word-write same bank). Delayed-by-1 (nackinv-d1)
   // hung packed namelen (h0 cap @40000); keep this pairing.
-  assign vld_wdata     = wr_denied ? '0 : wr_vld_bits_i;
+  //
+  // SL-W: explicit `inv_req` invalidates one way.  It has priority over the
+  // existing `wr_denied` path so the full-queue fallback cannot be starved by
+  // a colliding word write.
+  assign vld_wdata     = inv_req_i  ? (inv_vld_bits_i & ~inv_way_oh_i) :
+                         wr_denied ? '0 :
+                                     wr_vld_bits_i;
   assign vld_addr      = (wr_cl_vld_i) ? wr_cl_idx_i :
-                         (wr_denied)   ? wr_idx_i :
-                                         rd_idx_i[vld_sel_d];
+                         (inv_req_i)  ? inv_idx_i :
+                         (wr_denied)  ? wr_idx_i :
+                                        rd_idx_i[vld_sel_d];
   assign rd_tag        = rd_tag_i[vld_sel_q];  //delayed by one cycle
   assign bank_off_d    = (wr_cl_vld_i) ? wr_cl_off_i : rd_off_i[vld_sel_d];
   assign bank_idx_d    = (wr_cl_vld_i) ? wr_cl_idx_i : rd_idx_i[vld_sel_d];
   assign vld_req       = (wr_cl_vld_i) ? wr_cl_we_i :
-                         (wr_denied)   ? wr_req_i :
-                         (rd_acked)    ? '1 : '0;
+                         (inv_req_i)  ? inv_way_oh_i :
+                         (wr_denied)  ? wr_req_i :
+                         (rd_acked)   ? '1 : '0;
 
 
   // priority masking
@@ -197,6 +212,7 @@ module wt_dcache_mem
   always_comb begin : p_bank_req
     vld_we    = wr_cl_vld_i;
     wr_denied = 1'b0;
+    inv_ack_o = 1'b0;
     bank_req  = '0;
     wr_ack_o  = '0;
     bank_we   = '0;
@@ -207,10 +223,18 @@ module wt_dcache_mem
     end
 
     if (wr_cl_vld_i & |wr_cl_we_i) begin
+      // Cache-line refill has highest priority.  A pending invalidation must
+      // wait until the line write completes.
       bank_req = '1;
       bank_we  = '1;
       bank_idx = '{default: wr_cl_idx_i};
     end else begin
+      // SL-W explicit invalidation has priority over single-word writes.
+      if (inv_req_i) begin
+        inv_ack_o = 1'b1;
+        vld_we    = 1'b1;
+      end
+
       if (rd_acked) begin
         if (!rd_tag_only_i[vld_sel_d]) begin
           bank_req = dcache_cl_bin2oh(

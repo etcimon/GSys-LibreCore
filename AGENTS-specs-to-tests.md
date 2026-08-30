@@ -103,6 +103,7 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | F / D (floating point) | `riscv-tests` (`*uf*`/`*ud*`), `riscv-arch-test` (rv64 targets) |
 | C (compressed) | `riscv-tests` (`*uc*`), `riscv-arch-test`, `smoke-*` |
 | Zicsr + Part II ch2 CSRs | `csr-access`, `csr-embedded`, `hwconfig` |
+| L1 D$ write-through coherence (SL-W microarch) | `mini_wt_delay_ld`, `mini_fdt_nt_osbi_tight`, `mini_fdt_nt_osbi_h0`, **`soft-ladder-di`** gate 6 with `VoidKeepEn=0` + `WtDcacheFixupDepth>0`; PMU group 5 counters |
 | Zifencei / fences (4.1) | `riscv-tests` (`fence_i`), `riscv-arch-test`, `spec-deep-tests` (`spec_fence_drain`) |
 | RVWMO memory model (3.1) | `generated` (riscv-dv breadth); **`spec-deep-tests`** single-hart subset (`spec_rvwmo_litmus`) — multi-hart litmus still a gap |
 | PMA regions (II-3.6) | `mmu-sv32`, `pmp` (indirect), `linux` |

@@ -146,6 +146,8 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
    DcacheInvalidateOnFlush: bit'(0),
    DataUserEn: unsigned'(0),
    WtDcacheWbufDepth: int'(8),
+  WtDcacheFixupDepth: int'(0),
+  WtDcacheFixupVoidKeepEn: bit'(1),
    FetchUserWidth: unsigned'(32),
    FetchUserEn: unsigned'(0),
    InstrTlbEntries: int'(16),

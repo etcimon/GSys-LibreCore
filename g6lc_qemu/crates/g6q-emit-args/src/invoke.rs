@@ -354,9 +354,16 @@ pub fn build_argv(
         a.push("virtio-net-device,netdev=net0".into());
     }
 
-    let serial = boot.serial.clone().unwrap_or_else(|| "stdio".into());
-    a.push("-serial".into());
-    a.push(serial.clone());
+    // QEMU's -nographic already redirects serial to stdio; -serial stdio would
+    // create a second stdio character device and fail with "cannot use stdio by
+    // multiple character devices" on QEMU 10.x. Only emit -serial when the user
+    // explicitly requests a non-stdio backend.
+    if let Some(serial) = &boot.serial {
+        if serial != "stdio" {
+            a.push("-serial".into());
+            a.push(serial.clone());
+        }
+    }
 
     if boot.console == "virtio" {
         a.push("-device".into());
@@ -821,5 +828,25 @@ mod tests {
         let joined = build_argv(&virt, &StockTarget::default(), &boot, &ident).join(" ");
         assert!(joined.contains("rng-random,id=rng0"), "{joined}");
         assert!(joined.contains("virtio-rng-device"), "{joined}");
+    }
+
+    #[test]
+    fn nographic_does_not_emit_redundant_serial_stdio() {
+        let m = model_with(&[], 1, None);
+        let joined =
+            build_argv(&m, &StockTarget::default(), &BootOptions::default(), &ident).join(" ");
+        assert!(joined.contains("-nographic"), "{joined}");
+        assert!(!joined.contains("-serial"), "{joined}");
+    }
+
+    #[test]
+    fn explicit_non_stdio_serial_is_emitted() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            serial: Some("file:/tmp/serial.log".into()),
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("-serial file:/tmp/serial.log"), "{joined}");
     }
 }

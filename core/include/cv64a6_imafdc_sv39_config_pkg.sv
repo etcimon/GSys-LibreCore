@@ -55,6 +55,8 @@ package cva6_config_pkg;
 
   // Deeper WT coalescing buffer for dense sequential stores before verify loads.
   localparam CVA6ConfigWtDcacheWbufDepth = 16;
+  localparam CVA6ConfigWtDcacheFixupDepth = 0;
+  localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b1;
 
   localparam CVA6ConfigNrScoreboardEntries = 16;
 
@@ -182,6 +184,8 @@ package cva6_config_pkg;
       DcacheInvalidateOnFlush: unsigned'(CVA6ConfigDcacheInvalidateOnFlush),
       DataUserEn: unsigned'(CVA6ConfigDataUserEn),
       WtDcacheWbufDepth: int'(CVA6ConfigWtDcacheWbufDepth),
+      WtDcacheFixupDepth: int'(CVA6ConfigWtDcacheFixupDepth),
+      WtDcacheFixupVoidKeepEn: bit'(CVA6ConfigWtDcacheFixupVoidKeepEn),
       FetchUserWidth: unsigned'(CVA6ConfigFetchUserWidth),
       FetchUserEn: unsigned'(CVA6ConfigFetchUserEn),
       InstrTlbEntries: int'(16),

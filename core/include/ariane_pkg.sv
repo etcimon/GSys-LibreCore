@@ -692,6 +692,15 @@ package ariane_pkg;
   //   3: AI T0 complete (setcfg/getcfg/dot4/mv*/enq/poll/qfence/expsel)
   //   4: AI busy cycle (multi-cycle unit occupied)
 
+  // Group 5: SL-W write-buffer post-ACK fixup queue.
+  //   [7:5]=5, [4:0]=idx  -> mhpmevent = {3'b101, 5'idx}
+  localparam logic [MHPMEventGrpWidth-1:0] MHPMGrpSLW = 3'd5;
+  // Indices within MHPMGrpSLW:
+  //   0: VOID ACK pushed a store into the fixup queue
+  //   1: fixup queue wrote an acknowledged word into a hit way
+  //   2: fixup queue invalidated a way (full-queue fallback)
+  //   3: fixup queue full (lost slot; memory is authoritative)
+
   // --------------------
   // Atomics
   // --------------------

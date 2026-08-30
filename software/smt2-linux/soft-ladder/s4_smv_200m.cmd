@@ -1,0 +1,10 @@
+mkdir -p /opt/testharness/runs/s4-smv-200m
+unset CVA6_TRACE CVA6_TRACE_SPEC CVA6_TRACE_FILE CVA6_COOKIE_EXIT CVA6_SOAK_EXIT
+export CVA6_WFI_EXIT=0 CVA6_TRAP_DUMP=1
+H=/opt/testharness/work/work-ver-server-math-v-B/Variane_testharness
+ELF=/opt/testharness/runs/linux-g6lc64_server_math_v/fw_payload.elf
+ls -l "$H" "$ELF"
+"$H" +time_out=200000000 +max-cycles=200000000 +debug_disable +quiet_axi \
+  +tohost_addr=0x80041730 "$ELF" > /opt/testharness/runs/s4-smv-200m/run-B.log 2>&1
+echo rc=$?
+tail -n 60 /opt/testharness/runs/s4-smv-200m/run-B.log

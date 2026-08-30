@@ -24,7 +24,10 @@ use g6q_vm::device::{AiIsland, Clint, Plic, Uart};
 use g6q_vm::mem::{Device, DeviceKind, PhysMem, Region};
 use g6q_vm::{Halt, Hart};
 use pins::Pins;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Package version, from Cargo.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1297,6 +1300,76 @@ endpackage
     }
 
     #[test]
+    fn run_qemu_wsl_wraps_binary_and_wslizes_paths() {
+        let args = Args::parse([
+            "run",
+            "--backend",
+            "qemu",
+            "--target",
+            "t",
+            "--wsl",
+            "--qemu-path",
+            "E:\\qemu\\build\\qemu-system-riscv64",
+            "--kernel",
+            "C:\\out\\Image",
+            "--dry-run",
+        ]);
+        assert!(cmd_run(&args).is_ok());
+    }
+
+    #[test]
+    fn wslize_path_converts_windows_paths() {
+        assert_eq!(wslize_path("out\\foo\\bar"), "out/foo/bar");
+        assert_eq!(wslize_path("C:\\foo\\bar"), "/mnt/c/foo/bar");
+        assert_eq!(wslize_path("e:/foo/bar"), "/mnt/e/foo/bar");
+        assert_eq!(wslize_path("/mnt/e/foo/bar"), "/mnt/e/foo/bar");
+    }
+
+    #[test]
+    fn wslize_qemu_comma_arg_converts_file_and_keeps_keys() {
+        assert_eq!(
+            wslize_qemu_comma_arg("file=C:\\rootfs.img,format=raw"),
+            "file=/mnt/c/rootfs.img,format=raw"
+        );
+    }
+
+    #[test]
+    fn bytes_contains_finds_and_misses() {
+        assert!(bytes_contains(b"hello AI_OK world", b"AI_OK"));
+        assert!(!bytes_contains(b"hello world", b"AI_OK"));
+        assert!(bytes_contains(b"", b""));
+        assert!(!bytes_contains(b"x", b"xx"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_child_matches_expected_and_kills_early() {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.args(["/c", "echo AI_OK & timeout /t 2 >nul"]);
+        let (status, captured) =
+            run_child_with_timeout(&mut cmd, Some(Duration::from_secs(3)), Some("AI_OK")).unwrap();
+        assert!(
+            status.is_none(),
+            "expected string should cause an early kill"
+        );
+        assert!(bytes_contains(&captured, b"AI_OK"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_child_matches_expected_and_kills_early() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "echo AI_OK; sleep 2"]);
+        let (status, captured) =
+            run_child_with_timeout(&mut cmd, Some(Duration::from_secs(3)), Some("AI_OK")).unwrap();
+        assert!(
+            status.is_none(),
+            "expected string should cause an early kill"
+        );
+        assert!(bytes_contains(&captured, b"AI_OK"));
+    }
+
+    #[test]
     fn tandem_rejects_missing_reference() {
         let args = Args::parse(["tandem", "--under-test", "x"]);
         assert!(cmd_tandem(&args).is_err());
@@ -2110,6 +2183,7 @@ fn run_qemu(args: &Args) -> Result<(), String> {
         eprintln!("g6lc-qemu: warning: model does not pass strict conformance");
     }
 
+    let wsl = args.flag("wsl");
     let mut boot = resolve::boot_options(args);
     g6q_emit_args::check_profile(&model, &boot)?;
     let record = args.value("record").map(str::to_string);
@@ -2118,10 +2192,22 @@ fn run_qemu(args: &Args) -> Result<(), String> {
             .value("plugin")
             .map(str::to_string)
             .unwrap_or_else(|| plugin_path(args, &model));
-        let trace_tmp = format!("{record_path}.g6q-trace-tmp");
+        // The trace file lives in the WSL filesystem if QEMU runs under WSL, so use a
+        // WSL path for the plugin argument while keeping the original for the host-side
+        // copy after exit.
+        let wsl_record = wslize_path(record_path);
+        let trace_tmp = format!("{wsl_record}.g6q-trace-tmp");
         boot.plugin = Some(format!("{plugin_so},trace={trace_tmp}"));
     } else if args.flag("plugin") || args.value("plugin").is_some() {
-        boot.plugin = Some(plugin_path(args, &model));
+        let plugin = args
+            .value("plugin")
+            .map(str::to_string)
+            .unwrap_or_else(|| plugin_path(args, &model));
+        boot.plugin = Some(plugin);
+    }
+
+    if wsl {
+        wslize_boot(&mut boot);
     }
 
     let table = resolved
@@ -2161,19 +2247,59 @@ fn run_qemu(args: &Args) -> Result<(), String> {
     let argv = g6q_emit_args::build_argv(&model, &stock, &boot, &properties_for);
 
     let binary = args.value_or("qemu-path", "qemu-system-riscv64");
+    let wsl_binary = if wsl {
+        wslize_path(binary)
+    } else {
+        binary.to_string()
+    };
 
     if args.flag("dry-run") {
-        println!("{} {}", binary, argv.join(" "));
+        if wsl {
+            println!("wsl -- {wsl_binary} {}", argv.join(" "));
+        } else {
+            println!("{binary} {}", argv.join(" "));
+        }
         return Ok(());
     }
 
-    let mut cmd = std::process::Command::new(binary);
-    cmd.args(&argv);
-    let status = cmd
-        .status()
-        .map_err(|e| format!("failed to spawn `{binary}`: {e}"))?;
-    if !status.success() {
-        return Err(format!("`{binary}` exited with status {status}"));
+    let mut cmd;
+    if wsl {
+        cmd = std::process::Command::new("wsl");
+        cmd.arg("--").arg(&wsl_binary).args(&argv);
+    } else {
+        cmd = std::process::Command::new(&wsl_binary);
+        cmd.args(&argv);
+    }
+
+    let timeout = args
+        .value("timeout")
+        .map(|s| s.parse::<f64>())
+        .transpose()
+        .map_err(|_| "--timeout must be a non-negative number of seconds".to_string())?
+        .filter(|f| *f >= 0.0)
+        .map(Duration::from_secs_f64);
+    let expect = args.value("expect").map(str::to_string);
+
+    // Run the child. If a timeout or an expected output marker is requested, we
+    // spawn and watch stdout ourselves; otherwise a blocking status() is enough.
+    let (status, captured) = if timeout.is_some() || expect.is_some() {
+        run_child_with_timeout(&mut cmd, timeout, expect.as_deref())?
+    } else {
+        let status = cmd
+            .status()
+            .map_err(|e| format!("failed to spawn `{binary}`: {e}"))?;
+        (Some(status), Vec::new())
+    };
+
+    if let Some(exp) = &expect {
+        if !bytes_contains(&captured, exp.as_bytes()) {
+            return Err(format!("expected output `{exp}` was not seen"));
+        }
+    }
+    if let Some(status) = status {
+        if !status.success() {
+            return Err(format!("`{binary}` exited with status {status}"));
+        }
     }
 
     if let Some(record_path) = record {
@@ -2192,16 +2318,167 @@ fn run_qemu(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Spawn a child, tee its stdout to the terminal and a capture buffer, and
+/// optionally terminate it after `timeout` or as soon as `expect` is seen.
+///
+/// Returns `(status, captured_stdout)`. `status` is `None` when the process was
+/// killed because the expected string appeared.
+fn run_child_with_timeout(
+    cmd: &mut std::process::Command,
+    timeout: Option<Duration>,
+    expect: Option<&str>,
+) -> Result<(Option<std::process::ExitStatus>, Vec<u8>), String> {
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn child: {e}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or("failed to capture child stdout")?;
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let captured2 = captured.clone();
+    let copy_thread = std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stdout);
+        let mut buf = [0u8; 1024];
+        let mut host_stdout = std::io::stdout();
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = host_stdout.write_all(&buf[..n]);
+                    let _ = host_stdout.flush();
+                    captured2.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let start = Instant::now();
+    let (status, killed_for_expect) = loop {
+        if let Some(exp) = expect {
+            let buf = captured.lock().unwrap().clone();
+            if bytes_contains(&buf, exp.as_bytes()) {
+                let _ = child.kill();
+                let _ = child.wait();
+                break (None, true);
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break (Some(status), false),
+            Ok(None) => {
+                if let Some(t) = timeout {
+                    if start.elapsed() >= t {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break (None, false);
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(format!("failed to wait for child: {e}"));
+            }
+        }
+    };
+
+    copy_thread.join().ok();
+    let buf = captured.lock().unwrap().clone();
+
+    if killed_for_expect {
+        return Ok((None, buf));
+    }
+
+    if status.is_none() && timeout.is_some() {
+        return Err(format!("QEMU timed out after {:?}", timeout.unwrap()));
+    }
+
+    Ok((status, buf))
+}
+
+/// True if `haystack` contains the exact byte sequence `needle`.
+fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
 /// Default plugin `.so` path, or the user-supplied one after `--plugin`.
 fn plugin_path(args: &Args, model: &TargetModel) -> String {
     if let Some(p) = args.value("plugin") {
         return p.to_string();
     }
     let name = g6q_emit_qemu::machine::machine_name(&model.target_id);
-    format!(
-        "out/emit/{}/contrib/plugins/g6lc-{}.so",
-        model.target_id, name
-    )
+    format!("qemu/build/contrib/plugins/libg6lc-{name}.so")
+}
+
+/// Convert a Windows path into a WSL-friendly path.
+///
+/// `C:\foo\bar` becomes `/mnt/c/foo/bar`; relative backslashes become forward slashes.
+/// Paths that are already WSL-compatible are returned unchanged.
+fn wslize_path(s: &str) -> String {
+    let mut chars = s.chars();
+    if let Some(drive) = chars.next() {
+        let prefix: String = chars.by_ref().take(2).collect();
+        if (prefix == ":\\" || prefix == ":/") && drive.is_ascii_alphabetic() {
+            let rest: String = chars.collect();
+            return format!(
+                "/mnt/{}/{}",
+                drive.to_ascii_lowercase(),
+                rest.replace('\\', "/")
+            );
+        }
+    }
+    s.replace('\\', "/")
+}
+
+/// WSLize a QEMU `key=value` or bare path segment.
+fn wslize_qemu_value(s: &str) -> String {
+    if let Some((k, v)) = s.split_once('=') {
+        format!("{k}={}", wslize_path(v))
+    } else {
+        wslize_path(s)
+    }
+}
+
+/// WSLize a comma-separated QEMU argument (e.g. `file=foo,format=raw` or a plugin spec).
+fn wslize_qemu_comma_arg(s: &str) -> String {
+    s.split(',')
+        .map(wslize_qemu_value)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// WSLize the path-bearing fields of a [`BootOptions`] struct in place.
+fn wslize_boot(boot: &mut g6q_emit_args::BootOptions) {
+    if let Some(k) = &boot.kernel {
+        boot.kernel = Some(wslize_path(k));
+    }
+    if let Some(i) = &boot.initrd {
+        boot.initrd = Some(wslize_path(i));
+    }
+    if let Some(d) = &boot.dtb {
+        boot.dtb = Some(wslize_path(d));
+    }
+    if let Some(e) = &boot.elf {
+        boot.elf = Some(wslize_path(e));
+    }
+    for d in &mut boot.drives {
+        *d = wslize_qemu_comma_arg(d);
+    }
+    if let Some(d) = &boot.debug_file {
+        boot.debug_file = Some(wslize_path(d));
+    }
+    if let Some(p) = &boot.plugin {
+        boot.plugin = Some(wslize_qemu_comma_arg(p));
+    }
 }
 
 fn parse_addr(s: &str) -> Result<u64, String> {

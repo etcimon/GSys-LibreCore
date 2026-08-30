@@ -205,7 +205,8 @@ Ara never appear.
 
 ```systemverilog
 typedef struct packed {
-  int unsigned w_bytes, align_bits, slots, hw_per_w, issue, harts, hold_max;
+  int unsigned w_bytes, align_bits, slots, log2_slots, hw_per_w,
+               issue, harts, hart_idx_w, hold_max;
   logic smt, rvc, ftq, rvh;
 } fetch_geo_t;
 

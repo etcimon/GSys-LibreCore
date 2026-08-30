@@ -86,10 +86,11 @@ module frontend
     input logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_ready_i
 );
 
-  localparam int unsigned NrInstr = CVA6Cfg.INSTR_PER_FETCH;
-  localparam int unsigned IdxW = CVA6Cfg.LOG2_INSTR_PER_FETCH;
-  localparam bit FtqEn = CVA6Cfg.FtqDepth != 0;
-  localparam bit SmtEn = CVA6Cfg.NrHarts > 1;
+  localparam g6lc_fetch_pkg::fetch_geo_t Geo = g6lc_fetch_pkg::geo(CVA6Cfg);
+  localparam int unsigned NrInstr = Geo.slots;
+  localparam int unsigned IdxW = Geo.log2_slots;
+  localparam bit FtqEn = Geo.ftq;
+  localparam bit SmtEn = Geo.smt;
 
   localparam type bht_update_t = struct packed {
     logic                    valid;

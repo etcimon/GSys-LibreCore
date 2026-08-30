@@ -66,6 +66,11 @@ module wt_cache_subsystem
     // writebuffer status
     output logic wbuffer_empty_o,
     output logic wbuffer_not_ni_o,
+    // SL-W PMU events
+    output logic pm_void_ack_o,
+    output logic pm_fixup_write_o,
+    output logic pm_fixup_inval_o,
+    output logic pm_fixup_full_o,
     // memory side
     output noc_req_t noc_req_o,
     input noc_resp_t noc_resp_i,
@@ -169,6 +174,10 @@ module wt_cache_subsystem
       .req_ports_i     (dcache_req_ports_i),
       .req_ports_o     (dcache_req_ports_o),
       .miss_vld_bits_o (miss_vld_bits_o),
+      .pm_void_ack_o   (pm_void_ack_o),
+      .pm_fixup_write_o(pm_fixup_write_o),
+      .pm_fixup_inval_o(pm_fixup_inval_o),
+      .pm_fixup_full_o (pm_fixup_full_o),
       .mem_rtrn_vld_i  (adapter_dcache_rtrn_vld),
       .mem_rtrn_i      (adapter_dcache),
       .mem_data_req_o  (dcache_adapter_data_req),

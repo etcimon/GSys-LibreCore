@@ -49,6 +49,12 @@ module wt_dcache
 
     output logic [NumPorts-1:0][CVA6Cfg.DCACHE_SET_ASSOC-1:0] miss_vld_bits_o,
 
+    // SL-W PMU events
+    output logic pm_void_ack_o,
+    output logic pm_fixup_write_o,
+    output logic pm_fixup_inval_o,
+    output logic pm_fixup_full_o,
+
     input  logic         mem_rtrn_vld_i,
     input  dcache_rtrn_t mem_rtrn_i,
     output logic         mem_data_req_o,
@@ -90,6 +96,18 @@ module wt_dcache
   logic     [                  CVA6Cfg.XLEN-1:0]                                  wr_data;
   logic     [              (CVA6Cfg.XLEN/8)-1:0]                                  wr_data_be;
   logic     [     CVA6Cfg.DCACHE_USER_WIDTH-1:0]                                  wr_user;
+
+  // SL-W explicit line invalidation
+  logic                                                                           inv_req;
+  logic                                                                           inv_ack;
+  logic     [           DCACHE_CL_IDX_WIDTH-1:0]                                  inv_idx;
+  logic     [      CVA6Cfg.DCACHE_SET_ASSOC-1:0]                                  inv_way_oh;
+  logic     [      CVA6Cfg.DCACHE_SET_ASSOC-1:0]                                  inv_vld_bits;
+  // SL-W PMU events
+  logic                                                                           pm_void_ack;
+  logic                                                                           pm_fixup_write;
+  logic                                                                           pm_fixup_inval;
+  logic                                                                           pm_fixup_full;
 
   // miss unit <-> controllers/wbuffer
   logic     [                      NumPorts-1:0]                                  miss_req;
@@ -313,6 +331,17 @@ module wt_dcache
       .wr_data_o      (wr_data),
       .wr_user_o      (wr_user),
       .wr_data_be_o   (wr_data_be),
+      // SL-W explicit invalidation
+      .inv_req_o      (inv_req),
+      .inv_ack_i      (inv_ack),
+      .inv_idx_o      (inv_idx),
+      .inv_way_oh_o   (inv_way_oh),
+      .inv_vld_bits_o (inv_vld_bits),
+      // SL-W PMU events
+      .pm_void_ack_o    (pm_void_ack),
+      .pm_fixup_write_o (pm_fixup_write),
+      .pm_fixup_inval_o (pm_fixup_inval),
+      .pm_fixup_full_o  (pm_fixup_full),
       // write buffer forwarding
       .wbuffer_data_o (wbuffer_data),
       .tx_paddr_o     (tx_paddr),
@@ -362,9 +391,21 @@ module wt_dcache
       .wr_data_i      (wr_data),
       .wr_user_i      (wr_user),
       .wr_data_be_i   (wr_data_be),
+      // SL-W explicit invalidation
+      .inv_req_i      (inv_req),
+      .inv_ack_o      (inv_ack),
+      .inv_idx_i      (inv_idx),
+      .inv_way_oh_i   (inv_way_oh),
+      .inv_vld_bits_i (inv_vld_bits),
       // write buffer forwarding
       .wbuffer_data_i (wbuffer_data)
   );
+
+  // SL-W PMU event pass-through
+  assign pm_void_ack_o    = pm_void_ack;
+  assign pm_fixup_write_o = pm_fixup_write;
+  assign pm_fixup_inval_o = pm_fixup_inval;
+  assign pm_fixup_full_o  = pm_fixup_full;
 
   ///////////////////////////////////////////////////////
   // assertions

@@ -59,11 +59,12 @@ module instr_realign
     output logic [CVA6Cfg.INSTR_PER_FETCH-1:0][31:0] instr_o
 );
 
+  localparam g6lc_fetch_pkg::fetch_geo_t Geo = g6lc_fetch_pkg::geo(CVA6Cfg);
   // halfwords per fetch block, bits needed to index one, and the cursor width
   // (the cursor also has to represent "one past the last halfword")
-  localparam int unsigned NrHalfWords = CVA6Cfg.FETCH_WIDTH / 16;
-  localparam int unsigned HwIdxW = CVA6Cfg.FETCH_ALIGN_BITS - 1;
-  localparam int unsigned CurW = HwIdxW + 1;
+  localparam int unsigned NrHalfWords = Geo.hw_per_w;
+  localparam int unsigned HwIdxW = Geo.align_bits - 1;
+  localparam int unsigned CurW = Geo.align_bits;
 
   logic [NrHalfWords-1:0][15:0] hw;
   logic [NrHalfWords-1:0] hw_compressed;
@@ -71,7 +72,7 @@ module instr_realign
   logic [CurW-1:0] hw_avail;  // halfwords carried by this block
 
   // lower half of an instruction that spans into the next fetch block
-  localparam int unsigned NH = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
+  localparam int unsigned NH = (Geo.harts < 1) ? 1 : Geo.harts;
   logic [NH-1:0] carry_valid_bank_q;
   logic [NH-1:0][15:0] carry_instr_bank_q;
   logic [NH-1:0][CVA6Cfg.VLEN-1:0] carry_addr_bank_q;

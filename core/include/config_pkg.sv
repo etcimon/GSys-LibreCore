@@ -308,6 +308,9 @@ package config_pkg;
     int unsigned DataUserEn;
     // Write-through data cache write buffer depth
     int unsigned WtDcacheWbufDepth;
+    // Post-ACK L1 fixup queue depth (0 = disabled)
+    int unsigned WtDcacheFixupDepth;
+    bit          WtDcacheFixupVoidKeepEn;
     // User field on fetch bus enable
     int unsigned FetchUserEn;
     // Width of fetch user field
@@ -657,6 +660,8 @@ package config_pkg;
 
     int unsigned DATA_USER_EN;
     int unsigned WtDcacheWbufDepth;
+    int unsigned WtDcacheFixupDepth;
+    bit WtDcacheFixupVoidKeepEn;
     int unsigned FETCH_USER_WIDTH;
     int unsigned FETCH_USER_EN;
     // Match TB `parameter int unsigned AXI_USER_EN` (was bit; width mismatch
@@ -755,6 +760,11 @@ package config_pkg;
             (2 ** $clog2(Cfg.SnoopFilterEntries) == Cfg.SnoopFilterEntries));
     assert (Cfg.CohInvalDepth == 0 ||
             (2 ** $clog2(Cfg.CohInvalDepth) == Cfg.CohInvalDepth));
+    // SL-W write-buffer fixup queue must not exceed the write buffer and must
+    // be a power of two (or zero) when enabled.
+    assert (Cfg.WtDcacheFixupDepth <= Cfg.WtDcacheWbufDepth);
+    assert (Cfg.WtDcacheFixupDepth == 0 ||
+            (2 ** $clog2(Cfg.WtDcacheFixupDepth) == Cfg.WtDcacheFixupDepth));
     // Multi-core needs supervisor + MMU for SMP Linux (same gate as multi-hart).
     assert (!(Cfg.NrCores > 1 && !Cfg.RVS));
     assert (!(Cfg.NrCores > 1 && !Cfg.MmuPresent));

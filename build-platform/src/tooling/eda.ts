@@ -156,6 +156,8 @@ export interface FlatManifest {
   files: string[];
   /** Absolute, POSIX-style include directories. */
   incdirs: string[];
+  /** Verilog `+define+` directives collected from the manifest(s). */
+  defines: string[];
   /** Path of the generated flat command file. */
   path: string;
 }
@@ -175,9 +177,10 @@ export function flattenFlist(
   entry: string,
   env: Record<string, string>,
   cwd: string,
-): { files: string[]; incdirs: string[] } {
+): { files: string[]; incdirs: string[]; defines: string[] } {
   const files: string[] = [];
   const incdirs: string[] = [];
+  const defines: string[] = [];
   const seen = new Set<string>();
 
   const expand = (s: string): string =>
@@ -210,8 +213,12 @@ export function flattenFlist(
         // -F resolves relative to the including manifest, -f relative to cwd.
         const nested = text.slice(3).trim();
         walk(nested, text.startsWith("-F ") ? dir : cwd);
+      } else if (text.startsWith("+define+")) {
+        // Verilog defines from the manifest must be passed through so the
+        // flat command file behaves like the original flist.
+        if (!defines.includes(text)) defines.push(text);
       } else if (text.startsWith("+") || text.startsWith("-")) {
-        // Other directives (+define+, -sv, ...) are passed through untouched.
+        // Other directives (-sv, ...) are passed through untouched.
         continue;
       } else {
         const f = resolveFrom(dir, text);
@@ -221,7 +228,7 @@ export function flattenFlist(
   };
 
   walk(entry, cwd);
-  return { files, incdirs };
+  return { files, incdirs, defines };
 }
 
 /** Resolve the lint/synth top module for a config-package target. */
@@ -265,6 +272,7 @@ export function writeFlatManifest(
   );
   const files = [...primary.files];
   const incdirs = [...primary.incdirs];
+  const defines = [...primary.defines];
   // Opt-in IP (e.g. Ara) — append without mutating core/Flist.cva6.
   const extras =
     override.extraFlists !== undefined
@@ -285,6 +293,7 @@ export function writeFlatManifest(
     if (/Flist\.ara/i.test(extra) || /\/ara\//i.test(extra)) araOnFlist = true;
     const flat = flattenFlist(absExtra, env, cwd);
     for (const d of flat.incdirs) if (!incdirs.includes(d)) incdirs.push(d);
+    for (const f of flat.defines) if (!defines.includes(f)) defines.push(f);
     for (const f of flat.files) if (!files.includes(f)) files.push(f);
   }
   // Ara ships a real cva6_accel_first_pass_decoder; drop the core stub so the
@@ -341,11 +350,12 @@ export function writeFlatManifest(
         ]
       : []),
     ...incdirs.map((d) => `+incdir+${d}`),
+    ...defines,
     ...files,
     "",
   ].join("\n");
   writeFileSync(out, body, "utf8");
-  return { files, incdirs, path: posixPath(out) };
+  return { files, incdirs, defines, path: posixPath(out) };
 }
 
 /**

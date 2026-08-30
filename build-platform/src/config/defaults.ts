@@ -1371,6 +1371,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           target: "g6lc64_smt2",
           // SMT2 may add warnings; own budget so core baseline is not polluted.
           warningBudget: 600,
+          // SL-W gate-6: test the fixup queue without the VoidKeep containment.
         },
       },
       {

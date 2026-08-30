@@ -134,8 +134,9 @@ time rather than silently switching profiles.
 | Option | Default | Notes |
 |---|---|---|
 | `--backend args\|qemu\|rust` | `qemu` if available, else `rust` | B0 / B1+B2 / B3; `--backend qemu` targets the generated `g6lc-<target>` B1 machine; use `--stock-machine` / `--stock-cpu` to force the B0 stock target |
-| `--qemu-bin PATH` / `--qemu-src DIR` | discovered / `qemu/` | stock binary; emission target |
-| `--accel tcg` | `tcg` | only value; host-hypervisor acceleration is a recorded non-goal |
+| `--qemu-path PATH` / `--qemu-src DIR` | `qemu-system-riscv64` / `qemu/` | stock binary; emission target |
+| `--wsl` | off | spawn QEMU through `wsl --`; converts Windows paths to WSL paths |
+|| `--accel tcg` | `tcg` | only value; host-hypervisor acceleration is a recorded non-goal |
 | `--smp auto\|N` | `auto` = cores × threads-per-core | multi-threaded translation; "auto" uses the model |
 || `--maxcpus N` | `smp` | CPU hotplug ceiling, at least `smp` |
 | `--tcg-tuning default\|tuned` | `default` | `tuned` forces `-accel tcg,thread=multi` when `smp > 1`; incompatible with `--icount` |
@@ -143,12 +144,14 @@ time rather than silently switching profiles.
 | `--deterministic` | off; implied by `--tandem` / `--record` | fixed tick ratio, seeded devices |
 | `--debug CATEGORIES` | — | `-d` log categories for QEMU (`unimp`, `guest_errors`, ...); repeatable |
 | `--debug-file FILE` | — | `-D` log path for QEMU debug output |
-| `--plugin PATH` | — | load a TCG plugin (default `out/emit/<target>/contrib/plugins/g6lc-<id>.so`) |
+| `--plugin PATH` | — | load a TCG plugin (default `qemu/build/contrib/plugins/libg6lc-<id>.so`) |
 | `--record FILE` | — | write a stamped `RecordFile` (B3 native; B1+B2 QEMU auto-loads the trace plugin) |
 || `--checkpoint FILE` | — | write a resumable `Checkpoint` of the native run |
 || `--restore FILE` | — | resume a native run from a `Checkpoint`; `--image` is optional when this is given |
 || `--replay FILE` | — | replay the native run against a `RecordFile`, fail on divergence |
-| `--gdb PORT`, `--trace-uart FILE` | — | |
+| `--timeout SECONDS` | — | hard ceiling for `run --backend qemu` (fractional seconds allowed) |
+|| `--expect STRING` | — | when watching QEMU stdout, succeed as soon as `STRING` is seen; implies `--timeout` if no self-exiting payload |
+|| `--gdb PORT`, `--trace-uart FILE` | — | |
 
 ## 7. Diagnosis
 

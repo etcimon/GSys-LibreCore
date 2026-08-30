@@ -116,6 +116,17 @@ module wt_dcache_wbuffer
     output logic [CVA6Cfg.XLEN-1:0] wr_data_o,
     output logic [(CVA6Cfg.XLEN/8)-1:0] wr_data_be_o,
     output logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] wr_user_o,
+    // explicit line invalidation for SL-W fixup queue
+    output logic inv_req_o,
+    input logic inv_ack_i,
+    output logic [DCACHE_CL_IDX_WIDTH-1:0] inv_idx_o,
+    output logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] inv_way_oh_o,
+    output logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] inv_vld_bits_o,
+    // SL-W PMU events
+    output logic pm_void_ack_o,
+    output logic pm_fixup_write_o,
+    output logic pm_fixup_inval_o,
+    output logic pm_fixup_full_o,
     // to forwarding logic and miss unit
     output wbuffer_t [CVA6Cfg.WtDcacheWbufDepth-1:0] wbuffer_data_o,
     output logic [CVA6Cfg.DCACHE_MAX_TX-1:0][CVA6Cfg.PLEN-1:0]     tx_paddr_o,      // used to check for address collisions with read operations
@@ -209,6 +220,8 @@ module wt_dcache_wbuffer
   logic wr_cl_vld_q, wr_cl_vld_d;
   logic [DCACHE_CL_IDX_WIDTH-1:0] wr_cl_idx_q, wr_cl_idx_d;
 
+  logic ack_wr_active;
+
   logic [CVA6Cfg.PLEN-1:0] debug_paddr[CVA6Cfg.WtDcacheWbufDepth-1:0];
 
   // VOID-keep window (header note 3). This is containment for the
@@ -230,7 +243,8 @@ module wt_dcache_wbuffer
   // is the only hard-coded workload address in synthesizable core RTL and it
   // must be replaced by an address-agnostic mechanism before this core supports
   // another memory map or another firmware. Tracked as SL-W in AGENTS-todo.md.
-  localparam bit VoidKeepEn = 1'b1;
+  //
+  localparam bit VoidKeepEn = CVA6Cfg.WtDcacheFixupVoidKeepEn;
   localparam logic [19:0] VoidKeepTag = 20'h80040;
 
   logic [CVA6Cfg.WtDcacheWbufDepth-1:0] void_keep_d, void_keep_q;
@@ -238,7 +252,307 @@ module wt_dcache_wbuffer
   logic [(CVA6Cfg.XLEN/8)-1:0] ack_be;
   logic check_wr;
 
+  // SL-W post-ACK fixup queue (see architecture/dcache-ack-before-check.md §3.1).
+  // When CVA6Cfg.WtDcacheFixupDepth is 0 the block is empty and all fixup
+  // signals are tied off: the legacy VoidKeepEn path is preserved bit-identical.
+  logic                       fixup_push, fixup_full, fixup_evict;
+  logic [CVA6Cfg.PLEN-1:0]    fixup_paddr_push;
+  logic [(CVA6Cfg.XLEN/8)-1:0] fixup_be_push;
+  logic [CVA6Cfg.XLEN-1:0]    fixup_data_push;
+  logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] fixup_user_push;
+  logic                       fixup_empty;
+  logic                       fixup_pm_void_ack, fixup_pm_write, fixup_pm_inval, fixup_pm_full;
+
+  logic                       fixup_rd_req, fixup_rd_tag_only;
+  logic [CVA6Cfg.DCACHE_TAG_WIDTH-1:0] fixup_rd_tag;
+  logic [DCACHE_CL_IDX_WIDTH-1:0]      fixup_rd_idx;
+  logic [CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0] fixup_rd_off;
+  logic                                fixup_check_en_d, fixup_check_en_q, fixup_check_en_q1;
+  logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] fixup_hit_oh_q;
+  logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] fixup_vld_bits_q;
+
+  logic                       fixup_wr_req, fixup_wr_ack;
+  logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] fixup_wr_oh;
+  logic [DCACHE_CL_IDX_WIDTH-1:0]      fixup_wr_idx;
+  logic [CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0] fixup_wr_off;
+  logic [CVA6Cfg.XLEN-1:0]             fixup_wr_data;
+  logic [(CVA6Cfg.XLEN/8)-1:0]         fixup_wr_data_be;
+  logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] fixup_wr_user;
+
+  logic                       fixup_inv_req, fixup_inv_ack;
+  logic [DCACHE_CL_IDX_WIDTH-1:0]      fixup_inv_idx;
+  logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] fixup_inv_way_oh;
+  logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] fixup_inv_vld_bits;
+
   wbuffer_t wbuffer_check_mux, wbuffer_dirty_mux;
+
+  ///////////////////////////////////////////////////////
+  // SL-W fixup queue
+  ///////////////////////////////////////////////////////
+
+  generate
+    if (CVA6Cfg.WtDcacheFixupDepth == 0) begin : gen_fixup_disabled
+      // No queue allocated: tie off the fixup interface.
+      assign fixup_empty          = 1'b1;
+      assign fixup_full           = 1'b0;
+      assign fixup_rd_req         = 1'b0;
+      assign fixup_rd_tag         = '0;
+      assign fixup_rd_idx         = '0;
+      assign fixup_rd_off         = '0;
+      assign fixup_rd_tag_only    = 1'b1;
+      assign fixup_wr_req         = 1'b0;
+      assign fixup_wr_oh          = '0;
+      assign fixup_wr_idx         = '0;
+      assign fixup_wr_off         = '0;
+      assign fixup_wr_data        = '0;
+      assign fixup_wr_data_be     = '0;
+      assign fixup_wr_user        = '0;
+      assign fixup_inv_req        = 1'b0;
+      assign fixup_inv_idx        = '0;
+      assign fixup_inv_way_oh     = '0;
+      assign fixup_inv_vld_bits   = '0;
+      assign inv_req_o            = 1'b0;
+      assign inv_idx_o            = '0;
+      assign inv_way_oh_o         = '0;
+      assign inv_vld_bits_o       = '0;
+      assign ack_wr_active        = 1'b0;
+      assign fixup_pm_void_ack    = 1'b0;
+      assign fixup_pm_write       = 1'b0;
+      assign fixup_pm_inval       = 1'b0;
+      assign fixup_pm_full        = 1'b0;
+      assign pm_void_ack_o        = 1'b0;
+      assign pm_fixup_write_o     = 1'b0;
+      assign pm_fixup_inval_o     = 1'b0;
+      assign pm_fixup_full_o      = 1'b0;
+    end else begin : gen_fixup_queue
+      // Queue entry type.  Only the head of the FIFO is processed at a time.
+      typedef enum logic [1:0] {
+        FIXUP_PEND,
+        FIXUP_CHECK,
+        FIXUP_RETIRE
+      } fixup_state_t;
+
+      typedef struct packed {
+        logic [CVA6Cfg.PLEN-1:0]            paddr;
+        logic [(CVA6Cfg.XLEN/8)-1:0]        be;
+        logic [CVA6Cfg.XLEN-1:0]            data;
+        logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] user;
+      } fixup_entry_t;
+
+      fixup_entry_t [CVA6Cfg.WtDcacheFixupDepth-1:0] fixup_q, fixup_d;
+      fixup_entry_t                                  fixup_bypass_q, fixup_bypass_d;
+      fixup_state_t                                  fixup_state_q, fixup_state_d;
+      logic [$clog2(CVA6Cfg.WtDcacheFixupDepth)-1:0] fixup_head;
+      logic [$clog2(CVA6Cfg.WtDcacheFixupDepth)-1:0] fixup_tail;
+      logic [$clog2(CVA6Cfg.WtDcacheFixupDepth):0]   fixup_cnt;
+      logic                                          fixup_bypass_valid_q, fixup_bypass_valid_d;
+
+      // Cast the configured depth to the count width so all count comparisons are
+      // width-clean and Verilator does not emit WIDTHEXPAND warnings.
+      localparam int unsigned FixupDepth    = CVA6Cfg.WtDcacheFixupDepth;
+      localparam [$clog2(FixupDepth):0] FixupDepthCnt = FixupDepth[$clog2(FixupDepth):0];
+
+      // Full when the FIFO is at capacity and there is no bypass slot available.
+      assign fixup_full  = (fixup_cnt == FixupDepthCnt) && fixup_bypass_valid_q;
+      assign fixup_empty = (fixup_cnt == '0) && !fixup_bypass_valid_q;
+
+      // Helper signals derived from the active entry.
+      logic [CVA6Cfg.PLEN-1:0] active_paddr;
+      assign active_paddr = fixup_bypass_valid_q ? fixup_bypass_q.paddr : fixup_q[fixup_head].paddr;
+
+      logic [CVA6Cfg.DCACHE_TAG_WIDTH-1:0] paddr_tag;
+      logic [DCACHE_CL_IDX_WIDTH-1:0]      paddr_cl_idx;
+      logic [CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0] paddr_offset;
+
+      assign paddr_tag    = active_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH+CVA6Cfg.DCACHE_TAG_WIDTH-1:CVA6Cfg.DCACHE_INDEX_WIDTH];
+      assign paddr_cl_idx = active_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
+      assign paddr_offset = active_paddr[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0];
+
+      // Refill matching: a cacheline write (refill/inval) is in flight for this
+      // entry's index if wr_cl_vld_d/q matches the current paddr's CL index.
+      logic refill_hit_d, refill_hit_q;
+      assign refill_hit_d = (wr_cl_vld_d && (wr_cl_idx_d == paddr_cl_idx)) ||
+                            (wr_cl_vld_q && (wr_cl_idx_q == paddr_cl_idx));
+
+      // Tag-read interface.  The queue reads only when the wbuffer has no tag
+      // check of its own in flight and the current entry is not blocked by a
+      // refill.  fixup_rd_req_o below is ORed with the wbuffer rd_req_o.
+      assign fixup_rd_tag_only = 1'b1;
+      assign fixup_rd_tag      = paddr_tag;
+      assign fixup_rd_idx      = paddr_cl_idx;
+      assign fixup_rd_off      = paddr_offset;
+      assign fixup_rd_req      = (fixup_state_q == FIXUP_PEND) && !refill_hit_q &&
+                                 !(|tocheck) && !check_en_q && !check_en_q1;
+
+      // Capture tag-check result.  rd_hit_oh_i/rd_vld_bits_i are valid one
+      // cycle after rd_ack_i (when fixup_check_en_q is high), and the queue
+      // consumes them one cycle later (fixup_check_en_q1).
+      assign fixup_check_en_d = fixup_rd_req && rd_ack_i;
+      always_ff @(posedge clk_i or negedge rst_ni) begin : p_fixup_check_ff
+        if (!rst_ni) begin
+          fixup_check_en_q  <= 1'b0;
+          fixup_check_en_q1 <= 1'b0;
+          fixup_hit_oh_q    <= '0;
+          fixup_vld_bits_q  <= '0;
+        end else begin
+          fixup_check_en_q  <= fixup_check_en_d;
+          fixup_check_en_q1 <= fixup_check_en_q;
+          if (fixup_check_en_q) begin
+            fixup_hit_oh_q   <= rd_hit_oh_i;
+            fixup_vld_bits_q <= rd_vld_bits_i;
+          end
+        end
+      end
+
+      // Invalidation outputs to wt_dcache_mem.
+      assign inv_req_o      = fixup_inv_req;
+      assign inv_idx_o      = fixup_inv_idx;
+      assign inv_way_oh_o   = fixup_inv_way_oh;
+      assign inv_vld_bits_o = fixup_inv_vld_bits;
+
+      // SL-W PMU events
+      assign pm_void_ack_o    = fixup_pm_void_ack;
+      assign pm_fixup_write_o = fixup_pm_write;
+      assign pm_fixup_inval_o = fixup_pm_inval;
+      assign pm_fixup_full_o  = fixup_pm_full;
+
+      // Write / invalidate interface (used by the priority mux in p_tx_stat).
+      assign fixup_wr_idx     = paddr_cl_idx;
+      assign fixup_wr_off     = paddr_offset;
+      assign fixup_wr_data    = fixup_bypass_valid_q ? fixup_bypass_q.data : fixup_q[fixup_head].data;
+      assign fixup_wr_data_be = fixup_bypass_valid_q ? fixup_bypass_q.be   : fixup_q[fixup_head].be;
+      assign fixup_wr_user    = (CVA6Cfg.DATA_USER_EN != 0) ?
+                                (fixup_bypass_valid_q ? fixup_bypass_q.user : fixup_q[fixup_head].user) : '0;
+      assign fixup_inv_idx      = paddr_cl_idx;
+      assign fixup_inv_vld_bits = fixup_vld_bits_q;
+      assign fixup_inv_way_oh   = fixup_hit_oh_q;
+
+      // Fixup write / invalidate completion.  These are driven by the wbuffer
+      // write-port priority mux: wr_req_o is only granted to the queue when
+      // neither check_wr nor the ACK writeback is using the port.
+      assign fixup_wr_ack  = wr_ack_i && fixup_wr_req && !check_wr && !ack_wr_active;
+      assign fixup_inv_ack = inv_ack_i && fixup_inv_req;
+
+      // Controller: allocate, retire, and arbitrate the shared read/write ports.
+      always_comb begin : p_fixup_ctrl
+        fixup_d               = fixup_q;
+        fixup_bypass_d        = fixup_bypass_q;
+        fixup_state_d         = fixup_state_q;
+        fixup_bypass_valid_d  = fixup_bypass_valid_q;
+        fixup_pm_void_ack     = 1'b0;
+        fixup_pm_write        = 1'b0;
+        fixup_pm_inval        = 1'b0;
+        fixup_pm_full         = 1'b0;
+        fixup_wr_req          = 1'b0;
+        fixup_wr_oh           = '0;
+        fixup_inv_req         = 1'b0;
+
+        // Allocation on push.  If the FIFO has room, store the entry.  If not,
+        // use the single bypass slot for the full-queue fallback.
+        if (fixup_push) begin
+          fixup_pm_void_ack = 1'b1;
+          if (fixup_cnt < FixupDepthCnt) begin
+            fixup_d[fixup_tail] = '{paddr: fixup_paddr_push,
+                                     be:    fixup_be_push,
+                                     data:  fixup_data_push,
+                                     user:  fixup_user_push};
+          end else if (!fixup_bypass_valid_q) begin
+            fixup_bypass_valid_d = 1'b1;
+            fixup_bypass_d       = '{paddr: fixup_paddr_push,
+                                     be:    fixup_be_push,
+                                     data:  fixup_data_push,
+                                     user:  fixup_user_push};
+          end else begin
+            // Should not happen: fixup_full should have prevented the push.  If
+            // it does, record the overflow and carry on (no data lost; memory is
+            // authoritative, but a later load may hit stale data).
+            fixup_pm_full = 1'b1;
+          end
+        end
+
+        // State machine for the active (head or bypass) entry.
+        case (fixup_state_q)
+          FIXUP_PEND: begin
+            if (fixup_rd_req && rd_ack_i) begin
+              fixup_state_d = FIXUP_CHECK;
+            end
+          end
+
+          FIXUP_CHECK: begin
+            // fixup_hit_oh_q is valid when fixup_check_en_q1 is high.
+            if (fixup_check_en_q1) begin
+              if (|fixup_hit_oh_q) begin
+                fixup_state_d = FIXUP_RETIRE;
+              end else begin
+                // Tag miss: the fixup is dropped (memory is authoritative). The
+                // head is popped in the sequential block below so the FIFO does
+                // not spin on a line that is not resident.
+                if (fixup_bypass_valid_q) begin
+                  fixup_bypass_valid_d = 1'b0;
+                end
+                fixup_state_d = FIXUP_PEND;
+              end
+            end
+          end
+
+          FIXUP_RETIRE: begin
+            if (fixup_bypass_valid_q) begin
+              // Full-queue fallback: a tag hit must become an explicit
+              // invalidation of the hit way.
+              fixup_inv_req  = 1'b1;
+              fixup_pm_inval = 1'b1;
+              if (fixup_inv_ack) begin
+                fixup_bypass_valid_d = 1'b0;
+                fixup_state_d        = FIXUP_PEND;
+              end
+            end else begin
+              // Normal hit: write the acknowledged bytes into the hit way.
+              fixup_wr_req   = 1'b1;
+              fixup_wr_oh    = fixup_hit_oh_q;
+              fixup_pm_write = 1'b1;
+              if (fixup_wr_ack) begin
+                fixup_state_d = FIXUP_PEND;
+              end
+            end
+          end
+          default: fixup_state_d = FIXUP_PEND;
+        endcase
+      end
+
+      // Sequential update of FIFO and state.
+      always_ff @(posedge clk_i or negedge rst_ni) begin : p_fixup_ff
+        if (!rst_ni) begin
+          fixup_q               <= '{default: '0};
+          fixup_bypass_q        <= '{default: '0};
+          fixup_state_q         <= FIXUP_PEND;
+          fixup_head            <= '0;
+          fixup_tail            <= '0;
+          fixup_cnt             <= '0;
+          fixup_bypass_valid_q  <= 1'b0;
+          refill_hit_q          <= 1'b0;
+        end else begin
+          fixup_q               <= fixup_d;
+          fixup_bypass_q        <= fixup_bypass_d;
+          fixup_state_q         <= fixup_state_d;
+          fixup_bypass_valid_q  <= fixup_bypass_valid_d;
+          refill_hit_q          <= refill_hit_d;
+
+          // Head/tail and count management.  A push into the FIFO increments
+          // both tail and count.
+          if (fixup_push && (fixup_cnt < FixupDepthCnt)) begin
+            fixup_tail <= fixup_tail + 1'b1;
+            fixup_cnt  <= fixup_cnt + 1'b1;
+          end
+
+          // On normal hit retire, pop the head and decrement count.
+          if (fixup_state_q == FIXUP_RETIRE && !fixup_bypass_valid_q && fixup_wr_ack) begin
+            fixup_head <= fixup_head + 1'b1;
+            fixup_cnt  <= fixup_cnt - 1'b1;
+          end
+        end
+      end
+    end
+  endgenerate
 
   ///////////////////////////////////////////////////////
   // misc
@@ -361,9 +675,33 @@ module wt_dcache_wbuffer
   );
 
   always_comb begin : p_tx_stat
+    logic fixup_hold;
     tx_stat_d = tx_stat_q;
     evict     = 1'b0;
-    wr_req_o  = '0;
+    ack_wr_active = 1'b0;
+
+    // SL-W hold: if the post-ACK fixup queue is full and this ACK'd word is a
+    // fixup candidate, do not free the TX or pop the return FIFO until a slot
+    // frees.  This keeps correctness from depending on queue capacity.
+    fixup_hold = (CVA6Cfg.WtDcacheFixupDepth > 0) &&
+                 tx_stat_q[rtrn_id].vld &&
+                 !rtrn_empty &&
+                 !wbuffer_q[rtrn_ptr].checked &&
+                 !(check_en_q1 && (check_ptr_q1 == rtrn_ptr)) &&
+                 !(VoidKeepEn && !wbuffer_d[rtrn_ptr].checked &&
+                   (wr_paddr[31:12] == VoidKeepTag)) &&
+                 fixup_full;
+
+    // Shared cache word write port.  Priority (high to low):
+    // 1) `check_wr` legacy VOID-keep writeback
+    // 2) SL-W fixup queue retire
+    // 3) normal ACK writeback of already-checked words
+    wr_req_o     = '0;
+    wr_idx_o     = '0;
+    wr_off_o     = '0;
+    wr_data_o    = '0;
+    wr_data_be_o = '0;
+    wr_user_o    = '0;
 
     // Handle store ACKs from memory.
     //
@@ -375,22 +713,53 @@ module wt_dcache_wbuffer
     // load pressure). Always pop the rtrn FIFO; `if (evict)` clears txblock/valid.
     // Memory already holds the written bytes (write-through).
     // VOID-kept ecall objects wr_req on the later tag-check (check_wr), not here.
-    if (!rtrn_empty) begin
+    if (!rtrn_empty && !fixup_hold) begin
       if (tx_stat_q[rtrn_id].vld) begin
         tx_stat_d[rtrn_id].vld = 1'b0;
         if (!check_wr && wbuffer_q[rtrn_ptr].checked && (|ack_be) &&
             (|wbuffer_q[rtrn_ptr].hit_oh)) begin
-          wr_req_o = wbuffer_q[rtrn_ptr].hit_oh;
+          ack_wr_active = 1'b1;
+          wr_data_be_o  = ack_be;
+          wr_idx_o      = wr_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
+          wr_off_o      = wr_paddr[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0];
+          wr_data_o     = wbuffer_q[rtrn_ptr].data;
+          wr_user_o     = wbuffer_q[rtrn_ptr].user;
+          wr_req_o      = wbuffer_q[rtrn_ptr].hit_oh;
         end else if (!check_wr && check_en_q1 && (check_ptr_q1 == rtrn_ptr) &&
                      (|ack_be) && (|rd_hit_oh_q)) begin
-          wr_req_o = rd_hit_oh_q;
+          ack_wr_active = 1'b1;
+          wr_data_be_o  = ack_be;
+          wr_idx_o      = wr_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
+          wr_off_o      = wr_paddr[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0];
+          wr_data_o     = wbuffer_q[rtrn_ptr].data;
+          wr_user_o     = wbuffer_q[rtrn_ptr].user;
+          wr_req_o      = rd_hit_oh_q;
         end
       end
       // Always pop: a stuck return ID deadlocks the store-ACK path.
       evict = 1'b1;
     end
+
+    // SL-W fixup queue retire (middle priority).
+    if (!check_wr && fixup_wr_req) begin
+      ack_wr_active = 1'b0;
+      wr_data_be_o  = fixup_wr_data_be;
+      wr_idx_o      = fixup_wr_idx;
+      wr_off_o      = fixup_wr_off;
+      wr_data_o     = fixup_wr_data;
+      wr_user_o     = fixup_wr_user;
+      wr_req_o      = fixup_wr_oh;
+    end
+
+    // VOID-keep tag-check writeback (highest priority).
     if (check_wr) begin
-      wr_req_o = rd_hit_oh_q;
+      ack_wr_active = 1'b0;
+      wr_data_be_o  = wbuffer_q[check_ptr_q1].valid;
+      wr_idx_o      = wr_paddr_check[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
+      wr_off_o      = wr_paddr_check[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0];
+      wr_data_o     = wbuffer_q[check_ptr_q1].data;
+      wr_user_o     = wbuffer_q[check_ptr_q1].user;
+      wr_req_o      = rd_hit_oh_q;
     end
 
     // allocate a new entry
@@ -430,15 +799,18 @@ module wt_dcache_wbuffer
   assign rd_tag_d = extract_tag[CVA6Cfg.DCACHE_TAG_WIDTH-1:0];
 
   // trigger TAG readout in cache
-  assign rd_tag_only_o = 1'b1;
+  // The read port is shared between the wbuffer tag-check pipeline and the
+  // SL-W fixup queue.  The wbuffer has priority; the queue only reads when no
+  // wbuffer word is pending.
   assign rd_paddr = {
     {CVA6Cfg.XLEN_ALIGN_BYTES{1'b0}}, wbuffer_check_mux.wtag << CVA6Cfg.XLEN_ALIGN_BYTES
   };
-  assign rd_req_o = |tocheck;
-  assign rd_tag_o = rd_tag_q;  //delay by one cycle
-  assign rd_idx_o = rd_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
-  assign rd_off_o = rd_paddr[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0];
-  assign check_en_d = rd_req_o & rd_ack_i;
+  assign rd_req_o     = (|tocheck) || fixup_rd_req;
+  assign rd_tag_only_o = 1'b1;
+  assign rd_tag_o     = (|tocheck) ? rd_tag_q : fixup_rd_tag;
+  assign rd_idx_o     = (|tocheck) ? rd_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] : fixup_rd_idx;
+  assign rd_off_o     = (|tocheck) ? rd_paddr[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0] : fixup_rd_off;
+  assign check_en_d   = (|tocheck) & rd_ack_i;
 
   // cache update port
   assign rtrn_ptr = tx_stat_q[rtrn_id].ptr;
@@ -453,14 +825,7 @@ module wt_dcache_wbuffer
   };
   assign check_wr = check_en_q1 && void_keep_q[check_ptr_q1] &&
                     (|wbuffer_q[check_ptr_q1].valid) && (|rd_hit_oh_q);
-  assign wr_data_be_o = check_wr ? wbuffer_q[check_ptr_q1].valid : ack_be;
-  assign wr_idx_o = check_wr ?
-                    wr_paddr_check[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
-                    wr_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
-  assign wr_off_o = check_wr ? wr_paddr_check[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0] :
-                               wr_paddr[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0];
-  assign wr_data_o = check_wr ? wbuffer_q[check_ptr_q1].data : wbuffer_q[rtrn_ptr].data;
-  assign wr_user_o = check_wr ? wbuffer_q[check_ptr_q1].user : wbuffer_q[rtrn_ptr].user;
+  // Cache word write port is driven by the priority mux in p_tx_stat.
 
 
   ///////////////////////////////////////////////////////
@@ -584,6 +949,12 @@ module wt_dcache_wbuffer
     dirty_rd_en         = 1'b0;
     req_port_o.data_gnt = 1'b0;
     wbuffer_wren        = 1'b0;
+    fixup_push          = 1'b0;
+    fixup_evict         = 1'b0;
+    fixup_paddr_push    = '0;
+    fixup_be_push       = '0;
+    fixup_data_push     = '0;
+    fixup_user_push     = '0;
 
     // TAG lookup returns, mark corresponding word
     if (check_en_q1) begin
@@ -611,6 +982,22 @@ module wt_dcache_wbuffer
     // once TX write response came back, we can clear the TX block. if it was not dirty, we
     // can completely evict it - otherwise we have to leave it there for retransmission
     if (evict) begin
+      // Decide whether this ACK'd word is a candidate for the SL-W fixup queue.
+      // It must be unchecked, not already tag-checked this cycle, and not held
+      // by the legacy VoidKeep window.
+      fixup_evict = (CVA6Cfg.WtDcacheFixupDepth > 0) &&
+                    !wbuffer_q[rtrn_ptr].checked &&
+                    !(check_en_q1 && (check_ptr_q1 == rtrn_ptr)) &&
+                    !(VoidKeepEn && !wbuffer_d[rtrn_ptr].checked &&
+                      (wr_paddr[31:12] == VoidKeepTag)) &&
+                    !fixup_full;
+      if (fixup_evict) begin
+        fixup_push       = 1'b1;
+        fixup_paddr_push = wr_paddr;
+        fixup_be_push    = ack_be;
+        fixup_data_push  = wbuffer_q[rtrn_ptr].data;
+        fixup_user_push  = wbuffer_q[rtrn_ptr].user;
+      end
       for (int k = 0; k < (CVA6Cfg.XLEN / 8); k++) begin
         if (tx_stat_q[rtrn_id].be[k]) begin
           wbuffer_d[rtrn_ptr].txblock[k] = 1'b0;

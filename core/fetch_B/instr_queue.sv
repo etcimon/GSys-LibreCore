@@ -75,11 +75,12 @@ module instr_queue
     input logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_ready_i
 );
 
-  localparam int unsigned NrFifo = CVA6Cfg.INSTR_PER_FETCH;
-  localparam int unsigned NrIssue = CVA6Cfg.NrIssuePorts;
-  localparam int unsigned IdxW = CVA6Cfg.LOG2_INSTR_PER_FETCH;
-  localparam int unsigned HidW = $clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2);
-  localparam g6lc_fetch_pkg::fetch_en_t En = g6lc_fetch_pkg::en(CVA6Cfg);
+  localparam g6lc_fetch_pkg::fetch_geo_t Geo = g6lc_fetch_pkg::geo(CVA6Cfg);
+  localparam g6lc_fetch_pkg::fetch_en_t  En  = g6lc_fetch_pkg::en(CVA6Cfg);
+  localparam int unsigned NrFifo = Geo.slots;
+  localparam int unsigned NrIssue = Geo.issue;
+  localparam int unsigned IdxW = Geo.log2_slots;
+  localparam int unsigned HidW = Geo.hart_idx_w;
 
   typedef logic [IdxW-1:0] fifo_idx_t;
   // NrFifo is a power of two, so a truncating mask is a modulo

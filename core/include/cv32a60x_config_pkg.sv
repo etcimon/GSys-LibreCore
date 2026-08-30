@@ -119,6 +119,8 @@ package cva6_config_pkg;
       DcacheInvalidateOnFlush: bit'(0),
       DataUserEn: unsigned'(1),
       WtDcacheWbufDepth: int'(8),
+      WtDcacheFixupDepth: int'(0),
+      WtDcacheFixupVoidKeepEn: bit'(1),
       FetchUserWidth: unsigned'(32),
       FetchUserEn: unsigned'(1),
       InstrTlbEntries: int'(2),
