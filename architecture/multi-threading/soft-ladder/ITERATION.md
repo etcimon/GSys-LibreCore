@@ -1946,7 +1946,7 @@ Template at bottom.
 | **I3 Fix** | Keep `leftover_retake` + `leftover-complete slot0 push` + `replay_addr = icache_vaddr_q`; do not re-land `pipe_keep`, `leftover_replay_hold`, `leftover_drop hold`. Target fetch_B / IQ / thread-switch control-flow. |
 | **I4 Verify** | 8M: `plat_hc=4` `coldboot_done=1`, no pin-exit, cookie not reached. Soft getprop / BANR remain holding gates. |
 | **I5 Retire** | `b1-fdt-lenp-store` → `deferred`; new `b1-s4-fetch-b-iq-leftover` → `in_progress`; no new `mk_plat_skip` peel. |
-| **I6 Next** | G0 pointer-liveness / address-use on fetch_B leftover; stop speculative fetch_B queue edits until directed. |
+| **I6 Next** | G0 pointer-liveness / address-use on fetch_B leftover; stop speculative fetch_B queue edits until directed. **I6a** — build `s4-v-ptr0` mini: open/libfdt `fdt_offset_ptr` with a0=0 after a 32-bit RVI leftover + `c.jr` / `c.jalr` path; confirm `mepc=0` and `ra=0x12994` class. Locus: `g6lc_fetch_pkg::leftover_retake`, `instr_queue::replay_addr_o`, `frontend::icache_take` / `npc_d` priority. |
 
 #### Notes
 - S4 day-by-day detail lives in the `iter-012` section above (it was appended before the residual was reclassified as `iter-013`).

@@ -106,6 +106,13 @@ if (Test-Path $patchPy) {
   Write-Host "[build-opensbi-smt2] non-PIE Makefile patch applied"
 }
 
+# SMT product-closeout FDT fixups (zawrs, boot-crutches, etc.)
+$compensationPy = Join-Path $Smt2Root "scripts/patch_opensbi_smt_compensation.py"
+if (Test-Path $compensationPy) {
+  & python $compensationPy $src
+  Write-Host "[build-opensbi-smt2] SMT FDT compensation patch applied"
+}
+
 # Prefer a bash that has both `make` and a consistent path mount for find(1).
 # Git Bash often lacks make; Cygwin has make but needs /cygdrive paths.
 # Strategy: Cygwin if present (make available), else Git Bash (user may install make).

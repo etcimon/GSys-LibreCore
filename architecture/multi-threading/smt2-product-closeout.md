@@ -122,6 +122,11 @@ OpenSBI consumes these properties in the `CVA6_DI_BRINGUP` profile and patches
 `smt,default-sku` to decide whether to trust dual-hart topology before the
 product closeout is complete.
 
+The `smt,zawrs = <0>` property is paired with removing `zawrs` from the
+per-`cpu@` `riscv,isa-extensions` list; the `smt,*` node is the source of
+truth for the compensation rather than the implicit ISA string. When the
+`Zawrs`/wait-for-peer product item closes, add `zawrs` back to both places.
+
 ---
 
 ## 10. Verification gates

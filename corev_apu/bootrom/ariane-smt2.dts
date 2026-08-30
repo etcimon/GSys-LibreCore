@@ -60,7 +60,7 @@
         "zicbom", "zicboz", "zicbop",
         "zacas",
         "zkn",
-        "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+        "sstc", "sscofpmf", "zihintpause", "svpbmt";
       mmu-type = "riscv,sv39";
       tlb-split;
       // CMO geometry (Zicbo*); block size 64 B is platform CMO, not L1 line width
@@ -94,7 +94,7 @@
         "zicbom", "zicboz", "zicbop",
         "zacas",
         "zkn",
-        "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+        "sstc", "sscofpmf", "zihintpause", "svpbmt";
       mmu-type = "riscv,sv39";
       tlb-split;
       riscv,cboz-block-size = <64>;
@@ -138,6 +138,20 @@
     #size-cells = <2>;
     compatible = "simple-bus";
     ranges;
+
+    // SMT2 product-closeout properties: expose unimplemented product features
+    // so OpenSBI/Linux can compensate intrinsically. Removed when all items
+    // in architecture/multi-threading/smt2-product-closeout.md are retired.
+    smt-product-closeout {
+      compatible = "smt,product-closeout";
+      smt,boot-crutches = <0x3>;          /* SMT_COLD_EXCL | SMT_FIRST_ACT_EXCL */
+      smt,dual-commit = <0>;              /* two harts cannot commit CSRs same cycle */
+      smt,banked-bht = <0>;               /* BHT/BTB shared across harts */
+      smt,fp-register-banking = <0>;      /* F/D/V context not per-hart banked */
+      smt,idle-clock-gate = <0>;          /* no per-hart clock gating yet */
+      smt,zawrs = <0>;                    /* Zawrs/wait-for-peer not implemented */
+      smt,default-sku = "experimental";   /* SMT2 not yet a production default SKU */
+    };
 
     // 2 harts × (MSIP=3, MTIP=7) — mpfs/fu540 multi-hart list form
     // compatible: QEMU dual form (chip-id first string unfixable without product SKU)

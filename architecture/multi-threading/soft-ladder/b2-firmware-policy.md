@@ -30,7 +30,7 @@ Name: **`CVA6_DI_BRINGUP`** (or Kconfig equivalent).
 | `b2-early-init-skip` | Empty `early_init` | Real |
 | `b2-domain-finalize-cut` | Early finalize after safe walk **or** full walk once ecall poison fixed | Full finalize |
 | `b2-csr-probe-skip` | Skip hart CSR probes **only if** B1 still open | Full probes |
-|| `b2-smt-fdt-compensation` | Emit `/soc/smt-product-closeout` properties per `smt2-product-closeout.md`; patch `cpu@` status for `smt,boot-crutches` | No SMT compensation nodes; clean FDT |
+|| `b2-smt-fdt-compensation` | Emit `/soc/smt-product-closeout` properties per `smt2-product-closeout.md`; apply OpenSBI FDT fixups via `software/smt2-linux/scripts/patch_opensbi_smt_compensation.py` (currently drops `zawrs` when `smt,zawrs = <0>`). Patch `cpu@` status for `smt,boot-crutches` only after cold-excl retirement. | No SMT compensation nodes; clean FDT |
 
 ## Domain / ecall coupling (cont.51 pin)
 

@@ -53,6 +53,8 @@ python3 "$SMT2/scripts/wrap_pie_flags.py" "$SRC/Makefile" || true
 # Dual-hart CLINT/PLIC bring-up (ROOT_REGION_MAX, mtime_size, mswi single-init).
 # Idempotent; required for ariane-smt2.dts (NrHarts=2, 0xc0000 CLINT, 64 MiB PLIC).
 python3 "$SMT2/scripts/patch_opensbi_g6lc_clint.py" "$SRC"
+# SMT product-closeout FDT fixups (zawrs, boot-crutches, etc.)
+python3 "$SMT2/scripts/patch_opensbi_smt_compensation.py" "$SRC"
 # Prefer full ISA string when the toolchain supports zifencei (fence.i in OpenSBI).
 PLATFORM_RISCV_ISA="${PLATFORM_RISCV_ISA:-rv64imafdc_zicsr_zifencei}"
 make -C "$SRC" O="$BUILD" PLATFORM=generic distclean || true

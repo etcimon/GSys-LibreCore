@@ -188,13 +188,15 @@ sites:
       interaction, not an isolated `fdt_getprop` or `lenp` store.
     pin: "mepc=0x80012958 mcause=2 / mepc=0 after `sbi_trap_redirect` / `sbi_hart_hang` @eef4"
     rtl_loci:
-      - core/frontend/frontend.sv
-      - core/frontend/instr_queue.sv
-      - core/frontend/instr_realign.sv
+      - core/fetch_B/frontend.sv
+      - core/fetch_B/instr_queue.sv
+      - core/fetch_B/instr_realign.sv
+      - core/smt_legacy/g6lc_thread_select.sv
       - core/controller.sv
       - core/scoreboard.sv
-      - core/smt_legacy/g6lc_thread_select.sv
-    verif_idea: "s4-v-los0-* minis vs OpenSBI on work-ver-smt2-fw64 / slfix"
+    verif_idea: >
+      s4-v-los0-* minis vs OpenSBI on work-ver-smt2-fw64 / slfix.
+      Next: s4-v-ptr0 mini to pin a0=0 / fdt_offset_ptr -> c.jr 0 after 32-bit RVI leftover.
     retire_when: natural OpenSBI FDT walk reaches cookie 51b1babe without PEEL_FDT_GETPROP, SOFT_HART_INIT, or SOFT_PLAT_OPS
 
   - id: b1-heap-freelist-malloc
