@@ -16,6 +16,7 @@
 #   mini_stq_flush_fwd      I4ca overlapping ra/s3 slot
 #   mini_fdt_namelen_walk   combined namelen→check_node→next_tag→by_offset
 #   mini_fdt_nt_frame32     TRACE: 64B next_tag after 32B check_node (1st ra aliases 2nd s3)
+#   mini_fdt_nt_ptr0        S4 pointer-liveness: 32-bit RVI straddle -> offset_ptr -> c.jr a0
 #   mini_fdt_nt_stock       S1 stock interior (offset_ptr 16B + c.lw + jr BEGIN/PROP)
 #   mini_fdt_nt_cpus        S1 named BEGIN_NODE "cpus" per-byte offset_ptr on 32/64 nest
 #   mini_stq_alias_jal      S1 16×thunk16 then 2× on the same nest (no FDT tags)
@@ -153,6 +154,8 @@ build_elf() {
   elf="$OUT/${t}.elf"
   if [[ "$t" == mini_fdt_nt_osbi* ]]; then
     ld="$ROOT/verif/tests/custom/multicore/mini_fdt_nt_osbi.ld"
+  elif [[ -f "$ROOT/verif/tests/custom/multicore/${t}.ld" ]]; then
+    ld="$ROOT/verif/tests/custom/multicore/${t}.ld"
   fi
   if [[ "$src" == *.c ]]; then
     "$RISCV_CC" -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles \

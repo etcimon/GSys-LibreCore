@@ -196,7 +196,26 @@ sites:
       - core/scoreboard.sv
     verif_idea: >
       s4-v-los0-* minis vs OpenSBI on work-ver-smt2-fw64 / slfix.
-      Next: s4-v-ptr0 mini to pin a0=0 / fdt_offset_ptr -> c.jr 0 after 32-bit RVI leftover.
+      `s4-v-ptr0` built as `verif/tests/custom/multicore/mini_fdt_nt_ptr0.{S,ld}`
+      (fixed-VA wrapper + real `offset_ptr.bin` + 32-bit RVI straddle at 0x80012986).
+      After fixing the linker layout, `work-ver-smt2-fw64-B` **FAILS** with
+      `tohost = 122928` (`0x1E030`, lower 32b of the FDT stub at `0x8001E030`) after
+      ~514 cycles; `legacy`/`slfix` terminate with `tohost = 1` after ~201k cycles.
+      Confirms a fetch_B leftover pointer-liveness failure: the `c.jr a0` from
+      0x80012994 to the FDT stub (0x8001E030) traps with `mepc` lower 32b =
+      `0x1E030` while `ra = 0x80012994` is preserved (`tohost = 122928`). The
+      corruption is either the returned `a0` losing high bits or the target
+      `j pass` at the stub being mis-fetched after the `offset_ptr` internal
+      32-bit `lbu a3,36(a0)` straddle at 0x800130A6. The exact `mepc=0` class
+      cannot be surfaced in the bare Verilator TB because PC 0 contains the
+      bootrom. Running `verif/regress/soft-ladder-opensbi-soak.sh` with
+      `PEEL_FDT_NEXT_TAG=1` (natural `fdt_next_tag` @0x800129D4) on
+      `work-ver-smt2-fw64-B` reproduces the S4 residual: the simulation hangs
+      and never emits `0x51b1babe`, matching the historical IAF/`mepc=0`
+      `sbi_hart_hang` path in OpenSBI. Next: either fix the TB bootrom at 0 to
+      an illegal/unimp so a bare `c.jr a0` to 0 surfaces `mepc=0`, or keep the
+      OpenSBI soak as the primary S4 regression and the bare mini as the fast
+      directed reproducer.
     retire_when: natural OpenSBI FDT walk reaches cookie 51b1babe without PEEL_FDT_GETPROP, SOFT_HART_INIT, or SOFT_PLAT_OPS
 
   - id: b1-heap-freelist-malloc
