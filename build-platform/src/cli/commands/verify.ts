@@ -72,6 +72,10 @@ export const verifyCommand: Command = {
     "  --yes / -y         auto-accept tools install when managed tools are missing\n" +
     "  --formal-jobs N    solver processes per sby task (sby -j; default: host cores)\n" +
     "  --formal-tasks N   sby tasks run concurrently (default: cores / formal-jobs)\n" +
+    "  --formal-remote    run the formal suite on the remote testharness builder\n" +
+    "                     (one SSH round trip for the whole suite; the builder\n" +
+    "                     provisions its own toolchain and sby -j = its nproc)\n" +
+    "  --formal-host H    remote alias, implies --formal-remote\n" +
     "\n" +
     "The formal stage needs Yosys >= v0.67, where the slang SystemVerilog frontend\n" +
     "is integrated: below that, `read_slang` does not exist and any task reading a\n" +
@@ -152,10 +156,17 @@ export const verifyCommand: Command = {
     // any nested call see one source of truth.
     const formalJobs = flagString(args.flags, "formal-jobs");
     const formalTaskJobs = flagString(args.flags, "formal-tasks");
-    if (formalJobs || formalTaskJobs) {
+    const formalRemote = flagBool(args.flags, "formal-remote");
+    const formalHost = flagString(args.flags, "formal-host");
+    if (formalJobs || formalTaskJobs || formalRemote || formalHost) {
       const f = (config.verify.formal ??= {});
       if (formalJobs) f.jobs = Math.max(1, Number(formalJobs) || 1);
       if (formalTaskJobs) f.taskJobs = Math.max(1, Number(formalTaskJobs) || 1);
+      if (formalRemote) f.remote = true;
+      if (formalHost) {
+        f.remote = true;
+        f.remoteHost = formalHost;
+      }
     }
 
     const stages = requestedStages(args.flags as Record<string, unknown>, config.verify.stages);

@@ -93,6 +93,11 @@ SYNC_INCLUDE = [
     "verif/core-v-verif/lib/",
     "verif/tb/",
     "util/",
+    # Provisioning scripts the remote runs on itself. `install-formal.sh` builds
+    # the bounded-formal toolchain (Yosys >= v0.67 with the integrated slang
+    # frontend, plus SymbiYosys) on the builder, so `verify --formal
+    # --formal-remote` can put the solver work on the machine with the cores.
+    "build-platform/scripts/",
     "software/smt2-linux/soft-ladder/mk_plat_skip.py",
     "software/smt2-linux/soft-ladder/rebuild_held_from_pin.sh",
     "software/smt2-linux/soft-ladder/build/fw_payload_diag.elf",

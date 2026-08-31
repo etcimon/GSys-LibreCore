@@ -102,15 +102,42 @@ install_deps() {
                 libboost-system-dev libboost-filesystem-dev python3 python3-click)
     # shellcheck disable=SC2206
     pkgs+=(${FORMAL_WITH_SOLVERS})
-    log "apt-get install: ${pkgs[*]}"
-    if [[ "$(id -u)" == "0" ]]; then
-      DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${pkgs[@]}" || \
-        log "WARNING: some prerequisites failed to install; continuing"
-    elif command -v sudo >/dev/null 2>&1; then
-      DEBIAN_FRONTEND=noninteractive sudo -n apt-get install -y -q "${pkgs[@]}" || \
-        log "WARNING: sudo apt-get failed (no passwordless sudo?); continuing"
+
+    # Pick the privilege escalation once. `sudo -n` so a host without
+    # passwordless sudo fails fast instead of blocking on a prompt.
+    local SUDO=""
+    if [[ "$(id -u)" != "0" ]]; then
+      if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+        SUDO="sudo -n"
+      else
+        log "WARNING: not root and no passwordless sudo; install prerequisites manually:"
+        log "         ${pkgs[*]}"
+        return 0
+      fi
+    fi
+
+    # A stale package index makes every install fail with "Unable to locate
+    # package". Refresh best-effort; a failure here is not fatal because the
+    # index may already be current.
+    log "apt-get update (best effort)"
+    DEBIAN_FRONTEND=noninteractive $SUDO apt-get update -qq >/dev/null 2>&1 || \
+      log "WARNING: apt-get update failed; continuing with the existing index"
+
+    # One package at a time. A single unavailable or held package aborts a whole
+    # apt transaction, which would silently drop every other prerequisite and
+    # leave the real failure to surface later as "cmake not found".
+    local missing=()
+    for p in "${pkgs[@]}"; do
+      if DEBIAN_FRONTEND=noninteractive $SUDO apt-get install -y -q "$p" >/dev/null 2>&1; then
+        continue
+      fi
+      missing+=("$p")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+      log "WARNING: could not install: ${missing[*]}"
+      log "         (continuing; the toolchain check below reports what is fatal)"
     else
-      log "WARNING: not root and no sudo; install prerequisites manually"
+      log "prerequisites present"
     fi
   elif command -v brew >/dev/null 2>&1; then
     log "brew install: cmake ninja bison flex readline tcl-tk libffi z3"
@@ -123,7 +150,10 @@ install_deps() {
 
 check_toolchain() {
   local cmake_ver gxx_ver
-  command -v cmake >/dev/null 2>&1 || die "cmake not found (need >= 3.28)"
+  command -v cmake >/dev/null 2>&1 || die \
+    "cmake not found (need >= 3.28). Install it, or re-run with FORMAL_SKIP_DEPS=0 on a host with passwordless sudo."
+  command -v ninja >/dev/null 2>&1 || command -v ninja-build >/dev/null 2>&1 || die \
+    "ninja not found (Yosys main is a CMake+Ninja build)"
   cmake_ver="$(cmake --version | head -1 | awk '{print $3}')"
   log "cmake $cmake_ver"
   if command -v g++ >/dev/null 2>&1; then

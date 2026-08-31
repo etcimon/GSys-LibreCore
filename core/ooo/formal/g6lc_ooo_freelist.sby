@@ -7,10 +7,19 @@ mode prove
 depth 8
 
 [engines]
+# abc-pdr first: far faster than z3 on this bit-level cone. Both are raced.
+abc pdr
 smtbmc z3
 
 [script]
-read -formal g6lc_freelist.sv g6lc_ooo_freelist_props.sv
+# read_slang, NOT `read -formal`. The property references DUT state
+# hierarchically (dut.free_q), and the classic Verilog frontend cannot resolve
+# a cross-module reference: it silently declares a wire literally named
+# `dut.free_q`, warns "implicitly declared" / "used but has no driver", and
+# leaves the assertion checking a dangling net instead of the design. A vacuous
+# assertion that reports PASS is worse than no assertion.
+read_slang --std 1800-2017 --top g6lc_ooo_freelist_props -DFORMAL \
+    g6lc_freelist.sv g6lc_ooo_freelist_props.sv
 prep -top g6lc_ooo_freelist_props
 
 [files]

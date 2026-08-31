@@ -224,6 +224,20 @@ Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`
   4. `core/ooo/formal/g6lc_ooo_{rename,cancel}` pass on the Windows OSS CAD suite but were never observed to complete under the WSL build — same z3-slowness class as the order proof. If they ever stall in CI, add `abc bmc3` to their engine list before touching the props.
   5. **SMT fetch contracts proven (gate now 8/8).** `core/fetch_B/formal/g6lc_fetch_smt.sby` proves the three multi-threading contracts that SPEC §4/§5 state in prose and that each have a recorded failure behind them: **R1/I4** `packet_hart` (a switch must not retag an in-flight packet as the incoming hart — a parked hart legitimately runs with `sp==0`, so mislabelled provenance is indistinguishable from "not ready yet"); **I8** `commit_for_hart` (TRACE t=200082 had `src=4` reseeding fetch with hart0's target while `h=1`, stealing hart1's bootrom `jr s0`); **I10** `snap_pc` (bank the address the I$ accepted, not the fetch-ahead `npc`). `en_restore`/`en_smt` are **free inputs**, so one run proves the T=1 and T>1 envelopes together.
   6. **Envelope collapse landed.** The order proof now runs at the geometry ceiling `N=8` instead of a package's `N=4`. A narrower `INSTR_PER_FETCH` is the same proof with upper slot inputs tied off, and tying an input off can only remove counterexamples — so `FW=32/64/128` are covered by one run. This is the `C` factor of the width ledger going to 1: raising `geo.issue`, `geo.harts` or `FETCH_WIDTH` becomes a re-run in seconds, not a re-soak in hours. Do not specialise a proof down to a package geometry; that weakens it.
+  7a. **Two existing ooo proofs were silently VACUOUS.** `g6lc_ooo_{freelist,rename}.sby` used the classic
+     `read -formal` frontend while their properties reference DUT state hierarchically (`dut.free_q`,
+     `dut.busy_q`, `dut.ckpt_ptr_q`, `dut.map_q`). The classic frontend cannot resolve a cross-module
+     reference: it silently declared wires *literally named* `dut.free_q`, warned "implicitly declared" and
+     "used but has no driver", and left five assertions checking dangling nets instead of the design — while
+     reporting PASS. This is the H3 class applied to formal: **a pass that is not evidence.** Both are now on
+     `read_slang`, which resolves the references or errors, and both pass with **zero** dangling-wire warnings,
+     so the assertions are real for the first time. `g6lc_ooo_cancel` has no hierarchical refs and was
+     unaffected; `g6lc_ooo_rob` already used `read_slang`. Lesson worth keeping: **any proof that reaches into
+     a DUT must use `read_slang`**, never `read -formal`.
+  7b. **Remote formal landed, and it is the fast path.** `verify --formal --formal-remote` runs the whole
+     suite in one remote shell on the builder — **10 tasks in ~11 s** on 12 cores. Engine choice mattered more
+     than the host: adding `abc` alongside z3 took the suite from 128 s (with two z3-bound tasks dying on
+     `BrokenPipeError`) to 11 s. Details and the four traps in `build-platform/AGENTS.md` §4.6.2b.
   7. **Ladder map is now explicit.** [`core-fetch/SPEC.md`](architecture/core-fetch/SPEC.md) §10 records, for every fetch invariant, which rung checks it today, with what artifact, at what envelope, and whether it is worth moving left. That table is the work queue for this plane, and it replaces guessing about coverage.
 
 ### Objectives (ordered by ladder position, not by symptom)

@@ -106,6 +106,7 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | Fetch geometry / configurability (SPEC §1, §F) | **`g6lc_fetch_geo.sby`** — 6-point sweep FW 32/64/128/256 × RVC on/off. Raising a width is a re-run in seconds, not a package re-soak |
 | SMT fetch contracts (R1 provenance, I8 commit-hart, I10 switch progress) | **`g6lc_fetch_smt.sby`** — `en_restore`/`en_smt` free, so T=1 and T>1 are proven together |
 | ISA red lines (§E) | **`diag-isa-red-lines`** + **`diag-fw-accommodation`** (mechanical; prose alone did not hold them) |
+| Formal gate (all planes) | **`verify --formal`** — 10 tasks, or `--formal-remote` for the builder (~11 s on 12 cores). **Any proof that reaches into a DUT must use `read_slang`:** `read -formal` silently invents dangling wires for `dut.<sig>` and reports PASS on assertions that touch nothing (found in `g6lc_ooo_{freelist,rename}`, both fixed) |
 | Hart topology / `plat_hc` (R11, I25) | **`dts_to_dtb.py --check-all-harts`** (build-time DTS ↔ config pairing) + `check_cfg` product assert. Not a soak: `platform.hart_count` is a compile-time-decidable property of the DTS |
 | Zacas AMOCAS.W/D/Q (I §5.9) | `mc-mini-veri` + **`zacas-policy`** (hard RTL W/D/Q + odd illegal), `mc-stream-tests` / `mc-spo-soak` / `mc-spo-spike` (directed/ISS), `mc-spo-veri` (CRT residual) |
 | F / D (floating point) | `riscv-tests` (`*uf*`/`*ud*`), `riscv-arch-test` (rv64 targets) |

@@ -311,6 +311,31 @@ sby writes, and an 8-core build plus a solver was observed to destabilise the
 WSL VM outright. `verify.formal.workdirRoot` exists for this; the WSL path
 already uses a `$HOME` workdir.
 
+#### 4.6.2b Remote formal — putting the solver on the builder
+
+```
+bun run src/cli/index.ts verify --formal --formal-remote
+bun run src/cli/index.ts verify --formal --formal-host <alias>
+```
+
+Reuses the MT evidence transport (`verif/regress/remote-testharness.sh`, which
+owns the SSH ControlMaster). The whole suite is **one** remote shell, not one per
+task: `sync`, then a single script that provisions the toolchain if absent,
+runs every task with `sby -j $(nproc)`, and emits one `RESULT <task> rc= status=`
+line each. Measured **10 tasks in ~11 s** on a 12-core builder.
+
+Four things this had to get right, each of which failed first:
+
+| Trap | Fix |
+|---|---|
+| `build-platform/scripts/` was not in the proxy's `SYNC_INCLUDE`, so the remote had no installer | Added that one entry to `SYNC_INCLUDE` |
+| `shell` has a **60 s** default safety net (`DEFAULT_SHELL_TIMEOUT`), so a longer suite was cut off and every task after the cutoff reported "no RESULT line" | Pass a large **global** `--timeout` *before* the subcommand. `--timeout 0` does **not** disable it for `shell`: `cmd_shell` treats a non-positive value as "use the default" |
+| Credentials must not reach argv or the repo | The variable names are forwarded through `WSLENV`; the value crosses as an environment variable. The proxy still falls back to its untracked pass file |
+| Transport exit code says nothing about a proof (an SSH drop is 255) | Classify only from the `RESULT` lines; no lines at all is itself the error |
+
+Remote provisioning is a one-time ~5 min source build on 12 cores; afterwards the
+script adopts it and the step is a no-op.
+
 - **riscv-gcc**: xPack prebuilt (win zip / linux-x64 / darwin tar.gz) → `workspace/tooling/riscv`.
 - **opensbi-smt2**: Windows uses Cygwin make + xPack cygwrap; Linux uses bash script.
 - **spike**: Linux native or Windows via WSL (`build-platform/scripts/install-spike.sh`);

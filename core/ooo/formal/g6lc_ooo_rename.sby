@@ -8,10 +8,27 @@ mode bmc
 depth 12
 
 [engines]
+# abc-bmc3 first: it is much faster than z3 on these bit-level cones, and a z3
+# run here was observed to be killed mid-solve (BrokenPipeError, "Engine
+# terminated without status") on a loaded builder. Both are raced.
+abc bmc3
 smtbmc z3
 
 [script]
-read -formal g6lc_rename.sv g6lc_ooo_rename_props.sv
+# read_slang, NOT `read -formal`. The properties reference DUT state
+# hierarchically (dut.free_q, dut.busy_q, dut.ckpt_ptr_q, dut.map_q), and the
+# classic Verilog frontend cannot resolve a cross-module reference: it silently
+# created wires literally named `dut.free_q`, warned "implicitly declared" and
+# "used but has no driver", and left those four assertions checking dangling
+# nets instead of the design. A vacuous assertion that reports PASS is worse
+# than no assertion. slang resolves the references properly (and errors if they
+# are wrong), which is why every fetch proof already uses it.
+#
+# No --keep-hierarchy: slang refuses a hierarchical read across a PRESERVED
+# module boundary, and every assertion here lives in the props module, so
+# flattening costs nothing.
+read_slang --std 1800-2017 --top g6lc_ooo_rename_props -DFORMAL \
+    g6lc_rename.sv g6lc_ooo_rename_props.sv
 prep -top g6lc_ooo_rename_props
 
 [files]

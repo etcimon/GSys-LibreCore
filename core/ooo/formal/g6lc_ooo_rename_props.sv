@@ -69,7 +69,17 @@ module g6lc_ooo_rename_props #(
       .enable_i
   );
 
-  initial assume (!rst_ni);
+  // Force a reset in the first cycle. `initial assume (!rst_ni)` is rejected by
+  // the slang frontend ("reading net state during design initialization"), and
+  // this module is stateful, so the constraint cannot simply be dropped the way
+  // it can in a stateless props module: without it the solver starts the rename
+  // map, free vector and checkpoint pointer in an arbitrary state and every
+  // invariant is trivially violable. Drive it from an initialised register.
+  logic rst_init_q = 1'b1;
+  always_ff @(posedge clk_i) rst_init_q <= 1'b0;
+  always_ff @(posedge clk_i) begin
+    if (rst_init_q) assume (!rst_ni);
+  end
 
   // Environment constraints for a legal rename stream.
   always_ff @(posedge clk_i) begin

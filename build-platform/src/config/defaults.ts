@@ -1263,6 +1263,11 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // This is the one fetch proof that pins a geometry, so it is a multi-task
       // sweep; every other fetch proof is geometry-free by construction.
       "core/fetch_B/formal/g6lc_fetch_geo.sby",
+      // Against the LIVE instr_realign (not the pure functions): I1/I2
+      // no-fabricate versus the actual window data, and I4 per-hart leftover
+      // isolation. Both quantify over module state or the I$ line, which a
+      // pure-function proof cannot express. Runs in the smt2 configuration.
+      "core/fetch_B/formal/g6lc_fetch_realign.sby",
     ],
     formal: {
       // null = one sby process per host core, and tasks dispatched concurrently.
@@ -1585,6 +1590,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "core/fetch_B/formal/g6lc_fetch_smt_props.sv",
           "core/fetch_B/formal/g6lc_fetch_geo.sby",
           "core/fetch_B/formal/g6lc_fetch_geo_props.sv",
+          "core/fetch_B/formal/g6lc_fetch_realign.sby",
+          "core/fetch_B/formal/g6lc_fetch_realign_props.sv",
         ],
       },
       {

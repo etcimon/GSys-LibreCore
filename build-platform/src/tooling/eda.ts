@@ -20,6 +20,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join } from "node:path";
 
+
 import type { PlatformContext } from "../context.ts";
 import { run, type CommandResult } from "../platform/exec.ts";
 import { recommendedJobs } from "../platform/os.ts";
@@ -845,6 +846,197 @@ export async function formalTask(
   return summarise("formal", taskFile, result, null, started);
 }
 
+/** Remote layout used by verif/regress/remote/testharness_proxy.py. */
+const REMOTE_REPO = "/opt/testharness/repo";
+const REMOTE_FORMAL = "/opt/testharness/toolchains/formal";
+
+/**
+ * Bash run remotely to provision the toolchain once and then execute every
+ * task, emitting one `RESULT ...` line per task.
+ *
+ * Everything happens in a single remote shell on purpose: the point of the
+ * remote path is to pay one SSH round trip for the whole suite rather than one
+ * per task, and to let the builder's core count drive `sby -j`.
+ */
+function remoteFormalScript(tasks: { rel: string; dir: string; name: string; multi: boolean }[]): string {
+  const lines = [
+    "set -u",
+    `REPO=${REMOTE_REPO}`,
+    `FORMAL=${REMOTE_FORMAL}`,
+    'J="$(nproc 2>/dev/null || echo 4)"',
+    // install-formal.sh is idempotent and adopts an existing install, so this is
+    // a no-op after the first run.
+    'if [ ! -x "$FORMAL/bin/sby" ] || [ ! -x "$FORMAL/bin/yosys" ]; then',
+    '  echo "[formal] provisioning remote toolchain -> $FORMAL"',
+    '  FORMAL_INSTALL_DIR="$FORMAL" FORMAL_BUILD_DIR="$HOME/.cache/g6lc-formal" \\',
+    '    NUM_JOBS="$J" bash "$REPO/build-platform/scripts/install-formal.sh" \\',
+    '      || { echo "RESULT_TOOLCHAIN fail"; exit 3; }',
+    "fi",
+    'export PATH="$FORMAL/bin:$PATH"',
+    // Solver workdirs go on the builder's own filesystem, never a mount.
+    'RUNROOT="$HOME/.cache/g6lc-formal-run"',
+    'mkdir -p "$RUNROOT"',
+    '"$FORMAL/bin/yosys" -V || true',
+  ];
+  for (const t of tasks) {
+    const base = t.name.replace(/\.sby$/i, "");
+    const flag = t.multi ? "--prefix" : "-d";
+    lines.push(
+      `( cd "$REPO/${t.dir}" && "$FORMAL/bin/sby" -f -j "$J" ${flag} "$RUNROOT/${base}" ${JSON.stringify(t.name)} ) > "$RUNROOT/${base}.log" 2>&1`,
+      `rc=$?`,
+      `st="$(grep -oE 'DONE \\([A-Z]+' "$RUNROOT/${base}.log" | tail -1 | sed 's/DONE (//')"`,
+      `echo "RESULT ${t.rel} rc=$rc status=\${st:-UNKNOWN}"`,
+    );
+  }
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * Run the formal suite on the remote testharness builder.
+ *
+ * Uses the same transport as the rest of the MT evidence path
+ * (`verif/regress/remote-testharness.sh`, which owns the SSH ControlMaster and
+ * reads the key passphrase from `$TH_SSH_PASSPHRASE` or an untracked file --
+ * this function never handles a credential).
+ */
+async function runFormalTasksRemote(
+  ctx: PlatformContext,
+  tasks: string[],
+): Promise<StageOutcome[]> {
+  const started = performance.now();
+  const fail = (detail: string): StageOutcome[] =>
+    tasks.map((t) => ({
+      stage: "formal" as const,
+      target: t,
+      status: "fail" as const,
+      detail,
+      durationMs: elapsed(started),
+    }));
+
+  const wrapper = "verif/regress/remote-testharness.sh";
+  if (!existsSync(join(ctx.repoRoot, wrapper))) {
+    return fail(`${wrapper} missing; remote formal needs the testharness proxy`);
+  }
+
+  const specs = tasks.map((rel) => {
+    const abs = isAbsolute(rel) ? rel : join(ctx.repoRoot, rel);
+    let multi = false;
+    try {
+      multi = /^\s*\[tasks\]/m.test(readFileSync(abs, "utf8"));
+    } catch {
+      /* reported as UNKNOWN below */
+    }
+    const norm = rel.replace(/\\/g, "/");
+    const slash = norm.lastIndexOf("/");
+    return {
+      rel: norm,
+      dir: slash >= 0 ? norm.slice(0, slash) : ".",
+      name: slash >= 0 ? norm.slice(slash + 1) : norm,
+      multi,
+    };
+  });
+
+  const scriptDir = join(ctx.paths.build, "formal");
+  mkdirSync(scriptDir, { recursive: true });
+  const scriptPath = join(scriptDir, "remote-formal.sh");
+  writeFileSync(scriptPath, remoteFormalScript(specs), "utf8");
+
+  // The proxy is a Python program driven through bash; on Windows that means
+  // WSL, and the script path has to cross the boundary too.
+  const onWindows = ctx.host.os === "windows";
+  if (onWindows && !hasWsl()) {
+    return fail("remote formal needs bash; wsl is not available on this host");
+  }
+  const scriptArg = onWindows ? await windowsPathToWsl(scriptPath) : scriptPath;
+  const repoArg = onWindows ? await windowsPathToWsl(ctx.repoRoot) : ctx.repoRoot;
+  const hostFlag = ctx.config.verify.formal?.remoteHost
+    ? ` --host ${ctx.config.verify.formal.remoteHost}`
+    : "";
+  // Raise the proxy's one-shot safety net. `shell` defaults to 60s
+  // (DEFAULT_SHELL_TIMEOUT), which is right for an interactive query and wrong
+  // for a formal suite -- being cut off mid-suite surfaces as "no RESULT line"
+  // for every task after the cutoff rather than as a timeout. Note that
+  // `--timeout 0` does NOT disable it for this subcommand: cmd_shell treats a
+  // non-positive value as "use the default", so an explicit large value is
+  // required. It is a GLOBAL flag and must precede the subcommand.
+  const budget = Math.max(600, 300 * tasks.length);
+  const posix =
+    `cd ${JSON.stringify(repoArg)} && ` +
+    `bash ${wrapper}${hostFlag} sync && ` +
+    `bash ${wrapper}${hostFlag} --timeout ${budget} shell --cmd-file ${JSON.stringify(scriptArg)}`;
+
+  ctx.logger.info(`formal: remote via ${wrapper} (${tasks.length} task(s), sby -j = remote nproc)`);
+
+  // The proxy reads its key passphrase from $TH_SSH_PASSPHRASE or an untracked
+  // file. Forward the variables by NAME through WSLENV when they are present in
+  // this process's environment: the value crosses as an environment variable, so
+  // it never appears in argv, in a log line, or anywhere in the repository. If
+  // neither is set the proxy falls back to ~/.config/librecore/th-remote.pass.
+  const forward = ["TH_SSH_PASSPHRASE", "TH_REMOTE_HOST"].filter((k) => process.env[k]);
+  const wslEnv: Record<string, string> = {};
+  if (forward.length > 0) {
+    const existing = process.env.WSLENV ? `${process.env.WSLENV}:` : "";
+    wslEnv.WSLENV = existing + forward.join(":");
+  }
+
+  const res = onWindows
+    ? await run("wsl", wslCommand(posix), {
+        cwd: ctx.repoRoot,
+        env: { ...process.env, ...wslEnv } as Record<string, string>,
+        stdio: "capture",
+        allowFailure: true,
+        dryRun: ctx.dryRun,
+        logger: ctx.logger,
+      })
+    : await run("bash", ["-lc", posix], {
+        cwd: ctx.repoRoot,
+        stdio: "capture",
+        allowFailure: true,
+        dryRun: ctx.dryRun,
+        logger: ctx.logger,
+      });
+
+  const out = `${res.stdout}\n${res.stderr}`;
+  if (/RESULT_TOOLCHAIN fail/.test(out)) {
+    return fail("remote toolchain provisioning failed (needs cmake>=3.28, ninja, g++>=11)");
+  }
+
+  // Classify from the emitted RESULT lines, not from the transport's exit code:
+  // an SSH drop is rc=255 and says nothing about any proof.
+  const seen = new Map<string, { rc: number; status: string }>();
+  for (const m of out.matchAll(/^RESULT (\S+) rc=(\d+) status=(\S+)/gm)) {
+    seen.set(m[1] as string, { rc: Number(m[2]), status: (m[3] as string).toUpperCase() });
+  }
+  if (seen.size === 0) {
+    return fail(
+      `no RESULT lines from the remote run (transport exit ${res.code}); ` +
+        "check the proxy credentials and that `sync` succeeded",
+    );
+  }
+
+  const durationMs = elapsed(started);
+  return specs.map((s) => {
+    const r = seen.get(s.rel);
+    if (!r) {
+      return {
+        stage: "formal" as const,
+        target: s.rel,
+        status: "fail" as const,
+        detail: "no RESULT line for this task",
+        durationMs,
+      };
+    }
+    const pass = r.status === "PASS" && r.rc === 0;
+    return {
+      stage: "formal" as const,
+      target: s.rel,
+      status: pass ? ("pass" as const) : ("fail" as const),
+      detail: `remote ${r.status} (rc=${r.rc})`,
+      durationMs,
+    };
+  });
+}
+
 /**
  * Run every configured formal task, several at a time.
  *
@@ -860,6 +1052,9 @@ export async function runFormalTasks(
 ): Promise<StageOutcome[]> {
   if (tasks.length === 0) return [];
   const formalCfg = ctx.config.verify.formal ?? {};
+  // Remote first: it replaces the whole local dispatch, including the tool
+  // resolution, because the builder provisions its own toolchain.
+  if (formalCfg.remote) return runFormalTasksRemote(ctx, tasks);
   const cores = recommendedJobs();
   const perTask = formalCfg.jobs ?? cores;
   const defaultTaskJobs = Math.max(1, Math.min(tasks.length, Math.floor(cores / Math.max(1, perTask)) || 1));

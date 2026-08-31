@@ -38,7 +38,16 @@ module g6lc_ooo_freelist_props #(
       .free_prd_i
   );
 
-  initial assume (!rst_ni);
+  // Force a reset in the first cycle. `initial assume (!rst_ni)` is rejected by
+  // the slang frontend ("reading net state during design initialization"), and
+  // this module is stateful, so the constraint cannot be dropped: without it the
+  // solver starts free_q in an arbitrary state and the invariants are trivially
+  // violable. Drive it from an initialised register instead.
+  logic rst_init_q = 1'b1;
+  always_ff @(posedge clk_i) rst_init_q <= 1'b0;
+  always_ff @(posedge clk_i) begin
+    if (rst_init_q) assume (!rst_ni);
+  end
 
   always_ff @(posedge clk_i) begin
     if (rst_ni) assume (free_prd_i < PRF_ENTRIES[PRF_W-1:0]);
