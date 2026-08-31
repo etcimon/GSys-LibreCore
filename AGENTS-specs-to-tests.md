@@ -104,6 +104,7 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | OpenSBI / FDT residual (DI) | **`soft-ladder-osbi`** (cookie), `soft-ladder-di` (FDT minis + `mini_must_pass`/`mini_must_fail` oracle controls), `smt-linux-*` (full stack) |
 | Fetch invariants I2/I3/I5/I7/I8 | **`verify --formal`** `core/fetch_B/formal/*.sby` (bounded, exhaustive in envelope) — not `soft-ladder-di`, which can only sample them |
 | ISA red lines (§E) | **`diag-isa-red-lines`** + **`diag-fw-accommodation`** (mechanical; prose alone did not hold them) |
+| Hart topology / `plat_hc` (R11, I25) | **`dts_to_dtb.py --check-all-harts`** (build-time DTS ↔ config pairing) + `check_cfg` product assert. Not a soak: `platform.hart_count` is a compile-time-decidable property of the DTS |
 | Zacas AMOCAS.W/D/Q (I §5.9) | `mc-mini-veri` + **`zacas-policy`** (hard RTL W/D/Q + odd illegal), `mc-stream-tests` / `mc-spo-soak` / `mc-spo-spike` (directed/ISS), `mc-spo-veri` (CRT residual) |
 | F / D (floating point) | `riscv-tests` (`*uf*`/`*ud*`), `riscv-arch-test` (rv64 targets) |
 | C (compressed) | `riscv-tests` (`*uc*`), `riscv-arch-test`, `smoke-*` |

@@ -220,3 +220,187 @@ Execution: [`../testharness-proxy.md`](../testharness-proxy.md).
 Completion stages (G0…SL-T): `COMPLETION.md`.  
 Queue edge: `AGENTS-todo.md` (SL-A…E + SL-P + SL-N + SL-T).  
 Linux-boot scale: [`../linux-boot-scale.md`](../linux-boot-scale.md).
+
+---
+
+## Archetype x layer coverage (M5)
+
+Registry of record: [`verif/tests/custom/multicore/ARCHETYPES.yaml`](../../../verif/tests/custom/multicore/ARCHETYPES.yaml).
+Vocabulary: archetypes **W1–W7** from
+[`../../AGENTS-g6lc-opensbi-dev-heuristics.md`](../../AGENTS-g6lc-opensbi-dev-heuristics.md) §2;
+layers from [`../AGENTS-smt2-opensbi-dev-logics.md`](../AGENTS-smt2-opensbi-dev-logics.md) §2 “Home”
+and §4 `owning_combo`; invariants from
+[`../../firmware-boot-principles.md`](../../firmware-boot-principles.md) §B.
+
+**115 `*.S` files: 2 H3 oracle controls (`mini_must_pass`, `mini_must_fail`, no archetype by
+construction) + 113 suite minis.** Of the 113, **106 carry a primary archetype** and **7 carry
+none** — those seven are stream/bring-up work that no §2 archetype describes, and they are counted
+separately so the matrix is not inflated.
+
+| Archetype | L1-align | L2-accept | L3-order | L4-redirect | LSU | issue | commit | csr | amo | thread-select | none | **total** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **W1** structure walk | 8 | 1 <br>`mini_win_prefix` | 1 <br>`mini_nt_nested_jal` | 0 | 68 | 1 <br>`mini_jal_sd_ra` | 0 | 0 | 0 | 0 | 0 | **79** |
+| **W2** self-armed trap probe | 0 | 0 | 0 | 4 <br>`mini_csr_expected_trap`, `mini_csr_pmp_probe`, `mini_trap_cause`, `mini_amocas_q_illegal` | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **4** |
+| **W3** indirect dispatch | 1 <br>`mini_sib_cjalr` | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | **1** |
+| **W4** byte-string walk | 1 <br>`mini_strlen_rvc` | 0 | 0 | 0 | 1 <br>`mini_dual_cmv_strlen` | 0 | 0 | 0 | 0 | 0 | 0 | **2** |
+| **W5** release/acquire | 0 | 0 | 0 | 0 | 1 <br>`mc_spo_fence_drain` | 0 | 0 | 0 | 0 | 0 | 0 | **1** |
+| **W6** atomic ticket / reservation | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 16 | 0 | 0 | **16** |
+| **W7** election / self-relocation | 1 <br>`mini_jalr_bnez_lottery` | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 2 <br>`mini_ipi_hart1_sp`, `mini_wfi_noipi_hart1` | 0 | **3** |
+| *(no archetype)* | 0 | 1 <br>`mini_long` | 0 | 1 <br>`mini_jumps` | 2 <br>`mc_stream_plane`, `mini_stream_plane` | 0 | 2 <br>`mc_spo_cf_stream`, `mc_spo_mispred_stream` | 0 | 0 | 0 | 1 <br>`mini_tohost` | **7** |
+| **total** | **11** | **2** | **1** | **5** | **72** | **1** | **2** | **0** | **16** | **2** | **1** | **113** |
+
+The eight W1 × L1-align minis are `mini_fdt_a0_is_fdt`, `mini_fetch_straddle`, `mini_fdt_nt_ptr0`,
+`mini_fdt_nt_stock_pad`, `mini_fdt_nt_osbi_cutli`, `mini_fdt_nt_osbi_tightva`,
+`mini_bnez_jal_split`, `mini_jal_beqz_win`. The 68 W1 × LSU minis are the `fdt_nt_osbi*`,
+`hpd_*`, `ecall_list_*`, `stq_*` and freelist families.
+
+**Shape of the table, in one sentence:** 13 of 77 archetype × layer cells are occupied, and two of
+them (`W1 × LSU`, `W6 × amo`) hold 84 of the 106 classified minis, so the battery is deep on two
+cells and one-deep or empty everywhere else. That is the H1 dividend not yet taken: `W1 ≡ W4` and
+`W3 ≈ W2` mean the empty cells are fewer *contracts* than they look, but they are still untested
+geometries.
+
+### Gaps — every (archetype, layer) pair with zero minis
+
+64 empty pairs. **real** = nothing exercises it and something should; **structural** = the
+archetype's contract family (§2) does not cross that layer, so the empty cell is correct.
+
+**L1-align** (3 empty)
+
+- `W2 × L1-align` — **real, and the highest-value single cell.** R3 clause (c) says the blind
+  `mepc += 4` is sound only because `csrr` is always a 4-byte RVI, so a realigner presenting a
+  16-bit fragment at the probe's address turns a legal probe into an illegal instruction *and*
+  mis-advances `mepc`; no mini places a CSR probe at a straddling address.
+- `W5 × L1-align` — **structural.** The handshake's contract family is cross-hart ordering plus a
+  bounded fetch grant; it makes no mixed-length fetch demand of its own.
+- `W6 × L1-align` — **structural.** AMOs are always 4-byte RVI and the lock bodies are a handful of
+  instructions, so no 2-byte boundary question arises.
+
+**L2-accept** (6 empty)
+
+- `W2 × L2-accept` — **real.** “The probe is delivered whole” is an explicit W2 clause and I7 is
+  exactly the rule that a dropped window drops all of its slots; nothing tests a probe window drop.
+- `W3 × L2-accept` — **real but low value.** Window acceptance at an indirect target is the same
+  rule `mini_win_prefix` already exercises; a dedicated mini would mostly re-prove it.
+- `W4 × L2-accept` — **structural.** `W1 ≡ W4` as a contract family, so `mini_win_prefix` already
+  covers it; the empty cell is a labelling artifact, not a hole.
+- `W5 × L2-accept` — **real.** A tight spin-acquire loop is precisely the shape in which a
+  permanently dropped window is invisible until the soak times out.
+- `W6 × L2-accept` — **structural.** The AMO contract is forward progress at the `amo_buffer`, not
+  window acceptance.
+- `W7 × L2-accept` — **structural.** Election is a handful of reset-time instructions.
+
+**L3-order** (6 empty)
+
+- `W2 × L3-order` — **real.** I6 says head selection must not depend on opcode; CSR ops are the most
+  likely thing to be special-cased and no mini pins packet order around one.
+- `W3 × L3-order` — **real.** Same argument for `jalr`, which is the other opcode a scheduler is
+  tempted to filter.
+- `W4 × L3-order` — **structural** (`W1 ≡ W4`; `mini_nt_nested_jal` covers the family).
+- `W5 × L3-order` — **structural.** Cross-hart ordering is RVWMO at the LSU, not packet order.
+- `W6 × L3-order` — **real but narrow.** An AMO's position in a packet is an I6 question and is
+  untested, but no recorded negative points at it.
+- `W7 × L3-order` — **structural.**
+
+**L4-redirect** (6 empty)
+
+- `W1 × L4-redirect` — **real.** The blame router's “target was architecturally correct but never
+  fetched” branch is a structure-walk symptom; several W1 minis touch I11 but every one of them is
+  filed under L1-align or LSU, so no W1 mini owns redirect priority.
+- `W3 × L4-redirect` — **real, and one of the two named capability gaps.** `R3 ≡ R5` collapses
+  expected-trap and platform ops *at the redirect layer*, yet W3's single primary mini is filed
+  L1-align. Nothing pins “a mispredicted `jalr` always recovers to the architectural target,
+  never filtered by value or PMA” (I11/I19) for a function-pointer table.
+- `W4 × L4-redirect` — **structural** (`W1 ≡ W4`).
+- `W5 × L4-redirect` — **structural.** A spin loop's only redirect is its own backward branch.
+- `W6 × L4-redirect` — **real but narrow.** Squash-versus-reservation is filed under `amo`; the
+  redirect-priority half is not posed separately.
+- `W7 × L4-redirect` — **real.** I8's “SMT restore vs trap” ordering and I10's next-PC banking are
+  the I4y/I8 family; `mini_jalr_bnez_lottery` is L1-align, so W7 has no redirect-priority mini.
+
+**LSU** (4 empty)
+
+- `W2 × LSU` — **real but narrow.** `mini_csr_pmp_probe` does store `mcause`/`mtval` through `a3`
+  into a stack `trap_info`, but no mini owns the question of that store being visible to the
+  restored code.
+- `W3 × LSU` — **real.** The defining act of indirect dispatch is *loading* the pointer;
+  store-to-load forwarding of a function pointer (as opposed to a data pointer) has no mini.
+- `W6 × LSU` — **real.** “The reservation is not clobbered by an unrelated store” is an STQ-boundary
+  statement, and all 16 W6 minis run without store pressure.
+- `W7 × LSU` — **real.** “A hart's stack does not exist until its own path writes it” is an LSU
+  claim; both W7 thread-select minis check readiness, not the first store to a fresh stack.
+
+**issue** (6 empty)
+
+- `W2 × issue` — **real, and named in the R-table.** R3 Home includes `stall_csr_older` *(issue, not
+  fetch)* and clause (d) “`csrrw mtvec` must not dual-issue with the CSR it is arming”.
+  `mini_csr_expected_trap` carries the `dual_issue` co-factor but is filed L4-redirect, so the issue
+  clause has no owner.
+- `W3 × issue` — **real but narrow.** Operand-readiness for an indirect target register is untested.
+- `W4 × issue` — **structural** (`W1 ≡ W4`; `mini_jal_sd_ra` covers the family).
+- `W5 × issue` — **structural.**
+- `W6 × issue` — **real.** `mini_lrsc_d`'s own header names the LR→SC issue barrier blocking an
+  intervening store, but the mini is filed `amo`; the issue-layer clause has no owner.
+- `W7 × issue` — **structural.**
+
+**commit** (7 empty — the column's two minis are unclassified)
+
+- `W1 × commit` — **real.** I13/I15 squash membership *is* the “callee-saved register holds a value
+  from a previous call frame” class; `mini_stq_flush_fwd` deliberately mispredicts but is filed LSU.
+- `W2 × commit` — **real.** A squashed probe must perform no architectural write; untested.
+- `W3 × commit` — **real.** I15 for a mispredicted indirect call; untested.
+- `W4 × commit` — **structural** (`W1 ≡ W4`).
+- `W5 × commit` — **structural.**
+- `W6 × commit` — **real.** `mini_lrsc_d` names “no `flush_commit` after `lr.d`” and is filed `amo`,
+  so commit has no W6 owner.
+- `W7 × commit` — **structural.**
+
+**csr** (7 empty — the whole column is empty)
+
+- `W1 × csr`, `W3 × csr`, `W4 × csr`, `W5 × csr`, `W6 × csr` — **structural.** None of these contract
+  families touch per-hart CSR banking.
+- `W2 × csr` — **real.** The probe writes and reads real CSRs; per-hart CSR banking under
+  `NrHarts>1` (I22) is what a repeated probe on two *live* harts would test, and no probe mini has a
+  live peer.
+- `W7 × csr` — **real.** I25 (`mhartid` unique = `hart_id_i + h`) and R9's CLINT `S = N × T` have no
+  mini anywhere; `mini_ipi_hart1_sp` writes CLINT `MSIP` but is filed thread-select and never checks
+  `mhartid` uniqueness.
+
+**amo** (6 empty)
+
+- `W1 × amo`, `W2 × amo`, `W3 × amo`, `W4 × amo` — **structural.** None of these contract families
+  contain an atomic.
+- `W5 × amo` — **real.** OpenSBI's release/acquire sits on the same lock primitives as W6, but all
+  16 W6 minis are single-hart, so a live releaser paired with an AMO acquirer has no mini.
+- `W7 × amo` — **real.** `firmware/fw_base.S:48` is an `amoswap` lottery; no mini runs a *contested*
+  `amoswap` election, so the archetype's own witness instruction is untested at its own layer.
+
+**thread-select** (6 empty)
+
+- `W1 × thread-select` — **real.** I23 (every ready hart granted fetch within a bound) during a long
+  structure walk is exactly the `mini_fdt_nt_osbi` shape, but that mini is filed LSU.
+- `W2 × thread-select` — **real.** A probe repeated dozens of times while a peer is ready is the
+  I9-hold-versus-I23-bound conflict in its smallest form; untested.
+- `W3 × thread-select` — **structural.**
+- `W4 × thread-select` — **structural** (`W1 ≡ W4`).
+- `W5 × thread-select` — **real, and the headline gap.** R2′ Home is literally “thread-select bound;
+  not fetch”, and W5's only mini is single-hart and filed LSU. The archetype's own home layer has
+  zero minis.
+- `W6 × thread-select` — **real.** A spinning AMO acquirer must not be able to hold fetch (I23);
+  untested.
+
+**none** (7 empty) — `W1`…`W7 × none` are all **structural**: `none` means “no layer under test”, so
+an archetype-carrying mini can never legitimately land there.
+
+### Counts are of existence, not of passing
+
+Every number above counts *the existence of a mini in a cell*. None of it is a verdict. Per **H3**,
+the DI classifier was corrected on **2026-08-31** (it had read the harness timeout line
+`*** SUCCESS *** (tohost = 0)` as a pass), and every DI result recorded before that date was
+measured under a superseded verdict and must be re-run or annotated before it is cited. A populated
+cell therefore means “a directed program for this shape exists in tree”, not “this shape is green”.
+Read together with **T4/P2**: even a genuinely passing mini eliminates a *shape*, never a class —
+which is why `ARCHETYPES.yaml` records `missing_cofactors` next to `cofactors` for every entry.
+Only five minis run a live peer hart (`mini_fetch_straddle`, `mini_fdt_ro_probe`,
+`mini_fdt_nt_osbi`, `mini_stq_press_smt`, `mini_ipi_hart1_sp`); the other 59 hart-aware minis merely
+park `mhartid != 0`.

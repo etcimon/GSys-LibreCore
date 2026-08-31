@@ -145,17 +145,76 @@ Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`
     the proxy; a wrong answer in either direction aborts the run before any test.
   - **Hatch ledger:** `soft-ladder/inventory.yaml` gains the H7 `hatches:` schema, a repayment schedule, and the
     seven artifacts that repaid this pass.
+- **Third pass — L3 layer contracts (M4) and the R11 hart-count contract.**
+  - **M4 landed.** `core/fetch_B/g6lc_fetch_dbg.sv` is bound into `frontend` and already asserted I1/I2/I7-partial,
+    but the bind omitted the realigner's carry state, so I3/I5 could not be checked at all. Added
+    `leftover_valid_i` / `leftover_pc_i` / `leftover_lo_i` (the halfword observed hierarchically as
+    `i_instr_realign.carry_instr_q`, so the synthesizable port list is unchanged for a `translate_off` check) and
+    five assertions on the **emission**: slot0's PC is the carried PC, slot0's low half is un-rewritten (I2), and
+    the completed slot0 is RVI with `ilen==4` (I5). The *enable* conditions are deliberately not re-checked here —
+    the realigner builds them from the same `g6lc_fetch_pkg` functions the new L2 formal proves, so asserting them
+    at this tap would be a tautology. **OpenSBI anchor:** `include/sbi/sbi_csr_detect.h:17` arms mtvec and executes
+    a possibly-illegal `csrr`, and `lib/sbi/sbi_expected_trap.S:23` advances `mepc` by a **fixed 4** — sound only
+    because `csrr` is always 4-byte RVI. A completion that emits a 16-bit fragment at the probe address turns a
+    legal probe into an illegal instruction *and* mis-advances `mepc` (the R3(c) obligation), and would otherwise
+    surface ~10M cycles later as an unrelated hang.
+  - **I23 bound observed, not enforced.** `hold_age_q` was computed and only printed; it now `$warning`s once per
+    run when it exceeds `geo.hold_max`. Deliberately a warning and deliberately latched: silently releasing a hold
+    is itself a recorded negative (`NEGATIVE.md` §1, unbounded vs early lift), and an assertion that fires every
+    cycle is noise rather than blame locality.
+  - **R11 / I25 pushed to build time.** `software/smt2-linux/scripts/dts_to_dtb.py` now enforces that the number of
+    `cpu@` nodes **OpenSBI would actually count** equals `NrCores × NrHarts` of the owning config package. The three
+    counting conditions mirror `platform/generic/platform.c:172-184` exactly (parseable `reg`; `hartid <
+    SBI_HARTMASK_MAX_BITS` = 128 per `include/sbi/sbi_hartmask.h:23`; enabled per `lib/utils/fdt/fdt_helper.c:245`,
+    i.e. `status` absent or beginning `okay`/`ok`). `platform.hart_count` is the FDT walk's only durable output, so
+    a mismatch is never diagnosed by firmware — it appears as a hart that never leaves the HSM wait or an interrupt
+    delivered to a context that does not exist. New `DTS_CONFIG_PKG` pairing table, `--expect-harts`,
+    `--config-pkg`, `--no-hart-count-check`, and a standalone `--check-all-harts` sweep.
+  - **Defect found by that check, reported not changed:** `corev_apu/bootrom/ariane-ai.dts` advertises **one**
+    countable `cpu@` (and its CLINT `interrupts-extended` references only `CPU0_intc`) while
+    `core/include/g6lc64_ai_config_pkg.sv` sets `NrCores=2`, i.e. **S=2**. OpenSBI would set `plat_hc=1` and core 1
+    would never be started. Resolution is an owner decision — either add the second `cpu@`/intc and its CLINT+PLIC
+    contexts, or drop the AI package to `NrCores=1` — so it is recorded rather than unilaterally patched. The other
+    five mapped DTS/package pairs agree (`ariane.dts` 1, `smt2` 2, `stream8` 2, `server_math_v` 4, `ooo_server` 8).
 - Corrected the proxy and the local `soft-ladder-di-regress.sh` pass detection: a DI test only passes when the harness log shows `tohost = 1` (or `tohost = 0x1`). The previous logic treated the harness `*** SUCCESS *** (tohost = 0)` timeout as a pass, which inflated the 15/16 and 16/16 reports. **T9 (invalidate backwards) applies:** every DI count recorded before this fix came from the old classifier and is not comparable — re-measure or annotate before citing, especially where one was used to *eliminate* a hypothesis. With the corrected detection, the full consecutive DI suite is currently **0/16 PASS**:
   - `mini_amoadd_w_spin`, `mini_csr_expected_trap`, `mini_csr_pmp_probe`, `mini_dual_cmv_s3`, `mini_fdt_s2_nest`, `mini_fdt_check_prop_nest`, `mini_fdt_next_tag_lbu`, `mini_fdt_a0_is_fdt`, `mini_stq_flush_fwd`, `mini_fdt_namelen_walk`, `mini_fdt_nt_frame32`, `mini_fdt_nt_stock`, `mini_fdt_nt_cpus`, `mini_stq_alias_jal`, `mini_fdt_nt_osbi` all time out with `tohost = 0` (or hang at the bootrom `_hang`/`0x0` fetch loop).
   - `mini_fdt_lenp_sw` reaches its `fail:` path and the `rvfi_tracer` terminates the simulation (`rc=1`, `tohost=0`).
 - The bootrom `s0` symptom that motivated the filter is **unexplained, not fixed**: with the accommodation in place the B harness still stalled with `npc=0x10000` and `s0=0x0` for 64+ cycles, and legacy/slfix showed the same. That is H4 territory — the symptom was never made deterministic, so the three successive attributions to it are unfalsifiable and none is recorded as a conclusion.
 - Next (ordered by ladder position, not by symptom):
+  0. **Grow the battery along the axis the firmware supplies (T4).** M5 shows the residual's defining co-factor — a
+     live peer hart — is present in 5 of 113 minis. Before any further attribution, add live-peer variants for the
+     W1 minis that already pin the class single-hart, and one `W5 × thread-select` mini
+     (`lib/sbi/sbi_init.c:196` `wait_for_coldboot`: peer spins on `__smp_load_acquire` until the boot hart
+     releases). A mini that passes eliminates a shape, never a class.
   1. **H4 determinism before attribution.** Establish whether the bootrom `npc=0x10000` / `s0=0` stall is stable across three runs at `verilator --threads=1` with the observer binds off. If the outcome depends on simulator scheduling, the race/X *is* the bug and it outranks any functional hypothesis. Do not attribute until it is stable.
   2. **T2 promise location, not component.** With a stable symptom, name the first false promise on `I$ → realign → IQ → issue → EX → commit`, and instrument *that* boundary. `g6lc_fetch_dbg` already asserts I1 (bytes==memory); I3/I5/I7 have no boundary SVA yet (M4).
   3. **Run the new formal first.** `verify --formal` now covers I2/I3/I5/I7/I8. A counterexample there is seconds and names the tuple; it is strictly cheaper than any harness run and must be exhausted before a soak.
   4. Only then the OpenSBI residual (`mepc0=0x8000a9a8`, `mcause0=0x2`) — as a **gate**, not a search signal.
 - Deliberately **not** doing: another peel, another hold-ELF cycle, or another TRACE hunt for this class. H7 blocks a second unrepaid use, and the repayments for this class landed above.
-- Remaining migration items from the heuristics §5 table: **M4** (I3/I5/I7 boundary SVAs — `g6lc_fetch_dbg` computes some of these already) and **M5** (tag minis by archetype W1–W7 so the archetype × layer coverage matrix is knowable). **M1/M2/M3/M6 are landed.**
+- **M5 landed, and its result reframes the residual.** `verif/tests/custom/multicore/ARCHETYPES.yaml` classifies all
+  113 minis (+2 controls) by archetype W1–W7, owning layer, invariants, and the co-factors each actually supplies;
+  the matrix and a real/structural verdict for all 64 empty cells are in
+  [`soft-ladder/README.md`](architecture/multi-threading/soft-ladder/README.md) §"Archetype x layer coverage (M5)".
+  Counts are of **existence, not passing** (H3/T9). Three findings that matter more than the counts:
+  1. **Cross-hart is essentially untested.** Only **5 of 113** minis run a live peer hart
+     (`mini_fetch_straddle`, `mini_fdt_ro_probe`, `mini_fdt_nt_osbi`, `mini_stq_press_smt`, `mini_ipi_hart1_sp`);
+     the other 60 hart-aware minis merely *park* `mhartid!=0`. W5 (release/acquire) has one mini total and it is
+     single-hart, so `W5 × thread-select` — R2′'s own stated Home — is **empty**. This is P2/T4 exactly: the SMT2
+     residual is a `T=2` property, and the battery samples the `T=1` face of the cube. It also explains why a
+     green DI suite has never predicted the firmware outcome.
+  2. **`W3 × L4-redirect` is empty** although `R3 ≡ R5` makes redirect one of the *two* real capability gaps.
+     Nothing pins I11/I19 for a function-pointer table (`include/sbi/sbi_platform.h:265` is `if (ops->f) return
+     ops->f(...)` for every service).
+  3. **`W2 × L1-align` and `W2 × issue` are empty**, and both are named verbatim in R3: no mini places a CSR probe
+     at a straddling address (clause c — the blind `mepc += 4`), and no mini owns "`csrrw mtvec` must not
+     dual-issue with the CSR it is arming" (clause d, `stall_csr_older`). The whole `csr` layer column is zero.
+  Distribution is also lopsided: `W1 × LSU` (68) and `W6 × amo` (16) hold 84 of the 106 classified minis.
+  Lower-confidence classifications are flagged per-entry in the YAML (`mini_hpd_*` W1-vs-W3 ~70%; the 68 `W1 × LSU`
+  homes ~75%, resolved via the blame router's data signature since R4's Home is explicitly ambiguous).
+- Migration items from the heuristics §5 table: **M1–M6 are now landed.** M7 ("capability work resumes on proven ground") is the state this reaches, not a task. Open follow-ups it exposes, in ladder order:
+  1. `ariane-ai.dts` vs `g6lc64_ai_config_pkg.sv` hart-count mismatch (above) — an owner decision, and the first real defect the new L1 checks caught.
+  2. `core/scoreboard.sv` still consults the A-path `g6lc_sb_keep` list; waived-with-note in `diag-isa-red-lines`. Owed artifact is a squash-window contract at the EX→commit boundary.
+  3. The `.sby` files are unrun on this host (no SymbiYosys). First `verify --formal` on a host that has it will confirm the three fetch proofs, or expose that `packet_upto_cf`'s loop `break` needs an older-yosys rewrite.
 
 **AI matrix card (`Xg6lcai`) + licensing — live track (not scaffold-only):**
 

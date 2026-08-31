@@ -1,0 +1,1274 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Etienne Cimon
+#
+# ARCHETYPES.yaml - archetype x layer registry for the directed minis in this
+# directory.
+#
+# WHY THIS FILE EXISTS
+#   architecture/AGENTS-g6lc-opensbi-dev-heuristics.md section 5, item M5
+#   ("Battery classification"): the minis under verif/tests/custom/multicore
+#   were not tagged by archetype, so the archetype x layer matrix had unknown
+#   coverage. This registry is that tagging. The coverage matrix derived from
+#   it lives in
+#   architecture/multi-threading/soft-ladder/README.md, section
+#   "Archetype x layer coverage (M5)".
+#
+# VOCABULARY - all of it is imported, none of it is invented here.
+#   archetypes W1..W7   AGENTS-g6lc-opensbi-dev-heuristics.md section 2
+#   witness loci        AGENTS-g6lc-opensbi-dev-heuristics.md section 1
+#                       (the WITNESSES list) and
+#                       multi-threading/AGENTS-smt2-opensbi-dev-logics.md
+#                       section 2 (the R1..R12 table)
+#   layers              multi-threading/AGENTS-smt2-opensbi-dev-logics.md
+#                       section 2 "Home" column and section 4 owning_combo
+#   invariants I1..I28  firmware-boot-principles.md section B
+#
+# WHAT A GREEN MINI PROVES - read before using this file to close anything.
+#   Heuristic T4 / proposition P2: a mini that passes eliminates a SHAPE, never
+#   a class. Each mini here fixes one point in a product of co-factors (second
+#   hart, dual issue, RVC straddle, call nesting, live frame). Passing that
+#   point says nothing about the other points of the same archetype. That is
+#   why every entry carries both `cofactors` (what the mini supplies) and
+#   `missing_cofactors` (what the firmware supplies and the mini does not).
+#
+# WHAT THIS FILE IS NOT
+#   It is not a verdict record. It records EXISTENCE of a mini per cell, not
+#   pass/fail. Per heuristic H3, every DI pass recorded before 2026-08-31 was
+#   measured under a superseded verdict and must be re-run before it is cited.
+#   It is also not a target: a `witness` field is a citation that the archetype
+#   occurs in real supervisor firmware, never a specification and never
+#   something RTL may know about.
+#
+# HONESTY RULES APPLIED HERE
+#   * `null` means "not determinable from the source", and the `note` says so.
+#   * `archetype: null` means no section-2 archetype fits; the mini is counted
+#     as unclassified rather than forced into a cell, so the matrix is not
+#     inflated. Seven minis are in that state.
+#   * A `witness` is only filled in when the locus appears verbatim in the
+#     heuristics WITNESSES list or the logics R-table. No locus is guessed.
+#   * `mini_must_pass` / `mini_must_fail` are oracle controls (H3), not suite
+#     members, and are listed under `controls` with no archetype.
+
+meta:
+  task: "M5 - Battery classification"
+  source_dir: "verif/tests/custom/multicore"
+  generated_from: "header comment blocks plus body inspection of every *.S in this directory"
+  file_count: 115
+  mini_count: 113
+  control_count: 2
+
+  archetypes:
+    W1: "Structure walk - nested calls, pointer-through-argument stores, byte-assembled words, values that are offsets before they are addresses."
+    W2: "Self-armed trap probe - arm vector, execute possibly-illegal, restore vector, inline, repeated."
+    W3: "Indirect dispatch - function-pointer table, one indirect call per service."
+    W4: "Byte-string walk - data-terminated loops over unaligned bytes; contract family identical to W1."
+    W5: "Release/acquire handshake - one hart releases, others spin-acquire."
+    W6: "Atomic ticket / reservation - amoadd ticket, lr/sc retry."
+    W7: "Election / self-relocation - lottery, GOT rewrite, per-hart stack creation."
+
+  layers:
+    L1-align: "align_slots - bytes and alignment; I1-I5 (leftover, straddle, mixed RVC/RVI at every legal boundary)."
+    L2-accept: "window_accept - whole-window acceptance; I7 (partial acceptance is illegal)."
+    L3-order: "order - program order / packet; I6 (may drop, never modify)."
+    L4-redirect: "arch_redirect - which PC is next; I8-I12 (priority, trap hold, eret, mispredict, sequential step)."
+    LSU: "store queue / write buffer / D$ / forwarding; I16, I17. Explicitly NOT fetch."
+    issue: "issue_read_operands and scoreboard hazards, including stall_csr_older."
+    commit: "commit and squash membership; I13-I15."
+    csr: "per-hart CSR banks and CLINT; I22, I25."
+    amo: "amo_buffer / store_unit - AMO forward progress and reservation survival; I15, I24."
+    thread-select: "SMT thread selection and the bounded fetch grant; I10, I23."
+    none: "no layer under test - harness or bring-up smoke."
+
+  cofactors:
+    smt: "the mini is hart-aware: it reads mhartid and either parks mhartid!=0 or runs a live peer. The note says which; only five minis run a genuinely live peer."
+    dual_issue: "the mini deliberately shapes an issue pair or names dual-issue as the mechanism under test, rather than merely being run on a DI package."
+    rvc_straddle: "the mini deliberately places a 32-bit RVI so that it straddles a fetch window at a 2-byte boundary, or deliberately mixes RVC and RVI so RVI lands 2-byte aligned."
+    nested_calls: "a call is made from inside a callee, so at least two frames are live at the pin."
+    live_frame: "a callee-saved register, ra, or a stack slot must stay live across the event under test (a call, a trap, or a squash)."
+
+  note: >-
+    Counts derived from this file are counts of EXISTENCE, not of passing (H3).
+    A mini that passes eliminates a shape, not a class (T4/P2), so
+    `missing_cofactors` is as load-bearing as `cofactors`. Five minis run a live
+    peer hart (mini_fetch_straddle, mini_fdt_ro_probe, mini_fdt_nt_osbi,
+    mini_stq_press_smt, mini_ipi_hart1_sp); the other 59 minis that carry the
+    `smt` flag only park mhartid!=0, which supplies a second hart context but no
+    peer memory traffic. Where a layer assignment was contested the note records
+    the co-owner rather than silently picking one.
+
+controls:
+  - id: mini_must_pass
+    role: positive
+    expected_verdict: PASS
+    layer: none
+    invariants: []
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "H3 O2 positive control; parks mhartid!=0, writes tohost=1 in three instructions. Preflight gate for soft-ladder-di-regress.sh and testharness_proxy.py, not a suite member. No archetype by construction."
+
+  - id: mini_must_fail
+    role: negative
+    expected_verdict: FAIL
+    layer: none
+    invariants: []
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "H3 O2 negative control; writes tohost=3 unconditionally. Proves the oracle can say FAIL - the 2026-08-31 pass-biased-classifier class. Not a suite member. No archetype by construction."
+
+minis:
+  # ---------------------------------------------------------------------------
+  # W1 - structure walk. 79 minis. This is where the battery actually lives.
+  # ---------------------------------------------------------------------------
+  - id: bisect_bnez_midj
+    archetype: W1
+    secondary: W4
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls]
+    witness: null
+    note: "No header block; classification read off the body - inlined memcpy head that spills the three pointer arguments to the frame and reloads them each iteration. No OpenSBI locus for memcpy appears in either list, so witness is null."
+
+  - id: mc_spo_st_fwd
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "Same-core RAW store-to-load forward, bare metal. Single-factor test: no peer hart, no nesting, no straddle."
+
+  - id: mini_bnez_jal_split
+    archetype: W1
+    secondary: null
+    layer: L1-align
+    invariants: [I3, I5, I11, I13]
+    cofactors: [smt, rvc_straddle, nested_calls, live_frame]
+    missing_cofactors: [dual_issue]
+    witness: "lib/utils/libfdt/fdt.c:219"
+    note: "Reproduces the fdt_check_node_offset_ 12ac0 packing where an 8B window splits a jal at +6; trains the bnez taken then not-taken to see whether a BHT taken-kill drops the jal leftover. smt is park-only."
+
+  - id: mini_dual_cmv_s3
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [dual_issue]
+    missing_cofactors: [smt, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "PEEL_CMV shape - ld s3 then a c.mv pair then a consumer load; s3 must stay the loaded pointer. This is the I4b* per-register-pair family the heuristics doc criticises, so no archetype locus is a clean witness for it."
+
+  - id: mini_ecall_list_init
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "INIT_LIST_HEAD at a fixed PA with the address fully materialised before any store. Same link-chasing archetype as the heap freelist; the actual firmware site is sbi_ecall, which is not an enumerated locus. smt is park-only."
+
+  - id: mini_ecall_list_one
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "One-node variant of the list-walk bisect; all addresses held in s-registers before any store. smt is park-only."
+
+  - id: mini_ecall_list_void
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "mini_ecall_list_one plus same-line dummy loads between the list stores, so addresses retire first. smt is park-only."
+
+  - id: mini_ecall_list_walk
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "Insert N list_head nodes then chase next pointers; the load's result is the next address. Unrolled inserts, no jal and no fence, so there is no nesting co-factor. smt is park-only."
+
+  - id: mini_fdt_a0_is_fdt
+    archetype: W1
+    secondary: null
+    layer: L1-align
+    invariants: [I1, I2, I3, I5, I16, I17]
+    cofactors: [smt, rvc_straddle, nested_calls, live_frame]
+    missing_cofactors: [dual_issue]
+    witness: "lib/utils/libfdt/fdt.c:143"
+    note: "COMPLETION.md stage 0 mini; eleven phases over offset_ptr / next_tag / getprop under DI, including explicit leftover-high-bit phases. Layer is contested: L1-align for the leftover phases, LSU for the sd ra / ld ra phases (0x68, 0x69). smt is park-only."
+
+  - id: mini_fdt_check_prop_nest
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I13, I16, I17]
+    cofactors: [dual_issue, nested_calls, live_frame]
+    missing_cofactors: [smt, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:356"
+    note: "check_node / next_tag / by_offset_ fail path under dual issue; pins the mepc=0x12eb2 sw a0,0(s2) class where s2 is ra residue instead of the stack lenp."
+
+  - id: mini_fdt_getname_sp32
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:219"
+    note: "80B fdt_get_name frame nested in a 32B check_node whose c.addi16sp +32 sits at +8 of a 16B line; the pin is that sp is restored 32B low so ld ra reads the wrong slot. smt is park-only."
+
+  - id: mini_fdt_lenp_sw
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "The out-parameter store itself - c.mv s2,a2 then sw a0,0(s2), which must not land on code (historic mtval=0x80012b2a). Exactly the witness shape: a helper storing through a caller-supplied pointer."
+
+  - id: mini_fdt_namelen_walk
+    archetype: W1
+    secondary: W4
+    layer: LSU
+    invariants: [I1, I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "Combined walk (I4cc): namelen_ keeps s2=fdt and s3=lenp across check_node then a natural next_tag with a 4xlbu tag and a byte name-skip, then the by_offset out-parameter store with no refresh."
+
+  - id: mini_fdt_next_tag_lbu
+    archetype: W1
+    secondary: W4
+    layer: LSU
+    invariants: [I1, I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Structure-load shape: stack-only nests already pass, so this adds the multi-lbu plus shift/or big-endian tag assemble over a tiny in-image FDT."
+
+  - id: mini_fdt_nt_cpus
+    archetype: W1
+    secondary: W4
+    layer: LSU
+    invariants: [I1, I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "32B check_node / 64B next_tag nest with a named BEGIN_NODE, so the per-byte jal offset_ptr name skip runs before the PROP call. The empty-name variant was green, hence the named node."
+
+  - id: mini_fdt_nt_frame32
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:219"
+    note: "The frame-alias mini: check_node's 32B frame puts the first call's sd ra,56(sp) on the second call's ld s3,24(sp) slot. Three phases (alias only, ALU delay, jr a5 jump table)."
+
+  - id: mini_fdt_nt_osbi
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17, I22, I24]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "Stock namelen_ / by_offset_ / check_node / next_tag trampoline at pin VAs. One of only five minis with a LIVE peer: hart1 store-spins on a set-conflict line so an SMT switch-on-miss lands inside the walk."
+
+  - id: mini_fdt_nt_osbi_bochk
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:356"
+    note: "Stock namelen I-stream with a checker at the jal by_offset, to decide whether s3 is already clobbered before by_offset or inside it. smt is park-only (hart1 WFI)."
+
+  - id: mini_fdt_nt_osbi_cut
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Packed namelen truncated to ret after the second jal next_tag, to separate packing plus jal from the by_offset continuation. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_cutbo
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:356"
+    note: "Packed namelen truncated to ret immediately before the jal by_offset, so the second next_tag and the tag loop run without the by_offset store. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_cutli
+    archetype: W1
+    secondary: null
+    layer: L1-align
+    invariants: [I3, I5, I16]
+    cofactors: [smt, rvc_straddle, nested_calls, live_frame]
+    missing_cofactors: [dual_issue]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Packed namelen cut after a c.li a5,9 leftover then ret; the cut point is chosen at a leftover halfword, which is why the layer is L1-align rather than LSU. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_h0
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17, I22]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "mini_fdt_nt_osbi with hart1 parked in WFI instead of store-spinning. Its entire purpose is to subtract the live-peer co-factor, so it is the control half of that pair."
+
+  - id: mini_fdt_nt_osbi_pro
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "Three-way bisect of the namelen mid-saves selected by a7 (five far stores, one sd s11,40(sp), stock five mid-saves). smt is park-only."
+
+  - id: mini_fdt_nt_osbi_sw
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "Same trampoline as mini_fdt_nt_osbi but a software 144B namelen instead of the stock blob, isolating stock packing bytes from the 32B/64B nest. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tight
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "Five c.sdsp then the stock tail with no control flow between the stores and the jal next_tag. Base member of the tight* bisect family. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightbo
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:356"
+    note: "Tight 5-save nest with software-correct s2/s3, then the namelen FDT_PROP jal by_offset. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightn0
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "tight with zero mid c.sdsp - the N=0 point of the mid-save count sweep. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightn1
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "tight with one mid c.sdsp - N=1 point of the mid-save count sweep. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightn2
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "tight with two mid c.sdsp - N=2 point of the mid-save count sweep. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightn3
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "tight with three mid c.sdsp - N=3 point of the mid-save count sweep. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightn4
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "tight with four mid c.sdsp - N=4 point of the mid-save count sweep, the historic four-namelen-mid-save class. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightnop1
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "tight plus one c.nop after the five c.sdsp - separation sweep, distinct axis from the tightnN count sweep. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightnop2
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "tight plus two c.nop after the five c.sdsp - separation sweep. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightnop4
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "tight plus four c.nop after the five c.sdsp - separation sweep; the recorded split (s3 lives, s2 dies) is the reason this point exists. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightprop
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "tight phase 1 then software-correct s2/s3 from immediates and a bounded next_tag walk, to test whether the nested walk after the 5-save window is itself red. smt is park-only."
+
+  - id: mini_fdt_nt_osbi_tightva
+    archetype: W1
+    secondary: null
+    layer: L1-align
+    invariants: [I1, I2, I16]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Same tight nest as mini_fdt_nt_osbi_tight but the tail is linked at the pin VAs, so the only variable is instruction address. That makes L1-align the owning layer even though the observable is an s2/s3 clobber. The header does not claim a 2-byte straddle, so rvc_straddle is left unset. smt is park-only."
+
+  - id: mini_fdt_nt_ptr0
+    archetype: W1
+    secondary: W3
+    layer: L1-align
+    invariants: [I3, I5, I11]
+    cofactors: [smt, rvc_straddle, nested_calls, live_frame]
+    missing_cofactors: [dual_issue]
+    witness: "lib/utils/libfdt/fdt.c:143"
+    note: "Pointer liveness after a deliberate 32-bit RVI leftover: an addi is placed at 0x80012986 so it straddles the 64-bit boundary at 0x80012988, and the returned pointer is then consumed by c.jr a0. Real libfdt fdt_offset_ptr is loaded as a blob. smt is park-only."
+
+  - id: mini_fdt_nt_set
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "D$ set-conflict variant: FDT and the namelen stack pointer are placed in the same cache set but different lines and different pages, to separate set pressure from same-line aliasing."
+
+  - id: mini_fdt_nt_stock
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Stock-interior next_tag: stock offset_ptr frame plus header lbu, the c.lw tag shape, and the jr a5 BEGIN_NODE/PROP jump table on the 32B/64B nest. The jr a5 table is the W3 secondary."
+
+  - id: mini_fdt_nt_stock_nx
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:18"
+    note: "Stock next_tag with the FDT moved outside the execute region, so the header lbu path is cached rather than uncached-by-execute-overlay. Isolates uncached FDT byte loads from the jump table."
+
+  - id: mini_fdt_nt_stock_pad
+    archetype: W1
+    secondary: W3
+    layer: L1-align
+    invariants: [I1, I2, I12]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Stock next_tag with nt_begin realigned to 16B after the c.jr, to separate same-line jalr target and next-line fetch from the rest of the interior. Layer is L1-align because alignment is the only variable."
+
+  - id: mini_fdt_rdxrs1
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:18"
+    note: "rd == rs1 byte loads on the FDT header (lbu a5,38(a5) / lbu a5,26(a5)) plus the assembled big-endian words. Exactly the byte-assembled-header witness. smt is park-only."
+
+  - id: mini_fdt_ro_probe
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls]
+    witness: "lib/utils/libfdt/fdt.c:18"
+    note: "Calls the stock fdt_ro_probe_ blob against the real DTB with a cache-warmup stack store. One of the five minis with a LIVE peer: hart1 store-spins."
+
+  - id: mini_fdt_s2_nest
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:356"
+    note: "next_tag-shaped s2 save/restore nest then the by_offset_ fail-path store; catches callee-saved s2 clobber across jal (hang-6 family). No FDT data, so it is the pure liveness half."
+
+  - id: mini_fdt_walk_prop
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I1, I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:394"
+    note: "Real big-endian FDT with s2=lenp held across a nested save/restore; Spike-green first, then DI RTL."
+
+  - id: mini_fetch_straddle
+    archetype: W1
+    secondary: null
+    layer: L1-align
+    invariants: [I1, I2, I3, I5]
+    cofactors: [smt, rvc_straddle]
+    missing_cofactors: [dual_issue, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt_ro.c:356"
+    note: "The canonical straddle mini: a 32-bit beqz is placed at 0x80012006 so it crosses the 64-bit fetch word at 0x80012008, mirroring the npc0=0x800138d8 pin. One of the five minis with a LIVE peer (hart1 store-spins)."
+
+  - id: mini_freelist_unlink
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "sbi_malloc freelist unlink - ld a1,0(a4); ld a0,8(a4); sd a1,0(a0); sd a0,8(a1). The load's result is the next store address, which is the witness clause verbatim. Single-factor test."
+
+  - id: mini_hpd_2jr
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Two jump-table lw+jr pairs with no offset_ptr, to see whether the second jr hang needs offset_ptr leftover. The jtab is the next_tag tag dispatch, hence W1 primary with W3 secondary. smt is park-only."
+
+  - id: mini_hpd_2jr_after
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "One jal do_jr then a second lw of the same jtab word with no second jr, to test whether leftover from the first jr blocks any later load of that word. smt is park-only."
+
+  - id: mini_hpd_2jr_data
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "mini_hpd_2jr with the jump table in .data instead of .text, separating I$/D$ same-line aliasing from a D$-fill abort. smt is park-only."
+
+  - id: mini_hpd_2jr_fencei
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "mini_hpd_2jr with fence.i between the two jal do_jr, to test I$ coherence of the .text jtab line. smt is park-only."
+
+  - id: mini_hpd_2jr_ld
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "One scratch ld inserted between the two jal do_jr, to test whether a dummy load drains the leftover. smt is park-only."
+
+  - id: mini_hpd_2jr_lwf
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "D$ fence (not fence.i) between the jtab lw and the jr a5 inside do_jr. smt is park-only."
+
+  - id: mini_hpd_2jr_lwfi
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "fence.i between the jtab lw and the jr a5 inside do_jr; pairs with mini_hpd_2jr_lwf to separate I$ from D$. smt is park-only."
+
+  - id: mini_hpd_2jr_lwnop
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Eight c.nop between the jtab lw and the jr a5, to test whether splitting the lw/jr packet is enough without fence semantics. smt is park-only."
+
+  - id: mini_hpd_2jr_pad
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "mini_hpd_2jr with the jtab moved 64B away from jr_one, so line adjacency is the only variable. smt is park-only."
+
+  - id: mini_hpd_2lw_data
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "Two lw of the same .data word with no jr - the smallest point of the hpd bisect lattice. smt is park-only."
+
+  - id: mini_hpd_2lw_jal
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "Two lw of the same .data word with a jal between, to test whether any control flow between two loads of one line is enough. smt is park-only."
+
+  - id: mini_hpd_2lw_text
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "Two lw of the same .text word with no jr, isolating the I$/D$ alias axis. smt is park-only."
+
+  - id: mini_hpd_2lw_text_jal
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "Two lw of the same .text word with a jal between, the .text counterpart of mini_hpd_2lw_jal. smt is park-only."
+
+  - id: mini_hpd_2nt
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Two stock next_tag calls (offset_ptr plus jump table) without the 32B check_node nest, to decide whether the frame alias is required. smt is park-only."
+
+  - id: mini_hpd_2nt_diffsp
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Second next_tag uses a different 64B frame so its stores do not alias the first frame; isolates stack reuse from write-buffer occupancy. smt is park-only."
+
+  - id: mini_hpd_2nt_fence
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17, I24]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "fence between the two next_tag calls; a pass points at leftover HPD/MSHR/rtab state from the first jr a5 rather than the nest. smt is park-only."
+
+  - id: mini_hpd_2nt_nops
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "About 1024 addi of ALU delay between the two next_tag calls, to separate drain time from an ordering requirement. smt is park-only."
+
+  - id: mini_hpd_2nt_oneld
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "One dummy scratch ld between the two next_tag calls, no store and no fence. smt is park-only."
+
+  - id: mini_hpd_2nt_onesd
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "One dummy sd between the two next_tag calls, the N=1 point against the eight-store write-buffer fill. smt is park-only."
+
+  - id: mini_hpd_2nt_wbuf
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Eight sd to a scratch line between the two next_tag calls, sized to the write-buffer directory depth. smt is park-only."
+
+  - id: mini_hpd_lbu6
+    archetype: W1
+    secondary: W4
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:18"
+    note: "Six lbu into one 16B D$ line, sized against the request-table depth; the stock offset_ptr does five lbu into that line before ld ra. smt is park-only."
+
+  - id: mini_hpd_op_jtab
+    archetype: W1
+    secondary: W3
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "One stock offset_ptr (16B frame, six header lbu, ld ra) then the jump-table c.lw+jr - the smallest pair that combines the two halves. smt is park-only."
+
+  - id: mini_jal_beqz_win
+    archetype: W1
+    secondary: null
+    layer: L1-align
+    invariants: [I3, I8, I11, I12]
+    cofactors: [smt, rvc_straddle, nested_calls]
+    missing_cofactors: [dual_issue, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "next_tag jal and beqz placed in one 8B window; the RAS return to the beqz must not retire it with a stale a0. Callee is long so the call window can still be in flight at ret. smt is park-only."
+
+  - id: mini_jal_sd_ra
+    archetype: W1
+    secondary: null
+    layer: issue
+    invariants: [I15, I16]
+    cofactors: [smt, rvc_straddle, nested_calls, live_frame]
+    missing_cofactors: [dual_issue]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Predicted jal then a callee sd ra before the jal link writes back - a scoreboard RAW question, which is why the layer is issue rather than a fetch combo. Four phases, one of which straddles the jal. smt is park-only."
+
+  - id: mini_memcpy0
+    archetype: W1
+    secondary: W4
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: null
+    note: "No header block. Zero-length memcpy then memset through real calls with a full frame; pointer arguments are spilled and reloaded. No memcpy/memset locus appears in either citation list, so witness is null."
+
+  - id: mini_nt_nested_jal
+    archetype: W1
+    secondary: null
+    layer: L3-order
+    invariants: [I3, I6, I11, I13]
+    cofactors: [smt, rvc_straddle, nested_calls, live_frame]
+    missing_cofactors: [dual_issue]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "Leftover jal at +6 of an 8B window into a next_tag-like frame, then jal+beqz in one window. The named mechanism is the IQ address-FIFO head false-mispredicting the inner jal, so the layer is L3-order (I6) rather than L1-align. smt is park-only."
+
+  - id: mini_spo_st_fwd
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_heap.c"
+    note: "Bare-metal same-core store-to-load forward. Single-factor test; the bare-metal twin of mc_spo_st_fwd."
+
+  - id: mini_stq_alias_jal
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt.c:219"
+    note: "Same-PA store-queue aliasing without FDT tags: 32B check_node over 64B next_tag so the first sd ra,56(sp) aliases the second ld s3,24(sp), with asymmetric call counts per call as in the real BEGIN_NODE/PROP pair. smt is park-only and the header says it is required (shared SP races otherwise)."
+
+  - id: mini_stq_flush_fwd
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I13, I15, I16, I17]
+    cofactors: [nested_calls, live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:356"
+    note: "getprop s2/s3 frame reuse: f1 leaves its saved ra in a slot, f2 stores over it, takes a mispredicting branch, then reloads. Catches an STQ flush dropping a non-cancelled prologue store. commit (I13/I15) is a co-owner via the mispredict."
+
+  - id: mini_stq_press_smt
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17, I22]
+    cofactors: [smt, nested_calls, live_frame]
+    missing_cofactors: [dual_issue, rvc_straddle]
+    witness: "lib/utils/libfdt/fdt_ro.c:356"
+    note: "mini_stq_flush_fwd plus write-buffer pressure bursts and a LIVE second hart doing store bursts and AMOs on its own region, so SMT switches land between the callee sd and ld. One of only five minis with a live peer; the peer AMOs are background pressure, not the subject, so no W6 secondary."
+
+  - id: mini_win_prefix
+    archetype: W1
+    secondary: null
+    layer: L2-accept
+    invariants: [I2, I7, I12]
+    cofactors: [smt, rvc_straddle, nested_calls]
+    missing_cofactors: [dual_issue, live_frame]
+    witness: "lib/utils/libfdt/fdt.c:165"
+    note: "A ret sits at +6 of the same 8B window as the next_tag entry, so the sequential hit of that window is accepted after the jal and the prefix must not be issued. The header names the L2 live[] pc>=tgt rule, which is why this is the only L2-accept mini. smt is park-only."
+
+  - id: mini_wt_delay_ld
+    archetype: W1
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17, I24]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Same-hart store then a delayed load of one PA after the L1 fill, on the alias PA used by the namelen second ld s3. It isolates write-through write-around behaviour, which has no OpenSBI locus of its own in either list, so witness is null. smt is park-only."
+
+  # ---------------------------------------------------------------------------
+  # W2 - self-armed trap probe. 4 minis, all L4-redirect.
+  # ---------------------------------------------------------------------------
+  - id: mini_csr_expected_trap
+    archetype: W2
+    secondary: null
+    layer: L4-redirect
+    invariants: [I2, I8, I9]
+    cofactors: [dual_issue]
+    missing_cofactors: [smt, rvc_straddle, nested_calls, live_frame]
+    witness: "include/sbi/sbi_csr_detect.h:17"
+    note: "The exact witness shape: csrrw mtvec, csrr maybe-illegal, csrw mtvec restore, with an __sbi_expected_trap-style handler that advances mepc and mrets. Per R3, issue (stall_csr_older) is the co-owner of the arming-CSR pairing question."
+
+  - id: mini_csr_pmp_probe
+    archetype: W2
+    secondary: null
+    layer: L4-redirect
+    invariants: [I8, I9, I22]
+    cofactors: [live_frame]
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls]
+    witness: "lib/sbi/sbi_hart.c:771"
+    note: "Multi-step PMP probe loop with a3 as the pointer to a stack trap_info, matching the repeated-probe witness. The stack trap_info must survive the trap, hence live_frame. Not marked as owning the csr layer: in the R-table vocabulary csr banks are R9 (per-hart HSM/CLINT), not the PMP probe."
+
+  - id: mini_trap_cause
+    archetype: W2
+    secondary: null
+    layer: L4-redirect
+    invariants: [I8, I9]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_expected_trap.S:23"
+    note: "Arms mtvec, executes 170 c.nop, then a store that may trap, and the handler reports mcause. Arm-and-observe only: no mtvec restore, no mret, no repetition, so it supplies barely half the W2 shape. Single-factor test."
+
+  - id: mini_amocas_q_illegal
+    archetype: W2
+    secondary: W6
+    layer: L4-redirect
+    invariants: [I8, I9]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "include/sbi/sbi_csr_detect.h:17"
+    note: "Arms mtvec then executes an AMOCAS.Q with an odd rd, which must illegal-trap; the handler writes PASS. Same arm-then-maybe-illegal shape as the witness, but with no restore leg and no repetition."
+
+  # ---------------------------------------------------------------------------
+  # W3 - indirect dispatch. 1 mini as primary.
+  # ---------------------------------------------------------------------------
+  - id: mini_sib_cjalr
+    archetype: W3
+    secondary: W1
+    layer: L1-align
+    invariants: [I1, I2, I3, I5, I11]
+    cofactors: [smt, rvc_straddle]
+    missing_cofactors: [dual_issue, nested_calls, live_frame]
+    witness: "include/sbi/sbi_platform.h:265"
+    note: "Generic sibling c.jalr class by construction (CONTRACT.md Phase 1), not a VA-specific reproducer: an aligned RVI ld and an architectural c.jalr share a 16-byte line, with an optional leftover jal x0 on a taken-skip path. Five phases. The witness is the archetype locus for indirect dispatch, not the OpenSBI instance this generalises (which is a low-VA fw_base c.jalr and is not an enumerated locus). smt is park-only."
+
+  # ---------------------------------------------------------------------------
+  # W4 - byte-string walk. 2 minis. Contract family is identical to W1.
+  # ---------------------------------------------------------------------------
+  - id: mini_strlen_rvc
+    archetype: W4
+    secondary: null
+    layer: L1-align
+    invariants: [I1, I2, I3, I5]
+    cofactors: [dual_issue, rvc_straddle]
+    missing_cofactors: [smt, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_string.c:43"
+    note: "sbi_strlen-shaped RVC/RVI byte loop under DI, written because PEEL_CMV died half into an RVI add following an RVC addi. The deliberate C/I mixing is what puts RVI at 2-byte alignment, hence rvc_straddle."
+
+  - id: mini_dual_cmv_strlen
+    archetype: W4
+    secondary: W1
+    layer: LSU
+    invariants: [I1, I2, I16, I17]
+    cofactors: [dual_issue, nested_calls]
+    missing_cofactors: [smt, rvc_straddle, live_frame]
+    witness: "lib/sbi/sbi_string.c:43"
+    note: "Bridges mini_dual_cmv_s3 (green) to the PEEL_CMV failure: the c.mv pair feeds a strlen-like leaf call. W1 secondary because the c.mv pair is the structure-walk pointer-liveness half."
+
+  # ---------------------------------------------------------------------------
+  # W5 - release/acquire handshake. 1 mini, and it has no second hart.
+  # ---------------------------------------------------------------------------
+  - id: mc_spo_fence_drain
+    archetype: W5
+    secondary: null
+    layer: LSU
+    invariants: [I24]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/sbi_init.c:196"
+    note: "store then FENCE then load must observe the store. This supplies the RVWMO half of W5 and none of the cross-hart half: there is no releaser, no spinning acquirer, and no starvation bound under test. Treat it as a shape, not as coverage of the archetype."
+
+  # ---------------------------------------------------------------------------
+  # W6 - atomic ticket / reservation. 16 minis, all amo.
+  # ---------------------------------------------------------------------------
+  - id: mini_amoadd_w_spin
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15, I24]
+    cofactors: [dual_issue]
+    missing_cofactors: [smt, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/riscv_locks.c:48"
+    note: "OpenSBI-style ticket amoadd.w.aqrl then spin-load, under dual-issue-friendly ALU / c.mv / stack-RAW filler. Exactly the witness shape, but single-hart: there is no contending hart, so the forward-progress question is only half posed."
+
+  - id: mini_lrsc_d
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15, I24]
+    cofactors: [dual_issue]
+    missing_cofactors: [smt, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/riscv_locks.c:22"
+    note: "LR/SC dword pair under dual-issue filler: no flush_commit after lr.d, an LR-to-SC issue barrier blocking an intervening store, and the AMO buffer cancel path still permitting a later AMO. Single-hart, so nothing external can clobber the reservation."
+
+  - id: mini_printf_la_lock
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: [smt, dual_issue]
+    missing_cofactors: [rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/riscv_locks.c:48"
+    note: "la (auipc+addi) of the console lock then an amoadd.w acquire, isolating the DI la from OpenSBI occupancy. The recorded pin is the addi of the la, not the AMO, so issue or L1-align co-ownership is not excluded; amo is the archetype home. smt is park-only."
+
+  - id: mc_cas_lock_handoff
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15, I24]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/riscv_locks.c:48"
+    note: "Eight-iteration CAS acquire/release handoff on a stack word, single-hart, with an mtvec soft-skip for cores without Zacas. Ticket-handoff family; no contending hart."
+
+  - id: mc_spo_cas_stream
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15, I24]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "lib/sbi/riscv_locks.c:48"
+    note: "Stream fill plus AMOCAS handoff plus integrity check, with a compact working set because write-through makes multi-KiB loops multi-million-cycle. Single-hart."
+
+  - id: mini_amocas_d
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Bare-metal Zacas AMOCAS.D, soft-passing if the encoding is illegal. Zacas is not used by OpenSBI (its locks are amoadd and lr/sc), so there is no OpenSBI witness for this shape."
+
+  - id: mini_amocas_w
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Bare-metal Zacas AMOCAS.W. No OpenSBI witness - see mini_amocas_d."
+
+  - id: mini_amocas_q
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Bare-metal Zacas AMOCAS.Q register-pair CAS with even rd/rs2. No OpenSBI witness - see mini_amocas_d."
+
+  - id: mini_amocas_q_as_d
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "mini_amocas_d body with the Q funct3, checking the decoder alias. Encoding-level smoke; no OpenSBI witness."
+
+  - id: mini_amocas_q_smoke
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "One CAS then tohost, no value checks. Bring-up smoke for the Q path; no OpenSBI witness."
+
+  - id: mini_amocas_q_smoke2
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Two back-to-back AMOCAS.Q then pass, no value checks. No OpenSBI witness."
+
+  - id: mini_amocas_q_smoke2b
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "smoke2 with D-style register selection. Register-allocation variant only. No OpenSBI witness."
+
+  - id: mini_amocas_q_smoke2d
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "smoke2 with rs1=a3 instead of a4. Register-allocation variant only. No OpenSBI witness."
+
+  - id: mini_amocas_q_smoke2e
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "One CAS then a store to 16(sp), isolating a post-CAS store hang. No OpenSBI witness."
+
+  - id: zacas_amocas_d
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "CRT-hosted Zacas AMOCAS.D narrow smoke, soft-skipping without misa.A. No OpenSBI witness."
+
+  - id: zacas_amocas_w
+    archetype: W6
+    secondary: null
+    layer: amo
+    invariants: [I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "CRT-hosted Zacas AMOCAS.W narrow smoke, single-hart. No OpenSBI witness."
+
+  # ---------------------------------------------------------------------------
+  # W7 - election / self-relocation. 3 minis.
+  # ---------------------------------------------------------------------------
+  - id: mini_ipi_hart1_sp
+    archetype: W7
+    secondary: W5
+    layer: thread-select
+    invariants: [I10, I22, I23, I25]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "firmware/fw_base.S:38"
+    note: "Hart0 writes CLINT MSIP[1] then WFI; hart1 is unseen until ipi_i[1], then runs _start, sets its own sp and writes tohost. Exactly the witness clause - a hart's stack does not exist until its own path writes it. One of only five minis with a live peer. csr/CLINT is a co-owner of the layer."
+
+  - id: mini_wfi_noipi_hart1
+    archetype: W7
+    secondary: W5
+    layer: thread-select
+    invariants: [I22, I23]
+    cofactors: [smt]
+    missing_cofactors: [dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: "firmware/fw_base.S:38"
+    note: "The no-IPI counterpart of mini_ipi_hart1_sp: hart0 WFIs and hart1 must stay not-ready. Expected outcome is a cap hang, so a PASS here is a FINDING, not a green. It is a suite member, not an H3 oracle control, but its verdict must be read inverted."
+
+  - id: mini_jalr_bnez_lottery
+    archetype: W7
+    secondary: W3
+    layer: L1-align
+    invariants: [I3, I5, I11]
+    cofactors: [smt, rvc_straddle]
+    missing_cofactors: [dual_issue, nested_calls, live_frame]
+    witness: "firmware/fw_base.S:48"
+    note: "fw_base election/scratch_init shape: a leftover jal to a far target at scratch_init distance, plus an ops-table jalr and the csrr mhartid / c.mv sequence that decides whether scratch_init is skipped. Layer is L1-align because the pinned mechanism is the leftover jal, not the lottery itself. smt is park-only, so the lottery is never actually contested."
+
+  # ---------------------------------------------------------------------------
+  # Unclassified - no section-2 archetype fits. Counted separately so the
+  # matrix is not inflated. 7 minis.
+  # ---------------------------------------------------------------------------
+  - id: mc_spo_cf_stream
+    archetype: null
+    secondary: null
+    layer: commit
+    invariants: [I13, I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Multi-stream strided stores interleaved with branch/call noise for the OoO/server packages, so the cancel path coexists with prefetch and L2 traffic. This is a memory-system soak, not an OpenSBI workload archetype; forcing it into W1 would inflate the matrix."
+
+  - id: mc_spo_mispred_stream
+    archetype: null
+    secondary: null
+    layer: commit
+    invariants: [I13, I15]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Mispredict chain interleaved with stream stores, stressing cancel against the store buffer. Real contract (squash membership) but no section-2 archetype."
+
+  - id: mc_stream_plane
+    archetype: null
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Stream plane integrity - sequential 512B plus four non-overlapping stream heads. Bandwidth/integrity soak; no archetype."
+
+  - id: mini_stream_plane
+    archetype: null
+    secondary: null
+    layer: LSU
+    invariants: [I16, I17]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Bare-metal stream fill then verify, isolating the write-through store-to-load hang from CRT/memset noise. Bring-up isolate; no archetype."
+
+  - id: mini_jumps
+    archetype: null
+    secondary: null
+    layer: L4-redirect
+    invariants: [I12]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Taken direct jumps across I$ lines then PASS. Fetch-supply bring-up smoke; direct jumps are not indirect dispatch, so no archetype is claimed."
+
+  - id: mini_long
+    archetype: null
+    secondary: null
+    layer: L2-accept
+    invariants: [I7, I12]
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Stretches code past several I$ lines then writes tohost, diagnosing I$ fills beyond the first line under the Verilator preload. Bring-up smoke; layer assignment is low confidence (I7 vs plain I$ fill)."
+
+  - id: mini_tohost
+    archetype: null
+    secondary: null
+    layer: none
+    invariants: []
+    cofactors: []
+    missing_cofactors: [smt, dual_issue, rvc_straddle, nested_calls, live_frame]
+    witness: null
+    note: "Writes PASS to tohost and spins, single contiguous text+data for Verilator preload debug. Functionally a duplicate of the positive control but it IS a suite member, not a preflight gate, so it is listed here rather than under controls. Not hart-aware, so it is weaker than mini_must_pass on SMT packages."

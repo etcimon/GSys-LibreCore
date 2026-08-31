@@ -24,6 +24,12 @@ module g6lc_fetch_dbg
     input logic [CVA6Cfg.FETCH_WIDTH-1:0] data_q_i,
     input logic serving_unaligned_i,
     input logic leftover_pending_i,
+    // Leftover carry state (I3/I5). Read-only observation of the realigner's
+    // per-hart bank so the emitted slot0 can be checked against the carry it
+    // claims to complete.
+    input logic leftover_valid_i,
+    input logic [CVA6Cfg.VLEN-1:0] leftover_pc_i,
+    input logic [15:0] leftover_lo_i,
     input logic [7:0] hart_i,
     input logic [CVA6Cfg.INSTR_PER_FETCH-1:0] slot_v_i,
     input logic [CVA6Cfg.INSTR_PER_FETCH-1:0][CVA6Cfg.VLEN-1:0] slot_pc_i,
@@ -261,6 +267,38 @@ module g6lc_fetch_dbg
               k, slot_pc_i[k], slot_instr_i[k][15:0]);
       end
     end
+    // ---- L1 leftover EMISSION contract (I2 / I3 / I5) --------------------
+    // The realigner's *enable* (carry_ok) is built from the same
+    // `g6lc_fetch_pkg` functions the bounded formal proves, so re-checking it
+    // here would be a tautology. What is NOT proven downstream is that the
+    // slot actually emitted is the carry it claims to complete: `addr_o[0]`
+    // must be the carried PC and `instr_o[0][15:0]` the carried halfword, and
+    // nothing between the realigner and the queue may rewrite them (I2).
+    //
+    // The RVI check is the one with a firmware consequence. OpenSBI's CSR
+    // probe (`include/sbi/sbi_csr_detect.h:17`) arms mtvec, executes a
+    // possibly-illegal `csrr`, and its handler (`lib/sbi/sbi_expected_trap.S:23`)
+    // advances mepc by a FIXED 4. That is sound only because `csrr` is always
+    // a 4-byte RVI. A completion that emits a 16-bit fragment at the probe's
+    // address turns a legal probe into an illegal instruction AND mis-advances
+    // mepc -- the R3(c) obligation, and it would surface ~10M cycles later as
+    // an unrelated firmware hang rather than here.
+    if (rst_ni && En.align && serving_unaligned_i && slot_v_i[0]) begin
+      if (64'(slot_pc_i[0]) != 64'(leftover_pc_i))
+        $error("g6lc_fetch_dbg: I3 slot0 pc %x is not the carried pc %x",
+            slot_pc_i[0], leftover_pc_i);
+      if (slot_instr_i[0][15:0] != leftover_lo_i)
+        $error("g6lc_fetch_dbg: I2 slot0 low half %04x rewritten from carry %04x",
+            slot_instr_i[0][15:0], leftover_lo_i);
+      if (!rvi_prefix(slot_instr_i[0][15:0]))
+        $error("g6lc_fetch_dbg: I5 completed slot0 is not RVI lo=%04x pc=%x",
+            slot_instr_i[0][15:0], slot_pc_i[0]);
+      if (ilen_of(CVA6Cfg, slot_instr_i[0][15:0]) != 4)
+        $error("g6lc_fetch_dbg: I5 completed slot0 ilen!=4 pc=%x", slot_pc_i[0]);
+    end
+    // A carry cannot be completing and still be held for later.
+    if (rst_ni && En.align && serving_unaligned_i && !leftover_valid_i)
+      $error("g6lc_fetch_dbg: I3 completion without a held carry");
     if (rst_ni && fetch_snap_en &&
         ((fetch_snap_filt && snap_in_win) || (!fetch_snap_filt && snap_edge))) begin
       $display(
@@ -287,6 +325,25 @@ module g6lc_fetch_dbg
     end else hold_age_q <= '0;
   end
 
+  // I23 bound: "every hold carries an explicit bound", and NEGATIVE section 1
+  // is the unbounded-hold family. The bound is observed, never enforced --
+  // silently releasing a hold is itself a recorded negative (unbounded vs
+  // early lift), so this reports and does not touch the hold. Warning, and
+  // latched to one report per run, so an over-long hold names itself on the
+  // cycle it happens without turning every later run into noise.
+  logic hold_bound_reported_q;
+  // verilog_lint: waive always-ff-non-reset
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      hold_bound_reported_q <= 1'b0;
+    end else if (redirect_hold_i && !hold_bound_reported_q &&
+                 32'(hold_age_q) > Geo.hold_max) begin
+      hold_bound_reported_q <= 1'b1;
+      $warning("g6lc_fetch_dbg: I23 redirect_hold age %0d exceeds geo.hold_max %0d (pc=%x)",
+          hold_age_q, Geo.hold_max, redirect_pc_i);
+    end
+  end
+
   if (Issue > 1) begin : gen_issue_order
     // verilog_lint: waive always-ff-non-reset
     always_ff @(posedge clk_i) begin
@@ -302,7 +359,8 @@ module g6lc_fetch_dbg
       |snap.cf_mask, snap.kill_s1, snap.kill_s2, snap.bp_valid, snap.spec, snap.redirect_hold,
       snap.redirect_hit, snap.win_rej, snap.arch_valid, |snap.arch_src, snap.restore_fire,
       |snap.geo_issue, |snap.geo_harts, |snap.geo_slots, |snap.geo_hold_max, |snap.hold_age,
-      |arch_pc_i, |resolve_pc_i, Geo.smt,
+      |arch_pc_i, |resolve_pc_i, Geo.smt, leftover_valid_i, |leftover_pc_i, |leftover_lo_i,
+      hold_bound_reported_q,
       Geo.rvc, Geo.ftq, Geo.rvh, En.align, En.accept, En.redirect, En.trap_hold,
       En.bp_hint, |data_q_i, |slot_instr_i, |slot_bytes_ok};
 
@@ -320,6 +378,12 @@ bind frontend g6lc_fetch_dbg #(
     .data_q_i           (icache_data_q),
     .serving_unaligned_i(serving_unaligned),
     .leftover_pending_i (leftover_pending),
+    .leftover_valid_i   (leftover_valid),
+    .leftover_pc_i      (leftover_pc),
+    // The carried halfword is not a realigner output: it is observed
+    // hierarchically so the synthesizable port list stays unchanged for a
+    // translate_off-only check.
+    .leftover_lo_i      (i_instr_realign.carry_instr_q),
     .hart_i             (8'(smt_hart_i)),
     .slot_v_i           (instruction_valid),
     .slot_pc_i          (addr),
