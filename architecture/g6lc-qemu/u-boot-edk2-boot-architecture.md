@@ -1,7 +1,7 @@
 # U-Boot / EDK2 boot architecture for `g6lc_qemu`
 
-**Status:** scaffold / plan of record. Applies **after** the O7m `core/fetch_B/instr_queue`
-program-order residual is closed and the `g6lc_qemu` Q2 OpenSBI path is green. This file is
+**Status:** scaffold / plan of record. Applies **after** the O7p `core/fetch_B/instr_queue`
+age-ordered output is now in the RTL, but `mini_fdt_next_tag_lbu` still fails at 645 cycles on a `0x8000014e` self-loop, so the residual is not closed. Build-only Stage U0/E0 scaffolding can proceed in parallel This file is
 `architecture/` tier **T** (MIT), `.md` only, not compiled.
 
 Parent: [`architecture/g6lc-qemu/README.md`](README.md) · OS/firmware semantics:
@@ -38,9 +38,9 @@ generates firmware, emits DTB, and distinguishes the `g6lc-soc` (hardware-faithf
 ### B1 · Fetch/instruction-queue program order
 
 `core/fetch_B/instr_queue.sv` can issue instructions out of program order when multiple FIFOs hold
-entries from different fetch windows. The current O7m logic (non-empty round-robin + FIFO-usage tail
-pointer) keeps the queue live, but the output pointer can start at a FIFO whose head is younger than
-a head in another FIFO. This is the active `AGENTS-todo.md` item **O7o** and is a violation of the
+entries from different fetch windows. The current O7p logic (global `push_seq` age + oldest-first output
+pointer) keeps the queue live, and a 2-bit `shamt` width bug that caused pseq collisions was fixed. `mini_fdt_next_tag_lbu` still
+fails at 645 cycles on a `0x8000014e` self-loop. This is the active `AGENTS-todo.md` item **O7m → O7p** and is a violation of the
 I6 clause 1 contract.
 
 **Do not extend the boot ladder past OpenSBI until this is closed.** A second-stage loader is larger
@@ -54,8 +54,8 @@ would move through 10–100 M cycles instead of the current 6.5 M.
 ```text
 JUDGEMENT
   GIVEN    OpenSBI fw_payload is the smallest real supervisor witness
-  AND      O7m still fails mini_fdt_next_tag_lbu with tohost=1
-  THEN     U-Boot/EDK2 work is documentation-only until I6 clause 1 is proven
+  AND      O7p still fails mini_fdt_next_tag_lbu with tohost=1 at 645 cycles
+  THEN     U-Boot/EDK2 run stages are gated until the residual self-loop is closed, but build-only U0/E0 can proceed
   UNLESS   a bounded formal task g6lc_fetch_iq_order is green
   BECAUSE  P1 (workload is a witness) + P4 (a broken promise is discovered at a third module)
 ```
@@ -196,10 +196,10 @@ U-Boot entry. The FDT is the one `g6q` generated for the target, optionally over
 | U1 | U-Boot SPL reaches `board_init_f`/`board_init_r` on `g6lc-virt` | `g6q run` + string match | Fast, ~seconds |
 | U2 | U-Boot loads the FIT and starts the kernel on `g6lc-virt` with virtio | `g6q run` + kernel console | Fast, minutes |
 | U3 | Same on `g6lc-soc` with SD image (or SPI flash) | `g6q run` + kernel console | Hardware-faithful |
-| U4 | Tandem with RTL trace for U1–U3 selected steps | `--diag d1` | Only after O7m closeout |
+| U4 | Tandem with RTL trace for U1–U3 selected steps | `--diag d1` | Only after O7p closeout |
 
-Stages U0–U2 can start before the RTL issue is fully closed, because they run on `g6lc-virt` with
-stock QEMU. U3 and U4 are gated on `g6lc-soc` and on the queue fix.
+Stage U0 (build-loader) can start before the RTL residual is fully closed, because they run on `g6lc-virt` with
+stock QEMU. U1–U2 run on `g6lc-virt` with stock QEMU and are independent of the RTL queue order, but must not claim green until the queue is fully closed. U3 and U4 are gated on `g6lc-soc` and on the queue fix.
 
 ---
 
@@ -257,7 +257,7 @@ explicitly deferred.
 | E1 | SEC/PEI reaches DXE on `g6lc-virt` | `g6q run` + EDK2 serial output |
 | E2 | BDS enumerates virtio block and loads an `EFI/boot/bootriscv64.efi` | `g6q run` |
 | E3 | Linux starts under UEFI on `g6lc-virt` | `g6q run` + kernel console |
-| E4 | Tandem with RTL trace | `--diag d1` (gated on O7m) |
+| E4 | Tandem with RTL trace | `--diag d1` (gated on O7p closeout) |
 
 ---
 
@@ -387,13 +387,13 @@ silently produce a broken image.
 
 | Phase | Trigger | Work | Outcome |
 |---|---|---|---|
-| **U0** | Now (docs only) | Write this plan; pin U-Boot/EDK2 revs in `g6lc_qemu/pins.toml` as `planned` | Plan of record, no code |
-| **U1** | O7m closed | Implement `g6q fw build --loader u-boot` for `g6lc-virt` | U-Boot build on virtio |
+| **U0** | Now (build-only scaffolding) | Pin U-Boot/EDK2 revs in `g6lc_qemu/pins.toml` as `planned`; implement `g6q fw build --loader u-boot` for `g6lc-virt` | Build suite green; no runtime claim |
+| **U1** | U0 green | `g6q run` U-Boot SPL to `board_init_r` on `g6lc-virt` with virtio | U-Boot loader witness in QEMU |
 | **U2** | U1 green | `g6q run` U-Boot FIT → Linux on `g6lc-virt` | Distro boot in emulator |
-| **U3** | U2 green + I6 clause 1 proven | `g6lc-soc` U-Boot with SD/SPI, tandem D1 | Hardware-faithful boot |
+| **U3** | U2 green + O7p closeout + I6 clause 1 proven | `g6lc-soc` U-Boot with SD/SPI, tandem D1 | Hardware-faithful boot |
 | **E1** | U2 green | `g6q fw build --loader edk2` for `g6lc-virt` | EDK2 FD emitted |
 | **E2** | E1 green | `g6q run` EDK2 → Linux on `g6lc-virt` | UEFI distro boot |
-| **E3** | E2 green + formal/RTL green | Tandem with RTL on selected U-Boot/EDK2 stages | Evidence |
+| **E3** | E2 green + O7p closeout + I6 clause 1 proven | Tandem with RTL on selected U-Boot/EDK2 stages | Evidence |
 
 The staging is deliberately **not** a test plan. It is a feature promotion ladder: each phase is a
 build-platform suite or `g6q` command, and the decision to enter the next phase is a green gate, not
