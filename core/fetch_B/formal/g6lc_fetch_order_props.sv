@@ -7,8 +7,18 @@
 // Run: sby -f core/fetch_B/formal/g6lc_fetch_order.sby
 //      cva6-build verify --formal
 
+// N is the widest fetch geometry the contract must hold at, NOT the geometry of
+// one package. `packet_upto_cf` iterates 8 halfword slots, and `CVA6_MAX_ISSUE_PORTS`
+// is 8, so N=8 is the envelope ceiling.
+//
+// Proving at N=8 subsumes every narrower INSTR_PER_FETCH: a smaller geometry is
+// this same proof with the upper slot inputs tied to zero, and tying an input
+// off can only remove counterexamples. So one run covers FW=32/64/128 rather
+// than needing a task per package -- the `C` collapse in the width ledger
+// (architecture/AGENTS-g6lc-opensbi-dev-heuristics.md s0.1). Do not lower N to
+// "match the package": that would weaken the proof, not specialise it.
 module g6lc_fetch_order_props #(
-    parameter int unsigned N = 4
+    parameter int unsigned N = 8
 ) (
     input logic        clk_i,
     input logic        rst_ni,

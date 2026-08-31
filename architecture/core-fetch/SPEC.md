@@ -60,8 +60,14 @@ the completing high half — `start_hw0` is that shifted slot0, **not** `pc[ALIG
 miss mid-line straddles). Else leftover stays pending (I3). Kill does not change leftover state.
 `start_pc` is the first PC to emit (replaces A’s shift/present mux).
 
-Formal (when split out): `A_decode_pure`, `A_no_fabricate`, `A_pc_monotonic`, `A_leftover_adjacent`,
-`A_leftover_rvi`, `A_leftover_hart`, `A_kill_inert`, `A_no_loss`.
+Formal: the leftover half of this list is **live and proven** — `core/fetch_B/formal/`
+(`g6lc_fetch_align.sby`), no module split required, because the contract already *is* a set of
+pure functions in `g6lc_fetch_pkg`. `A_leftover_adjacent` = I3, `A_leftover_rvi` = I5,
+`A_kill_inert` = `leftover_update`/`leftover_retake`, `A_no_loss` = `leftover_slot0_push`
+(in `g6lc_fetch_order.sby`). Still unproven and still needing the split (they quantify over
+memory bytes or over the per-hart bank, neither of which is a closed tuple): `A_decode_pure`
+(I1), `A_no_fabricate` (I2), `A_leftover_hart` (I4). I1/I2 are asserted instead at L3 in
+`g6lc_fetch_dbg`. Full map: §10.
 
 Live B: `core/fetch_B/instr_realign.sv` — `carry_ok = leftover_complete(...)`;
 `hw_compressed = (ilen_of==2)`; cursor over `NrHalfWords`. A non-next valid window
@@ -195,3 +201,61 @@ is extra cleanup, not a size target.
    exception-suppress, …). Do not touch the issue throttle (RC1/RC4) until R6–R11.
 
 ISA red lines stay off. `NEGATIVE.md` classes stay out of B.
+
+---
+
+## 10. Ladder position of every fetch invariant
+
+Where each invariant is *checked today*, and whether it is worth moving left. Rungs are the
+feedback-latency ladder in
+[`../multi-threading/AGENTS-SMT2-opensbi-reasoning-pattern-workflow.md`](../multi-threading/AGENTS-SMT2-opensbi-reasoning-pattern-workflow.md)
+§4: **L0** definition · **L1** elaboration · **L2** bounded proof · **L3** simulation assertion ·
+**L4** directed mini · **L5** suite · **L6** firmware · **L7** peel/hold/TRACE. A check's value is
+roughly inversely proportional to its latency, so the standing work item is always "move the check
+from S to S'", never "run S again".
+
+| Inv | Rule (short) | Rung now | Artifact | Envelope proven | Move left? |
+|---|---|---|---|---|---|
+| **I1** | decode is a function of bytes+address alone | L3 | `g6lc_fetch_dbg` I1 bytes==memory | live geometry | **No.** Quantifies over the I$ line; not a closed tuple. L3 is leftmost feasible. |
+| **I2** | realigner emits exactly the ISA instrs, no rewrite | L3 + L2 | dbg slot pc-step + emission check; `packet_upto_cf` order proof | slots ≤ 8 | Partly moved. The packet-order half is L2; the bytes half stays L3. |
+| **I3** | leftover completes only from the next window | **L2** | `g6lc_fetch_align.sby` | all addresses | Done. |
+| **I4** | leftover is per-hart | L3 (weak) | realigner banks by `hart_i`; no assertion | — | **Yes → L2/L3.** The bank index is a closed tuple; currently the only check is that the code indexes it. Open. |
+| **I5** | complete only from a legal RVI prefix | **L2** | `g6lc_fetch_align.sby` | all halfwords | Done. Also re-checked on the *emitted* slot at L3. |
+| **I6** | IQ order is program order, opcode-agnostic | L2 (partial) | `packet_upto_cf` prefix/no-hole | slots ≤ 8 | Partial: proves the mask shape, not that head selection ignores `rd`/FU. |
+| **I7** | whole window or none | **L2** | `packet_accept`, `leftover_slot0_push` | all | Done. |
+| **I8** | redirect total priority order | **L2** | `g6lc_fetch_redirect.sby` (incl. restore-never-outranks-trap) | both T envelopes | Done. |
+| **I9** | trap entry held until decode consumes | L3 (observe) | `redirect_hold` / `hold_age` | — | **Yes → L2.** Bounded by construction; needs the hold state as a tuple. Open. |
+| **I10** | thread switch loses no progress | **L2** | `g6lc_fetch_smt.sby` (`snap_pc`) | both T envelopes | Done. |
+| **I11** | mispredict always redirects to the resolved target | L1 + L3 | `G6LC_FETCH_B` skips `g6lc_jalr_usable`; `diag-isa-red-lines` RL-RESOLVE-PMA | — | Enforced by absence, mechanically. |
+| **I12** | sequential step is one window | **L2** | `g6lc_fetch_geo.sby` (`nxt == base + W`, `nxt > pc`, `!same_win(pc, nxt)`) | FW 32/64/128/256 × RVC on/off | Done. |
+| **geo** | window algebra is self-consistent (`win_base`/`win_tag`/`same_win`/`hw_off` agree; `ilen_of` ≡ `rvi_prefix`) | **L2** | `g6lc_fetch_geo.sby` | 6 envelope points | Done. This is SPEC §1 and §F as properties. |
+| **I23** | every hold carries an explicit bound | L3 (warn) | `g6lc_fetch_dbg` latched `$warning` | live geometry | Observe-only on purpose: silent release is a recorded negative. |
+| **R1/I4** | packet carries the *fetching* hart | **L2** | `g6lc_fetch_smt.sby` (`packet_hart`) | both T envelopes | Done. |
+| **I8 (SMT)** | PC_COMMIT reseeds only for the active hart | **L2** | `g6lc_fetch_smt.sby` (`commit_for_hart`) | both T envelopes | Done. |
+
+**Envelope note (the `C` collapse).** Three different mechanisms keep these proofs from being
+per-package, and the distinction matters when adding a fourth:
+
+1. **Free the fold.** `en.restore` and `en_smt` are *free inputs* in the redirect and SMT proofs,
+   so one run covers T=1 and T>1 together instead of needing a package each.
+2. **Prove at the ceiling.** The order proof runs at `N=8`, the geometry ceiling. A narrower
+   `INSTR_PER_FETCH` is the same proof with upper slot inputs tied off, and tying an input off can
+   only *remove* counterexamples — so the wide proof subsumes the narrow ones.
+3. **Sweep what must be pinned.** Only `g6lc_fetch_geo` genuinely needs a concrete
+   `FETCH_WIDTH`/`ALIGN_BITS`/`RVC`, so it is a multi-task sby sweep (6 points) rather than a
+   single run.
+
+So raising `geo.issue`, `geo.harts` or `FETCH_WIDTH` is a **re-run** (seconds), not a re-soak
+(hours). Do not "specialise" a proof down to a package's geometry — that weakens it. Prefer (1),
+then (2), and only use (3) when the function genuinely reads `cfg`.
+
+**One stated assumption**, recorded rather than hidden: `g6lc_fetch_geo` assumes the PC is not in
+the final window of the 64-bit space, because `win_base(pc) + W_BYTES` wraps there and forward
+progress genuinely does not hold. The core cannot fetch such an address (VLEN is 39/64 and no PMA
+execute region reaches the top), so the strong property is kept and the impossible input excluded.
+
+**Open, in ladder order:** I4 per-hart leftover, I9 bounded trap hold, and the head-selection half
+of I6. Each is a closed tuple or nearly so, so each belongs at L2 rather than where it sits. I4 and
+I9 both need a small piece of *state* (the per-hart bank; the hold counter), which is why they did
+not fall out with the rest — they want a stateful props module with a real reset, not the stateless
+shape the current five use.

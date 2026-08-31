@@ -222,6 +222,26 @@ Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`
      - **Do not run solvers with their workdir on `/mnt`.** DrvFs is slow for the many small files sby writes, and an 8-core build plus a solver crashed the WSL VM repeatedly. `verify.formal.workdirRoot` exists for this, and the WSL path uses a `$HOME` workdir.
      - Oracle checked in both directions (H3 applied to the gate itself): injecting one false property makes the gate report 1/7 failed; removing it returns 7/7.
   4. `core/ooo/formal/g6lc_ooo_{rename,cancel}` pass on the Windows OSS CAD suite but were never observed to complete under the WSL build — same z3-slowness class as the order proof. If they ever stall in CI, add `abc bmc3` to their engine list before touching the props.
+  5. **SMT fetch contracts proven (gate now 8/8).** `core/fetch_B/formal/g6lc_fetch_smt.sby` proves the three multi-threading contracts that SPEC §4/§5 state in prose and that each have a recorded failure behind them: **R1/I4** `packet_hart` (a switch must not retag an in-flight packet as the incoming hart — a parked hart legitimately runs with `sp==0`, so mislabelled provenance is indistinguishable from "not ready yet"); **I8** `commit_for_hart` (TRACE t=200082 had `src=4` reseeding fetch with hart0's target while `h=1`, stealing hart1's bootrom `jr s0`); **I10** `snap_pc` (bank the address the I$ accepted, not the fetch-ahead `npc`). `en_restore`/`en_smt` are **free inputs**, so one run proves the T=1 and T>1 envelopes together.
+  6. **Envelope collapse landed.** The order proof now runs at the geometry ceiling `N=8` instead of a package's `N=4`. A narrower `INSTR_PER_FETCH` is the same proof with upper slot inputs tied off, and tying an input off can only remove counterexamples — so `FW=32/64/128` are covered by one run. This is the `C` factor of the width ledger going to 1: raising `geo.issue`, `geo.harts` or `FETCH_WIDTH` becomes a re-run in seconds, not a re-soak in hours. Do not specialise a proof down to a package geometry; that weakens it.
+  7. **Ladder map is now explicit.** [`core-fetch/SPEC.md`](architecture/core-fetch/SPEC.md) §10 records, for every fetch invariant, which rung checks it today, with what artifact, at what envelope, and whether it is worth moving left. That table is the work queue for this plane, and it replaces guessing about coverage.
+
+### Objectives (ordered by ladder position, not by symptom)
+
+The cheap rungs are now real, so the ordering rule from
+[`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) §2.9 applies literally: spend the next
+increment at the **leftmost stage that can express the rule**, and treat firmware as a gate.
+
+| # | Objective | Rung | Why now |
+|---|---|---|---|
+| ~~**O1a**~~ | ~~I12 explicit sequential step + the window algebra~~ | L2 | **Done.** `g6lc_fetch_geo.sby` proves `nxt == base + W`, `nxt > pc`, `!same_win(pc, nxt)`, and that `win_base`/`win_tag`/`same_win`/`hw_off`/`ilen_of`/`rvi_prefix` all agree — **swept over 6 envelope points** (FW 32/64/128/256 × RVC, plus 64/128 without RVC). Gate is now **9/9**. |
+| **O1b** | Close the three remaining L2 items in SPEC §10: **I4** per-hart leftover, **I9** bounded trap hold, **I6** head-selection independence | L2 | I4 and I9 need a small piece of *state* (the per-hart bank; the hold counter), so they want a stateful props module with a real reset rather than the stateless shape the current six use. That is the only reason they did not fall out with the rest. |
+| **O2** | Grow the battery along the **live-peer** axis (M5: 5 of 113 minis run a live peer; `W5 × thread-select` is empty) | L4 | The residual is a `T=2` property and the battery samples the `T=1` face. Highest-value non-formal work, and it is what would make a DI verdict mean something. |
+| **O3** | **H4 determinism** on the bootrom `npc=0x10000` / `s0=0` stall before any further attribution | L6 prep | Three attributions already exist for it and none is falsifiable while the symptom is unstable. If the outcome depends on simulator scheduling, the race is the bug. |
+| **O4** | OpenSBI residual (`mepc0=0x8000a9a8`, `mcause0=0x2`) | L6 | Only as a **gate**, after O1–O3. Never as a search signal. |
+
+Deliberately **not** queued: another peel, hold-ELF cycle, or TRACE hunt for this class (H7 blocks a
+second unrepaid use), and any specialisation of a proof to a package geometry (weakens it).
 
 **AI matrix card (`Xg6lcai`) + licensing — live track (not scaffold-only):**
 

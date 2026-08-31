@@ -102,7 +102,9 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | M (mul/div) | `riscv-tests` (`*um*`), `riscv-arch-test`, `generated` |
 | A / Zalrsc (atomics, LR/SC) | `riscv-tests` (`*ua*`), `riscv-arch-test`, `linux`, **`soft-ladder-di`** (DI AMO/LRSC minis under smt2) |
 | OpenSBI / FDT residual (DI) | **`soft-ladder-osbi`** (cookie), `soft-ladder-di` (FDT minis + `mini_must_pass`/`mini_must_fail` oracle controls), `smt-linux-*` (full stack) |
-| Fetch invariants I2/I3/I5/I7/I8 | **`verify --formal`** `core/fetch_B/formal/*.sby` (bounded, exhaustive in envelope) — not `soft-ladder-di`, which can only sample them |
+| Fetch invariants I2/I3/I5/I7/I8/I10/I12 + R1 | **`verify --formal`** `core/fetch_B/formal/*.sby` (bounded, exhaustive in envelope) — not `soft-ladder-di`, which can only sample them |
+| Fetch geometry / configurability (SPEC §1, §F) | **`g6lc_fetch_geo.sby`** — 6-point sweep FW 32/64/128/256 × RVC on/off. Raising a width is a re-run in seconds, not a package re-soak |
+| SMT fetch contracts (R1 provenance, I8 commit-hart, I10 switch progress) | **`g6lc_fetch_smt.sby`** — `en_restore`/`en_smt` free, so T=1 and T>1 are proven together |
 | ISA red lines (§E) | **`diag-isa-red-lines`** + **`diag-fw-accommodation`** (mechanical; prose alone did not hold them) |
 | Hart topology / `plat_hc` (R11, I25) | **`dts_to_dtb.py --check-all-harts`** (build-time DTS ↔ config pairing) + `check_cfg` product assert. Not a soak: `platform.hart_count` is a compile-time-decidable property of the DTS |
 | Zacas AMOCAS.W/D/Q (I §5.9) | `mc-mini-veri` + **`zacas-policy`** (hard RTL W/D/Q + odd illegal), `mc-stream-tests` / `mc-spo-soak` / `mc-spo-spike` (directed/ISS), `mc-spo-veri` (CRT residual) |

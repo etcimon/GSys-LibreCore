@@ -778,6 +778,18 @@ export async function formalTask(
   // asks for instead of serialising them.
   const jobs = formalCfg.jobs ?? recommendedJobs();
 
+  // A task file with a [tasks] section expands to several runs, and sby rejects
+  // `-d` for that ("Exactly one task is required when workdir is specified").
+  // `--prefix` is the multi-task form: sby appends `_<task>` to it. Detect from
+  // the file rather than from configuration so a sweep can be added to any .sby
+  // without also editing the platform.
+  let multiTask = false;
+  try {
+    multiTask = /^\s*\[tasks\]/m.test(readFileSync(abs, "utf8"));
+  } catch {
+    /* unreadable is handled by the existsSync check above */
+  }
+
   const outRoot = formalCfg.workdirRoot
     ? (isAbsolute(formalCfg.workdirRoot)
         ? formalCfg.workdirRoot
@@ -804,10 +816,11 @@ export async function formalTask(
     const dirWsl = await windowsPathToWsl(taskDir);
     // Native-FS workdir under the WSL home keeps the solver off DrvFs.
     const outWsl = `$HOME/.cache/g6lc-formal-run/${taskBase}`;
+    const outFlag = multiTask ? `--prefix ${outWsl}` : `-d ${outWsl}`;
     const cmd = [
-      `mkdir -p ${outWsl}`,
+      `mkdir -p $(dirname ${outWsl})`,
       `cd ${JSON.stringify(dirWsl)}`,
-      `${JSON.stringify(sbyWsl)} -f -j ${jobs} -d ${outWsl} ${JSON.stringify(taskName)}`,
+      `${JSON.stringify(sbyWsl)} -f -j ${jobs} ${outFlag} ${JSON.stringify(taskName)}`,
     ].join(" && ");
     const wres = await run("wsl", wslCommand(cmd), {
       cwd: ctx.repoRoot,
@@ -819,7 +832,8 @@ export async function formalTask(
     return summarise("formal", taskFile, wres, null, started);
   }
 
-  const result = await run(paths.sby, ["-f", "-j", String(jobs), "-d", outDir, taskName], {
+  const outArgs = multiTask ? ["--prefix", outDir] : ["-d", outDir];
+  const result = await run(paths.sby, ["-f", "-j", String(jobs), ...outArgs, taskName], {
     cwd: taskDir,
     env: edaEnv(ctx, paths, ctx.config.soc.coreConfig),
     stdio: "capture",

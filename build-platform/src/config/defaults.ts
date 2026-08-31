@@ -1255,6 +1255,14 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       "core/fetch_B/formal/g6lc_fetch_align.sby",
       "core/fetch_B/formal/g6lc_fetch_order.sby",
       "core/fetch_B/formal/g6lc_fetch_redirect.sby",
+      // SMT-facing fetch contracts: I4/R1 packet provenance, I8 commit-hart
+      // filter, I10 switch progress. `en.restore` / `en_smt` are free inputs,
+      // so one run proves both the T=1 and T>1 envelopes.
+      "core/fetch_B/formal/g6lc_fetch_smt.sby",
+      // Geometry contract, swept: FW=32/64/128/256 with RVC and 64/128 without.
+      // This is the one fetch proof that pins a geometry, so it is a multi-task
+      // sweep; every other fetch proof is geometry-free by construction.
+      "core/fetch_B/formal/g6lc_fetch_geo.sby",
     ],
     formal: {
       // null = one sby process per host core, and tasks dispatched concurrently.
@@ -1573,6 +1581,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "core/fetch_B/formal/g6lc_fetch_order_props.sv",
           "core/fetch_B/formal/g6lc_fetch_redirect.sby",
           "core/fetch_B/formal/g6lc_fetch_redirect_props.sv",
+          "core/fetch_B/formal/g6lc_fetch_smt.sby",
+          "core/fetch_B/formal/g6lc_fetch_smt_props.sv",
+          "core/fetch_B/formal/g6lc_fetch_geo.sby",
+          "core/fetch_B/formal/g6lc_fetch_geo_props.sv",
         ],
       },
       {

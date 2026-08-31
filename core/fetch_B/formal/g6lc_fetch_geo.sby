@@ -1,0 +1,51 @@
+# R6 fetch GEOMETRY contract (bounded) - swept across the legal envelope.
+#
+# Unlike the other fetch proofs, which are geometry-free by construction, this
+# one pins FETCH_WIDTH / FETCH_ALIGN_BITS / RVC and is therefore run once per
+# point of the envelope. That sweep is the `C` collapse of the width ledger:
+# adding a width is a re-run in seconds, not a package re-soak in hours.
+#
+# Envelope points mirror core-fetch/SPEC.md s1:
+#   FW=32/AB=2  FW=64/AB=3  FW=128/AB=4  FW=256/AB=5   (AB = log2(FW/8))
+#   RVC on for all four; RVC off for the two widths a !RVC package uses.
+#
+# Run: sby -f core/fetch_B/formal/g6lc_fetch_geo.sby          (all tasks)
+#      sby -f core/fetch_B/formal/g6lc_fetch_geo.sby fw64c    (one task)
+# Wired into build-platform verify.formalTasks (cva6-build verify --formal).
+
+[tasks]
+fw32c
+fw64c
+fw128c
+fw256c
+fw64i
+fw128i
+
+[options]
+mode prove
+depth 4
+
+[engines]
+# abc-pdr is the fast path for these bit-level contracts; z3 is raced alongside
+# it so no single solver shape can stall the gate. See g6lc_fetch_align.sby.
+abc pdr
+smtbmc z3
+
+[script]
+# `config_pkg.sv` uses user-defined-type casts (`ai_cfg_t'(0)`), which the
+# classic Verilog frontend cannot parse. sv-elab/slang is integrated into
+# Yosys from v0.67, so this needs no plugin -- see core-fetch/SPEC.md s2.
+# One line per envelope point: slang bakes parameters at elaboration, so the
+# geometry has to be set with -G rather than patched afterwards.
+fw32c:  read_slang --std 1800-2017 --keep-hierarchy --top g6lc_fetch_geo_props -DFORMAL -G FW=32  -G AB=2 -G RVC=1 config_pkg.sv g6lc_fetch_pkg.sv g6lc_fetch_geo_props.sv
+fw64c:  read_slang --std 1800-2017 --keep-hierarchy --top g6lc_fetch_geo_props -DFORMAL -G FW=64  -G AB=3 -G RVC=1 config_pkg.sv g6lc_fetch_pkg.sv g6lc_fetch_geo_props.sv
+fw128c: read_slang --std 1800-2017 --keep-hierarchy --top g6lc_fetch_geo_props -DFORMAL -G FW=128 -G AB=4 -G RVC=1 config_pkg.sv g6lc_fetch_pkg.sv g6lc_fetch_geo_props.sv
+fw256c: read_slang --std 1800-2017 --keep-hierarchy --top g6lc_fetch_geo_props -DFORMAL -G FW=256 -G AB=5 -G RVC=1 config_pkg.sv g6lc_fetch_pkg.sv g6lc_fetch_geo_props.sv
+fw64i:  read_slang --std 1800-2017 --keep-hierarchy --top g6lc_fetch_geo_props -DFORMAL -G FW=64  -G AB=3 -G RVC=0 config_pkg.sv g6lc_fetch_pkg.sv g6lc_fetch_geo_props.sv
+fw128i: read_slang --std 1800-2017 --keep-hierarchy --top g6lc_fetch_geo_props -DFORMAL -G FW=128 -G AB=4 -G RVC=0 config_pkg.sv g6lc_fetch_pkg.sv g6lc_fetch_geo_props.sv
+prep -top g6lc_fetch_geo_props
+
+[files]
+../../include/config_pkg.sv
+../g6lc_fetch_pkg.sv
+g6lc_fetch_geo_props.sv
