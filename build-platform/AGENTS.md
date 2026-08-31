@@ -262,6 +262,7 @@ bun run src/cli/index.ts tools install              # list profiles
 bun run src/cli/index.ts tools install dual-hart    # riscv-gcc + OpenSBI SMT2
 bun run src/cli/index.ts tools install sim          # open-source sim path
 bun run src/cli/index.ts tools install spike        # Spike (Linux / WSL)
+bun run src/cli/index.ts tools install formal       # Yosys>=0.67 + SymbiYosys
 bun run src/cli/index.ts tools install all
 bun run src/cli/index.ts setup --install --profile dual-hart
 ```
@@ -271,8 +272,44 @@ bun run src/cli/index.ts setup --install --profile dual-hart
 | `sim` / `open-source-sim` | riscv-gcc, verilator, spike, iverilog | Default for bare `setup --install` |
 | `dual-hart` | riscv-gcc, opensbi-smt2 | `software/smt2-linux/scripts/build-opensbi-smt2.{ps1,sh}` |
 | `opensbi` | opensbi-smt2 | Firmware only |
-| `all` | sim + opensbi-smt2 | Full residual stack |
-| single recipe | `riscv-gcc` \| `verilator` \| `spike` \| `iverilog` \| `opensbi-smt2` | `tools install <id>` |
+| `formal` | formal | Bounded-proof toolchain for `verify --formal` |
+| `all` | sim + opensbi-smt2 + formal | Full residual stack |
+| single recipe | `riscv-gcc` \| `verilator` \| `spike` \| `iverilog` \| `opensbi-smt2` \| `formal` | `tools install <id>` |
+
+- **formal**: source-builds **Yosys (>= v0.67)** with the *integrated* sv-elab/slang
+  frontend, plus SymbiYosys, into `workspace/tooling/formal`
+  (`scripts/install-formal.sh`; CMake+Ninja, `NUM_JOBS` cores). It first tries to
+  **adopt** an existing install that already has `read_slang`, which is minutes
+  cheaper than rebuilding. Windows delegates to **WSL** (`platform/wsl.ts`),
+  the same rule as Spike, and installs Linux ELFs into the managed prefix.
+  A distro Yosys is *not* sufficient: Ubuntu 24.04 ships 0.33, whose classic
+  frontend cannot parse `core/include/config_pkg.sv` (`ai_cfg_t'(0)` →
+  `TOK_USER_TYPE`) and rejects package-to-package `import`. Below v0.67 there is
+  no `read_slang` at all.
+
+#### 4.6.2a Running the formal gate
+
+```
+bun run src/cli/index.ts verify --formal
+bun run src/cli/index.ts verify --formal --formal-jobs 2 --formal-tasks 4
+```
+
+`eda.ts` resolves the toolchain **oss-cad → workspace/tooling/formal → PATH**
+and prints which it chose. It decides integrated-vs-plugin slang from the
+artifact on disk (no `share/yosys/plugins/slang.so` ⇒ integrated), so a suite
+that drops the plugin keeps working and `-m` is never passed to a Yosys that
+would reject it.
+
+Parallelism is two-level and configured by `verify.formal`:
+`jobs` is `sby -j` (solver processes inside one task, which matters because the
+`.sby` files race two engines) and `taskJobs` is how many tasks run at once.
+Defaults are cores and `cores / jobs`. These proofs are small and numerous, so
+wall time is dominated by task concurrency, not by any single solver call.
+
+**Do not let a solver work on `/mnt`.** DrvFs is slow for the many small files
+sby writes, and an 8-core build plus a solver was observed to destabilise the
+WSL VM outright. `verify.formal.workdirRoot` exists for this; the WSL path
+already uses a `$HOME` workdir.
 
 - **riscv-gcc**: xPack prebuilt (win zip / linux-x64 / darwin tar.gz) → `workspace/tooling/riscv`.
 - **opensbi-smt2**: Windows uses Cygwin make + xPack cygwrap; Linux uses bash script.

@@ -50,7 +50,7 @@ export type Simulator =
   | "vivado";
 
 /** Open-source tools the platform installs into workspace/tooling. */
-export type ManagedTool = "riscv-gcc" | "verilator" | "spike" | "iverilog";
+export type ManagedTool = "riscv-gcc" | "verilator" | "spike" | "iverilog" | "formal";
 
 /** Physical-design / synthesis back-ends. */
 export type PhysicalDesignFlow =
@@ -127,8 +127,54 @@ export interface ToolVersions {
   spike: string;
   iverilog: string;
   dtc: string;
+  /**
+   * Yosys git ref for the managed bounded-formal toolchain. Must be >= v0.67:
+   * that is where the sv-elab/slang SystemVerilog frontend became integrated,
+   * and without it `read_slang` does not exist and any task that reads a config
+   * package fails at parse (the classic frontend rejects `ai_cfg_t'(0)`).
+   */
+  yosys?: string;
+  /** SymbiYosys git ref installed alongside that Yosys. */
+  sby?: string;
   openroad?: string;
   siliconcompiler?: string;
+}
+
+/**
+ * How the bounded-formal stage runs.
+ *
+ * Formal is the cheapest rung of the feedback-latency ladder
+ * (`architecture/multi-threading/AGENTS-SMT2-opensbi-reasoning-pattern-workflow.md`
+ * section 4): a counterexample here costs seconds, the same defect found by a
+ * firmware soak costs minutes-to-hours and names a PC instead of a tuple. So the
+ * stage is worth making fast and worth making runnable on any host.
+ */
+export interface FormalConfig {
+  /**
+   * Max concurrent sby processes (`sby -j`). `null` = one per host core.
+   * Tasks are also dispatched concurrently up to `taskJobs`, so a host with N
+   * cores can saturate on a suite of small proofs instead of serialising them.
+   */
+  jobs?: number | null;
+  /** Max sby TASKS run concurrently. `null` = min(taskJobs default, tasks). */
+  taskJobs?: number | null;
+  /**
+   * Root for sby working directories (`sby -d`). `null` = beside the .sby file.
+   *
+   * Set this to a NATIVE filesystem path when the repo lives on a mounted host
+   * drive. Under WSL, running a solver with its workdir on `/mnt/<drive>`
+   * (DrvFs) is markedly slower and was observed to destabilise the VM; a
+   * workdir under the Linux root avoids both.
+   */
+  workdirRoot?: string | null;
+  /**
+   * Run the formal stage on the remote testharness host instead of locally.
+   * Uses the same SSH transport as `verif/regress/remote/testharness_proxy.py`
+   * so the heavy solver work lands on the builder, not the laptop.
+   */
+  remote?: boolean;
+  /** Remote host alias for `remote` (default: the proxy's TH_REMOTE_HOST). */
+  remoteHost?: string | null;
 }
 
 export interface ToolchainConfig {
@@ -548,6 +594,8 @@ export interface VerifyConfig {
   synthDefines: string[];
   /** SymbiYosys task files run by the formal stage, repo-relative. */
   formalTasks: string[];
+  /** Bounded-formal execution surface (tool location, parallelism, workdir). */
+  formal: FormalConfig;
   /** Test suite ids (see tests.suites) run by the sim stage. */
   simSuites: string[];
   /** Stages enabled when `verify` runs with no explicit stage flag. */

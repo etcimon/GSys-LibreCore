@@ -61,8 +61,10 @@ module g6lc_fetch_redirect_props (
     end
   end
 
-  // BMC/prove: start from a forced reset (no free-state induction trap).
-  initial assume (!rst_ni);
+  // No reset assumption: this module is stateless. Every property below is a
+  // combinational implication over free inputs, so there is no initial state
+  // for a free-running reset to corrupt. (`initial assume` is also rejected by
+  // the slang frontend -- reading a net during design initialization.)
 
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin

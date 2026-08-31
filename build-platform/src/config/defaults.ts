@@ -71,6 +71,12 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       spike: "vendored",
       iverilog: "v12_0",
       dtc: "1.6.1",
+      // Yosys main. Must stay >= v0.67: that is where the sv-elab/slang
+      // SystemVerilog frontend became integrated (no plugin .so). Below it,
+      // `read_slang` does not exist and the classic frontend cannot parse
+      // core/include/config_pkg.sv -- it rejects `ai_cfg_t'(0)`.
+      yosys: "main",
+      sby: "main",
     },
     packageManager: {
       windows: "chocolatey",
@@ -1250,6 +1256,20 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       "core/fetch_B/formal/g6lc_fetch_order.sby",
       "core/fetch_B/formal/g6lc_fetch_redirect.sby",
     ],
+    formal: {
+      // null = one sby process per host core, and tasks dispatched concurrently.
+      // These proofs are small and numerous, so wall time is dominated by how
+      // many run at once, not by any single solver call.
+      jobs: null,
+      taskJobs: null,
+      // Keep solver working directories off a mounted host filesystem. On WSL a
+      // workdir under /mnt/<drive> (DrvFs) is markedly slower and was observed
+      // to destabilise the VM; `null` here means "beside the .sby file", which
+      // the runner overrides with a workspace path when the repo is on /mnt.
+      workdirRoot: null,
+      remote: false,
+      remoteHost: null,
+    },
     simSuites: ["smoke-cv64a6", "smoke-cv32a65x"],
     stages: { lint: true, formal: true, sim: true, synth: true },
     // Measured 2026-07-24 with the flag set above. Dominated by vendored cvfpu

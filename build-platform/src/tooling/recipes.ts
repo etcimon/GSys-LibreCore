@@ -408,6 +408,132 @@ export async function installSpike(
   };
 }
 
+function isFormalInstalled(formalBin: string): boolean {
+  // Both halves matter: yosys without sby cannot run a task file, and sby
+  // without a slang-capable yosys fails at parse on any config package.
+  return existsSync(join(formalBin, "yosys")) && existsSync(join(formalBin, "sby"));
+}
+
+/**
+ * Bounded-formal toolchain: Yosys (with the integrated sv-elab/slang frontend)
+ * plus SymbiYosys, into workspace/tooling/formal.
+ *
+ * Host rules mirror Spike:
+ * - **Linux / macOS**: `build-platform/scripts/install-formal.sh` natively.
+ * - **Windows**: never native. Yosys/sby are POSIX tools and the solver stack
+ *   is not usable from Cygwin here, so the same script runs under **WSL** and
+ *   installs Linux binaries into the managed prefix (invoke via `wsl`).
+ *
+ * Source build is not a preference, it is a requirement: distro Yosys (0.33 on
+ * Ubuntu 24.04) has no `read_slang`, and its classic frontend cannot parse
+ * `core/include/config_pkg.sv`. sv-elab is integrated from Yosys v0.67.
+ */
+export async function installFormal(
+  ctx: PlatformContext,
+  options: RecipeOptions = {},
+): Promise<RecipeResult> {
+  const { logger, repoRoot, tools, host, config, paths } = ctx;
+
+  if (!options.force && isFormalInstalled(tools.formalBin)) {
+    return already("formal", "already installed");
+  }
+
+  const scriptRel = "build-platform/scripts/install-formal.sh";
+  const scriptAbs = join(repoRoot, scriptRel);
+  if (!existsSync(scriptAbs)) {
+    return { id: "formal", ok: false, skipped: false, reason: `${scriptRel} missing` };
+  }
+
+  const versions = config.toolchain.versions;
+  const yosysRef = versions.yosys ?? "main";
+  const sbyRef = versions.sby ?? "main";
+  const jobs = String(recommendedJobs());
+
+  if (options.dryRun) {
+    const via = host.os === "windows" ? "wsl -e bash" : "bash";
+    logger.info(`[dry-run] ${via} ${scriptRel} (yosys=${yosysRef} → ${tools.formal})`);
+    return already("formal", "dry-run");
+  }
+
+  // --- Windows: build under WSL into the managed prefix --------------------
+  if (host.os === "windows") {
+    if (!hasBinary("wsl")) {
+      logger.warn(
+        "The formal toolchain requires WSL on Windows (Yosys/SymbiYosys are POSIX tools). " +
+          "Install WSL, then re-run: bun run src/cli/index.ts tools install formal",
+      );
+      return {
+        id: "formal",
+        ok: false,
+        skipped: true,
+        reason: "windows: wsl required for the formal toolchain",
+      };
+    }
+
+    const installWsl = await windowsPathToWsl(tools.formal);
+    const scriptWsl = await windowsPathToWsl(scriptAbs);
+    // Build under the WSL home, never on /mnt: DrvFs is slow for a ninja build
+    // and an 8-core build plus a solver was observed to crash the WSL VM.
+    const shellCmd = [
+      `export FORMAL_INSTALL_DIR=${JSON.stringify(installWsl)}`,
+      'export FORMAL_BUILD_DIR="$HOME/.cache/g6lc-formal"',
+      `export FORMAL_YOSYS_REF=${JSON.stringify(yosysRef)}`,
+      `export FORMAL_SBY_REF=${JSON.stringify(sbyRef)}`,
+      `export NUM_JOBS=${jobs}`,
+      `export FORMAL_FORCE=${options.force ? "1" : "0"}`,
+      `bash ${JSON.stringify(scriptWsl)}`,
+    ].join("; ");
+
+    logger.info(`Formal toolchain: building under WSL → ${tools.formal}`);
+    logger.info(`  yosys ref ${yosysRef} (needs >= v0.67 for integrated slang), ${jobs} jobs`);
+
+    const res = await run("wsl", ["-e", "bash", "-lc", shellCmd], {
+      cwd: repoRoot,
+      logger,
+      allowFailure: true,
+      stdio: "both",
+    });
+
+    const ok = res.ok && isFormalInstalled(tools.formalBin);
+    return {
+      id: "formal",
+      ok,
+      skipped: false,
+      reason: ok
+        ? `${tools.formalBin}/{yosys,sby} (Linux ELF; run via wsl)`
+        : `WSL formal install failed (exit ${res.code}); need cmake>=3.28, ninja and g++>=11 in WSL`,
+    };
+  }
+
+  // --- Linux / macOS native -------------------------------------------------
+  if (!hasBinary("bash")) {
+    return { id: "formal", ok: false, skipped: true, reason: "bash not found" };
+  }
+
+  const env = childEnv(ctx, {
+    FORMAL_INSTALL_DIR: tools.formal,
+    FORMAL_BUILD_DIR: join(paths.cache, "formal-build"),
+    FORMAL_YOSYS_REF: yosysRef,
+    FORMAL_SBY_REF: sbyRef,
+    NUM_JOBS: jobs,
+    FORMAL_FORCE: options.force ? "1" : "0",
+  });
+  logger.info(`Formal toolchain: building natively → ${tools.formal} (${jobs} jobs)`);
+  const res = await runBashScript(scriptRel, [], {
+    cwd: repoRoot,
+    env,
+    logger,
+    allowFailure: true,
+  });
+  const ok = res.ok && isFormalInstalled(tools.formalBin);
+  return {
+    id: "formal",
+    ok,
+    skipped: false,
+    reason: ok ? undefined : `formal install failed (exit ${res.code})`,
+  };
+}
+
 /** Icarus Verilog: delegate to the OS package manager (brew/apt install). */
 export async function installIcarus(
   ctx: PlatformContext,

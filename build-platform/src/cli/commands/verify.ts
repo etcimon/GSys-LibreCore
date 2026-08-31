@@ -19,7 +19,7 @@ import {
   edaPaths,
   edaPresence,
   elaborateTarget,
-  formalTask,
+  runFormalTasks,
   lintTarget,
   synthTarget,
   type GateStageId,
@@ -69,7 +69,14 @@ export const verifyCommand: Command = {
     "\n" +
     "  --from-timing DIR  validate timings precompile package before stages\n" +
     "  --use-emit         expert: export emit flist env for sim consumers (default off)\n" +
-    "  --yes / -y         auto-accept tools install when managed tools are missing",
+    "  --yes / -y         auto-accept tools install when managed tools are missing\n" +
+    "  --formal-jobs N    solver processes per sby task (sby -j; default: host cores)\n" +
+    "  --formal-tasks N   sby tasks run concurrently (default: cores / formal-jobs)\n" +
+    "\n" +
+    "The formal stage needs Yosys >= v0.67, where the slang SystemVerilog frontend\n" +
+    "is integrated: below that, `read_slang` does not exist and any task reading a\n" +
+    "config package fails at parse. Provision it with:\n" +
+    "  tools install formal        (source build; runs under WSL on Windows)",
   examples: [
     "verify",
     "verify --lint",
@@ -141,6 +148,16 @@ export const verifyCommand: Command = {
       Object.assign(process.env, ft.env);
     }
 
+    // CLI parallelism overrides land on the resolved config so the runner and
+    // any nested call see one source of truth.
+    const formalJobs = flagString(args.flags, "formal-jobs");
+    const formalTaskJobs = flagString(args.flags, "formal-tasks");
+    if (formalJobs || formalTaskJobs) {
+      const f = (config.verify.formal ??= {});
+      if (formalJobs) f.jobs = Math.max(1, Number(formalJobs) || 1);
+      if (formalTaskJobs) f.taskJobs = Math.max(1, Number(formalTaskJobs) || 1);
+    }
+
     const stages = requestedStages(args.flags as Record<string, unknown>, config.verify.stages);
     const targetFlag = typeof args.flags.target === "string" ? args.flags.target : null;
     const targets = targetFlag ? [targetFlag] : config.verify.targets;
@@ -168,9 +185,13 @@ export const verifyCommand: Command = {
             detail: "no tasks configured (verify.formalTasks is empty)",
             durationMs: 0,
           });
-        }
-        for (const task of config.verify.formalTasks) {
-          outcomes.push(await formalTask(ctx, paths, task));
+        } else {
+          logger.info(
+            `toolchain: ${paths.formalSource}` +
+              (paths.slangIntegrated ? " (slang integrated)" : "") +
+              `  sby=${paths.sby}`,
+          );
+          outcomes.push(...(await runFormalTasks(ctx, paths, config.verify.formalTasks)));
         }
       } else {
         logger.heading("Simulation");

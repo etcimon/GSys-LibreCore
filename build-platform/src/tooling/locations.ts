@@ -27,6 +27,9 @@ export interface ToolLocations {
   iverilogBin: string;
   /** Device-tree-compiler install dir. */
   dtc: string;
+  /** Bounded-formal toolchain (Yosys with integrated slang + SymbiYosys). */
+  formal: string;
+  formalBin: string;
   /** Python venv bin/Scripts dir. */
   pythonVenvBin: string;
 }
@@ -43,6 +46,10 @@ export function toolLocations(
   const spike = join(t, "spike");
   const riscv = join(t, "riscv");
   const dtc = join(t, "dtc");
+  // Not version-suffixed: the pin is a git ref, and one prefix holds a matched
+  // yosys + sby pair (sby's Python support modules live under the same
+  // share/yosys tree as the yosys that executes them).
+  const formal = join(t, "formal");
   const pythonVenvBin = join(
     paths.pythonVenv,
     os === "windows" ? "Scripts" : "bin",
@@ -58,6 +65,8 @@ export function toolLocations(
     iverilog,
     iverilogBin: join(iverilog, "bin"),
     dtc,
+    formal,
+    formalBin: join(formal, "bin"),
     pythonVenvBin,
   };
 }

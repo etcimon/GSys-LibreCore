@@ -42,8 +42,10 @@ module g6lc_fetch_align_props (
     retake   = leftover_retake(replay, lo_v, next_win);
   end
 
-  // BMC/prove: start from a forced reset (no free-state induction trap).
-  initial assume (!rst_ni);
+  // No reset assumption: this module is stateless. Every property below is a
+  // combinational implication over free inputs, so there is no initial state
+  // for a free-running reset to corrupt. (`initial assume` is also rejected by
+  // the slang frontend -- reading a net during design initialization.)
 
   // Host constraint: the realign stage presents `valid` already qualified by
   // window_accept, so a killed window never reaches the leftover tuple.

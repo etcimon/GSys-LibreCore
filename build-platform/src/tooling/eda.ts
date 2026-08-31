@@ -22,6 +22,8 @@ import { basename, dirname, isAbsolute, join } from "node:path";
 
 import type { PlatformContext } from "../context.ts";
 import { run, type CommandResult } from "../platform/exec.ts";
+import { recommendedJobs } from "../platform/os.ts";
+import { hasWsl, windowsPathToWsl, wslCommand } from "../platform/wsl.ts";
 
 /** Absolute locations of every binary the gate can drive. */
 export interface EdaPaths {
@@ -40,6 +42,15 @@ export interface EdaPaths {
   iverilog: string;
   /** yosys-slang plugin, giving Yosys a real SystemVerilog frontend. */
   slangPlugin: string;
+  /**
+   * True when `yosys` came from the managed formal prefix (or PATH) rather than
+   * the OSS CAD Suite. Those builds are >= v0.67, where the sv-elab/slang
+   * frontend is INTEGRATED: `read_slang` exists with no plugin, and loading a
+   * plugin that is not there is a hard error. See scripts/install-formal.sh.
+   */
+  slangIntegrated: boolean;
+  /** Where yosys/sby were actually found, for diagnostics. */
+  formalSource: "oss-cad" | "managed" | "path" | "missing";
 }
 
 export interface EdaToolStatus {
@@ -77,17 +88,63 @@ export function edaPaths(ctx: PlatformContext): EdaPaths {
   const lib = join(root, "lib");
   const x = ctx.host.exeSuffix;
 
+  // Formal toolchain resolution, in priority order:
+  //   1. OSS CAD Suite (one extracted tree, plugin-based slang)
+  //   2. workspace/tooling/formal (source build, integrated slang) -- on
+  //      Windows these are Linux ELFs invoked through WSL, so the exe suffix
+  //      does not apply to them
+  //   3. bare names, letting PATH resolve them
+  // The managed prefix is where `tools install formal` puts a Yosys new enough
+  // to have `read_slang` built in, which is the only configuration that can
+  // parse core/include/config_pkg.sv.
+  const ossYosys = join(bin, `yosys${x}`);
+  const ossSby = join(bin, `sby${x}`);
+  const managedBin = ctx.tools.formalBin;
+  const managedYosys = join(managedBin, "yosys");
+  const managedSby = join(managedBin, "sby");
+
+  let yosys = ossYosys;
+  let sby = ossSby;
+  let slangIntegrated = false;
+  let formalSource: EdaPaths["formalSource"] = "missing";
+
+  const pluginPath = join(root, "share", "yosys", "plugins", "slang.so");
+
+  if (existsSync(ossYosys) && existsSync(ossSby)) {
+    formalSource = "oss-cad";
+    // A suite without the plugin file is a Yosys >= v0.67 carrying the frontend
+    // internally. Decide on the artifact that is actually there rather than on
+    // the suite's name, so a future suite that drops the plugin keeps working.
+    slangIntegrated = !existsSync(pluginPath);
+  } else if (existsSync(managedYosys) && existsSync(managedSby)) {
+    yosys = managedYosys;
+    sby = managedSby;
+    slangIntegrated = true;
+    formalSource = "managed";
+  } else if (existsSync(managedYosys)) {
+    // Half-installed prefix: still prefer it so the error names the real gap.
+    yosys = managedYosys;
+    slangIntegrated = true;
+    formalSource = "managed";
+  } else {
+    // Leave the OSS paths in place for the presence report, but record that a
+    // PATH lookup is the remaining option (used by the WSL/native runners).
+    formalSource = "path";
+  }
+
   return {
     root,
     bin,
     lib,
     verilator: join(bin, `verilator_bin${x}`),
     verilatorRoot: join(root, "share", "verilator"),
-    yosys: join(bin, `yosys${x}`),
-    sby: join(bin, `sby${x}`),
+    yosys,
+    sby,
     slang: join(bin, `slang${x}`),
     iverilog: join(bin, `iverilog${x}`),
-    slangPlugin: join(root, "share", "yosys", "plugins", "slang.so"),
+    slangPlugin: pluginPath,
+    slangIntegrated,
+    formalSource,
   };
 }
 
@@ -628,12 +685,17 @@ export async function synthTarget(
 ): Promise<StageOutcome> {
   const started = performance.now();
 
-  if (!existsSync(paths.yosys) || !existsSync(paths.slangPlugin)) {
+  // A Yosys >= v0.67 has the slang frontend built in, so the plugin is neither
+  // present nor wanted; only the older OSS CAD layout needs `-m <plugin>`.
+  const needsPlugin = !paths.slangIntegrated;
+  if (!existsSync(paths.yosys) || (needsPlugin && !existsSync(paths.slangPlugin))) {
     return {
       stage: "synth",
       target,
       status: "skip",
-      detail: "yosys or the yosys-slang plugin is missing",
+      detail: needsPlugin
+        ? "yosys or the yosys-slang plugin is missing"
+        : "yosys is missing",
       durationMs: elapsed(started),
     };
   }
@@ -658,9 +720,13 @@ export async function synthTarget(
     "stat",
   ].join("; ");
 
-  // The frontend must be loaded with -m; the in-script `plugin -i` form is not
-  // supported by this Yosys build.
-  const result = await run(paths.yosys, ["-m", paths.slangPlugin, "-p", script], {
+  // Older layout: the frontend must be loaded with -m (the in-script
+  // `plugin -i` form is not supported by that Yosys build). With an integrated
+  // slang there is nothing to load, and passing -m would be a hard error.
+  const yosysArgs = needsPlugin
+    ? ["-m", paths.slangPlugin, "-p", script]
+    : ["-p", script];
+  const result = await run(paths.yosys, yosysArgs, {
     cwd: ctx.repoRoot,
     env: edaEnv(ctx, paths, target),
     stdio: "capture",
@@ -700,15 +766,60 @@ export async function formalTask(
     };
   }
 
-  // Per-task workdir so sequential tasks do not clobber each other.
+  // Per-task workdir so concurrent tasks do not clobber each other.
   // SymbiYosys resolves [files] relative to the process cwd (not the .sby
   // path), so we run with cwd = the directory that holds the task + props.
   const taskDir = dirname(abs);
   const taskName = basename(abs);
   const taskBase = taskName.replace(/\.sby$/i, "");
-  const outDir = join(ctx.paths.build, "formal", taskBase);
+  const formalCfg = ctx.config.verify.formal ?? {};
+  // `sby -j` bounds the solver processes one task may spawn. The .sby files
+  // race two engines, so >1 here is what lets a single task use both cores it
+  // asks for instead of serialising them.
+  const jobs = formalCfg.jobs ?? recommendedJobs();
+
+  const outRoot = formalCfg.workdirRoot
+    ? (isAbsolute(formalCfg.workdirRoot)
+        ? formalCfg.workdirRoot
+        : join(ctx.repoRoot, formalCfg.workdirRoot))
+    : join(ctx.paths.build, "formal");
+  const outDir = join(outRoot, taskBase);
   mkdirSync(outDir, { recursive: true });
-  const result = await run(paths.sby, ["-f", "-d", outDir, taskName], {
+
+  // On Windows the managed toolchain is a set of Linux ELFs in the workspace;
+  // they cannot be exec'd directly. Run them through WSL, translating the three
+  // paths that cross the boundary. A solver workdir is deliberately NOT placed
+  // on /mnt: DrvFs is slow for the many small files sby writes.
+  if (ctx.host.os === "windows" && paths.formalSource !== "oss-cad") {
+    if (!hasWsl()) {
+      return {
+        stage: "formal",
+        target: taskFile,
+        status: "skip",
+        detail: "formal toolchain is a Linux build and wsl is not available",
+        durationMs: elapsed(started),
+      };
+    }
+    const sbyWsl = await windowsPathToWsl(paths.sby);
+    const dirWsl = await windowsPathToWsl(taskDir);
+    // Native-FS workdir under the WSL home keeps the solver off DrvFs.
+    const outWsl = `$HOME/.cache/g6lc-formal-run/${taskBase}`;
+    const cmd = [
+      `mkdir -p ${outWsl}`,
+      `cd ${JSON.stringify(dirWsl)}`,
+      `${JSON.stringify(sbyWsl)} -f -j ${jobs} -d ${outWsl} ${JSON.stringify(taskName)}`,
+    ].join(" && ");
+    const wres = await run("wsl", wslCommand(cmd), {
+      cwd: ctx.repoRoot,
+      stdio: "capture",
+      allowFailure: true,
+      dryRun: ctx.dryRun,
+      logger: ctx.logger,
+    });
+    return summarise("formal", taskFile, wres, null, started);
+  }
+
+  const result = await run(paths.sby, ["-f", "-j", String(jobs), "-d", outDir, taskName], {
     cwd: taskDir,
     env: edaEnv(ctx, paths, ctx.config.soc.coreConfig),
     stdio: "capture",
@@ -718,6 +829,45 @@ export async function formalTask(
   });
 
   return summarise("formal", taskFile, result, null, started);
+}
+
+/**
+ * Run every configured formal task, several at a time.
+ *
+ * These proofs are small and numerous, so total wall time is dominated by how
+ * many run concurrently rather than by any one solver call. Task-level
+ * concurrency is bounded separately from `sby -j` so the two multiply out to
+ * roughly one core each rather than oversubscribing the host.
+ */
+export async function runFormalTasks(
+  ctx: PlatformContext,
+  paths: EdaPaths,
+  tasks: string[],
+): Promise<StageOutcome[]> {
+  if (tasks.length === 0) return [];
+  const formalCfg = ctx.config.verify.formal ?? {};
+  const cores = recommendedJobs();
+  const perTask = formalCfg.jobs ?? cores;
+  const defaultTaskJobs = Math.max(1, Math.min(tasks.length, Math.floor(cores / Math.max(1, perTask)) || 1));
+  const taskJobs = Math.max(1, formalCfg.taskJobs ?? defaultTaskJobs);
+
+  if (taskJobs === 1) {
+    const out: StageOutcome[] = [];
+    for (const t of tasks) out.push(await formalTask(ctx, paths, t));
+    return out;
+  }
+
+  const results: StageOutcome[] = new Array(tasks.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= tasks.length) return;
+      results[i] = await formalTask(ctx, paths, tasks[i] as string);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(taskJobs, tasks.length) }, worker));
+  return results;
 }
 
 /**

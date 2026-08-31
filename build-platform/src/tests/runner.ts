@@ -118,6 +118,15 @@ export function hasManagedTool(ctx: PlatformContext, tool: ManagedTool): boolean
       );
     case "iverilog":
       return existsSync(join(tools.iverilogBin, exe("iverilog"))) || hasBinary("iverilog");
+    case "formal":
+      // Managed formal is a Linux build (invoked via WSL on Windows), so the
+      // exe suffix does not apply to it. Both halves must be present: yosys
+      // alone cannot run a task file, and sby alone has nothing to drive.
+      return (
+        (existsSync(join(tools.formalBin, "yosys")) &&
+          existsSync(join(tools.formalBin, "sby"))) ||
+        (hasBinary("yosys") && hasBinary("sby"))
+      );
     case "riscv-gcc": {
       const prefix = config.toolchain.riscvGcc.toolPrefix ?? "riscv-none-elf-";
       return (

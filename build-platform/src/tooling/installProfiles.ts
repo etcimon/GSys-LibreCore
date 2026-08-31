@@ -25,6 +25,7 @@ import type { PlatformContext } from "../context.ts";
 import { childEnv } from "../context.ts";
 import { hasBinary, run } from "../platform/exec.ts";
 import {
+  installFormal,
   installIcarus,
   installOpenSourceSimTools,
   installRiscvGcc,
@@ -34,7 +35,13 @@ import {
   type RecipeResult,
 } from "./recipes.ts";
 
-export type InstallProfileId = "sim" | "dual-hart" | "opensbi" | "all" | "open-source-sim";
+export type InstallProfileId =
+  | "sim"
+  | "dual-hart"
+  | "opensbi"
+  | "formal"
+  | "all"
+  | "open-source-sim";
 
 export interface InstallProfile {
   id: InstallProfileId;
@@ -68,9 +75,16 @@ export const INSTALL_PROFILES: InstallProfile[] = [
     recipeIds: ["opensbi-smt2"],
   },
   {
+    id: "formal",
+    summary:
+      "Bounded formal: Yosys >= v0.67 with the integrated slang frontend plus SymbiYosys (source build, WSL on Windows)",
+    recipeIds: ["formal"],
+  },
+  {
     id: "all",
-    summary: "sim + dual-hart (full residual software stack for suites + R3a)",
-    recipeIds: ["riscv-gcc", "verilator", "spike", "iverilog", "opensbi-smt2"],
+    summary:
+      "sim + dual-hart + formal (full residual stack for suites, R3a and verify --formal)",
+    recipeIds: ["riscv-gcc", "verilator", "spike", "iverilog", "opensbi-smt2", "formal"],
   },
 ];
 
@@ -180,6 +194,8 @@ export async function installRecipeById(
       return installSpike(ctx, options);
     case "iverilog":
       return installIcarus(ctx, options);
+    case "formal":
+      return installFormal(ctx, options);
     case "opensbi-smt2":
     case "opensbi":
       return installOpensbiSmt2(ctx, options);

@@ -18,6 +18,7 @@ const RECIPE_FOR: Record<ManagedTool, string> = {
   verilator: "verilator",
   spike: "spike",
   iverilog: "iverilog",
+  formal: "formal",
 };
 
 export function missingManagedTools(ctx: PlatformContext, tools: ManagedTool[]): ManagedTool[] {

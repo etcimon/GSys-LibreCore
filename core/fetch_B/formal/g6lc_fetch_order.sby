@@ -8,10 +8,21 @@ mode prove
 depth 4
 
 [engines]
+# Two engines, raced in parallel (sby runs them concurrently and takes the
+# first conclusive result). abc-pdr is orders of magnitude faster on these
+# bit-level combinational contracts -- the packet-order proof is 0.27s under
+# pdr and does not converge in 240s under z3 -- while z3 is the more capable
+# engine if a property later grows word-level arithmetic. Racing them means
+# no single solver shape can stall the gate.
+abc pdr
 smtbmc z3
 
 [script]
-read -formal config_pkg.sv g6lc_fetch_pkg.sv g6lc_fetch_order_props.sv
+# `config_pkg.sv` uses user-defined-type casts (`ai_cfg_t'(0)`), which the
+# classic Verilog frontend cannot parse. sv-elab/slang is integrated into
+# Yosys from v0.67, so this needs no plugin -- see core-fetch/SPEC.md s2.
+read_slang --std 1800-2017 --keep-hierarchy --top g6lc_fetch_order_props -DFORMAL \
+    config_pkg.sv g6lc_fetch_pkg.sv g6lc_fetch_order_props.sv
 prep -top g6lc_fetch_order_props
 
 [files]
