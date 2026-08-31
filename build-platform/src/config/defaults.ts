@@ -1550,6 +1550,31 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           // SL-W gate-6: test the fixup queue without the VoidKeep containment.
         },
       },
+      // --- smt2: combinational-loop visibility ------------------------------
+      // `verify.lintArgs` carries `-Wno-UNOPTFLAT` project-wide, which silences
+      // the ENTIRE combinational-loop class. That waiver is defensible for the
+      // vendored IP it was added for, but it also means the fetch plane cannot
+      // see a loop it introduces -- and a loop is an AGENTS.md section 0
+      // violation (the `g6lc_icache` vaddr_d -> cl_hit -> dreq_o.ready -> vaddr_d
+      // loop was found and fixed by hand, not by lint). Verilator honours the
+      // LAST -W flag, so appending `-Wwarn-UNOPTFLAT` re-enables it for this
+      // diagnostic only, leaving the main gate's baseline untouched.
+      //
+      // Optional because the count is not yet ratcheted: treat it as a report,
+      // and do not add a new loop on top of whatever it shows.
+      {
+        id: "diag-smt2-comb-loops",
+        description: "Combinational loops (UNOPTFLAT) in g6lc64_smt2, un-waived.",
+        compartment: "smt2",
+        kind: "verilator-lint",
+        tools: ["verilator"],
+        optional: true,
+        verilator: {
+          target: "g6lc64_smt2",
+          lintArgs: ["-Wwarn-UNOPTFLAT"],
+          warningBudget: null,
+        },
+      },
       {
         id: "diag-smt2-payload",
         description: "OpenSBI fw_payload.elf present (R3a).",

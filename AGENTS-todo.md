@@ -249,6 +249,62 @@ Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`
      properties instead of greps.
   7. **Ladder map is now explicit.** [`core-fetch/SPEC.md`](architecture/core-fetch/SPEC.md) §10 records, for every fetch invariant, which rung checks it today, with what artifact, at what envelope, and whether it is worth moving left. That table is the work queue for this plane, and it replaces guessing about coverage.
 
+### O1c / O2 attempt (2026-08-31) — both produced hard information, neither landed as planned
+
+**O1c (I9 at L2): blocked by a real combinational loop, not by tooling.** The live-frontend harness was
+built and *elaborates cleanly* — `read_slang --allow-use-before-declare` over 27 files (all four
+`parameter type` structs reconstructed; every predictor, the realigner and the queue resolve). It then
+fails at SMT model construction with **"Found logic loop in module g6lc_fetch_hold_props"**, so no
+proof can be built over `frontend.sv` today. Files are kept at
+`core/fetch_B/formal/g6lc_fetch_hold.{sby,props.sv}` (not in `formalTasks`) because the harness is
+correct and only the design blocks it.
+
+Chasing that produced the finding that matters: **`verify.lintArgs` carries `-Wno-UNOPTFLAT`
+project-wide, which hides the entire circular-combinational-logic class.** Re-enabling it (Verilator
+honours the last `-W` flag) gives **11 reports, 8 of them in the active fetch plane**:
+
+| Locus | Signal |
+|---|---|
+| `core/fetch_B/frontend.sv:153` | **`fetch_address`** |
+| `core/fetch_B/frontend.sv:197` (×3) | regularized nodes on that cone |
+| `core/fetch_B/g6lc_fetch_pkg.sv:167` | **`kill_s2`** |
+| `core/fetch_B/instr_queue.sv:117` | `address_overflow` |
+| `core/fetch_B/instr_queue.sv:126,173` | rotate/regularize nodes |
+| `core/decoder.sv:118`, `core/csr_regfile.sv:257`, `core/load_unit.sv:439` | outside fetch |
+
+`fetch_address` ↔ `kill_s2` is **the same loop class the 2026-08-31 icache fix broke** — that fix cut
+the path through the cache (`vaddr_d → cl_hit → dreq_o.ready → vaddr_d`), but the frontend-internal
+cycle remains. New optional diagnostic **`diag-smt2-comb-loops`** keeps the class visible without
+touching the main gate's baseline. Not ratcheted yet: treat it as a report and do not add a loop on
+top of it. UNOPTFLAT can be a false positive for bit-sliced signals, but yosys refusing to build an
+SMT model is independent corroboration that at least one is real.
+
+**O2 (live-peer battery): blocked upstream, and the M1 oracle controls proved it in one run.** Before
+writing minis, the cheapest discriminator (P6) was to ask whether the DI path can produce a PASS at
+all. It cannot. The **first ever execution** of the oracle controls, remotely on the B harness:
+
+```
+mini_must_pass -> fail (expected pass)
+mini_must_fail -> fail (expected fail)
+ORACLE INVALID -- H3 'Oracle Validity First' precondition is not met
+Suite NOT run: per-test results would be meaningless.
+```
+
+`mini_must_pass` is **three instructions** that unconditionally write `tohost=1`, so the failure is
+upstream of every test's logic. The trace is unambiguous and **deterministic** (not flaky): the core
+spins at `pc=0x10044 instr=ffdff06f` — `jal zero,0x10040`, the **bootrom `_hang` loop** — until the
+cycle cap, on every test.
+
+Three consequences:
+1. **Adding minis is pointless until this is fixed.** The `W5 × thread-select` gap is real, but no new
+   directed test can be validated while every test dies in the bootrom. O2 is *gated on O3*, not
+   merely ordered after it.
+2. **The controls earned their keep immediately.** They converted "16 mysterious failures" into one
+   sentence about the bootrom, and they aborted the suite instead of reporting 16 meaningless verdicts.
+3. **This is the H4 determinism O3 wanted.** The symptom is now stable and reproducible, which is the
+   precondition for attributing it. Note it also confirms the reverted commit filter was *masking*
+   this defect by forcing `s0`'s write rather than fixing it — exactly what H6 predicted.
+
 ### Objectives (ordered by ladder position, not by symptom)
 
 The cheap rungs are now real, so the ordering rule from
@@ -259,9 +315,9 @@ increment at the **leftmost stage that can express the rule**, and treat firmwar
 |---|---|---|---|
 | ~~**O1a**~~ | ~~I12 explicit sequential step + the window algebra~~ | L2 | **Done.** `g6lc_fetch_geo.sby` proves `nxt == base + W`, `nxt > pc`, `!same_win(pc, nxt)`, and that `win_base`/`win_tag`/`same_win`/`hw_off`/`ilen_of`/`rvi_prefix` all agree — **swept over 6 envelope points** (FW 32/64/128/256 × RVC, plus 64/128 without RVC). Gate is now **9/9**. |
 | ~~**O1b**~~ | ~~I4 per-hart leftover, I6 head-selection independence~~ | L2 | **Done.** Both closed by proving against **live modules** instead of pure functions. `g6lc_fetch_realign.sby` instantiates the real realigner and proves **I1/I2** no-fabricate (emitted halfword == `data_i` at that slot's own address) and **I4** per-hart carry isolation. `g6lc_fetch_iq.sby` proves **I6** by **self-composition**: two live `instr_queue` copies, identical control, different raw `instr_i`, identical `ready_o`/`consumed_o`/`replay_*`/`fetch_entry_valid_o`/`.address`. Gate is now **11/11** (~18 s remote). |
-| **O1c** | **I9** bounded trap hold | L2 | The only fetch invariant left at L3. Harder than the others: the hold state lives in `frontend.sv`, which drags in the predictors and the queue, so it is a much larger elaboration than the realigner or the IQ. |
-| **O2** | Grow the battery along the **live-peer** axis (M5: 5 of 113 minis run a live peer; `W5 × thread-select` is empty) | L4 | The residual is a `T=2` property and the battery samples the `T=1` face. Highest-value non-formal work, and it is what would make a DI verdict mean something. |
-| **O3** | **H4 determinism** on the bootrom `npc=0x10000` / `s0=0` stall before any further attribution | L6 prep | Three attributions already exist for it and none is falsifiable while the symptom is unstable. If the outcome depends on simulator scheduling, the race is the bug. |
+| **O1c** | **I9** bounded trap hold | L2 | **Blocked, and the blocker is the finding.** The harness elaborates; `frontend.sv` has a circular combinational cone (`fetch_address` / `kill_s2`) that stops yosys building an SMT model. Fix the loop first -- then this proof is a re-run, not new work. |
+| **O2** | Grow the battery along the **live-peer** axis | L4 | **Gated on O3, not merely after it.** `mini_must_pass` (3 instructions) fails: every test spins in the bootrom `_hang` loop at `0x10044`. No directed test can be validated until that is fixed. |
+| **O3** | Bootrom `_hang` spin - why `jr s0` never reaches DRAM | L6 prep | **Now the critical path, and now deterministic.** Every DI test, including a 3-instruction one, ends spinning at `pc=0x10044 instr=ffdff06f` (`jal zero,0x10040`). H4 is satisfied, so attribution is finally admissible. Prime suspect is the `fetch_address`/`kill_s2` combinational cone from O1c: a non-convergent frontend and a bootrom that never completes its jump are consistent. |
 | **O4** | OpenSBI residual (`mepc0=0x8000a9a8`, `mcause0=0x2`) | L6 | Only as a **gate**, after O1–O3. Never as a search signal. |
 
 Deliberately **not** queued: another peel, hold-ELF cycle, or TRACE hunt for this class (H7 blocks a

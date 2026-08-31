@@ -254,6 +254,17 @@ the final window of the 64-bit space, because `win_base(pc) + W_BYTES` wraps the
 progress genuinely does not hold. The core cannot fetch such an address (VLEN is 39/64 and no PMA
 execute region reaches the top), so the strong property is kept and the impossible input excluded.
 
+**I9 is blocked by the design, not by the method.** The live-frontend harness exists
+(`core/fetch_B/formal/g6lc_fetch_hold.{sby,props.sv}`, 27 files, all four `parameter type` structs
+reconstructed) and *elaborates cleanly*. It then fails at SMT model construction: **"Found logic
+loop"**. Re-enabling the project-wide `-Wno-UNOPTFLAT` waiver shows why — 8 circular-combinational
+reports in this plane, including **`frontend.sv:153 fetch_address`** and
+**`g6lc_fetch_pkg.sv:167 kill_s2`**. That is the same cone the 2026-08-31 icache fix cut on the cache
+side (`vaddr_d → cl_hit → dreq_o.ready → vaddr_d`); the frontend-internal cycle survived it. So the
+work item is *break the cone*, after which the I9 proof is a re-run rather than new work. Visibility:
+the optional `diag-smt2-comb-loops` diagnostic. Only the SAFETY half of I9 is in scope for a proof at
+all; the I23 bound stays an L3 observation for the reason given above.
+
 **Open, in ladder order:** just **I9** (bounded trap hold). I4 and I6 both closed by moving from
 pure functions to LIVE modules: I1/I2/I4 in `g6lc_fetch_realign` (the realigner plus its per-hart
 bank) and I6 in `g6lc_fetch_iq` (two queue copies). I9 is the last one, and it is harder than
