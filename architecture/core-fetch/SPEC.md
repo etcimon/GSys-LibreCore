@@ -216,15 +216,15 @@ from S to S'", never "run S again".
 
 | Inv | Rule (short) | Rung now | Artifact | Envelope proven | Move left? |
 |---|---|---|---|---|---|
-| **I1** | decode is a function of bytes+address alone | L3 | `g6lc_fetch_dbg` I1 bytes==memory | live geometry | **No.** Quantifies over the I$ line; not a closed tuple. L3 is leftmost feasible. |
+| **I1** | decode is a function of bytes+address alone | **L2** + L3 | `g6lc_fetch_realign.sby` (live module: emitted halfword == `data_i` at that slot's own address); `g6lc_fetch_dbg` keeps the same check in every sim | smt2 cfg (FW=64, T=2, RVC) | Done. *This row previously read "L3 is leftmost feasible" - that was wrong: one window is a bounded free input, so the quantifier is closed after all.* |
 | **I2** | realigner emits exactly the ISA instrs, no rewrite | L3 + L2 | dbg slot pc-step + emission check; `packet_upto_cf` order proof | slots ≤ 8 | Partly moved. The packet-order half is L2; the bytes half stays L3. |
 | **I3** | leftover completes only from the next window | **L2** | `g6lc_fetch_align.sby` | all addresses | Done. |
-| **I4** | leftover is per-hart | L3 (weak) | realigner banks by `hart_i`; no assertion | — | **Yes → L2/L3.** The bank index is a closed tuple; currently the only check is that the code indexes it. Open. |
+| **I4** | leftover is per-hart | **L2** | `g6lc_fetch_realign.sby` - a window presented for one hart leaves every other hart's carry unchanged (NH=2) | smt2 cfg | Done. |
 | **I5** | complete only from a legal RVI prefix | **L2** | `g6lc_fetch_align.sby` | all halfwords | Done. Also re-checked on the *emitted* slot at L3. |
-| **I6** | IQ order is program order, opcode-agnostic | L2 (partial) | `packet_upto_cf` prefix/no-hole | slots ≤ 8 | Partial: proves the mask shape, not that head selection ignores `rd`/FU. |
+| **I6** | IQ order is program order, opcode-agnostic | **L2** | `g6lc_fetch_iq.sby` - NON-INTERFERENCE over two live `instr_queue` copies: identical control, different raw `instr_i`, identical `ready_o`/`consumed_o`/`replay_*`/`fetch_entry_valid_o`/`.address`. Packet-mask shape also proven by `g6lc_fetch_order` | smt2 cfg, NI=2 | Done. |
 | **I7** | whole window or none | **L2** | `packet_accept`, `leftover_slot0_push` | all | Done. |
 | **I8** | redirect total priority order | **L2** | `g6lc_fetch_redirect.sby` (incl. restore-never-outranks-trap) | both T envelopes | Done. |
-| **I9** | trap entry held until decode consumes | L3 (observe) | `redirect_hold` / `hold_age` | — | **Yes → L2.** Bounded by construction; needs the hold state as a tuple. Open. |
+| **I9** | trap entry held until decode consumes | L3 (observe) | `redirect_hold` / `hold_age` | - | **Open.** Needs the hold state, which lives in `frontend.sv`; a live-module proof there is far heavier than the realigner (predictors + IQ elaborate too). Next candidate after I6. |
 | **I10** | thread switch loses no progress | **L2** | `g6lc_fetch_smt.sby` (`snap_pc`) | both T envelopes | Done. |
 | **I11** | mispredict always redirects to the resolved target | L1 + L3 | `G6LC_FETCH_B` skips `g6lc_jalr_usable`; `diag-isa-red-lines` RL-RESOLVE-PMA | — | Enforced by absence, mechanically. |
 | **I12** | sequential step is one window | **L2** | `g6lc_fetch_geo.sby` (`nxt == base + W`, `nxt > pc`, `!same_win(pc, nxt)`) | FW 32/64/128/256 × RVC on/off | Done. |
@@ -254,8 +254,13 @@ the final window of the 64-bit space, because `win_base(pc) + W_BYTES` wraps the
 progress genuinely does not hold. The core cannot fetch such an address (VLEN is 39/64 and no PMA
 execute region reaches the top), so the strong property is kept and the impossible input excluded.
 
-**Open, in ladder order:** I4 per-hart leftover, I9 bounded trap hold, and the head-selection half
-of I6. Each is a closed tuple or nearly so, so each belongs at L2 rather than where it sits. I4 and
-I9 both need a small piece of *state* (the per-hart bank; the hold counter), which is why they did
-not fall out with the rest — they want a stateful props module with a real reset, not the stateless
-shape the current five use.
+**Open, in ladder order:** just **I9** (bounded trap hold). I4 and I6 both closed by moving from
+pure functions to LIVE modules: I1/I2/I4 in `g6lc_fetch_realign` (the realigner plus its per-hart
+bank) and I6 in `g6lc_fetch_iq` (two queue copies). I9 is the last one, and it is harder than
+either because the hold state lives in `frontend.sv`, which drags in the predictors and the queue.
+
+**A note on proof shape, since it decided three of these.** A property that says "X must not
+depend on Y" cannot be witnessed by any single execution, so it needs self-composition: run two
+copies, vary only Y, assert the observable agrees. That is how I6 is proven, and it is the right
+shape for any future "opcode-agnostic" / "value-independent" claim -- including the ISA red lines
+in `../firmware-boot-principles.md` sE, which are all of that form.

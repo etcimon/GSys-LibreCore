@@ -238,6 +238,15 @@ Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`
      suite in one remote shell on the builder — **10 tasks in ~11 s** on 12 cores. Engine choice mattered more
      than the host: adding `abc` alongside z3 took the suite from 128 s (with two z3-bound tasks dying on
      `BrokenPipeError`) to 11 s. Details and the four traps in `build-platform/AGENTS.md` §4.6.2b.
+  7c. **Two proof shapes worth reusing.** (a) *Live module over pure function* — when a rule quantifies over
+     module state or over the I$ line, instantiate the real module (as `core/ooo/formal` already did) instead of
+     concluding the rule is not L2-expressible. That closed I1/I2/I4, which SPEC §10 had wrongly recorded as
+     "L3 is leftmost feasible". (b) **Self-composition for non-interference** — a rule of the form "X must not
+     depend on Y" cannot be witnessed by any single execution. Run two copies, vary only Y, assert the
+     observable agrees. That is how I6 is proven, and it is the right shape for **every** ISA red line in
+     `firmware-boot-principles.md` §E, which are all "must not decide from a value" claims. Today those are
+     policed by a `source-scan` tripwire (`diag-isa-red-lines`); a self-composition proof would make them
+     properties instead of greps.
   7. **Ladder map is now explicit.** [`core-fetch/SPEC.md`](architecture/core-fetch/SPEC.md) §10 records, for every fetch invariant, which rung checks it today, with what artifact, at what envelope, and whether it is worth moving left. That table is the work queue for this plane, and it replaces guessing about coverage.
 
 ### Objectives (ordered by ladder position, not by symptom)
@@ -249,7 +258,8 @@ increment at the **leftmost stage that can express the rule**, and treat firmwar
 | # | Objective | Rung | Why now |
 |---|---|---|---|
 | ~~**O1a**~~ | ~~I12 explicit sequential step + the window algebra~~ | L2 | **Done.** `g6lc_fetch_geo.sby` proves `nxt == base + W`, `nxt > pc`, `!same_win(pc, nxt)`, and that `win_base`/`win_tag`/`same_win`/`hw_off`/`ilen_of`/`rvi_prefix` all agree — **swept over 6 envelope points** (FW 32/64/128/256 × RVC, plus 64/128 without RVC). Gate is now **9/9**. |
-| **O1b** | Close the three remaining L2 items in SPEC §10: **I4** per-hart leftover, **I9** bounded trap hold, **I6** head-selection independence | L2 | I4 and I9 need a small piece of *state* (the per-hart bank; the hold counter), so they want a stateful props module with a real reset rather than the stateless shape the current six use. That is the only reason they did not fall out with the rest. |
+| ~~**O1b**~~ | ~~I4 per-hart leftover, I6 head-selection independence~~ | L2 | **Done.** Both closed by proving against **live modules** instead of pure functions. `g6lc_fetch_realign.sby` instantiates the real realigner and proves **I1/I2** no-fabricate (emitted halfword == `data_i` at that slot's own address) and **I4** per-hart carry isolation. `g6lc_fetch_iq.sby` proves **I6** by **self-composition**: two live `instr_queue` copies, identical control, different raw `instr_i`, identical `ready_o`/`consumed_o`/`replay_*`/`fetch_entry_valid_o`/`.address`. Gate is now **11/11** (~18 s remote). |
+| **O1c** | **I9** bounded trap hold | L2 | The only fetch invariant left at L3. Harder than the others: the hold state lives in `frontend.sv`, which drags in the predictors and the queue, so it is a much larger elaboration than the realigner or the IQ. |
 | **O2** | Grow the battery along the **live-peer** axis (M5: 5 of 113 minis run a live peer; `W5 × thread-select` is empty) | L4 | The residual is a `T=2` property and the battery samples the `T=1` face. Highest-value non-formal work, and it is what would make a DI verdict mean something. |
 | **O3** | **H4 determinism** on the bootrom `npc=0x10000` / `s0=0` stall before any further attribution | L6 prep | Three attributions already exist for it and none is falsifiable while the symptom is unstable. If the outcome depends on simulator scheduling, the race is the bug. |
 | **O4** | OpenSBI residual (`mepc0=0x8000a9a8`, `mcause0=0x2`) | L6 | Only as a **gate**, after O1–O3. Never as a search signal. |

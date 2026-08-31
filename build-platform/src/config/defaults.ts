@@ -1268,6 +1268,11 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // isolation. Both quantify over module state or the I$ line, which a
       // pure-function proof cannot express. Runs in the smt2 configuration.
       "core/fetch_B/formal/g6lc_fetch_realign.sby",
+      // I6 as NON-INTERFERENCE: two live instr_queue copies, identical
+      // control, different raw instruction payloads, identical control
+      // outputs. "Head selection must not depend on opcode/rd/FU" is an
+      // information-flow claim, so no single-trace assertion can witness it.
+      "core/fetch_B/formal/g6lc_fetch_iq.sby",
     ],
     formal: {
       // null = one sby process per host core, and tasks dispatched concurrently.
@@ -1592,6 +1597,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "core/fetch_B/formal/g6lc_fetch_geo_props.sv",
           "core/fetch_B/formal/g6lc_fetch_realign.sby",
           "core/fetch_B/formal/g6lc_fetch_realign_props.sv",
+          "core/fetch_B/formal/g6lc_fetch_iq.sby",
+          "core/fetch_B/formal/g6lc_fetch_iq_props.sv",
         ],
       },
       {

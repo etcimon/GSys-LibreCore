@@ -1,0 +1,41 @@
+# R6 instruction-queue formal (bounded) - I6 as NON-INTERFERENCE.
+#
+# Self-composition: two live instr_queue instances, identical control, different
+# raw instruction payloads. Every control output must agree, which is what
+# "head selection must not depend on opcode, rd, or FU" actually means.
+#
+# Run: sby -f core/fetch_B/formal/g6lc_fetch_iq.sby
+# Wired into build-platform verify.formalTasks (cva6-build verify --formal).
+
+[options]
+# Two queues plus their FIFOs; the horizon must cover fill, dual issue, replay
+# and a flush. Bounded rather than unbounded: `prove` on two copies of a FIFO is
+# a much harder induction problem than the property needs.
+mode bmc
+depth 10
+
+[engines]
+# abc-bmc3 first (far faster than z3 on this bit-level cone); both are raced.
+abc bmc3
+smtbmc z3
+
+[script]
+# read_slang: `fetch_entry_t` is a `parameter type`, and the queue is driven
+# through it, which the classic frontend cannot elaborate. It is also the only
+# frontend that resolves hierarchical/parameterised-type designs faithfully --
+# see the note in core/ooo/formal/g6lc_ooo_rename.sby about `read -formal`
+# silently inventing dangling wires.
+read_slang --std 1800-2017 --top g6lc_fetch_iq_props -DFORMAL \
+    g6lc64_smt2_config_pkg.sv config_pkg.sv riscv_pkg.sv ariane_pkg.sv \
+    g6lc_fetch_pkg.sv cva6_fifo_v3.sv instr_queue.sv g6lc_fetch_iq_props.sv
+prep -top g6lc_fetch_iq_props
+
+[files]
+../../include/g6lc64_smt2_config_pkg.sv
+../../include/config_pkg.sv
+../../include/riscv_pkg.sv
+../../include/ariane_pkg.sv
+../g6lc_fetch_pkg.sv
+../../cva6_fifo_v3.sv
+../instr_queue.sv
+g6lc_fetch_iq_props.sv
