@@ -13,6 +13,7 @@
 #![allow(clippy::items_after_test_module)]
 
 mod args;
+mod loader;
 mod pins;
 mod resolve;
 
@@ -507,7 +508,7 @@ fn resolved_dts_blob(args: &Args, resolved: &resolve::Resolved) -> Result<Vec<u8
 /// Derive the logical hart count for an OpenSBI build when the caller points at a
 /// design or a device tree. This makes the firmware's `PLATFORM_HART_COUNT` match
 /// the processor-node count in the generated FDT.
-fn fw_build_hart_count(args: &Args) -> Option<u32> {
+pub(crate) fn fw_build_hart_count(args: &Args) -> Option<u32> {
     if args.value("target").is_none()
         && args.value("config-pkg").is_none()
         && args.value("repo-root").is_none()
@@ -579,7 +580,7 @@ fn emit_device_tree(args: &Args, resolved: &resolve::Resolved, form: &str) -> Re
 /// Output paths routinely name a directory that does not exist yet (`out/…` is the
 /// default emission root and is gitignored, so a fresh clone has no such directory).
 /// Failing there would look like a tool error for what is a perfectly ordinary request.
-fn write_out(path: &str, text: &str) -> Result<(), String> {
+pub(crate) fn write_out(path: &str, text: &str) -> Result<(), String> {
     if let Some(parent) = std::path::Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -1566,8 +1567,12 @@ fn cmd_fw(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// `fw fetch` — clone the pinned OpenSBI source into the requested source directory.
+/// `fw fetch` — clone a pinned firmware/loader source into the requested source directory.
 fn fw_fetch(args: &Args) -> Result<(), String> {
+    if args.value("loader").is_some_and(|l| l != "opensbi") {
+        return loader::fetch(args);
+    }
+
     let pins_path = Pins::find(std::env::current_dir().unwrap_or_default().as_path())
         .ok_or("cannot find pins.toml; run from inside the package")?;
     let pins = Pins::from_file(&pins_path).map_err(|e| format!("cannot read pins.toml: {e}"))?;
@@ -1635,8 +1640,12 @@ fn fw_fetch(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
-/// `fw build` — compile the fetched OpenSBI source with a cross-toolchain.
+/// `fw build` — compile a fetched firmware/loader source with a cross-toolchain.
 fn fw_build(args: &Args) -> Result<(), String> {
+    if args.value("loader").is_some_and(|l| l != "opensbi") {
+        return loader::build(args);
+    }
+
     let pins_path = Pins::find(std::env::current_dir().unwrap_or_default().as_path())
         .ok_or("cannot find pins.toml; run from inside the package")?;
     let pins = Pins::from_file(&pins_path).map_err(|e| format!("cannot read pins.toml: {e}"))?;
@@ -1861,12 +1870,12 @@ fn fw_build(args: &Args) -> Result<(), String> {
 }
 
 /// True when `wsl` is on the host PATH.
-fn wsl_available() -> bool {
+pub(crate) fn wsl_available() -> bool {
     which("wsl")
 }
 
 /// Check whether a command exists inside the default WSL distribution.
-fn wsl_which(cmd: &str) -> bool {
+pub(crate) fn wsl_which(cmd: &str) -> bool {
     std::process::Command::new("wsl")
         .arg("which")
         .arg(cmd)
@@ -1879,7 +1888,7 @@ fn wsl_which(cmd: &str) -> bool {
 /// Convert a path for use as a `make` argument. In WSL mode the path is made absolute,
 /// translated to a WSL path, and converted to forward slashes; otherwise backslashes are
 /// replaced by forward slashes.
-fn make_path_arg(p: &std::path::Path, use_wsl: bool) -> Result<String, String> {
+pub(crate) fn make_path_arg(p: &std::path::Path, use_wsl: bool) -> Result<String, String> {
     if use_wsl {
         let abs = if p.is_absolute() {
             p.to_path_buf()
@@ -1896,7 +1905,7 @@ fn make_path_arg(p: &std::path::Path, use_wsl: bool) -> Result<String, String> {
 
 /// Convert an absolute Windows path to its WSL equivalent. Relative paths are left as-is
 /// (with backslashes replaced by forward slashes so WSL make sees a portable path).
-fn to_wsl_path(p: &std::path::Path) -> Result<String, String> {
+pub(crate) fn to_wsl_path(p: &std::path::Path) -> Result<String, String> {
     let with_slashes = p.to_string_lossy().replace('\\', "/");
     if !p.is_absolute() {
         return Ok(with_slashes);
@@ -1918,7 +1927,7 @@ fn to_wsl_path(p: &std::path::Path) -> Result<String, String> {
 
 /// Locate a RISC-V cross-toolchain prefix from `--cross-compile`, `CROSS_COMPILE`, or
 /// common names on the PATH.
-fn detect_cross_compile(args: &Args) -> Result<(String, bool), String> {
+pub(crate) fn detect_cross_compile(args: &Args) -> Result<(String, bool), String> {
     if let Some(p) = args.value("cross-compile") {
         let wsl = cfg!(windows) && wsl_available() && wsl_which(&format!("{p}gcc"));
         return Ok((p.to_string(), wsl));
@@ -1970,7 +1979,7 @@ fn detect_cross_compile(args: &Args) -> Result<(String, bool), String> {
     Err("no RISC-V cross-toolchain found; set CROSS_COMPILE or --cross-compile".into())
 }
 
-fn which(cmd: &str) -> bool {
+pub(crate) fn which(cmd: &str) -> bool {
     std::process::Command::new("where")
         .arg(cmd)
         .stdout(std::process::Stdio::null())

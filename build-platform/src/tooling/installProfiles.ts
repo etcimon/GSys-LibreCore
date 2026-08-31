@@ -25,11 +25,13 @@ import type { PlatformContext } from "../context.ts";
 import { childEnv } from "../context.ts";
 import { hasBinary, run } from "../platform/exec.ts";
 import {
+  installEdk2Src,
   installFormal,
   installIcarus,
   installOpenSourceSimTools,
   installRiscvGcc,
   installSpike,
+  installUbootSrc,
   installVerilator,
   type RecipeOptions,
   type RecipeResult,
@@ -199,6 +201,10 @@ export async function installRecipeById(
     case "opensbi-smt2":
     case "opensbi":
       return installOpensbiSmt2(ctx, options);
+    case "u-boot-src":
+      return installUbootSrc(ctx, options);
+    case "edk2-src":
+      return installEdk2Src(ctx, options);
     default:
       return { id, ok: false, skipped: false, reason: `unknown recipe: ${id}` };
   }

@@ -422,7 +422,9 @@ export async function loadTensorBoardEnv(
         const text = readFileSync(genEnv, "utf8");
         for (const line of text.split("\n")) {
           const m = line.match(/^export\s+([A-Z0-9_]+)=(.*)$/);
-          if (m) env[m[1]] = m[2].replace(/^["']|["']$/g, "");
+          if (m && m[1] && m[2]) {
+            env[m[1]] = m[2].replace(/^["']|["']$/g, "");
+          }
         }
       } catch {
         /* ignore */

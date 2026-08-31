@@ -14,7 +14,7 @@ import { mkdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import { childEnv, type PlatformContext } from "../context.ts";
-import { hasBinary, run } from "../platform/exec.ts";
+import { hasBinary, run, which } from "../platform/exec.ts";
 import { resolveBashBinary, runBashScript } from "../platform/shell.ts";
 import { recommendedJobs } from "../platform/os.ts";
 
@@ -736,4 +736,85 @@ export async function installOpenSourceSimTools(
     results.push(result);
   }
   return results;
+}
+
+/** Locate a Python interpreter that can drive g6lc_qemu/tools/g6q.py. */
+function findPython(): string | null {
+  return which("python3") || which("python") || which("py");
+}
+
+/**
+ * Generic fetch recipe for a g6lc_qemu loader. Clones the pinned upstream
+ * source tree under workspace/tooling/loader-src/<loader> by delegating to
+ * the package's own fetch-fw command so the pin is authoritative.
+ */
+async function installLoaderSrc(
+  ctx: PlatformContext,
+  loader: "u-boot" | "edk2",
+  options: RecipeOptions = {},
+): Promise<RecipeResult> {
+  const { logger, repoRoot, paths } = ctx;
+  const recipeId = `${loader}-src`;
+  const python = findPython();
+  if (!python) {
+    return { id: recipeId, ok: false, skipped: false, reason: "python3 not found on PATH" };
+  }
+
+  const script = join(repoRoot, "g6lc_qemu", "tools", "g6q.py");
+  if (!existsSync(script)) {
+    return { id: recipeId, ok: false, skipped: false, reason: `g6q.py missing: ${script}` };
+  }
+
+  const srcDir = join(paths.tooling, "loader-src", loader);
+  const gitMarker = join(srcDir, ".git");
+  if (!options.force && existsSync(gitMarker)) {
+    return already(recipeId, `already present: ${srcDir}`);
+  }
+
+  const fwArgs = ["fetch-fw", "--loader", loader, "--loader-src", srcDir];
+  if (loader === "edk2") {
+    const platDir = join(paths.tooling, "loader-src", "edk2-platforms");
+    fwArgs.push("--edk2-platforms-src", platDir);
+  }
+  if (options.dryRun) {
+    fwArgs.push("--dry-run");
+  }
+
+  if (options.dryRun) {
+    logger.info(`[dry-run] ${python} tools/g6q.py ${fwArgs.join(" ")}`);
+    return already(recipeId, "dry-run");
+  }
+
+  logger.info(`${recipeId}: fetching pinned ${loader} source into ${srcDir}`);
+  const res = await run(python, [script, ...fwArgs], {
+    cwd: join(repoRoot, "g6lc_qemu"),
+    env: childEnv(ctx),
+    logger,
+    allowFailure: true,
+    stdio: "both",
+  });
+
+  const ok = res.ok && existsSync(gitMarker);
+  return {
+    id: recipeId,
+    ok,
+    skipped: false,
+    reason: ok ? srcDir : `${loader} source fetch failed (exit ${res.code})`,
+  };
+}
+
+/** Fetch pinned U-Boot source into workspace/tooling/loader-src/u-boot. */
+export async function installUbootSrc(
+  ctx: PlatformContext,
+  options: RecipeOptions = {},
+): Promise<RecipeResult> {
+  return installLoaderSrc(ctx, "u-boot", options);
+}
+
+/** Fetch pinned EDK2 source (edk2 + edk2-platforms) into workspace/tooling/loader-src. */
+export async function installEdk2Src(
+  ctx: PlatformContext,
+  options: RecipeOptions = {},
+): Promise<RecipeResult> {
+  return installLoaderSrc(ctx, "edk2", options);
 }

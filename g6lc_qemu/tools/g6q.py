@@ -1360,8 +1360,13 @@ def _fw_cli(argv: list[str]) -> int:
 
 def cmd_fetch_fw(args: argparse.Namespace) -> int:
     fw_args = ["fw", "fetch"]
+    if args.loader:
+        fw_args += ["--loader", args.loader]
     if args.fw_src:
-        fw_args += ["--fw-src", args.fw_src]
+        src_opt = "--loader-src" if (args.loader and args.loader != "opensbi") else "--fw-src"
+        fw_args += [src_opt, args.fw_src]
+    if args.loader == "edk2" and args.edk2_platforms_src:
+        fw_args += ["--edk2-platforms-src", args.edk2_platforms_src]
     if args.dry_run:
         fw_args += ["--dry-run"]
     return _fw_cli(fw_args)
@@ -1371,8 +1376,17 @@ def cmd_fetch_fw(args: argparse.Namespace) -> int:
 
 def cmd_build_fw(args: argparse.Namespace) -> int:
     fw_args = ["fw", "build"]
+    if args.loader:
+        fw_args += ["--loader", args.loader]
+    _loader = args.loader and args.loader != "opensbi"
+    src_opt = "--loader-src" if _loader else "--fw-src"
+    out_opt = "--loader-out" if _loader else "--fw-out"
     if args.fw_src:
-        fw_args += ["--fw-src", args.fw_src]
+        fw_args += [src_opt, args.fw_src]
+    if args.loader == "edk2" and args.edk2_platforms_src:
+        fw_args += ["--edk2-platforms-src", args.edk2_platforms_src]
+    if args.machine:
+        fw_args += ["--machine", args.machine]
     if args.fw_mode:
         fw_args += ["--fw-mode", args.fw_mode]
     if args.fw_platform:
@@ -1380,7 +1394,7 @@ def cmd_build_fw(args: argparse.Namespace) -> int:
     if args.fw_text_start:
         fw_args += ["--fw-text-start", args.fw_text_start]
     if args.fw_out:
-        fw_args += ["--fw-out", args.fw_out]
+        fw_args += [out_opt, args.fw_out]
     if args.cross_compile:
         fw_args += ["--cross-compile", args.cross_compile]
     for make in args.fw_make:
@@ -1938,17 +1952,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("rest", nargs=argparse.REMAINDER)
     p.set_defaults(fn=cmd_bridge)
 
-    p = sub.add_parser("fetch-fw", help="fetch the pinned OpenSBI firmware source into out/fw-src/")
-    p.add_argument("--fw-src", default=None, help="source directory (default: out/fw-src/opensbi)")
+    p = sub.add_parser("fetch-fw", help="fetch pinned firmware/loader source (default: opensbi)")
+    p.add_argument("--loader", default=None, help="loader to fetch: opensbi, u-boot, edk2")
+    p.add_argument("--loader-src", "--fw-src", default=None, dest="fw_src",
+                   help="source directory (default: out/fw-src/<loader>)")
+    p.add_argument("--edk2-platforms-src", default=None, dest="edk2_platforms_src",
+                   help="edk2-platforms source directory (default: out/fw-src/edk2-platforms)")
     p.add_argument("--dry-run", action="store_true", help="print the planned clone command and exit")
     p.set_defaults(fn=cmd_fetch_fw)
 
-    p = sub.add_parser("build-fw", help="build the fetched OpenSBI firmware")
-    p.add_argument("--fw-src", default=None, help="source directory (default: out/fw-src/opensbi)")
+    p = sub.add_parser("build-fw", help="build the fetched firmware/loader (default: opensbi)")
+    p.add_argument("--loader", default=None, help="loader to build: opensbi, u-boot, edk2")
+    p.add_argument("--loader-src", "--fw-src", default=None, dest="fw_src",
+                   help="source directory (default: out/loader-src/<loader>)")
+    p.add_argument("--edk2-platforms-src", default=None, dest="edk2_platforms_src",
+                   help="edk2-platforms source directory (default: out/loader-src/edk2-platforms)")
+    p.add_argument("--loader-out", "--fw-out", default=None, dest="fw_out",
+                   help="output directory for board package and build (default: out/loader-build/<loader>-<target>-<machine>)")
+    p.add_argument("--machine", default=None, help="machine profile: g6lc-virt (default: g6lc-soc)")
     p.add_argument("--fw-mode", default=None, help="dynamic, jump, or payload (default: dynamic)")
     p.add_argument("--fw-platform", default=None, help="OpenSBI platform (default: generic)")
     p.add_argument("--fw-text-start", default=None, help="firmware link address (default: from pins.toml)")
-    p.add_argument("--fw-out", default=None, help="output directory for built firmware (default: out/fw)")
     p.add_argument("--fw-make", action="append", default=[], help="extra VAR=VAL passed to make (repeatable)")
     p.add_argument("--fw-fdt", default=None, help="DTB path to embed (or 'auto' to generate from the resolved model)")
     p.add_argument("--fw-payload", default=None, help="kernel/payload for payload mode")

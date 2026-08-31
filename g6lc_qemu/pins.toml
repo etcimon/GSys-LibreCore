@@ -46,6 +46,26 @@ platform = "generic"            # no vendor platform C
 fw_text_start = "0x80000000"
 status   = "fetched"            # updated by `g6q fetch-fw`; path is gitignored out/fw-src/opensbi
 
+# --------------------------------------------------------------- loader firmware ---
+# U-Boot and EDK2 are SEPARATE GPL / BSD works. g6lc_qemu fetches them on demand into
+# gitignored out/loader-src/ and emits board packages as text; no crate links them.
+[u_boot]
+url      = "https://github.com/u-boot/u-boot.git"
+ref      = "v2025.07"           # U0 build-only pin; revalidate when board package matures
+status   = "planned"            # updated by `g6q fw fetch --loader u-boot`; path is gitignored out/loader-src/u-boot
+defconfig_base = "qemu-riscv64_smode_defconfig"
+text_base_offset = "0x200000"   # DRAM base + 2 MiB for S-mode text
+
+[edk2]
+url      = "https://github.com/tianocore/edk2.git"
+ref      = "edk2-stable202511"  # E0 build-only pin; revalidate when RISC-V platform matures
+status   = "planned"            # updated by `g6q fw fetch --loader edk2`; path is gitignored out/loader-src/edk2
+
+[edk2_platforms]
+url      = "https://github.com/tianocore/edk2-platforms.git"
+ref      = "master"             # E0 build-only pin; use a commit SHA once the platform matures
+status   = "planned"            # updated by `g6q fw fetch --loader edk2`; path is gitignored out/loader-src/edk2-platforms
+
 # ----------------------------------------------------------------- riscv toolchain ---
 [riscv_toolchain]
 name     = "xpack-riscv-none-elf-gcc"

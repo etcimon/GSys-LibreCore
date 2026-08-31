@@ -73,7 +73,7 @@ export const toolsCommand: Command = {
           logger.info(`                   recipes: ${p.recipeIds.join(", ")}`);
         }
         logger.info("");
-        logger.info("Recipes: riscv-gcc | verilator | spike | iverilog | opensbi-smt2");
+        logger.info("Recipes: riscv-gcc | verilator | spike | iverilog | opensbi-smt2 | u-boot-src | edk2-src");
         logger.info("Example: bun run src/cli/index.ts tools install dual-hart");
         return 0;
       }

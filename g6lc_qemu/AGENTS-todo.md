@@ -1381,3 +1381,23 @@ These fixes are now in the generator: `g6q-emit-qemu` emits `reg_shift` / `clock
 - Resolved the `mini_fdt_nt_ptr0` S4 residual: the `tohost = 122928` (`0x1E030`) failure was an IAF because the FDT stub at `0x8001E030` is outside the `g6lc64_smt2` execute region. Moving `.text.fdt` to `0x8001D000` in `verif/tests/custom/multicore/mini_fdt_nt_ptr0.{S,ld}` makes the directed mini PASS on `work-ver-smt2-fw64-B` and in the remote `di` suite.
 - The fetch_B target `0x8001E030` was never corrupt; `+fetch_snap` and an I-cache diagnostic display confirmed the `c.jr a0` redirect delivers the correct target and the I-cache returns an exception (not zero data from a fetch bug). The `btb` `predict_address = 0x80000000` seen before the redirect is the predicted fall-through path after the mispredict is killed, not a corrupt pointer.
 - The historic OpenSBI `mepc=0` / `sbi_hart_hang` S4 class is a separate residual: it occurs when `fdt_next_tag` / `fdt_offset_ptr` control flow reaches a non-execute address (or when the trap-redirect path itself lands at PC 0). It is not addressed by the `mini_fdt_nt_ptr0` test-address fix.
+
+### U0/E0 loader build scaffolding (this pass)
+
+- Added `[u_boot]`, `[edk2]`, and `[edk2_platforms]` pins to `g6lc_qemu/pins.toml` with pinned upstream URLs and refs (U-Boot `v2025.07`, EDK2 `edk2-stable202511`, EDK2 platforms `master`). Status is `planned`.
+- Added `g6lc_qemu/crates/g6q-cli/src/loader.rs` — a build-only scaffolding module that clones pinned source, generates a target-specific board package from `TargetModel`, writes a build script, and attempts the build only when the host has the prerequisites.
+- Extended `g6lc-qemu fw` to dispatch `--loader u-boot|edk2` for both `fw fetch` and `fw build`; OpenSBI remains the default when `--loader` is absent or `opensbi`.
+- Extended `python tools/g6q.py fetch-fw` and `build-fw` to accept `--loader`, `--loader-src`, `--loader-out`, and `--machine` and forward them to the Rust CLI.
+- Generated U-Board board package includes: defconfig fragment, config-fragment, board header, FIT `.its` skeleton, `u-boot-build.sh`, and README. It uses the upstream `qemu-riscv64_smode_defconfig` as a base and overrides `CONFIG_SYS_TEXT_BASE`, `CONFIG_SYS_LOAD_ADDR`, and DRAM values from the model.
+- Generated EDK2 board package includes: `G6lcPlatformPkg.dec`, `.dsc`, `.fdf`, `.h`, `edk2-build.sh`, and README. The script is expected to fail in E0 because the RISC-V SEC/PEI/DXE/BDS platform is not yet wired.
+- Validation green: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `python tools/check_independence.py`, `python tools/g6q.py check`, and the two loader dry-runs all pass in this pass.
+- Added `--edk2-platforms-src` to `python tools/g6q.py fetch-fw` and `build-fw` so EDK2 `edk2-platforms` can be fetched to a non-default path.
+- Build-platform integration: added `u-boot-build` and `edk2-build` regression suites (`build-platform/src/config/defaults.ts`) plus `u-boot-src` and `edk2-src` install recipes (`build-platform/src/tooling/recipes.ts`, `installProfiles.ts`, `cli/commands/tools.ts`); recipes delegate to `g6lc_qemu/tools/g6q.py fetch-fw` and clone into `build-platform/workspace/tooling/loader-src/`.
+- Build-platform `bunx tsc --noEmit` and the `bun test` suite pass except for the pre-existing `branding-g6lc.test.ts` failure.
+- Runtime stages U1–U3 and E1–E3 remain gated on the unresolved O7p `mini_fdt_next_tag_lbu` self-loop / SL-W stale-read residual and I6 clause 1 proof; only build-only U0/E0 scaffolding is claimed.
+- Verified dry-run commands:
+  - `g6q fw build --loader u-boot --target g6lc64_smt2 --machine g6lc-virt --dry-run`
+  - `g6q fw build --loader edk2 --target g6lc64_smt2 --machine g6lc-virt --dry-run`
+  - `bun run src/cli/index.ts tools install u-boot-src --dry-run`
+  - `bun run src/cli/index.ts tools install edk2-src --dry-run`
+- Missing host prerequisites to record: RISC-V cross-toolchain, `make`, `bash`, WSL (on Windows), `ninja`/BaseTools for EDK2, and network/git for source fetch.

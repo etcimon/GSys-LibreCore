@@ -1,7 +1,6 @@
 # U-Boot / EDK2 boot architecture for `g6lc_qemu`
 
-**Status:** scaffold / plan of record. Applies **after** the O7p `core/fetch_B/instr_queue`
-age-ordered output is now in the RTL, but `mini_fdt_next_tag_lbu` still fails at 645 cycles on a `0x8000014e` self-loop, so the residual is not closed. Build-only Stage U0/E0 scaffolding can proceed in parallel This file is
+**Status:** scaffold / plan of record. U0 (U-Boot build-only scaffolding) and E0 (EDK2 build-only scaffolding) are now started in `g6lc_qemu`; see `g6lc_qemu/AGENTS-todo.md` and `g6lc_qemu/pins.toml`. Runtime stages U1–U3 and E1–E3 remain gated until the O7p `core/fetch_B/instr_queue` residual is closed: `mini_fdt_next_tag_lbu` still fails because the third caller loads `nextoff` from `0x80007fcc` and gets 0x4 instead of the 0x8 just stored. This is the S1/SL-W L1-stale store-to-load class, not a queue-order bug. Build-only Stage U0/E0 scaffolding can proceed in parallel. This file is
 `architecture/` tier **T** (MIT), `.md` only, not compiled.
 
 Parent: [`architecture/g6lc-qemu/README.md`](README.md) · OS/firmware semantics:
@@ -39,9 +38,9 @@ generates firmware, emits DTB, and distinguishes the `g6lc-soc` (hardware-faithf
 
 `core/fetch_B/instr_queue.sv` can issue instructions out of program order when multiple FIFOs hold
 entries from different fetch windows. The current O7p logic (global `push_seq` age + oldest-first output
-pointer) keeps the queue live, and a 2-bit `shamt` width bug that caused pseq collisions was fixed. `mini_fdt_next_tag_lbu` still
-fails at 645 cycles on a `0x8000014e` self-loop. This is the active `AGENTS-todo.md` item **O7m → O7p** and is a violation of the
-I6 clause 1 contract.
+pointer) keeps the queue live, and a 2-bit `shamt` width bug that caused pseq collisions was fixed. RVFI shows the
+fail is now a store-to-load stale read: the second `next_tag_lbu` call stores `nextoff=0x8` to `0x80007fcc`, the third
+caller immediately loads the same address and gets `0x4`. This is the S1/SL-W L1-stale class, not I6 clause 1.
 
 **Do not extend the boot ladder past OpenSBI until this is closed.** A second-stage loader is larger
 and more branch/dcache-sensitive than the OpenSBI payload. If the queue can invert a return path
@@ -54,9 +53,9 @@ would move through 10–100 M cycles instead of the current 6.5 M.
 ```text
 JUDGEMENT
   GIVEN    OpenSBI fw_payload is the smallest real supervisor witness
-  AND      O7p still fails mini_fdt_next_tag_lbu with tohost=1 at 645 cycles
-  THEN     U-Boot/EDK2 run stages are gated until the residual self-loop is closed, but build-only U0/E0 can proceed
-  UNLESS   a bounded formal task g6lc_fetch_iq_order is green
+  AND      the O7p residual is the S1/SL-W store-to-load stale read
+  THEN     U-Boot/EDK2 run stages are gated until SL-W gate-6 is green, but build-only U0/E0 can proceed
+  UNLESS   the `g6lc_qemu` OpenSBI boot witness and `mini_fdt_next_tag_lbu` both pass
   BECAUSE  P1 (workload is a witness) + P4 (a broken promise is discovered at a third module)
 ```
 
@@ -196,10 +195,12 @@ U-Boot entry. The FDT is the one `g6q` generated for the target, optionally over
 | U1 | U-Boot SPL reaches `board_init_f`/`board_init_r` on `g6lc-virt` | `g6q run` + string match | Fast, ~seconds |
 | U2 | U-Boot loads the FIT and starts the kernel on `g6lc-virt` with virtio | `g6q run` + kernel console | Fast, minutes |
 | U3 | Same on `g6lc-soc` with SD image (or SPI flash) | `g6q run` + kernel console | Hardware-faithful |
-| U4 | Tandem with RTL trace for U1–U3 selected steps | `--diag d1` | Only after O7p closeout |
+| U4 | Tandem with RTL trace for U1–U3 selected steps | `--diag d1` | Only after SL-W gate-6 green |
 
-Stage U0 (build-loader) can start before the RTL residual is fully closed, because they run on `g6lc-virt` with
-stock QEMU. U1–U2 run on `g6lc-virt` with stock QEMU and are independent of the RTL queue order, but must not claim green until the queue is fully closed. U3 and U4 are gated on `g6lc-soc` and on the queue fix.
+Stage U0 (build-loader) can start before the RTL residual is fully closed because it is a build step.
+U1–U2 run on `g6lc-virt` with stock QEMU and are independent of the RTL queue order, but boot
+validation must not claim green until `mini_fdt_next_tag_lbu` and the I6 clause 1 proof are green.
+U3 and U4 are gated on `g6lc-soc` and on the queue fix.
 
 ---
 
@@ -257,7 +258,7 @@ explicitly deferred.
 | E1 | SEC/PEI reaches DXE on `g6lc-virt` | `g6q run` + EDK2 serial output |
 | E2 | BDS enumerates virtio block and loads an `EFI/boot/bootriscv64.efi` | `g6q run` |
 | E3 | Linux starts under UEFI on `g6lc-virt` | `g6q run` + kernel console |
-| E4 | Tandem with RTL trace | `--diag d1` (gated on O7p closeout) |
+| E4 | Tandem with RTL trace | `--diag d1` (gated on SL-W gate-6 green) |
 
 ---
 
@@ -265,20 +266,21 @@ explicitly deferred.
 
 ### 5.1 CLI additions
 
-Extend `g6q fw` / `g6q run` per the existing `architecture/g6lc-qemu/cli.md` style:
+Extend `g6q fw` per the existing `architecture/g6lc-qemu/cli.md` style. The current U0/E0 scaffolding uses:
 
 ```text
-g6q fw build --fw-loader u-boot|edk2 --target ID
-  --fw-loader-src PATH   # override pinned source
-  --fw-loader-rev REV    # override pin
-  --fw-its PATH          # inject an .its (U-Boot)
-  --fw-dsc PATH          # inject a .dsc (EDK2)
-
-g6q run --loader u-boot|edk2 --loader-image PATH
-  --sd-image PATH        # g6lc-soc
-  --block-image PATH     # g6lc-virt
-  --loader-fdt PATH      # FDT passed to the loader (defaults to generated)
+g6q fw fetch --loader u-boot|edk2 [--loader-src PATH] [--dry-run]
+g6q fw build --loader u-boot|edk2 --target g6lc64_smt2 --machine g6lc-virt
+             [--loader-src PATH] [--loader-out PATH]
+             [--cross-compile PREFIX] [--dry-run]
 ```
+
+- `--loader-src` overrides the pinned source directory (`out/loader-src/<loader>` by default).
+- `--loader-out` overrides the generated board package / build root.
+- `--machine g6lc-virt` is the first supported profile; `g6lc-soc` is accepted but not yet runtime-validated.
+- Dry-run writes the generated board package and build script and prints the planned command without invoking the loader build.
+
+`g6q run --loader u-boot|edk2` is *not* implemented yet; it is part of U1/E1 and is gated on the RTL residual.
 
 ### 5.2 IR additions
 
@@ -306,27 +308,30 @@ Add two conformance findings:
 
 ### 6.1 Suites and diagnostics
 
-Following `build-platform/AGENTS.md` §4.4, add two **optional** suites:
+Added **optional build suites** in `build-platform/src/config/defaults.ts`:
 
 | Suite id | Group | Target | What |
 |---|---|---|---|
-| `u-boot-build` | `linux` | `g6lc64_smt2` | `g6q fw build --loader u-boot` |
-| `u-boot-boot-virt` | `linux` | `g6lc64_smt2` | `g6q run --loader u-boot --machine g6lc-virt` |
-| `edk2-build` | `linux` | `g6lc64_smt2` | `g6q fw build --loader edk2` |
-| `edk2-boot-virt` | `linux` | `g6lc64_smt2` | `g6q run --loader edk2 --machine g6lc-virt` |
+| `u-boot-build` | `linux` | `g6lc64_smt2` | `g6q fw build --loader u-boot --target g6lc64_smt2 --machine g6lc-virt --dry-run` |
+| `edk2-build` | `linux` | `g6lc64_smt2` | `g6q fw build --loader edk2 --target g6lc64_smt2 --machine g6lc-virt --dry-run` |
 
-They are **not** in `tests.defaultSuites` until the loader is green. They live in `.config.ts` as
-optional and are surfaced by `bun run src/cli/index.ts test --list`.
+The runtime suites `u-boot-boot-virt` and `edk2-boot-virt` are **deferred** until U1/U2 and E1/E2 are green. All four are **not** in `tests.defaultSuites` until the loader is green. The build suites are surfaced by `bun run src/cli/index.ts test --list`.
 
 ### 6.2 Managed tools
 
-Following `build-platform/AGENTS.md` §4.3, add two source recipes to `src/tooling/recipes.ts`:
+Added two source recipes to `build-platform/src/tooling/recipes.ts` and wired them through
+`installProfiles.ts` / `cli/commands/tools.ts`:
 
-- `installUbootSrc` — clones and optionally patches the pinned U-Boot.
-- `installEdk2Src` — clones the pinned edk2 + edk2-platforms.
+- `u-boot-src` — calls `g6lc_qemu/tools/g6q.py fetch-fw --loader u-boot --loader-src <workspace/tooling/loader-src/u-boot>`.
+- `edk2-src` — calls `g6q.py fetch-fw --loader edk2 --loader-src <.../edk2> --edk2-platforms-src <.../edk2-platforms>`.
 
-Both install into `workspace/tooling/loader-src/` (gitignored). The `g6q` package may also keep its
-own copy under `g6lc_qemu/out/loader-src/`; the build-platform adapter passes the path via `--fw-loader-src`.
+Both install into `build-platform/workspace/tooling/loader-src/` (gitignored). They reuse the pins in
+`g6lc_qemu/pins.toml` rather than duplicating them. `--edk2-platforms-src` was added to `tools/g6q.py`
+to support the separate `edk2-platforms` tree.
+
+**Status:** wired and `tsc --noEmit` + `bun test` green (same pre-existing `branding-g6lc.test.ts`
+failure as before). `bun run src/cli/index.ts tools install u-boot-src --dry-run` and
+`edk2-src --dry-run` both plan the expected `g6q.py fetch-fw` commands.
 
 ### 6.3 `--formal-remote` based on `.sby`
 
@@ -387,13 +392,14 @@ silently produce a broken image.
 
 | Phase | Trigger | Work | Outcome |
 |---|---|---|---|
-| **U0** | Now (build-only scaffolding) | Pin U-Boot/EDK2 revs in `g6lc_qemu/pins.toml` as `planned`; implement `g6q fw build --loader u-boot` for `g6lc-virt` | Build suite green; no runtime claim |
+| **U0** | Now (build-only scaffolding) | Pin U-Boot/EDK2 revs in `g6lc_qemu/pins.toml` as `planned`; implement `g6q fw build --loader u-boot` for `g6lc-virt`; generate board package + build script; do **not** claim a green build until host cross-toolchain/network validated | Build scaffolding and dry-run green; no runtime claim |
 | **U1** | U0 green | `g6q run` U-Boot SPL to `board_init_r` on `g6lc-virt` with virtio | U-Boot loader witness in QEMU |
 | **U2** | U1 green | `g6q run` U-Boot FIT → Linux on `g6lc-virt` | Distro boot in emulator |
-| **U3** | U2 green + O7p closeout + I6 clause 1 proven | `g6lc-soc` U-Boot with SD/SPI, tandem D1 | Hardware-faithful boot |
-| **E1** | U2 green | `g6q fw build --loader edk2` for `g6lc-virt` | EDK2 FD emitted |
+| **U3** | U2 green + SL-W gate-6 green + I6 clause 1 proven | `g6lc-soc` U-Boot with SD/SPI, tandem D1 | Hardware-faithful boot |
+| **E0** | Now (build-only scaffolding, in parallel with U0) | Pin EDK2 + edk2-platforms revs; implement `g6q fw build --loader edk2` for `g6lc-virt`; generate DEC/DSC/FDF/h + build script; expected to fail at runtime because the RISC-V SEC/PEI/DXE/BDS platform is not yet wired | Build scaffolding and dry-run green; no runtime claim |
+| **E1** | E0 green + U2 green | `g6q run` EDK2 SEC/PEI to DXE on `g6lc-virt` | EDK2 FD witness in QEMU |
 | **E2** | E1 green | `g6q run` EDK2 → Linux on `g6lc-virt` | UEFI distro boot |
-| **E3** | E2 green + O7p closeout + I6 clause 1 proven | Tandem with RTL on selected U-Boot/EDK2 stages | Evidence |
+| **E3** | E2 green + SL-W gate-6 green + I6 clause 1 proven | Tandem with RTL on selected U-Boot/EDK2 stages | Evidence |
 
 The staging is deliberately **not** a test plan. It is a feature promotion ladder: each phase is a
 build-platform suite or `g6q` command, and the decision to enter the next phase is a green gate, not
