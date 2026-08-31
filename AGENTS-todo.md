@@ -378,6 +378,76 @@ illegal-instruction trap. Whether (a) is hart-1-parked-legitimately versus hart-
 established** and is the next thing to determine — the `id-dbg` line does not identify the hart, so the
 first step is per-hart attribution, not another hypothesis.
 
+### Fastest path to O4, inferred from OpenSBI source (2026-08-31)
+
+Rather than treat O4 as "run the soak again", the path was derived by lifting the failing directed mini
+to its archetype and reading the OpenSBI witness for it (H1 → §2 archetypes → logics §2 R-table).
+
+**`mini_csr_expected_trap` is a verbatim transcription of OpenSBI's R3 probe.** Disassembly of the
+built ELF against the firmware source leaves no ambiguity:
+
+| Mini | OpenSBI witness |
+|---|---|
+| `csrrw t1, mtvec, t0` (arm, saving old mtvec) | `include/sbi/sbi_csr_detect.h:17` `csr_read_allowed` |
+| `.word 0xfff022f3` = `csrr t0,0xfff` (illegal CSR) | the maybe-illegal probe itself |
+| `csrw mtvec, t1` (restore), inline, repeated twice | same, and `lib/sbi/sbi_hart.c:771` repeats it dozens of times |
+| `expected_handler`: `csrr mepc; addi +4; csrw mepc; mret` | `lib/sbi/sbi_expected_trap.S:23` — the **blind fixed +4** |
+
+**Its failure, measured on the freshly built B harness with a matched ROM:** `mcause=0` and `mepc=0`
+for the full 200k cycles, i.e. **no trap ever fires**. The illegal CSR access at `0x80000020` does not
+except; execution then continues past the restore, and does not even take the
+`bne s0,t3,fail` at `0x8000002e` (which must be taken, since `s0` cannot hold the `0xe601` cookie a
+handler never wrote). `tohost` is never written by either the pass path or the `fail` path, and the core
+ends fetching zeros at `0x800000cc` — `0x38` bytes, i.e. **14 × 4**, past the `0x94`-byte `.text`.
+
+**So the gate on O4 is the W2 archetype — precise trap — and it is not in the fetch plane.**
+
+```
+O4  OpenSBI fw_payload reaches the cookie
+ └── requires sbi_hart_detect_features() to complete            lib/sbi/sbi_hart.c:771
+      └── which repeats csr_read_allowed() dozens of times      include/sbi/sbi_csr_detect.h:17
+           └── which REQUIRES a precise illegal-instruction trap
+               plus a handler whose blind mepc+=4 is sound      lib/sbi/sbi_expected_trap.S:23
+                └── mini_csr_expected_trap is exactly that, and no trap fires at all
+                     └── Home (logics §2, R3): "precise trap", `stall_csr_older` (**issue**, not fetch)
+                          └── corroborated independently by the A/B pair: fails on BOTH flavours
+```
+
+Three things line up, which is why this is worth acting on rather than another hypothesis:
+1. **A/B said "not fetch_B"** — and R3's Home is issue/commit, not fetch. Independent agreement.
+2. **All 11 proven contracts are fetch.** None touches trap delivery, so none of them could have caught
+   this — which is exactly why the pin survived a green formal gate.
+3. **M5 already flagged this cell as empty**: `W2 × issue` and `W2 × commit` have **zero** minis, and
+   R3's clauses (c) and (d) were recorded as having no owner. The coverage matrix predicted the gap
+   before the failure was understood.
+
+**Discriminator run (T3), and it picks the file: exception delivery, not CSR legality.** Two minis were
+built differing in *one word* — an illegal **instruction** (`.word 0x00000000`) versus an illegal **CSR
+access** (`.word 0xfff022f3`), everything else identical:
+
+| Probe | `mcause` / `mepc` | Reached DRAM? |
+|---|---|---|
+| illegal **instruction** | `0` / `0x0` | **yes** — executing `0x80000018`…`0x80000026` |
+| illegal **CSR access** | `0` / `0x0` | **yes** — executing `0x80000024`…`0x80000034` |
+
+**Neither raises a trap.** The confound was checked before drawing the conclusion (both minis share
+`mini_must_pass`'s shape, which never leaves the ROM, so "no trap" could have meant "no execution"):
+they *do* execute in DRAM, so `mcause=0` is a real absence of trap delivery and not an absence of
+instructions.
+
+Because the failure is **identical for both**, it is *not* the CSR-legality path. The suspect is the
+generic **exception delivery / trap-entry path** — `core/commit_stage.sv` and `core/controller.sv` —
+and **not** `core/csr_regfile.sv`. One 20-second experiment eliminated a file that would otherwise have
+been the obvious place to start reading.
+
+This also reframes O1c: I9 is "trap entry to `mtvec` is held until decode consumes it", and on this
+evidence a trap entry is never *generated* in the first place. The I9 hold contract is downstream of a
+defect in raising the exception at all, so proving I9 would not have caught this either.
+
+**Do not** re-measure the recorded O4 signature (`mepc0=0x8000a9a8`, `mcause0=0x2`) as evidence yet: it
+was taken on RTL that still carried the commit value filter, so per T9 it is not comparable to anything
+current. Re-derive it only after the W2 gate passes.
+
 ### Objectives (ordered by ladder position, not by symptom)
 
 The cheap rungs are now real, so the ordering rule from
@@ -393,7 +463,10 @@ increment at the **leftmost stage that can express the rule**, and treat firmwar
 | **O3** | Bootrom `_hang` spin - why `jr s0` never reaches DRAM | L6 prep | **Now the critical path, and now deterministic.** Every DI test, including a 3-instruction one, ends spinning at `pc=0x10044 instr=ffdff06f` (`jal zero,0x10040`). H4 is satisfied, so attribution is finally admissible. Prime suspect is the `fetch_address`/`kill_s2` combinational cone from O1c: a non-convergent frontend and a bootrom that never completes its jump are consistent. |
 | **O4** | OpenSBI residual (`mepc0=0x8000a9a8`, `mcause0=0x2`) | L6 | Only as a **gate**, and it is unreachable until O3 lands: the machine never leaves the bootrom, so the OpenSBI signature recorded earlier was itself measured on a different (filtered) RTL. Re-measure it after O3 before citing it. Never a search signal. |
 | ~~**O3a**~~ | ~~A/B pair on `mini_must_pass`~~ | L4 | **Done. Result: not fetch_B** — fails on both flavours, so the blame router points at the generic core or firmware policy. Retires the comb-loop-causes-O3 hypothesis. |
-| **O3b** | **Next concrete step:** per-hart attribution of the two signatures | L4 | `id-dbg` does not print the hart, so it is currently impossible to tell "hart 1 parked correctly" from "hart 0 stuck". Add the hart id to that trace line (or read the trapdump) *before* forming another hypothesis. Then: why does `mini_csr_expected_trap` fetch `00000000` at `0x800000ce` while `mini_must_pass` never leaves ROM? |
+| **O3b** | Per-hart attribution of the `mini_must_pass` signature | L4 | `id-dbg` does not print the hart, so "hart 1 parked correctly" cannot be told from "hart 0 stuck". Still open, but **no longer the critical path** — O3c is cheaper and sits directly on the O4 chain. |
+| ~~**O3c**~~ | ~~illegal instruction vs illegal CSR discriminator~~ | L4 | **Done. Both fail identically with `mcause=0`, and both execute in DRAM** (confound checked). So it is **not** CSR legality: the suspect is generic exception delivery — `commit_stage.sv` / `controller.sv`, not `csr_regfile.sv`. |
+| **O3d'** | **Next concrete step:** why does a decoded-illegal instruction never raise an exception? | L4→RTL | Read the illegal→`ex.valid`→trap-entry path with the two minis in `~/trapdisc` as the reproducer (20 s each). `id_stage` shows `is_illegal=1` while `dec_ex=0`, so start where `is_illegal` is supposed to become an exception. Only then propose a fix. |
+| **O3d** | Pin the precise-trap contract at L2 — the first proof outside the fetch plane | L2 | `W2 × issue` and `W2 × commit` are empty cells (M5). All 11 proven contracts are fetch, which is precisely why a green formal gate could not catch this. |
 
 Deliberately **not** queued: another peel, hold-ELF cycle, or TRACE hunt for this class (H7 blocks a
 second unrepaid use), and any specialisation of a proof to a package geometry (weakens it).
