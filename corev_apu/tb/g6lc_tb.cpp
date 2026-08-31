@@ -91,7 +91,9 @@ static const char *verilog_plusargs[] = {
     // Window lifecycle probe (core/fetch_B/frontend.sv). Same allowlist rule as
     // above: an unlisted plusarg is handed to HTIF, rejected, and the run dies
     // before the probe arms.
-    "fetch_win_trace", nullptr};
+    "fetch_win_trace",
+    // instr_queue order probe (core/fetch_B/instr_queue.sv).
+    "iq_trace", nullptr};
 
 extern dtm_t* dtm;
 extern remote_bitbang_t * jtag;

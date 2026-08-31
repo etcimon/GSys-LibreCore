@@ -403,6 +403,40 @@ module instr_queue
       $display("[iq-dbg] t=%0t rst_ni=%b idx_ds_q=%b idx_ds_d=%b empty=%b valid=%b push=%b fev0=%b",
                $time, rst_ni, idx_ds_q, idx_ds_d, instr_queue_empty, valid, push_instr_fifo, fetch_entry_valid_o[0]);
   end
+
+  // -------------------------------------------------------------------------
+  // ORDER PROBE (`+iq_trace`). I6 clause 1 -- "IQ order is program order" -- is
+  // the clause g6lc_fetch_iq.sby does NOT prove (it proves clause 2,
+  // value-independence, by self-composition, and both copies can be wrong in the
+  // same way while it stays green). This makes clause 1 observable.
+  //
+  // Both rotating pointers are printed, because the output pointer alone looked
+  // disciplined -- `idx_ds_d` advances only on `fire_prefix` -- which moves
+  // suspicion to the INPUT pointer mapping pushes onto FIFOs the output pointer
+  // has already passed. Order can break at either end and only the pair shows
+  // which.
+  //   isq/dsq/dsd  input pointer, output pointer, next output pointer
+  //   push/valid   which FIFOs are written this cycle, and the slot valids
+  //   fire         fire_prefix -- ports actually handshaking
+  //   cons         consumed_o back to the frontend
+  //   full/rdy     occupancy and the resulting ready_o
+  //   a0           address leaving port 0, i.e. the order actually observed
+  // -------------------------------------------------------------------------
+  logic iqt_en;
+  initial iqt_en = $test$plusargs("iq_trace");
+
+  always @(negedge clk_i) begin
+    if (rst_ni && iqt_en && $time() < 200000) begin
+      if ((|push_instr_fifo) || (|consumed_o) || (|fetch_entry_valid_o)) begin
+        // Single string literal: a concatenated {"..",".."} format compiles but
+        // never reaches the binary, giving a silent no-op probe.
+        $display("[iq] t=%0t isq=%b dsq=%b dsd=%b push=%b valid=%b fire=%b cons=%b full=%b rdy=%b a0=%h",
+                 $time, idx_is_q, idx_ds_q, idx_ds_d, push_instr_fifo, valid,
+                 fire_prefix, consumed_o, instr_queue_full, ready_o,
+                 fetch_entry_o[0].address);
+      end
+    end
+  end
 //pragma translate_on
 
   // ----------------------
