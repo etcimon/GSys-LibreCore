@@ -112,6 +112,9 @@ module instr_queue
   // output stream: one-hot select rotated by issue port
   logic [NrFifo-1:0] idx_ds_d, idx_ds_q;
   logic [NrIssue:0][NrFifo-1:0] idx_ds;
+  // O7m: round-robin non-empty drain order and FIFO usage used by the tail pointer
+  logic [NrIssue:0][NrFifo-1:0] idx_ds_rr;
+  logic [NrFifo-1:0][$clog2(8)-1:0] instr_queue_usage;
   // address (branch target) queue
   logic [CVA6Cfg.VLEN-1:0] address_out;
   logic push_address, pop_address, full_address, address_overflow;
@@ -243,55 +246,121 @@ module instr_queue
   // ----------------------
   // Downstream interface
   // ----------------------
-  // slot of issue port p. When En.order is set, the two oldest (smallest PC)
-  // FIFO heads are presented on ports 0/1 so the issue group is in program
-  // order. The tail pointer continues to rotate round-robin for the state
-  // machine; it is only used as the next idx_ds_q when both ports pop.
+  // slot of issue port p. idx_ds_rr is the round-robin non-empty drain order
+  // starting from idx_ds_q: idx_ds_rr[0] is the first non-empty FIFO, [1] the
+  // next, and so on. This is the "program order" pointer; it is used both for
+  // the tail pointer and as the issue candidate set.
   //
-  // CAVEAT (O7m): this is correct within one fetch window, but across a
-  // control-flow boundary (ret, backward branch) a return target can have a
-  // smaller PC than the fall-through it follows. Global PC ordering then
-  // inverts program order and the return target is issued first. Fixing this
-  // without hanging the queue is the next task (see AGENTS-todo.md).
+  // For the issue group (idx_ds[0..NrIssue-1]) we use PC order *within one
+  // fetch window*: all candidate slots are from the same I$ line/window, so
+  // smaller PC is guaranteed earlier in program order and a producer is issued
+  // before a consumer that depends on it. Across a control-flow boundary (ret,
+  // backward branch) the next fetch window may have a smaller PC than the
+  // fall-through; there PC order would invert program order, so we fall back to
+  // round-robin FIFO order for that group.
+  //
+  // The tail pointer uses idx_ds_rr and the per-FIFO usage count so a FIFO that
+  // still has entries after a pop is not skipped; only when a FIFO becomes empty
+  // does the drain pointer move to the next non-empty one.
+  always_comb begin : gen_rr_pointers
+    fifo_idx_t [NrFifo-1:0] ne_idx;
+    int                     ne_count;
+    fifo_idx_t              start_idx;
+
+    start_idx = '0;
+    ne_idx    = '{default: '0};
+    for (int unsigned p = 0; p <= NrIssue; p++) idx_ds_rr[p] = '0;
+
+    for (int unsigned f = 0; f < NrFifo; f++) begin
+      if (idx_ds_q[f]) start_idx = fifo_idx_t'(f);
+    end
+
+    ne_count = 0;
+    for (int unsigned i = 0; i < NrFifo; i++) begin
+      fifo_idx_t c = (start_idx + fifo_idx_t'(i)) & IdxMask;
+      if (~instr_queue_empty[c]) begin
+        ne_idx[ne_count] = c;
+        ne_count = ne_count + 1;
+      end
+    end
+
+    for (int unsigned p = 0; p <= NrIssue; p++) begin
+      if (p < ne_count) begin
+        idx_ds_rr[p][ne_idx[p]] = 1'b1;
+      end
+    end
+  end
+
   generate
     if (En.order && NrIssue > 1) begin : gen_ordered_issue
-      // B/I13: round-robin 4 FIFOs can drain a younger control-flow in port 0
-      // before an older producer in port 1, causing c.jr/c.jalr to use stale
-      // ra/sp. Select oldest-PC first, then second-oldest.
+      // Reorder the round-robin candidate group by PC only when every candidate
+      // is from the same I$ fetch window; otherwise round-robin is program order.
       always_comb begin
-        logic [CVA6Cfg.VLEN-1:0] oldest_pc, second_pc;
-        logic [NrFifo-1:0] oldest_mask, second_mask;
-        oldest_pc   = '1;
-        second_pc   = '1;
-        oldest_mask = '0;
-        second_mask = '0;
+        logic [NrFifo-1:0] candidate_mask;
+        logic              all_same_window;
+        logic [CVA6Cfg.VLEN-1:0] ref_window;
+        logic [NrFifo-1:0] used;
+        logic [CVA6Cfg.VLEN-1:0] best_pc;
+        logic [NrFifo-1:0]       best_mask;
+
+        used      = '0;
+        best_pc   = '1;
+        best_mask = '0;
+
+        for (int unsigned p = 0; p < NrIssue; p++) idx_ds[p] = '0;
+
+        candidate_mask = '0;
+        for (int unsigned p = 0; p < NrIssue; p++) begin
+          candidate_mask |= idx_ds_rr[p];
+        end
+
+        ref_window      = '0;
+        all_same_window = 1'b0;
         for (int unsigned f = 0; f < NrFifo; f++) begin
-          if (~instr_queue_empty[f]) begin
-            if (instr_data_out[f].pc < oldest_pc) begin
-              oldest_pc   = instr_data_out[f].pc;
-              oldest_mask = '0;
-              oldest_mask[f] = 1'b1;
-            end
+          if (candidate_mask[f] && ~instr_queue_empty[f]) begin
+            ref_window      = instr_data_out[f].pc >> Geo.align_bits;
+            all_same_window = 1'b1;
+            break;
           end
         end
         for (int unsigned f = 0; f < NrFifo; f++) begin
-          if (~instr_queue_empty[f] && ~oldest_mask[f]) begin
-            if (instr_data_out[f].pc < second_pc) begin
-              second_pc   = instr_data_out[f].pc;
-              second_mask = '0;
-              second_mask[f] = 1'b1;
-            end
+          if (candidate_mask[f] && ~instr_queue_empty[f] &&
+              (instr_data_out[f].pc >> Geo.align_bits) != ref_window) begin
+            all_same_window = 1'b0;
           end
         end
-        idx_ds[0] = oldest_mask;
-        idx_ds[1] = second_mask;
+
+        if (all_same_window) begin
+          // Same window: PC order == program order for these candidates.
+          used = '0;
+          for (int unsigned p = 0; p < NrIssue; p++) begin
+            best_pc   = '1;
+            best_mask = '0;
+            for (int unsigned f = 0; f < NrFifo; f++) begin
+              if (candidate_mask[f] && ~used[f] && ~instr_queue_empty[f] &&
+                  (instr_data_out[f].pc < best_pc)) begin
+                best_pc   = instr_data_out[f].pc;
+                best_mask = '0;
+                best_mask[f] = 1'b1;
+              end
+            end
+            idx_ds[p] = best_mask;
+            used     |= best_mask;
+          end
+        end else begin
+          // Cross-window: round-robin FIFO order is program order.
+          for (int unsigned p = 0; p < NrIssue; p++) begin
+            idx_ds[p] = idx_ds_rr[p];
+          end
+        end
       end
+
       for (genvar p = NrIssue; p <= NrIssue; p++) begin : gen_ordered_tail
-        assign idx_ds[p] = rotate_left(idx_ds_q, fifo_idx_t'(p % NrFifo));
+        assign idx_ds[p] = idx_ds_rr[p];
       end
     end else begin : gen_rotate_ds
       for (genvar p = 0; p <= NrIssue; p++) begin : gen_rotate_ds_inner
-        assign idx_ds[p] = rotate_left(idx_ds_q, fifo_idx_t'(p % NrFifo));
+        assign idx_ds[p] = idx_ds_rr[p];
       end
     end
   endgenerate
@@ -391,15 +460,32 @@ module instr_queue
   assign pop_address = |(fetch_entry_is_cf & fire_prefix);
 
   always_comb begin : gen_rotate_head
-    // Recover from an all-zero drain pointer (initial / reset race). An
-    // all-zero pointer makes fetch_entry_valid_o spuriously 1 with the
-    // initial FIFO data and leaks a bogus pc=0 into the ID stage.
-    idx_ds_d = (|idx_ds_q) ? idx_ds_q : {{NrFifo - 1{1'b0}}, 1'b1};
-    for (int unsigned p = 0; p < NrIssue; p++) begin
-      // do not advance from an all-zero pointer or into an all-zero selection;
-      // that would re-select an empty FIFO and lock the pointer at zero.
-      if (fire_prefix[p] && |idx_ds_q && |idx_ds[p+1]) idx_ds_d = idx_ds[p+1];
-      else break;
+    fifo_idx_t              start_idx;
+    logic [NrFifo-1:0]      would_be_empty;
+
+    // Predict which FIFOs will be empty after this cycle's pops. A pop on a
+    // FIFO with usage==1 empties it; any other pop or no pop leaves it non-empty.
+    for (int unsigned f = 0; f < NrFifo; f++) begin
+      would_be_empty[f] = instr_queue_empty[f] ||
+          (pop_instr[f] && (instr_queue_usage[f] == 1));
+    end
+
+    // The drain pointer always rotates to the first FIFO that will still hold an
+    // entry, starting from the current pointer. If all will be empty, fall back
+    // to F0 (the reset value) so the pointer is valid for the next push.
+    start_idx = '0;
+    for (int unsigned f = 0; f < NrFifo; f++) begin
+      if (idx_ds_q[f]) start_idx = fifo_idx_t'(f);
+    end
+
+    idx_ds_d = {{NrFifo - 1{1'b0}}, 1'b1};  // F0 fallback
+    for (int unsigned i = 0; i < NrFifo; i++) begin
+      fifo_idx_t c = (start_idx + fifo_idx_t'(i)) & IdxMask;
+      if (~would_be_empty[c]) begin
+        idx_ds_d = '0;
+        idx_ds_d[c] = 1'b1;
+        break;
+      end
     end
   end
 
@@ -466,7 +552,7 @@ module instr_queue
         .testmode_i(1'b0),
         .full_o    (instr_queue_full[i]),
         .empty_o   (instr_queue_empty[i]),
-        .usage_o   (),
+        .usage_o   (instr_queue_usage[i]),
         .data_i    (instr_data_in[i]),
         .push_i    (push_instr_fifo[i]),
         .data_o    (instr_data_out[i]),
