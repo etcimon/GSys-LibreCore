@@ -176,7 +176,30 @@ module g6lc_icache
   assign areq_o.fetch_vaddr = (vaddr_q >> CVA6Cfg.FETCH_ALIGN_BITS) << CVA6Cfg.FETCH_ALIGN_BITS;
 
   // split virtual address into index and offset to address cache arrays
-  assign cl_index = vaddr_q[CVA6Cfg.ICACHE_INDEX_WIDTH-1:ICACHE_OFFSET_WIDTH];
+  //
+  // I4xk: this MUST be vaddr_d, not vaddr_q. The array read (`cache_rden`) is
+  // launched in IDLE, in the same cycle the request arrives, but `vaddr_d` only
+  // becomes `vaddr_q` at the next edge -- so indexing with vaddr_q reads the
+  // PREVIOUS request's line while READ then compares and returns it as the
+  // current one. ICACHE_OFFSET_WIDTH is $clog2(128/8)=4 here, so bit 4 is the
+  // line-index LSB and the resulting skew is exactly one cache line: the core is
+  // handed the bytes from `addr - 0x10`. That is an I1/I2 violation (decode is a
+  // function of bytes and address alone) and it made the machine execute
+  // instructions offset from its own PC -- observed as `csrw mtvec` never
+  // executing, so traps vectored to the reset vector instead of the handler.
+  //
+  // Using vaddr_d here does NOT reinstate the convergence loop that I4xi was
+  // added to break. That loop was
+  //     vaddr_d -> cl_index -> cl_hit -> dreq_o.ready -> vaddr_d
+  // and I4xj already cut its `cl_hit -> ready` edge by removing `dreq_o.ready`
+  // from the READ hit branch; in IDLE `dreq_o.ready` is an unconditional 1'b1
+  // that does not depend on cl_hit. With that edge gone the index no longer
+  // participates in any cycle, so the correct address can be used again.
+  // `cl_offset_d` (the word-within-line select) already keys off `dreq_i.vaddr`,
+  // i.e. the same arriving address, so index and offset are now consistent:
+  // read in IDLE with the arriving address, compare and respond in READ with
+  // that same address once latched.
+  assign cl_index = vaddr_d[CVA6Cfg.ICACHE_INDEX_WIDTH-1:ICACHE_OFFSET_WIDTH];
 
 
   if (CVA6Cfg.NOCType == config_pkg::NOC_TYPE_AXI4_ATOP) begin : gen_axi_offset
