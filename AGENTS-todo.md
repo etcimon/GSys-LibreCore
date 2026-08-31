@@ -424,10 +424,37 @@ returned for a fetch of address A are the bytes at A" has no owner. A green 11/1
 executes the wrong instructions are therefore perfectly consistent — the gate never claimed otherwise.
 That missing promise is now the highest-value contract in the repository, ahead of I9.
 
+**The missing promise now has an owner, and it is validated in both directions.** `+fetch_i1_check`
+(`core/id_stage.sv`, sim-only, + `g6lc_dram_peek64` DPI in `corev_apu/tb/g6lc_tb.cpp`) checks at the
+*delivery* point — the `(address, instruction)` pair decode actually consumes — so one sentence covers
+the I$, the realigner and the queue. Positive control: it fires on `~/trapdisc/t_ecall.elf`. Negative
+control: silent without the flag. Its output **quantifies** the defect:
+
+| addr | delivered | should be | bytes actually come from |
+|---|---|---|---|
+| `0x80000010` | `f14022f3` | `30529073` | `0x80000000` |
+| `0x80000014` | `02029c63` | `00734401` | `0x80000004` |
+| `0x80000020` | `30529073` | `fe430313` | `0x80000010` |
+
+**The data stream lags the address stream by exactly `0x10` — two 8-byte fetch windows at
+`FETCH_WIDTH=64`.** Not a random corruption, not an off-by-one: a constant two-window lag, which is a
+pipeline-depth signature (a response register pair sampled one stage too late, or an FDIP/FTQ entry
+retired against the wrong window) rather than an addressing or decode fault.
+
+Three instrument traps were hit building this, all worth remembering because each looks exactly like
+"the check found nothing":
+- `g6lc_fetch_dbg.sv` is **commented out of `Flist.cva6`** (line 252) while present in `Flist.fetch_B`;
+  the B build uses `Flist.cva6`, so a checker placed there is never compiled. Hence the move to
+  `id_stage.sv`, which is in the build and already hosts the `[id-dbg]` probe.
+- A plusarg absent from the C++ **allowlist** (`g6lc_tb.cpp:84`) is handed to HTIF, which rejects it and
+  kills the run *before* the checker arms. A rejected plusarg and a clean check are indistinguishable
+  from the outside.
+- A comment line beginning with the linter's own name is parsed as a directive and fails elaboration.
+
 **Next, in order:**
-1. Write the I1-at-supply contract: I$ response bytes == memory at the requested `vaddr`. Cheapest form
-   is an L3 simulation assertion in the testbench (compare the I$ response against the backing memory
-   model on every grant) — it needs no formal work and would have caught this on the first run.
+1. ~~Write the I1-at-supply contract~~ **Done** (above), and it did what the ordering predicted: it
+   localised the defect to a constant two-window lag in one 9-second run, having cost less than any of
+   the hypotheses it replaced.
 2. Only then localise: the `0x10` shift is a whole number of fetch windows, so suspect the I$
    response/`vaddr` pairing (the registered-`vaddr_q` path touched by the earlier convergence fix) or
    FDIP/FTQ replay serving a stale window. `id-dbg` already prints `fetch_addr`, so pair it with the
@@ -625,7 +652,9 @@ increment at the **leftmost stage that can express the rule**, and treat firmwar
 | ~~**O3d'**~~ | ~~read the illegal→`ex.valid`→trap path~~ | L4→RTL | **Done, with a real find and an honest negative.** Found and fixed a genuine ISA violation (CVXIF offload is port-0 only while the decoder withholds `ex.valid`; unsound on all three multi-issue G6LC targets, now a `check_cfg` `$fatal` + knob to baseline). It did **not** fix the symptom: still `mcause=0` after a confirmed rebuild. |
 | ~~**O3e**~~ | ~~is the `instruction_o` cone why `ex.valid` never asserts?~~ | L2/RTL | **Wrong question — retracted.** `ex.valid` *does* assert and exceptions *are* taken; the RVFI trace shows `ILLEGAL_INSTR` reported and vectored. The four-driver `instruction_o` struct is real and still blocks the L2 decode proof, but it is a **proof-model** obstacle, not the boot defect. |
 | **O5** | **THE defect: retire stream executes bytes offset `0x10` from the reported PC** | L3→RTL | I1/I2 violation at instruction supply, confirmed architecturally (`csrw mtvec` never executed, so the trap vectored to the bootrom instead of the handler). Explains the bootrom stall, `mini_must_pass`, the run-off-the-end, and all 16 DI failures as one defect. Repro: `~/trapdisc/t_ecall.elf`, 9 s. |
-| **O5a** | **Next concrete step:** the missing promise — I$ response bytes == memory at the requested `vaddr` | L3 | No contract owns this, which is why 11/11 formal is green while the core executes the wrong instructions. An L3 TB assertion comparing every I$ grant against the backing memory needs no formal work and would have caught this on run one. Write it **before** localising. |
+| ~~**O5a**~~ | ~~the missing promise: delivered bytes == memory at the delivered address~~ | L3 | **Done and validated both ways.** `+fetch_i1_check` in `core/id_stage.sv` + `g6lc_dram_peek64` DPI. Fires on the repro, silent without the flag. Quantified the defect to a **constant `0x10` (two-window) lag of data behind address**. |
+| **O5b** | **Next concrete step:** find the two-window lag | RTL | A *constant* lag is a pipeline-depth signature, not an addressing fault: suspect a response register pair sampled a stage late, or an FTQ/FDIP entry retired against the wrong window. Pair `+fetch_i1_check` with `+fetch_snap` for the window view. Note `g6lc_fetch_dbg` needs `Flist.fetch_B` — it is commented out of `Flist.cva6:252`, which is the flist the B build actually uses. |
+| **O5c** | Wire `+fetch_i1_check` into the DI suite once O5b lands | L3 | It is the strongest oracle in the repo and belongs in every regression, but only after the known violation is fixed — otherwise every run drowns in expected violations and the check gets switched off. |
 | **O3f** | Harden the build against stale-model builds | L0 | Three stale-instrument traps hit in one session (committed `bootrom.sv` behind `bootrom.S`; the output-cache key in `testharness_proxy.py:823` omits `core/include/*config_pkg.sv`; `grep Verilating` is not a valid "did it elaborate" probe because Verilator is silent on success). Each cost more than the analysis it interrupted. |
 | **O3d** | Pin the precise-trap contract at L2 — the first proof outside the fetch plane | L2 | `W2 × issue` and `W2 × commit` are empty cells (M5). All 11 proven contracts are fetch, which is precisely why a green formal gate could not catch this. |
 

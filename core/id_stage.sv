@@ -14,6 +14,16 @@
 // Description: Instruction decode, contains the logic for decode,
 //              issue and read operands.
 
+//pragma translate_off
+// Post-preload DRAM peek for the I1-at-supply oracle below (implemented in
+// corev_apu/tb/g6lc_tb.cpp). Returns 0 outside the preloaded image so bootrom and
+// CLINT fetches are skipped rather than falsely reported.
+`ifndef G6LC_DRAM_PEEK_T
+`define G6LC_DRAM_PEEK_T
+import "DPI-C" function int g6lc_dram_peek64(input longint addr, output longint data);
+`endif
+//pragma translate_on
+
 module id_stage #(
     parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
     parameter type branchpredict_sbe_t = logic,
@@ -152,6 +162,16 @@ module id_stage #(
   scoreboard_entry_t [CVA6Cfg.NrIssuePorts-1:0]       decoded_instruction;
   logic              [CVA6Cfg.NrIssuePorts-1:0]       decoded_instruction_valid;
   logic              [CVA6Cfg.NrIssuePorts-1:0][31:0] orig_instr;
+
+//pragma translate_off
+  // I1-at-supply oracle enable, latched once (see the checker further down).
+  logic i1_chk_en;
+  initial begin
+    i1_chk_en = $test$plusargs("fetch_i1_check");
+    i1_bad    = 0;
+    i1_seen   = 0;
+  end
+//pragma translate_on
 
   // Compressed decoder signals
   logic              [CVA6Cfg.NrIssuePorts-1:0]       is_illegal_rvc;
@@ -1204,5 +1224,75 @@ module id_stage #(
       issue_q <= issue_n;
     end
   end
+
+//pragma translate_off
+  // -------------------------------------------------------------------------
+  // I1 AT SUPPLY (`+fetch_i1_check`): the instruction presented at address A is
+  // the instruction at A in memory.
+  //
+  // This is the promise nothing in the repo owned. Every fetch formal contract
+  // takes the response bytes as a FREE input and proves the realigner and queue
+  // are faithful to whatever they are handed -- the right contract for those
+  // modules, and exactly why an 11/11 green gate coexisted with a core executing
+  // instructions offset 0x10 from its own PC. The realigner was faultless; it was
+  // handed the wrong window.
+  //
+  // Checked at the DELIVERY point rather than the I$ port: this covers the I$, the
+  // realigner and the queue in one sentence, and (address, instruction) is the
+  // pair decode actually consumes. L3 is the earliest rung that can express it at
+  // all -- the claim relates the DUT to the memory image, which no bounded module
+  // proof can see -- so per the push-left rule it belongs here, not in a soak.
+  //
+  // In its own clocked block, not inside the combinational decode block: nested
+  // automatics there are not assigned on every control path and get reported as
+  // inferred latches (AGENTS.md s0.1), and a checker should sample state rather
+  // than participate in it. Read-only and opt-in -- an oracle must not perturb
+  // what it observes -- and silent outside the preloaded DRAM image (bootrom,
+  // CLINT), which the DPI reports by returning 0.
+  // -------------------------------------------------------------------------
+  longint unsigned i1_a;
+  longint          i1_lo, i1_hi;
+  logic [127:0]    i1_win;
+  logic [31:0]     i1_want;
+  int unsigned     i1_sh;
+  int unsigned     i1_bad, i1_seen;
+
+  // verilog_lint: waive always-ff-non-reset
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && i1_chk_en) begin
+      for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+        if (fetch_entry_valid_i[i]) begin
+          i1_a = longint'(fetch_entry_i[i].address);
+          // Two adjacent 64-bit words, so a 32-bit instruction straddling the
+          // 8-byte boundary is still compared against the right bytes.
+          if (g6lc_dram_peek64(longint'(i1_a & ~64'h7), i1_lo) == 1 &&
+              g6lc_dram_peek64(longint'((i1_a & ~64'h7) + 8), i1_hi) == 1) begin
+            i1_win  = {i1_hi, i1_lo};
+            i1_sh   = 8 * int'(i1_a & 64'h7);
+            i1_want = i1_win[i1_sh+:32];
+            i1_seen = i1_seen + 1;
+            // RVC: only the low halfword is architecturally the instruction.
+            if (fetch_entry_i[i].instruction[1:0] == 2'b11) begin
+              if (fetch_entry_i[i].instruction !== i1_want) begin
+                i1_bad = i1_bad + 1;
+                $display(
+                    "[fetch-i1] VIOLATION addr=%h got=%h want=%h (bytes presented are not the bytes at this address)",
+                    i1_a, fetch_entry_i[i].instruction, i1_want);
+              end
+            end else if (fetch_entry_i[i].instruction[15:0] !== i1_want[15:0]) begin
+              i1_bad = i1_bad + 1;
+              $display("[fetch-i1] VIOLATION addr=%h got=%h want=%h (rvc halfword mismatch)",
+                       i1_a, fetch_entry_i[i].instruction[15:0], i1_want[15:0]);
+            end
+          end
+        end
+      end
+    end
+  end
+
+  final begin
+    if (i1_chk_en) $display("[fetch-i1] checked=%0d violations=%0d", i1_seen, i1_bad);
+  end
+//pragma translate_on
 
 endmodule

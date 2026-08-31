@@ -82,7 +82,12 @@ static vluint64_t main_time = 0;
 // does not reject them. Use +permissive…+permissive-off if you need more.
 static const char *verilog_plusargs[] = {
     "jtag_rbb_enable", "time_out", "debug_disable", "tohost_addr", "elf_file",
-    "quiet_axi", "fetch_snap", "fetch_snap_lo", "fetch_snap_hi", nullptr};
+    "quiet_axi", "fetch_snap", "fetch_snap_lo", "fetch_snap_hi",
+    // I1-at-supply oracle (core/id_stage.sv). Must be allowlisted or the arg
+    // parser hands it to HTIF, which rejects it and the run dies before the
+    // checker ever arms -- a silent-oracle failure mode, since a rejected plusarg
+    // looks exactly like a check that found nothing.
+    "fetch_i1_check", nullptr};
 
 extern dtm_t* dtm;
 extern remote_bitbang_t * jtag;
@@ -95,6 +100,37 @@ void handle_sigterm(int sig) {
 extern "C" void read_elf(const char* filename);
 extern "C" char get_section (long long* address, long long* len);
 extern "C" void read_section_void(long long address, void * buffer, uint64_t size = 0);
+
+// ---------------------------------------------------------------------------
+// I1-at-supply oracle (see core/fetch_B/g6lc_fetch_dbg.sv, `+fetch_i1_check`).
+//
+// The fetch formal contracts all take the I$ response `data_i` as a FREE input:
+// they prove the realigner and queue are faithful to whatever bytes they are
+// handed, which is the right contract for those modules and exactly why they
+// cannot see a supply that hands over the WRONG bytes. Nothing in the repo owned
+// the promise "the bytes returned for a fetch of address A are the bytes at A",
+// and a core that executes instructions offset from its own PC passed an 11/11
+// formal gate as a result.
+//
+// This exposes the post-preload DRAM image so the promise can be checked in
+// simulation at the point it is made. Deliberately a plain byte peek with no
+// side effects: the oracle must not be able to perturb what it observes.
+// ---------------------------------------------------------------------------
+static const uint8_t *g6lc_dram_ptr   = nullptr;
+static uint64_t       g6lc_dram_bytes = 0;
+static uint64_t       g6lc_dram_base  = 0x80000000ULL;
+
+extern "C" int g6lc_dram_peek64(long long addr, long long *data) {
+  if (!g6lc_dram_ptr || !data) return 0;
+  const uint64_t a = (uint64_t)addr;
+  if (a < g6lc_dram_base) return 0;                     // bootrom/CLINT: not our image
+  const uint64_t off = a - g6lc_dram_base;
+  if (off + 8 > g6lc_dram_bytes) return 0;              // outside the preloaded window
+  uint64_t v = 0;
+  for (int i = 0; i < 8; i++) v |= (uint64_t)g6lc_dram_ptr[off + i] << (8 * i);
+  *data = (long long)v;
+  return 1;
+}
 
 // Called by $time in Verilog converts to double, to match what SystemC does
 double sc_time_stamp () {
@@ -424,6 +460,13 @@ done_processing:
       }
     }
   }
+
+  // Publish the preloaded DRAM image to the I1-at-supply oracle. Done after all
+  // preload paths above have run, so the checker compares against the same bytes
+  // the core will fetch rather than against a partially-populated image.
+  g6lc_dram_ptr   = reinterpret_cast<const uint8_t *>(MEM);
+  g6lc_dram_bytes = (uint64_t)mem_size;
+  g6lc_dram_base  = dram_base;
 
   // Optional mid-run MEM probe (set env CVA6_PRELOAD_PROBE=1)
   const bool probe = (std::getenv("CVA6_PRELOAD_PROBE") != nullptr);
