@@ -1119,6 +1119,12 @@ module frontend
     );
   end
 
+  // O7m note: an experiment to flush the instruction queue on predicted taken
+  // control flow (bp_fire) was tried and reverted. It removed the return target
+  // along with the fall-through and the core refetched the caller path. The
+  // right fix is to keep the return target and remove only the fall-through, or
+  // to order the group without inverting program order. See AGENTS-todo.md O7m.
+
   instr_queue #(
       .CVA6Cfg(CVA6Cfg),
       .fetch_entry_t(fetch_entry_t)
