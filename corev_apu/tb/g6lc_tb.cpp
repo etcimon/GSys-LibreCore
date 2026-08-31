@@ -87,7 +87,11 @@ static const char *verilog_plusargs[] = {
     // parser hands it to HTIF, which rejects it and the run dies before the
     // checker ever arms -- a silent-oracle failure mode, since a rejected plusarg
     // looks exactly like a check that found nothing.
-    "fetch_i1_check", nullptr};
+    "fetch_i1_check",
+    // Window lifecycle probe (core/fetch_B/frontend.sv). Same allowlist rule as
+    // above: an unlisted plusarg is handed to HTIF, rejected, and the run dies
+    // before the probe arms.
+    "fetch_win_trace", nullptr};
 
 extern dtm_t* dtm;
 extern remote_bitbang_t * jtag;

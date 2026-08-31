@@ -1147,4 +1147,48 @@ module frontend
       .fetch_entry_ready_i(fetch_entry_ready_i)    // to back-end
   );
 
+//pragma translate_off
+  // -------------------------------------------------------------------------
+  // WINDOW LIFECYCLE PROBE (`+fetch_win_trace`).
+  //
+  // Added because the last three attributions for "instructions did not retire"
+  // were each wrong, and each would have been caught immediately by looking at
+  // the whole window lifecycle instead of one suspected signal. The rule this
+  // encodes: when the question is WHERE something is dropped, instrument every
+  // stage that can drop it and read, rather than testing one hypothesis per
+  // rebuild.
+  //
+  // One line per cycle in which anything happens to a window: an I$ response, a
+  // take, a kill, or a redirect. Fields are the full set of reasons a window or
+  // its slots can disappear between the I$ and the queue:
+  //   rsp/vaddr  the response and the address it is attributed to
+  //   take       registered into icache_*_q, i.e. accepted by the frontend
+  //   k1/k2      kill_s1 / kill_s2 -- request killed in flight
+  //   bpf        bp_fire -- prediction redirect, ALSO clears icache_valid_q
+  //   fl/mp/rp   flush_i / is_mispredict / replay
+  //   una        serving_unaligned (realigner carrying a split instruction)
+  //   vmask      per-slot instruction_valid actually presented to the queue
+  //   iqr        instr_queue_ready -- backpressure, the other way slots vanish
+  // -------------------------------------------------------------------------
+  logic fwt_en;
+  initial fwt_en = $test$plusargs("fetch_win_trace");
+
+  // verilog_lint: waive always-ff-non-reset
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && fwt_en && $time() < 200000) begin
+      if (icache_dreq_i.valid || icache_take || kill_s1 || kill_s2 || bp_fire
+          || flush_i || is_mispredict || replay) begin
+        // Single string literal, NOT a {"..",".."} concatenation: with the
+        // concatenated form the block compiled (fwt_en appears in the generated
+        // model) but the format string never reached the binary and the probe
+        // printed nothing -- a silent no-op probe, which is the worst kind.
+        $display("[win] t=%0t rsp=%b vaddr=%h take=%b k1=%b k2=%b bpf=%b fl=%b mp=%b rp=%b una=%b vmask=%b iqr=%b npc=%h",
+                 $time, icache_dreq_i.valid, icache_dreq_i.vaddr, icache_take,
+                 kill_s1, kill_s2, bp_fire, flush_i, is_mispredict, replay,
+                 serving_unaligned, instruction_valid, instr_queue_ready, npc_d);
+      end
+    end
+  end
+//pragma translate_on
+
 endmodule
