@@ -118,10 +118,6 @@ module instr_queue
   // address (branch target) queue
   logic [CVA6Cfg.VLEN-1:0] address_out;
   logic push_address, pop_address, full_address, address_overflow;
-  // O7n: delayed queue flush on control-flow issue so the issue stage holds the
-  // CF and its target for one cycle, then the queue is cleared and refilled from
-  // the (already-redirected) frontend in program order.
-  logic cf_fire, queue_flush, flush_delayed;
   // downstream handshake
   logic [NrIssue-1:0] fetch_entry_is_cf, fetch_entry_blocks_ss, fetch_entry_fire, fire_prefix;
   // instruction / predicted CF of the slot each port drains, kept separate from
@@ -463,26 +459,6 @@ module instr_queue
 
   assign pop_address = |(fetch_entry_is_cf & fire_prefix);
 
-  // O7n: flush the queue one cycle after a predicted-taken control-flow is
-  // issued. The issue stage holds the CF and its predicted target for that cycle;
-  // the next cycle the queue is cleared and refilled from the redirected
-  // frontend in program order, eliminating stale fall-through / inverted target
-  // entries. Only predicted-taken CFs (sel_cf != NoCF) trigger this; not-taken
-  // branches and non-CF instructions keep the queue intact.
-  assign cf_fire = |(fetch_entry_is_cf & fire_prefix);
-
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) begin
-      flush_delayed <= 1'b0;
-    end else if (queue_flush) begin
-      flush_delayed <= 1'b0;
-    end else begin
-      flush_delayed <= cf_fire;
-    end
-  end
-
-  assign queue_flush = flush_i | flush_delayed;
-
   always_comb begin : gen_rotate_head
     fifo_idx_t              start_idx;
     logic [NrFifo-1:0]      would_be_empty;
@@ -572,7 +548,7 @@ module instr_queue
     ) i_fifo_instr_data (
         .clk_i     (clk_i),
         .rst_ni    (rst_ni),
-        .flush_i   (queue_flush),
+        .flush_i   (flush_i),
         .testmode_i(1'b0),
         .full_o    (instr_queue_full[i]),
         .empty_o   (instr_queue_empty[i]),
@@ -599,7 +575,7 @@ module instr_queue
   ) i_fifo_address (
       .clk_i     (clk_i),
       .rst_ni    (rst_ni),
-      .flush_i   (queue_flush),
+      .flush_i   (flush_i),
       .testmode_i(1'b0),
       .full_o    (full_address),
       .empty_o   (),
@@ -618,7 +594,7 @@ module instr_queue
       if (!rst_ni) begin
         idx_ds_q <= {{NrFifo - 1{1'b0}}, 1'b1};  // one-hot
         idx_is_q <= '0;  // binary
-      end else if (queue_flush) begin
+      end else if (flush_i) begin
         idx_ds_q <= {{NrFifo - 1{1'b0}}, 1'b1};
         idx_is_q <= '0;
       end else begin
