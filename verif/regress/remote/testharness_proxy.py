@@ -1237,7 +1237,21 @@ def cmd_di(rem: Remote, args) -> int:
             f"{shlex.quote(harness)} +time_out={args.time_out} "
             f"+max-cycles={args.time_out} +debug_disable +quiet_axi "
             f"{tohost_arg}{plusargs} {shlex.quote(remote_elf)} > {shlex.quote(logfile)} 2>&1; "
-            f"rc=$?; echo \"rc=$rc\"; tail -n {tail} {shlex.quote(logfile)}"
+            f"rc=$?; echo \"rc=$rc\"; "
+            # Classify on the REMOTE, against the whole log, and echo one verdict
+            # line. Classifying locally from `tail -n N` silently under-reports:
+            # the rvfi_tracer termination notice is printed at the moment of
+            # termination and is then buried by trailing probe output, so it falls
+            # outside the tail window and a genuine PASS reads as a timeout. That
+            # cost a 1/16 report where the logs said 4/18.
+            f"L={shlex.quote(logfile)}; T=0; "
+            f"grep -q 'rvfi_tracer.* Simulation terminated' \"$L\" && T=1; "
+            f"if grep -q '\\*\\*\\* FAILED \\*\\*\\*' \"$L\"; then echo 'verdict=FAIL reason=exit-code'; "
+            f"elif grep -q '\\*\\*\\* SUCCESS \\*\\*\\*' \"$L\"; then "
+            f"  if [ \"$T\" = 1 ]; then echo 'verdict=PASS reason=terminated'; "
+            f"  else echo 'verdict=FAIL reason=timeout'; fi; "
+            f"else echo 'verdict=FAIL reason=no-output'; fi; "
+            f"tail -n {tail} \"$L\""
         )
         proc = rem.run(script, check=False, capture=True)
         out_text = proc.stdout
@@ -1264,17 +1278,20 @@ def cmd_di(rem: Remote, args) -> int:
         # tohost write is actually observed (rvfi_tracer.sv: mem_paddr ==
         # TOHOST_ADDR && mem_wdata[0]). Verified present for both controls at 318
         # cycles and absent under a 300-cycle cap. A pass needs BOTH.
-        terminated = re.search(r"rvfi_tracer.* Simulation terminated", out_text) is not None
-        success = "*** SUCCESS ***" in out_text
-        failed = "*** FAILED ***" in out_text
-        passed = terminated and success and not failed
+        # Parse the remote verdict line. A MISSING verdict is a failure, never a
+        # pass: if the classifier did not run we know nothing, and defaulting to
+        # pass is how a silent oracle turns into a green report.
+        vm = re.search(r"^verdict=(PASS|FAIL) reason=(\S+)", out_text, re.MULTILINE)
+        if vm:
+            passed = vm.group(1) == "PASS"
+            why = vm.group(2)
+        else:
+            passed = False
+            why = "no-verdict"
         tohost_match = re.search(r"\(tohost = (?:0x)?([0-9a-fA-F]+)\)", out_text)
         tohost = int(tohost_match.group(1), 16) if tohost_match else -1
         if not passed:
-            # Keep the three failure modes distinguishable in the log: a nonzero
-            # exit code, a timeout (no termination), and a crash (no output).
-            why = ("exit-code" if failed else "timeout" if success else "no-output")
-            th_log(f"[di]   {test}: not a pass ({why}); terminated={terminated}")
+            th_log(f"[di]   {test}: not a pass ({why})")
         th_log(f"[di] {'PASS' if passed else 'FAIL'} {test} rc={rc} tohost={tohost} in {time.time()-t0_run:.1f}s")
         if args.pull:
             dest = repo_root() / "remote-runs" / tag / f"{test}.log"
