@@ -126,7 +126,7 @@ export function childEnv(
     // are case-sensitive; set both to be safe.
     Path: newPath,
     RISCV: tools.riscv,
-    CVA6_REPO_DIR: repoRoot,
+    CVA6_REPO_DIR: host.os === "windows" ? repoRoot.replace(/\\/g, "/") : repoRoot,
     VERILATOR_INSTALL_DIR: verilatorInstallDir,
     // OSS CAD / Verilator perl wrapper honors VERILATOR_ROOT when set.
     ...(existsSync(join(verilatorInstallDir, "share", "verilator"))

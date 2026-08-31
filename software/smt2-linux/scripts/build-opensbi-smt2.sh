@@ -53,8 +53,10 @@ python3 "$SMT2/scripts/wrap_pie_flags.py" "$SRC/Makefile" || true
 # Dual-hart CLINT/PLIC bring-up (ROOT_REGION_MAX, mtime_size, mswi single-init).
 # Idempotent; required for ariane-smt2.dts (NrHarts=2, 0xc0000 CLINT, 64 MiB PLIC).
 python3 "$SMT2/scripts/patch_opensbi_g6lc_clint.py" "$SRC"
-# SMT product-closeout FDT fixups (zawrs, boot-crutches, etc.)
-python3 "$SMT2/scripts/patch_opensbi_smt_compensation.py" "$SRC"
+# No SMT product-closeout FDT patch: the cpu@ nodes are the contract and
+# dts_to_dtb.py proves them honest at build time (see smt2-product-closeout.md
+# section 9). The old runtime rewriter called sbi_malloc() from
+# fw_platform_init(), i.e. before sbi_heap_init(), and faulted on NULL+0x18.
 # Prefer full ISA string when the toolchain supports zifencei (fence.i in OpenSBI).
 PLATFORM_RISCV_ISA="${PLATFORM_RISCV_ISA:-rv64imafdc_zicsr_zifencei}"
 make -C "$SRC" O="$BUILD" PLATFORM=generic distclean || true

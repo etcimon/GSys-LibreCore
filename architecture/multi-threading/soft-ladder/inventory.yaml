@@ -127,58 +127,106 @@ sites:
 
   - id: b1-fdt-lenp-store
     bucket: B1
-    priority: 2
-    status: deferred
-    ladder: cont.44 / iter-012 (superseded by S4/iter-013)
+    priority: 1
+    status: in_progress
+    ladder: iter-014
     soft_form: >
-      OpenSBI is the class test. `mini_fdt_opensbi_blob` Variane PASS,
-      `PEEL_FDT_GETPROP=1` in isolation green, but combined natural FDT
-      walk on S4 fails at 0x80012958 / mepc=0 -> `sbi_hart_hang`. The
-      residual is a fetch_B/IQ leftover + SMT switch/CF interaction, not an
-      isolated `fdt_getprop` or `lenp` store.
-    pin: "historical; FDT getprop/lenp class superseded by fetch_B/IQ leftover S4 (mepc=0x80012958 mcause=2 jump-to-0 / sbi_hart_hang @eef4)"
+      OpenSBI is the class test. `mini_fdt_nt_osbi`, `mini_fdt_rdxrs1`
+      (rd==rs1 FDT header loads), and new `mini_fdt_ro_probe` (direct
+      `fdt_ro_probe_` blob call with a live `lenp` stack store and hart1 spin)
+      all **PASS**, so the `a5=0x8001e000` snapshot in the failing soak is the
+      *pre-load* value: the `lbu` has not retired because the frontend is
+      mis-supplying instructions, not because of a load-unit or wbuffer bug.
+      With `verilator --threads=1` the residual becomes a misaligned
+      `npc0=0x800138d8` — the second half of the 32-bit `beqz s4` at
+      `0x800138d6` in `fdt_getprop_by_offset`. This is a `core/fetch_B`
+      `instr_realign` / `instr_queue` 32-bit-straddle-at-2-byte-alignment bug
+      (the S4 class), not a `load_unit` / `wt_dcache_wbuffer` data defect.
+    pin: >
+      `PEEL_FDT_NEXT_TAG=1` on `work-ver-smt2-fw64-B` (vthreads=12):
+      `hangpc` `npc0=0x800125d8`/`0x80012638` inside `fdt_ro_probe_` with
+      `a50=0x8001e000`, `a00=0xaf5` (totalsize). On the same build with
+      `verilator --threads=1`, the 12M-cycle snapshot is
+      `npc0=0x800138d8` (second half of 32-bit `beqz s4,0x80013910` at
+      `fdt_getprop_by_offset+0x24`), `ra0=0x8001389a` (return address in
+      `fdt_path_offset` after `sbi_strlen`), `a50=0x2f` (`'/'` path char),
+      `a00=0xaf5` (totalsize). This is an instruction-stream misalignment.
     rtl_loci:
-      - core/store_buffer.sv
-      - core/load_unit.sv
-      - core/issue_read_operands.sv
-      - core/scoreboard.sv
-      - core/store_unit.sv
-      - core/frontend/instr_queue.sv
+      - core/fetch_B/instr_realign.sv
+      - core/fetch_B/instr_queue.sv
+      - core/fetch_B/frontend.sv
+      - core/fetch_B/g6lc_fetch_pkg.sv
+      - core/fetch_B/g6lc_fetch_pkg::leftover_drop
+      - core/fetch_B/g6lc_fetch_pkg::leftover_retake
+      - core/fetch_B/g6lc_fetch_pkg::window_accept
     monorepo_soak_note: >
-      Same family as hang-6 dual FDT BADOFFSET and hang-7 single FDT walk.
-      iter-012: dual-commit negative; STQ data-forward off under SuperscalarEn
-      + st_pipeline_busy on page-offset match (store_buffer/load_unit).
+      Same family as hang-6 dual FDT BADOFFSET, hang-7 single FDT walk, and
+      the S4 `mini_fdt_nt_ptr0` `mepc=0x...1E030`/`ra=0x80012994` jump-to-stub
+      residual. The root cause is the `fetch_B` frontend mis-supplying the
+      I-stream when a 32-bit instruction starts at a 2-byte-aligned address
+      that straddles a 64-bit fetch word (e.g. `fdt_getprop_by_offset` at
+      `0x800138d6`, `fdt_ro_probe_` `bgeu` at `0x8001263e`). The load-unit
+      / D-cache / wbuffer loci were a symptom, not the cause.
     rtl_progress: >
       2026-08-09 soft-ladder worktree: FDT shape minis (lenp_sw, s2_nest,
       check_prop_nest) PASS on work-ver-smt2-fw64 after fixing nest mini
-      (valid a2; compare s2 to s3 post-nest). Live PEEL is 129f8/4/9
-      (a0=offset). Historic 12eb2/12b2a is R2 after G0. I4cf last c.mv
-      keep. Next: COMPLETION.md stage 0, not I4cg.
-      2026-08-22 master 4bab99ca0: core/store_buffer.sv keeps non-cancelled
-      speculative stores on mispredict/flush under G6LC_FETCH_B. PEEL_FDT_GETPROP=1
-      OpenSBI soak green on work-ver-smt2-fw64-B (cookie 51b1babe, plat_hc=2,
-      coldboot_done=1, [1008]=51b1d000). Default (soft getprop) also green.
-      mini_fdt_a0_is_fdt and mini_fdt_lenp_sw PASS on B. A/slfix still
-      129f8/4/9.
+      (valid a2; compare s2 to s3 post-nest). Historic 12eb2/12b2a is R2
+      after G0. I4cf last c.mv keep. Next: COMPLETION.md stage 0, not I4cg.
       2026-08-24 WSL: default mk and PEEL_FDT_GETPROP SUCCESS t=81920.
       Combined still 12eb2. I4cd I$ HOLD-FAIL reverted. I4dn IPI-seen kept.
       I4ce G1ao-on-cancel reverted (peel-identical). mini_stq_flush_fwd PASS.
       Not I4az / not I4cg.
-      2026-08-25: MT evidence is proxy-only
-      (architecture/multi-threading/testharness-proxy.md). I4dp 2-hart +
-      8-hart Linux 200M-cap tohost=0 must not regress. Classify from
-      runs/<tag>/run-*.log.
-      2026-08-27: S4 fetch_B/IQ leftover now owns the live pin; this id
-      superseded by b1-s4-fetch-b-iq-leftover (iter-013).
+      2026-08-30: S4 residual closed as IAF/test-address (iter-013).
+      Rebuilt `work-ver-smt2-fw64-B` from current source and reproduced
+      `b1-fdt-lenp-store` via `PEEL_FDT_GETPROP=1` and `PEEL_FDT_NEXT_TAG=1`
+      OpenSBI soaks. Both hang inside `fdt_ro_probe_` at 12M cycles: pin A
+      `npc0=0x800125d8` (`beqz a5`) with `a50=0x8001e000`; pin B
+      `npc0=0x80012638` (`or a5,a5,a4` version read) with `a50=0x8001e000`,
+      `a00=0xaf5` (totalsize). `mini_fdt_nt_osbi` PASS; new
+      `mini_fdt_rdxrs1` PASS (rd==rs1 FDT header load is not the root cause).
+      Fixed `work-ver-smt2-fw64-legacy` build (`g6lc_tb.cpp` `#ifdef
+      G6LC_FETCH_B`, `soft-ladder-build-harness.sh` adds `-DG6LC_FETCH_B` for
+      B only). `mini_fdt_nt_osbi` also passes on legacy. `PEEL_FDT_NEXT_TAG=1`
+      on legacy fails in `sbi_heap_init` (`npc0=0x8000f3f8`, partial cookie
+      `0x51b1c001`, `plat_hc=2`), a different residual.
+      Added `mini_fdt_ro_probe.S`/`mini_fdt_ro_probe.ld` (direct `jal` to the
+      OpenSBI `fdt_ro_probe_` blob with stack `lenp` store and hart1 spin) —
+      it **PASSes**, so `fdt_ro_probe_` in isolation is not the defect.
+      `+fetch_snap` (sim-only `translate_off` observer) masks the hang and
+      moves the snapshot to `npc0=0x800138a8` (`fdt_path_offset_namelen`),
+      proving the residual is timing / Verilator evaluation-order sensitive.
+      Built `work-ver-smt2-fw64-B-vt1` with `verilator --threads=1`.
+      `PEEL_FDT_NEXT_TAG=1` on the single-threaded build fails at 12M with
+      `npc0=0x800138d8` — the second half of the 32-bit `beqz s4` at
+      `0x800138d6` in `fdt_getprop_by_offset` — confirming the residual is a
+      `core/fetch_B/instr_realign` 32-bit-straddle-at-2-byte-alignment bug.
+      Additional 1-thread soaks: 500k pin `npc0=0x800137b0` (`bltu s1,s2`);
+      3M pin `npc0=0x80013788` (`a50=0x2f`, `a40=0x11`, `ra0=0x8001389a`);
+      12M pin `npc0=0x800138d8` (second half of `beqz s4`). The PC advances
+      through `fdt_path_offset_namelen` but eventually reaches a `core/fetch_B`
+      32-bit straddle at `0x800138d6`. With `CVA6_TRACE=1` the 2M pin is also
+      `npc0=0x800137b0`. The failure is highly sensitive to observer/Verilator
+      evaluation order.
+      The `a5=0x8001e000` and `a5=0x2f` snapshots are now understood as
+      symptoms of an instruction-stream misalignment, not load-unit/wbuffer
+      data defects.
     verif_idea: >
-      mini_fdt_a0_is_fdt Spike PASS / slfix FAIL 19.
-      EXTRACT E0 g6lc_sb_keep landed. Soak then E1/G0. Not I4cg.
-    retire_when: real sbi_printf green; soft printf cave deleted
+      `mini_fdt_nt_osbi` (pass), `mini_fdt_rdxrs1` (pass), `mini_fdt_ro_probe`
+      (pass), `mini_fdt_nt_ptr0` (pass after IAF fix), and new
+      `mini_fetch_straddle` (pass on both 12-thread and 1-thread builds)
+      show that the 32-bit straddle by itself is not sufficient. OpenSBI
+      `PEEL_FDT_GETPROP=1` / `PEEL_FDT_NEXT_TAG=1` soaks fail. Need a
+      directed mini with the full `fdt_getprop_by_offset` prologue/context
+      (call/return, stack stores, hart1 spin, D$ state) to reproduce the
+      `npc0=0x800138d8` misalignment. The fix is in `core/fetch_B/instr_realign`
+      / `instr_queue`, not the load unit or wbuffer.
+    retire_when: natural OpenSBI FDT walk reaches cookie 51b1babe without
+      PEEL_FDT_GETPROP, PEEL_FDT_NEXT_TAG, SOFT_HART_INIT, or SOFT_PLAT_OPS
 
   - id: b1-s4-fetch-b-iq-leftover
     bucket: B1
-    priority: 1
-    status: in_progress
+    priority: 2
+    status: closed
     ladder: cont.S4 / iter-013
     soft_form: >
       OpenSBI is the class test. `mini_fdt_opensbi_blob` Variane PASS,
@@ -216,6 +264,19 @@ sites:
       an illegal/unimp so a bare `c.jr a0` to 0 surfaces `mepc=0`, or keep the
       OpenSBI soak as the primary S4 regression and the bare mini as the fast
       directed reproducer.
+    rtl_progress: >
+      2026-08-30: closed as IAF/test-address. The `mini_fdt_nt_ptr0` failure
+      was an instruction-access fault, not a fetch_B/IQ leftover bug. FDT
+      stub at 0x8001e030 is outside the `g6lc64_smt2` execute region.
+      Moving `.text.fdt` to 0x8001d000 makes the bare mini PASS. The
+      historic OpenSBI `mepc=0` `sbi_hart_hang` path was tracked under
+      `b1-fdt-lenp-store` (fdt_ro_probe_ data corruption).
+      2026-08-30 (cont.): `b1-fdt-lenp-store` is itself a `core/fetch_B`
+      `instr_realign` 32-bit straddle bug (see `npc0=0x800138d8` on
+      `verilator --threads=1`). The S4 class is therefore *not* fully closed;
+      it has re-emerged as a misaligned instruction stream in the natural FDT
+      path. The `mepc=0x...1E030` and `npc0=0x800138d8` failures are the same
+      fetch_B/IQ leftover class, not data corruption.
     retire_when: natural OpenSBI FDT walk reaches cookie 51b1babe without PEEL_FDT_GETPROP, SOFT_HART_INIT, or SOFT_PLAT_OPS
 
   - id: b1-heap-freelist-malloc

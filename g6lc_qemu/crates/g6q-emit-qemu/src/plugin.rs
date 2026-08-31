@@ -727,18 +727,14 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("static uint64_t g6lc_trace_order[G6LC_HARTS_TOTAL];\n");
     body.push_str("static G6lcRecord g6lc_trace_prev[G6LC_HARTS_TOTAL];\n");
     body.push_str("static bool g6lc_trace_prev_valid[G6LC_HARTS_TOTAL];\n");
-    body.push_str("static bool g6lc_trace_first_record;\n\n");
+    body.push_str("static bool g6lc_trace_first_record;\n");
+    body.push_str("#define G6LC_TRACE_BATCH 65536\n");
+    body.push_str("static G6lcRecord g6lc_trace_batch[G6LC_HARTS_TOTAL][G6LC_TRACE_BATCH];\n");
+    body.push_str("static size_t g6lc_trace_batch_len[G6LC_HARTS_TOTAL];\n");
+    body.push_str("static GMutex g6lc_trace_lock;\n\n");
 
-    body.push_str("static void g6lc_trace_write(const G6lcRecord *rec)\n{\n");
-    body.push_str("    if (!g6lc_trace_file) {\n");
-    body.push_str("        return;\n");
-    body.push_str("    }\n");
-    body.push_str("    if (!g6lc_trace_first_record) {\n");
-    body.push_str("        fprintf(g6lc_trace_file, \",\\n\");\n");
-    body.push_str("    }\n");
-    body.push_str("    g6lc_trace_first_record = false;\n");
-
-    body.push_str("    fprintf(g6lc_trace_file,\n");
+    body.push_str("static void g6lc_trace_format_record(GString *buf, const G6lcRecord *rec)\n{\n");
+    body.push_str("    g_string_append_printf(buf,\n");
     body.push_str("        \"{\\\"order\\\":%\" PRIu64 \",\\\"hart\\\":%u,\\\"pc_rdata\\\":%\" PRIu64 \",\\\"pc_wdata\\\":%\" PRIu64 \",\\\"insn\\\":%\" PRIu32 \",\\\"trap\\\":%s,\\\"cause\\\":%\" PRIu64 \",\\\"prv\\\":%u,\\\"halt\\\":%s,\\\"rd_addr\\\":%u,\\\"rd_wdata\\\":%\" PRIu64 \",\\\"frd_addr\\\":%u,\\\"frd_wdata\\\":%\" PRIu64 \"}\",\n");
     body.push_str("        rec->order, rec->hart,\n");
     body.push_str("        rec->pc_rdata, rec->pc_wdata,\n");
@@ -748,7 +744,45 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("        rec->halt ? \"true\" : \"false\",\n");
     body.push_str("        rec->rd_addr, rec->rd_wdata,\n");
     body.push_str("        rec->frd_addr, rec->frd_wdata);\n");
-    body.push_str("    fflush(g6lc_trace_file);\n");
+    body.push_str("}\n\n");
+
+    body.push_str("static void g6lc_trace_flush(uint32_t hart)\n{\n");
+    body.push_str("    if (!g6lc_trace_file || hart >= G6LC_HARTS_TOTAL || g6lc_trace_batch_len[hart] == 0) {\n");
+    body.push_str("        return;\n");
+    body.push_str("    }\n");
+    body.push_str("    GString *body = g_string_sized_new(1 << 24);\n");
+    body.push_str("    for (size_t i = 0; i < g6lc_trace_batch_len[hart]; ++i) {\n");
+    body.push_str("        if (i > 0) {\n");
+    body.push_str("            g_string_append(body, \",\\n\");\n");
+    body.push_str("        }\n");
+    body.push_str("        g6lc_trace_format_record(body, &g6lc_trace_batch[hart][i]);\n");
+    body.push_str("    }\n");
+    body.push_str("    g_mutex_lock(&g6lc_trace_lock);\n");
+    body.push_str("    if (g6lc_trace_file) {\n");
+    body.push_str("        if (!g6lc_trace_first_record) {\n");
+    body.push_str("            fwrite(\",\\n\", 1, 2, g6lc_trace_file);\n");
+    body.push_str("        } else {\n");
+    body.push_str("            g6lc_trace_first_record = false;\n");
+    body.push_str("        }\n");
+    body.push_str("        fwrite(body->str, 1, body->len, g6lc_trace_file);\n");
+    body.push_str("    }\n");
+    body.push_str("    g_mutex_unlock(&g6lc_trace_lock);\n");
+    body.push_str("    g_string_free(body, TRUE);\n");
+    body.push_str("    g6lc_trace_batch_len[hart] = 0;\n");
+    body.push_str("}\n\n");
+
+    body.push_str("static void g6lc_trace_write(const G6lcRecord *rec)\n{\n");
+    body.push_str("    if (!g6lc_trace_file) {\n");
+    body.push_str("        return;\n");
+    body.push_str("    }\n");
+    body.push_str("    uint32_t hart = rec->hart;\n");
+    body.push_str("    if (hart >= G6LC_HARTS_TOTAL) {\n");
+    body.push_str("        return;\n");
+    body.push_str("    }\n");
+    body.push_str("    g6lc_trace_batch[hart][g6lc_trace_batch_len[hart]++] = *rec;\n");
+    body.push_str("    if (g6lc_trace_batch_len[hart] == G6LC_TRACE_BATCH) {\n");
+    body.push_str("        g6lc_trace_flush(hart);\n");
+    body.push_str("    }\n");
     body.push_str("}\n\n");
 
     body.push_str("static void g6lc_vcpu_insn_exec(unsigned int vcpu_index, void *userdata)\n{\n");
@@ -911,6 +945,10 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
 
     body.push_str("static void g6lc_tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)\n{\n");
     body.push_str("    (void)id;\n");
+    body.push_str("    if (g6lc_trace_insns == NULL) {\n");
+    body.push_str("        g6lc_trace_insns = g_ptr_array_new();\n");
+    body.push_str("        g_ptr_array_set_free_func(g6lc_trace_insns, g_free);\n");
+    body.push_str("    }\n");
     body.push_str("    size_t n = qemu_plugin_tb_n_insns(tb);\n");
     body.push_str("    for (size_t i = 0; i < n; ++i) {\n");
     body.push_str("        struct qemu_plugin_insn *insn = qemu_plugin_tb_get_insn(tb, i);\n");
@@ -974,6 +1012,9 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("                g6lc_trace_prev[h].halt = true;\n");
     body.push_str("                g6lc_trace_write(&g6lc_trace_prev[h]);\n");
     body.push_str("            }\n");
+    body.push_str("        }\n");
+    body.push_str("        for (uint32_t h = 0; h < G6LC_HARTS_TOTAL; ++h) {\n");
+    body.push_str("            g6lc_trace_flush(h);\n");
     body.push_str("        }\n");
     body.push_str("        fprintf(g6lc_trace_file, \"\\n]}\\n\");\n");
     body.push_str("        fclose(g6lc_trace_file);\n");
@@ -1040,6 +1081,7 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("            g6lc_trace_file = fopen(path, \"w\");\n");
     body.push_str("            if (g6lc_trace_file) {\n");
     body.push_str("                g6lc_trace_first_record = true;\n");
+    body.push_str("                g_mutex_init(&g6lc_trace_lock);\n");
     body.push_str("                fprintf(g6lc_trace_file,\n");
     body.push_str("                    \"{\\\"header\\\":{\\\"profile\\\":\\\"%s\\\",\\\"profile_tainted\\\":%s,\\\"evidence\\\":false},\\\"records\\\":[\\n\",\n");
     body.push_str("                    G6LC_PROFILE, G6LC_PROFILE_TAINTED);\n");
@@ -1066,8 +1108,10 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("        }\n");
     body.push_str("#endif\n");
     body.push_str("    }\n");
-    body.push_str("    g6lc_trace_insns = g_ptr_array_new();\n");
-    body.push_str("    g_ptr_array_set_free_func(g6lc_trace_insns, g_free);\n");
+    body.push_str("    if (g6lc_trace_insns == NULL) {\n");
+    body.push_str("        g6lc_trace_insns = g_ptr_array_new();\n");
+    body.push_str("        g_ptr_array_set_free_func(g6lc_trace_insns, g_free);\n");
+    body.push_str("    }\n");
     body.push_str("#if G6LC_AI_DESC_DECODE == 1\n");
     body.push_str("    for (uint32_t h = 0; h < G6LC_HARTS_TOTAL; ++h) {\n");
     body.push_str("        g6lc_tensor_events[h] = NULL;\n");

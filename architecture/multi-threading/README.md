@@ -128,6 +128,8 @@ state correct. Island compute stays in `corev_apu/ai_island/**` and host stacks 
 | Doc | Role |
 |------|------|
 | [`smt2-bringup.md`](smt2-bringup.md) | SMT enable + dual-hart Linux CI sketch |
+| [`AGENTS-SMT2-opensbi-reasoning-pattern-workflow.md`](AGENTS-SMT2-opensbi-reasoning-pattern-workflow.md) | **Foundation (philosophy):** propositions P1–P7, thought patterns T1–T10 in sentence pseudo-code, the six speculation-visibility channels, the feedback-latency ladder L0–L7, and worked `core/` + `corev_apu/` reasoning transcripts. The layer the logics and heuristics docs pull from |
+| [`AGENTS-smt2-opensbi-dev-logics.md`](AGENTS-smt2-opensbi-dev-logics.md) | **Planning aid (not law):** OpenSBI source → obligation → invariant → `fetch_B` combo, as heuristic pseudo-code (blame router, negative pruner, verdict semantics, capability navigation) |
 | [`smt2-product-closeout.md`](smt2-product-closeout.md) | Post-cookie SMT2 product closeout + FDT `smt,*` compensation properties |
 | [`soft-ladder/`](soft-ladder/) | DI OpenSBI residual promotion (B1→B3) |
 | [`fdt-topology-soft-ladder.md`](fdt-topology-soft-ladder.md) | `NrCores`×`NrHarts` DTS / cpu-map |

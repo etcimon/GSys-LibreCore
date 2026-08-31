@@ -30,7 +30,7 @@ SECTIONS
   .text.offset : { *(.text.offset) }
 
   /* Minimal FDT + stub */
-  . = 0x8001e000;
+  . = 0x8001d000;
   .text.fdt : { *(.text.fdt) }
 
   .rodata : { *(.rodata*) }

@@ -47,6 +47,8 @@ module cva6_hpdcache_subsystem
     input logic clk_i,
     // Asynchronous reset active low - SUBSYSTEM
     input logic rst_ni,
+    // Reset value for the in-flight I$ fetch address
+    input logic [CVA6Cfg.VLEN-1:0] boot_addr_i,
 
     //  AXI port to upstream memory/peripherals
     //  {{{
@@ -160,6 +162,7 @@ module cva6_hpdcache_subsystem
   ) i_g6lc_icache (
       .clk_i         (clk_i),
       .rst_ni        (rst_ni),
+      .boot_addr_i   (boot_addr_i),
       .flush_i       (icache_flush_i),
       .en_i          (icache_en_i),
       .miss_o        (icache_miss_o),

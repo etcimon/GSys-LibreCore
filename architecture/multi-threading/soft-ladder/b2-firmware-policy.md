@@ -30,7 +30,7 @@ Name: **`CVA6_DI_BRINGUP`** (or Kconfig equivalent).
 | `b2-early-init-skip` | Empty `early_init` | Real |
 | `b2-domain-finalize-cut` | Early finalize after safe walk **or** full walk once ecall poison fixed | Full finalize |
 | `b2-csr-probe-skip` | Skip hart CSR probes **only if** B1 still open | Full probes |
-|| `b2-smt-fdt-compensation` | Emit `/soc/smt-product-closeout` properties per `smt2-product-closeout.md`; apply OpenSBI FDT fixups via `software/smt2-linux/scripts/patch_opensbi_smt_compensation.py` (currently drops `zawrs` when `smt,zawrs = <0>`). Patch `cpu@` status for `smt,boot-crutches` only after cold-excl retirement. | No SMT compensation nodes; clean FDT |
+| `b2-smt-fdt-compensation` | **Retired — no firmware site.** The `cpu@` nodes are the contract; `dts_to_dtb.py` proves them honest at DTB build time (`smt2-product-closeout.md` §9). The former OpenSBI rewriter called `sbi_malloc()` from `fw_platform_init()`, before `sbi_heap_init()`, and trapped `fault_load` on `NULL+0x18`. Do not reintroduce it. | Same — stock firmware |
 
 ## Domain / ecall coupling (cont.51 pin)
 

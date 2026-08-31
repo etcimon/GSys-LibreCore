@@ -1156,6 +1156,14 @@ module id_stage #(
       if (flush_i) begin
         for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) issue_n[i].valid = 1'b0;
       end
+//pragma translate_off
+      if ($time() < 200000)
+        for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++)
+          if (fetch_entry_valid_i[i])
+            $display("[id-dbg] t=%0t port=%0d fetch_addr=%h instr=%h is_illegal=%b dec_pc=%h dec_ex=%b",
+                     $time, i, fetch_entry_i[i].address, fetch_entry_i[i].instruction, is_illegal_rvc[i],
+                     decoded_instruction[i].pc, decoded_instruction[i].ex.valid);
+//pragma translate_on
     end
   end else begin
     always_comb begin

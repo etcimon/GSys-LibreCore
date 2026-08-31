@@ -38,6 +38,7 @@ module wt_cache_subsystem
 ) (
     input logic clk_i,
     input logic rst_ni,
+    input logic [CVA6Cfg.VLEN-1:0] boot_addr_i,
     // I$
     input logic icache_en_i,  // enable icache (or bypass e.g: in debug mode)
     input logic icache_flush_i,  // flush the icache, flush and kill have to be asserted together
@@ -131,6 +132,7 @@ module wt_cache_subsystem
   ) i_g6lc_icache (
       .clk_i         (clk_i),
       .rst_ni        (rst_ni),
+      .boot_addr_i   (boot_addr_i),
       .flush_i       (icache_flush_i),
       .en_i          (icache_en_i),
       .miss_o        (icache_miss_o),

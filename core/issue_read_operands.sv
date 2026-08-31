@@ -769,6 +769,29 @@ module issue_read_operands
           end
         end
       end
+      // I11/G1gu: JALR base must be a usable target before issue. If the
+      // scoreboard forward is usable, keep it; otherwise fall back to the RF
+      // peek if that is usable; otherwise stall until the producer (LOAD/ALU)
+      // delivers a usable address. This covers the SMT2 same-cycle / just-
+      // committed RAW race where a stale RF or an invalid forward would make
+      // JALR jump to 0 (OpenSBI mepc=0 / bootrom jr s0). SMT+SS only.
+      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          issue_instr_i[i].op == ariane_pkg::JALR) begin
+        if (forward_rs1[i] &&
+            g6lc_jalr_usable::usable(
+                CVA6Cfg, CVA6Cfg.VLEN, 64'(rs1_res[i]))) begin
+          // forward is usable, use it
+        end else if (g6lc_jalr_usable::usable(
+                         CVA6Cfg, CVA6Cfg.VLEN, 64'(operand_a_regfile[i]))) begin
+          // RF value is usable; prefer it over the unusable/missing forward
+          forward_rs1[i] = 1'b0;
+        end else begin
+          // Neither source is usable: the base is not yet known. Stall JALR.
+          stall_raw[i] = 1'b1;
+          stall_rs1[i] = 1'b1;
+          forward_rs1[i] = 1'b0;
+        end
+      end
       end
     end
 
@@ -834,9 +857,6 @@ module issue_read_operands
         end
       end
     end
-    // G1gf stall jalr until rs1 usable —
-    // HOLD-FAIL no cookie (hung OpenSBI jalr).
-    // Do not re-land (G0/G1i class).
   end
 
   // third operand from fp regfile or gp regfile if NR_RGPR_PORTS == 3

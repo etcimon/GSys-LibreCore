@@ -25,6 +25,7 @@ Subcommands
   build     build a harness flavour remotely (B | legacy)
   run       upload one ELF and run it (minimal payload)
   soak      run the OpenSBI cookie soak remotely
+  di        compile and run the directed mini suite remotely in parallel
   py        upload Python scripts and run them with a remote thread pool
   pull      copy remote logs back
   shell     interactive ssh into the remote workdir
@@ -41,13 +42,16 @@ Speed notes
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from contextlib import contextmanager
@@ -122,6 +126,27 @@ FLAVOURS = {
     "B": ("work-ver-smt2-fw64-B", True),
     "legacy": ("work-ver-smt2-fw64-legacy", False),
 }
+
+# Default directed mini suite from verif/regress/soft-ladder-di-regress.sh.
+# Keep in sync with that script; override with --tests.
+DEFAULT_DI_TESTS = [
+    "mini_amoadd_w_spin",
+    "mini_csr_expected_trap",
+    "mini_csr_pmp_probe",
+    "mini_dual_cmv_s3",
+    "mini_fdt_lenp_sw",
+    "mini_fdt_s2_nest",
+    "mini_fdt_check_prop_nest",
+    "mini_fdt_next_tag_lbu",
+    "mini_fdt_a0_is_fdt",
+    "mini_stq_flush_fwd",
+    "mini_fdt_namelen_walk",
+    "mini_fdt_nt_frame32",
+    "mini_fdt_nt_stock",
+    "mini_fdt_nt_cpus",
+    "mini_stq_alias_jal",
+    "mini_fdt_nt_osbi",
+]
 
 _DEBUG: bool = False
 
@@ -580,6 +605,42 @@ def env_prefix() -> str:
     return f"set -a; . {REMOTE_ROOT}/env.sh; set +a;"
 
 
+def _di_max_workers(rem: Remote, verlib: str, requested: int, n_tests: int) -> int:
+    """Compute DI worker count so each running test can saturate the remote
+    host while the next test starts as soon as a worker frees up.
+
+    The build script pins Verilator vthreads to nproc, so one Variane_testharness
+    already uses all cores. Running more than one in parallel oversubscribes and
+    slows every test. We therefore run one test at a time unless the remote has
+    many more cores than the compiled vthreads count.
+    """
+    # Probe the host and, if the build recorded its vthreads, use that.
+    nproc = 0
+    try:
+        nproc_txt = rem.out("command -v nproc >/dev/null && nproc || echo 0").strip()
+        nproc = int(nproc_txt) if nproc_txt.isdigit() else 0
+    except Exception:
+        pass
+    vthreads = 0
+    vthreads_file = f"{REMOTE_ROOT}/work/{verlib}/.vthreads"
+    try:
+        vthreads_txt = rem.out(f"cat {shlex.quote(vthreads_file)} 2>/dev/null || echo 0").strip()
+        vthreads = int(vthreads_txt) if vthreads_txt.isdigit() else 0
+    except Exception:
+        pass
+    if vthreads <= 0:
+        # Fall back to nproc; the build uses vthreads=nproc by default.
+        vthreads = nproc if nproc > 0 else 12
+    if nproc <= 0:
+        nproc = vthreads
+    # Number of harnesses that can run without oversubscribing.
+    workers = max(1, nproc // vthreads)
+    # Respect the user's cap and never exceed the number of tests.
+    workers = min(workers, requested, n_tests)
+    log(f"di workers: {workers} (nproc={nproc} vthreads={vthreads} requested={requested})")
+    return workers
+
+
 def file_tag(path: Path) -> str:
     h = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
     return f"{path.stem}-{h}"
@@ -815,6 +876,8 @@ def cmd_build(rem: Remote, args) -> int:
         f"SOFT_LADDER_BUILD_CLEAN={shlex.quote(clean)}",
         "VLT_HOME=\"$VLT_HOME\"",
     ]
+    for kv in args.env:
+        env_vars.append(shlex.quote(kv))
 
     if args.cache:
         # Auto-detect and enable ccache/mold on the remote.
@@ -861,6 +924,19 @@ def cmd_build(rem: Remote, args) -> int:
     rc = rem.run(script, check=False).returncode
     log(f"build {'OK' if rc == 0 else 'FAILED'} in {time.time() - t0:.1f}s")
 
+    if rc == 0:
+        # Record nproc and the actual vthreads used by the build so the DI
+        # worker pool can be sized to saturate the host without oversubscribing.
+        rem.run(
+            f"command -v nproc >/dev/null 2>/dev/null && nproc > {shlex.quote(verlib_dir + '/.nproc')} || true",
+            check=False,
+        )
+        rem.run(
+            f"grep -m1 'vthreads=' {shlex.quote(verlib_dir + '/build.log')} | "
+            f"sed 's/.*vthreads=//' | head -1 > {shlex.quote(verlib_dir + '/.vthreads')} 2>/dev/null || true",
+            check=False,
+        )
+
     if rc == 0 and args.output_cache and cache_dir:
         rem.run(
             f"mkdir -p {shlex.quote(f'{REMOTE_ROOT}/cache/builds')} && "
@@ -872,8 +948,46 @@ def cmd_build(rem: Remote, args) -> int:
     return rc
 
 
+def _kill_stranded_harnesses(rem: Remote) -> None:
+    """Pre-flight cleanup: terminate any Variane_testharness left by a
+    previous hung or aborted session before starting a new one. This is a
+    best-effort defence against multiple heavy Verilator processes stacking up
+    on the remote builder."""
+    # Use '[V]ariane_testharness' regex trick so the pkill command line does not
+    # match itself.
+    rc = rem.run("pkill -f '[V]ariane_testharness' || true", check=False).returncode
+    if rc == 0:
+        log("pre-flight pkill: no stray Variane_testharness processes")
+    else:
+        log(f"pre-flight pkill returned rc={rc} (may be normal if none found)")
+
+
+def _no_overlap_guard(rem: Remote, command: str = "") -> None:
+    """Refuse to start a new testharness workload if another one is already
+    running on the remote host. Prevents the parallel-simulation flakiness that
+    happens when heavy Verilator processes or soft-ladder scripts overlap.
+
+    The check uses a regex class on the first character so the pgrep command
+    line does not match itself."""
+    procs = rem.out(
+        "pgrep -a -f '[V]ariane_testharness|[s]oft-ladder' || true"
+    ).strip()
+    if procs:
+        # Filter out the pgrep line itself (it contains the pattern as a string).
+        lines = [ln for ln in procs.splitlines() if "pgrep -a -f" not in ln]
+        if lines:
+            log("overlap guard: existing testharness/soft-ladder processes found:")
+            for ln in lines:
+                log(f"  {ln}")
+            if command:
+                die(f"refusing to start '{command}' while another workload is running")
+            die("refusing to start another workload while a testharness is running")
+
+
 def cmd_run(rem: Remote, args) -> int:
     rem.start_master()
+    _kill_stranded_harnesses(rem)
+    _no_overlap_guard(rem, "run")
     verlib, _ = flavour_info(args.flavour)
     if args.verlib:
         verlib = args.verlib
@@ -896,13 +1010,41 @@ def cmd_run(rem: Remote, args) -> int:
     log(f"uploading {elf.name} ({elf.stat().st_size} bytes) -> {rundir}")
     rem.push(elf, remote_elf)
 
+    def _tohost_addr(e: Path) -> str:
+        for nm in (
+            os.environ.get("CROSS_COMPILE", "") + "nm",
+            "riscv-none-elf-nm",
+            "riscv64-unknown-elf-nm",
+            "nm",
+        ):
+            if not nm:
+                continue
+            try:
+                proc = subprocess.run(
+                    [shutil.which(nm) or nm, str(e)],
+                    check=False, capture_output=True, text=True,
+                )
+                for line in proc.stdout.splitlines():
+                    m = re.match(r"^([0-9a-fA-F]+)\s+\S\s+tohost\s*$", line)
+                    if m:
+                        return f"+tohost_addr=0x{m.group(1)} "
+            except Exception:
+                continue
+        return ""
+
+    tohost_arg = _tohost_addr(elf)
+    if not tohost_arg:
+        log(f"WARNING: no tohost symbol for {elf}; relying on harness default")
     plusargs = " ".join(shlex.quote(a) for a in args.plusarg)
+    env_vars = " ".join(shlex.quote(kv) for kv in args.env)
+    if env_vars:
+        env_vars = f"export {env_vars}; "
     logfile = f"{rundir}/run-{args.flavour}.log"
     script = (
-        f"{env_prefix()} cd {rundir} && "
+        f"{env_prefix()} {env_vars}cd {rundir} && "
         f"{shlex.quote(harness)} +time_out={args.time_out} "
         f"+max-cycles={args.time_out} +debug_disable +quiet_axi "
-        f"{plusargs} {shlex.quote(remote_elf)} > {shlex.quote(logfile)} 2>&1; "
+        f"{tohost_arg}{plusargs} {shlex.quote(remote_elf)} > {shlex.quote(logfile)} 2>&1; "
         f"echo \"rc=$?\"; tail -n {args.tail} {shlex.quote(logfile)}"
     )
     rem.dbg(f"run script: {script[:200]}...")
@@ -918,7 +1060,11 @@ def cmd_run(rem: Remote, args) -> int:
 
 def cmd_soak(rem: Remote, args) -> int:
     rem.start_master()
+    _kill_stranded_harnesses(rem)
+    _no_overlap_guard(rem, "soak")
     verlib, _ = flavour_info(args.flavour)
+    if args.verlib:
+        verlib = args.verlib
     env = [f"SOFT_LADDER_FETCH={args.flavour}",
            f"SOFT_LADDER_HARNESS={REMOTE_ROOT}/work/{verlib}"]
     if args.skip_build:
@@ -940,6 +1086,185 @@ def cmd_soak(rem: Remote, args) -> int:
     rc = rem.run(script, check=False).returncode
     log(f"soak finished rc={rc} in {time.time()-t0:.1f}s")
     return rc
+
+
+def cmd_di(rem: Remote, args) -> int:
+    """Compile the directed mini (DI) suite locally and run it on the remote
+    harness consecutively. Each test gets its own remote log; logs can be pulled
+    back with --pull.
+
+    This mirrors verif/regress/soft-ladder-di-regress.sh, but keeps exactly one
+    Variane_testharness running at a time. Verilator already pins vthreads to the
+    remote host's nproc, so a single harness saturates the machine; running more
+    in parallel oversubscribes cores and makes tests flaky.
+    """
+    rem.start_master()
+    _kill_stranded_harnesses(rem)
+    _no_overlap_guard(rem, "di")
+    root = repo_root()
+    verlib, _ = flavour_info(args.flavour)
+    if args.verlib:
+        verlib = args.verlib
+    harness = f"{REMOTE_ROOT}/work/{verlib}/Variane_testharness"
+
+    if rem.check(f"test -x {shlex.quote(harness)}", quiet=True) != 0:
+        die(f"no remote harness '{harness}'; build first: {sys.argv[0]} build {args.flavour}")
+
+    tests = args.tests if args.tests else DEFAULT_DI_TESTS
+    if not tests:
+        die("no tests selected")
+
+    # Build all minis locally using the existing shell script in compile-only mode.
+    out = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="th-di-"))
+    out.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["SOFT_LADDER_COMPILE_ONLY"] = "1"
+    env["SOFT_LADDER_OUT"] = str(out)
+    env["SOFT_LADDER_TESTS"] = " ".join(tests)
+    env["SOFT_LADDER_TESTS"] = " ".join(tests)
+    script = f"cd {shlex.quote(str(root))} && bash verif/regress/soft-ladder-di-regress.sh"
+    log(f"compiling {len(tests)} DI tests -> {out}")
+    t0 = time.time()
+    proc = subprocess.run(script, shell=True, env=env, check=False,
+                          capture_output=True, text=True)
+    if _DEBUG and proc.stdout:
+        debug(proc.stdout[-2000:])
+    if proc.returncode != 0:
+        if proc.stdout:
+            log(proc.stdout[-2000:])
+        if proc.stderr:
+            log(proc.stderr[-2000:])
+        die("DI compile failed")
+    log(f"compile finished in {time.time()-t0:.1f}s")
+
+    # Map each test to its compiled ELF.
+    elfs = {}
+    missing = []
+    for t in tests:
+        e = out / f"{t}.elf"
+        if e.is_file():
+            elfs[t] = e
+        else:
+            missing.append(t)
+    if missing:
+        die(f"compiled ELF missing for: {missing}")
+
+    # Upload all ELFs before the thread pool starts (minimises rsync overlap).
+    tag = args.tag or f"di-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    rundir = f"{REMOTE_ROOT}/runs/{tag}"
+    rem.run(f"mkdir -p {shlex.quote(rundir)}")
+    log(f"uploading {len(elfs)} ELFs -> {rundir}")
+    t0 = time.time()
+    for t, e in elfs.items():
+        rem.push(e, f"{rundir}/{t}.elf")
+    log(f"upload finished in {time.time()-t0:.1f}s")
+
+    plusargs = " ".join(shlex.quote(a) for a in args.plusarg)
+    tail = args.tail
+    log_lock = threading.Lock()
+
+    def th_log(msg: str) -> None:
+        with log_lock:
+            log(msg)
+
+    def tohost_addr(elf: Path) -> str:
+        for nm in (
+            os.environ.get("CROSS_COMPILE", "") + "nm",
+            "riscv-none-elf-nm",
+            "riscv64-unknown-elf-nm",
+            "nm",
+        ):
+            if not nm:
+                continue
+            try:
+                proc = subprocess.run(
+                    [shutil.which(nm) or nm, str(elf)],
+                    check=False, capture_output=True, text=True,
+                )
+                for line in proc.stdout.splitlines():
+                    m = re.match(r"^([0-9a-fA-F]+)\s+\S\s+tohost\s*$", line)
+                    if m:
+                        return m.group(1)
+            except Exception:
+                continue
+        return ""
+
+    def run_one(test: str, elf: Path) -> tuple[str, bool, str, float]:
+        remote_elf = f"{rundir}/{test}.elf"
+        logfile = f"{rundir}/{test}.log"
+        th = tohost_addr(elf)
+        if not th:
+            th_log(f"[di] WARNING {test}: no tohost symbol; using 0")
+            tohost_arg = ""
+        else:
+            tohost_arg = f"+tohost_addr=0x{th} "
+        th_log(f"[di] start {test} tohost=0x{th}")
+        t0_run = time.time()
+        script = (
+            f"{env_prefix()} cd {shlex.quote(rundir)} && "
+            f"{shlex.quote(harness)} +time_out={args.time_out} "
+            f"+max-cycles={args.time_out} +debug_disable +quiet_axi "
+            f"{tohost_arg}{plusargs} {shlex.quote(remote_elf)} > {shlex.quote(logfile)} 2>&1; "
+            f"rc=$?; echo \"rc=$rc\"; tail -n {tail} {shlex.quote(logfile)}"
+        )
+        proc = rem.run(script, check=False, capture=True)
+        out_text = proc.stdout
+        # The remote script always echoes "rc=N" before the tail.
+        match = re.search(r"^rc=(\d+)", out_text, re.MULTILINE)
+        rc = int(match.group(1)) if match else proc.returncode
+        # DI convention: tohost=1 is pass, anything else (including tohost=0
+        # timeout / no write) is fail. The harness returns the tohost value as
+        # its exit code, so rc==1 only means pass if the log actually shows
+        # tohost=1. rvfi_tracer mismatches can also return rc==1 while tohost
+        # is still 0, so we must parse the printed tohost value, not just rc.
+        tohost_match = re.search(r"\(tohost = (?:0x)?([0-9a-fA-F]+)\)", out_text)
+        tohost = int(tohost_match.group(1), 0) if tohost_match else 0
+        passed = tohost == 1
+        th_log(f"[di] {'PASS' if passed else 'FAIL'} {test} rc={rc} tohost={tohost} in {time.time()-t0_run:.1f}s")
+        if args.pull:
+            dest = repo_root() / "remote-runs" / tag / f"{test}.log"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                rem.pull(logfile, dest)
+            except Exception as exc:
+                th_log(f"[di] pull {test} failed: {exc}")
+        return (test, passed, out_text, time.time() - t0_run)
+
+    t0_all = time.time()
+    # DI is intentionally single-threaded on the remote: one Variane_testharness
+    # with vthreads=nproc already saturates the builder; overlapping harnesses
+    # oversubscribe and cause flaky fails (e.g. mini_fdt_lenp_sw).
+    max_workers = 1
+    log(f"di workers: {max_workers} (consecutive mode)")
+    results: dict[str, tuple[str, bool, str, float]] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futures = {ex.submit(run_one, t, e): t for t, e in elfs.items()}
+        for fut in concurrent.futures.as_completed(futures):
+            test = futures[fut]
+            try:
+                results[test] = fut.result()
+            except Exception as exc:
+                th_log(f"[di] ERROR {test}: {exc}")
+                results[test] = (test, False, str(exc), 0.0)
+
+    wall = time.time() - t0_all
+    pass_n = sum(1 for _, p, _, _ in results.values() if p)
+    fail_n = len(results) - pass_n
+
+    log("-" * 60)
+    for t in tests:
+        _, p, out_text, dt = results.get(t, (t, False, "", 0.0))
+        status = "PASS" if p else "FAIL"
+        log(f"[di] {status:4} {t:32} {dt:6.1f}s")
+        if not p and out_text:
+            tail_lines = out_text.splitlines()[-5:]
+            for line in tail_lines:
+                log(f"       {line}")
+    log("-" * 60)
+    log(f"DI summary: pass={pass_n} fail={fail_n} tests={len(tests)} wall={wall:.1f}s")
+    if args.pull:
+        log(f"pulled logs -> {repo_root() / 'remote-runs' / tag}")
+    return 0 if fail_n == 0 else 1
 
 
 def cmd_pull(rem: Remote, args) -> int:
@@ -993,6 +1318,13 @@ def cmd_shell(rem: Remote, args) -> int:
         # terminal, so the output came back interleaved with a fresh prompt
         # instead of as a plain captured result. Pass --tty when the remote
         # command must die with the SSH session (SIGHUP on disconnect).
+        #
+        # Shell is the back-door used by helper scripts to launch the DI suite;
+        # apply the same overlap guard so two consecutive shell invocations do not
+        # both start heavy Variane/soft-ladder workloads.
+        if re.search(r"Variane_testharness|soft-ladder", args.command):
+            _kill_stranded_harnesses(rem)
+            _no_overlap_guard(rem, f"shell ({args.command[:60]}...)")
         timeout = args.timeout if args.timeout > 0 else DEFAULT_SHELL_TIMEOUT
         return rem.run(f"cd {REMOTE_ROOT} && {args.command}",
                        check=False, timeout=timeout,
@@ -1223,6 +1555,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="skip repo sync before build")
     sp.add_argument("--output-cache", default=False, action="store_true",
                     help="seed from and archive the full Mdir in a content-keyed cache")
+    sp.add_argument("--env", action="append", default=[],
+                    help="extra KEY=VALUE env var for the build (repeatable)")
     sp.set_defaults(fn=cmd_build)
 
     sp = sub.add_parser("run", help="upload one ELF and run it (minimal payload)")
@@ -1234,11 +1568,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--plusarg", action="append", default=[],
                     help="extra +plusarg (repeatable)")
     sp.add_argument("--tail", type=int, default=30)
+    sp.add_argument("--env", action="append", default=[],
+                    help="extra KEY=VALUE for the harness environment (repeatable)")
     sp.add_argument("--pull", action="store_true", help="copy logs back when done")
     sp.set_defaults(fn=cmd_run)
 
     sp = sub.add_parser("soak", help="run the OpenSBI cookie soak remotely")
     sp.add_argument("--flavour", choices=sorted(FLAVOURS), default="B")
+    sp.add_argument("--verlib", default=None,
+                    help="override the Verilator work directory name")
     sp.add_argument("--skip-build", action="store_true",
                     help="reuse an already built ELF")
     sp.add_argument("--hold", action="store_true",
@@ -1246,6 +1584,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--env", action="append", default=[],
                     help="extra KEY=VALUE for the soak (repeatable)")
     sp.set_defaults(fn=cmd_soak)
+
+    sp = sub.add_parser("di", help="run the directed mini (DI) suite remotely in parallel")
+    sp.add_argument("--flavour", choices=sorted(FLAVOURS), default="B")
+    sp.add_argument("--verlib", default=None)
+    sp.add_argument("--tests", nargs="+", default=None,
+                    help="mini test names (space separated; default: DEFAULT_DI_TESTS)")
+    sp.add_argument("--time-out", dest="time_out", default="400000",
+                    help="per-test +time_out/+max-cycles (default 400000)")
+    sp.add_argument("--threads", type=int, default=1,
+                    help="kept for compatibility; DI now runs one Variane at a time")
+    sp.add_argument("--plusarg", action="append", default=[],
+                    help="extra +plusarg for every test (repeatable)")
+    sp.add_argument("--tail", type=int, default=30,
+                    help="tail lines of each remote log in the summary (default 30)")
+    sp.add_argument("--pull", action="store_true",
+                    help="copy each test log back when done")
+    sp.add_argument("--tag", default=None,
+                    help="remote run dir name (default di-<timestamp>)")
+    sp.add_argument("--out", default=None,
+                    help="local dir for compiled ELFs (default: temp)")
+    sp.set_defaults(fn=cmd_di)
 
     sp = sub.add_parser("py", help="upload Python scripts and run them remotely (thread pool)")
     sp.add_argument("script", nargs="+", help="local Python script(s) to execute")

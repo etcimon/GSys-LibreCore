@@ -193,6 +193,51 @@ This cycle is co-equal with other standing disciplines when the change touches t
 auto-correct, or datapath/control that FO4 is meant to screen. It does **not** replace `verify`
 (lint/sim/synth) or formal.
 
+### 2.9 Firmware-driven reasoning before firmware-driven testing
+
+Work on **soft-ladder, SMT2, `core/fetch_B`, and the surrounding architectural development** must
+infer its logic from three documents that sit *above* the code, and must do so **before** the change
+is written — not after a test disagrees with it:
+
+| Lens | Document | What it supplies |
+|------|----------|------------------|
+| **Foundation** | `architecture/multi-threading/AGENTS-SMT2-opensbi-reasoning-pattern-workflow.md` | Propositions P1–P7, thought patterns T1–T10 in sentence pseudo-code, the six speculation-visibility channels, the feedback-latency ladder L0–L7 |
+| **Method** | `architecture/AGENTS-g6lc-opensbi-dev-heuristics.md` | Weighted heuristics H1–H7 (archetype lift, contract-before-change, oracle validity, determinism-first, blame locality, red-line executability, escape-hatch budget) |
+| **Instance** | `architecture/multi-threading/AGENTS-smt2-opensbi-dev-logics.md` | The SMT2 obligation set (`R1`–`R12`) anchored to OpenSBI `file:line`, the blame router, and `NEGATIVE.md` as a pruning predicate |
+
+**Why this belongs in the coding philosophy rather than only in the architecture tree.** This project
+does not advance by small edits that a fast test loop can adjudicate. It advances by **large,
+structured RTL updates whose validation arrives late and expensively** — a firmware soak is minutes
+to hours for one bit of output, and a peel/hold cycle costs more than the change it defends. Under
+those economics, the probability that a change is correct is set mostly *before* it is compiled, by
+the quality of the reasoning that produced it. Testing then **confirms** correctness; it does not
+**create** it.
+
+Concretely, a change developed through these lenses is more likely to be right because it:
+
+- names a **workload archetype** and a contract, not a symptom and a patch (H1, T1) — so the same
+  change covers firmware nobody has compiled yet;
+- states its rule over a **closed tuple** and gates it on the parameter that *explains* it, not the
+  one that happens to be set in the failing package (H2, P2, `I28`);
+- has been walked against the **six speculation-visibility channels** and the ISA red lines
+  (`architecture/firmware-boot-principles.md` §E) before it exists (T5, H6);
+- pushes its check to the **leftmost feasible stage** — definition, `check_cfg`, bounded formal,
+  then SVA — so a violation is discovered near its cause rather than ten million cycles away
+  (T6, §4 ladder, §4.5 here);
+- treats firmware as a **witness and a final gate**, never as a search signal or something to be
+  edited around (P1). If firmware or bootrom source must change to accommodate an RTL behaviour, the
+  RTL behaviour is the defect.
+
+**Practical requirement.** For a non-trivial change to `core/**` or `corev_apu/**` in this area, the
+PR note states: the archetype, the contract sentence (no address, register, or firmware symbol in
+it), the ladder stage at which the rule is checked, and the visibility-channel walk. That is a short
+paragraph, and it is cheaper than one soak.
+
+**Boundaries.** These three documents are *lenses, not law*. They never override `AGENTS.md` §0
+(SoC prime directive), the carry-over checklist, `AGENTS-licensing.md`, or the normative fetch
+specification in `architecture/firmware-boot-principles.md` / `architecture/core-fetch/`. Where a
+lens and a normative document disagree, the normative document wins and the lens is corrected.
+
 ---
 
 ## 3. Abstract timing-analysis practices
@@ -410,6 +455,10 @@ description or commit message.
 - [ ] **Structural FO4 soak (when applicable):** for timing-structure / datapath / auto-correct work,
       ran `python tools/svt.py monorepo-soak` (or a documented sparse profile) on real monorepo SV;
       package fixed first; RTL only if proven (§2.8). Not required for pure docs or unrelated uncore.
+- [ ] **Firmware-driven reasoning stated (when applicable):** for soft-ladder / SMT2 / `core/fetch_B`
+      and related architectural work, the note gives the archetype, the contract sentence (free of
+      addresses, register names and firmware symbols), the ladder stage the rule is checked at, and
+      the speculation-visibility-channel walk (§2.9). Not required for unrelated areas.
 
 ---
 

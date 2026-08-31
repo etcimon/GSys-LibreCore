@@ -21,7 +21,7 @@ $required = @(
   "architecture/multi-threading/smt2-bringup.md",
   "build-platform/scripts/validate-cva6-dts.ps1",
   "build-platform/scripts/fetch-linux-dts.ps1",
-  "core/smt/g6lc_smt_csr_bank.sv",
+  "core/smt_legacy/g6lc_smt_csr_bank.sv",
   "corev_apu/tb/ariane_testharness.sv",
   "corev_apu/src/g6lc_cluster.sv",
   "core/cva6.sv"
@@ -59,7 +59,7 @@ if ($th -notmatch "core_ipi" -or $th -notmatch "core_timer_irq") {
 Write-Host "  ok CLINT NR_HARTS + per-hart fanout in testharness"
 
 # CSR bank per-hart IRQ
-$csr = Get-Content "core/smt/g6lc_smt_csr_bank.sv" -Raw
+$csr = Get-Content "core/smt_legacy/g6lc_smt_csr_bank.sv" -Raw
 if ($csr -notmatch "time_irq_i\[h\]" -or $csr -notmatch "ipi_i\[h\]") {
   Write-Error "smt_csr_bank must wire per-hart time_irq/ipi"
   exit 1

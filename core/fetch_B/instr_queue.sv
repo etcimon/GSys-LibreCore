@@ -243,21 +243,65 @@ module instr_queue
   // ----------------------
   // Downstream interface
   // ----------------------
-  // slot of issue port p, i.e. the drain pointer rotated by p
-  for (genvar p = 0; p <= NrIssue; p++) begin : gen_rotate_ds
-    assign idx_ds[p] = rotate_left(idx_ds_q, fifo_idx_t'(p % NrFifo));
-  end
+  // slot of issue port p. When En.order is set, the two oldest (smallest PC)
+  // FIFO heads are presented on ports 0/1 so the issue group is in program
+  // order. The tail pointer continues to rotate round-robin for the state
+  // machine; it is only used as the next idx_ds_q when both ports pop.
+  generate
+    if (En.order && NrIssue > 1) begin : gen_ordered_issue
+      // B/I13: round-robin 4 FIFOs can drain a younger control-flow in port 0
+      // before an older producer in port 1, causing c.jr/c.jalr to use stale
+      // ra/sp. Select oldest-PC first, then second-oldest.
+      always_comb begin
+        logic [CVA6Cfg.VLEN-1:0] oldest_pc, second_pc;
+        logic [NrFifo-1:0] oldest_mask, second_mask;
+        oldest_pc   = '1;
+        second_pc   = '1;
+        oldest_mask = '0;
+        second_mask = '0;
+        for (int unsigned f = 0; f < NrFifo; f++) begin
+          if (~instr_queue_empty[f]) begin
+            if (instr_data_out[f].pc < oldest_pc) begin
+              oldest_pc   = instr_data_out[f].pc;
+              oldest_mask = '0;
+              oldest_mask[f] = 1'b1;
+            end
+          end
+        end
+        for (int unsigned f = 0; f < NrFifo; f++) begin
+          if (~instr_queue_empty[f] && ~oldest_mask[f]) begin
+            if (instr_data_out[f].pc < second_pc) begin
+              second_pc   = instr_data_out[f].pc;
+              second_mask = '0;
+              second_mask[f] = 1'b1;
+            end
+          end
+        end
+        idx_ds[0] = oldest_mask;
+        idx_ds[1] = second_mask;
+      end
+      for (genvar p = NrIssue; p <= NrIssue; p++) begin : gen_ordered_tail
+        assign idx_ds[p] = rotate_left(idx_ds_q, fifo_idx_t'(p % NrFifo));
+      end
+    end else begin : gen_rotate_ds
+      for (genvar p = 0; p <= NrIssue; p++) begin : gen_rotate_ds_inner
+        assign idx_ds[p] = rotate_left(idx_ds_q, fifo_idx_t'(p % NrFifo));
+      end
+    end
+  endgenerate
 
   // port 0 presents whenever its FIFO slot holds data; a later port additionally
   // requires that no earlier port of the group carries a control-flow instruction
-  assign fetch_entry_valid_o[0] = ~|(instr_queue_empty & idx_ds[0]);
+  // Guard against an all-zero drain pointer: it would present a bogus pc=0 entry
+  // from the initial FIFO state and lock the pointer at zero via fire_prefix.
+  assign fetch_entry_valid_o[0] = (|idx_ds_q) & (|idx_ds[0]) & ~|(instr_queue_empty & idx_ds[0]);
   for (genvar p = 1; p < NrIssue; p++) begin : gen_fetch_entry_valid
     logic blocked;
     always_comb begin
       blocked = 1'b0;
       for (int unsigned e = 0; e < p; e++) if (fetch_entry_blocks_ss[e]) blocked = 1'b1;
     end
-    assign fetch_entry_valid_o[p] = ~|(instr_queue_empty & idx_ds[p])
+    assign fetch_entry_valid_o[p] = (|idx_ds[p]) & ~|(instr_queue_empty & idx_ds[p])
                                     & ~blocked & fetch_entry_valid_o[0];
   end
 
@@ -341,12 +385,25 @@ module instr_queue
   assign pop_address = |(fetch_entry_is_cf & fire_prefix);
 
   always_comb begin : gen_rotate_head
-    idx_ds_d = idx_ds_q;
+    // Recover from an all-zero drain pointer (initial / reset race). An
+    // all-zero pointer makes fetch_entry_valid_o spuriously 1 with the
+    // initial FIFO data and leaks a bogus pc=0 into the ID stage.
+    idx_ds_d = (|idx_ds_q) ? idx_ds_q : {{NrFifo - 1{1'b0}}, 1'b1};
     for (int unsigned p = 0; p < NrIssue; p++) begin
-      if (fire_prefix[p]) idx_ds_d = idx_ds[p+1];
+      // do not advance from an all-zero pointer or into an all-zero selection;
+      // that would re-select an empty FIFO and lock the pointer at zero.
+      if (fire_prefix[p] && |idx_ds_q && |idx_ds[p+1]) idx_ds_d = idx_ds[p+1];
       else break;
     end
   end
+
+//pragma translate_off
+  always @(negedge clk_i) begin
+    if ($time() < 100)
+      $display("[iq-dbg] t=%0t rst_ni=%b idx_ds_q=%b idx_ds_d=%b empty=%b valid=%b push=%b fev0=%b",
+               $time, rst_ni, idx_ds_q, idx_ds_d, instr_queue_empty, valid, push_instr_fifo, fetch_entry_valid_o[0]);
+  end
+//pragma translate_on
 
   // ----------------------
   // FIFOs

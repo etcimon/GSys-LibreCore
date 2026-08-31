@@ -184,6 +184,7 @@ Each iteration is a **closed loop** over **one residual class**:
 | `b3-sim-harness.md` | B3 SUCCESS / suite / peel knobs (P0+P3) |
 | [`../testharness-proxy.md`](../testharness-proxy.md) | **Harness of record:** proxy-only Spike/soak/peel/TRACE/I4dp |
 | [`../linux-boot-scale.md`](../linux-boot-scale.md) | OpenSBI O0–O8 × fetch_B four combos × named envelopes (N/T/I/RVV/stream) |
+| [`../AGENTS-smt2-opensbi-dev-logics.md`](../AGENTS-smt2-opensbi-dev-logics.md) | **Planning aid:** the inference procedure (OpenSBI `file:line` → obligation → invariant → combo), blame router, `NEGATIVE.md` as a pruner predicate, verdict semantics. Not a gate. |
 | `monorepo-soak-integration.md` | monorepo-soak × cont.## apply/skip + RTL sync set |
 
 Upstream narrative: `../smt2-bringup.md` (cont.33–51).  

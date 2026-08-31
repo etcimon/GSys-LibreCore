@@ -76,6 +76,8 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 | `ai-matrix/frameworks-virt-pcie.md` | Host multi-phase: soft virt-ai-pcie → SV HARD → optional `--from-timing`. |
 | `ara-vector-attach.md` | U10ᵇ Ara/RVV flist + `server_math_v` package contract |
 | `firmware-boot-principles.md` | Handoff then fetch-as-A: I1–I28, peels/P1–P4 for capabilities |
+| `multi-threading/AGENTS-SMT2-opensbi-reasoning-pattern-workflow.md` | **Foundation (philosophy):** the reasoning layer under the two below — propositions P1–P7, thought patterns T1–T10 in sentence pseudo-code, the six speculation-visibility channels, the feedback-latency ladder L0–L7, worked `core/` and `corev_apu/` transcripts. |
+| `AGENTS-g6lc-opensbi-dev-heuristics.md` | **Methodology (not law):** seven weighted heuristics — archetype lift, contract-before-change (bounded formal over `g6lc_fetch_pkg`), oracle validity, determinism-first, blame locality, red-line executability, escape-hatch budget. Generalizes `multi-threading/AGENTS-smt2-opensbi-dev-logics.md`; aims at removing the need for peel/soak/hold. |
 | `core-fetch/` | Fetch spec; frozen A is `core/frontend`; workspace B is `core/fetch_B` |
 | `multi-threading/smt2-bringup.md` | U6.1 SMT2 bring-up — dual-thread Linux/OpenSBI checklist; live gap is fetch_B/IQ leftover, not banked state |
 | `multi-threading/testharness-proxy.md` | **Harness of record** for SMT Spike/soak/peel/TRACE/I4dp (proxy-only; classify from log) |

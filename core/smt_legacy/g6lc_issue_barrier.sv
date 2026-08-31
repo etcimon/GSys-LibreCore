@@ -577,16 +577,65 @@ module g6lc_issue_barrier
     end
   end
 
+  // I13b: B same-cycle sp write -> sp use / control flow. The generic IRO
+  // RAW loop cannot observe a producer that the fetch queue has placed in a
+  // later issue port, and it also misses the implicit dependency of a return
+  // (c.jr/c.jalr) on the function's own addi sp restore. Stall a port if it
+  // is a non-ALU x2 consumer or a control-flow instruction and any other port
+  // in the same group holds an older same-hart addi sp (rd==2). ALU consumers
+  // keep the existing ALU-ALU bypass; the registered unresolved_sp_q covers
+  // already-issued sp writes.
+  function automatic logic is_addi_sp(input scoreboard_entry_t sbe);
+    is_addi_sp = (sbe.fu == ariane_pkg::ALU) &&
+                 (sbe.rd[4:0] == 5'd2) &&
+                 !(CVA6Cfg.FpPresent && ariane_pkg::is_rd_fpr(sbe.op)) &&
+                 (sbe.rs1[4:0] == 5'd2);
+  endfunction
+
+  logic [CVA6Cfg.NrIssuePorts-1:0] stall_sp_older;
+  always_comb begin
+    stall_sp_older = '0;
+    if (CVA6Cfg.SuperscalarEn) begin
+      for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
+        // Only consumers and control-flow are held back; the addi sp itself
+        // is the producer and must be allowed to issue.
+        logic is_sp_consumer, is_cf;
+        is_cf = issue_instr_sb_i[p].fu == ariane_pkg::CTRL_FLOW;
+        is_sp_consumer = (issue_instr_sb_i[p].fu != ariane_pkg::ALU) &&
+                         ((issue_instr_sb_i[p].rs1[4:0] == 5'd2) ||
+                          (issue_instr_sb_i[p].rs2[4:0] == 5'd2));
+        if (issue_valid_sb_i[p] && (is_sp_consumer || is_cf)) begin
+          for (int unsigned o = 0; o < CVA6Cfg.NrIssuePorts; o++) begin
+            if (o != p &&
+                issue_valid_sb_i[o] &&
+                issue_instr_sb_i[o].hart_id == issue_instr_sb_i[p].hart_id &&
+                is_addi_sp(issue_instr_sb_i[o]) &&
+                issue_instr_sb_i[o].pc < issue_instr_sb_i[p].pc) begin
+              stall_sp_older[p] = 1'b1;
+            end
+          end
+        end
+      end
+    end
+  end
+
   for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_gate
     // I13: B keeps CF/CSR barriers + same-cycle CSR stall.
     // Opcode/rd-specific stalls (sp, store-ra, a0-Branch, leftover jal,
     // keep_prefix) stay A-only (LEDGER deleted forms).
 `ifdef G6LC_FETCH_B
+    // I13a: B also stalls while a same-hart sp-write (c.addi16sp / addi sp)
+    // is outstanding. Without this, c.sdsp/c.ldsp/c.jr issue while sp has not
+    // yet committed and the prologue/epilogue stack frame is saved at the
+    // caller's sp or the function returns before the sp is restored.
     assign issue_valid_o[p] =
         issue_valid_sb_i[p]
         && !unresolved_cf_q[issue_instr_sb_i[p].hart_id]
         && !unresolved_csr_q[issue_instr_sb_i[p].hart_id]
-        && !stall_csr_older[p];
+        && !stall_csr_older[p]
+        && !stall_sp_older[p]
+        && !(CVA6Cfg.SuperscalarEn &&
+             unresolved_sp_q[issue_instr_sb_i[p].hart_id]);
 `else
     assign issue_valid_o[p] =
         issue_valid_sb_i[p]

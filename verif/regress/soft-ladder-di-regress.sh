@@ -196,7 +196,10 @@ veri_tohost_pass() {
   "$harness" +max-cycles="$MAX_CYCLES" +time_out="$MAX_CYCLES" +debug_disable \
     +tohost_addr="0x${th}" "$elf" >"$vlog" 2>&1
   set -e
-  if grep -q 'SUCCESS' "$vlog"; then
+  # DI convention: tohost=1 is pass, anything else (including tohost=0
+  # timeout or tohost=3 fail) is fail. "SUCCESS" in the log means the
+  # harness reached max-cycles with tohost=0, which is a timeout, not a pass.
+  if grep -qE 'tohost = (0x)?1[^0-9a-fA-F]' "$vlog"; then
     return 0
   fi
   return 1

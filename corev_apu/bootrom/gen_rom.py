@@ -113,17 +113,23 @@ def generate_sv(filename, rom):
     """ Generate SystemVerilog bootcode for FPGA and ASIC """
     with open(filename + ".sv", "w") as f:
         rom_str = ""
-        rom = bytes(reversed(rom))
-        # process in junks of 64 bit (8 byte)
-        for i in range(int(len(rom)/8)):
-            rom_str += "        64'h" + rom[i*8:i*8+4].hex() + "_" + rom[i*8+4:i*8+8].hex() + ",\n"
+        # SystemVerilog packed-array literals fill highest index first, so the
+        # literal list must be the binary words in reverse address order.  Within
+        # each 64-bit word the low 32 bits are the first 4 little-endian bytes.
+        num_words = int(len(rom)/8)
+        for i in range(num_words - 1, -1, -1):
+            low = rom[i*8:i*8+4]
+            high = rom[i*8+4:i*8+8]
+            low_hex = bytes(reversed(low)).hex()
+            high_hex = bytes(reversed(high)).hex()
+            rom_str += "        64'h" + high_hex + "_" + low_hex + ",\n"
 
         # remove the trailing comma
         rom_str = rom_str[:-2]
 
         f.write(LICENSE_TEMPLATE)
         s = Template(MODULE_TEMPLATE)
-        f.write(s.substitute(filename=filename, size=int(len(rom)/8), content=rom_str))
+        f.write(s.substitute(filename=filename, size=num_words, content=rom_str))
 
 def main():
     filename = parse()

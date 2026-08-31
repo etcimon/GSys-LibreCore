@@ -362,8 +362,9 @@ stage_paths() {
     architecture/multi-threading/soft-ladder/README.md
     architecture/multi-threading/soft-ladder/ITERATION.md
     core/include/g6lc64_smt2_config_pkg.sv
-    core/smt/g6lc_smt_regfile.sv
-    core/smt/g6lc_smt_csr_bank.sv
+    core/smt_legacy/g6lc_smt_regfile.sv
+    core/smt_legacy/g6lc_smt_csr_bank.sv
+    core/smt_legacy/g6lc_issue_barrier.sv
     core/scoreboard.sv
     core/issue_stage.sv
     corev_apu/bootrom/ariane-smt2.dts
@@ -379,11 +380,11 @@ stage_paths() {
   done
   grep -q "NrHarts: *unsigned'(2)" core/include/g6lc64_smt2_config_pkg.sv \
     && ok "NrHarts=2 in g6lc64_smt2" || bad "NrHarts!=2"
-  grep -q "unresolved_sp_q" core/issue_stage.sv \
+  grep -q "unresolved_sp_q" core/smt_legacy/g6lc_issue_barrier.sv \
     && ok "iter-012 sp barrier present" || bad "missing unresolved_sp_q"
   grep -q "SuperscalarEn" core/scoreboard.sv \
     && ok "iter-012 LOAD cancel under SS present" || bad "missing SS LOAD cancel"
-  if grep -q "ai_aicfg_o" core/smt/g6lc_smt_csr_bank.sv; then
+  if grep -q "ai_aicfg_o" core/smt_legacy/g6lc_smt_csr_bank.sv; then
     ok "SMT CSR AI sideband ports"
   else
     bad "g6lc_smt_csr_bank missing AI ports"

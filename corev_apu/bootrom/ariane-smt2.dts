@@ -139,17 +139,28 @@
     compatible = "simple-bus";
     ranges;
 
-    // SMT2 product-closeout properties: expose unimplemented product features
-    // so OpenSBI/Linux can compensate intrinsically. Removed when all items
-    // in architecture/multi-threading/smt2-product-closeout.md are retired.
-    smt-product-closeout {
+    // SMT2 product-closeout checklist — DOCUMENTATION ONLY.
+    // No firmware reads this node. The cpu@ nodes above are the sole
+    // guest-visible contract, and they already omit everything still open here;
+    // dts_to_dtb.py proves that at DTB build time and fails the build if a
+    // cpu@ ever advertises a token listed absent below. Do not reintroduce a
+    // runtime FDT rewriter: the previous OpenSBI fork called sbi_malloc() from
+    // fw_platform_init(), which runs before sbi_heap_init(), and faulted on
+    // NULL+0x18. Retired item-by-item per
+    // architecture/multi-threading/smt2-product-closeout.md.
+    smt-product-closeout@0 {
       compatible = "smt,product-closeout";
+      reg = <0x0 0x0 0x0 0x0>;
       smt,boot-crutches = <0x3>;          /* SMT_COLD_EXCL | SMT_FIRST_ACT_EXCL */
       smt,dual-commit = <0>;              /* two harts cannot commit CSRs same cycle */
       smt,banked-bht = <0>;               /* BHT/BTB shared across harts */
       smt,fp-register-banking = <0>;      /* F/D/V context not per-hart banked */
       smt,idle-clock-gate = <0>;          /* no per-hart clock gating yet */
-      smt,zawrs = <0>;                    /* Zawrs/wait-for-peer not implemented */
+      /* WRS.NTO/WRS.STO do decode (decoder.sv, ZawrsEn=1) and retire as WFI,
+       * which Zawrs permits. What is absent is the SMT wait-for-peer wake, so
+       * zawrs is not advertised to Linux and SBI must not use
+       * sbi_send_ipi_and_wait. */
+      smt,zawrs = <0>;                    /* no wait-for-peer wake */
       smt,default-sku = "experimental";   /* SMT2 not yet a production default SKU */
     };
 

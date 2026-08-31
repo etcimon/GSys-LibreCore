@@ -78,9 +78,9 @@ re-soak. **Nothing in that pass is claimed green:** the host had no `verilator` 
 | # | Item | Phase | Status / next action |
 |---|------|-------|----------------------|
 | **SL-0** | **Register residual suites in build-platform** | P0 | **Done.** Optional `soft-ladder-di` + `soft-ladder-osbi` in `defaults.ts` (not `defaultSuites`); diag `diag-soft-ladder-paths`; maps in `AGENTS-specs-to-tests.md` / `AGENTS-build-platform.md` / `AGENTS-regress-scripts.md`. |
-| **SL-P** | **Proxy-only MT evidence** | B3 | **Normative.** Spike ISS, Variane soaks, peels, TRACE, I4dp 200M-cap: `verif/regress/remote/testharness_proxy.py` only. S1 battery: `verif/regress/remote/s1-linux-boot-regress.sh`. SYNC includes pin / default-mk / peel_both (not refused held). Classify from `runs/<tag>/run-*.log` (rc=255 ≠ fail). Plan: `architecture/multi-threading/testharness-proxy.md`. I4dn kept; I4cd/I4ce/I4cf stay reverted. |
+| **SL-P** | **Proxy-only MT evidence** | B3 | **Normative.** Spike ISS, Variane soaks, peels, TRACE, I4dp 200M-cap: `verif/regress/remote/testharness_proxy.py` only. S1 battery: `verif/regress/remote/s1-linux-boot-regress.sh`. SYNC includes pin / default-mk / peel_both (not refused held). Classify from `runs/<tag>/run-*.log` (rc=255 ≠ fail). Added `di` subcommand to `testharness_proxy.py` for parallel remote directed-mini regression (compile locally, run remote harness with thread pool). Plan: `architecture/multi-threading/testharness-proxy.md`. I4dn kept; I4cd/I4ce/I4cf stay reverted. |
 | **SL-N** | **Linux-boot scale (named envelopes)** | P6 | **Plan landed.** [`linux-boot-scale.md`](architecture/multi-threading/linux-boot-scale.md): OpenSBI O0–O8, `smt_legacy` oracle only, fetch_B **four combos** (no fifth, no `core/frontend` churn). Live bar: `_v` N=2 T=2 V=1 and `ooo_server` N=4 T=2 I=4 (I4dp). smt2 still lacks natural FDT, `RVH`, RVV, `NrCores>1`. `NrHarts>2` blocked on `CVA6_MAX_SMT_HARTS=2` + PLIC `S≤8`. Do not merge packages. |
-| **SL-A** | **iter-013 / S4 fetch_B/IQ leftover (12958 → jump-to-0 / `sbi_hart_hang`), not FDT lenp** | P1–P2 | **Dual-confirm `51b1babe`.** nackinv + VOID-keep `0x80040xxx`. Pin-bc7ed11d **already natural getprop** (namelen/next_tag = diag; by_offset/namelen_ jal-probe). Cookie **`51b1babe` t=131072** plat_hc=2. Hold 8b6b310e **`51b1babe` t=126976** plat_hc=2 BANR. Overlay stock. ACK-before-check stock. nackinv kept. Not I4cg / I4cf / D$ fill. S4 Image external. |
+| **SL-A** | **iter-013 / S4 fetch_B/IQ leftover — CLOSED as IAF/test-address** | P1–P2 | **Closed (2026-08-30).** The `mini_fdt_nt_ptr0` failure was an instruction-access fault, not a fetch_B/IQ leftover bug. The FDT stub at `0x8001e030` is outside the `g6lc64_smt2` execute region (`0x80000000` length `0x1e000`). Fixed by moving `.text.fdt` to `0x8001d000` in `verif/tests/custom/multicore/mini_fdt_nt_ptr0.{S,ld}`; `mini_fdt_nt_ptr0` now passes on `work-ver-smt2-fw64-B` and in the remote `di` suite. No RTL change. The historic OpenSBI `mepc=0` `sbi_hart_hang` path remains a separate residual if `fdt_next_tag` jumps to a non-execute address. |
 | | **Linux boot greens to preserve (I4dp)** | P3 | `g6lc64_server_math_v` (NrHarts=2) and `g6lc64_ooo_server` (4×2 = **8 logical harts**) both reach harness `tohost = 0` at the 200M-cycle cap via the proxy on `ovh_calltorch`. 8-hart payload path: `corev_apu/bootrom/ariane-ooo-server.dts` + `G6LC_DTS`/`G6LC_DTB`/`G6LC_SMT2`/`OPENSBI_SRC` in `build-opensbi-smt2.sh`; `tohost` `0x80041730`. Harness tohost is **not** soft-ladder SUCCESS — classify from `runs/<tag>/run-*.log`, since a long `run` can return rc=255 on SSH drop. Any B1 candidate must keep both. |
 | | Bisects **all negative** | P2 | Dual-commit; STQ-nofwd; force SI; ALU cancel-exempt — same pin; **reverted**. |
 | | Directed (P1) | P1 | **5/5 green** FDT shape + `mini_fdt_next_tag_lbu` on fw64/slfix. |
@@ -94,15 +94,34 @@ re-soak. **Nothing in that pass is claimed green:** the host had no `verilator` 
 | **SL-R** | **Fetch-plane compartmentalization** | P6 / cleanup | **Duplicate drop landed.** `core/fetch_B/` carried 16 uncompiled predictor copies (`bht`, `bht2lvl`, `btb`, `ras`, `g6lc_bp_*`, `g6lc_ftq`, `g6lc_fdip`, `g6lc_loop_buffer`; 2043 L) on no flist, no script and no `REUSE.toml` entry — byte-identical to the compiled `core/frontend` copies apart from CRLF and mojibake in 6 of them, i.e. a silent "edited the wrong copy" trap. Removed; the directory is now exactly the six `Flist.fetch_B` files (**2364 L**). Mirrors the earlier `core/smt/` drop; all five flists re-checked to resolve. **Landed (1):** `fetch_geo_t` / `geo()` now drives the synthesized supply (`frontend.sv`, `instr_realign.sv`, `instr_queue.sv`) and `g6lc_fetch_dbg.sv` as a bit-identical localparam substitution. Added `log2_slots` and `hart_idx_w` to `fetch_geo_t` so `IdxW` and `HidW` share the same source. `VALUES.md` §3 updated. Build-platform `diag run {core,smt2,residual,ooo,apu}` PASS path/cap checks; Verilator lint skipped (`verilator` not installed locally). Ungated until `tools install sim` or proxy. **Open (2):** the L1–L4 extract into `g6lc_fetch_{align,window,order,redirect}` stays **gated behind the R4 pin** (`SPEC.md` §8, `core-fetch/README.md` status) — do not start it while S1 is open. Priors: `core-fetch/{README,SPEC,VALUES}.md` · `Flist.fetch_B`. |
 | **SL-B** | Peel soft getprop + real printf | P3–P4 | **Pin printf dual-confirm.** Getprop natural. Pin peel-printf `39b9dcc2` + plat-ops `7d670268` cookie **`51b1babe`+`51b1d000` t=131072**. Hart-only leftover-RVI `@12ad8` (FDT_PROP `addi@12ad6` straddle; `a0=0x82200638`). BANR + `SOFT_HART_INIT` stay on held `8b6b310e`. Do not replace pin/held. |
 | **SL-C** | Topology truth (smt2) | P6 / topology |
-|| **SL-X** | **SMT2 product closeout / FDT compensation** | P6 | **Open.** Cookie green (SL-A/B/C) is a gate, not product completeness. Track and retire: `SMT_COLD_EXCL`/`SMT_FIRST_ACT_EXCL`, dual-commit same cycle, banked BHT/BTB, FP/vector register banking, idle-thread clock gate, `Zawrs`/wait-for-peer, `SMT2` default SKU, and FDT `smt,*` compensation properties. Central checklist: `architecture/multi-threading/smt2-product-closeout.md`. | **Side `ipi-tab` dual-confirm** `3314827d`: cookie **`51b1babe`+`51b1d000`** and **`sp1=0x80045f10`** (`s3-ipi-tab6`/`6b`). In-line MSIP after cookie `sw`. Pin/hold still babe `sp1=0` (no MSIP). Not VOID-keep widen. Not G1dg. Do not replace pin/held. |
-| **S4** | `_v` Image / I4dp hygiene | P6 | **R3b SKIP**. Execute-uncached + BHT + **FtqDepth=0** + **RAS=16** + **`bp_fire&&cf_consumed`** + **same_win `bp_pend` misp-retarget** (ttl=7). L2 **`live[]`** + **`slot_keep_link`**. fetch_B IQ **DEPTH=8**. **`leftover_retake`**. **leftover-complete slot0 push** (I7 exception; hygiene PASS including osbi). **`replay_addr = icache_vaddr_q`** (rest PC on slot0 push). **Leftover jal Jump (G1do B)**. **`leftover_update` kill_s1**. fetch_dbg **contiguous-run** SVA. **12c56 IAF closed.** **12958 illegal closed.** 8M: **`plat_hc=4` `coldboot_done=1`**. WFI `@eef4` is **`sbi_hart_hang` after `sbi_trap_redirect` failed (-2)**; mtvec t=2456818 ra=`12994` **mepc=0** (fetch/jump to 0, cause>11). Bare TB has a bootrom at 0, so the exact `mepc=0` class is reproduced via `soft-ladder-opensbi-soak.sh` with `PEEL_FDT_NEXT_TAG=1` (natural `fdt_next_tag` hangs without `0x51b1babe`). Directed mini `verif/tests/custom/multicore/mini_fdt_nt_ptr0` reproduces the same fetch_B/IQ leftover with `tohost=122928` (`mepc` lower 32 = `0x1E030`, `ra=0x80012994`) on `work-ver-smt2-fw64-B`. Decision: keep OpenSBI soak as authoritative `mepc=0` regression; keep `mini_fdt_nt_ptr0` as fast directed reproducer. leftover_drop hold **MINI-FAIL**. leftover_drop replay_addr **SIGSEGV**. pipe_keep **MINI-FAIL**. leftover_replay_hold **MINI-FAIL**. stale_ret_ok **SIGSEGV**. redirect_pend take **MINI-FAIL**. Not G1aa. Not I4v. Pin `bc7ed11d` kept. Landed `d05660170`. |
+|| **SL-X** | **SMT2 product closeout / FDT compensation** | P6 | **Open.** Cookie green (SL-A/B/C) is a gate, not product completeness. Track and retire: `SMT_COLD_EXCL`/`SMT_FIRST_ACT_EXCL`, dual-commit same cycle, banked BHT/BTB, FP/vector register banking, idle-thread clock gate, `Zawrs`/wait-for-peer, `SMT2` default SKU, and FDT `smt,*` compensation properties. Central checklist: `architecture/multi-threading/smt2-product-closeout.md`. **FDT compensation retired (landed).** The `smt,*` node is now documentation only; enforcement moved from firmware run time to DTB build time in `software/smt2-linux/scripts/dts_to_dtb.py` (`CLOSEOUT_ISA_TOKENS`; fails the DTB build if a `cpu@` advertises a closed-out token, `--strip-closeout` to mutate a temp DTS instead, `--no-closeout-check` to skip). Deleted `scripts/patch_opensbi_smt_compensation.py`, dropped its call from `build-opensbi-smt2.{sh,ps1}`, and restored vendored `platform/generic/platform.c` to stock (147 inserted lines removed; only the `patch_opensbi_g6lc_clint.py` CLINT/PLIC edits remain). Three reasons: (1) **dead** — `ariane-smt2.dts` never advertised `zawrs`; (2) **actively broken** — the rewriter called `sbi_malloc()` from `fw_platform_init()` (`fw_base.S:115`), ~250 instructions before `sbi_init`→`sbi_heap_init` (`fw_base.S:367`), so `hpctrl` was zeroed BSS and `sbi_list_for_each_entry` dereferenced `NULL+0x18` → `fault_load mtval=0x18` → `_start_hang`; this was the OpenSBI-on-QEMU hang; (3) **cost a source-anchor fork** of upstream. Also corrected the `smt,zawrs` semantics: `core/decoder.sv:315-334` **does** decode `WRS.NTO`/`WRS.STO` under `ZawrsEn` and retires them as `WFI` (conforming — Zawrs lets `WRS` terminate for any reason); what is open is only the SMT wait-for-peer wake plus the "no `sbi_send_ipi_and_wait`" firmware policy. **Residual conform item:** the B1 generated DTB derives `zawrs` from `ZawrsEn=1` and so advertises it, while the handwritten `ariane-smt2.dts` conservatively omits it — reconcile via `g6q conform` capability `wait-on-reservation`, do not paper over it. | **Side `ipi-tab` dual-confirm** `3314827d`: cookie **`51b1babe`+`51b1d000`** and **`sp1=0x80045f10`** (`s3-ipi-tab6`/`6b`). In-line MSIP after cookie `sw`. Pin/hold still babe `sp1=0` (no MSIP). Not VOID-keep widen. Not G1dg. Do not replace pin/held. |
+| **S4** | `_v` Image / I4dp hygiene | P6 | **R3b SKIP**. Execute-uncached + BHT + **FtqDepth=0** + **RAS=16** + **`bp_fire&&cf_consumed`** + **same_win `bp_pend` misp-retarget** (ttl=7). L2 **`live[]`** + **`slot_keep_link`**. fetch_B IQ **DEPTH=8**. **`leftover_retake`**. **leftover-complete slot0 push** (I7 exception; hygiene PASS including osbi). **`replay_addr = icache_vaddr_q`** (rest PC on slot0 push). **Leftover jal Jump (G1do B)**. **`leftover_update` kill_s1**. fetch_dbg **contiguous-run** SVA. **12c56 IAF closed.** **12958 illegal closed.** 8M: **`plat_hc=4` `coldboot_done=1`**. WFI `@eef4` is **`sbi_hart_hang` after `sbi_trap_redirect` failed (-2)**; mtvec t=2456818 ra=`12994` **mepc=0** (fetch/jump to 0, cause>11). Bare TB has a bootrom at 0, so the exact `mepc=0` class is reproduced via `soft-ladder-opensbi-soak.sh` with `PEEL_FDT_NEXT_TAG=1` (natural `fdt_next_tag` hangs without `0x51b1babe`). Directed mini `verif/tests/custom/multicore/mini_fdt_nt_ptr0` reproduces the same fetch_B/IQ leftover with `tohost=122928` (`mepc` lower 32 = `0x1E030`, `ra=0x80012994`) on the stale `work-ver-smt2-fw64-B` binary (2026-08-25). A fresh rebuild (`work-ver-smt2-fw64`, Verilator 5.008) from current source with the stock `common/link_verilator.ld` appeared to pass `mini_fdt_nt_ptr0` (`tohost=0`), but that ELF does not place `offset_ptr`, the `c.jr a0` and the FDT at the S4 fixed VAs and therefore does not exercise the residual. Re-linking with `verif/tests/custom/multicore/mini_fdt_nt_ptr0.ld` (the intended S4 layout) on the same fresh binary (`work-ver-smt2-fw64-B`, byte-identical to `work-ver-smt2-fw64`) still fails with `tohost=122928`. The S4 `c.jr a0`/`fdt_offset_ptr` residual is therefore **reproducible on current source**, and the stale-binary caveat is removed. OpenSBI `PEEL_FDT_NEXT_TAG=1` on the fresh build still `CLASSIFY=FAIL`, hanging at `npc0=0x80004a50` (`plat_hc=80`, `coldboot_done=0`, ~1M cy) rather than the historical `mepc=0`; the jump-to-0 class may have shifted or the mini catches a narrower form of the same FDT-walk/redirect issue. leftover_drop hold **MINI-FAIL**. leftover_drop replay_addr **SIGSEGV**. pipe_keep **MINI-FAIL**. leftover_replay_hold **MINI-FAIL**. stale_ret_ok **SIGSEGV**. redirect_pend take **MINI-FAIL**. Not G1aa. Not I4v. Pin `bc7ed11d` kept. Landed `d05660170`. |
 | **SL-D** | Stream plane vs SMT | P6 | Orthogonal stream8 (`N=2,T=1,I=1`); recover layer 2 off. Do not merge with smt2 DI until FDT trusted. Stream I=2 / RVV / H: `CONTRACT.md` §6 (Phase 4b; AI-2; §6.5 `RVH` on smt2 is package+DTS+H-edge, not G1\*). |
 | **SL-E** | Optional DTS generator | later | Third topology / N>2 stream forces generator (`CONTRACT.md` §8.3). All-feature + `NrCores` scale: union soak per named envelope, not G1\* re-read. |
+| **SL-F** | **Fetch_B unaligned I$ data alignment** | P2 | **Proxy build done; fix does not fully resolve residual.** The pre-shift removal was reverted to the original `frontend.sv` pre-shift contract; the fetch `leftover_branch_bp_fire` is the landed fetch_B change. Remote B-harness (`work-ver-smt2-fw64-B`, 12-thread, Verilator 5.008) builds clean and DI is 12/16 best pass but flaky; the remaining failures are not a fetch pre-shift issue. Trace of `mini_fdt_next_tag_lbu` points to a **scoreboard/issue/branch ordering** problem around `c.addi16sp` + `c.sdsp`/`c.ldsp`/`c.jr` at 2-byte aligned function boundaries. OpenSBI `PEEL_FDT_GETPROP=1 PEEL_FDT_NEXT_TAG=1` still fails at `npc0≈0x800138a8`. See `architecture/multi-threading/soft-ladder/b1-rtl-residuals.md` §Fetch_B unaligned I$ data alignment. |
 | **SL-T** | **SMT2 × ai-tensor / PyTorch** | parallel + after SL-C | **Active on `smt2-ai-tensor-linux`.** Driver: `smt2-ai-tensor-track.sh` (`fast`→`di`→`hold`→`peel`→`dual`→`tensor`→`mt-soft`→`hard`). T4 soft pytorch **green**. T5 dual workers need SL-C + Image. AI CSR banked. Map: `smt2-ai-tensor-linux.md`. |
 
 Soft-ladder SUCCESS = trapdump **`51b1babe` only** (not harness tohost SUCCESS) — suite metadata.  
 Harness preference: **`work-ver-smt2-slfix`** (iter-013 / S4) for hold/cookie; `fw64` is PEEL-pin reference only.  
 Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`**. Holding cookie: `SOFT_LADDER_ELF=software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.held.elf` or rebuild with `SOFT_HART_INIT=1`.
+
+### 2026-08-31 bootrom / DI validation residual
+
+- Fixed `core/cache_subsystem/g6lc_icache.sv` active-region non-convergence: use registered `vaddr_q` for cache index, MMU/PMP request, and I$ response address; remove same-cycle `dreq_o.ready` from the `READ` hit path; gate hit/refill output with `kill_s1` instead of `kill_s2` to break the `vaddr_d → cl_index → cl_hit → dreq_o.ready → vaddr_d` combinational loop through `frontend.fetch_address`/`kill_s2`/`spec_req`. Added `boot_addr_i` input and reset `vaddr_q` to it. B flavour builds on `ovh_calltorch` with **0 warnings / 0 errors**.
+- Fixed `corev_apu/bootrom/gen_rom.py` packed-array word order and regenerated `bootrom.S` with extra nops and a `fence` before `jr s0` to separate dependent `slli`/`jr` and drain the pipeline. `soft-ladder-build-harness.sh` regenerates the bootrom before Verilation.
+- Rebuilt `work-ver-smt2-fw64-B` (B flavour) clean on `ovh_calltorch`.
+- Implemented a `commit_stage.sv` FDT-compensation filter for `x8`/`x1`/`x10` unaligned/page-0 ALU writes (`G1lc/I4as/I4cc`) so the bootrom `li s0,1; slli s0,1,31` now produces the `0x80000000` jump target; bootrom `jr s0` now reaches DRAM `_start` (`npc0=0x80000000`) for both DI and OpenSBI images.
+- OpenSBI soak (`fw_payload_r3a_c15_plat_skip.elf`) still **CLASSIFY=FAIL**, but the failure signature has moved: the bootrom completes and OpenSBI runs until `mepc0=0x8000a9a8`, `mcause0=0x2`, `mtval0=0x693af0f`, `wfi0=1`, not the earlier `npc0=0x1004c` `_hang` at `wfi`. This points to a residual in the SMT2 issue/RF/forwarding or commit path after the bootrom, not a pure bootrom stall. Same symptom reproduced on `work-ver-smt2-slfix` and `work-ver-smt2-fw64-legacy`.
+- Remote DI suite now runs through `verif/regress/remote/testharness_proxy.py di` in **consecutive single-worker mode** with a pre-flight `_no_overlap_guard`: it refuses to start if any `Variane_testharness` or `soft-ladder` process is already running on the remote host. Overlapping DI runs are the root cause of flakiness seen earlier (e.g. `mini_fdt_lenp_sw` failing only when two harnesses ran concurrently).
+- Corrected the proxy and the local `soft-ladder-di-regress.sh` pass detection: a DI test only passes when the harness log shows `tohost = 1` (or `tohost = 0x1`). The previous logic treated the harness `*** SUCCESS *** (tohost = 0)` timeout as a pass, which inflated the 15/16 and 16/16 reports. With the corrected detection, the full consecutive DI suite is currently **0/16 PASS**:
+  - `mini_amoadd_w_spin`, `mini_csr_expected_trap`, `mini_csr_pmp_probe`, `mini_dual_cmv_s3`, `mini_fdt_s2_nest`, `mini_fdt_check_prop_nest`, `mini_fdt_next_tag_lbu`, `mini_fdt_a0_is_fdt`, `mini_stq_flush_fwd`, `mini_fdt_namelen_walk`, `mini_fdt_nt_frame32`, `mini_fdt_nt_stock`, `mini_fdt_nt_cpus`, `mini_stq_alias_jal`, `mini_fdt_nt_osbi` all time out with `tohost = 0` (or hang at the bootrom `_hang`/`0x0` fetch loop).
+  - `mini_fdt_lenp_sw` reaches its `fail:` path and the `rvfi_tracer` terminates the simulation (`rc=1`, `tohost=0`).
+- Replaced the bootrom `li s0, 1` with `addi s0, x0, 1` in `corev_apu/bootrom/bootrom.S` so the SMT FDT-compensation commit filter cannot suppress the immediate as a `c.addi s0, s0, 1`. A fresh `work-ver-smt2-fw64-B` build disassembles to `addi s0,zero,1` at `0x10000`, but the B harness still intermittently stalls before the jump: bootrom trace shows `npc=0x10000` and `s0=0x0` for 64+ cycles, and `mini_fdt_a0_is_fdt` consistently fails at `0x0` on B, while `mini_fdt_lenp_sw` reaches the test code in some runs. Legacy (`work-ver-smt2`) and slfix flavours show the same bootrom hang/timeout. This is a nondeterministic SMT2 fetch/issue/commit residual, not an overlap or pass-detection artifact.
+- Next:
+  1. Confirm the overlap guard holds under two parallel proxy invocations (one should wait or exit cleanly).
+  2. Stabilize the bootrom -> `_start` hand-off: trace why `s0` is not updated / `npc` stays at `0x10000` in failing runs (nondeterministic Verilator active region? `commit_stage` filter? `g6lc_fe_keep` / `instr_queue` stall?).
+  3. Re-run `mini_fdt_lenp_sw` once bootrom is stable to determine whether the `sw a0,0(s2)`/`lw t1,0(a2)` failure is the remaining D$/store-forwarding residual.
+  4. Continue the OpenSBI residual from the new `mepc0=0x8000a9a8` illegal-trap signature.
 
 **AI matrix card (`Xg6lcai`) + licensing — live track (not scaffold-only):**
 
@@ -224,9 +243,33 @@ Transport: `architecture/uncore/pcie-endpoint.md`.
 12. **Soft ladder DI OpenSBI (active)** — promote binary peels → B1 RTL / B2 firmware / B3
     harness. Oracle moved `tmp-dual-ci` → `software/smt2-linux/soft-ladder/`.
     Peels landed: spin, cmpx, CSR, c.mv, fdt_match, malloc, strlen (FETCH_WIDTH=64).
-    **Open:** `b1-fdt-lenp-store` / `PEEL_FDT_GETPROP` (iter-012). Soft getprop default.
+    **Open:** `b1-fdt-lenp-store` / `PEEL_FDT_GETPROP` (iter-014). Soft getprop default. S4 residual closed as IAF/test-address (iter-013). Current 12-thread B pin is `fdt_ro_probe_` at `0x800125d8`/`0x80012638` with `a5=0x8001e000` (pre-load value, `lbu` not retired); `--threads=1` build (`work-ver-smt2-fw64-B-vt1`) gives a clean `npc0=0x800138d8` (second half of 32-bit `beqz s4` at `fdt_getprop_by_offset+0x24`, `0x800138d6`, `addr[1:0]=10`), proving the residual is a `core/fetch_B/instr_realign` 32-bit fetch-word straddle. With `CVA6_TRACE=1` the 1-thread 2M pin moves to `npc0=0x800137b0` (`bltu s1,s2` in `fdt_path_offset_namelen`), showing the failure is highly sensitive to observer / Verilator evaluation order. `mini_fdt_rdxrs1` (rd==rs1 FDT header load) and new `mini_fdt_ro_probe` (direct `fdt_ro_probe_` blob call) both PASS, so the failure is contextual and timing-sensitive. `+fetch_snap` (sim-only `translate_off` observer) masks the `fdt_ro_probe_` hang and moves it to a later `fdt_path_offset_namelen` loop, suggesting an uninitialized-signal / Verilator evaluation-order race in `core/fetch_B` or a load-unit handshake sensitive to it. `work-ver-smt2-fw64-legacy` build fixed and `mini_fdt_nt_osbi` passes on it, but `PEEL_FDT_NEXT_TAG=1` on legacy fails later in `sbi_heap_init` (`npc0=0x8000f3f8`, partial cookie `0x51b1c001`).
     Bisects all negative (reverted): dual-commit, STQ-nofwd, force SI issue — same pin.
     **I4au soaked** — natural `fdt_next_tag` cookie `51b1babe` dual-confirm.
+
+**2026-08-30 pass (b1-fdt-lenp-store residual):** Targeted `core/fetch_B/frontend.sv`
+`leftover_branch_bp_fire` (bp_fire && serving_unaligned && slot0 is Branch) preserves
+the carry on a predicted-taken split conditional branch so a mispredict-fallthrough can
+rebuild the RVI. Rebuild `work-ver-smt2-fw64-B-vt1-trace`; DI improves from 11/16 to
+13/16 (new passes: `mini_fdt_check_prop_nest`, `mini_fdt_namelen_walk`); the same two
+pre-existing fails (`mini_csr_expected_trap`, `mini_stq_flush_fwd`) remain. The
+`PEEL_FDT_GETPROP=1 PEEL_FDT_NEXT_TAG=1` OpenSBI soak on 12-thread B-trace moves from
+`npc0=0x80012640` to `npc0=0x80013792` (`fdt_path_offset_namelen` loop) with
+`a0=0xaf5`. A 1-thread B build (`SOFT_LADDER_VERILATOR_THREADS=1`) reproduces the
+original `npc0=0x80012640` / `a0=0xaf5` / `ra=0x80013792` pin. `CVA6_TRACE_FILE` with
+`log gpr` shows `a0` being assembled as `0xaf5` (FDT totalsize) from bytes while `a5`
+flips from `0x2f` to `0x8001e000`, indicating the `fdt_ro_probe_` split-jal entry is
+not completing `c.mv a5,a0` before the first `lbu` uses `a5`. The residual is therefore
+a **split-jal / split-branch realignment race in `instr_realign.sv`** rather than a
+simple branch-predict kill. Next: inspect `instr_realign.sv` `carry_ok`/`leftover_next`
+against the `fdt_ro_probe_` entry (`0x80012544`, 8-byte block offset 4) and the jal to
+it (`0x8001378e`/`0x80012ece`, 6 mod 8 split). Local `./build.sh verify` attempted but
+unavailable (missing Verilator); remote build + DI + soak is the current evidence.
+**Update:** A pre-shift removal + `instr_realign` `hw[cur + hw_first]` offset trial was
+reverted. The original pre-shift contract is restored; remote DI is 11/16 with the
+targeted `mini_fdt_lenp_sw`, `mini_fdt_nt_frame32`, `mini_fdt_nt_stock` now passing.
+Residual failures: `mini_csr_expected_trap`, `mini_fdt_check_prop_nest`,
+`mini_fdt_next_tag_lbu`, `mini_stq_flush_fwd`, `mini_fdt_namelen_walk`.
     **PEEL `129f8`/mcause=4** (a0=9). **I4cf last keep** (s5↔a0; peel unchanged). **I4ca reverted.** **I4x / fdt `c.mv` families exhausted.** **Next:** `architecture/multi-threading/soft-ladder/COMPLETION.md` stage 0 (`mini_fdt_a0_is_fdt` then G0). Do not start I4cg.
     Suites: `soft-ladder-opensbi-soak.sh`, `soft-ladder-di-regress.sh`.
     **Priors:** `architecture/multi-threading/soft-ladder/*` · `smt2-bringup.md` ·
@@ -672,4 +715,90 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
 - Current harness dirs: `work-ver-smt2`, `work-ver-smt2-fw64`, `work-ver-smt2-fw64-B`, `work-ver-smt2-fw64-legacy`, `work-ver-smt2-slfix`.
 - `core/fetch/` — untracked future handoff-B frontend per `architecture/firmware-boot-principles.md`. Not part of `smt_legacy`/`fetch_B`; left for Phase 2/capability work (do not delete without explicit go-ahead).
 
-**Next:** continue FDT walk pin (`PEEL_FDT_GETPROP` held track / `b1-fdt-lenp-store`) and update `inventory.yaml` as sites reach `retired`.
+**Next:** continue `b1-fdt-lenp-store` as a `core/fetch_B/instr_realign` 32-bit RVI straddle residual; build a directed mini that reproduces the `npc0=0x800138d8` misalignment. Legacy harness build is now fixed.
+
+## Build-platform / SMT2 × ai-tensor / g6lc_qemu continuation (2026-08-30)
+
+- Fixed `core/smt/` → `core/smt_legacy/` path drift in the SMT2 track scripts:
+  - `verif/regress/smt2-ai-tensor-track.sh` (regfile, CSR bank, issue barrier)
+  - `verif/regress/dual-hart-ci.sh` and `dual-hart-ci.ps1`
+  - `verif/regress/smt-linux-boot-path.ps1`
+- `smt2-ai-tensor-track.sh fast` green except `g6lc64_smt2 lint` (no local verilator).
+- `smt2-ai-tensor-track.sh hold` and `peel` both reach the `51b1babe` cookie on `work-ver-smt2-slfix` (with the held / pin ELF).
+- `smt2-ai-tensor-track.sh tensor` and `mt-soft` pass (PyTorch Device virt-card + sequential dual invoke).
+- `smt2-ai-tensor-track.sh di` runs 6/7 FDT minis; the one `mini_fdt_next_tag_lbu` false `tohost=1` FAIL is the known Verilator/HTIF `exit_code` convention in `corev_apu/tb/g6lc_tb.cpp` (DTM branch prints `*** FAILED *** (tohost = 1)` even though `tohost=1` is the pass value), not an RTL failure.
+- g6lc_qemu:
+  - `g6q run --backend qemu --target g6lc64_smt2 --expect SMT2-OSBI-OK` boots the generated B1 machine.
+  - `--tcg-tuning tuned` and `--icount 1` both reach the same boot gate (Q8).
+  - `g6q diag --uarch-out out/uarch.json` writes model-derived D2 counters (Q7).
+  - `g6q run --record out/smt2-trace.json --timeout 45 --expect SMT2-OSBI-OK`
+    reaches the OpenSBI boot gate and writes a valid 1.5 GB RecordFile (Q5/D1).
+    The B2 trace plugin now batches records per hart (64 Ki records) and uses a
+    `GMutex` for thread-safe MTTCG flushes; fixed the earlier
+    `g_ptr_array_add: assertion 'rarray' failed` crash by lazy-initialising the
+    instruction array in `g6lc_tb_trans`.
+  - `g6q run --backend qemu --plugin ...-pmu.so,out=smt2-pmu.json` reaches the
+    boot gate and writes a 6.8 KB PMU counter artifact (Q7 D2).
+  - `g6q run --backend native --image smoke.bin` runs a bare-metal UART payload
+    and prints `OK`; `--record` + `--replay` round-trip with no divergence (Q3/Q5).
+- SMT2 soft-ladder:
+  - `smt2-ai-tensor-track.sh fast` passes 21/22; only `g6lc64_smt2 lint` fails
+    (no local Verilator).
+  - `soft-ladder-opensbi-soak.sh` with `work-ver-smt2-slfix` + pinned ELF reaches
+    `CLASSIFY=SUCCESS cookie 51b1babe` at t=83968 cycles.
+  - The `work-ver-smt2-fw64-B` harness does not reach the cookie within 12 M
+    cycles / 1800 s; `work-ver-smt2-slfix` completes in <60 s. Frontend/harness
+    divergence to be investigated on the RTL SMT2 track.
+  - `smt2-ai-tensor-track.sh peel` (PEEL_FDT_GETPROP=1) and `hold` (held
+    oracle) both pass 21/0 and reach the cookie at t=83968 on
+    `work-ver-smt2-slfix`.
+- SMT2 dual-hart:
+  - `smt2-ai-tensor-track.sh dual` passes all artifact/preflight gates; only
+    `g6lc64_smt2 lint` fails (no Verilator).
+  - `dual-hart-ci.sh` with `DUAL_HART_LIVE=1` on `work-ver-smt2-slfix` passes
+    live `smt_dual_park`, `smt_peer_tohost`, `smt_dual_active`,
+    `smt_dual_concurrent`, and `smt_dual_wfi_timer`.
+- AI tensor / mt-soft:
+  - `smt2-ai-tensor-track.sh tensor` passes 21/0 (Device virt-card cases only
+    because PyTorch is not installed).
+  - `smt2-ai-tensor-track.sh mt-soft` passes 21/0 (sequential dual invoke).
+- SMT2 soft-ladder DI:
+  - `smt2-ai-tensor-track.sh di` passes 6/7 mini FDT tests on
+    `work-ver-smt2-slfix`; `mini_fdt_next_tag_lbu` prints
+    `*** FAILED *** (tohost = 1)` due to the known Verilator/HTIF `exit_code`
+    convention in `corev_apu/tb/g6lc_tb.cpp`, not an RTL failure.
+- AI tensor hard (RTL):
+  - `smt2-ai-tensor-track.sh hard` passes 21/0: `tensor virt-impl --impl hard`
+    on `g6lc64_ai` with `work-ver-ai` passes both soft (Device/PyTorch) and hard
+    (Verilator RTL) phases; `ai_island_mmio_smoke` and `ai_gemm_s8_smoke` both
+    SUCCESS.
+- SMT2 fetch divergence:
+  - The passing `work-ver-smt2-slfix` harness is built with `core/Flist.cva6`
+    (A/legacy fetch); the failing `work-ver-smt2-fw64-B` harness is built with
+    `core/Flist.fetch_B` (B fetch). Same ELF, same timeout: cookie on `slfix`,
+    no cookie on `fw64-B`. Old `work-ver-smt2` is stale and prints plusarg help.
+- DTS / boot path:
+  - Fixed `corev_apu/bootrom/ariane-smt2.dts` `smt-product-closeout` node: added
+    `reg = <0x0 0x0 0x0 0x0>;` and `@0` unit address to silence `dtc` warnings.
+    `smt-linux-boot-path.sh` passes with no warnings.
+- SMT2 fetch_B S4 residual:
+  - Reproduced the fetch_B/IQ leftover pointer-liveness bug with
+    `verif/tests/custom/multicore/mini_fdt_nt_ptr0.S` on `work-ver-smt2-fw64-B`:
+    `tohost = 122928` (`0x1E030`) after 514 cycles, matching
+    `architecture/multi-threading/soft-ladder/ITERATION.md` iter-013.
+  - Real OpenSBI context with `PEEL_FDT_NEXT_TAG=1` on `work-ver-smt2-fw64-B` also
+    fails to reach the `51b1babe` cookie within 2 M cycles / 300 s; trapdump shows
+    `0x51b1c001` cave value and `plat_hc=2`/`coldboot_done=0`.
+  - `work-ver-smt2-slfix` (2026-08-21 build) does not reproduce the same S4 mini
+    signature (`tohost = 76180`/`ra`), confirming the local harness is stale
+    relative to the ITERATION.md baseline.
+  - `g6lc_fetch_dbg` (`+fetch_snap`) trace: `c.jr a0` at `0x80012994` is
+    resolved with `a0=0x8001e030` but the frontend issues `fetch_addr=0x80000000`
+    (boot address) immediately after; the eventual `0x8001e030` demand returns
+    all-zero data. Root cause narrowed to `JumpR` prediction / BTB-pend state in
+    `core/fetch_B/frontend.sv` or the I-Cache refill for the redirected target.
+    Caveat: the `work-ver-smt2-fw64-B` binary is dated 2026-08-25 and may predate
+    the `core/fetch_B` duplicate drop / current `btb` source; the `btb` prediction
+    of `0x80000000` for an unexecuted `c.jr a0` is unexpected for a cold BTB and
+    must be reproduced on a fresh build.
+- `python tools/g6q.py check` remains green.

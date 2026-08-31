@@ -52,6 +52,8 @@ module g6lc_icache
 ) (
     input logic clk_i,
     input logic rst_ni,
+    /// reset value for the in-flight virtual fetch address
+    input logic [CVA6Cfg.VLEN-1:0] boot_addr_i,
 
     /// flush the icache, flush and kill have to be asserted together
     input  logic         flush_i,
@@ -165,10 +167,16 @@ module g6lc_icache
   // latch this in case we have to stall later on
   // make sure this is 32bit aligned
   assign vaddr_d = (dreq_o.ready & dreq_i.req) ? dreq_i.vaddr : vaddr_q;
+  // I4xi: use the latched request address (vaddr_q) for tag compare, MMU/PMP
+  // request, and I$ response vaddr. vaddr_d is the next address before it has
+  // been registered; using it for compare/ready created a Verilator
+  // active-region convergence loop:
+  //   vaddr_d -> cl_index -> cl_hit -> dreq_o.ready -> vaddr_d -> ...
+  // This makes the I$ a two-cycle hit (request in IDLE, hit in READ).
   assign areq_o.fetch_vaddr = (vaddr_q >> CVA6Cfg.FETCH_ALIGN_BITS) << CVA6Cfg.FETCH_ALIGN_BITS;
 
   // split virtual address into index and offset to address cache arrays
-  assign cl_index = vaddr_d[CVA6Cfg.ICACHE_INDEX_WIDTH-1:ICACHE_OFFSET_WIDTH];
+  assign cl_index = vaddr_q[CVA6Cfg.ICACHE_INDEX_WIDTH-1:ICACHE_OFFSET_WIDTH];
 
 
   if (CVA6Cfg.NOCType == config_pkg::NOC_TYPE_AXI4_ATOP) begin : gen_axi_offset
@@ -195,6 +203,10 @@ module g6lc_icache
   assign mem_data_o.nc  = paddr_is_nc;
   // way that is being replaced
   assign mem_data_o.way = repl_way;
+  // present the latched request address (vaddr_q) on the response interface.
+  // vaddr_d is the next un-registered address; using it for the response
+  // mis-associates data with an un-served request and feeds a combinational
+  // loop through the branch-predictor same-window check.
   assign dreq_o.vaddr   = vaddr_q;
 
   // invalidations take two cycles
@@ -301,19 +313,15 @@ module g6lc_icache
               cmp_en_d         = 1'b1;
               state_d          = READ;
             end else begin
-              dreq_o.valid = ~dreq_i.kill_s2;  // just don't output in this case
+              dreq_o.valid = ~dreq_i.kill_s1;  // don't output on flush/misp/replay; keep bp_fire response for the branch window
               state_d      = IDLE;
               force_all_ways_d = 1'b0;
 
-              // we can accept another request
-              // and stay here, but only if no inval is coming in
-              // note: we are not expecting ifill return packets here...
-              if (!mem_rtrn_vld_i) begin
-                dreq_o.ready = 1'b1;
-                if (dreq_i.req) begin
-                  state_d = READ;
-                end
-              end
+              // I4xj: do not assert dreq_o.ready in the READ hit branch. The
+              // I$ is a two-cycle machine (request in IDLE, hit/output in READ).
+              // Keeping ready=1 here made vaddr_d combinational and created an
+              // active-region convergence loop with the frontend branch-predictor
+              // same-window logic.
               // if a request is being killed at this stage,
               // we have to bail out and wait for the address translation to complete
               if (dreq_i.kill_s1) begin
@@ -348,14 +356,17 @@ module g6lc_icache
         // so we do not have to check for invals here
         if (mem_rtrn_vld_i && mem_rtrn_i.rtype == ICACHE_IFILL_ACK) begin
           state_d = IDLE;
-          // only return data if request is not being killed
-          if (!(dreq_i.kill_s2 || flush_d)) begin
+          // I4xj: do not gate refill return on bp_fire (kill_s2); that creates
+          // a combinational loop through the frontend branch predictor.
+          // bp_pend_q / same_win already drops fall-through returns after a
+          // taken branch. Cancel only on architectural kills (flush/misp/replay).
+          if (!(dreq_i.kill_s1 || flush_d)) begin
             dreq_o.valid = 1'b1;
             // only write to cache if this address is cacheable
             cache_wren   = ~paddr_is_nc;
           end
           // bail out if this request is being killed
-        end else if (dreq_i.kill_s2 || flush_d) begin
+        end else if (dreq_i.kill_s1 || flush_d) begin
           state_d = KILL_MISS;
         end
       end
@@ -629,7 +640,7 @@ module g6lc_icache
     if (!rst_ni) begin
       cl_tag_q      <= '0;
       flush_cnt_q   <= '0;
-      vaddr_q       <= '0;
+      vaddr_q       <= boot_addr_i;
       cmp_en_q      <= '0;
       cache_en_q    <= '0;
       flush_q       <= '0;

@@ -1146,6 +1146,69 @@ scatter-shot commits.
 | Unknown interrupt budget reported as `0` | stated a limit the inputs do not support; now `null` |
 | Privilege modes given device-tree tokens | false `undeclared` on every target |
 
+### OpenSBI boot on generated B1 `g6lc-g6lc64_smt2` — root-caused and green
+
+The OpenSBI hang on the generated B1 machine was **not** a QEMU, FDT, CPU-property
+or argv defect. It was a defect in the *host project's* OpenSBI fork.
+
+- Symptom: `-M g6lc-g6lc64_smt2 -bios <smt2 fw_payload.bin>` produced no serial
+  output and spun in `wfi`. `-d in_asm,exec,int` showed
+  `riscv_cpu_do_interrupt: cause:5 epc:0x8000f2d4 tval:0x18 desc=fault_load` inside
+  `sbi_malloc`, then `_start_hang` (`0x800003c8: wfi; j -4`).
+- Root cause: the monorepo patched OpenSBI's `platform/generic/platform.c` with an
+  FDT rewriter that called `sbi_malloc()` from `fw_platform_init()`
+  (`fw_base.S:115`) — ~250 instructions **before** `sbi_init()` → `sbi_heap_init()`
+  (`fw_base.S:367`). `hpctrl` was still zeroed BSS, so `sbi_list_for_each_entry`
+  walked from `NULL` and loaded `n->size` at `NULL+0x18`. `tval=0x18` matches exactly.
+  The rewriter also allocated *unconditionally*, before checking whether the token
+  it wanted to strip was even present — and it never was.
+- Fix (host project, outside this package): the runtime rewriter is retired;
+  enforcement moved to DTB build time in `software/smt2-linux/scripts/dts_to_dtb.py`.
+  Firmware is stock again.
+- Result on this package's generated machine, unchanged apart from a rebuilt firmware:
+
+  ```
+  OpenSBI v1.5
+  Platform Name             : eth,ariane-smt2
+  Platform HART Count       : 2
+  Platform IPI Device       : aclint-mswi
+  Platform Timer Device     : aclint-mtimer @ 32768Hz
+  Platform Console Device   : uart8250
+  Domain0 HARTs             : 0*,1*
+  ...
+  SMT2-OSBI: boot hart
+  SMT2-OSBI: peer up
+  SMT2-OSBI-OK
+  ```
+
+  So the B1 machine, generated CPU, generated FDT, ACLINT SWI/MTIMER split, PLIC and
+  `serial-mm regshift=2` were all correct the whole time.
+- **Package-side defect found and fixed:** `run --backend qemu` resolved
+  `qemu-system-riscv64` from `PATH`, which finds a distro QEMU with no `g6lc-*`
+  machine, so the default invocation died with `unsupported machine type` even
+  though the generated machine was fine. `qemu_binary()` in `g6q-cli/src/main.rs`
+  now prefers an in-tree `qemu/build/qemu-system-riscv64` (either suffix; the
+  Windows in-tree build is a WSL ELF with no `.exe`) and falls back to `PATH`.
+  `--qemu-path` still wins, and `--verbose` prints the binary chosen. Two tests pin
+  both branches; `architecture/CLI.md` §6 updated.
+- **Repeatable one-command gate** for this path, no `--qemu-path` needed:
+
+  ```
+  g6lc-qemu run --repo-root <design> --target g6lc64_smt2 --backend qemu \
+                --timeout 20 --expect SMT2-OSBI-OK
+  ```
+
+  Firmware resolves through `CVA6_LINUX_PAYLOAD` / `G6LC_QEMU_FW` (`resolve.rs`) or
+  `out/fw/`. Verified: `qemu binary: qemu/build/qemu-system-riscv64`, banner, and
+  `SMT2-OSBI-OK` seen, `--expect` satisfied.
+- Residual conform item, **already surfaced correctly — do not special-case it**:
+  the generated B1 FDT derives `zawrs` from `ZawrsEn=1` and advertises it, while the
+  host project's handwritten `ariane-smt2.dts` omits it pending the SMT wait-for-peer
+  item. `conform --target g6lc64_smt2` reports capability `wait-on-reservation` as
+  `undeclared` (live in config, silent in DTS), which is exactly the intended signal;
+  `napot-pages` (`svnapot`) is the same shape. That is the checker doing its job, not
+  a bug to patch in an emitter.
+
 ### Boot-validation notes (Q4)
 
 OpenSBI v1.5.1 now boots the generated `g6lc-unnamed` machine and prints its banner.
@@ -1238,3 +1301,83 @@ These fixes are now in the generator: `g6q-emit-qemu` emits `reg_shift` / `clock
 - Re-ran `python tools/g6q.py install-qemu --package fixtures\ai --target ai` after `git checkout --` the patched QEMU build files; the generated `qemu/` tree is now entirely package-originated and has no duplicate meson blocks.
 - `python tools/g6q.py build-qemu` and the in-guest `AI_OK` smoke still pass; `python tools/g6q.py check` is green.
 - No git commit was made.
+
+### Q4 continuation — g6lc-qemu run child SIGTERM + dry-run toolchain fallback
+
+- `g6q-cli` `run` now terminates the QEMU child with `SIGTERM` and waits up to
+  two seconds before falling back to `SIGKILL`. This lets B2 plugins and trace
+  recorders run their `qemu_plugin_atexit_cb` callbacks when `--expect` or
+  `--timeout` ends the run early.
+- `g6q-cli` `fw build --dry-run` no longer requires a real RISC-V cross-toolchain
+  on the host; validation of `--fw-make`, `--fw-mode`, and `--fw-payload` runs
+  first so malformed inputs are rejected before the toolchain is even probed.
+- `python tools/g6q.py check` is green.
+- B1/B2 runtime smoke:
+  - `g6q run --backend qemu --plugin qemu/build/contrib/plugins/libg6lc-g6lc64_smt2-pmu.so,out=out/smt2-pmu.json --timeout 10 --expect SMT2-OSBI-OK`
+    succeeds and writes a non-empty `smt2-pmu.json` PMU counter artifact.
+  - The generated B1 `g6lc-g6lc64_smt2` machine boots stock OpenSBI to
+    `SMT2-OSBI-OK` with the B2 PMU plugin loaded.
+- Soft-ladder S4 cross-check (monorepo):
+  - The `mini_fdt_nt_ptr0` failure on `work-ver-smt2-fw64-B` was an
+    **instruction-access fault (IAF)**, not a fetch_B/IQ leftover bug.
+  - The FDT stub at `0x8001E030` is outside the `g6lc64_smt2` execute region
+    (`0x80000000` length `0x1e000` ends at `0x8001DFFF`). The `c.jr a0` target
+    `a0 = 0x8001E030` is architecturally correct; the I-cache returns the MMU/PMA
+    exception, and the trap handler reports `mepc` low 32b = `0x1E030`
+    (`tohost = 122928`).
+  - Moving `.text.fdt` to `0x8001D000` in `verif/tests/custom/multicore/mini_fdt_nt_ptr0.{S,ld}`
+    makes `mini_fdt_nt_ptr0` **PASS** (`tohost = 0` after ~492 cy) on
+    `work-ver-smt2-fw64-B` and in the remote `di` suite. No RTL change.
+  - The historic OpenSBI `mepc=0` / `sbi_hart_hang` S4 residual remains a
+    separate issue if `fdt_next_tag` control flow reaches a non-execute address.
+
+### Q7/Q8 continuation — g6lc-qemu run + diag + MTTCG smoke
+
+- `g6q run --backend qemu --repo-root /mnt/e/cva6 --target g6lc64_smt2
+  --timeout 15 --expect SMT2-OSBI-OK` boots the generated B1 machine to
+  `SMT2-OSBI-OK` (using `G6LC_QEMU_FW=/mnt/e/cva6/build-platform/workspace/smt2-linux/fw_payload.bin`).
+- `--tcg-tuning tuned` and `--icount 1` both reach the same boot gate, confirming
+  the Q8 MTTCG / deterministic-time option plumbing in `resolve.rs`.
+- `g6q diag --repo-root /mnt/e/cva6 --target g6lc64_smt2 --uarch-out out/uarch.json`
+  writes a model-derived D2 counter artifact (roofline / structure counters).
+- `g6q run --backend qemu --record out/smt2-trace.json --timeout 45
+  --expect SMT2-OSBI-OK` now reaches `SMT2-OSBI-OK` and writes a 1.5 GB
+  `out/smt2-trace.json` RecordFile (Q5/D1).
+  - Fixed the B2 trace plugin to batch records per hart (64 Ki record buffers,
+    `GString` formatted flushes) and to use a `GMutex` around the file write and
+    the first-record comma state, making it safe under MTTCG and avoiding the
+    original `fprintf`+`fflush` per-instruction overhead.
+  - The previous `g_ptr_array_add: assertion 'rarray' failed` crash was caused by
+    `g6lc_tb_trans` running before `qemu_plugin_install` had published
+    `g6lc_trace_insns`; added a lazy-init guard and moved the initialization
+    check into `qemu_plugin_install`.
+  - `python tools/g6q.py check` remains green (112 workspace tests pass).
+- `python tools/g6q.py check` remains green.
+
+### Q3/Q5/Q7 continuation — native run, record/replay, PMU
+
+- Built a 28-byte bare-metal `smoke.bin` (UART `OK\n` loop at 0x80000000) and ran it under `g6q run --backend native --image /tmp/smoke.bin --target g6lc64_smt2 --repo-root /mnt/e/cva6`.
+- Native VM prints the expected `OK\n` stream and stops at the step limit; `--record out/native-smoke.json --steps 50` writes a valid RecordFile; `--replay out/native-smoke.json` reproduces the same stream with no divergence.
+- `g6q run --backend qemu --plugin qemu/build/contrib/plugins/libg6lc-g6lc64_smt2-pmu.so,out=out/smt2-pmu.json --timeout 15 --expect SMT2-OSBI-OK` reaches the OpenSBI boot gate and writes a 6.8 KB `out/smt2-pmu.json` D2 counter artifact with `counter_count:6` and per-hart cycle/instruction/event entries.
+- These confirm B3 native D1 record/replay and B2 QEMU PMU emission are usable end-to-end; `python tools/g6q.py check` remains green (112 workspace tests pass).
+- Caveat: `run --backend native` currently runs a single hart and does not model SMT2 hart 1 peer bring-up, so it cannot run the same OpenSBI payload used with B1/B2.
+
+### SMT2 soft-ladder OpenSBI cookie soak
+
+- `smt2-ai-tensor-track.sh fast` passed 21/22 gates; the only failure is `g6lc64_smt2 lint` because local Verilator is missing (expected).
+- `verif/regress/soft-ladder-opensbi-soak.sh` with `SOFT_LADDER_HARNESS=work-ver-smt2-slfix` and the pinned `fw_payload_r3a_c15_plat_skip.pin-bc7ed11d.elf` reaches `CLASSIFY=SUCCESS fetch=B cookie 51b1babe` at `t=83968` cycles.
+- The default `work-ver-smt2-fw64-B` harness did not reach the cookie within the 12 M cycle / 1800 s wall timeout (process killed after ~17 minutes with no `51b1babe` output), while `work-ver-smt2-slfix` completes in under a minute. This is a harness/frontend divergence, not a g6lc_qemu issue; documented here for the RTL SMT2 track.
+- `smt2-ai-tensor-track.sh peel` (PEEL_FDT_GETPROP=1, pin ELF, 2 M cycle timeout) passes 21/0 and reaches `51b1babe` at `t=83968` on `work-ver-smt2-slfix`.
+- `smt2-ai-tensor-track.sh hold` (held oracle, 3 M cycle timeout) passes 21/0 and reaches the same cookie at the same cycle count on `work-ver-smt2-slfix`.
+- `smt2-ai-tensor-track.sh dual` (DUAL_HART_LIVE=0) passes all artifact/preflight checks; the only failure is `g6lc64_smt2 lint` (no local Verilator).
+- `dual-hart-ci.sh` with `DUAL_HART_LIVE=1 DUAL_HART_HARNESS=work-ver-smt2-slfix/Variane_testharness` passes live `smt_dual_park`, `smt_peer_tohost`, `smt_dual_active`, `smt_dual_concurrent`, and `smt_dual_wfi_timer` on the `slfix` harness; only `g6lc64_smt2 lint` fails due to missing Verilator.
+- `smt2-ai-tensor-track.sh tensor` passes 21/0: `run-ai-tensor.sh pytorch` runs the Device virt-card cases (PyTorch not installed) and reports OK.
+- `smt2-ai-tensor-track.sh mt-soft` passes 21/0: sequential dual invoke passes.
+- `smt2-ai-tensor-track.sh di` passes 6/7 mini FDT tests on `work-ver-smt2-slfix`; `mini_fdt_next_tag_lbu` reports `*** FAILED *** (tohost = 1)`, which is the known `corev_apu/tb/g6lc_tb.cpp` Verilator/HTIF `exit_code` convention printing "FAILED" for `tohost=1` even though `tohost=1` is the pass value.
+- `smt2-ai-tensor-track.sh hard` passes 21/0: `tensor virt-impl --impl hard --suite narrow --core g6lc64_ai` runs the soft PyTorch/Device phase and the hard Verilator RTL phase on `work-ver-ai/Variane_testharness`; both `ai_island_mmio_smoke` and `ai_gemm_s8_smoke` PASS (`tohost = 0`).
+- Summary of the `smt2-ai-tensor-track` staged track: `peel`, `hold`, `tensor`, `mt-soft`, and `hard` all pass 21/0; `dual` and `di` fail only on the missing local Verilator lint and the known `tohost=1` testbench convention, respectively.
+- Investigated the `work-ver-smt2-fw64-B` OpenSBI soak failure: the passing `work-ver-smt2-slfix` harness is built with the legacy `core/Flist.cva6` (A fetch), while `work-ver-smt2-fw64-B` is built with `core/Flist.fetch_B` (B fetch). The same pin ELF and same 12 M cycle timeout produce a cookie on `slfix` and no cookie on `fw64-B`, confirming a fetch_B (L1-L4) divergence. The older `work-ver-smt2` harness is stale and prints the plusarg help instead of running; it is not a usable comparison point.
+- Fixed the `dtc` `simple_bus_reg`/`unit_address_vs_reg` warnings on `corev_apu/bootrom/ariane-smt2.dts` by adding `reg = <0x0 0x0 0x0 0x0>;` and a `@0` unit address to the `/soc/smt-product-closeout` documentation node. `smt-linux-boot-path.sh` now passes with no dtc warnings.
+- Resolved the `mini_fdt_nt_ptr0` S4 residual: the `tohost = 122928` (`0x1E030`) failure was an IAF because the FDT stub at `0x8001E030` is outside the `g6lc64_smt2` execute region. Moving `.text.fdt` to `0x8001D000` in `verif/tests/custom/multicore/mini_fdt_nt_ptr0.{S,ld}` makes the directed mini PASS on `work-ver-smt2-fw64-B` and in the remote `di` suite.
+- The fetch_B target `0x8001E030` was never corrupt; `+fetch_snap` and an I-cache diagnostic display confirmed the `c.jr a0` redirect delivers the correct target and the I-cache returns an exception (not zero data from a fetch bug). The `btb` `predict_address = 0x80000000` seen before the redirect is the predicted fall-through path after the mispredict is killed, not a corrupt pointer.
+- The historic OpenSBI `mepc=0` / `sbi_hart_hang` S4 class is a separate residual: it occurs when `fdt_next_tag` / `fdt_offset_ptr` control flow reaches a non-execute address (or when the trap-redirect path itself lands at PC 0). It is not addressed by the `mini_fdt_nt_ptr0` test-address fix.

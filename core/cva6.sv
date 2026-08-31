@@ -1949,6 +1949,7 @@ module cva6
         // to D$
         .clk_i             (clk_i),
         .rst_ni            (rst_ni),
+        .boot_addr_i       (boot_addr_i[CVA6Cfg.VLEN-1:0]),
         // I$
         .icache_en_i       (icache_en_csr),
         .icache_flush_i    (icache_flush_ctrl_cache),
@@ -2012,6 +2013,7 @@ module cva6
     ) i_cache_subsystem (
         .clk_i (clk_i),
         .rst_ni(rst_ni),
+        .boot_addr_i   (boot_addr_i[CVA6Cfg.VLEN-1:0]),
 
         .icache_en_i   (icache_en_csr),
         .icache_flush_i(icache_flush_ctrl_cache),
@@ -2082,6 +2084,7 @@ module cva6
         // to D$
         .clk_i             (clk_i),
         .rst_ni            (rst_ni),
+        .boot_addr_i       (boot_addr_i[CVA6Cfg.VLEN-1:0]),
         .priv_lvl_i        (priv_lvl),
         // I$
         .icache_en_i       (icache_en_csr),

@@ -29,6 +29,7 @@ module cva6_icache_axi_wrapper
 ) (
     input logic             clk_i,
     input logic             rst_ni,
+    input logic [CVA6Cfg.VLEN-1:0] boot_addr_i,
     input riscv::priv_lvl_t priv_lvl_i,
 
     input logic flush_i,  // flush the icache, flush and kill have to be asserted together
@@ -118,6 +119,7 @@ module cva6_icache_axi_wrapper
   ) i_g6lc_icache (
       .clk_i         (clk_i),
       .rst_ni        (rst_ni),
+      .boot_addr_i   (boot_addr_i),
       .flush_i       (flush_i),
       .en_i          (en_i),
       .miss_o        (miss_o),

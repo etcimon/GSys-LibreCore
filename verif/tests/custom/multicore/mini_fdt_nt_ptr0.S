@@ -4,7 +4,7 @@
 # S4 directed mini: fdt_offset_ptr pointer-liveness after a 32-bit RVI leftover +
 # c.jr a0 path. Confirms the ra=0x80012994 class; on the fetch_B/IQ leftover bug
 # the returned pointer loses its high bits and c.jr a0 lands in the low 20-bit
-# address space (mepc lower 32 = 0x1E030 from the FDT stub at 0x8001E030).
+# address space (mepc lower 32 = 0x1D030 from the FDT stub at 0x8001D030).
 #
 # Layout (B-flavour FETCH_WIDTH=64):
 #   _start at 0x80000000 loads fdt/offset/len and jumps to test.
@@ -15,13 +15,13 @@
 #   Real libfdt fdt_offset_ptr is loaded from osbi_nt/offset_ptr.bin at
 #   0x80013000 (its 32-bit lbu a3,36(a0) at 0x800130A6 straddles a 64-bit
 #   fetch boundary, mirroring the original S4 pin).
-#   A minimal FDT + stub is at 0x8001E000.
+#   A minimal FDT + stub is at 0x8001D000.
 #
 # tohost encoding (the TB prints the 32-bit exit code = tohost>>1):
 #   mepc!=0 -> tohost = (mepc << 1) | 1  (prints lower 32 bits of mepc)
 #   mepc==0 -> tohost = (ra    << 1) | 1  (prints lower 32 bits of ra)
-#   Current S4 pointer-liveness: mepc = 0x...1E030 (FDT stub low), ra = 0x80012994
-#   -> tohost lower 32 = 0x1E030 = 122928.
+#   Current S4 pointer-liveness: mepc = 0x...1D030 (FDT stub low), ra = 0x80012994
+#   -> tohost lower 32 = 0x1D030 = 118832.
 
   .option rvc
   .section .text.init
@@ -82,7 +82,7 @@ test_code:
   c.nop                     # 0x8001298E
   jal  offset_ptr           # 0x80012990, ra=0x80012994
 
-  # S4: c.jr a0 at 0x80012994.  On a correct core a0 = 0x8001E030 and the
+  # S4: c.jr a0 at 0x80012994.  On a correct core a0 = 0x8001D030 and the
   # stub (j pass) runs.  On the fetch_B/IQ leftover bug the returned address
   # or the target fetch is corrupted and the control-flow transfer fails.
   c.jr a0                   # 0x80012994, ra already 0x80012994
@@ -100,9 +100,9 @@ offset_ptr:
 
 # ---------------------------------------------------------------------------
 # Minimal FDT with a stub at dt_struct offset 0x30.
-# Correct offset_ptr(fdt, 0, 4) returns fdt + 0x30 (0x8001E030).
+# Correct offset_ptr(fdt, 0, 4) returns fdt + 0x30 (0x8001D030).
 # On the fetch_B/IQ leftover bug the returned pointer (or the target fetch)
-# is corrupted; the c.jr a0 traps with mepc lower 32 = 0x1E030 while
+# is corrupted; the c.jr a0 traps with mepc lower 32 = 0x1D030 while
 # ra = 0x80012994 (the S4 pointer-liveness class).
 # ---------------------------------------------------------------------------
   .section .text.fdt, "ax"

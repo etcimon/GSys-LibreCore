@@ -94,7 +94,8 @@ if (-not (Test-Path $src)) {
   Write-Error "OpenSBI source missing at $src — run fetch-opensbi.ps1 first (or drop -SkipFetch)"
   exit 2
 }
-$buildDir = Join-Path $Out "opensbi-build"
+# Use a very short build dir to avoid xPack ar.exe path-length truncation.
+$buildDir = (Split-Path $RepoRoot -Qualifier) + "\s2ob"
 Ensure-Dir $buildDir
 
 # Soften PIE requirement for bare-metal xPack (riscv-none-elf lacks -pie)
@@ -106,12 +107,10 @@ if (Test-Path $patchPy) {
   Write-Host "[build-opensbi-smt2] non-PIE Makefile patch applied"
 }
 
-# SMT product-closeout FDT fixups (zawrs, boot-crutches, etc.)
-$compensationPy = Join-Path $Smt2Root "scripts/patch_opensbi_smt_compensation.py"
-if (Test-Path $compensationPy) {
-  & python $compensationPy $src
-  Write-Host "[build-opensbi-smt2] SMT FDT compensation patch applied"
-}
+# No SMT product-closeout FDT patch: the cpu@ nodes are the contract and
+# dts_to_dtb.py proves them honest at build time (see smt2-product-closeout.md
+# section 9). The old runtime rewriter called sbi_malloc() from
+# fw_platform_init(), i.e. before sbi_heap_init(), and faulted on NULL+0x18.
 
 # Prefer a bash that has both `make` and a consistent path mount for find(1).
 # Git Bash often lacks make; Cygwin has make but needs /cygdrive paths.
@@ -203,6 +202,7 @@ $srcU = Convert-ToUnixPath $src
 $buildU = Convert-ToUnixPath $buildDir
 $dtbU = Convert-ToUnixPath $dtb
 $payU = Convert-ToUnixPath $payloadPath
+$py3U = Convert-ToUnixPath (Join-Path $RepoRoot "build-platform/workspace/tooling/python-venv/Scripts")
 
 # Cygwin + Windows xPack: inject path-translating wrappers so cc1.exe sees C:/...
 $crossWrapU = ""
@@ -259,6 +259,14 @@ export CROSS_COMPILE='$cc'
 $script = @"
 set -e
 $pathBootstrap
+# Use the build-platform Python venv for Kconfiglib if it exists; otherwise
+# the Kconfig shebang (`#!/usr/bin/env python`) can hit the Windows Store stub.
+if [ -d "$py3U" ]; then
+  [ -f "$py3U/python.exe" ] && [ ! -f "$py3U/python3.exe" ] && \
+    cp "$py3U/python.exe" "$py3U/python3.exe" || true
+  export PATH="${py3U}:`$PATH"
+fi
+command -v python3
 command -v `${CROSS_COMPILE}gcc
 command -v find
 command -v make
@@ -271,7 +279,11 @@ cd '$srcU'
 mkdir -p '$buildU'
 make O='$buildU' PLATFORM=generic FW_TEXT_START=0x80000000 \
   FW_PAYLOAD_PATH='$payMake' FW_FDT_PATH='$dtbMake' \
-  CROSS_COMPILE=`"`$CROSS_COMPILE`" OPENSBI_ALLOW_NO_PIE=y -j2
+  CROSS_COMPILE=`"`$CROSS_COMPILE`" \
+  AR=`"`${CROSS_COMPILE}gcc-ar`" \
+  PYTHON=python3 \
+  PLATFORM_RISCV_ISA=rv64imafdc_zicsr_zifencei \
+  OPENSBI_ALLOW_NO_PIE=y -j2
 "@
 & $bash -lc $script
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

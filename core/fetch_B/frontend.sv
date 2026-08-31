@@ -212,6 +212,20 @@ module frontend
   // retire a leftover-complete jal, else the next leftover (strncmp jal_lo
   // after strlen jal@17fc6) is never stored and RAS misses 17fda
   // (s4-v-nien node_is_enabled -48). Not G1bq (do not spare I$ kill_s2).
+  // A split conditional branch in slot0 that is predicted-taken must not
+  // consume the carry, because the mispredict-fallthrough path will replay
+  // the same block and needs the low half to rebuild the RVI (b1-fdt-lenp
+  // 2-byte aligned split-RVI at 0x8001263e and 0x8001378e). Jumps are still
+  // retired so unconditional taken-jals update the carry for the target.
+  // I22: present the I$ response to the realigner on the same cycle it is
+  // returned, not one cycle later via icache_*_q. The registered copy can
+  // latch a bogus pc=0 / data=0 from an initial or X-state return and push
+  // a stream of illegal instructions into the instruction queue.
+  logic [CVA6Cfg.VLEN-1:0] realigner_vaddr;
+  logic [CVA6Cfg.FETCH_WIDTH-1:0] realigner_data;
+  assign realigner_vaddr = icache_dreq_i.valid ? icache_dreq_i.vaddr : ftq_head_vaddr;
+  assign realigner_data  = icache_dreq_i.valid ? icache_data     : lbuf_data;
+
   instr_realign #(
       .CVA6Cfg(CVA6Cfg)
   ) i_instr_realign (
@@ -220,13 +234,15 @@ module frontend
       .flush_i            (flush_i),
       .kill_i             (leftover_kill),
       .hart_i             (smt_hart_i),
-      .valid_i            (icache_valid_q),
+      // I23: hold the realigner at 0 during reset so an X-state I$.valid or
+      // stale carry is not pushed into the instruction queue as a bogus pc=0.
+      .valid_i            (icache_take & rst_ni),
       .serving_unaligned_o(serving_unaligned),
       .leftover_pending_o (leftover_pending),
       .leftover_valid_o   (leftover_valid),
       .leftover_pc_o      (leftover_pc),
-      .address_i          (icache_vaddr_q),
-      .data_i             (icache_data_q),
+      .address_i          (realigner_vaddr),
+      .data_i             (realigner_data),
       .valid_o            (instruction_valid_raw),
       .addr_o             (addr),
       .instr_o            (instr)
@@ -752,7 +768,14 @@ module frontend
   // Leftover-complete slot0 pushed on I7 overflow: consume carry
   // (leftover_update) while I$ kill_s1 still replays the rest.
   assign leftover_slot0_push = serving_unaligned & instr_queue_consumed[0] & replay;
-  assign leftover_kill = is_mispredict | flush_i | (replay & ~leftover_slot0_push);
+  // Hold the carry when a leftover-complete conditional branch is predicted
+  // taken: the carry must survive until the branch resolves in case the
+  // prediction is wrong and the completing block has to be replayed.
+  logic leftover_branch_bp_fire;
+  assign leftover_branch_bp_fire = bp_fire & serving_unaligned
+      & (cf_type[0] == ariane_pkg::Branch);
+  assign leftover_kill = is_mispredict | flush_i | (replay & ~leftover_slot0_push)
+      | leftover_branch_bp_fire;
 
   // I10: bank the accepted I$ address when switch kills it, not next_block.
   always_ff @(posedge clk_i or negedge rst_ni) begin

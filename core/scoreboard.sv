@@ -202,6 +202,12 @@ module scoreboard #(
         // the decoded instruction we put in there is valid (1st bit)
         // increase the issue counter and advance issue pointer
         num_issue += 'd1;
+//pragma translate_off
+        if ($time() < 200000)
+          $display("[sb-alloc] t=%0t idx=%0d pc=%h instr=%h ex.valid=%b valid=%b",
+                   $time, issue_pointer[i], decoded_instr_i[i].pc, orig_instr_i[i],
+                   decoded_instr_i[i].ex.valid, decoded_instr_valid_i[i]);
+//pragma translate_on
         mem_n[issue_pointer[i]] = '{
             issued: 1'b1,
             cancelled: 1'b0,

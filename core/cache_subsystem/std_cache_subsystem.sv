@@ -37,6 +37,7 @@ module std_cache_subsystem
 ) (
     input logic clk_i,
     input logic rst_ni,
+    input logic [CVA6Cfg.VLEN-1:0] boot_addr_i,
     input riscv::priv_lvl_t priv_lvl_i,
     // I$
     input logic icache_en_i,  // enable icache (or bypass e.g: in debug mode)
@@ -88,6 +89,7 @@ module std_cache_subsystem
   ) i_cva6_icache_axi_wrapper (
       .clk_i     (clk_i),
       .rst_ni    (rst_ni),
+      .boot_addr_i(boot_addr_i),
       .priv_lvl_i(priv_lvl_i),
       .flush_i   (icache_flush_i),
       .en_i      (icache_en_i),

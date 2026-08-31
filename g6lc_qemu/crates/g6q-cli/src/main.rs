@@ -1285,6 +1285,28 @@ endpackage
     }
 
     #[test]
+    fn qemu_path_option_wins_over_any_in_tree_build() {
+        let args = Args::parse(["run", "--qemu-path", "/nonexistent/qemu"]);
+        assert_eq!(qemu_binary(&args), "/nonexistent/qemu");
+    }
+
+    #[test]
+    fn qemu_binary_prefers_an_in_tree_build_over_path() {
+        // The generated `-M g6lc-<target>` machine only exists in the QEMU built
+        // from this package, so `PATH` is only a fallback. Tests run with the
+        // crate directory as the cwd, which has no `qemu/build/`.
+        let args = Args::parse(["run"]);
+        let in_tree = std::path::Path::new("qemu")
+            .join("build")
+            .join("qemu-system-riscv64");
+        if in_tree.is_file() {
+            assert_eq!(qemu_binary(&args), in_tree.to_string_lossy());
+        } else {
+            assert_eq!(qemu_binary(&args), "qemu-system-riscv64");
+        }
+    }
+
+    #[test]
     fn run_qemu_record_sets_plugin_and_trace_arg() {
         let args = Args::parse([
             "run",
@@ -1639,9 +1661,38 @@ fn fw_build(args: &Args) -> Result<(), String> {
         .or_else(|| pins.get("opensbi", "fw_text_start"))
         .unwrap_or("0x80000000");
 
-    let (cross, use_wsl) = detect_cross_compile(args)?;
+    // Validate --fw-make before toolchain detection so bad inputs are rejected
+    // quickly even when the host lacks a cross-toolchain.
+    for extra in args.values("fw-make") {
+        if !extra.contains('=') {
+            return Err(format!("--fw-make value must be VAR=VAL: `{extra}`"));
+        }
+    }
 
     let mode = args.value_or("fw-mode", "dynamic");
+    match mode {
+        "dynamic" => {}
+        "jump" => {
+            if args.value("fw-jump-addr").is_none() {
+                return Err("--fw-mode jump requires --fw-jump-addr".into());
+            }
+        }
+        "payload" => {
+            if args.value("fw-payload").is_none() {
+                return Err("--fw-mode payload requires --fw-payload".into());
+            }
+        }
+        other => return Err(format!("unsupported fw mode `{other}`")),
+    }
+
+    // Dry-run can preview the build command without a real cross-toolchain;
+    // otherwise we need one on the host.
+    let (cross, use_wsl) = if args.flag("dry-run") {
+        detect_cross_compile(args).unwrap_or_else(|_| ("riscv64-unknown-elf-".to_string(), false))
+    } else {
+        detect_cross_compile(args)?
+    };
+
     let mut make_args = vec![
         format!("CROSS_COMPILE={cross}"),
         format!("PLATFORM={platform}"),
@@ -1659,30 +1710,22 @@ fn fw_build(args: &Args) -> Result<(), String> {
         "dynamic" => make_args.push("FW_DYNAMIC=y".into()),
         "jump" => {
             make_args.push("FW_JUMP=y".into());
-            let addr = args
-                .value("fw-jump-addr")
-                .ok_or("--fw-mode jump requires --fw-jump-addr")?;
+            let addr = args.value("fw-jump-addr").unwrap();
             make_args.push(format!("FW_JUMP_ADDR={addr}"));
         }
         "payload" => {
             make_args.push("FW_PAYLOAD=y".into());
-            let payload = args
-                .value("fw-payload")
-                .ok_or("--fw-mode payload requires --fw-payload")?;
+            let payload = args.value("fw-payload").unwrap();
             make_args.push(format!(
                 "FW_PAYLOAD_PATH={}",
                 make_path_arg(&PathBuf::from(payload), use_wsl)?
             ));
         }
-        other => return Err(format!("unsupported fw mode `{other}`")),
+        _ => unreachable!(),
     }
 
     for extra in args.values("fw-make") {
-        if extra.contains('=') {
-            make_args.push(extra.clone());
-        } else {
-            return Err(format!("--fw-make value must be VAR=VAL: `{extra}`"));
-        }
+        make_args.push(extra.clone());
     }
 
     let fw_out = args
@@ -1965,8 +2008,39 @@ fn cmd_run(args: &Args) -> Result<(), String> {
     }
 }
 
+fn native_image_default() -> Option<String> {
+    if let Ok(p) = std::env::var("G6LC_QEMU_IMAGE") {
+        if std::path::Path::new(&p).is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(p) = std::env::var("CVA6_LINUX_PAYLOAD") {
+        let path = std::path::PathBuf::from(&p);
+        if path.is_file() {
+            // The build-platform variable usually points to the .elf; prefer a sibling .bin
+            // for the flat-image native VM.
+            let bin = path.with_extension("bin");
+            if bin.is_file() {
+                return Some(bin.to_string_lossy().into_owned());
+            }
+            if p.ends_with(".bin") {
+                return Some(p);
+            }
+        }
+    }
+    let staged = std::path::PathBuf::from("out/fw/fw_payload.bin");
+    if staged.is_file() {
+        Some(staged.to_string_lossy().into_owned())
+    } else {
+        None
+    }
+}
+
 fn run_native(args: &Args) -> Result<(), String> {
-    let image = args.value("image");
+    let image = args
+        .value("image")
+        .map(str::to_string)
+        .or_else(native_image_default);
     let restore = args.value("restore");
     if image.is_none() && restore.is_none() {
         return Err("run --backend native needs --image FILE or --restore CHECKPOINT".into());
@@ -2074,7 +2148,7 @@ fn run_native(args: &Args) -> Result<(), String> {
     }
 
     if let Some(image) = image {
-        let bytes = std::fs::read(image).map_err(|e| format!("cannot read {image}: {e}"))?;
+        let bytes = std::fs::read(&image).map_err(|e| format!("cannot read {image}: {e}"))?;
         for (i, b) in bytes.iter().enumerate() {
             mem.write_le::<1>(base + i as u64, *b as u64)
                 .map_err(|e| format!("cannot load binary: {e}"))?;
@@ -2176,6 +2250,34 @@ fn run_args(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Resolve the `qemu-system-riscv64` to spawn for `run --backend qemu`.
+///
+/// `--qemu-path` always wins. Otherwise an in-tree `qemu/build/` binary is
+/// preferred over one found on `PATH`: the generated `-M g6lc-<target>` machine
+/// only exists in the QEMU built from this package's emitted sources, so a distro
+/// `qemu-system-riscv64` would reject it with "unsupported machine type".
+fn qemu_binary(args: &Args) -> String {
+    const FALLBACK: &str = "qemu-system-riscv64";
+    if let Some(p) = args.value("qemu-path") {
+        return p.to_string();
+    }
+    // On Windows the in-tree QEMU is built under WSL, so it has no `.exe`
+    // suffix; a native MinGW build does. Accept either, preferring the
+    // platform's usual form.
+    let names: [&str; 2] = if cfg!(windows) {
+        ["qemu-system-riscv64.exe", FALLBACK]
+    } else {
+        [FALLBACK, "qemu-system-riscv64.exe"]
+    };
+    for name in names {
+        let candidate = std::path::Path::new("qemu").join("build").join(name);
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    FALLBACK.to_string()
+}
+
 fn run_qemu(args: &Args) -> Result<(), String> {
     let resolved = resolve::resolve(args)?;
     let model = g6q_ingest::assemble(&resolved.sources);
@@ -2246,11 +2348,14 @@ fn run_qemu(args: &Args) -> Result<(), String> {
     let stock = g6q_emit_args::StockTarget { machine, cpu_base };
     let argv = g6q_emit_args::build_argv(&model, &stock, &boot, &properties_for);
 
-    let binary = args.value_or("qemu-path", "qemu-system-riscv64");
+    let binary = qemu_binary(args);
+    if args.flag("verbose") {
+        eprintln!("g6lc-qemu: qemu binary: {binary}");
+    }
     let wsl_binary = if wsl {
-        wslize_path(binary)
+        wslize_path(&binary)
     } else {
-        binary.to_string()
+        binary.clone()
     };
 
     if args.flag("dry-run") {
@@ -2361,8 +2466,7 @@ fn run_child_with_timeout(
         if let Some(exp) = expect {
             let buf = captured.lock().unwrap().clone();
             if bytes_contains(&buf, exp.as_bytes()) {
-                let _ = child.kill();
-                let _ = child.wait();
+                terminate_child(&mut child);
                 break (None, true);
             }
         }
@@ -2371,15 +2475,14 @@ fn run_child_with_timeout(
             Ok(None) => {
                 if let Some(t) = timeout {
                     if start.elapsed() >= t {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        terminate_child(&mut child);
                         break (None, false);
                     }
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(e) => {
-                let _ = child.kill();
+                terminate_child(&mut child);
                 return Err(format!("failed to wait for child: {e}"));
             }
         }
@@ -2397,6 +2500,39 @@ fn run_child_with_timeout(
     }
 
     Ok((status, buf))
+}
+
+/// Reap a child process, giving it a chance to run exit handlers.
+///
+/// On Unix this sends SIGTERM, waits up to two seconds for a clean exit,
+/// then falls back to SIGKILL. On Windows it falls back to `Child::kill`
+/// immediately, because Windows has no POSIX signal delivery.
+fn terminate_child(child: &mut std::process::Child) {
+    if let Ok(Some(_)) = child.try_wait() {
+        let _ = child.wait();
+        return;
+    }
+
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        if pid != 0 {
+            let _ = std::process::Command::new("kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status();
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(2) {
+                if let Ok(Some(_)) = child.try_wait() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// True if `haystack` contains the exact byte sequence `needle`.
@@ -2458,6 +2594,9 @@ fn wslize_qemu_comma_arg(s: &str) -> String {
 
 /// WSLize the path-bearing fields of a [`BootOptions`] struct in place.
 fn wslize_boot(boot: &mut g6q_emit_args::BootOptions) {
+    if let g6q_emit_args::Firmware::File(p) = &mut boot.firmware {
+        *p = wslize_path(p);
+    }
     if let Some(k) = &boot.kernel {
         boot.kernel = Some(wslize_path(k));
     }

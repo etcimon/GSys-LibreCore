@@ -463,8 +463,13 @@ module commit_stage
     // Do not write a0 unless this retire's rd is a0 (PEEL a0=9).
     if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
       for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
+        // G1lc: suppress unaligned ALU writes to s0 from non-x0 sources
+        // (c.mv s0,a0 / add s0,*,* / addi s0,s0,imm). Do not suppress
+        // li/lui/auipc s0,imm (rs1 == x0) or slli s0,1<<31 (result[2:0]==0)
+        // so the bootrom can build the 0x80000000 jump target.
         if (we_gpr_o[p] &&
             commit_instr_i[p].rd[4:0] == 5'd8 &&
+            commit_instr_i[p].rs1 != 5'd0 &&
             commit_instr_i[p].result[2:0] != 3'b0)
           we_gpr_o[p] = 1'b0;
         if (we_gpr_o[p] &&
@@ -524,6 +529,10 @@ module commit_stage
       // but we give precedence to exceptions which happened earlier e.g.: instruction page
       // faults for example
       if (commit_instr_i[0].ex.valid) begin
+//pragma translate_off
+        if ($time() < 200000)
+          $display("[commit-dbg] t=%0t pc=%h ex.valid=%b cause=%0d", $time, commit_instr_i[0].pc, commit_instr_i[0].ex.valid, commit_instr_i[0].ex.cause);
+//pragma translate_on
         exception_o = commit_instr_i[0].ex;
       end
     end

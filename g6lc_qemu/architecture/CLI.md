@@ -134,7 +134,7 @@ time rather than silently switching profiles.
 | Option | Default | Notes |
 |---|---|---|
 | `--backend args\|qemu\|rust` | `qemu` if available, else `rust` | B0 / B1+B2 / B3; `--backend qemu` targets the generated `g6lc-<target>` B1 machine; use `--stock-machine` / `--stock-cpu` to force the B0 stock target |
-| `--qemu-path PATH` / `--qemu-src DIR` | `qemu-system-riscv64` / `qemu/` | stock binary; emission target |
+| `--qemu-path PATH` / `--qemu-src DIR` | `qemu/build/qemu-system-riscv64` if present, else `qemu-system-riscv64` on `PATH` / `qemu/` | binary to spawn; emission target. The in-tree build is preferred because `-M g6lc-<target>` only exists in the QEMU built from this package's emitted sources — a distro `qemu-system-riscv64` rejects it with "unsupported machine type". `--verbose` prints the binary actually chosen. |
 | `--wsl` | off | spawn QEMU through `wsl --`; converts Windows paths to WSL paths |
 || `--accel tcg` | `tcg` | only value; host-hypervisor acceleration is a recorded non-goal |
 | `--smp auto\|N` | `auto` = cores × threads-per-core | multi-threaded translation; "auto" uses the model |
@@ -149,8 +149,8 @@ time rather than silently switching profiles.
 || `--checkpoint FILE` | — | write a resumable `Checkpoint` of the native run |
 || `--restore FILE` | — | resume a native run from a `Checkpoint`; `--image` is optional when this is given |
 || `--replay FILE` | — | replay the native run against a `RecordFile`, fail on divergence |
-| `--timeout SECONDS` | — | hard ceiling for `run --backend qemu` (fractional seconds allowed) |
-|| `--expect STRING` | — | when watching QEMU stdout, succeed as soon as `STRING` is seen; implies `--timeout` if no self-exiting payload |
+| `--timeout SECONDS` | — | hard ceiling for `run --backend qemu` (fractional seconds allowed); child gets `SIGTERM` then `SIGKILL` |
+|| `--expect STRING` | — | succeed as soon as `STRING` is seen on QEMU stdout, then `SIGTERM` the child so B2 plugins can flush |
 || `--gdb PORT`, `--trace-uart FILE` | — | |
 
 ## 7. Diagnosis
@@ -222,8 +222,10 @@ g6q run     --target <id> --repo-root /path/to/design --os firmware-smoke --buil
 g6q run     --target <id> --machine g6lc-virt --os ubuntu --kernel Image \
             --rootfs rootfs.img --netdev user --ssh-port 2222 --smp 8
 g6q tandem  --target <id> --elf test.elf --tandem spike --tandem-ref $(which spike)
-g6q run     --target mini --backend qemu --qemu-path ./qemu/build/qemu-system-riscv64 \
-            --kernel ./smoke.elf --record trace.json
+g6q run     --target mini --backend qemu --kernel ./smoke.elf --record trace.json
+# OpenSBI boot gate on the generated B1 machine (in-tree QEMU picked up by default):
+g6q run     --target g6lc64_smt2 --repo-root /path/to/design --backend qemu \
+            --timeout 20 --expect SMT2-OSBI-OK
 # Explicit B0 stock-QEMU override:
 g6q run     --target mini --backend qemu --stock-machine virt --stock-cpu rv64 \
             --qemu-path qemu-system-riscv64 --kernel ./smoke.elf

@@ -82,8 +82,19 @@ C-states.
 |------|-------|------------|--------|--------------|
 | `Zawrs` wait-on-pause | `core/controller.sv` / SBI | `sbi_send_ipi_and_wait` works correctly across harts | Open | `smt,zawrs` = 0 |
 
-While open, SBI must not use `sbi_send_ipi_and_wait`; Linux does not advertise
-`zawrs`.
+Scope, precisely: the **instructions are implemented**. `core/decoder.sv` decodes
+`WRS.NTO` (imm `0x00d`) and `WRS.STO` (imm `0x01d`) under `CVA6Cfg.ZawrsEn` and
+retires them as `ariane_pkg::WFI` with WFI's privilege/`TW` rules. Zawrs permits
+`WRS` to terminate for any reason, so that is a conforming implementation, and
+every `g6lc*` package sets `ZawrsEn: bit'(1)`.
+
+What is open is the SMT **wait-for-peer wake** (no reservation-set-invalidation
+wake between the two harts). That is a microarchitectural quality-of-implementation
+item plus a firmware policy, not an ISA-advertisement item. While open: SBI must
+not use `sbi_send_ipi_and_wait`, and `ariane-smt2.dts` does not list `zawrs` in
+`riscv,isa` / `riscv,isa-extensions`. Packages without the SMT wake constraint
+(`ariane-linux`, `ariane-ai`, `ariane-stream8`, `ariane-ooo-server`,
+`ariane-server-math-v`) do advertise `zawrs`, which is correct for them.
 
 ---
 
@@ -117,15 +128,50 @@ soc {
 };
 ```
 
-OpenSBI consumes these properties in the `CVA6_DI_BRINGUP` profile and patches
-`cpu@` `status` / `available` fields accordingly. Linux may read
-`smt,default-sku` to decide whether to trust dual-hart topology before the
-product closeout is complete.
+**This node is documentation only. No firmware reads it.** The `cpu@` nodes are
+the sole guest-visible contract, and they must simply not advertise what the SKU
+does not provide. `smt,default-sku` is a checklist marker, not a runtime input.
 
-The `smt,zawrs = <0>` property is paired with removing `zawrs` from the
-per-`cpu@` `riscv,isa-extensions` list; the `smt,*` node is the source of
-truth for the compensation rather than the implicit ISA string. When the
-`Zawrs`/wait-for-peer product item closes, add `zawrs` back to both places.
+### Enforcement: build time, not run time
+
+`software/smt2-linux/scripts/dts_to_dtb.py` runs before `make` and proves the
+invariant. For each `smt,<item> = <0>` that maps to a guest-visible extension
+(table `CLOSEOUT_ISA_TOKENS`; today only `zawrs`), it checks every `riscv,isa`
+and `riscv,isa-extensions` in the tree:
+
+| Case | Behaviour |
+|------|-----------|
+| No `cpu@` advertises the token | prints `closeout OK: no cpu@ advertises <tok>`, compiles |
+| A `cpu@` advertises it | **fails the DTB build** (exit 3), naming property and token |
+| `--strip-closeout` | rewrites a temporary DTS without the token, compiles that, leaves the source DTS untouched |
+| `--no-closeout-check` | skips the guard |
+
+Non-ISA properties (`dual-commit`, `banked-bht`, `fp-register-banking`,
+`idle-clock-gate`, `boot-crutches`, `default-sku`) are deliberately not enforced —
+they describe microarchitecture and policy, not guest-visible ISA. `g6q conform`
+remains the checker for config × DTS disagreement generally
+(capability `wait-on-reservation`: `config = ZawrsEn`, `dts = zawrs`).
+
+### Retired: the OpenSBI runtime rewriter
+
+An earlier revision patched OpenSBI's `platform/generic/platform.c` with
+`g6lc_fdt_smt_compensation()` (via a now-deleted
+`scripts/patch_opensbi_smt_compensation.py`) to strip `zawrs` from the FDT at
+run time. It is retired for three independent reasons:
+
+1. **It was dead.** `ariane-smt2.dts` has never advertised `zawrs`, so the strip
+   had nothing to remove.
+2. **It broke the boot.** The rewriter called `sbi_malloc()` from
+   `fw_platform_init()` (`fw_base.S:115`), which runs ~250 instructions before
+   `sbi_init()` → `sbi_heap_init()` (`fw_base.S:367`). `hpctrl` was still zeroed
+   BSS, so `sbi_list_for_each_entry` dereferenced `NULL+0x18` and trapped
+   `fault_load` with `mtval = 0x18`, landing in `_start_hang`. This was the
+   OpenSBI-on-QEMU hang observed on `g6lc-g6lc64_smt2`.
+3. **It cost a fork.** The patch matched upstream source text by anchor and had
+   to track it across OpenSBI revisions.
+
+Firmware stays stock. When the wait-for-peer item closes, add `zawrs` back to the
+`cpu@` nodes and drop `smt,zawrs` — no firmware change is involved.
 
 ---
 

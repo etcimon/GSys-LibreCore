@@ -95,6 +95,10 @@ BUILD_LDFLAGS="${SOFT_LADDER_BUILD_LDFLAGS:-}"
 # nackinv-d1 / wrprio-all incremental rebuilds fail with "no member wr_ack".
 # Opt-in: SOFT_LADDER_BUILD_CXXFLAGS=-DG6LC_TRACE_WT_WBUFFER (needs public).
 BUILD_CXXFLAGS="${SOFT_LADDER_BUILD_CXXFLAGS:-}"
+# fetch_B (G6LC_FETCH_B) testbench debug probes only exist in the B frontend.
+if [[ "$FETCH" == "B" ]]; then
+  BUILD_CXXFLAGS="-DG6LC_FETCH_B ${BUILD_CXXFLAGS}"
+fi
 LINKER="${SOFT_LADDER_BUILD_LINKER:-}"
 
 if [[ -n "$LINKER" ]]; then
@@ -237,6 +241,17 @@ fi
 log "target=$TARGET ver-library=$VERLIB_DIR jobs=$JOBS vthreads=$VTHREADS"
 echo "$FETCH" >"$STAMP"
 
+# Regenerate corev_apu/bootrom/bootrom.sv and bootrom.h from the current
+# bootrom.S / linker.ld / ariane.dts. Verilator consumes the .sv directly,
+# but the top-level Makefile does not rebuild it, so a stale bootrom.sv would
+# silently boot from an old binary or from DTB strings.
+log "regenerating bootrom"
+make -C "$ROOT/corev_apu/bootrom" \
+  RISCV_GCC="$RISCV/bin/riscv-none-elf-gcc" \
+  RISCV_OBJCOPY="$RISCV/bin/riscv-none-elf-objcopy" \
+  PYTHON=python3 \
+  all
+
 # When the Mdir is outside the repo (e.g. remote /opt/testharness/work/...),
 # the generated Variane_testharness.mk's VPATH (.. and VM_USER_DIR) does not
 # point to the C++ sources. Seed VPATH with the repo root so the compile step
@@ -254,6 +269,9 @@ make -s verilate \
   ver-library="$VERLIB_DIR" \
   flist="$FLIST" \
   verilator_threads="$VTHREADS" \
+  TRACE_COMPACT="${SOFT_LADDER_BUILD_TRACE_COMPACT:-}" \
+  TRACE_FAST="${SOFT_LADDER_BUILD_TRACE_FAST:-}" \
+  VERILATOR_INSTALL_DIR="${VERILATOR_INSTALL_DIR:-$VLT_HOME}" \
   XLEN=64 \
   CVA6_REPO_DIR="$CVA6_REPO_DIR" \
   SPIKE_INSTALL_DIR="$SPIKE_INSTALL_DIR" \

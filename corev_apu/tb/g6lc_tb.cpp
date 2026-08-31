@@ -345,13 +345,13 @@ done_processing:
     top->rtc_i = 0;
     top->eval();
 #if VM_TRACE
-    if (vcdfile || fst_fname)
+    if ((vcdfile || fst_fname) && main_time >= start)
       tfp->dump(static_cast<vluint64_t>(main_time * 2));
 #endif
     top->clk_i = 1;
     top->eval();
 #if VM_TRACE
-    if (vcdfile || fst_fname)
+    if ((vcdfile || fst_fname) && main_time >= start)
       tfp->dump(static_cast<vluint64_t>(main_time * 2 + 1));
 #endif
     main_time++;
@@ -457,14 +457,14 @@ done_processing:
     top->clk_i = 0;
     top->eval();
 #if VM_TRACE
-    if (vcdfile || fst_fname)
+    if ((vcdfile || fst_fname) && main_time >= start)
       tfp->dump(static_cast<vluint64_t>(main_time * 2));
 #endif
 
     top->clk_i = 1;
     top->eval();
 #if VM_TRACE
-    if (vcdfile || fst_fname)
+    if ((vcdfile || fst_fname) && main_time >= start)
       tfp->dump(static_cast<vluint64_t>(main_time * 2 + 1));
 #endif
     // toggle RTC
@@ -558,6 +558,21 @@ done_processing:
       }
       bool poll = (main_time > 10000) && ((main_time & poll_mask) == 0);
       bool tick = poll || (trace_on && have_log);
+#if (VERILATOR_VERSION_INTEGER >= 5000000)
+      if (main_time < 64) {
+        auto gpr0 = [&](int n) -> uint64_t {
+          const auto &rf = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem);
+          return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
+        };
+        uint64_t npc = (uint64_t)top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
+        uint64_t mepc0 = (uint64_t)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q);
+        uint64_t mcause0 = (uint64_t)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q);
+        std::cerr << std::hex << "[boot] t=" << main_time << " npc=0x" << npc
+                  << " mepc=0x" << mepc0 << " mcause=" << mcause0
+                  << " s0=0x" << gpr0(8) << " a5=0x" << gpr0(15)
+                  << std::dec << "\n";
+      }
+#endif
       if (tick && !rules.empty()) {
         auto *cbytes = reinterpret_cast<const uint8_t *>(MEM);
         auto rd64 = [&](size_t off) -> uint64_t {
@@ -741,6 +756,8 @@ done_processing:
         // Leftover-complete 12958 vs sequential 12960. replay_addr /
         // serving_unaligned / is_mispredict DCE; k1 = misp|flush|replay.
         // npc_q and icache_vaddr_q are flops (not DCE).
+        // These signals only exist in the fetch_B (G6LC_FETCH_B) frontend.
+#if 0  // G6LC_FETCH_B debug signals are not in the verilated public interface; re-enable after adding /* verilator public */ to the wires.
         if (trace_on && ((main_time >= 103000 && main_time <= 180000) ||
                          (main_time >= 2448000 && main_time <= 2453000))) {
           unsigned fifk = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_if);
@@ -790,6 +807,7 @@ done_processing:
                       << "\n";
           }
         }
+#endif
         bool do_exit = false;
         for (auto &r : rules) {
           if (r.kind == G6LC_EXIT_COOKIE && poll) {

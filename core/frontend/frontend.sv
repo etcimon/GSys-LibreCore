@@ -213,11 +213,14 @@ module frontend
       .flush_i            (flush_i),
       .kill_i             (kill_s2),
       .hart_i             (smt_hart_i),
-      .valid_i            (icache_valid_q),
+      // Only present a real I$ response to the realigner; icache_valid_q is
+      // a registered copy that can become 1 with stale vaddr/data 0x0 during
+      // reset/flush and would otherwise push a bogus pc=0 into the instr queue.
+      .valid_i            (icache_dreq_i.valid | lbuf_inject),
       .serving_unaligned_o(serving_unaligned),
       .leftover_pending_o (leftover_pending),
-      .address_i          (icache_vaddr_q),
-      .data_i             (icache_data_q),
+      .address_i          (realigner_vaddr),
+      .data_i             (realigner_data),
       .valid_o            (instruction_valid),
       .addr_o             (addr),
       .instr_o            (instr)
@@ -703,6 +706,14 @@ module frontend
   logic [CVA6Cfg.FETCH_WIDTH-1:0] icache_data;
   // re-align the cache line
   assign icache_data = icache_dreq_i.data >> {shamt, 4'b0};
+  // I$: present the response address and data immediately on the valid pulse.
+  // icache_vaddr_q / icache_data_q are registered one cycle later, so using
+  // them directly for the realigner gives the previous (reset) values and
+  // produces a bogus PC 0x0 for the first fetch.
+  logic [CVA6Cfg.VLEN-1:0] realigner_vaddr;
+  logic [CVA6Cfg.FETCH_WIDTH-1:0] realigner_data;
+  assign realigner_vaddr = icache_dreq_i.valid ? icache_dreq_i.vaddr : icache_vaddr_q;
+  assign realigner_data  = icache_dreq_i.valid ? icache_data     : icache_data_q;
   // loop-buffer inject: present as a 1-cycle I$ response without a request
   assign lbuf_inject = FtqEn && CVA6Cfg.LoopBufEn && lbuf_consume;
 
@@ -728,9 +739,19 @@ module frontend
       // re-enter the instruction queue, so drop it on any redirect. kill_s2 only
       // cancels the in-flight request.
       if (flush_i || is_mispredict || bp_fire) begin
+//pragma translate_off
+        if ($time() < 100)
+          $display("[fe-flush] t=%0t flush=%b mis=%b bp=%b icache_valid_q=%b dreq_i.valid=%b",
+                   $time, flush_i, is_mispredict, bp_fire, icache_valid_q, icache_dreq_i.valid);
+//pragma translate_on
         icache_valid_q    <= 1'b0;
         icache_ex_valid_q <= ariane_pkg::FE_NONE;
       end else begin
+//pragma translate_off
+        if ($time() < 100)
+          $display("[fe-reg] t=%0t dreq_i.vaddr=%h dreq_i.valid=%b icache_valid_q=%b vaddr_q=%h data_q[31:0]=%h",
+                   $time, icache_dreq_i.vaddr, icache_dreq_i.valid, icache_valid_q, icache_vaddr_q, icache_data_q[31:0]);
+//pragma translate_on
         // prefer the real I$ return, else inject the loop buffer into the same pipe
         icache_valid_q <= icache_dreq_i.valid | lbuf_inject;
         if (icache_dreq_i.valid || lbuf_inject) begin
@@ -931,7 +952,7 @@ module frontend
       .instr_i            (instr),                 // from re-aligner
       .addr_i             (addr),                  // from re-aligner
       .exception_i        (icache_ex_valid_q),     // from I$
-      .exception_addr_i   (icache_vaddr_q),
+      .exception_addr_i   (realigner_vaddr),
       .exception_gpaddr_i (icache_gpaddr_q),
       .exception_tinst_i  (icache_tinst_q),
       .exception_gva_i    (icache_gva_q),

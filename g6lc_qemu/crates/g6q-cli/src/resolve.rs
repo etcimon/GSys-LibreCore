@@ -73,16 +73,47 @@ pub fn boot_options(args: &Args) -> g6q_emit_args::BootOptions {
     let staged_fw = format!("out/fw/fw_{fw_mode}.bin");
     let built_fw =
         format!("out/fw-src/opensbi/build/platform/{fw_platform}/firmware/fw_{fw_mode}.bin");
-    let firmware = match args.value("fw") {
-        Some(p) => g6q_emit_args::Firmware::File(p.to_string()),
-        None if fw_mode == "none" => g6q_emit_args::Firmware::None,
-        None if std::path::Path::new(&staged_fw).is_file() => {
-            g6q_emit_args::Firmware::File(staged_fw)
+
+    // Host-adapter hook: lets a monorepo build (e.g. `build-platform/workspace/smt2-linux`)
+    // pass a prebuilt OpenSBI without becoming a second source of truth. `G6LC_QEMU_FW`
+    // wins; otherwise `CVA6_LINUX_PAYLOAD` is used, preferring a sibling `.bin` if the
+    // variable points to the `.elf`.
+    let env_fw = {
+        if let Ok(p) = std::env::var("G6LC_QEMU_FW") {
+            if std::path::Path::new(&p).is_file() {
+                Some(p)
+            } else {
+                None
+            }
+        } else if let Ok(p) = std::env::var("CVA6_LINUX_PAYLOAD") {
+            let elf = std::path::PathBuf::from(&p);
+            if elf.is_file() {
+                let bin = elf.with_extension("bin");
+                if bin.is_file() {
+                    Some(bin.to_string_lossy().into_owned())
+                } else {
+                    Some(p)
+                }
+            } else {
+                None
+            }
+        } else {
+            None
         }
-        None if std::path::Path::new(&built_fw).is_file() => {
-            g6q_emit_args::Firmware::File(built_fw)
-        }
-        None => g6q_emit_args::Firmware::Default,
+    };
+
+    let firmware = if let Some(p) = args.value("fw") {
+        g6q_emit_args::Firmware::File(p.to_string())
+    } else if fw_mode == "none" {
+        g6q_emit_args::Firmware::None
+    } else if let Some(p) = env_fw {
+        g6q_emit_args::Firmware::File(p)
+    } else if std::path::Path::new(&staged_fw).is_file() {
+        g6q_emit_args::Firmware::File(staged_fw)
+    } else if std::path::Path::new(&built_fw).is_file() {
+        g6q_emit_args::Firmware::File(built_fw)
+    } else {
+        g6q_emit_args::Firmware::Default
     };
 
     let os = args.value_or("os", "firmware-smoke").to_string();
