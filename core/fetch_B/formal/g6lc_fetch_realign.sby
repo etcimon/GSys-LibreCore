@@ -1,0 +1,43 @@
+# R6 realigner formal (bounded) - proves against the LIVE instr_realign.
+#
+# I1/I2 no-fabricate (emitted halfword == the halfword in this window's data)
+# and I4 per-hart leftover isolation. Both need the module, not just the pure
+# functions: one quantifies over the I$ line, the other over the per-hart bank.
+#
+# NH=2 so the bank is genuinely exercised; a single-hart run cannot fail I4.
+#
+# Run: sby -f core/fetch_B/formal/g6lc_fetch_realign.sby
+# Wired into build-platform verify.formalTasks (cva6-build verify --formal).
+
+[options]
+# Stateful (the carry bank), so the horizon must cover establish-then-complete
+# across two windows plus the kill/flush cases in between.
+mode bmc
+depth 8
+
+[engines]
+abc bmc3
+smtbmc z3
+
+[script]
+# No --keep-hierarchy: slang refuses a hierarchical read across a PRESERVED
+# module boundary, and the bank (dut.carry_valid_bank_q) has to be observed.
+# Every assertion lives in this props module, not in the DUT, so flattening
+# costs nothing here. sv-elab/slang is integrated into Yosys from v0.67.
+# `riscv_pkg` and `ariane_pkg` read `cva6_config_pkg`, which is whichever target
+# package is on the flist. The smt2 package is used here so the proof runs in the
+# configuration this plane actually ships (T=2, RVC, FW=64); it must be read
+# before the two packages that reference it.
+read_slang --std 1800-2017 --top g6lc_fetch_realign_props -DFORMAL \
+    g6lc64_smt2_config_pkg.sv config_pkg.sv riscv_pkg.sv ariane_pkg.sv \
+    g6lc_fetch_pkg.sv instr_realign.sv g6lc_fetch_realign_props.sv
+prep -top g6lc_fetch_realign_props
+
+[files]
+../../include/g6lc64_smt2_config_pkg.sv
+../../include/config_pkg.sv
+../../include/riscv_pkg.sv
+../../include/ariane_pkg.sv
+../g6lc_fetch_pkg.sv
+../instr_realign.sv
+g6lc_fetch_realign_props.sv
