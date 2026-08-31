@@ -35,6 +35,7 @@ first.
 | [`../../g6lc_qemu/architecture/AI_BRIDGE.md`](../../g6lc_qemu/architecture/AI_BRIDGE.md) | **Package-side**: host-**pushed** accelerator work — descriptor packing from the ingested layout, local (B3) vs remote (B1+B2) execution routes, the tensor artifact contract, and the transport boundary that stays unmodelled until `contracts.ai_host_transport` is pinned |
 | [`cli.md`](cli.md) | Complete command-line surface: target / DTS / APU / OpenSBI / OS / diag |
 | [`os-linux-matrix.md`](os-linux-matrix.md) | OpenSBI modes, OS profiles (incl. Ubuntu), the Q9 capability matrix |
+|| [`u-boot-edk2-boot-architecture.md`](u-boot-edk2-boot-architecture.md) | U-Boot + FIT and EDK2 / UEFI boot ladder, gated on fetch-IQ program order |
 | [`staging.md`](staging.md) | Q0–Q9 stages with entry / exit gates |
 
 Related programs of record:
