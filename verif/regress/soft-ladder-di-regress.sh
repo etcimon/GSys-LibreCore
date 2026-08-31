@@ -203,12 +203,37 @@ veri_tohost_pass() {
   "$harness" +max-cycles="$MAX_CYCLES" +time_out="$MAX_CYCLES" +debug_disable \
     +tohost_addr="0x${th}" "$elf" >"$vlog" 2>&1
   set -e
-  # DI convention: tohost=1 is pass, anything else (including tohost=0
-  # timeout or tohost=3 fail) is fail. "SUCCESS" in the log means the
-  # harness reached max-cycles with tohost=0, which is a timeout, not a pass.
-  if grep -qE 'tohost = (0x)?1[^0-9a-fA-F]' "$vlog"; then
+  # Pass/fail classification. Read this before changing it -- the obvious rules
+  # are all wrong, and two of them have already been shipped.
+  #
+  # The harness prints `dtm->exit_code()`, NOT the raw tohost word
+  # (corev_apu/tb/ariane_tb.cpp, and g6lc_tb.cpp). HTIF convention is that
+  # tohost bit0 signals "done" and bits[31:1] carry the exit code, so:
+  #   test writes tohost=1  -> code 0 -> "*** SUCCESS *** (tohost = 0)"
+  #   test writes tohost=3  -> code 1 -> "*** FAILED ***  (tohost = 1)"
+  # A rule of "tohost = 1 means pass" therefore matches the FAILING run and
+  # misses the passing one -- exactly inverted. Measured on this harness:
+  #   mini_must_pass -> *** SUCCESS *** (tohost = 0) after 318 cycles
+  #   mini_must_fail -> *** FAILED ***  (tohost = 1) after 318 cycles
+  #
+  # But `SUCCESS` alone is not sufficient either, which is what motivated the
+  # inverted rule in the first place: on a TIMEOUT no exit code is ever set, so
+  # exit_code()==0 and the harness prints the SAME "*** SUCCESS *** (tohost = 0)"
+  # line. A genuine pass and a timeout are indistinguishable in that string.
+  #
+  # The real discriminator is the rvfi_tracer: it only prints its termination
+  # notice when it actually observes the tohost write
+  # (corev_apu/tb/rvfi_tracer.sv, `mem_paddr == TOHOST_ADDR && mem_wdata[0]`).
+  # Verified: present for both controls at 318 cycles, absent under a 300-cycle
+  # cap. So a pass requires BOTH positive termination and a success code.
+  local terminated=0
+  grep -qE 'rvfi_tracer.* Simulation terminated' "$vlog" && terminated=1
+  if [[ "$terminated" == "1" ]] && grep -qE '\*\*\* SUCCESS \*\*\*' "$vlog"; then
     return 0
   fi
+  # Everything else is a failure, and the three cases stay distinguishable to a
+  # reader of the log: FAILED (nonzero exit code), no termination (timeout), or
+  # no harness output at all (crash).
   return 1
 }
 

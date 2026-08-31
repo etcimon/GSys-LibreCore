@@ -1244,14 +1244,37 @@ def cmd_di(rem: Remote, args) -> int:
         # The remote script always echoes "rc=N" before the tail.
         match = re.search(r"^rc=(\d+)", out_text, re.MULTILINE)
         rc = int(match.group(1)) if match else proc.returncode
-        # DI convention: tohost=1 is pass, anything else (including tohost=0
-        # timeout / no write) is fail. The harness returns the tohost value as
-        # its exit code, so rc==1 only means pass if the log actually shows
-        # tohost=1. rvfi_tracer mismatches can also return rc==1 while tohost
-        # is still 0, so we must parse the printed tohost value, not just rc.
+        # Pass/fail classification. The obvious rules are all wrong and two have
+        # already shipped; see soft-ladder-di-regress.sh for the same reasoning.
+        #
+        # The harness prints dtm->exit_code(), NOT the raw tohost word. HTIF uses
+        # tohost bit0 as "done" with bits[31:1] as the exit code, so a test that
+        # writes tohost=1 prints "(tohost = 0)" and one that writes tohost=3
+        # prints "(tohost = 1)". A "tohost == 1 means pass" rule matches the
+        # FAILING run and misses the passing one. Measured 2026-08-31:
+        #   mini_must_pass -> *** SUCCESS *** (tohost = 0) after 318 cycles
+        #   mini_must_fail -> *** FAILED ***  (tohost = 1) after 318 cycles
+        #
+        # "SUCCESS" alone is also insufficient -- which is what motivated the
+        # inverted rule: on a timeout no exit code is set, so exit_code()==0 and
+        # the harness prints the SAME success line. Pass and timeout are
+        # indistinguishable in that string.
+        #
+        # The discriminator is the rvfi_tracer notice, which only appears when the
+        # tohost write is actually observed (rvfi_tracer.sv: mem_paddr ==
+        # TOHOST_ADDR && mem_wdata[0]). Verified present for both controls at 318
+        # cycles and absent under a 300-cycle cap. A pass needs BOTH.
+        terminated = re.search(r"rvfi_tracer.* Simulation terminated", out_text) is not None
+        success = "*** SUCCESS ***" in out_text
+        failed = "*** FAILED ***" in out_text
+        passed = terminated and success and not failed
         tohost_match = re.search(r"\(tohost = (?:0x)?([0-9a-fA-F]+)\)", out_text)
-        tohost = int(tohost_match.group(1), 0) if tohost_match else 0
-        passed = tohost == 1
+        tohost = int(tohost_match.group(1), 16) if tohost_match else -1
+        if not passed:
+            # Keep the three failure modes distinguishable in the log: a nonzero
+            # exit code, a timeout (no termination), and a crash (no output).
+            why = ("exit-code" if failed else "timeout" if success else "no-output")
+            th_log(f"[di]   {test}: not a pass ({why}); terminated={terminated}")
         th_log(f"[di] {'PASS' if passed else 'FAIL'} {test} rc={rc} tohost={tohost} in {time.time()-t0_run:.1f}s")
         if args.pull:
             dest = repo_root() / "remote-runs" / tag / f"{test}.log"
