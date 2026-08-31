@@ -243,43 +243,84 @@ module instr_queue
   // ----------------------
   // Downstream interface
   // ----------------------
-  // slot of issue port p. When En.order is set, the two oldest (smallest PC)
-  // FIFO heads are presented on ports 0/1 so the issue group is in program
-  // order. The tail pointer continues to rotate round-robin for the state
-  // machine; it is only used as the next idx_ds_q when both ports pop.
+  // slot of issue port p. When En.order is set, the issue group is ordered so a
+  // producer is never issued after a consumer that depends on it (c.jr/c.jalr
+  // stale ra/sp, B/I13). The local rule is "oldest-PC first" *within one fetch
+  // window* -- that is the only case where smaller PC is guaranteed to mean
+  // earlier in program order. Across control-flow (ret, backward branch) the next
+  // fetch window can have a smaller PC than the current fall-through, so PC order
+  // there inverts program order and the return target over-takes older slots.
+  // In that case the group falls back to round-robin FIFO order, which is program
+  // order. The tail pointer continues round-robin for the state machine.
   generate
     if (En.order && NrIssue > 1) begin : gen_ordered_issue
-      // B/I13: round-robin 4 FIFOs can drain a younger control-flow in port 0
-      // before an older producer in port 1, causing c.jr/c.jalr to use stale
-      // ra/sp. Select oldest-PC first, then second-oldest.
+      // Candidate FIFOs are the next NrIssue entries in round-robin order.
+      // Reorder by PC only if every non-empty candidate is from the same
+      // instruction-fetch window; otherwise stick to round-robin.
+      logic [NrFifo-1:0] candidate_mask;
+      logic              all_same_window;
+      logic [CVA6Cfg.VLEN-1:0] ref_window;
+
       always_comb begin
-        logic [CVA6Cfg.VLEN-1:0] oldest_pc, second_pc;
-        logic [NrFifo-1:0] oldest_mask, second_mask;
-        oldest_pc   = '1;
-        second_pc   = '1;
-        oldest_mask = '0;
-        second_mask = '0;
+        logic [NrFifo-1:0] used;
+        logic [CVA6Cfg.VLEN-1:0] best_pc;
+        logic [NrFifo-1:0]       best_mask;
+
+        used      = '0;
+        best_pc   = '1;
+        best_mask = '0;
+        candidate_mask = '0;
+        for (int unsigned i = 0; i < NrIssue; i++) begin
+          candidate_mask |= rotate_left(idx_ds_q, fifo_idx_t'(i));
+        end
+
+        // Pick the first non-empty candidate as the window reference.
+        ref_window     = '0;
+        all_same_window = 1'b0;
         for (int unsigned f = 0; f < NrFifo; f++) begin
-          if (~instr_queue_empty[f]) begin
-            if (instr_data_out[f].pc < oldest_pc) begin
-              oldest_pc   = instr_data_out[f].pc;
-              oldest_mask = '0;
-              oldest_mask[f] = 1'b1;
-            end
+          if (candidate_mask[f] && ~instr_queue_empty[f]) begin
+            ref_window      = instr_data_out[f].pc >> Geo.align_bits;
+            all_same_window = 1'b1;
+            break;
           end
         end
         for (int unsigned f = 0; f < NrFifo; f++) begin
-          if (~instr_queue_empty[f] && ~oldest_mask[f]) begin
-            if (instr_data_out[f].pc < second_pc) begin
-              second_pc   = instr_data_out[f].pc;
-              second_mask = '0;
-              second_mask[f] = 1'b1;
-            end
+          if (candidate_mask[f] && ~instr_queue_empty[f] &&
+              (instr_data_out[f].pc >> Geo.align_bits) != ref_window) begin
+            all_same_window = 1'b0;
           end
         end
-        idx_ds[0] = oldest_mask;
-        idx_ds[1] = second_mask;
+
+        for (int unsigned p = 0; p < NrIssue; p++) begin
+          idx_ds[p] = '0;
+        end
+
+        if (all_same_window) begin
+          // Within the same fetch window, PC order == program order.
+          used = '0;
+          for (int unsigned p = 0; p < NrIssue; p++) begin
+            best_pc   = '1;
+            best_mask = '0;
+            for (int unsigned f = 0; f < NrFifo; f++) begin
+              if (candidate_mask[f] && ~used[f] && ~instr_queue_empty[f] &&
+                  (instr_data_out[f].pc < best_pc)) begin
+                best_pc   = instr_data_out[f].pc;
+                best_mask = '0;
+                best_mask[f] = 1'b1;
+              end
+            end
+            idx_ds[p] = best_mask;
+            used     |= best_mask;
+          end
+        end else begin
+          // Cross-window group: round-robin is program order. A return target
+          // with a smaller PC must not overtake the fall-through that preceded it.
+          for (int unsigned p = 0; p < NrIssue; p++) begin
+            idx_ds[p] = rotate_left(idx_ds_q, fifo_idx_t'(p % NrFifo));
+          end
+        end
       end
+
       for (genvar p = NrIssue; p <= NrIssue; p++) begin : gen_ordered_tail
         assign idx_ds[p] = rotate_left(idx_ds_q, fifo_idx_t'(p % NrFifo));
       end
@@ -430,10 +471,12 @@ module instr_queue
       if ((|push_instr_fifo) || (|consumed_o) || (|fetch_entry_valid_o)) begin
         // Single string literal: a concatenated {"..",".."} format compiles but
         // never reaches the binary, giving a silent no-op probe.
-        $display("[iq] t=%0t isq=%b dsq=%b dsd=%b push=%b valid=%b fire=%b cons=%b full=%b rdy=%b a0=%h",
+        $display("[iq] t=%0t isq=%b dsq=%b dsd=%b push=%b valid=%b fire=%b cons=%b full=%b rdy=%b a0=%h head=[%h %h %h %h]",
                  $time, idx_is_q, idx_ds_q, idx_ds_d, push_instr_fifo, valid,
                  fire_prefix, consumed_o, instr_queue_full, ready_o,
-                 fetch_entry_o[0].address);
+                 fetch_entry_o[0].address,
+                 instr_data_out[0].pc, instr_data_out[1].pc,
+                 instr_data_out[2].pc, instr_data_out[3].pc);
       end
     end
   end
