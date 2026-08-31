@@ -305,6 +305,79 @@ Three consequences:
    precondition for attributing it. Note it also confirms the reverted commit filter was *masking*
    this defect by forcing `s0`'s write rather than fixing it — exactly what H6 predicted.
 
+### Workflow to O4, inferred (2026-08-31) — and one instrument defect fixed on the way
+
+O4 is not workable directly; it sits behind O3. The dependency chain, cheapest step first:
+
+```
+O4  OpenSBI residual, as a gate
+ └── O3  bootrom must reach DRAM (jr s0 -> 0x80000000)
+      └── which layer loses the jump?
+           └── cheapest discriminator (P6): A/B pair on mini_must_pass
+                ├── legacy green + B red -> fetch_B; one fix also unblocks O1c and O2
+                └── both red             -> generic core (issue/commit/link), different owner
+```
+
+**Instrument defect found and fixed first — the committed generated bootrom was a commit behind its
+source.** `corev_apu/bootrom/bootrom.{sv,h}` are *generated* from `bootrom.S` by `gen_rom.py`, and they
+are **checked in**. When `bootrom.S` was reverted to stock in `f2bbcad63`, the artifacts were left at
+`7e6c19c54` (the accommodation image with interleaved `nop`s). Verilator compiles the `.sv`, not the
+`.S`, so the in-tree image silently disagreed with its own source. Both are now regenerated and in
+sync (diff is exactly the accommodation→stock image). **Standing hazard worth remembering: a generated
+artifact that is checked in can disagree with its source, and here the artifact is what ships into the
+simulation.** `soft-ladder-build-harness.sh` does regenerate it during a remote build (with the right
+`RISCV_GCC`), which is why remote runs were not as stale as the tree — but anything that Verilates the
+tree directly would have used the wrong ROM.
+
+**A retraction.** On the first pass I read `fetch_addr=0x10044 instr=ffdff06f` as the core fetching a
+*different 8-byte window* than the PC claimed — i.e. an I$/I1 violation. **That was wrong**, and it was
+wrong because it was measured against the mismatched image above: `ffdff06f` sits at `0x10050` in the
+accommodation build. After a clean rebuild the spin site moves to `0x1004c`, which *is* `wfi` in the
+correct image. There is no evidence of an I$ window mismatch. (T9: when the instrument changes, the
+record moves — including my own reading of it from 40 minutes earlier.)
+
+**O3 stands, now on a trustworthy instrument.** Freshly built B harness, bootrom regenerated from stock
+`bootrom.S` (verified by disassembly: `li s0,1; slli s0,s0,0x1f; csrr; auipc; addi; jr s0` at
+`0x10000`-`0x10014`, `_hang` at `0x10040`):
+
+```
+mini_must_pass -> fail (expected pass)      # three instructions, tohost=1
+mini_must_fail -> fail (expected fail)
+ORACLE INVALID -- suite NOT run
+spin: fetch_addr=0x1004c   (wfi, inside _hang)
+```
+
+So `jr s0` at `0x10014` does not reach `0x80000000`, and the hart ends parked in `_hang`. That is a
+real bootrom→DRAM hand-off defect on current source, measured with a matched ROM for the first time.
+
+**A/B pair run — result: NOT fetch_B.** `mini_must_pass` fails on **both** `--flavour B` and
+`--flavour legacy`. By the blame router's step 0 (`logics.md` §3, `ab.legacy_red && ab.B_red`) that is
+*"generic core (issue / STQ / CSR / commit) or B2 firmware policy"*. So the `fetch_address`/`kill_s2`
+combinational cone from O1c, while a real hygiene defect that still blocks the I9 proof, is **not** the
+cause of O3. That hypothesis is retired rather than left hanging.
+
+**The M1 control is itself valid** — checked before trusting its verdict, since a failing positive
+control can equally mean a broken control (H3 applied to the control). `mini_must_pass` links and
+assembles exactly as intended: `_start` at `0x80000000`, `tohost` at `0x80001000`, body =
+`csrr t0,mhartid; bnez t0,park; li t0,1; auipc/addi t1,tohost; sw t0,0(t1); j .`, with hart!=0 parked in
+`wfi`. Nothing about the test is wrong; the machine does not write `tohost`.
+
+**O3's framing was too narrow: the behaviour is test-dependent, and some tests DO reach DRAM.** On the
+same freshly built B harness:
+
+| Test | Where it ends |
+|---|---|
+| `mini_must_pass` | `fetch_addr=0x1004c` — `wfi` inside the **bootrom** `_hang`; never leaves ROM |
+| `mini_amoadd_w_spin` | fail (timeout) |
+| `mini_csr_expected_trap` | `dec_pc=0x800000cc`, `fetch_addr=0x800000ce instr=00000000 is_illegal=1` — **in DRAM**, fetching zeros past its code |
+
+So "the bootrom never reaches DRAM" is wrong as a general statement: `mini_csr_expected_trap` executes
+at `0x800000cc`. Two distinct signatures are in play, and they must not be merged into one story:
+(a) a hart that stays parked in the bootrom, and (b) a hart in DRAM fetching `00000000` and taking an
+illegal-instruction trap. Whether (a) is hart-1-parked-legitimately versus hart-0-stuck is **not yet
+established** and is the next thing to determine — the `id-dbg` line does not identify the hart, so the
+first step is per-hart attribution, not another hypothesis.
+
 ### Objectives (ordered by ladder position, not by symptom)
 
 The cheap rungs are now real, so the ordering rule from
@@ -318,7 +391,9 @@ increment at the **leftmost stage that can express the rule**, and treat firmwar
 | **O1c** | **I9** bounded trap hold | L2 | **Blocked, and the blocker is the finding.** The harness elaborates; `frontend.sv` has a circular combinational cone (`fetch_address` / `kill_s2`) that stops yosys building an SMT model. Fix the loop first -- then this proof is a re-run, not new work. |
 | **O2** | Grow the battery along the **live-peer** axis | L4 | **Gated on O3, not merely after it.** `mini_must_pass` (3 instructions) fails: every test spins in the bootrom `_hang` loop at `0x10044`. No directed test can be validated until that is fixed. |
 | **O3** | Bootrom `_hang` spin - why `jr s0` never reaches DRAM | L6 prep | **Now the critical path, and now deterministic.** Every DI test, including a 3-instruction one, ends spinning at `pc=0x10044 instr=ffdff06f` (`jal zero,0x10040`). H4 is satisfied, so attribution is finally admissible. Prime suspect is the `fetch_address`/`kill_s2` combinational cone from O1c: a non-convergent frontend and a bootrom that never completes its jump are consistent. |
-| **O4** | OpenSBI residual (`mepc0=0x8000a9a8`, `mcause0=0x2`) | L6 | Only as a **gate**, after O1–O3. Never as a search signal. |
+| **O4** | OpenSBI residual (`mepc0=0x8000a9a8`, `mcause0=0x2`) | L6 | Only as a **gate**, and it is unreachable until O3 lands: the machine never leaves the bootrom, so the OpenSBI signature recorded earlier was itself measured on a different (filtered) RTL. Re-measure it after O3 before citing it. Never a search signal. |
+| ~~**O3a**~~ | ~~A/B pair on `mini_must_pass`~~ | L4 | **Done. Result: not fetch_B** — fails on both flavours, so the blame router points at the generic core or firmware policy. Retires the comb-loop-causes-O3 hypothesis. |
+| **O3b** | **Next concrete step:** per-hart attribution of the two signatures | L4 | `id-dbg` does not print the hart, so it is currently impossible to tell "hart 1 parked correctly" from "hart 0 stuck". Add the hart id to that trace line (or read the trapdump) *before* forming another hypothesis. Then: why does `mini_csr_expected_trap` fetch `00000000` at `0x800000ce` while `mini_must_pass` never leaves ROM? |
 
 Deliberately **not** queued: another peel, hold-ELF cycle, or TRACE hunt for this class (H7 blocks a
 second unrepaid use), and any specialisation of a proof to a package geometry (weakens it).
