@@ -735,6 +735,24 @@ package config_pkg;
     assert (Cfg.NrALUs >= 1 && Cfg.NrALUs <= CVA6_MAX_ISSUE_PORTS);
     assert (!(Cfg.SuperscalarEn && Cfg.NrALUs < 2));
     assert (Cfg.NrIssuePorts <= Cfg.NR_SB_ENTRIES);
+    // CVXIF offload is wired for issue port 0 only, and with CvxifEn the decoder
+    // deliberately withholds `ex.valid` for an illegal instruction
+    // (core/decoder.sv:1976) so the coprocessor can claim the encoding first;
+    // the exception is then re-raised from the rejection
+    // (core/cvxif_fu.sv:69, driven by x_transaction_rejected). But every gate on
+    // that path keys off `issue_instr_i[0]`
+    // (core/issue_read_operands.sv:288, and its own "TODO check only for 1st
+    // instruction ??"). So on a multi-issue core an illegal instruction that
+    // lands on any port != 0 gets fu=CVXIF, no ex.valid, no CVXIF transaction,
+    // and cvxif_fu never returns valid: it neither traps nor retires, and the
+    // machine wedges. That is an ISA violation, so it must not be reachable by
+    // choosing a parameter combination -- fail elaboration instead of building a
+    // core that silently drops illegal-instruction exceptions. Lift this once the
+    // offload path covers all NrIssuePorts.
+    assert (!(Cfg.CvxifEn && Cfg.NrIssuePorts > 1))
+    else
+      $fatal(1,
+             "[cfg] CvxifEn with NrIssuePorts>1 is unsound: CVXIF offload is port-0 only, so an illegal instruction on another port never traps");
     assert (Cfg.INSTR_PER_FETCH >= 1);
     // Support for disabling MIP.MSIP and MIE.MSIE in Hypervisor and Supervisor mode is not supported
     // Software Interrupt can be disabled when there is only M machine mode in CVA6.

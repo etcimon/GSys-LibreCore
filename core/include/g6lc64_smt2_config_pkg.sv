@@ -31,7 +31,13 @@ package cva6_config_pkg;
   localparam CVA6ConfigF8En = 0;
   localparam CVA6ConfigFVecEn = 0;
 
-  localparam CVA6ConfigCvxifEn = 1;
+  // 0, not inherited-1: CVXIF offload is wired for issue port 0 only, while the
+  // decoder withholds ex.valid for an illegal instruction so the coprocessor may
+  // claim the encoding first. On this 2-wide core an illegal instruction issued on
+  // port 1 therefore never traps and never retires. check_cfg now rejects the
+  // combination outright; this target has no coprocessor to offload to, so the
+  // knob goes to baseline rather than the assert being relaxed.
+  localparam CVA6ConfigCvxifEn = 0;
   localparam CVA6ConfigCExtEn = 1;
   localparam CVA6ConfigZcbExtEn = 1;
   localparam CVA6ConfigZcmpExtEn = 0;

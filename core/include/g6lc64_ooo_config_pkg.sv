@@ -32,7 +32,9 @@ package cva6_config_pkg;
   localparam CVA6ConfigF8En = 0;
   localparam CVA6ConfigFVecEn = 0;
 
-  localparam CVA6ConfigCvxifEn = 1;
+  // 0: see g6lc64_smt2_config_pkg.sv -- CVXIF offload is issue-port-0 only, so
+  // CvxifEn on a multi-issue core drops illegal-instruction exceptions.
+  localparam CVA6ConfigCvxifEn = 0;
   localparam CVA6ConfigCExtEn = 1;
   localparam CVA6ConfigZcbExtEn = 1;
   localparam CVA6ConfigZcmpExtEn = 0;

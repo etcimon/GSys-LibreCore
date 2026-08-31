@@ -444,6 +444,43 @@ This also reframes O1c: I9 is "trap entry to `mtvec` is held until decode consum
 evidence a trap entry is never *generated* in the first place. The I9 hold contract is downstream of a
 defect in raising the exception at all, so proving I9 would not have caught this either.
 
+#### A real static defect found by reading that path — and an honest negative on the fix
+
+Reading `is_illegal → ex.valid → trap` end to end found a genuine ISA violation, independent of whether
+it causes the symptom above:
+
+| Step | Locus | Behaviour when `CvxifEn` |
+|---|---|---|
+| 1 | `core/decoder.sv:1838-1844` | illegal instr → `fu = CVXIF`, `op = OFFLOAD` |
+| 2 | `core/decoder.sv:1976` | **`ex.valid` is withheld** — `if (!CVA6Cfg.CvxifEn)` — so the coprocessor may claim the encoding first |
+| 3 | `core/issue_read_operands.sv:288` | `cvxif_req_allowed = (issue_instr_i[0].fu == CVXIF)` — **port 0 only**, with its own `TODO check only for 1st instruction ??` |
+| 4 | `core/cvxif_fu.sv:61,69` | `x_valid_o` and `x_exception_o.valid` are both just `x_illegal_i` |
+
+So on a **multi-issue** core an illegal instruction landing on any port `!= 0` gets `fu=CVXIF`, no
+`ex.valid`, no CVXIF transaction, and `cvxif_fu` never returns valid: **it neither traps nor retires**,
+and the machine wedges. Three G6LC configs shipped that combination — `g6lc64_smt2` (2-wide),
+`g6lc64_ooo` (2), `g6lc64_ooo_server` (4) — while *every* upstream config has `NrIssuePorts: 0`. The
+unsound pairing is therefore ours: the superscalar targets inherited `CvxifEn=1` from the upstream
+default without the offload path ever being extended past port 0.
+
+Fixed as a parameter red line rather than a waiver (I28: a parameter gate must not legitimize an ISA
+violation): `check_cfg` now `$fatal`s on `CvxifEn && NrIssuePorts > 1`, and the three targets take the
+knob to baseline (`CvxifEn = 0`) since none has a coprocessor to offload to.
+
+**But it did not fix the symptom, and that is recorded as a negative result, not quietly dropped.**
+Rebuilt and re-ran both probes: still `mcause=0`, still no trap. The rebuild is *confirmed* to have
+taken effect — the harness shrank `3736872 → 3718216` bytes as the CVXIF FU and example coprocessor
+dropped out of the model — so this is a real negative, not a stale instrument (which had already caught
+me twice today, see below).
+
+**Therefore a second, independent defect blocks exception delivery.** The leading suspect now converges
+with O1c: `core/decoder.sv:118 instruction_o` appears in the `UNOPTFLAT` circular-combinational report,
+and `instruction_o.ex.valid` is *precisely* the field that fails to work. `core/csr_regfile.sv:257
+update_access_exception` is in the same report, which would equally explain the illegal-CSR arm. A
+non-convergent `instruction_o` cone is a mechanism that produces "decode says illegal, nothing traps"
+for both probes at once. That is the next hypothesis, and it makes the comb-loop cleanup a correctness
+prerequisite rather than hygiene.
+
 **Do not** re-measure the recorded O4 signature (`mepc0=0x8000a9a8`, `mcause0=0x2`) as evidence yet: it
 was taken on RTL that still carried the commit value filter, so per T9 it is not comparable to anything
 current. Re-derive it only after the W2 gate passes.
@@ -465,7 +502,9 @@ increment at the **leftmost stage that can express the rule**, and treat firmwar
 | ~~**O3a**~~ | ~~A/B pair on `mini_must_pass`~~ | L4 | **Done. Result: not fetch_B** — fails on both flavours, so the blame router points at the generic core or firmware policy. Retires the comb-loop-causes-O3 hypothesis. |
 | **O3b** | Per-hart attribution of the `mini_must_pass` signature | L4 | `id-dbg` does not print the hart, so "hart 1 parked correctly" cannot be told from "hart 0 stuck". Still open, but **no longer the critical path** — O3c is cheaper and sits directly on the O4 chain. |
 | ~~**O3c**~~ | ~~illegal instruction vs illegal CSR discriminator~~ | L4 | **Done. Both fail identically with `mcause=0`, and both execute in DRAM** (confound checked). So it is **not** CSR legality: the suspect is generic exception delivery — `commit_stage.sv` / `controller.sv`, not `csr_regfile.sv`. |
-| **O3d'** | **Next concrete step:** why does a decoded-illegal instruction never raise an exception? | L4→RTL | Read the illegal→`ex.valid`→trap-entry path with the two minis in `~/trapdisc` as the reproducer (20 s each). `id_stage` shows `is_illegal=1` while `dec_ex=0`, so start where `is_illegal` is supposed to become an exception. Only then propose a fix. |
+| ~~**O3d'**~~ | ~~read the illegal→`ex.valid`→trap path~~ | L4→RTL | **Done, with a real find and an honest negative.** Found and fixed a genuine ISA violation (CVXIF offload is port-0 only while the decoder withholds `ex.valid`; unsound on all three multi-issue G6LC targets, now a `check_cfg` `$fatal` + knob to baseline). It did **not** fix the symptom: still `mcause=0` after a confirmed rebuild. |
+| **O3e** | **Next concrete step:** is the `instruction_o` combinational cone why `ex.valid` never asserts? | L2/RTL | `decoder.sv:118 instruction_o` and `csr_regfile.sv:257 update_access_exception` are both in the `UNOPTFLAT` report, and `instruction_o.ex.valid` is exactly the failing field — one mechanism explains both probe arms. This promotes the comb-loop cleanup from hygiene to a **correctness prerequisite**, and it is the same cone that blocks O1c's I9 proof. Repro: `~/trapdisc/t_{instr,csr}.elf`, 20 s each. |
+| **O3f** | Harden the build against stale-model builds | L0 | Three stale-instrument traps hit in one session (committed `bootrom.sv` behind `bootrom.S`; the output-cache key in `testharness_proxy.py:823` omits `core/include/*config_pkg.sv`; `grep Verilating` is not a valid "did it elaborate" probe because Verilator is silent on success). Each cost more than the analysis it interrupted. |
 | **O3d** | Pin the precise-trap contract at L2 — the first proof outside the fetch plane | L2 | `W2 × issue` and `W2 × commit` are empty cells (M5). All 11 proven contracts are fetch, which is precisely why a green formal gate could not catch this. |
 
 Deliberately **not** queued: another peel, hold-ELF cycle, or TRACE hunt for this class (H7 blocks a
