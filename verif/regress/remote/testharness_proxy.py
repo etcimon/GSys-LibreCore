@@ -148,6 +148,16 @@ DEFAULT_DI_TESTS = [
     "mini_fdt_nt_osbi",
 ]
 
+# H3 "Oracle Validity First" controls (architecture/AGENTS-g6lc-opensbi-dev-
+# heuristics.md s5 M1). These are a preflight GATE, never suite members: the
+# positive control must PASS and the negative control must FAIL, otherwise the
+# classifier cannot say both words and no verdict from the run is a measurement.
+# On 2026-08-31 the DI classifier read "*** SUCCESS *** (tohost = 0)" as a pass;
+# the negative control is what makes that class of defect visible.
+ORACLE_POSITIVE = "mini_must_pass"
+ORACLE_NEGATIVE = "mini_must_fail"
+ORACLE_CONTROLS = (ORACLE_POSITIVE, ORACLE_NEGATIVE)
+
 _DEBUG: bool = False
 
 
@@ -1097,6 +1107,11 @@ def cmd_di(rem: Remote, args) -> int:
     Variane_testharness running at a time. Verilator already pins vthreads to the
     remote host's nproc, so a single harness saturates the machine; running more
     in parallel oversubscribes cores and makes tests flaky.
+
+    H3 (Oracle Validity First): the two oracle controls run before the suite.
+    mini_must_pass must PASS and mini_must_fail must FAIL; if either verdict is
+    wrong the suite is not run and this returns non-zero, because the verdicts
+    it would produce are not measurements. Bypass with --no-oracle-check.
     """
     rem.start_master()
     _kill_stranded_harnesses(rem)
@@ -1110,9 +1125,17 @@ def cmd_di(rem: Remote, args) -> int:
     if rem.check(f"test -x {shlex.quote(harness)}", quiet=True) != 0:
         die(f"no remote harness '{harness}'; build first: {sys.argv[0]} build {args.flavour}")
 
-    tests = args.tests if args.tests else DEFAULT_DI_TESTS
+    tests = [t for t in (args.tests if args.tests else DEFAULT_DI_TESTS)
+             if t not in ORACLE_CONTROLS]
     if not tests:
         die("no tests selected")
+
+    # H3 preflight: the two oracle controls are compiled and uploaded with the
+    # suite but are NOT suite members -- they run first, are reported
+    # separately, and never enter the pass/fail counts.
+    oracle_check = not getattr(args, "no_oracle_check", False)
+    controls = list(ORACLE_CONTROLS) if oracle_check else []
+    compile_list = controls + tests
 
     # Build all minis locally using the existing shell script in compile-only mode.
     out = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="th-di-"))
@@ -1120,10 +1143,9 @@ def cmd_di(rem: Remote, args) -> int:
     env = os.environ.copy()
     env["SOFT_LADDER_COMPILE_ONLY"] = "1"
     env["SOFT_LADDER_OUT"] = str(out)
-    env["SOFT_LADDER_TESTS"] = " ".join(tests)
-    env["SOFT_LADDER_TESTS"] = " ".join(tests)
+    env["SOFT_LADDER_TESTS"] = " ".join(compile_list)
     script = f"cd {shlex.quote(str(root))} && bash verif/regress/soft-ladder-di-regress.sh"
-    log(f"compiling {len(tests)} DI tests -> {out}")
+    log(f"compiling {len(compile_list)} DI tests -> {out}")
     t0 = time.time()
     proc = subprocess.run(script, shell=True, env=env, check=False,
                           capture_output=True, text=True)
@@ -1140,13 +1162,18 @@ def cmd_di(rem: Remote, args) -> int:
     # Map each test to its compiled ELF.
     elfs = {}
     missing = []
-    for t in tests:
+    for t in compile_list:
         e = out / f"{t}.elf"
         if e.is_file():
             elfs[t] = e
         else:
             missing.append(t)
     if missing:
+        if any(t in ORACLE_CONTROLS for t in missing):
+            log("[di] ORACLE INVALID - an oracle control did not build: "
+                f"{[t for t in missing if t in ORACLE_CONTROLS]}")
+            log("[di] the toolchain or linker script cannot even produce the "
+                "controls, so no verdict from this suite would be a measurement")
         die(f"compiled ELF missing for: {missing}")
 
     # Upload all ELFs before the thread pool starts (minimises rsync overlap).
@@ -1230,6 +1257,49 @@ def cmd_di(rem: Remote, args) -> int:
                 th_log(f"[di] pull {test} failed: {exc}")
         return (test, passed, out_text, time.time() - t0_run)
 
+    # --- H3 oracle preflight ------------------------------------------------
+    # Run the two controls FIRST, through the same run_one() path as the suite,
+    # one at a time (no overlap). mini_must_pass must PASS and mini_must_fail
+    # must FAIL. If either is wrong the suite is not run at all: its results
+    # would not be measurements. --no-oracle-check bypasses this for debugging.
+    if oracle_check:
+        th_log("[di] oracle preflight (H3): "
+               f"{ORACLE_POSITIVE} must PASS, {ORACLE_NEGATIVE} must FAIL")
+        verdicts: dict[str, tuple[bool, str]] = {}
+        for ctl, want_pass in ((ORACLE_POSITIVE, True), (ORACLE_NEGATIVE, False)):
+            _, passed, ctl_out, _ = run_one(ctl, elfs[ctl])
+            verdicts[ctl] = (passed, ctl_out)
+            th_log(f"[di] control {ctl}: got {'PASS' if passed else 'FAIL'}, "
+                   f"expected {'PASS' if want_pass else 'FAIL'}")
+        pos_ok = verdicts[ORACLE_POSITIVE][0] is True
+        neg_ok = verdicts[ORACLE_NEGATIVE][0] is False
+        if not (pos_ok and neg_ok):
+            log("-" * 60)
+            log("[di] ORACLE INVALID - H3 'Oracle Validity First' precondition "
+                "is not met")
+            if not pos_ok:
+                log(f"[di]   positive control {ORACLE_POSITIVE} did not PASS: the "
+                    "oracle cannot say PASS.")
+                log("[di]   The harness, toolchain or link is broken and every "
+                    "verdict in this run would be void.")
+                for line in verdicts[ORACLE_POSITIVE][1].splitlines()[-10:]:
+                    log(f"         {line}")
+            if not neg_ok:
+                log(f"[di]   negative control {ORACLE_NEGATIVE} was reported as "
+                    "PASS: the oracle cannot say FAIL.")
+                log("[di]   The classifier is pass-biased - this is the "
+                    "2026-08-31 defect class ('*** SUCCESS *** (tohost = 0)' "
+                    "read as a pass) - and every recorded PASS is void.")
+                for line in verdicts[ORACLE_NEGATIVE][1].splitlines()[-10:]:
+                    log(f"         {line}")
+            log(f"[di] suite NOT run ({len(tests)} tests skipped). Fix the "
+                "oracle, or re-run with --no-oracle-check to bypass.")
+            log("-" * 60)
+            return 2
+        th_log("[di] oracle preflight OK: the classifier can say both PASS and FAIL")
+    else:
+        log("[di] oracle preflight DISABLED (--no-oracle-check) - H3 unmet")
+
     t0_all = time.time()
     # DI is intentionally single-threaded on the remote: one Variane_testharness
     # with vthreads=nproc already saturates the builder; overlapping harnesses
@@ -1238,7 +1308,8 @@ def cmd_di(rem: Remote, args) -> int:
     log(f"di workers: {max_workers} (consecutive mode)")
     results: dict[str, tuple[str, bool, str, float]] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(run_one, t, e): t for t, e in elfs.items()}
+        # Controls are a gate, not suite members: never submitted here.
+        futures = {ex.submit(run_one, t, elfs[t]): t for t in tests}
         for fut in concurrent.futures.as_completed(futures):
             test = futures[fut]
             try:
@@ -1604,6 +1675,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="remote run dir name (default di-<timestamp>)")
     sp.add_argument("--out", default=None,
                     help="local dir for compiled ELFs (default: temp)")
+    sp.add_argument("--no-oracle-check", action="store_true",
+                    help=f"skip the H3 oracle preflight ({ORACLE_POSITIVE} must "
+                         f"pass / {ORACLE_NEGATIVE} must fail); debugging only")
     sp.set_defaults(fn=cmd_di)
 
     sp = sub.add_parser("py", help="upload Python scripts and run them remotely (thread pool)")

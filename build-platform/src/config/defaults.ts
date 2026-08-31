@@ -1239,6 +1239,16 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       "core/ooo/formal/g6lc_ooo_rob.sby",
       "core/ooo/formal/g6lc_ooo_cancel.sby",
       "core/ooo/formal/g6lc_ooo_rename.sby",
+      // Fetch bounded formal (M2 in architecture/AGENTS-g6lc-opensbi-dev-heuristics.md
+      // section 5). `core/fetch_B/g6lc_fetch_pkg.sv` is already pure functions, so
+      // invariants I3/I5 (leftover), I2/I7 (packet order) and I8 (redirect
+      // priority) are proof obligations over a closed tuple rather than soak
+      // candidates. These are the L2 rung of the feedback-latency ladder: a
+      // violation is a counterexample in seconds instead of a firmware pin ten
+      // million cycles downstream.
+      "core/fetch_B/formal/g6lc_fetch_align.sby",
+      "core/fetch_B/formal/g6lc_fetch_order.sby",
+      "core/fetch_B/formal/g6lc_fetch_redirect.sby",
     ],
     simSuites: ["smoke-cv64a6", "smoke-cv32a65x"],
     stages: { lint: true, formal: true, sim: true, synth: true },
@@ -1291,6 +1301,134 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         compartment: "host",
         kind: "probe-cap",
         probeCaps: ["linux-or-wsl"],
+      },
+      // --- core: ISA red lines as code (M3) --------------------------------
+      // architecture/firmware-boot-principles.md section E lists five classes
+      // that CF-0 reverted and that must not be re-landed. Prose did not hold:
+      // the commit value filter came back, and the bootrom was then edited to
+      // work around it. A prohibition that lives only in prose is not a
+      // prohibition, so it runs by default (`core` is in defaultCompartments).
+      {
+        id: "diag-isa-red-lines",
+        description: "ISA red lines (firmware-boot-principles section E) absent from core RTL.",
+        compartment: "core",
+        kind: "source-scan",
+        sourceScan: {
+          roots: ["core"],
+          extensions: [".sv", ".svh"],
+          exclude: [
+            "core/cache_subsystem/hpdcache",
+            "core/fpu",
+            "core/cvfpu",
+            "core/ooo/formal",
+            "core/fetch_B/formal",
+          ],
+          forbid: [
+            {
+              id: "RL-COMMIT-VALUE",
+              // A commit write disabled by a test on that write's own result.
+              pattern:
+                "commit_instr_i\\[[^\\]]*\\]\\.result\\[[^;{]{0,80}\\)[^;{]{0,40}we_(gpr|fpr)_o\\[[^\\]]*\\] = 1'b0",
+              rationale:
+                "Commit value filter: a control decision (whether an architectural write happens) taken from a data value. Speculation visibility channel 5; not expressible over any closed tuple, which is the tell that it is a filter and not a contract. A config gate does not launder it.",
+              remedy:
+                "Fix the mechanism that made the filter look necessary: squash membership, forwarding transparency, or redirect priority.",
+            },
+            {
+              id: "RL-CANCEL-WB",
+              // A GPR/FPR write forced on for an entry the scoreboard dropped.
+              // The lookbehind matters: `!commit_drop_i[..]` guarding a write is
+              // the CORRECT polarity (write only when not dropped) and must not
+              // trip. Only an un-negated drop reaching a write is the red line.
+              pattern:
+                "(?<![!~])commit_drop_i\\[[^\\]]*\\][^;{]{0,300}we_(gpr|fpr)_o\\[[^\\]]*\\] = 1'b1",
+              rationale:
+                "Cancelled writeback: a squashed operation performs an architectural write (visibility channel 1). If a use observes a stale destination the defect is the squash window or the issue-stage RAW interlock, not the retire.",
+              remedy:
+                "Widen or correct the squash window; do not resurrect the write at commit.",
+            },
+            {
+              id: "RL-RESOLVE-PMA",
+              // Mispredict suppressed because the target misses an exec region.
+              pattern:
+                "is_mispredict[^;{]{0,200}is_inside_\\w*regions|is_inside_execute_regions[^;{]{0,200}is_mispredict",
+              rationale:
+                "Resolve-by-PMA: branch resolution is architectural and must not consult a physical-memory attribute. Prediction may be filtered (I19/I21); resolution may not (I11).",
+              remedy:
+                "Move the fetchability test to the predict path (predict_fetchable) and leave resolve unconditional.",
+            },
+            {
+              id: "RL-FWD-BY-VALUE",
+              // Operand source (RF vs forward) chosen by a property of the value.
+              pattern:
+                "forward_rs\\d\\[[^\\]]*\\][^;{]{0,300}(exec_region_base|is_inside_\\w*regions|page_zero)",
+              rationale:
+                "Forward-by-value: whether an operand comes from the register file or the forwarding network is decided by inspecting the forwarded value (page-zero / PMA / execute-region). Visibility channel 5, and it silently corrupts any program whose legitimate data happens to look like an address.",
+              remedy:
+                "Make forwarding transparent. If a forwarded value is wrong, the defect is the squash window or the writeback ordering that produced it.",
+            },
+            {
+              id: "RL-SQUASH-EXEMPT",
+              // Keep-by-register / keep-by-immediate exemption lists.
+              pattern: "g6lc_sb_keep::",
+              rationale:
+                "Squash exemption list: keep-by-register/immediate/FU. An exemption list patches visibility channels 1 and 2 one instruction at a time while the actual defect is a wrong squash window, which no per-register clause can reach. A-only; it must not migrate.",
+              remedy:
+                "Correct the squash window itself; retire the keep list rather than extending it.",
+            },
+          ],
+          allow: [
+            {
+              path: "core/smt_legacy/",
+              id: "RL-SQUASH-EXEMPT",
+              note:
+                "A-path oracle only (firmware-boot-principles section E: 'A-only and must not migrate'). Retires with the smt_legacy frontend.",
+            },
+            {
+              path: "core/scoreboard.sv",
+              id: "RL-SQUASH-EXEMPT",
+              note:
+                "Pre-existing debt: the shared scoreboard still consults the A-path keep list. Owed artifact is a squash-window contract at the EX->commit boundary; tracked in AGENTS-todo.md.",
+            },
+            {
+              path: "core/issue_read_operands.sv",
+              id: "RL-SQUASH-EXEMPT",
+              note:
+                "A-path only: every g6lc_sb_keep call site here is inside `ifndef G6LC_FETCH_B`, so B compiles without them. Retires with smt_legacy. Do not extend, and do not let one escape the guard.",
+            },
+            {
+              path: "core/issue_read_operands.sv",
+              id: "RL-FWD-BY-VALUE",
+              note:
+                "A-path only (`ifndef G6LC_FETCH_B`): g6lc_sb_keep::exec_region_base falls back to the RF when a forwarded rs2 looks like an execute-region base. This is section E 'Forward-by-value' verbatim and is why B must never inherit it.",
+            },
+          ],
+        },
+      },
+      {
+        id: "diag-fw-accommodation",
+        description: "Firmware/bootrom sources not edited to work around an RTL mechanism.",
+        compartment: "core",
+        kind: "source-scan",
+        sourceScan: {
+          // The cheapest red-line detector in the repo: if firmware source had
+          // to change to suit the RTL, the RTL is the defect and the firmware
+          // edit is a peel in disguise. Firmware is a witness, not a variable.
+          roots: ["corev_apu/bootrom", "software/smt2-linux"],
+          extensions: [".S", ".s", ".c", ".h"],
+          forbid: [
+            {
+              id: "FW-ACCOMMODATION",
+              pattern:
+                "(#|//)[^\\n]{0,200}?(commit filter|we_gpr|does not forward|issue pipe|drain the (issue )?pipe|SMT2 issue|scoreboard (does|will) not|fetch_B|leftover)",
+              flags: "i",
+              rationale:
+                "A firmware or bootrom comment names an RTL mechanism, which means the program was changed to avoid it. The avoided encoding is legal RISC-V: every other program that uses it is still broken, and no test will show it.",
+              remedy:
+                "Revert the firmware edit and fix the RTL mechanism it was avoiding.",
+            },
+          ],
+        },
       },
       // --- core: default verify surface (imafdc) ---------------------------
       {
@@ -1400,6 +1538,21 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "core/ooo/formal/g6lc_ooo_freelist.sby",
           "core/ooo/formal/g6lc_ooo_rob.sby",
           "core/ooo/formal/g6lc_ooo_rename.sby",
+        ],
+      },
+      // --- core: fetch bounded formal present (L2 rung) --------------------
+      {
+        id: "diag-fetch-formal-paths",
+        description: "Fetch bounded-formal property packages on disk (I3/I5, I2/I7, I8).",
+        compartment: "core",
+        kind: "path-check",
+        paths: [
+          "core/fetch_B/formal/g6lc_fetch_align.sby",
+          "core/fetch_B/formal/g6lc_fetch_align_props.sv",
+          "core/fetch_B/formal/g6lc_fetch_order.sby",
+          "core/fetch_B/formal/g6lc_fetch_order_props.sv",
+          "core/fetch_B/formal/g6lc_fetch_redirect.sby",
+          "core/fetch_B/formal/g6lc_fetch_redirect_props.sv",
         ],
       },
       {

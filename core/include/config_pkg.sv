@@ -29,6 +29,18 @@ package config_pkg;
 `endif
   /// Max SMT hardware threads *per core* (U6.1). Cluster hart count ≈ NrCores×NrHarts.
   localparam int unsigned CVA6_MAX_SMT_HARTS = 2;
+  /// Max *software* harts in the cluster: S = NrCores × NrHarts. Bounding the
+  /// factors separately is not enough — the uncore scales with the product.
+  /// `corev_apu/tb/ariane_testharness.sv` slices the PLIC vector as two
+  /// contexts (M and S) per software hart against `ariane_soc::NumTargets`,
+  /// which `ariane_soc_pkg.sv` fixes at 16 (`gen_plic_addrmap.py -t 16`), so
+  /// the keepable bound is 2·S ≤ 16. Kept core-side because `config_pkg`
+  /// cannot see an APU/TB package; it is the same cross-package lockstep
+  /// discipline `ariane_soc_pkg.sv` already documents for `CVA6_MAX_CORES`.
+  /// Without this the product is constant-foldable but unchecked, so
+  /// `NrCores=8, NrHarts=2` elaborates cleanly and is only discovered when the
+  /// wrong CPU takes an interrupt under Linux.
+  localparam int unsigned CVA6_MAX_SW_HARTS = 8;
 
   /// The NoC type is a top-level parameter, hence we need a bit more
   /// information on what protocol those type parameters are supporting.
@@ -754,6 +766,10 @@ package config_pkg;
               Cfg.BPCkptDepth < Cfg.NR_SB_ENTRIES));
     // U6.2 multi-core cluster (1..CVA6_MAX_CORES; multi-core path is 2–8).
     assert (Cfg.NrCores >= 1 && Cfg.NrCores <= CVA6_MAX_CORES);
+    // Software hart count is the PRODUCT of the two topology axes; the PLIC
+    // context budget scales with it, not with either factor. Both operands are
+    // compile-time constants, so this belongs at elaboration.
+    assert (Cfg.NrCores * Cfg.NrHarts <= CVA6_MAX_SW_HARTS);
     assert (Cfg.CohPolicy inside {COH_WRITE_INVAL, COH_BROADCAST, COH_FILTERED});
     assert (!(Cfg.NrCores > 1 && Cfg.SnoopFilterEn && Cfg.SnoopFilterEntries == 0));
     assert (Cfg.SnoopFilterEntries == 0 ||

@@ -4,7 +4,7 @@
 // diagnostics.ts — Compartmentalized diagnostic tests with per-test Verilator
 // configs. Driven by config.diagnostics; surfaced by `diag` and `probe diag`.
 
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import type { PlatformContext } from "../context.ts";
@@ -260,6 +260,144 @@ function stageToDiag(
   };
 }
 
+/** Collect files under `roots` with a matching extension, skipping `exclude`. */
+function collectSourceFiles(
+  repoRoot: string,
+  roots: string[],
+  extensions: string[],
+  exclude: string[],
+): string[] {
+  const out: string[] = [];
+  const skip = exclude.map((e) => e.replace(/\\/g, "/"));
+  const walk = (rel: string): void => {
+    const norm = rel.replace(/\\/g, "/");
+    if (skip.some((s) => norm === s || norm.startsWith(`${s}/`))) return;
+    const abs = join(repoRoot, rel);
+    let st;
+    try {
+      st = statSync(abs);
+    } catch {
+      return;
+    }
+    if (st.isFile()) {
+      if (extensions.some((e) => norm.endsWith(e))) out.push(norm);
+      return;
+    }
+    if (!st.isDirectory()) return;
+    let names: string[];
+    try {
+      names = readdirSync(abs);
+    } catch {
+      return;
+    }
+    for (const n of names) walk(`${norm}/${n}`);
+  };
+  for (const r of roots) walk(r);
+  return out;
+}
+
+/**
+ * Mechanical red-line tripwire. Whitespace is collapsed before matching so a
+ * pattern can span a multi-line `if`; the reported line number is recovered by
+ * locating the match's first token in the raw text.
+ */
+function runSourceScan(ctx: PlatformContext, test: DiagnosticTest): DiagnosticOutcome {
+  const started = performance.now();
+  const cfg = test.sourceScan;
+  const fin = (
+    status: DiagnosticOutcome["status"],
+    detail: string,
+    recorded?: string[],
+  ): DiagnosticOutcome => ({
+    id: test.id,
+    compartment: test.compartment,
+    kind: test.kind,
+    status,
+    detail,
+    durationMs: Math.round(performance.now() - started),
+    optional: Boolean(test.optional),
+    // Recorded (waived) hits are the H7 ledger entries, surfaced as log lines.
+    log: recorded && recorded.length > 0 ? recorded : undefined,
+  });
+  if (!cfg) return fin("fail", "source-scan diagnostic has no sourceScan config");
+
+  const files = collectSourceFiles(
+    ctx.repoRoot,
+    cfg.roots,
+    cfg.extensions,
+    cfg.exclude ?? [],
+  );
+  const violations: string[] = [];
+  const waived: string[] = [];
+
+  for (const rel of files) {
+    let raw: string;
+    try {
+      raw = readFileSync(join(ctx.repoRoot, rel), "utf8");
+    } catch {
+      continue;
+    }
+    // Collapse whitespace while keeping a collapsed-index -> raw-index map, so
+    // a hit reports the line it is actually on rather than the first textual
+    // lookalike in the file.
+    let collapsed = "";
+    const rawAt: number[] = [];
+    for (let i = 0; i < raw.length; i++) {
+      const ch = raw[i] as string;
+      if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r" || ch === "\f" || ch === "\v") {
+        if (collapsed.length > 0 && collapsed[collapsed.length - 1] !== " ") {
+          collapsed += " ";
+          rawAt.push(i);
+        }
+        continue;
+      }
+      collapsed += ch;
+      rawAt.push(i);
+    }
+    // Line number of each raw offset, computed once per file.
+    const lineAt = (rawIdx: number): number => {
+      let n = 1;
+      for (let i = 0; i < rawIdx && i < raw.length; i++) if (raw[i] === "\n") n++;
+      return n;
+    };
+    for (const f of cfg.forbid) {
+      const flags = f.flags ?? "";
+      const re = new RegExp(f.pattern, flags.includes("g") ? flags : `${flags}g`);
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(collapsed)) !== null) {
+        if (m[0].length === 0) {
+          re.lastIndex += 1;
+          continue;
+        }
+        const line = lineAt(rawAt[m.index] ?? 0);
+        const at = `${rel}:${line}`;
+        const allow = (cfg.allow ?? []).find(
+          (a) => a.id === f.id && rel.startsWith(a.path.replace(/\\/g, "/")),
+        );
+        if (allow) {
+          waived.push(`${f.id} ${at} (recorded: ${allow.note})`);
+        } else {
+          violations.push(`${f.id} ${at}\n      ${f.rationale}\n      remedy: ${f.remedy}`);
+        }
+      }
+    }
+  }
+
+  const scanned = `scanned ${files.length} file(s)`;
+  if (violations.length > 0) {
+    return fin(
+      "fail",
+      `${violations.length} red-line violation(s); ${scanned}\n    ${violations.join("\n    ")}`,
+      waived,
+    );
+  }
+  return fin(
+    "pass",
+    `no new red lines; ${scanned}${waived.length > 0 ? `, ${waived.length} recorded` : ""}`,
+    waived,
+  );
+}
+
 async function runVerilatorDiag(
   ctx: PlatformContext,
   paths: EdaPaths,
@@ -337,6 +475,8 @@ export async function runDiagnostic(
   switch (test.kind) {
     case "path-check":
       return runPathCheck(ctx, test);
+    case "source-scan":
+      return runSourceScan(ctx, test);
     case "probe-cap":
       return runProbeCap(ctx, test, options.probeReport ?? null);
     case "verilator-lint":
@@ -416,6 +556,21 @@ export function diagnosticReadiness(
         kind: t.kind,
         ready: missing.length === 0,
         note: missing.length ? `missing ${missing[0]}` : "paths present",
+        optional: Boolean(t.optional),
+      };
+    }
+    if (t.kind === "source-scan") {
+      // No tool required: the scan is pure file reading, so it is always ready.
+      const roots = t.sourceScan?.roots ?? [];
+      const missing = roots.filter((p) => !existsSync(join(ctx.repoRoot, p)));
+      return {
+        id: t.id,
+        compartment: t.compartment,
+        kind: t.kind,
+        ready: missing.length === 0,
+        note: missing.length
+          ? `missing root ${missing[0]}`
+          : `${t.sourceScan?.forbid.length ?? 0} forbidden pattern(s) over ${roots.length} root(s)`,
         optional: Boolean(t.optional),
       };
     }

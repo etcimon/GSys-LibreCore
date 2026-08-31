@@ -619,7 +619,53 @@ export type DiagnosticKind =
   | "verilator-lint" // Verilator --lint-only with DiagnosticVerilatorConfig
   | "verilator-elab" // slang elaboration with same surface
   | "probe-cap" // capability ids from the probe matrix
-  | "path-check"; // repo-relative paths that must exist
+  | "path-check" // repo-relative paths that must exist
+  | "source-scan"; // forbidden source patterns (ISA red lines)
+
+/**
+ * One forbidden source shape. Matched against the file text with runs of
+ * whitespace collapsed to a single space, so a pattern can span the newlines of
+ * a multi-line `if`. Keep `pattern` anchored on the mechanism, not on a symbol.
+ */
+export interface ForbiddenPattern {
+  /** Stable id reported on a hit (e.g. `RL-COMMIT-VALUE`). */
+  id: string;
+  /** JS regex source, applied to the whitespace-collapsed file text. */
+  pattern: string;
+  /** Regex flags; `g` and `i` are added by the runner as needed. */
+  flags?: string;
+  /** Why this class is forbidden (quoted back on a hit). */
+  rationale: string;
+  /** What to do instead — never "add an exemption". */
+  remedy: string;
+}
+
+/**
+ * A recorded, pre-existing violation. Reported as a warning and counted, not
+ * failed. This is the escape-hatch ledger: the tripwire stays live for new
+ * code while existing debt remains visible instead of being silently waived.
+ */
+export interface SourceScanAllow {
+  /** Repo-relative path prefix the waiver applies to. */
+  path: string;
+  /** ForbiddenPattern id being waived at that path. */
+  id: string;
+  /** Why it is still here and what retires it. */
+  note: string;
+}
+
+export interface DiagnosticSourceScanConfig {
+  /** Repo-relative directories or files to walk. */
+  roots: string[];
+  /** File extensions to consider (with dot, e.g. `.sv`). */
+  extensions: string[];
+  /** Repo-relative path prefixes to skip entirely (vendored trees). */
+  exclude?: string[];
+  /** The forbidden shapes. Any un-waived hit fails the diagnostic. */
+  forbid: ForbiddenPattern[];
+  /** Recorded pre-existing violations (warn + count, do not fail). */
+  allow?: SourceScanAllow[];
+}
 
 export interface DiagnosticTest {
   /** Stable id (`diag run <id>`). */
@@ -637,6 +683,8 @@ export interface DiagnosticTest {
   probeCaps?: string[];
   /** Repo-relative paths that must exist (kind path-check). */
   paths?: string[];
+  /** Forbidden source patterns (required for kind source-scan). */
+  sourceScan?: DiagnosticSourceScanConfig;
 }
 
 export interface DiagnosticsConfig {

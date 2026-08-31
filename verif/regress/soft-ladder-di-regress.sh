@@ -47,6 +47,13 @@
 #   SOFT_LADDER_TESTS="mini_sib_cjalr mini_fdt_opensbi_blob mini_lrsc_d" bash ...
 #   SOFT_LADDER_HARNESS=work-ver-smt2-fw64 bash ...
 #   SOFT_LADDER_COMPILE_ONLY=1 bash ...   # assemble only
+#   SOFT_LADDER_ORACLE_CHECK=0 bash ...   # skip the H3 oracle preflight
+#
+# Oracle controls (H3, architecture/AGENTS-g6lc-opensbi-dev-heuristics.md s5 M1):
+#   mini_must_pass  positive control, MUST pass (tohost=1 unconditionally)
+#   mini_must_fail  negative control, MUST fail (tohost=3 unconditionally)
+# Both run before the list above and are NOT suite members. A wrong answer from
+# either aborts the run non-zero instead of reporting per-test results.
 #
 # Fetch flavour (A/B on the same minis — firmware-boot-principles.md F-loop):
 #   SOFT_LADDER_FETCH=B      bash ...   # B: core/fetch_B — DEFAULT build
@@ -205,6 +212,75 @@ veri_tohost_pass() {
   return 1
 }
 
+# --- H3 oracle preflight (architecture/AGENTS-g6lc-opensbi-dev-heuristics.md) ---
+# A pass must be positive evidence, never the absence of a failure string. Two
+# controls gate the run: mini_must_pass MUST pass and mini_must_fail MUST fail.
+# They are a gate, not suite members, so they never appear in DEFAULT_TESTS.
+# Set SOFT_LADDER_ORACLE_CHECK=0 to bypass while debugging the controls.
+ORACLE_CHECK="${SOFT_LADDER_ORACLE_CHECK:-1}"
+
+run_control() {
+  # Build + run one control. Echoes pass | fail | build | skip.
+  # Runs in a command substitution, so the set +e below is subshell-local.
+  local t="$1" elf vlog vr=0
+  if ! elf="$(build_elf "$t")"; then
+    echo "build"
+    return 0
+  fi
+  if [[ "$COMPILE_ONLY" == "1" ]]; then
+    echo "skip"
+    return 0
+  fi
+  vlog="$OUT/veri_${FETCH}_${t}.log"
+  set +e
+  veri_tohost_pass "$elf" "$vlog"
+  vr=$?
+  set -e
+  case "$vr" in
+    0) echo "pass" ;;
+    2) echo "skip" ;;
+    *) echo "fail" ;;
+  esac
+}
+
+oracle_preflight() {
+  local pv nv
+  log "=== oracle preflight (H3) ==="
+  pv="$(run_control mini_must_pass)"
+  nv="$(run_control mini_must_fail)"
+  log "  mini_must_pass -> ${pv} (expected pass)"
+  log "  mini_must_fail -> ${nv} (expected fail)"
+  if [[ "$pv" == "skip" || "$nv" == "skip" ]]; then
+    log "  oracle preflight SKIPPED (compile-only, or no harness to run)"
+    return 0
+  fi
+  if [[ "$pv" == "pass" && "$nv" == "fail" ]]; then
+    log "  oracle valid: the classifier can say both PASS and FAIL"
+    return 0
+  fi
+  log "ORACLE INVALID -- H3 'Oracle Validity First' precondition is not met."
+  if [[ "$pv" != "pass" ]]; then
+    log "  positive control mini_must_pass did not PASS (${pv}): the oracle"
+    log "  cannot say PASS. Harness, toolchain or linker script is broken and"
+    log "  every verdict in this run would be void."
+    if [[ -f "$OUT/veri_${FETCH}_mini_must_pass.log" ]]; then
+      tail -20 "$OUT/veri_${FETCH}_mini_must_pass.log" || true
+    fi
+  fi
+  if [[ "$nv" != "fail" ]]; then
+    log "  negative control mini_must_fail did not FAIL (${nv}): the oracle"
+    log "  cannot say FAIL. The classifier is pass-biased -- this is the"
+    log "  2026-08-31 defect class ('*** SUCCESS *** (tohost = 0)' read as a"
+    log "  pass) -- and every recorded PASS is void."
+    if [[ -f "$OUT/veri_${FETCH}_mini_must_fail.log" ]]; then
+      tail -20 "$OUT/veri_${FETCH}_mini_must_fail.log" || true
+    fi
+  fi
+  log "Suite NOT run: per-test results would be meaningless. Fix the oracle,"
+  log "or re-run with SOFT_LADDER_ORACLE_CHECK=0 to bypass for debugging."
+  return 3
+}
+
 log "ordered-path step1: B1 directed DI soak"
 log "fetch=${FETCH} harness=${HARNESS_DIR} spike=${RUN_SPIKE} tests=${tests[*]}"
 cva6_tools_report || true
@@ -214,6 +290,18 @@ if ! cva6_have_riscv_gcc 2>/dev/null; then
     log "need riscv gcc (RISCV_CC=$RISCV_CC)"
     exit 1
   fi
+fi
+
+# Oracle controls run FIRST. If either gives the wrong answer the suite is not
+# run at all, because its per-test results would not be measurements.
+if [[ "$ORACLE_CHECK" == "1" ]]; then
+  orc=0
+  oracle_preflight || orc=$?
+  if [[ $orc -ne 0 ]]; then
+    exit "$orc"
+  fi
+else
+  log "oracle preflight DISABLED (SOFT_LADDER_ORACLE_CHECK=0) -- H3 unmet"
 fi
 
 for t in "${tests[@]}"; do

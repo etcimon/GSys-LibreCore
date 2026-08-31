@@ -1,0 +1,20 @@
+# R6 fetch redirect priority formal (bounded) — pure g6lc_fetch_pkg functions.
+# Run: sby -f core/fetch_B/formal/g6lc_fetch_redirect.sby
+# Wired into build-platform verify.formalTasks (cva6-build verify --formal).
+
+[options]
+# Priority encoder resolves in one cycle.
+mode prove
+depth 4
+
+[engines]
+smtbmc z3
+
+[script]
+read -formal config_pkg.sv g6lc_fetch_pkg.sv g6lc_fetch_redirect_props.sv
+prep -top g6lc_fetch_redirect_props
+
+[files]
+../../include/config_pkg.sv
+../g6lc_fetch_pkg.sv
+g6lc_fetch_redirect_props.sv

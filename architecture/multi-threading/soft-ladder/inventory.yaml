@@ -4,6 +4,20 @@
 # ladder: cont.N where first pinned / last soft form
 # priority: 1 = do first (blocks other peels)
 #
+# hatches: optional escape-hatch ledger for this site (H7 in
+#   architecture/AGENTS-g6lc-opensbi-dev-heuristics.md). Every peel, soak, hold
+#   and TRACE must leave behind a permanent artifact that makes the next one
+#   unnecessary; an unrepaid second use buys the same information twice.
+#     hatches:
+#       peel:  <int>   uses of mk_plat_skip / a soft stub
+#       soak:  <int>   firmware soaks whose only output was a verdict
+#       hold:  <int>   hold-ELF non-regression runs
+#       trace: <int>   TRACE hunts
+#       repaid: [<artifact>, ...]   property | assertion | mini | control |
+#                                   lint | rubric-row that closed the loop
+#   health(site) = sum(hatch uses) / max(1, landed changes). It should fall
+#   monotonically. If it does not, the loop has reverted to search.
+#
 # Update this file whenever a soft site is peeled, fixed, or reclassified.
 
 meta:
@@ -16,6 +30,34 @@ meta:
   target_config: g6lc64_smt2
   worktree_rtl_sync: "2026-08-08 from E:\\cva6 monorepo-soak landings (AMOCAS.Q, SMT hart, trapdump)"
   rtl_commits: "a9ee4b143 soft-ladder; 47572e98c AMO cancel; 041574c0c LR/SC; iter-006 CSR stall"
+
+  # H7 escape-hatch ledger. Per-site `hatches:` blocks are the source of truth;
+  # this is the roll-up and the standing repayment schedule.
+  hatch_ledger:
+    status: seeded
+    # Historic totals are NOT reconstructed here. The record predates the
+    # 2026-08-31 oracle correction (H3), so per-site hatch counts taken from it
+    # would be measured under a superseded verdict. Sites get a `hatches:` block
+    # when they are next touched; the roll-up is meaningful from that point on.
+    measured_from: 2026-08-31
+    known_scale: "~380 increments, ~314 recorded negatives, 1 binary-patch oracle"
+    repayment_schedule:
+      peel: "a mini reproducing the peeled behaviour + the property it violates"
+      soak: "a bounded property that would have caught it in seconds (H2)"
+      hold: "an identity check + battery that makes the hold ELF redundant"
+      trace: "a layer assertion at the point the trace was inspected (H5)"
+      cookie: "a positive-control battery signal that does not need firmware (H3)"
+    repaid_2026_08_31:
+      - "cookie -> verif/tests/custom/multicore/mini_must_pass.S (positive control)"
+      - "cookie -> verif/tests/custom/multicore/mini_must_fail.S (negative control)"
+      - "soak  -> core/fetch_B/formal/g6lc_fetch_align.sby (I3/I5 leftover)"
+      - "soak  -> core/fetch_B/formal/g6lc_fetch_order.sby (I2/I7 packet order)"
+      - "soak  -> core/fetch_B/formal/g6lc_fetch_redirect.sby (I8 priority)"
+      - "trace -> diag-isa-red-lines (section E as a mechanical veto)"
+      - "trace -> diag-fw-accommodation (the H6 corollary detector)"
+    outstanding:
+      - id: RL-SQUASH-EXEMPT-scoreboard
+        note: "core/scoreboard.sv still consults the A-path g6lc_sb_keep list; waived in diag-isa-red-lines. Owed: a squash-window contract at the EX->commit boundary."
 
 # ---------------------------------------------------------------------------
 # B1 — RTL / dual-issue residuals (fix in core; delete soft nops after)

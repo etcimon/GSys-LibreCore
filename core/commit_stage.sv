@@ -204,22 +204,12 @@ module commit_stage
     // Must not wait on LSU/AMO readiness (store path used to stall even on drop).
     if (commit_drop_i[0] && !halt_i) begin
       commit_ack_o[0] = 1'b1;
-      // G1s: a cancelled jal/jalr still retires ra. Keep already has
-      // CTRL_FLOW rd==ra; P6 0x65 means RF stayed P5 0x14c so the link
-      // never wrote. SMT+SS; page-0 results stay dropped (I4as).
-      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
-          commit_instr_i[0].fu == ariane_pkg::CTRL_FLOW &&
-          commit_instr_i[0].rd[4:0] == 5'd1 &&
-          |commit_instr_i[0].result[CVA6Cfg.XLEN-1:12])
-        we_gpr_o[0] = 1'b1;
-      // G1an: cancelled LOAD still writes rd. G1s analog.
-      // TRACE G1am: c.ldsp t3 dest stayed 0xed. SMT+SS.
-      // IRO stalls the use until this retire. Not G1i/G1af.
-      if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
-          commit_instr_i[0].fu == ariane_pkg::LOAD &&
-          commit_instr_i[0].valid &&
-          commit_instr_i[0].rd[4:0] != 5'd0)
-        we_gpr_o[0] = 1'b1;
+      // A dropped entry is squashed: it performs no architectural write.
+      // firmware-boot-principles.md SE red line "Cancelled writeback" -- forcing
+      // a GPR write for a cancelled CTRL_FLOW/LOAD makes speculation visible
+      // through channel 1 (a squashed operation performs an architectural
+      // write). If a use observes a stale destination, the defect is the squash
+      // WINDOW or the issue-stage RAW interlock, not the retire.
     end else if (commit_instr_i[0].valid && !halt_i) begin
       // we will not commit the instruction if we took an exception
       if (commit_instr_i[0].ex.valid || break_from_trigger_i) begin
@@ -418,15 +408,9 @@ module commit_stage
 
           commit_ack_o[1] = 1'b1;
 
-          if (!commit_drop_i[1] ||
-              (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
-               commit_instr_i[1].fu == ariane_pkg::CTRL_FLOW &&
-               commit_instr_i[1].rd[4:0] == 5'd1 &&
-               |commit_instr_i[1].result[CVA6Cfg.XLEN-1:12]) ||
-              (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
-               commit_instr_i[1].fu == ariane_pkg::LOAD &&
-               commit_instr_i[1].valid &&
-               commit_instr_i[1].rd[4:0] != 5'd0)) begin
+          // Port-1 squash is the port-0 rule: a dropped entry writes nothing.
+          // SE red line "Cancelled writeback" -- see the port-0 note above.
+          if (!commit_drop_i[1]) begin
             if (CVA6Cfg.FpPresent && ariane_pkg::is_rd_fpr(commit_instr_i[1].op))
               we_fpr_o[1] = 1'b1;
             else we_gpr_o[1] = 1'b1;
@@ -448,41 +432,28 @@ module commit_stage
         end
       end
     end
-    // I4am/n: unaligned ALU→s0 (addi / add rs1!=x0). Soak-negative —
-    // write is not those. I4ao: suppress we_gpr to x8 when the result
-    // is byte-unaligned (`"/cpus"+1`). G1j: [3:0] also dropped 8B-aligned
-    // FDT (`0x80001048`) so `c.mv s0,a0` never took (mini 0x39). SMT+SS.
-    // I4as: page0 / small integer cannot be a return address — suppress
-    // we_gpr to x1 when result[VLEN-1:12]==0 (nat ra0=8 after I4ao).
-    // G1q: do not apply that to CTRL_FLOW. P6 jal issued (mini 0x6a no)
-    // but RF ra stayed P5 0x14c; a page-0 jal result (J-imm / next_pc=4)
-    // must not drop the link write. ALU ra=8 still suppressed.
-    // I4ca (reverted): page-0 non-zero `c.add a0,a1` commit filter
-    // hold-FAIL `51b1c001` / coldboot_done=0.
-    // I4cc: leftover casq dual_we / hi-pending retargets waddr to rd|1.
-    // Do not write a0 unless this retire's rd is a0 (PEEL a0=9).
-    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1) begin
-      for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
-        // G1lc: suppress unaligned ALU writes to s0 from non-x0 sources
-        // (c.mv s0,a0 / add s0,*,* / addi s0,s0,imm). Do not suppress
-        // li/lui/auipc s0,imm (rs1 == x0) or slli s0,1<<31 (result[2:0]==0)
-        // so the bootrom can build the 0x80000000 jump target.
-        if (we_gpr_o[p] &&
-            commit_instr_i[p].rd[4:0] == 5'd8 &&
-            commit_instr_i[p].rs1 != 5'd0 &&
-            commit_instr_i[p].result[2:0] != 3'b0)
-          we_gpr_o[p] = 1'b0;
-        if (we_gpr_o[p] &&
-            commit_instr_i[p].rd[4:0] == 5'd1 &&
-            commit_instr_i[p].fu != ariane_pkg::CTRL_FLOW &&
-            commit_instr_i[p].result[CVA6Cfg.XLEN-1:12] == '0)
-          we_gpr_o[p] = 1'b0;
-        if (we_gpr_o[p] &&
-            waddr_o[p] == 5'd10 &&
-            commit_instr_i[p].rd[4:0] != 5'd10)
-          we_gpr_o[p] = 1'b0;
-      end
-    end
+    // No commit-stage value filter lives here.
+    //
+    // firmware-boot-principles.md SE lists "drop x8 unless 8-byte aligned" and
+    // "drop x1 if result < 4 KiB" as ISA red lines. They inspect a RESULT to
+    // decide whether an architectural write happens, which is speculation
+    // visibility channel 5 (a control decision taken from a data value) and is
+    // not expressible over any closed tuple -- the tell that a filter is not a
+    // contract. Being config-gated does not launder it: the suppressed write is
+    // legal RISC-V for every program on that configuration, and only the one
+    // program that was edited around it ever shows the damage.
+    //
+    // If a destination appears stale, the owning promise is "issue -> EX:
+    // operands are architectural or transparently forwarded" or "EX -> commit:
+    // squashed means no write, unsquashed means every write" -- fix there.
+    //
+    // AMOCAS.Q is the one legitimate waddr retarget: on a single commit port
+    // the held hi destination drives waddr_o[0] a cycle after the AMO retired,
+    // so an ordinary retire in that cycle would write the AMO's destination
+    // with its own result. That is structural port ownership, not a value test,
+    // and it is anchored on the parameter that explains it (I28).
+    if (CVA6Cfg.RVA && CVA6Cfg.RVZacas && casq_hi_pending_q && !instr_0_is_amo)
+      we_gpr_o[0] = 1'b0;
 
     if (CVA6Cfg.RVZCMP) begin
       for (int i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin

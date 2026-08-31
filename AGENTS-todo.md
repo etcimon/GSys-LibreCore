@@ -113,15 +113,49 @@ Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`
 - Implemented a `commit_stage.sv` FDT-compensation filter for `x8`/`x1`/`x10` unaligned/page-0 ALU writes (`G1lc/I4as/I4cc`) so the bootrom `li s0,1; slli s0,1,31` now produces the `0x80000000` jump target; bootrom `jr s0` now reaches DRAM `_start` (`npc0=0x80000000`) for both DI and OpenSBI images.
 - OpenSBI soak (`fw_payload_r3a_c15_plat_skip.elf`) still **CLASSIFY=FAIL**, but the failure signature has moved: the bootrom completes and OpenSBI runs until `mepc0=0x8000a9a8`, `mcause0=0x2`, `mtval0=0x693af0f`, `wfi0=1`, not the earlier `npc0=0x1004c` `_hang` at `wfi`. This points to a residual in the SMT2 issue/RF/forwarding or commit path after the bootrom, not a pure bootrom stall. Same symptom reproduced on `work-ver-smt2-slfix` and `work-ver-smt2-fw64-legacy`.
 - Remote DI suite now runs through `verif/regress/remote/testharness_proxy.py di` in **consecutive single-worker mode** with a pre-flight `_no_overlap_guard`: it refuses to start if any `Variane_testharness` or `soft-ladder` process is already running on the remote host. Overlapping DI runs are the root cause of flakiness seen earlier (e.g. `mini_fdt_lenp_sw` failing only when two harnesses ran concurrently).
-- Corrected the proxy and the local `soft-ladder-di-regress.sh` pass detection: a DI test only passes when the harness log shows `tohost = 1` (or `tohost = 0x1`). The previous logic treated the harness `*** SUCCESS *** (tohost = 0)` timeout as a pass, which inflated the 15/16 and 16/16 reports. With the corrected detection, the full consecutive DI suite is currently **0/16 PASS**:
+- **Methodology turn (2026-08-31, second pass).** The three reasoning documents —
+  [`AGENTS-SMT2-opensbi-reasoning-pattern-workflow.md`](architecture/multi-threading/AGENTS-SMT2-opensbi-reasoning-pattern-workflow.md) (foundation),
+  [`AGENTS-g6lc-opensbi-dev-heuristics.md`](architecture/AGENTS-g6lc-opensbi-dev-heuristics.md) (method) and
+  [`AGENTS-smt2-opensbi-dev-logics.md`](architecture/multi-threading/AGENTS-smt2-opensbi-dev-logics.md) (instance) —
+  name the previous pass's own changes as the live failure instance (workflow §9.2, heuristics H6 retrospective).
+  Acted on rather than argued with. Work moved **left** on the feedback-latency ladder (L6/L7 → L0/L1/L2/L3)
+  and the two red lines were reverted:
+  - **Reverted `core/commit_stage.sv` commit value filter** (§E "drop `x8` unless 8-byte aligned; drop `x1` if
+    result < 4 KiB"). It took a control decision from a data value (visibility **channel 5**) and was not
+    expressible over any closed tuple — the tell that it was a filter, not a contract. The `SuperscalarEn &&
+    NrHarts>1` gate did not launder it (P5: identity is necessary, not sufficient).
+  - **Reverted the cancelled-writeback forces** on both commit ports (§E "force GPR write for cancelled
+    CTRL_FLOW/LOAD", `G1s`/`G1an`) — a squashed operation performing an architectural write is **channel 1**.
+  - **Kept** one Zacas port-ownership guard, re-anchored from `SuperscalarEn && NrHarts>1` onto `RVZacas`,
+    the parameter that actually explains it (I28), and restated without a register number.
+  - **Reverted `corev_apu/bootrom/bootrom.S`** to the stock sequence (`li s0,1; slli; csrr; la; jr s0`).
+    Both the `addi s0, x0, 1` rewrite and the `nop`×5 + `fence` pipeline-drain padding were firmware edited to
+    accommodate RTL (P1 inverted). The bootrom is our own code, which is what made the edit feel free.
+  - **New L1 check:** `CVA6_MAX_SW_HARTS=8` + `assert (NrCores * NrHarts <= CVA6_MAX_SW_HARTS)` in
+    `config_pkg`. The factors were bounded separately while the PLIC context budget scales with the *product*,
+    so `NrCores=8, NrHarts=2` elaborated cleanly and would only fail when the wrong CPU took an interrupt under
+    Linux. All in-tree packages pass (`ooo_server` is exactly 8).
+  - **New L2 rung:** `core/fetch_B/formal/` (`align` I3/I5, `order` I2/I7, `redirect` I8) over the pure functions
+    already in `g6lc_fetch_pkg`, mirroring `core/ooo/formal/`; wired into `verify.formalTasks` +
+    `diag-fetch-formal-paths`.
+  - **Red lines mechanized:** new `source-scan` diagnostic kind + `diag-isa-red-lines` / `diag-fw-accommodation`,
+    both in the default `core` compartment. Self-tested against a five-violation fixture (5/5 fired, then clean).
+    Pre-existing debt is **waived with a note and counted**, not hidden — 20 recorded entries today.
+  - **Oracle controls:** `mini_must_pass` / `mini_must_fail` preflight the DI suite in both the shell runner and
+    the proxy; a wrong answer in either direction aborts the run before any test.
+  - **Hatch ledger:** `soft-ladder/inventory.yaml` gains the H7 `hatches:` schema, a repayment schedule, and the
+    seven artifacts that repaid this pass.
+- Corrected the proxy and the local `soft-ladder-di-regress.sh` pass detection: a DI test only passes when the harness log shows `tohost = 1` (or `tohost = 0x1`). The previous logic treated the harness `*** SUCCESS *** (tohost = 0)` timeout as a pass, which inflated the 15/16 and 16/16 reports. **T9 (invalidate backwards) applies:** every DI count recorded before this fix came from the old classifier and is not comparable — re-measure or annotate before citing, especially where one was used to *eliminate* a hypothesis. With the corrected detection, the full consecutive DI suite is currently **0/16 PASS**:
   - `mini_amoadd_w_spin`, `mini_csr_expected_trap`, `mini_csr_pmp_probe`, `mini_dual_cmv_s3`, `mini_fdt_s2_nest`, `mini_fdt_check_prop_nest`, `mini_fdt_next_tag_lbu`, `mini_fdt_a0_is_fdt`, `mini_stq_flush_fwd`, `mini_fdt_namelen_walk`, `mini_fdt_nt_frame32`, `mini_fdt_nt_stock`, `mini_fdt_nt_cpus`, `mini_stq_alias_jal`, `mini_fdt_nt_osbi` all time out with `tohost = 0` (or hang at the bootrom `_hang`/`0x0` fetch loop).
   - `mini_fdt_lenp_sw` reaches its `fail:` path and the `rvfi_tracer` terminates the simulation (`rc=1`, `tohost=0`).
-- Replaced the bootrom `li s0, 1` with `addi s0, x0, 1` in `corev_apu/bootrom/bootrom.S` so the SMT FDT-compensation commit filter cannot suppress the immediate as a `c.addi s0, s0, 1`. A fresh `work-ver-smt2-fw64-B` build disassembles to `addi s0,zero,1` at `0x10000`, but the B harness still intermittently stalls before the jump: bootrom trace shows `npc=0x10000` and `s0=0x0` for 64+ cycles, and `mini_fdt_a0_is_fdt` consistently fails at `0x0` on B, while `mini_fdt_lenp_sw` reaches the test code in some runs. Legacy (`work-ver-smt2`) and slfix flavours show the same bootrom hang/timeout. This is a nondeterministic SMT2 fetch/issue/commit residual, not an overlap or pass-detection artifact.
-- Next:
-  1. Confirm the overlap guard holds under two parallel proxy invocations (one should wait or exit cleanly).
-  2. Stabilize the bootrom -> `_start` hand-off: trace why `s0` is not updated / `npc` stays at `0x10000` in failing runs (nondeterministic Verilator active region? `commit_stage` filter? `g6lc_fe_keep` / `instr_queue` stall?).
-  3. Re-run `mini_fdt_lenp_sw` once bootrom is stable to determine whether the `sw a0,0(s2)`/`lw t1,0(a2)` failure is the remaining D$/store-forwarding residual.
-  4. Continue the OpenSBI residual from the new `mepc0=0x8000a9a8` illegal-trap signature.
+- The bootrom `s0` symptom that motivated the filter is **unexplained, not fixed**: with the accommodation in place the B harness still stalled with `npc=0x10000` and `s0=0x0` for 64+ cycles, and legacy/slfix showed the same. That is H4 territory — the symptom was never made deterministic, so the three successive attributions to it are unfalsifiable and none is recorded as a conclusion.
+- Next (ordered by ladder position, not by symptom):
+  1. **H4 determinism before attribution.** Establish whether the bootrom `npc=0x10000` / `s0=0` stall is stable across three runs at `verilator --threads=1` with the observer binds off. If the outcome depends on simulator scheduling, the race/X *is* the bug and it outranks any functional hypothesis. Do not attribute until it is stable.
+  2. **T2 promise location, not component.** With a stable symptom, name the first false promise on `I$ → realign → IQ → issue → EX → commit`, and instrument *that* boundary. `g6lc_fetch_dbg` already asserts I1 (bytes==memory); I3/I5/I7 have no boundary SVA yet (M4).
+  3. **Run the new formal first.** `verify --formal` now covers I2/I3/I5/I7/I8. A counterexample there is seconds and names the tuple; it is strictly cheaper than any harness run and must be exhausted before a soak.
+  4. Only then the OpenSBI residual (`mepc0=0x8000a9a8`, `mcause0=0x2`) — as a **gate**, not a search signal.
+- Deliberately **not** doing: another peel, another hold-ELF cycle, or another TRACE hunt for this class. H7 blocks a second unrepaid use, and the repayments for this class landed above.
+- Remaining migration items from the heuristics §5 table: **M4** (I3/I5/I7 boundary SVAs — `g6lc_fetch_dbg` computes some of these already) and **M5** (tag minis by archetype W1–W7 so the archetype × layer coverage matrix is knowable). **M1/M2/M3/M6 are landed.**
 
 **AI matrix card (`Xg6lcai`) + licensing — live track (not scaffold-only):**
 
