@@ -378,6 +378,64 @@ illegal-instruction trap. Whether (a) is hart-1-parked-legitimately versus hart-
 established** and is the next thing to determine — the `id-dbg` line does not identify the hart, so the
 first step is per-hart attribution, not another hypothesis.
 
+### ROOT CAUSE FOUND: the retire stream executes bytes that do not match the PC (2026-08-31)
+
+Following the ordering (read the counterexample before theorising) led to the actual defect, and it
+**reverses two of my own earlier conclusions**. Both retractions are recorded because the reasoning that
+produced them was wrong in an instructive way.
+
+**Retraction 1 — "exception delivery is broken" is FALSE.** The RVFI trace shows instructions retiring
+normally and an `ILLEGAL_INSTR exception` being *reported and taken*. Exceptions work. The earlier
+`mcause=0` readings came from an `id-dbg` probe that does not observe committed CSR state; I treated a
+silent probe as evidence of absence.
+
+**Retraction 2 — the "wrong fetch window" reading I retracted on 2026-08-31 was RIGHT.** I withdrew it
+because it had been measured against a mismatched bootrom image. The observation was sound; only its
+instrument was bad. Re-measured against a *verified* ELF, it holds.
+
+**The evidence.** `~/trapdisc/t_ecall.elf`, `.text` 0x44 bytes, one clean LOAD segment at 0x80000000
+(readelf-confirmed, so nothing is missing from memory):
+
+| Addr | ELF contains | RVFI actually retired |
+|---|---|---|
+| `0x80000008` | `auipc t0,0x0` | `auipc` — matches |
+| `0x8000000c` | `addi t0,t0,36` | `addi` — matches |
+| `0x80000010` | **`csrw mtvec,t0`** (`30529073`) | **`f14022f3` = `csrr t0,mhartid`** — the bytes from `0x80000000` |
+| `0x80000014` | **`li s0,0`** (`4401`) | **`02029c63` = `bnez`** — the bytes from `0x80000004` |
+
+So the machine is fed bytes from address `A` while reporting PC `A + 0x10`.
+
+**This is not a tracer artifact — the architectural effect follows the BYTES, not the PC.** Two
+independent confirmations: (a) `csrr` wrote `x5 = 0`, i.e. a CSR *read* really executed where the ELF
+has a CSR *write*; and (b) the subsequent trap vectored to `0x00010048` (bootrom `_hang`) instead of
+`handler` at `0x8000002c`, which is only possible if **`csrw mtvec` never executed**. The wrong
+instruction was not merely mis-reported, it was *committed*.
+
+**That is an I1/I2 violation** — "decode is a function of bytes and address alone" — at the
+instruction-supply boundary, and it explains every symptom of the last two days at once: the bootrom
+never completing `jr s0`, `mini_must_pass` failing, `mini_csr_expected_trap` running off the end of its
+`.text` into zeros, and all 16 DI minis failing. One defect, many faces.
+
+**Why none of the 11 proven contracts could catch it — and this is the important structural lesson.**
+Every fetch proof takes `data_i` as a *free* input and proves the realigner/queue are faithful to
+whatever they are handed. That is exactly the right contract for those modules, and it is exactly why it
+is blind here: **no contract ties `data_i` to the memory content at `vaddr`.** The promise "the bytes
+returned for a fetch of address A are the bytes at A" has no owner. A green 11/11 gate and a core that
+executes the wrong instructions are therefore perfectly consistent — the gate never claimed otherwise.
+That missing promise is now the highest-value contract in the repository, ahead of I9.
+
+**Next, in order:**
+1. Write the I1-at-supply contract: I$ response bytes == memory at the requested `vaddr`. Cheapest form
+   is an L3 simulation assertion in the testbench (compare the I$ response against the backing memory
+   model on every grant) — it needs no formal work and would have caught this on the first run.
+2. Only then localise: the `0x10` shift is a whole number of fetch windows, so suspect the I$
+   response/`vaddr` pairing (the registered-`vaddr_q` path touched by the earlier convergence fix) or
+   FDIP/FTQ replay serving a stale window. `id-dbg` already prints `fetch_addr`, so pair it with the
+   returned data and diff against the ELF.
+3. Re-run the A/B pair afterwards: both flavours failing is consistent with a shared I$/supply defect
+   rather than a fetch_B-specific one, which fits this root cause better than it fits the earlier
+   decode-plane hypotheses.
+
 ### Roadmap analysis: O4 → soft-ladder → SMT2 → multi-threading → g6lc_qemu (2026-08-31)
 
 Asked for a large architectural pass toward *Linux + hypervisor boot and stable runtime* on the maximal
@@ -565,7 +623,9 @@ increment at the **leftmost stage that can express the rule**, and treat firmwar
 | **O3b** | Per-hart attribution of the `mini_must_pass` signature | L4 | `id-dbg` does not print the hart, so "hart 1 parked correctly" cannot be told from "hart 0 stuck". Still open, but **no longer the critical path** — O3c is cheaper and sits directly on the O4 chain. |
 | ~~**O3c**~~ | ~~illegal instruction vs illegal CSR discriminator~~ | L4 | **Done. Both fail identically with `mcause=0`, and both execute in DRAM** (confound checked). So it is **not** CSR legality: the suspect is generic exception delivery — `commit_stage.sv` / `controller.sv`, not `csr_regfile.sv`. |
 | ~~**O3d'**~~ | ~~read the illegal→`ex.valid`→trap path~~ | L4→RTL | **Done, with a real find and an honest negative.** Found and fixed a genuine ISA violation (CVXIF offload is port-0 only while the decoder withholds `ex.valid`; unsound on all three multi-issue G6LC targets, now a `check_cfg` `$fatal` + knob to baseline). It did **not** fix the symptom: still `mcause=0` after a confirmed rebuild. |
-| **O3e** | **Next concrete step:** is the `instruction_o` combinational cone why `ex.valid` never asserts? | L2/RTL | `decoder.sv:118 instruction_o` and `csr_regfile.sv:257 update_access_exception` are both in the `UNOPTFLAT` report, and `instruction_o.ex.valid` is exactly the failing field — one mechanism explains both probe arms. This promotes the comb-loop cleanup from hygiene to a **correctness prerequisite**, and it is the same cone that blocks O1c's I9 proof. Repro: `~/trapdisc/t_{instr,csr}.elf`, 20 s each. |
+| ~~**O3e**~~ | ~~is the `instruction_o` cone why `ex.valid` never asserts?~~ | L2/RTL | **Wrong question — retracted.** `ex.valid` *does* assert and exceptions *are* taken; the RVFI trace shows `ILLEGAL_INSTR` reported and vectored. The four-driver `instruction_o` struct is real and still blocks the L2 decode proof, but it is a **proof-model** obstacle, not the boot defect. |
+| **O5** | **THE defect: retire stream executes bytes offset `0x10` from the reported PC** | L3→RTL | I1/I2 violation at instruction supply, confirmed architecturally (`csrw mtvec` never executed, so the trap vectored to the bootrom instead of the handler). Explains the bootrom stall, `mini_must_pass`, the run-off-the-end, and all 16 DI failures as one defect. Repro: `~/trapdisc/t_ecall.elf`, 9 s. |
+| **O5a** | **Next concrete step:** the missing promise — I$ response bytes == memory at the requested `vaddr` | L3 | No contract owns this, which is why 11/11 formal is green while the core executes the wrong instructions. An L3 TB assertion comparing every I$ grant against the backing memory needs no formal work and would have caught this on run one. Write it **before** localising. |
 | **O3f** | Harden the build against stale-model builds | L0 | Three stale-instrument traps hit in one session (committed `bootrom.sv` behind `bootrom.S`; the output-cache key in `testharness_proxy.py:823` omits `core/include/*config_pkg.sv`; `grep Verilating` is not a valid "did it elaborate" probe because Verilator is silent on success). Each cost more than the analysis it interrupted. |
 | **O3d** | Pin the precise-trap contract at L2 — the first proof outside the fetch plane | L2 | `W2 × issue` and `W2 × commit` are empty cells (M5). All 11 proven contracts are fetch, which is precisely why a green formal gate could not catch this. |
 
