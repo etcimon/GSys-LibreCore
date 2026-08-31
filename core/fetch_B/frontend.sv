@@ -255,6 +255,21 @@ module frontend
   // Not I$ extra-shift (SIGSEGV). Not exact vaddr==tgt / bp_ret_ge (MINI-FAIL).
   // accept=1: do not AND kill_s2 (eats taken jumps).
   logic [63:0] present_exp_q;
+  // `G6LC_NO_PREFIX_FILTER` makes this filter permissive. It is kept as a
+  // documented switch because the answer it gave is worth being able to reproduce.
+  //
+  // MEASURED 2026-08-31: defining it changes the DI battery NOT AT ALL -- 4/16,
+  // same tests, same failure modes. Two conclusions follow, and the second
+  // corrects an earlier attribution of mine:
+  //   1. this filter is not load-bearing for the current suite; and
+  //   2. it is therefore NOT the mechanism that drops instructions after a
+  //      predicted `ret` (O7f). Those three vanished instructions have another
+  //      cause, and blaming the filter was wrong even though the O7a fix to it
+  //      was independently worth +2 tests on the architectural-redirect path.
+  // The filter is left ACTIVE: "not load-bearing for 16 minis" is weak grounds for
+  // deleting a mechanism whose comment cites specific OpenSBI walk scenarios that
+  // this suite does not contain. Its comparison is still unsound in principle for
+  // returns, which is what O7b should resolve properly.
   always_comb begin
     for (int unsigned i = 0; i < NrInstr; i++) begin
       instruction_valid[i] = g6lc_fetch_pkg::slot_live(
@@ -262,7 +277,11 @@ module frontend
           1'b1,
           g6lc_fetch_pkg::slot_keep_link(
               g6lc_fetch_pkg::slot_ge_expected(
+`ifdef G6LC_NO_PREFIX_FILTER
+                  1'b1,
+`else
                   (i == 0) && serving_unaligned,
+`endif
                   64'(addr[i]),
                   present_exp_q),
               rvi_jump[i] | rvc_jump[i] | rvi_call[i] | rvc_call[i]));
