@@ -1,0 +1,41 @@
+# Decode never withholds an illegal-instruction exception -- live `decoder`.
+#
+# Two tasks on purpose (see the header of g6lc_trap_deliver_props.sv):
+#   ok  CvxifEn=0, the shipped multi-issue setting  -> must PASS
+#   bug CvxifEn=1                                   -> must FAIL (expect fail)
+# `bug` is the machine-checked negative control: it proves the property has teeth
+# and that the check_cfg guard on `CvxifEn && NrIssuePorts > 1` is load-bearing.
+#
+# Run: sby -f core/formal/g6lc_trap_deliver.sby
+#      cva6-build verify --formal
+
+[tasks]
+ok
+bug
+
+[options]
+mode prove
+depth 2
+bug: expect fail
+
+[engines]
+smtbmc z3
+
+[script]
+# read_slang, not `read -formal`: the properties reach into `dut.illegal_instr`,
+# and the classic frontend silently invents a dangling wire for a hierarchical
+# reference -- which passes vacuously. It is also the only frontend here that
+# elaborates `parameter type` structs and package imports.
+ok:  read_slang --std 1800-2017 --allow-use-before-declare --top g6lc_trap_deliver_props -DFORMAL g6lc64_smt2_config_pkg.sv config_pkg.sv riscv_pkg.sv ariane_pkg.sv build_config_pkg.sv decoder.sv g6lc_trap_deliver_props.sv
+bug: read_slang --std 1800-2017 --allow-use-before-declare --top g6lc_trap_deliver_props -DFORMAL -DG6LC_TRAP_CVXIF g6lc64_smt2_config_pkg.sv config_pkg.sv riscv_pkg.sv ariane_pkg.sv build_config_pkg.sv decoder.sv g6lc_trap_deliver_props.sv
+prep -top g6lc_trap_deliver_props
+
+[files]
+../include/g6lc_core_types.svh
+../include/g6lc64_smt2_config_pkg.sv
+../include/config_pkg.sv
+../include/riscv_pkg.sv
+../include/ariane_pkg.sv
+../include/build_config_pkg.sv
+../decoder.sv
+g6lc_trap_deliver_props.sv

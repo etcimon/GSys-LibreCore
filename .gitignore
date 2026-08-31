@@ -155,3 +155,7 @@ software/smt2-linux/soft-ladder/_trace_fdt2/
 /verif/regress/remote/create_trace_*.py
 /verif/regress/remote/run_fetch_snap_*.py
 /verif/regress/remote/start_fetch_snap*.py
+
+# SymbiYosys task working directories (dir name = <sby basename>[_<task>]).
+# The .sby and *_props.sv inputs stay tracked; only the generated dirs are ignored.
+core/**/formal/*/

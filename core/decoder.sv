@@ -1754,8 +1754,16 @@ module decoder
               5'h5: begin
                 instruction_o.op = ariane_pkg::AMO_CASQ;
                 imm_select = MUX_RD_RS3;
-                // Odd pair base is reserved / illegal
-                if (instr.atype.rd[0] || instr.atype.rs2[0]) illegal_instr = 1'b1;
+                // Odd pair base is reserved / illegal.
+                // riscv_pkg declares these fields at their instruction bit
+                // positions (`atype_t.rd` is [11:7], `rs2` is [24:20]), so the
+                // register LSB is bit 7 / bit 20 -- NOT bit 0. Indexing [0] here
+                // was out of bounds: Verilator resolves it to X/0 and the check
+                // silently never fired, so an odd-pair AMOCAS.Q was accepted
+                // instead of being reported illegal. Found by elaborating this
+                // decoder under slang for core/formal/g6lc_trap_deliver.sby,
+                // which rejects the out-of-bounds index outright.
+                if (instr.atype.rd[7] || instr.atype.rs2[20]) illegal_instr = 1'b1;
               end
               default: illegal_instr = 1'b1;
             endcase

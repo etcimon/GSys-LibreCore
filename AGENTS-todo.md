@@ -378,6 +378,68 @@ illegal-instruction trap. Whether (a) is hart-1-parked-legitimately versus hart-
 established** and is the next thing to determine — the `id-dbg` line does not identify the hart, so the
 first step is per-hart attribution, not another hypothesis.
 
+### Roadmap analysis: O4 → soft-ladder → SMT2 → multi-threading → g6lc_qemu (2026-08-31)
+
+Asked for a large architectural pass toward *Linux + hypervisor boot and stable runtime* on the maximal
+envelope (8-wide OoO, 8 cores, stream plane, L1–L3, RVV). The honest answer is that **the feature
+parameterization is not the bottleneck and new feature RTL is not the right next code**:
+
+- `check_cfg` already carries a dense legality envelope for U1–U6 — `OoOEn`/`SliceOoOEn` exclusivity,
+  `NrIssuePorts` 1..8, `NrCores` 1..8 with the `NrCores × NrHarts` product bound, `L2En`/`L3En`
+  dependency and power-of-two shape checks, prediction-fabric legality, `RVH → RVS`, prefetch/D$ type
+  gating. Adding more asserts there would be duplication, not progress.
+- What is missing is **contracts on the planes those features run through**. Every one of the 11 proven
+  contracts is in the fetch plane. Decode, issue, commit, the exception path, the LSU and the coherence
+  fabric have **zero**. That is not a documentation gap; it is why a green formal gate coexists with a
+  core that cannot deliver an illegal-instruction trap.
+
+So the ordering is forced, and it is *narrower* than the feature list:
+
+| Stage | Gate | Why it must come first |
+|---|---|---|
+| **now** | exception delivery works at all | RVH/Linux/RVV all assume precise traps. A hypervisor is *built* out of traps (`sret`/`mret`, two-stage faults, `hideleg`). Building RVV or L3 on a core that drops exceptions is building on sand. |
+| then | **O4** OpenSBI residual | Reachable only once `sbi_hart_detect_features`' CSR probes can trap. Its recorded signature must be **re-derived**, not reused (T9). |
+| then | soft-ladder / SMT2 live-peer battery (**O2**) | Needs a valid oracle, which needs a machine that can report PASS. |
+| then | multi-threading beyond T=2 | I18/I20/I22/I23 per-hart isolation contracts, none of which exist yet outside fetch. |
+| last | `g6lc_qemu` B0–B3 | It *consumes* the model (DTS/PMU/device contracts). A generator fed by an unverified core propagates the error into the tooling. |
+
+**Concrete pass made toward this, rather than feature scaffolding:**
+
+1. **A real latent bug, found by trying to elaborate the decoder formally** (`core/decoder.sv:1758`).
+   `riscv_pkg` declares instruction fields at their bit positions — `atype_t.rd` is `[11:7]`, `rs2` is
+   `[24:20]` — so the AMOCAS.Q odd-pair guard `instr.atype.rd[0] || instr.atype.rs2[0]` indexed **bits
+   that do not exist**. Verilator resolves an out-of-range index to X/0 and says nothing, so *the check
+   never fired* and an odd-pair AMOCAS.Q was accepted instead of reported illegal. slang rejects it
+   outright. Fixed to `rd[7]`/`rs2[20]`. This is the push-left thesis in miniature: the proof paid for
+   itself before it ran.
+
+2. **`core/include/g6lc_core_types.svh`** — the modularity seam. SV packages cannot be parameterized, so
+   every pipeline struct lives as a `localparam type` in `core/cva6.sv`, unreachable from any harness not
+   instantiated under `cva6`. Consequence: each props file **hand-copies** the layouts
+   (`g6lc_fetch_hold_props.sv` reconstructs four, "layout-identical … by hand and by hope"). A props file
+   whose `scoreboard_entry_t` has drifted still elaborates, still passes, and is checking a different
+   machine. The header follows the convention the codebase already uses for exactly this
+   (`rvfi_types.svh`, `cvxif_types.svh`: cfg-as-macro-argument). `cva6.sv` adoption is deliberately
+   deferred — it must be shown netlist-identical first (I27 applied to a refactor) — and until then the
+   header is documented as a copy that must track `cva6.sv`. One tracked copy beats N untracked ones.
+
+3. **`core/formal/g6lc_trap_deliver.{sby,props.sv}`** — the first exception-plane contract, live-DUT
+   (not a policy model: the `ooo` proofs are self-contained models and would have reproduced the
+   *intent* rather than the code, which is how the CVXIF hole survived). Two tasks by design, so the
+   proof has its own oracle: `ok` (CvxifEn=0) must pass, `bug` (CvxifEn=1) carries `expect fail` and is
+   the machine-checked statement that the withheld `ex.valid` is real and the new `check_cfg` guard is
+   load-bearing.
+
+   **Status: elaborates clean (0 errors, 0 warnings) but `ok` FAILS, so it is NOT wired into
+   `verify.formalTasks`.** All three assertions fail together, which points at the structure rather than
+   at any one property — and the structure is the find: **`instruction_o` is driven by four separate
+   processes** (`always_comb : decoder` :192, `always_comb : sign_extend` :1879, the continuous
+   `assign instruction_o.valid` :1961, and `always_comb : exception_handling` :1963), i.e. one packed
+   struct variable with four drivers. That is exactly why `decoder.sv:118 instruction_o` appears in the
+   `UNOPTFLAT` circular-combinational report, and it is strong corroboration for **O3e**. Not yet proven
+   to be *the* cause of the missing trap — the counterexample trace has not been read — so it is logged
+   as corroboration, not as a verdict.
+
 ### Fastest path to O4, inferred from OpenSBI source (2026-08-31)
 
 Rather than treat O4 as "run the soak again", the path was derived by lifting the failing directed mini
