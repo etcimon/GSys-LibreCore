@@ -870,6 +870,43 @@ module frontend
       if (flush_i || is_mispredict || bp_fire) begin
         icache_valid_q    <= 1'b0;
         icache_ex_valid_q <= ariane_pkg::FE_NONE;
+        // I3/I7: re-base the prefix filter on the redirect target.
+        //
+        // `present_exp_q` is a MONOTONIC-PROGRESS filter: `slot_ge_expected`
+        // drops any slot whose pc is below it, which is what stops a
+        // same-window sequential HIT from re-issuing the prefix ahead of a
+        // jump target. That is only sound while addresses increase. A redirect
+        // may go BACKWARDS -- `mret` to `mepc+4`, a taken backward branch, a
+        // trap entry to a low `mtvec` -- and until now this branch left the
+        // register holding the PRE-redirect address. When that stale value is
+        // above the target, every slot in the target's own (partial) window is
+        // dropped and fetch effectively resumes at the next window boundary.
+        //
+        // Measured before this fix, in mini_csr_expected_trap: the handler set
+        // mepc=0x80000024 and execution resumed at 0x80000028; the second probe
+        // set mepc=0x80000042 and resumed at 0x80000048 -- each time the next
+        // 8-byte boundary, losing `csrw mtvec,t1` and `lui t3,0xe`, which is why
+        // the cookie compare saw 0xec02 instead of 0xe601. Aligned redirects
+        // (jr s0 -> 0x80000000, trap entry -> handler at 0x80000060) were
+        // unaffected, which is what made this look like a trap bug rather than a
+        // fetch one.
+        //
+        // Cleared, NOT seeded with `npc_d`. Seeding with npc_d was tried first and
+        // traded one bug for another: it fixed the two trap minis but hung
+        // mini_fdt_lenp_sw (PASS -> timeout), because npc_d at the instant of a
+        // flush is not always the address the redirect eventually requests, and a
+        // seed ABOVE the real target drops that target's window -- the very
+        // failure this is meant to remove, with a different stale value.
+        //
+        // Clearing cannot over-filter, and it costs nothing real: prefix-drop
+        // exists for the SAME-WINDOW SEQUENTIAL HIT case, where a jump target
+        // sits inside a window already being streamed and the slots ahead of it
+        // must not issue. After a redirect there is no such prefix -- the window
+        // is freshly requested AT the target and `icache_data` is shifted by
+        // `shamt` so slot 0 IS the target. The filter is re-armed one cycle later
+        // by the normal `icache_take` update, so exactly one window is unfiltered
+        // and that window has nothing to filter.
+        present_exp_q     <= '0;
       end else begin
         // prefer the real I$ return, else inject the loop buffer into the same pipe
         icache_valid_q <= icache_take;
