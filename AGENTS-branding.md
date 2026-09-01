@@ -14,6 +14,12 @@ Governs how the project is named in code, prose and silicon. Referenced from
 `G6LC` = "GSys 6-stage LibreCore", preserving the pipeline-depth semantics that
 the `A6` in CVA6 carried. `G6LC` is an identifier prefix, not a trademark.
 
+**GSys and GlobecSys are different.** `GSys` is a brand of Etienne Cimon and is
+**not a trademark.** Multimedia Protection Inc. is the contracting entity for
+the GSys Commercial License only; it does not own the GSys brand. GlobecSys Inc.
+is a separate corporation; do not treat its corporate name as the GSys brand.
+See `TRADEMARKS.md`.
+
 ## 2. Device nomenclature
 
 OpenHW's `CV` prefix is a CORE-V family marker and cannot be reused. The

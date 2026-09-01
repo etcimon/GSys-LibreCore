@@ -14,7 +14,9 @@ explanation of why this document exists and what it costs you.
 
 Thank you for your interest in contributing to GSys LibreCore ("**We**" or
 "**Us**"), a project of Etienne Cimon administered in commercial matters through
-GlobecSys Inc.
+Multimedia Protection Inc., the contracting entity. GSys is a brand of Etienne
+Cimon and is not a trademark. GlobecSys Inc. is a separate corporation and is
+not a party to this Agreement.
 
 This agreement documents the rights granted by contributors to Us. It is a
 legally binding document; please read it carefully before agreeing. To make it

@@ -23,8 +23,11 @@ OpenHW Group — CORE-V CVA6                          (Apache-2.0 WITH SHL-2.0/2
    + SiFive, UC Regents — Apache-2.0 / BSD-3-Clause material
                     |
                     v
-GSys LibreCore (G6LC)                     (CERN-OHL-S-2.0 OR GSys Commercial,
-Etienne Cimon / GlobecSys Inc.             for LibreCore-original material only)
+GSys LibreCore (G6LC)          (CERN-OHL-S-2.0 OR GSys Commercial;
+                               LibreCore-original material only)
+  rights holder / GSys brand . Etienne Cimon (GSys is not a trademark)
+  contracting entity ......... Multimedia Protection Inc.
+  GlobecSys Inc. ............. separate corporation, not the GSys brand
 ```
 
 ## What is LibreCore-original, and what is not

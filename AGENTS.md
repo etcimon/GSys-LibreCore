@@ -152,7 +152,9 @@ docs/specs skips it. It sits beside (never above) the section-0 SoC prime direct
 ### 0.4a Branding (standing workflow rule — see `AGENTS-branding.md`)
 
 Naming is a licensing-adjacent obligation: neither Apache-2.0 §6 nor Solderpad §6 grants trademark
-rights, so the project must not brand itself `CVA6`/`CORE-V`. New code is `g6lc_*` / `g6lc64_*`;
+rights, so the project must not brand itself `CVA6`/`CORE-V`. **GSys is not a trademark**; it is a
+brand of Etienne Cimon. Multimedia Protection Inc. is the commercial contracting entity only.
+New code is `g6lc_*` / `g6lc64_*`;
 prose is "GSys LibreCore" then "LibreCore". The **boundary rule** is binding: rename at the boundary,
 never inside a tier-U file — add `core/include/g6lc_pkg.sv` (the `g6lc_cfg_t` / `G6LCCfg` alias seam)
 or `core/Flist.g6lc`, rather than churning ~5,900 `CVA6Cfg` sites for zero legal benefit.

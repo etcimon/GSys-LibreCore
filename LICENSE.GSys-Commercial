@@ -10,7 +10,8 @@ STATUS OF THIS DOCUMENT
 This document describes the terms on which the GSys Commercial License is
 OFFERED. It is not itself a grant of rights and it is not a signed agreement.
 No rights under this document arise until a separate written agreement has been
-executed between the Licensee and the rights holder.
+executed between the Licensee and the rights holder, Etienne Cimon, who also
+owns the GSys brand. GSys is not a trademark.
 
   >> This offer document requires review by qualified counsel before it is
   >> used in a commercial transaction. Royalty rates, territory, term,
@@ -239,11 +240,12 @@ sections 3.2 to 3.6, then section 4.5.
         - any foundry PDK, memory compiler output or vendor cell library, which
           remain subject to their own terms.
 
-  4.4 TRADEMARK. The GSys marks are licensed separately and on different
-      conditions; see TRADEMARKS.md. A commercial licensee that takes marking
-      relief under section 3.3 thereby declines the compliance-badge grant in
-      TRADEMARKS.md section 3 and may not represent the Product as
-      source-available.
+  4.4 BRAND AND NAMES. GSys is not a trademark. The GSys brand (including
+      "GSys LibreCore", "LibreCore", and the die legend) is owned by Etienne
+      Cimon. Permission to apply the die legend is stated in TRADEMARKS.md and
+      is not a trademark licence. A commercial licensee that takes marking relief under
+      section 3.3 thereby declines the die-legend permission in TRADEMARKS.md
+      section 3 and may not represent the Product as source-available.
 
   4.5 COMMERCIAL-ONLY MATERIAL (TIER P, CASE 2). A subset of
       LibreCore-original material is deliberately NOT offered under
@@ -271,10 +273,12 @@ sections 3.2 to 3.6, then section 4.5.
 5. CONSIDERATION
 ================================================================================
 
-Royalties are payable to Etienne Cimon. Commercial relationships are
-administered through GlobecSys Inc. ("GSys"); the contracting entity and
-structure are at the rights holder's discretion and are fixed in the executed
-agreement.
+Royalties are payable to Etienne Cimon, who owns the GSys brand. GSys is not
+a trademark. Commercial relationships are administered through Multimedia
+Protection Inc., the contracting entity. GlobecSys Inc. is a separate
+corporation and is not a party to this offer. See TRADEMARKS.md. The
+contracting entity and structure are otherwise at the rights holder's
+discretion and are fixed in the executed agreement.
 
 Royalty basis is set per agreement and is typically structured on one or more
 of: per-unit shipped, per-tape-out or per-mask-set, per-design-win, or an

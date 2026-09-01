@@ -109,8 +109,10 @@ publishing your PDK adaptation — a royalty-bearing **[GSys Commercial License]
 is available. It also carries the warranty and IP indemnification that CERN-OHL-S §6 explicitly
 disclaims.
 
-Royalties are payable to Etienne Cimon; commercial relationships are administered through
-**GlobecSys Inc. ("GSys")**. See [Commercial licence & contact](#commercial-licence--contact).
+Royalties are payable to Etienne Cimon, who owns the **GSys** brand (**not** a
+trademark). Commercial relationships are administered through **Multimedia
+Protection Inc.**, the contracting entity. **GlobecSys Inc.** is a separate
+corporation and is not the contracting entity. See [Commercial licence & contact](#commercial-licence--contact).
 
 ### Three things stated up front
 
@@ -281,11 +283,12 @@ When emailing about a commercial licence, it speeds things up considerably if yo
 - your target process / foundry, and whether PDK adaptation is under NDA;
 - expected volume and whether you need indemnification.
 
-Also use these channels for CLA submission, trademark questions, and security reports.
+Also use these channels for CLA submission, naming questions, and security reports.
 
-> Royalties are payable to **Etienne Cimon**. Commercial relationships are administered through
-> **GlobecSys Inc. (GSys)**; the contracting entity and structure are at the rights holder's
-> discretion and are fixed in the executed agreement.
+> Royalties are payable to **Etienne Cimon**, who owns the **GSys** brand (**not** a trademark).
+> Commercial relationships are administered through **Multimedia Protection Inc.**, the
+> contracting entity. **GlobecSys Inc.** is a separate corporation and is not the contracting
+> entity. The structure of the executed agreement is otherwise at the rights holder's discretion.
 > [`LICENSE.GSys-Commercial`](LICENSE.GSys-Commercial) is an **offer document** — it grants nothing
 > until a separate written agreement is signed, and it is pending counsel review
 > ([`AGENTS-todo.md`](AGENTS-todo.md) B1).

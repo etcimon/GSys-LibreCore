@@ -16,7 +16,9 @@ Contributions to tier T are MIT inbound and outbound and need no agreement.
 
 Thank you for Your interest in contributing to GSys LibreCore ("**We**" or
 "**Us**"), a project of Etienne Cimon administered in commercial matters through
-GlobecSys Inc.
+Multimedia Protection Inc., the contracting entity. GSys is a brand of Etienne
+Cimon and is not a trademark. GlobecSys Inc. is a separate corporation and is
+not a party to this Agreement.
 
 ## 1. Definitions
 

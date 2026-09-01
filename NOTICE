@@ -7,7 +7,8 @@ A RISC-V application-class processor core, derived from the OpenHW Group CVA6
   Product name .... GSys LibreCore
   Short name ...... LibreCore
   Code prefix ..... G6LC
-  Steward ......... GlobecSys Inc. ("GSys")
+  Brand ........... GSys (Etienne Cimon; not a trademark)
+  Contracting ..... Multimedia Protection Inc.
   Rights holder ... Etienne Cimon (LibreCore-original material)
 
 --------------------------------------------------------------------------------

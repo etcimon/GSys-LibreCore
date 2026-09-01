@@ -116,8 +116,11 @@ CI, and heritage documentation. See `AGENTS-branding.md`.
 
 ## 8. Contact
 
-Commercial licensing, CLA submission and trademark questions:
-open an issue at the Source Location given in `NOTICE` §1, or contact the rights
-holder listed in `.active-contributor`.
+Commercial licensing, CLA submission and naming questions:
+open an issue at the Source Location given in `NOTICE` §1, or contact the
+contracting entity, Multimedia Protection Inc. The rights holder and GSys brand
+owner is listed in `.active-contributor` (Etienne Cimon). GSys is not a
+trademark. GlobecSys Inc. is a separate corporation and is not the contracting
+entity.
 
 > Contact routing is provisional pending publication; see `AGENTS-todo.md`.
