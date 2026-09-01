@@ -18,20 +18,20 @@ validate, or refuse, without guessing.
 
 | Ask | Emulator | Design | Why it still matters |
 |---|---|---|---|
-| **F1** placement | Ingests `cap_base`/`desc_base` when published | Not localparams beside `CAP_OFF_*` | Guest cannot address the island on B1; virt-card UIO is not that pin |
-| **F2** desc version | Named `FALLBACK_DESC_VERSION` once | No accepted-version localparam | Honest bad-version reporting |
-| **F3** packed cap words | Parses cap-window expressions | Still comments / `always_comb` | One guest binary across SKUs |
-| **F4** word order | Cross-check `bits_to_desc` / comments | Byte vs word map unconfirmed | Host image == device == emitted model |
-| **F5** flags dtype/irq | `flags_layout` ingested | Helpers/comments, not localparams | No hard-coded `DTYPE_SHIFT` |
-| **F6** cluster | `queue_cluster_map` or field; else 0 | No required map/CSR/field | Per-cluster events; I2 dispatch |
-| **F7** §8 vs RTL | Ingests RTL `CAP_OFF_*` | `scaling-100tops.md` §8 still `0x14`=DRAM BW | Silent wrong discovery from the doc |
-| **F8** clusters enabled | Cannot split one `Clusters` word | RTL emits a single count | Present ≠ enabled; TOPS/W per SKU |
-| **F9** PMU offsets | Reader + modelled PMU ready | Live package offsets unpublished | D2 vs RTL `0x180–0x18C` is hand-only |
-| **F10** `ew`/`sp24` | Accessors when published | Live pkg: prio/irq only | No INT4 *effective*-TOPS number |
-| **F11** measured DRAM | Roofline refuses BW bound if unpublished | `DramGBps=0` | Cannot say compute- vs bandwidth-bound |
-| **F12** MaxDim | `shape_fits_blocking` | Not stated in `isa-encoding.md` §7 | 256³ fits; 4096³ is 16³ tiles |
-| **F13** writeback | Roofline uses `max(compulsory,tiled)+4mn` | §4 still input-only `2/T` | Intensity 42 vs 128 MAC/byte at T=256 |
-| **F14** 16-bit meas | Saturate like RTL `0xFFFF` | Units/range unclear | 400 GB/s cannot be reported precisely |
+| **F1** placement | Ingests `CAP_BASE`/`AI_CAP_BASE` | **Published** `AI_CAP_BASE=0x4000_0000`, `DESC_BASE=0x140` | B1 guest-visible island |
+| **F2** desc version | Prefers `DESC_VERSION` | **Published** `DESC_VERSION` | Honest bad-version reporting |
+| **F3** packed cap words | Parses cap-window expressions | `CAP_OFF_*` named; packings still comb | One guest binary across SKUs |
+| **F4** word order | Cross-check `bits_to_desc` / comments | Byte offsets in `desc_t` | Host image == device |
+| **F5** flags dtype/irq | `flags_layout` ingested | **Published** `FLAG_*_SHIFT` | No hard-coded `DTYPE_SHIFT` |
+| **F6** cluster | `QueueClusterMap` | **Published** `'{0,0}` | Per-cluster events; I2 dispatch |
+| **F7** §8 vs RTL | Ingests RTL `CAP_OFF_*` | **Closed** — §8 is the shipped map | Silent wrong discovery gone |
+| **F8** clusters enabled | Split word + bitmap | **Published** present/enabled + `CLUSTER_EN` | Present ≠ enabled |
+| **F9** PMU offsets | Reader + modelled PMU ready | **Published** `PMU_OFF_*` `0x180–0x18C` | D2 vs RTL auto-diff |
+| **F10** `ew`/`sp24` | Accessors when published | **Published** `desc_{dtype,accmode,ew,sp24}` | Engine still s8-dense |
+| **F11** measured DRAM | Roofline refuses BW bound if unpublished | **Open (I3):** `DramGBps=0` | Cannot say compute- vs bandwidth-bound |
+| **F12** MaxDim | `shape_fits_blocking` | **Published** `isa-encoding.md` §7; SW tiles | 256³ fits; 4096³ is 16³ tiles |
+| **F13** writeback | Roofline uses `max(compulsory,tiled)+4mn` | **Published** §4 writeback term | Intensity 42 vs 128 at T=256 |
+| **F14** 16-bit meas | Saturate like RTL `0xFFFF` | **Published** 32-bit `DRAM_MEAS_X1000` at `0x2C` | 400 GB/s readable |
 | **F15** poll pending | Emulator `POLL_PENDING` / ring-full `0` | Unpublished | Not a hardware contract |
 
 ---

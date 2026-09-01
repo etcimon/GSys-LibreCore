@@ -4,23 +4,21 @@
 // Xg6lcai island top (P3 spine): capability window + AI-3 addr check +
 // descriptor engine. Not yet on the SoC AXI map — standalone veri first.
 //
-// Register map (byte address, 32-bit data):
-//   0x0000..0x00FF  capability window (RO)
-//   0x0100          control  [0]=enable [1]=wr_cpl_en (completion DMA; default 1 if DMA)
-//   0x0104          status   [0]=busy, [1]=fetch_busy, [31:16]=last_status
-//   0x0108          doorbell  [7:0]=qid, [30:8]=ticket, [31]=fetch_from_mem
-//   0x010C          done sticky (write 1 = claim/pop CPL FIFO head)
+// Register map (byte address, 32-bit data). Names in g6lc_ai_island_cfg_pkg:
+//   CAP_BASE / REG_OFF_CAP     capability window (RO) through 0x00FF
+//   REG_OFF_CTL     0x0100  control  [0]=enable [1]=wr_cpl_en
+//   REG_OFF_STATUS  0x0104  status   [0]=busy, [1]=fetch_busy, [31:16]=last_status
+//   REG_OFF_DOORBELL 0x0108 doorbell  [7:0]=qid, [30:8]=ticket, [31]=fetch_from_mem
+//   REG_OFF_CPL     0x010C  done sticky (write 1 = claim/pop CPL FIFO head)
 //   0x0110          done ticket (RO) — CPL FIFO head
 //   0x0114          done status (RO) — CPL FIFO head
 //   Completion FIFO depth = min(QueueDepth, 16) (see g6lc_ai_cpl_fifo / completion-fifo.md)
 //   0x0118/0x011C   desc_ptr lo/hi (fetch source when doorbell[31]=1)
-//   0x0120+q*0x20   region: +0 base_lo, +4 base_hi, +8 limit_lo,
+//   REG_OFF_QUEUE   0x0120+q*0x20  region: +0 base_lo, +4 base_hi, +8 limit_lo,
 //                            +c limit_hi, +10 perm (write commits region)
-//   0x0140..0x017F  descriptor latch (16x32-bit)
-//   0x0180          PMU R beats (RO, sticky last GEMM)
-//   0x0184          PMU W beats (RO, sticky last GEMM)
-//   0x0188          PMU active cycles (RO, sticky last GEMM)
-//   0x018C          PMU sustained GB/s x1000 (RO, from last GEMM)
+//   DESC_BASE       0x0140..0x017F  descriptor latch (16x32-bit)
+//   PMU_OFF_R_BEATS / W_BEATS / CYCLES / GBPS_X1000  (RO, sticky last GEMM)
+// Guest-absolute: AI_CAP_BASE=0x4000_0000, AI_DESC_BASE=0x4000_0140.
 
 module g6lc_ai_island_top
   import g6lc_ai_island_cfg_pkg::*;

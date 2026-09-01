@@ -68,8 +68,8 @@ Honest status of **implemented silicon/software**, not the scaffold-only state o
 | **PMU / CAP geometry** | CAP + PMU windows | **Live** | cap/bw_pmu smokes |
 | **I3-lite bus** (trail C-store, multi-out AR, …) | island fabric | **Live** | scale gemm + PMU |
 | **NoC width 64b** | island | **Floor (live)** | wider NoC deferred |
-| **I2 multi-cluster / NoC/QoS** | island package | **Not started** | staging rule: measure I3 BW first |
-| **I3 full memory bandwidth model** | DRAM/channels | **Open** | PMU present; model soak open |
+| **I2 multi-cluster / NoC/QoS** | island package | **Not started** | F8 present/enabled + bitmap published; still measure I3 BW first |
+| **I3 full memory bandwidth model** | DRAM/channels | **Path published, value open** | `DramGBps=0`; `PMU_OFF_*` + `CAP_OFF_DRAM_MEAS_X1000`; F13 writeback in §4 |
 | **PCIe EP + virtio (P5)** | uncore | **Virtual only** | `virt-ai-pcie` TCP + EDK2 GPEX RC witness; transport **unpinned** |
 | **ai-tensor host** sim/SoftIsland/virt-card | `ai-tensor/` | **Live** | golden + queue/event-fd soaks |
 | **PyTorch soft path** | `torch_ops` + virt-card | **Live** | `test_torch_virt_ai_island` (torch optional) |

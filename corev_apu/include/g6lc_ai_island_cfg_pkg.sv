@@ -32,6 +32,7 @@ package g6lc_ai_island_cfg_pkg;
     int unsigned QueueDepth;
     int unsigned QosClasses;
     int unsigned WorkQuantumK;   // preemption boundary in k-steps
+    int unsigned ClustersEnabled; // F8: enabled count; == Clusters until I2 gating
   } ai_island_cfg_t;
 
   // I1 live RTL: AccTile*=256 / PeLanes=256 (1 MAC cycle per C at full tile).
@@ -52,7 +53,8 @@ package g6lc_ai_island_cfg_pkg;
       Queues:       unsigned'(2),
       QueueDepth:   unsigned'(64),
       QosClasses:   unsigned'(2),
-      WorkQuantumK: unsigned'(64)
+      WorkQuantumK: unsigned'(64),
+      ClustersEnabled: unsigned'(1)
   };
 
   // Latency-SKU target: AccTile* = 256 frozen; full Macs/NoC/DRAM still open.
@@ -70,10 +72,38 @@ package g6lc_ai_island_cfg_pkg;
       Queues:       unsigned'(2),
       QueueDepth:   unsigned'(64),
       QosClasses:   unsigned'(2),
-      WorkQuantumK: unsigned'(64)
+      WorkQuantumK: unsigned'(64),
+      ClustersEnabled: unsigned'(1)
   };
 
-  // Capability window MMIO layout (offsets, 32-bit LE) — scaling-100tops.md §8.
+  // Guest-absolute island placement (F1). SoC alias of GPIOBase; 4 KiB window.
+  // Emulator ingest: AI_CAP_BASE/AI_DESC_BASE → island-relative cap_base/desc_base.
+  localparam logic [63:0] AI_CAP_BASE  = 64'h4000_0000;
+  localparam logic [63:0] AI_DESC_BASE = 64'h4000_0140;
+
+  // Island-relative register map (F1). Capability window occupies [CAP_BASE, 0x00FF].
+  localparam logic [15:0] CAP_BASE          = 16'h0000;
+  localparam logic [15:0] DESC_BASE         = 16'h0140;
+  localparam logic [15:0] REG_OFF_CAP       = 16'h0000;
+  localparam logic [15:0] REG_OFF_DESC      = 16'h0140;
+  localparam logic [15:0] REG_OFF_CTL       = 16'h0100;
+  localparam logic [15:0] REG_OFF_STATUS    = 16'h0104;
+  localparam logic [15:0] REG_OFF_DOORBELL  = 16'h0108;
+  localparam logic [15:0] REG_OFF_CPL       = 16'h010C;
+  localparam logic [15:0] REG_OFF_QUEUE     = 16'h0120;
+
+  // I3 PMU (sticky last GEMM). Units: beats, cycles, milli-GB/s.
+  localparam logic [15:0] PMU_OFF_R_BEATS     = 16'h0180;
+  localparam logic [15:0] PMU_OFF_W_BEATS     = 16'h0184;
+  localparam logic [15:0] PMU_OFF_CYCLES      = 16'h0188;
+  localparam logic [15:0] PMU_OFF_GBPS_X1000  = 16'h018C;
+
+  // Live SKU: both queues on cluster 0. I2 grows this with ClustersEnabled.
+  localparam int unsigned QueueClusterMap [0:1] = '{0, 0};
+
+  // Capability window MMIO layout (offsets, 32-bit LE) — **RTL is normative**
+  // (scaling-100tops.md §8 tracks these CAP_OFF_* names; do not rediscover from
+  // an older 0x14=DRAM table).
   localparam logic [15:0] CAP_OFF_VERSION     = 16'h00;
   localparam logic [15:0] CAP_OFF_CLUSTERS    = 16'h04;
   localparam logic [15:0] CAP_OFF_MACS_CYCLE  = 16'h08;
@@ -86,5 +116,10 @@ package g6lc_ai_island_cfg_pkg;
   localparam logic [15:0] CAP_OFF_QOS         = 16'h20;
   localparam logic [15:0] CAP_OFF_QUANTUM     = 16'h24;
   localparam logic [15:0] CAP_OFF_DTYPE_MASK  = 16'h28;  // ew/sp24 grant bits
+  // F14: full 32-bit measured milli-GB/s. Packed [31:16] of DRAM_GBPS saturates
+  // at 16'hFFFF (>= 65.535 GB/s); software must read this word for I3 ≥ 66 GB/s.
+  localparam logic [15:0] CAP_OFF_DRAM_MEAS_X1000 = 16'h2C;
+  // F8: enabled-cluster bitmap (bit i = cluster i powered/enabled).
+  localparam logic [15:0] CAP_OFF_CLUSTER_EN  = 16'h30;
 
 endpackage

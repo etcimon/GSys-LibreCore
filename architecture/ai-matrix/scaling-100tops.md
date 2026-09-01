@@ -117,6 +117,12 @@ This is the derivation behind the draft's "≥200–400 GB/s": it is the `T = 25
 *consequence* of the blocking factor, not an independent choice. **Pick `T` and the DRAM class
 together; anything else produces a machine that cannot reach its own peak.**
 
+> **F13 (writeback):** `2/T` is **input-only**. The live sequencer is a resident GEMM (load all A,
+> load all B, MAC, store C). With `s32` accumulators the C writeback is `4·m·n`, which at
+> `m=n=k=T` is **twice** the input traffic — total traffic 3× this table, intensity **42 rather
+> than 128 MAC/byte at T=256**. Size I3 from `max(compulsory, tiled) + 4mn`. The table above
+> remains the streaming-reduction bound; do not quote it as the live engine's DRAM demand.
+
 ### 4.1 `T` is a property of the accumulator SRAM, not of the PE array
 
 The most likely implementation error here is equating `T` with a physical array dimension. It is not.
@@ -272,25 +278,33 @@ package with fields no core module reads, for a block that lives in `corev_apu/`
 
 The capability window is what lets the PyTorch partitioner cost a kernel on an unknown part.
 
-> **F7 (open):** this table is the **plan of record**. Shipped `g6lc_ai_cap_window.sv` disagrees from
-> `0x14` onward (`block_mnk`, packed DRAM nameplate+measured, `{queue_depth,queues}`, QoS, quantum,
-> dtype mask). Until this section and the RTL are the same document, **ingest RTL `CAP_OFF_*`**
-> (`g6lc_qemu` / `RTL_FEEDBACK.md` F7). Do not discover geometry from the rows below on silicon.
+> **F7 closed on the document:** the table below **is** the shipped `CAP_OFF_*` map in
+> `g6lc_ai_island_cfg_pkg.sv` / `g6lc_ai_cap_window.sv`. Ingest those names; do not rediscover
+> from an older draft that put DRAM at `0x14`.
 
-| Offset | Field (plan) |
-|---|---|
-| `0x00` | capability version, must match `aicfg.version` |
-| `0x04` | cluster count present / cluster count enabled (**F8:** RTL today emits one `Clusters` word) |
-| `0x08` | MACs per cycle per cluster |
-| `0x0C` | island clock, kHz |
-| `0x10` | SRAM bytes per cluster |
-| `0x14` | peak DRAM bandwidth, MB/s (measured at bring-up, not nameplate) |
-| `0x18` | supported dtype/element-width mask (§9) |
-| `0x1C` | queue count, QoS class count |
+| Offset | `CAP_OFF_*` | Field (RTL, normative) |
+|---|---|---|
+| `0x00` | `VERSION` | capability version (`AiIslandCapVersion`) |
+| `0x04` | `CLUSTERS` | `[15:0]` present, `[31:16]` enabled (F8) |
+| `0x08` | `MACS_CYCLE` | MACs per cycle per cluster |
+| `0x0C` | `CLOCK_KHZ` | island clock, kHz |
+| `0x10` | `SRAM_BYTES` | SRAM bytes per cluster |
+| `0x14` | `BLOCK_MNK` | packed `log2(M)\|log2(N)\|log2(K)` |
+| `0x18` | `DRAM_GBPS` | `[15:0]` nameplate GB/s; `[31:16]` measured milli-GB/s, saturates at `0xFFFF` |
+| `0x1C` | `QUEUES` | `{queue_depth[31:16], queues[15:0]}` |
+| `0x20` | `QOS` | QoS class count |
+| `0x24` | `QUANTUM` | work quantum K |
+| `0x28` | `DTYPE_MASK` | dtype/ew/sp24 grant bits |
+| `0x2C` | `DRAM_MEAS_X1000` | full 32-bit measured milli-GB/s (F14; I3 ≥ 66 GB/s) |
+| `0x30` | `CLUSTER_EN` | enabled-cluster bitmap (F8) |
+
+Guest placement (F1): `AI_CAP_BASE = 0x4000_0000`, `AI_DESC_BASE = 0x4000_0140`;
+island-relative `CAP_BASE=0`, `DESC_BASE=0x140`. PMU: `PMU_OFF_{R_BEATS,W_BEATS,CYCLES,GBPS_X1000}`
+at `0x180–0x18C`.
 
 **Live fixture vs this plan (not a measurement):** I1-lite is 256 MAC/cycle × 1 GHz = **0.512 TOPS**
-(§2). The §5.1 throughput SKU is ~98.3 TOPS at 8×4096 MAC/cycle × 1.5 GHz. Next island step is still
-**I3 measure then I2** (§11). Emulator asks F9–F14: `g6lc_qemu/architecture/RTL_FEEDBACK.md`.
+(§2). Nameplate `DramGBps` is still **0** until I3 measures it into the PMU/CAP path. The §5.1
+throughput SKU is ~98.3 TOPS at 8×4096 MAC/cycle × 1.5 GHz. Next: **I3 measure then I2** (§11).
 SoC/QEMU/SMT2 envelopes: `architecture/current-stage.md`.
 
 **This keeps the frozen ISA contract invariant.** `ai.setcfg` continues to describe only the

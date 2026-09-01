@@ -53,22 +53,22 @@ this file prevents.
 None of F1–F15 is **closed on the design**. Several are **handled on the emulator**: ingest,
 validate, or refuse, without guessing. Live `out/ai_soc_model.json` is one target, not a pin.
 
-| Ask | Emulator | Design | Typical live model |
+| Ask | Emulator | Design (2026-09 I3–F1 pass) | Typical live model |
 |---|---|---|---|
-| **F1** placement | Ingests `cap_base`/`desc_base` when published; unresolved → no B2 decoder | Still not localparams beside `CAP_OFF_*` | often `cap_base=0`, `desc_base=320` |
-| **F2** desc version | `FALLBACK_DESC_VERSION` named once | No accepted-version localparam | `desc_layout.version: null` |
-| **F3** packed cap words | Parses cap-window `dtype_mask`/`block_mnk`/`dram_gbps`/`queues` | Still comments / `always_comb` | often `dtype_mask`/`block_mnk` null |
-| **F4** word order | `g6q-diag` cross-checks `bits_to_desc` / comments | Byte vs word map unconfirmed | packer uses those offsets |
-| **F5** flags dtype/irq | `flags_layout` ingested; no hard-coded `DTYPE_SHIFT` | Helpers/comments, not localparams | `irq_bit=2`, `dtype_shift=8` parsed |
-| **F6** cluster | `queue_cluster_map` or `cluster` field; else 0 | No published map/CSR/field required | map `[0,1]` when the package has it |
-| **F7** §8 vs RTL | Ingests RTL `CAP_OFF_*` | `scaling-100tops.md` §8 still `0x14`=DRAM BW | silent wrong discovery if a host uses §8 |
-| **F8** clusters enabled | Cannot split one `Clusters` word | RTL emits a single count | `clusters: 1` |
-| **F9** PMU offsets | Reader + B3 modelled PMU ready | Live package `pmu_offsets: {}` | comparison is hand-only |
-| **F10** `ew`/`sp24` | Accessors when published; else `dtype_combined` | Live pkg: prio/irq only (fixture publishes all) | no INT4 effective-TOPS claim |
-| **F11** measured DRAM | Roofline refuses BW bound if unpublished | `DramGBps=0` | MAC bound only |
-| **F12** MaxDim | `shape_fits_blocking` in `g6q-diag::roofline` | Not stated in `isa-encoding.md` §7 | 256³ fits; 4096³ does not |
-| **F13** writeback | Roofline uses `max(compulsory,tiled)+4mn` | §4 still input-only `2/T` | intensity 42 vs 128 at T=256 |
-| **F14** 16-bit meas | Saturate like RTL `0xFFFF` | Units/range unclear | 400 GB/s cannot be reported precisely |
+| **F1** placement | Ingests `CAP_BASE`/`DESC_BASE`/`AI_*` | **Published** `AI_CAP_BASE=0x4000_0000`, `AI_DESC_BASE=0x4000_0140`, `CAP_BASE=0`, `DESC_BASE=0x140` | guest-addressable on B1 |
+| **F2** desc version | Prefers `DESC_VERSION` | **Published** `DESC_VERSION` (= `ContractVersion`) | 1 |
+| **F3** packed cap words | Parses cap-window `dtype_mask`/`block_mnk`/`dram_gbps`/`queues` | `CAP_OFF_*` named; packings still `always_comb` | ingest RTL |
+| **F4** word order | `g6q-diag` cross-checks `bits_to_desc` / comments | Byte offsets in `desc_t` comments | packer uses those offsets |
+| **F5** flags dtype/irq | `flags_layout` ingested | **Published** `FLAG_*_SHIFT/WIDTH` + accessors | `irq_bit=2`, `dtype_shift=8` |
+| **F6** cluster | `QueueClusterMap` | **Published** `QueueClusterMap '{0,0}` (both queues, cluster 0) | map `[0,0]` |
+| **F7** §8 vs RTL | Ingests RTL `CAP_OFF_*` | **Closed in the doc** — §8 is the shipped map | no silent wrong discovery |
+| **F8** clusters enabled | Split word + bitmap | **Published** `0x04` present/enabled + `CAP_OFF_CLUSTER_EN` | present=1, enabled=1, bitmap=1 |
+| **F9** PMU offsets | Reader + B3 modelled PMU ready | **Published** `PMU_OFF_{R_BEATS,W_BEATS,CYCLES,GBPS_X1000}` | `0x180–0x18C` |
+| **F10** `ew`/`sp24` | Accessors when published | **Published** `desc_dtype`/`accmode`/`ew`/`sp24` | engine still s8-dense only |
+| **F11** measured DRAM | Roofline refuses BW bound if unpublished | **Open (I3):** `DramGBps=0`; PMU path live | MAC bound only until a measurement |
+| **F12** MaxDim | `shape_fits_blocking` | **Published** in `isa-encoding.md` §7; SW owns tiling | 256³ fits; 4096³ does not |
+| **F13** writeback | Roofline uses `max(compulsory,tiled)+4mn` | **Published** in `scaling-100tops.md` §4 | intensity 42 vs 128 at T=256 |
+| **F14** 16-bit meas | Saturate like RTL `0xFFFF` | **Published:** packed half saturates; `CAP_OFF_DRAM_MEAS_X1000` is 32-bit | 400 GB/s readable at `0x2C` |
 | **F15** poll pending | Emulator `POLL_PENDING` / ring-full `0` | Unpublished | not a hardware contract |
 
 SoC snapshot (SMT2, QEMU firmware, OoO, H, RVV, stream): [`../../architecture/current-stage.md`](../../architecture/current-stage.md).

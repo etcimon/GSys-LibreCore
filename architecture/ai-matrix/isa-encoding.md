@@ -3,6 +3,8 @@
 **Status:** proposed, unratified · **Scope:** normative for **both** seam options B and D
 **Parent:** `README.md` (read §2 first) · **Licensing:** tier T doc; the contract it describes is
 implemented by tier **R** RTL and consumed by tier **R/T** interface files
+**Live asks:** F12 MaxDim bound in §7; F10 `ew`/`sp24` accessors in `g6lc_ai_desc_pkg`.
+Snapshot: [`../current-stage.md`](../current-stage.md).
 
 > **Why this document exists.** `README.md` §2.2 makes the encoding, the CSR map and the T2 descriptor
 > ABI **invariant across the CVXIF (B) and accelerator (D) seams**, so that the toolchain, the kernel
@@ -332,6 +334,13 @@ in-core `ai.enq` path and the host-side PCIe doorbell path.
 | `14` | `sp24` |
 | `19:16` | priority class (§7.1); `0` is the default class |
 | `31:20`, `15` | reserved, write zero |
+
+**Shape bound (F12).** Each of `m`, `n`, `k` must be in `[1, MaxDim]`, where `MaxDim` is the
+corresponding capability-window tile (`CAP_OFF_BLOCK_MNK` / `AccTileM/N/K`). The live
+sequencer (`g6lc_ai_gemm_seq` `ST_CHK`) **rejects** a descriptor that exceeds the tile
+(`ST_ERR`). **Software owns blocking** beyond that limit: the §12 `M=N=K=4096` gate is
+16³ tiles on the live MaxDim=256 part, not one doorbell. Hardware does not stream a
+larger reduction; if that is desired later, `ST_CHK` is the wrong check.
 
 **The descriptor is self-describing and the engine must not read `aicfg`.** Arithmetic type used to be
 implicit in `aicfg`, which is wrong for an engine whose work outlives the instruction that enqueued it:

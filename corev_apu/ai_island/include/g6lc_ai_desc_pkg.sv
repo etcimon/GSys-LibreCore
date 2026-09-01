@@ -9,6 +9,20 @@ package g6lc_ai_desc_pkg;
   localparam int unsigned DescBytes  = 64;
   localparam int unsigned DescBits   = DescBytes * 8;
   localparam int unsigned ContractVersion = 1;
+  // Ingested name (F2). Keep equal to ContractVersion (engine checks 16'(ContractVersion)).
+  localparam logic [15:0] DESC_VERSION = 16'd1;
+
+  // flags subfield layout (isa-encoding.md §7) — F5/F10.
+  localparam int unsigned FLAG_DTYPE_SHIFT   = 8;
+  localparam int unsigned FLAG_DTYPE_WIDTH   = 2;
+  localparam int unsigned FLAG_ACCMODE_SHIFT = 10;
+  localparam int unsigned FLAG_ACCMODE_WIDTH = 2;
+  localparam int unsigned FLAG_EW_SHIFT      = 12;
+  localparam int unsigned FLAG_EW_WIDTH      = 2;
+  localparam int unsigned FLAG_SP24_SHIFT    = 14;
+  localparam int unsigned FLAG_IRQ_SHIFT     = 2;
+  localparam int unsigned FLAG_PRIO_SHIFT    = 16;
+  localparam int unsigned FLAG_PRIO_WIDTH    = 4;
 
   // Descriptor op field (offset 0x02)
   localparam logic [15:0] OP_GEMM    = 16'd1;
@@ -27,6 +41,7 @@ package g6lc_ai_desc_pkg;
   localparam logic [15:0] ST_WATCHDOG = 16'd7;
 
   // Packed 64-byte descriptor (little-endian field view).
+  // +0xNN comments are **byte offsets** into the latch window (F4).
   // Software builds the memory image; the engine never reads aicfg.
   typedef struct packed {
     logic [63:0] ptr_done;     // +0x38
@@ -81,13 +96,28 @@ package g6lc_ai_desc_pkg;
     return b;
   endfunction
 
-  // flags[19:16] priority, flags[13:8] type fields (dtype/accmode/ew/sp24)
+  function automatic logic [1:0] desc_dtype(input desc_t d);
+    return d.flags[FLAG_DTYPE_SHIFT +: FLAG_DTYPE_WIDTH];
+  endfunction
+
+  function automatic logic [1:0] desc_accmode(input desc_t d);
+    return d.flags[FLAG_ACCMODE_SHIFT +: FLAG_ACCMODE_WIDTH];
+  endfunction
+
+  function automatic logic [1:0] desc_ew(input desc_t d);
+    return d.flags[FLAG_EW_SHIFT +: FLAG_EW_WIDTH];
+  endfunction
+
+  function automatic logic desc_sp24(input desc_t d);
+    return d.flags[FLAG_SP24_SHIFT];
+  endfunction
+
   function automatic logic [3:0] desc_prio(input desc_t d);
-    return d.flags[19:16];
+    return d.flags[FLAG_PRIO_SHIFT +: FLAG_PRIO_WIDTH];
   endfunction
 
   function automatic logic desc_irq(input desc_t d);
-    return d.flags[2];
+    return d.flags[FLAG_IRQ_SHIFT];
   endfunction
 
   // Completion word: {reserved[15:0], status[15:0], ticket[31:0]}
