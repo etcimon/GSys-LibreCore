@@ -587,7 +587,8 @@ fn uboot_config_fragment(text_base: u64, dram_base: u64, dram_len: u64) -> Strin
          CONFIG_SYS_LOAD_ADDR={text_base:#x}\n\
          CONFIG_NR_DRAM_BANKS=1\n\
          CONFIG_SYS_SDRAM_BASE={dram_base:#x}\n\
-         CONFIG_SYS_BOOTMAPSZ={dram_len:#x}\n",
+         CONFIG_SYS_BOOTMAPSZ={dram_len:#x}\n\
+         # CONFIG_TOOLS_MKEFICAPSULE is not set\n",
     )
 }
 
