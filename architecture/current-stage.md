@@ -17,7 +17,7 @@ at U0.
 |---|---|---|
 | **B1 SMT2 RTL** | Fine-grain banks (PC/CSR/RF/RAS/GHR); `g6lc64_smt2` N=1 T=2; cookie SUCCESS `51b1babe` is Variane trapdump; SL-W queue landed (default `WtDcacheFixupDepth=0`); I4dp `_v` and `ooo_server` 200M `tohost=0` on proxy | SL-C topology truth; R3b Linux Image; dual-commit same cycle; `SMT2` default SKU; retire boot crutches |
 | **QEMU firmware** | U1–U3 (virt + generated `g6lc-soc` OpenSBI/U-Boot/OpenWrt/`CPUINFO-DONE`); E2–E3 EDK2 virt (Shell, OpenWrt, GPEX virtio); U3-Shell virt green | E4 RTL pflash tandem (no 32 MiB pflash on Variane); soc U3-Shell StartImage hang; `g6lc-soc` has no PCI |
-| **AI island** | I1-lite AccTile 256, HARD gemm_s8 + 256³ ~83.7k cy (~0.512 TOPS @ 1 GHz, §2 def); CPL FIFO; PLIC-8; I3-lite bus; **F1/F7–F10/F12–F14 published** (`CAP_BASE`/`PMU_OFF_*`/`DESC_VERSION`/cluster enable) | **I3 measured BW** (`DramGBps=0`); I2 clusters; I4 UPF/thermal |
+| **AI island** | I1-lite AccTile 256, HARD gemm_s8 + 256³ ~83.7k cy (~0.512 TOPS @ 1 GHz, §2 def); CPL FIFO; PLIC-8; **I3-lite** NoC nameplate 8 GB/s + PMU/CAP measured after GEMM; F1/F7–F10/F12–F14 published | **I3 DRAM-class** (400 GB/s SKU still a target package, not live); I2 clusters; I4 UPF/thermal |
 | **ai-tensor / PCIe stand-in** | virt-ai-pcie TCP UIO; packed DESC/CPL/CAP join EDK2 ESP; doorbell/IRQ/QoS/qid bounds; `contracts.ai_host_transport` **unpinned** | Fused GPEX endpoint; pinned BAR/MSI/device ID; Linux UIO on live board |
 | **OoO / multi-issue / multi-core** | `OoOEn` production-gated; `NrIssuePorts` 1–4 by package; `NrCores` 1–8 hub; stream8 CRT 9/9 | Slice-OoO default off; `CVA6_MAX_SMT_HARTS=2`; merge stream×SMT packages |
 | **Hypervisor** | U9.0–U9.2 + H-edge Spike+RTL 3/3 | KVM stress; G-stage soak |

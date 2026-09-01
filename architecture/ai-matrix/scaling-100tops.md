@@ -302,10 +302,13 @@ Guest placement (F1): `AI_CAP_BASE = 0x4000_0000`, `AI_DESC_BASE = 0x4000_0140`;
 island-relative `CAP_BASE=0`, `DESC_BASE=0x140`. PMU: `PMU_OFF_{R_BEATS,W_BEATS,CYCLES,GBPS_X1000}`
 at `0x180–0x18C`.
 
-**Live fixture vs this plan (not a measurement):** I1-lite is 256 MAC/cycle × 1 GHz = **0.512 TOPS**
-(§2). Nameplate `DramGBps` is still **0** until I3 measures it into the PMU/CAP path. The §5.1
-throughput SKU is ~98.3 TOPS at 8×4096 MAC/cycle × 1.5 GHz. Next: **I3 measure then I2** (§11).
-SoC/QEMU/SMT2 envelopes: `architecture/current-stage.md`.
+**Live fixture vs this plan:** I1-lite is 256 MAC/cycle × 1 GHz = **0.512 TOPS** (§2).
+I3-lite nameplate `DramGBps = 8` is the **64-bit NoC peak** at 1 GHz, not the 400 GB/s DRAM
+SKU. After each GEMM the PMU writes measured milli-GB/s into `CAP_OFF_DRAM_GBPS[31:16]`
+and `CAP_OFF_DRAM_MEAS_X1000`. The 256³ HARD point (~83.7k cy) is the arithmetic fixture;
+achieved BW is whatever `ai_bw_pmu_smoke` reads back, not a Python `2/T` restatement.
+Full DRAM-controller I3 (channels, ≥80% of 400 GB/s) remains open. Next island step is
+still **I3 DRAM then I2** (§11). SoC/QEMU/SMT2 envelopes: `architecture/current-stage.md`.
 
 **This keeps the frozen ISA contract invariant.** `ai.setcfg` continues to describe only the
 *core-attached* plane; island geometry is never expressed in a CSR. That is the property that lets one

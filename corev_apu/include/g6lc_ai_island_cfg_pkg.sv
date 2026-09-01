@@ -49,7 +49,7 @@ package g6lc_ai_island_cfg_pkg;
       AccTileK:     unsigned'(256),
       NocWidth:     unsigned'(64),
       DramChannels: unsigned'(1),
-      DramGBps:     unsigned'(0),             // not measured (I3)
+      DramGBps:     unsigned'(8),             // I3-lite: 64-bit NoC @ 1 GHz peak GB/s
       Queues:       unsigned'(2),
       QueueDepth:   unsigned'(64),
       QosClasses:   unsigned'(2),

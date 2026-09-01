@@ -28,7 +28,7 @@ validate, or refuse, without guessing.
 | **F8** clusters enabled | Split word + bitmap | **Published** present/enabled + `CLUSTER_EN` | Present ≠ enabled |
 | **F9** PMU offsets | Reader + modelled PMU ready | **Published** `PMU_OFF_*` `0x180–0x18C` | D2 vs RTL auto-diff |
 | **F10** `ew`/`sp24` | Accessors when published | **Published** `desc_{dtype,accmode,ew,sp24}` | Engine still s8-dense |
-| **F11** measured DRAM | Roofline refuses BW bound if unpublished | **Open (I3):** `DramGBps=0` | Cannot say compute- vs bandwidth-bound |
+| **F11** measured DRAM | Roofline uses nameplate or measured | **I3-lite:** `DramGBps=8` NoC peak; PMU fills measured | Full 400 GB/s DRAM I3 still open |
 | **F12** MaxDim | `shape_fits_blocking` | **Published** `isa-encoding.md` §7; SW tiles | 256³ fits; 4096³ is 16³ tiles |
 | **F13** writeback | Roofline uses `max(compulsory,tiled)+4mn` | **Published** §4 writeback term | Intensity 42 vs 128 at T=256 |
 | **F14** 16-bit meas | Saturate like RTL `0xFFFF` | **Published** 32-bit `DRAM_MEAS_X1000` at `0x2C` | 400 GB/s readable |

@@ -27,8 +27,9 @@ _start:
   li   t1, 1
   bne  t0, t1, fail
 
+  # F8: [15:0] present, [31:16] enabled — live SKU is 1/1
   lw   t0, CAP_CLUSTERS(s0)
-  li   t1, 1
+  li   t1, 0x00010001
   bne  t0, t1, fail
 
   lw   t0, CAP_MACS(s0)

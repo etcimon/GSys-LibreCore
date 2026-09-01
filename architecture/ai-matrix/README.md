@@ -69,7 +69,7 @@ Honest status of **implemented silicon/software**, not the scaffold-only state o
 | **I3-lite bus** (trail C-store, multi-out AR, …) | island fabric | **Live** | scale gemm + PMU |
 | **NoC width 64b** | island | **Floor (live)** | wider NoC deferred |
 | **I2 multi-cluster / NoC/QoS** | island package | **Not started** | F8 present/enabled + bitmap published; still measure I3 BW first |
-| **I3 full memory bandwidth model** | DRAM/channels | **Path published, value open** | `DramGBps=0`; `PMU_OFF_*` + `CAP_OFF_DRAM_MEAS_X1000`; F13 writeback in §4 |
+| **I3 full memory bandwidth model** | DRAM/channels | **I3-lite live; full DRAM open** | Live nameplate **8 GB/s** (64-bit NoC @ 1 GHz); PMU + `CAP_OFF_DRAM_MEAS_X1000` after GEMM; 400 GB/s is the SKU target package |
 | **PCIe EP + virtio (P5)** | uncore | **Virtual only** | `virt-ai-pcie` TCP + EDK2 GPEX RC witness; transport **unpinned** |
 | **ai-tensor host** sim/SoftIsland/virt-card | `ai-tensor/` | **Live** | golden + queue/event-fd soaks |
 | **PyTorch soft path** | `torch_ops` + virt-card | **Live** | `test_torch_virt_ai_island` (torch optional) |

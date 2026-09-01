@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# I3 bandwidth PMU: after a 32x32 all-ones GEMM, island MMIO must report
+# I3-lite bandwidth PMU: after a 32x32 all-ones GEMM, island MMIO must report
 # non-zero R/W beats and active cycles at 0x180/184/188, and a positive
 # sustained GB/s x1000 at 0x18C. CAP DRAM (0x18) high half mirrors that
-# milli-GB/s; low half is nameplate (0 for live cfg).
+# milli-GB/s (16-bit saturate); low half is I1-lite NoC nameplate (8 GB/s).
+# 0x2C is the full 32-bit measured milli-GB/s (F14).
 
   .equ AI_BASE,     0x40000000
   .equ CAP_DRAM,    0x18
+  .equ CAP_DRAM_MEAS, 0x2C
   .equ AI_CTL,      0x100
   .equ AI_DOORBELL, 0x108
   .equ AI_DONE,     0x10C
@@ -110,17 +112,21 @@ _start:
   beqz t0, fail
   lw   t0, AI_PMU_GBPS(s0)
   beqz t0, fail
-  # CAP DRAM [31:16] mirrors measured milli-GB/s; [15:0] nameplate (=0 live)
+  # CAP DRAM [31:16] mirrors measured milli-GB/s; [15:0] I3-lite NoC nameplate
   lw   t1, CAP_DRAM(s0)
   srli t2, t1, 16
   beqz t2, fail
-  # high half must match PMU milli (capped to 16 bits)
   li   t3, 0xFFFF
   and  t0, t0, t3
   bne  t0, t2, fail
-  # low half nameplate must be 0 (live cfg DramGBps=0); andi imm is 12-bit only
   and  t1, t1, t3
-  bnez t1, fail
+  li   t2, 8
+  bne  t1, t2, fail
+  # F14: 0x2C is the unsaturated 32-bit measured milli-GB/s
+  lw   t1, CAP_DRAM_MEAS(s0)
+  lw   t0, AI_PMU_GBPS(s0)
+  beqz t1, fail
+  bne  t0, t1, fail
 
 pass:
   li   a0, 1

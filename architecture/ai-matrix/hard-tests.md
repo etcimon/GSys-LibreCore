@@ -136,7 +136,7 @@ Scripts:
 | **I1** one cluster AccTile/PeLanes 256 | **Partial live** | gemm_s8_* + CAP; PE/`tc_sram` cluster still lite |
 | **I3-lite** bus/PMU/C-store/multi-out AR | **Live** | bw_pmu, gemm scale, mmio |
 | **CPL FIFO** multi-claim | **Live** | `ai_cpl_fifo_multi_claim` |
-| **I3** measured memory bandwidth to model | **Open** | need dedicated BW soak beyond PMU |
+| **I3** measured memory bandwidth to model | **I3-lite live** (NoC 8 GB/s nameplate + `ai_bw_pmu_smoke`); full DRAM-class soak open | PMU + CAP `0x18`/`0x2C` |
 | **I2** NoC + N clusters + QoS | **Not started** | no multi-cluster directed suite yet |
 | **I4** PD / UPF / thermal | **Open** | — |
 

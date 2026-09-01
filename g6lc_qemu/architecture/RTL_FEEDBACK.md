@@ -65,7 +65,7 @@ validate, or refuse, without guessing. Live `out/ai_soc_model.json` is one targe
 | **F8** clusters enabled | Split word + bitmap | **Published** `0x04` present/enabled + `CAP_OFF_CLUSTER_EN` | present=1, enabled=1, bitmap=1 |
 | **F9** PMU offsets | Reader + B3 modelled PMU ready | **Published** `PMU_OFF_{R_BEATS,W_BEATS,CYCLES,GBPS_X1000}` | `0x180–0x18C` |
 | **F10** `ew`/`sp24` | Accessors when published | **Published** `desc_dtype`/`accmode`/`ew`/`sp24` | engine still s8-dense only |
-| **F11** measured DRAM | Roofline refuses BW bound if unpublished | **Open (I3):** `DramGBps=0`; PMU path live | MAC bound only until a measurement |
+| **F11** measured DRAM | Roofline refuses BW bound if unpublished | **I3-lite:** live `DramGBps=8` (NoC peak); PMU fills measured half + `0x2C`. Full 400 GB/s DRAM I3 open | I1-lite can close a roofline against 8 GB/s |
 | **F12** MaxDim | `shape_fits_blocking` | **Published** in `isa-encoding.md` §7; SW owns tiling | 256³ fits; 4096³ does not |
 | **F13** writeback | Roofline uses `max(compulsory,tiled)+4mn` | **Published** in `scaling-100tops.md` §4 | intensity 42 vs 128 at T=256 |
 | **F14** 16-bit meas | Saturate like RTL `0xFFFF` | **Published:** packed half saturates; `CAP_OFF_DRAM_MEAS_X1000` is 32-bit | 400 GB/s readable at `0x2C` |
