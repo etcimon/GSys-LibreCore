@@ -74,7 +74,7 @@ _QEMU_TOKENS = [
 # Emitters legitimately contain the *string* "qemu" (file names, banners). Only
 # the patterns above — which imply consuming QEMU's own headers — are forbidden.
 
-_SKIP_DIRS = {".git", "target", ".tools", "out", "qemu", "__pycache__", ".venv"}
+_SKIP_DIRS = {".git", "target", ".tools", "out", "qemu", "linux-dist", "__pycache__", ".venv"}
 
 
 def _is_inside(path: Path, root: Path) -> bool:

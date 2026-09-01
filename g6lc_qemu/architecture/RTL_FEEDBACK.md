@@ -48,6 +48,31 @@ emulator work it gates rather than against an abstract tidiness argument.
 withdrawn with a reason. Removing a row because the emulator worked around it locally is the failure
 this file prevents.
 
+### 2.1 Emulator vs design (F1–F15, 2026-09)
+
+None of F1–F15 is **closed on the design**. Several are **handled on the emulator**: ingest,
+validate, or refuse, without guessing. Live `out/ai_soc_model.json` is one target, not a pin.
+
+| Ask | Emulator | Design | Typical live model |
+|---|---|---|---|
+| **F1** placement | Ingests `cap_base`/`desc_base` when published; unresolved → no B2 decoder | Still not localparams beside `CAP_OFF_*` | often `cap_base=0`, `desc_base=320` |
+| **F2** desc version | `FALLBACK_DESC_VERSION` named once | No accepted-version localparam | `desc_layout.version: null` |
+| **F3** packed cap words | Parses cap-window `dtype_mask`/`block_mnk`/`dram_gbps`/`queues` | Still comments / `always_comb` | often `dtype_mask`/`block_mnk` null |
+| **F4** word order | `g6q-diag` cross-checks `bits_to_desc` / comments | Byte vs word map unconfirmed | packer uses those offsets |
+| **F5** flags dtype/irq | `flags_layout` ingested; no hard-coded `DTYPE_SHIFT` | Helpers/comments, not localparams | `irq_bit=2`, `dtype_shift=8` parsed |
+| **F6** cluster | `queue_cluster_map` or `cluster` field; else 0 | No published map/CSR/field required | map `[0,1]` when the package has it |
+| **F7** §8 vs RTL | Ingests RTL `CAP_OFF_*` | `scaling-100tops.md` §8 still `0x14`=DRAM BW | silent wrong discovery if a host uses §8 |
+| **F8** clusters enabled | Cannot split one `Clusters` word | RTL emits a single count | `clusters: 1` |
+| **F9** PMU offsets | Reader + B3 modelled PMU ready | Live package `pmu_offsets: {}` | comparison is hand-only |
+| **F10** `ew`/`sp24` | Accessors when published; else `dtype_combined` | Live pkg: prio/irq only (fixture publishes all) | no INT4 effective-TOPS claim |
+| **F11** measured DRAM | Roofline refuses BW bound if unpublished | `DramGBps=0` | MAC bound only |
+| **F12** MaxDim | `shape_fits_blocking` in `g6q-diag::roofline` | Not stated in `isa-encoding.md` §7 | 256³ fits; 4096³ does not |
+| **F13** writeback | Roofline uses `max(compulsory,tiled)+4mn` | §4 still input-only `2/T` | intensity 42 vs 128 at T=256 |
+| **F14** 16-bit meas | Saturate like RTL `0xFFFF` | Units/range unclear | 400 GB/s cannot be reported precisely |
+| **F15** poll pending | Emulator `POLL_PENDING` / ring-full `0` | Unpublished | not a hardware contract |
+
+SoC snapshot (SMT2, QEMU firmware, OoO, H, RVV, stream): [`../../architecture/current-stage.md`](../../architecture/current-stage.md).
+
 ## 3. What the asks unblock, in dependency order
 
 ```text
@@ -155,6 +180,38 @@ F1 is load-bearing: until it lands, every other accelerator result is against a 
 its own bases rather than against the design's. Note that the B2 plugin now *gates itself* on F1:
 with the placement unresolved it emits an access stream rather than a submission stream, because
 decoding against a guessed base would produce plausible-looking wrong tensor events.
+
+### 3.3 How this should progress toward 100 TOPS (and what must stay off that path)
+
+The island track in `scaling-100tops.md` §11 is still the order: **measure I3 bandwidth before I2
+clusters**. The emulator must not grow a second MAC/byte model in Python (`AI_BRIDGE.md` limit 2);
+`g6q-diag::roofline` is the bound. virt_ai_card + EDK2 ESP is **layout agreement**, not I3.
+
+**On the 100-TOPS path (change set: island + host push):**
+
+1. Keep the §2 headline (dense INT8, no INT4/sparsity folded in). F10 is what would allow a
+   *second* effective-TOPS number, not a rewrite of the first.
+2. Size from F13 (writeback) and F12 (tile, do not submit 4096³ as one descriptor).
+3. Close F11/F9/F14 so `BW_measured` and `TOPS_sustained@AI` can be diffed against D2, not guessed.
+4. Publish F8 then replicate clusters (I2) behind the same DESC/doorbell ABI (F6).
+5. Publish F1 so B1 guests map the island; pin `ai_host_transport` only then. Until that pin, do
+   not fuse QEMU GPEX (root complex) with virt_ai_card (endpoint).
+
+**Off the island critical path (separate change sets — `current-stage.md` §2):**
+
+| Change set | Relation to 100 TOPS |
+|---|---|
+| SMT2 / soft-ladder / R3b Image | Host Linux workers need two honest harts (SL-C). Not MAC width. |
+| QEMU U-Boot/EDK2 | Firmware hypothesis for the card's own Linux. Never Variane evidence. |
+| Full OoO + multi-issue packages | Control-plane IPC. `OoOEn=0` stays identity. Do not put island knobs in `cva6_cfg_t` (§8). |
+| Multi-core `NrCores` | Independent of cluster count (SMT cap `S≤8`, `CVA6_MAX_SMT_HARTS=2`). |
+| Hypervisor / KVM | Needed for a server SKU, not for island TOPS. |
+| Stream plane `g6lc64_stream8` | Orthogonal envelope until FDT trusted; do not merge with smt2 DI. |
+| RVV / Ara | Core-attached memcpy/math. Do **not** widen `AiTileM/N/K=8` with island TOPS. |
+
+The live 0.512 TOPS fixture versus the ~98.3 TOPS plan is a **192×** MAC×clock gap. Growing
+`MacsPerCycle` without I3 (F11) is the §11 failure mode the emulator already predicts (~10%
+utilisation if the 256³ memory path is unchanged).
 
 ## 4. Using the emulator to debug cluster bring-up
 

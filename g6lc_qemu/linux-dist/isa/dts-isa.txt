@@ -1,0 +1,8 @@
+# From corev_apu/bootrom/ariane-smt2.dts (g6lc64_smt2).
+riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas"
+riscv,isa-base = "rv64i"
+riscv,isa-extensions = i m a f d c b zicntr zicsr zifencei zihpm zba zbb zbs zcb zicond zicbom zicboz zicbop zacas zkn sstc sscofpmf zihintpause svpbmt
+mmu-type = riscv,sv39
+NrHarts = 2
+RVV = 0
+RVH = 0

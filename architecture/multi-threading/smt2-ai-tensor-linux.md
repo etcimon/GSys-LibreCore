@@ -26,6 +26,10 @@ submission and multi-queue isolation without OpenSBI/FDT corruption under DI.
 
 Do **not** treat PyTorch success on a single-hart package as SMT2 green.
 
+QEMU EDK2/U-Boot dual-hart boots and virt-card DESC join are **firmware/card stand-in**
+(`architecture/current-stage.md`). They do not retire SL-C or the Variane cookie. 100 TOPS
+stays the island I3→I2 order (`RTL_FEEDBACK.md` §3.3), not a second PyTorch multiplier.
+
 ---
 
 ## 0. Iteration-speed contract (read first)

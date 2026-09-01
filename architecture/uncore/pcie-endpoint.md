@@ -1,7 +1,8 @@
 # Uncore outline — PCIe endpoint (compute card)
 
-**Domain:** interconnect · **Catalog ids:** `verilog-pcie`, `litepcie` · **Status:** planned
-**Scaffold only** (see `architecture/uncore/README.md`).
+**Domain:** interconnect · **Catalog ids:** `verilog-pcie`, `litepcie` · **Status:** planned RTL;
+**virtual stand-in live** (EDK2 GPEX = host RC, `virt_ai_card` = endpoint; transport **unpinned**)
+**Scaffold only** (see `architecture/uncore/README.md`). Snapshot: `architecture/current-stage.md`.
 
 ## 1. Intent
 Make LibreCore the **endpoint** of a PCIe link rather than the root — i.e. a plug-in **CPU+AI card**
@@ -122,6 +123,23 @@ PCIe PHY):
 - Host contract: `architecture/ai-matrix/board-uio-eventfd.md` §7
 
 Promotion to a physical card keeps connector ids and switches soft-sticky → live UIO + endpoint IP.
+
+The host-side EDK2 witness (`g6lc-virt` GPEX + FD Shell) currently delivers a packed `DESC.BIN`
+(ingested `desc_layout` OP_GEMM image) as a **FAT file** on the virtio-blk ESP, not as a BAR4 write.
+The card stand-in (`ai-tensor/tools/virt_ai_card/`) accepts the same image as BAR4 name `DESC` and
+via `mmio_wr` into the existing 4 KiB UIO window at ingested `desc_base`. CAP words are readable
+with `mmio_rd`. The host rings UIO DOORBELL and claims DONE the same way. Packed `ptr_a`/`ptr_b`/`ptr_c`/`ptr_done`
+stay **0** (ABI null): bulk tensors ride BAR4 names `A`/`B`/`C`, and the completion word is MMIO
+`CPL`, not a DMA write to an invented address. Descriptor `flags[2]` is the ingested IRQ bit
+(`isa-encoding.md` §7); the stand-in `FLAG_IRQ` is `1<<2`. Packed `ld_ab` is `k|(n<<16)` from the
+GEMM shape, not an address. Dense INT8 is `dtype=00`/`ew=00`/`sp24=0` (no INT4 in the 100-TOPS
+headline). Doorbell qid maps to a cluster via ingested `queue_cluster_map` and to a QoS class via
+`qid % qos_classes`. The stand-in GEMM `k` is checked against ingested `work_quantum_k`
+(`within_quantum`); fence/priority bits stay clear (`isa-encoding.md` §7.1). The card rejects a packed `ld_ab` that does not match `n,k`, a doorbell `qid >= queues`, and a
+descriptor `version` other than 1 (stand-in `ST_ERR`; the ingested package publishes `ST_OK` only).
+Unknown `op` completes stand-in `ST_BAD_OP`; a doorbell while CTL.enable=0 completes `ST_DISABLED`;
+setting CTL.enable=1 again restores `ST_OK` (`reenable_ok`).
+That is layout agreement over TCP, not a pinned BAR map. `contracts.ai_host_transport` stays unpinned.
 
 ## 11. Scan pointers
 Endpoint config-space/BAR target logic, MSI-X table, DMA engine, AXI bridge, and which FPGA hard-IP

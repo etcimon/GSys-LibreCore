@@ -30,6 +30,12 @@ Preferred sources (pick one):
        place at:  $OUT/Image
        or export LINUX_IMAGE=/absolute/path/to/Image
 
+  2b) OpenWrt custom compile (E3 UEFI on QEMU virt)
+       bash g6lc_qemu/openwrt/build.sh
+       # pin v24.10.2, target sifiveu + kernel-virt overlay (EFI stub + virtio)
+       # products: bin/targets/sifiveu/generic/openwrt-*-initramfs-kernel.bin
+       #           and linux-sifiveu_generic/Image  (copy to $OUT/Image)
+
   3) Prebuilt lab artifact
        export LINUX_IMAGE=/lab/path/Image
 

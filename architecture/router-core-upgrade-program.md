@@ -9,6 +9,12 @@ against; every implementation pass must cite the upgrade number it is advancing.
 Read first: `AGENTS.md` §0 (SoC/tape-out prime directive), `AGENTS-coding-philosophy.md`,
 `AGENTS-configuration.md`, and the domain playbooks in `agents/guides/`.
 
+**Progress (2026-09):** U1–U4, multi-issue, U7, U6.0 L2, U6.1 fine-grain SMT banks, U6.2
+multi-core hub, U9 H/Sstc, U10 C-light, U5 OoO **production-gated**. Product closeout (SMT2
+SKU, dual-commit, banked BHT) and R3b Linux Image remain. 100 TOPS is an **island** track
+(`ai-matrix/scaling-100tops.md`), not an upgrade number in this file — do not put island knobs
+in `cva6_cfg_t`. Parallel envelopes: [`current-stage.md`](current-stage.md).
+
 ---
 
 ## 0. What this program is

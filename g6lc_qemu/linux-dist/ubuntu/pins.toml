@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# Ubuntu slot pin. Not a git submodule yet — see ubuntu/README.md.
+
+[ubuntu]
+series   = "noble"
+version  = "24.04"
+arch     = "riscv64"
+ports    = "http://ports.ubuntu.com/ubuntu-ports"
+status   = "scaffolded"
+isa      = "../isa/g6lc64_smt2-march.txt"
+kernel   = "../isa/kernel-6.6.config"
+notes    = "Share RTL ISA with OpenWrt. Fork livecd-rootfs / ubuntu-image to etcimon when the image builder is stood up."

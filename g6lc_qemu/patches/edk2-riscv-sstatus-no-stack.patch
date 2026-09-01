@@ -1,0 +1,50 @@
+From: Etienne Cimon
+Subject: MdePkg/BaseLib RiscV64: do not use the stack in sstatus SIE helpers
+
+RiscVDisableSupervisorModeInterrupts does add sp,-__SIZEOF_POINTER__ then sd.
+On edk2-stable202511 RV64 GCC5 that becomes c.addi sp,-4 plus an 8-byte sd,
+overlapping the caller's saved s0. Use t0 (caller-saved).
+
+diff --git a/MdePkg/Library/BaseLib/RiscV64/RiscVInterrupt.S b/MdePkg/Library/BaseLib/RiscV64/RiscVInterrupt.S
+--- a/MdePkg/Library/BaseLib/RiscV64/RiscVInterrupt.S
++++ b/MdePkg/Library/BaseLib/RiscV64/RiscVInterrupt.S
+@@ -22,32 +22,21 @@ ASM_PFX(RiscVDisableSupervisorModeInterrupts):
+-  add   sp, sp, -(__SIZEOF_POINTER__)
+-  sd    a1, (sp)
+-  li    a1, SSTATUS_SIE
+-  csrc  CSR_SSTATUS, a1
+-  ld    a1, (sp)
+-  add   sp, sp, (__SIZEOF_POINTER__)
++  li    t0, SSTATUS_SIE
++  csrc  CSR_SSTATUS, t0
+   ret
+ 
+ //
+ // This routine enables supervisor mode interrupt
+ //
+ ASM_PFX(RiscVEnableSupervisorModeInterrupt):
+-  add   sp, sp, -2*(__SIZEOF_POINTER__)
+-  sd    a0, (0*__SIZEOF_POINTER__)(sp)
+-  sd    a1, (1*__SIZEOF_POINTER__)(sp)
+-
+-  csrr  a0, CSR_SSTATUS
+-  and   a0, a0, (1 << SSTATUS_SPP_BIT_POSITION)
+-  bnez  a0, InTrap      // We are in supervisor mode (SMode)
++  csrr  t0, CSR_SSTATUS
++  andi  t0, t0, (1 << SSTATUS_SPP_BIT_POSITION)
++  bnez  t0, 1f          // We are in supervisor mode (SMode)
+                         // trap handler.
+                         // Skip enabling SIE becasue SIE
+                         // is set to disabled by RISC-V hart
+                         // when the trap takes hart to SMode.
+ 
+-  li    a1, SSTATUS_SIE
+-  csrs  CSR_SSTATUS, a1
+-InTrap:
+-  ld    a0, (0*__SIZEOF_POINTER__)(sp)
+-  ld    a1, (1*__SIZEOF_POINTER__)(sp)
+-  add   sp, sp, 2*(__SIZEOF_POINTER__)
++  li    t0, SSTATUS_SIE
++  csrs  CSR_SSTATUS, t0
++1:
+   ret

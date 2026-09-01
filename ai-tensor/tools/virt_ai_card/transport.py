@@ -26,6 +26,10 @@ MSG_HELLO = "hello"
 MSG_GEMM_S8 = "gemm_s8"
 MSG_BAR4_PUT = "bar4_put"
 MSG_BAR4_GET = "bar4_get"
+MSG_MMIO_RD = "mmio_rd"
+MSG_MMIO_WR = "mmio_wr"
+MSG_IRQ_WAIT = "irq_wait"
+MSG_IRQ_CLEAR = "irq_clear"
 MSG_RESULT = "result"
 MSG_ERROR = "error"
 MSG_PING = "ping"
@@ -193,7 +197,25 @@ def bar4_encode_int8_matrix(mat: Sequence) -> Dict[str, Any]:
     return {"format": "int8_lists", "data": mat}
 
 
-def bar4_decode_matrix(blob: Dict[str, Any]) -> Any:
-    if blob.get("format") == "int8_lists":
+def bar4_encode_bytes(raw: bytes) -> Dict[str, Any]:
+    """Encode a packed descriptor (or other opaque blob) for BAR4 bulk transfer."""
+    return {"format": "raw_hex", "data": raw.hex()}
+
+
+def bar4_decode(blob: Dict[str, Any]) -> Any:
+    fmt = blob.get("format")
+    if fmt == "int8_lists":
         return blob["data"]
-    raise ValueError(f"unsupported bar4 format: {blob.get('format')}")
+    if fmt == "raw_hex":
+        return bytes.fromhex(str(blob.get("data") or ""))
+    raise ValueError(f"unsupported bar4 format: {fmt}")
+
+
+def bar4_decode_matrix(blob: Dict[str, Any]) -> Any:
+    return bar4_decode(blob)
+
+
+def bar4_encode(data: Any) -> Dict[str, Any]:
+    if isinstance(data, (bytes, bytearray)):
+        return bar4_encode_bytes(bytes(data))
+    return bar4_encode_int8_matrix(data)

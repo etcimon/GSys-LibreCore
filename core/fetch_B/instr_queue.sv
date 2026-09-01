@@ -212,7 +212,7 @@ module instr_queue
 
   always_comb begin : gen_shamt
     shamt = '0;
-    for (int unsigned i = 0; i < NrFifo; i++) shamt = shamt + fifo_idx_t'(push_instr_fifo[i]);
+    for (int unsigned i = 0; i < NrFifo; i++) shamt = shamt + {{3{1'b0}}, push_instr_fifo[i]};
   end
 
   assign idx_is_d = (idx_is_q + fifo_idx_t'(shamt)) & IdxMask;
@@ -240,7 +240,9 @@ module instr_queue
       for (int unsigned s2 = 0; s2 < NrFifo; s2++) begin
         if (valid[s2] && (addr_i[s2] < addr_i[s])) rank = rank + 1'b1;
       end
-      instr_data_in[f].push_seq = push_seq_q + 16'(rank);
+      // O7o: rank is only IdxW bits; pad it explicitly so read_slang/Verific
+      // both see the addition as a clean 16-bit sum.
+      instr_data_in[f].push_seq = push_seq_q + {{(16 - IdxW) {1'b0}}, rank};
     end
   end
 

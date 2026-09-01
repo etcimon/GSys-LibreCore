@@ -1301,6 +1301,9 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // outputs. "Head selection must not depend on opcode/rd/FU" is an
       // information-flow claim, so no single-trace assertion can witness it.
       "core/fetch_B/formal/g6lc_fetch_iq.sby",
+      // I6 clause 1: FIFO insertion order (discharges IQ pseq_monotone), then
+      // live-queue age-select / monotone issue.
+      "core/fetch_B/formal/cva6_fifo_v3_order.sby",
     ],
     formal: {
       // null = one sby process per host core, and tasks dispatched concurrently.

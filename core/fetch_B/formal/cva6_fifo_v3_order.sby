@@ -1,0 +1,31 @@
+# I6 clause-1 support: cva6_fifo_v3 data-order + control self-composition.
+#
+# Proves the live FIFO (FPGA_EN=0, FALL_THROUGH=0, DEPTH=8) pops in insertion
+# order and that empty/full/usage do not depend on payload bits. That
+# discharges the `push_seq_range_ok` cone bound in `g6lc_fetch_iq_order.sby`.
+#
+# Immediate asserts inside always_ff (not concurrent SVA): abc-bmc3's AIGER
+# path treats clk_i as $anyseq and would otherwise check sampled properties
+# on unclocked frames (degenerate FAIL at step 3 with PI_clk_i held 0).
+#
+# Run: sby -f core/fetch_B/formal/cva6_fifo_v3_order.sby
+#      cva6-build verify --formal --formal-remote
+
+[options]
+mode bmc
+depth 12
+
+[engines]
+# abc-bmc3 first (the bit-level cone is small). z3 is the remote-available
+# SMT solver (yices-smt2 is not on the testharness PATH).
+abc bmc3
+smtbmc z3
+
+[script]
+read_slang --std 1800-2017 --top cva6_fifo_v3_order_props -DFORMAL \
+    cva6_fifo_v3.sv cva6_fifo_v3_order_props.sv
+prep -top cva6_fifo_v3_order_props
+
+[files]
+../../cva6_fifo_v3.sv
+cva6_fifo_v3_order_props.sv

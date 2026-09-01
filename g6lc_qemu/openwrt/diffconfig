@@ -1,0 +1,20 @@
+# OpenWrt v24.10.2 custom compile for LibreCore E3 (QEMU virt + EDK2).
+# Target is sifiveu (only in-tree RV64 board with EFI stub). Kernel overlay
+# in kernel-virt.config adds SOC_VIRT + virtio + 8250 for qemu virt.
+CONFIG_TARGET_sifiveu=y
+CONFIG_TARGET_sifiveu_generic=y
+CONFIG_TARGET_sifiveu_generic_DEVICE_sifive_unleashed=y
+CONFIG_TARGET_ROOTFS_INITRAMFS=y
+CONFIG_TARGET_INITRAMFS_COMPRESSION_GZIP=y
+CONFIG_TARGET_ROOTFS_CPIOGZ=y
+CONFIG_TARGET_ROOTFS_EXT4FS=y
+CONFIG_TARGET_IMAGES_GZIP=y
+CONFIG_DEVEL=y
+CONFIG_CCACHE=y
+# gcc 13.3: zba/zbb/zbs/zicbom/zicboz; not zacas (GCC 14).
+CONFIG_TARGET_OPTIMIZATION="-Os -pipe -march=rv64imafdc_zba_zbb_zbs_zcb_zicond_zicbom_zicboz -mabi=lp64d"
+# Keep the image small: no luci, no extra wireless stacks.
+# CONFIG_PACKAGE_luci is not set
+CONFIG_PACKAGE_kmod-virtio-blk=y
+CONFIG_PACKAGE_kmod-virtio-net=y
+CONFIG_PACKAGE_kmod-fs-vfat=y

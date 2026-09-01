@@ -270,18 +270,28 @@ package with fields no core module reads, for a block that lives in `corev_apu/`
 | Clusters, MACs/cluster, per-cluster SRAM, NoC width, DRAM channels, QoS classes | **new** `corev_apu/include/g6lc_ai_island_cfg_pkg.sv` (tier **R** — interface stays open) | uncore parameters, one SoC package, zero core churn |
 | Runtime discovery of the above | **MMIO capability window** in the island (BAR0 / fabric-mapped), plus the `g6lc,ai-matrix` DTS node | software must never recompile per SKU |
 
-The capability window is what lets the PyTorch partitioner cost a kernel on an unknown part:
+The capability window is what lets the PyTorch partitioner cost a kernel on an unknown part.
 
-| Offset | Field |
+> **F7 (open):** this table is the **plan of record**. Shipped `g6lc_ai_cap_window.sv` disagrees from
+> `0x14` onward (`block_mnk`, packed DRAM nameplate+measured, `{queue_depth,queues}`, QoS, quantum,
+> dtype mask). Until this section and the RTL are the same document, **ingest RTL `CAP_OFF_*`**
+> (`g6lc_qemu` / `RTL_FEEDBACK.md` F7). Do not discover geometry from the rows below on silicon.
+
+| Offset | Field (plan) |
 |---|---|
 | `0x00` | capability version, must match `aicfg.version` |
-| `0x04` | cluster count present / cluster count enabled |
+| `0x04` | cluster count present / cluster count enabled (**F8:** RTL today emits one `Clusters` word) |
 | `0x08` | MACs per cycle per cluster |
 | `0x0C` | island clock, kHz |
 | `0x10` | SRAM bytes per cluster |
 | `0x14` | peak DRAM bandwidth, MB/s (measured at bring-up, not nameplate) |
 | `0x18` | supported dtype/element-width mask (§9) |
 | `0x1C` | queue count, QoS class count |
+
+**Live fixture vs this plan (not a measurement):** I1-lite is 256 MAC/cycle × 1 GHz = **0.512 TOPS**
+(§2). The §5.1 throughput SKU is ~98.3 TOPS at 8×4096 MAC/cycle × 1.5 GHz. Next island step is still
+**I3 measure then I2** (§11). Emulator asks F9–F14: `g6lc_qemu/architecture/RTL_FEEDBACK.md`.
+SoC/QEMU/SMT2 envelopes: `architecture/current-stage.md`.
 
 **This keeps the frozen ISA contract invariant.** `ai.setcfg` continues to describe only the
 *core-attached* plane; island geometry is never expressed in a CSR. That is the property that lets one

@@ -5,10 +5,11 @@
 # edk2-build.sh — build-platform suite for EDK2 E0 build-only scaffolding.
 #
 # This is a build-time witness, not a runtime boot test. It generates the
-# G6lcPlatformPkg DEC/DSC/FDF/h scaffold and build script under
-# g6lc_qemu/out/loader-build/ and validates the dry-run plan. A real build
-# requires the pinned edk2 + edk2-platforms sources, a RISC-V cross toolchain,
-# bash/make, and (on Windows) WSL.
+# G6lcPlatformPkg wrap of upstream OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc
+# (PEI-less S-mode payload) under g6lc_qemu/out/loader-build/ and validates
+# the dry-run plan. A real build requires the pinned edk2 source (edk2-platforms
+# is not required for g6lc-virt), a RISC-V cross toolchain, bash/make, and
+# (on Windows) WSL. The RTL witness is verif/tests/custom/multicore/mini_edk2_sec.S.
 
 set -euo pipefail
 

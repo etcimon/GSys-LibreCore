@@ -80,11 +80,38 @@ module wt_dcache_mem
     input logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] inv_vld_bits_i,
 
     // forwarded wbuffer
-    input wbuffer_t [CVA6Cfg.WtDcacheWbufDepth-1:0] wbuffer_data_i
+    input wbuffer_t [CVA6Cfg.WtDcacheWbufDepth-1:0] wbuffer_data_i,
+    // SL-W fixup queue forwarding (newest-first; unused when fixup depth is 0)
+    input wbuffer_t [CVA6Cfg.WtDcacheFixupDepth:0] fixup_wbuffer_i,
+    // Full XLEN word present in wbuffer/fixup: load can complete without a
+    // miss refill (store still buffered, not yet a TX). Not a miss-unit mask.
+    output logic wbuffer_fwd_hit_o
 );
 
   localparam DCACHE_NUM_BANKS = CVA6Cfg.DCACHE_LINE_WIDTH / CVA6Cfg.XLEN;
   localparam DCACHE_NUM_BANKS_WIDTH = $clog2(DCACHE_NUM_BANKS);
+
+  // SL-W: combine normal wbuffer and fixup queue for readout forwarding.
+  // For fixup depth 0 the upper slice is empty and the readout logic reduces
+  // to the original wbuffer_data_i behaviour.
+  // Pad to a power of two so lzc WIDTH == array length. A raw depth of 11
+  // (Wbuf=8 + fixup-forward=3) gives $clog2=4, and Verilator indexes the
+  // packed VlWide with that 4-bit cnt (0..15) — SIGSEGV on the testharness.
+  localparam int unsigned FixupForwardDepth = CVA6Cfg.WtDcacheFixupDepth + int'(CVA6Cfg.WtDcacheFixupDepth > 0);
+  localparam int unsigned WbufferAllRaw     = CVA6Cfg.WtDcacheWbufDepth + FixupForwardDepth;
+  localparam int unsigned WbufferAllDepth   = (WbufferAllRaw <= 1) ? 1 : (2 ** $clog2(WbufferAllRaw));
+
+  wbuffer_t [WbufferAllDepth-1:0] wbuffer_all;
+
+  for (genvar k = 0; k < WbufferAllDepth; k++) begin : gen_wbuffer_all
+    if (k < CVA6Cfg.WtDcacheWbufDepth) begin : gen_wbuf
+      assign wbuffer_all[k] = wbuffer_data_i[k];
+    end else if (k < WbufferAllRaw) begin : gen_fix
+      assign wbuffer_all[k] = fixup_wbuffer_i[k-CVA6Cfg.WtDcacheWbufDepth];
+    end else begin : gen_pad
+      assign wbuffer_all[k] = '0;
+    end
+  end
 
   // functions
   function automatic logic [DCACHE_NUM_BANKS-1:0] dcache_cl_bin2oh(
@@ -126,7 +153,7 @@ module wt_dcache_mem
 
   logic [$clog2(NumPorts)-1:0] vld_sel_d, vld_sel_q;
 
-  logic [CVA6Cfg.WtDcacheWbufDepth-1:0] wbuffer_hit_oh;
+  logic [WbufferAllDepth-1:0] wbuffer_hit_oh;
   logic [(CVA6Cfg.XLEN/8)-1:0] wbuffer_be;
   logic [CVA6Cfg.XLEN-1:0] wbuffer_rdata, rdata;
   logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] wbuffer_ruser, ruser;
@@ -265,7 +292,7 @@ module wt_dcache_mem
 
   logic [CVA6Cfg.DCACHE_OFFSET_WIDTH-CVA6Cfg.XLEN_ALIGN_BYTES-1:0] wr_cl_off;
   logic [CVA6Cfg.DCACHE_OFFSET_WIDTH-CVA6Cfg.XLEN_ALIGN_BYTES-1:0] wr_cl_nc_off;
-  logic [                   $clog2(CVA6Cfg.WtDcacheWbufDepth)-1:0] wbuffer_hit_idx;
+  logic [                   $clog2(WbufferAllDepth)-1:0] wbuffer_hit_idx;
   logic [                    $clog2(CVA6Cfg.DCACHE_SET_ASSOC)-1:0] rd_hit_idx;
 
   assign cmp_en_d = (|vld_req) & ~vld_we;
@@ -282,12 +309,12 @@ module wt_dcache_mem
     assign ruser_cl[i] = bank_ruser[bank_off_q[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:CVA6Cfg.XLEN_ALIGN_BYTES]][i];
   end
 
-  for (genvar k = 0; k < CVA6Cfg.WtDcacheWbufDepth; k++) begin : gen_wbuffer_hit
-    assign wbuffer_hit_oh[k] = (|wbuffer_data_i[k].valid) & ({{CVA6Cfg.XLEN_ALIGN_BYTES{1'b0}}, wbuffer_data_i[k].wtag} == (wbuffer_cmp_addr >> CVA6Cfg.XLEN_ALIGN_BYTES));
+  for (genvar k = 0; k < WbufferAllDepth; k++) begin : gen_wbuffer_hit
+    assign wbuffer_hit_oh[k] = (|wbuffer_all[k].valid) & ({{CVA6Cfg.XLEN_ALIGN_BYTES{1'b0}}, wbuffer_all[k].wtag} == (wbuffer_cmp_addr >> CVA6Cfg.XLEN_ALIGN_BYTES));
   end
 
   lzc #(
-      .WIDTH(CVA6Cfg.WtDcacheWbufDepth)
+      .WIDTH(WbufferAllDepth)
   ) i_lzc_wbuffer_hit (
       .in_i   (wbuffer_hit_oh),
       .cnt_o  (wbuffer_hit_idx),
@@ -302,9 +329,16 @@ module wt_dcache_mem
       .empty_o()
   );
 
-  assign wbuffer_rdata = wbuffer_data_i[wbuffer_hit_idx].data;
-  assign wbuffer_ruser = wbuffer_data_i[wbuffer_hit_idx].user;
-  assign wbuffer_be    = (|wbuffer_hit_oh) ? wbuffer_data_i[wbuffer_hit_idx].valid : '0;
+  // SL-W: the hit index may point into the combined wbuffer_all (normal + fixup)
+  assign wbuffer_rdata = wbuffer_all[wbuffer_hit_idx].data;
+  assign wbuffer_ruser = wbuffer_all[wbuffer_hit_idx].user;
+  assign wbuffer_be    = (|wbuffer_hit_oh) ? wbuffer_all[wbuffer_hit_idx].valid : '0;
+  // Complete-word forward: every byte of the XLEN readout is in the buffer.
+  // A cache-miss load of that word must not issue a refill (stale DRAM) while
+  // the store is still sitting in the wbuffer. Per-word miss-unit *masking* of
+  // colliding loads was tried and reverted (starves FDT walks); completing the
+  // load here does not hold miss-port arbitration.
+  assign wbuffer_fwd_hit_o = (|wbuffer_hit_oh) && (&wbuffer_be);
 
   if (CVA6Cfg.NOCType == config_pkg::NOC_TYPE_AXI4_ATOP) begin : gen_axi_offset
     // In case of an uncached read, return the desired CVA6Cfg.XLEN-bit segment of the most recent AXI read

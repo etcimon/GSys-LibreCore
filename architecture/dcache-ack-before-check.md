@@ -78,6 +78,48 @@ simultaneously:
 4. and the input to **miss/refill** sequencing.
 
 So an (a)-fix expressed in that state cannot avoid perturbing (b). The `nack2idx` trace names the
+
+## 2.1 `mini_stq_flush_fwd` (gate-6, now PASS)
+
+`load_tx_collision` covers **in-flight store TXes** only. A store that is still a
+**valid wbuffer word** (not yet a TX) does not set `tx_vld`. A following load
+that **misses L1** then issues a refill of stale DRAM while the store sits in
+the buffer — the `ld` in the second frame sees the previous frame's `ra`.
+
+A per-word **miss-unit mask** of those loads was tried and reverted: it starves
+FDT walks (mode b). The landed axis is the opposite: if the wbuffer/fixup
+already holds the **full XLEN word**, the read controller treats that as a hit
+and completes from the overlay (`wbuffer_fwd_hit_o` in `wt_dcache_mem`, consumed
+in `wt_dcache_ctrl`). No miss-port arbitration change.
+
+RVFI on `work-ver-smt2-fw64-B-slwfix` (`edk2-e1-slwfix`, 406 cycles):
+`c.sdsp s3,24(sp)` at `0x8000006c` writes `0x33330000` to `0x80007ff8`; later
+`c.ldsp s3,24(sp)` retires with **PC=`0x80000000`** (should be `0x8000008a`
+after `c.nop` at `0x80000088`) and **s3=`0x18`** from LSU PA `0x80007ff8`.
+Neighbour `ld s2` from `0x80007ff0` is correct (`0x22220000`). So gate-6 is
+two defects on one retire: leftover/npc-0 delivery of the 16-bit load, and a
+D$ / STQ forward miss that is **not** f1's `ra` (`0x8000002a`). Probe `[slw-fwd]` / `[stq-fwd]` (`slw-stq-probe`): f2 `sd s3` is in the
+wbuffer at t=358–359 (`wdata=0x33330000`, `fwd=1`); by t=368 `hit=0 be=0`
+and L1 `cache=0`; STQ forward `v=0` for that PA. Neighbour `0x80007ff0`
+gets an L1 hit (`rdhit=1`, `0x22220000`) and `ld s2` is correct. The
+failing load's `s3=0x18` is **not** any probed overlay. `fixup_paddr_push`
+now uses `{wtag, byte-zeros}` rather than `wr_paddr` (which prepends zeros
+and drops tag bits) plus a same-cycle VOID-ACK forward.
+`mini_stq_flush_fwd` **PASS** (`slw-stq-coal`, oracle green, `mini_edk2_sec`
+PASS). Evicts were `checked=1` so VOID-only `fixup_evict` never pushed; ACK
+then cleared the wbuffer with no L1 write (`hit_oh=0`). Pushing checked
+tag-misses and keeping them on miss closed iter 0 (`ld s3` at `0x8000008a`
+returns `0x33330000`). Iter 1 still saw the previous word until same-PA
+coalesce (`0x33330001` overwrites the queued `0x33330000`). The first post-sync B that
+included the combined `wbuffer_all` (raw depth 11) plus signed `%` into
+`fixup_q` **SIGSEGV'd Variane at bootrom** (`mini_must_pass` rc=139, t=275,
+`id-dbg` truncated). Isolation: HEAD dcache (`work-ver-smt2-fw64-B-headiso`)
+oracle green and `mini_edk2_sec` PASS; IQ width casts were in both binaries.
+Cause: Verilator 5.008 C++ still evaluates `fixup_q[src_idx]` on the unused
+ternary side, and signed `(-1)%2 == -1`; lzc `$clog2(11)=4` can index past a
+packed 11-entry `VlWide`. Mitigations in RTL: unsigned FIFO index in
+`p_fixup_wbuffer`, pad `WbufferAllDepth` to the next power of two. Do not
+re-land the miss-unit mask.
 sharpest instance of (4): a suppressed hit does not cause the line to be refilled while another miss
 to a different index is outstanding, so the load sees neither the buffer nor a fresh line.
 

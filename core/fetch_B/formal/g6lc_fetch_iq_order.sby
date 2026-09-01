@@ -1,0 +1,36 @@
+# R6 instruction-queue formal (bounded) - I6 clause 1: program-order issue.
+#
+# Proves against the live `instr_queue` that, when multiple FIFO heads are
+# available, the greedy age-ordered pointer selects the smallest per-entry
+# `push_seq` first and that the issued `push_seq` (and therefore `address`)
+# sequence is non-decreasing over time.
+#
+# Run: sby -f core/fetch_B/formal/g6lc_fetch_iq_order.sby
+# Not in the default verify.formalTasks until pseq_monotone PASSes; the FIFO
+# data-order discharge lives in cva6_fifo_v3_order.sby (that task is default).
+
+[options]
+# One live queue; depth must cover fill, a few dual issues, a replay and a flush.
+mode bmc
+depth 10
+
+[engines]
+# abc-bmc3 first (far faster than z3 on this bit-level cone); both are raced.
+abc bmc3
+smtbmc z3
+
+[script]
+read_slang --std 1800-2017 --top g6lc_fetch_iq_order_props -DFORMAL \
+    g6lc64_smt2_config_pkg.sv config_pkg.sv riscv_pkg.sv ariane_pkg.sv \
+    g6lc_fetch_pkg.sv cva6_fifo_v3.sv instr_queue.sv g6lc_fetch_iq_order_props.sv
+prep -top g6lc_fetch_iq_order_props
+
+[files]
+../../include/g6lc64_smt2_config_pkg.sv
+../../include/config_pkg.sv
+../../include/riscv_pkg.sv
+../../include/ariane_pkg.sv
+../g6lc_fetch_pkg.sv
+../../cva6_fifo_v3.sv
+../instr_queue.sv
+g6lc_fetch_iq_order_props.sv

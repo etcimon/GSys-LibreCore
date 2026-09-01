@@ -9,6 +9,9 @@ All-feature enable + `NrCores` scale vs SMT fetch recover:
 
 ## 0. Done vs open (snapshot)
 
+WIP snapshot (SMT2 / QEMU / 100 TOPS / PCIe vs OoO·H·RVV·stream):
+[`current-stage.md`](current-stage.md). QEMU is never Variane evidence.
+
 | Track | Status |
 |-------|--------|
 | U1–U4, multi-issue, U7ᵃ/ᵇ/ᶜ, U6.0–U6.2 integrated | **Done / partial** |
@@ -111,8 +114,12 @@ core/include/cv64a6_server_math_v_config_pkg.sv  # VExtEn=1, CvxifEn=0
     S3b-lab real-STA retune still open)
 
 **Live next (authoritative ordered list + file priors):**
-[`AGENTS-todo.md`](../AGENTS-todo.md) — **Current phase** (landed table with prior paths) and
-**Practical next** in `AGENTS-todo.md` (host residual §1–§10 largely **done**; lab FO4/STA + stream8 optional growth open).
+[`AGENTS-todo.md`](../AGENTS-todo.md) — **Current phase** and **Practical next**.
+Stage map: [`current-stage.md`](current-stage.md) (parallel envelopes, not one serial queue).
+Host residual §1–§10 largely **done**; lab FO4/STA + stream8 optional growth open.
+QEMU firmware ladder (U-Boot/EDK2 virt+soc) is **green as hypothesis**; E4 pflash and soc Shell
+remain. 100 TOPS next is **I3 measure then I2**, gated by `RTL_FEEDBACK.md` F9–F14, not by KVM or
+full OoO. PCIe host transport stays **unpinned**.
 
 Quick spine for those open items:
 
@@ -127,5 +134,8 @@ Quick spine for those open items:
 | Ara live cosim / VRF | `ara-vector-cosim` · lab when `_v` TB + Image |
 | Lab FO4/STA | `s9-lab-gate` · real STA / OpenROAD still lab |
 | ~~Stream8-class package~~ **promoted + CRT 9/9 + H-edge 3/3** | `g6lc64_stream8` · `mc-spo-veri` · `kvm-h-veri` |
+| QEMU E4 / soc Shell | `u-boot-edk2-boot-architecture.md` · no 32 MiB pflash on Variane; soc StartImage hang |
+| 100 TOPS I3→I2 | `scaling-100tops.md` §11 · `RTL_FEEDBACK.md` F9–F14 · do not grow clusters before measured BW |
+| PCIe transport pin | `pcie-endpoint.md` · keep GPEX RC ≠ virt_ai_card EP until `ai_host_transport` |
 
 

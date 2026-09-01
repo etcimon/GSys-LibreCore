@@ -54,7 +54,9 @@ module wt_dcache_ctrl
     input logic [CVA6Cfg.XLEN-1:0] rd_data_i,
     input logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] rd_user_i,
     input logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] rd_vld_bits_i,
-    input logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] rd_hit_oh_i
+    input logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] rd_hit_oh_i,
+    // Write-buffer/fixup holds the full XLEN word (see wt_dcache_mem).
+    input logic wbuffer_fwd_hit_i
 );
 
   // controller FSM
@@ -163,7 +165,7 @@ module wt_dcache_ctrl
           if (wr_cl_vld_i || !rd_ack_q) begin
             state_d = REPLAY_REQ;
             // we've got a hit
-          end else if ((|rd_hit_oh_i) && cache_en_i) begin
+          end else if (((|rd_hit_oh_i) || wbuffer_fwd_hit_i) && cache_en_i) begin
             state_d = IDLE;
             req_port_o.data_rvalid = 1'b1;
             // we can handle another request

@@ -1,0 +1,5 @@
+# Toolchain -march for g6lc64_smt2.
+# Kernel/userspace gcc in OpenWrt v24.10.2 is 13.3 — it has zba/zbb/zbs/zicbom/zicboz
+# (and zcb/zicond) but not zacas (GCC 14). Keep zacas out of -march so the
+# toolchain still builds; the kernel still sees zacas in the DTS / hwprobe.
+rv64imafdc_zba_zbb_zbs_zcb_zicond_zicbom_zicboz

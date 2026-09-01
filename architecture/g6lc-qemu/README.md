@@ -1,6 +1,9 @@
 # Extension point: `g6lc_qemu` — generated emulation and SV diagnosis
 
-**Status:** **Q1 — ingest, `TargetModel` and conformance landed** · **Code prefix:** `g6lc_qemu` / `g6q` ·
+**Status:** **Q1–Q2 landed; Q3–Q9 in progress.** QEMU virt + generated `g6lc-soc` OpenSBI / U-Boot /
+EDK2 / OpenWrt **boot green** (hypothesis only). AI host push = packed DESC + `virt_ai_card`;
+`contracts.ai_host_transport` **unpinned**. Snapshot: [`../current-stage.md`](../current-stage.md).
+**Code prefix:** `g6lc_qemu` / `g6q` ·
 **Licensing:** tier **T** (MIT) · **Package:** [`../../g6lc_qemu/`](../../g6lc_qemu/)
 
 Feature-domain for **emulating GSys LibreCore** rather than simulating it: a self-contained Rust
@@ -37,6 +40,7 @@ first.
 | [`os-linux-matrix.md`](os-linux-matrix.md) | OpenSBI modes, OS profiles (incl. Ubuntu), the Q9 capability matrix |
 || [`u-boot-edk2-boot-architecture.md`](u-boot-edk2-boot-architecture.md) | U-Boot + FIT and EDK2 / UEFI boot ladder, gated on fetch-IQ program order |
 | [`staging.md`](staging.md) | Q0–Q9 stages with entry / exit gates |
+| [`rtl-feedback-next.md`](rtl-feedback-next.md) | F1–F15 vs emulator ingest; **I3-before-I2** vs SMT2/QEMU/OoO/H/RVV/stream envelopes |
 
 Related programs of record:
 [`../multi-threading/testharness-proxy.md`](../multi-threading/testharness-proxy.md) (evidence

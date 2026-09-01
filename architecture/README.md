@@ -47,13 +47,14 @@ deliberately **do not restate** the feature guides in `agents/guides/` — they 
 | `speculative-execution/` | **FSE** deep window + recovery plan (`full-speculation-architecture.md`, `UPDATE-PLAN.md`); `DeepSpecEn` S1 | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` |
 | `out-of-order/` | Slice-OoO (MLP) then full rename/ROB/LSQ multi-issue OoO | Microarchitectural, in-core | `agents/guides/AGENTS-speculation.md` + `router-core-upgrade-program.md` |
 | `core-fetch/` | Instruction supply: frozen A = `core/frontend` + `core/smt` pkg/dbg; default B = `core/fetch_B/`; g1\* oracle in `core/smt_legacy/` | Microarchitectural, in-core | `firmware-boot-principles.md`, `core-fetch/SPEC.md`, `core-fetch/SMT-LEGACY.md` |
-| `multi-threading/` | Simultaneous multithreading (U6.1) | **Landed (fine-grain banks)**; live gap is dual-issue + fetch_B/IQ leftover + OpenSBI firmware, not missing PC/CSR/RF/RAS/GHR banks | `agents/guides/AGENTS-soc-readiness.md` · **execution:** `multi-threading/testharness-proxy.md` |
+| `current-stage.md` | **WIP snapshot (2026-09):** SMT2 / QEMU firmware / 100 TOPS / PCIe stand-in vs OoO·H·RVV·stream change sets | Scaffold status only | this file · `AGENTS-todo.md` Current phase |
+| `multi-threading/` | Simultaneous multithreading (U6.1) | **Landed (fine-grain banks)**; QEMU virt/soc dual-hart OpenSBI/Linux **green** (not Variane evidence); live RTL gap is SL-C topology + R3b Image + product closeout | `agents/guides/AGENTS-soc-readiness.md` · **execution:** `multi-threading/testharness-proxy.md` · **snapshot:** `current-stage.md` |
 | `multi-core/` | Multi-hart tiles, coherence, interrupt scaling | SoC integration | `agents/guides/AGENTS-l2l3-cache.md`, `-soc-readiness.md` |
 | `l2-l3-cache/` | Memory-side L2 / SoC L3 (LLC) | SoC integration (not an L1 edit) | `agents/guides/AGENTS-l2l3-cache.md` |
 | `spec-extensions/` | Further RISC-V ISA features (V, Zvk, Sv57, CFI, …) | Spec-anchored | `agents/spec/INDEX.md` + relevant guide |
-| `ai-matrix/` | INT8 matrix acceleration (`Xg6lcai`) for a PCIe CPU+AI card | **Live P1–P3 / I1 partial** — CVXIF plane + `ai_island` T2; next **I3 BW → I2 clusters** | `ai-matrix/README.md` §0 progress table + `hard-tests.md` + `scaling-100tops.md` + `frameworks-virt-pcie.md` + `uncore/pcie-endpoint.md` |
+| `ai-matrix/` | INT8 matrix acceleration (`Xg6lcai`) for a PCIe CPU+AI card | **Live P1–P3 / I1-lite** (0.512 TOPS fixture @ 256 MAC/cycle×1 GHz); QEMU/EDK2 stand-in join, transport **unpinned**; next **I3 measure → I2 clusters** (`RTL_FEEDBACK.md` F9–F14) | `ai-matrix/README.md` §0 + `hard-tests.md` + `scaling-100tops.md` + `current-stage.md` + `g6lc_qemu/architecture/RTL_FEEDBACK.md` |
 | `sv-timing/` | Structural FO4 precompile package pointer (host = build-platform `timings`) | Tooling / host adapter | `sv-timing/AGENTS.md`, `AGENTS-host.md` |
-| `g6lc-qemu/` | Generated emulation (stock-QEMU / QEMU C / native Rust) + SV diagnosis (RVFI tandem, PMU/uarch) from configs ⇄ flists ⇄ DTS | **Q0 scaffold + package skeleton** — tooling, tier T (MIT) | `g6lc-qemu/README.md`; package `g6lc_qemu/AGENTS.md` |
+| `g6lc-qemu/` | Generated emulation (stock-QEMU / QEMU C / native Rust) + SV diagnosis | **Q1–Q2 landed; Q3–Q9 in progress.** QEMU virt/soc OpenSBI+U-Boot+EDK2+OpenWrt **green** (hypothesis, never Variane evidence). AI push path = packed DESC + virt_ai_card; `ai_host_transport` unpinned | `g6lc-qemu/README.md` · `g6lc-qemu/staging.md` · `current-stage.md`; package `g6lc_qemu/AGENTS.md` |
 | `ai-tensor/` (package at repo root) | PyTorch/TensorFlow **backend** for `Xg6lcai` / `ai_island` (host software; not RTL) | **Live** soft virt-card + HARD virt-impl | `ai-tensor/AGENTS.md`; `tensor virt-impl --impl hard --suite narrow` |
 
 Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings outs, `--from-timing` soak hand-off) is documented in [`build-platform-workspace-lifecycle.md`](build-platform-workspace-lifecycle.md) — not an RTL extension point; still scaffold-only (no flist).
@@ -64,11 +65,12 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 
 | Document | Scope |
 |---|---|
+| `current-stage.md` | **WIP snapshot:** parallel change sets (SMT2, QEMU firmware, 100 TOPS island, PCIe stand-in, OoO/H/RVV/stream). |
 | `g6lc-qemu/README.md` | **Host plan:** `g6lc_qemu` generator — configs ⇄ flists ⇄ DTS → four emulation backends + D1 tandem / D2 uarch. Q0–Q9 in `g6lc-qemu/staging.md`. **Never evidence** (see `multi-threading/testharness-proxy.md`). |
 | `build-platform-workspace-lifecycle.md` | **Host plan:** granular `cva6-build clean` (purpose/age) + `--from-timing` validate/consume for soaks/diag/sim; workspace artifact taxonomy. |
 | `build-platform-opensta-from-timing.md` | **Host plan:** precompiled timings packages → SDC seeds → Yosys/OpenSTA/OpenROAD validation + FO4↔STA correlate loop (S0–S5). |
-| `router-core-upgrade-program.md` | Active 8-upgrade program (perf/W-ranked). **Progress ~U6.2 partial:** U1–U4, multi-issue, U7ᵃ/ᵇ, U6.0; **U6.1 fine-grain banks landed, product closeout open**; U6.2 multi-core 1–8 hub; H + AVX-like sequenced in `remaining-upgrade-sequence.md`; U5 remain. |
-| `remaining-upgrade-sequence.md` | Post-U6 queue: multi-core, H/Sstc, U10, Ara, **U5 OoO + L3/PF** |
+| `router-core-upgrade-program.md` | Active 8-upgrade program (perf/W-ranked). **U1–U4, multi-issue, U7, U6.0 landed; U6.1 banks landed / product closeout open; U6.2 hub live; U5 OoO production-gated.** H + AVX-like in `remaining-upgrade-sequence.md`. Snapshot: `current-stage.md`. |
+| `remaining-upgrade-sequence.md` | Post-U6 queue: multi-core, H/Sstc, U10, Ara, U5 OoO + L3/PF, **QEMU Linux ladder, 100 TOPS I3→I2** |
 | `out-of-order/README.md` | U4 slice + **U5.0–U5.2** status |
 | `l2-l3-cache/README.md` | L2 done; **L3 + server prefetcher** |
 | `ai-matrix/scaling-100tops.md` | **Sizing plan:** frozen TOPS definition, bandwidth-first model (`BW = 2/T × MAC-rate`), core-attached vs island plane split, chiplet deferral gate. **SKU decided (AI-S1): both, staged** — latency SKU first (I1→I3), throughput SKU by cluster replication (I2), one memory system serving both. |

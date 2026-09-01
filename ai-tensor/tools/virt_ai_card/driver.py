@@ -38,7 +38,9 @@ DESC_PTR_LO = 0x118
 DESC_PTR_HI = 0x11C
 REG0 = 0x120
 DESC = 0x140
+DESC_END = 0x180
 PMU = 0x180
+DESC_BYTES = DESC_END - DESC
 
 # CAP word indices (×4 = offset)
 CAP_VERSION = 0
@@ -57,7 +59,8 @@ ST_OK = 0
 ST_ERR = 1
 ST_DISABLED = 2
 ST_BAD_OP = 3
-FLAG_IRQ = 1 << 0
+# isa-encoding.md §7: flags[2] raise IRQ. Matches ingested flags_layout.irq_bit.
+FLAG_IRQ = 1 << 2
 
 # Soft path URI used by board.json ai.uioConnectors.island0
 DEFAULT_SOFT_PATH = "virt://virt-ai-pcie/island0"
@@ -182,6 +185,7 @@ class VirtualUioDevice:
         path: str = DEFAULT_SOFT_PATH,
         *,
         eventfd: Optional[VirtualEventFd] = None,
+        cap: Optional[dict] = None,
     ) -> None:
         self.path = path
         self.eventfd = eventfd
@@ -190,7 +194,10 @@ class VirtualUioDevice:
         # private "DRAM" for BAR4-style tensors (not in 4K window)
         self._dram: dict[str, List[List[int]]] = {}
         self._enable = False
-        self._wr_cpl_en = True
+        # Null ptr_done (ABI): no DMA completion-word write until the host sets CTL.wr_cpl_en.
+        self._wr_cpl_en = False
+        self._irq_bit = 2
+        self._queues = 1
         self._busy = False
         self._last_status = 0
         self._db_qid = 0
@@ -198,21 +205,31 @@ class VirtualUioDevice:
         self._desc_words = [0] * 16
         self._pmu = (0, 0, 0, 0)  # r, w, cycles, gbps_x1000
         self._comp_fifo: List[_Completion] = []
-        self._seed_cap()
+        self._seed_cap(cap)
         self._refresh_done_head()
 
-    # -- CAP seed (island_p3-ish) -------------------------------------------
+    # -- CAP seed (island_p3-ish; overrides are reported geometry, not timing) --
 
-    def _seed_cap(self) -> None:
+    def _seed_cap(self, cap: Optional[dict] = None) -> None:
+        cap = cap or {}
+        if cap.get("irq_bit") is not None:
+            self._irq_bit = int(cap["irq_bit"]) & 31
         words = [0] * 11
-        words[CAP_VERSION] = CONTRACT_VERSION
-        words[CAP_CLUSTERS] = 1
-        words[CAP_MACS] = 256
-        words[CAP_CLOCK_KHZ] = 1_000_000
-        words[CAP_SRAM] = 8 * 1024 * 1024
-        words[CAP_ACC_TILE] = _log2_tile_pack(256, 256, 256)
-        words[CAP_DRAM] = 400  # nameplate GB/s low half
-        words[CAP_QUEUES] = 1 | (8 << 16)  # queues | depth_depth
+        words[CAP_VERSION] = int(cap.get("version", CONTRACT_VERSION))
+        words[CAP_CLUSTERS] = int(cap.get("clusters", 1))
+        words[CAP_MACS] = int(cap.get("macs_per_cycle", cap.get("macs", 256)))
+        words[CAP_CLOCK_KHZ] = int(cap.get("clock_khz", 1_000_000))
+        words[CAP_SRAM] = int(cap.get("sram_bytes", 8 * 1024 * 1024))
+        words[CAP_ACC_TILE] = _log2_tile_pack(
+            int(cap.get("acc_tile_m", 256)),
+            int(cap.get("acc_tile_n", 256)),
+            int(cap.get("acc_tile_k", 256)),
+        )
+        words[CAP_DRAM] = int(cap.get("dram_gbps", 400))
+        queues = int(cap.get("queues", 1)) & 0xFFFF
+        depth = int(cap.get("queue_depth", 8)) & 0xFFFF
+        self._queues = queues if queues else 1
+        words[CAP_QUEUES] = queues | (depth << 16)
         words[CAP_DTYPE] = 0x1  # int8
         for i, w in enumerate(words):
             struct.pack_into("<I", self._mem, i * 4, w)
@@ -326,6 +343,18 @@ class VirtualUioDevice:
         if not self._enable:
             self._push_completion(self._db_ticket, ST_DISABLED, False)
             return
+        if self._db_qid >= self._queues:
+            self._push_completion(self._db_ticket, ST_ERR, False)
+            return
+        if any(self._desc_words):
+            ver = self._desc_words[0] & 0xFFFF
+            if ver not in (0, CONTRACT_VERSION):
+                self._push_completion(self._db_ticket, ST_ERR, False)
+                return
+            op = (self._desc_words[0] >> 16) & 0xFFFF
+            if op not in (0, OP_GEMM):
+                self._push_completion(self._db_ticket, ST_BAD_OP, False)
+                return
         # High-level path: if A/B stored via gemm_s8 API, use those; else try DESC dims
         a = self._dram.get("A")
         b = self._dram.get("B")
@@ -334,9 +363,22 @@ class VirtualUioDevice:
         if a is not None and b is not None:
             m, k = len(a), len(a[0])
             n = len(b[0]) if b else 0
+            if any(self._desc_words):
+                m_d, n_d, k_d = self._desc_words[2], self._desc_words[3], self._desc_words[4]
+                if (m_d or n_d or k_d) and (m_d, n_d, k_d) != (m, n, k):
+                    self._push_completion(self._db_ticket, ST_ERR, False)
+                    return
+                ld_ab = self._desc_words[5]
+                if ld_ab:
+                    lda = ld_ab & 0xFFFF
+                    ldb = (ld_ab >> 16) & 0xFFFF
+                    if (lda, ldb) != (k, n):
+                        self._push_completion(self._db_ticket, ST_ERR, False)
+                        return
             # FLAG_IRQ from desc flags word if programmed, else default on for soft path
-            flags = self._desc_words[1] if any(self._desc_words) else FLAG_IRQ
-            irq = (flags & FLAG_IRQ) != 0
+            flag = 1 << self._irq_bit
+            flags = self._desc_words[1] if any(self._desc_words) else flag
+            irq = (flags & flag) != 0
             # Soft path with eventfd: ensure IRQ so claim discipline is exercised.
             if self.eventfd is not None:
                 irq = True
@@ -353,10 +395,37 @@ class VirtualUioDevice:
 
     # -- high-level GEMM (card agent / smoke) -------------------------------
 
+    def stage_tensor(self, name: str, matrix: Sequence[Sequence[int]]) -> None:
+        """Stage a BAR4 tensor into card DRAM so a later doorbell can consume it."""
+        with self._lock:
+            self._dram[str(name)] = [list(row) for row in matrix]
+
+    def get_tensor(self, name: str) -> Optional[List[List[int]]]:
+        with self._lock:
+            t = self._dram.get(str(name))
+            if t is None:
+                return None
+            return [list(row) for row in t]
+
     def enable(self, on: bool = True) -> None:
         with self._lock:
             self._enable = on
             self._pack32(CTL, (1 if on else 0) | ((1 if self._wr_cpl_en else 0) << 1))
+
+    def load_desc(self, image: bytes) -> None:
+        """Copy a packed descriptor image into the existing DESC window (0x140)."""
+        with self._lock:
+            self._load_desc_unlocked(image)
+
+    def _load_desc_unlocked(self, image: bytes) -> None:
+        buf = bytes(image[:DESC_BYTES]).ljust(DESC_BYTES, b"\x00")
+        nwords = DESC_BYTES // 4
+        words = [0] * nwords
+        for i in range(nwords):
+            words[i] = int.from_bytes(buf[i * 4 : (i + 1) * 4], "little")
+        self._desc_words = words
+        for i, w in enumerate(words):
+            self._pack32(DESC + i * 4, w)
 
     def stage_gemm_s8(
         self,
@@ -365,20 +434,38 @@ class VirtualUioDevice:
         *,
         ticket: int = 1,
         irq: bool = True,
+        desc: Optional[bytes] = None,
     ) -> int:
-        """Stage A/B, program minimal DESC, ring doorbell. Returns ticket."""
+        """Stage A/B, program DESC (packed image or minimal words), ring doorbell."""
         with self._lock:
             self._dram["A"] = [list(row) for row in a]
             self._dram["B"] = [list(row) for row in b]
             m, k = len(a), len(a[0])
             n = len(b[0])
-            # minimal desc words: version|op, flags, m, n, k
-            self._desc_words = [0] * 16
-            self._desc_words[0] = CONTRACT_VERSION | (OP_GEMM << 16)
-            self._desc_words[1] = FLAG_IRQ if irq else 0
-            self._desc_words[2] = m
-            self._desc_words[3] = n
-            self._desc_words[4] = k
+            if desc:
+                self._load_desc_unlocked(bytes(desc))
+            if desc or any(self._desc_words):
+                m_d, n_d, k_d = self._desc_words[2], self._desc_words[3], self._desc_words[4]
+                if (m_d or n_d or k_d) and (m_d, n_d, k_d) != (m, n, k):
+                    self._push_completion(ticket, ST_ERR, self.eventfd is not None)
+                    return ticket
+                ld_ab = self._desc_words[5]
+                if ld_ab:
+                    lda = ld_ab & 0xFFFF
+                    ldb = (ld_ab >> 16) & 0xFFFF
+                    if (lda, ldb) != (k, n):
+                        self._push_completion(ticket, ST_ERR, self.eventfd is not None)
+                        return ticket
+            else:
+                # minimal desc words: version|op, flags, m, n, k
+                self._desc_words = [0] * (DESC_BYTES // 4)
+                self._desc_words[0] = CONTRACT_VERSION | (OP_GEMM << 16)
+                self._desc_words[1] = (1 << self._irq_bit) if irq else 0
+                self._desc_words[2] = m
+                self._desc_words[3] = n
+                self._desc_words[4] = k
+                for i, w in enumerate(self._desc_words):
+                    self._pack32(DESC + i * 4, w)
             if not self._enable:
                 self.enable(True)
             # doorbell: qid=0 | ticket<<8
@@ -394,13 +481,14 @@ class VirtualUioDevice:
         irq: bool = True,
         wait: bool = True,
         timeout: float = 2.0,
+        desc: Optional[bytes] = None,
     ) -> List[List[int]]:
         """
         Stage + doorbell + (optional) eventfd wait + claim DONE.
 
         Claim order: wait → claim DONE @0x10C → clear eventfd.
         """
-        self.stage_gemm_s8(a, b, ticket=ticket, irq=irq)
+        self.stage_gemm_s8(a, b, ticket=ticket, irq=irq, desc=desc)
         if wait:
             return self.wait_claim_result(ticket=ticket, timeout=timeout)
         c = self._dram.get("C")
@@ -452,6 +540,20 @@ class VirtualUioDevice:
 
     def cap_version(self) -> int:
         return self.read32(CAP_BASE)
+
+    def cap_snapshot(self) -> dict:
+        """Reported CAP window. Values are geometry, not a throughput measurement."""
+        q = self.read32(CAP_BASE + CAP_QUEUES * 4)
+        return {
+            "cap_version": self.read32(CAP_BASE + CAP_VERSION * 4),
+            "clusters": self.read32(CAP_BASE + CAP_CLUSTERS * 4),
+            "macs_per_cycle": self.read32(CAP_BASE + CAP_MACS * 4),
+            "clock_khz": self.read32(CAP_BASE + CAP_CLOCK_KHZ * 4),
+            "sram_bytes": self.read32(CAP_BASE + CAP_SRAM * 4),
+            "dram_gbps": self.read32(CAP_BASE + CAP_DRAM * 4),
+            "queues": q & 0xFFFF,
+            "queue_depth": (q >> 16) & 0xFFFF,
+        }
 
 
 def soft_path_for_board(boardid: str = "virt-ai-pcie") -> str:

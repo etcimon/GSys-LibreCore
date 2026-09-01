@@ -1,0 +1,5 @@
+# Applied in order by apply-patches.sh onto official openwrt/openwrt @ pin.
+# Seed patches (first-party). extract-patches.sh may append from-fork/*.patch
+# after developing on linux-dist/openwrt-* (etcimon forks).
+0001-kernel-defaults-olddefconfig.patch
+0002-sifiveu-g6lc-virt-and-isa-overlay.patch

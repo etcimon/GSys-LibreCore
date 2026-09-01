@@ -23,11 +23,17 @@ from virt_ai_card.transport import (  # noqa: E402
     MSG_ERROR,
     MSG_GEMM_S8,
     MSG_HELLO,
+    MSG_IRQ_CLEAR,
+    MSG_IRQ_WAIT,
+    MSG_MMIO_RD,
+    MSG_MMIO_WR,
     MSG_PING,
     MSG_PONG,
     MSG_RESULT,
     MSG_SHUTDOWN,
     VirtualPcieLink,
+    bar4_decode,
+    bar4_encode_bytes,
     bar4_encode_int8_matrix,
 )
 
@@ -71,12 +77,75 @@ class HostClient:
         if r.get("type") == MSG_ERROR or not r.get("ok"):
             raise RuntimeError(f"bar4_put: {r}")
 
+    def bar4_put_bytes(self, name: str, data: bytes) -> None:
+        """Push an opaque blob (packed descriptor) over the BAR4 stand-in."""
+        r = self.link.request(
+            {
+                "type": MSG_BAR4_PUT,
+                "name": name,
+                "blob": bar4_encode_bytes(data),
+            },
+            sock=self._sock,
+        )
+        if r.get("type") == MSG_ERROR or not r.get("ok"):
+            raise RuntimeError(f"bar4_put_bytes: {r}")
+
     def bar4_get(self, name: str) -> Any:
         r = self.link.request({"type": MSG_BAR4_GET, "name": name}, sock=self._sock)
         if r.get("type") == MSG_ERROR or not r.get("ok"):
             raise RuntimeError(f"bar4_get: {r}")
         blob = r.get("blob") or {}
+        if "format" in blob:
+            return bar4_decode(blob)
         return blob.get("data")
+
+    def mmio_read32(self, off: int) -> int:
+        """Read a word from the existing 4 KiB UIO window (not a pinned PCIe BAR)."""
+        r = self.link.request(
+            {"type": MSG_MMIO_RD, "off": int(off)}, sock=self._sock
+        )
+        if r.get("type") == MSG_ERROR or not r.get("ok"):
+            raise RuntimeError(f"mmio_read32: {r}")
+        return int(r.get("val", 0)) & 0xFFFFFFFF
+
+    def mmio_write32(self, off: int, val: int) -> None:
+        r = self.link.request(
+            {"type": MSG_MMIO_WR, "off": int(off), "val": int(val) & 0xFFFFFFFF},
+            sock=self._sock,
+        )
+        if r.get("type") == MSG_ERROR or not r.get("ok"):
+            raise RuntimeError(f"mmio_write32: {r}")
+
+    def mmio_write_bytes(self, off: int, data: bytes) -> None:
+        raw = bytes(data)
+        pad = (-len(raw)) % 4
+        if pad:
+            raw = raw + b"\x00" * pad
+        for i in range(0, len(raw), 4):
+            self.mmio_write32(off + i, int.from_bytes(raw[i : i + 4], "little"))
+
+    def mmio_read_bytes(self, off: int, n: int) -> bytes:
+        n4 = n + ((-n) % 4)
+        buf = bytearray()
+        for i in range(0, n4, 4):
+            buf.extend(self.mmio_read32(off + i).to_bytes(4, "little"))
+        return bytes(buf[:n])
+
+    def irq_wait(self, timeout: float = 2.0) -> int:
+        """Wait for the card eventfd (MSI stand-in). Claim DONE after this returns."""
+        r = self.link.request(
+            {"type": MSG_IRQ_WAIT, "timeout": float(timeout)},
+            sock=self._sock,
+            timeout=max(float(timeout) + 1.0, 2.0),
+        )
+        if r.get("type") == MSG_ERROR or not r.get("ok"):
+            raise RuntimeError(f"irq_wait: {r}")
+        return int(r.get("n", 1))
+
+    def irq_clear(self) -> None:
+        r = self.link.request({"type": MSG_IRQ_CLEAR}, sock=self._sock)
+        if r.get("type") == MSG_ERROR or not r.get("ok"):
+            raise RuntimeError(f"irq_clear: {r}")
 
     def gemm_s8(
         self,

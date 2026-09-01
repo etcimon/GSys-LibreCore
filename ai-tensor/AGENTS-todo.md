@@ -59,6 +59,12 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] MappedWindow (file-backed) + linux-mmio UIO/`/dev/mem` open (feature-gated)
 - [ ] Board-validated UIO map on live Variane/FPGA
 - [x] SoftIsland FLAG_IRQ sticky + DONE clear (PLIC mirror discipline)
+- [x] virt_ai_card `FLAG_IRQ = 1<<2` matches `isa-encoding.md` §7 / ingested `flags_layout.irq_bit`; packed DESC flags and ESP `FLAGS.TXT` `irq_bit_ok`. Null `ptr_*` (`PTR.TXT` `ptr_null`); bulk is BAR4 names, not invented addresses.
+- [x] Packed `ld_ab = k|(n<<16)` matches `pack_desc64`; ESP `DESC.TXT` `ld_ab_ok`. Dense INT8 `dtype_s8s8` / `ew_byte` / `sp24=false` (`int4_not_in_headline`). Doorbell cluster from ingested `queue_cluster_map`.
+- [x] virt_ai_card doorbell checks `ld_ab` against `n,k` (ST_ERR on mismatch). ESP `SCHED.TXT` `within_quantum`; qid→qos; FLAGS `fence_clear` / `priority_default` (`isa-encoding.md` §7.1).
+- [x] virt_ai_card rejects `qid >= queues` and desc `version` other than 1 (`ST_ERR`). ESP `STAT.TXT` `qid_bound`.
+- [x] virt_ai_card unknown `op` → `ST_BAD_OP`; doorbell while CTL.enable=0 → `ST_DISABLED`. ESP `OP.TXT` `op_ok`; `CTL.TXT` `disabled_rejected`.
+- [x] CTL re-enable after disable restores `ST_OK` (`reenable_ok`).
 - [x] IRQ wait abstraction (`irq.rs`: SoftSticky + UioIrqWait under linux-mmio; PLIC-8 contract)
 - [x] Host EventFd wait abstraction + hostless soft soak / FIFO re-arm (EventFdWait, CLI event-fd-soak)
 - [x] Monorepo spawn: run-ai-tensor.sh event-fd-soak (+ queue-soak includes it)
@@ -89,6 +95,11 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] WaitPolicy (Poll/IrqThenPoll/DmaThenClaim/ClaimOnly) + `soak_multi_queue` + CLI `queue-soak`
 - [x] Host adapter: `cva6-build tensor status|doctor|test|golden|cosim|queue-soak|rtl`
 - [x] `Device(backend=virt-card)` + `VirtCardSession` (local VirtualUioDevice / TCP CardAgent)
+- [x] virt_ai_card BAR4 `raw_hex` + `bar4_put_bytes("DESC")` copies a packed image into UIO DESC@0x140;
+  `stage_gemm_s8(..., desc=)` checks m/n/k words against A/B. Not a pinned PCIe BAR.
+- [x] virt_ai_card `mmio_rd`/`mmio_wr` on the existing 4 KiB UIO window (CAP + DESC); hello `mmio_size=0x1000`.
+- [x] BAR4 A/B stage into card DRAM; host doorbell + DONE claim over MMIO; BAR4 get C.
+- [x] `irq_wait` / `irq_clear` over TCP (eventfd MSI stand-in); claim order wait → DONE → clear.
 - [x] Structured PyTorch suite `python/tests/test_torch_virt_ai_island.py` (ai_island features via virt-ai-pcie)
 - [x] Host: `tensor pytorch|frameworks|regress --board virt-ai-pcie --core g6lc64_ai [--from-timing DIR]`
 - [x] Virtual implementation multi-phase: `tensor virt-impl` / `--impl soft|hard|full` / `--rtl-hard`

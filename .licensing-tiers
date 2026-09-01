@@ -41,6 +41,7 @@ R   core/smt_legacy/g6lc_*.sv
 R   core/smt_legacy/frontend.sv
 R   core/fetch_B/g6lc_fetch_pkg.sv
 R   core/fetch_B/g6lc_fetch_dbg.sv
+R   core/fetch_B/formal/**
 R   core/g6lc_slice_*.sv
 R   core/g6lc_bp_*.sv
 R   core/frontend/g6lc_bp_*.sv
@@ -104,6 +105,15 @@ T   sv-timing/**
 # separate GPL work under gitignored g6lc_qemu/{out,qemu}/ and are never committed here.
 # See g6lc_qemu/AGENTS-licensing.md and architecture/g6lc-qemu/README.md s3 (E-GPLLINK).
 T   g6lc_qemu/**
+# linux-dist OpenWrt trees are upstream GPL (etcimon forks of official). Leave
+# them verbatim (E-UPSTREAMWRITE). First-party linux-dist/*.md and ubuntu/
+# scaffold stay tier T via the g6lc_qemu/** rule above; last match wins.
+U   g6lc_qemu/linux-dist/openwrt/**
+U   g6lc_qemu/linux-dist/openwrt-packages/**
+U   g6lc_qemu/linux-dist/openwrt-luci/**
+U   g6lc_qemu/linux-dist/openwrt-routing/**
+U   g6lc_qemu/linux-dist/openwrt-telephony/**
+U   g6lc_qemu/linux-dist/edk2/**
 T   corev-mb/lib/**
 T   docs/**
 T   architecture/**

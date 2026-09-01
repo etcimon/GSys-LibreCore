@@ -1,0 +1,40 @@
+From: Etienne Cimon
+Subject: UefiCpuPkg: RV64 trap frame width is 8, not __SIZEOF_POINTER__
+
+SupervisorModeTrap does:
+
+  addi sp, sp, -SMODE_TRAP_REGS_SIZE
+  sd   sepc, SMODE_TRAP_REGS_OFFSET(sepc)(sp)
+
+SMODE_TRAP_REGS_OFFSET uses __SIZEOF_POINTER__. The C struct is
+UINT64[35] (280 bytes, sepc at 256). EDK2 GCC5_RISCV64_PP_FLAGS is
+only `DEF(GCC_PP_FLAGS) DEF(GCC5_RISCV_OPENSBI_TYPES)` — no
+-march/-mabi — while ASM_FLAGS has `-march=rv64gc -mabi=lp64`.
+xpack riscv-none-elf-gcc defaults to rv32/ilp32, so the PP step
+substitutes __SIZEOF_POINTER__=4. Linked CpuDxe then does
+`addi sp,sp,-140` and 8-byte sd/ld at 4-byte strides.
+
+sret restores sepc/sstatus from overlapped slots. After CpuTimer
+s_timer this shows up as INST_ACCESS_PAGE_FAULT at DRAM size
+(0x100000000 with -m 4096). LoongArch already passes -mabi on
+PP_FLAGS; RISC-V did not.
+
+This header is RV64-only (`sd`/`ld`). Width 8 matches the UINT64
+struct regardless of the preprocessor ABI.
+
+diff --git a/UefiCpuPkg/Library/CpuExceptionHandlerLib/RiscV/ExceptionHandler.h b/UefiCpuPkg/Library/CpuExceptionHandlerLib/RiscV/ExceptionHandler.h
+index 1111111..2222222 100644
+--- a/UefiCpuPkg/Library/CpuExceptionHandlerLib/RiscV/ExceptionHandler.h
++++ b/UefiCpuPkg/Library/CpuExceptionHandlerLib/RiscV/ExceptionHandler.h
+@@ -62,7 +62,10 @@ SupervisorModeTrap (
+ #define SMODE_TRAP_REGS_stval    34
+ #define SMODE_TRAP_REGS_last     35
+ 
+-#define SMODE_TRAP_REGS_OFFSET(x)  ((SMODE_TRAP_REGS_##x) * __SIZEOF_POINTER__)
++// RV64 trap registers are UINT64. Do not use __SIZEOF_POINTER__: EDK2
++// GCC5_RISCV64_PP_FLAGS omit -mabi=lp64, so the assembler preprocessor
++// defaults to xpack rv32/ilp32 (width 4) and the C struct stays 8.
++#define SMODE_TRAP_REGS_OFFSET(x)  ((SMODE_TRAP_REGS_##x) * 8)
+ #define SMODE_TRAP_REGS_SIZE  SMODE_TRAP_REGS_OFFSET(last)
+ 
+ #pragma pack(1)

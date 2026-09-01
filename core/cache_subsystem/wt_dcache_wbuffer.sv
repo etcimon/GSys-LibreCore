@@ -127,6 +127,8 @@ module wt_dcache_wbuffer
     output logic pm_fixup_write_o,
     output logic pm_fixup_inval_o,
     output logic pm_fixup_full_o,
+    // SL-W fixup queue forwarding to read mux (newest-first, bypass then FIFO)
+    output wbuffer_t [CVA6Cfg.WtDcacheFixupDepth:0] fixup_wbuffer_o,
     // to forwarding logic and miss unit
     output wbuffer_t [CVA6Cfg.WtDcacheWbufDepth-1:0] wbuffer_data_o,
     output logic [CVA6Cfg.DCACHE_MAX_TX-1:0][CVA6Cfg.PLEN-1:0]     tx_paddr_o,      // used to check for address collisions with read operations
@@ -324,6 +326,7 @@ module wt_dcache_wbuffer
       assign pm_fixup_write_o     = 1'b0;
       assign pm_fixup_inval_o     = 1'b0;
       assign pm_fixup_full_o      = 1'b0;
+      assign fixup_wbuffer_o      = '{default: '0};
     end else begin : gen_fixup_queue
       // Queue entry type.  Only the head of the FIFO is processed at a time.
       typedef enum logic [1:0] {
@@ -346,11 +349,13 @@ module wt_dcache_wbuffer
       logic [$clog2(CVA6Cfg.WtDcacheFixupDepth)-1:0] fixup_tail;
       logic [$clog2(CVA6Cfg.WtDcacheFixupDepth):0]   fixup_cnt;
       logic                                          fixup_bypass_valid_q, fixup_bypass_valid_d;
+      logic                                          fixup_coalesced;
 
       // Cast the configured depth to the count width so all count comparisons are
       // width-clean and Verilator does not emit WIDTHEXPAND warnings.
       localparam int unsigned FixupDepth    = CVA6Cfg.WtDcacheFixupDepth;
       localparam [$clog2(FixupDepth):0] FixupDepthCnt = FixupDepth[$clog2(FixupDepth):0];
+      localparam int unsigned FixupForwardDepth = FixupDepth + int'(FixupDepth > 0);
 
       // Full when the FIFO is at capacity and there is no bypass slot available.
       assign fixup_full  = (fixup_cnt == FixupDepthCnt) && fixup_bypass_valid_q;
@@ -447,26 +452,50 @@ module wt_dcache_wbuffer
         fixup_wr_oh           = '0;
         fixup_inv_req         = 1'b0;
 
-        // Allocation on push.  If the FIFO has room, store the entry.  If not,
-        // use the single bypass slot for the full-queue fallback.
+        // Allocation on push. Coalesce same-word PA first so a later store to
+        // the alias does not fill the queue with stale older words (iter-1
+        // mini_stq_flush_fwd saw 0x33330000 after 0x33330001).
+        fixup_coalesced = 1'b0;
         if (fixup_push) begin
           fixup_pm_void_ack = 1'b1;
-          if (fixup_cnt < FixupDepthCnt) begin
-            fixup_d[fixup_tail] = '{paddr: fixup_paddr_push,
-                                     be:    fixup_be_push,
-                                     data:  fixup_data_push,
-                                     user:  fixup_user_push};
-          end else if (!fixup_bypass_valid_q) begin
-            fixup_bypass_valid_d = 1'b1;
-            fixup_bypass_d       = '{paddr: fixup_paddr_push,
-                                     be:    fixup_be_push,
-                                     data:  fixup_data_push,
-                                     user:  fixup_user_push};
+          if (fixup_bypass_valid_q &&
+              (fixup_bypass_q.paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] ==
+               fixup_paddr_push[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES])) begin
+            fixup_bypass_d  = '{paddr: fixup_paddr_push,
+                                be:    fixup_be_push,
+                                data:  fixup_data_push,
+                                user:  fixup_user_push};
+            fixup_coalesced = 1'b1;
           end else begin
-            // Should not happen: fixup_full should have prevented the push.  If
-            // it does, record the overflow and carry on (no data lost; memory is
-            // authoritative, but a later load may hit stale data).
-            fixup_pm_full = 1'b1;
+            for (int unsigned k = 0; k < FixupDepth; k++) begin
+              int unsigned idx;
+              idx = (int'(unsigned'(fixup_head)) + int'(k)) % int'(FixupDepth);
+              if (!fixup_coalesced && k < unsigned'(fixup_cnt) &&
+                  (fixup_q[idx].paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] ==
+                   fixup_paddr_push[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES])) begin
+                fixup_d[idx]    = '{paddr: fixup_paddr_push,
+                                    be:    fixup_be_push,
+                                    data:  fixup_data_push,
+                                    user:  fixup_user_push};
+                fixup_coalesced = 1'b1;
+              end
+            end
+          end
+          if (!fixup_coalesced) begin
+            if (fixup_cnt < FixupDepthCnt) begin
+              fixup_d[fixup_tail] = '{paddr: fixup_paddr_push,
+                                       be:    fixup_be_push,
+                                       data:  fixup_data_push,
+                                       user:  fixup_user_push};
+            end else if (!fixup_bypass_valid_q) begin
+              fixup_bypass_valid_d = 1'b1;
+              fixup_bypass_d       = '{paddr: fixup_paddr_push,
+                                       be:    fixup_be_push,
+                                       data:  fixup_data_push,
+                                       user:  fixup_user_push};
+            end else begin
+              fixup_pm_full = 1'b1;
+            end
           end
         end
 
@@ -484,12 +513,10 @@ module wt_dcache_wbuffer
               if (|fixup_hit_oh_q) begin
                 fixup_state_d = FIXUP_RETIRE;
               end else begin
-                // Tag miss: the fixup is dropped (memory is authoritative). The
-                // head is popped in the sequential block below so the FIFO does
-                // not spin on a line that is not resident.
-                if (fixup_bypass_valid_q) begin
-                  fixup_bypass_valid_d = 1'b0;
-                end
+                // Tag miss: line not resident. Keep the entry so loads can
+                // still forward until a refill makes the line visible, then
+                // retry the tag check. Popping here reopened the wbuffer hole
+                // on mini_stq_flush_fwd (checked-miss ACK, L1 empty).
                 fixup_state_d = FIXUP_PEND;
               end
             end
@@ -539,16 +566,67 @@ module wt_dcache_wbuffer
 
           // Head/tail and count management.  A push into the FIFO increments
           // both tail and count.
-          if (fixup_push && (fixup_cnt < FixupDepthCnt)) begin
+          if (fixup_push && !fixup_coalesced && (fixup_cnt < FixupDepthCnt)) begin
             fixup_tail <= fixup_tail + 1'b1;
             fixup_cnt  <= fixup_cnt + 1'b1;
           end
 
           // On normal hit retire, pop the head and decrement count.
+          // Tag-miss keeps the head so forwarding survives until refill.
           if (fixup_state_q == FIXUP_RETIRE && !fixup_bypass_valid_q && fixup_wr_ack) begin
             fixup_head <= fixup_head + 1'b1;
             fixup_cnt  <= fixup_cnt - 1'b1;
           end
+        end
+      end
+
+      // Convert a fixup paddr to the wtag used by the cache readout mux.
+      function automatic [CVA6Cfg.DCACHE_TAG_WIDTH+(CVA6Cfg.DCACHE_INDEX_WIDTH-CVA6Cfg.XLEN_ALIGN_BYTES)-1:0] fixup_wtag(input [CVA6Cfg.PLEN-1:0] paddr);
+        fixup_wtag = {paddr[CVA6Cfg.DCACHE_INDEX_WIDTH+CVA6Cfg.DCACHE_TAG_WIDTH-1:CVA6Cfg.DCACHE_INDEX_WIDTH],
+                      paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.XLEN_ALIGN_BYTES]};
+      endfunction
+
+      // Forward newest fixup data first (bypass if active, then tail-1, ...).
+      // This matches the wbuffer forwarding priority: wbuffer_data_o beats
+      // fixup_wbuffer_o, and within fixup_wbuffer_o the newest entry wins.
+      // Index with unsigned arithmetic only. Signed `int %` is negative in
+      // generated C++ ((-1)%2 == -1) and a ternary still evaluates
+      // `fixup_q[src_idx]`, which SIGSEGVs Variane at bootrom before any store.
+      always_comb begin : p_fixup_wbuffer
+        fixup_wbuffer_o = '{default: '0};
+        for (int unsigned i = 0; i < FixupForwardDepth; i++) begin
+          logic take_bypass;
+          int unsigned ufifo;
+          int unsigned usrc;
+          take_bypass = (i == 0) && fixup_bypass_valid_q;
+          ufifo = (i == 0) ? 0 : (i - (fixup_bypass_valid_q ? 1 : 0));
+          if (FixupDepth > 1) begin
+            // 2*Depth keeps the unsigned sum non-negative for every legal ufifo
+            // (max FixupForwardDepth-1 == Depth). Do not use 1-bit unsigned'(tail).
+            usrc = (int'(unsigned'(fixup_tail)) + (2 * FixupDepth) - 1 - int'(ufifo)) %
+                   FixupDepth;
+          end else begin
+            usrc = 0;
+          end
+          if (take_bypass) begin
+            fixup_wbuffer_o[i].wtag  = fixup_wtag(fixup_bypass_q.paddr);
+            fixup_wbuffer_o[i].data  = fixup_bypass_q.data;
+            fixup_wbuffer_o[i].user  = (CVA6Cfg.DATA_USER_EN != 0) ? fixup_bypass_q.user : '0;
+            fixup_wbuffer_o[i].valid = fixup_bypass_q.be;
+          end else if (ufifo < unsigned'(fixup_cnt)) begin
+            fixup_wbuffer_o[i].wtag  = fixup_wtag(fixup_q[usrc].paddr);
+            fixup_wbuffer_o[i].data  = fixup_q[usrc].data;
+            fixup_wbuffer_o[i].user  = (CVA6Cfg.DATA_USER_EN != 0) ? fixup_q[usrc].user : '0;
+            fixup_wbuffer_o[i].valid = fixup_q[usrc].be;
+          end
+        end
+        // Same-cycle VOID ACK: wbuffer_d already cleared the entry, so the
+        // registered FIFO/bypass is a cycle late. Present the push as newest.
+        if (fixup_push) begin
+          fixup_wbuffer_o[0].wtag  = wbuffer_q[rtrn_ptr].wtag;
+          fixup_wbuffer_o[0].data  = fixup_data_push;
+          fixup_wbuffer_o[0].user  = (CVA6Cfg.DATA_USER_EN != 0) ? fixup_user_push : '0;
+          fixup_wbuffer_o[0].valid = fixup_be_push;
         end
       end
     end
@@ -985,15 +1063,22 @@ module wt_dcache_wbuffer
       // Decide whether this ACK'd word is a candidate for the SL-W fixup queue.
       // It must be unchecked, not already tag-checked this cycle, and not held
       // by the legacy VoidKeep window.
+      // Push on VOID ACK (unchecked) *or* on a checked tag-miss: in both
+      // cases ACK frees the wbuffer entry and L1 does not yet hold the
+      // word (check_wr is VoidKeep-only; ACK writeback needs |hit_oh).
+      // Checked hits write L1 in p_tx_stat and must not enter the queue.
       fixup_evict = (CVA6Cfg.WtDcacheFixupDepth > 0) &&
-                    !wbuffer_q[rtrn_ptr].checked &&
+                    !(wbuffer_q[rtrn_ptr].checked && (|wbuffer_q[rtrn_ptr].hit_oh)) &&
                     !(check_en_q1 && (check_ptr_q1 == rtrn_ptr)) &&
                     !(VoidKeepEn && !wbuffer_d[rtrn_ptr].checked &&
                       (wr_paddr[31:12] == VoidKeepTag)) &&
                     !fixup_full;
       if (fixup_evict) begin
         fixup_push       = 1'b1;
-        fixup_paddr_push = wr_paddr;
+        // Reconstruct PA as {wtag, byte-zeros}. wr_paddr is `{3'b0, wtag<<3}`,
+        // which drops the high tag bits; fixup_wtag() then misses the load.
+        fixup_paddr_push = {wbuffer_q[rtrn_ptr].wtag,
+                            {CVA6Cfg.XLEN_ALIGN_BYTES{1'b0}}};
         fixup_be_push    = ack_be;
         fixup_data_push  = wbuffer_q[rtrn_ptr].data;
         fixup_user_push  = wbuffer_q[rtrn_ptr].user;

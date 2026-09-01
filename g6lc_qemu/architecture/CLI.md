@@ -67,7 +67,7 @@ Global: `--json-out FILE`, `-v/--verbose`, `-q/--quiet`, `--dry-run`, `--out-dir
 | Option | Default | Source of truth |
 |---|---|---|
 | `--soc-map auto\|FILE` | `auto` | the design's SoC/peripheral package |
-| `--machine g6lc-soc\|g6lc-virt` | **`g6lc-soc`** | [`DESIGN.md`](DESIGN.md) §4 |
+| `--machine g6lc-soc\|g6lc-virt` | **`g6lc-soc`** | [`DESIGN.md`](DESIGN.md) §4. `--loader edk2` and `--loader u-boot` without `g6lc-soc` force stock QEMU `virt` (pflash / virtio). `--loader u-boot --machine g6lc-soc` uses the generated B1 machine (`g6lc-<target>`) |
 | `--mem-base ADDR` / `--mem-size SIZE` | from the SoC package | overriding sets `faithful: false` |
 | `--peripheral ID=on\|off` | as mapped | per-peripheral gate |
 | `--peripheral-base ID=ADDR` | as mapped | **flags the machine non-faithful** |
@@ -112,7 +112,7 @@ Secondary harts park until the supervisor interface starts them; `--sbi-extensio
 
 | Option | Default | Notes |
 |---|---|---|
-| `--os PROFILE` | `firmware-smoke` | `buildroot`/`ubuntu`/`debian`/`fedora` imply `g6lc-virt`, `qcow2` rootfs format, and a `root=/dev/vda` append unless overridden |
+| `--os PROFILE` | `firmware-smoke` | `buildroot`/`ubuntu`/`debian`/`fedora` imply `g6lc-virt`, `qcow2` rootfs format, and a `root=/dev/vda` append unless overridden. `openwrt` implies `g6lc-virt`. With `--loader edk2`, a virtio ESP (`BOOTRISCV64.EFI` from `out/loader-run/openwrt/initramfs-Image`) instead of `-kernel`. With `--loader u-boot`, OpenSBI `fw_dynamic` + `-kernel u-boot.bin` (U1) and, for `--os openwrt` on virt, a partitioned FAT ESP image (`out/loader-run/esp-uboot.img`) so distro boot `bootefi`s that PE (U2). `--machine g6lc-soc` skips virtio and `-device loader`s an EFI FIT (`g6lc-efi.itb`) at `0x84000000` for U-Boot `bootm` (U3-FIT). A newc `cpuinfo-init.cpio` is QEMU `-initrd` (not a FIT ramdisk: Linux 6.6 RISC-V disables EFI LoadFile2 initrd as overlapping reserved memory) so overlay `/init` prints `/proc/cpuinfo` on ttyS0 as `CPUINFO-DONE`. Falls back to a raw PE `bootefi`. The same FIT is also staged as a 32 MiB SPI NOR image (`-drive if=mtd`, QEMU `n25q256a` on FPGA Xilinx AXI SPI at `0x20000000`) so U-Boot `sf probe` / `sf read` / `bootm` from NOR (no DRAM `-device loader`). `--os efi-shell` with `--loader u-boot` stages EDK2 `Shell.efi`: on `g6lc-virt` as `esp-shell.img` `BOOTRISCV64.EFI` (U3-Shell, expect `UEFI Interactive Shell`); on `g6lc-soc` as an EFI FIT on that NOR (`bootm` then `bootefi hello` fallback). With `--loader edk2 --machine g6lc-virt`, the FD Shell's `startup.nsh` runs `pci`, lists `fs0:\`, and types `CARD.TXT`, ingested `CAP.TXT`/`PLANE.TXT`/`ROOF.TXT`/`QUEUE.TXT`/`SCHED.TXT`/`STAT.TXT`/`PTR.TXT`/`FLAGS.TXT`/`JOIN.TXT`/`CPL.TXT`/`CPL.HEX`, packed `DESC.TXT`/`CTL.TXT`/`OP.TXT`/`DESC.HEX` (`E2-PCI-ENUM` / `OP_GEMM` / `tops_on=island` / `class_dram_gbps` / `doorbell_qid_last` / `ptr_null` / `irq_bit_ok` / `dtype_s8s8` / `ld_ab_ok` / `cluster_from_map` / `within_quantum` / `qid_bound` / `op_ok` / `reenable_ok` / `join=firmware_and_card`; GPEX root-complex witness; AI card endpoint is `ai-tensor/tools/virt_ai_card/`, transport pin unpinned). Memory floors to 1 GiB on the OpenWrt virt path |
 || `--distro-root DIR` | `out/dist/<os>` | search directory for `vmlinuz`/`Image`, `initrd.img`, and `rootfs.qcow2`; explicit `--kernel`/`--initrd`/`--rootfs` win |
 | `--kernel FILE` | environment | kernel image |
 | `--initrd FILE` | — | initial ramdisk |
@@ -125,6 +125,8 @@ Secondary harts park until the supervisor interface starts them; `--sbi-extensio
 | `--virtio blk,net,rng,9p,console` | — | virt profile only; `rng` currently wires `virtio-rng-device` |
 | `--elf FILE`, `--exit-on-tohost` | — | bare-metal harness semantics |
 | `--timeout SECONDS`, `--max-instret N` | none | bounded runs for CI |
+| `--expect TEXT` | — | kill QEMU when `TEXT` appears on serial; the run succeeds if it was seen |
+| `--send-on MATCH=TEXT` (repeatable, in order) | — | when `MATCH` appears on serial, write `TEXT` to QEMU stdin. `\n` `\r` `\t` `\\` are unescaped. Combine with `--expect` so the guest is driven then killed, e.g. `--send-on "Please press Enter=\\n"` |
 
 Anything needing a disk or a network forces `g6lc-virt`, and the tool **says so on stderr** the first
 time rather than silently switching profiles.

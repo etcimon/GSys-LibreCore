@@ -40,6 +40,12 @@ Expected golden: \(A{=}[[1,2],[3,4]], B{=}[[5,6],[7,8]] \Rightarrow C{=}[[19,22]
 
 See `architecture/ai-matrix/board-uio-eventfd.md` § Virtual board.
 
+## Descriptor stand-in
+
+- `FLAG_IRQ = 1<<2` (`isa-encoding.md` §7). Seed `cap["irq_bit"]` from the ingested layout.
+- Packed `ptr_a`/`ptr_b`/`ptr_c`/`ptr_done` stay **0** (ABI null). Bulk tensors are BAR4 names
+  `A`/`B`/`C`; the completion word is MMIO `CPL` (`CTL.wr_cpl_en=0`). No invented DRAM addresses.
+
 ## License
 
 MIT (tier T tooling).

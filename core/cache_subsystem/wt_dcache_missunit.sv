@@ -588,13 +588,12 @@ module wt_dcache_missunit
           end else if (!mshr_vld_q || load_ack) begin
             // replay the read request in case the address has collided with MSHR during the time the request was pending
             // i.e., the cache state may have been updated in the mean time due to a refill at the same CL address
-            if (mshr_rdrd_collision_d[miss_port_idx]) begin
+            if (mshr_rdrd_collision_d[miss_port_idx] || tx_rdwr_collision) begin
               miss_replay_o[miss_port_idx] = 1'b1;
-              // Previously stalled forever on tx_rdwr_collision (load vs in-flight
-              // store TX). That deadlocks when the load port wins arbitration and
-              // store misses cannot retire the TX. For write-through, memory already
-              // has (or is receiving) the store; allow the load miss to issue. The
-              // wbuffer still forwards dirty bytes on the read data path.
+              // Replay a load miss that collides with an in-flight store TX until
+              // the write-through completes. The store can still retire because
+              // the load is not issued, so the arbiter can select the store port
+              // in the next cycle.
             end else begin
               mem_data_req_o   = 1'b1;
               mem_data_o.rtype = DCACHE_LOAD_REQ;

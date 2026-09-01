@@ -197,5 +197,21 @@
       reg-shift = <2>;
       reg-io-width = <4>;
     };
+
+    // FPGA xlnx_axi_quad_spi at SPIBase; ip2intc_irpt = irq_sources[1] = PLIC 2.
+    spi@20000000 {
+      compatible = "xlnx,xps-spi-2.00.a";
+      reg = <0x0 0x20000000 0x0 0x1000>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <2>;
+      #address-cells = <1>;
+      #size-cells = <0>;
+      num-cs = <1>;
+      flash@0 {
+        compatible = "jedec,spi-nor";
+        reg = <0>;
+        spi-max-frequency = <50000000>;
+      };
+    };
   };
 };

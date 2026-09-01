@@ -121,6 +121,20 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
         body.push_str("#include \"hw/intc/sifive_plic.h\"\n");
     }
     body.push_str("#include \"qom/object.h\"\n");
+    let has_spi = all_peripherals.iter().any(|p| {
+        p.model
+            .as_deref()
+            .map(|m| {
+                let m = m.to_lowercase();
+                m.contains("xps-spi") || m.contains("axi-quad-spi")
+            })
+            .unwrap_or(false)
+    });
+    if has_spi {
+        body.push_str("#include \"hw/irq.h\"\n");
+        body.push_str("#include \"hw/ssi/ssi.h\"\n");
+        body.push_str("#include \"system/blockdev.h\"\n");
+    }
     body.push('\n');
 
     // Machine and CPU type macros.
@@ -291,6 +305,8 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
         }
         body.push_str("    if (strstr(model, \"ai-island\") || strstr(model, \"ai-matrix\"))\n");
         body.push_str("        return \"unimplemented-device\";\n");
+        body.push_str("    if (strstr(model, \"xps-spi\") || strstr(model, \"axi-quad-spi\"))\n");
+        body.push_str("        return \"xlnx.xps-spi\";\n");
         body.push_str("    return NULL;\n");
         body.push_str("}\n\n");
 
@@ -387,6 +403,36 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
             "                                     g6lc_peripherals[i].clock_frequency / 16);\n",
         );
         body.push_str("            }\n");
+        body.push_str("        }\n");
+        body.push_str("        if (strcmp(qom, \"xlnx.xps-spi\") == 0) {\n");
+        body.push_str("            SSIBus *spi;\n");
+        body.push_str("            DeviceState *flash;\n");
+        body.push_str("            DriveInfo *dinfo;\n");
+        body.push_str("            qemu_irq cs_line;\n");
+        body.push_str("            dev = qdev_new(\"xlnx.xps-spi\");\n");
+        body.push_str("            qdev_prop_set_string(dev, \"endianness\", \"little\");\n");
+        body.push_str("            qdev_prop_set_uint8(dev, \"num-ss-bits\", 1);\n");
+        body.push_str("            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);\n");
+        body.push_str(
+            "            sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, g6lc_peripherals[i].base);\n",
+        );
+        body.push_str("            if (g6lc_peripherals[i].irq >= 0 && plic_dev) {\n");
+        body.push_str("                sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,\n");
+        body.push_str("                    qdev_get_gpio_in(plic_dev,\n");
+        body.push_str("                                     g6lc_peripherals[i].irq));\n");
+        body.push_str("            }\n");
+        body.push_str("            spi = (SSIBus *)qdev_get_child_bus(dev, \"spi\");\n");
+        body.push_str("            flash = qdev_new(\"n25q256a\");\n");
+        body.push_str("            dinfo = drive_get(IF_MTD, 0, 0);\n");
+        body.push_str("            if (dinfo) {\n");
+        body.push_str("                qdev_prop_set_drive_err(flash, \"drive\",\n");
+        body.push_str("                                        blk_by_legacy_dinfo(dinfo),\n");
+        body.push_str("                                        &error_fatal);\n");
+        body.push_str("            }\n");
+        body.push_str("            qdev_realize_and_unref(flash, BUS(spi), &error_fatal);\n");
+        body.push_str("            cs_line = qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0);\n");
+        body.push_str("            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1, cs_line);\n");
+        body.push_str("            continue;\n");
         body.push_str("        }\n");
         body.push_str("        if (!dev) {\n");
         body.push_str("            continue;\n");
@@ -509,22 +555,8 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     }
     body.push_str("    }\n\n");
 
-    body.push_str("    /* Load the kernel after the firmware image if one is provided. */\n");
-    body.push_str("    if (machine->kernel_filename) {\n");
-    body.push_str("        target_ulong kernel_start_addr =\n");
-    body.push_str("            riscv_calc_kernel_start_addr(&info, firmware_end_addr);\n");
-    body.push_str("        riscv_load_kernel(machine, &info, kernel_start_addr, true, NULL);\n");
-    body.push_str("        if (info.image_low_addr) {\n");
-    body.push_str("            start_addr = info.image_low_addr;\n");
-    body.push_str("        }\n");
-    body.push_str("    }\n\n");
-
-    body.push_str("    /* OpenSBI's sanitize_domain() needs a next address outside firmware. */\n");
-    body.push_str("    if (!info.image_low_addr) {\n");
-    body.push_str("        info.image_low_addr = dram_base + 0x200000ULL;\n");
-    body.push_str("    }\n\n");
-
-    body.push_str("    /* Resolve the device tree: user -dtb wins, else the generated blob. */\n");
+    body.push_str("    /* Resolve the device tree before -kernel so riscv_load_initrd can\n");
+    body.push_str("     * write linux,initrd-* (QEMU virt does the same). */\n");
     body.push_str("    if (machine->dtb) {\n");
     body.push_str("        machine->fdt = load_device_tree(machine->dtb, NULL);\n");
     body.push_str("        if (!machine->fdt) {\n");
@@ -532,9 +564,43 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     body.push_str("            exit(1);\n");
     body.push_str("        }\n");
     body.push_str("    } else if (!machine->fdt) {\n");
+    body.push_str("        /* Packed blob has no slack for linux,initrd-* / bootargs. */\n");
+    body.push_str(&format!("        const void *blob = g6lc_{name}_dtb;\n"));
     body.push_str(&format!(
-        "        machine->fdt = g_memdup2(g6lc_{name}_dtb, g6lc_{name}_dtb_size);\n"
+        "        int blob_size = (int)g6lc_{name}_dtb_size;\n"
     ));
+    body.push_str("        int fdt_size = blob_size * 2;\n");
+    body.push_str("        if (fdt_size < blob_size + 0x1000) {\n");
+    body.push_str("            fdt_size = blob_size + 0x1000;\n");
+    body.push_str("        }\n");
+    body.push_str("        machine->fdt = g_malloc0(fdt_size);\n");
+    body.push_str("        if (fdt_open_into(blob, machine->fdt, fdt_size)) {\n");
+    body.push_str("            error_report(\"fdt_open_into failed\");\n");
+    body.push_str("            exit(1);\n");
+    body.push_str("        }\n");
+    body.push_str("    }\n\n");
+
+    body.push_str("    /* Load -kernel at DRAM+2MiB (QEMU virt / U-Boot TEXT_BASE). */\n");
+    body.push_str("    if (machine->kernel_filename) {\n");
+    body.push_str("        target_ulong kernel_start_addr = dram_base + 0x200000ULL;\n");
+    body.push_str("        if (kernel_start_addr < firmware_end_addr) {\n");
+    body.push_str("            kernel_start_addr = firmware_end_addr;\n");
+    body.push_str("        }\n");
+    body.push_str("        riscv_load_kernel(machine, &info, kernel_start_addr, true, NULL);\n");
+    body.push_str("        /* Reset enters firmware when -bios is set. S-mode payloads\n");
+    body.push_str("         * (U-Boot qemu-riscv64_smode) cannot run from M-mode reset. */\n");
+    body.push_str(
+        "        if (!machine->firmware || strcmp(machine->firmware, \"none\") == 0) {\n",
+    );
+    body.push_str("            if (info.image_low_addr) {\n");
+    body.push_str("                start_addr = info.image_low_addr;\n");
+    body.push_str("            }\n");
+    body.push_str("        }\n");
+    body.push_str("    }\n\n");
+
+    body.push_str("    /* OpenSBI's sanitize_domain() needs a next address outside firmware. */\n");
+    body.push_str("    if (!info.image_low_addr) {\n");
+    body.push_str("        info.image_low_addr = dram_base + 0x200000ULL;\n");
     body.push_str("    }\n\n");
 
     body.push_str("    /* Place and load the FDT near the end of RAM. */\n");
@@ -685,8 +751,27 @@ mod tests {
         assert!(f.contents.contains("RISCVHartArrayState harts"));
         assert!(f.contents.contains("TYPE_RISCV_HART_ARRAY"));
         assert!(f.contents.contains("riscv_load_kernel"));
+        assert!(
+            !f.contents.contains("xlnx.xps-spi"),
+            "SPI is only emitted when the model has an xps-spi peripheral"
+        );
+        assert!(f.contents.contains("dram_base + 0x200000ULL"));
+        assert!(f.contents.contains("S-mode payloads"));
         assert!(f.contents.contains("riscv_compute_fdt_addr"));
         assert!(f.contents.contains("riscv_load_fdt"));
+        assert!(f.contents.contains("fdt_open_into"));
+        let fdt_pos = f
+            .contents
+            .find("g6lc_g6lc64_test_dtb")
+            .expect("embedded dtb");
+        let kernel_pos = f
+            .contents
+            .find("riscv_load_kernel")
+            .expect("riscv_load_kernel");
+        assert!(
+            fdt_pos < kernel_pos,
+            "FDT must exist before riscv_load_kernel so -initrd sets linux,initrd-*"
+        );
         assert!(f
             .contents
             .contains("object_property_set_uint(OBJECT(&s->harts)"));
@@ -723,6 +808,38 @@ mod tests {
         assert!(f.contents.contains("No firmware requested"));
         assert!(f.contents.contains("info.image_low_addr"));
         assert!(f.contents.contains("riscv_setup_rom_reset_vec"));
+    }
+
+    #[test]
+    fn machine_emits_xilinx_spi_and_n25q256a_when_model_has_xps_spi() {
+        let mut m = TargetModel::new("g6lc64_test");
+        m.soc.dram = Some((0x8000_0000, 0x4000_0000));
+        m.soc.harts_total = 1;
+        m.soc.intc_sources = 4;
+        m.soc.intc_targets = 4;
+        m.soc.contexts_per_hart = 1;
+        m.soc.peripherals.push(g6q_core::model::Peripheral {
+            id: "interrupt-controller".into(),
+            base: 0x0c00_0000,
+            len: 0x0400_0000,
+            model: Some("sifive,plic-1.0.0".into()),
+            irq: None,
+            ..g6q_core::model::Peripheral::default()
+        });
+        m.soc.peripherals.push(g6q_core::model::Peripheral {
+            id: "spi".into(),
+            base: 0x2000_0000,
+            len: 0x1000,
+            model: Some("xlnx,xps-spi-2.00.a".into()),
+            irq: Some(2),
+            ..g6q_core::model::Peripheral::default()
+        });
+        let e = emit_machine(&m, "0.1.0", "sha256:abc");
+        let f = &e.files[0];
+        assert!(f.contents.contains("xlnx.xps-spi"), "{}", f.contents);
+        assert!(f.contents.contains("n25q256a"));
+        assert!(f.contents.contains("IF_MTD"));
+        assert!(f.contents.contains("#include \"hw/ssi/ssi.h\""));
     }
 
     #[test]

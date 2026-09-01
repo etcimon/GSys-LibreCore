@@ -141,11 +141,14 @@ pub fn boot_options(args: &Args) -> g6q_emit_args::BootOptions {
         dtb: args.value("dtb").map(str::to_string),
         elf: args.value("elf").map(str::to_string),
         drives,
+        virtio_pci: false,
+        mtd: Vec::new(),
         drive_format: args
             .value("rootfs-format")
             .map(str::to_string)
             .unwrap_or_else(|| default_drive_format(&os)),
         netdev_user: args.value_or("netdev", "none") == "user" || !forwards.is_empty(),
+        netdev_hub: false,
         port_forwards: forwards,
         console: args.value_or("console", "uart").to_string(),
         virtio: args
@@ -162,6 +165,9 @@ pub fn boot_options(args: &Args) -> g6q_emit_args::BootOptions {
         debug: args.value("debug").map(str::to_string),
         debug_file: args.value("debug-file").map(str::to_string),
         plugin: args.value("plugin").map(str::to_string),
+        pflash_code: None,
+        pflash_vars: None,
+        mem_loads: Vec::new(),
     }
 }
 
@@ -174,6 +180,7 @@ fn default_distro_root(args: &Args, os: &str) -> std::path::PathBuf {
         return std::path::PathBuf::from(r);
     }
     match os {
+        "openwrt" => std::path::PathBuf::from("out/loader-run/openwrt"),
         "buildroot" | "ubuntu" | "debian" | "fedora" => {
             std::path::PathBuf::from(format!("out/dist/{os}"))
         }
@@ -185,11 +192,13 @@ fn default_distro_root(args: &Args, os: &str) -> std::path::PathBuf {
 fn distro_candidates(kind: &str, os: &str) -> Vec<String> {
     match kind {
         "kernel" => vec![
+            "initramfs-Image".into(),
             "vmlinuz".into(),
             "Image".into(),
             "zImage".into(),
             "uImage".into(),
             "kernel".into(),
+            "openwrt-sifiveu-generic-sifive_unleashed-initramfs-kernel.bin".into(),
         ],
         "initrd" => vec![
             "initrd.img".into(),
@@ -223,6 +232,7 @@ fn find_distro_file(root: &std::path::Path, kind: &str, os: &str) -> Option<Stri
 fn default_drive_format(os: &str) -> String {
     match os {
         "ubuntu" | "debian" | "fedora" => "qcow2".into(),
+        "openwrt" => "raw".into(),
         _ => "raw".into(),
     }
 }
@@ -293,13 +303,16 @@ pub fn resolve(args: &Args) -> Result<Resolved, String> {
     out.sources.plane = args.value_or("plane", "soc").to_string();
     let machine = args.value_or("machine", "g6lc-soc");
     let os = args.value_or("os", "firmware-smoke");
-    let distro = matches!(os, "buildroot" | "ubuntu" | "debian" | "fedora");
-    out.sources.profile = if machine == "g6lc-virt" || distro {
+    let distro = matches!(os, "buildroot" | "ubuntu" | "debian" | "fedora" | "openwrt");
+    // Explicit `--machine g6lc-soc` wins: U3b OpenWrt on the faithful map has no virtio.
+    out.sources.profile = if args.value("machine") == Some("g6lc-soc") {
+        Profile::Soc
+    } else if machine == "g6lc-virt" || distro {
         Profile::Virt
     } else {
         Profile::Soc
     };
-    if distro && machine != "g6lc-virt" {
+    if distro && args.value("machine") != Some("g6lc-soc") && machine != "g6lc-virt" {
         out.notes.push(format!(
             "os={os} implies the virtualised profile (g6lc-virt)"
         ));
@@ -650,6 +663,28 @@ mod tests {
         // A non-deterministic oracle is not an oracle.
         let boot = boot_options(&Args::parse(["tandem", "--tandem", "spike"]));
         assert!(boot.deterministic);
+    }
+
+    #[test]
+    fn openwrt_os_forces_virt_profile_and_raw_format() {
+        let r = resolve(&Args::parse(["run", "--os", "openwrt"])).unwrap();
+        assert_eq!(r.sources.profile, Profile::Virt);
+        let boot = boot_options(&Args::parse(["run", "--os", "openwrt"]));
+        assert_eq!(boot.os, "openwrt");
+        assert_eq!(boot.drive_format, "raw");
+    }
+
+    #[test]
+    fn openwrt_on_g6lc_soc_stays_faithful_profile() {
+        let r = resolve(&Args::parse([
+            "run",
+            "--os",
+            "openwrt",
+            "--machine",
+            "g6lc-soc",
+        ]))
+        .unwrap();
+        assert_eq!(r.sources.profile, Profile::Soc);
     }
 
     #[test]

@@ -38,8 +38,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import platform
 import shutil
 import subprocess
@@ -92,11 +94,21 @@ class DescLayout:
     produces a descriptor that looks plausible and is wrong.
     """
 
-    def __init__(self, desc_bytes: int, fields: dict, ops: dict, statuses: dict) -> None:
+    def __init__(
+        self,
+        desc_bytes: int,
+        fields: dict,
+        ops: dict,
+        statuses: dict,
+        completion: dict | None = None,
+        flags_layout: dict | None = None,
+    ) -> None:
         self.desc_bytes = desc_bytes
         self.fields = fields
         self.ops = ops
         self.statuses = statuses
+        self.completion = completion or {}
+        self.flags_layout = flags_layout or {}
 
     @classmethod
     def from_model(cls, model: dict) -> "DescLayout":
@@ -129,11 +141,15 @@ class DescLayout:
             desc_bytes = max(
                 int(f["offset"]) + int(f["size"]) for f in fields.values()
             )
+        completion = layout.get("completion") or {}
+        flags_layout = layout.get("flags_layout") or {}
         return cls(
             desc_bytes=desc_bytes,
             fields={k: dict(v) for k, v in fields.items()},
             ops={k: int(v) for k, v in (layout.get("ops") or {}).items()},
             statuses={k: int(v) for k, v in (layout.get("statuses") or {}).items()},
+            completion={k: int(v) for k, v in completion.items()} if completion else {},
+            flags_layout={k: v for k, v in flags_layout.items()} if flags_layout else {},
         )
 
     @classmethod
@@ -181,6 +197,35 @@ class DescLayout:
                 return name
         return None
 
+    def irq_mask(self) -> int | None:
+        """`1 << irq_bit` from the ingested flags_layout, or None if unpublished."""
+        bit = self.flags_layout.get("irq_bit")
+        if bit is None:
+            return None
+        return 1 << int(bit)
+
+    def apply_standin_defaults(self, values: dict) -> dict:
+        """IRQ flag from ingested irq_bit; pointer fields stay 0 (null).
+
+        Null `ptr_done` is ABI: no DMA completion-word write (ai-tensor ABI-CONTRACT
+        §3). BAR4 names A/B/C carry bulk tensors. Do not invent DRAM or BAR addresses.
+        `ld_ab` is packed from already-known `n`/`k` (ai-tensor `pack_desc64`), not an address.
+        """
+        if "flags" not in values and "flags" in self.fields:
+            mask = self.irq_mask()
+            if mask is not None:
+                values["flags"] = mask
+        if "ld_ab" not in values and "ld_ab" in self.fields:
+            n, k = values.get("n"), values.get("k")
+            if n is not None and k is not None:
+                ni = n if isinstance(n, int) else int(str(n), 0)
+                ki = k if isinstance(k, int) else int(str(k), 0)
+                values["ld_ab"] = (ki & 0xFFFF) | ((ni & 0xFFFF) << 16)
+        for name in ("ptr_a", "ptr_b", "ptr_c", "ptr_scale", "ptr_done"):
+            if name in self.fields and name not in values:
+                values[name] = 0
+        return values
+
     def pack(self, values: dict) -> bytes:
         """Pack a descriptor image, little-endian, using only model-supplied geometry."""
         buf = bytearray(self.desc_bytes)
@@ -202,6 +247,136 @@ class DescLayout:
                 )
             buf[offset : offset + size] = value.to_bytes(size, "little")
         return bytes(buf)
+
+    def unpack(self, image: bytes) -> dict:
+        """Read every model-declared field from a packed image. Inverse of pack."""
+        if len(image) != self.desc_bytes:
+            raise LayoutError(
+                f"image is {len(image)} bytes; the model describes a "
+                f"{self.desc_bytes}-byte descriptor"
+            )
+        out: dict = {}
+        for name, field in self.fields.items():
+            offset, size = int(field["offset"]), int(field["size"])
+            out[name] = int.from_bytes(image[offset : offset + size], "little")
+        return out
+
+    def decode_text(self, image: bytes) -> str:
+        """Shell-friendly decode. Names and widths come from the model, not literals."""
+        values = self.unpack(image)
+        lines = [
+            f"desc_bytes={self.desc_bytes}",
+            "layout=ingested",
+        ]
+        preferred = ("version", "op", "flags", "m", "n", "k", "ld_ab")
+        seen: set = set()
+        for raw in preferred:
+            try:
+                name = self.resolve(raw)
+            except LayoutError:
+                continue
+            seen.add(name)
+            val = values[name]
+            if name == "op" or raw == "op":
+                op_name = self.op_name(val)
+                lines.append(f"op={op_name or val}")
+            elif raw == "flags" and val == 0:
+                continue
+            elif raw == "ld_ab":
+                lda = int(val) & 0xFFFF
+                ldb = (int(val) >> 16) & 0xFFFF
+                lines.append(f"ld_ab={val}")
+                lines.append(f"lda={lda}")
+                lines.append(f"ldb={ldb}")
+                try:
+                    n = int(values[self.resolve("n")])
+                    k = int(values[self.resolve("k")])
+                    lines.append(f"ld_ab_ok={'true' if lda == k and ldb == n else 'false'}")
+                except (LayoutError, KeyError, TypeError, ValueError):
+                    pass
+            else:
+                lines.append(f"{name}={val}")
+        for name in sorted(values):
+            if name in seen:
+                continue
+            val = values[name]
+            if val == 0:
+                continue
+            lines.append(f"{name}={val}")
+        lines.append("tops_not_evidence=true")
+        return "\r\n".join(lines) + "\r\n"
+
+    def pack_completion(self, ticket: int, status: int) -> bytes:
+        """Pack a completion word. Bit ranges come from the ingested layout."""
+        c = self.completion
+        needed = (
+            "ticket_bit_low",
+            "ticket_bit_high",
+            "status_bit_low",
+            "status_bit_high",
+        )
+        missing = [k for k in needed if k not in c]
+        if missing:
+            raise LayoutError(
+                "the model has no usable desc_layout.completion "
+                f"(missing {', '.join(missing)})"
+            )
+        tlo, thi = int(c["ticket_bit_low"]), int(c["ticket_bit_high"])
+        slo, shi = int(c["status_bit_low"]), int(c["status_bit_high"])
+
+        def _place(val: int, lo: int, hi: int, name: str) -> int:
+            if hi < lo:
+                raise LayoutError(f"completion {name} bit range {lo}..{hi} is inverted")
+            width = hi - lo + 1
+            mask = (1 << width) - 1
+            if val < 0 or val > mask:
+                raise LayoutError(
+                    f"completion {name}={val} does not fit bits [{lo}:{hi}]"
+                )
+            return (val & mask) << lo
+
+        word = _place(ticket, tlo, thi, "ticket") | _place(status, slo, shi, "status")
+        hi = max(thi, shi)
+        nbytes = max(8, ((hi // 8) + 1 + 7) // 8 * 8)
+        return word.to_bytes(nbytes, "little")
+
+    def unpack_completion(self, image: bytes) -> dict:
+        """Read ticket/status from a packed completion word using the ingested ranges."""
+        if not self.completion:
+            raise LayoutError("the model has no desc_layout.completion")
+        word = int.from_bytes(image, "little")
+        tlo, thi = int(self.completion["ticket_bit_low"]), int(self.completion["ticket_bit_high"])
+        slo, shi = int(self.completion["status_bit_low"]), int(self.completion["status_bit_high"])
+
+        def _extract(lo: int, hi: int) -> int:
+            mask = (1 << (hi - lo + 1)) - 1
+            return (word >> lo) & mask
+
+        return {"ticket": _extract(tlo, thi), "status": _extract(slo, shi)}
+
+    def completion_text(self) -> str:
+        """Shell-friendly completion-word dump. Bit ranges from the ingested layout."""
+        lines = ["source=ingested", "layout=completion"]
+        for key in (
+            "ticket_bit_low",
+            "ticket_bit_high",
+            "status_bit_low",
+            "status_bit_high",
+        ):
+            if key in self.completion:
+                lines.append(f"{key}={self.completion[key]}")
+        if "ST_OK" in self.statuses:
+            lines.append(f"st_ok={self.statuses['ST_OK']}")
+        if self.completion and "ST_OK" in self.statuses:
+            try:
+                img = self.pack_completion(1, self.statuses["ST_OK"])
+                lines.append("example_ticket=1")
+                lines.append(f"example_status={self.statuses['ST_OK']}")
+                lines.append(f"example_hex={img.hex()}")
+            except LayoutError:
+                pass
+        lines.append("tops_not_evidence=true")
+        return "\r\n".join(lines) + "\r\n"
 
 
 # ------------------------------------------------------------------------- the artifact
@@ -325,6 +500,17 @@ class TensorArtifact:
         if status_names:
             out["by_status_name"] = status_names
         return out
+
+    def to_json(self) -> dict:
+        raw = {"header": self.header, "events": self.events}
+        if self.flags_layout:
+            raw["flags_layout"] = self.flags_layout
+        return raw
+
+    def dump(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(self.to_json(), indent=2) + "\n", encoding="utf-8")
 
     def pytorch_summary(self, layout: DescLayout | None = None) -> list:
         """Return one entry per completed tensor operation.
@@ -608,7 +794,876 @@ def push_remote(args: argparse.Namespace) -> int:
     return res.returncode
 
 
-ROUTES = {"native": push_native, "remote": push_remote}
+def find_ai_tensor_root(repo_root: str | None = None) -> Path | None:
+    """Locate the ai-tensor package (runtime discovery, not a compile dependency)."""
+    candidates = []
+    env = os.environ.get("AI_TENSOR_ROOT")
+    if env:
+        candidates.append(Path(env))
+    if repo_root:
+        candidates.append(Path(repo_root) / "ai-tensor")
+    candidates.append(package_root().parent / "ai-tensor")
+    for c in candidates:
+        if (c / "tools" / "virt_ai_card" / "smoke.py").is_file():
+            return c
+    return None
+
+
+def island_config(model: dict) -> dict:
+    return ((model.get("soc") or {}).get("ai_island") or {}).get("config") or {}
+
+
+def modelled_peak_ops(cfg: dict) -> int | None:
+    """Peak ops/s from ingested geometry. 1 MAC = 2 ops (scaling-100tops.md §2).
+
+    `macs_per_cycle` is the island total as published. Not a measurement.
+    """
+    macs = cfg.get("macs_per_cycle")
+    clock_khz = cfg.get("clock_khz")
+    if macs is None or clock_khz is None:
+        return None
+    hz = int(clock_khz) * 1000
+    if hz <= 0 or int(macs) <= 0:
+        return None
+    return int(macs) * hz * 2
+
+
+def _fmt_peak(n: float) -> str:
+    s = f"{n:.6f}".rstrip("0").rstrip(".")
+    return s
+
+
+def island_cap_text(model: dict) -> str:
+    """Shell-friendly CAP dump. Geometry from the model; TOPS is definition + modelled peak."""
+    cfg = island_config(model)
+    lines = ["source=ingested", "window=cap"]
+    for key in (
+        "clusters",
+        "macs_per_cycle",
+        "clock_khz",
+        "acc_tile_m",
+        "acc_tile_n",
+        "acc_tile_k",
+        "sram_bytes",
+        "queues",
+        "queue_depth",
+        "dram_gbps",
+    ):
+        if cfg.get(key) is not None:
+            lines.append(f"{key}={cfg[key]}")
+    peak = modelled_peak_ops(cfg)
+    if peak is not None:
+        lines.append(f"modelled_peak_ops_per_s={peak}")
+        lines.append(f"modelled_peak_gops={_fmt_peak(peak / 1e9)}")
+        lines.append(f"modelled_peak_tops={_fmt_peak(peak / 1e12)}")
+    class_vs = class_vs_sku(cfg)
+    lines.extend(class_vs)
+    lines.append("tops_def=100e12 dense INT8 ops/s; MAC=2 ops; no sparsity/INT4")
+    lines.append("tops_not_evidence=true")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def plane_text(model: dict) -> str:
+    """Two-plane split. Island geometry from the model; core tile is not in this IR."""
+    cfg = island_config(model)
+    lines = ["source=ingested", "split=two_plane"]
+    lines.append("island_role=throughput")
+    for src, name in (
+        ("acc_tile_m", "island_acc_tile_m"),
+        ("acc_tile_n", "island_acc_tile_n"),
+        ("acc_tile_k", "island_acc_tile_k"),
+        ("clusters", "island_clusters"),
+        ("macs_per_cycle", "island_macs_per_cycle"),
+    ):
+        if cfg.get(src) is not None:
+            lines.append(f"{name}={cfg[src]}")
+    lines.append("core_plane=latency")
+    lines.append("core_tile=not_in_this_model")
+    lines.append("tops_on=island")
+    lines.append("ref=scaling-100tops.md s3")
+    lines.append("tops_not_evidence=true")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def _sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def join_text(*, desc: bytes | None, cpl: bytes | None) -> str:
+    """Firmware ESP images the card stand-in also uses. Not a BAR map."""
+    lines = ["source=ingested", "join=firmware_and_card"]
+    if desc:
+        lines.append(f"desc_bytes={len(desc)}")
+        lines.append(f"desc_hex_prefix={desc[:4].hex()}")
+        lines.append(f"desc_sha256={_sha256_hex(desc)}")
+    if cpl:
+        lines.append(f"cpl_bytes={len(cpl)}")
+        lines.append(f"cpl_hex={cpl.hex()}")
+        lines.append(f"cpl_sha256={_sha256_hex(cpl)}")
+    lines.append("bar4_desc=DESC")
+    lines.append("bar4_cpl=CPL")
+    lines.append("irq=wait_then_claim_done")
+    lines.append("tops_not_evidence=true")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def roof_text(model: dict) -> str:
+    """Class vs SKU DRAM roofline. T from ingested acc_tile_m; 2/T from scaling-100tops.md §4."""
+    cfg = island_config(model)
+    lines = ["source=ingested", "model=scaling-100tops.md s4"]
+    t = cfg.get("acc_tile_m")
+    if t:
+        t = int(t)
+        lines.append(f"blocking_t={t}")
+        bpm = 2.0 / float(t)
+        lines.append(f"bytes_per_mac={_fmt_peak(bpm)}")
+        class_macs_per_s = 50 * 10**12
+        class_gbps = bpm * class_macs_per_s / 1e9
+        lines.append(f"class_dram_gbps={_fmt_peak(class_gbps)}")
+        macs = cfg.get("macs_per_cycle")
+        clock_khz = cfg.get("clock_khz")
+        if macs is not None and clock_khz:
+            hz = int(clock_khz) * 1000
+            if hz > 0:
+                sku_macs_per_s = int(macs) * hz
+                sku_gbps = bpm * sku_macs_per_s / 1e9
+                lines.append(f"sku_dram_gbps={_fmt_peak(sku_gbps)}")
+        if cfg.get("dram_gbps") is not None:
+            lines.append(f"published_dram_gbps={cfg['dram_gbps']}")
+        acc_sram = t * t * 4
+        lines.append(f"acc_sram_bytes={acc_sram}")
+        lines.append(f"acc_sram_kib={acc_sram // 1024}")
+        island_sram = cfg.get("sram_bytes")
+        if island_sram is not None:
+            lines.append(f"island_sram_bytes={int(island_sram)}")
+            lines.append(f"acc_fits_island_sram={'true' if acc_sram <= int(island_sram) else 'false'}")
+    lines.append("tops_not_evidence=true")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def queue_text(model: dict) -> str:
+    """Ingested ring/QoS geometry. Doorbell qid 0 is the first ring, not a BAR."""
+    cfg = island_config(model)
+    lines = ["source=ingested", "window=queues"]
+    for key in (
+        "queues",
+        "queue_depth",
+        "qos_classes",
+        "work_quantum_k",
+        "noc_width",
+        "dram_channels",
+    ):
+        if cfg.get(key) is not None:
+            lines.append(f"{key}={cfg[key]}")
+    qmap = cfg.get("queue_cluster_map")
+    if isinstance(qmap, list) and qmap:
+        lines.append("queue_cluster_map=" + ",".join(str(int(x)) for x in qmap))
+        lines.append("cluster_from_map=true")
+        for i, c in enumerate(qmap):
+            lines.append(f"qid{i}_cluster={int(c)}")
+    nqos = cfg.get("qos_classes")
+    nq = cfg.get("queues")
+    if nqos and nq:
+        nqos_i, nq_i = int(nqos), int(nq)
+        if nqos_i > 0 and nq_i > 0:
+            lines.append("qos_from_qid=true")
+            for i in range(nq_i):
+                lines.append(f"qid{i}_qos={i % nqos_i}")
+    nq = cfg.get("queues")
+    if nq:
+        nq_i = int(nq)
+        lines.append("doorbell_qid=0")
+        lines.append(f"doorbell_qid_last={nq_i - 1}")
+        lines.append(f"doorbell_qid_ok={'true' if nq_i > 0 else 'false'}")
+    lines.append("tops_not_evidence=true")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def sched_text(model: dict, standin_k: int | None = None) -> str:
+    """§7.1 scheduling: ingested work quantum and qid→QoS. Not a BAR, not a measurement."""
+    cfg = island_config(model)
+    lines = ["source=ingested", "window=sched"]
+    q = cfg.get("work_quantum_k")
+    if q is not None:
+        lines.append(f"work_quantum_k={int(q)}")
+    if standin_k is not None and q:
+        lines.append(f"standin_k={int(standin_k)}")
+        lines.append(f"within_quantum={'true' if int(standin_k) <= int(q) else 'false'}")
+    nqos = cfg.get("qos_classes")
+    nq = cfg.get("queues")
+    if nqos and nq and int(nqos) > 0 and int(nq) > 0:
+        lines.append(f"qos_classes={int(nqos)}")
+        lines.append("qos_from_qid=true")
+        for i in range(int(nq)):
+            lines.append(f"qid{i}_qos={i % int(nqos)}")
+    lines.append("ref=isa-encoding.md s7.1")
+    lines.append("tops_not_evidence=true")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def stat_text(model: dict, desc_version: int | None = None) -> str:
+    """qid bounds and descriptor version. oob is rejected; status codes stay ingested ST_OK."""
+    cfg = island_config(model)
+    layout = (model.get("soc") or {}).get("ai_island", {}).get("desc_layout") or {}
+    statuses = layout.get("statuses") or {}
+    lines = ["source=ingested", "window=status"]
+    if "ST_OK" in statuses:
+        lines.append(f"st_ok={int(statuses['ST_OK'])}")
+    nq = cfg.get("queues")
+    if nq:
+        nq_i = int(nq)
+        lines.append(f"queues={nq_i}")
+        lines.append("qid_min=0")
+        lines.append(f"qid_last={nq_i - 1}")
+        lines.append(f"oob_qid={nq_i}")
+        lines.append("qid_bound=true")
+    if desc_version is not None:
+        lines.append(f"desc_version={int(desc_version)}")
+        lines.append(f"version_ok={'true' if int(desc_version) == 1 else 'false'}")
+    lines.append("oob_rejected=true")
+    lines.append("tops_not_evidence=true")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def op_text(layout: DescLayout, packed_op: int | None = None) -> str:
+    """Ingested op table. Packed stand-in is OP_GEMM; unknown ops are rejected."""
+    lines = ["source=ingested", "window=ops"]
+    for name, val in sorted(layout.ops.items(), key=lambda kv: (int(kv[1]), str(kv[0]))):
+        lines.append(f"{name}={int(val)}")
+    if packed_op is not None:
+        lines.append(f"packed_op={int(packed_op)}")
+        name = layout.op_name(int(packed_op))
+        if name:
+            lines.append(f"packed_op_name={name}")
+        gemm = layout.ops.get("OP_GEMM")
+        lines.append(
+            f"op_ok={'true' if gemm is not None and int(packed_op) == int(gemm) else 'false'}"
+        )
+    lines.append("unknown_op_rejected=true")
+    lines.append("tops_not_evidence=true")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def ctl_text() -> str:
+    """CTL enable + wr_cpl_en=0 (null ptr_done). Disabled doorbells are rejected."""
+    lines = [
+        "source=ingested",
+        "window=ctl",
+        "ctl_enable=1",
+        "wr_cpl_en=0",
+        "disabled_rejected=true",
+        "reenable_ok=true",
+        "ref=ABI-CONTRACT s2.3",
+        "tops_not_evidence=true",
+    ]
+    return "\r\n".join(lines) + "\r\n"
+
+
+def ptr_text(layout: DescLayout) -> str:
+    """Null pointer fields. Bulk is BAR4 names; completion is MMIO CPL. No addresses."""
+    lines = ["source=ingested", "window=ptrs"]
+    for name in ("ptr_a", "ptr_b", "ptr_c", "ptr_scale", "ptr_done"):
+        if name in layout.fields:
+            field = layout.fields[name]
+            lines.append(f"{name}_off={int(field['offset'])}")
+            lines.append(f"{name}_size={int(field['size'])}")
+            lines.append(f"{name}=0")
+    lines.append("ptr_null=true")
+    lines.append("bulk=bar4_names")
+    lines.append("bar4_a=A")
+    lines.append("bar4_b=B")
+    lines.append("bar4_c=C")
+    lines.append("ptr_done_path=mmio_cpl")
+    lines.append("wr_cpl_en=0")
+    lines.append("addr=unresolved")
+    lines.append("tops_not_evidence=true")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def flags_text(layout: DescLayout, packed_flags: int | None = None) -> str:
+    """Ingested flags_layout. irq_bit is isa-encoding.md §7 bit 2, not a BAR."""
+    fl = layout.flags_layout
+    lines = ["source=ingested", "window=flags"]
+    if "irq_bit" in fl:
+        bit = int(fl["irq_bit"])
+        mask = 1 << bit
+        lines.append(f"irq_bit={bit}")
+        lines.append(f"irq_mask={mask}")
+        if packed_flags is not None:
+            lines.append(f"flags_packed={int(packed_flags)}")
+            lines.append(f"flags_irq={'true' if int(packed_flags) & mask else 'false'}")
+        lines.append(f"card_flag_irq={mask}")
+        lines.append(f"irq_bit_ok={'true' if bit == 2 else 'false'}")
+    packed = int(packed_flags or 0)
+    fence_before = bool(packed & 1)
+    fence_after = bool(packed & 2)
+    fused_requant = bool(packed & 8)
+    lines.append(f"fence_before={'true' if fence_before else 'false'}")
+    lines.append(f"fence_after={'true' if fence_after else 'false'}")
+    lines.append(f"fused_requant={'true' if fused_requant else 'false'}")
+    lines.append(
+        f"fence_clear={'true' if not (fence_before or fence_after or fused_requant) else 'false'}"
+    )
+    if fl.get("priority_shift") is not None and fl.get("priority_mask") is not None:
+        penc = (packed >> int(fl["priority_shift"])) & int(fl["priority_mask"])
+        lines.append(f"priority_enc={penc}")
+        lines.append(f"priority_default={'true' if penc == 0 else 'false'}")
+    if fl.get("dtype_shift") is not None and fl.get("dtype_mask") is not None:
+        enc = (packed >> int(fl["dtype_shift"])) & int(fl["dtype_mask"])
+        lines.append(f"dtype_enc={enc}")
+        lines.append(f"dtype_s8s8={'true' if enc == 0 else 'false'}")
+    accmode = fl.get("accmode") or {}
+    if isinstance(accmode, dict) and accmode.get("shift") is not None:
+        enc = (packed >> int(accmode["shift"])) & int(accmode.get("mask") or 0)
+        lines.append(f"accmode_enc={enc}")
+    ew = fl.get("ew") or {}
+    if isinstance(ew, dict) and ew.get("shift") is not None:
+        enc = (packed >> int(ew["shift"])) & int(ew.get("mask") or 0)
+        lines.append(f"ew_enc={enc}")
+        lines.append(f"ew_byte={'true' if enc == 0 else 'false'}")
+    if fl.get("sp24_bit") is not None:
+        on = bool(packed & (1 << int(fl["sp24_bit"])))
+        lines.append(f"sp24={'true' if on else 'false'}")
+    for key in (
+        "dtype_shift",
+        "dtype_mask",
+        "priority_shift",
+        "priority_mask",
+    ):
+        if fl.get(key) is not None:
+            lines.append(f"{key}={fl[key]}")
+    lines.append("int4_not_in_headline=true")
+    lines.append("ref=isa-encoding.md s7")
+    lines.append("tops_not_evidence=true")
+    return "\r\n".join(lines) + "\r\n"
+
+
+def class_vs_sku(cfg: dict) -> list:
+    """100-TOPS class need vs this SKU. Definition arithmetic, not a measurement.
+
+    scaling-100tops.md §2: 100e12 dense INT8 ops/s, 1 MAC = 2 ops.
+    At 1.0 GHz that is 50 000 MAC/cycle.
+    """
+    clock_khz = cfg.get("clock_khz")
+    macs = cfg.get("macs_per_cycle")
+    hz = int(clock_khz) * 1000 if clock_khz else 1_000_000_000
+    if hz <= 0:
+        return []
+    need = (100 * 10**12) // (2 * hz)
+    lines = [
+        "class_def_tops=100",
+        f"class_need_macs_per_cycle={need}",
+    ]
+    if macs is not None and need:
+        frac = int(macs) / float(need)
+        lines.append(f"sku_frac_of_class={_fmt_peak(frac)}")
+    return lines
+
+
+def mmio_map_from_model(model: dict) -> dict:
+    """CAP/DESC window bases from the ingested model. No UIO literals here."""
+    cfg = island_config(model)
+    cap_base = cfg.get("cap_base")
+    desc_base = cfg.get("desc_base")
+    offs = cfg.get("cap_offsets") or {}
+    cap0 = int(cap_base) if cap_base is not None else 0
+    out: dict = {
+        "cap_base": cap_base,
+        "desc_base": desc_base,
+    }
+    if "version" in offs:
+        out["version_off"] = cap0 + int(offs["version"])
+    if "clusters" in offs:
+        out["clusters_off"] = cap0 + int(offs["clusters"])
+    if "macs_cycle" in offs:
+        out["macs_off"] = cap0 + int(offs["macs_cycle"])
+    return out
+
+
+def cap_overrides_from_model(model: dict) -> dict:
+    """Map ingested island config onto virt_ai_card CAP seed keys."""
+    cfg = island_config(model)
+    out: dict = {}
+    mapping = {
+        "clusters": "clusters",
+        "macs_per_cycle": "macs_per_cycle",
+        "clock_khz": "clock_khz",
+        "sram_bytes": "sram_bytes",
+        "acc_tile_m": "acc_tile_m",
+        "acc_tile_n": "acc_tile_n",
+        "acc_tile_k": "acc_tile_k",
+        "dram_gbps": "dram_gbps",
+        "queues": "queues",
+        "queue_depth": "queue_depth",
+    }
+    for src, dst in mapping.items():
+        if cfg.get(src) is not None:
+            out[dst] = int(cfg[src])
+    return out
+
+
+def pack_gemm_desc(model_path: str | Path, *, m: int, n: int, k: int, version: int = 1) -> bytes:
+    """Pack an OP_GEMM descriptor from the ingested model. Offsets come from the model."""
+    layout = DescLayout.from_model_file(model_path)
+    values = {"version": version, "m": m, "n": n, "k": k, "op": layout.op_value("OP_GEMM")}
+    layout.apply_standin_defaults(values)
+    return layout.pack(values)
+
+
+def virt_card_artifact(
+    c: list,
+    *,
+    m: int,
+    n: int,
+    k: int,
+    desc: bytes | None = None,
+    cap: dict | None = None,
+    modelled_peak_gops: float | None = None,
+    mmio: dict | None = None,
+    doorbell: dict | None = None,
+    pmu: dict | None = None,
+    completion_hex: str | None = None,
+) -> TensorArtifact:
+    """Stamp a pushed-path artifact. evidence is always false (software stand-in)."""
+    header = {
+        "profile": "g6lc-virt",
+        "profile_tainted": True,
+        "evidence": False,
+        "route": "virt-card",
+        "card": "virt-ai-pcie",
+        "tops_not_evidence": True,
+    }
+    if desc is not None:
+        header["desc_bytes"] = len(desc)
+        header["desc_hex"] = desc.hex()
+        header["desc_op"] = "OP_GEMM"
+        header["bar4_desc"] = True
+    if cap:
+        header["island_cap"] = cap
+    if modelled_peak_gops is not None:
+        header["modelled_peak_gops"] = modelled_peak_gops
+    if mmio:
+        header["mmio_uio"] = mmio
+    if doorbell:
+        header["doorbell"] = doorbell
+    if pmu:
+        header["pmu"] = pmu
+        header["pmu_not_tops"] = True
+    if completion_hex:
+        header["completion_hex"] = completion_hex
+    return TensorArtifact(
+        header,
+        [
+            {
+                "order": 0,
+                "hart": 0,
+                "op": 1,
+                "status": 0,
+                "done": True,
+                "m": m,
+                "n": n,
+                "k": k,
+                "cluster": 0,
+                "c": c,
+            }
+        ],
+        None,
+    )
+
+
+def push_virt_card(args: argparse.Namespace) -> int:
+    """Pushed path over the existing virt_ai_card TCP stand-in (not a pinned PCIe BAR)."""
+    root = None
+    if getattr(args, "card_root", None):
+        root = Path(args.card_root)
+    if root is None:
+        root = find_ai_tensor_root(getattr(args, "repo_root", None))
+    if root is None:
+        err(
+            "ai-tensor virt_ai_card not found; pass --repo-root <monorepo> or "
+            "AI_TENSOR_ROOT / --card-root"
+        )
+        return 1
+    tools = root / "tools"
+    if str(tools) not in sys.path:
+        sys.path.insert(0, str(tools))
+    try:
+        from virt_ai_card.card_agent import CardAgent
+        from virt_ai_card.host_client import HostClient
+    except ImportError as exc:
+        err(f"cannot import virt_ai_card from {tools}: {exc}")
+        return 1
+
+    a = [[1, 2], [3, 4]]
+    b = [[5, 6], [7, 8]]
+    expect = [[19, 22], [43, 50]]
+    desc = None
+    cap_ov: dict | None = None
+    peak_gops: float | None = None
+    mmio_map: dict = {}
+    cpl_layout: DescLayout | None = None
+    qmap: list | None = None
+    nqos: int | None = None
+    wqk: int | None = None
+    standin_k: int | None = None
+    model = getattr(args, "model", None)
+    if model:
+        try:
+            raw_model = json.loads(Path(model).read_text(encoding="utf-8"))
+            cap_ov = cap_overrides_from_model(raw_model) or None
+            mmio_map = mmio_map_from_model(raw_model)
+            peak = modelled_peak_ops(island_config(raw_model))
+            if peak is not None:
+                peak_gops = peak / 1e9
+            desc = pack_gemm_desc(model, m=2, n=2, k=2)
+            layout = DescLayout.from_model(raw_model)
+            cpl_layout = layout
+            irq_bit = (layout.flags_layout or {}).get("irq_bit")
+            if irq_bit is not None:
+                cap_ov = dict(cap_ov or {})
+                cap_ov["irq_bit"] = int(irq_bit)
+            cfg = island_config(raw_model)
+            qmap = cfg.get("queue_cluster_map")
+            if not isinstance(qmap, list):
+                qmap = None
+            if cfg.get("qos_classes") is not None:
+                nqos = int(cfg["qos_classes"])
+            if cfg.get("work_quantum_k") is not None:
+                wqk = int(cfg["work_quantum_k"])
+            dims = layout.unpack(desc)
+            standin_k = int(dims.get("k") or 0)
+            if (int(dims.get("m") or 0), int(dims.get("n") or 0), int(dims.get("k") or 0)) != (
+                2,
+                2,
+                2,
+            ):
+                err("virt-card golden A/B is 2x2; packed desc m/n/k must be 2")
+                return 1
+            if "ld_ab" in dims:
+                lda = int(dims["ld_ab"]) & 0xFFFF
+                ldb = (int(dims["ld_ab"]) >> 16) & 0xFFFF
+                if (lda, ldb) != (2, 2):
+                    err(f"packed ld_ab lda={lda} ldb={ldb}; expected lda=k=2 ldb=n=2")
+                    return 1
+            log(f"packed {len(desc)}-byte OP_GEMM descriptor from {model}")
+        except (LayoutError, OSError, json.JSONDecodeError) as exc:
+            err(f"cannot pack descriptor from {model}: {exc}")
+            return 1
+    if args.dry_run:
+        extra = f" desc={len(desc)}B" if desc is not None else ""
+        if cap_ov:
+            extra += f" cap_clusters={cap_ov.get('clusters')}"
+        log(f"dry-run: virt-card GEMM 2x2 via {root}{extra}")
+        return 0
+
+    agent = CardAgent(host="127.0.0.1", port=0, cap=cap_ov)
+    host, port = agent.start()
+    snap: dict = {}
+    doorbell = None
+    c = None
+    desc_join = False
+    desc_hash_join = False
+    cpl_hash_join = False
+    try:
+        import time as _time
+
+        _time.sleep(0.05)
+        cli = HostClient(host=host, port=port)
+        hello = cli.connect()
+        snap = hello.get("cap") or {}
+        log(
+            f"card hello boardid={hello.get('boardid')} cap={hello.get('cap_version')} "
+            f"clusters={snap.get('clusters')} macs/cycle={snap.get('macs_per_cycle')}"
+        )
+        if cap_ov and cap_ov.get("macs_per_cycle") is not None:
+            if snap.get("macs_per_cycle") != cap_ov.get("macs_per_cycle"):
+                err("card CAP macs_per_cycle does not match ingested model")
+                return 1
+            log("card CAP seeded from ingested model (reported, not simulated)")
+        mmio_rd = getattr(cli, "mmio_read32", None)
+        mmio_wrb = getattr(cli, "mmio_write_bytes", None)
+        mmio_rdb = getattr(cli, "mmio_read_bytes", None)
+        if mmio_rd and cap_ov and mmio_map.get("macs_off") is not None:
+            got_macs = mmio_rd(int(mmio_map["macs_off"]))
+            if got_macs != cap_ov.get("macs_per_cycle"):
+                err(
+                    f"MMIO CAP macs_per_cycle {got_macs} != model {cap_ov.get('macs_per_cycle')}"
+                )
+                return 1
+            log(
+                f"MMIO CAP macs_per_cycle={got_macs} at off={mmio_map['macs_off']} "
+                "(UIO 4K window, not a pinned BAR)"
+            )
+        if desc is not None:
+            put_bytes = getattr(cli, "bar4_put_bytes", None)
+            if put_bytes is None:
+                err("virt_ai_card HostClient has no bar4_put_bytes; update ai-tensor")
+                return 1
+            put_bytes("DESC", desc)
+            got = cli.bar4_get("DESC")
+            if got != desc:
+                err("BAR4 DESC round-trip mismatch (stand-in bulk plane)")
+                return 1
+            log(f"BAR4 DESC {len(desc)}B round-trip ok (UIO DESC@0x140 stand-in, not a pinned BAR)")
+            esp_desc = package_root() / "out" / "loader-run" / "esp-edk2-pci" / "DESC.BIN"
+            if esp_desc.is_file() and esp_desc.read_bytes() == desc:
+                log("BAR4 DESC matches ESP DESC.BIN (firmware/card layout join)")
+                desc_join = True
+            join_path = package_root() / "out" / "loader-run" / "esp-edk2-pci" / "JOIN.TXT"
+            if join_path.is_file():
+                join_body = join_path.read_text(encoding="ascii")
+                if f"desc_sha256={_sha256_hex(desc)}" in join_body:
+                    desc_hash_join = True
+                    log("DESC sha256 matches ESP JOIN.TXT")
+            desc_base = mmio_map.get("desc_base")
+            if mmio_wrb and mmio_rdb and desc_base is not None:
+                mmio_wrb(int(desc_base), desc)
+                got_mmio = mmio_rdb(int(desc_base), len(desc))
+                if got_mmio != desc:
+                    err("MMIO DESC window round-trip mismatch")
+                    return 1
+                log(
+                    f"MMIO DESC@{int(desc_base):#x} {len(desc)}B round-trip ok "
+                    "(ingested desc_base, not a pinned BAR)"
+                )
+        cli.bar4_put("A", a)
+        cli.bar4_put("B", b)
+        c = None
+        doorbell = None
+        mmio_wr = getattr(cli, "mmio_write32", None)
+        try:
+            from virt_ai_card.driver import (
+                CTL,
+                DOORBELL,
+                DONE,
+                DSTATUS,
+                PMU,
+                STATUS,
+                ST_DISABLED,
+                ST_ERR,
+                ST_OK,
+                TICKET,
+            )
+        except ImportError:
+            CTL = None  # type: ignore[assignment]
+        if CTL is not None and mmio_wr and mmio_rd:
+            ticket = 1
+            ptr_done = 0
+            packed_flags = 0
+            if desc is not None and cpl_layout is not None:
+                unpacked = cpl_layout.unpack(desc)
+                ptr_done = int(unpacked.get("ptr_done") or 0)
+                packed_flags = int(unpacked.get("flags") or 0)
+            # Null ptr_done ⇒ no DMA completion write (ABI-CONTRACT §3).
+            ctl = 1 if ptr_done == 0 else (1 | (1 << 1))
+            mmio_wr(CTL, ctl)
+            qid = 0
+            nq = snap.get("queues")
+            if nq is not None and int(nq) <= 0:
+                err("ingested/card queues is not positive")
+                return 1
+            irq_fn = getattr(cli, "irq_wait", None)
+
+            def _ring(ticket: int, qid: int, expect_status: int = ST_OK) -> dict:
+                mmio_wr(DOORBELL, (int(ticket) << 8) | (int(qid) & 0xFF))
+                irq_waited = False
+                if expect_status == ST_OK and irq_fn is not None:
+                    try:
+                        irq_fn(2.0)
+                        irq_waited = True
+                    except Exception as exc:  # noqa: BLE001 — fall back to DONE poll
+                        log(f"irq_wait skipped: {exc}")
+                done = mmio_rd(DONE)
+                got_ticket = mmio_rd(TICKET)
+                dstatus = mmio_rd(DSTATUS)
+                if not (int(done) & 1):
+                    raise RuntimeError("MMIO doorbell produced no DONE")
+                if int(dstatus) != int(expect_status):
+                    raise RuntimeError(
+                        f"MMIO completion status {dstatus} != {expect_status}"
+                    )
+                if int(got_ticket) != int(ticket):
+                    raise RuntimeError(f"MMIO ticket {got_ticket} != {ticket}")
+                mmio_wr(DONE, 1)
+                if irq_waited:
+                    clr = getattr(cli, "irq_clear", None)
+                    if clr is not None:
+                        clr()
+                out = {
+                    "ticket": int(got_ticket),
+                    "status": int(dstatus),
+                    "qid": int(qid),
+                    "irq_waited": irq_waited,
+                    "claimed": True,
+                }
+                if isinstance(qmap, list) and 0 <= int(qid) < len(qmap):
+                    out["cluster"] = int(qmap[int(qid)])
+                if nqos is not None and nqos > 0:
+                    out["qos_class"] = int(qid) % nqos
+                return out
+
+            try:
+                round0 = _ring(ticket, qid)
+            except RuntimeError as exc:
+                err(str(exc))
+                return 1
+            pmu = {
+                "r": mmio_rd(PMU),
+                "w": mmio_rd(PMU + 4),
+                "cycles": mmio_rd(PMU + 8),
+                "gbps_x1000": mmio_rd(PMU + 12),
+            }
+            status_word = mmio_rd(STATUS)
+            c = cli.bar4_get("C")
+            doorbell = dict(round0)
+            doorbell["status_busy"] = int(status_word) & 1
+            doorbell["status_code"] = (int(status_word) >> 16) & 0xFFFF
+            doorbell["ptr_null"] = ptr_done == 0
+            doorbell["wr_cpl_en"] = 0 if ptr_done == 0 else 1
+            doorbell["flags"] = packed_flags
+            if desc is not None and cpl_layout is not None and "ld_ab" in cpl_layout.fields:
+                doorbell["ld_ab"] = int(cpl_layout.unpack(desc).get("ld_ab") or 0)
+                doorbell["lda"] = doorbell["ld_ab"] & 0xFFFF
+                doorbell["ldb"] = (doorbell["ld_ab"] >> 16) & 0xFFFF
+            irq_mask = cpl_layout.irq_mask() if cpl_layout is not None else None
+            if irq_mask is not None:
+                doorbell["flags_irq"] = bool(packed_flags & irq_mask)
+                doorbell["irq_bit"] = int((cpl_layout.flags_layout or {}).get("irq_bit") or 0)
+            doorbell["fence_clear"] = not bool(packed_flags & 0xB)
+            if wqk is not None and standin_k is not None:
+                doorbell["work_quantum_k"] = wqk
+                doorbell["standin_k"] = standin_k
+                doorbell["within_quantum"] = standin_k <= wqk
+            nq_i = int(nq) if nq is not None else 1
+            if nq_i >= 2:
+                try:
+                    round1 = _ring(ticket + 1, 1)
+                except RuntimeError as exc:
+                    err(str(exc))
+                    return 1
+                doorbell["qid1"] = round1
+                doorbell["multi_queue"] = True
+                c = cli.bar4_get("C")
+            try:
+                oob = _ring(ticket + max(nq_i, 1), nq_i, expect_status=ST_ERR)
+            except RuntimeError as exc:
+                err(str(exc))
+                return 1
+            doorbell["qid_oob"] = oob
+            doorbell["qid_bound"] = True
+            mmio_wr(CTL, 0)
+            try:
+                dis = _ring(ticket + nq_i + 1, 0, expect_status=ST_DISABLED)
+            except RuntimeError as exc:
+                err(str(exc))
+                return 1
+            doorbell["disabled"] = dis
+            doorbell["disabled_rejected"] = True
+            mmio_wr(CTL, 1)
+            try:
+                rec = _ring(ticket + nq_i + 2, 0, expect_status=ST_OK)
+            except RuntimeError as exc:
+                err(str(exc))
+                return 1
+            doorbell["reenable"] = rec
+            doorbell["reenable_ok"] = True
+            c = cli.bar4_get("C")
+            irq_waited = bool(round0.get("irq_waited"))
+            got_ticket = round0["ticket"]
+            dstatus = round0["status"]
+            if desc_join:
+                doorbell["esp_desc_join"] = True
+            if desc_hash_join:
+                doorbell["esp_desc_hash_join"] = True
+            if cpl_layout is not None and cpl_layout.completion:
+                try:
+                    img = cpl_layout.pack_completion(int(got_ticket), int(dstatus))
+                    doorbell["completion_hex"] = img.hex()
+                    doorbell["completion_bytes"] = len(img)
+                    put_cpl = getattr(cli, "bar4_put_bytes", None)
+                    if put_cpl is not None:
+                        put_cpl("CPL", img)
+                        got_cpl = cli.bar4_get("CPL")
+                        if got_cpl != img:
+                            err("BAR4 CPL round-trip mismatch")
+                            return 1
+                        doorbell["bar4_cpl"] = True
+                        log(
+                            f"BAR4 CPL {len(img)}B round-trip ok "
+                            "(packed completion word, not a pinned BAR)"
+                        )
+                        esp_cpl = package_root() / "out" / "loader-run" / "esp-edk2-pci" / "CPL.BIN"
+                        if esp_cpl.is_file() and esp_cpl.read_bytes() == img:
+                            doorbell["esp_cpl_join"] = True
+                            log("BAR4 CPL matches ESP CPL.BIN (firmware/card layout join)")
+                        join_path = (
+                            package_root() / "out" / "loader-run" / "esp-edk2-pci" / "JOIN.TXT"
+                        )
+                        if join_path.is_file() and f"cpl_sha256={_sha256_hex(img)}" in join_path.read_text(
+                            encoding="ascii"
+                        ):
+                            doorbell["esp_cpl_hash_join"] = True
+                            log("CPL sha256 matches ESP JOIN.TXT")
+                except LayoutError as exc:
+                    log(f"completion pack skipped: {exc}")
+            doorbell["pmu"] = pmu
+            doorbell["pmu_not_tops"] = True
+            log(
+                f"MMIO doorbell ticket={got_ticket} status={dstatus} "
+                f"pmu_r={pmu['r']} irq_waited={irq_waited} qid={qid} "
+                f"multi_queue={doorbell.get('multi_queue', False)} "
+                f"ptr_null={doorbell.get('ptr_null')} "
+                f"flags_irq={doorbell.get('flags_irq')} "
+                f"lda={doorbell.get('lda')} "
+                f"cluster={round0.get('cluster')} "
+                f"qos={round0.get('qos_class')} "
+                f"within_quantum={doorbell.get('within_quantum')} "
+                f"qid_bound={doorbell.get('qid_bound')} "
+                f"disabled_rejected={doorbell.get('disabled_rejected')} "
+                f"reenable_ok={doorbell.get('reenable_ok')} "
+                "(UIO wait-then-claim, not a pinned BAR; pmu not TOPS)"
+            )
+        else:
+            c = cli.gemm_s8(a_name="A", b_name="B", ticket=1)
+        cli.close()
+    finally:
+        agent.stop()
+
+    if c != expect:
+        err(f"virt-card golden mismatch: {c} != {expect}")
+        return 1
+    art = virt_card_artifact(
+        c,
+        m=2,
+        n=2,
+        k=2,
+        desc=desc,
+        cap=snap if snap else None,
+        modelled_peak_gops=peak_gops,
+        mmio=(
+            {
+                "window": "uio_4k",
+                "desc_base": mmio_map.get("desc_base"),
+                "macs_off": mmio_map.get("macs_off"),
+            }
+            if mmio_map.get("desc_base") is not None
+            else None
+        ),
+        doorbell=doorbell,
+        pmu=(doorbell or {}).get("pmu") if doorbell else None,
+        completion_hex=(doorbell or {}).get("completion_hex") if doorbell else None,
+    )
+    out = Path(args.tensor_out)
+    art.dump(out)
+    log(f"tensor artifact at {out} (virt-card, evidence=false)")
+    return 0
+
+
+ROUTES = {
+    "native": push_native,
+    "remote": push_remote,
+    "virt-card": push_virt_card,
+}
 
 
 # ------------------------------------------------------------------------- subcommands
@@ -623,6 +1678,126 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     have_rsync = shutil.which("rsync") is not None
     remote_state = "ok" if (remote.is_file() and have_ssh and have_rsync) else "missing ssh/rsync"
     rows.append(("remote (B1+B2)", remote_state, str(remote)))
+    card = find_ai_tensor_root(getattr(args, "repo_root", None))
+    rows.append(
+        (
+            "virt-card (ai-tensor)",
+            "ok" if card else "set AI_TENSOR_ROOT or --repo-root",
+            str(card or ""),
+        )
+    )
+    rows.append(
+        (
+            "edk2-pci (GPEX RC)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect \"Virtio Network Device\"",
+        )
+    )
+    rows.append(
+        (
+            "edk2-desc (packed OP_GEMM)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect OP_GEMM",
+        )
+    )
+    rows.append(
+        (
+            "edk2-cap (modelled peak)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect class_need_macs_per_cycle",
+        )
+    )
+    rows.append(
+        (
+            "edk2-cpl (completion layout)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect example_hex",
+        )
+    )
+    rows.append(
+        (
+            "edk2-plane (two-plane split)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect tops_on=island",
+        )
+    )
+    rows.append(
+        (
+            "edk2-join (ESP/card images)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect join=firmware_and_card",
+        )
+    )
+    rows.append(
+        (
+            "edk2-roof (class DRAM BW)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect class_dram_gbps",
+        )
+    )
+    rows.append(
+        (
+            "edk2-queue (ingested rings)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect doorbell_qid_last",
+        )
+    )
+    rows.append(
+        (
+            "edk2-ptr (null ptr_*)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect ptr_null",
+        )
+    )
+    rows.append(
+        (
+            "edk2-flags (ingested irq_bit)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect irq_bit_ok",
+        )
+    )
+    rows.append(
+        (
+            "edk2-ld (lda/ldb from n,k)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect ld_ab_ok",
+        )
+    )
+    rows.append(
+        (
+            "edk2-dtype (dense INT8)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect dtype_s8s8",
+        )
+    )
+    rows.append(
+        (
+            "edk2-sched (work quantum / QoS)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect within_quantum",
+        )
+    )
+    rows.append(
+        (
+            "edk2-stat (qid bounds)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect qid_bound",
+        )
+    )
+    rows.append(
+        (
+            "edk2-op (ingested OP_GEMM)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect op_ok",
+        )
+    )
+    rows.append(
+        (
+            "edk2-ctl (re-enable after disable)",
+            "witness",
+            "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect reenable_ok",
+        )
+    )
     width = max(len(r[0]) for r in rows)
     for name, state, note in rows:
         log(f"  {name.ljust(width)}  {state}  {note}")
@@ -641,10 +1816,12 @@ def _parse_set(items: list) -> dict:
 
 def cmd_pack(args: argparse.Namespace) -> int:
     try:
-        layout = DescLayout.from_model_file(args.model)
+        raw = json.loads(Path(args.model).read_text(encoding="utf-8"))
+        layout = DescLayout.from_model(raw)
         values = _parse_set(args.set)
         if args.op:
             values["op"] = layout.op_value(args.op)
+        layout.apply_standin_defaults(values)
         image = layout.pack(values)
     except (LayoutError, OSError, json.JSONDecodeError) as exc:
         err(str(exc))
@@ -655,6 +1832,138 @@ def cmd_pack(args: argparse.Namespace) -> int:
         log(f"wrote {len(image)}-byte descriptor to {args.out}")
     else:
         print(image.hex())
+    decode_out = getattr(args, "decode_out", None)
+    if decode_out:
+        Path(decode_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(decode_out).write_text(layout.decode_text(image), encoding="ascii")
+        log(f"wrote decode text to {decode_out}")
+    cap_out = getattr(args, "cap_out", None)
+    if cap_out:
+        Path(cap_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(cap_out).write_text(island_cap_text(raw), encoding="ascii")
+        log(f"wrote CAP text to {cap_out}")
+        plane_path = Path(cap_out).with_name("PLANE.TXT")
+        plane_path.write_text(plane_text(raw), encoding="ascii")
+        log(f"wrote plane text to {plane_path}")
+        roof_path = Path(cap_out).with_name("ROOF.TXT")
+        roof_path.write_text(roof_text(raw), encoding="ascii")
+        log(f"wrote roof text to {roof_path}")
+        queue_path = Path(cap_out).with_name("QUEUE.TXT")
+        queue_path.write_text(queue_text(raw), encoding="ascii")
+        log(f"wrote queue text to {queue_path}")
+        standin_k = None
+        if "k" in layout.fields:
+            try:
+                standin_k = int(layout.unpack(image).get("k") or 0)
+            except LayoutError:
+                standin_k = None
+        sched_path = Path(cap_out).with_name("SCHED.TXT")
+        sched_path.write_text(sched_text(raw, standin_k=standin_k), encoding="ascii")
+        log(f"wrote sched text to {sched_path}")
+        desc_ver = None
+        if "version" in layout.fields:
+            try:
+                desc_ver = int(layout.unpack(image).get("version") or 0)
+            except LayoutError:
+                desc_ver = None
+        stat_path = Path(cap_out).with_name("STAT.TXT")
+        stat_path.write_text(stat_text(raw, desc_version=desc_ver), encoding="ascii")
+        log(f"wrote stat text to {stat_path}")
+        packed_op = None
+        if "op" in layout.fields:
+            try:
+                packed_op = int(layout.unpack(image).get("op") or 0)
+            except LayoutError:
+                packed_op = None
+        op_path = Path(cap_out).with_name("OP.TXT")
+        op_path.write_text(op_text(layout, packed_op), encoding="ascii")
+        log(f"wrote op text to {op_path}")
+        ctl_path = Path(cap_out).with_name("CTL.TXT")
+        ctl_path.write_text(ctl_text(), encoding="ascii")
+        log(f"wrote ctl text to {ctl_path}")
+        ptr_path = Path(cap_out).with_name("PTR.TXT")
+        ptr_path.write_text(ptr_text(layout), encoding="ascii")
+        log(f"wrote ptr text to {ptr_path}")
+        packed_flags = None
+        if "flags" in layout.fields:
+            packed_flags = int(layout.unpack(image).get("flags") or 0)
+        flags_path = Path(cap_out).with_name("FLAGS.TXT")
+        flags_path.write_text(flags_text(layout, packed_flags), encoding="ascii")
+        log(f"wrote flags text to {flags_path}")
+    cpl_out = getattr(args, "cpl_out", None)
+    if cpl_out:
+        Path(cpl_out).parent.mkdir(parents=True, exist_ok=True)
+        Path(cpl_out).write_text(layout.completion_text(), encoding="ascii")
+        log(f"wrote CPL text to {cpl_out}")
+        try:
+            img = layout.pack_completion(1, layout.statuses.get("ST_OK", 0))
+            bin_path = Path(cpl_out).with_suffix(".BIN")
+            bin_path.write_bytes(img)
+            log(f"wrote {len(img)}-byte completion word to {bin_path}")
+        except LayoutError:
+            img = None
+            bin_path = None
+        desc_bytes = Path(args.out).read_bytes() if args.out else image
+        cpl_bytes = bin_path.read_bytes() if bin_path and bin_path.is_file() else None
+        join_path = Path(cpl_out).with_name("JOIN.TXT")
+        join_path.write_text(join_text(desc=desc_bytes, cpl=cpl_bytes), encoding="ascii")
+        log(f"wrote join text to {join_path}")
+    return 0
+
+
+def cmd_cpl(args: argparse.Namespace) -> int:
+    try:
+        layout = DescLayout.from_model_file(args.model)
+        text = layout.completion_text()
+    except (LayoutError, OSError, json.JSONDecodeError) as exc:
+        err(str(exc))
+        return 1
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(text, encoding="ascii")
+        log(f"wrote CPL text to {args.out}")
+        try:
+            img = layout.pack_completion(1, layout.statuses.get("ST_OK", 0))
+            bin_path = Path(args.out).with_suffix(".BIN")
+            bin_path.write_bytes(img)
+            log(f"wrote {len(img)}-byte completion word to {bin_path}")
+        except LayoutError:
+            pass
+    else:
+        print(text, end="")
+    return 0
+
+
+def cmd_cap(args: argparse.Namespace) -> int:
+    try:
+        raw = json.loads(Path(args.model).read_text(encoding="utf-8"))
+        text = island_cap_text(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        err(str(exc))
+        return 1
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(text, encoding="ascii")
+        log(f"wrote CAP text to {args.out}")
+    else:
+        print(text, end="")
+    return 0
+
+
+def cmd_unpack(args: argparse.Namespace) -> int:
+    try:
+        layout = DescLayout.from_model_file(args.model)
+        image = Path(args.image).read_bytes()
+        text = layout.decode_text(image)
+    except (LayoutError, OSError, json.JSONDecodeError) as exc:
+        err(str(exc))
+        return 1
+    if args.out:
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.out).write_text(text, encoding="ascii")
+        log(f"wrote decode text to {args.out}")
+    else:
+        print(text, end="")
     return 0
 
 
@@ -776,7 +2085,33 @@ def cmd_pcie(args: argparse.Namespace) -> int:
         "doorbell": "BAR0 offset 0, 32-bit (version|op) — same encoding as the guest-visible descriptor doorbell",
         "bulk_plane": "resizable BAR4 for descriptor + A/B/C/scale tensor pages (min 1 MiB, target 64 MiB)",
         "completion": "host polls BAR2 status/ticket mapping or receives MSI from the card",
-        "note": "all BAR sizes, device IDs, and MSI details are conceptual until pinned",
+        "edk2_host_witness": "g6q run --loader edk2 --os efi-shell --machine g6lc-virt --expect \"Virtio Network Device\"",
+        "edk2_desc": "ESP DESC.BIN/DESC.HEX/DESC.TXT from ingested desc_layout; file delivery, not a BAR map",
+        "edk2_cap": "ESP CAP.TXT is ingested island geometry plus modelled peak and 100-TOPS class vs SKU; tops_not_evidence",
+        "edk2_cpl": "ESP CPL.TXT/CPL.BIN/CPL.HEX is an ingested completion word (ticket/status bit ranges); example_hex is ticket=1 ST_OK",
+        "bar4_cpl": "virt_ai_card BAR4 name CPL carries the packed completion word; esp_cpl_join when it matches ESP CPL.BIN",
+        "edk2_plane": "ESP PLANE.TXT: island throughput from ingested acc_tile; core latency not in this model; tops_on=island",
+        "irq_wait": "virt_ai_card irq_wait then DONE claim (eventfd MSI stand-in); not a pinned MSI vector",
+        "edk2_join": "ESP JOIN.TXT: DESC/CPL images and SHA-256 shared with BAR4 DESC/CPL; join=firmware_and_card",
+        "edk2_roof": "ESP ROOF.TXT: class vs SKU DRAM BW from ingested blocking T (2/T) plus acc SRAM T^2*4; tops_not_evidence",
+        "edk2_queue": "ESP QUEUE.TXT: ingested queues/depth/qos; doorbell qid 0 and last=queues-1; virt-card rings both when queues>=2",
+        "edk2_ptr": "ESP PTR.TXT: ingested ptr_* packed as 0 (ABI null); bulk BAR4 names A/B/C; ptr_done_path=mmio_cpl; no invented addresses",
+        "edk2_flags": "ESP FLAGS.TXT: ingested irq_bit (isa-encoding.md §7 bit 2); packed DESC flags=1<<irq_bit; virt_ai_card FLAG_IRQ matches; dtype_s8s8 dense INT8, no INT4 in the headline",
+        "edk2_ld": "ESP DESC.TXT lda/ldb packed from n,k into ingested ld_ab; ld_ab_ok; not a BAR address",
+        "edk2_cluster": "ESP QUEUE.TXT qid→cluster from ingested queue_cluster_map; virt-card stamps cluster on each doorbell",
+        "edk2_sched": "ESP SCHED.TXT: stand-in k vs ingested work_quantum_k (within_quantum); qid→qos; isa-encoding.md §7.1; not a measurement",
+        "edk2_stat": "ESP STAT.TXT: qid_bound (qid < queues); oob doorbell rejected; desc version=1; not a BAR",
+        "edk2_op": "ESP OP.TXT: ingested OP_GEMM; packed op_ok; unknown ops rejected",
+        "edk2_ctl": "ESP CTL.TXT: enable=1 wr_cpl_en=0 (null ptr_done); disabled doorbells rejected; reenable_ok after CTL.enable=1",
+        "mmio_uio": "virt_ai_card mmio_rd/mmio_wr on the existing 4 KiB UIO window (CAP + DESC@desc_base); not a pinned BAR",
+        "uio_doorbell": "host writes UIO DOORBELL then claims DONE; completion bit ranges from ingested desc_layout.completion; not a pinned BAR",
+        "bar4_desc": "virt_ai_card BAR4 name DESC carries the packed image into the existing UIO DESC@0x140 window; not a pinned BAR",
+        "card_standin": "ai-tensor/tools/virt_ai_card/smoke.py",
+        "push_route": "ai_tensor_bridge.py push --route virt-card --repo-root <monorepo> --model out/ai_soc_model.json",
+        "tops_definition": "100e12 dense INT8 ops/s peak; 1 MAC = 2 ops; no sparsity/INT4 in the headline (architecture/ai-matrix/scaling-100tops.md §2)",
+        "two_plane": "core-attached tile 8x8x8 is a latency device; island clusters carry TOPS",
+        "tops_not_evidence": True,
+        "note": "BAR sizes/device IDs/MSI are conceptual until pinned; EDK2 is root-complex firmware; virt_ai_card is the endpoint stand-in; not a fused bus",
     }
     print(json.dumps(concept, indent=2, sort_keys=True))
     if rev == "unpinned" or not rev:
@@ -844,8 +2179,27 @@ def cmd_diag(args: argparse.Namespace) -> int:
 _SELFTEST_MODEL = {
     "soc": {
         "ai_island": {
-            "config": {"cap_base": 0, "desc_base": 0x140, "clusters": 2},
+            "config": {
+                "cap_base": 0,
+                "desc_base": 0x140,
+                "clusters": 2,
+                "macs_per_cycle": 256,
+                "clock_khz": 1000000,
+                "acc_tile_m": 256,
+                "sram_bytes": 2097152,
+                "queues": 2,
+                "queue_depth": 64,
+                "qos_classes": 2,
+                "work_quantum_k": 64,
+                "queue_cluster_map": [0, 1],
+            },
             "desc_layout": {
+                "completion": {
+                    "ticket_bit_low": 0,
+                    "ticket_bit_high": 31,
+                    "status_bit_low": 32,
+                    "status_bit_high": 47,
+                },
                 "desc_bytes": 16,
                 "fields": {
                     "version": {"offset": 0, "size": 2, "bit_low": 0, "bit_high": 15},
@@ -856,6 +2210,13 @@ _SELFTEST_MODEL = {
                 },
                 "ops": {"OP_GEMM": 1, "OP_CONV2D": 2},
                 "statuses": {"ST_OK": 0, "ST_ERR": 1},
+                "flags_layout": {
+                    "irq_bit": 2,
+                    "dtype_shift": 8,
+                    "dtype_mask": 3,
+                    "priority_shift": 16,
+                    "priority_mask": 15,
+                },
             }
         }
     }
@@ -996,6 +2357,171 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     diffs = compare_artifacts(stamped, other)
     check("divergence is reported", any(d["field"] == "status" for d in diffs), str(diffs))
 
+    vc = virt_card_artifact([[19, 22], [43, 50]], m=2, n=2, k=2)
+    check("virt-card artifact is never evidence", vc.header.get("evidence") is False)
+    check("virt-card route is stamped", vc.header.get("route") == "virt-card")
+    check("virt-card event is done 2x2", vc.events[0]["m"] == 2 and vc.events[0]["done"] is True)
+    dumped = vc.to_json()
+    check("virt-card dump has header+events", "header" in dumped and len(dumped["events"]) == 1)
+
+    packed16 = layout.pack({"version": 1, "op": 1, "m": 2})
+    check("selftest pack is the model's size", len(packed16) == 16)
+    roundtrip = layout.unpack(packed16)
+    check("unpack version", roundtrip.get("version") == 1)
+    check("unpack op", roundtrip.get("op") == 1)
+    check("unpack m", roundtrip.get("m") == 2)
+    text = layout.decode_text(packed16)
+    check("decode_text names OP_GEMM", "OP_GEMM" in text)
+    check("decode_text carries m=2", "m=2" in text)
+    try:
+        layout.unpack(packed16[:-1])
+        check("short image is rejected", False)
+    except LayoutError:
+        pass
+    vc2 = virt_card_artifact([[19, 22], [43, 50]], m=2, n=2, k=2, desc=packed16)
+    check("virt-card stamps desc_bytes from packed image", vc2.header.get("desc_bytes") == 16)
+    check(
+        "virt-card desc_hex is little-endian version|op",
+        str(vc2.header.get("desc_hex", "")).startswith("01000100"),
+    )
+    check("virt-card dump carries desc_hex", "desc_hex" in vc2.to_json()["header"])
+    check("virt-card without desc has no desc_hex", "desc_hex" not in dumped["header"])
+    check("virt-card with desc stamps bar4_desc", vc2.header.get("bar4_desc") is True)
+
+    cap_txt = island_cap_text(_SELFTEST_MODEL)
+    check("CAP text names clusters", "clusters=2" in cap_txt)
+    check("CAP text names macs_per_cycle", "macs_per_cycle=256" in cap_txt)
+    check("CAP modelled peak is 512 GOPS", "modelled_peak_gops=512" in cap_txt)
+    check("CAP modelled tops is 0.512", "modelled_peak_tops=0.512" in cap_txt)
+    check("CAP class need is 50000 MAC/cycle at 1 GHz", "class_need_macs_per_cycle=50000" in cap_txt)
+    check("CAP sku_frac is 256/50000", "sku_frac_of_class=0.00512" in cap_txt)
+    check("CAP is never evidence", "tops_not_evidence=true" in cap_txt)
+    check("1 MAC = 2 ops at 256×1 GHz", modelled_peak_ops(island_config(_SELFTEST_MODEL)) == 512_000_000_000)
+    mmap = mmio_map_from_model(
+        {
+            "soc": {
+                "ai_island": {
+                    "config": {
+                        "cap_base": 0,
+                        "desc_base": 320,
+                        "cap_offsets": {"version": 0, "clusters": 4, "macs_cycle": 8},
+                    }
+                }
+            }
+        }
+    )
+    check("mmio desc_base comes from the model", mmap.get("desc_base") == 320)
+    check("mmio macs_off comes from the model", mmap.get("macs_off") == 8)
+    cpl_txt = layout.completion_text()
+    check("CPL text names ticket bits", "ticket_bit_high=31" in cpl_txt)
+    check("CPL text names ST_OK", "st_ok=0" in cpl_txt)
+    check("CPL is never evidence", "tops_not_evidence=true" in cpl_txt)
+    cpl_img = layout.pack_completion(1, 0)
+    check("completion word is 8 bytes", len(cpl_img) == 8)
+    check("ticket=1 is little-endian in the word", cpl_img[0] == 1)
+    check("status=0 leaves the high half zero", cpl_img[4:8] == b"\x00\x00\x00\x00")
+    round_cpl = layout.unpack_completion(cpl_img)
+    check("completion unpack ticket", round_cpl.get("ticket") == 1)
+    check("completion unpack status", round_cpl.get("status") == 0)
+    check("CPL text carries example_hex", "example_hex=" in cpl_txt)
+    plane = plane_text(_SELFTEST_MODEL)
+    check("PLANE text is two-plane", "split=two_plane" in plane)
+    check("PLANE puts TOPS on the island", "tops_on=island" in plane)
+    check("PLANE does not invent a core tile", "core_tile=not_in_this_model" in plane)
+    check("PLANE is never evidence", "tops_not_evidence=true" in plane)
+    jt = join_text(desc=b"\x01\x00\x01\x00", cpl=b"\x01" + b"\x00" * 7)
+    check("JOIN names firmware_and_card", "join=firmware_and_card" in jt)
+    check("JOIN carries desc prefix", "desc_hex_prefix=01000100" in jt)
+    check("JOIN carries cpl hex", "cpl_hex=0100000000000000" in jt)
+    check("JOIN irq order is wait then claim", "irq=wait_then_claim_done" in jt)
+    check("JOIN carries desc sha256", "desc_sha256=" in jt)
+    check("JOIN carries cpl sha256", "cpl_sha256=" in jt)
+    roof = roof_text(_SELFTEST_MODEL)
+    check("ROOF names blocking T", "blocking_t=256" in roof)
+    check("ROOF class DRAM is ~391 GB/s", "class_dram_gbps=390.625" in roof)
+    check("ROOF SKU DRAM is 2 GB/s", "sku_dram_gbps=2" in roof)
+    check("ROOF acc SRAM is 256 KiB", "acc_sram_kib=256" in roof)
+    check("ROOF acc fits island SRAM", "acc_fits_island_sram=true" in roof)
+    check("ROOF is never evidence", "tops_not_evidence=true" in roof)
+    qt = queue_text(_SELFTEST_MODEL)
+    check("QUEUE names rings", "queues=2" in qt)
+    check("QUEUE names depth", "queue_depth=64" in qt)
+    check("QUEUE doorbell qid is 0", "doorbell_qid=0" in qt)
+    check("QUEUE last qid is queues-1", "doorbell_qid_last=1" in qt)
+    check("QUEUE cluster comes from the map", "cluster_from_map=true" in qt)
+    check("QUEUE qid 0 maps to cluster 0", "qid0_cluster=0" in qt)
+    check("QUEUE qos comes from qid", "qos_from_qid=true" in qt)
+    check("QUEUE qid 0 qos is 0", "qid0_qos=0" in qt)
+    check("QUEUE is never evidence", "tops_not_evidence=true" in qt)
+    st = sched_text(_SELFTEST_MODEL, standin_k=2)
+    check("SCHED names work quantum", "work_quantum_k=64" in st)
+    check("SCHED stand-in k is within Q", "within_quantum=true" in st)
+    check("SCHED is never evidence", "tops_not_evidence=true" in st)
+    stt = stat_text(_SELFTEST_MODEL, desc_version=1)
+    check("STAT qid is bounded", "qid_bound=true" in stt)
+    check("STAT oob qid is queues", "oob_qid=2" in stt)
+    check("STAT version is ok", "version_ok=true" in stt)
+    check("STAT is never evidence", "tops_not_evidence=true" in stt)
+    ot = op_text(layout, packed_op=1)
+    check("OP table names GEMM", "OP_GEMM=1" in ot)
+    check("OP packed is ok", "op_ok=true" in ot)
+    check("OP unknown is rejected", "unknown_op_rejected=true" in ot)
+    ct = ctl_text()
+    check("CTL wr_cpl_en is 0", "wr_cpl_en=0" in ct)
+    check("CTL disabled doorbells are rejected", "disabled_rejected=true" in ct)
+    check("CTL re-enable is ok", "reenable_ok=true" in ct)
+    check("flags_layout irq_bit is ingested", layout.flags_layout.get("irq_bit") == 2)
+    check("irq_mask is 1<<2", layout.irq_mask() == 4)
+    defaults = layout.apply_standin_defaults({"version": 1, "op": 1, "m": 4})
+    check("stand-in flags is irq_mask", defaults.get("flags") == 4)
+    check("stand-in ptr_done is null", defaults.get("ptr_done") == 0)
+    standin = layout.pack(defaults)
+    check("packed flags word is irq_mask", standin[4:8] == b"\x04\x00\x00\x00")
+    pt = ptr_text(layout)
+    check("PTR names null pointers", "ptr_null=true" in pt)
+    check("PTR names BAR4 A", "bar4_a=A" in pt)
+    check("PTR completion is MMIO", "ptr_done_path=mmio_cpl" in pt)
+    check("PTR does not invent an address", "0x9000" not in pt)
+    check("PTR is never evidence", "tops_not_evidence=true" in pt)
+    ft = flags_text(layout, packed_flags=4)
+    check("FLAGS names irq_bit", "irq_bit=2" in ft)
+    check("FLAGS irq_bit matches isa-encoding", "irq_bit_ok=true" in ft)
+    check("FLAGS packed irq is set", "flags_irq=true" in ft)
+    check("FLAGS fence bits are clear", "fence_clear=true" in ft)
+    check("FLAGS priority is default 0", "priority_default=true" in ft)
+    check("FLAGS dense INT8 is s8s8", "dtype_s8s8=true" in ft)
+    check("FLAGS does not claim INT4", "int4_not_in_headline=true" in ft)
+    check("FLAGS is never evidence", "tops_not_evidence=true" in ft)
+    geom = json.loads(json.dumps(_SELFTEST_MODEL))
+    gfields = geom["soc"]["ai_island"]["desc_layout"]["fields"]
+    gfields["n"] = {"offset": 16, "size": 4, "bit_low": 128, "bit_high": 159}
+    gfields["k"] = {"offset": 20, "size": 4, "bit_low": 160, "bit_high": 191}
+    gfields["ld_ab"] = {"offset": 24, "size": 4, "bit_low": 192, "bit_high": 223}
+    geom["soc"]["ai_island"]["desc_layout"]["desc_bytes"] = 28
+    gl = DescLayout.from_model(geom)
+    gvals = {"version": 1, "op": 1, "m": 2, "n": 2, "k": 2}
+    gl.apply_standin_defaults(gvals)
+    check("ld_ab is packed from n,k", gvals.get("ld_ab") == 0x00020002)
+    gimg = gl.pack(gvals)
+    check("ld_ab little-endian in the image", gimg[24:28] == b"\x02\x00\x02\x00")
+    gtxt = gl.decode_text(gimg)
+    check("decode names lda", "lda=2" in gtxt)
+    check("decode names ldb", "ldb=2" in gtxt)
+    check("ld_ab matches n,k", "ld_ab_ok=true" in gtxt)
+    ov = cap_overrides_from_model(_SELFTEST_MODEL)
+    check("CAP overrides carry clusters", ov.get("clusters") == 2)
+    vc3 = virt_card_artifact(
+        [[19, 22], [43, 50]],
+        m=2,
+        n=2,
+        k=2,
+        desc=packed16,
+        cap={"clusters": 2, "macs_per_cycle": 256},
+        modelled_peak_gops=512.0,
+    )
+    check("virt-card stamps island_cap", vc3.header.get("island_cap", {}).get("clusters") == 2)
+    check("virt-card stamps modelled_peak_gops", vc3.header.get("modelled_peak_gops") == 512.0)
+
     if failures:
         for f in failures:
             err(f)
@@ -1017,6 +2543,7 @@ def main(argv: list | None = None) -> int:
     sub = ap.add_subparsers(dest="verb", required=True)
 
     p = sub.add_parser("doctor", help="report which execution routes are available")
+    p.add_argument("--repo-root", default=None)
     p.set_defaults(fn=cmd_doctor)
 
     p = sub.add_parser("pack", help="pack a descriptor using the model's own layout")
@@ -1024,7 +2551,38 @@ def main(argv: list | None = None) -> int:
     p.add_argument("--set", action="append", default=[], help="field=value, repeatable")
     p.add_argument("--op", default=None, help="op name from the model's table, or a number")
     p.add_argument("--out", default=None, help="write the image here instead of printing hex")
+    p.add_argument(
+        "--decode-out",
+        default=None,
+        help="write a Shell-friendly field dump (DESC.TXT) using the model's names",
+    )
+    p.add_argument(
+        "--cap-out",
+        default=None,
+        help="write ingested island CAP geometry (CAP.TXT); modelled peak, not evidence",
+    )
+    p.add_argument(
+        "--cpl-out",
+        default=None,
+        help="write ingested completion-word layout (CPL.TXT)",
+    )
     p.set_defaults(fn=cmd_pack)
+
+    p = sub.add_parser("cpl", help="dump ingested completion-word layout as Shell text")
+    p.add_argument("--model", required=True, help="TargetModel JSON")
+    p.add_argument("--out", default=None, help="write CPL.TXT here instead of stdout")
+    p.set_defaults(fn=cmd_cpl)
+
+    p = sub.add_parser("cap", help="dump ingested island CAP geometry as Shell text")
+    p.add_argument("--model", required=True, help="TargetModel JSON")
+    p.add_argument("--out", default=None, help="write CAP.TXT here instead of stdout")
+    p.set_defaults(fn=cmd_cap)
+
+    p = sub.add_parser("unpack", help="decode a packed descriptor using the model's own layout")
+    p.add_argument("--model", required=True, help="TargetModel JSON")
+    p.add_argument("--image", required=True, help="packed descriptor bytes")
+    p.add_argument("--out", default=None, help="write decode text here instead of stdout")
+    p.set_defaults(fn=cmd_unpack)
 
     p = sub.add_parser("push", help="run one execution and retrieve the tensor artifact")
     p.add_argument("--route", default="native", choices=sorted(ROUTES))
@@ -1047,6 +2605,12 @@ def main(argv: list | None = None) -> int:
         "--uarch-out",
         default=None,
         help="after a successful run, run g6lc-qemu diag and write counters here (native only)",
+    )
+    p.add_argument("--card-root", default=None, help="ai-tensor root for --route virt-card")
+    p.add_argument(
+        "--model",
+        default=None,
+        help="TargetModel JSON; virt-card packs OP_GEMM from desc_layout into the artifact header",
     )
     p.set_defaults(fn=cmd_push)
 

@@ -188,8 +188,8 @@ What the bridge owns:
 
 | Step | Behaviour |
 |---|---|
-| `pack` | pack a descriptor image using **the model's own** field offsets, sizes and op table |
-| `push` | run one execution on a chosen route, retrieve the tensor artifact; with `--uarch-out` (native route only) it also runs `g6lc-qemu diag` and writes D2 counters, optionally with `--measured-dram-gbps` in GB/s; the counters include `ai.pmu.*` modelled PMU values from the tensor artifact |
+| `pack` | pack a descriptor image using **the model's own** field offsets, sizes and op table; `--decode-out` writes a Shell-friendly field dump (`unpack` is the inverse); `--cap-out` writes ingested island CAP geometry plus modelled peak (`cap` dumps the same); `--cpl-out` writes the ingested completion-word layout and a packed example word (`cpl` dumps the same) |
+| `push` | run one execution on a chosen route, retrieve the tensor artifact; `--route virt-card` drives the existing `ai-tensor` `virt_ai_card` TCP stand-in (BAR4 put + gemm_s8 golden) and stamps `evidence: false`. With `--model` it packs an OP_GEMM image from `desc_layout`, BAR4-puts it as name `DESC` into UIO DESC@0x140, and stamps `desc_hex` / `bar4_desc`. With `--uarch-out` (native route only) it also runs `g6lc-qemu diag` |
 | `results` | summarise the artifact: event count, completion count, op/hart/status/cluster histograms; with `--model` it resolves op/status codes to the design's names, reports the SKU `clusters` count, and with `--per-event` it emits a PyTorch-friendly `outputs` list of completed operations with shapes, `cluster`, `dtype`, and A/B/C pointers; when the artifact carries `flags_layout`, `dtype` is recovered from `flags` when the event does not carry the field |
 | `results --tops` | add a 100-TOPS-style roofline section from `g6lc-qemu diag`: `peak_tops`, `peak_gops`, `total_macs`, `total_ops`, the theoretical time the observed MACs would take at peak utilisation, and the `Compute`/`Bandwidth`/`Unresolved` `bound` derived from the D2 `balance_mac_per_byte` and `tiled_input_intensity_mac_per_byte` counters; this is a modelled bound, not a measurement, and is marked `tops_not_evidence` |
 | `diag` | run `g6lc-qemu diag` and feed it an optional `--measured-dram-gbps` host measurement; the bridge converts GB/s to milli-GB/s and passes it through `--measured-dram-gbps-x1000`, closing the F11 roofline loop from the host side |
@@ -274,6 +274,39 @@ virtio device id, or a 1000-TOPS claim before that pin is set would be exactly t
 `tools/ai_tensor_bridge.py pcie` exposes the concept without committing to it: it prints the proposed
 BAR/virtio/MSI outline and exits with an error when the contract is `unpinned`. This gives host
 adapters a stable place to hook the push path once the design publishes the transport contract.
+
+### 6.2 EDK2 PCI witness vs the existing card stand-in
+
+Two implementations already exist. They are **opposite ends of the link** and must not be merged
+into one invented BAR table:
+
+| Role | Existing implementation | Gate |
+|---|---|---|
+| Host **root complex** firmware | QEMU virt GPEX + EDK2 PciBus; `virtio-blk-pci` + hubport `virtio-net-pci` + `virtio-serial-pci` | `--expect 1AF4` / `E2-PCI-BAR` / `E2-PCI-NET` / **`Virtio Network Device`**: GPEX `1B36:0008`, blk `1AF4:1001`, net `1AF4:1000` (VirtioNetDxe bound), console `1AF4:1003`. Hubport: no packets, no `ifconfig` addresses. Stock virtio roles, not an AI BAR |
+| Packed descriptor on the ESP | `DESC.BIN` / `DESC.HEX` / `DESC.TXT` from `ai_tensor_bridge.py pack --decode-out` against ingested `desc_layout` (64-byte OP_GEMM, `m=n=k=2`). Shell `type fs0:\DESC.TXT` prints `op=OP_GEMM`. This is a **file**, not a BAR write | `--expect OP_GEMM` (layout agreement only) |
+| Model-reported CAP on the ESP | `CAP.TXT` from ingested `soc.ai_island.config` plus modelled peak (`macs_per_cycle × clock × 2 ops/MAC`) and 100-TOPS class vs SKU (`class_need_macs_per_cycle=50000` at 1 GHz; fixture `sku_frac_of_class=0.00512`). Not a measurement | `--expect class_need_macs_per_cycle` |
+| UIO MMIO stand-in | `virt_ai_card` `mmio_rd`/`mmio_wr` on the existing 4 KiB window. CAP and DESC bases come from the ingested model (`cap_base`, `desc_base`, `cap_offsets`) | `push --route virt-card --model` logs MMIO CAP + DESC round-trip |
+| Doorbell + completion | Host BAR4-stages A/B, writes UIO DOORBELL, polls DONE/TICKET/DSTATUS, claims DONE, reads stand-in PMU (not TOPS). ESP `CPL.TXT`/`CPL.BIN`/`CPL.HEX` is an ingested completion word (`ticket=1`, `ST_OK`). virt-card BAR4 name `CPL` carries the same bytes; `esp_cpl_join` when it matches the ESP file | `--expect example_hex` |
+| Two-plane split | ESP `PLANE.TXT`: island throughput from ingested `acc_tile_*`/`clusters`; core plane is latency and **not in this model** (do not type 8×8×8 here). TOPS ride the island | `--expect tops_on=island` |
+| IRQ wait + ESP/card join | Host `irq_wait` (eventfd MSI stand-in) then claims DONE. ESP `JOIN.TXT` records DESC/CPL images and SHA-256 shared with BAR4 `DESC`/`CPL`. `esp_desc_join` / `esp_cpl_hash_join` when they match | `--expect join=firmware_and_card` |
+| Class DRAM roofline | ESP `ROOF.TXT`: `bytes_per_mac=2/T` from ingested `acc_tile_m`; class BW at 50e12 MAC/s vs this SKU; `acc_sram_bytes=T²·4`. Not a measurement | `--expect class_dram_gbps` / `acc_sram_kib` |
+| Ingested queues | ESP `QUEUE.TXT`: `queues`/`queue_depth`/`qos_classes`/`work_quantum_k`; doorbell qid 0 and last=`queues-1`. virt-card rings qid 0 then qid 1 when `queues>=2` | `--expect doorbell_qid_last` |
+| Null pointer fields | ESP `PTR.TXT`: ingested `ptr_*` offsets packed as `0` (ABI null). Bulk tensors are BAR4 names `A`/`B`/`C`; completion is MMIO CPL (`wr_cpl_en=0`). No invented DRAM/BAR addresses | `--expect ptr_null` |
+| Ingested IRQ flag | ESP `FLAGS.TXT`: `irq_bit` from `desc_layout.flags_layout` (`isa-encoding.md` §7 bit 2). Packed DESC `flags=1<<irq_bit`. virt_ai_card `FLAG_IRQ` matches. Dense INT8 `dtype_s8s8` / `ew_byte`; `int4_not_in_headline` (100 TOPS definition) | `--expect irq_bit_ok` / `dtype_s8s8` |
+| Packed `ld_ab` | ESP `DESC.TXT`: `lda=k`, `ldb=n` packed into ingested `ld_ab` (`ai-tensor` `pack_desc64`). Not an address | `--expect ld_ab_ok` |
+| Queue→cluster map | ESP `QUEUE.TXT` `qidN_cluster` from ingested `queue_cluster_map`. virt-card stamps `cluster` on each doorbell qid | `--expect cluster_from_map` |
+| Scheduling / QoS | ESP `SCHED.TXT`: stand-in `k` vs ingested `work_quantum_k` (`within_quantum`); qid→qos class. FLAGS `fence_clear` / `priority_default`. Card rejects `ld_ab` that does not match `n,k`. Not a measurement | `--expect within_quantum` |
+| qid bounds / version | ESP `STAT.TXT`: `qid < queues` (`qid_bound`); oob doorbell rejected; packed `version=1`. Card `ST_ERR` on oob qid or bad version (stand-in error, not an ingested extra status) | `--expect qid_bound` |
+| Ingested op table | ESP `OP.TXT`: ingested `OP_GEMM`; packed `op_ok`. Card `ST_BAD_OP` on unknown op (stand-in) | `--expect op_ok` |
+| CTL enable | ESP `CTL.TXT`: `ctl_enable=1` `wr_cpl_en=0` (null `ptr_done`). Disabled doorbells complete stand-in `ST_DISABLED`; `CTL.enable=1` restores `ST_OK` (`reenable_ok`) | `--expect reenable_ok` |
+| Card **endpoint** stand-in | `ai-tensor/tools/virt_ai_card/` (`VirtualPcieLink` TCP JSON, BAR0-like MMIO, BAR4 blob, golden GEMM). `push --route virt-card --model` BAR4-puts the packed image as name `DESC` into the existing UIO DESC window at 0x140 and stamps `desc_hex` / `bar4_desc` on the artifact | `python3 ai-tensor/tools/virt_ai_card/smoke.py` |
+| Joined PCIe function the host enumerates *and* the card exposes | blocked on `contracts.ai_host_transport` | `ai_tensor_bridge.py pcie` exits 1 while unpinned |
+
+`g6lc-soc` has no PCI (`architecture/g6lc-qemu/README.md`). The faithful map is MMIO island
+`0x4000_0000` + PLIC-8, not ECAM. EDK2 on virt proving `pci` lists a host bridge is the firmware
+half of `pcie-root-complex.md`; `virt_ai_card` is the software half of `pcie-endpoint.md`. Pinning
+the transport is what would put an endpoint function on the GPEX bus so both halves share a
+device. Until then, run both gates; do not emit a QEMU `pci-testdev` with guessed BAR sizes.
 
 ## 7. Stage placement (no new axis)
 

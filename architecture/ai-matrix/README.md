@@ -70,7 +70,7 @@ Honest status of **implemented silicon/software**, not the scaffold-only state o
 | **NoC width 64b** | island | **Floor (live)** | wider NoC deferred |
 | **I2 multi-cluster / NoC/QoS** | island package | **Not started** | staging rule: measure I3 BW first |
 | **I3 full memory bandwidth model** | DRAM/channels | **Open** | PMU present; model soak open |
-| **PCIe EP + virtio (P5)** | uncore | **Virtual only** | `virt-ai-pcie` soft board + TCP agent |
+| **PCIe EP + virtio (P5)** | uncore | **Virtual only** | `virt-ai-pcie` TCP + EDK2 GPEX RC witness; transport **unpinned** |
 | **ai-tensor host** sim/SoftIsland/virt-card | `ai-tensor/` | **Live** | golden + queue/event-fd soaks |
 | **PyTorch soft path** | `torch_ops` + virt-card | **Live** | `test_torch_virt_ai_island` (torch optional) |
 | **soft→HARD virt-impl** | build-platform `tensor` | **Live** | `virt-impl --impl hard --suite narrow` **PASS** |
@@ -78,8 +78,11 @@ Honest status of **implemented silicon/software**, not the scaffold-only state o
 | **I4 PD / UPF / thermal** | backend | **Open** | — |
 
 **Next program step (scaling):** freeze AccTile/`T`/CAP; **measure I3 bandwidth** against
-`scaling-100tops.md` §4; then **I2 cluster replication** without regressing narrow/ci HARD on the
-single-cluster path. Detail: [`hard-tests.md`](hard-tests.md) §5 · [`scaling-100tops.md`](scaling-100tops.md) §11.
+`scaling-100tops.md` §4 (F13 writeback, not input-only `2/T`); then **I2 cluster replication**
+without regressing narrow/ci HARD on the single-cluster path. Do not wait on KVM, full OoO, or a
+pinned PCIe BAR. Design asks: [`../../g6lc_qemu/architecture/RTL_FEEDBACK.md`](../../g6lc_qemu/architecture/RTL_FEEDBACK.md)
+§2.1 / §3.3. Snapshot: [`../current-stage.md`](../current-stage.md).
+Detail: [`hard-tests.md`](hard-tests.md) §5 · [`scaling-100tops.md`](scaling-100tops.md) §11.
 
 ---
 

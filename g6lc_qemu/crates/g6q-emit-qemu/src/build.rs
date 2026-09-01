@@ -33,7 +33,9 @@ pub fn emit_build_wiring(model: &TargetModel, version: &str, digest: &str) -> Em
     body.push_str("    depends on RISCV32 || RISCV64\n");
     body.push_str("    select RISCV_ACLINT\n");
     body.push_str("    select SIFIVE_PLIC\n");
-    body.push_str("    select SERIAL_MM\n\n");
+    body.push_str("    select SERIAL_MM\n");
+    body.push_str("    select XILINX_SPI\n");
+    body.push_str("    select SSI_M25P80\n\n");
 
     body.push_str("# 2. Append to configs/targets/riscv64-softmmu.mak (or the matching configs/targets file)\n");
     body.push_str(&format!("CONFIG_G6LC_{upper}=y\n\n"));

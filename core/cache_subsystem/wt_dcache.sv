@@ -139,9 +139,11 @@ module wt_dcache
   // miss unit <-> wbuffer
   logic     [         CVA6Cfg.DCACHE_MAX_TX-1:0][               CVA6Cfg.PLEN-1:0] tx_paddr;
   logic     [         CVA6Cfg.DCACHE_MAX_TX-1:0]                                  tx_vld;
+  logic                                                                           wbuffer_fwd_hit;
 
   // wbuffer <-> memory
   wbuffer_t [     CVA6Cfg.WtDcacheWbufDepth-1:0]                                  wbuffer_data;
+  wbuffer_t [                         CVA6Cfg.WtDcacheFixupDepth:0]               fixup_wbuffer;
 
 
   ///////////////////////////////////////////////////////
@@ -251,7 +253,8 @@ module wt_dcache
           .rd_data_i      (rd_data),
           .rd_user_i      (rd_user),
           .rd_vld_bits_i  (rd_vld_bits),
-          .rd_hit_oh_i    (rd_hit_oh)
+          .rd_hit_oh_i    (rd_hit_oh),
+          .wbuffer_fwd_hit_i(wbuffer_fwd_hit)
       );
     end else begin
       assign rd_prio[k] = 1'b0;
@@ -344,6 +347,7 @@ module wt_dcache
       .pm_fixup_full_o  (pm_fixup_full),
       // write buffer forwarding
       .wbuffer_data_o (wbuffer_data),
+      .fixup_wbuffer_o(fixup_wbuffer),
       .tx_paddr_o     (tx_paddr),
       .tx_vld_o       (tx_vld)
   );
@@ -398,7 +402,9 @@ module wt_dcache
       .inv_way_oh_i   (inv_way_oh),
       .inv_vld_bits_i (inv_vld_bits),
       // write buffer forwarding
-      .wbuffer_data_i (wbuffer_data)
+      .wbuffer_data_i (wbuffer_data),
+      .fixup_wbuffer_i(fixup_wbuffer),
+      .wbuffer_fwd_hit_o(wbuffer_fwd_hit)
   );
 
   // SL-W PMU event pass-through

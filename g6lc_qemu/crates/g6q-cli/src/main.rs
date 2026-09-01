@@ -13,6 +13,7 @@
 #![allow(clippy::items_after_test_module)]
 
 mod args;
+mod esp_fat;
 mod loader;
 mod pins;
 mod resolve;
@@ -274,6 +275,10 @@ fn emit_args(
     model: &TargetModel,
 ) -> Result<String, String> {
     let mut boot = resolve::boot_options(args);
+    crate::loader::apply_edk2_pflash(args, &mut boot)?;
+    crate::loader::apply_edk2_os_esp(args, &mut boot)?;
+    crate::loader::apply_uboot_os_esp(args, &mut boot)?;
+    crate::loader::apply_uboot_payload(args, &mut boot)?;
     g6q_emit_args::check_profile(model, &boot)?;
     if args.flag("plugin") || args.value("plugin").is_some() {
         boot.plugin = Some(plugin_path(args, model));
@@ -1271,6 +1276,38 @@ endpackage
     }
 
     #[test]
+    fn run_args_uboot_loader_emits_kernel() {
+        let args = Args::parse([
+            "run",
+            "--backend",
+            "args",
+            "--target",
+            "t",
+            "--loader",
+            "u-boot",
+            "--loader-image",
+            "out/u-boot.bin",
+        ]);
+        assert!(cmd_run(&args).is_ok());
+    }
+
+    #[test]
+    fn run_args_edk2_loader_emits_virt_pflash() {
+        let args = Args::parse([
+            "run",
+            "--backend",
+            "args",
+            "--target",
+            "t",
+            "--loader",
+            "edk2",
+            "--loader-image",
+            "out/edk2/CODE.fd",
+        ]);
+        assert!(cmd_run(&args).is_ok());
+    }
+
+    #[test]
     fn run_qemu_dry_run_does_not_require_a_binary() {
         let args = Args::parse([
             "run",
@@ -1283,6 +1320,39 @@ endpackage
             "/nonexistent/qemu",
         ]);
         assert!(cmd_run(&args).is_ok());
+    }
+
+    #[test]
+    fn qemu_stock_target_uboot_virt_stays_stock_virt() {
+        let model = TargetModel::default();
+        let virt = qemu_stock_target(
+            &Args::parse(["run", "--loader", "u-boot", "--machine", "g6lc-virt"]),
+            &model,
+        );
+        assert_eq!(virt.machine, "virt");
+        assert_eq!(virt.cpu_base, "rv64");
+        let soc = qemu_stock_target(
+            &Args::parse([
+                "run",
+                "--loader",
+                "u-boot",
+                "--machine",
+                "g6lc-soc",
+                "--target",
+                "g6lc64_smt2",
+            ]),
+            &TargetModel::new("g6lc64_smt2"),
+        );
+        assert_eq!(soc.machine, "g6lc-g6lc64_smt2");
+        assert!(soc.cpu_base.is_empty());
+    }
+
+    #[test]
+    fn send_on_splits_on_first_equals_and_unescapes() {
+        let v = parse_send_on(&[r"Please press Enter=\ncat /proc/cpuinfo\n".into()]).unwrap();
+        assert_eq!(v[0].0, "Please press Enter");
+        assert_eq!(v[0].1, "\ncat /proc/cpuinfo\n");
+        assert!(parse_send_on(&["nomatchequals".into()]).is_err());
     }
 
     #[test]
@@ -1370,7 +1440,8 @@ endpackage
         let mut cmd = std::process::Command::new("cmd");
         cmd.args(["/c", "echo AI_OK & timeout /t 2 >nul"]);
         let (status, captured) =
-            run_child_with_timeout(&mut cmd, Some(Duration::from_secs(3)), Some("AI_OK")).unwrap();
+            run_child_with_timeout(&mut cmd, Some(Duration::from_secs(3)), Some("AI_OK"), &[])
+                .unwrap();
         assert!(
             status.is_none(),
             "expected string should cause an early kill"
@@ -1384,7 +1455,8 @@ endpackage
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", "echo AI_OK; sleep 2"]);
         let (status, captured) =
-            run_child_with_timeout(&mut cmd, Some(Duration::from_secs(3)), Some("AI_OK")).unwrap();
+            run_child_with_timeout(&mut cmd, Some(Duration::from_secs(3)), Some("AI_OK"), &[])
+                .unwrap();
         assert!(
             status.is_none(),
             "expected string should cause an early kill"
@@ -2259,6 +2331,31 @@ fn run_args(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// Choose stock virt vs the generated B1 machine for `run --backend qemu`.
+fn qemu_stock_target(args: &Args, model: &TargetModel) -> g6q_emit_args::StockTarget {
+    let edk2 = crate::loader::from_args(args) == Some(crate::loader::Loader::Edk2);
+    let uboot = crate::loader::from_args(args) == Some(crate::loader::Loader::Uboot);
+    let soc = args.value("machine") == Some("g6lc-soc");
+    let force_stock_virt = edk2
+        || (uboot && !soc)
+        || args.value("stock-machine").is_some()
+        || args.value("stock-cpu").is_some();
+    if force_stock_virt {
+        g6q_emit_args::StockTarget {
+            machine: args.value_or("stock-machine", "virt").to_string(),
+            cpu_base: args.value_or("stock-cpu", "rv64").to_string(),
+        }
+    } else {
+        g6q_emit_args::StockTarget {
+            machine: format!(
+                "g6lc-{}",
+                g6q_emit_qemu::machine::machine_name(&model.target_id)
+            ),
+            cpu_base: String::new(),
+        }
+    }
+}
+
 /// Resolve the `qemu-system-riscv64` to spawn for `run --backend qemu`.
 ///
 /// `--qemu-path` always wins. Otherwise an in-tree `qemu/build/` binary is
@@ -2296,6 +2393,10 @@ fn run_qemu(args: &Args) -> Result<(), String> {
 
     let wsl = args.flag("wsl");
     let mut boot = resolve::boot_options(args);
+    crate::loader::apply_edk2_pflash(args, &mut boot)?;
+    crate::loader::apply_edk2_os_esp(args, &mut boot)?;
+    crate::loader::apply_uboot_os_esp(args, &mut boot)?;
+    crate::loader::apply_uboot_payload(args, &mut boot)?;
     g6q_emit_args::check_profile(&model, &boot)?;
     let record = args.value("record").map(str::to_string);
     if let Some(record_path) = &record {
@@ -2339,22 +2440,15 @@ fn run_qemu(args: &Args) -> Result<(), String> {
     };
 
     // Use the generated B1 machine by default; --stock-machine / --stock-cpu select B0 stock QEMU.
-    let (machine, cpu_base) =
-        if args.value("stock-machine").is_some() || args.value("stock-cpu").is_some() {
-            (
-                args.value_or("stock-machine", "virt").to_string(),
-                args.value_or("stock-cpu", "rv64").to_string(),
-            )
-        } else {
-            (
-                format!(
-                    "g6lc-{}",
-                    g6q_emit_qemu::machine::machine_name(&model.target_id)
-                ),
-                String::new(),
-            )
-        };
-    let stock = g6q_emit_args::StockTarget { machine, cpu_base };
+    // EDK2 RiscVVirt needs stock virt pflash. U-Boot on g6lc-virt (U1/U2) uses stock virt
+    // for virtio; `--machine g6lc-soc` (U3) keeps the generated faithful machine.
+    let stock = qemu_stock_target(args, &model);
+    // Generated B1 machines set min_cpus from NrHarts (g6lc64_smt2 → 2). An
+    // explicit `--smp 1` is rejected by QEMU; floor to the model's hart count.
+    if stock.cpu_base.is_empty() {
+        let min = model.soc.harts_total.max(1);
+        boot.smp = Some(boot.smp.unwrap_or(min).max(min));
+    }
     let argv = g6q_emit_args::build_argv(&model, &stock, &boot, &properties_for);
 
     let binary = qemu_binary(args);
@@ -2393,11 +2487,12 @@ fn run_qemu(args: &Args) -> Result<(), String> {
         .filter(|f| *f >= 0.0)
         .map(Duration::from_secs_f64);
     let expect = args.value("expect").map(str::to_string);
+    let send_on = parse_send_on(args.values("send-on"))?;
 
     // Run the child. If a timeout or an expected output marker is requested, we
     // spawn and watch stdout ourselves; otherwise a blocking status() is enough.
-    let (status, captured) = if timeout.is_some() || expect.is_some() {
-        run_child_with_timeout(&mut cmd, timeout, expect.as_deref())?
+    let (status, captured) = if timeout.is_some() || expect.is_some() || !send_on.is_empty() {
+        run_child_with_timeout(&mut cmd, timeout, expect.as_deref(), &send_on)?
     } else {
         let status = cmd
             .status()
@@ -2437,11 +2532,52 @@ fn run_qemu(args: &Args) -> Result<(), String> {
 ///
 /// Returns `(status, captured_stdout)`. `status` is `None` when the process was
 /// killed because the expected string appeared.
+fn parse_send_on(values: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut out = Vec::new();
+    for v in values {
+        let (pat, text) = v
+            .split_once('=')
+            .ok_or_else(|| format!("--send-on needs MATCH=TEXT, got `{v}`"))?;
+        if pat.is_empty() {
+            return Err("--send-on MATCH must be non-empty".into());
+        }
+        out.push((pat.to_string(), unescape_send(text)));
+    }
+    Ok(out)
+}
+
+fn unescape_send(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn run_child_with_timeout(
     cmd: &mut std::process::Command,
     timeout: Option<Duration>,
     expect: Option<&str>,
+    send_on: &[(String, String)],
 ) -> Result<(Option<std::process::ExitStatus>, Vec<u8>), String> {
+    if !send_on.is_empty() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
         .spawn()
@@ -2470,10 +2606,19 @@ fn run_child_with_timeout(
         }
     });
 
+    let mut stdin = child.stdin.take();
+    let mut send_idx = 0usize;
     let start = Instant::now();
     let (status, killed_for_expect) = loop {
+        let buf = captured.lock().unwrap().clone();
+        if send_idx < send_on.len() && bytes_contains(&buf, send_on[send_idx].0.as_bytes()) {
+            if let Some(sin) = stdin.as_mut() {
+                let _ = sin.write_all(send_on[send_idx].1.as_bytes());
+                let _ = sin.flush();
+            }
+            send_idx += 1;
+        }
         if let Some(exp) = expect {
-            let buf = captured.lock().unwrap().clone();
             if bytes_contains(&buf, exp.as_bytes()) {
                 terminate_child(&mut child);
                 break (None, true);
@@ -2621,11 +2766,23 @@ fn wslize_boot(boot: &mut g6q_emit_args::BootOptions) {
     for d in &mut boot.drives {
         *d = wslize_qemu_comma_arg(d);
     }
+    for d in &mut boot.mtd {
+        *d = wslize_path(d);
+    }
     if let Some(d) = &boot.debug_file {
         boot.debug_file = Some(wslize_path(d));
     }
     if let Some(p) = &boot.plugin {
         boot.plugin = Some(wslize_qemu_comma_arg(p));
+    }
+    if let Some(p) = &boot.pflash_code {
+        boot.pflash_code = Some(wslize_path(p));
+    }
+    if let Some(p) = &boot.pflash_vars {
+        boot.pflash_vars = Some(wslize_path(p));
+    }
+    for (p, _) in &mut boot.mem_loads {
+        *p = wslize_path(p);
     }
 }
 

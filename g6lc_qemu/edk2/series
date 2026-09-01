@@ -1,0 +1,4 @@
+# Applied by apply-patches.sh onto official tianocore/edk2 @ edk2-stable202511.
+# Paths are relative to g6lc_qemu/.
+patches/edk2-riscv-sstatus-no-stack.patch
+patches/edk2-riscv-trap-frame-width.patch

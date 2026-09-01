@@ -1,0 +1,30 @@
+From: Etienne Cimon <etcimon@globecsys.com>
+Subject: [PATCH] kernel-defaults: G6LC olddefconfig hook for NEW kconfig symbols
+
+SOC_VIRT (and other overlay selects) expose NEW symbols that make OpenWrt's
+non-interactive syncconfig fail. Close them with olddefconfig after
+Kernel/Configure writes .config.set.
+
+This patch is applied to official openwrt/openwrt (v24.10.2). The etcimon
+fork is not used at compile time.
+
+---
+ include/kernel-defaults.mk | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/include/kernel-defaults.mk b/include/kernel-defaults.mk
+--- a/include/kernel-defaults.mk
++++ b/include/kernel-defaults.mk
+@@ -125,7 +125,11 @@ define Kernel/Configure/Default
+ 	cmp -s $(LINUX_DIR)/.config.set $(LINUX_DIR)/.config.prev || { \
+ 		cp $(LINUX_DIR)/.config.set $(LINUX_DIR)/.config; \
+ 		cp $(LINUX_DIR)/.config.set $(LINUX_DIR)/.config.prev; \
+ 	}
++	# G6LC_OLDDEFCONFIG: close NEW kconfig symbols non-interactively
++	$(KERNEL_MAKE) olddefconfig
++	cp $(LINUX_DIR)/.config $(LINUX_DIR)/.config.set
++	cp $(LINUX_DIR)/.config $(LINUX_DIR)/.config.prev
+ 	$(_SINGLE) [ -d $(LINUX_DIR)/user_headers ] || $(KERNEL_MAKE) $(if $(findstring uml,$(BOARD)),ARCH=$(ARCH)) INSTALL_HDR_PATH=$(LINUX_DIR)/user_headers headers_install
+ 	grep '=[ym]' $(LINUX_DIR)/.config.set | LC_ALL=C sort | $(MKHASH) md5 > $(LINUX_DIR)/.vermagic
+ endef
+

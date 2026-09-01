@@ -5,7 +5,15 @@ independence contract). This file is the **plan of record**; the queue is the st
 
 Each stage names its deliverable, its **entry** condition, its **exit gate**, and what its output may
 be cited as. The recurring answer to the last is *"a hypothesis and a checkpoint, never evidence"*
-([`README.md`](README.md) §6.1).
+([`README.md`](README.md) §6.1). WIP vs SMT2 / 100 TOPS / PCIe:
+[`../current-stage.md`](../current-stage.md).
+
+**Live state (2026-09).** Q0–Q1 complete. **Q2 boot gate met on QEMU** (stock virt + generated
+`g6lc-soc`: OpenSBI, U-Boot U1–U3, EDK2 E2–E3, OpenWrt, `CPUINFO-DONE` on SPI). Q3 native VM and
+Q4 B1 machine are **in progress and used** (F/D/RVC, AI island helpers, dual-hart FDT). Q5–Q9
+partial (checkpoint/replay, B2 plugin, PMU, virt profile, matrix). Loader ladder and AI DESC/CPL
+join are **firmware/card stand-in**, not a pinned PCIe function. Never cite this as Variane
+evidence.
 
 ---
 
@@ -73,7 +81,7 @@ Three refinements the soak forced, all recorded in `g6lc_qemu/AGENTS-todo.md`:
 
 ---
 
-## Q2 — B0: stock-QEMU driver + OpenSBI ✅ *(emission complete; boot gate pending host tooling)*
+## Q2 — B0: stock-QEMU driver + OpenSBI ✅ *(emission complete; boot gate later met on QEMU)*
 
 **Deliverable** `g6q-emit-args`: generated `.dtb`, `-cpu rv64,<props>`, machine/kernel/initrd/append
 argv, plus the **capability delta report** (what stock `virt` cannot express). `g6q fw` drives the
@@ -94,12 +102,15 @@ through an in-tree flattened-tree writer *and* reader, so **no external device-t
 required**; all seven real trees round-trip with their facts intact. Disks and networking are
 refused on the faithful machine, which genuinely has neither.
 
-**Blocked on host tooling, and honestly so.** No emulator, device-tree compiler or cross-toolchain
-is installed where this was written, so the exit gate above has *not* been demonstrated and `g6q fw`
-is not implemented — building the firmware chain blind against the in-tree profile would be
-guesswork. The `qemu` property names in the capability table are likewise unvalidated; most default
-to the device-tree token, and a wrong one fails at start-up rather than silently. Closing Q2 needs
-an emulator and a toolchain on the host.
+**Written as blocked on host tooling.** That was honest at Q2 authoring: no emulator or
+cross-toolchain on that host, so the exit gate had not been demonstrated.
+
+**Later outcome (2026-09).** The Q2 boot gate **is met on QEMU**: in-tree `qemu-system-riscv64`
+boots OpenSBI on stock virt and on generated `g6lc-g6lc64_smt2`; U-Boot and EDK2 loaders and
+OpenWrt EFI stubs are green on virt; U3-FIT/SPI `CPUINFO-DONE` is green on `g6lc-soc`. See
+[`u-boot-edk2-boot-architecture.md`](u-boot-edk2-boot-architecture.md) and package
+`g6lc_qemu/AGENTS-todo.md`. Residual: E4 full EDK2 FD on Variane (no 32 MiB pflash); soc
+U3-Shell StartImage hang. Still **not** B1 RTL evidence.
 
 ---
 

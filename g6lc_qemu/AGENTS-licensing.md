@@ -45,6 +45,7 @@ QEMU is **GPL-2.0**. This package is MIT. Both facts survive because of one stru
 | The generator (`crates/**`, `tools/**`) | **MIT** | yes |
 | C source the generator **emits** (machine, CPU, devices, TCG plugins) | **GPL-2.0-or-later**, authored by the emitter into a **separate work** | **no** — `out/`, `qemu/` are gitignored |
 | The QEMU checkout that receives the emission | upstream GPL-2.0, untouched | **no** — fetched on demand, rev in `pins.toml` |
+| OpenWrt / Ubuntu distro sources | upstream GPL / Canonical | **dev forks** under `linux-dist/openwrt-*` (etcimon); **compile** uses official OpenWrt + `openwrt/patches/` |
 | The native Rust VM (B3) | **MIT** | yes |
 
 ### 2.1 Prohibited, without exception

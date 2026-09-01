@@ -117,6 +117,8 @@ g6lc_qemu/
   schemas/                   ← target-model.schema.json, conformance.schema.json
   out/                       ← gitignored: emitted artifacts, DTBs, firmware
   qemu/                      ← gitignored: the QEMU checkout emission targets (separate GPL work)
+  openwrt/                   ← E3 compile: official OpenWrt + patches/ (MIT scripts)
+  linux-dist/                ← etcimon OpenWrt forks (openwrt-*) + ubuntu scaffold; not used at compile
   .tools/                    ← gitignored: contained rustup / cargo / venv
 ```
 

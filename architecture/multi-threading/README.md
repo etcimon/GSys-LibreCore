@@ -29,8 +29,9 @@ workers.
 | Per-hart GHR | **Live** — `g6lc_bp_ghist` + gshare GHR banks |
 | Shared BHT/BTB | Shared tables (cross-hart pollution possible) |
 | `g6lc_thread_select.sv` + `g6lc_hart_state.sv` | **Live** under `core/smt_legacy/` — inventory [`../core-fetch/SMT-LEGACY.md`](../core-fetch/SMT-LEGACY.md) |
-| Soft-ladder DI residual | **Active** — S4 fetch_B/IQ leftover (`12958` → jump-to-0 / `sbi_hart_hang`). E0–E3 + G1 landed. PEEL `129f8`/4/9 and `12958` are the live pins. |
-| AI / PyTorch host path | **Live soft** on `g6lc64_ai` + virt-ai-pcie; **SMT2 multi-thread pytorch** after SL-C |
+| Soft-ladder DI residual | **Active** — Variane cookie `51b1babe` is the SUCCESS pin; QEMU dual-hart OpenSBI/Linux is **not** that pin. SL-C topology + R3b Image still open. Snapshot: [`../current-stage.md`](../current-stage.md). |
+| QEMU SMT2 firmware | **Green as hypothesis** — `g6q run` OpenSBI/U-Boot/EDK2/OpenWrt `--smp 2` on virt and generated soc | Never cite as Variane |
+| AI / PyTorch host path | **Live soft** on `g6lc64_ai` + virt-ai-pcie + EDK2 DESC join; **SMT2 multi-thread pytorch** after SL-C + Image |
 
 ### Model: fine-grain SMT (drain-friendly)
 On thread switch: flush **IF** and drop **unissued** decode; restore banked NPC; **do not** clear scoreboard/EX or BP. Outgoing-hart ops retire with CSR/RF keyed by instruction `hart_id`. Active fetch hart owns RAS/GHR bank and privilege mux. See `smt2-bringup.md`.

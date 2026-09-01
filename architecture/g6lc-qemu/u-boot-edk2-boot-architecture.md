@@ -1,6 +1,6 @@
 # U-Boot / EDK2 boot architecture for `g6lc_qemu`
 
-**Status:** scaffold / plan of record. U0 (U-Boot build-only scaffolding) and E0 (EDK2 build-only scaffolding) are now started in `g6lc_qemu`; see `g6lc_qemu/AGENTS-todo.md` and `g6lc_qemu/pins.toml`. Runtime stages U1–U3 and E1–E3 remain gated until the O7p `core/fetch_B/instr_queue` residual is closed: `mini_fdt_next_tag_lbu` still fails because the third caller loads `nextoff` from `0x80007fcc` and gets 0x4 instead of the 0x8 just stored. This is the S1/SL-W L1-stale store-to-load class, not a queue-order bug. Build-only Stage U0/E0 scaffolding can proceed in parallel. This file is
+**Status:** U0/U1/U2 green on QEMU virt; **U3a/U3b/U3-FIT/U3-SPI green** on generated `g6lc-soc` (OpenWrt EFI FIT from SPI NOR via `sf read`+`bootm`, no DRAM loader; `/proc/cpuinfo` via QEMU `-initrd` overlay). E0–E3 green as below. E1 RTL SEC-ABI green (`mini_edk2_sec` PASS on `work-ver-smt2-fw64-B-slwfix`). E1 FD wraps `OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc`. E2 QEMU virt **green**: Shell v2.2 **and** virtio-blk ESP (`FS0:`, `EFI/BOOT/BOOTRISCV64.EFI` via `startup.nsh` → `E2-VIRTIO-ESP`). E3 Image is a **custom OpenWrt v24.10.2 compile** (`g6lc_qemu/openwrt/`, sifiveu + virtio/EFI overlay); `g6q run --loader edk2 --os openwrt` stages that PE as `BOOTRISCV64.EFI`. See `g6lc_qemu/AGENTS-todo.md` and `g6lc_qemu/pins.toml`. This file is
 `architecture/` tier **T** (MIT), `.md` only, not compiled.
 
 Parent: [`architecture/g6lc-qemu/README.md`](README.md) · OS/firmware semantics:
@@ -36,27 +36,49 @@ generates firmware, emits DTB, and distinguishes the `g6lc-soc` (hardware-faithf
 
 ### B1 · Fetch/instruction-queue program order
 
-`core/fetch_B/instr_queue.sv` can issue instructions out of program order when multiple FIFOs hold
-entries from different fetch windows. The current O7p logic (global `push_seq` age + oldest-first output
-pointer) keeps the queue live, and a 2-bit `shamt` width bug that caused pseq collisions was fixed. RVFI shows the
-fail is now a store-to-load stale read: the second `next_tag_lbu` call stores `nextoff=0x8` to `0x80007fcc`, the third
-caller immediately loads the same address and gets `0x4`. This is the S1/SL-W L1-stale class, not I6 clause 1.
+I6 clause 1 is implemented in `instr_queue.sv` (O7p age-select) and the supporting FIFO
+insertion-order contract is proven (`cva6_fifo_v3_order.sby` PASS). `mini_fdt_next_tag_lbu` and
+`mini_stq_flush_fwd` **PASS** on `work-ver-smt2-fw64-B-slwfix` (`slw-fdt-regress` /
+`slw-gate6-noprop`; keep-on-miss did not hang FDT). Gate-6 no longer blocks E2.
 
-**Do not extend the boot ladder past OpenSBI until this is closed.** A second-stage loader is larger
-and more branch/dcache-sensitive than the OpenSBI payload. If the queue can invert a return path
-(F0/F1/F2/F3 head order), it can also invert a U-Boot `relocate` loop or an EDK2 PEI dispatcher.
-The same failure would appear as a silent hang or a corrupted `.data` segment, and the diagnosis
-would move through 10–100 M cycles instead of the current 6.5 M.
+**E2 QEMU virt is green** (not Variane). OpenSBI hands off to pflash `0x20000000` S-mode.
+Two assembler-preprocessor ABI bugs (xpack gcc defaults to rv32/ilp32; EDK2
+`GCC5_RISCV64_PP_FLAGS` omitted `-mabi=lp64` while `ASM_FLAGS` had it):
+
+1. `RiscVDisableSupervisorModeInterrupts` did `addi sp,-4` / `sd a1,(sp)` and
+   smashed the caller's saved `s0`. Patch:
+   `g6lc_qemu/patches/edk2-riscv-sstatus-no-stack.patch` (use `t0`, no stack).
+   CpuDxe then prints `SATP mode 10 successfully configured`.
+2. `SupervisorModeTrap` allocated `addi sp,sp,-140` (35×4) against a C
+   `UINT64[35]` struct (280, sepc at 256). `sd`/`ld` at 4-byte strides overlapped
+   sepc/sstatus; after CpuTimer `s_timer` this was `INST_ACCESS_PAGE_FAULT` at
+   DRAM size (`0x100000000` with `-m 4096`). Patch:
+   `g6lc_qemu/patches/edk2-riscv-trap-frame-width.patch` (offset ×8) plus
+   `-march=rv64gc -mabi=lp64` on `*_GCC5_RISCV64_PP_FLAGS` (LoongArch already
+   did this). Linked CpuDxe: `addi sp,sp,-280`.
+
+DEBUG and RELEASE both reach Bds and **UEFI Interactive Shell v2.2**
+(`Shell>`). Virtio-blk ESP (`fat:rw:out/loader-run/esp` with
+`EFI/BOOT/BOOTRISCV64.EFI` = RELEASE `Shell.efi`) maps as `FS0:`/`HD0b:`;
+Shell runs `startup.nsh` and prints `E2-VIRTIO-ESP` then launches that EFI
+app. `g6q run --backend qemu --loader edk2 --machine g6lc-virt --wsl
+--drive fat:rw:out/loader-run/esp --expect E2-VIRTIO-ESP` is green on
+in-tree QEMU 10.0.0. Default CODE/VARS:
+`out/loader-run/src/RISCV_VIRT_{CODE,VARS}.fd` (RELEASE, trap-frame ×8).
+`ProtectUefiImage` still warns `Image Section Alignment(0x40) vs 0x1000` on
+DEBUG Shell.efi; that is non-fatal. Distro 8.2 rejects g6q's `zacas=` CPU
+property — use in-tree 10.0.0 for `g6q run`. E3 Image is OpenWrt v24.10.2 custom-compiled (`g6lc_qemu/openwrt/build.sh`,
+sifiveu + `kernel-virt.config` EFI stub/virtio/8250). Not Variane.
 
 **Decision rule (H1, H2, H3 from heuristics):**
 
 ```text
 JUDGEMENT
   GIVEN    OpenSBI fw_payload is the smallest real supervisor witness
-  AND      the O7p residual is the S1/SL-W store-to-load stale read
-  THEN     U-Boot/EDK2 run stages are gated until SL-W gate-6 is green, but build-only U0/E0 can proceed
-  UNLESS   the `g6lc_qemu` OpenSBI boot witness and `mini_fdt_next_tag_lbu` both pass
-  BECAUSE  P1 (workload is a witness) + P4 (a broken promise is discovered at a third module)
+  AND      `mini_stq_flush_fwd` and `mini_fdt_next_tag_lbu` PASS on slwfix
+  AND      QEMU virt DEBUG EDK2 prints UEFI Interactive Shell v2.2
+  THEN     E2 is closed as a QEMU-virt firmware witness, not an RTL gate
+  BECAUSE  P1 (workload is a witness) — the remaining 0x40 vs 0x1000 warning is non-fatal
 ```
 
 ### B2 · No `g6lc_qemu` loader build profile
@@ -193,14 +215,18 @@ U-Boot entry. The FDT is the one `g6q` generated for the target, optionally over
 |---|---|---|---|
 | U0 | `build-loader` succeeds; `u-boot-spl.bin` and `.itb` emitted | `g6q check` | Build-time gate; no RTL |
 | U1 | U-Boot SPL reaches `board_init_f`/`board_init_r` on `g6lc-virt` | `g6q run` + string match | Fast, ~seconds |
-| U2 | U-Boot loads the FIT and starts the kernel on `g6lc-virt` with virtio | `g6q run` + kernel console | Fast, minutes |
-| U3 | Same on `g6lc-soc` with SD image (or SPI flash) | `g6q run` + kernel console | Hardware-faithful |
+| U2 | U-Boot distro-boot `bootefi` of the OpenWrt EFI-stub PE from a partitioned virtio ESP (`esp-uboot.img`) | `g6q run --loader u-boot --os openwrt` + kernel console | Fast, minutes. FIT remains a later `g6lc-soc` path; the E3 product is PE32+ |
+| U3a | U-Boot banner on generated `g6lc-<target>` (`--machine g6lc-soc`) | `g6q run --loader u-boot --machine g6lc-soc --expect U-Boot` | Fast. B1 reset stays at OpenSBI; `-kernel` at DRAM+2MiB |
+| U3b | Linux + procd on `g6lc-soc` via U-Boot `bootefi` of a DRAM-resident OpenWrt PE (no virtio/SD) | `g6q run --loader u-boot --os openwrt --machine g6lc-soc --expect "procd: - init -"` | Fast |
+| U3-FIT | Same machine, `bootm` of `g6lc-efi.itb` (`os = efi`) plus QEMU `-initrd cpuinfo-init.cpio` | `--expect CPUINFO-DONE` (or `procd: - init -`) | Fast |
+| U3-SPI | Same machine, `sf probe` + `sf read` + `bootm` of the EFI FIT from NOR (`n25q256a`, `-drive if=mtd`; no DRAM loader) | `--expect SPI-READ-DONE` or `CPUINFO-DONE` | Fast |
+| U3-Shell | U-Boot `bootefi` of EDK2 `Shell.efi` | virt: `--os efi-shell --machine g6lc-virt --expect "UEFI Interactive Shell"`; soc SPI FIT still StartImage-hangs (`bootefi hello` ASCII is green there) | Fast |
 | U4 | Tandem with RTL trace for U1–U3 selected steps | `--diag d1` | Only after SL-W gate-6 green |
 
 Stage U0 (build-loader) can start before the RTL residual is fully closed because it is a build step.
-U1–U2 run on `g6lc-virt` with stock QEMU and are independent of the RTL queue order, but boot
-validation must not claim green until `mini_fdt_next_tag_lbu` and the I6 clause 1 proof are green.
-U3 and U4 are gated on `g6lc-soc` and on the queue fix.
+U1–U2 run on `g6lc-virt` with stock QEMU. U3a runs on the generated B1 `g6lc-soc` machine.
+U3b, U3-FIT, and U3-SPI (`sf read` + `bootm` of the FIT from NOR, then `CPUINFO-DONE`) are green.
+U3-Shell is green on virt (distro `bootefi` of `Shell.efi` from `esp-shell.img`). On `g6lc-soc` the same PE is a FIT on NOR: `bootm` transfers to EFI then hangs; `bootefi hello` prints `Hello, world!`. U4 remains later.
 
 ---
 
@@ -247,18 +273,21 @@ g6q run --target g6lc64_smt2 --machine g6lc-virt \
 ```
 
 `g6lc-virt` is the natural first profile for EDK2 because it provides virtio storage and a UEFI
-variable store in a flash file. `g6lc-soc` EDK2 would need a real NOR/SPI flash model and is
-explicitly deferred.
+variable store in a flash file. SPI NOR (`n25q256a` on FPGA Xilinx AXI SPI) now exists on
+`g6lc-soc` (U3-SPI). Full EDK2 FD still needs 32 MiB pflash and stays deferred. U-Boot can
+`bootefi` EDK2 `Shell.efi` from a virtio ESP (U3-Shell virt green); the soc SPI FIT path
+loads that PE then hangs in `StartImage`.
 
 ### 4.5 Validation ladder
 
 | Stage | What | Gate |
 |---|---|---|
 | E0 | `build-loader` succeeds and emits a `.fd` | `g6q check` |
-| E1 | SEC/PEI reaches DXE on `g6lc-virt` | `g6q run` + EDK2 serial output |
+| E1 | SEC ABI on RTL (`mini_edk2_sec`); FD from `RiscVVirtQemu.dsc` | remote Variane + `g6q fw build --loader edk2` |
 | E2 | BDS enumerates virtio block and loads an `EFI/boot/bootriscv64.efi` | `g6q run` |
-| E3 | Linux starts under UEFI on `g6lc-virt` | `g6q run` + kernel console |
-| E4 | Tandem with RTL trace | `--diag d1` (gated on SL-W gate-6 green) |
+| E2-PCI | EDK2 Shell `pci` on QEMU virt GPEX + a stock virtio-blk **PCI function** (host **root complex**; not the AI card endpoint) | `--expect 1AF4`: `1B36:0008` GPEX and `1AF4:1001` SCSI virtio-blk at `PciRoot(0x0)/Pci(0x1,0x0)`. ESP also carries packed `DESC.BIN` (ingested OP_GEMM, not a BAR). Card stand-in remains `virt_ai_card` until `contracts.ai_host_transport` is pinned |
+| E3 | Linux starts under UEFI on `g6lc-virt` | `g6q run --loader edk2 --os openwrt --smp 2` → `Brought up 1 node, 2 CPUs` and `procd: - init -` |
+| E4 | Tandem with RTL trace | Variane cannot boot 32 MiB pflash. RTL witness stays `mini_edk2_sec`. Official edk2 + `g6lc_qemu/patches/edk2-*.patch` (etcimon fork is extract-only). |
 
 ---
 
@@ -280,7 +309,10 @@ g6q fw build --loader u-boot|edk2 --target g6lc64_smt2 --machine g6lc-virt
 - `--machine g6lc-virt` is the first supported profile; `g6lc-soc` is accepted but not yet runtime-validated.
 - Dry-run writes the generated board package and build script and prints the planned command without invoking the loader build.
 
-`g6q run --loader u-boot|edk2` is *not* implemented yet; it is part of U1/E1 and is gated on the RTL residual.
+`g6q run --backend args|qemu --loader edk2` is implemented: it forces stock `-M virt`
+pflash0/pflash1 (`acpi=off`), pads CODE/VARS to 32 MiB, and emits `-blockdev` nodes.
+`--loader-image` / `--loader-vars` select the FDs. The RTL witness remains
+`verif/tests/custom/multicore/mini_edk2_sec.S` (remote Variane).
 
 ### 5.2 IR additions
 
@@ -394,12 +426,18 @@ silently produce a broken image.
 |---|---|---|---|
 | **U0** | Now (build-only scaffolding) | Pin U-Boot/EDK2 revs in `g6lc_qemu/pins.toml` as `planned`; implement `g6q fw build --loader u-boot` for `g6lc-virt`; generate board package + build script; do **not** claim a green build until host cross-toolchain/network validated | Build scaffolding and dry-run green; no runtime claim |
 | **U1** | U0 green | `g6q run` U-Boot SPL to `board_init_r` on `g6lc-virt` with virtio | U-Boot loader witness in QEMU |
-| **U2** | U1 green | `g6q run` U-Boot FIT → Linux on `g6lc-virt` | Distro boot in emulator |
-| **U3** | U2 green + SL-W gate-6 green + I6 clause 1 proven | `g6lc-soc` U-Boot with SD/SPI, tandem D1 | Hardware-faithful boot |
-| **E0** | Now (build-only scaffolding, in parallel with U0) | Pin EDK2 + edk2-platforms revs; implement `g6q fw build --loader edk2` for `g6lc-virt`; generate DEC/DSC/FDF/h + build script; expected to fail at runtime because the RISC-V SEC/PEI/DXE/BDS platform is not yet wired | Build scaffolding and dry-run green; no runtime claim |
-| **E1** | E0 green + U2 green | `g6q run` EDK2 SEC/PEI to DXE on `g6lc-virt` | EDK2 FD witness in QEMU |
-| **E2** | E1 green | `g6q run` EDK2 → Linux on `g6lc-virt` | UEFI distro boot |
-| **E3** | E2 green + SL-W gate-6 green + I6 clause 1 proven | Tandem with RTL on selected U-Boot/EDK2 stages | Evidence |
+| **U2** | U1 green | `g6q run --loader u-boot --os openwrt` on `g6lc-virt`: OpenSBI → U-Boot `bootefi` → OpenWrt EFI stub `Linux version 6.6.93` (`efi: EFI v2.11 by Das U-Boot`). `--smp 2` green: `HARTs 0*,1*`, `Brought up 1 node, 2 CPUs`, `procd: - init -`. ESP is MBR+FAT16 `out/loader-run/esp-uboot.img` (QEMU `fat:rw:<dir>` has no partition table). | Distro boot in emulator |
+| **U3a** | U2 green | `g6q run --loader u-boot --machine g6lc-soc`: generated `g6lc-g6lc64_smt2`, OpenSBI next `0x80200000`, **`U-Boot 2025.07`**, `Model: GSys LibreCore g6lc64_smt2`. B1 fix: reset vector stays at `-bios`; `-kernel` loads at DRAM+2MiB (S-mode U-Boot cannot run from M-mode reset). Generated machine `min_cpus` is NrHarts (2); `--smp 1` is floored. | U-Boot on the faithful machine |
+| **U3b** | U3a green | `g6q run --loader u-boot --os openwrt --machine g6lc-soc --smp 2 --expect "procd: - init -"`: DRAM PE at `0x84000000`, soc U-Boot `bootefi` + `earlycon=sbi`. **`Linux version 6.6.93`**, 2 CPUs, **`procd: - init -`**. | Kernel + userspace on the faithful machine |
+| **U3-FIT** | U3b green | `mkimage` FIT `g6lc-efi.itb` (`kernel_noload` / `os = efi`). `bootm 0x84000000` → EFI stub → **`Linux version 6.6.93`**. Cpuinfo witness is QEMU `-initrd cpuinfo-init.cpio`. | cva6-sdk FIT shape on the faithful machine |
+| **U3-SPI** | U3-FIT green | FPGA `xlnx_axi_quad_spi` at `0x20000000` (PLIC 2) + QEMU `n25q256a` (`-drive if=mtd`). No DRAM loader. **`SPI-PROBE-DONE`** → **`SPI-READ-DONE`** (24 MiB) → `bootm` → **`Linux version 6.6.93`** / **`CPUINFO-DONE`**. | Hardware SPI window, not virtio |
+| **U3-Shell** | U3-SPI green | `g6q run --loader u-boot --os efi-shell --machine g6lc-virt --expect "UEFI Interactive Shell"`: distro `bootefi` of EDK2 `Shell.efi` from MBR+FAT16 `esp-shell.img`. Banner **`UEFI Interactive Shell v2.2`**, `UEFI v2.110 (Das U-Boot)`, `FS0:`. Soc SPI FIT `bootm` of the same PE transfers to EFI then hangs after `Booting <NULL>`; soc `bootefi hello` prints **`Hello, world!`**. | EDK2 Shell via U-Boot, not a 32 MiB pflash FD |
+| **E0** | Done (build-only wrap) | Pin EDK2 `edk2-stable202511`; `g6q fw build --loader edk2` for `g6lc-virt` wraps upstream `OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc` (PEI-less S-mode payload). edk2-platforms is not required for virt. | Dry-run green; generated script invokes the upstream DSC |
+| **E1** | FD green; RTL SEC-ABI green on slwfix B | Remote Verilator `mini_edk2_sec` **PASS** on `work-ver-smt2-fw64-B-slwfix` (oracle green). FD **PASS** (CODE 8 MiB / VARS 768 KiB). Post-sync SIGSEGV isolated to SL-W `wbuffer_all`/signed `%` (not IQ casts); crash-fix in tree. WSL QEMU 8.2.2 virt pflash: OpenSBI hands off to `0x20000000` S-mode, then EDK2 `STORE_ACCESS_PAGE_FAULT` — SEC/DXE banner not reached. | FD + RTL SEC-ABI green; QEMU SEC fault is an E1 residual |
+| **E2** | E1 green | `g6q run` EDK2 Bds + Shell; virtio-blk ESP `FS0:` + `BOOTRISCV64.EFI` (`E2-VIRTIO-ESP`) | UEFI loader + virtio witness |
+| **E2-PCI** | E2 green | GPEX `1B36:0008`; virtio-blk `1AF4:1001`; virtio-net `1AF4:1000` (VirtioNetDxe **`Virtio Network Device`** bound); virtio-serial `1AF4:1003`. Hubport: no slirp, no `ifconfig` addresses. ESP `DESC.BIN`/`DESC.HEX`/`DESC.TXT` is a packed OP_GEMM from ingested `desc_layout` (`--expect OP_GEMM`). `CAP.TXT` is ingested island geometry plus modelled peak (`--expect modelled_peak_gops`; fixture 512 GOPS, not 100 TOPS). virt_ai_card BAR4 name `DESC` loads that image into UIO DESC@0x140; CAP window is seeded from the same model. **Root-complex** firmware. Transport pin unpinned. | EDK2 PciBus + stock virtio blk/net/console roles + packed-desc file + existing ai-tensor TCP card, not a fused AI BAR |
+| **E3** | E2 green + OpenWrt custom Image | `g6q run` EDK2 → OpenWrt EFI stub on `g6lc-virt` | UEFI OpenWrt boot |
+| **E4** | E3 green + SL-W gate-6 green + I6 clause 1 proven | Tandem with RTL on selected U-Boot/EDK2 stages | Evidence |
 
 The staging is deliberately **not** a test plan. It is a feature promotion ladder: each phase is a
 build-platform suite or `g6q` command, and the decision to enter the next phase is a green gate, not

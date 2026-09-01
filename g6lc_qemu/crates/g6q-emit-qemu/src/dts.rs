@@ -155,6 +155,11 @@ fn build_dts(model: &TargetModel) -> Node {
     cpus.props
         .insert("timebase-frequency".into(), cell(model.isa.timebase_hz));
 
+    // Phandle 1 is the PLIC. CPU intc of hart h is 2+h. The cpu@h node itself
+    // sits after the intc range so cpu-map can point at the hart, not the intc.
+    let cpu_node_phandle = |h: u32| 2 + harts as u64 + h as u64;
+    let cpu_intc_phandle = |h: u32| 2 + h as u64;
+
     for h in 0..harts {
         let mut cpu = Node {
             name: format!("cpu@{h}"),
@@ -162,6 +167,8 @@ fn build_dts(model: &TargetModel) -> Node {
         };
         cpu.props.insert("device_type".into(), s("cpu"));
         cpu.props.insert("reg".into(), cell(h as u64));
+        cpu.props
+            .insert("phandle".into(), cell(cpu_node_phandle(h)));
         cpu.props.insert("status".into(), s("okay"));
         cpu.props.insert("compatible".into(), s("riscv"));
         cpu.props.insert("riscv,isa".into(), s(&isa_string(model)));
@@ -173,6 +180,32 @@ fn build_dts(model: &TargetModel) -> Node {
             cpu.props
                 .insert("mmu-type".into(), s(&format!("riscv,{mmu}")));
         }
+        // CMO block size is the platform Zic64b size (64 B), not the L1 line.
+        if ext_live(model, "zicbom") {
+            cpu.props.insert("riscv,cbom-block-size".into(), cell(64));
+        }
+        if ext_live(model, "zicboz") {
+            cpu.props.insert("riscv,cboz-block-size".into(), cell(64));
+        }
+        if let Some(sz) = uarch_u64(model, "IcacheByteSize") {
+            cpu.props.insert("i-cache-size".into(), cell(sz));
+        }
+        if let Some(bits) = uarch_u64(model, "IcacheLineWidth") {
+            cpu.props
+                .insert("i-cache-block-size".into(), cell(bits / 8));
+        }
+        if let Some(sz) = uarch_u64(model, "DcacheByteSize") {
+            cpu.props.insert("d-cache-size".into(), cell(sz));
+        }
+        if let Some(bits) = uarch_u64(model, "DcacheLineWidth") {
+            cpu.props
+                .insert("d-cache-block-size".into(), cell(bits / 8));
+        }
+        if uarch_u64(model, "InstrTlbEntries").is_some()
+            && uarch_u64(model, "DataTlbEntries").is_some()
+        {
+            cpu.props.insert("tlb-split".into(), Prop::Flag);
+        }
 
         let mut intc = Node {
             name: "interrupt-controller".into(),
@@ -180,13 +213,17 @@ fn build_dts(model: &TargetModel) -> Node {
         };
         intc.props.insert("#interrupt-cells".into(), cell(1));
         intc.props.insert("compatible".into(), s("riscv,cpu-intc"));
-        intc.props.insert("phandle".into(), cell(h as u64 + 2));
+        intc.props
+            .insert("phandle".into(), cell(cpu_intc_phandle(h)));
         intc.props.insert("interrupt-controller".into(), Prop::Flag);
         cpu.children.push(intc);
         cpus.children.push(cpu);
     }
 
     // cpu-map, only when the model expresses it without guessing.
+    // Linux cpus.yaml: SMT cores have threadN { cpu = <&cpuM>; } children;
+    // a single-thread core is a leaf with cpu = <&cpuM>. Never a threadN
+    // *property* on the core (that made core0 a leaf without `cpu`).
     if let (Some(cores), Some(threads)) = (model.soc.cores, model.soc.threads_per_core) {
         if cores > 0 && threads > 0 && cores * threads <= harts {
             let mut cpu_map = Node {
@@ -197,19 +234,28 @@ fn build_dts(model: &TargetModel) -> Node {
                 name: "cluster0".into(),
                 ..Node::default()
             };
-            let mut h = 0;
+            let mut h = 0u32;
             for c in 0..cores {
                 let mut core = Node {
                     name: format!("core{c}"),
                     ..Node::default()
                 };
-                for t in 0..threads {
+                if threads == 1 {
                     if h < harts {
-                        core.props.insert(
-                            format!("thread{t}"),
-                            cell(h as u64 + 2), // CPU{h}_intc phandle
-                        );
+                        core.props.insert("cpu".into(), cell(cpu_node_phandle(h)));
                         h += 1;
+                    }
+                } else {
+                    for t in 0..threads {
+                        if h < harts {
+                            let mut thread = Node {
+                                name: format!("thread{t}"),
+                                ..Node::default()
+                            };
+                            thread.props.insert("cpu".into(), cell(cpu_node_phandle(h)));
+                            core.children.push(thread);
+                            h += 1;
+                        }
                     }
                 }
                 cluster.children.push(core);
@@ -325,6 +371,22 @@ fn build_dts(model: &TargetModel) -> Node {
                 .insert("interrupt-parent".into(), cell(plic_phandle));
         }
 
+        if is_xilinx_spi(&p) {
+            dev.props.insert("#address-cells".into(), cell(1));
+            dev.props.insert("#size-cells".into(), cell(0));
+            dev.props.insert("num-cs".into(), cell(1));
+            let mut flash = Node {
+                name: "flash@0".into(),
+                ..Node::default()
+            };
+            flash.props.insert("compatible".into(), s("jedec,spi-nor"));
+            flash.props.insert("reg".into(), cell(0));
+            flash
+                .props
+                .insert("spi-max-frequency".into(), cell(50_000_000));
+            dev.children.push(flash);
+        }
+
         // NS16550a-specific descriptors that stock firmware expects.
         if is_ns16550(&p) {
             if let Some(clock) = p.clock_frequency {
@@ -422,6 +484,21 @@ fn build_pmu_node(model: &TargetModel) -> Option<Node> {
     Some(pmu)
 }
 
+fn ext_live(model: &TargetModel, token: &str) -> bool {
+    model
+        .isa
+        .extensions
+        .iter()
+        .any(|(t, v)| t == token && v == "live")
+}
+
+fn uarch_u64(model: &TargetModel, key: &str) -> Option<u64> {
+    match model.uarch.raw.get(key) {
+        Some(g6q_core::Json::Int(i)) if *i >= 0 => Some(*i as u64),
+        _ => None,
+    }
+}
+
 fn is_intc(p: &Peripheral) -> bool {
     let id = p.id.to_lowercase();
     if id == "intc" || id == "plic" || id.starts_with("plic") || id == "interrupt-controller" {
@@ -458,6 +535,11 @@ fn is_clint(p: &Peripheral) -> bool {
 fn is_ns16550(p: &Peripheral) -> bool {
     let model = p.model.as_deref().unwrap_or("").to_lowercase();
     model.contains("ns16550")
+}
+
+fn is_xilinx_spi(p: &Peripheral) -> bool {
+    let model = p.model.as_deref().unwrap_or("").to_lowercase();
+    model.contains("xps-spi") || model.contains("axi-quad-spi")
 }
 
 fn is_virtio_mmio(p: &Peripheral) -> bool {
@@ -596,6 +678,39 @@ mod tests {
     }
 
     #[test]
+    fn xilinx_spi_emits_jedec_flash_child() {
+        let mut m = TargetModel::new("t");
+        m.soc.dram = Some((0x8000_0000, 0x1000_0000));
+        m.soc.harts_total = 1;
+        m.soc.contexts_per_hart = 1;
+        m.soc.intc_sources = 4;
+        m.soc.intc_targets = 4;
+        m.soc.peripherals.push(g6q_core::model::Peripheral {
+            id: "spi".into(),
+            base: 0x2000_0000,
+            len: 0x1000,
+            model: Some("xlnx,xps-spi-2.00.a".into()),
+            irq: Some(2),
+            ..g6q_core::model::Peripheral::default()
+        });
+        let e = emit_dtb(&m, "0.1.0", "sha256:abc");
+        let c = e.files.iter().find(|f| f.path.ends_with(".c")).unwrap();
+        let blob = extract_blob(&c.contents);
+        let root = g6q_dts::from_blob(&blob).expect("valid blob");
+        let soc = root.child("soc").expect("soc");
+        let spi = soc.child("spi@20000000").expect("spi");
+        assert_eq!(
+            spi.prop("compatible").and_then(|p| p.first_string()),
+            Some("xlnx,xps-spi-2.00.a")
+        );
+        let flash = spi.child("flash@0").expect("flash@0");
+        assert_eq!(
+            flash.prop("compatible").and_then(|p| p.first_string()),
+            Some("jedec,spi-nor")
+        );
+    }
+
+    #[test]
     fn clint_emits_interrupts_extended_to_cpu_intc() {
         let mut m = TargetModel::new("t");
         m.soc.dram = Some((0x8000_0000, 0x1000_0000));
@@ -641,30 +756,123 @@ mod tests {
         let map = cpus.child("cpu-map").expect("cpu-map");
         let cluster = map.child("cluster0").expect("cluster0");
         let core0 = cluster.child("core0").expect("core0");
+        // 4 harts → cpu phandles 6,7,8,9 (intc occupies 2..5, PLIC is 1).
         assert_eq!(
-            core0.prop("thread0").and_then(|p| p.cells()),
-            Some(&[2][..])
-        );
-        assert_eq!(
-            core0.prop("thread1").and_then(|p| p.cells()),
-            Some(&[3][..])
-        );
-        assert_eq!(
-            cluster
-                .child("core1")
+            core0
+                .child("thread0")
                 .unwrap()
-                .prop("thread0")
+                .prop("cpu")
                 .and_then(|p| p.cells()),
-            Some(&[4][..])
+            Some(&[6][..])
         );
         assert_eq!(
-            cluster
-                .child("core1")
+            core0
+                .child("thread1")
                 .unwrap()
-                .prop("thread1")
+                .prop("cpu")
                 .and_then(|p| p.cells()),
-            Some(&[5][..])
+            Some(&[7][..])
         );
+        let core1 = cluster.child("core1").expect("core1");
+        assert_eq!(
+            core1
+                .child("thread0")
+                .unwrap()
+                .prop("cpu")
+                .and_then(|p| p.cells()),
+            Some(&[8][..])
+        );
+        assert_eq!(
+            core1
+                .child("thread1")
+                .unwrap()
+                .prop("cpu")
+                .and_then(|p| p.cells()),
+            Some(&[9][..])
+        );
+    }
+
+    #[test]
+    fn cpu_map_single_thread_core_is_a_leaf_with_cpu_phandle() {
+        let mut m = TargetModel::new("t");
+        m.soc.dram = Some((0x8000_0000, 0x1000_0000));
+        m.soc.harts_total = 2;
+        m.soc.cores = Some(2);
+        m.soc.threads_per_core = Some(1);
+        m.soc.contexts_per_hart = 1;
+        m.soc.intc_sources = 4;
+        m.soc.intc_targets = 4;
+        let e = emit_dtb(&m, "0.1.0", "sha256:abc");
+        let c = e.files.iter().find(|f| f.path.ends_with(".c")).unwrap();
+        let blob = extract_blob(&c.contents);
+        let root = g6q_dts::from_blob(&blob).expect("valid blob");
+        let core0 = root
+            .child("cpus")
+            .unwrap()
+            .child("cpu-map")
+            .unwrap()
+            .child("cluster0")
+            .unwrap()
+            .child("core0")
+            .unwrap();
+        assert!(core0.child("thread0").is_none());
+        // 2 harts → cpu phandles 4, 5
+        assert_eq!(core0.prop("cpu").and_then(|p| p.cells()), Some(&[4][..]));
+    }
+
+    #[test]
+    fn cpu_node_gets_cmo_and_cache_geometry_from_the_model() {
+        let mut m = TargetModel::new("t");
+        m.soc.dram = Some((0x8000_0000, 0x1000_0000));
+        m.soc.harts_total = 1;
+        m.isa.extensions = vec![
+            ("zicbom".into(), "live".into()),
+            ("zicboz".into(), "live".into()),
+        ];
+        m.uarch
+            .raw
+            .insert("IcacheByteSize".into(), g6q_core::Json::Int(16 * 1024));
+        m.uarch
+            .raw
+            .insert("IcacheLineWidth".into(), g6q_core::Json::Int(128));
+        m.uarch
+            .raw
+            .insert("DcacheByteSize".into(), g6q_core::Json::Int(32 * 1024));
+        m.uarch
+            .raw
+            .insert("DcacheLineWidth".into(), g6q_core::Json::Int(128));
+        m.uarch
+            .raw
+            .insert("InstrTlbEntries".into(), g6q_core::Json::Int(16));
+        m.uarch
+            .raw
+            .insert("DataTlbEntries".into(), g6q_core::Json::Int(16));
+        let e = emit_dtb(&m, "0.1.0", "sha256:abc");
+        let c = e.files.iter().find(|f| f.path.ends_with(".c")).unwrap();
+        let blob = extract_blob(&c.contents);
+        let root = g6q_dts::from_blob(&blob).expect("valid blob");
+        let cpu = root.child("cpus").unwrap().child("cpu@0").unwrap();
+        assert_eq!(
+            cpu.prop("riscv,cbom-block-size").and_then(|p| p.cells()),
+            Some(&[64][..])
+        );
+        assert_eq!(
+            cpu.prop("riscv,cboz-block-size").and_then(|p| p.cells()),
+            Some(&[64][..])
+        );
+        assert_eq!(
+            cpu.prop("i-cache-size").and_then(|p| p.cells()),
+            Some(&[16384][..])
+        );
+        assert_eq!(
+            cpu.prop("i-cache-block-size").and_then(|p| p.cells()),
+            Some(&[16][..])
+        );
+        assert_eq!(
+            cpu.prop("d-cache-size").and_then(|p| p.cells()),
+            Some(&[32768][..])
+        );
+        assert!(cpu.prop("tlb-split").is_some());
     }
 
     #[test]

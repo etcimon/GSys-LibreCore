@@ -68,10 +68,18 @@ pub struct BootOptions {
     pub elf: Option<String>,
     /// Disk images; each implies a virtio transport.
     pub drives: Vec<String>,
+    /// Attach drives as `virtio-blk-pci` (GPEX endpoint) instead of
+    /// `virtio-blk-device` (virtio-mmio). EDK2 PciBus enumeration needs PCI;
+    /// U-Boot U2 keeps mmio. Not an AI BAR map.
+    pub virtio_pci: bool,
+    /// SPI NOR images (`-drive if=mtd`). Valid on `g6lc-soc` (Xilinx AXI SPI).
+    pub mtd: Vec<String>,
     /// Disk image format for the drives. Empty means `raw` for every drive.
     pub drive_format: String,
     /// Whether to attach user-mode networking.
     pub netdev_user: bool,
+    /// Hubport netdev (no slirp) so `virtio-net-pci` can enumerate.
+    pub netdev_hub: bool,
     /// Host-to-guest port forwards as `(host, guest)`.
     pub port_forwards: Vec<(u16, u16)>,
     /// Serial destination.
@@ -100,6 +108,13 @@ pub struct BootOptions {
     pub debug_file: Option<String>,
     /// Path to a TCG plugin `.so` to load, if any.
     pub plugin: Option<String>,
+    /// EDK2 code pflash (`RISCV_VIRT_CODE.fd`). Implies QEMU virt pflash0/1.
+    pub pflash_code: Option<String>,
+    /// EDK2 variable pflash (`RISCV_VIRT_VARS.fd`).
+    pub pflash_vars: Option<String>,
+    /// Raw images loaded at a fixed physical address (`-device loader`).
+    /// Used on `g6lc-soc` where there is no virtio disk (U3b DRAM PE).
+    pub mem_loads: Vec<(String, u64)>,
 }
 
 impl BootOptions {
@@ -116,8 +131,11 @@ impl BootOptions {
             ("dtb", opt_str(self.dtb.as_deref())),
             ("elf", opt_str(self.elf.as_deref())),
             ("drives", Json::arr(self.drives.iter().map(Json::str))),
+            ("virtio_pci", Json::Bool(self.virtio_pci)),
+            ("mtd", Json::arr(self.mtd.iter().map(Json::str))),
             ("drive_format", Json::str(&self.drive_format)),
             ("netdev_user", Json::Bool(self.netdev_user)),
+            ("netdev_hub", Json::Bool(self.netdev_hub)),
             (
                 "port_forwards",
                 Json::arr(
@@ -151,6 +169,16 @@ impl BootOptions {
             ("debug", opt_str(self.debug.as_deref())),
             ("debug_file", opt_str(self.debug_file.as_deref())),
             ("plugin", opt_str(self.plugin.as_deref())),
+            ("pflash_code", opt_str(self.pflash_code.as_deref())),
+            ("pflash_vars", opt_str(self.pflash_vars.as_deref())),
+            (
+                "mem_loads",
+                Json::arr(
+                    self.mem_loads
+                        .iter()
+                        .map(|(p, a)| Json::arr([Json::str(p), Json::addr(*a)])),
+                ),
+            ),
         ])
     }
 }
@@ -265,7 +293,12 @@ pub fn build_argv(
     boot: &BootOptions,
     properties_for: &dyn Fn(&str) -> Vec<String>,
 ) -> Vec<String> {
-    let mut a: Vec<String> = vec!["-M".into(), stock.machine.clone()];
+    let mut machine = stock.machine.clone();
+    if boot.pflash_code.is_some() && !machine.contains("pflash0") {
+        // Upstream RiscVVirt is a QEMU-virt pflash payload (acpi=off per README).
+        machine.push_str(",pflash0=pflash0,pflash1=pflash1,acpi=off");
+    }
+    let mut a: Vec<String> = vec!["-M".into(), machine];
 
     // A generated B1 machine has its own CPU type and must not take a stock -cpu argument.
     if !stock.cpu_base.is_empty() {
@@ -312,6 +345,16 @@ pub fn build_argv(
         Firmware::Default => {}
     }
 
+    if let Some(code) = &boot.pflash_code {
+        a.push("-blockdev".into());
+        a.push(format!(
+            "node-name=pflash0,driver=file,read-only=on,filename={code}"
+        ));
+        let vars = boot.pflash_vars.as_deref().unwrap_or(code);
+        a.push("-blockdev".into());
+        a.push(format!("node-name=pflash1,driver=file,filename={vars}"));
+    }
+
     for (flag, value) in [
         ("-kernel", boot.kernel.as_ref().or(boot.elf.as_ref())),
         ("-initrd", boot.initrd.as_ref()),
@@ -340,9 +383,24 @@ pub fn build_argv(
         a.push("-drive".into());
         a.push(format!("file={drive},format={fmt},if=none,id=hd{i}"));
         a.push("-device".into());
-        a.push(format!("virtio-blk-device,drive=hd{i}"));
+        let blk = if boot.virtio_pci {
+            "virtio-blk-pci"
+        } else {
+            "virtio-blk-device"
+        };
+        a.push(format!("{blk},drive=hd{i}"));
     }
 
+    for (i, mtd) in boot.mtd.iter().enumerate() {
+        a.push("-drive".into());
+        a.push(format!("file={mtd},format=raw,if=mtd,id=mtd{i}"));
+    }
+
+    let net_dev = if boot.virtio_pci {
+        "virtio-net-pci"
+    } else {
+        "virtio-net-device"
+    };
     if boot.netdev_user {
         let mut spec = String::from("user,id=net0");
         for (host, guest) in &boot.port_forwards {
@@ -351,7 +409,12 @@ pub fn build_argv(
         a.push("-netdev".into());
         a.push(spec);
         a.push("-device".into());
-        a.push("virtio-net-device,netdev=net0".into());
+        a.push(format!("{net_dev},netdev=net0"));
+    } else if boot.netdev_hub {
+        a.push("-netdev".into());
+        a.push("hubport,id=net0,hubid=0".into());
+        a.push("-device".into());
+        a.push(format!("{net_dev},netdev=net0"));
     }
 
     // QEMU's -nographic already redirects serial to stdio; -serial stdio would
@@ -365,9 +428,17 @@ pub fn build_argv(
         }
     }
 
-    if boot.console == "virtio" {
+    // virtio-serial-pci is the endpoint "virtio-console" role on GPEX.
+    // Do not attach virtconsole to serial0 under -nographic (chardev clash).
+    if boot.virtio_pci {
         a.push("-device".into());
-        a.push("virtio-serial-device".into());
+        a.push("virtio-serial-pci".into());
+    }
+    if boot.console == "virtio" {
+        if !boot.virtio_pci {
+            a.push("-device".into());
+            a.push("virtio-serial-device".into());
+        }
         a.push("-device".into());
         a.push("virtconsole,chardev=serial0".into());
     }
@@ -421,6 +492,11 @@ pub fn build_argv(
         a.push(plugin.clone());
     }
 
+    for (path, addr) in &boot.mem_loads {
+        a.push("-device".into());
+        a.push(format!("loader,file={path},addr={addr:#x},force-raw=on"));
+    }
+
     a.push("-nographic".into());
     a
 }
@@ -444,6 +520,7 @@ fn os_append(os: &str) -> Option<String> {
 pub fn requires_virt_profile(boot: &BootOptions) -> bool {
     !boot.drives.is_empty()
         || boot.netdev_user
+        || boot.netdev_hub
         || boot.console == "virtio"
         || !boot.virtio.is_empty()
 }
@@ -553,6 +630,21 @@ mod tests {
     }
 
     #[test]
+    fn edk2_pflash_wires_virt_blockdevs() {
+        let m = model_with(&[], 2, Some((0x8000_0000, 0x4000_0000)));
+        let boot = BootOptions {
+            pflash_code: Some("CODE.fd".into()),
+            pflash_vars: Some("VARS.fd".into()),
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("pflash0=pflash0"), "{joined}");
+        assert!(joined.contains("acpi=off"), "{joined}");
+        assert!(joined.contains("filename=CODE.fd"), "{joined}");
+        assert!(joined.contains("filename=VARS.fd"), "{joined}");
+    }
+
+    #[test]
     fn firmware_modes_render_distinctly() {
         let m = model_with(&[], 1, None);
         let bare = BootOptions {
@@ -588,6 +680,61 @@ mod tests {
         let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
         assert!(joined.contains("file=rootfs.img"), "{joined}");
         assert!(joined.contains("virtio-blk-device"), "{joined}");
+        assert!(!joined.contains("virtio-blk-pci"), "{joined}");
+    }
+
+    #[test]
+    fn virtio_pci_emits_blk_pci_not_mmio() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            drives: vec!["esp.img".into()],
+            virtio_pci: true,
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("virtio-blk-pci"), "{joined}");
+        assert!(!joined.contains("virtio-blk-device"), "{joined}");
+    }
+
+    #[test]
+    fn virtio_pci_emits_net_pci_not_mmio() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            netdev_user: true,
+            virtio_pci: true,
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("virtio-net-pci"), "{joined}");
+        assert!(!joined.contains("virtio-net-device"), "{joined}");
+    }
+
+    #[test]
+    fn netdev_hub_emits_hubport_and_virtio_net_pci() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            netdev_hub: true,
+            virtio_pci: true,
+            ..BootOptions::default()
+        };
+        assert!(requires_virt_profile(&boot));
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("hubport,id=net0,hubid=0"), "{joined}");
+        assert!(joined.contains("virtio-net-pci"), "{joined}");
+        assert!(!joined.contains("-netdev user"), "{joined}");
+    }
+
+    #[test]
+    fn virtio_pci_emits_serial_pci_without_virtconsole() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            virtio_pci: true,
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("virtio-serial-pci"), "{joined}");
+        assert!(!joined.contains("virtio-serial-device"), "{joined}");
+        assert!(!joined.contains("virtconsole"), "{joined}");
     }
 
     #[test]
@@ -785,6 +932,38 @@ mod tests {
         let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
         assert!(joined.contains("root=/dev/vda1"), "{joined}");
         assert!(!joined.contains("console=ttyS0"), "{joined}");
+    }
+
+    #[test]
+    fn mem_loads_emit_device_loader() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            mem_loads: vec![("pe.bin".into(), 0x8400_0000)],
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(
+            joined.contains("-device loader,file=pe.bin,addr=0x84000000,force-raw=on"),
+            "{joined}"
+        );
+        assert!(
+            !joined.contains("virtio-blk-device"),
+            "DRAM loads must not imply virtio: {joined}"
+        );
+    }
+
+    #[test]
+    fn mtd_drive_is_if_mtd_and_does_not_force_virt() {
+        let m = model_with(&[], 2, Some((0x8000_0000, 0x1000_0000)));
+        let boot = BootOptions {
+            mtd: vec!["spi-nor.img".into()],
+            ..BootOptions::default()
+        };
+        assert!(!requires_virt_profile(&boot));
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("if=mtd"), "{joined}");
+        assert!(joined.contains("file=spi-nor.img"), "{joined}");
+        assert!(!joined.contains("virtio-blk"), "{joined}");
     }
 
     #[test]
