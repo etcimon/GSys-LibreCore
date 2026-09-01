@@ -20,7 +20,7 @@ any later distro) sitting alongside:
 
 | Slot | Role | Dev submodule (etcimon) | Official compile pin |
 |---|---|---|---|
-| `openwrt/` | OpenWrt core | [etcimon/openwrt](https://github.com/etcimon/openwrt) | [openwrt/openwrt](https://github.com/openwrt/openwrt) `v24.10.2` |
+| `openwrt/` | OpenWrt core | [etcimon/openwrt](https://github.com/etcimon/openwrt) `37fc534` (`openwrt-24.10`) | [openwrt/openwrt](https://github.com/openwrt/openwrt) `v24.10.2` |
 | `openwrt-packages/` | packages feed | [etcimon/openwrt-packages](https://github.com/etcimon/openwrt-packages) | [openwrt/packages](https://github.com/openwrt/packages) |
 | `openwrt-luci/` | LuCI feed | [etcimon/openwrt-luci](https://github.com/etcimon/openwrt-luci) | [openwrt/luci](https://github.com/openwrt/luci) |
 | `openwrt-routing/` | routing feed | [etcimon/openwrt-routing](https://github.com/etcimon/openwrt-routing) | [openwrt/routing](https://github.com/openwrt/routing) |
