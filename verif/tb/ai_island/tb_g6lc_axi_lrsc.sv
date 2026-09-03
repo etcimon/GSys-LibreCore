@@ -145,6 +145,35 @@ module tb_g6lc_axi_lrsc;
     cycles++;
   endtask
 
+  // ---------------------------------------------------------------------------
+  // This testbench cannot be built by the pinned remote Verilator 5.008.
+  // ---------------------------------------------------------------------------
+  // The `#0;` settle points below are rejected outright:
+  //   %Error-ZERODLY: #0 delays do not schedule process resumption in the
+  //                   Inactive region
+  // 15 sites here, 5 in tb_g6lc_ai_atomics_aw.sv, 19 in
+  // tb_g6lc_ai_litedram_wrap.sv -- so the whole unit-TB family is unavailable
+  // on the proxy, and the cycle counts recorded for `ai-dram-atomics` came
+  // from some other tool and are not reproducible there.
+  //
+  // Two cheap substitutions were tried and BOTH FAIL, identically:
+  //
+  //   #0;  ->  #1;                 hs_ar "timeout AR" at t=4145000
+  //   #0;  ->  @(negedge clk);     hs_ar "timeout AR" at t=4145000
+  //
+  // Same timestamp for both, deep in the sequence rather than at the first
+  // handshake, and after the 8-deep AR-backpressure scenario. So the settle
+  // point is not the discriminator: something in the R/B drain accounting
+  // (`got`, `nr`/`nw`, the `r_go`/`b_go` gating of mem.r_valid/mem.b_valid)
+  // depends on resuming *pre*-NBA, and `nar` never falls back below MaxOut,
+  // which starves the next hs_ar. Recorded so the next attempt does not
+  // re-derive it: this needs the drain loops restructured around a defined
+  // sampling point, not a delay swapped out.
+  //
+  // Until then the citable exclusive-monitor evidence is harness-level
+  // (ai-dual-core-excl, ai-dual-core-lrsc-disjoint on Variane), and
+  // run-lrsc-oracle.sh reports SKIP rather than pretending to a verdict.
+
   task automatic hs_ar(input int unsigned lim);
     int unsigned tlim;
     tlim = cycles + lim;
