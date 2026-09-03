@@ -18,6 +18,15 @@ module tb_g6lc_ai_island;
   int unsigned errors;
   int unsigned cycles;
 
+  logic [7:0][31:0] ch_r, ch_w;
+  always_comb begin
+    ch_r = '0;
+    ch_w = '0;
+    ch_r[0] = 32'h1111_0001;
+    ch_r[1] = 32'h2222_0002;
+    ch_w[0] = 32'hAAAA_000A;
+  end
+
   g6lc_ai_island_top i_dut (
       .clk_i     (clk),
       .rst_ni    (rst_ni),
@@ -28,7 +37,10 @@ module tb_g6lc_ai_island;
       .wdata_i   (wdata),
       .rdata_o   (rdata),
       .rvalid_o  (rvalid),
-      .irq_o     (irq)
+      .irq_o     (irq),
+      .dram_init_done_i(1'b1),
+      .ch_r_beats_i(ch_r),
+      .ch_w_beats_i(ch_w)
   );
 
   initial clk = 0;
@@ -155,6 +167,19 @@ module tb_g6lc_ai_island;
     if (r == 0) begin
       $error("cap clusters zero"); errors++;
     end else $display("PASS cap clusters=%0d", r);
+
+    reg_read(16'h0050, r);
+    if (r !== 32'h1111_0001) begin
+      $error("cap CH_R0 got %h", r); errors++;
+    end
+    reg_read(16'h0054, r);
+    if (r !== 32'h2222_0002) begin
+      $error("cap CH_R1 got %h", r); errors++;
+    end
+    reg_read(16'h0070, r);
+    if (r !== 32'hAAAA_000A) begin
+      $error("cap CH_W0 got %h", r); errors++;
+    end else $display("PASS cap occupancy 0x50/0x70");
 
     // ---- Enable ----
     reg_write(16'h0100, 32'h1);

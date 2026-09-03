@@ -141,10 +141,10 @@ export const statusCommand: Command = {
     );
     logger.info(`sim suites : ${config.verify.simSuites.join(", ")}`);
     logger.info(
-      "opt-in pkgs: g6lc64_ooo, g6lc64_ooo_server, g6lc64_server_math, g6lc64_stream8, g6lc64_smt2, cv64a6_spec_deep",
+      "opt-in pkgs: g6lc64_ooo, g6lc64_ooo_server, g6lc64_server_math, g6lc64_stream8, g6lc64_smt2, g6lc64_ai, cv64a6_spec_deep",
     );
     logger.info(
-      "opt-in test: mc-stream-tests, ooo-l3-tests, server-math-tests, dual-hart-ci, timings-sta-handoff, sv-timing-*",
+      "opt-in test: mc-stream-tests, ooo-l3-tests, ai-* (test --ai / --ai-remote / --ai-qemu), server-math-tests, dual-hart-ci, timings-sta-handoff, sv-timing-*",
     );
 
     logger.heading("Timings / STA handoff");
@@ -184,6 +184,7 @@ export const statusCommand: Command = {
     logger.info("verify  : g6lc-build verify --lint      per-change gate (lint/formal/sim/synth)");
     logger.info("test    : g6lc-build test timings-sta-handoff   S0–S2 timings/STA smoke");
     logger.info("timings : g6lc-build timings sta-handoff --try-tools --from-timing <pkg>");
+    logger.info("ai      : g6lc-build test --ai   |  diag run ai   |  test --ai-remote   |  g6q --ai");
     logger.info("board   : g6lc-build mb list            select/build a motherboard (around the die)");
     logger.info("vendor  : g6lc-build vendor list        uncore controllers + PHY (ara = U10ᵇ)");
     logger.info("foundry : g6lc-build tech status        technology / PDK optimization for tape-out");

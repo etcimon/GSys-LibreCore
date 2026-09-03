@@ -70,12 +70,12 @@ probe (observe) ──► tools install / setup --install ──► diag run ─
 | `status` | One-glance SoC target + managed provisioning snapshot. |
 | `doctor` | Quick host PATH readiness + managed-tool summary (points to `probe`). |
 | `probe`  | **In-depth** capability boxes (tabs): host, platform, pkg, utils, tools, env, **diag**, commands, **install**. Flags: `--deep`, `--json`. |
-| `diag`   | **Compartmentalized diagnostics** with **per-test Verilator configs** (`config.diagnostics`): `list` / `status` / `run [host\|core\|smt2\|ooo\|apu\|residual\|id]`. |
+| `diag`   | **Compartmentalized diagnostics** with **per-test Verilator configs** (`config.diagnostics`): `list` / `status` / `run [host\|core\|smt2\|ooo\|ai\|apu\|residual\|id]`. |
 | `man`    | **Human man-page Q&A** via Grok headless (`grok -p` / `-r`, model `grok-build`): `[id?] [files…] [query]`; continues session by id; writes `workspace/man/<id>/answer.html` and opens the browser. |
 | `setup`  | Create workspace + submodules; `--install --profile <sim\|dual-hart\|all>` provisions tools (ends with a tools probe snapshot). |
 | `tools`  | List managed tools; `tools install <sim\|dual-hart\|opensbi\|all\|recipe>` installs stacks. |
 | `build`  | Build the RTL simulation model (Verilator on the open-source path). |
-| `test`   | Run regression suite(s) from `verif/regress`: `--list`, `<id...>`, `--suite a,b`, `--group <g>`, `--all`, `--open-source`. |
+| `test`   | Run regression suite(s) from `verif/regress`: `--list`, `<id...>`, `--suite a,b`, `--group <g>`, `--ai` / `--ai-remote` / `--ai-qemu`, `--channels N`, `--from-timing`, `--all`, `--open-source`. |
 | `verify` | Per-change gate: `--lint` / `--formal` / `--sim` / `--synth` / `--target`. |
 | `vendor` / `mb` / `tech` | Uncore catalog, motherboard, PDK optimization. |
 | `clean`  | Free space: `status` inventory; purpose subcommands (`diag`/`timings`/…); `--older-than 7d`; `sim`/`tooling`/`all` need `--yes`. Legacy `--tooling`/`--cache`/`--all` still work. |
@@ -126,6 +126,7 @@ sweep.
 | `core` | imafdc + cv32a65x lint surfaces, flist paths |
 | `smt2` | dual-hart package lint (budget 600), payload, R3 paths |
 | `ooo` | formal prop paths + ooo package lint |
+| `ai` | Xg6lcai island/matrix/DRAM-channel paths; optional `g6lc64_ai` lint |
 | `apu` | Ara flist + `g6lc_ara_lint_top` surface |
 | `residual` | managed Spike / residual Verilator caps |
 
@@ -135,6 +136,10 @@ sweep.
 ./build.sh diag run                 # default: host + core (non-optional)
 ./build.sh diag run smt2 --all      # include optional smt2 tests
 ./build.sh diag run diag-smt2-lint  # single id
+./build.sh diag run ai              # Xg6lcai (like ooo)
+./build.sh test --ai --channels 4 --ai-dram 1
+./build.sh test --ai-remote --from-timing <pkg>
+./build.sh test --ai-qemu           # g6lc_qemu; not Variane
 ```
 
 ### Install profiles (sim + dual-hart)

@@ -6,6 +6,8 @@
 // Instantiates NR_CORES × ariane, g6lc_coherence_hub, optional L2/L3/PF,
 // inclusive-L3 back-inval (parameter), and wires L1 inv adapters.
 // PMU group-2 probes fan into each core's perf_counters.
+// DRAM channels sit **below** this wrapper (`mem_req_o` → xbar → DRAM slave).
+// Raising NR_CORES does not instantiate PHYs; see architecture/uncore/dram-channel-scaling.md.
 
 module g6lc_cluster
   import g6lc_coherence_pkg::*;

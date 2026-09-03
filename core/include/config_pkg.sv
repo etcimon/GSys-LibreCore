@@ -123,6 +123,23 @@ package config_pkg;
   /// Grouped in a nested struct rather than flattened like the U5/U6 knobs
   /// below: a flat addition costs one line per member in each of the ~24
   /// config packages, a nested one costs exactly one line.
+  ///
+  /// ---------------------------------------------------------------------
+  /// Numeric formats (AiFmt* below) -- one bitmap, two planes
+  /// ---------------------------------------------------------------------
+  /// `Int4En` and `Sparse24En` were the first two arithmetic grants and are
+  /// kept because software already reads them back from `aicfg`. They do not
+  /// generalise: they are named bits, so every new format would add a field
+  /// here and a line to every package, and neither the island capability
+  /// window nor the descriptor could express "this part does BF16".
+  ///
+  /// `FormatMask` replaces that with a grant BITMAP over `AiFmt*` positions.
+  /// One field carries every present and future format, `check_cfg` keeps it
+  /// consistent with the legacy bits, and the same bitmap is what the island
+  /// publishes at `CAP_OFF_DTYPE_MASK` and what a descriptor's `numfmt` field
+  /// is checked against. A format that is not granted is REFUSED, never
+  /// silently demoted to INT8 -- a wrong-format GEMM returns plausible
+  /// numbers, which is the worst possible failure for a tensor engine.
   typedef struct packed {
     bit          MatrixEn;    // master enable: custom-2 opcode + AI CSRs
     bit          AccelEn;     // seam D (accelerator port); 0 => seam B (CVXIF)
@@ -136,6 +153,14 @@ package config_pkg;
     // parts that do and do not implement them.
     bit          Int4En;      // grant aicfg.ew=01 (4-bit elements)
     bit          Sparse24En;  // grant aicfg.sp24 (structured 2:4 sparsity on A)
+    /// Granted numeric formats, as a bitmap of AiFmt* positions.
+    ///
+    /// Bit 0 (INT8 dense) is mandatory whenever MatrixEn: it is the format the
+    /// golden, the requant rule (isa-encoding.md s3.5) and every directed test
+    /// are written in, so a part that grants no format at all would have no
+    /// reference to be correct against. Everything above bit 0 is optional and
+    /// independently discoverable, so a minimal SKU stays small.
+    int unsigned FormatMask;
     int unsigned TileM;       // native tile rows
     int unsigned TileN;       // native tile columns
     int unsigned TileK;       // native reduction depth
@@ -153,6 +178,68 @@ package config_pkg;
 
   /// Default for every package that does not implement the AI plane.
   localparam ai_cfg_t AiCfgOff = ai_cfg_t'(0);
+
+  /// -------------------------------------------------------------------------
+  /// Numeric-format bit positions (`ai_cfg_t.FormatMask`, `aicfg.numfmt`,
+  /// descriptor `flags.numfmt`, island `CAP_OFF_DTYPE_MASK`).
+  /// -------------------------------------------------------------------------
+  /// ONE enumeration, four consumers. The bit position in the grant mask and
+  /// the value of the request field are deliberately the SAME number, so a
+  /// grant check is `mask[request]` rather than a translation table that can
+  /// disagree with itself.
+  ///
+  /// `AI_FMT_INT` is 0 so that a descriptor or `aicfg` written by software that
+  /// predates this field -- i.e. with the whole `numfmt` field zero -- keeps its
+  /// old meaning exactly: integer, element width from `ew`, signedness from
+  /// `dtype`. That is what makes this an extension into reserved space rather
+  /// than a contract version bump (isa-encoding.md s9).
+  localparam int unsigned AI_FMT_INT      = 0;  // width from ew, sign from dtype
+  localparam int unsigned AI_FMT_INT4     = 1;  // == ew=01; mirrors Int4En
+  localparam int unsigned AI_FMT_SP24     = 2;  // structured 2:4 sparsity on A
+  localparam int unsigned AI_FMT_FP8_E4M3 = 3;
+  localparam int unsigned AI_FMT_FP8_E5M2 = 4;
+  localparam int unsigned AI_FMT_FP16     = 5;  // IEEE 754 binary16
+  localparam int unsigned AI_FMT_BF16     = 6;  // bfloat16
+  localparam int unsigned AI_FMT_FP32     = 7;  // IEEE 754 binary32
+  localparam int unsigned AI_FMT_WIDTH    = 8;  // bits of FormatMask defined
+
+  /// Convenience masks. A SKU should name one of these rather than a hex
+  /// literal, so that adding a format updates every package that wanted it.
+  localparam int unsigned AiFmtMaskInt8      = 1 << AI_FMT_INT;
+  localparam int unsigned AiFmtMaskInt8Int4  = AiFmtMaskInt8 | (1 << AI_FMT_INT4);
+  /// Inference card: dense INT8 + INT4 + 2:4 sparsity + the three 16-bit-and-
+  /// below float formats a serving stack actually asks for.
+  localparam int unsigned AiFmtMaskInfer     = AiFmtMaskInt8Int4
+                                             | (1 << AI_FMT_SP24)
+                                             | (1 << AI_FMT_FP8_E4M3)
+                                             | (1 << AI_FMT_FP8_E5M2)
+                                             | (1 << AI_FMT_FP16)
+                                             | (1 << AI_FMT_BF16);
+  /// Adds FP32 for training / reference paths.
+  localparam int unsigned AiFmtMaskAll       = AiFmtMaskInfer | (1 << AI_FMT_FP32);
+
+  /// True when `mask` grants format index `fmt`.
+  function automatic bit ai_fmt_granted(input int unsigned mask, input int unsigned fmt);
+    if (fmt >= AI_FMT_WIDTH) return 1'b0;
+    return bit'((mask >> fmt) & 1);
+  endfunction
+
+  /// Widest operand element in bytes for a granted format.
+  ///
+  /// Used to size operand fetch and to reject a descriptor whose leading
+  /// dimension cannot hold its own row. It is a function of the format rather
+  /// than of `ew` alone, because a float format fixes its own width.
+  function automatic int unsigned ai_fmt_bytes(input int unsigned fmt);
+    case (fmt)
+      AI_FMT_INT4:     return 1;  // packed two per byte; a row is still bytes
+      AI_FMT_FP8_E4M3,
+      AI_FMT_FP8_E5M2: return 1;
+      AI_FMT_FP16,
+      AI_FMT_BF16:     return 2;
+      AI_FMT_FP32:     return 4;
+      default:         return 1;  // AI_FMT_INT: 8-bit unless ew says otherwise
+    endcase
+  endfunction
 
   localparam NrMaxRules = 16;
 
@@ -887,6 +974,37 @@ package config_pkg;
               !Cfg.AiCfg.MatrixEn));
     assert (!(Cfg.AiCfg.Queues > 0 && !Cfg.AiCfg.MatrixEn));
     assert (!((Cfg.AiCfg.Int4En || Cfg.AiCfg.Sparse24En) && !Cfg.AiCfg.MatrixEn));
+    // Numeric formats. The mask and the two legacy grant bits describe the same
+    // thing, so they must not disagree: software may read either, and a part
+    // that answered "INT4" through one and "no INT4" through the other would be
+    // undiscoverable rather than merely wrong.
+    assert (!(Cfg.AiCfg.MatrixEn &&
+              !ai_fmt_granted(Cfg.AiCfg.FormatMask, AI_FMT_INT)))
+      else $error("AiCfg.FormatMask must grant AI_FMT_INT (dense INT8): it is the format the golden and the requant rule are written in");
+    assert (ai_fmt_granted(Cfg.AiCfg.FormatMask, AI_FMT_INT4) == Cfg.AiCfg.Int4En)
+      else $error("AiCfg.FormatMask AI_FMT_INT4 disagrees with AiCfg.Int4En");
+    assert (ai_fmt_granted(Cfg.AiCfg.FormatMask, AI_FMT_SP24) == Cfg.AiCfg.Sparse24En)
+      else $error("AiCfg.FormatMask AI_FMT_SP24 disagrees with AiCfg.Sparse24En");
+    // No format bit outside the defined enumeration.
+    assert ((Cfg.AiCfg.FormatMask >> AI_FMT_WIDTH) == 0)
+      else $error("AiCfg.FormatMask sets a bit above AI_FMT_WIDTH");
+    // A part granting no format at all must not claim the plane.
+    assert (!(!Cfg.AiCfg.MatrixEn && Cfg.AiCfg.FormatMask != 0));
+    // Float formats need a float-capable core to move operands and to hold the
+    // requant scale: the core-attached plane sources scales through the FP
+    // register file, and a descriptor asking for FP16/BF16/FP32 on an
+    // integer-only part could not be honoured even by the island, because the
+    // host has no way to build the operands.
+    assert (!((ai_fmt_granted(Cfg.AiCfg.FormatMask, AI_FMT_FP16) ||
+               ai_fmt_granted(Cfg.AiCfg.FormatMask, AI_FMT_BF16) ||
+               ai_fmt_granted(Cfg.AiCfg.FormatMask, AI_FMT_FP32) ||
+               ai_fmt_granted(Cfg.AiCfg.FormatMask, AI_FMT_FP8_E4M3) ||
+               ai_fmt_granted(Cfg.AiCfg.FormatMask, AI_FMT_FP8_E5M2)) && !Cfg.RVF))
+      else $error("AiCfg.FormatMask grants a float format but RVF is 0");
+    // FP32 accumulation over a 32-bit accumulator leaves no headroom, so a part
+    // granting FP32 must also carry RVD for the host-side reference path.
+    assert (!(ai_fmt_granted(Cfg.AiCfg.FormatMask, AI_FMT_FP32) && !Cfg.RVD))
+      else $error("AiCfg.FormatMask grants AI_FMT_FP32 but RVD is 0");
     // Geometry: non-zero and power-of-two when the plane is enabled.
     assert (!(Cfg.AiCfg.MatrixEn && (Cfg.AiCfg.TileM == 0 ||
               2 ** $clog2(Cfg.AiCfg.TileM) != Cfg.AiCfg.TileM)));

@@ -31,6 +31,12 @@ module g6lc_ai_gemm_seq #(
     parameter int unsigned IdWidth   = 4,
     parameter int unsigned MaxDim    = 8,
     parameter int unsigned PeLanes   = 4,  // parallel MACs / cycle (power of 2 preferred)
+    parameter int unsigned MaxAROut  = 2,  // I3: multi-outstanding AR; live = 2
+    // Shared DRAM stripe (g6lc_ai_island_cfg_pkg). N=1 leaves MaxBurstBeats
+    // at 255 so the live 256³ fixture stays bit-identical. N>1 caps each
+    // INCR at the 64 B stripe so GEMM and core L2 fills share one map.
+    parameter int unsigned NrChannels = 1,
+    parameter int unsigned ChanShift  = 6,
     parameter type         axi_req_t  = logic,
     parameter type         axi_resp_t = logic
 ) (
@@ -68,8 +74,25 @@ module g6lc_ai_gemm_seq #(
   localparam int unsigned BeatLaneW     = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
   // Max beats per AR/AW (AXI4 max 256 → len=255; keep ≤255 for 8-bit counters)
   localparam int unsigned MaxBurstBeats = 255;
-  // Multi-outstanding AR: issue next row/burst while prior R stream drains
-  localparam int unsigned MaxAROut = 2;
+  // Inflight counter width; live MaxAROut=2 → AROutW=2 (bit-identical).
+  localparam int unsigned AROutW = (MaxAROut <= 1) ? 1 : $clog2(MaxAROut + 1);
+  // N=1 keeps a single AXI ID (cookie / HARD identity). N>1 with a full-beat
+  // drain uses one ID per outstanding AR so UNIQUE_IDS=1 can issue into two
+  // channels at once. PeLanes < BytesPerBeat keeps the leftover-beat path
+  // and therefore the in-order single-ID sequence.
+  localparam bit          SplitArId = (NrChannels > 1) && (PeLanes >= BytesPerBeat);
+  localparam int unsigned ARSlotW   = (MaxAROut <= 1) ? 1 : $clog2(MaxAROut);
+  localparam logic [IdWidth-1:0] ArIdBase = IdWidth'(2);
+  // pragma translate_off
+  initial begin
+    assert (MaxAROut >= 1 && MaxAROut <= 8)
+      else $error("g6lc_ai_gemm_seq: MaxAROut=%0d not in [1,8] (I3)", MaxAROut);
+    assert (g6lc_ai_island_cfg_pkg::dram_channels_ok(NrChannels))
+      else $error("g6lc_ai_gemm_seq: NrChannels=%0d not in {1,2,4,8}", NrChannels);
+    assert (ChanShift >= 3 && ChanShift <= 16)
+      else $error("g6lc_ai_gemm_seq: ChanShift=%0d out of range", ChanShift);
+  end
+  // pragma translate_on
 
   typedef enum logic [3:0] {
     ST_IDLE  = 4'd0,
@@ -92,7 +115,7 @@ module g6lc_ai_gemm_seq #(
   logic        err_q, err_d;
   logic        done_q;
   // Multi-outstanding AR count (0..MaxAROut); AW still single-outstanding
-  logic [1:0]  ar_inflight_q, ar_inflight_d;
+  logic [AROutW-1:0] ar_inflight_q, ar_inflight_d;
   logic        aw_sent_q, aw_sent_d;
   logic        w_sent_q, w_sent_d;
   // First R of head outstanding AR uses stored lane0; later Rs beat-aligned
@@ -107,6 +130,22 @@ module g6lc_ai_gemm_seq #(
   logic                 ar_lane_push_en;
   logic                 ar_lane_pop_en;
   logic [BeatLaneW-1:0] ar_head_lane;
+  // N>1: per-outstanding write cursor so R may complete out of order.
+  typedef struct packed {
+    logic                 valid;
+    logic                 first;
+    logic [BeatLaneW-1:0] lane0;
+    logic [31:0]          row;
+    logic [31:0]          col;
+  } ar_slot_t;
+  ar_slot_t             ar_slot_q [MaxAROut];
+  logic                 ar_slot_we;
+  logic [ARSlotW-1:0]   ar_slot_widx;
+  logic [31:0]          ar_slot_push_row, ar_slot_push_col;
+  logic                 ar_slot_r_en;
+  logic                 ar_slot_r_last;
+  logic [ARSlotW-1:0]   ar_slot_ridx;
+  logic [31:0]          ar_slot_ntake;
 
   // A multi-byte unpack count (this R cycle); B multi-write count (1..8)
   logic [7:0]  la_n_d;
@@ -348,6 +387,29 @@ module g6lc_ai_gemm_seq #(
     return total[7:0];
   endfunction
 
+  // N=1: identity (return nb). N>1: do not cross DramChanShift stripe.
+  function automatic logic [7:0] cap_beats_to_stripe(
+      input logic [AddrWidth-1:0] addr,
+      input logic [7:0] nb
+  );
+    automatic int unsigned maxb;
+    maxb = g6lc_ai_island_cfg_pkg::dram_beats_in_stripe(
+        NrChannels, ChanShift, BytesPerBeat, 64'(addr));
+    if (32'(nb) > maxb) return maxb[7:0];
+    return nb;
+  endfunction
+
+  function automatic logic [31:0] cap_nbeats_to_stripe(
+      input logic [AddrWidth-1:0] addr,
+      input logic [31:0] nbeats
+  );
+    automatic int unsigned maxb;
+    maxb = g6lc_ai_island_cfg_pkg::dram_beats_in_stripe(
+        NrChannels, ChanShift, BytesPerBeat, 64'(addr));
+    if (nbeats > maxb) return 32'(maxb);
+    return nbeats;
+  endfunction
+
   // Elements covered by `nb` beats starting at byte lane `lane0`, cap `rem`
   function automatic logic [31:0] elems_for_burst(
       input logic [31:0] rem,
@@ -488,6 +550,14 @@ module g6lc_ai_gemm_seq #(
     ar_lane_push    = '0;
     ar_lane_push_en = 1'b0;
     ar_lane_pop_en  = 1'b0;
+    ar_slot_we         = 1'b0;
+    ar_slot_widx       = '0;
+    ar_slot_push_row   = '0;
+    ar_slot_push_col   = '0;
+    ar_slot_r_en       = 1'b0;
+    ar_slot_r_last     = 1'b0;
+    ar_slot_ridx       = '0;
+    ar_slot_ntake      = '0;
     la_n_d          = 8'd0;
     lb_n_d          = 4'd1;
     beat_left_d     = beat_left_q;
@@ -507,7 +577,7 @@ module g6lc_ai_gemm_seq #(
 
     unique case (state_q)
       ST_IDLE: begin
-        ar_inflight_d = 2'd0;
+        ar_inflight_d = '0;
         aw_sent_d     = 1'b0;
         w_sent_d      = 1'b0;
         beat_left_d   = 8'd0;
@@ -528,7 +598,7 @@ module g6lc_ai_gemm_seq #(
           err_d   = 1'b1;
           state_d = ST_DONE;
         end else begin
-          ar_inflight_d = 2'd0;
+          ar_inflight_d = '0;
           beat_left_d   = 8'd0;
           burst_first_d = 1'b0;
           ar_i_en = 1'b1; ar_i_d = '0;
@@ -541,21 +611,48 @@ module g6lc_ai_gemm_seq #(
       // Load A: multi-beat INCR + multi-outstanding AR (issue runs ahead of R)
       ST_LA: begin
         begin
-          automatic logic       ar_push, r_fire;
+          automatic logic       ar_push, r_fire, r_match;
           automatic logic [7:0] nb;
           automatic logic [31:0] elems;
+          automatic logic [ARSlotW-1:0] free_s, match_s;
           ar_push = 1'b0;
           r_fire  = 1'b0;
+          r_match = 1'b0;
+          free_s  = '0;
+          match_s = '0;
+          if (SplitArId) begin
+            automatic logic found_free;
+            found_free = 1'b0;
+            for (int unsigned s = 0; s < MaxAROut; s++) begin
+              if (!ar_slot_q[s].valid && !found_free) begin
+                found_free = 1'b1;
+                free_s = ARSlotW'(s);
+              end
+              if (ar_slot_q[s].valid &&
+                  axi_resp_i.r.id == (ArIdBase + IdWidth'(s))) begin
+                r_match = 1'b1;
+                match_s = ARSlotW'(s);
+              end
+            end
+          end
           // ---- Issue AR (may run concurrent with R) ----
-          if (ar_inflight_q < 2'(MaxAROut) && ar_i_q < m_q) begin
+          if (ar_inflight_q < AROutW'(MaxAROut) && ar_i_q < m_q) begin
             axi_req_o.ar.addr  = beat_align(a_ar_cur);
-            nb                 = beats_for_rem(k_q - ar_t_q, a_ar_cur[BeatAlignW-1:0]);
+            nb                 = cap_beats_to_stripe(
+                beat_align(a_ar_cur),
+                beats_for_rem(k_q - ar_t_q, a_ar_cur[BeatAlignW-1:0]));
             axi_req_o.ar.len   = axi_pkg::len_t'(nb - 8'd1);
+            if (SplitArId)
+              axi_req_o.ar.id = ArIdBase + IdWidth'(free_s);
             axi_req_o.ar_valid = 1'b1;
             if (axi_resp_i.ar_ready) begin
               ar_push         = 1'b1;
               ar_lane_push_en = 1'b1;
               ar_lane_push    = a_ar_cur[BeatAlignW-1:0];
+              ar_slot_we       = SplitArId;
+              ar_slot_widx     = free_s;
+              ar_slot_push_row = ar_i_q;
+              ar_slot_push_col = ar_t_q;
               elems = elems_for_burst(k_q - ar_t_q, a_ar_cur[BeatAlignW-1:0], nb);
               if (ar_t_q + elems >= k_q) begin
                 ar_t_en = 1'b1; ar_t_d = '0;
@@ -566,31 +663,43 @@ module g6lc_ai_gemm_seq #(
             end
           end
           // ---- Receive R ----
-          axi_req_o.r_ready = (ar_inflight_q != 2'd0);
-          if (ar_inflight_q != 2'd0 && axi_resp_i.r_valid) begin
+          axi_req_o.r_ready = (ar_inflight_q != '0) &&
+                              (!SplitArId || !axi_resp_i.r_valid || r_match);
+          if (ar_inflight_q != '0 && axi_resp_i.r_valid &&
+              (!SplitArId || r_match)) begin
             automatic logic [BeatLaneW-1:0] lane0;
-            automatic logic [31:0] n_take, rem_k, rem_beat;
+            automatic logic [31:0] n_take, rem_k, rem_beat, recv_i, recv_t;
+            automatic logic recv_first;
             r_fire   = 1'b1;
-            lane0    = burst_first_q ? ar_head_lane : BeatLaneW'(0);
-            rem_k    = k_q - t_q;
+            recv_i   = SplitArId ? ar_slot_q[match_s].row : i_q;
+            recv_t   = SplitArId ? ar_slot_q[match_s].col : t_q;
+            recv_first = SplitArId ? ar_slot_q[match_s].first : burst_first_q;
+            lane0    = recv_first
+                     ? (SplitArId ? ar_slot_q[match_s].lane0 : ar_head_lane)
+                     : BeatLaneW'(0);
+            rem_k    = k_q - recv_t;
             rem_beat = 32'(BytesPerBeat) - 32'(lane0);
             n_take   = rem_k;
             if (n_take > rem_beat) n_take = rem_beat;
             if (n_take > PeLanes)  n_take = PeLanes;
             la_n_d = n_take[7:0];
+            ar_slot_r_en   = SplitArId;
+            ar_slot_ridx   = match_s;
+            ar_slot_r_last = axi_resp_i.r.last;
+            ar_slot_ntake  = n_take;
             for (int unsigned p = 0; p < PeLanes; p++) begin
               if (32'(p) < n_take) begin
                 automatic logic [31:0] tt;
-                tt = t_q + 32'(p);
+                tt = recv_t + 32'(p);
                 a_w_req [t_bank(tt)] = 1'b1;
-                a_w_addr[t_bank(tt)] = a_bank_addr(i_q, tt);
+                a_w_addr[t_bank(tt)] = a_bank_addr(recv_i, tt);
                 a_w_data[t_bank(tt)] = byte_from_beat(
                     axi_resp_i.r.data, BeatLaneW'(unsigned'(lane0) + p));
               end
             end
             if (axi_resp_i.r.last)
               ar_lane_pop_en = 1'b1;
-            if ((t_q + n_take >= k_q) && (i_q + 1 == m_q)) begin
+            if (!SplitArId && (t_q + n_take >= k_q) && (i_q + 1 == m_q)) begin
               ar_t_en = 1'b1; ar_t_d = '0;
               ar_j_en = 1'b1; ar_j_d = '0;
               ar_i_en = 1'b1; ar_i_d = '0;
@@ -601,12 +710,12 @@ module g6lc_ai_gemm_seq #(
           // Net inflight + burst_first (handles AR+R same cycle)
           unique case ({ar_push, r_fire && axi_resp_i.r.last})
             2'b10: begin
-              ar_inflight_d = ar_inflight_q + 2'd1;
-              if (ar_inflight_q == 2'd0) burst_first_d = 1'b1;
+              ar_inflight_d = ar_inflight_q + AROutW'(1);
+              if (ar_inflight_q == '0) burst_first_d = 1'b1;
             end
             2'b01: begin
-              ar_inflight_d = ar_inflight_q - 2'd1;
-              burst_first_d = (ar_inflight_q > 2'd1);
+              ar_inflight_d = ar_inflight_q - AROutW'(1);
+              burst_first_d = (ar_inflight_q > AROutW'(1));
             end
             2'b11: begin
               ar_inflight_d = ar_inflight_q;  // pop+push
@@ -616,8 +725,11 @@ module g6lc_ai_gemm_seq #(
           endcase
           if (r_fire && !axi_resp_i.r.last)
             burst_first_d = 1'b0;
-          if (state_d == ST_LB)
-            ar_inflight_d = 2'd0;
+          if (SplitArId) begin
+            if ((ar_i_en ? ar_i_d : ar_i_q) >= m_q && ar_inflight_d == '0)
+              state_d = ST_LB;
+          end else if (state_d == ST_LB)
+            ar_inflight_d = '0;
         end
       end
 
@@ -683,27 +795,54 @@ module g6lc_ai_gemm_seq #(
               state_d     = ST_MAC;
               acc_d       = '0;
               beat_left_d = 8'd0;
-              ar_inflight_d = 2'd0;
+              ar_inflight_d = '0;
             end else
               state_d = ST_LB;
           end
         end else begin
           // Multi-outstanding AR on B: issue while receive drains prior burst
           begin
-            automatic logic       ar_push, r_fire;
+            automatic logic       ar_push, r_fire, r_match;
             automatic logic [7:0] nb;
             automatic logic [31:0] elems;
+            automatic logic [ARSlotW-1:0] free_s, match_s;
             ar_push = 1'b0;
             r_fire  = 1'b0;
-            if (ar_inflight_q < 2'(MaxAROut) && ar_t_q < k_q) begin
+            r_match = 1'b0;
+            free_s  = '0;
+            match_s = '0;
+            if (SplitArId) begin
+              automatic logic found_free;
+              found_free = 1'b0;
+              for (int unsigned s = 0; s < MaxAROut; s++) begin
+                if (!ar_slot_q[s].valid && !found_free) begin
+                  found_free = 1'b1;
+                  free_s = ARSlotW'(s);
+                end
+                if (ar_slot_q[s].valid &&
+                    axi_resp_i.r.id == (ArIdBase + IdWidth'(s))) begin
+                  r_match = 1'b1;
+                  match_s = ARSlotW'(s);
+                end
+              end
+            end
+            if (ar_inflight_q < AROutW'(MaxAROut) && ar_t_q < k_q) begin
               axi_req_o.ar.addr  = beat_align(b_ar_cur);
-              nb                 = beats_for_rem(n_q - ar_j_q, b_ar_cur[BeatAlignW-1:0]);
+              nb                 = cap_beats_to_stripe(
+                  beat_align(b_ar_cur),
+                  beats_for_rem(n_q - ar_j_q, b_ar_cur[BeatAlignW-1:0]));
               axi_req_o.ar.len   = axi_pkg::len_t'(nb - 8'd1);
+              if (SplitArId)
+                axi_req_o.ar.id = ArIdBase + IdWidth'(free_s);
               axi_req_o.ar_valid = 1'b1;
               if (axi_resp_i.ar_ready) begin
                 ar_push         = 1'b1;
                 ar_lane_push_en = 1'b1;
                 ar_lane_push    = b_ar_cur[BeatAlignW-1:0];
+                ar_slot_we       = SplitArId;
+                ar_slot_widx     = free_s;
+                ar_slot_push_row = ar_t_q;
+                ar_slot_push_col = ar_j_q;
                 elems = elems_for_burst(n_q - ar_j_q, b_ar_cur[BeatAlignW-1:0], nb);
                 if (ar_j_q + elems >= n_q) begin
                   ar_j_en = 1'b1; ar_j_d = '0;
@@ -713,68 +852,81 @@ module g6lc_ai_gemm_seq #(
                 end
               end
             end
-            axi_req_o.r_ready = (ar_inflight_q != 2'd0);
-            if (ar_inflight_q != 2'd0 && axi_resp_i.r_valid) begin
+            axi_req_o.r_ready = (ar_inflight_q != '0) &&
+                                (!SplitArId || !axi_resp_i.r_valid || r_match);
+            if (ar_inflight_q != '0 && axi_resp_i.r_valid &&
+                (!SplitArId || r_match)) begin
               automatic logic [LaneW-1:0]     bk;
               automatic logic [BeatLaneW-1:0] lane0;
               automatic logic [31:0]          ntake, left_beat, rem_row, rem_in_beat;
+              automatic logic [31:0]          recv_t, recv_j;
+              automatic logic                 recv_first;
               r_fire  = 1'b1;
-              bk      = t_bank(t_q);
-              lane0   = burst_first_q ? ar_head_lane : BeatLaneW'(0);
-              rem_row     = n_q - j_q;
+              recv_t  = SplitArId ? ar_slot_q[match_s].row : t_q;
+              recv_j  = SplitArId ? ar_slot_q[match_s].col : j_q;
+              recv_first = SplitArId ? ar_slot_q[match_s].first : burst_first_q;
+              bk      = t_bank(recv_t);
+              lane0   = recv_first
+                      ? (SplitArId ? ar_slot_q[match_s].lane0 : ar_head_lane)
+                      : BeatLaneW'(0);
+              rem_row     = n_q - recv_j;
               rem_in_beat = 32'(BytesPerBeat) - 32'(lane0);
               ntake       = rem_row;
               if (ntake > rem_in_beat) ntake = rem_in_beat;
               if (ntake > 32'd8)       ntake = 32'd8;
               if (ntake == 0)          ntake = 32'd1;
               lb_n_d = ntake[3:0];
+              ar_slot_r_en   = SplitArId;
+              ar_slot_ridx   = match_s;
+              ar_slot_r_last = axi_resp_i.r.last;
+              ar_slot_ntake  = ntake;
               b_w_req [bk] = 1'b1;
-              b_w_addr[bk] = b_bank_addr(t_q, j_q);
+              b_w_addr[bk] = b_bank_addr(recv_t, recv_j);
               b_w_data[bk] = byte_from_beat(axi_resp_i.r.data, lane0);
               if (ntake >= 32'd2) begin
                 b_w2_req [bk] = 1'b1;
-                b_w2_addr[bk] = b_bank_addr(t_q, j_q + 32'd1);
+                b_w2_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd1);
                 b_w2_data[bk] = byte_from_beat(
                     axi_resp_i.r.data, BeatLaneW'(lane0 + 1));
               end
               if (ntake >= 32'd3) begin
                 b_w3_req [bk] = 1'b1;
-                b_w3_addr[bk] = b_bank_addr(t_q, j_q + 32'd2);
+                b_w3_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd2);
                 b_w3_data[bk] = byte_from_beat(
                     axi_resp_i.r.data, BeatLaneW'(lane0 + 2));
               end
               if (ntake >= 32'd4) begin
                 b_w4_req [bk] = 1'b1;
-                b_w4_addr[bk] = b_bank_addr(t_q, j_q + 32'd3);
+                b_w4_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd3);
                 b_w4_data[bk] = byte_from_beat(
                     axi_resp_i.r.data, BeatLaneW'(lane0 + 3));
               end
               if (ntake >= 32'd5) begin
                 b_w5_req [bk] = 1'b1;
-                b_w5_addr[bk] = b_bank_addr(t_q, j_q + 32'd4);
+                b_w5_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd4);
                 b_w5_data[bk] = byte_from_beat(
                     axi_resp_i.r.data, BeatLaneW'(lane0 + 4));
               end
               if (ntake >= 32'd6) begin
                 b_w6_req [bk] = 1'b1;
-                b_w6_addr[bk] = b_bank_addr(t_q, j_q + 32'd5);
+                b_w6_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd5);
                 b_w6_data[bk] = byte_from_beat(
                     axi_resp_i.r.data, BeatLaneW'(lane0 + 5));
               end
               if (ntake >= 32'd7) begin
                 b_w7_req [bk] = 1'b1;
-                b_w7_addr[bk] = b_bank_addr(t_q, j_q + 32'd6);
+                b_w7_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd6);
                 b_w7_data[bk] = byte_from_beat(
                     axi_resp_i.r.data, BeatLaneW'(lane0 + 6));
               end
               if (ntake >= 32'd8) begin
                 b_w8_req [bk] = 1'b1;
-                b_w8_addr[bk] = b_bank_addr(t_q, j_q + 32'd7);
+                b_w8_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd7);
                 b_w8_data[bk] = byte_from_beat(
                     axi_resp_i.r.data, BeatLaneW'(lane0 + 7));
               end
               left_beat = rem_in_beat - ntake;
-              rem_row   = n_q - j_q - ntake;
+              rem_row   = n_q - recv_j - ntake;
               if (left_beat > rem_row) left_beat = rem_row;
               beat_left_d = left_beat[7:0];
               beat_lane_d = BeatLaneW'(lane0 + ntake[BeatLaneW-1:0]);
@@ -782,7 +934,7 @@ module g6lc_ai_gemm_seq #(
               beat_data_d   = axi_resp_i.r.data;
               if (axi_resp_i.r.last)
                 ar_lane_pop_en = 1'b1;
-              if (j_q + ntake >= n_q && t_q + 1 == k_q) begin
+              if (!SplitArId && j_q + ntake >= n_q && t_q + 1 == k_q) begin
                 state_d       = ST_MAC;
                 acc_d         = '0;
                 beat_left_d   = 8'd0;
@@ -791,12 +943,12 @@ module g6lc_ai_gemm_seq #(
             end
             unique case ({ar_push, r_fire && axi_resp_i.r.last})
               2'b10: begin
-                ar_inflight_d = ar_inflight_q + 2'd1;
-                if (ar_inflight_q == 2'd0) burst_first_d = 1'b1;
+                ar_inflight_d = ar_inflight_q + AROutW'(1);
+                if (ar_inflight_q == '0) burst_first_d = 1'b1;
               end
               2'b01: begin
-                ar_inflight_d = ar_inflight_q - 2'd1;
-                burst_first_d = (ar_inflight_q > 2'd1);
+                ar_inflight_d = ar_inflight_q - AROutW'(1);
+                burst_first_d = (ar_inflight_q > AROutW'(1));
               end
               2'b11: begin
                 ar_inflight_d = ar_inflight_q;
@@ -806,9 +958,14 @@ module g6lc_ai_gemm_seq #(
             endcase
             if (r_fire && !axi_resp_i.r.last)
               burst_first_d = 1'b0;
-            // Entering MAC: drop residual tracking (last r.last should clear)
-            if (state_d == ST_MAC)
-              ar_inflight_d = 2'd0;
+            if (SplitArId) begin
+              if ((ar_t_en ? ar_t_d : ar_t_q) >= k_q && ar_inflight_d == '0) begin
+                state_d     = ST_MAC;
+                acc_d       = '0;
+                beat_left_d = 8'd0;
+              end
+            end else if (state_d == ST_MAC)
+              ar_inflight_d = '0;
           end
         end
       end
@@ -858,6 +1015,7 @@ module g6lc_ai_gemm_seq #(
                 pairs_rem = (n_q - stc_j_q) >> 1;
                 nbeats    = pairs_rem;
                 if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
+                nbeats    = cap_nbeats_to_stripe(c_store_addr, nbeats);
                 if (nbeats == 0) nbeats = 1;
                 axi_req_o.aw.addr  = c_store_addr;
                 axi_req_o.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
@@ -990,6 +1148,7 @@ module g6lc_ai_gemm_seq #(
               pairs_rem = (n_q - stc_j_q) >> 1;
               nbeats    = pairs_rem;
               if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
+              nbeats    = cap_nbeats_to_stripe(c_store_addr, nbeats);
               if (nbeats == 0) nbeats = 1;
               axi_req_o.aw.addr  = c_store_addr;
               axi_req_o.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
@@ -1135,15 +1294,17 @@ module g6lc_ai_gemm_seq #(
       acc_q <= '0;
       err_q <= 1'b0;
       done_q <= 1'b0;
-      ar_inflight_q <= 2'd0;
+      ar_inflight_q <= '0;
       aw_sent_q <= 1'b0;
       w_sent_q <= 1'b0;
       burst_first_q <= 1'b0;
       ar_i_q <= '0;
       ar_t_q <= '0;
       ar_j_q <= '0;
-      for (int unsigned k = 0; k < MaxAROut; k++)
+      for (int unsigned k = 0; k < MaxAROut; k++) begin
         ar_lane_mem_q[k] <= '0;
+        ar_slot_q[k]     <= '0;
+      end
       beat_q <= '0;
       beat_lane_q <= '0;
       beat_left_q <= '0;
@@ -1173,8 +1334,8 @@ module g6lc_ai_gemm_seq #(
         for (int unsigned k = 0; k < MaxAROut - 1; k++)
           ar_lane_mem_q[k] <= ar_lane_mem_q[k + 1];
         // after shift, free slot index is ar_inflight_q-1 (depth stays same)
-        if (ar_inflight_q != 2'd0)
-          ar_lane_mem_q[ar_inflight_q - 2'd1] <= ar_lane_push;
+        if (ar_inflight_q != '0)
+          ar_lane_mem_q[ar_inflight_q - AROutW'(1)] <= ar_lane_push;
         else
           ar_lane_mem_q[0] <= ar_lane_push;
       end else if (ar_lane_push_en) begin
@@ -1182,6 +1343,32 @@ module g6lc_ai_gemm_seq #(
       end else if (ar_lane_pop_en) begin
         for (int unsigned k = 0; k < MaxAROut - 1; k++)
           ar_lane_mem_q[k] <= ar_lane_mem_q[k + 1];
+      end
+      if (SplitArId) begin
+        if (ar_slot_we) begin
+          ar_slot_q[ar_slot_widx].valid <= 1'b1;
+          ar_slot_q[ar_slot_widx].first <= 1'b1;
+          ar_slot_q[ar_slot_widx].lane0 <= ar_lane_push;
+          ar_slot_q[ar_slot_widx].row   <= ar_slot_push_row;
+          ar_slot_q[ar_slot_widx].col   <= ar_slot_push_col;
+        end
+        if (ar_slot_r_en) begin
+          if (ar_slot_r_last)
+            ar_slot_q[ar_slot_ridx].valid <= 1'b0;
+          else begin
+            ar_slot_q[ar_slot_ridx].first <= 1'b0;
+            if ((state_q == ST_LA &&
+                 ar_slot_q[ar_slot_ridx].col + ar_slot_ntake >= k_q) ||
+                (state_q == ST_LB &&
+                 ar_slot_q[ar_slot_ridx].col + ar_slot_ntake >= n_q)) begin
+              ar_slot_q[ar_slot_ridx].col <= '0;
+              ar_slot_q[ar_slot_ridx].row <=
+                  ar_slot_q[ar_slot_ridx].row + 32'd1;
+            end else
+              ar_slot_q[ar_slot_ridx].col <=
+                  ar_slot_q[ar_slot_ridx].col + ar_slot_ntake;
+          end
+        end
       end
       beat_left_q   <= beat_left_d;
       beat_lane_q   <= beat_lane_d;
@@ -1217,10 +1404,12 @@ module g6lc_ai_gemm_seq #(
         t_q   <= '0;
         beat_left_q   <= '0;
         burst_first_q <= 1'b0;
-        ar_inflight_q <= 2'd0;
+        ar_inflight_q <= '0;
         ar_i_q <= '0;
         ar_t_q <= '0;
         ar_j_q <= '0;
+        for (int unsigned s = 0; s < MaxAROut; s++)
+          ar_slot_q[s] <= '0;
         c_pair_hold_q <= 1'b0;
         stc_w_left_q  <= '0;
         stc_elem_q    <= '0;
@@ -1231,8 +1420,19 @@ module g6lc_ai_gemm_seq #(
         pmu_cy_q <= '0;
       end
 
+      if (state_q == ST_LA && state_d == ST_LB) begin
+        i_q <= '0;
+        j_q <= '0;
+        t_q <= '0;
+      end
+      if (state_q == ST_LB && state_d == ST_MAC) begin
+        i_q <= '0;
+        j_q <= '0;
+        t_q <= '0;
+      end
+
       // A load: advance t by la_n_d (multi-byte unpack)
-      if (state_q == ST_LA && ar_inflight_q != 2'd0 && axi_resp_i.r_valid) begin
+      if (!SplitArId && state_q == ST_LA && ar_inflight_q != '0 && axi_resp_i.r_valid) begin
         if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
           err_q <= 1'b1;
         if (t_q + 32'(la_n_d) >= k_q) begin
@@ -1249,10 +1449,10 @@ module g6lc_ai_gemm_seq #(
       end
 
       // B load: up to 8 elements/cycle (AR/R or oct beat drain)
-      if (state_q == ST_LB &&
+      if (!SplitArId && state_q == ST_LB &&
           ((beat_left_q != 8'd0) ||
-           (ar_inflight_q != 2'd0 && axi_resp_i.r_valid))) begin
-        if (ar_inflight_q != 2'd0 && axi_resp_i.r_valid &&
+           (ar_inflight_q != '0 && axi_resp_i.r_valid))) begin
+        if (ar_inflight_q != '0 && axi_resp_i.r_valid &&
             (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}))
           err_q <= 1'b1;
         if (j_q + 32'(lb_n_d) >= n_q) begin

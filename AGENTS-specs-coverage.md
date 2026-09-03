@@ -139,6 +139,7 @@ required feature above. Status is therefore per-target.
 | AVX-like / server math | CBO full-line + RVB + server package; `_v` + Ara attach live-lintable |
 | RVV / Ara (U10ᵇ) | Partial: live Ara lint + purpose guide + `v` DTS + directed tests; SBI/cosim open |
 | CVXIF coprocessor interface | Implemented & tested (mutex with RVV accelerator) |
+| Custom `Xg6lcai` island (I3-lite) | Partial: CAP/GEMM/PMU directed (`ai-matrix-veri`); wrap AR/AW=8; S4 `g6lc_axi_lrsc` eight regular AR/AW; CLASS1 {1,2,4,8} Variane PASS; S4 parks hart 1 (`ai-dt`/`ai-d{1,2,4,8}`); dual-core stripe ELF on N>=2; all-N occupancy `ai-d8`/`ai-sc8`; exclusive `amoadd.d` `ai-dt`/`ai-d1`/`ai-d8`; CLI `test --ai` / `diag run ai` / `test --ai-remote`; class-1 nameplate not measured; QEMU higher-level only |
 | RVFI trace / debug triggers / PMU | Implemented & tested |
 
 ---

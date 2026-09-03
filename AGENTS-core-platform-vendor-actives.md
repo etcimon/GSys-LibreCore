@@ -36,7 +36,7 @@ any row with `vendor sync <id>`; inspect with `vendor scan <id>` (see `AGENTS-ve
 ### 2.1 memory — DRAM
 | id | controller | license | on-die vs board/PHY | corev_apu seam | status |
 |---|---|---|---|---|---|
-| `litedram` | LiteDRAM DDR3/DDR4/LPDDR4 + PHYs | BSD-2-Clause | Controller soft RTL; **DDR PHY = FPGA MIG / Altera EMIF or ASIC hard macro**; DIMM + clocking on board | AXI memory-side / `corev_apu/fpga/src` | planned |
+| `litedram` | LiteDRAM DDR3/DDR4/LPDDR4 + PHYs | BSD-2-Clause | Controller Migen; testharness `gen.py --sim`; FPGA PHY = USDDRPHY/K7 / ASIC hard macro | `g6lc_ai_litedram_wrap` / class-1 backend | **vendored** @ 3cf585a; generate open |
 
 ### 2.2 network — Ethernet
 | id | controller | license | on-die vs board/PHY | corev_apu seam | status |

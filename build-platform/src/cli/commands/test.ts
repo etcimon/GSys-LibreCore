@@ -24,6 +24,14 @@ import {
 } from "../../tooling/timings.ts";
 import { offerInstallMissingTools } from "../../tooling/offerInstall.ts";
 import type { ManagedTool } from "../../config/schema.ts";
+import {
+  applyAiEnv,
+  formatAiResolvedLine,
+  isAiSuiteId,
+  parseAiFlagErrors,
+  parseAiFlags,
+  resolveAiTesting,
+} from "../../tooling/aiTesting.ts";
 
 /** Print every catalogued suite with its group, tags, and runnable status. */
 function printList(ctx: PlatformContext): void {
@@ -53,11 +61,14 @@ export const testCommand: Command = {
   name: "test",
   summary: "Run LibreCore regression suite(s) discovered from verif/regress.",
   usage:
-    "bun run src/cli/index.ts test [<id...>] [--suite a,b] [--group <g>] [--all] [--open-source] [--list] [--from-timing DIR] [--use-emit] [--yes] [--dry-run]",
+    "bun run src/cli/index.ts test [<id...>] [--suite a,b] [--group <g>] [--ai] [--ai-remote] [--ai-qemu] [--channels N] [--ai-dram 0|1] [--from-timing DIR] [--all] [--open-source] [--list] [--use-emit] [--yes] [--dry-run]",
   details:
     "Selection (first match wins):\n" +
     "  <id...> / --suite a,b   explicit suite ids\n" +
     `  --group <g>             a whole family (${TEST_GROUPS.join("|")})\n` +
+    "  --ai                    Xg6lcai directed (config/matrix/island), like --suite ooo-l3-tests\n" +
+    "  --ai-remote             I3 S4 testharness_proxy (flavour ai-dt / --channels/--ai-dram)\n" +
+    "  --ai-qemu               g6lc_qemu higher-level Linux/emulation (NOT Variane evidence)\n" +
     "  --all                   every non-optional suite (+ --include-optional)\n" +
     "  --open-source           only suites runnable on the managed OSS toolchain\n" +
     "  (none)                  tests.defaultSuites from .config.ts\n" +
@@ -65,6 +76,14 @@ export const testCommand: Command = {
     "(not failed), so a broad run validates cleanly on a partially-provisioned\n" +
     "host — unless you accept an interactive install prompt (or pass --yes).\n" +
     "`--list` shows every suite with its runnable status.\n" +
+    "\n" +
+    "AI knobs (export AI_ISLAND_DRAM_* / S4_FLAVOUR for regress scripts):\n" +
+    "  --channels 1|2|4|8      DramChannels stripe (x4 = class-1 LiteDRAM N=4)\n" +
+    "  --ai-dram 0|1           0=SRAM (class 0), 1=DDR4 LiteDRAM (N×19 GB/s nameplate)\n" +
+    "  --ai-ghz G              island clock (enables Cas=14 timing SKU when class 0)\n" +
+    "  --ai-clusters N         I2 CAP/F8 only — N>1 is not live RTL\n" +
+    "  --ai-flavour|--flavour  ai|ai-dt|ai-d1|ai-d2|ai-d4|ai-d8|ai-sc{2,4,8}\n" +
+    "  --ai-tensor             include smt2-ai-tensor-track (or use `tensor` CLI)\n" +
     "\n" +
     "--from-timing <dir>  validate timings precompile out-dir structure first,\n" +
     "                     then export CVA6_FROM_TIMING for regress scripts.\n" +
@@ -75,6 +94,10 @@ export const testCommand: Command = {
     "bun run src/cli/index.ts test --list",
     "bun run src/cli/index.ts test smoke-cv64a6",
     "bun run src/cli/index.ts test --suite ooo-l3-tests",
+    "bun run src/cli/index.ts test --ai",
+    "bun run src/cli/index.ts test --ai --channels 4 --ai-dram 1",
+    "bun run src/cli/index.ts test --ai-remote --from-timing workspace/build/sv-timing/host-cv64a6_imafdc_sv39",
+    "bun run src/cli/index.ts test --ai-qemu",
     "bun run src/cli/index.ts test --group arch",
     "bun run src/cli/index.ts test --open-source --dry-run",
     "bun run src/cli/index.ts test --all --include-optional",
@@ -100,6 +123,23 @@ export const testCommand: Command = {
       return 1;
     }
 
+    const aiFlagErrors = parseAiFlagErrors(args.flags as Record<string, string | boolean>);
+    if (aiFlagErrors.length) {
+      for (const e of aiFlagErrors) logger.error(e);
+      return 2;
+    }
+    const aiKnobs = parseAiFlags(args.flags as Record<string, string | boolean>);
+    const ai = resolveAiTesting(aiKnobs);
+    if (ai.errors.length) {
+      for (const e of ai.errors) logger.error(e);
+      return 2;
+    }
+    if (ai.active) {
+      applyAiEnv(ai);
+      logger.info(formatAiResolvedLine(ai));
+      for (const w of ai.warnings) logger.warn(w);
+    }
+
     const suiteFlag = flagString(args.flags, "suite");
     const ids = [
       ...args.positionals,
@@ -110,6 +150,10 @@ export const testCommand: Command = {
     let suites: TestSuite[];
     if (ids.length > 0) {
       const sel = selectSuites(config, ids);
+      for (const u of sel.unknown) logger.warn(`unknown suite '${u}' — skipping (see: test --list).`);
+      suites = sel.suites;
+    } else if (ai.active && ai.suiteIds.length > 0) {
+      const sel = selectSuites(config, ai.suiteIds);
       for (const u of sel.unknown) logger.warn(`unknown suite '${u}' — skipping (see: test --list).`);
       suites = sel.suites;
     } else if (typeof args.flags.group === "string") {
@@ -137,7 +181,15 @@ export const testCommand: Command = {
       const needed = new Set<ManagedTool>();
       for (const s of suites) for (const t of s.tools) needed.add(t);
       // Heavy directed suites often list tools:[] but still need Verilator at runtime.
-      if (suites.some((s) => s.group === "directed" || s.id.includes("ooo") || s.id.includes("l3"))) {
+      if (
+        suites.some(
+          (s) =>
+            s.group === "directed" ||
+            s.id.includes("ooo") ||
+            s.id.includes("l3") ||
+            isAiSuiteId(s.id),
+        )
+      ) {
         needed.add("verilator");
         needed.add("riscv-gcc");
       }

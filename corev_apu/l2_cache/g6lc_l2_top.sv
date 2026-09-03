@@ -7,11 +7,13 @@
 //   * Multi-MSHR with line-merge (no duplicate fills for same line)
 //   * Banked data array (hit || fill in parallel when banks differ)
 //   * Combinational non-cacheable bypass (MMIO never enters tags)
+//   * Exclusive AR (AxLOCK) bypasses and forwards lock to the DRAM monitor
 //   * Write-through + read-allocate (matches WT L1)
 //   * Parallel SET_ASSOC tag compare
 //
 // When Enable=0 the module is not instantiated (caller wires AXI identity).
-// Line size must equal L1 / Zic64b (64 B default).
+// Line size must equal L1 / Zic64b (64 B default). That 64 B line is also the
+// default DRAM stripe (`DramChanShift=6`); a fill must not straddle a channel.
 
 module g6lc_l2_top
   import g6lc_l2_pkg::*;
@@ -360,11 +362,16 @@ module g6lc_l2_top
           size_d      = slv_req_i.ar.size;
           cache_d     = slv_req_i.ar.cache;
           atop_d      = '0;
-          lock_d      = 1'b0;
+          // Exclusive LR (AxLOCK) must reach g6lc_axi_lrsc. Zeroing lock_d
+          // here made LDEX a plain AR; STEX then saw no reservation (Variane
+          // sc.d rd=1 / tohost=9) while amoadd.d ATOP still passed (AW.lock
+          // was already captured). Locked AR always bypasses — a cache hit
+          // would return OKAY and never arm the DRAM monitor.
+          lock_d      = slv_req_i.ar.lock;
           is_write_d  = 1'b0;
           cacheable_d = l2_is_cacheable(slv_req_i.ar.cache);
           beat_d      = '0;
-          if (l2_is_cacheable(slv_req_i.ar.cache)) begin
+          if (l2_is_cacheable(slv_req_i.ar.cache) && !slv_req_i.ar.lock) begin
             state_d = S_TAG;
           end else begin
             l2_bypass_o = 1'b1;
@@ -526,14 +533,17 @@ module g6lc_l2_top
 
       // ---------------- Non-cacheable / write bypass ----------------
       S_BYPASS_AR: begin
+        // Drive captured fields. Copying live slv.ar a cycle after the
+        // handshake drops AR.lock (HPDCACHE already deasserted the beat).
         mst_req_o.ar_valid = 1'b1;
-        mst_req_o.ar       = slv_req_i.ar;
-        // override with captured
         mst_req_o.ar.addr  = addr_q;
         mst_req_o.ar.id    = id_q;
         mst_req_o.ar.len   = len_q;
         mst_req_o.ar.size  = size_q;
+        mst_req_o.ar.burst = axi_pkg::BURST_INCR;
         mst_req_o.ar.cache = cache_q;
+        mst_req_o.ar.lock  = lock_q;
+        mst_req_o.ar.prot  = 3'b000;
         if (mst_resp_i.ar_ready) state_d = S_BYPASS_R;
       end
 

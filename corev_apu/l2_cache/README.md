@@ -7,6 +7,7 @@ Memory-side AXI-to-AXI L2 under `corev_apu/l2_cache/`. Does **not** edit `core/c
 - **Multi-waiter attach (U6.2)**: up to `MAX_WAITERS` ids per line so multi-core same-line misses share one fill.
 - **Banked data array** (`g6lc_l2_data.sv`, default 4 banks via `tc_sram`): hit read and fill write proceed in parallel when banks differ.
 - **Non-cacheable bypass**: `ax.cache[1]==0` skips tags (MMIO never pollutes L2).
+- **Exclusive AR bypass**: `AR.lock` is captured and forwarded on the memory-side AR. A locked read never takes the tag-hit path (that would return OKAY and leave `g6lc_axi_lrsc` unarmed). `AW.lock` / ATOP were already preserved for AMOCAS/STEX.
 - **Write-through + read-allocate**: matches CVA6 WT L1; writes push through to memory.
 - **Parallel tag compare**: single-cycle SET_ASSOC hit path.
 - **Pairs with** `corev_apu/coherence/` split AR‖AW hub under multi-core.

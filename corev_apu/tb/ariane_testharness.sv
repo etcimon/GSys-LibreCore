@@ -72,6 +72,11 @@ module ariane_testharness #(
   logic        ndmreset;
   logic        ndmreset_n;
   logic        debug_req_core;
+`ifdef G6LC_HAVE_LITEDRAM
+  // CLASS1: hold the cluster while C++ drains ELF into LiteDRAM native.
+  // Cookie/class-0 does not define G6LC_HAVE_LITEDRAM (SRAM poke stays).
+  logic        preload_hold /*verilator public*/ = 1'b1;
+`endif
 
   int          jtag_enable;
   logic        init_done;
@@ -122,6 +127,32 @@ module ariane_testharness #(
   // Driven from gen_ai_island when MatrixEn; idle otherwise.
   ariane_axi::req_t  ai_dma_req;
   ariane_axi::resp_t ai_dma_resp;
+  logic              dram_init_done;
+  logic [g6lc_ai_island_cfg_pkg::AI_DRAM_MAX_CHANNELS-1:0][31:0]
+                     dram_ch_r_beats, dram_ch_w_beats;
+  // One island cfg for APB *and* the DRAM slave. Channel/class/shift must
+  // not drift between gen_ai_island and i_dram_backend.
+  localparam g6lc_ai_island_cfg_pkg::ai_island_cfg_t AiIslandCfg =
+`ifdef G6LC_AI_DRAM_CHANS_8
+      g6lc_ai_island_cfg_pkg::AiIslandDdr4x8Bringup
+`elsif G6LC_AI_DRAM_CHANS_4
+      g6lc_ai_island_cfg_pkg::AiIslandDdr4x4Bringup
+`elsif G6LC_AI_DRAM_CHANS_2
+      g6lc_ai_island_cfg_pkg::AiIslandDdr4x2Bringup
+`elsif G6LC_AI_DRAM_CLASS1
+      g6lc_ai_island_cfg_pkg::AiIslandDdr4Bringup
+`elsif G6LC_AI_DRAM_SIM_CHANS_8
+      g6lc_ai_island_cfg_pkg::AiIslandSimChans8
+`elsif G6LC_AI_DRAM_SIM_CHANS_4
+      g6lc_ai_island_cfg_pkg::AiIslandSimChans4
+`elsif G6LC_AI_DRAM_SIM_CHANS_2
+      g6lc_ai_island_cfg_pkg::AiIslandSimChans2
+`elsif G6LC_AI_DRAM_TIMING
+      g6lc_ai_island_cfg_pkg::AiIslandDdr4TimingSim
+`else
+      g6lc_ai_island_cfg_pkg::AiIslandLatencyDefault
+`endif
+      ;
   `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_req)
   `AXI_ASSIGN_TO_RESP(ai_dma_resp, slave[2])
 
@@ -139,6 +170,16 @@ module ariane_testharness #(
     .rst_no       ( ndmreset_n           ),
     .init_no      (                      ) // keep open
   );
+
+`ifdef G6LC_HAVE_LITEDRAM
+  wire core_rst_n = ndmreset_n & ~preload_hold;
+  function void g6lc_tb_preload_hold(input int unsigned on);
+    preload_hold = (on != 32'd0);
+  endfunction
+  export "DPI-C" function g6lc_tb_preload_hold;
+`else
+  wire core_rst_n = ndmreset_n;
+`endif
 
   // ---------------
   // Debug
@@ -472,6 +513,7 @@ module ariane_testharness #(
     );
 
     g6lc_ai_island_apb #(
+        .IslandCfg      ( AiIslandCfg ),
         .EnableDmaFetch ( 1'b1 ),
         .AxiDataWidth   ( AXI_DATA_WIDTH ),
         .AxiIdWidth     ( ariane_axi_soc::IdWidth ),
@@ -479,7 +521,7 @@ module ariane_testharness #(
         .axi_resp_t     ( ariane_axi::resp_t )
     ) i_ai_island (
         .clk_i     ( clk_i      ),
-        .rst_ni    ( ndmreset_n ),
+        .rst_ni    ( core_rst_n ),
         .testmode_i( test_en    ),
         .psel_i    ( ai_psel    ),
         .penable_i ( ai_penable ),
@@ -498,7 +540,10 @@ module ariane_testharness #(
         .sb_last_status_o    ( ai_isl_last_status     ),
         .sb_has_completion_o ( ai_isl_has_completion  ),
         .axi_dma_req_o       ( ai_dma_req             ),
-        .axi_dma_resp_i      ( ai_dma_resp            )
+        .axi_dma_resp_i      ( ai_dma_resp            ),
+        .dram_init_done_i    ( dram_init_done         ),
+        .ch_r_beats_i        ( dram_ch_r_beats        ),
+        .ch_w_beats_i        ( dram_ch_w_beats        )
     );
   end else begin : gen_gpio_err
     assign ai_irq = 1'b0;
@@ -534,21 +579,69 @@ module ariane_testharness #(
     .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
   ) dram();
 
-  logic                         req;
-  logic                         we;
-  logic [AXI_ADDRESS_WIDTH-1:0] addr;
-  logic [AXI_DATA_WIDTH/8-1:0]  be;
-  logic [AXI_DATA_WIDTH-1:0]    wdata;
-  logic [AXI_DATA_WIDTH-1:0]    rdata;
-  logic [AXI_USER_WIDTH-1:0]    wuser;
-  logic [AXI_USER_WIDTH-1:0]    ruser;
+  // Exclusive-monitor outstanding. Live cookie keeps pulp axi_riscv_atomics_wrap
+  // (1 AR + 1 AW). S4/CLASS1/SIM_CHANS uses g6lc_axi_atomics_wrap so HPDCACHE
+  // split-ID LDEX/STEX still match (address-only); LR/SC still snoops stores.
+  // Instance name stays i_axi_riscv_atomics (TB probes).
+  localparam int unsigned DRAM_AW_OUT =
+      g6lc_ai_island_cfg_pkg::dram_aw_out(AiIslandCfg);
 
+`ifdef G6LC_AI_DRAM_TIMING
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_CLASS1
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_CHANS_2
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_CHANS_4
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_CHANS_8
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_SIM_CHANS_2
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_SIM_CHANS_4
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_SIM_CHANS_8
+  `define G6LC_AI_EXCL_MULTI
+`endif
+
+`ifdef G6LC_AI_EXCL_MULTI
+  // SIM_CHANS keeps island MaxAROut=2 so dram_aw_out=1 (cookie identity).
+  // g6lc wrap + AMOS deadlock an AMO at 1 write slot; S4/CLASS1 already
+  // pass 8. Do not change cookie pulp DRAM_AW_OUT.
+  localparam int unsigned DRAM_EXCL_AW =
+      (DRAM_AW_OUT < unsigned'(2)) ? unsigned'(8) : DRAM_AW_OUT;
+  g6lc_axi_atomics_wrap #(
+    .AXI_ADDR_WIDTH     ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH     ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH       ( ariane_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH     ( AXI_USER_WIDTH               ),
+    .AXI_MAX_WRITE_TXNS ( DRAM_EXCL_AW ),
+    .RISCV_WORD_WIDTH   ( 64 ),
+    // One reservation per software hart. A single global reservation livelocks
+    // two harts contending on *different* addresses (g6lc_axi_lrsc header), so
+    // this is sized from the SoC's own hart count rather than left at a
+    // default. NR_HARTS = NR_CORES x NrHarts.
+    .NRes               ( (NR_HARTS < 1) ? 1 : NR_HARTS )
+  ) i_axi_riscv_atomics (
+    .clk_i,
+    .rst_ni ( ndmreset_n               ),
+    .slv    ( master[ariane_soc::DRAM] ),
+    .mst    ( dram                     )
+  );
+`else
   axi_riscv_atomics_wrap #(
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
     .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
     .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
     .AXI_USER_WIDTH ( AXI_USER_WIDTH               ),
-    .AXI_MAX_WRITE_TXNS ( 1  ),
+    .AXI_MAX_WRITE_TXNS ( DRAM_AW_OUT ),
     .RISCV_WORD_WIDTH   ( 64 )
   ) i_axi_riscv_atomics (
     .clk_i,
@@ -556,6 +649,7 @@ module ariane_testharness #(
     .slv    ( master[ariane_soc::DRAM] ),
     .mst    ( dram                     )
   );
+`endif
 
   AXI_BUS #(
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
@@ -580,47 +674,57 @@ module ariane_testharness #(
     .mst    ( dram_delayed )
   );
 
-  axi2mem #(
-    .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
-    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
-    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
-    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
-  ) i_axi2mem (
-    .clk_i  ( clk_i        ),
-    .rst_ni ( ndmreset_n   ),
-    .slave  ( dram_delayed ),
-    .req_o  ( req          ),
-    .we_o   ( we           ),
-    .addr_o ( addr         ),
-    .be_o   ( be           ),
-    .user_o ( wuser        ),
-    .data_o ( wdata        ),
-    .user_i ( ruser        ),
-    .data_i ( rdata        )
+  // SoC DRAM slave. Class/channels/shift come from AiIslandCfg (same as the
+  // island APB). Class 1 is +define+G6LC_AI_DRAM_CLASS1+G6LC_HAVE_LITEDRAM.
+  g6lc_ai_dram_backend #(
+    .DramClass      ( AiIslandCfg.DramClass            ),
+    .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave     ),
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH                ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH                   ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH                   ),
+    .AXI_USER_EN    ( AXI_USER_EN                      ),
+    .NUM_WORDS      ( NUM_WORDS                        ),
+    .NrChannels     ( AiIslandCfg.DramChannels         ),
+    .ChanShift      ( AiIslandCfg.DramChanShift        ),
+    .MaxAROut       ( AiIslandCfg.MaxAROut             )
+  ) i_dram_backend (
+    .clk_i      ( clk_i        ),
+    .rst_ni     ( ndmreset_n   ),
+    .rst_sram_ni( rst_ni       ),
+    .testmode_i ( test_en      ),
+    .slave      ( dram_delayed ),
+    .init_done_o( dram_init_done ),
+    .ch_r_beats_o ( dram_ch_r_beats ),
+    .ch_w_beats_o ( dram_ch_w_beats )
   );
 
-  sram #(
-    .DATA_WIDTH ( AXI_DATA_WIDTH ),
-    .USER_WIDTH ( AXI_USER_WIDTH ),
-    .USER_EN    ( AXI_USER_EN    ),
-`ifdef VERILATOR
-    .SIM_INIT   ( "none"         ),
-`else
-    .SIM_INIT   ( "zeros"        ),
-`endif
-    .NUM_WORDS  ( NUM_WORDS      )
-  ) i_sram (
-    .clk_i      ( clk_i                                                                       ),
-    .rst_ni     ( rst_ni                                                                      ),
-    .req_i      ( req                                                                         ),
-    .we_i       ( we                                                                          ),
-    .addr_i     ( addr[$clog2(NUM_WORDS)-1+$clog2(AXI_DATA_WIDTH/8):$clog2(AXI_DATA_WIDTH/8)] ),
-    .wuser_i    ( wuser                                                                       ),
-    .wdata_i    ( wdata                                                                       ),
-    .be_i       ( be                                                                          ),
-    .ruser_o    ( ruser                                                                       ),
-    .rdata_o    ( rdata                                                                       )
-  );
+  // Remote v5.008 cannot look up CVA6Cfg.DcacheLineWidth (struct member
+  // missing on the elaborated parameter). Use the target package constants.
+  localparam int unsigned L1D_LINE_B = cva6_config_pkg::CVA6ConfigDcacheLineWidth / 8;
+  localparam int unsigned L1I_LINE_B = cva6_config_pkg::CVA6ConfigIcacheLineWidth / 8;
+  localparam int unsigned L2_LINE_B  = unsigned'(64);
+
+  // pragma translate_off
+  // Core pipelines (I$/D$/L2) share this slave. A line fill must not straddle
+  // a stripe or axi_demux will park the whole burst on the first channel.
+  initial begin
+    automatic int unsigned nch, shift, stripe, l2b, l1d, l1i;
+    nch   = AiIslandCfg.DramChannels;
+    shift = AiIslandCfg.DramChanShift;
+    if (nch > 1) begin
+      stripe = unsigned'(1) << shift;
+      l2b = L2_LINE_B;
+      l1d = L1D_LINE_B;
+      l1i = L1I_LINE_B;
+      if (l2b > stripe)
+        $error("ariane_testharness: L2 line %0d B exceeds DRAM stripe %0d B", l2b, stripe);
+      if (l1d > stripe)
+        $error("ariane_testharness: D$ line %0d B exceeds DRAM stripe %0d B", l1d, stripe);
+      if (l1i > stripe)
+        $error("ariane_testharness: I$ line %0d B exceeds DRAM stripe %0d B", l1i, stripe);
+    end
+  end
+  // pragma translate_on
 
   // ---------------
   // AXI Xbar
@@ -812,7 +916,7 @@ module ariane_testharness #(
     .rvfi_probes_t  ( rvfi_probes_t       )
   ) i_cluster (
     .clk_i          ( clk_i               ),
-    .rst_ni         ( ndmreset_n          ),
+    .rst_ni         ( core_rst_n          ),
     .boot_addr_i    ( ariane_soc::ROMBase[CVA6Cfg.VLEN-1:0] ),
     .irq_i          ( core_irqs           ),
     .ipi_i          ( core_ipi            ),

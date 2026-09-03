@@ -10,7 +10,8 @@
 //
 // Golden full tree (committed, SoC-accurate): corev_apu/bootrom/ariane-ai.dts
 // Host path contract: architecture/ai-matrix/board-uio-eventfd.md
-// Defaults: AiIslandBase 0x4000_0000, PLIC source 8, AccTile 256, queues 1.
+// Defaults: AiIslandBase 0x4000_0000, PLIC source 8, AccTile 256, queues 2,
+// I3-lite DramClass=0 / 8 GB/s NoC.
 //
 // Include under /soc { ... } only when AiMatrixEn=1 (g6lc64_ai). Never advertise
 // xg6lcai / this node on packages that leave the GPIO window as an error slave.
@@ -28,9 +29,13 @@
 //     g6lc,acc-tile-n = <256>;
 //     g6lc,acc-tile-k = <256>;
 //     g6lc,macs-per-cycle = <256>;
-//     g6lc,queues = <1>;
-//     g6lc,queue-depth = <8>;
+//     g6lc,queues = <2>;
+//     g6lc,queue-depth = <64>;
 //     g6lc,noc-width = <64>;
+//     g6lc,dram-class = <0>;
+//     g6lc,dram-gbps = <8>;
+//     g6lc,dram-channels = <1>;
+//     g6lc,max-ar-out = <2>;
 //     status = "okay";
 //   };
 
@@ -44,8 +49,16 @@ ai_matrix: ai-matrix@40000000 {
   g6lc,acc-tile-n = <256>;
   g6lc,acc-tile-k = <256>;
   g6lc,macs-per-cycle = <256>;
-  g6lc,queues = <1>;
-  g6lc,queue-depth = <8>;
+  g6lc,queues = <2>;
+  g6lc,queue-depth = <64>;
   g6lc,noc-width = <64>;
+  g6lc,dram-class = <0>;
+  g6lc,dram-gbps = <8>;
+  /* Live N=1. Opt-in N>1 still uses one memory@ (hardware stripe).
+     Per-channel occupancy is CAP 0x50/0x70, not a DT property. */
+  g6lc,dram-channels = <1>;
+  g6lc,dram-chan-shift = <6>;
+  g6lc,max-ar-out = <2>;
+  /* init_done / timing_en are runtime CAP 0x48, not DT. */
   status = "okay";
 };

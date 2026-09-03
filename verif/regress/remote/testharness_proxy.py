@@ -132,6 +132,57 @@ FLAVOURS = {
     "legacy": ("work-ver-smt2-fw64-legacy", False),
 }
 
+# g6lc64_ai Variane libraries (I3 S4 / CLASS1). Not SMT2 B/legacy.
+# Built by verif/regress/ai-matrix-build-harness.sh via proxy `build ai-dt`
+# (also ai-d1/2/4/8 CLASS1 LiteDRAM and ai-sc2/4/8 class-0 SRAM stripe).
+AI_FLAVOURS = {
+    "ai": {
+        "verlib": "work-ver-ai",
+        "target": "g6lc64_ai",
+        "defines": "",
+    },
+    "ai-dt": {
+        "verlib": "work-ver-ai-dt",
+        "target": "g6lc64_ai",
+        "defines": "G6LC_AI_DRAM_TIMING",
+    },
+    "ai-d1": {
+        "verlib": "work-ver-ai-d1",
+        "target": "g6lc64_ai",
+        "defines": "G6LC_AI_DRAM_CLASS1",
+    },
+    "ai-d2": {
+        "verlib": "work-ver-ai-d2",
+        "target": "g6lc64_ai",
+        "defines": "G6LC_AI_DRAM_CHANS_2",
+    },
+    "ai-d4": {
+        "verlib": "work-ver-ai-d4",
+        "target": "g6lc64_ai",
+        "defines": "G6LC_AI_DRAM_CHANS_4",
+    },
+    "ai-d8": {
+        "verlib": "work-ver-ai-d8",
+        "target": "g6lc64_ai",
+        "defines": "G6LC_AI_DRAM_CHANS_8",
+    },
+    "ai-sc2": {
+        "verlib": "work-ver-ai-sc2",
+        "target": "g6lc64_ai",
+        "defines": "G6LC_AI_DRAM_SIM_CHANS_2",
+    },
+    "ai-sc4": {
+        "verlib": "work-ver-ai-sc4",
+        "target": "g6lc64_ai",
+        "defines": "G6LC_AI_DRAM_SIM_CHANS_4",
+    },
+    "ai-sc8": {
+        "verlib": "work-ver-ai-sc8",
+        "target": "g6lc64_ai",
+        "defines": "G6LC_AI_DRAM_SIM_CHANS_8",
+    },
+}
+
 # Default directed mini suite from verif/regress/soft-ladder-di-regress.sh.
 # Keep in sync with that script; override with --tests.
 DEFAULT_DI_TESTS = [
@@ -610,10 +661,17 @@ def repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def flavour_names() -> list[str]:
+    return sorted(set(FLAVOURS) | set(AI_FLAVOURS))
+
+
 def flavour_info(flavour: str) -> tuple[str, bool]:
-    if flavour not in FLAVOURS:
-        die(f"unknown flavour '{flavour}' (choose: {', '.join(FLAVOURS)})")
-    return FLAVOURS[flavour]
+    if flavour in FLAVOURS:
+        return FLAVOURS[flavour]
+    if flavour in AI_FLAVOURS:
+        return (AI_FLAVOURS[flavour]["verlib"], True)
+    die(f"unknown flavour '{flavour}' (choose: {', '.join(flavour_names())})")
+    raise AssertionError
 
 
 def env_prefix() -> str:
@@ -712,6 +770,11 @@ def cmd_doctor(rem: Remote, args) -> int:
     log("--- built harnesses ---")
     for flav, (verlib, _) in FLAVOURS.items():
         p = f"{REMOTE_ROOT}/work/{verlib}/Variane_testharness"
+        val = rem.out(f"test -x {p} && stat -c '%y (%s bytes)' {p} || echo -")
+        log(f"  {flav:<10}: {val}")
+    log("--- AI testharness (g6lc64_ai; optional) ---")
+    for flav, meta in AI_FLAVOURS.items():
+        p = f"{REMOTE_ROOT}/work/{meta['verlib']}/Variane_testharness"
         val = rem.out(f"test -x {p} && stat -c '%y (%s bytes)' {p} || echo -")
         log(f"  {flav:<10}: {val}")
     return 0
@@ -824,6 +887,7 @@ def build_cache_key(root: Path, flavour: str, target: str) -> str:
         "Makefile",
         "verilator_config.vlt",
         "verif/regress/soft-ladder-build-harness.sh",
+        "verif/regress/ai-matrix-build-harness.sh",
         "core/Flist.cva6",
         "core/Flist.fetch_B",
         "core/Flist.smt_legacy",
@@ -867,9 +931,12 @@ def build_cache_key(root: Path, flavour: str, target: str) -> str:
 
 def cmd_build(rem: Remote, args) -> int:
     rem.start_master()
+    ai_meta = AI_FLAVOURS.get(args.flavour)
     verlib, _stock = flavour_info(args.flavour)
     if args.verlib:
         verlib = args.verlib
+    if ai_meta and args.target == DEFAULT_TARGET:
+        args.target = ai_meta["target"]
 
     if args.sync:
         rc = cmd_sync(rem, argparse.Namespace(full=False))
@@ -879,18 +946,42 @@ def cmd_build(rem: Remote, args) -> int:
     if rem.check(f"test -f {REMOTE_ROOT}/env.sh", quiet=True) != 0:
         die(f"remote env.sh missing; run '{sys.argv[0]} setup {args.host}' first")
 
-    jobs = args.jobs or "$(nproc)"
+    if ai_meta:
+        _no_overlap_guard(rem, f"build {args.flavour}")
+
+    # AI C++ compile (make -j / cc1plus) OOMs at -j2 on 30 Gi. Keep jobs=1.
+    # Model --threads (vthreads) defaults to remote nproc in the harness so
+    # one Variane_testharness saturates the host at run. Override:
+    #   --jobs N                 C++ make -j (still capped unless ALLOW_HIGH_JOBS)
+    #   --vthreads N             verilator --threads (default nproc)
+    jobs = args.jobs or ("1" if ai_meta else "$(nproc)")
     clean = "1" if args.clean else "0"
     root = repo_root()
     verlib_dir = f"{REMOTE_ROOT}/work/{verlib}"
 
-    env_vars = [
-        f"SOFT_LADDER_VERLIB={shlex.quote(verlib_dir)}",
-        f"SOFT_LADDER_BUILD_TARGET={shlex.quote(args.target)}",
-        f"SOFT_LADDER_BUILD_JOBS={shlex.quote(jobs)}",
-        f"SOFT_LADDER_BUILD_CLEAN={shlex.quote(clean)}",
-        "VLT_HOME=\"$VLT_HOME\"",
-    ]
+    if ai_meta:
+        env_vars = [
+            f"AI_MATRIX_VERLIB={shlex.quote(verlib_dir)}",
+            f"AI_MATRIX_TARGET={shlex.quote(args.target)}",
+            f"AI_MATRIX_DEFINES={shlex.quote(ai_meta['defines'])}",
+            f"AI_MATRIX_BUILD_JOBS={shlex.quote(jobs)}",
+            f"AI_MATRIX_BUILD_CLEAN={shlex.quote(clean)}",
+            f"AI_MATRIX_FLAVOUR={shlex.quote(args.flavour)}",
+            "VLT_HOME=\"$VLT_HOME\"",
+        ]
+        vthreads = getattr(args, "vthreads", None)
+        if vthreads is not None:
+            env_vars.append(
+                f"AI_MATRIX_VERILATOR_THREADS={shlex.quote(str(vthreads))}"
+            )
+    else:
+        env_vars = [
+            f"SOFT_LADDER_VERLIB={shlex.quote(verlib_dir)}",
+            f"SOFT_LADDER_BUILD_TARGET={shlex.quote(args.target)}",
+            f"SOFT_LADDER_BUILD_JOBS={shlex.quote(jobs)}",
+            f"SOFT_LADDER_BUILD_CLEAN={shlex.quote(clean)}",
+            "VLT_HOME=\"$VLT_HOME\"",
+        ]
     for kv in args.env:
         env_vars.append(shlex.quote(kv))
 
@@ -927,13 +1018,22 @@ def cmd_build(rem: Remote, args) -> int:
         else:
             log(f"output cache miss for key {cache_key}")
 
+    if ai_meta:
+        build_sh = "verif/regress/ai-matrix-build-harness.sh"
+    else:
+        build_sh = "verif/regress/soft-ladder-build-harness.sh"
     script = (
         f"{env_prefix()} cd {REMOTE_ROOT}/repo && "
         f"mkdir -p {REMOTE_ROOT}/work && "
         + " ".join(env_vars)
-        + f" bash verif/regress/soft-ladder-build-harness.sh {shlex.quote(args.flavour)}"
+        + f" bash {build_sh} {shlex.quote(args.flavour)}"
     )
-    log(f"building flavour={args.flavour} verlib={verlib} target={args.target} jobs={jobs}")
+    vth = getattr(args, "vthreads", None)
+    vth_s = str(vth) if vth is not None else ("nproc" if ai_meta else "harness")
+    log(
+        f"building flavour={args.flavour} verlib={verlib} target={args.target} "
+        f"jobs={jobs} vthreads={vth_s}"
+    )
     rem.dbg(f"build script: {script[:240]}...")
     t0 = time.time()
     rc = rem.run(script, check=False).returncode
@@ -968,9 +1068,10 @@ def _kill_stranded_harnesses(rem: Remote) -> None:
     previous hung or aborted session before starting a new one. This is a
     best-effort defence against multiple heavy Verilator processes stacking up
     on the remote builder."""
-    # Use '[V]ariane_testharness' regex trick so the pkill command line does not
-    # match itself.
-    rc = rem.run("pkill -f '[V]ariane_testharness' || true", check=False).returncode
+    # Match the harness binary path only. `pkill -f Variane_testharness` also
+    # hits `g++ -c …/Variane_testharness_*.cpp` during a rebuild (SIGTERM on
+    # cc1plus, 15-min "Terminated" make). Slash + (space or EOL) excludes those.
+    rc = rem.run("pkill -f '[/]Variane_testharness( |$)' || true", check=False).returncode
     if rc == 0:
         log("pre-flight pkill: no stray Variane_testharness processes")
     else:
@@ -985,7 +1086,7 @@ def _no_overlap_guard(rem: Remote, command: str = "") -> None:
     The check uses a regex class on the first character so the pgrep command
     line does not match itself."""
     procs = rem.out(
-        "pgrep -a -f '[V]ariane_testharness|[s]oft-ladder' || true"
+        "pgrep -a -f '[/]Variane_testharness( |$)|[s]oft-ladder' || true"
     ).strip()
     if procs:
         # Filter out the pgrep line itself (it contains the pattern as a string).
@@ -1055,8 +1156,11 @@ def cmd_run(rem: Remote, args) -> int:
     if env_vars:
         env_vars = f"export {env_vars}; "
     logfile = f"{rundir}/run-{args.flavour}.log"
+    # g6lc64_ai at -O0: Verilator combo eval of dual-core scoreboard + 256 Mi
+    # SRAM blew the default 8 Mi stack (SIGSEGV at ~2.6k cycles, guard page
+    # in ProcMaps). Soft-ladder B/legacy stay well under 8 Mi.
     script = (
-        f"{env_prefix()} {env_vars}cd {rundir} && "
+        f"{env_prefix()} {env_vars}cd {rundir} && ulimit -s unlimited && "
         f"{shlex.quote(harness)} +time_out={args.time_out} "
         f"+max-cycles={args.time_out} +debug_disable +quiet_axi "
         f"{tohost_arg}{plusargs} {shlex.quote(remote_elf)} > {shlex.quote(logfile)} 2>&1; "
@@ -1659,10 +1763,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_sync)
 
     sp = sub.add_parser("build", help="build a harness flavour remotely")
-    sp.add_argument("flavour", choices=sorted(FLAVOURS))
+    sp.add_argument("flavour", choices=flavour_names())
     sp.add_argument("--target", default=DEFAULT_TARGET)
     sp.add_argument("--verlib", default=None)
-    sp.add_argument("--jobs", default=None)
+    sp.add_argument("--jobs", default=None,
+                    help="C++ make -j. AI default 1 (cc1plus OOM at -j2 on 30Gi).")
+    sp.add_argument("--vthreads", default=None, type=int,
+                    help="Verilator --threads for the model (AI default: remote nproc). "
+                         "One Variane_testharness then saturates the host. "
+                         "Does not raise C++ make -j.")
     sp.add_argument("--clean", action="store_true",
                     help="wipe the flavour Mdir and rebuild from scratch")
     sp.add_argument("--cache", default=True, action=argparse.BooleanOptionalAction,
@@ -1677,7 +1786,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("run", help="upload one ELF and run it (minimal payload)")
     sp.add_argument("elf")
-    sp.add_argument("--flavour", choices=sorted(FLAVOURS), default="B")
+    sp.add_argument("--flavour", choices=flavour_names(), default="B")
     sp.add_argument("--verlib", default=None)
     sp.add_argument("--tag", default=None, help="run dir name (default <elf>-<sha>)")
     sp.add_argument("--time-out", dest="time_out", default="400000")
@@ -1690,7 +1799,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_run)
 
     sp = sub.add_parser("soak", help="run the OpenSBI cookie soak remotely")
-    sp.add_argument("--flavour", choices=sorted(FLAVOURS), default="B")
+    sp.add_argument("--flavour", choices=flavour_names(), default="B")
     sp.add_argument("--verlib", default=None,
                     help="override the Verilator work directory name")
     sp.add_argument("--skip-build", action="store_true",
@@ -1702,7 +1811,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_soak)
 
     sp = sub.add_parser("di", help="run the directed mini (DI) suite remotely in parallel")
-    sp.add_argument("--flavour", choices=sorted(FLAVOURS), default="B")
+    sp.add_argument("--flavour", choices=flavour_names(), default="B")
     sp.add_argument("--verlib", default=None)
     sp.add_argument("--tests", nargs="+", default=None,
                     help="mini test names (space separated; default: DEFAULT_DI_TESTS)")

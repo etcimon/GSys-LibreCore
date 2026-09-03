@@ -7,6 +7,10 @@
 // into a flat desc_bits_t. One outstanding transaction; 8 beats of 64-bit
 // data (INCR). Completes with ok or bus error. Timing: multi-cycle FSM;
 // does not lengthen any core pipeline path.
+//
+// When DramChannels>1 the default stripe is 64 B (= DescBytes). Software must
+// 64 B-align descriptor pointers so this fetch does not straddle a channel
+// (same contract as L2 line fills). The engine does not split the AR.
 
 module g6lc_ai_desc_fetch
   import g6lc_ai_desc_pkg::*;

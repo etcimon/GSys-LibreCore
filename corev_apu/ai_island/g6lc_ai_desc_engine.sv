@@ -22,7 +22,12 @@ module g6lc_ai_desc_engine
     // When 1: structural write path present (ports live). Runtime gate is wr_cpl_en_i.
     parameter bit          WriteCompletion = 1'b0,
     // When 1: OP_GEMM enters ST_GEMM (I1-lite). When 0: P3 accept-only for GEMM.
-    parameter bit          ExecuteGemm     = 1'b0
+    parameter bit          ExecuteGemm     = 1'b0,
+    // Granted numeric formats, one bit per config_pkg::AI_FMT_* index. Must be
+    // the SAME value the capability window publishes at CAP_OFF_DTYPE_MASK,
+    // otherwise software discovers a format the engine then refuses. The island
+    // top passes one constant to both; do not default this to all-ones.
+    parameter logic [15:0] DtypeMask       = 16'h0001
 ) (
     input  logic                  clk_i,
     input  logic                  rst_ni,
@@ -202,6 +207,15 @@ module g6lc_ai_desc_engine
           state_d  = ST_COMPLETE;
         end else if (int'(qid_q) >= NumQueues) begin
           status_d = ST_BAD_QID;
+          state_d  = ST_COMPLETE;
+        end else if (!desc_numfmt_granted(desc_q, DtypeMask)) begin
+          // Fail closed on an ungranted numeric format. Checked here, in PARSE,
+          // alongside version/op/qid rather than in the GEMM sequencer, because
+          // this is a contract check on the descriptor and not a property of the
+          // datapath -- and because refusing before any operand fetch means an
+          // unsupported format costs no DRAM traffic. Demotion to INT8 is
+          // deliberately not offered: it would produce plausible wrong numbers.
+          status_d = ST_BAD_FMT;
           state_d  = ST_COMPLETE;
         end else begin
           // Priority is clamped by software/S-mode policy; engine accepts 0..15.

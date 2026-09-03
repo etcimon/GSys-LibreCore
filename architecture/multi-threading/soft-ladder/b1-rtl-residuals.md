@@ -35,7 +35,7 @@ Historical promotion order among B1 (from `inventory.yaml` priority):
 | Primary RTL | LSU reservation set, SC fail/success, flush interaction |
 | Directed test sketch | LR; non-conflicting dual-issue op; SC success; LR; store; SC fail |
 | Retire criterion | Delete soft cmpx shim; OpenSBI uses stock atomics |
-| **iter-005 fix (in tree)** | (1) Skip `flush_commit` for `AMO_LR*` so LR does not `flush_ex` the pipe. (2) `lr_sc_pair_q` in issue: after LR until SC, block non-SC STORE so intervening stores cannot clear `axi_riscv_lrsc` exclusive. Helpers `is_amo_lr`/`is_amo_sc`. Test: `mini_lrsc_d.S`. Lab re-soak still required before peeling soft cmpx. |
+| **iter-005 fix (in tree)** | (1) Skip `flush_commit` for `AMO_LR*` so LR does not `flush_ex` the pipe. (2) `lr_sc_pair_q` in issue: after LR until SC, block non-SC STORE so intervening stores cannot clear `axi_riscv_lrsc` exclusive. Helpers `is_amo_lr`/`is_amo_sc`. Test: `mini_lrsc_d.S`. Lab re-soak still required before peeling soft cmpx. **SI deadlock:** a same-hart `sd` between `lr.d` and `sc.d` never issues (`lr_sc_pair_q`) while in-order issue cannot reach `sc.d` — Variane hang, not a DRAM-monitor miss. Intervening snoop stays wrap-TB (`tb_g6lc_axi_lrsc`). I3 exclusive ELF is LR/SC success only. |
 
 ### CSR expected-trap (priority 2)
 

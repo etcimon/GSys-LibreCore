@@ -135,7 +135,7 @@ Quick spine for those open items:
 | Lab FO4/STA | `s9-lab-gate` · real STA / OpenROAD still lab |
 | ~~Stream8-class package~~ **promoted + CRT 9/9 + H-edge 3/3** | `g6lc64_stream8` · `mc-spo-veri` · `kvm-h-veri` |
 | QEMU E4 / soc Shell | `u-boot-edk2-boot-architecture.md` · no 32 MiB pflash on Variane; soc StartImage hang |
-| 100 TOPS I3→I2 | `scaling-100tops.md` §11 · `RTL_FEEDBACK.md` F9–F14 · do not grow clusters before measured BW |
+| 100 TOPS I3→I2 | `scaling-100tops.md` §4.2–§11 · `uncore/dram-channel-scaling.md` · `RTL_FEEDBACK.md` F9–F14 · shared DRAM slave (cores + `NrCores` + island) · do not grow clusters before measured BW |
 | PCIe transport pin | `pcie-endpoint.md` · keep GPEX RC ≠ virt_ai_card EP until `ai_host_transport` |
 
 

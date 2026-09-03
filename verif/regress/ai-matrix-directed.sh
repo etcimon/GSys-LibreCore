@@ -50,8 +50,51 @@ need=(
   verif/tests/custom/ai/ai_island_mmio_smoke.S
   core/cvxif_g6lc_ai/g6lc_ai_acc_bank.sv
   corev_apu/include/g6lc_ai_island_cfg_pkg.sv
+  corev_apu/src/g6lc_ai_dram_backend.sv
+  corev_apu/src/g6lc_ai_litedram_wrap.sv
+  corev_apu/src/g6lc_ai_dram_channels.sv
+  corev_apu/src/g6lc_axi_lrsc.sv
+  corev_apu/src/g6lc_axi_atomics_wrap.sv
+  verif/tb/ai_island/tb_g6lc_axi_lrsc.sv
+  verif/tb/ai_island/tb_g6lc_ai_atomics_aw.sv
+  verif/tb/ai_island/run-dram-atomics.sh
+  corev_apu/ai_island/g6lc_ai_dram_timing.sv
   corev_apu/ai_island/g6lc_ai_island_apb.sv
+  agents/vendor/AGENTS-vendor-litedram.md
+  architecture/uncore/litedram-testharness.yml
+  architecture/uncore/dram-channel-scaling.md
+  verif/tb/ai_island/tb_g6lc_ai_dram_stripe.sv
+  verif/tb/ai_island/run-dram-stripe.sh
+  verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv
+  verif/tb/ai_island/run-litedram-wrap.sh
+  verif/tb/ai_island/tb_g6lc_ai_dram_bw.sv
+  verif/tb/ai_island/run-dram-bw.sh
+  verif/tb/ai_island/tb_g6lc_ai_dram_backend_stripe.sv
+  verif/tb/ai_island/run-dram-backend-stripe.sh
+  verif/tb/ai_island/tb_g6lc_ai_dram_channels.sv
+  verif/tb/ai_island/run-dram-channels.sh
+  verif/tb/ai_island/tb_g6lc_ai_gemm_stripe.sv
+  verif/tb/ai_island/run-gemm-stripe.sh
+  verif/tb/ai_island/tb_g6lc_ai_gemm_backend.sv
+  verif/tb/ai_island/run-gemm-backend.sh
+  verif/tb/ai_island/run-gemm-backend-class1.sh
+  verif/tb/ai_island/tb_g6lc_ai_gemm_channels.sv
+  verif/tb/ai_island/run-gemm-channels.sh
+  verif/tb/ai_island/tb_g6lc_ai_cap_occupancy.sv
+  verif/tb/ai_island/run-cap-occupancy.sh
   verif/tests/testlist_ai_matrix.yaml
+  verif/tests/custom/ai/ai_gemm_tile_2x2_smoke.S
+  verif/tests/custom/ai/ai_dual_core_stripe_smoke.S
+  verif/regress/remote/ai-dual-core-stripe.sh
+  verif/tests/custom/ai/ai_nch_occupancy_smoke.S
+  verif/regress/remote/ai-nch-occupancy.sh
+  verif/tests/custom/ai/ai_class1_amo_lrsc_smoke.S
+  verif/regress/remote/ai-class1-amo-lrsc.sh
+  verif/tests/custom/ai/ai_dual_core_excl_smoke.S
+  verif/regress/remote/ai-dual-core-excl.sh
+  verif/tb/ai_island/tb_g6lc_ai_dram_timing.sv
+  verif/tb/ai_island/run-dram-timing.sh
+  corev_apu/ai_island/generated/README.md
   architecture/ai-matrix/isa-encoding.md
 )
 for f in "${need[@]}"; do
@@ -68,6 +111,178 @@ grep -q "CVA6ConfigVExtEn = 0" "$pkg" && ok "VExtEn=0 (seam B)" || bad "VExtEn m
 # CSR address constants must avoid FTRAN
 grep -q "CSR_AICFG.*=.*12'h801" core/cvxif_g6lc_ai/include/g6lc_ai_instr_pkg.sv \
   && ok "aicfg @ 0x801 (not FTRAN 0x800)" || bad "aicfg address"
+
+cfg=corev_apu/include/g6lc_ai_island_cfg_pkg.sv
+grep -q "AI_DRAM_DDR4" "$cfg" && ok "DramClass DDR4 named" || bad "AI_DRAM_DDR4"
+grep -q "AiIslandDdr4Bringup" "$cfg" && ok "DDR4 bringup package (not live)" || bad "AiIslandDdr4Bringup"
+grep -q "AiIslandDdr4x2Bringup" "$cfg" && ok "DDR4 2-channel bringup (38 GB/s)" || bad "AiIslandDdr4x2Bringup"
+grep -q "AiIslandDdr4x4Bringup" "$cfg" && ok "DDR4 4-channel bringup (76 GB/s)" || bad "AiIslandDdr4x4Bringup"
+grep -q "AiIslandDdr4x8Bringup" "$cfg" && ok "DDR4 8-channel bringup (152 GB/s)" || bad "AiIslandDdr4x8Bringup"
+grep -q "G6LC_AI_DRAM_CHANS_8" corev_apu/tb/ariane_testharness.sv \
+  && ok "testharness class-1 8ch LiteDRAM (default off)" || bad "G6LC_AI_DRAM_CHANS_8"
+grep -q "G6LC_AI_DRAM_CHANS_4" corev_apu/tb/ariane_testharness.sv \
+  && ok "testharness class-1 4ch LiteDRAM (default off)" || bad "G6LC_AI_DRAM_CHANS_4"
+grep -q "AiIslandSimChans2" "$cfg" && ok "class-0 2-channel SRAM stripe" || bad "AiIslandSimChans2"
+grep -q "AiIslandSimChans4" "$cfg" && ok "class-0 4-channel SRAM stripe" || bad "AiIslandSimChans4"
+grep -q "AiIslandSimChans8" "$cfg" && ok "class-0 8-channel SRAM stripe" || bad "AiIslandSimChans8"
+grep -q "G6LC_AI_DRAM_SIM_CHANS_4" corev_apu/tb/ariane_testharness.sv \
+  && ok "testharness class-0 4ch SRAM (default off)" || bad "G6LC_AI_DRAM_SIM_CHANS_4"
+grep -q "G6LC_AI_DRAM_SIM_CHANS_8" corev_apu/tb/ariane_testharness.sv \
+  && ok "testharness class-0 8ch SRAM (default off)" || bad "G6LC_AI_DRAM_SIM_CHANS_8"
+grep -q "ch_r_beats_o" corev_apu/src/g6lc_ai_dram_backend.sv \
+  && ok "SoC DRAM occupancy ports" || bad "ch_r_beats_o"
+grep -q "dram_burst_fits_stripe" "$cfg" && ok "stripe burst helper" || bad "dram_burst_fits_stripe"
+grep -q "class 0 must refuse 400" verif/tb/ai_island/tb_g6lc_ai_dram_stripe.sv \
+  && ok "nameplate guard refuses 400 on class 0/1" || bad "stripe 400 guard"
+grep -q "ddr4_nameplate_gbps" "$cfg" && ok "nameplate scales with channels" || bad "ddr4_nameplate_gbps"
+grep -q "AI_DRAM_MAX_CHANNELS" "$cfg" && ok "max DRAM channels named" || bad "AI_DRAM_MAX_CHANNELS"
+grep -q "CAP_OFF_MAX_AR_OUT" "$cfg" && ok "CAP MaxAROut" || bad "CAP_OFF_MAX_AR_OUT"
+grep -q "DramClass:    unsigned'(AI_DRAM_SIM_AXI)" "$cfg" \
+  && ok "live DramClass=0" || bad "live must stay class 0"
+grep -q "DramCas:      unsigned'(0)" "$cfg" && ok "live DramCas=0 bypass" || bad "live Cas must be 0"
+grep -q "CAP_OFF_DRAM_TIMING" "$cfg" && ok "CAP DRAM timing" || bad "CAP_OFF_DRAM_TIMING"
+grep -q "AiIslandDdr4TimingSim" "$cfg" && ok "class-0 DDR4 timing sim SKU" || bad "AiIslandDdr4TimingSim"
+grep -q "G6LC_AI_DRAM_TIMING" corev_apu/tb/ariane_testharness.sv \
+  && ok "testharness timing define (default off)" || bad "G6LC_AI_DRAM_TIMING"
+grep -q "G6LC_AI_DRAM_SIM_CHANS_2" corev_apu/tb/ariane_testharness.sv \
+  && ok "testharness class-0 2ch SRAM stripe (default off)" || bad "G6LC_AI_DRAM_SIM_CHANS_2"
+grep -B1 'G6LC_AI_EXCL_MULTI' corev_apu/tb/ariane_testharness.sv | grep -q 'G6LC_AI_DRAM_SIM_CHANS_2' \
+  && ok "SIM_CHANS uses g6lc exclusive wrap (not pulp 1-OT)" || bad "SIM_CHANS EXCL_MULTI"
+grep -q "DRAM_EXCL_AW" corev_apu/tb/ariane_testharness.sv \
+  && ok "g6lc wrap AW slots not cookie dram_aw_out=1" || bad "DRAM_EXCL_AW"
+grep -q "cap_beats_to_stripe" corev_apu/ai_island/g6lc_ai_gemm_seq.sv \
+  && ok "GEMM burst capped to stripe when N>1" || bad "cap_beats_to_stripe"
+grep -q "SplitArId" corev_apu/ai_island/g6lc_ai_gemm_seq.sv \
+  && ok "GEMM N>1 split outstanding AR IDs" || bad "SplitArId"
+grep -q "phy2_addr" verif/tb/ai_island/tb_g6lc_ai_dram_channels.sv \
+  && ok "class-1 two IDs per PHY (N=2/4)" || bad "phy2_addr"
+grep -q 'build_nch 1' verif/tb/ai_island/run-dram-channels.sh \
+  && ok "class-1 PHY N=1 identity" || bad "dram_channels n1"
+grep -q "g6lc_ai_cap_window" verif/tb/ai_island/tb_g6lc_ai_gemm_channels.sv \
+  && ok "class-1 GEMM CAP occupancy window" || bad "gemm_channels cap_window"
+grep -q "GATE_MILLI" verif/tb/ai_island/tb_g6lc_ai_dram_bw.sv \
+  && ok "class-1 --sim stream BW TB" || bad "dram_bw GATE_MILLI"
+grep -q 'build_nch 1' verif/tb/ai_island/run-gemm-channels.sh \
+  && ok "class-1 GEMM N=1 LiteDRAM identity" || bad "gemm_channels n1"
+grep -q 'build_nch 4' verif/tb/ai_island/run-gemm-channels.sh \
+  && ok "class-1 GEMM N=4 LiteDRAM" || bad "gemm_channels n4"
+grep -q 'build_nch 8' verif/tb/ai_island/run-gemm-channels.sh \
+  && ok "class-1 GEMM N=8 LiteDRAM" || bad "gemm_channels n8"
+grep -q 'run_wide' verif/tb/ai_island/tb_g6lc_ai_gemm_backend.sv \
+  && ok "class-0 GEMM wide lda=64 occupancy" || bad "gemm_backend run_wide"
+grep -q 'DRAM_CLASS' verif/tb/ai_island/tb_g6lc_ai_gemm_backend.sv \
+  && ok "GEMM backend DramClass parameter (CLASS1 slave)" || bad "gemm_backend DRAM_CLASS"
+grep -q 'GDRAM_CLASS=1' verif/tb/ai_island/run-gemm-backend-class1.sh \
+  && ok "class-1 GEMM via dram_backend (testharness CLASS1)" || bad "gemm_backend class1"
+grep -q 'build_nch 4' verif/tb/ai_island/run-gemm-backend-class1.sh \
+  && ok "class-1 backend GEMM N=4 (CHANS_4 slave)" || bad "gemm_backend class1 n4"
+grep -q 'build_nch 8' verif/tb/ai_island/run-gemm-backend-class1.sh \
+  && ok "class-1 backend GEMM N=8 (CHANS_8 slave)" || bad "gemm_backend class1 n8"
+grep -q 'user_port_native_0' corev_apu/src/g6lc_ai_litedram_wrap.sv \
+  && ok "wrap native user port" || bad "user_port_native_0"
+grep -q "aw_size <= 3'd3" corev_apu/src/g6lc_ai_litedram_wrap.sv \
+  && ok "wrap accepts core WT size 0-3" || bad "wrap aw_size"
+grep -q 'w0err' corev_apu/src/g6lc_ai_litedram_wrap.sv \
+  && ok "wrap SLVERR illegal burst (no aw_ready stall)" || bad "wrap w0err"
+grep -q '3344_2211' verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv \
+  && ok "wrap ST.H +2 merge" || bad "wrap ST.H"
+grep -q 'wr_bad_burst' verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv \
+  && ok "wrap multi-beat WRAP SLVERR" || bad "wrap WRAP SLVERR"
+grep -q 'wr_nbeats' verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv \
+  && ok "wrap L1 16 B INCR fill" || bad "wrap wr_nbeats"
+grep -q '9988_7766_EEFF_0011' verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv \
+  && ok "wrap ST.W +4 merge" || bad "wrap ST.W +4"
+grep -q 'rd_sz' verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv \
+  && ok "wrap NC AR size 0/1/2" || bad "wrap rd_sz"
+grep -q 'R-while-B' verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv \
+  && ok "wrap AR while B outstanding" || bad "wrap R-while-B"
+grep -q 'collect_r_nbeats_pair' verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv \
+  && ok "wrap two outstanding AR (I$+D$ / L2 MSHR)" || bad "wrap dual AR"
+grep -q "8'd7" verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv \
+  && ok "wrap two 64 B AR (L2 two-MSHR)" || bad "wrap 64B dual AR"
+grep -q '3rd AR ready with both slots live' verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv \
+  && ok "wrap 3rd AR backpressure" || bad "wrap 3rd AR"
+grep -q 'timeout mixed AR' verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv \
+  && ok "wrap mixed AW+AR two IDs" || bad "wrap mixed AW AR"
+grep -q 'ai-dt' verif/regress/remote/testharness_proxy.py \
+  && ok "proxy AI flavour ai-dt (MaxAROut=8)" || bad "proxy ai-dt"
+grep -q 'ai-d4' verif/regress/remote/testharness_proxy.py \
+  && ok "proxy AI flavour ai-d4 (CLASS1 N=4)" || bad "proxy ai-d4"
+grep -q '"ai"' build-platform/src/config/schema.ts \
+  && ok "diag compartment ai in schema" || bad "schema DiagnosticCompartment ai"
+grep -q -- '--ai-remote' build-platform/src/cli/commands/test.ts \
+  && ok "test --ai-remote CLI" || bad "test --ai-remote"
+grep -q -- '--ai-qemu' build-platform/src/cli/commands/test.ts \
+  && ok "test --ai-qemu CLI" || bad "test --ai-qemu"
+grep -q 'ai-dram-stripe' build-platform/src/config/defaults.ts \
+  && ok "suite ai-dram-stripe (class-0 N>1)" || bad "ai-dram-stripe suite"
+grep -q 'nch-from-env.inc.sh' verif/tb/ai_island/run-dram-channels.sh \
+  && ok "channels TB honors AI_ISLAND_DRAM_CHANNELS" || bad "nch-from-env channels"
+grep -q 'g6lc_dram_peek64' corev_apu/tb/ariane_tb.cpp \
+  && ok "ariane_tb.cpp DPI stub g6lc_dram_peek64 (AI testharness link)" || bad "peek64 stub"
+grep -q 'ai_s4_mshr_xbar_smoke' verif/regress/remote/s4-mshr-xbar.sh \
+  && ok "S4 remote testharness xbar×MSHR×MaxAROut" || bad "s4-mshr-xbar.sh"
+grep -q 'S4_LINE_BASE' verif/tests/custom/ai/ai_s4_mshr_xbar_smoke.S \
+  && ok "S4 ELF 8 L2-line loads + 8x8 GEMM" || bad "ai_s4_mshr_xbar_smoke"
+grep -q 'LINE1' verif/tests/custom/ai/ai_dual_core_stripe_smoke.S \
+  && ok "dual-core stripe ELF (NrCores=2, CAP 0x38 N>=2)" || bad "ai_dual_core_stripe_smoke"
+grep -q 'CAP_CH1_W' verif/tests/custom/ai/ai_dual_core_stripe_smoke.S \
+  && ok "dual-core S5 occupancy CAP 0x70/0x74" || bad "dual-core occupancy"
+grep -q 'G6LC_CHSRAM' corev_apu/tb/ariane_tb.cpp \
+  && ok "class-0 N>1 stripe SRAM preload (ai-sc*)" || bad "sim-stripe preload"
+grep -q 's4_park' verif/tests/custom/ai/ai_s4_mshr_xbar_smoke.S \
+  && ok "S4 parks hart 1 (dual-core is separate ELF)" || bad "S4 hart1 park"
+grep -q 'nch_park' verif/tests/custom/ai/ai_nch_occupancy_smoke.S \
+  && ok "all-N occupancy ELF (CAP 0x38 N, 0x70+4*i)" || bad "ai_nch_occupancy_smoke"
+grep -q 'ai_nch_occupancy_smoke' verif/regress/remote/ai-nch-occupancy.sh \
+  && ok "all-N occupancy remote (default ai-d8)" || bad "ai-nch-occupancy.sh"
+grep -q 'amoadd.d' verif/tests/custom/ai/ai_class1_amo_lrsc_smoke.S \
+  && ok "CLASS1 exclusive ELF (amoadd.d + lr.d/sc.d)" || bad "ai_class1_amo_lrsc_smoke"
+grep -q 'ai_class1_amo_lrsc_smoke' verif/regress/remote/ai-class1-amo-lrsc.sh \
+  && ok "CLASS1 exclusive remote (default ai-dt)" || bad "ai-class1-amo-lrsc.sh"
+grep -q 'COOKIE1' verif/tests/custom/ai/ai_dual_core_excl_smoke.S \
+  && ok "dual-core exclusive snoop ELF (hart1 store kills sc.d)" || bad "ai_dual_core_excl_smoke"
+grep -q 'ai_dual_core_excl_smoke' verif/regress/remote/ai-dual-core-excl.sh \
+  && ok "dual-core exclusive remote (default ai-dt)" || bad "ai-dual-core-excl.sh"
+grep -q 'AI_ISLAND_DRAM_CHANS_2' verif/regress/ai-matrix-veri.sh \
+  && ok "Variane opt-in CHANS_2 → work-ver-ai-d2" || bad "veri CHANS_2"
+grep -q 'AI_ISLAND_DRAM_CHANS_8' verif/regress/ai-matrix-veri.sh \
+  && ok "Variane opt-in CHANS_8 → work-ver-ai-d8" || bad "veri CHANS_8"
+grep -q 'g6lc_ai_dram_channels.sv' Makefile \
+  && ok "testharness flist has dram_channels" || bad "Makefile dram_channels"
+grep -q 'run_wide' verif/tb/ai_island/tb_g6lc_ai_gemm_channels.sv \
+  && ok "class-1 GEMM wide lda=64 occupancy" || bad "gemm_channels run_wide"
+grep -q "64'h8000_0038" verif/tb/ai_island/tb_g6lc_ai_gemm_stripe.sv \
+  && ok "GEMM stripe TB starts A on a stripe edge" || bad "gemm stripe A ptr"
+grep -q "CAP_OFF_DRAM_CH_R" corev_apu/include/g6lc_ai_island_cfg_pkg.sv \
+  && ok "CAP occupancy offsets 0x50/0x70" || bad "CAP_OFF_DRAM_CH_R"
+grep -q "CAP_OFF_DRAM_CHANS" verif/tb/ai_island/tb_g6lc_ai_cap_occupancy.sv \
+  && ok "CAP 0x38 DTS channels/shift decode" || bad "cap occupancy 0x38"
+grep -q "g6lc,dram-channels" corev_apu/bootrom/ariane-ai.dts \
+  && ok "DTS one memory@ + dram-channels" || bad "ariane-ai dram-channels"
+grep -q "ch_r_beats_i" corev_apu/tb/ariane_testharness.sv \
+  && ok "testharness occupancy wired into island CAP" || bad "testharness ch_r_beats_i"
+grep -q "gen_sim_stripe" corev_apu/src/g6lc_ai_dram_backend.sv \
+  && ok "class-0 N>1 striped SRAM" || bad "gen_sim_stripe"
+grep -q "n_r_ready   = 1'b1" corev_apu/src/g6lc_ai_litedram_wrap.sv \
+  && ok "wrap always accepts native rdata (no ID; --sim pulse)" || bad "n_r_ready"
+grep -q "UNIQUE_IDS" corev_apu/src/g6lc_ai_dram_backend.sv \
+  && ok "stripe demux UNIQUE_IDS (same-ID may retarget channel)" || bad "UNIQUE_IDS"
+grep -q "CAP_OFF_DRAM_STATUS" "$cfg" && ok "CAP DRAM status" || bad "CAP_OFF_DRAM_STATUS"
+grep -q 'id: "litedram"' build-platform/src/config/defaults.ts \
+  && grep -q "enabled: false" build-platform/src/config/defaults.ts \
+  && ok "litedram catalog enabled:false" || bad "do not auto-fetch litedram"
+if [[ -d vendor/litex/litedram/litedram ]]; then
+  ok "litedram submodule checkout"
+else
+  skip "litedram checkout absent"
+fi
+if [[ -f corev_apu/ai_island/generated/gateware/litedram_core.v ]]; then
+  grep -q "module litedram_core" corev_apu/ai_island/generated/gateware/litedram_core.v \
+    && ok "generated litedram_core.v" || bad "litedram_core.v missing module"
+else
+  skip "litedram_core.v not generated"
+fi
 
 COMMON="$ROOT/verif/tests/custom/common"
 LD="$COMMON/link_verilator.ld"
@@ -96,6 +311,66 @@ else
       bad "compile $t (see $OUT/${t}.cc.err)"
     fi
   done
+fi
+
+if command -v verilator >/dev/null 2>&1; then
+  if bash verif/tb/ai_island/run-dram-timing.sh; then
+    ok "tb_g6lc_ai_dram_timing (page hit/miss)"
+  else
+    bad "tb_g6lc_ai_dram_timing"
+  fi
+  if bash verif/tb/ai_island/run-dram-stripe.sh; then
+    ok "tb_g6lc_ai_dram_stripe (core/L2 vs GEMM stripe)"
+  else
+    bad "tb_g6lc_ai_dram_stripe"
+  fi
+  if bash verif/tb/ai_island/run-litedram-wrap.sh; then
+    ok "tb_g6lc_ai_litedram_wrap (class-1 id6 cluster+island+L2 line)"
+  else
+    bad "tb_g6lc_ai_litedram_wrap"
+  fi
+  if bash verif/tb/ai_island/run-dram-bw.sh; then
+    ok "tb_g6lc_ai_dram_bw (class-1 --sim stream measure; 80% still Variane)"
+  else
+    bad "tb_g6lc_ai_dram_bw"
+  fi
+  if bash verif/tb/ai_island/run-dram-backend-stripe.sh; then
+    ok "tb_g6lc_ai_dram_backend_stripe (class-0 N=2/4/8 SRAM image)"
+  else
+    bad "tb_g6lc_ai_dram_backend_stripe"
+  fi
+  if bash verif/tb/ai_island/run-dram-channels.sh; then
+    ok "tb_g6lc_ai_dram_channels (class-1 N=1/2/4/8 LiteDRAM stripe)"
+  else
+    bad "tb_g6lc_ai_dram_channels"
+  fi
+  if bash verif/tb/ai_island/run-gemm-stripe.sh; then
+    ok "tb_g6lc_ai_gemm_stripe (N=1 identity + N=2 stripe)"
+  else
+    bad "tb_g6lc_ai_gemm_stripe"
+  fi
+  if bash verif/tb/ai_island/run-gemm-backend.sh; then
+    ok "tb_g6lc_ai_gemm_backend (N=1/2/4/8 golden C + CAP + wide occupancy)"
+  else
+    bad "tb_g6lc_ai_gemm_backend"
+  fi
+  if bash verif/tb/ai_island/run-gemm-backend-class1.sh; then
+    ok "tb_g6lc_ai_gemm_backend class1 (testharness CLASS1/CHANS N=1/2/4 native wrap)"
+  else
+    bad "tb_g6lc_ai_gemm_backend class1"
+  fi
+  if bash verif/tb/ai_island/run-gemm-channels.sh; then
+    ok "tb_g6lc_ai_gemm_channels (golden C vs class-1 N=1/2/4/8 LiteDRAM + CAP + wide)"
+  else
+    bad "tb_g6lc_ai_gemm_channels"
+  fi
+  if bash verif/tb/ai_island/run-cap-occupancy.sh; then
+    ok "tb_g6lc_ai_cap_occupancy (S5 CAP 0x50/0x70)"
+  else
+    bad "tb_g6lc_ai_cap_occupancy"
+  fi
+else
+  skip "no verilator — dram-timing/stripe/wrap TB skipped"
 fi
 
 if [[ "$LIVE_RTL" = "1" ]]; then

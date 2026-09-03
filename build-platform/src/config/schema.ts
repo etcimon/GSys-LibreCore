@@ -620,7 +620,7 @@ export interface VerifyConfig {
 // Diagnostics are small, self-contained gates used by `diag` / `probe diag`.
 // Unlike `verify` (full multi-target sweep) each entry owns its Verilator
 // surface: top, flist extras, lintArgs, warning budget, defines. Compartments
-// group related checks (host probe caps, core lint, smt2, ooo, residual WSL).
+// group related checks (host probe caps, core lint, smt2, ooo, ai, residual WSL).
 
 /** Logical grouping for diagnostic tests (tab / filter key). */
 export type DiagnosticCompartment =
@@ -628,6 +628,7 @@ export type DiagnosticCompartment =
   | "core"
   | "smt2"
   | "ooo"
+  | "ai"
   | "apu"
   | "residual";
 

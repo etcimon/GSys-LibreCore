@@ -38,7 +38,11 @@ module g6lc_ai_island_apb
     output logic        sb_has_completion_o,
     // AXI DMA (desc fetch)
     output axi_req_t    axi_dma_req_o,
-    input  axi_resp_t   axi_dma_resp_i
+    input  axi_resp_t   axi_dma_resp_i,
+    // No port defaults: Verilator 5.008 (remote testharness) rejects them.
+    input  logic        dram_init_done_i,
+    input  logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r_beats_i,
+    input  logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_w_beats_i
 );
 
   logic        is_req, is_we;
@@ -75,7 +79,10 @@ module g6lc_ai_island_apb
       .sb_last_status_o    (sb_last_status_o),
       .sb_has_completion_o (sb_has_completion_o),
       .axi_dma_req_o       (axi_dma_req_o),
-      .axi_dma_resp_i      (axi_dma_resp_i)
+      .axi_dma_resp_i      (axi_dma_resp_i),
+      .dram_init_done_i    (dram_init_done_i),
+      .ch_r_beats_i        (ch_r_beats_i),
+      .ch_w_beats_i        (ch_w_beats_i)
   );
 
   always_comb begin

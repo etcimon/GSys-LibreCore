@@ -6,9 +6,11 @@
 **Licensing:** tier T doc (MIT, no inline header). The silicon it describes is tier **R** (open,
 dual-licensed); **AI-0 closed on the open path**, so nothing here is licensing-blocked.
 
-> **Where we are vs this plan (2026-08-11).** I0 + staged SKU (**AI-S1**) closed. Single-cluster
-> AccTile 256 + CPL FIFO + HARD narrow/ci/peak green. **Next executable work:** measure I3 bandwidth
-> against §4, then I2 multi-cluster — without breaking single-cluster HARD bit-identity.
+> **Where we are vs this plan (2026-09).** I0 + staged SKU (**AI-S1**) closed. Single-cluster
+> AccTile 256 + CPL FIFO + HARD narrow/ci/peak green. I3-lite live (class 0, N=1, 8 GB/s NoC).
+> **Next executable work:** class-1 DRAM + **shared-channel stability** (§4.2–4.3, cores and
+> `NrCores` on the same slave) against §4, then I2 multi-cluster — without breaking
+> single-cluster HARD bit-identity. Do not treat `DramChannels` as island-private.
 
 > **Why this document exists.** `README.md` sizes a *seam*. It does not size a *machine*. A review of
 > a 100-TOPS target showed that the interesting decisions at that scale are not seam decisions at all,
@@ -20,6 +22,8 @@ dual-licensed); **AI-0 closed on the open path**, so nothing here is licensing-b
 2. Definition of the number (do this before any RTL)
 3. The two-plane split — the load-bearing restructure
 4. Sizing model: bandwidth first, then MACs
+   - 4.2 Shared multi-channel DRAM (core pipelines + island, not I2)
+   - 4.3 Stability of the `DramChannels` knob
 5. The batch-1 trap, and the staged SKU decision (**AI-S1, closed**)
 6. On-die SRAM: 8–32 MB, not 32–128 MB
 7. Clusters and the NoC cut line; chiplets deferred
@@ -151,6 +155,85 @@ Reference memory options for the 391 GB/s row: 2 × LPDDR5X-8533 ×128 (≈273 G
 adequate), or 1 HBM2E stack (≈460 GB/s) — noting that HBM implies an interposer, i.e. it re-imports the
 advanced-packaging cost that §7 defers.
 
+### 4.2 Shared multi-channel DRAM — cores use it too
+
+Bandwidth on this part scales by **independent DRAM controllers**, not by PHY width and not by
+I2 cluster count. Detail and the implementation checklist live in
+[`../uncore/dram-channel-scaling.md`](../uncore/dram-channel-scaling.md). The load-bearing facts
+for the 100-TOPS plan are here so a later pass cannot grow MACs, or grow `NrCores`, and call
+that memory.
+
+**`DramChannels` is a SoC DRAM-slave knob** (`g6lc_ai_island_cfg_pkg`, power of two, max 8).
+Each channel is one `litedram_core`. Stripe is `addr[DramChanShift +: log2(N)]`, default shift
+**6 = 64 B**, matching `Zic64b` and the L2 line. Class-1 nameplate is **`N × 19` GB/s**
+(DDR4-2400×64). **400 GB/s is class 2 LPDDR5 only.**
+
+The testharness already wires `g6lc_ai_dram_backend` on `master[DRAM]` **after** the exclusive-
+monitor wrap. That is the same slave the cluster `mem_req_o` hits. The island GEMM DMA is a
+second xbar master, not a private memory. Therefore every `core/` path that already misses to
+DRAMBase — I$ fill, D$ / WT, PTW, AMO/LR/SC, SMT2's second hart on the same AXI master,
+`cbo.zero`, stream copies, Ara when attached — **uses the channels without a `cva6_cfg_t`
+field**. Putting `DramChannels` in `cva6_cfg_t` would tax ~24 core packages with a PHY count
+no pipeline stage should decode (§8).
+
+`NrCores` and `DramChannels` are orthogonal. Raising the cluster from 1 to 8 adds miss-fill
+concurrency through the hub/L2/L3; it does not instantiate PHYs. I2 `Clusters` likewise
+replicates compute behind the NoC cut line (§7) and is forbidden from changing this memory
+system.
+
+DDR4 maxes at **8 × 19 = 152 GB/s**. That covers the latency SKU's GEMM row at `T = 512`
+(24–48 GB/s) once the fabric can carry it. It does **not** cover the 100-TOPS 195 GB/s row,
+and it does not cover the 391 GB/s `T = 256` row. The throughput SKU still buys class 2.
+
+Live interconnect is 64-bit @ 1 GHz = **8 GB/s**. Observed BW cannot exceed
+`min(nameplate, AxiDataWidth×f, NoC peak)`. The §12 `BW_measured` floor is 80% of **that
+minimum**, not 80% of a nameplate the xbar cannot carry, and not 80% of 400 on class 1.
+Directed class-1 `--sim` stream (`tb_g6lc_ai_dram_bw`) with the native bursting wrap
+measured **7858 milli-GB/s (98% of fabric)** on a 256-beat INCR (2048 beats / 2085 cy).
+The 80% floor of `min(19, 8)` is **closed**. LiteDRAM native rdata is a delayed pulse
+with no `ready` backpressure; the wrap always accepts and only issues while
+FIFO+inflight still fit. YAML `sys_clk_freq` is 100 MHz; beats/cycle is the number.
+Wrap smoke **1445 cy**: eight AR + eight AW live / 9th backpressure (MaxAROut=8), mixed AW+AR,
+L1 16 B, WRAP **SLVERR**. AXI held until `init_done`. Not the 19 GB/s nameplate; not 400.
+A later dual-port DRAM front-end (narrow cluster port + wide island port into the **same**
+stripe) is how 400 GB/s and Linux coexist without splitting the map — planned in the uncore
+note, not live, not I2.
+
+### 4.3 Stability of the `DramChannels` knob
+
+The knob is already in the package (`island_cfg_legal`, `island_cfg_with_channels`, CAP
+`0x38`). Stability is the work that remains before N>1 is a SKU. Condensed from the uncore
+note; do not implement I2 in lieu of any row.
+
+| Invariant | Why |
+|---|---|
+| N=1 is a wire (`gen_sel1`) | Cookie `51b1babe`, HARD 256³, OpenSBI identity |
+| N>1 is one interleaved map, not N windows | Same `memory@`; same descriptor pointers |
+| Burst / cache line ≤ `2^ChanShift` | `axi_demux` routes the whole transaction by first-beat address. Frozen pair: L2 64 B + shift 6 |
+| Atomics wrap **above** the demux | One exclusive monitor; island DMA never `AxLOCK` |
+| `init_done = AND` of all PHYs | CAP `0x48` bit 0; no master issues early |
+| Backpressure, never drop | xbar 8 × demux `MAX_TRANS` 8 × L2 MSHR 8 × island `MaxAROut` |
+| L2 bank LSB aligns with the stripe | 4 banks on `addr[7:6]`; N=4 ⇒ one channel per L2 bank |
+| Island-DMA Cas delay does not sit on core SRAM | `g6lc_ai_dram_timing` is opt-in and island-only |
+| Per-channel PMU before claiming balance | Aggregate island PMU is not a stripe proof |
+| Demand fetch/LSU/L2 miss beats GEMM and PF | Shared slave; QoS is a stability item, not a TOPS item |
+
+L1 stays 16 B (`DcacheLineWidth=128`) and does not need to know N: four L1 lines fit in one
+64 B stripe. Frontend sequential fetch and the server next-line prefetcher already walk
+stripes. The core pipelines **use** the channels by issuing AXI; they do not **configure**
+them. S1 (class-0 N>1 SRAM + GEMM burst cap) is the slave-side work that makes that
+true for N>1 without a `core/` edit: a 255-beat GEMM INCR would have been parked on
+one PHY and disagreed with L2's 64 B fills. N=1 still uses `MaxBurstBeats=255`.
+S4-line (two 64 B INCR fills in flight) is the same slave seeing the L2-MSHR case.
+Island DMA on that slave is proven N=1 identity (`tb_g6lc_ai_gemm_backend`
+**175 cy**, AR id=2 only, occupancy ch1 silent, CAP `0x50`/`0x70` match) and
+N>1 with a second **wide** job (`lda=64`, one A row per stripe — the L2-line
+analogue) so **all NCH** read occupancy is live: class-0 N=2/4/8 **356/405/503 cy**,
+class-1 LiteDRAM N=1/2/4/8 **336/681/821/1162 cy** (MaxAROut=8), A=1,B=1 **golden C=16**, CAP match.
+SoC-side `ch_*_beats_o` occupancy lives on the DRAM slave and is readable at CAP
+`0x50`/`0x70` (`dram-channel-scaling.md` S5); island CAP `0x18`/`0x2C`/`0x180`
+stay aggregate GEMM.
+
 ## 5. The batch-1 trap
 
 Take a decoder-only LLM with `W` bytes of INT8 weights. Generating one token touches every weight once:
@@ -273,7 +356,7 @@ package with fields no core module reads, for a block that lives in `corev_apu/`
 | Parameter class | Home | Rationale |
 |---|---|---|
 | Seam, tile geometry, accumulator banks, ring count/depth, op-group gates | `config_pkg::ai_cfg_t` (**unchanged**) | the core genuinely decodes and traps on these |
-| Clusters, MACs/cluster, per-cluster SRAM, NoC width, DRAM channels, QoS classes | **new** `corev_apu/include/g6lc_ai_island_cfg_pkg.sv` (tier **R** — interface stays open) | uncore parameters, one SoC package, zero core churn |
+| Clusters, MACs/cluster, per-cluster SRAM, NoC width, DRAM channels, QoS classes | **new** `corev_apu/include/g6lc_ai_island_cfg_pkg.sv` (tier **R** — interface stays open) | uncore parameters, one SoC package, zero core churn. **Cores still use the channels:** the stripe sits on the DRAM slave, not in `ex_stage` (§4.2). |
 | Runtime discovery of the above | **MMIO capability window** in the island (BAR0 / fabric-mapped), plus the `g6lc,ai-matrix` DTS node | software must never recompile per SKU |
 
 The capability window is what lets the PyTorch partitioner cost a kernel on an unknown part.
@@ -297,6 +380,14 @@ The capability window is what lets the PyTorch partitioner cost a kernel on an u
 | `0x28` | `DTYPE_MASK` | dtype/ew/sp24 grant bits |
 | `0x2C` | `DRAM_MEAS_X1000` | full 32-bit measured milli-GB/s (F14; I3 ≥ 66 GB/s) |
 | `0x30` | `CLUSTER_EN` | enabled-cluster bitmap (F8) |
+| `0x34` | `DRAM_CLASS` | `0` testharness AXI (I3-lite), `1` DDR4, `2` LPDDR5 SKU |
+| `0x38` | `DRAM_CHANS` | `[15:0]` independent DRAM channels (1,2,4,8); `[23:16]` stripe `DramChanShift` (default 6 = 64 B) |
+| `0x3C` | `NOC_WIDTH` | island NoC width, bits |
+| `0x40` | `MAX_AR_OUT` | GEMM multi-outstanding AR depth (live 2; DDR4 bringup 8) |
+| `0x44` | `DRAM_TIMING` | packed `{tRP[23:16], tRCD[15:8], Cas[7:0]}` island-DMA cycles; live `0` = bypass; opt-in timing sim `0x000E0E0E` (14/14/14) |
+| `0x48` | `DRAM_STATUS` | `[0]` init_done (class 0 = 1); `[1]` timing_en (`DramCas!=0`) |
+| `0x50` | `DRAM_CH_R` | SoC occupancy: channel `i` read-beat count at `0x50+4*i` (8×32). Includes cores + L2 + island. |
+| `0x70` | `DRAM_CH_W` | SoC occupancy: channel `i` write-beat count at `0x70+4*i`. Not GEMM PMU (`0x18`/`0x2C`/`0x180`). |
 
 Guest placement (F1): `AI_CAP_BASE = 0x4000_0000`, `AI_DESC_BASE = 0x4000_0140`;
 island-relative `CAP_BASE=0`, `DESC_BASE=0x140`. PMU: `PMU_OFF_{R_BEATS,W_BEATS,CYCLES,GBPS_X1000}`
@@ -307,8 +398,14 @@ I3-lite nameplate `DramGBps = 8` is the **64-bit NoC peak** at 1 GHz, not the 40
 SKU. After each GEMM the PMU writes measured milli-GB/s into `CAP_OFF_DRAM_GBPS[31:16]`
 and `CAP_OFF_DRAM_MEAS_X1000`. The 256³ HARD point (~83.7k cy) is the arithmetic fixture;
 achieved BW is whatever `ai_bw_pmu_smoke` reads back, not a Python `2/T` restatement.
-Full DRAM-controller I3 (channels, ≥80% of 400 GB/s) remains open. Next island step is
-still **I3 DRAM then I2** (§11). SoC/QEMU/SMT2 envelopes: `architecture/current-stage.md`.
+Full DRAM-controller I3 remains open: LiteDRAM is vendored+`--sim` generated;
+`AiIslandDdr4Bringup` publishes **19 GB/s** (`N=1`, `MaxAROut=8`) and
+`AiIslandDdr4x2Bringup` **38 GB/s** (`N=2`) behind opt-in defines, not the live
+default. Do not treat 19 or 38 as measured, and do not put 400 on class 1.
+Channel stripe is SoC-wide (cluster + island, §4.2); stability plan:
+[`../uncore/dram-channel-scaling.md`](../uncore/dram-channel-scaling.md).
+Next island step is still **I3 DRAM then I2** (§11). SoC/QEMU/SMT2 envelopes:
+`architecture/current-stage.md`.
 
 **This keeps the frozen ISA contract invariant.** `ai.setcfg` continues to describe only the
 *core-attached* plane; island geometry is never expressed in a CSR. That is the property that lets one
@@ -369,7 +466,7 @@ is widened, so I3 moves ahead of the multi-cluster step.
 |---|---|---|---|
 | **I0** | This document: TOPS definition, bandwidth model, plane split, staged SKU decision | docs only | — (done) |
 | **I1** | **One** island cluster: PE array, banked staging + accumulator SRAM via `tc_sram`, local sequencer, capability window. **Freezes `T`, accumulator geometry, DRAM class and the NoC cut line for both SKUs.** | GEMM bit-exact vs the §3.5 rounding rule; synth smoke + FO4; area/power recorded; capability window correct on a one-cluster part | P3 (T2 spine) |
-| **I3** | Memory system: DRAM controller class, prefetch/staging, measured bandwidth into the capability register | measured sustained ≥ 80% of nameplate; `tok/s @ batch=1` on a real quantised model | I1 |
+| **I3** | Memory system: DRAM controller class, **shared** multi-channel slave (cores + L2/L3 + island), prefetch/staging, measured bandwidth into the capability register | **I3-lite done:** `DramClass=0`, NoC 8 GB/s, PMU→CAP, `MaxAROut=2`, **N=1**. **DRAM I3 open:** class-1 LiteDRAM opt-in; nameplate **`N × 19` GB/s**; N=1/2 defines; measure ≥80% of `min(nameplate, fabric)`; N>1 stability in `../uncore/dram-channel-scaling.md`. 400 is `DramClass=2` only. I2 must not change this memory | I1 |
 | **—** | **Latency SKU tapes out here** (1–2 clusters, ~12–25 TOPS) | §12 metrics, latency column | I3, I4 |
 | **I2** | NoC + N clusters + per-cluster clock/power gating + QoS arbitration | ≥60% of peak on `M=N=K=4096`; QoS soak with two tenants; **no change to `T`, the memory system or the software stack** | I3 |
 | **I4** | Physical: floorplan islands, UPF power domains, thermal sensor + capping loop, STA | full-chip STA closes; power cap demonstrated | I1 (latency SKU), re-run after I2 |
@@ -392,7 +489,7 @@ Replace "100 TOPS" with these in every gate and every datasheet:
 | `TOPS_peak` | §2 definition | as specified |
 | `TOPS_sustained@AI` | measured, at a **stated** arithmetic intensity, over ≥1 s | ≥60% of peak at AI ≥ 128 |
 | `SKU` | latency (1–2 clusters) or throughput (8 clusters) — §5.1 | stated on every figure |
-| `BW_measured` | achieved DRAM bandwidth on a streaming GEMM | ≥80% of nameplate |
+| `BW_measured` | achieved DRAM bandwidth on a streaming GEMM | ≥80% of **`min(nameplate, fabric peak)`** (§4.2); never 80% of 400 on class 1 |
 | `tok/s @ batch=1` | the §5 regime, reported **separately** and never converted to TOPS | reported, not floored |
 | `TOPS/W` | `TOPS_sustained` over card power at the cap | reported per SKU |
 | `p99 descriptor latency` under 2 tenants | QoS proof from I2 | bounded by the work quantum |
@@ -406,5 +503,6 @@ A number that is not one of these does not appear in a review.
 | Seam and tiers | [`README.md`](README.md) |
 | Frozen contract | [`isa-encoding.md`](isa-encoding.md) |
 | Transport / card | [`../uncore/pcie-endpoint.md`](../uncore/pcie-endpoint.md) |
+| DRAM channels / core+cluster use | [`../uncore/dram-channel-scaling.md`](../uncore/dram-channel-scaling.md) |
 | SoC readiness gates | `agents/guides/AGENTS-soc-readiness.md` |
 | Licensing (island is tier R, open) | `AGENTS-licensing.md` · `.licensing-tiers` |

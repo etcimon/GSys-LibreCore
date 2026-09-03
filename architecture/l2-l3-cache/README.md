@@ -11,7 +11,16 @@ without editing L1 files or weakening RVWMO.
 
 ```
 cores ──► coherence hub ──► L2 ──► L3 (opt) ──► server prefetcher (opt) ──► DRAM
+                                                                      │
+                         island GEMM DMA (xbar master) ───────────────┘
+                                      DRAM = N-channel stripe (I3)
 ```
+
+DRAM channels are **not** an L2 feature. The stripe (`DramChannels`, default 64 B =
+L2 line) sits on the SoC DRAM slave so L2/L3 miss fills, the server prefetcher, and
+the island DMA share one map. L2 default 4 banks on `addr[7:6]` already align with
+that stripe (N=4 ⇒ one channel per bank). Do not let a line or AXI burst straddle
+`2^DramChanShift`. Detail: [`../uncore/dram-channel-scaling.md`](../uncore/dram-channel-scaling.md).
 
 | Level | Module | Config |
 |-------|--------|--------|
@@ -32,9 +41,14 @@ LLC-friendly server streams (packet buffers, page copy, KVM guest memory).
 
 ## U6.0 L2 (implemented)
 MSHR line-merge, banked data (`tc_sram`), NC bypass, WT+RA, parallel tags.
+Exclusive `AR.lock` (LDEX) is captured and forwarded on the memory-side AR and
+never takes the tag-hit path — otherwise `g6lc_axi_lrsc` never arms and
+`sc.d` returns 1. `AW.lock` / ATOP were already preserved.
 
 ## Invariants
-RVWMO; PMA (MMIO uncached via NC bypass); CBO end-to-end; 64 B lines with `Zic64b`.
+RVWMO; PMA (MMIO uncached via NC bypass); CBO end-to-end; 64 B lines with `Zic64b`
+(equals default `DramChanShift=6`). Demand miss wins AR over prefetch **and** must
+keep winning over island GEMM when both share the DRAM slave.
 
 ## Status
 L2 **done**. L3 + server PF **done (config-gated)**. PMU group 2 **wired** (cluster → core).

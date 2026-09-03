@@ -353,6 +353,13 @@ test("parseArgs supports --output and -o value", () => {
   expect(b.flags.output).toBe("out/t2");
 });
 
+test("parseArgs -- ends flags so remote shell can pass tail -n", () => {
+  const a = parseArgs(["remote", "shell", "--", "tail", "-n", "40", "/tmp/build.log"]);
+  expect(a.command).toBe("remote");
+  expect(a.positionals).toEqual(["shell", "tail", "-n", "40", "/tmp/build.log"]);
+  expect(a.flags["dry-run"]).toBeUndefined();
+});
+
 test("summarizeTimingsPackage builds soak dashboard from analyze.json", () => {
   const paths = makePaths(join(FIX, "ws"));
   const ctx = fakeCtx(join(FIX, "repo"), paths);

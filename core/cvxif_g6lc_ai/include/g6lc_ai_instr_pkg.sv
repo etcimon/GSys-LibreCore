@@ -237,6 +237,15 @@ package g6lc_ai_instr_pkg;
     return op inside {AI_MMA_S8, AI_MMA_U8, AI_MMA_SU8, AI_MMA_US8};
   endfunction
 
+  // F15: ai.poll / ai.enq return contract (isa-encoding.md §7).
+  // poll is a 2-bit status in rd, not a ticket. 0 is pending (not 0xffff_ffff).
+  // enq returns all-ones of XLEN when the queue is disabled (aiqctl[0]=0);
+  // island backpressure is sticky submit, not a rejected ticket.
+  localparam logic [31:0] POLL_PENDING = 32'd0;
+  localparam logic [31:0] POLL_OK      = 32'd1;
+  localparam logic [31:0] POLL_ERR     = 32'd2;
+  localparam logic [63:0] ENQ_FULL     = 64'hFFFF_FFFF_FFFF_FFFF;
+
   function automatic logic writes_ai_state(input opcode_t op);
     // Any op that mutates tile/acc/cfg marks ais Dirty (isa-encoding.md §5).
     return op inside {

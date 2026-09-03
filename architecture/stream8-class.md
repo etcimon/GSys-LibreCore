@@ -14,7 +14,7 @@ one named SoC envelope:
 | Issue width | **n-wide** (start **2**, option **4**) | `g6lc64_ooo{,_server}` · `architecture/out-of-order/` |
 | Cluster | **y-core** (start **2**, scale **≤8**) | `NrCores` · `g6lc_cluster` · `architecture/multi-core/` |
 | SMT | **NrHarts ≤ 2** per core (optional) | `g6lc64_smt2` · `architecture/multi-threading/` |
-| Memory | Shared **L2 + L3** + stream PF | `architecture/l2-l3-cache/` · server_math / ooo_server |
+| Memory | Shared **L2 + L3** + stream PF. DRAM `DramChannels` is the slave under that hierarchy (`uncore/dram-channel-scaling.md`); stream8 `NrCores` does not set channel count | `architecture/l2-l3-cache/` · server_math / ooo_server |
 | ISA residual | **IMAFDC + H + Zacas (W/D/Q)** + optional **V/Ara** | server_math{,_v} · `zacas-policy` · `ara-vector-*` |
 | FO4 screen | Structural **@ x GHz** (host `sv-timing`; not STA) | `AGENTS-build-platform.md` §6.1 · `fo4-v1.toml` |
 | STA | Lab only — never retune FO4 from fixtures | `s9-lab-gate` · OpenSTA plan |

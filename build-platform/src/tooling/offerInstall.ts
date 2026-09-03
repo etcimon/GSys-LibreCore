@@ -3,7 +3,7 @@
 //
 // offerInstall.ts — When managed tools are missing, offer tools install (y/n).
 //
-// Keeps `test --suite ooo-l3-tests` / `verify --target g6lc64_ooo_server` usable
+// Keeps `test --suite ooo-l3-tests` / `test --ai` / `verify --target g6lc64_ooo_server` usable
 // on a default platform by prompting once for the sim profile instead of only
 // printing a skip/fail reason.
 

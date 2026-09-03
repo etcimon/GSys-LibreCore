@@ -27,6 +27,7 @@ export const DIAG_COMPARTMENTS: DiagnosticCompartment[] = [
   "core",
   "smt2",
   "ooo",
+  "ai",
   "apu",
   "residual",
 ];
@@ -445,6 +446,10 @@ async function runVerilatorDiag(
     }
   }
 
+  const envDefines = (process.env.AI_MATRIX_DEFINES ?? "")
+    .split("+")
+    .map((d) => d.trim())
+    .filter(Boolean);
   const surface = {
     target: v.target,
     top: v.top,
@@ -452,7 +457,7 @@ async function runVerilatorDiag(
     extraFlists: v.extraFlists,
     lintArgs: v.lintArgs,
     lintArgsMode: v.lintArgsMode,
-    defines: v.defines,
+    defines: [...(v.defines ?? []), ...envDefines],
     waiverFile: v.waiverFile,
     warningBudget: v.warningBudget,
     tag: test.id,

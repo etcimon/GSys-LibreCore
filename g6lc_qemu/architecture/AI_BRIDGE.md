@@ -308,6 +308,72 @@ half of `pcie-root-complex.md`; `virt_ai_card` is the software half of `pcie-end
 the transport is what would put an endpoint function on the GPEX bus so both halves share a
 device. Until then, run both gates; do not emit a QEMU `pci-testdev` with guessed BAR sizes.
 
+### 6.3 "QEMU is the card's SoC" — where the boundary actually falls
+
+A recurring request is to have QEMU *behave like the SoC on the AI card*, with outside processes
+submitting contained PyTorch jobs. That is already the shape of §2's pushed path, but the phrase
+hides a fork that decides where every future file goes, so it is written out here.
+
+**QEMU emulates the die, not the link.** The thing on the card is a LibreCore SoC: harts, MMIO
+island at `0x4000_0000`, PLIC source 8, DRAM. That is exactly what `g6lc-soc` already models, and it
+is why `g6lc-soc` deliberately has **no PCI**. Making the guest enumerate itself over ECAM to reach
+its own island would model the *host's* view from inside the card — the one place it does not exist.
+So:
+
+```text
+  outside QEMU                      │  inside QEMU (= the card's SoC)
+                                    │
+  contained PyTorch job             │
+   torch.nn / torch op              │
+        │ ai-tensor-ir              │
+        │ ai-tensor-abi (Desc64)    │
+        ▼                           │
+   bridge / virt-card ──────────────┼──► guest DRAM (descriptors + operands)
+   (transport stand-in;             │           │
+    the LINK, unpinned)             │           ▼
+                                    │    guest driver / UIO ── ai.enq / doorbell
+                                    │           │
+                                    │           ▼
+                                    │    island model ── completion + PLIC-8
+   results / tensor artifact ◄──────┼───────────┘
+```
+
+The dashed column is the **only** place a transport contract belongs, and it is the only column that
+is unpinned. Everything to its right is already faithful; everything to its left is host software.
+
+**Four compartments, four owners.** The reason to draw it this way is that each column then has one
+owner and one failure mode, so a bug lands in a known package:
+
+| Compartment | Owner | Fails as |
+|---|---|---|
+| Framework op → `Desc64` | `ai-tensor` (`-ir`, `-abi`) | wrong descriptor, caught by golden GEMM |
+| Host↔card transport | **unpinned** `contracts.ai_host_transport`; stood in by `virt_ai_card` | cannot fail yet — there is nothing to be wrong |
+| Guest driver → island | `corev_apu` DTS + UIO; `ai_tensor/qemu_uio.py` in-guest | wrong MMIO/IRQ sequence, caught by the qemu-uio suite |
+| Island semantics | design packages, ingested | wrong status/geometry, caught by conformance |
+
+**What "contained" has to mean, concretely.** A PyTorch job arriving from outside is untrusted with
+respect to the card, so containment is not a wrapper script — it is three properties the model
+already has, and they are worth naming so they are not weakened for convenience:
+
+1. **Descriptor-only authority.** The outside process supplies a `Desc64` and operand bytes. It does
+   not choose an island register, an IRQ, or a queue's internal state. Every effect it can have is
+   reachable through a descriptor the engine parses and may refuse.
+2. **Bounds are the engine's, not the submitter's.** `g6lc_ai_addr_check` and `ST_BAD_PTR` are what
+   make an out-of-window pointer an error rather than a read of someone else's memory. A host-side
+   check would be advice; the engine's check is the boundary.
+3. **Refusal is visible.** `ST_BAD_VER` / `ST_BAD_OP` / `ST_BAD_QID` / `ST_BAD_FMT` are distinct so a
+   rejected job reports *why*. A submitter that asked for BF16 on an INT8 part must learn that,
+   rather than receive INT8 results computed from BF16 bits.
+
+**What this does not license.** Two claims remain out of reach no matter how complete the guest path
+becomes, and both are easy to make by accident once PyTorch runs end to end inside a guest:
+
+- A tensor artifact produced this way is functional agreement on the ABI. It is **not** throughput,
+  not TOPS, and not evidence — `../AGENTS.md` §1.8 and [`DIAG.md`](DIAG.md) apply unchanged.
+- Running the job under `g6lc-virt` (needed for a distro with Python) does **not** carry over to
+  `g6lc-soc`. The virtio profile is stamped and quarantined for exactly this reason; a PyTorch result
+  from `g6lc-virt` says the software stack agrees, not that the SoC does.
+
 ## 7. Stage placement (no new axis)
 
 This work lands on the existing Q-stages of [`DESIGN.md`](DESIGN.md) §7. The backend letters B0–B3

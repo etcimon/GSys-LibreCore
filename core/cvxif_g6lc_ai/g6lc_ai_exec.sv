@@ -266,8 +266,7 @@ module g6lc_ai_exec
   assign pmu_post_o = valid_q && pmu_post_q;
   assign pmu_t0_o   = valid_q && pmu_t0_q;
 
-  // ai.poll status (0=pending, 1=ok, 2=error) — pure combo, no block locals.
-  // Prefer island completion when it covers the ticket; else T0 local stub.
+  // ai.poll — POLL_PENDING/OK/ERR (g6lc_ai_instr_pkg F15). Prefer island.
   logic [31:0] poll_want;
   logic        poll_isl_hit, poll_isl_err, poll_local_done;
   logic [1:0]  poll_status;
@@ -277,10 +276,10 @@ module g6lc_ai_exec
                            (isl_last_status_i != 16'd0);
   assign poll_local_done = (poll_want < ticket_q);
   always_comb begin
-    if (!ai_q_en_i) poll_status = 2'd0;
-    else if (poll_isl_err) poll_status = 2'd2;
-    else if (poll_isl_hit || poll_local_done) poll_status = 2'd1;
-    else poll_status = 2'd0;
+    if (!ai_q_en_i) poll_status = POLL_PENDING[1:0];
+    else if (poll_isl_err) poll_status = POLL_ERR[1:0];
+    else if (poll_isl_hit || poll_local_done) poll_status = POLL_OK[1:0];
+    else poll_status = POLL_PENDING[1:0];
   end
 
   // ------------------------------------------------------------------ combo
@@ -492,7 +491,7 @@ module g6lc_ai_exec
                 sb_desc_ptr_n  = registers_i[0];
                 ticket_d       = ticket_q + 32'd1;
               end else begin
-                result_n = {XLEN{1'b1}};
+                result_n = XLEN'(ENQ_FULL);
               end
               we_n     = 1'b1;
               valid_n  = 1'b1;

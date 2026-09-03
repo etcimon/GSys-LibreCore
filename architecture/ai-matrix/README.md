@@ -10,19 +10,27 @@ cores and a matrix island sharing one address space. Read `../README.md` (scaffo
 | Doc | Role |
 |---|---|
 | [`isa-encoding.md`](isa-encoding.md) | Frozen ISA / CSR / Desc64 contract |
-| [`scaling-100tops.md`](scaling-100tops.md) | I0–I4 sizing; **next: I3 measure → I2 clusters** |
+| [`scaling-100tops.md`](scaling-100tops.md) | I0–I4 sizing; §4.2–4.3 shared `DramChannels` (cores + island); **next: I3 measure → I2 clusters** |
 | [`hard-tests.md`](hard-tests.md) | **HARD suites + directed ELF catalog + green results** |
 | [`frameworks-virt-pcie.md`](frameworks-virt-pcie.md) | soft virt-ai-pcie + `tensor virt-impl` soft→HARD→timing |
 | [`completion-fifo.md`](completion-fifo.md) | CPL FIFO RTL + multi-claim |
 | [`board-uio-eventfd.md`](board-uio-eventfd.md) | PLIC-8 / UIO / eventfd board contract |
 | [`../../ai-tensor/AGENTS.md`](../../ai-tensor/AGENTS.md) | Host ML backend package |
 
-**Host gates (build-platform):**
+**Host gates (build-platform)** — same shape as OoO (`diag run ooo`, `test --suite ooo-l3-tests`, `--from-timing`):
 
 ```text
-tensor pytorch --board virt-ai-pcie --core g6lc64_ai              # soft
-tensor virt-impl --impl hard --suite narrow --require-hard        # soft + SV HARD
-tensor rtl-hard --suite narrow|smoke|ci|peak                      # SV only
+diag run ai                                                      # paths + optional g6lc64_ai lint
+test --ai                                                        # config / matrix / island directed
+test --ai --channels 4 --ai-dram 1                               # x4 DDR4 LiteDRAM stripe + wrap TB
+test --ai --ai-ghz 1.25 --from-timing <fo4-pkg>                  # Cas=14 timing SKU + FO4 preflight
+test --ai-remote                                                 # I3 S4 testharness_proxy (ai-dt)
+test --ai-qemu                                                   # g6lc_qemu Linux/emulation (NOT Variane)
+tensor pytorch --board virt-ai-pcie --core g6lc64_ai             # soft
+tensor virt-impl --impl hard --suite narrow --require-hard       # soft + SV HARD
+tensor rtl-hard --suite narrow|smoke|ci|peak                     # SV only
+g6q --ai doctor                                                  # higher-level ingest host
+remote --ai build                                                # proxy flavour ai-dt
 ```
 
 > Architecture docs under this tree remain **non-flist** design of record. Live RTL lives under
@@ -69,7 +77,7 @@ Honest status of **implemented silicon/software**, not the scaffold-only state o
 | **I3-lite bus** (trail C-store, multi-out AR, …) | island fabric | **Live** | scale gemm + PMU |
 | **NoC width 64b** | island | **Floor (live)** | wider NoC deferred |
 | **I2 multi-cluster / NoC/QoS** | island package | **Not started** | F8 present/enabled + bitmap published; still measure I3 BW first |
-| **I3 full memory bandwidth model** | DRAM/channels | **I3-lite live; full DRAM open** | Live nameplate **8 GB/s** (64-bit NoC @ 1 GHz); PMU + `CAP_OFF_DRAM_MEAS_X1000` after GEMM; 400 GB/s is the SKU target package |
+| **I3 full memory bandwidth model** | DRAM/channels | **I3-lite live; DRAM I3 opt-in** | class 0, 8 GB/s, N=1, Cas=0 default; SoC `master[DRAM]` shared with cores/L2; opt-in class-1 N=1/2/4/8 and class-0 `SIM_CHANS_{2,4,8}`; GEMM class-1 N=8 **1162 cy** wide all-NCH occupancy; 400 is class 2 |
 | **PCIe EP + virtio (P5)** | uncore | **Virtual only** | `virt-ai-pcie` TCP + EDK2 GPEX RC witness; transport **unpinned** |
 | **ai-tensor host** sim/SoftIsland/virt-card | `ai-tensor/` | **Live** | golden + queue/event-fd soaks |
 | **PyTorch soft path** | `torch_ops` + virt-card | **Live** | `test_torch_virt_ai_island` (torch optional) |
@@ -78,9 +86,10 @@ Honest status of **implemented silicon/software**, not the scaffold-only state o
 | **I4 PD / UPF / thermal** | backend | **Open** | — |
 
 **Next program step (scaling):** freeze AccTile/`T`/CAP; **measure I3 bandwidth** against
-`scaling-100tops.md` §4 (F13 writeback, not input-only `2/T`); then **I2 cluster replication**
-without regressing narrow/ci HARD on the single-cluster path. Do not wait on KVM, full OoO, or a
-pinned PCIe BAR. Design asks: [`../../g6lc_qemu/architecture/RTL_FEEDBACK.md`](../../g6lc_qemu/architecture/RTL_FEEDBACK.md)
+`scaling-100tops.md` §4 (F13 writeback, not input-only `2/T`) on the **shared** DRAM slave
+(cores already use it; do not make `DramChannels` island-private); then **I2 cluster
+replication** without regressing narrow/ci HARD on the single-cluster path. Do not wait on
+KVM, full OoO, or a pinned PCIe BAR. Design asks: [`../../g6lc_qemu/architecture/RTL_FEEDBACK.md`](../../g6lc_qemu/architecture/RTL_FEEDBACK.md)
 §2.1 / §3.3. Snapshot: [`../current-stage.md`](../current-stage.md).
 Detail: [`hard-tests.md`](hard-tests.md) §5 · [`scaling-100tops.md`](scaling-100tops.md) §11.
 

@@ -1,0 +1,19 @@
+echo '===== last 80 of log ====='
+tail -n 80 /opt/testharness/runs/openwrt-e3.log
+echo '===== syncconfig / choice context ====='
+python3 - << "PY"
+from pathlib import Path
+p = Path("/opt/testharness/runs/openwrt-e3.log")
+t = p.read_text(errors="replace")
+idx = t.rfind("choice[")
+if idx < 0:
+    idx = t.rfind("syncconfig")
+print(t[max(0, idx-2500):idx+1500] if idx >= 0 else "no choice/syncconfig")
+PY
+echo '===== SOC_VIRT / VIRTIO in sifiveu config ====='
+grep -n "SOC_VIRT\|CONFIG_VIRTIO\|SERIAL_8250\|CMDLINE\|NONPORTABLE\|SOC_SIFIVE" \
+  /opt/testharness/cache/openwrt/target/linux/sifiveu/config-6.6 | tail -40
+echo '===== linux .config fragments if any ====='
+ls /opt/testharness/cache/openwrt/build_dir/target-riscv64_riscv64_musl/linux-sifiveu_generic/linux-6.6.93/.config 2>/dev/null && \
+  grep -n "SOC_VIRT\|VIRTIO\|CMDLINE\|choice" \
+    /opt/testharness/cache/openwrt/build_dir/target-riscv64_riscv64_musl/linux-sifiveu_generic/linux-6.6.93/.config | head -40

@@ -9,6 +9,16 @@
 #   bash verif/regress/ai-matrix-veri.sh
 #   AI_MATRIX_VERI_REBUILD=1 bash verif/regress/ai-matrix-veri.sh
 #   AI_MATRIX_VERI_TESTS="ai_dot4_s8_smoke" bash verif/regress/ai-matrix-veri.sh
+#   AI_ISLAND_DRAM_TIMING=1 AI_MATRIX_VERI_REBUILD=1 bash verif/regress/ai-matrix-veri.sh
+#     → work-ver-ai-dt, +define+G6LC_AI_DRAM_TIMING (class-0 SRAM + Cas=14).
+#     Not LiteDRAM; not 19/400 GB/s. Default library stays Cas=0 identity.
+#   AI_ISLAND_DRAM_CLASS1=1 → work-ver-ai-d1, LiteDRAM N=1 (needs generated core).
+#   AI_ISLAND_DRAM_CHANS_2=1 → work-ver-ai-d2, LiteDRAM N=2 (38 GB/s nameplate).
+#   AI_ISLAND_DRAM_CHANS_4=1 → work-ver-ai-d4, LiteDRAM N=4 (76 GB/s nameplate).
+#   AI_ISLAND_DRAM_CHANS_8=1 → work-ver-ai-d8, LiteDRAM N=8 (152 GB/s nameplate).
+#   AI_ISLAND_DRAM_SIM_CHANS_2=1 → work-ver-ai-sc2, class-0 SRAM N=2 stripe.
+#   AI_ISLAND_DRAM_SIM_CHANS_4=1 → work-ver-ai-sc4, class-0 SRAM N=4.
+#   AI_ISLAND_DRAM_SIM_CHANS_8=1 → work-ver-ai-sc8, class-0 SRAM N=8.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
@@ -45,8 +55,43 @@ if [[ -n "${SPIKE_INSTALL_DIR:-}" ]]; then
 fi
 
 REBUILD="${AI_MATRIX_VERI_REBUILD:-0}"
-VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai}"
-DEFAULT_TESTS="ai_csr_aistatus_xs ai_setcfg_readback ai_illegal_when_off ai_dot4_s8_smoke ai_mma_s8_golden ai_requant_rhe_golden ai_pmu_group4_smoke ai_queue_doorbell ai_aiperm_umode ai_island_mmio_smoke ai_cpl_fifo_multi_claim ai_enq_sideband_smoke ai_dual_enq_poll ai_irq_plic_smoke ai_desc_fetch_smoke ai_enq_fetch_smoke ai_ptr_done_smoke ai_gemm_s8_smoke ai_gemm_s8_lda_smoke ai_gemm_dim_err_smoke ai_gemm_s8_4x4_smoke ai_gemm_s8_8x8_smoke ai_gemm_s8_16x16_smoke ai_gemm_s8_32x32_smoke ai_gemm_s8_64x64_smoke ai_gemm_s8_128x128_smoke ai_gemm_s8_256x256_smoke ai_bw_pmu_smoke ai_cap_bringup_smoke"
+TIMING="${AI_ISLAND_DRAM_TIMING:-0}"
+CLASS1="${AI_ISLAND_DRAM_CLASS1:-0}"
+CHANS2="${AI_ISLAND_DRAM_CHANS_2:-0}"
+CHANS4="${AI_ISLAND_DRAM_CHANS_4:-0}"
+CHANS8="${AI_ISLAND_DRAM_CHANS_8:-0}"
+SIMCH2="${AI_ISLAND_DRAM_SIM_CHANS_2:-0}"
+SIMCH4="${AI_ISLAND_DRAM_SIM_CHANS_4:-0}"
+SIMCH8="${AI_ISLAND_DRAM_SIM_CHANS_8:-0}"
+if [[ "$CHANS8" == "1" ]]; then
+  VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai-d8}"
+  TIMING_DEFINES="defines=G6LC_AI_DRAM_CHANS_8"
+elif [[ "$CHANS4" == "1" ]]; then
+  VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai-d4}"
+  TIMING_DEFINES="defines=G6LC_AI_DRAM_CHANS_4"
+elif [[ "$CHANS2" == "1" ]]; then
+  VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai-d2}"
+  TIMING_DEFINES="defines=G6LC_AI_DRAM_CHANS_2"
+elif [[ "$CLASS1" == "1" ]]; then
+  VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai-d1}"
+  TIMING_DEFINES="defines=G6LC_AI_DRAM_CLASS1"
+elif [[ "$SIMCH8" == "1" ]]; then
+  VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai-sc8}"
+  TIMING_DEFINES="defines=G6LC_AI_DRAM_SIM_CHANS_8"
+elif [[ "$SIMCH4" == "1" ]]; then
+  VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai-sc4}"
+  TIMING_DEFINES="defines=G6LC_AI_DRAM_SIM_CHANS_4"
+elif [[ "$SIMCH2" == "1" ]]; then
+  VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai-sc2}"
+  TIMING_DEFINES="defines=G6LC_AI_DRAM_SIM_CHANS_2"
+elif [[ "$TIMING" == "1" ]]; then
+  VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai-dt}"
+  TIMING_DEFINES="defines=G6LC_AI_DRAM_TIMING"
+else
+  VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai}"
+  TIMING_DEFINES=""
+fi
+DEFAULT_TESTS="ai_csr_aistatus_xs ai_setcfg_readback ai_illegal_when_off ai_dot4_s8_smoke ai_mma_s8_golden ai_requant_rhe_golden ai_pmu_group4_smoke ai_queue_doorbell ai_aiperm_umode ai_island_mmio_smoke ai_cpl_fifo_multi_claim ai_enq_sideband_smoke ai_dual_enq_poll ai_irq_plic_smoke ai_desc_fetch_smoke ai_enq_fetch_smoke ai_ptr_done_smoke ai_gemm_s8_smoke ai_gemm_s8_lda_smoke ai_gemm_dim_err_smoke ai_gemm_s8_4x4_smoke ai_gemm_s8_8x8_smoke ai_gemm_s8_16x16_smoke ai_gemm_s8_32x32_smoke ai_gemm_s8_64x64_smoke ai_gemm_s8_128x128_smoke ai_gemm_s8_256x256_smoke ai_bw_pmu_smoke ai_cap_bringup_smoke ai_gemm_tile_2x2_smoke"
 # shellcheck disable=SC2206
 tests=( ${AI_MATRIX_VERI_TESTS:-$DEFAULT_TESTS} )
 # 256x256 GEMM ~0.3M cy; MaxBurst=64 + I3 PMU; headroom for suite.
@@ -60,7 +105,7 @@ if [[ -z "${VERILATOR_ROOT:-}" && -d /root/tools/verilator-v5.008/share/verilato
 fi
 
 log() { echo "[ai-matrix-veri] $*"; }
-log "target=${DV_TARGET} rebuild=${REBUILD} ver-library=${VER_LIBRARY}"
+log "target=${DV_TARGET} rebuild=${REBUILD} ver-library=${VER_LIBRARY} dram-timing=${TIMING} class1=${CLASS1} chans2=${CHANS2} chans4=${CHANS4} chans8=${CHANS8} sim-chans-2=${SIMCH2}"
 log "verilator: $(command -v verilator) ($(verilator --version 2>/dev/null | head -1))"
 
 command -v verilator >/dev/null || { log "need verilator"; exit 1; }
@@ -87,6 +132,7 @@ if [[ "$REBUILD" == "1" || ! -x "$ROOT/$VER_LIBRARY/Variane_testharness" ]]; the
   make -C "$ROOT" verilate \
     verilator="verilator --no-timing" \
     target="$DV_TARGET" ver-library="$VER_LIBRARY" \
+    ${TIMING_DEFINES} \
     XLEN=64 \
     CVA6_REPO_DIR="$CVA6_REPO_DIR" \
     SPIKE_INSTALL_DIR="${SPIKE_INSTALL_DIR:-}" \

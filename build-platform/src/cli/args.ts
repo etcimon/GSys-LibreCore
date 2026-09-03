@@ -86,6 +86,17 @@ const VALUE_FLAGS = new Set([
   "remote-ssh",
   "remote-ssh-pass",
   "remote-ssh-identity",
+  // AI island / matrix (test/diag/verify/remote/g6q — same pattern as OoO)
+  "channels",
+  "ai-dram",
+  "ai-ghz",
+  "ai-clusters",
+  "ai-flavour",
+  "flavour",
+  "jobs",
+  "vthreads",
+  "env",
+  "cmd-file",
 ]);
 
 const SHORT_ALIASES: Record<string, string> = {
@@ -105,6 +116,15 @@ export function parseArgs(argv: string[]): ParsedArgs {
 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
+
+    if (token === "--") {
+      // End of flags: remainder is positional (e.g. `remote shell -- tail -n 40`).
+      for (const rest of argv.slice(i + 1)) {
+        if (command === null) command = rest;
+        else positionals.push(rest);
+      }
+      break;
+    }
 
     if (token.startsWith("--")) {
       const body = token.slice(2);

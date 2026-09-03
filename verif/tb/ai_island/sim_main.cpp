@@ -139,6 +139,7 @@ int main(int argc, char **argv) {
   dut->sb_qid_i = 0;
   dut->sb_ticket_i = 0;
   dut->sb_desc_ptr_i = 0;
+  dut->dram_init_done_i = 1;
   // EnableDmaFetch=0 (standalone): AXI ports are 1-bit logic stubs
   dut->axi_dma_resp_i = 0;
   for (int i = 0; i < 5; i++)
@@ -153,6 +154,15 @@ int main(int argc, char **argv) {
 
   r = reg_read(0x0004);
   expect("cap clusters non-zero", r != 0);
+
+  r = reg_read(0x0048);
+  expect("dram status init_done", (r & 1u) == 1u);
+
+  r = reg_read(0x0050);
+  expect("cap CH_R0 default 0", r == 0);
+  r = reg_read(0x0070);
+  expect("cap CH_W0 default 0", r == 0);
+  expect("dram status timing_en off (default Cas=0)", (r & 2u) == 0u);
 
   // Enable
   reg_write(0x0100, 1);

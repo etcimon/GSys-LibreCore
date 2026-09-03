@@ -33,6 +33,13 @@ import {
 import { runSuites, selectSuites } from "../../tests/runner.ts";
 import { offerInstallMissingTools } from "../../tooling/offerInstall.ts";
 import type { ManagedTool } from "../../config/schema.ts";
+import {
+  applyAiEnv,
+  formatAiResolvedLine,
+  parseAiFlagErrors,
+  parseAiFlags,
+  resolveAiTesting,
+} from "../../tooling/aiTesting.ts";
 
 const STAGES: GateStageId[] = ["lint", "formal", "sim", "synth"];
 
@@ -54,7 +61,7 @@ export const verifyCommand: Command = {
   name: "verify",
   summary: "Run the per-change gate: lint, formal, simulation, synthesis.",
   usage:
-    "bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth] [--target <cfg>] [--from-timing DIR] [--use-emit] [--yes] [--json] [--dry-run]",
+    "bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth] [--target <cfg>] [--ai] [--from-timing DIR] [--use-emit] [--yes] [--json] [--dry-run]",
   details:
     "Runs the AGENTS.md §0.2 verification gate with the open EDA suite pinned in\n" +
     ".config.ts (verify.suite). Stages:\n" +
@@ -68,6 +75,11 @@ export const verifyCommand: Command = {
     "With no stage flag, the stages enabled in verify.stages all run.\n" +
     "\n" +
     "  --from-timing DIR  validate timings precompile package before stages\n" +
+    "  --ai               opt-in g6lc64_ai lint target + AI directed sim suites\n" +
+    "                     (like --target g6lc64_ooo_server). Remote S4 is\n" +
+    "                     `test --ai-remote`, not this gate.\n" +
+    "  --channels / --ai-dram / --ai-ghz / --ai-flavour\n" +
+    "                     stamp AI_ISLAND_DRAM_* env for sim (same as test --ai)\n" +
     "  --use-emit         expert: export emit flist env for sim consumers (default off)\n" +
     "  --yes / -y         auto-accept tools install when managed tools are missing\n" +
     "  --formal-jobs N    solver processes per sby task (sby -j; default: host cores)\n" +
@@ -85,6 +97,7 @@ export const verifyCommand: Command = {
     "verify",
     "verify --lint",
     "verify --lint --synth --target g6lc64_ooo_server",
+    "verify --lint --ai --from-timing workspace/build/sv-timing/host-cv64a6_imafdc_sv39",
     "verify --json",
     "verify --lint --from-timing workspace/build/sv-timing/host-cv64a6_imafdc_sv39",
   ],
@@ -122,6 +135,30 @@ export const verifyCommand: Command = {
         "Install: g6lc-build tools install sim   or extract the OSS CAD Suite / set verify.suite.root.",
       );
       return 3;
+    }
+
+    if (flagBool(args.flags, "ai-remote")) {
+      logger.error(
+        "verify does not run the remote testharness. Use: test --ai-remote  (or remote --ai build)",
+      );
+      return 2;
+    }
+
+    const aiFlagErrors = parseAiFlagErrors(args.flags as Record<string, string | boolean>);
+    if (aiFlagErrors.length) {
+      for (const e of aiFlagErrors) logger.error(e);
+      return 2;
+    }
+    const aiKnobs = parseAiFlags(args.flags as Record<string, string | boolean>);
+    const ai = resolveAiTesting(aiKnobs);
+    if (ai.errors.length) {
+      for (const e of ai.errors) logger.error(e);
+      return 2;
+    }
+    if (ai.active) {
+      applyAiEnv(ai);
+      logger.info(formatAiResolvedLine(ai));
+      for (const w of ai.warnings) logger.warn(w);
     }
 
     const fromTiming = flagString(args.flags, "from-timing");
@@ -171,7 +208,13 @@ export const verifyCommand: Command = {
 
     const stages = requestedStages(args.flags as Record<string, unknown>, config.verify.stages);
     const targetFlag = typeof args.flags.target === "string" ? args.flags.target : null;
-    const targets = targetFlag ? [targetFlag] : config.verify.targets;
+    const targets = targetFlag
+      ? [targetFlag]
+      : aiKnobs.wantAi
+        ? [...config.verify.targets, "g6lc64_ai"].filter(
+            (t, i, a) => a.indexOf(t) === i,
+          )
+        : config.verify.targets;
     const outcomes: StageOutcome[] = [];
 
     for (const stage of stages) {
@@ -226,7 +269,12 @@ export const verifyCommand: Command = {
             durationMs: 0,
           });
         } else {
-          const { suites, unknown } = selectSuites(config, config.verify.simSuites);
+          const simIds = aiKnobs.wantAi
+            ? [...config.verify.simSuites, ...ai.suiteIds.filter((id) =>
+                ["ai-config-smoke", "ai-matrix-directed", "ai-island-veri"].includes(id),
+              )]
+            : config.verify.simSuites;
+          const { suites, unknown } = selectSuites(config, simIds);
           for (const id of unknown) {
             outcomes.push({
               stage: "sim",

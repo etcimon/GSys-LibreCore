@@ -14,7 +14,7 @@ describe("diagnostics catalog", () => {
     const tests = listDiagnostics(DEFAULT_CONFIG.diagnostics);
     expect(tests.length).toBeGreaterThan(5);
     const compartments = new Set(tests.map((t) => t.compartment));
-    for (const c of ["host", "core", "smt2"] as const) {
+    for (const c of ["host", "core", "smt2", "ooo", "ai"] as const) {
       expect(compartments.has(c)).toBe(true);
     }
     const vl = tests.filter((t) => t.kind === "verilator-lint");

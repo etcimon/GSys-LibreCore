@@ -18,8 +18,15 @@ import { join } from "node:path";
 
 import { requireContext, type Command } from "../command.ts";
 import { canPromptInteractive } from "../../util/prompt.ts";
-import { runBashScript } from "../../platform/shell.ts";
-import { flagString } from "../args.ts";
+import { resolveRegressEngine, runRegressScript } from "../../platform/shell.ts";
+import { flagBool, flagString } from "../args.ts";
+import {
+  applyAiEnv,
+  formatAiResolvedLine,
+  parseAiFlagErrors,
+  parseAiFlags,
+  resolveAiTesting,
+} from "../../tooling/aiTesting.ts";
 
 const DEFAULT_HOST = "ovh_calltorch";
 const CACHE_FILE = ".remote-ssh-creds";
@@ -118,16 +125,27 @@ export const remoteCommand: Command = {
   name: "remote",
   summary: "Run the remote testharness proxy (SSH + rsync + Verilator).",
   usage:
-    "bun run src/cli/index.ts remote [--remote-ssh <host>] <proxy-subcommand> [args...]",
+    "bun run src/cli/index.ts remote [--remote-ssh <host>] [--ai] [--channels N] [--ai-dram 0|1] <proxy-subcommand> [args...]",
   details:
     "Thin gateway to verif/regress/remote/testharness_proxy.py.\n" +
-    "Subcommands: doctor, setup, sync, build <B|legacy>, run <elf>,\n" +
-    "soak, pull, shell, clean [runs|work|all|everything].\n" +
-    "Passphrase is cached in build-platform/.remote-ssh-creds (gitignored, 0600).",
+    "Subcommands: doctor, setup, sync, build <B|legacy|ai|ai-dt|ai-d1|ai-d2|ai-d4|ai-d8>,\n" +
+    "run <elf>, soak, pull, shell, clean [runs|work|all|everything].\n" +
+    "Passphrase is cached in build-platform/.remote-ssh-creds (gitignored, 0600).\n" +
+    "\n" +
+    "AI (same knobs as test --ai / diag run ai):\n" +
+    "  --ai                 default flavour ai-dt when `build` has no flavour arg\n" +
+    "  --channels 1|2|4|8   map onto ai-d{1,2,4,8} (class 1) or ai-sc* (class 0)\n" +
+    "  --ai-dram 0|1        SRAM vs DDR4 LiteDRAM\n" +
+    "  --ai-flavour NAME    explicit proxy flavour\n" +
+    "  --jobs N             C++ make -j (AI default 1: cc1plus OOM at -j2 on 30Gi)\n" +
+    "  --vthreads N         Verilator --threads (AI default: remote nproc)\n" +
+    "S4 directed ELF: test --ai-remote  (s4-mshr-xbar.sh). Not cookie. Not 400 GB/s.",
   examples: [
     "bun run src/cli/index.ts remote --remote-ssh ovh_calltorch doctor",
     "bun run src/cli/index.ts remote setup",
     "bun run src/cli/index.ts remote build B",
+    "bun run src/cli/index.ts remote --ai build",
+    "bun run src/cli/index.ts remote --ai --channels 4 --ai-dram 1 build",
     "bun run src/cli/index.ts remote --remote-ssh-pass pwrd128 build B",
     "bun run src/cli/index.ts remote soak --flavour B",
   ],
@@ -185,17 +203,83 @@ export const remoteCommand: Command = {
       return 1;
     }
 
-    const [subcommand, ...rest] = args.positionals;
+    const [subcommand, ...restIn] = args.positionals;
     if (!subcommand) {
       args.logger.error("Missing remote subcommand.");
       return 1;
+    }
+
+    const aiFlagErrors = parseAiFlagErrors(args.flags as Record<string, string | boolean>);
+    if (aiFlagErrors.length) {
+      for (const e of aiFlagErrors) args.logger.error(e);
+      return 2;
+    }
+    const aiKnobs = parseAiFlags(args.flags as Record<string, string | boolean>);
+    // `remote --ai` is the S4 testharness path (ai-dt), matching `test --ai-remote`.
+    if (aiKnobs.wantAi) aiKnobs.wantRemote = true;
+    const ai = resolveAiTesting(aiKnobs);
+    if (ai.errors.length) {
+      for (const e of ai.errors) args.logger.error(e);
+      return 2;
+    }
+    const rest = [...restIn];
+    const jobs = flagString(args.flags, "jobs");
+    const vthreads = flagString(args.flags, "vthreads");
+    if (ai.active) {
+      applyAiEnv(ai);
+      args.logger.info(formatAiResolvedLine(ai));
+      for (const w of ai.warnings) args.logger.warn(w);
+      if (subcommand === "build" && (rest.length === 0 || rest[0]?.startsWith("-"))) {
+        rest.unshift(ai.flavour);
+      }
+      if (
+        (subcommand === "run" || subcommand === "soak" || subcommand === "di") &&
+        !rest.includes("--flavour") &&
+        typeof args.flags.flavour !== "string" &&
+        typeof args.flags["ai-flavour"] !== "string"
+      ) {
+        rest.push("--flavour", ai.flavour);
+      }
     }
 
     // Forward global verbose/debug flags to the proxy.
     const proxyArgs: string[] = [];
     if (args.flags.verbose) proxyArgs.push("-v");
     if (args.flags.debug || args.flags["log-level"] === "debug") proxyArgs.push("-d");
-    proxyArgs.push("--host", host, subcommand, ...rest);
+    const flavourFlag =
+      flagString(args.flags, "ai-flavour") ?? flagString(args.flags, "flavour");
+    if (
+      flavourFlag &&
+      subcommand !== "build" &&
+      !rest.includes("--flavour")
+    ) {
+      rest.push("--flavour", flavourFlag);
+    }
+    if (jobs && !rest.includes("--jobs")) {
+      rest.push("--jobs", jobs);
+    }
+    if (vthreads && !rest.includes("--vthreads")) {
+      rest.push("--vthreads", vthreads);
+    }
+    const extraEnv = flagString(args.flags, "env");
+    if (extraEnv) {
+      rest.push("--env", extraEnv);
+    }
+    // `--timeout` is a proxy GLOBAL (before subcommand). `--cmd-file` is a
+    // `shell` subparser flag and must sit before `shell -- <command>`.
+    const timeout = flagString(args.flags, "timeout") ?? flagString(args.flags, "time-out");
+    if (timeout) {
+      proxyArgs.push("--timeout", timeout);
+    }
+    const subFlags: string[] = [];
+    const cmdFile = flagString(args.flags, "cmd-file");
+    if (cmdFile && !rest.includes("--cmd-file")) {
+      subFlags.push("--cmd-file", cmdFile);
+    }
+    if (subcommand === "shell" && rest.length > 0 && rest[0] !== "--") {
+      rest.unshift("--");
+    }
+    proxyArgs.push("--host", host, subcommand, ...subFlags, ...rest);
 
     const env: Record<string, string> = {
       TH_SSH_PASSPHRASE: passphrase,
@@ -204,13 +288,17 @@ export const remoteCommand: Command = {
       env.TH_SSH_IDENTITY = entry.identity;
     }
 
-    // The proxy script must run under a Unix-like environment. On Windows the
-    // build-platform's runBashScript will route through WSL or Git-Bash.
+    // Same engine as `test` suites: WSL on Windows (python3 + OpenSSH), else Git-Bash.
+    if (process.platform === "win32") {
+      args.logger.info(
+        `remote engine: ${resolveRegressEngine()} (set G6LC_REGRESS_ENGINE=wsl|git-bash to override)`,
+      );
+    }
     args.logger.info(`remote: ${host} -> ${wrapper} ${proxyArgs.join(" ")}`);
-    const result = await runBashScript(
+    const result = await runRegressScript(
       wrapper,
       proxyArgs,
-      { env, cwd: repoRoot, stdio: "both" },
+      { env, cwd: repoRoot, stdio: "both", allowFailure: true },
     );
     return result.code;
   },

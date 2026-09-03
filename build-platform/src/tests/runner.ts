@@ -20,6 +20,7 @@ import {
 } from "../platform/shell.ts";
 import type { ManagedTool, ResolvedBuildConfig, TestGroup, TestSuite } from "../config/schema.ts";
 import { findOssCadVerilatorRoot, isVerilatorInstalled } from "../tooling/recipes.ts";
+import { copyAiEnv } from "../tooling/aiTesting.ts";
 
 export interface SuiteResult {
   id: string;
@@ -220,6 +221,8 @@ export async function runSuite(
   ] as const) {
     if (process.env[k]) extra[k] = process.env[k]!;
   }
+  // Xg6lcai DRAM/channel/flavour knobs (test --ai --channels 4 --ai-dram 1).
+  copyAiEnv(extra);
   const env = childEnv(ctx, extra);
 
   if (options.dryRun) {

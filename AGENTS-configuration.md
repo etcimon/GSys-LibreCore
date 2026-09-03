@@ -48,6 +48,82 @@ of frequency.
 > data. Any row marked `inferred` must be replaced with foundry/STA data before tape-out, and no
 > "closes timing" claim may cite an inferred row.
 
+### 1.0a Second target of record — GSys LibreCore AI card (`g6lc64_ai`)
+
+**There are two SKUs, and until this section existed only one of them had an operating point.**
+That gap was not academic: `g6lc_ai_island_cfg_pkg::AiIslandLatencyDefault` sets
+`ClockKhz = 1_000_000` (1 GHz), which agrees with **neither** the router target below (1.25 GHz)
+**nor** the throughput figure `architecture/ai-matrix/scaling-100tops.md` §7 derives its 98.3 TOPS
+from (1.5 GHz). Every island TOPS number is a product of MAC width **and** clock, so an unanchored
+clock makes the headline unfalsifiable — which is exactly the failure `scaling-100tops.md` §2
+exists to prevent.
+
+The AI card is a **PCIe add-in card**, not a fanless gateway. Nothing in §1.1 transfers to it:
+the power budget differs by ~25×, the thermal solution is active, and the memory class is
+DDR4/LPDDR5 rather than a 16-bit DDR3 gateway bus.
+
+| Item | Latency SKU | Throughput SKU | Confidence |
+|---|---|---|---|
+| Island clock | **1.0 GHz** (live fixture, `AiIslandLatencyDefault`) | **1.5 GHz** (`scaling-100tops.md` §7) | decided / inferred |
+| Core clock | tracks §1.1 (1.25 GHz) — the cores are the same IP | 1.25 GHz | inferred |
+| Clusters × MAC/cycle | 1 × 256 live; 1–2 × 4096–8192 target | 8 × 4096 | decided |
+| Peak dense INT8 | **0.512 TOPS** live; ~12–25 TOPS target | **98.3 TOPS** | derived |
+| DRAM class | DDR4-2400×64, `N × 19` GB/s (`DramChannels` ∈ {1,2,4,8}) | LPDDR5 ~400 GB/s (`DramClass=2`, not live) | decided |
+| Card power | — | 60–80 W typical, 100–150 W peak (AI-S4) | inferred, **unmeasured** |
+| Thermal | — | active; 75 W slot budget is insufficient, needs 8-pin aux | inferred |
+| Process | 12 nm FFC class, as §2 | same | inferred |
+
+**Binding rules, so the two SKUs cannot drift:**
+
+1. **The island clock is a config field, never a literal.** `ai_island_cfg_t.ClockKhz` is the single
+   source; the capability window publishes it at `CAP_OFF_CLOCK_KHZ` so software reads it rather
+   than assuming. A TOPS figure quoted without naming the `ClockKhz` it used is not a figure.
+2. **The core clock does not change between SKUs.** The cores are the same IP under both, so
+   §1.1's 1.25 GHz target and its sign-off corner apply unchanged. Raising the *island* clock is
+   not permission to raise the *core* clock.
+3. **Frequency is screened, not asserted.** See §1.0b.
+4. **A number marked `unmeasured` may not gate a tape-out decision.** The card power row is
+   AI-S4 and is explicitly open.
+
+### 1.0b Raising the frequency target — the `sv-timing` → `--from-timing` loop
+
+`AGENTS-coding-philosophy.md` §2.8 records that the sparse EX and frontend cones **close at
+2.5 GHz under structural FO4 screening**. That is a screen, not STA, and the distinction is
+load-bearing: the budget model is
+
+```
+budget_fo4 = (1000 / target_mhz × 1000 / fo4_ps) × (1 − margin)      # fo4_ps=20, margin=0.2
+```
+
+so raising `--target-mhz` *tightens* the budget rather than proving anything about silicon.
+
+The supported way to move the target, and to have the rest of the platform believe it:
+
+```bash
+# 1. Screen the real RTL at the new target and emit a timing package.
+cd sv-timing
+python tools/svt.py monorepo-soak --target-mhz 2500 --profile sparse_ex \
+       --correct --emit --allow-latency
+
+# 2. Feed that package to the host gates, which then carry the target with them.
+./build.sh timings validate --from-timing build-platform/workspace/build/sv-timing/monorepo-soak/sparse_ex
+cva6-build test --ai --ai-ghz 1.25 --from-timing <fo4-pkg>     # island SKU × screened target
+cva6-build diag run ai --from-timing <fo4-pkg>
+```
+
+**What must be true before a raised target is written into this file:**
+
+| Gate | Why |
+|---|---|
+| The sparse cones close at the new target **after** latency-neutral rewrites only | Buying closure with extra pipeline stages changes the micro-architecture, so it is a design decision, not a retune (§2.8 rule 6) |
+| Residual exclusive/LSU cones are named, with their estimated ceiling | Those cones sit at ~1.4–1.7 GHz after rewriting and call for multi-cycle/T3, not more FO4 credit |
+| The island's `ClockKhz` and the core target are updated **together or explicitly not** | §1.0a rule 2 |
+| `--from-timing` is passed to the suites that quote the number | Otherwise the suite is still quoting the old target |
+| The row is marked `inferred (FO4 screen)` and not `closes timing` | §1.0's status rule: no closure claim may cite an inferred row |
+
+**`fo4-v1` must not be retuned from synthetic fixtures** — only from real STA plus host
+`retune-propose` (§2.8 rule 1). Screening harder is free; claiming closure is not.
+
 ### 1.1 Baseline — CVA6V-EC router core
 
 | Item | Baseline value | Where it drives code |

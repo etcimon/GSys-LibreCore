@@ -54,6 +54,8 @@ export function renderGeneralHelp(commands: Command[], info: CliInfo): string {
   lines.push("  bun run src/cli/index.ts setup --install --profile sim");
   lines.push("  bun run src/cli/index.ts build --iss verilator  # verilate the configured target");
   lines.push("  bun run src/cli/index.ts test --list            # discover regression suites");
+  lines.push("  bun run src/cli/index.ts test --ai              # Xg6lcai directed (like ooo-l3-tests)");
+  lines.push("  bun run src/cli/index.ts diag run ai            # AI island/matrix/DRAM diag compartment");
   lines.push("  bun run src/cli/index.ts test --open-source     # run all OSS-runnable suites");
   lines.push("  bun run src/cli/index.ts config --json          # dump the resolved configuration");
   lines.push("");

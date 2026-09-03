@@ -48,6 +48,7 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
+#include <queue>
 
 #include <fesvr/dtm.h>
 #include <fesvr/htif_hexwriter.h>
@@ -66,10 +67,115 @@ static vluint64_t main_time = 0;
 // Plusargs consumed by RTL/SV ($value$plusargs) — must be allowlisted so HTIF
 // does not reject them. Use +permissive…+permissive-off if you need more.
 static const char *verilog_plusargs[] = {
-    "jtag_rbb_enable", "time_out", "debug_disable", "tohost_addr", "elf_file", nullptr};
+    "jtag_rbb_enable", "time_out", "debug_disable", "tohost_addr", "elf_file",
+    // testharness_proxy always passes +quiet_axi +max-cycles= (HTIF rejects unknown).
+    "quiet_axi", "max-cycles",
+    nullptr};
 
 extern dtm_t* dtm;
 extern remote_bitbang_t * jtag;
+
+#if defined(G6LC_HAVE_LITEDRAM)
+// CLASS1 ELF preload: C++ queues packed 256-bit native words; SV
+// g6lc_ai_dram_channels pops via g6lc_pl_try_pop and steals wrap's native
+// write engine. Cookie/class-0 does not compile this (no gen_sim_axi poke).
+struct G6lcPlWord {
+  uint64_t addr, d0, d1, d2, d3;
+  uint32_t be;
+};
+static std::queue<G6lcPlWord> g6lc_pl_q;
+
+extern "C" int g6lc_pl_try_pop(unsigned long long *addr, unsigned long long *d0,
+                               unsigned long long *d1, unsigned long long *d2,
+                               unsigned long long *d3, unsigned int *be) {
+  if (g6lc_pl_q.empty())
+    return 0;
+  const G6lcPlWord w = g6lc_pl_q.front();
+  g6lc_pl_q.pop();
+  *addr = w.addr;
+  *d0 = w.d0;
+  *d1 = w.d1;
+  *d2 = w.d2;
+  *d3 = w.d3;
+  *be = w.be;
+  return 1;
+}
+
+#include "svdpi.h"
+extern "C" int g6lc_litedram_pl_busy();
+extern "C" void g6lc_tb_preload_hold(unsigned int on);
+
+static svScope g6lc_find_scope(const char *const *names) {
+  for (int i = 0; names[i] != nullptr; i++) {
+    svScope sc = svGetScopeFromName(names[i]);
+    if (sc) {
+      std::cerr << "[g6lc-ai] dpi scope " << names[i] << "\n";
+      return sc;
+    }
+  }
+  return nullptr;
+}
+
+static int g6lc_pl_hw_busy() {
+  static svScope sc = nullptr;
+  if (!sc) {
+    static const char *const names[] = {
+        "TOP.ariane_testharness.i_dram_backend.gen_need_litedram.i_dram_channels",
+        "ariane_testharness.i_dram_backend.gen_need_litedram.i_dram_channels",
+        "TOP.ariane_testharness.i_dram_backend.i_dram_channels",
+        nullptr};
+    sc = g6lc_find_scope(names);
+    if (!sc) {
+      std::cerr << "[g6lc-ai] svGetScope channels failed\n";
+      return 1;
+    }
+  }
+  svSetScope(sc);
+  return g6lc_litedram_pl_busy();
+}
+
+static void g6lc_pl_release_cluster() {
+  static const char *const names[] = {
+      "TOP.ariane_testharness", "ariane_testharness", nullptr};
+  svScope sc = g6lc_find_scope(names);
+  if (!sc) {
+    std::cerr << "[g6lc-ai] svGetScope testharness failed\n";
+    return;
+  }
+  svSetScope(sc);
+  g6lc_tb_preload_hold(0);
+}
+
+static void g6lc_pl_push_bytes(uint64_t addr, const uint8_t *p, size_t n) {
+  const uint64_t start = addr;
+  const uint64_t end = addr + (uint64_t)n;
+  uint64_t a = start & ~0x1FULL;
+  while (a < end) {
+    uint64_t d[4] = {0, 0, 0, 0};
+    uint32_t be = 0;
+    for (int sl = 0; sl < 4; sl++) {
+      for (int b = 0; b < 8; b++) {
+        const uint64_t ba = a + (uint64_t)(sl * 8 + b);
+        if (ba >= start && ba < end) {
+          d[sl] |= (uint64_t)p[ba - start] << (8 * b);
+          be |= 1u << (sl * 8 + b);
+        }
+      }
+    }
+    if (be != 0 && (d[0] | d[1] | d[2] | d[3]) != 0) {
+      G6lcPlWord w;
+      w.addr = a;
+      w.d0 = d[0];
+      w.d1 = d[1];
+      w.d2 = d[2];
+      w.d3 = d[3];
+      w.be = be;
+      g6lc_pl_q.push(w);
+    }
+    a += 32;
+  }
+}
+#endif
 
 void handle_sigterm(int sig) {
   dtm->stop();
@@ -79,6 +185,17 @@ void handle_sigterm(int sig) {
 extern "C" void read_elf(const char* filename);
 extern "C" char get_section (long long* address, long long* len);
 extern "C" void read_section_void(long long address, void * buffer, uint64_t size = 0);
+
+// DPI imported by core/id_stage.sv (`g6lc_dram_peek64`). g6lc_tb.cpp owns the
+// real i_sram oracle. This file is used for g6lc64_ai (`G6LC_TB_NO_HIER`, DRAM
+// is g6lc_ai_dram_backend) so a 0-return stub is honest: the I1 checker skips
+// rather than comparing against a dummy 16-byte MEM. Without this the AI
+// testharness fails to link.
+extern "C" int g6lc_dram_peek64(long long addr, long long *data) {
+  (void)addr;
+  if (data) *data = 0;
+  return 0;
+}
 
 // Called by $time in Verilog converts to double, to match what SystemC does
 double sc_time_stamp () {
@@ -343,7 +460,19 @@ done_processing:
   top->rst_ni = 1;
 
   // Preload memory.
-#if (VERILATOR_VERSION_INTEGER >= 5000000)
+#if defined(G6LC_HAVE_LITEDRAM)
+  // CLASS1: DRAM is LiteDRAM wrap, not gen_sim_axi.i_sram. Poking the class-0
+  // SRAM path would fail to compile (generate not elaborated). Native writes
+  // through wrap after init, cluster held via preload_hold.
+#elif defined(G6LC_AI_DRAM_SIM_CHANS_2) || defined(G6LC_AI_DRAM_SIM_CHANS_4) || defined(G6LC_AI_DRAM_SIM_CHANS_8)
+  // Class-0 N>1: gen_sim_stripe.gen_ch[i].i_sram, not gen_sim_axi.
+#elif defined(G6LC_TB_NO_HIER)
+  // g6lc64_ai: DRAM is i_dram_backend.gen_sim_axi.i_sram (class 0 N=1), not
+  // testharness i_sram. A 16-byte dummy overflowed on ELF preload (segfault).
+  // SMT gen_smt / gen_csr[1] probes stay compiled out below.
+#define MEM top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
+#define MEM_USER MEM
+#elif (VERILATOR_VERSION_INTEGER >= 5000000)
   // Verilator v5: Use rootp pointer and .data() accessor.
 #define MEM top->rootp->ariane_testharness__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
 #define MEM_USER top->rootp->ariane_testharness__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram.m_storage
@@ -354,6 +483,162 @@ done_processing:
 #endif
   long long addr;
   long long len;
+  const uint64_t dram_base = 0x80000000ULL;
+  const uint64_t dram_user = 0x84000000ULL;
+  size_t mem_size = 0xFFFFFF;
+  bool bulk_done = false;
+
+#if defined(G6LC_AI_DRAM_SIM_CHANS_8)
+#define G6LC_SIM_NCH 8
+#elif defined(G6LC_AI_DRAM_SIM_CHANS_4)
+#define G6LC_SIM_NCH 4
+#elif defined(G6LC_AI_DRAM_SIM_CHANS_2)
+#define G6LC_SIM_NCH 2
+#endif
+#if defined(G6LC_SIM_NCH)
+#define G6LC_CHSRAM(i)                                                         \
+  top->rootp                                                                   \
+      ->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_stripe__DOT__gen_ch__BRA__##i##__KET____DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
+#endif
+
+#if defined(G6LC_HAVE_LITEDRAM)
+  std::cerr << "[g6lc-ai] CLASS1 preload into LiteDRAM native (cluster held)\n";
+  while (get_section(&addr, &len)) {
+    if (len <= 0)
+      continue;
+    const uint64_t a = (uint64_t)addr;
+    const uint64_t e = a + (uint64_t)len;
+    const uint64_t d0 = dram_base;
+    const uint64_t d1 = dram_base + 0x10000000ULL;
+    if (a < d1 && e > d0) {
+      std::vector<uint8_t> tmp((size_t)len);
+      read_section_void(addr, tmp.data(), (uint64_t)len);
+      const uint64_t start = (a > d0) ? a : d0;
+      const uint64_t end = (e < d1) ? e : d1;
+      const size_t n = (size_t)(end - start);
+      if (n > 0)
+        g6lc_pl_push_bytes(start, tmp.data() + (size_t)(start - a), n);
+    }
+  }
+  {
+    const size_t nword = g6lc_pl_q.size();
+    std::cerr << "[g6lc-ai] native queue words=" << nword << " draining\n";
+    auto clock_tick = [&]() {
+      top->clk_i = 0;
+      top->eval();
+#if VM_TRACE
+      if (vcdfile || fst_fname)
+        tfp->dump(static_cast<vluint64_t>(main_time * 2));
+#endif
+      top->clk_i = 1;
+      top->eval();
+#if VM_TRACE
+      if (vcdfile || fst_fname)
+        tfp->dump(static_cast<vluint64_t>(main_time * 2 + 1));
+#endif
+      if (main_time % 2 == 0)
+        top->rtc_i ^= 1;
+      main_time++;
+    };
+    const uint64_t drain_to = main_time + 2000000ULL + (uint64_t)nword * 16ULL;
+    // rstgen holds ndmreset_n low for a few cycles after rst_ni=1.
+    for (int i = 0; i < 16; i++)
+      clock_tick();
+    while ((g6lc_pl_q.size() != 0 || g6lc_pl_hw_busy() != 0) &&
+           main_time < drain_to)
+      clock_tick();
+    if (g6lc_pl_q.size() != 0 || g6lc_pl_hw_busy() != 0) {
+      std::cerr << "[g6lc-ai] CLASS1 preload drain timeout t=" << main_time
+                << " q=" << g6lc_pl_q.size()
+                << " hw=" << g6lc_pl_hw_busy() << "\n";
+      return 1;
+    }
+    g6lc_pl_release_cluster();
+    for (int i = 0; i < 4; i++)
+      clock_tick();
+    std::cerr << "[g6lc-ai] CLASS1 preload done words=" << nword
+              << " t=" << main_time << " cluster released\n";
+  }
+  if (max_cycles == (uint64_t)-1)
+    max_cycles = 2000000ULL;
+  std::cerr << "[g6lc-ai] sim loop max_cycles=" << max_cycles
+            << " (no dtm/jtag poll)" << std::endl;
+#elif defined(G6LC_SIM_NCH)
+  {
+    const int nch = G6LC_SIM_NCH;
+    const int selw = (nch <= 2) ? 1 : (nch <= 4) ? 2 : 3;
+    std::cerr << "[g6lc-ai] class-0 stripe preload nch=" << nch
+              << " gen_sim_stripe\n";
+    auto poke = [&](uint64_t ba, uint8_t b) {
+      const int ch = (int)((ba >> 6) & (uint64_t)(nch - 1));
+      const uint64_t local =
+          ((ba >> (6 + selw)) << 6) | (ba & 63ULL);
+      // RTL: addr_i = local_a[$clog2(ChWords)-1+3:3], ChWords=2^25/N.
+      const size_t chwords = (size_t)1 << (25 - selw);
+      const size_t word = (size_t)((local >> 3) & (chwords - 1));
+      const int sh = (int)(local & 7ULL) * 8;
+      uint64_t v;
+      switch (ch) {
+      case 0: v = G6LC_CHSRAM(0)[word]; break;
+      case 1: v = G6LC_CHSRAM(1)[word]; break;
+#if G6LC_SIM_NCH >= 4
+      case 2: v = G6LC_CHSRAM(2)[word]; break;
+      case 3: v = G6LC_CHSRAM(3)[word]; break;
+#endif
+#if G6LC_SIM_NCH >= 8
+      case 4: v = G6LC_CHSRAM(4)[word]; break;
+      case 5: v = G6LC_CHSRAM(5)[word]; break;
+      case 6: v = G6LC_CHSRAM(6)[word]; break;
+      case 7: v = G6LC_CHSRAM(7)[word]; break;
+#endif
+      default: return;
+      }
+      v &= ~(0xffULL << sh);
+      v |= (uint64_t)b << sh;
+      switch (ch) {
+      case 0: G6LC_CHSRAM(0)[word] = v; break;
+      case 1: G6LC_CHSRAM(1)[word] = v; break;
+#if G6LC_SIM_NCH >= 4
+      case 2: G6LC_CHSRAM(2)[word] = v; break;
+      case 3: G6LC_CHSRAM(3)[word] = v; break;
+#endif
+#if G6LC_SIM_NCH >= 8
+      case 4: G6LC_CHSRAM(4)[word] = v; break;
+      case 5: G6LC_CHSRAM(5)[word] = v; break;
+      case 6: G6LC_CHSRAM(6)[word] = v; break;
+      case 7: G6LC_CHSRAM(7)[word] = v; break;
+#endif
+      default: break;
+      }
+    };
+    size_t nbytes = 0;
+    while (get_section(&addr, &len)) {
+      if (len <= 0)
+        continue;
+      const uint64_t a = (uint64_t)addr;
+      const uint64_t e = a + (uint64_t)len;
+      if (a < dram_base + 0x10000000ULL && e > dram_base) {
+        std::vector<uint8_t> tmp((size_t)len);
+        read_section_void(addr, tmp.data(), (uint64_t)len);
+        const uint64_t start = (a > dram_base) ? a : dram_base;
+        const uint64_t end =
+            (e < dram_base + 0x10000000ULL) ? e : dram_base + 0x10000000ULL;
+        for (uint64_t ba = start; ba < end; ba++) {
+          poke(ba, tmp[(size_t)(ba - a)]);
+          nbytes++;
+        }
+      }
+    }
+    std::cerr << "[g6lc-ai] stripe preload bytes=" << nbytes << "\n";
+  }
+  if (max_cycles == (uint64_t)-1)
+    max_cycles = 2000000ULL;
+  std::cerr << "[g6lc-ai] sim loop max_cycles=" << max_cycles
+            << " (no dtm/jtag poll)" << std::endl;
+#else
+#if defined(G6LC_TB_NO_HIER)
+  std::cerr << "[g6lc-ai] preload into i_dram_backend.gen_sim_axi.i_sram\n";
+#endif
 
   // DRAM preload into the Verilator SRAM model.
   // 1) Bulk memif read from DRAM base (covers the full load_elf image when the
@@ -362,10 +647,6 @@ done_processing:
   // 3) PHDRs that *start below* DRAM but overlap it (mini_tohost links .text at
   //    0x80000000 inside a LOAD that begins at 0x7ffff000). fesvr only accepts
   //    exact PHDR addresses for read_section_void — read whole section then copy.
-  const uint64_t dram_base = 0x80000000ULL;
-  const uint64_t dram_user = 0x84000000ULL;
-  size_t mem_size = 0xFFFFFF;
-  bool bulk_done = false;
   while (get_section(&addr, &len)) {
     if (!bulk_done && addr == (long long)dram_base) {
       read_section_void(addr, (void *)MEM, mem_size);
@@ -409,7 +690,31 @@ done_processing:
     }
   }
 
+#if defined(G6LC_TB_NO_HIER)
+  std::cerr << "[g6lc-ai] preload done bulk=" << (bulk_done ? 1 : 0)
+            << " probing eval" << std::endl;
+  top->clk_i = 0;
+  top->eval();
+  std::cerr << "[g6lc-ai] eval0 ok exit_o=" << (unsigned)top->exit_o
+            << " dtm=" << (void *)dtm << " jtag=" << (void *)jtag << std::endl;
+  top->clk_i = 1;
+  top->eval();
+  std::cerr << "[g6lc-ai] eval1 posedge rst_ni=1 ok" << std::endl;
+  // +debug_disable: SimDTM is not driving the core. dtm->done()/jtag->done()
+  // still talk to fesvr and SIGSEGV'd here after a clean eval. Poll exit_o
+  // (rvfi_tracer tohost) and max_cycles only.
+  if (max_cycles == (uint64_t)-1)
+    max_cycles = 2000000ULL;
+  std::cerr << "[g6lc-ai] sim loop max_cycles=" << max_cycles
+            << " (no dtm/jtag poll)" << std::endl;
+#endif
+#endif // !G6LC_HAVE_LITEDRAM
+
   // Optional mid-run MEM probe (set env CVA6_PRELOAD_PROBE=1)
+#if !defined(G6LC_TB_NO_HIER)
+  // Do not build this lambda on G6LC_TB_NO_HIER: capturing the 32M-word
+  // dram_backend SRAM (VlUnpacked<QData, 33554432>) SIGSEGV'd at -O0
+  // before the sim loop ran.
   const bool probe = (std::getenv("CVA6_PRELOAD_PROBE") != nullptr);
   auto mem_half = [&](size_t off) -> uint16_t {
     auto *bytes = reinterpret_cast<const uint8_t *>(MEM);
@@ -436,10 +741,25 @@ done_processing:
               << " [0x1000]=0x" << mem_half(0x1000)
               << std::dec << "\n";
   }
+#endif
 
+#if defined(G6LC_TB_NO_HIER)
+  std::cerr << "[g6lc-ai] entering while t=" << main_time << std::endl;
+  while (!(top->exit_o & 0x1) && main_time < max_cycles) {
+    if (main_time < 15)
+      std::cerr << "[g6lc-ai] body t=" << main_time << " clk=0" << std::endl;
+    else if ((main_time & 511ULL) == 0)
+      std::cerr << "[g6lc-ai] t=" << main_time
+                << " exit_o=" << (unsigned)top->exit_o << std::endl;
+#else
   while (!dtm->done() && !jtag->done() && !(top->exit_o & 0x1)) {
+#endif
     top->clk_i = 0;
     top->eval();
+#if defined(G6LC_TB_NO_HIER)
+    if (main_time < 15)
+      std::cerr << "[g6lc-ai] negedge t=" << main_time << " ok" << std::endl;
+#endif
 #if VM_TRACE
     if (vcdfile || fst_fname)
       tfp->dump(static_cast<vluint64_t>(main_time * 2));
@@ -457,6 +777,7 @@ done_processing:
     }
     main_time++;
     // I4q: first time frontend NPC is 0 after leaving boot (smt2 hart0 illegal).
+#if !defined(G6LC_TB_NO_HIER)
     if (std::getenv("CVA6_TRAP_DUMP") != nullptr) {
       static int saw_nonzero_npc = 0;
       static int logged_zero_npc = 0;
@@ -470,6 +791,7 @@ done_processing:
       }
 #endif
     }
+#endif
     // Honor -m / +max-cycles= (parsed above). Without this the TB never times
     // out on bare-metal/OpenSBI images that lack a tohost handshake.
     if (main_time >= max_cycles)
@@ -479,6 +801,7 @@ done_processing:
     // the remaining +max-cycles. Trapdump/hangpc still run after the loop.
     // Poll every 4096 cycles. Mini tohost at the same VA is never 51b1babe.
     // G1de: "0" disables. Presence-only treated =0 as on.
+#if !defined(G6LC_TB_NO_HIER)
     const char *_ce = std::getenv("CVA6_COOKIE_EXIT");
     if (_ce && _ce[0] && _ce[0] != '0' &&
         main_time > 10000 && (main_time & 4095ULL) == 0) {
@@ -500,6 +823,7 @@ done_processing:
                 << " MEM[0x886]=0x" << mem_half(0x886)
                 << std::dec << "\n";
     }
+#endif // !G6LC_TB_NO_HIER
     // Hang-7 event probe (every cycle, capped): use COMMIT PC (not npc) so RF
     // matches retired state. Also filter mentry to alias-shaped calls.
     // Compile-time gated: see CVA6_MC_PC_PROBE_COMPILE at file head.
@@ -934,7 +1258,31 @@ done_processing:
     fclose(vcdfile);
 #endif
 
+  // Classify BEFORE any getenv / DRAM dump. gdb of the -O0 g6lc64_ai
+  // harness showed SIGSEGV in getenv("CVA6_TRAP_DUMP") after the sim loop
+  // (environ smashed); S4 may already have set exit_o.
+#if defined(G6LC_TB_NO_HIER)
+  {
+    unsigned e = (unsigned)top->exit_o;
+    if (e == 1) {
+      fprintf(stderr, "%s *** SUCCESS *** (tohost = 1) after %ld cycles\n",
+              htif_argv[1], main_time);
+      ret = 0;
+    } else if (e != 0 && e != 0xffffffffu) {
+      fprintf(stderr, "%s *** FAILED *** (tohost = %u) after %ld cycles\n",
+              htif_argv[1], e, main_time);
+      ret = (int)e;
+    } else {
+      fprintf(stderr, "%s *** FAILED *** (tohost = 0 timeout) after %ld cycles\n",
+              htif_argv[1], main_time);
+      ret = 1;
+    }
+    fflush(stderr);
+  }
+#endif
+
   // Optional post-run DRAM dump for OpenSBI hang diagnostics (CVA6_TRAP_DUMP=1)
+#if !defined(G6LC_TB_NO_HIER)
   if (std::getenv("CVA6_TRAP_DUMP") != nullptr) {
     auto *bytes = reinterpret_cast<const uint8_t *>(MEM);
     auto rd64 = [&](size_t off) -> uint64_t {
@@ -996,6 +1344,7 @@ done_processing:
     }
     // R3a hang state: live NPC + per-hart CSR/RF (smt2 = 1 core × 2 banks).
     // I4o: npc0=0x32e is _start_warm hart-id scan; mepc=0 is a separate illegal.
+#if !defined(G6LC_TB_NO_HIER)
     {
       auto npc0 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__i_frontend__DOT__npc_q;
       auto mepc0 = top->rootp->ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6__DOT__csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q;
@@ -1028,6 +1377,7 @@ done_processing:
                 << " mtvec=0x" << (uint64_t)mtvec
                 << std::dec << "\n";
     }
+#endif // !G6LC_TB_NO_HIER
     // R3a fdtcnt probe BSS log @ DRAM+0x42e00 (VA 0x80042e00):
     //   +0x00 next_tag entry count
     //   +0x08 last structure offset (a1 into fdt_next_tag)
@@ -1115,7 +1465,9 @@ done_processing:
       std::cerr << "\n";
     }
   }
+#endif // !G6LC_TB_NO_HIER
 
+#if !defined(G6LC_TB_NO_HIER)
   if (dtm->exit_code()) {
     fprintf(stderr, "%s *** FAILED *** (tohost = %d) after %ld cycles\n", htif_argv[1], dtm->exit_code(), main_time);
     ret = dtm->exit_code();
@@ -1129,9 +1481,12 @@ done_processing:
   } else {
     fprintf(stderr, "%s *** SUCCESS *** (tohost = 0) after %ld cycles\n", htif_argv[1], main_time);
   }
+#endif
 
+#if !defined(G6LC_TB_NO_HIER)
   if (dtm) delete dtm;
   if (jtag) delete jtag;
+#endif
 
   std::clock_t c_end = std::clock();
   auto t_end = std::chrono::high_resolution_clock::now();

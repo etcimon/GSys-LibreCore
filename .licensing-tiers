@@ -56,7 +56,7 @@ R   core/g6lc.sv
 R   corev_apu/coherence/**
 R   corev_apu/l2_cache/**
 R   corev_apu/l3_cache/**
-R   corev_apu/src/g6lc_axi_2to1_mux.sv
+R   corev_apu/src/g6lc_axi_*.sv
 R   corev_apu/src/g6lc_ara_attach.sv
 R   corev_apu/src/g6lc_cluster.sv
 

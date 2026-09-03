@@ -35,10 +35,17 @@ Snoop filter · inv coalesce · multi-master AXI RR + anti-starve · NC bypass �
 
 ## Sanctioned seam
 Cluster size at **SoC** (`corev_apu`); core stays single-hart-instance + `mhartid`.
-Hub sits between core AXI masters and shared L2.
+Hub sits between core AXI masters and shared L2. DRAM is **below** L2/L3: `mem_req_o`
+hits the testharness `master[DRAM]` slave (`g6lc_ai_dram_backend`). Multi-channel
+stripe (`DramChannels`) is that slave's property, not a per-core port and not
+`cva6_cfg_t`. Raising `NrCores` adds miss-fill concurrency; it does **not** instantiate
+PHYs. Plan: [`../uncore/dram-channel-scaling.md`](../uncore/dram-channel-scaling.md).
 
 ## `.dts`
 N× `cpu@`, PLIC contexts, CLINT extents, `next-level-cache = <&l2>`.
+One `memory@` node even when `DramChannels>1` (hardware stripe, not N Linux banks).
 
 ## Invariants
-RVWMO across harts · cluster-wide LR/SC+AMO · MMIO never cached · precise traps per hart.
+RVWMO across harts · cluster-wide LR/SC+AMO (exclusive monitor **above** the channel
+demux) · MMIO never cached · precise traps per hart · N=1 `IDENTITY_FAST` still sees
+the same DRAM slave.

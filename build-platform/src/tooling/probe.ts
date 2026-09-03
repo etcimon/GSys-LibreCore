@@ -567,6 +567,20 @@ function buildCommandMatrix(
       install: "diag list  |  tools install sim  |  verify.suite OSS CAD under workspace/tooling",
     },
     {
+      command: "diag run ai",
+      summary: "Xg6lcai island/matrix/DRAM-channel diagnostics (like diag run ooo)",
+      needs: ["bun"],
+      required: ["bun"],
+      install: "diag run ai --all  |  test --ai  |  tensor doctor",
+    },
+    {
+      command: "test --ai",
+      summary: "Xg6lcai directed + optional remote testharness / g6lc_qemu",
+      needs: ["bun", "bash"],
+      required: ["bun"],
+      install: "test --ai  |  test --ai-remote  |  test --ai-qemu  |  g6q --ai doctor",
+    },
+    {
       command: "timings doctor",
       summary: "Timings/STA readiness + FO4 model retune checklist",
       needs: ["bun"],

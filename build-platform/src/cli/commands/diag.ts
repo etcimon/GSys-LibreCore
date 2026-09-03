@@ -24,13 +24,20 @@ import { gatherProbeReport } from "../../tooling/probe.ts";
 import { edaPaths, edaPresence } from "../../tooling/eda.ts";
 import { validateTimingsOutDir } from "../../tooling/timings.ts";
 import { renderBox, type BoxRow } from "../../util/box.ts";
+import {
+  applyAiEnv,
+  formatAiResolvedLine,
+  parseAiFlagErrors,
+  parseAiFlags,
+  resolveAiTesting,
+} from "../../tooling/aiTesting.ts";
 
 export const diagCommand: Command = {
   name: "diag",
   summary:
-    "Compartmentalized diagnostics with per-test Verilator configs (host/core/smt2/ooo/apu).",
+    "Compartmentalized diagnostics with per-test Verilator configs (host/core/smt2/ooo/ai/apu).",
   usage:
-    "bun run src/cli/index.ts diag [list|status|run] [compartment|id…] [--all] [--from-timing DIR] [--json] [--dry-run]",
+    "bun run src/cli/index.ts diag [list|status|run] [compartment|id…] [--ai] [--all] [--from-timing DIR] [--json] [--dry-run]",
   details:
     "Diagnostics are small, self-contained gates from config.diagnostics.tests.\n" +
     "Unlike `verify` (full multi-target sweep), each test can declare its own\n" +
@@ -40,18 +47,24 @@ export const diagCommand: Command = {
     "  diag status            readiness (no heavy lint unless tools already there)\n" +
     "  diag run               run default compartments (diagnostics.defaultCompartments)\n" +
     "  diag run core smt2     run compartments\n" +
+    "  diag run ai            Xg6lcai paths + optional g6lc64_ai lint (like `diag run ooo`)\n" +
+    "  diag run --ai          same as `diag run ai`\n" +
     "  diag run diag-smt2-lint  run one test by id\n" +
     "  diag run --all         include optional tests when selecting by compartment\n" +
     "  --from-timing <dir>    preflight structural validate of timings out-dir\n" +
     "                         (does not replace live RTL flists; see lifecycle plan)\n" +
+    "  --channels / --ai-dram / --ai-ghz / --ai-flavour\n" +
+    "                         stamp AI_ISLAND_DRAM_* env for lint defines (same as test)\n" +
     "\n" +
-    "Compartments: host | core | smt2 | ooo | apu | residual\n" +
-    "Related: probe diag | verify --lint | probe install | timings validate",
+    "Compartments: host | core | smt2 | ooo | ai | apu | residual\n" +
+    "Related: probe diag | verify --lint | probe install | timings validate | test --ai",
   examples: [
     "bun run src/cli/index.ts diag list",
     "bun run src/cli/index.ts diag status",
     "bun run src/cli/index.ts diag run",
     "bun run src/cli/index.ts diag run core",
+    "bun run src/cli/index.ts diag run ai",
+    "bun run src/cli/index.ts diag run --ai --all --from-timing workspace/build/sv-timing/host-cv64a6_imafdc_sv39",
     "bun run src/cli/index.ts diag run diag-smt2-lint",
     "bun run src/cli/index.ts diag run smt2 --all",
     "bun run src/cli/index.ts diag run core --from-timing workspace/build/sv-timing/host-cv64a6_imafdc_sv39",
@@ -150,14 +163,34 @@ export const diagCommand: Command = {
     }
 
     if (sub === "run") {
+      const aiFlagErrors = parseAiFlagErrors(args.flags as Record<string, string | boolean>);
+      if (aiFlagErrors.length) {
+        for (const e of aiFlagErrors) logger.error(e);
+        return 2;
+      }
+      const aiKnobs = parseAiFlags(args.flags as Record<string, string | boolean>);
+      const ai = resolveAiTesting(aiKnobs);
+      if (ai.errors.length) {
+        for (const e of ai.errors) logger.error(e);
+        return 2;
+      }
+      if (ai.active) {
+        applyAiEnv(ai);
+        logger.info(formatAiResolvedLine(ai));
+        for (const w of ai.warnings) logger.warn(w);
+      }
+
       let runFilter = filter;
-      if (includeOptional && filter.length === 0) {
+      if (aiKnobs.wantAi && !runFilter.some((f) => f.toLowerCase() === "ai")) {
+        runFilter = [...runFilter, "ai"];
+      }
+      if (includeOptional && filter.length === 0 && !aiKnobs.wantAi) {
         // all tests including optional
         runFilter = config.diagnostics.tests.map((t) => t.id);
-      } else if (includeOptional && filter.length > 0) {
+      } else if (includeOptional && runFilter.length > 0) {
         // expand compartments to include optional
         const expanded: string[] = [];
-        for (const f of filter) {
+        for (const f of runFilter) {
           if ((DIAG_COMPARTMENTS as string[]).includes(f.toLowerCase())) {
             for (const t of config.diagnostics.tests.filter(
               (x) => x.compartment === f.toLowerCase(),

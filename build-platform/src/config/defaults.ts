@@ -676,6 +676,94 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        // I3 S4 remote testharness: xbar × L2 8 MSHR × MaxAROut=8 (ai-dt default).
+        // CLI: test --ai-remote  |  test --ai --channels 4 --ai-dram 1
+        id: "ai-s4-mshr-xbar",
+        description:
+          "OPTIONAL remote: I3 S4 Variane xbar×8 MSHR×MaxAROut on testharness_proxy (default flavour ai-dt). Env S4_FLAVOUR / --ai-flavour. Not cookie. Not 400 GB/s.",
+        script: "verif/regress/remote/s4-mshr-xbar.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvTarget: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "ai-dram-atomics",
+        description:
+          "OPTIONAL: testharness exclusive-monitor (pulp LRSC=1 cookie; g6lc_axi_lrsc eight AR/AW + LR/SC snoop for S4/CLASS1). Not Variane.",
+        script: "verif/regress/ai-dram-atomics.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "none",
+        tools: ["verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "ai-litedram-wrap",
+        description:
+          "OPTIONAL: class-1 LiteDRAM AXI→native wrap TB (size 0–3, L1 16 B, dual AR, WRAP SLVERR). Needs generated litedram_core.v.",
+        script: "verif/regress/ai-litedram-wrap.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "none",
+        tools: ["verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "ai-dram-channels",
+        description:
+          "OPTIONAL: class-1 LiteDRAM DramChannels stripe N=1/2/4/8. Selected by test --ai --channels 4 --ai-dram 1. Honors AI_ISLAND_DRAM_CHANNELS. Not Variane.",
+        script: "verif/regress/ai-dram-channels.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "none",
+        tools: ["verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "ai-dram-stripe",
+        description:
+          "OPTIONAL: class-0 SRAM DramChannels stripe (cores+L2+island). Selected by test --ai --channels 4. Honors AI_ISLAND_DRAM_CHANNELS. Not Variane.",
+        script: "verif/regress/ai-dram-stripe.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "none",
+        tools: ["verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "ai-dram-timing",
+        description:
+          "OPTIONAL: class-0 Cas=14 page-timing TB (G6LC_AI_DRAM_TIMING / --ai-ghz / --from-timing). Not STA.",
+        script: "verif/regress/ai-dram-timing.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "none",
+        tools: ["verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        // Higher-level g6lc_qemu Linux/emulation — NOT Variane evidence.
+        id: "ai-qemu-linux",
+        description:
+          "OPTIONAL higher-level: g6lc_qemu doctor + g6lc64_ai ingest/bridge path (Linux emulation). Not Variane; not 400 GB/s. CLI: test --ai-qemu | g6q --ai doctor.",
+        script: "verif/regress/ai-qemu-linux.sh",
+        group: "linux",
+        target: "g6lc64_ai",
+        dvSimulators: "none",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "kvm-h-veri",
         description:
           "OPTIONAL: H-edge Variane 3/3 (h_edge_diag/kvm_h_stress/hlv_hsv). Prefers work-ver-stream8.",
@@ -1008,13 +1096,14 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         mechanism: "submodule",
         url: "https://github.com/enjoy-digital/litedram.git",
         path: "vendor/litex/litedram",
+        ref: "3cf585a60a37113f18a9f6c6f3ee774be521623e",
         license: "BSD-2-Clause",
-        status: "planned",
+        status: "vendored",
         enabled: false,
-        scanPaths: ["litedram/core", "litedram/phy"],
-        integrationSeam: "corev_apu (AXI memory-side) / corev_apu/fpga/src",
+        scanPaths: ["litedram/core", "litedram/phy", "litedram/frontend", "litedram/gen.py"],
+        integrationSeam: "corev_apu/src/g6lc_ai_litedram_wrap.sv (native user_port_native_0_* → AXI)",
         phyNote:
-          "Controller is soft RTL; the DDR PHY is an FPGA vendor hard block (Xilinx MIG / Altera EMIF) or an ASIC foundry hard macro. Board supplies DIMM/clocking.",
+          "Controller is Migen; testharness uses gen.py --sim (LiteDRAMCoreSimPHY). FPGA PHY is USDDRPHY/K7DDRPHY or an ASIC hard macro. vendor scan of .sv/.v is empty until generate.",
         architectureDoc: "architecture/uncore/ddr4-controller.md",
       },
       // --- network: Ethernet MAC / NIC -------------------------------------
@@ -1667,6 +1756,99 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         verilator: {
           target: "g6lc64_ooo",
           warningBudget: 650,
+        },
+      },
+      // --- ai: island / matrix / DRAM channels / tensor / qemu -------------
+      {
+        id: "diag-ai-cfg-paths",
+        description:
+          "Xg6lcai config + shared DramChannels RTL (cores + L2 + island slave).",
+        compartment: "ai",
+        kind: "path-check",
+        paths: [
+          "core/include/g6lc64_ai_config_pkg.sv",
+          "corev_apu/include/g6lc_ai_island_cfg_pkg.sv",
+          "corev_apu/src/g6lc_ai_dram_backend.sv",
+          "corev_apu/src/g6lc_ai_dram_channels.sv",
+          "corev_apu/src/g6lc_ai_litedram_wrap.sv",
+          "corev_apu/ai_island/g6lc_ai_dram_timing.sv",
+          "core/cvxif_g6lc_ai/g6lc_ai_coprocessor.sv",
+        ],
+      },
+      {
+        id: "diag-ai-island-paths",
+        description: "Island TBs + directed scripts for wrap / channels / S4.",
+        compartment: "ai",
+        kind: "path-check",
+        paths: [
+          "verif/tb/ai_island/tb_g6lc_ai_atomics_aw.sv",
+          "verif/tb/ai_island/tb_g6lc_axi_lrsc.sv",
+          "verif/tb/ai_island/run-dram-atomics.sh",
+          "corev_apu/src/g6lc_axi_lrsc.sv",
+          "corev_apu/src/g6lc_axi_atomics_wrap.sv",
+          "verif/tb/ai_island/tb_g6lc_ai_litedram_wrap.sv",
+          "verif/tb/ai_island/run-litedram-wrap.sh",
+          "verif/tb/ai_island/tb_g6lc_ai_dram_channels.sv",
+          "verif/tb/ai_island/run-dram-channels.sh",
+          "verif/tb/ai_island/nch-from-env.inc.sh",
+          "verif/regress/ai-dram-stripe.sh",
+          "verif/tb/ai_island/run-dram-timing.sh",
+          "verif/regress/ai-matrix-directed.sh",
+          "verif/regress/ai-config-smoke.sh",
+          "verif/tests/custom/ai/ai_s4_mshr_xbar_smoke.S",
+          "architecture/uncore/dram-channel-scaling.md",
+          "architecture/ai-matrix/hard-tests.md",
+        ],
+      },
+      {
+        id: "diag-ai-remote-proxy",
+        description:
+          "Remote testharness AI flavours (ai/ai-dt/ai-d1/ai-d*) + S4 driver.",
+        compartment: "ai",
+        kind: "path-check",
+        paths: [
+          "verif/regress/remote/testharness_proxy.py",
+          "verif/regress/remote/s4-mshr-xbar.sh",
+          "verif/regress/ai-matrix-build-harness.sh",
+          "architecture/multi-threading/testharness-proxy.md",
+        ],
+      },
+      {
+        id: "diag-ai-tensor-paths",
+        description: "ai-tensor host package + spawn script (tensor CLI).",
+        compartment: "ai",
+        kind: "path-check",
+        optional: true,
+        paths: [
+          "ai-tensor/AGENTS.md",
+          "monorepo-soak/run-ai-tensor.sh",
+          "architecture/ai-matrix/frameworks-virt-pcie.md",
+        ],
+      },
+      {
+        id: "diag-ai-qemu-bridge",
+        description:
+          "g6lc_qemu AI bridge (higher-level Linux emulation, not Variane evidence).",
+        compartment: "ai",
+        kind: "path-check",
+        optional: true,
+        paths: [
+          "g6lc_qemu/tools/g6q.py",
+          "g6lc_qemu/tools/ai_tensor_bridge.py",
+          "g6lc_qemu/architecture/AI_BRIDGE.md",
+          "verif/regress/ai-qemu-linux.sh",
+        ],
+      },
+      {
+        id: "diag-ai-lint",
+        description: "Verilator lint of g6lc64_ai config package (optional, like ooo).",
+        compartment: "ai",
+        kind: "verilator-lint",
+        tools: ["verilator"],
+        optional: true,
+        verilator: {
+          target: "g6lc64_ai",
+          warningBudget: 700,
         },
       },
       // --- apu / ara residual ----------------------------------------------

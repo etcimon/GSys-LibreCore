@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Etienne Cimon
+#
+# Input for LiteDRAM gen.py --sim (SDRAMPHYModel, no FPGA PHY).
+# Checkout: vendor/litex/litedram @ 3cf585a60a37113f18a9f6c6f3ee774be521623e
+#
+#   python3 vendor/litex/litedram/litedram/gen.py --sim --name litedram_core \
+#     --output-dir corev_apu/ai_island/generated \
+#     architecture/uncore/litedram-testharness.yml
+#
+# Needs Migen + LiteX (not in the default host image). Do not invent the
+# generated top name: --name litedram_core is the documented default.
+# Native user port (256-bit / 26-bit cmd_addr). Testharness IdWidthSlave is
+# 6; g6lc_ai_litedram_wrap is the AXI slave (id 6) and packs 4×64-bit beats
+# into one native word so cluster and island DMA keep distinct IDs.
+# Wrap smoke PASS id6 1445 cy (eight AR + eight AW live / 9th backpressure). Directed 256-beat --sim stream 7858 milli-GB/s
+# (98% fabric) — 80% gate closed. Native rdata is a delayed pulse; wrap
+# always accepts. Not 400 GB/s.
+# block_until_ready: false — no CPU to write the init_done CSR (cpu: None).
+# One generated core = one DRAM channel (19 GB/s DDR4-2400×64 nameplate).
+# Bandwidth scales by instantiating N cores (DramChannels = 1,2,4,8) with
+# 64-byte stripe at DramChanShift (default 6). See g6lc_ai_dram_channels.sv.
+# The stripe sits on the SoC DRAM slave (testharness master[DRAM]) so core
+# I$/D$/PTW, L2/L3, NrCores, and island DMA share one map — not island-private.
+# Nameplate = N × 19 GB/s (AiIslandDdr4Bringup / AiIslandDdr4x2Bringup)
+# is DDR4-2400×64 at a ~300 MHz 1:4 sys clock — **not** this YAML's 100 MHz
+# --sim. 4 DFI phases × 64-bit = 256-bit native. Beats/cycle is
+# clock-invariant. Not 400 GB/s (LPDDR5 DramClass=2). Stability:
+# architecture/uncore/dram-channel-scaling.md.
+
+{
+    "cpu":             "None",
+    "memtype":         "DDR4",
+    "sdram_module":    "MT40A512M16",
+    "sdram_module_nb": 4,
+    "sdram_rank_nb":   1,
+    "sdram_phy":       "USDDRPHY",
+    "sys_clk_freq":    100e6,
+    "input_clk_freq":  100e6,
+    "cmd_buffer_depth": 16,
+    "user_ports": {
+        "native_0": {
+            "type": "native",
+            "block_until_ready": False
+        }
+    }
+}

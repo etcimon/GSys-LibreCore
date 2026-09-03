@@ -155,3 +155,9 @@ ${CVA6_REPO_DIR}/corev_apu/src/ariane.sv
 ${CVA6_REPO_DIR}/corev_apu/src/g6lc_ara_attach.sv
 ${CVA6_REPO_DIR}/corev_apu/src/g6lc_axi_2to1_mux.sv
 ${CVA6_REPO_DIR}/corev_apu/src/g6lc_cluster.sv
+${CVA6_REPO_DIR}/corev_apu/src/g6lc_ai_dram_backend.sv
+${CVA6_REPO_DIR}/corev_apu/src/g6lc_ai_litedram_wrap.sv
+${CVA6_REPO_DIR}/corev_apu/src/g6lc_ai_dram_channels.sv
+${CVA6_REPO_DIR}/corev_apu/src/g6lc_axi_lrsc.sv
+${CVA6_REPO_DIR}/corev_apu/src/g6lc_axi_atomics_wrap.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_dram_timing.sv

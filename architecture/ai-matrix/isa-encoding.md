@@ -105,7 +105,8 @@ differently configured parts.
 | `19:16` | `version` | contract version, read-only on grant (§9) |
 | `21:20` | `ew` | element width: `00` 8-bit, `01` 4-bit, `10`/`11` reserved |
 | `22` | `sp24` | request structured 2:4 sparsity on operand A |
-| `XLEN-1:23` | *reserved* | write zero, read zero |
+| `25:23` | `numfmt` | numeric format, `config_pkg::AI_FMT_*` (§3.1a) |
+| `XLEN-1:26` | *reserved* | write zero, read zero |
 
 **`ew` and `sp24` exist so that sub-byte and sparse modes are requestable at all.** `dtype[13:12]` is
 fully allocated to the four signedness combinations, so without a separate width field INT4 — the main
@@ -114,6 +115,55 @@ carved from previously reserved space and both are **`0` on a part that does not
 which is exactly the value version-1 software writes; the `ai.setcfg` grant rule then downgrades a
 4-bit or sparse request to `00`/`0` rather than trapping. Supported combinations are enumerated in the
 island capability window, not guessed (§8).
+
+### 3.1a `numfmt` — one enumeration for every numeric format
+
+`ew` and `dtype` describe **integers**: a width and a signedness. Neither can express BF16, and
+widening `ew` cannot either — it has two spare codes and there are five float formats worth having
+(FP8 E4M3, FP8 E5M2, FP16, BF16, FP32). `numfmt` is therefore a 3-bit field carved from reserved
+space in both `aicfg` (`[25:23]`) and the descriptor (`flags[22:20]`, §7).
+
+| `numfmt` | `config_pkg` name | Meaning |
+|---|---|---|
+| `000` | `AI_FMT_INT` | integer: width from `ew`, signedness from `dtype` |
+| `001` | `AI_FMT_INT4` | 4-bit integer (equivalently `ew=01`) |
+| `010` | `AI_FMT_SP24` | structured 2:4 sparse on A (equivalently `sp24`) |
+| `011` | `AI_FMT_FP8_E4M3` | 8-bit float, 4-bit exponent |
+| `100` | `AI_FMT_FP8_E5M2` | 8-bit float, 5-bit exponent |
+| `101` | `AI_FMT_FP16` | IEEE 754 binary16 |
+| `110` | `AI_FMT_BF16` | bfloat16 |
+| `111` | `AI_FMT_FP32` | IEEE 754 binary32 |
+
+**`AI_FMT_INT` is `000` on purpose, and that is what makes this an extension rather than a version
+bump (§9).** Version-1 software writes zeros into reserved space, so an existing `aicfg` write and an
+existing descriptor keep their exact prior meaning: integer, width from `ew`, sign from `dtype`. No
+shipped image changes behaviour, so `ContractVersion` stays `1`.
+
+**The grant bit index equals the request value.** `ai_cfg_t.FormatMask` (core plane) and
+`AiIslandDtypeMask` / `CAP_OFF_DTYPE_MASK` (island plane) are bitmaps over these same indices, so
+checking a request is `mask[numfmt]` — not a translation table that could disagree with itself in one
+of the four places this contract is consumed (core, island, emulator, `ai-tensor`).
+
+**The two planes diverge in how they refuse, and this is deliberate:**
+
+| Plane | Ungranted format | Why |
+|---|---|---|
+| Core T0/T1 (`ai.setcfg`) | **downgrade** to the nearest granted value, report it in the grant | §3.1's existing rule; keeps a binary portable across parts |
+| Island T2 (descriptor) | **refuse** with `ST_BAD_FMT` | a descriptor outlives the thread that wrote it, so nobody is left to read a downgraded grant |
+
+The island cannot borrow the core's downgrade rule. `ai.setcfg` returns the granted value *to the
+caller*, who can adapt; a descriptor's submitter may be a host process across an unpinned transport
+that never sees a grant word. Silently computing INT8 over BF16 bits would return numerically
+plausible results, which for a tensor engine is strictly worse than an error — nothing downstream can
+detect it. Hence a distinct status rather than `ST_BAD_OP`: software must be able to tell "this engine
+cannot do BF16" from "this opcode does not exist" to choose a fallback deliberately.
+
+**Granting is gated on the datapath, not on intent.** The live island PE is `s8×s8→s32`, so
+`AiIslandDtypeMask` is `16'h0001` and `g6lc64_ai`'s `FormatMask` is `AiFmtMaskInt8`. Widening either
+without the matching datapath advertises a format the engine then refuses — worse than never
+advertising it, because software will have planned around it. `check_cfg` additionally requires
+`RVF` for any float grant and `RVD` for FP32, since the host has no way to build those operands
+otherwise.
 
 ### 3.2 Matrix multiply-accumulate — `funct3 = 001`
 
@@ -333,7 +383,8 @@ in-core `ai.enq` path and the host-side PCIe doorbell path.
 | `13:12` | `ew`, encoded as §3.1 |
 | `14` | `sp24` |
 | `19:16` | priority class (§7.1); `0` is the default class |
-| `31:20`, `15` | reserved, write zero |
+| `22:20` | `numfmt`, encoded as §3.1a. Ungranted ⇒ `ST_BAD_FMT`, never demoted |
+| `31:23`, `15` | reserved, write zero |
 
 **Shape bound (F12).** Each of `m`, `n`, `k` must be in `[1, MaxDim]`, where `MaxDim` is the
 corresponding capability-window tile (`CAP_OFF_BLOCK_MNK` / `AccTileM/N/K`). The live
@@ -341,6 +392,12 @@ sequencer (`g6lc_ai_gemm_seq` `ST_CHK`) **rejects** a descriptor that exceeds th
 (`ST_ERR`). **Software owns blocking** beyond that limit: the §12 `M=N=K=4096` gate is
 16³ tiles on the live MaxDim=256 part, not one doorbell. Hardware does not stream a
 larger reduction; if that is desired later, `ST_CHK` is the wrong check.
+
+C is packed with `ldc = n` (the descriptor has no `ldc` field). Host tiling of a
+larger logical C therefore writes **packed tiles** and concatenates them; A/B may
+be strided views via `lda`/`ldb`. Directed: `ai_gemm_tile_2x2_smoke` (32³ as 2×2
+tiles of 16×16×32). K-tiling that needs `C += A·B` is not hardware — `accmode` is
+published (F10) but the engine still overwrites C.
 
 **The descriptor is self-describing and the engine must not read `aicfg`.** Arithmetic type used to be
 implicit in `aicfg`, which is wrong for an engine whose work outlives the instruction that enqueued it:
@@ -359,6 +416,19 @@ escalation from any process holding a doorbell page.
 
 Ring: `aiqbase` + power-of-two entries (`aiqctl[7:4]`), producer index in the doorbell page, consumer
 index owned by hardware. Full is signalled by `ai.enq` returning all-ones, never by blocking.
+
+**`ai.poll` / `ai.enq` return contract (F15),** named in `g6lc_ai_instr_pkg`:
+
+| Symbol | Value | Meaning |
+|---|---|---|
+| `POLL_PENDING` | `0` | not finished (also returned when the queue is disabled) |
+| `POLL_OK` | `1` | finished, completion status was 0 |
+| `POLL_ERR` | `2` | finished, completion status was non-zero |
+| `ENQ_FULL` | all-ones of `XLEN` | `ai.enq` did not take the work (`aiqctl[0]=0` today) |
+
+`ai.poll` returns this **status**, not a ticket. The emulator's `0xffff_ffff` pending value is
+not the hardware contract. Island backpressure is a sticky sideband submit, not a rejected
+ticket; do not treat a returned ticket as proof the engine was idle.
 
 ### 7.1 Scheduling, QoS and preemption (normative)
 

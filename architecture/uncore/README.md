@@ -30,6 +30,7 @@ controller vs board/analog PHY, and *what* gates it must pass before it is wired
 | Outline | Domain | Catalog ids | On-die vs board/PHY |
 |---|---|---|---|
 | `ddr4-controller.md` | memory | `litedram` | Controller on-die; DDR PHY = FPGA MIG / ASIC hard macro; DIMM on board |
+| `dram-channel-scaling.md` | memory (I3) | `litedram` × N | **Shared** N-channel stripe on the DRAM slave: core pipelines, L2/L3, `NrCores`, and island DMA. Stability plan for `DramChannels`. |
 | `ethernet-controller.md` | network | `verilog-ethernet`, `liteeth`, `corundum`, `ariane-ethernet` | MAC on-die; PHY = external chip |
 | `pcie-root-complex.md` | interconnect | `verilog-pcie`, `litepcie` | Glue on-die; SerDes/link = hard IP; NVMe/GPU are endpoints |
 | `pcie-endpoint.md` | interconnect | `verilog-pcie`, `litepcie` | **Inverse role:** LibreCore *is* the endpoint (CPU+AI card); BAR/config target on-die; SerDes = hard IP |

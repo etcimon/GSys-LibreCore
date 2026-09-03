@@ -23,6 +23,20 @@ package g6lc_ai_desc_pkg;
   localparam int unsigned FLAG_IRQ_SHIFT     = 2;
   localparam int unsigned FLAG_PRIO_SHIFT    = 16;
   localparam int unsigned FLAG_PRIO_WIDTH    = 4;
+  // Numeric format selector, carved from flags[22:20] (previously reserved).
+  //
+  // Values are `config_pkg::AI_FMT_*`, and AI_FMT_INT == 0 -- so a descriptor
+  // built before this field existed, with the whole word zero, still means
+  // "integer, width from ew, signedness from dtype". That is what makes this an
+  // extension rather than a version bump (isa-encoding.md §9): no shipped image
+  // changes meaning.
+  //
+  // The engine must check the request against the granted mask
+  // (CAP_OFF_DTYPE_MASK) and REFUSE an ungranted format. Demoting silently to
+  // INT8 would return numerically plausible garbage, which for a tensor engine
+  // is worse than an error status.
+  localparam int unsigned FLAG_NUMFMT_SHIFT  = 20;
+  localparam int unsigned FLAG_NUMFMT_WIDTH  = 3;
 
   // Descriptor op field (offset 0x02)
   localparam logic [15:0] OP_GEMM    = 16'd1;
@@ -39,6 +53,11 @@ package g6lc_ai_desc_pkg;
   localparam logic [15:0] ST_BAD_QID = 16'd5;
   localparam logic [15:0] ST_DISABLED = 16'd6;
   localparam logic [15:0] ST_WATCHDOG = 16'd7;
+  // Requested numeric format (flags.numfmt) is not in the granted mask.
+  // Distinct from ST_BAD_OP so software can tell "this engine cannot do BF16"
+  // from "this opcode does not exist" and fall back deliberately rather than
+  // guessing.
+  localparam logic [15:0] ST_BAD_FMT = 16'd8;
 
   // Packed 64-byte descriptor (little-endian field view).
   // +0xNN comments are **byte offsets** into the latch window (F4).
@@ -110,6 +129,25 @@ package g6lc_ai_desc_pkg;
 
   function automatic logic desc_sp24(input desc_t d);
     return d.flags[FLAG_SP24_SHIFT];
+  endfunction
+
+  function automatic logic [2:0] desc_numfmt(input desc_t d);
+    return d.flags[FLAG_NUMFMT_SHIFT +: FLAG_NUMFMT_WIDTH];
+  endfunction
+
+  // Is this descriptor's requested numeric format granted by `mask`
+  // (the same bitmap the island publishes at CAP_OFF_DTYPE_MASK)?
+  //
+  // The grant bit index equals the request value by construction
+  // (config_pkg::AI_FMT_*), so this is a shift-and-test, not a lookup table
+  // that could drift out of step with the core's copy.
+  //
+  // A descriptor whose format is not granted must complete with
+  // ST_BAD_FMT. It must NOT be demoted to INT8: the engine would return
+  // numerically plausible results for the wrong arithmetic, and nothing
+  // downstream could detect it.
+  function automatic logic desc_numfmt_granted(input desc_t d, input logic [15:0] mask);
+    return mask[desc_numfmt(d)];
   endfunction
 
   function automatic logic [3:0] desc_prio(input desc_t d);

@@ -186,7 +186,7 @@ export function validateConfig(config: ResolvedBuildConfig): void {
   // Diagnostics: unique ids; verilator kinds need a verilator block + target.
   const { diagnostics } = config;
   const diagIds = new Set<string>();
-  const COMPARTMENTS = new Set(["host", "core", "smt2", "ooo", "apu", "residual"]);
+  const COMPARTMENTS = new Set(["host", "core", "smt2", "ooo", "ai", "apu", "residual"]);
   for (const d of diagnostics.tests) {
     if (diagIds.has(d.id)) issues.push(`diagnostics.tests has duplicate id '${d.id}'.`);
     diagIds.add(d.id);

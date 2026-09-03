@@ -18,6 +18,10 @@
 //                            +c limit_hi, +10 perm (write commits region)
 //   DESC_BASE       0x0140..0x017F  descriptor latch (16x32-bit)
 //   PMU_OFF_R_BEATS / W_BEATS / CYCLES / GBPS_X1000  (RO, sticky last GEMM)
+//   CAP_OFF_MAX_AR_OUT 0x40  GEMM multi-outstanding AR (I3)
+//   CAP_OFF_DRAM_TIMING 0x44  packed Cas/tRCD/tRP (0 = island-DMA bypass)
+//   CAP_OFF_DRAM_STATUS 0x48  [0]=init_done [1]=timing_en
+//   CAP_OFF_DRAM_CH_R/W 0x50/0x70  SoC occupancy (8×32), not GEMM PMU
 // Guest-absolute: AI_CAP_BASE=0x4000_0000, AI_DESC_BASE=0x4000_0140.
 
 module g6lc_ai_island_top
@@ -59,7 +63,13 @@ module g6lc_ai_island_top
     output logic        sb_has_completion_o,
     // AXI master for desc fetch (tie req idle / resp ready when EnableDmaFetch=0)
     output axi_req_t    axi_dma_req_o,
-    input  axi_resp_t   axi_dma_resp_i
+    input  axi_resp_t   axi_dma_resp_i,
+    // I3: DRAM backend init/calib. Tie 1 when the TB has no DRAM slave.
+    // No port defaults: Verilator 5.008 (remote testharness) rejects them.
+    input  logic        dram_init_done_i,
+    // S5 SoC occupancy. Tie 0 when the TB has no DRAM slave.
+    input  logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r_beats_i,
+    input  logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_w_beats_i
 );
 
   localparam int unsigned NumQueues = (IslandCfg.Queues == 0) ? 1 : IslandCfg.Queues;
@@ -71,6 +81,13 @@ module g6lc_ai_island_top
   localparam int unsigned CplCntW =
       (CplFifoDepth <= 1) ? 1 : $clog2(CplFifoDepth + 1);
 
+  // pragma translate_off
+  initial begin
+    assert (island_cfg_legal(IslandCfg))
+      else $error("g6lc_ai_island: illegal DramClass/DramGBps/Clusters (I3)");
+  end
+  // pragma translate_on
+
   // ------------------------------------------------------------------ cap
   logic [31:0] cap_rdata;
   logic        cap_rvalid;
@@ -80,13 +97,26 @@ module g6lc_ai_island_top
   // Forward declared: PMU hold lives with other regs below; default 0 until first GEMM
   logic [31:0] pmu_gbps_x1000_q;
 
-  g6lc_ai_cap_window #(.IslandCfg(IslandCfg)) i_cap (
+  // Single source for the granted-format bitmap: the capability window
+  // publishes it and the descriptor engine enforces it. Binding both from one
+  // localparam is what keeps discovery and enforcement from drifting -- a part
+  // that advertised BF16 and then returned ST_BAD_FMT would be worse than one
+  // that never advertised it.
+  localparam logic [15:0] DtypeMaskLp = AiIslandDtypeMask;
+
+  g6lc_ai_cap_window #(
+      .IslandCfg(IslandCfg),
+      .DtypeMask(DtypeMaskLp)
+  ) i_cap (
       .clk_i, .rst_ni,
       .req_i   (cap_sel),
       .we_i    (we_i),
       .addr_i  (addr_i),
       .wdata_i (wdata_i),
       .dram_gbps_meas_x1000_i(pmu_gbps_x1000_q),
+      .dram_init_done_i(dram_init_done_i),
+      .ch_r_beats_i(ch_r_beats_i),
+      .ch_w_beats_i(ch_w_beats_i),
       .rdata_o (cap_rdata),
       .rvalid_o(cap_rvalid)
   );
@@ -254,6 +284,8 @@ module g6lc_ai_island_top
   logic [31:0] pmu_r_hold_q, pmu_w_hold_q, pmu_cy_hold_q;
 
   if (EnableDmaFetch) begin : gen_dma_fetch
+    axi_req_t  dma_mux_req;
+    axi_resp_t dma_resp_int;
     g6lc_ai_desc_fetch #(
         .AddrWidth (AddrWidth),
         .DataWidth (AxiDataWidth),
@@ -270,7 +302,7 @@ module g6lc_ai_island_top
         .err_o   (fetch_err),
         .desc_o  (fetch_desc),
         .axi_req_o  (fetch_axi_req),
-        .axi_resp_i (axi_dma_resp_i)
+        .axi_resp_i (dma_resp_int)
     );
     g6lc_ai_mem_store #(
         .AddrWidth (AddrWidth),
@@ -288,7 +320,7 @@ module g6lc_ai_island_top
         .done_o  (wr_done),
         .err_o   (wr_err),
         .axi_req_o  (store_axi_req),
-        .axi_resp_i (axi_dma_resp_i)
+        .axi_resp_i (dma_resp_int)
     );
     // Geometry from IslandCfg (single source with capability window).
     // I1-lite assumes square AccTileM=N=K; PeLanes = MacsPerCycle.
@@ -309,6 +341,9 @@ module g6lc_ai_island_top
         .IdWidth   (AxiIdWidth),
         .MaxDim    (IslandCfg.AccTileM),
         .PeLanes   (IslandCfg.MacsPerCycle),
+        .MaxAROut  (IslandCfg.MaxAROut),
+        .NrChannels(IslandCfg.DramChannels),
+        .ChanShift (IslandCfg.DramChanShift),
         .axi_req_t (axi_req_t),
         .axi_resp_t(axi_resp_t)
     ) i_gemm (
@@ -331,7 +366,7 @@ module g6lc_ai_island_top
         .pmu_w_beats_o(gemm_pmu_w),
         .pmu_cycles_o (gemm_pmu_cy),
         .axi_req_o  (gemm_axi_req),
-        .axi_resp_i (axi_dma_resp_i)
+        .axi_resp_i (dma_resp_int)
     );
     // Priority: completion store > GEMM > desc fetch. When all idle, drive a
     // clean zero req (no b_ready) so the DMA master cannot siphon B beats from
@@ -339,9 +374,30 @@ module g6lc_ai_island_top
     logic store_active, gemm_active;
     assign store_active = (!wr_ready || wr_start);
     assign gemm_active  = (!gemm_ready || gemm_start);
-    assign axi_dma_req_o = store_active ? store_axi_req
-                         : gemm_active  ? gemm_axi_req
-                         : (!fetch_ready ? fetch_axi_req : '0);
+    assign dma_mux_req = store_active ? store_axi_req
+                       : gemm_active  ? gemm_axi_req
+                       : (!fetch_ready ? fetch_axi_req : '0);
+    // I3: DDR4 page-command delay on island DMA only (Cas==0 = live bypass).
+    if (IslandCfg.DramCas == 0) begin : gen_dram_t_bypass
+      assign axi_dma_req_o = dma_mux_req;
+      assign dma_resp_int  = axi_dma_resp_i;
+    end else begin : gen_dram_t_page
+      g6lc_ai_dram_timing #(
+          .CasCycles  (IslandCfg.DramCas),
+          .TrcdCycles (IslandCfg.DramTrcd),
+          .TrpCycles  (IslandCfg.DramTrp),
+          .AddrWidth  (AddrWidth),
+          .axi_req_t  (axi_req_t),
+          .axi_resp_t (axi_resp_t)
+      ) i_dram_timing (
+          .clk_i,
+          .rst_ni,
+          .slv_req_i  (dma_mux_req),
+          .slv_resp_o (dma_resp_int),
+          .mst_req_o  (axi_dma_req_o),
+          .mst_resp_i (axi_dma_resp_i)
+      );
+    end
     assign fetch_busy = !fetch_ready || sb_fetch_pending_q || !wr_ready || !gemm_ready;
   end else begin : gen_no_dma_fetch
     assign fetch_ready = 1'b1;
@@ -387,7 +443,8 @@ module g6lc_ai_island_top
       .NumQueues       (NumQueues),
       .AddrWidth       (AddrWidth),
       .WriteCompletion (EnableDmaFetch),
-      .ExecuteGemm     (EnableDmaFetch)
+      .ExecuteGemm     (EnableDmaFetch),
+      .DtypeMask       (DtypeMaskLp)
   ) i_engine (
       .clk_i, .rst_ni,
       .testmode_i      (testmode_i),

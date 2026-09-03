@@ -25,17 +25,34 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_tile_sram.sv` | dual-port Latency=0 `tc_sram` tile bank (A/B int8, C int32) | **landed** |
 | `g6lc_ai_pe_dot.sv` | multi-lane INT8 MAC slice (PeLanes products/cycle) | **landed** |
 | `g6lc_ai_gemm_seq.sv` | I1 GEMM: banked A/B + multi-bank C + dual-i32 store + PE | **landed** |
+| `g6lc_ai_dram_timing.sv` | I3 island-DMA DDR4 page-command delay (Cas=0 bypass) | **landed** |
+| `g6lc_ai_cpl_fifo.sv` | completion FIFO (DONE claim = pop head) | **landed** |
+| `g6lc_ai_island_top.sv` | reg map + CPL FIFO + IRQ + fetch/store/gemm AXI mux | **landed** |
+| `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 (next) |
+| AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |
 
 Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=256**,
 **AccTileM/N/K=256** (SKU AccTile* live; 1 MAC cycle per C). C multi-banked
 (`j % PeLanes`) → each `tc_sram` is `MaxDim*1` words (256xi32 @256/256).
 I3-lite: B oct-drain + multi-beat AR/AW + dual-bank C-read + trail C-store
-during MAC + **multi-outstanding AR (depth 2)** + PMU @0x180; CAP DRAM; NoC 64b.
-256³ directed: **83,705 cy** (unchanged vs trail on zero-latency TB; multi-out ready for DRAM).
-| `g6lc_ai_cpl_fifo.sv` | completion FIFO (DONE claim = pop head) | **landed** |
-| `g6lc_ai_island_top.sv` | reg map + CPL FIFO + IRQ + fetch/store/gemm AXI mux | **landed** |
-| `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 (next) |
-| AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |
+during MAC + **multi-outstanding AR (`MaxAROut=2`, CAP `0x40`)** + PMU @0x180;
+CAP DRAM; NoC 64b. **DramClass=0** (testharness SRAM via xbar slave[2] →
+`g6lc_ai_dram_backend`); nameplate **8 GB/s**. 256³ directed: **83,705 cy**
+(zero-latency TB). **DRAM I3** (`DramClass=1` LiteDRAM, package
+`AiIslandDdr4Bringup` nameplate 19 GB/s / `MaxAROut=8`) is not instantiated —
+the class-1 generate `$error`s rather than silently using SRAM. Island-DMA
+CAP `0x48` `DRAM_STATUS`: bit0 `init_done` (class 0 = 1), bit1 `timing_en`.
+SoC occupancy (cores + L2 + island) is CAP `0x50`/`0x70` (`CAP_OFF_DRAM_CH_{R,W}`);
+GEMM PMU at `0x18`/`0x2C`/`0x180` stays aggregate.
+DRAM **channel count** (`DramChannels` 1/2/4/8) is a **SoC DRAM-slave** knob
+(cores + L2 + `NrCores` + island DMA share `g6lc_ai_dram_backend`). Each class-1
+channel is one LiteDRAM `--sim` core, striped at `DramChanShift` (default 6).
+Class 0 N>1 uses the same demux with SRAM (`G6LC_AI_DRAM_SIM_CHANS_2`). GEMM
+INCR is capped to the stripe when N>1 so it cannot disagree with L2 fills.
+Nameplate is `N × 19` GB/s on class 1. Live N=1. `g6lc_ai_dram_timing` is a page-command delay (live Cas=0 bypass). Opt-in
+`+define+G6LC_AI_DRAM_TIMING` selects `AiIslandDdr4TimingSim` (class 0, Cas=14,
+MaxAROut=8) — still SRAM backing, still 8 GB/s nameplate, not LiteDRAM. Do not
+start I2 on this fixture. F12 tiling: `ai_gemm_tile_2x2_smoke`.
 
 ## SoC map (Variane)
 

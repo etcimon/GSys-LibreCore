@@ -360,6 +360,9 @@ bun run src/cli/index.ts diag run                 # defaultCompartments (host+co
 bun run src/cli/index.ts diag run core smt2
 bun run src/cli/index.ts diag run diag-smt2-lint
 bun run src/cli/index.ts diag run smt2 --all      # include optional
+bun run src/cli/index.ts diag run ai              # Xg6lcai (like ooo)
+bun run src/cli/index.ts test --ai --channels 4 --ai-dram 1
+bun run src/cli/index.ts test --ai-remote --from-timing <pkg>
 ```
 
 | Compartment | Typical contents |
@@ -368,6 +371,7 @@ bun run src/cli/index.ts diag run smt2 --all      # include optional
 | `core` | path-check flist; verilator lint imafdc + cv32a65x |
 | `smt2` | dual-hart paths, optional lint (`g6lc64_smt2`), payload, caps |
 | `ooo` | formal `.sby` paths; optional ooo package lint |
+| `ai` | Xg6lcai config/island/DRAM/tensor/QEMU paths; optional `g6lc64_ai` lint. CLI: `diag run ai`, `test --ai`, `test --ai-remote`, `test --ai-qemu`, `--channels`/`--ai-dram`/`--from-timing` |
 | `apu` | Ara flist; optional `g6lc_ara_lint_top` + `Flist.ara` |
 | `residual` | spike / verilator residual caps |
 

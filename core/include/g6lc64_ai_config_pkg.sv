@@ -136,6 +136,14 @@ package cva6_config_pkg;
       UmodeEn: bit'(1),
       Int4En: bit'(0),
       Sparse24En: bit'(0),
+      //  - FormatMask: dense INT8 only, matching Int4En/Sparse24En above and the
+      //    island's AiIslandDtypeMask. check_cfg asserts the three agree, so
+      //    turning on INT4 here is a three-line change and cannot be half-done.
+      //    Raising this to AiFmtMaskInfer is the FP8/FP16/BF16 SKU and needs the
+      //    island datapath to consume flags.numfmt first -- the mask is a GRANT,
+      //    and granting a format the engine cannot execute makes it return
+      //    plausible wrong numbers instead of an error.
+      FormatMask: config_pkg::AiFmtMaskInt8,
       TileM: unsigned'(8),
       TileN: unsigned'(8),
       TileK: unsigned'(8),

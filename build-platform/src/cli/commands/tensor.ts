@@ -29,6 +29,12 @@ import {
   runAiTensorVirtImpl,
   type TensorRunOptions,
 } from "../../tooling/tensor.ts";
+import {
+  applyAiEnv,
+  formatAiResolvedLine,
+  parseAiFlags,
+  resolveAiTesting,
+} from "../../tooling/aiTesting.ts";
 
 function flagStr(
   flags: Record<string, string | boolean>,
@@ -78,6 +84,15 @@ function collectRunOptions(args: CommandArgs): TensorRunOptions {
   };
 }
 
+function applyAiTensorDefaults(opts: TensorRunOptions, flags: Record<string, string | boolean>): TensorRunOptions {
+  if (!flagBool(flags, "ai")) return opts;
+  return {
+    ...opts,
+    core: opts.core ?? "g6lc64_ai",
+    target: opts.target ?? "g6lc64_ai",
+  };
+}
+
 export const tensorCommand: Command = {
   name: "tensor",
   summary:
@@ -86,7 +101,7 @@ export const tensorCommand: Command = {
     "bun run src/cli/index.ts tensor [status|doctor|probe|test|golden|cosim|queue-soak|rtl|rtl-hard|virt-card|frameworks|pytorch|virt-impl|regress|check] " +
     "[--board ID] [--core|--target CFG] [--impl soft|hard|full] [--rtl-hard] " +
     "[--suite|--rtl-suite narrow|smoke|ci|peak|full] [--tests LIST] [--ver-library DIR] " +
-    "[--from-timing DIR] [--use-emit] [--backend sim|mmio|virt-card] [--dry-run] [--json]",
+    "[--from-timing DIR] [--use-emit] [--ai] [--backend sim|mmio|virt-card] [--dry-run] [--json]",
   details:
     "Spawns ai-tensor package tooling without Cargo path deps.\n" +
     "Mirrors timings → sv-timing and diag/test --from-timing preflight.\n" +
@@ -124,6 +139,8 @@ export const tensorCommand: Command = {
     "\n" +
     "  --from-timing <dir>   FO4 package preflight + dashboard (like test)\n" +
     "  --use-emit            expert corrected flist env\n" +
+    "  --ai                  default --core/--target g6lc64_ai (same as test --ai)\n" +
+    "  --channels / --ai-dram  stamp AI_ISLAND_DRAM_* for HARD library selection\n" +
     "\n" +
     "Docs: architecture/ai-matrix/frameworks-virt-pcie.md\n" +
     "Note: soft ≠ SV RTL; hard = real island TB; --from-timing is FO4 not STA.",
@@ -147,8 +164,24 @@ export const tensorCommand: Command = {
     if (dirOverride) {
       process.env.AI_TENSOR_DIR = dirOverride;
     }
-    const runOpts = collectRunOptions(args);
+    if (flagBool(args.flags, "ai")) {
+      const ai = resolveAiTesting(parseAiFlags(args.flags as Record<string, string | boolean>));
+      if (ai.errors.length) {
+        for (const e of ai.errors) logger.error(e);
+        return 2;
+      }
+      applyAiEnv(ai);
+      logger.info(formatAiResolvedLine(ai));
+    }
+
+    const runOpts = applyAiTensorDefaults(
+      collectRunOptions(args),
+      args.flags as Record<string, string | boolean>,
+    );
     runOpts.dryRun = dryRun;
+    if (!runOpts.verLibrary && process.env.AI_MATRIX_VER_LIBRARY) {
+      runOpts.verLibrary = process.env.AI_MATRIX_VER_LIBRARY;
+    }
 
     if (runOpts.useEmit && !runOpts.fromTiming) {
       logger.error("--use-emit requires --from-timing <dir>");

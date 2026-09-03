@@ -20,7 +20,7 @@ validate, or refuse, without guessing.
 |---|---|---|---|
 | **F1** placement | Ingests `CAP_BASE`/`AI_CAP_BASE` | **Published** `AI_CAP_BASE=0x4000_0000`, `DESC_BASE=0x140` | B1 guest-visible island |
 | **F2** desc version | Prefers `DESC_VERSION` | **Published** `DESC_VERSION` | Honest bad-version reporting |
-| **F3** packed cap words | Parses cap-window expressions | `CAP_OFF_*` named; packings still comb | One guest binary across SKUs |
+| **F3** packed cap words | Parses cap-window expressions | **Published** `CAP_BLOCK_*_SHIFT`, `AiIslandDtypeMask` | One guest binary across SKUs |
 | **F4** word order | Cross-check `bits_to_desc` / comments | Byte offsets in `desc_t` | Host image == device |
 | **F5** flags dtype/irq | `flags_layout` ingested | **Published** `FLAG_*_SHIFT` | No hard-coded `DTYPE_SHIFT` |
 | **F6** cluster | `QueueClusterMap` | **Published** `'{0,0}` | Per-cluster events; I2 dispatch |
@@ -28,11 +28,11 @@ validate, or refuse, without guessing.
 | **F8** clusters enabled | Split word + bitmap | **Published** present/enabled + `CLUSTER_EN` | Present ≠ enabled |
 | **F9** PMU offsets | Reader + modelled PMU ready | **Published** `PMU_OFF_*` `0x180–0x18C` | D2 vs RTL auto-diff |
 | **F10** `ew`/`sp24` | Accessors when published | **Published** `desc_{dtype,accmode,ew,sp24}` | Engine still s8-dense |
-| **F11** measured DRAM | Roofline uses nameplate or measured | **I3-lite:** `DramGBps=8` NoC peak; PMU fills measured | Full 400 GB/s DRAM I3 still open |
-| **F12** MaxDim | `shape_fits_blocking` | **Published** `isa-encoding.md` §7; SW tiles | 256³ fits; 4096³ is 16³ tiles |
+| **F11** measured DRAM | Roofline uses nameplate or measured | **I3-lite** live N=1. Native wrap **1445 cy** (AR/AW=8). `--sim` 256-beat **7858 milli-GB/s (98%)** — 80% gate **closed**. Variane `ai-dt` PASS **2899 cy** two-hart / **2620 cy** parked; CLASS1 first-pass {1,2,4,8} **5363/5758/5762/5821 cy**; parked S4 `ai-d{1,2,4,8}` **4246/4520/4553/4582 cy**; all-N occupancy **1328/889 cy** on `ai-d8`/`ai-sc8`; exclusive **PASS `ai-dt` 552** / **`ai-d1` 781** / **`ai-d2` 945** / **`ai-d4` 941** / **`ai-d8` 941 cy** / **`ai-sc2` 620** / **`ai-sc4` 620 cy**; dual-core snoop **16667/17137/17137/17163/17187/16686/16686 cy** (`ai-dt`/`ai-d1`/`ai-d2`/`ai-d4`/`ai-d8`/`ai-sc2`/`ai-sc4`) | Not 19 GB/s nameplate; 400 is class 2 |
+| **F12** MaxDim | `shape_fits_blocking` | **Published** `isa-encoding.md` §7; SW tiles; directed `ai_gemm_tile_2x2_smoke` | 256³ fits; 4096³ is 16³ tiles; C packed `ldc=n` |
 | **F13** writeback | Roofline uses `max(compulsory,tiled)+4mn` | **Published** §4 writeback term | Intensity 42 vs 128 at T=256 |
 | **F14** 16-bit meas | Saturate like RTL `0xFFFF` | **Published** 32-bit `DRAM_MEAS_X1000` at `0x2C` | 400 GB/s readable |
-| **F15** poll pending | Emulator `POLL_PENDING` / ring-full `0` | Unpublished | Not a hardware contract |
+| **F15** poll pending | Emulator `0xffff_ffff` / full `0` | **Published:** `POLL_PENDING=0` / `POLL_OK=1` / `POLL_ERR=2` / `ENQ_FULL=all-ones` | Emulator pending is not HW |
 
 ---
 
@@ -49,8 +49,8 @@ in the number.** F10 would allow a *second* effective-TOPS figure, not a rewrite
 
 | Order | Work | Why it is next |
 |---|---|---|
-| 1 | **I3 bandwidth measure** (host `--measured-dram-gbps` is a *hypothesis* only) | §11: do not grow MAC arrays ahead of memory. F11 leaves `DramGBps=0`. Live 256³ is 78% MAC util; widening without I3 predicts ~10% util. |
-| 2 | **F12 software tiling** against ingested `acc_tile_*` | §12 `4096³` is not one descriptor on MaxDim=256. |
+| 1 | **I3 bandwidth measure** (host `--measured-dram-gbps` is a *hypothesis* only) | §11: do not grow MAC arrays ahead of memory. Live nameplate is 8 GB/s NoC; DDR4 bringup nameplate 19 is unpublished until LiteDRAM. Live 256³ is 78% MAC util; widening without I3 predicts ~10% util. |
+| 2 | **F12 software tiling** against ingested `acc_tile_*` | Directed 32³→2×2 of 16. §12 `4096³` is not one descriptor on MaxDim=256. |
 | 3 | **F13 writeback in any BW claim** | Resident GEMM writeback is `4·m·n`; at `m=n=k=T` that is 2× the inputs. |
 | 4 | **F9 PMU offsets as localparams** | Modelled D2 cannot auto-diff RTL `0x180–0x18C`. |
 | 5 | **F10 accessors** for `ew`/`sp24` | Else INT4 2:4 is inexpressible. |
@@ -62,6 +62,10 @@ in the number.** F10 would allow a *second* effective-TOPS figure, not a rewrite
 Live geometry: **256 MAC/cycle × 1 GHz = 0.512 TOPS**. Throughput SKU plan: 8 clusters ×
 4096 MAC/cycle @ 1.5 GHz ≈ **98.3 TOPS**. The 192× gap is MAC width × clock, not an emulator
 measurement.
+
+Host CLI (not a closed F-row): `cva6-build g6q --ai` / `test --ai-qemu` ingest `g6lc64_ai` and
+the AI_BRIDGE stand-in. `--ai-clusters N` with N>1 only exports F8 env; I2 is not live.
+`--from-timing` is FO4 structure, not STA and not F11 measured DRAM.
 
 ### 2.2 Off the island critical path (separate change sets)
 
