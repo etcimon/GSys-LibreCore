@@ -117,10 +117,11 @@ module g6lc_ai_island_top
     // the format through CAP_OFF_DTYPE_MASK, plans around it, and then every
     // descriptor comes back ST_BAD_FMT. Make raising the mask without the
     // datapath a build failure rather than a runtime surprise.
+    // One string literal, NOT a brace concatenation: `{"a","b"}` is a bit
+    // vector, so Verilator prints it as a giant decimal instead of using it as
+    // the format, and the diagnostic becomes unreadable. Learned the hard way.
     assert ((DtypeMaskLp & ~AiIslandPeImplMask) == 16'h0)
-      else $error({"g6lc_ai_island_top: AiIslandDtypeMask (%h) grants a format ",
-                   "the PE does not implement (AiIslandPeImplMask %h). Widen ",
-                   "the datapath first, then the grant."},
+      else $error("g6lc_ai_island_top: AiIslandDtypeMask %h grants a format the PE does not implement (AiIslandPeImplMask %h); widen the datapath before the grant",
                   DtypeMaskLp, AiIslandPeImplMask);
     // Dense INT8 is the format the golden, the requant rule and every directed
     // test are written in, so a live island must always grant it.

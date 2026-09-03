@@ -401,14 +401,35 @@ done_processing:
   top->rst_ni = 1;
 
   // Preload memory.
+  //
+  // The DRAM SRAM moved: `ariane_testharness` no longer instantiates
+  // `axi2mem`/`sram` inline, it instantiates `g6lc_ai_dram_backend`, and that
+  // change is NOT behind an ifdef -- so the old `ariane_testharness.i_sram`
+  // path stopped existing for every flavour. `ariane_tb.cpp` was updated for
+  // the AI flavours; this file, which flavour B and legacy use, was not, so B
+  // has failed to compile since the backend landed (`has no member named
+  // ...i_sram...`). That silently blocked the OpenSBI / soft-ladder line, whose
+  // evidence all comes from flavour B.
+  //
+  // Only the prefix changes. The suffix, `gen_mem_user` included, is the same
+  // `sram` module as before and `AXI_USER_EN` is still forwarded
+  // (ariane_testharness.sv `i_dram_backend`), so MEM_USER stays a genuinely
+  // separate user-bit memory rather than an alias of MEM -- aliasing it would
+  // overwrite data with user bits.
+  //
+  // `gen_sim_axi` is the class-0, single-channel generate arm. B and legacy pass
+  // no `G6LC_AI_DRAM_*` define, so they select `AiIslandLatencyDefault`
+  // (DramClass=0, DramChannels=1) and this is the right arm. The stripe
+  // (`gen_sim_stripe.gen_ch[i]`) and class-1 LiteDRAM paths are AI-only and live
+  // in ariane_tb.cpp.
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
   // Verilator v5: Use rootp pointer and .data() accessor.
-#define MEM top->rootp->ariane_testharness__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
-#define MEM_USER top->rootp->ariane_testharness__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram.m_storage
+#define MEM top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
+#define MEM_USER top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram.m_storage
 #else
   // Verilator v4
-#define MEM top->ariane_testharness__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram
-#define MEM_USER top->ariane_testharness__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram
+#define MEM top->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram
+#define MEM_USER top->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__0__KET____DOT__gen_mem_user__DOT__i_tc_sram_wrapper_user__DOT__i_tc_sram__DOT__sram
 #endif
   long long addr;
   long long len;
@@ -1298,8 +1319,13 @@ done_processing:
       unsigned pend1 = 0, ar1 = 0;
 #endif
       // DRAM path: axi2mem IDLE=0 READ=1 WRITE=2 SEND_B=3 WAIT_WVALID=4
-      auto a2m = top->rootp->ariane_testharness__DOT__i_axi2mem__DOT__state_q;
-      auto a2m_cnt = top->rootp->ariane_testharness__DOT__i_axi2mem__DOT__cnt_q;
+      // Same relocation as MEM above: axi2mem now lives inside
+      // g6lc_ai_dram_backend's class-0 single-channel arm, keeping its instance
+      // name. This block is behind CVA6_MC_PC_PROBE_COMPILE so it was not part
+      // of the compile failure, but it had rotted the same way; fixed here so
+      // enabling the probe does not rediscover it. Untested (needs that macro).
+      auto a2m = top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_axi2mem__DOT__state_q;
+      auto a2m_cnt = top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_axi2mem__DOT__cnt_q;
       auto demux_lock = top->rootp->ariane_testharness__DOT__i_axi_xbar__DOT__i_xbar__DOT__gen_slv_port_demux__BRA__0__KET____DOT__i_axi_demux__DOT__gen_demux__DOT__lock_ar_valid_q;
       auto demux_ar = top->rootp->ariane_testharness__DOT__i_axi_xbar__DOT__i_xbar__DOT__gen_slv_port_demux__BRA__0__KET____DOT__i_axi_demux__DOT__gen_demux__DOT__ar_valid;
       auto atom_ar = top->rootp->ariane_testharness__DOT__i_axi_riscv_atomics__DOT____Vcellout__i_atomics__mst_ar_valid_o;
@@ -1338,9 +1364,9 @@ done_processing:
       auto ic_hit = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_cva6_icache__DOT__cl_hit);
       auto ic_inv = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_cva6_icache__DOT__inv_q);
       auto ic_en = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_cva6_icache__DOT__cache_en_q);
-      auto a2m_addr = top->rootp->ariane_testharness__DOT__i_axi2mem__DOT__req_addr_q;
+      auto a2m_addr = top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_axi2mem__DOT__req_addr_q;
       // ax_req_q: packed {id, addr, len, size, burst}
-      const auto &a2m_ax = top->rootp->ariane_testharness__DOT__i_axi2mem__DOT__ax_req_q;
+      const auto &a2m_ax = top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_axi2mem__DOT__ax_req_q;
       std::cerr << std::hex << "[mc_pc] @" << main_time
                 << " c0.npc=0x" << (unsigned long long)npc0
                 << " c0.iq_pc=0x" << (unsigned long long)pc_iq0

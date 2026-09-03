@@ -191,6 +191,11 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/l3_cache/g6lc_l3_top.sv                                            \
         corev_apu/src/g6lc_cluster.sv                                                \
         corev_apu/include/g6lc_ai_island_cfg_pkg.sv                                  \
+        corev_apu/src/g6lc_ai_dram_backend.sv                                        \
+        corev_apu/src/g6lc_ai_litedram_wrap.sv                                       \
+        corev_apu/src/g6lc_ai_dram_channels.sv                                       \
+        corev_apu/src/g6lc_axi_lrsc.sv                                               \
+        corev_apu/src/g6lc_axi_atomics_wrap.sv                                       \
         corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv                              \
         corev_apu/ai_island/g6lc_ai_addr_check.sv                                    \
         corev_apu/ai_island/g6lc_ai_cap_window.sv                                    \
@@ -200,6 +205,7 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/ai_island/g6lc_ai_tile_sram.sv                                     \
         corev_apu/ai_island/g6lc_ai_pe_dot.sv                                        \
         corev_apu/ai_island/g6lc_ai_gemm_seq.sv                                      \
+        corev_apu/ai_island/g6lc_ai_dram_timing.sv                                   \
         corev_apu/ai_island/g6lc_ai_cpl_fifo.sv                                       \
         corev_apu/ai_island/g6lc_ai_island_top.sv                                    \
         corev_apu/ai_island/g6lc_ai_island_apb.sv                                    \
@@ -720,12 +726,23 @@ ifeq ($(origin TB_CPP), undefined)
 endif
 
 # verilator-specific
-verilate_command := $(verilator) --no-timing verilator_config.vlt                                                \
+#
+# verilator_assert: Verilator SKIPS every `assert` statement unless --assert is
+# passed. Without it, `config_pkg::check_cfg` -- which AGENTS.md 0.2 makes the
+# mandatory mechanism for config legality -- never executes, and neither does
+# any `//pragma translate_off ... initial assert` parameter guard in core/ or
+# corev_apu/. Those guards then look like enforcement while being documentation,
+# which is what heuristic H6 exists to forbid. Defaults ON so the guards are
+# real; override with `verilator_assert=` to bisect a firing assertion against
+# the previous (unchecked) behaviour. See AI-X5 in AGENTS-todo.md.
+verilator_assert      ?= --assert
+
+verilate_command := $(verilator) --no-timing verilator_config.vlt $(verilator_assert)                            \
                     -f $(flist)                                                                                  \
                     core/cva6_rvfi.sv                                                                            \
                     $(filter-out %.vhd, $(ariane_pkg))                                                           \
                     $(filter-out core/fpu_wrap.sv, $(filter-out %.vhd, $(filter-out %_config_pkg.sv, $(src))))   \
-                    +define+$(defines)$(if $(TRACE_FAST),+VM_TRACE)$(if $(TRACE_COMPACT),+VM_TRACE+VM_TRACE_FST) \
+                    +define+$(defines)$(if $(findstring G6LC_AI_DRAM_CLASS1,$(defines)),+G6LC_HAVE_LITEDRAM+G6LC_LITEDRAM_PRELOAD,)$(if $(findstring G6LC_AI_DRAM_CHANS_2,$(defines)),+G6LC_HAVE_LITEDRAM+G6LC_LITEDRAM_PRELOAD,)$(if $(findstring G6LC_AI_DRAM_CHANS_4,$(defines)),+G6LC_HAVE_LITEDRAM+G6LC_LITEDRAM_PRELOAD,)$(if $(findstring G6LC_AI_DRAM_CHANS_8,$(defines)),+G6LC_HAVE_LITEDRAM+G6LC_LITEDRAM_PRELOAD,)$(if $(TRACE_FAST),+VM_TRACE)$(if $(TRACE_COMPACT),+VM_TRACE+VM_TRACE_FST) \
                     corev_apu/tb/common/mock_uart.sv                                                             \
                     +incdir+corev_apu/axi_node                                                                   \
                     $(if $(verilator_threads), --threads $(verilator_threads))                                   \
@@ -751,17 +768,32 @@ verilate_command := $(verilator) --no-timing verilator_config.vlt               
                     $(if $(TRACE_COMPACT), --trace-fst $(VL_INC_DIR)/verilated_fst_c.cpp)                        \
                     $(if $(TRACE_FAST), --trace $(VL_INC_DIR)/verilated_vcd_c.cpp)                               \
                     -LDFLAGS "-L$(RISCV)/lib -L$(SPIKE_INSTALL_DIR)/lib -Wl,-rpath,$(RISCV)/lib -Wl,-rpath,$(SPIKE_INSTALL_DIR)/lib -lfesvr -lriscv -ldisasm -lyaml-cpp $(if $(PROFILE), -g -pg,) -lpthread $(if $(TRACE_COMPACT), -lz,)" \
-                    -CFLAGS "$(CFLAGS)$(if $(PROFILE), -g -pg,) -DVL_DEBUG -I$(SPIKE_INSTALL_DIR)"               \
+                    -CFLAGS "$(CFLAGS)$(if $(PROFILE), -g -pg,) -DVL_DEBUG -I$(SPIKE_INSTALL_DIR)$(if $(or $(findstring G6LC_HAVE_LITEDRAM,$(defines)),$(findstring G6LC_AI_DRAM_CLASS1,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_2,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_4,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_8,$(defines))), -DG6LC_HAVE_LITEDRAM,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_2,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_2,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_4,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_4,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_8,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_8,)" \
                     $(if $(SPIKE_TANDEM), +define+SPIKE_TANDEM, )                                                \
                     --cc --vpi                                                                                   \
                     $(list_incdir) --top-module ariane_testharness                                               \
                     --threads-dpi none                                                                           \
                     --Mdir $(ver-library) -O3                                                                    \
                     --exe $(TB_CPP) corev_apu/tb/dpi/SimDTM.cc corev_apu/tb/dpi/SimJTAG.cc                       \
-                    corev_apu/tb/dpi/remote_bitbang.cc corev_apu/tb/dpi/msim_helper.cc
+                    corev_apu/tb/dpi/remote_bitbang.cc corev_apu/tb/dpi/msim_helper.cc                          \
+                    $(if $(or $(findstring G6LC_HAVE_LITEDRAM,$(defines)),$(findstring G6LC_AI_DRAM_CLASS1,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_2,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_4,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_8,$(defines))), corev_apu/ai_island/generated/gateware/litedram_core.v,)
 
 # User Verilator, at some point in the future this will be auto-generated
 # Pass host CXX/CC so conda/mamba toolchains (x86_64-*-g++) work without a bare `g++` on PATH.
+# I3 island-DMA DDR4 page timing (class 0 SRAM, not LiteDRAM):
+#   make verilate defines=G6LC_AI_DRAM_TIMING ver-library=work-ver-ai-dt target=g6lc64_ai
+# I3 class-1 LiteDRAM --sim (not default; needs generated/gateware/litedram_core.v):
+#   make verilate defines=G6LC_HAVE_LITEDRAM+G6LC_AI_DRAM_CLASS1 ver-library=work-ver-ai-d1 target=g6lc64_ai
+# Two DRAM channels (38 GB/s nameplate; 64-byte stripe):
+#   make verilate defines=G6LC_HAVE_LITEDRAM+G6LC_AI_DRAM_CHANS_2 ver-library=work-ver-ai-d2 target=g6lc64_ai
+# Four DRAM channels (76 GB/s nameplate):
+#   make verilate defines=G6LC_HAVE_LITEDRAM+G6LC_AI_DRAM_CHANS_4 ver-library=work-ver-ai-d4 target=g6lc64_ai
+# Eight DRAM channels (152 GB/s nameplate; directed PHY N=8 PASS 453 cy):
+#   make verilate defines=G6LC_HAVE_LITEDRAM+G6LC_AI_DRAM_CHANS_8 ver-library=work-ver-ai-d8 target=g6lc64_ai
+# Class-0 2/4/8-channel SRAM stripe (cores + island; not LiteDRAM):
+#   make verilate defines=G6LC_AI_DRAM_SIM_CHANS_2 ver-library=work-ver-ai-sc2 target=g6lc64_ai
+#   make verilate defines=G6LC_AI_DRAM_SIM_CHANS_4 ver-library=work-ver-ai-sc4 target=g6lc64_ai
+#   make verilate defines=G6LC_AI_DRAM_SIM_CHANS_8 ver-library=work-ver-ai-sc8 target=g6lc64_ai
 verilate:
 	@echo "[Verilator] Building Model$(if $(PROFILE), for Profiling,)"
 	$(verilate_command)
