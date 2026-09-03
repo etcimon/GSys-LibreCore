@@ -92,6 +92,8 @@ need=(
   verif/regress/remote/ai-class1-amo-lrsc.sh
   verif/tests/custom/ai/ai_dual_core_excl_smoke.S
   verif/regress/remote/ai-dual-core-excl.sh
+  verif/tests/custom/ai/ai_dual_core_lrsc_disjoint_smoke.S
+  verif/regress/remote/ai-dual-core-lrsc-disjoint.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_timing.sv
   verif/tb/ai_island/run-dram-timing.sh
   corev_apu/ai_island/generated/README.md
@@ -144,6 +146,34 @@ grep -q "CAP_OFF_DRAM_TIMING" "$cfg" && ok "CAP DRAM timing" || bad "CAP_OFF_DRA
 grep -q "AiIslandDdr4TimingSim" "$cfg" && ok "class-0 DDR4 timing sim SKU" || bad "AiIslandDdr4TimingSim"
 grep -q "G6LC_AI_DRAM_TIMING" corev_apu/tb/ariane_testharness.sv \
   && ok "testharness timing define (default off)" || bad "G6LC_AI_DRAM_TIMING"
+
+# AI-X1: the exclusive monitor must hold one reservation PER HART. A single
+# global reservation livelocks two harts on disjoint addresses, and the
+# same-address snoop gate cannot see it. Both the table and the bisection seam
+# that proves the gate can fail are load-bearing.
+grep -q "NRes" corev_apu/src/g6lc_axi_lrsc.sv \
+  && ok "lrsc reservation table (not one global)" || bad "g6lc_axi_lrsc NRes"
+grep -q "NRes" corev_apu/src/g6lc_axi_atomics_wrap.sv \
+  && ok "atomics wrap forwards NRes" || bad "g6lc_axi_atomics_wrap NRes"
+grep -q "G6LC_AI_LRSC_SINGLE_RES" corev_apu/tb/ariane_testharness.sv \
+  && ok "single-reservation negative control seam kept" || bad "G6LC_AI_LRSC_SINGLE_RES"
+grep -q "NR_HARTS" corev_apu/tb/ariane_testharness.sv \
+  && ok "NRes sized from hart count" || bad "NRes must come from NR_HARTS"
+
+# AI-X2: numeric formats are ONE bitmap over ONE enumeration, and an ungranted
+# format must fail closed rather than be demoted to INT8.
+grep -q "AI_FMT_BF16" core/include/config_pkg.sv \
+  && ok "numeric format enumeration in config_pkg" || bad "config_pkg AI_FMT_*"
+grep -q "FormatMask" core/include/config_pkg.sv \
+  && ok "ai_cfg_t.FormatMask grant bitmap" || bad "ai_cfg_t.FormatMask"
+grep -q "FormatMask: config_pkg::AiFmtMaskInt8" core/include/g6lc64_ai_config_pkg.sv \
+  && ok "live grant stays dense INT8 (PE is s8xs8->s32)" || bad "live FormatMask"
+grep -q "ST_BAD_FMT" corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv \
+  && ok "ST_BAD_FMT distinct from ST_BAD_OP" || bad "ST_BAD_FMT"
+grep -q "FLAG_NUMFMT_SHIFT" corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv \
+  && ok "descriptor numfmt field" || bad "FLAG_NUMFMT_SHIFT"
+grep -q "desc_numfmt_granted" corev_apu/ai_island/g6lc_ai_desc_engine.sv \
+  && ok "engine refuses ungranted format in PARSE" || bad "engine must check numfmt"
 grep -q "G6LC_AI_DRAM_SIM_CHANS_2" corev_apu/tb/ariane_testharness.sv \
   && ok "testharness class-0 2ch SRAM stripe (default off)" || bad "G6LC_AI_DRAM_SIM_CHANS_2"
 grep -B1 'G6LC_AI_EXCL_MULTI' corev_apu/tb/ariane_testharness.sv | grep -q 'G6LC_AI_DRAM_SIM_CHANS_2' \

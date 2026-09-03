@@ -12,6 +12,16 @@ module tb_g6lc_axi_lrsc;
   localparam int unsigned ADDR_W = 64;
   localparam int unsigned DATA_W = 64;
   localparam int unsigned MAX    = 8;
+  // Reservation-table depth. `+define+G6LC_TB_LRSC_SINGLE_RES` builds the
+  // pre-fix behaviour (one global reservation) so the disjoint scenario below
+  // can be shown to FAIL on it. A test that has never failed is not an oracle,
+  // so this negative control is a permanent part of the TB rather than a
+  // throwaway local edit.
+`ifdef G6LC_TB_LRSC_SINGLE_RES
+  localparam int unsigned NRES   = 1;
+`else
+  localparam int unsigned NRES   = 8;
+`endif
 
   logic clk, rst_ni, r_go, b_go;
   int unsigned errors, cycles;
@@ -35,7 +45,8 @@ module tb_g6lc_axi_lrsc;
       .AXI_DATA_WIDTH     ( DATA_W ),
       .AXI_ID_WIDTH       ( ID_W   ),
       .AXI_MAX_WRITE_TXNS ( MAX    ),
-      .RISCV_WORD_WIDTH   ( 64     )
+      .RISCV_WORD_WIDTH   ( 64     ),
+      .NRes               ( NRES   )
   ) i_dut (
       .clk_i  ( clk ),
       .rst_ni ( rst_ni ),
@@ -47,7 +58,8 @@ module tb_g6lc_axi_lrsc;
       .AXI_ADDR_WIDTH ( ADDR_W ),
       .AXI_DATA_WIDTH ( DATA_W ),
       .AXI_ID_WIDTH   ( ID_W   ),
-      .MaxOut         ( MAX    )
+      .MaxOut         ( MAX    ),
+      .NRes           ( NRES   )
   ) i_dut (
       .clk_i  ( clk ),
       .rst_ni ( rst_ni ),
@@ -369,6 +381,107 @@ module tb_g6lc_axi_lrsc;
       end
       if (nstore != stores0 + 1) begin
         $error("SC fail must not store nstore=%0d", nstore); errors++;
+      end
+    end
+
+    // Disjoint reservations: two agents reserve DIFFERENT addresses, then each
+    // completes its own SC. Both must succeed -- nothing wrote either address.
+    //
+    // This is the case the single-reservation monitor fails and that the
+    // same-address snoop test above cannot detect, because only one line is in
+    // play there. With NRES=1 the second LR destroys the first reservation and
+    // the first SC returns OKAY instead of EXOKAY, which is the livelock two
+    // harts hit on unrelated spinlocks. Build with
+    // `+define+G6LC_TB_LRSC_SINGLE_RES` to observe exactly that.
+    begin
+      int unsigned stores0;
+      stores0 = nstore;
+      // A reserves 0x8000_7000.
+      issue_ar(6'h12, 64'h8000_7000, 1'b1);
+      begin
+        int unsigned tlim;
+        tlim = cycles + 400;
+        #0; while (!slv.r_valid && cycles < tlim) tick;
+        tick;
+      end
+      // B reserves a different line, inside A's LR..SC window.
+      issue_ar(6'h13, 64'h8000_7100, 1'b1);
+      begin
+        int unsigned tlim;
+        tlim = cycles + 400;
+        #0; while (!slv.r_valid && cycles < tlim) tick;
+        tick;
+      end
+      // A's SC must still succeed.
+      issue_aw_w(6'h12, 64'h8000_7000, 64'h7777, 1'b1);
+      begin
+        int unsigned tlim;
+        tlim = cycles + 400;
+        #0; while ((!(slv.b_valid && slv.b_id == 6'h12)) && cycles < tlim) tick;
+        if (!slv.b_valid || slv.b_id !== 6'h12 || slv.b_resp !== 2'b01) begin
+          $error("disjoint SC A id=%h resp=%h (expected EXOKAY; a peer LR to another address must not clear this reservation)",
+                 slv.b_id, slv.b_resp);
+          errors++;
+        end
+        tick;
+      end
+      // B's SC must also succeed.
+      issue_aw_w(6'h13, 64'h8000_7100, 64'h8888, 1'b1);
+      begin
+        int unsigned tlim;
+        tlim = cycles + 400;
+        #0; while ((!(slv.b_valid && slv.b_id == 6'h13)) && cycles < tlim) tick;
+        if (!slv.b_valid || slv.b_id !== 6'h13 || slv.b_resp !== 2'b01) begin
+          $error("disjoint SC B id=%h resp=%h (expected EXOKAY)", slv.b_id, slv.b_resp);
+          errors++;
+        end
+        tick;
+      end
+      // Both SCs succeeded, so both must have written downstream.
+      if (nstore != stores0 + 2) begin
+        $error("disjoint SCs must both store nstore=%0d expected=%0d", nstore, stores0 + 2);
+        errors++;
+      end
+    end
+
+    // Same address, two reservations: exactly one SC may win. Guards against
+    // "fix" the other way -- a table that simply never clears would let both
+    // succeed and silently break mutual exclusion.
+    begin
+      logic first_ok, second_ok;
+      issue_ar(6'h14, 64'h8000_7200, 1'b1);
+      begin
+        int unsigned tlim;
+        tlim = cycles + 400;
+        #0; while (!slv.r_valid && cycles < tlim) tick;
+        tick;
+      end
+      issue_ar(6'h15, 64'h8000_7200, 1'b1);
+      begin
+        int unsigned tlim;
+        tlim = cycles + 400;
+        #0; while (!slv.r_valid && cycles < tlim) tick;
+        tick;
+      end
+      issue_aw_w(6'h14, 64'h8000_7200, 64'h9999, 1'b1);
+      begin
+        int unsigned tlim;
+        tlim = cycles + 400;
+        #0; while ((!(slv.b_valid && slv.b_id == 6'h14)) && cycles < tlim) tick;
+        first_ok = slv.b_valid && (slv.b_resp === 2'b01);
+        tick;
+      end
+      issue_aw_w(6'h15, 64'h8000_7200, 64'hAAAA, 1'b1);
+      begin
+        int unsigned tlim;
+        tlim = cycles + 400;
+        #0; while ((!(slv.b_valid && slv.b_id == 6'h15)) && cycles < tlim) tick;
+        second_ok = slv.b_valid && (slv.b_resp === 2'b01);
+        tick;
+      end
+      if (first_ok === second_ok) begin
+        $error("same-address SCs: exactly one must win (first=%0b second=%0b)", first_ok, second_ok);
+        errors++;
       end
     end
 

@@ -255,9 +255,24 @@ Hold these when turning `G6LC_AI_DRAM_CHANS_2` (or N=4/8) from a define into a S
    winner because a successful SC consumes its entry. Table-full evicts the rotating victim, which
    is a permitted spurious SC failure and cannot starve a requester.
 
-   `NRes = 1` reproduces the old behaviour for bisection. Note `corev_apu/coherence/g6lc_lr_sc_tracker.sv`
-   is a **different** monitor on the coherence-hub path; the two must not disagree about who owns
-   the reservation on a given build.
+   `NRes = 1` reproduces the old behaviour for bisection, and
+   `+define+G6LC_AI_LRSC_SINGLE_RES` on the testharness forces it. **Keep that seam**: it is what
+   makes the gate an oracle rather than a test that has never failed, and rediscovering the negative
+   costs a 22-minute harness rebuild.
+
+   Proxy evidence (Variane, flavour `ai-dt`):
+
+   | Netlist | `ai_dual_core_lrsc_disjoint_smoke` |
+   |---|---|
+   | `NRes = NR_HARTS = 2` (fixed) | **SUCCESS `tohost=1`, 16602 cy** |
+   | `NRes = 1` (pre-fix, `work-ver-ai-1res`) | **FAILED `tohost=9`, 16580 cy** |
+
+   `tohost=9` is `fail_lrsc` — hart 0's `sc.d` refused although nothing wrote its address. The
+   same-address snoop gate `ai-dual-core-excl` still passes at **16667 cy**, bit-identical to its
+   recorded baseline, so the fix is additive rather than a behaviour swap.
+
+   Note `corev_apu/coherence/g6lc_lr_sc_tracker.sv` is a **different** monitor on the coherence-hub
+   path; the two must not disagree about who owns the reservation on a given build.
 
 ### 5.3 Timing, init, observability
 

@@ -628,7 +628,17 @@ module ariane_testharness #(
     // two harts contending on *different* addresses (g6lc_axi_lrsc header), so
     // this is sized from the SoC's own hart count rather than left at a
     // default. NR_HARTS = NR_CORES x NrHarts.
+    //
+    // `+define+G6LC_AI_LRSC_SINGLE_RES` forces the pre-fix depth of 1. It
+    // exists so the disjoint LR/SC gate can be shown to FAIL on the old
+    // behaviour: a test that has never failed is not an oracle, and the
+    // same-address snoop gate cannot distinguish the two designs. Keep it --
+    // rediscovering this negative costs a full harness rebuild.
+`ifdef G6LC_AI_LRSC_SINGLE_RES
+    .NRes               ( 1 )
+`else
     .NRes               ( (NR_HARTS < 1) ? 1 : NR_HARTS )
+`endif
   ) i_axi_riscv_atomics (
     .clk_i,
     .rst_ni ( ndmreset_n               ),
