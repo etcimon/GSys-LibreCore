@@ -92,6 +92,29 @@
     reg = <0x0 0x80000000 0x0 0x10000000>;
   };
 
+  /* Operand window for in-guest ai-tensor over UIO.
+   *
+   * The island DMAs A/B/C, so operands must live in a guest-physical range it can
+   * reach and the kernel will not hand to something else. `no-map` keeps it out of
+   * the linear map so a userspace mmap of the range is the only view of it, which is
+   * what makes `/dev/mem` + AI_TENSOR_DMA_BASE safe rather than merely convenient.
+   *
+   * Still one memory@ node: this is a carve-out of the same DRAM the cores use, not a
+   * second address space. Sized for one AccTile=256 job triple (2*256*256 int8 inputs
+   * + 256*256 int32 C = 384 KiB) with headroom.
+   */
+  reserved-memory {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    ranges;
+
+    ai_dma: ai-operands@8f000000 {
+      compatible = "shared-dma-pool";
+      reg = <0x0 0x8f000000 0x0 0x01000000>;
+      no-map;
+    };
+  };
+
   soc {
     #address-cells = <2>;
     #size-cells = <2>;
@@ -128,18 +151,38 @@
     // Xg6lcai island — CAP/CTL/doorbell/regions/desc/PMU (4 KiB APB window).
     // Geometry must track CAP words / g6lc_ai_island_cfg (I1 AccTile=256).
     ai_matrix: ai-matrix@40000000 {
-      compatible = "g6lc,ai-matrix";
+      /* "generic-uio" is the fallback compatible `uio_pdrv_genirq` matches, so an
+       * in-guest runtime binds the window and the PLIC-8 line with a stock kernel and
+       * no out-of-tree driver. The vendor string stays first: a future in-kernel driver
+       * must win over the generic bind. The alternative -- a
+       * `uio_pdrv_genirq.of_id=g6lc,ai-matrix` command line -- also works and is what
+       * a kernel built without this fallback needs.
+       * Contract: architecture/ai-matrix/board-uio-eventfd.md
+       */
+      compatible = "g6lc,ai-matrix", "generic-uio";
       reg = <0x0 0x40000000 0x0 0x1000>;
       interrupt-parent = <&PLIC0>;
       interrupts = <8>;
+      /* Operands are DMAed from the reserved carve-out above; ai-tensor reads its
+       * base and size from here rather than being told on the command line. */
+      memory-region = <&ai_dma>;
       // Discovery helpers for userspace / UIO bind (not Linux ABI yet).
       g6lc,acc-tile-m = <256>;
       g6lc,acc-tile-n = <256>;
       g6lc,acc-tile-k = <256>;
       g6lc,macs-per-cycle = <256>;
-      g6lc,queues = <1>;
-      g6lc,queue-depth = <8>;
+      g6lc,queues = <2>;
+      g6lc,queue-depth = <64>;
       g6lc,noc-width = <64>;
+      g6lc,dram-class = <0>;
+      g6lc,dram-gbps = <8>;
+      /* Live N=1 class 0. CLASS1 / CHANS_{2,4,8} still one memory@; hardware
+       * stripe on the shared DRAM slave (cores + island). CAP 0x38 packs
+       * count+shift; 0x34 class; 0x48 init_done. Do not add per-channel memory@. */
+      g6lc,dram-channels = <1>;
+      g6lc,dram-chan-shift = <6>;
+      g6lc,max-ar-out = <2>;
+      /* init_done / timing_en are runtime CAP 0x48, not DT. */
       status = "okay";
     };
   };

@@ -1639,16 +1639,40 @@ fn resolve_pkg_file(rel: &str) -> Option<PathBuf> {
     None
 }
 
-fn run_bridge_pack(
-    program: &str,
-    extra: &[&str],
-    script: &str,
-    model: &str,
-    dst: &str,
-    decode: &str,
-    cap: &str,
-    cpl: &str,
-) -> bool {
+/// The paths one bridge `pack` invocation reads and writes.
+///
+/// Grouped rather than passed positionally: six same-typed `&str` in a row is a call site
+/// where a transposed pair compiles and then writes the capability dump over the
+/// descriptor.
+struct BridgePackPaths<'a> {
+    script: &'a str,
+    model: &'a str,
+    dst: &'a str,
+    decode: &'a str,
+    cap: &'a str,
+    cpl: &'a str,
+}
+
+/// Lowercase hex, built without a `format!` per byte.
+fn hex_string(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+fn run_bridge_pack(program: &str, extra: &[&str], p: &BridgePackPaths<'_>) -> bool {
+    let BridgePackPaths {
+        script,
+        model,
+        dst,
+        decode,
+        cap,
+        cpl,
+    } = *p;
     let mut cmd = Command::new(program);
     cmd.args(extra);
     cmd.args([
@@ -1697,55 +1721,20 @@ fn stage_packed_desc_bin(esp: &Path) -> Result<(), String> {
     let txt_s = txt.to_string_lossy().to_string();
     let cap_s = cap.to_string_lossy().to_string();
     let cpl_s = cpl.to_string_lossy().to_string();
+    let paths = BridgePackPaths {
+        script: &script_s,
+        model: &model_s,
+        dst: &dst_s,
+        decode: &txt_s,
+        cap: &cap_s,
+        cpl: &cpl_s,
+    };
     let packed = if cfg!(windows) {
-        run_bridge_pack(
-            "python",
-            &[],
-            &script_s,
-            &model_s,
-            &dst_s,
-            &txt_s,
-            &cap_s,
-            &cpl_s,
-        ) || run_bridge_pack(
-            "python3",
-            &[],
-            &script_s,
-            &model_s,
-            &dst_s,
-            &txt_s,
-            &cap_s,
-            &cpl_s,
-        ) || run_bridge_pack(
-            "py",
-            &["-3"],
-            &script_s,
-            &model_s,
-            &dst_s,
-            &txt_s,
-            &cap_s,
-            &cpl_s,
-        )
+        run_bridge_pack("python", &[], &paths)
+            || run_bridge_pack("python3", &[], &paths)
+            || run_bridge_pack("py", &["-3"], &paths)
     } else {
-        run_bridge_pack(
-            "python3",
-            &[],
-            &script_s,
-            &model_s,
-            &dst_s,
-            &txt_s,
-            &cap_s,
-            &cpl_s,
-        ) || run_bridge_pack(
-            "python",
-            &[],
-            &script_s,
-            &model_s,
-            &dst_s,
-            &txt_s,
-            &cap_s,
-            &cpl_s,
-        )
+        run_bridge_pack("python3", &[], &paths) || run_bridge_pack("python", &[], &paths)
     } || {
         let script_w = crate::make_path_arg(&script, true).ok();
         let model_w = crate::make_path_arg(&model, true).ok();
@@ -1754,21 +1743,28 @@ fn stage_packed_desc_bin(esp: &Path) -> Result<(), String> {
         let cap_w = crate::make_path_arg(&cap, true).ok();
         let cpl_w = crate::make_path_arg(&cpl, true).ok();
         match (script_w, model_w, dst_w, txt_w, cap_w, cpl_w) {
-            (Some(s), Some(m), Some(d), Some(t), Some(ca), Some(cp)) => {
-                run_bridge_pack("wsl", &["-e", "python3"], &s, &m, &d, &t, &ca, &cp)
-            }
+            (Some(s), Some(m), Some(d), Some(t), Some(ca), Some(cp)) => run_bridge_pack(
+                "wsl",
+                &["-e", "python3"],
+                &BridgePackPaths {
+                    script: &s,
+                    model: &m,
+                    dst: &d,
+                    decode: &t,
+                    cap: &ca,
+                    cpl: &cp,
+                },
+            ),
             _ => false,
         }
     };
     if packed && dst.is_file() {
         if let Ok(bytes) = std::fs::read(&dst) {
-            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-            let _ = std::fs::write(esp.join("DESC.HEX"), hex.as_bytes());
+            let _ = std::fs::write(esp.join("DESC.HEX"), hex_string(&bytes).as_bytes());
         }
         let cpl_bin = esp.join("CPL.BIN");
         if let Ok(bytes) = std::fs::read(&cpl_bin) {
-            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-            let _ = std::fs::write(esp.join("CPL.HEX"), hex.as_bytes());
+            let _ = std::fs::write(esp.join("CPL.HEX"), hex_string(&bytes).as_bytes());
         }
     }
     Ok(())
@@ -1893,8 +1889,24 @@ mod tests {
     use super::*;
     use crate::args::Args;
 
+    /// Serialises the tests that stage the OpenWrt ESP.
+    ///
+    /// Both exercise a product path that writes the fixed `out/loader-run/esp-openwrt`
+    /// tree, so running them concurrently is a file race, not a flaky assertion — on
+    /// Windows the loser gets `os error 32`. The location is part of the loader's
+    /// contract, so the tests are serialised rather than the product being changed to
+    /// suit them.
+    static ESP_OPENWRT: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the ESP lock, ignoring poisoning: a panic in one test must fail that test,
+    /// not cascade into every other test that touches the same directory.
+    fn lock_esp() -> std::sync::MutexGuard<'static, ()> {
+        ESP_OPENWRT.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn edk2_openwrt_stages_esp_and_drops_kernel() {
+        let _guard = lock_esp();
         let dir = std::env::temp_dir().join(format!("g6q-ow-pe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pe = dir.join("initramfs-Image");
@@ -2279,6 +2291,7 @@ mod tests {
 
     #[test]
     fn uboot_openwrt_keeps_uboot_kernel_and_attaches_esp_img() {
+        let _guard = lock_esp();
         let dir = std::env::temp_dir().join(format!("g6q-uboot-ow-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let pe = dir.join("initramfs-Image");

@@ -341,6 +341,17 @@ pub struct AiIslandConfig {
     /// Empty when the design publishes the register map only as comments, which is the
     /// current state — recorded as ask F9 in `architecture/RTL_FEEDBACK.md`.
     pub pmu_offsets: std::collections::BTreeMap<String, u64>,
+    /// Island control-surface offsets by name, from `REG_OFF_*` localparams.
+    ///
+    /// These are the registers a driver writes to *operate* the island — control, status,
+    /// doorbell, completion claim, per-queue region programming — as opposed to the
+    /// read-only capability window. They are the second half of ask F1: the descriptor
+    /// window placement alone lets a guest find the descriptor, but not ring the bell.
+    ///
+    /// Names are the `REG_OFF_` suffix, lowercased: `ctl`, `status`, `doorbell`, `cpl`,
+    /// `queue`, `cap`, `desc`. Empty when the design publishes the map only as comments,
+    /// in which case a backend falls back to a *derived* placement and says so.
+    pub reg_offsets: std::collections::BTreeMap<String, u64>,
     /// Base of the capability window inside the island MMIO region, when the design
     /// states it.
     ///
@@ -413,6 +424,14 @@ impl AiIslandConfig {
                 ),
             ),
             (
+                "reg_offsets",
+                Json::obj(
+                    self.reg_offsets
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), Json::Int(*v as i64))),
+                ),
+            ),
+            (
                 "cap_base",
                 self.cap_base.map_or(Json::Null, |v| Json::Int(v as i64)),
             ),
@@ -443,6 +462,23 @@ impl AiIslandConfig {
     /// "the island has no capabilities", which are very different findings.
     pub fn placement_resolved(&self) -> bool {
         self.cap_base.is_some() && self.desc_base.is_some()
+    }
+
+    /// Island-relative offset of a control register the design publishes.
+    ///
+    /// `None` means the design did not name it, which is different from "it is at zero":
+    /// a backend must fall back visibly rather than invent a doorbell address.
+    pub fn reg_offset(&self, name: &str) -> Option<u64> {
+        self.reg_offsets.get(name).copied()
+    }
+
+    /// Whether the island can be *operated* from the published map, not merely addressed.
+    ///
+    /// [`Self::placement_resolved`] answers "can a guest find the descriptor window".
+    /// This answers the question that actually gates an in-guest driver: is there a
+    /// published doorbell to ring and a published completion register to claim?
+    pub fn control_surface_resolved(&self) -> bool {
+        self.reg_offset("doorbell").is_some() && self.reg_offset("cpl").is_some()
     }
 
     /// Capability words the guest may read, as window-relative offset -> value.

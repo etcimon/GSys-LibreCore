@@ -57,7 +57,27 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] CLI `mmio-gemm` + doctor CAP probe
 - [x] Feature `linux-mmio` stub for future UIO map (not default CI)
 - [x] MappedWindow (file-backed) + linux-mmio UIO/`/dev/mem` open (feature-gated)
+- [x] **`qemu-uio` backend** (`python/ai_tensor/qemu_uio.py`) — the in-guest path named in
+  the monorepo's `architecture/g6lc-qemu/ai-island.md` §5, which until now existed only in
+  prose. `Device("qemu-uio")` and an env default (`AI_TENSOR_UIO=/dev/uioN` **plus**
+  `AI_TENSOR_DMA_BASE`; a `virt://` path still means `virt-card`).
+  Geometry is read from the **CAP window**, never from the DT helper properties — that is the
+  rule on hardware and it is what keeps one binary valid across SKUs.
+  Operand memory is explicit: the island DMAs A/B/C, so `AI_TENSOR_DMA_BASE` is *required*
+  rather than defaulted, because guessing a DMA base is the same class of error as guessing an
+  MMIO base. `MmioWindow` / `IrqSource` / `DmaMemory` are protocols, so the submission
+  sequence is testable off-target while the real path uses `mmap` + a blocking UIO read.
+- [x] **19 protocol tests** (`python/tests/test_qemu_uio_backend.py`) against a register-accurate
+  fake island that actually multiplies: CAP discovery across two SKUs, **AI-3 region programmed
+  before the doorbell**, **descriptor latched before the doorbell**, **DONE claimed before the
+  PLIC is completed** (a level-set source re-arms otherwise), completion word naming
+  ticket+status, PMU sticky read, host tiling beyond AccTile (F12), and the refusals —
+  oversize shape, undersized DMA window, disabled island, absent queue, `virt://` path,
+  missing `AI_TENSOR_DMA_BASE`.
 - [ ] Board-validated UIO map on live Variane/FPGA
+- [ ] ai-tensor staged into a riscv64 initramfs for a real in-guest run (needs a cross build;
+  the guest kernel side is now enabled — `CONFIG_UIO`/`CONFIG_UIO_PDRV_GENIRQ` and the
+  `generic-uio` fallback compatible + `no-map` operand carve-out in `ariane-ai.dts`)
 - [x] SoftIsland FLAG_IRQ sticky + DONE clear (PLIC mirror discipline)
 - [x] virt_ai_card `FLAG_IRQ = 1<<2` matches `isa-encoding.md` §7 / ingested `flags_layout.irq_bit`; packed DESC flags and ESP `FLAGS.TXT` `irq_bit_ok`. Null `ptr_*` (`PTR.TXT` `ptr_null`); bulk is BAR4 names, not invented addresses.
 - [x] Packed `ld_ab = k|(n<<16)` matches `pack_desc64`; ESP `DESC.TXT` `ld_ab_ok`. Dense INT8 `dtype_s8s8` / `ew_byte` / `sp24=false` (`int4_not_in_headline`). Doorbell cluster from ingested `queue_cluster_map`.

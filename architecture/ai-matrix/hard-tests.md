@@ -1,7 +1,7 @@
 # AI island HARD / directed verification map
 
 **Status:** live lab gates green (2026-08-11) · **Package:** `g6lc64_ai` · **TB:** `work-ver-ai`  
-**Host entry:** `cva6-build tensor rtl-hard|virt-impl` · **Regress:** `verif/regress/ai-matrix-veri.sh`
+**Host entry:** `cva6-build test --ai` / `diag run ai` / `tensor rtl-hard|virt-impl` · **Regress:** `verif/regress/ai-matrix-veri.sh`
 
 This document is the **source of truth for what HARD means** for `ai_island` / `Xg6lcai`: which
 directed ELFs exist, which narrow Verilator surfaces run them, and how that maps to software
@@ -21,7 +21,12 @@ monorepo `AGENTS-todo.md` (AI-S3) · `AGENTS-build-platform.md` (tensor host).
 | **HARD narrow** | Variane + 2 directed ELFs | `tensor rtl-hard --suite narrow` | Live SV CAP/CTL + INT8 GEMM |
 | **HARD smoke/ci/peak/full** | Variane + curated ELF sets | `tensor rtl-hard --suite …` or `run-ai-matrix-hard-suite.sh` | FIFO / IRQ / desc / scale GEMM |
 | **virt-impl hard** | soft → HARD chained | `tensor virt-impl --impl hard --suite narrow` | Software **and** RTL under one host CLI |
-| **sv-timing** | FO4 package validate | `--from-timing DIR` on tensor | Structural timing package (not STA) |
+| **sv-timing** | FO4 package validate | `--from-timing DIR` on test/diag/tensor | Structural timing package (not STA) |
+| **diag ai** | path-check + optional `g6lc64_ai` lint | `diag run ai` (like `diag run ooo`) | Config/island/DRAM/tensor/QEMU files |
+| **directed --ai** | config-smoke + matrix-directed + island-veri | `test --ai` | Package legality, CSR/GEMM contract, island spine |
+| **channels / wrap** | LiteDRAM stripe N=1/2/4/8 + AXI wrap TB | `test --ai --channels 4 --ai-dram 1` | Shared DramChannels (cores+L2+island), wrap gearbox |
+| **remote S4** | testharness_proxy `ai-dt` / `ai-d*` | `test --ai-remote` / `remote --ai build` | xbar × 8 MSHR × MaxAROut=8. **`ai-dt` PASS 2681 cy tohost=1.** **Variane evidence** |
+| **g6lc_qemu** | doctor + AI_BRIDGE ingest | `test --ai-qemu` / `g6q --ai` | Higher-level Linux/emulation. **Not Variane** |
 
 **Default pytorch/virt-impl HARD surface is `narrow`** (diag-style ownership of target/tests/library).
 
@@ -136,13 +141,31 @@ Scripts:
 | **I1** one cluster AccTile/PeLanes 256 | **Partial live** | gemm_s8_* + CAP; PE/`tc_sram` cluster still lite |
 | **I3-lite** bus/PMU/C-store/multi-out AR | **Live** | bw_pmu, gemm scale, mmio |
 | **CPL FIFO** multi-claim | **Live** | `ai_cpl_fifo_multi_claim` |
-| **I3** measured memory bandwidth to model | **I3-lite live** (NoC 8 GB/s nameplate + `ai_bw_pmu_smoke`); full DRAM-class soak open | PMU + CAP `0x18`/`0x2C` |
+| **I3** measured memory bandwidth to model | **I3-lite live**; class-1 `--sim` 256-beat stream **7858 milli-GB/s (98% of 8 GB/s)** — 80% gate **closed**; wrap **1445 cy** (eight AR + eight AW live / 9th backpressure); GEMM class-1 N=1/2/4/8 **336/681/821/1162 cy** (MaxAROut=8); S4 parks hart 1: `ai-dt` **2620 cy**, `ai-d1` **4246**, `ai-d2` **4520**, `ai-d4` **4553**, `ai-d8` **4582**; first-pass CLASS1 {1,2,4,8} 5363/5758/5762/5821; dual-core stripe **830/900/582 cy** on `ai-d2`/`ai-d8`/`ai-sc{2,4,8}`; all-N occupancy **1328/889 cy** on `ai-d8`/`ai-sc8`; exclusive **PASS `ai-dt` 552** / **`ai-d1` 781** / **`ai-d2` 945** / **`ai-d4` 941** / **`ai-d8` 941 cy** / **`ai-sc2` 620** / **`ai-sc4` 620 cy**; dual-core snoop **16667/17137/17137/17163/17187/16686/16686 cy** (`ai-dt`/`ai-d1`/`ai-d2`/`ai-d4`/`ai-d8`/`ai-sc2`/`ai-sc4`); isolated lrsc **130 cy**; wrap-stack **104 cy** | Do not quote 98% as 19 GB/s nameplate; 400 is class 2 |
 | **I2** NoC + N clusters + QoS | **Not started** | no multi-cluster directed suite yet |
 | **I4** PD / UPF / thermal | **Open** | — |
 
 **Next for clustering/scaling:** keep AccTile/`T`/CAP frozen; measure I3 bandwidth; then I2
 cluster replication without breaking narrow/ci HARD bit-identity on the single-cluster path
 (see `scaling-100tops.md` §5.1 staging rule).
+
+### 5.1 Emulator-side gates (fast, **never** HARD evidence)
+
+These run in seconds on any host and do not need Verilator, a RISC-V toolchain, or a
+Variane build. They exist because the I2 acceptance shape — `M = N = K = 4096`, §12 —
+**cannot be submitted as one descriptor** (F12): it is 16³ tiled descriptors, so the host
+tiler and the in-guest submission path are on the I2 critical path, not beside it. Getting
+them wrong is cheap to discover here and expensive to discover on a 200 M-cycle soak.
+
+| Gate | What it proves | Command |
+|---|---|---|
+| `g6q-vm` island GEMM | the emulated island **computes** `C = A·B` rather than only completing a ticket; F12 tile bound refuses oversize shapes with the package's own status | `cd g6lc_qemu && python tools/g6q.py test` |
+| `g6q-vm` MMIO end-to-end | a guest drives CTL → latch → doorbell → status → `C` → DONE with no custom instruction | same |
+| `ai-tensor` `qemu-uio` | the in-guest submission *sequence*: CAP discovery, region-before-doorbell, latch-before-doorbell, claim-before-PLIC-complete, host tiling | `cd ai-tensor && PYTHONPATH=python python python/tests/test_qemu_uio_backend.py` |
+
+They are **not** substitutes for §3's directed ELFs. An emulator says the software stack
+drives the device correctly; it says nothing about cycles, bandwidth, or TOPS
+(`g6lc_qemu/AGENTS.md` §1.8).
 
 ---
 

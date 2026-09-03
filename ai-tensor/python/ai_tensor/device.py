@@ -139,10 +139,12 @@ def _normalize_backend(backend: str) -> str:
         "virtual-pcie",
     ):
         return "virt-card"
+    if be in ("qemu-uio", "uio", "linux-uio-real", "guest-uio"):
+        return "qemu-uio"
     if be == "sim":
         return "sim"
     raise ValueError(
-        "backend must be 'sim', 'mmio'/'mmio-soft', or 'virt-card' "
+        "backend must be 'sim', 'mmio'/'mmio-soft', 'virt-card' or 'qemu-uio' "
         f"(got {backend!r})"
     )
 
@@ -161,6 +163,10 @@ def _env_backend_default() -> str:
     uio = os.environ.get("AI_TENSOR_UIO", "").strip()
     if uio.startswith("virt://"):
         return "virt-card"
+    # A real UIO node plus a guest-physical operand window means we are inside a guest
+    # talking to an actual island, not to a host-side stand-in.
+    if uio.startswith("/dev/") and os.environ.get("AI_TENSOR_DMA_BASE", "").strip():
+        return "qemu-uio"
     return "sim"
 
 
@@ -172,6 +178,7 @@ class Device:
       - ``sim``: direct sim (native or pure-Python)
       - ``mmio`` / ``mmio-soft``: SoftIsland MMIO protocol (native required)
       - ``virt-card``: virtual PCIe AI board (soft UIO/eventfd; local or TCP agent)
+      - ``qemu-uio``: in-guest UIO against a real island (emulator or hardware)
     """
 
     def __init__(
@@ -181,6 +188,7 @@ class Device:
         caps: Optional[Caps] = None,
         board_id: Optional[str] = None,
         virt_mode: Optional[str] = None,
+        session: Optional[Any] = None,
     ):
         if backend is None or backend == "":
             be = _env_backend_default()
@@ -189,6 +197,7 @@ class Device:
         self._native = _try_native()
         self._dev = None
         self._virt = None
+        self._uio = None
         self._caps = caps or Caps()
         self._last_pmu = Pmu()
         self.backend = be
@@ -228,6 +237,28 @@ class Device:
             )
             if caps is not None:
                 self._caps = caps
+        elif be == "qemu-uio":
+            from . import qemu_uio
+
+            # A caller may pass a pre-built session (tests, or a runtime that owns the
+            # mapping); otherwise open one from the environment.
+            self._uio = session or qemu_uio.open_from_env()
+            self.backend = "qemu-uio"
+            c = self._uio.caps
+            # Geometry comes from the CAP window, which is the whole point of the
+            # window: an explicit `caps=` override is honoured, but it is an override of
+            # a real measurement rather than a substitute for one.
+            self._caps = Caps(
+                acc_tile_m=c.acc_tile_m,
+                acc_tile_n=c.acc_tile_n,
+                acc_tile_k=c.acc_tile_k,
+                macs_per_cycle=c.macs_per_cycle,
+                noc_width=c.noc_width,
+                clusters=c.clusters,
+                compute_ref=False,
+            )
+            if caps is not None:
+                self._caps = caps
         else:
             if self._native is None or not hasattr(self._native, "Mmio"):
                 raise RuntimeError(
@@ -243,10 +274,13 @@ class Device:
                 self._caps = caps
 
     def close(self) -> None:
-        """Release virt-card agent/client when used."""
+        """Release virt-card agent/client or UIO mapping when used."""
         if self._virt is not None:
             self._virt.close()
             self._virt = None
+        if self._uio is not None:
+            self._uio.close()
+            self._uio = None
 
     def __enter__(self) -> "Device":
         return self
@@ -353,6 +387,15 @@ class Device:
         return self._caps
 
     def pmu(self) -> Pmu:
+        if self._uio is not None:
+            d = self._uio.pmu()
+            self._last_pmu = Pmu(
+                r_beats=int(d.get("r_beats", 0)),
+                w_beats=int(d.get("w_beats", 0)),
+                cycles=int(d.get("cycles", 0)),
+                gbps_x1000=int(d.get("gbps_x1000", 0)),
+            )
+            return self._last_pmu
         if self._dev is not None and hasattr(self._dev, "pmu"):
             d = self._dev.pmu()
             self._last_pmu = Pmu(
@@ -392,6 +435,8 @@ class Device:
         }
         if self._virt is not None:
             meta["virt"] = self._virt.as_caps_dict()
+        if self._uio is not None:
+            meta["uio"] = self._uio.as_caps_dict()
 
         if caps.fits(m, n, k) or not auto_tile:
             c, tix, status = self._gemm_one(m, n, k, a8, b8, ticket)
@@ -437,6 +482,8 @@ class Device:
         b8: List[int],
         ticket: int,
     ) -> Tuple[List[int], int, int]:
+        if self._uio is not None:
+            return self._uio.gemm_s8(m, n, k, a8, b8, ticket)
         if self._virt is not None:
             return self._virt.gemm_s8(m, n, k, a8, b8, ticket)
         if self._dev is not None:

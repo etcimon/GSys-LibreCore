@@ -82,3 +82,6 @@
 	path = g6lc_qemu/linux-dist/edk2
 	url = https://github.com/etcimon/edk2.git
 	branch = master
+[submodule "vendor/litex/litedram"]
+	path = vendor/litex/litedram
+	url = https://github.com/enjoy-digital/litedram.git

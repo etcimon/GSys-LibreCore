@@ -55,9 +55,9 @@ validate, or refuse, without guessing. Live `out/ai_soc_model.json` is one targe
 
 | Ask | Emulator | Design (2026-09 I3–F1 pass) | Typical live model |
 |---|---|---|---|
-| **F1** placement | Ingests `CAP_BASE`/`DESC_BASE`/`AI_*` | **Published** `AI_CAP_BASE=0x4000_0000`, `AI_DESC_BASE=0x4000_0140`, `CAP_BASE=0`, `DESC_BASE=0x140` | guest-addressable on B1 |
+| **F1** placement | Ingests `CAP_BASE`/`DESC_BASE`/`AI_*` **and the control surface** `REG_OFF_{CTL,STATUS,DOORBELL,CPL,QUEUE}` → `AiIslandConfig::reg_offsets`; `control_surface_resolved()` separates *addressable* from *operable* | **Published** `AI_CAP_BASE=0x4000_0000`, `AI_DESC_BASE=0x4000_0140`, `CAP_BASE=0`, `DESC_BASE=0x140`, plus `REG_OFF_*` | guest-addressable **and operable** on B3 |
 | **F2** desc version | Prefers `DESC_VERSION` | **Published** `DESC_VERSION` (= `ContractVersion`) | 1 |
-| **F3** packed cap words | Parses cap-window `dtype_mask`/`block_mnk`/`dram_gbps`/`queues` | `CAP_OFF_*` named; packings still `always_comb` | ingest RTL |
+| **F3** packed cap words | Parses cap-window `dtype_mask`/`block_mnk`/`dram_gbps`/`queues` | **Published** `CAP_BLOCK_*_SHIFT`, `AiIslandDtypeMask` | ingest RTL |
 | **F4** word order | `g6q-diag` cross-checks `bits_to_desc` / comments | Byte offsets in `desc_t` comments | packer uses those offsets |
 | **F5** flags dtype/irq | `flags_layout` ingested | **Published** `FLAG_*_SHIFT/WIDTH` + accessors | `irq_bit=2`, `dtype_shift=8` |
 | **F6** cluster | `QueueClusterMap` | **Published** `QueueClusterMap '{0,0}` (both queues, cluster 0) | map `[0,0]` |
@@ -65,13 +65,49 @@ validate, or refuse, without guessing. Live `out/ai_soc_model.json` is one targe
 | **F8** clusters enabled | Split word + bitmap | **Published** `0x04` present/enabled + `CAP_OFF_CLUSTER_EN` | present=1, enabled=1, bitmap=1 |
 | **F9** PMU offsets | Reader + B3 modelled PMU ready | **Published** `PMU_OFF_{R_BEATS,W_BEATS,CYCLES,GBPS_X1000}` | `0x180–0x18C` |
 | **F10** `ew`/`sp24` | Accessors when published | **Published** `desc_dtype`/`accmode`/`ew`/`sp24` | engine still s8-dense only |
-| **F11** measured DRAM | Roofline refuses BW bound if unpublished | **I3-lite:** live `DramGBps=8` (NoC peak); PMU fills measured half + `0x2C`. Full 400 GB/s DRAM I3 open | I1-lite can close a roofline against 8 GB/s |
-| **F12** MaxDim | `shape_fits_blocking` | **Published** in `isa-encoding.md` §7; SW owns tiling | 256³ fits; 4096³ does not |
+| **F11** measured DRAM | Roofline refuses BW bound if unpublished | **I3-lite:** 8 GB/s NoC; Cas=0 default; opt-in `G6LC_AI_DRAM_TIMING` Cas=14 still class 0. Class-1 19 GB/s / LiteDRAM unsynced | I1-lite can close a roofline against 8 GB/s |
+| **F12** MaxDim | `shape_fits_blocking` | **Published** in `isa-encoding.md` §7; SW owns tiling; `ai_gemm_tile_2x2_smoke`; C packed `ldc=n` | 256³ fits; 4096³ does not |
 | **F13** writeback | Roofline uses `max(compulsory,tiled)+4mn` | **Published** in `scaling-100tops.md` §4 | intensity 42 vs 128 at T=256 |
 | **F14** 16-bit meas | Saturate like RTL `0xFFFF` | **Published:** packed half saturates; `CAP_OFF_DRAM_MEAS_X1000` is 32-bit | 400 GB/s readable at `0x2C` |
-| **F15** poll pending | Emulator `POLL_PENDING` / ring-full `0` | Unpublished | not a hardware contract |
+| **F15** poll pending | Emulator `0xffff_ffff` / ring-full `0` | **Published live RTL:** `POLL_PENDING=0`, `POLL_OK=1`, `POLL_ERR=2`, `ENQ_FULL=all-ones` (`g6lc_ai_instr_pkg`). Emulator pending value is not hardware. | B1 poll matches T0 |
 
 SoC snapshot (SMT2, QEMU firmware, OoO, H, RVV, stream): [`../../architecture/current-stage.md`](../../architecture/current-stage.md).
+
+### 2.2 Reader defects found by pointing the ingest at the live packages (2026-09)
+
+The rows above said "published". They were — but the *reader* could not read them, so every
+one of those closures was theoretical. Pointing `parse_ai_island_cfg_pkg` /
+`parse_ai_desc_pkg` / `parse_cap_window_*` at the live tree found four defects with a
+single shape: **the design names its constants, and the reader only understood numerals.**
+
+| Defect | Symptom | Fix |
+|---|---|---|
+| SKU literals refer to named constants (`AI_DRAM_CHAN_SHIFT_DEFAULT`, `AI_MAX_AR_OUT_LIVE`, `AI_DRAM_SIM_AXI`) | `parse_ai_island_cfg_pkg` returned `Err("bad integer: AIDRAMCHANSHIFTDEFAULT")` — **the entire island model was missing**, not one field | `collect_symbols` builds a symbol table from the package's own `localparam` scalars; an unresolved identifier is an error, never a zero |
+| Capability-window case labels are symbolic (`CAP_OFF_DRAM_GBPS[15:2]:`) | packed `dram_gbps` / `queues` words silently unsourced | `parse_case_cap_name` reads the label as the capability's own name; the numeric form stays as a fallback |
+| `block_mnk` is a shift-OR of `CAP_BLOCK_*_SHIFT`, and `DtypeMask` defaults to `AiIslandDtypeMask` | recovered from an `always_comb` expression and an overridable module parameter, or not at all | both are localparams now, so `ai_cfg.rs` reads them from the **package** and the cap-window parse is the fallback |
+| Flag accessors index by constant (`d.flags[FLAG_DTYPE_SHIFT +: FLAG_DTYPE_WIDTH]`) | `flags_layout` came back `None`, so `dtype`/`ew`/`sp24` were unresolved despite being published | `parse_flag_localparam` prefers `FLAG_*_SHIFT`/`_WIDTH`; the range-parsing accessor path stays as a fallback |
+
+**The lesson is a reader-side one and it generalises:** a package that graduates from literals
+to named constants looks *more* published to a human and *less* published to an ingest. A
+closure claimed on the design side is not closed until something reads it, which is why the
+live-file tests now assert the published state rather than asserting its absence.
+
+### 2.3 A derived placement that collided with a published one
+
+`AiRegMap::from_desc_layout` placed the status register at `desc_base + desc_bytes`, i.e.
+`0x140 + 0x40 = 0x180` on the reference package — which is exactly `PMU_OFF_R_BEATS`. A
+guest reading status got a beat counter, and a guest writing status poked the PMU window.
+Nothing failed loudly, because both are plausible 32-bit values.
+
+`AiRegMap::from_model` now takes the control surface from `REG_OFF_*` and only falls back to
+the derived placement when the design publishes none. The two are distinguished by
+`status_packed`, because the published register is packed (`busy | last_status << 16`) while
+the derived fallback is a bare status code — reporting the packed layout for an offset the
+design never named would be an invention of the same kind.
+
+**Standing ask (unchanged):** `0x110` done-ticket, `0x114` done-status and `0x118`/`0x11C`
+`desc_ptr` are still register-map comments rather than localparams. They are the remaining
+quarter of F1; the doorbell-and-claim path does not need them, the DMA-fetch path does.
 
 ## 3. What the asks unblock, in dependency order
 

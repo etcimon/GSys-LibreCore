@@ -32,6 +32,7 @@ pub mod c;
 pub mod csr;
 pub mod device;
 pub mod exec;
+pub mod gemm;
 pub mod insn;
 pub mod mem;
 pub mod mmu;

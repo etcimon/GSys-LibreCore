@@ -154,7 +154,7 @@ fourth, and it is qualitatively different from the others:
 | `sim` | host, hostless | ABI pack/unpack, IR |
 | `virt-card` | host, soft device | contract conformance, eventfd/UIO shape |
 | SV HARD | host driving Verilator | the real RTL, at RTL speed |
-| **`qemu-uio`** (new) | **inside guest Linux on the emulator** | the *whole* path: Linux UIO bind → mmap of the `g6lc,ai-matrix` node → doorbell → PLIC-8 IRQ → DONE claim → descriptor ABI |
+| **`qemu-uio`** (**landed**, `ai-tensor/python/ai_tensor/qemu_uio.py`) | **inside guest Linux on the emulator** | the *whole* path: Linux UIO bind → mmap of the `g6lc,ai-matrix` node → doorbell → PLIC-8 IRQ → DONE claim → descriptor ABI |
 
 This is the only backend where the **guest kernel driver, the DTS node, the interrupt path and the
 userspace runtime are all in the loop at once**, and it runs at boot-to-shell speed rather than at
@@ -166,12 +166,29 @@ userspace runtime are all in the loop at once**, and it runs at boot-to-shell sp
    boots Linux with the `g6lc,ai-matrix` node present (`compatible = "g6lc,ai-matrix"`, `reg` at
    `0x4000_0000`/`0x1000`, `interrupts = <8>`, plus the `g6lc,acc-tile-*` / `g6lc,macs-per-cycle` /
    `g6lc,queues` discovery helpers).
-2. In-guest UIO binds the node; ai-tensor sets `AI_TENSOR_UIO` to the guest UIO path (the emulator
-   documents the mapping from the existing `virt://virt-ai-pcie/island0` form).
+2. In-guest UIO binds the node. `uio_pdrv_genirq` matches it two ways: the DTS now carries
+   `compatible = "g6lc,ai-matrix", "generic-uio"`, and the OpenWrt command line also sets
+   `uio_pdrv_genirq.of_id=g6lc,ai-matrix` so an out-of-date DTB still binds. ai-tensor sets
+   `AI_TENSOR_UIO` to the guest UIO path (a `virt://` path still selects `virt-card`).
 3. ai-tensor reads geometry from the **CAP window**, not from the DTS helpers — same rule as on real
-   hardware.
+   hardware. The accumulator tile comes from the packed `block_mnk` word, which is the bound every
+   descriptor dimension must respect (F12).
 4. `gemm_s8` submits a `Desc64`, rings the doorbell, waits on the eventfd/IRQ, claims DONE, and
    compares against the same INT8 golden as `ai_gemm_s8_smoke`.
+
+**Operands need a guest-physical home.** The island DMAs `A`/`B`/`C`, so they cannot live in
+ordinary pageable memory. `ariane-ai.dts` carves a `no-map` `reserved-memory` region out of the
+same DRAM the cores use — one `memory@` node still, a carve-out and not a second address space —
+and the node points at it with `memory-region`. ai-tensor takes the window as
+`AI_TENSOR_DMA_BASE`/`AI_TENSOR_DMA_SIZE` and refuses to start without a base, because an invented
+DMA base corrupts whatever actually lives there.
+
+**What the emulator side had to gain to make this real.** The device model used to record
+descriptors and completion words without computing anything, so an in-guest test could only ask
+"did a completion appear" — which passes on a device that multiplies nothing. B3 now reads the
+operands and writes `C` (`g6q-vm/src/gemm.rs`), and the published control surface
+(`REG_OFF_{CTL,STATUS,DOORBELL,CPL}`) is ingested and implemented, so the sequence above is the
+sequence the emulator actually executes.
 
 **Cross-connect discipline** ([`../../ai-tensor/AGENTS.md`](../../ai-tensor/AGENTS.md) §4): the
 emulator consumes the contract by **pin**; if the silicon docs change opcodes, CSRs or the descriptor,

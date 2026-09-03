@@ -12,8 +12,10 @@ be cited as. The recurring answer to the last is *"a hypothesis and a checkpoint
 `g6lc-soc`: OpenSBI, U-Boot U1–U3, EDK2 E2–E3, OpenWrt, `CPUINFO-DONE` on SPI). Q3 native VM and
 Q4 B1 machine are **in progress and used** (F/D/RVC, AI island helpers, dual-hart FDT). Q5–Q9
 partial (checkpoint/replay, B2 plugin, PMU, virt profile, matrix). Loader ladder and AI DESC/CPL
-join are **firmware/card stand-in**, not a pinned PCIe function. Never cite this as Variane
-evidence.
+join are **firmware/card stand-in**, not a pinned PCIe function. **linux-dist submodules** are
+gitlinked (`pins.toml` `fork_ref`): etcimon openwrt `37fc534` (G6LC overlay), edk2 `4460122`
+(sstatus/trap-frame); feeds at openwrt-24.10 HEADs. Compile still uses official trees +
+`g6lc_qemu/openwrt/patches`. Never cite this as Variane evidence.
 
 ---
 
@@ -176,6 +178,24 @@ backend.
 window, submits a `gemm_s8` descriptor, takes the PLIC-8 interrupt, claims DONE, and matches the same
 INT8 golden as `ai_gemm_s8_smoke`. PMU group 4 counters move. Trap fidelity holds (reserved
 `funct3=111`, out-of-range tile index, `TileLdEn=0` ⇒ `ai.ldt` illegal, U-mode without `aiperm`).
+
+**Status (2026-09) — the pieces of that gate, and which are landed.**
+
+| Piece | State |
+|---|---|
+| B3 island **computes** the GEMM against guest memory | **Landed** (`g6q-vm/src/gemm.rs`); `ldc = n`, s8×s8→s32, tile bound and status codes from the model |
+| Published control surface `CTL`/`STATUS`/`DOORBELL`/`CPL` ingested and implemented | **Landed** (`REG_OFF_*` → `AiIslandConfig::reg_offsets` → `AiRegMap::from_model`) |
+| Guest drives a job through MMIO alone, `C` matches the golden | **Landed** — `a_guest_can_drive_a_gemm_entirely_through_the_published_mmio_window` |
+| ai-tensor **`qemu-uio` backend** | **Landed** (`ai-tensor/python/ai_tensor/qemu_uio.py`, 19 protocol tests) |
+| DTS: `generic-uio` fallback compatible, `no-map` operand carve-out, `memory-region` | **Landed** in `corev_apu/bootrom/ariane-ai.dts` |
+| OpenWrt: `CONFIG_UIO`/`CONFIG_UIO_PDRV_GENIRQ`/`CONFIG_OF_RESERVED_MEM`, `uio_pdrv_genirq.of_id` | **Landed** in `kernel-virt.config` + seed patch 0002 (`git apply --check` re-verified) |
+| B3 raises the island's PLIC source rather than poking `mip` | **Landed**; falls back to `mip` when the tree names no line, and says so |
+| **B1 emitted C**: `sysbus_connect_irq` for the island + `qemu_irq_raise` in the device | **Open** — the generated machine creates the island but never wires its line |
+| ai-tensor **in the initramfs**; a real in-guest run | **Open** — needs a riscv64 build of the package staged into the rootfs |
+| PMU group 4 moving under an in-guest `perf stat` | **Open** (Q7) |
+
+The first seven are host-verifiable and were verified. The last three need a guest build,
+and none of them is Variane evidence in any case.
 
 **Cross-connect:** contract consumed by pin from
 [`../ai-matrix/isa-encoding.md`](../ai-matrix/isa-encoding.md); no opcode is defined here.

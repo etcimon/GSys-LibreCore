@@ -297,13 +297,56 @@ impl Hart {
                 self.csr.mip &= !((1u64 << 11) | (1u64 << 9));
             }
         }
+        self.run_pending_ai_job(mem);
         if let Some(a) = mem.ai_island() {
-            if a.irq_pending {
-                self.csr.mip |= 1u64 << 11;
+            let (pending, source) = (a.irq_pending, a.irq_source);
+            match source {
+                // Routed: raise the island's own source so the guest claims and completes
+                // it through the controller, which is the discipline the RTL requires and
+                // the one an in-guest driver has to get right.
+                Some(src) if pending => {
+                    if let Some(p) = mem.plic_mut() {
+                        p.pending |= 1u32 << src;
+                    }
+                }
+                Some(src) => {
+                    if let Some(p) = mem.plic_mut() {
+                        p.pending &= !(1u32 << src);
+                    }
+                }
+                // Unrouted: the device tree did not say which line the island drives, so
+                // there is nothing to claim. Report it directly rather than inventing a
+                // source id, and leave the gap visible.
+                None if pending => self.csr.mip |= 1u64 << 11,
+                None => {}
             }
         }
 
         None
+    }
+
+    /// Execute a job a doorbell write latched, and apply its memory effects.
+    ///
+    /// The island is a device inside `mem`, so it cannot both hold the job and write `C`.
+    /// This is the seam where the two halves meet: take the job, compute against guest
+    /// memory, write the results back, then report the status to the device.
+    fn run_pending_ai_job(&mut self, mem: &mut PhysMem) {
+        let Some(model) = self.ai_model.clone() else {
+            return;
+        };
+        let Some(ev) = mem.ai_island_mut().and_then(|a| a.take_pending_job()) else {
+            return;
+        };
+        let job = crate::gemm::execute(mem, &ev, &model);
+        for (addr, val) in &job.c_writes {
+            let _ = mem.write_le::<4>(*addr, *val as u32 as u64);
+        }
+        let write = mem
+            .ai_island_mut()
+            .and_then(|a| a.complete_pending_job(ev, job.status));
+        if let Some((addr, word)) = write {
+            let _ = mem.write_le::<8>(addr, word);
+        }
     }
 
     /// Run until a halt or `limit` steps, comparing each retired record against a
@@ -5576,6 +5619,134 @@ mod tests {
         assert_eq!(ticket, 0);
         assert_eq!(status, 0);
         assert_eq!(h.regs.get(6), word);
+    }
+
+    /// The whole in-guest path, driven only through MMIO stores and loads.
+    ///
+    /// This is the shape a UIO-backed runtime uses: no custom instruction, no host-side
+    /// help — enable, fill the descriptor latch, ring the bell, read the status, read `C`.
+    /// It is the gate that separates "the completion word appeared" from "the island
+    /// computed something", which every earlier island smoke could not tell apart.
+    #[test]
+    fn a_guest_can_drive_a_gemm_entirely_through_the_published_mmio_window() {
+        use crate::device::AiIsland;
+        use crate::mem::{Device, DeviceKind, Region};
+
+        let mut h = hart();
+        let mut m = mem();
+        let ai_model = crate::device::tests::model_with_control_surface();
+        let mut ai_island = AiIsland::new();
+        ai_island.set_ai_model(&ai_model);
+        const ISLAND: u64 = 0x4000_0000;
+        m.add_device(Device::new(ISLAND, 0x1000, DeviceKind::AiIsland(ai_island)));
+        h.ai_model = Some(ai_model.clone());
+
+        // Operand and result buffers in guest DRAM.
+        let (a_ptr, b_ptr, c_ptr, done_ptr) =
+            (0x9000_0000u64, 0x9000_1000, 0x9000_2000, 0x9000_3000);
+        m.add(Region::new(0x9000_0000, 0x4000));
+        // A = [[1, 2], [3, 4]], B = [[5, 6], [7, 8]]  =>  C = [[19, 22], [43, 50]]
+        for (i, v) in [1i8, 2, 3, 4].iter().enumerate() {
+            m.write_le::<1>(a_ptr + i as u64, *v as u8 as u64).unwrap();
+        }
+        for (i, v) in [5i8, 6, 7, 8].iter().enumerate() {
+            m.write_le::<1>(b_ptr + i as u64, *v as u8 as u64).unwrap();
+        }
+
+        // Every offset below comes from the model, not from a constant in this test.
+        let reg = |n: &str| ISLAND + ai_model.config.reg_offset(n).unwrap();
+        let desc = |field: &str| ISLAND + 0x140 + ai_model.desc_layout.offset(field).unwrap();
+        let irq_bit = ai_model.desc_layout.flags_layout.unwrap().irq_bit;
+
+        // CTL: enable + completion-word write.
+        m.write_le::<4>(reg("ctl"), 0b11).unwrap();
+
+        // Descriptor: version 1, OP_GEMM, 2x2x2, lda = ldb = 2, IRQ requested.
+        // The latch window is word-addressed, so `version` and `op` are the two halves of
+        // its first 32-bit word rather than two independently writable registers.
+        assert_eq!(
+            desc("op"),
+            desc("version") + 2,
+            "op shares word 0 with version"
+        );
+        m.write_le::<4>(desc("version"), 1 | (1 << 16)).unwrap();
+        m.write_le::<4>(desc("flags"), 1u64 << irq_bit).unwrap();
+        m.write_le::<4>(desc("m"), 2).unwrap();
+        m.write_le::<4>(desc("n"), 2).unwrap();
+        m.write_le::<4>(desc("k"), 2).unwrap();
+        m.write_le::<4>(desc("ld_ab"), 2 | (2 << 16)).unwrap();
+        m.write_le::<8>(desc("ptr_a"), a_ptr).unwrap();
+        m.write_le::<8>(desc("ptr_b"), b_ptr).unwrap();
+        m.write_le::<8>(desc("ptr_c"), c_ptr).unwrap();
+        m.write_le::<8>(desc("ptr_done"), done_ptr).unwrap();
+
+        // Ring the doorbell, then retire one instruction so the island runs.
+        m.write_le::<4>(reg("doorbell"), 1).unwrap();
+        m.write_le::<4>(0x8000_0000, 0x00000013).unwrap(); // nop
+        assert_eq!(h.step(&mut m, 64), None);
+
+        // C is in guest memory, row-major with ldc = n.
+        let c = |i: u64| m.read_le::<4>(c_ptr + i * 4).unwrap() as u32 as i32;
+        assert_eq!(
+            [c(0), c(1), c(2), c(3)],
+            [19, 22, 43, 50],
+            "the island must actually multiply, not merely complete"
+        );
+
+        // The status register reports idle with ST_OK, and the completion word landed.
+        assert_eq!(m.read_le::<4>(reg("status")).unwrap(), 0);
+        let word = m.read_le::<8>(done_ptr).unwrap();
+        let cl = ai_model.desc_layout.completion.unwrap();
+        assert_eq!(word >> cl.status_bit_low & 0xffff, 0, "ST_OK");
+        assert_eq!(word & 0xffff_ffff, 1, "first ticket");
+
+        // The descriptor asked for an interrupt, so the source is asserted; claiming it
+        // through the completion register drops it, which must happen before the PLIC is
+        // completed or a level-set re-arms.
+        assert!(m.ai_island().unwrap().irq_pending);
+        m.write_le::<4>(reg("cpl"), 1).unwrap();
+        assert!(!m.ai_island().unwrap().irq_pending);
+    }
+
+    #[test]
+    fn a_shape_beyond_the_accumulator_tile_completes_with_an_error_and_writes_no_c() {
+        use crate::device::AiIsland;
+        use crate::mem::{Device, DeviceKind, Region};
+
+        let mut h = hart();
+        let mut m = mem();
+        let mut ai_model = crate::device::tests::model_with_control_surface();
+        // A part whose accumulator tile is 2: a 4-wide request must be refused, and the
+        // refusal must come from the model rather than from a limit typed into the device.
+        ai_model.config.acc_tile_m = 2;
+        ai_model.config.acc_tile_n = 2;
+        ai_model.config.acc_tile_k = 2;
+        let mut ai_island = AiIsland::new();
+        ai_island.set_ai_model(&ai_model);
+        const ISLAND: u64 = 0x4000_0000;
+        m.add_device(Device::new(ISLAND, 0x1000, DeviceKind::AiIsland(ai_island)));
+        h.ai_model = Some(ai_model.clone());
+
+        m.add(Region::new(0x9000_0000, 0x4000));
+        let reg = |n: &str| ISLAND + ai_model.config.reg_offset(n).unwrap();
+        let desc = |f: &str| ISLAND + 0x140 + ai_model.desc_layout.offset(f).unwrap();
+
+        m.write_le::<4>(reg("ctl"), 0b11).unwrap();
+        m.write_le::<4>(desc("version"), 1 | (1 << 16)).unwrap();
+        m.write_le::<4>(desc("m"), 4).unwrap();
+        m.write_le::<4>(desc("n"), 4).unwrap();
+        m.write_le::<4>(desc("k"), 4).unwrap();
+        m.write_le::<4>(desc("ld_ab"), 4 | (4 << 16)).unwrap();
+        m.write_le::<8>(desc("ptr_a"), 0x9000_0000).unwrap();
+        m.write_le::<8>(desc("ptr_b"), 0x9000_1000).unwrap();
+        m.write_le::<8>(desc("ptr_c"), 0x9000_2000).unwrap();
+        m.write_le::<4>(reg("doorbell"), 1).unwrap();
+        m.write_le::<4>(0x8000_0000, 0x00000013).unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+
+        // ST_ERR in the high half, and C untouched.
+        assert_eq!(m.read_le::<4>(reg("status")).unwrap(), 1 << 16);
+        assert_eq!(m.read_le::<4>(0x9000_2000).unwrap(), 0);
     }
 
     #[test]

@@ -436,23 +436,50 @@ fn parse_flags_layout(text: &str) -> Option<g6q_core::model::DescFlagsLayout> {
     let mut layout = g6q_core::model::DescFlagsLayout::default();
     let mut found = false;
 
-    // Helper functions `desc_prio` and `desc_irq` return explicit bit ranges.
-    if let Some(body) = extract_function_body(text, "desc_prio") {
-        if let Some((_, high, low)) = body.split(';').find_map(parse_return_range) {
-            layout.priority_shift = low;
-            layout.priority_mask = (1u32 << (high - low + 1)) - 1;
-            found = true;
-        }
+    // Named `FLAG_*_SHIFT` / `FLAG_*_WIDTH` localparams are the published form, and they
+    // are preferred over reading an accessor body: an accessor that indexes by constant
+    // (`d.flags[FLAG_DTYPE_SHIFT +: FLAG_DTYPE_WIDTH]`) carries no literal range at all,
+    // so a range-only reader sees a package that publishes nothing.
+    let shift = |n: &str| parse_flag_localparam(text, n);
+    let field_from_params = |base: &str| -> Option<FlagField> {
+        let s = shift(&format!("FLAG_{base}_SHIFT"))?;
+        let w = shift(&format!("FLAG_{base}_WIDTH"))?;
+        Some(FlagField::from_range(s + w.saturating_sub(1), s))
+    };
+
+    if let (Some(s), Some(w)) = (shift("FLAG_PRIO_SHIFT"), shift("FLAG_PRIO_WIDTH")) {
+        layout.priority_shift = s;
+        layout.priority_mask = (1u32 << w) - 1;
+        found = true;
     }
-    if let Some(body) = extract_function_body(text, "desc_irq") {
-        if let Some(bit) = body.split(';').find_map(parse_return_bit) {
-            layout.irq_bit = bit;
-            found = true;
+    if let Some(b) = shift("FLAG_IRQ_SHIFT") {
+        layout.irq_bit = b;
+        found = true;
+    }
+
+    // Helper functions `desc_prio` and `desc_irq` return explicit bit ranges.
+    if !found {
+        if let Some(body) = extract_function_body(text, "desc_prio") {
+            if let Some((_, high, low)) = body.split(';').find_map(parse_return_range) {
+                layout.priority_shift = low;
+                layout.priority_mask = (1u32 << (high - low + 1)) - 1;
+                found = true;
+            }
+        }
+        if let Some(body) = extract_function_body(text, "desc_irq") {
+            if let Some(bit) = body.split(';').find_map(parse_return_bit) {
+                layout.irq_bit = bit;
+                found = true;
+            }
         }
     }
 
     // Per-field arithmetic-type accessors, when the package publishes them.
     let field_from_fn = |name: &str| -> Option<FlagField> {
+        let short = name.strip_prefix("desc_").unwrap_or(name).to_uppercase();
+        if let Some(f) = field_from_params(&short) {
+            return Some(f);
+        }
         let body = extract_function_body(text, name)?;
         let (_, high, low) = body.split(';').find_map(parse_return_range)?;
         Some(FlagField::from_range(high, low))
@@ -480,7 +507,10 @@ fn parse_flags_layout(text: &str) -> Option<g6q_core::model::DescFlagsLayout> {
         layout.ew = Some(f);
         found = true;
     }
-    if let Some(body) = extract_function_body(text, "desc_sp24") {
+    if let Some(bit) = shift("FLAG_SP24_SHIFT") {
+        layout.sp24_bit = Some(bit);
+        found = true;
+    } else if let Some(body) = extract_function_body(text, "desc_sp24") {
         if let Some(bit) = body.split(';').find_map(parse_return_bit) {
             layout.sp24_bit = Some(bit);
             found = true;
@@ -492,6 +522,39 @@ fn parse_flags_layout(text: &str) -> Option<g6q_core::model::DescFlagsLayout> {
     } else {
         None
     }
+}
+
+/// Read a `localparam int unsigned FLAG_<NAME> = <n>;` value from the descriptor package.
+///
+/// Deliberately narrow: only a plain decimal or hex literal is accepted, because a flag
+/// position recovered from anything more elaborate would be a guess about the ABI.
+fn parse_flag_localparam(text: &str, name: &str) -> Option<u32> {
+    // Line-oriented on purpose. Splitting on `;` would fold a preceding `//` comment into
+    // the statement, and the live package puts one immediately above the flag block --
+    // which silently hid the first constant of the group.
+    for line in text.lines() {
+        let stmt = line.split("//").next().unwrap_or(line).trim();
+        let stmt = stmt.trim_end_matches(';').trim();
+        if !stmt.starts_with("localparam") || !stmt.contains(name) {
+            continue;
+        }
+        let (lhs, rhs) = stmt.split_once('=')?;
+        let decl = lhs
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .next_back()?;
+        if decl != name {
+            continue;
+        }
+        let v = rhs.trim().trim_end_matches(';').trim();
+        let v = v.rsplit_once('\'').map_or(v, |(_, r)| r);
+        let (radix, digits) = match v.strip_prefix(['h', 'H']) {
+            Some(d) => (16, d),
+            None => (10, v.strip_prefix(['d', 'D']).unwrap_or(v)),
+        };
+        return u32::from_str_radix(&digits.replace('_', ""), radix).ok();
+    }
+    None
 }
 
 fn parse_return_range(stmt: &str) -> Option<(&str, u32, u32)> {
@@ -755,13 +818,13 @@ endpackage
         assert_eq!((flags >> f.dtype_shift) & f.dtype_mask, 0, "dtype stays 00");
     }
 
-    /// The live design package must not silently look like it resolves the type fields.
+    /// The live design package now publishes every `flags` subfield as a localparam.
     ///
-    /// It publishes `desc_prio`/`desc_irq` and a combined comment only, so `ew`/`sp24` stay
-    /// `None`. If this starts failing because the design added the accessors, that is the
-    /// good outcome — update the assertion and the F10 row in `RTL_FEEDBACK.md`.
+    /// F5 and F10 are closed on the design: `dtype`, `accmode`, `ew` and `sp24` are named
+    /// separately instead of sharing one comment span, so a sub-byte or sparse request is
+    /// expressible rather than indistinguishable from a mis-set `dtype`.
     #[test]
-    fn the_real_desc_package_leaves_arith_type_unresolved() {
+    fn the_real_desc_package_publishes_every_flag_subfield() {
         let path = std::path::Path::new(r"E:/cva6/corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv");
         if !path.exists() {
             return;
@@ -770,13 +833,19 @@ endpackage
         let layout = parse_ai_desc_pkg(&text).unwrap();
         let f = layout
             .flags_layout
-            .expect("prio/irq accessors are published");
+            .expect("FLAG_*_SHIFT localparams are published");
         assert_eq!(f.irq_bit, 2);
         assert_eq!(f.priority_shift, 16);
+        assert_eq!(f.priority_mask, 0x0f);
         assert!(
-            !f.arith_type_resolved(),
-            "if the design now publishes desc_dtype/desc_accmode/desc_ew/desc_sp24, close F10"
+            f.arith_type_resolved(),
+            "desc_dtype/accmode/ew/sp24 are published; F10 is closed on the design"
         );
+        assert!(!f.dtype_combined, "dtype must not be read as a blob");
+        assert_eq!(f.dtype_shift, 8);
+        assert_eq!(f.dtype_mask, 0x3);
+        assert_eq!(f.ew.unwrap().shift, 12);
+        assert_eq!(f.sp24_bit, Some(14));
     }
 
     #[test]

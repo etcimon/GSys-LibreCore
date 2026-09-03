@@ -645,6 +645,22 @@ pub struct AiRegMap {
     pub status: u64,
     /// Completion register (device-owned, not a descriptor field).
     pub completion: u64,
+    /// Control register: enable, and completion-word DMA. `None` when unpublished.
+    pub ctl: Option<u64>,
+    /// Doorbell: writing it submits the latched descriptor. `None` when unpublished.
+    ///
+    /// Without this a guest can fill the descriptor window and never start a job, which
+    /// is precisely the state ask F1 describes.
+    pub doorbell: Option<u64>,
+    /// Completion claim register: write-1 pops the completion FIFO head.
+    pub cpl: Option<u64>,
+    /// True when `status` came from the design's published register map.
+    ///
+    /// The published register is *packed* — a busy flag plus the last job's status in the
+    /// high half — while the derived bring-up fallback is a bare status code at whatever
+    /// offset follows the descriptor. Reporting the packed layout for an offset the design
+    /// never named would be an invention, so the two are distinguished rather than merged.
+    pub status_packed: bool,
 }
 
 impl Default for AiRegMap {
@@ -664,6 +680,10 @@ impl Default for AiRegMap {
             ptr_done: 0x40,
             status: 0x48,
             completion: 0x50,
+            ctl: None,
+            doorbell: None,
+            cpl: None,
+            status_packed: false,
         }
     }
 }
@@ -681,6 +701,10 @@ impl AiRegMap {
     /// with holes in it. `status` and `completion` are device registers rather than
     /// descriptor fields, so they are placed immediately after the descriptor using the
     /// layout's own `desc_bytes` — derived, not chosen.
+    ///
+    /// Prefer [`Self::from_model`] when a configuration is available: the derived
+    /// placement is only correct by accident, and on the reference package it lands the
+    /// status register on top of the published PMU window.
     pub fn from_desc_layout(layout: &g6q_core::model::AiDescLayout, base: u64) -> Self {
         let mut map = Self::default();
         let set = |slot: &mut u64, name: &str| {
@@ -703,6 +727,38 @@ impl AiRegMap {
             map.status = base + layout.desc_bytes;
             map.completion = base + layout.desc_bytes + 8;
         }
+        map
+    }
+
+    /// Resolve the window from a full island model: descriptor fields *and* the published
+    /// control surface.
+    ///
+    /// The descriptor half comes from [`Self::from_desc_layout`]. The control half comes
+    /// from the design's own `REG_OFF_*` names, so `status` stops being derived as
+    /// "just past the descriptor" — a derivation that happens to collide with the
+    /// published PMU window on the reference package, silently shadowing the status
+    /// register behind a counter.
+    ///
+    /// A name the design does not publish keeps the derived fallback, and the doorbell
+    /// stays `None`, so [`AiIslandConfig::control_surface_resolved`] can report that the
+    /// island is addressable but not operable rather than pretending otherwise.
+    ///
+    /// [`AiIslandConfig::control_surface_resolved`]: g6q_core::model::AiIslandConfig::control_surface_resolved
+    pub fn from_model(model: &g6q_core::model::AiIslandModel) -> Self {
+        let base = model.config.desc_base.unwrap_or(0);
+        let mut map = Self::from_desc_layout(&model.desc_layout, base);
+        if let Some(off) = model.config.reg_offset("status") {
+            map.status = off;
+            map.status_packed = true;
+        }
+        if let Some(off) = model.config.reg_offset("cpl") {
+            // The completion register and the claim register are the same address: reading
+            // returns the head of the completion FIFO, writing one pops it.
+            map.completion = off;
+            map.cpl = Some(off);
+        }
+        map.ctl = model.config.reg_offset("ctl");
+        map.doorbell = model.config.reg_offset("doorbell");
         map
     }
 }
@@ -760,6 +816,11 @@ pub struct AiIsland {
     pub version: u16,
     /// Last submitted op.
     pub op: u16,
+    /// Packed descriptor flag word: interrupt request, priority, arithmetic mode.
+    ///
+    /// Latched like any other descriptor field. Without it a doorbell submission could
+    /// never request a completion interrupt, so the in-guest IRQ path would be untestable.
+    pub flags: u32,
     /// M dimension.
     pub m: u32,
     /// N dimension.
@@ -813,6 +874,25 @@ pub struct AiIsland {
     pub pmu_cycles: u32,
     /// Sustained DRAM bandwidth in 1/1000 GB/s from the last GEMM, or zero if unresolved.
     pub pmu_gbps_x1000: u32,
+    /// `CTL[0]`: island enabled. A doorbell on a disabled island completes `ST_DISABLED`.
+    pub enabled: bool,
+    /// `CTL[1]`: write the completion word to `ptr_done` after a successful job.
+    pub wr_cpl_en: bool,
+    /// Status of the most recently completed job, reported in the status register.
+    pub last_status: u16,
+    /// A job latched by a doorbell write and not yet executed.
+    ///
+    /// The island reads operands from guest memory, but it *lives* in that memory's
+    /// device list, so it cannot hold the mutable borrow needed to write `C`. The
+    /// doorbell therefore records the job and [`AiIsland::take_pending_job`] hands it to
+    /// the caller, exactly as `queue_qfence` hands back its completion writes.
+    pub pending_job: Option<g6q_diag::ai_tensor::AiTensorEvent>,
+    /// PLIC source line the island is wired to, when the device tree states one.
+    ///
+    /// `None` means the interrupt is not routable: the island can still set
+    /// [`Self::irq_pending`], but nothing may claim it through the controller. Inventing
+    /// a source number here would make an unroutable design look wired.
+    pub irq_source: Option<u32>,
 }
 
 impl AiIsland {
@@ -884,8 +964,7 @@ impl AiIsland {
     /// so a caller can say "the guest cannot address this island" instead of silently
     /// running against an invented address map.
     pub fn set_ai_model(&mut self, model: &g6q_core::model::AiIslandModel) {
-        let desc_base = model.config.desc_base.unwrap_or(0);
-        self.regmap = AiRegMap::from_desc_layout(&model.desc_layout, desc_base);
+        self.regmap = AiRegMap::from_model(model);
         self.cap_base = model.config.cap_base;
         self.codes = AiStatusCodes::from_desc_layout(&model.desc_layout);
         if self.status != self.codes.ok {
@@ -1282,6 +1361,112 @@ impl AiIsland {
     pub fn drain_events(&mut self) -> Vec<g6q_diag::ai_tensor::AiTensorEvent> {
         std::mem::take(&mut self.events)
     }
+
+    /// The descriptor currently latched in the MMIO shadow window, as a tensor event.
+    ///
+    /// This is the doorbell path: a guest writes descriptor words into the latch window
+    /// and rings the bell, rather than pointing at a descriptor in memory. The two paths
+    /// must agree on the descriptor image, so the same event type carries both.
+    fn latched_event(&self) -> g6q_diag::ai_tensor::AiTensorEvent {
+        g6q_diag::ai_tensor::AiTensorEvent {
+            version: self.version,
+            op: self.op,
+            flags: self.flags,
+            m: self.m,
+            n: self.n,
+            k: self.k,
+            ld_ab: self.ld_ab,
+            ptr_a: self.ptr_a,
+            ptr_b: self.ptr_b,
+            ptr_c: self.ptr_c,
+            ptr_scale: self.ptr_scale,
+            ptr_done: self.ptr_done,
+            ..Default::default()
+        }
+    }
+
+    /// Take the job a doorbell write latched, if any.
+    ///
+    /// The caller owns the mutable memory borrow and is expected to run the job (see
+    /// [`crate::gemm::plan`]) and then report the outcome through
+    /// [`Self::complete_pending_job`].
+    pub fn take_pending_job(&mut self) -> Option<g6q_diag::ai_tensor::AiTensorEvent> {
+        self.pending_job.take()
+    }
+
+    /// Record the outcome of a job the caller executed on the island's behalf.
+    ///
+    /// Returns the `(address, word)` completion write the island would perform, when the
+    /// descriptor asked for one and the control register enables it. As everywhere else
+    /// in this device, the write is returned rather than performed because the island is
+    /// borrowed from the memory it would write.
+    pub fn complete_pending_job(
+        &mut self,
+        mut ev: g6q_diag::ai_tensor::AiTensorEvent,
+        status: u16,
+    ) -> Option<(u64, u64)> {
+        self.ticket = self.ticket.wrapping_add(1);
+        self.status = status;
+        self.last_status = status;
+        let cfg = self
+            .ai_model
+            .as_ref()
+            .map(|m| m.config.clone())
+            .unwrap_or_default();
+
+        ev.order = self.event_order;
+        ev.ticket = self.ticket;
+        ev.status = status;
+        ev.done = true;
+        (
+            ev.pmu_r_beats,
+            ev.pmu_w_beats,
+            ev.pmu_cycles,
+            ev.pmu_gbps_x1000,
+        ) = Self::pmu_values_for_event(&ev, &cfg);
+        (
+            self.pmu_r_beats,
+            self.pmu_w_beats,
+            self.pmu_cycles,
+            self.pmu_gbps_x1000,
+        ) = (
+            ev.pmu_r_beats,
+            ev.pmu_w_beats,
+            ev.pmu_cycles,
+            ev.pmu_gbps_x1000,
+        );
+
+        // The completion interrupt is per-descriptor: the flags word asks for it, and the
+        // bit position comes from the ingested layout rather than a convention here.
+        let wants_irq = self
+            .ai_model
+            .as_ref()
+            .and_then(|m| m.desc_layout.flags_layout)
+            .map(|fl| (ev.flags >> fl.irq_bit) & 1 == 1)
+            .unwrap_or(false);
+        if wants_irq {
+            self.irq_pending = true;
+        }
+
+        let word = self.pack_completion_word(self.ticket as u64, status as u64);
+        let write = if self.wr_cpl_en && ev.ptr_done != 0 {
+            Some((ev.ptr_done, word))
+        } else {
+            None
+        };
+        self.events.push(ev);
+        self.event_order += 1;
+        write
+    }
+
+    /// The status word a guest reads from the published status register.
+    ///
+    /// Layout mirrors the island's own register map: a busy flag in the low bits and the
+    /// status of the last completed job in the high half.
+    fn status_word(&self) -> u64 {
+        let busy = u64::from(self.pending_job.is_some());
+        busy | ((self.last_status as u64) << 16)
+    }
 }
 
 impl MmioDevice for AiIsland {
@@ -1299,9 +1484,20 @@ impl MmioDevice for AiIsland {
             return v;
         }
         let r = self.regmap;
+        // The published control surface takes precedence over the derived descriptor
+        // window, so a design whose descriptor latch abuts its control registers still
+        // reports control correctly.
+        if Some(offset) == r.ctl {
+            return u64::from(self.enabled) | (u64::from(self.wr_cpl_en) << 1);
+        }
+        if Some(offset) == r.doorbell {
+            // Write-only in the island; reading back the last doorbell would invent a
+            // register the design does not describe.
+            return 0;
+        }
         match offset {
             o if o == r.version_op => ((self.op as u64) << 16) | (self.version as u64),
-            o if o == r.flags => 0,
+            o if o == r.flags => self.flags as u64,
             o if o == r.m => self.m as u64,
             o if o == r.n => self.n as u64,
             o if o == r.k => self.k as u64,
@@ -1311,6 +1507,7 @@ impl MmioDevice for AiIsland {
             o if o == r.ptr_c => self.ptr_c,
             o if o == r.ptr_scale => self.ptr_scale,
             o if o == r.ptr_done => self.ptr_done,
+            o if o == r.status && r.status_packed => self.status_word(),
             o if o == r.status => self.status as u64,
             o if o == r.completion => self.completion_word(),
             _ => 0,
@@ -1322,8 +1519,35 @@ impl MmioDevice for AiIsland {
             return;
         }
         let r = self.regmap;
+        if Some(offset) == r.ctl {
+            self.enabled = value & 1 != 0;
+            self.wr_cpl_en = value & 2 != 0;
+            return;
+        }
+        if Some(offset) == r.doorbell {
+            // Ringing the bell submits whatever the latch window currently holds. A
+            // disabled island completes immediately with the package's own disabled code
+            // rather than quietly running the job.
+            if self.enabled {
+                self.pending_job = Some(self.latched_event());
+            } else {
+                self.status = self.codes.disabled;
+                self.last_status = self.codes.disabled;
+            }
+            return;
+        }
+        if Some(offset) == r.cpl {
+            // Write-one claims the completion and drops the level interrupt. The RTL
+            // requires the source be cleared before the PLIC is completed, or a level-set
+            // re-arms it; modelling the claim here is what makes that testable in-guest.
+            if value & 1 != 0 {
+                self.irq_pending = false;
+            }
+            return;
+        }
         match offset {
             o if o == r.version_op => self.submit(value, value >> 16),
+            o if o == r.flags => self.flags = value as u32,
             o if o == r.m => self.m = value as u32,
             o if o == r.n => self.n = value as u32,
             o if o == r.k => self.k = value as u32,
@@ -1334,10 +1558,17 @@ impl MmioDevice for AiIsland {
             o if o == r.ptr_scale => self.ptr_scale = value,
             o if o == r.ptr_done => {
                 self.ptr_done = value;
-                self.ticket = self.ticket.wrapping_add(1);
-                self.irq_pending = true;
+                // Bring-up fallback only. On a design that publishes a doorbell, writing
+                // the descriptor's completion pointer is a plain latch write: the ticket
+                // is allocated and the interrupt raised when the *job* completes, not when
+                // a field is filled in. Keeping the old behaviour there would hand out a
+                // ticket per field write.
+                if r.doorbell.is_none() {
+                    self.ticket = self.ticket.wrapping_add(1);
+                    self.irq_pending = true;
+                }
             }
-            o if o == r.status => self.irq_pending = false,
+            o if o == r.status && r.doorbell.is_none() => self.irq_pending = false,
             _ => {}
         }
     }
@@ -1565,6 +1796,161 @@ pub(crate) mod tests {
             },
             ..Default::default()
         }
+    }
+
+    /// The reference model plus the published control surface (`REG_OFF_*`).
+    ///
+    /// Kept separate from [`model_with_layout`] so the tests that pin the *derived*
+    /// bring-up fallback keep exercising it: the two placements really are different
+    /// contracts, and collapsing them would hide that.
+    pub(crate) fn model_with_control_surface() -> g6q_core::model::AiIslandModel {
+        let mut m = model_with_layout();
+        m.desc_layout.version = Some(1);
+        m.desc_layout.ops.insert("OP_GEMM".to_string(), 1);
+        m.desc_layout.ops.insert("OP_LAYOUT".to_string(), 3);
+        m.desc_layout.statuses.insert("ST_ERR".to_string(), 1);
+        m.desc_layout.statuses.insert("ST_BAD_OP".to_string(), 4);
+        // Live island map: control at 0x100, status 0x104, doorbell 0x108, claim 0x10C.
+        for (k, v) in [
+            ("ctl", 0x100u64),
+            ("status", 0x104),
+            ("doorbell", 0x108),
+            ("cpl", 0x10c),
+            ("queue", 0x120),
+            ("cap", 0x000),
+            ("desc", 0x140),
+        ] {
+            m.config.reg_offsets.insert(k.to_string(), v);
+        }
+        m
+    }
+
+    #[test]
+    fn the_published_control_surface_replaces_the_derived_status_placement() {
+        // The derived placement puts `status` just past the descriptor -- at 0x180 for a
+        // 64-byte descriptor based at 0x140 -- which is exactly where the design publishes
+        // its PMU window. Reading a counter as a status register is the kind of silent
+        // wrongness the register map exists to prevent.
+        let derived = AiRegMap::from_desc_layout(&model_with_layout().desc_layout, 0x140);
+        assert_eq!(derived.status, 0x180, "the derived placement collides");
+        assert!(!derived.status_packed);
+
+        let published = AiRegMap::from_model(&model_with_control_surface());
+        assert_eq!(published.status, 0x104);
+        assert_eq!(published.ctl, Some(0x100));
+        assert_eq!(published.doorbell, Some(0x108));
+        assert_eq!(published.cpl, Some(0x10c));
+        assert!(published.status_packed);
+    }
+
+    #[test]
+    fn an_island_without_a_published_doorbell_has_none() {
+        // Addressable is not operable: the fallback must not invent a doorbell.
+        let map = AiRegMap::from_model(&model_with_layout());
+        assert_eq!(map.doorbell, None);
+        assert_eq!(map.ctl, None);
+    }
+
+    #[test]
+    fn control_enables_the_island_and_the_doorbell_latches_a_job() {
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model_with_control_surface());
+
+        // A doorbell on a disabled island completes with the package's disabled code and
+        // latches nothing.
+        a.store(0x108, 4, 1);
+        assert!(a.take_pending_job().is_none());
+        assert_eq!(a.status, 7, "ST_DISABLED from the ingested table");
+
+        // CTL[0] enables, CTL[1] turns on the completion-word write.
+        a.store(0x100, 4, 0b11);
+        assert_eq!(a.load(0x100, 4), 0b11);
+        assert!(a.enabled && a.wr_cpl_en);
+
+        // Fill the latch window through the *model's* descriptor offsets, then ring.
+        a.store(0x140, 4, 1 | (1 << 16)); // version = 1, op = OP_GEMM
+        a.store(0x140 + 8, 4, 2); // m
+        a.store(0x140 + 12, 4, 2); // n
+        a.store(0x140 + 16, 4, 2); // k
+        a.store(0x108, 4, 1);
+        let job = a.take_pending_job().expect("doorbell latched a job");
+        assert_eq!((job.version, job.op, job.m, job.n, job.k), (1, 1, 2, 2, 2));
+        assert!(a.take_pending_job().is_none(), "a bell rings once");
+    }
+
+    #[test]
+    fn a_completion_claim_drops_the_level_interrupt() {
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model_with_control_surface());
+        a.store(0x100, 4, 1);
+        a.irq_pending = true;
+        // Writing zero is not a claim.
+        a.store(0x10c, 4, 0);
+        assert!(a.irq_pending);
+        // Write-one claims and clears the source, which is what has to happen *before*
+        // the PLIC is completed or a level-set re-arms it.
+        a.store(0x10c, 4, 1);
+        assert!(!a.irq_pending);
+    }
+
+    #[test]
+    fn the_status_register_reports_busy_and_the_last_status() {
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model_with_control_surface());
+        a.store(0x100, 4, 1);
+        assert_eq!(a.load(0x104, 4), 0, "idle, nothing completed yet");
+
+        a.store(0x140, 4, 1 | (1 << 16));
+        a.store(0x108, 4, 1);
+        assert_eq!(a.load(0x104, 4) & 1, 1, "busy while a job is latched");
+
+        let job = a.take_pending_job().unwrap();
+        a.complete_pending_job(job, 4); // ST_BAD_OP from the ingested table
+        assert_eq!(
+            a.load(0x104, 4),
+            4 << 16,
+            "idle, last status in the high half"
+        );
+    }
+
+    #[test]
+    fn the_completion_interrupt_is_requested_by_the_descriptor_not_by_default() {
+        let m = model_with_control_surface();
+        let irq_bit = m.desc_layout.flags_layout.unwrap().irq_bit;
+        let mut a = AiIsland::new();
+        a.set_ai_model(&m);
+        a.store(0x100, 4, 1);
+
+        let quiet = g6q_diag::ai_tensor::AiTensorEvent::default();
+        a.complete_pending_job(quiet, 0);
+        assert!(!a.irq_pending, "no IRQ unless the descriptor asks for one");
+
+        let loud = g6q_diag::ai_tensor::AiTensorEvent {
+            flags: 1 << irq_bit,
+            ..Default::default()
+        };
+        a.complete_pending_job(loud, 0);
+        assert!(a.irq_pending);
+    }
+
+    #[test]
+    fn the_completion_word_is_written_only_when_control_enables_it() {
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model_with_control_surface());
+        let ev = g6q_diag::ai_tensor::AiTensorEvent {
+            ptr_done: 0x9000_0000,
+            ..Default::default()
+        };
+
+        // CTL[1] clear: the job completes but no completion word is written.
+        a.store(0x100, 4, 0b01);
+        assert!(a.complete_pending_job(ev, 0).is_none());
+
+        a.store(0x100, 4, 0b11);
+        let (addr, _) = a
+            .complete_pending_job(ev, 0)
+            .expect("wr_cpl_en writes the completion word");
+        assert_eq!(addr, 0x9000_0000);
     }
 
     /// A completion layout with status in the lower 16 bits and ticket in the upper 48 bits,

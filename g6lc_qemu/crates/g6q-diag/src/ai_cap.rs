@@ -191,15 +191,23 @@ pub fn parse_cap_window_packed(
         if !arm.contains(':') {
             continue;
         }
-        let label = arm.split(':').next()?.trim();
-        let word = match parse_case_word_index(label) {
-            Some(w) => w,
-            None => continue,
-        };
-        let offset = word * 4;
-        let cap_name = match cap_by_offset.get(&offset) {
-            Some(n) => n.clone(),
-            None => continue,
+        // A label is either a numeric word index (`14'h06:`) or the capability's own
+        // name (`CAP_OFF_DRAM_GBPS[15:2]:`). The symbolic form is what the live window
+        // uses and is the more robust of the two, because it says which capability the
+        // arm answers instead of leaving that to arithmetic on an offset table.
+        let label = arm.split_once(':').map(|(l, _)| l).unwrap_or(arm).trim();
+        let cap_name = match parse_case_cap_name(label) {
+            Some(n) if cap_offsets.contains_key(&n) => n,
+            Some(_) => continue,
+            None => {
+                let Some(word) = parse_case_word_index(label) else {
+                    continue;
+                };
+                match cap_by_offset.get(&(word * 4)) {
+                    Some(n) => n.clone(),
+                    None => continue,
+                }
+            }
         };
 
         // The dtype_mask and block_mnk words are handled by dedicated readers: dtype_mask is a
@@ -218,6 +226,21 @@ pub fn parse_cap_window_packed(
     }
 
     Some(words)
+}
+
+/// Read a symbolic case label such as `CAP_OFF_DRAM_GBPS[15:2]` as a capability name.
+///
+/// Returns the lowercased `CAP_OFF_` suffix, which is the same key the configuration
+/// package reader uses, so the two halves of the window meet on a shared name rather than
+/// on a computed offset.
+fn parse_case_cap_name(label: &str) -> Option<String> {
+    let tok = label.split_whitespace().last()?;
+    let tok = tok.split('[').next()?.trim();
+    let short = tok.strip_prefix("CAP_OFF_")?;
+    if short.is_empty() {
+        return None;
+    }
+    Some(short.to_lowercase())
 }
 
 fn parse_case_word_index(label: &str) -> Option<u64> {
@@ -471,33 +494,28 @@ endmodule
     }
 
     #[test]
-    fn parses_real_cap_window_block_mnk_if_present() {
-        let path = std::path::Path::new(r"E:/cva6/corev_apu/ai_island/g6lc_ai_cap_window.sv");
-        if !path.exists() {
+    fn the_live_block_mnk_and_dtype_mask_come_from_the_package() {
+        // F3 is closed on the design: `CAP_BLOCK_*_SHIFT` and `AiIslandDtypeMask` are
+        // localparams in the configuration package, so the packed layout no longer has to
+        // be recovered from an `always_comb` expression or a module parameter that an
+        // instantiation could override. This pins the *published* route.
+        let cfg_path = std::path::Path::new(r"E:/cva6/corev_apu/include/g6lc_ai_island_cfg_pkg.sv");
+        if !cfg_path.exists() {
             return;
         }
-        let text = std::fs::read_to_string(path).unwrap();
-        let layout = parse_cap_window_block_mnk(&text).unwrap();
-        // Live cap window packs K above N above M, each four bits wide.
+        let cfg_text = std::fs::read_to_string(cfg_path).unwrap();
+        let cfg = crate::ai_cfg::parse_ai_island_cfg_pkg(&cfg_text).unwrap();
+
+        let layout = cfg.block_mnk.expect("CAP_BLOCK_*_SHIFT are published");
         assert_eq!(layout.m_low, 0);
         assert_eq!(layout.n_low, 4);
         assert_eq!(layout.k_low, 8);
         assert_eq!(layout.m_width, 4);
-    }
-
-    #[test]
-    fn parses_real_cap_window_dtype_mask_if_present() {
-        let path = std::path::Path::new(r"E:/cva6/corev_apu/ai_island/g6lc_ai_cap_window.sv");
-        if !path.exists() {
-            return;
-        }
-        let text = std::fs::read_to_string(path).unwrap();
-        let mask = parse_cap_window_dtype_mask(&text);
-        assert!(
-            mask.is_some(),
-            "DtypeMask should be present in the live cap window"
+        assert_eq!(
+            cfg.dtype_mask,
+            Some(0x0001),
+            "the live part grants dense s8 only"
         );
-        assert_eq!(mask.unwrap(), 0x0001, "live cap window default is s8 dense");
     }
 
     #[test]

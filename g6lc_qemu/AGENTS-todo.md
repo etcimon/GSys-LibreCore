@@ -18,6 +18,72 @@ contract, the pin in `pins.toml` plus the document it names.
 
 ---
 
+## Latest pass — Q6 functional island + control surface (2026-09)
+
+**The ingest could not read the live design at all, and nothing had noticed.** Every
+`RTL_FEEDBACK.md` row that said "published" was untested against the real packages: pointing
+the readers at them returned `Err("bad integer: AIDRAMCHANSHIFTDEFAULT")`, so
+`parse_ai_island_cfg_pkg` produced *no model*, not a model with one wrong field. Four reader
+defects, one shape — **the design graduated from literals to named constants, and the reader
+only understood numerals** (`architecture/RTL_FEEDBACK.md` §2.2):
+
+- SKU literals refer to `AI_DRAM_CHAN_SHIFT_DEFAULT` / `AI_MAX_AR_OUT_LIVE` / `AI_DRAM_SIM_AXI`
+  → `collect_symbols` builds a symbol table from the package's own scalars; an unresolved
+  identifier is an error, never a zero.
+- Capability-window case labels are symbolic (`CAP_OFF_DRAM_GBPS[15:2]:`) → `parse_case_cap_name`.
+- `block_mnk` is a shift-OR of `CAP_BLOCK_*_SHIFT`, `DtypeMask` defaults to `AiIslandDtypeMask`
+  → both read from the **package** now; the cap-window parse is the fallback.
+- Flag accessors index by constant → `parse_flag_localparam` prefers `FLAG_*_SHIFT`/`_WIDTH`.
+
+**F1's second half landed.** `REG_OFF_{CTL,STATUS,DOORBELL,CPL,QUEUE}` are ingested into
+`AiIslandConfig::reg_offsets`; `control_surface_resolved()` separates *addressable* from
+*operable*, because knowing where the descriptor window sits does not tell a guest how to ring
+the bell. This also removed a live collision: the derived placement put `status` at
+`desc_base + desc_bytes` = `0x180` = `PMU_OFF_R_BEATS`, so a guest read a beat counter as a
+status word (§2.3).
+
+**B3 computes the GEMM.** `crates/g6q-vm/src/gemm.rs` reads A/B from guest memory and writes
+`C` (`ldc = n`, s8×s8→s32). Op codes, status codes and the accumulator-tile bound come from the
+ingested model; F12's bound returns the package's own `ST_ERR`; a sub-byte or sparse request the
+CAP window does not grant is refused rather than silently run as dense s8. A guest now drives a
+job end-to-end through MMIO alone — `a_guest_can_drive_a_gemm_entirely_through_the_published_mmio_window`.
+
+**One emitter defect fixed on the way:** the SPI creation block was emitted unconditionally
+while its `hw/ssi/ssi.h` include was gated on the model, so a machine without an SPI peripheral
+generated C that could not compile. The stale test that asserted otherwise was right.
+
+**The green command is green again.** `python tools/g6q.py check` failed at HEAD, on three
+counts that had nothing to do with this pass and were each masked by the one before it:
+`cargo test` stops at the first failing binary, so the `g6q-diag` failures hid an
+`g6q-emit-qemu` one; clippy never ran because the tests failed first. Cleared:
+
+- 3 `g6q-cli` clippy errors — `run_bridge_pack` took eight positional `&str` (grouped into
+  `BridgePackPaths`; six same-typed arguments in a row is a call site where a transposed
+  pair compiles and writes the capability dump over the descriptor), and two
+  `format!`-per-byte hex loops (`hex_string`).
+- A **real emitter defect**: the SPI creation block was emitted unconditionally while its
+  `hw/ssi/ssi.h` include was gated on the model, so a machine with no SPI peripheral
+  generated C referencing `SSIBus`/`SSI_GPIO_CS` without the header. The stale test that
+  asserted the block should not appear was right; the emitter had regressed past it.
+- A **parallel-test file race**: two `loader::tests` stage the same fixed
+  `out/loader-run/esp-openwrt` tree, so on Windows the loser got `os error 32`. The path is
+  part of the loader contract, so the tests are serialised by a mutex rather than the
+  product bent to suit them.
+
+| Check | Result | At HEAD |
+|---|---|---|
+| `python tools/g6q.py check` | **OK** | FAILED |
+| `cargo test --workspace` (parallel **and** `--test-threads=1`) | **560 pass / 0 fail** | 531 / 6 serial, plus a parallel-only flake |
+| `cargo clippy --workspace --all-targets -- -D warnings` | clean | 3 errors |
+| `cargo fmt --all --check` | clean | clean |
+| `check_independence.py` | OK, 78 files | OK |
+
+Open, deliberately: **B1 emitted C does not wire the island's interrupt** (`sysbus_connect_irq`
++ `qemu_irq_raise`); B3 does. And `0x110`/`0x114`/`0x118`/`0x11C` are still register-map comments
+rather than localparams — the doorbell-and-claim path does not need them, the DMA-fetch path does.
+
+---
+
 ## Current stage
 
 **Q1 — ingest, `TargetModel`, conformance. Complete.**

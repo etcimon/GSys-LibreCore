@@ -24,6 +24,17 @@ g6lc-qemu <verb> [options]
 Global: `--json-out FILE`, `-v/--verbose`, `-q/--quiet`, `--dry-run`, `--out-dir DIR`
 (default `out/`), `--color auto|always|never`.
 
+Monorepo host adapter (`cva6-build g6q`, `build-platform/src/cli/commands/g6q.ts`):
+
+```
+cva6-build g6q --ai doctor
+cva6-build g6q --ai --from-timing <fo4-pkg> run -- gen --emit qemu
+cva6-build test --ai-qemu
+```
+
+`--ai` defaults ingest `--target g6lc64_ai`. This is **higher-level Linux/emulation**, not Variane
+evidence (`architecture/ai-matrix/hard-tests.md`). RTL pins stay on `test --ai-remote`.
+
 ---
 
 ## 1. Design selection

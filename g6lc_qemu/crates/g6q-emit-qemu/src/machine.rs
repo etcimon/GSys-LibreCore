@@ -305,8 +305,12 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
         }
         body.push_str("    if (strstr(model, \"ai-island\") || strstr(model, \"ai-matrix\"))\n");
         body.push_str("        return \"unimplemented-device\";\n");
-        body.push_str("    if (strstr(model, \"xps-spi\") || strstr(model, \"axi-quad-spi\"))\n");
-        body.push_str("        return \"xlnx.xps-spi\";\n");
+        if has_spi {
+            body.push_str(
+                "    if (strstr(model, \"xps-spi\") || strstr(model, \"axi-quad-spi\"))\n",
+            );
+            body.push_str("        return \"xlnx.xps-spi\";\n");
+        }
         body.push_str("    return NULL;\n");
         body.push_str("}\n\n");
 
@@ -404,36 +408,44 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
         );
         body.push_str("            }\n");
         body.push_str("        }\n");
-        body.push_str("        if (strcmp(qom, \"xlnx.xps-spi\") == 0) {\n");
-        body.push_str("            SSIBus *spi;\n");
-        body.push_str("            DeviceState *flash;\n");
-        body.push_str("            DriveInfo *dinfo;\n");
-        body.push_str("            qemu_irq cs_line;\n");
-        body.push_str("            dev = qdev_new(\"xlnx.xps-spi\");\n");
-        body.push_str("            qdev_prop_set_string(dev, \"endianness\", \"little\");\n");
-        body.push_str("            qdev_prop_set_uint8(dev, \"num-ss-bits\", 1);\n");
-        body.push_str("            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);\n");
-        body.push_str(
-            "            sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, g6lc_peripherals[i].base);\n",
-        );
-        body.push_str("            if (g6lc_peripherals[i].irq >= 0 && plic_dev) {\n");
-        body.push_str("                sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,\n");
-        body.push_str("                    qdev_get_gpio_in(plic_dev,\n");
-        body.push_str("                                     g6lc_peripherals[i].irq));\n");
-        body.push_str("            }\n");
-        body.push_str("            spi = (SSIBus *)qdev_get_child_bus(dev, \"spi\");\n");
-        body.push_str("            flash = qdev_new(\"n25q256a\");\n");
-        body.push_str("            dinfo = drive_get(IF_MTD, 0, 0);\n");
-        body.push_str("            if (dinfo) {\n");
-        body.push_str("                qdev_prop_set_drive_err(flash, \"drive\",\n");
-        body.push_str("                                        blk_by_legacy_dinfo(dinfo),\n");
-        body.push_str("                                        &error_fatal);\n");
-        body.push_str("            }\n");
-        body.push_str("            qdev_realize_and_unref(flash, BUS(spi), &error_fatal);\n");
-        body.push_str("            cs_line = qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0);\n");
-        body.push_str("            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1, cs_line);\n");
-        body.push_str("            continue;\n");
-        body.push_str("        }\n");
+        // Gated on the model, like the `hw/ssi/ssi.h` include above. Emitting the block
+        // unconditionally produced C that referenced `SSIBus` and `SSI_GPIO_CS` without
+        // the header a machine with no SPI peripheral never includes -- so the generated
+        // file would not compile.
+        if has_spi {
+            body.push_str("        if (strcmp(qom, \"xlnx.xps-spi\") == 0) {\n");
+            body.push_str("            SSIBus *spi;\n");
+            body.push_str("            DeviceState *flash;\n");
+            body.push_str("            DriveInfo *dinfo;\n");
+            body.push_str("            qemu_irq cs_line;\n");
+            body.push_str("            dev = qdev_new(\"xlnx.xps-spi\");\n");
+            body.push_str("            qdev_prop_set_string(dev, \"endianness\", \"little\");\n");
+            body.push_str("            qdev_prop_set_uint8(dev, \"num-ss-bits\", 1);\n");
+            body.push_str(
+                "            sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);\n",
+            );
+            body.push_str(
+                "            sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, g6lc_peripherals[i].base);\n",
+            );
+            body.push_str("            if (g6lc_peripherals[i].irq >= 0 && plic_dev) {\n");
+            body.push_str("                sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0,\n");
+            body.push_str("                    qdev_get_gpio_in(plic_dev,\n");
+            body.push_str("                                     g6lc_peripherals[i].irq));\n");
+            body.push_str("            }\n");
+            body.push_str("            spi = (SSIBus *)qdev_get_child_bus(dev, \"spi\");\n");
+            body.push_str("            flash = qdev_new(\"n25q256a\");\n");
+            body.push_str("            dinfo = drive_get(IF_MTD, 0, 0);\n");
+            body.push_str("            if (dinfo) {\n");
+            body.push_str("                qdev_prop_set_drive_err(flash, \"drive\",\n");
+            body.push_str("                                        blk_by_legacy_dinfo(dinfo),\n");
+            body.push_str("                                        &error_fatal);\n");
+            body.push_str("            }\n");
+            body.push_str("            qdev_realize_and_unref(flash, BUS(spi), &error_fatal);\n");
+            body.push_str("            cs_line = qdev_get_gpio_in_named(flash, SSI_GPIO_CS, 0);\n");
+            body.push_str("            sysbus_connect_irq(SYS_BUS_DEVICE(dev), 1, cs_line);\n");
+            body.push_str("            continue;\n");
+            body.push_str("        }\n");
+        }
         body.push_str("        if (!dev) {\n");
         body.push_str("            continue;\n");
         body.push_str("        }\n");
@@ -754,6 +766,11 @@ mod tests {
         assert!(
             !f.contents.contains("xlnx.xps-spi"),
             "SPI is only emitted when the model has an xps-spi peripheral"
+        );
+        assert!(
+            !f.contents.contains("#include \"hw/ssi/ssi.h\""),
+            "the SSI header follows the SPI block; emitting one without the other \
+             produces a file that does not compile"
         );
         assert!(f.contents.contains("dram_base + 0x200000ULL"));
         assert!(f.contents.contains("S-mode payloads"));

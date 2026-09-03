@@ -13,6 +13,10 @@ use g6q_core::model::AiIslandConfig;
 pub fn parse_ai_island_cfg_pkg(text: &str) -> Result<AiIslandConfig, String> {
     let cleaned = strip_sv_comments(text);
 
+    // Named constants first: the SKU literals refer to them by name, so a reader that
+    // cannot resolve an identifier cannot ingest the package at all.
+    let syms = collect_symbols(&cleaned);
+
     // Find the latency default struct literal.
     let default = extract_struct_literal(&cleaned, "AiIslandLatencyDefault")
         .ok_or_else(|| "AiIslandLatencyDefault not found".to_string())?;
@@ -23,7 +27,7 @@ pub fn parse_ai_island_cfg_pkg(text: &str) -> Result<AiIslandConfig, String> {
             cfg.queue_cluster_map = parse_array_literal(&raw).ok();
             continue;
         }
-        let v = eval_field(&raw)?;
+        let v = eval_field_with(&raw, &syms)?;
         match field.as_str() {
             "Clusters" => cfg.clusters = v as u32,
             "MacsPerCycle" => cfg.macs_per_cycle = v as u32,
@@ -48,6 +52,31 @@ pub fn parse_ai_island_cfg_pkg(text: &str) -> Result<AiIslandConfig, String> {
         cfg.cap_version = v as u16;
     }
 
+    // F3: the packed `block_mnk` layout and the data-type grant mask used to live only
+    // inside the capability-window module -- one as a concatenation expression, the other
+    // as a module parameter. Both are named localparams here now, so prefer the package:
+    // an expression in an `always_comb` arm is a fragile thing to read, and a module
+    // parameter can be overridden at instantiation.
+    let shift = |n: &str| extract_localparam_scalar(&cleaned, n).map(|v| v as u32);
+    if let (Some(m_low), Some(n_low), Some(k_low)) = (
+        shift("CAP_BLOCK_M_SHIFT"),
+        shift("CAP_BLOCK_N_SHIFT"),
+        shift("CAP_BLOCK_K_SHIFT"),
+    ) {
+        let w = shift("CAP_BLOCK_FIELD_W").unwrap_or(4);
+        cfg.block_mnk = Some(g6q_core::model::CapBlockMnk {
+            m_low,
+            m_width: w,
+            n_low,
+            n_width: w,
+            k_low,
+            k_width: w,
+        });
+    }
+    if let Some(v) = extract_localparam_scalar(&cleaned, "AiIslandDtypeMask") {
+        cfg.dtype_mask = Some(v as u32);
+    }
+
     // Capability window offsets, and the island MMIO placement when the design states it.
     //
     // The offsets live in this package, but the *placement* of each window is decided by
@@ -69,6 +98,13 @@ pub fn parse_ai_island_cfg_pkg(text: &str) -> Result<AiIslandConfig, String> {
             // register-map comments (ask F9).
             if let Some(short) = name.strip_prefix("PMU_OFF_") {
                 cfg.pmu_offsets.insert(short.to_lowercase(), value);
+            }
+            // The control surface a driver operates: control, status, doorbell, completion
+            // claim and per-queue region programming. This is the second half of ask F1 --
+            // knowing where the descriptor window sits does not tell a guest how to ring the
+            // bell. As above, absent means absent; a backend must not invent a doorbell.
+            if let Some(short) = name.strip_prefix("REG_OFF_") {
+                cfg.reg_offsets.insert(short.to_lowercase(), value);
             }
             match name {
                 "CAP_BASE" | "REG_OFF_CAP" => cfg.cap_base = Some(value),
@@ -142,7 +178,7 @@ fn parse_array_literal(raw: &str) -> Result<Vec<u32>, String> {
         if item.is_empty() {
             continue;
         }
-        out.push(parse_atom(item)? as u32);
+        out.push(parse_atom(item, &Symbols::new())? as u32);
     }
     Ok(out)
 }
@@ -345,17 +381,67 @@ fn parse_localparam_hex_scalar(line: &str) -> Option<(&str, u64)> {
     u64::from_str_radix(&value, base).ok().map(|n| (name, n))
 }
 
+/// Named integer constants a package declares before its struct literals.
+///
+/// A configuration package does not write every number twice: it names the ones that
+/// carry meaning (`AI_DRAM_CHAN_SHIFT_DEFAULT`, `AI_MAX_AR_OUT_LIVE`, `AI_DRAM_SIM_AXI`)
+/// and then *refers* to them from the SKU literals. A reader that only understands
+/// numerals cannot ingest such a package at all — which is worse than reading it wrongly,
+/// because the whole model goes missing rather than one field.
+type Symbols = std::collections::BTreeMap<String, i64>;
+
+/// Collect `localparam int unsigned NAME = <expr>;` constants, resolving forward
+/// references in declaration order.
+///
+/// Only self-contained integer declarations are collected; anything that does not
+/// evaluate against the symbols seen so far is skipped rather than guessed, so a struct
+/// literal or an unparsed expression cannot become a bogus constant.
+fn collect_symbols(cleaned: &str) -> Symbols {
+    let mut syms = Symbols::new();
+    for stmt in cleaned.split(';') {
+        let stmt = stmt.trim();
+        if !stmt.starts_with("localparam") {
+            continue;
+        }
+        // A struct literal is not a scalar constant.
+        if stmt.contains('{') {
+            continue;
+        }
+        let Some(rest) = stmt.strip_prefix("localparam") else {
+            continue;
+        };
+        let Some((lhs, value)) = split_top_level_assign(rest) else {
+            continue;
+        };
+        let Some(name) = lhs
+            .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|t| !t.is_empty())
+            .next_back()
+        else {
+            continue;
+        };
+        if let Ok(v) = eval_field_with(value, &syms) {
+            syms.insert(name.to_string(), v);
+        }
+    }
+    syms
+}
+
 fn eval_field(raw: &str) -> Result<i64, String> {
+    eval_field_with(raw, &Symbols::new())
+}
+
+fn eval_field_with(raw: &str, syms: &Symbols) -> Result<i64, String> {
     let s = raw.trim();
     let s = s
         .strip_prefix("unsigned'")
         .or_else(|| s.strip_prefix("int'"))
         .map_or(s, |inner| inner.trim().trim_start_matches('(').trim());
     let s = s.strip_suffix(")").map_or(s, |inner| inner.trim());
-    eval_expr(s)
+    eval_expr(s, syms)
 }
 
-fn eval_expr(s: &str) -> Result<i64, String> {
+fn eval_expr(s: &str, syms: &Symbols) -> Result<i64, String> {
     // Sum of products: supports "A * B + C" and "A * B * C".
     let mut total: i64 = 0;
     for term in split_top_level(s, '+') {
@@ -369,7 +455,7 @@ fn eval_expr(s: &str) -> Result<i64, String> {
             if factor.is_empty() {
                 return Err(format!("empty factor in expression: {s}"));
             }
-            let v = parse_atom(factor)?;
+            let v = parse_atom(factor, syms)?;
             prod = prod.checked_mul(v).ok_or("integer overflow")?;
         }
         total = total.checked_add(prod).ok_or("integer overflow")?;
@@ -377,8 +463,18 @@ fn eval_expr(s: &str) -> Result<i64, String> {
     Ok(total)
 }
 
-fn parse_atom(s: &str) -> Result<i64, String> {
-    let s = s.trim().replace('_', "");
+fn parse_atom(s: &str, syms: &Symbols) -> Result<i64, String> {
+    let raw = s.trim();
+    // Resolve a named constant before touching the text: `_` is both a numeric separator
+    // and the most common character in these identifiers, so stripping it first turns
+    // `AI_DRAM_CHAN_SHIFT_DEFAULT` into an unparseable word.
+    if raw.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
+        if let Some(v) = syms.get(raw) {
+            return Ok(*v);
+        }
+        return Err(format!("unresolved constant: {raw}"));
+    }
+    let s = raw.replace('_', "");
     if let Some(rest) = s.strip_prefix("0x") {
         return i64::from_str_radix(rest, 16).map_err(|_| format!("bad hex integer: {s}"));
     }
@@ -407,12 +503,116 @@ mod tests {
         assert!(cfg.queue_depth > 0);
         assert!(cfg.clusters > 0);
         assert!(cfg.cap_offsets.contains_key("version"));
-        // F9: the island's PMU registers exist (island_top 0x180-0x18C) but are published
-        // only as comments, so nothing can be ingested. If this starts failing because the
-        // design added PMU_OFF_* localparams, that is the good outcome -- close F9.
+        // The SKU literals refer to named constants (`AI_DRAM_CHAN_SHIFT_DEFAULT`,
+        // `AI_MAX_AR_OUT_LIVE`, `AI_DRAM_SIM_AXI`), so this also pins that the reader
+        // resolves identifiers rather than only numerals.
         assert!(
-            cfg.pmu_offsets.is_empty(),
-            "if PMU_OFF_* is now published, close F9 in RTL_FEEDBACK.md"
+            cfg.acc_tile_m > 0 && cfg.acc_tile_n > 0 && cfg.acc_tile_k > 0,
+            "the accumulator tile bounds every descriptor dimension; it must be ingested"
+        );
+        // F9 is closed on the design: the PMU offsets are localparams now, so the modelled
+        // bound can be diffed against the island's own measurement.
+        assert!(
+            !cfg.pmu_offsets.is_empty(),
+            "PMU_OFF_* is published; ingest regressed"
+        );
+        // F1's second half: the control surface, not merely the descriptor placement.
+        // Addressable is not the same as operable -- without a doorbell a guest can fill
+        // the latch window and never start a job.
+        assert!(cfg.placement_resolved(), "island must be addressable");
+        assert!(
+            cfg.control_surface_resolved(),
+            "REG_OFF_DOORBELL/REG_OFF_CPL are published; ingest regressed"
+        );
+    }
+
+    #[test]
+    fn a_sku_literal_may_refer_to_named_constants() {
+        // A package names the numbers that carry meaning and refers to them from its SKU
+        // literals. A reader that only understands numerals loses the *whole* model, not
+        // one field, so this is pinned separately from the live-file test.
+        let text = r#"
+package g6lc_ai_island_cfg_pkg;
+  localparam int unsigned AI_DRAM_CHAN_SHIFT_DEFAULT = 6;
+  localparam int unsigned AI_MAX_AR_OUT_LIVE = 2;
+  localparam int unsigned KIB = 1024;
+  localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters: unsigned'(1),
+      Queues: unsigned'(2),
+      QueueDepth: unsigned'(64),
+      SramBytes: unsigned'(2 * KIB * KIB),
+      DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
+      MaxAROut: unsigned'(AI_MAX_AR_OUT_LIVE)
+  };
+endpackage
+"#;
+        let cfg = parse_ai_island_cfg_pkg(text).expect("named constants must resolve");
+        assert_eq!(cfg.queues, 2);
+        assert_eq!(cfg.sram_bytes, 2 * 1024 * 1024);
+    }
+
+    #[test]
+    fn an_unknown_identifier_is_an_error_not_a_zero() {
+        // Reading an unresolved name as zero would put a plausible wrong number in the
+        // model, which is the failure this package exists to prevent.
+        let text = r#"
+package g6lc_ai_island_cfg_pkg;
+  localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters: unsigned'(SOME_UNDECLARED_NAME),
+      Queues: unsigned'(1)
+  };
+endpackage
+"#;
+        let err = parse_ai_island_cfg_pkg(text).unwrap_err();
+        assert!(err.contains("unresolved constant"), "{err}");
+    }
+
+    #[test]
+    fn published_control_offsets_are_ingested() {
+        let text = r#"
+package g6lc_ai_island_cfg_pkg;
+  localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters: unsigned'(1),
+      Queues: unsigned'(1),
+      QueueDepth: unsigned'(8)
+  };
+  localparam logic [15:0] REG_OFF_CTL      = 16'h0100;
+  localparam logic [15:0] REG_OFF_STATUS   = 16'h0104;
+  localparam logic [15:0] REG_OFF_DOORBELL = 16'h0108;
+  localparam logic [15:0] REG_OFF_CPL      = 16'h010C;
+  localparam logic [15:0] REG_OFF_QUEUE    = 16'h0120;
+endpackage
+"#;
+        let cfg = parse_ai_island_cfg_pkg(text).unwrap();
+        assert_eq!(cfg.reg_offset("ctl"), Some(0x100));
+        assert_eq!(cfg.reg_offset("status"), Some(0x104));
+        assert_eq!(cfg.reg_offset("doorbell"), Some(0x108));
+        assert_eq!(cfg.reg_offset("cpl"), Some(0x10c));
+        assert_eq!(cfg.reg_offset("queue"), Some(0x120));
+        assert!(cfg.control_surface_resolved());
+        // A control offset must not leak into the capability table.
+        assert!(!cfg.cap_offsets.contains_key("doorbell"));
+    }
+
+    #[test]
+    fn an_island_can_be_addressable_without_being_operable() {
+        // This is the distinction ask F1 turns on, so it is pinned rather than implied.
+        let text = r#"
+package g6lc_ai_island_cfg_pkg;
+  localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters: unsigned'(1),
+      Queues: unsigned'(1),
+      QueueDepth: unsigned'(8)
+  };
+  localparam logic [15:0] CAP_BASE  = 16'h0000;
+  localparam logic [15:0] DESC_BASE = 16'h0140;
+endpackage
+"#;
+        let cfg = parse_ai_island_cfg_pkg(text).unwrap();
+        assert!(cfg.placement_resolved(), "the descriptor window is placed");
+        assert!(
+            !cfg.control_surface_resolved(),
+            "no doorbell is published, so the island cannot be operated"
         );
     }
 
