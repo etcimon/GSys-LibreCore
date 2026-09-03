@@ -94,6 +94,8 @@ need=(
   verif/regress/remote/ai-dual-core-excl.sh
   verif/tests/custom/ai/ai_dual_core_lrsc_disjoint_smoke.S
   verif/regress/remote/ai-dual-core-lrsc-disjoint.sh
+  verif/tests/custom/ai/ai_numfmt_grant_smoke.S
+  verif/regress/remote/ai-numfmt-grant.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_timing.sv
   verif/tb/ai_island/run-dram-timing.sh
   corev_apu/ai_island/generated/README.md

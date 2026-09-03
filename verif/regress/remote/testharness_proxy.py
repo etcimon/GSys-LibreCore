@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -350,6 +351,38 @@ class Remote:
         ]
         return out
 
+    def _passphrase_from_platform_cache(self) -> str | None:
+        """Last resort: the build-platform credential cache, keyed by host alias.
+
+        `build-platform/src/cli/commands/remote.ts` prompts once and caches the
+        passphrase in `build-platform/.remote-ssh-creds` (untracked, 0600), then
+        injects it as TH_SSH_PASSPHRASE when *it* drives this proxy. A script run
+        directly -- ai-dual-core-excl.sh and every other sibling in
+        verif/regress/remote/ -- never sees that injection, so on a host set up
+        through the build-platform the standalone scripts could not authenticate
+        at all and each needed its own shim to re-extract the value.
+
+        Reading the same file here removes that asymmetry. It is not a new secret
+        location: the file is already untracked, already 0600, and already holds
+        exactly this value.
+        """
+        path = repo_root() / "build-platform" / ".remote-ssh-creds"
+        try:
+            if not path.is_file():
+                return None
+            cache = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        entry = (cache.get("hosts") or {}).get(self.host)
+        if not isinstance(entry, dict):
+            return None
+        val = entry.get("passphrase")
+        if isinstance(val, str) and val:
+            if self.verbose:
+                log(f"passphrase from {path} (host {self.host})")
+            return val
+        return None
+
     def _passphrase(self) -> str | None:
         val = os.environ.get("TH_SSH_PASSPHRASE")
         if val:
@@ -364,7 +397,7 @@ class Remote:
                         return txt
             except OSError:
                 continue
-        return None
+        return self._passphrase_from_platform_cache()
 
     def _key_is_encrypted(self) -> bool:
         if not self.identity:
