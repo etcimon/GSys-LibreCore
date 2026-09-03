@@ -349,7 +349,29 @@ package g6lc_ai_island_cfg_pkg;
   // GRANT, so widening it without the matching datapath would advertise a format
   // the engine cannot execute; the engine then returns ST_BAD_FMT and software
   // has been lied to. Widen the datapath first, then this mask.
+  // `+define+G6LC_AI_TB_OVERGRANT` grants BF16 that the PE cannot execute, so
+  // the grant ⊆ implemented guard in g6lc_ai_island_top can be shown to FIRE.
+  // A guard that has never fired is indistinguishable from a dead one -- a
+  // silent build proves only that nothing complained. Keep the seam.
+`ifdef G6LC_AI_TB_OVERGRANT
+  localparam logic [15:0] AiIslandDtypeMask   = 16'h0041;  // INT8 + BF16 (illegal)
+`else
   localparam logic [15:0] AiIslandDtypeMask   = 16'h0001;
+`endif
+
+  // What the PE array can actually COMPUTE, as opposed to what the capability
+  // window is willing to advertise.
+  //
+  // These are two different facts and keeping them as one number is how a part
+  // ends up advertising BF16 it cannot do. `AiIslandDtypeMask` is policy -- a
+  // SKU may legitimately grant less than the hardware supports. This is
+  // capability, and it is a property of `g6lc_ai_pe`/`g6lc_ai_mac`: today
+  // strictly `s8×s8→s32`, hence bit 0 alone.
+  //
+  // `g6lc_ai_island_top` asserts grant ⊆ implemented, so raising the grant
+  // without the datapath is caught at elaboration instead of becoming a
+  // guest-visible lie. Update this ONLY together with the PE.
+  localparam logic [15:0] AiIslandPeImplMask  = 16'h0001;
 
   // I3 legality: sim-AXI nameplate is the NoC peak; never advertise 400 GB/s
   // on class 0; enabled clusters cannot exceed present.

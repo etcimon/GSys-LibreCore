@@ -104,6 +104,31 @@ module g6lc_ai_island_top
   // that never advertised it.
   localparam logic [15:0] DtypeMaskLp = AiIslandDtypeMask;
 
+  // pragma translate_off
+  // NOTE: these asserts do NOT currently execute in the Verilator flow --
+  // `verilate_command` (Makefile:729) omits `--assert`, so Verilator skips every
+  // assertion in the design, `config_pkg::check_cfg` included. Proven with a
+  // standalone probe; tracked as AI-X5. They are written correctly and will
+  // start enforcing the moment that flag lands. Do not treat them as a live
+  // gate before then: the AI-X2 grant behaviour is proven instead by real
+  // descriptor traffic (ai-numfmt-grant, both polarities).
+  initial begin
+    // A grant the PE cannot execute is worse than no grant: software discovers
+    // the format through CAP_OFF_DTYPE_MASK, plans around it, and then every
+    // descriptor comes back ST_BAD_FMT. Make raising the mask without the
+    // datapath a build failure rather than a runtime surprise.
+    assert ((DtypeMaskLp & ~AiIslandPeImplMask) == 16'h0)
+      else $error({"g6lc_ai_island_top: AiIslandDtypeMask (%h) grants a format ",
+                   "the PE does not implement (AiIslandPeImplMask %h). Widen ",
+                   "the datapath first, then the grant."},
+                  DtypeMaskLp, AiIslandPeImplMask);
+    // Dense INT8 is the format the golden, the requant rule and every directed
+    // test are written in, so a live island must always grant it.
+    assert (DtypeMaskLp[config_pkg::AI_FMT_INT])
+      else $error("g6lc_ai_island_top: AiIslandDtypeMask must grant AI_FMT_INT");
+  end
+  // pragma translate_on
+
   g6lc_ai_cap_window #(
       .IslandCfg(IslandCfg),
       .DtypeMask(DtypeMaskLp)
