@@ -29,6 +29,7 @@
 //! own the mutable borrow.
 
 use crate::mem::PhysMem;
+use crate::numfmt::{pack_c, read_elem, row_bytes, Elem, NumFmt};
 use g6q_core::model::AiIslandModel;
 use g6q_diag::ai_tensor::AiTensorEvent;
 
@@ -40,6 +41,10 @@ const ST_OK: &str = "ST_OK";
 const ST_ERR: &str = "ST_ERR";
 const ST_BAD_VER: &str = "ST_BAD_VER";
 const ST_BAD_OP: &str = "ST_BAD_OP";
+/// Distinct from `ST_ERR` so a guest can tell "this engine cannot do BF16" from a generic
+/// failure and fall back deliberately. Resolved optionally: a package predating the status
+/// falls back to `ST_ERR` rather than inventing a code.
+const ST_BAD_FMT: &str = "ST_BAD_FMT";
 
 /// Op-code name for the dense matrix-multiply the engine implements.
 const OP_GEMM: &str = "OP_GEMM";
@@ -128,6 +133,36 @@ fn requests_ungranted_mode(model: &AiIslandModel, flags: u32) -> Option<bool> {
     Some(dtype != 0 && (granted & !1) == 0)
 }
 
+/// Resolve the numeric format a descriptor requests, and check it is granted.
+///
+/// Three distinguishable outcomes, because collapsing them would hide the interesting one:
+///
+/// * `Ok(fmt)` — the request is resolved and granted.
+/// * `Err(UngrantedDtype)` — resolved but not in the capability window's mask, or a value the
+///   ABI reserves. Both are refusals; neither may fall back to INT8.
+/// * `Ok(NumFmt::Int)` when the package does not publish the field at all — the request
+///   cannot be characterised, so the only honest reading is the all-zero legacy one, which
+///   *is* integer. Executing float arithmetic on an unresolved layout would mean guessing an
+///   operand encoding.
+fn resolve_numfmt(model: &AiIslandModel, flags: u32) -> Result<NumFmt, AiJobReject> {
+    let Some(fl) = model.desc_layout.flags_layout else {
+        return Ok(NumFmt::Int);
+    };
+    let Some(field) = fl.numfmt else {
+        return Ok(NumFmt::Int);
+    };
+    let raw = field.extract(flags);
+    let fmt = NumFmt::from_abi(raw).ok_or(AiJobReject::UngrantedDtype)?;
+    // Absent a published mask, assume the frozen baseline: dense INT8 only. Assuming
+    // everything is granted would make the emulator compute formats the design refuses,
+    // which is the one divergence that cannot be caught by comparing results.
+    let granted = model.config.dtype_mask.unwrap_or(1);
+    if (granted >> fmt.grant_bit()) & 1 == 0 {
+        return Err(AiJobReject::UngrantedDtype);
+    }
+    Ok(fmt)
+}
+
 /// Execute one descriptor image against guest memory.
 ///
 /// `ev` is the descriptor already read from memory by
@@ -183,9 +218,25 @@ pub fn plan(
     }
 
     // ---- arithmetic mode -------------------------------------------------------------
+    // Two checks, not one. `requests_ungranted_mode` covers the legacy `ew`/`sp24`/`dtype`
+    // levers; `resolve_numfmt` covers the numeric-format field. Both must refuse, because a
+    // descriptor can express an ungranted mode either way and demoting silently to INT8
+    // would return numerically plausible results for the wrong arithmetic.
     if requests_ungranted_mode(model, ev.flags) == Some(true) {
         return Err((AiJobReject::UngrantedDtype, status_of(model, ST_ERR, 1)));
     }
+    let fmt = match resolve_numfmt(model, ev.flags) {
+        Ok(f) => f,
+        Err(why) => {
+            // Prefer the design's own ST_BAD_FMT when the package publishes it, so the guest
+            // can tell "cannot do BF16" from a generic error and choose a fallback.
+            let st = model
+                .desc_layout
+                .status(ST_BAD_FMT)
+                .map_or_else(|| status_of(model, ST_ERR, 1), |v| v as u16);
+            return Err((why, st));
+        }
+    };
 
     // ---- shape -----------------------------------------------------------------------
     // The engine bounds every dimension by the corresponding accumulator tile and rejects
@@ -216,30 +267,46 @@ pub fn plan(
     //   A strides by `lda`, B by `ldb`; C rows are contiguous, so `ldc = n`.
     // A read the guest memory map cannot satisfy is an error, not a zero: silently
     // reading zero would produce a wrong C that still looks like a successful job.
+    // Leading dimensions count ELEMENTS, so a row's byte extent depends on the format: a
+    // packed INT4 row spans half the bytes of the same-length INT8 row, and an FP32 row four
+    // times as many. Striding by elements would silently overlap or gap the rows.
+    let a_row_stride = row_bytes(fmt, lda as u64);
+    let b_row_stride = row_bytes(fmt, ldb as u64);
+
     let mut c_writes = Vec::with_capacity((m * n) as usize);
+    let bad = |model: &AiIslandModel| (AiJobReject::BadShape, status_of(model, ST_ERR, 1));
     for i in 0..m {
-        let a_row = ev.ptr_a.wrapping_add(i.wrapping_mul(lda as u64));
+        let a_row = ev.ptr_a.wrapping_add(i.wrapping_mul(a_row_stride));
         for j in 0..n {
-            let mut acc: i32 = 0;
+            // One accumulator per kind. Integer modes sum in i32 and float modes in f32,
+            // matching the 32-bit `C` the ABI defines; see the numfmt module note on why a
+            // wider accumulator would make the model less useful as a golden, not more.
+            let mut acc_i: i32 = 0;
+            let mut acc_f: f32 = 0.0;
             for t in 0..k {
-                let a = match mem.read_le::<1>(a_row.wrapping_add(t)) {
-                    Ok(v) => v as u8 as i8 as i32,
-                    Err(_) => return Err((AiJobReject::BadShape, status_of(model, ST_ERR, 1))),
-                };
-                let b_addr = ev
-                    .ptr_b
-                    .wrapping_add(t.wrapping_mul(ldb as u64))
-                    .wrapping_add(j);
-                let b = match mem.read_le::<1>(b_addr) {
-                    Ok(v) => v as u8 as i8 as i32,
-                    Err(_) => return Err((AiJobReject::BadShape, status_of(model, ST_ERR, 1))),
-                };
-                acc = acc.wrapping_add(a.wrapping_mul(b));
+                let rd = |addr: u64| mem.read_le::<1>(addr).ok().map(|v| v as u8);
+                let a = read_elem(fmt, a_row, t, rd).ok_or_else(|| bad(model))?;
+                // B is walked down its rows, so the row base moves with `t` and the element
+                // index within the row is `j`.
+                let b_row = ev.ptr_b.wrapping_add(t.wrapping_mul(b_row_stride));
+                let b = read_elem(fmt, b_row, j, rd).ok_or_else(|| bad(model))?;
+                match (a, b) {
+                    (Elem::Int(x), Elem::Int(y)) => {
+                        acc_i = acc_i.wrapping_add(x.wrapping_mul(y));
+                    }
+                    (Elem::Float(x), Elem::Float(y)) => {
+                        acc_f += x * y;
+                    }
+                    // read_elem derives the element kind from `fmt` alone, so a mixed pair is
+                    // structurally impossible. Refuse rather than pick one: a silent choice
+                    // here would be an arithmetic error dressed as a result.
+                    _ => return Err(bad(model)),
+                }
             }
             let c_addr = ev
                 .ptr_c
                 .wrapping_add(i.wrapping_mul(n).wrapping_add(j).wrapping_mul(4));
-            c_writes.push((c_addr, acc));
+            c_writes.push((c_addr, if fmt.is_float() { pack_c(acc_f) } else { acc_i }));
         }
     }
 
@@ -294,7 +361,50 @@ mod tests {
         l.statuses.insert("ST_ERR".into(), 1);
         l.statuses.insert("ST_BAD_VER".into(), 2);
         l.statuses.insert("ST_BAD_OP".into(), 3);
+        l.statuses.insert("ST_BAD_FMT".into(), 8);
         l
+    }
+
+    /// The published flags layout, including `numfmt` at `flags[22:20]`.
+    fn flags_layout() -> g6q_core::model::DescFlagsLayout {
+        use g6q_core::model::{DescFlagsLayout, FlagField};
+        DescFlagsLayout {
+            dtype_shift: 8,
+            dtype_mask: 0x3,
+            priority_shift: 16,
+            priority_mask: 0xf,
+            irq_bit: 2,
+            dtype_combined: false,
+            accmode: Some(FlagField {
+                shift: 10,
+                mask: 0x3,
+            }),
+            ew: Some(FlagField {
+                shift: 12,
+                mask: 0x3,
+            }),
+            sp24_bit: Some(14),
+            numfmt: Some(FlagField {
+                shift: 20,
+                mask: 0x7,
+            }),
+        }
+    }
+
+    /// A model whose capability window grants `mask` and publishes the flags layout.
+    ///
+    /// Used to model a SKU whose datapath implements more than dense INT8. Raising the mask
+    /// here is legitimate *in the model*; on real hardware the island asserts
+    /// grant ⊆ `AiIslandPeImplMask`, so a design cannot advertise what its PE cannot do.
+    fn model_granting(mask: u32) -> AiIslandModel {
+        let mut m = model(256);
+        m.config.dtype_mask = Some(mask);
+        m.desc_layout.flags_layout = Some(flags_layout());
+        m
+    }
+
+    fn all_formats_granted() -> u32 {
+        0xff
     }
 
     fn model(tile: u32) -> AiIslandModel {
@@ -341,6 +451,261 @@ mod tests {
             ..Default::default()
         };
         (mem, ev)
+    }
+
+    /// A 2x2x2 GEMM over `fmt`, with A = B = [[1,2],[3,4]] written in that format, so the
+    /// golden is [[7,10],[15,22]] regardless of encoding.
+    ///
+    /// Reusing one matrix across every format is the point: it makes the formats *comparable*.
+    /// A per-format fixture could hide a decode bug behind a per-format golden.
+    ///
+    /// The operands are deliberately 1..4. Signed INT4 spans only -8..7, so the more obvious
+    /// B = [[5,6],[7,8]] silently wraps 8 to -8 and yields 1*6 + 2*(-8) = -10 instead of 22 —
+    /// a wrong answer that looks like an arithmetic bug rather than an unrepresentable
+    /// operand. Every value here is exact in INT4, both FP8 variants, FP16, BF16 and FP32,
+    /// and the encoders below assert that rather than trusting it.
+    fn fixture_fmt(fmt: NumFmt) -> (PhysMem, AiTensorEvent) {
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(BASE, 0x1000));
+        let a = [1.0f32, 2.0, 3.0, 4.0];
+        let b = [1.0f32, 2.0, 3.0, 4.0];
+
+        let mut put = |base: u64, vals: &[f32]| {
+            for (idx, &v) in vals.iter().enumerate() {
+                let idx = idx as u64;
+                match fmt {
+                    NumFmt::Int4 => {
+                        // Two elements per byte, low nibble first. Assert representability:
+                        // silently truncating to a nibble is how an unrepresentable operand
+                        // turns into a plausible wrong product.
+                        let iv = v as i32;
+                        assert!(
+                            (-8..=7).contains(&iv),
+                            "test operand {v} does not fit signed INT4"
+                        );
+                        let addr = base + idx / 2;
+                        let cur = mem.read_le::<1>(addr).unwrap_or(0) as u8;
+                        let nib = (iv as u8) & 0x0f;
+                        let byte = if idx % 2 == 0 {
+                            (cur & 0xf0) | nib
+                        } else {
+                            (cur & 0x0f) | (nib << 4)
+                        };
+                        mem.write_le::<1>(addr, byte as u64).unwrap();
+                    }
+                    NumFmt::Int | NumFmt::Sp24 => {
+                        mem.write_le::<1>(base + idx, (v as i32 as u8) as u64)
+                            .unwrap();
+                    }
+                    NumFmt::Fp8E4m3 => {
+                        // 1..8 are exactly representable: E=bias+e, M=fraction.
+                        let enc = f32_to_fp8(v, 4, 3, 7);
+                        mem.write_le::<1>(base + idx, enc as u64).unwrap();
+                    }
+                    NumFmt::Fp8E5m2 => {
+                        let enc = f32_to_fp8(v, 5, 2, 15);
+                        mem.write_le::<1>(base + idx, enc as u64).unwrap();
+                    }
+                    NumFmt::Bf16 => {
+                        let h = (v.to_bits() >> 16) as u16;
+                        mem.write_le::<2>(base + idx * 2, h as u64).unwrap();
+                    }
+                    NumFmt::Fp16 => {
+                        let h = f32_to_fp16(v);
+                        mem.write_le::<2>(base + idx * 2, h as u64).unwrap();
+                    }
+                    NumFmt::Fp32 => {
+                        mem.write_le::<4>(base + idx * 4, v.to_bits() as u64)
+                            .unwrap();
+                    }
+                }
+            }
+        };
+        put(BASE + 0x100, &a);
+        put(BASE + 0x200, &b);
+
+        let ev = AiTensorEvent {
+            version: 1,
+            op: 1,
+            m: 2,
+            n: 2,
+            k: 2,
+            ld_ab: 2 | (2 << 16),
+            ptr_a: BASE + 0x100,
+            ptr_b: BASE + 0x200,
+            ptr_c: BASE + 0x300,
+            flags: (fmt as u32) << 20,
+            ..Default::default()
+        };
+        (mem, ev)
+    }
+
+    /// Encode a small positive power-scaled value into an IEEE-shaped mini float.
+    ///
+    /// Only used for the 1..8 test operands, which are all exactly representable in every
+    /// format under test, so no rounding policy is needed or implied.
+    fn f32_to_fp8(v: f32, exp_bits: u32, man_bits: u32, bias: i32) -> u8 {
+        let bits = v.to_bits();
+        let sign = (bits >> 31) & 1;
+        let exp = ((bits >> 23) & 0xff) as i32 - 127;
+        let man = bits & 0x007f_ffff;
+        let shifted = man >> (23 - man_bits);
+        assert_eq!(
+            man,
+            shifted << (23 - man_bits),
+            "test operand {v} is not exact in this format"
+        );
+        let e = (exp + bias) as u32;
+        assert!(e < (1 << exp_bits), "test operand {v} overflows exponent");
+        ((sign << (exp_bits + man_bits)) | (e << man_bits) | shifted) as u8
+    }
+
+    fn f32_to_fp16(v: f32) -> u16 {
+        let bits = v.to_bits();
+        let sign = (bits >> 31) & 1;
+        let exp = ((bits >> 23) & 0xff) as i32 - 127;
+        let man = bits & 0x007f_ffff;
+        let shifted = man >> 13;
+        assert_eq!(man, shifted << 13, "test operand {v} is not exact in fp16");
+        let e = (exp + 15) as u32;
+        ((sign << 15) | (e << 10) | shifted) as u16
+    }
+
+    /// Every granted format must produce the same golden from the same matrix.
+    ///
+    /// This is the core claim of format support: the arithmetic differs in *encoding*, not in
+    /// result, for operands all formats represent exactly. A format that decoded its operands
+    /// wrongly would land here rather than in a format-specific test with a bespoke golden.
+    #[test]
+    fn every_format_computes_the_same_golden() {
+        let want = [7i32, 10, 15, 22];
+        for fmt in [
+            NumFmt::Int,
+            NumFmt::Int4,
+            NumFmt::Fp8E4m3,
+            NumFmt::Fp8E5m2,
+            NumFmt::Fp16,
+            NumFmt::Bf16,
+            NumFmt::Fp32,
+        ] {
+            let (mem, ev) = fixture_fmt(fmt);
+            let m = model_granting(all_formats_granted());
+            let r = plan(&mem, &ev, &m)
+                .unwrap_or_else(|e| panic!("{} must be accepted: {:?}", fmt.as_str(), e));
+            assert_eq!(r.status, 0, "{} status", fmt.as_str());
+            let got: Vec<i32> = r.c_writes.iter().map(|(_, v)| *v).collect();
+            if fmt.is_float() {
+                let got_f: Vec<f32> = got.iter().map(|&w| f32::from_bits(w as u32)).collect();
+                let want_f: Vec<f32> = want.iter().map(|&v| v as f32).collect();
+                assert_eq!(got_f, want_f, "{} C (as f32)", fmt.as_str());
+            } else {
+                assert_eq!(got, want, "{} C (as i32)", fmt.as_str());
+            }
+        }
+    }
+
+    /// An INT4 row is half the bytes of an INT8 row, so the second row must not be read from
+    /// where INT8 would put it. A stride bug shows up as a wrong C rather than a fault.
+    #[test]
+    fn int4_rows_stride_by_packed_bytes() {
+        let (mem, ev) = fixture_fmt(NumFmt::Int4);
+        // A occupies 2 rows x 2 elements = 2 bytes total when packed, not 4.
+        assert_eq!(row_bytes(NumFmt::Int4, 2), 1);
+        let m = model_granting(all_formats_granted());
+        let r = plan(&mem, &ev, &m).unwrap();
+        let got: Vec<i32> = r.c_writes.iter().map(|(_, v)| *v).collect();
+        assert_eq!(got, vec![7, 10, 15, 22]);
+    }
+
+    /// Each format is refused unless its own grant bit is set — one bit at a time.
+    ///
+    /// A mask test that only checked "nothing beyond INT8" would pass on an implementation
+    /// that granted the wrong bit, so every format is checked against a mask containing
+    /// exactly itself and against one containing everything else.
+    #[test]
+    fn a_format_is_refused_unless_its_own_grant_bit_is_set() {
+        for fmt in [
+            NumFmt::Int4,
+            NumFmt::Fp8E4m3,
+            NumFmt::Fp8E5m2,
+            NumFmt::Fp16,
+            NumFmt::Bf16,
+            NumFmt::Fp32,
+        ] {
+            let (mem, ev) = fixture_fmt(fmt);
+            let bit = 1u32 << fmt.grant_bit();
+
+            // Granted alone (plus INT8, which is always granted): accepted.
+            let m = model_granting(1 | bit);
+            assert!(
+                plan(&mem, &ev, &m).is_ok(),
+                "{} must be accepted when its bit is set",
+                fmt.as_str()
+            );
+
+            // Everything else granted but not this one: refused with ST_BAD_FMT.
+            let m = model_granting(all_formats_granted() & !bit);
+            let (why, st) = plan(&mem, &ev, &m)
+                .err()
+                .unwrap_or_else(|| panic!("{} must be refused", fmt.as_str()));
+            assert_eq!(why, AiJobReject::UngrantedDtype, "{}", fmt.as_str());
+            assert_eq!(
+                st,
+                8,
+                "{} must report ST_BAD_FMT, not a generic error",
+                fmt.as_str()
+            );
+        }
+    }
+
+    /// The 3-bit field cannot encode a reserved value, so every descriptor names a real
+    /// format — and bits above the field must not leak into the decode.
+    ///
+    /// `NumFmt::from_abi` still rejects >= 8 as defence in depth for a package that widens
+    /// the field, but that path is unreachable from a descriptor today. Asserting the
+    /// unreachability is the useful test: it is what lets the refusal logic rely on "resolved
+    /// but ungranted" being the only failure mode a guest can provoke.
+    #[test]
+    fn the_numfmt_field_cannot_encode_a_reserved_value() {
+        for raw in 0..8u32 {
+            assert!(
+                NumFmt::from_abi(raw).is_some(),
+                "every 3-bit value must name a format; {raw} does not"
+            );
+        }
+        // Bits above flags[22:20] must be masked off, not folded into the format.
+        let (mem, mut ev) = fixture_fmt(NumFmt::Int);
+        ev.flags = 1 << 23; // just above the field
+        let m = model_granting(1); // INT8 only
+        let r = plan(&mem, &ev, &m).expect("a bit above the field must not change the format");
+        let got: Vec<i32> = r.c_writes.iter().map(|(_, v)| *v).collect();
+        assert_eq!(got, vec![7, 10, 15, 22], "must still decode as INT8");
+    }
+
+    /// An ungranted format is refused with the design's own `ST_BAD_FMT`, not a generic error.
+    #[test]
+    fn an_ungranted_format_reports_the_designs_bad_fmt_status() {
+        let (mem, ev) = fixture_fmt(NumFmt::Fp32);
+        let m = model_granting(1); // INT8 only, so FP32 is ungranted
+        let (why, st) = plan(&mem, &ev, &m).expect_err("must be refused");
+        assert_eq!(why, AiJobReject::UngrantedDtype);
+        assert_eq!(st, 8, "ST_BAD_FMT, so a guest can pick a fallback");
+    }
+
+    /// With the field unpublished the request cannot be characterised, so the only honest
+    /// reading is the all-zero legacy one — integer — and INT8 work must still succeed.
+    ///
+    /// This is what keeps a package that predates `numfmt` working unchanged.
+    #[test]
+    fn an_unpublished_numfmt_field_falls_back_to_integer() {
+        let (mem, mut ev) = fixture_fmt(NumFmt::Int);
+        // Set a float format in the flags, but publish no layout at all.
+        ev.flags = (NumFmt::Bf16 as u32) << 20;
+        let mut m = model(256);
+        m.desc_layout.flags_layout = None;
+        let r = plan(&mem, &ev, &m).expect("integer work must still run");
+        let got: Vec<i32> = r.c_writes.iter().map(|(_, v)| *v).collect();
+        assert_eq!(got, vec![7, 10, 15, 22], "must decode as INT8, not BF16");
     }
 
     #[test]
@@ -485,6 +850,10 @@ mod tests {
                 mask: 0x3,
             }),
             sp24_bit: Some(14),
+            numfmt: Some(FlagField {
+                shift: 20,
+                mask: 0x7,
+            }),
         });
         // ew = 01 (INT4) with DtypeMask granting only bit 0.
         ev.flags = 1 << 12;

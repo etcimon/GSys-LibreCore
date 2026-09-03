@@ -708,6 +708,18 @@ pub struct DescFlagsLayout {
     pub ew: Option<FlagField>,
     /// Bit index of the structured 2:4 sparsity request, when the package publishes it.
     pub sp24_bit: Option<u32>,
+    /// Numeric-format selector, when the package publishes it as its own accessor.
+    ///
+    /// This is the field that distinguishes integer from floating-point work: `ew` and
+    /// `dtype` can only describe integers (a width and a signedness), so BF16 and the FP8
+    /// variants have no encoding without it. Values are `config_pkg::AI_FMT_*`, and
+    /// `AI_FMT_INT == 0` so a descriptor written before the field existed keeps its old
+    /// meaning exactly.
+    ///
+    /// While this is unresolved the emulator cannot tell an FP request from an integer one,
+    /// so it must not execute float arithmetic at all — guessing would return numerically
+    /// plausible results for the wrong format.
+    pub numfmt: Option<FlagField>,
 }
 
 impl DescFlagsLayout {
@@ -726,6 +738,7 @@ impl DescFlagsLayout {
                 "sp24_bit",
                 self.sp24_bit.map_or(Json::Null, |b| Json::Int(b as i64)),
             ),
+            ("numfmt", self.numfmt.map_or(Json::Null, |f| f.to_json())),
         ])
     }
 
@@ -748,6 +761,7 @@ impl DescFlagsLayout {
             accmode: FlagField::from_json(json.get("accmode")),
             ew: FlagField::from_json(json.get("ew")),
             sp24_bit: u32_from(json.get("sp24_bit")),
+            numfmt: FlagField::from_json(json.get("numfmt")),
         })
     }
 

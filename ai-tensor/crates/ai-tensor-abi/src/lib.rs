@@ -29,6 +29,127 @@ pub const ST_WATCHDOG: u16 = 7;
 /// `flags[2]` — request completion IRQ when sticky IRQ is wired.
 pub const FLAG_IRQ: u32 = 1 << 2;
 
+/// Numeric-format selector inside `Desc64::flags`, at `flags[22:20]`.
+///
+/// Mirrors `g6lc_ai_desc_pkg::FLAG_NUMFMT_SHIFT/WIDTH`. `ew` and `dtype` can only describe
+/// integers -- a width and a signedness -- so BF16 and the FP8 variants have no encoding
+/// without this field. It occupies previously reserved bits and `NumFmt::Int == 0`, so a
+/// descriptor built before the field existed keeps its exact prior meaning and the contract
+/// version stays 1.
+pub const FLAG_NUMFMT_SHIFT: u32 = 20;
+/// Width of the `numfmt` field: 3 bits, 8 formats.
+pub const FLAG_NUMFMT_WIDTH: u32 = 3;
+/// Mask of `numfmt` after shifting.
+pub const FLAG_NUMFMT_MASK: u32 = (1 << FLAG_NUMFMT_WIDTH) - 1;
+
+/// Requested numeric format is not in the island's granted mask.
+///
+/// Distinct from a generic error so a runtime can tell "this engine cannot do BF16" from
+/// "this opcode does not exist" and choose a fallback deliberately rather than guessing.
+pub const ST_BAD_FMT: u16 = 8;
+
+/// A numeric format, indexed exactly as `config_pkg::AI_FMT_*`.
+///
+/// The discriminant is the ABI value *and* the grant-mask bit index. Keeping them the same
+/// number means a grant check is a shift-and-test rather than a lookup table that can drift
+/// out of step with the hardware's copy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum NumFmt {
+    /// Integer; width from `ew`, signedness from `dtype`. The all-zero legacy encoding.
+    Int = 0,
+    /// 4-bit signed integer, two elements per byte.
+    Int4 = 1,
+    /// Structured 2:4 sparsity on operand A.
+    Sp24 = 2,
+    /// 8-bit float, 4-bit exponent, 3-bit mantissa (OCP).
+    Fp8E4m3 = 3,
+    /// 8-bit float, 5-bit exponent, 2-bit mantissa (OCP).
+    Fp8E5m2 = 4,
+    /// IEEE 754 binary16.
+    Fp16 = 5,
+    /// bfloat16.
+    Bf16 = 6,
+    /// IEEE 754 binary32.
+    Fp32 = 7,
+}
+
+impl NumFmt {
+    /// Decode an ABI value; `None` for a value the ABI reserves.
+    ///
+    /// Reserved is refused rather than defaulted: silently treating an unknown format as INT8
+    /// returns numerically plausible results for the wrong arithmetic, which nothing
+    /// downstream can detect.
+    pub fn from_abi(v: u32) -> Option<Self> {
+        Some(match v {
+            0 => NumFmt::Int,
+            1 => NumFmt::Int4,
+            2 => NumFmt::Sp24,
+            3 => NumFmt::Fp8E4m3,
+            4 => NumFmt::Fp8E5m2,
+            5 => NumFmt::Fp16,
+            6 => NumFmt::Bf16,
+            7 => NumFmt::Fp32,
+            _ => return None,
+        })
+    }
+
+    /// ABI value, which is also the grant-mask bit index.
+    pub fn abi(self) -> u32 {
+        self as u32
+    }
+
+    /// This format's bit in a grant mask.
+    pub fn grant_bit(self) -> u16 {
+        1u16 << (self as u32)
+    }
+
+    /// Stable wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NumFmt::Int => "int",
+            NumFmt::Int4 => "int4",
+            NumFmt::Sp24 => "sp24",
+            NumFmt::Fp8E4m3 => "fp8e4m3",
+            NumFmt::Fp8E5m2 => "fp8e5m2",
+            NumFmt::Fp16 => "fp16",
+            NumFmt::Bf16 => "bf16",
+            NumFmt::Fp32 => "fp32",
+        }
+    }
+
+    /// Operand bytes per element; `None` for sub-byte formats sharing a byte.
+    pub fn elem_bytes(self) -> Option<u32> {
+        Some(match self {
+            NumFmt::Int | NumFmt::Sp24 | NumFmt::Fp8E4m3 | NumFmt::Fp8E5m2 => 1,
+            NumFmt::Fp16 | NumFmt::Bf16 => 2,
+            NumFmt::Fp32 => 4,
+            NumFmt::Int4 => return None,
+        })
+    }
+
+    /// Bytes spanned by `n` consecutive elements.
+    ///
+    /// A packed INT4 row is half an INT8 row and an FP32 row is four times as long, so a
+    /// caller that strides by elements rather than bytes overlaps or gaps its rows.
+    pub fn row_bytes(self, n: u32) -> u32 {
+        match self.elem_bytes() {
+            Some(b) => n.saturating_mul(b),
+            None => n.div_ceil(2),
+        }
+    }
+
+    /// Place this format into a `flags` word, clearing any previous value.
+    pub fn into_flags(self, flags: u32) -> u32 {
+        (flags & !(FLAG_NUMFMT_MASK << FLAG_NUMFMT_SHIFT)) | (self.abi() << FLAG_NUMFMT_SHIFT)
+    }
+
+    /// Read the format out of a `flags` word; `None` for a reserved value.
+    pub fn from_flags(flags: u32) -> Option<Self> {
+        Self::from_abi((flags >> FLAG_NUMFMT_SHIFT) & FLAG_NUMFMT_MASK)
+    }
+}
+
 /// MMIO offsets (byte) relative to island base — island_p3_v1 / live README.
 pub mod mmio {
     // CAP window (RO) — see g6lc_ai_cap_window
@@ -134,6 +255,24 @@ impl CapRegs {
             queue_depth: ((q >> 16) & 0xffff) as u16,
             dtype_mask: (w[10] & 0xffff) as u16,
         })
+    }
+
+    /// Does the island grant `fmt`?
+    ///
+    /// `dtype_mask` is a bitmap over `NumFmt` indices, read from `CAP_DTYPE_MASK`. The
+    /// capability window is the discovery authority, so a runtime asks this rather than
+    /// assuming: submitting an ungranted format returns `ST_BAD_FMT`, and the island will not
+    /// demote it to INT8 because plausible wrong numbers are worse than an error.
+    pub fn grants(&self, fmt: NumFmt) -> bool {
+        self.dtype_mask & fmt.grant_bit() != 0
+    }
+
+    /// Every format this island grants, in ABI order.
+    pub fn granted_formats(&self) -> Vec<NumFmt> {
+        (0..8)
+            .filter_map(NumFmt::from_abi)
+            .filter(|f| self.grants(*f))
+            .collect()
     }
 
     /// Synthetic CAP matching live AiIslandLatencyDefault shape (AccTile/Macs=256).

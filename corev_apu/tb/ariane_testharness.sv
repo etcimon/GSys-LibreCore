@@ -518,7 +518,18 @@ module ariane_testharness #(
         .AxiDataWidth   ( AXI_DATA_WIDTH ),
         .AxiIdWidth     ( ariane_axi_soc::IdWidth ),
         .axi_req_t      ( ariane_axi::req_t ),
-        .axi_resp_t     ( ariane_axi::resp_t )
+        .axi_resp_t     ( ariane_axi::resp_t ),
+        // `+define+G6LC_AI_TB_OVERGRANT` advertises BF16 the PE cannot execute, so the
+        // grant-subset-of-datapath guard in g6lc_ai_island_top can be shown to FIRE. Kept
+        // here rather than as an `ifdef` inside the config package: two conditional
+        // declarations of one localparam make the value unreadable to anything that parses
+        // the package without evaluating macros, and the emulator's capability ingest is
+        // exactly such a reader. The package states one design; the testbench overrides.
+`ifdef G6LC_AI_TB_OVERGRANT
+        .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMaskOvergrant )
+`else
+        .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMask )
+`endif
     ) i_ai_island (
         .clk_i     ( clk_i      ),
         .rst_ni    ( core_rst_n ),

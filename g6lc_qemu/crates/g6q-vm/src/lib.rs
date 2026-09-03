@@ -36,6 +36,7 @@ pub mod gemm;
 pub mod insn;
 pub mod mem;
 pub mod mmu;
+pub mod numfmt;
 pub mod regs;
 
 pub use exec::{Halt, Hart};

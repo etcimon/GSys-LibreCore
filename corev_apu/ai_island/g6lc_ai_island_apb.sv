@@ -13,7 +13,9 @@ module g6lc_ai_island_apb
     parameter int unsigned    AxiDataWidth = 64,
     parameter int unsigned    AxiIdWidth   = 4,
     parameter type            axi_req_t    = logic,
-    parameter type            axi_resp_t   = logic
+    parameter type            axi_resp_t   = logic,
+    // Forwarded to g6lc_ai_island_top; see there for why it is a parameter.
+    parameter logic [15:0]    DtypeMask    = AiIslandDtypeMask
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
@@ -59,7 +61,8 @@ module g6lc_ai_island_apb
       .AxiDataWidth  (AxiDataWidth),
       .AxiIdWidth    (AxiIdWidth),
       .axi_req_t     (axi_req_t),
-      .axi_resp_t    (axi_resp_t)
+      .axi_resp_t    (axi_resp_t),
+      .DtypeMask     (DtypeMask)
   ) i_island (
       .clk_i     (clk_i),
       .rst_ni    (rst_ni),

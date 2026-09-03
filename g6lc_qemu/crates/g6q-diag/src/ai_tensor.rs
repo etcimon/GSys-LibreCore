@@ -27,6 +27,10 @@ const DEFAULT_FLAGS_LAYOUT: DescFlagsLayout = DescFlagsLayout {
     accmode: None,
     ew: None,
     sp24_bit: None,
+    // Unresolved, like the other arithmetic subfields: a bare event array predates the
+    // field, so claiming a numeric format here would invent one. The backend then refuses
+    // float work rather than guessing the operand encoding.
+    numfmt: None,
 };
 
 /// One AI-island descriptor event.

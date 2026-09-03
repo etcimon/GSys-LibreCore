@@ -507,6 +507,13 @@ fn parse_flags_layout(text: &str) -> Option<g6q_core::model::DescFlagsLayout> {
         layout.ew = Some(f);
         found = true;
     }
+    // Numeric format. Resolved the same way as `ew`, from FLAG_NUMFMT_SHIFT/WIDTH. Without
+    // it an FP request is indistinguishable from an integer one, so the backend refuses to
+    // execute float arithmetic rather than guessing at the operand encoding.
+    if let Some(f) = field_from_fn("desc_numfmt") {
+        layout.numfmt = Some(f);
+        found = true;
+    }
     if let Some(bit) = shift("FLAG_SP24_SHIFT") {
         layout.sp24_bit = Some(bit);
         found = true;
@@ -846,6 +853,27 @@ endpackage
         assert_eq!(f.dtype_mask, 0x3);
         assert_eq!(f.ew.unwrap().shift, 12);
         assert_eq!(f.sp24_bit, Some(14));
+
+        // The numeric-format field, which is what makes FP work expressible at all: `ew` and
+        // `dtype` describe only integers, so without this BF16 and the FP8 variants have no
+        // encoding. Pinned to the design's own position rather than assumed, so a package
+        // that moves it surfaces here instead of silently decoding the wrong bits as a format.
+        let nf = f
+            .numfmt
+            .expect("FLAG_NUMFMT_SHIFT/WIDTH are published; float formats are expressible");
+        assert_eq!(nf.shift, 20, "numfmt sits at flags[22:20]");
+        assert_eq!(nf.mask, 0x7, "3 bits: 8 formats");
+
+        // AI_FMT_INT == 0 must remain the all-zero encoding, or every descriptor written
+        // before the field existed changes meaning and ContractVersion=1 becomes a lie.
+        assert_eq!(nf.extract(0), 0, "an all-zero flags word must mean integer");
+
+        // The status that makes refusal distinguishable from a generic error.
+        assert_eq!(
+            layout.statuses.get("ST_BAD_FMT").copied(),
+            Some(8),
+            "ST_BAD_FMT must be published so a guest can tell 'cannot do BF16' from ST_ERR"
+        );
     }
 
     #[test]

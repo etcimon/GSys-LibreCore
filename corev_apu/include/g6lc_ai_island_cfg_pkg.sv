@@ -349,15 +349,21 @@ package g6lc_ai_island_cfg_pkg;
   // GRANT, so widening it without the matching datapath would advertise a format
   // the engine cannot execute; the engine then returns ST_BAD_FMT and software
   // has been lied to. Widen the datapath first, then this mask.
-  // `+define+G6LC_AI_TB_OVERGRANT` grants BF16 that the PE cannot execute, so
-  // the grant ⊆ implemented guard in g6lc_ai_island_top can be shown to FIRE.
-  // A guard that has never fired is indistinguishable from a dead one -- a
-  // silent build proves only that nothing complained. Keep the seam.
-`ifdef G6LC_AI_TB_OVERGRANT
-  localparam logic [15:0] AiIslandDtypeMask   = 16'h0041;  // INT8 + BF16 (illegal)
-`else
   localparam logic [15:0] AiIslandDtypeMask   = 16'h0001;
-`endif
+
+  // Illegal grant used ONLY as a negative control: INT8 + BF16, where the PE
+  // implements INT8 alone, so the grant ⊆ implemented guard in
+  // g6lc_ai_island_top must fire. A guard that has never fired is
+  // indistinguishable from a dead one, and a silent build proves only that
+  // nothing complained.
+  //
+  // It is a named constant here rather than an `ifdef` around
+  // AiIslandDtypeMask itself: two conditional declarations of one localparam
+  // make the value unparseable to anything that reads this package without
+  // evaluating macros, and the emulator's capability-window ingest is exactly
+  // such a reader (it reported "unresolved" instead of 0x0001). The testbench
+  // selects it by parameter, so the package keeps stating one design.
+  localparam logic [15:0] AiIslandDtypeMaskOvergrant = 16'h0041;
 
   // What the PE array can actually COMPUTE, as opposed to what the capability
   // window is willing to advertise.

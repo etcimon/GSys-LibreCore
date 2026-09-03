@@ -35,7 +35,11 @@ module g6lc_ai_island_top
     parameter int unsigned    AxiDataWidth = 64,
     parameter int unsigned    AxiIdWidth   = 4,
     parameter type            axi_req_t    = logic,
-    parameter type            axi_resp_t   = logic
+    parameter type            axi_resp_t   = logic,
+    // Granted numeric formats, one bit per config_pkg::AI_FMT_* index. A parameter
+    // rather than a package read so a testbench can drive an illegal grant to prove
+    // the guard below fires; the design default is the package's own value.
+    parameter logic [15:0]    DtypeMask    = AiIslandDtypeMask
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
@@ -99,10 +103,10 @@ module g6lc_ai_island_top
 
   // Single source for the granted-format bitmap: the capability window
   // publishes it and the descriptor engine enforces it. Binding both from one
-  // localparam is what keeps discovery and enforcement from drifting -- a part
+  // value is what keeps discovery and enforcement from drifting -- a part
   // that advertised BF16 and then returned ST_BAD_FMT would be worse than one
   // that never advertised it.
-  localparam logic [15:0] DtypeMaskLp = AiIslandDtypeMask;
+  localparam logic [15:0] DtypeMaskLp = DtypeMask;
 
   // pragma translate_off
   // NOTE: these asserts do NOT currently execute in the Verilator flow --
