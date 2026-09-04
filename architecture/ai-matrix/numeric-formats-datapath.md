@@ -306,20 +306,25 @@ reduction tree and a second accumulator path — the same F0b-2 pipeline serves 
 4. Edge cases: odd `k` (last byte carries one valid nibble), negative zero, `lda` that is odd
    (packed row stride is not an integer number of bytes), and `ldb` mismatched with `n`.
 
-### 7.6 Sequencer changes still to land
+### 7.6 Sequencer changes: MAC slice landed, load/masks still to land
 
-The PE is ready; the sequencer still needs:
+The MAC-execution slice is in place in `g6lc_ai_gemm_seq`:
 
-1. `t_q` advance by `2 * PeLanes` for INT4, `PeLanes` for INT8.
+1. `t_q` advances by `2 * PeLanes` for INT4, `PeLanes` for INT8 (`mac_step` signal).
 2. For INT4, read byte index `(t_q / 2) + p` from bank `p` (this works because `t_q` is
    always a multiple of `2 * PeLanes`, so `t_q / 2` is a multiple of `PeLanes`).
 3. Per-lane nibble validity and masking: zero the invalid nibble in `pe_a`/`pe_b` when
    `t_q + 2p + 1 >= k_q`, but keep the valid nibble.
-4. `a_addr` / `b_addr` must scale leading dimension by elements per byte (0.5 for INT4,
-   1 for INT8/FP8, 2 for BF16/FP16, 4 for FP32). For INT4 the byte stride is `lda / 2`
-   (or `ceil(lda/2)` if odd rows are allowed), and the element `t` lives at byte `t / 2`.
-5. Update `g6lc_ai_island_cfg_pkg::AiIslandDtypeMask` and `AiIslandPeImplMask` to
-   `AiFmtMaskInt8Int4` together once the sequencer can execute INT4, so the existing
+4. `a_addr` / `b_addr` scale the byte offset of element `t` by `t / 2` and the leading-
+   dimension byte stride by `ceil(lda / 2)` for INT4. The live INT8 path is unchanged.
+
+Still open:
+
+5. A/B tile load FSM must scale the bytes-per-row count for INT4: `ceil(k / 2)` bytes
+   in the burst and `ceil(lda / 2)` bytes between rows. Currently the load logic treats
+   one AXI byte as one element, so it over-fetches for INT4.
+6. Update `g6lc_ai_island_cfg_pkg::AiIslandDtypeMask` and `AiIslandPeImplMask` to
+   `AiFmtMaskInt8Int4` together once the load path is correct, so the existing
    `grant ⊆ implemented` assertion stays valid.
 
 ---
@@ -331,7 +336,7 @@ The PE is ready; the sequencer still needs:
 | F0a tree | **landed and verified.** Variane `ai-dt` rebuilt; island GEMM goldens `ai_gemm_s8_smoke` **SUCCESS 1212 cy** and `ai_gemm_s8_4x4_smoke` **SUCCESS 1673 cy**, zero assertions fired (`--assert` is live since AI-X5). Those exercise the PE through `g6lc_ai_gemm_seq`, which is the integration that matters. The unit TB `tb_g6lc_ai_pe_dot` is written but **cannot run** on this tool version — see below |
 | F0b-1 accumulator moved out of the PE | **landed and verified.** `g6lc_ai_pe_dot` no longer has `acc_i`/`acc_o`; it is a pure sum-of-products reducer, and `g6lc_ai_gemm_seq` owns `acc_q + pe_sum`. Bit-identical: goldens **1212 cy** and **1673 cy**, unchanged from F0a, 0 assertions |
 | F0b-2 pipeline register | **landed and verified.** `sum_q <= pe_sum`, drain computes `acc_d = (first_q ? '0 : acc_q) + sum_q` and writes `C` at `(sum_i_q, sum_j_q)` if `last_q`. Indices advance at issue rate; the C write and accumulator update lag by one cycle but issue one cycle per MAC. Verified: `ai_gemm_s8_smoke` **1212 cy**, `ai_gemm_s8_4x4_smoke` **1673 cy** (same as F0b-1, so the pipeline is fully hidden for small fixtures), `ai_gemm_s8_lda_smoke` **1212 cy**, `ai_gemm_s8_64x64_smoke` **SUCCESS 93,194 cy** with zero assertions. The trail-store hazard predicted in §5.1 does not appear in these fixtures because the delayed C write still completes before the trail store streams the same row; full trail-store stress is left for the wider flavour sweep |
-| F1 INT4 | PE plumbing and widening verified; sequencer addressing/load scaling is the next slice |
+| F1 INT4 | PE plumbing/widening and sequencer MAC addressing/stride scaling verified; A/B tile load byte-count and capability masks are the next slice |
 | F2 FP8 | open |
 | F3 BF16 | open |
 | F4 FP16 | open |

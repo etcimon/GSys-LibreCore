@@ -109,9 +109,11 @@ module g6lc_ai_gemm_seq #(
   logic [31:0] m_q, n_q, k_q;
   logic [15:0] lda_q, ldb_q;
   logic [2:0]  numfmt_q;
+  logic [31:0] mac_step;
   logic [AddrWidth-1:0] pa_q, pb_q, pc_q;
 
-  // i,j element indices; t is reduction base (multiple of PeLanes during MAC)
+  // i,j element indices; t is reduction base (multiple of PeLanes during MAC
+  // for INT8, multiple of 2*PeLanes for INT4)
   logic [31:0] i_q, j_q, t_q;
   logic [31:0] acc_q, acc_d;
   // F0b-2: one-cycle pipeline between the PE's pure reduction and the
@@ -331,6 +333,9 @@ module g6lc_ai_gemm_seq #(
       .sum_o   (pe_sum)
   );
 
+  // F1: number of elements issued per MAC cycle.
+  assign mac_step = (numfmt_q == 3'd1) ? 32'(2 * PeLanes) : 32'(PeLanes);
+
   // F0b-2: the accumulator is now fed from the PIPELINE register, so
   // `mac_acc_next` is a function of state (sum_q, acc_q) rather than of the
   // live combinational tree output. The cycle-accurate expression:
@@ -370,12 +375,31 @@ module g6lc_ai_gemm_seq #(
   assign pmu_w_beats_o = pmu_w_q;
   assign pmu_cycles_o  = pmu_cy_q;
 
+  // F1: element index / leading-dimension scale for packed formats.
+  // For INT4, two elements share one byte, so the byte offset of element `t` is
+  // t/2 and the byte stride of a row is lda/2 (descriptor must use an even lda).
+  // For all other formats the byte offset and stride are the element counts.
+  // This is used by the AXI tile-load address functions.
+  function automatic logic [31:0] fmt_t_to_byte_off(
+      input logic [31:0] t
+  );
+    return (numfmt_q == 3'd1) ? (t >> 1) : t;  // AI_FMT_INT4 == 1
+  endfunction
+
+  function automatic logic [31:0] fmt_ld_to_stride(
+      input logic [15:0] ld
+  );
+    // INT4 packs two elements per byte. A row of ld elements needs ceil(ld/2)
+    // bytes; the +1 rounds up for odd ld. The intra-row offset uses t>>1 or j>>1.
+    return (numfmt_q == 3'd1) ? ((32'(ld) + 32'd1) >> 1) : 32'(ld);
+  endfunction
+
   function automatic logic [AddrWidth-1:0] a_addr(
       input logic [AddrWidth-1:0] base,
       input logic [31:0] i, t,
       input logic [15:0] lda
   );
-    return base + AddrWidth'((i * 32'(lda) + t));
+    return base + AddrWidth'((i * fmt_ld_to_stride(lda) + fmt_t_to_byte_off(t)));
   endfunction
 
   function automatic logic [AddrWidth-1:0] b_addr(
@@ -383,7 +407,7 @@ module g6lc_ai_gemm_seq #(
       input logic [31:0] t, j,
       input logic [15:0] ldb
   );
-    return base + AddrWidth'((t * 32'(ldb) + j));
+    return base + AddrWidth'((t * fmt_ld_to_stride(ldb) + fmt_t_to_byte_off(j)));
   endfunction
 
   function automatic logic [AddrWidth-1:0] c_addr(
@@ -1040,9 +1064,11 @@ module g6lc_ai_gemm_seq #(
           automatic logic [31:0] pairs_rem, nbeats, beats_done, j_eff;
           automatic logic [31:0] t_next;
           automatic logic        last_step;
+          automatic logic [31:0] t_byte_base;
           mac_active = (i_q < m_q);
-          t_next     = t_q + PeLanes;
+          t_next     = t_q + mac_step;
           last_step  = (t_next >= k_q);
+          t_byte_base= (numfmt_q == 3'd1) ? (t_q >> 1) : t_q;  // AI_FMT_INT4 == 1
           can_trail  = DualCRead && (DataWidth >= 64) && (stc_i_q < i_q ||
                        (i_q >= m_q && stc_i_q < m_q));
 
@@ -1066,16 +1092,40 @@ module g6lc_ai_gemm_seq #(
           // ---- issue the next step ----------------------------------------
           if (mac_active) begin
             for (int unsigned p = 0; p < PeLanes; p++) begin
-              automatic logic [31:0] tt;
-              tt = t_q + 32'(p);
-              if (tt < k_q) begin
-                a_r_req [p] = 1'b1;
-                a_r_addr[p] = a_bank_addr(i_q, tt);
-                b_r_req [p] = 1'b1;
-                b_r_addr[p] = b_bank_addr(tt, j_q);
-                pe_a[p]     = $signed(a_r_data[p]);
-                pe_b[p]     = $signed(b_r_data[p]);
-                pe_v[p]     = 1'b1;
+              if (numfmt_q == 3'd1) begin
+                // INT4: two elements per byte. Lane p covers elements
+                // (t_q + 2p) and (t_q + 2p + 1) in the same byte.
+                automatic logic [31:0] e0, e1;
+                e0 = t_q + 32'(p << 1);
+                e1 = e0 + 32'd1;
+                if (e0 < k_q) begin
+                  automatic logic [31:0] byte_idx;
+                  byte_idx = t_byte_base + 32'(p);
+                  a_r_req [p] = 1'b1;
+                  a_r_addr[p] = a_bank_addr(i_q, byte_idx);
+                  b_r_req [p] = 1'b1;
+                  b_r_addr[p] = b_bank_addr(byte_idx, j_q);
+                  // Mask the invalid nibble(s) to 0; the PE sign-extends the
+                  // remaining nibble and computes two products, one of which is 0.
+                  pe_a[p]     = {(e1 < k_q) ? a_r_data[p][7:4] : 4'b0000,
+                                 (e0 < k_q) ? a_r_data[p][3:0] : 4'b0000};
+                  pe_b[p]     = {(e1 < k_q) ? b_r_data[p][7:4] : 4'b0000,
+                                 (e0 < k_q) ? b_r_data[p][3:0] : 4'b0000};
+                  pe_v[p]     = 1'b1;
+                end
+              end else begin
+                // INT8/FP8/BF16/FP16/FP32: one byte per element.
+                automatic logic [31:0] tt;
+                tt = t_q + 32'(p);
+                if (tt < k_q) begin
+                  a_r_req [p] = 1'b1;
+                  a_r_addr[p] = a_bank_addr(i_q, tt);
+                  b_r_req [p] = 1'b1;
+                  b_r_addr[p] = b_bank_addr(tt, j_q);
+                  pe_a[p]     = $signed(a_r_data[p]);
+                  pe_b[p]     = $signed(b_r_data[p]);
+                  pe_v[p]     = 1'b1;
+                end
               end
             end
             // Capture what the PE produced this cycle. (i,j,t) are the issue
@@ -1578,7 +1628,7 @@ module g6lc_ai_gemm_seq #(
       // Resetting acc_q at the element boundary would clear the running total
       // before the last partial has been drained into it.
       if (state_q == ST_MAC && i_q < m_q) begin
-        if (t_q + PeLanes >= k_q) begin
+        if (t_q + mac_step >= k_q) begin
           t_q   <= '0;
           if (j_q + 1 == n_q) begin
             j_q <= '0;
@@ -1586,7 +1636,7 @@ module g6lc_ai_gemm_seq #(
           end else
             j_q <= j_q + 1;
         end else
-          t_q <= t_q + PeLanes;
+          t_q <= t_q + mac_step;
       end
 
       // Store cursor (trail during MAC or dedicated ST_STC)
