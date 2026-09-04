@@ -224,6 +224,88 @@ capability window would otherwise promise arithmetic that returns `ST_BAD_FMT`.
 
 ---
 
+## 7. F1 design: INT4 in the island datapath
+
+INT4 is the cheapest format and the only one that *raises* throughput. The work splits into
+carrying `numfmt` to the sequencer, changing the operand fetch, and reusing the 8×8 signed
+multiplier to compute two 4×4 products.
+
+### 7.1 The multiplier trick
+
+A signed 4-bit value sign-extended to 8 bits is still that value. So for INT4:
+
+```
+let a4 = sext4(nibble_a);  // a4 is the 4-bit value in an 8-bit signed container
+let b4 = sext4(nibble_b);
+let p  = a4 * b4;          // fits in 8 bits (max 49, min -56)
+```
+
+The existing 8×8 multiplier cell computes `a8 * b8` where `a8` and `b8` are already sign-
+extended from 8-bit inputs. If those inputs happen to be sign-extended 4-bit values, the
+product is the correct 4×4 product, still in 32-bit sign-extended form. So the multiplier
+array does not need a separate 4×4 unit; it needs the **right nibble** fed to each lane.
+
+This means the *tree* is the bottleneck. For INT4, each read byte contains two operands, so
+the PE can produce `2 * PeLanes` products per cycle. The tree already parameterized by `Lanes`;
+F1 sizes it for `2 * PeLanes` and uses the upper half as zeros when `numfmt != INT4`. The
+depth increases by one adder level (log2(2*256)=9), which is fine because the F0b-2 register
+sits between the tree and the accumulator.
+
+### 7.2 Operand fetch
+
+The A/B tile SRAM has `PeLanes` banks, each returning one byte. In INT8, bank `q` in a MAC
+step reads the byte at element `t_q + q`. In INT4, the same `PeLanes` bytes contain
+`2 * PeLanes` elements:
+
+```
+byte b = t_q / 2 + q                 // t_q is a multiple of PeLanes and therefore even
+nibble 0 -> element t_q + 2q
+nibble 1 -> element t_q + 2q + 1
+```
+
+The `t_q` advance for INT4 should be `2 * PeLanes` elements per issue. The bank address is
+`i * KPerBank + (t_q/2 + q) / PeLanes` (A) and `j * KPerBank + (t_q/2 + q) / PeLanes` (B).
+`KPerBank = ceil(MaxDim/PeLanes)` is still sufficient because `t_q/2 + q < MaxDim/2 + PeLanes <=
+MaxDim <= PeLanes * KPerBank` for the live parameters. The byte fits; only the mapping changes.
+
+`pe_a[p]` for the PE therefore becomes `2 * PeLanes` 8-bit lanes:
+- for INT8: `pe_a[2q] = a_r_data[q]`, `pe_a[2q+1] = 0`, `pe_v[2q+1] = 0`.
+- for INT4: `pe_a[2q] = sext4(a_r_data[q][3:0])`, `pe_a[2q+1] = sext4(a_r_data[q][7:4])`,
+  both valid.
+
+The tree width doubles, but the upper half of the product array is zero for INT8, so the sum
+is unchanged.
+
+### 7.3 Descriptor / capability plumbing
+
+The `numfmt` field (`flags[22:20]`) already reaches the descriptor engine
+(`g6lc_ai_desc_engine.sv`) and is refused with `ST_BAD_FMT` if not granted. For F1:
+
+- `g6lc_ai_gemm_seq` receives `numfmt` from the descriptor (it already has `m/n/k/lda/ldb`).
+- INT4 uses `numfmt == AI_FMT_INT4` (value from `config_pkg`).
+- `AiIslandPeImplMask` and `AiIslandDtypeMask` gain `AI_FMT_INT4`.
+- `g6lc_ai_island_top` already asserts `grant ⊆ impl`; the assertion will fire unless both
+  masks move together.
+
+### 7.4 Why not a separate small INT4 PE
+
+A dedicated 4×4 multiplier array would need `2 * PeLanes` 4×4 multipliers to get the 2×
+throughput, which is the same cell count as fracturing the existing 8×8 array (`~2× area` for
+2× the products is expected). Keeping one array and switching the inputs avoids a second
+reduction tree and a second accumulator path — the same F0b-2 pipeline serves all formats.
+
+### 7.5 Verification plan
+
+1. PE-level: once the unit TB layer works, verify `pe_sum` for INT4 against a reference
+   function with packed nibbles.
+2. Harness: `ai_gemm_s8_*` tests must remain byte/cycle-identical (INT8 path unchanged).
+3. New test `ai_gemm_int4_4x4_smoke.S`: operand fixture values in `[-8,7]`, golden computed
+   from the emulator `numfmt.rs`.
+4. Edge cases: odd `k` (last byte carries one valid nibble), negative zero, `lda` that is odd
+   (packed row stride is not an integer number of bytes), and `ldb` mismatched with `n`.
+
+---
+
 ## 6. Status
 
 | Step | State |
@@ -231,7 +313,7 @@ capability window would otherwise promise arithmetic that returns `ST_BAD_FMT`.
 | F0a tree | **landed and verified.** Variane `ai-dt` rebuilt; island GEMM goldens `ai_gemm_s8_smoke` **SUCCESS 1212 cy** and `ai_gemm_s8_4x4_smoke` **SUCCESS 1673 cy**, zero assertions fired (`--assert` is live since AI-X5). Those exercise the PE through `g6lc_ai_gemm_seq`, which is the integration that matters. The unit TB `tb_g6lc_ai_pe_dot` is written but **cannot run** on this tool version — see below |
 | F0b-1 accumulator moved out of the PE | **landed and verified.** `g6lc_ai_pe_dot` no longer has `acc_i`/`acc_o`; it is a pure sum-of-products reducer, and `g6lc_ai_gemm_seq` owns `acc_q + pe_sum`. Bit-identical: goldens **1212 cy** and **1673 cy**, unchanged from F0a, 0 assertions |
 | F0b-2 pipeline register | **landed and verified.** `sum_q <= pe_sum`, drain computes `acc_d = (first_q ? '0 : acc_q) + sum_q` and writes `C` at `(sum_i_q, sum_j_q)` if `last_q`. Indices advance at issue rate; the C write and accumulator update lag by one cycle but issue one cycle per MAC. Verified: `ai_gemm_s8_smoke` **1212 cy**, `ai_gemm_s8_4x4_smoke` **1673 cy** (same as F0b-1, so the pipeline is fully hidden for small fixtures), `ai_gemm_s8_lda_smoke` **1212 cy**, `ai_gemm_s8_64x64_smoke` **SUCCESS 93,194 cy** with zero assertions. The trail-store hazard predicted in §5.1 does not appear in these fixtures because the delayed C write still completes before the trail store streams the same row; full trail-store stress is left for the wider flavour sweep |
-| F1 INT4 | open |
+| F1 INT4 | in design — §7 |
 | F2 FP8 | open |
 | F3 BF16 | open |
 | F4 FP16 | open |
