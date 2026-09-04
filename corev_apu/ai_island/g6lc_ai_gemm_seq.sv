@@ -49,6 +49,7 @@ module g6lc_ai_gemm_seq #(
     input  logic [31:0] k_i,
     input  logic [15:0] lda_i,
     input  logic [15:0] ldb_i,
+    input  logic [2:0]  numfmt_i,
     input  logic [AddrWidth-1:0] ptr_a_i,
     input  logic [AddrWidth-1:0] ptr_b_i,
     input  logic [AddrWidth-1:0] ptr_c_i,
@@ -107,6 +108,7 @@ module g6lc_ai_gemm_seq #(
   state_e state_q, state_d;
   logic [31:0] m_q, n_q, k_q;
   logic [15:0] lda_q, ldb_q;
+  logic [2:0]  numfmt_q;
   logic [AddrWidth-1:0] pa_q, pb_q, pc_q;
 
   // i,j element indices; t is reduction base (multiple of PeLanes during MAC)
@@ -325,6 +327,7 @@ module g6lc_ai_gemm_seq #(
       .a_i     (pe_a),
       .b_i     (pe_b),
       .valid_i (pe_v),
+      .numfmt_i(numfmt_q),
       .sum_o   (pe_sum)
   );
 
@@ -1369,6 +1372,7 @@ module g6lc_ai_gemm_seq #(
       state_q   <= ST_IDLE;
       m_q <= '0; n_q <= '0; k_q <= '0;
       lda_q <= '0; ldb_q <= '0;
+      numfmt_q <= '0;
       pa_q <= '0; pb_q <= '0; pc_q <= '0;
       i_q <= '0; j_q <= '0; t_q <= '0;
       acc_q <= '0;
@@ -1491,6 +1495,7 @@ module g6lc_ai_gemm_seq #(
         k_q   <= k_i;
         lda_q <= lda_i;
         ldb_q <= ldb_i;
+        numfmt_q <= numfmt_i;
         pa_q  <= ptr_a_i;
         pb_q  <= ptr_b_i;
         pc_q  <= ptr_c_i;

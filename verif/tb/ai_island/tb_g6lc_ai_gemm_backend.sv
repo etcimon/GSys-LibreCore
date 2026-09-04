@@ -140,6 +140,7 @@ module tb_g6lc_ai_gemm_backend
       .k_i          ( gemm_k ),
       .lda_i        ( gemm_lda ),
       .ldb_i        ( gemm_ldb ),
+      .numfmt_i     ( 3'd0 ),
       .ptr_a_i      ( gemm_pa ),
       .ptr_b_i      ( gemm_pb ),
       .ptr_c_i      ( gemm_pc ),

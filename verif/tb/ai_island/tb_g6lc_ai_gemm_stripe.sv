@@ -157,6 +157,7 @@ module tb_g6lc_ai_gemm_stripe
       .k_i          ( 32'd16 ),
       .lda_i        ( 16'd16 ),
       .ldb_i        ( 16'd2 ),
+      .numfmt_i     ( 3'd0 ),
       .ptr_a_i      ( 64'h8000_0038 ),
       .ptr_b_i      ( 64'h8000_0100 ),
       .ptr_c_i      ( 64'h8000_0200 ),

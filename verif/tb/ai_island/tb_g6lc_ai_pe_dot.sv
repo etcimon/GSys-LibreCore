@@ -122,11 +122,11 @@ module tb_g6lc_ai_pe_dot;
     end
   end
 
-  g6lc_ai_pe_dot #(.Lanes(L0)) d0 (.a_i(a0), .b_i(b0), .valid_i(v0), .sum_o(o0));
-  g6lc_ai_pe_dot #(.Lanes(L1)) d1 (.a_i(a1), .b_i(b1), .valid_i(v1), .sum_o(o1));
-  g6lc_ai_pe_dot #(.Lanes(L2)) d2 (.a_i(a2), .b_i(b2), .valid_i(v2), .sum_o(o2));
-  g6lc_ai_pe_dot #(.Lanes(L3)) d3 (.a_i(a3), .b_i(b3), .valid_i(v3), .sum_o(o3));
-  g6lc_ai_pe_dot #(.Lanes(L4)) d4 (.a_i(a4), .b_i(b4), .valid_i(v4), .sum_o(o4));
+  g6lc_ai_pe_dot #(.Lanes(L0)) d0 (.a_i(a0), .b_i(b0), .valid_i(v0), .numfmt_i(3'd0), .sum_o(o0));
+  g6lc_ai_pe_dot #(.Lanes(L1)) d1 (.a_i(a1), .b_i(b1), .valid_i(v1), .numfmt_i(3'd0), .sum_o(o1));
+  g6lc_ai_pe_dot #(.Lanes(L2)) d2 (.a_i(a2), .b_i(b2), .valid_i(v2), .numfmt_i(3'd0), .sum_o(o2));
+  g6lc_ai_pe_dot #(.Lanes(L3)) d3 (.a_i(a3), .b_i(b3), .valid_i(v3), .numfmt_i(3'd0), .sum_o(o3));
+  g6lc_ai_pe_dot #(.Lanes(L4)) d4 (.a_i(a4), .b_i(b4), .valid_i(v4), .numfmt_i(3'd0), .sum_o(o4));
 
   // The linear chain the tree replaced, in declaration order. Agreement with
   // this IS the associativity claim.

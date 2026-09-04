@@ -308,6 +308,7 @@ module g6lc_ai_island_top
   logic        gemm_start, gemm_ready, gemm_done, gemm_err;
   logic [31:0] gemm_m, gemm_n, gemm_k;
   logic [15:0] gemm_lda, gemm_ldb;
+  logic [2:0]  gemm_numfmt;
   logic [AddrWidth-1:0] gemm_ptr_a, gemm_ptr_b, gemm_ptr_c;
   // I3 PMU from last GEMM job (pmu_gbps_x1000_q declared above for CAP)
   logic [31:0] gemm_pmu_r, gemm_pmu_w, gemm_pmu_cy;
@@ -386,6 +387,7 @@ module g6lc_ai_island_top
         .k_i      (gemm_k),
         .lda_i    (gemm_lda),
         .ldb_i    (gemm_ldb),
+        .numfmt_i (gemm_numfmt),
         .ptr_a_i  (gemm_ptr_a),
         .ptr_b_i  (gemm_ptr_b),
         .ptr_c_i  (gemm_ptr_c),
@@ -465,6 +467,7 @@ module g6lc_ai_island_top
     assign _ax = |axi_dma_resp_i | sb_fetch_pending_q | |sb_desc_ptr_i
                  | |wr_addr | |wr_data
                  | |gemm_m | |gemm_n | |gemm_k | |gemm_lda | |gemm_ldb
+                 | |gemm_numfmt
                  | |gemm_ptr_a | |gemm_ptr_b | |gemm_ptr_c;
     // verilator lint_on UNUSEDSIGNAL
   end
@@ -520,6 +523,7 @@ module g6lc_ai_island_top
       .gemm_k_o        (gemm_k),
       .gemm_lda_o      (gemm_lda),
       .gemm_ldb_o      (gemm_ldb),
+      .gemm_numfmt_o   (gemm_numfmt),
       .gemm_ptr_a_o    (gemm_ptr_a),
       .gemm_ptr_b_o    (gemm_ptr_b),
       .gemm_ptr_c_o    (gemm_ptr_c),
