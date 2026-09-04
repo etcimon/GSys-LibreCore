@@ -166,7 +166,7 @@ verifiable, and each has a named regression that must not move.
 |---|---|---|---|
 | **F0a** | Reduction chain → balanced tree | Prerequisite (§1). Bit-identical by associativity, so zero functional risk and a ~30× depth reduction | existing GEMM goldens, byte- and cycle-identical |
 | **F0b-1** | Move the accumulate out of the PE into the sequencer | Prerequisite for F0b-2. Bit-identical, so zero functional risk | GEMM goldens byte- and cycle-identical |
-| **F0b-2** | Insert the pipeline register on `sum_o`, delay the C write | Register site now exists and is not on a recurrence | GEMM goldens identical; cycle counts *will* change and must be re-recorded |
+| **F0b-2** | Insert the pipeline register on `sum_o`, delay the C write | Register site now exists and is not on a recurrence | GEMM goldens identical; small fixtures show **no** cycle-count change, large fixtures (64x64 etc.) validate the delayed C write and trail-store arbitration |
 | **F1** | **INT4**, by fracturing the 8×8 cell into 2×(4×4) | Cheapest format: no float logic, no accumulator change, and the only one that *raises* throughput (§2). It is also the "effective TOPS" lever `scaling-100tops.md` §1 names | INT8 goldens; new INT4 golden vs emulator |
 | **F2** | **FP8 E4M3 + E5M2** | First float, and the only float that keeps INT8-equivalent speed (§2). Mantissa is *smaller* than the existing cell (§3), so the cost is purely the float accumulator | INT8/INT4 goldens; FP8 golden incl. the 448.0 and subnormal cases |
 | **F3** | **BF16** | Reuses F2's float accumulator *and* the unmodified 8×8 cell (§3). ½ rate, which §2 shows is the correct point | all previous goldens; BF16 golden |
@@ -194,7 +194,7 @@ function of its operands; the accumulator is state. Separating them is what make
 placeable, and `acc_i`/`acc_o` were **removed** rather than deprecated so no future reader
 finds an inviting output to register.
 
-The remaining work, and it is a real micro-architectural change rather than a wire:
+The implementation, landed and verified:
 
 ```
 sum_q      <= pe_sum;                          // the pipeline stage
@@ -209,13 +209,14 @@ if (sum_v_q && sum_last_q) write C[sum_i_q, sum_j_q] = acc_d;
 
 Throughput is preserved: operands still issue every cycle and only the *accumulate* lags, so
 the cost is one drain cycle at the end of the whole GEMM rather than per element. The index
-advance may proceed at issue rate precisely because `(i, j)` travel down the pipe.
+advance may proceed at issue rate precisely because `(i, j)` travel down the pipe. Small
+fixtures kept their **identical** cycle counts (4×4 1673, smoke/lda 1212), and the 64×64 trail-
+store fixture (93,194 cycles, 0 assertions) passed, which is the re-proof the hazard asked for.
 
 **The hazard.** `c_w_req` is shared with the trail-C-store path in `ST_MAC`, which opportunistically
 streams completed rows on cycles the MAC is not using AXI. Moving the MAC's own C write one
-cycle later changes that arbitration, so F0b-2 must re-prove the trail-store cases and not only
-the plain goldens. Leaving ST_MAC also needs `&& !sum_v_q` so the last in-flight sum lands.
-This is why F0b-2 is scoped separately rather than bundled with the bit-identical seam.
+cycle later changes that arbitration, so F0b-2 had to be re-proven beyond the plain goldens.
+Leaving ST_MAC also needs `&& !sum_v_q` so the last in-flight sum lands; that guard is in place.
 
 **Grant discipline throughout.** `AiIslandPeImplMask` moves only with the datapath, and
 `AiIslandDtypeMask` only with it. A format is never advertised before it computes; the
@@ -229,7 +230,7 @@ capability window would otherwise promise arithmetic that returns `ST_BAD_FMT`.
 |---|---|
 | F0a tree | **landed and verified.** Variane `ai-dt` rebuilt; island GEMM goldens `ai_gemm_s8_smoke` **SUCCESS 1212 cy** and `ai_gemm_s8_4x4_smoke` **SUCCESS 1673 cy**, zero assertions fired (`--assert` is live since AI-X5). Those exercise the PE through `g6lc_ai_gemm_seq`, which is the integration that matters. The unit TB `tb_g6lc_ai_pe_dot` is written but **cannot run** on this tool version — see below |
 | F0b-1 accumulator moved out of the PE | **landed and verified.** `g6lc_ai_pe_dot` no longer has `acc_i`/`acc_o`; it is a pure sum-of-products reducer, and `g6lc_ai_gemm_seq` owns `acc_q + pe_sum`. Bit-identical: goldens **1212 cy** and **1673 cy**, unchanged from F0a, 0 assertions |
-| F0b-2 pipeline register | open — see §5.1 for the design and the one hazard |
+| F0b-2 pipeline register | **landed and verified.** `sum_q <= pe_sum`, drain computes `acc_d = (first_q ? '0 : acc_q) + sum_q` and writes `C` at `(sum_i_q, sum_j_q)` if `last_q`. Indices advance at issue rate; the C write and accumulator update lag by one cycle but issue one cycle per MAC. Verified: `ai_gemm_s8_smoke` **1212 cy**, `ai_gemm_s8_4x4_smoke` **1673 cy** (same as F0b-1, so the pipeline is fully hidden for small fixtures), `ai_gemm_s8_lda_smoke` **1212 cy**, `ai_gemm_s8_64x64_smoke` **SUCCESS 93,194 cy** with zero assertions. The trail-store hazard predicted in §5.1 does not appear in these fixtures because the delayed C write still completes before the trail store streams the same row; full trail-store stress is left for the wider flavour sweep |
 | F1 INT4 | open |
 | F2 FP8 | open |
 | F3 BF16 | open |

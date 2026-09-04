@@ -112,6 +112,16 @@ module g6lc_ai_gemm_seq #(
   // i,j element indices; t is reduction base (multiple of PeLanes during MAC)
   logic [31:0] i_q, j_q, t_q;
   logic [31:0] acc_q, acc_d;
+  // F0b-2: one-cycle pipeline between the PE's pure reduction and the
+  // accumulator. The pipeline carries not just the sum, but the i/j address
+  // and first/last flags, because the C write and accumulator reset now happen
+  // one cycle after the operands were issued.
+  logic [31:0] sum_q, sum_d;
+  logic        sum_v_q, sum_v_d;
+  logic        sum_first_q, sum_first_d;
+  logic        sum_last_q, sum_last_d;
+  logic [31:0] sum_i_q, sum_i_d;
+  logic [31:0] sum_j_q, sum_j_d;
   logic        err_q, err_d;
   logic        done_q;
   // Multi-outstanding AR count (0..MaxAROut); AW still single-outstanding
@@ -318,12 +328,19 @@ module g6lc_ai_gemm_seq #(
       .sum_o   (pe_sum)
   );
 
-  // F0b-1: the accumulate is performed HERE, from the PE's pure sum of
-  // products. The PE no longer has an accumulator port.
+  // F0b-2: the accumulator is now fed from the PIPELINE register, so
+  // `mac_acc_next` is a function of state (sum_q, acc_q) rather than of the
+  // live combinational tree output. The cycle-accurate expression:
+  //   sum_q   is pe_sum from one cycle ago
+  //   first_q is (t_q == 0) from one cycle ago, i.e. a new element
+  //   acc_q   is the running sum after the previous drain
+  //   acc_d   = (first_q ? '0 : acc_q) + sum_q
   //
-  // `mac_acc_next` is bit-identical to the previous `pe_acc_out` -- same
-  // operands, same adder, same cycle -- so this relocation changes nothing
-  // observable. Its
+  // This is the structural pipeline. Timing closure (depth, retiming,
+  // placement) is sv-timing's job later; this is just the state-machine split.
+  //
+  // Bit-identical to the previous pe_acc_out only if the pipeline is empty at
+  // the start and the FSM drains before changing state.
   // purpose is structural: `acc_q <= acc_q + tree` is a recurrence, so a
   // pipeline register cannot be placed on `acc_o` without feeding a stale
   // `acc_i` back into the next step and silently dropping terms. Splitting the
@@ -338,7 +355,7 @@ module g6lc_ai_gemm_seq #(
   // shared with the trail-store path in ST_MAC, so moving the MAC write one
   // cycle later changes that arbitration.
   logic [31:0] mac_acc_next;
-  assign mac_acc_next = acc_q + pe_sum;
+  assign mac_acc_next = (sum_first_q ? '0 : acc_q) + sum_q;
 
   // I3 PMU accumulators (active while not IDLE/DONE)
   logic [31:0] pmu_r_q, pmu_w_q, pmu_cy_q;
@@ -558,6 +575,14 @@ module g6lc_ai_gemm_seq #(
 
     state_d     = state_q;
     acc_d       = acc_q;
+    // F0b-2: pipeline defaults (and empty-pipe on state entry).
+    sum_d       = '0;
+    sum_v_d     = 1'b0;
+    sum_first_d = 1'b0;
+    sum_last_d  = 1'b0;
+    sum_i_d     = '0;
+    sum_j_d     = '0;
+    // acc_d keeps the current accumulator unless a drain overrides it.
     err_d       = err_q;
     ar_inflight_d = ar_inflight_q;
     aw_sent_d   = aw_sent_q;
@@ -994,16 +1019,48 @@ module g6lc_ai_gemm_seq #(
       // Parallel MAC: lanes cover t_q .. t_q+PeLanes-1
       // Trail-store: when DualCRead and stc_i < i_q, stream completed rows on
       // free AXI (MAC does not use AXI). i_q==m means MAC finished all rows.
+      //
+      // F0b-2: the PE is one stage ahead of the accumulator. In each cycle:
+      //   * issue operands from (i_q,j_q,t_q) and capture pe_sum as sum_d;
+      //   * drain the previous cycle's sum_q into acc_q and, if it was the
+      //     last step of (sum_i_q,sum_j_q), write the tile C at that address.
+      //   * index (i,j,t) advance at issue rate.
+      //
+      // Throughput is preserved: operands issue every cycle. Only the C write
+      // and accumulator update are delayed by one cycle. The drain uses the
+      // captured (sum_i_q,sum_j_q) because (i_q,j_q) have already advanced.
       ST_MAC: begin
         begin
           automatic logic mac_active;
           automatic logic can_trail;
           automatic logic        can_pair;
           automatic logic [31:0] pairs_rem, nbeats, beats_done, j_eff;
+          automatic logic [31:0] t_next;
+          automatic logic        last_step;
           mac_active = (i_q < m_q);
+          t_next     = t_q + PeLanes;
+          last_step  = (t_next >= k_q);
           can_trail  = DualCRead && (DataWidth >= 64) && (stc_i_q < i_q ||
                        (i_q >= m_q && stc_i_q < m_q));
 
+          // ---- drain the previous issue -----------------------------------
+          // The previous cycle's sum is now stable; add it to the accumulator
+          // and write the tile if that issue completed an element.
+          //
+          // This is intentionally OUTSIDE the `mac_active` guard, so the last
+          // in-flight sum drains even when the issue cursor has already
+          // reached i_q == m and no new operands are being fed.
+          if (sum_v_q) begin
+            acc_d = mac_acc_next;
+            if (sum_last_q) begin
+              c_w_req  = 1'b1;
+              c_w_bank = c_bank(sum_j_q);
+              c_w_addr = c_bank_addr(sum_i_q, sum_j_q);
+              c_w_data = mac_acc_next;
+            end
+          end
+
+          // ---- issue the next step ----------------------------------------
           if (mac_active) begin
             for (int unsigned p = 0; p < PeLanes; p++) begin
               automatic logic [31:0] tt;
@@ -1018,16 +1075,14 @@ module g6lc_ai_gemm_seq #(
                 pe_v[p]     = 1'b1;
               end
             end
-            // F0b-1: accumulate from the PE's pure sum (see mac_acc_next).
-            // Bit-identical to the previous `acc_d = pe_acc_out`.
-            acc_d = mac_acc_next;
-            if (t_q + PeLanes >= k_q) begin
-              // C[i,j] complete this cycle
-              c_w_req  = 1'b1;
-              c_w_bank = c_bank(j_q);
-              c_w_addr = c_bank_addr(i_q, j_q);
-              c_w_data = mac_acc_next;
-            end
+            // Capture what the PE produced this cycle. (i,j,t) are the issue
+            // coordinates; they advance in the index logic below.
+            sum_d      = pe_sum;
+            sum_v_d    = 1'b1;
+            sum_first_d= (t_q == 0);
+            sum_last_d = last_step;
+            sum_i_d    = i_q;
+            sum_j_d    = j_q;
           end
 
           // Trail C-store (same pair path as ST_STC, cursor stc_i/stc_j)
@@ -1140,8 +1195,10 @@ module g6lc_ai_gemm_seq #(
             end
           end
 
-          // Exit: MAC done (i>=m) and store done (stc_i>=m)
-          if (i_q >= m_q && stc_i_q >= m_q && !aw_sent_q)
+          // Exit: MAC done (i>=m) and store done (stc_i>=m). The pipeline
+          // must be empty before leaving: a valid in-flight sum has its C
+          // write one cycle later and cannot be cancelled.
+          if (i_q >= m_q && stc_i_q >= m_q && !aw_sent_q && !sum_v_q)
             state_d = ST_DONE;
           else if (i_q >= m_q && stc_i_q >= m_q && aw_sent_q)
             state_d = ST_MAC;  // finish open AW/B
@@ -1324,6 +1381,13 @@ module g6lc_ai_gemm_seq #(
       ar_i_q <= '0;
       ar_t_q <= '0;
       ar_j_q <= '0;
+      // F0b-2: the reduction pipeline is empty at reset.
+      sum_q      <= '0;
+      sum_v_q    <= 1'b0;
+      sum_first_q<= 1'b0;
+      sum_last_q <= 1'b0;
+      sum_i_q    <= '0;
+      sum_j_q    <= '0;
       for (int unsigned k = 0; k < MaxAROut; k++) begin
         ar_lane_mem_q[k] <= '0;
         ar_slot_q[k]     <= '0;
@@ -1343,6 +1407,14 @@ module g6lc_ai_gemm_seq #(
     end else begin
       state_q       <= state_d;
       acc_q         <= acc_d;
+      // F0b-2: advance the pipeline stage. The values captured are the ones
+      // the ST_MAC block drove as `sum_*_d` from the issue cycle.
+      sum_q       <= sum_d;
+      sum_v_q     <= sum_v_d;
+      sum_first_q <= sum_first_d;
+      sum_last_q  <= sum_last_d;
+      sum_i_q     <= sum_i_d;
+      sum_j_q     <= sum_j_d;
       err_q         <= err_d;
       ar_inflight_q <= ar_inflight_d;
       aw_sent_q     <= aw_sent_d;
@@ -1495,10 +1567,14 @@ module g6lc_ai_gemm_seq #(
       // MAC: t_q is reduction base; advance by PeLanes, then (i,j).
       // When last cell finishes, i_q := m (one past end) so trail store sees
       // stc_i < i_q for all rows; j_q stays 0.
+      //
+      // F0b-2: the accumulator is NOT reset here anymore. Reset is now
+      // `sum_first_q` in the next drain, which adds the first partial to 0.
+      // Resetting acc_q at the element boundary would clear the running total
+      // before the last partial has been drained into it.
       if (state_q == ST_MAC && i_q < m_q) begin
         if (t_q + PeLanes >= k_q) begin
           t_q   <= '0;
-          acc_q <= '0;
           if (j_q + 1 == n_q) begin
             j_q <= '0;
             i_q <= i_q + 1;  // becomes m when last row completes
