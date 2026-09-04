@@ -309,15 +309,36 @@ module g6lc_ai_gemm_seq #(
   logic signed [7:0] pe_a [PeLanes];
   logic signed [7:0] pe_b [PeLanes];
   logic              pe_v [PeLanes];
-  logic       [31:0] pe_acc_out;
+  logic       [31:0] pe_sum;
 
   g6lc_ai_pe_dot #(.Lanes(PeLanes)) i_pe (
       .a_i     (pe_a),
       .b_i     (pe_b),
       .valid_i (pe_v),
-      .acc_i   (acc_q),
-      .acc_o   (pe_acc_out)
+      .sum_o   (pe_sum)
   );
+
+  // F0b-1: the accumulate is performed HERE, from the PE's pure sum of
+  // products. The PE no longer has an accumulator port.
+  //
+  // `mac_acc_next` is bit-identical to the previous `pe_acc_out` -- same
+  // operands, same adder, same cycle -- so this relocation changes nothing
+  // observable. Its
+  // purpose is structural: `acc_q <= acc_q + tree` is a recurrence, so a
+  // pipeline register cannot be placed on `acc_o` without feeding a stale
+  // `acc_i` back into the next step and silently dropping terms. Splitting the
+  // reduction (a pure function) from the accumulator (state) puts the register
+  // site inside this module, where the sequencer can also delay the matching
+  // C-write address and the element's first/last flags.
+  //
+  // F0b-2 replaces this with:
+  //   sum_q <= pe_sum;  acc_d = (first_q ? '0 : acc_q) + sum_q;
+  // plus delayed i/j for the C write and a one-cycle drain before leaving
+  // ST_MAC. Landing that needs its own verification pass: the C-write port is
+  // shared with the trail-store path in ST_MAC, so moving the MAC write one
+  // cycle later changes that arbitration.
+  logic [31:0] mac_acc_next;
+  assign mac_acc_next = acc_q + pe_sum;
 
   // I3 PMU accumulators (active while not IDLE/DONE)
   logic [31:0] pmu_r_q, pmu_w_q, pmu_cy_q;
@@ -997,13 +1018,15 @@ module g6lc_ai_gemm_seq #(
                 pe_v[p]     = 1'b1;
               end
             end
-            acc_d = pe_acc_out;
+            // F0b-1: accumulate from the PE's pure sum (see mac_acc_next).
+            // Bit-identical to the previous `acc_d = pe_acc_out`.
+            acc_d = mac_acc_next;
             if (t_q + PeLanes >= k_q) begin
               // C[i,j] complete this cycle
               c_w_req  = 1'b1;
               c_w_bank = c_bank(j_q);
               c_w_addr = c_bank_addr(i_q, j_q);
-              c_w_data = pe_acc_out;
+              c_w_data = mac_acc_next;
             end
           end
 

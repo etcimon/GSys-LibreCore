@@ -68,7 +68,6 @@ module tb_g6lc_ai_pe_dot;
   logic [LMAX*8-1:0] sa_pk;
   logic [LMAX*8-1:0] sb_pk;
   logic [LMAX-1:0]   sv_pk;
-  logic [31:0]       acc_in;
 
   // Lanes under test. 256 is live PeLanes; 3 and 5 are non-powers of two.
   localparam int unsigned L0 = 1;
@@ -123,18 +122,18 @@ module tb_g6lc_ai_pe_dot;
     end
   end
 
-  g6lc_ai_pe_dot #(.Lanes(L0)) d0 (.a_i(a0), .b_i(b0), .valid_i(v0), .acc_i(acc_in), .acc_o(o0));
-  g6lc_ai_pe_dot #(.Lanes(L1)) d1 (.a_i(a1), .b_i(b1), .valid_i(v1), .acc_i(acc_in), .acc_o(o1));
-  g6lc_ai_pe_dot #(.Lanes(L2)) d2 (.a_i(a2), .b_i(b2), .valid_i(v2), .acc_i(acc_in), .acc_o(o2));
-  g6lc_ai_pe_dot #(.Lanes(L3)) d3 (.a_i(a3), .b_i(b3), .valid_i(v3), .acc_i(acc_in), .acc_o(o3));
-  g6lc_ai_pe_dot #(.Lanes(L4)) d4 (.a_i(a4), .b_i(b4), .valid_i(v4), .acc_i(acc_in), .acc_o(o4));
+  g6lc_ai_pe_dot #(.Lanes(L0)) d0 (.a_i(a0), .b_i(b0), .valid_i(v0), .sum_o(o0));
+  g6lc_ai_pe_dot #(.Lanes(L1)) d1 (.a_i(a1), .b_i(b1), .valid_i(v1), .sum_o(o1));
+  g6lc_ai_pe_dot #(.Lanes(L2)) d2 (.a_i(a2), .b_i(b2), .valid_i(v2), .sum_o(o2));
+  g6lc_ai_pe_dot #(.Lanes(L3)) d3 (.a_i(a3), .b_i(b3), .valid_i(v3), .sum_o(o3));
+  g6lc_ai_pe_dot #(.Lanes(L4)) d4 (.a_i(a4), .b_i(b4), .valid_i(v4), .sum_o(o4));
 
   // The linear chain the tree replaced, in declaration order. Agreement with
   // this IS the associativity claim.
   function automatic logic signed [31:0] ref_chain(input int unsigned n);
     logic signed [31:0] s;
     logic signed [7:0]  av, bv;
-    s = $signed(acc_in);
+    s = 32'sd0;
     for (int unsigned l = 0; l < n; l++) begin
       if (sv_pk[l]) begin
         av = sa_pk[8*l+:8];
@@ -174,42 +173,39 @@ module tb_g6lc_ai_pe_dot;
 
   initial begin
     // ---- directed smallest case -------------------------------------------
-    acc_in = 32'd0;
     drive_const(8'sd3, 8'sd5, 1'b1);
     chk("3*5 on L1", o0, 32'sd15);
     check_all("const 3*5");
 
-    // A masked lane must contribute nothing, and acc_i must pass through.
-    acc_in = 32'hdead_beef;
+    // A masked lane must contribute nothing.
     drive_const(8'sd100, 8'sd100, 1'b0);
-    chk("acc passthrough L256", o4, $signed(32'hdead_beef));
+    chk("all masked is zero", o4, 32'sd0);
     check_all("all masked");
 
-    // ---- deliberate overflow ----------------------------------------------
-    // Near INT32_MAX, then add positives. A non-associative reduction diverges.
-    acc_in = 32'h7fff_f000;
-    drive_const(8'sd127, 8'sd127, 1'b1);
-    check_all("overflow from acc");
-
-    // Most-negative operand: -128 * -128 = +16384.
-    acc_in = 32'h8000_0100;
+    // Most-negative operand: -128 * -128 = +16384, which is where a sign-
+    // extension slip shows up as a negative product.
     drive_const(8'sh80, 8'sh80, 1'b1);
     check_all("most-negative squared");
 
     // Mixed sign: -128 * 127 = -16256.
-    acc_in = 32'd0;
     drive_const(8'sh80, 8'sd127, 1'b1);
     check_all("mixed sign");
 
     // ---- dense max, exact in 32 bits --------------------------------------
-    acc_in = 32'd0;
     drive_const(8'sd127, 8'sd127, 1'b1);
     // 256 * 127 * 127 = 4_129_024.
     chk("L256 dense max", o4, 32'sd4_129_024);
 
+    // NOTE: there is no overflow case here, and there cannot be. The PE is now
+    // a pure sum of products with no accumulator input, and the widest
+    // magnitude reachable is 256 * 128 * 128 = 4_194_304 -- three orders of
+    // magnitude short of INT32. Associativity holds under wrapping regardless,
+    // but it is not *observable* at these widths, so an "overflow test" here
+    // would only assert that nothing overflowed. Overflow now belongs to the
+    // accumulator in g6lc_ai_gemm_seq, which is where the recurrence lives.
+
     // ---- randomised -------------------------------------------------------
     for (int unsigned trial = 0; trial < 300; trial++) begin
-      acc_in = $urandom();
       for (int unsigned l = 0; l < LMAX; l++) begin
         sa_pk[8*l+:8] = 8'($urandom());
         sb_pk[8*l+:8] = 8'($urandom());

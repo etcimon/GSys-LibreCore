@@ -42,8 +42,22 @@ module g6lc_ai_pe_dot #(
     input  logic signed [7:0]  a_i     [Lanes],
     input  logic signed [7:0]  b_i     [Lanes],
     input  logic               valid_i [Lanes],
-    input  logic        [31:0] acc_i,
-    output logic        [31:0] acc_o
+    // Pure sum of products for this step. The accumulator is NOT here.
+    //
+    // The module used to expose `acc_i`/`acc_o` and compute `acc_i + tree`.
+    // That is removed rather than kept for compatibility, because it is an
+    // actively misleading place to pipeline: `acc_q <= acc_i + tree` with
+    // `acc_i == acc_q` is a recurrence, so a register on `acc_o` feeds a stale
+    // accumulator into the next step and silently drops terms. A future reader
+    // looking for "the obvious output to register" must not find one here.
+    //
+    // The reduction is a pure function of the operands; the accumulator is
+    // state, and state belongs to the sequencer. So F0b-2's pipeline stage sits
+    // on this output, in g6lc_ai_gemm_seq:
+    //
+    //   sum_q <= sum_o
+    //   acc_q <= (first ? '0 : acc_q) + sum_q
+    output logic        [31:0] sum_o
 );
 
   // Tree levels needed to reduce `Lanes` products to one.
@@ -75,6 +89,8 @@ module g6lc_ai_pe_dot #(
   // result is a depth-ceil(log2(Lanes)) adder tree.
   //
   // Keep it as one block with no intermediate array.
+  logic signed [31:0] tree_sum;
+
   always_comb begin
     automatic logic signed [31:0] node [Lanes];
     automatic int unsigned cnt;
@@ -93,11 +109,10 @@ module g6lc_ai_pe_dot #(
       cnt = (cnt + 1) / 2;
     end
 
-    // The incoming accumulator joins last, so the tree is a pure sum of
-    // products and `acc_i` adds exactly one adder of depth rather than sitting
-    // at the head of a chain.
-    acc_o = $signed(acc_i) + node[0];
+    tree_sum = node[0];
   end
+
+  assign sum_o = tree_sum;
 
   // pragma translate_off
   // Guard the unused upper entries of the ragged `level` array: only the first
