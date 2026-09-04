@@ -1,0 +1,48 @@
+---
+title: URLRouter
+description: libwasm.router is experimental. :name, trailing *, @entering / @leaving. Not SvelteKit. Layouts are not routes.
+---
+
+# URLRouter
+
+`libwasm.router` is the client router. It is experimental, it is not SvelteKit, and svelte-d uses only the patterns it can express. Layouts are **not** router entries. They stay mounted as `@child` wrappers; the page is swapped in the entering callback. `goto` / `invalidate` / `beforeNavigate` / prefetch / true hydration (attach handles to existing SSR DOM) are titled seams. Until those exist, do not print APIs that call them.
+
+## Match language
+
+A route pattern is a string. Matching walks the URL and the pattern in lockstep:
+
+- Literal segments must match exactly.
+- `:name` consumes one path segment and stores it in `RouterEvent.parameters["name"]`.
+- Trailing `*` matches the rest and succeeds immediately.
+- At most **64** placeholders (`maxRouteParameters`).
+- Specificity is static chars ≫ `:param` ≫ `*`. Kit uses that so `/:slug` does not steal `/admin`.
+
+`RouterEvent` carries `parameters`, `prevURL`, and `newURL`. Callbacks have type `Optional!(Promise!void) delegate(ref RouterEvent ev)`. Empty optional means “continue now.” A D `Promise!void` means “call `iterate` again when it fulfills.” That promise is [in-process](./async), not a `JsPromise`.
+
+## Direction and UDAs
+
+```d
+enum Direction { Entering, Leaving, Always }
+
+@entering!"/admin/users/:id"
+Optional!(Promise!void) enterUser(ref RouterEvent ev) { /* applyKitParams */ }
+
+@leaving!"/admin/users/:id"
+Optional!(Promise!void) leaveUser(ref RouterEvent ev) { /* … */ }
+```
+
+`registerRoutes` (generated on the struct, called from `_start` after `compile!`) walks those UDAs and `register`s them. svelte-d prints `@entering` on the page struct from the kit file path: `src/routes/admin/users/[id]/+page.svelte` → `/admin/users/:id`. Groups `(app)` strip. `[[optional]]` expands to two registrations. `[...rest]` becomes trailing `*` and loses the name.
+
+## `navigateTo` and the browser
+
+`URLRouter` constructs a `ManagedPool(64*1024)`, calls `setupRouter()`, and exports a JS-callable delegate named `"navigate_to"`. The engine’s `libwasm.ts` / `debug-bridge.ts` listen for `popstate` and `callNative('navigate_to', location.pathname)`. The wasm-eh `onpopstate` UDA is not reliable, which is why that JS path exists.
+
+`navigateTo` does **not** `pushState` when `document().location().pathname` already matches. Leaving **drops** the route from `m_activeRoutes`, so a later visit (back/forward) still fires `@entering` even if the route was seen before. Kit `setVisible` + `applyKitParams` depend on that re-fire, including `/users/:id` param changes while the pattern is still the same.
+
+If a navigation starts while callbacks are still pending, the new URL is stored as `m_pendingURL` and run when the iterator finishes. `setTitle` / `getTitle` and `setBasePath` / `getBasePath` are the other knobs. Default `_start` without `ready` is `router().navigateTo(document().location().front.pathname())`.
+
+## What svelte-d prints
+
+One page `@entering` per path. Static segments beat params. Layouts stay mounted. The page struct is remounted or `setVisible`d inside the entering callback (`KitRoutes`). There is one wasm module. A second `mixin Spa` per layout would be a second DOM.
+
+This router and vibe.0’s `URLRouter` share a match language (`:name`, `*`, 64 placeholders) on purpose, so a kit `[id]` is `:id` on both cells. They are still two types in two packages. Do not `import vibe.http.router` from `lang=d`.

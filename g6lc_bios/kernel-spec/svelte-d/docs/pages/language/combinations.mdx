@@ -1,0 +1,18 @@
+---
+title: Combo fixtures
+description: Engine Combo*.svelte files stack official AST nodes in one tree. They are the idiom library, not the app.
+---
+
+# Combo fixtures
+
+A language with this many constructs cannot be tested one node per file. Combinations are where the owner of a `{#if}`, the absorption of a `{#each}`, and the seed of a `bind:value` share a `construct()` and fight over a field name. The engine’s `src-svelte/lib/Combo*.svelte` files exist so those fights happen in a golden, not in your admin page. Compile drops them into the workspace. They are not your application. Application routes belong in the project `src/`.
+
+`ClickField.svelte` is the teaching example: `lang=d`, `on:click`, `{msg}`. `IfToggle.svelte` is `{#if}` / `{:else}` plus `this.update.open`. Everything after that is a stack.
+
+`Combo.svelte` puts `{#if}` / `{:else if}` / `{:else}` around several consequent children (a `<p>`, a `{@html}`, a `{#each}`), each item taken from a real `<li>` (class:, static attr, `{item}`, index), plus `<slot>` fallback, `{#await}` pending/then/catch, `<ClickField msg="hi" />`, and `bind:value` + `class:` + `id={}` on one input. The printer must walk every walkable child, attach every new `@child` to the same `@visible` bool, and share one `construct()` for `put`s and prop assigns.
+
+`ComboMore.svelte` is the next official batch: `{#snippet}` + `{@render}`, `bind:this`, `bind:group`, `{@const}` / `{@debug}`, `{#key}` `remount!`, `<svelte:window on:keydown|preventDefault>`, and runes rewritten onto fields plus `onMount`. `ComboNext.svelte` is special elements and leftover directives: static `<svelte:element>`, `use:`, `transition:`, spread, fragment, `<svelte:component>`, `{@attach}`, `in:`/`out:`/`animate:`, boundary fallback. `ComboRest.svelte` is options, head, `{let}`, each index+key, `slot let:`, `svelte:self`. `ComboCss.svelte` is `<style>` / `addCss`, live `style:` concat, dynamic `svelte:element`, Handle spread.
+
+`ComboForm.svelte` is textarea/select `bind:value`, `bind:innerHTML`, `details bind:open`, valueless `disabled`, `class:on`, `on:click|once` plus `on:keydown` on one button. `ComboMedia.svelte` is SVG/video/ARIA, `on:click|self|trusted`, boundary plus `throwBoundary`. `ComboWide.svelte` is `{#if !off}`, MathML, dialog/audio/progress/canvas/iframe, custom element, `svelte:document` / `body`. `ComboExpr.svelte` is `a && b`, await-then `{v}`, snippet args, destructure each, `form on:submit` via `nodeHandle`, table, `bind:clientWidth`. `ComboOr.svelte` is `a || b`, await then+catch, named slot, `bind:scrollY`, picture/fieldset, `:global`. `ComboMisc.svelte` is `n > 0`, `bind:files`, datalist/ruby/map, `style:--accent`, drag. `ComboSem.svelte` is `(ready && ok)`, `who == extra`, `pair(a,b)`, `bind:this` on a component, landmarks. `ComboNest.svelte` is `on && !hide`, each+if `li`, `[x, y]`, `bind:indeterminate`. `ComboIfCmp.svelte` is the ten-way `{#if it.n ? on}` table. `ComboSurf`, `ComboCover`, and `ComboIfHost` carry further each-if and host-if mixes.
+
+When you add a construct, add it to a Combo (or a new one) and to this page. A one-off fixture per node is how combinations stop being tested. The official AST in `svelte-ref-impl` is the spec of record for *what a `.svelte` file may contain*; these Combos are the spec of record for *what svelte-d prints when those nodes share a tree*.

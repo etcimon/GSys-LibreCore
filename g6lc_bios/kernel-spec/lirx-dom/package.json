@@ -1,0 +1,36 @@
+{
+  "name": "@lirx/dom",
+  "version": "0.9.0",
+  "description": "Extremely fast framework to build web application",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lirx-js/dom"
+  },
+  "keywords": [
+    "front-end",
+    "framework",
+    "components",
+    "webapp",
+    "reactive",
+    "observable",
+    "signals"
+  ],
+  "author": "Valentin Richard",
+  "license": "MIT",
+  "access": "public",
+  "sideEffects": false,
+  "dependencies": {
+    "@lirx/core": "^1.6.0",
+    "@lirx/unsubscribe": "^1.0.0",
+    "@lirx/utils": "^1.3.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.3"
+  },
+  "localDependencies": [
+    "@lirx/core",
+    "@lirx/utils",
+    "@lirx/unsubscribe"
+  ],
+  "packageManager": "yarn@4.1.0"
+}

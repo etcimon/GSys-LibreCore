@@ -1,0 +1,14 @@
+---
+title: Lifetime
+description: compile! then construct, then render + @connect, then onMount, then App.ready. this.update writes the field and the live handle.
+---
+
+# `construct` / `update` / `onMount`
+
+Svelte authors reach for `onMount` because the official runtime has a moment after the DOM exists. libwasm has a longer sequence, and printing the official `onMount` as a JS import would skip most of it. `mixin Spa!App` plants `__gshared Application application` and exported `_start(heap_base)`. That `_start` is the only boot.
+
+First, `alloc_init` and `PoolStack.initialize`. The pool stack is empty; there is no default pool. Second, optional `App.main()` if the type has it — pre-graph, no inject, no handles, almost never printed. Third, `application.compile()`, which is `compile!`: fill `@inject`, recurse `@child`, then call **`construct()`** on each struct. Fourth, `setupRouter` and `application.registerRoutes`, which walk `@entering` / `@leaving` already on those structs. Fifth, `render`: create JS handles, apply `@prop` / `@attr` / `@style`, attach `@callback` listeners, **`@connect .add`**, `appendChild`, then **`propagateOnMount` → `onMount()`**. Sixth, `App.ready()` if present. First paint is done. Default if `ready` is absent: `router().navigateTo(location.pathname)`.
+
+`construct` therefore cannot read the DOM. It seeds child `@prop` fields from host fields (`msgSpan.msg = msg`) and `put`s each items. `onMount` may touch handles. `App.ready` is where `wireEach` and `wireAwait` attach, because those need live handles — wiring them in `construct` was G95 and the analogous await bug. HMR is `dumpApp` / `loadApp` on the same `__gshared application`; JS reload re-runs `_start` on the new wasm and then `loadApp`. Lists serialize; `ManagedPool` is still skipped.
+
+`this.update.foo = v` writes the struct field **and** pushes it to the live handle. For an `@visible` bool it also fires `setVisible`. Author `x =` in a handler is rewritten to `this.update.x`. Heavy methods wrap `ScopedPool(m_pool)` and copy survivors onto the graph. Language `new` bumps `WasmAllocator` and is never recycled. After boot, the mutation surface is `update`, `remount!"child"`, `setVisible`, `HTMLArray.put`, and `shrinkTo`. That is the whole lifetime. There is no disposer stack and no Svelte runtime `onMount`.

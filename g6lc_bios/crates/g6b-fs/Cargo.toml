@@ -1,0 +1,17 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "BIOS USB volumes: FAT32 flash + key file manager (FAT32/NTFS/ext4)"
+
+[dependencies]
+g6b-spec = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+---
+title: Text and mustaches
+description: "{ident} is a child @prop. {@html} is innerHTML. {@const} is a host field. {@render} instantiates a snippet."
+---
+
+# Text, `{expr}`, `{@html}`
+
+Raw text is the least interesting node and the easiest to get wrong in a printer. It is `@prop!"textContent"` on the NamedNode that owns it, not a string concatenate on the parent. Concatenate-on-the-parent cannot `update`. A child NamedNode can.
+
+`{ident}` is the same idea with a name. The child field is called `ident`. `construct` seeds `child.ident = ident` from the host field (G85). Author `this.update.x` is rewritten to `child.update.x` so the live handle moves. That rewrite is why `ClickField`’s `go()` does not say `this.update.msg` on the host and hope; it says `msgSpan.update.msg = msg` after updating the host field. The printed file is the teacher.
+
+`{@html expr}` is a wrapper `div` with `@prop!"innerHTML"`. `construct` seeds it (`rawHtml.raw = raw` in `Combo.svelte`). It is not `Eval` and it is not a second HTML parser. The browser’s `innerHTML` is the sink. Treat the expression as you would any other trusted HTML; svelte-d does not grow a sanitizer.
+
+Comments are skipped. `{@const x = …}` and `{let extra = 3}` / `{const …}` become host fields (`int` / `bool` / `string`). They are not reactive. `{@debug x}` is `console.log("x")` in `onMount`, after handles exist, so a debug of a bound value sees the seeded field. `{@render snippet()}` walks the stored snippet body. `{@render pair(who, extra)}` assigns each parameter and then walks — multi-param snippets are not a single string bag. `{@attach fn}` is an `onMount` call with `this.node.handle`, which is why it cannot run in `construct`.
+
+The theme across this page is ownership. Text, mustaches, and HTML all belong to a NamedNode that `update` can address. A printer that inlined them into the parent’s `textContent` would be simpler and would be wrong the first time something flipped.

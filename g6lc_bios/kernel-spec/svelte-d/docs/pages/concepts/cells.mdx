@@ -1,0 +1,22 @@
+---
+title: Wasm vs host
+description: "One LDC 1.43. Two targets — wasm32 libwasm and native vibe.0."
+---
+
+# Wasm vs host
+
+The stack has two *cells* in the sense that matters to a page author, and one *compiler* in the sense that matters to setup. Confusing those two sentences is how people reintroduce a 1.42 host toolchain “just for vibe.0.”
+
+The **wasm cell** is libwasm. It is what `<script lang="d">` and `src-d/` compile to. The target triple is `wasm32-unknown-wasi`. The flags that make D `try/catch` real are `--wasm-enable-eh` and `--foptimize-nothrow=false`. After the link, Binaryen ≥123 **parses** that `try_table` module and ships it through `wasm-opt -Oz` (release) or `-g -O0` (debug). Flatten `--asyncify` is still UNREACHABLE on `try_table` (123 and 132), so this cell never asyncifies. You write `mixin NodeDef`, `this.update`, `UnorderedList`, and same-function `try/catch`. You do not write `import vibe.*`, `std.file`, or `.await`.
+
+The **host cell** is vibe.0. It is what `+page.server.d`, `+server.d`, `+layout.server.d`, and `hooks.server.d` compile to, inside `ws/webserver`. The target is native. You write `HTTPServerRequest`, `registerWebInterface`, `res.writeBody`, `res.redirect`. You do not write `import libwasm` or `mixin Spa`. Class names are dest-unique (`AdminPageServer`, `UsersPageServer`) so every ingested route can hang on `webserver/source/app.d` without colliding.
+
+One LDC 1.43+ compiles both. `findHostLdc` and `findWasmLdc` are the same function. Each `dub build` still clears `DFLAGS` and `DC` so a wasm object cannot be linked into the host and a host Phobos object cannot be linked into wasm. That is “two cells” as *targets*, not as *versions*.
+
+Each cell also has two **build types**. Debug (`svelte-d wasm --debug`, `svelte-d host`, `bun run dev`) keeps symbols (`wasm-opt -g -O0` still parses `try_table`). Release (`svelte-d wasm`, `svelte-d host --release`, `svelte-d build`, `bun run build`) is optimize plus `lflags -strip-all`, then wasm-opt `-Oz`. The kit-admin measurements — 12.64 MiB debug wasm down to **0.93 MiB** / 224 KB gzipped, 14.08 MiB debug host down to **10.85 MiB** — are in [Wasm and host sizes](../advanced/sizes).
+
+`<script lang="ts">` is neither cell. It is spliced into `src-ts/modules/generated/` and folded into `libwasm.init(modules)` as `jsExports`, and registered on `window.__svelteD.ts`. jQuery, SCSS, and vanilla helpers stay on Vite. Same-file D reaches those exports by the simple name (`callTs` / Lodash `invoke`). A window host object that is not a `lang=ts` export is still `Eval("window.$")`, the PgLite pattern. A printed `import jquery` in `src-d/` would be a third FFI. The calling convention is [cross-calling](../language/cross-calling).
+
+Layouts are worth a special mention because they look like they might be a third cell. They are not. A `+layout.svelte` prints as an `@child` wrapper that **stays mounted**. `KitRoutes` remounts the page inside `@entering`. There is one wasm module and one `mixin Spa!App`. A layout that became its own wasm module would be a second DOM.
+
+The two cells have their own API sections: [libwasm](../libwasm) for the wasm runtime a `<script lang="d">` compiles against, and [vibe.0](../vibe.0) for the host runtime a `+page.server.d` compiles against.

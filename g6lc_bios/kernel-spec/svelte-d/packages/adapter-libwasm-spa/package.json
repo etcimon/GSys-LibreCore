@@ -1,0 +1,16 @@
+{
+  "name": "adapter-libwasm-spa",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "svelte-d adapter-libwasm-spa: wasm CSR SPA packaging. No Node HTTP stack.",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "dependencies": {
+    "svelte-d": "workspace:*"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

@@ -1,0 +1,138 @@
+import { createMulticastReplayLastSource, distinctObserver, IObservable, IObserver } from '@lirx/core';
+import { VirtualNode } from '../../../../virtual-node.class';
+import { IVirtualReactiveDOMNodeTemplate } from '../../../types/virtual-reactive-dom-node-template.type';
+import { IVirtualDOMNodeOrNull } from '../../../virtual-dom-node.class';
+import { VirtualContainerNode } from '../../static/container/virtual-container-node.class';
+import { trackByIdentity } from './track-by/track-by-identity';
+
+/** TYPES **/
+
+export type IVirtualReactiveForLoopNodeTemplateArgument<GItem> = {
+  item: GItem;
+  index: IObservable<number>;
+};
+
+export type IVirtualReactiveForLoopNodeTemplate<GItem> = IVirtualReactiveDOMNodeTemplate<IVirtualReactiveForLoopNodeTemplateArgument<GItem>>;
+
+export interface IVirtualReactiveForLoopNodeOptionsTrackByFunction<GItem> {
+  (item: GItem): any;
+}
+
+/** CLASS **/
+
+export class VirtualReactiveForLoopNode<GItem> extends VirtualContainerNode {
+  constructor(
+    items$: IObservable<Iterable<GItem>>,
+    template: IVirtualReactiveForLoopNodeTemplate<GItem>,
+    trackBy: IVirtualReactiveForLoopNodeOptionsTrackByFunction<GItem> = trackByIdentity,
+  ) {
+    super();
+
+    let previousMap = new Map<any, VirtualReactiveForLoopChildNode<GItem>>();
+
+    this.onConnected$(items$)((items: Iterable<GItem>): void => {
+      const newMap = new Map<any, VirtualReactiveForLoopChildNode<GItem>>();
+
+      // iterates on items: creates or updates nodes
+      {
+        const iterator: Iterator<GItem> = items[Symbol.iterator]();
+        let index: number = 0;
+        let result: IteratorResult<GItem>;
+        while (!(result = iterator.next()).done) {
+          const item: GItem = result.value;
+          const id: any = trackBy(item);
+          let node: VirtualReactiveForLoopChildNode<GItem> | undefined = previousMap.get(item);
+
+          if (node === void 0) {
+            const { emit: $index, subscribe: index$ } = createMulticastReplayLastSource<number>(index);
+            node = new VirtualReactiveForLoopChildNode<GItem>(
+              id,
+              item,
+              distinctObserver($index),
+            );
+            template(node, {
+              item,
+              index: index$,
+            });
+          } else {
+            node.$index(index);
+          }
+
+          newMap.set(id, node);
+
+          index++;
+        }
+      }
+
+      // remove unused nodes
+      {
+        // fix children because we will mutate the tree
+        const children: VirtualReactiveForLoopChildNode<GItem>[] = Array.from(this.getChildren() as Generator<VirtualReactiveForLoopChildNode<GItem>>);
+
+        for (let i = 0, l = children.length; i < l; i++) {
+          const node: VirtualReactiveForLoopChildNode<GItem> = children[i];
+          if (!newMap.has(node.id)) {
+            node.detach();
+            // console.log('detach', (node as any).getSelfDOMNodes()[0].getAttribute('name'));
+          }
+        }
+      }
+
+      // re-order nodes
+      { // TODO improve when (this.firstChild === null) => bulk append
+        const getNextNode = (
+          node: IVirtualDOMNodeOrNull,
+        ): IVirtualDOMNodeOrNull => {
+          return (node === null)
+            ? null
+            : node.nextNode;
+        };
+
+        let referenceNode: IVirtualDOMNodeOrNull = getNextNode(this.firstChild);
+
+        const iterator: Iterator<VirtualReactiveForLoopChildNode<GItem>> = newMap.values();
+        let result: IteratorResult<VirtualReactiveForLoopChildNode<GItem>>;
+        while (!(result = iterator.next()).done) {
+          const node: VirtualReactiveForLoopChildNode<GItem> = result.value;
+          node.attach(this, referenceNode);
+          // if (node.attach(this, referenceNode)) {
+          //   console.log('attach', (node as any).getSelfDOMNodes()[0].getAttribute('name'));
+          // }
+          referenceNode = getNextNode(node);
+        }
+      }
+
+      previousMap = newMap;
+    });
+  }
+
+  override canAttachChildNode(
+    childNode: VirtualNode,
+  ): boolean {
+    return (childNode instanceof VirtualReactiveForLoopChildNode);
+  }
+}
+
+/*------------------------------*/
+
+class VirtualReactiveForLoopChildNode<GItem> extends VirtualContainerNode {
+  public readonly id: any;
+  public readonly item: GItem;
+  // public readonly $index$: ISource<number>;
+  public readonly $index: IObserver<number>;
+
+  constructor(
+    id: any,
+    item: GItem,
+    $index: IObserver<number>,
+  ) {
+    super();
+
+    this.id = id;
+    this.item = item;
+    this.$index = $index;
+  }
+}
+
+
+

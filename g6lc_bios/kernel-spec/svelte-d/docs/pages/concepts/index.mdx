@@ -1,0 +1,20 @@
+---
+title: How svelte-d works
+description: Pegged + libdparse walk Svelte into an AST that is the libwasm D IR. Compile integrates svelte-engine as svelte-engine-ws.
+---
+
+# How svelte-d works
+
+svelte-d is a D program that happens to be importable from bun. The native CLI is built with vibe.0 as a library (`VibeCustomMain`); the TypeScript module in `packages/svelte-d/ts` is a thin façade over that executable and, when present, a dynamic library. Neither side parses Svelte with the official compiler. Pegged (with a markup scan as a named fallback) produces a tree whose node kinds are already libwasm’s. libdparse checks the `lang=d` bodies and the host `*.d` files. The printer pretty-prints. That is the entire front end.
+
+The back end is not a code generator in the usual sense. There is no private intermediate language that then becomes D. The tree *is* `NodeDef`, `@child`, `@prop`, `Slot`, `@visible`, `UnorderedList`. Pretty-printing that tree into `svelte-engine-ws/src-d/` is the compile. JSON written under `ws/.svelte-d/ir/` is a content-addressed cache of those nodes so the next compile can skip a dest whose bytes would not change. It is not a language you are supposed to edit.
+
+Around that print sit four mechanical steps that exist so the print has a place to land. First, **drop** copies the packaged `svelte-engine` bootstrap to `svelte-engine-ws`. The template is a golden; the workspace is disposable. Second, **ingest** overlays the bun project’s `src/` — routes, lib, imported `node_modules/*.svelte`, local TypeScript and SCSS helpers, `public/` — onto that workspace. Third, **print** walks the ingested `.svelte` files and the host `+page.server.d` files. Fourth, optional **`wasm`** and **`host`** cells invoke the same LDC 1.43 against two different `dub.sdl` files, with `DFLAGS` and `DC` cleared so objects cannot leak from one cell into the other.
+
+Kit features are **accommodated in svelte-engine, libwasm, and vibe.0**, not in svelte-d. If `{#each}{#if row.ok}` needs a new list primitive, that primitive is added to libwasm, demonstrated in the engine, and only then printed. svelte-d does not grow a third runtime to paper over a missing idiom. Updating the engine and dropping again is how a new construct enters the product.
+
+Two principles organize everything that follows.
+
+**Fall-through** means a kit path keeps its relative shape. Only the cell prefix changes. `src/routes/admin/users/+page.svelte` is still `routes/admin/users` under `src-svelte/` and `src-d/`; the file name `+page.svelte` becomes `page.d` because D cannot start an identifier with `+`. Mapping a path is not a claim that every construct on that file has been printed. Status lives in the language section and in `architecture/sveltekit-feature-map.md`.
+
+**AST ≡ D IR** means the kinds in the walk are the kinds `compile!()` already understands. A `{#if}` that became a bespoke `IfNode` in a private JSON IR would force a second lowering, and that second lowering is how a toolchain quietly becomes a second DOM. There is one graph. [The IR contract](../language) is the long form of that sentence.

@@ -1,0 +1,48 @@
+kernel-spec — Unlicense / public-domain reference trees
+========================================================
+
+These directories are **not** GSys LibreCore original work. They are kept as
+read-only ancestors for writing the rust-generated ZealOS-shaped BIOS kernel.
+Do not relicense. Do not edit copyright, LICENSE, or NOTICE files inside them
+(E-UPSTREAMWRITE analog). They are not Cargo members and are not linked.
+
+ZealOS/
+  Source: https://github.com/Zeal-Operating-System/ZealOS
+  License: Unlicense (public domain dedication)
+  Role: primary service-contract ancestor (Adam, DolDoc, ZealC, Gr, Compiler)
+
+TempleOS/
+  Source: https://github.com/cia-foundation/TempleOS
+  License: public domain (Terry A. Davis / TempleOS)
+  Role: original HolyC / Adam / Kernel / Compiler snapshot
+
+goja/
+  Source: https://github.com/dop251/goja
+  License: MIT (Dmitry Panov / Robert Krimen)
+  Role: ES5 VM *semantic* spec; never a Go module or Cargo dependency
+
+lirx-dom/
+  Source: https://github.com/lirx-js/dom
+  License: MIT (Valentin Richard)
+  Role: DOM mutation locality spec; never linked
+
+webidl/
+  Source: Mozilla WebIDL (MPL-2.0) via riscv-compilers/libwasm
+  Role: interface catalog for the lightweight BIOS browser
+
+svelte-d/
+  Source: https://github.com/etcimon/svelte-d
+  License: MIT (Etienne Cimon)
+  Role: Svelte → libwasm/WASM UI compiler spec; never LDC/Binaryen in this package
+
+botan/
+  Source: riscv-dev/botan (Botan, BSD-2-Clause; Jack Lloyd et al. / Etienne Cimon D port)
+  Role: TLS 1.2, X.509, RSA, ECDSA reference; never compiled here
+
+libwasm/
+  Source: riscv-compilers/libwasm (MIT; Sebastiaan Koppe / Etienne Cimon druntime-wasm)
+  Role: WASM-JIT druntime + fetch/Object_Call spec; never compiled here
+
+First-party BIOS code stays MIT under g6lc_bios/crates/**.
+Generated ZealC (KMain.ZC, Adam.ZC, …) is MIT, produced by g6b-design from a
+BoardSpec — it is a rewrite, not a copy of these trees.

@@ -1,0 +1,52 @@
+---
+title: 'Spa, _start, lifetime'
+description: mixin Spa!App injects _start. compile, construct, render, onMount, ready. The only boot.
+---
+
+# Spa, `_start`, lifetime
+
+`mixin Spa!App` is how a libwasm program becomes a program. It plants `__gshared Application application` and an exported `_start(uint heap_base)` with the C name `_start`. The JavaScript glue instantiates the wasm module and calls that export with the linear-memory heap base. There is no D `main` on the default path, and there is no second boot. svelte-engine’s `src-d/app.d` is exactly this mixin around `struct App`. svelte-d prints your pages as `@child` fields of that same `App`; it does not emit a second `Spa`.
+
+The mixin accepts an optional `Theme` (`mixin Spa!(Application, Theme)`). `GetCss!(Application, Theme)` is injected before render so compile-time styles exist when the first handle is created. `version (hmr)` additionally exports `dumpApp` and `loadApp` against the same `__gshared application`. JS reload re-runs `_start` on the new module and then `loadApp`s the dumped graph.
+
+`spa.d` static-asserts `__VERSION__` is 2106 (LDC 1.36), 2112 (LDC 1.42), or 2113 (LDC 1.43 / master). svelte-d’s default cell is 1.43. Named `ldc-1.36` / `ldc-1.42` configs remain in libwasm for asyncify work; they are not what `bunx svelte-d wasm` builds.
+
+## What `_start` does, in order
+
+1. **`alloc_init(heap_base)`** — `WasmAllocator.init`. Linear memory from here up is the bump heap.
+2. **`PoolStack.initialize()`** — the pool stack is empty. There is no default pool. A later `ScopedPool(m_pool)` or `ManagedPool` pushes one.
+3. **`getRoot()`** — an `extern(C)` import. JS returns the handle of the mount node (usually `#root`).
+4. **`addApplicationCss!(Application, Theme)()`** — `GetCss` then `addCss` if the string is non-empty.
+5. **Hook `writeln` / `logInfo` / `logError`** onto `console.info` / `console.error`, and `parseInt` onto a small `fast.format` helper. memutils debug prints go through the browser console, not stdout.
+6. **`application.main()`** if the type has it — pre-graph, no inject, no handles. svelte-d almost never prints this.
+7. **`application.compile()`** — `compile!`: fill `@inject`, recurse `@child`, then call **`construct()`** on each struct. Handles do not exist yet.
+8. **`setupRouter()` + `application.registerRoutes()`** — walk `@entering` / `@leaving` already on those structs. The router is live before first paint so `ready` can `navigateTo`.
+9. **`libwasm.dom.render(root, application)`** — create JS handles, apply `@prop` / `@attr` / `@style`, attach `@callback` listeners, **`@connect .add`**, `appendChild`, then **`propagateOnMount` → `onMount()`**.
+10. **`application.ready()`** if present; otherwise `router().navigateTo(document().location().front.pathname())`.
+
+That last default is why a kit app that forgets `ready` still routes. svelte-d prints `ready` when `{#each}` / `{#await}` need live handles (`wireEach`, `wireAwait`). Wiring those in `construct` was a real bug: the handles were not there yet.
+
+## The methods a printed struct may have
+
+These are libwasm’s lifetime, not Svelte’s. There is no JS `onMount` import. Printing one would be a second runtime.
+
+| Method | When | What you may do |
+|---|---|---|
+| `void main()` | before `compile!` | almost never; no inject, no handles |
+| `void construct()` | end of `compile!` | seed child `@prop` fields, `put` list items, set `@inject` pointers. Do **not** read the DOM. |
+| `void onMount()` | after `render` | touch handles, add listeners that need a live node |
+| `void onUnmount()` | `unmount` / `shrinkTo` / list `remove` | drop subscriptions you own; EventEmitter does not un-add |
+| `void ready()` | after first paint, **App only** | `wireEach`, `wireAwait`, first `navigateTo` |
+| `void registerRoutes()` | after `compile!`, before `render` | usually generated from `@entering` |
+
+`this.update.foo = v` is available as soon as `render` has assigned the handle. Calling it from `construct` writes the D field and then talks to an invalid handle. Seed the field; let `render` push it.
+
+## What svelte-d prints onto this sequence
+
+A kit `+page.svelte` becomes a struct that hangs as `@child` of `App`. Layouts stay mounted as `@child` wrappers; `KitRoutes` remounts the page inside `@entering`. There is one wasm module and one `mixin Spa!App`. A layout that became its own wasm module would be a second DOM.
+
+Author names survive. `struct ClickField` still has `go` and `msg`. The printer adds `goButton` and `msgSpan` around them. When you set a breakpoint in code-d on `void construct()`, you are in the same function the language pages describe.
+
+HMR is the same `__gshared application`. `dumpApp` serialises `HTMLArray` / `List` as `:l:N:[{item}…]`. After reload, `loadApp` shrinks and `put`s so dumped items win over `construct()` seeds. `ManagedPool`, pointers, `EventEmitter`, `NamedNode`, and enums are still skipped. Do not store the only copy of a value in a skipped field and expect HMR to bring it back.
+
+The long form of this page, construct by construct, is [Lifetime](../language/lifetime) in the IR section. This page is the runtime the printer is naming.

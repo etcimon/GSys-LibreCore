@@ -22,6 +22,8 @@ use g6q_core::model::{Peripheral, Profile, TargetModel};
 pub enum Loader {
     Uboot,
     Edk2,
+    /// Independent `g6lc_bios` ELF (built by `g6b`, not fetched).
+    Bios,
 }
 
 impl Loader {
@@ -29,6 +31,7 @@ impl Loader {
         match self {
             Loader::Uboot => "u-boot",
             Loader::Edk2 => "edk2",
+            Loader::Bios => "bios",
         }
     }
 
@@ -36,6 +39,7 @@ impl Loader {
         match self {
             Loader::Uboot => "u_boot",
             Loader::Edk2 => "edk2",
+            Loader::Bios => "bios",
         }
     }
 
@@ -43,6 +47,7 @@ impl Loader {
         match self {
             Loader::Uboot => "out/loader-src/u-boot",
             Loader::Edk2 => "out/loader-src/edk2",
+            Loader::Bios => "out/g6lc_bios.elf",
         }
     }
 
@@ -50,6 +55,7 @@ impl Loader {
         match self {
             Loader::Uboot => format!("out/loader-build/u-boot-{target}-{machine}"),
             Loader::Edk2 => format!("out/loader-build/edk2-{target}-{machine}"),
+            Loader::Bios => format!("out/loader-build/bios-{target}-{machine}"),
         }
     }
 
@@ -57,6 +63,7 @@ impl Loader {
         match self {
             Loader::Uboot => "u-boot-build.sh",
             Loader::Edk2 => "edk2-build.sh",
+            Loader::Bios => "g6b-design-compile.sh",
         }
     }
 
@@ -65,6 +72,7 @@ impl Loader {
         match s {
             "u-boot" | "u_boot" | "uboot" => Some(Loader::Uboot),
             "edk2" => Some(Loader::Edk2),
+            "bios" | "g6lc-bios" | "g6b" => Some(Loader::Bios),
             _ => None,
         }
     }
@@ -77,7 +85,14 @@ pub fn from_args(args: &Args) -> Option<Loader> {
 
 /// `g6q fw fetch --loader <u-boot|edk2>` — clone the pinned upstream source.
 pub fn fetch(args: &Args) -> Result<(), String> {
-    let loader = from_args(args).ok_or("--loader u-boot|edk2 is required")?;
+    let loader = from_args(args).ok_or("--loader u-boot|edk2|bios is required")?;
+    if loader == Loader::Bios {
+        return Err(
+            "`--loader bios` is built by `g6b design compile` in the g6lc_bios package; \
+             there is nothing to fetch"
+                .into(),
+        );
+    }
     let pins = load_pins()?;
     let src = src_dir(args, loader);
 
@@ -92,6 +107,7 @@ pub fn fetch(args: &Args) -> Result<(), String> {
     let dry_run = args.flag("dry-run");
 
     match loader {
+        Loader::Bios => unreachable!("bios fetch returns before pin_url"),
         Loader::Uboot => {
             if dry_run {
                 print_fetch_plan(loader, url, rev, &src);
@@ -177,7 +193,14 @@ pub fn build(args: &Args) -> Result<(), String> {
         }
     }
 
+    if loader == Loader::Bios {
+        return Err(
+            "`--loader bios` is built by `g6b design compile`; use `g6q run --loader bios`"
+                .into(),
+        );
+    }
     let plan = match loader {
+        Loader::Bios => unreachable!("bios build returns before generate"),
         Loader::Uboot => uboot_generate_package(
             args,
             &pins,
@@ -379,6 +402,7 @@ fn minimal_model(args: &Args) -> TargetModel {
 
 fn source_ready(src: &Path, loader: Loader) -> bool {
     match loader {
+        Loader::Bios => src.is_file(),
         Loader::Uboot => src.join("Makefile").is_file(),
         Loader::Edk2 => src.join("edksetup.sh").is_file(),
     }
@@ -1100,6 +1124,71 @@ pub fn apply_uboot_payload(
     boot.kernel = Some(img.to_string_lossy().replace('\\', "/"));
     prefer_virt_opensbi(args, boot);
     Ok(())
+}
+
+/// Wire `--loader bios` as OpenSBI's S-mode next stage (`-kernel g6lc_bios.elf`).
+///
+/// The ELF is produced by the independent `g6lc_bios` package (`g6b design compile`).
+/// QEMU virt uses generic OpenSBI the same way U-Boot does.
+pub fn apply_bios_payload(
+    args: &Args,
+    boot: &mut g6q_emit_args::BootOptions,
+) -> Result<(), String> {
+    if from_args(args) != Some(Loader::Bios) {
+        return Ok(());
+    }
+    let img = args
+        .value("loader-image")
+        .or_else(|| args.value("bios-image"))
+        .map(PathBuf::from)
+        .unwrap_or_else(default_bios_elf);
+    let dry = args.flag("dry-run") || args.value("backend") == Some("args");
+    if !img.is_file() && !dry {
+        return Err(format!(
+            "--loader bios needs g6lc_bios.elf at {} (g6b design compile --spec …)",
+            img.display()
+        ));
+    }
+    boot.kernel = Some(img.to_string_lossy().replace('\\', "/"));
+    prefer_virt_opensbi(args, boot);
+    wire_holyc_dual_band(args, boot);
+    // High-res display-proxy stand-in on virt (ZealOS 640×480 scaled). Not a NIC.
+    let mach = args.value("machine").unwrap_or("g6lc-virt");
+    if mach.contains("virt") && !boot.virtio.iter().any(|v| v == "gpu") {
+        boot.virtio.push("gpu".into());
+    }
+    Ok(())
+}
+
+/// HolyC dual-band: UART0 is `-nographic` stdio; UART1 is an SSH-like TCP REPL.
+///
+/// `--holyc-port off` disables the TCP band. `--holyc-port N` (default 2222)
+/// emits `-serial tcp:127.0.0.1:N,server,nowait` unless `--serial` was set.
+fn wire_holyc_dual_band(args: &Args, boot: &mut g6q_emit_args::BootOptions) {
+    let raw = args.value("holyc-port").unwrap_or("2222");
+    if raw == "off" || raw == "none" {
+        return;
+    }
+    let Ok(port) = raw.parse::<u16>() else {
+        return;
+    };
+    if boot.serial.is_none() {
+        boot.serial = Some(format!("tcp:127.0.0.1:{port},server,nowait"));
+    }
+}
+
+fn default_bios_elf() -> PathBuf {
+    // Prefer an in-tree sibling package output, then the g6q out/ directory.
+    for p in [
+        PathBuf::from("../g6lc_bios/out/g6lc_bios.elf"),
+        PathBuf::from("g6lc_bios/out/g6lc_bios.elf"),
+        PathBuf::from("out/g6lc_bios.elf"),
+    ] {
+        if p.is_file() {
+            return p;
+        }
+    }
+    PathBuf::from("out/g6lc_bios.elf")
 }
 
 /// OpenWrt EFI stub + initramfs wants more than the model's 256 MiB window.
@@ -2171,6 +2260,48 @@ mod tests {
         let mut boot = g6q_emit_args::BootOptions::default();
         apply_uboot_payload(&args, &mut boot).unwrap();
         assert_eq!(boot.kernel.as_deref(), Some("out/u-boot.bin"));
+    }
+
+    #[test]
+    fn bios_payload_sets_kernel_on_dry_run() {
+        let args = Args::parse([
+            "run",
+            "--loader",
+            "bios",
+            "--dry-run",
+            "--loader-image",
+            "out/g6lc_bios.elf",
+        ]);
+        let mut boot = g6q_emit_args::BootOptions::default();
+        apply_bios_payload(&args, &mut boot).unwrap();
+        assert_eq!(boot.kernel.as_deref(), Some("out/g6lc_bios.elf"));
+        assert_eq!(
+            boot.serial.as_deref(),
+            Some("tcp:127.0.0.1:2222,server,nowait")
+        );
+        assert!(
+            boot.virtio.iter().any(|v| v == "gpu"),
+            "virtio={:?}",
+            boot.virtio
+        );
+        assert!(!boot.netdev_user);
+    }
+
+    #[test]
+    fn bios_payload_holyc_port_off_skips_tcp_band() {
+        let args = Args::parse([
+            "run",
+            "--loader",
+            "bios",
+            "--dry-run",
+            "--loader-image",
+            "out/g6lc_bios.elf",
+            "--holyc-port",
+            "off",
+        ]);
+        let mut boot = g6q_emit_args::BootOptions::default();
+        apply_bios_payload(&args, &mut boot).unwrap();
+        assert!(boot.serial.is_none(), "serial={:?}", boot.serial);
     }
 
     #[test]

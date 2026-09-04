@@ -1,0 +1,28 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "g6b / g6lc-bios host CLI"
+default-run = "g6b"
+
+[[bin]]
+name = "g6b"
+path = "src/main.rs"
+
+[dependencies]
+g6b-spec = { workspace = true }
+g6b-design = { workspace = true }
+g6b-doldoc = { workspace = true }
+g6b-kernel = { workspace = true }
+g6b-holyc = { workspace = true }
+g6b-elf = { workspace = true }
+g6b-http = { workspace = true }
+
+[lints]
+workspace = true

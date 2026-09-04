@@ -1,0 +1,78 @@
+---
+tags: [CLASS, COMPONENT]
+---
+
+# Component
+
+- **[SOURCE FILE](https://github.com/lirx-js/dom/blob/main/src/component/classes/component.class.ts)**
+- **[TUTORIAL](/docs/documentation/component/component/)**
+
+---
+
+```ts
+class Component<GElement extends Element, GData extends object, GTemplateData extends object> extends AbstractComponent<GElement, GData> {
+  readonly name: string;
+
+  constructor(
+    options: IComponentOptions<GElement, GData, GTemplateData>,
+  );
+
+  create(
+    slots: IVirtualComponentNodeSlotsMap = DEFAULT_SLOTS,
+  ): IComponentVirtualComponentNode<GElement, GData>;
+}
+```
+
+With:
+
+```ts
+interface IComponentOptions<GElement extends Element, GData extends object, GTemplateData extends object> {
+  name: string;
+  extends?: string;
+  namespaceURI?: string,
+  template?: IComponentTemplate<GTemplateData> | undefined;
+  styles?: (readonly IComponentStyle[]) | undefined;
+  mode?: IComponentMode | undefined;
+  componentData?: IComponentInitVoidComponentDataFunction<GData> | undefined;
+  templateData?: IComponentInitVoidTemplateDataFunction<GElement, GData, GTemplateData> | undefined;
+}
+```
+
+
+### Definition
+
+This class is used to define a Component:
+a name, a template, some style, its inputs and outputs, and an "init" function.
+
+### Example
+
+```ts title="todo-list-item.component.ts"
+export const TodoListItemComponent = new Component<HTMLElement, ITodoListItemComponentData, ITemplateData>({
+  name: 'app-todo-list-item',
+  template: compileReactiveHTMLAsComponentTemplate({ html }),
+  styles: [compileStyleAsComponentStyle(style)],
+  componentData: (): ITodoListItemComponentData => ({
+    message: input<string>(),
+    remove: output<void>(),
+  }),
+  templateData: (node: VirtualComponentNode<HTMLElement, ITodoListItemComponentData>): ITemplateData => {
+    const message$ = node.input$('message');
+    const $onClickRemoveButton = node.$output('remove');
+
+    return {
+      message$,
+      $onClickRemoveButton,
+    };
+  },
+});
+```
+
+Then to bootstrap it:
+
+```ts title="main.ts"
+import { bootstrap } from '@lirx/dom';
+import { TodoListItemComponent } from './todo-list-item.component';
+
+bootstrap(TodoListItemComponent);
+```
+

@@ -1,0 +1,193 @@
+
+U32 image[GR_HEIGHT * GR_WIDTH];
+
+U0 MGInit()
+{
+	MemSet(image, BLACK32, sizeof(image));
+}
+
+U0 MGUpdate()
+{//Copy image to framebuffer memory
+//For better performance we could only write what's changed.
+	MemCopy(text.fb_alias, image, sizeof(image));
+}
+
+U0 MGPlot(I64 x,I64 y)
+{
+	if (0 <= x < GR_WIDTH && 0 <= y < GR_HEIGHT)
+		image[x + y * GR_WIDTH] = WHITE32;
+}
+
+U0 MGHLine(I64 x1, I64 x2, I64 y)
+{//No clipping
+	I64 x;
+
+	if (y >= GR_HEIGHT)
+		return;
+	if (x2 < x1)
+		SwapI64(&x1, &x2);
+	if (x1 < 0)
+		x1 = 0;
+	if (x2 < x1)
+		SwapI64(&x1, &x2);
+	x = x1;
+
+	while (x <= x2 && x < GR_WIDTH)
+	{
+		image[x + y * GR_WIDTH] = WHITE32;
+		x++;
+	}
+}
+ 
+U0 MGLine(I64 x1,I64 y1,I64 x2,I64 y2)
+{//No clipping
+	I64 x_start, x_end, y_start, y_end, x, y, dx, dy, c;
+
+	c = 0;
+	x_start = MinI64(x1, x2);
+
+	if (x_start == x1)
+	{
+		y_start = y1;
+		x_end = x2;
+		y_end = y2;
+	}
+	else // x2
+	{
+		y_start = y2;
+		x_end = x1;
+		y_end = y1;
+	}
+
+	x = x_start;
+	y = y_start;
+	dx = x_end - x_start;
+
+	if (y_end < y_start)
+	{
+		dy = y_start - y_end;
+
+		if (dx >= dy)
+		{
+			while (x <= x_end)
+			{
+				MGPlot(x, y);
+				c += dy;
+				if (c >= dx)
+				{
+					c -= dx;
+					y--;
+				}
+				x++;
+			}
+		}
+		else
+		{
+			while (y > y_end)
+			{
+				MGPlot(x, y);
+				c += dx;
+				if (c >= dy)
+				{
+					c -= dy;
+					x++;
+				}
+				y--;
+			}
+		}
+	}
+	else
+	{
+		dy = y_end - y_start;
+
+		if (dx >= dy)
+		{
+			while (x <= x_end)
+			{
+				MGPlot(x, y);
+				c += dy;
+				if (c >= dx)
+				{
+					c -= dx;
+					y++;
+				}
+				x++;
+			}
+		}
+		else
+		{
+			while (y <= y_end)
+			{
+				MGPlot(x, y);
+				c += dx;
+				if (c >= dy)
+				{
+					c -= dy;
+					x++;
+				}
+				y++;
+			}
+		}
+	}
+}
+
+U0 MGCircle(I64 x, I64 y, F64 r)
+{
+	F64 s, c, x1, y1, x2, y2;
+	I64 len;
+
+	if (r < 0)
+		return;
+	x1 = r;
+	y1 = 0;
+	c = Cos(1 / r);
+	s = Sin(1 / r);
+	len = 2 * r * π;
+	MGPlot(x + x1, y + y1);
+	while (len-- >= 0)
+	{
+
+		//m1@a1 * m2@a2 	= m1*m2@(arg1+arg2)
+
+		//(x1+y1i)*(x2+y2i) = x1*x2+(x1*y1+x2*y2)i-y1*y2
+
+		// me$SY,-3$ti$SY,0$=mCos(t)+imSin(t)
+
+		x2 = x1;
+		y2 = y1;
+		x1 = c * x2 - s * y2;
+		y1 = s * x2 + c * y2;
+		MGPlot(x+x1,y+y1);
+	}
+}
+
+U0 MiniGrLibDemo()
+{
+	I64 i;
+
+	MGInit;
+
+	for (i = 0; i < 100; i++)
+		MGHLine(200 + i, 400 + i, 400 + i);
+
+	for (i = 0; i < GR_HEIGHT + 20; i += 10)
+		MGLine(i, 0, 0, GR_HEIGHT - i);
+
+	for (i = 0; i < 300; i += 4)
+		MGCircle(400, 200 + i, i);
+
+	MGUpdate;
+	Busy(1500000);
+
+
+/*
+We are returning graphics to normal operations under ZealOS.
+It is not normal to by-pass the ZealOS graphcis routines.
+The ZealOS graphics don't know the framebuffer has changed.
+This function tells ZealOS to update whole screen.
+*/
+	//<CTRL-ALT-v> will flush screen VGA cache and un-set framebuffer-busy bit.
+	LFBFlush;
+}
+ 
+MiniGrLibDemo;

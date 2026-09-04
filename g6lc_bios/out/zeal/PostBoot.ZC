@@ -1,0 +1,34 @@
+// Generated PostBoot.ZC — enable=runtime access=kvm
+// Immutable after Linux handoff (viewable, writes disabled):
+//   config
+//   keys
+//   boot-policy
+U0 LinuxHandoff()
+{
+	Print("POSTBOOT-LIVE\n");
+}
+
+U0 ViewSection(U8 *name)
+{
+	Print("VIEW %s\n", name);
+}
+
+U0 WriteSection(U8 *name)
+{
+	Print("WRITE %s\n", name);
+}
+
+U0 Reboot()
+{
+	Print("POWER-REBOOT\n");
+}
+
+U0 Shutdown()
+{
+	Print("POWER-SHUTDOWN\n");
+}
+
+U0 Wakeup()
+{
+	Print("POWER-WAKEUP\n");
+}

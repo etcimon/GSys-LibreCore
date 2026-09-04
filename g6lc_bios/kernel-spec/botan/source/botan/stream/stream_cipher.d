@@ -1,0 +1,193 @@
+/**
+* Stream Cipher
+* 
+* Copyright:
+* (C) 2015,2016 Jack Lloyd
+* (C) 2014-2026 Etienne Cimon
+*
+* License:
+* Botan is released under the Simplified BSD License (see LICENSE.md)
+*/
+module botan.stream.stream_cipher;
+
+import botan.constants;
+public import botan.algo_base.sym_algo;
+/**
+* Base class for all stream ciphers
+*/
+interface StreamCipher : SymmetricAlgorithm
+{
+public:
+    /**
+    * Encrypt or decrypt a message
+    * Params:
+    *  input = the plaintext
+    *  output = the ubyte array to hold the output, i.e. the ciphertext
+    *  len = the length of both in and out in bytes
+    */
+    abstract void cipher(const(ubyte)* input, ubyte* output, size_t len);
+
+    /**
+    * Encrypt or decrypt a message
+    * Params:
+    *  buf = the plaintext / ciphertext
+    *  len = the length of buf in bytes
+    */
+    final void cipher1(const(ubyte)* buf, size_t len)
+    { cipher(buf, cast(ubyte*)buf, len); }
+
+    /**
+    * Encrypt or decrypt a message
+    * Params:
+    *  buf = the plaintext / ciphertext
+    */
+    final void cipher1(ref ubyte[] buf)
+    { cipher(buf.ptr, buf.ptr, buf.length); }
+
+    /// In-place cipher of `inoutput`.
+    final void encipher(Alloc)(ref Vector!( ubyte, Alloc ) inoutput)
+    { cipher(inoutput.ptr, inoutput.ptr, inoutput.length); }
+
+    /// ditto
+    final void encrypt(Alloc)(ref Vector!( ubyte, Alloc ) inoutput)
+    { cipher(inoutput.ptr, inoutput.ptr, inoutput.length); }
+
+    /// ditto
+    final void decrypt(Alloc)(ref Vector!( ubyte, Alloc ) inoutput)
+    { cipher(inoutput.ptr, inoutput.ptr, inoutput.length); }
+
+    /**
+    * Resync the cipher using the IV
+    * Params:
+    *  iv = the initialization vector
+    *  iv_len = the length of the IV in bytes
+    */
+    abstract void setIv(const(ubyte)* iv, size_t iv_len);
+    // { if (iv_len) throw new InvalidArgument("The stream cipher " ~ name ~ " does not support resyncronization"); }
+
+    /**
+    * Params:
+    *  iv_len = the length of the IV in bytes
+    * Returns: if the length is valid for this algorithm
+    */
+    abstract bool validIvLength(size_t iv_len) const;
+    // { return (iv_len == 0); }
+
+    /**
+    * Jump the keystream to byte `offset` (C++ StreamCipher::seek).
+    * Ciphers that cannot seek throw InvalidArgument when offset != 0.
+    */
+    abstract void seek(ulong offset);
+
+    /**
+    * Get a new object representing the same algorithm as this
+    */
+    abstract StreamCipher clone() const;
+}
+
+static if (BOTAN_TEST):
+import botan.test;
+import botan.libstate.libstate;
+import botan.codec.hex;
+import core.atomic;
+import memutils.hashmap;
+private shared size_t total_tests;
+
+size_t streamTest(string algo,
+                   string key_hex,
+                   string in_hex,
+                   string out_hex,
+                   string nonce_hex,
+                   ulong seek = 0)
+{
+    const SecureVector!ubyte key = hexDecodeLocked(key_hex);
+    const SecureVector!ubyte ct = hexDecodeLocked(out_hex);
+    // Missing In = all-zero plaintext of Out length (C++ keystream KATs).
+    const SecureVector!ubyte pt = in_hex.length ? hexDecodeLocked(in_hex)
+                                                : SecureVector!ubyte(ct.length);
+    const SecureVector!ubyte nonce = hexDecodeLocked(nonce_hex);
+    
+    AlgorithmFactory af = globalState().algorithmFactory();
+    
+    const auto providers = af.providersOf(algo);
+    size_t fails = 0;
+    
+    if (providers.empty)
+    {
+        logTrace("Unknown algo " ~ algo);
+        return 0;
+    }
+    
+    foreach (provider; providers[])
+    {
+        atomicOp!"+="(total_tests, 1);
+        const StreamCipher proto = af.prototypeStreamCipher(algo, provider);
+        
+        if (!proto)
+        {
+            logError("Unable to get " ~ algo ~ " from provider '" ~ provider ~ "'");
+            ++fails;
+            continue;
+        }
+        
+        Unique!StreamCipher cipher = proto.clone();
+        cipher.setKey(key);
+
+        if (nonce.length)
+            cipher.setIv(nonce.ptr, nonce.length);
+
+        if (seek)
+            cipher.seek(seek);
+        
+        SecureVector!ubyte buf = pt.clone;
+        
+        cipher.encrypt(buf);
+        
+        if (buf != ct)
+        {
+            logError(algo ~ " " ~ provider ~ " enc " ~ hexEncode(buf) ~ " != " ~ out_hex);
+            ++fails;
+        }
+    }
+    
+    return fails;
+}
+
+static if (BOTAN_HAS_TESTS && !SKIP_STREAM_CIPHER_TEST) unittest
+{
+    logDebug("Testing stream_cipher.d ...");
+    auto test = delegate(string input)
+    {
+        File vec = File(input, "r");
+        
+        return runTestsBb(vec, "StreamCipher", "Out", true,
+            (ref HashMap!(string, string) m) {
+                string in_hex;
+                if (auto p = "In" in m)
+                    in_hex = *p;
+                ulong seek = 0;
+                if (auto p = "Seek" in m)
+                {
+                    import std.conv : to;
+                    seek = to!ulong(*p);
+                }
+                return streamTest(m["StreamCipher"], m["Key"], in_hex, m["Out"], m.get("Nonce"), seek);
+            });
+    };
+    
+    size_t fails = runTestsInDir("test_data/stream", test);
+
+    import botan.libstate.lookup;
+    fails += checkMemutilsRepeat("stream ChaCha", {
+        Unique!StreamCipher c = retrieveStreamCipher("ChaCha").clone();
+        ubyte[32] k;
+        ubyte[8] iv;
+        ubyte[16] b;
+        c.setKey(k.ptr, k.length);
+        if (!c.validIvLength(0))
+            c.setIv(iv.ptr, iv.length);
+        c.cipher(b.ptr, b.ptr, b.length);
+    });
+
+    testReport("stream", total_tests, fails);
+}

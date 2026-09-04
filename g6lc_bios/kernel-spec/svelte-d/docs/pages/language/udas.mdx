@@ -1,0 +1,28 @@
+---
+title: UDA vocabulary
+description: The libwasm graph compile!() walks. @connect paths are member paths, not CSS selectors.
+---
+
+# UDA vocabulary
+
+The previous pages introduce UDAs as they appear in Svelte. This page is the vocabulary `compile!()` actually walks, in one place, so a printed file can be read without flipping back. These are libwasm UDAs (`types.d`), not D `@property`. Bare `@prop` with no name is not a legal UDA; the template is `struct prop(alias prop_name)`.
+
+`mixin NodeDef!"tag"` is the NamedNode. `@child` marks a field as a child component; `getChildren` finds it and `compile!` recurses. `@prop` / `@attr` / `@style` are the DOM property, attribute, and class on **this** NamedNode. Pointer `@prop` / `@attr` dereference if non-null — that is how an `@inject!"msg" string*` can feed the same named property. `@callback!"click"` is the DOM event to method. `mixin Slot!("name", Params)` is an `EventEmitter`; empty-Params `add` appends. `this.emit(slot, args)` calls those callbacks, including address-callbacks with `cast(size_t)(&t)`.
+
+`@connect!"a.b"` is `t.a.b.add(&method)`. The string is a D member path; dots stay dots. `@connect!("list.items","link.clicker")` is the list form: `t.list.items.link_clicker.add(&method)`. The second path’s dots become underscores because `ArrayItemEvents!T` declares Slots on the array with underscores. The method’s first parameter must be `size_t`. `@inject!"parentField"` is a single identifier, not a dotted path; `compile!` searches the parent tuple for a member of that name and, if the child field is a pointer, stores `&parent.host`.
+
+`@visible!"child"` skips or remounts that `@child` via `setVisible`. `{#if ident}` prints this UDA on `bool ident` of the owner. `@entering!"/path"` is libwasm `URLRouter`, not a DOM UDA. `@connect` and `@inject` paths are identifiers on the compiled struct. They are not SvelteKit file paths and not CSS selectors. A connect string that looks like `.admin-nav` is a mistake, not a feature.
+
+| UDA / mixin | Role |
+|---|---|
+| `mixin NodeDef!"tag"` | NamedNode of that HTML type |
+| `@child` | child component; `compile!` recurses |
+| `@prop` / `@attr` / `@style` | DOM property / attribute / class on this NamedNode |
+| `@callback!"click"` | DOM event → method |
+| `mixin Slot!("name", Params)` | `EventEmitter` — fireable |
+| `this.emit(slot, args)` | call EventEmitter cbs |
+| `@connect!"a.b"` | member path; dots stay dots |
+| `@connect!("list.items","link.clicker")` | list form; second path dots → underscores; first param `size_t` |
+| `@inject!"parentField"` | `compile!` copies `&parent.parentField` |
+| `@visible!"child"` | skip / remount that `@child` |
+| `@entering!"/path"` | libwasm `URLRouter` |

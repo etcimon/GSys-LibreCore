@@ -1,0 +1,8 @@
+{
+  "name": "@prism-react-renderer/webstorm-dracula",
+  "private": true,
+  "sideEffects": false,
+  "main": "index.ts",
+  "module": "index.js",
+  "license": "MIT"
+}

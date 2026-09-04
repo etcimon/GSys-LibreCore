@@ -1,0 +1,40 @@
+---
+title: Introduction
+description: svelte-d compiles Svelte / SvelteKit into libwasm D IR inside svelte-engine-ws. Not a Svelte-to-JS wrap.
+---
+
+# svelte-d
+
+svelte-d is a compiler, not a runtime. A bun + Svelte / SvelteKit project is parsed as Svelte source — Pegged for the `.svelte` surface, libdparse for `<script lang="d">` and `*.d` files — and pretty-printed as **libwasm** D for the browser cell and **vibe.0** D for the server cell. The destination of that print is a dropped copy of the **svelte-engine** bootstrap called **`svelte-engine-ws`**. Nothing in that pipeline invokes npm `svelte/compiler`, wraps Svelte as JavaScript, or invents a second DOM or HTTP stack. The engine already knows how to be a wasm-eh SPA and a vibe.0 host; svelte-d’s job is to make your kit sources look like the D that engine already compiles.
+
+That last sentence is the whole product thesis, and it is worth sitting with. Most Svelte toolchains treat the official compiler as the source of truth and emit JavaScript (or a JavaScript-shaped IR) that a browser runtime interprets. svelte-d treats **libwasm’s compile-time struct graph** as the source of truth. A `{#if}`, an `on:click`, and a `{#each}` are not lowered through a private component JSON and then re-expressed as D. They *are* `@visible`, `Slot` plus `@connect`, and `UnorderedList` — the same kinds `libwasm.dom.compile!()` already walks. The printer is a pretty-printer of that graph. If a construct cannot be `compile!()`’d, the correct response is a diagnostic, not a silent JavaScript fallback.
+
+```
+src/routes/+page.svelte
+        │  Pegged + libdparse
+        ▼
+AST ≡ NodeDef / @child / @prop / Slot / @visible / UnorderedList
+        │  pretty-print
+        ▼
+svelte-engine-ws/src-d/routes/page.d     libwasm
+svelte-engine-ws/src-ts/modules/…        lang=ts jsExports + __svelteD.ts
+svelte-engine-ws/webserver/source/…      +page.server.d → vibe.0
+```
+
+Names survive that walk. `ClickField.svelte` becomes `struct ClickField` with methods still called `go` and fields still called `msg`. The printer adds wiring (`goButton`, `@connect!"goButton.click"`) around the author’s identifiers; it does not rename them to `Button3` or `el_0`. That representativeness is how a reader goes from a failing wasm stack frame back to the `.svelte` line that produced it, and it is why the language section of this site can show Svelte and D side by side without a lookup table.
+
+## How to read this site
+
+The pages are ordered as a course, not as an API dump. [Getting Started](./getting-started) gets LDC 1.43 onto the machine and runs the first `drop-ws` / `compile`. [Concepts](./concepts) explains why there is a template and a workspace, why kit paths keep their shape, and why wasm and host are two *targets* of one compiler rather than two compilers. The [development guide](./guide) is how you write an app. Its running example is a **simplified admin panel** — layout, dashboard, user list, user `:id` — the same kit shape as `packages/svelte-d-kit-admin`, stripped of Postgres, Redis, and browser CDP so the IR is visible.
+
+The heart of the site is [Svelte → D IR](./language). That section teaches every interactive `.svelte` construct svelte-d prints, and the exact libwasm idiom it becomes. Read it before adding `{#each}{#if row.ok}` or `<svelte:boundary>` to a real page.
+
+[libwasm](./libwasm) and [vibe.0](./vibe.0) are the two cells that `<script lang="d">` and `+page.server.d` actually compile against. The language pages show the printer’s output; those two sections show the runtime that output is calling — `compile!`, `this.update`, `Lodash.execute`, `listenHTTP`, `registerWebInterface`, `Json`. [Getting Started](./getting-started) recommends VS Code plus code-d pointed at `svelte-engine-ws` so that IR is completable. [Reference](./reference) is the CLI and adapters. [Advanced](./advanced) covers the single LDC 1.43 cell, [debug vs release sizes](./advanced/sizes), wasm exception handling, incremental compile, and the debug map.
+
+Agent-facing architecture notes remain in the repository under `architecture/`. They are written to the *next change* and assume you already know this guide. This site is the human development guide; those files are the construction ledger.
+
+## What svelte-d refuses to be
+
+It is not a Svelte-to-JavaScript compiler, and it is not a thin wrap of the npm `svelte` package. Shipping a second DOM — a virtual DOM, a second handle table, a second `domEvent` — would duplicate work libwasm already does and would break the “AST ≡ IR” contract. Shipping a Node HTTP server would duplicate vibe.0 `listenHTTP`. Those refusals are not style preferences; they are how the stack stays one SPA and one host.
+
+It is also not two LDC versions. An earlier split kept host 1.42 and wasm 1.43 as separate binaries. That extra machinery is gone. **One LDC 1.43+** compiles the svelte-d CLI, the vibe.0 host, and the wasm-eh module. Wasm and host still do not share object files or `DFLAGS`; they share a compiler. `bunx svelte-d setup` is how that compiler appears on Windows, macOS, and Linux.

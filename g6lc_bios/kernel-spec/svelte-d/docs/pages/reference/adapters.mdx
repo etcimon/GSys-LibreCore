@@ -1,0 +1,10 @@
+---
+title: Adapters
+description: adaptWorkspace copies artifacts from the workspace. It does not start a Node HTTP stack.
+---
+
+# Adapters
+
+An adapter in this stack is not a SvelteKit adapter in the official sense. It does not replace the compiler and it does not start `listenHTTP`. `adaptWorkspace({ ws, adapter, out })` reads `ws/.svelte-d/manifest.json` and copies the artifacts that adapter knows how to ship. The names are `static`, `libwasm-spa`, `vibe0`, and `vibe0-proxy`. `bunx svelte-kit-d adapt static --out build` is the CLI form.
+
+`static` is files. `libwasm-spa` is the wasm module plus the JS glue that instantiates it. `vibe0` is the host binary. `vibe0-proxy` is the host that reverse-proxies Vite. None of them parse Svelte with `svelte/compiler`. If you need a new output shape, add an adapter that consumes the manifest; do not add a Node server “just for preview.”

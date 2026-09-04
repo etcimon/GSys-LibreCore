@@ -1,0 +1,651 @@
+/**
+* TLS Client
+* 
+* Copyright:
+* (C) 2004-2011,2012,2015,2016 Jack Lloyd
+* (C) 2016 Matthias Gierlings
+* (C) 2017 Harry Reimann, Rohde & Schwarz Cybersecurity
+* (C) 2021 Elektrobit Automotive GmbH
+* (C) 2014-2026 Etienne Cimon
+*
+* License:
+* Botan is released under the Simplified BSD License (see LICENSE.md)
+*/
+module botan.tls.client;
+
+import botan.constants;
+static if (BOTAN_HAS_TLS):
+
+public import botan.tls.channel;
+public import botan.tls.credentials_manager;
+public import botan.tls.server_info;
+public import botan.rng.rng;
+import botan.tls.handshake_state;
+import botan.tls.messages;
+import memutils.dictionarylist;
+import botan.utils.types;
+static if (BOTAN_HAS_TLS_13) import botan.tls.tls13.handshake;
+
+/**
+* TLS Client
+*/
+final class TLSClient : TLSChannel
+{
+public:
+    /**
+    * Set up a new TLS client session
+    *
+    * Params:
+    *  socket_output_fn = is called with data for the outbound socket
+    *  proc_cb = is called when new application data is received
+    *  alert_cb = is called when a TLS alert is received
+    *  handshake_cb = is called when a handshake is completed
+    *  session_manager = manages session state
+    *  creds = manages application/user credentials
+    *  policy = specifies other connection policy information
+    *  rng = a random number generator
+    *  server_info = is identifying information about the TLS server
+    *  offer_version = specifies which version we will offer
+    *          to the TLS server.
+    *  next_protocols = specifies protocols to advertise with ALPN
+    *  reserved_io_buffer_size = This many bytes of memory will
+    *          be preallocated for the read and write buffers. Smaller
+    *          values just mean reallocations and copies are more likely.
+    */
+    this(void delegate(in ubyte[]) socket_output_fn,
+         void delegate(in ubyte[]) proc_cb,
+         void delegate(in TLSAlert, in ubyte[]) alert_cb,
+         bool delegate(in TLSSession) handshake_cb,
+         TLSSessionManager session_manager,
+         TLSCredentialsManager creds,
+         in TLSPolicy policy,
+         RandomNumberGenerator rng,
+         in TLSServerInformation server_info = TLSServerInformation(),
+         in TLSProtocolVersion offer_version = TLSProtocolVersion.latestTlsVersion(),
+         Vector!string next_protocols = Vector!string(),
+         size_t reserved_io_buffer_size = 16*1024)
+    { 
+        super(socket_output_fn, proc_cb, alert_cb, handshake_cb, session_manager, rng, offer_version.isDatagramProtocol(), reserved_io_buffer_size);
+		m_policy = policy;
+        m_creds = creds;
+        m_info = server_info;
+        const string srp_identifier = m_creds.srpIdentifier("tls-client", m_info.hostname());
+        HandshakeState state = createHandshakeState(offer_version);
+        sendClientHello(state, false, offer_version, srp_identifier, next_protocols.move());
+    }
+
+	protected:
+    override Vector!X509Certificate getPeerCertChain(in HandshakeState state) const
+    {
+        if (state.serverCerts())
+            return state.serverCerts().certChain().clone;
+        return Vector!X509Certificate();
+    }
+
+    /**
+    * Send a new client hello to renegotiate
+    */
+    override void initiateHandshake(HandshakeState state, bool force_full_renegotiation)
+    {
+        sendClientHello(state, force_full_renegotiation, state.Version());
+    }
+
+    void sendClientHello(HandshakeState state_base,
+                         bool force_full_renegotiation,
+                         TLSProtocolVersion _version,
+                         in string srp_identifier = "",
+                         Vector!string next_protocols = Vector!string())
+    {
+        ClientHandshakeState state = cast(ClientHandshakeState)(state_base);
+        if (state.Version().isDatagramProtocol())
+            state.setExpectedNext(HELLO_VERIFY_REQUEST); // optional
+        state.setExpectedNext(SERVER_HELLO);
+        
+        if (!force_full_renegotiation && !m_info.empty)
+        {
+            TLSSession session_info;
+            if (sessionManager().loadFromServerInfo(m_info, session_info))
+            {
+                if (srp_identifier == "" || session_info.srpIdentifier() == srp_identifier)
+                {
+                    state.clientHello(new ClientHello(
+                                          state.handshakeIo(),
+                                          state.hash(),
+                                          m_policy,
+                                          rng(),
+                                          secureRenegotiationDataForClientHello().clone,
+                                          session_info,
+                                          next_protocols.move));
+                    
+                    state.resume_master_secret = session_info.masterSecret().clone;
+                }
+            }
+        }
+
+        if (!state.clientHello()) // not resuming
+        {
+            state.clientHello(new ClientHello(state.handshakeIo(),
+                                              state.hash(),
+                                              _version,
+                                              m_policy,
+                                              rng(),
+                                              secureRenegotiationDataForClientHello().clone,
+                                              next_protocols.move,
+                                              m_info.hostname(),
+                                              srp_identifier));
+        }
+
+        secureRenegotiationCheck(state.clientHello());
+    }
+
+    /**
+    * Process a handshake message
+    */
+    override void processHandshakeMsg(in HandshakeState active_state,
+                               HandshakeState state_base,
+                               HandshakeType type,
+                               const ref Vector!ubyte contents)
+    {
+        ClientHandshakeState state = cast(ClientHandshakeState)(state_base);
+        
+        if (type == HELLO_REQUEST && active_state)
+        {
+            auto hello_request = scoped!HelloRequest(contents);
+            
+            // Ignore request entirely if we are currently negotiating a handshake
+            if (state.clientHello())
+                return;
+            
+            if (!m_policy.allowServerInitiatedRenegotiation() ||
+                (!m_policy.allowInsecureRenegotiation() && !secureRenegotiationSupported()))
+            {
+                // RFC 5746 section 4.2
+                sendWarningAlert(TLSAlert.NO_RENEGOTIATION);
+                return;
+            }
+            
+            this.initiateHandshake(state, false);
+            
+            return;
+        }
+        
+        state.confirmTransitionTo(type);
+        
+        if (type != HANDSHAKE_CCS && type != FINISHED && type != HELLO_VERIFY_REQUEST
+            && type != CERTIFICATE_VERIFY)
+            state.hash().update(state.handshakeIo().format(contents, type));
+        
+        if (type == HELLO_VERIFY_REQUEST)
+        {
+            state.setExpectedNext(SERVER_HELLO);
+            state.setExpectedNext(HELLO_VERIFY_REQUEST); // might get it again
+            
+            auto hello_verify_request = scoped!HelloVerifyRequest(contents);
+
+            state.helloVerifyRequest(hello_verify_request.Scoped_payload);
+        }
+        else if (type == SERVER_HELLO)
+        {
+            state.serverHello(new ServerHello(contents));
+            
+            if (!state.clientHello().offeredSuite(state.serverHello().ciphersuite()))
+            {
+                throw new TLSException(TLSAlert.HANDSHAKE_FAILURE, "TLSServer replied with ciphersuite we didn't send");
+            }
+            
+            if (!valueExists(state.clientHello().compressionMethods(),
+                             state.serverHello().compressionMethod()))
+            {
+                throw new TLSException(TLSAlert.HANDSHAKE_FAILURE, "TLSServer replied with compression method we didn't send");
+            }
+            
+            auto client_extn = state.clientHello().extensionTypes();
+            auto server_extn = state.serverHello().extensionTypes();
+            
+            import std.algorithm : setDifference;
+            import std.range : empty, array;
+            auto diff = setDifference(server_extn[].sort(), client_extn[].sort());
+            if (!diff.empty)
+            {
+                throw new TLSException(TLSAlert.HANDSHAKE_FAILURE,
+                                       "TLSServer sent extension(s) " ~ diff.array.to!(string[]).joiner(", ").to!string ~ " but we did not request it");
+            }
+            
+            state.setVersion(state.serverHello().Version());
+            m_application_protocol = state.serverHello().nextProtocol();
+
+            secureRenegotiationCheck(state.serverHello());
+            
+            const bool server_returned_same_session_id = !state.serverHello().sessionId().empty &&
+                                                         (state.serverHello().sessionId() == state.clientHello().sessionId());
+            
+            if (server_returned_same_session_id)
+            {
+                // successful resumption
+                
+                /*
+                * In this case, we offered the version used in the original
+                * session, and the server must resume with the same version.
+                */
+                if (state.serverHello().Version() != state.clientHello().Version())
+                    throw new TLSException(TLSAlert.HANDSHAKE_FAILURE, "TLSServer resumed session but with wrong version");
+                
+                state.computeSessionKeys(state.resume_master_secret);
+                
+                if (state.serverHello().supportsSessionTicket())
+                    state.setExpectedNext(NEW_SESSION_TICKET);
+                else
+                    state.setExpectedNext(HANDSHAKE_CCS);
+            }
+            else
+            {
+                // new session
+                
+                if (state.clientHello().Version().isDatagramProtocol() !=
+                    state.serverHello().Version().isDatagramProtocol())
+                {
+                    throw new TLSException(TLSAlert.PROTOCOL_VERSION, "TLSServer replied with different protocol type than we offered");
+                }
+                
+                if (state.Version() > state.clientHello().Version())
+                {
+                    throw new TLSException(TLSAlert.HANDSHAKE_FAILURE, "TLSServer replied with later version than in hello");
+                }
+                
+                if (!m_policy.acceptableProtocolVersion(state.Version()))
+                {
+                    throw new TLSException(TLSAlert.PROTOCOL_VERSION, "TLSServer version " ~ state.Version().toString() ~ " is unacceptable by policy");
+                }
+
+                static if (BOTAN_HAS_TLS_13)
+                {
+                    if (state.Version() == TLSProtocolVersion(TLSProtocolVersion.TLS_V13))
+                    {
+                        static if (BOTAN_HAS_CURVE25519)
+                        {
+                            auto ks = state.serverHello().tls13KeyShare();
+                            auto ss = tls13ClientSecretFromServerShare(state.clientHello(), ks);
+                            const string prf = state.ciphersuite().prfAlgo();
+                            const(ubyte)[] hs = state.hash().getContents()[];
+                            auto sec = tls13HandshakeSecrets(prf, ss.ptr, ss.length, hs.ptr, hs.length);
+                            state.tls13SetHsTraffic(prf, sec.handshake_secret.move(),
+                                                    sec.client_handshake_traffic.move(),
+                                                    sec.server_handshake_traffic.move());
+                            tls13SetRecordKeys(tls13AeadName(state.ciphersuite()), prf,
+                                               state.tls13ClientHs().ptr, state.tls13ClientHs().length,
+                                               state.tls13ServerHs().ptr, state.tls13ServerHs().length,
+                                               CLIENT);
+                        }
+                        state.setExpectedNext(ENCRYPTED_EXTENSIONS);
+                        return;
+                    }
+                }
+                
+                if (state.ciphersuite().sigAlgo() != "")
+                {
+                    state.setExpectedNext(CERTIFICATE);
+                }
+                else if (state.ciphersuite().kexAlgo() == "PSK")
+                {
+                    /* PSK is anonymous so no certificate/cert req message is
+                        ever sent. The server may or may not send a server kex,
+                        depending on if it has an identity hint for us.
+
+                        (EC)DHE_PSK always sends a server key exchange for the
+                        DH exchange portion.
+                    */
+                    
+                    state.setExpectedNext(SERVER_KEX);
+                    state.setExpectedNext(SERVER_HELLO_DONE);
+                }
+                else if (state.ciphersuite().kexAlgo() != "RSA")
+                {
+                    state.setExpectedNext(SERVER_KEX);
+                }
+                else
+                {
+                    state.setExpectedNext(CERTIFICATE_REQUEST); // optional
+                    state.setExpectedNext(SERVER_HELLO_DONE);
+                }
+            }
+        }
+        else if (type == ENCRYPTED_EXTENSIONS)
+        {
+            static if (BOTAN_HAS_TLS_13)
+            {
+                Unique!TLS13EncryptedExtensions ee = new TLS13EncryptedExtensions(contents);
+                if (ee.nextProtocol().length)
+                    m_application_protocol = ee.nextProtocol();
+                state.setExpectedNext(CERTIFICATE);
+                state.setExpectedNext(FINISHED);
+            }
+        }
+        else if (type == CERTIFICATE)
+        {
+            static if (BOTAN_HAS_TLS_13)
+            {
+                if (state.Version() == TLSProtocolVersion(TLSProtocolVersion.TLS_V13))
+                {
+                    Unique!TLS13Certificate c13 = new TLS13Certificate(contents, SERVER);
+                    if (c13.empty)
+                        throw new TLSException(TLSAlert.DECODE_ERROR, "TLSClient: No certificates sent by server");
+                    try
+                    {
+                        m_creds.verifyCertificateChain("tls-client", m_info.hostname(), c13.certChain());
+                    }
+                    catch (Exception e)
+                    {
+                        throw new TLSException(TLSAlert.BAD_CERTIFICATE, e.msg);
+                    }
+                    state.serverCerts(new Certificate(c13.certChain().clone));
+                    state.setExpectedNext(CERTIFICATE_VERIFY);
+                    return;
+                }
+            }
+            if (state.ciphersuite().kexAlgo() != "RSA")
+            {
+                state.setExpectedNext(SERVER_KEX);
+            }
+            else
+            {
+                state.setExpectedNext(CERTIFICATE_REQUEST); // optional
+                state.setExpectedNext(SERVER_HELLO_DONE);
+            }
+            
+            state.serverCerts(new Certificate(contents));
+            
+            const Vector!X509Certificate* server_certs = &state.serverCerts().certChain();
+            
+            if (server_certs.empty)
+                throw new TLSException(TLSAlert.HANDSHAKE_FAILURE, "TLSClient: No certificates sent by server");
+            
+            try
+            {
+                m_creds.verifyCertificateChain("tls-client", m_info.hostname(), *server_certs);
+            }
+            catch(Exception e)
+            {
+                throw new TLSException(TLSAlert.BAD_CERTIFICATE, e.msg);
+            }
+            
+            PublicKey peer_key = (*server_certs)[0].subjectPublicKey();
+            
+            if (peer_key.algoName != state.ciphersuite().sigAlgo())
+                throw new TLSException(TLSAlert.ILLEGAL_PARAMETER, "Certificate key type did not match ciphersuite");
+            
+            state.server_public_key = peer_key;
+        }
+        else if (type == SERVER_KEX)
+        {
+            state.setExpectedNext(CERTIFICATE_REQUEST); // optional
+            state.setExpectedNext(SERVER_HELLO_DONE);
+            
+            state.serverKex(new ServerKeyExchange(contents,
+                                                  state.ciphersuite().kexAlgo(),
+                                                  state.ciphersuite().sigAlgo(),
+                                                  state.Version()));
+            
+            if (state.ciphersuite().sigAlgo() != "")
+            {
+                const PublicKey server_key = state.getServerPublicKey();
+                if (!state.serverKex().verify(server_key, state))
+                {
+                    throw new TLSException(TLSAlert.DECRYPT_ERROR, "Bad signature on server key exchange");
+                }
+            }
+        }
+        else if (type == CERTIFICATE_REQUEST)
+        {
+            state.setExpectedNext(SERVER_HELLO_DONE);
+            state.certReq(new CertificateReq(contents, state.Version()));
+        }
+        else if (type == CERTIFICATE_VERIFY)
+        {
+            static if (BOTAN_HAS_TLS_13)
+            {
+                if (state.Version() == TLSProtocolVersion(TLSProtocolVersion.TLS_V13))
+                {
+                    Unique!TLS13CertificateVerify cv = new TLS13CertificateVerify(contents);
+                    if (!state.serverCerts() || state.serverCerts().empty)
+                        throw new TLSException(TLSAlert.HANDSHAKE_FAILURE, "CertificateVerify without certificate");
+                    Unique!PublicKey leaf = state.serverCerts().certChain()[0].subjectPublicKey();
+                    const string prf = state.ciphersuite().prfAlgo();
+                    const(ubyte)[] hs = state.hash().getContents()[];
+                    if (!tls13VerifyCertificateVerify(*leaf, SERVER, prf, hs.ptr, hs.length,
+                                                      cv.scheme(),
+                                                      cv.signature().ptr, cv.signature().length))
+                        throw new TLSException(TLSAlert.DECRYPT_ERROR, "TLS 1.3 CertificateVerify failed");
+                    state.hash().update(state.handshakeIo().format(contents, type));
+                    state.setExpectedNext(FINISHED);
+                    return;
+                }
+            }
+            throw new TLSUnexpectedMessage("CertificateVerify unexpected in this handshake");
+        }
+        else if (type == SERVER_HELLO_DONE)
+        {
+            state.serverHelloDone(new ServerHelloDone(contents));
+            
+            if (state.receivedHandshakeMsg(CERTIFICATE_REQUEST))
+            {
+                const(Vector!string)* types = &state.certReq().acceptableCertTypes();
+                
+                Vector!X509Certificate client_certs = m_creds.certChain(*types, "tls-client", m_info.hostname());
+                
+                state.clientCerts(new Certificate(state.handshakeIo(), state.hash(), client_certs));
+            }
+            
+            state.clientKex(new ClientKeyExchange(state.handshakeIo(),
+                                                     state,
+                                                     m_policy,
+                                                     m_creds,
+                                                     state.server_public_key.get(),
+                                                     m_info.hostname(),
+                                                     rng()));
+            
+            state.computeSessionKeys();
+            
+            if (state.receivedHandshakeMsg(CERTIFICATE_REQUEST) && !state.clientCerts().empty)
+            {
+                PrivateKey priv_key = m_creds.privateKeyFor(state.clientCerts().certChain()[0], "tls-client", m_info.hostname());
+                
+                state.clientVerify(new CertificateVerify(state.handshakeIo(),
+                                                         state,
+                                                         m_policy,
+                                                         rng(),
+                                                         priv_key));
+            }
+            
+            state.handshakeIo().send(scoped!ChangeCipherSpec());
+            
+            changeCipherSpecWriter(CLIENT);
+
+            // Setup channelID
+            bool supports_channel_id = state.clientHello().supportsChannelID() && state.serverHello().supportsChannelID();
+            if (supports_channel_id) {
+                state.channelID(new ChannelID(state.handshakeIo(),
+                        state.hash(),
+                        m_creds, 
+                        m_info.hostname, 
+                        state.hash().flushInto(state.Version(), state.ciphersuite().prfAlgo())
+                        ));
+            }
+
+            state.clientFinished(new Finished(state.handshakeIo(), state, CLIENT));
+
+            if (supports_channel_id)
+                state.setOriginalHandshakeHash(state.hash().flushInto(state.Version(), state.ciphersuite().prfAlgo()));
+
+            if (state.serverHello().supportsSessionTicket())
+                state.setExpectedNext(NEW_SESSION_TICKET);
+            else
+                state.setExpectedNext(HANDSHAKE_CCS);
+        }
+        else if (type == NEW_SESSION_TICKET)
+        {
+            state.newSessionTicket(new NewSessionTicket(contents));
+            
+            state.setExpectedNext(HANDSHAKE_CCS);
+        }
+        else if (type == HANDSHAKE_CCS)
+        {
+            state.setExpectedNext(FINISHED);
+            
+            changeCipherSpecReader(CLIENT);
+
+        }
+        else if (type == FINISHED)
+        {
+            static if (BOTAN_HAS_TLS_13)
+            {
+                if (state.Version() == TLSProtocolVersion(TLSProtocolVersion.TLS_V13))
+                {
+                    state.serverFinished(new Finished(contents.clone));
+                    if (!state.tls13HaveHsTraffic())
+                        throw new TLSException(TLSAlert.INTERNAL_ERROR, "Missing TLS 1.3 handshake secrets");
+                    const string prf = state.ciphersuite().prfAlgo();
+                    const(ubyte)[] hs = state.hash().getContents()[];
+                    auto expect = tls13FinishedMac(prf, state.tls13ServerHs().ptr, state.tls13ServerHs().length,
+                                                   hs.ptr, hs.length);
+                    if (state.serverFinished().verifyData()[] != expect[])
+                        throw new TLSException(TLSAlert.DECRYPT_ERROR, "Finished message didn't verify");
+                    state.hash().update(state.handshakeIo().format(contents, type));
+                    const(ubyte)[] hs2 = state.hash().getContents()[];
+                    auto app = tls13AppSecrets(prf, state.tls13HandshakeSecret().ptr,
+                                               state.tls13HandshakeSecret().length,
+                                               hs2.ptr, hs2.length);
+                    state.tls13SetAppTraffic(app.client_application_traffic.move(),
+                                             app.server_application_traffic.move());
+                    // C++ advance_with_server_finished (client): read = s ap
+                    // so 0.5-RTT / NST decrypts; Finished still uses c hs write.
+                    tls13SetReadTrafficKey(state.tls13ServerApp().ptr,
+                                           state.tls13ServerApp().length);
+                    auto cvd = tls13FinishedMac(prf, state.tls13ClientHs().ptr, state.tls13ClientHs().length,
+                                                hs2.ptr, hs2.length);
+                    state.clientFinished(new Finished(state.handshakeIo(), state.hash(), cvd.move()));
+                    // C++ advance_with_client_finished (client): write = c ap.
+                    tls13SetWriteTrafficKey(state.tls13ClientApp().ptr,
+                                            state.tls13ClientApp().length);
+                    auto session_info = new TLSSession(state.serverHello().sessionId().clone,
+                                                       state.tls13ServerHs().clone,
+                                                       SecureVector!ubyte(),
+                                                       state.serverHello().Version(),
+                                                       state.serverHello().ciphersuite(),
+                                                       state.serverHello().compressionMethod(),
+                                                       CLIENT,
+                                                       state.serverHello().fragmentSize(),
+                                                       false,
+                                                       getPeerCertChain(state),
+                                                       Vector!ubyte(),
+                                                       m_info,
+                                                       "");
+                    scope(exit) destroy(session_info);
+                    saveSession(session_info);
+                    activateSession();
+                    return;
+                }
+            }
+            state.serverFinished(new Finished(contents.clone));
+            
+            if (!state.serverFinished().verify(state, SERVER))
+                throw new TLSException(TLSAlert.DECRYPT_ERROR, "Finished message didn't verify");
+            
+            state.hash().update(state.handshakeIo().format(contents, type));
+            
+            if (!state.clientFinished()) // session resume case
+            {
+                state.handshakeIo().send(scoped!ChangeCipherSpec());
+                
+                changeCipherSpecWriter(CLIENT);
+
+                // Setup Resumption ChannelID
+                if (state.clientHello().supportsChannelID() && state.serverHello().supportsChannelID()) 
+                {
+                    TLSSession sess;
+                    scope(exit) if (sess) sess.destroy();
+                    if (sessionManager() && sessionManager().loadFromSessionId(state.serverHello().sessionId(), sess))
+                    {
+                        state.setOriginalHandshakeHash(sess.originalHandshakeHash().clone());
+                        state.channelID(new ChannelID(state.handshakeIo(),
+                                state.hash(),
+                                m_creds, 
+                                m_info.hostname,
+                                state.hash().flushInto(state.Version(), state.ciphersuite().prfAlgo()),
+                                state.originalHandshakeHash().clone
+                                ));
+                    }
+                }
+                // todo: Else if the session was supposed to use it, fail?
+                state.clientFinished(new Finished(state.handshakeIo(), state, CLIENT));
+            }
+            
+            Vector!ubyte session_id = state.serverHello().sessionId().clone;
+            
+            Vector!ubyte session_ticket = state.sessionTicket();
+            
+            if (session_id.empty && !session_ticket.empty)
+                session_id = makeHelloRandom(rng(), m_policy);
+
+            auto session_info =   new TLSSession(session_id.clone,
+                                                 state.sessionKeys().masterSecret().clone,
+                                                 state.originalHandshakeHash().clone(),
+                                                 state.serverHello().Version(),
+                                                 state.serverHello().ciphersuite(),
+                                                 state.serverHello().compressionMethod(),
+                                                 CLIENT,
+                                                 state.serverHello().fragmentSize(),
+                                                 state.serverHello().supportsExtendedMasterSecret(),
+                                                 getPeerCertChain(state),
+                                                 session_ticket.move(),
+                                                 m_info,
+                                                 "");
+			scope(exit) destroy(session_info);
+            const bool should_save = saveSession(session_info);
+            
+            if (!session_id.empty)
+            {
+                if (should_save)
+                    sessionManager().save(session_info);
+                else {
+                    auto entry = &session_info.sessionId();
+                    sessionManager().removeEntry(*entry);
+                }
+            }
+            
+            activateSession();
+        }
+        else
+            throw new TLSUnexpectedMessage("Unknown handshake message received");
+    }
+
+    override HandshakeState newHandshakeState(HandshakeIO io)
+    {
+        return new ClientHandshakeState(io);
+    }
+
+private:
+    const TLSPolicy m_policy;
+    TLSCredentialsManager m_creds;
+    const TLSServerInformation m_info;
+}
+
+
+private final class ClientHandshakeState : HandshakeState
+{
+public:
+    
+    this(HandshakeIO io, void delegate(in HandshakeMessage) msg_callback = null) 
+    { 
+        super(io, msg_callback);
+    }
+    
+    const(PublicKey) getServerPublicKey() const
+    {
+        assert(server_public_key, "TLSServer sent us a certificate");
+        return *server_public_key;
+    }
+    
+    // Used during session resumption
+    SecureVector!ubyte resume_master_secret;
+    Unique!PublicKey server_public_key;
+}

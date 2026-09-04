@@ -1,0 +1,27 @@
+{
+  "schema": "svelte-d-ir/v1",
+  "app": "svelte-engine",
+  "wasmCell": "ldc-master",
+  "nodes": [
+    {
+      "id": "app",
+      "kind": "App",
+      "emit": "src-d/app.d",
+      "children": ["navbar", "content", "dock"]
+    },
+    {
+      "id": "dock",
+      "kind": "Component",
+      "emit": "src-d/dock.d",
+      "slots": ["navigate"],
+      "source": "src-svelte/lib/Dock.svelte"
+    },
+    {
+      "id": "content",
+      "kind": "Page",
+      "emit": "src-d/app.d#Main",
+      "updates": ["heading.innerText", "status.innerText"],
+      "source": "src-svelte/routes/+page.svelte"
+    }
+  ]
+}

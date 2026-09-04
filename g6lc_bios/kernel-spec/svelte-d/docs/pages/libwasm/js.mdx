@@ -1,0 +1,106 @@
+---
+title: 'Handle, bindings, Lodash'
+description: The JS object table, WebIDL structs, Lodash.execute, moment, Eval. Procedural leaves, not the way a button is represented.
+---
+
+# Handle, bindings, Lodash
+
+The structure of the UI is the [NodeDef graph](./graph). Everything on this page is a **procedural leaf**: a body inside `void go()`, a load helper, a PgLite query. Lodash is not how a `<button>` is represented. A printer that emitted `_.map` to mean `{#each}` would have abandoned the IR contract.
+
+## The handle table
+
+JS holds DOM and host objects in a table that is seeded `{1: document, 2: window}`. D stores `alias Handle = uint`. `document()` in `libwasm.dom` is `Document(JsHandle(1))`. `window()` is `Window(JsHandle(2))`. `undefined()` is handle `0`. Dropping a handle (`libwasm_removeObject`) frees the JS slot; using it afterwards is a use-after-free on the other side of the FFI.
+
+Every typed binding is a thin struct over that integer. Methods are `Object_Call_*` / `Object_Getter_*` / `Object_Setter_*` imports, `nothrow:` `@safe:`. D never stores a JS pointer. When code-d completes `document().location().front.pathname()`, you are walking `libwasm.bindings.Document` → `Location` → a `string` that crossed as a wasm string, not as a JS value you can keep.
+
+## WebIDL bindings
+
+`source/libwasm/bindings/` is about 680 files generated from `webidl/definitions/` by the same Pegged-asModule pattern svelte-d uses for `.svelte`. `import libwasm;` public-imports the lot. The structs you will actually type in a `lang=d` script are the ones the browser already has:
+
+| Binding | Typical use in `lang=d` |
+|---|---|
+| `Document` / `document()` | `location`, `getElementById` (rare; prefer NodeDef), `title` |
+| `Window` / `window()` | `history`, `onpopstate`, `fetch` via `WindowOrWorkerGlobalScope` |
+| `MouseEvent`, `KeyboardEvent`, `InputEvent`, `FocusEvent` | `@callback` parameter types |
+| `HTMLInputElement`, `HTMLButtonElement`, … | `NamedNode` aliases; `bind:value` reads `.value` |
+| `Request` / `Response` / `fetch` | `WindowOrWorkerGlobalScope.fetch` → `JsPromise!(Response)` |
+| `Console` / `console` | `console.info`, `console.error` (also what `log_info` wraps) |
+| `History`, `Location` | router `pushState` / `pathname` |
+
+A `Handle` wrapping type such as `JSON` (from `fast.json` via the barrel) is how a JS object becomes something D can index after `execute!JSON()`. Missing API → diagnostic “add or regenerate binding in libwasm/webidl”, not a JS stub. New browser API is a libwasm change, then the printer may emit it.
+
+## Lodash: a command buffer, not a runtime
+
+`struct Lodash` (`lodash.d`) is a buffer of JS `_` calls. Chain methods return `Lodash`. **`execute!T()`** is the only way the buffer becomes a D value. It ships through `ldexec_Handle__*` / `ldexec_string__*` imports and yields `string`, `long`, `double`, or a `Handle`-wrapping type such as `JSON`.
+
+```d
+auto n = Lodash(someHandle, VarType.handle, 256)
+  .filter(predicate)
+  .map(iteratee)
+  .execute!JSON();
+```
+
+`VarType` tags the init value: `handle`, `boolean`, `string_`, `number`, `decimal`, `eval`, and five callback shapes (`Handle_string__bool`, `Handle_long__bool`, …). Iteratees are `extern(C)` delegates. `Eval` is truthy when `eval_str` is non-empty, which is why `if (predicate)` / `if (iteratee)` in the chain methods can skip an empty default.
+
+The escape hatches for “call this JS name with these D args” are `defaultTo`, `attempt`, and `invoke`. That is how Moment and PgLite are written — **not** a second FFI. Same-file `lang=ts` exports use the same Lodash path through `callTs` / `callTsPromise` (`libwasm.bridge`): `defaultTo(eval("window.__svelteD.ts")).invoke("ident.fn", args).execute!T()`. Inverse D→TS registration is `exportDelegate` plus `setDRet`. See [cross-calling](../language/cross-calling).
+
+```d
+auto ld = Lodash();
+ld.defaultTo(Eval("window.pglite"));
+ld.attempt("query", sql);
+auto rows = ld.execute!JSON();
+```
+
+`window._` is installed by the workspace JS glue (`src-ts/modules/bindings.ts`). D never `import`s lodash npm. A chain that never `execute`s is a no-op that leaked a buffer.
+
+### Methods on `struct Lodash`
+
+Any method that exists as `auto ref name(...)` on the struct may be chained. The surface follows lodash’s own catalogue. Grouped the way the file is written:
+
+**Arrays.** `chunk`, `compact`, `concat`, `difference` / `differenceBy` / `differenceWith`, `drop` / `dropWhile` / `dropRightWhile`, `fill`, `findIndex` / `findLastIndex`, `flatten` / `flattenDeep` / `flattenDepth`, `fromPairs`, `head`, `indexOf`, `initial`, `intersection` / `intersectionBy` / `intersectionWith`, `join`, `last`, `lastIndexOf`, `nth`, `pull` / `pullAll` / `pullAllBy` / `pullAllWith` / `pullAt`, `remove`, `reverse`, `slice`, `sortedIndex` / `sortedIndexBy` / `sortedIndexOf` / `sortedLastIndex` / `sortedLastIndexBy` / `sortedLastIndexOf`, `sortedUniq` / `sortedUniqBy`, `tail`, `take` / `takeRight` / `takeRightWhile` / `takeWhile`, `union_` / `unionBy` / `unionWith`, `uniq` / `uniqBy` / `uniqWith`, `unzip` / `unzipWith`, `without`, `xor` / `xorBy` / `xorWith`, `zip` / `zipObject` / `zipObjectDeep` / `zipWith`.
+
+**Collections.** `countBy`, `every`, `filter`, `find` / `findLast`, `flatMap` / `flatMapDeep` / `flatMapDepth`, `forEach` / `forEachRight`, `groupBy`, `includes`, `invokeMap`, `keyBy`, `map`, `orderBy`, `partition`, `reduce` / `reduceRight`, `reject`, `sample` / `sampleSize`, `shuffle`, `size`, `some`, `sortBy`.
+
+**Lang / util (selection).** `now`, `castArray`, `clone` / `cloneDeep` / `cloneDeepWith` / `cloneWith`, `conformsTo`, `eq` / `gt` / `gte`, `isArguments`, `isArray`, `isArrayBuffer`, `isArrayLike`, `isArrayLikeObject`, `isBoolean`, `isBuffer`, `isDate`, `isElement`, `isEmpty`, `isEqual` / `isEqualWith`, `isError`, `isFinite`, `isFunction`, `isInteger`, `isLength`, plus the rest of the `is*` / `to*` family further down the file, and the object / string / math / seq methods that follow the same `auto ref` + optional iteratee shape.
+
+**Seams you will type by hand.** `initialize`, `addLocal`, `onError`, `defaultTo`, `attempt`, `invoke`, `execute!T`. `Eval("…")` plants a `VarType.eval` node.
+
+svelte-d’s v1 subset checker allows any method that exists on `struct Lodash` and fails only on unknown names. Do not invent `_` or `moment` free functions.
+
+D arrays, ints, and strings stay in D: `import std.algorithm` / `std.range` / `std.conv` at **module** scope (spa-phobos, not stock `-Iimport`). Use Lodash when the value is a **JS handle**. Mixing the two — `std.algorithm.map` over a `Handle` — is a type error that means you forgot `execute`.
+
+## Moment
+
+`moment(...)` is a `Lodash` wrapper. `moment()` is `defaultTo(Eval("moment"))` plus `attempt(Eval("undefined"))` — “now”. `moment(args)` forwards the args through `attempt`. The struct keeps a saved `Handle` so chained mutators (`utc`, `add`, `startOf`, `year(val)`, …) do not re-enter `moment()` every time.
+
+```d
+auto stamp = moment().utc().format("YYYY-MM-DD");
+auto later = moment(iso).add(1, "days").unix();
+if (moment(a).isBefore(b)) { /* … */ }
+```
+
+Getters (`format`, `unix`, `valueOf`, `year()`, `fromNow`, `toISOString`, `isValid`, `isBefore` / `isAfter` / `isSame` / `isBetween`, `asSeconds`, …) `save()`, `invoke`, and `execute!string` / `execute!long` / `execute!double`. Setters mark `m_dirty` and stay on the chain. Booleans go through `toLength()` and `execute!long() > 0` because the Lodash cell does not have a first-class `execute!bool`.
+
+`window.moment` is installed next to `window._`. There is no `new Date` on this cell.
+
+## Host-object wrappers (PgLite pattern)
+
+A JS library that is not WebIDL becomes a thin D wrapper around `Lodash` + `Eval("window.X")`, plus TypeScript that assigns `window.X`. Engine `src-d/pglite.d` is the golden. New wrappers belong under `ws/src-d/` or inline in the method that needs them. They do not belong in a second `extern(C)` table.
+
+```d
+struct PgLite {
+  Lodash m_ld;
+  auto query(string sql) {
+    m_ld = Lodash();
+    m_ld.defaultTo(Eval("window.pglite"));
+    m_ld.attempt("query", sql);
+    return m_ld.execute!JSON();
+  }
+}
+```
+
+`{#each}` of a JS collection first `execute`s into D or handles, then the list is an `UnorderedList`. `{#each}` of D structs never goes through Lodash.
+
+## What this page is not
+
+It is not the way to build a button. It is not a reason to `import` vibe.0 from `lang=d`. It is not a reason to `eval("document.foo")` from TypeScript and call that the IR. Typed talk is bindings. Untyped talk is Lodash. Time is moment. A `lang=ts` export is `callTs`. Unknown `window.foo` is a PgLite-style wrapper. Everything else is a titled seam in libwasm.

@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "product": "iot",
+  "isa": {
+    "xlen": 32,
+    "march": "rv32imac",
+    "mmu": "sv32",
+    "extensions": {
+      "c": "live",
+      "v": "absent",
+      "zba": "absent",
+      "zicboz": "absent"
+    }
+  },
+  "kernel": {
+    "shape": "zeal",
+    "gr": { "enable": false, "w": 640, "h": 480, "colors": 16, "backend": "uart" },
+    "cli": "zealc",
+    "display": "html-js",
+    "browser": {
+      "html": true,
+      "dom": true,
+      "view": true,
+      "css": false,
+      "js": "aot",
+      "js_live": false,
+      "html_subset": "setup"
+    }
+  },
+  "connectors": {
+    "core": ["sbi", "opp"],
+    "apu": ["uart"],
+    "uncore": []
+  },
+  "peripherals": [
+    { "id": "uart0", "class": "uart", "model": "ns16550", "base": "0x10000000" }
+  ],
+  "memory": {
+    "dram_base": "0x80000000",
+    "dram_len": "0x08000000",
+    "text_offset": "0x200000"
+  },
+  "harts": { "count": 1 },
+  "entry": { "hotkey": "DEL", "timeout_ms": 2000 },
+  "holyc": {
+    "fast_init": true,
+    "dual_band": {
+      "uart": true,
+      "tcp": { "enable": true, "host_port": 2222, "guest_port": 22, "proto": "holyc-repl" }
+    }
+  },
+  "postboot": {
+    "enable": "never",
+    "access": "view",
+    "immutable": ["config"],
+    "power": ["reboot", "shutdown"]
+  },
+  "faces": {
+    "display": "html-js",
+    "cli": "zealc-overlay",
+    "remote_http": { "enable": "never" }
+  }
+}

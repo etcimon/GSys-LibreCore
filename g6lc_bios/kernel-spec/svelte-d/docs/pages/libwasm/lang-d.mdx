@@ -1,0 +1,90 @@
+---
+title: 'lang="d" on the wasm cell'
+description: A script lang=d body is already libwasm D. Fields, methods, this.update, Lodash, try/catch. Not vibe.0. Not npm.
+---
+
+# `lang="d"` on the wasm cell
+
+The most important sentence in the development guide is also the reason this section exists: **`<script lang="d">` is libwasm D**. svelte-d libdparse-checks the body and prints it onto the same struct that owns the markup’s `NodeDef` graph. This page is that body, walked against the API the previous pages named, so a script you type in a `.svelte` file and a method you read in `src-d/` are visibly the same language.
+
+```svelte
+<script lang="d">
+  import std.algorithm : map;
+  import std.conv : to;
+  import std.array : array;
+
+  string title = "Home";
+  int clicks = 0;
+
+  void onClick(MouseEvent ev) {
+    this.update.clicks = clicks + 1;
+    this.update.title = "Clicked";
+  }
+
+  void loadStamp() {
+    auto stamp = moment().utc().format("YYYY-MM-DD");
+    this.update.title = stamp;
+  }
+
+  void loadRemote() {
+    window().fetch("/__svelte-d/host/users").then((Response res) {
+      return res.json();
+    }).then((JSON body) {
+      this.update.title = "ok";
+    }).error((Any reason) {
+      this.update.title = "failed";
+    });
+  }
+
+  void parseOrFail(string raw) {
+    try {
+      this.update.clicks = raw.to!int;
+    } catch (Exception e) {
+      this.update.title = e.msg;
+    }
+  }
+
+  void construct() {
+    titleSpan.title = title;
+  }
+</script>
+
+<section class="container">
+  <h1>{title}</h1>
+  <button on:click={onClick}>Ping</button>
+</section>
+```
+
+## What each line already is
+
+`string title` and `int clicks` are fields of the printed struct, with the same types and the same initialisers. `void onClick(MouseEvent ev)` is a method of that struct; `MouseEvent` is `libwasm.bindings.MouseEvent`, the type `@callback!"click"` will pass through `domEvent`. `this.update.title = "Clicked"` is the mutation primitive; the printer keeps it, and also rewrites a bare `title =` in a handler to `this.update.title` (and to `titleSpan.update.title` when `{title}` exists as a child NamedNode).
+
+`import std.algorithm` is lifted to **module** scope, above `nothrow:`. It is not written inside the struct. `map` / `array` run on D arrays. A JS array would be `Lodash(h, VarType.handle, n).map(…).execute!JSON()`. Mixing those two is the usual first type error.
+
+`moment()` and `window().fetch` are the [JS surface](./js) and [JsPromise](./async). They live in a method body. They are not how the `<button>` is represented; the button is `mixin NodeDef!"button"` plus `Slot!"click"` plus `@connect`.
+
+`try/catch` is ordinary D on wasm-eh, with the hard constraint [throwBoundary](../language/await-boundary) repeats: the `try`, the `throw`, and the `catch` must be in the **same function** on the **same struct**. Personality is first-catch-type only. `to!int` belongs inside that `try` because the struct is `nothrow:` and an escaped exception is an abort.
+
+`void construct()` seeds the child `@prop` before handles exist. `onMount` / `onUnmount` / `App.ready` are the rest of [lifetime](./spa). There is no JS `onMount` import.
+
+## What the printer adds around you
+
+The markup becomes the graph `compile!()` walks. The `<section>` is `mixin NodeDef!"section"` with `@style!"container"`. The button is a child struct with `mixin Slot!"click"`, `@callback!"click"`, and `mixin NodeDef!"button"`. The parent `@connect!"onClickButton.click"` calls your `onClick`. The `{title}` `<h1>` is a child whose `@prop!"textContent"` field is still named `title`. Your identifiers stay. The printer names the wiring.
+
+`svelte.config.js` blanks the `lang=d` block so vscode-svelte does not parse D as TypeScript. Open the dest in code-d to complete `this.update`, `Lodash`, `document()`, `JsPromise`. That is the [Getting Started](../getting-started) IDE recommendation, and it is why this section is written with the same identifiers serve-d will offer.
+
+## What must not appear
+
+| In the script | Why |
+|---|---|
+| `import vibe.*` | host cell |
+| npm `import` | `lang=ts` + Vite (dest range + copy); same-file TS exports via `callTs` |
+| `Eval("window.$")` | window host object that is not a `lang=ts` export |
+| `.await` inside `try/catch` | landing pad and `libwasm_await__void` cannot share a try |
+| `std.file` / `std.stdio` / `std.socket` | not wasm Phobos here |
+| `new Date` | `moment(...)` |
+| `_.map` as `{#each}` | `{#each}` is `UnorderedList` |
+| a function that both `try/catch`es and `.await`s | Flatten and `try_table` cannot share a frame |
+| `extern(C)` JS one-offs | bindings, or a named Lodash wrapper |
+
+The author-facing contract, shorter, is [script lang="d"](../guide/script-lang-d). The construct-by-construct IR is [Svelte → D IR](../language). This page is the same script after you know what `import libwasm;` actually is.

@@ -1,0 +1,39 @@
+name "svelte-engine"
+description "BIOS-UI wasm cell: libwasm SPA (svelte-d fall-through). Not vibe.0."
+authors "Etienne Cimon"
+copyright "Copyright © 2026, Etienne Cimon"
+license "MIT"
+dflags "--wasm-enable-eh" "-mattr=+exception-handling" "-fvisibility=hidden" "-fno-moduleinfo"
+versions "G6LC_G6B"
+targetPath "public"
+targetName "bios-ui-raw"
+sourcePaths "src-d"
+stringImportPaths "src-d-views"
+buildRequirements "allowWarnings"
+
+configuration "application" {
+    targetType "executable"
+    dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false" "-disable-linker-strip-dead"
+    lflags "--export=_start" "--export=dumpApp" "--export=loadApp" "--export=allocString"
+    postBuildCommands "node -e \"require('fs').copyFileSync('public/bios-ui-raw.wasm','public/bios-ui.wasm')\""
+    dependency "libwasm" path="C:/Users/etcim/.grok/worktrees/cva6/bios-design-impl/g6lc_bios/browser-ui/libwasm"
+    subConfiguration "libwasm" "ldc-master"
+}
+
+configuration "ldc-master" {
+    targetType "executable"
+    dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false" "-disable-linker-strip-dead"
+    lflags "--export=_start" "--export=dumpApp" "--export=loadApp" "--export=allocString"
+    postBuildCommands "node -e \"require('fs').copyFileSync('public/bios-ui-raw.wasm','public/bios-ui.wasm')\""
+    dependency "libwasm" path="C:/Users/etcim/.grok/worktrees/cva6/bios-design-impl/g6lc_bios/browser-ui/libwasm"
+    subConfiguration "libwasm" "ldc-master"
+}
+
+buildType "debug" {
+    buildOptions "debugMode" "debugInfo"
+}
+
+buildType "release" {
+    buildOptions "releaseMode" "optimize" "inline"
+    lflags "-strip-all"
+}

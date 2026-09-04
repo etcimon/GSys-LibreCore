@@ -1,0 +1,86 @@
+---
+title: NodeDef graph and UDAs
+description: A libwasm app is a value graph of structs. compile! walks it. this.update mutates it. There is no virtual DOM.
+---
+
+# NodeDef graph and UDAs
+
+A libwasm app is not a tree of heap widgets. It is a **value graph of structs**. `mixin NodeDef!"tag"` plants a compile-time `NamedNode` on each struct. `libwasm.dom.compile!()` walks that graph once: it fills `@inject` pointers from the parent tuple, recurses into `@child` aggregates, then, later in `render`, wires `@connect` delegates onto `Slot` / `EventEmitter` fields and applies `@prop` / `@attr` / `@style` onto the live handles. Dynamic UI is mutating that graph — `this.update.field`, `UnorderedList.put`, `setVisible`, `unmount` — not rebuilding a virtual DOM.
+
+svelte-d’s claim that **AST ≡ D IR** is this sentence in printer form. An element is not an `HtmlElement` in a private JSON model. It is `mixin NodeDef!"tag"`. When you open the dest in code-d, you are looking at the graph `compile!` will walk.
+
+## NodeDef → NamedNode → typed HTML element
+
+`mixin NodeDef!"button"` expands to a field `NamedNode!("button", "button") node;`. `NamedNode!(name, tag)` aliases `Element` through `TagHtmlElementMap`:
+
+| `NodeDef` argument | Bindings type |
+|---|---|
+| `"button"` | `HTMLButtonElement` |
+| `"input"` | `HTMLInputElement` |
+| `"ul"` | `HTMLUListElement` |
+| `"li"` | `HTMLLIElement` |
+| `"a"` | `HTMLAnchorElement` |
+| `"p"` / `"div"` / `"span"` / `"section"` | matching `HTML*Element` |
+| unknown / custom | `HTMLElement` via `opDispatch` |
+
+`alias node this` makes the struct a handle. `createNode` + `renderIntoNode` assign the JS `Handle` into `node.node`. Two overloads exist: `NodeDef!"name"` when the field name equals the tag, and `NodeDef!("name","tag")` when they differ. svelte-d prints the first for ordinary elements.
+
+`getChildren` is a CTFE filter over `FieldNameTuple` for fields that have the `@child` UDA. `compile!` uses that list. A field that is a child in your head but is missing `@child` is invisible to the walk.
+
+## The UDA vocabulary
+
+These are libwasm UDAs in `types.d`, not D `@property`. Bare `@prop` with no name is not a legal UDA; the template is `struct prop(alias prop_name)`.
+
+| UDA / mixin | Role |
+|---|---|
+| `mixin NodeDef!"tag"` | NamedNode of that HTML type |
+| `@child` | field is a child component; `compile!` recurses |
+| `@prop!"textContent"` / `@attr!"placeholder"` / `@style!"cls"` | DOM property / attribute / class on **this** NamedNode |
+| `@callback!"click"` | DOM event → method; `addEventListener` + `domEvent` |
+| `mixin Slot!("name", Params)` | `@eventemitter EventEmitter!Params name` |
+| `this.emit(slot, args)` | call those callbacks, including address-callbacks with `cast(size_t)(&t)` |
+| `@connect!"a.b"` | `t.a.b.add(&method)` — member path, dots stay dots |
+| `@connect!("list.items","link.clicker")` | list form; second path dots → underscores; first param `size_t` |
+| `@inject!"parentField"` | `compile!` copies `&parent.parentField` (or the value) |
+| `@visible!"child"` | skip / remount that `@child` via `setVisible` |
+| `@entering!"/path"` / `@leaving!"/path"` | `URLRouter`, not a DOM UDA |
+
+`@connect` and `@inject` paths are identifiers on the compiled struct. They are not SvelteKit file paths and not CSS selectors.
+
+Pointer `@prop` / `@attr` dereference if non-null. That is how an `@inject!"msg" string*` can feed the same named property. `child.update.foo = v` is `opDispatch` that writes the struct field **and** pushes it to the live handle. For an `@visible` bool it also fires `setVisible`.
+
+## Events: Slot, emit, connect
+
+`domEvent(uint ctx, uint fun, Handle event)` is the only re-entry from JS. The engine’s `libwasm.ts` looks the handle up, then calls the wasm export with the delegate’s context pointer and function pointer packed as `uint`s. Every `MouseEvent`, `KeyboardEvent`, and `InputEvent` is an empty D struct over that handle; `addEventListenerTyped` static-asserts the parameter type matches `toEventType("click")` → `EventType.mouse` → `MouseEvent`.
+
+`EventEmitter!Params` holds two vectors: ordinary callbacks and address-callbacks. `add` **appends** (`~=`). There is no un-add. `mixin Slot!"click"` is `EventEmitter!()`; assigning a delegate into the `Vector` does not compile, which is why an older printer that wrote `cbs = del` failed.
+
+`@connect!"goButton.click"` runs in `renderIntoNode`, after every static `construct`: `t.goButton.click.add(&method)`. The one-string form keeps dots as field access. The two-string form is for lists.
+
+`toEventType` knows `click`, `dblclick`, `input`, `change`, `keyup` / `keydown` / `keypress`, `focus` / `focusin` / `focusout`, `blur`, mouse up/down/move / `contextmenu`, the drag family, clipboard, `wheel`, and anything starting `pointer` or `touch`. Anything else is `EventType.custom`. A new event name is a `@callback!"name"` if that table knows it; otherwise it is a libwasm seam, not a svelte-d one.
+
+## Lists: `UnorderedList`, `HTMLArray`, `put`
+
+`UnorderedList!T` is `List!(T, "ul")`: `mixin NodeDef!"ul"` plus `@child HTMLArray!(T) items`. Connect’s first path is therefore `field.items`. `List.put` appends and `render`s the new item into the `ul`. `shrinkTo` / `remove` `unmount` the dropped items and then shrink the appender.
+
+`HTMLArray.put` calls `assignEventListeners(*t)` then appends. That is **runtime** linking of item `Slot`s to `arr.__path` — it is not `compile!`. `compile!` does **not** walk `DynamicArray` / `HTMLArray` appenders. `@inject` on a list item is therefore not filled by `compile!(App)`. svelte-d prints a constructor pointer (`items.put(new Item("one", &this))`) for that reason. Prefer that over hoping `compile!` will see the item.
+
+The two-arg `@connect!("menulist.items","link.clicker")` rewrites the second path’s dots to underscores because `ArrayItemEvents!T` declares a Slot on the array named `link_clicker`, plus `__link_clicker(size_t addr, Params)` that `emitIdx`s. The handler’s first parameter **must** be `size_t`. Golden: engine `navbar.d` `@connect!("menulist.items","link.clicker") void onEdit(size_t idx, string name)`.
+
+`Updater` / `update(range, list)` reuses slots and calls `assignEventListeners` again on replace. Detached items must not emit. Do not keep inject pointers into a destroyed host.
+
+## How `compile!` and `render` split the work
+
+**Static tree** (`mixin Spa!App` → `application.compile()`):
+
+1. For each field: if it is a NamedNode (and not `node`), try `setChildFromParent` (name match) then `@inject`.
+2. Else if public: `setParamFromParent` (same-name injection) then `@inject`.
+3. Else if `@child` aggregate: `compile!(child)(child, params, t, ts)` — the parent is pushed onto `Ts` so the child’s inject can see it.
+4. After all fields: `construct()` if present. Handles do not exist yet.
+5. `@connect .add` is **not** this walk. It runs in `renderIntoNode` after every static `construct`.
+
+**Render** creates the JS handle, applies `@prop` / `@attr` / `@style`, attaches `@callback` listeners, runs `@connect`, `appendChild`s, then `onMount`.
+
+After boot the mutation surface is `update`, `remount!"child"`, `setVisible`, `HTMLArray.put`, and `shrinkTo`. That is the whole lifetime. There is no disposer stack.
+
+The IR pages [Elements](../language/elements), [Events](../language/events), [if](../language/if), [each](../language/each), and [UDA vocabulary](../language/udas) show the Svelte that prints into this graph. This page is the graph itself.

@@ -1,0 +1,34 @@
+SvelteKit:
+  Name <~ [A-Za-z_] [A-Za-z0-9_]*
+  TagName <~ [A-Za-z] [A-Za-z0-9-]*
+  VoidName <- "input" / "br" / "hr" / "img" / "meta" / "link" / "area" / "col" / "source" / "wbr" / "base"
+  Quoted <~ doublequote (!doublequote .)* doublequote / "'" (!"'" .)* "'"
+  AttrName <~ [A-Za-z:@] [-A-Za-z0-9:._]*
+  Mustache < "{" Name "}"
+  AttrValue < Mustache / Quoted
+  Attr < Spacing AttrName (Spacing "=" Spacing AttrValue)?
+  Text <~ (!("<" / "{") .)+
+  Spacing <- (blank / endOfLine)*
+
+  ScriptHead <~ (!">" .)*
+  ScriptBody <~ (!"</script>" .)*
+  StyleBody <~ (!"</style>" .)*
+  ScriptBlock < "<script" ScriptHead ">" ScriptBody "</script>" Spacing
+  StyleBlock < "<style" ScriptHead ">" StyleBody "</style>" Spacing
+  HtmlComment < "<!--" (!"-->" .)* "-->" Spacing
+
+  IfCond <~ (!"}" .)+
+  EachList <~ Name
+
+  VoidElement < "<" VoidName Attr* Spacing ("/>" / ">") Spacing
+  OpenElement < "<" !("script" / "style" / "/") TagName Attr* Spacing ">" MarkupNode* "</" TagName Spacing ">" Spacing
+  Element < VoidElement / OpenElement
+
+  ElsePart < "{:else}" MarkupNode*
+  IfBlock < "{#if" Spacing IfCond "}" MarkupNode* ElsePart? "{/if}" Spacing
+  EachBlock < "{#each" Spacing EachList Spacing "as" Spacing Name Spacing "}" MarkupNode* ElsePart? "{/each}" Spacing
+
+  MarkupNode < IfBlock / EachBlock / Element / Mustache / HtmlComment / Text
+  MarkupDoc < Spacing MarkupNode* eoi
+  FilePart < ScriptBlock / StyleBlock / HtmlComment / MarkupNode
+  Document < Spacing FilePart* eoi

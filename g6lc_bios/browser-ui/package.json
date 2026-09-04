@@ -1,0 +1,16 @@
+{
+  "name": "g6lc-bios-ui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "BIOS-UI: Svelte (not SvelteKit) compiled through a first-party svelte-d fall-through into svelte-engine-ws, then TypeScript+Bun to WASM for g6b-wasm JIT.",
+  "license": "MIT",
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "test": "bun test",
+    "check": "bun test && bun scripts/build.ts"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

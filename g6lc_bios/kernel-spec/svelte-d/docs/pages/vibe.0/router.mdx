@@ -1,0 +1,47 @@
+---
+title: URLRouter
+description: "Literals, :name, trailing *, max 64 placeholders. Tree matcher. HEAD falls back to GET. Kit [id] is :id."
+---
+
+# URLRouter
+
+`URLRouter` implements `HTTPRouter` / `HTTPServerRequestHandler`. Routes are registered with `match` / `get` / `post` / `put` / `delete_` / `patch` / `any`. Matching walks in registration order. A handler “wins” when it writes response headers. `HEAD` falls back to `GET`. No match → return without writing → server 404.
+
+This is the same match language libwasm’s client router speaks, on purpose. A kit `[id]` is `:id` on both cells. They are still two types in two packages.
+
+## Match language
+
+- Literal path segments.
+- `:name` placeholders — one path segment, stored in `req.params["name"]`.
+- Trailing `*` raw wildcard.
+- Max 64 placeholders. At least one character between placeholders.
+
+Default implementation is the **tree matcher** (`version = VibeRouterTreeMatch` unless `VibeOldRouterImpl`). `rebuild()` forces eager graph construction; otherwise the first request pays for it. Nested routers take a constructor prefix `this(string prefix)`.
+
+```d
+auto router = new URLRouter;
+router.get("/admin/users/:id", &getUser);
+router.post("/admin/users", &createUser);
+router.any("/__svelte-d/host/*", &kitHost);
+```
+
+SvelteKit filesystem → this language:
+
+| Kit file | vibe.0 pattern |
+|---|---|
+| `src/routes/admin/+page.server.d` | `/admin` (plus `/__svelte-d/host/` prefix) |
+| `src/routes/admin/users/[id]/+page.server.d` | `/admin/users/:id` |
+| `src/routes/(app)/shop/+page.server.d` | `/shop` — groups strip |
+| `src/routes/blog/[...rest]/+page.server.d` | `/blog/*` — the name is lost |
+| `src/routes/opt/[[maybe]]/+page.server.d` | two registrations |
+| `src/routes/api/+server.d` `GET`/`POST` | `router.match(HTTPMethod.*, …)` |
+
+Matchers `[id=uuid]` are handler-side predicates in v1. Duplicate placeholder names must be renamed by the compiler. Named rest is a titled vibe.0 seam.
+
+## How a handler completes
+
+`listenHTTP`, `URLRouter.match`, and `registerWebInterface` all accept the same family: `void function(HTTPServerRequest, HTTPServerResponse)`, the delegate form, `HTTPServerRequestHandler.handleRequest`, and `scope` variants. A handler completes a request by writing to `HTTPServerResponse`. Returning without writing is a fall-through so a later route can try. The server synthesises 404 only if **nothing** wrote headers (`res.headerWritten`, or for HTTP/2 `!http2_stream.headersWritten`).
+
+`hooks.server` `handle` is `router.any("*", …)` registered **before** page routes, or `@before` on the web interface. Order is part of the contract. svelte-d hangs generated kit classes after the engine’s own open endpoints and before the static-files / proxy tail.
+
+`VibeOldRouterImpl` keeps a linear `Route[]`. It is a deprecated path. Do not print against it.

@@ -1,0 +1,104 @@
+---
+title: Getting Started
+description: Install LDC 1.43, add svelte-d to a bun project, drop svelte-engine-ws, compile Svelte to D IR.
+---
+
+# Getting Started
+
+A working svelte-d machine has three kinds of tool on it, and it helps to know why each is there before you install anything. **bun** is the JavaScript package manager and the host for the TypeScript API (`import { compileWorkspace } from 'svelte-d'`). **git** is how the engine submodule and, if you work in this repository, libwasm / vibe.0 checkouts arrive. **LDC 1.43+** and **dub** are the D compiler and its package tool. One LDC binary builds three different artifacts: the svelte-d CLI itself (native), the vibe.0 host inside `svelte-engine-ws/webserver` (native), and the wasm-eh module the browser instantiates. They are different *targets* — wasm32-unknown-wasi versus the host triple — but they are no longer different compiler versions. A 1.42 `ldc2` on `PATH` is refused for all three.
+
+## 1. Platform
+
+```bash
+bunx svelte-d setup
+```
+
+That command is deliberately available before the native `svelte-d` executable exists. The bun bin intercepts `setup` and runs a TypeScript script, so a consumer who has only just `bun add`’d the package can still obtain a compiler. A consumer machine does **not** have a `riscv-dev` tree. Discovery walks a fixed order: `SVELTE_D_LDC` / `LDC` / `WASM_LDC` / `DC` if the binary’s `--version` is 1.43 or later; then `~/.svelte-d/toolchains` (or `SVELTE_D_TOOLCHAINS`); then, if you happen to be on an author machine, a nearby `ldc2-build` or `toolchains/ldc2-1.43*`; then `ldc2` on `PATH`, still version-checked. Only the first identity line of `--version` counts. A 1.43 binary whose banner later says it was *built with* 1.42 is accepted; a real 1.42 is not.
+
+If nothing matches, setup downloads the official `ldc-developers/ldc` **1.43.0-beta1** build for the current OS and architecture — Windows x64, Linux x86_64 or aarch64, macOS x86_64 or arm64 — into `~/.svelte-d/toolchains`. Windows extraction of the official `.7z` needs 7-Zip; Unix uses `tar`. `--no-download` or `SVELTE_D_NO_DOWNLOAD=1` skips the fetch when you intend to point `SVELTE_D_LDC` at a tree you already have.
+
+The same command pulls the **etcimon/binaryen** `wasm-opt` CI publishes for this machine’s triple — **darwin-arm64**, **darwin-x86_64**, **linux-x86_64**, **linux-aarch64**, or **windows-x86_64** — from release tag `wasm-opt-svelte-d` (fallback: `wasm-opt-binaries` branch, then nightly.link). That binary lands in `binaryen-build/<os-arch>/` next to an Apache-2.0 `LICENSE`, and is copied to `~/.svelte-d/toolchains/binaryen-svelte-d`. A successful pull does not cmake-rebuild Binaryen; `svelte-d wasm` / `build` pull the same way if the binary is missing. Official Binaryen 123 is only the fallback if that release is missing. `SVELTE_D_BUILD_WASM_OPT=1` opts into a source rebuild.
+
+A live `libwasm` checkout is registered with `dub add-local … ~master`; a live `vibe.0` (and its host graph: memutils, botan, libasync, libhttp2, openssl) is registered the same way. Without those checkouts, setup clones `github.com/etcimon/openssl` (vibe-0 1.2.1 wants `openssl ~>3.3.4`, which is not a DUB-registry configuration) and `add-local`s it. The engine’s `dub.sdl` still fetches libwasm from `github.com/etcimon/libwasm`, and the host pulls `vibe-0` from the DUB registry.
+
+From a clone of this repository the same sequence produces the CLI as well:
+
+```bash
+git clone --recurse-submodules https://github.com/etcimon/svelte-d.git
+cd svelte-d
+bunx svelte-d setup
+bun install
+bunx svelte-d version
+```
+
+`bun install` runs `prepare`, which packs `svelte-engine` into the package if needed and `dub build`s the native compiler. After that, `bunx svelte-d` is the CLI. A consumer project that depends on `github:etcimon/svelte-d` runs the same `prepare` on install, so the machine that runs `bun install` is the machine that needs LDC 1.43.
+
+## 2. A consumer project
+
+```bash
+bun add github:etcimon/svelte-d
+```
+
+The dest of every drop and compile is configurable. Create `svelte-d.config.ts` at the **project top level** — next to `package.json`, not inside `node_modules` — and name the workspace there. The default this repository itself uses, and the default a new app should use, is a directory sitting beside the config file:
+
+```ts
+// svelte-d.config.ts
+export default { workspace: './svelte-engine-ws' }
+```
+
+Compilation can be driven from TypeScript or from the CLI. The TypeScript path is the one a bun script or `svelte-kit-d` uses internally:
+
+```ts
+import { dropWorkspace, compileWorkspace, workspaceDir } from 'svelte-d'
+
+const ws = workspaceDir()
+dropWorkspace({ dest: ws, force: true })
+compileWorkspace({ ws, project: process.cwd() })
+```
+
+The CLI is the same operations with flags:
+
+```bash
+bunx svelte-d drop-ws --force
+bunx svelte-d compile --project .
+```
+
+`compile` infers `--project` when the current directory already has `src/routes`. The dest is never the packaged `svelte-engine/` template. That tree is the golden bootstrap; mutating it while compiling an app is how you destroy the idiom library the next compile is supposed to drop from. `drop-ws` **overlays** the template onto `svelte-engine-ws` and never deletes that folder or files you added there. `--force` overwrites template-owned files so a new engine can land; it does not `rmdir` the workspace. A leftover Vite process on Windows can still lock `node_modules`; overlay skip-logs those files instead of failing the drop.
+
+`svelte-d wasm` / `svelte-d build` are **release + `lflags -strip-all`**, then the fork `wasm-opt` `--asyncify`s the `try_table` module (so `{#await}` `.await` waits and D can fill `{:then}` / `{:catch}` after rewind) and `-Oz`s it. Stock Binaryen 123/132 still cannot `--asyncify`; `wireAwait` then keeps `JsPromise.then` / `.error` and notes the Any handle first. `svelte-d wasm --debug` and `svelte-d host` keep symbols for IR work in the dest. On the kit-admin tree that is 12.64 MiB of debug wasm versus **0.93 MiB** shipped (224 KB gzipped), and 14.08 MiB of debug host versus **10.85 MiB** release — see [Wasm and host sizes](./advanced/sizes).
+
+## 3. The first `.svelte` file
+
+The smallest complete example is the engine’s own `ClickField`. It is worth typing by hand once, because every later construct is a variation on what this file already does.
+
+```svelte
+<script lang="d">
+  string msg = "idle";
+  void go() { this.update.msg = "clicked"; }
+</script>
+
+<div class="click-field">
+  <button type="button" on:click={go}>Go</button>
+  <span>{msg}</span>
+</div>
+```
+
+`<script lang="d">` is not a decoration. It is libwasm D, libdparse-checked, and printed onto the same struct that owns the markup. `string msg` is a field of `struct ClickField`. `void go()` is a method of that struct. `this.update.msg = "clicked"` is already the libwasm mutation primitive: it writes the field and pushes the new value to the live DOM handle.
+
+The markup becomes the graph `compile!()` walks. The outer `div` is `mixin NodeDef!"div"` with `@style!"click-field"`. The button is a **child struct** `GoButton` with `mixin Slot!"click"`, `@callback!"click"`, and `mixin NodeDef!"button"`. The parent connects to that slot with `@connect!"goButton.click"` and calls the author’s `go()`. The `{msg}` span is another child, `MsgSpan`, whose `@prop!"textContent"` field is seeded from the host `msg` in `construct()`. Author names `go` and `msg` are still `go` and `msg` in the printed D. The printer added `goButton` and `msgSpan` around them; it did not rename them.
+
+That pattern — host fields and methods stay, wiring is added, `update` is the mutation — is the whole language. [Svelte → D IR](./language) spends the rest of the course showing how `{#if}`, `{#each}`, `bind:`, `{#await}`, and `<svelte:boundary>` instantiate it.
+
+## 4. VS Code, code-d, and the IR workspace
+
+The `.svelte` files are the authoring surface. The D that svelte-d prints — `svelte-engine-ws/src-d/**/*.d` for the wasm cell, `svelte-engine-ws/webserver/source/**/*.d` for the host cell — is the IR you will actually debug. A Svelte-only editor will not complete `this.update`, will not jump to `mixin NodeDef`, and will not see `HTTPServerRequest`. The recommendation is therefore **VS Code plus [code-d](https://marketplace.visualstudio.com/items?itemName=webfreak.code-d)** (`webfreak.code-d`). code-d talks to **serve-d**, the D language server that already sits on libdparse, D-Scanner, and dfmt. That is the same parser family svelte-d uses to check `<script lang="d">` and `+page.server.d`. serve-d is an IDE, not a compile-time dependency; svelte-d must never `dub` it.
+
+After the first `drop-ws`, add `svelte-engine-ws` as a workspace folder (a multi-root workspace that also contains the bun project is the usual shape). code-d discovers `svelte-engine-ws/dub.sdl` and resolves `import libwasm;` against the wasm cell: `mixin Spa`, `NodeDef`, `Lodash`, `document()`, `JsPromise`, `ScopedPool`. Open `svelte-engine-ws/webserver` the same way — it has its own `dub.sdl` — so `import vibe.http.server;` and `import helpers;` resolve on the host cell. Do not point one DUB root at both recipes. Wasm and host are two targets of one LDC; they are not one project.
+
+`svelte.config.js` in the engine blanks every `lang="d"` block so the official Svelte extension and `svelte-check` do not try to parse D as TypeScript. That blanking is an editor courtesy. It is not a compile step, and it is why go-to-definition on `void go()` inside the `.svelte` file will not land in `src-d/`. The printed `struct` is the place to read the graph.
+
+Treat the printed D as a reading copy. When you want to understand why a click did not update the span, open the dest struct, walk `@connect` and `this.update`, then change the `.svelte` and recompile. Hand-editing dest and then compiling again is how those edits disappear. The [libwasm](./libwasm) and [vibe.0](./vibe.0) sections of this site are written for that reading: they name the same identifiers serve-d will complete.
+
+## What to do next
+
+Copy or recreate the [simplified admin example](./guide/first-project). It is the kit-admin fixture reduced to a layout, a dashboard, a user list, and a `:id` page, with vibe.0 JSON instead of Postgres and Redis. Once that tree compiles, read the [language section](./language) before adding combinations, then [libwasm](./libwasm) and [vibe.0](./vibe.0) when you need the runtime the printer is targeting. The Combo fixtures in the engine are the idiom library for those combinations; they are not the app.

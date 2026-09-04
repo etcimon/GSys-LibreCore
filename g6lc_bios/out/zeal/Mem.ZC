@@ -1,0 +1,5 @@
+// Generated MemCpy — scalar (RVV absent)
+U0 MemCpy(U8 *dst, U8 *src, INative n)
+{
+	while (n) { *dst++ = *src++; n--; }
+}

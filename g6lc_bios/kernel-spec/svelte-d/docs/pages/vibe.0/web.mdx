@@ -1,0 +1,73 @@
+---
+title: registerWebInterface
+description: Public methods become routes. @path @method @before @after. getUsers is GET /users. This is how +page.server.d hangs on app.d.
+---
+
+# registerWebInterface
+
+`registerWebInterface` (`vibe.web.web`) is the codegen layer svelte-d actually prints toward. Each public method of a class instance becomes a `router.match` entry. Method parameters come from query, form, or — if the name is `_`-prefixed — from `req.params`. Returning a class or interface instance recurses, so path hierarchies can be class hierarchies. There is **no** `vibe.web.rest` in this tree; `web.common` still mentions REST in its header.
+
+```d
+void registerWebInterface(C : Object, MethodStyle method_style = MethodStyle.lowerUnderscored)(
+    URLRouter router, C instance, WebInterfaceSettings settings = null);
+```
+
+`WebInterfaceSettings.urlPrefix` is how kit host files land under `/__svelte-d/host/`. `ignoreTrailingSlash` (default on) registers the slashed and slashless forms; GET redirects, other methods run the handler.
+
+## How a method name becomes a verb and a path
+
+`extractHTTPMethodAndName` looks at `@method` / `@path` first. If both are present, that is the route. Otherwise it inspects the identifier:
+
+| Prefix | HTTP method | Path is the rest, style-adjusted |
+|---|---|---|
+| `get`, `query` | GET | `getUsers` → `/users` |
+| `put`, `set` | PUT | |
+| `update`, `patch` | PATCH | |
+| `add`, `create`, `post` | POST | `postSave` → `/save` |
+| `remove`, `erase`, `delete` | DELETE | |
+| property getter / setter | GET / PUT | |
+| `index` (special case) | GET | `""` |
+| anything else | POST | the whole name |
+
+Default `MethodStyle` is `lowerUnderscored`: `getUserName` → `/user_name`. The other styles are `unaltered`, `camelCase`, `pascalCase`, `lowerCase`, `upperCase`, `upperUnderscored`. svelte-d prints dest-unique class names and keeps method names that already match this table (`getUsers`, `post`, `postSave`) so the generated URL is the one the wasm cell fetches.
+
+`@noRoute` skips a public method. Nested APIs must be parameterless and return a class/interface.
+
+## Parameter conversion
+
+Unprefixed parameters map to query/form fields:
+
+- Arrays are `<name>_<index>`; length is the first missing index.
+- `Nullable!T` and parameters with defaults are optional. Everything else is required.
+- Structs without `fromString` / `fromStringValidate` expand to `<name>_<member>`.
+- Booleans are true if the field is present (HTML checkbox rule).
+- Otherwise: `fromStringValidate`, then `fromString`, then `std.conv.to!T`.
+- The rules recurse, so you can nest arrays and structs.
+
+Special parameters:
+
+- `__error` is populated when `@errorDisplay` is in use.
+- `InputStream` receives the request body — already drained if parse-form/JSON options are on.
+- `HTTPServerRequest` / `HTTPServerResponse` / `HTTPRequest` / `HTTPResponse` receive the live objects. **This is the svelte-d host idiom.** Printed `getUsers(HTTPServerRequest req, HTTPServerResponse res)` does not go through form conversion at all.
+
+`_id` reads `req.params["id"]`, which is how a kit `[id]` reaches the method after the router stored `:id`.
+
+## Supported attributes
+
+| UDA | Effect |
+|---|---|
+| `@path("/users/:id")` | override the generated path; placeholders land in `req.params` |
+| `@method(HTTPMethod.POST)` | override the verb |
+| `@before!fun` / `@after!fun` | `vibe.internal.meta.funcattr`; kit `hooks` can be this |
+| `@errorDisplay` | fill `__error` and re-render |
+| `@contentType` | response content type |
+| `@noRoute` | do not register |
+| `SessionVar!(T, "key")` | field bound to the session |
+
+`@before` / `@after` are de-facto public even though they live under `vibe.internal`. Treat `meta.funcattr` as part of this API; treat the rest of `vibe.internal` as private.
+
+## What svelte-d prints
+
+`+page.server.d` becomes `class AdminPageServer` (dest-unique) in `webserver/source/generated/…`. `actions` become `post` and `postSave`; `?/name` is approximately `/save`. `+server.d` verbs become `router.match(HTTPMethod.*, …)` or a small web-interface class. Layout `load` is composed in generated D — vibe.0 has no layout primitive. Class-level `@path` plus `settings.urlPrefix` is the `/__svelte-d/host/` prefix.
+
+Do not print Diet. Do not print `vibe.web.rest`. Do not print a second HTTP stack in bun that “implements `load`.” The wasm cell talks to these routes with `JsPromise.then`.

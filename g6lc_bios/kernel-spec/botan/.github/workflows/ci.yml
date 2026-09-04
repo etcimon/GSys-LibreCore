@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches:
+    - master
+  pull_request:
+    branches:
+    - master
+  workflow_dispatch:
+    # allow this workflow to be triggered manually
+
+jobs:
+  builder:
+    name: 'Build and test on ${{ matrix.arch }}-${{ matrix.os }}/${{ matrix.dc }}'
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ contains(matrix.dc, 'beta') }}
+    env:
+      ARCH: ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        dc: [ldc-latest, ldc-beta, dmd-latest, dmd-beta]
+        os: [ubuntu-latest, windows-latest]
+        arch: [x86, x86_64]
+        exclude:
+          - os: ubuntu-latest
+            arch: x86
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: etcimon/memutils
+          ref: v1.0.13
+          path: _ci/memutils
+      - uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ${{ matrix.dc }}
+      - name: Install multi-lib for 32-bit systems
+        if: matrix.arch == 'x86' && matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install gcc-multilib
+      - name: Register memutils v1.0.13
+        run: dub add-local _ci/memutils
+      - id: build
+        name: Build and test library
+        run: |
+          chmod +x scripts/ci-test.sh
+          ARCH="$ARCH" DC="${DC:-ldc2}" scripts/ci-test.sh
+        shell: bash
+
+  openssl-engine:
+    name: 'full_openssl Hash/Block/RSA on x86_64-ubuntu-latest/ldc-latest'
+    runs-on: ubuntu-latest
+    env:
+      ARCH: x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: etcimon/memutils
+          ref: v1.0.13
+          path: _ci/memutils
+      - uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-latest
+      - name: Install OpenSSL 3 headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Register memutils v1.0.13
+        run: dub add-local _ci/memutils
+      - name: Build and test OpenSSL engine
+        run: |
+          chmod +x scripts/ci-test-openssl.sh
+          ARCH=x86_64 DC="${DC:-ldc2}" scripts/ci-test-openssl.sh
+        shell: bash

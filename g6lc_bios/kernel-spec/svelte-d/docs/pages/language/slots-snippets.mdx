@@ -1,0 +1,12 @@
+---
+title: Slots and snippets
+description: "slot is mixin Slot plus fallback. snippet is stored and instantiated at @render."
+---
+
+# Slots and snippets
+
+Svelte uses the word “slot” for two things, and libwasm uses `Slot` for a third. A content `<slot>` is a hole in a layout or component that the parent fills. A `{#snippet}` is a named fragment instantiated at `{@render}`. `mixin Slot!"click"` is an `EventEmitter`. The first two belong on this page. The third belongs on [events](./events). The names collide in English and they do not collide in D; the printed file is what tells them apart.
+
+A content `<slot>` prints as `mixin Slot!("name")` plus fallback children. The fallback is what you see in the admin layout when nothing is projected — `admin fallback` in the example. Named `<slot name="aside">` is a named Slot (`ComboOr.svelte`). `<slot let:item>` prints `string item; // let:item` on the slot or element. A parent that writes `<Panel>hello</Panel>` is the slot site. Layouts use `<slot>` so `KitRoutes` can remount the page inside the wrapper. A layout that inlined the page instead of slotting it would force the page to be a field of the layout type, and nested routes would become a compile-time tree of every possible child.
+
+`{#snippet}` stores a body. `{@render greet(who)}` instantiates it. Multi-param `{#snippet pair(a, b)}` plus `{@render pair(who, extra)}` assigns each parameter and then walks (`ComboSem.svelte`). A snippet **site** on `<svelte:component>` is `ComboNext.svelte`. The failed snippet on `<svelte:boundary>` is [await / boundary](./await-boundary); it is a snippet that happens to be the failed branch, not a fourth kind of slot.

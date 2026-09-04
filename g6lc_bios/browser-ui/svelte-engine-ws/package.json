@@ -1,0 +1,6 @@
+{
+  "name": "g6lc-bios-ui-ws",
+  "private": true,
+  "type": "module",
+  "description": "Dropped svelte-engine-ws for BIOS UI (dub+libwasm wasm-eh cell)."
+}

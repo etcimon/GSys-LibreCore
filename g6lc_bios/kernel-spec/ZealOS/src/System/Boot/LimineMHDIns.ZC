@@ -1,0 +1,106 @@
+
+#ifndef binary_limine_hdd_bin_data
+U8 binary_limine_hdd_bin_data[0];
+#endif
+
+Bool LimineCFGMake(U8 drv_let)
+{
+	U8		*filename_cfg = MStrPrint("%C:/Boot/Limine.CONF", drv_let);
+	CDoc	*doc = DocNew(filename_cfg);
+	CDrive	*drive;
+	CBlkDev	*bd;
+	I64		 i;
+	U8		*filename_sys, *filename_elf, *filename_zxe, *st;
+
+	"\nGenerating Limine.CONF ...\n";
+
+	DocPrint(doc,
+		"timeout: 2\n"
+		"interface_resolution: 1024x768\n\n");
+
+	"Searching drives for Limine bootloader files ...\n";
+	for (i = 0, drive = blkdev.drvs; i < DRIVES_NUM; i++, drive++)
+	{
+		if (drive->drive_signature == DRIVE_SIGNATURE_VAL && drive->fs_type == FSt_FAT32 && DriveIsWritable(drive->drv_let))
+		{
+			bd = drive->bd;
+			drv_let = Drive2Letter(drive);
+
+			filename_sys = MStrPrint("%C:/Boot/Limine-BIOS.SYS", drv_let);
+			filename_elf = MStrPrint("%C:/Boot/ZealBooter.ELF", drv_let);
+			filename_zxe = MStrPrint("%C:/Boot/Kernel.ZXE", drv_let);
+			if (FileFind(filename_sys) && FileFind(filename_elf) && FileFind(filename_zxe))
+			{
+				st = MStrPrint("/ZealOS %C:/\n"
+					"protocol: limine\n"
+					"resolution: 1024x768\n"
+					"path: boot(%d):/Boot/ZealBooter.ELF\n"
+					"module_path: boot(%d):/Boot/Kernel.ZXE\n"
+					"\n", drv_let, drive->prt_num + 1, drive->prt_num + 1);
+
+				DocPrint(doc, st);
+				"%C:/ drive added as a Limine.CONF menu entry.\n", drv_let;
+			}
+			else
+				"%C:/ drive is missing Limine bootloader files.\n", drv_let;
+		}
+	}
+	DocWrite(doc);
+	DocDel(doc);
+
+	"/Boot/Limine.CONF generated.\n";
+
+	"Copying Limine.CONF to all other drives ...\n";
+	for (i = 0, drive = blkdev.drvs; i < DRIVES_NUM; i++, drive++)
+	{
+		if (drive->drive_signature == DRIVE_SIGNATURE_VAL && drive->fs_type == FSt_FAT32 && DriveIsWritable(drive->drv_let))
+		{
+			drv_let = Drive2Letter(drive);
+			if (FileFind(filename_sys) && FileFind(filename_elf) && FileFind(filename_zxe))
+			{
+				st = MStrPrint("%C:/Boot/Limine.CONF", drv_let);
+				Copy(filename_cfg, st);
+			}
+		}
+	}
+
+	return TRUE;
+}
+
+Bool LimineMHDIns(U8 drv_let)
+{
+	U8	*limine			= binary_limine_hdd_bin_data;
+	U16  limine_size	= sizeof(binary_limine_hdd_bin_data);
+	U64 *limine_stage2	= limine + 0x1A4;
+	CBlkDev				*bd = Letter2BlkDev(drv_let);
+	CMasterBoot			 old_mbr, *new_mbr = limine;
+
+	if (limine_size == 0)
+	{
+		"\n" ST_ERR_ST "Limine HDD MBR binary bytes not found. Must first #include it, then recompile this file.\n";
+		return FALSE;
+	}
+
+	'\n';
+
+	*limine_stage2 = 0x200;
+
+	BlkDevLock(bd);
+
+	AHCIAtaBlksRead(bd, &old_mbr, 0, 1); // read old MBR currently on disk
+	MemCopy(new_mbr->p, old_mbr.p, sizeof(CMasterBoot.p)); // copy old MBR partition table to new Limine MBR
+
+	// read the whole MBR + post-MBR-gap that Limine wants to overwrite, save all of that as an OldMBR.BIN
+	BootMHDOldRead(drv_let, drv_let, 63);
+
+	AHCIAtaBlksWrite(bd, limine, 0, 63); // write Limine to MBR and post-MBR gap
+
+	BlkDevUnlock(bd);
+
+	LimineCFGMake(drv_let);
+
+	"\nLimine BSD2-licensed HDD MBR Boot Loader installed.\n\n";
+
+	return TRUE;
+
+}

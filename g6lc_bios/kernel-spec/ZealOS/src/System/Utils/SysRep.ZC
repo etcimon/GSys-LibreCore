@@ -1,0 +1,493 @@
+U8 *SysRepFlagsMake(U8 *buf)
+{
+	U8 *str;
+	U8 *tmp = StrReplace(StrReplace(StrReplace(StrReplace(buf,
+		"+ ", ""),
+		"- ", "",, TRUE),
+		"+", "\n$$BLUE$$+$$GREEN$$",, TRUE),
+		"-", "\n$$BLUE$$-$$RED$$",, TRUE);
+
+	str = MStrPrint("$$ID,17$$%s$$ID,-17$$", tmp);
+	Free(tmp);
+
+	return str;
+}
+
+public I64 SysRep(I64 type=SMBIOSt_ALL, I64 handle=0, Bool show_all_flags=FALSE, I64 memdev_handle=0xFFFF)
+{//Display info of System Management BIOS (SMBIOS) structures.  Returns structure count of displayed structures.
+	I64					 i = 1, structure_count = 0, cache_count = 0;
+	CSMBIOSEntryPoint	*entry;
+	CSMBIOSHeader		*header;
+	U8					buffer[2048], buffer2[512], *str;
+
+	if (!SMBIOSEntryScan(&entry))
+	{
+		"No SMBIOS data found.\n";
+		return 0;
+	}
+	header = entry->table_address;
+
+	if (!handle && type == 0xFF)
+		"SMBIOS version %d.%d (%d entries)\n", entry->major_version, entry->minor_version, entry->structure_count;
+	while (header->type != 127)
+	{
+		if (handle && header->handle != handle)
+			goto loop_end;
+		if (type != 0xFF && header->type != type)
+			goto loop_end;
+		switch (header->type)
+		{
+			start:
+				case SMBIOSt_BIOS:
+					CSMBIOSBIOSInfo *bios_info = header;
+					I64 start_addr = bios_info->start_address_segment << 16;
+					"$$TR-C,\"BIOS\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$"
+					"Vendor\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, bios_info->vendor);
+					"Version\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, bios_info->version);
+					"Release Date\t\t:$$BLACK$$%s (mm/dd/yyyy)$$FG$$\n", SMBIOSStr(header, bios_info->release_date);
+					"Release Version\t:$$BLACK$$%d.%d$$FG$$\n", bios_info->major_release, bios_info->minor_release;
+					"Start Address\t:$$BLACK$$0x%X$$FG$$\n", Seg2Linear(&start_addr);
+					"Image Size\t\t:$$BLACK$$%d bytes$$FG$$\n", (0x10000 - bios_info->start_address_segment) * 16;
+					"ROM Size\t\t\t:$$BLACK$$";
+					if (bios_info->rom_size == 0xFF)
+						"%d %ziB$$FG$$\n", bios_info->extended_rom_size & ~0xC000, Bt(&bios_info->extended_rom_size, 14), "M\0G";
+					else
+						"%d KiB$$FG$$\n", (bios_info->rom_size + 1) * 64;
+					if (Bt(&bios_info->flags, 3))
+						"Flags Not Supported$$FG$$\n";
+					else 
+					{
+						"$$TR,\"Flags\"$$";
+						FlagsStrPrint(buffer, Define("ST_SMBIOS_BIOS_FLAGS"), bios_info->flags & ~0xF, show_all_flags, 31);
+						CatPrint(buffer, FlagsStrPrint(buffer2, Define("ST_SMBIOS_BIOS_FLAGSEXT1"), bios_info->extended_flags[0], show_all_flags, 8));
+						CatPrint(buffer, FlagsStrPrint(buffer2, Define("ST_SMBIOS_BIOS_FLAGSEXT2"), bios_info->extended_flags[1], show_all_flags, 5));
+						str = SysRepFlagsMake(buffer);
+						"%s$$FG$$\n", str; 
+						Free(str);
+					}
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_SYSTEM:
+					CSMBIOSSystemInfo *sys_info = header;
+					"$$TR-C,\"System\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$Manufacturer\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, sys_info->manufacturer);
+					"Product Name\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, sys_info->product_name);
+					"Version\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, sys_info->version);
+					"Serial Number\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, sys_info->serial_number);
+					"UUID\t\t\t\t:$$BLACK$$%X-%X-%X-%X-%X$$FG$$\n", EndianU32(sys_info->uuid(U32 *)),
+						EndianU16((sys_info->uuid)(U16 *)[2]), EndianU16((sys_info->uuid)(U16 *)[3]), EndianU16((sys_info->uuid)(U16 *)[4]),
+						EndianU16((sys_info->uuid)(U16 *)[5]) << 32 | EndianU32((sys_info->uuid)(U32 *)[3]);
+					"Wakeup Type\t\t:$$BLACK$$%Z$$FG$$\n", sys_info->wakeup_type, "ST_SMBIOS_WAKEUP_TYPES";
+					"SKU Number\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, sys_info->sku_number);
+					"Family\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, sys_info->family);
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_ENCLOSURE:
+					CSMBIOSEnclosureInfo *info = header;
+					"$$TR-C,\"Enclosure\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$Manufacturer\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, info->manufacturer);
+					"Type\t\t\t\t:$$BLACK$$%Z%z$$FG$$\n", info->type & 0x7F, "ST_SMBIOS_ENCLOSURE_TYPES",
+						Bt(&info->type, 7), " \0, Lock Present";
+					"Version\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, info->version);
+					"Bootup State\t\t:$$BLACK$$%Z$$FG$$\n", info->bootup_state, "ST_SMBIOS_ENCLOSURE_STATES";
+					"Thermal State\t:$$BLACK$$%Z$$FG$$\n", info->thermal_state, "ST_SMBIOS_ENCLOSURE_STATES";
+					"Power Supply\t\t:$$BLACK$$%Z$$FG$$\n", info->power_supply_state, "ST_SMBIOS_ENCLOSURE_STATES";
+					"Security Status\t:$$BLACK$$%Z$$FG$$\n", info->security_status, "ST_SMBIOS_ENCLOSURE_SECURITY_STATUSES";
+					"Height\t\t\t:$$BLACK$$";
+					if (info->height)
+						"%0.2f\"$$FG$$\n", info->height * 1.75; //height is in 'U' units. 1 'U' is 1.75 inches or 4.445 cm.
+					else "Unknown$$FG$$\n";
+					"Serial Number\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, info->serial_number);
+					"Asset Tag\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, info->asset_tag);
+					"Power Cord Count\t:$$BLACK$$";
+					if (info->power_cord_count)
+						"%d$$FG$$\n", info->power_cord_count;
+					else "Unknown$$FG$$\n";
+//					"Contained Elements:$$BLACK$$",r,'\t';  //TODO: maybe implement this?
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_PROCESSOR:
+					CSMBIOSProcessorInfo *p_info = header;
+					CRAXRBXRCXRDX regs;
+					CPUId(1, &regs);
+					"$$TR-C,\"Processor\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$Socket Name\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, p_info->name);
+					"Processor Type\t:$$BLACK$$%Z$$FG$$\n", p_info->type, "ST_SMBIOS_PROCESSOR_TYPES";
+					"Status\t\t\t:$$BLACK$$%z, %z$$FG$$\n",  p_info->status >> 6, "Socket Unpopulated\0Socket Populated", 
+						p_info->status & 7, "Unknown\0CPU Enabled\0CPU Disabled through BIOS Setup\0"
+						"CPU Disabled by BIOS (POST Error)\0CPU is Idle, Waiting to be Enabled\0 \0 \0Other";
+					"Core Count\t\t:$$BLACK$$%d$$FG$$\n", p_info->core_count;
+					"Cores Enabled\t:$$BLACK$$%d$$FG$$\n", p_info->cores_enabled;
+					"Manufacturer\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, p_info->manufacturer);
+//					"CPU Family\t\t\t:$$BLACK$$%z$$FG$$\n", p_info->family, "ST_SMBIOS_PROCESSOR_FAMILIES"; TODO: maybe implement this?
+					"Name\t\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, p_info->version);
+					"Family\t\t\t:$$BLACK$$";
+					if (regs.rax >> 8 & 0xF < 0xF)
+						"%d$$FG$$\n", regs.rax >> 8 & 0xF;
+					else
+						"%d$$FG$$\n", 0xF + regs.rax >> 20 & 0xFF;
+
+					"Model\t\t\t:$$BLACK$$";
+					if (regs.rax >> 4 & 0xF < 0xF)
+						"%d$$FG$$\n", regs.rax >> 4 & 0xF;
+					else
+						"%d$$FG$$\n", (regs.rax >> 4 & 0xF) << 4 | (regs.rax >> 16 & 0xF);
+
+					"Stepping\t\t\t:$$BLACK$$%d$$FG$$\n", regs.rax & 0xF;
+					"Current Speed\t:$$BLACK$$";
+					if (p_info->current_speed)
+						"%0.1f GHz$$FG$$\n", p_info->current_speed / 1000.0;
+					else "Unknown$$FG$$\n";
+
+					"Max Speed\t\t:$$BLACK$$";
+					if (p_info->max_speed)
+						"%0.1f GHz$$FG$$\n", p_info->max_speed / 1000.0;
+					else "Unknown$$FG$$\n";
+					"Socket\t\t\t:$$BLACK$$%Z$$FG$$\n", p_info->upgrade, "ST_SMBIOS_PROCESSOR_UPGRADES";
+
+					"Voltage\t\t\t:$$BLACK$$";
+					if (Bt(&p_info->voltage, 7))
+						"%0.1fV$$FG$$\n", (p_info->voltage & 0x7F) / 10.0;
+					else
+						"%Z$$FG$$\n", Bsf(p_info->voltage), "ST_SMBIOS_PROCESSOR_VOLTAGE_LEVELS";
+
+					"External Clock\t:$$BLACK$$";
+					if (p_info->external_clock)
+						"%d MHz$$FG$$\n", p_info->external_clock;
+					else "Unknown$$FG$$\n";
+						
+					"Serial Number\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, p_info->serial_number);
+					"Asset Tag\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, p_info->asset_tag);
+					"Part Number\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, p_info->part_number);
+						
+					FlagsStrPrint(buffer, Define("ST_SMBIOS_PROCESSOR_FLAGS"), p_info->characteristics, show_all_flags, 9);
+					str = SysRepFlagsMake(buffer);
+					"$$TR,\"Processor Flags\"$$%s$$FG$$\n", str;
+					FlagsStrPrint(buffer, Define("ST_CPUID_1_EDX_FLAGS"), regs.rdx, show_all_flags, 32);
+					CatPrint(buffer, FlagsStrPrint(buffer2, Define("ST_CPUID_1_ECX_FLAGS"), regs.rcx, show_all_flags, 31));
+					str = SysRepFlagsMake(buffer);
+					"$$TR,\"CPUID 0x1 Flags\"$$%s$$FG$$\n", str;
+					Free(str);
+					if (p_info->l1_cache_handle && p_info->l1_cache_handle != 0xFFFF)
+					{
+						"$$TR,\"L1 Cache Info\"$$\n";
+						SysRep(,p_info->l1_cache_handle, show_all_flags);
+					}
+					if (p_info->l2_cache_handle && p_info->l2_cache_handle != 0xFFFF)
+					{
+						"$$TR,\"L2 Cache Info\"$$\n";
+						SysRep(,p_info->l2_cache_handle, show_all_flags);
+					}
+					if (p_info->l3_cache_handle && p_info->l3_cache_handle != 0xFFFF)
+					{
+						"$$TR,\"L3 Cache Info\"$$\n";
+						SysRep(,p_info->l3_cache_handle, show_all_flags);
+					}
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_CACHE:
+					if (!handle)
+						break;
+					if (cache_count++ > 0)
+						break;
+					CSMBIOSCacheInfo *c_info = header;
+					"$$FD,CYAN$$";
+					"$$ID,3$$";
+					"Name\t\t\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, c_info->name);
+					"Status\t\t\t\t:$$BLACK$$%z$$FG$$\n", Bt(&c_info->config, 7), "Disabled\0Enabled";
+					"Mode\t\t\t\t\t:$$BLACK$$%z$$FG$$\n",  c_info->config >> 8 & 3, "Write-Through\0Write-Back\0Varies with Memory Address\0Unknown";
+					"Type\t\t\t\t\t:$$BLACK$$%z$$FG$$\n", c_info->cache_type, " \0Other\0Unknown\0Instruction\0Data\0Unified";
+					"Location\t\t\t\t:$$BLACK$$%z$$FG$$\n", c_info->config >> 5 & 3, "CPU Internal\0External\0 \0Unknown";
+					"Socketed\t\t\t\t:$$BLACK$$%z$$FG$$\n", Bt(&c_info->config, 3), "No\0Yes";
+					"Max Cache Size\t\t:$$BLACK$$";
+					if (Bt(&c_info->max_size, 15)) //if Bit 15 is 1 then granularity is 64K else 1K
+						"%d KB$$FG$$\n", (c_info->max_size & 0x7FFF) * 64;
+					else
+						"%d KB$$FG$$\n", c_info->max_size & 0x7FFF;
+					"Installed Size\t\t:$$BLACK$$";
+					if (Bt(&c_info->installed_size, 15)) //if Bit 15 is 1 then granularity is 64K else 1K
+						"%d KB$$FG$$\n", (c_info->installed_size & 0x7FFF) * 64;
+					else
+						"%d KB$$FG$$\n", c_info->installed_size & 0x7FFF;
+					FlagsStrPrint(buffer, Define("ST_SMBIOS_CACHE_SRAM_TYPES"), c_info->supported_sram_type);
+					str = StrReplace(buffer, "+", ", ");
+					"Supported SRAM Types\t:$$BLACK$$%s$$FG$$\n", str + 2;
+					Free(str);
+					"Installed SRAM Type\t:$$BLACK$$%Z$$FG$$\n", Bsf(c_info->installed_sram_type), "ST_SMBIOS_CACHE_SRAM_TYPES";
+					"Cache Speed\t\t\t:$$BLACK$$";
+					if (c_info->cache_speed)
+						"%d nS$$FG$$\n", c_info->cache_speed;
+					else "Unknown$$FG$$\n";
+					"ECC type\t\t\t\t:$$BLACK$$%z$$FG$$\n", c_info->error_correction_type, 
+						" \0Other\0Unknown\0None\0Parity\0Single-bit ECC\0Multi-bit ECC";
+					"Associativity\t\t\t:$$BLACK$$%Z$$FG$$\n", c_info->associativity, "ST_SMBIOS_CACHE_ASSOCIATIVITY";
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_PHYMEM:
+					CSMBIOSMemArrayInfo *ma_info = header;
+					"$$TR,\"Memory Array\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$";
+					"Location\t\t\t:$$BLACK$$%Z$$FG$$\n", ma_info->location, "ST_SMBIOS_PHYMEM_LOCATIONS";
+					"Use\t\t\t\t:$$BLACK$$%Z$$FG$$\n", ma_info->use, "ST_SMBIOS_PHYMEM_USES";
+					"Error Correction\t:$$BLACK$$%z$$FG$$\n", ma_info->use, " \0Other\0Unknown\0None\0Parity\0Single-bit ECC\0Multi-bit ECC\0CRC";
+					"Max Capacity\t\t:$$BLACK$$";
+					if (ma_info->max_capacity == 0x80000000)
+						"%d MB$$FG$$\n", ma_info->extended_max_capacity / 1024;
+					else						
+						"%d MB$$FG$$\n", ma_info->max_capacity / 1024;
+					"Mem Device Count\t:$$BLACK$$%d$$FG$$\n", ma_info->mem_device_count;
+					"$$TR,\"Memory Devices\"$$\n";
+					"$$ID,3$$";
+					SysRep(SMBIOSt_MEM_DEVICE, handle, show_all_flags, ma_info->header.handle);
+					"$$ID,-3$$";
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_MEM_DEVICE:
+					CSMBIOSMemDeviceInfo *mem_info = header;
+					if (type != SMBIOSt_MEM_DEVICE)
+						break;
+					if (memdev_handle != 0xFFFF && memdev_handle != mem_info->memory_array_handle)
+						break;
+					"$$TR,\"Memory Device\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$";
+					"Device Location\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, mem_info->device_locator);
+					"Bank Location\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, mem_info->bank_locator);
+					"Manufacturer\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, mem_info->manufacturer);
+					"Size\t\t\t\t:$$BLACK$$";
+					if (!mem_info->size)
+						"No Device Installed$$FG$$\n";
+					else if (mem_info->size == 0xFFFF)
+						"Unknown$$FG$$\n";
+					else if (mem_info->size == 0x7FFF)
+						"%d GB$$FG$$\n", mem_info->extended_size; 
+					else
+						"%d %zB$$FG$$\n", mem_info->size & 0x7FFF, Bt(&mem_info->size, 15), "M\0K";
+					if (entry->major_version >= 2 && entry->minor_version >= 8)
+					{
+						"Min Voltage\t\t:$$BLACK$$";
+						if (mem_info->min_voltage)
+							"%d mV$$FG$$\n", mem_info->min_voltage;
+						else
+							"Unknown$$FG$$\n";
+						"Max Voltage\t\t:$$BLACK$$";
+						if (mem_info->max_voltage)
+							"%d mV$$FG$$\n", mem_info->max_voltage;
+						else
+							"Unknown$$FG$$\n";
+						"Configured Volt.\t:$$BLACK$$";
+						if (mem_info->configured_voltage)
+							"%d mV$$FG$$\n", mem_info->configured_voltage;
+						else
+							"Unknown$$FG$$\n";
+					}
+					"Total Width\t\t:$$BLACK$$";
+					if (mem_info->total_width != 0xFFFF)
+						"%d bits$$FG$$\n", mem_info->total_width;
+					else
+						"Unknown$$FG$$\n";
+					"Data Width\t\t\t:$$BLACK$$";
+					if (mem_info->data_width != 0xFFFF)
+						"%d bits$$FG$$\n", mem_info->data_width;
+					else
+						"Unknown$$FG$$\n";
+					"Max Speed\t\t\t:$$BLACK$$";
+					if (mem_info->speed)
+						"%d $MA-X+PU,"MT/s",LM="\"megatransfers per second\";View;"$$$FG$$\n", mem_info->speed;
+					else
+						"Unknown$$FG$$\n";
+					"Configured Speed\t:$$BLACK$$";
+					if (mem_info->configured_speed)
+						"%d $MA-X+PU,"MT/s",LM="\"megatransfers per second\";View;"$$$FG$$\n", mem_info->configured_speed;
+					else
+						"Unknown$$FG$$\n";
+					"Serial Number\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, mem_info->serial_number);
+					"Part Number\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, mem_info->part_number);
+					"Asset Tag\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, mem_info->asset_tag);
+					"Form Factor\t\t:$$BLACK$$%Z$$FG$$\n", mem_info->form_factor, "ST_SMBIOS_MEMDEV_FORM_FACTORS";
+					"Type\t\t\t\t:$$BLACK$$%Z$$FG$$\n", mem_info->type, "ST_SMBIOS_MEMDEV_TYPES";
+					FlagsStrPrint(buffer, Define("ST_SMBIOS_MEMDEV_TYPE_DETAILS"), mem_info->type_detail, show_all_flags, 16);
+					str = SysRepFlagsMake(buffer);
+					"$$TR,\"Type Flags\"$$%s$$FG$$\n", str;
+					Free(str);
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_BASEBOARD:
+					CSMBIOSBaseboardInfo *b_info = header;
+					"$$TR-C,\"Baseboard\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$";
+					"Manufacturer\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, b_info->manufacturer);
+					"Product\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, b_info->product);
+					"Version\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, b_info->version);
+					"Type\t\t\t\t:$$BLACK$$%Z$$FG$$\n",  b_info->board_type, "ST_SMBIOS_BASEBOARD_TYPES";
+					"Location\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, b_info->chassis_location, "Not Specified");
+					"Serial Number\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, b_info->serial_number);
+					"Asset Tag\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, b_info->asset_tag);
+					"$$TR,\"Flags\"$$";
+					FlagsStrPrint(buffer, Define("ST_SMBIOS_BASEBOARD_FLAGS"), b_info->feature_flags, show_all_flags, 5);
+					str = SysRepFlagsMake(buffer);
+					"%s$$FG$$\n", str;
+					Free(str);
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_CONNECTOR:
+					CSMBIOSConnectorInfo *con_info = header;
+					"$$TR,\"Port Connector\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$";
+					"Port Type\t\t:$$BLACK$$";
+					if (con_info->port_type == 0xFF)
+						"Other$$FG$$\n";
+					else
+						"%Z$$FG$$\n", con_info->port_type, "ST_SMBIOS_PORT_TYPES";
+					"External Name\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, con_info->external_name);
+					"Internal Name\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, con_info->internal_name);
+					"External Type\t:$$BLACK$$";
+					if (con_info->external_type == 0xFF)
+						"Other$$FG$$\n";
+					else
+						"%Z$$FG$$\n", con_info->external_type, "ST_SMBIOS_CONNECTOR_TYPES";
+					"Internal Type\t:$$BLACK$$";
+					if (con_info->internal_type == 0xFF)
+						"Other$$FG$$\n";
+					else
+						"%Z$$FG$$\n", con_info->internal_type, "ST_SMBIOS_CONNECTOR_TYPES";
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_BATTERY:
+					CSMBIOSBatteryInfo *bat_info = header;
+					"$$TR,\"Battery\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$";
+					"Name\t\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, bat_info->name);
+					"Manufacturer\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, bat_info->manufacturer);
+					"$MA-X+PU,"SBDS",LM="\"\dGREEN\dS\dFG\dmart \dGREEN\dB\dFG\dattery \dGREEN\dD\dFG\data \dGREEN\dS\dFG\dpecification\n\";View;"$ Version\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, bat_info->manufacturer);
+					"Manufacture Date\t:$$BLACK$$";
+					if (bat_info->manufacture_date)
+						"%s$$FG$$\n", SMBIOSStr(header, bat_info->manufacture_date);
+					else
+						"%s$$FG$$\n", SMBIOSStr(header, bat_info->sbds_manufacture_date);
+					"Chemistry\t\t:$$BLACK$$";
+					if (bat_info->chemistry)
+						"%s$$FG$$\n", SMBIOSStr(header, bat_info->chemistry);
+					else
+						"%s$$FG$$\n", SMBIOSStr(header, bat_info->sbds_chemistry);
+					"Capacity\t\t\t:$$BLACK$$";
+					if (bat_info->capacity)
+						"%d Milliwatt-Hours$$FG$$\n", bat_info->capacity * bat_info->capacity_multiplier;
+					else
+						"Unknown$$FG$$\n";
+					"Voltage\t\t\t:$$BLACK$$";
+					if (bat_info->voltage)
+						"%d Millivolts$$FG$$\n", bat_info->voltage;
+					else
+						"Unknown$$FG$$\n";
+					"Max Data Error\t:$$BLACK$$";
+					if (bat_info->max_battery_data_error != 0xFF)
+						"%d$$FG$$\n", bat_info->max_battery_data_error;
+					else
+						"Unknown$$FG$$\n";
+					"Serial Number\t:$$BLACK$$";
+					if (bat_info->serial_number)
+						"%s$$FG$$\n", SMBIOSStr(header, bat_info->serial_number);
+					else
+						"%d$$FG$$\n", bat_info->sbds_serial_number;
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_OEM_STRINGS:
+				case SMBIOSt_SYS_CONFIG_OPTIONS:
+					if (header->type == SMBIOSt_OEM_STRINGS)	
+						"$$TR,\"OEM Strings\"$$\n";
+					else
+						"$$TR,\"Sys Config Strings\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$";
+					str = *(header(U8 *) + sizeof(CSMBIOSHeader)); //using str to hold the string count
+					for (i = 1; i <= str; i++)
+						"\t\t\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, i);
+					"$$ID,-3$$";
+					break;
+
+				case SMBIOSt_SLOT:
+					CSMBIOSSlotInfo *slot_info = header;
+					"$$TR,\"Slot\"$$\n";
+					"$$FD,CYAN$$";
+					"$$ID,3$$";
+					"Name\t\t\t\t:$$BLACK$$%s$$FG$$\n", SMBIOSStr(header, slot_info->name);
+					"Type\t\t\t\t:$$BLACK$$";
+					if (slot_info->type >= 0xA0)
+						"%Z$$FG$$\n", slot_info->type - 0xA0, "ST_SMBIOS_SLOT_TYPES2";
+					else
+						"%Z$$FG$$\n", slot_info->type, "ST_SMBIOS_SLOT_TYPES1";
+					"Data Bus Width\t:$$BLACK$$%Z$$FG$$\n", slot_info->data_bus_width, "ST_SMBIOS_SLOT_DATA_BUS_WIDTHS";
+					"Current Usage\t:$$BLACK$$%z$$FG$$\n", slot_info->current_usage, " \0Other\0Unknown\0Available\0In Use\0Unavailable";
+					"Slot Length\t\t:$$BLACK$$%z$$FG$$\n", slot_info->length, " \0Other\0Unknown\0Short\0Long\02.5\" Drive Form Factor\03.5\" Drive Form Factor";
+					"Segment Group\t:$$BLACK$$";
+					if (slot_info->segment_group_number != 0xFF)
+						"%d$$FG$$\n", slot_info->segment_group_number;
+					else
+						"None$$FG$$\n";
+					"Bus\t\t\t\t:$$BLACK$$";
+					if (slot_info->bus_number != 0xFF)
+						"%d$$FG$$\n", slot_info->bus_number;
+					else
+						"None$$FG$$\n";
+
+					if (slot_info->device_function_number != 0xFF)
+					{
+						"Device\t\t\t:$$BLACK$$%d$$FG$$\n", slot_info->device_function_number >> 3;
+						"Function\t\t\t:$$BLACK$$%d$$FG$$\n", slot_info->device_function_number & 7;
+					}
+					else
+						"Device\t\t\t:$$BLACK$$None$$FG$$\nFunction\t\t\t:$$BLACK$$None$$FG$$\n";
+					"$$TR,\"Flags\"$$";
+					if (!Bt(&slot_info->flags1, 0))
+					{
+						FlagsStrPrint(buffer, Define("ST_SMBIOS_SLOT_FLAGS1"), slot_info->flags1, show_all_flags, 8);
+						CatPrint(buffer, FlagsStrPrint(buffer2, Define("ST_SMBIOS_SLOT_FLAGS2"), slot_info->flags2, show_all_flags, 4));
+						str = SysRepFlagsMake(buffer);
+						"%s$$FG$$\n", str;
+						Free(str);
+					}
+					"$$ID,-3$$";
+					break;
+
+				case 28:
+					"$$TR,\"Temperature Probe\"$$\n";
+					break;
+					
+			end:
+				structure_count++;
+ 		}
+loop_end:
+		header = header(U8 *) + header->length;
+		for (i = 1; header(U8 *)[i - 1] || header(U8 *)[i]; i++);
+		header = header(U8 *) + i + 1;
+	}
+	if (!handle)
+		"$$FD,BLUE$$";
+
+	return structure_count;
+}
+
+public U0 BIOSRep()
+{//Wrapper around $LK,"SysRep",A="MN:SysRep"$() to only show BIOS info.
+	SysRep(SMBIOSt_BIOS);
+}

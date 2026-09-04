@@ -1,0 +1,89 @@
+---
+title: HTTP server and client
+description: listenHTTP, HTTPServerRequest / Response, HTTP/2, fileserver, reverse proxy, sessions, WebSockets, client.
+---
+
+# HTTP server and client
+
+The request journey is one fiber per accepted TCP connection. That fiber owns the HTTP/1.1 keep-alive loop, or the whole HTTP/2 session (which then multiplexes streams as further tasks). Protocol switch happens **before** the user handler, except h2c upgrade which splits stream 1. Writing headers commits the route. Returning without writing is a fall-through (router) or a 404 (server).
+
+## Settings that matter
+
+`HTTPServerSettings` is a **class** (mutable, reference-shared). `dup` shallow-copies fields and deep-copies `bindAddresses`. TLS context, session store, and HTTP/2 settings are shared, not cloned as independent servers.
+
+| Field | Default / note |
+|---|---|
+| `port` | 80 |
+| `bindAddresses` | `["::", "0.0.0.0"]` |
+| `hostName` | virtual-host key |
+| `options` | `HTTPServerOption.defaults` (parse everything + error stack traces; **not** `distribute`) |
+| `keepAliveTimeout` | 10 seconds |
+| `maxRequestSize` | 2 MiB |
+| `maxRequestHeaderSize` | 8 KiB |
+| `tlsContext` | null → plaintext; `sslContext` is a property alias |
+| `sessionStore` / `sessionIdCookie` | cookie sessions |
+| `serverString` | `"vibe.d/" ~ vibeVersionString` → `"vibe.d/0.7.23"` |
+| `disableHTTP2` | false |
+| `http2Settings` | push, windows, frame size, max streams |
+| `useCompressionIfPossible` | **true** (gzip/deflate via `Accept-Encoding`; not brotli) |
+| `tcpNoDelay` | false |
+| `webSocketPingInterval` | 60 seconds |
+| `errorPageHandler` | custom error pages; kit `handleError` lands here |
+| `accessLog*` | Apache-format file/console loggers |
+
+`HTTPServerOption.distribute` is the only default-off performance knob besides disabling parsers. Stack traces on errors are **on by default** — production snippets xor them off. Default options parse and drain form/JSON bodies. Handlers that need the raw stream must clear those bits.
+
+## Connection and request
+
+Initial wait for the first bytes is **hard-coded 10 seconds** (not `keepAliveTimeout`). Wrong-protocol-on-TLS-port is a hardcoded 497 page. Then:
+
+- Optional TLS. Peek ClientHello; ALPN chooses `h2*` or `http/1.1`. SNI selects the virtual-host context.
+- HTTP/2 if the preface is `PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n`, or ALPN starts with `h2`, or a later `Upgrade: h2c` + `HTTP2-Settings`.
+- Otherwise HTTP/1.x keep-alive.
+
+Per request the server allocates `HTTPServerRequest` / `HTTPServerResponse` from `ThreadMem` and a 4 KiB `ScopedPool` for parser scratch. Body is lazy: `Content-Length` → `LimitedHTTPInputStream`; chunked → `ChunkedInputStream`. `Expect: 100-continue` writes `100` on the top stream. Session cookie → `sessionStore.open`. Form / JSON parse **drains** `bodyReader` when those options are on.
+
+`HTTPServerRequest` is what a `+page.server.d` method takes: peer address, `path`, `query`, `form`, `json`, `cookies`, `params`, `files`, `session`, `tls`, `clientCertificate`, lazy `bodyReader`. `req.params["id"]` is the `:id` the router stored, not SvelteKit `locals`. `locals` is not a field. A real `HTTPServerRequest.locals` is a titled vibe.0 seam and must not be smuggled in on a svelte-d PR.
+
+`HTTPServerResponse` is `writeBody`, `writeJsonBody`, `writeRawBody`, `bodyWriter`, `startSession`, `redirect`, `setCookie`, the header map, and HTTP/2 vs 1.x `finalize()`. `enforceHTTP` / `enforceBadRequest` throw `HTTPStatusException` and become 4xx/5xx via `errorPageHandler`.
+
+Default response headers: `Server`, cached `Date`, `Keep-Alive` for persistent HTTP/1.1. Compression wrappers sit on the body writer when `Content-Encoding` was set.
+
+## HTTP/2
+
+Three start modes: prior-knowledge preface, ALPN `h2*` over TLS, h2c upgrade (`101 Switching Protocols`, session runs in a new task so stream 1 can finish as HTTP/2). `HTTP2Session` wraps libhttp2 plus a connector; `HTTP2Stream` is a `ConnectionStream`. Settings include `enablePush`, connection/stream windows, `chunkSize` (max frame / 16 KiB default), `maxConcurrentStreams`, `maxHeadersListSize`. `:method` / `:path` / `:authority` / `:scheme` map onto `HTTPRequest` / `Host`. After header parse the rest of the server (router, sessions, compression) is protocol-agnostic.
+
+Client HTTP/2 cleartext upgrade is **off** by default (`disablePlainUpgrade` is true). Server h2c upgrade is **on** if HTTP/2 is enabled.
+
+## Fileserver, reverse proxy, sessions, WebSockets
+
+`serveStaticFiles` / `serveStaticFile` strip a prefix, `Path.normalize`, reject absolute and `..`. Optional `encodingFileExtension` maps `"gzip"` → `.gz` so precompressed files are served with `Content-Encoding`. MIME from `vibe.inet.mimetypes`. The engine serves `../public/` **before** the Vite proxy, which is how `public/hello.txt` is a vibe.0 file and not a Vite accident.
+
+`listenHTTPReverseProxy` / `reverseProxyRequest` force `HTTPServerOption.none` on the outer server (no body parse), drop hop-by-hop headers, and can proxy WebSockets. The engine uses this toward Vite `:5173` with HTTP/2 disabled on that hop. `adapter-vibe0-proxy` is that shape in a bun package.
+
+`Session` + `SessionStore`. Cookie name from settings. ID from `SHA1HashMixerRNG`, constructed only on `"V|"` threads. In-tree stores: memory, and `vibe.db.redis.sessionstore.RedisSessionStore` (JSON values, optional TTL). `SessionVar!(T, "key")` on a web-interface class binds a session key.
+
+`handleWebSockets` / `handleWebSocket` upgrade from HTTP/1.1 (and, unverified, HTTP/2). Ping interval from server settings. A client helper exists.
+
+Auth: `performBasicAuth(realm, pwcheck)` is in the barrel. Digest exists and is not starred.
+
+## Client
+
+`requestHTTP(url, requester, responder, settings)` and `connectHTTP` (pooled). `HTTPClientSettings` has `proxyURL`, `defaultKeepAliveTimeout` (115s), `maxRedirects` (2), `userAgent` (`"vibe.d/0.7.23 (HTTPClient, +http://vibed.org/)"`), `cookieJar`, nested `http2`, and a `tlsContext` override. Pooling is a thread-local `CircularBuffer` of 16 `(ConnInfo, ConnectionPool!HTTPClient)`. `ConnInfo` includes **settings identity** (reference), so cloned settings make a new pool. Body decode on the client is gzip/deflate **and** brotli — the server auto-encode does not offer brotli.
+
+Kit `load` that `fetch`es is **out of v1** (client unread). Do not print a Node `fetch` implementation of `load`. The host writes JSON; the wasm cell `JsPromise.then`s it.
+
+## Stream stack
+
+```
+InputStream / OutputStream / Stream / ConnectionStream   vibe.core.stream
+        ▲
+TCPConnection / UDPConnection / UDSConnection (linux)    vibe.core.net
+        ▲
+TLSStream (interface)                                    vibe.stream.tls
+   BotanTLSStream | OpenSSLStream
+        ▲
+HTTP2Stream                                              vibe.http.http2
+```
+
+HTTP always talks to a `ConnectionStream`. `createTLSStream` is the stable constructor. Botan is the default; OpenSSL if `TLSVersion.tls1_3`. `vibe.stream.ssl` is a scheduled-for-deprecation alias layer.

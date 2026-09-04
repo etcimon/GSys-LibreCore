@@ -109,6 +109,16 @@ T   sv-timing/**
 # separate GPL work under gitignored g6lc_qemu/{out,qemu}/ and are never committed here.
 # See g6lc_qemu/AGENTS-licensing.md and architecture/g6lc-qemu/README.md s3 (E-GPLLINK).
 T   g6lc_qemu/**
+T   g6lc_bios/**
+# Unlicense / public-domain TempleOS + ZealOS reference forks (not MIT).
+U   g6lc_bios/kernel-spec/ZealOS/**
+U   g6lc_bios/kernel-spec/TempleOS/**
+U   g6lc_bios/kernel-spec/goja/**
+U   g6lc_bios/kernel-spec/lirx-dom/**
+U   g6lc_bios/kernel-spec/webidl/**
+U   g6lc_bios/kernel-spec/svelte-d/**
+U   g6lc_bios/kernel-spec/botan/**
+U   g6lc_bios/kernel-spec/libwasm/**
 # linux-dist OpenWrt trees are upstream GPL (etcimon forks of official). Leave
 # them verbatim (E-UPSTREAMWRITE). First-party linux-dist/*.md and ubuntu/
 # scaffold stay tier T via the g6lc_qemu/** rule above; last match wins.

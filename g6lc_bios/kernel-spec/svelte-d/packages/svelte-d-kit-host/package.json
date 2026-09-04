@@ -1,0 +1,16 @@
+{
+  "name": "svelte-d-kit-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "bun + ts + svelte-d consumer: [...rest] → *, hooks.server errorPageHandler, form post/postSave.",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "svelte-d": "workspace:*"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

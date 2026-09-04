@@ -1,0 +1,29 @@
+---
+title: "on: to Slot and @connect"
+description: Named handlers become a child Slot, @callback click, and a parent @connect path. Empty Slot is EventEmitter!().
+---
+
+# `on:` → Slot / `@connect`
+
+An `on:click={go}` looks, in Svelte, like a function attribute. In libwasm it is a small graph. The element becomes its own struct. That struct mixes in `Slot!"click"`, which is an `EventEmitter!()`. It declares `@callback!"click" void onClick(MouseEvent ev)` that `this.emit(click)`. The parent declares `@child GoButton goButton` and `@connect!"goButton.click" void on_goButton_click()` that calls the author’s `go()`. The author’s method is still named `go`. The printer added the button struct and the connect path around it.
+
+```d
+struct GoButton {
+  mixin Slot!"click";
+  @callback!"click" void onClick(MouseEvent ev) { this.emit(click); }
+  mixin NodeDef!"button";
+}
+struct ClickField {
+  @child GoButton goButton;
+  @connect!"goButton.click" void on_goButton_click() { go(); }
+  void go() { /* author body */ }
+}
+```
+
+Empty `Slot!"click"` is `EventEmitter!()`. libwasm `add` **appends** (`~=`). Assigning a delegate into that `Vector` does not compile — an older `Slot` assigned (`cbs = del`) and broke against `Vector`. If you write `mixin Slot` by hand, append. Do not assign.
+
+`@connect!"a.b"` is a **member path** on the compiled struct. Dots stay dots. It is not a CSS selector and not a kit path. `@connect!("list.items","link.clicker")` is the list form: the first path is the `HTMLArray`, the second is the event on item type `T` with dots rewritten to underscores (`link_clicker`). The connected method’s first parameter **must be `size_t`**. That integer is the item address (or index via `getIndexInArray`). Forgetting it is a compile error in the generated D, not a runtime miss.
+
+Component events `on:done={go}` connect to `@connect!"panel.done"` — the child’s Slot, not a new DOM listener. Several `on:` on one node become several listeners. Modifiers are not a second event system: `preventDefault`, `stopPropagation`, `once`, `trusted` (`isTrusted`), and `self` are applied in the callback. `<form on:submit>` uses `nodeHandle` because `HTMLFormElement.opDispatch` is not a template; UFCS `.handle` is the wrong lookup.
+
+Author `mixin Slot!("name", T)` that already `this.emit(name)` is not re-emitted. The printer will not double-wrap a Slot you already wrote. `on:click|self|trusted` is `ComboMedia`. Drag, copy, scroll, contextmenu, pointer, focus, wheel, and touch are the same IR with different event names (`ComboMisc`, `ComboNest`, `ComboSem`).

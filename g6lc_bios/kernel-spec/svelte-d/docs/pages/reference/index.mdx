@@ -1,0 +1,10 @@
+---
+title: Reference
+description: CLI, adapters, and the import API.
+---
+
+# Reference
+
+The development guide and the language section are how you think. This section is how you invoke. The TypeScript surface is `import { compileWorkspace, dropWorkspace, mapKitPath, workspaceDir, setupPlatform } from 'svelte-d'`. The CLI is the same operations with flags, plus `setup`, `parse`, `scan`, `map`, `bootstrap`, `kit-routes`, `lodash`, `wasm`, `host`, and `version`. Adapters consume `ws/.svelte-d/manifest.json` and copy artifacts; they do not start a Node HTTP stack.
+
+If a flag’s default surprises you, it is usually dest. Dest comes from `svelte-d.config.ts` `workspace`, then from the kit project root, never from the packaged template. See [config](../guide/config) before assuming `drop-ws` without `--dest` wrote where you are looking.

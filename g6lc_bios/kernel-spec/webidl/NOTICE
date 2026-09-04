@@ -1,0 +1,11 @@
+kernel-spec/webidl — Mozilla WebIDL definitions (MPL-2.0)
+==========================================================
+
+Copied from `riscv-compilers/libwasm/webidl/definitions` (Gecko-style
+WebIDL). Each file keeps its Mozilla Public License 2.0 header.
+
+These files are a **spec of record** for the BIOS lightweight browser
+(`g6b-webidl` / `g6b-dom` / `g6b-js`). They are not compiled, flisted, or
+linked. First-party stubs and live interfaces are MIT in `crates/**`.
+
+Do not relicense. Do not strip MPL headers (E-UPSTREAMWRITE analog).

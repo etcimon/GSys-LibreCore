@@ -1,0 +1,139 @@
+:root {
+  /*--ifm-color-primary: #2e8555;*/
+  /*--ifm-color-primary-dark: #29784c;*/
+  /*--ifm-color-primary-darker: #277148;*/
+  /*--ifm-color-primary-darkest: #205d3b;*/
+  /*--ifm-color-primary-light: #33925d;*/
+  /*--ifm-color-primary-lighter: #359962;*/
+  /*--ifm-color-primary-lightest: #3cad6e;*/
+
+  --ifm-color-primary: #1499ff;
+  --ifm-color-primary-dark: #008cf8;
+  --ifm-color-primary-darker: #0084ea;
+  --ifm-color-primary-darkest: #006dc1;
+  --ifm-color-primary-light: #30a5ff;
+  --ifm-color-primary-lighter: #3dabff;
+  --ifm-color-primary-lightest: #66bdff;
+
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+
+  & .docusaurus-mermaid-container {
+    & .actor {
+      stroke: #dacef3 !important;
+      fill: #ededff !important;
+    }
+
+    & text.actor > tspan {
+      fill: #000 !important;
+    }
+
+    & .messageText {
+      fill: #333 !important;
+    }
+  }
+}
+
+[data-theme='dark'] {
+  /*--ifm-color-primary: #25c2a0;*/
+  /*--ifm-color-primary-dark: #21af90;*/
+  /*--ifm-color-primary-darker: #1fa588;*/
+  /*--ifm-color-primary-darkest: #1a8870;*/
+  /*--ifm-color-primary-light: #29d5b0;*/
+  /*--ifm-color-primary-lighter: #32d8b4;*/
+  /*--ifm-color-primary-lightest: #4fddbf;*/
+
+  --ifm-color-primary: #57a8ff;
+  --ifm-color-primary-dark: #3596ff;
+  --ifm-color-primary-darker: #248dff;
+  --ifm-color-primary-darkest: #0073ef;
+  --ifm-color-primary-light: #79baff;
+  --ifm-color-primary-lighter: #8ac3ff;
+  --ifm-color-primary-lightest: #beddff;
+
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+
+  & .docusaurus-mermaid-container {
+
+    & .rect {
+      fill: #4f3c69 !important;
+    }
+
+    & .actor {
+      stroke: #d1d1d1 !important;
+      fill: #3f3f3f !important;
+    }
+
+    & .note {
+      stroke: #a3e791 !important;
+      fill: #505d37 !important;
+    }
+
+    & .noteText,
+    & .noteText > tspan {
+      fill: #e3e3e3 !important;
+    }
+
+    & .loopText,
+    & .loopText > tspan {
+      fill: #9ab6ff !important;
+    }
+
+    & .labelBox {
+      stroke: #6cfbac !important;
+      fill: #1b1b1d !important;
+    }
+
+    & .labelText,
+    & .labelText > tspan {
+      fill: #54dfa4 !important;
+    }
+
+    & text.actor > tspan {
+      fill: #ffc42b !important;
+      font-weight: bold !important;
+    }
+
+    & .messageText {
+      fill: #ff7777 !important;
+    }
+
+    & .actor-man circle,
+    & line {
+      stroke: #ffa16b !important;
+      fill: #1f2020 !important;
+    }
+
+    & .loopLine {
+      stroke: #91532d !important;
+      fill: #1f2020 !important;
+    }
+
+    & .messageLine0,
+    & .messageLine1 {
+      stroke: #5b96a3 !important;
+    }
+
+    & #arrowhead path,
+    & #crosshead path {
+      fill: #5b96a3 !important;
+      stroke: #5b96a3 !important;
+    }
+  }
+}
+
+
+article:not([itemprop="blogPost"]) img {
+  border-radius: var(--ifm-code-border-radius, 0.4rem);
+  background-color: #fff;
+  border: 1px solid var(--ifm-color-emphasis-300, #dadde1);
+  //padding: 10px 0;
+}
+
+article img {
+  display: block;
+}
+
+/*[data-theme='dark'] .markdown img {*/
+/*    background-color: rgba(255, 255, 255, 0.6);*/
+/*}*/

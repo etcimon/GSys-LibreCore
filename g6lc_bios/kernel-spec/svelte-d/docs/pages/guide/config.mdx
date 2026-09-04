@@ -1,0 +1,18 @@
+---
+title: svelte-d.config.ts
+description: Project-level config. workspace defaults to ./svelte-engine-ws at the project root.
+---
+
+# svelte-d.config.ts
+
+svelte-d looks for a project config by walking up from the current working directory. The names it accepts, in order, are `svelte-d.config.ts`, `.js`, `.mjs`, `.cjs`, and `.json`. The walk skips `node_modules`, `.git`, and `svelte-engine-ws` so a generated workspace cannot hide a real config, and so an install tree cannot steal dest from the project. The TypeScript loader does **not** `import()` the file. It extracts the `workspace` (or `workspaceDir`) string with the same regular expression the D CLI uses. That is why a config may say `import { defineConfig } from 'svelte-d'` for an editor’s sake and still cannot cycle through the loader: the loader never executes it.
+
+```ts
+export default {
+  workspace: './svelte-engine-ws',
+}
+```
+
+The field is relative to the config file, or absolute. Dest resolution is then: that field if present; else `<kit-project>/svelte-engine-ws` when a `src/routes` (or `src-svelte`) tree is found that is not the engine itself; else an existing checkout sibling. The dest is never the packaged `svelte-engine/` template. `import { defineConfig, workspaceDir, loadSvelteDConfig } from 'svelte-d'` is the TS surface. The D CLI, including `drop-ws` without `--dest`, reads the same files.
+
+Putting `workspace` at the project top level is the point of the feature. An earlier default dropped next to the packaged engine, which for an installed package meant `node_modules/svelte-d/svelte-engine-ws`. That dest disappears on the next install and treats the compiler package as the application. The config exists so you do not have to remember that.

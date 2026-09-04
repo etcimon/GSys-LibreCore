@@ -1,0 +1,9 @@
+@import "tailwindcss";
+@plugin "daisyui" {
+  --daisyui-themes: nord, abyss, cupcake, dracula;
+  --daisyui-root: "#root";
+  --daisyui-include: ;
+  --daisyui-exclude: ;
+  --daisyui-prefix: ;
+  --daisyui-logs: true;
+}

@@ -1,0 +1,19 @@
+// Generated KMain.ZC — rust g6b-design, do not edit
+// product=desktop march=rv64imafdc xlen=64
+U0 HolycInit()
+{
+	Print("HOLYC-READY\n");
+}
+
+U0 UiBoot()
+{
+	Print("UI-BOOT\n");
+}
+
+U0 KMain()
+{
+	Print("G6LC-BIOS\n");
+	HolycInit();
+	Print("DUAL-BAND uart+tcp:2222\n");
+	UiBoot();
+}

@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-tls"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "HolyC HTTPS + RISC-V SHA-256/AES-128 primitives (not OpenSSL)"
+
+[lints]
+workspace = true

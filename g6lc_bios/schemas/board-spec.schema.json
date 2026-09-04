@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://gsys.dev/g6lc-bios/board-spec.schema.json",
+  "title": "g6lc_bios BoardSpec",
+  "type": "object",
+  "required": ["schema_version", "isa"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "product": { "type": "string" },
+    "isa": {
+      "type": "object",
+      "properties": {
+        "xlen": { "enum": [32, 64] },
+        "march": { "type": "string" },
+        "mmu": { "type": "string" },
+        "extensions": {
+          "type": "object",
+          "additionalProperties": { "enum": ["live", "stub", "absent"] }
+        }
+      }
+    },
+    "kernel": { "type": "object" },
+    "connectors": { "type": "object" },
+    "peripherals": { "type": "array" },
+    "memory": { "type": "object" },
+    "harts": { "type": "object" },
+    "entry": { "type": "object" },
+    "holyc": { "type": "object" },
+    "postboot": { "type": "object" },
+    "loopback": { "type": "object" },
+    "net_expose": { "type": "object" },
+    "faces": { "type": "object" }
+  }
+}

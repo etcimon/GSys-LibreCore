@@ -1,0 +1,144 @@
+/**
+* Modular Reducer
+* 
+* Copyright:
+* (C) 1999-2010 Jack Lloyd
+* (C) 2014-2026 Etienne Cimon
+*
+* License:
+* Botan is released under the Simplified BSD License (see LICENSE.md)
+*/
+module botan.math.numbertheory.reducer;
+
+import botan.constants;
+static if (BOTAN_HAS_PUBLIC_KEY_CRYPTO):
+
+import botan.math.numbertheory.numthry;
+import botan.math.mp.mp_core;
+import botan.math.bigint.bigint;
+import std.traits : isPointer;
+
+/**
+* Modular Reducer (using Barrett's technique)
+*/
+struct ModularReducer
+{
+public:
+    /**
+    * Returns: the modulus used for reduction
+    */
+    ref const(BigInt) getModulus() const return { return m_modulus; }
+
+    /**
+    * Barrett reduction of `x` modulo the stored modulus.
+    * Params:
+    *  x = value to reduce (moved from)
+    * Returns: x reduced into [0, p)
+    */
+    BigInt reduce(BigInt x) const
+    {
+        if (m_mod_words == 0)
+            throw new InvalidState("ModularReducer: Never initalized");
+        if (x.cmp(m_modulus, false) < 0)
+        {
+            if (x.isNegative())
+                return x + m_modulus; // make positive
+            return x.move;
+        }
+        else if (x.cmp(m_modulus_2, false) < 0)
+        {
+            BigInt t1 = x.clone;
+            t1.setSign(BigInt.Positive);
+            t1 >>= (MP_WORD_BITS * (m_mod_words - 1));
+            t1 *= m_mu;
+            
+            t1 >>= (MP_WORD_BITS * (m_mod_words + 1));
+            t1 *= m_modulus;
+            
+            t1.maskBits(MP_WORD_BITS * (m_mod_words + 1));
+            
+            BigInt t2 = x.move;
+            t2.setSign(BigInt.Positive);
+            t2.maskBits(MP_WORD_BITS * (m_mod_words + 1));
+            
+            t2 -= t1;
+            
+            if (t2.isNegative())
+            {
+                t2 += BigInt.powerOf2(MP_WORD_BITS * (m_mod_words + 1));
+            }
+            while (t2 >= m_modulus)
+                t2 -= m_modulus;            
+
+            if (x.isPositive())
+                return t2.move();
+            else
+                return m_modulus - t2;
+        }
+        else
+        {
+            // too big, fall back to normal division
+            return (x % m_modulus);
+        }
+    }
+
+    /**
+    * Multiply mod p
+    * Params:
+    *  x = integer
+    *  y = integer
+    * Returns: (x * y) % p
+    */
+    BigInt multiply(const(BigInt)* x, const(BigInt)* y) const
+    { 
+        return reduce((*x) * y);
+    }
+
+    /**
+    * Square mod p
+    * Params:
+    *  x = integer
+    * Returns: (x * x) % p
+    */
+    BigInt square()(const(BigInt)* x) const
+    {
+        return reduce(x.square());
+    }
+
+    /**
+    * Cube mod p
+    * Params:
+    *  x = integer
+    * Returns: (x * x * x) % p
+    */
+    BigInt cube()(const(BigInt)* x) const
+    { return multiply(x, this.square(x)); }
+
+    /**
+    * Returns: true iff a modulus was supplied
+    */
+    bool initialized() const { return (m_mod_words != 0); }
+
+    /**
+    * Params:
+    *  mod = positive modulus p
+    */
+    this(const ref BigInt mod)
+    {
+        if (mod <= 0)
+            throw new InvalidArgument("ModularReducer: modulus must be positive");
+        m_modulus = mod.clone;
+        m_mod_words = m_modulus.sigWords();
+        m_modulus_2 = .square(&m_modulus);
+		auto po2 = BigInt.powerOf2(2 * MP_WORD_BITS * m_mod_words);
+        m_mu = po2 / m_modulus;
+    }
+
+    @property ModularReducer clone() const {
+        return ModularReducer(m_modulus);
+    }
+
+private:
+    BigInt m_modulus, m_modulus_2, m_mu;
+    size_t m_mod_words;
+}

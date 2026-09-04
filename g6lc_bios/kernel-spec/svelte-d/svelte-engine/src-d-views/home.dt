@@ -1,0 +1,9 @@
+ons-page#tabbar-page
+ons-toolbar
+	div.center Home
+		ons-toolbar-button(onclick="fn.toggleMenu()")
+			ons-icon(icon="ion-ios-menu, material:md-menu")
+ons-tabbar#appTabbar(swipeable, position="auto")
+	ons-tab(label="Home", icon="ion-ios-home", page="home.html", active)
+	ons-tab(label="Forms", icon="ion-ios-create", page="forms.html")
+	ons-tab(label="Animations", icon="ion-ios-film", page="animations.html")

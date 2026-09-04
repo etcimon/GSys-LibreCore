@@ -1,0 +1,362 @@
+{
+  "files": [
+    {
+      "ident": "App_svelte",
+      "rel": "src/App.svelte",
+      "tag": "section",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/clocks"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/menu"
+        },
+        {
+          "kind": "holyc",
+          "line": "UsbLs(\"fat32\")"
+        },
+        {
+          "kind": "holyc",
+          "line": "MenuCpu()"
+        },
+        {
+          "kind": "register",
+          "path": "/bios/custom",
+          "method": "GET"
+        },
+        {
+          "kind": "text",
+          "id": "bios-ui",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "status",
+          "value": "UI-BOOT"
+        },
+        {
+          "kind": "text",
+          "id": "bios-nav",
+          "value": "Main CPU Memory Uncore Devices Boot Settings"
+        }
+      ]
+    },
+    {
+      "ident": "Boot_svelte",
+      "rel": "src/Boot.svelte",
+      "tag": "section",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/boot"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/bootloader"
+        },
+        {
+          "kind": "holyc",
+          "line": "Menu(\"boot\")"
+        },
+        {
+          "kind": "text",
+          "id": "menu-boot",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "boot-title",
+          "value": "Boot"
+        }
+      ]
+    },
+    {
+      "ident": "Cpu_svelte",
+      "rel": "src/Cpu.svelte",
+      "tag": "section",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/cpu"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/cpu"
+        },
+        {
+          "kind": "holyc",
+          "line": "MenuCpu()"
+        },
+        {
+          "kind": "text",
+          "id": "menu-cpu",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "cpu-title",
+          "value": "CPU"
+        }
+      ]
+    },
+    {
+      "ident": "Devices_svelte",
+      "rel": "src/Devices.svelte",
+      "tag": "section",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/devices"
+        },
+        {
+          "kind": "holyc",
+          "line": "Menu(\"devices\")"
+        },
+        {
+          "kind": "text",
+          "id": "menu-devices",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "devices-title",
+          "value": "Devices"
+        }
+      ]
+    },
+    {
+      "ident": "FileMgr_svelte",
+      "rel": "src/FileMgr.svelte",
+      "tag": "section",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/files"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/files/fat32"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/files/ntfs"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/files/ext4"
+        },
+        {
+          "kind": "holyc",
+          "line": "UsbLs(\"ntfs\")"
+        },
+        {
+          "kind": "text",
+          "id": "filemgr",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "fm-tabs",
+          "value": "fat32 ntfs ext4"
+        },
+        {
+          "kind": "text",
+          "id": "fm-list",
+          "value": "USB-FILES"
+        }
+      ]
+    },
+    {
+      "ident": "Flash_svelte",
+      "rel": "src/Flash.svelte",
+      "tag": "section",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/usb/ls"
+        },
+        {
+          "kind": "holyc",
+          "line": "UsbFlash(\"openwrt.bin\")"
+        },
+        {
+          "kind": "text",
+          "id": "usb-flash",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "usb-title",
+          "value": "USB-FAT32"
+        },
+        {
+          "kind": "text",
+          "id": "usb-list",
+          "value": "openwrt.bin"
+        }
+      ]
+    },
+    {
+      "ident": "Main_svelte",
+      "rel": "src/Main.svelte",
+      "tag": "section",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/main"
+        },
+        {
+          "kind": "holyc",
+          "line": "Menu(\"main\")"
+        },
+        {
+          "kind": "text",
+          "id": "menu-main",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "main-title",
+          "value": "Main"
+        }
+      ]
+    },
+    {
+      "ident": "Memory_svelte",
+      "rel": "src/Memory.svelte",
+      "tag": "section",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/memory"
+        },
+        {
+          "kind": "holyc",
+          "line": "Menu(\"memory\")"
+        },
+        {
+          "kind": "text",
+          "id": "menu-memory",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "memory-title",
+          "value": "Memory"
+        }
+      ]
+    },
+    {
+      "ident": "Menu_svelte",
+      "rel": "src/Menu.svelte",
+      "tag": "nav",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/menu"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/cpu"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/uncore"
+        },
+        {
+          "kind": "holyc",
+          "line": "MenuCpu()"
+        },
+        {
+          "kind": "holyc",
+          "line": "MenuUncore()"
+        },
+        {
+          "kind": "text",
+          "id": "bios-menu",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "menu-title",
+          "value": "Main CPU Memory Uncore Devices Boot Settings"
+        }
+      ]
+    },
+    {
+      "ident": "Settings_svelte",
+      "rel": "src/Settings.svelte",
+      "tag": "section",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/settings"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/settings"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/settings/usb"
+        },
+        {
+          "kind": "holyc",
+          "line": "Menu(\"settings\")"
+        },
+        {
+          "kind": "text",
+          "id": "menu-settings",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "settings-title",
+          "value": "Settings"
+        }
+      ]
+    },
+    {
+      "ident": "Uncore_svelte",
+      "rel": "src/Uncore.svelte",
+      "tag": "section",
+      "langTs": true,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/uncore"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/uncore"
+        },
+        {
+          "kind": "holyc",
+          "line": "MenuUncore()"
+        },
+        {
+          "kind": "text",
+          "id": "menu-uncore",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "uncore-title",
+          "value": "Uncore"
+        }
+      ]
+    }
+  ]
+}

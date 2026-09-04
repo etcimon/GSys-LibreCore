@@ -1,0 +1,10 @@
+---
+title: Advanced
+description: One LDC 1.43, wasm-eh, incremental compile, debug map.
+---
+
+# Advanced
+
+The development guide assumes the compiler is present and the IR is the one you meant. This section is what happens when that assumption is the thing you are debugging. [LDC 1.43 setup](./platform) is the single compiler on every OS, and why a 1.42 `ldc2` on `PATH` is not a fallback. [wasm-eh](./wasm-eh) is why `try/catch` works and why `.await` does not. [Incremental compile](./incremental) is reprint-skip, opposite-cell-skip, and per-`.o`. [Debug map](./debug) is how a wasm stack frame becomes a `.svelte` line.
+
+None of this changes the IR contract. It is how the contract stays cheap to re-check.

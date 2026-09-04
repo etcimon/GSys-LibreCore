@@ -1,0 +1,14 @@
+---
+title: "svelte:* special elements"
+description: head, window, document, body, element, component, self, fragment, boundary, options — each has a distinct IR.
+---
+
+# `<svelte:*>`
+
+Official Svelte special elements are not one IR family. `<svelte:head>` is a `document()` walk. `<svelte:element this={tag}>` is a dynamic `createElement`. `<svelte:self>` is a nullable pointer so `compile!` does not recurse at CTFE. Treating them as “the svelte: namespace” and printing one wrapper would erase those distinctions. Each row below is a different reason.
+
+`<svelte:head>` becomes `document()` and walks `<title>` children. `<title>` itself is `document().title("…")` in `onMount` (handle 1 is `document`). Putting that write in `construct()` would run before the handle table is live. `<svelte:window>` is `window()` plus `on:`; `bind:scrollY` / `scrollX` call `window().scrollY()`. `<svelte:document>` and `<svelte:body>` are the same idea on `document()` and the body, with `on:`. Fixtures: `ComboRest`, `ComboMore`, `ComboWide`, `ComboOr`.
+
+`<svelte:element this="section">` is static and becomes `NodeDef!"section"`. `<svelte:element this={tag}>` is dynamic: a `div` plus `@attr!"data-tag"`, seeded in `construct`, created with `createElement(string)` at `createNode`, and re-applied by `applyTag` via `document().createElement`, `replaceChild`, and a handle steal. `this.update.tag` re-applies. That is a lot of mechanism for one attribute, and it is why a dynamic tag is not “just a string `@attr`.”
+
+`<svelte:component this={ClickField}>` with a static type is `@child`. `<svelte:self>` is `@child Host* selfKid`, null until `new`, plus a body `@child SelfDiv`. `compile!`, CSS style-sets, and `registerRoutes` skip same-type `T*` so CTFE does not recurse forever. `<svelte:fragment>` walks children and prints no wrapper `NodeDef`. `<svelte:boundary>` is [await / boundary](./await-boundary). `<svelte:options>` is a comment. None of these is a second `compile!`.

@@ -1,0 +1,19 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-elf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "BoardSpec → RISC-V ELF OpenSBI next-stage payload (host-generated)"
+
+[dependencies]
+g6b-spec = { workspace = true }
+g6b-kernel = { workspace = true }
+g6b-asm = { workspace = true }
+
+[lints]
+workspace = true

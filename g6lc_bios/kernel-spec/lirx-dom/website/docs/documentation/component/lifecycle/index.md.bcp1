@@ -1,0 +1,118 @@
+# Lifecycle
+
+Listening and using properly the lifecycle of a component, is a task **requiring a special attention**.
+Indeed, if this part is poorly managed, it will usually lead to memory leaks or inconsistent states of the application.
+This is something we want to avoid at all costs,
+if we want to keep a good user experience, and a functional application.
+
+## Manual lifecycle handling
+
+We'll use illustrate this particular concern, with a component logging the current date every 1000ms.
+
+Let's start by remembering that all the internal logic of the component,
+must be handled from the `init` function defined when calling `createComponent`:
+
+```ts
+export const MyComponent = createComponent<IConfig>({
+  // ...other properties
+  init: (node: VirtualCustomElementNode<IConfig>): void => {
+    // here we'll manage the node's state, and all the logic of the component
+  },
+});
+```
+
+A naive solution
+
+```ts
+// NAIVE SOLUTION
+export const MyComponent = createComponent<IConfig>({
+  // ...other properties
+  init: (node: VirtualCustomElementNode<IConfig>): void => {
+    const request = fetch('https://api.com')
+      .then(_ => _.json)
+      .then((data) => {
+        console.log('success', data);
+        // play with data
+      })
+      .then((error) => {
+        console.error(error);
+      });
+  },
+});
+```
+
+However, in this example,
+
+---
+
+In general, any async task happening in the context of the component **MUST** listen to the component "connected" state.
+
+
+The "connected" state, as well as all the internal logic of the component,
+must be handled from the `init` function defined when calling `createComponent`:
+
+```ts
+export const MyComponent = createComponent<IConfig>({
+  // ...other properties
+  init: (node: VirtualCustomElementNode<IConfig>): void => {
+    // here we'll manage the node's state, and all the logic of the component
+  },
+});
+```
+
+The init function receives a single parameter `node` of type [VirtualCustomElementNode](/docs/reference/virtual-custom-element-node/).
+This object contains, many properties and methods, including some to play with the component's lifecycle:
+
+
+```ts
+interface Component {
+  readonly isConnected: boolean;
+  readonly isConnected$: IObservable<boolean>;
+  
+  onConnected$<GValue>(
+    observable: IObservable<GValue>,
+  ): IObservable<GValue>;
+}
+```
+
+The readonly `isConnected` property returns true if the node is connected to the DOM,
+meaning that the node has the root document (`document`), as a parent.
+
+However, because the "connected" state of the node will change over time (ex: removed from the DOM), we'll prefer to user the Observable `isConnected$` instead.
+
+
+```ts
+export const MyComponent = createComponent<IConfig>({
+  // ...other properties
+  init: (node: VirtualCustomElementNode<IConfig>): void => {
+    const request$ = fromFetch('https://api.com');
+    
+    const data$ = switchMap$$(node.isConnected$, (connected: boolean) => {
+      return connected
+        ? request$
+        : empty();
+    });
+    
+    // play with data$
+    $data($log);
+  },
+});
+```
+
+
+
+
+
+## Automatic lifecycle handling
+
+speak about self disconnected observables.
+
+---
+
+It's very important to properly manage the lifecycle of a component:
+
+Usually, when the component is connected to the DOM , we want to start many async tasks
+
+TODO
+
+Speak about onConnected ?

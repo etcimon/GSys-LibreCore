@@ -1,0 +1,9 @@
+{
+  "schema": "svelte-d-wasm-ldc/v1",
+  "ldc": "E:/cva6/riscv-compilers/ldc2-build/bin/ldc2.exe",
+  "dub": "C:/D/ldc2-1.41.0-windows-x64/bin/dub.exe",
+  "libwasm": "C:/Users/etcim/.grok/worktrees/cva6/bios-design-impl/g6lc_bios/browser-ui/libwasm",
+  "cell": "wasm-eh",
+  "version": "LDC - the LLVM D compiler (1.43.0-git-1218a47):",
+  "ok": true
+}

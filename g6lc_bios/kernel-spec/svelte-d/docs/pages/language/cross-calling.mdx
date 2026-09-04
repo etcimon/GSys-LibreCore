@@ -1,0 +1,91 @@
+---
+title: Cross-calling lang=d and lang=ts
+description: Simple names expand to Lodash callTs / exportDelegate. Module-mangled registry. Optional args keep defaults.
+---
+
+# Cross-calling `lang="d"` and `lang="ts"`
+
+The two script cells stay two cells. What they share is libwasm’s existing registration, not a second FFI. TypeScript exports land on `window.__svelteD.ts[<module>][<name>]` and on `jsExports.env`. D calls them through **Lodash** `invoke`. D `extern(C) export` functions register with **`exportDelegate`**; TypeScript calls `callNative('module.fn', args)` (or `window.__svelteD.d[module][name]`).
+
+## Names
+
+The printer keeps the **simple name** in the file that declared the function. The registry key is **module-mangled** so two `.svelte` files can both export `greet`:
+
+| Surface | Example |
+|---|---|
+| Svelte rel | `lib/Bridge.svelte` |
+| Module ident | `lib_Bridge_svelte` (same as `identFromRel`) |
+| `context="module"` | `lib_Bridge_svelte_mod` |
+| TS export `greet` | `__svelteD.ts.lib_Bridge_svelte.greet` |
+| D `extern(C) export add` | `__svelteD.d` + `callNative('lib_Bridge_svelte.add', args)` |
+| Same-file D call | `greet("Ada")` — a module-level variadic thunk |
+| Other `.svelte` D | `import lib.Bridge : greet;` then `greet("Peer")` |
+
+Multiple `<script lang="ts">` and `<script lang="d">` tags in one file are all scanned. Exports are registered even when the other language never calls them.
+
+## Optional arguments
+
+Calling is not arity-strict. A TS `greet(name = "world")` becomes a D thunk `greet(ARGS...)(auto ref ARGS args)` that forwards **only the arguments you wrote**. Omitted trailing arguments keep the JavaScript default. The same is true the other way: `callNative('mod.add', [1])` leaves `int add(int a, int b = 0)` with `b = 0`.
+
+Do not wrap the call in extra overloads that require every parameter.
+
+## D calling TS (Lodash)
+
+```svelte
+<script lang="ts">
+  export function greet(name: string = "world"): string {
+    return "hi " + name;
+  }
+  export async function loadUser(id: number = 0): Promise<string> {
+    return "u" + id;
+  }
+</script>
+<script lang="d">
+  string msg;
+  void go() { this.update.msg = greet("Ada"); }
+  void goDef() { this.update.msg = greet(); }
+  void load() {
+    auto p = loadUser(1);
+    p.await;
+  }
+</script>
+```
+
+Printed IR (same module):
+
+```d
+string greet(ARGS...)(auto ref ARGS args)
+{
+  return callTs!string("lib_Bridge_svelte.greet", args);
+}
+JsPromise!(string) loadUser(ARGS...)(auto ref ARGS args)
+{
+  return callTsPromise!(string)("lib_Bridge_svelte.loadUser", args);
+}
+```
+
+`callTs` is `Lodash().defaultTo(eval("window.__svelteD.ts")).invoke(path, args).execute!T()`. Async functions return a `JsPromise` so `.await` is the same protocol as `{#await}`. Do not wrap `.await` in `try`.
+
+## TS calling D (`exportDelegate`)
+
+```d
+extern(C) export int add(int a, int b = 0) { return a + b; }
+```
+
+The printer lifts that function to module scope, wraps it as `void svelte_d_wrap_<ident>_add(Handle)`, and `exportDelegate("lib_Bridge_svelte.add", &wrapper)`. TypeScript:
+
+```ts
+await window.callNative('lib_Bridge_svelte.add', [2, 3]) // 5
+await window.callNative('lib_Bridge_svelte.add', [2])    // 2, b defaults
+window.__svelteD.d.lib_Bridge_svelte.add(2)
+```
+
+The wrapper reads only the args that are present on the handle. The return goes through `setDRet` / `__svelteD.ret`, which `callNative` returns.
+
+## Imports
+
+`import { tag } from './helper'` inside `lang=ts` is rewritten onto the dest helper path after ingest. `$lib/foo` becomes `src-ts/modules/helpers/lib/foo`. An import of another `.svelte` becomes `./<ident>.ts` in `src-ts/modules/generated`. npm specifiers fall through from the **project**: dest `package.json` gets the declared range, dest `node_modules/<pkg>` gets a copy of the project’s install when it exists, and `compile` runs `bun install` in the dest if the package is still missing. That is the same Vite cell as the rest of `src-ts`; it is not a Node HTTP stack.
+
+## What this is not
+
+It is not Svelte-to-JS, and it is not a new handle table. Markup is still NodeDef. Lodash `invoke` and `exportDelegate` are the two libwasm seams. A D `Promise!T` is still the wrong type for `{#await}`.

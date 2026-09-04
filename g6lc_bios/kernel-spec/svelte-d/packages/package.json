@@ -1,0 +1,18 @@
+{
+  "name": "svelte-d-packages",
+  "private": true,
+  "workspaces": [
+    "svelte-d",
+    "svelte-kit-d",
+    "adapter-static",
+    "adapter-libwasm-spa",
+    "adapter-vibe0",
+    "adapter-vibe0-proxy",
+    "svelte-d-coverage",
+    "svelte-d-kit-app",
+    "svelte-d-kit-fs",
+    "svelte-d-kit-host",
+    "svelte-d-kit-env",
+    "svelte-d-kit-admin"
+  ]
+}

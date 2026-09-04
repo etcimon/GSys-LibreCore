@@ -1,0 +1,10 @@
+// Generated connectors — symbols exist only when live
+extern INative SbiPutchar(INative ch);
+extern INative PmuRead(INative idx);
+extern INative OppSet(U8 *id);
+extern INative UartPut(U8 ch);
+extern INative GpioRead(INative pin);
+extern INative SpiRead(INative off, U8 *dst, INative n);
+extern INative HolycReplPut(U8 *buf, INative n);
+extern INative HolycReplGet(U8 *buf, INative n);
+extern INative SbiSrst(INative typ);

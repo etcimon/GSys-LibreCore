@@ -1,0 +1,38 @@
+---
+title: "{#each} UnorderedList"
+description: "{#each} prints UnorderedList!T. Nested {#if} on the item keeps the ul and unmounts each li. App.ready wires after render."
+---
+
+# `{#each}` → `UnorderedList`
+
+A Svelte `{#each}` looks like a loop over markup. In libwasm it is a typed list in the struct graph: `UnorderedList!T`, which is an `HTMLArray!T` plus `ArrayItemEvents` plus `assignEventListeners`. `put` appends an item. `shrinkTo(0)` clears. The item type `T` is a struct named from the **alias** (`user` → something you can still read as the user row). `{user}` on the item is `@prop` on that item, not a concatenate on the `ul`. Index `(i)` is an `int i` field on the item — not `@prop!"dataset"`, because `dataset` is a getter-only `DOMStringMap` and libwasm will skip the assign. Key `(x)` is `@attr!"data-key"`.
+
+`<ul>{#each}` **absorbs** the wrapper. `UnorderedList` is already `NodeDef!"ul"`. A printer that emitted an outer `ul` and an inner `ul` would nest two lists and would have nowhere honest to hang `{:else}`. `{#each}` inside a non-`ul` hangs on that parent as a child. Destructure `{#each rows as {name}}` and `{#each pairs as [x, y]}` become item fields. Undeclared lists still demo-seed (`one`/`two`) so a Combo file without a `string[]` still paints.
+
+`{:else}` is `@visible!"empty_*" bool list_empty`. A host `string[] xs;` or `= []` skips `put` and inits `xs_empty = true` (LangCoverage `voids` → `None`). `xs = []` in a handler is `shrinkTo(0)` plus `setVisible` (G89 Wipe). `<ul>{#each}{:else}` prints `ExtrasList` — an `HTMLArray` plus the else `@child` plus `NodeDef!"ul"` — so Empty hangs **inside** the `ul` (G90). Bare `{#each}{:else}` is `UnorderedList` plus a sibling else. Those two dests look similar in Svelte and are different graphs; the fixture pair exists so the printer cannot “simplify” them into one.
+
+## `{#each}` plus `{#if}` on the item
+
+This is the construct that took G94 through G118, and it is the construct an admin list will hit the moment you write `{#each users as user}{#if user.ok}`. The `ul` **stays**. Each `li` unmounts. `{#each}{#if cond}<li>` uses `sync_items_on`. `{#each rows as row}{#if row.ok}` puts `bool ok` on the item, seeds the first true, and `sync_rows_ok` reads `it.ok`. App `ready` calls `wireEach` **after render**. Wiring before render was G95: construct ran too early, the false item still had no handle, and Flip could not unmount it.
+
+Item-field predicates combine with a host bool. The sync helper is named after the list. Flip of the host bool must not destroy rows that the item field still wants visible. The table is the contract; the paragraphs above it are why the helper names look so specific.
+
+| Predicate on the item | Sync helper | What Flip of host `on` does |
+|---|---|---|
+| `row.ok` | `sync_rows_ok` | Pin `fill_rows` sets the rest |
+| `pick.ok && on` | `sync_picks_on` | hides picks; ok-rows stay |
+| `hold.ok \|\| on` | `sync_holds_on` | leaves the first hold |
+| `!skip.ok` | `sync_skips_ok` | first seeded-true hidden |
+| `!cut.ok && on` | `sync_cuts_on` | hides cuts |
+| `!keep.ok \|\| on` | `sync_keeps_on` | leaves the `!ok` keep |
+| `drop.ok && !on` | `sync_drops_on` | hidden at boot; Flip shows first |
+| `!both.ok \|\| !on` | `sync_boths_on` | boot shows `!ok`; Flip shows both |
+| `!nand.ok && !on` | `sync_nands_on` | hidden at boot; Flip shows `!ok` |
+| `hit.n > 0` | `sync_hits_n` | `int n` on the item; seed `1` |
+| `more.n > 0 && on` | `sync_mores_on` | hides mores |
+| `lot.n > 0 \|\| on` | `sync_lots_on` | leaves first lot |
+| `few.n > 0 && !on` | `sync_fews_on` | hidden at boot; Flip shows first |
+
+`ComboIfCmp.svelte` walks the next ten comparisons (`n > 0`, `n > 0 || !on`, `n == 0`, `n != 0`, `n < 1`, `n <= 0`, `n >= 1`, `n >= 1 && on`, `on && n > 0`, `n > 1`) as a table, including unseeded-item and rhs≠0 corners. If you are adding an eleventh mix, add it there, not as a one-off page.
+
+List `@connect!("list.items","slot")` still takes `size_t` first. Item parent pointers are `@inject!"host"` set in the item constructor; `compile!` does not walk appenders. That is why a click on a row can call back into the page without the item storing a heap pointer you allocated in `put`.

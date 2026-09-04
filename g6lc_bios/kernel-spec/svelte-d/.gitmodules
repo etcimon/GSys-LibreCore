@@ -1,0 +1,7 @@
+[submodule "svelte-engine"]
+	path = svelte-engine
+	url = https://github.com/etcimon/svelte-engine.git
+[submodule "binaryen"]
+	path = binaryen
+	url = https://github.com/etcimon/binaryen.git
+	branch = svelte-d

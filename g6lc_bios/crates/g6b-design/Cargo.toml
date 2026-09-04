@@ -1,0 +1,23 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-design"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Self-design compiler: BoardSpec → ZealC Config / Connectors / linker"
+
+[dependencies]
+g6b-spec = { workspace = true }
+g6b-asm = { workspace = true }
+g6b-webidl = { workspace = true }
+g6b-gr = { workspace = true }
+g6b-tls = { workspace = true }
+g6b-wasm = { workspace = true }
+g6b-ui = { workspace = true }
+
+[lints]
+workspace = true

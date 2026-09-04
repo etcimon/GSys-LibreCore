@@ -1,0 +1,16 @@
+{
+  "name": "adapter-vibe0",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "svelte-d adapter-vibe0: package vibe.0 host exe + public/. No Node HTTP stack.",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "dependencies": {
+    "svelte-d": "workspace:*"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

@@ -1,0 +1,16 @@
+---
+title: Directives
+description: "class: is @style bool. style: concatenates one @prop style."
+---
+
+# `class:`, `style:`, `use:`, spread
+
+Directives look like attributes and they are not attributes. An attribute is data on the NamedNode (`@attr`, `@prop`, static `@style` tokens). A directive is a *relationship* between a host field and that NamedNode that has to be kept true after `update`.
+
+`class:x={y}` is `@style!"x" bool y` on the element. Parent `this.update.y` syncs the child. `class:on` shorthand is the same with the ident equal to the class name. Static `class="a b"` is still tokenized `@style` on **this** element’s `NodeDef`, not on the first `@child` (G88). Mixing the shorthand with the static form on one node is supported; they share the element’s style set, not a string you concatenate in a handler.
+
+`style:color={c}` and `style:background|important` share **one** `@prop!"style"`. `onMount` concatenates `color:` and `background:… !important`. `style:--accent={tone}` is a custom property in that same bag (`ComboMisc`). A printer that emitted one `@prop` per `style:` would fight itself on the single DOM `style` string.
+
+`use:action` and `{@attach fn}` are `onMount` calls with `child.node.handle` or `this.node.handle`. They cannot run in `construct`. `transition:`, `in:`, `out:`, and `animate:` are CSS-only `@style!"name"`. There is no JavaScript transition runtime. If you need a real transition, it is CSS or it is a titled libwasm seam.
+
+`{...props}` as a string bag is `applySpread(string)` — `k=v` pairs via `setAttribute` — with a leftover `@attr!"data-spread"`. `{...extra}` as a `Handle` is `applyObjectSpread` for class, style, and bool. `let:name` is `string name; // let:name` on the slot or element. None of these is `Object.assign` in JS. The wasm cell does not grow an object runtime to make a spread look official.

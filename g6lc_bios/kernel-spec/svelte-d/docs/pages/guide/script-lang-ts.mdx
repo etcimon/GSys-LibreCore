@@ -1,0 +1,12 @@
+---
+title: lang=ts splice
+description: Instance and context=module TypeScript become src-ts/modules/generated, register on __svelteD.ts, and fold into libwasm.init.
+---
+
+# lang=ts splice
+
+A `.svelte` file may carry two scripts, and they are not two ways of saying the same thing. `<script lang="d">` is the libwasm struct. `<script lang="ts">`, whether instance or `context="module"`, is TypeScript that Vite already understands. svelte-d does not compile that TypeScript. It **splices** the body into the workspace at `src-ts/modules/generated/<identFromRel>.ts` using `js-module.ts.tmpl`. Exported functions are wrapped as `jsExports.env.<name>(...args)` so `libwasm.init` can load them, **and** registered on `window.__svelteD.ts[<ident>][<name>]` so D can call them. If the body already exports `jsExports`, that bag is kept and only the registry trailer is appended. `rewriteModulesIndex` then regenerates `src-ts/modules/index.ts` from `modules-index.ts.tmpl`, folding every generated module into the same list that already contains `bindings`, `spa`, `libwasm`, and `debug-bridge`.
+
+That regeneration is the splice. There is not a second `index.ts`, and there is not a Node `require` graph. Author `import $ from 'jquery'` inside the TS body is legal Vite input once the helper is on the workspace (see [extensions](./extensions)). Same-file D calls those exports by the **simple name** — the printer emits a variadic `callTs` thunk. A printed `import jquery` in `src-d/` would be a third FFI, and the wasm cell does not grow one.
+
+The `context="module"` exports in the admin example (`adminReady`, `adminLayoutReady`) exist so tests and your own JS can name the page. They are registered on `__svelteD.ts[<ident>_mod]`. Dual-script files do both jobs. Another `.svelte` imports the printed D thunk (`import lib.Bridge : greet`). npm specifiers on the TS body fall through from the project onto dest `package.json` (declared range) and dest `node_modules/<pkg>` (a copy of the project’s install). See [cross-calling](./cross-calling) and [Cross-calling lang=d and lang=ts](../language/cross-calling).

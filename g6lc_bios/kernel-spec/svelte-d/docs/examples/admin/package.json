@@ -1,0 +1,15 @@
+{
+  "name": "svelte-d-example-admin",
+  "private": true,
+  "type": "module",
+  "description": "Simplified kit-admin: layout, dashboard, users, :id. No Postgres/Redis/CDP.",
+  "scripts": {
+    "setup": "bunx svelte-d setup",
+    "drop": "bunx svelte-d drop-ws --force",
+    "compile": "bunx svelte-d compile --project .",
+    "dev": "bunx svelte-kit-d dev"
+  },
+  "dependencies": {
+    "svelte-d": "github:etcimon/svelte-d"
+  }
+}

@@ -1,0 +1,18 @@
+{
+    "name": "pubkey",
+    "description": "A Botan test for public key encryption",
+    "license": "MIT",
+    "authors": ["Etienne Cimon", "See CREDITS.md for more."],
+    "targetName": "botan",
+    "targetType": "executable",
+    "targetPath": "build",
+    "workingDirectory": "build",
+    
+    "dependencies": {
+            "botan": { "version": "~master", "path": "../../" } 
+    }, 
+    "subConfigurations": {
+        "botan": "pubkey"
+    },
+    "versions": ["TLSGC", "EnableDebugger"]
+}

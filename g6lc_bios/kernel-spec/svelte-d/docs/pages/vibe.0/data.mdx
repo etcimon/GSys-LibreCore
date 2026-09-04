@@ -1,0 +1,73 @@
+---
+title: 'JSON, sessions, databases'
+description: vibe.data.Json, cookies, SessionStore, Postgres, Redis, SQLite, helpers.connectDB / connectCache.
+---
+
+# JSON, sessions, databases
+
+The host cell’s data plane is vibe.0’s, not libwasm’s `fast.json` and not Node. A `+page.server.d` that builds a payload with `Json.emptyObject` and writes it with `res.writeBody(..., "application/json")` is already on this API. `import helpers;` public-imports the same graph the engine’s `connectDB` / `connectCache` use, so you do not have to remember every module name.
+
+## `vibe.data.Json`
+
+`Json` is an 8-byte-aligned tagged value (`undefined` / `null` / `bool` / `int` / `bigInt` / `float` / `string` / `array` / `object`). Strict typing: operations across types throw `JSONException`. Access is `j["key"]`, `j[idx]`, `get!T`, `to!T`, `foreach (string key, value; j)`, `toString` / `toPrettyString` / `parseJson` / `parseJsonString`. Member-syntax `j.name = …` is deprecated.
+
+```d
+Json payload = Json.emptyObject;
+payload["users"] = Json.emptyArray;
+payload["users"] ~= user;
+res.writeBody(payload.serializeToJsonString(), "application/json");
+```
+
+`serializeToJson` / `deserializeJson` come from `vibe.data.serialization`, which `json.d` public-imports. Policy order: enums, serializer-native types, arrays / `Tuple`, AAs, `Nullable!T`, custom serializable, `toISOExtString` (e.g. `SysTime`), `toString` / `fromString`, struct/class as object (`@name`, `@optional`, `@asArray`), pointers, scalars. No aliasing detection — cycles become copies.
+
+HTTP server fills `req.json` when `parseJsonBody` is on and `Content-Type` is `application/json` or `application/vnd.api+json` (the whole body as UTF-8). Versions: `VibeJsonFieldNames` (dotted names in errors), `JsonLineNumbers`, `JsonOptionalChaining` (missing key returns a sentinel).
+
+This is **not** `libwasm` / `fast.json` `JSON`. A wasm `lang=d` script that `execute!JSON()`s a `fetch` body is on the other cell. Do not import one from the other.
+
+## Cookies and sessions
+
+Server cookies are `req.cookies` / `res.setCookie`. The client `FileCookieJar` (`http.cookiejar`, BSD-3) is a different type, used by `requestHTTP`, not by host files.
+
+`Session` + `SessionStore`. Memory store lives in `http.session`. `RedisSessionStore` stores JSON values with an optional TTL. The engine’s `app.d` may attach Redis when the daemon is present. `SessionVar!(T, "key")` on a web-interface class is the declarative form. Session IDs come from `SHA1HashMixerRNG` and are only constructed on `"V|"` threads.
+
+CSRF: vibe.0 has none (engine comments only). svelte-d generates an origin check on actions.
+
+## Postgres, Redis, SQLite
+
+`vibe.db.pgsql.pgsql` is a first-party PostgreSQL client (no libpq). `PostgresDB` takes a `string[string]` of params (`host`, `database`, `user`, `password`, `ssl`, `statement_timeout`). `lockConnection()` returns a connection from a pool (`maxConcurrency`). `PGCommand` runs queries. Engine `helpers.connectDB()` reads `PGHOST` / `PGDATABASE` / `PGUSER` / `PGPASSWORD` / `PGSSL`, with a Windows TCP default and a POSIX unix-socket default.
+
+`vibe.db.redis.redis` is in the barrel. `connectRedis(host, port)` or a unix socket; `getDatabase(0)` is the usual handle. `helpers.connectCache()` reads `REDIS_HOST`. Idioms and typed helpers live in `db.redis.idioms` / `types`, not starred.
+
+`vibe.db.sqlite.sqlite3` is a vendored d2sqlite3-style wrapper (`Database`, `Statement`, `Row`). It is not gated by `version(SQLite)` despite the README. Importing it links `sqlite3`. The simplified admin example does not use it; kit-admin talks to Postgres and Redis and writes `"skip"` when those daemons are absent.
+
+## The `helpers` barrel
+
+Engine `webserver/source/helpers.d` is what printed host files are allowed to assume:
+
+```d
+public import vibe.db.pgsql.pgsql;
+public import vibe.data.json;
+public import vibe.http.server;
+public import vibe.core.core;
+public import vibe.core.log;          // logInfo, logWarn, logError, …
+public import vibe.web.web;
+public import vibe.db.redis.redis;
+public import vibe.core.concurrency;
+public import vibe.mail.smtp;
+public import vibe.stream.botan;
+public import vibe.stream.tls;
+public import vibe.stream.operations;
+public import botan.passhash.bcrypt;
+public import botan.rng.auto_rng;
+public import std.conv;
+public import std.datetime;
+public import memutils.unique;
+```
+
+Plus `connectDB()`, `connectCache()`, `kitLog(level, msg)` (SvelteKit-shaped console → vibe.0 log levels), and `toIPAddress`. Third-party packages enter the same way as PG/Redis: add them to the engine host `dub.sdl`, then `import`. Do not fetch a new D package from the bun project. Authors may also write the `import` lines directly; the printer lifts them to the generated module header, outside the `registerWebInterface` class.
+
+## Mail, XML, HTML DOM, brotli
+
+`vibe.mail.smtp` is in the barrel; the engine keeps `SMTPClientSettings mailer` next to the helpers. `vibe.data.xml` (Boost, KXML) and `vibe.data.dom` (Boost, arsd.dom) are public and not starred. HTTP **server** auto-compression is gzip/deflate. Brotli is a client decode path (`vibe.stream.brotli`) plus `extern(C)` bindings in `vibe.data.brotli`.
+
+`$env/static/private` and `$app/server` are host-cell only. The IR graph check is a compile error if they leak into wasm.

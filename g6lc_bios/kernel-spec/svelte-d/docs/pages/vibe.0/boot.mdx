@@ -1,0 +1,76 @@
+---
+title: Custom main and event loop
+description: VibeCustomMain, LibasyncDriver, listenHTTP, runEventLoop. One listen thread. Tasks stay on their thread.
+---
+
+# Custom main and event loop
+
+A vibe.0 process is a `main()` you wrote, a `LibasyncDriver` the module constructor started, one or more `listenHTTP` calls on that first thread, and `runEventLoop()` which does not return until something calls `exitEventLoop()`. There is no implicit main. `source/vibe/appmain.d` compiles only under `VibeDefaultMain` **and** not `VibeCustomMain`, and when it compiles it `static assert`s. The engine’s `webserver/dub.sdl` sets `VibeCustomMain`. Generated apps must too.
+
+## Process start
+
+`vibe.core.core` `shared static this()` (process):
+
+- Initialises the log module.
+- Allocates `VibeDriverCore` and the thread registry mutex/condition.
+- Installs SIGINT/SIGTERM/SIGPIPE (POSIX) or SIGABRT/SIGTERM/SIGINT (Windows).
+- Names the main thread `"V|Main"`. Threads whose name does not start with `"V|"` are ignored by later per-thread setup.
+- Calls `setupDriver()` → `new LibasyncDriver(core)`.
+- Creates a process-wide `ManualEvent` used as a cross-thread wake.
+- Optionally registers `--uid` / `--gid` (unless `VibeNoDefaultArgs`).
+- If `newStdConcurrency`, installs `VibedScheduler` into `std.concurrency`.
+
+Per `"V|…"` thread, `static this()` allocates a `CoreTask` fiber slot and calls `setupDriver()` again so workers get their own `LibasyncDriver` / `EventLoop`. `getEventDriver()` is typed as returning `LibasyncDriver`, not `EventDriver`. The abstraction is documentary: you cannot swap backends without editing that module. Residual `version(VibeLibeventDriver)` branches elsewhere are leftover.
+
+## `listenHTTP` then `runEventLoop`
+
+```d
+void main()
+{
+    auto settings = new HTTPServerSettings;
+    settings.port = 8080;
+    settings.bindAddresses = ["127.0.0.1"];
+
+    auto router = new URLRouter;
+    router.registerWebInterface(new UsersPageServer);
+
+    listenHTTP(settings, router);
+    runEventLoop();
+}
+```
+
+Listening may only happen on the thread that first called `listenHTTP` (`g_ctor`). “Listening from multiple threads is unsupported.” `listenHTTP` allocates an `HTTPServerContext` in `ThreadMem`, optionally installs an ALPN chooser (`h2` / `h2-16` / `h2-14` / `http/1.1`, or always `http/1.1` if `disableHTTP2`), and `listenTCP`s each bind address. A second `listenHTTP` on the same `(addr, port)` is a virtual host.
+
+`runEventLoop()` sets `s_eventLoopRunning`, notifies idle, and delegates to `LibasyncDriver.runEventLoop()`:
+
+```
+while (!exitFlag && getEventLoop().loop(-1.seconds)) {
+    processTimers();
+    getDriverCore().notifyIdle();
+}
+```
+
+libasync `EventLoop.loop` is the OS wait (IOCP / epoll / kqueue). Socket readiness resumes the waiting fiber via `DriverCore.resumeTask`. Exit: `exitEventLoop()` triggers an `AsyncSignal`. Process teardown waits for non-daemon `"V|…"` threads and logs leftover connections / HTTP/2 sessions.
+
+`runTask` either recycles a `CoreTask` from `s_availableFibers` or `ThreadMem.alloc!CoreTask`. It resumes the fiber synchronously until the first yield (typically the first socket read). Tasks stay on their thread.
+
+## Versions that change the boot
+
+| Version | Contract |
+|---|---|
+| `VibeCustomMain` | **Required.** Suppresses `appmain.main`. |
+| `VibeDefaultMain` | Compiles `appmain.main`, which then asserts. Unusable. |
+| `VibeNoDebug` | Strips `Trace` / breadcrumbs / `TaskDebugger` / `vibe.http.debugger`. |
+| `VibeNoTLS` | Skips TLS accept. |
+| `VibeNoDefaultArgs` | Skip built-in `--uid` / `--gid`. |
+| `VibeDisableCommandLineParsing` | `vibe.core.args` no-op. |
+| `VibeIdleCollect` | Installs a GC timer. |
+| `VibeDebugCatchAll` | `runEventLoop` / request path catch `Throwable`. |
+| `Have_vibe_d` | Compatibility flag the library always sets (DUB would auto-define `Have_vibe_0`). |
+| `EnableDebugger` | Library default; paired with the absence of `VibeNoDebug`. |
+
+`DisableDebugger`, `TLSGC`, and `SQLite` appear in README examples and are **not** matched in `source/`. `@safe` is not part of the interface; the fork does not use it.
+
+## What svelte-d’s host `main` actually does
+
+Engine `webserver/source/app.d` is the golden. It builds a `URLRouter`, optionally `setupDebugger()`, hangs GC endpoints, `registerWebInterface`s the installation API and every generated kit class under `/__svelte-d/host/`, `serveStaticFiles("../public/")` **before** the Vite reverse-proxy, then `listenHTTP` and `runEventLoop()`. Sessions may be `RedisSessionStore`. TLS is botan when certs are present. svelte-d writes only between the marked import and route regions. It does not rewrite the rest of `main`, and it does not add a second event loop.

@@ -1,0 +1,26 @@
+---
+title: Wasm and host sizes
+description: Debug keeps symbols. Release is LDC strip-all then Binaryen ≥123 -Oz. Kit-admin ships 0.93 MiB / 224 KB gzipped.
+---
+
+# Wasm and host sizes
+
+A libwasm SPA is one wasm module and one vibe.0 host. Those two files are what the user downloads and what the operator runs. Debug builds keep DWARF, the wasm name section, and `/DEBUG` so a failing `_start` or a vibe.0 stack still names `ClickField.go`. Release builds ask DUB for `optimize` + `inline` and pass **`lflags -strip-all`** (on Windows the host also gets `/OPT:REF /OPT:ICF /DEBUG:NONE`). After the wasm link, **Binaryen ≥123** `wasm-opt` parses the LDC 1.43 `try_table` module and, on release, runs `-Oz --converge --strip-debug --strip-dwarf --strip-producers` with `--enable-exception-handling`. That is the official ship path. It is **not** `--asyncify` — Flatten still cannot rewrite `try_table`.
+
+`bun run dev` / `svelte-d wasm --debug` / `svelte-d host` stay on **debug**. `bun run build` / `svelte-d build` / `svelte-d wasm` / `svelte-d host --release` are **release + strip**, then wasm-opt `-Oz` when Binaryen ≥123 is on the machine (`bunx svelte-d setup` downloads it). Switching modes rebuilds; reprint-skip will not reuse a debug module as a release one.
+
+The numbers below are the simplified **kit-admin** tree compiled with LDC 1.43 into that package’s own `svelte-engine-ws` — the same IR the language section prints, not a hello-world stub.
+
+| Artifact | Debug | LDC release + strip | wasm-opt `-Oz` (ship) |
+|---|---|---|---|
+| `public/svelte-engine.wasm` | 12.64 MiB (13,255,662) | 1.59 MiB (1,667,361) | **0.93 MiB** (971,820) |
+| same, `gzip -9` | — | 217 KiB (222,176) | **224 KB** (223,909) |
+| `webserver/svelte-engine-server` | 14.08 MiB (14,759,424) | **10.85 MiB** (11,377,664) | (host is not wasm-opt) |
+
+The wasm cell is where strip and `-Oz` pay. Debug wasm carries the name section and DWARF so `wasm-names.json` and a browser DevTools wasm frame can still say `lib.ClickField.go`. LDC `-strip-all` drops most of that and leaves 1.59 MiB. Binaryen then folds the leftover DWARF (~134 KiB after LDC strip) and shrinks the CTFE `NodeDef` graph, spa-phobos, and WebIDL bindings to **0.93 MiB**. Gzip of the `-Oz` module is slightly *larger* than gzip of the unopt release (transfer is similar; the raw ship size is the win). There is no React, no virtual DOM, and no second JS runtime. A real admin shell (layout, list, `:id`, `{#await}`, host JSON) still fits in a module smaller than a typical JS SPA *source map*.
+
+The twelve exports stay after `-Oz`: `memory`, `__indirect_function_table`, `svelte_engine_eh_probe`, `svelte_engine_phobos_probe`, `_start`, `dumpApp`, `loadApp`, `domEvent`, `allocString`, `jsCallback0`, `jsCallback`, `__heap_base`.
+
+The host shrinks less because vibe.0, botan, and OpenSSL stay in the image. Release still drops the debug directory and unused COMDAT. The matching `.pdb` is a debug leftover, not the ship artifact.
+
+Those figures live in `svelte-engine-ws/.svelte-d/artifact-sizes.json` after `bun run build` in `packages/svelte-d-kit-admin`. They are measurements, not a budget. A page that `new`s on every click will grow the heap at runtime without changing this file size. See [memory](../libwasm/runtime) and [wasm vs host](../concepts/cells).

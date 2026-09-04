@@ -1,0 +1,16 @@
+{
+  "name": "svelte-d-coverage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "bun + ts + svelte-d coverage package: multi-file official .svelte graphs, dual-script, kit fall-through, compose/if/on/bind:this.",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "svelte-d": "workspace:*"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

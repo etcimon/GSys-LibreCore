@@ -1,0 +1,16 @@
+{
+  "name": "adapter-vibe0-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "svelte-d adapter-vibe0-proxy: package host that reverse-proxies to Vite :5173. No Node HTTP stack.",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "dependencies": {
+    "svelte-d": "workspace:*"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

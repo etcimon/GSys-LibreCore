@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    name: bun install + CLI + tests
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: svelte-engine submodule
+        run: git submodule update --init svelte-engine
+
+      - name: Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: LDC 1.43
+        uses: dlang-community/setup-dlang@v1
+        with:
+          compiler: ldc-beta
+
+      - name: Build CLI (bun install prepare)
+        run: bun install
+        env:
+          SVELTE_D_FORCE_BUILD: '1'
+          SVELTE_D_NO_BUILD_WASM_OPT: '1'
+
+      - name: CLI version
+        run: bun bin/svelte-d.ts version
+
+      - name: Pull forked wasm-opt
+        env:
+          SVELTE_D_NO_BUILD_WASM_OPT: '1'
+        run: bun scripts/pull-wasm-opt.ts
+
+      - name: Tests
+        run: bun run test

@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "HTTP/1.1 + HTTP/2 parse and kernel endpoint router (not SvelteKit)"
+
+[dependencies]
+g6b-spec = { workspace = true }
+g6b-fs = { workspace = true }
+g6b-tls = { workspace = true }
+g6b-wasm = { workspace = true }
+
+[lints]
+workspace = true

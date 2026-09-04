@@ -1,0 +1,18 @@
+graph TB;
+    VirtualNode
+    VirtualDOMNode--extends-->VirtualNode
+    VirtualLeafNode--extends-->VirtualDOMNode
+    VirtualRootNode--extends-->VirtualDOMNode
+    VirtualShadowRootNode--extends-->VirtualRootNode
+    VirtualCommentNode--extends-->VirtualLeafNode
+    VirtualTextNode--extends-->VirtualLeafNode
+    VirtualContainerNode--extends-->VirtualDOMNode
+    VirtualElementNode--extends-->VirtualDOMNode
+    VirtualReactiveElementNode--extends-->VirtualElementNode
+    VirtualComponentNode--extends-->VirtualReactiveElementNode
+    VirtualReactiveAsyncNode--extends-->VirtualContainerNode
+    VirtualReactiveForLoopNode--extends-->VirtualContainerNode
+    VirtualReactiveIfNode--extends-->VirtualContainerNode
+    VirtualReactiveSwitchNode--extends-->VirtualContainerNode
+    VirtualReactiveTextNode--extends-->VirtualTextNode
+

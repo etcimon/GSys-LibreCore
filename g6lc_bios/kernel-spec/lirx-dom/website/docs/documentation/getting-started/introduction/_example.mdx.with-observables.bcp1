@@ -1,0 +1,80 @@
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<Tabs>
+  <TabItem value="html" label="HTML" default>
+
+```html title="app-hello-world.component.html"
+<div class="input-container">
+  <input
+    [value]="$.input$"
+    (input)="() => $.$input(node.value)"
+  >
+</div>
+<div
+  class="max-length-container"
+  [class.valid]="$.valid$"
+>
+  Length: {{ $.remaining$ }} / 10
+</div>
+```
+
+  </TabItem>
+
+  <TabItem value="scss" label="SCSS">
+
+```scss title="app-hello-world.component.scss"
+:host {
+  display: block;
+  & > .max-length-container:not(.valid) {
+    color: red;
+  }
+}
+```
+
+  </TabItem>
+
+  <TabItem value="ts" label="TS">
+
+```ts title="app-hello-world.component.ts"
+import { let$$, map$$, IObservable, IObserver } from '@lirx/core';
+import { compileReactiveHTMLAsComponentTemplate, compileStyleAsComponentStyle, Component } from '@lirx/dom';
+
+// @ts-ignore
+import html from './app-hello-world.component.html?raw';
+// @ts-ignore
+import style from '.app-hello-world.component.scss?inline';
+
+/**
+ * COMPONENT: 'app-hello-world'
+ */
+
+interface ITemplateData {
+  readonly $input: IObserver<string>;
+  readonly input$: IObservable<string>;
+  readonly remaining$: IObservable<number>;
+  readonly valid$: IObservable<boolean>;
+}
+
+export const AppHelloWorldComponent = new Component<HTMLElement, object, ITemplateData>({
+  name: 'app-hello-world',
+  template: compileReactiveHTMLAsComponentTemplate({ html }),
+  styles: [compileStyleAsComponentStyle(style)],
+  init: (node: VirtualCustomElementNode<HTMLElement, object>): ITemplateData => {
+    const [$input, input$] = let$$('');
+    const remaining$ = map$$(input$, (value: string) => value.length);
+    const valid$ = map$$(remaining$, (value: number) => (value <= 10));
+
+    return {
+      $input,
+      input$,
+      remaining$,
+      valid$,
+    };
+  },
+});
+```
+
+  </TabItem>
+
+</Tabs>

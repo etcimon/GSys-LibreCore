@@ -1,0 +1,50 @@
+# Using the AOT compiler
+
+`@lirx/dom` embeds a JIT compiler to convert on-the-fly the `reactive-html` templates and `reactive-css` styles of our components.
+
+However, it has been build from the beginning to be able to pre-compile these templates and styles, through an AOT compiler.
+
+This permits to remove entirely the JIT compiler, saving space, and the necessity to parse and compile these files on runtime, increasing drastically the performances.
+
+So **using the [@lirx/dom-aot-plugin](https://github.com/lirx-js/dom-aot-plugin) is strongly recommended**.
+We can install it using the command:
+
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<Tabs groupId="package-managers">
+  <TabItem value="npm" label="npm">
+
+```bash
+npm install @lirx/dom-aot-plugin -D
+```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+```bash
+yarn add @lirx/dom-aot-plugin --dev
+```
+
+  </TabItem>
+</Tabs>
+
+Then, we'll have to update the **vite.config.js** file to enable these optimizations:
+
+```js title="vite.config.js"
+// import the AOT plugin
+import { aotPlugin } from '@lirx/dom-aot-plugin';
+
+const config = {
+  // ...
+  plugins: [
+    aotPlugin(),
+  ],
+  // ...
+};
+
+export default config;
+```
+
+Now, when running `yarn run dev` or `yarn run build`, the plugin will optimize automatically our components.

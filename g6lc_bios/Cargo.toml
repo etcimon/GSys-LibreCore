@@ -1,0 +1,68 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# g6lc_bios workspace — independent ZealOS-shaped setup firmware.
+#
+# INVARIANTS:
+#   * NO external crates.io dependencies (KD0). Adding one requires AGENTS-todo.md
+#     plus an exact pin in pins.toml.
+#   * NO path deps that escape this package (no core/, corev_apu/, g6lc_qemu).
+#   * First-party path dependencies only.
+# Enforced by tools/check_independence.py.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/g6b-spec",
+    "crates/g6b-asm",
+    "crates/g6b-design",
+    "crates/g6b-doldoc",
+    "crates/g6b-html",
+    "crates/g6b-dom",
+    "crates/g6b-holyc",
+    "crates/g6b-js",
+    "crates/g6b-kernel",
+    "crates/g6b-gr",
+    "crates/g6b-webidl",
+    "crates/g6b-tls",
+    "crates/g6b-http",
+    "crates/g6b-fs",
+    "crates/g6b-wasm",
+    "crates/g6b-ui",
+    "crates/g6b-elf",
+    "crates/g6b-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Etienne Cimon"]
+rust-version = "1.85"
+
+[workspace.dependencies]
+g6b-spec = { path = "crates/g6b-spec" }
+g6b-asm = { path = "crates/g6b-asm" }
+g6b-design = { path = "crates/g6b-design" }
+g6b-doldoc = { path = "crates/g6b-doldoc" }
+g6b-html = { path = "crates/g6b-html" }
+g6b-dom = { path = "crates/g6b-dom" }
+g6b-holyc = { path = "crates/g6b-holyc" }
+g6b-js = { path = "crates/g6b-js" }
+g6b-kernel = { path = "crates/g6b-kernel" }
+g6b-gr = { path = "crates/g6b-gr" }
+g6b-webidl = { path = "crates/g6b-webidl" }
+g6b-tls = { path = "crates/g6b-tls" }
+g6b-http = { path = "crates/g6b-http" }
+g6b-fs = { path = "crates/g6b-fs" }
+g6b-wasm = { path = "crates/g6b-wasm" }
+g6b-ui = { path = "crates/g6b-ui" }
+g6b-elf = { path = "crates/g6b-elf" }
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

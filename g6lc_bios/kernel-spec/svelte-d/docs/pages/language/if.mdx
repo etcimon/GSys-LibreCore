@@ -1,0 +1,34 @@
+---
+title: "{#if} @visible"
+description: "{#if} is not a second struct type. It is @visible on a bool plus setVisible / remount / unmount."
+---
+
+# `{#if}` → `@visible`
+
+Svelte’s `{#if}` looks like a branch. In a virtual DOM it *is* a branch: the consequent is created or destroyed as a separate tree. libwasm does not have that tree. It has a compiled struct graph and a way to skip a child. `{#if ident}` therefore prints as `@visible!"child"` on a `bool ident` that lives on the **owner** struct, plus `setVisible` / `remount` / `unmount`. The child is the same `@child` it would have been without the if. Visibility is a property of that child, not a second component type.
+
+```svelte
+<script lang="d">
+  bool open = false;
+  void toggle() { this.update.open = !open; }
+</script>
+{#if open}
+  <p>Visible</p>
+{:else}
+  <p>Hidden</p>
+{/if}
+```
+
+`this.update.open` is the flip. libwasm `update` writes the field **and** fires `setVisible`. A bare `open = !open` in a handler is rewritten to `this.update.open` so the handle moves. `IfToggle.svelte` is this file. If you read the printed D and do not see `@visible` on `open`, ingest pointed at the wrong source.
+
+## Who owns the bool
+
+The owner is the host struct when the `{#if}` is a direct child of the component. The owner is the **parent element’s struct** when the `{#if}` is nested inside an element. Nested flip is `owner.update.cond = cond`. Host-root if still emits `setVisible!"child"(this, cond)` and assigns `not_cond` for the else. Getting the owner wrong is how a page-level Flip hides a bool inside a child that happens to be called `open` too. Each owner carries its own field.
+
+`{:else}` is a second `@child` with inverted `setVisible`. `{:else if}` is a nested `IfBlock` in `elseKids`, still multi-child `@visible`. Several consequent children — a `<p>`, a `{@html}`, a `{#each}` — attach to the **same** bool. The printer walks every walkable child, not only the first. `Combo.svelte` exists to prove that: one `show` hides or shows three different kinds of kid together.
+
+## Predicates
+
+A predicate is not a miniature language. It is a D expression the printer already knows how to put on a `bool` or an `int`. `{#if open}` is the bool. `{#if !off}` inverts. `{#if a && b}` and `{#if a || b}` combine host bools. `{#if on && !hide}` is AND with a negation. `{#if n > 0}` is an `int` comparison. `{#if who == extra}` compares identifiers. `{(ready && ok)}` is the same AND with parentheses, which matters only because the scan once treated the parens as text.
+
+Predicates that mention an **item field** — `{#if row.ok}`, `{#if hit.n > 0}`, and every AND/OR/NOT mix of those with a host bool — do not belong to this page. The bool or `int` lives **on the item**, and a `sync_*` helper walks `it.ok` / `it.n` after `put`. That is [`{#each}`](./each), and it is the hardest IR in the language.

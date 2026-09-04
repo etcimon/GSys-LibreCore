@@ -1,0 +1,12 @@
+---
+title: Cross-calling lang=d and lang=ts
+description: Same-file simple names, cross-svelte module imports, optional args. Lodash + exportDelegate.
+---
+
+# Cross-calling in scripts
+
+A `.svelte` file may have several `<script lang="ts">` and `<script lang="d">` tags. Each export is registered even if the other language never calls it. Same-file D uses the **simple name**. Another file imports the printed thunk (`import lib.Bridge : greet`). Registry keys are module-mangled (`lib_Bridge_svelte.greet`) so two components can share a name.
+
+Arguments are not arity-strict: omit a trailing parameter and the callee default stays. Async TS functions return `JsPromise` so D uses `.await` the same way as `{#await}`.
+
+The full calling convention — Lodash `callTs`, `exportDelegate` / `callNative`, imports — is [Cross-calling lang=d and lang=ts](../language/cross-calling).

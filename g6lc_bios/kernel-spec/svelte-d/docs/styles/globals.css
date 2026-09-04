@@ -1,0 +1,183 @@
+/* Copyright (c) 2026 Etienne Cimon */
+/* SPDX-License-Identifier: MIT */
+
+/*
+ * svelte-d docs theme — same Palatino / mathpazo reading stack as the
+ * LibreCore site, with a Svelte-adjacent orange accent.
+ */
+@import url('https://fonts.cdnfonts.com/css/tex-gyre-pagella');
+
+:root {
+  --pazo-serif: 'TeX Gyre Pagella', 'Palatino Linotype', 'Book Antiqua',
+    Palatino, 'URW Palladio L', 'P052', Georgia, 'Times New Roman', serif;
+  --pazo-mono: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', 'Fira Code',
+    ui-monospace, 'Menlo', 'Consolas', monospace;
+
+  --nextra-primary-hue: 18deg;
+  --nextra-primary-saturation: 88%;
+
+  --pazo-line-height: 1.75;
+  --pazo-measure: 46rem;
+}
+
+html {
+  font-feature-settings: 'kern' 1, 'liga' 1, 'calt' 1, 'onum' 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+html,
+body,
+.nextra-container,
+.nextra-content {
+  font-family: var(--pazo-serif);
+}
+
+.nextra-content p,
+.nextra-content li,
+.nextra-content td,
+.nextra-content th,
+.nextra-content blockquote {
+  font-size: 1.05rem;
+  line-height: var(--pazo-line-height);
+  letter-spacing: 0.003em;
+}
+
+.nextra-content h1,
+.nextra-content h2,
+.nextra-content h3,
+.nextra-content h4,
+.nextra-content h5,
+.nextra-content h6 {
+  font-family: var(--pazo-serif);
+  letter-spacing: -0.012em;
+  text-wrap: balance;
+}
+
+.nextra-content h1 {
+  font-size: 2.5rem;
+  font-weight: 700;
+  line-height: 1.15;
+  background: linear-gradient(
+    92deg,
+    hsl(var(--nextra-primary-hue) var(--nextra-primary-saturation) 48%),
+    hsl(calc(var(--nextra-primary-hue) + 22deg) var(--nextra-primary-saturation) 52%)
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.nextra-content h2 {
+  font-size: 1.7rem;
+  font-weight: 650;
+  margin-top: 2.5rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid hsl(var(--nextra-primary-hue) 30% 50% / 0.18);
+}
+
+.nextra-content h3 {
+  font-size: 1.32rem;
+  font-weight: 600;
+}
+
+code,
+kbd,
+pre,
+samp,
+.nextra-content code {
+  font-family: var(--pazo-mono);
+  font-feature-settings: 'liga' 1, 'calt' 1;
+}
+
+.nextra-content :not(pre) > code {
+  font-size: 0.86em;
+  padding: 0.12em 0.42em;
+  border-radius: 0.4rem;
+  background: hsl(var(--nextra-primary-hue) 40% 50% / 0.1);
+  border: 1px solid hsl(var(--nextra-primary-hue) 40% 50% / 0.14);
+}
+
+.nextra-content a {
+  text-decoration: none;
+  background-image: linear-gradient(currentColor, currentColor);
+  background-position: 0 100%;
+  background-repeat: no-repeat;
+  background-size: 0% 1.5px;
+  transition: background-size 0.22s ease;
+}
+
+.nextra-content a:hover {
+  background-size: 100% 1.5px;
+}
+
+.nextra-content blockquote {
+  border-inline-start-width: 3px;
+  border-inline-start-color: hsl(
+    var(--nextra-primary-hue) var(--nextra-primary-saturation) 55%
+  );
+  background: hsl(var(--nextra-primary-hue) 40% 50% / 0.05);
+  border-radius: 0 0.5rem 0.5rem 0;
+  padding: 0.75rem 1.1rem;
+  font-style: italic;
+}
+
+.nextra-content table {
+  border-collapse: separate;
+  border-spacing: 0;
+  overflow: hidden;
+  border-radius: 0.6rem;
+  border: 1px solid hsl(var(--nextra-primary-hue) 20% 50% / 0.16);
+}
+
+.nextra-content thead {
+  background: hsl(var(--nextra-primary-hue) 40% 50% / 0.08);
+}
+
+.nextra-content th,
+.nextra-content td {
+  border: none;
+  border-bottom: 1px solid hsl(var(--nextra-primary-hue) 20% 50% / 0.12);
+}
+
+.nextra-content tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.nextra-content tbody tr:hover {
+  background: hsl(var(--nextra-primary-hue) 40% 50% / 0.04);
+}
+
+.nextra-content pre {
+  border-radius: 0.7rem;
+  border: 1px solid hsl(var(--nextra-primary-hue) 20% 50% / 0.16);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 8px 24px rgb(0 0 0 / 0.05);
+}
+
+.nextra-sidebar-container {
+  font-size: 0.95rem;
+}
+
+.nextra-sidebar-container a.active,
+.nextra-sidebar-container li.active > a {
+  background: hsl(var(--nextra-primary-hue) var(--nextra-primary-saturation) 55% / 0.14);
+  font-weight: 600;
+}
+
+.nextra-nav-container {
+  backdrop-filter: saturate(1.4) blur(12px);
+}
+
+.nextra-content article {
+  max-width: none;
+}
+
+.nextra-content ul > li,
+.nextra-content ol > li {
+  margin-top: 0.4rem;
+}
+
+::selection {
+  background: hsl(var(--nextra-primary-hue) var(--nextra-primary-saturation) 55% / 0.28);
+}

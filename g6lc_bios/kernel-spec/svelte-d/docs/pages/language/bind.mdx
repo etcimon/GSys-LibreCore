@@ -1,0 +1,14 @@
+---
+title: "bind:"
+description: "bind:value is a host field plus an input Slot that writes back."
+---
+
+# `bind:`
+
+Svelte `bind:` is a two-way door. libwasm does not have a two-way door as a primitive. It has `@prop` (parent → DOM) and `Slot` (DOM → parent). `bind:value={tone}` is both: a host field `tone`, an `@prop!"value"` on the input named after that ident, a `construct` seed so the first paint matches the field, and an `input` / `change` Slot that writes the host field back. `ComboForm.svelte` is the proof for textarea and select. Number `value` is a `double`, not a `string` that you `to!int` in the handler — the extra parse would throw inside `nothrow`.
+
+`bind:this` is a `Handle`. On an element it is filled in `onMount`, because `construct` has no handles yet. On a component it is the `@child` handle. `bind:group` on radios seeds `checked` from the host and writes back on `change`. `bind:checked` and `bind:open` are the same shape for checkbox and `<details>` / `<dialog>`. `bind:innerHTML` is `@prop!"innerHTML"`. `bind:files` is a `Handle`. `bind:indeterminate` is `ComboNest`. `bind:scrollY` / `scrollX` on `<svelte:window>` call `window().scrollY()`. `bind:paused`, `muted`, and `volume` are media fields; `volume` is numeric.
+
+Some DOM properties are getter-only. libwasm **skips** those assigns. `dataset` is a `DOMStringMap`. Layout metrics (`clientWidth`) and `paused` as a write are in that family. That is why `{#each}` index is `int i` and `bind:clientWidth` is a field, not `@prop`. Printing `@prop!"dataset"` looks closer to Svelte and does nothing at runtime.
+
+`bind:value={tone}` and `id={tone}` cannot share a field. The attribute becomes `id_`. One write would otherwise clobber the other, and the input’s id would change when the value changed. `construct` seeds both from the host expression. The printed names are ugly and they are the reason the page still works.

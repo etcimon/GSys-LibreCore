@@ -1,0 +1,7 @@
+{
+  "name": "ext-app",
+  "private": true,
+  "dependencies": {
+    "fake-grid": "0.0.0"
+  }
+}

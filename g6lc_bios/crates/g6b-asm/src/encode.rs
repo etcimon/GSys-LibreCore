@@ -1,0 +1,315 @@
+// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+
+//! RISC-V encodings used by IR lowering. No x86.
+
+#![allow(missing_docs)]
+
+pub const X0: u32 = 0;
+pub const RA: u32 = 1;
+pub const SP: u32 = 2;
+pub const TP: u32 = 4;
+pub const T0: u32 = 5;
+pub const T1: u32 = 6;
+pub const T2: u32 = 7;
+pub const S1: u32 = 9;
+pub const A0: u32 = 10;
+pub const A1: u32 = 11;
+pub const A2: u32 = 12;
+pub const A6: u32 = 16;
+pub const A7: u32 = 17;
+
+pub const CSR_SSTATUS: u32 = 0x100;
+pub const CSR_SIE: u32 = 0x104;
+pub const CSR_STVEC: u32 = 0x105;
+/// Supervisor address-translation (`satp`). Bare = 0 (Priv ch. 4).
+pub const CSR_SATP: u32 = 0x180;
+pub const CSR_SEPC: u32 = 0x141;
+pub const CSR_SCAUSE: u32 = 0x142;
+/// Unprivileged `time` CSR (`rdtime`). S-mode; OpenSBI may trap-and-emulate.
+pub const CSR_TIME: u32 = 0xC01;
+pub const SRET: u32 = 0x1020_0073;
+/// `sie` / `sstatus` bits: supervisor timer + global SIE (Priv spec ch. 3).
+/// `sie` supervisor software interrupt (SSI / SBI IPI wake).
+pub const SIE_SSIE: i64 = 1 << 1;
+pub const SIE_STIE: i64 = 1 << 5;
+/// `sie` supervisor external interrupt (PLIC / SEI, Priv ch. 3).
+pub const SIE_SEIE: i64 = 1 << 9;
+pub const SSTATUS_SIE: i64 = 1 << 1;
+/// QEMU virt / SiFive PLIC (S-mode context 1 = hart0).
+pub const PLIC_BASE: u64 = 0x0c00_0000;
+pub const PLIC_ENABLE_S0: u64 = 0x0c00_2080;
+pub const PLIC_THRESH_S0: u64 = 0x0c20_1000;
+pub const PLIC_CLAIM_S0: u64 = 0x0c20_1004;
+/// BoardSpec UART PLIC line (QEMU virt ns16550; not COM1).
+pub const UART_IRQ: i64 = 1;
+/// ns16550 IER received-data bit (`ERBFI`).
+pub const UART_IER_RX: i64 = 1;
+/// ns16550 LSR data-ready bit.
+pub const UART_LSR_DR: i64 = 1;
+/// Sideband mailbox (not a netdev). Matches generated `g6lc_bios_mbox.h`.
+pub const MBOX_MAGIC: u32 = 0x4736_4d42;
+pub const MBOX_OFF_DOORBELL: u64 = 0x00;
+pub const MBOX_OFF_LENGTH: u64 = 0x04;
+pub const MBOX_OFF_STATUS: u64 = 0x08;
+pub const MBOX_OFF_IRQ_EN: u64 = 0x0c;
+pub const MBOX_OFF_CMD: u64 = 0x10;
+pub const MBOX_OFF_RSP: u64 = 0x110;
+pub const MBOX_CMD_BYTES: u64 = 0x100;
+pub const MBOX_RSP_BYTES: u64 = 0x100;
+pub const MBOX_ST_BUSY: u32 = 0x1;
+pub const MBOX_ST_RSP: u32 = 0x2;
+pub const MBOX_ST_DELEG: u32 = 0x4;
+/// Linux `write()` doorbell kick (not the `G6MB` identity word).
+pub const MBOX_KICK: u32 = 1;
+/// Little-endian `VIEW` / `WAKE` / `UI` response words.
+pub const MBOX_RSP_VIEW: u32 = 0x5745_4956;
+pub const MBOX_RSP_WAKE: u32 = 0x454b_4157;
+pub const MBOX_RSP_UI: u32 = 0x000a_4955;
+pub const MBOX_RSP_FILE: u32 = 0x454c_4946;
+/// SysGrInit plane magic `GR16` (640×480×16; not VGA).
+pub const GR16_MAGIC: u32 = 0x3631_5247;
+/// Guest UI blob ident at `__ui_blob` (`G6UI`).
+pub const UI_MAGIC: u32 = 0x4955_3647;
+/// WASM module magic `\0asm` (little-endian), echoed at G6UI+24 after FileServe.
+pub const WASM_MAGIC: u32 = 0x6d73_6100;
+/// Packed 4bpp colour-1 word for the boot scanline.
+pub const GR_FILL_WORD: u32 = 0x1111_1111;
+/// Little-endian 4-char UART/HolyC command prefixes.
+pub const CMD_VIEW: u32 = 0x7765_6956; // "View"
+pub const CMD_REBO: u32 = 0x6f62_6552; // "Rebo"
+pub const CMD_SHUT: u32 = 0x7475_6853; // "Shut"
+pub const CMD_WAKE: u32 = 0x656b_6157; // "Wake"
+pub const CMD_UI: u32 = 0x0000_6955; // "Ui\0\0"
+pub const CMD_FILE: u32 = 0x656c_6946; // "File"
+pub const CMD_GET: u32 = 0x0074_6547; // "Get\0"
+/// SBI TIME extension id (`'TIME'`).
+pub const SBI_TIME_EID: i64 = 0x5449_4d45;
+/// QEMU virt / OpenSBI default timebase (Hz). Interval = TIMEBASE / fps.
+pub const TIMEBASE_HZ: u64 = 10_000_000;
+pub const VTYPE_E8_M1_TA_MA: u32 = 0xC0;
+/// SBI `sbi_console_putchar` extension id (legacy).
+pub const SBI_PUTCHAR: i64 = 1;
+/// SBI SRST extension id (`'SRST'`).
+pub const SBI_SRST_EID: i64 = 0x5352_5354;
+/// SBI HSM extension id (`'HSM'`).
+pub const SBI_HSM_EID: i64 = 0x0048_534d;
+/// SBI IPI extension id (`'sPI'`).
+pub const SBI_IPI_EID: i64 = 0x0073_5049;
+
+pub fn lui(rd: u32, imm20: u32) -> u32 {
+    (imm20 << 12) | (rd << 7) | 0x37
+}
+
+pub fn auipc(rd: u32, imm20: u32) -> u32 {
+    (imm20 << 12) | (rd << 7) | 0x17
+}
+
+pub fn addi(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (rd << 7) | 0x13
+}
+
+pub fn andi(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (0x7 << 12) | (rd << 7) | 0x13
+}
+
+pub fn lbu(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (0x4 << 12) | (rd << 7) | 0x03
+}
+
+pub fn lw(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (0x2 << 12) | (rd << 7) | 0x03
+}
+
+pub fn ld(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (0x3 << 12) | (rd << 7) | 0x03
+}
+
+pub fn sb(rs2: u32, rs1: u32, imm: i32) -> u32 {
+    let imm = (imm as u32) & 0xfff;
+    ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | ((imm & 0x1f) << 7) | 0x23
+}
+
+pub fn sw(rs2: u32, rs1: u32, imm: i32) -> u32 {
+    let imm = (imm as u32) & 0xfff;
+    ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | (0x2 << 12) | ((imm & 0x1f) << 7) | 0x23
+}
+
+pub fn sd(rs2: u32, rs1: u32, imm: i32) -> u32 {
+    let imm = (imm as u32) & 0xfff;
+    ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | (0x3 << 12) | ((imm & 0x1f) << 7) | 0x23
+}
+
+pub fn srli(rd: u32, rs1: u32, shamt: u32) -> u32 {
+    (shamt << 20) | (rs1 << 15) | (0x5 << 12) | (rd << 7) | 0x13
+}
+
+pub fn slli(rd: u32, rs1: u32, shamt: u32) -> u32 {
+    (shamt << 20) | (rs1 << 15) | (0x1 << 12) | (rd << 7) | 0x13
+}
+
+pub fn add(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x33
+}
+
+/// RV32M/RV64M `mul`.
+pub fn mul(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x01 << 25) | (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x33
+}
+
+pub fn xor(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (0x4 << 12) | (rd << 7) | 0x33
+}
+
+pub fn sub(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x20 << 25) | (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x33
+}
+
+pub fn beq(rs1: u32, rs2: u32, imm: i32) -> u32 {
+    let imm = imm as u32;
+    (((imm >> 12) & 1) << 31)
+        | (((imm >> 5) & 0x3f) << 25)
+        | (rs2 << 20)
+        | (rs1 << 15)
+        | (((imm >> 1) & 0xf) << 8)
+        | (((imm >> 11) & 1) << 7)
+        | 0x63
+}
+
+pub fn bne(rs1: u32, rs2: u32, imm: i32) -> u32 {
+    beq(rs1, rs2, imm) | (1 << 12)
+}
+
+pub fn jal(rd: u32, imm: i32) -> u32 {
+    let imm = imm as u32;
+    (((imm >> 20) & 1) << 31)
+        | (((imm >> 1) & 0x3ff) << 21)
+        | (((imm >> 11) & 1) << 20)
+        | (((imm >> 12) & 0xff) << 12)
+        | (rd << 7)
+        | 0x6f
+}
+
+pub fn jalr(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (rd << 7) | 0x67
+}
+
+pub fn csrrw(rd: u32, csr: u32, rs1: u32) -> u32 {
+    (csr << 20) | (rs1 << 15) | (1 << 12) | (rd << 7) | 0x73
+}
+
+pub fn csrrs(rd: u32, csr: u32, rs1: u32) -> u32 {
+    (csr << 20) | (rs1 << 15) | (2 << 12) | (rd << 7) | 0x73
+}
+
+pub fn ecall() -> u32 {
+    0x0000_0073
+}
+
+pub fn wfi() -> u32 {
+    0x1050_0073
+}
+
+pub fn sfence_vma() -> u32 {
+    0x1200_0073
+}
+
+pub fn vsetvli(rd: u32, rs1: u32, vtype: u32) -> u32 {
+    (vtype << 20) | (rs1 << 15) | (0x7 << 12) | (rd << 7) | 0x57
+}
+
+pub fn vle8(vd: u32, rs1: u32) -> u32 {
+    (1 << 25) | (rs1 << 15) | (vd << 7) | 0x07
+}
+
+pub fn vse8(vs3: u32, rs1: u32) -> u32 {
+    (1 << 25) | (rs1 << 15) | (vs3 << 7) | 0x27
+}
+
+pub fn hi_lo(addr: u64) -> (u32, i32) {
+    let lo = (addr & 0xfff) as i32;
+    let lo = if lo >= 0x800 { lo - 0x1000 } else { lo };
+    let hi = ((addr.wrapping_add(0x800)) >> 12) as u32;
+    (hi, lo)
+}
+
+pub fn fits12(imm: i64) -> bool {
+    (-2048..=2047).contains(&imm)
+}
+
+pub fn li_nwords(imm: i64) -> usize {
+    if fits12(imm) {
+        1
+    } else {
+        2
+    }
+}
+
+pub fn li_words(rd: u32, imm: i64) -> Vec<u32> {
+    if fits12(imm) {
+        vec![addi(rd, X0, imm as i32)]
+    } else {
+        let (hi, lo) = hi_lo(imm as u64);
+        vec![lui(rd, hi), addi(rd, rd, lo)]
+    }
+}
+
+pub fn reg_name(r: u32) -> &'static str {
+    match r {
+        0 => "zero",
+        1 => "ra",
+        2 => "sp",
+        4 => "tp",
+        5 => "t0",
+        6 => "t1",
+        7 => "t2",
+        9 => "s1",
+        10 => "a0",
+        11 => "a1",
+        12 => "a2",
+        16 => "a6",
+        17 => "a7",
+        _ => "x?",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addi_a0_x0_1() {
+        assert_eq!(addi(A0, X0, 1), 0x0010_0513);
+        assert_eq!(ecall(), 0x0000_0073);
+        assert_eq!(csrrw(X0, CSR_STVEC, T2), 0x1053_9073);
+    }
+
+    #[test]
+    fn cmd_words_are_le_ascii() {
+        assert_eq!(CMD_VIEW, u32::from_le_bytes(*b"View"));
+        assert_eq!(CMD_REBO, u32::from_le_bytes(*b"Rebo"));
+        assert_eq!(CMD_SHUT, u32::from_le_bytes(*b"Shut"));
+        assert_eq!(CMD_WAKE, u32::from_le_bytes(*b"Wake"));
+        assert_eq!(CMD_UI, u32::from_le_bytes(*b"Ui\0\0"));
+        assert_eq!(CMD_FILE, u32::from_le_bytes(*b"File"));
+        assert_eq!(CMD_GET, u32::from_le_bytes(*b"Get\0"));
+        assert_eq!(MBOX_RSP_UI, u32::from_le_bytes(*b"UI\n\0"));
+        assert_eq!(MBOX_RSP_FILE, u32::from_le_bytes(*b"FILE"));
+        assert_eq!(WASM_MAGIC, u32::from_le_bytes(*b"\0asm"));
+    }
+
+    #[test]
+    fn li_sbi_srst_is_two_words() {
+        assert_eq!(li_nwords(SBI_SRST_EID), 2);
+        assert_eq!(li_nwords(SBI_PUTCHAR), 1);
+        let w = li_words(A7, SBI_SRST_EID);
+        assert_eq!(w.len(), 2);
+    }
+
+    #[test]
+    fn srli_scause_interrupt_bit_rv64() {
+        // srli t2, t0, 63 — isolate scause[63] (Priv ch3 interrupt bit).
+        assert_eq!(srli(T2, T0, 63), 0x03f2_d393);
+        assert_eq!(CSR_TIME, 0xC01);
+    }
+}

@@ -1,0 +1,68 @@
+class CEthernetFrame
+{
+	U8	source_address[MAC_ADDRESS_LENGTH];
+	U8	padding[2];
+	U8	destination_address[MAC_ADDRESS_LENGTH];
+	U16	ethertype;
+
+	U8 *data;
+
+	I64 length;
+};
+
+class CEthernetGlobals
+{
+	U8 ethernet_null[MAC_ADDRESS_LENGTH];
+	U8 ethernet_broadcast[MAC_ADDRESS_LENGTH];
+
+} ethernet_globals;
+
+U0 EthernetGlobalsInit()
+{
+	I64 i;
+	for (i = 0; i < MAC_ADDRESS_LENGTH; i++)
+	{
+		ethernet_globals.ethernet_null[i]		= 0;
+		ethernet_globals.ethernet_broadcast[i]	= 0xFF;
+	}
+}
+
+U0 EthernetFrameParse(CEthernetFrame *frame_out, U8 *frame, U16 length)
+{
+	// length is assumed to NOT include the FCS.
+
+	// Shrine says MemCopy has a high overhead.
+	// Almost tempted to say that means that a lot
+	// of the current system should be done with 
+	// less extra allocation altogether, more passing.
+	// In practice, MemCopy causes the most slowdown on bare-metal.
+
+	NetLog("ETHERNET FRAME PARSE: Parsing frame, copying out to frame_out param.");
+
+	MemCopy(frame_out->destination_address, frame,						MAC_ADDRESS_LENGTH);
+
+	MemCopy(frame_out->source_address,		frame + MAC_ADDRESS_LENGTH, MAC_ADDRESS_LENGTH);
+
+	frame_out->ethertype = frame[ETHERNET_ETHERTYPE_OFFSET + 1] | frame[ETHERNET_ETHERTYPE_OFFSET] << 8;
+
+	frame_out->data		 = frame + ETHERNET_DATA_OFFSET;
+
+	frame_out->length	 = length - ETHERNET_MAC_HEADER_LENGTH;
+}
+
+U0 EthernetFrameFinish(I64 de_index)
+{//Alias for generic driver Finish TX function.
+	U8 *data = NetDriverPacketBufferGet(de_index);
+	I64 length = NetDriverPacketLengthGet(de_index);
+	U8 *mac = EthernetMACGet();
+	Bool is_loopback = !MemCompare(mac, data, MAC_ADDRESS_LENGTH); // check the TX packet MAC against local MAC
+
+	//  software loopback the TX packet to RX NetQueue if it's loopback
+	if (is_loopback)
+		NetQueueLazyPush(data, length);
+
+	NetDriverTransmitPacketFinish(de_index);
+
+}
+
+EthernetGlobalsInit;

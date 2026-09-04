@@ -1,0 +1,26 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "BIOS kernel host path: HolyC + HTML+JS + Gr rewrite"
+
+[dependencies]
+g6b-html = { workspace = true }
+g6b-dom = { workspace = true }
+g6b-spec = { workspace = true }
+g6b-design = { workspace = true }
+g6b-holyc = { workspace = true }
+g6b-js = { workspace = true }
+g6b-gr = { workspace = true }
+g6b-wasm = { workspace = true }
+g6b-http = { workspace = true }
+g6b-ui = { workspace = true }
+
+[lints]
+workspace = true

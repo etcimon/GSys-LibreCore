@@ -1,0 +1,16 @@
+{
+  "name": "svelte-d-kit-env",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "bun + ts + svelte-d consumer: $app/$env generated enums, cookies, redirect, setHeaders.",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "svelte-d": "workspace:*"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

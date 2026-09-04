@@ -1,0 +1,185 @@
+---
+title: Example — admin panel
+description: "Simplified kit-admin — layout, dashboard, users list, and /admin/users/:id."
+---
+
+# Example: admin panel
+
+The in-tree `packages/svelte-d-kit-admin` fixture is a real admin: nested routes, dest-unique host classes, Postgres and Redis soaks, a debug map, an overlay, an IR inspector, and optional Chrome/Firefox consoles. That is more than you need to learn the IR. This page is the same *shape* with the extras stripped. You get a layout that stays mounted, a dashboard, a user list, and a user `:id` page. Host files return JSON. There is no database and no browser automation. The copyable files live in `docs/examples/admin/` in this repository.
+
+```
+my-admin/
+  svelte-d.config.ts
+  package.json
+  src/
+    lib/AdminDash.svelte
+    routes/admin/
+      +layout.svelte
+      +page.svelte
+      +page.server.d
+      users/
+        +page.svelte
+        +page.server.d
+        [id]/
+          +page.svelte
+          +page.server.d
+```
+
+`mapKitPath` for this tree is the fall-through contract in miniature. The layout has no URL of its own; it is a wrapper. The dashboard is `/admin`. The list is `/admin/users`. The param page is `/admin/users/:id`, and the dest directory is `_id_/` because LDC will not accept `[id]` on Windows. Host files land under `webserver/source/generated/` with dest-unique class names so `assembleHostRoutes` can hang every one of them on `app.d`.
+
+Layouts are `@child` wrappers, not router entries. `KitRoutes` remounts the *page* inside `@entering`. If the layout were a second wasm module, back/forward would tear down the nav on every navigation, and you would have invented a second DOM. The IR refuses that.
+
+## Config and package
+
+```ts
+// svelte-d.config.ts
+export default { workspace: './svelte-engine-ws' }
+```
+
+```json
+{
+  "name": "my-admin",
+  "type": "module",
+  "dependencies": { "svelte-d": "github:etcimon/svelte-d" },
+  "scripts": {
+    "setup": "bunx svelte-d setup",
+    "compile": "bunx svelte-d compile --project .",
+    "dev": "bunx svelte-kit-d dev"
+  }
+}
+```
+
+```bash
+bun install
+bunx svelte-d setup
+bunx svelte-d drop-ws --force
+bunx svelte-d compile --project .
+```
+
+After compile you should be able to open `svelte-engine-ws/src-d/routes/admin/page.d` and see a `struct` whose `{#if}` and `<AdminDash />` are `@visible` and `@child`. If that file is missing, ingest did not see `src/routes`. If it exists but still looks like the engine’s stock `+page.svelte`, the project path was not passed (or cwd had no `src/routes` when you inferred it).
+
+## Layout — slot, `{#if}`, and `svelte:head`
+
+The layout is the smallest file that still exercises three IR families at once. `open` is a host bool. `{#if open}` is `@visible` on the `nav` child, not a second layout type. `<slot>` is the content hole `KitRoutes` fills; the fallback text is what prints when nothing is projected. `<svelte:head>` walks into `document().title` during `onMount`, which is after handles exist — putting a DOM write in `construct()` would be too early.
+
+```svelte
+<script lang="ts" context="module">
+  export function adminLayoutReady() { return true }
+</script>
+
+<script lang="d">
+  bool open = true;
+</script>
+
+<div class="admin-layout">
+  <svelte:head><title>Admin</title></svelte:head>
+  {#if open}
+    <nav>Admin</nav>
+  {/if}
+  <slot>admin fallback</slot>
+</div>
+```
+
+The `context="module"` TypeScript is not decorative. It splices into `src-ts/modules/generated/` so `libwasm.init` has a named export the tests (and your own `jsExports`) can see, and it registers on `__svelteD.ts[<ident>_mod]`. Same-file D may call those exports by the simple name (`callTs`). Dual-script files do both cells’ jobs without mixing them. See [cross-calling](./cross-calling).
+
+## Dashboard — `{#if}` plus a component
+
+A page that only inlines markup teaches `{#if}`. A page that instantiates `<AdminDash />` also teaches `@child`. Both matter, because a component is not a string include: it is `import lib.AdminDash;` plus `@child AdminDash adminDash`, and the page’s `{#if show}` attaches `@visible!"adminDash"` to the *page* struct’s `bool show`. Flip is `this.update.show = false`. libwasm `update` writes the field and fires `setVisible`, which unmounts the child without destroying the page.
+
+```svelte
+<!-- src/lib/AdminDash.svelte -->
+<script lang="d">
+  bool show = true;
+</script>
+<div class="admin-dash">
+  {#if show}
+    <p>Dashboard</p>
+  {/if}
+</div>
+```
+
+```svelte
+<!-- src/routes/admin/+page.svelte -->
+<script lang="d">
+  bool show = true;
+</script>
+<div class="admin-dash">
+  {#if show}
+    <AdminDash />
+  {/if}
+</div>
+```
+
+The inner `{#if}` on `AdminDash` is a *different* bool on a *different* struct. Nested visibility is not a global flag. Each owner carries its own `@visible` field, which is why a Flip on the page does not accidentally hide a bool inside the child that happens to share a name.
+
+## Host JSON, without a database
+
+The kit-admin host talks to Redis and Postgres and records `"skip"` when they are absent. That is valuable for soak tests. It is noise when you are learning the cell split. A host file is vibe.0: a function that takes `HTTPServerRequest` / `HTTPServerResponse` and writes a body. It becomes a dest-unique `registerWebInterface` class under `/__svelte-d/host/`. Vite keeps `/`. Do not `import libwasm` here.
+
+```d
+// src/routes/admin/+page.server.d
+void getAdmin(HTTPServerRequest req, HTTPServerResponse res)
+{
+	Json payload = Json.emptyObject;
+	payload["panel"] = "admin";
+	res.writeBody(payload.serializeToJsonString(), "application/json");
+}
+```
+
+## Users list — `{#each}` inside `{#if}`
+
+This is the first combination that surprises people. The outer `{#if show}` shows or hides the *list*. The inner `{#each users as user}` is an `UnorderedList!User`. `{user}` is `@prop` on the *item*, not a concatenate on the `ul`. `<ul>{#each}` would absorb the wrapper because `UnorderedList` is already `NodeDef!"ul"`; here the each sits inside a `div`, so the list hangs on that parent.
+
+```svelte
+<script lang="d">
+  bool show = true;
+</script>
+<div class="admin-users">
+  {#if show}
+    {#each users as user}
+      <li>{user}</li>
+    {/each}
+  {/if}
+</div>
+```
+
+The host can seed JSON. The wasm cell still owns the `UnorderedList`. Putting the array only on the server and expecting the `ul` to fill itself is SvelteKit SSR thinking; this stack’s v1 page is a SPA struct that `put`s items in `construct` / `ready`.
+
+```d
+void getUsers(HTTPServerRequest req, HTTPServerResponse res)
+{
+	Json payload = Json.emptyObject;
+	payload["users"] = Json.emptyArray;
+	Json row = Json.emptyObject;
+	row["email"] = "ada@example.com";
+	payload["users"] ~= row;
+	res.writeBody(payload.serializeToJsonString(), "application/json");
+}
+```
+
+## User `:id` — params and navigate
+
+A param page is where kit routing and IR meet. `@entering` assigns `ev.parameters["id"]` onto the page field and calls `applyKitParams()`. `{id}` seeds a child `@prop` in `construct`. `gotoUrl` is the wasm-eh navigation helper, not SvelteKit `goto`; it exists because `libwasm.router` is experimental and `navigateTo` does not `pushState` when the browser path already matches.
+
+```svelte
+<script lang="d">
+  import kit.app_navigation;
+  bool show = true;
+  string id = "";
+  void goList() { gotoUrl("/admin/users"); }
+</script>
+
+<div class="admin-user">
+  <p class="admin-user-id">{id}</p>
+  <button type="button" on:click={goList}>List</button>
+  {#if show}
+    <p>{id}</p>
+  {/if}
+</div>
+```
+
+The dest path is `_id_/`. If you look for `src-d/routes/admin/users/[id]/page.d` you will not find it, and that is not a failed ingest.
+
+## What the full kit-admin still is
+
+`packages/svelte-d-kit-admin` adds `logs/` and `features/`, Postgres/Redis soaks that write `"skip"` when offline, `+error.svelte`, debug-map / overlay / IR inspector pages, and optional Chrome/Firefox console rewrite. Those are host and debug surfaces. They are not more Svelte syntax. Learn the IR on this tree; graduate to kit-admin when you need the soaks and the overlay.

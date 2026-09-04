@@ -1,0 +1,105 @@
+CTask *net_log_task = NULL;
+Bool net_log_enabled = TRUE;
+
+U0 NetLogSave()
+{
+	StrCopy(net_log_task->put_doc->filename.name, "::/Home/Net/Log.DD");
+	DocWrite(net_log_task->put_doc);
+}
+
+U0 NetLogInit()
+{
+    if (!net_log_enabled) return;
+	net_log_task = Spawn(&ServerCmdLine, NULL, "Network Log");
+	TaskWait(net_log_task);
+
+	net_log_task->border_src	= BDS_CONST;
+	net_log_task->border_attr	= DKGRAY << 4 + LTGRAY;
+	net_log_task->text_attr		= WHITE  << 4 + LTGRAY;
+	DocClear(net_log_task->border_doc, TRUE);
+
+	WinHorz(TEXT_COLS / 3, 2 * TEXT_COLS / 3, net_log_task);
+	WinVert(2 * TEXT_ROWS / 3, 5 * TEXT_ROWS / 6, net_log_task);
+	WinFocus(net_log_task);
+
+	DocPrint(net_log_task->put_doc, "$$WW+H,1$$");
+
+//	net_log_task->put_doc->max_entries = I64_MAX;
+
+	Bts(&net_log_task->win_inhibit, WIf_SELF_FOCUS);
+}
+
+U0 NetLogToggle() {
+	if (Fs != sys_task)
+	{
+		"\nMust be ran as system";	
+		return;
+	}
+    net_log_enabled = !net_log_enabled;
+	if(!net_log_enabled)
+		Kill(net_log_task);
+	else
+		NetLogInit;
+}
+
+U0 NetLogBottom()
+{//Move cursor, cur_entry, to bottom.
+	Bool unlock;
+	CDoc *doc = net_log_task->put_doc;
+
+	unlock = DocLock(doc);
+	doc->cur_entry	= doc;
+	doc->cur_col	= 0;
+	if (unlock)
+		DocUnlock(doc);
+}
+
+U0 NetLog(U8 *format, ...)
+{ // Output text to NetLogTask as Log.
+    if (!net_log_enabled) return;
+	U8 *buf = StrPrintJoin(NULL, format, argc, argv);
+
+	NetLogBottom;
+
+	DocPrint(net_log_task->put_doc, "%s\n", buf);
+
+	Free(buf);
+}
+
+U0 NetWarn(U8 *format, ...)
+{ // Output text to NetLogTask as Warning.
+    if (!net_log_enabled) return;
+	U8 *buf = StrPrintJoin(NULL, format, argc, argv);
+
+	NetLogBottom;
+
+	DocPrint(net_log_task->put_doc, "$$BG,BROWN$$$$WHITE$$%s$$BG$$$$FG$$\n", buf);
+
+	Free(buf);
+}
+
+U0 NetErr(U8 *format, ...)
+{ // Output text to NetLogTask as Error.
+    if (!net_log_enabled) return;
+	U8 *buf = StrPrintJoin(NULL, format, argc, argv);
+
+	NetLogBottom;
+
+	DocPrint(net_log_task->put_doc, "$$BG,RED$$$$WHITE$$%s$$BG$$$$FG$$\n", buf);
+
+	Free(buf);
+}
+
+U0 NetDebug(U8 *format, ...)
+{ // Output text to NetLogTask as Debug.
+    if (!net_log_enabled) return;
+	U8 *buf = StrPrintJoin(NULL, format, argc, argv);
+
+	NetLogBottom;
+
+	DocPrint(net_log_task->put_doc, "$$BG,YELLOW$$$$DKGRAY$$%s$$BG$$$$FG$$\n", buf);
+
+	Free(buf);
+}
+
+NetLogInit;

@@ -1,0 +1,24 @@
+{
+  "name": "svelte-kit-d",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "bun + svelte-d consumer: import svelte-d, drop svelte-engine-ws, Vite HMR + vibe.0",
+  "bin": {
+    "svelte-kit-d": "./src/cli.ts"
+  },
+  "scripts": {
+    "dev": "bun src/cli.ts dev",
+    "serve": "bun src/cli.ts serve",
+    "test": "bun test",
+    "drop": "bun src/cli.ts drop",
+    "compile": "bun src/cli.ts compile",
+    "adapt": "bun src/cli.ts adapt"
+  },
+  "dependencies": {
+    "svelte-d": "workspace:*"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

@@ -1,0 +1,38 @@
+---
+title: What vibe.0 is
+description: The host cell. A 2015 vibe.d fork with libasync, botan, libhttp2. What +page.server.d actually compiles against.
+---
+
+# What vibe.0 is
+
+vibe.0 is the host cell. It is a 2015 vibe.d fork (DUB name **`vibe-0`**, git tag `v1.2.1`) with libasync as the only event backend, botan (and optionally OpenSSL) for TLS, and libhttp2 for HTTP/2. svelte-d does not wrap it in Node. `+page.server.d`, `+server.d`, `+layout.server.d`, and `hooks.server.d` print as vibe.0 D and `registerWebInterface` onto the engine’s `webserver`. If you have just finished [Getting Started](../getting-started) and opened `svelte-engine-ws/webserver` in VS Code with code-d, the identifiers that complete under `import vibe.http.server;` and `import helpers;` are the subject of this section.
+
+It is **not** official vibe.d. Diet / `vibe.templ` are gone. `vibe.web.rest` is gone. Mongo is gone. The libevent / Win32 / libev drivers are gone. `vibeVersionString` is still `"0.7.23"` — the upstream tag at the fork — and the `Server` / `User-Agent` headers still say `vibe.d/0.7.23` unless the app sets `serverString`. Do not conflate that string with the git tag.
+
+The consumer shape is construction: `VibeCustomMain`, your own `main()`, `listenHTTP`, `runEventLoop()`. Default `appmain.d` `static assert`s otherwise. `vibe.core.core` starts the only backend, `LibasyncDriver`. One fiber per TCP connection owns HTTP/1.1 keep-alive or an HTTP/2 session. Dispatch is `context.requestHandler` → `URLRouter.handleRequest`. `registerWebInterface` turns public methods + `@path` `@method` `@before` `@after` into `router.match` entries.
+
+`import vibe.d;` and `import vibe.vibe;` are the same public re-export list. Neither gives you a working `main()` in this fork. Typical host files import narrower modules (`vibe.http.server`, `vibe.data.json`, `vibe.web.web`) plus the engine barrel `import helpers;`. They do not import `libwasm`. A `+page.server.d` that does is in the wrong cell.
+
+## Barrel vs explicit imports
+
+**In `vibe.d` / `vibe.vibe`:** core (`args`, `concurrency`, `core`, `file`, `log`, `net`, `sync`, `trace`), `crypto.passwordhash`, `data.json` (which public-imports `serialization`), `db.redis.redis`, HTTP (`auth.basic_auth`, `client`, `fileserver`, `form`, `proxy`, `router`, `server`, `debugger`, `websockets`), inet (`message`, `url`, `urltransfer`), `mail.smtp`, streams (`counting`, `memory`, `operations`, `ssl`, `zlib`), textfilter, `utils.string`, `web.web`, plus Phobos `toDelegate` / `to` / `std.datetime` / `enforce`.
+
+**Public but not starred** — import them by name, which is what the engine and the README samples do:
+
+| Area | Modules |
+|---|---|
+| HTTP | `http.common`, `http.status`, `http.session`, `http.http2`, `http.cookiejar`, `http.log`, `http.auth.digest_auth` |
+| Stream | `stream.tls` (prefer over `ssl`), `stream.botan`, `stream.openssl`, `stream.brotli` |
+| Data | `data.xml`, `data.dom`, `data.brotli` |
+| DB | `db.sqlite.sqlite3`, `db.pgsql.pgsql`, `db.redis.idioms`, `db.redis.sessionstore`, `db.redis.types` |
+| Other | `crypto.cryptorand`, `inet.path`, `inet.mimetypes`, `inet.webform`, `web.common`, `web.validation` |
+
+`vibe.core.drivers.*` and `vibe.internal.*` (except `meta.funcattr`, which `registerWebInterface` public-imports as `@before` / `@after`) are not a stable API.
+
+## How svelte-d hangs a kit on this
+
+`svelte-d host` is `dub build` in `ws/webserver` with the same LDC 1.43 as wasm and with `DFLAGS` / `DC` cleared. Generated classes are dest-unique (`AdminPageServer`, `UsersPageServer`) so every ingested route can hang on `webserver/source/app.d` without colliding. `assembleHostRoutes` writes between `// svelte-d:begin-host-routes` markers. `registerWebInterface` is called under `/__svelte-d/host/`; Vite keeps `/`. Adapters copy the host exe and `public/`; they do not add a Node HTTP stack.
+
+The rest of this section is the runtime in the order you will meet it when you open a printed `+page.server.d`. [Custom main & event loop](./boot) is process start. [HTTP](./http) is the connection and the request object. [URLRouter](./router) is the match language. [registerWebInterface](./web) is how a class becomes routes. [JSON, sessions, databases](./data) is the data plane. [lang="d" on the host cell](./lang-d) puts the same identifiers back next to the file you actually write.
+
+svelte-d’s [vibe.0 host files](../guide/host) page is the author-facing contract. This section is the library that contract names.

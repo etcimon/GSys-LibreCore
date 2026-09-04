@@ -1,0 +1,9 @@
+name "svelte-d"
+description "Svelte / SvelteKit → libwasm / vibe.0. bun install builds the svelte-d CLI."
+authors "Etienne Cimon"
+copyright "Copyright © 2026, Etienne Cimon"
+license "MIT"
+homepage "https://etcimon.github.io/svelte-d/"
+# Version is the git tag (v0.2.3 → 0.2.3). Do not set `version` here:
+# code.dlang.org rejects ~master when the recipe version is a semver.
+targetType "none"

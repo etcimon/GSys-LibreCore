@@ -16,6 +16,8 @@ contract, the pin in `pins.toml` plus the document it names.
 
 **Green command:** `python tools/g6q.py check`
 
+`--loader bios` / `gen --emit bios-spec`: OpenSBI next-stage wiring for the independent `g6lc_bios` package. That package is a **rewrite** of TempleOS/ZealOS specs (`g6lc_bios/kernel-spec/`), not a vendor of those trees; ELF from `g6b elf`. Dual-band HolyC: UART0 nographic stdio, UART1 `-serial tcp:127.0.0.1:2222,server,nowait` (`--holyc-port`). QEMU hypothesis only.
+
 ---
 
 ## Latest pass — Q6 functional island + control surface (2026-09)

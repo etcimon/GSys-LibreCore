@@ -1,0 +1,36 @@
+{
+  "name": "bios-ui",
+  "workspace": "svelte-engine-ws",
+  "kit": false,
+  "wasm": "out/bios-ui.wasm",
+  "constructs": {
+    "live": [
+      "NodeDef",
+      "@prop",
+      "@child",
+      "@visible",
+      "_start",
+      "FileMgr",
+      "Menu"
+    ],
+    "stub": [
+      "{#each}",
+      "{#await}",
+      "Slot",
+      "@callback"
+    ],
+    "refused": [
+      "router",
+      "$state",
+      "sveltekit"
+    ]
+  },
+  "markers": [
+    "SVELTE-LIVE NodeDef",
+    "SVELTE-LIVE _start",
+    "SVELTE-LIVE FileMgr",
+    "SVELTE-LIVE Menu",
+    "SVELTE-STUB {#await}",
+    "SVELTE-REFUSED sveltekit"
+  ]
+}

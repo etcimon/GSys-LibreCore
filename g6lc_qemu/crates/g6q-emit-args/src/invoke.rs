@@ -450,6 +450,10 @@ pub fn build_argv(
             a.push("-device".into());
             a.push("virtio-rng-device,rng=rng0".into());
         }
+        if v.as_str() == "gpu" {
+            a.push("-device".into());
+            a.push("virtio-gpu-device".into());
+        }
     }
 
     // icount is incompatible with MTTCG; resolve the combination before either is emitted.

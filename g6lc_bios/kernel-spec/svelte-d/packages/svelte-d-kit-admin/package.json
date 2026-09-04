@@ -1,0 +1,24 @@
+{
+  "name": "svelte-d-kit-admin",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "bun + ts + svelte-d admin panel: D-IR debug map, Puppeteer rewrite, vibe.0 PG/Redis/JSON hosts.",
+  "scripts": {
+    "test": "bun test",
+    "dev": "bun src/cli.ts dev",
+    "build": "bun src/cli.ts build",
+    "start": "bun src/cli.ts dev"
+  },
+  "dependencies": {
+    "admin-mini": "1.0.0",
+    "svelte-d": "workspace:*"
+  },
+  "optionalDependencies": {
+    "puppeteer": "^24.0.0",
+    "playwright": "^1.50.0"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

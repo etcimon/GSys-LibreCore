@@ -1,0 +1,24 @@
+{
+  "name": "svelte-d",
+  "version": "0.2.3",
+  "private": true,
+  "type": "module",
+  "description": "Importable svelte-d: TypeScript API over native exe + dynamic lib (bun:ffi). Kit syntax falls through to libwasm/vibe.0 in an equivalent svelte-engine-ws tree.",
+  "exports": {
+    ".": "./ts/index.ts"
+  },
+  "types": "./ts/index.ts",
+  "scripts": {
+    "pack-engine": "bun scripts/pack-engine.ts"
+  },
+  "files": [
+    "ts",
+    "bin",
+    "lib",
+    "svelte-engine",
+    "templates"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

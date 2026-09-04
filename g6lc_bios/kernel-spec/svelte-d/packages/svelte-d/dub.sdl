@@ -1,0 +1,29 @@
+name "svelte-d"
+description "SvelteKit → D compiler (vibe.0 + Pegged + libdparse). Importable exe + lib + TS."
+authors "Etienne Cimon"
+copyright "Copyright © 2026, Etienne Cimon"
+license "MIT"
+dependency "pegged" version="~>0.4.4"
+dependency "libdparse" version="~>0.25.0"
+sourcePaths "source"
+stringImportPaths "grammar" "templates"
+buildRequirements "allowWarnings"
+
+configuration "application" {
+    targetType "executable"
+    targetName "svelte-d"
+    targetPath "bin"
+    mainSourceFile "source/app.d"
+    // Compiler only. Dest host (svelte-engine-ws/webserver) links vibe-0.
+}
+
+configuration "library" {
+    targetType "dynamicLibrary"
+    targetName "svelte-d"
+    targetPath "lib"
+    excludedSourceFiles "source/app.d"
+    // Windows: statically fold Phobos + libdparse + pegged into the DLL.
+    // -dllimport=none avoids __imp_ thunks for those static libs.
+    // -link-defaultlib-shared=false avoids expecting phobos2.dll.
+    dflags "-dllimport=none" "-link-defaultlib-shared=false"
+}

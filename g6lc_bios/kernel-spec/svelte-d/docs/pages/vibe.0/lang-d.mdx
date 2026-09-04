@@ -1,0 +1,83 @@
+---
+title: 'lang="d" on the host cell'
+description: +page.server.d is vibe.0 D. HTTPServerRequest, Json, registerWebInterface. Not libwasm. Not Node load.
+---
+
+# `lang="d"` on the host cell
+
+On the wasm cell, `lang="d"` is a `<script>` inside a `.svelte` file. On the host cell, `lang="d"` is the file itself: `+page.server.d`, `+server.d`, `+layout.server.d`, `hooks.server.d`. Both are D. They compile with the same LDC 1.43. They do not share object files, they do not share `DFLAGS`, and they do not share imports. This page is the host file, walked against the API the previous pages named, so a method you type next to a kit route and a class you read under `webserver/source/generated/` are visibly the same language.
+
+```d
+// src/routes/admin/users/+page.server.d
+import helpers;
+
+class UsersPageServer
+{
+	void getUsers(HTTPServerRequest req, HTTPServerResponse res)
+	{
+		Json payload = Json.emptyObject;
+		payload["users"] = Json.emptyArray;
+		res.writeBody(payload.serializeToJsonString(), "application/json");
+	}
+
+	void postSave(HTTPServerRequest req, HTTPServerResponse res)
+	{
+		auto name = req.form.get("name", "");
+		if (!name.length)
+			enforceHTTP(false, HTTPStatus.badRequest, "name required");
+		res.redirect("/admin/users");
+	}
+
+	void getUser(HTTPServerRequest req, HTTPServerResponse res)
+	{
+		auto id = req.params["id"];
+		Json payload = Json.emptyObject;
+		payload["id"] = id;
+		res.writeJsonBody(payload);
+	}
+}
+```
+
+svelte-d prints that class dest-unique (`UsersPageServer` stays if it does not collide; `AdminUsersPageServer` if it must) into `webserver/source/generated/routes/admin/users/page_server.d`, lifts the imports to the module header, and hangs `registerWebInterface(new UsersPageServer, kit)` on `app.d` with `kit.urlPrefix = "/__svelte-d/host/"`. `getUsers` is `GET /__svelte-d/host/users`. `postSave` is `POST /__svelte-d/host/save`, which is how a SvelteKit `actions.save` is approximated. `req.params["id"]` is the `:id` from `[id]`.
+
+## What each identifier already is
+
+`HTTPServerRequest` / `HTTPServerResponse` are the [special parameters](./web) that skip form conversion. `Json` is [vibe.data.Json](./data), not libwasm `JSON`. `enforceHTTP` is `vibe.http.status`. `req.form`, `req.json`, `req.cookies`, `req.params`, `res.setCookie`, `res.redirect`, `res.writeBody`, `res.writeJsonBody` are the [server](./http) object. `import helpers;` is the engine barrel that already pulled those modules plus `connectDB` / `connectCache` / `kitLog`.
+
+A host function that needs Postgres is still this file:
+
+```d
+void getUsers(HTTPServerRequest req, HTTPServerResponse res)
+{
+	auto db = connectDB();
+	auto cmd = scoped!PGCommand(db, "select id, name from users");
+	Json payload = Json.emptyObject;
+	payload["users"] = Json.emptyArray;
+	// … fill from rows …
+	res.writeBody(payload.serializeToJsonString(), "application/json");
+}
+```
+
+kit-admin writes `"skip"` when the daemon is absent. The simplified admin example in this site’s `docs/examples/admin` does not open a database at all. Both are vibe.0. Neither is a Node `load`.
+
+## `hooks.server.d` and layouts
+
+`hooks.server` `handle` is `router.any("*", …)` registered **before** page routes, or `@before` on the web interface. `handleError` is `HTTPServerSettings.errorPageHandler`. Layout `load` is composed in generated D; vibe.0 has no layout primitive. `+server.d` verbs become `router.match(HTTPMethod.GET, …)` (and POST / PUT / PATCH / DELETE) or a small web-interface class.
+
+Cookies are `req.cookies` / `res.setCookie`. Sessions are `settings.sessionStore` (the engine may attach `RedisSessionStore`). `$env/static/private` is host-cell only.
+
+## What must not appear
+
+| In the host file | Why |
+|---|---|
+| `import libwasm` | wasm cell |
+| `mixin Spa` / `mixin NodeDef` | wasm cell |
+| `Lodash` / `document()` / `moment()` | wasm cell |
+| Node `fetch` as the implementation of `load` | there is no second HTTP stack |
+| Diet templates as SSR | Diet is deleted from vibe.0; `src-d-views/*.dt` is wasm `stringImportPaths` |
+| `vibe.web.rest` | not in this tree |
+| a new DUB package added only in the bun project | add it to `webserver/dub.sdl`, then import |
+
+Open `svelte-engine-ws/webserver` as a DUB root in code-d so `HTTPServerRequest`, `Json`, and `helpers.connectDB` complete. That is the [Getting Started](../getting-started) IDE recommendation applied to this cell. The author-facing contract, shorter, is [vibe.0 host files](../guide/host). This page is the same file after you know what `import vibe.web.web;` actually is.
+
+The wasm cell consumes these routes with `window().fetch("/__svelte-d/host/users").then(...)`. That fetch is [libwasm](../libwasm/js). The JSON it returns is this page.

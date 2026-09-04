@@ -1,0 +1,72 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# pins.toml — crate and toolchain pins. No Go goja, no QEMU, no OpenSBI.
+
+[package]
+version = "0.1.0"
+stage = "B20"
+schema_version = "1"
+
+[toolchain]
+rust = "1.85.0"
+python_min = "3.9"
+
+# Semantic reference only. Never a crate or Go module dependency.
+[js]
+spec = "goja-es5.1"
+spec_url = "https://github.com/dop251/goja"
+rev = "f87b40ad7341524f081e8d08d9f295b18f6c41a6"
+path = "kernel-spec/goja"
+license = "MIT"
+note = "opcodes and host-loop contract; not linked; not a Go module"
+
+[dom]
+spec = "lirx-js-dom"
+spec_url = "https://github.com/lirx-js/dom"
+rev = "deef354d89a362373774cfc6258b8b88986f4d72"
+path = "kernel-spec/lirx-dom"
+license = "MIT"
+note = "DOM locality spec; not linked"
+
+[webidl]
+spec = "gecko-webidl"
+path = "kernel-spec/webidl"
+license = "MPL-2.0"
+note = "copied definitions; not compiled; live/stub in g6b-webidl"
+
+[svelte_d]
+spec = "svelte-d"
+spec_url = "https://github.com/etcimon/svelte-d"
+rev = "45a7d1a818b6fe4aa62180a5abfa55d818597bb9"
+path = "kernel-spec/svelte-d"
+license = "MIT"
+note = "Svelte→libwasm/WASM UI spec; not LDC; not Binaryen; not compiled here"
+
+[libwasm]
+spec = "libwasm-druntime"
+path = "kernel-spec/libwasm"
+license = "MIT"
+note = "WASM JIT druntime / Object_Call / fetch spec; not compiled; not LDC"
+
+[botan]
+spec = "botan-d"
+path = "kernel-spec/botan"
+license = "BSD-2-Clause"
+note = "TLS/X.509/RSA/ECDSA spec; not compiled; rewrite in g6b-tls"
+
+[zealos]
+role = "kernel-spec-reference"
+url = "https://github.com/Zeal-Operating-System/ZealOS.git"
+rev = "eee210f4379ba3d00b47507f336a158eefb2c993"
+path = "kernel-spec/ZealOS"
+license = "Unlicense"
+note = "not a crate; not linked; refresh with kernel-spec/fetch.ps1"
+
+[templeos]
+role = "kernel-spec-reference"
+url = "https://github.com/cia-foundation/TempleOS.git"
+rev = "c26482bb6ad3f80106d28504ec5db3c6a360732c"
+path = "kernel-spec/TempleOS"
+license = "public-domain"
+note = "not a crate; not linked; original HolyC/Adam/Kernel snapshot"

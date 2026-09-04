@@ -1,0 +1,254 @@
+# Installation
+
+## Cloning the example repo
+
+The fastest way to begin a new `@lirx/dom` project, consists in cloning the [examples' repository](https://github.com/lirx-js/dom-examples):
+
+```bash
+git clone https://github.com/lirx-js/dom-examples
+```
+
+It's a fresh and updated repository with everything set-up to develop and build our applications. It has:
+
+- 📜 sass and typescript support (highly recommended)
+- 🔃 hot reload
+- 🏗️ agressive build optimizations
+- 🖌️ many examples
+
+Then to run the project:
+
+<Tabs groupId="package-managers">
+  <TabItem value="npm" label="npm">
+
+```bash
+cd dom-examples
+npm i
+npm run dev
+```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+```bash
+cd dom-examples
+yarn
+yarn dev
+```
+
+  </TabItem>
+</Tabs>
+
+## From scratch
+
+We'll see here how to start from scratch a new project. It may be useful, if we prefer to set up by ourselves an environment.
+We'll use [Vite](https://vitejs.dev/), because it's a very convenient tool to develop and build a web application.
+
+So, let's begin by creating a new project:
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+<Tabs groupId="package-managers">
+  <TabItem value="npm" label="npm">
+
+```bash
+npm create vite@latest
+```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+```bash
+yarn create vite
+```
+
+  </TabItem>
+</Tabs>
+
+
+We enter the project's name (ex: `my-app`), then select the framework `vanilla` with the `typescript` flavour.
+
+Then we go into the newly created folder:
+
+```bash
+cd my-app
+```
+
+And we install `sass` using the command:
+
+<Tabs groupId="package-managers">
+  <TabItem value="npm" label="npm">
+
+```bash
+npm install sass -D
+```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+```bash
+yarn add sass --dev
+```
+
+  </TabItem>
+</Tabs>
+
+Finally, we'll have to install `@lirx/dom` and `@lirx/core`:
+
+<Tabs groupId="package-managers">
+  <TabItem value="npm" label="npm">
+
+```bash
+npm install @lirx/core @lirx/dom --save
+```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+```bash
+yarn add @lirx/core @lirx/dom
+```
+
+  </TabItem>
+</Tabs>
+
+- `@lirx/dom` is the framework itself which manages the DOM nodes and bind them with Observables.
+- `@lirx/core` contains all the tools to create and pipe Observables.
+
+### Optimizing the build
+
+`@lirx/dom` embeds a [JIT compiler](https://en.wikipedia.org/wiki/Just-in-time_compilation) to convert on-the-fly the `reactive-html` templates and `reactive-css` styles of our components.
+
+However, it has been build from the beginning to be able to pre-compile these templates and styles, through an [AOT compiler](https://en.wikipedia.org/wiki/Ahead-of-time_compilation).
+
+This permits to remove entirely the JIT compiler, saving space, and the necessity to parse and compile these files on runtime, increasing drastically the performances.
+
+So using `@lirx/dom-aot-plugin` is strongly recommended.
+
+<Tabs groupId="package-managers">
+  <TabItem value="npm" label="npm">
+
+```bash
+npm install @lirx/dom-aot-plugin -D
+```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+```bash
+yarn add @lirx/dom-aot-plugin --dev
+```
+
+  </TabItem>
+</Tabs>
+
+Then, we'll update the **vite.config.js** file to enable these optimizations:
+
+```js title="vite.config.js"
+import { aotPlugin } from '@lirx/dom-aot-plugin';
+
+/**
+ * @type {import('vite').UserConfig}
+ */
+const config = {
+  build: {
+    target: 'esnext',
+  },
+  plugins: [
+    aotPlugin({
+      pathMatches: (path) => {
+        return path.endsWith('.ts')
+          || path.endsWith('.component.mjs');
+      },
+    }),
+  ],
+  optimizeDeps: {
+    include: [
+      '@lirx/core',
+      '@lirx/dom',
+    ],
+  },
+};
+
+export default config;
+```
+
+### Create a component
+
+Our environment is ready !
+Now we may create our first component:
+
+
+```ts title="app.ts"
+import { Component, compileReactiveHTMLAsComponentTemplate, bootstrap } from '@lirx/dom';
+
+const AppMainComponent = new Component({
+  name: 'app-main',
+  template: compileReactiveHTMLAsComponentTemplate({
+    html: `
+      Hello world !
+    `,
+  }),
+});
+
+function run() {
+  bootstrap(AppMainComponent);
+}
+
+window.onload = run;
+```
+
+I won't explain here what this code does in details, as it is only there as an example.
+But, in a few words, it simply creates a component and starts the app from this entry point.
+
+## Start developing
+
+To start our application into a **dev** environment, simply type the command:
+
+<Tabs groupId="package-managers">
+  <TabItem value="npm" label="npm">
+
+```bash
+npm run dev
+```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+```bash
+yarn run dev
+```
+
+  </TabItem>
+</Tabs>
+
+This will support on the fly: instant server start, hot reloading, typescript and scss transpiling, and much more.
+
+---
+
+Finally, to build the app for a **prod** environment:
+
+<Tabs groupId="package-managers">
+  <TabItem value="npm" label="npm">
+
+```bash
+npm run build
+```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+```bash
+yarn run build
+```
+
+  </TabItem>
+</Tabs>
+
+This will bundle our application, through an "app optimizing process" (tree-shacking, aot, minification, ...).
+
+---
+
+And voila !
+
+We're now ready to develop and create our own app using `@lirx/dom`.

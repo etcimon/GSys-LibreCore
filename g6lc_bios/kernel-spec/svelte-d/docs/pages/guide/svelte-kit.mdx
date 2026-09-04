@@ -1,0 +1,28 @@
+---
+title: SvelteKit routes
+description: File-based routing falls through to KitRoutes + vibe.0. Layouts stay mounted.
+---
+
+# SvelteKit routes
+
+svelte-d walks `src/routes` the way SvelteKit does, because the filesystem *is* the router contract authors already know. What it does *not* do is implement SvelteKit. The meaning of a route on the wasm cell is libwasm `URLRouter` plus `@entering` / `@leaving` on structs that `registerRoutes` already discovers. The meaning on the host cell is vibe.0 `URLRouter` plus `registerWebInterface`. Layouts are not router entries. They are `@child` wrappers that stay mounted while `KitRoutes` remounts the page. That is how a nav bar survives `/admin` → `/admin/users` without becoming a second wasm module.
+
+File names fall through with only the sanitizing D and LDC require. `+page.svelte` becomes `page.d` because `+` is not a D identifier. `[slug]` becomes `_slug_/` on disk because `[` in an argv path trips LDC’s `globMatch` on Windows. `[[lang]]` expands to two patterns, omit and include. `(app)` stays on disk and disappears from the URL. `[...path]` is a trailing `*` in v1; the rest name is dropped. Those spellings are ugly and they are stable. Looking for `src-d/routes/[slug]/page.d` is a failed search, not a failed compile.
+
+| File | URL / role | Dest |
+|---|---|---|
+| `+page.svelte` | that folder’s page | `src-d/routes/…/page.d` |
+| `+layout.svelte` | wrapper, stays mounted | `src-d/routes/…/layout.d` as `@child` |
+| `+error.svelte` | error page | `src-d/…/error.d` + host `errorPageHandler` |
+| `+page.server.d` | getters / `load` | `webserver/source/generated/…/page_server.d` |
+| `+server.d` | HTTP verbs | `…/server.d` |
+| `(app)/shop/+page.svelte` | `/shop` | group kept on disk |
+| `[slug]/+page.svelte` | `/:slug` | dest `_slug_/` |
+| `[[lang]]/+page.svelte` | `/docs` and `/docs/:lang` | optional param |
+| `files/[...path]/+page.svelte` | `/files/*` | rest → trailing `*` |
+
+`+page.ts` universal `load` is out of v1. The diagnostic is to use `+page.server.d`. `hooks.server` `handleError` maps to `HTTPServerSettings.errorPageHandler`. Non-identity `handle` is rejected; the generated identity is what `assembleHostRoutes` already knows how to hang. `handleFetch` is not claimed.
+
+Browser back and forward go through JS `popstate` and `callNative('navigate_to')`. Leaving a route **drops** it from `m_activeRoutes` so a later visit still fires `@entering` and `applyKitParams`. That is what makes a previously shown `/admin/users/:id` remount with a new `id` instead of showing a stale struct. `libwasm.router` is experimental; do not print SvelteKit `goto` / `invalidate` / `beforeNavigate` as if they existed. `gotoUrl` is the wasm-eh helper this stack actually has.
+
+`svelte-d kit-routes --ws <ws>` lists each pattern, the kit-relative path, and the `src-d` dest. Use it when a page compiles but does not appear: the usual cause is a dest-unique host class that did not hang, or a layout that was ingested as a page.

@@ -1,0 +1,14 @@
+---
+title: Incremental compile
+description: Reprint-skip, opposite-cell-skip, per-.o wasm. Hash-skip does not relink.
+---
+
+# Incremental compile
+
+A full `dub` of the wasm cell is honest and slow. Incremental compile exists so a flipped `{#if}` does not relink libwasm, and so a host-only edit does not touch wasm at all. It is a cache discipline, not a second compiler.
+
+**Reprint-skip** compares dest bytes. If they would not change, the file is not written and the mtime stays. Vite and `dub` then have no reason to rebuild that input. **Opposite-cell-skip** means a dirty `+page.server.d` does not relink wasm. **`compile --only FILE`** is the watch path: one kit source, one reprint.
+
+The default no-LTO wasm cell can go further. Content-hash IR nodes, cache the emitted D, invalidate the route / component / layout cone, then `ldc2 -c` dirty `src-d` into `.svelte-d/o/` and relink those objects with the libwasm `.a` set from `dub describe`. LTO cells (`ldc-1.36` full, `ldc-1.42` thin) stay whole-program `dub`. A hash-skip compile, or a touched `.svelte` whose dest bytes did not change, does **not** relink wasm. `wasmDirty` looks at `write.json` and at `src-d/` / `dub.sdl`, not at the fact that you saved a file.
+
+`contentHash` includes schema, kind, payload, child hashes, printer pin, and cell pin (LDC version plus libwasm or vibe.0 pin). A runtime bump cannot silently reuse objects. The printer pin is a string in `compile.d`; bumping it is how you force a world rebuild after an IR change.

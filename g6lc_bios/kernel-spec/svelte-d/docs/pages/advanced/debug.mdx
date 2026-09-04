@@ -1,0 +1,12 @@
+---
+title: Debug map and overlay
+description: debug-map.json names orig .svelte lines. Overlay and IR inspector are static pages in public/__svelte-d/.
+---
+
+# Debug map and overlay
+
+A wasm stack frame that says `lib.ClickField.ClickField.go` is already better than `wasm-function[412]`, and it is not yet the `.svelte` line the author wrote. Compile writes `public/__svelte-d/debug-map.json`. Printed D carries `//# svelte-d-ir orig=lib/ClickField.svelte:1`. `rewriteStack` and `rewriteCdpStack` join dest D / wasm names back onto that orig. They never invent an orig for a `wasm://` frame they cannot join. Async stacks add a tag only: `wasm-function[N] [async-wasm]` and `asyncify_start_unwind [asyncify]`. The page hook `__svelteDRewriteError` rewrites a `wrapExportFn` throw the same way, and `__svelteDLastAwait` holds the last `.await` settlement (failed + reason) so DevTools can see a reject that did not become a D exception.
+
+`/__svelte-d/overlay` names compile and LDC errors by orig `.svelte`. `/__svelte-d/ir` lists printed dests; it is read-only and does not execute. `/__svelte-d/wasm-names.json` joins the wasm name section onto those dests. Vite serves them as static files from `public/`. vibe.0 `serveStaticFiles` serves them too, before the reverse proxy.
+
+`packages/svelte-d-kit-admin` is the live consumer: Chrome and Firefox consoles, colored vibe.0 logs, optional Puppeteer. The [simplified admin example](../guide/first-project) does not require any of that. Learn the IR without a browser first; turn the overlay on when a dest no longer reads as the Svelte you thought you wrote.

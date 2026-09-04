@@ -1,0 +1,77 @@
+---
+tags: [FUNCTION, COMPONENT, TEMPLATE]
+---
+
+# compileReactiveHTMLAsComponentTemplate
+
+- **[SOURCE FILE](https://github.com/lirx-js/dom/blob/main/src/component/template/compile-reactive-html-as-component-template.ts)**
+- **[TUTORIAL](/docs/documentation/component/component/)**
+
+---
+
+```ts
+function compileReactiveHTMLAsComponentTemplate<GData extends object>(
+  options: ICompileReactiveHTMLAsComponentTemplateOptions,
+): IComponentTemplate<GData>
+```
+
+
+With:
+
+```ts
+interface ICompileReactiveHTMLAsComponentTemplateOptions {
+  readonly html: string;
+  readonly customElements?: readonly IGenericComponent[];
+  readonly modifiers?: readonly IGenericVirtualDOMNodeModifier[];
+}
+```
+
+### Definition
+
+This function compiles some reactive html into a component template.
+Then, this component template is usually used as a template for a [Component](/docs/reference/component/).
+
+Let's break its options:
+
+- `html`: this is the [reactive html](/docs/documentation/syntax/) to compile.
+- `customElements`: this is an array of the Components required in this template.
+If one is missing, the framework will report an error.
+This is intended to import the real component which is defined in typescript.
+- `modifiers`: this is an array of the [Modifiers](/docs/documentation/syntax/attributes/modifier/) required in this template.
+
+### Example
+
+#### (best) - Import the template from an `.html` file:
+
+```ts title="todo-list-item.component.ts"
+import html from './todo-list-item.component.html?raw';
+// ...
+export const TodoListItemComponent = new Component<HTMLElement, ITodoListItemComponentData, ITemplateData>({
+  // ...
+  template: compileReactiveHTMLAsComponentTemplate({ html }),
+  // ...
+});
+```
+
+
+#### Template requiring child components:
+
+```ts title="todo-list.component.ts"
+export const TodoListComponent = new Component<HTMLElement, ITodoListComponentData, ITemplateData>({
+  // ...
+  template: compileReactiveHTMLAsComponentTemplate({
+    html: `
+      <app-todo-list-item
+        *for="let item of $.items"
+        $[message]="item.message"
+        $(remove)="() => $.removeItem(item)"
+      ></app-todo-list-item>
+    `,
+    customElements: [
+      TodoListItemComponent,
+    ],
+  }),
+  // ...
+});
+```
+

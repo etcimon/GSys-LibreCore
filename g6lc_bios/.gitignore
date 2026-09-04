@@ -1,0 +1,29 @@
+# Rust build
+/target/
+**/target/
+
+# JS / D / CMake caches (kernel-spec and browser-ui clones)
+**/node_modules/
+**/.dub/
+**/CMakeFiles/
+**/.next/
+**/third_party/
+
+# Host binaries that ride along in spec forks
+**/*.exe
+**/*.exe.*
+**/*.pdb
+**/*.ilk
+**/*.obj
+
+# Generated payload images (sources under out/zeal stay)
+/out/*.elf
+/out/*.ppm
+/out/*.glsl
+
+# Python
+**/__pycache__/
+*.py[cod]
+
+# Temporary rename of nested spec-fork .git dirs while vendoring
+**/.git.nested.bak/

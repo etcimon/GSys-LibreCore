@@ -1,0 +1,5 @@
+// Generated Adam.ZC — Temple/ZealOS first task (product=desktop)
+U0 Adam()
+{
+	KMain();
+}

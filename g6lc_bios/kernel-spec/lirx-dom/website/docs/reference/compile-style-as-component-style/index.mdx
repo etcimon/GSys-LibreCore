@@ -1,0 +1,57 @@
+---
+tags: [FUNCTION, COMPONENT, STYLE]
+---
+
+# compileStyleAsComponentStyle
+
+- **[SOURCE FILE](https://github.com/lirx-js/dom/blob/main/src/component/style/compile-style-as-component-style.ts)**
+- **[TUTORIAL](/docs/documentation/component/component/#style)**
+
+---
+
+```ts
+function compileStyleAsComponentStyle(
+  css: string,
+): IComponentStyle
+```
+
+### Definition
+
+This function compiles some css into a component style.
+Then, this component style is usually used with a [Component](/docs/reference/component/).
+
+Under the hood, this function transforms the `:host` and `:host-context` into something generally available and usable by a Component.
+
+### Example
+
+#### (best) - Import the style from an `.scss` file:
+
+```ts title="todo-list.component.ts"
+import style from './todo-list.component.scss?inline';
+// ...
+export const TodoListComponent = new Component<HTMLElement, ITodoListComponentData, ITemplateData>({
+  // ...
+  styles: [compileStyleAsComponentStyle(style)],
+  // ...
+});
+```
+
+
+#### Write directly the style:
+
+```ts title="todo-list.component.ts"
+export const TodoListComponent = new Component<HTMLElement, ITodoListComponentData, ITemplateData>({
+  // ...
+  styles: [compileStyleAsComponentStyle(`
+    :host {
+      display: block;
+      padding: 14px;
+      background-color: white;
+    }
+  `)],
+  // ...
+});
+```
+
+
+

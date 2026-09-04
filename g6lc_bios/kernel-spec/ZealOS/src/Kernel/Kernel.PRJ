@@ -1,0 +1,62 @@
+//Compile this by calling $LK,"BootHDIns",A="MN:BootHDIns"$().
+//Don't do it directly.  See $LK,"Comp(\"/Kernel/Kernel\")",A="FF:::/System/Boot/BootHDIns.ZC,Comp(\"/Kernel/Kernel\""$.
+
+#exe {
+	Cd(__DIR__);;
+	Option(OPTf_WARN_PAREN,		ON);
+	Option(OPTf_WARN_DUP_TYPES, ON);
+	#include "KConfig"
+	CKConfig *kernel_config;
+	kernel_config = KConfigNew;
+};
+
+#include "KernelA.HH"
+#include "KStart16"
+#include "KStart32"
+#include "KStart64"
+#include "KMathA"
+#include "KUtils"
+#exe {Option(OPTf_KEEP_PRIVATE,			ON);};
+#include "/Compiler/CompilerA.HH"
+#exe {Option(OPTf_EXTERNS_TO_IMPORTS,	ON);};
+#include "/Compiler/CompilerB.HH"
+#exe {Option(OPTf_EXTERNS_TO_IMPORTS,	OFF);};
+#exe {Option(OPTf_KEEP_PRIVATE,			OFF);};
+#include "KernelB.HH"
+#include "KExterns"
+#include "StrA"
+#include "KGlobals"
+#include "KMathB"
+#include "Sched"
+#include "Memory/MakeMemory"
+#include "FontStd"
+#include "FontAux"
+#include "StrB"
+#include "KHashA"
+#include "KInterrupts"
+#include "KDataTypes"
+#include "KHashB"
+#include "KLoad"
+#include "KDate"
+#include "StrPrint"
+#include "StrScan"
+#include "KDefine"
+#include "Display"
+#include "KMisc"
+#include "KDebug"
+#include "KeyDev"
+#include "KExcept"
+#include "SerialDev/MakeSerialDev"
+#include "QuickSort"
+#include "KTask"
+#include "Job"
+#include "PCIBIOS"
+#include "PCI"
+#include "MultiProc"
+#include "EdLite"
+#include "BlkDev/MakeBlkDev"
+#include "FunSeg"
+#include "SMBIOS"
+#include "KMain"
+
+#exe {KConfigDel(kernel_config);};

@@ -1,0 +1,23 @@
+---
+title: vibe.0 host files
+description: +page.server.d and +server.d print as registerWebInterface classes. No libwasm on the host cell.
+---
+
+# vibe.0 host files
+
+The host cell is the one authors from a SvelteKit background reach for when they want `load` and `actions`. In this stack those files are D, they compile with the same LDC 1.43 as wasm, and they run in vibe.0. `+page.server.d`, `+server.d`, `+layout.server.d`, and `hooks.server.d` fall through to `webserver/source/generated/`. Class names are dest-unique — `AdminPageServer`, `UsersPageServer`, `AppLayoutServer` — because two routes that both printed `class PageServer` would collide when `assembleHostRoutes` hangs them on `app.d`.
+
+A host function takes `HTTPServerRequest` and `HTTPServerResponse`. JSON is vibe.0 `Json`. Cookies are `req.cookies` / `res.setCookie`. Redirect is `res.redirect`. `actions` become `post` and `postSave`; `?/name` is approximately `/save`. There is no Node `fetch` implementation of `load`, and there is no second HTTP server in bun. `svelte-d host --ws <ws>` is `dub build` in `ws/webserver`.
+
+```d
+void getUsers(HTTPServerRequest req, HTTPServerResponse res)
+{
+	Json payload = Json.emptyObject;
+	payload["users"] = Json.emptyArray;
+	res.writeBody(payload.serializeToJsonString(), "application/json");
+}
+```
+
+Do not `import libwasm` here. Do not `mixin Spa`. The simplified admin example’s host files return JSON and nothing else; kit-admin’s host files additionally talk to Postgres and Redis and write `"skip"` when those daemons are absent. Both are vibe.0. Neither is a Node route module.
+
+The runtime those identifiers belong to — `listenHTTP`, `URLRouter`, `registerWebInterface`, `Json`, `connectDB` — is [vibe.0](../vibe.0). [lang="d" on the host cell](../vibe.0/lang-d) walks a full `+page.server.d` against that API. Open `svelte-engine-ws/webserver` in VS Code with code-d to complete the same names; see [Getting Started](../getting-started).

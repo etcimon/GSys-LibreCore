@@ -1,0 +1,22 @@
+---
+title: Elements and components
+description: mixin NodeDef!"tag" → NamedNode → TagHtmlElementMap. PascalCase components become @child.
+---
+
+# Elements and components
+
+libwasm does not have a heap of widgets. It has a **value graph of structs**. `mixin NodeDef!"button"` plants a compile-time `NamedNode!("button", "button")` on the struct, aliased through `TagHtmlElementMap` to `HTMLButtonElement`. `alias node this` makes the struct a handle. `compile!()` walks `@child`, fills `@inject`, then `render` creates the JS handles and applies `@prop` / `@attr` / `@style`. Dynamic UI is mutating that graph. It is not rebuilding a virtual DOM.
+
+That is why a `<button>` is not printed as `createElement("button")` in a method. A method would run too late (handles already exist) or too early (handles do not exist yet) and would not participate in `compile!`. `NodeDef` *is* the element.
+
+Known tags map to typed bindings: `button`, `input`, `ul`, `li`, `a`, `p`, `div`, `span`, `section`, and the rest of `TagHtmlElementMap`. Unknown and custom tags (`<my-widget>`) go through `opDispatch` to `HTMLElement`. SVG (`svg`, `circle`), media (`video`, `audio`, `img`), MathML (`math`, `mi`), `dialog`, `progress`, `canvas`, `iframe`, and landmarks (`article`, `nav`, `main`) are ordinary `NodeDef` tags. Fixtures: `ComboMedia`, `ComboWide`, `ComboExpr`, `ComboOr`, `ComboSem`.
+
+Nesting is not flattening. `<option>` under `<select>` is a nested `@child` on the select’s struct. Table rows hang on the table. `{#if}` and `{#await}` kids hang on the **parent element** when they are nested, not always on the host. Getting the owner wrong is how a flip of `open` on a page hides a bool inside a child that happens to share the name.
+
+`<ul>{#each}` is the one absorption. `UnorderedList` is already `NodeDef!"ul"`. Printing a wrapper `ul` around another `ul` would nest two lists and break `{:else}` hanging. `{#each}` inside a non-`ul` hangs on that parent as a child list.
+
+Attributes follow the same “this NamedNode” rule. `type="button"` is `@attr!"type"`. Valueless `disabled` is `@attr!"disabled" bool = true`. `class="a b"` is one `@style!"a"` per token on **this** element. Mustache attributes `id={tone}` become `@attr!"id"` on a field named `id_`, deliberately *not* `tone`, because `bind:value={tone}` already owns `tone`. `construct` seeds the host expression into `id_`. Colliding those two fields was a real bug: one write clobbered the other.
+
+## Components
+
+`<ClickField msg="hi" />` is not a string include and not a Svelte runtime component. It is `import lib.ClickField;` plus `@child ClickField clickField`. Prop assigns share `construct()` with `{#each}` seed `put`s, so one function initializes the graph before handles exist. Only PascalCase names are components. The dest ident is the Svelte file name: `ClickField.d`, `struct ClickField`. `lib_Dock_svelte` is a generated *TS* module ident; the D struct is still `Dock`.

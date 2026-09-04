@@ -1,0 +1,58 @@
+---
+title: 'Memory, EH, CSS, HMR'
+description: WasmAllocator and ScopedPool. try_table personality. GetCss / addCss. dumpApp / loadApp. wasmMemoryGrow.
+---
+
+# Memory, exceptions, CSS, HMR
+
+The NodeDef graph is App-lifetime. Transient work inside `@connect`, list `put`, and Lodash bodies is not. Those two sentences are the memory model. Everything else on this page is the machinery that makes them true on `wasm32-unknown-wasi`.
+
+## `WasmAllocator` and the pool stack
+
+`_start` calls `alloc_init(heap_base)`, which is `WasmAllocator.init`. That allocator is a bump pointer over wasm linear memory. `wasm_malloc`, `_d_allocclass`, `_d_newclass`, `_d_newarrayT` / `_d_newarrayU`, and `_d_arrayappendcTX` all go through it. Language `new` therefore bumps the heap and is **never recycled**. A page that `new`s a tree of items on every click will grow until the tab dies.
+
+`PoolStack.initialize()` creates an empty stack. A `ManagedPool(64 * 1024)` (what `App.construct` and `URLRouter` allocate) or a `ScopedPool(m_pool)` pushes a pool. While that pool is current, `alloc` / `_d_allocmemory` / `allocString` come from it. When the `ScopedPool` is destroyed, that memory is gone. **Graph lifetime ≠ pool lifetime.** `@prop` fields, item structs, and `Array` fields must not alias a popped pool. Copy or freeze before `put` / assign.
+
+Heavy printed methods wrap `ScopedPool(m_pool)` and copy survivors onto the NodeDef graph. That is the idiom. A `lang=d` script that does the same is following the engine, not inventing a GC.
+
+`libwasm.intrinsics` exposes the wasm memory builtins the allocator sits on:
+
+```d
+auto wasmMemorySize();   // number of 64 KiB pages (mem 0)
+auto wasmMemoryGrow(int delta);
+```
+
+You almost never call these from a page. They are how `WasmAllocator` asks the host for more linear memory. They are listed here because code-d will complete them under `import libwasm;` and they are not a second heap.
+
+There is no GC. GC symbols exist as stubs and types so Phobos snippets compile; they do not reclaim. `-fno-moduleinfo` is required because this runtime does not implement LDC’s `__minfo` registry. Stock `-Iimport` on a wasm triple must stay empty so `druntime-wasm` / `runtime-v1.43.0` `object.d` wins.
+
+## Exceptions: wasm-eh, not asyncify
+
+The default engine configuration is `--wasm-enable-eh`, `-mattr=+exception-handling`, `--foptimize-nothrow=false`. `libwasm.rt.eh` is the personality. `_d_throw_exception` is a real wasm `throw` of tag 0 so `try_table` / `catch_ref` can catch it. `ExceptionHeader` storage is a single `__gshared` slot; a second in-flight exception overwrites it. Nested throw during catch is rare in the SPA and is not a heap-allocated header yet.
+
+Printed structs are `nothrow:`. LDC 1.43’s default `--foptimize-nothrow` **deletes landing pads** inside `nothrow` functions. Without `--foptimize-nothrow=false` a D `catch` vanishes and you will debug a “working” binary that never enters the handler. The engine’s `dub.sdl` already passes the flag.
+
+svelte-d’s `throwBoundary` is same-function `try` / `throw` / `catch` on the same struct. Personality is first-catch-type only. An exception that crosses a function boundary is an abort, not a boundary. `std.conv.to` and friends belong inside that `try`. An uncaught throw is `_d_print_throwable` → `console.error`, then abort.
+
+Binaryen ≥123 parses this `try_table` module and is the official `-Oz` post-link. Do not compose it with Flatten `--asyncify`. Do not print `.await` on this cell. See [JsPromise](./async) and [wasm-eh](../advanced/wasm-eh).
+
+## CSS
+
+`GetCss!(Application, Theme)` walks `@style` / `@styleset` at compile time and produces a string. `_start` calls `addCss` on it before first render. Instance `<style>` blocks in a `.svelte` file become `addCss` plus `@style!".box"` on the matching `NodeDef`. `:global(.wide)` still yields `.wide` — the `:global` wrapper is an official-compiler concern this printer does not reimplement, but the class name must survive or DaisyUI / Tailwind utilities in the engine would vanish.
+
+`changeClass` updates a live handle. Dynamic class lists are `@style` fields you `update`, not a second className runtime.
+
+Diet templates under `src-d-views/*.dt` are wasm-cell `stringImportPaths` only. They are not the SSR engine and they are not vibe.0 Diet (which this fork deleted).
+
+## HMR
+
+`version (hmr)` on `mixin Spa` exports:
+
+```d
+extern(C) export string dumpApp();   // application.dumpState()
+extern(C) export void loadApp(string state);
+```
+
+JS reload instantiates the new module, calls `_start`, then `loadApp`. Lists serialise as `:l:N:[{item}…]`. After load, dumped items win over `construct()` seeds. Still skipped: pointers, `EventEmitter`, `NamedNode`, `ManagedPool`, enums. The engine’s `dub.sdl` sets `versions "hmr"` on the wasm cell. A dest you built without that version has no dump/load exports.
+
+HMR is not a reason to store the only copy of a value in a skipped field. It is also not a reason to edit dest D and expect the next compile to keep it. The `.svelte` file is the source; the dest is the IR.

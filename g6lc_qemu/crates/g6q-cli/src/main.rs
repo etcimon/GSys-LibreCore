@@ -248,11 +248,12 @@ fn cmd_gen(args: &Args) -> Result<(), String> {
         "qemu-pmu-plugin" => return emit_qemu_pmu_plugin(args, &model),
         "matrix" => return emit_matrix(args, &resolved),
         "dts" | "dtb" => return emit_device_tree(args, &resolved, emit),
+        "bios-spec" => emit_bios_spec(&model, args)?,
         other => {
             return Err(format!(
                 "`--emit {other}` is specified in architecture/CLI.md but lands at a later \
                  stage; available now: model, conformance, args, matrix, dts, dtb, qemu, \
-                 qemu-machine, qemu-plugin, qemu-pmu-plugin"
+                 qemu-machine, qemu-plugin, qemu-pmu-plugin, bios-spec"
             ))
         }
     };
@@ -268,6 +269,240 @@ fn cmd_gen(args: &Args) -> Result<(), String> {
     enforce_conformance(args, &model)
 }
 
+/// `--emit bios-spec` — BoardSpec JSON for the independent `g6lc_bios` package.
+///
+/// Text-out only. `g6b` never imports this crate; it reads the JSON file.
+fn emit_bios_spec(model: &TargetModel, args: &Args) -> Result<String, String> {
+    let mut ext = std::collections::BTreeMap::new();
+    for (tok, verd) in &model.isa.extensions {
+        ext.insert(tok.clone(), Json::str(verd));
+    }
+    if !ext.contains_key("v") {
+        ext.insert("v".into(), Json::str("absent"));
+    }
+    let peripherals: Vec<Json> = model
+        .soc
+        .peripherals
+        .iter()
+        .map(|p| {
+            Json::obj([
+                ("id", Json::str(&p.id)),
+                ("class", Json::str(&p.id)),
+                ("model", Json::str(p.model.as_deref().unwrap_or(&p.id))),
+                ("base", Json::addr(p.base)),
+            ])
+        })
+        .collect();
+    let (dram_base, dram_len) = model.soc.dram.unwrap_or((0x8000_0000, 0x4000_0000));
+    let virt = args.value("machine") == Some("g6lc-virt")
+        || matches!(model.profile, Profile::Virt);
+    let doc = Json::obj([
+        ("schema_version", Json::Int(1)),
+        ("product", Json::str(&model.target_id)),
+        (
+            "isa",
+            Json::obj([
+                ("xlen", Json::Int(model.isa.xlen as i64)),
+                ("march", Json::str(&model.isa.isa_string)),
+                (
+                    "mmu",
+                    Json::str(model.isa.mmu_mode.as_deref().unwrap_or("bare")),
+                ),
+                ("extensions", Json::Obj(ext)),
+            ]),
+        ),
+        (
+            "kernel",
+            Json::obj([
+                ("shape", Json::str("zeal")),
+                ("display", Json::str("html-js")),
+                (
+                    "gr",
+                    Json::obj([
+                        ("enable", Json::Bool(virt)),
+                        ("w", Json::Int(640)),
+                        ("h", Json::Int(480)),
+                        ("colors", Json::Int(16)),
+                        (
+                            "backend",
+                            Json::str(if virt { "virtio-gpu" } else { "uart" }),
+                        ),
+                    ]),
+                ),
+                (
+                    "holyc",
+                    Json::obj([
+                        ("fast_init", Json::Bool(true)),
+                        (
+                            "dual_band",
+                            Json::obj([
+                                ("uart", Json::Bool(true)),
+                                (
+                                    "tcp",
+                                    Json::obj([
+                                        ("enable", Json::Bool(true)),
+                                        ("host_port", Json::Int(2222)),
+                                        ("guest_port", Json::Int(22)),
+                                        ("proto", Json::str("holyc-repl")),
+                                    ]),
+                                ),
+                            ]),
+                        ),
+                    ]),
+                ),
+                (
+                    "postboot",
+                    Json::obj([
+                        ("enable", Json::str(if virt { "runtime" } else { "never" })),
+                        ("access", Json::str(if virt { "kvm" } else { "view" })),
+                        (
+                            "immutable",
+                            Json::arr(
+                                ["config", "keys", "boot-policy"]
+                                    .into_iter()
+                                    .map(Json::str),
+                            ),
+                        ),
+                        (
+                            "power",
+                            Json::arr(["reboot", "shutdown", "wakeup"].into_iter().map(Json::str)),
+                        ),
+                        (
+                            "backends",
+                            Json::arr(["html-js", "ssh-holyc"].into_iter().map(Json::str)),
+                        ),
+                        ("always_on_domain", Json::Bool(virt)),
+                        ("reserved_dram", Json::str("0x100000")),
+                    ]),
+                ),
+            ]),
+        ),
+        (
+            "memory",
+            Json::obj([
+                ("dram_base", Json::addr(dram_base)),
+                ("dram_len", Json::addr(dram_len)),
+                ("text_offset", Json::str("0x200000")),
+            ]),
+        ),
+        (
+            "harts",
+            Json::obj([
+                ("count", Json::Int(model.soc.harts_total.max(1) as i64)),
+                (
+                    "cores",
+                    Json::Int(model.soc.cores.unwrap_or(1).max(1) as i64),
+                ),
+                (
+                    "threads",
+                    Json::Int(model.soc.threads_per_core.unwrap_or(1).max(1) as i64),
+                ),
+            ]),
+        ),
+        (
+            "core",
+            Json::obj([
+                (
+                    "issue_ports",
+                    Json::Int(uarch_u32(model, "NrIssuePorts", 1) as i64),
+                ),
+                (
+                    "ooo",
+                    Json::Bool(uarch_flag(
+                        model,
+                        &["OoOEn", "SliceOoOEn", "DeepSpecEn"],
+                    )),
+                ),
+                (
+                    "stream",
+                    Json::Bool(
+                        model.target_id.contains("stream")
+                            || uarch_flag(model, &["StreamEn", "StreamI"]),
+                    ),
+                ),
+            ]),
+        ),
+        (
+            "uncore",
+            Json::obj([
+                ("clint", Json::Bool(true)),
+                ("plic", Json::Bool(true)),
+                ("ddr", Json::Bool(uncore_hit(model, &["ddr", "dram"]))),
+                ("pcie", Json::Bool(uncore_hit(model, &["pcie", "pci"]))),
+                (
+                    "ethernet",
+                    Json::Bool(uncore_hit(model, &["eth", "gmac", "ethernet"])),
+                ),
+                (
+                    "storage",
+                    Json::Bool(uncore_hit(model, &["sata", "nvme", "sdcard"])),
+                ),
+                (
+                    "hdmi",
+                    Json::Bool(uncore_hit(model, &["hdmi", "displayport"])),
+                ),
+            ]),
+        ),
+        ("peripherals", Json::Arr(peripherals)),
+        (
+            "entry",
+            Json::obj([
+                ("hotkey", Json::str("DEL")),
+                ("timeout_ms", Json::Int(2000)),
+            ]),
+        ),
+        (
+            "net_expose",
+            Json::obj([
+                (
+                    "mode",
+                    Json::str(if virt { "until-delegate" } else { "never" }),
+                ),
+                ("via", Json::str("adapter")),
+                ("web", Json::Bool(virt)),
+                ("ssh_holyc", Json::Bool(virt)),
+            ]),
+        ),
+        (
+            "loopback",
+            Json::obj([
+                ("enable", Json::Bool(virt)),
+                ("transport", Json::str("mbox")),
+                ("compatible", Json::str("gsys,g6lc-bios-mbox")),
+                ("base", Json::str("0x10100000")),
+                ("len", Json::str("0x1000")),
+                ("irq", Json::Int(3)),
+                ("chardev", Json::str("/dev/g6lc-bios")),
+            ]),
+        ),
+    ]);
+    Ok(doc.to_pretty())
+}
+
+fn uarch_u32(model: &TargetModel, key: &str, dflt: u32) -> u32 {
+    match model.uarch.raw.get(key) {
+        Some(Json::Int(n)) if *n > 0 => *n as u32,
+        Some(Json::Bool(true)) => 1,
+        _ => dflt,
+    }
+}
+
+fn uarch_flag(model: &TargetModel, keys: &[&str]) -> bool {
+    keys.iter().any(|k| match model.uarch.raw.get(*k) {
+        Some(Json::Int(n)) => *n != 0,
+        Some(Json::Bool(b)) => *b,
+        Some(Json::Str(s)) => s == "1" || s.eq_ignore_ascii_case("true"),
+        _ => false,
+    })
+}
+
+fn uncore_hit(model: &TargetModel, needles: &[&str]) -> bool {
+    model.soc.peripherals.iter().any(|p| {
+        let blob = format!("{} {}", p.id, p.model.as_deref().unwrap_or("")).to_ascii_lowercase();
+        needles.iter().any(|n| blob.contains(n))
+    })
+}
+
 /// `--emit args` — the stock-emulator invocation plus what it does not cover.
 fn emit_args(
     args: &Args,
@@ -279,6 +514,7 @@ fn emit_args(
     crate::loader::apply_edk2_os_esp(args, &mut boot)?;
     crate::loader::apply_uboot_os_esp(args, &mut boot)?;
     crate::loader::apply_uboot_payload(args, &mut boot)?;
+    crate::loader::apply_bios_payload(args, &mut boot)?;
     g6q_emit_args::check_profile(model, &boot)?;
     if args.flag("plugin") || args.value("plugin").is_some() {
         boot.plugin = Some(plugin_path(args, model));
@@ -2335,9 +2571,11 @@ fn run_args(args: &Args) -> Result<(), String> {
 fn qemu_stock_target(args: &Args, model: &TargetModel) -> g6q_emit_args::StockTarget {
     let edk2 = crate::loader::from_args(args) == Some(crate::loader::Loader::Edk2);
     let uboot = crate::loader::from_args(args) == Some(crate::loader::Loader::Uboot);
+    let bios = crate::loader::from_args(args) == Some(crate::loader::Loader::Bios);
     let soc = args.value("machine") == Some("g6lc-soc");
     let force_stock_virt = edk2
         || (uboot && !soc)
+        || (bios && !soc)
         || args.value("stock-machine").is_some()
         || args.value("stock-cpu").is_some();
     if force_stock_virt {
@@ -2397,6 +2635,7 @@ fn run_qemu(args: &Args) -> Result<(), String> {
     crate::loader::apply_edk2_os_esp(args, &mut boot)?;
     crate::loader::apply_uboot_os_esp(args, &mut boot)?;
     crate::loader::apply_uboot_payload(args, &mut boot)?;
+    crate::loader::apply_bios_payload(args, &mut boot)?;
     g6q_emit_args::check_profile(&model, &boot)?;
     let record = args.value("record").map(str::to_string);
     if let Some(record_path) = &record {

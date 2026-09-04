@@ -1,0 +1,10 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# Pinned toolchain. `python tools/g6b.py setup` installs this channel into
+# .tools/rustup — nothing global is touched.
+
+[toolchain]
+channel = "1.85.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
