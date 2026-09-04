@@ -56,7 +56,7 @@ _start:
   add  t1, t0, t1
   sw   zero, 0(t1)
 
-  li   t0, (1 << 16) | 1
+  li   t0, (1 << 16) | 2
   sw   t0, AI_DESC+0x0(s0)
   sw   zero, AI_DESC+0x4(s0)
   li   t0, N

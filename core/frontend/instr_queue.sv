@@ -190,7 +190,7 @@ module instr_queue
       instr_data_in[f].pc = addr_i[s];
       instr_data_in[f].cf = cf_type_i[s];
 //pragma translate_off
-      if (f == 0 && $time() < 300000 && valid_i)
+      if (f == 0 && $test$plusargs("iq_dbg") && $time() < 300000 && valid_i)
         $display("[iq-dbg] t=%0t s=%0d valid_i=%b addr_i[s]=%h instr_i[s]=%h ex=%0d ex_vaddr=%h",
                  $time, s, valid_i, addr_i[s], instr_i[s], exception_i, exception_addr_i);
 //pragma translate_on

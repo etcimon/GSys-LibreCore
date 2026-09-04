@@ -307,7 +307,12 @@ module cva6_hpdcache_if_adapter
               phys_indexed: 1'b1,
               addr_tag: amo_tag,
               pma: '{
-                  uncacheable: hpdcache_req_is_uncacheable,
+                  // Cacheable LR installs the line (UC_AMO_WRITE_DATA) which
+                  // snoops and kills the uncached LR/SC reservation. Bypass
+                  // L1 for LR/SC only; AMO ADD/etc stay cacheable.
+                  uncacheable: hpdcache_req_is_uncacheable
+                               || (cva6_amo_req_i.amo_op == ariane_pkg::AMO_LR)
+                               || (cva6_amo_req_i.amo_op == ariane_pkg::AMO_SC),
                   io: 1'b0,
                   wr_policy_hint: hpdcache_pkg::HPDCACHE_WR_POLICY_AUTO
               }

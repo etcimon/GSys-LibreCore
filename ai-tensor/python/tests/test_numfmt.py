@@ -130,11 +130,22 @@ def test_an_unmapped_dtype_raises_rather_than_approximating():
 
 
 def test_grant_check_against_the_live_mask():
-    """The live island publishes 0x0001 — dense INT8 only."""
-    live = 0x0001
-    assert numfmt_granted(live, AI_FMT_INT)
+    """The live island publishes 0x0003 — dense INT8 + INT4 (F1).
+
+    INT4 joined the grant only once the PE unpacked two sign-extended nibbles per byte
+    through the existing signed 8x8 cell, the reduction widened to 2*Lanes, and both
+    loaders started counting bytes against ``ceil(k/2)``. The float formats are still
+    ungranted because their accumulator paths (F2-F5) do not exist.
+
+    This mirrors ``AiIslandDtypeMask``; if the two drift, a host plans around a format
+    the island then refuses with ``ST_BAD_FMT``.
+    """
+    live = 0x0003
+    granted = {AI_FMT_INT, AI_FMT_INT4}
+    for fmt in granted:
+        assert numfmt_granted(live, fmt), f"{NUMFMT_NAMES[fmt]} must be granted"
     for fmt in ALL_FORMATS:
-        if fmt != AI_FMT_INT:
+        if fmt not in granted:
             assert not numfmt_granted(live, fmt), f"{NUMFMT_NAMES[fmt]} is not granted"
 
 

@@ -403,12 +403,6 @@ module instr_queue
   end
 
 //pragma translate_off
-  always @(negedge clk_i) begin
-    if ($time() < 100)
-      $display("[iq-dbg] t=%0t rst_ni=%b idx_ds_q=%b idx_ds_d=%b empty=%b valid=%b push=%b fev0=%b",
-               $time, rst_ni, idx_ds_q, idx_ds_d, instr_queue_empty, valid, push_instr_fifo, fetch_entry_valid_o[0]);
-  end
-
   // -------------------------------------------------------------------------
   // ORDER PROBE (`+iq_trace`). I6 clause 1 -- "IQ order is program order" -- is
   // the clause g6lc_fetch_iq.sby does NOT prove (it proves clause 2,

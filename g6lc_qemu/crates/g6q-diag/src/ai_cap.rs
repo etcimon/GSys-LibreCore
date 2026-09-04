@@ -511,10 +511,15 @@ endmodule
         assert_eq!(layout.n_low, 4);
         assert_eq!(layout.k_low, 8);
         assert_eq!(layout.m_width, 4);
+        // F1 raised the live grant from dense INT8 (0x0001) to INT8 + INT4 (0x0003),
+        // together with the PE nibble unpack, the 2*PeLanes reduction, and the byte-counting
+        // loaders. This assertion is the drift detector for that: it must only ever move in
+        // lockstep with `AiIslandPeImplMask`, because the emulator gates its own arithmetic on
+        // the ingested mask and would otherwise compute a format the RTL refuses.
         assert_eq!(
             cfg.dtype_mask,
-            Some(0x0001),
-            "the live part grants dense s8 only"
+            Some(0x0003),
+            "the live part grants dense INT8 + INT4"
         );
     }
 

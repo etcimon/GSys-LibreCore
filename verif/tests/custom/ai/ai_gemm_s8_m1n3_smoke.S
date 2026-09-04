@@ -1,9 +1,24 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# I1 multi-step PE GEMM: 4x4x8 INT8, PeLanes=4 ⇒ 2 MAC cycles per C element.
-#   A all-ones (4x8), B all-ones (8x4) → C[i,j] = 8 for all 16 elements.
-# Exercises banked tile load + multi-step reduction. HTIF fail codes odd.
+# m=1, n=3, k=4 INT8 GEMM. Bisector for AI-X8.
+#
+# With m=1 there is never a completed row to stream while MAC is still running,
+# so `can_trail` (stc_i < i_q) cannot fire during ST_MAC and the C store happens
+# entirely in ST_STC. Combined with ai_gemm_s8_oddn_smoke (m=2, same n and k)
+# this separates the two candidate sites:
+#
+#   m=1 n=3 PASSES -> the pair->single defect is TRAIL-STORE specific
+#                     (the ST_MAC copy of the store logic, and/or the F0b-2
+#                     delayed C write racing the trail read at a row boundary)
+#   m=1 n=3 FAILS  -> the defect is in the shared pair->single cursor logic
+#                     and is present in ST_STC too
+#
+# A[1][4] row-major, lda=4:   [ 1 2 3 4 ]
+# B[4][3] row-major, ldb=3:   [1 2 3][4 5 6][7 8 9][10 11 12]
+# C[1][3] = A*B, ldc = 3:     [ 70 80 90 ]
+#
+# Exit codes: 1=pass, 3=status, 5=trap, 7=ticket, 9+2*e=C[e], 31=timeout.
 
   .equ AI_BASE,     0x40000000
   .equ AI_CTL,      0x100
@@ -36,25 +51,21 @@ _start:
   li   t0, 0x3
   sw   t0, AI_REG0+0x10(s0)
 
-  # Zero C (16 x i32)
   la   t0, mat_c
-  li   t1, 16
-1:
   sw   zero, 0(t0)
-  addi t0, t0, 4
-  addi t1, t1, -1
-  bnez t1, 1b
+  sw   zero, 4(t0)
+  sw   zero, 8(t0)
 
-  # version=2 op=GEMM, m=n=4 k=8, lda=8 ldb=4
-  li   t0, (1 << 16) | 2
+  li   t0, (1 << 16) | 2       # op=OP_GEMM, version=2
   sw   t0, AI_DESC+0x0(s0)
   sw   zero, AI_DESC+0x4(s0)
-  li   t0, 4
-  sw   t0, AI_DESC+0x8(s0)     # m
-  sw   t0, AI_DESC+0xC(s0)     # n
-  li   t0, 8
-  sw   t0, AI_DESC+0x10(s0)    # k
-  li   t0, 0x00080008          # ldb=8 (k-major B), lda=8
+  li   t0, 1                   # m  <-- single row: no trail store
+  sw   t0, AI_DESC+0x8(s0)
+  li   t0, 3                   # n  <-- odd
+  sw   t0, AI_DESC+0xC(s0)
+  li   t0, 4                   # k
+  sw   t0, AI_DESC+0x10(s0)
+  li   t0, 0x00040004          # ldb=4 (k-major B), lda=4
   sw   t0, AI_DESC+0x14(s0)
   la   t0, mat_a
   sw   t0, AI_DESC+0x18(s0)
@@ -79,82 +90,75 @@ _start:
   li   t0, (21 << 8)
   sw   t0, AI_DOORBELL(s0)
 
-  li   t2, 500000
-2:
+  li   t2, 200000
+1:
   lw   t0, AI_DONE(s0)
   andi t0, t0, 1
-  bnez t0, 3f
+  bnez t0, 2f
   addi t2, t2, -1
-  bnez t2, 2b
+  bnez t2, 1b
+  li   a0, 31
   j    fail
-3:
+2:
   lw   t0, AI_DSTATUS(s0)
   slli t0, t0, 48
   srli t0, t0, 48
   li   t1, ST_OK
+  li   a0, 3
   bne  t0, t1, fail
   lw   t0, AI_TICKET(s0)
   li   t1, 21
+  li   a0, 7
   bne  t0, t1, fail
 
   fence
-  # Every C element must be 8
   la   t0, mat_c
-  li   t1, 16
-  li   t3, 8
-4:
-  lw   t2, 0(t0)
-  bne  t2, t3, fail
-  addi t0, t0, 4
-  addi t1, t1, -1
-  bnez t1, 4b
+  lw   t1, 0(t0)
+  li   t2, 70
+  li   a0, 9
+  bne  t1, t2, fail
+  lw   t1, 4(t0)
+  li   t2, 80
+  li   a0, 11
+  bne  t1, t2, fail
+  lw   t1, 8(t0)
+  li   t2, 90
+  li   a0, 13
+  bne  t1, t2, fail
 
 pass:
   li   a0, 1
   la   t0, tohost
   sw   a0, 0(t0)
-5: j 5b
+3: j 3b
 
 fail:
-  li   a0, 3
   la   t0, tohost
   sw   a0, 0(t0)
-6: j 6b
+4: j 4b
 
 trap_vec:
   li   a0, 5
   la   t0, tohost
   sw   a0, 0(t0)
-7: j 7b
+5: j 5b
 
   .section .data
   .align 3
   .globl mat_a
 mat_a:
-  # 4 rows × 8 cols of 1
-  .byte 1,1,1,1,1,1,1,1
-  .byte 1,1,1,1,1,1,1,1
-  .byte 1,1,1,1,1,1,1,1
-  .byte 1,1,1,1,1,1,1,1
+  .byte 1, 2, 3, 4
   .align 3
   .globl mat_b
 mat_b:
-  # 8 rows × 4 cols of 1
-  .byte 1,1,1,1
-  .byte 1,1,1,1
-  .byte 1,1,1,1
-  .byte 1,1,1,1
-  .byte 1,1,1,1
-  .byte 1,1,1,1
-  .byte 1,1,1,1
-  .byte 1,1,1,1
+  # k-major B'[n][k] = B'[3][4], ldb = k = 4. B'[j][t] = 3t + j + 1.
+  .byte 1, 4, 7, 10
+  .byte 2, 5, 8, 11
+  .byte 3, 6, 9, 12
   .align 3
   .globl mat_c
 mat_c:
-  .word 0,0,0,0
-  .word 0,0,0,0
-  .word 0,0,0,0
-  .word 0,0,0,0
+  .word 0, 0, 0
 
   .section .tohost,"aw",@progbits
   .align 6

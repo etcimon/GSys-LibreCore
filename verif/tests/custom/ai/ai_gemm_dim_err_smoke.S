@@ -34,7 +34,7 @@ _start:
   li   t0, 0x3
   sw   t0, AI_REG0+0x10(s0)
 
-  li   t0, (1 << 16) | 1
+  li   t0, (1 << 16) | 2
   sw   t0, AI_DESC+0x0(s0)
   sw   zero, AI_DESC+0x4(s0)
   li   t0, 257                 # m > MaxDim (256)

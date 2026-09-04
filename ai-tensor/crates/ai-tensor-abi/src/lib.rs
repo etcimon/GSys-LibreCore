@@ -10,7 +10,13 @@
 use thiserror::Error;
 
 pub const DESC_BYTES: usize = 64;
-pub const CONTRACT_VERSION: u16 = 1;
+/// Version 2: operand B is **k-major** (`B[n][k]`, `ldb` strides j).
+///
+/// This is a deliberate break, not an extension, and it is versioned rather than silently
+/// reinterpreted: `ld_ab` keeps its bit layout but `ldb` changes which axis it strides, so a
+/// version-1 image would describe a different matrix and still look valid. See
+/// `architecture/ai-matrix/numeric-formats-datapath.md` §8.
+pub const CONTRACT_VERSION: u16 = 2;
 
 pub const OP_GEMM: u16 = 1;
 pub const OP_CONV2D: u16 = 2;
@@ -159,6 +165,13 @@ pub mod mmio {
     pub const CAP_MACS_PER_CYCLE: u16 = 0x0008;
     pub const CAP_CLOCK_KHZ: u16 = 0x000C;
     pub const CAP_SRAM_BYTES: u16 = 0x0010;
+    /// AI-X9 operand layout: bit 0 = A k-major, bit 1 = B k-major.
+    ///
+    /// Read this rather than assuming the layout from `CONTRACT_VERSION`: a host that
+    /// discovers `b_k_major == 0` is talking to a version-1 part and must repack.
+    pub const CAP_LAYOUT: u16 = 0x004C;
+    pub const CAP_LAYOUT_A_KMAJOR: u32 = 1 << 0;
+    pub const CAP_LAYOUT_B_KMAJOR: u32 = 1 << 1;
     pub const CAP_ACC_TILE: u16 = 0x0014; // packed log2(K)|log2(N)|log2(M)
     pub const CAP_DRAM: u16 = 0x0018; // nameplate | meas milli-GB/s
     pub const CAP_QUEUES: u16 = 0x001C;
@@ -364,7 +377,10 @@ impl Desc64 {
         d.m = m;
         d.n = n;
         d.k = k;
-        d.ld_ab = k | (n << 16); // lda=k (row-major A[m,k]), ldb=n (B[k,n] stored as k×n)
+        // lda=k (row-major A[m,k]); ldb=k (k-major B[n,k], AI-X9). Both operands stride their
+        // row index and run contiguously along the reduction axis. This is the layout a
+        // framework already has: torch.nn.Linear.weight is [out_features, in_features].
+        d.ld_ab = k | (k << 16);
         d
     }
 

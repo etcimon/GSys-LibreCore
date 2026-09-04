@@ -177,6 +177,13 @@ module scoreboard #(
 
   // maintain a FIFO with issued instructions
   // keep track of all issued instructions
+//pragma translate_off
+  // O7 alloc trace. Opt-in (`+sb_alloc`): unconditional always_comb $display
+  // SIGSEGV'd the -O0 g6lc64_ai testharness at ~2.6k cycles (VL_WRITEF of
+  // packed issue_q). Next full verilate must not emit it by default.
+  logic sb_alloc_en;
+  initial sb_alloc_en = $test$plusargs("sb_alloc");
+//pragma translate_on
   always_comb begin : issue_fifo
     // default assignment
     mem_n     = mem_q;
@@ -203,7 +210,7 @@ module scoreboard #(
         // increase the issue counter and advance issue pointer
         num_issue += 'd1;
 //pragma translate_off
-        if ($time() < 200000)
+        if (sb_alloc_en && $time() < 200000)
           $display("[sb-alloc] t=%0t idx=%0d pc=%h instr=%h ex.valid=%b valid=%b",
                    $time, issue_pointer[i], decoded_instr_i[i].pc, orig_instr_i[i],
                    decoded_instr_i[i].ex.valid, decoded_instr_valid_i[i]);

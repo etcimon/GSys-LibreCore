@@ -120,6 +120,10 @@ module g6lc_ai_cap_window
           rdata_n = {30'h0,
                      (IslandCfg.DramCas != 0),
                      dram_init_done_i};
+        // AI-X9: operand layout, so software discovers that B is k-major rather
+        // than inferring it from a contract version it may never read.
+        CAP_OFF_LAYOUT[15:2]:
+          rdata_n = AiIslandLayoutWord;
         default: rdata_n = 32'h0;
       endcase
     end

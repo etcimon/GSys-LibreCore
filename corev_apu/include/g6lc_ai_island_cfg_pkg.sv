@@ -321,6 +321,17 @@ package g6lc_ai_island_cfg_pkg;
   // write beats at 0x70+4*i. Island CAP 0x18/0x2C/0x180 stay aggregate.
   localparam logic [15:0] CAP_OFF_DRAM_CH_R   = 16'h50;
   localparam logic [15:0] CAP_OFF_DRAM_CH_W   = 16'h70;
+  // AI-X9 operand layout. Published so software DISCOVERS the layout instead of
+  // inferring it from a contract version it may not check.
+  //   [0] a_k_major : A rows contiguous along k (1 = row-major A[m][k])
+  //   [1] b_k_major : B rows contiguous along k (1 = k-major B[n][k])
+  //   [31:2] reserved
+  // Live SKU publishes both set. b_k_major was 0 in ContractVersion 1.
+  localparam logic [15:0] CAP_OFF_LAYOUT      = 16'h4C;
+  localparam int unsigned CAP_LAYOUT_A_KMAJOR_BIT = 0;
+  localparam int unsigned CAP_LAYOUT_B_KMAJOR_BIT = 1;
+  localparam logic [31:0] AiIslandLayoutWord =
+      (32'd1 << CAP_LAYOUT_A_KMAJOR_BIT) | (32'd1 << CAP_LAYOUT_B_KMAJOR_BIT);
 
   // F3: packed CAP_OFF_BLOCK_MNK subfields (log2 tile dims).
   localparam int unsigned CAP_BLOCK_M_SHIFT   = 0;
@@ -345,11 +356,27 @@ package g6lc_ai_island_cfg_pkg;
   //   bit 6 AI_FMT_BF16
   //   bit 7 AI_FMT_FP32
   //
-  // Live value is INT8-only because the PE datapath is s8×s8→s32. This is a
-  // GRANT, so widening it without the matching datapath would advertise a format
-  // the engine cannot execute; the engine then returns ST_BAD_FMT and software
-  // has been lied to. Widen the datapath first, then this mask.
-  localparam logic [15:0] AiIslandDtypeMask   = 16'h0001;
+  // Live value is INT8 + INT4 (F1). This is a GRANT, so it moves only AFTER the
+  // datapath can execute the format -- widening it early advertises arithmetic
+  // the engine then refuses with ST_BAD_FMT, i.e. software has been lied to.
+  //
+  // INT4 qualified when all three pieces were in place and measured:
+  //   * g6lc_ai_pe_dot reduces 2*Lanes products and unpacks two sign-extended
+  //     nibbles per byte through the existing signed 8x8 cell (F1-PE);
+  //   * g6lc_ai_gemm_seq advances t by 2*PeLanes, reads byte (t/2)+p, and masks
+  //     the invalid nibble on an odd-k tail (F1-sequencer);
+  //   * both loaders count t in BYTES against k_bytes = fmt_row_bytes(k), so a
+  //     packed row is fetched at its real length instead of 2x over-fetched
+  //     (F1-load).
+  // FP8 needs no further load work -- it is already one byte per element -- but
+  // it is NOT granted here because its multiplier/accumulator path is F2.
+  //
+  // Literal, not `config_pkg::AiFmtMaskInt8Int4`: the ai_island unit-TB runners
+  // (verif/tb/ai_island/run-gemm-*.sh) compile THIS package before core's
+  // config_pkg, so a cross-package reference here breaks them. The value must
+  // equal AiFmtMaskInt8Int4; g6lc_ai_island_top's grant ⊆ implemented assertion
+  // and config_pkg's own check_cfg mask↔Int4En rule are what keep it honest.
+  localparam logic [15:0] AiIslandDtypeMask   = 16'h0003;  // AiFmtMaskInt8Int4
 
   // Illegal grant used ONLY as a negative control: INT8 + BF16, where the PE
   // implements INT8 alone, so the grant ⊆ implemented guard in
@@ -371,13 +398,18 @@ package g6lc_ai_island_cfg_pkg;
   // These are two different facts and keeping them as one number is how a part
   // ends up advertising BF16 it cannot do. `AiIslandDtypeMask` is policy -- a
   // SKU may legitimately grant less than the hardware supports. This is
-  // capability, and it is a property of `g6lc_ai_pe`/`g6lc_ai_mac`: today
-  // strictly `s8×s8→s32`, hence bit 0 alone.
+  // capability, and it is a property of the PE datapath: `s8×s8→s32`, plus (F1)
+  // the same signed 8x8 cell fed two sign-extended 4-bit nibbles per byte, which
+  // is a genuine second format rather than a relabelling.
+  //
+  // Still bit 0 and 1 only. FP8 would need the float accumulator (F2), BF16 the
+  // exponent path (F3), FP16 an 11x11 significand (F4), FP32 a decomposition
+  // (F5) -- none of which exist yet, so none may appear here.
   //
   // `g6lc_ai_island_top` asserts grant ⊆ implemented, so raising the grant
   // without the datapath is caught at elaboration instead of becoming a
   // guest-visible lie. Update this ONLY together with the PE.
-  localparam logic [15:0] AiIslandPeImplMask  = 16'h0001;
+  localparam logic [15:0] AiIslandPeImplMask  = 16'h0003;  // AiFmtMaskInt8Int4
 
   // I3 legality: sim-AXI nameplate is the NoC peak; never advertise 400 GB/s
   // on class 0; enabled clusters cannot exceed present.

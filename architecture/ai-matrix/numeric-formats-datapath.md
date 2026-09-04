@@ -336,7 +336,7 @@ Still open:
 | F0a tree | **landed and verified.** Variane `ai-dt` rebuilt; island GEMM goldens `ai_gemm_s8_smoke` **SUCCESS 1212 cy** and `ai_gemm_s8_4x4_smoke` **SUCCESS 1673 cy**, zero assertions fired (`--assert` is live since AI-X5). Those exercise the PE through `g6lc_ai_gemm_seq`, which is the integration that matters. The unit TB `tb_g6lc_ai_pe_dot` is written but **cannot run** on this tool version — see below |
 | F0b-1 accumulator moved out of the PE | **landed and verified.** `g6lc_ai_pe_dot` no longer has `acc_i`/`acc_o`; it is a pure sum-of-products reducer, and `g6lc_ai_gemm_seq` owns `acc_q + pe_sum`. Bit-identical: goldens **1212 cy** and **1673 cy**, unchanged from F0a, 0 assertions |
 | F0b-2 pipeline register | **landed and verified.** `sum_q <= pe_sum`, drain computes `acc_d = (first_q ? '0 : acc_q) + sum_q` and writes `C` at `(sum_i_q, sum_j_q)` if `last_q`. Indices advance at issue rate; the C write and accumulator update lag by one cycle but issue one cycle per MAC. Verified: `ai_gemm_s8_smoke` **1212 cy**, `ai_gemm_s8_4x4_smoke` **1673 cy** (same as F0b-1, so the pipeline is fully hidden for small fixtures), `ai_gemm_s8_lda_smoke` **1212 cy**, `ai_gemm_s8_64x64_smoke` **SUCCESS 93,194 cy** with zero assertions. The trail-store hazard predicted in §5.1 does not appear in these fixtures because the delayed C write still completes before the trail store streams the same row; full trail-store stress is left for the wider flavour sweep |
-| F1 INT4 | PE plumbing/widening and sequencer MAC addressing/stride scaling verified; A/B tile load byte-count and capability masks are the next slice |
+| F1 INT4 | **COMPLETE and verified.** PE widening (F1-PE), MAC addressing/stride scaling (F1-sequencer), the §8 k-major operand change, and byte-counting loaders (F1-load) are all landed. Grants raised to `AiFmtMaskInt8Int4` (`16'h0003`) in both `AiIslandDtypeMask` and `AiIslandPeImplMask`. `ai_gemm_s4_smoke` (m=2 n=2 k=4, operands spanning −8..7, negative C) **PASSES 1230 cy**, and all seven INT8 fixtures keep their exact cycle counts. See §9 |
 | F2 FP8 | open |
 | F3 BF16 | open |
 | F4 FP16 | open |
@@ -379,3 +379,338 @@ harness structures all produced the identical wrong delta before the harness was
 rather than a verdict. Note the design itself is unaffected: `g6lc_ai_gemm_seq` drives
 `pe_a[p]` procedurally from its own `always_comb`, which is the pattern that works — and is
 why the harness-level goldens are valid evidence.
+
+---
+
+## 8. The operand-layout decision: B becomes k-major
+
+F1's MAC slice landed (§7.6) and then hit a wall in the **load** path. Resolving it turned out
+to require an ABI change, and the analysis inverted the obvious answer, so it is recorded here
+rather than in a commit message.
+
+### 8.1 The constraint, stated precisely
+
+The blocking property is **not** "INT4 needs a transpose". It is:
+
+> A sub-byte format forces the **packing axis to equal the reduction axis**. Two INT4 elements
+> sharing a byte must both feed the *same* `C[i,j]` accumulator, so they must be two
+> consecutive `t`. Every ≥1-byte format (INT8, FP8, BF16, FP16, FP32) is indifferent to the
+> packing axis, because each element occupies whole bytes.
+
+So this is a **sub-byte** problem, not a general numeric-format problem. FP32 with row-major B
+works fine on the existing loader; only INT4 (and any future INT2/FP4) breaks. That matters,
+because it means "one common path for all six formats" is a benefit the ABI change *buys*, not
+a requirement the formats impose.
+
+`A[i,t]` is row-major and therefore already packs along `t`. `B[t,j]` row-major packs along
+`j`. Those axes do not match, which is the whole difficulty.
+
+### 8.2 The three candidates
+
+| | ABI | Throughput | RTL effect | Generality |
+|---|---|---|---|---|
+| **(i)** row-major B, transpose nibbles inside the loader | unchanged | **~2× B load latency** for INT4 — cannot pack until rows `t` and `t+1` are both resident, which cancels much of the point | + `MaxDim`-byte row buffer, + pair-and-pack | INT4 only |
+| **(ii)** row-major B, 2×2 INT4 micro-tile (2 `t` × 2 `j`, 4 products, 2 C columns) | unchanged | full 2× | **two accumulators per issue, 2× C write rate** — reopens exactly the `sum_first`/`sum_last`/delayed-C protocol F0b-1/F0b-2 just cleaned up | INT4 only |
+| **(iii)** **B supplied k-major** (`B'[j,t]`, `ldb = k`) | **breaks row-major B** | full 2×, byte-for-byte identical traffic | **net deletion** — see §8.3 | all six formats, one path |
+
+### 8.3 Why (iii) removes code rather than adding it
+
+The decisive observation is that **the B *tile* layout does not change at all**. It is already
+k-contiguous within a `j` row:
+
+```
+b_bank_addr(t, j) = j * KPerBank + t / PeLanes      bank = t % PeLanes
+a_bank_addr(i, t) = i * KPerBank + t / PeLanes      bank = t % PeLanes
+```
+
+Those are the *same function* with the row index swapped. What fights the tile is the current
+memory **traversal**, which streams along `j`. Stream along `t` instead and B's loader becomes
+structurally identical to A's:
+
+| | A today | B today | B under (iii) |
+|---|---|---|---|
+| memory traversal | along `t` | along `j` | along `t` |
+| a 64-bit beat lands in | `PeLanes` banks, 1 addr each | **1 bank, 8 addrs** | `PeLanes` banks, 1 addr each |
+| tile SRAM write ports | 2 | **8** | 2 |
+| sub-byte packing | natural | impossible | natural |
+
+So (iii) does not merely enable INT4. It deletes the oct-port drain: the
+`beat_left_q`/`beat_lane_q`/`beat_q` leftover machinery, the `b_w2..b_w8` port fan-out, and the
+B tile's `NumPorts(8) → 2`. That is a real area saving on the largest SRAM in the island, and
+the 8 ports turn out to buy nothing the bank spread does not already provide — A sustains one
+beat per cycle across 8 *different* banks with a single write port each.
+
+One scale function then serves both operands and all six formats:
+
+```
+byte_off(t)     = (elems_per_byte == 2) ? t >> 1        : t * bytes_per_elem
+row_stride(ld)  = (elems_per_byte == 2) ? (ld + 1) >> 1 : ld * bytes_per_elem
+```
+
+which is `config_pkg::ai_fmt_bytes()` generalised — a function that already exists and already
+carries the INT4 "packed two per byte" note.
+
+### 8.4 Why the ABI "break" is smaller than it sounds
+
+**For the dominant workload, k-major B is the layout the caller already has.**
+
+`torch.nn.Linear.weight` is stored `[out_features, in_features]` = `[n, k]` row-major, and
+`F.linear(x, W) = x @ Wᵀ`. In `C[m,n] = A[m,k] · B[k,n]` that makes `B = Wᵀ`, and `W` as stored
+is exactly **k-contiguous per output column `j`** — layout (iii). TF `Dense` kernels under the
+usual `[units, input_dim]` storage are the same. So the *current* row-major-B contract is the
+one that forces a transpose of every `nn.Linear` weight; (iii) adopts the layout the callers
+already satisfy and pushes the transpose onto the rarer general-GEMM case, where `OP_LAYOUT`
+(opcode 3, **already reserved and already accepted** by the descriptor engine) is the sanctioned
+home for it.
+
+### 8.5 Versioning — where the repo's own instinct does not apply
+
+`AI_FMT_INT == 0` exists so that "no shipped image changes meaning" and `ContractVersion` stays
+1. Applying that reflex here would give a `FLAG_BT` bit defaulting to legacy and **two permanent
+B loaders** — the opposite of the minimality (iii) is chosen for. The no-break rule does not
+bind, because:
+
+- live grants are INT8-only (`AiIslandDtypeMask = 16'h0001`), so no format needing this is
+  reachable yet;
+- every consumer of `ldb` is in-tree — the RTL, the four `verif/tb/ai_island` benches, the
+  emulator, `ai-tensor`. There is no external shipped image;
+- the island is pre-tape-out.
+
+Decision: **`ContractVersion` goes to 2, k-major B becomes the only layout, and the legacy
+oct-drain path is deleted.** `FLAG_BT` is *not* introduced; a migration bit whose only consumer
+is the migration is dead weight the moment the goldens are regenerated.
+
+### 8.6 The verification hazard that must be closed first
+
+This is the real risk in the change, and it is not the ABI.
+
+- `ai_gemm_s8_64x64_smoke`, `128x128`, `256x256` fill `mat_b` with `.rept N / .byte 1` — an
+  **all-ones** matrix. It is layout-invariant and **cannot distinguish** row-major B from
+  k-major B.
+- `ai_gemm_s8_smoke`, `4x4`, `lda` are square or symmetric enough that a transposed B still
+  produces plausible C.
+
+So a wrong transpose passes the entire existing suite. Before the switch, the suite needs a
+fixture with `m ≠ n ≠ k` and **asymmetric** B data, whose C is wrong under either layout if the
+other is used. `ai_gemm_s8_asym_smoke` (m=2, n=3, k=4) is that fixture, and it lands *first*,
+on the pre-change RTL, so it is proven to pass row-major before it is asked to prove k-major.
+
+Note that C never changes: `C = A·B` is the same product. Only B's **storage** changes, so the
+expected values in every fixture stay exactly as they are.
+
+### 8.7 Throughput
+
+Byte-for-byte identical. The current B load is `k` bursts of `row_bytes(n)`; the proposed one is
+`n` bursts of `row_bytes(k)`. Same total, both fully contiguous INCR.
+
+| shape | effect |
+|---|---|
+| square `k ≈ n` | identical |
+| tall-skinny `k ≫ n` | **better** — fewer, longer bursts |
+| wide-flat `n ≫ k` | worse burst count, mitigated by `MaxAROut` multi-outstanding AR, which A already depends on |
+
+Beat absorption is unchanged at one beat per cycle. This is why the oct-port was removable
+without a throughput cost — but the claim is only settled by re-measuring
+`ai_gemm_s8_64x64_smoke` against its **93,194 cy** baseline, not by this argument.
+
+### 8.8 Change surface — **LANDED**
+
+| File | Change |
+|---|---|
+| `include/g6lc_ai_desc_pkg.sv` | `ContractVersion = 2`, `DESC_VERSION = 16'd2`; normative OPERAND LAYOUT block |
+| `g6lc_ai_gemm_seq.sv` | `ST_LB` rewritten to mirror `ST_LA` (burst along t, row cursor j); beat-hold drain, `b_w2..b_w8`, `beat_q`/`beat_lane_q`/`beat_left_q` **deleted**; B tile `NumPorts(8) → 2`; `b_addr` swaps its axes; `ldb < k` legality; `lb_n_d` widened `[3:0] → [7:0]` |
+| `core/include/config_pkg.sv` | `ai_fmt_bytes` unchanged — the sequencer's `fmt_t_to_byte_off`/`fmt_ld_to_stride` already generalise it |
+| `g6q-vm/src/gemm.rs` | B row base `t * b_row_stride` → `j * b_row_stride`, element index `j` → `t`; `ldb < n` → `ldb < k`; `read_elem` needed **no** change |
+| `ai-tensor-abi` | `CONTRACT_VERSION = 2`; `Gemm::new` sets `ld_ab = k \| (k << 16)`; `mmio::CAP_LAYOUT` + bit masks |
+| `g6lc_ai_island_cfg_pkg.sv` / `g6lc_ai_cap_window.sv` | new `CAP_OFF_LAYOUT = 0x4C` publishing `a_k_major`/`b_k_major`, so software discovers the layout instead of inferring it from a version it may not read |
+| fixtures | 17 fixtures bumped to version 2; `ldb` corrected where `n != k`; `mat_b` transposed in the data-bearing ones. The all-ones large fixtures needed no data edit |
+
+Net effect on `g6lc_ai_gemm_seq.sv`: **1677 → ~1520 lines.** The change removes code, as §8.3 predicted.
+
+### 8.10 Measured result
+
+Same `ai-dt` netlist, all fixtures recompiled at version 2:
+
+| fixture | shape | cycles | note |
+|---|---|---|---|
+| `ai_gemm_s8_smoke` | 2×2×2 | **1212** | identical to the row-major baseline |
+| `ai_gemm_s8_lda_smoke` | 2×2×2, lda=4 | **1212** | identical |
+| `ai_gemm_s8_4x4_smoke` | 4×4×8 | **1612** | was 1673 — k-major B is *faster* here |
+| `ai_gemm_s8_asym_smoke` | 2×4×6 | **1375** | the layout oracle |
+| `ai_gemm_s8_oddn_smoke` | 2×3×4 | **1369** | was FAILING (AI-X8) |
+| `ai_gemm_s8_n1_smoke` | 2×1×4 | **1154** | matrix-vector |
+| `ai_gemm_s8_m1n3_smoke` | 1×3×4 | **1218** | odd n, no trail store |
+| `ai_gemm_s8_64x64_smoke` | 64×64×64 | **93,194** | **bit-identical to the baseline**, 0 assertions |
+
+`g6lc_qemu` workspace **583/583**; `ai-tensor-abi` + `ai-tensor-ir` **15/15**.
+
+**The 64×64 result is the one that settles §8.7.** The 8-port B tile and the oct-drain were
+removed and the large-fixture cycle count did not move by one cycle, so the claim that the
+extra write ports bought no throughput is now measured rather than argued. The saving is
+`PeLanes` × 6 write ports on the island's largest SRAM array.
+
+`ai_gemm_s8_smoke` accepting a version-2 descriptor is itself the proof the netlist
+carries the change: a stale build would have answered `ST_BAD_VER`.
+
+The 4×4 improvement is the §8.7 tall-skinny case showing up early — that fixture is
+`k=8 > n=4`, so `n` bursts of `row_bytes(k)` beats `k` bursts of `row_bytes(n)`.
+
+### 8.11 What this bought F2–F5
+
+The point of §8 was never INT4 alone. With the loaders counting **bytes**, a format now only
+has to declare how many bytes a row of `k` elements occupies — `fmt_row_bytes` — and neither
+loader needs a per-format branch. The remaining format work is therefore confined to the
+*MAC-side gather and the multiplier*, which is where it belongs:
+
+| step | load work remaining | datapath work remaining |
+|---|---|---|
+| **F2** FP8 E4M3/E5M2 | **none** — 1 byte/element, already exact | float accumulator; significand is *smaller* than the existing 8×8 cell |
+| **F3** BF16 | `fmt_row_bytes` × 2 (one line) | exponent path; reuses F2's accumulator and the unmodified 8×8 cell |
+| **F4** FP16 | `fmt_row_bytes` × 2 (one line) | 11×11 significand — new multiplier |
+| **F5** FP32 | `fmt_row_bytes` × 4 (one line) | 24×24 by decomposition |
+
+So the ordering argument of §5 survives contact with the implementation, and the "one
+configurable common path" the ABI change was chosen for is real rather than aspirational.
+
+### 8.9 Sizing note
+
+`KPerBank = ceil(MaxDim / PeLanes)` and `BankWords = MaxDim * KPerBank` are sized in
+**elements**. For a sub-byte format a tile row holds `ceil(MaxDim/2)` bytes, so the existing
+sizing is conservative (over-provisioned), not wrong — INT4 uses half the tile. Left as is
+deliberately; shrinking it would make the tile format-dependent, which is the coupling this
+whole section removes.
+
+---
+
+## 9. F1 complete: INT4 executes in RTL
+
+The last F1 slice was the **load byte-count**, and it turned out to be the cleanest of the
+three because it is expressible as a change of *units* rather than a new branch.
+
+### 9.1 Two cursor conventions, stated
+
+`g6lc_ai_gemm_seq` now uses `t` with two different meanings, in two disjoint sets of states:
+
+| states | `t` counts | bound |
+|---|---|---|
+| `ST_LA`, `ST_LB` | **bytes** along the operand row | `k_bytes = fmt_row_bytes(k_q)` |
+| `ST_MAC` | **elements** | `k_q` |
+
+`t_q` is reset at every state transition, so the meanings never overlap — the same reuse
+`i_q`/`j_q` already rely on. This is why the load path became format-agnostic: the tile stores
+bytes keyed by byte position (`bank = byte % PeLanes`, `addr = row*KPerBank + byte/PeLanes`),
+which is exactly what the MAC reads back with `byte_idx = (t_q >> 1) + p`. Only ST_MAC needs to
+know about elements, because only elements bound against `k` and only elements decide nibble
+validity on an odd-`k` tail.
+
+Consequence: `a_addr`/`b_addr` no longer convert `t`, because the caller already scaled it.
+Only `fmt_ld_to_stride` remains, and it is now a thin wrapper over `fmt_row_bytes`.
+
+### 9.2 Grants raised, in lockstep
+
+`AiIslandDtypeMask` and `AiIslandPeImplMask` both moved `16'h0001 → 16'h0003`. The
+`grant ⊆ implemented` assertion in `g6lc_ai_island_top` passed at elaboration, which is the
+build-time proof that the two did not drift.
+
+Both are **literals**, not `config_pkg::AiFmtMaskInt8Int4`: the `verif/tb/ai_island/run-gemm-*.sh`
+unit-TB runners compile `g6lc_ai_island_cfg_pkg` *before* core's `config_pkg`, so a
+cross-package reference breaks them. The value is pinned instead by the elaboration assertion
+and by the emulator's ingest test, which reads the real package text and asserts `0x0003`.
+
+### 9.3 Measured
+
+| fixture | shape | cycles |
+|---|---|---|
+| **`ai_gemm_s4_smoke`** | **INT4** 2×2×4 | **1230** |
+| `ai_gemm_s8_smoke` | 2×2×2 | 1212 |
+| `ai_gemm_s8_lda_smoke` | 2×2×2, lda=4 | 1212 |
+| `ai_gemm_s8_4x4_smoke` | 4×4×8 | 1612 |
+| `ai_gemm_s8_asym_smoke` | 2×4×6 | 1375 |
+| `ai_gemm_s8_oddn_smoke` | 2×3×4 | 1369 |
+
+Every INT8 count is unchanged from before the byte-counting change, which is the regression
+argument: for INT8 `k_bytes == k_q`, so the load path is bit-identical by construction.
+
+The INT4 fixture is built to fail loudly rather than pass by luck: operands span the signed
+INT4 endpoints (`−8`, `7`), `−8 × −8 = +64` is present so a sign-extension slip shows up as a
+negative product, and three of the four golden C values are **negative**, which an
+all-positive golden could not check. It also asserts `ST_OK` rather than `ST_BAD_FMT`, so it
+fails if the grant and the datapath disagree.
+
+### 9.4 Measured: INT4 buys ~nothing at 64×64, and that is the correct answer
+
+`ai_gemm_s4_64x64_smoke` is the INT4 twin of `ai_gemm_s8_64x64_smoke` — **byte-identical
+descriptors except `flags.numfmt`**, same all-ones operands, same golden `C[i,j] = 64` checked
+across all 4096 elements. So the cycle delta is attributable to the format alone:
+
+| fixture | format | cycles |
+|---|---|---|
+| `ai_gemm_s8_64x64_smoke` | INT8 | **93,194** |
+| `ai_gemm_s4_64x64_smoke` | INT4 | **93,177** |
+
+**A 17-cycle difference — 0.02%.** Halving the operand bytes bought essentially nothing.
+
+This is not a defect, and it is worth stating plainly because it contradicts a naive reading of
+§2's "INT4 = 2×":
+
+1. **The MAC cost is identical by construction.** At `PeLanes ≥ 64` one issue covers all of
+   `k=64` for both formats (INT8 steps by `PeLanes`, INT4 by `2*PeLanes`), so both spend
+   exactly `m*n` issues in `ST_MAC`. INT4's extra lanes are *idle* at this `k`, not busy.
+2. **The load is latency-bound, not byte-bound.** Both formats issue the same **number** of AR
+   transactions (one burst per operand row, 64 each); INT4 only makes each burst shorter. With
+   `MaxAROut = 2` the per-burst latency dominates, so fewer beats per burst barely helps.
+3. **The harness dominates the wall clock anyway.** 93k cycles is mostly CPU boot, descriptor
+   setup, the completion poll and a 4096-element check loop. The GEMM is a small slice.
+
+So §2's 2× is an argument about a **DRAM-bandwidth-saturated** regime, and a 64×64 tile
+resident in SRAM is emphatically not in that regime. The honest claim after this pass is:
+*INT4 halves operand traffic, which is a bandwidth-regime win and is not observable on these
+fixtures.* Nothing here licenses an "INT4 throughput" number.
+
+`ai_gemm_fmt_pmu_smoke` exists to sharpen this by reading the island's own per-job counter
+(`AI_PMU_CY`, 0x188) for both formats in one ELF and requiring INT4 to be strictly faster. It
+needs `S4_TIME_OUT=3000000` (see its header) and has **not** produced a number yet.
+
+### 9.4b Not established
+
+- **INT4 in a bandwidth-bound regime.** Needs a shape that actually saturates DRAM — large `k`
+  with a tile that does not fit, or `MaxAROut` raised so the load stops being latency-bound.
+  Until then §2's ratios remain projections.
+- **Odd `k`** — now covered, see `ai_gemm_s4_oddk_smoke` in §9.3.
+### 9.5 The multi-channel defect the layout rewrite introduced (AI-X10)
+
+Worth recording, because the layout change looked complete and was not.
+
+`ai-dt` is single-channel, so `SplitArId` is 0 and the load column cursor comes straight from
+`t_q`. On `ai-sc2` (`NrChannels = 2`) the AR slots are split and the cursor lives in
+`ar_slot_q[].col`, retired by a **per-state bound**:
+
+```
+if ((state_q == ST_LA && ...col + ntake >= k_bytes) ||
+    (state_q == ST_LB && ...col + ntake >= n_q   ))   // <-- stale
+```
+
+`n_q` was right while B was row-major, because its rows ran along `j`. AI-X9 made `col` a byte
+offset along `t`, so the bound had to become `k_bytes` — and did not. The slot rolled its row at
+the wrong point and corrupted C.
+
+It is reachable only when **both** conditions hold:
+
+1. `SplitArId` — `NrChannels > 1` and `PeLanes >= BytesPerBeat`;
+2. a row stride that does **not** divide `BytesPerBeat`, so a row straddles a beat.
+
+No power-of-two shape can satisfy (2), which is why every earlier flavour sweep was blind to it.
+Bisected in three 20 s runs:
+
+| fixture | strides | `ai-dt` | `ai-sc2` |
+|---|---|---|---|
+| power-of-two fixtures | divide 8 | PASS | PASS |
+| `ai_gemm_s8_asym_smoke` | lda=6, **ldb=6** | PASS | **FAIL** |
+| `ai_gemm_s8_astraddle_smoke` | lda=6, **ldb=8** (padded) | PASS | **PASS** |
+
+The third row is the one that matters: with only A straddling it passes, which acquits the
+untouched `ST_LA` and puts the fault squarely in the new `ST_LB`.
+
+**Standing lesson:** non-power-of-two dimensions belong in the permanent suite, not just in
+bring-up. Every dimension in the suite was a power of two before this session, and that single
+property hid an odd-`n` C-store defect (AI-X8) *and* a multi-channel load defect (AI-X10).

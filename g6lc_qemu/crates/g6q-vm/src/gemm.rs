@@ -257,14 +257,22 @@ pub fn plan(
         || over_tile(n, tn)
         || over_tile(k, tk)
         || (lda as u64) < k
-        || (ldb as u64) < n
+        // AI-X9: B is k-major, so ldb must hold a row of k elements (was n).
+        || (ldb as u64) < k
     {
         return Err((AiJobReject::BadShape, status_of(model, ST_ERR, 1)));
     }
 
     // ---- compute ---------------------------------------------------------------------
-    //   C[i,j] (i32) = sum_t A[i,t] * B[t,j],  A/B int8 row-major
-    //   A strides by `lda`, B by `ldb`; C rows are contiguous, so `ldc = n`.
+    //   C[i,j] (i32) = sum_t A[i,t] * B[j,t]
+    //
+    // AI-X9 (descriptor ContractVersion 2): A is row-major [m][k] and B is **k-major**
+    // [n][k]. Both stride their row index (`lda` strides i, `ldb` strides j) and both run
+    // contiguously along the reduction axis t. That symmetry is the point: it is what makes
+    // a sub-byte format expressible, because two INT4 elements packed in one byte are
+    // consecutive t and therefore feed the same C[i,j] accumulator. It is also the layout a
+    // framework already has -- torch.nn.Linear.weight is [n, k] row-major.
+    // See architecture/ai-matrix/numeric-formats-datapath.md §8.
     // A read the guest memory map cannot satisfy is an error, not a zero: silently
     // reading zero would produce a wrong C that still looks like a successful job.
     // Leading dimensions count ELEMENTS, so a row's byte extent depends on the format: a
@@ -286,10 +294,11 @@ pub fn plan(
             for t in 0..k {
                 let rd = |addr: u64| mem.read_le::<1>(addr).ok().map(|v| v as u8);
                 let a = read_elem(fmt, a_row, t, rd).ok_or_else(|| bad(model))?;
-                // B is walked down its rows, so the row base moves with `t` and the element
-                // index within the row is `j`.
-                let b_row = ev.ptr_b.wrapping_add(t.wrapping_mul(b_row_stride));
-                let b = read_elem(fmt, b_row, j, rd).ok_or_else(|| bad(model))?;
+                // B is k-major, so its row base is fixed by `j` for the whole reduction and
+                // the element index within the row is `t` -- exactly like A. `read_elem` is
+                // index-based and needs no change for either operand or any format.
+                let b_row = ev.ptr_b.wrapping_add(j.wrapping_mul(b_row_stride));
+                let b = read_elem(fmt, b_row, t, rd).ok_or_else(|| bad(model))?;
                 match (a, b) {
                     (Elem::Int(x), Elem::Int(y)) => {
                         acc_i = acc_i.wrapping_add(x.wrapping_mul(y));
@@ -427,14 +436,16 @@ mod tests {
     fn fixture() -> (PhysMem, AiTensorEvent) {
         let mut mem = PhysMem::new();
         mem.add(Region::new(BASE, 0x1000));
-        // A = [[1, 2], [3, 4]] at +0x100, lda = 2
-        // B = [[5, 6], [7, 8]] at +0x200, ldb = 2
-        // C = A*B = [[19, 22], [43, 50]] at +0x300
+        // A = [[1, 2], [3, 4]] at +0x100, row-major, lda = 2
+        // B = [[5, 6], [7, 8]] logically; AI-X9 stores it **k-major**, so the bytes are
+        // B'[j][t] = B[t][j] = 5, 7, 6, 8 at +0x200 with ldb = k = 2.
+        // C = A*B = [[19, 22], [43, 50]] at +0x300 -- unchanged, because only B's storage
+        // moved, not the product.
         for (off, v) in [(0u64, 1i8), (1, 2), (2, 3), (3, 4)] {
             mem.write_le::<1>(BASE + 0x100 + off, v as u8 as u64)
                 .unwrap();
         }
-        for (off, v) in [(0u64, 5i8), (1, 6), (2, 7), (3, 8)] {
+        for (off, v) in [(0u64, 5i8), (1, 7), (2, 6), (3, 8)] {
             mem.write_le::<1>(BASE + 0x200 + off, v as u8 as u64)
                 .unwrap();
         }
@@ -468,7 +479,9 @@ mod tests {
         let mut mem = PhysMem::new();
         mem.add(Region::new(BASE, 0x1000));
         let a = [1.0f32, 2.0, 3.0, 4.0];
-        let b = [1.0f32, 2.0, 3.0, 4.0];
+        // B is logically [[1,2],[3,4]] but stored k-major (AI-X9), so the bytes are
+        // B'[j][t] = B[t][j] = 1, 3, 2, 4. The golden C = [[7,10],[15,22]] is unchanged.
+        let b = [1.0f32, 3.0, 2.0, 4.0];
 
         let mut put = |base: u64, vals: &[f32]| {
             for (idx, &v) in vals.iter().enumerate() {

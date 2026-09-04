@@ -3,15 +3,25 @@
 //
 // Xg6lcai I1/I3-lite: INT8 GEMM over AXI with banked tc_sram tiles + PE array.
 //
-//   C[i,j] (i32) = sum_t A[i,t]*B[t,j]  with A,B int8, row-major
-//   lda/ldb from descriptor; C uses ldc = n (contiguous rows).
+//   C[i,j] (i32) = sum_t A[i,t]*B[j,t]
+//
+// AI-X9 operand layout (descriptor ContractVersion 2):
+//   A row-major   [m][k], lda strides i, contiguous along t
+//   B **k-major** [n][k], ldb strides j, contiguous along t
+//   C row-major   [m][n], ldc = n
+//
+// Both operands have the REDUCTION axis contiguous. That is what lets one
+// traversal and one format-scaling rule serve both, and it is what makes a
+// sub-byte format expressible: two INT4 elements packed in a byte must feed the
+// same C[i,j] accumulator, so they must be consecutive t. Rationale and the
+// rejected alternatives: architecture/ai-matrix/numeric-formats-datapath.md §8.
 //
 // Phases:
 //   1) Load A → banked tile SRAM (bank = t % PeLanes)
 //      Multi-byte unpack; AXI INCR burst (up to MaxBurstBeats) along the row.
-//   2) Load B → banked tile SRAM (bank = t % PeLanes)
-//      Oct-write same bank (up to 8 B/cycle, NumPorts=8) + AXI INCR along j;
-//      full 64b R beat drains in 1 cy; r_ready gated while draining leftovers.
+//   2) Load B → banked tile SRAM (bank = t % PeLanes), identical traversal to
+//      A with j as the row index. One beat spreads across PeLanes banks at one
+//      address each, so the tile is 1R1W like A's.
 //   3) MAC: PeLanes parallel products/cycle via g6lc_ai_pe_dot
 //   4) Store C: dual-i32 pack on ≥64-bit bus; multi-beat INCR AW (up to
 //      MaxBurstBeats pair-beats) along a C row; dual-bank combo read so
@@ -20,7 +30,7 @@
 //      rides free AXI cycles; drain tail after last MAC row.
 //
 // C multi-banked (j % PeLanes). Beat packing parameterized by DataWidth.
-// Bursts stay within a single A row (k), B row (n), or C row (n); never cross.
+// Bursts stay within a single A row (k), B row (k), or C row (n); never cross.
 //
 // Bounds: m,n,k ∈ [1, MaxDim]. Timing: multi-cycle; multi-outstanding AR
 // (MaxAROut) hides inter-burst memory latency on A/B loads; one AW.
@@ -110,6 +120,7 @@ module g6lc_ai_gemm_seq #(
   logic [15:0] lda_q, ldb_q;
   logic [2:0]  numfmt_q;
   logic [31:0] mac_step;
+  logic [31:0] k_bytes;
   logic [AddrWidth-1:0] pa_q, pb_q, pc_q;
 
   // i,j element indices; t is reduction base (multiple of PeLanes during MAC
@@ -161,15 +172,11 @@ module g6lc_ai_gemm_seq #(
   logic [ARSlotW-1:0]   ar_slot_ridx;
   logic [31:0]          ar_slot_ntake;
 
-  // A multi-byte unpack count (this R cycle); B multi-write count (1..8)
+  // Multi-byte unpack count for this R cycle. AI-X9 made the two loads the same
+  // shape, so lb_n_d is now the same width as la_n_d (it was [3:0], capped at 8
+  // by the deleted oct-drain) and both count elements along t.
   logic [7:0]  la_n_d;
-  logic [3:0]  lb_n_d;
-  // B beat hold: leftover consecutive j-bytes after AR/R
-  logic [DataWidth-1:0] beat_q;
-  logic [BeatLaneW-1:0] beat_lane_q, beat_lane_d;
-  logic [7:0]           beat_left_q, beat_left_d;
-  logic                 beat_load_d;  // capture RDATA into beat_q
-  logic [DataWidth-1:0] beat_data_d;
+  logic [7:0]  lb_n_d;
 
   // C dual-store: dual-bank combo read of C[j],C[j+1] → one W/cycle (PeLanes≥2).
   // Multi-beat: AW once with len=nbeats-1; stream W; advance j on B by stc_elem.
@@ -201,28 +208,10 @@ module g6lc_ai_gemm_seq #(
   logic                 b_w_req  [PeLanes];
   logic [BankAddrW-1:0] b_w_addr [PeLanes];
   logic [7:0]           b_w_data [PeLanes];
-  // I3 B same-bank multi-write (w..w8): up to 8 B/cycle into one bank
-  logic                 b_w2_req  [PeLanes];
-  logic [BankAddrW-1:0] b_w2_addr [PeLanes];
-  logic [7:0]           b_w2_data [PeLanes];
-  logic                 b_w3_req  [PeLanes];
-  logic [BankAddrW-1:0] b_w3_addr [PeLanes];
-  logic [7:0]           b_w3_data [PeLanes];
-  logic                 b_w4_req  [PeLanes];
-  logic [BankAddrW-1:0] b_w4_addr [PeLanes];
-  logic [7:0]           b_w4_data [PeLanes];
-  logic                 b_w5_req  [PeLanes];
-  logic [BankAddrW-1:0] b_w5_addr [PeLanes];
-  logic [7:0]           b_w5_data [PeLanes];
-  logic                 b_w6_req  [PeLanes];
-  logic [BankAddrW-1:0] b_w6_addr [PeLanes];
-  logic [7:0]           b_w6_data [PeLanes];
-  logic                 b_w7_req  [PeLanes];
-  logic [BankAddrW-1:0] b_w7_addr [PeLanes];
-  logic [7:0]           b_w7_data [PeLanes];
-  logic                 b_w8_req  [PeLanes];
-  logic [BankAddrW-1:0] b_w8_addr [PeLanes];
-  logic [7:0]           b_w8_data [PeLanes];
+  // AI-X9: the I3 same-bank multi-write ports (w2..w8) are gone. They existed
+  // only because a row-major B burst ran along j and therefore landed a whole
+  // beat in ONE bank. k-major B spreads a beat across PeLanes banks at one
+  // address each, so 1W is enough -- same as A.
 
   // C multi-bank (bank = j % PeLanes). Dual concurrent reads for pair-store:
   // j and j+1 always hit different banks when PeLanes >= 2 (live: 128).
@@ -265,19 +254,19 @@ module g6lc_ai_gemm_seq #(
     g6lc_ai_tile_sram #(
         .NumWords (BankWords),
         .DataWidth(8),
-        .NumPorts (8),  // I3: oct same-bank drain (full 64b R beat)
+        .NumPorts (2),  // AI-X9: 1R1W, same as A (was 8 for the oct drain)
         .ImplKey  ("g6lc_ai_tile_b")
     ) i_tile_b (
         .clk_i, .rst_ni, .testmode_i,
         .r_req_i (b_r_req[p]), .r_addr_i(b_r_addr[p]), .r_data_o(b_r_data[p]),
         .w_req_i (b_w_req[p]), .w_addr_i(b_w_addr[p]), .w_data_i(b_w_data[p]),
-        .w2_req_i(b_w2_req[p]), .w2_addr_i(b_w2_addr[p]), .w2_data_i(b_w2_data[p]),
-        .w3_req_i(b_w3_req[p]), .w3_addr_i(b_w3_addr[p]), .w3_data_i(b_w3_data[p]),
-        .w4_req_i(b_w4_req[p]), .w4_addr_i(b_w4_addr[p]), .w4_data_i(b_w4_data[p]),
-        .w5_req_i(b_w5_req[p]), .w5_addr_i(b_w5_addr[p]), .w5_data_i(b_w5_data[p]),
-        .w6_req_i(b_w6_req[p]), .w6_addr_i(b_w6_addr[p]), .w6_data_i(b_w6_data[p]),
-        .w7_req_i(b_w7_req[p]), .w7_addr_i(b_w7_addr[p]), .w7_data_i(b_w7_data[p]),
-        .w8_req_i(b_w8_req[p]), .w8_addr_i(b_w8_addr[p]), .w8_data_i(b_w8_data[p])
+        .w2_req_i(1'b0), .w2_addr_i('0), .w2_data_i('0),
+        .w3_req_i(1'b0), .w3_addr_i('0), .w3_data_i('0),
+        .w4_req_i(1'b0), .w4_addr_i('0), .w4_data_i('0),
+        .w5_req_i(1'b0), .w5_addr_i('0), .w5_data_i('0),
+        .w6_req_i(1'b0), .w6_addr_i('0), .w6_data_i('0),
+        .w7_req_i(1'b0), .w7_addr_i('0), .w7_data_i('0),
+        .w8_req_i(1'b0), .w8_addr_i('0), .w8_data_i('0)
     );
   end
 
@@ -336,6 +325,11 @@ module g6lc_ai_gemm_seq #(
   // F1: number of elements issued per MAC cycle.
   assign mac_step = (numfmt_q == 3'd1) ? 32'(2 * PeLanes) : 32'(PeLanes);
 
+  // F1: bytes in one operand row (k elements). This is the bound the LOAD states
+  // run to; ST_MAC still bounds against k_q in elements. For INT8 the two are
+  // equal, which is why the INT8 path is bit-identical.
+  assign k_bytes = fmt_row_bytes(k_q);
+
   // F0b-2: the accumulator is now fed from the PIPELINE register, so
   // `mac_acc_next` is a function of state (sum_q, acc_q) rather than of the
   // live combinational tree output. The cycle-accurate expression:
@@ -375,39 +369,57 @@ module g6lc_ai_gemm_seq #(
   assign pmu_w_beats_o = pmu_w_q;
   assign pmu_cycles_o  = pmu_cy_q;
 
-  // F1: element index / leading-dimension scale for packed formats.
-  // For INT4, two elements share one byte, so the byte offset of element `t` is
-  // t/2 and the byte stride of a row is lda/2 (descriptor must use an even lda).
-  // For all other formats the byte offset and stride are the element counts.
-  // This is used by the AXI tile-load address functions.
-  function automatic logic [31:0] fmt_t_to_byte_off(
-      input logic [31:0] t
+  // ---------------------------------------------------------------------------
+  // F1 format scaling. TWO cursor conventions, deliberately:
+  //
+  //   * the LOAD states (ST_LA/ST_LB) count t in **BYTES** along the row;
+  //   * ST_MAC counts t in **ELEMENTS**, because only elements bound against k
+  //     and only elements decide nibble validity on an odd-k tail.
+  //
+  // `t_q` is reset at every state transition, so the two meanings never overlap
+  // -- the same reuse `i_q`/`j_q` already rely on. Making the load count bytes
+  // is what makes the ENTIRE load path format-agnostic: the tile stores bytes
+  // keyed by byte position (bank = byte % PeLanes, addr = row*KPerBank +
+  // byte/PeLanes), which is exactly what the MAC reads back. So a format only
+  // has to say how many bytes a row of k elements occupies, and neither loader
+  // needs a per-format branch. FP8 reuses this unchanged; BF16/FP16/FP32 will
+  // need only their MAC-side gather, not a new loader.
+  function automatic logic [31:0] fmt_row_bytes(
+      input logic [31:0] elems
   );
-    return (numfmt_q == 3'd1) ? (t >> 1) : t;  // AI_FMT_INT4 == 1
+    // INT4 packs two elements per byte; ceil so an odd count keeps its last
+    // element. Every other live format is one byte per element. Wider formats
+    // (BF16/FP16 = 2, FP32 = 4) multiply here when their datapath lands.
+    return (numfmt_q == 3'd1) ? ((elems + 32'd1) >> 1) : elems;  // AI_FMT_INT4 == 1
   endfunction
 
   function automatic logic [31:0] fmt_ld_to_stride(
       input logic [15:0] ld
   );
-    // INT4 packs two elements per byte. A row of ld elements needs ceil(ld/2)
-    // bytes; the +1 rounds up for odd ld. The intra-row offset uses t>>1 or j>>1.
-    return (numfmt_q == 3'd1) ? ((32'(ld) + 32'd1) >> 1) : 32'(ld);
+    return fmt_row_bytes(32'(ld));
   endfunction
 
+  // `t` is a BYTE offset within the row (load-state convention above), so no
+  // conversion happens here -- the caller already scaled it.
   function automatic logic [AddrWidth-1:0] a_addr(
       input logic [AddrWidth-1:0] base,
       input logic [31:0] i, t,
       input logic [15:0] lda
   );
-    return base + AddrWidth'((i * fmt_ld_to_stride(lda) + fmt_t_to_byte_off(t)));
+    return base + AddrWidth'((i * fmt_ld_to_stride(lda) + t));
   endfunction
 
+  // AI-X9: B is k-major. `ldb` strides j; elements run contiguously along t,
+  // exactly like A. So this is a_addr with the row index swapped, which is what
+  // lets one traversal and one format-scaling rule serve both operands, and what
+  // makes sub-byte packing expressible (two INT4 elements in a byte are
+  // consecutive t and therefore feed the same C[i,j]).
   function automatic logic [AddrWidth-1:0] b_addr(
       input logic [AddrWidth-1:0] base,
       input logic [31:0] t, j,
       input logic [15:0] ldb
   );
-    return base + AddrWidth'((t * fmt_ld_to_stride(ldb) + fmt_t_to_byte_off(j)));
+    return base + AddrWidth'((j * fmt_ld_to_stride(ldb) + t));
   endfunction
 
   function automatic logic [AddrWidth-1:0] c_addr(
@@ -545,27 +557,6 @@ module g6lc_ai_gemm_seq #(
       b_w_req[p]  = 1'b0;
       b_w_addr[p] = '0;
       b_w_data[p] = '0;
-      b_w2_req[p] = 1'b0;
-      b_w2_addr[p] = '0;
-      b_w2_data[p] = '0;
-      b_w3_req[p] = 1'b0;
-      b_w3_addr[p] = '0;
-      b_w3_data[p] = '0;
-      b_w4_req[p] = 1'b0;
-      b_w4_addr[p] = '0;
-      b_w4_data[p] = '0;
-      b_w5_req[p] = 1'b0;
-      b_w5_addr[p] = '0;
-      b_w5_data[p] = '0;
-      b_w6_req[p] = 1'b0;
-      b_w6_addr[p] = '0;
-      b_w6_data[p] = '0;
-      b_w7_req[p] = 1'b0;
-      b_w7_addr[p] = '0;
-      b_w7_data[p] = '0;
-      b_w8_req[p] = 1'b0;
-      b_w8_addr[p] = '0;
-      b_w8_data[p] = '0;
       pe_a[p]     = '0;
       pe_b[p]     = '0;
       pe_v[p]     = 1'b0;
@@ -632,11 +623,7 @@ module g6lc_ai_gemm_seq #(
     ar_slot_ridx       = '0;
     ar_slot_ntake      = '0;
     la_n_d          = 8'd0;
-    lb_n_d          = 4'd1;
-    beat_left_d     = beat_left_q;
-    beat_lane_d     = beat_lane_q;
-    beat_load_d     = 1'b0;
-    beat_data_d     = beat_q;
+    lb_n_d          = 8'd0;
     burst_first_d   = burst_first_q;
     c_pair_hold_d   = c_pair_hold_q;
     c_lo_we_d       = 1'b0;
@@ -653,7 +640,6 @@ module g6lc_ai_gemm_seq #(
         ar_inflight_d = '0;
         aw_sent_d     = 1'b0;
         w_sent_d      = 1'b0;
-        beat_left_d   = 8'd0;
         burst_first_d = 1'b0;
         c_pair_hold_d = 1'b0;
         stc_w_left_d  = 8'd0;
@@ -665,14 +651,14 @@ module g6lc_ai_gemm_seq #(
       end
 
       ST_CHK: begin
+        // AI-X9: B is k-major, so ldb must hold a row of k elements (was n).
         if (m_q == 0 || n_q == 0 || k_q == 0
             || m_q > MaxDim || n_q > MaxDim || k_q > MaxDim
-            || lda_q < k_q[15:0] || ldb_q < n_q[15:0]) begin
+            || lda_q < k_q[15:0] || ldb_q < k_q[15:0]) begin
           err_d   = 1'b1;
           state_d = ST_DONE;
         end else begin
           ar_inflight_d = '0;
-          beat_left_d   = 8'd0;
           burst_first_d = 1'b0;
           ar_i_en = 1'b1; ar_i_d = '0;
           ar_t_en = 1'b1; ar_t_d = '0;
@@ -713,7 +699,7 @@ module g6lc_ai_gemm_seq #(
             axi_req_o.ar.addr  = beat_align(a_ar_cur);
             nb                 = cap_beats_to_stripe(
                 beat_align(a_ar_cur),
-                beats_for_rem(k_q - ar_t_q, a_ar_cur[BeatAlignW-1:0]));
+                beats_for_rem(k_bytes - ar_t_q, a_ar_cur[BeatAlignW-1:0]));
             axi_req_o.ar.len   = axi_pkg::len_t'(nb - 8'd1);
             if (SplitArId)
               axi_req_o.ar.id = ArIdBase + IdWidth'(free_s);
@@ -726,8 +712,8 @@ module g6lc_ai_gemm_seq #(
               ar_slot_widx     = free_s;
               ar_slot_push_row = ar_i_q;
               ar_slot_push_col = ar_t_q;
-              elems = elems_for_burst(k_q - ar_t_q, a_ar_cur[BeatAlignW-1:0], nb);
-              if (ar_t_q + elems >= k_q) begin
+              elems = elems_for_burst(k_bytes - ar_t_q, a_ar_cur[BeatAlignW-1:0], nb);
+              if (ar_t_q + elems >= k_bytes) begin
                 ar_t_en = 1'b1; ar_t_d = '0;
                 ar_i_en = 1'b1; ar_i_d = ar_i_q + 32'd1;
               end else begin
@@ -750,7 +736,7 @@ module g6lc_ai_gemm_seq #(
             lane0    = recv_first
                      ? (SplitArId ? ar_slot_q[match_s].lane0 : ar_head_lane)
                      : BeatLaneW'(0);
-            rem_k    = k_q - recv_t;
+            rem_k    = k_bytes - recv_t;
             rem_beat = 32'(BytesPerBeat) - 32'(lane0);
             n_take   = rem_k;
             if (n_take > rem_beat) n_take = rem_beat;
@@ -772,7 +758,7 @@ module g6lc_ai_gemm_seq #(
             end
             if (axi_resp_i.r.last)
               ar_lane_pop_en = 1'b1;
-            if (!SplitArId && (t_q + n_take >= k_q) && (i_q + 1 == m_q)) begin
+            if (!SplitArId && (t_q + n_take >= k_bytes) && (i_q + 1 == m_q)) begin
               ar_t_en = 1'b1; ar_t_d = '0;
               ar_j_en = 1'b1; ar_j_d = '0;
               ar_i_en = 1'b1; ar_i_d = '0;
@@ -806,240 +792,139 @@ module g6lc_ai_gemm_seq #(
         end
       end
 
-      // Load B: oct-drain (≤8/cycle = full 64b beat) + multi-beat INCR;
-      // r_ready off only if leftover beyond 8 (wider bus future)
+      // Load B: k-major (AI-X9), so this is ST_LA with the row index swapped --
+      // the burst runs along t (contiguous) and the row cursor is j.
+      //
+      // The oct-drain that used to live here is DELETED. When B was row-major
+      // the burst ran along j, so one 64-bit beat landed in ONE bank at up to 8
+      // different local addresses; that is the only reason the B tile needed
+      // NumPorts(8) and the only reason a held-beat path
+      // (beat_q/beat_lane_q/beat_left_q) existed. Under k-major a beat spreads
+      // across PeLanes DIFFERENT banks at one address each -- exactly what A
+      // already sustains with a single write port -- so the 8 ports and the
+      // whole leftover path were buying nothing. Byte traffic is unchanged:
+      // k bursts of row_bytes(n) becomes n bursts of row_bytes(k).
       ST_LB: begin
-        if (beat_left_q != 8'd0) begin
-          // Drain held beat — hold R if a burst is still open
-          axi_req_o.r_ready = 1'b0;
-          begin
-            automatic logic [LaneW-1:0] bk;
-            automatic logic [31:0]     ntake, rem_row, rem_beat;
-            bk       = t_bank(t_q);
-            rem_row  = n_q - j_q;
-            rem_beat = 32'(beat_left_q);
-            ntake    = rem_row;
-            if (ntake > rem_beat) ntake = rem_beat;
-            if (ntake > 32'd8)    ntake = 32'd8;
-            if (ntake == 0)       ntake = 32'd1;
-            lb_n_d = ntake[3:0];
-            // Port map: w=j+0 .. w8=j+7
-            b_w_req [bk] = 1'b1;
-            b_w_addr[bk] = b_bank_addr(t_q, j_q);
-            b_w_data[bk] = byte_from_beat(beat_q, beat_lane_q);
-            if (ntake >= 32'd2) begin
-              b_w2_req [bk] = 1'b1;
-              b_w2_addr[bk] = b_bank_addr(t_q, j_q + 32'd1);
-              b_w2_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 1));
+        begin
+          automatic logic       ar_push, r_fire, r_match;
+          automatic logic [7:0] nb;
+          automatic logic [31:0] elems;
+          automatic logic [ARSlotW-1:0] free_s, match_s;
+          ar_push = 1'b0;
+          r_fire  = 1'b0;
+          r_match = 1'b0;
+          free_s  = '0;
+          match_s = '0;
+          if (SplitArId) begin
+            automatic logic found_free;
+            found_free = 1'b0;
+            for (int unsigned s = 0; s < MaxAROut; s++) begin
+              if (!ar_slot_q[s].valid && !found_free) begin
+                found_free = 1'b1;
+                free_s = ARSlotW'(s);
+              end
+              if (ar_slot_q[s].valid &&
+                  axi_resp_i.r.id == (ArIdBase + IdWidth'(s))) begin
+                r_match = 1'b1;
+                match_s = ARSlotW'(s);
+              end
             end
-            if (ntake >= 32'd3) begin
-              b_w3_req [bk] = 1'b1;
-              b_w3_addr[bk] = b_bank_addr(t_q, j_q + 32'd2);
-              b_w3_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 2));
+          end
+          // ---- Issue AR (may run concurrent with R) ----
+          if (ar_inflight_q < AROutW'(MaxAROut) && ar_j_q < n_q) begin
+            axi_req_o.ar.addr  = beat_align(b_ar_cur);
+            nb                 = cap_beats_to_stripe(
+                beat_align(b_ar_cur),
+                beats_for_rem(k_bytes - ar_t_q, b_ar_cur[BeatAlignW-1:0]));
+            axi_req_o.ar.len   = axi_pkg::len_t'(nb - 8'd1);
+            if (SplitArId)
+              axi_req_o.ar.id = ArIdBase + IdWidth'(free_s);
+            axi_req_o.ar_valid = 1'b1;
+            if (axi_resp_i.ar_ready) begin
+              ar_push         = 1'b1;
+              ar_lane_push_en = 1'b1;
+              ar_lane_push    = b_ar_cur[BeatAlignW-1:0];
+              ar_slot_we       = SplitArId;
+              ar_slot_widx     = free_s;
+              ar_slot_push_row = ar_j_q;
+              ar_slot_push_col = ar_t_q;
+              elems = elems_for_burst(k_bytes - ar_t_q, b_ar_cur[BeatAlignW-1:0], nb);
+              if (ar_t_q + elems >= k_bytes) begin
+                ar_t_en = 1'b1; ar_t_d = '0;
+                ar_j_en = 1'b1; ar_j_d = ar_j_q + 32'd1;
+              end else begin
+                ar_t_en = 1'b1; ar_t_d = ar_t_q + elems;
+              end
             end
-            if (ntake >= 32'd4) begin
-              b_w4_req [bk] = 1'b1;
-              b_w4_addr[bk] = b_bank_addr(t_q, j_q + 32'd3);
-              b_w4_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 3));
+          end
+          // ---- Receive R ----
+          axi_req_o.r_ready = (ar_inflight_q != '0) &&
+                              (!SplitArId || !axi_resp_i.r_valid || r_match);
+          if (ar_inflight_q != '0 && axi_resp_i.r_valid &&
+              (!SplitArId || r_match)) begin
+            automatic logic [BeatLaneW-1:0] lane0;
+            automatic logic [31:0] n_take, rem_k, rem_beat, recv_j, recv_t;
+            automatic logic recv_first;
+            r_fire   = 1'b1;
+            recv_j   = SplitArId ? ar_slot_q[match_s].row : j_q;
+            recv_t   = SplitArId ? ar_slot_q[match_s].col : t_q;
+            recv_first = SplitArId ? ar_slot_q[match_s].first : burst_first_q;
+            lane0    = recv_first
+                     ? (SplitArId ? ar_slot_q[match_s].lane0 : ar_head_lane)
+                     : BeatLaneW'(0);
+            rem_k    = k_bytes - recv_t;
+            rem_beat = 32'(BytesPerBeat) - 32'(lane0);
+            n_take   = rem_k;
+            if (n_take > rem_beat) n_take = rem_beat;
+            if (n_take > PeLanes)  n_take = PeLanes;
+            lb_n_d = n_take[7:0];
+            ar_slot_r_en   = SplitArId;
+            ar_slot_ridx   = match_s;
+            ar_slot_r_last = axi_resp_i.r.last;
+            ar_slot_ntake  = n_take;
+            for (int unsigned p = 0; p < PeLanes; p++) begin
+              if (32'(p) < n_take) begin
+                automatic logic [31:0] tt;
+                tt = recv_t + 32'(p);
+                b_w_req [t_bank(tt)] = 1'b1;
+                b_w_addr[t_bank(tt)] = b_bank_addr(tt, recv_j);
+                b_w_data[t_bank(tt)] = byte_from_beat(
+                    axi_resp_i.r.data, BeatLaneW'(unsigned'(lane0) + p));
+              end
             end
-            if (ntake >= 32'd5) begin
-              b_w5_req [bk] = 1'b1;
-              b_w5_addr[bk] = b_bank_addr(t_q, j_q + 32'd4);
-              b_w5_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 4));
-            end
-            if (ntake >= 32'd6) begin
-              b_w6_req [bk] = 1'b1;
-              b_w6_addr[bk] = b_bank_addr(t_q, j_q + 32'd5);
-              b_w6_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 5));
-            end
-            if (ntake >= 32'd7) begin
-              b_w7_req [bk] = 1'b1;
-              b_w7_addr[bk] = b_bank_addr(t_q, j_q + 32'd6);
-              b_w7_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 6));
-            end
-            if (ntake >= 32'd8) begin
-              b_w8_req [bk] = 1'b1;
-              b_w8_addr[bk] = b_bank_addr(t_q, j_q + 32'd7);
-              b_w8_data[bk] = byte_from_beat(beat_q, BeatLaneW'(beat_lane_q + 7));
-            end
-            beat_left_d = beat_left_q - ntake[7:0];
-            beat_lane_d = BeatLaneW'(beat_lane_q + ntake[BeatLaneW-1:0]);
-            if (j_q + ntake >= n_q && t_q + 1 == k_q) begin
-              state_d     = ST_MAC;
-              acc_d       = '0;
-              beat_left_d = 8'd0;
-              ar_inflight_d = '0;
+            if (axi_resp_i.r.last)
+              ar_lane_pop_en = 1'b1;
+            if (!SplitArId && (t_q + n_take >= k_bytes) && (j_q + 1 == n_q)) begin
+              state_d = ST_MAC;
+              acc_d   = '0;
             end else
               state_d = ST_LB;
           end
-        end else begin
-          // Multi-outstanding AR on B: issue while receive drains prior burst
-          begin
-            automatic logic       ar_push, r_fire, r_match;
-            automatic logic [7:0] nb;
-            automatic logic [31:0] elems;
-            automatic logic [ARSlotW-1:0] free_s, match_s;
-            ar_push = 1'b0;
-            r_fire  = 1'b0;
-            r_match = 1'b0;
-            free_s  = '0;
-            match_s = '0;
-            if (SplitArId) begin
-              automatic logic found_free;
-              found_free = 1'b0;
-              for (int unsigned s = 0; s < MaxAROut; s++) begin
-                if (!ar_slot_q[s].valid && !found_free) begin
-                  found_free = 1'b1;
-                  free_s = ARSlotW'(s);
-                end
-                if (ar_slot_q[s].valid &&
-                    axi_resp_i.r.id == (ArIdBase + IdWidth'(s))) begin
-                  r_match = 1'b1;
-                  match_s = ARSlotW'(s);
-                end
-              end
+          // Net inflight + burst_first (handles AR+R same cycle)
+          unique case ({ar_push, r_fire && axi_resp_i.r.last})
+            2'b10: begin
+              ar_inflight_d = ar_inflight_q + AROutW'(1);
+              if (ar_inflight_q == '0) burst_first_d = 1'b1;
             end
-            if (ar_inflight_q < AROutW'(MaxAROut) && ar_t_q < k_q) begin
-              axi_req_o.ar.addr  = beat_align(b_ar_cur);
-              nb                 = cap_beats_to_stripe(
-                  beat_align(b_ar_cur),
-                  beats_for_rem(n_q - ar_j_q, b_ar_cur[BeatAlignW-1:0]));
-              axi_req_o.ar.len   = axi_pkg::len_t'(nb - 8'd1);
-              if (SplitArId)
-                axi_req_o.ar.id = ArIdBase + IdWidth'(free_s);
-              axi_req_o.ar_valid = 1'b1;
-              if (axi_resp_i.ar_ready) begin
-                ar_push         = 1'b1;
-                ar_lane_push_en = 1'b1;
-                ar_lane_push    = b_ar_cur[BeatAlignW-1:0];
-                ar_slot_we       = SplitArId;
-                ar_slot_widx     = free_s;
-                ar_slot_push_row = ar_t_q;
-                ar_slot_push_col = ar_j_q;
-                elems = elems_for_burst(n_q - ar_j_q, b_ar_cur[BeatAlignW-1:0], nb);
-                if (ar_j_q + elems >= n_q) begin
-                  ar_j_en = 1'b1; ar_j_d = '0;
-                  ar_t_en = 1'b1; ar_t_d = ar_t_q + 32'd1;
-                end else begin
-                  ar_j_en = 1'b1; ar_j_d = ar_j_q + elems;
-                end
-              end
+            2'b01: begin
+              ar_inflight_d = ar_inflight_q - AROutW'(1);
+              burst_first_d = (ar_inflight_q > AROutW'(1));
             end
-            axi_req_o.r_ready = (ar_inflight_q != '0) &&
-                                (!SplitArId || !axi_resp_i.r_valid || r_match);
-            if (ar_inflight_q != '0 && axi_resp_i.r_valid &&
-                (!SplitArId || r_match)) begin
-              automatic logic [LaneW-1:0]     bk;
-              automatic logic [BeatLaneW-1:0] lane0;
-              automatic logic [31:0]          ntake, left_beat, rem_row, rem_in_beat;
-              automatic logic [31:0]          recv_t, recv_j;
-              automatic logic                 recv_first;
-              r_fire  = 1'b1;
-              recv_t  = SplitArId ? ar_slot_q[match_s].row : t_q;
-              recv_j  = SplitArId ? ar_slot_q[match_s].col : j_q;
-              recv_first = SplitArId ? ar_slot_q[match_s].first : burst_first_q;
-              bk      = t_bank(recv_t);
-              lane0   = recv_first
-                      ? (SplitArId ? ar_slot_q[match_s].lane0 : ar_head_lane)
-                      : BeatLaneW'(0);
-              rem_row     = n_q - recv_j;
-              rem_in_beat = 32'(BytesPerBeat) - 32'(lane0);
-              ntake       = rem_row;
-              if (ntake > rem_in_beat) ntake = rem_in_beat;
-              if (ntake > 32'd8)       ntake = 32'd8;
-              if (ntake == 0)          ntake = 32'd1;
-              lb_n_d = ntake[3:0];
-              ar_slot_r_en   = SplitArId;
-              ar_slot_ridx   = match_s;
-              ar_slot_r_last = axi_resp_i.r.last;
-              ar_slot_ntake  = ntake;
-              b_w_req [bk] = 1'b1;
-              b_w_addr[bk] = b_bank_addr(recv_t, recv_j);
-              b_w_data[bk] = byte_from_beat(axi_resp_i.r.data, lane0);
-              if (ntake >= 32'd2) begin
-                b_w2_req [bk] = 1'b1;
-                b_w2_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd1);
-                b_w2_data[bk] = byte_from_beat(
-                    axi_resp_i.r.data, BeatLaneW'(lane0 + 1));
-              end
-              if (ntake >= 32'd3) begin
-                b_w3_req [bk] = 1'b1;
-                b_w3_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd2);
-                b_w3_data[bk] = byte_from_beat(
-                    axi_resp_i.r.data, BeatLaneW'(lane0 + 2));
-              end
-              if (ntake >= 32'd4) begin
-                b_w4_req [bk] = 1'b1;
-                b_w4_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd3);
-                b_w4_data[bk] = byte_from_beat(
-                    axi_resp_i.r.data, BeatLaneW'(lane0 + 3));
-              end
-              if (ntake >= 32'd5) begin
-                b_w5_req [bk] = 1'b1;
-                b_w5_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd4);
-                b_w5_data[bk] = byte_from_beat(
-                    axi_resp_i.r.data, BeatLaneW'(lane0 + 4));
-              end
-              if (ntake >= 32'd6) begin
-                b_w6_req [bk] = 1'b1;
-                b_w6_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd5);
-                b_w6_data[bk] = byte_from_beat(
-                    axi_resp_i.r.data, BeatLaneW'(lane0 + 5));
-              end
-              if (ntake >= 32'd7) begin
-                b_w7_req [bk] = 1'b1;
-                b_w7_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd6);
-                b_w7_data[bk] = byte_from_beat(
-                    axi_resp_i.r.data, BeatLaneW'(lane0 + 6));
-              end
-              if (ntake >= 32'd8) begin
-                b_w8_req [bk] = 1'b1;
-                b_w8_addr[bk] = b_bank_addr(recv_t, recv_j + 32'd7);
-                b_w8_data[bk] = byte_from_beat(
-                    axi_resp_i.r.data, BeatLaneW'(lane0 + 7));
-              end
-              left_beat = rem_in_beat - ntake;
-              rem_row   = n_q - recv_j - ntake;
-              if (left_beat > rem_row) left_beat = rem_row;
-              beat_left_d = left_beat[7:0];
-              beat_lane_d = BeatLaneW'(lane0 + ntake[BeatLaneW-1:0]);
-              beat_load_d   = 1'b1;
-              beat_data_d   = axi_resp_i.r.data;
-              if (axi_resp_i.r.last)
-                ar_lane_pop_en = 1'b1;
-              if (!SplitArId && j_q + ntake >= n_q && t_q + 1 == k_q) begin
-                state_d       = ST_MAC;
-                acc_d         = '0;
-                beat_left_d   = 8'd0;
-              end else
-                state_d = ST_LB;
+            2'b11: begin
+              ar_inflight_d = ar_inflight_q;  // pop+push
+              burst_first_d = 1'b1;           // new head (pushed or shifted)
             end
-            unique case ({ar_push, r_fire && axi_resp_i.r.last})
-              2'b10: begin
-                ar_inflight_d = ar_inflight_q + AROutW'(1);
-                if (ar_inflight_q == '0) burst_first_d = 1'b1;
-              end
-              2'b01: begin
-                ar_inflight_d = ar_inflight_q - AROutW'(1);
-                burst_first_d = (ar_inflight_q > AROutW'(1));
-              end
-              2'b11: begin
-                ar_inflight_d = ar_inflight_q;
-                burst_first_d = 1'b1;
-              end
-              default: ;
-            endcase
-            if (r_fire && !axi_resp_i.r.last)
-              burst_first_d = 1'b0;
-            if (SplitArId) begin
-              if ((ar_t_en ? ar_t_d : ar_t_q) >= k_q && ar_inflight_d == '0) begin
-                state_d     = ST_MAC;
-                acc_d       = '0;
-                beat_left_d = 8'd0;
-              end
-            end else if (state_d == ST_MAC)
-              ar_inflight_d = '0;
-          end
+            default: ;
+          endcase
+          if (r_fire && !axi_resp_i.r.last)
+            burst_first_d = 1'b0;
+          if (SplitArId) begin
+            if ((ar_j_en ? ar_j_d : ar_j_q) >= n_q && ar_inflight_d == '0) begin
+              state_d = ST_MAC;
+              acc_d   = '0;
+            end
+          end else if (state_d == ST_MAC)
+            ar_inflight_d = '0;
         end
       end
 
@@ -1140,7 +1025,27 @@ module g6lc_ai_gemm_seq #(
 
           // Trail C-store (same pair path as ST_STC, cursor stc_i/stc_j)
           if (can_trail) begin
-            can_pair = !stc_j_q[0] && (stc_j_q + 1 < n_q);
+            // AI-X8: pair on EVEN n only, decided per ROW rather than per
+            // position, so a row never transitions pair -> single midway.
+            //
+            // The old predicate was `!stc_j_q[0] && (stc_j_q + 1 < n_q)`, which
+            // for odd n stores ceil(n/2)-1 pairs and then one single, i.e. TWO
+            // AW transactions for one row. That transition is the AI-X8 defect:
+            // m=2/n=3 returned a wrong C[0][2] with ST_OK and a correct ticket.
+            // Bisected on one unchanged netlist:
+            //   n=1     (single path only)          PASS
+            //   n=4/n=6 (pair path only)            PASS
+            //   m=1 n=3 (transition, no trailing)   PASS
+            //   m=2 n=3 (transition, trailing)      FAIL
+            // So neither path is wrong alone, and ST_STC's identical transition
+            // is fine; only the trail store racing an active MAC breaks. The
+            // race itself is NOT root-caused -- this removes the construct
+            // rather than explaining it, which is why the fixtures stay.
+            //
+            // Cost: an odd-n C row now takes n beats instead of ceil(n/2).
+            // C store is overlapped with MAC and is not the bottleneck, and odd
+            // n is the rare shape, so this is the cheap side of the trade.
+            can_pair = !n_q[0];
             if (can_pair) begin
               if (!aw_sent_q) begin
                 pairs_rem = (n_q - stc_j_q) >> 1;
@@ -1274,7 +1179,10 @@ module g6lc_ai_gemm_seq #(
         begin
           automatic logic        can_pair;
           automatic logic [31:0] pairs_rem, nbeats, beats_done, j_eff;
-          can_pair = (DataWidth >= 64) && !stc_j_q[0] && (stc_j_q + 1 < n_q);
+          // AI-X8: even n only, per row -- see the trail-store copy in ST_MAC.
+          // Kept identical to the trail predicate so the two store sites cannot
+          // disagree about how a row is chunked.
+          can_pair = (DataWidth >= 64) && !n_q[0];
 
           if (can_pair) begin
             if (!aw_sent_q) begin
@@ -1446,9 +1354,6 @@ module g6lc_ai_gemm_seq #(
         ar_lane_mem_q[k] <= '0;
         ar_slot_q[k]     <= '0;
       end
-      beat_q <= '0;
-      beat_lane_q <= '0;
-      beat_left_q <= '0;
       c_pair_hold_q <= 1'b0;
       c_lo_q <= '0;
       stc_w_left_q <= '0;
@@ -1506,10 +1411,15 @@ module g6lc_ai_gemm_seq #(
             ar_slot_q[ar_slot_ridx].valid <= 1'b0;
           else begin
             ar_slot_q[ar_slot_ridx].first <= 1'b0;
-            if ((state_q == ST_LA &&
-                 ar_slot_q[ar_slot_ridx].col + ar_slot_ntake >= k_q) ||
-                (state_q == ST_LB &&
-                 ar_slot_q[ar_slot_ridx].col + ar_slot_ntake >= n_q)) begin
+            // AI-X9/F1: `col` is a BYTE offset along the operand row in BOTH load
+            // states now, so both bound against k_bytes. ST_LB used to bound
+            // against n_q because row-major B ran along j -- keeping that after
+            // the k-major rewrite retired the slot's column at the wrong point
+            // and corrupted C whenever a row straddled a beat boundary. It only
+            // showed on SplitArId (NrChannels>1) with a row stride that does not
+            // divide BytesPerBeat, which no power-of-two fixture produces;
+            // ai_gemm_s8_asym_smoke (k=6) on ai-sc2 is the gate.
+            if (ar_slot_q[ar_slot_ridx].col + ar_slot_ntake >= k_bytes) begin
               ar_slot_q[ar_slot_ridx].col <= '0;
               ar_slot_q[ar_slot_ridx].row <=
                   ar_slot_q[ar_slot_ridx].row + 32'd1;
@@ -1519,12 +1429,9 @@ module g6lc_ai_gemm_seq #(
           end
         end
       end
-      beat_left_q   <= beat_left_d;
-      beat_lane_q   <= beat_lane_d;
       c_pair_hold_q <= c_pair_hold_d;
       stc_w_left_q  <= stc_w_left_d;
       stc_elem_q    <= stc_elem_d;
-      if (beat_load_d) beat_q <= beat_data_d;
       if (c_lo_we_d)   c_lo_q <= c_r_data;
       done_q        <= (state_q == ST_DONE);
 
@@ -1552,7 +1459,6 @@ module g6lc_ai_gemm_seq #(
         i_q   <= '0;
         j_q   <= '0;
         t_q   <= '0;
-        beat_left_q   <= '0;
         burst_first_q <= 1'b0;
         ar_inflight_q <= '0;
         ar_i_q <= '0;
@@ -1585,7 +1491,7 @@ module g6lc_ai_gemm_seq #(
       if (!SplitArId && state_q == ST_LA && ar_inflight_q != '0 && axi_resp_i.r_valid) begin
         if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
           err_q <= 1'b1;
-        if (t_q + 32'(la_n_d) >= k_q) begin
+        if (t_q + 32'(la_n_d) >= k_bytes) begin
           t_q <= '0;
           if (i_q + 1 != m_q)
             i_q <= i_q + 1;
@@ -1598,25 +1504,23 @@ module g6lc_ai_gemm_seq #(
           t_q <= t_q + 32'(la_n_d);
       end
 
-      // B load: up to 8 elements/cycle (AR/R or oct beat drain)
-      if (!SplitArId && state_q == ST_LB &&
-          ((beat_left_q != 8'd0) ||
-           (ar_inflight_q != '0 && axi_resp_i.r_valid))) begin
-        if (ar_inflight_q != '0 && axi_resp_i.r_valid &&
-            (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}))
+      // B load: advance t by lb_n_d, then j -- the same shape as the A load
+      // above, because AI-X9 made B k-major. There is no held-beat term any
+      // more; the oct-drain that needed one is gone.
+      if (!SplitArId && state_q == ST_LB && ar_inflight_q != '0 && axi_resp_i.r_valid) begin
+        if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
           err_q <= 1'b1;
-        if (j_q + 32'(lb_n_d) >= n_q) begin
-          j_q <= '0;
-          beat_left_q <= '0;  // new row; do NOT clear ar_inflight (next-row AR may be out)
-          if (t_q + 1 != k_q)
-            t_q <= t_q + 1;
+        if (t_q + 32'(lb_n_d) >= k_bytes) begin
+          t_q <= '0;
+          if (j_q + 1 != n_q)
+            j_q <= j_q + 1;
           else begin
             i_q <= '0;
             j_q <= '0;
             t_q <= '0;
           end
         end else
-          j_q <= j_q + 32'(lb_n_d);
+          t_q <= t_q + 32'(lb_n_d);
       end
 
       // MAC: t_q is reduction base; advance by PeLanes, then (i,j).

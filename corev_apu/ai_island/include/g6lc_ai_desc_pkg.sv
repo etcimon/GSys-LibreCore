@@ -8,9 +8,44 @@ package g6lc_ai_desc_pkg;
 
   localparam int unsigned DescBytes  = 64;
   localparam int unsigned DescBits   = DescBytes * 8;
-  localparam int unsigned ContractVersion = 1;
+  // Version 2: operand B is k-major. See OPERAND LAYOUT below.
+  //
+  // This IS a deliberate break, unlike the flags.numfmt extension below, and it
+  // is versioned rather than silently reinterpreted. `ld_ab` keeps its bit
+  // layout but `ldb` changes which axis it strides, so a version-1 image would
+  // be read as a valid descriptor describing a different matrix -- exactly the
+  // "plausible wrong numbers" failure this package refuses elsewhere. Bumping
+  // the version makes a stale image fail with ST_BAD_VER instead.
+  //
+  // The break is affordable because every consumer is in-tree (RTL, the
+  // verif/tb/ai_island benches, g6q-vm, ai-tensor), live grants are INT8-only,
+  // and the island is pre-tape-out. Rationale and the alternatives that were
+  // rejected: architecture/ai-matrix/numeric-formats-datapath.md §8.
+  localparam int unsigned ContractVersion = 2;
   // Ingested name (F2). Keep equal to ContractVersion (engine checks 16'(ContractVersion)).
-  localparam logic [15:0] DESC_VERSION = 16'd1;
+  localparam logic [15:0] DESC_VERSION = 16'd2;
+
+  // ---------------------------------------------------------------------------
+  // OPERAND LAYOUT (normative)
+  // ---------------------------------------------------------------------------
+  //   C[i,j] (i32) = sum_t A[i,t] * B[j,t]
+  //
+  //   A is row-major   [m][k], `lda` strides i, elements contiguous along t.
+  //   B is **k-major** [n][k], `ldb` strides j, elements contiguous along t.
+  //   C is row-major   [m][n], ldc = n.
+  //
+  // Both operands therefore have the REDUCTION axis contiguous, which is what
+  // makes one loader and one format-scaling rule serve both, and what makes a
+  // sub-byte format expressible at all: two INT4 elements packed in a byte must
+  // feed the same C[i,j] accumulator, so they must be consecutive t.
+  //
+  // B being k-major is not an inconvenience imposed on callers. It is the
+  // layout a framework already has: torch.nn.Linear.weight is stored
+  // [out_features, in_features] = [n, k] row-major and F.linear(x, W) = x @ W',
+  // so W as stored IS this B. A general row-major B is repacked once through
+  // OP_LAYOUT rather than on every GEMM.
+  //
+  // `ldb >= k` is the legality rule (it was `ldb >= n` in version 1).
 
   // flags subfield layout (isa-encoding.md §7) — F5/F10.
   localparam int unsigned FLAG_DTYPE_SHIFT   = 8;

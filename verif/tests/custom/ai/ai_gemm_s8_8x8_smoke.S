@@ -46,7 +46,7 @@ _start:
   bnez t1, 1b
 
   # m=n=k=8, lda=ldb=8
-  li   t0, (1 << 16) | 1
+  li   t0, (1 << 16) | 2
   sw   t0, AI_DESC+0x0(s0)
   sw   zero, AI_DESC+0x4(s0)
   li   t0, 8

@@ -84,6 +84,10 @@ R   core/include/g6lc64_ooo_config_pkg.sv
 R   core/include/g6lc64_ooo_server_config_pkg.sv
 R   core/include/g6lc64_server_math_config_pkg.sv
 R   core/include/g6lc64_server_math_v_config_pkg.sv
+R   core/include/g6lc_*.sv
+R   corev_apu/include/g6lc_*.sv
+R   corev_apu/include/g6lc_*.svh
+R   corev_apu/ai_island/**
 
 # --- DE MINIMIS EXCLUSIONS (deliberately tier U, do not "fix") ----------------
 # These carry an Etienne Cimon modification but the delta is too small to support
@@ -118,6 +122,9 @@ T   corev-mb/lib/**
 T   docs/**
 T   architecture/**
 T   agents/**
+T   ai-tensor/**
+T   AGENTS.md
+T   AGENTS-*.md
 T   verif/regress/**
 T   verif/tb/**
 T   verif/tests/**

@@ -5646,10 +5646,11 @@ mod tests {
             (0x9000_0000u64, 0x9000_1000, 0x9000_2000, 0x9000_3000);
         m.add(Region::new(0x9000_0000, 0x4000));
         // A = [[1, 2], [3, 4]], B = [[5, 6], [7, 8]]  =>  C = [[19, 22], [43, 50]]
+        // B is stored k-major (AI-X9), so its bytes are B'[j][t] = B[t][j] = 5, 7, 6, 8.
         for (i, v) in [1i8, 2, 3, 4].iter().enumerate() {
             m.write_le::<1>(a_ptr + i as u64, *v as u8 as u64).unwrap();
         }
-        for (i, v) in [5i8, 6, 7, 8].iter().enumerate() {
+        for (i, v) in [5i8, 7, 6, 8].iter().enumerate() {
             m.write_le::<1>(b_ptr + i as u64, *v as u8 as u64).unwrap();
         }
 

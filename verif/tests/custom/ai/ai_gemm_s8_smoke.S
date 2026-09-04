@@ -46,8 +46,8 @@ _start:
   sw   zero, 8(t0)
   sw   zero, 12(t0)
 
-  # Descriptor: version=1 op=GEMM(1), m=n=k=2, lda=ldb=2
-  li   t0, (1 << 16) | 1
+  # Descriptor: version=2 op=GEMM(1), m=n=k=2, lda=ldb=2
+  li   t0, (1 << 16) | 2
   sw   t0, AI_DESC+0x0(s0)
   sw   zero, AI_DESC+0x4(s0)
   li   t0, 2
@@ -143,8 +143,9 @@ mat_a:
   .align 3
   .globl mat_b
 mat_b:
-  .byte 5, 6
-  .byte 7, 8
+  # AI-X9: k-major B'[j][t] = B[t][j]. Row-major B was [[5,6],[7,8]].
+  .byte 5, 7
+  .byte 6, 8
   .align 3
   .globl mat_c
 mat_c:
