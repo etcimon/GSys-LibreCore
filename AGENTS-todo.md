@@ -1372,3 +1372,28 @@ Retired incomplete/unrelated artifacts outside the `smt_legacy` / `fetch_B` trac
     of `0x80000000` for an unexecuted `c.jr a0` is unexpected for a cold BTB and
     must be reproduced on a fresh build.
 - `python tools/g6q.py check` remains green.
+
+---
+
+### AI-X11 — post-F1 commit state (2026-09-04)
+
+- **Committed** F1-sequencer/F1-load, AI-X8 (odd-n store), AI-X9 (k-major B ABI), AI-X10 (multi-channel straddle), the INT4 golden/odd-k/shape/PMU fixtures, and the g6lc_qemu/ai-tensor ABI sync to master as `ee407cea6`.
+- **`ai_gemm_s8_32x32_smoke` PASS on `ai-d8`** (63,860 cycles, 333 s wall) — the k-major B layout and INT8 path are correct for m=n=k=32 on 8-channel class-1 LiteDRAM. This rules out a generic 32×32 stall in the current harness.
+- **Still open:** the `ai_gemm_fmt_pmu_smoke` 32×32 INT4-vs-INT8 cycle comparison fixture. The `ai-dt` harness was stale; the `ai-d8` run was killed too early because the 32×32×32 single job took ~5.5 minutes and the two-job PMU fixture was expected to need ~10–15 minutes. A new `ai-d8` run with `S4_TIME_OUT=300000` is in progress.
+- **Still open:** wider-flavour soak (`ai-sc4`/class-1) and a full Rust workspace test run to confirm the k-major / INT4 changes did not regress the emulator or host ABI.
+- **Licensing pass:** `.licensing-tiers` updated so `corev_apu/ai_island/**`, `corev_apu/include/g6lc_*.sv`, and `core/include/g6lc_*.sv` are tier R, `ai-tensor/**` and root `AGENTS-*.md` are tier T. `.gitignore` now excludes `corev_apu/ai_island/generated/` and `trace.spec`.
+
+### AI-X11a — function-call probe for the multi-job hang (2026-09-04 continued)
+
+- Re-ran `ai_gemm_s8_32x32_smoke` and a ticket-51 twin `ai_gemm_s8_32x32_t51` on `ai-dt`: both PASS in **26,723 cycles**, confirming a single 32×32×32 INT8 job still completes and the ticket value is not the issue.
+- Built `ai_gemm_s8_32x32_t51_fn` (same descriptor, same data, but wrapped in a `jal`/`ret` `submit` function) and ran on `ai-dt` with `S4_TIME_OUT=50000`: it **timed out at 50,000 cycles with `tohost=0`**. Disassembly confirms the function is correctly formed (`sw zero, AI_DESC+0x4` present, `ret` to `<pass>`). Re-running with `S4_TIME_OUT=100000` to see if it is just slower.
+- Built `ai_gemm_two_s8_probe` and `ai_gemm_two_s8_probe2` (sequential two-job, claim, status-read) to isolate the second doorbell. Both runs with `time_out=100000` returned `rc=255` early; the remote `Variane_testharness` process kept running and had to be killed. Likely the long `max-cycles` run is losing the proxy tail (`--tail 30` does not capture the end) and/or SSH timeout. This means the previous "two-job timeout" may partly be a harness/proxy artifact, not proven RTL.
+- The `t51_fn` failure is the cleanest new signal: a single job wrapped in a function **does not complete in the same cycle budget as the in-line version**. Re-run with `S4_TIME_OUT=100000` **confirmed timeout at 100,000 cycles**, so it is a genuine hang, not a tight budget. Candidate root causes being checked:
+  1. The `submit` function uses `slli t0, t3, 8; sw t0, AI_DOORBELL` while in-line uses `li t0, 0x3300; sw t0, AI_DOORBELL` — same value, different reg allocation.
+  2. `ret` (`c.jr ra`) returns to `<pass>` at `0x8000004e`, which is a backward/close return; possible CVA6 return-stack or `c.jr` decode interaction.
+  3. The pass/fail/trap labels at `0x4e/0x5e/0x6e` are immediately before the `submit` function; the `j fail`/`j trap` branches from inside `submit` are short backward jumps. No obvious misalignments.
+- `ai_gemm_two_s8_inline` (two jobs, but still using a `jal`/`ret` to a `run_job` function) **also timed out at 100,000 cycles**. That means the `jal`/`ret` pattern by itself is enough to hang, and the earlier two-job result is confounded by the function.
+- `ai_gemm_two_s8_nofn` (two sequential 32×32 INT8 jobs, **fully in-line, no `jal`/`ret` at all**) **PASS** on `ai-dt` in **20,178 cycles**. This disambiguates the bug: the **second doorbell and completion FIFO work correctly**; the failure is the `jal`/`ret` function-call pattern in this test context.
+- In-lined `ai_gemm_fmt_pmu_smoke.S` (removed `submit`, `check_status`, `check_ticket`, `check_c` functions, unrolled both jobs) and re-ran on `ai-dt` with `S4_TIME_OUT=100000`: **PASS in 50,953 cycles**, `tohost=1`. The INT4 job's `AI_PMU_CY` is strictly less than the INT8 job's, so the cycle-count oracle is satisfied.
+- In-lined `ai_gemm_two_s8_smoke.S` the same way and re-ran on `ai-dt`: **PASS in 50,948 cycles**, `tohost=1`. Both multi-job INT8 fixtures are now green.
+- Deleted temporary diagnostic fixtures: `ai_gemm_s8_32x32_t51.S`, `ai_gemm_s8_32x32_t51_fn.S`, `ai_gemm_two_s8_probe.S`, `ai_gemm_two_s8_probe2.S`, `ai_gemm_two_s8_inline.S`, `ai_gemm_two_s8_nofn.S`. The retained fix is in `ai_gemm_fmt_pmu_smoke.S` and `ai_gemm_two_s8_smoke.S`.
