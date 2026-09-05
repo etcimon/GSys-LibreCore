@@ -35,6 +35,7 @@ See `architecture/ai-matrix/scaling-100tops.md` §3 and §8.
 | `include/g6lc_ai_policy_pkg.sv`, `g6lc_ai_policy_codec.sv` | frozen eight-state policy, hysteresis and successor hints | **verified compartment**, not instantiated by top |
 | `g6lc_ai_policy_steer.sv` | format-aware benefit gate and fixed-budget topology | **verified compartment**, no production consumer |
 | `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_fp_mac.sv` | exact widening and separate FP32 RNE multiply/add | **verified scalar primitive**, not integrated floating GEMM |
+| `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_pe_dot_float.sv` | FP8 E4M3/E5M2 block-floating dot product with RNE FP32 conversion | **verified Lanes=4 unit**: 4,007 checks pass with Verilator; Yosys `read_slang`, `check -assert` and `synth -top g6lc_ai_pe_dot_float -flatten` all report zero problems. Not integrated into GEMM sequencer; Lanes=256 / timing / full-system next |
 
 Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=256**,
 **AccTileM/N/K=256** (SKU AccTile* live; 1 MAC cycle per C). C multi-banked
@@ -144,6 +145,15 @@ or FP32, then performs separate FP32 RNE MUL and ADD. It preserves subnormals an
 signed zero, reports local exception flags, holds responses under backpressure,
 and cancels work on reset/flush/disable. It is **off by default** and does not
 connect floating operands to the live integer GEMM reducer or expand any grant.
+
+A separate standalone FP8 dot-product primitive, `g6lc_ai_pe_dot_float`, is
+verified at `Lanes=4` with 4,007 Verilator checks against a `double` oracle. It
+decodes FP8 E4M3/E5M2, forms per-lane products, aligns to a common block exponent,
+reduces in a 128-bit balanced tree and converts to RNE FP32 once. Yosys
+`read_slang`, `check -assert` and `synth -top g6lc_ai_pe_dot_float -flatten` all
+report zero problems. It is not connected to `g6lc_ai_gemm_seq` and does not
+change the live `AiIslandDtypeMask` / `AiIslandPeImplMask`; it is not floating
+GEMM support or ISA F/D conformance.
 
 | Pipeline registers | Accepted request to visible result | Scalar initiation interval |
 |---|---:|---:|

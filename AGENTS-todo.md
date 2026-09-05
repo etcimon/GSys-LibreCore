@@ -88,11 +88,21 @@ Priors: `architecture/ai-matrix/numeric-formats-datapath.md`, AI policy §10–�
   1 NumPy skip, 22 QEMU UIO tests and torch smoke. Build-platform typecheck and
   13 focused tests pass. Software rejects invalid C/done destinations and
   device overlays and preserves sticky completion errors.
-- [ ] Integrate floating GEMM loaders/array and validate full-system grants;
-  production `IslandFpEn` stays off and live island grant/PE masks stay 3
-  (INT8/INT4). Scalar FP and software formats are not floating GEMM support or
-  ISA F/D conformance. This increment adds neither fused requantization nor
-  non-GEMM arithmetic; existing spine operations are unchanged.
+- [x] FP8 E4M3/E5M2 block-floating dot product PE: new
+  `corev_apu/ai_island/g6lc_ai_pe_dot_float.sv` with per-lane decode, product,
+  block-exponent alignment, 128-bit reduction tree and RNE FP32 conversion.
+  Verified by `verif/tb/ai_island/run-pe-dot-float.sh` (Verilator 5.x) with
+  `pe_dot_float_main.cpp`: 4,007 Lanes=4 directed/random checks vs exact `double`
+  oracle pass. Yosys `read_slang` elaborates with zero errors/warnings; `check -assert`
+  and `synth -top g6lc_ai_pe_dot_float -flatten` each report zero problems and zero
+  latches. `AiIslandDtypeMask` / `AiIslandPeImplMask` remain `16'h0003`. No
+  fused/reassociated reduction, no FTZ, no new clock/reset.
+- [ ] Integrate the FP8 dot-product PE into `g6lc_ai_gemm_seq` loader/accumulator
+  and validate full-system grants; production `IslandFpEn` stays off and live
+  island grant/PE masks stay 3 (INT8/INT4). Scalar FP and software formats are
+  not floating GEMM support or ISA F/D conformance. This increment adds neither
+  fused requantization nor non-GEMM arithmetic; existing spine operations are
+  unchanged.
 - [ ] Bind descriptor metadata/per-context flush to a real policy consumer and
   PMU; prove tile/bank/tail behavior, then measure real RTL memory traffic.
   Keep host execution, emulator wall time, scheduling models and RTL timing

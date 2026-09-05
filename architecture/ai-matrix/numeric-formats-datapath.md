@@ -34,6 +34,15 @@ the island capability window. Native NaN outputs are canonical quiet FP32 NaN;
 subnormals and signed zero remain significant. Per-operation flags are local
 outputs, not implicit writes to a core's floating-point CSRs.
 
+A separate FP8 block-floating dot-product PE (`g6lc_ai_pe_dot_float`) is also
+verified at `Lanes=4`: it decodes E4M3/E5M2, multiplies, picks the most negative
+exponent as a block exponent, aligns products into a 128-bit signed accumulator,
+reduces with the same balanced integer tree, and normalises/rounds to RNE FP32
+once. `verif/tb/ai_island/run-pe-dot-float.sh` passes 4,007 checks vs an exact
+`double` oracle, and Yosys `read_slang`, `check -assert` and
+`synth -top g6lc_ai_pe_dot_float -flatten` each report zero problems. It is not
+integrated into `g6lc_ai_gemm_seq` and does not change the live grant mask.
+
 Descriptor version 2 remains the contract: A is `[m][k]`, B is `[n][k]`, both
 leading dimensions count elements along K. `DESC_B_K_MAJOR` publishes that fact
 for consumers that must not infer layout from square test cases. Conventional
@@ -206,7 +215,7 @@ verifiable, and each has a named regression that must not move.
 | **F0b-1** | Move the accumulate out of the PE into the sequencer | Prerequisite for F0b-2. Bit-identical, so zero functional risk | GEMM goldens byte- and cycle-identical |
 | **F0b-2** | Insert the pipeline register on `sum_o`, delay the C write | Register site now exists and is not on a recurrence | GEMM goldens identical; small fixtures show **no** cycle-count change, large fixtures (64x64 etc.) validate the delayed C write and trail-store arbitration |
 | **F1** | **INT4**, by fracturing the 8×8 cell into 2×(4×4) | Cheapest format: no float logic, no accumulator change, and the only one that *raises* throughput (§2). It is also the "effective TOPS" lever `scaling-100tops.md` §1 names | INT8 goldens; new INT4 golden vs emulator |
-| **F2** | **FP8 E4M3 + E5M2** | First float, and the only float that keeps INT8-equivalent speed (§2). Mantissa is *smaller* than the existing cell (§3), so the cost is purely the float accumulator | INT8/INT4 goldens; FP8 golden incl. the 448.0 and subnormal cases |
+| **F2** | **FP8 E4M3 + E5M2** | First float, and the only float that keeps INT8-equivalent speed (§2). Mantissa is *smaller* than the existing cell (§3), so the cost is purely the float accumulator. The `g6lc_ai_pe_dot_float` unit is verified at Lanes=4 with 4,007 checks and is synthesizable (`synth -top g6lc_ai_pe_dot_float -flatten` reports zero problems) | INT8/INT4 goldens; FP8 golden incl. the 448.0 and subnormal cases; standalone dot-product Verilator + Yosys check/synth pass |
 | **F3** | **BF16** | Reuses F2's float accumulator *and* the unmodified 8×8 cell (§3). ½ rate, which §2 shows is the correct point | all previous goldens; BF16 golden |
 | **F4** | **FP16** | Needs an 11×11 significand for the same ½ rate as BF16 — more area, no throughput gain (§3). Deliberately after BF16 | all previous; FP16 golden incl. subnormals |
 | **F5** | **FP32** | 24×24 significand by decomposition, ¼ rate | all previous; FP32 golden |
@@ -374,7 +383,7 @@ Subsequent F1 closure (see §9):
 | F0b-1 accumulator moved out of the PE | **landed and verified.** `g6lc_ai_pe_dot` no longer has `acc_i`/`acc_o`; it is a pure sum-of-products reducer, and `g6lc_ai_gemm_seq` owns `acc_q + pe_sum`. Bit-identical: goldens **1212 cy** and **1673 cy**, unchanged from F0a, 0 assertions |
 | F0b-2 pipeline register | **landed and verified.** `sum_q <= pe_sum`, drain computes `acc_d = (first_q ? '0 : acc_q) + sum_q` and writes `C` at `(sum_i_q, sum_j_q)` if `last_q`. Indices advance at issue rate; the C write and accumulator update lag by one cycle but issue one cycle per MAC. Verified: `ai_gemm_s8_smoke` **1212 cy**, `ai_gemm_s8_4x4_smoke` **1673 cy** (same as F0b-1, so the pipeline is fully hidden for small fixtures), `ai_gemm_s8_lda_smoke` **1212 cy**, `ai_gemm_s8_64x64_smoke` **SUCCESS 93,194 cy** with zero assertions. The trail-store hazard predicted in §5.1 does not appear in these fixtures because the delayed C write still completes before the trail store streams the same row; full trail-store stress is left for the wider flavour sweep |
 | F1 INT4 | **COMPLETE and verified.** PE widening (F1-PE), MAC addressing/stride scaling (F1-sequencer), the §8 k-major operand change, and byte-counting loaders (F1-load) are all landed. Grants raised to `AiFmtMaskInt8Int4` (`16'h0003`) in both `AiIslandDtypeMask` and `AiIslandPeImplMask`. `ai_gemm_s4_smoke` (m=2 n=2 k=4, operands spanning −8..7, negative C) **PASSES 1230 cy**, and all seven INT8 fixtures keep their exact cycle counts. See §9 |
-| F2 FP8 | E4M3/E5M2 widening and ordered scalar arithmetic verified; floating GEMM integration **open** |
+| F2 FP8 | E4M3/E5M2 widening, ordered scalar arithmetic and a Lanes=4 FP8 dot-product PE (`g6lc_ai_pe_dot_float`) **landed and verified**: 4,007 Verilator checks vs a `double` oracle, Yosys `read_slang`, `check -assert` and `synth -top g6lc_ai_pe_dot_float -flatten` all report zero problems. Floating GEMM integration and `Lanes=256` timing remain **open**.
 | F3 BF16 | Exact widening and ordered scalar arithmetic verified; floating GEMM integration **open** |
 | F4 FP16 | Exact widening and ordered scalar arithmetic verified; floating GEMM integration **open** |
 | F5 FP32 | Separate RNE multiply/add primitive verified; floating GEMM integration **open** |
@@ -610,7 +619,7 @@ loader needs a per-format branch. The remaining format work is therefore confine
 
 | step | load work remaining | datapath work remaining |
 |---|---|---|
-| **F2** FP8 E4M3/E5M2 | **none** — 1 byte/element, already exact | float accumulator; significand is *smaller* than the existing 8×8 cell |
+| **F2** FP8 E4M3/E5M2 | **none** — 1 byte/element, already exact | float dot-product PE / accumulator; significand is *smaller* than the existing 8×8 cell. Lanes=4 `g6lc_ai_pe_dot_float` verified with Verilator + Yosys `read_slang`/`check`/`synth`; Lanes=256 and GEMM integration open |
 | **F3** BF16 | `fmt_row_bytes` × 2 (one line) | exponent path; reuses F2's accumulator and the unmodified 8×8 cell |
 | **F4** FP16 | `fmt_row_bytes` × 2 (one line) | 11×11 significand — new multiplier |
 | **F5** FP32 | `fmt_row_bytes` × 4 (one line) | 24×24 by decomposition |
