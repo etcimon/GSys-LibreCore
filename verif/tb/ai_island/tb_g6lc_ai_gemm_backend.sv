@@ -23,8 +23,11 @@ module tb_g6lc_ai_gemm_backend
   localparam int unsigned NWORDS  = 1024;
   localparam int unsigned TO_HS   = 8000;
   localparam int unsigned TO_RSP  = 20000;
-  localparam logic [DATA_W-1:0] ONES8 = 64'h0101_0101_0101_0101;
-  localparam logic [DATA_W-1:0] C16   = 64'h0000_0010_0000_0010;
+  localparam logic [DATA_W-1:0] ONES8  = 64'h0101_0101_0101_0101;
+  localparam logic [DATA_W-1:0] C16    = 64'h0000_0010_0000_0010;
+  // FP8 E4M3 1.0 = 0x38 (0_0111_000); FP32 16.0 = 0x41800000
+  localparam logic [DATA_W-1:0] FP8_1  = {8{8'h38}};
+  localparam logic [DATA_W-1:0] FP8_C16 = {2{32'h41800000}};
 
   typedef logic [ADDR_W-1:0]     addr_t;
   typedef logic [ID_W-1:0]       id_t;
@@ -36,6 +39,7 @@ module tb_g6lc_ai_gemm_backend
   logic clk, rst_ni, init_done, start, ready, done, err;
   logic [31:0] gemm_m, gemm_n, gemm_k;
   logic [15:0] gemm_lda, gemm_ldb;
+  logic [2:0]  gemm_numfmt;
   logic [63:0] gemm_pa, gemm_pb, gemm_pc;
   logic aw_pend, w_pend, ar_pend, aw_set, w_set, ar_set;
   logic b_ready_en, r_ready_en;
@@ -140,7 +144,7 @@ module tb_g6lc_ai_gemm_backend
       .k_i          ( gemm_k ),
       .lda_i        ( gemm_lda ),
       .ldb_i        ( gemm_ldb ),
-      .numfmt_i     ( 3'd0 ),
+      .numfmt_i     ( gemm_numfmt ),
       .ptr_a_i      ( gemm_pa ),
       .ptr_b_i      ( gemm_pb ),
       .ptr_c_i      ( gemm_pc ),
@@ -337,7 +341,7 @@ module tb_g6lc_ai_gemm_backend
       gemm_n   = 32'd2;
       gemm_k   = 32'd16;
       gemm_lda = 16'd64;
-      gemm_ldb = 16'd2;
+      gemm_ldb = 16'd16;
       gemm_pa  = 64'h8000_0000;
       gemm_pb  = 64'h8000_0200;
       gemm_pc  = 64'h8000_0300;
@@ -391,7 +395,7 @@ module tb_g6lc_ai_gemm_backend
     cycles = 0;
     start = 0;
     gemm_m = 32'd2; gemm_n = 32'd2; gemm_k = 32'd16;
-    gemm_lda = 16'd16; gemm_ldb = 16'd2;
+    gemm_lda = 16'd16; gemm_ldb = 16'd16; gemm_numfmt = 3'd0;
     gemm_pa = 64'h8000_0038;
     gemm_pb = 64'h8000_0100;
     gemm_pc = 64'h8000_0200;
@@ -480,7 +484,31 @@ module tb_g6lc_ai_gemm_backend
       errors++;
     end
 
+    // FP8 E4M3 run: 1.0 * 1.0 + ... = 16.0 (FP32 0x41800000)
+    // config_pkg::AI_FMT_FP8_E4M3 = 3
+    gemm_numfmt = 3'd3;
+    wr8(64'h8000_0038, FP8_1);
+    wr8(64'h8000_0040, FP8_1);
+    wr8(64'h8000_0048, FP8_1);
+    wr8(64'h8000_0050, FP8_1);
+    wr8(64'h8000_0100, FP8_1);
+    wr8(64'h8000_0108, FP8_1);
+    wr8(64'h8000_0110, FP8_1);
+    wr8(64'h8000_0118, FP8_1);
+    kick_gemm;
+    if (err) begin
+      $error("gemm err (fp8)");
+      errors++;
+    end
+    rd8(64'h8000_0200, c0);
+    rd8(64'h8000_0208, c1);
+    if (c0 !== FP8_C16 || c1 !== FP8_C16) begin
+      $error("golden C fp8 exp=%h got %h %h", FP8_C16, c0, c1);
+      errors++;
+    end
+
     check_cap;
+    gemm_numfmt = 3'd0;
     if (NCH >= 2)
       run_wide;
 

@@ -370,4 +370,53 @@ package g6lc_ai_fp_pkg;
     result = {sign, exp_field, man_field};
     return {flags, result};
   endfunction
+
+  // RNE FP32 addition, used by the GEMM accumulator for multi-step float tiles.
+  // Decodes both operands, aligns to the larger exponent, adds the integer
+  // mantissas, and normalises/rounds with bfp_mant_exp_to_fp32.
+  // Returns {flags[4:0], result[31:0]} with flags layout matching pe_dot_float.
+  function automatic logic [36:0] fp32_add(
+      input logic [31:0] a,
+      input logic [31:0] b
+  );
+    fp_dot_value_t da, db;
+    logic signed [FP_DOT_MAXW-1:0] ma, mb, msum;
+    logic signed [15:0] exp_c;
+    logic               sign_c;
+    logic [36:0]        res;
+    da = fp_dot_decode_value(a, 3'(config_pkg::AI_FMT_FP32));
+    db = fp_dot_decode_value(b, 3'(config_pkg::AI_FMT_FP32));
+
+    // NaN propagation and infinities
+    if (da.is_nan || db.is_nan)
+      return {5'b10000, 32'h7fc00000};
+    if (da.is_inf && db.is_inf) begin
+      if (da.sign != db.sign)
+        return {5'b10000, 32'h7fc00000};
+      return {5'b00100, {da.sign, 8'hff, 23'd0}};
+    end
+    if (da.is_inf) return {5'b00100, {da.sign, 8'hff, 23'd0}};
+    if (db.is_inf) return {5'b00100, {db.sign, 8'hff, 23'd0}};
+
+    // Zeros: sign is negative only if both are negative zero.
+    if (da.is_zero && db.is_zero)
+      return {5'd0, {da.sign & db.sign, 31'd0}};
+
+    // Normal/subnormal finite values.  da.exp/db.exp are such that
+    // value = (-1)^sign * mant * 2^exp.  Align the smaller to the larger exp.
+    exp_c = (da.exp > db.exp) ? da.exp : db.exp;
+
+    ma = da.sign ? -$signed({{(FP_DOT_MAXW-32){1'b0}}, da.mant})
+                 :  $signed({{(FP_DOT_MAXW-32){1'b0}}, da.mant});
+    mb = db.sign ? -$signed({{(FP_DOT_MAXW-32){1'b0}}, db.mant})
+                 :  $signed({{(FP_DOT_MAXW-32){1'b0}}, db.mant});
+
+    if (da.exp < exp_c) ma = ma >>> (exp_c - da.exp);
+    if (db.exp < exp_c) mb = mb >>> (exp_c - db.exp);
+
+    msum  = ma + mb;
+    sign_c = msum[FP_DOT_MAXW-1];
+    res   = bfp_mant_exp_to_fp32(sign_c, msum, exp_c);
+    return res;
+  endfunction
 endpackage

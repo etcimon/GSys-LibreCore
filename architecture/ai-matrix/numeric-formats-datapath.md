@@ -34,14 +34,21 @@ the island capability window. Native NaN outputs are canonical quiet FP32 NaN;
 subnormals and signed zero remain significant. Per-operation flags are local
 outputs, not implicit writes to a core's floating-point CSRs.
 
-A separate FP8 block-floating dot-product PE (`g6lc_ai_pe_dot_float`) is also
-verified at `Lanes=4`: it decodes E4M3/E5M2, multiplies, picks the most negative
-exponent as a block exponent, aligns products into a 128-bit signed accumulator,
-reduces with the same balanced integer tree, and normalises/rounds to RNE FP32
-once. `verif/tb/ai_island/run-pe-dot-float.sh` passes 4,007 checks vs an exact
-`double` oracle, and Yosys `read_slang`, `check -assert` and
-`synth -top g6lc_ai_pe_dot_float -flatten` each report zero problems. It is not
-integrated into `g6lc_ai_gemm_seq` and does not change the live grant mask.
+A generic floating block-floating dot-product PE (`g6lc_ai_pe_dot_float`) is
+verified at `Lanes=4`: it decodes FP8 E4M3/E5M2, FP16, BF16 and FP32,
+multiplies, picks the most negative exponent as a block exponent, aligns products
+into a 640-bit signed accumulator, reduces with a balanced adder tree, and
+normalises/rounds to RNE FP32 once. `verif/tb/ai_island/run-pe-dot-float.sh`
+passes 5,018 checks vs an exact `double` oracle, and Yosys `read_slang`,
+`check -assert` and `synth -noabc -top g6lc_ai_pe_dot_float -flatten` each
+report zero problems.
+
+`g6lc_ai_gemm_seq` now dispatches FP8 (E4M3/E5M2) to the floating PE, accumulates
+multi-step tiles with a per-step FP32 `fp32_add`, and stores the FP32 result in
+the C tile. The backend unit test `verif/tb/ai_island/run-gemm-backend.sh`
+includes a directed FP8 E4M3 2x2x16 golden (all 1.0 operands producing FP32 16.0)
+alongside the existing INT8 fixtures. BF16, FP16 and FP32 GEMM still require
+MAC-side byte gather; the live island grant/implementation masks remain INT8+INT4.
 
 Descriptor version 2 remains the contract: A is `[m][k]`, B is `[n][k]`, both
 leading dimensions count elements along K. `DESC_B_K_MAJOR` publishes that fact

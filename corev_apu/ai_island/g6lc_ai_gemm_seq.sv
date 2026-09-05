@@ -311,16 +311,43 @@ module g6lc_ai_gemm_seq #(
   // PE: multi-lane MAC (driven only in ST_MAC)
   logic signed [7:0] pe_a [PeLanes];
   logic signed [7:0] pe_b [PeLanes];
+  logic        [31:0] pe_a_float [PeLanes];
+  logic        [31:0] pe_b_float [PeLanes];
   logic              pe_v [PeLanes];
   logic       [31:0] pe_sum;
+  logic       [31:0] pe_sum_int;
+  logic       [31:0] pe_sum_float;
 
-  g6lc_ai_pe_dot #(.Lanes(PeLanes)) i_pe (
+  // Integer/INT4 path
+  g6lc_ai_pe_dot #(.Lanes(PeLanes)) i_pe_int (
       .a_i     (pe_a),
       .b_i     (pe_b),
       .valid_i (pe_v),
       .numfmt_i(numfmt_q),
-      .sum_o   (pe_sum)
+      .sum_o   (pe_sum_int)
   );
+
+  // Floating path (FP8/FP16/BF16/FP32)
+  g6lc_ai_pe_dot_float #(.Lanes(PeLanes)) i_pe_float (
+      .a_i     (pe_a_float),
+      .b_i     (pe_b_float),
+      .valid_i (pe_v),
+      .numfmt_i(numfmt_q),
+      .sum_o   (pe_sum_float),
+      .flags_o ()
+  );
+
+  // Format selection: integer/INT4 vs floating.
+  // numfmt_q is constant for a tile, so the mux is a per-job static select.
+  localparam logic [2:0] AI_FMT_INT  = 3'd0;
+  localparam logic [2:0] AI_FMT_INT4 = 3'd1;
+  logic pe_float_en;
+  // Only dispatch to the float dot for implemented FP families
+  // (FP8 E4M3/E5M2, FP16, BF16, FP32).  SP24 and reserved codes stay on the
+  // integer path where the sequencer's numfmt check / descriptor grant will
+  // reject them before the MAC.
+  assign pe_float_en = (numfmt_q inside {3'd3, 3'd4, 3'd5, 3'd6, 3'd7});
+  assign pe_sum = pe_float_en ? pe_sum_float : pe_sum_int;
 
   // F1: number of elements issued per MAC cycle.
   assign mac_step = (numfmt_q == 3'd1) ? 32'(2 * PeLanes) : 32'(PeLanes);
@@ -357,7 +384,12 @@ module g6lc_ai_gemm_seq #(
   // shared with the trail-store path in ST_MAC, so moving the MAC write one
   // cycle later changes that arbitration.
   logic [31:0] mac_acc_next;
-  assign mac_acc_next = (sum_first_q ? '0 : acc_q) + sum_q;
+  logic [36:0] mac_fp32_add;
+  // Float tiles accumulate with RNE FP32 addition; integer tiles with i32 add.
+  assign mac_fp32_add = g6lc_ai_fp_pkg::fp32_add(acc_q, sum_q);
+  assign mac_acc_next = pe_float_en
+      ? (sum_first_q ? sum_q : mac_fp32_add[31:0])
+      : ((sum_first_q ? '0 : acc_q) + sum_q);
 
   // I3 PMU accumulators (active while not IDLE/DONE)
   logic [31:0] pmu_r_q, pmu_w_q, pmu_cy_q;
@@ -557,9 +589,11 @@ module g6lc_ai_gemm_seq #(
       b_w_req[p]  = 1'b0;
       b_w_addr[p] = '0;
       b_w_data[p] = '0;
-      pe_a[p]     = '0;
-      pe_b[p]     = '0;
-      pe_v[p]     = 1'b0;
+      pe_a[p]       = '0;
+      pe_b[p]       = '0;
+      pe_a_float[p] = '0;
+      pe_b_float[p] = '0;
+      pe_v[p]       = 1'b0;
     end
     c_r0_req  = 1'b0;
     c_r0_bank = '0;
@@ -996,10 +1030,13 @@ module g6lc_ai_gemm_seq #(
                                  (e0 < k_q) ? a_r_data[p][3:0] : 4'b0000};
                   pe_b[p]     = {(e1 < k_q) ? b_r_data[p][7:4] : 4'b0000,
                                  (e0 < k_q) ? b_r_data[p][3:0] : 4'b0000};
+                  pe_a_float[p] = 32'd0;
+                  pe_b_float[p] = 32'd0;
                   pe_v[p]     = 1'b1;
                 end
               end else begin
-                // INT8/FP8/BF16/FP16/FP32: one byte per element.
+                // INT8/FP8: one byte per element.  Wider formats (BF16/FP16/FP32)
+                // still load one byte here but assemble multi-byte operands below.
                 automatic logic [31:0] tt;
                 tt = t_q + 32'(p);
                 if (tt < k_q) begin
@@ -1009,6 +1046,10 @@ module g6lc_ai_gemm_seq #(
                   b_r_addr[p] = b_bank_addr(tt, j_q);
                   pe_a[p]     = $signed(a_r_data[p]);
                   pe_b[p]     = $signed(b_r_data[p]);
+                  // For FP8, zero-extend the byte into the 32-bit float lane.
+                  // For integer formats this is ignored by the mux.
+                  pe_a_float[p] = {24'b0, a_r_data[p]};
+                  pe_b_float[p] = {24'b0, b_r_data[p]};
                   pe_v[p]     = 1'b1;
                 end
               end
