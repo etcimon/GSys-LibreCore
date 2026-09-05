@@ -25,9 +25,18 @@ pub fn mount(spec: &BoardSpec) -> BTreeMap<String, StaticFile> {
     }
     let root = f.root.trim_end_matches('/');
     let root = if root.is_empty() { "" } else { root };
+    let libwasm = f.wasm
+        && spec.kernel.wasm.enable
+        && spec.kernel.ui == "svelte-d"
+        && g6b_wasm::bios_ui_libwasm_live();
     let mut out = BTreeMap::new();
     if f.html {
-        let html = index_html(spec, f.js, f.wasm, root).into_bytes();
+        let html = if libwasm {
+            g6b_ui::setup_html_libwasm(spec, &format!("{root}/ui-libwasm.wasm"))
+        } else {
+            g6b_ui::setup_html(spec)
+        }
+        .into_bytes();
         put(
             &mut out,
             &format!("{root}/index.html"),
@@ -42,13 +51,21 @@ pub fn mount(spec: &BoardSpec) -> BTreeMap<String, StaticFile> {
         );
         put(&mut out, "/", "text/html; charset=utf-8", html);
     }
-    if f.js {
+    if f.js && spec.kernel.js == "aot" {
         put(
             &mut out,
             &format!("{root}/app.js"),
             "application/javascript; charset=utf-8",
             app_js(spec, f.wasm, root).into_bytes(),
         );
+        if spec.worker_limit() > 0 {
+            put(
+                &mut out,
+                &format!("{root}/worker.js"),
+                "application/javascript; charset=utf-8",
+                include_bytes!("../../../browser-ui/src/worker.ts").to_vec(),
+            );
+        }
     }
     if f.wasm {
         put(
@@ -57,9 +74,23 @@ pub fn mount(spec: &BoardSpec) -> BTreeMap<String, StaticFile> {
             "application/wasm",
             g6b_wasm::bios_ui_wasm().to_vec(),
         );
+        if libwasm {
+            put(
+                &mut out,
+                &format!("{root}/ui-libwasm.wasm"),
+                "application/wasm",
+                g6b_wasm::bios_ui_libwasm().to_vec(),
+            );
+        }
     }
     let listing = listing_json(&out);
-    put(&mut out, root, "application/json", listing.into_bytes());
+    let listing_path = if root.is_empty() { "/files.json" } else { root };
+    put(
+        &mut out,
+        listing_path,
+        "application/json",
+        listing.into_bytes(),
+    );
     out
 }
 
@@ -75,37 +106,10 @@ fn put(map: &mut BTreeMap<String, StaticFile>, path: &str, ct: &str, body: Vec<u
     );
 }
 
-fn index_html(spec: &BoardSpec, js: bool, wasm: bool, root: &str) -> String {
-    let script = if js {
-        format!("<script src=\"{root}/app.js\"></script>\n")
-    } else {
-        String::new()
-    };
-    let wasm_note = if wasm {
-        format!("<p id=\"wasm\">{root}/ui.wasm</p>\n")
-    } else {
-        String::new()
-    };
-    format!(
-        "<!DOCTYPE html>\n\
-<html><head><title>G6LC-BIOS</title></head>\n\
-<body>\n\
-<h1 id=\"banner\">G6LC-BIOS</h1>\n\
-<p id=\"status\">boot</p>\n\
-<p id=\"profile\">{}</p>\n\
-{wasm_note}{script}\
-</body></html>\n",
-        spec.kernel.profile.as_str()
-    )
-}
-
-fn app_js(spec: &BoardSpec, wasm: bool, root: &str) -> String {
-    let mut s = g6b_wasm::BIOS_UI_JS.to_string();
+fn app_js(spec: &BoardSpec, wasm: bool, _root: &str) -> String {
+    let mut s = include_str!("../../../browser-ui/src/kernel.ts").to_string();
     if !s.ends_with('\n') {
         s.push('\n');
-    }
-    if wasm {
-        s.push_str(&format!("fetch(\"{root}/ui.wasm\");\n"));
     }
     s.push_str(&format!(
         "// profile={} wasm={}\n",
@@ -120,9 +124,9 @@ fn listing_json(files: &BTreeMap<String, StaticFile>) -> String {
         .values()
         .map(|f| {
             format!(
-                "{{\"path\":\"{}\",\"type\":\"{}\",\"bytes\":{}}}",
-                f.path,
-                f.content_type.split(';').next().unwrap_or(&f.content_type),
+                "{{\"path\":{},\"type\":{},\"bytes\":{}}}",
+                g6b_spec::quote_json(&f.path),
+                g6b_spec::quote_json(f.content_type.split(';').next().unwrap_or(&f.content_type)),
                 f.body.len()
             )
         })
@@ -133,6 +137,110 @@ fn listing_json(files: &BTreeMap<String, StaticFile>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn served_html_is_shared_and_adapter_is_not_host_aot() {
+        let mut spec =
+            BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        spec.kernel.http.files.root = "/setup/".into();
+        let files = mount(&spec);
+        let expected = if g6b_wasm::bios_ui_libwasm_live() {
+            g6b_ui::setup_html_libwasm(&spec, "/setup/ui-libwasm.wasm")
+        } else {
+            g6b_ui::setup_html(&spec)
+        };
+        assert_eq!(files["/setup/index.html"].body, expected.as_bytes());
+        let js = String::from_utf8_lossy(&files["/setup/app.js"].body);
+        assert!(js.contains("createWasmHost"));
+        assert!(js.contains("exports._start()"));
+        assert!(!js.contains("declare const kernel"));
+        assert!(!js.contains("kernel.register(\"/bios/custom\")"));
+        spec.kernel.http.files.js = false;
+        spec.kernel.http.files.wasm = false;
+        let files = mount(&spec);
+        assert!(!files.contains_key("/setup/app.js"));
+        assert!(!files.contains_key("/setup/ui.wasm"));
+        spec.kernel.http.files.root = "/".into();
+        let files = mount(&spec);
+        assert!(String::from_utf8_lossy(&files["/"].body).starts_with("<!DOCTYPE html>"));
+    }
+
+    #[test]
+    fn js_off_omits_adapter_but_leaves_static_html_and_wasm_file() {
+        let mut spec =
+            BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        for js in ["off", "none"] {
+            spec.kernel.js = js.into();
+            let files = mount(&spec);
+            assert!(!files.contains_key("/ui/app.js"));
+            assert!(files.contains_key("/ui/ui.wasm"));
+            let html = String::from_utf8_lossy(&files["/ui/index.html"].body);
+            assert!(!html.contains("<script"));
+            assert!(!html.contains("data-wasm-url="));
+            assert!(html.contains("id=\"menu-cpu\""));
+        }
+        spec.kernel.js = "aot".into();
+        spec.kernel.http.proxy_js = false;
+        let files = mount(&spec);
+        assert!(files.contains_key("/ui/app.js"));
+        let html = String::from_utf8_lossy(&files["/ui/index.html"].body);
+        assert!(!html.contains("data-fetch="));
+        assert!(html.contains("data-wasm-url=\"/ui/ui.wasm\""));
+    }
+
+    #[test]
+    fn compute_worker_script_is_local_and_explicitly_tasking_gated() {
+        let mut spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full","harts":{"cores":4,"threads":1},"kernel":{"tasking":{"enable":true,"max_workers":2}}}"#).unwrap();
+        spec.kernel.http.files.root = "/setup".into();
+        let files = mount(&spec);
+        assert_eq!(
+            files["/setup/worker.js"].body,
+            include_bytes!("../../../browser-ui/src/worker.ts")
+        );
+        let html = String::from_utf8_lossy(&files["/"].body);
+        assert!(html.contains("data-worker-url=\"/setup/worker.js\""));
+        assert!(html.contains("data-worker-limit=\"2\""));
+        assert!(html.contains("id=\"worker-check\""));
+        spec.kernel.tasking.enable = false;
+        let files = mount(&spec);
+        assert!(!files.contains_key("/setup/worker.js"));
+        assert!(!String::from_utf8_lossy(&files["/"].body).contains("data-worker-url="));
+        spec.kernel.tasking.enable = true;
+        spec.kernel.js = "off".into();
+        assert!(!mount(&spec).contains_key("/setup/worker.js"));
+    }
+
+    #[test]
+    fn libwasm_serving_respects_ui_files_and_js_gates() {
+        let mut spec =
+            BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        spec.kernel.http.files.root = "/custom".into();
+        for ui in ["svelte-d", "html-js"] {
+            spec.kernel.ui = ui.into();
+            for wasm in [true, false] {
+                spec.kernel.http.files.wasm = wasm;
+                for js in ["aot", "off", "none"] {
+                    spec.kernel.js = js.into();
+                    let files = mount(&spec);
+                    let live = ui == "svelte-d" && wasm && g6b_wasm::bios_ui_libwasm_live();
+                    assert_eq!(files.contains_key("/custom/ui-libwasm.wasm"), live);
+                    let html = String::from_utf8_lossy(&files["/"].body);
+                    assert_eq!(html.contains("data-libwasm-url="), live && js == "aot");
+                    assert_eq!(html.contains("id=\"libwasm-root\""), live && js == "aot");
+                    assert!(html.contains("id=\"row-cpu-cores\""));
+                    if live {
+                        let file = &files["/custom/ui-libwasm.wasm"];
+                        assert_eq!(file.content_type, "application/wasm");
+                        assert_eq!(file.body, g6b_wasm::bios_ui_libwasm());
+                        assert!(String::from_utf8_lossy(&files["/custom"].body)
+                            .contains("ui-libwasm.wasm"));
+                    }
+                }
+            }
+        }
+        spec.kernel.http.files.enable = false;
+        assert!(mount(&spec).is_empty());
+    }
 
     #[test]
     fn full_profile_mounts_html_js_wasm() {

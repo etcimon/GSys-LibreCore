@@ -10,6 +10,7 @@ pub mod analyze;
 pub mod crypto;
 pub mod encode;
 pub mod exec;
+pub mod task;
 
 use std::collections::BTreeMap;
 
@@ -241,6 +242,11 @@ pub enum Op {
         csr: u32,
         rs: u32,
     },
+    Csrrc {
+        rd: u32,
+        csr: u32,
+        rs: u32,
+    },
     /// `lui`+`addi` of an address into `rd` (lowered after layout).
     La {
         rd: u32,
@@ -366,6 +372,12 @@ pub const UI_HEADER_BYTES: u64 = 32;
 
 /// First-party `browser-ui/out/bios-ui.wasm` (host include; guest copies when live).
 pub const BIOS_UI_WASM: &[u8] = include_bytes!("../../../browser-ui/out/bios-ui.wasm");
+
+/// LDC 1.43 / libwasm wasm-eh cell (`browser-ui/out/bios-ui-libwasm.wasm`).
+/// Empty when the `G6B_DUB_WASM=1` dub cell has never run on this checkout.
+/// The g6b-wasm interpreter cannot execute it (i64/memory ops/EH tags);
+/// it is served for the browser-side DOM-kernel host only.
+pub const BIOS_UI_LIBWASM: &[u8] = include_bytes!("../../../browser-ui/out/bios-ui-libwasm.wasm");
 
 /// ELF `p_memsz`: stacks, then Gr plane + UART line + G6UI header BSS.
 pub fn payload_memsz(filesz: u64, nharts: u32, extra: u64) -> u64 {
@@ -541,6 +553,7 @@ fn encode_op(op: &Op, pc: usize, labels: &BTreeMap<String, usize>) -> Result<u32
         Op::Jalr { rd, rs, imm } => encode::jalr(*rd, *rs, *imm),
         Op::Csrrw { rd, csr, rs } => encode::csrrw(*rd, *csr, *rs),
         Op::Csrrs { rd, csr, rs } => encode::csrrs(*rd, *csr, *rs),
+        Op::Csrrc { rd, csr, rs } => encode::csrrc(*rd, *csr, *rs),
         Op::Ecall => encode::ecall(),
         Op::Wfi => encode::wfi(),
         Op::SfenceVma => encode::sfence_vma(),
@@ -682,6 +695,9 @@ fn op_to_asm(op: &Op) -> String {
         }
         Op::Csrrs { rd, csr, rs } => {
             format!("\tcsrrs\t{}, {csr:#x}, {}", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Csrrc { rd, csr, rs } => {
+            format!("\tcsrrc\t{}, {csr:#x}, {}", reg_name(*rd), reg_name(*rs))
         }
         Op::La { rd, addr } => match addr {
             Addr::Abs(a) => format!("\tla\t{}, {a:#x}", reg_name(*rd)),

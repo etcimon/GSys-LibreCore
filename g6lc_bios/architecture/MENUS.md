@@ -67,6 +67,49 @@ JSON rides `/dev/g6lc-bios`.
 Aliases `GET /bios/cpu` and `GET /bios/uncore`. HolyC `MenuCpu();` / `Menu("cpu");`
 is `KernelGet` of the same path.
 
+## Executable presentation contract (B51)
+
+`g6b-ui::setup_html` supplies all seven menu panels, every BoardSpec item,
+and its label, value and read-only status. It is shared by the kernel
+viewport and `g6b-http::files`, not independently reconstructed in each.
+Stable IDs are `menu-{id}`, `{id}-title`, `row-{menu}-{item}`,
+`label-{menu}-{item}` and `access-{menu}-{item}`. Values are HTML-escaped;
+menu JSON uses the shared Unicode-safe JSON quoting routine.
+
+`BrowserSession::select_menu` hides other panels without destroying rows.
+`kernel.browser.start_menu` selects the initial panel, default `main`.
+A normal browser uses the same panels for click navigation and refreshes
+through `/bios/menu/*`; no HolyC runtime global is required. Static HTML
+still contains every row when scripting is off. The Settings menu also
+reports UI backend, JS mode, initial menu, WASM/JIT configuration and the
+shared task-service controls: enable, UI hart, task/worker limit and stack bytes.
+`kernel.tasking` is opt-in (default disabled); it configures the host scheduler /
+worker interface and ASM primitive contract, not an already-installed guest
+scheduler. For example, add to the existing kernel object:
+
+```json
+"tasking": { "enable": true, "ui_hart": 0, "max_tasks": 128, "max_workers": 0, "stack_bytes": 32768 }
+```
+
+Worker limit zero selects the available non-UI harts (one on a singlehart
+fallback), bounded by task capacity. Explicit worker limits reduce concurrency;
+there is no oversubscription or saturation guarantee. Host tasking supports up
+to 64 configured harts, 3–256 descriptors and 16-byte-aligned 4 KiB–1 MiB task
+stacks. Both HolyC and browser rows derive these values from the same BoardSpec.
+
+USB flash listings require `usb.enable && usb.flash_fat32`; FileMgr requires
+`usb.enable && usb.key`; its filesystem panels follow the individual
+filesystem flags. Clocks and USB-settings utilities use their own capability
+gates. Generated sample Svelte fragments never override those gates.
+
+All current `MenuItem.writable` values are false. These screens expose the
+same **compiled configuration** as HolyC, not a second editable configuration
+database. Flashing, persistent settings import/export and Linux hardware
+ownership transfer are not made real by displaying buttons; the browser
+therefore does not expose the router's historical canned mutation responses
+as working operations. Host tests compare every row against HolyC output
+across embedded/router/appliance/desktop/full profiles.
+
 Fixtures: `g6lc64-smt2.json` (SMT2 dual-issue, H/V off as in `g6lc64_smt2_config_pkg`),
 `g6lc64-server.json` (2×2 harts, issue 2, OoO, stream, H+V, full uncore),
 `g6lc64-virt.json` (1×2 SMT, issue 2). Host: `g6q gen --emit bios-spec --target g6lc64_smt2`.

@@ -118,25 +118,48 @@ impl Parser<'_> {
                 Some(b'\\') => match self.bump() {
                     Some(b'"') => out.push('"'),
                     Some(b'\\') => out.push('\\'),
+                    Some(b'/') => out.push('/'),
+                    Some(b'b') => out.push('\u{8}'),
+                    Some(b'f') => out.push('\u{c}'),
                     Some(b'n') => out.push('\n'),
+                    Some(b'r') => out.push('\r'),
                     Some(b't') => out.push('\t'),
                     Some(b'u') => {
-                        let mut hex = [0u8; 4];
-                        for slot in &mut hex {
-                            *slot = self.bump().ok_or("bad \\u")?;
+                        let mut n = self.hex_quad()?;
+                        if (0xd800..=0xdbff).contains(&n) {
+                            if self.bump() != Some(b'\\') || self.bump() != Some(b'u') {
+                                return Err("missing low surrogate".into());
+                            }
+                            let low = self.hex_quad()?;
+                            if !(0xdc00..=0xdfff).contains(&low) {
+                                return Err("invalid low surrogate".into());
+                            }
+                            n = 0x10000 + ((n - 0xd800) << 10) + low - 0xdc00;
                         }
-                        let n =
-                            u32::from_str_radix(std::str::from_utf8(&hex).unwrap_or("0000"), 16)
-                                .unwrap_or(0);
-                        if let Some(ch) = char::from_u32(n) {
-                            out.push(ch);
-                        }
+                        out.push(char::from_u32(n).ok_or("invalid Unicode escape")?);
                     }
-                    _ => {}
+                    _ => return Err("invalid string escape".into()),
                 },
-                Some(c) => out.push(c as char),
+                Some(0..=31) => return Err("unescaped control in string".into()),
+                Some(c) if c.is_ascii() => out.push(c as char),
+                Some(_) => {
+                    let tail =
+                        std::str::from_utf8(&self.s[self.i - 1..]).map_err(|_| "invalid UTF-8")?;
+                    let ch = tail.chars().next().ok_or("missing character")?;
+                    self.i += ch.len_utf8() - 1;
+                    out.push(ch);
+                }
             }
         }
+    }
+
+    fn hex_quad(&mut self) -> Result<u32, String> {
+        let mut n = 0;
+        for _ in 0..4 {
+            let c = self.bump().ok_or("incomplete Unicode escape")? as char;
+            n = (n << 4) | c.to_digit(16).ok_or("invalid Unicode escape")?;
+        }
+        Ok(n)
     }
 
     fn number(&mut self) -> Result<Json, String> {
@@ -198,9 +221,48 @@ impl Parser<'_> {
     }
 }
 
+pub fn quote_json(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c < ' ' || matches!(c, '<' | '>' | '&' | '\u{2028}' | '\u{2029}') => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strings_roundtrip_and_reject_invalid_escapes() {
+        for s in ["αβ", "\"\\\n\r\t\u{8}", "</script>", "\u{1d11e}"] {
+            assert_eq!(parse_json(&quote_json(s)).unwrap(), Json::Str(s.into()));
+        }
+        assert_eq!(
+            parse_json(r#""\uD834\uDD1E""#).unwrap(),
+            Json::Str("\u{1d11e}".into())
+        );
+        for s in [
+            r#""\uD834x""#,
+            r#""\uDD1E""#,
+            r#""\q""#,
+            r#""\uxxxx""#,
+            "\"a\nb\"",
+        ] {
+            assert!(parse_json(s).is_err(), "{s}");
+        }
+    }
 
     #[test]
     fn parses_nested() {

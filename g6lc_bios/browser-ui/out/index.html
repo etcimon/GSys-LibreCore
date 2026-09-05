@@ -1,9 +1,42 @@
 <!DOCTYPE html>
-<html><head><title>G6LC-BIOS</title></head>
-<body>
-<section id="bios-ui"><p id="status">boot</p></section>
-<section id="usb-flash"><p id="usb-title"></p><p id="usb-list"></p></section>
-<section id="filemgr"><p id="fm-tabs"></p><p id="fm-list"></p></section>
-<section id="bios-menu"><p id="menu-title"></p></section>
-<script src="./bios-ui.js"></script>
+<html lang="en"><head><meta charset="utf-8"><title>G6LC-BIOS</title>
+<style>body{font:16px "Courier New",monospace;background:#0000aa;color:#c8c8c8;margin:0;padding:1ch}h1{background:#00aaaa;color:#fff;text-align:center;margin:0}section,nav{border:1px solid #00aaaa;padding:0 1ch;margin:1ch 0}[hidden]{display:none!important}</style></head>
+<body><h1>G6LC-BIOS</h1>
+<p>Static compile-product preview. The served setup menus are generated from BoardSpec.</p>
+<section id="bios-ui">
+<p id="status">UI-BOOT</p>
+<nav id="bios-nav">Main CPU Memory Uncore Devices Boot Settings</nav>
+</section>
+<section id="menu-boot">
+<p id="boot-title">Boot</p>
+</section>
+<section id="menu-cpu">
+<p id="cpu-title">CPU</p>
+</section>
+<section id="menu-devices">
+<p id="devices-title">Devices</p>
+</section>
+<section id="filemgr">
+<p id="fm-tabs">fat32 ntfs ext4</p>
+<p id="fm-list">USB-FILES</p>
+</section>
+<section id="usb-flash">
+<p id="usb-title">USB-FAT32</p>
+<p id="usb-list">Read-only USB image listing; not refreshed</p>
+</section>
+<section id="menu-main">
+<p id="main-title">Main</p>
+</section>
+<section id="menu-memory">
+<p id="memory-title">Memory</p>
+</section>
+<nav id="bios-menu">
+<p id="menu-title">Main CPU Memory Uncore Devices Boot Settings</p>
+</nav>
+<section id="menu-settings">
+<p id="settings-title">Settings</p>
+</section>
+<section id="menu-uncore">
+<p id="uncore-title">Uncore</p>
+</section>
 </body></html>

@@ -430,7 +430,10 @@ fn step(
             let v = match f3 {
                 0 => a.wrapping_add(imm as u64),
                 1 => a << (shamt(w, xlen)),
-                5 if f7 & 0x20 == 0 => a >> shamt(w, xlen),
+                5 if f7 & 0x20 == 0 => {
+                    let unsigned = if xlen == 32 { u64::from(a as u32) } else { a };
+                    unsigned >> shamt(w, xlen)
+                }
                 7 => a & (imm as u64),
                 _ => return Step::Halt(Halt::Unimp(w)),
             };
@@ -585,14 +588,14 @@ fn step(
                 sret(csr, pc);
                 return Step::Cont;
             }
-            if f3 == 1 || f3 == 2 {
+            if (1..=3).contains(&f3) {
                 let n = w >> 20;
                 let old = csr_read(csr, n);
                 let rs = x[rs1 as usize];
                 if f3 == 1 {
                     csr_write(csr, n, rs);
-                } else if rs != 0 {
-                    csr_write(csr, n, old | rs);
+                } else if rs1 != 0 {
+                    csr_write(csr, n, if f3 == 2 { old | rs } else { old & !rs });
                 }
                 wr(xlen, x, rd, old);
                 *pc = npc;
@@ -1091,6 +1094,559 @@ fn store_u64(ram: &mut [u8], base: u64, addr: u64, v: u64) -> bool {
 mod tests {
     use super::*;
     use crate::analyze;
+    use crate::task::{
+        task_entry_ir, task_switch_ir, TaskLayout, TaskStart, TASK_ENTRY, TASK_REGISTERS,
+        TASK_SWITCH,
+    };
+    use crate::{Addr, Node, Op, Purpose};
+
+    const TASK_BASE: u64 = 0x1000;
+
+    struct TaskMachine {
+        xlen: u32,
+        x: [u64; 32],
+        pc: u64,
+        csr: Csr,
+        ram: Vec<u8>,
+    }
+
+    impl TaskMachine {
+        fn new(xlen: u32, module: &Module) -> Self {
+            let (words, rodata) = module.to_words(TASK_BASE).unwrap();
+            assert!(rodata.is_empty());
+            let mut ram = vec![0; 0x10000];
+            for (slot, word) in words.iter().enumerate() {
+                ram[slot * 4..slot * 4 + 4].copy_from_slice(&word.to_le_bytes());
+            }
+            Self {
+                xlen,
+                x: [0; 32],
+                pc: TASK_BASE,
+                csr: Csr::default(),
+                ram,
+            }
+        }
+
+        fn tick(&mut self) -> Option<Halt> {
+            let word = fetch_u32(&self.ram, TASK_BASE, self.pc).unwrap();
+            let mut console = String::new();
+            match step(
+                self.xlen,
+                &mut self.x,
+                &mut self.pc,
+                &mut self.csr,
+                &mut self.ram,
+                TASK_BASE,
+                word,
+                &mut console,
+                &mut 0,
+            ) {
+                Step::Cont => None,
+                Step::Halt(halt) => Some(halt),
+            }
+        }
+
+        fn put(&mut self, address: u64, image: &[u8]) {
+            let offset = (address - TASK_BASE) as usize;
+            self.ram[offset..offset + image.len()].copy_from_slice(image);
+        }
+
+        fn word(&self, address: u64) -> u64 {
+            if self.xlen == 32 {
+                u64::from(load_u32(&self.ram, TASK_BASE, address).unwrap())
+            } else {
+                load_u64(&self.ram, TASK_BASE, address).unwrap()
+            }
+        }
+
+        fn reg(&self, register: u32) -> u64 {
+            if self.xlen == 32 {
+                u64::from(self.x[register as usize] as u32)
+            } else {
+                self.x[register as usize]
+            }
+        }
+    }
+
+    fn task_module(ops: Vec<Op>) -> Module {
+        Module {
+            nodes: vec![Node {
+                purpose: Purpose::Topology,
+                ops,
+            }],
+            ..Module::default()
+        }
+    }
+
+    fn task_label(module: &Module, label: &str) -> u64 {
+        let mut pc = TASK_BASE;
+        for op in module.nodes.iter().flat_map(|n| &n.ops) {
+            if matches!(op, Op::Label(name) if name == label) {
+                return pc;
+            }
+            pc += crate::op_nwords(op) as u64 * 4;
+        }
+        panic!("missing label {label}");
+    }
+
+    fn task_load(xlen: u32, rd: u32, rs: u32, off: i32) -> Op {
+        if xlen == 32 {
+            Op::Lw { rd, rs, off }
+        } else {
+            Op::Ld { rd, rs, off }
+        }
+    }
+
+    fn task_store(xlen: u32, rs2: u32, rs1: u32, off: i32) -> Op {
+        if xlen == 32 {
+            Op::Sw { rs2, rs1, off }
+        } else {
+            Op::Sd { rs2, rs1, off }
+        }
+    }
+
+    fn task_yield(ops: &mut Vec<Op>, old: u64, next: u64) {
+        ops.extend([
+            Op::La {
+                rd: 10,
+                addr: Addr::Abs(old),
+            },
+            Op::La {
+                rd: 11,
+                addr: Addr::Abs(next),
+            },
+            Op::Jal {
+                rd: 1,
+                to: TASK_SWITCH.into(),
+            },
+        ]);
+    }
+
+    fn task_handler(xlen: u32, name: &str, old: u64, next: u64, enable: bool) -> Vec<Op> {
+        let word = (xlen / 8) as i32;
+        let frame = 16 * word;
+        let mut ops = vec![
+            Op::Label(format!("{name}_enter")),
+            Op::Addi {
+                rd: 2,
+                rs: 2,
+                imm: -frame,
+            },
+        ];
+        let saved: Vec<_> = TASK_REGISTERS.iter().copied().filter(|r| *r != 2).collect();
+        for (slot, register) in saved.iter().enumerate() {
+            ops.push(task_store(xlen, *register, 2, slot as i32 * word));
+        }
+        ops.push(task_store(xlen, 10, 2, 13 * word));
+        for (slot, register) in TASK_REGISTERS[2..].iter().enumerate() {
+            ops.push(Op::Li {
+                rd: *register,
+                imm: -100 - slot as i64 - if enable { 100 } else { 0 },
+            });
+        }
+        ops.push(Op::Li {
+            rd: 5,
+            imm: SSTATUS_SIE,
+        });
+        ops.push(if enable {
+            Op::Csrrs {
+                rd: 0,
+                csr: CSR_SSTATUS,
+                rs: 5,
+            }
+        } else {
+            Op::Csrrc {
+                rd: 0,
+                csr: CSR_SSTATUS,
+                rs: 5,
+            }
+        });
+        ops.push(Op::Label(format!("{name}_ready")));
+        task_yield(&mut ops, old, next);
+        ops.push(Op::Label(format!("{name}_resumed")));
+        ops.push(task_load(xlen, 10, 2, 13 * word));
+        ops.push(Op::Addi {
+            rd: 10,
+            rs: 10,
+            imm: 1,
+        });
+        for (slot, register) in saved.iter().enumerate() {
+            ops.push(task_load(xlen, *register, 2, slot as i32 * word));
+        }
+        ops.extend([
+            Op::Addi {
+                rd: 2,
+                rs: 2,
+                imm: frame,
+            },
+            Op::Jalr {
+                rd: 0,
+                rs: 1,
+                imm: 0,
+            },
+        ]);
+        ops
+    }
+
+    #[test]
+    fn task_lowered_words_alternate_stacks_registers_and_exit_rv32_rv64() {
+        for xlen in [32, 64] {
+            let layout = TaskLayout::new(xlen).unwrap();
+            let mut ops = Vec::new();
+            task_yield(&mut ops, 0x6000, 0x6100);
+            ops.extend([Op::Label("root_resumed".into()), Op::Wfi]);
+            ops.extend(task_handler(xlen, "a", 0x6100, 0x6200, false));
+            ops.extend(task_handler(xlen, "b", 0x6200, 0x6100, true));
+            for (name, old, next) in [("a", 0x6100, 0x6200), ("b", 0x6200, 0x6000)] {
+                ops.push(Op::Label(format!("{name}_exit")));
+                task_yield(&mut ops, old, next);
+                ops.push(Op::Wfi);
+            }
+            let mut module = task_module(ops);
+            module.nodes.extend(task_entry_ir(xlen).unwrap().nodes);
+            module.nodes.extend(task_switch_ir(xlen).unwrap().nodes);
+            let switch_pc = task_label(&module, TASK_SWITCH);
+            let switch_end = TASK_BASE + module.to_words(TASK_BASE).unwrap().0.len() as u64 * 4;
+            let mut machine = TaskMachine::new(xlen, &module);
+            let argument = if xlen == 32 {
+                0xfedc_ba98
+            } else {
+                0x1234_5678_fedc_ba98
+            };
+            let bootstrap = layout.empty_context(0x6000, 3).unwrap();
+            machine.put(0x6000, &bootstrap);
+            for (name, address, stack_base, arg, enable) in [
+                ("a", 0x6100, 0x8000, argument, true),
+                ("b", 0x6200, 0x9000, argument + 16, false),
+            ] {
+                let image = layout
+                    .initial_context(
+                        address,
+                        TaskStart {
+                            hart_id: 3,
+                            stack_base,
+                            stack_bytes: 0x1000,
+                            entry_pc: task_label(&module, TASK_ENTRY),
+                            handler_pc: task_label(&module, &format!("{name}_enter")),
+                            argument: arg,
+                            exit_pc: task_label(&module, &format!("{name}_exit")),
+                            enable_interrupts: enable,
+                        },
+                    )
+                    .unwrap();
+                layout
+                    .validate_switch(0x6000, &bootstrap, address, &image, 3)
+                    .unwrap();
+                machine.put(address, &image);
+            }
+            machine.x[2] = 0x8000;
+            machine.x[3] = 0x1357_2468;
+            machine.x[4] = 3;
+            for (slot, register) in TASK_REGISTERS[2..].iter().enumerate() {
+                wr(xlen, &mut machine.x, *register, 0x3456_0000 + slot as u64);
+            }
+            let root_registers = machine.x;
+            let other_status = 0xc0000 | SSTATUS_SPIE | SSTATUS_SPP;
+            machine.csr.sstatus = other_status | 2;
+            machine.csr.satp = 0x1234;
+            machine.csr.sie = 0x220;
+            machine.csr.sepc = 0x5678;
+            let checkpoints = [
+                "a_enter",
+                "a_ready",
+                "b_enter",
+                "b_ready",
+                "a_resumed",
+                "a_exit",
+                "b_resumed",
+                "b_exit",
+                "root_resumed",
+            ];
+            let mut seen = Vec::new();
+            let mut snapshots = [[0u64; 32]; 2];
+            let mut switches = 0;
+            let mut halt = None;
+            for _ in 0..2000 {
+                if machine.pc == switch_pc {
+                    switches += 1;
+                }
+                for (index, label) in checkpoints.iter().enumerate() {
+                    if machine.pc != task_label(&module, label) {
+                        continue;
+                    }
+                    seen.push(index);
+                    match *label {
+                        "a_enter" | "b_enter" => {
+                            let b = *label == "b_enter";
+                            assert_eq!(machine.reg(10), argument + if b { 16 } else { 0 });
+                            assert_eq!(machine.reg(2), if b { 0xa000 } else { 0x9000 });
+                            assert_eq!(machine.csr.sstatus & 2, if b { 0 } else { 2 });
+                        }
+                        "a_ready" | "b_ready" => {
+                            snapshots[usize::from(*label == "b_ready")] = machine.x;
+                        }
+                        "a_resumed" | "b_resumed" => {
+                            let b = *label == "b_resumed";
+                            let snapshot = snapshots[usize::from(b)];
+                            for register in TASK_REGISTERS.iter().filter(|r| **r != 1) {
+                                assert_eq!(
+                                    machine.x[*register as usize], snapshot[*register as usize],
+                                    "RV{xlen} {label} x{register}"
+                                );
+                            }
+                            assert_eq!(machine.reg(10), 0);
+                            assert_eq!(machine.reg(1), task_label(&module, label));
+                            let address = if b { 0x6200 } else { 0x6100 };
+                            for register in TASK_REGISTERS {
+                                let saved = machine.word(
+                                    address + layout.register_offset(register).unwrap() as u64,
+                                );
+                                assert_eq!(saved, machine.reg(register), "saved x{register}");
+                            }
+                            assert_eq!(
+                                machine.word(machine.reg(2) + 13 * layout.word_bytes() as u64),
+                                argument + if b { 16 } else { 0 }
+                            );
+                            assert_eq!(machine.csr.sstatus & 2, if b { 2 } else { 0 });
+                        }
+                        "a_exit" | "b_exit" => {
+                            let b = *label == "b_exit";
+                            assert_eq!(machine.reg(10), argument + if b { 17 } else { 1 });
+                            assert_eq!(machine.reg(2), if b { 0xa000 } else { 0x9000 });
+                        }
+                        "root_resumed" => {
+                            for register in TASK_REGISTERS.iter().filter(|r| **r != 1) {
+                                assert_eq!(
+                                    machine.x[*register as usize],
+                                    root_registers[*register as usize]
+                                );
+                            }
+                            assert_eq!(machine.reg(10), 0);
+                            assert_eq!(machine.csr.sstatus & 2, 2);
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                let word = fetch_u32(&machine.ram, TASK_BASE, machine.pc).unwrap();
+                if (switch_pc..switch_end).contains(&machine.pc)
+                    && matches!(word & 0x7f, 0x03 | 0x23)
+                {
+                    assert_eq!(
+                        machine.csr.sstatus & 2,
+                        0,
+                        "context memory touched with SIE"
+                    );
+                }
+                halt = machine.tick();
+                assert_eq!(machine.reg(3), 0x1357_2468);
+                assert_eq!(machine.reg(4), 3);
+                assert_eq!(machine.csr.sstatus & !2, other_status);
+                assert_eq!(machine.csr.satp, 0x1234);
+                assert_eq!(machine.csr.sie, 0x220);
+                assert_eq!(machine.csr.sepc, 0x5678);
+                if halt.is_some() {
+                    break;
+                }
+            }
+            assert_eq!(halt, Some(Halt::Wfi));
+            assert_eq!(seen, (0..checkpoints.len()).collect::<Vec<_>>());
+            assert_eq!(switches, 5);
+            for address in [0x6000, 0x6100, 0x6200] {
+                assert_eq!(machine.word(address + layout.hart_offset() as u64), 3);
+            }
+        }
+    }
+
+    #[test]
+    fn task_switch_rejects_wrong_hart_and_invalid_context_without_mutation() {
+        for xlen in [32, 64] {
+            for enabled in [0, 2] {
+                for case in 0..15 {
+                    let layout = TaskLayout::new(xlen).unwrap();
+                    let module = task_switch_ir(xlen).unwrap();
+                    let mut machine = TaskMachine::new(xlen, &module);
+                    let mut old = layout.empty_context(0x6000, 3).unwrap();
+                    let mut next = layout
+                        .initial_context(
+                            0x6100,
+                            TaskStart {
+                                hart_id: 3,
+                                stack_base: 0x8000,
+                                stack_bytes: 0x1000,
+                                entry_pc: 0x2000,
+                                handler_pc: 0x2100,
+                                argument: 0,
+                                exit_pc: 0x2200,
+                                enable_interrupts: true,
+                            },
+                        )
+                        .unwrap();
+                    let word_bytes = layout.word_bytes();
+                    let corrupt = |image: &mut [u8], offset: usize, value: u64| {
+                        image[offset..offset + word_bytes]
+                            .copy_from_slice(&value.to_le_bytes()[..word_bytes]);
+                    };
+                    machine.x[1] = 0x1800;
+                    machine.x[2] = 0xa000;
+                    machine.x[3] = 0x123456;
+                    machine.x[4] = 3;
+                    machine.x[10] = 0x6000;
+                    machine.x[11] = 0x6100;
+                    match case {
+                        0 => corrupt(&mut old, layout.hart_offset(), 4),
+                        1 => corrupt(&mut next, layout.hart_offset(), 4),
+                        2 => corrupt(&mut next, layout.register_offset(2).unwrap(), 0x8008),
+                        3 => corrupt(&mut next, layout.register_offset(1).unwrap(), 0x2002),
+                        4 => corrupt(&mut next, layout.sie_offset(), 0x22),
+                        5 => machine.x[10] = 0,
+                        6 => machine.x[11] = 0,
+                        7 => machine.x[10] += 8,
+                        8 => machine.x[11] += 8,
+                        9 => machine.x[11] = machine.x[10],
+                        10 => machine.x[2] += 8,
+                        11 => machine.x[1] += 2,
+                        12..=14 => {}
+                        _ => unreachable!(),
+                    }
+                    machine.put(0x6000, &old);
+                    machine.put(0x6100, &next);
+                    let ram_before = machine.ram.clone();
+                    let regs_before = machine.x;
+                    let status_before = 0xc0000
+                        | enabled
+                        | match case {
+                            12 => 1 << 13,
+                            13 => 1 << 9,
+                            14 => 1 << 15,
+                            _ => 0,
+                        };
+                    machine.csr.sstatus = status_before;
+                    let mut returned = false;
+                    for _ in 0..200 {
+                        assert_eq!(machine.tick(), None, "RV{xlen} reject case {case}");
+                        if machine.pc == regs_before[1] {
+                            returned = true;
+                            break;
+                        }
+                    }
+                    assert!(returned);
+                    assert_eq!(
+                        machine.reg(10),
+                        if xlen == 32 {
+                            u64::from(u32::MAX)
+                        } else {
+                            u64::MAX
+                        }
+                    );
+                    for register in TASK_REGISTERS.into_iter().chain([3, 4]) {
+                        assert_eq!(machine.x[register as usize], regs_before[register as usize]);
+                    }
+                    assert_eq!(machine.csr.sstatus, status_before);
+                    assert_eq!(machine.ram, ram_before);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn task_entry_masks_sie_and_parks_if_exit_hook_returns() {
+        for xlen in [32, 64] {
+            let mut module = task_entry_ir(xlen).unwrap();
+            module.nodes.extend(
+                task_module(vec![
+                    Op::Label("handler".into()),
+                    Op::Addi {
+                        rd: 10,
+                        rs: 10,
+                        imm: 7,
+                    },
+                    Op::Jalr {
+                        rd: 0,
+                        rs: 1,
+                        imm: 0,
+                    },
+                    Op::Label("exit".into()),
+                    Op::Addi {
+                        rd: 11,
+                        rs: 10,
+                        imm: 0,
+                    },
+                    Op::Jalr {
+                        rd: 0,
+                        rs: 1,
+                        imm: 0,
+                    },
+                ])
+                .nodes,
+            );
+            let mut machine = TaskMachine::new(xlen, &module);
+            machine.x[2] = 0x8000;
+            machine.x[3] = 0x1234;
+            machine.x[4] = 2;
+            machine.x[8] = task_label(&module, "handler");
+            machine.x[9] = 41;
+            machine.x[18] = task_label(&module, "exit");
+            machine.csr.sstatus = 0x66002;
+            let mut halt = None;
+            for _ in 0..20 {
+                halt = machine.tick();
+                if halt.is_some() {
+                    break;
+                }
+            }
+            assert_eq!(halt, Some(Halt::Wfi));
+            assert_eq!(machine.reg(11), 48);
+            assert_eq!(machine.reg(2), 0x8000);
+            assert_eq!(machine.reg(3), 0x1234);
+            assert_eq!(machine.reg(4), 2);
+            assert_eq!(machine.csr.sstatus, 0x66000);
+            assert_eq!(machine.tick(), None);
+            assert_eq!(machine.tick(), Some(Halt::Wfi));
+        }
+    }
+
+    #[test]
+    fn rv32_srli_zero_extends_sign_extended_register_before_shifting() {
+        for xlen in [32, 64] {
+            let module = task_module(vec![
+                Op::Li { rd: 5, imm: -1 },
+                Op::Srli {
+                    rd: 6,
+                    rs: 5,
+                    shamt: xlen - 1,
+                },
+                Op::Srli {
+                    rd: 7,
+                    rs: 5,
+                    shamt: 1,
+                },
+                Op::Srli {
+                    rd: 8,
+                    rs: 5,
+                    shamt: 0,
+                },
+                Op::Wfi,
+            ]);
+            let mut machine = TaskMachine::new(xlen, &module);
+            for _ in 0..4 {
+                assert_eq!(machine.tick(), None);
+            }
+            assert_eq!(machine.tick(), Some(Halt::Wfi));
+            assert_eq!(machine.reg(6), 1);
+            assert_eq!(
+                machine.reg(7),
+                if xlen == 32 {
+                    0x7fff_ffff
+                } else {
+                    0x7fff_ffff_ffff_ffff
+                }
+            );
+            assert_eq!(
+                machine.reg(8),
+                if xlen == 32 { 0xffff_ffff } else { u64::MAX }
+            );
+        }
+    }
 
     #[test]
     fn kstart_smoke_prints_satp_and_timer() {

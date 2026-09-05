@@ -368,14 +368,26 @@ impl Router {
 
     /// Convenience for JS `fetch(url)` (GET).
     pub fn fetch_get(&self, url: &str) -> Response {
-        let path = url
-            .split("://")
-            .last()
-            .and_then(|s| s.find('/').map(|i| &s[i..]))
-            .unwrap_or(url);
-        let path = path.split('?').next().unwrap_or(path);
+        self.fetch("GET", url)
+    }
+
+    pub fn fetch(&self, method: &str, url: &str) -> Response {
+        if !url.starts_with('/')
+            || url.starts_with("//")
+            || url.contains('\\')
+            || url.chars().any(char::is_control)
+        {
+            return Response::json(
+                400,
+                "{\"error\":\"kernel fetch requires a local absolute path\"}",
+            );
+        }
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        if path.split('/').any(|p| matches!(p, "." | "..")) {
+            return Response::json(400, "{\"error\":\"path traversal refused\"}");
+        }
         self.handle(&Request {
-            method: "GET".into(),
+            method: method.to_ascii_uppercase(),
             path: path.into(),
             version: Version::Http11,
             headers: Vec::new(),
@@ -387,6 +399,23 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_preserves_methods_and_confines_urls() {
+        let mut r = Router::default();
+        r.insert("POST", "/bios/custom", "js", "{\"posted\":true}");
+        assert_eq!(r.fetch("POST", "/bios/custom?view=1#result").status, 200);
+        assert_eq!(r.fetch_get("/bios/custom").status, 404);
+        for url in [
+            "https://other/bios/custom",
+            "//other/bios/custom",
+            "/bios/../bios/custom",
+            "bios/custom",
+            "/bios\\custom",
+        ] {
+            assert_eq!(r.fetch("POST", url).status, 400, "{url}");
+        }
+    }
 
     #[test]
     fn spec_clocks_and_js_register() {

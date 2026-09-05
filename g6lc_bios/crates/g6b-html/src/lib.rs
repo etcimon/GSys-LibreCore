@@ -9,64 +9,76 @@ use g6b_dom::Node;
 
 /// Parse a tiny HTML subset into a DOM tree.
 pub fn parse(src: &str) -> Node {
+    parse_checked(src).unwrap_or_else(|_| Node::elem("document"))
+}
+
+pub fn parse_checked(src: &str) -> Result<Node, String> {
+    if src.len() > 1_048_576 {
+        return Err("HTML source limit exceeded".into());
+    }
     let mut root = Node::elem("document");
     let mut rest = src;
     // skip doctype
-    if let Some(i) = rest.find('<') {
-        rest = &rest[i..];
-    }
-    root.children = parse_nodes(&mut rest);
-    root
+    root.children = parse_nodes(&mut rest, None, 0)?;
+    Ok(root)
 }
 
-fn parse_nodes(rest: &mut &str) -> Vec<Node> {
+fn parse_nodes(rest: &mut &str, parent: Option<&str>, depth: usize) -> Result<Vec<Node>, String> {
+    if depth > 128 {
+        return Err("HTML nesting limit exceeded".into());
+    }
     let mut nodes = Vec::new();
-    loop {
-        skip_ws(rest);
-        if rest.is_empty() {
-            break;
-        }
-        if rest.starts_with("</") {
-            break;
-        }
-        if rest.starts_with('<') {
-            if let Some(n) = parse_elem(rest) {
-                nodes.push(n);
-            } else {
-                break;
+    while !rest.is_empty() {
+        if rest.starts_with("<!--") {
+            let end = rest[4..].find("-->").ok_or("unterminated HTML comment")? + 4;
+            *rest = &rest[end + 3..];
+        } else if rest
+            .get(..9)
+            .map(|s| s.eq_ignore_ascii_case("<!doctype"))
+            .unwrap_or(false)
+        {
+            let end = rest.find('>').ok_or("unterminated doctype")?;
+            if !rest[9..end].trim().eq_ignore_ascii_case("html") {
+                return Err("unsupported doctype".into());
             }
-        } else if let Some(i) = rest.find('<') {
-            let text = rest[..i].to_string();
-            *rest = &rest[i..];
-            if !text.trim().is_empty() {
-                nodes.push(Node::text_node(text.trim()));
+            *rest = &rest[end + 1..];
+        } else if rest.starts_with("</") {
+            let end = rest.find('>').ok_or("unterminated closing tag")?;
+            let name = rest[2..end].trim();
+            if !parent
+                .map(|p| name.eq_ignore_ascii_case(p))
+                .unwrap_or(false)
+            {
+                return Err(format!("unexpected closing tag {name}"));
             }
+            *rest = &rest[end + 1..];
+            return Ok(nodes);
+        } else if rest.starts_with('<') {
+            nodes.push(parse_elem(rest, depth)?);
         } else {
-            if !rest.trim().is_empty() {
-                nodes.push(Node::text_node(rest.trim()));
-            }
-            *rest = "";
+            let end = rest.find('<').unwrap_or(rest.len());
+            nodes.push(Node::text_node(&decode_entities(&rest[..end])));
+            *rest = &rest[end..];
         }
     }
-    nodes
+    if let Some(parent) = parent {
+        return Err(format!("unclosed element {parent}"));
+    }
+    Ok(nodes)
 }
 
-fn parse_elem(rest: &mut &str) -> Option<Node> {
-    if !rest.starts_with('<') {
-        return None;
-    }
+fn parse_elem(rest: &mut &str, depth: usize) -> Result<Node, String> {
     *rest = &rest[1..];
-    if rest.starts_with('/') {
-        return None;
-    }
     let name_end = rest
-        .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+        .find(|c: char| c.is_ascii_whitespace() || c == '>' || c == '/')
         .unwrap_or(rest.len());
     let name = rest[..name_end].to_ascii_lowercase();
+    g6b_dom::validate_element_name(&name)?;
     *rest = &rest[name_end..];
     let mut node = Node::elem(&name);
     // attributes
     loop {
+        let had_space = rest.starts_with(|c: char| c.is_ascii_whitespace());
         skip_ws(rest);
         if rest.starts_with('>') {
             *rest = &rest[1..];
@@ -74,69 +86,149 @@ fn parse_elem(rest: &mut &str) -> Option<Node> {
         }
         if rest.starts_with("/>") {
             *rest = &rest[2..];
-            return Some(node);
+            return Ok(node);
         }
-        if rest.is_empty() {
-            return Some(node);
+        if rest.is_empty() || !had_space {
+            return Err("expected whitespace or > after tag/attribute".into());
         }
         let key_end = rest
-            .find(|c: char| c == '=' || c.is_whitespace() || c == '>')
+            .find(|c: char| c == '=' || c.is_ascii_whitespace() || c == '>' || c == '/')
             .unwrap_or(rest.len());
         let key = rest[..key_end].to_ascii_lowercase();
+        g6b_dom::validate_attribute_name(&key)?;
         *rest = &rest[key_end..];
+        let after_key = *rest;
         skip_ws(rest);
-        let mut val = String::new();
-        if rest.starts_with('=') {
-            *rest = &rest[1..];
+        let mut value = String::new();
+        if let Some(tail) = rest.strip_prefix('=') {
+            *rest = tail;
             skip_ws(rest);
-            if rest.starts_with('"') {
+            if rest.starts_with(['\'', '"']) {
+                let quote = rest.as_bytes()[0] as char;
                 *rest = &rest[1..];
-                if let Some(e) = rest.find('"') {
-                    val = rest[..e].to_string();
-                    *rest = &rest[e + 1..];
+                let end = rest.find(quote).ok_or("unterminated attribute value")?;
+                value = decode_entities(&rest[..end]);
+                *rest = &rest[end + 1..];
+            } else {
+                let end = rest
+                    .find(|c: char| {
+                        c.is_ascii_whitespace() || matches!(c, '>' | '\'' | '"' | '<' | '=' | '`')
+                    })
+                    .unwrap_or(rest.len());
+                if end == 0 {
+                    return Err("expected attribute value".into());
                 }
+                value = decode_entities(&rest[..end]);
+                *rest = &rest[end..];
             }
+        } else {
+            *rest = after_key;
         }
-        if key == "id" {
-            node.id = Some(val);
+        if node.get_attribute(&key).is_none() {
+            node.set_attribute(&key, &value)?;
         }
     }
     if VOID.contains(&name.as_str()) {
-        return Some(node);
+        return Ok(node);
     }
     if name == "script" || name == "style" {
-        let closer = format!("</{name}>");
-        if let Some(i) = find_close(rest, &closer) {
-            let raw = rest[..i].to_string();
-            *rest = &rest[i + closer.len()..];
-            if !raw.trim().is_empty() {
-                node.children.push(Node::text_node(raw.trim()));
-            }
-            return Some(node);
+        let (start, end) = find_close(rest, &name).ok_or("unclosed raw-text element")?;
+        if start != 0 {
+            node.children.push(Node::text_node(&rest[..start]));
         }
+        *rest = &rest[end..];
+    } else {
+        node.children = parse_nodes(rest, Some(&name), depth + 1)?;
     }
-    node.children = parse_nodes(rest);
-    if rest.starts_with("</") {
-        if let Some(e) = rest.find('>') {
-            *rest = &rest[e + 1..];
-        }
-    }
-    Some(node)
+    Ok(node)
 }
 
 fn skip_ws(rest: &mut &str) {
-    *rest = rest.trim_start();
+    *rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
 }
 
-const VOID: &[&str] = &["br", "hr", "img", "input", "meta", "link"];
+const VOID: &[&str] = &[
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source",
+    "track", "wbr",
+];
 
-fn find_close(hay: &str, closer: &str) -> Option<usize> {
-    let h = hay.as_bytes();
-    let c = closer.as_bytes();
-    if c.is_empty() || h.len() < c.len() {
-        return None;
+fn find_close(hay: &str, name: &str) -> Option<(usize, usize)> {
+    for (start, _) in hay.match_indices("</") {
+        let tail = &hay[start + 2..];
+        if tail
+            .get(..name.len())
+            .map(|s| s.eq_ignore_ascii_case(name))
+            .unwrap_or(false)
+        {
+            let remainder = &tail[name.len()..];
+            let trimmed = remainder.trim_start_matches(|c: char| c.is_ascii_whitespace());
+            if trimmed.starts_with('>') {
+                return Some((start, hay.len() - trimmed.len() + 1));
+            }
+        }
     }
-    (0..=h.len() - c.len()).find(|&i| h[i..i + c.len()].eq_ignore_ascii_case(c))
+    None
+}
+
+pub fn decode_entities(source: &str) -> String {
+    let mut out = String::new();
+    let mut rest = source;
+    while let Some(start) = rest.find('&') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        if let Some(end) = rest.as_bytes().iter().take(33).position(|b| *b == b';') {
+            let entity = &rest[1..end];
+            let decoded = match entity {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "nbsp" => Some('\u{a0}'),
+                _ => {
+                    let number = if let Some(digits) = entity
+                        .strip_prefix("#x")
+                        .or_else(|| entity.strip_prefix("#X"))
+                    {
+                        u32::from_str_radix(digits, 16).ok()
+                    } else if let Some(digits) = entity.strip_prefix('#') {
+                        digits.parse::<u32>().ok()
+                    } else {
+                        None
+                    };
+                    number.map(|n| {
+                        char::from_u32(n)
+                            .filter(|c| *c != '\0')
+                            .unwrap_or('\u{fffd}')
+                    })
+                }
+            };
+            if let Some(c) = decoded {
+                out.push(c);
+                rest = &rest[end + 1..];
+                continue;
+            }
+        }
+        out.push('&');
+        rest = &rest[1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+pub fn escape_text(source: &str) -> String {
+    let mut out = String::new();
+    for c in source.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Text of every `<script>` element, in document order.
@@ -161,6 +253,9 @@ fn collect_scripts(node: &Node, out: &mut Vec<String>) {
 
 /// Flatten DOM text for a UART viewport (BIOS display without Gr).
 pub fn to_uart_lines(node: &Node, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
     let mut lines = Vec::new();
     walk(node, &mut lines, width);
     if lines.is_empty() {
@@ -170,6 +265,9 @@ pub fn to_uart_lines(node: &Node, width: usize) -> Vec<String> {
 }
 
 fn walk(n: &Node, lines: &mut Vec<String>, width: usize) {
+    if n.hidden {
+        return;
+    }
     if n.name == "#text" {
         push_text(lines, &n.text, width);
         return;
@@ -177,37 +275,147 @@ fn walk(n: &Node, lines: &mut Vec<String>, width: usize) {
     if n.name == "title" || n.name == "script" || n.name == "style" {
         return;
     }
-    if (n.name == "h1" || n.name == "p" || n.name == "div")
-        && !lines.last().map(|s| s.is_empty()).unwrap_or(true)
-    {
+    let block = matches!(
+        n.name.as_str(),
+        "h1" | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "p"
+            | "div"
+            | "section"
+            | "nav"
+            | "pre"
+            | "tr"
+            | "li"
+    );
+    if block && !lines.last().map(|s| s.is_empty()).unwrap_or(true) {
         lines.push(String::new());
     }
     for c in &n.children {
         walk(c, lines, width);
     }
-    if n.name == "h1" || n.name == "p" || n.name == "div" || n.name == "br" {
+    if block || n.name == "br" {
         lines.push(String::new());
     }
 }
 
 fn push_text(lines: &mut Vec<String>, text: &str, width: usize) {
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    let last = lines.last_mut().unwrap();
-    if last.len() + text.len() + 1 > width && !last.is_empty() {
-        lines.push(text.to_string());
-    } else {
-        if !last.is_empty() {
-            last.push(' ');
+    for word in text.split_whitespace() {
+        if lines.is_empty() {
+            lines.push(String::new());
         }
-        last.push_str(text);
+        let used = lines.last().unwrap().chars().count();
+        if used != 0 {
+            if used + 1 + word.chars().count() > width {
+                lines.push(String::new());
+            } else {
+                lines.last_mut().unwrap().push(' ');
+            }
+        }
+        for c in word.chars() {
+            if lines.last().unwrap().chars().count() == width {
+                lines.push(String::new());
+            }
+            lines.last_mut().unwrap().push(c);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn setup_tables_have_row_boundaries() {
+        let dom = parse_checked("<section><h2>CPU</h2><table><tr><th>Cores</th><td>2</td></tr><tr><th>Threads</th><td>4</td></tr></table></section>").unwrap();
+        let lines: Vec<_> = to_uart_lines(&dom, 80)
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(lines, ["CPU", "Cores 2", "Threads 4"]);
+    }
+
+    #[test]
+    fn attributes_entities_hidden_and_raw_text() {
+        let source = "<!DOCTYPE html><!-- ignored --><body><p id='visible' class=row data-title=ok>A &amp; B &#xE9; &#233;</p><div id=panel hidden='false'><p>secret</p></div><script>console.log('a < b &amp;');</script><style>.x { color: red; }</style></body>";
+        let mut dom = parse_checked(source).unwrap();
+        let visible = dom.get_element_by_id("visible").unwrap();
+        assert_eq!(visible.get_attribute("class"), Some("row"));
+        assert_eq!(visible.inner_text(), "A & B é é");
+        assert!(dom.get_element_by_id("panel").unwrap().hidden);
+        let painted = to_uart_lines(&dom, 80).join("\n");
+        assert!(!painted.contains("secret"));
+        assert!(!painted.contains("console"));
+        assert!(!painted.contains("color"));
+        assert_eq!(script_sources(&dom), vec!["console.log('a < b &amp;');"]);
+        dom.get_element_by_id("panel").unwrap().set_visible(true);
+        assert!(to_uart_lines(&dom, 80).join("\n").contains("secret"));
+    }
+
+    #[test]
+    fn checked_parser_rejects_malformed_without_hanging() {
+        for source in [
+            "<p id='bad>",
+            "<div><span></div>",
+            "<p =x>",
+            "<!-- open",
+            "<script>open",
+            "<p><",
+            "<div hidden/",
+            "</div>",
+        ] {
+            assert!(parse_checked(source).is_err(), "{source}");
+            assert!(parse(source).children.is_empty(), "{source}");
+        }
+        assert_eq!(
+            parse_checked("leading <p>body</p> trailing")
+                .unwrap()
+                .inner_text(),
+            "leading body trailing"
+        );
+    }
+
+    #[test]
+    fn duplicate_attributes_keep_first_and_width_counts_characters() {
+        let mut dom = parse_checked("<p ID='first' id='second'>&lt;é&gt;&quot;&apos;</p>").unwrap();
+        assert!(dom.get_element_by_id("first").is_some());
+        assert!(dom.get_element_by_id("second").is_none());
+        assert_eq!(dom.inner_text(), "<é>\"'");
+        let lines = to_uart_lines(&parse("<p>éééééé</p>"), 3);
+        assert!(lines.iter().all(|line| line.chars().count() <= 3));
+        assert!(to_uart_lines(&dom, 0).iter().all(|line| line.is_empty()));
+    }
+
+    #[test]
+    fn entity_roundtrip_and_raw_tag_boundaries() {
+        let text = "<&\"'é> &amp;";
+        assert_eq!(decode_entities(&escape_text(text)), text);
+        assert_eq!(
+            decode_entities("&unknown; &#0; &#xD800; &#x110000;"),
+            "&unknown; \u{fffd} \u{fffd} \u{fffd}"
+        );
+        let dom =
+            parse_checked("<SCRIPT>console.log('</scriptx>');</ScRiPt ><p>shown</p>").unwrap();
+        assert_eq!(script_sources(&dom), vec!["console.log('</scriptx>');"]);
+        assert!(to_uart_lines(&dom, 80).join("\n").contains("shown"));
+        assert!(parse_checked("<p id='x'class='y'></p>").is_err());
+        let nested = format!("{}x{}", "<p>".repeat(130), "</p>".repeat(130));
+        assert!(parse_checked(&nested).is_err());
+    }
+
+    #[test]
+    fn short_unicode_html_never_panics() {
+        let alphabet = ["é", "<", ">", "=", "'", "\"", "&", ";", "/", "a"];
+        for a in alphabet {
+            for b in alphabet {
+                for c in alphabet {
+                    let _ = parse_checked(&format!("{a}{b}{c}"));
+                }
+            }
+        }
+    }
 
     #[test]
     fn parses_setup_page() {

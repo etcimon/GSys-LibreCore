@@ -1,0 +1,13 @@
+{
+  "schema": "g6lc-browser-products/v1",
+  "files": {
+    "bios-ui.wasm": "569eb2679fb1570001ad83874ff09e5b37e3811b9b1325511844628b860d9d87",
+    "bios-ui.js": "f7ba084de06bb41403491e5c6ba4fcd982893ef4fb605eb3687b57a6800a5519",
+    "kernel.js": "76f9785a9047e984b2830b07da11f5f17a3094a43d10cd35e86f897b6c772780",
+    "worker.js": "ae38aa0b7010caca57f2ed751451a080541a75fc043f679d41418f3d5f014fdc",
+    "bios-ui.css": "274811e070eaa15381eec545afcd196da074c0ae76aff5b791679b609ed4c1ab",
+    "index.html": "dcab33404283dbb592c7db7644fd151ac789ef3a4759ce783347bafb3d3b5866",
+    "bios-ui-libwasm.wasm": "78b76006ff44de223eb93a91ef58ac1ecb34743490cfff6fa60a5113e60f3422"
+  },
+  "libwasmAvailable": true
+}

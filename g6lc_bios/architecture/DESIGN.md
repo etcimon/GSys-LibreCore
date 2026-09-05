@@ -29,6 +29,34 @@ OpenSBI fw_dynamic -kernel g6lc_bios.elf   (g6q --loader bios)
                 →  postboot.enable keeps a management instantiation
 ```
 
+B50–B52 execution boundaries: the host kernel has a persistent
+`BrowserSession` for checked DOM mount, configuration-gated JS/WASM, shared
+menu refresh and non-destructive navigation. Both native served HTML and
+HolyC read the same BoardSpec rows. The WASM decoder/interpreter validates a
+bounded i32 subset; native lowering emits real numeric RV32/RV64 functions
+through the ASM IR. Full guest DOM execution, native code installation and
+an interactive guest GPU/input loop are still open; see `BROWSER.md` and
+`WASM.md` rather than interpreting historical boot markers as completion.
+
+B53 prerequisite increment adds mutable bounded WASM memory, wider numeric
+JIT lowering, static DOM-handle transactions and a native Rust continuation
+scheduler with typed exception/trap outcomes. The host session polls one bounded
+turn; completed read-only kernel requests resume on the next turn, leaving input
+and painting available. A separately verified LDC 1.43/libwasm artifact is served
+only for `svelte-d`; its explicit static-DOM mode does not register unsupported
+D browser routes. D/WASM particle state drives the optional native-browser
+WebGL background behind App.svelte's translucent CSS. These are host-tested
+prerequisites, not completion of B53's S-mode runtime/input/scanout/JIT gates.
+
+Timing/review note: this pass changes first-party host/firmware software,
+not RTL, clocks, reset, PMA/PMP, DFT, ISA encodings or device-tree capabilities.
+No hardware timing/PPA improvement is claimed. Resource limits and compile
+gates are explicit; negative tests cover malformed input and disabled paths.
+The trade-off is a bounded, reject-unsupported browser/VM subset rather than
+a general web engine or heavyweight runtime dependency. DTS/spec/config
+hardware alignment is unchanged; BIOS schema and shared Settings rows carry
+the software configuration additions.
+
 XLEN 32 vs 64 and RVV are `#define`s in generated `Config.ZC`. `Mem.ZC` mentions
 `vsetvli` only when `extensions.v=live` and `xlen=64`.
 

@@ -139,8 +139,17 @@ mixin template Spa(Application, Theme)
       application.main();
     }
     application.compile();
-    setupRouter();
-    application.registerRoutes();
+    version (G6LC_G6B)
+    {
+      static assert(__traits(hasMember, Application, "g6bStaticDom") && Application.g6bStaticDom,
+        "G6B currently requires explicit static DOM mode; D router callbacks are unsupported");
+      static assert(__traits(hasMember, Application, "ready"), "G6B static DOM requires ready()");
+    }
+    else
+    {
+      setupRouter();
+      application.registerRoutes();
+    }
     libwasm.dom.render(root, application);
     static if (__traits(hasMember, Application, "ready"))
     {

@@ -9,15 +9,15 @@
 |---|---|---|
 | This guider | `AGENTS.md` | Invariants + current planning state |
 | Live todo | `AGENTS-todo.md` | Stage checklist |
-| Living plan | `architecture/PLAN.md` | Rewrite-from-spec, conformity gate, B0–B49 |
+| Living plan | `architecture/PLAN.md` | Rewrite-from-spec, conformity gate, B0–B52; guest browser/JIT residuals |
 | Licensing | `AGENTS-licensing.md` | MIT first-party; Unlicense `kernel-spec/` |
 | Architecture | `architecture/` | PLAN, ZEAL, DESIGN, CODEGEN |
 | Kernel spec | `kernel-spec/` | TempleOS + ZealOS reference forks (not compiled) |
-| Green command | `python tools/g6b.py check` | independence + fmt + clippy + test + bios-regress |
+| Green commands | `python tools/g6b.py check`, then `python tools/g6b.py regress` | independence + Bun tests/build + fmt + clippy + workspace tests; separate BIOS/transport regression |
 
 ## Current planning state
 
-**B0–B49 landed.** Profiles `embedded`/`router` → `full` compile UART+SPI flash
+**B0–B52 landed within the stated host/guest boundaries.** Profiles `embedded`/`router` → `full` compile UART+SPI flash
 up to browser-UI HTTPS and USB settings. USB FAT32 flash is always compiled;
 the USB-key file manager (FAT32/NTFS/ext4) is extra. 64-bit SMT2 / multi-issue /
 stream / OoO / hypervisor / RVV specs infer setup menus. HolyC kernel file
@@ -46,6 +46,14 @@ plane with a boot scanline, and an 8×8 `G6LC` blit; QEMU still uses
 `\0asm` and prints `/ui/` paths; UART/mbox `File` lists them. `GetFile` is GET
 `/ui/ui.wasm` (mailbox RSP `\0asm`+size; not a netdev). `WasmJit` is the
 `i32.add` leaf when `kernel.wasm.jit`.
+
+B50–B52 add bounded JS/DOM and validated i32 WASM execution, shared complete
+menu rows, native-browser navigation/imports, `kernel.browser.start_menu`,
+post-script Gr/proxy painting, and real numeric RV32/RV64 lowering. The host
+`BrowserSession` and served native app are executable. The guest ELF still
+has bring-up helpers, not the complete browser runtime or arbitrary JIT code
+installation. Read `BROWSER.md` / `WASM.md` for supported subsets and limits;
+never equate a `WASM-JIT` boot marker with native compilation of the UI.
 
 QEMU `--loader bios` is hypothesis, never Variane evidence.
 

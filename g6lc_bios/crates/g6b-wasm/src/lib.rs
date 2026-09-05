@@ -10,9 +10,14 @@ mod binary;
 mod interp;
 mod jit;
 
-pub use binary::{decode, encode_ui_module, Module};
-pub use interp::{run, run_start, DomHost, Host};
-pub use jit::jit_add_i32;
+pub use binary::{
+    decode, encode_ui_module, validate, Export, FuncType, Import, Instr, Module, MAX_CONTROL_DEPTH,
+    MAX_FUNCTIONS, MAX_INSTRUCTIONS, MAX_LOCALS, MAX_MEMORY_PAGES, MAX_MODULE_BYTES, MAX_STACK,
+};
+pub use interp::{
+    run, run_start, run_with_fuel, DomHost, Host, DEFAULT_FUEL, MAX_CALL_DEPTH, MAX_FUEL,
+};
+pub use jit::{jit_add_i32, jit_riscv, MAX_JIT_INSTRUCTIONS, MAX_JIT_SLOTS};
 
 /// Boot / generated-source marker.
 pub const MARKER: &str = "WASM-JIT";
@@ -25,6 +30,17 @@ pub const BIOS_UI_CATALOG: &str = include_str!("../../../browser-ui/out/catalog.
 /// Bytes of `browser-ui/out/bios-ui.wasm`.
 pub fn bios_ui_wasm() -> &'static [u8] {
     BIOS_UI_WASM
+}
+
+/// Bytes of `browser-ui/out/bios-ui-libwasm.wasm` (LDC/libwasm wasm-eh cell).
+/// Empty until `G6B_DUB_WASM=1 bun scripts/build.ts` runs locally.
+pub fn bios_ui_libwasm() -> &'static [u8] {
+    g6b_asm::BIOS_UI_LIBWASM
+}
+
+/// True when the libwasm lane artifact is a real WASM module.
+pub fn bios_ui_libwasm_live() -> bool {
+    bios_ui_libwasm().len() <= MAX_MODULE_BYTES && bios_ui_libwasm().starts_with(b"\0asm\x01\0\0\0")
 }
 
 /// `SVELTE-LIVE` / `SVELTE-STUB` / `SVELTE-REFUSED` markers from catalog.json.

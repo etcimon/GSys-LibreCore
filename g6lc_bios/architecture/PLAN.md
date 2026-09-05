@@ -35,7 +35,7 @@ BoardSpec JSON  →  g6b-design / g6b-holyc / g6b-html / g6b-elf
 
 ## 1. Current planning state (2026-09)
 
-**Stage: B0–B49 landed.** Named BIOS profiles (`embedded`/`router` → `full`)
+**Stage: B0–B52 landed within the stated host/guest boundaries.** Named BIOS profiles (`embedded`/`router` → `full`)
 compile from UART+SPI flash up to browser-UI HTTPS + USB settings. USB FAT32
 flash is always compiled; the USB-key file manager (FAT32/NTFS/ext4) is extra.
 64-bit SMT2 / multi-core / multi-issue / stream / OoO / hypervisor / RVV
@@ -69,7 +69,16 @@ paths (HolyC `FileServe("/ui")` rewrite). UART/mbox `File` / `F` lists them.
 `GetFile` is the HTTP GET of `/ui/ui.wasm`: UART prints `GET /ui/ui.wasm`
 (and `HTTP/1.1 200` when `kernel.http` is on); mailbox kick `G` returns
 `\0asm` + size in the RSP (not a netdev).
-Green command: `python tools/g6b.py check`.
+Green commands: `python tools/g6b.py check`, then `python tools/g6b.py regress`.
+
+B50–B52 extend the **host software** paths: strict bounded Goja-shaped AOT,
+lirx-style DOM locality, checked HTML, one configurable HolyC/browser menu
+presentation, real native-browser import/navigation handling, post-script
+framebuffer rendering and framed/deadlined local HTTP serving. WASM gains
+validated control/locals/numeric execution plus real RV32/RV64 numeric-export
+lowering through ASM IR. This is not full guest JS/DOM execution or a general
+on-guest JIT. Detailed supported/refused boundaries: `BROWSER.md`, `WASM.md`.
+
 
 | Layer | State |
 |---|---|
@@ -144,10 +153,49 @@ RTL mailbox / DTS merge into `corev_apu` is an inference recorded in
 | **B47** | Embed `bios-ui.wasm` in ELF; `jal WasmJit`; UART/mbox `Ui` | landed |
 | **B48** | Guest `FileServe`: `\0asm` echo + `/ui/` listing; UART/mbox `File` | landed |
 | **B49** | Guest `GetFile`: GET `/ui/ui.wasm`; mailbox RSP magic+size | landed |
+| **B50** | Bounded JS AOT, strict strings/HTML, local DOM mutations and non-destructive visibility | landed (host) |
+| **B51** | Shared configurable menu rows; executable host/native-browser presentations; post-script framebuffer and bounded HTTP transport | landed (host) |
+| **B52** | Validated i32 WASM interpreter with fuel and real numeric RV32/RV64 ASM lowering | landed (host generation + machine-word tests) |
+| **B53** | Guest JS/DOM runtime, input/GPU scanout and JIT installation/trampolines/cache synchronization | host prerequisites advanced; guest gates open |
+| **B54** | Real persistent settings/flash backend and authenticated production TLS | open |
 
 Kernel-spec RISC-V map: [`KERNEL-RV.md`](KERNEL-RV.md). Generated `zeal/KStart.S`
 and `zeal/KInts.S` match `g6b-elf` because both lower `g6b-asm` IR
 ([`CODEGEN.md`](CODEGEN.md)).
+
+### B53 dependency order and practical kernel minimum
+
+The next stage is not a general-purpose OS or a third Svelte runtime. Required
+services are allocation/linear memory, typed host handles, bounded ready/pending
+queues, cancellation, monotonic time, read-only router transport, dirty-DOM
+painting, input delivery and asynchronous display submission. BoardSpec gates
+remain the sole authority; OpenSBI remains M-mode and BIOS stays S-mode.
+
+- Implemented host prerequisites: i32 load/store/size/grow, widened numeric
+  RV32/RV64 JIT differential coverage, stable static JS DOM handles, explicit
+  Rust await/throw/catch continuations and kernel poll/cancel integration.
+- Implemented browser lane: strict LDC 1.43 DUB build with isolated local runtime,
+  explicit static-DOM SPA, guarded publication, transactional DOM imports,
+  D-generated particle state, extracted Svelte CSS, native WebGL frame pacing,
+  pause/reduced-motion/failure handling. This is a component scaffold, not full
+  Svelte compilation or a guest browser.
+- Required before full libwasm: persistent instance globals/tables and indirect
+  calls, numeric types beyond i32, EH cleanup, real callback/Promise handles,
+  allocation/GC semantics for exercised paths, full component lifetime/reactivity
+  and a verified Asyncify or native continuation transform. Binaryen requests
+  currently fail explicitly; numeric JIT code cannot suspend/unwind yet.
+- Required before QEMU display: compile/install the guest runtime, connect IRQ
+  input and transport completion to normal-context polls, implement real GPU
+  resource/scanout commands and capture WASM-driven pixels. Never substitute a
+  static boot pattern or host-browser screenshot for that evidence.
+- Reproducibility follow-up: carry the local runtime-v1.43.0 time/demangle/
+  invariant/source-set repairs into the runtime-adapt recipe or vendor the
+  verified carry. The current carried tree is untracked-local; compiler
+  provenance/preflight detects drift but does not provision a missing runtime.
+
+Detailed contracts and acceptance ladder: `WASM.md`, `BROWSER.md`, `DISPLAY.md`,
+`FILE-SERVER.md`. No new RTL, device-tree, ISA or PMA/PMP behavior is introduced
+by these host prerequisite changes.
 
 ## 3. Conformity — how an inference is allowed
 

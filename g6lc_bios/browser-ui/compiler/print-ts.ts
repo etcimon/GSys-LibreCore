@@ -108,6 +108,8 @@ export function printG6bJs(files: SvelteFile[]): string {
         lines.push(
           `document.getElementById(${JSON.stringify(o.id)}).innerText = ${JSON.stringify(o.value)};`,
         );
+      } else if (o.kind === "visible") {
+        lines.push(`document.getElementById(${JSON.stringify(o.id)}).hidden = ${!o.on};`);
       } else if (o.kind === "fetch") {
         if (seenFetch.has(o.url)) continue;
         seenFetch.add(o.url);

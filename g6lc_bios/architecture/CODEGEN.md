@@ -81,6 +81,21 @@ those knobs emit is an analyzed IR, not a string template.
 HolyC `g6b-holyc::isel` is a Target-shaped wrapper around that IR. It must not
 grow a second encoder.
 
+## Cooperative task library
+
+`g6b-asm::task::{task_switch_ir,task_entry_ir}` generate Topology-purpose nodes
+for the cooperative integer task ABI. The only added instruction operation is
+CSRRC, lowered/formatted/executed through the same pipeline. Tests execute
+repeated context alternations and handler/exit trampolines on RV32 and RV64;
+the executor's RV32 logical right shift now masks its operand to XLEN first.
+
+`g6b-kernel::TaskServices` exposes the primitive modules and constructs validated
+XLEN-specific initial context bytes tied to scheduler hart ownership and the
+BoardSpec stack budget. These are a **library seam**, not a second encoder,
+and are not silently appended to or invoked by the default guest boot path.
+Guest runqueue/allocator/dispatch integration is still required. See
+`KERNEL-RV.md` for register, SIE, FS/VS/XS, lifetime and SMP contracts.
+
 ## Review checklist (codegen)
 
 - New generated instruction? Add an `Op`, a `Purpose` (or attach to an existing

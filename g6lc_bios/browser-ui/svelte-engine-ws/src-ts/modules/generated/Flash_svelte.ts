@@ -11,5 +11,5 @@ _reg.registerTs("Flash_svelte", "holycEval", holycEval);
 _reg.registerTs("Flash_svelte", "registerEndpoint", registerEndpoint);
 export function mount() {
   fetchBios("/bios/usb/ls");
-  holycEval("UsbFlash(\"openwrt.bin\")");
+  holycEval("UsbLs(\"fat32\")");
 }

@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import json
 import os
 import shutil
 import socket
@@ -83,7 +85,9 @@ def case_dom_js_ui_boot(spec: Path) -> None:
         "G6LC-BIOS",
         "HOLYC-READY",
         "UI-BOOT",
-        "opp: idle",
+        "Setting Value Access",
+        "Read-only",
+        "WASM-INTERPRETER _start",
         "PROXY-INIT",
         "GL-ADAPTER",
         "TLS-READY",
@@ -117,6 +121,8 @@ def case_dom_js_ui_boot(spec: Path) -> None:
             raise RuntimeError(f"boot missing {m}: {out!r}")
     if "getElementById" in out:
         raise RuntimeError("script source leaked onto UART viewport")
+    if "BROWSER-ERROR" in out:
+        raise RuntimeError("browser fell back after a runtime error")
 
 
 def case_qemu_dual_band_args(spec: Path) -> None:
@@ -146,6 +152,168 @@ def _read_until(sock: socket.socket, needle: bytes, timeout: float) -> bytes:
             break
         buf += chunk
     return buf
+
+
+@contextmanager
+def _http_server(spec: Path):
+    proc = subprocess.Popen(
+        [str(g6b_bin()), "http-serve", "--spec", str(spec), "--port", "0"],
+        cwd=str(package_root()),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert proc.stderr is not None
+        line = proc.stderr.readline()
+        if not line.startswith("HTTP-PORT "):
+            raise RuntimeError(f"no HTTP-PORT: {line!r}")
+        yield int(line.split()[-1])
+    finally:
+        proc.terminate()
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate(timeout=5)
+
+
+def _socket_response(sock: socket.socket) -> bytes:
+    deadline = time.monotonic() + 3
+    response = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("HTTP response deadline exceeded")
+        sock.settimeout(remaining)
+        chunk = sock.recv(8192)
+        if not chunk:
+            return bytes(response)
+        response.extend(chunk)
+        if len(response) > 2 * 1024 * 1024:
+            raise RuntimeError("HTTP response exceeds host regression limit")
+
+
+def _http_response(sock: socket.socket) -> tuple[dict[str, str], bytes]:
+    head, body = _socket_response(sock).split(b"\r\n\r\n", 1)
+    lines = head.decode("ascii").split("\r\n")
+    if lines[0] != "HTTP/1.1 200 OK":
+        raise RuntimeError(f"HTTP status: {lines[0]}")
+    headers = dict((k.lower(), v.strip()) for k, v in (s.split(":", 1) for s in lines[1:]))
+    if int(headers["content-length"]) != len(body):
+        raise RuntimeError("truncated HTTP body")
+    return headers, body
+
+
+def _http_get(port: int, path: str) -> tuple[dict[str, str], bytes]:
+    with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+        sock.sendall(f"GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode("ascii"))
+        return _http_response(sock)
+
+
+def case_http_fragmented_headers(spec: Path) -> None:
+    with _http_server(spec) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+            sock.sendall(b"GET /bios/menu HTTP/1.1\r\nHost: local")
+            sock.settimeout(0.1)
+            try:
+                early = sock.recv(1)
+            except TimeoutError:
+                pass
+            else:
+                raise RuntimeError(f"server closed/responded before header end: {early!r}")
+            sock.sendall(b"host\r\nContent-Length: 4\r\n\r\nAB")
+            try:
+                early = sock.recv(1)
+            except TimeoutError:
+                pass
+            else:
+                raise RuntimeError(f"server closed/responded before body end: {early!r}")
+            sock.sendall(b"CD")
+            _, body = _http_response(sock)
+            if not json.loads(body)["menus"]:
+                raise RuntimeError("missing shared menus")
+
+
+def case_http_idle_preconnection(spec: Path) -> None:
+    with _http_server(spec) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=3):
+            _, body = _http_get(port, "/bios/menu")
+            if not json.loads(body)["menus"]:
+                raise RuntimeError("idle preconnection blocked shared menus")
+
+
+def case_http_shared_ui(spec: Path) -> None:
+    with _http_server(spec) as port:
+        _, listing = _http_get(port, "/bios/www")
+        root = json.loads(listing)["root"].rstrip("/")
+        headers, page = _http_get(port, "/")
+        if headers["content-type"].split(";")[0] != "text/html":
+            raise RuntimeError("shared page is not HTML")
+        if headers.get("connection") != "close":
+            raise RuntimeError("one-request adapter must advertise Connection: close")
+        _, index = _http_get(port, root + "/index.html")
+        if index != page or b'id="menu-cpu"' not in page:
+            raise RuntimeError("root and mounted page must share setup menus")
+        headers, app = _http_get(port, root + "/app.js")
+        if headers["content-type"].split(";")[0] != "application/javascript":
+            raise RuntimeError("native app has incorrect MIME type")
+        if b"createWasmHost" not in app or b"declare const kernel" in app:
+            raise RuntimeError("served app is not the native browser adapter")
+        headers, wasm = _http_get(port, root + "/ui.wasm")
+        if headers["content-type"] != "application/wasm" or not wasm.startswith(b"\0asm\1\0\0\0"):
+            raise RuntimeError("invalid browser WASM response")
+        headers, body = _http_get(port, "/bios/menu")
+        if headers["content-type"] != "application/json":
+            raise RuntimeError("menu index has incorrect MIME type")
+        for menu in json.loads(body)["menus"]:
+            _, body = _http_get(port, "/bios/menu/" + menu["id"])
+            detail = json.loads(body)
+            if detail["id"] != menu["id"] or not detail["items"]:
+                raise RuntimeError(f"missing menu detail: {menu['id']}")
+
+
+def case_http_standalone_frames(spec: Path) -> None:
+    path = b"/bios/menu"
+    block = b"\x82\x04" + bytes([len(path)]) + path
+    h2 = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + len(block).to_bytes(3, "big")
+    h2 += b"\x01\x05\0\0\0\x01" + block
+    h1 = b"GET /bios/menu HTTP/1.1\r\nHost: localhost\r\n\r\n"
+    with _http_server(spec) as port:
+        for inner in (h1, h2):
+            for wrapped in (False, True):
+                request = (
+                    b"\x17\x03\x03" + len(inner).to_bytes(2, "big") + inner
+                    if wrapped else inner
+                )
+                with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+                    sock.sendall(request[:1])
+                    time.sleep(0.02)
+                    sock.sendall(request[1:])
+                    response = _socket_response(sock)
+                if wrapped:
+                    if (
+                        response[:3] != b"\x17\x03\x03"
+                        or int.from_bytes(response[3:5], "big") != len(response) - 5
+                    ):
+                        raise RuntimeError("invalid standalone TLS application record")
+                    response = response[5:]
+                if b'"menus":[' not in response:
+                    raise RuntimeError("standalone HTTP/TLS frame lost menu response")
+        hello = b"\x03\x03" + bytes(32) + b"\0\0\x02\0\x3c\x01\0"
+        handshake = b"\x01" + len(hello).to_bytes(3, "big") + hello
+        record = b"\x16\x03\x03" + len(handshake).to_bytes(2, "big") + handshake
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+            sock.sendall(record[:6])
+            time.sleep(0.02)
+            sock.sendall(record[6:])
+            response = _socket_response(sock)
+        if (
+            response[:3] != b"\x16\x03\x03"
+            or int.from_bytes(response[3:5], "big") != len(response) - 5
+            or response[5:6] != b"\x02"
+        ):
+            raise RuntimeError("standalone ClientHello lost ServerHello record")
 
 
 def case_dual_band_repl(spec: Path) -> None:
@@ -419,6 +587,10 @@ def main() -> int:
         ("holyc_fast_init", case_holyc_fast_init),
         ("dom_js_ui_boot", case_dom_js_ui_boot),
         ("qemu_dual_band_args", case_qemu_dual_band_args),
+        ("http_fragmented_headers", case_http_fragmented_headers),
+        ("http_idle_preconnection", case_http_idle_preconnection),
+        ("http_shared_ui", case_http_shared_ui),
+        ("http_standalone_frames", case_http_standalone_frames),
         ("dual_band_repl_postboot", case_dual_band_repl),
         ("loopback_mbox", case_loopback_mbox),
         ("boot_sideband", case_boot_sideband),

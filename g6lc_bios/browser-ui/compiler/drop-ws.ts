@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: MIT
 /** Drop BIOS UI into svelte-engine-ws (svelte-d workspace dest). Never mutates kernel-spec. */
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { catalogJson, marker } from "./constructs.ts";
 import { findLibwasmCheckout } from "./ldc.ts";
 import type { SvelteFile } from "./parse.ts";
-import { printApp, printModule, structName } from "./print-d.ts";
+import { printApp, printModule, structName, validateDProject } from "./print-d.ts";
 import { printGeneratedTs, printJsExports } from "./print-ts.ts";
 import { engineDubSdl } from "./wasm-cell.ts";
 
@@ -16,8 +16,13 @@ export type Dropped = {
   files: string[];
 };
 
-export function dropWorkspace(root: string, files: SvelteFile[]): Dropped {
+export function dropWorkspace(root: string, files: SvelteFile[], libwasm = findLibwasmCheckout(root)): Dropped {
+  validateDProject(files);
+  const dSources = files.map((file) => structName(file) === "App" ? printApp(files) : printModule(file));
   const ws = join(root, "svelte-engine-ws");
+  for (const rel of ["src-d", "src-d-views", "src-svelte", "src-ts/modules/generated"]) {
+    rmSync(join(ws, rel), { recursive: true, force: true });
+  }
   const written: string[] = [];
   const put = (rel: string, body: string) => {
     const p = join(ws, rel);
@@ -39,20 +44,13 @@ export function dropWorkspace(root: string, files: SvelteFile[]): Dropped {
       2,
     ) + "\n",
   );
-  const libwasm = findLibwasmCheckout(root);
   put("dub.sdl", engineDubSdl(libwasm));
   put("src-d-views/home.dt", "p BIOS-UI\n");
 
   const ir: Record<string, unknown>[] = [];
-  const app = files.find((f) => structName(f) === "App");
-  const rest = files.filter((f) => f !== app);
-
-  for (const f of files) {
+  for (const [index, f] of files.entries()) {
     put(`src-svelte/${structName(f)}.svelte`, f.src.endsWith("\n") ? f.src : f.src + "\n");
-    const d =
-      structName(f) === "App"
-        ? printApp(files)
-        : printModule(f);
+    const d = dSources[index];
     put(`src-d/${structName(f).toLowerCase()}.d`, d.endsWith("\n") ? d : d + "\n");
     put(`src-ts/modules/generated/${f.ident}.ts`, printGeneratedTs(f));
     ir.push({

@@ -6,11 +6,12 @@
  * Export: memory, _start.
  */
 
-import type { FetchOp, SvelteFile, TextOp } from "./parse.ts";
+import type { FetchOp, SvelteFile, TextOp, VisibleOp } from "./parse.ts";
 
 export function emitWasm(files: SvelteFile[]): Uint8Array {
   const texts: TextOp[] = [];
   const fetches: FetchOp[] = [];
+  const visible: VisibleOp[] = [];
   const seenT = new Set<string>();
   const seenF = new Set<string>();
   for (const f of files) {
@@ -25,16 +26,18 @@ export function emitWasm(files: SvelteFile[]): Uint8Array {
         if (seenF.has(o.url)) continue;
         seenF.add(o.url);
         fetches.push(o);
+      } else if (o.kind === "visible") {
+        visible.push(o);
       }
     }
   }
   if (texts.length === 0) {
     texts.push({ kind: "text", id: "status", value: "UI-BOOT" });
   }
-  return encode(texts, fetches);
+  return encode(texts, fetches, visible);
 }
 
-function encode(texts: TextOp[], fetches: FetchOp[]): Uint8Array {
+function encode(texts: TextOp[], fetches: FetchOp[], visible: VisibleOp[]): Uint8Array {
   type Slot = { off: number; len: number };
   const mem: number[] = [];
   const intern = (s: string): Slot => {
@@ -46,6 +49,9 @@ function encode(texts: TextOp[], fetches: FetchOp[]): Uint8Array {
   };
   const textSlots = texts.map((t) => ({ id: intern(t.id), val: intern(t.value) }));
   const fetchSlots = fetches.map((f) => intern(f.url));
+  const visibleSlots = visible.map((v) => ({ id: intern(v.id), on: v.on }));
+  const hasVisibility = visibleSlots.length > 0;
+  const importCount = hasVisibility ? 3 : 2;
   if (mem.length < 64) {
     while (mem.length < 64) mem.push(0);
   }
@@ -54,14 +60,15 @@ function encode(texts: TextOp[], fetches: FetchOp[]): Uint8Array {
   out.push(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00);
 
   const types: number[] = [];
-  pushUleb(types, 3);
+  pushUleb(types, hasVisibility ? 4 : 3);
   types.push(0x60, 4, 0x7f, 0x7f, 0x7f, 0x7f, 0); // set_inner_text
   types.push(0x60, 2, 0x7f, 0x7f, 0); // fetch
   types.push(0x60, 0, 0); // _start
+  if (hasVisibility) types.push(0x60, 3, 0x7f, 0x7f, 0x7f, 0);
   section(out, 1, types);
 
   const imports: number[] = [];
-  pushUleb(imports, 2);
+  pushUleb(imports, importCount);
   putName(imports, "env");
   putName(imports, "set_inner_text");
   imports.push(0x00);
@@ -70,6 +77,12 @@ function encode(texts: TextOp[], fetches: FetchOp[]): Uint8Array {
   putName(imports, "fetch");
   imports.push(0x00);
   pushUleb(imports, 1);
+  if (hasVisibility) {
+    putName(imports, "env");
+    putName(imports, "set_visible");
+    imports.push(0x00);
+    pushUleb(imports, 3);
+  }
   section(out, 2, imports);
 
   const funcs: number[] = [];
@@ -90,7 +103,7 @@ function encode(texts: TextOp[], fetches: FetchOp[]): Uint8Array {
   pushUleb(exports, 0);
   putName(exports, "_start");
   exports.push(0x00);
-  pushUleb(exports, 2);
+  pushUleb(exports, importCount);
   section(out, 7, exports);
 
   const body: number[] = [];
@@ -106,6 +119,16 @@ function encode(texts: TextOp[], fetches: FetchOp[]): Uint8Array {
     pushIleb(body, t.val.len);
     body.push(0x10);
     pushUleb(body, 0);
+  }
+  for (const v of visibleSlots) {
+    body.push(0x41);
+    pushIleb(body, v.id.off);
+    body.push(0x41);
+    pushIleb(body, v.id.len);
+    body.push(0x41);
+    pushIleb(body, v.on ? 1 : 0);
+    body.push(0x10);
+    pushUleb(body, 2);
   }
   for (const f of fetchSlots) {
     body.push(0x41);

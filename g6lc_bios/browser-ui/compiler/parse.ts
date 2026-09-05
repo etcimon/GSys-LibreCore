@@ -4,13 +4,14 @@
 
 import { refuseKit } from "./constructs.ts";
 
-export type Binding = { name: string; value: string };
+export type Binding = { name: string; value: string; constantBoolean?: boolean };
 
 export type TextOp = { kind: "text"; id: string; value: string };
 export type FetchOp = { kind: "fetch"; url: string };
 export type HolycOp = { kind: "holyc"; line: string };
 export type RegisterOp = { kind: "register"; path: string; method: string };
-export type UiOp = TextOp | FetchOp | HolycOp | RegisterOp;
+export type VisibleOp = { kind: "visible"; id: string; on: boolean };
+export type UiOp = TextOp | FetchOp | HolycOp | RegisterOp | VisibleOp;
 
 export type SvelteFile = {
   rel: string;
@@ -37,7 +38,9 @@ export function parseSvelte(rel: string, src: string): SvelteFile {
   const lets = parseLets(script.body);
   const ops: UiOp[] = [];
   ops.push(...parseCalls(script.body));
-  ops.push(...parseMarkup(src, lets));
+  const markup = src.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
+  ops.push(...parseMarkup(markup, lets));
+  ops.push(...parseVisibility(markup, lets));
   const tag = firstTag(src) ?? "div";
   return {
     rel,
@@ -65,10 +68,11 @@ function parseLets(body: string): Binding[] {
     const m = t.match(/^let\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?);?\s*$/);
     if (!m) continue;
     let val = m[2].trim().replace(/;$/, "");
+    const constantBoolean = val === "true" ? true : val === "false" ? false : undefined;
     if (val.startsWith('"') && val.endsWith('"') && val.length >= 2) {
       val = val.slice(1, -1);
     }
-    out.push({ name: m[1], value: val });
+    out.push({ name: m[1], value: val, constantBoolean });
   }
   return out;
 }
@@ -98,11 +102,11 @@ function unesc(s: string): string {
 
 function parseMarkup(src: string, lets: Binding[]): TextOp[] {
   const ops: TextOp[] = [];
-  const re = /id\s*=\s*"([^"]+)"[^>]*>([^<]*)/g;
+  const re = /\bid\s*=\s*(["'])(.*?)\1[^>]*>([^<]*)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src))) {
-    const id = m[1];
-    const raw = m[2].trim();
+    const id = m[2];
+    const raw = m[3].replace(/\{(?:#if\s+[^}]+|:else|\/if)\}/g, "").trim();
     ops.push({ kind: "text", id, value: interp(raw, lets) });
   }
   return ops;
@@ -116,6 +120,37 @@ function interp(text: string, lets: Binding[]): string {
     if (hit) return hit.value;
   }
   return t;
+}
+
+function parseVisibility(src: string, lets: Binding[]): VisibleOp[] {
+  const ops: VisibleOp[] = [];
+  const stack: { on: boolean; alternate: boolean }[] = [];
+  const re = /\{#if\s+([^}]+)\}|\{:else(?:\s+[^}]+)?\}|\{\/if\}|<[a-z][a-z0-9-]*\b([^>]*)>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(src))) {
+    if (match[1] !== undefined) {
+      if (stack.length >= 32) throw new Error("conditional nesting budget exceeded");
+      const expr = match[1].trim();
+      const negated = expr.startsWith("!");
+      const name = negated ? expr.slice(1).trim() : expr;
+      const value = name === "true" ? true : name === "false" ? false : lets.find((binding) => binding.name === name)?.constantBoolean;
+      if (value === undefined) throw new Error("#if requires an initial boolean literal: " + expr);
+      stack.push({ on: negated ? !value : value, alternate: false });
+    } else if (match[0].startsWith("{:else")) {
+      const top = stack.at(-1);
+      if (!top || top.alternate || match[0] !== "{:else}") throw new Error("unsupported #if else branch");
+      top.on = !top.on;
+      top.alternate = true;
+    } else if (match[0] === "{/if}") {
+      if (!stack.pop()) throw new Error("unmatched /if");
+    } else if (stack.length) {
+      const id = match[2]?.match(/\bid\s*=\s*(["'])(.*?)\1/)?.[2];
+      if (!id) throw new Error("bounded #if elements require an id");
+      ops.push({ kind: "visible", id, on: stack.every((scope) => scope.on) });
+    }
+  }
+  if (stack.length) throw new Error("unclosed #if");
+  return ops;
 }
 
 function firstTag(src: string): string | undefined {

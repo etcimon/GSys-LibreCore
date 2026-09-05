@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "profile": "full",
+  "product": "GSys LibreCore host worker preview",
+  "isa": {
+    "xlen": 64,
+    "march": "rv64imac",
+    "mmu": "sv39",
+    "extensions": { "c": "live", "f": "absent", "d": "absent", "v": "absent", "h": "absent" }
+  },
+  "harts": { "cores": 4, "threads": 2 },
+  "kernel": {
+    "shape": "zeal",
+    "ui": "svelte-d",
+    "browser": { "js": "aot", "start_menu": "settings" },
+    "wasm": { "enable": true, "jit": true },
+    "tasking": { "enable": true, "ui_hart": 0, "max_tasks": 128, "max_workers": 0, "stack_bytes": 32768 },
+    "gr": { "enable": true, "w": 640, "h": 480, "colors": 16, "backend": "virtio-gpu" },
+    "proxy": { "enable": true, "link": "host-gl", "dpi": 192, "fps": 60, "high_w": 1920, "high_h": 1080, "gl": true }
+  },
+  "connectors": { "core": ["sbi"], "apu": ["uart", "spi"], "uncore": ["clint", "plic"] },
+  "peripherals": [
+    { "id": "uart0", "class": "uart", "model": "ns16550", "base": "0x10000000" },
+    { "id": "spi0", "class": "blk", "model": "sifive-spi-nor", "base": "0x20000000" }
+  ]
+}

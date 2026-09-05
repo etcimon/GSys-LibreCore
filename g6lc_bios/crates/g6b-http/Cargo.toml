@@ -12,6 +12,7 @@ description = "HTTP/1.1 + HTTP/2 parse and kernel endpoint router (not SvelteKit
 
 [dependencies]
 g6b-spec = { workspace = true }
+g6b-ui = { workspace = true }
 g6b-fs = { workspace = true }
 g6b-tls = { workspace = true }
 g6b-wasm = { workspace = true }

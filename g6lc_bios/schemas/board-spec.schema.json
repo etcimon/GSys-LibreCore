@@ -19,7 +19,33 @@
         }
       }
     },
-    "kernel": { "type": "object" },
+    "kernel": {
+      "type": "object",
+      "properties": {
+        "ui": { "enum": ["html-js", "svelte-d"] },
+        "tasking": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enable": { "type": "boolean", "default": false },
+            "ui_hart": { "type": "integer", "minimum": 0, "maximum": 63 },
+            "max_tasks": { "type": "integer", "minimum": 3, "maximum": 256 },
+            "max_workers": { "type": "integer", "minimum": 0, "maximum": 254 },
+            "stack_bytes": { "type": "integer", "minimum": 4096, "maximum": 1048576, "multipleOf": 16 }
+          }
+        },
+        "browser": {
+          "type": "object",
+          "properties": {
+            "js": { "enum": ["aot", "off", "none"] },
+            "ui": { "enum": ["html-js", "svelte-d"] },
+            "start_menu": { "enum": ["main", "cpu", "memory", "uncore", "devices", "boot", "settings"] },
+            "wasm": { "$ref": "#/$defs/wasm" }
+          }
+        },
+        "wasm": { "$ref": "#/$defs/wasm" }
+      }
+    },
     "connectors": { "type": "object" },
     "peripherals": { "type": "array" },
     "memory": { "type": "object" },
@@ -30,5 +56,14 @@
     "loopback": { "type": "object" },
     "net_expose": { "type": "object" },
     "faces": { "type": "object" }
+  },
+  "$defs": {
+    "wasm": {
+      "type": "object",
+      "properties": {
+        "enable": { "type": "boolean" },
+        "jit": { "type": "boolean" }
+      }
+    }
   }
 }

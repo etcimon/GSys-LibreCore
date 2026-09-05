@@ -12,7 +12,7 @@ nothrow:
   @trusted:
   mixin NodeDef!"section";
   @prop!"id" enum id = "usb-title";
-  @prop!"innerText" string images = "openwrt.bin";
+  @prop!"innerText" string images = "Read-only USB image listing; not refreshed";
   void construct() @trusted { }
   void onMount() { }
   void onUnmount() { }

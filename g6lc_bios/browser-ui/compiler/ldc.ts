@@ -5,7 +5,7 @@
  * `packages/svelte-d/ts/platform.ts` / `workspace/ldc.d`.
  * Never returns 1.36 / 1.41 / 1.42 (PATH on this host is 1.41).
  */
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -35,14 +35,13 @@ export function isLdc143Text(text: string): boolean {
     text.split(/\r?\n/).find((l) => /LDC - the LLVM D compiler/i.test(l)) || text;
   const m = first.match(/\(([^)]+)\)/);
   const ver = m?.[1] ?? first;
-  if (/1\.(36|40|41|42)\./.test(ver)) return false;
-  return /1\.(43|44|45|46)/.test(ver);
+  return /^1\.43\.\d+(?:[-+][\w.-]+)?$/.test(ver.trim());
 }
 
 export function isLdc143(bin: string): boolean {
   if (!bin || !existsSync(bin)) return false;
   const r = spawnSync(bin, ["--version"], { encoding: "utf8", shell: false });
-  return isLdc143Text((r.stdout || "") + (r.stderr || ""));
+  return r.status === 0 && isLdc143Text((r.stdout || "") + (r.stderr || ""));
 }
 
 function which(cmd: string): string {
@@ -119,7 +118,7 @@ export function findLdc(start?: string): string {
   const exe = hostTriple().exe;
   for (const k of ["SVELTE_D_LDC", "LDC", "WASM_LDC", "SVELTE_D_WASM_LDC"]) {
     const v = process.env[k];
-    if (v && existsSync(v) && isLdc143(v)) return v;
+    if (v) return existsSync(v) && isLdc143(v) ? resolve(v) : "";
   }
   const dc = process.env.DC;
   if (dc && existsSync(dc) && isLdc143(dc)) return dc;
@@ -154,7 +153,7 @@ function isLibwasmRoot(p: string): boolean {
 /** Spec checkout only (kernel-spec/libwasm). Never a DUB cache tree. */
 export function findLibwasmCheckout(start?: string): string {
   const env = process.env.LIBWASM_ROOT;
-  if (env && isLibwasmRoot(env)) return resolve(env);
+  if (env) return isLibwasmRoot(env) ? resolve(env) : "";
   for (const seed of ldcSeeds(start)) {
     for (const cand of [
       join(seed, "libwasm"),
@@ -194,6 +193,55 @@ export type Toolchain = {
   versionLine: string;
   ok: boolean;
 };
+
+export function runtimePreflight(tc: Toolchain): string[] {
+  const errors: string[] = [];
+  if (!tc.ok || !tc.ldc || !tc.dub || !isLdc143Text(tc.versionLine)) {
+    errors.push("LDC 1.43 and dub are required for runtime-v1.43.0 (DMD 2.113)");
+  }
+  if (!tc.libwasm || /(?:^|[\\/])(?:kernel-spec|riscv-compilers)(?:[\\/]|$)/i.test(tc.libwasm)) {
+    errors.push("LIBWASM_ROOT must select the local browser-ui/libwasm adaptation, not a spec/toolchain checkout");
+    return errors;
+  }
+  const requireText = (rel: string, patterns: RegExp[]) => {
+    const file = join(tc.libwasm, rel);
+    if (!existsSync(file)) {
+      errors.push(`missing carried runtime/dependency: ${file}`);
+      return;
+    }
+    const text = readFileSync(file, "utf8");
+    if (patterns.some((pattern) => !pattern.test(text))) errors.push(`incompatible carried runtime configuration: ${file}`);
+  };
+  requireText("dub.sdl", [/configuration\s+"ldc-master"\s*\{[^}]*dependency\s+"druntime-wasm-143"\s+path="\.\/runtime-v1\.43\.0"/s, /"-defaultlib="/]);
+  requireText("source/libwasm/g6b_kernel.d", [/module libwasm\.g6b_kernel;/]);
+  requireText("runtime-v1.43.0/dub.sdl", [/name\s+"druntime-wasm-143"/, /version\s+"1\.43\.0"/, /versions\s+"CRuntime_LIBWASM"/, /targetType\s+"sourceLibrary"/]);
+  requireText("runtime-v1.43.0/object.d", [/version\s*\(CRuntime_LIBWASM\)/]);
+  for (const rel of ["core/exception.d", "core/memory.d", "ldc/attributes.d", "std/format/package.d", "rt/lifetime.d"]) {
+    requireText(`runtime-v1.43.0/${rel}`, []);
+  }
+  for (const name of ["memutils-wasm", "fast-wasm", "optional-wasm"]) {
+    requireText(`${name}/dub.sdl`, [/configuration\s+"ldc-master"\s*\{[^}]*importPaths\s+"\.\.\/runtime-v1\.43\.0\/?"/s]);
+  }
+  requireText("diet-wasm/dub.sdl", [/name\s+"diet-wasm"/]);
+  const time = join(tc.libwasm, "runtime-v1.43.0/core/stdc/time.d");
+  requireText("runtime-v1.43.0/core/stdc/time.d", []);
+  requireText("runtime-v1.43.0/core/sys/wasi/time.d", []);
+  if (existsSync(time)) {
+    const body = readFileSync(time, "utf8");
+    const posixFirst = /version\s*\(Posix\)/.exec(body)?.index ?? -1;
+    const localFirst = /version\s*\(CRuntime_LIBWASM\)/.exec(body)?.index ?? Infinity;
+    const wasiFirst = /version\s*\(WASI\)/.exec(body)?.index ?? Infinity;
+    if (posixFirst >= 0 && posixFirst < Math.min(localFirst, wasiFirst) && !existsSync(join(tc.libwasm, "runtime-v1.43.0/core/sys/posix/stdc/time.d"))) {
+      errors.push("incomplete runtime-v1.43.0: core.stdc.time selects Posix before WASI but core/sys/posix/stdc/time.d is missing; repair the carried CRuntime_LIBWASM time selection (no stock imports)");
+    }
+  }
+  return errors;
+}
+
+export function wasmLdcConfig(libwasm: string): string {
+  const runtime = JSON.stringify("-I" + join(libwasm, "runtime-v1.43.0").replace(/\\/g, "/"));
+  return `default:\n{\n    switches = [ "-mtriple=wasm32-unknown-wasi", "-defaultlib=", "-d-version=CRuntime_LIBWASM", "-d-version=G6LC_G6B", "-fno-moduleinfo", "-mattr=+exception-handling", "--wasm-enable-eh", "-link-internally", "--foptimize-nothrow=false", "-L-z", "-Lstack-size=1048576", "-L--stack-first" ];\n    post-switches = [ ${runtime} ];\n    lib-dirs = [];\n};\n`;
+}
 
 export function resolveToolchain(start?: string): Toolchain {
   const ldc = findLdc(start);

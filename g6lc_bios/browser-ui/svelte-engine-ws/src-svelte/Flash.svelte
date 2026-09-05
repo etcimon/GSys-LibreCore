@@ -1,8 +1,8 @@
 <script lang="ts">
   import { fetchBios, holycEval } from "./kernel.ts";
-  let images = "openwrt.bin";
+  let images = "Read-only USB image listing; not refreshed";
   fetchBios("/bios/usb/ls");
-  holycEval("UsbFlash(\"openwrt.bin\")");
+  holycEval("UsbLs(\"fat32\")");
 </script>
 
 <section id="usb-flash">

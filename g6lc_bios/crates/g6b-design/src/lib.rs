@@ -167,8 +167,8 @@ fn emit_config(spec: &BoardSpec) -> String {
          #define G6LC_UNCORE_ETH {}\n\
          #define G6LC_UNCORE_STORAGE {}\n\
          #define G6LC_UNCORE_HDMI {}\n",
-        spec.product,
-        spec.isa.march,
+        escape_comment_value(&spec.product),
+        escape_comment_value(&spec.isa.march),
         spec.isa.xlen,
         rvv,
         flag(spec.isa.c),
@@ -486,7 +486,9 @@ fn emit_kmain(spec: &BoardSpec) -> String {
          \tTimerInit();\n\
          \tUiBoot();\n\
          }}\n",
-        spec.product, spec.isa.march, spec.isa.xlen
+        escape_comment_value(&spec.product),
+        escape_comment_value(&spec.isa.march),
+        spec.isa.xlen
     )
 }
 
@@ -497,8 +499,24 @@ fn emit_adam(spec: &BoardSpec) -> String {
          {{\n\
          \tKMain();\n\
          }}\n",
-        spec.product
+        escape_comment_value(&spec.product)
     )
+}
+
+fn escape_comment_value(value: &str) -> String {
+    let mut out = String::new();
+    for c in value.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\\' => out.push_str("\\x5c"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn emit_postboot(spec: &BoardSpec) -> String {
@@ -1023,6 +1041,26 @@ pub fn write_to_dir(out: &DesignOut, dir: &std::path::Path) -> Result<(), String
 mod tests {
     use super::*;
     use g6b_spec::BoardSpec;
+
+    #[test]
+    fn product_cannot_break_out_of_generated_comments() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"product":"Board \"α\" https://local\nU0 Injected() { Reboot(); }\rnext\\"}"#).unwrap();
+        for source in [emit_config(&spec), emit_kmain(&spec), emit_adam(&spec)] {
+            let header = source
+                .lines()
+                .find(|line| line.contains("product="))
+                .unwrap();
+            assert!(
+                header.contains(
+                    "Board \"α\" https://local\\nU0 Injected() { Reboot(); }\\rnext\\x5c"
+                ),
+                "{header}"
+            );
+            assert!(!source
+                .lines()
+                .any(|line| line.starts_with("U0 Injected") || line.starts_with("next")));
+        }
+    }
 
     #[test]
     fn rv32_config_has_xlen_32_and_rvv_0() {

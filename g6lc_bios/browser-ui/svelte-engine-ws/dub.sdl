@@ -13,19 +13,17 @@ buildRequirements "allowWarnings"
 
 configuration "application" {
     targetType "executable"
-    dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false" "-disable-linker-strip-dead"
-    lflags "--export=_start" "--export=dumpApp" "--export=loadApp" "--export=allocString"
-    postBuildCommands "node -e \"require('fs').copyFileSync('public/bios-ui-raw.wasm','public/bios-ui.wasm')\""
-    dependency "libwasm" path="C:/Users/etcim/.grok/worktrees/cva6/bios-design-impl/g6lc_bios/browser-ui/libwasm"
+    dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false"
+    lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
+    dependency "libwasm" path="E:/cva6/g6lc_bios/browser-ui/libwasm"
     subConfiguration "libwasm" "ldc-master"
 }
 
 configuration "ldc-master" {
     targetType "executable"
-    dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false" "-disable-linker-strip-dead"
-    lflags "--export=_start" "--export=dumpApp" "--export=loadApp" "--export=allocString"
-    postBuildCommands "node -e \"require('fs').copyFileSync('public/bios-ui-raw.wasm','public/bios-ui.wasm')\""
-    dependency "libwasm" path="C:/Users/etcim/.grok/worktrees/cva6/bios-design-impl/g6lc_bios/browser-ui/libwasm"
+    dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false"
+    lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
+    dependency "libwasm" path="E:/cva6/g6lc_bios/browser-ui/libwasm"
     subConfiguration "libwasm" "ldc-master"
 }
 

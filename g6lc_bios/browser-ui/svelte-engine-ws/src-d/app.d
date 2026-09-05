@@ -26,15 +26,110 @@ nothrow:
   @child Boot boot;
   @child Cpu cpu;
   @child Devices devices;
-  @child FileMgr filemgr;
+  @child FileMgr fileMgr;
   @child Flash flash;
-  @child Main main;
+  @child Main mainChild;
   @child Memory memory;
   @child Menu menu;
   @child Settings settings;
   @child Uncore uncore;
   void construct() @trusted { }
   void onMount() { }
+  enum g6bStaticDom = true;
+  void ready() { }
   void onUnmount() { }
 }
 mixin Spa!App;
+
+private struct G6bFxParticle { float x, y, intensity, size; }
+static assert(G6bFxParticle.sizeof == 16);
+private __gshared G6bFxParticle[256] g6bFxParticles;
+private __gshared float[512] g6bFxVelocity;
+private __gshared float[2] g6bFxLogo;
+private __gshared float[2] g6bFxLogoVelocity = [0.17f, 0.12f];
+private __gshared uint g6bFxSeed = 0x6C696272;
+private __gshared bool g6bFxReady;
+
+private float g6bFxRandom() @trusted @nogc
+{
+    g6bFxSeed ^= g6bFxSeed << 13;
+    g6bFxSeed ^= g6bFxSeed >> 17;
+    g6bFxSeed ^= g6bFxSeed << 5;
+    return cast(float)(g6bFxSeed & 0xFFFFFF) / 16777216.0f;
+}
+
+private float g6bFxClamp(float value, float low, float high) @safe @nogc
+{
+    return value < low ? low : (value > high ? high : value);
+}
+
+extern(C) export uint g6b_fx_data() @trusted @nogc
+{
+    return cast(uint)g6bFxParticles.ptr;
+}
+
+extern(C) export uint g6b_fx_count() @safe @nogc
+{
+    return 256;
+}
+
+extern(C) export uint g6b_fx_logo() @trusted @nogc
+{
+    return cast(uint)g6bFxLogo.ptr;
+}
+
+extern(C) export void g6b_fx_step(float dt) @trusted @nogc
+{
+    if (!g6bFxReady)
+    {
+        foreach (i; 0 .. 256)
+        {
+            g6bFxParticles[i] = G6bFxParticle(g6bFxRandom() * 2.0f - 1.0f,
+                g6bFxRandom() * 2.0f - 1.0f, 0.35f + 0.65f * g6bFxRandom(),
+                2.0f + 8.0f * g6bFxRandom());
+            g6bFxVelocity[i * 2] = (g6bFxRandom() - 0.5f) * 0.2f;
+            g6bFxVelocity[i * 2 + 1] = (g6bFxRandom() - 0.5f) * 0.2f;
+        }
+        g6bFxLogo[] = 0.0f;
+        g6bFxReady = true;
+    }
+    if (!(dt > 0.0f)) return;
+    if (dt > 0.05f) dt = 0.05f;
+    foreach (axis; 0 .. 2)
+    {
+        const limit = axis == 0 ? 0.76f : 0.78f;
+        g6bFxLogo[axis] += g6bFxLogoVelocity[axis] * dt;
+        if (g6bFxLogo[axis] > limit || g6bFxLogo[axis] < -limit)
+        {
+            g6bFxLogo[axis] = g6bFxClamp(g6bFxLogo[axis], -limit, limit);
+            g6bFxLogoVelocity[axis] = -g6bFxLogoVelocity[axis];
+        }
+    }
+    foreach (i; 0 .. 256)
+    {
+        auto p = &g6bFxParticles[i];
+        const dx = g6bFxLogo[0] - p.x;
+        const dy = g6bFxLogo[1] - p.y;
+        const force = 0.12f / (0.08f + dx * dx + dy * dy);
+        float vx = g6bFxVelocity[i * 2];
+        float vy = g6bFxVelocity[i * 2 + 1];
+        vx = (vx + (dx * 0.30f - dy * 0.80f) * force * dt) * (1.0f - 0.18f * dt);
+        vy = (vy + ((dy * 0.30f + dx * 0.80f) * force - 0.10f) * dt) * (1.0f - 0.18f * dt);
+        vx = g6bFxClamp(vx, -1.5f, 1.5f);
+        vy = g6bFxClamp(vy, -1.5f, 1.5f);
+        p.x += vx * dt;
+        p.y += vy * dt;
+        p.intensity -= 0.18f * dt;
+        if (p.x < -1.0f || p.x > 1.0f || p.y < -1.0f || p.y > 1.0f || p.intensity < 0.1f)
+        {
+            p.x = g6bFxLogo[0] + (g6bFxRandom() - 0.5f) * 0.05f;
+            p.y = g6bFxLogo[1] + (g6bFxRandom() - 0.5f) * 0.05f;
+            p.intensity = 0.55f + 0.45f * g6bFxRandom();
+            p.size = 2.0f + 8.0f * g6bFxRandom();
+            vx = (g6bFxRandom() - 0.5f) * 1.4f;
+            vy = 0.2f + 0.8f * g6bFxRandom();
+        }
+        g6bFxVelocity[i * 2] = vx;
+        g6bFxVelocity[i * 2 + 1] = vy;
+    }
+}

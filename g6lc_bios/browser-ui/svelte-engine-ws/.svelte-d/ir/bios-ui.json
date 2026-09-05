@@ -185,7 +185,7 @@
         },
         {
           "kind": "holyc",
-          "line": "UsbFlash(\"openwrt.bin\")"
+          "line": "UsbLs(\"fat32\")"
         },
         {
           "kind": "text",
@@ -200,7 +200,7 @@
         {
           "kind": "text",
           "id": "usb-list",
-          "value": "openwrt.bin"
+          "value": "Read-only USB image listing; not refreshed"
         }
       ]
     },

@@ -44,10 +44,10 @@ impl Menu {
             .iter()
             .map(|i| {
                 format!(
-                    "{{\"id\":\"{}\",\"label\":\"{}\",\"value\":\"{}\",\"writable\":{}}}",
-                    i.id,
-                    i.label,
-                    i.value,
+                    "{{\"id\":{},\"label\":{},\"value\":{},\"writable\":{}}}",
+                    crate::quote_json(&i.id),
+                    crate::quote_json(&i.label),
+                    crate::quote_json(&i.value),
                     if i.writable { "true" } else { "false" }
                 )
             })
@@ -251,6 +251,36 @@ fn menu_settings(spec: &BoardSpec) -> Menu {
         id: "settings",
         title: "Settings",
         items: vec![
+            MenuItem::row("ui", "UI backend", &spec.kernel.ui),
+            MenuItem::row("js", "JavaScript", &spec.kernel.js),
+            MenuItem::row("start_menu", "Initial menu", &spec.kernel.start_menu),
+            MenuItem::row("wasm", "WASM", yn(spec.kernel.wasm.enable)),
+            MenuItem::row("wasm_jit", "WASM RISC-V lowering", yn(spec.kernel.wasm.jit)),
+            MenuItem::row(
+                "tasking",
+                "Cooperative task services",
+                yn(spec.kernel.tasking.enable),
+            ),
+            MenuItem::row(
+                "ui_hart",
+                "UI hart",
+                spec.kernel.tasking.ui_hart.to_string(),
+            ),
+            MenuItem::row(
+                "task_limit",
+                "Task limit",
+                spec.kernel.tasking.max_tasks.to_string(),
+            ),
+            MenuItem::row(
+                "worker_limit",
+                "Compute worker limit",
+                spec.worker_limit().to_string(),
+            ),
+            MenuItem::row(
+                "task_stack",
+                "Task stack bytes",
+                spec.kernel.tasking.stack_bytes.to_string(),
+            ),
             MenuItem::row("export", "Export", yn(spec.kernel.settings.export)),
             MenuItem::row("import", "Import", yn(spec.kernel.settings.import)),
             MenuItem::row("uart", "via UART", yn(spec.kernel.settings.uart)),
@@ -267,6 +297,70 @@ fn has_class(spec: &BoardSpec, class: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tasking_limits_are_opt_in_topology_bound_and_shared() {
+        let defaults = BoardSpec::default();
+        assert_eq!(defaults.worker_limit(), 0);
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"harts":{"cores":4,"threads":2},"kernel":{"tasking":{"enable":true,"ui_hart":1,"max_tasks":16,"max_workers":4,"stack_bytes":8192}}}"#).unwrap();
+        assert_eq!(spec.worker_limit(), 4);
+        let settings = spec.menu("settings").unwrap();
+        assert!(settings
+            .items
+            .iter()
+            .any(|item| item.id == "worker_limit" && item.value == "4"));
+        for config in [
+            r#"{"ui_hart":8}"#,
+            r#"{"max_tasks":2}"#,
+            r#"{"max_workers":127,"max_tasks":128}"#,
+            r#"{"stack_bytes":4097}"#,
+            r#"{"enable":"yes"}"#,
+            r#"{"preempt":true}"#,
+        ] {
+            assert!(BoardSpec::from_json_str(&format!(r#"{{"schema_version":1,"harts":{{"cores":4,"threads":2}},"kernel":{{"tasking":{config}}}}}"#)).is_err(), "{config}");
+        }
+        let single = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"tasking":{"enable":true}}}"#,
+        )
+        .unwrap();
+        assert_eq!(single.worker_limit(), 1);
+    }
+
+    #[test]
+    fn browser_options_are_shared_and_validated() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"browser":{"js":"off","start_menu":"cpu"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.kernel.start_menu, "cpu");
+        let settings = spec.menu("settings").unwrap();
+        assert_eq!(
+            settings.items.iter().find(|i| i.id == "js").unwrap().value,
+            "off"
+        );
+        for src in [
+            r#"{"schema_version":1,"kernel":{"browser":{"js":"goja"}}}"#,
+            r#"{"schema_version":1,"kernel":{"browser":{"start_menu":"bad"}}}"#,
+            r#"{"schema_version":1,"http":{"files":{"root":"//remote/ui"}}}"#,
+            r#"{"schema_version":1,"http":{"files":{"root":"/ui/../bios"}}}"#,
+            r#"{"schema_version":1,"http":{"files":{"root":"/ui\""}}}"#,
+        ] {
+            assert!(BoardSpec::from_json_str(src).is_err(), "{src}");
+        }
+    }
+
+    #[test]
+    fn menu_json_roundtrips_user_strings() {
+        let spec = BoardSpec {
+            product: "Board \"α\"\\test\n".into(),
+            ..BoardSpec::default()
+        };
+        let json = crate::parse_json(&spec.menu("main").unwrap().json()).unwrap();
+        let crate::Json::Arr(items) = json.get("items") else {
+            panic!("items")
+        };
+        assert_eq!(items[0].get("value").as_str(), Some(spec.product.as_str()));
+    }
 
     #[test]
     fn smt2_infers_cpu_menu() {

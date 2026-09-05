@@ -13,5 +13,9 @@ description = "Shared BIOS UI surface: HolyC-UI ⊥ browser-UI (MENUS.md)"
 [dependencies]
 g6b-spec = { workspace = true }
 
+[dev-dependencies]
+g6b-js = { workspace = true }
+g6b-html = { workspace = true }
+
 [lints]
 workspace = true

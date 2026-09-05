@@ -12,7 +12,7 @@ mod json;
 mod menu;
 mod profile;
 
-pub use json::{parse_json, Json};
+pub use json::{parse_json, quote_json, Json};
 pub use menu::{Menu, MenuItem};
 pub use profile::BiosProfile;
 
@@ -383,12 +383,67 @@ impl Default for Usb {
 }
 
 /// Kernel / display slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tasking {
+    pub enable: bool,
+    pub ui_hart: u32,
+    pub max_tasks: u32,
+    pub max_workers: u32,
+    pub stack_bytes: u32,
+}
+
+impl Default for Tasking {
+    fn default() -> Self {
+        Self {
+            enable: false,
+            ui_hart: 0,
+            max_tasks: 128,
+            max_workers: 0,
+            stack_bytes: 32768,
+        }
+    }
+}
+
+impl Tasking {
+    fn parse(value: &Json) -> Result<Self, String> {
+        let mut config = Self::default();
+        if matches!(value, Json::Null) {
+            return Ok(config);
+        }
+        let Json::Obj(fields) = value else {
+            return Err("kernel.tasking must be an object".into());
+        };
+        for (name, value) in fields {
+            match name.as_str() {
+                "enable" => {
+                    config.enable = value.as_bool().ok_or("tasking.enable must be boolean")?
+                }
+                "ui_hart" | "max_tasks" | "max_workers" | "stack_bytes" => {
+                    let number = value
+                        .as_u32()
+                        .ok_or_else(|| format!("tasking.{name} must be u32"))?;
+                    match name.as_str() {
+                        "ui_hart" => config.ui_hart = number,
+                        "max_tasks" => config.max_tasks = number,
+                        "max_workers" => config.max_workers = number,
+                        _ => config.stack_bytes = number,
+                    }
+                }
+                _ => return Err(format!("unknown tasking setting {name}")),
+            }
+        }
+        Ok(config)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Kernel {
     pub shape: String,
     pub gr: Gr,
     pub display: String,
     pub js: String,
+    pub start_menu: String,
+    pub tasking: Tasking,
     /// `html-js` or `svelte-d`. Never `sveltekit`.
     pub ui: String,
     pub proxy: DisplayProxy,
@@ -409,6 +464,8 @@ impl Default for Kernel {
             gr: Gr::default(),
             display: "html-js".into(),
             js: "aot".into(),
+            start_menu: "main".into(),
+            tasking: Tasking::default(),
             ui: "html-js".into(),
             proxy: DisplayProxy::default(),
             tls: Tls::default(),
@@ -737,6 +794,7 @@ impl BoardSpec {
         }
         if let Json::Obj(_) = v.get("kernel") {
             apply_kernel(&mut spec.kernel, v.get("kernel"));
+            spec.kernel.tasking = Tasking::parse(v.get("kernel").get("tasking"))?;
         }
         if let Json::Obj(_) = v.get("proxy") {
             apply_proxy(&mut spec.kernel.proxy, v.get("proxy"));
@@ -840,6 +898,21 @@ impl BoardSpec {
     }
 
     /// Legality: XLEN, RVV, GPIO vs AI island, post-boot architecture.
+    pub fn worker_limit(&self) -> u32 {
+        if !self.kernel.tasking.enable {
+            return 0;
+        }
+        let available = self.harts.saturating_sub(1).max(1);
+        let requested = if self.kernel.tasking.max_workers == 0 {
+            available
+        } else {
+            self.kernel.tasking.max_workers
+        };
+        requested
+            .min(available)
+            .min(self.kernel.tasking.max_tasks.saturating_sub(2))
+    }
+
     pub fn check(&self) -> Result<(), String> {
         if self.isa.xlen != 32 && self.isa.xlen != 64 {
             return Err(format!("isa.xlen must be 32 or 64, got {}", self.isa.xlen));
@@ -1014,6 +1087,43 @@ impl BoardSpec {
                 "kernel.ui `{}` refused; use html-js or svelte-d (not sveltekit)",
                 self.kernel.ui
             ));
+        }
+        if !matches!(self.kernel.js.as_str(), "aot" | "off" | "none") {
+            return Err("kernel.browser.js must be aot or off (none is an alias)".into());
+        }
+        if self.menu(&self.kernel.start_menu).is_none() {
+            return Err(format!(
+                "unknown kernel.browser.start_menu `{}`",
+                self.kernel.start_menu
+            ));
+        }
+        let root = self.kernel.http.files.root.as_str();
+        if !root.starts_with('/')
+            || root.starts_with("//")
+            || root.contains(['?', '#', '\\'])
+            || root.chars().any(|c| c.is_control() || c.is_whitespace())
+            || root.split('/').any(|s| matches!(s, "." | ".."))
+            || root
+                .chars()
+                .any(|c| !c.is_ascii_alphanumeric() && !matches!(c, '/' | '-' | '_' | '.'))
+        {
+            return Err(
+                "kernel.http.files.root must be a local absolute path without traversal".into(),
+            );
+        }
+        let tasking = &self.kernel.tasking;
+        if tasking.ui_hart >= self.harts
+            || tasking.ui_hart >= 64
+            || !(3..=256).contains(&tasking.max_tasks)
+            || tasking.max_workers > tasking.max_tasks - 2
+            || !(4096..=1048576).contains(&tasking.stack_bytes)
+            || tasking.stack_bytes % 16 != 0
+            || (tasking.enable && self.harts > 64)
+        {
+            return Err(
+                "invalid kernel.tasking: UI hart, task/worker limit, or aligned stack budget"
+                    .into(),
+            );
         }
         if self.kernel.wasm.jit && !self.kernel.wasm.enable {
             return Err("kernel.wasm.jit needs kernel.wasm.enable".into());
@@ -1549,6 +1659,9 @@ fn apply_kernel(k: &mut Kernel, v: &Json) {
         }
         if let Some(ui) = v.get("browser").get("ui").as_str() {
             k.ui = ui.to_string();
+        }
+        if let Some(menu) = v.get("browser").get("start_menu").as_str() {
+            k.start_menu = menu.to_string();
         }
         if let Json::Obj(_) = v.get("browser").get("wasm") {
             apply_wasm(&mut k.wasm, v.get("browser").get("wasm"));
