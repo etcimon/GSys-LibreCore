@@ -70,6 +70,43 @@ level of the stack legible to an AI agent.
 
 ---
 
+## AI optimization path and current status
+
+The AI-island optimization work treats runtime decisions as a **compressed policy
+codec**, not a learned profiler. Shape buckets, opcode class, native sparsity
+samples, continuity and compute/movement balance select one of eight 3-bit
+codewords. Hysteresis and feature-signature silence limit reevaluation; current
+and successor decodes provide tile/dataflow/prefetch choices and discardable
+address/bank hints. Skipping still requires an independent exact-zero proof.
+
+| Layer | Current status | Evidence boundary |
+|---|---|---|
+| T2 GEMM | INT8 and packed INT4; descriptor v2, k-major B; island grant and PE masks `0x0003` | Existing Variane directed integration; no floating GEMM grant |
+| Policy codec and benefit steering | Isolated, verified RTL; fixed format-aware reduction/output budgets | Control decisions and scheduling-model comparisons, not integrated array throughput |
+| Floating arithmetic | Exact FP8 E4M3/E5M2, FP16, BF16 and FP32 widening plus separate FP32 RNE multiply/add | Scalar RTL only; default result latency 8 cycles, initiation interval 10 cycles |
+| Native software evaluation | ai-tensor and model-derived B3 execution agree on descriptor and C32 bytes | Live-mask run: 16 execute / 68 reject; explicit software fixture: 82 / 2; not guest boot or RTL timing |
+
+The balanced LLM/diffusion-shaped **scheduling fixtures** report modeled time
+reductions of **38.24% at SRAM128** and **3.55% at SRAM512** against their matched
+baseline. Per-format/state usage, negative results and the slightly better
+retrospective fixed-code comparison are retained. These figures are neither
+measured MAC/s nor a benchmark of a real LLM or diffusion model.
+
+`PolicyCodecEn`, `PolicyBenefitEn` and `IslandFpEn` remain off in production.
+The next steps are descriptor/tile metadata and per-context ownership, one guarded
+GEMM policy consumer at a time, PMU visibility, and end-to-end memory/arithmetic
+regressions. Floating loaders, accumulators and stores must be integrated before
+expanding grants. I3 memory characterization still precedes I2 clustering;
+PDK timing, DFT/ATPG and full-SoC compliance remain separate gates.
+
+Start with the [architecture and measured scopes](architecture/ai-matrix/README.md#10-frozen-workload-policy-codec-compartment)
+(the complete policy/native sections are §10–§12), the
+[island status and integration path](corev_apu/ai_island/README.md),
+[ai-tensor](ai-tensor/README.md), and [B3 evaluation](g6lc_qemu/README.md#native-tensor-evaluation-and-optimization).
+Optional checks are `test ai-policy-codec`, `test ai-desc-formats`,
+`test ai-fp-mac` and `test ai-native-eval` through
+`bun build-platform/src/cli/index.ts`; Verilator work uses the remote proxy.
+
 ## Licensing
 
 LibreCore is **dual-licensed**, and the split is deliberate.

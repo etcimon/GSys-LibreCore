@@ -664,6 +664,54 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        id: "ai-policy-codec",
+        description:
+          "OPTIONAL remote: eight-state codec and format-aware benefit steering; validated scheduling-model percentages, not production MAC/s. Local synthesis/formal via --synth-only.",
+        script: "verif/regress/ai-policy-codec.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "ai-native-eval",
+        description:
+          "OPTIONAL: ai-tensor/B3 native-format evaluation against live grants and software fixtures; not QEMU guest execution or RTL cycles. Requires a built native g6lc-qemu binary.",
+        script: "verif/regress/ai-native-eval.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "native-model",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "ai-desc-formats",
+        description:
+          "OPTIONAL remote: descriptor-mode legality, effective INT4 aliases/grants, and actual engine refusal/handoff; not a full SoC run.",
+        script: "verif/regress/ai-desc-formats.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "ai-fp-mac",
+        description:
+          "OPTIONAL remote: exact scalar FP8/FP16/BF16/FP32 widen plus separate RNE multiply/add, handshake and flags; not integrated floating GEMM.",
+        script: "verif/regress/ai-fp-mac.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "ai-island-veri",
         description:
           "OPTIONAL: standalone Verilator smoke for Xg6lcai P3 island spine (AI-3 addr check + desc engine).",

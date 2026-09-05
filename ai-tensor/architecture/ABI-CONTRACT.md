@@ -31,6 +31,50 @@ Logical fields (see isa-encoding §7 and island pkg):
 
 **API:** `Desc64::pack` / `unpack`, builders with checked ranges, endianness = LE.
 
+### 2.1a Desc64 v2 native scalar operands
+
+The active descriptor version is **2**. Version 1 is rejected by the execution paths;
+`Desc64::unpack` remains a lossless byte parser, not an execution adapter. Native A is
+`A[m][k]` row-major and native B is **`B[n][k]` k-major**: the dot product reads
+`A[i][t] * B[j][t]`. Both default leading dimensions are **K**, so
+`ld_ab = k | (k << 16)`, never `k | (n << 16)`. Leading dimensions count **elements**,
+not bytes. Each INT4 row starts on a byte boundary, low nibble first, with an unused high
+nibble for odd K. Strided footprint is `(rows-1)*row_bytes(ld)+row_bytes(k)`; trailing
+padding after the last logical row need not be present. C is packed row-major 32-bit LE.
+
+The existing `gemm_s8` matrix interfaces continue to mean `A[m,k] @ B[k,n]` and explicitly
+pack/transpose B at the native boundary. Raw byte interfaces never transpose or cast.
+Strides must be at least K and fit the two u16 fields. Zero dimensions, truncated operands,
+invalid AI-3 permissions, physical-memory extents and completion pointers are rejected
+before any computed C write. Inputs may alias C in the software reference because the
+whole result is computed before committing C; this is not a hardware aliasing guarantee.
+
+| `flags[22:20]` | Native input | C32 semantics |
+|---|---|---|
+| 0 | signed INT8 | wrapping two's-complement i32 |
+| 1 | signed packed INT4 | wrapping two's-complement i32 |
+| 2 | SP24 | **unsupported even with the grant bit set** |
+| 3 | FP8 E4M3 | ordered binary32 |
+| 4 | FP8 E5M2 | ordered binary32 |
+| 5 | IEEE FP16 | ordered binary32 |
+| 6 | BF16 | ordered binary32 |
+| 7 | IEEE FP32 | ordered binary32 |
+
+FP widening is exact. E4M3 exponent 15 is finite except mantissa 7 (NaN); E5M2 uses
+IEEE infinity/NaN encodings. FP8 signed zeros and subnormals are preserved by decoding.
+BF16 widens by shifting bits 16 places; FP16 is exactly widened. Starting from +0,
+each product rounds to f32 RNE, then each addition rounds separately to f32 RNE, in
+increasing K order: **no FMA and no f64 reduction**. Every NaN C output is canonical
+`0x7fc00000`. Native FP K-splitting is refused rather than changing reduction order.
+
+`Caps.dtype_mask` preserves CAP `0x28`; ungranted formats report `ST_BAD_FMT=8`.
+Default hardware-like software caps remain `0x0001`. The explicit software-reference-v2
+profile grants `0x00fb` because the reference computes all seven scalar formats. It is
+not a hardware/RTL grant, performance claim, or physical PCIe contract.
+
+Existing historical code comments describing v1 are retained; this section and the explicit
+v2 profile pins supersede their old row-major B/version-1 descriptions.
+
 ### 2.2 Completion word
 
 Upstream: `{ reserved[15:0], status[15:0], ticket[31:0] }`.  

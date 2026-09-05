@@ -60,6 +60,27 @@ def gemm_s8(
     return c, meta
 
 
+def gemm(a: ArrayLike, b: ArrayLike, *, device: Optional[Device] = None,
+         backend: str = 'sim', ticket: int = 1) -> Tuple['np.ndarray', dict]:
+    from .c_abi import numfmt_of_dtype
+    import sys
+    a, b = np.asarray(a), np.asarray(b)
+    if a.ndim != 2 or b.ndim != 2 or a.shape[1] != b.shape[0]:
+        raise ValueError('expected A[m,k] and B[k,n]')
+    if a.dtype != b.dtype:
+        raise ValueError('native GEMM requires matching operand dtypes')
+    if sys.byteorder != 'little' or not a.dtype.isnative or not b.dtype.isnative:
+        raise NotImplementedError('native NumPy byte views require little-endian operands')
+    fmt = numfmt_of_dtype(a.dtype)
+    m, k = a.shape
+    n = b.shape[1]
+    dev = device or Device(backend)
+    raw = dev.gemm_native(np.ascontiguousarray(a).tobytes(), np.ascontiguousarray(b.T).tobytes(),
+                          int(m), int(n), int(k), fmt, ticket=ticket)
+    out = np.frombuffer(raw, dtype='<i4' if fmt < 2 else '<f4').copy().reshape(m, n)
+    return out, {'backend': dev.backend, 'numfmt': fmt, 'status': 0, 'ticket': ticket, 'caps': dev.caps().as_dict()}
+
+
 def check_close_to_numpy(
     a: ArrayLike,
     b: ArrayLike,

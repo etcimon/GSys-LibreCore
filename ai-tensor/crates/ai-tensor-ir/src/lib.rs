@@ -106,7 +106,7 @@ impl Gemm {
     }
 
     pub fn lower_with_tile(&self, tile: AccTile) -> Result<Desc64, IrError> {
-        if self.m == 0 || self.n == 0 || self.k == 0 {
+        if self.m == 0 || self.n == 0 || self.k == 0 || self.k > 0xffff {
             return Err(IrError::BadShape);
         }
         if !tile.fits(self.m, self.n, self.k) {
@@ -121,7 +121,7 @@ impl Gemm {
         }
         let mut d = Desc64::gemm(self.m, self.n, self.k);
         d.op = OP_GEMM;
-        d.ld_ab = self.k | (self.n << 16);
+        d.ld_ab = self.k | (self.k << 16);
         d.ptr_a = self.ptr_a;
         d.ptr_b = self.ptr_b;
         d.ptr_c = self.ptr_c;

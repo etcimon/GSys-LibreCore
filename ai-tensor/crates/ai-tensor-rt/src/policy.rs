@@ -117,7 +117,7 @@ pub fn soak_multi_queue<D: Device>(dev: &mut D) -> Result<usize, RtError> {
     let pc = dev.alloc(need_c)?;
     let pd = dev.alloc(8)?;
     dev.write_mem(pa, &[1, 2, 3, 4])?;
-    dev.write_mem(pb, &[5, 6, 7, 8])?;
+    dev.write_mem(pb, &[5, 7, 6, 8])?;
     dev.write_mem(pc, &[0u8; 16])?;
     dev.write_mem(pd, &[0u8; 8])?;
 

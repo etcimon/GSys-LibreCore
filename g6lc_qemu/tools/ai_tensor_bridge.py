@@ -102,7 +102,9 @@ class DescLayout:
         statuses: dict,
         completion: dict | None = None,
         flags_layout: dict | None = None,
+        operand_b_k_major: bool | None = None,
     ) -> None:
+        self.operand_b_k_major = operand_b_k_major
         self.desc_bytes = desc_bytes
         self.fields = fields
         self.ops = ops
@@ -150,6 +152,7 @@ class DescLayout:
             statuses={k: int(v) for k, v in (layout.get("statuses") or {}).items()},
             completion={k: int(v) for k, v in completion.items()} if completion else {},
             flags_layout={k: v for k, v in flags_layout.items()} if flags_layout else {},
+            operand_b_k_major=layout.get("operand_b_k_major"),
         )
 
     @classmethod
@@ -220,7 +223,10 @@ class DescLayout:
             if n is not None and k is not None:
                 ni = n if isinstance(n, int) else int(str(n), 0)
                 ki = k if isinstance(k, int) else int(str(k), 0)
-                values["ld_ab"] = (ki & 0xFFFF) | ((ni & 0xFFFF) << 16)
+                bi = ki if self.operand_b_k_major is True else ni
+                if not (0 < ki <= 0xFFFF and 0 < bi <= 0xFFFF):
+                    raise LayoutError("stand-in strides must be positive u16 element counts")
+                values["ld_ab"] = ki | (bi << 16)
         for name in ("ptr_a", "ptr_b", "ptr_c", "ptr_scale", "ptr_done"):
             if name in self.fields and name not in values:
                 values[name] = 0
@@ -291,7 +297,9 @@ class DescLayout:
                 try:
                     n = int(values[self.resolve("n")])
                     k = int(values[self.resolve("k")])
-                    lines.append(f"ld_ab_ok={'true' if lda == k and ldb == n else 'false'}")
+                    valid = lda >= k and ldb >= k if self.operand_b_k_major is True else lda == k and ldb == n
+                    lines.append(f"ld_ab_ok={'true' if valid else 'false'}")
+                    lines.append("operand_b_layout=" + ("k-major" if self.operand_b_k_major is True else "legacy-row-major-unresolved" if self.operand_b_k_major is None else "row-major"))
                 except (LayoutError, KeyError, TypeError, ValueError):
                     pass
             else:
@@ -436,6 +444,13 @@ class TensorArtifact:
         mask = int(self.flags_layout.get("dtype_mask", 0))
         return (int(flags) >> shift) & mask
 
+    def _numfmt_for_event(self, ev: dict, layout: DescLayout | None = None) -> int | None:
+        field = self.flags_layout.get("numfmt") or (layout.flags_layout.get("numfmt") if layout else None)
+        if field and ev.get("flags") is not None:
+            return (int(ev["flags"]) >> int(field["shift"])) & int(field["mask"])
+        value = ev.get("numfmt")
+        return int(value) if value is not None else None
+
     def summary(self, layout: DescLayout | None = None, clusters: int | None = None) -> dict:
         """Aggregates that are *present* in the stream.
 
@@ -452,6 +467,7 @@ class TensorArtifact:
         statuses: dict = {}
         status_names: dict = {}
         dtypes: dict = {}
+        numfmts: dict = {}
         by_cluster: dict = {}
         done = 0
         for ev in self.events:
@@ -473,6 +489,9 @@ class TensorArtifact:
 
             dtype = self._dtype_for_event(ev)
             dtypes[str(dtype)] = dtypes.get(str(dtype), 0) + 1
+            fmt = self._numfmt_for_event(ev, layout)
+            key = str(fmt) if fmt is not None else "unresolved"
+            numfmts[key] = numfmts.get(key, 0) + 1
 
             cluster = ev.get("cluster", 0)
             by_cluster[str(cluster)] = by_cluster.get(str(cluster), 0) + 1
@@ -491,6 +510,7 @@ class TensorArtifact:
             "by_status": statuses,
             "by_hart": harts,
             "by_dtype": dtypes,
+            "by_numfmt": numfmts,
             "by_cluster": by_cluster,
         }
         if clusters is not None:
@@ -539,6 +559,8 @@ class TensorArtifact:
                 "shape_n": ev.get("n"),
                 "shape_k": ev.get("k"),
                 "dtype": self._dtype_for_event(ev),
+                "numfmt": self._numfmt_for_event(ev, layout),
+                "numfmt_name": numeric_format_name(self._numfmt_for_event(ev, layout)),
                 "cluster": ev.get("cluster", 0),
                 "ptr_a": ev.get("ptr_a"),
                 "ptr_b": ev.get("ptr_b"),
@@ -2522,6 +2544,24 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     check("virt-card stamps island_cap", vc3.header.get("island_cap", {}).get("clusters") == 2)
     check("virt-card stamps modelled_peak_gops", vc3.header.get("modelled_peak_gops") == 512.0)
 
+    legacy = gl.apply_standin_defaults({"m": 2, "n": 3, "k": 5})
+    check("unresolved stand-in retains explicit legacy stride", legacy["ld_ab"] == 5 | (3 << 16))
+    gl.operand_b_k_major = True
+    native = gl.apply_standin_defaults({"m": 2, "n": 3, "k": 5})
+    check("published k-major uses K for both strides", native["ld_ab"] == 5 | (5 << 16))
+    check("asymmetric decode validates k-major", "ld_ab_ok=true" in gl.decode_text(gl.pack(native)))
+    fmt_artifact = TensorArtifact({}, [{"flags": 7 << 20, "dtype": 0, "op": 1}], {"numfmt": {"shift": 20, "mask": 7}})
+    check("numeric format stays separate from signedness", fmt_artifact.summary()["by_numfmt"] == {"7": 1} and fmt_artifact.summary()["by_dtype"] == {"0": 1})
+    unknown_artifact = TensorArtifact({}, [{"dtype": 0, "op": 1}])
+    check("unknown numeric format is not INT8", unknown_artifact.summary()["by_numfmt"] == {"unresolved": 1})
+    sample_request = {"jobs": [{"id": "packed", "m": 3, "n": 1, "k": 3, "lda": 5, "numfmt": 1, "a_hex": "2103aa5406bb8709", "opcode_class": 2}]}
+    sample_result = {"jobs": [{"id": "packed", "executed": True}]}
+    sample = policy_workload(sample_request, sample_result)["records"][0]
+    check("policy sample removes row padding and repacks nibbles", sample["native_sample_hex"] == "21436587" and sample["sample_valid"] and sample["exact_zero"] is False)
+    sample_request["jobs"][0]["m"] = 1
+    sample = policy_workload(sample_request, sample_result)["records"][0]
+    check("short policy sample remains invalid", sample["native_sample_hex"] == "" and sample["sample_valid"] is False)
+
     if failures:
         for f in failures:
             err(f)
@@ -2534,6 +2574,94 @@ def cmd_selftest(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------- argparse
 
 
+def numeric_format_name(value: int | None) -> str:
+    return {0: "int8", 1: "int4", 2: "sp24", 3: "fp8e4m3", 4: "fp8e5m2", 5: "fp16", 6: "bf16", 7: "fp32"}.get(value, "unresolved" if value is None else "unknown")
+
+
+def evaluate(request: str | Path, result: str | Path, source_flags=(), binary: str | Path | None = None) -> dict:
+    executable = Path(binary).resolve() if binary else cli_binary()
+    if executable is None:
+        raise LayoutError("g6lc-qemu binary not found; run python tools/g6q.py build first")
+    request_path, result_path = Path(request).resolve(), Path(result).resolve()
+    cmd = [executable, "tensor-eval", *source_flags, "--request", request_path, "--result", result_path]
+    completed = _run(cmd, check=False)
+    if completed.returncode:
+        raise LayoutError(f"tensor-eval failed with exit {completed.returncode}; see {result_path}")
+    raw = json.loads(result_path.read_text(encoding="utf-8"))
+    if raw.get("schema") != "g6q.tensor-eval-result.v1" or raw.get("backend") != "b3-descriptor-executor":
+        raise LayoutError("unexpected tensor-eval result protocol")
+    model = raw.get("model") or {}
+    layout = DescLayout.from_model(model)
+    if layout.operand_b_k_major is not True:
+        raise LayoutError("tensor-eval result does not publish B-k-major")
+    return raw
+
+
+def policy_workload(request: dict, result: dict) -> dict:
+    inputs = {job["id"]: job for job in request["jobs"]}
+    records = []
+    for outcome in result["jobs"]:
+        if not outcome.get("executed"):
+            continue
+        job = inputs[outcome["id"]]
+        fmt = job["numfmt"]
+        sample = bytearray()
+        valid = job["m"] * job["k"] >= 8 and fmt in (0, 1, 3, 4, 5, 6, 7)
+        if valid:
+            data = bytes.fromhex(job["a_hex"])
+            stride = job.get("lda", job["k"])
+            if fmt == 1:
+                for index in range(8):
+                    row, col = divmod(index, job["k"])
+                    offset = row * ((stride + 1) // 2) + col // 2
+                    nibble = (data[offset] >> (4 * (col % 2))) & 15
+                    if index % 2 == 0:
+                        sample.append(nibble)
+                    else:
+                        sample[-1] |= nibble << 4
+            else:
+                width = 4 if fmt == 7 else 2 if fmt in (5, 6) else 1
+                for index in range(8):
+                    row, col = divmod(index, job["k"])
+                    offset = (row * stride + col) * width
+                    sample.extend(data[offset:offset + width])
+                valid = len(sample) == 8 * width
+        records.append({
+            "id": job["id"], "m": job["m"], "n": job["n"], "k": job["k"],
+            "numfmt": fmt, "opcode_class": job.get("opcode_class", 0),
+            "native_sample_hex": sample.hex() if valid else "", "sample_valid": valid,
+            "exact_zero": False,
+        })
+    return {
+        "schema": "g6lc.policy-workload.v1", "records": records,
+        "source": result.get("source"), "backend": "b3-descriptor-executor",
+        "qemu_guest": False, "rtl_cycles": False, "learned_profiler": False,
+    }
+
+
+def cmd_evaluate(args: argparse.Namespace) -> int:
+    try:
+        raw = evaluate(args.request, args.result, args.source_flags, args.binary)
+        if args.policy_trace_out:
+            paths = [Path(p).resolve() for p in (args.request, args.result)]
+            if Path(args.policy_trace_out).resolve() in paths:
+                raise LayoutError("policy trace must not overwrite request or result")
+            request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+            trace = policy_workload(request, raw)
+            Path(args.policy_trace_out).write_text(json.dumps(trace, indent=2) + "\n", encoding="utf-8")
+        summary = {key: raw[key] for key in ("schema", "backend", "source", "job_count", "executed_count", "failed_count", "qemu_guest", "rtl_cycles")}
+        summary["by_numfmt"] = {}
+        for job in raw["jobs"]:
+            name = numeric_format_name(job["numfmt"])
+            counts = summary["by_numfmt"].setdefault(name, {"executed": 0, "rejected": 0})
+            counts["executed" if job["executed"] else "rejected"] += 1
+        print(json.dumps(summary, indent=2, sort_keys=True))
+        return 0
+    except (LayoutError, OSError, ValueError, KeyError) as exc:
+        err(str(exc))
+        return 1
+
+
 def main(argv: list | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="ai_tensor_bridge.py",
@@ -2541,6 +2669,13 @@ def main(argv: list | None = None) -> int:
         "(architecture/AI_BRIDGE.md).",
     )
     sub = ap.add_subparsers(dest="verb", required=True)
+
+    p = sub.add_parser("evaluate", help="native B3 tensor-eval; forwards design source flags; not guest boot/cycles")
+    p.add_argument("--request", required=True)
+    p.add_argument("--result", required=True)
+    p.add_argument("--binary", default=None)
+    p.add_argument("--policy-trace-out", default=None)
+    p.set_defaults(fn=cmd_evaluate)
 
     p = sub.add_parser("doctor", help="report which execution routes are available")
     p.add_argument("--repo-root", default=None)
@@ -2662,7 +2797,11 @@ def main(argv: list | None = None) -> int:
     p = sub.add_parser("selftest", help="offline checks; no model, QEMU or network")
     p.set_defaults(fn=cmd_selftest)
 
-    args = ap.parse_args(argv)
+    args, extra = ap.parse_known_args(argv)
+    if args.verb == "evaluate":
+        args.source_flags = extra[1:] if extra and extra[0] == "--" else extra
+    elif extra:
+        ap.error("unrecognized arguments: " + " ".join(extra))
     if args.verb == "push" and args.route == "native" and not args.image:
         ap.error("push --route native needs --image FILE")
     return int(args.fn(args))

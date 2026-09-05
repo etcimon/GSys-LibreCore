@@ -85,6 +85,7 @@ class FakeIsland:
         )
         for off, val in [
             (qu.CAP_VERSION, 1),
+            (qu.CAP_DTYPE_MASK, 1),
             (qu.CAP_CLUSTERS, 1 | (1 << 16)),
             (qu.CAP_MACS_CYCLE, 256),
             (qu.CAP_CLOCK_KHZ, 1_000_000),
@@ -146,7 +147,7 @@ class FakeIsland:
             return
         d = struct.unpack_from("<HHIIIIIQQQQQ", self.regs, qu.MMIO_DESC)
         version, op, _flags, m, n, k, ld_ab, pa, pb, pc, _ps, pdone = d
-        if version != 1:
+        if version != 2:
             self.last_status = 2
         elif op != 1:
             self.last_status = 3
@@ -156,21 +157,17 @@ class FakeIsland:
             self.last_status = 4  # ST_BAD_PTR
         else:
             lda, ldb = ld_ab & 0xFFFF, ld_ab >> 16
-            a = self.dma.read(pa - self.dma.base, m * lda)
-            b = self.dma.read(pb - self.dma.base, k * ldb)
-            out = bytearray(m * n * 4)
-            for i in range(m):
-                for j in range(n):
-                    acc = 0
-                    for t in range(k):
-                        av = a[i * lda + t]
-                        bv = b[t * ldb + j]
-                        acc += (av - 256 if av > 127 else av) * (
-                            bv - 256 if bv > 127 else bv
-                        )
-                    struct.pack_into("<i", out, (i * n + j) * 4, acc)
-            self.dma.write(pc - self.dma.base, bytes(out))
-            self.last_status = 0
+            from ai_tensor.numfmt import gemm_native, layout
+            fmt = (_flags >> 20) & 7
+            try:
+                _, _, na, nb, _ = layout(m, n, k, fmt, lda, ldb)
+                a = self.dma.read(pa - self.dma.base, na)
+                b = self.dma.read(pb - self.dma.base, nb)
+                out = gemm_native(a, b, m, n, k, fmt, lda, ldb, self.read32(qu.CAP_DTYPE_MASK))
+                self.dma.write(pc - self.dma.base, out)
+                self.last_status = 0
+            except ValueError:
+                self.last_status = 8
         self.done_sticky = True
         self.irq_pending = True
         if self.wr_cpl_en and pdone:
@@ -217,6 +214,38 @@ class TestCapabilityDiscovery(unittest.TestCase):
 
 
 class TestSubmissionProtocol(unittest.TestCase):
+    def test_native_bytes_preserve_format_and_kmajor_layout(self):
+        s, isl, dma = session()
+        struct.pack_into('<I', isl.regs, qu.CAP_DTYPE_MASK, 0xfb)
+        s.caps = qu.read_caps(isl)
+        self.assertEqual(s.caps.dtype_mask, 0xfb)
+        a = struct.pack('<3f', 1, 2, 3)
+        b = struct.pack('<6f', 4, 5, 6, 7, 8, 9)
+        out = s.gemm_native(a, b, 1, 2, 3, 7)
+        self.assertEqual(struct.unpack('<2f', out), (32, 50))
+        self.assertEqual(dma.read(0, len(a)), a)
+        self.assertEqual(dma.read(64, len(b)), b)
+        self.assertEqual(struct.unpack_from('<I', isl.regs, qu.MMIO_DESC + 20)[0], 3 | (3 << 16))
+        self.assertEqual(struct.unpack_from('<I', isl.regs, qu.MMIO_DESC + 4)[0] >> 20, 7)
+
+    def test_native_invalid_inputs_do_not_write_dma(self):
+        s, isl, dma = session()
+        before = bytes(dma._buf)
+        for fmt in (2, 7):
+            with self.assertRaises(ValueError):
+                s.gemm_native(bytes(4), bytes(4), 1, 1, 1, fmt)
+        with self.assertRaises(ValueError):
+            s.gemm_s8(2, 2, 2, [1], [1, 2, 3, 4])
+        self.assertEqual(bytes(dma._buf), before)
+        self.assertFalse(any(op == 'w' and off == qu.MMIO_DOORBELL for op, off, _ in isl.trace))
+
+    def test_v1_submission_is_refused(self):
+        s, _, _ = session()
+        desc = bytearray(64)
+        struct.pack_into('<H', desc, 0, 1)
+        with self.assertRaisesRegex(ValueError, 'v2 required'):
+            s.submit(desc)
+
     def test_gemm_matches_the_int8_golden(self):
         s, _, _ = session()
         a = [1, 2, 3, 4]

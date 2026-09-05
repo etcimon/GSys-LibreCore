@@ -168,6 +168,7 @@ impl SoftIsland {
             8 => 0,
             9 => 0,
             10 => u32::from(self.cap.dtype_mask),
+            19 => mmio::CAP_LAYOUT_B_KMAJOR,
             _ => 0,
         }
     }
@@ -234,12 +235,20 @@ impl SoftIsland {
             return;
         }
 
-        let m = d.m as u64;
-        let n = d.n as u64;
-        let k = d.k as u64;
-        let a_len = m * d.lda() as u64;
-        let b_len = k * d.ldb() as u64;
-        let c_len = m * n * 4;
+        if crate::numfmt::check_desc_format(&d, self.cap.dtype_mask).is_err() {
+            self.complete(ticket, ai_tensor_abi::ST_BAD_FMT, false);
+            return;
+        }
+        let layout = match crate::numfmt::Layout::from_desc(&d) {
+            Ok(l) => l,
+            Err(_) => {
+                self.complete(ticket, ST_BAD_PTR, false);
+                return;
+            }
+        };
+        let a_len = layout.a_bytes as u64;
+        let b_len = layout.b_bytes as u64;
+        let c_len = layout.c_bytes as u64;
         if !self.region_ok(qid, d.ptr_a, a_len, true, false)
             || !self.region_ok(qid, d.ptr_b, b_len, true, false)
             || !self.region_ok(qid, d.ptr_c, c_len, false, true)
@@ -249,7 +258,8 @@ impl SoftIsland {
         }
         if d.ptr_done != 0
             && self.wr_cpl_en
-            && !self.region_ok(qid, d.ptr_done, 8, false, true)
+            && (!self.region_ok(qid, d.ptr_done, 8, false, true)
+                || crate::numfmt::memory_range(d.ptr_done, MEM_BASE, 8, self.mem.len()).is_err())
         {
             self.complete(ticket, ST_BAD_PTR, false);
             return;
@@ -283,27 +293,7 @@ impl SoftIsland {
     }
 
     fn run_gemm_ref(&mut self, d: &Desc64) -> Result<(), RtError> {
-        let m = d.m as usize;
-        let n = d.n as usize;
-        let k = d.k as usize;
-        let lda = d.lda() as usize;
-        let ldb = d.ldb() as usize;
-        let oa = self.off(d.ptr_a)?;
-        let ob = self.off(d.ptr_b)?;
-        let oc = self.off(d.ptr_c)?;
-        for i in 0..m {
-            for j in 0..n {
-                let mut acc: i32 = 0;
-                for t in 0..k {
-                    let av = self.mem[oa + i * lda + t] as i8 as i32;
-                    let bv = self.mem[ob + t * ldb + j] as i8 as i32;
-                    acc += av * bv;
-                }
-                let out_i = oc + (i * n + j) * 4;
-                self.mem[out_i..out_i + 4].copy_from_slice(&acc.to_le_bytes());
-            }
-        }
-        Ok(())
+        crate::numfmt::execute_memory(&mut self.mem, MEM_BASE, d, true)
     }
 
     fn complete(&mut self, ticket: u32, status: u16, irq: bool) {
@@ -476,6 +466,14 @@ impl MmioDevice {
             island,
             cached_caps,
         }
+    }
+
+    pub fn software_reference_v2() -> Self {
+        let mut cap = CapRegs::island_p3_sim_default();
+        cap.dtype_mask = crate::numfmt::SOFTWARE_DTYPE_MASK;
+        let island = SoftIsland::with_cap(cap, 64);
+        let cached_caps = island.caps_from_cap();
+        Self { island, cached_caps }
     }
 
     /// Re-probe CAP through MMIO (as a real backend would after map).
@@ -888,6 +886,7 @@ pub fn seed_cap_island_p3(bus: &mut dyn MmioBus) {
     bus.write32(0x18, u32::from(c.dram_nameplate_gbps));
     bus.write32(0x1c, u32::from(c.queues) | (u32::from(c.queue_depth) << 16));
     bus.write32(0x28, u32::from(c.dtype_mask));
+    bus.write32(mmio::CAP_LAYOUT, mmio::CAP_LAYOUT_B_KMAJOR);
 }
 
 
@@ -945,7 +944,7 @@ mod tests {
         let pb = d.pack();
         dev.write_mem(desc_addr, &pb).unwrap();
         dev.write_mem(pa, &[1, 2, 3, 4]).unwrap();
-        dev.write_mem(pbb, &[5, 6, 7, 8]).unwrap();
+        dev.write_mem(pbb, &[5, 7, 6, 8]).unwrap();
         // desc_ptr + doorbell fetch
         dev.island.write32(mmio::DESC_PTR_LO, desc_addr as u32);
         dev.island
@@ -1010,6 +1009,8 @@ mod tests {
         let mut w = MappedWindow::zeros(4096);
         seed_cap_island_p3(&mut w);
         let cap = probe_cap_regs(&mut w);
+        assert_eq!(w.read32(mmio::CAP_LAYOUT), mmio::CAP_LAYOUT_B_KMAJOR);
+        assert_eq!(SoftIsland::new().read32(mmio::CAP_LAYOUT), mmio::CAP_LAYOUT_B_KMAJOR);
         assert_eq!(cap.macs_per_cycle, 256);
         assert_eq!(cap.acc_tile.m, 256);
     }

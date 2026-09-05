@@ -139,8 +139,18 @@ python tools/ait.py test
 python tools/ait.py doctor
 ```
 
-Until the tooling spine exists, treat `architecture/` + `AGENTS-todo.md` as the only required
-artifacts and keep changes documentation-first.
+The tooling spine is live. `python tools/ait.py test` runs Rust, pure-Python,
+ABI-lockstep and optional framework checks, including the external local cosim
+helper by default. On Windows, the Rust cosim launcher requires a POSIX `sh`;
+Git's `usr/bin` can be added to the **child command's** PATH. The CLI quotes
+forward-slash interpreter/harness paths so spaces and backslashes are preserved.
+
+For the PyO3 bindings, use a Python version supported by the pinned PyO3 release.
+Python 3.14 is newer than PyO3 0.22.6's supported range; do not bypass its version
+check. A verification invocation may set `PYO3_PYTHON` to an existing supported
+interpreter (the host's OSS CAD Suite Python 3.11 was used for `cargo check -p
+ai-tensor-py --offline`). Compilation is not an extension import test under 3.14.
+No interpreter or dependency is installed implicitly.
 
 ---
 

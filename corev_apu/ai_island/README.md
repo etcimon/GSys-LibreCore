@@ -1,11 +1,13 @@
 # `corev_apu/ai_island` — Xg6lcai island plane (P3+)
 
-**Status:** P3 spine landed (standalone veri) · **not yet on SoC AXI flist** · **Tier R**  
+**Status:** P3/AXI integration and INT8/INT4 GEMM in the Variane AI testharness;
+policy/FP compartments remain isolated; production SoC closure pending · **Tier R**
 **Config:** `corev_apu/include/g6lc_ai_island_cfg_pkg.sv`
 
-This directory is the **throughput / T2** plane of `Xg6lcai`. It is *not* part of
-the core package (`cva6_cfg_t` / `ai_cfg_t`). See
-`architecture/ai-matrix/scaling-100tops.md` §3 and §8.
+This directory is the **throughput / T2** plane of `Xg6lcai`, separate from the
+core-attached T0/T1 datapath. Island geometry and capabilities come from the island
+package; `CVA6Cfg.AiCfg` gates the optional attachment and development compartments.
+See `architecture/ai-matrix/scaling-100tops.md` §3 and §8.
 
 | Plane | Home | Sized by |
 |---|---|---|
@@ -23,13 +25,16 @@ the core package (`cva6_cfg_t` / `ai_cfg_t`). See
 | `g6lc_ai_desc_fetch.sv` | AXI read-only 64 B descriptor fetch | **landed** |
 | `g6lc_ai_mem_store.sv` | AXI single-beat store (completion word) | **landed** |
 | `g6lc_ai_tile_sram.sv` | dual-port Latency=0 `tc_sram` tile bank (A/B int8, C int32) | **landed** |
-| `g6lc_ai_pe_dot.sv` | multi-lane INT8 MAC slice (PeLanes products/cycle) | **landed** |
+| `g6lc_ai_pe_dot.sv` | signed INT8/packed-INT4 dot-product reducer; accumulation owned by sequencer | **landed** |
 | `g6lc_ai_gemm_seq.sv` | I1 GEMM: banked A/B + multi-bank C + dual-i32 store + PE | **landed** |
 | `g6lc_ai_dram_timing.sv` | I3 island-DMA DDR4 page-command delay (Cas=0 bypass) | **landed** |
 | `g6lc_ai_cpl_fifo.sv` | completion FIFO (DONE claim = pop head) | **landed** |
 | `g6lc_ai_island_top.sv` | reg map + CPL FIFO + IRQ + fetch/store/gemm AXI mux | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 (next) |
 | AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |
+| `include/g6lc_ai_policy_pkg.sv`, `g6lc_ai_policy_codec.sv` | frozen eight-state policy, hysteresis and successor hints | **verified compartment**, not instantiated by top |
+| `g6lc_ai_policy_steer.sv` | format-aware benefit gate and fixed-budget topology | **verified compartment**, no production consumer |
+| `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_fp_mac.sv` | exact widening and separate FP32 RNE multiply/add | **verified scalar primitive**, not integrated floating GEMM |
 
 Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=256**,
 **AccTileM/N/K=256** (SKU AccTile* live; 1 MAC cycle per C). C multi-banked
@@ -97,6 +102,102 @@ reg before `ai.enq` (same-addr load-back can STLF; kick is a core wire).
 3. **I1-lite** — sequential GEMM over AXI (**done**); full PE cluster next.
 4. **I3** — memory system measured.
 5. **I2** — N clusters (must not change latency-SKU results).
+
+## Policy codec development compartment
+
+`include/g6lc_ai_policy_pkg.sv` and `g6lc_ai_policy_codec.sv` implement the
+GSys LibreCore frozen eight-class policy encoder, hysteretic commit, current and
+repeat/successor decode, and discardable address/bank hints. The control gate is
+`CVA6Cfg.AiCfg.PolicyCodecEn` (all production targets off); the independent
+verification wrapper enables it. **Not yet instantiated by the island top and
+not yet steering the GEMM datapath.** It is not a Desc64/QoS/ISA change or a
+measured throughput improvement.
+
+`g6lc_ai_policy_steer.sv` adds the default-off `AiCfg.PolicyBenefitEn` wrapper:
+native-format zero metadata, format epochs, compact retained topology metadata,
+and a benefit-gated balanced row/column/reduction allocation. INT4/INT8/FP8/
+FP16/BF16/FP32 scheduling support is not an arithmetic capability grant; no
+floating-point skip or silent format conversion is permitted. The efficiency
+suite checks an equal-resource ticking scheduling model and emits per-format,
+per-state and balanced-mix percentages in `steering-*/efficiency.json`, including
+negative results and a best-fixed-code comparator. None are production speedups.
+
+Architecture and integration contract: `architecture/ai-matrix/README.md` §10–§11.
+Verification: `bun build-platform/src/cli/index.ts test ai-policy-codec` uses the
+remote proxy. For local synthesis only (never local Verilator), use
+`python verif/regress/ai-policy-codec.py --synth-only --yosys <existing-yosys>`;
+this checks enabled/disabled synthesis and 12-step bounded safety with reachable
+events. Numerical tests use a software tuple consumer, not the live array.
+
+## Native formats and floating arithmetic status
+
+The live island advertises **INT8 and INT4 only**: `AiIslandDtypeMask` and
+`AiIslandPeImplMask` remain `16'h0003`. Descriptor v2 uses A `[m][k]`, B `[n][k]`,
+and element-count K strides, with per-row byte rounding for packed INT4.
+`DESC_B_K_MAJOR` publishes the layout for model ingestion. Native T2 arithmetic
+is signed and overwrite-only; unsupported dtype/accmode/EW/sparse combinations
+return `ST_BAD_FMT`. Legacy INT/EW1 resolves to INT4 for both the grant check and
+GEMM handoff. This changes neither the descriptor size nor the raw format field.
+
+The optional `AiCfg.IslandFpEn` scalar primitive widens FP8 E4M3/E5M2, FP16, BF16
+or FP32, then performs separate FP32 RNE MUL and ADD. It preserves subnormals and
+signed zero, reports local exception flags, holds responses under backpressure,
+and cancels work on reset/flush/disable. It is **off by default** and does not
+connect floating operands to the live integer GEMM reducer or expand any grant.
+
+| Pipeline registers | Accepted request to visible result | Scalar initiation interval |
+|---|---:|---:|
+| 1 | 4 cycles | 6 cycles |
+| 2 | 6 cycles | 8 cycles |
+| 3 (default) | 8 cycles | 10 cycles |
+| 5 | 12 cycles | 14 cycles |
+
+Remote arithmetic/flag tests pass all four variants, including 141,587 widening
+probes per variant. Isolated synthesis reports zero latches and a zero-cell
+disabled implementation; bounded control/widening checks are not PDK timing or
+DFT sign-off. The default is one **scalar** MAC per ten cycles, not the full-array
+service rate used by the policy scheduling model.
+
+## Optimization path and next integration gates
+
+1. **Native correctness first — available.** Independent ai-tensor and B3
+   descriptor execution compare packed descriptors and C32 bytes. Live grants
+   execute 16 of 84 jobs and reject 68; the named software-only `0x00fb` fixture
+   executes 82 and rejects two. This is not a QEMU guest or RTL datapath run.
+2. **Policy evaluation — available in isolation.** Closed, validated traces of
+   successful jobs feed the remote RTL policy wrapper. Samples carry no exact-zero
+   proof; no DMA address hint is materialized. Per-format/code usage and signed
+   cycle-model comparisons remain explicitly labeled future-array hypotheses.
+3. **Guarded integer consumer — open.** Produce metadata from real descriptor/tile
+   state, isolate per-context history and flushes, then connect one tile/order/bank/
+   prefetch consumer at a time. Preserve dense fallback, tail/storage/address
+   guards and precise completions; add PMU events before reporting application rates.
+4. **Floating GEMM — open.** Integrate native byte gathering, scalar or replicated
+   arithmetic, ordered accumulation and C32 stores. Test real memory stalls and
+   rejected formats end to end before changing capability/implementation masks.
+5. **Measured optimization — open.** Compare identical work and formats on the
+   integrated RTL, including switching/misprediction tax, contention and held-out
+   framework traces. I3 memory characterization remains ahead of I2 clustering.
+   DFT/testmode semantics, PDK STA, physical area/power and full compliance remain gates.
+
+From the repository root, the optional registered suites are:
+
+```text
+bun build-platform/src/cli/index.ts test ai-policy-codec
+bun build-platform/src/cli/index.ts test ai-desc-formats
+bun build-platform/src/cli/index.ts test ai-fp-mac
+bun build-platform/src/cli/index.ts test ai-native-eval
+python verif/regress/ai-native-eval.py --binary <host-native-g6lc-qemu> --replay-policy
+```
+
+The first three use the remote testharness proxy; the native evaluator requires a
+binary built for its executing host (Linux for the WSL regression engine).
+Descriptor-mode coverage exercises 3,072 helper combinations and 1,024 engine
+cases, including refusal and effective-format handoff. Full architecture,
+metric definitions and reproduction details are in
+[`architecture/ai-matrix/README.md`](../../architecture/ai-matrix/README.md) §10–§12.
+Existing full-core synthesis and branding failures remain tracked in `AGENTS-todo.md`;
+these compartment results do not waive them.
 
 ## Licensing
 

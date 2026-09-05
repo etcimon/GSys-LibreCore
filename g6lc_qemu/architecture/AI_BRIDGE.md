@@ -5,6 +5,72 @@ Backends: [`DESIGN.md`](DESIGN.md) §3 · Profiles: §4 · Staging: §7 · Non-g
 
 ---
 
+## Native descriptor-executor evaluation
+
+The `tensor-eval` CLI and bridge `evaluate` route execute native source buffers through
+B3's existing descriptor decoder and GEMM planner, without a guest boot. Descriptor
+fields, grants, version, statuses and numeric-format flag positions come from the
+embedded TargetModel. The optional IR fact `operand_b_k_major` is read solely from
+`DESC_B_K_MAJOR`; evaluation requires true. Both element strides are at least K.
+Legacy unresolved bridge stand-ins retain their old explicit profile behavior.
+
+Scratch allocations are aligned offsets within model DRAM and bounded to the job's
+needed bytes, never the full model RAM. A/B/C are disjoint. Unsupported formats,
+including SP24 even if granted, do not write C. No unknown float becomes INT8.
+RAM-only decoded operand reuse removes repeated memory/decode work while retaining
+reduction order, separate f32 multiply/add, canonical NaN C and wrapping integer sums.
+MMIO retains scalar access order. Host benchmarks describe emulator cost only; no
+cycle, hardware throughput or RISC-V exception-flag claim follows.
+
+DMA destination validation requires the entire C span to be normal RAM and four-byte
+aligned before any C writes are returned. A nonnull completion sink must be eight-byte
+aligned and cover eight bytes of normal RAM, including for accepted-but-skipped ops.
+Device overlays exclude RAM from the reuse/write path even after checkpoint restore.
+Destination failures use the model's ST_BAD_PTR, falling back to ST_ERR. Earlier
+version/op/format rejections keep their precedence. Guest write boundaries must also
+check errors: failed completion DMA must not leave ST_OK in MMIO, queue poll or tensor
+events, and must not allocate another ticket or rewrite descriptor addresses. An
+unexpected late DMA failure may follow successful computation; it is still a failed
+job, not evidence that C/completion reached memory. Queue-fence bookkeeping remains
+separate from the MMIO/direct GEMM executor; fencing must preserve earlier failures.
+
+Software-exploration fixtures may grant 0xfb; they never widen a loaded design mask.
+The bridge does not import a tensor framework or a host repository. Its `evaluate`
+subcommand forwards source arguments and request/result paths to the package CLI.
+`evaluate(request, result, source_flags=(), binary=None)` returns the result dictionary;
+malformed input or a contract/I/O failure raises LayoutError. Legal rejected jobs do
+not raise. `--binary` avoids selecting a stale release binary. Artifact summaries
+carry `by_numfmt` separately from `by_dtype` (signedness); unresolved format stays
+unresolved, not integer. Float C words are IEEE f32, integer C words are wrapping i32.
+
+Optional bridge `--policy-trace-out FILE` exports `g6lc.policy-workload.v1`: successful
+jobs only, records with `id/m/n/k/numfmt/opcode_class`, `native_sample_hex`,
+`sample_valid`, and `exact_zero=false`. Eight logical source-A elements are packed
+without stride padding, including repacking nibbles across odd INT4 rows. Fewer than
+eight elements yields empty sample and sample_valid=false. This is source-buffer
+replay data, not learned profiling, guest state, or evidence of CVA6 execution.
+
+Host-only optimization benchmark: `python tools/g6q.py cargo -- test -p g6q-vm
+--release host_decode_reuse_benchmark -- --ignored --nocapture`. It compares an
+independent per-MAC scalar loop with the planner, checks exact C first, and times
+10 jobs of 64x48x128 with padded strides. One Windows run (microseconds for all 10):
+
+| Format | Scalar baseline | RAM reuse | Host speedup |
+|---|---:|---:|---:|
+| INT8 | 46179 | 8141 | 5.67x |
+| INT4 | 52761 | 6435 | 8.20x |
+| FP8 E4M3 | 231393 | 8623 | 26.83x |
+| FP8 E5M2 | 221530 | 7867 | 28.16x |
+| FP16 | 222834 | 9650 | 23.09x |
+| BF16 | 82244 | 20840 | 3.95x |
+| FP32 | 135472 | 21558 | 6.28x |
+
+These are host-emulator measurements, not RTL timing or hardware throughput. The
+planner reuses (M+N)*K decoded input elements instead of decoding 2*M*N*K elements;
+MAC order is unchanged. Timing/DFT/CDC impact on silicon: none, software-only pass.
+B1 guest boot and B2 observability are unchanged; no new floating exception flags,
+RISC-V numerical compliance or cycle-accurate results are asserted.
+
 ## 1. The question this document answers
 
 The accelerator model added at Q6 is reached two ways: by instructions from the guest, and by

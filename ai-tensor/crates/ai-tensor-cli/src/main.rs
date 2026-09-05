@@ -192,7 +192,7 @@ fn main() {
             println!("ai-tensor 0.1.0");
             println!("default_profile=sim-v0");
             println!("backends=sim,mmio-soft,mapped-file (linux-uio: feature linux-mmio)");
-            println!("abi_rev=0.1.0");
+            println!("abi_rev=2.0.0");
             println!("desc_bytes={DESC_BYTES}");
             println!(
                 "soft_cap.acc_tile={}x{}x{} macs={} noc={} queues={} depth={}",

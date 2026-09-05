@@ -238,7 +238,11 @@ fn decode_float(bits: u32, exp_bits: u32, man_bits: u32, bias: i32, has_inf: boo
 /// 32 bits wide in the ABI either way, so the distinction is in interpretation, not width,
 /// and the consumer knows which because it chose the format.
 pub fn pack_c(acc_f32: f32) -> i32 {
-    acc_f32.to_bits() as i32
+    if acc_f32.is_nan() {
+        0x7fc0_0000
+    } else {
+        acc_f32.to_bits() as i32
+    }
 }
 
 /// Read one element of `fmt` at logical index `idx` in a row starting at `base`.
@@ -255,22 +259,22 @@ where
 {
     match fmt {
         NumFmt::Int4 => {
-            let byte = read(base.wrapping_add(idx / 2))?;
+            let byte = read(base.checked_add(idx / 2)?)?;
             // Low nibble first: little-endian element order within the byte, matching how
             // the packed operand is written by the host runtime.
             let nib = if idx % 2 == 0 { byte & 0x0f } else { byte >> 4 };
             Some(Elem::Int(sext(nib as u32, 4)))
         }
         NumFmt::Int | NumFmt::Sp24 => {
-            let b = read(base.wrapping_add(idx))?;
+            let b = read(base.checked_add(idx)?)?;
             Some(Elem::Int(b as i8 as i32))
         }
-        NumFmt::Fp8E4m3 => Some(Elem::Float(fp8_e4m3_to_f32(read(base.wrapping_add(idx))?))),
-        NumFmt::Fp8E5m2 => Some(Elem::Float(fp8_e5m2_to_f32(read(base.wrapping_add(idx))?))),
+        NumFmt::Fp8E4m3 => Some(Elem::Float(fp8_e4m3_to_f32(read(base.checked_add(idx)?)?))),
+        NumFmt::Fp8E5m2 => Some(Elem::Float(fp8_e5m2_to_f32(read(base.checked_add(idx)?)?))),
         NumFmt::Fp16 | NumFmt::Bf16 => {
-            let a = base.wrapping_add(idx.wrapping_mul(2));
+            let a = base.checked_add(idx.checked_mul(2)?)?;
             let lo = read(a)? as u16;
-            let hi = read(a.wrapping_add(1))? as u16;
+            let hi = read(a.checked_add(1)?)? as u16;
             let h = lo | (hi << 8);
             Some(Elem::Float(if fmt == NumFmt::Bf16 {
                 bf16_to_f32(h)
@@ -279,10 +283,10 @@ where
             }))
         }
         NumFmt::Fp32 => {
-            let a = base.wrapping_add(idx.wrapping_mul(4));
+            let a = base.checked_add(idx.checked_mul(4)?)?;
             let mut w = 0u32;
             for i in 0..4 {
-                w |= (read(a.wrapping_add(i))? as u32) << (8 * i);
+                w |= (read(a.checked_add(i)?)? as u32) << (8 * i);
             }
             Some(Elem::Float(f32::from_bits(w)))
         }
@@ -495,6 +499,10 @@ mod tests {
 
     #[test]
     fn pack_c_round_trips_float_bits() {
+        for bits in [0x7f80_0001, 0xffc1_2345, 0x7fff_ffff] {
+            assert_eq!(pack_c(f32::from_bits(bits)), 0x7fc0_0000);
+        }
+        assert_eq!(pack_c(-0.0) as u32, 0x8000_0000);
         for v in [0.0f32, 1.0, -2.5, 1e10, -1e-10] {
             assert_eq!(f32::from_bits(pack_c(v) as u32), v);
         }

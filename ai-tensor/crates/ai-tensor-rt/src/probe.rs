@@ -31,7 +31,7 @@ impl ProbeReport {
     ) -> Self {
         Self {
             package: "ai-tensor",
-            abi_rev: "0.1.0",
+            abi_rev: "2.0.0",
             profile_id: profile.id.clone(),
             backend: backend_label.to_string(),
             wait_policy: profile.wait_policy.clone(),
@@ -75,7 +75,7 @@ impl ProbeReport {
                 "\"caps\":{{",
                 "\"acc_tile_m\":{tm},\"acc_tile_n\":{tn},\"acc_tile_k\":{tk},",
                 "\"macs_per_cycle\":{macs},\"noc_width\":{noc},",
-                "\"clusters\":{cl},\"queues\":{q},\"queue_depth\":{qd}",
+                "\"clusters\":{cl},\"queues\":{q},\"queue_depth\":{qd},\"dtype_mask\":{dtype}",
                 "}},",
                 "\"pmu\":{{\"r_beats\":{pr},\"w_beats\":{pw},\"cycles\":{pc},\"gbps_x1000\":{pg}}},",
                 "\"irq\":{{\"plic_source\":{ip},\"clear_before_plic_complete\":{ic}}},",
@@ -98,6 +98,7 @@ impl ProbeReport {
             cl = self.caps.clusters,
             q = self.caps.queues,
             qd = self.caps.queue_depth,
+            dtype = self.caps.dtype_mask,
             pr = self.pmu.r_beats,
             pw = self.pmu.w_beats,
             pc = self.pmu.cycles,

@@ -64,7 +64,7 @@ def test_integer_is_the_all_zero_encoding():
     """
     assert AI_FMT_INT == 0
     assert numfmt_from_flags(0) == AI_FMT_INT
-    assert CONTRACT_VERSION == 1
+    assert CONTRACT_VERSION == 2
 
 
 def test_abi_values_are_dense_and_named():

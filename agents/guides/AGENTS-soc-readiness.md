@@ -23,6 +23,20 @@ multi-month delay.
 | **NoC / memory port** | `noc_req_o/noc_resp_i` (`core/cva6.sv`), `core/cache_subsystem/*axi_adapter.sv`, `corev_apu/` | L2/L3, external memory, SoC integration |
 | **Observability** | `core/cva6_rvfi_probes.sv`, `core/perf_counters.sv`, `core/trigger_module.sv` | Trace, PMU events, debug triggers |
 
+For the frozen AI workload-policy compartment, open
+`architecture/ai-matrix/README.md` §10–§11 before touching
+`corev_apu/ai_island/g6lc_ai_policy_codec.sv` or `g6lc_ai_policy_steer.sv`.
+`AiCfg.PolicyCodecEn`, `PolicyBenefitEn` and `IslandFpEn` remain off in production;
+there is no production policy top instance. Standalone verification does not
+promote a new GEMM dataflow. Integration must bind a real descriptor-metadata
+producer and consumer, tuple limits, exact-zero authorization, per-context flush,
+tile/bank/tail/address validation and island PMU strobes, then measure with real
+RTL memory traffic. I3-before-I2 ordering is unchanged. The `ai-policy-codec` suite
+runs Verilator through the remote proxy; its explicit
+`--synth-only --yosys <existing-yosys>` mode runs local Yosys without Verilator.
+Native-trace replay and future-array scheduling gains are not hardware MAC/s;
+use each matching synthesis/formal report for its area/assertion counts.
+
 Rule of thumb: if a change forces edits deep inside `issue_read_operands.sv`, `scoreboard.sv`, or a
 cache controller, ask whether it could instead live behind CVXIF or a config gate. The core pipeline is
 the most expensive place to re-verify.
@@ -51,6 +65,37 @@ the most expensive place to re-verify.
 - No new `always_latch`; no combinational feedback; no gated clock built by hand (use `tc_clk_gating`).
 
 ---
+
+### AI scalar/native-format readiness snapshot
+
+`architecture/ai-matrix/numeric-formats-datapath.md` and the root implementation /
+test maps separate the landed software and scalar primitive from array work:
+
+- `g6lc_ai_fp_mac` + `g6lc_ai_fp_pkg` have exact FP8/FP16/BF16 widening and serial
+  FP32 RNE multiply then add (no FTZ, fusion or reassociation). **Measured scalar
+  only:** FpPipeRegs 1/2/3/5 give accept-to-visible latency 4/6/8/12 and initiation
+  interval 6/8/10/14 cycles. Do not multiply this into a floating-array rate.
+  Generic synthesis reports 8,234 cells / 428 sequential / zero latches and zero
+  cells disabled; 17 widening properties + 8 control assertions (12-step control
+  bound) are not induction, full arithmetic proof, physical area or STA. Remote scalar tests
+  retain an audited existing-vendor lint baseline, not blanket lint closure.
+- `ai-native-eval` is host/B3 functional interop, not guest execution or RTL
+  timing. `ai-desc-formats` verifies helpers **and the actual descriptor engine**:
+  illegal modes fail before operand fetch; legacy INT + EW=1 uses effective INT4
+  for both grant and GEMM handoff. The parse guard is small combinational logic,
+  with no added state, clock, reset, DTS or capability. Live grant/PE masks are
+  still 3 (INT8/INT4); software fixtures and the default-off scalar primitive do
+  not establish floating GEMM or ISA F/D conformance. This increment adds neither
+  fused requantization nor non-GEMM arithmetic; existing spine operations are unchanged.
+- Software safety covers invalid C/done destinations, device-overlay rejection
+  and sticky completion errors. Floating GEMM loaders/array integration and
+  full-system grant validation are still required. For stateful FP integration,
+  audit `testmode_i` through the wrapper/vendor boundary; a port alone is not
+  scan/ATPG closure. No new clock/reset domain is claimed.
+- **Open sign-off blockers:** prior full-core `alu` range-select and issue/commit
+  declaration-order errors; two moved-core-type branding failures; DFT/test-mode
+  audit, PDK STA, physical area/power and full compliance. Package/standalone
+  greens and recorded historical SoC runs do not constitute a fresh full-SoC pass.
 
 ## 2. Configuration & parameterization
 

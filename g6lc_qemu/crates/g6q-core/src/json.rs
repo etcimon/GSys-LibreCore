@@ -193,7 +193,7 @@ impl<'a> Parser<'a> {
 
     fn skip_ws(&mut self) {
         while let Some(c) = self.peek() {
-            if c.is_whitespace() {
+            if matches!(c, ' ' | '\t' | '\r' | '\n') {
                 self.advance();
             } else {
                 break;
@@ -240,7 +240,9 @@ impl<'a> Parser<'a> {
             self.skip_ws();
             self.expect(':')?;
             let val = self.value()?;
-            map.insert(key, val);
+            if map.insert(key.clone(), val).is_some() {
+                return Err(format!("duplicate object key `{key}`"));
+            }
             self.skip_ws();
             match self.peek() {
                 Some(',') => {
@@ -299,28 +301,40 @@ impl<'a> Parser<'a> {
                     Some('r') => out.push('\r'),
                     Some('t') => out.push('\t'),
                     Some('u') => {
-                        let mut code = String::new();
-                        for _ in 0..4 {
-                            if let Some(c) = self.advance() {
-                                code.push(c);
-                            } else {
-                                return Err("truncated \\u escape".to_string());
+                        let mut n = self.unicode_unit()?;
+                        if (0xd800..=0xdbff).contains(&n) {
+                            self.expect('\\')?;
+                            self.expect('u')?;
+                            let low = self.unicode_unit()?;
+                            if !(0xdc00..=0xdfff).contains(&low) {
+                                return Err("invalid low surrogate".into());
                             }
+                            n = 0x10000 + ((n - 0xd800) << 10) + low - 0xdc00;
                         }
-                        let n = u32::from_str_radix(&code, 16)
-                            .map_err(|_| format!("bad \\u escape `{code}`"))?;
-                        if let Some(c) = char::from_u32(n) {
-                            out.push(c);
-                        } else {
-                            return Err(format!("invalid unicode scalar {n}"));
-                        }
+                        out.push(
+                            char::from_u32(n)
+                                .ok_or_else(|| format!("invalid unicode scalar {n}"))?,
+                        );
                     }
                     other => return Err(format!("bad escape `\\{other:?}`")),
                 },
+                Some(c) if c < '\u{0020}' => return Err("unescaped control character".into()),
                 Some(c) => out.push(c),
                 None => return Err("unterminated string".to_string()),
             }
         }
+    }
+
+    fn unicode_unit(&mut self) -> Result<u32, String> {
+        let mut value = 0;
+        for _ in 0..4 {
+            let digit = self
+                .advance()
+                .and_then(|c| c.to_digit(16))
+                .ok_or("invalid unicode escape")?;
+            value = (value << 4) | digit;
+        }
+        Ok(value)
     }
 
     fn bool(&mut self) -> Result<Json, String> {
@@ -357,6 +371,10 @@ impl<'a> Parser<'a> {
             }
         }
         let text = &self.src[start..self.pos];
+        let digits = text.strip_prefix('-').unwrap_or(text);
+        if digits.len() > 1 && digits.starts_with('0') {
+            return Err(format!("leading zero in integer `{text}`"));
+        }
         text.parse::<i64>()
             .map(Json::Int)
             .map_err(|_| format!("bad integer `{text}`"))
@@ -384,6 +402,24 @@ fn escape_into(s: &str, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strict_request_json_and_surrogate_pairs() {
+        for invalid in [
+            r#"{"m":1,"m":2}"#,
+            "01",
+            "-01",
+            "\"line\nbreak\"",
+            "\u{00a0}1",
+            r#""\ud800""#,
+        ] {
+            assert!(Json::parse(invalid).is_err(), "{invalid:?}");
+        }
+        assert_eq!(
+            Json::parse(r#""\ud834\udd1e""#).unwrap(),
+            Json::str(char::from_u32(0x1d11e).unwrap().to_string())
+        );
+    }
 
     #[test]
     fn scalars_render() {

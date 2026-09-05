@@ -450,8 +450,12 @@ fn build_ai_island_model(flist: &g6q_flist::Expansion) -> Option<g6q_core::model
         .find(|f| f.ends_with("g6lc_ai_cap_window.sv"))
     {
         if let Ok(cap_text) = std::fs::read_to_string(cap_path) {
-            config.dtype_mask = g6q_diag::ai_cap::parse_cap_window_dtype_mask(&cap_text);
-            config.block_mnk = g6q_diag::ai_cap::parse_cap_window_block_mnk(&cap_text);
+            config.dtype_mask = config
+                .dtype_mask
+                .or_else(|| g6q_diag::ai_cap::parse_cap_window_dtype_mask(&cap_text));
+            config.block_mnk = config
+                .block_mnk
+                .or_else(|| g6q_diag::ai_cap::parse_cap_window_block_mnk(&cap_text));
             if let Some(packed) =
                 g6q_diag::ai_cap::parse_cap_window_packed(&cap_text, &config.cap_offsets)
             {

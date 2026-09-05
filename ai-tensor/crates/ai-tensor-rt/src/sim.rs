@@ -80,43 +80,8 @@ impl SimDevice {
         r.contains(addr, len.max(1), need_r, need_w)
     }
 
-    fn execute_gemm_s8(&mut self, d: &Desc64) -> Result<(), RtError> {
-        let m = d.m as usize;
-        let n = d.n as usize;
-        let k = d.k as usize;
-        let lda = d.lda() as usize;
-        let ldb = d.ldb() as usize;
-        if lda < k || ldb < n {
-            return Err(RtError::BadPtr("ld"));
-        }
-        let a_bytes = m.saturating_mul(lda);
-        let b_bytes = k.saturating_mul(ldb);
-        let c_bytes = m.saturating_mul(n).saturating_mul(4);
-        if !self.check_ptr(0, d.ptr_a, a_bytes as u64, true, false)
-            || !self.check_ptr(0, d.ptr_b, b_bytes as u64, true, false)
-            || !self.check_ptr(0, d.ptr_c, c_bytes as u64, false, true)
-        {
-            return Err(RtError::BadPtr("gemm buf"));
-        }
-        if !self.caps.compute_ref {
-            return Ok(());
-        }
-        let oa = self.off(d.ptr_a)?;
-        let ob = self.off(d.ptr_b)?;
-        let oc = self.off(d.ptr_c)?;
-        for i in 0..m {
-            for j in 0..n {
-                let mut acc: i32 = 0;
-                for t in 0..k {
-                    let av = self.mem[oa + i * lda + t] as i8 as i32;
-                    let bv = self.mem[ob + t * ldb + j] as i8 as i32;
-                    acc += av * bv;
-                }
-                let out_i = oc + (i * n + j) * 4;
-                self.mem[out_i..out_i + 4].copy_from_slice(&acc.to_le_bytes());
-            }
-        }
-        Ok(())
+    fn execute_gemm_native(&mut self, d: &Desc64) -> Result<(), RtError> {
+        crate::numfmt::execute_memory(&mut self.mem, MEM_BASE, d, self.caps.compute_ref)
     }
 
     fn run_job(&mut self, qid: u8, ticket: u32, d: &Desc64) -> Completion {
@@ -152,12 +117,16 @@ impl SimDevice {
                 status: ST_BAD_QID,
             };
         };
-        let m = d.m as u64;
-        let n = d.n as u64;
-        let k = d.k as u64;
-        let a_len = m * d.lda() as u64;
-        let b_len = k * d.ldb() as u64;
-        let c_len = m * n * 4;
+        if crate::numfmt::check_desc_format(d, self.caps.dtype_mask).is_err() {
+            return Completion { ticket, status: ai_tensor_abi::ST_BAD_FMT };
+        }
+        let layout = match crate::numfmt::Layout::from_desc(d) {
+            Ok(l) => l,
+            Err(_) => return Completion { ticket, status: ST_BAD_PTR },
+        };
+        let a_len = layout.a_bytes as u64;
+        let b_len = layout.b_bytes as u64;
+        let c_len = layout.c_bytes as u64;
         if !self.check_ptr(q, d.ptr_a, a_len, true, false)
             || !self.check_ptr(q, d.ptr_b, b_len, true, false)
             || !self.check_ptr(q, d.ptr_c, c_len, false, true)
@@ -169,7 +138,8 @@ impl SimDevice {
         }
         if d.ptr_done != 0
             && self.wr_cpl_en
-            && !self.check_ptr(q, d.ptr_done, 8, false, true)
+            && (!self.check_ptr(q, d.ptr_done, 8, false, true)
+                || crate::numfmt::memory_range(d.ptr_done, MEM_BASE, 8, self.mem.len()).is_err())
         {
             return Completion {
                 ticket,
@@ -177,7 +147,7 @@ impl SimDevice {
             };
         }
 
-        if let Err(_) = self.execute_gemm_s8(d) {
+        if let Err(_) = self.execute_gemm_native(d) {
             return Completion {
                 ticket,
                 status: ST_BAD_PTR,
@@ -185,7 +155,7 @@ impl SimDevice {
         }
 
         // Approximate bus beats for observability (not cycle-accurate RTL PMU).
-        let bytes_r = (d.m as u64) * (d.lda() as u64) + (d.k as u64) * (d.ldb() as u64);
+        let bytes_r = a_len + b_len;
         let bytes_w = (d.m as u64) * (d.n as u64) * 4;
         let bpb = (self.caps.noc_width / 8).max(1) as u64;
         self.pmu = PmuSnapshot {

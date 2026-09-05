@@ -6,6 +6,7 @@
 // You may obtain a copy of the License at https://solderpad.org/licenses/
 //
 // Original Author: Jean-Roch COULON - Thales
+// Modified by: Etienne Cimon — optional AI island policy codec configuration.
 
 package config_pkg;
 
@@ -147,6 +148,9 @@ package config_pkg;
     bit          RequantEn;   // funct3=100 requantise / activate group
     bit          SparseEn;    // funct3=110 gather / expert-select group
     bit          UmodeEn;     // allow U-mode issue (aiperm[0] reset value)
+    bit          PolicyCodecEn;
+    bit          PolicyBenefitEn;
+    bit          IslandFpEn;
     // Datatype options. These are GRANT gates, not encodings: aicfg carries the
     // request, and ai.setcfg downgrades to the nearest supported value rather
     // than trapping (isa-encoding.md s3.1), so software is portable across
@@ -973,6 +977,13 @@ package config_pkg;
     assert (!((Cfg.AiCfg.RequantEn || Cfg.AiCfg.SparseEn || Cfg.AiCfg.UmodeEn) &&
               !Cfg.AiCfg.MatrixEn));
     assert (!(Cfg.AiCfg.Queues > 0 && !Cfg.AiCfg.MatrixEn));
+    assert (!(Cfg.AiCfg.PolicyCodecEn && (!Cfg.AiCfg.MatrixEn || Cfg.AiCfg.Queues == 0)))
+      else $error("AiCfg.PolicyCodecEn requires the matrix plane and a T2 queue");
+    assert (!(Cfg.AiCfg.PolicyBenefitEn && !Cfg.AiCfg.PolicyCodecEn))
+      else $error("AiCfg.PolicyBenefitEn requires the policy codec");
+    assert (!(Cfg.AiCfg.IslandFpEn && (!Cfg.AiCfg.MatrixEn || Cfg.AiCfg.Queues == 0 ||
+              !Cfg.RVF || !Cfg.RVD)))
+      else $error("AiCfg.IslandFpEn requires the matrix plane, a T2 queue, RVF and RVD");
     assert (!((Cfg.AiCfg.Int4En || Cfg.AiCfg.Sparse24En) && !Cfg.AiCfg.MatrixEn));
     // Numeric formats. The mask and the two legacy grant bits describe the same
     // thing, so they must not disagree: software may read either, and a part

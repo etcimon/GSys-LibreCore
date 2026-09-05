@@ -39,6 +39,12 @@ pub fn parse_ai_desc_pkg(text: &str) -> Result<AiDescLayout, String> {
                 layout.desc_bytes = value as u64;
             } else if name == "DESC_VERSION" || name == "DESCVERSION" || name == "DESC_VER" {
                 layout.version = Some(value as u64);
+            } else if name == "DESC_B_K_MAJOR" {
+                layout.operand_b_k_major = match value {
+                    0 => Some(false),
+                    1 => Some(true),
+                    _ => return Err("DESC_B_K_MAJOR must be 0 or 1".into()),
+                };
             } else if name.starts_with("OP_") {
                 layout.ops.insert(name, value as u64);
             } else if name.starts_with("ST_") {
@@ -626,6 +632,24 @@ fn parse_dtype_comment(text: &str) -> Option<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn b_major_fact_is_explicit_optional_and_boolean() {
+        let base = "package p; localparam int DescVersion = 2; endpackage";
+        assert_eq!(parse_ai_desc_pkg(base).unwrap().operand_b_k_major, None);
+        for (value, want) in [("0", false), ("1", true), ("1'b1", true)] {
+            let text = format!("package p; localparam int DESC_B_K_MAJOR = {value}; endpackage");
+            let layout = parse_ai_desc_pkg(&text).unwrap();
+            assert_eq!(layout.operand_b_k_major, Some(want));
+            assert_eq!(
+                layout.to_json().get("operand_b_k_major"),
+                &g6q_core::Json::Bool(want)
+            );
+        }
+        assert!(
+            parse_ai_desc_pkg("package p; localparam int DESC_B_K_MAJOR = 2; endpackage").is_err()
+        );
+    }
 
     #[test]
     fn parses_reference_package() {

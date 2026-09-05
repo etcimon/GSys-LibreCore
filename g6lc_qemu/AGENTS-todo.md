@@ -20,6 +20,69 @@ contract, the pin in `pins.toml` plus the document it names.
 
 ---
 
+## DMA destination validation follow-up (complete)
+
+Preserved the native evaluator and the subsequent mode-legality/INT4-alias changes.
+Six initial regressions were observed failing before the production fixes: C alignment,
+completion sinks, guest pending/fence/poll error status and restored device overlays.
+Normal-RAM classification now excludes every overlapping device and conservatively
+refuses empty/overflowing ranges. GEMM validates full C coverage/alignment and nonnull
+completion sinks before producing C writes, including completion sinks for skipped ops.
+
+Guest C/completion write boundaries now check errors and update the existing completion
+and event status without allocating another ticket or changing descriptor pointers.
+Queue fences only finish pending entries, so repeat fences cannot erase DMA failures
+or advance the tail twice. Pointer failures report published ST_BAD_PTR, falling back
+to ST_ERR; existing version/op/format/shape precedence is retained. Queue-fence
+bookkeeping still does not replace the MMIO/direct GEMM computation route.
+
+Validation: focused `cargo test -p g6q-vm` **170 passed, 0 failed, 1 ignored**;
+`python tools/g6q.py check` **OK**, 607 workspace tests passed, 0 failed, 1 optional
+benchmark ignored. Independence (80 files), bridge selftest, fmt and clippy green.
+The release `float_specials_and_nonfused_rounding` discriminator passed unchanged;
+no arithmetic barriers or float changes were added. The native fixture result in
+`out/tensor-eval-dma.json` is byte-identical to `out/tensor-eval-wrapper.json`
+(`git diff --no-index` exit 0): still 9 executed and 2 legal rejections.
+Tests cover late mapping loss at poll, boundary revalidation, partial-span/no-partial-C
+failure, null sinks, skipped ops and single completion/tail advancement. Only the
+random/reference test fixtures gained explicit C backing memory required by the new
+validation; fixed-K format packing is untouched. Scope: MIT/std-only B3 software;
+no root, RTL, ai-tensor, dependency, grant or schema changes.
+
+## Native tensor evaluation pass (complete)
+
+Architecture/CLI.md and architecture/AI_BRIDGE.md defined the native descriptor
+route before implementation. Added `tensor-eval` to the Rust CLI and Python primary
+wrapper; `bridge evaluate` forwards source flags and can export source-buffer policy
+samples. Results embed the full model, status/grant decisions and native C bytes.
+`operand_b_k_major: Option<bool>` is ingested only from `DESC_B_K_MAJOR`; new evaluation
+requires true. Legacy unresolved stand-ins keep their old stride interpretation.
+
+B3 canonicalizes NaN C, always rejects SP24 and caches decoded RAM operands while
+retaining scalar MMIO ordering, separate f32 multiply/add and wrapping integer sums.
+Independent scalar comparisons cover every dense format, padded/asymmetric shapes,
+random bits, special values, non-FMA rounding and late faults. Scratch stays bounded
+and model-derived; the 4-GiB DRAM relocation test needs just 216 bytes for its small job.
+Fixed two grant-ingest hazards: 32-bit SV hex literals were not read by ai_cfg, and
+cap-window parsing could overwrite published package facts with None. No live grants
+were widened; the new 0xfb fixture is explicitly software exploration.
+
+Validation: `python tools/g6q.py check` **OK**, 595 tests passed, 0 failed, one optional
+host benchmark ignored by the normal gate; independence 80 files, fmt/clippy and
+bridge selftest green. `python tools/g6q.py doctor` exit 0 on Windows, Cargo 1.85.0;
+only optional Spike is missing, no installation performed. The primary-wrapper and
+bridge fixture invocations both returned exit 0, 9 executed / 2 legal rejections.
+Host-only release benchmark passed separately: 3.95x..28.16x over per-MAC scalar
+baseline, with complete per-format microseconds in architecture/AI_BRIDGE.md.
+
+A live convenience ingest with only `--repo-root E:/cva6 --target g6lc64_ai` resolved
+`soc.ai_island=null` and evaluation correctly refused. The host must pass a manifest
+that actually contains the island config/descriptor/instruction packages; this is not
+permission to use fixture grants for a live target. B1 guest/RTL timing and floating
+exception-flag verification remain separate. MIT/std-only, no host imports, no RTL
+edits, no GPL linkage. Rustfmt also normalized pre-existing wrapping in CLI loader
+and BIOS-emission expressions so the full-package formatting gate could pass.
+
 ## Latest pass — Q6 functional island + control surface (2026-09)
 
 **The ingest could not read the live design at all, and nothing had noticed.** Every

@@ -111,6 +111,37 @@ wait(ticket | irq, timeout) -> Completion
 
 ---
 
+## 4a. Native scalar reference APIs
+
+```python
+from ai_tensor.numfmt import gemm_native, pack_bits, decode_bits
+c32 = gemm_native(a_bytes, b_kmajor_bytes, m, n, k, numfmt,
+                  lda=None, ldb=None, dtype_mask=0x00fb)
+```
+
+This stable dependency-free API returns **bytes**, not converted Python floats or ints.
+`pack_bits(rows, numfmt, ld=None)` packs already-known native bit patterns without defining
+new quantization/overflow rules. `decode_bits(bits, numfmt)` exposes exact widening for
+reference tests. All binary inputs/outputs are little-endian; native FP32 arrays may be
+supplied via a framework byte view without a numeric conversion.
+
+`Device('software-reference-v2').gemm_native(a, b, m, n, k, numfmt, lda=None, ldb=None)`
+uses the same contract with caps/tile checks. `Device('sim')` remains conservative unless
+software-reference caps are explicitly selected. `QemuUioSession.gemm_native` stages the
+native bytes, submits the v2 descriptor through the existing latch/MMIO route and returns
+C32 bytes. It reads the dtype grant mask from CAP `0x28` and does not grant FP itself.
+`run_gemm_native(dev, m, n, k, a, b, fmt, lda, ldb, ticket)` is the Rust equivalent,
+returning `(Vec<u8>, Completion)`; SimDevice and SoftIsland share one `numfmt` module.
+
+This is a functional reference, not a cycle/timing model or a full QEMU guest. Model
+loading, JSON evaluator glue and generated g6lc_qemu evaluation belong to consumers
+outside this package. Generic byte paths never demote to INT8. Legacy explicit S8
+framework convenience functions retain their intentional int8 conversions. Virt-card's
+matrix convenience transport remains S8-only and rejects non-INT descriptors; its native
+byte API is not implemented. Generic native methods report that limitation rather than
+reinterpret bytes. Native non-S8 multi-tile/streaming and FP hardware loader integration
+remain separate work.
+
 ## 5. Memory profiles
 
 | Profile | Description |

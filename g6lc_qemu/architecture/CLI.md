@@ -37,6 +37,51 @@ evidence (`architecture/ai-matrix/hard-tests.md`). RTL pins stay on `test --ai-r
 
 ---
 
+## Native tensor evaluation
+
+`g6q tensor-eval --request JOBS.json --result RESULT.json` accepts the normal design
+source flags (`--target`, `--config-pkg`, `--flist`, `--dts`, `--repo-root`, etc.).
+The request schema is `g6q.tensor-eval.v1`, with `jobs` containing objects with required
+`id`, `m`, `n`, `k`, `numfmt`, `a_hex`, `b_hex` and optional `lda`, `ldb`,
+`opcode_class`. Dimensions are positive u32; strides default to K and count elements.
+A is row-major [m,k], B is k-major [n,k]. INT4 rows round up to whole bytes.
+Unknown fields, invalid hex, overflow and excessive requests are malformed errors.
+The model must publish `desc_layout.operand_b_k_major=true`, version, numeric-format
+flags and status codes; unresolved or false layout is refused, never guessed.
+
+The result schema is `g6q.tensor-eval-result.v1`, backend `b3-descriptor-executor`.
+It embeds the full model and source/profile stamp and reports per-job `id`, `numfmt`,
+`status`, `status_name`, `executed`, `rejected`, `C_hex`, `descriptor_hex`, geometry
+and strides. Legal unsupported/ungranted jobs remain in the result with ST_BAD_FMT,
+empty C and an aggregate `failed_count`; these do not make the process fail.
+Malformed requests or unresolved model contracts return nonzero, with no success claim.
+This is native functional evaluation, not QEMU guest execution and not RTL cycles.
+
+Limits: 32 MiB request text, 1..256 jobs, unique nonempty IDs at most 256 UTF-8 bytes,
+64 Mi MACs across a request, 64 MiB scratch per job, 4096 descriptor bytes. Strides
+must fit the published `ld_ab` halves (1..65535). Buffers must cover every logical
+element and may include the final row's stride padding: length is between
+`(rows-1)*row_bytes(stride)+row_bytes(k)` and `rows*row_bytes(stride)` inclusive.
+No hex prefix or whitespace; little-endian elements; INT4 low nibble first.
+Unknown/SP24 formats require syntactically valid hex but no invented storage encoding.
+If a numeric selector cannot fit the published flag field, ST_BAD_FMT is returned
+with empty `descriptor_hex` and reason `numfmt-not-representable`, rather than a
+truncated selector executed as another format. Malformed-result JSON has `error` and
+an empty jobs array; I/O errors are also nonzero. No partial successes are published.
+
+Standalone software exploration (from the package directory):
+
+```text
+python tools/g6q.py tensor-eval --target tensor-software-exploration --config-pkg fixtures/ai/ai_soc_config_pkg.sv --flist fixtures/ai/eval-manifest.f --dts fixtures/ai/board.dts --request fixtures/ai/tensor-eval-jobs.json --result out/tensor-eval-result.json
+python tools/ai_tensor_bridge.py evaluate --binary target/debug/g6lc-qemu.exe --target tensor-software-exploration --config fixtures/ai/ai_soc_config_pkg.sv --flist fixtures/ai/eval-manifest.f --dts fixtures/ai/board.dts --request fixtures/ai/tensor-eval-jobs.json --result out/tensor-eval-result.json --policy-trace-out out/tensor-policy.json
+```
+
+On Unix omit `.exe`; create the output directory if absent. `g6q.py run` is the
+existing guest-run wrapper, not a generic verb dispatcher; use `g6q.py tensor-eval`,
+`cargo -- run -p g6q-cli -- tensor-eval ...`, or the built binary for this native verb.
+`--config` aliases `--config-pkg`.
+The fixture mask 0xfb is software exploration only, never a live hardware grant.
+
 ## 1. Design selection
 
 | Option | Default | Source of truth |

@@ -31,6 +31,21 @@ that hazard is what the test is about, not because it was observed in a particul
 | `ai/g6lc_ai_desc_pkg.sv` | a packed descriptor package with `desc_t`, `bits_to_desc`, `desc_to_bits`, `make_completion`, per-field `desc_dtype`/`desc_accmode`/`desc_ew`/`desc_sp24` accessors **and** a stale combined type comment | descriptor layout, completion geometry, and the accessor-beats-comment rule for the arithmetic-type subfields |
 | `ai/g6lc_ai_instr_pkg.sv` | a minimal custom-instruction package with `ai.enq`/`ai.poll`/`ai.qfence` encodings | instruction-set ingestion |
 
+## Native numeric exploration
+
+`ai/eval-manifest.f` selects the invented `eval_g6lc_ai_desc_pkg.sv` and
+`eval_g6lc_ai_island_cfg_pkg.sv`, plus the existing instruction fixture. The descriptor
+publishes version 2 and `DESC_B_K_MAJOR=1`; the software-only format mask is 0xfb.
+This is not a hardware capability override. The legacy `ai/manifest.f` stays unchanged.
+
+`ai/tensor-eval-jobs.json` exercises all seven dense formats, asymmetric and padded
+geometry, FP32 signaling NaN, SP24 rejection and an unrepresentable selector. The
+first seven jobs share golden C = [[1,2,3],[3,4,7]]; the padded INT8 job produces
+[[6],[15]], NaN produces `0000c07f`, and the last two jobs produce no C. The result
+has 9 executed and 2 failed jobs, exit 0. CLI invocations are in architecture/CLI.md.
+The CLI tests relocate both DRAM (a 4-GiB window with only 216 scratch bytes needed
+for the asymmetric jobs) and descriptor field offsets to catch hard-coded addresses.
+
 ## Rules for adding a fixture
 
 - Invent the content. If you need a hazard from a real tree, reproduce the *hazard*, not

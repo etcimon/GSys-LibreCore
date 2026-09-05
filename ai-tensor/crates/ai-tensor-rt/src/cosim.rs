@@ -238,7 +238,7 @@ pub fn run_external_cosim_checks() -> Option<Result<(String, String), RtError>> 
 pub fn check_desc_pack_golden() -> Result<(), RtError> {
     let d = Desc64::gemm(8, 8, 8).with_ptrs(0x8001_0000, 0x8001_1000, 0x8001_2000, 0x8001_3000);
     let b = d.pack();
-    if b[0..4] != [1, 0, 1, 0] {
+    if b[0..4] != [2, 0, 1, 0] {
         return Err(RtError::Msg("desc header golden".into()));
     }
     if b[8..12] != [8, 0, 0, 0] {

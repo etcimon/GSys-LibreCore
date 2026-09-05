@@ -76,7 +76,7 @@ impl Queue {
 pub fn desc_for_tile(
     tile: &GemmTile,
     full_k: u32,
-    full_n: u32,
+    _full_n: u32,
     ptr_a_base: u64,
     ptr_b_base: u64,
     ptr_c_tile: u64,
@@ -85,7 +85,7 @@ pub fn desc_for_tile(
 ) -> Desc64 {
     // Byte offsets: A i8, B i8
     let a_off = (tile.i0 as u64) * (full_k as u64) + (tile.t0 as u64);
-    let b_off = (tile.t0 as u64) * (full_n as u64) + (tile.j0 as u64);
+    let b_off = (tile.j0 as u64) * (full_k as u64) + (tile.t0 as u64);
     let mut d = Desc64::gemm(tile.tm, tile.tn, tile.tk).with_ptrs(
         ptr_a_base + a_off,
         ptr_b_base + b_off,
@@ -93,7 +93,7 @@ pub fn desc_for_tile(
         ptr_done,
     );
     // lda = full K so rows of A stride past the k-tile window; ldb = full N for B.
-    d.ld_ab = full_k | (full_n << 16);
+    d.ld_ab = full_k | (full_k << 16);
     if irq {
         d = d.with_irq(true);
     }
@@ -120,7 +120,8 @@ pub fn plan_gemm_s8_stream<D: Device>(
     if a.len() < need_a || b.len() < need_b {
         return Err(RtError::BufferOob);
     }
-    if m == 0 || n == 0 || k == 0 {
+    crate::numfmt::check_format(ai_tensor_abi::NumFmt::Int, dev.caps().dtype_mask)?;
+    if m == 0 || n == 0 || k == 0 || k > 0xffff {
         return Err(RtError::Msg("zero dimension".into()));
     }
 
@@ -152,7 +153,7 @@ pub fn plan_gemm_s8_stream<D: Device>(
     dev.program_region(queue.qid, reg)?;
 
     let a_bytes: Vec<u8> = a[..need_a].iter().map(|x| *x as u8).collect();
-    let b_bytes: Vec<u8> = b[..need_b].iter().map(|x| *x as u8).collect();
+    let b_bytes: Vec<u8> = (0..n as usize).flat_map(|j| (0..k as usize).map(move |t| b[t * n as usize + j] as u8)).collect();
     dev.write_mem(pa, &a_bytes)?;
     dev.write_mem(pb, &b_bytes)?;
     dev.write_mem(pc, &vec![0u8; max_c])?;
@@ -249,7 +250,7 @@ pub fn run_gemm_stream_plan_ex<D: Device>(
                 );
                 let dst = ((job.tile.i0 as usize + ii) * plan.n as usize)
                     + (job.tile.j0 as usize + jj);
-                c[dst] = c[dst].saturating_add(v);
+                c[dst] = c[dst].wrapping_add(v);
             }
         }
     }
@@ -357,8 +358,8 @@ mod tests {
         let d = desc_for_tile(&t, 8, 16, 0x1000, 0x2000, 0x3000, 0x4000, false);
         assert_eq!(d.m, 2);
         assert_eq!(d.lda(), 8);
-        assert_eq!(d.ldb(), 16);
+        assert_eq!(d.ldb(), 8);
         assert_eq!(d.ptr_a, 0x1000 + 2 * 8 + 1);
-        assert_eq!(d.ptr_b, 0x2000 + 1 * 16 + 4);
+        assert_eq!(d.ptr_b, 0x2000 + 4 * 8 + 1);
     }
 }

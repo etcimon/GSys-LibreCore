@@ -147,7 +147,7 @@ module g6lc_ai_desc_engine
   assign gemm_k_o     = desc_q.k;
   assign gemm_lda_o   = desc_q.ld_ab[15:0];
   assign gemm_ldb_o   = desc_q.ld_ab[31:16];
-  assign gemm_numfmt_o= desc_numfmt(desc_q);
+  assign gemm_numfmt_o= desc_compute_numfmt(desc_q);
   assign gemm_ptr_a_o = AddrWidth'(desc_q.ptr_a);
   assign gemm_ptr_b_o = AddrWidth'(desc_q.ptr_b);
   assign gemm_ptr_c_o = AddrWidth'(desc_q.ptr_c);

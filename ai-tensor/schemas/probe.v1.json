@@ -56,7 +56,8 @@
         "noc_width": { "type": "integer", "minimum": 8 },
         "clusters": { "type": "integer", "minimum": 1 },
         "queues": { "type": "integer", "minimum": 1 },
-        "queue_depth": { "type": "integer", "minimum": 1 }
+        "queue_depth": { "type": "integer", "minimum": 1 },
+        "dtype_mask": { "type": "integer", "minimum": 0, "maximum": 65535 }
       },
       "additionalProperties": false
     },

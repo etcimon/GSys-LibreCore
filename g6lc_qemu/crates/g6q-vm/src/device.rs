@@ -588,11 +588,12 @@ impl AiQueue {
 
     /// Fence: complete all outstanding entries.
     pub fn qfence(&mut self) -> usize {
-        for e in self.entries.iter_mut() {
+        let mut n = 0;
+        for e in self.entries.iter_mut().filter(|e| !e.done) {
             e.done = true;
             e.status = 0;
+            n += 1;
         }
-        let n = self.entries.len();
         self.tail = (self.tail + n as u64) % self.depth;
         n
     }
@@ -1260,7 +1261,11 @@ impl AiIsland {
     /// memory. The writes are returned rather than performed here because `AiIsland` may be
     /// borrowed from the same `PhysMem` that owns the memory to be written.
     pub fn queue_qfence(&mut self) -> Vec<(u64, u64)> {
+        let pending = self.pending_queue_completions();
         let n: usize = self.queues.iter_mut().map(AiQueue::qfence).sum();
+        if n == 0 {
+            return Vec::new();
+        }
         let ok = self.codes.ok;
         let cfg = self
             .ai_model
@@ -1271,9 +1276,10 @@ impl AiIsland {
         // event this fence completes, store the per-event values, and leave the device
         // state as the last completed event so `pmuread` matches RTL sticky semantics.
         let mut last_pmu = (0u32, 0u32, 0u32, 0u32);
-        let len = self.events.len();
-        for i in 0..n {
-            if let Some(ev) = self.events.get_mut(len.saturating_sub(1).saturating_sub(i)) {
+        for (ticket, _) in &pending {
+            if let Some(ev) = self.events.iter_mut().find(|e| e.ticket == *ticket as u32) {
+                ev.done = true;
+                ev.status = ok;
                 last_pmu = Self::pmu_values_for_event(ev, &cfg);
                 (
                     ev.pmu_r_beats,
@@ -1289,20 +1295,73 @@ impl AiIsland {
             self.pmu_cycles,
             self.pmu_gbps_x1000,
         ) = last_pmu;
-        for ev in self.events.iter_mut().rev().take(n) {
-            ev.done = true;
-            ev.status = ok;
+        for (ticket, _) in &pending {
+            for q in &mut self.queues {
+                if let Some(entry) = q.entries.iter_mut().find(|e| e.ticket == *ticket) {
+                    entry.status = ok as u32;
+                }
+            }
         }
-        self.events
+        pending
+            .into_iter()
+            .filter(|(_, ptr)| *ptr != 0)
+            .map(|(ticket, ptr)| (ptr, self.pack_completion_word(ticket, ok as u64)))
+            .collect()
+    }
+
+    pub(crate) fn pending_queue_completions(&self) -> Vec<(u64, u64)> {
+        self.queues
             .iter()
-            .rev()
-            .take(n)
-            .filter(|ev| ev.ptr_done != 0)
-            .map(|ev| {
-                let word = self.pack_completion_word(ev.ticket as u64, ev.status as u64);
-                (ev.ptr_done, word)
+            .flat_map(|q| &q.entries)
+            .filter(|e| !e.done)
+            .map(|entry| {
+                let ptr = self
+                    .events
+                    .iter()
+                    .find(|ev| ev.ticket == entry.ticket as u32)
+                    .map_or(0, |ev| ev.ptr_done);
+                (entry.ticket, ptr)
             })
             .collect()
+    }
+
+    fn dma_failure_status(&self) -> u16 {
+        self.ai_model
+            .as_ref()
+            .map(crate::gemm::bad_pointer_status)
+            .unwrap_or(self.codes.disabled)
+    }
+
+    pub(crate) fn fail_pending_dma(&mut self) {
+        if self.status == self.codes.ok {
+            let status = self.dma_failure_status();
+            self.status = status;
+            self.last_status = status;
+            if let Some(ev) = self.events.last_mut() {
+                ev.status = status;
+            }
+        }
+    }
+
+    pub(crate) fn fail_queue_dma(&mut self, ticket: u64) -> u64 {
+        let failure = self.dma_failure_status();
+        let mut status = None;
+        for q in &mut self.queues {
+            if let Some(entry) = q.entries.iter_mut().find(|e| e.ticket == ticket && e.done) {
+                if entry.status == self.codes.ok as u32 {
+                    entry.status = failure as u32;
+                }
+                status = Some(entry.status as u16);
+            }
+        }
+        if let Some(status) = status {
+            if let Some(ev) = self.events.iter_mut().find(|e| e.ticket == ticket as u32) {
+                ev.status = status;
+            }
+            self.status = status;
+            self.last_status = status;
+        }
+        self.queue_poll_details(ticket).0
     }
 
     /// Capability words the guest may read, as offset -> value.
@@ -1775,6 +1834,7 @@ pub(crate) mod tests {
             desc_layout: AiDescLayout {
                 desc_bytes: 64,
                 version: None,
+                operand_b_k_major: None,
                 fields,
                 ops: Default::default(),
                 statuses,

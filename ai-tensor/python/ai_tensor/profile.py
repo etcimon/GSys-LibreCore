@@ -20,6 +20,8 @@ class Profile:
     acc_tile_n: int = 256
     acc_tile_k: int = 256
     macs_per_cycle: int = 256
+    contract_version: int = 2
+    dtype_mask: int = 1
     mmio_base: Optional[int] = None
     plic_source: Optional[int] = None
     wait_policy: str = "poll"
@@ -86,6 +88,10 @@ class Profile:
                 p.acc_tile_k = int(v, 0)
             elif k == "macs_per_cycle":
                 p.macs_per_cycle = int(v, 0)
+            elif k == 'contract_version':
+                p.contract_version = int(v, 0)
+            elif k == 'dtype_mask':
+                p.dtype_mask = int(v, 0)
             elif k == "mmio_base":
                 p.mmio_base = int(v, 0)
             elif k == "plic_source":
@@ -94,4 +100,8 @@ class Profile:
                 p.wait_policy = v
             elif k == "submit_mode":
                 p.submit_mode = v
+        if p.contract_version != 2 or 't2_desc_v1' in p.features:
+            raise ValueError('profile requires an unsupported descriptor version; v2 B k-major required')
+        if not 0 <= p.dtype_mask <= 0xffff:
+            raise ValueError('dtype_mask must be u16')
         return p

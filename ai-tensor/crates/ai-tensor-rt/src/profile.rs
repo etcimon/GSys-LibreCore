@@ -113,6 +113,10 @@ impl Profile {
                 p.raw.insert(k, v);
             }
         }
+        if p.raw.get("contract_version").is_some_and(|v| v != "2")
+            || p.features.iter().any(|f| f == "t2_desc_v1") {
+            return Err(RtError::Msg("profile requires an unsupported descriptor version; v2 B k-major required".into()));
+        }
         Ok(p)
     }
 }
@@ -159,7 +163,7 @@ acc_tile_m = 256
 mmio_base = "0x40000000"
 plic_source = 8
 features = [
-  "t2_desc_v1",
+  "t2_desc_v2",
   "pmu_v1",
 ]
 "#;

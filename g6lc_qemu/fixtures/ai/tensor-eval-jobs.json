@@ -1,0 +1,16 @@
+{
+  "schema": "g6q.tensor-eval.v1",
+  "jobs": [
+    {"id":"int8-asymmetric","m":2,"n":3,"k":2,"numfmt":0,"a_hex":"01020304","b_hex":"010000010101"},
+    {"id":"int4-asymmetric","m":2,"n":3,"k":2,"numfmt":1,"a_hex":"2143","b_hex":"011011"},
+    {"id":"fp8e4m3-asymmetric","m":2,"n":3,"k":2,"numfmt":3,"a_hex":"38404448","b_hex":"380000383838"},
+    {"id":"fp8e5m2-asymmetric","m":2,"n":3,"k":2,"numfmt":4,"a_hex":"3c404244","b_hex":"3c00003c3c3c"},
+    {"id":"fp16-asymmetric","m":2,"n":3,"k":2,"numfmt":5,"a_hex":"003c004000420044","b_hex":"003c00000000003c003c003c"},
+    {"id":"bf16-asymmetric","m":2,"n":3,"k":2,"numfmt":6,"a_hex":"803f004040408040","b_hex":"803f00000000803f803f803f"},
+    {"id":"fp32-asymmetric","m":2,"n":3,"k":2,"numfmt":7,"a_hex":"0000803f000000400000404000008040","b_hex":"0000803f00000000000000000000803f0000803f0000803f"},
+    {"id":"int8-padded-k3","m":2,"n":1,"k":3,"lda":5,"ldb":4,"numfmt":0,"a_hex":"010203aaaa040506","b_hex":"010101"},
+    {"id":"fp32-nan","m":1,"n":1,"k":1,"numfmt":7,"a_hex":"0100807f","b_hex":"0000803f"},
+    {"id":"sp24-rejected","m":1,"n":1,"k":1,"numfmt":2,"a_hex":"","b_hex":""},
+    {"id":"unknown-rejected","m":1,"n":1,"k":1,"numfmt":99,"a_hex":"","b_hex":""}
+  ]
+}

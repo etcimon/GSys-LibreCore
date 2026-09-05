@@ -24,6 +24,7 @@ package g6lc_ai_desc_pkg;
   localparam int unsigned ContractVersion = 2;
   // Ingested name (F2). Keep equal to ContractVersion (engine checks 16'(ContractVersion)).
   localparam logic [15:0] DESC_VERSION = 16'd2;
+  localparam bit DESC_B_K_MAJOR = 1'b1;
 
   // ---------------------------------------------------------------------------
   // OPERAND LAYOUT (normative)
@@ -170,6 +171,17 @@ package g6lc_ai_desc_pkg;
     return d.flags[FLAG_NUMFMT_SHIFT +: FLAG_NUMFMT_WIDTH];
   endfunction
 
+  function automatic logic [2:0] desc_compute_numfmt(input desc_t d);
+    if (desc_numfmt(d) == 3'd0 && desc_ew(d) == 2'd1) return 3'd1;
+    return desc_numfmt(d);
+  endfunction
+
+  function automatic logic desc_compute_mode_legal(input desc_t d);
+    return desc_dtype(d) == 2'd0 && desc_accmode(d) == 2'd0 && !desc_sp24(d) &&
+           desc_numfmt(d) != 3'd2 && desc_ew(d) < 2'd2 &&
+           (desc_numfmt(d) < 3'd3 || desc_ew(d) == 2'd0);
+  endfunction
+
   // Is this descriptor's requested numeric format granted by `mask`
   // (the same bitmap the island publishes at CAP_OFF_DTYPE_MASK)?
   //
@@ -182,7 +194,7 @@ package g6lc_ai_desc_pkg;
   // numerically plausible results for the wrong arithmetic, and nothing
   // downstream could detect it.
   function automatic logic desc_numfmt_granted(input desc_t d, input logic [15:0] mask);
-    return mask[desc_numfmt(d)];
+    return desc_compute_mode_legal(d) && mask[{1'b0, desc_compute_numfmt(d)}];
   endfunction
 
   function automatic logic [3:0] desc_prio(input desc_t d);

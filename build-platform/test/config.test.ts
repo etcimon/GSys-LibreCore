@@ -18,6 +18,26 @@ test("config resolves and validates", async () => {
   }
 });
 
+test("AI policy codec stays an optional remote compartment", async () => {
+  const { config } = await loadConfig();
+  const suite = config.tests.suites.find((s) => s.id === "ai-policy-codec");
+  expect(suite?.script).toBe("verif/regress/ai-policy-codec.sh");
+  expect(suite?.optional).toBe(true);
+  expect(suite?.tools).toEqual([]);
+  expect(config.tests.defaultSuites).not.toContain("ai-policy-codec");
+});
+
+test("AI native evaluation and scalar floating gates stay optional", async () => {
+  const { config } = await loadConfig();
+  for (const id of ["ai-native-eval", "ai-desc-formats", "ai-fp-mac"]) {
+    const suite = config.tests.suites.find((s) => s.id === id);
+    expect(suite?.script).toBe(`verif/regress/${id}.sh`);
+    expect(suite?.optional).toBe(true);
+    expect(suite?.tools).toEqual([]);
+    expect(config.tests.defaultSuites).not.toContain(id);
+  }
+});
+
 test("deepMerge overrides scalars and arrays but merges objects", () => {
   const base = { a: 1, nested: { x: 1, y: 2 }, list: [1, 2, 3] };
   const merged = deepMerge(base, { a: 2, nested: { y: 9 }, list: [4] });

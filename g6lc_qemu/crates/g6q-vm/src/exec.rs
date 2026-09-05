@@ -337,16 +337,42 @@ impl Hart {
         let Some(ev) = mem.ai_island_mut().and_then(|a| a.take_pending_job()) else {
             return;
         };
-        let job = crate::gemm::execute(mem, &ev, &model);
-        for (addr, val) in &job.c_writes {
-            let _ = mem.write_le::<4>(*addr, *val as u32 as u64);
+        let mut job = crate::gemm::execute(mem, &ev, &model);
+        if Self::apply_ai_c_writes(mem, &job.c_writes).is_err() {
+            job.status = crate::gemm::bad_pointer_status(&model);
         }
         let write = mem
             .ai_island_mut()
             .and_then(|a| a.complete_pending_job(ev, job.status));
         if let Some((addr, word)) = write {
-            let _ = mem.write_le::<8>(addr, word);
+            if Self::write_ai_completion(mem, addr, word).is_err() {
+                if let Some(ai) = mem.ai_island_mut() {
+                    ai.fail_pending_dma();
+                }
+            }
         }
+    }
+
+    fn apply_ai_c_writes(mem: &mut PhysMem, writes: &[(u64, i32)]) -> Result<(), MemError> {
+        for (addr, _) in writes {
+            if addr % 4 != 0 || !mem.is_ram_range(*addr, 4) {
+                return Err(MemError::Invalid);
+            }
+        }
+        for (addr, value) in writes {
+            mem.write_le::<4>(*addr, *value as u32 as u64)?;
+        }
+        Ok(())
+    }
+
+    fn write_ai_completion(mem: &mut PhysMem, addr: u64, word: u64) -> Result<(), MemError> {
+        if addr == 0 {
+            return Ok(());
+        }
+        if !crate::gemm::completion_writable(mem, addr) {
+            return Err(MemError::Invalid);
+        }
+        mem.write_le::<8>(addr, word)
     }
 
     /// Run until a halt or `limit` steps, comparing each retired record against a
@@ -2935,11 +2961,16 @@ impl Hart {
     ) -> Result<u64, ExecError> {
         let ticket = self.regs.get(rs1);
         if let Some(ai) = mem.ai_island_mut() {
-            let (word, ptr_done) = ai.queue_poll_details(ticket);
+            let (mut word, ptr_done) = ai.queue_poll_details(ticket);
             // The island writes the completion word to ptr_done only when the entry is done;
             // while pending the guest just sees the 0xffff_ffff sentinel.
-            if ptr_done != 0 && word != 0xffff_ffff {
-                let _ = mem.write_le::<8>(ptr_done, word);
+            if ptr_done != 0
+                && word != 0xffff_ffff
+                && Self::write_ai_completion(mem, ptr_done, word).is_err()
+            {
+                if let Some(ai) = mem.ai_island_mut() {
+                    word = ai.fail_queue_dma(ticket);
+                }
             }
             self.regs.set(rd, word);
             Ok(nx)
@@ -2951,15 +2982,26 @@ impl Hart {
     }
 
     fn execute_ai_qfence(&mut self, mem: &mut PhysMem, nx: u64) -> Result<u64, ExecError> {
-        let writes = if let Some(ai) = mem.ai_island_mut() {
-            ai.queue_qfence()
+        let pending = if let Some(ai) = mem.ai_island_mut() {
+            let pending = ai.pending_queue_completions();
+            ai.queue_qfence();
+            pending
         } else {
             self.fault_addr = 0;
             self.take_trap(2);
             return Ok(self.regs.pc);
         };
-        for (addr, word) in writes {
-            let _ = mem.write_le::<8>(addr, word);
+        for (ticket, ptr) in pending {
+            let word = mem
+                .ai_island_mut()
+                .map(|ai| ai.queue_poll_details(ticket).0);
+            if let Some(word) = word {
+                if Self::write_ai_completion(mem, ptr, word).is_err() {
+                    if let Some(ai) = mem.ai_island_mut() {
+                        ai.fail_queue_dma(ticket);
+                    }
+                }
+            }
         }
         Ok(nx)
     }
@@ -5439,6 +5481,244 @@ mod tests {
             assert_eq!(events[0].descriptor_addr, 0x8000_0000);
             assert!(events[0].done);
         }
+    }
+
+    fn dma_guest_fixture(c_ptr: u64, done_ptr: u64, op: u16) -> (Hart, PhysMem) {
+        use crate::device::AiIsland;
+        use crate::mem::{Device, DeviceKind, Region};
+        let mut h = hart();
+        let mut m = mem();
+        let mut model = crate::device::tests::model_with_control_surface();
+        model.desc_layout.statuses.insert("ST_BAD_PTR".into(), 0x55);
+        let mut ai = AiIsland::new();
+        ai.set_ai_model(&model);
+        ai.version = model.desc_layout.version.unwrap() as u16;
+        ai.op = op;
+        ai.m = 2;
+        ai.n = 2;
+        ai.k = 2;
+        ai.ld_ab = 2 | (2 << 16);
+        ai.ptr_a = 0x9000_0000;
+        ai.ptr_b = 0x9000_1000;
+        ai.ptr_c = c_ptr;
+        ai.ptr_done = done_ptr;
+        m.add(Region::new(0x9000_0000, 0x4000));
+        for offset in 0..4 {
+            m.write_le::<1>(ai.ptr_a + offset, offset + 1).unwrap();
+            m.write_le::<1>(ai.ptr_b + offset, offset + 5).unwrap();
+        }
+        for offset in 0..16 {
+            m.write_le::<1>(0x9000_2000 + offset, 0xa5).unwrap();
+        }
+        for (name, field) in &model.desc_layout.fields {
+            let value = match name.as_str() {
+                "version" => ai.version as u64,
+                "op" => op as u64,
+                "m" | "n" | "k" => 2,
+                "ld_ab" => ai.ld_ab as u64,
+                "ptr_a" => ai.ptr_a,
+                "ptr_b" => ai.ptr_b,
+                "ptr_c" => c_ptr,
+                "ptr_done" => done_ptr,
+                _ => 0,
+            };
+            let addr = 0x9000_0400 + field.offset;
+            match field.size {
+                2 => m.write_le::<2>(addr, value).unwrap(),
+                4 => m.write_le::<4>(addr, value).unwrap(),
+                8 => m.write_le::<8>(addr, value).unwrap(),
+                _ => panic!("fixture field width"),
+            }
+        }
+        m.add_device(Device::new(0x4000_0000, 0x1000, DeviceKind::AiIsland(ai)));
+        h.ai_model = Some(model);
+        h.ai_instr_set = Some(g6q_core::model::AiInstrSet {
+            opcode_custom2: 0x5b,
+            mask_f7f3op: 0xfe00707f,
+            match_enq: 0x0000505b,
+            match_poll: 0x0200505b,
+            match_qfence: 0x0400505b,
+            ..Default::default()
+        });
+        (h, m)
+    }
+
+    fn overlay_dma_device(m: &mut PhysMem, base: u64) {
+        use crate::mem::{Device, DeviceKind};
+        let saved = m.snapshot();
+        let island = m.ai_island().unwrap().clone();
+        let mut restored = PhysMem::new();
+        restored.add_device(Device::new(
+            0x4000_0000,
+            0x1000,
+            DeviceKind::AiIsland(island),
+        ));
+        restored.add_device(Device::new(
+            base,
+            1,
+            DeviceKind::Uart(crate::device::Uart::default()),
+        ));
+        restored.restore(&saved);
+        *m = restored;
+    }
+
+    fn ring_dma_guest(h: &mut Hart, m: &mut PhysMem) {
+        let config = &h.ai_model.as_ref().unwrap().config;
+        m.write_le::<4>(0x4000_0000 + config.reg_offset("ctl").unwrap(), 3)
+            .unwrap();
+        m.write_le::<4>(0x4000_0000 + config.reg_offset("doorbell").unwrap(), 1)
+            .unwrap();
+        m.write_le::<4>(0x8000_0000, 0x13).unwrap();
+        assert_eq!(h.step(m, 64), None);
+    }
+
+    #[test]
+    fn pending_guest_dma_bad_c_reports_failure_without_partial_c() {
+        for c_ptr in [
+            0x9000_2001,
+            0xa000_0000,
+            0x9000_3ff8,
+            0x4000_0140,
+            u64::MAX - 3,
+            0x9000_2000,
+        ] {
+            let (mut h, mut m) = dma_guest_fixture(c_ptr, 0x9000_3000, 1);
+            if c_ptr == 0x9000_2000 {
+                overlay_dma_device(&mut m, c_ptr + 7);
+            }
+            ring_dma_guest(&mut h, &mut m);
+            let ai = m.ai_island().unwrap();
+            assert_eq!(ai.last_status, 0x55, "C={c_ptr:#x}");
+            assert_eq!(ai.status, 0x55);
+            assert_eq!(ai.ticket, 1);
+            assert_eq!(ai.events.len(), 1);
+            assert_eq!(ai.events[0].status, 0x55);
+            assert!(ai.events[0].done);
+            assert_eq!(m.read_le::<8>(0x9000_3000).unwrap(), 1 | (0x55 << 32));
+            let ram = m
+                .snapshot()
+                .into_iter()
+                .find(|r| r.0 == 0x9000_0000)
+                .unwrap()
+                .2;
+            assert_eq!(&ram[0x2000..0x2010], &[0xa5; 16]);
+            assert_eq!(&ram[0x3ff8..0x4000], &[0; 8]);
+            h.run_pending_ai_job(&mut m);
+            assert_eq!(m.ai_island().unwrap().ticket, 1);
+        }
+    }
+
+    #[test]
+    fn pending_guest_dma_bad_completion_rejects_gemm_and_skipped_ops() {
+        for op in [1, 3] {
+            for ptr in [
+                0x9000_3001,
+                0xa000_0000,
+                0x9000_3ffc,
+                0x4000_0000,
+                u64::MAX - 3,
+                0x9000_3000,
+            ] {
+                let (mut h, mut m) = dma_guest_fixture(0x9000_2000, ptr, op);
+                if ptr == 0x9000_3000 {
+                    overlay_dma_device(&mut m, ptr + 7);
+                }
+                ring_dma_guest(&mut h, &mut m);
+                let ai = m.ai_island().unwrap();
+                assert_eq!(ai.status, 0x55, "done={ptr:#x}, op={op}");
+                assert_eq!(ai.events.len(), 1);
+                assert_eq!(ai.events[0].ptr_done, ptr);
+                assert_eq!(ai.events[0].status, 0x55);
+                let ram = m
+                    .snapshot()
+                    .into_iter()
+                    .find(|r| r.0 == 0x9000_0000)
+                    .unwrap()
+                    .2;
+                assert_eq!(&ram[0x2000..0x2010], &[0xa5; 16]);
+            }
+        }
+    }
+
+    #[test]
+    fn queue_dma_failure_is_visible_and_sticky_in_guest_poll() {
+        for ptr in [
+            0x9000_3001,
+            0xa000_0000,
+            0x9000_3ffc,
+            0x4000_0000,
+            0x9000_3000,
+        ] {
+            let (mut h, mut m) = dma_guest_fixture(0x9000_2000, ptr, 3);
+            if ptr == 0x9000_3000 {
+                overlay_dma_device(&mut m, ptr + 7);
+            }
+            h.regs.set(10, 0x9000_0400);
+            let enq = (10 << 15) | (5 << 12) | (5 << 7) | 0x5b;
+            let fence = (2 << 25) | (5 << 12) | 0x5b;
+            let poll = (1 << 25) | (5 << 15) | (5 << 12) | (6 << 7) | 0x5b;
+            for (i, word) in [enq, fence, poll, fence, poll].iter().enumerate() {
+                m.write_le::<4>(0x8000_0000 + i as u64 * 4, *word).unwrap();
+            }
+            for _ in 0..5 {
+                assert_eq!(h.step(&mut m, 64), None);
+            }
+            assert_eq!(h.regs.get(6), 0x55 << 32, "done={ptr:#x}");
+            let ai = m.ai_island_mut().unwrap();
+            assert_eq!(ai.queue_poll(0), Some(0x55 << 32));
+            assert_eq!(ai.events.len(), 1);
+            assert_eq!(ai.events[0].status, 0x55);
+            assert_eq!(ai.events[0].ptr_done, ptr);
+            assert_eq!(ai.events[0].descriptor_addr, 0x9000_0400);
+            assert_eq!(ai.queues[0].tail, 1);
+        }
+    }
+
+    #[test]
+    fn dma_write_boundaries_revalidate_and_do_not_double_complete() {
+        let (h, mut m) = dma_guest_fixture(0x9000_2000, 0x9000_3000, 3);
+        assert!(Hart::apply_ai_c_writes(&mut m, &[(0x9000_2000, 7), (0xa000_0000, 8)]).is_err());
+        assert_eq!(m.read_le::<4>(0x9000_2000).unwrap(), 0xa5a5a5a5);
+        let model = h.ai_model.as_ref().unwrap();
+        let ev = crate::device::AiIsland::read_descriptor_event(&m, 0x9000_0400, 0, model).unwrap();
+        let (ptr, word) = {
+            let ai = m.ai_island_mut().unwrap();
+            ai.wr_cpl_en = true;
+            ai.complete_pending_job(ev, ai.codes.ok).unwrap()
+        };
+        overlay_dma_device(&mut m, ptr + 7);
+        assert!(Hart::write_ai_completion(&mut m, ptr, word).is_err());
+        let ai = m.ai_island_mut().unwrap();
+        ai.fail_pending_dma();
+        ai.fail_pending_dma();
+        assert_eq!(ai.status, 0x55);
+        assert_eq!(ai.last_status, 0x55);
+        assert_eq!(ai.ticket, 1);
+        assert_eq!(ai.events.len(), 1);
+        assert_eq!(ai.events[0].status, 0x55);
+        assert_eq!(ai.events[0].ptr_done, ptr);
+        assert_eq!(ai.completion_word(), 1 | (0x55 << 32));
+    }
+
+    #[test]
+    fn guest_poll_reports_a_completion_mapping_lost_after_fence() {
+        let (mut h, mut m) = dma_guest_fixture(0x9000_2000, 0x9000_3000, 3);
+        h.regs.set(10, 0x9000_0400);
+        let words = [
+            (10 << 15) | (5 << 12) | (5 << 7) | 0x5b,
+            (2 << 25) | (5 << 12) | 0x5b,
+            (1 << 25) | (5 << 15) | (5 << 12) | (6 << 7) | 0x5b,
+        ];
+        for (i, word) in words.iter().enumerate() {
+            m.write_le::<4>(0x8000_0000 + i as u64 * 4, *word).unwrap();
+        }
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(m.ai_island().unwrap().events[0].status, 0);
+        overlay_dma_device(&mut m, 0x9000_3007);
+        assert_eq!(h.step(&mut m, 64), None);
+        assert_eq!(h.regs.get(6), 0x55 << 32);
+        assert_eq!(m.ai_island().unwrap().events[0].status, 0x55);
     }
 
     #[test]

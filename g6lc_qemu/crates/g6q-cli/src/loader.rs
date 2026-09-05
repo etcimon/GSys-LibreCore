@@ -195,8 +195,7 @@ pub fn build(args: &Args) -> Result<(), String> {
 
     if loader == Loader::Bios {
         return Err(
-            "`--loader bios` is built by `g6b design compile`; use `g6q run --loader bios`"
-                .into(),
+            "`--loader bios` is built by `g6b design compile`; use `g6q run --loader bios`".into(),
         );
     }
     let plan = match loader {

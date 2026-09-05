@@ -475,6 +475,20 @@ fn parse_atom(s: &str, syms: &Symbols) -> Result<i64, String> {
         return Err(format!("unresolved constant: {raw}"));
     }
     let s = raw.replace('_', "");
+    if let Some((width, digits)) = s.split_once('\'') {
+        let _ = width
+            .parse::<u32>()
+            .map_err(|_| format!("bad width: {s}"))?;
+        let digits = digits.strip_prefix('s').unwrap_or(digits);
+        let radix = match digits.as_bytes().first() {
+            Some(b'h' | b'H') => 16,
+            Some(b'd' | b'D') => 10,
+            Some(b'b' | b'B') => 2,
+            Some(b'o' | b'O') => 8,
+            _ => return Err(format!("bad literal: {s}")),
+        };
+        return i64::from_str_radix(&digits[1..], radix).map_err(|_| format!("bad literal: {s}"));
+    }
     if let Some(rest) = s.strip_prefix("0x") {
         return i64::from_str_radix(rest, 16).map_err(|_| format!("bad hex integer: {s}"));
     }
@@ -490,6 +504,13 @@ fn parse_atom(s: &str, syms: &Symbols) -> Result<i64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_width_grant_literals_are_not_lost() {
+        for (literal, value) in [("32'hfb", 251), ("32'h0000_0003", 3), ("8'b11111011", 251)] {
+            assert_eq!(eval_field(literal), Ok(value));
+        }
+    }
 
     #[test]
     fn parses_real_ai_island_cfg_package_if_present() {

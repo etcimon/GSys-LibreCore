@@ -134,6 +134,9 @@ package cva6_config_pkg;
       RequantEn: bit'(1),
       SparseEn: bit'(1),
       UmodeEn: bit'(1),
+      PolicyCodecEn: bit'(0),
+      PolicyBenefitEn: bit'(0),
+      IslandFpEn: bit'(0),
       Int4En: bit'(0),
       Sparse24En: bit'(0),
       //  - FormatMask: dense INT8 only, matching Int4En/Sparse24En above and the

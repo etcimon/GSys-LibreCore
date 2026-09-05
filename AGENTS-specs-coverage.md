@@ -139,12 +139,21 @@ required feature above. Status is therefore per-target.
 | AVX-like / server math | CBO full-line + RVB + server package; `_v` + Ara attach live-lintable |
 | RVV / Ara (U10ᵇ) | Partial: live Ara lint + purpose guide + `v` DTS + directed tests; SBI/cosim open |
 | CVXIF coprocessor interface | Implemented & tested (mutex with RVV accelerator) |
+| AI workload policy codec (microarchitecture) | Partial: standalone control/format-aware benefit RTL, production gates off, native-trace replay and independently checked scheduling model; on/off generic synthesis and bounded safety/reachability. No production top instance/consumer, integrated metadata/flush/PMU, tile/bank/tail proof, STA or measured array MAC/s; I3 before I2 unchanged. |
+| AI scalar floating arithmetic (not ISA F/D) | Partial: exact widening plus separate RNE FP32 multiply/add primitive verified with flags, backpressure and cancellation; measured scalar latency/II, generic synthesis, widening properties and bounded control checks only (not induction). Production IslandFpEn off; no floating GEMM loaders/array/grant integration or new ISA F/D conformance evidence. |
+| AI native-format descriptor/host interop | Partial: descriptor-v2 k-major packing and B3 native-byte functional evaluation verified; actual RTL engine mode legality, effective INT4 alias grants/handoff and rejection tested. Live grant/PE masks remain 3 (INT8/INT4 only); software fixtures are not hardware capabilities or throughput. Invalid C/completion destinations, device overlays and sticky completion errors covered in software; this increment adds no fused requantization or non-GEMM arithmetic. |
 | Custom `Xg6lcai` island (I3-lite) | Partial: CAP/GEMM/PMU directed (`ai-matrix-veri`); wrap AR/AW=8; S4 `g6lc_axi_lrsc` eight regular AR/AW; CLASS1 {1,2,4,8} Variane PASS; S4 parks hart 1 (`ai-dt`/`ai-d{1,2,4,8}`); dual-core stripe ELF on N>=2; all-N occupancy `ai-d8`/`ai-sc8`; exclusive `amoadd.d` `ai-dt`/`ai-d1`/`ai-d8`; CLI `test --ai` / `diag run ai` / `test --ai-remote`; class-1 nameplate not measured; QEMU higher-level only |
 | RVFI trace / debug triggers / PMU | Implemented & tested |
 
 ---
 
 ## Headline
+
+AI continuation results do not promote normative ISA coverage or whole-SoC
+readiness: policy/scalar gates remain off in production, floating GEMM integration
+is absent, and prior full-core synthesis/branding blockers, DFT/test-mode audit,
+PDK STA, physical area/power and full compliance remain open. Package, standalone
+RTL and historical SoC results retain their separate scopes.
 
 Fully covered (implemented **and** tested): the RV64GC / RV32 base (I/M/A/F/D/C), CSRs and M/S/U
 privilege, FENCE.I and I/D coherence, PMA, PMP (with Smepmp), Sv32/Sv39 paging, and the core

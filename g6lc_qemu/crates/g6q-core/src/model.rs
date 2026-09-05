@@ -806,6 +806,8 @@ pub struct AiDescLayout {
     /// report "bad version" has nothing to compare against. Absence is recorded rather
     /// than defaulted so the fallback is visible instead of looking model-derived.
     pub version: Option<u64>,
+    #[doc = "Published DESC_B_K_MAJOR fact; None is unresolved, never inferred from version."]
+    pub operand_b_k_major: Option<bool>,
     /// Field name -> layout.
     pub fields: std::collections::BTreeMap<String, DescField>,
     /// Op-code name -> value.
@@ -823,6 +825,10 @@ impl AiDescLayout {
     pub fn to_json(&self) -> Json {
         Json::obj([
             ("desc_bytes", Json::Int(self.desc_bytes as i64)),
+            (
+                "operand_b_k_major",
+                self.operand_b_k_major.map_or(Json::Null, Json::Bool),
+            ),
             (
                 "version",
                 self.version.map_or(Json::Null, |v| Json::Int(v as i64)),

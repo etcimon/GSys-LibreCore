@@ -78,7 +78,7 @@ pub fn soak_queue_depth<D: Device>(
         // Vary pattern slightly per job
         let a0 = (1 + i as i8).wrapping_mul(1);
         dev.write_mem(pa, &[a0 as u8, 2, 3, 4])?;
-        dev.write_mem(pb, &[5, 6, 7, 8])?;
+        dev.write_mem(pb, &[5, 7, 6, 8])?;
         dev.write_mem(pc, &[0u8; 16])?;
         dev.write_mem(pd, &[0u8; 8])?;
         let desc = Desc64::gemm(2, 2, 2).with_ptrs(pa, pb, pc, pd);
@@ -128,7 +128,7 @@ pub fn soak_history_poll<D: Device>(dev: &mut D, n: u32) -> Result<u32, RtError>
         let pc = dev.alloc(16)?;
         let pd = dev.alloc(8)?;
         dev.write_mem(pa, &[1, 2, 3, 4])?;
-        dev.write_mem(pb, &[5, 6, 7, 8])?;
+        dev.write_mem(pb, &[5, 7, 6, 8])?;
         dev.write_mem(pc, &[0u8; 16])?;
         let desc = Desc64::gemm(2, 2, 2).with_ptrs(pa, pb, pc, pd);
         let t = q.next_ticket();
@@ -171,7 +171,7 @@ pub fn soak_ticket_sequence<D: Device>(dev: &mut D, n: u32) -> Result<Vec<Comple
     let pc = dev.alloc(16)?;
     let pd = dev.alloc(8)?;
     dev.write_mem(pa, &[1, 2, 3, 4])?;
-    dev.write_mem(pb, &[5, 6, 7, 8])?;
+    dev.write_mem(pb, &[5, 7, 6, 8])?;
     let desc = Desc64::gemm(2, 2, 2).with_ptrs(pa, pb, pc, pd);
     let mut q = Queue::q0(300);
     for _ in 0..n.max(1).min(32) {

@@ -17,6 +17,7 @@ mod esp_fat;
 mod loader;
 mod pins;
 mod resolve;
+mod tensor_eval;
 
 use args::Args;
 use g6q_core::model::Profile;
@@ -49,6 +50,11 @@ const VERBS: &[Verb] = &[
         name: "gen",
         summary: "ingest a design and emit model / argv / device tree / C",
         stage: "Q1",
+    },
+    Verb {
+        name: "tensor-eval",
+        summary: "evaluate native buffers through B3 descriptors (not guest boot or cycles)",
+        stage: "Q6",
     },
     Verb {
         name: "conform",
@@ -169,6 +175,7 @@ fn dispatch(verb: &str, args: &Args) -> Result<(), String> {
         "gen" => cmd_gen(args),
         "conform" => cmd_conform(args),
         "run" => cmd_run(args),
+        "tensor-eval" => tensor_eval::command(args),
         "dts" => cmd_dts(args),
         "fw" => cmd_fw(args),
         "tandem" => cmd_tandem(args),
@@ -294,8 +301,7 @@ fn emit_bios_spec(model: &TargetModel, args: &Args) -> Result<String, String> {
         })
         .collect();
     let (dram_base, dram_len) = model.soc.dram.unwrap_or((0x8000_0000, 0x4000_0000));
-    let virt = args.value("machine") == Some("g6lc-virt")
-        || matches!(model.profile, Profile::Virt);
+    let virt = args.value("machine") == Some("g6lc-virt") || matches!(model.profile, Profile::Virt);
     let doc = Json::obj([
         ("schema_version", Json::Int(1)),
         ("product", Json::str(&model.target_id)),
@@ -357,11 +363,7 @@ fn emit_bios_spec(model: &TargetModel, args: &Args) -> Result<String, String> {
                         ("access", Json::str(if virt { "kvm" } else { "view" })),
                         (
                             "immutable",
-                            Json::arr(
-                                ["config", "keys", "boot-policy"]
-                                    .into_iter()
-                                    .map(Json::str),
-                            ),
+                            Json::arr(["config", "keys", "boot-policy"].into_iter().map(Json::str)),
                         ),
                         (
                             "power",
@@ -408,10 +410,7 @@ fn emit_bios_spec(model: &TargetModel, args: &Args) -> Result<String, String> {
                 ),
                 (
                     "ooo",
-                    Json::Bool(uarch_flag(
-                        model,
-                        &["OoOEn", "SliceOoOEn", "DeepSpecEn"],
-                    )),
+                    Json::Bool(uarch_flag(model, &["OoOEn", "SliceOoOEn", "DeepSpecEn"])),
                 ),
                 (
                     "stream",
@@ -1027,6 +1026,9 @@ fn print_help() {
     println!("  --version           print version and stage");
     println!("  --help              this message");
     println!("  --demo              print a demonstration target model");
+    println!("  tensor-eval --request JOBS.json --result RESULT.json [design source options]");
+    println!("    Native B3 descriptor execution; not QEMU guest execution or RTL cycles.");
+    println!("    Legal rejections stay in JSON failed_count with exit 0; malformed input/contract errors exit nonzero.");
     println!();
     println!("Package automation (build, test, check) lives in `python tools/g6q.py`.");
 }

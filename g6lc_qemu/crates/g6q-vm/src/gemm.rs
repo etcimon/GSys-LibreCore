@@ -77,6 +77,8 @@ pub enum AiJobReject {
     BadShape,
     /// The descriptor requested an arithmetic mode the capability window does not grant.
     UngrantedDtype,
+    #[doc = "A DMA pointer is unaligned, overflows, or is not backed by writable normal RAM."]
+    BadPointer,
 }
 
 impl AiJobReject {
@@ -87,6 +89,7 @@ impl AiJobReject {
             AiJobReject::BadOp => "bad-op",
             AiJobReject::BadShape => "bad-shape",
             AiJobReject::UngrantedDtype => "ungranted-dtype",
+            AiJobReject::BadPointer => "bad-pointer",
         }
     }
 }
@@ -106,6 +109,14 @@ fn split_ld(ld_ab: u32) -> (u32, u32) {
     (ld_ab & 0xffff, ld_ab >> 16)
 }
 
+pub(crate) fn bad_pointer_status(model: &AiIslandModel) -> u16 {
+    status_of(model, "ST_BAD_PTR", status_of(model, ST_ERR, 1))
+}
+
+pub(crate) fn completion_writable(mem: &PhysMem, ptr: u64) -> bool {
+    ptr == 0 || (ptr % 8 == 0 && mem.is_ram_range(ptr, 8))
+}
+
 /// Whether the descriptor asks for an arithmetic mode beyond dense 8-bit.
 ///
 /// Returns `None` when the flags layout is unresolved, which means the request cannot be
@@ -118,6 +129,18 @@ fn requests_ungranted_mode(model: &AiIslandModel, flags: u32) -> Option<bool> {
     if fl.dtype_combined {
         return None;
     }
+    if let (Some(_), Some(accmode), Some(ew), Some(sp24)) =
+        (fl.numfmt, fl.accmode, fl.ew, fl.sp24_bit)
+    {
+        let dtype = (flags >> fl.dtype_shift) & fl.dtype_mask;
+        return Some(
+            dtype != 0
+                || accmode.extract(flags) != 0
+                || ew.extract(flags) > 1
+                || ((flags >> sp24) & 1) != 0,
+        );
+    }
+    // Compatibility for older, partially unresolved layouts; never guess field positions.
     let ew = fl.ew.map(|f| f.extract(flags)).unwrap_or(0);
     let sp24 = fl.sp24_bit.map(|b| (flags >> b) & 1).unwrap_or(0);
     let dtype = (flags >> fl.dtype_shift) & fl.dtype_mask;
@@ -148,16 +171,33 @@ fn resolve_numfmt(model: &AiIslandModel, flags: u32) -> Result<NumFmt, AiJobReje
     let Some(fl) = model.desc_layout.flags_layout else {
         return Ok(NumFmt::Int);
     };
+    if fl
+        .sp24_bit
+        .is_some_and(|bit| bit < 32 && flags & (1 << bit) != 0)
+    {
+        return Err(AiJobReject::UngrantedDtype);
+    }
     let Some(field) = fl.numfmt else {
         return Ok(NumFmt::Int);
     };
     let raw = field.extract(flags);
-    let fmt = NumFmt::from_abi(raw).ok_or(AiJobReject::UngrantedDtype)?;
+    let mut fmt = NumFmt::from_abi(raw).ok_or(AiJobReject::UngrantedDtype)?;
+    if !fl.dtype_combined {
+        if let Some(ew) = fl.ew {
+            let ew = ew.extract(flags);
+            if ew > 1 || (fmt.is_float() && ew != 0) {
+                return Err(AiJobReject::UngrantedDtype);
+            }
+            if fmt == NumFmt::Int && ew == 1 {
+                fmt = NumFmt::Int4;
+            }
+        }
+    }
     // Absent a published mask, assume the frozen baseline: dense INT8 only. Assuming
     // everything is granted would make the emulator compute formats the design refuses,
     // which is the one divergence that cannot be caught by comparing results.
     let granted = model.config.dtype_mask.unwrap_or(1);
-    if (granted >> fmt.grant_bit()) & 1 == 0 {
+    if fmt == NumFmt::Sp24 || (granted >> fmt.grant_bit()) & 1 == 0 {
         return Err(AiJobReject::UngrantedDtype);
     }
     Ok(fmt)
@@ -210,6 +250,9 @@ pub fn plan(
     }
     let gemm = model.desc_layout.op(OP_GEMM);
     if gemm != Some(ev.op as u64) {
+        if !completion_writable(mem, ev.ptr_done) {
+            return Err((AiJobReject::BadPointer, bad_pointer_status(model)));
+        }
         return Ok(AiJobResult {
             status: ok,
             c_writes: Vec::new(),
@@ -223,7 +266,10 @@ pub fn plan(
     // descriptor can express an ungranted mode either way and demoting silently to INT8
     // would return numerically plausible results for the wrong arithmetic.
     if requests_ungranted_mode(model, ev.flags) == Some(true) {
-        return Err((AiJobReject::UngrantedDtype, status_of(model, ST_ERR, 1)));
+        return Err((
+            AiJobReject::UngrantedDtype,
+            status_of(model, ST_BAD_FMT, status_of(model, ST_ERR, 1)),
+        ));
     }
     let fmt = match resolve_numfmt(model, ev.flags) {
         Ok(f) => f,
@@ -281,10 +327,57 @@ pub fn plan(
     let a_row_stride = row_bytes(fmt, lda as u64);
     let b_row_stride = row_bytes(fmt, ldb as u64);
 
+    let bad = |model: &AiIslandModel| (AiJobReject::BadPointer, bad_pointer_status(model));
+    let span = |rows: u64, stride: u64| {
+        (rows - 1)
+            .checked_mul(stride)
+            .and_then(|v| v.checked_add(row_bytes(fmt, k)))
+            .ok_or_else(|| bad(model))
+    };
+    let a_len = span(m, a_row_stride)?;
+    let b_len = span(n, b_row_stride)?;
+    ev.ptr_a.checked_add(a_len).ok_or_else(|| bad(model))?;
+    ev.ptr_b.checked_add(b_len).ok_or_else(|| bad(model))?;
+    let c_len = m
+        .checked_mul(n)
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| bad(model))?;
+    if ev.ptr_c % 4 != 0
+        || !mem.is_ram_range(ev.ptr_c, c_len)
+        || !completion_writable(mem, ev.ptr_done)
+    {
+        return Err(bad(model));
+    }
+    let reuse = mem.is_ram_range(ev.ptr_a, a_len)
+        && mem.is_ram_range(ev.ptr_b, b_len)
+        && (m + n)
+            .checked_mul(k)
+            .is_some_and(|v| v <= 16 * 1024 * 1024);
+    let decode = |base: u64, rows: u64, stride: u64| -> Result<Vec<Elem>, (AiJobReject, u16)> {
+        let mut values = Vec::with_capacity((rows * k) as usize);
+        for row in 0..rows {
+            for t in 0..k {
+                values.push(
+                    read_elem(fmt, base + row * stride, t, |addr| {
+                        mem.read_le::<1>(addr).ok().map(|v| v as u8)
+                    })
+                    .ok_or_else(|| bad(model))?,
+                );
+            }
+        }
+        Ok(values)
+    };
+    let (a_values, b_values) = if reuse {
+        (
+            decode(ev.ptr_a, m, a_row_stride)?,
+            decode(ev.ptr_b, n, b_row_stride)?,
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let mut c_writes = Vec::with_capacity((m * n) as usize);
-    let bad = |model: &AiIslandModel| (AiJobReject::BadShape, status_of(model, ST_ERR, 1));
     for i in 0..m {
-        let a_row = ev.ptr_a.wrapping_add(i.wrapping_mul(a_row_stride));
+        let a_row = ev.ptr_a + i * a_row_stride;
         for j in 0..n {
             // One accumulator per kind. Integer modes sum in i32 and float modes in f32,
             // matching the 32-bit `C` the ABI defines; see the numfmt module note on why a
@@ -293,18 +386,27 @@ pub fn plan(
             let mut acc_f: f32 = 0.0;
             for t in 0..k {
                 let rd = |addr: u64| mem.read_le::<1>(addr).ok().map(|v| v as u8);
-                let a = read_elem(fmt, a_row, t, rd).ok_or_else(|| bad(model))?;
+                let a = if reuse {
+                    a_values[(i * k + t) as usize]
+                } else {
+                    read_elem(fmt, a_row, t, rd).ok_or_else(|| bad(model))?
+                };
                 // B is k-major, so its row base is fixed by `j` for the whole reduction and
                 // the element index within the row is `t` -- exactly like A. `read_elem` is
                 // index-based and needs no change for either operand or any format.
-                let b_row = ev.ptr_b.wrapping_add(j.wrapping_mul(b_row_stride));
-                let b = read_elem(fmt, b_row, t, rd).ok_or_else(|| bad(model))?;
+                let b_row = ev.ptr_b + j * b_row_stride;
+                let b = if reuse {
+                    b_values[(j * k + t) as usize]
+                } else {
+                    read_elem(fmt, b_row, t, rd).ok_or_else(|| bad(model))?
+                };
                 match (a, b) {
                     (Elem::Int(x), Elem::Int(y)) => {
                         acc_i = acc_i.wrapping_add(x.wrapping_mul(y));
                     }
                     (Elem::Float(x), Elem::Float(y)) => {
-                        acc_f += x * y;
+                        let product = x * y;
+                        acc_f += product;
                     }
                     // read_elem derives the element kind from `fmt` alone, so a mixed pair is
                     // structurally impossible. Refuse rather than pick one: a silent choice
@@ -312,9 +414,7 @@ pub fn plan(
                     _ => return Err(bad(model)),
                 }
             }
-            let c_addr = ev
-                .ptr_c
-                .wrapping_add(i.wrapping_mul(n).wrapping_add(j).wrapping_mul(4));
+            let c_addr = ev.ptr_c + (i * n + j) * 4;
             c_writes.push((c_addr, if fmt.is_float() { pack_c(acc_f) } else { acc_i }));
         }
     }
@@ -331,6 +431,451 @@ mod tests {
     use super::*;
     use crate::mem::{PhysMem, Region};
     use g6q_core::model::{AiDescLayout, AiIslandConfig, DescField};
+
+    fn scalar_baseline(mem: &PhysMem, ev: &AiTensorEvent, fmt: NumFmt) -> Vec<(u64, i32)> {
+        let (lda, ldb) = (ev.ld_ab & 0xffff, ev.ld_ab >> 16);
+        let mut out = Vec::new();
+        for i in 0..ev.m as u64 {
+            for j in 0..ev.n as u64 {
+                let (mut integer, mut float) = (0i32, 0f32);
+                for t in 0..ev.k as u64 {
+                    let rd = |addr| mem.read_le::<1>(addr).ok().map(|b| b as u8);
+                    let a =
+                        read_elem(fmt, ev.ptr_a + i * row_bytes(fmt, lda as u64), t, rd).unwrap();
+                    let b =
+                        read_elem(fmt, ev.ptr_b + j * row_bytes(fmt, ldb as u64), t, rd).unwrap();
+                    match (a, b) {
+                        (Elem::Int(a), Elem::Int(b)) => {
+                            integer = integer.wrapping_add(a.wrapping_mul(b))
+                        }
+                        (Elem::Float(a), Elem::Float(b)) => {
+                            let product = a * b;
+                            float += product;
+                        }
+                        _ => panic!("mixed numeric kinds"),
+                    }
+                }
+                let bits = if fmt.is_float() {
+                    if float.is_nan() {
+                        0x7fc0_0000
+                    } else {
+                        float.to_bits() as i32
+                    }
+                } else {
+                    integer
+                };
+                out.push((ev.ptr_c + (i * ev.n as u64 + j) * 4, bits));
+            }
+        }
+        out
+    }
+
+    fn random_case(fmt: NumFmt, m: u32, n: u32, k: u32, padding: u32) -> (PhysMem, AiTensorEvent) {
+        let lda = k + padding;
+        let ldb = k + padding + 1;
+        let mut state = 0x1234_5678u32;
+        let mut buffer = |len: u64| {
+            let mut bytes = vec![0; len as usize];
+            for byte in &mut bytes {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                *byte = state as u8;
+            }
+            bytes
+        };
+        let mut mem = PhysMem::new();
+        mem.add(Region::from_file(
+            BASE,
+            &buffer(m as u64 * row_bytes(fmt, lda as u64)),
+        ));
+        mem.add(Region::from_file(
+            BASE + 0x10_0000,
+            &buffer(n as u64 * row_bytes(fmt, ldb as u64)),
+        ));
+        mem.add(Region::new(BASE + 0x20_0000, m as u64 * n as u64 * 4));
+        let ev = AiTensorEvent {
+            version: 1,
+            op: 1,
+            m,
+            n,
+            k,
+            ld_ab: lda | (ldb << 16),
+            flags: (fmt as u32) << 20,
+            ptr_a: BASE,
+            ptr_b: BASE + 0x10_0000,
+            ptr_c: BASE + 0x20_0000,
+            ..Default::default()
+        };
+        (mem, ev)
+    }
+
+    #[test]
+    fn dma_destinations_reject_before_any_c_writes() {
+        let (mut mem, original) = fixture();
+        let mut model = model_granting(0xfb);
+        model.desc_layout.statuses.insert("ST_BAD_PTR".into(), 0x55);
+        for offset in 0..16 {
+            mem.write_le::<1>(original.ptr_c + offset, 0xa5).unwrap();
+        }
+        for ptr in [
+            original.ptr_c + 1,
+            BASE + 0x2000,
+            BASE + 0xff8,
+            u64::MAX - 3,
+        ] {
+            let ev = AiTensorEvent {
+                ptr_c: ptr,
+                ..original
+            };
+            let result = execute(&mem, &ev, &model);
+            assert_eq!(result.status, 0x55, "C={ptr:#x}");
+            assert!(result.c_writes.is_empty());
+        }
+        for op in [1, 3] {
+            for ptr in [BASE + 1, BASE + 0x2000, BASE + 0xffc, u64::MAX - 3] {
+                let ev = AiTensorEvent {
+                    op,
+                    ptr_done: ptr,
+                    ..original
+                };
+                let result = execute(&mem, &ev, &model);
+                assert_eq!(result.status, 0x55, "done={ptr:#x}, op={op}");
+                assert!(result.c_writes.is_empty());
+            }
+        }
+        let saved = mem.snapshot();
+        let mut overlay = PhysMem::new();
+        overlay.add_device(crate::mem::Device::new(
+            original.ptr_c + 7,
+            1,
+            crate::mem::DeviceKind::Uart(crate::device::Uart::default()),
+        ));
+        overlay.restore(&saved);
+        let result = execute(&overlay, &original, &model);
+        assert_eq!(result.status, 0x55);
+        assert!(result.c_writes.is_empty());
+        assert_eq!(overlay.snapshot(), saved);
+        let mut ev = original;
+        ev.ptr_c = BASE + 0x500;
+        ev.ptr_done = original.ptr_c;
+        assert_eq!(execute(&overlay, &ev, &model).status, 0x55);
+        model.desc_layout.statuses.remove("ST_BAD_PTR");
+        assert_eq!(execute(&overlay, &ev, &model).status, 1);
+        ev.flags = 2 << 20;
+        assert_eq!(execute(&overlay, &ev, &model).status, 8);
+        ev.version = 2;
+        assert_eq!(execute(&overlay, &ev, &model).status, 2);
+        ev.version = original.version;
+        ev.op = u16::MAX;
+        assert_eq!(execute(&overlay, &ev, &model).status, 3);
+        ev.op = original.op;
+        ev.flags = 0;
+        ev.m = 0;
+        assert_eq!(execute(&overlay, &ev, &model).status, 1);
+        for offset in 0..16 {
+            assert_eq!(mem.read_le::<1>(original.ptr_c + offset).unwrap(), 0xa5);
+        }
+    }
+
+    #[test]
+    fn restored_input_device_overlay_is_not_a_ram_reuse_candidate() {
+        let (mem, ev) = fixture();
+        let mut overlay = PhysMem::new();
+        overlay.add_device(crate::mem::Device::new(
+            ev.ptr_a + 1,
+            1,
+            crate::mem::DeviceKind::Uart(crate::device::Uart::default()),
+        ));
+        overlay.restore(&mem.snapshot());
+        assert!(!overlay.is_ram_range(ev.ptr_a, 4));
+        assert_eq!(
+            plan(&overlay, &ev, &model_granting(0xfb)).unwrap().c_writes,
+            scalar_baseline(&overlay, &ev, NumFmt::Int)
+        );
+    }
+
+    #[test]
+    fn decoded_ram_reuse_matches_scalar_random_formats_and_strides() {
+        for code in [0, 1, 3, 4, 5, 6, 7] {
+            let fmt = NumFmt::from_abi(code).unwrap();
+            for (m, n, k) in [(1, 7, 3), (5, 2, 9), (3, 4, 5), (1, 1, 1)] {
+                for padding in [0, 1, 4] {
+                    let (mem, ev) = random_case(fmt, m, n, k, padding);
+                    let baseline = scalar_baseline(&mem, &ev, fmt);
+                    let optimized = plan(&mem, &ev, &model_granting(0xfb)).unwrap();
+                    assert_eq!(
+                        optimized.c_writes, baseline,
+                        "{fmt:?} {m}x{n}x{k} pad {padding}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn mode_flags(
+        model: &AiIslandModel,
+        fmt: u32,
+        dtype: u32,
+        acc: u32,
+        ew: u32,
+        sparse: u32,
+    ) -> u32 {
+        let fl = model.desc_layout.flags_layout.unwrap();
+        (fmt << fl.numfmt.unwrap().shift)
+            | (dtype << fl.dtype_shift)
+            | (acc << fl.accmode.unwrap().shift)
+            | (ew << fl.ew.unwrap().shift)
+            | (sparse << fl.sp24_bit.unwrap())
+    }
+
+    #[test]
+    fn descriptor_modes_fail_closed_with_wide_grants() {
+        let (mut mem, mut ev) = fixture();
+        for offset in 0..16 {
+            mem.write_le::<1>(ev.ptr_c + offset, 0xa5).unwrap();
+        }
+        for mask in [3, 0xfb, 0xff] {
+            let model = model_granting(mask);
+            for value in 1..4 {
+                for (dtype, acc) in [(value, 0), (0, value)] {
+                    ev.flags = mode_flags(&model, 0, dtype, acc, 0, 0);
+                    let result = execute(&mem, &ev, &model);
+                    assert_eq!(result.status, 8, "flags={:#x} mask={mask:#x}", ev.flags);
+                    assert!(result.c_writes.is_empty());
+                    for offset in 0..16 {
+                        assert_eq!(mem.read_le::<1>(ev.ptr_c + offset).unwrap(), 0xa5);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn descriptor_modes_exhaustive_relocated_model() {
+        let (mem, mut ev) = fixture();
+        for relocated in [false, true] {
+            let mut count = 0;
+            for mask in [1, 3, 0xfb] {
+                let mut model = model_granting(mask);
+                if relocated {
+                    let fl = model.desc_layout.flags_layout.as_mut().unwrap();
+                    fl.dtype_shift = 0;
+                    fl.accmode.as_mut().unwrap().shift = 3;
+                    fl.ew.as_mut().unwrap().shift = 6;
+                    fl.sp24_bit = Some(9);
+                    fl.numfmt.as_mut().unwrap().shift = 25;
+                }
+                for fmt in 0..8 {
+                    for dtype in 0..4 {
+                        for acc in 0..4 {
+                            for ew in 0..4 {
+                                for sparse in 0..2 {
+                                    ev.flags = mode_flags(&model, fmt, dtype, acc, ew, sparse);
+                                    let effective = if fmt == 0 && ew == 1 { 1 } else { fmt };
+                                    let legal = dtype == 0
+                                        && acc == 0
+                                        && sparse == 0
+                                        && fmt != 2
+                                        && ew < 2
+                                        && (fmt < 3 || ew == 0)
+                                        && mask & (1 << effective) != 0;
+                                    let result = plan(&mem, &ev, &model);
+                                    assert_eq!(
+                                        result.is_ok(),
+                                        legal,
+                                        "relocated={relocated} flags={:#x} mask={mask:#x}",
+                                        ev.flags
+                                    );
+                                    if legal {
+                                        assert_eq!(
+                                            resolve_numfmt(&model, ev.flags).unwrap(),
+                                            NumFmt::from_abi(effective).unwrap()
+                                        );
+                                    } else {
+                                        assert_eq!(
+                                            result.unwrap_err(),
+                                            (AiJobReject::UngrantedDtype, 8)
+                                        );
+                                        assert!(execute(&mem, &ev, &model).c_writes.is_empty());
+                                    }
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(count, 3072);
+        }
+    }
+
+    #[test]
+    fn unresolved_legacy_layout_retains_compatibility() {
+        let (mem, mut ev) = fixture();
+        let mut model = model_granting(1);
+        ev.flags = mode_flags(&model, 0, 0, 0, 1, 0);
+        model.desc_layout.flags_layout.as_mut().unwrap().numfmt = None;
+        assert_eq!(execute(&mem, &ev, &model).status, 8);
+        model.config.dtype_mask = Some(3);
+        assert_eq!(resolve_numfmt(&model, ev.flags), Ok(NumFmt::Int));
+        assert_eq!(execute(&mem, &ev, &model).status, 0);
+        model.desc_layout.flags_layout = None;
+        assert_eq!(execute(&mem, &ev, &model).status, 0);
+    }
+
+    #[test]
+    fn descriptor_int4_aliases_compute_odd_k_padded_rows() {
+        let (mut mem, mut ev) = fixture();
+        ev.k = 3;
+        ev.ld_ab = 5 | (5 << 16);
+        for (base, bytes) in [
+            (ev.ptr_a, [0x2f, 0xe3, 0xab, 0xb4, 0xe6, 0xcd]),
+            (ev.ptr_b, [0xd2, 0xe4, 0xab, 0x2f, 0xee, 0xcd]),
+        ] {
+            for (offset, byte) in bytes.iter().enumerate() {
+                mem.write_le::<1>(base + offset as u64, *byte as u64)
+                    .unwrap();
+            }
+        }
+        for (fmt, ew) in [(0, 1), (1, 0), (1, 1)] {
+            for mask in [3, 1, 2, 0xf9, 0xfb, 0xff] {
+                let model = model_granting(mask);
+                ev.flags = mode_flags(&model, fmt, 0, 0, ew, 0);
+                let result = execute(&mem, &ev, &model);
+                if mask & (1 << NumFmt::Int4.grant_bit()) == 0 {
+                    assert_eq!(result.status, 8);
+                    assert!(result.c_writes.is_empty());
+                } else {
+                    assert_eq!(result.status, 0);
+                    assert_eq!(
+                        result.c_writes.iter().map(|(_, v)| *v).collect::<Vec<_>>(),
+                        [4, -1, 47, -26]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_is_never_dense_even_if_granted() {
+        let (mem, mut ev) = fixture();
+        let model = model_granting(0xff);
+        for flags in [2 << 20, 1 << 14] {
+            ev.flags = flags;
+            assert_eq!(
+                plan(&mem, &ev, &model),
+                Err((AiJobReject::UngrantedDtype, 8))
+            );
+            assert!(execute(&mem, &ev, &model).c_writes.is_empty());
+        }
+    }
+
+    #[test]
+    fn wrapping_pointers_and_late_input_faults_produce_no_writes() {
+        let (mem, mut ev) = fixture();
+        let model = model_granting(0xfb);
+        ev.ptr_a = u64::MAX;
+        assert!(execute(&mem, &ev, &model).c_writes.is_empty());
+        ev.ptr_a = BASE + 0xffd;
+        assert!(execute(&mem, &ev, &model).c_writes.is_empty());
+        ev.ptr_a = BASE + 0x100;
+        ev.ptr_c = u64::MAX - 3;
+        assert!(execute(&mem, &ev, &model).c_writes.is_empty());
+    }
+
+    #[test]
+    fn mmio_uses_scalar_fallback() {
+        use crate::mem::{Device, DeviceKind};
+        let (mut mem, mut ev) = fixture();
+        mem.add_device(Device::new(
+            BASE + 0x2000,
+            8,
+            DeviceKind::Uart(crate::device::Uart::default()),
+        ));
+        ev.ptr_a = BASE + 0x2000;
+        assert!(!mem.is_ram_range(ev.ptr_a, 4));
+        assert_eq!(
+            plan(&mem, &ev, &model_granting(0xfb)).unwrap().c_writes,
+            scalar_baseline(&mem, &ev, NumFmt::Int)
+        );
+    }
+
+    #[test]
+    fn float_specials_and_nonfused_rounding() {
+        let mut mem = PhysMem::new();
+        let x = f32::from_bits(0x3f80_0001);
+        let y = f32::from_bits(0x3f7f_fffe);
+        let a: Vec<u8> = [-1f32, x].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let b: Vec<u8> = [1f32, y].iter().flat_map(|v| v.to_le_bytes()).collect();
+        mem.add(Region::from_file(BASE, &a));
+        mem.add(Region::from_file(BASE + 64, &b));
+        mem.add(Region::new(BASE + 128, 4));
+        let mut ev = AiTensorEvent {
+            version: 1,
+            op: 1,
+            m: 1,
+            n: 1,
+            k: 2,
+            ld_ab: 2 | (2 << 16),
+            flags: 7 << 20,
+            ptr_a: BASE,
+            ptr_b: BASE + 64,
+            ptr_c: BASE + 128,
+            ..Default::default()
+        };
+        let model = model_granting(0xfb);
+        assert_ne!(x.mul_add(y, -1.0).to_bits(), 0);
+        assert_eq!(plan(&mem, &ev, &model).unwrap().c_writes[0].1, 0);
+        ev.k = 1;
+        for bits in [
+            0x7f80_0001u32,
+            0xffc1_2345,
+            0x8000_0000,
+            1,
+            0x7f80_0000,
+            0xff80_0000,
+        ] {
+            mem.write_le::<4>(BASE, bits as u64).unwrap();
+            let result = plan(&mem, &ev, &model).unwrap();
+            assert_eq!(result.c_writes, scalar_baseline(&mem, &ev, NumFmt::Fp32));
+            if f32::from_bits(bits).is_nan() {
+                assert_eq!(result.c_writes[0].1, 0x7fc0_0000);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "host-only wall-clock benchmark; not RTL timing"]
+    fn host_decode_reuse_benchmark() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        for code in [0, 1, 3, 4, 5, 6, 7] {
+            let fmt = NumFmt::from_abi(code).unwrap();
+            let (mem, ev) = random_case(fmt, 64, 48, 128, 3);
+            let model = model_granting(0xfb);
+            assert_eq!(
+                plan(&mem, &ev, &model).unwrap().c_writes,
+                scalar_baseline(&mem, &ev, fmt)
+            );
+            let start = Instant::now();
+            for _ in 0..10 {
+                black_box(scalar_baseline(black_box(&mem), black_box(&ev), fmt));
+            }
+            let baseline = start.elapsed();
+            let start = Instant::now();
+            for _ in 0..10 {
+                black_box(plan(black_box(&mem), black_box(&ev), black_box(&model)).unwrap());
+            }
+            let optimized = start.elapsed();
+            println!(
+                "HOST ONLY {fmt:?} 64x48x128 x10 baseline_us={} optimized_us={} speedup={:.2}",
+                baseline.as_micros(),
+                optimized.as_micros(),
+                baseline.as_secs_f64() / optimized.as_secs_f64()
+            );
+        }
+    }
 
     const BASE: u64 = 0x8000_0000;
 

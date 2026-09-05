@@ -33,6 +33,7 @@ from virt_ai_card.driver import (
     FLAG_IRQ,
     STATUS,
     ST_BAD_OP,
+    ST_BAD_FMT,
     ST_DISABLED,
     ST_ERR,
     TICKET,
@@ -82,7 +83,7 @@ def _test_local_driver() -> None:
     bare.stage_tensor("A", GOLDEN_A)
     bare.stage_tensor("B", GOLDEN_B)
     desc_irq = bytearray(DESC_BYTES)
-    desc_irq[0:4] = (1 | (1 << 16)).to_bytes(4, "little")
+    desc_irq[0:4] = (2 | (1 << 16)).to_bytes(4, "little")
     desc_irq[4:8] = FLAG_IRQ.to_bytes(4, "little")
     desc_irq[8:12] = (2).to_bytes(4, "little")
     desc_irq[12:16] = (2).to_bytes(4, "little")
@@ -98,7 +99,7 @@ def _test_local_driver() -> None:
     noirq.stage_tensor("A", GOLDEN_A)
     noirq.stage_tensor("B", GOLDEN_B)
     desc_quiet = bytearray(DESC_BYTES)
-    desc_quiet[0:4] = (1 | (1 << 16)).to_bytes(4, "little")
+    desc_quiet[0:4] = (2 | (1 << 16)).to_bytes(4, "little")
     desc_quiet[8:12] = (2).to_bytes(4, "little")
     desc_quiet[12:16] = (2).to_bytes(4, "little")
     desc_quiet[16:20] = (2).to_bytes(4, "little")
@@ -111,7 +112,7 @@ def _test_local_driver() -> None:
     ld_ok.stage_tensor("A", GOLDEN_A)
     ld_ok.stage_tensor("B", GOLDEN_B)
     desc_ld = bytearray(DESC_BYTES)
-    desc_ld[0:4] = (1 | (1 << 16)).to_bytes(4, "little")
+    desc_ld[0:4] = (2 | (1 << 16)).to_bytes(4, "little")
     desc_ld[8:12] = (2).to_bytes(4, "little")
     desc_ld[12:16] = (2).to_bytes(4, "little")
     desc_ld[16:20] = (2).to_bytes(4, "little")
@@ -120,6 +121,16 @@ def _test_local_driver() -> None:
     ld_ok.write32(DOORBELL, 11 << 8)
     assert ld_ok.read32(DSTATUS) == 0, "matching ld_ab must complete ST_OK"
     ld_ok.claim_done()
+    for flags in (1 << 8, 1 << 10, 1 << 12, 1 << 14, 1 << 20, 5 << 20):
+        unsupported = VirtualUioDevice()
+        unsupported.enable(True)
+        unsupported.stage_tensor("A", GOLDEN_A)
+        unsupported.stage_tensor("B", GOLDEN_B)
+        desc_mode = bytearray(desc_ld)
+        desc_mode[4:8] = flags.to_bytes(4, "little")
+        unsupported.load_desc(bytes(desc_mode))
+        unsupported.write32(DOORBELL, 19 << 8)
+        assert unsupported.read32(DSTATUS) == ST_BAD_FMT, f"unsupported arithmetic flags {flags:#x}"
     ld_bad = VirtualUioDevice()
     ld_bad.enable(True)
     ld_bad.stage_tensor("A", GOLDEN_A)
@@ -151,14 +162,14 @@ def _test_local_driver() -> None:
     desc_ver[16:20] = (2).to_bytes(4, "little")
     bad_ver.load_desc(bytes(desc_ver))
     bad_ver.write32(DOORBELL, 15 << 8)
-    assert bad_ver.read32(DSTATUS) == ST_ERR, "desc version != 1 must complete ST_ERR"
+    assert bad_ver.read32(DSTATUS) == 2, "desc version != 2 must complete ST_BAD_VER"
     print("  qid bound + desc version: ok")
     bad_op = VirtualUioDevice(cap={"queues": 1})
     bad_op.enable(True)
     bad_op.stage_tensor("A", GOLDEN_A)
     bad_op.stage_tensor("B", GOLDEN_B)
     desc_op = bytearray(DESC_BYTES)
-    desc_op[0:4] = (1 | (99 << 16)).to_bytes(4, "little")
+    desc_op[0:4] = (2 | (99 << 16)).to_bytes(4, "little")
     desc_op[8:12] = (2).to_bytes(4, "little")
     desc_op[12:16] = (2).to_bytes(4, "little")
     desc_op[16:20] = (2).to_bytes(4, "little")
@@ -198,7 +209,7 @@ def _test_tcp_path() -> None:
         assert cli.ping()
         assert cli.mmio_read32(0) == 1
         desc = bytearray(DESC_BYTES)
-        desc[0:4] = (1 | (1 << 16)).to_bytes(4, "little")
+        desc[0:4] = (2 | (1 << 16)).to_bytes(4, "little")
         desc[8:12] = (2).to_bytes(4, "little")
         desc[12:16] = (2).to_bytes(4, "little")
         desc[16:20] = (2).to_bytes(4, "little")
@@ -233,7 +244,7 @@ def _test_tcp_path() -> None:
         assert c == GOLDEN_C, f"tcp gemm-by-name mismatch: {c}"
         # packed DESC blob over BAR4 into the existing UIO DESC window (0x140)
         desc = bytearray(DESC_BYTES)
-        desc[0:4] = (1 | (1 << 16)).to_bytes(4, "little")
+        desc[0:4] = (2 | (1 << 16)).to_bytes(4, "little")
         desc[8:12] = (2).to_bytes(4, "little")
         desc[12:16] = (2).to_bytes(4, "little")
         desc[16:20] = (2).to_bytes(4, "little")

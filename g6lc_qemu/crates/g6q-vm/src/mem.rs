@@ -347,6 +347,26 @@ impl PhysMem {
         self.regions.iter_mut().find(|r| r.contains(addr, n))
     }
 
+    pub(crate) fn is_ram_range(&self, addr: u64, len: u64) -> bool {
+        let Some(end) = addr.checked_add(len).filter(|_| len != 0) else {
+            return false;
+        };
+        let Ok(n) = usize::try_from(len) else {
+            return false;
+        };
+        self.devices.iter().all(|d| {
+            d.len != 0
+                && d.base
+                    .checked_add(d.len)
+                    .is_some_and(|device_end| end <= d.base || addr >= device_end)
+        }) && self.region_for(addr, n).is_some_and(|r| {
+            r.base.checked_add(r.len).is_some()
+                && (addr - r.base)
+                    .checked_add(len)
+                    .is_some_and(|offset| offset <= r.data.len() as u64)
+        })
+    }
+
     fn device_for(&self, addr: u64, n: usize) -> Option<&Device> {
         self.devices.iter().find(|d| d.contains(addr, n))
     }
@@ -409,6 +429,30 @@ impl PhysMem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normal_ram_rejects_empty_overflow_and_device_overlays() {
+        let mut m = PhysMem::new();
+        m.add_device(Device::new(
+            0x1045,
+            2,
+            DeviceKind::Uart(crate::device::Uart::default()),
+        ));
+        m.restore(&[(0x1000, 0x100, vec![0xaa; 0x100])]);
+        assert!(m.is_ram_range(0x1000, 0x40));
+        assert!(!m.is_ram_range(0x1040, 8));
+        assert!(!m.is_ram_range(0x1045, 1));
+        assert!(!m.is_ram_range(0x1000, 0));
+        assert!(!m.is_ram_range(u64::MAX - 3, 8));
+        assert!(!m.is_ram_range(0x10fc, 8));
+        assert_eq!(m.read_le::<1>(0x1045).unwrap(), 0);
+        m.devices.push(Device::new(
+            u64::MAX - 1,
+            8,
+            DeviceKind::Uart(crate::device::Uart::default()),
+        ));
+        assert!(!m.is_ram_range(0x1000, 8));
+    }
 
     #[test]
     fn read_write_round_trips_le() {

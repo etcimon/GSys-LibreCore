@@ -6,17 +6,54 @@
 `g6lc_qemu/crates/g6q-vm/src/numfmt.rs`
 
 > **Why this document exists.** The format *contract* is frozen (`numfmt`, the grant mask,
-> `ST_BAD_FMT`) and the *emulator* computes all six formats. The hardware computes INT8 only.
+> `ST_BAD_FMT`) and the *emulator* computes the defined formats. The live hardware computes INT4/INT8.
 > The obvious next step — "add the other formats to the PE" — is the wrong one, for two
-> reasons this document establishes with numbers: the existing INT8 reduction cannot meet
-> timing, and equal throughput across formats is forbidden by memory bandwidth rather than by
-> multiplier area. Both change the development order.
+> reasons explored here: the original INT8 reduction chain needed restructuring, and
+> format-wide throughput depends on memory bandwidth as well as multiplier area. The tree
+> and INT4 path have since landed; floating arithmetic remains an isolated scalar primitive.
+> Structural delay estimates below are historical planning assumptions, not STA results.
 
 ---
 
-## 1. Finding: the INT8 baseline does not close timing
+The independent format-aware policy compartment is described in `README.md` §11.
+`AiCfg.PolicyBenefitEn` enables scheduling metadata and benefit-driven row/column/
+reduction grouping for the seven scalar formats, with native zero classification
+and no floating-point residual skipping. Its matched-format cycle percentages
+come from a validated service model, **not the numeric PE**; they neither complete
+F2–F5 nor authorize a capability-mask change, reassociation or precision loss.
 
-`g6lc_ai_pe_dot.sv` reduces `Lanes` products with a **linear chain**:
+### Ordered floating arithmetic and emulator-evaluation continuation
+
+The implemented arithmetic increment is an optional **scalar** operation
+`RNE(RNE(widen(A) * widen(B)) + acc_fp32)`, using the existing FPnew FP32 unit in
+separate MUL and ADD operations. Exact source widening covers FP8 E4M3/E5M2,
+FP16, BF16 and FP32; integer execution remains on its existing reducer. This does
+not assume BF16 or E4M3 support from a differently named vendor format. The
+`AiCfg.IslandFpEn` gate is off by default and does not itself grant a format in
+the island capability window. Native NaN outputs are canonical quiet FP32 NaN;
+subnormals and signed zero remain significant. Per-operation flags are local
+outputs, not implicit writes to a core's floating-point CSRs.
+
+Descriptor version 2 remains the contract: A is `[m][k]`, B is `[n][k]`, both
+leading dimensions count elements along K. `DESC_B_K_MAJOR` publishes that fact
+for consumers that must not infer layout from square test cases. Conventional
+framework `A @ B` APIs must repack B at the boundary rather than changing their
+mathematical meaning. The g6lc_qemu native evaluation route must derive version,
+field locations, flags and grants from the ingested model; unsupported layouts
+and ungranted formats are refusals, never INT8 reinterpretations.
+
+Software-native evaluation can complete before the remaining T2 floating loader,
+byte-gather, accumulator, DMA and grant integration. Likewise, a scalar primitive
+is not the format-wide array assumed by the policy scheduling model. Its measured
+latency/initiation interval must be reported independently, and F2–F5 stay open
+at island level until integrated GEMM numerical and memory regressions pass.
+
+## 1. Historical finding: the original INT8 reduction chain
+
+Before F0a/F0b, `g6lc_ai_pe_dot.sv` reduced `Lanes` products with a **linear chain**.
+The following analysis motivated the now-landed balanced tree and pipeline; it is
+not a description or timing sign-off of the current reducer:
+
 
 ```systemverilog
 assign partial[0] = $signed(acc_i);
@@ -24,17 +61,18 @@ for (genvar l = 0; l < int'(Lanes); l++)
   assign partial[l+1] = partial[l] + prod[l];   // depth == Lanes
 ```
 
-The header comment says "MAC tree depth ~Lanes", which is two errors in one phrase: it is not
-a tree, and a *tree* would be depth `log2(Lanes)`. At the live `PeLanes = 256`:
+The former header described "MAC tree depth ~Lanes", but the structure was a chain;
+a tree has depth `log2(Lanes)`. The historical comparison at `PeLanes = 256` was:
 
 | Structure | Adder depth | Est. delay @ 32-bit add ≈ 100 ps | Implied f_max |
 |---|---|---|---|
-| chain (today) | **256** | ~25.6 ns | **~39 MHz** |
+| original chain | **256** | ~25.6 ns | **~39 MHz** |
 | balanced tree | **8** | ~0.8 ns | ~1.25 GHz (before the multiplier) |
 
-100 ps for a 32-bit carry-propagate add is optimistic at the 12 nm class this targets, so the
-chain figure is a floor, not an estimate. Against `AGENTS-configuration.md` §1.0a's 1.0 GHz
-island clock the baseline is **off by more than an order of magnitude**.
+The assumed 100 ps per 32-bit carry-propagate add makes the original chain miss the
+1.0 GHz target in `AGENTS-configuration.md` §1.0a by more than an order of magnitude
+in this structural model. These numbers are neither a physical delay bound nor a
+measured clock limit; the current tree still needs library/placement-aware STA.
 
 **Consequence for the format work.** Every format multiplies the multiplier count or width.
 Doing that first would (a) spend area on a datapath that cannot be clocked, and (b) make the
@@ -306,7 +344,7 @@ reduction tree and a second accumulator path — the same F0b-2 pipeline serves 
 4. Edge cases: odd `k` (last byte carries one valid nibble), negative zero, `lda` that is odd
    (packed row stride is not an integer number of bytes), and `ldb` mismatched with `n`.
 
-### 7.6 Sequencer changes: MAC slice landed, load/masks still to land
+### 7.6 Sequencer changes: historical F1 split (now closed)
 
 The MAC-execution slice is in place in `g6lc_ai_gemm_seq`:
 
@@ -318,14 +356,13 @@ The MAC-execution slice is in place in `g6lc_ai_gemm_seq`:
 4. `a_addr` / `b_addr` scale the byte offset of element `t` by `t / 2` and the leading-
    dimension byte stride by `ceil(lda / 2)` for INT4. The live INT8 path is unchanged.
 
-Still open:
+Subsequent F1 closure (see §9):
 
-5. A/B tile load FSM must scale the bytes-per-row count for INT4: `ceil(k / 2)` bytes
-   in the burst and `ceil(lda / 2)` bytes between rows. Currently the load logic treats
-   one AXI byte as one element, so it over-fetches for INT4.
-6. Update `g6lc_ai_island_cfg_pkg::AiIslandDtypeMask` and `AiIslandPeImplMask` to
-   `AiFmtMaskInt8Int4` together once the load path is correct, so the existing
-   `grant ⊆ implemented` assertion stays valid.
+5. The A/B loaders now count `ceil(k / 2)` native bytes and use the corresponding
+   per-row byte strides. The earlier INT4 over-fetch gap is closed.
+6. `g6lc_ai_island_cfg_pkg::AiIslandDtypeMask` and `AiIslandPeImplMask` were raised
+   together to `AiFmtMaskInt8Int4` (`16'h0003`), retaining `grant ⊆ implemented`.
+   Floating formats are not included in this grant.
 
 ---
 
@@ -337,14 +374,23 @@ Still open:
 | F0b-1 accumulator moved out of the PE | **landed and verified.** `g6lc_ai_pe_dot` no longer has `acc_i`/`acc_o`; it is a pure sum-of-products reducer, and `g6lc_ai_gemm_seq` owns `acc_q + pe_sum`. Bit-identical: goldens **1212 cy** and **1673 cy**, unchanged from F0a, 0 assertions |
 | F0b-2 pipeline register | **landed and verified.** `sum_q <= pe_sum`, drain computes `acc_d = (first_q ? '0 : acc_q) + sum_q` and writes `C` at `(sum_i_q, sum_j_q)` if `last_q`. Indices advance at issue rate; the C write and accumulator update lag by one cycle but issue one cycle per MAC. Verified: `ai_gemm_s8_smoke` **1212 cy**, `ai_gemm_s8_4x4_smoke` **1673 cy** (same as F0b-1, so the pipeline is fully hidden for small fixtures), `ai_gemm_s8_lda_smoke` **1212 cy**, `ai_gemm_s8_64x64_smoke` **SUCCESS 93,194 cy** with zero assertions. The trail-store hazard predicted in §5.1 does not appear in these fixtures because the delayed C write still completes before the trail store streams the same row; full trail-store stress is left for the wider flavour sweep |
 | F1 INT4 | **COMPLETE and verified.** PE widening (F1-PE), MAC addressing/stride scaling (F1-sequencer), the §8 k-major operand change, and byte-counting loaders (F1-load) are all landed. Grants raised to `AiFmtMaskInt8Int4` (`16'h0003`) in both `AiIslandDtypeMask` and `AiIslandPeImplMask`. `ai_gemm_s4_smoke` (m=2 n=2 k=4, operands spanning −8..7, negative C) **PASSES 1230 cy**, and all seven INT8 fixtures keep their exact cycle counts. See §9 |
-| F2 FP8 | open |
-| F3 BF16 | open |
-| F4 FP16 | open |
-| F5 FP32 | open |
+| F2 FP8 | E4M3/E5M2 widening and ordered scalar arithmetic verified; floating GEMM integration **open** |
+| F3 BF16 | Exact widening and ordered scalar arithmetic verified; floating GEMM integration **open** |
+| F4 FP16 | Exact widening and ordered scalar arithmetic verified; floating GEMM integration **open** |
+| F5 FP32 | Separate RNE multiply/add primitive verified; floating GEMM integration **open** |
 
-Live `AiIslandPeImplMask` / `AiIslandDtypeMask` remain `16'h0001`, dense INT8, and will until
-F1 lands. The emulator implements all six and refuses all but INT8 against that mask, so the
-model and the hardware do not disagree in the meantime.
+Live `AiIslandPeImplMask` / `AiIslandDtypeMask` are `16'h0003`: INT8 and packed INT4.
+Software references implement seven scalar formats, but execute only those allowed by
+the selected mask. The explicitly named software fixture uses `0x00fb`; it never
+replaces live discovery. SP24 remains unsupported even in that fixture.
+
+The floating primitive is `g6lc_ai_fp_mac.sv` with `include/g6lc_ai_fp_pkg.sv`.
+For 1/2/3/5 pipeline registers, isolated RTL measures 4/6/8/12 cycles to a visible
+result and 6/8/10/14-cycle initiation intervals. Default-off `AiCfg.IslandFpEn`
+does not connect it to `g6lc_ai_gemm_seq`; that sequencer remains integer-only.
+Loaders, byte gathering, ordered accumulation, C stores and integrated grant tests
+are still required before claiming F2–F5 at island level. Reproduction and scope:
+[`README.md` §12](README.md#12-native-model-evaluation-and-exact-floating-arithmetic).
 
 **Not established here.** No STA has been run on either the chain or the tree; the delay
 figures in §1 are structural estimates for *ordering decisions only*, and

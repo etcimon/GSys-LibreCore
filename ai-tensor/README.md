@@ -51,9 +51,56 @@ bun run build-platform/src/cli/index.ts tensor regress \
 Test map: `../architecture/ai-matrix/frameworks-virt-pcie.md`.
 
 
-Default backend is **hostless sim**: packs island-compatible 64 B descriptors, AI-3 region checks,
-optional INT8 reference GEMM, completion word — enough to exercise the software path **before**
-more island RTL.
+Default backend is **hostless sim**: packs island-compatible 64 B descriptors, checks
+AI-3 regions, and executes a reference GEMM with completion reporting. Its default
+grant remains INT8-only; discovered device grants are not replaced by software capabilities.
+
+## Native formats and current status
+
+The package uses **descriptor v2**: A `[m][k]`, native B `[n][k]`, and element-count
+strides `lda/ldb >= k`. Public `A @ B` APIs preserve conventional matrix semantics
+by transposing/repacking B at the boundary. Old v1 profiles/buffers are refused,
+not silently reinterpreted; retained profile filenames contain explicit v2 pins.
+
+Rust SimDevice/SoftIsland and the independent Python reference support signed
+INT4/INT8, FP8 E4M3/E5M2, FP16, BF16 and FP32. Integer C wraps in i32; floating C
+uses ordered, separate binary32 multiply/add with canonical NaN output. The
+`software-reference-v2.toml` mask `0x00fb` is an explicit reference profile, not a
+hardware grant. SP24 and unsupported arithmetic modes are refused. Legacy
+INT/EW1 descriptors require the effective INT4 grant before any computed C write.
+
+```python
+from ai_tensor.numfmt import gemm_native
+
+c32 = gemm_native(bytes([1, 2]), bytes([3, 4]), 1, 1, 2, numfmt=0, dtype_mask=1)
+assert int.from_bytes(c32, "little", signed=True) == 11
+```
+
+For device submission, use `Device.gemm_native` or `QemuUioSession.gemm_native`
+with native buffers and the discovered format mask. Generic Torch/NumPy paths
+preserve matching source dtypes; they do not quantize unsupported input to INT8.
+NumPy coverage skips explicitly when unavailable. TensorFlow remains S8-only,
+virtual-card native-byte transport is not implemented, and non-S8 multi-tile
+streaming and extension import/runtime validation remain open.
+
+### Optimization path and verification
+
+Keep native numerical/layout correctness separate from scheduling. The optional
+host adapter compares this package's reference bytes with a separately built
+`g6lc_qemu tensor-eval`, then exports successful work for RTL policy replay.
+Neither package links the other, and reference support does not enable floating
+GEMM in the physical island. The next hardware-facing step is validated format-aware
+load/store and accumulation, followed by guarded policy consumption and measured
+memory/compute utilization—not silent precision reduction.
+
+`python tools/ait.py test` passes ABI lockstep, 5 ABI / 10 IR / 48 runtime tests,
+external local cosim ping/job, Python reference tests (16 run, one optional NumPy
+skip), 22 QEMU-UIO protocol tests and PyTorch smoke. The virtual-card local/TCP
+smoke also passes unsupported-mode rejection. These are software/protocol checks,
+not an RTL or QEMU guest benchmark. On Windows the external harness needs `sh`
+on the child PATH; Git's `usr/bin` supplies it. Pinned PyO3 0.22.6 rejects Python
+3.14; typechecking passed with an existing Python 3.11 interpreter without bypassing
+that check. See [runtime](architecture/RUNTIME.md) and [versioning](architecture/VERSIONING.md).
 
 ## Layout
 

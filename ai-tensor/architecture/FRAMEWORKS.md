@@ -16,6 +16,15 @@ All frameworks:
 
 No framework-private descriptor layout.
 
+The generic `ai_tensor.torch_ops.gemm` and `ai_tensor.numpy_ops.gemm` functions preserve
+matching operand dtypes, explicitly transpose B to the v2 native `[n][k]` layout and
+submit byte views to `Device.gemm_native`. They return i32 for integers and f32 for floats.
+Unsupported dtype, mixed dtype, big-endian input or oversized native tiles are refused;
+there is no implicit int8 conversion or FP K-split fallback. The explicit `gemm_s8`
+convenience functions retain their documented int8 conversions. TensorFlow remains
+S8-only; no generic native TF lowering is claimed. Pure Python native bytes and
+`pack_bits` require neither NumPy nor PyTorch. See `RUNTIME.md` §4a for API signatures.
+
 ```
 torch.mm / tf.linalg.matmul
         │

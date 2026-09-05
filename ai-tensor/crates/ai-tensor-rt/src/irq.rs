@@ -134,7 +134,7 @@ pub fn soak_irq_wait<D: Device>(dev: &mut D) -> Result<(), RtError> {
     let pc = dev.alloc(16)?;
     let pd = dev.alloc(8)?;
     dev.write_mem(pa, &[1, 2, 3, 4])?;
-    dev.write_mem(pb, &[5, 6, 7, 8])?;
+    dev.write_mem(pb, &[5, 7, 6, 8])?;
     dev.write_mem(pc, &[0u8; 16])?;
     let desc = Desc64::gemm(2, 2, 2)
         .with_ptrs(pa, pb, pc, pd)
@@ -177,7 +177,7 @@ pub fn soak_eventfd_wait<D: Device>(dev: &mut D) -> Result<(), RtError> {
     let pc = dev.alloc(16)?;
     let pd = dev.alloc(8)?;
     dev.write_mem(pa, &[1, 2, 3, 4])?;
-    dev.write_mem(pb, &[5, 6, 7, 8])?;
+    dev.write_mem(pb, &[5, 7, 6, 8])?;
     dev.write_mem(pc, &[0u8; 16])?;
     let desc = Desc64::gemm(2, 2, 2)
         .with_ptrs(pa, pb, pc, pd)
@@ -218,7 +218,7 @@ pub fn soak_eventfd_fifo_multi(dev: &mut crate::MmioDevice) -> Result<(), RtErro
     let pc = dev.alloc(16)?;
     let pd = dev.alloc(8)?;
     dev.write_mem(pa, &[1, 2, 3, 4])?;
-    dev.write_mem(pb, &[5, 6, 7, 8])?;
+    dev.write_mem(pb, &[5, 7, 6, 8])?;
     dev.write_mem(pc, &[0u8; 16])?;
     let desc = Desc64::gemm(2, 2, 2)
         .with_ptrs(pa, pb, pc, pd)

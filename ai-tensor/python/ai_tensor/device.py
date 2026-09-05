@@ -12,7 +12,7 @@ import struct
 
 # --- pure Python ABI (fallback; must match ai-tensor-abi) ---
 DESC_BYTES = 64
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 OP_GEMM = 1
 ST_OK = 0
 
@@ -31,9 +31,14 @@ def pack_gemm_desc(
     ptr_c: int = 0x3000,
     ptr_done: int = 0x4000,
     flags: int = 0,
+    *,
+    lda: int | None = None,
+    ldb: int | None = None,
 ) -> bytes:
     """Pack a 64-byte LE GEMM descriptor (island layout)."""
-    ld_ab = (k & 0xFFFF) | ((n & 0xFFFF) << 16)
+    from .c_abi import pack_desc64
+    validated = pack_desc64(m, n, k, ptr_a, ptr_b, ptr_c, ptr_done, flags, lda=lda, ldb=ldb)
+    ld_ab = struct.unpack_from('<I', validated, 20)[0]
     return struct.pack(
         "<HHI IIII QQQQQ",
         CONTRACT_VERSION,
@@ -62,6 +67,7 @@ class Caps:
     noc_width: int = 64
     clusters: int = 1
     compute_ref: bool = True
+    dtype_mask: int = 1
 
     def as_dict(self) -> Dict[str, Any]:
         return {
@@ -72,6 +78,7 @@ class Caps:
             "noc_width": self.noc_width,
             "clusters": self.clusters,
             "compute_ref": self.compute_ref,
+            "dtype_mask": self.dtype_mask,
         }
 
     def fits(self, m: int, n: int, k: int) -> bool:
@@ -141,8 +148,8 @@ def _normalize_backend(backend: str) -> str:
         return "virt-card"
     if be in ("qemu-uio", "uio", "linux-uio-real", "guest-uio"):
         return "qemu-uio"
-    if be == "sim":
-        return "sim"
+    if be in ('sim', 'software-reference-v2'):
+        return be
     raise ValueError(
         "backend must be 'sim', 'mmio'/'mmio-soft', 'virt-card' or 'qemu-uio' "
         f"(got {backend!r})"
@@ -206,9 +213,15 @@ class Device:
             "AI_TENSOR_BOARD_ID"
         )
 
-        if be == "sim":
+        if be == 'software-reference-v2':
+            self._native = None
+            self._caps = caps or Caps(dtype_mask=0xfb)
+            self.backend = 'software-reference-v2'
+        elif be == "sim":
             if self._native is not None and hasattr(self._native, "Sim"):
-                self._dev = self._native.Sim()
+                if getattr(self._native, 'CONTRACT_VERSION', None) != CONTRACT_VERSION:
+                    raise RuntimeError('native extension must be rebuilt for Desc64 v2')
+                self._dev = self._native.Sim(software_reference=bool(caps and caps.dtype_mask == 0xfb))
                 self.backend = "sim-native"
                 self._refresh_caps_native()
             else:
@@ -256,6 +269,7 @@ class Device:
                 noc_width=c.noc_width,
                 clusters=c.clusters,
                 compute_ref=False,
+                dtype_mask=c.dtype_mask,
             )
             if caps is not None:
                 self._caps = caps
@@ -265,7 +279,9 @@ class Device:
                     "backend='mmio' requires ai_tensor_native.Mmio "
                     "(build: cargo build -p ai-tensor-py && install module)"
                 )
-            self._dev = self._native.Mmio()
+            if getattr(self._native, 'CONTRACT_VERSION', None) != CONTRACT_VERSION:
+                raise RuntimeError('native extension must be rebuilt for Desc64 v2')
+            self._dev = self._native.Mmio(software_reference=bool(caps and caps.dtype_mask == 0xfb))
             self.backend = "mmio-soft-native"
             if hasattr(self._dev, "probe_caps"):
                 self._dev.probe_caps()
@@ -350,7 +366,7 @@ class Device:
                 be = "virt-card"
             else:
                 be = "mmio"
-        elif be not in ("sim", "mmio"):
+        elif be not in ("sim", "mmio", "software-reference-v2"):
             be = "sim"
         caps = Caps(
             acc_tile_m=pr.acc_tile_m,
@@ -360,6 +376,7 @@ class Device:
             noc_width=pr.noc_width,
             clusters=1,
             compute_ref=True,
+            dtype_mask=pr.dtype_mask,
         )
         try:
             dev = cls(be, caps=caps)
@@ -381,6 +398,7 @@ class Device:
             noc_width=int(d.get("noc_width", 64)),
             clusters=int(d.get("clusters", 1)),
             compute_ref=bool(d.get("compute_ref", True)),
+            dtype_mask=int(d.get("dtype_mask", 1)),
         )
 
     def caps(self) -> Caps:
@@ -406,6 +424,24 @@ class Device:
             )
         return self._last_pmu
 
+    def gemm_native(self, a: bytes, b: bytes, m: int, n: int, k: int, numfmt: int,
+                    lda=None, ldb=None, *, ticket: int = 1) -> bytes:
+        from .numfmt import gemm_native, validate_buffers
+        a, b, lda, ldb, _, _, _ = validate_buffers(
+            a, b, m, n, k, numfmt, lda, ldb, self._caps.dtype_mask)
+        if not self._caps.fits(m, n, k):
+            raise ValueError('native GEMM exceeds AccTile; ordered FP K-splitting is unsupported')
+        if self._uio is not None:
+            return self._uio.gemm_native(a, b, m, n, k, numfmt, lda, ldb, ticket=ticket)
+        if self._virt is not None:
+            raise NotImplementedError('virt-card native formats are not implemented; use sim or qemu-uio')
+        if self._dev is not None:
+            if not hasattr(self._dev, 'gemm_native'):
+                raise NotImplementedError('native extension lacks gemm_native; rebuild or use the pure Python reference')
+            return bytes(self._dev.gemm_native(a, b, m, n, k, numfmt, lda, ldb, ticket))
+        out = gemm_native(a, b, m, n, k, numfmt, lda, ldb, self._caps.dtype_mask)
+        return out
+
     def gemm_s8(
         self,
         m: int,
@@ -423,6 +459,10 @@ class Device:
         Returns ``(c_list, ticket, status, meta)`` where meta includes caps/pmu/tiles.
         If dims exceed AccTile and ``auto_tile``, streams tiled jobs and accumulates.
         """
+        from .numfmt import check_format
+        check_format(0, self._caps.dtype_mask)
+        if min(m, n, k) <= 0 or len(a) < m * k or len(b) < k * n:
+            raise ValueError('invalid shape or short S8 operands')
         a8 = [int(x) for x in a]
         b8 = [int(x) for x in b]
         caps = self.caps()
@@ -466,7 +506,9 @@ class Device:
                 return c, last_ticket, status, meta
             for ii in range(tm):
                 for jj in range(tn):
-                    c[(i0 + ii) * n + (j0 + jj)] += partial[ii * tn + jj]
+                    dst = (i0 + ii) * n + (j0 + jj)
+                    value = (c[dst] + partial[ii * tn + jj]) & 0xFFFFFFFF
+                    c[dst] = value - (1 << 32) if value & (1 << 31) else value
             tix = last_ticket + 1
         meta["pmu"] = self.pmu().as_dict()
         meta["backend"] = self.backend
@@ -525,12 +567,10 @@ def _python_gemm_s8(
     m: int, n: int, k: int, a: List[int], b: List[int], ticket: int
 ) -> Tuple[List[int], int, int]:
     """Reference path when native module is not built."""
-    assert len(a) >= m * k and len(b) >= k * n
-    c: List[int] = []
-    for i in range(m):
-        for j in range(n):
-            acc = 0
-            for t in range(k):
-                acc += int(a[i * k + t]) * int(b[t * n + j])
-            c.append(acc)
-    return c, ticket, ST_OK
+    from .numfmt import gemm_native
+    if len(a) < m * k or len(b) < k * n:
+        raise ValueError('operand buffer too short')
+    a_bytes = bytes(x & 255 for x in a)
+    b_bytes = bytes(b[t * n + j] & 255 for j in range(n) for t in range(k))
+    raw = gemm_native(a_bytes, b_bytes, m, n, k, 0)
+    return list(struct.unpack('<' + 'i' * (m * n), raw)), ticket, ST_OK

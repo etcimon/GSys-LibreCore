@@ -90,6 +90,47 @@ g6lc-qemu gen \
 | **B2** | Generated QEMU **TCG plugins** for tracing and microarchitectural modelling | GPL-2.0, separate work |
 | **B3** | A **native Rust** virtual machine — the tandem oracle, deterministic replay, checkpoints | MIT, in this tree |
 
+## Native tensor evaluation and optimization
+
+`tensor-eval` executes native tensor buffers through the **B3 descriptor executor**,
+without booting a guest. The loaded model supplies descriptor version/layout,
+format grants and status codes. It must publish `DESC_B_K_MAJOR=true`: A is
+`[m][k]`, B is `[n][k]`, and both strides count elements along K. Results include
+the model/source stamp, packed descriptors, status and exact C32 bytes, with
+`qemu_guest=false`, `rtl_cycles=false` and `fp_exception_flags=false`.
+
+From this package directory, with an existing toolchain and output directory:
+
+```text
+python tools/g6q.py tensor-eval --target tensor-software-exploration --config-pkg fixtures/ai/ai_soc_config_pkg.sv --flist fixtures/ai/eval-manifest.f --dts fixtures/ai/board.dts --request fixtures/ai/tensor-eval-jobs.json --result out/tensor-eval-result.json
+```
+
+This explicit **software fixture** grants `0x00fb` and exercises INT8, INT4,
+FP8 E4M3/E5M2, FP16, BF16 and FP32; its 11 jobs yield 9 executions and 2 legal
+rejections. It never changes a loaded design's grant mask. SP24, unsupported
+native modes and ungranted formats fail closed rather than becoming INT8.
+Integer results wrap in i32; floating results use ordered, separate f32
+multiply/add and canonical NaNs. C/completion ranges are checked before writes;
+DMA failures remain failures in guest poll/completion records.
+
+The software optimization reuses `(M+N)*K` decoded operands in ordinary RAM
+instead of decoding `2*M*N*K` operands inside the reduction loop. Device overlays
+are excluded and MMIO keeps scalar access order. A matched host benchmark checks
+exact C before timing; its reproduction command and per-format measurements are
+in [AI_BRIDGE](architecture/AI_BRIDGE.md). A faster host evaluator is **not faster
+hardware**, and no array rate or clock frequency is inferred from those timings.
+
+The bridge's `evaluate --policy-trace-out FILE` exports successful-job metadata
+and eight logical native A samples for an external policy consumer. Samples never
+assert an exact-zero proof. This is a replay input, not a learned profiler or
+execution of an RTL policy inside B3. Request/result schemas and source flags are
+specified in [CLI](architecture/CLI.md#native-tensor-evaluation).
+
+Current package gate: `python tools/g6q.py check` passes independence, formatting,
+clippy and **607 workspace tests** (one optional host benchmark ignored). Numerical
+execution through B1/QEMU guests, floating exception flags and physical island
+throughput remain outside this native evaluation result.
+
 ## Two machine profiles
 
 - **`g6lc-soc`** — byte-faithful to the design's SoC package. No PCI, no virtio, the real DRAM window.

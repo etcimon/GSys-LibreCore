@@ -396,8 +396,13 @@ larger reduction; if that is desired later, `ST_CHK` is the wrong check.
 C is packed with `ldc = n` (the descriptor has no `ldc` field). Host tiling of a
 larger logical C therefore writes **packed tiles** and concatenates them; A/B may
 be strided views via `lda`/`ldb`. Directed: `ai_gemm_tile_2x2_smoke` (32³ as 2×2
-tiles of 16×16×32). K-tiling that needs `C += A·B` is not hardware — `accmode` is
-published (F10) but the engine still overwrites C.
+tiles of 16×16×32). K-tiling that needs `C += A·B` is not hardware — the native
+T2 subset is signed, overwrite-only. Nonzero `dtype` or `accmode`, sparse mode,
+reserved EW, and float requests with nonzero EW are refused with `ST_BAD_FMT`.
+Legacy `numfmt=INT` plus `ew=01` resolves to INT4 and requires the INT4 grant;
+explicit `numfmt=INT4` accepts EW zero or one. Raw format extraction and the
+64-byte descriptor layout remain unchanged. Unsupported post-op groups, including
+fused requant, are not made executable by this numeric-format validation.
 
 **The descriptor is self-describing and the engine must not read `aicfg`.** Arithmetic type used to be
 implicit in `aicfg`, which is wrong for an engine whose work outlives the instruction that enqueued it:

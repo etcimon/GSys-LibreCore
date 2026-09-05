@@ -63,7 +63,32 @@ def main() -> int:
         ("AI_TENSOR_CTL_ENABLE", py.CTL_ENABLE),
         ("AI_TENSOR_CTL_WR_CPL_EN", py.CTL_WR_CPL_EN),
     ]
+    for name in ('ST_BAD_FMT', 'FLAG_NUMFMT_SHIFT', 'FLAG_NUMFMT_WIDTH', 'FLAG_NUMFMT_MASK'):
+        checks.append(('AI_TENSOR_' + name, getattr(py, name)))
+    variants = {
+        'Int': 'INT', 'Int4': 'INT4', 'Sp24': 'SP24', 'Fp8E4m3': 'FP8_E4M3',
+        'Fp8E5m2': 'FP8_E5M2', 'Fp16': 'FP16', 'Bf16': 'BF16', 'Fp32': 'FP32',
+    }
+    for name in variants.values():
+        checks.append(('AI_TENSOR_FMT_' + name, getattr(py, 'AI_FMT_' + name)))
     bad = []
+    rust = (ROOT / 'crates/ai-tensor-abi/src/lib.rs').read_text(encoding='utf-8')
+    for name in ('CONTRACT_VERSION', 'FLAG_NUMFMT_SHIFT', 'FLAG_NUMFMT_WIDTH', 'ST_BAD_FMT'):
+        match = re.search(r'pub const ' + name + r': \w+ = (\d+);', rust)
+        if not match or int(match[1]) != getattr(py, name):
+            bad.append(f'Rust/Python {name} mismatch')
+    for variant, name in variants.items():
+        match = re.search(r'^\s*' + variant + r' = (\d+),', rust, re.MULTILINE)
+        if not match or int(match[1]) != getattr(py, 'AI_FMT_' + name):
+            bad.append(f'Rust/Python NumFmt::{variant} mismatch')
+    from ai_tensor.device import CONTRACT_VERSION as device_version, pack_gemm_desc
+    if device_version != py.CONTRACT_VERSION:
+        bad.append('Device/C ABI descriptor version mismatch')
+    import struct
+    for pack in (py.pack_desc64, pack_gemm_desc):
+        blob = pack(2, 3, 5)
+        if struct.unpack_from('<H', blob)[0] != 2 or struct.unpack_from('<I', blob, 20)[0] != 5 | (5 << 16):
+            bad.append('Desc64 v2 default element strides must both be K')
     for hname, pval in checks:
         if hname not in d:
             bad.append(f"header missing {hname}")

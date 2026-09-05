@@ -28,7 +28,7 @@ def probe_dict(
     pmu: Pmu = dev.pmu()
     return {
         "package": "ai-tensor",
-        "abi_rev": "0.1.0",
+        "abi_rev": "2.0.0",
         "profile_id": pr.id,
         "backend": dev.backend,
         "wait_policy": getattr(pr, "wait_policy", "poll") or "poll",
@@ -42,6 +42,7 @@ def probe_dict(
             "macs_per_cycle": caps.macs_per_cycle,
             "noc_width": caps.noc_width,
             "clusters": caps.clusters,
+            "dtype_mask": caps.dtype_mask,
         },
         "pmu": pmu.as_dict(),
         "irq": {

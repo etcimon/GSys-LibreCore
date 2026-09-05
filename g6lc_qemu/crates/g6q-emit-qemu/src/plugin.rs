@@ -1237,6 +1237,7 @@ mod tests {
             desc_layout: AiDescLayout {
                 desc_bytes: 64,
                 version: Some(1),
+                operand_b_k_major: None,
                 fields,
                 ops: std::collections::BTreeMap::new(),
                 statuses: [("ST_OK".into(), 0)].into_iter().collect(),

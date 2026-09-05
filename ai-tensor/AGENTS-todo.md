@@ -143,6 +143,24 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [x] Island CPL FIFO RTL (`g6lc_ai_cpl_fifo` + top; SoftIsland claim=pop head)
 - [ ] Multi-outstanding **compute** (engine still one-at-a-time; FIFO holds finishes)
 
+## Native scalar reference / descriptor v2 pass
+
+- [x] Align Python/C/IR/runtime to Desc64 v2: A `[m][k]`, native B `[n][k]`, both default leading dimensions K in elements; reject v1 rather than reinterpret it. Existing profile filenames retained with new explicit v2 IDs/pins; old `t2_desc_v1` profiles are refused.
+- [x] Shared first-party Rust `numfmt` and pure-Python `ai_tensor.numfmt` references for INT4/INT8/FP8 E4M3/E5M2/FP16/BF16/FP32, ordered non-fused f32 and wrapping i32 C32 outputs; SP24 unsupported even with bit 2 granted.
+- [x] Preserve S8 matrix API mathematics through explicit B packing; validate native buffers/strides/AI-3 and memory extents (including completion pointer) before computed C writes. `Caps.dtype_mask` preserves discovered grants; default mask remains 0x0001.
+- [x] `run_gemm_native`, `Device.gemm_native`, and `QemuUioSession.gemm_native`; CAP 0x28 dtype discovery; `software-reference-v2.toml` explicitly grants 0x00fb only for reference computation. No C binary caps layout changes.
+- [x] Generic torch/NumPy `gemm` preserves matching dtypes via raw byte views and explicit B transpose; unsupported dtypes/backends/FP K-splitting are refused, never demoted. Known-bit packing helper avoids defining new quantization rules.
+- [x] Strengthened C/Python/Rust descriptor version and NumFmt constant check. Added dependency-free reference tests and QemuUio raw protocol tests to `ait.py test`.
+- [x] Virtual S8 wrapper remains functional: v2 pin, non-INT descriptor refusal, refreshed descriptor per tile (including ragged edges), and failed completion no longer returns stale C. Its native byte transport remains unimplemented.
+- [x] Validation: `doctor`, `check-independence` (27 C/Python macros plus Rust comparisons), `cargo test --workspace --exclude ai-tensor-py` (58 tests), optimized `cargo test -p ai-tensor-rt --release` (43), `ait.py test --no-harness`, Python reference unittest (15, one NumPy skip), QemuUio unittest (22), virtual torch unittest (11), virtual local/TCP smoke, and pytest `python/tests` (85 passed, one NumPy skip). PyTorch generic FP16/BF16/FP32 and FP8 byte paths tested without NumPy. `git diff --check` passed.
+- [x] Parent PyO3 validation: `cargo check -p ai-tensor-py --offline` passes with the existing Python 3.11 interpreter selected by `PYO3_PYTHON`. Python 3.14 is correctly refused by pinned PyO3 0.22.6; its version check was not bypassed. Extension build/import under the user's chosen interpreter remains separate from typechecking.
+- [x] External local harness: fixed quoting of interpreter/script paths in `ait.py`; full `ait.py test` passes with Git's `usr/bin` on the child PATH so `sh` is available. Ping and numerical job results are exercised, not skipped. The root `ai-native-eval` host adapter also compares actual B3 descriptor execution to this package under live and software-fixture grants; no QEMU guest/hardware execution is claimed.
+- [x] Descriptor-mode closure: `check_desc_format` is wired before layout/compute in SimDevice and SoftIsland. Unsupported dtype/accmode/EW/SP24 combinations return `ST_BAD_FMT` with C unchanged, and INT/EW1 aliases check the effective INT4 grant. Backend regression spans masks 1/2/3/0xfb. RT now passes 48 tests. Virtual S8 rejects unsupported arithmetic flags rather than evaluating them as signed INT8.
+- [ ] Optional framework/runtime coverage: NumPy and TensorFlow are absent; NumPy generic tests skip explicitly and TF remains S8-only. No new dependencies were installed.
+- [ ] Remaining: native virt-card bytes transport, generic TF, non-S8 multi-tile streaming, and FP hardware loader integration. Historical source comments are retained; ABI-CONTRACT v2 text supersedes old row-major B descriptions.
+
+Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or physical PCIe contracts changed. MIT/Etienne Cimon headers retained or added to first-party code/config; Markdown kept header-free. No out-of-package Rust dependencies. Intermediate failures (missing APIs in new red tests, Rust moved-value/format-argument compile errors, stale virtual ragged-tile C) were corrected and rerun; the remaining denied/unsupported validations above are not soft-passed.
+
 ## Open design notes
 
 - **Completion DMA vs PLIC claim:** island soak keeps `CTL.wr_cpl_en=0` for pure claim tests;

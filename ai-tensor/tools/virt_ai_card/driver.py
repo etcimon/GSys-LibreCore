@@ -53,11 +53,13 @@ CAP_DRAM = 6
 CAP_QUEUES = 7
 CAP_DTYPE = 10
 
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 OP_GEMM = 1
 ST_OK = 0
 ST_ERR = 1
-ST_DISABLED = 2
+ST_DISABLED = 6
+ST_BAD_FMT = 8
+ST_BAD_VER = 2
 ST_BAD_OP = 3
 # isa-encoding.md §7: flags[2] raise IRQ. Matches ingested flags_layout.irq_bit.
 FLAG_IRQ = 1 << 2
@@ -98,8 +100,8 @@ def int8_gemm(
                 # force int8 range for realism
                 if av < -128 or av > 127 or bv < -128 or bv > 127:
                     raise ValueError("int8 range required")
-                acc += av * bv
-            row.append(acc)
+                acc = (acc + av * bv) & 0xffffffff
+            row.append(acc - (1 << 32) if acc & (1 << 31) else acc)
         out.append(row)
     return out
 
@@ -215,7 +217,7 @@ class VirtualUioDevice:
         if cap.get("irq_bit") is not None:
             self._irq_bit = int(cap["irq_bit"]) & 31
         words = [0] * 11
-        words[CAP_VERSION] = int(cap.get("version", CONTRACT_VERSION))
+        words[CAP_VERSION] = int(cap.get("version", 1))
         words[CAP_CLUSTERS] = int(cap.get("clusters", 1))
         words[CAP_MACS] = int(cap.get("macs_per_cycle", cap.get("macs", 256)))
         words[CAP_CLOCK_KHZ] = int(cap.get("clock_khz", 1_000_000))
@@ -348,13 +350,16 @@ class VirtualUioDevice:
             return
         if any(self._desc_words):
             ver = self._desc_words[0] & 0xFFFF
-            if ver not in (0, CONTRACT_VERSION):
-                self._push_completion(self._db_ticket, ST_ERR, False)
+            if ver != CONTRACT_VERSION:
+                self._push_completion(self._db_ticket, ST_BAD_VER, False)
                 return
             op = (self._desc_words[0] >> 16) & 0xFFFF
             if op not in (0, OP_GEMM):
                 self._push_completion(self._db_ticket, ST_BAD_OP, False)
                 return
+        if self._desc_words[1] & ((7 << 20) | (3 << 8) | (3 << 10) | (3 << 12) | (1 << 14)):
+            self._push_completion(self._db_ticket, ST_BAD_FMT, False)
+            return
         # High-level path: if A/B stored via gemm_s8 API, use those; else try DESC dims
         a = self._dram.get("A")
         b = self._dram.get("B")
@@ -372,7 +377,7 @@ class VirtualUioDevice:
                 if ld_ab:
                     lda = ld_ab & 0xFFFF
                     ldb = (ld_ab >> 16) & 0xFFFF
-                    if (lda, ldb) != (k, n):
+                    if (lda, ldb) != (k, k):
                         self._push_completion(self._db_ticket, ST_ERR, False)
                         return
             # FLAG_IRQ from desc flags word if programmed, else default on for soft path
@@ -444,7 +449,7 @@ class VirtualUioDevice:
             n = len(b[0])
             if desc:
                 self._load_desc_unlocked(bytes(desc))
-            if desc or any(self._desc_words):
+            if desc:
                 m_d, n_d, k_d = self._desc_words[2], self._desc_words[3], self._desc_words[4]
                 if (m_d or n_d or k_d) and (m_d, n_d, k_d) != (m, n, k):
                     self._push_completion(ticket, ST_ERR, self.eventfd is not None)
@@ -453,7 +458,7 @@ class VirtualUioDevice:
                 if ld_ab:
                     lda = ld_ab & 0xFFFF
                     ldb = (ld_ab >> 16) & 0xFFFF
-                    if (lda, ldb) != (k, n):
+                    if (lda, ldb) != (k, k):
                         self._push_completion(ticket, ST_ERR, self.eventfd is not None)
                         return ticket
             else:
@@ -464,6 +469,7 @@ class VirtualUioDevice:
                 self._desc_words[2] = m
                 self._desc_words[3] = n
                 self._desc_words[4] = k
+                self._desc_words[5] = k | (k << 16)
                 for i, w in enumerate(self._desc_words):
                     self._pack32(DESC + i * 4, w)
             if not self._enable:
@@ -509,7 +515,7 @@ class VirtualUioDevice:
             except TimeoutError:
                 if not self.done_sticky:
                     raise
-        elif self.eventfd is not None:
+        elif self.eventfd is not None and not self.done_sticky:
             self.eventfd.wait(timeout=timeout)
 
         # Claim DONE before clearing IRQ (document + implement)
@@ -531,6 +537,8 @@ class VirtualUioDevice:
                 if self.eventfd.pending == 0:
                     self.eventfd.signal(1)
 
+        if head.status != ST_OK:
+            raise RuntimeError(f'GEMM completion status {head.status}')
         if head.c_matrix is not None:
             return head.c_matrix
         c = self._dram.get("C")

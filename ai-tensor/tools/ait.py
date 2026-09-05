@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -32,7 +33,7 @@ def run(cmd: list[str], *, cwd: Path | None = None, check: bool = True, env: dic
 def default_cosim_cmd() -> str:
     # Prefer package venv python if present, else current interpreter.
     py = sys.executable
-    return f"{py} {HARNESS}"
+    return shlex.join([Path(py).as_posix(), HARNESS.as_posix()])
 
 
 def cmd_doctor(_: argparse.Namespace) -> None:
@@ -83,6 +84,8 @@ def cmd_test(ns: argparse.Namespace) -> None:
     # Python smoke + goldens (no torch/tf required)
     env_py = os.environ.copy()
     env_py["PYTHONPATH"] = str(ROOT / "python") + os.pathsep + env_py.get("PYTHONPATH", "")
+    run([sys.executable, '-m', 'unittest', 'discover', '-s', 'python/tests', '-p', 'test_native_reference.py'], env=env_py)
+    run([sys.executable, '-m', 'unittest', 'discover', '-s', 'python/tests', '-p', 'test_qemu_uio_backend.py'], env=env_py)
     log("+ python -m ai_tensor")
     r = subprocess.run([sys.executable, "-m", "ai_tensor"], cwd=str(ROOT), env=env_py)
     if r.returncode != 0:

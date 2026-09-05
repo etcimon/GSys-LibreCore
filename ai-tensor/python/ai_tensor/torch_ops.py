@@ -66,6 +66,30 @@ def gemm_s8(
     return c, meta
 
 
+def gemm(a: 'torch.Tensor', b: 'torch.Tensor', *, device: Optional[Device] = None,
+         backend: str = 'sim', ticket: int = 1) -> Tuple['torch.Tensor', dict]:
+    from .c_abi import numfmt_of_dtype
+    import sys
+    if sys.byteorder != 'little':
+        raise NotImplementedError('native torch byte views require a little-endian host')
+    if a.dim() != 2 or b.dim() != 2 or a.shape[1] != b.shape[0]:
+        raise ValueError('expected A[m,k] and B[k,n]')
+    if a.dtype != b.dtype:
+        raise ValueError('native GEMM requires matching operand dtypes')
+    fmt = numfmt_of_dtype(a.dtype)
+    a_native = a.detach().cpu().contiguous()
+    b_native = b.detach().cpu().transpose(0, 1).contiguous()
+    a_bytes = bytes(a_native.view(torch.uint8).reshape(-1).tolist())
+    b_bytes = bytes(b_native.view(torch.uint8).reshape(-1).tolist())
+    m, k = a.shape
+    n = b.shape[1]
+    dev = device or Device(backend)
+    raw = dev.gemm_native(a_bytes, b_bytes, int(m), int(n), int(k), fmt, ticket=ticket)
+    dtype = torch.int32 if fmt < 2 else torch.float32
+    out = torch.frombuffer(bytearray(raw), dtype=dtype).clone().reshape(m, n)
+    return out, {'backend': dev.backend, 'numfmt': fmt, 'status': 0, 'ticket': ticket, 'caps': dev.caps().as_dict()}
+
+
 def check_close_to_torch(
     a: "torch.Tensor",
     b: "torch.Tensor",

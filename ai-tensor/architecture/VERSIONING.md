@@ -108,5 +108,22 @@ Do not multiply profiles per framework — only per **platform capability**.
 | `profiles/sim-v0.toml` | sim | AccTile/Macs=256, NocWidth=64, `pmu_v1`, `compute_ref` |
 | `profiles/island-p3-v1.toml` | linux-uio (M5) | Same geometry; MMIO base `0x4000_0000`; PLIC 8 |
 
-Default CI remains **sim-v0**. M5 selects **island-p3-v1** (or successor) when UIO/map is available.
+The profile **filenames are retained for caller path stability**, but their contents now
+explicitly pin `abi_rev=2.0.0`, `contract_version=2`, `operand_b_layout="k-major"`,
+and `t2_desc_v2`. `sim-v0.toml` now identifies as `sim-v2`;
+`island-p3-v1.toml` identifies as `island-p3-desc-v2`. The latter is a v2 compatibility
+requirement, not a claim that an old v1 device was upgraded. Its MMIO offset-map name
+remains `island_p3_v1` because the offsets did not change. Both retain the conservative
+`dtype_mask=0x0001` pin; real devices must be gated by discovered CAP, not this default.
+The earlier conceptual examples are historical v1 examples and are not accepted as
+executable v2 profiles. Parsers reject explicit non-v2 versions and `t2_desc_v1`.
+
+`profiles/software-reference-v2.toml` is an explicit software-only full scalar reference
+(`0x00fb`, no SP24). Python `Device.from_profile` selects the pure Python reference even
+if an optional native extension is installed. Rust callers select
+`Caps::software_reference_v2()` or `MmioDevice::software_reference_v2()`; the minimal
+Rust profile parser remains metadata, not a device factory. Native PyO3 constructors
+accept `software_reference=True`; old extensions without `CONTRACT_VERSION=2` are refused.
+No C binary caps structure was extended. Package release numbers remain a separate
+release-management step; the wire ABI revision and descriptor version are already explicit.
 

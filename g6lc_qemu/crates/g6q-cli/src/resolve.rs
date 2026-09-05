@@ -293,6 +293,7 @@ pub fn resolve(args: &Args) -> Result<Resolved, String> {
 
     out.sources.target_id = if target.is_empty() {
         args.value("config-pkg")
+            .or_else(|| args.value("config"))
             .and_then(|p| Path::new(p).file_stem().and_then(|s| s.to_str()))
             .unwrap_or("unnamed")
             .trim_end_matches("_config_pkg")
@@ -330,7 +331,7 @@ pub fn resolve(args: &Args) -> Result<Resolved, String> {
     });
 
     // --- configuration package ---------------------------------------------------
-    let cfg_path = match args.value("config-pkg") {
+    let cfg_path = match args.value("config-pkg").or_else(|| args.value("config")) {
         Some(p) => Some(PathBuf::from(p)),
         None => repo_root.as_ref().and_then(|r| {
             if target.is_empty() {

@@ -8,7 +8,7 @@ import struct
 from pathlib import Path
 
 DESC_BYTES = 64
-CONTRACT_VERSION = 1
+CONTRACT_VERSION = 2
 OP_GEMM = 1
 ST_OK = 0
 ST_BAD_PTR = 4
@@ -164,9 +164,18 @@ def pack_desc64(
     ptr_c: int = 0,
     ptr_done: int = 0,
     flags: int = 0,
+    *,
+    lda: int | None = None,
+    ldb: int | None = None,
 ) -> bytes:
     """Pack LE Desc64 matching C/Rust layout."""
-    ld_ab = (k & 0xFFFF) | ((n & 0xFFFF) << 16)
+    lda = k if lda is None else lda
+    ldb = k if ldb is None else ldb
+    if any(not isinstance(x, int) or not 0 < x <= 0xFFFFFFFF for x in (m, n, k)):
+        raise ValueError('dimensions must be positive u32 values')
+    if any(not isinstance(x, int) or not k <= x <= 0xFFFF for x in (lda, ldb)):
+        raise ValueError('leading dimensions must be elements >= K and <= 65535')
+    ld_ab = lda | (ldb << 16)
     return struct.pack(
         "<HHI IIII QQQQQ",
         CONTRACT_VERSION,

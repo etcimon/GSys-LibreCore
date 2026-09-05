@@ -1,7 +1,12 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
 # ai-tensor profile: hostless sim (default CI)
 # Phase A: CAP/PMU/tile fields match live island_p3 (AccTile/Macs=256, Noc=64).
-id = "sim-v0"
-abi_rev = "0.1.0"
+id = "sim-v2"
+abi_rev = "2.0.0"
+contract_version = 2
+operand_b_layout = "k-major"
+dtype_mask = 0x0001
 isa_doc_rev = "monorepo:architecture/ai-matrix/isa-encoding.md"
 island_rev = "none"
 backend = "sim"
@@ -13,7 +18,7 @@ macs_per_cycle = 256
 wait_policy = "poll"
 submit_mode = "latch"
 features = [
-  "t2_desc_v1",
+  "t2_desc_v2",
   "completion_word_v1",
   "ai3_regions",
   "op_gemm",

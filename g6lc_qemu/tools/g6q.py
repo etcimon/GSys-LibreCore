@@ -1155,6 +1155,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     return _cargo(["run", "-p", "g6q-cli", "--", "run", *rest])
 
 
+def cmd_tensor_eval(args: argparse.Namespace) -> int:
+    rest = list(args.rest)
+    if rest and rest[0] == "--":
+        rest = rest[1:]
+    return _cargo(["run", "-p", "g6q-cli", "--", "tensor-eval", *rest])
+
+
 def cmd_cargo(args: argparse.Namespace) -> int:
     return _cargo(list(args.rest))
 
@@ -1848,6 +1855,9 @@ def cmd_clean(args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------------- main ---
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "tensor-eval":
+        return cmd_tensor_eval(argparse.Namespace(rest=argv[1:]))
     ap = argparse.ArgumentParser(
         prog="g6q", description="g6lc_qemu package automation (primary entry point).")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1897,6 +1907,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keep-going", "-k", action="store_true",
                    help="run every step even after a failure")
     p.set_defaults(fn=cmd_check)
+
+    p = sub.add_parser("tensor-eval", help="native B3 descriptor evaluation; forwards all options to the Rust CLI")
+    p.add_argument("rest", nargs=argparse.REMAINDER)
+    p.set_defaults(fn=cmd_tensor_eval)
 
     p = sub.add_parser("run", help="cargo run -p g6q-cli -- ...")
     p.add_argument("rest", nargs=argparse.REMAINDER)

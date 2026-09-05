@@ -15,7 +15,7 @@ extern "C" {
 #endif
 
 #define AI_TENSOR_DESC_BYTES 64
-#define AI_TENSOR_CONTRACT_VERSION 1
+#define AI_TENSOR_CONTRACT_VERSION 2
 
 #define AI_TENSOR_OP_GEMM 1
 #define AI_TENSOR_OP_CONV2D 2
@@ -30,6 +30,19 @@ extern "C" {
 #define AI_TENSOR_ST_BAD_QID 5
 #define AI_TENSOR_ST_DISABLED 6
 #define AI_TENSOR_ST_WATCHDOG 7
+#define AI_TENSOR_ST_BAD_FMT 8
+#define AI_TENSOR_FLAG_NUMFMT_SHIFT 20
+#define AI_TENSOR_FLAG_NUMFMT_WIDTH 3
+#define AI_TENSOR_FLAG_NUMFMT_MASK 0x7u
+#define AI_TENSOR_FMT_INT 0
+#define AI_TENSOR_FMT_INT4 1
+#define AI_TENSOR_FMT_SP24 2
+#define AI_TENSOR_FMT_FP8_E4M3 3
+#define AI_TENSOR_FMT_FP8_E5M2 4
+#define AI_TENSOR_FMT_FP16 5
+#define AI_TENSOR_FMT_BF16 6
+#define AI_TENSOR_FMT_FP32 7
+#define AI_TENSOR_CAP_DTYPE_MASK 0x0028u
 
 /** flags[2] — request completion IRQ when sticky IRQ is wired. */
 #define AI_TENSOR_FLAG_IRQ (1u << 2)

@@ -12,6 +12,7 @@ __version__ = "0.1.0"
 
 from .c_abi import PLIC_SOURCE_ISLAND_P3, completion_make, pack_desc64, verify_header_present
 from .device import Caps, Device, Pmu, gemm_s8, pack_gemm_desc, tile_gemm
+from .numfmt import gemm_native
 
 # virt_card is lazy-imported via Device; re-export session type for advanced use.
 try:
@@ -37,6 +38,7 @@ __all__ = [
     "builtin_goldens",
     "completion_make",
     "gemm_s8",
+    "gemm_native",
     "pack_desc64",
     "pack_gemm_desc",
     "probe_dict",

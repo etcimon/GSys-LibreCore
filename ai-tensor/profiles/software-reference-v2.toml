@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+id = "software-reference-v2"
+abi_rev = "2.0.0"
+contract_version = 2
+operand_b_layout = "k-major"
+island_rev = "none"
+backend = "software-reference-v2"
+dtype_mask = 0x00fb
+noc_width = 64
+acc_tile_m = 256
+acc_tile_n = 256
+acc_tile_k = 256
+macs_per_cycle = 256
+wait_policy = "poll"
+submit_mode = "latch"
+features = ["t2_desc_v2", "completion_word_v1", "compute_ref", "scalar_formats"]
+notes = "Software reference only. No hardware, RTL, DMA timing, or physical PCIe grants. SP24 unsupported."

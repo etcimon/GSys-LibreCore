@@ -65,6 +65,7 @@ CAP_SRAM_BYTES = 0x10
 CAP_BLOCK_MNK = 0x14
 CAP_DRAM_GBPS = 0x18
 CAP_QUEUES = 0x1C
+CAP_DTYPE_MASK = 0x28
 CAP_NOC_WIDTH = 0x3C
 CAP_CLUSTER_EN = 0x30
 
@@ -139,6 +140,7 @@ class IslandCaps:
     noc_width: int
     dram_gbps: int
     dram_gbps_measured_x1000: int
+    dtype_mask: int
 
     def as_dict(self) -> Dict[str, int]:
         return dict(self.__dict__)
@@ -171,6 +173,7 @@ def read_caps(win: MmioWindow) -> IslandCaps:
         noc_width=win.read32(CAP_NOC_WIDTH),
         dram_gbps=dram_word & 0xFFFF,
         dram_gbps_measured_x1000=(dram_word >> 16) & 0xFFFF,
+        dtype_mask=win.read32(CAP_DTYPE_MASK) & 0xFFFF,
     )
 
 
@@ -230,6 +233,11 @@ class QemuUioSession:
 
     def submit(self, desc: bytes, qid: int = 0) -> int:
         """Latch a descriptor and ring the doorbell. Returns the ticket."""
+        from .c_abi import CONTRACT_VERSION
+        if len(desc) != 64 or struct.unpack_from('<H', desc)[0] != CONTRACT_VERSION:
+            raise ValueError('Desc64 v2 required; v1 B layout is not reinterpreted')
+        from .numfmt import check_format
+        check_format((struct.unpack_from('<I', desc, 4)[0] >> 20) & 7, self.caps.dtype_mask)
         self._latch(desc)
         self._ticket += 1
         ticket = self._ticket
@@ -284,6 +292,26 @@ class QemuUioSession:
         Tiling beyond the tile is the caller's job (``Device.gemm_s8`` does it), because
         the engine rejects an oversize dimension rather than streaming it.
         """
+        if min(m, n, k) <= 0 or len(a) < m * k or len(b) < k * n:
+            raise ValueError('invalid shape or short S8 operands')
+        a_bytes = bytes(int(x) & 255 for x in a)
+        b_bytes = bytes(int(b[t * n + j]) & 255 for j in range(n) for t in range(k))
+        raw, issued, status = self._gemm_native_result(a_bytes, b_bytes, m, n, k, 0, ticket=ticket)
+        return list(struct.unpack('<' + 'i' * (m * n), raw)), issued, status
+
+    def gemm_native(self, a: bytes, b: bytes, m: int, n: int, k: int, numfmt: int,
+                    lda=None, ldb=None, *, ticket: int = 1) -> bytes:
+        raw, _, status = self._gemm_native_result(a, b, m, n, k, numfmt, lda, ldb, ticket=ticket)
+        if status != ST_OK:
+            raise RuntimeError(f'native GEMM failed with status {status}')
+        return raw
+
+    def _gemm_native_result(self, a, b, m, n, k, numfmt, lda=None, ldb=None, *, ticket=1):
+        from .numfmt import validate_buffers
+        from .c_abi import numfmt_flags
+        a_bytes, b_bytes, lda, ldb, na, nb, c_len = validate_buffers(
+            a, b, m, n, k, numfmt, lda, ldb, self.caps.dtype_mask)
+        a_bytes, b_bytes = a_bytes[:na], b_bytes[:nb]
         if not (
             m <= self.caps.acc_tile_m
             and n <= self.caps.acc_tile_n
@@ -294,9 +322,6 @@ class QemuUioSession:
                 f"{self.caps.acc_tile_m}x{self.caps.acc_tile_n}x{self.caps.acc_tile_k}; "
                 "tile on the host"
             )
-        a_bytes = bytes((int(x) & 0xFF) for x in a[: m * k])
-        b_bytes = bytes((int(x) & 0xFF) for x in b[: k * n])
-        c_len = m * n * 4
 
         # Lay A, B, C and the completion word out in the DMA window, 64-byte aligned so
         # no operand shares a cache line or a DRAM stripe boundary with another.
@@ -313,6 +338,8 @@ class QemuUioSession:
                 f"the DMA window holds {self.dma.size} bytes; this job needs {need}"
             )
 
+        if self.dma.base < 0 or self.dma.base + need > (1 << 64):
+            raise ValueError('DMA pointer range exceeds u64')
         self.dma.write(a_off, a_bytes)
         self.dma.write(b_off, b_bytes)
         self.dma.write(c_off, b"\x00" * c_len)
@@ -329,14 +356,16 @@ class QemuUioSession:
             ptr_b=base + b_off,
             ptr_c=base + c_off,
             ptr_done=base + done_off,
+            flags=numfmt_flags(numfmt), lda=lda, ldb=ldb,
         )
         issued = self.submit(desc)
         status = self.wait()
         if status != ST_OK:
-            return [0] * (m * n), issued, status
+            return bytes(c_len), issued, status
         raw = self.dma.read(c_off, c_len)
-        c = list(struct.unpack("<" + "i" * (m * n), raw))
-        return c, issued, ST_OK
+        if len(raw) != c_len:
+            raise ValueError('short C32 DMA read')
+        return raw, issued, ST_OK
 
     def as_caps_dict(self) -> Dict[str, Any]:
         d = self.caps.as_dict()

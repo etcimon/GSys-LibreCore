@@ -324,6 +324,7 @@
               "additionalProperties": false,
               "properties": {
                 "desc_bytes": { "type": "integer", "minimum": 0 },
+                "operand_b_k_major": { "type": ["boolean", "null"] },
                 "version": {
                   "description": "Descriptor version the island implements. Null means the package does not publish it, so a bring-up fallback is in use.",
                   "type": ["integer", "null"],
@@ -374,6 +375,14 @@
                     },
                     "ew": {
                       "description": "Element-width (sub-byte) selector, when the design publishes a desc_ew accessor. While null, no backend may claim a sub-byte effective-throughput multiplier.",
+                      "type": ["object", "null"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "shift": { "type": "integer", "minimum": 0 },
+                        "mask": { "type": "integer", "minimum": 0 }
+                      }
+                    },
+                    "numfmt": {
                       "type": ["object", "null"],
                       "additionalProperties": false,
                       "properties": {

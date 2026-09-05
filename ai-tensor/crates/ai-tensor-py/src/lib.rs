@@ -19,6 +19,7 @@ fn caps_to_dict(py: Python<'_>, caps: ai_tensor_rt::Caps) -> PyResult<Py<PyDict>
     d.set_item("compute_ref", caps.compute_ref)?;
     d.set_item("wr_cpl_en", caps.wr_cpl_en)?;
     d.set_item("op_gemm", caps.op_gemm)?;
+    d.set_item("dtype_mask", caps.dtype_mask)?;
     Ok(d.into())
 }
 
@@ -39,9 +40,10 @@ struct Sim {
 #[pymethods]
 impl Sim {
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (software_reference=false))]
+    fn new(software_reference: bool) -> Self {
         Self {
-            inner: Mutex::new(SimDevice::new()),
+            inner: Mutex::new(if software_reference { SimDevice::with_caps(ai_tensor_rt::Caps::software_reference_v2()) } else { SimDevice::new() }),
         }
     }
 
@@ -58,6 +60,18 @@ impl Sim {
         run_gemm_s8(&mut *dev, m, n, k, &a, &b, ticket)
             .map(|(c, comp)| (c, comp.ticket, comp.status))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn gemm_native(
+        &self, py: Python<'_>, a: Vec<u8>, b: Vec<u8>, m: u32, n: u32, k: u32,
+        numfmt: u32, lda: u32, ldb: u32, ticket: u32,
+    ) -> PyResult<Py<pyo3::types::PyBytes>> {
+        let fmt = ai_tensor_abi::NumFmt::from_abi(numfmt)
+            .ok_or_else(|| PyRuntimeError::new_err("ST_BAD_FMT: invalid numfmt"))?;
+        let mut dev = self.inner.lock().unwrap();
+        let (out, _) = ai_tensor_rt::run_gemm_native(&mut *dev, m, n, k, &a, &b, fmt, Some(lda), Some(ldb), ticket)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(pyo3::types::PyBytes::new_bound(py, &out).unbind())
     }
 
     fn enable(&self, on: bool) {
@@ -83,8 +97,9 @@ struct Mmio {
 #[pymethods]
 impl Mmio {
     #[new]
-    fn new() -> Self {
-        let mut d = MmioDevice::new();
+    #[pyo3(signature = (software_reference=false))]
+    fn new(software_reference: bool) -> Self {
+        let mut d = if software_reference { MmioDevice::software_reference_v2() } else { MmioDevice::new() };
         d.probe_caps();
         Self {
             inner: Mutex::new(d),
@@ -110,6 +125,18 @@ impl Mmio {
         run_gemm_s8(&mut *dev, m, n, k, &a, &b, ticket)
             .map(|(c, comp)| (c, comp.ticket, comp.status))
             .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    fn gemm_native(
+        &self, py: Python<'_>, a: Vec<u8>, b: Vec<u8>, m: u32, n: u32, k: u32,
+        numfmt: u32, lda: u32, ldb: u32, ticket: u32,
+    ) -> PyResult<Py<pyo3::types::PyBytes>> {
+        let fmt = ai_tensor_abi::NumFmt::from_abi(numfmt)
+            .ok_or_else(|| PyRuntimeError::new_err("ST_BAD_FMT: invalid numfmt"))?;
+        let mut dev = self.inner.lock().unwrap();
+        let (out, _) = ai_tensor_rt::run_gemm_native(&mut *dev, m, n, k, &a, &b, fmt, Some(lda), Some(ldb), ticket)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        Ok(pyo3::types::PyBytes::new_bound(py, &out).unbind())
     }
 
     fn enable(&self, on: bool) {
@@ -147,5 +174,6 @@ fn ai_tensor_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Mmio>()?;
     m.add_function(wrap_pyfunction!(pack_gemm_desc, m)?)?;
     m.add("__version__", "0.1.0")?;
+    m.add("CONTRACT_VERSION", ai_tensor_abi::CONTRACT_VERSION)?;
     Ok(())
 }

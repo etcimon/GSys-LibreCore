@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 //! Runtime: regions, submit, wait — **sim** backend (mandatory CI).
 
+pub mod numfmt;
 mod sim;
 mod mmio;
 mod profile;
@@ -48,6 +49,8 @@ pub enum RtError {
     BadPtr(&'static str),
     #[error("unsupported op")]
     UnsupportedOp,
+    #[error("ST_BAD_FMT: unsupported or ungranted numeric format")]
+    BadFmt,
     #[error("ticket not found")]
     UnknownTicket,
     #[error("timeout waiting for completion")]
@@ -64,6 +67,7 @@ pub struct Caps {
     pub completion_word: bool,
     pub wr_cpl_en: bool,
     pub op_gemm: bool,
+    pub dtype_mask: u16,
     /// When true, sim runs a software INT8 GEMM into C (high-level torch tests).
     pub compute_ref: bool,
     /// AccTile geometry (from CAP or profile pin).
@@ -89,7 +93,8 @@ impl Caps {
             t2_desc: true,
             completion_word: true,
             wr_cpl_en: true,
-            op_gemm: (c.dtype_mask & 1) != 0,
+            op_gemm: (c.dtype_mask & numfmt::SOFTWARE_DTYPE_MASK) != 0,
+            dtype_mask: c.dtype_mask,
             compute_ref: true,
             acc_tile: c.acc_tile,
             macs_per_cycle: c.macs_per_cycle,
@@ -98,6 +103,12 @@ impl Caps {
             queues: u32::from(c.queues.max(1)),
             queue_depth: u32::from(c.queue_depth.max(1)),
         }
+    }
+
+    pub fn software_reference_v2() -> Self {
+        let mut caps = Self::default();
+        caps.dtype_mask = numfmt::SOFTWARE_DTYPE_MASK;
+        caps
     }
 
     pub fn max_tile(&self) -> AccTile {
@@ -172,6 +183,48 @@ pub trait Device: Send {
     }
 }
 
+pub fn run_gemm_native<D: Device>(
+    dev: &mut D, m: u32, n: u32, k: u32, a: &[u8], b: &[u8],
+    fmt: ai_tensor_abi::NumFmt, lda: Option<u32>, ldb: Option<u32>, ticket: u32,
+) -> Result<(Vec<u8>, Completion), RtError> {
+    let caps = dev.caps();
+    numfmt::check_format(fmt, caps.dtype_mask)?;
+    let lda = lda.unwrap_or(k);
+    let ldb = ldb.unwrap_or(k);
+    let layout = numfmt::Layout::new(m, n, k, fmt, lda, ldb)?;
+    layout.validate(a, b)?;
+    if !caps.max_tile().fits(m, n, k) {
+        return Err(RtError::Msg("native GEMM exceeds AccTile; ordered FP K-splitting is not supported".into()));
+    }
+    let pa = dev.alloc(layout.a_bytes)?;
+    let pb = dev.alloc(layout.b_bytes)?;
+    let pc = dev.alloc(layout.c_bytes)?;
+    let pd = dev.alloc(8)?;
+    let base = pa.min(pb).min(pc).min(pd);
+    let limit = [pa.checked_add(layout.a_bytes as u64), pb.checked_add(layout.b_bytes as u64),
+        pc.checked_add(layout.c_bytes as u64), pd.checked_add(8)]
+        .into_iter().collect::<Option<Vec<_>>>().ok_or(RtError::BufferOob)?
+        .into_iter().max().ok_or(RtError::BufferOob)?;
+    dev.program_region(0, Region { base, limit, read: true, write: true })?;
+    dev.write_mem(pa, &a[..layout.a_bytes])?;
+    dev.write_mem(pb, &b[..layout.b_bytes])?;
+    dev.write_mem(pc, &vec![0; layout.c_bytes])?;
+    dev.write_mem(pd, &[0; 8])?;
+    let mut d = Desc64::gemm(m, n, k).with_ptrs(pa, pb, pc, pd);
+    d.flags = fmt.into_flags(d.flags);
+    d.ld_ab = lda | (ldb << 16);
+    dev.enable(true);
+    dev.set_wr_cpl_en(true);
+    dev.submit(0, ticket, &d)?;
+    let completion = dev.wait(ticket)?;
+    if !completion.is_ok() {
+        return Err(RtError::Msg(format!("status {}", completion.status)));
+    }
+    let mut out = vec![0; layout.c_bytes];
+    dev.read_mem(pc, &mut out)?;
+    Ok((out, completion))
+}
+
 /// Convenience: submit GEMM and wait; optional software compute already in sim.
 pub fn run_gemm_s8<D: Device>(
     dev: &mut D,
@@ -221,7 +274,7 @@ pub fn run_gemm_s8<D: Device>(
     dev.program_region(0, reg)?;
 
     let a_bytes: Vec<u8> = a[..need_a].iter().map(|x| *x as u8).collect();
-    let b_bytes: Vec<u8> = b[..need_b].iter().map(|x| *x as u8).collect();
+    let b_bytes: Vec<u8> = (0..n as usize).flat_map(|j| (0..k as usize).map(move |t| b[t * n as usize + j] as u8)).collect();
     dev.write_mem(pa, &a_bytes)?;
     dev.write_mem(pb, &b_bytes)?;
     dev.write_mem(pc, &vec![0u8; need_c * 4])?;
@@ -278,6 +331,139 @@ mod auto_tile_tests {
     use super::*;
     use crate::SimDevice;
     use ai_tensor_abi::{AccTile, CapRegs};
+
+    #[test]
+    fn native_formats_sim_and_mmio() {
+        use ai_tensor_abi::NumFmt;
+        for (fmt, one) in [
+            (NumFmt::Int, vec![1]), (NumFmt::Int4, vec![1]),
+            (NumFmt::Fp8E4m3, vec![0x38]), (NumFmt::Fp8E5m2, vec![0x3c]),
+            (NumFmt::Fp16, vec![0, 0x3c]), (NumFmt::Bf16, vec![0x80, 0x3f]),
+            (NumFmt::Fp32, 1.0f32.to_le_bytes().to_vec()),
+        ] {
+            let mut sim = SimDevice::with_caps(Caps::software_reference_v2());
+            let mut mmio = MmioDevice::software_reference_v2();
+            let want = if matches!(fmt, NumFmt::Int | NumFmt::Int4) { 1u32 } else { 0x3f800000 };
+            let (a, _) = run_gemm_native(&mut sim, 1, 1, 1, &one, &one, fmt, None, None, 1).unwrap();
+            let (b, _) = run_gemm_native(&mut mmio, 1, 1, 1, &one, &one, fmt, None, None, 1).unwrap();
+            assert_eq!(a, want.to_le_bytes());
+            assert_eq!(a, b);
+        }
+    }
+
+    #[test]
+    fn native_refuses_sp24_and_ungranted() {
+        use ai_tensor_abi::NumFmt;
+        let mut dev = SimDevice::new();
+        assert!(run_gemm_native(&mut dev, 1, 1, 1, &[1], &[1], NumFmt::Int4, None, None, 1).is_err());
+        let mut caps = Caps::software_reference_v2();
+        caps.dtype_mask = 0xff;
+        let mut dev = SimDevice::with_caps(caps);
+        assert!(run_gemm_native(&mut dev, 1, 1, 1, &[1], &[1], NumFmt::Sp24, None, None, 1).is_err());
+    }
+
+    fn rejects_before_c_write<D: Device>(dev: &mut D) {
+        use ai_tensor_abi::{NumFmt, ST_BAD_FMT, ST_BAD_PTR, ST_BAD_VER};
+        dev.enable(true);
+        dev.set_wr_cpl_en(true);
+        dev.program_region(0, Region { base: 0x1000, limit: u64::MAX, read: true, write: true }).unwrap();
+        let a = dev.alloc(4).unwrap();
+        let b = dev.alloc(4).unwrap();
+        let c = dev.alloc(16).unwrap();
+        dev.write_mem(a, &[1, 2, 3, 4]).unwrap();
+        dev.write_mem(b, &[5, 7, 6, 8]).unwrap();
+        dev.write_mem(c, &[0xa5; 16]).unwrap();
+        let d = Desc64::gemm(2, 2, 2).with_ptrs(a, b, c, 0);
+        for (idx, status) in [ST_BAD_VER, ST_BAD_FMT, ST_BAD_PTR, ST_BAD_PTR, ST_BAD_PTR].into_iter().enumerate() {
+            let mut bad = d.clone();
+            match idx {
+                0 => bad.version = 1,
+                1 => bad.flags = NumFmt::Sp24.into_flags(0),
+                2 => bad.ld_ab = 1 | (2 << 16),
+                3 => bad.ptr_b = u64::MAX - 1,
+                _ => bad.ptr_done = 0x1000 + (1 << 24) - 4,
+            }
+            dev.submit(0, idx as u32 + 30, &bad).unwrap();
+            assert_eq!(dev.wait(idx as u32 + 30).unwrap().status, status);
+            let mut out = [0; 16];
+            dev.read_mem(c, &mut out).unwrap();
+            assert_eq!(out, [0xa5; 16]);
+        }
+    }
+
+    #[test]
+    fn invalid_descriptors_leave_c_untouched() {
+        rejects_before_c_write(&mut SimDevice::with_caps(Caps::software_reference_v2()));
+        rejects_before_c_write(&mut MmioDevice::software_reference_v2());
+    }
+
+    fn check_native_descriptor_modes(dev: &mut dyn Device, mask: u16) {
+        use ai_tensor_abi::{NumFmt, ST_BAD_FMT};
+        dev.enable(true);
+        dev.program_region(0, Region { base: 0x1000, limit: u64::MAX, read: true, write: true }).unwrap();
+        let a = dev.alloc(4).unwrap();
+        let b = dev.alloc(4).unwrap();
+        let c = dev.alloc(16).unwrap();
+        dev.write_mem(a, &[0x21, 0x03, 0xed, 0x0f]).unwrap();
+        dev.write_mem(b, &[0xe3, 0x01, 0x2f, 0x0d]).unwrap();
+        let accepted = if mask & 2 != 0 { ST_OK } else { ST_BAD_FMT };
+        let cases = [
+            (1 << 12, accepted),
+            (NumFmt::Int4.into_flags(0), accepted),
+            (1 << 8, ST_BAD_FMT),
+            (1 << 10, ST_BAD_FMT),
+            (2 << 12, ST_BAD_FMT),
+            (1 << 14, ST_BAD_FMT),
+            (NumFmt::Sp24.into_flags(0), ST_BAD_FMT),
+            (NumFmt::Fp16.into_flags(1 << 12), ST_BAD_FMT),
+        ];
+        for (index, (flags, status)) in cases.into_iter().enumerate() {
+            dev.write_mem(c, &[0xa5; 16]).unwrap();
+            let mut descriptor = Desc64::gemm(2, 2, 3).with_ptrs(a, b, c, 0);
+            descriptor.flags = flags;
+            let ticket = 100 + index as u32;
+            dev.submit(0, ticket, &descriptor).unwrap();
+            assert_eq!(dev.wait(ticket).unwrap().status, status, "mask={mask:x} flags={flags:x}");
+            let mut result = [0; 16];
+            dev.read_mem(c, &mut result).unwrap();
+            if status == ST_OK {
+                let expected: Vec<u8> = [2i32, -6, -6, 2].iter().flat_map(|v| v.to_le_bytes()).collect();
+                assert_eq!(result.as_slice(), expected.as_slice());
+            } else {
+                assert_eq!(result, [0xa5; 16]);
+            }
+        }
+    }
+
+    #[test]
+    fn native_descriptor_modes_reach_backend_status_and_grants() {
+        for mask in [1u16, 2, 3, 0xfb] {
+            let mut caps = Caps::software_reference_v2();
+            caps.dtype_mask = mask;
+            check_native_descriptor_modes(&mut SimDevice::with_caps(caps), mask);
+            let mut cap_regs = CapRegs::island_p3_sim_default();
+            cap_regs.dtype_mask = mask;
+            let mut mmio = MmioDevice::new();
+            *mmio.soft_island_mut() = SoftIsland::with_cap(cap_regs, 64);
+            mmio.probe_caps();
+            check_native_descriptor_modes(&mut mmio, mask);
+        }
+    }
+
+    #[test]
+    fn native_odd_int4_and_f32_order() {
+        use ai_tensor_abi::NumFmt;
+        let a = [0x21, 0xf3, 0xfe, 0x08];
+        let b = [0x21, 0x03, 0xff, 0x0f, 0x11, 0x01];
+        let mut dev = MmioDevice::software_reference_v2();
+        let (raw, _) = run_gemm_native(&mut dev, 2, 3, 3, &a, &b, NumFmt::Int4, None, None, 1).unwrap();
+        let want: Vec<u8> = [14i32, -6, 6, -28, 11, -11].iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(raw, want);
+        let a: Vec<u8> = [16777216.0f32, 1.0, -16777216.0].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let b: Vec<u8> = [1.0f32; 3].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let (raw, _) = run_gemm_native(&mut dev, 1, 1, 3, &a, &b, NumFmt::Fp32, None, None, 2).unwrap();
+        assert_eq!(raw, [0; 4]);
+    }
 
     #[test]
     fn auto_tile_single_when_fits() {
