@@ -29,16 +29,20 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   reachable work/commit/hold/warm/skip/hit/miss witnesses (not induction/STA).
 - [x] Format-aware benefit refinement (§11): native INT4/INT8/FP8/FP16/BF16/FP32
   metadata normalization, same-format fallback, balanced multi-input/output slot
-  topology, compact metadata and runtime benefit gate. Remote default/extremes
-  and seed 123 pass, including 380 ticking scheduling-model fixtures per steering
-  build, native INT4 rounding, strict unsupported-SP24 checks and 28 matched-format
-  workload pairs. Default balanced mix: 38.24% modeled time saved at SRAM128,
-  3.55% at SRAM512; best fixed code still slightly better. Per-state/format usage,
-  negative results, static comparisons and percentages are in `efficiency.json`.
-  Recorded default-wrapper synthesis is 1,213 generic cells / 139 sequential /
-  zero latches, with 26 steering assertions at a 12-step bound and reachable
-  applied topology; disabled wrappers have zero cells. Matching report:
-  `build-platform/workspace/build/ai-policy-codec-20260905T013620Z-c2ca42f5bd05/results.json`.
+  topology, compact metadata and runtime benefit gate. Steering now uses full
+  16-bit `m/n/k` retention and a `(m+n)*rowbytes(active_k) >= read_bytes` benefit
+  guard (simpler than a full product-based compute model and preserves the same
+  SRAM128/SRAM512 balanced-mix results). Remote default/extremes and seed 123 pass,
+  including 380 ticking scheduling-model fixtures per steering build, native INT4
+  rounding, strict unsupported-SP24 checks and 28 matched-format workload pairs.
+  Default balanced mix: 38.24% modeled time saved at SRAM128, 3.56% at SRAM512;
+  best fixed code still slightly better. Per-state/format usage, negative results,
+  static comparisons and percentages are in `efficiency.json`.
+  Recorded default-wrapper synthesis is 626 generic cells / 113 sequential / zero
+  latches for the codec wrapper, and 1,222 generic cells / 167 sequential / zero
+  latches for the enabled steering wrapper, with 26 steering assertions at a 12-step
+  bound and reachable applied topology; disabled wrappers have zero cells. Matching
+  report: `build-platform/workspace/build/ai-policy-codec-20260905T134537Z-865a53bca276/results.json`.
   These generic counts are not physical area or an estimate for a future array.
   Remote native-trace replay also passes: future-array modeled sums are live
   14,588→9,420; software-fixture SRAM128 72,134→52,056 and SRAM512 59,846→45,912.
@@ -93,16 +97,40 @@ Priors: `architecture/ai-matrix/numeric-formats-datapath.md`, AI policy §10–�
   product, block-exponent alignment, 640-bit reduction tree and RNE FP32 conversion.
   Verified by `verif/tb/ai_island/run-pe-dot-float.sh` (Verilator 5.x) with
   `pe_dot_float_main.cpp`: 5,018 Lanes=4 directed/random checks vs exact `double`
-  oracle pass. Yosys `read_slang` elaborates with zero errors/warnings; `check -assert`
-  and `synth -noabc -top g6lc_ai_pe_dot_float -flatten` each report zero problems and zero
-  latches. `AiIslandDtypeMask` / `AiIslandPeImplMask` remain `16'h0003`. No
+  oracle pass. Yosys `read_slang` elaborates `g6lc_ai_pe_dot_float` with zero errors/warnings;
+  `synth -noabc -top g6lc_ai_pe_dot_float -flatten` reports zero problems and zero latches.
+  `g6lc_ai_pe_dot_float_pipe` also `read_slang`s and `synth -noabc -top ... -flatten`s with
+  zero errors/warnings, zero CHECK problems and ~7,900 flops / ~115k generic cells (Lanes=4)
+  after narrowing the mantissa product to 24×24. `AiIslandDtypeMask` / `AiIslandPeImplMask` remain `16'h0003`. No
   fused/reassociated reduction, no FTZ, no new clock/reset.
-- [ ] Integrate the floating dot-product PE into `g6lc_ai_gemm_seq` loader/accumulator
+- [x] Integrate the floating dot-product PE into `g6lc_ai_gemm_seq` loader/accumulator
   and validate full-system grants; production `IslandFpEn` stays off and live
   island grant/PE masks stay 3 (INT8/INT4). Scalar FP and software formats are
   not floating GEMM support or ISA F/D conformance. This increment adds neither
   fused requantization nor non-GEMM arithmetic; existing spine operations are
   unchanged.
+  - Landed `g6lc_ai_pe_dot_float_pipe.sv` (parameterized by `Lanes`, Latency =
+    `$clog2(P2)+4`) and wired it into `g6lc_ai_gemm_seq` behind `DotPipeFloat`.
+  - Fixed the back-to-back transaction hazard: stage-2 product and block-exp/flag
+    metadata are now registered, and a stage-3 block-exp/flag register feeds the
+    reduction-tree metadata pipeline. This keeps data, block exponent and special-
+    value flags aligned for consecutive starts with different `numfmt` and data.
+  - Added a `dot_pending_q` outstanding-transaction counter and gated `can_trail`
+    and `ST_MAC` exit on it, preventing the C-flush path from overtaking pipelined
+    dot results. Pipelined dot output is captured directly in the main `sum_*` registers.
+  - `verif/tb/ai_island/run-gemm-backend.sh` (nch={1,2,4,8}, dpf=0,1) PASSES across
+    INT4/INT8/FP8/FP16/BF16/FP32. `run-pe-dot-float.sh` (Lanes=4) passes 5,018 checks;
+    `run-pe-dot-float-pipe.sh` passes 5,028 checks for both Lanes=4 (latency 6) and
+    Lanes=8 (latency 7); a Verilator Lanes=256 lint-only build also passes. Stage-1/2/3
+    local variables were split into `always_comb` next-state logic so `read_slang` and
+    `synth -noabc -top g6lc_ai_pe_dot_float_pipe -flatten` report zero errors/warnings.
+    The `s2_prod_q` array is loaded in a `generate` loop to avoid Verilator 5.008
+    `BLKLOOPINIT` on delayed assignments inside procedural for loops. Width-casting
+    fixes in `g6lc_ai_fp_pkg.sv` also cleared
+    `verif/regress/ai-fp-mac.py` (FpPipeRegs 1/2/3/5, ~40k scalar transactions).
+    Timing impact: adds one outstanding-transaction counter and muxed `sum_*` update
+    path in `g6lc_ai_gemm_seq`; the dot pipe itself is a new multi-cycle reduction
+    tree whose latency grows with `log2(PeLanes)+4`.
 - [ ] Bind descriptor metadata/per-context flush to a real policy consumer and
   PMU; prove tile/bank/tail behavior, then measure real RTL memory traffic.
   Keep host execution, emulator wall time, scheduling models and RTL timing

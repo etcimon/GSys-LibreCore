@@ -34,18 +34,36 @@ the island capability window. Native NaN outputs are canonical quiet FP32 NaN;
 subnormals and signed zero remain significant. Per-operation flags are local
 outputs, not implicit writes to a core's floating-point CSRs.
 
-A generic floating block-floating dot-product PE (`g6lc_ai_pe_dot_float`) is
-verified at `Lanes=4`: it decodes FP8 E4M3/E5M2, FP16, BF16 and FP32,
-multiplies, picks the most negative exponent as a block exponent, aligns products
-into a 640-bit signed accumulator, reduces with a balanced adder tree, and
-normalises/rounds to RNE FP32 once. `verif/tb/ai_island/run-pe-dot-float.sh`
-passes 5,018 checks vs an exact `double` oracle, and Yosys `read_slang`,
-`check -assert` and `synth -noabc -top g6lc_ai_pe_dot_float -flatten` each
-report zero problems.
+A generic floating block-floating dot-product PE is provided in two flavors:
+* the combinational `g6lc_ai_pe_dot_float` is verified at `Lanes=4`; it decodes
+  FP8 E4M3/E5M2, FP16, BF16 and FP32, multiplies, picks the most negative
+  exponent as a block exponent, aligns products into a 640-bit signed
+  accumulator, reduces with a balanced adder tree, and normalises/rounds to RNE
+  FP32 once;
+* the pipelined `g6lc_ai_pe_dot_float_pipe` adds registered stages so the same
+  datapath supports `Lanes=256` without a single-cycle critical path, exposes
+  `start_i`/`valid_o` with `Latency = $clog2(Lanes) + 4`, and registers stage-2
+  product and block-exp/flag metadata plus a stage-3 block-exp/flag register so
+  back-to-back starts with different `numfmt` and data stay aligned.
+
+`verif/tb/ai_island/run-pe-dot-float.sh` passes 5,018 checks vs an exact
+`double` oracle for the combinational module. `run-pe-dot-float-pipe.sh` passes
+5,028 checks for `Lanes=4` and `Lanes=8`, including back-to-back issue with
+different `numfmt`/data and half/alternating valid masks (finite results checked
+within 1 ULP of the `double`-to-float oracle because the BFP reduction rounds
+once at the end). A Verilator Lanes=256 elaboration/lint build of the pipelined
+module completes with only pre-existing width warnings. Yosys `read_slang`,
+`check -assert` and `synth -noabc -top g6lc_ai_pe_dot_float -flatten` report
+zero problems, and `synth -noabc -top g6lc_ai_pe_dot_float_pipe -flatten` also
+reports zero errors/warnings and zero CHECK problems for Lanes=4.
 
 `g6lc_ai_gemm_seq` now dispatches FP8 (E4M3/E5M2), FP16, BF16 and FP32 to the
 floating PE, accumulates multi-step tiles with a per-step FP32 `fp32_add`, and
-stores the FP32 result in the C tile. INT8 stays on the existing integer PE and
+stores the FP32 result in the C tile. When `DotPipeFloat` is set it uses the
+pipelined `g6lc_ai_pe_dot_float_pipe` with a `dot_valid` handshake, a metadata
+shift-register that returns `(first,last,i,j)` with the delayed `sum_o`, and an
+outstanding-transaction counter (`dot_pending_q`) that prevents the C-flush path
+from overtaking in-flight dot results. INT8 stays on the existing integer PE and
 INT4 stays on the packed-nibble path. The MAC-side byte gather scales
 `mac_step` and `fmt_row_bytes` by the format byte width (1/2/4), so the loaders
 remain byte-oriented and the same bank/address mapping covers all formats.
@@ -53,24 +71,21 @@ remain byte-oriented and the same bank/address mapping covers all formats.
 The backend unit test `verif/tb/ai_island/run-gemm-backend.sh` now includes
 directed 2x2x16 goldens for all live formats: INT8, INT4 (0x11 packed +1
 nibbles), FP8 E4M3, FP8 E5M2, FP16, BF16 and FP32. Each uses all-1.0 (or
-all-1 for integers) operands and expects 16/16.0 in the C tile. The standalone
-`g6lc_ai_pe_dot_float` regression still passes.
+all-1 for integers) operands and expects 16/16.0 in the C tile. It passes for
+nch={1,2,4,8} with both the combinational (`dpf=0`) and pipelined
+(`dpf=1`) dot-product implementations. The standalone `g6lc_ai_pe_dot_float`
+and `g6lc_ai_pe_dot_float_pipe` regressions both still pass.
 
 The live island `AiIslandDtypeMask` and `AiIslandPeImplMask` remain INT8+INT4
 only until the descriptor/grant path is updated to issue and validate the wider
 floating formats.
 
-## Lanes=256 floating dot-product architecture (TBD)
+## Lanes=256 floating dot-product architecture
 
-The current `g6lc_ai_pe_dot_float` is a fully combinational decode -> product ->
-block-exponent -> align -> reduce -> round path, sized for `FP_DOT_MAXW = 640`
-bits. At `Lanes = 256` this becomes a 256-input multiplier array, a 256-wide
-exponent tree, a 256x640-bit alignment shifter, and a `log2(256) = 8`-level
-640-bit adder tree, followed by a 32-bit normalise/round. Even with a balanced
-tree, the resulting single-cycle path is too long for the target frequency.
-
-The intended pipelined architecture keeps the same functional result while
-breaking the path into stages:
+The pipelined module `g6lc_ai_pe_dot_float_pipe` implements the same decode ->
+product -> block-exponent -> align -> reduce -> round datapath as the
+combinational `g6lc_ai_pe_dot_float`, but breaks the path into registered
+stages so it can support `Lanes = 256` without a single-cycle critical path:
 
 1. **Decode & multiply** (1 stage): per lane, decode `a_i/b_i` and form
    `(sign, mantissa, exponent)` for each product.
@@ -79,20 +94,18 @@ breaking the path into stages:
    before alignment.
 3. **Align** (1 stage): shift each product mantissa by
    `product_exp - block_exp` into the shared 640-bit accumulator grid.
-4. **Reduce** (3-4 stages): a balanced signed adder tree, 256 -> 128 -> 64 ->
-   32 -> 16 -> 8 -> 4 -> 2 -> 1, with a pipeline register every two levels. The
-   exact number of stages is a timing closure knob and should be retimed with
-   the P&R flow.
+4. **Reduce** (`$clog2(Lanes)` levels): a balanced signed adder tree, with a
+   pipeline register every level. The total latency is `$clog2(Lanes) + 4`
+   cycles from `start_i` to `valid_o`, including the final output register.
 5. **Normalise & round** (1 stage): `bfp_mant_exp_to_fp32` produces the final
    FP32 `sum_o` and `flags_o`.
 
-The `g6lc_ai_gemm_seq` FSM assumes one cycle of dot-product latency through
-`sum_q`. Moving to multi-cycle `valid_o` requires adding a `dot_valid` handshake
-and matching the MAC cursor advance to the dot-product latency. The aligned
-reduction unit should be parameterised to keep `Lanes=4/8/256` as a single
-module with `Pipeline`/`Stages` parameters, or be a companion module with the
-same numerical interface so both can be co-verified against the exact `double`
-oracle in `run-pe-dot-float.sh`.
+`g6lc_ai_gemm_seq` adds a `dot_valid` handshake and a metadata shift-register
+that returns `(first,last,i,j)` with the delayed `sum_o`. An outstanding-transaction
+counter (`dot_pending_q`) gates the C-flush path so a pipelined result can never
+be overwritten by a store that was issued before the dot returned. The
+`DotPipeFloat` parameter selects the pipelined PE and is verified in the backend
+unit test for `nch={1,2,4,8}` across all live formats.
 
 Descriptor version 2 remains the contract: A is `[m][k]`, B is `[n][k]`, both
 leading dimensions count elements along K. `DESC_B_K_MAJOR` publishes that fact
@@ -266,7 +279,7 @@ verifiable, and each has a named regression that must not move.
 | **F0b-1** | Move the accumulate out of the PE into the sequencer | Prerequisite for F0b-2. Bit-identical, so zero functional risk | GEMM goldens byte- and cycle-identical |
 | **F0b-2** | Insert the pipeline register on `sum_o`, delay the C write | Register site now exists and is not on a recurrence | GEMM goldens identical; small fixtures show **no** cycle-count change, large fixtures (64x64 etc.) validate the delayed C write and trail-store arbitration |
 | **F1** | **INT4**, by fracturing the 8×8 cell into 2×(4×4) | Cheapest format: no float logic, no accumulator change, and the only one that *raises* throughput (§2). It is also the "effective TOPS" lever `scaling-100tops.md` §1 names | INT8 goldens; new INT4 golden vs emulator |
-| **F2** | **FP8 E4M3 + E5M2** | First float, and the only float that keeps INT8-equivalent speed (§2). Mantissa is *smaller* than the existing cell (§3), so the cost is purely the float accumulator. The `g6lc_ai_pe_dot_float` unit is verified at Lanes=4 with 4,007 checks and is synthesizable (`synth -top g6lc_ai_pe_dot_float -flatten` reports zero problems) | INT8/INT4 goldens; FP8 golden incl. the 448.0 and subnormal cases; standalone dot-product Verilator + Yosys check/synth pass |
+| **F2** | **FP8 E4M3 + E5M2** | First float, and the only float that keeps INT8-equivalent speed (§2). Mantissa is *smaller* than the existing cell (§3), so the cost is purely the float accumulator. The `g6lc_ai_pe_dot_float` unit is verified at Lanes=4 with 5,018 checks and `g6lc_ai_pe_dot_float_pipe` at Lanes=4/8 with 5,028 checks; both are synthesizable (`synth -top g6lc_ai_pe_dot_float -flatten` reports zero problems) | INT8/INT4 goldens; FP8 golden incl. the 448.0 and subnormal cases; standalone dot-product Verilator + Yosys check/synth pass; pipelined GEMM integration nch={1,2,4,8} dpf=0,1 PASS |
 | **F3** | **BF16** | Reuses F2's float accumulator *and* the unmodified 8×8 cell (§3). ½ rate, which §2 shows is the correct point | all previous goldens; BF16 golden |
 | **F4** | **FP16** | Needs an 11×11 significand for the same ½ rate as BF16 — more area, no throughput gain (§3). Deliberately after BF16 | all previous; FP16 golden incl. subnormals |
 | **F5** | **FP32** | 24×24 significand by decomposition, ¼ rate | all previous; FP32 golden |
@@ -434,10 +447,29 @@ Subsequent F1 closure (see §9):
 | F0b-1 accumulator moved out of the PE | **landed and verified.** `g6lc_ai_pe_dot` no longer has `acc_i`/`acc_o`; it is a pure sum-of-products reducer, and `g6lc_ai_gemm_seq` owns `acc_q + pe_sum`. Bit-identical: goldens **1212 cy** and **1673 cy**, unchanged from F0a, 0 assertions |
 | F0b-2 pipeline register | **landed and verified.** `sum_q <= pe_sum`, drain computes `acc_d = (first_q ? '0 : acc_q) + sum_q` and writes `C` at `(sum_i_q, sum_j_q)` if `last_q`. Indices advance at issue rate; the C write and accumulator update lag by one cycle but issue one cycle per MAC. Verified: `ai_gemm_s8_smoke` **1212 cy**, `ai_gemm_s8_4x4_smoke` **1673 cy** (same as F0b-1, so the pipeline is fully hidden for small fixtures), `ai_gemm_s8_lda_smoke` **1212 cy**, `ai_gemm_s8_64x64_smoke` **SUCCESS 93,194 cy** with zero assertions. The trail-store hazard predicted in §5.1 does not appear in these fixtures because the delayed C write still completes before the trail store streams the same row; full trail-store stress is left for the wider flavour sweep |
 | F1 INT4 | **COMPLETE and verified.** PE widening (F1-PE), MAC addressing/stride scaling (F1-sequencer), the §8 k-major operand change, and byte-counting loaders (F1-load) are all landed. Grants raised to `AiFmtMaskInt8Int4` (`16'h0003`) in both `AiIslandDtypeMask` and `AiIslandPeImplMask`. `ai_gemm_s4_smoke` (m=2 n=2 k=4, operands spanning −8..7, negative C) **PASSES 1230 cy**, and all seven INT8 fixtures keep their exact cycle counts. See §9 |
-| F2–F5 FP8/FP16/BF16/FP32 | E4M3/E5M2 widening, ordered scalar arithmetic and a Lanes=4 FP8 dot-product PE (`g6lc_ai_pe_dot_float`) **landed and verified**: 5,018 Verilator Lanes=4 checks vs a `double` oracle for FP8 E4M3/E5M2, FP16, BF16 and FP32. Yosys `read_slang`, `check -assert` and `synth -noabc -top g6lc_ai_pe_dot_float -flatten` all report zero problems (full `abc` mapping skipped on the 640-bit proof-of-concept accumulator). Floating GEMM integration, `Lanes=256` timing and FP32 24×24 decomposition remain **open**.
-| F3 BF16 | Included in the generic dot-product PE; floating GEMM integration **open** |
-| F4 FP16 | Included in the generic dot-product PE; floating GEMM integration **open** |
-| F5 FP32 | Included in the generic dot-product PE; 24×24 decomposition and floating GEMM integration open; floating GEMM integration **open** |
+| F2–F5 FP8/FP16/BF16/FP32 | E4M3/E5M2 widening, ordered scalar arithmetic and both combinational (`g6lc_ai_pe_dot_float`) and pipelined (`g6lc_ai_pe_dot_float_pipe`) dot-product PEs **landed and verified**: 5,018 Verilator Lanes=4 checks vs a `double` oracle for the combinational
+`g6lc_ai_pe_dot_float` and 5,028 Lanes=4/8 checks (with 1-ULP finite tolerance
+for BFP-vs-float rounding) for `g6lc_ai_pe_dot_float_pipe`, including
+back-to-back issue with different `numfmt`/data and half/alternating valid masks;
+Lanes=256 Verilator elaboration/lint passes with only pre-existing width warnings;
+`g6lc_ai_gemm_seq` integrated with `DotPipeFloat` and `dot_pending_q`
+outstanding-transaction tracking; `run-gemm-backend.sh` PASS for nch={1,2,4,8}
+with `dpf=0,1` across all live formats. Yosys `read_slang`, `check -assert` and
+`synth -noabc -top g6lc_ai_pe_dot_float -flatten` all report zero problems, and
+`synth -noabc -top g6lc_ai_pe_dot_float_pipe -flatten` also reports zero
+errors/warnings and zero CHECK problems for Lanes=4 (full `abc` mapping skipped
+on the 640-bit proof-of-concept accumulator). `fp_dot_product` now narrows the
+mantissa product to `a.mant[23:0] * b.mant[23:0]` (24×24) before the 64-bit
+extension, so the widest significand path is an explicit 24×24 unsigned
+multiplier. Yosys generic cell count for `g6lc_ai_pe_dot_float_pipe` (Lanes=4)
+falls from ~128k to ~115k cells. Full `abc` mapping on the 640-bit accumulator
+remains too heavy for this tool pass, and physical hard-macro/timing closure for
+100-TOPS-class arrays is still a PDK- and floorplan-dependent step; the current
+product path is functionally correct for dot-product sums that fit within the
+640-bit FP_DOT_MAXW accumulator.
+| F3 BF16 | Included in the generic dot-product PE and the pipelined GEMM backend |
+| F4 FP16 | Included in the generic dot-product PE and the pipelined GEMM backend |
+| F5 FP32 | Included in the generic dot-product PE and the pipelined GEMM backend; 24×24 decomposition open for non-decomposable product widths |
 
 Live `AiIslandPeImplMask` / `AiIslandDtypeMask` are `16'h0003`: INT8 and packed INT4.
 Software references implement seven scalar formats, but execute only those allowed by
@@ -670,7 +702,7 @@ loader needs a per-format branch. The remaining format work is therefore confine
 
 | step | load work remaining | datapath work remaining |
 |---|---|---|
-| **F2** FP8 E4M3/E5M2 | **none** — 1 byte/element, already exact | float dot-product PE / accumulator; significand is *smaller* than the existing 8×8 cell. Lanes=4 `g6lc_ai_pe_dot_float` verified with Verilator + Yosys `read_slang`/`check`/`synth`; Lanes=256 and GEMM integration open |
+| **F2** FP8 E4M3/E5M2 | **none** — 1 byte/element, already exact | float dot-product PE / accumulator; significand is *smaller* than the existing 8×8 cell. Lanes=4 `g6lc_ai_pe_dot_float` (5,018 checks) and `g6lc_ai_pe_dot_float_pipe` (5,028 Lanes=4/8 checks) verified with Verilator; Lanes=256 lint passes; pipelined GEMM integration PASS nch={1,2,4,8}, dpf=0,1 |
 | **F3** BF16 | `fmt_row_bytes` × 2 (one line) | exponent path; reuses F2's accumulator and the unmodified 8×8 cell |
 | **F4** FP16 | `fmt_row_bytes` × 2 (one line) | 11×11 significand — new multiplier |
 | **F5** FP32 | `fmt_row_bytes` × 4 (one line) | 24×24 by decomposition |

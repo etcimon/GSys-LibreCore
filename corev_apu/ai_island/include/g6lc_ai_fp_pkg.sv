@@ -162,9 +162,9 @@ package g6lc_ai_fp_pkg;
       end
     endcase
 
-    d.sign = (raw >> (exp_bits + man_bits)) & 1'b1;
-    exp_enc = (raw >> man_bits) & ((32'd1 << exp_bits) - 32'd1);
-    man_enc =  raw        & ((32'd1 << man_bits) - 32'd1);
+    d.sign = raw[exp_bits + man_bits];
+    exp_enc = 8'((raw >> man_bits) & ((32'd1 << exp_bits) - 32'd1));
+    man_enc = 23'(raw        & ((32'd1 << man_bits) - 32'd1));
 
     if (exp_enc == 8'd0 && man_enc == 23'd0) begin
       d.is_zero = 1'b1;
@@ -186,7 +186,7 @@ package g6lc_ai_fp_pkg;
         d.exp  = 16'(1 - int'(bias) - int'(man_bits));
       end else begin
         // Normal: exp field - bias, mantissa is 1.man
-        d.mant = 32'((32'd1 << man_bits) + man_enc);
+        d.mant = 32'((32'd1 << man_bits) + 32'(man_enc));
         d.exp  = 16'(int'(exp_enc) - int'(bias) - int'(man_bits));
       end
     end
@@ -212,7 +212,7 @@ package g6lc_ai_fp_pkg;
     end else begin
       p.sign    = a.sign ^ b.sign;
       p.exp     = a.exp + b.exp;
-      p.mant    = 64'(a.mant) * 64'(b.mant);
+      p.mant    = 64'(a.mant[23:0] * b.mant[23:0]);
       p.is_nan  = 1'b0;
       p.is_inf  = 1'b0;
       p.is_zero = 1'b0;
@@ -230,7 +230,7 @@ package g6lc_ai_fp_pkg;
     if (!prod.is_nan && !prod.is_inf && !prod.is_zero) begin
       logic signed [63:0]  sm;
       int                    shift;
-      sm    = prod.sign ? -$signed({32'd0, prod.mant}) : $signed({32'd0, prod.mant});
+      sm    = prod.sign ? (~$signed(prod.mant) + 64'sd1) : $signed(prod.mant);
       shift = int'(prod.exp) - int'(block_exp);
       if (shift >= 0 && shift < FP_DOT_MAXW)
         aligned = {{(FP_DOT_MAXW-64){sm[63]}}, sm} << shift;

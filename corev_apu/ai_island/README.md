@@ -35,7 +35,7 @@ See `architecture/ai-matrix/scaling-100tops.md` §3 and §8.
 | `include/g6lc_ai_policy_pkg.sv`, `g6lc_ai_policy_codec.sv` | frozen eight-state policy, hysteresis and successor hints | **verified compartment**, not instantiated by top |
 | `g6lc_ai_policy_steer.sv` | format-aware benefit gate and fixed-budget topology | **verified compartment**, no production consumer |
 | `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_fp_mac.sv` | exact widening and separate FP32 RNE multiply/add | **verified scalar primitive**, not integrated floating GEMM |
-| `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_pe_dot_float.sv` | FP8/FP16/BF16/FP32 block-floating dot product with 640-bit reduction and RNE FP32 conversion | **verified Lanes=4 unit**: 5,018 checks pass with Verilator; Yosys `read_slang`, `check -assert` and `synth -noabc -top g6lc_ai_pe_dot_float -flatten` all report zero problems. Not integrated into GEMM sequencer; Lanes=256 / timing / full-system next |
+| `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_pe_dot_float.sv` | FP8/FP16/BF16/FP32 block-floating dot product with 640-bit reduction and RNE FP32 conversion | **verified Lanes=4/8 unit and GEMM integration**: combinational `pe_dot_float` 5,018 checks; pipelined `pe_dot_float_pipe` 5,028 checks for Lanes=4 and Lanes=8 (back-to-back different `numfmt`/data, half/alt valid masks) with Verilator; Yosys `read_slang`, `check -assert`, `synth -noabc -top g6lc_ai_pe_dot_float -flatten` and `synth -noabc -top g6lc_ai_pe_dot_float_pipe -flatten` all report zero problems. Mantissa product is explicitly 24×24; pipelined dot-pipe generic cells are ~115k (Lanes=4). Pipelined dot is integrated into `g6lc_ai_gemm_seq` behind `DotPipeFloat` and passes `run-gemm-backend.sh` nch={1,2,4,8} `dpf=0,1` across INT4/INT8/FP8/FP16/BF16/FP32; Lanes=256 / timing / full SoC next |
 
 Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=256**,
 **AccTileM/N/K=256** (SKU AccTile* live; 1 MAC cycle per C). C multi-banked
@@ -115,8 +115,9 @@ not yet steering the GEMM datapath.** It is not a Desc64/QoS/ISA change or a
 measured throughput improvement.
 
 `g6lc_ai_policy_steer.sv` adds the default-off `AiCfg.PolicyBenefitEn` wrapper:
-native-format zero metadata, format epochs, compact retained topology metadata,
-and a benefit-gated balanced row/column/reduction allocation. INT4/INT8/FP8/
+native-format zero metadata, format epochs, full 16-bit retained `m/n/k` metadata,
+and a benefit-gated balanced row/column/reduction allocation using
+`(m+n)*rowbytes(active_k) >= read_bytes` as the refinement guard. INT4/INT8/FP8/
 FP16/BF16/FP32 scheduling support is not an arithmetic capability grant; no
 floating-point skip or silent format conversion is permitted. The efficiency
 suite checks an equal-resource ticking scheduling model and emits per-format,
@@ -146,14 +147,19 @@ signed zero, reports local exception flags, holds responses under backpressure,
 and cancels work on reset/flush/disable. It is **off by default** and does not
 connect floating operands to the live integer GEMM reducer or expand any grant.
 
-A separate standalone FP8 dot-product primitive, `g6lc_ai_pe_dot_float`, is
-verified at `Lanes=4` with 4,007 Verilator checks against a `double` oracle. It
-decodes FP8 E4M3/E5M2, forms per-lane products, aligns to a common block exponent,
-reduces in a 128-bit balanced tree and converts to RNE FP32 once. Yosys
-`read_slang`, `check -assert` and `synth -top g6lc_ai_pe_dot_float -flatten` all
-report zero problems. It is not connected to `g6lc_ai_gemm_seq` and does not
-change the live `AiIslandDtypeMask` / `AiIslandPeImplMask`; it is not floating
-GEMM support or ISA F/D conformance.
+A standalone FP dot-product primitive, `g6lc_ai_pe_dot_float`, is verified at
+`Lanes=4` with 5,018 Verilator checks against a `double` oracle. It decodes
+FP8 E4M3/E5M2, FP16, BF16 and FP32, forms per-lane products, aligns to a common
+block exponent, reduces in a 640-bit balanced tree and converts to RNE FP32 once.
+A pipelined variant, `g6lc_ai_pe_dot_float_pipe`, issues one dot per cycle and
+passes 5,028 checks for `Lanes=4` and `Lanes=8` including back-to-back issue with
+different `numfmt`/data and half/alternating valid masks. The pipelined dot is
+integrated into `g6lc_ai_gemm_seq` behind `DotPipeFloat` and `run-gemm-backend.sh`
+passes for nch={1,2,4,8} with `dpf=0,1` across INT4/INT8/FP8/FP16/BF16/FP32.
+Yosys `read_slang`, `check -assert` and `synth -top g6lc_ai_pe_dot_float -flatten`
+all report zero problems. It does not change the live `AiIslandDtypeMask` /
+`AiIslandPeImplMask` by default; it is not floating GEMM production support or
+ISA F/D conformance.
 
 | Pipeline registers | Accepted request to visible result | Scalar initiation interval |
 |---|---:|---:|
