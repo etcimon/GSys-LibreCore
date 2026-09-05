@@ -14,7 +14,8 @@ module tb_g6lc_ai_gemm_backend
   import g6lc_ai_island_cfg_pkg::*;
 #(
     parameter int unsigned NCH        = 2,
-    parameter int unsigned DRAM_CLASS = AI_DRAM_SIM_AXI
+    parameter int unsigned DRAM_CLASS = AI_DRAM_SIM_AXI,
+    parameter bit          DOT_PIPE_FLOAT = 1'b0
 );
   localparam int unsigned ID_W    = 4;
   localparam int unsigned MST_ID  = ID_W + 1;
@@ -136,6 +137,7 @@ module tb_g6lc_ai_gemm_backend
       .IdWidth    ( ID_W ),
       .MaxDim     ( 16 ),
       .PeLanes    ( 8 ),
+      .DotPipeFloat( DOT_PIPE_FLOAT ),
       .MaxAROut   ( (DRAM_CLASS == AI_DRAM_SIM_AXI) ? AI_MAX_AR_OUT_LIVE
                                                    : AI_MAX_AR_OUT_DRAM ),
       .NrChannels ( NCH ),

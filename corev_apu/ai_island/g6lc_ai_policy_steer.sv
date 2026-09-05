@@ -72,8 +72,8 @@ module g6lc_ai_policy_steer
   if (AiCfg.PolicyCodecEn && AiCfg.PolicyBenefitEn) begin : gen_steering
     typedef struct packed {
       logic seen;
-      logic [4:0] m, n;
-      logic [9:0] k;
+      logic [15:0] m, n;
+      logic [15:0] k;
       logic [2:0] numfmt;
       logic [1:0] balance;
     } metadata_t;
@@ -106,9 +106,9 @@ module g6lc_ai_policy_steer
       metadata_d = metadata_q;
       if (accept) begin
         metadata_d.seen = 1'b1;
-        metadata_d.m = {|m_i[15:4], m_i[3:0]};
-        metadata_d.n = {|n_i[15:4], n_i[3:0]};
-        metadata_d.k = (|k_i[15:9]) ? 10'd512 : {1'b0, k_i[8:0]};
+        metadata_d.m = m_i;
+        metadata_d.n = n_i;
+        metadata_d.k = k_i;
         metadata_d.numfmt = numfmt_i;
         metadata_d.balance = balance_i;
       end
@@ -122,7 +122,7 @@ module g6lc_ai_policy_steer
 
     assign numfmt_o = metadata_q.numfmt;
     assign topology_o = policy_topology(code_o, metadata_q.numfmt,
-        16'(metadata_q.m), 16'(metadata_q.n), 16'(metadata_q.k), metadata_q.balance,
+        metadata_q.m, metadata_q.n, metadata_q.k, metadata_q.balance,
         ReadBytesPerCycle, MinGain16ths, FormatSlotsLog2);
 
     // pragma translate_off

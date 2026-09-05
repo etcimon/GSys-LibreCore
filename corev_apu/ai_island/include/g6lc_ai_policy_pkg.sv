@@ -107,6 +107,17 @@ package g6lc_ai_policy_pkg;
     return 4'(dividend >> (int'(row_log) + int'(col_log) + 1));
   endfunction
 
+  function automatic logic [63:0] policy_rowbytes(
+      input logic [15:0] k,
+      input logic [2:0] numfmt
+  );
+    logic [2:0] bits;
+    logic [63:0] num;
+    bits = policy_element_bits_log2(numfmt);
+    num = 64'(k) * 64'(32'd1 << bits);
+    return (num + 64'd7) >> 3;
+  endfunction
+
   function automatic policy_topology_t policy_topology(
       input policy_code_t code,
       input logic [2:0] numfmt,
@@ -121,8 +132,9 @@ package g6lc_ai_policy_pkg;
     logic [2:0] row_max, col_max, balanced_row, balanced_col;
     logic [3:0] gain, balanced_gain, group_log;
     logic [15:0] active_k;
-    logic [18:0] input_bytes;
-    logic underfilled, balance_ok;
+    logic [63:0] base_step;
+    logic underfilled;
+    logic balance_ok;
     t = '0;
     if (!policy_format_known(numfmt) || m == 16'd0 || n == 16'd0 || k == 16'd0 ||
         slots[numfmt*4 +: 4] == 4'd0 || slots[numfmt*4 +: 4] > 4'd9)
@@ -178,15 +190,15 @@ package g6lc_ai_policy_pkg;
       col_log = balanced_col;
       gain = balanced_gain;
     end
+
     active_k = (k < (16'd1 << t.slots_log2)) ? k : (16'd1 << t.slots_log2);
-    input_bytes = {3'd0, active_k} << (int'(t.element_bits_log2) - 2);
-    if (t.element_bits_log2 == 3'd2 && active_k[0]) input_bytes = input_bytes + 19'd1;
+    base_step = (64'(m) + 64'(n)) * policy_rowbytes(active_k, numfmt);
     underfilled = k <= (16'd1 << (int'(t.slots_log2) - 1));
-    balance_ok = balance != 2'd0 || (code == POLICY_DECODE &&
-        (underfilled || int'(input_bytes) >= (read_bytes << 2)));
+
+    balance_ok = balance != 2'd0 || (code == POLICY_DECODE);
     if (code != POLICY_MOVEMENT && balance_ok && (row_log != 3'd0 || col_log != 3'd0) &&
         (m >= 16'd8 || n >= 16'd8) && int'(gain) >= min_gain &&
-        (underfilled || int'(input_bytes) > read_bytes)) begin
+        (underfilled || base_step >= 64'(read_bytes))) begin
       t.apply = 1'b1;
       t.rows_log2 = row_log;
       t.cols_log2 = col_log;

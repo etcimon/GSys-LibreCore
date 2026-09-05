@@ -27,7 +27,9 @@
 module g6lc_ai_island_top
   import g6lc_ai_island_cfg_pkg::*;
   import g6lc_ai_desc_pkg::*;
+  import g6lc_ai_policy_pkg::*;
 #(
+    parameter config_pkg::ai_cfg_t AiCfg = config_pkg::AiCfgOff,
     parameter ai_island_cfg_t IslandCfg = AiIslandLatencyDefault,
     parameter int unsigned    AddrWidth = 64,
     // When 1: instantiate AXI desc-fetch (SoC). Standalone spine keeps 0.
@@ -313,6 +315,11 @@ module g6lc_ai_island_top
   // I3 PMU from last GEMM job (pmu_gbps_x1000_q declared above for CAP)
   logic [31:0] gemm_pmu_r, gemm_pmu_w, gemm_pmu_cy;
   logic [31:0] pmu_r_hold_q, pmu_w_hold_q, pmu_cy_hold_q;
+  // F15: policy codec/steering sticky snapshot (last GEMM job)
+  logic [31:0] pmu_policy_code_q, pmu_policy_word_q,
+               pmu_policy_topo_q, pmu_policy_event_q;
+  logic [31:0] pmu_policy_code_hold, pmu_policy_word_hold,
+               pmu_policy_topo_hold, pmu_policy_event_hold;
 
   if (EnableDmaFetch) begin : gen_dma_fetch
     axi_req_t  dma_mux_req;
@@ -400,6 +407,7 @@ module g6lc_ai_island_top
         .axi_req_o  (gemm_axi_req),
         .axi_resp_i (dma_resp_int)
     );
+
     // Priority: completion store > GEMM > desc fetch. When all idle, drive a
     // clean zero req (no b_ready) so the DMA master cannot siphon B beats from
     // the xbar — that was observed to break subsequent PLIC claim.
@@ -470,6 +478,123 @@ module g6lc_ai_island_top
                  | |gemm_numfmt
                  | |gemm_ptr_a | |gemm_ptr_b | |gemm_ptr_c;
     // verilator lint_on UNUSEDSIGNAL
+  end
+
+  // ------------------------------------------------------------------
+  // F15: policy codec/steering (observable/PMU first consumer)
+  //
+  // Metadata producer: the accepted GEMM descriptor job (gemm_start pulse).
+  // First consumer: sticky MMIO snapshot of the selected policy and steering
+  // events, exposed through new PMU offsets.  No control back into the GEMM
+  // sequencer yet; dense GEMM behavior is unchanged when policy is disabled or
+  // the format is unsupported.
+  //
+  // Placed outside the DMA-fetch generate so the live SoC path (EnableDmaFetch=1)
+  // and the standalone spine smoke (EnableDmaFetch=0) see the same PMU interface.
+  // When EnableDmaFetch=0 the descriptor engine's ExecuteGemm is also 0, so
+  // gemm_start is never asserted and the policy remains idle.
+  // ------------------------------------------------------------------
+  logic             policy_ready, policy_work_valid;
+  logic             policy_eval, policy_commit, policy_hold;
+  logic             policy_predict_hit, policy_predict_miss;
+  logic             policy_warm_valid, policy_residual_skip;
+  policy_code_t     policy_code, policy_next_code;
+  policy_t          policy, policy_next;
+  logic [2:0]       policy_numfmt;
+  policy_topology_t policy_topology_value;
+
+  g6lc_ai_policy_steer #(
+    .AiCfg(AiCfg),
+    .ReadBytesPerCycle(IslandCfg.NocWidth / 8)
+  ) i_policy_steer (
+    .clk_i,
+    .rst_ni,
+    .testmode_i,
+    .enable_i   (AiCfg.PolicyCodecEn),
+    .flush_i    (gemm_err),
+    .valid_i    (gemm_start),
+    .batch_first_i(gemm_start),
+    .batch_last_i (gemm_start),
+    .m_i        (gemm_m[15:0]),
+    .n_i        (gemm_n[15:0]),
+    .k_i        (gemm_k[15:0]),
+    .opcode_i   (3'd0),
+    .balance_i  (2'd1),
+    .numfmt_i   (gemm_numfmt),
+    .sample_i   ('0),
+    .sample_valid_i(1'b0),
+    .exact_zero_i(1'b0),
+    .next_addr_i   ('0),
+    .next_addr_valid_i(1'b0),
+    .mispredict_i  (1'b0),
+    .ready_o    (policy_ready),
+    .work_valid_o(policy_work_valid),
+    .code_o     (policy_code),
+    .next_code_o(policy_next_code),
+    .policy_o   (policy),
+    .next_policy_o(policy_next),
+    .warm_valid_o(policy_warm_valid),
+    .warm_addr_o(),
+    .warm_bank_o(),
+    .residual_skip_o(policy_residual_skip),
+    .eval_o     (policy_eval),
+    .commit_o   (policy_commit),
+    .hold_o     (policy_hold),
+    .predict_hit_o(policy_predict_hit),
+    .predict_miss_o(policy_predict_miss),
+    .numfmt_o   (policy_numfmt),
+    .topology_o (policy_topology_value)
+  );
+
+  // Aggregate event/status snapshot into one 32-bit word.
+  logic [31:0] policy_event_word;
+  assign policy_event_word = {24'h0,
+                              policy_topology_value.apply, policy_warm_valid,
+                              policy_residual_skip, policy_predict_miss,
+                              policy_predict_hit, policy_hold, policy_commit,
+                              policy_eval};
+
+  // Capture hold register when the policy work is valid, copy to sticky PMU
+  // when the GEMM job completes (same cadence as pmu_r/w/cy).
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      pmu_policy_code_hold <= '0;
+      pmu_policy_word_hold <= '0;
+      pmu_policy_topo_hold <= '0;
+      pmu_policy_event_hold <= '0;
+      pmu_policy_code_q     <= '0;
+      pmu_policy_word_q     <= '0;
+      pmu_policy_topo_q     <= '0;
+      pmu_policy_event_q    <= '0;
+    end else begin
+      if (gemm_err) begin
+        pmu_policy_code_hold <= '0;
+        pmu_policy_word_hold <= '0;
+        pmu_policy_topo_hold <= '0;
+        pmu_policy_event_hold <= '0;
+      end else if (policy_work_valid) begin
+        pmu_policy_code_hold <= {21'h0, 3'(policy_next_code), 3'(policy_code), 5'h0};
+        pmu_policy_word_hold <= {7'h0, 2'(policy.dataflow),
+                                 4'(policy.tile_m_log2), 4'(policy.tile_n_log2),
+                                 4'(policy.tile_k_log2), policy.sparse_check,
+                                 2'(policy.prefetch_depth), 8'(policy_numfmt)};
+        pmu_policy_topo_hold <= {9'h0, 1'(policy_topology_value.valid),
+                                 1'(policy_topology_value.apply),
+                                 3'(policy_topology_value.rows_log2),
+                                 3'(policy_topology_value.cols_log2),
+                                 4'(policy_topology_value.reduction_log2),
+                                 4'(policy_topology_value.slots_log2),
+                                 3'(policy_topology_value.element_bits_log2),
+                                 4'(policy_topology_value.gain_16ths)};
+        pmu_policy_event_hold <= policy_event_word;
+      end
+      if (gemm_done) begin
+        pmu_policy_code_q  <= pmu_policy_code_hold;
+        pmu_policy_word_q  <= pmu_policy_word_hold;
+        pmu_policy_topo_q  <= pmu_policy_topo_hold;
+        pmu_policy_event_q <= pmu_policy_event_hold;
+      end
+    end
   end
 
   g6lc_ai_desc_engine #(
@@ -710,6 +835,10 @@ module g6lc_ai_island_top
         16'h0184: rdata_n = pmu_w_hold_q;
         16'h0188: rdata_n = pmu_cy_hold_q;
         16'h018C: rdata_n = pmu_gbps_x1000_q;
+        16'h0190: rdata_n = pmu_policy_code_q;
+        16'h0194: rdata_n = pmu_policy_word_q;
+        16'h0198: rdata_n = pmu_policy_topo_q;
+        16'h019C: rdata_n = pmu_policy_event_q;
         default: begin
           if (addr_i[15:0] >= 16'h0140 && addr_i[15:0] < 16'h0180)
             rdata_n = desc_words_q[addr_i[5:2]];
@@ -760,12 +889,15 @@ module g6lc_ai_island_top
 
   // Silence unused
   // verilator lint_off UNUSEDSIGNAL
-  logic _sr, _fec, _full;
+  logic _sr, _fec, _full, _prdy;
   logic [CplCntW-1:0] _cnt;
+  policy_t _pnext;
   assign _sr   = submit_ready;
   assign _fec  = fetch_err_complete_q;
   assign _full = cpl_full;
   assign _cnt  = cpl_count;
+  assign _prdy = policy_ready;
+  assign _pnext = policy_next;
   // verilator lint_on UNUSEDSIGNAL
 
 endmodule

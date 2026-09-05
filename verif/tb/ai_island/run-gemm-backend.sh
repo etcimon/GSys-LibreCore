@@ -15,9 +15,11 @@ CCELLS="$ROOT/vendor/pulp-platform/common_cells"
 AXI="$ROOT/vendor/pulp-platform/axi"
 build_nch() {
   local nch="$1"
-  local mdir="$2"
+  local dpf="$2"
+  local mdir="$3"
   mkdir -p "$mdir"
   verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTFLAT \
+    -GDOT_PIPE_FLOAT="$dpf" \
     -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-PINCONNECTEMPTY -Wno-CASEINCOMPLETE \
     -GNCH="$nch" \
   -I"$AXI/include" \
@@ -49,6 +51,7 @@ build_nch() {
   "$ROOT/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv" \
+  "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_tile_sram.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_gemm_seq.sv" \
   "$ROOT/verif/tb/ai_island/tb_g6lc_ai_gemm_backend.sv" \
@@ -60,6 +63,7 @@ DEFAULT_NCHS=(1 2 4 8)
 # shellcheck source=nch-from-env.inc.sh
 . "$(dirname "$0")/nch-from-env.inc.sh"
 for nch in "${NCH_LIST[@]}"; do
-  build_nch "$nch" "${OUT}-n${nch}"
+  build_nch "$nch" 0 "${OUT}-n${nch}"
+  build_nch "$nch" 1 "${OUT}-n${nch}-dpf1"
 done
-echo "PASS tb_g6lc_ai_gemm_backend nch=${NCH_LIST[*]}"
+echo "PASS tb_g6lc_ai_gemm_backend nch=${NCH_LIST[*]} dpf=0,1"

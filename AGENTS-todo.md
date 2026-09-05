@@ -48,10 +48,20 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   14,588→9,420; software-fixture SRAM128 72,134→52,056 and SRAM512 59,846→45,912.
   These are scheduling-model gains, not production FP GEMM support or measured
   array MAC/s; `PolicyBenefitEn` remains default-off.
-- [ ] Bind a real metadata producer and one policy consumer at a time to the
+- [~] Bind a real metadata producer and one policy consumer at a time to the
   sequencer, including tail/storage/format guards, per-context flush, bank/address
-  validation, island PMU counters, and dense fallback. No production top instance
-  exists yet; do not advertise a new capability or measure this as a speedup.
+  validation, island PMU counters, and dense fallback. First consumer wired:
+  `g6lc_ai_policy_steer` now lives inside `g6lc_ai_island_top`, fed from the
+  descriptor/GEMM job (m/n/k/numfmt) with format-known gating and `gemm_err` flush,
+  and exposes the selected policy plus steering events as sticky PMU words at
+  `0x0190..0x019C` (`g6lc_ai_island_cfg_pkg`).  The consumer is observable-only:
+  it does not change GEMM traversal, preserving dense fallback.  Build flists and
+  the standalone `ai-island-veri` smoke were updated to include dot-product and
+  policy packages; the smoke now passes after fixing the descriptor `version`
+  field in `sim_main.cpp` (it was still using the obsolete v1 while the engine
+  expects v2, causing `ST_BAD_VER` for every non-disabled descriptor).  A
+  live `EnableDmaFetch=1` or directed policy-unit smoke is still needed to exercise
+  the new PMU at runtime.
 - [ ] Calibrate against captured framework operator walks, hold out real models,
   and replay through the RTL memory model. QEMU/Hugging Face functional traces
   can feed this step; QEMU wall-clock speed is not island throughput evidence.

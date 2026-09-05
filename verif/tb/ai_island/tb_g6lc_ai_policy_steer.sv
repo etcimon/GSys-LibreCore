@@ -48,7 +48,7 @@ module tb_g6lc_ai_policy_steer_instance #(
   logic [2:0] ff_q;
   logic [1:0] fb_q;
   logic fseen_q;
-  int unsigned baseline_k, baseline_bytes;
+  int unsigned baseline_k, baseline_step;
   logic state_nonzero;
   assign state_nonzero = |{ready_o, work_valid_o, code_o, next_code_o, numfmt_o,
       (policy_o ^ 17'h03332), (next_policy_o ^ 17'h03332), topology_o,
@@ -58,7 +58,8 @@ module tb_g6lc_ai_policy_steer_instance #(
     baseline_k = 32'(fk_q);
     if (baseline_k > (32'd1 << topology_o.slots_log2))
       baseline_k = 32'd1 << topology_o.slots_log2;
-    baseline_bytes = 2 * ((baseline_k * (32'd1 << topology_o.element_bits_log2) + 7) / 8);
+    baseline_step = (32'(fm_q) + 32'(fn_q)) *
+        ((baseline_k * (32'd1 << topology_o.element_bits_log2) + 7) / 8);
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -104,7 +105,7 @@ module tb_g6lc_ai_policy_steer_instance #(
         assert (topology_o.valid && code_o != 3'd7);
         assert (fb_q != 2'd0 || (code_o == 3'd3 &&
             (32'(fk_q) <= ((32'd1 << topology_o.slots_log2) >> 1) ||
-             baseline_bytes >= 4 * ReadBytesPerCycle)));
+             baseline_step >= ReadBytesPerCycle)));
         assert (32'(topology_o.rows_log2) + 32'(topology_o.cols_log2) <= 4);
         assert (fm_q >= 16'd8 || fn_q >= 16'd8);
         assert (32'(topology_o.rows_log2) + 32'(topology_o.cols_log2) +
@@ -114,7 +115,7 @@ module tb_g6lc_ai_policy_steer_instance #(
         assert ((32'(fm_q) & ((32'd1 << topology_o.rows_log2) - 1)) == 0);
         assert ((32'(fn_q) & ((32'd1 << topology_o.cols_log2) - 1)) == 0);
         assert (32'(fk_q) <= ((32'd1 << topology_o.slots_log2) >> 1) ||
-            baseline_bytes > ReadBytesPerCycle);
+            baseline_step >= ReadBytesPerCycle);
       end else begin
         assert (topology_o.rows_log2 == '0 && topology_o.cols_log2 == '0);
         assert (topology_o.gain_16ths == '0);

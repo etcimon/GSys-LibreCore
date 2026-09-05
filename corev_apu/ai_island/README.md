@@ -32,8 +32,8 @@ See `architecture/ai-matrix/scaling-100tops.md` §3 and §8.
 | `g6lc_ai_island_top.sv` | reg map + CPL FIFO + IRQ + fetch/store/gemm AXI mux | **landed** |
 | `g6lc_ai_cluster.sv` | PE array + `tc_sram` + sequencer | I1 (next) |
 | AXI/DMA master + xbar attach | fabric citizen | **wired** (`NrSlaves=3`, slave[2]) |
-| `include/g6lc_ai_policy_pkg.sv`, `g6lc_ai_policy_codec.sv` | frozen eight-state policy, hysteresis and successor hints | **verified compartment**, not instantiated by top |
-| `g6lc_ai_policy_steer.sv` | format-aware benefit gate and fixed-budget topology | **verified compartment**, no production consumer |
+| `include/g6lc_ai_policy_pkg.sv`, `g6lc_ai_policy_codec.sv` | frozen eight-state policy, hysteresis and successor hints | **verified compartment**, instantiated by `g6lc_ai_island_top`; no traversal control yet |
+| `g6lc_ai_policy_steer.sv` | format-aware benefit gate and fixed-budget topology | **verified compartment**, first consumer is an observable island PMU at `0x0190..0x019C`; no GEMM traversal change |
 | `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_fp_mac.sv` | exact widening and separate FP32 RNE multiply/add | **verified scalar primitive**, not integrated floating GEMM |
 | `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_pe_dot_float.sv` | FP8/FP16/BF16/FP32 block-floating dot product with 640-bit reduction and RNE FP32 conversion | **verified Lanes=4/8 unit and GEMM integration**: combinational `pe_dot_float` 5,018 checks; pipelined `pe_dot_float_pipe` 5,028 checks for Lanes=4 and Lanes=8 (back-to-back different `numfmt`/data, half/alt valid masks) with Verilator; Yosys `read_slang`, `check -assert`, `synth -noabc -top g6lc_ai_pe_dot_float -flatten` and `synth -noabc -top g6lc_ai_pe_dot_float_pipe -flatten` all report zero problems. Mantissa product is explicitly 24×24; pipelined dot-pipe generic cells are ~115k (Lanes=4). Pipelined dot is integrated into `g6lc_ai_gemm_seq` behind `DotPipeFloat` and passes `run-gemm-backend.sh` nch={1,2,4,8} `dpf=0,1` across INT4/INT8/FP8/FP16/BF16/FP32; Lanes=256 / timing / full SoC next |
 
@@ -88,7 +88,7 @@ bash monorepo-soak/run-ai-tensor.sh rtl
 bash monorepo-soak/run-ai-tensor-rtl-hard.sh  # mmio + gemm_s8 on work-ver-ai
 ```
 
-Standalone smoke: cap, good desc, AI-3 OOR/perm, bad version, disabled.  
+Standalone smoke: cap, good desc, AI-3 OOR/perm, bad version, disabled, CPL FIFO multi-claim — all PASS.  
 SoC: MMIO doorbell + AI-3; sideband enq/poll; **PLIC-8 IRQ**; **DMA desc fetch + ptr_done write**
 (`desc_ptr` @ `0x118/11C`, doorbell bit[31]=fetch → `ai_desc_fetch_smoke`);
 **I1-lite GEMM** (`ai_gemm_s8_smoke` — 2×2×2 int8 golden). Spine tests use
@@ -110,9 +110,10 @@ reg before `ai.enq` (same-addr load-back can STLF; kick is a core wire).
 GSys LibreCore frozen eight-class policy encoder, hysteretic commit, current and
 repeat/successor decode, and discardable address/bank hints. The control gate is
 `CVA6Cfg.AiCfg.PolicyCodecEn` (all production targets off); the independent
-verification wrapper enables it. **Not yet instantiated by the island top and
-not yet steering the GEMM datapath.** It is not a Desc64/QoS/ISA change or a
-measured throughput improvement.
+verification wrapper enables it. **Instantiated in `g6lc_ai_island_top` as an
+observable-only PMU consumer** (sticky policy words at `0x0190..0x019C`), but not
+yet steering the GEMM datapath. It is not a Desc64/QoS/ISA change or a measured
+throughput improvement.
 
 `g6lc_ai_policy_steer.sv` adds the default-off `AiCfg.PolicyBenefitEn` wrapper:
 native-format zero metadata, format epochs, full 16-bit retained `m/n/k` metadata,
@@ -184,10 +185,12 @@ service rate used by the policy scheduling model.
    successful jobs feed the remote RTL policy wrapper. Samples carry no exact-zero
    proof; no DMA address hint is materialized. Per-format/code usage and signed
    cycle-model comparisons remain explicitly labeled future-array hypotheses.
-3. **Guarded integer consumer — open.** Produce metadata from real descriptor/tile
-   state, isolate per-context history and flushes, then connect one tile/order/bank/
-   prefetch consumer at a time. Preserve dense fallback, tail/storage/address
-   guards and precise completions; add PMU events before reporting application rates.
+3. **Guarded integer consumer — in progress.** Metadata is produced from the
+   descriptor/GEMM job (m/n/k/numfmt) in `g6lc_ai_island_top`; the first consumer
+   is the observable island PMU (`0x0190..0x019C`) with per-context `gemm_err` flush
+   and format-known gating. Tile/order/bank/prefetch consumers remain open;
+   preserve dense fallback, tail/storage/address guards and precise completions;
+   prove each consumer separately before reporting application rates.
 4. **Floating GEMM — open.** Integrate native byte gathering, scalar or replicated
    arithmetic, ordered accumulation and C32 stores. Test real memory stalls and
    rejected formats end to end before changing capability/implementation masks.

@@ -272,6 +272,11 @@ package g6lc_ai_island_cfg_pkg;
   localparam logic [15:0] PMU_OFF_W_BEATS     = 16'h0184;
   localparam logic [15:0] PMU_OFF_CYCLES      = 16'h0188;
   localparam logic [15:0] PMU_OFF_GBPS_X1000  = 16'h018C;
+  // F15: policy codec/steering sticky snapshot (last GEMM job). RO.
+  localparam logic [15:0] PMU_OFF_POLICY_CODE  = 16'h0190;
+  localparam logic [15:0] PMU_OFF_POLICY_WORD  = 16'h0194;
+  localparam logic [15:0] PMU_OFF_POLICY_TOPO  = 16'h0198;
+  localparam logic [15:0] PMU_OFF_POLICY_EVENT = 16'h019C;
 
   // Live SKU: both queues on cluster 0. I2 grows this with ClustersEnabled.
   localparam int unsigned QueueClusterMap [0:1] = '{0, 0};

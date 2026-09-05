@@ -41,6 +41,7 @@ module g6lc_ai_gemm_seq #(
     parameter int unsigned IdWidth   = 4,
     parameter int unsigned MaxDim    = 8,
     parameter int unsigned PeLanes   = 4,  // parallel MACs / cycle (power of 2 preferred)
+    parameter bit          DotPipeFloat = 1'b0, // 0: combinational g6lc_ai_pe_dot_float; 1: pipelined dot product with valid handshake
     parameter int unsigned MaxAROut  = 2,  // I3: multi-outstanding AR; live = 2
     // Shared DRAM stripe (g6lc_ai_island_cfg_pkg). N=1 leaves MaxBurstBeats
     // at 255 so the live 256³ fixture stays bit-identical. N>1 caps each
@@ -327,7 +328,7 @@ module g6lc_ai_gemm_seq #(
       .sum_o   (pe_sum_int)
   );
 
-  // Floating path (FP8/FP16/BF16/FP32)
+  // Floating path (FP8/FP16/BF16/FP32) — combinational baseline
   g6lc_ai_pe_dot_float #(.Lanes(PeLanes)) i_pe_float (
       .a_i     (pe_a_float),
       .b_i     (pe_b_float),
@@ -336,6 +337,74 @@ module g6lc_ai_gemm_seq #(
       .sum_o   (pe_sum_float),
       .flags_o ()
   );
+
+  // Pipelined floating dot-product handshake
+  // dot_start is asserted with each MAC issue; dot_sum/dot_first/... are valid
+  // DOT_LATENCY-1 cycles later, matching dot_valid_o.  DOT_LATENCY is the
+  // dot product's registered Latency plus the one-cycle output register.
+  localparam int unsigned DOT_LATENCY = DotPipeFloat ?
+      ($clog2(PeLanes < 1 ? 1 : PeLanes) + 5) : 1;
+
+  logic dot_start;
+  logic dot_valid;
+  logic [31:0] dot_sum;
+  logic dot_first_out, dot_last_out;
+  logic [31:0] dot_i_out, dot_j_out;
+  logic dot_first_issue, dot_last_issue;
+  logic [31:0] dot_i_issue, dot_j_issue;
+  // F0b-2: outstanding dot-product transactions so the MAC does not exit before
+  // all pipelined results have returned and their C writes have been issued.
+  logic [$clog2(PeLanes)+4:0] dot_pending_q;
+
+  generate
+    if (DotPipeFloat) begin : gen_dot_pipe
+      g6lc_ai_pe_dot_float_pipe #(.Lanes(PeLanes)) i_pe_float_pipe (
+          .clk_i    (clk_i),
+          .rst_ni   (rst_ni),
+          .start_i  (dot_start),
+          .a_i      (pe_a_float),
+          .b_i      (pe_b_float),
+          .valid_i  (pe_v),
+          .numfmt_i (numfmt_q),
+          .sum_o    (dot_sum),
+          .flags_o  (),
+          .valid_o  (dot_valid)
+      );
+
+      logic [DOT_LATENCY-1:0] dot_first_pipe, dot_last_pipe;
+      logic [DOT_LATENCY-1:0][31:0] dot_i_pipe, dot_j_pipe;
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          dot_first_pipe <= '0;
+          dot_last_pipe  <= '0;
+          dot_i_pipe     <= '0;
+          dot_j_pipe     <= '0;
+        end else begin
+          dot_first_pipe <= {dot_first_pipe[DOT_LATENCY-2:0],
+                             dot_start ? dot_first_issue : 1'b0};
+          dot_last_pipe  <= {dot_last_pipe[DOT_LATENCY-2:0],
+                             dot_start ? dot_last_issue : 1'b0};
+          dot_i_pipe     <= {dot_i_pipe[DOT_LATENCY-2:0],
+                             dot_start ? dot_i_issue : 32'd0};
+          dot_j_pipe     <= {dot_j_pipe[DOT_LATENCY-2:0],
+                             dot_start ? dot_j_issue : 32'd0};
+        end
+      end
+
+      assign dot_first_out = dot_first_pipe[DOT_LATENCY-1];
+      assign dot_last_out  = dot_last_pipe[DOT_LATENCY-1];
+      assign dot_i_out     = dot_i_pipe[DOT_LATENCY-1];
+      assign dot_j_out     = dot_j_pipe[DOT_LATENCY-1];
+    end else begin : gen_dot_float_comb
+      assign dot_valid     = 1'b0;
+      assign dot_sum       = '0;
+      assign dot_first_out = 1'b0;
+      assign dot_last_out  = 1'b0;
+      assign dot_i_out     = '0;
+      assign dot_j_out     = '0;
+    end
+  endgenerate
 
   // Format selection: integer/INT4 vs floating.
   // numfmt_q is constant for a tile, so the mux is a per-job static select.
@@ -655,6 +724,12 @@ module g6lc_ai_gemm_seq #(
     sum_last_d  = 1'b0;
     sum_i_d     = '0;
     sum_j_d     = '0;
+    // Dot-product issue metadata defaults (used only when DotPipeFloat is set).
+    dot_start       = 1'b0;
+    dot_first_issue = 1'b0;
+    dot_last_issue  = 1'b0;
+    dot_i_issue     = '0;
+    dot_j_issue     = '0;
     // acc_d keeps the current accumulator unless a drain overrides it.
     err_d       = err_q;
     ar_inflight_d = ar_inflight_q;
@@ -1010,8 +1085,10 @@ module g6lc_ai_gemm_seq #(
           last_step  = (t_next >= k_q);
           t_byte_base= (numfmt_q == 3'd1) ? (t_q >> 1)
                                           : (t_q * ai_fmt_bytes());
-          can_trail  = DualCRead && (DataWidth >= 64) && (stc_i_q < i_q ||
-                       (i_q >= m_q && stc_i_q < m_q));
+          can_trail  = DualCRead && (DataWidth >= 64) &&
+                       (dot_pending_q == '0) &&
+                       (stc_i_q < i_q ||
+                        (i_q >= m_q && stc_i_q < m_q));
 
           // ---- drain the previous issue -----------------------------------
           // The previous cycle's sum is now stable; add it to the accumulator
@@ -1107,14 +1184,32 @@ module g6lc_ai_gemm_seq #(
               end
             end
 
+            // Tag the pipelined dot product when this is a float tile.
+            dot_start      = mac_active && pe_float_en;
+            dot_first_issue= (t_q == 0);
+            dot_last_issue = last_step;
+            dot_i_issue    = i_q;
+            dot_j_issue    = j_q;
+
             // Capture what the PE produced this cycle. (i,j,t) are the issue
             // coordinates; they advance in the index logic below.
-            sum_d      = pe_sum;
-            sum_v_d    = 1'b1;
-            sum_first_d= (t_q == 0);
-            sum_last_d = last_step;
-            sum_i_d    = i_q;
-            sum_j_d    = j_q;
+            if (DotPipeFloat && pe_float_en) begin
+              // Dot output is captured directly in the main always_ff below;
+              // these always_comb values are not used for the pipelined path.
+              sum_d      = '0;
+              sum_v_d    = 1'b0;
+              sum_first_d= 1'b0;
+              sum_last_d = 1'b0;
+              sum_i_d    = '0;
+              sum_j_d    = '0;
+            end else begin
+              sum_d      = pe_sum;
+              sum_v_d    = 1'b1;
+              sum_first_d= (t_q == 0);
+              sum_last_d = last_step;
+              sum_i_d    = i_q;
+              sum_j_d    = j_q;
+            end
           end
 
           // Trail C-store (same pair path as ST_STC, cursor stc_i/stc_j)
@@ -1250,11 +1345,13 @@ module g6lc_ai_gemm_seq #(
           // Exit: MAC done (i>=m) and store done (stc_i>=m). The pipeline
           // must be empty before leaving: a valid in-flight sum has its C
           // write one cycle later and cannot be cancelled.
-          if (i_q >= m_q && stc_i_q >= m_q && !aw_sent_q && !sum_v_q)
+          if (i_q >= m_q && stc_i_q >= m_q && !aw_sent_q && !sum_v_q &&
+              dot_pending_q == '0)
             state_d = ST_DONE;
-          else if (i_q >= m_q && stc_i_q >= m_q && aw_sent_q)
+          else if (i_q >= m_q && stc_i_q >= m_q && aw_sent_q &&
+                   dot_pending_q == '0)
             state_d = ST_MAC;  // finish open AW/B
-          else if (!DualCRead && i_q >= m_q) begin
+          else if (!DualCRead && i_q >= m_q && dot_pending_q == '0) begin
             // PeLanes==1: fall back to dedicated ST_STC
             state_d       = ST_STC;
             aw_sent_d     = 1'b0;
@@ -1454,21 +1551,32 @@ module g6lc_ai_gemm_seq #(
       stc_elem_q <= '0;
       stc_i_q <= '0;
       stc_j_q <= '0;
+      dot_pending_q <= '0;
       pmu_r_q  <= '0;
       pmu_w_q  <= '0;
       pmu_cy_q <= '0;
     end else begin
       state_q       <= state_d;
       acc_q         <= acc_d;
-      // F0b-2: advance the pipeline stage. The values captured are the ones
-      // the ST_MAC block drove as `sum_*_d` from the issue cycle.
-      sum_q       <= sum_d;
-      sum_v_q     <= sum_v_d;
-      sum_first_q <= sum_first_d;
-      sum_last_q  <= sum_last_d;
-      sum_i_q     <= sum_i_d;
-      sum_j_q     <= sum_j_d;
-      err_q         <= err_d;
+      // F0b-2: advance the pipeline stage. For the pipelined floating path the
+      // dot product valid/data are sampled directly from the pipe output; the
+      // integer path continues to use the combinational `sum_*_d` values.
+      if (DotPipeFloat && pe_float_en) begin
+        sum_q       <= dot_valid ? dot_sum : '0;
+        sum_v_q     <= dot_valid;
+        sum_first_q <= dot_valid ? dot_first_out : 1'b0;
+        sum_last_q  <= dot_valid ? dot_last_out  : 1'b0;
+        sum_i_q     <= dot_valid ? dot_i_out     : '0;
+        sum_j_q     <= dot_valid ? dot_j_out     : '0;
+      end else begin
+        sum_q       <= sum_d;
+        sum_v_q     <= sum_v_d;
+        sum_first_q <= sum_first_d;
+        sum_last_q  <= sum_last_d;
+        sum_i_q     <= sum_i_d;
+        sum_j_q     <= sum_j_d;
+      end
+      err_q       <= err_d;
       ar_inflight_q <= ar_inflight_d;
       aw_sent_q     <= aw_sent_d;
       w_sent_q      <= w_sent_d;
@@ -1526,6 +1634,11 @@ module g6lc_ai_gemm_seq #(
       c_pair_hold_q <= c_pair_hold_d;
       stc_w_left_q  <= stc_w_left_d;
       stc_elem_q    <= stc_elem_d;
+      dot_pending_q <= DotPipeFloat && pe_float_en
+                       ? dot_pending_q
+                         + (dot_start ? 1'd1 : 1'd0)
+                         - ((dot_valid && dot_pending_q != '0) ? 1'd1 : 1'd0)
+                       : '0;
       if (c_lo_we_d)   c_lo_q <= c_r_data;
       done_q        <= (state_q == ST_DONE);
 

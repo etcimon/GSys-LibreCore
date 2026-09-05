@@ -785,27 +785,26 @@ than one output, a non-movement class, at least one M/N dimension of eight, the
 configured minimum gain (default 2/16), and either an underfilled baseline K vector
 or SRAM read pressure above `ReadBytesPerCycle` (default 128). Movement-bound
 balance normally vetoes selection. The refined **decode exception** admits that
-balance when the baseline K vector is underfilled or its input-read demand is at
-least four times the SRAM service rate. Thus a bandwidth-heavy decoder is not
-assumed incapable of benefiting from local reuse; the measured whole-tile gain
-still includes the same external traffic on both paths. The pressure comparison
-uses two independently byte-rounded native rows, including odd INT4 K: for
-example K=511 occupies 512 bytes across A/B, not 511. A directed boundary test
-pins that distinction.
+balance when the baseline K vector is underfilled or the whole-tile baseline
+operand-read demand `(M+N)*rowbytes(active_K)` is at least the SRAM service rate.
+Thus a bandwidth-heavy decoder is not assumed incapable of benefiting from local
+reuse; the measured whole-tile gain still includes the same external traffic on
+both paths. The pressure comparison uses independently byte-rounded native rows,
+including odd INT4 K: for example K=511 occupies 256 bytes per row, so
+`(1+128)*256` bytes for a 1×128 tile, not `2*256`. A directed boundary test pins
+that distinction.
 All arithmetic is small masks, shifts, comparisons and fixed-code tables; there
 is no runtime search across operators, table training, float arithmetic or
 full-matrix cost multiplication. A rejected topology is the same-format baseline.
 A useful state is allowed to persist through the existing hysteresis; code usage
 is measured, not forced to artificial equal shares.
 
-The wrapper also compresses retained topology metadata without changing decisions:
-M and N keep their low four bits and an upper-bits-present flag; K saturates at
-512. Those retain every divisor, nonzero/size test and K threshold used by this
-decoder (maximum output factor 16, maximum service budget 512). The original
-classifier still sees raw dimensions, not these compressed values. A separate
-full-metadata formal expression and 14,560 boundary cases per steering build
-check equivalence. Increasing those resource bounds requires revisiting the
-compression, not just widening a parameter.
+The wrapper retains full 16-bit `m/n/k` topology metadata (the classifier still
+sees raw dimensions). K is only clipped to the active service slot when computing
+`active_K`; the retained value keeps the full dimension for the resource model.
+A separate full-metadata formal expression and 14,560 boundary cases per steering
+build check equivalence. Widening the metadata or service bounds is a parameter
+change, not a decoder redesign.
 
 ### 11.4 What a verified percentage must compare
 
@@ -909,7 +908,7 @@ usage is enforced; low-usage classes remain visible rather than being inflated.
 Equal-weight 4-family × 7-format normalization gives **38.24% modeled time
 reduction / 61.93% normalized throughput increase**. This is an explicit
 benchmark mix, not a claim of equal real-world demand or a 50/50 LLM/image split.
-Increasing SRAM service to 512 B/cycle reduces those figures to **3.55% / 3.68%**.
+Increasing SRAM service to 512 B/cycle reduces those figures to **3.56% / 3.69%**.
 Most INT8/FP8/16-bit/FP32 dense cases then have approximately zero benefit and
 small decision-overhead regressions; INT4 retains useful lane-fill gains. Thus
 port pressure is a hypothesis that materially determines the answer.
@@ -935,13 +934,20 @@ were evaluated on the development fixtures; further seeds/families are checks,
 not evidence of a captured-model calibration/held-out split. Final second-seed
 run `123` (`ai-policy-codec-20260905T013623Z-50c820a701f5`) also passes, over
 185,122 records: normalized time reductions are 35.67% and 3.54% at 128 and
-512 B/cycle respectively. SP24 is checked by the complete reference scoreboard,
-including opcode/sample-change silence, rather than exempted from code checks.
+512 B/cycle respectively. A later local steering run with the full 16-bit `m/n/k`
+retention and the `(m+n)*rowbytes(active_K) >= read_bytes` gate passes over
+190,946 records, giving 38.24% and 3.56% signed time reduction at 128 and
+512 B/cycle (artifacts `build-platform/workspace/build/ai-policy-efficiency-final`
+and `ai-policy-efficiency-final-512`). SP24 is checked by the complete reference
+scoreboard, including opcode/sample-change silence, rather than exempted from code
+checks.
 
 Local Yosys 0.67+92 artifacts:
-`build-platform/workspace/build/ai-policy-codec-20260905T013620Z-c2ca42f5bd05/`.
-The combined codec/steering wrapper synthesizes to **1,213 generic cells,
-139 sequential cells, zero latches**; disabled wrappers have zero cells. Metadata
+`build-platform/workspace/build/ai-policy-codec-20260905T134537Z-865a53bca276/`.
+The codec wrapper (`tb_g6lc_ai_policy`) synthesizes to **626 generic cells,
+113 sequential cells, zero latches**; the enabled steering wrapper
+(`tb_g6lc_ai_policy_steer_on`) synthesizes to **1,222 generic cells,
+167 sequential cells, zero latches**; disabled wrappers have zero cells. Metadata
 compression alone reduced 1,274 / 167 to 1,211 / 139, removing **28 state bits**
 without changing topology results; exact INT4 row rounding adds two generic
 cells. The original codec remains 626 / 113.

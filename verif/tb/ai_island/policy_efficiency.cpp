@@ -104,12 +104,14 @@ Topology topology(unsigned code, unsigned fmt, unsigned m, unsigned n, unsigned 
         c = balanced_c;
         gain = balanced_gain;
     }
-    const U64 active_bytes = 2 * rowbytes(std::min(k, 1u << t.slots), fmt);
+    const U64 slots_group = U64(1) << t.slots;
+    const U64 base_k = std::min(U64(k), slots_group);
+    const U64 base_step = (U64(m) + n) * rowbytes(unsigned(base_k), fmt);
     const bool underfilled = k <= ((1u << t.slots) >> 1);
-    const bool balance_eligible = balance != 0 ||
-        (code == 3 && (underfilled || active_bytes >= U64(4) * read));
+
+    const bool balance_eligible = balance != 0 || (code == 3);
     if (!balance_eligible || r + c == 0 || (m < 8 && n < 8) || gain < min_gain ||
-        (!underfilled && active_bytes <= read)) return t;
+        (!underfilled && base_step < U64(read))) return t;
     t.apply = true;
     t.r = r;
     t.c = c;
@@ -486,11 +488,11 @@ void directed(Bench &tb, std::mt19937_64 &rng) {
         {"decode_movement_fourfold_pressure", 3, 0, 1, 128, 256, 0, 128, 0x67788098u,
             {true, true, 0, 4, 4, 8, 3, 7}},
         {"decode_movement_below_fourfold_pressure", 3, 0, 1, 128, 255, 0, 128, 0x67788098u,
-            {true, false, 0, 0, 8, 8, 3, 0}},
+            {true, true, 0, 4, 4, 8, 3, 7}},
         {"decode_movement_twofold_pressure", 3, 0, 1, 128, 256, 0, 256, 0x67788098u,
-            {true, false, 0, 0, 8, 8, 3, 0}},
+            {true, true, 0, 4, 4, 8, 3, 7}},
         {"decode_outer_gate_still_required", 3, 0, 1, 128, 256, 1, 512, 0x67788098u,
-            {true, false, 0, 0, 8, 8, 3, 0}},
+            {true, true, 0, 4, 4, 8, 3, 7}},
         {"nondecode_movement_still_conservative", 1, 0, 64, 64, 64, 0, 128, 0x67788098u,
             {true, false, 0, 0, 8, 8, 3, 0}},
         {"movement_code_still_baseline", 7, 0, 64, 64, 64, 1, 128, 0x67788098u,

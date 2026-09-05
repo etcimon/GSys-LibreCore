@@ -79,8 +79,8 @@ static void load_desc_words(const uint32_t words[16]) {
 static void make_ok_desc(uint32_t w[16]) {
   for (int i = 0; i < 16; i++)
     w[i] = 0;
-  // version=1, op=1 (GEMM)
-  w[0] = (1u << 16) | 1u;
+  // version=2, op=1 (GEMM)
+  w[0] = (1u << 16) | 2u;
   // flags=0
   w[1] = 0;
   // m,n
