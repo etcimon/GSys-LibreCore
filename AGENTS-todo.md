@@ -88,16 +88,16 @@ Priors: `architecture/ai-matrix/numeric-formats-datapath.md`, AI policy §10–�
   1 NumPy skip, 22 QEMU UIO tests and torch smoke. Build-platform typecheck and
   13 focused tests pass. Software rejects invalid C/done destinations and
   device overlays and preserves sticky completion errors.
-- [x] FP8 E4M3/E5M2 block-floating dot product PE: new
-  `corev_apu/ai_island/g6lc_ai_pe_dot_float.sv` with per-lane decode, product,
-  block-exponent alignment, 128-bit reduction tree and RNE FP32 conversion.
+- [x] FP8/FP16/BF16/FP32 block-floating dot product PE: extended
+  `corev_apu/ai_island/g6lc_ai_pe_dot_float.sv` with generic per-lane decode,
+  product, block-exponent alignment, 640-bit reduction tree and RNE FP32 conversion.
   Verified by `verif/tb/ai_island/run-pe-dot-float.sh` (Verilator 5.x) with
-  `pe_dot_float_main.cpp`: 4,007 Lanes=4 directed/random checks vs exact `double`
+  `pe_dot_float_main.cpp`: 5,018 Lanes=4 directed/random checks vs exact `double`
   oracle pass. Yosys `read_slang` elaborates with zero errors/warnings; `check -assert`
-  and `synth -top g6lc_ai_pe_dot_float -flatten` each report zero problems and zero
+  and `synth -noabc -top g6lc_ai_pe_dot_float -flatten` each report zero problems and zero
   latches. `AiIslandDtypeMask` / `AiIslandPeImplMask` remain `16'h0003`. No
   fused/reassociated reduction, no FTZ, no new clock/reset.
-- [ ] Integrate the FP8 dot-product PE into `g6lc_ai_gemm_seq` loader/accumulator
+- [ ] Integrate the floating dot-product PE into `g6lc_ai_gemm_seq` loader/accumulator
   and validate full-system grants; production `IslandFpEn` stays off and live
   island grant/PE masks stay 3 (INT8/INT4). Scalar FP and software formats are
   not floating GEMM support or ISA F/D conformance. This increment adds neither
@@ -139,7 +139,7 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **Ara / RVV** | Attach + DTS + directed; **VRF/cosim gate** `ara-vector-cosim` (live lmul opt) | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
 | **H / KVM** | U9 + **H-edge Spike+RTL 3/3** (`kvm-h-spike` / Variane server_math) | `architecture/server-math-hypervisor.md` · remaining-upgrade Phase B · `agents/spec/riscv-spec-II-5.*-hypervisor*.html` · impl Hypervisor row · `verif/tests/custom/kvm_h/` · suite `kvm-h-tests` |
 | **`g6lc_qemu` emulation** | **Q1–Q2 landed; Q3–Q9 in progress.** QEMU virt + generated `g6lc-soc` OpenSBI/U-Boot/EDK2/OpenWrt **boot green** (hypothesis). AI DESC/CPL join + virt_ai_card; `ai_host_transport` **unpinned**. **Never Variane evidence.** Snapshot: `architecture/current-stage.md`. Design asks F1–F15: `g6lc_qemu/architecture/RTL_FEEDBACK.md` §2.1. | `architecture/g6lc-qemu/README.md` · `staging.md` · `u-boot-edk2-boot-architecture.md` · package `g6lc_qemu/AGENTS-todo.md` |
-| **`g6lc_bios`** | **B0–B49 landed.** Independent S-mode BIOS rewrite of TempleOS/ZealOS specs. `g6b elf` / `g6q run --loader bios` / `g6q gen --emit bios-spec`. Guest G6UI, FileServe, GetFile. Never Variane, never `-netdev`. | `architecture/g6lc-bios/README.md` · `g6lc_bios/AGENTS.md` · `g6lc_bios/architecture/PLAN.md` |
+| **`g6lc_bios`** | **B0–B52 landed within host/guest boundaries.** B50 strict JS/DOM; B51 shared configurable HolyC/browser menu rows, native browser imports/navigation and framed local HTTP; B52 bounded i32 WASM execution + real RV32/RV64 numeric lowering. Guest full browser/JIT installation and persistent settings/TLS remain open. Check: 196 Rust + 15 Bun tests; 13 BIOS regressions. Never Variane, never `-netdev`. | `architecture/g6lc-bios/README.md` · `g6lc_bios/AGENTS.md` · `g6lc_bios/architecture/PLAN.md` |
 | **U-Boot / EDK2 loader architecture** | **U0/U1/U2 QEMU virt green; E0–E3 QEMU virt green; E1 RTL SEC-ABI green (E2/U2 not RTL).** `g6q fw build --loader edk2` wraps upstream `OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc`. Remote `edk2-stable202511` + BaseTools + user-local `iasl` **OK**; CODE 8 MiB / VARS 768 KiB. **Isolation:** post-sync B with SL-W `wbuffer_all` SIGSEGV'd `mini_must_pass` (rc=139, t=275). HEAD dcache `work-ver-smt2-fw64-B-headiso` oracle green, `mini_edk2_sec` **PASS**, `mini_stq_flush_fwd` FAIL (gate-6). IQ width casts were not the crash. SL-W crash-fix (unsigned fixup index + power-of-two `WbufferAllDepth`) **`work-ver-smt2-fw64-B-slwfix` oracle green, `mini_edk2_sec` PASS** (6.5 s); `mini_stq_flush_fwd` **PASS** (`slw-gate6-noprop`, no sim probes): checked-miss ACK pushes fixup, miss keeps the entry, same-PA coalesce. E2 no longer gated on this mini. `apply_edk2_pflash` floors `-m` to 4 GiB and prefers generic-virt OpenSBI (`out/fw/fw_dynamic-generic-virt.bin`, no `FW_FDT_PATH`) over a g6lc-FDT `fw_dynamic` (that hung silent on virt). CpuDxe SATP green after `RiscVInterrupt.S` `s0` smash fix (`g6lc_qemu/patches/edk2-riscv-sstatus-no-stack.patch`). Smbios `INST_ACCESS_PAGE_FAULT` was `SupervisorModeTrap` `addi sp,-140` vs C `UINT64[35]` (xpack PP default ilp32); trap-frame ×8 + `PP_FLAGS -mabi=lp64` → `addi sp,-280`. QEMU 8.2.2 virt DEBUG: `SATP mode 10`, Bds, **UEFI Interactive Shell v2.2**. Virtio ESP `FS0:` + `BOOTRISCV64.EFI` (`E2-VIRTIO-ESP`) via `g6q run --loader edk2 --machine g6lc-virt --drive fat:rw:out/loader-run/esp`. E3 OpenWrt EFI stub green on EDK2. **U2 green**: `g6q run --loader u-boot --os openwrt` → U-Boot `bootefi` → `Linux version 6.6.93`; `--smp 2` → 2 CPUs and `procd`. **U3a/U3b/U3-FIT/U3-SPI green**: `--machine g6lc-soc` → `bootefi` DRAM PE (procd) and `bootm` of `g6lc-efi.itb` from NOR (`CPUINFO-DONE`). **U3-Shell virt green**: `--os efi-shell --machine g6lc-virt` → `UEFI Interactive Shell v2.2`. Soc SPI Shell `StartImage` hangs; soc `bootefi hello` ASCII green. **E2-PCI**: EDK2 Shell `pci` on GPEX (root complex) vs `virt_ai_card` (endpoint stand-in); `ai_host_transport` unpinned. SD still open. `mini_fdt_next_tag_lbu` PASS (`slw-fdt-regress`). | `architecture/g6lc-qemu/u-boot-edk2-boot-architecture.md` · `architecture/dcache-ack-before-check.md` §2.1 · `g6lc_qemu/AGENTS-todo.md` · `g6lc_qemu/pins.toml` |
 
 Standing disciplines remain active (`AGENTS.md` §0.4–§0.6). Keep

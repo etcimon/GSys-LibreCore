@@ -1,14 +1,14 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
-// Xg6lcai I1 FP8 dot product (F2).
+// Xg6lcai floating dot product (F2–F5).
 //
 // Computes sum_{lane} (valid[lane] ? widen(a[lane]) * widen(b[lane]) : 0)
-// for FP8 E4M3 and E5M2. Uses a block-floating-point reduction:
-//   1. decode each FP8 byte into (sign, mantissa, exponent);
+// for FP8 E4M3/E5M2, FP16, BF16 and FP32. Uses a block-floating-point reduction:
+//   1. decode each element into (sign, mantissa, exponent);
 //   2. multiply to (sign, product_mantissa, product_exponent);
 //   3. pick the most-negative product exponent as the block exponent;
-//   4. shift each product mantissa to that block and sum in a 128-bit tree;
+//   4. shift each product mantissa to that block and sum in a wide integer tree;
 //   5. convert the integer sum and block exponent to IEEE 754 binary32.
 //
 // The output is rounded to nearest-even once, at the end of the dot. This is
@@ -21,29 +21,34 @@
 module g6lc_ai_pe_dot_float #(
     parameter int unsigned Lanes = 4
 ) (
-    input  logic        [7:0]  a_i     [Lanes],
-    input  logic        [7:0]  b_i     [Lanes],
+    input  logic        [31:0] a_i     [Lanes],
+    input  logic        [31:0] b_i     [Lanes],
     input  logic               valid_i [Lanes],
-    input  logic        [2:0]  numfmt_i,  // AI_FMT_FP8_E4M3 or AI_FMT_FP8_E5M2
+    input  logic        [2:0]  numfmt_i,  // AI_FMT_FP8_E4M3/FP8_E5M2/FP16/BF16/FP32
     output logic        [31:0] sum_o,
     output logic        [4:0]  flags_o
 );
 
   localparam logic [2:0] AI_FMT_FP8_E4M3 = 3'(config_pkg::AI_FMT_FP8_E4M3);
   localparam logic [2:0] AI_FMT_FP8_E5M2 = 3'(config_pkg::AI_FMT_FP8_E5M2);
-  // sentinel for "no finite product yet" (larger than any FP8 product exponent)
-  localparam logic signed [15:0] NO_EXP  = 16'sd32767;
+  localparam logic [2:0] AI_FMT_FP16     = 3'(config_pkg::AI_FMT_FP16);
+  localparam logic [2:0] AI_FMT_BF16     = 3'(config_pkg::AI_FMT_BF16);
+  localparam logic [2:0] AI_FMT_FP32     = 3'(config_pkg::AI_FMT_FP32);
+
+  // sentinel for "no finite product yet" (larger than any product exponent)
+  localparam logic signed [15:0] NO_EXP = 16'sd32767;
   // round the lane count up to the next power of two for a clean balanced tree
   localparam int unsigned P2 = 1 << ($clog2(Lanes < 1 ? 1 : Lanes));
   localparam int unsigned LEVELS = $clog2(P2);
+  localparam int unsigned MAXW = g6lc_ai_fp_pkg::FP_DOT_MAXW;
 
   // Per-lane decoded products and reduced control signals.
-  g6lc_ai_fp_pkg::fp8_product_t prod [P2];
-  logic        is_nan_arr [P2];
-  logic        is_inf_arr [P2];
+  g6lc_ai_fp_pkg::fp_dot_product_t prod [P2];
+  logic        is_nan_arr  [P2];
+  logic        is_inf_arr  [P2];
   logic        is_zero_arr [P2];
-  logic        valid_arr  [P2];
-  logic        sign_arr   [P2];
+  logic        valid_arr   [P2];
+  logic        sign_arr    [P2];
   logic signed [15:0] exp_arr [P2];
 
   logic        any_nan;
@@ -53,25 +58,31 @@ module g6lc_ai_pe_dot_float #(
   logic        inf_sign;
   logic signed [15:0] block_exp;
 
-  logic signed [127:0] bfp_sum;
+  logic signed [MAXW-1:0] bfp_sum;
 
   // 1. decode and multiply per lane; pad extra P2-Lanes slots with zero
   always_comb begin
-    g6lc_ai_fp_pkg::fp8_product_t prod_zero;
+    g6lc_ai_fp_pkg::fp_dot_product_t prod_zero;
     prod_zero = '0;
     prod_zero.is_nan  = 1'b0;
     prod_zero.is_inf  = 1'b0;
     prod_zero.is_zero = 1'b1;
     for (int unsigned l = 0; l < P2; l++) begin
-      g6lc_ai_fp_pkg::fp8_value_t dec_a, dec_b;
-      g6lc_ai_fp_pkg::fp8_product_t p;
+      g6lc_ai_fp_pkg::fp_dot_value_t dec_a, dec_b;
+      g6lc_ai_fp_pkg::fp_dot_product_t p;
+      logic fmt_ok;
       dec_a = '0;
       dec_b = '0;
-      p = prod_zero;
-      if (l < Lanes && (numfmt_i == AI_FMT_FP8_E4M3 || numfmt_i == AI_FMT_FP8_E5M2)) begin
-        dec_a = g6lc_ai_fp_pkg::fp8_decode_value(a_i[l], numfmt_i);
-        dec_b = g6lc_ai_fp_pkg::fp8_decode_value(b_i[l], numfmt_i);
-        p = g6lc_ai_fp_pkg::fp8_product(dec_a, dec_b);
+      p     = prod_zero;
+      fmt_ok = (numfmt_i == AI_FMT_FP8_E4M3) ||
+               (numfmt_i == AI_FMT_FP8_E5M2) ||
+               (numfmt_i == AI_FMT_FP16)     ||
+               (numfmt_i == AI_FMT_BF16)     ||
+               (numfmt_i == AI_FMT_FP32);
+      if (l < Lanes && fmt_ok) begin
+        dec_a = g6lc_ai_fp_pkg::fp_dot_decode_value(a_i[l], numfmt_i);
+        dec_b = g6lc_ai_fp_pkg::fp_dot_decode_value(b_i[l], numfmt_i);
+        p     = g6lc_ai_fp_pkg::fp_dot_product(dec_a, dec_b);
       end
       prod[l] = p;
 
@@ -86,8 +97,8 @@ module g6lc_ai_pe_dot_float #(
 
   // Reductions over the per-lane vectors.
   always_comb begin
-    any_nan = 1'b0;
-    any_inf = 1'b0;
+    any_nan    = 1'b0;
+    any_inf    = 1'b0;
     any_finite = 1'b0;
     for (int unsigned l = 0; l < P2; l++) begin
       any_nan    = any_nan    | is_nan_arr[l];
@@ -129,11 +140,11 @@ module g6lc_ai_pe_dot_float #(
   // Align each product and reduce using an in-place tree. Alignment is a pure
   // function so this block contains only the self-referential reduction.
   always_comb begin
-    logic signed [127:0] node [P2];
+    logic signed [MAXW-1:0] node [P2];
     int unsigned cnt;
-    bfp_sum = 128'd0;
+    bfp_sum = MAXW'(0);
     for (int unsigned l = 0; l < P2; l++) begin
-      node[l] = valid_arr[l] ? g6lc_ai_fp_pkg::fp8_product_aligned(prod[l], block_exp) : 128'd0;
+      node[l] = valid_arr[l] ? g6lc_ai_fp_pkg::fp_dot_product_aligned(prod[l], block_exp) : MAXW'(0);
     end
 
     cnt = P2;
@@ -152,13 +163,12 @@ module g6lc_ai_pe_dot_float #(
       (any_nan || (any_inf && !same_inf_sign)) ? {5'b10000, 32'h7fc00000} :  // canonical quiet NaN (NV)
       (any_inf)                                ? {5'b00100, {inf_sign, 8'hff, 23'd0}} :  // OF
       (!any_finite)                            ? {5'd0,     32'd0} :
-                                                  g6lc_ai_fp_pkg::bfp_mant_exp_to_fp32(bfp_sum[127], bfp_sum, block_exp);
+                                                  g6lc_ai_fp_pkg::bfp_mant_exp_to_fp32(
+                                                    bfp_sum[MAXW-1], bfp_sum, block_exp);
 
   // pragma translate_off
   initial begin
     assert (Lanes >= 1) else $error("g6lc_ai_pe_dot_float: Lanes must be >= 1");
-    assert (numfmt_i == AI_FMT_FP8_E4M3 || numfmt_i == AI_FMT_FP8_E5M2)
-      else $error("g6lc_ai_pe_dot_float: only FP8 E4M3/E5M2 supported");
   end
   // pragma translate_on
 

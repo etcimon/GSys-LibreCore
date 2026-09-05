@@ -35,7 +35,7 @@ See `architecture/ai-matrix/scaling-100tops.md` §3 and §8.
 | `include/g6lc_ai_policy_pkg.sv`, `g6lc_ai_policy_codec.sv` | frozen eight-state policy, hysteresis and successor hints | **verified compartment**, not instantiated by top |
 | `g6lc_ai_policy_steer.sv` | format-aware benefit gate and fixed-budget topology | **verified compartment**, no production consumer |
 | `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_fp_mac.sv` | exact widening and separate FP32 RNE multiply/add | **verified scalar primitive**, not integrated floating GEMM |
-| `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_pe_dot_float.sv` | FP8 E4M3/E5M2 block-floating dot product with RNE FP32 conversion | **verified Lanes=4 unit**: 4,007 checks pass with Verilator; Yosys `read_slang`, `check -assert` and `synth -top g6lc_ai_pe_dot_float -flatten` all report zero problems. Not integrated into GEMM sequencer; Lanes=256 / timing / full-system next |
+| `include/g6lc_ai_fp_pkg.sv`, `g6lc_ai_pe_dot_float.sv` | FP8/FP16/BF16/FP32 block-floating dot product with 640-bit reduction and RNE FP32 conversion | **verified Lanes=4 unit**: 5,018 checks pass with Verilator; Yosys `read_slang`, `check -assert` and `synth -noabc -top g6lc_ai_pe_dot_float -flatten` all report zero problems. Not integrated into GEMM sequencer; Lanes=256 / timing / full-system next |
 
 Capability window (`AiIslandLatencyDefault`) advertises **MacsPerCycle=256**,
 **AccTileM/N/K=256** (SKU AccTile* live; 1 MAC cycle per C). C multi-banked

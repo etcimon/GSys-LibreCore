@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# Unit-test g6lc_ai_pe_dot_float (FP8 E4M3/E5M2) with Verilator.
+# Unit-test g6lc_ai_pe_dot_float (FP8/FP16/BF16/FP32) with Verilator.
 # Intended to run under WSL or a Linux host where the pinned Verilator 5.008
 # and g++ are available. The default assumes the build-platform managed
 # install at build-platform/workspace/tooling/verilator-v5.008-wsl.
