@@ -60,6 +60,40 @@ The live island `AiIslandDtypeMask` and `AiIslandPeImplMask` remain INT8+INT4
 only until the descriptor/grant path is updated to issue and validate the wider
 floating formats.
 
+## Lanes=256 floating dot-product architecture (TBD)
+
+The current `g6lc_ai_pe_dot_float` is a fully combinational decode -> product ->
+block-exponent -> align -> reduce -> round path, sized for `FP_DOT_MAXW = 640`
+bits. At `Lanes = 256` this becomes a 256-input multiplier array, a 256-wide
+exponent tree, a 256x640-bit alignment shifter, and a `log2(256) = 8`-level
+640-bit adder tree, followed by a 32-bit normalise/round. Even with a balanced
+tree, the resulting single-cycle path is too long for the target frequency.
+
+The intended pipelined architecture keeps the same functional result while
+breaking the path into stages:
+
+1. **Decode & multiply** (1 stage): per lane, decode `a_i/b_i` and form
+   `(sign, mantissa, exponent)` for each product.
+2. **Block exponent** (1 stage): reduce the 256 product exponents to the most
+   negative (i.e. largest negative) value; this is the only serial dependency
+   before alignment.
+3. **Align** (1 stage): shift each product mantissa by
+   `product_exp - block_exp` into the shared 640-bit accumulator grid.
+4. **Reduce** (3-4 stages): a balanced signed adder tree, 256 -> 128 -> 64 ->
+   32 -> 16 -> 8 -> 4 -> 2 -> 1, with a pipeline register every two levels. The
+   exact number of stages is a timing closure knob and should be retimed with
+   the P&R flow.
+5. **Normalise & round** (1 stage): `bfp_mant_exp_to_fp32` produces the final
+   FP32 `sum_o` and `flags_o`.
+
+The `g6lc_ai_gemm_seq` FSM assumes one cycle of dot-product latency through
+`sum_q`. Moving to multi-cycle `valid_o` requires adding a `dot_valid` handshake
+and matching the MAC cursor advance to the dot-product latency. The aligned
+reduction unit should be parameterised to keep `Lanes=4/8/256` as a single
+module with `Pipeline`/`Stages` parameters, or be a companion module with the
+same numerical interface so both can be co-verified against the exact `double`
+oracle in `run-pe-dot-float.sh`.
+
 Descriptor version 2 remains the contract: A is `[m][k]`, B is `[n][k]`, both
 leading dimensions count elements along K. `DESC_B_K_MAJOR` publishes that fact
 for consumers that must not infer layout from square test cases. Conventional

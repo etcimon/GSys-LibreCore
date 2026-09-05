@@ -16,6 +16,13 @@
 // the natural first parallel implementation. It is kept behind the live
 // INT8/INT4 mask and gated by g6lc_ai_island_top's grant/impl checks.
 //
+// TODO (Lanes=256): the current implementation is a single-cycle fully
+// combinational path. For Lanes=256 it must be pipelined: decode/multiply,
+// block-exponent, align, multi-stage reduction tree, then normalise/round. The
+// GEMM sequencer's one-cycle `sum_q` assumption will need a `valid` handshake
+// once the dot-product latency exceeds one cycle. See
+// architecture/ai-matrix/numeric-formats-datapath.md for the proposed stages.
+//
 // Not Variane. Not a throughput number.
 
 module g6lc_ai_pe_dot_float #(
