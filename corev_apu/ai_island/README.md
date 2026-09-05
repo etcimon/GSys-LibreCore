@@ -1,7 +1,8 @@
 # `corev_apu/ai_island` — Xg6lcai island plane (P3+)
 
 **Status:** P3/AXI integration and INT8/INT4 GEMM in the Variane AI testharness;
-policy/FP compartments remain isolated; production SoC closure pending · **Tier R**
+policy/FP compartments remain isolated; first policy consumer observable in
+`g6lc_ai_island_top`; production SoC closure pending · **Tier R**
 **Config:** `corev_apu/include/g6lc_ai_island_cfg_pkg.sv`
 
 This directory is the **throughput / T2** plane of `Xg6lcai`, separate from the
@@ -89,7 +90,7 @@ bash monorepo-soak/run-ai-tensor-rtl-hard.sh  # mmio + gemm_s8 on work-ver-ai
 ```
 
 Standalone smoke: cap, good desc, AI-3 OOR/perm, bad version, disabled, CPL FIFO multi-claim — all PASS.  
-SoC: MMIO doorbell + AI-3; sideband enq/poll; **PLIC-8 IRQ**; **DMA desc fetch + ptr_done write**
+SoC: MMIO doorbell + AI-3; sideband enq/poll; **PLIC-8 IRQ**; **DMA desc fetch + ptr_done write**; **policy PMU DMA smoke**
 (`desc_ptr` @ `0x118/11C`, doorbell bit[31]=fetch → `ai_desc_fetch_smoke`);
 **I1-lite GEMM** (`ai_gemm_s8_smoke` — 2×2×2 int8 golden). Spine tests use
 `OP_LAYOUT` so they do not exercise compute.  
@@ -130,7 +131,11 @@ Verification: `bun build-platform/src/cli/index.ts test ai-policy-codec` uses th
 remote proxy. For local synthesis only (never local Verilator), use
 `python verif/regress/ai-policy-codec.py --synth-only --yosys <existing-yosys>`;
 this checks enabled/disabled synthesis and 12-step bounded safety with reachable
-events. Numerical tests use a software tuple consumer, not the live array.
+events. A live Verilator DMA smoke, `verif/regress/ai-island-dma.sh`, fetches a v2
+GEMM descriptor into `g6lc_ai_island_top` with `EnableDmaFetch=1` and policy
+enabled, then checks that the sticky policy PMU words at `0x0190..0x019C` are
+non-zero after a successful `ST_OK` completion. Numerical tests use a software
+tuple consumer, not the live array.
 
 ## Native formats and floating arithmetic status
 
@@ -206,6 +211,7 @@ bun build-platform/src/cli/index.ts test ai-policy-codec
 bun build-platform/src/cli/index.ts test ai-desc-formats
 bun build-platform/src/cli/index.ts test ai-fp-mac
 bun build-platform/src/cli/index.ts test ai-native-eval
+bash verif/regress/ai-island-dma.sh
 python verif/regress/ai-native-eval.py --binary <host-native-g6lc-qemu> --replay-policy
 ```
 

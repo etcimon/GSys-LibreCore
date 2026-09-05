@@ -453,8 +453,9 @@ T2 at `corev_apu/ai_island/`, not in a relocated `core/ai_island/`. Its gate is
 `CVA6Cfg.AiCfg.PolicyCodecEn` in `core/include/config_pkg.sv`; `check_cfg` requires
 `MatrixEn` and a nonzero queue count. All production packages default it off.
 The compartment accepts the nested `AiCfg` parameter. Its dedicated verification
-wrapper enables it; **the production island top does not instantiate it yet**.
-Neither the existing GEMM traversal nor the descriptor ABI changes.
+wrapper enables it; the production island top instantiates it as an
+observable-only consumer with no downstream scheduling effect. Neither the
+existing GEMM traversal nor the descriptor ABI changes.
 
 ### 10.1 Method: compile policy, do not train a profiler
 
@@ -626,11 +627,13 @@ shift/capture control remain backend work. No clock-gating cell is instantiated
 because no clock is gated. Feature-signature silence and bounded cooldown reduce
 needless updates but do not establish a power number. Place the block beside the tile scheduler, not across the array.
 PMU/trace event outputs are exposed (`eval`, `commit`, `hold`, prediction hit/miss)
-but not yet wired to island MMIO counters. Core RVFI/debug and `.dts`/ISA/Desc64
-remain unchanged because the production datapath is untouched. Synthesis,
-unbounded formal/coverage closure, physical scan, real consumer wiring, PMU
-binding and measured area/power/timing remain promotion gates, not inferred from
-a synthetic score. The existing open tier-R licence applies; verification tooling
+and wired to the island MMIO PMU words at `0x0190..0x019C` as an observable-only
+consumer. The first consumer does not drive GEMM traversal, prefetch, address/bank
+hints or residual sparse-skip; those remain promotion gates. Core RVFI/debug and
+`.dts`/ISA/Desc64 remain unchanged because the production datapath is untouched.
+Synthesis, unbounded formal/coverage closure, physical scan, real consumer wiring
+and measured area/power/timing remain promotion gates, not inferred from a
+synthetic score. The existing open tier-R licence applies; verification tooling
 is tier T. `config_pkg.sv` retains its upstream notices; no licensing tier,
 security policy or compliance control was weakened.
 
@@ -640,6 +643,7 @@ security policy or compliance control was weakened.
 bun build-platform/src/cli/index.ts test ai-policy-codec
 wsl --exec python3 /mnt/e/cva6/verif/regress/ai-policy-codec.py --seed 123 --parameters default
 python verif/regress/ai-policy-codec.py --synth-only --yosys <existing-yosys-executable>
+wsl --exec bash /mnt/e/cva6/verif/regress/ai-island-dma.sh
 ```
 
 The first command uses the configured WSL regression engine and remote proxy;
@@ -661,6 +665,14 @@ raised, and genuine `AiCfgOff` for disabled testing. A second-seed run (`123`),
 `ai-policy-codec-20260905T002520Z-394c13c409b1`, also passes the full default
 scoreboard and shape walks. Local synthesis/formal artifacts are pinned under
 `build-platform/workspace/build/ai-policy-codec-20260905T002514Z-9406d2244cf3/`.
+
+A live island DMA smoke, `verif/regress/ai-island-dma.sh`, now fetches a v2 GEMM
+descriptor from an AXI stub memory into `g6lc_ai_island_top` with `EnableDmaFetch=1`,
+explicitly enables `AiCfg.PolicyCodecEn` in a test-local `ai_cfg_t`, and verifies
+that the sticky policy PMU words at `0x0190..0x019C` are non-zero after a
+successful `ST_OK` completion. It runs in ~170 cycles under Verilator 5.008 and
+leaves dense GEMM traversal, prefetch, address/bank hints and residual sparse-skip
+unconnected; those are still promotion gates.
 
 | Assumed shape-derived walk | Committed/raw code agreement | Issued-hint accuracy | Re-encode rate |
 |---|---|---|---|
