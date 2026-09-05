@@ -25,9 +25,16 @@ module tb_g6lc_ai_gemm_backend
   localparam int unsigned TO_RSP  = 20000;
   localparam logic [DATA_W-1:0] ONES8  = 64'h0101_0101_0101_0101;
   localparam logic [DATA_W-1:0] C16    = 64'h0000_0010_0000_0010;
-  // FP8 E4M3 1.0 = 0x38 (0_0111_000); FP32 16.0 = 0x41800000
-  localparam logic [DATA_W-1:0] FP8_1  = {8{8'h38}};
-  localparam logic [DATA_W-1:0] FP8_C16 = {2{32'h41800000}};
+  // FP8/FP16/BF16/FP32 all-1.0 patterns for little-endian byte storage.
+  // FP32 16.0 = 0x41800000 is the expected C row for 2x2x16 with all-1.0.
+  // INT4 all +1 packed two per byte = 0x11 per byte.
+  localparam logic [DATA_W-1:0] INT4_1  = {8{8'h11}};
+  localparam logic [DATA_W-1:0] FP8_E4M3_1 = {8{8'h38}};       // 0_0111_000
+  localparam logic [DATA_W-1:0] FP8_E5M2_1 = {8{8'h3C}};       // 0_01111_00
+  localparam logic [DATA_W-1:0] FP16_1    = {4{16'h3C00}};
+  localparam logic [DATA_W-1:0] BF16_1    = {4{16'h3F80}};
+  localparam logic [DATA_W-1:0] FP32_1    = {2{32'h3F800000}};
+  localparam logic [DATA_W-1:0] FP_C16    = {2{32'h41800000}};
 
   typedef logic [ADDR_W-1:0]     addr_t;
   typedef logic [ID_W-1:0]       id_t;
@@ -54,6 +61,7 @@ module tb_g6lc_ai_gemm_backend
   logic saw_cap, saw_next, saw_id2, saw_id3, straddle;
   logic [15:0] inf_ids;
   logic [DATA_W-1:0] r_data_cap;
+  logic [DATA_W-1:0] c0, c1;
 
   AXI_BUS #(.AXI_ADDR_WIDTH(ADDR_W), .AXI_DATA_WIDTH(DATA_W),
             .AXI_ID_WIDTH(ID_W), .AXI_USER_WIDTH(1)) mux_slv[1:0]();
@@ -319,6 +327,63 @@ module tb_g6lc_ai_gemm_backend
     end
   endtask
 
+  // Format helper: write m x k and n x k operand rows of `pattern`.
+  // `bpe` is bytes per element for unpacked formats. `packed` is set only for
+  // INT4 (two 4-bit elements per byte).  k=16, m=n=2; golden is 16 for INT8/INT4
+  // and FP32 16.0 for the floating formats.
+  task automatic run_fmt_float(
+      input logic [2:0]  numfmt,
+      input logic [DATA_W-1:0] pattern,
+      input int unsigned bpe,
+      input logic        is_packed = 1'b0
+  );
+    int unsigned r, c, w, words_per_row;
+    logic [63:0] a_base, b_base;
+    logic [31:0] k_bytes, a_stride, b_stride;
+    if (bpe == 0) bpe = 1;
+    gemm_numfmt = numfmt;
+    if (is_packed) begin
+      k_bytes  = (gemm_k + 32'd1) >> 1;
+      a_stride = (32'(gemm_lda) + 32'd1) >> 1;
+      b_stride = (32'(gemm_ldb) + 32'd1) >> 1;
+    end else begin
+      k_bytes  = gemm_k * bpe;
+      a_stride = 32'(gemm_lda) * bpe;
+      b_stride = 32'(gemm_ldb) * bpe;
+    end
+    words_per_row = (k_bytes + 32'd7) / 32'd8;
+    // A rows
+    for (r = 0; r < gemm_m; r++) begin
+      a_base = gemm_pa + (64'(r) * 64'(a_stride));
+      for (w = 0; w < words_per_row; w++)
+        wr8(a_base + (64'(w) << 3), pattern);
+    end
+    // B rows
+    for (c = 0; c < gemm_n; c++) begin
+      b_base = gemm_pb + (64'(c) * 64'(b_stride));
+      for (w = 0; w < words_per_row; w++)
+        wr8(b_base + (64'(w) << 3), pattern);
+    end
+    kick_gemm;
+    if (straddle) begin
+      $error("fmt %0d GEMM burst straddled stripe", numfmt);
+      errors++;
+    end
+    rd8(64'h8000_0200, c0);
+    rd8(64'h8000_0208, c1);
+    if (numfmt == 3'd1) begin
+      if (c0 !== C16 || c1 !== C16) begin
+        $error("fmt %0d golden C exp=%h got %h %h", numfmt, C16, c0, c1);
+        errors++;
+      end
+    end else begin
+      if (c0 !== FP_C16 || c1 !== FP_C16) begin
+        $error("fmt %0d golden C exp=%h got %h %h", numfmt, FP_C16, c0, c1);
+        errors++;
+      end
+    end
+  endtask
+
   task automatic run_wide;
     logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] snap_r;
     logic [DATA_W-1:0] cw;
@@ -390,7 +455,6 @@ module tb_g6lc_ai_gemm_backend
   endtask
 
   initial begin
-    logic [DATA_W-1:0] c0, c1;
     errors = 0;
     cycles = 0;
     start = 0;
@@ -484,28 +548,17 @@ module tb_g6lc_ai_gemm_backend
       errors++;
     end
 
-    // FP8 E4M3 run: 1.0 * 1.0 + ... = 16.0 (FP32 0x41800000)
-    // config_pkg::AI_FMT_FP8_E4M3 = 3
-    gemm_numfmt = 3'd3;
-    wr8(64'h8000_0038, FP8_1);
-    wr8(64'h8000_0040, FP8_1);
-    wr8(64'h8000_0048, FP8_1);
-    wr8(64'h8000_0050, FP8_1);
-    wr8(64'h8000_0100, FP8_1);
-    wr8(64'h8000_0108, FP8_1);
-    wr8(64'h8000_0110, FP8_1);
-    wr8(64'h8000_0118, FP8_1);
-    kick_gemm;
-    if (err) begin
-      $error("gemm err (fp8)");
-      errors++;
-    end
-    rd8(64'h8000_0200, c0);
-    rd8(64'h8000_0208, c1);
-    if (c0 !== FP8_C16 || c1 !== FP8_C16) begin
-      $error("golden C fp8 exp=%h got %h %h", FP8_C16, c0, c1);
-      errors++;
-    end
+    // Integer INT4 packed run (two +1 nibbles per byte => dot = 16).
+    // numfmt=1 is INT4; bpe is ignored because packed=1.
+    run_fmt_float(3'd1, INT4_1, 1, 1'b1); // INT4
+
+    // Floating GEMM runs: each uses all-1.0 operands and expects FP32 16.0.
+    // numfmt encodings: 3=FP8 E4M3, 4=FP8 E5M2, 5=FP16, 6=BF16, 7=FP32.
+    run_fmt_float(3'd3, FP8_E4M3_1, 1, 1'b0); // FP8 E4M3
+    run_fmt_float(3'd4, FP8_E5M2_1, 1, 1'b0); // FP8 E5M2
+    run_fmt_float(3'd5, FP16_1,    2, 1'b0); // FP16
+    run_fmt_float(3'd6, BF16_1,    2, 1'b0); // BF16
+    run_fmt_float(3'd7, FP32_1,    4, 1'b0); // FP32
 
     check_cap;
     gemm_numfmt = 3'd0;

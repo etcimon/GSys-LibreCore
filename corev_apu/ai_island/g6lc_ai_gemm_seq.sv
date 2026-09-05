@@ -349,8 +349,24 @@ module g6lc_ai_gemm_seq #(
   assign pe_float_en = (numfmt_q inside {3'd3, 3'd4, 3'd5, 3'd6, 3'd7});
   assign pe_sum = pe_float_en ? pe_sum_float : pe_sum_int;
 
+  // ---------------------------------------------------------------------------
+  // F1-F5 format scaling: bytes per element for the live numerical formats.
+  // INT4 packs two elements per byte; all other live formats use the natural
+  // byte width. This is a local copy so g6lc_ai_gemm_seq stays unit-testable
+  // without pulling config_pkg into every backend runner.
+  function automatic logic [31:0] ai_fmt_bytes();
+    case (numfmt_q)
+      3'd1:              return 32'd1; // INT4 (packed, but a byte holds two)
+      3'd3, 3'd4:        return 32'd1; // FP8 E4M3 / E5M2
+      3'd5, 3'd6:        return 32'd2; // FP16 / BF16
+      3'd7:              return 32'd4; // FP32
+      default:           return 32'd1; // INT8 and reserved
+    endcase
+  endfunction
+
   // F1: number of elements issued per MAC cycle.
-  assign mac_step = (numfmt_q == 3'd1) ? 32'(2 * PeLanes) : 32'(PeLanes);
+  assign mac_step = (numfmt_q == 3'd1) ? 32'(2 * PeLanes)
+                                       : (32'(PeLanes) / ai_fmt_bytes());
 
   // F1: bytes in one operand row (k elements). This is the bound the LOAD states
   // run to; ST_MAC still bounds against k_q in elements. For INT8 the two are
@@ -386,6 +402,11 @@ module g6lc_ai_gemm_seq #(
   logic [31:0] mac_acc_next;
   logic [36:0] mac_fp32_add;
   // Float tiles accumulate with RNE FP32 addition; integer tiles with i32 add.
+  // Timing note: fp32_add is a combinational decode/align/add/normalise block.
+  // Together with the multi-byte gather mux it lengthens the MAC combinational
+  // path vs the integer path. A future pass should either retime it around the
+  // existing one-cycle pe_sum -> acc_q pipeline or pipeline fp32_add itself;
+  // this is not a throughput change and does not affect the load/store FSM.
   assign mac_fp32_add = g6lc_ai_fp_pkg::fp32_add(acc_q, sum_q);
   assign mac_acc_next = pe_float_en
       ? (sum_first_q ? sum_q : mac_fp32_add[31:0])
@@ -420,9 +441,9 @@ module g6lc_ai_gemm_seq #(
       input logic [31:0] elems
   );
     // INT4 packs two elements per byte; ceil so an odd count keeps its last
-    // element. Every other live format is one byte per element. Wider formats
-    // (BF16/FP16 = 2, FP32 = 4) multiply here when their datapath lands.
-    return (numfmt_q == 3'd1) ? ((elems + 32'd1) >> 1) : elems;  // AI_FMT_INT4 == 1
+    // element. FP8/INT8 are one byte. FP16/BF16 are two bytes. FP32 is four.
+    return (numfmt_q == 3'd1) ? ((elems + 32'd1) >> 1)
+                              : (elems * ai_fmt_bytes());
   endfunction
 
   function automatic logic [31:0] fmt_ld_to_stride(
@@ -987,7 +1008,8 @@ module g6lc_ai_gemm_seq #(
           mac_active = (i_q < m_q);
           t_next     = t_q + mac_step;
           last_step  = (t_next >= k_q);
-          t_byte_base= (numfmt_q == 3'd1) ? (t_q >> 1) : t_q;  // AI_FMT_INT4 == 1
+          t_byte_base= (numfmt_q == 3'd1) ? (t_q >> 1)
+                                          : (t_q * ai_fmt_bytes());
           can_trail  = DualCRead && (DataWidth >= 64) && (stc_i_q < i_q ||
                        (i_q >= m_q && stc_i_q < m_q));
 
@@ -1035,25 +1057,56 @@ module g6lc_ai_gemm_seq #(
                   pe_v[p]     = 1'b1;
                 end
               end else begin
-                // INT8/FP8: one byte per element.  Wider formats (BF16/FP16/FP32)
-                // still load one byte here but assemble multi-byte operands below.
-                automatic logic [31:0] tt;
-                tt = t_q + 32'(p);
-                if (tt < k_q) begin
+                // INT8/FP8/BF16/FP16/FP32: load bytes, then assemble elements
+                // into 32-bit float lanes.  `byte_idx` is the byte position
+                // along the K row; `k_bytes` comes from fmt_row_bytes().
+                automatic logic [31:0] byte_idx;
+                byte_idx = t_byte_base + 32'(p);
+                if (byte_idx < k_bytes) begin
                   a_r_req [p] = 1'b1;
-                  a_r_addr[p] = a_bank_addr(i_q, tt);
+                  a_r_addr[p] = a_bank_addr(i_q, byte_idx);
                   b_r_req [p] = 1'b1;
-                  b_r_addr[p] = b_bank_addr(tt, j_q);
+                  b_r_addr[p] = b_bank_addr(byte_idx, j_q);
                   pe_a[p]     = $signed(a_r_data[p]);
                   pe_b[p]     = $signed(b_r_data[p]);
-                  // For FP8, zero-extend the byte into the 32-bit float lane.
-                  // For integer formats this is ignored by the mux.
-                  pe_a_float[p] = {24'b0, a_r_data[p]};
-                  pe_b_float[p] = {24'b0, b_r_data[p]};
-                  pe_v[p]     = 1'b1;
                 end
               end
             end
+
+            // Assemble multi-byte floating operands (BF16/FP16/FP32) from the
+            // byte-lane read data. For INT8/FP8 this is a zero-extend; for
+            // FP16/BF16 it is two bytes little-endian; for FP32 it is four.
+            // INT4 stays in its own branch above.
+            if (numfmt_q != 3'd1) begin
+              for (int unsigned e = 0; int'(e) < int'(mac_step); e++) begin
+                automatic logic [31:0] elem_t;
+                automatic logic [31:0] off;
+                elem_t = t_q + 32'(e);
+                if (elem_t < k_q) begin
+                  off = 32'(e) * ai_fmt_bytes();
+                  case (ai_fmt_bytes())
+                    32'd1: begin
+                      pe_a_float[e] = {24'b0, a_r_data[off]};
+                      pe_b_float[e] = {24'b0, b_r_data[off]};
+                    end
+                    32'd2: begin
+                      pe_a_float[e] = {16'b0, a_r_data[off+1], a_r_data[off]};
+                      pe_b_float[e] = {16'b0, b_r_data[off+1], b_r_data[off]};
+                    end
+                    32'd4: begin
+                      pe_a_float[e] = {a_r_data[off+3], a_r_data[off+2], a_r_data[off+1], a_r_data[off]};
+                      pe_b_float[e] = {b_r_data[off+3], b_r_data[off+2], b_r_data[off+1], b_r_data[off]};
+                    end
+                    default: begin
+                      pe_a_float[e] = 32'd0;
+                      pe_b_float[e] = 32'd0;
+                    end
+                  endcase
+                  pe_v[e] = 1'b1;
+                end
+              end
+            end
+
             // Capture what the PE produced this cycle. (i,j,t) are the issue
             // coordinates; they advance in the index logic below.
             sum_d      = pe_sum;

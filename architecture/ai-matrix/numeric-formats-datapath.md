@@ -43,12 +43,22 @@ passes 5,018 checks vs an exact `double` oracle, and Yosys `read_slang`,
 `check -assert` and `synth -noabc -top g6lc_ai_pe_dot_float -flatten` each
 report zero problems.
 
-`g6lc_ai_gemm_seq` now dispatches FP8 (E4M3/E5M2) to the floating PE, accumulates
-multi-step tiles with a per-step FP32 `fp32_add`, and stores the FP32 result in
-the C tile. The backend unit test `verif/tb/ai_island/run-gemm-backend.sh`
-includes a directed FP8 E4M3 2x2x16 golden (all 1.0 operands producing FP32 16.0)
-alongside the existing INT8 fixtures. BF16, FP16 and FP32 GEMM still require
-MAC-side byte gather; the live island grant/implementation masks remain INT8+INT4.
+`g6lc_ai_gemm_seq` now dispatches FP8 (E4M3/E5M2), FP16, BF16 and FP32 to the
+floating PE, accumulates multi-step tiles with a per-step FP32 `fp32_add`, and
+stores the FP32 result in the C tile. INT8 stays on the existing integer PE and
+INT4 stays on the packed-nibble path. The MAC-side byte gather scales
+`mac_step` and `fmt_row_bytes` by the format byte width (1/2/4), so the loaders
+remain byte-oriented and the same bank/address mapping covers all formats.
+
+The backend unit test `verif/tb/ai_island/run-gemm-backend.sh` now includes
+directed 2x2x16 goldens for all live formats: INT8, INT4 (0x11 packed +1
+nibbles), FP8 E4M3, FP8 E5M2, FP16, BF16 and FP32. Each uses all-1.0 (or
+all-1 for integers) operands and expects 16/16.0 in the C tile. The standalone
+`g6lc_ai_pe_dot_float` regression still passes.
+
+The live island `AiIslandDtypeMask` and `AiIslandPeImplMask` remain INT8+INT4
+only until the descriptor/grant path is updated to issue and validate the wider
+floating formats.
 
 Descriptor version 2 remains the contract: A is `[m][k]`, B is `[n][k]`, both
 leading dimensions count elements along K. `DESC_B_K_MAJOR` publishes that fact

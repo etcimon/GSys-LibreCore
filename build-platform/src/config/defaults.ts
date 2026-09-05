@@ -712,6 +712,18 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        id: "ai-pe-dot-float",
+        description:
+          "OPTIONAL: FP8 E4M3/E5M2 block-floating dot product (Lanes=4) vs exact double oracle; not integrated floating GEMM.",
+        script: "verif/regress/ai-pe-dot-float.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: ["verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "ai-island-veri",
         description:
           "OPTIONAL: standalone Verilator smoke for Xg6lcai P3 island spine (AI-3 addr check + desc engine).",
