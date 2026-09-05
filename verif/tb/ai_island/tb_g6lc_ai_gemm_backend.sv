@@ -63,6 +63,8 @@ module tb_g6lc_ai_gemm_backend
   logic [15:0] inf_ids;
   logic [DATA_W-1:0] r_data_cap;
   logic [DATA_W-1:0] c0, c1;
+  logic [DATA_W-1:0] c0_eqv, c1_eqv;
+  logic [3:0]        ar_max_val;
 
   AXI_BUS #(.AXI_ADDR_WIDTH(ADDR_W), .AXI_DATA_WIDTH(DATA_W),
             .AXI_ID_WIDTH(ID_W), .AXI_USER_WIDTH(1)) mux_slv[1:0]();
@@ -156,7 +158,7 @@ module tb_g6lc_ai_gemm_backend
       .lda_i        ( gemm_lda ),
       .ldb_i        ( gemm_ldb ),
       .numfmt_i     ( gemm_numfmt ),
-      .ar_max_i     ( 4'(GEMM_MAX_AR) ),
+      .ar_max_i     ( ar_max_val ),
       .ptr_a_i      ( gemm_pa ),
       .ptr_b_i      ( gemm_pb ),
       .ptr_c_i      ( gemm_pc ),
@@ -496,6 +498,8 @@ module tb_g6lc_ai_gemm_backend
     wr8(64'h8000_0110, ONES8);
     wr8(64'h8000_0118, ONES8);
 
+    // High run: policy off / fallback (max AR). Capture reference C.
+    ar_max_val = 4'(GEMM_MAX_AR);
     start = 1'b1;
     tick;
     start = 1'b0;
@@ -551,6 +555,43 @@ module tb_g6lc_ai_gemm_backend
       $error("golden C exp=16,16 got %h %h", c0, c1);
       errors++;
     end
+    c0_eqv = c0;
+    c1_eqv = c1;
+
+    // Low run: policy consumer on (advisory ar_max=2).  Must match reference C.
+    if (4'(GEMM_MAX_AR) > 4'd2) begin
+      while (!ready && cycles < TO_RSP) tick;
+      ar_max_val = 4'd2;
+      start = 1'b1;
+      tick;
+      start = 1'b0;
+      while (!done && cycles < TO_RSP) tick;
+      if (!done) begin
+        $error("timeout low-ar gemm cycles=%0d ar=%0d", cycles, n_ar);
+        errors++;
+      end
+      if (err) begin
+        $error("gemm err low-ar");
+        errors++;
+      end
+      if (straddle) begin
+        $error("low-ar GEMM burst straddled stripe");
+        errors++;
+      end
+      rd8(64'h8000_0200, c0);
+      rd8(64'h8000_0208, c1);
+      if (c0 !== C16 || c1 !== C16) begin
+        $error("low-ar golden C exp=16,16 got %h %h", c0, c1);
+        errors++;
+      end
+      if (c0 !== c0_eqv || c1 !== c1_eqv) begin
+        $error("ar_max equivalence failed exp=%h %h got=%h %h", c0_eqv, c1_eqv, c0, c1);
+        errors++;
+      end
+    end
+
+    // Restore max AR for the remaining format sweep.
+    ar_max_val = 4'(GEMM_MAX_AR);
 
     // Integer INT4 packed run (two +1 nibbles per byte => dot = 16).
     // numfmt=1 is INT4; bpe is ignored because packed=1.

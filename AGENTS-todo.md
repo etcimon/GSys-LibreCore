@@ -70,7 +70,8 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   GEMM completes with `ST_OK`. After wiring the `ar_max_i` consumer,
   `ai-island-dma`, `ai-island-policy-walk`, `ai-island-veri`, `ai-pe-dot-float`,
   `run-gemm-backend`, `run-gemm-stripe`, `run-gemm-channels`, and
-  `run-gemm-backend-class1` all PASS.
+  `run-gemm-backend-class1` (nch=1/2/4/8, with AR-max consumer-off/consumer-on
+  numerical equivalence) all PASS.
 - [ ] Calibrate against captured framework operator walks, hold out real models,
   and replay through the RTL memory model. QEMU/Hugging Face functional traces
   can feed this step; QEMU wall-clock speed is not island throughput evidence.
