@@ -35,7 +35,7 @@ BoardSpec JSON  →  g6b-design / g6b-holyc / g6b-html / g6b-elf
 
 ## 1. Current planning state (2026-09)
 
-**Stage: B0–B52 landed within the stated host/guest boundaries.** Named BIOS profiles (`embedded`/`router` → `full`)
+**Stage: B0–B52 plus B55–B59 host lanes landed within the stated host/guest boundaries.** Named BIOS profiles (`embedded`/`router` → `full`)
 compile from UART+SPI flash up to browser-UI HTTPS + USB settings. USB FAT32
 flash is always compiled; the USB-key file manager (FAT32/NTFS/ext4) is extra.
 64-bit SMT2 / multi-core / multi-issue / stream / OoO / hypervisor / RVV
@@ -158,6 +158,11 @@ RTL mailbox / DTS merge into `corev_apu` is an inference recorded in
 | **B52** | Validated i32 WASM interpreter with fuel and real numeric RV32/RV64 ASM lowering | landed (host generation + machine-word tests) |
 | **B53** | Guest JS/DOM runtime, input/GPU scanout and JIT installation/trampolines/cache synchronization | host prerequisites advanced; guest gates open |
 | **B54** | Real persistent settings/flash backend and authenticated production TLS | open |
+| **B55** | Mutable per-run WASM memory (`i32.load/store*`, `memory.size/grow`) + extended i32 lowering (bitwise, shifts, rotates, signed/unsigned ordering) through `g6b-asm` | landed (host; RV32/RV64 differential machine-word tests) |
+| **B56** | Bounded nonblocking JS async: `await` fetch tokens, throw/catch, cancellation, stale/duplicate rejection, per-task/tick budgets; kernel poll integration | landed (host) |
+| **B57** | Transactional DOM: Rust `DomTransaction` + native-browser DOM-kernel host (validated handles, rollback, property allowlist); explicit libwasm ABI mount with startup verification | landed (host) |
+| **B58** | Cooperative RV32/RV64 task-switch IR, bounded multicore scheduler/task services, DedicatedWorker compute protocol (SHA-256/AES-GCM) shared by browser and HolyC menus | landed (host IR + host services; guest dispatch open) |
+| **B59** | LDC 1.43 + carried `runtime-v1.43.0` libwasm cell: DUB workspace generation, provenance/ABI/startup-gated publication, Asyncify fail-closed, D particle exports + WebGL backdrop | landed (component-shell artifact; full Svelte tree open) |
 
 Kernel-spec RISC-V map: [`KERNEL-RV.md`](KERNEL-RV.md). Generated `zeal/KStart.S`
 and `zeal/KInts.S` match `g6b-elf` because both lower `g6b-asm` IR
@@ -188,9 +193,8 @@ remain the sole authority; OpenSBI remains M-mode and BIOS stays S-mode.
   input and transport completion to normal-context polls, implement real GPU
   resource/scanout commands and capture WASM-driven pixels. Never substitute a
   static boot pattern or host-browser screenshot for that evidence.
-- Reproducibility follow-up: carry the local runtime-v1.43.0 time/demangle/
-  invariant/source-set repairs into the runtime-adapt recipe or vendor the
-  verified carry. The current carried tree is untracked-local; compiler
+- Reproducibility follow-up: the verified `runtime-v1.43.0` carry is now
+  vendored under `browser-ui/libwasm/` and tracked; compiler
   provenance/preflight detects drift but does not provision a missing runtime.
 
 Detailed contracts and acceptance ladder: `WASM.md`, `BROWSER.md`, `DISPLAY.md`,

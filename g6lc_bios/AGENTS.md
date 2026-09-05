@@ -17,7 +17,7 @@
 
 ## Current planning state
 
-**B0–B52 landed within the stated host/guest boundaries.** Profiles `embedded`/`router` → `full` compile UART+SPI flash
+**B0–B52 plus B55–B59 host lanes landed within the stated host/guest boundaries.** Profiles `embedded`/`router` → `full` compile UART+SPI flash
 up to browser-UI HTTPS and USB settings. USB FAT32 flash is always compiled;
 the USB-key file manager (FAT32/NTFS/ext4) is extra. 64-bit SMT2 / multi-issue /
 stream / OoO / hypervisor / RVV specs infer setup menus. HolyC kernel file
@@ -49,7 +49,13 @@ plane with a boot scanline, and an 8×8 `G6LC` blit; QEMU still uses
 
 B50–B52 add bounded JS/DOM and validated i32 WASM execution, shared complete
 menu rows, native-browser navigation/imports, `kernel.browser.start_menu`,
-post-script Gr/proxy painting, and real numeric RV32/RV64 lowering. The host
+post-script Gr/proxy painting, and real numeric RV32/RV64 lowering. B55–B59
+extend the host lanes: mutable per-run WASM memory and widened i32 lowering, a
+bounded nonblocking JS async scheduler (`await`/throw/catch with budgets and
+cancellation), transactional DOM in both Rust and the native-browser kernel,
+cooperative RV32/RV64 task-switch IR with bounded scheduler/task services, a
+DedicatedWorker compute protocol, and a provenance-gated LDC 1.43 libwasm
+component-shell cell (Asyncify and full Svelte semantics fail closed). The host
 `BrowserSession` and served native app are executable. The guest ELF still
 has bring-up helpers, not the complete browser runtime or arbitrary JIT code
 installation. Read `BROWSER.md` / `WASM.md` for supported subsets and limits;

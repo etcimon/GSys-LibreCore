@@ -63,6 +63,24 @@ Green commands: `python tools/g6b.py check` (independence + Bun tests/build + fm
 | **B52** Validated bounded i32 WASM control/locals/calls; fuel; RV32/RV64 numeric export lowering and differential machine-word tests | landed (host software; architecture limits apply) |
 | **B53** Guest runtime JS/DOM integration, input/GPU scanout, executable JIT installation/trampolines/cache sync | host prerequisites advanced; guest gates open |
 | **B54** Real persistent settings/flash backends and authenticated production TLS; remove canned mutation acknowledgements only with backend implementation | open |
+| **B55** Mutable per-run WASM memory (load/store/size/grow) + extended i32 lowering (bitwise/shifts/rotates/ordering) via `g6b-asm` | landed (host; RV32/RV64 differential machine-word tests) |
+| **B56** Bounded nonblocking JS async: `await` fetch tokens, throw/catch, cancellation, stale/duplicate rejection, per-task/tick budgets | landed (host) |
+| **B57** Transactional DOM (`DomTransaction` + native-browser DOM-kernel host); explicit libwasm ABI mount with startup verification | landed (host) |
+| **B58** Cooperative RV32/RV64 task-switch IR, bounded scheduler/task services, DedicatedWorker compute protocol shared by browser/HolyC menus | landed (host IR + services; guest dispatch open) |
+| **B59** LDC 1.43 + vendored `runtime-v1.43.0` libwasm cell: DUB workspace, provenance/ABI/startup-gated publication, Asyncify fail-closed, D particle exports + WebGL backdrop | landed (component-shell artifact; full Svelte tree open) |
+
+B55–B59 verification (2026-09): `python tools/g6b.py check` passed
+independence, 42 Bun tests across 3 files (0 fail) including the actual LDC
+cell startup against the explicit DOM ABI and an isolated LDC-compiled
+particle-D run, `bun run build` emitting `out/bios-ui.wasm` plus a verified
+fresh LDC component-shell artifact, fmt, strict Clippy and 276 Rust tests
+(1 ignored: Node-native WebAssembly differential memory case). Asyncify /
+`wasm-opt` is absent on this host and fails closed: requesting it or compiling
+await-bearing Svelte sources returns status 3 and never ships an artifact.
+`bios-regress` passed all 13 cases. No RTL/silicon, guest JIT, or full
+guest-browser claim follows from these host results. MIT headers and upstream
+reference boundaries were retained; the LDC runtime carry is vendored with its
+upstream notices intact.
 
 B50–B52 verification (2026-09-05): `python tools/g6b.py check` passed
 independence, 15 Bun tests/build, fmt, strict Clippy and 196 Rust tests;
