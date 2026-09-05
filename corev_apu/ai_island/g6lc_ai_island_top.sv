@@ -395,6 +395,7 @@ module g6lc_ai_island_top
         .lda_i    (gemm_lda),
         .ldb_i    (gemm_ldb),
         .numfmt_i (gemm_numfmt),
+        .ar_max_i (gemm_ar_max),
         .ptr_a_i  (gemm_ptr_a),
         .ptr_b_i  (gemm_ptr_b),
         .ptr_c_i  (gemm_ptr_c),
@@ -501,6 +502,7 @@ module g6lc_ai_island_top
   policy_code_t     policy_code, policy_next_code;
   policy_t          policy, policy_next;
   logic [2:0]       policy_numfmt;
+  logic [3:0]       gemm_ar_max;
   policy_topology_t policy_topology_value;
 
   g6lc_ai_policy_steer #(
@@ -566,6 +568,7 @@ module g6lc_ai_island_top
       pmu_policy_word_q     <= '0;
       pmu_policy_topo_q     <= '0;
       pmu_policy_event_q    <= '0;
+      gemm_ar_max           <= 4'(IslandCfg.MaxAROut);
     end else begin
       if (gemm_err) begin
         pmu_policy_code_hold <= '0;
@@ -578,6 +581,9 @@ module g6lc_ai_island_top
                                  4'(policy.tile_m_log2), 4'(policy.tile_n_log2),
                                  4'(policy.tile_k_log2), policy.sparse_check,
                                  2'(policy.prefetch_depth), 8'(policy_numfmt)};
+        gemm_ar_max <= (AiCfg.PolicyCodecEn)
+                       ? (4'd1 + {2'b0, policy.prefetch_depth})
+                       : 4'(IslandCfg.MaxAROut);
         pmu_policy_topo_hold <= {9'h0, 1'(policy_topology_value.valid),
                                  1'(policy_topology_value.apply),
                                  3'(policy_topology_value.rows_log2),

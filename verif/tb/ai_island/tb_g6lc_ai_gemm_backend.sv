@@ -131,6 +131,8 @@ module tb_g6lc_ai_gemm_backend
       .rvalid_o     ( cap_rvalid )
   );
 
+  localparam int GEMM_MAX_AR = (DRAM_CLASS == AI_DRAM_SIM_AXI) ? AI_MAX_AR_OUT_LIVE
+                                                               : AI_MAX_AR_OUT_DRAM;
   g6lc_ai_gemm_seq #(
       .AddrWidth  ( ADDR_W ),
       .DataWidth  ( DATA_W ),
@@ -138,8 +140,7 @@ module tb_g6lc_ai_gemm_backend
       .MaxDim     ( 16 ),
       .PeLanes    ( 8 ),
       .DotPipeFloat( DOT_PIPE_FLOAT ),
-      .MaxAROut   ( (DRAM_CLASS == AI_DRAM_SIM_AXI) ? AI_MAX_AR_OUT_LIVE
-                                                   : AI_MAX_AR_OUT_DRAM ),
+      .MaxAROut   ( GEMM_MAX_AR ),
       .NrChannels ( NCH ),
       .ChanShift  ( AI_DRAM_CHAN_SHIFT_DEFAULT ),
       .axi_req_t  ( gbus_req_t ),
@@ -155,6 +156,7 @@ module tb_g6lc_ai_gemm_backend
       .lda_i        ( gemm_lda ),
       .ldb_i        ( gemm_ldb ),
       .numfmt_i     ( gemm_numfmt ),
+      .ar_max_i     ( 4'(GEMM_MAX_AR) ),
       .ptr_a_i      ( gemm_pa ),
       .ptr_b_i      ( gemm_pb ),
       .ptr_c_i      ( gemm_pc ),

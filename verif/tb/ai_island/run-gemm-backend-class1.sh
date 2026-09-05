@@ -30,8 +30,10 @@ build_nch() {
     -GDRAM_CLASS=1 \
     -I"$AXI/include" \
     -I"$CCELLS/include" \
+    -I"$ROOT/core/include" \
     -I"$ROOT/corev_apu/include" \
     "$CCELLS/src/cf_math_pkg.sv" \
+    "$ROOT/core/include/config_pkg.sv" \
     "$CCELLS/src/lzc.sv" \
     "$CCELLS/src/counter.sv" \
     "$CCELLS/src/delta_counter.sv" \
@@ -54,7 +56,10 @@ build_nch() {
     "$ROOT/corev_apu/src/g6lc_ai_dram_channels.sv" \
     "$ROOT/corev_apu/src/g6lc_ai_dram_backend.sv" \
     "$CORE" \
+    "$ROOT/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv" \
     "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot.sv" \
+    "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv" \
+    "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv" \
     "$ROOT/corev_apu/ai_island/g6lc_ai_tile_sram.sv" \
     "$ROOT/corev_apu/ai_island/g6lc_ai_gemm_seq.sv" \
     "$ROOT/verif/tb/ai_island/tb_g6lc_ai_gemm_backend.sv" \

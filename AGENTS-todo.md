@@ -54,8 +54,11 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   `g6lc_ai_policy_steer` now lives inside `g6lc_ai_island_top`, fed from the
   descriptor/GEMM job (m/n/k/numfmt) with format-known gating and `gemm_err` flush,
   and exposes the selected policy plus steering events as sticky PMU words at
-  `0x0190..0x019C` (`g6lc_ai_island_cfg_pkg`).  The consumer is observable-only:
-  it does not change GEMM traversal, preserving dense fallback.  Build flists and
+  `0x0190..0x019C` (`g6lc_ai_island_cfg_pkg`).  First safe traversal consumer now
+  connected: `policy.prefetch_depth` drives `g6lc_ai_gemm_seq.ar_max_i` (clamped to
+  `MaxAROut`) so the GEMM can cap its outstanding AR count per policy. The consumer
+  is gated by `AiCfg.PolicyCodecEn` and off by default, preserving the dense
+  numerical fallback.  Build flists and
   the standalone `ai-island-veri` smoke were updated to include dot-product and
   policy packages; the smoke now passes after fixing the descriptor `version`
   field in `sim_main.cpp` (it was still using the obsolete v1 while the engine
@@ -64,7 +67,10 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   runs `verif/tb/ai_island/tb_g6lc_ai_island_dma.sv` with an AXI stub memory, a
   DMA-fetched v2 GEMM descriptor, policy codec/steering explicitly enabled, and
   checks that the sticky policy words at `0x0190..0x019C` are non-zero while the
-  GEMM completes with `ST_OK`.
+  GEMM completes with `ST_OK`. After wiring the `ar_max_i` consumer,
+  `ai-island-dma`, `ai-island-policy-walk`, `ai-island-veri`, `ai-pe-dot-float`,
+  `run-gemm-backend`, `run-gemm-stripe`, `run-gemm-channels`, and
+  `run-gemm-backend-class1` all PASS.
 - [ ] Calibrate against captured framework operator walks, hold out real models,
   and replay through the RTL memory model. QEMU/Hugging Face functional traces
   can feed this step; QEMU wall-clock speed is not island throughput evidence.

@@ -133,6 +133,7 @@ module tb_g6lc_ai_gemm_channels
       .lda_i        ( gemm_lda ),
       .ldb_i        ( gemm_ldb ),
       .numfmt_i     ( 3'd0 ),
+      .ar_max_i     ( 4'(AI_MAX_AR_OUT_DRAM) ),
       .ptr_a_i      ( gemm_pa ),
       .ptr_b_i      ( gemm_pb ),
       .ptr_c_i      ( gemm_pc ),
@@ -329,7 +330,7 @@ module tb_g6lc_ai_gemm_channels
       gemm_n   = 32'd2;
       gemm_k   = 32'd16;
       gemm_lda = 16'd64;
-      gemm_ldb = 16'd2;
+      gemm_ldb = 16'd16;
       gemm_pa  = 64'h8000_0000;
       gemm_pb  = 64'h8000_0200;
       gemm_pc  = 64'h8000_0300;
@@ -383,7 +384,7 @@ module tb_g6lc_ai_gemm_channels
     cycles = 0;
     start = 0;
     gemm_m = 32'd2; gemm_n = 32'd2; gemm_k = 32'd16;
-    gemm_lda = 16'd16; gemm_ldb = 16'd2;
+    gemm_lda = 16'd16; gemm_ldb = 16'd16;
     gemm_pa = 64'h8000_0038;
     gemm_pb = 64'h8000_0100;
     gemm_pc = 64'h8000_0200;

@@ -23,11 +23,15 @@ build_nch() {
     -I"$AXI/include" \
     -I"$CCELLS/include" \
     -I"$ROOT/corev_apu/include" \
+    -I"$ROOT/core/include" \
     "$AXI/src/axi_pkg.sv" \
     "$AXI/src/axi_intf.sv" \
+    "$ROOT/core/include/config_pkg.sv" \
     "$ROOT/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv" \
     "$ROOT/corev_apu/include/g6lc_ai_island_cfg_pkg.sv" \
+    "$ROOT/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv" \
     "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot.sv" \
+    "$ROOT/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv" \
     "$ROOT/corev_apu/ai_island/g6lc_ai_tile_sram.sv" \
     "$ROOT/corev_apu/ai_island/g6lc_ai_gemm_seq.sv" \
     "$ROOT/verif/tb/ai_island/tb_g6lc_ai_gemm_stripe.sv" \

@@ -61,6 +61,7 @@ module g6lc_ai_gemm_seq #(
     input  logic [15:0] lda_i,
     input  logic [15:0] ldb_i,
     input  logic [2:0]  numfmt_i,
+    input  logic [3:0]  ar_max_i,  // 0 = use parameter MaxAROut
     input  logic [AddrWidth-1:0] ptr_a_i,
     input  logic [AddrWidth-1:0] ptr_b_i,
     input  logic [AddrWidth-1:0] ptr_c_i,
@@ -88,6 +89,11 @@ module g6lc_ai_gemm_seq #(
   localparam int unsigned MaxBurstBeats = 255;
   // Inflight counter width; live MaxAROut=2 → AROutW=2 (bit-identical).
   localparam int unsigned AROutW = (MaxAROut <= 1) ? 1 : $clog2(MaxAROut + 1);
+  // Dynamic AR cap from policy prefetch_depth (0 = fall back to MaxAROut)
+  logic [AROutW-1:0] ar_max_eff;
+  assign ar_max_eff = (ar_max_i != '0 && ar_max_i <= AROutW'(MaxAROut))
+                      ? AROutW'(ar_max_i)
+                      : AROutW'(MaxAROut);
   // N=1 keeps a single AXI ID (cookie / HARD identity). N>1 with a full-beat
   // drain uses one ID per outstanding AR so UNIQUE_IDS=1 can issue into two
   // channels at once. PeLanes < BytesPerBeat keeps the leftover-beat path
@@ -825,7 +831,7 @@ module g6lc_ai_gemm_seq #(
             end
           end
           // ---- Issue AR (may run concurrent with R) ----
-          if (ar_inflight_q < AROutW'(MaxAROut) && ar_i_q < m_q) begin
+          if (ar_inflight_q < ar_max_eff && ar_i_q < m_q) begin
             axi_req_o.ar.addr  = beat_align(a_ar_cur);
             nb                 = cap_beats_to_stripe(
                 beat_align(a_ar_cur),
@@ -961,7 +967,7 @@ module g6lc_ai_gemm_seq #(
             end
           end
           // ---- Issue AR (may run concurrent with R) ----
-          if (ar_inflight_q < AROutW'(MaxAROut) && ar_j_q < n_q) begin
+          if (ar_inflight_q < ar_max_eff && ar_j_q < n_q) begin
             axi_req_o.ar.addr  = beat_align(b_ar_cur);
             nb                 = cap_beats_to_stripe(
                 beat_align(b_ar_cur),
