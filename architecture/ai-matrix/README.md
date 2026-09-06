@@ -1480,6 +1480,14 @@ path by four levels (1497 at 8 lanes, 1630 at 64) while adding **+55% cells**
 dot product at all. **No STA, no frequency, and no timing closure evidence exists
 for any lane width**, and a 6.3x-area block could still lose at the clock.
 
+This is a tooling limit, not an oversight. Mapped synthesis does not converge
+under the available open flow even for the block that scales: synthesising
+`g6lc_ai_pe_dot_float` on its own still times out in ABC at 900 s for `Lanes=8`
+and blows up in the SAT share pass at `Lanes=64`. The coarse generic proxy is
+therefore the only area evidence that exists for the arithmetic array, and the
+gang-versus-replicate decision needs a commercial flow (or a mapping recipe cheap
+enough to finish) before it is settled on cost.
+
 Two hard limits on the above. First, **multi-cluster is advertised but not
 implemented**: `Clusters`/`ClustersEnabled` appear in `island_cfg_legal` and the
 CAP window, while `g6lc_ai_island_top` instantiates exactly one

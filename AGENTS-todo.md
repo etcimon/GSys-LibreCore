@@ -193,6 +193,15 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   pipelined float dot moves the path by four levels while adding +55% cells
   (596,485 at 8 lanes, 3,753,800 at 64), so the deep path is not in the dot.
   tb_g6lc_ai_gemm_area gained a DotPipe parameter for that comparison.
+- [ ] TOOLING GAP (blocks every area/timing decision about widening): mapped
+  synthesis does not converge under the available open flow, even for the block
+  that actually scales. Isolating g6lc_ai_pe_dot_float and synthesising it alone
+  still fails: ABC times out at 900 s for Lanes=8, and Lanes=64 blows up in the
+  SAT-based share pass. So there is no mapped cell count, no gate depth and no STA
+  for the arithmetic array at any width, and the coarse generic proxy
+  (383,575 -> 2,416,615 cells for 8 -> 64 lanes) is the only area evidence that
+  exists. Deciding whether to buy lane ganging needs a commercial flow, or a
+  mapping recipe cheap enough to converge; do not settle it from the proxy alone.
 - [ ] Full synth/timing for the datapath is still open: with a sound harness Yosys
   stalls in SAT resource sharing (554k variables at 16 lanes) and then in ABC, so
   only coarse generic cells exist and there is no STA/frequency evidence. A
