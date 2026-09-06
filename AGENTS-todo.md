@@ -175,6 +175,26 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   constant bound derived from PeLanes/MaxDim so the datapath synthesises; until
   then there are zero gate-level cells for it and only the policy controllers
   have synthesis evidence. Harness: verif/tb/ai_island/tb_g6lc_ai_gemm_area.sv.
+- [x] Built the remote-only research basis verif/regress/ai-gemm-codec-basis.py
+  (dispatches through testharness_proxy, refuses local runs): six provisioning
+  points (PeLanes 8/16/32 x MaxAROut 2/8) x five codec shape classes x seven
+  formats x every legal AR depth, twice each. 2,100 records, digests stable at
+  every depth, status=PASS. Evidence:
+  remote-runs/ai-gemm-codec-basis-20260906T165957Z-718434a9a9d1.
+- [x] MEASURED CODEC RETURN: shape is flat (best point identical across all five
+  shape classes for all seven formats => a shape-keyed codec captures nothing,
+  consistent with the AR consumer being removable at zero cost). Format is not:
+  INT4 wants 8 lanes (0% from wider), INT8/FP8 want 16 (+0.94..+69.6%),
+  FP16/BF16 want 32 (+12.9..+177.8%), FP32 wants 32 (+38.8..+188.2%). AR 8 never
+  wins. So the codec's productive output is format-driven lane grouping, and the
+  positive-return path to +300% is that (up to +188%) combined with the 2.11x
+  cluster replication advantage.
+- [ ] Needs RTL that does not exist: selectable lane gang/split so narrow formats
+  split a wide array into independent groups (more concurrent jobs) and wide
+  formats gang lanes for one job. Until then the +188% is a return of
+  hypothetical provisioning, since lanes are fixed at elaboration.
+- [ ] Register ai-gemm-codec-basis in build-platform test suites and the Makefile
+  once the lane-grouping consumer exists; it is currently a research runner.
 - [ ] Sub-code/group tuning has zero throughput leverage while nothing consumes
   the codec output. Do not tune it for performance. It becomes productive only
   with a provisioning consumer that RAISES a bound - cluster count or lane

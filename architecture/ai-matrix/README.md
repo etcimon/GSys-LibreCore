@@ -1445,6 +1445,52 @@ exhausts the unroll limit (see `tb_g6lc_ai_gemm_area.sv`). Area here is therefor
 reasoned per MAC lane, not measured in cells; published synthesis evidence still
 covers only the policy controllers.
 
+### Remote research basis: where the codec has a calculated positive return
+
+`verif/regress/ai-gemm-codec-basis.py` is remote-only (it dispatches through
+`testharness_proxy.py` and refuses to run locally). It builds
+`tb_g6lc_ai_gemm_backend` at six provisioning points (`PeLanes` 8/16/32 x
+`MaxAROut` 2/8) and runs the `+measure` sweep over the codec's own shape classes
+(`8x8` bulk, `1x16` decode, `16x1` tall, `2x16` wide, `16x16` large) for all seven
+granted formats at every legal AR depth, twice each. Result digests were stable
+across every AR depth at every point, so nothing below changes arithmetic.
+Evidence: `remote-runs/ai-gemm-codec-basis-20260906T165957Z-718434a9a9d1`,
+2,100 measured records, `status=PASS`, Verilator 5.008 on the harness.
+
+**Shape gives the codec nothing; format gives it a lot.** For all seven formats
+the winning provisioning point is identical across all five shape classes
+(`shape_dependent=false` everywhere), so a shape-keyed runtime choice has no
+throughput to capture - which is consistent with the AR-cap consumer having been
+removable at zero cost. The optimum does differ by *format*, and `numfmt` is
+already a codec feature and a `policy_topology` input:
+
+| Format | Best lanes | Gain versus 8-lane baseline (min - max across shapes) |
+|---|--:|---|
+| INT4 | 8 | 0% at every shape - wider lanes never help |
+| INT8, FP8 E4M3/E5M2 | 16 | +0.94% (tall) - **+69.6%** (16x16) |
+| FP16, BF16 | 32 | +12.9% - **+177.8%** (16x16) |
+| FP32 | 32 | +38.8% - **+188.2%** (16x16) |
+
+`MaxAROut` 8 never won: AR 2 ties or wins everywhere, confirming again that AR
+depth is not a productive codec output.
+
+**This is the productive codec target.** A format-driven lane-grouping decision
+has a measured return of up to `+188%` on one engine, before any cluster
+replication - and it is precisely the multi-input/multi-output "virtual
+transistor" grouping the original objective described. The two directions are
+complementary rather than competing: narrow formats (INT4 at 0% gain from
+ganging) should *split* a wide array into independent 8-lane groups to run
+several jobs at once, while wide formats (FP32 at +188%) should *gang* lanes
+together for one job. Combining format-driven grouping with the 2.11x replication
+advantage is the credible route past +300%, and both are provisioning decisions
+the eight-state code plus 3-bit subcode can express directly.
+
+What this is not: the sweep provisions each point at elaboration time, so the
+codec cannot conjure lanes at runtime. Realising the return needs selectable lane
+grouping in the datapath (gang/split), which does not exist yet. Until it does,
+these are measured returns of *hypothetical provisioning*, not of the shipped
+island, and no gate is enabled on their strength.
+
 ### Where sub-codes and groups can and cannot help
 
 Tuning subcode/group parameters cannot move MAC/s today, for a structural reason
@@ -1453,12 +1499,16 @@ topologies were already modelled at `0.998x`, and the one output that did reach
 hardware (`prefetch_depth`) could only lower a bound and has been removed.
 
 The productive reframing is that the codec needs a consumer that *raises*
-provisioning. Cluster count and lane grouping are exactly such knobs: choosing
-"four clusters of 8" over "one engine of 32" is worth a measured 2.11x, and it is
-precisely the kind of shape-driven decision the eight-state codec plus 3-bit
-subcode was built to express. Until cluster replication or selectable lane
-grouping exists in RTL, subcode work has zero throughput leverage and should not
-be tuned further for performance.
+provisioning. The remote basis above pins down which feature actually carries the
+return: **format, not shape**. Groups keyed on shape buckets measure flat, while a
+format-keyed lane-grouping decision measures up to `+188%`, and cluster choice is
+worth a further 2.11x at equal area. So the codec's productive form is a
+format-and-provisioning selector, not a shape-and-tile selector, and the subcode's
+job becomes "how to group lanes for this element width", not "which tile shape to
+guess". Until selectable lane grouping or cluster replication exists in RTL,
+subcode work still has zero throughput leverage and must not be tuned for
+performance - but the target it should be fitted to is now measured rather than
+modelled.
 
 **Structural conclusion: the knob cannot win.** `prefetch_depth` can only lower
 the cap below `MaxAROut` (0 falls back to `MaxAROut`), measured throughput rises

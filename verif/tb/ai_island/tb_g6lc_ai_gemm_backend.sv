@@ -39,12 +39,22 @@ module tb_g6lc_ai_gemm_backend
   localparam int unsigned NWORDS  = 1024;
   localparam int unsigned TO_HS   = 8000;
   localparam int unsigned TO_RSP  = 20000;
-  // +measure geometry.  m=n=8 so ar_max up to GEMM_MAX_AR=8 is reachable at all
-  // (A/B ARs are bounded by m/n); k=16 so the golden C constant is unchanged.
-  localparam int unsigned MeasM      = 8;
-  localparam int unsigned MeasN      = 8;
+  // +measure geometry.  m and n must exceed the AR depth under test because A/B
+  // ARs are bounded by m then n; k stays 16 because the golden C constant is
+  // exactly k for all-ones operands, so varying k would need new per-format
+  // constants.  MeasShapes walks the codec's own shape classes so a provisioning
+  // optimum can be attributed to a policy group: square/bulk, decode (m=1),
+  // tall (m>n), wide (n>m) and the largest square MaxDim allows.
   localparam int unsigned MeasK      = 16;
   localparam int unsigned MeasPasses = 2;
+  localparam int unsigned MeasShapes = 5;
+  localparam int unsigned MeasMN [MeasShapes][2] = '{
+      '{8,  8},   // bulk / square
+      '{1,  16},  // decode-like: single output row
+      '{16, 1},   // tall
+      '{2,  16},  // wide
+      '{16, 16}   // largest square at MaxDim=16
+  };
   localparam logic [DATA_W-1:0] ONES8  = 64'h0101_0101_0101_0101;
   localparam logic [DATA_W-1:0] C16    = 64'h0000_0010_0000_0010;
   // FP8/FP16/BF16/FP32 all-1.0 patterns for little-endian byte storage.
@@ -609,14 +619,15 @@ module tb_g6lc_ai_gemm_backend
   // MeasM*MeasN 8 B results need 512 B, so the three regions are spaced 1 KiB
   // apart inside the NWORDS*8 = 8 KiB model.
   task automatic measure_sweep;
-    int unsigned saved_cycles, pass;
+    int unsigned saved_cycles, pass, shape;
     saved_cycles = cycles;
     meas_runs    = 0;
-    gemm_m   = MeasM;
-    gemm_n   = MeasN;
     gemm_k   = MeasK;
     gemm_lda = 16'(MeasK);
     gemm_ldb = 16'(MeasK);
+    // 16 rows x 16 elements x 4 B worst case is 1 KiB per operand, and 16x16
+    // 32-bit results are another 1 KiB, so the three regions sit 1 KiB apart
+    // inside the NWORDS*8 = 8 KiB model.
     gemm_pa  = 64'h8000_0400;
     gemm_pb  = 64'h8000_0800;
     gemm_pc  = 64'h8000_0C00;
@@ -625,18 +636,23 @@ module tb_g6lc_ai_gemm_backend
     // sample it would have to trust.  Run-to-run spread inside a block pair is
     // the memory-model noise floor, and no depth may be preferred on a margin
     // smaller than that floor.
-    for (pass = 0; pass < MeasPasses; pass++) begin
-      meas_runs = 0;
-      $display("MEASURE_BEGIN schema=g6lc.policy-measure.v1 tb=tb_g6lc_ai_gemm_backend cycle_source=free_running_rtl_counter class=%0d nch=%0d dpf=%0d ar_max=%0d pass=%0d lanes=%0d",
-               DRAM_CLASS, NCH, DOT_PIPE_FLOAT, GEMM_MAX_AR, pass, GEMM_LANES);
-      measure_fmt(3'd0, ONES8,      1, 1'b0);  // INT8
-      measure_fmt(3'd1, INT4_1,     1, 1'b1);  // INT4 (two +1 nibbles per byte)
-      measure_fmt(3'd3, FP8_E4M3_1, 1, 1'b0);  // FP8 E4M3
-      measure_fmt(3'd4, FP8_E5M2_1, 1, 1'b0);  // FP8 E5M2
-      measure_fmt(3'd5, FP16_1,     2, 1'b0);  // FP16
-      measure_fmt(3'd6, BF16_1,     2, 1'b0);  // BF16
-      measure_fmt(3'd7, FP32_1,     4, 1'b0);  // FP32
-      $display("MEASURE_END runs=%0d formats=7 ar_max=%0d", meas_runs, GEMM_MAX_AR);
+    for (shape = 0; shape < MeasShapes; shape++) begin
+      gemm_m = 32'(MeasMN[shape][0]);
+      gemm_n = 32'(MeasMN[shape][1]);
+      for (pass = 0; pass < MeasPasses; pass++) begin
+        meas_runs = 0;
+        $display("MEASURE_BEGIN schema=g6lc.policy-measure.v1 tb=tb_g6lc_ai_gemm_backend cycle_source=free_running_rtl_counter class=%0d nch=%0d dpf=%0d ar_max=%0d pass=%0d lanes=%0d",
+                 DRAM_CLASS, NCH, DOT_PIPE_FLOAT, GEMM_MAX_AR,
+                 shape * MeasPasses + pass, GEMM_LANES);
+        measure_fmt(3'd0, ONES8,      1, 1'b0);  // INT8
+        measure_fmt(3'd1, INT4_1,     1, 1'b1);  // INT4 (two +1 nibbles per byte)
+        measure_fmt(3'd3, FP8_E4M3_1, 1, 1'b0);  // FP8 E4M3
+        measure_fmt(3'd4, FP8_E5M2_1, 1, 1'b0);  // FP8 E5M2
+        measure_fmt(3'd5, FP16_1,     2, 1'b0);  // FP16
+        measure_fmt(3'd6, BF16_1,     2, 1'b0);  // BF16
+        measure_fmt(3'd7, FP32_1,     4, 1'b0);  // FP32
+        $display("MEASURE_END runs=%0d formats=7 ar_max=%0d", meas_runs, GEMM_MAX_AR);
+      end
     end
     ar_max_val  = 4'(GEMM_MAX_AR);
     gemm_numfmt = 3'd0;
