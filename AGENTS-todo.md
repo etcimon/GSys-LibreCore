@@ -72,9 +72,107 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   `run-gemm-backend`, `run-gemm-stripe`, `run-gemm-channels`, and
   `run-gemm-backend-class1` (nch=1/2/4/8, with AR-max consumer-off/consumer-on
   numerical equivalence) all PASS.
-- [ ] Calibrate against captured framework operator walks, hold out real models,
-  and replay through the RTL memory model. QEMU/Hugging Face functional traces
-  can feed this step; QEMU wall-clock speed is not island throughput evidence.
+- [x] Implement optional per-group 3-bit topology subcode (§11.6) as a cancellable
+  steering sidecar; frozen primary codes and live traversal unchanged. Five remote
+  profiles PASS (13,574 standalone cases/build plus full original-output equivalence
+  and cancellation checks). Generic enabled synthesis 4,881 cells / 340 sequential /
+  zero latches, disabled zero; fixed-INT4-fixture 36-step control proof passes.
+  Build-platform typecheck and seven config tests pass. Full `verify` was attempted
+  but stopped after making no further progress at its native SymbiYosys launch;
+  this pass does not establish whole-repository lint/formal/sim/synthesis success.
+  The documented `diag run licensing` command currently returns `Unknown: licensing`;
+  tier/header/REUSE retention was reviewed manually without changing licensing policy.
+- [ ] Promote subcode selection only after evidence beats the existing allocator.
+  The 105 handcrafted prefill/decode/routed/diffusion tile fixtures all retain
+  subcode 0 at read128/read512 and lose the 32-cycle evaluation tax; this is not
+  a captured-model calibration or a live GEMM MAC/s improvement. Evidence and
+  source hashes: `ai-policy-subcode-20260906T121408Z-82b41477e961`; architecture §11.6–§11.7.
+  Feedback reports explicitly remain `NOT_QUALIFIED`; equal-weight modeled MAC/cycle
+  deltas are -0.132168% (read128) and -0.147716% (read512), not additional speedup.
+- [x] Revalidate codec-first control at seed123/default/min/max after the sidecar
+  addition: `ai-policy-codec-20260906T121255Z-2a22cc633240` PASS. Purity/sticky decode
+  re-encode at 0.10%; mixed prefill/decode hint accuracy 99.27%; adversarial all-class
+  accuracy 0% and ragged diffusion 72.60% remain reported, not masked as successes.
+  Control accuracy does not establish optimization throughput or captured-model PGO.
+- [x] Capture actual pretrained SmolLM2-135M and held-out Pythia-70M execution
+  with pinned safetensors, FP32/BF16 prefill/cache decode and 63/64-token alignment
+  cases. Eight captures contain 6,200 matrix records, lowered conservatively into
+  84,720 independent tiles with exact MAC conservation. Offline candidate-7 tuning
+  uses calibration only; weight/model split leakage is rejected. New capture and
+  calibration suite passes 57 tests; bounded replay validates sampled metadata/cost
+  cases against actual subcode RTL, not numerical tensors or AXI memory traffic.
+  Reports: `policy-calibration-final-{128,512}-20260906.json` under the build workspace;
+  methodology, revisions and limitations in architecture §11.8.
+- [ ] Improve measured useful MAC/s beyond the existing allocator before promotion.
+  Captured-data tuning retains `0x4420ca` and regresses from search overhead; fixed
+  serial-service ceilings at read128 are 1.238630x calibration / 1.125685x holdout,
+  so +500% (6x) is not supported. Masked-tail oracle hypotheses (1.214351x/1.105900x)
+  require new bank/tail/numerical proofs and are not gains of the current RTL.
+- [x] Add host-only higher-level motif fitting over ordered captures, calibration-only
+  structural-template ranking and nested frozen-group/subcode parameters. Exact
+  geometry/evidence guards remain mandatory. Warm-up, hold, cooldown, normalized
+  realized-gain/spread rejection and stale/duplicate/tax controls are tested;
+  capture/calibration/motif host suite now passes 114 tests. Final ordered report:
+  `policy-motifs-window-final-20260906.json`, 32/51 templates, 312/382 calibration
+  versus 10/58 held-out group-window matches; useful-MAC coverage 99.8300% versus
+  0.4944%, zero actual performance-qualified claims. This is not generalization
+  or measured MAC/s proof.
+- [x] Add `PolicySubcodeCacheEn` (requires subcode enable, production off): exact
+  completed-result reuse returns in one cycle versus 32-cycle misses. Five cache
+  profiles and two seeds pass full-key, cancellation, epoch and primary-equivalence
+  checks. Generic cache overhead 593 cells / two sequential cells, no latches;
+  72-step fixed-INT4 cache-control proof reaches a hit (not arbitrary-key numerical
+  proof). The cache reduces evaluator latency only; group/mux/array behavior stays
+  unchanged. Scoped evidence: `ai-policy-subcode-20260906T132220Z-e638dd091632` and
+  `ai-policy-subcode-synth-20260906T132132Z-356d75ad3869`.
+- [x] Add measured MAC/s tuning feedback for the one policy knob with a live
+  consumer: opt-in `+measure` AR-depth sweep in `tb_g6lc_ai_gemm_backend` (default
+  off, existing directed run still `PASS ... nch=1 2 4 8 dpf=0,1` with zero MEASURE
+  lines) plus `policy_measure.py`/`test_policy_measure.py` (35 tests PASS) producing
+  `g6lc.policy-measure.v1`. Digests identical at every depth; depth 2 beats depth 1
+  on all seven formats by `+5.263%` worst case, up to `+7.143%` MAC/cycle.
+- [ ] DECISION NEEDED (measured regression, do not silently "fix"): `policy_decode`
+  gives `POLICY_DECODE`/`POLICY_ROUTED`/`POLICY_SPARSE` `prefetch_depth=2'd1`, and
+  `ar_max_eff` honors 1 literally against live `MaxAROut=2`, so the policy consumer
+  measurably slows exactly those codes versus the dense fallback. Options: retune
+  those depths (breaks the frozen group table), treat depth as a floor/hint in the
+  consumer mapping (changes the consumer, not the codec), or raise `MaxAROut`.
+  Left unchanged pending direction; measured on a small fixture only.
+- [x] Found and fixed a defect in my own measurement: A/B ARs are bounded by m/n,
+  so the 2x2x16 sweep capped inflight ARs at 2 and every depth >= 2 was identical
+  hardware. All earlier depth >= 2 numbers (+19.6% in-sample, +1.00% CV) were
+  noise and are retracted. Sweep now 8x8x16 (1024 MACs, ~68% of PeLanes=8 peak,
+  depths 1..8 reachable) with repeated passes so the noise floor is measured.
+- [x] Re-swept the whole live-knob space on the corrected fixture. Depth response
+  is monotonic (deeper always better): DRAM class depths 1..8 give -40.2, -19.1,
+  -12.6, -6.2, -3.0, -2.9, -1.5, 0% versus policy-off. Live class depth 1 costs
+  -8.15% with a 0% noise floor. Cross-validated per-format tuning loses -1.01%
+  mean with all four folds negative.
+- [ ] ASSESSMENT (structural, not just empirical): AR-depth steering CANNOT beat
+  no steering. prefetch_depth only lowers the cap below MaxAROut (0 = fallback),
+  and measured throughput increases monotonically with depth, so the optimum is
+  "do not cap" = policy-off. Ceiling versus no steering is 0%; the shipped table
+  spends -8.15% on decode/routed/sparse. The 11-66% topology class needs a
+  multi-output MAC array that does not exist, so no parameter tuning reaches it.
+  Ranked next steps: (1) stop capping AR depth (or delete the consumer), (2) find
+  a knob that can raise a bound rather than only lower one, (3) invest in
+  PeLanes/multi-output datapath for double-digit gain. Do not enable
+  PolicySubcodeEn/CacheEn for throughput: advisory sidecar off the GEMM critical
+  path (0% MAC/s), models at 0.998x.
+- [ ] Re-run the AR-depth sweep through the remote testharness proxy; the current
+  artifacts come from local WSL Verilator and are diagnostic-grade dispatch.
+- [ ] Extend the sweep to large tiles/`MaxAROut=8` DRAM classes so depth evidence
+  is not limited to one small job per format.
+- [ ] Qualify motif proposals with matched real array counters and held-out workload
+  benefit; no such timing was supplied. The full post-cache `verify --lint --sim
+  --synth` attempt failed in the general smoke harness on generated SRAM/SMT C++
+  member references and was stopped after broad generated-output cleanup. Git
+  reported no tracked deletions. Review cleanup/proxy routing before rerunning
+  that broad gate; do not treat it as SoC sign-off.
+- [ ] Expand to representative prompt/model distributions, pretrained diffusion
+  and routed-MoE captures, then replay numerical operands through RTL memory/PEs.
+  QEMU inference/descriptor execution remains separate; QEMU wall-clock speed is
+  not island throughput evidence. Live floating grants and production gates stay off.
 - [ ] Resolve prior full-core synthesis blockers (`alu` range select and
   issue/commit declaration ordering) and the two moved-core-type branding test
   failures before whole-repository sign-off. PDK STA, DFT/`testmode_i` audit,

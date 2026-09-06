@@ -136,6 +136,8 @@ package cva6_config_pkg;
       UmodeEn: bit'(1),
       PolicyCodecEn: bit'(0),
       PolicyBenefitEn: bit'(0),
+      PolicySubcodeEn: bit'(0),
+      PolicySubcodeCacheEn: bit'(0),
       IslandFpEn: bit'(0),
       Int4En: bit'(0),
       Sparse24En: bit'(0),

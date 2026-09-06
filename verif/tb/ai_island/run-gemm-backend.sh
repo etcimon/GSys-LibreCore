@@ -13,6 +13,11 @@ if ! command -v verilator >/dev/null 2>&1; then
 fi
 CCELLS="$ROOT/vendor/pulp-platform/common_cells"
 AXI="$ROOT/vendor/pulp-platform/axi"
+# Opt-in RTL measurement sweep. Unset / not "1" => byte-identical default run.
+PLUSARGS=()
+if [[ "${AI_GEMM_BACKEND_MEASURE:-0}" == "1" ]]; then
+  PLUSARGS+=(+measure)
+fi
 build_nch() {
   local nch="$1"
   local dpf="$2"
@@ -57,7 +62,7 @@ build_nch() {
   "$ROOT/verif/tb/ai_island/tb_g6lc_ai_gemm_backend.sv" \
     --top-module tb_g6lc_ai_gemm_backend \
     -Mdir "$mdir" -o tb_g6lc_ai_gemm_backend
-  "$mdir/tb_g6lc_ai_gemm_backend"
+  "$mdir/tb_g6lc_ai_gemm_backend" ${PLUSARGS[@]+"${PLUSARGS[@]}"}
 }
 DEFAULT_NCHS=(1 2 4 8)
 # shellcheck source=nch-from-env.inc.sh

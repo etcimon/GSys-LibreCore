@@ -676,6 +676,30 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        id: "ai-policy-subcode",
+        description:
+          "OPTIONAL remote: bounded per-group 3-bit topology selection, native-format cost scoreboard and modeled MAC/cycle comparisons; not live PE throughput.",
+        script: "verif/regress/ai-policy-subcode.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
+        id: "ai-policy-calibration",
+        description:
+          "OPTIONAL: captured-model provenance, offline topology autotuning, held-out split and cost-bound unit tests; no model downloads or framework dependency.",
+        script: "verif/regress/ai-policy-calibration.sh",
+        group: "directed",
+        target: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "ai-native-eval",
         description:
           "OPTIONAL: ai-tensor/B3 native-format evaluation against live grants and software fixtures; not QEMU guest execution or RTL cycles. Requires a built native g6lc-qemu binary.",

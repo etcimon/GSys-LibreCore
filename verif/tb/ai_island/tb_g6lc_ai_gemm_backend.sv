@@ -5,6 +5,14 @@
 // DRAM_CLASS=0: class-0 SRAM. DRAM_CLASS=1: native LiteDRAM wrap (CLASS1).
 // Job 1: 2x2 k=16 golden C=16. Job 2 (N>1): lda=64 all-NCH occupancy.
 // Not Variane.
+//
+// `+measure` adds an opt-in RTL measurement sweep (default OFF: without the
+// plusarg the directed cost, every $error check and the PASS line are
+// byte-identical to before).  It re-runs the SAME 2x2x16 job for every granted
+// numeric format x every legal ar_max in [1, GEMM_MAX_AR] and prints one
+// MEASURE line per run for verif/tb/ai_island/policy_measure.py.  AR depth is
+// a memory-side prefetch cap only: the golden C must be identical at every
+// depth, and a difference is an $error.
 
 `timescale 1ns/1ps
 `include "axi/typedef.svh"
@@ -24,6 +32,12 @@ module tb_g6lc_ai_gemm_backend
   localparam int unsigned NWORDS  = 1024;
   localparam int unsigned TO_HS   = 8000;
   localparam int unsigned TO_RSP  = 20000;
+  // +measure geometry.  m=n=8 so ar_max up to GEMM_MAX_AR=8 is reachable at all
+  // (A/B ARs are bounded by m/n); k=16 so the golden C constant is unchanged.
+  localparam int unsigned MeasM      = 8;
+  localparam int unsigned MeasN      = 8;
+  localparam int unsigned MeasK      = 16;
+  localparam int unsigned MeasPasses = 2;
   localparam logic [DATA_W-1:0] ONES8  = 64'h0101_0101_0101_0101;
   localparam logic [DATA_W-1:0] C16    = 64'h0000_0010_0000_0010;
   // FP8/FP16/BF16/FP32 all-1.0 patterns for little-endian byte storage.
@@ -65,6 +79,12 @@ module tb_g6lc_ai_gemm_backend
   logic [DATA_W-1:0] c0, c1;
   logic [DATA_W-1:0] c0_eqv, c1_eqv;
   logic [3:0]        ar_max_val;
+  // Measurement plumbing (sim-only, +measure).  `cycles` is the TB's shared
+  // TIMEOUT BUDGET -- every helper task compares it against TO_HS/TO_RSP
+  // absolutely -- so it can never be the measurement.  `free_cy` is a
+  // genuinely free-running clock counter that no timeout loop touches.
+  logic [31:0]       free_cy;
+  int unsigned       meas_runs;
 
   AXI_BUS #(.AXI_ADDR_WIDTH(ADDR_W), .AXI_DATA_WIDTH(DATA_W),
             .AXI_ID_WIDTH(ID_W), .AXI_USER_WIDTH(1)) mux_slv[1:0]();
@@ -174,6 +194,13 @@ module tb_g6lc_ai_gemm_backend
 
   initial clk = 0;
   always #5 clk = ~clk;
+
+  // Free-running clock counter: the only source of the reported MEASURE cycle
+  // counts.  Wraps at 2^32, which the 2x2x16 jobs never approach.
+  always_ff @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) free_cy <= 32'd0;
+    else         free_cy <= free_cy + 32'd1;
+  end
 
   always_ff @(posedge clk or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -460,9 +487,157 @@ module tb_g6lc_ai_gemm_backend
     tick;
   endtask
 
+  // ---------------------------------------------------------------------------
+  // Opt-in measurement sweep (+measure).  Sim-only and strictly additive.
+  // ---------------------------------------------------------------------------
+
+  // Store the m x k and n x k all-ones operand rows for one measurement job,
+  // using the same byte/stride convention as run_fmt_float.
+  task automatic measure_store(
+      input logic [DATA_W-1:0] pattern,
+      input int unsigned       bpe,
+      input logic              is_packed
+  );
+    int unsigned r, c, w, words_per_row, ebytes;
+    logic [63:0] a_base, b_base;
+    logic [31:0] k_bytes, a_stride, b_stride;
+    ebytes = (bpe == 0) ? 1 : bpe;
+    if (is_packed) begin
+      k_bytes  = (gemm_k + 32'd1) >> 1;
+      a_stride = (32'(gemm_lda) + 32'd1) >> 1;
+      b_stride = (32'(gemm_ldb) + 32'd1) >> 1;
+    end else begin
+      k_bytes  = gemm_k * ebytes;
+      a_stride = 32'(gemm_lda) * ebytes;
+      b_stride = 32'(gemm_ldb) * ebytes;
+    end
+    words_per_row = (k_bytes + 32'd7) / 32'd8;
+    for (r = 0; r < gemm_m; r++) begin
+      a_base = gemm_pa + (64'(r) * 64'(a_stride));
+      for (w = 0; w < words_per_row; w++)
+        wr8(a_base + (64'(w) << 3), pattern);
+    end
+    for (c = 0; c < gemm_n; c++) begin
+      b_base = gemm_pb + (64'(c) * 64'(b_stride));
+      for (w = 0; w < words_per_row; w++)
+        wr8(b_base + (64'(w) << 3), pattern);
+    end
+  endtask
+
+  // One numeric format, every legal ar_max in [1, GEMM_MAX_AR].  Same workload,
+  // same operands, same pointers: only the AR cap moves.  The golden C is
+  // re-checked per run AND pinned against the ar=1 reference, because a
+  // prefetch-depth knob that changes arithmetic is a bug, not a tuning result.
+  task automatic measure_fmt(
+      input logic [2:0]        numfmt,
+      input logic [DATA_W-1:0] pattern,
+      input int unsigned       bpe,
+      input logic              is_packed
+  );
+    int unsigned ar;
+    logic [31:0] start_cy, run_cy;
+    logic [DATA_W-1:0] golden, ref0, ref1;
+    logic have_ref, straddle_pre;
+    golden      = (numfmt == 3'd0 || numfmt == 3'd1) ? C16 : FP_C16;
+    have_ref    = 1'b0;
+    ref0        = '0;
+    ref1        = '0;
+    gemm_numfmt = numfmt;
+    for (ar = 1; ar <= unsigned'(GEMM_MAX_AR); ar++) begin
+      straddle_pre = straddle;
+      cycles       = 0;  // fresh timeout budget for this job; never the measurement
+      ar_max_val   = 4'(ar);
+      measure_store(pattern, bpe, is_packed);
+      while (!ready && cycles < TO_RSP) tick;
+      if (!ready) begin
+        $error("MEASURE fmt=%0d ar=%0d sequencer never ready", numfmt, ar);
+        errors++;
+      end
+      start_cy = free_cy;
+      kick_gemm;
+      run_cy = free_cy - start_cy;
+      if (straddle && !straddle_pre) begin
+        $error("MEASURE fmt=%0d ar=%0d burst straddled stripe", numfmt, ar);
+        errors++;
+      end
+      rd8(gemm_pc,         c0);
+      rd8(gemm_pc + 64'd8, c1);
+      if (c0 !== golden || c1 !== golden) begin
+        $error("MEASURE fmt=%0d ar=%0d golden C exp=%h got %h %h", numfmt, ar, golden, c0, c1);
+        errors++;
+      end
+      if (!have_ref) begin
+        ref0     = c0;
+        ref1     = c1;
+        have_ref = 1'b1;
+      end else if (c0 !== ref0 || c1 !== ref1) begin
+        $error("MEASURE fmt=%0d ar=%0d C differs from ar=1 exp=%h %h got %h %h",
+               numfmt, ar, ref0, ref1, c0, c1);
+        errors++;
+      end
+      $display("MEASURE fmt=%0d ar=%0d m=%0d n=%0d k=%0d macs=%0d cycles=%0d pmu_cycles=%0d r_beats=%0d w_beats=%0d c0=%h c1=%h",
+               numfmt, ar, gemm_m, gemm_n, gemm_k, gemm_m * gemm_n * gemm_k,
+               run_cy, pmu_cy, pmu_r, pmu_w, c0, c1);
+      meas_runs++;
+    end
+  endtask
+
+  // The sweep itself.  Restores the directed-phase timeout budget afterwards so
+  // the PASS line keeps meaning the same thing as in a sweep-OFF run.
+  //
+  // Geometry matters for what this sweep can even observe.  g6lc_ai_gemm_seq
+  // issues an A-phase AR only while `ar_i_q < m_q` and a B-phase AR only while
+  // `ar_j_q < n_q`, so outstanding ARs are bounded by m (then n), NOT by
+  // ar_max_eff alone.  At the directed 2x2x16 geometry no more than 2 ARs can
+  // ever be inflight, which makes every ar_max >= 2 the same hardware and turns
+  // any measured spread at depth 3..8 into memory-page noise.  The sweep
+  // therefore uses m=n=8 so depths up to GEMM_MAX_AR=8 are actually reachable,
+  // and k=16 so the golden C stays the same constant the directed phase checks.
+  // 8x8x16 is also 1024 useful MACs instead of 64, which amortises the fixed
+  // descriptor/AR/drain cost the 2x2x16 fixture was dominated by.
+  //
+  // MeasM x MeasK operands at 8 B/element worst case need 512 B per operand and
+  // MeasM*MeasN 8 B results need 512 B, so the three regions are spaced 1 KiB
+  // apart inside the NWORDS*8 = 8 KiB model.
+  task automatic measure_sweep;
+    int unsigned saved_cycles, pass;
+    saved_cycles = cycles;
+    meas_runs    = 0;
+    gemm_m   = MeasM;
+    gemm_n   = MeasN;
+    gemm_k   = MeasK;
+    gemm_lda = 16'(MeasK);
+    gemm_ldb = 16'(MeasK);
+    gemm_pa  = 64'h8000_0400;
+    gemm_pb  = 64'h8000_0800;
+    gemm_pc  = 64'h8000_0C00;
+    // Each pass is its own block, so the host analyser sees repeated
+    // independent observations of the same (format, depth) instead of one
+    // sample it would have to trust.  Run-to-run spread inside a block pair is
+    // the memory-model noise floor, and no depth may be preferred on a margin
+    // smaller than that floor.
+    for (pass = 0; pass < MeasPasses; pass++) begin
+      meas_runs = 0;
+      $display("MEASURE_BEGIN schema=g6lc.policy-measure.v1 tb=tb_g6lc_ai_gemm_backend cycle_source=free_running_rtl_counter class=%0d nch=%0d dpf=%0d ar_max=%0d pass=%0d",
+               DRAM_CLASS, NCH, DOT_PIPE_FLOAT, GEMM_MAX_AR, pass);
+      measure_fmt(3'd0, ONES8,      1, 1'b0);  // INT8
+      measure_fmt(3'd1, INT4_1,     1, 1'b1);  // INT4 (two +1 nibbles per byte)
+      measure_fmt(3'd3, FP8_E4M3_1, 1, 1'b0);  // FP8 E4M3
+      measure_fmt(3'd4, FP8_E5M2_1, 1, 1'b0);  // FP8 E5M2
+      measure_fmt(3'd5, FP16_1,     2, 1'b0);  // FP16
+      measure_fmt(3'd6, BF16_1,     2, 1'b0);  // BF16
+      measure_fmt(3'd7, FP32_1,     4, 1'b0);  // FP32
+      $display("MEASURE_END runs=%0d formats=7 ar_max=%0d", meas_runs, GEMM_MAX_AR);
+    end
+    ar_max_val  = 4'(GEMM_MAX_AR);
+    gemm_numfmt = 3'd0;
+    cycles = saved_cycles;
+  endtask
+
   initial begin
     errors = 0;
     cycles = 0;
+    meas_runs = 0;
     start = 0;
     gemm_m = 32'd2; gemm_n = 32'd2; gemm_k = 32'd16;
     gemm_lda = 16'd16; gemm_ldb = 16'd16; gemm_numfmt = 3'd0;
@@ -609,6 +784,10 @@ module tb_g6lc_ai_gemm_backend
     gemm_numfmt = 3'd0;
     if (NCH >= 2)
       run_wide;
+
+    // Opt-in and last: the directed phase above is untouched when it is off.
+    if ($test$plusargs("measure"))
+      measure_sweep;
 
     if (errors == 0)
       $display("PASS g6lc_ai_gemm_backend class=%0d nch=%0d ar=%0d cycles=%0d r=%0d/%0d goldenC=16 cap%s",

@@ -114,7 +114,7 @@ package g6lc_ai_policy_pkg;
     logic [2:0] bits;
     logic [63:0] num;
     bits = policy_element_bits_log2(numfmt);
-    num = 64'(k) * 64'(32'd1 << bits);
+    num = 64'(k) * (64'd1 << bits);
     return (num + 64'd7) >> 3;
   endfunction
 

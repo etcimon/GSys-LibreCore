@@ -150,6 +150,8 @@ package config_pkg;
     bit          UmodeEn;     // allow U-mode issue (aiperm[0] reset value)
     bit          PolicyCodecEn;
     bit          PolicyBenefitEn;
+    bit          PolicySubcodeEn;
+    bit          PolicySubcodeCacheEn;
     bit          IslandFpEn;
     // Datatype options. These are GRANT gates, not encodings: aicfg carries the
     // request, and ai.setcfg downgrades to the nearest supported value rather
@@ -981,6 +983,10 @@ package config_pkg;
       else $error("AiCfg.PolicyCodecEn requires the matrix plane and a T2 queue");
     assert (!(Cfg.AiCfg.PolicyBenefitEn && !Cfg.AiCfg.PolicyCodecEn))
       else $error("AiCfg.PolicyBenefitEn requires the policy codec");
+    assert (!(Cfg.AiCfg.PolicySubcodeEn && !Cfg.AiCfg.PolicyBenefitEn))
+      else $error("AiCfg.PolicySubcodeEn requires policy benefit steering");
+    assert (!(Cfg.AiCfg.PolicySubcodeCacheEn && !Cfg.AiCfg.PolicySubcodeEn))
+      else $error("AiCfg.PolicySubcodeCacheEn requires policy subcode evaluation");
     assert (!(Cfg.AiCfg.IslandFpEn && (!Cfg.AiCfg.MatrixEn || Cfg.AiCfg.Queues == 0 ||
               !Cfg.RVF || !Cfg.RVD)))
       else $error("AiCfg.IslandFpEn requires the matrix plane, a T2 queue, RVF and RVD");

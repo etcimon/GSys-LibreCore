@@ -209,6 +209,7 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/ai_island/g6lc_ai_pe_dot_float.sv                                  \
         corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv                             \
         corev_apu/ai_island/g6lc_ai_policy_codec.sv                                  \
+        corev_apu/ai_island/g6lc_ai_policy_subcode.sv                                \
         corev_apu/ai_island/g6lc_ai_policy_steer.sv                                  \
         corev_apu/ai_island/g6lc_ai_gemm_seq.sv                                      \
         corev_apu/ai_island/g6lc_ai_dram_timing.sv                                   \

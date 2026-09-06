@@ -975,6 +975,411 @@ increase FP grants, claim silicon speed, or remove the fixed-code comparator on
 the strength of this model. The broader full-core synthesis gate still has the
 unrelated errors recorded in §10.5.
 
+### 11.6 Per-group 3-bit subcode evaluator
+
+`g6lc_ai_policy_subcode` adds an optional advisory search behind
+`AiCfg.PolicySubcodeEn` (requires benefit steering; all production gates remain
+off). The frozen primary 3-bit policy is unchanged. A separate 3-bit candidate
+index is interpreted within bulk, decode, routed or sparse-candidate groups;
+other classes return the existing topology without evaluation.
+
+| Subcode | Candidate output grouping R x C |
+|---|---|
+| 0 | Existing format-aware topology, retained on ties |
+| 1 | Same-format single-output baseline |
+| 2 | 1 x 16 |
+| 3 | 2 x 8 |
+| 4 | 4 x 4 |
+| 5 | 8 x 2 |
+| 6 | 16 x 1 |
+| 7 | Group parameter: defaults bulk 2 x 4, decode 1 x 8, routed 1 x 4, sparse 4 x 2 |
+
+The last candidate is encoded in four six-bit `GroupShapeLog2` entries (low
+entry bulk, then decode, routed, sparse; row log in bits 5:3, column log in 2:0).
+`FormatStepCycles` supplies a four-bit minimum service interval per format;
+`FormatMinReductionLog2` bounds the reduction width of alternatives. These are
+compile-time service hypotheses, not trained or measured format capacities.
+At runtime, exact retained shape and native row packing select the best legal
+candidate. Slots are conserved: `R*C*D = 2**slots_log2`, with at most 16 outputs.
+This increment accepts evaluation dimensions 1..256; larger shapes, unknown
+formats and malformed baseline geometry return an unevaluated fallback.
+M/N must divide the candidate grouping exactly; K tails use byte-rounded rows,
+including odd INT4 K. No sparse arithmetic credit or floating reassociation is
+introduced. A sparse candidate uses the same dense cost accounting.
+
+Evaluation serializes eight candidates through PREP, SERVICE, TOTAL and COMPARE:
+32 cycles after the standalone input handshake. Native read service and
+format minimum issue interval determine full and partial K-step cost; registered
+products then form the tile compute-service estimate. External traffic is
+identical across candidates and is added separately in performance reports.
+An alternative is selected only when its compute cost plus all 32 evaluation
+cycles, `SwitchCycles` (default 2), and `MinSavingsCycles` (default 2) is strictly
+less than the existing allocator's compute cost. Fallback still pays evaluation
+cost; the tests must report that regression rather than erase it.
+
+The steering integration is a cancellable shadow evaluator: primary ready/work,
+code, topology and residual/hint semantics remain unchanged. A newly accepted
+record cancels any older subcode search or held result; the most recent record
+is evaluated once its primary policy is available. Full-rate input can therefore
+starve shadow evaluation. The standalone ready/busy/valid interface is the seam
+for a future backpressured consumer. Subcode results and costs have separate
+observation ports, not new MMIO or descriptor bits. The island leaves those
+ports unused: **this is implemented selection RTL, not a multi-output PE or a
+live GEMM speedup**. Existing PMU topology words still describe the primary path.
+
+Timing/review: candidate construction and three arithmetic/comparison stages are
+separated by registers, outside core issue/commit and AXI address generation.
+The new cost multipliers, variable shifts and metadata fanout need synthesis and
+PDK timing review; no GHz claim follows from cycle counts. No new clock/reset,
+latch, memory macro, permission path or numerical datapath is added. State uses
+the existing active-low reset and testmode convention; flush/disable clears all
+retained state. ISA/DTS/format grants are unchanged. Actual broadcast wiring,
+accumulator banks, pipeline drain, real-model calibration, STA and DFT remain
+promotion gates. `ai-policy-subcode` owns the scoped scoreboard and matched
+MAC/cycle evaluation; synthetic fixtures are not captured model inference.
+
+Verification (2026-09-06): remote artifact
+`ai-policy-subcode-20260906T120534Z-59ac4379a07d/output/policy-subcode-results-6ekram31`
+passes five parameter profiles, each with 13,574 standalone cases and actual
+steering-output equivalence (1,172 accepts, 444 results, 712 cancellations).
+The independent 64-bit reference walks K fragments rather than copying the
+RTL closed-form cost. Maximum geometry, all format slot budgets, strict margin
+boundaries, idle mutation and cancellation at every search age are exercised.
+Arithmetic bounds for legal candidates are at most 17,408 service cycles per
+group and 251,658,240 compute cycles per tile (256 cubed times the maximum
+15-cycle service interval), fitting the 15-bit service and 28-bit cost state.
+Local artifact `ai-policy-subcode-synth-20260906T115809Z-e9b58abe2d73`
+reports 4,881 generic cells / 340 sequential cells / zero latches, disabled zero,
+and four control assertions through 36 steps with reachable completion. That
+proof fixes INT4 16x16x17 geometry and leaves controls arbitrary; it is not a
+full arithmetic or steering-integration formal proof.
+
+**Performance counterevidence:** all 105 named handcrafted tile fixtures retain
+subcode 0 at both 128 and 512 B/cycle; the existing allocator already wins among
+these candidates. With the 32-cycle search charged, throughput deltas across
+formats are negative:
+
+| Tile fixture family | Read128 MAC/cycle change | Read512 MAC/cycle change |
+|---|---:|---:|
+| Prefill | -0.052056% to -0.014289% | -0.052056% to -0.014289% |
+| Decode | -0.811839% to -0.114361% | -0.834420% to -0.117958% |
+| Routed experts | -0.155885% to -0.026876% | -0.226501% to -0.047079% |
+| Diffusion matrices | -0.049739% to -0.014185% | -0.052877% to -0.017801% |
+
+Randomized geometry diagnostics do exercise profitable alternatives, including
+single-output and group-specific candidates in parameter tests, but are not a
+real-model workload distribution. Reports keep those diagnostics separate from
+`workload_fixtures`. Do not add these results to the earlier fixed-dot savings:
+this experiment compares incrementally against the existing allocator and does
+not establish further workload speedup. Keep the gate off; calibration should
+next test bank/port costs and amortization opportunities before adding consumers.
+
+### 11.7 Codec-first feedback methodology
+
+The primary runtime path remains metadata encode -> registered 3-bit code ->
+two combinational policy decodes, not the multi-cycle subcode search. Single-cycle
+accepted metadata contains shape buckets, semantic opcode, eight-element sparse
+residue, shape continuity and balance. The exact coarse-feature signature avoids
+hash collisions; unchanged signatures silence the encoder while accepted-work
+votes still advance hysteresis. Defaults HoldWork=3, DwellWork=4 and CooldownWork=2
+are frozen hypotheses, not learned frequencies. Strategy equity means uniform
+hold/dwell rules for consecutive fitting classes, not equal quotas or a guarantee
+of accurate predictions on deliberately alternating classes.
+
+The primary and repeat-or-successor decoders produce advisory geometry, dataflow,
+sparse-check and prefetch tuples. Successor hints use a caller-supplied address;
+they cannot infer a pointer, grant permission or issue speculative memory traffic
+by themselves. Integer residual skip additionally requires exact proof; sample
+zeros alone never authorize dropped arithmetic. Format epochs, flush and disabled
+operation preserve context boundaries. No named accelerator algorithm is assumed.
+
+Feedback has separate axes: classification/prediction accuracy, modeled useful
+MAC/cycle, and measured memory/PE cycles. The runner's `performance_feedback`
+section now explicitly reports `NOT_QUALIFIED`, equal family/format normalized
+costs and a no-regression/strict-improvement model screen. Positive, tie, regression
+and invalid-count controls test this reporting boundary. Even a passing synthetic
+screen cannot assert held-out captures, a live PE consumer or physical timing.
+No result automatically changes a production gate or fits a runtime table.
+
+Fresh seed-123 remote control run
+`ai-policy-codec-20260906T121255Z-2a22cc633240` passes default/minimum/maximum
+hold/dwell/cooldown/bank parameters, directed false-sparse and class walks,
+16,384 metadata combinations, 30,000 random cycles and 26,446 shape-derived
+records. Selected default-profile observations (control metrics, not speed):
+
+| Scenario | Re-encode rate | Committed/raw agreement | Resolved-hint accuracy |
+|---|---:|---:|---:|
+| Pure bulk | 0.10% | 100.00% | 99.95% |
+| Sticky decode | 0.10% | 100.00% | 100.00% |
+| Mixed prefill/decode | 1.12% | 98.66% | 99.27% |
+| Routed experts | 1.36% | 98.75% | 99.30% |
+| Decode with injected misses | 0.10% | 100.00% | 87.57% |
+| Adversarial all-class alternation | 100.00% | 25.00% | 0.00% |
+| Ragged shape-derived diffusion | 46.24% | 78.97% | 72.60% |
+
+The poor adversarial/ragged cases remain visible. Historical arbitrary
+transition/mispredict cost units are sensitivity tests, not MAC/s estimates.
+Next real-world validation must capture framework operator order, native formats,
+actual routing and source/model revision, lower into legal tiles, and hold out
+models before fitting parameters. A Hugging Face model executed in QEMU can
+validate descriptor/grant/numerical behavior and produce replay metadata; QEMU
+wall-clock token/s measures that emulator/software setup, not island MAC/s.
+RTL replay supplies bus/PE-cycle evidence, and multiplying MAC/cycle by a stated
+clock remains a projection until timing is established. No captured-model or
+Hugging Face/QEMU inference benchmark was run for this refinement.
+
+### 11.8 Captured pretrained-model calibration (2026-09-06)
+
+This pass advances the capture gate beyond the synthetic fixtures in §11.7;
+it does not add a live array or a QEMU inference throughput measurement.
+`capture_policy_model.py` records original dispatched PyTorch linear, matmul,
+mm/addmm/bmm and baddbmm operations, module paths, native operand shapes/strides,
+linear weight transposition, batch multiplicity, dtype and eight-element samples.
+It executes each original operation once. Bias/scaling and non-matrix operations
+are identified separately, not counted as extra GEMM MACs. Prefill and four
+single-token cached forwards must produce finite logits; token/output digests
+are recorded without publishing prompt text or generated text in the artifact.
+This is a forward-execution check, not an independent model-quality assessment.
+
+After explicit user approval, a contained environment was provisioned at
+`build-platform/workspace/tooling/policy-capture/`: WSL Python 3.12.3,
+PyTorch 2.6.0+cpu, Transformers 4.46.3, Diffusers 0.32.2, NumPy 2.2.2,
+huggingface-hub 0.28.1 and safetensors 0.5.2. Its environment/model provenance,
+wheel hashes and exact package pins remain in the ignored workspace. Capture
+itself never installs or downloads, uses offline local snapshots and
+`trust_remote_code=False`, and requires complete safetensors weights. No global
+packages or production config were changed.
+
+| Role | Pretrained model | Immutable revision |
+|---|---|---|
+| Calibration | HuggingFaceTB/SmolLM2-135M (Llama) | `93efa2f097d58c2a74874c7e644dbc9b0cee75a2` |
+| Held out | EleutherAI/pythia-70m-deduped (GPTNeoX) | `e93a9faa9c77e5d09219f6c868bfc7a1bd65593c` |
+
+Eight final captures cover each model in FP32/BF16 with the short development
+prompt, plus matched 63- and 64-token BF16 prompts. A 32-token ceiling yielded
+23 actual SmolLM2 tokens and 24 Pythia tokens; these were not mislabeled as 32.
+SmolLM2 records 1,360 matrix operations per run, Pythia 190. Each BF16 run also
+contains five genuinely FP32 rotary operations. Native dtypes are retained, not
+projected onto INT8/INT4. The live island still grants INT8/INT4 only.
+No pretrained diffusion or routed-MoE capture is claimed by these two dense LMs.
+
+`policy_calibration.py` checks hashes/schema, rejects overlapping model IDs or
+weight fingerprints between calibration and holdout, conserves useful MACs and
+aggregates exact <=256-axis tile multiplicities. Linear weights remain [N,K] in
+the source record and are explicitly interpreted as transposed. Samples are not
+propagated to unrelated tiles; no sparsity or prefetch credit is inferred.
+Raw metadata codes drive the existing topology baseline with balance=1: this
+is not a replay of full codec hysteresis. Independent K tiles read/write C each
+time, with identical traffic and serial external/local service for all candidates.
+Autotuning searches 15 legal shapes for candidate 7 in each eligible group using
+calibration counts only. Unobserved routed/sparse groups keep their defaults.
+Margins, format slots, bandwidth and evaluation tax are not tuned to inflate gain.
+
+Final reports: `build-platform/workspace/build/policy-calibration-final-{128,512}-20260906.json`.
+The calibration set contains 5,440 source records / 69,140 independent tiles;
+the held-out set 760 source records / 15,580 tiles. Both bandwidth profiles retain
+`GroupShapeLog2=0x4420ca`: none of the candidate-7 substitutions wins this fit.
+The target +500% throughput means 6x the existing allocator, not a rebased naive
+kernel. Results relative to the subcode-disabled existing allocator are:
+
+| Same-resource profile | SmolLM2 tuned MAC/cycle ratio | Pythia held-out ratio | Ideal fixed-service ceilings (SmolLM2 / Pythia) |
+|---|---:|---:|---:|
+| SRAM 128 B/cycle, external 8 B/cycle | 0.999020x | 0.999242x | 1.238630x / 1.125685x |
+| SRAM 512 B/cycle, external 8 B/cycle | 0.998766x | 0.999132x | 1.000542x / 1.000264x |
+
+Thus **6x is ruled out under these fixed-traffic, serial-service assumptions**;
+the search currently regresses through overhead. Bounds are not universal
+hardware limits: changing residency, bandwidth, overlap or arithmetic resources
+would be a different implementation and must be measured separately.
+
+Captured priorities differ from synthetic record shares. On SmolLM2, raw wide
+code 1 is only 14.79% of tiles but 86.86% of useful MACs and 48.64% of baseline
+cycles; decode is 67.48% of tiles but 8.35% of MACs and 47.76% of cycles. Optimizing
+record frequency alone misses the dominant compute work. No routed/sparse
+frequency is invented for these captures.
+
+An explicitly non-deployable masked-output-tail oracle identifies a narrower
+opportunity: 1.214351x SmolLM2 and 1.105900x Pythia at read128 if partial output
+groups could share the array with ideal bank/port service and free selection.
+It conserves native MACs and is checked against a separate fragment loop, but is
+not used to fit/export subcodes and is not supported by the current selector's
+M/N-divisibility guards. This supports investigating tail-masked broadcast and
+accumulator banks, not claiming a measured 21.44%/10.59% improvement.
+
+Reproducible entry points (capture requires the approved isolated interpreter):
+
+```text
+capture_policy_model.py --model-id <id> --revision <sha> --cache-dir <local-hub-cache> --out <capture.json> --dtype bf16 --prefill-tokens 64 --decode-steps 4 --prompt <development-text>
+policy_calibration.py --calibration <SmolLM2 captures...> --held-out <Pythia captures...> --out <report.json> --replay-out <replay.json> --read-bytes 128
+python verif/regress/ai-policy-subcode.py --parameters default --replay <replay.json>
+bun build-platform/src/cli/index.ts test ai-policy-calibration
+```
+
+The bounded replay is metadata/cost checking against actual subcode RTL, not
+full numerical tensor or AXI DMA replay. Source capture hashes and canonical
+replay hashes bind the stages, while structural validation alone cannot
+authenticate a third party's self-reported model execution. Production gates
+remain off pending net benefit, live consumers, numerical/permission proofs,
+bank/tail verification and timing/DFT evidence.
+
+### 11.9 Agent-assisted motif fitting and bounded reuse
+
+Higher-level pattern recognition belongs in the host capture/autotune layer;
+it is not restricted to local scalar counters and does not add a learned model
+to RTL. The capture now retains ordered non-matrix operators with exact links to
+matrix records, rather than attempting to infer epilogue/gather ordering from
+aggregate counts. Full geometry, native format, operator/module provenance and
+layout residues remain available. Shape/stride agreement is only a reuse-axis
+hypothesis, never proof of tensor identity, bank placement or data residency.
+Static slice/view operations must not be promoted into irregular gather evidence.
+
+The host motif pass proposes nested subcode parameters over the frozen eight
+group codes. Its logical descriptor is the pair `{group[2:0],subcode[2:0]}`:
+six internal bits, not a new Desc64 encoding or a replacement for the frozen
+primary 3-bit policy. Recognized prefill/decode sequences, repeated projection
+and attention structure, or ordered epilogue/gather families supply context;
+they do not grant unimplemented fused arithmetic or new memory operations.
+Uncaptured routed experts and image-generation models remain explicitly absent.
+Only parameter choices expressible by the existing candidate geometry fabric
+can be exported. Group encoding, successor map, policy muxes and arithmetic
+contracts remain unchanged.
+
+Warm-up, hysteresis, exact feature signatures, paired evidence and rejection
+windows are host supervision in this pass. Inferred benefit and externally
+provided measured useful-MAC/cycle evidence are distinct. Missing measurements,
+format/work/profile mismatch, stale or duplicated pairs, topology/mispredict
+penalties or net regression must prevent qualification or reject a retained
+proposal. Model/synthetic feedback exercises this logic but is not array timing.
+A rejected proposal can be refitted or replaced by baseline in the host ledger;
+there is no new runtime-writable codebook interface or on-die motif-window engine.
+Timing, numerical/permission checks and actual consumer support still gate any
+production promotion, even when paired evidence is structurally valid.
+
+The deliberately narrow RTL companion is an optional exact-match last-completed
+subcode-result cache. It memoizes deterministic topology evaluation, not a motif
+classifier or a learned history table. Reuse must match the complete shape,
+format, eligible group and baseline topology under the same compiled parameters.
+Unfinished searches cannot become cache entries; reset, disable, flush and batch/
+format epochs invalidate reuse. A fresh record cancels any older response while
+preserving only a valid completed entry within the allowed epoch. Cache-disabled
+behavior and all primary codec outputs must remain equivalent. This targets
+repeated evaluation latency only; it does not establish a new array MAC/s gain.
+
+Implemented host entry point: `policy_motifs.py`. Defaults are a 16-record window,
+eight-record warm-up, two consistent windows before retention, two-window cooldown
+and a 32-template catalog. `MinRealizedGain16ths=8` requires measured fractional
+saving to reach at least half the predicted fractional saving; with
+`MaxGainSpread16ths=8`, the largest normalized saving across retained windows must
+not exceed 1.5 times the smallest. Inclusive boundaries and exact rational
+comparisons avoid treating different workload sizes as inconsistent raw-cycle
+counts. Taxes are additional cycles not already included in measured elapsed
+cycles. No supplied measurement means no qualified performance claim.
+
+A separate structural template key excludes literal model/layer names while
+preserving format, phase, raw group, buckets, R/C residues modulo 16, canonical
+matrix families and run-collapsed reuse sequences. Exact geometry, layouts and
+source identity remain in feature/evidence guards. Calibration-only opportunity
+ranking chooses catalog entries by predicted saving, then baseline cycles, useful
+MACs and support; there is no first-arrival bias or equal-share quota. A template
+hit cannot bypass full-shape legality or exact paired evidence.
+
+Actual ordered-capture report `policy-motifs-window-final-20260906.json` admits
+32 of 51 calibration templates. It matches 312/382 calibration group-windows
+(99.8300% useful-MAC coverage), but only 10/58 held-out group-windows (0.4944%
+useful-MAC coverage). Epilogue adjacency is observed as a structural hypothesis;
+irregular gathers are not observed and routed bursts remain uncaptured. All
+admitted subcode hints are baseline 0, `GroupShapeLog2` stays `0x4420ca`, and
+qualified measured claims remain zero. This is limited structural transfer, not
+mostly accurate cross-model performance prediction or a demonstrated lift.
+
+The RTL cache uses `AiCfg.PolicySubcodeCacheEn`, requiring `PolicySubcodeEn` and
+defaulting off. Eligible misses complete in 32 cycles; exact completed-result
+hits in one cycle. The retained winner is reused conservatively, not upgraded
+because the lookup is cheaper. The hit cost includes one lookup cycle plus the
+conditional switching cost. `cancel_i` separates response cancellation from
+true epoch invalidation; accepted first/format-change/after-last records flush
+in steering. `subcode_cache_hit_o` is response-qualified observation; primary
+ready/work/code/policy outputs remain unchanged. The live descriptor producer
+still treats each GEMM as an epoch, so this does not enable cross-job cache reuse.
+
+Remote cache tests pass five service/parameter profiles: 1,556 hits and 1,623
+misses/rejections per profile, interrupted searches at every age, key changes,
+format/batch invalidation and original-output equivalence. Yosys artifact
+`ai-policy-subcode-synth-20260906T132132Z-356d75ad3869` reports 4,880 generic cells /
+340 sequential with cache off versus 5,473 / 342 with cache on, zero latches;
+whole evaluator off is zero cells. The incremental cost is 593 generic cells and
+two sequential cells, not technology area. A 72-step fixed-INT4 control proof
+with K=17/18 reaches a hit and checks five assertions; arbitrary full-key and
+numerical cache correctness remain simulation evidence, not induction. A broader
+numerical formal attempt timed out. Host capture/calibration/motif tests pass
+114 cases, including false sparsity, forced group/subcode walks, stale feedback,
+taxes, warm-up/steady transitions, gain consistency, rollback and split isolation.
+
+### Measured AR-depth feedback (first real RTL cycle evidence)
+
+`tb_g6lc_ai_gemm_backend` gained an opt-in `+measure` sweep (default off, existing
+checks and PASS line unchanged) that runs the same GEMM per numeric format at
+every legal AR depth and reports free-running RTL cycles, sequencer PMU counters
+and result digests. `policy_measure.py` validates that log into the
+`g6lc.policy-measure.v1` artifact and computes MAC/cycle with exact rational math.
+
+Result digests are identical at every depth, so AR depth never changes arithmetic.
+The first artifacts (`policy-measure.json`, `policy-measure-class1.json`) used a
+2x2x16 fixture and are superseded: see the fixture defect below. Their depth-1
+versus depth-2 direction held up, but their magnitudes and every depth >= 2
+comparison did not.
+
+This is the project's first measured rather than modeled throughput evidence, and
+it is a **regression finding about the existing policy table**, not a gain:
+`policy_decode` maps `POLICY_DECODE`, `POLICY_ROUTED` and `POLICY_SPARSE` to
+`prefetch_depth=2'd1`, and `g6lc_ai_gemm_seq.ar_max_eff` honors that literally,
+so those three codes request the measurably slower depth while codes at depth 2
+or 3 resolve to 2. Depth 0 and depths above `MaxAROut` fall back to `MaxAROut`.
+
+**Fixture defect found and corrected — earlier depth results were invalid.**
+`g6lc_ai_gemm_seq` issues an A-phase AR only while `ar_i_q < m_q` and a B-phase AR
+only while `ar_j_q < n_q`, so inflight ARs are bounded by `m` then `n`, not by
+`ar_max_eff` alone. At the original 2x2x16 sweep geometry no more than two ARs
+could ever be inflight, so **every depth >= 2 was the same hardware** and the
+observed spread at depths 3-8 was memory-page noise. That fixture also ran at only
+about 20% of peak. The sweep now uses 8x8x16 (1024 useful MACs, depth up to 8
+genuinely reachable, about 68% of the `PeLanes=8` peak) and repeats each pass so
+the noise floor is measured rather than assumed.
+
+On the corrected fixture the depth response is **monotonic — deeper is always
+better** — which is the expected latency-hiding physics, not a tuning curve:
+
+| Depth | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| DRAM class vs policy-off | -40.2% | -19.1% | -12.6% | -6.2% | -3.0% | -2.9% | -1.5% | 0% |
+
+- Live class (`MaxAROut=2`, noise floor exactly 0%): depth 1 costs **-8.15%**;
+  depth 2 *is* policy-off and is optimal.
+- DRAM class (`MaxAROut=8`, repeat-pass noise floor 2.8% mean / 25% worst):
+  policy-off is optimal. Cross-validated per-format tuning loses **-1.01% mean
+  with all four folds negative**. Five of seven formats show exactly 0% headroom;
+  the two apparent small wins (`+4.35%`, `+1.37%`) sit below the noise floor.
+
+**Structural conclusion: the knob cannot win.** `prefetch_depth` can only lower
+the cap below `MaxAROut` (0 falls back to `MaxAROut`), measured throughput rises
+monotonically with depth, so "do not cap" — which is exactly policy-off — is the
+optimum. The ceiling for AR-depth steering versus no steering is **0%**, and the
+shipped table spends **-8.15%** on decode/routed/sparse traffic. No parameter
+tuning changes this; the sign is fixed by construction. Artifacts:
+`policy-measure-live-m8-20260906.json`, `policy-measure-class1-m8-20260906.json`.
+
+Scope limits: one small fixed job per format, one testbench memory model, and
+local WSL Verilator dispatch, so this is diagnostic-grade evidence rather than a
+proxy-authoritative regression result. It is not silicon, wall-clock or QEMU
+throughput, and MAC/s is withheld unless a clock is explicitly declared, in which
+case it is a projection. No frozen policy code, mux, gate or RTL default was
+changed on the strength of it; the recommendation is a tuning input only.
+
+The full repository verification attempt is not a sign-off result: its smoke
+harness failed on generated SRAM/SMT hierarchy member references. It was stopped
+after its broad generated-output cleanup was noticed; Git showed no tracked
+file deletions. Keep scoped proxy evidence separate from that incomplete gate.
+
 ## 12. Native model evaluation and exact floating arithmetic
 
 The next layer connects the independent `ai-tensor` and `g6lc_qemu` packages

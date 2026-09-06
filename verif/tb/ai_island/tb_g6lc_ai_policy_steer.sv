@@ -39,7 +39,9 @@ module tb_g6lc_ai_policy_steer_instance #(
     .MinGain16ths(MinGain16ths), .FormatSlotsLog2(FormatSlotsLog2)
   ) i_steer (
     .code_o(code_o), .next_code_o(next_code_o),
-    .policy_o(policy_o), .next_policy_o(next_policy_o), .topology_o(topology_o), .*
+    .policy_o(policy_o), .next_policy_o(next_policy_o), .topology_o(topology_o),
+    .subcode_valid_o(), .subcode_evaluated_o(), .subcode_cache_hit_o(), .subcode_o(), .subcode_topology_o(),
+    .subcode_baseline_cycles_o(), .subcode_selected_cycles_o(), .*
   );
 
 `ifdef FORMAL

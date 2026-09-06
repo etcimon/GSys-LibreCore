@@ -196,9 +196,11 @@ grep -q "GATE_MILLI" verif/tb/ai_island/tb_g6lc_ai_dram_bw.sv \
   && ok "class-1 --sim stream BW TB" || bad "dram_bw GATE_MILLI"
 grep -q 'build_nch 1' verif/tb/ai_island/run-gemm-channels.sh \
   && ok "class-1 GEMM N=1 LiteDRAM identity" || bad "gemm_channels n1"
-grep -q 'build_nch 4' verif/tb/ai_island/run-gemm-channels.sh \
+# The N sweep is a DEFAULT_NCHS loop (nch-from-env.inc.sh), not unrolled
+# `build_nch <n>` calls, so assert the list that actually drives it.
+grep -Eq 'DEFAULT_NCHS=\(1 2 4 8\)' verif/tb/ai_island/run-gemm-channels.sh \
   && ok "class-1 GEMM N=4 LiteDRAM" || bad "gemm_channels n4"
-grep -q 'build_nch 8' verif/tb/ai_island/run-gemm-channels.sh \
+grep -Eq 'DEFAULT_NCHS=\(1 2 4 8\)' verif/tb/ai_island/run-gemm-channels.sh \
   && ok "class-1 GEMM N=8 LiteDRAM" || bad "gemm_channels n8"
 grep -q 'run_wide' verif/tb/ai_island/tb_g6lc_ai_gemm_backend.sv \
   && ok "class-0 GEMM wide lda=64 occupancy" || bad "gemm_backend run_wide"
@@ -206,9 +208,9 @@ grep -q 'DRAM_CLASS' verif/tb/ai_island/tb_g6lc_ai_gemm_backend.sv \
   && ok "GEMM backend DramClass parameter (CLASS1 slave)" || bad "gemm_backend DRAM_CLASS"
 grep -q 'GDRAM_CLASS=1' verif/tb/ai_island/run-gemm-backend-class1.sh \
   && ok "class-1 GEMM via dram_backend (testharness CLASS1)" || bad "gemm_backend class1"
-grep -q 'build_nch 4' verif/tb/ai_island/run-gemm-backend-class1.sh \
+grep -Eq 'DEFAULT_NCHS=\(1 2 4 8\)' verif/tb/ai_island/run-gemm-backend-class1.sh \
   && ok "class-1 backend GEMM N=4 (CHANS_4 slave)" || bad "gemm_backend class1 n4"
-grep -q 'build_nch 8' verif/tb/ai_island/run-gemm-backend-class1.sh \
+grep -Eq 'DEFAULT_NCHS=\(1 2 4 8\)' verif/tb/ai_island/run-gemm-backend-class1.sh \
   && ok "class-1 backend GEMM N=8 (CHANS_8 slave)" || bad "gemm_backend class1 n8"
 grep -q 'user_port_native_0' corev_apu/src/g6lc_ai_litedram_wrap.sv \
   && ok "wrap native user port" || bad "user_port_native_0"

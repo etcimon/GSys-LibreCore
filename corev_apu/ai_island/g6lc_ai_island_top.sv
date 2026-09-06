@@ -545,7 +545,9 @@ module g6lc_ai_island_top
     .predict_hit_o(policy_predict_hit),
     .predict_miss_o(policy_predict_miss),
     .numfmt_o   (policy_numfmt),
-    .topology_o (policy_topology_value)
+    .topology_o (policy_topology_value),
+    .subcode_valid_o(), .subcode_evaluated_o(), .subcode_cache_hit_o(), .subcode_o(), .subcode_topology_o(),
+    .subcode_baseline_cycles_o(), .subcode_selected_cycles_o()
   );
 
   // Aggregate event/status snapshot into one 32-bit word.

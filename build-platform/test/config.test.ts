@@ -18,13 +18,15 @@ test("config resolves and validates", async () => {
   }
 });
 
-test("AI policy codec stays an optional remote compartment", async () => {
+test("AI policy validation compartments stay optional", async () => {
   const { config } = await loadConfig();
-  const suite = config.tests.suites.find((s) => s.id === "ai-policy-codec");
-  expect(suite?.script).toBe("verif/regress/ai-policy-codec.sh");
-  expect(suite?.optional).toBe(true);
-  expect(suite?.tools).toEqual([]);
-  expect(config.tests.defaultSuites).not.toContain("ai-policy-codec");
+  for (const id of ["ai-policy-codec", "ai-policy-subcode", "ai-policy-calibration"]) {
+    const suite = config.tests.suites.find((s) => s.id === id);
+    expect(suite?.script).toBe(`verif/regress/${id}.sh`);
+    expect(suite?.optional).toBe(true);
+    expect(suite?.tools).toEqual([]);
+    expect(config.tests.defaultSuites).not.toContain(id);
+  }
 });
 
 test("AI native evaluation and scalar floating gates stay optional", async () => {

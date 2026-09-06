@@ -27,6 +27,7 @@ LEGACY_SOURCES = (
     "verif/tb/ai_island/policy_main.cpp",
 )
 SOURCES = LEGACY_SOURCES + (
+    "corev_apu/ai_island/g6lc_ai_policy_subcode.sv",
     "corev_apu/ai_island/g6lc_ai_policy_steer.sv",
     "verif/tb/ai_island/tb_g6lc_ai_policy_resource.sv",
     "verif/tb/ai_island/tb_g6lc_ai_policy_steer.sv",

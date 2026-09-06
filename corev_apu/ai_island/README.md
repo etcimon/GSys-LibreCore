@@ -126,6 +126,30 @@ suite checks an equal-resource ticking scheduling model and emits per-format,
 per-state and balanced-mix percentages in `steering-*/efficiency.json`, including
 negative results and a best-fixed-code comparator. None are production speedups.
 
+`g6lc_ai_policy_subcode.sv` adds a separately gated `AiCfg.PolicySubcodeEn`
+shadow evaluator in steering: eight candidates per bulk/decode/routed/sparse
+class, a 3-bit candidate index, format service/reduction parameters and four
+registered stages per candidate. It cancels on newer metadata and publishes
+separate result/cost observation ports; it does not replace the primary topology
+or feed the live GEMM. Defaults remain off, and no numerical or MMIO ABI changes.
+`python verif/regress/ai-policy-subcode.py --parameters extremes` runs the remote
+scoreboard plus steering equivalence and explicit MAC/cycle comparisons.
+`--synth-only --yosys <existing-yosys> --formal required` runs local generic
+synthesis and fixed-fixture bounded control checks only. Named tile fixtures
+currently show no incremental improvement over the existing allocator after
+charging the 32-cycle evaluation tax; see §11.6 before enabling or promoting it.
+The optional `PolicySubcodeCacheEn` exact-result cache reduces a completed-key
+repeat to one cycle; misses remain 32 cycles and batch/format epochs flush reuse.
+It adds no group-policy mux, arithmetic or address-generation behavior. Generic
+cache off/on results are 4,880/5,473 cells and 340/342 sequential cells, zero
+latches, with scoped cache-control proof and hit reachability through 72 steps.
+This is evaluator latency evidence, not measured GEMM throughput.
+`policy_motifs.py` analyzes ordered host captures and exports nested parameter
+proposals with warm-up and paired-evidence rejection windows. Structural motif
+matches never replace exact topology/format guards or authorize sparse skips.
+Current held-out template coverage is low and no real array timing was supplied;
+see architecture §11.9. All production gates stay off.
+
 Architecture and integration contract: `architecture/ai-matrix/README.md` §10–§11.
 Verification: `bun build-platform/src/cli/index.ts test ai-policy-codec` uses the
 remote proxy. For local synthesis only (never local Verilator), use

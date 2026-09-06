@@ -11,7 +11,12 @@ module g6lc_ai_policy_steer
     parameter int unsigned BankBits = 4,
     parameter int unsigned ReadBytesPerCycle = 128,
     parameter int unsigned MinGain16ths = 2,
-    parameter logic [31:0] FormatSlotsLog2 = 32'h67788098
+    parameter logic [31:0] FormatSlotsLog2 = 32'h67788098,
+    parameter int unsigned SubcodeMinSavingsCycles = 2,
+    parameter int unsigned SubcodeSwitchCycles = 2,
+    parameter logic [31:0] SubcodeFormatStepCycles = 32'h11111111,
+    parameter logic [31:0] SubcodeMinReductionLog2 = 32'h00000000,
+    parameter logic [23:0] SubcodeGroupShapeLog2 = 24'h4420ca
 ) (
     input  logic clk_i,
     input  logic rst_ni,
@@ -49,13 +54,21 @@ module g6lc_ai_policy_steer
     output logic predict_hit_o,
     output logic predict_miss_o,
     output logic [2:0] numfmt_o,
-    output policy_topology_t topology_o
+    output policy_topology_t topology_o,
+    output logic subcode_valid_o, subcode_evaluated_o, subcode_cache_hit_o,
+    output logic [2:0] subcode_o,
+    output policy_topology_t subcode_topology_o,
+    output logic [31:0] subcode_baseline_cycles_o, subcode_selected_cycles_o
 );
 
   // pragma translate_off
   initial begin
     assert (!AiCfg.PolicyBenefitEn || AiCfg.PolicyCodecEn)
       else $fatal(1, "Policy benefit steering requires PolicyCodecEn");
+    assert (!AiCfg.PolicySubcodeEn || AiCfg.PolicyBenefitEn)
+      else $fatal(1, "Policy subcode requires benefit steering");
+    assert (!AiCfg.PolicySubcodeCacheEn || AiCfg.PolicySubcodeEn)
+      else $fatal(1, "Policy subcode cache requires subcode evaluation");
     assert (ReadBytesPerCycle > 0 && ReadBytesPerCycle <= 4096 &&
         (ReadBytesPerCycle & (ReadBytesPerCycle - 1)) == 0)
       else $fatal(1, "Policy SRAM read service must be a power of two in [1,4096]");
@@ -72,6 +85,7 @@ module g6lc_ai_policy_steer
   if (AiCfg.PolicyCodecEn && AiCfg.PolicyBenefitEn) begin : gen_steering
     typedef struct packed {
       logic seen;
+      logic last;
       logic [15:0] m, n;
       logic [15:0] k;
       logic [2:0] numfmt;
@@ -106,6 +120,7 @@ module g6lc_ai_policy_steer
       metadata_d = metadata_q;
       if (accept) begin
         metadata_d.seen = 1'b1;
+        metadata_d.last = batch_last_i;
         metadata_d.m = m_i;
         metadata_d.n = n_i;
         metadata_d.k = k_i;
@@ -119,6 +134,27 @@ module g6lc_ai_policy_steer
       if (!rst_ni) metadata_q <= '0;
       else if (testmode_i || accept || flush_i || !enable_i) metadata_q <= metadata_d;
     end
+
+    g6lc_ai_policy_subcode #(
+      .Enabled(AiCfg.PolicySubcodeEn), .CacheEn(AiCfg.PolicySubcodeCacheEn),
+      .ReadBytesPerCycle(ReadBytesPerCycle),
+      .MinSavingsCycles(SubcodeMinSavingsCycles), .SwitchCycles(SubcodeSwitchCycles),
+      .FormatStepCycles(SubcodeFormatStepCycles),
+      .FormatMinReductionLog2(SubcodeMinReductionLog2),
+      .GroupShapeLog2(SubcodeGroupShapeLog2)
+    ) i_subcode (
+      .clk_i, .rst_ni, .testmode_i, .enable_i,
+      .flush_i(flush_i || (accept && (!AiCfg.PolicySubcodeCacheEn ||
+          batch_first_i || new_format || metadata_q.last))),
+      .cancel_i(accept), .start_i(work_valid_o),
+      .code_i(code_o), .numfmt_i(metadata_q.numfmt),
+      .m_i(metadata_q.m), .n_i(metadata_q.n), .k_i(metadata_q.k),
+      .baseline_i(topology_o), .ready_o(), .busy_o(),
+      .valid_o(subcode_valid_o), .evaluated_o(subcode_evaluated_o), .cache_hit_o(subcode_cache_hit_o),
+      .subcode_o, .topology_o(subcode_topology_o),
+      .baseline_cycles_o(subcode_baseline_cycles_o),
+      .selected_cycles_o(subcode_selected_cycles_o)
+    );
 
     assign numfmt_o = metadata_q.numfmt;
     assign topology_o = policy_topology(code_o, metadata_q.numfmt,
@@ -154,5 +190,12 @@ module g6lc_ai_policy_steer
     assign predict_miss_o = 1'b0;
     assign numfmt_o = '0;
     assign topology_o = '0;
+    assign subcode_valid_o = 1'b0;
+    assign subcode_evaluated_o = 1'b0;
+    assign subcode_cache_hit_o = 1'b0;
+    assign subcode_o = '0;
+    assign subcode_topology_o = '0;
+    assign subcode_baseline_cycles_o = '0;
+    assign subcode_selected_cycles_o = '0;
   end
 endmodule
