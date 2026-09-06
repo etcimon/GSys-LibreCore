@@ -23,7 +23,14 @@ module tb_g6lc_ai_gemm_backend
 #(
     parameter int unsigned NCH        = 2,
     parameter int unsigned DRAM_CLASS = AI_DRAM_SIM_AXI,
-    parameter bit          DOT_PIPE_FLOAT = 1'b0
+    parameter bit          DOT_PIPE_FLOAT = 1'b0,
+    // Provisioning overrides for the +measure sweep only.  0 keeps the shipped
+    // value, so an unset build is byte-identical to the directed configuration.
+    // PE_LANES raises the arithmetic peak (PeLanes MAC/cycle) and AR_PROVISION
+    // raises the outstanding-AR bound, which is the only direction that can add
+    // throughput: policy prefetch_depth could merely lower it.
+    parameter int unsigned PE_LANES     = 0,
+    parameter int unsigned AR_PROVISION = 0
 );
   localparam int unsigned ID_W    = 4;
   localparam int unsigned MST_ID  = ID_W + 1;
@@ -153,14 +160,16 @@ module tb_g6lc_ai_gemm_backend
       .rvalid_o     ( cap_rvalid )
   );
 
-  localparam int GEMM_MAX_AR = (DRAM_CLASS == AI_DRAM_SIM_AXI) ? AI_MAX_AR_OUT_LIVE
-                                                               : AI_MAX_AR_OUT_DRAM;
+  localparam int GEMM_SHIPPED_AR = (DRAM_CLASS == AI_DRAM_SIM_AXI) ? AI_MAX_AR_OUT_LIVE
+                                                                   : AI_MAX_AR_OUT_DRAM;
+  localparam int GEMM_MAX_AR = (AR_PROVISION == 0) ? GEMM_SHIPPED_AR : int'(AR_PROVISION);
+  localparam int GEMM_LANES  = (PE_LANES == 0) ? 8 : int'(PE_LANES);
   g6lc_ai_gemm_seq #(
       .AddrWidth  ( ADDR_W ),
       .DataWidth  ( DATA_W ),
       .IdWidth    ( ID_W ),
       .MaxDim     ( 16 ),
-      .PeLanes    ( 8 ),
+      .PeLanes    ( GEMM_LANES ),
       .DotPipeFloat( DOT_PIPE_FLOAT ),
       .MaxAROut   ( GEMM_MAX_AR ),
       .NrChannels ( NCH ),
@@ -618,8 +627,8 @@ module tb_g6lc_ai_gemm_backend
     // smaller than that floor.
     for (pass = 0; pass < MeasPasses; pass++) begin
       meas_runs = 0;
-      $display("MEASURE_BEGIN schema=g6lc.policy-measure.v1 tb=tb_g6lc_ai_gemm_backend cycle_source=free_running_rtl_counter class=%0d nch=%0d dpf=%0d ar_max=%0d pass=%0d",
-               DRAM_CLASS, NCH, DOT_PIPE_FLOAT, GEMM_MAX_AR, pass);
+      $display("MEASURE_BEGIN schema=g6lc.policy-measure.v1 tb=tb_g6lc_ai_gemm_backend cycle_source=free_running_rtl_counter class=%0d nch=%0d dpf=%0d ar_max=%0d pass=%0d lanes=%0d",
+               DRAM_CLASS, NCH, DOT_PIPE_FLOAT, GEMM_MAX_AR, pass, GEMM_LANES);
       measure_fmt(3'd0, ONES8,      1, 1'b0);  // INT8
       measure_fmt(3'd1, INT4_1,     1, 1'b1);  // INT4 (two +1 nibbles per byte)
       measure_fmt(3'd3, FP8_E4M3_1, 1, 1'b0);  // FP8 E4M3

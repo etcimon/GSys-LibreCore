@@ -148,6 +148,25 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   -12.6, -6.2, -3.0, -2.9, -1.5, 0% versus policy-off. Live class depth 1 costs
   -8.15% with a 0% noise floor. Cross-validated per-format tuning loses -1.01%
   mean with all four folds negative.
+- [x] Corrected the mapping claim: island_top requested 1+prefetch_depth, so cap 1
+  was unreachable. Real exposure was 0% at live MaxAROut=2 and -19.1/-12.6/-6.2%
+  on MaxAROut=8 parts. The earlier -8.15% depth-1 figure is withdrawn.
+- [x] Removed the AR-cap consumer: gemm_ar_max is unconditionally MaxAROut.
+  prefetch_depth stays PMU-visible advice with nothing consuming it. Island DMA
+  regression PASS (*** SUCCESS *** 170 cycles).
+- [x] Added run-gemm-scaling.sh (PE_LANES/AR_PROVISION, defaults = shipped values).
+  Measured: AR provisioning 2/4/8 gives exactly 0% at every lane width; lanes
+  8->16 gives +52.9%, 16->32 a further +23.8% (+89.2% cumulative), all nine
+  configs golden-clean. INT8 saturates at 16 lanes because k=16 completes a
+  reduction in one cycle. PeLanes=4 is invalid (SplitArId needs lanes >= beat).
+- [ ] 300% VERDICT: not reachable by parameters. Measured ceiling at this tile
+  geometry is ~+89% and already saturating, with utilisation falling 68->52->26%
+  of peak as lanes widen. A 4x class needs three coupled changes, none a knob:
+  (1) raise MaxDim/k so wide lanes stay fed, (2) operand bandwidth past the
+  64-bit beat (wider beats or more channels) since 32 INT8 lanes want ~32 B/cycle,
+  (3) multiple output accumulators, i.e. the multi-output datapath the topology
+  model assumed. Needs a micro-architecture plan, area/power budget and a
+  steady-state fixture with k >> lanes before any number is quoted.
 - [ ] ASSESSMENT (structural, not just empirical): AR-depth steering CANNOT beat
   no steering. prefetch_depth only lowers the cap below MaxAROut (0 = fallback),
   and measured throughput increases monotonically with depth, so the optimum is

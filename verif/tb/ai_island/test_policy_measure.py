@@ -58,7 +58,7 @@ class ParsingTests(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0], {"index": 0, "tb": "tb_g6lc_ai_gemm_backend", "dram_class": 0,
                                     "channels": 1, "dot_pipe_float": False, "ar_max": 2,
-                                    "repeat": 0, "runs": 14})
+                                    "repeat": 0, "lanes": 8, "runs": 14})
         self.assertEqual(len(records), 14)
         first = records[0]
         self.assertEqual((first["block"], first["numfmt"], first["numfmt_name"], first["ar_max"]),

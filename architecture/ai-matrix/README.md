@@ -1360,6 +1360,48 @@ better** — which is the expected latency-hiding physics, not a tuning curve:
   with all four folds negative**. Five of seven formats show exactly 0% headroom;
   the two apparent small wins (`+4.35%`, `+1.37%`) sit below the noise floor.
 
+**Correction to the mapping.** `g6lc_ai_island_top` requested
+`1 + prefetch_depth`, not `prefetch_depth`, so the shallowest cap any code could
+ask for was 2 and depth 1 was never reachable. The real exposure was therefore:
+no-op at the live `MaxAROut=2` (every code clamps to 2), and on `MaxAROut=8`
+DramClass parts `-19.1%` for DECODE/ROUTED/SPARSE (cap 2), `-12.6%` for
+BULK/TALL/ATTENTION (cap 3) and `-6.2%` for WIDE/MOVEMENT (cap 4). An earlier
+`-8.15%` figure quoted a depth-1 case that cannot occur and is withdrawn.
+
+**Consumer removed.** `gemm_ar_max` is now unconditionally `IslandCfg.MaxAROut`.
+`policy.prefetch_depth` remains visible in the PMU word as advice, but nothing
+consumes it, so the AR path is identical to no policy steering. The island DMA
+regression still reports `*** SUCCESS *** ai-island DMA (170 cycles)`.
+
+**Raising a bound instead of lowering one.** A provisioning sweep
+(`run-gemm-scaling.sh`, `PE_LANES`/`AR_PROVISION`, both defaulting to the shipped
+values so an unset build is byte-identical) measures where throughput actually
+comes from. AR provisioning 2/4/8 at one channel gives **exactly 0%** at every
+lane width, confirming outstanding-AR depth is not the binding constraint here.
+Lane width is:
+
+| Lanes | INT8 cycles | MAC/cycle | Share of peak | All-7-format total |
+|--:|--:|--:|--:|--:|
+| 8 | 188 | 5.45 | 68.1% | 2036 cycles |
+| 16 | 124 | 8.26 | 51.6% | 1332 cycles (+52.9%) |
+| 32 | 124 | 8.26 | 25.8% | 1076 cycles (+89.2% cumulative) |
+
+All nine configurations keep their golden C, so these are like-for-like. INT8
+saturates at 16 lanes: with `k=16` a reduction already completes in one cycle, so
+further lanes have nothing to reduce, and only formats with more than one byte per
+element still gain at 32. `PeLanes=4` is not a valid point at all (it deadlocked
+the directed phase, since `SplitArId` depends on `PeLanes >= BytesPerBeat`).
+
+**On the 300% target: not reachable by parameter tuning, and not by lanes alone.**
+Measured headroom at this tile geometry is about `+89%`, and it is already
+saturating. A 4x class of gain needs three things together, none of which is a
+knob: `k` (and `MaxDim`, currently 16) large enough that wide lanes stay fed;
+operand bandwidth beyond the 64-bit/8-byte beat, since 32 INT8 lanes want ~32 B
+per cycle; and multiple output accumulators, which is exactly the multi-output
+datapath the topology model assumed and the RTL does not have. Widening lanes
+without the other two only lowers utilisation, which is visible above as 68% ->
+52% -> 26% of peak.
+
 **Structural conclusion: the knob cannot win.** `prefetch_depth` can only lower
 the cap below `MaxAROut` (0 falls back to `MaxAROut`), measured throughput rises
 monotonically with depth, so "do not cap" — which is exactly policy-off — is the

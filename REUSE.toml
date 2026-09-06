@@ -180,6 +180,7 @@ path = [
   "verif/tb/ai_island/test_policy_motifs.py",
   "verif/tb/ai_island/policy_measure.py",
   "verif/tb/ai_island/test_policy_measure.py",
+  "verif/tb/ai_island/run-gemm-scaling.sh",
 ]
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Etienne Cimon"

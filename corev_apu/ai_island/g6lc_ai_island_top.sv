@@ -583,9 +583,18 @@ module g6lc_ai_island_top
                                  4'(policy.tile_m_log2), 4'(policy.tile_n_log2),
                                  4'(policy.tile_k_log2), policy.sparse_check,
                                  2'(policy.prefetch_depth), 8'(policy_numfmt)};
-        gemm_ar_max <= (AiCfg.PolicyCodecEn)
-                       ? (4'd1 + {2'b0, policy.prefetch_depth})
-                       : 4'(IslandCfg.MaxAROut);
+        // policy.prefetch_depth is reported in the PMU word above but no longer
+        // caps the GEMM AR depth.  Measured on tb_g6lc_ai_gemm_backend (8x8x16,
+        // repeated passes, identical result digests at every depth): sequencer
+        // throughput rises monotonically with outstanding AR depth, so any cap
+        // below MaxAROut only loses MAC/cycle.  The old mapping requested
+        // 1+prefetch_depth, i.e. 2..4, which is a no-op at the live MaxAROut=2
+        // but costs -19.1% (depth 2), -12.6% (depth 3) and -6.2% (depth 4)
+        // against no steering on DramClass configs with MaxAROut=8.  A knob that
+        // can only lower a bound cannot beat leaving the bound alone, so the
+        // consumer is removed rather than retuned.  Reinstating it requires
+        // measured evidence that some code genuinely prefers a shallower depth.
+        gemm_ar_max <= 4'(IslandCfg.MaxAROut);
         pmu_policy_topo_hold <= {9'h0, 1'(policy_topology_value.valid),
                                  1'(policy_topology_value.apply),
                                  3'(policy_topology_value.rows_log2),

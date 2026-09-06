@@ -46,7 +46,8 @@ LIMITATIONS = (
 )
 
 BEGIN_RE = re.compile(r"^MEASURE_BEGIN schema=(\S+) tb=(\S+) cycle_source=(\S+) "
-                      r"class=(\d+) nch=(\d+) dpf=(\d+) ar_max=(\d+)(?: pass=(\d+))?$")
+                      r"class=(\d+) nch=(\d+) dpf=(\d+) ar_max=(\d+)"
+                      r"(?: pass=(\d+))?(?: lanes=(\d+))?$")
 RUN_RE = re.compile(r"^MEASURE fmt=(\d+) ar=(\d+) m=(\d+) n=(\d+) k=(\d+) macs=(\d+) cycles=(\d+) "
                     r"pmu_cycles=(\d+) r_beats=(\d+) w_beats=(\d+) c0=([0-9a-fA-F]{1,16}) c1=([0-9a-fA-F]{1,16})$")
 END_RE = re.compile(r"^MEASURE_END runs=(\d+) formats=(\d+) ar_max=(\d+)$")
@@ -97,7 +98,10 @@ def parse_log(text):
             open_block = {"index": len(blocks), "tb": tb, "dram_class": int(begin.group(4)),
                           "channels": int(begin.group(5)), "dot_pipe_float": begin.group(6) != "0",
                           "ar_max": int(begin.group(7)),
-                          "repeat": int(begin.group(8)) if begin.group(8) else 0, "runs": 0}
+                          "repeat": int(begin.group(8)) if begin.group(8) else 0,
+                          # Arithmetic peak of the block, so a lanes change is
+                          # never mistaken for an AR-depth effect.
+                          "lanes": int(begin.group(9)) if begin.group(9) else 8, "runs": 0}
             require(1 <= open_block["ar_max"] <= MAX_AR, "block ar_max must be in [1,8]" + where)
             blocks.append(open_block)
         elif run:
