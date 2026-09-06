@@ -61,7 +61,7 @@ Green commands: `python tools/g6b.py check` (independence + Bun tests/build + fm
 | **B50** Strict bounded JS AOT; Unicode/escape correctness; DOM attributes/selectors/local dirty tracking; non-destructive visibility; checked HTML and table-row painting | landed (host software; architecture limits apply) |
 | **B51** Shared spec-derived menu rows, `kernel.browser.start_menu` and JS gates; host BrowserSession/Gr/proxy execution; native read-only browser navigation/WASM imports; bounded local HTTP framing | landed (host software; architecture limits apply) |
 | **B52** Validated bounded i32 WASM control/locals/calls; fuel; RV32/RV64 numeric export lowering and differential machine-word tests | landed (host software; architecture limits apply) |
-| **B53** Guest runtime JS/DOM integration, input/GPU scanout, executable JIT installation/trampolines/cache sync | host prerequisites advanced; bounded guest `_start`→`__ui_dom`→`DomPaint` lane + `Ui` re-dump + executed-plane PPM + `VioProbe`/`VioInit`/`VioScan` virtio-gpu path **verified on real QEMU 8.2 + OpenSBI 1.5** (`fixtures/g6lc64-qemu.json`, QMP screendump shows the guest-painted band **and the 1920×1080 high-res proxy scanout** — `FbExpand` scale-blit, centered `to_ppm` geometry); uncore `display`-engine seam (`DispPaint` + `G6FB` simplefb handoff, `fixtures/g6lc64-hdmi.json`, exec-modelled) + `qemu-args` `--vnc`/`--no-gl`/`virtio-gpu-gl-device` under `proxy.gl` landed; eventq/input, WFI waits and runtime gates open |
+| **B53** Guest runtime JS/DOM integration, input/GPU scanout, executable JIT installation/trampolines/cache sync | host prerequisites advanced; bounded guest `_start`→`__ui_dom`→`DomPaint` lane + `Ui` re-dump + executed-plane PPM + `VioProbe`/`VioInit`/`VioScan` virtio-gpu path **verified on real QEMU 8.2 + OpenSBI 1.5** (`fixtures/g6lc64-qemu.json`, QMP screendump shows the guest-painted band **and the 1920×1080 high-res proxy scanout** — `FbExpand` scale-blit, centered `to_ppm` geometry); uncore `display`-engine seam (`DispPaint` + `G6FB` simplefb handoff, `fixtures/g6lc64-hdmi.json`, exec-modelled) + `qemu-args` `--vnc`/`--no-gl`/`virtio-gpu-gl-device` under `proxy.gl` landed; **virtio-input eventq (`InpInit`/`InpDrain`/`InpPoll` + `virtio-keyboard-device` argv) and WFI-driven ctrlq/eventq waits landed (exec-model verified)**; **absent-device tolerance for stock QEMU virt landed** (`trap_fault` recoverable probe windows for UART1/mbox — `g6lc64-virt.json` boots stock `virt`); runtime gates open |
 | **B54** Real persistent settings/flash backends and authenticated production TLS; remove canned mutation acknowledgements only with backend implementation | open |
 | **B55** Mutable per-run WASM memory (load/store/size/grow) + extended i32 lowering (bitwise/shifts/rotates/ordering) via `g6b-asm` | landed (host; RV32/RV64 differential machine-word tests) |
 | **B56** Bounded nonblocking JS async: `await` fetch tokens, throw/catch, cancellation, stale/duplicate rejection, per-task/tick budgets | landed (host) |
@@ -239,8 +239,48 @@ render node; this WSL host has none → `opengl is not available`), `--no-gl`
 falls back to `virtio-gpu-device` (identical guest commands), and `--vnc N`
 appends `-vnc 127.0.0.1:N` — a host frontend over the QEMU console that
 serves the BIOS scanout and a later Linux guest identically. Still open:
-eventq/input delivery, `wfi`-driven waits, `g6lc64-virt.json` under QEMU
-(custom mbox device model), host render-node availability for real virgl.
+host render-node availability for real virgl (`egl-headless,gl=on` needs
+`/dev/dri/renderD*` — `--no-gl` is the fallback), QEMU `sendkey` verification
+of the input lane.
+
+B53 follow-on 8 (2026-09) — **virtio-input eventq + WFI waits + absent-device
+tolerance.** `VIO_DEV_INPUT` (DeviceID 18) is scanned on the virtio-mmio
+slots: `InpInit` performs the virtio 1.x handshake on the probed input slot,
+sets up the *eventq* (queue 0 — 8 posted `virtio_input_event` buffers in
+`__vio+INP_*`, `VIO_BSS` → 0x600) and notifies; the exec model's
+`host_inp_kick` stands in for QEMU `sendkey` (canned `EV_KEY` KEY_A press →
+used elem → InterruptStatus → PLIC irq `1+slot`). `trap_inp` acks the device
+ISR and `jal`s `InpDrain`, which pushes each `EV_KEY` event as
+`(code<<8)|value` into the bounded 16-entry `INP_KQ` key queue (serial
+marker `INP`) and re-posts every consumed buffer so the device never runs
+dry. UART `Keys`/`K` (`CMD_KEYS`) runs `InpPoll` → `KEY <8-hex>` dump per
+queued entry. `qemu-args` emits `-device virtio-keyboard-device` under
+`BoardSpec::wants_virtio_input()` (= `wants_virtio_gpu && kernel.wasm.enable`).
+**WFI-driven waits:** `VioInit`'s used-ring wait and `VioCmd`'s completion
+wait insert `wfi` between a poll miss and the loop-back when `uncore.plic`
+armed SEIE — the iteration bound still caps wake-check cycles and the
+periodic timer keeps wakes coming, so a silent device degrades to the
+bounded timeout rather than hanging (exec model completes synchronously:
+the first check exits before `wfi`; QEMU exercises the irq-wake path).
+**Absent-device tolerance for stock QEMU virt:** unmapped MMIO loads/stores
+raise load/store access faults (scause 5/7, `stval` = fault address) in the
+exec model when `stvec` is armed, and `trap_fault` treats `stval` inside the
+UART1 or loopback-mbox probe window as device-absent — sets the
+`__uart_line` flag and resumes at `sepc+4` — so `g6lc64-virt.json` boots on
+stock `virt` (no g6lc-bios mailbox, no second ns16550) instead of parking on
+`TRAP`. `MboxInit` additionally readback-checks the doorbell write
+(`MBOX-NONE` when `G6MB` does not echo — covers QEMU's mapped-but-foreign
+`fw_cfg` at `0x10100000`, which absorbs writes without faulting). Ordering
+fix: `uart1_node`'s probe now runs before `PlicInit` arms the UART irq — a
+trap-context `uart1_drain` read on an absent UART1 would otherwise take a
+*nested* access fault and clobber `sepc`; `trap_mbox`/`uart1_drain` gate on
+the absent flags. Exec model: `is_uart1` is presence-gated, the input device
+is modelled at slot 1 (transport regs + eventq buffer latch +
+`host_inp_kick`), and `run_module_bare` is the stock-QEMU shape (no mbox /
+no UART1) — `stock_qemu_absent_devices_recover` asserts `MBOX-NONE` +
+`UART1-NONE` + `VIRTIO-GPU-OK` + `VIRTIO-INPUT-OK` + `INP` with no `TRAP-`
+and a `Wfi` halt; `vio_input_eventq_delivers_key` covers the eventq round
+trip. `48/48` exec tests, `python tools/g6b.py check` green.
 
 B50–B52 verification (2026-09-05): `python tools/g6b.py check` passed
 independence, 15 Bun tests/build, fmt, strict Clippy and 196 Rust tests;

@@ -153,6 +153,7 @@ pub fn run_module_hart(
         hartid,
         b'V',
         spec.wants_virtio_gpu(),
+        true,
     )
 }
 
@@ -180,7 +181,16 @@ pub fn run_module_kick(
             .saturating_add(module.vio_bytes)
             .saturating_add(module.vio_fb_bytes),
     );
-    run_with_kick(spec, &image, entry, memsz, 0, kick, spec.wants_virtio_gpu())
+    run_with_kick(
+        spec,
+        &image,
+        entry,
+        memsz,
+        0,
+        kick,
+        spec.wants_virtio_gpu(),
+        true,
+    )
 }
 
 /// Same as [`run_module`] but overrides whether the virtio-gpu mmio device is
@@ -203,7 +213,40 @@ pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Resul
             .saturating_add(module.vio_bytes)
             .saturating_add(module.vio_fb_bytes),
     );
-    run_with_kick(spec, &image, entry, memsz, 0, b'V', false)
+    run_with_kick(spec, &image, entry, memsz, 0, b'V', false, true)
+}
+
+/// Same as [`run_module`] but models *stock QEMU virt*: no g6lc-bios mailbox
+/// and no second ns16550 — the `MboxInit`/`uart1` probe windows must detect
+/// absence (fault-recover on unmapped MMIO) instead of parking.
+pub fn run_module_bare(spec: &BoardSpec, module: &Module, entry: u64) -> Result<Smoke, String> {
+    let (insns, rodata) = module.to_words(entry)?;
+    let mut image = Vec::with_capacity(insns.len() * 4 + rodata.len());
+    for w in insns {
+        image.extend_from_slice(&w.to_le_bytes());
+    }
+    image.extend_from_slice(&rodata);
+    let memsz = payload_memsz(
+        image.len() as u64,
+        module.n_harts(),
+        module
+            .gr_bytes
+            .saturating_add(module.line_bytes)
+            .saturating_add(module.ui_bytes)
+            .saturating_add(module.dom_bytes)
+            .saturating_add(module.vio_bytes)
+            .saturating_add(module.vio_fb_bytes),
+    );
+    run_with_kick(
+        spec,
+        &image,
+        entry,
+        memsz,
+        0,
+        b'V',
+        spec.wants_virtio_gpu(),
+        false,
+    )
 }
 
 pub fn run(
@@ -221,6 +264,7 @@ pub fn run(
         hartid,
         b'V',
         spec.wants_virtio_gpu(),
+        true,
     )
 }
 
@@ -233,6 +277,7 @@ fn run_with_kick(
     hartid: u64,
     kick: u8,
     vio_gpu: bool,
+    extras: bool,
 ) -> Result<Smoke, String> {
     let xlen = spec.isa.xlen;
     if xlen != 32 && xlen != 64 {
@@ -252,7 +297,7 @@ fn run_with_kick(
     x[11] = if hartid == 0 { 0x8fe0_0000 } else { 0 };
     let mut pc = entry;
     let mut csr = Csr {
-        mbox_base: if spec.loopback.enable {
+        mbox_base: if extras && spec.loopback.enable {
             hex_u64(&spec.loopback.base)
         } else {
             0
@@ -260,9 +305,10 @@ fn run_with_kick(
         mbox_irq: spec.loopback.irq,
         mbox_cmd: vec![0; 256],
         mbox_rsp: vec![0; 256],
-        uart1_repl: spec.holyc.dual_band.tcp.enable,
+        uart1_repl: extras && spec.holyc.dual_band.tcp.enable,
         uart1_base: crate::analyze::uart1_base(spec),
         vio_gpu,
+        vio_inp: vio_gpu && spec.wants_virtio_input(),
         vio_disp_w: if spec.kernel.gr.enable {
             spec.kernel.gr.w.max(8)
         } else {
@@ -404,6 +450,11 @@ fn run_with_kick(
                 if host_uart_kick(&mut csr) && take_pending_sei(xlen, &mut pc, &mut csr) {
                     continue;
                 }
+                if host_inp_kick(&mut csr, &mut ram, entry)
+                    && take_pending_sei(xlen, &mut pc, &mut csr)
+                {
+                    continue;
+                }
                 return Ok(done(console, steps, h, &csr, &ram, entry));
             }
         }
@@ -500,6 +551,7 @@ struct Csr {
     sstatus: u64,
     scause: u64,
     sepc: u64,
+    stval: u64,
     time: u64,
     timecmp: u64,
     time_ecalls: u32,
@@ -566,6 +618,28 @@ struct Csr {
     vio_last_cmd: u32,
     /// Last response `type` word written into a device-write desc.
     vio_last_resp: u32,
+    /// Modelled virtio-input keyboard at slot 1 (`-device
+    /// virtio-keyboard-device`; QEMU virt PLIC irq = 1+slot → 2).
+    vio_inp: bool,
+    inp_status: u32,
+    inp_feat_sel: u32,
+    inp_drv_sel: u32,
+    inp_qsel: u32,
+    inp_qnum: u32,
+    inp_qdesc: u64,
+    inp_qavail: u64,
+    inp_qused: u64,
+    inp_ready: bool,
+    inp_isr: u32,
+    /// Used-ring publish index for the input eventq (queue 0).
+    inp_used_idx: u16,
+    /// Avail-ring entries the device has consumed (eventq buffer posts).
+    inp_avail_seen: u16,
+    /// Eventq buffers the driver posted and the device holds — each element
+    /// is a desc head id waiting for an input event.
+    inp_bufs: Vec<u16>,
+    /// Host event injection latch (one canned EV_KEY per run).
+    inp_poked: bool,
     /// Modelled pmode geometry (BoardSpec `kernel.gr.w/h`).
     vio_disp_w: u32,
     vio_disp_h: u32,
@@ -709,7 +783,16 @@ fn step(
             };
             match v {
                 Some(v) => wr(xlen, x, rd, v),
-                None => return Step::Halt(Halt::Unimp(w)),
+                None => {
+                    if csr.stvec != 0 {
+                        // Unmapped MMIO load → load access fault (5): the
+                        // trap window marks probe reads device-absent.
+                        take_mmio_fault(*pc, 5, addr, csr);
+                        *pc = csr.stvec;
+                        return Step::Cont;
+                    }
+                    return Step::Halt(Halt::Unimp(w));
+                }
             }
             *pc = npc;
         }
@@ -750,6 +833,11 @@ fn step(
                 _ => return Step::Halt(Halt::Unimp(w)),
             };
             if !ok {
+                if csr.stvec != 0 {
+                    take_mmio_fault(*pc, 7, addr, csr);
+                    *pc = csr.stvec;
+                    return Step::Cont;
+                }
                 return Step::Halt(Halt::Unimp(w));
             }
             if is_gr(csr, addr) {
@@ -1044,9 +1132,14 @@ fn is_vio_mmio(addr: u64) -> bool {
 }
 
 fn vio_load(csr: &Csr, addr: u64) -> u32 {
-    use crate::encode::{VIO_DEV_GPU, VIO_F_VERSION_1, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_STEP};
+    use crate::encode::{
+        VIO_DEV_GPU, VIO_DEV_INPUT, VIO_F_VERSION_1, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_STEP,
+    };
     let off = addr - VIO_MMIO_BASE;
     let slot = off / VIO_MMIO_STEP;
+    if slot == 1 && csr.vio_inp {
+        return inp_load(csr, off % VIO_MMIO_STEP, VIO_DEV_INPUT);
+    }
     if slot != 0 || !csr.vio_gpu {
         return 0;
     }
@@ -1079,6 +1172,10 @@ fn vio_store(csr: &mut Csr, ram: &mut [u8], base: u64, addr: u64, v: u32) {
     use crate::encode::{VIO_MMIO_BASE, VIO_MMIO_STEP};
     let off = addr - VIO_MMIO_BASE;
     let slot = off / VIO_MMIO_STEP;
+    if slot == 1 && csr.vio_inp {
+        inp_store(csr, ram, base, off % VIO_MMIO_STEP, v);
+        return;
+    }
     if slot != 0 || !csr.vio_gpu {
         return;
     }
@@ -1144,6 +1241,109 @@ fn vio_notify(csr: &mut Csr, ram: &mut [u8], base: u64) {
         // PlicInit enabled the 1..=8 range).
         csr.plic_pending |= 1 << 1;
     }
+}
+
+/// virtio-input register reads (transport regs only — DeviceID 18, no
+/// device-cfg window modelled: `EV_KEY` events are device-initiated).
+fn inp_load(csr: &Csr, reg: u64, dev_id: u32) -> u32 {
+    use crate::encode::{VIO_F_VERSION_1, VIO_MAGIC};
+    match reg {
+        0x00 => VIO_MAGIC,
+        0x04 => 2,
+        0x08 => dev_id,
+        0x10 => {
+            if csr.inp_feat_sel == 1 {
+                VIO_F_VERSION_1
+            } else {
+                0
+            }
+        }
+        0x14 => csr.inp_feat_sel,
+        0x24 => csr.inp_drv_sel,
+        0x30 => csr.inp_qsel,
+        0x34 => 8, // eventq QueueNumMax (driver posts 8 event buffers)
+        0x38 => csr.inp_qnum,
+        0x44 => u32::from(csr.inp_ready),
+        0x60 => csr.inp_isr,
+        0x70 => csr.inp_status,
+        _ => 0,
+    }
+}
+
+/// virtio-input register writes — `QUEUE_NOTIFY` on the eventq records the
+/// newly-posted event buffers in `inp_bufs` (the device holds them until a
+/// key event arrives, exactly like QEMU's virtio-input backend).
+fn inp_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
+    match reg {
+        0x14 => csr.inp_feat_sel = v,
+        0x24 => csr.inp_drv_sel = v,
+        0x30 => csr.inp_qsel = v,
+        0x38 => csr.inp_qnum = v,
+        0x44 => csr.inp_ready = v != 0,
+        0x50 => {
+            if csr.inp_ready && csr.inp_qsel == 0 && csr.inp_qdesc != 0 {
+                let avail = csr.inp_qavail;
+                let idx = load_u32(ram, base, avail)
+                    .map(|w| (w >> 16) as u16)
+                    .unwrap_or(0);
+                let mut n = idx.wrapping_sub(csr.inp_avail_seen).min(8);
+                while n > 0 {
+                    n -= 1;
+                    let ri = csr.inp_avail_seen % 8;
+                    let word = load_u32(ram, base, avail + 4 + u64::from(ri & !1) * 2).unwrap_or(0);
+                    let head = ((word >> ((ri & 1) * 16)) & 0xffff) as u16;
+                    csr.inp_bufs.push(head);
+                    csr.inp_avail_seen = csr.inp_avail_seen.wrapping_add(1);
+                }
+            }
+        }
+        0x64 => csr.inp_isr &= !v,
+        0x70 => {
+            csr.inp_status = v;
+            if v == 0 {
+                csr.inp_qnum = 0;
+                csr.inp_ready = false;
+                csr.inp_isr = 0;
+                csr.inp_used_idx = 0;
+                csr.inp_avail_seen = 0;
+                csr.inp_bufs.clear();
+                csr.inp_poked = false;
+            }
+        }
+        0x80 => csr.inp_qdesc = (csr.inp_qdesc & !0xffff_ffff) | u64::from(v),
+        0x84 => csr.inp_qdesc = (csr.inp_qdesc & 0xffff_ffff) | (u64::from(v) << 32),
+        0x90 => csr.inp_qavail = (csr.inp_qavail & !0xffff_ffff) | u64::from(v),
+        0x94 => csr.inp_qavail = (csr.inp_qavail & 0xffff_ffff) | (u64::from(v) << 32),
+        0xa0 => csr.inp_qused = (csr.inp_qused & !0xffff_ffff) | u64::from(v),
+        0xa4 => csr.inp_qused = (csr.inp_qused & 0xffff_ffff) | (u64::from(v) << 32),
+        _ => {}
+    }
+}
+
+/// Inject one canned `EV_KEY` (KEY_A, press) into the next posted eventq
+/// buffer — models QEMU `sendkey a` at idle. Fills the desc buffer, publishes
+/// the used elem and raises PLIC irq 1+slot(=2) for the virtio-mmio slot.
+fn host_inp_kick(csr: &mut Csr, ram: &mut [u8], base: u64) -> bool {
+    if !csr.vio_inp || csr.inp_poked || !csr.inp_ready || csr.inp_qused == 0 {
+        return false;
+    }
+    let Some(head) = csr.inp_bufs.pop() else {
+        return false;
+    };
+    csr.inp_poked = true;
+    // virtio_input_event {u16 type=EV_KEY, u16 code=30 (KEY_A), u32 value=1}.
+    let daddr = load_u64(ram, base, csr.inp_qdesc.wrapping_add(u64::from(head) * 16)).unwrap_or(0);
+    let _ = store_u32(ram, base, daddr, 1 | (30 << 16));
+    let _ = store_u32(ram, base, daddr + 4, 1);
+    let used = csr.inp_qused;
+    let ui = csr.inp_used_idx % 8;
+    let _ = store_u32(ram, base, used + 4 + u64::from(ui) * 8, u32::from(head));
+    let _ = store_u32(ram, base, used + 8 + u64::from(ui) * 8, 8);
+    csr.inp_used_idx = csr.inp_used_idx.wrapping_add(1);
+    let _ = store_u32(ram, base, used, u32::from(csr.inp_used_idx) << 16);
+    csr.inp_isr |= 1;
+    csr.plic_pending |= 1 << 2;
+    true
 }
 
 /// Walk one descriptor chain (≤8): OUT descriptors carry `ctrl_hdr.type`, the
@@ -1345,6 +1545,13 @@ fn take_sync_trap(pc: u64, code: u64, csr: &mut Csr) {
     csr.faults = csr.faults.saturating_add(1);
 }
 
+/// Synchronous MMIO access fault — `stval` carries the faulting address so
+/// the guest probe window (`trap_fault`) can classify it as device-absent.
+fn take_mmio_fault(pc: u64, code: u64, addr: u64, csr: &mut Csr) {
+    csr.stval = addr;
+    take_sync_trap(pc, code, csr);
+}
+
 fn sret(csr: &mut Csr, pc: &mut u64) {
     let spie = (csr.sstatus >> 5) & 1;
     csr.sstatus = (csr.sstatus & !SSTATUS_SIE as u64) | (spie << 1);
@@ -1406,6 +1613,7 @@ fn csr_read(c: &Csr, n: u32) -> u64 {
         CSR_SSTATUS => c.sstatus,
         CSR_SCAUSE => c.scause,
         CSR_SEPC => c.sepc,
+        crate::encode::CSR_STVAL => c.stval,
         CSR_TIME => c.time,
         _ => 0,
     }
@@ -1419,6 +1627,7 @@ fn csr_write(c: &mut Csr, n: u32, v: u64) {
         CSR_SSTATUS => c.sstatus = v,
         CSR_SCAUSE => c.scause = v,
         CSR_SEPC => c.sepc = v,
+        crate::encode::CSR_STVAL => c.stval = v,
         CSR_TIME => c.time = v,
         _ => {}
     }
@@ -1485,7 +1694,7 @@ fn is_uart0(addr: u64) -> bool {
 }
 
 fn is_uart1(csr: &Csr, addr: u64) -> bool {
-    (csr.uart1_base..csr.uart1_base + 0x100).contains(&addr)
+    csr.uart1_repl && (csr.uart1_base..csr.uart1_base + 0x100).contains(&addr)
 }
 
 fn uart_dev(csr: &mut Csr, addr: u64) -> &mut Uart16550 {
@@ -2531,6 +2740,51 @@ mod tests {
         assert!(!s.console.contains("VIRTIO-GPU-OK"), "{}", s.console);
         assert_eq!(s.vio_status, 0);
         assert_eq!(s.vio_last_cmd, 0);
+    }
+
+    #[test]
+    fn vio_input_eventq_delivers_key() {
+        // virtio-keyboard on slot 1: InpInit posts 8 eventq buffers, the host
+        // kick (QEMU `sendkey` stand-in) fills one with EV_KEY KEY_A, raises
+        // PLIC irq 2 → trap_inp → InpDrain pushes the key queue + INP marker.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},"kernel":{"gr":{"enable":true,"backend":"virtio-gpu"},"wasm":{"enable":true}},"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        assert!(spec.wants_virtio_input());
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("VIRTIO-INPUT-OK"), "{}", s.console);
+        assert!(!s.console.contains("VIRTIO-INPUT-FAIL"), "{}", s.console);
+        // The drained EV_KEY event marker.
+        assert!(s.console.contains("INP\n"), "{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(matches!(s.halt, Halt::Wfi), "{:?}", s.halt);
+    }
+
+    #[test]
+    fn stock_qemu_absent_devices_recover() {
+        // Stock QEMU virt has no g6lc-bios mailbox and no second ns16550 —
+        // the declared windows are unmapped → access fault → trap_fault marks
+        // them absent and resumes at sepc+4 instead of parking on TRAP.
+        // virtio-gpu/virtio-input are QEMU-attached and still work.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},"loopback":{"enable":true},"kernel":{"gr":{"enable":true,"backend":"virtio-gpu"},"wasm":{"enable":true}},"holyc":{"dual_band":{"tcp":{"enable":true}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let s = run_module_bare(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("MBOX-NONE"), "{}", s.console);
+        assert!(s.console.contains("UART1-NONE"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-GPU-OK"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-INPUT-OK"), "{}", s.console);
+        assert!(s.console.contains("INP\n"), "{}", s.console);
+        assert!(
+            !s.console.contains("TRAP-"),
+            "probe faults must recover, not park: {}",
+            s.console
+        );
+        assert!(matches!(s.halt, Halt::Wfi), "{:?}", s.halt);
     }
 
     #[test]

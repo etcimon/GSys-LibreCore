@@ -54,8 +54,18 @@ rewrite). S-mode PLIC (QEMU virt `0x0c000000` ctx1) writes a nonzero priority to
 enabled source (QEMU resets them to 0), enables UART/virtio-mmio/mbox, and
 claims/completes SEI — the virtio-mmio source resolves to `irq = 1 + slot`
 from `__vio+VIO_DEV_OFF` → `trap_vio` (ISR read + ACK + `__vio` counter;
-QEMU-verified: `irqf == 8` after boot). Hart 0 `HartStart` uses SBI HSM+IPI for extra harts; SSI
-(irq 1) wakes `wfi`. `MboxInit` writes `G6MB` + irq_en at `loopback.base`
+QEMU-verified: `irqf == 8` after boot), and the virtio-input slot (DeviceID
+18, `virtio-keyboard-device` when `wants_virtio_input()`) resolves the same
+way → `trap_inp` → `InpDrain` pushes `EV_KEY` codes into the bounded
+`INP_KQ` queue (UART `Keys`/`K` dumps them). `VioInit`/`VioCmd` completion
+waits are `wfi`-driven (irq wake + bounded timeout), not pure spins. Hart 0
+`HartStart` uses SBI HSM+IPI for extra harts; SSI
+(irq 1) wakes `wfi`. Absent-device tolerance: `trap_fault` recovers MMIO
+access faults (scause 5/7) whose `stval` sits in the UART1 or mailbox probe
+window — absent flags + `sepc+4` resume — so `g6lc64-virt.json` boots on
+stock QEMU virt (no g6lc-bios mailbox / second ns16550) instead of parking;
+`MboxInit` readback-checks the doorbell (`MBOX-NONE` when `G6MB` doesn't
+echo, covering QEMU's mapped-but-foreign `fw_cfg`). `MboxInit` writes `G6MB` + irq_en at `loopback.base`
 (default `0x10100000`); trap irq 3 services doorbell kicks (`View` → ST_RSP,
 `Reboot`/`Shutdown` → SBI SRST). UART RX is PLIC irq 10 — QEMU virt's
 ns16550 line, per the machine DTB (`trap_uart` drains
@@ -201,12 +211,14 @@ remain the sole authority; OpenSBI remains M-mode and BIOS stays S-mode.
   allocation/GC semantics for exercised paths, full component lifetime/reactivity
   and a verified Asyncify or native continuation transform. Binaryen requests
   currently fail explicitly; numeric JIT code cannot suspend/unwind yet.
-- Required before QEMU display: compile/install the guest runtime, connect IRQ
-  input and transport completion to normal-context polls, and capture real
-  QEMU scanout of guest-mutated pixels. The virtio-gpu command sequence is
-  exercised host-side (`VioScan` + exec model, `smoke --out-vio`); QEMU has
-  not yet presented a window, so never substitute the modeled surface, a
-  static boot pattern, or a host-browser screenshot for that evidence.
+- Required before QEMU display: compile/install the guest runtime, wire the
+  `INP_KQ` key queue into the DOM input consumers (the virtio-input eventq →
+  `InpDrain` → bounded queue lane is landed; QEMU `sendkey` verification is
+  pending a QEMU host run), and capture real QEMU scanout of guest-mutated
+  pixels. The virtio-gpu command sequence is exercised host-side (`VioScan` +
+  exec model, `smoke --out-vio`); QEMU has not yet presented a window, so
+  never substitute the modeled surface, a static boot pattern, or a
+  host-browser screenshot for that evidence.
 - Reproducibility follow-up: the verified `runtime-v1.43.0` carry is now
   vendored under `browser-ui/libwasm/` and tracked; compiler
   provenance/preflight detects drift but does not provision a missing runtime.

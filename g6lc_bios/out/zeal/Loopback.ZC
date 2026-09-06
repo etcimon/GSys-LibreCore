@@ -1,1 +1,6 @@
-// loopback disabled
+// Generated Loopback.ZC — mbox 0x10100000 irq 3 → /dev/g6lc-bios
+// not a netdev; Linux binds after NET-DELEGATE
+U0 LoopbackInit()
+{
+	Print("LOOPBACK-MBOX\n");
+}

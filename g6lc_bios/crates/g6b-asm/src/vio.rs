@@ -16,17 +16,18 @@
 #![allow(missing_docs)]
 
 use crate::analyze::{g6b_spec_proxy, Object};
-use crate::encode::{A0, A1, A2, A7, RA, SP, T0, T1, T2, T3, T4, T5, T6, X0};
+use crate::encode::{A0, A1, A2, A6, A7, RA, SP, T0, T1, T2, T3, T4, T5, T6, X0};
 use crate::encode::{
-    SBI_PUTCHAR, VIO_DESC_NEXT, VIO_DESC_WRITE, VIO_DEV_GPU, VIO_F_VERSION_1, VIO_GPU_FMT_B8G8R8X8,
-    VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING, VIO_GPU_RESOURCE_CREATE_2D,
-    VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_OK_DISPLAY_INFO, VIO_GPU_RESP_OK_NODATA,
-    VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_TO_HOST_2D, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS,
-    VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_DRV_FEATURES, VIO_REG_DRV_FEATURES_SEL, VIO_REG_FEATURES,
-    VIO_REG_FEATURES_SEL, VIO_REG_ISR_ACK, VIO_REG_ISR_STATUS, VIO_REG_QUEUE_AVAIL,
-    VIO_REG_QUEUE_DESC, VIO_REG_QUEUE_NOTIFY, VIO_REG_QUEUE_NUM, VIO_REG_QUEUE_NUM_MAX,
-    VIO_REG_QUEUE_READY, VIO_REG_QUEUE_SEL, VIO_REG_QUEUE_USED, VIO_REG_STATUS, VIO_ST_ACK,
-    VIO_ST_DRIVER, VIO_ST_DRIVER_OK, VIO_ST_FEATURES_OK,
+    SBI_PUTCHAR, VIO_DESC_NEXT, VIO_DESC_WRITE, VIO_DEV_GPU, VIO_DEV_INPUT, VIO_F_VERSION_1,
+    VIO_GPU_FMT_B8G8R8X8, VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING,
+    VIO_GPU_RESOURCE_CREATE_2D, VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_OK_DISPLAY_INFO,
+    VIO_GPU_RESP_OK_NODATA, VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_EV_KEY,
+    VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_DRV_FEATURES,
+    VIO_REG_DRV_FEATURES_SEL, VIO_REG_FEATURES, VIO_REG_FEATURES_SEL, VIO_REG_ISR_ACK,
+    VIO_REG_ISR_STATUS, VIO_REG_QUEUE_AVAIL, VIO_REG_QUEUE_DESC, VIO_REG_QUEUE_NOTIFY,
+    VIO_REG_QUEUE_NUM, VIO_REG_QUEUE_NUM_MAX, VIO_REG_QUEUE_READY, VIO_REG_QUEUE_SEL,
+    VIO_REG_QUEUE_USED, VIO_REG_STATUS, VIO_ST_ACK, VIO_ST_DRIVER, VIO_ST_DRIVER_OK,
+    VIO_ST_FEATURES_OK,
 };
 use crate::{Addr, Node, Op, Purpose};
 use g6b_spec::BoardSpec;
@@ -34,9 +35,13 @@ use g6b_spec::BoardSpec;
 /// `__vio` BSS: descriptor table (8×16B) @0, avail ring @0x80 (32B — 4+2*8+2
 /// = 22B used), used ring @0xC0 (80B — 4+8*8+4 = 72B used), request area
 /// @0x120 (96B — largest ctrlq req is 56B), response buffer @0x180 (512B),
-/// device-base scratch @0x3f0, irq counter @0x3f4, `G6FB` scanout
-/// descriptor @0x400 (28B — the `simple-framebuffer`-shaped handoff).
-pub const VIO_BSS: u64 = 0x420;
+/// device-base scratch @0x3f0, irq counter @0x3f4, input-device scratch
+/// @0x3f8, `G6FB` scanout descriptor @0x400 (28B — the
+/// `simple-framebuffer`-shaped handoff), then the virtio-input eventq block:
+/// desc table @0x440 (8×16B), avail @0x4c0, used @0x4e0 (72B used), event
+/// buffers @0x530 (8×8B `virtio_input_event`), used-idx shadow @0x570,
+/// key-queue head/tail @0x574/0x578, key codes @0x580 (16×4B).
+pub const VIO_BSS: u64 = 0x600;
 pub const VIO_AVAIL_OFF: i32 = 0x80;
 pub const VIO_USED_OFF: i32 = 0xc0;
 pub const VIO_REQ_OFF: i32 = 0x120;
@@ -60,6 +65,22 @@ pub const VIO_IRQF_OFF: i32 = 0x3f4;
 /// `simple-framebuffer`/`simpledrm` node inherits, so the same surface
 /// serves the BIOS scanout and the OS.
 pub const DISP_DESC_OFF: i32 = 0x400;
+/// Scratch u32 holding the probed virtio-input (DeviceID 18) mmio base.
+pub const VIO_INP_OFF: i32 = 0x3f8;
+/// Input eventq descriptor table (8 descs — one per posted event buffer).
+pub const INP_DESC_OFF: i32 = 0x440;
+pub const INP_AVAIL_OFF: i32 = 0x4c0;
+pub const INP_USED_OFF: i32 = 0x4e0;
+/// 8 `virtio_input_event` buffers (8B each: u16 type, u16 code, u32 value).
+pub const INP_EVBUF_OFF: i32 = 0x530;
+/// Shadow of the last-consumed eventq used idx (`InpDrain` walks forward).
+pub const INP_LAST_USED: i32 = 0x570;
+/// Bounded key queue: head (producer), tail (consumer) u16s.
+pub const INP_KQ_HEAD: i32 = 0x574;
+pub const INP_KQ_TAIL: i32 = 0x578;
+/// 16 u32 entries `(code << 8) | value` — consumed by the `Keys` UART
+/// command / the DOM input lane.
+pub const INP_KQ_OFF: i32 = 0x580;
 /// Uncore display-engine presence magic (`architecture/uncore/hdmi-display.md`).
 pub const DISP_MAGIC: u32 = u32::from_le_bytes(*b"G6DS");
 /// `G6FB` descriptor magic.
@@ -109,10 +130,11 @@ fn lw(rd: u32, rs: u32, off: i32) -> Op {
 
 /// `VioInit` — rescan slots → reset → status handshake → `VIRTIO_F_VERSION_1`
 /// negotiation → ctrlq rings in `__vio` → `GET_DISPLAY_INFO` descriptor chain
-/// → bounded used-ring poll → `VIRTIO-INFO`. Fail-closed: any mismatch or
-/// timeout prints `VIRTIO-GPU-FAIL`; an absent device returns silently
-/// (`VioProbe` already printed `VIRTIO-GPU-NONE`).
-pub fn init_node(o: Object) -> Node {
+/// → used-ring wait → `VIRTIO-INFO`. Fail-closed: any mismatch or timeout
+/// prints `VIRTIO-GPU-FAIL`; an absent device returns silently (`VioProbe`
+/// already printed `VIRTIO-GPU-NONE`). The used wait is WFI-driven when
+/// `uncore.plic` armed SEIE (`PlicInit` runs earlier in the boot flow).
+pub fn init_node(o: Object, spec: &BoardSpec) -> Node {
     let mut ops = vec![
         Op::Comment(format!(
             "{} — scan → reset → features → ctrlq → GET_DISPLAY_INFO",
@@ -367,14 +389,19 @@ pub fn init_node(o: Object) -> Node {
             rs: T4,
             imm: -1,
         },
-        Op::Bne {
+        Op::Beq {
             rs1: T4,
             rs2: X0,
-            to: "vi2_poll".into(),
+            to: "vi2_fail".into(),
         },
+    ]);
+    if spec.uncore.plic {
+        ops.push(Op::Wfi);
+    }
+    ops.extend([
         Op::Jal {
             rd: X0,
-            to: "vi2_fail".into(),
+            to: "vi2_poll".into(),
         },
         Op::Label("vi2_got".into()),
         lw(T2, T5, VIO_RSP_OFF),
@@ -481,157 +508,809 @@ fn submit_nodata(ops: &mut Vec<Op>, req_len: i64, fail: &str) {
 /// `VioCmd` — leaf ctrlq submitter. In: a0 = request bytes, a1 = response
 /// bytes; the caller pre-builds the request at `__vio+VIO_REQ_OFF` and the
 /// device base lives at `__vio+VIO_DEV_OFF`. Out: a0 = response `type` word
-/// (0 on timeout / unprobed device). Clobbers t0..t6, a0.
-pub fn cmd_node() -> Node {
+/// (0 on timeout / unprobed device). Clobbers t0..t6, a0. When
+/// `uncore.plic` is live the completion wait is WFI-driven: each poll miss
+/// sleeps until the virtio used-buffer irq (or any other enabled source —
+/// the loop bound still bounds wake-check cycles, and the periodic timer
+/// keeps wakes coming so a silent device degrades to a bounded timeout).
+pub fn cmd_node(spec: &BoardSpec) -> Node {
+    let wfi = spec.uncore.plic;
+    let mut ops = vec![
+        Op::Comment(
+            "VioCmd — submit one ctrlq chain (desc0=req OUT, desc1=resp WRITE); \
+                 bounded used.idx poll; ring fields are u16 packed into sw words"
+                .into(),
+        ),
+        Op::Glob("VioCmd".into()),
+        Op::Label("VioCmd".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T6, T5, VIO_DEV_OFF),
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: "vqc_ret0".into(),
+        },
+        // desc0 = {req, a0, NEXT, next=1}
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: VIO_REQ_OFF,
+        },
+        sw(T2, T5, 0),
+        sw(X0, T5, 4),
+        sw(A0, T5, 8),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_DESC_NEXT | (1 << 16)),
+        },
+        sw(T3, T5, 12),
+        // desc1 = {resp, a1, WRITE}
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: VIO_RSP_OFF,
+        },
+        sw(T2, T5, 16),
+        sw(X0, T5, 20),
+        sw(A1, T5, 24),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_DESC_WRITE),
+        },
+        sw(T3, T5, 28),
+        // avail.ring[idx % 8] = head 0 — two byte stores (u16 slot)
+        lw(T2, T5, VIO_AVAIL_OFF),
+        Op::Srli {
+            rd: T1,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Andi {
+            rd: T4,
+            rs: T1,
+            imm: 7,
+        },
+        Op::Slli {
+            rd: T4,
+            rs: T4,
+            shamt: 1,
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: VIO_AVAIL_OFF + 4,
+        },
+        Op::Add {
+            rd: T4,
+            rs1: T4,
+            rs2: T5,
+        },
+        Op::Sb {
+            rs2: X0,
+            rs1: T4,
+            off: 0,
+        },
+        Op::Sb {
+            rs2: X0,
+            rs1: T4,
+            off: 1,
+        },
+        Op::Fence,
+        // avail word = (idx + 1) << 16; flags stay 0 (we never set
+        // VIRTQ_AVAIL_F_NO_INTERRUPT) — do NOT try to preserve the low
+        // half: slli/srli by 16 on rv64 masks 48 bits, not 16.
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: 1,
+        },
+        Op::Slli {
+            rd: T3,
+            rs: T1,
+            shamt: 16,
+        },
+        sw(T3, T5, VIO_AVAIL_OFF),
+        Op::Fence,
+        sw(X0, T6, VIO_REG_QUEUE_NOTIFY),
+        // poll used.idx == the avail idx we just published
+        Op::Li {
+            rd: T4,
+            imm: VIO_POLL_MAX,
+        },
+        Op::Label("vqc_poll".into()),
+        lw(T2, T5, VIO_USED_OFF),
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: T1,
+            to: "vqc_done".into(),
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Beq {
+            rs1: T4,
+            rs2: X0,
+            to: "vqc_ret0".into(),
+        },
+    ];
+    if wfi {
+        // Sleep until the virtio used-buffer irq (or any enabled source)
+        // instead of burning the poll budget — the loop bound still caps
+        // wake-check cycles and the periodic timer guarantees wakes.
+        ops.push(Op::Wfi);
+    }
+    ops.extend([
+        Op::Jal {
+            rd: X0,
+            to: "vqc_poll".into(),
+        },
+        Op::Label("vqc_ret0".into()),
+        Op::Li {
+            rd: A0,
+            imm: i64::from(b'X'),
+        },
+        Op::Li {
+            rd: A7,
+            imm: SBI_PUTCHAR,
+        },
+        Op::Ecall,
+        Op::Li { rd: A0, imm: 0 },
+        ret(),
+        Op::Label("vqc_done".into()),
+        // Read InterruptStatus and write it back to InterruptACK — the
+        // device raised a used-buffer irq for this completion.
+        lw(T3, T6, VIO_REG_ISR_STATUS),
+        sw(T3, T6, VIO_REG_ISR_ACK),
+        lw(A0, T5, VIO_RSP_OFF),
+        ret(),
+    ]);
     Node {
         purpose: Purpose::Virtio,
-        ops: vec![
-            Op::Comment(
-                "VioCmd — submit one ctrlq chain (desc0=req OUT, desc1=resp WRITE); \
-                 bounded used.idx poll; ring fields are u16 packed into sw words"
-                    .into(),
-            ),
-            Op::Glob("VioCmd".into()),
-            Op::Label("VioCmd".into()),
-            Op::La {
-                rd: T5,
-                addr: Addr::VioBss,
-            },
-            lw(T6, T5, VIO_DEV_OFF),
-            Op::Beq {
-                rs1: T6,
-                rs2: X0,
-                to: "vqc_ret0".into(),
-            },
-            // desc0 = {req, a0, NEXT, next=1}
-            Op::Addi {
-                rd: T2,
-                rs: T5,
-                imm: VIO_REQ_OFF,
-            },
-            sw(T2, T5, 0),
-            sw(X0, T5, 4),
-            sw(A0, T5, 8),
-            Op::Li {
-                rd: T3,
-                imm: i64::from(VIO_DESC_NEXT | (1 << 16)),
-            },
-            sw(T3, T5, 12),
-            // desc1 = {resp, a1, WRITE}
-            Op::Addi {
-                rd: T2,
-                rs: T5,
-                imm: VIO_RSP_OFF,
-            },
-            sw(T2, T5, 16),
-            sw(X0, T5, 20),
-            sw(A1, T5, 24),
-            Op::Li {
-                rd: T3,
-                imm: i64::from(VIO_DESC_WRITE),
-            },
-            sw(T3, T5, 28),
-            // avail.ring[idx % 8] = head 0 — two byte stores (u16 slot)
-            lw(T2, T5, VIO_AVAIL_OFF),
-            Op::Srli {
-                rd: T1,
-                rs: T2,
-                shamt: 16,
-            },
-            Op::Andi {
-                rd: T4,
-                rs: T1,
-                imm: 7,
-            },
-            Op::Slli {
-                rd: T4,
-                rs: T4,
-                shamt: 1,
-            },
-            Op::Addi {
-                rd: T4,
-                rs: T4,
-                imm: VIO_AVAIL_OFF + 4,
-            },
-            Op::Add {
-                rd: T4,
-                rs1: T4,
-                rs2: T5,
-            },
-            Op::Sb {
-                rs2: X0,
-                rs1: T4,
-                off: 0,
-            },
-            Op::Sb {
-                rs2: X0,
-                rs1: T4,
-                off: 1,
-            },
-            Op::Fence,
-            // avail word = (idx + 1) << 16; flags stay 0 (we never set
-            // VIRTQ_AVAIL_F_NO_INTERRUPT) — do NOT try to preserve the low
-            // half: slli/srli by 16 on rv64 masks 48 bits, not 16.
-            Op::Addi {
-                rd: T1,
-                rs: T1,
-                imm: 1,
-            },
-            Op::Slli {
-                rd: T3,
-                rs: T1,
-                shamt: 16,
-            },
-            sw(T3, T5, VIO_AVAIL_OFF),
-            Op::Fence,
-            sw(X0, T6, VIO_REG_QUEUE_NOTIFY),
-            // poll used.idx == the avail idx we just published
-            Op::Li {
-                rd: T4,
-                imm: VIO_POLL_MAX,
-            },
-            Op::Label("vqc_poll".into()),
-            lw(T2, T5, VIO_USED_OFF),
-            Op::Srli {
-                rd: T2,
-                rs: T2,
-                shamt: 16,
-            },
-            Op::Beq {
-                rs1: T2,
-                rs2: T1,
-                to: "vqc_done".into(),
-            },
-            Op::Addi {
-                rd: T4,
-                rs: T4,
-                imm: -1,
-            },
-            Op::Bne {
-                rs1: T4,
-                rs2: X0,
-                to: "vqc_poll".into(),
-            },
-            Op::Label("vqc_ret0".into()),
-            Op::Li {
-                rd: A0,
-                imm: i64::from(b'X'),
-            },
-            Op::Li {
-                rd: A7,
-                imm: SBI_PUTCHAR,
-            },
-            Op::Ecall,
-            Op::Li { rd: A0, imm: 0 },
-            ret(),
-            Op::Label("vqc_done".into()),
-            // Read InterruptStatus and write it back to InterruptACK — the
-            // device raised a used-buffer irq for this completion.
-            lw(T3, T6, VIO_REG_ISR_STATUS),
-            sw(T3, T6, VIO_REG_ISR_ACK),
-            lw(A0, T5, VIO_RSP_OFF),
-            ret(),
-        ],
+        ops,
+    }
+}
+
+/// `InpInit` — virtio-input (DeviceID 18) eventq bring-up. `VioProbe` stores
+/// the input device base at `__vio+VIO_INP_OFF` (0 → silent return). Performs
+/// the same virtio 1.x status handshake as `VioInit` on the input slot, then
+/// sets up the *eventq* (queue 0 — virtio-input's event ring is queue 0, the
+/// statusq is queue 1 and unused here): 8 posted `virtio_input_event`
+/// buffers in `__vio+INP_*`, one `QUEUE_NOTIFY`. Prints `VIRTIO-INPUT-OK`;
+/// `VIRTIO-INPUT-FAIL` on a handshake/queue mismatch. Leaf (t-regs only).
+pub fn inp_init_node(o: Object) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — slot scan for DeviceID 18, then eventq handshake + 8 posted event buffers",
+            o.why
+        )),
+        Op::Glob("InpInit".into()),
+        Op::Label("InpInit".into()),
+        // Scan the virtio-mmio slots for an input device (the GPU probe
+        // already claimed its own slot — this looks for DeviceID 18 only).
+        Op::La {
+            rd: T0,
+            addr: Addr::Abs(VIO_MMIO_BASE),
+        },
+        Op::Li {
+            rd: T1,
+            imm: VIO_MMIO_SLOTS,
+        },
+        Op::Li {
+            rd: T4,
+            imm: VIO_MMIO_STEP as i64,
+        },
+        Op::Label("ipi_slot".into()),
+        lw(T2, T0, 0),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_MAGIC),
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "ipi_next".into(),
+        },
+        lw(T2, T0, 8),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_DEV_INPUT),
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "ipi_dev".into(),
+        },
+        Op::Label("ipi_next".into()),
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T4,
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "ipi_slot".into(),
+        },
+    ];
+    putc_str(&mut ops, "VIRTIO-INPUT-NONE\n");
+    ops.push(ret());
+    ops.extend([
+        Op::Label("ipi_dev".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        // publish the input device base: trap_vio resolves its PLIC source.
+        sw(T0, T5, VIO_INP_OFF),
+        Op::Addi {
+            rd: T6,
+            rs: T0,
+            imm: 0,
+        },
+        // reset → bounded readback poll
+        sw(X0, T6, VIO_REG_STATUS),
+        Op::Li { rd: T4, imm: 4 },
+        Op::Label("ipi_rst".into()),
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "ipi_ack".into(),
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: "ipi_rst".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "ipi_fail".into(),
+        },
+        Op::Label("ipi_ack".into()),
+        Op::Li {
+            rd: T2,
+            imm: i64::from(VIO_ST_ACK | VIO_ST_DRIVER),
+        },
+        sw(T2, T6, VIO_REG_STATUS),
+        sw(X0, T6, VIO_REG_FEATURES_SEL),
+        lw(T2, T6, VIO_REG_FEATURES),
+        sw(X0, T6, VIO_REG_DRV_FEATURES_SEL),
+        sw(X0, T6, VIO_REG_DRV_FEATURES),
+        Op::Li { rd: T2, imm: 1 },
+        sw(T2, T6, VIO_REG_FEATURES_SEL),
+        lw(T3, T6, VIO_REG_FEATURES),
+        Op::Andi {
+            rd: T3,
+            rs: T3,
+            imm: VIO_F_VERSION_1 as i32,
+        },
+        Op::Li { rd: T2, imm: 1 },
+        sw(T2, T6, VIO_REG_DRV_FEATURES_SEL),
+        sw(T3, T6, VIO_REG_DRV_FEATURES),
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_FEATURES_OK,
+        },
+        sw(T2, T6, VIO_REG_STATUS),
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Andi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_FEATURES_OK,
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "ipi_fail".into(),
+        },
+        // eventq = queue 0: rings in __vio+INP_*.
+        sw(X0, T6, VIO_REG_QUEUE_SEL),
+        lw(T2, T6, VIO_REG_QUEUE_NUM_MAX),
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "ipi_fail".into(),
+        },
+        Op::Li {
+            rd: T3,
+            imm: VIO_QUEUE_NUM,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_NUM),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: INP_DESC_OFF,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_DESC),
+        sw(X0, T6, VIO_REG_QUEUE_DESC + 4),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: INP_AVAIL_OFF,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_AVAIL),
+        sw(X0, T6, VIO_REG_QUEUE_AVAIL + 4),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: INP_USED_OFF,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_USED),
+        sw(X0, T6, VIO_REG_QUEUE_USED + 4),
+        Op::Li { rd: T3, imm: 1 },
+        sw(T3, T6, VIO_REG_QUEUE_READY),
+        // post 8 event buffers: desc[i] = {evbuf+i*8, len 8, WRITE}.
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: INP_DESC_OFF,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: INP_EVBUF_OFF,
+        },
+        Op::Li { rd: T4, imm: 8 },
+        Op::Label("ipi_buf".into()),
+        sw(T3, T2, 0),
+        sw(X0, T2, 4),
+        Op::Li { rd: T1, imm: 8 },
+        sw(T1, T2, 8),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_DESC_WRITE),
+        },
+        sw(T1, T2, 12),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: 16,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T3,
+            imm: 8,
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: "ipi_buf".into(),
+        },
+        // avail ring: ring[0..8] = heads 0..7, idx = 8.
+        sw(X0, T5, INP_AVAIL_OFF),
+        Op::Li {
+            rd: T1,
+            imm: 0x0001_0000,
+        },
+        sw(T1, T5, INP_AVAIL_OFF + 4),
+        Op::Li {
+            rd: T1,
+            imm: 0x0003_0002,
+        },
+        sw(T1, T5, INP_AVAIL_OFF + 8),
+        Op::Li {
+            rd: T1,
+            imm: 0x0005_0004,
+        },
+        sw(T1, T5, INP_AVAIL_OFF + 12),
+        Op::Li {
+            rd: T1,
+            imm: 0x0007_0006,
+        },
+        sw(T1, T5, INP_AVAIL_OFF + 16),
+        Op::Fence,
+        Op::Li {
+            rd: T1,
+            imm: 0x8_0000,
+        },
+        sw(T1, T5, INP_AVAIL_OFF),
+        Op::Fence,
+        sw(X0, T6, VIO_REG_QUEUE_NOTIFY),
+        // DRIVER_OK after buffers are posted — the device can fill them as
+        // soon as it is live.
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_DRIVER_OK,
+        },
+        sw(T2, T6, VIO_REG_STATUS),
+    ]);
+    putc_str(&mut ops, "VIRTIO-INPUT-OK\n");
+    ops.push(Op::Label("ipi_ret".into()));
+    ops.push(ret());
+    ops.push(Op::Label("ipi_fail".into()));
+    putc_str(&mut ops, "VIRTIO-INPUT-FAIL\n");
+    ops.push(ret());
+    Node {
+        purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// `InpDrain` — consume the eventq used ring: each used elem's desc id picks
+/// one `virtio_input_event` buffer; EV_KEY press/release events are pushed
+/// into the bounded `INP_KQ` key queue as `(code << 8) | value` and marked
+/// `INP`. Every consumed buffer is re-posted to the avail ring + notified,
+/// so the device never runs dry. Leaf; safe from trap context (t-regs +
+/// saved a-regs only) — callers must have interrupts off or the queue
+/// shadow is single-writer.
+pub fn inp_drain_node(o: Object) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — eventq used-ring drain → INP_KQ + re-post",
+            o.why
+        )),
+        Op::Glob("InpDrain".into()),
+        Op::Label("InpDrain".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T6, T5, VIO_INP_OFF),
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: "ipd_ret".into(),
+        },
+        lw(T4, T5, INP_LAST_USED),
+        Op::Label("ipd_next".into()),
+        // used idx is the hi16 of the used ring header.
+        lw(T1, T5, INP_USED_OFF),
+        Op::Srli {
+            rd: T1,
+            rs: T1,
+            shamt: 16,
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: T4,
+            to: "ipd_done".into(),
+        },
+        // elem i = INP_USED + 4 + (last % 8) * 8 → id in t3.
+        Op::Andi {
+            rd: T2,
+            rs: T4,
+            imm: 7,
+        },
+        Op::Slli {
+            rd: T2,
+            rs: T2,
+            shamt: 3,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: INP_USED_OFF + 4,
+        },
+        Op::Add {
+            rd: T2,
+            rs1: T2,
+            rs2: T5,
+        },
+        lw(T3, T2, 0),
+        // event = __vio + INP_EVBUF + id*8 → {type:u16, code:u16, value:u32}.
+        Op::Andi {
+            rd: T2,
+            rs: T3,
+            imm: 7,
+        },
+        Op::Slli {
+            rd: T2,
+            rs: T2,
+            shamt: 3,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: INP_EVBUF_OFF,
+        },
+        Op::Add {
+            rd: T2,
+            rs1: T2,
+            rs2: T5,
+        },
+        lw(A2, T2, 4),
+        // EV_KEY only; type is the u16 at offset 0 — lbu suffices (EV_*
+        // constants are all < 256) and is xlen-agnostic.
+        Op::Lbu {
+            rd: A1,
+            rs: T2,
+            off: 0,
+        },
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_INP_EV_KEY),
+        },
+        Op::Bne {
+            rs1: A1,
+            rs2: T1,
+            to: "ipd_repost".into(),
+        },
+        // push (code<<8 | value&0xff) — code is the hi16 of word0.
+        lw(A1, T2, 0),
+        Op::Srli {
+            rd: A1,
+            rs: A1,
+            shamt: 16,
+        },
+        Op::Slli {
+            rd: A1,
+            rs: A1,
+            shamt: 8,
+        },
+        Op::Andi {
+            rd: A2,
+            rs: A2,
+            imm: 0xff,
+        },
+        Op::Xor {
+            rd: A1,
+            rs1: A1,
+            rs2: A2,
+        },
+        lw(T1, T5, INP_KQ_HEAD),
+        Op::Andi {
+            rd: T2,
+            rs: T1,
+            imm: 15,
+        },
+        Op::Slli {
+            rd: T2,
+            rs: T2,
+            shamt: 2,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: INP_KQ_OFF,
+        },
+        Op::Add {
+            rd: T2,
+            rs1: T2,
+            rs2: T5,
+        },
+        sw(A1, T2, 0),
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: 1,
+        },
+        sw(T1, T5, INP_KQ_HEAD),
+    ];
+    putc_str(&mut ops, "INP\n");
+    ops.extend([
+        Op::Label("ipd_repost".into()),
+        // re-post the consumed buffer id (t3) at avail idx; then last++.
+        lw(T2, T5, INP_AVAIL_OFF),
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Andi {
+            rd: T1,
+            rs: T2,
+            imm: 7,
+        },
+        Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: 1,
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: INP_AVAIL_OFF + 4,
+        },
+        Op::Add {
+            rd: T1,
+            rs1: T1,
+            rs2: T5,
+        },
+        Op::Sb {
+            rs2: T3,
+            rs1: T1,
+            off: 0,
+        },
+        Op::Srli {
+            rd: T3,
+            rs: T3,
+            shamt: 8,
+        },
+        Op::Sb {
+            rs2: T3,
+            rs1: T1,
+            off: 1,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: 1,
+        },
+        Op::Slli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        sw(T2, T5, INP_AVAIL_OFF),
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: 1,
+        },
+        sw(T4, T5, INP_LAST_USED),
+        Op::Jal {
+            rd: X0,
+            to: "ipd_next".into(),
+        },
+        Op::Label("ipd_done".into()),
+        Op::Fence,
+        sw(X0, T6, VIO_REG_QUEUE_NOTIFY),
+        Op::Label("ipd_ret".into()),
+    ]);
+    ops.push(ret());
+    let _ = o;
+    Node {
+        purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// `InpPoll` — UART `Keys` command body: drain the eventq, then pop the key
+/// queue printing `KEY <8-hex>` per entry (`hexdig` lives in the trap node —
+/// the label is module-wide). Bounded by the 16-entry queue.
+pub fn inp_poll_node(o: Object, spec: &BoardSpec) -> Node {
+    let xlen = spec.isa.xlen;
+    let mut ops = vec![
+        Op::Comment(format!("{} — jal InpDrain then pop INP_KQ", o.why)),
+        Op::Glob("InpPoll".into()),
+        Op::Label("InpPoll".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -16,
+        },
+        st_x(xlen, RA, SP, 0),
+        Op::Jal {
+            rd: RA,
+            to: "InpDrain".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Label("ipp_next".into()),
+        lw(T1, T5, INP_KQ_TAIL),
+        lw(T2, T5, INP_KQ_HEAD),
+        Op::Beq {
+            rs1: T1,
+            rs2: T2,
+            to: "ipp_done".into(),
+        },
+        Op::Andi {
+            rd: T2,
+            rs: T1,
+            imm: 15,
+        },
+        Op::Slli {
+            rd: T2,
+            rs: T2,
+            shamt: 2,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: INP_KQ_OFF,
+        },
+        Op::Add {
+            rd: T2,
+            rs1: T2,
+            rs2: T5,
+        },
+        lw(T0, T2, 0),
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: 1,
+        },
+        sw(T1, T5, INP_KQ_TAIL),
+    ];
+    putc_str(&mut ops, "KEY ");
+    // print 8 hex digits of t0 via the shared hexdig table.
+    ops.extend([
+        Op::Li { rd: A2, imm: 8 },
+        Op::Label("ipp_hex".into()),
+        Op::Srli {
+            rd: T2,
+            rs: T0,
+            shamt: 28,
+        },
+        Op::Andi {
+            rd: T2,
+            rs: T2,
+            imm: 0xf,
+        },
+        Op::Slli {
+            rd: T0,
+            rs: T0,
+            shamt: 4,
+        },
+        Op::La {
+            rd: A6,
+            addr: Addr::Label("hexdig".into()),
+        },
+        Op::Add {
+            rd: A6,
+            rs1: A6,
+            rs2: T2,
+        },
+        Op::Lbu {
+            rd: A0,
+            rs: A6,
+            off: 0,
+        },
+        Op::Li {
+            rd: A7,
+            imm: SBI_PUTCHAR,
+        },
+        Op::Ecall,
+        Op::Addi {
+            rd: A2,
+            rs: A2,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: A2,
+            rs2: X0,
+            to: "ipp_hex".into(),
+        },
+    ]);
+    putc_str(&mut ops, "\n");
+    ops.extend([
+        Op::Jal {
+            rd: X0,
+            to: "ipp_next".into(),
+        },
+        Op::Label("ipp_done".into()),
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+    ]);
+    ops.push(ret());
+    Node {
+        purpose: Purpose::Virtio,
+        ops,
     }
 }
 

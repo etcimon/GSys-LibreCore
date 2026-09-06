@@ -1246,6 +1246,14 @@ impl BoardSpec {
                     ))
     }
 
+    /// True when the QEMU argv should attach `virtio-keyboard-device` and the
+    /// guest should probe DeviceID 18 (`InpProbe`/`InpInit`/`InpDrain`). The
+    /// keyboard rides the same virtio-mmio window as the console GPU; the
+    /// probe is fail-closed (`VIRTIO-INPUT-NONE`) when QEMU has no device.
+    pub fn wants_virtio_input(&self) -> bool {
+        self.wants_virtio_gpu() && self.kernel.wasm.enable
+    }
+
     /// Dual-band HolyC TCP host port when that band is live.
     pub fn holyc_tcp_port(&self) -> Option<u16> {
         if self.holyc.dual_band.tcp.enable {

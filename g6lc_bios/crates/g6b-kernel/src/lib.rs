@@ -487,6 +487,15 @@ pub fn qemu_dual_band_argv(spec: &BoardSpec) -> Vec<String> {
             a.push("-device".into());
             a.push("virtio-gpu-device".into());
         }
+        if spec.wants_virtio_input() {
+            // virtio-input keyboard on its own mmio slot → the guest probes
+            // DeviceID 18, posts eventq buffers and drains EV_KEY events
+            // (`Keys`/`K` over the UART console; QEMU `sendkey` on the
+            // monitor feeds the device). Fail-closed: a spec without this
+            // device prints `VIRTIO-INPUT-NONE`.
+            a.push("-device".into());
+            a.push("virtio-keyboard-device".into());
+        }
     }
     a
 }

@@ -12,18 +12,20 @@
 use g6b_spec::BoardSpec;
 
 use crate::encode::{
-    A0, A1, A2, A6, A7, CMD_FILE, CMD_GET, CMD_REBO, CMD_SHUT, CMD_UI, CMD_VIEW, CMD_WAKE,
-    CSR_SATP, CSR_SCAUSE, CSR_SEPC, CSR_SIE, CSR_SSTATUS, CSR_STVEC, CSR_TIME, GR16_MAGIC,
-    GR_FILL_WORD, MBOX_MAGIC, MBOX_OFF_CMD, MBOX_OFF_DOORBELL, MBOX_OFF_IRQ_EN, MBOX_OFF_LENGTH,
-    MBOX_OFF_RSP, MBOX_OFF_STATUS, MBOX_RSP_FILE, MBOX_RSP_UI, MBOX_RSP_VIEW, MBOX_RSP_WAKE,
-    MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE, PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID,
-    SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID, SIE_SEIE, SIE_SSIE, SIE_STIE, SP,
-    SSTATUS_SIE, T0, T1, T2, T3, T4, TP, UART_IER_RX, UART_IRQ, UART_LSR_DR, UI_MAGIC, VIO_DEV_GPU,
-    VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
+    A0, A1, A2, A6, A7, CMD_FILE, CMD_GET, CMD_KEYS, CMD_REBO, CMD_SHUT, CMD_UI, CMD_VIEW,
+    CMD_WAKE, CSR_SATP, CSR_SCAUSE, CSR_SEPC, CSR_SIE, CSR_SSTATUS, CSR_STVEC, CSR_TIME,
+    GR16_MAGIC, GR_FILL_WORD, MBOX_MAGIC, MBOX_OFF_CMD, MBOX_OFF_DOORBELL, MBOX_OFF_IRQ_EN,
+    MBOX_OFF_LENGTH, MBOX_OFF_RSP, MBOX_OFF_STATUS, MBOX_RSP_FILE, MBOX_RSP_UI, MBOX_RSP_VIEW,
+    MBOX_RSP_WAKE, MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE, PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1,
+    SBI_HSM_EID, SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID, SCAUSE_LOAD_ACCESS,
+    SCAUSE_STORE_ACCESS, SIE_SEIE, SIE_SSIE, SIE_STIE, SP, SSTATUS_SIE, T0, T1, T2, T3, T4, TP,
+    UART_IER_RX, UART_IRQ, UART_LSR_DR, UI_MAGIC, VIO_DEV_GPU, VIO_MAGIC, VIO_MMIO_BASE,
+    VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
 };
 use crate::{
     gr_bss_len, gr_stride, Addr, Module, Node, Op, Purpose, BIOS_UI_WASM, GR_HEADER_BYTES,
-    STACK_BYTES, STACK_SHIFT, UART_LINE_BSS, UART_LINE_CAP, UI_HEADER_BYTES,
+    MBOX_DEAD_OFF, STACK_BYTES, STACK_SHIFT, UART1_DEAD_OFF, UART_LINE_BSS, UART_LINE_CAP,
+    UI_HEADER_BYTES,
 };
 
 /// One analyzed object: purpose, architectural home, whether it is live.
@@ -352,6 +354,13 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     if let Some(o) = timer {
         m.push(timer_call_node(o));
     }
+    if let Some(o) = uart {
+        // The UART1 presence probe must run BEFORE PlicInit arms the UART
+        // irq — otherwise trap_uart's drain can take a nested access fault
+        // on an absent UART1 before the flag exists (nested traps clobber
+        // sepc). In normal context the probe fault recovers cleanly.
+        m.push(uart1_node(o, spec));
+    }
     if let Some(o) = plic {
         m.push(plic_call_node(o));
     }
@@ -383,7 +392,7 @@ pub fn kstart(spec: &BoardSpec) -> Module {
         m.vio_fb_bytes = fb;
     }
     if let Some(o) = vio {
-        m.push(vio_call_node(o));
+        m.push(vio_call_node(o, spec));
     }
     if let Some(o) = ui {
         m.ui_bytes = UI_HEADER_BYTES;
@@ -412,9 +421,6 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     }
     if let Some(o) = disp {
         m.push(disp_paint_call_node(o));
-    }
-    if let Some(o) = uart {
-        m.push(uart1_node(o, spec));
     }
     if let Some(o) = park {
         m.push(park_node(o));
@@ -447,11 +453,16 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     }
     if let Some(o) = vio {
         m.push(vio_probe_node(o));
-        m.push(crate::vio::init_node(o));
-        m.push(crate::vio::cmd_node());
+        m.push(crate::vio::init_node(o, spec));
+        m.push(crate::vio::cmd_node(spec));
         m.push(crate::vio::scan_node(spec));
         if spec.kernel.gr.enable || spec.kernel.proxy.enable {
             m.push(crate::vio::paint_node(spec));
+        }
+        if spec.wants_virtio_input() {
+            m.push(crate::vio::inp_init_node(o));
+            m.push(crate::vio::inp_drain_node(o));
+            m.push(crate::vio::inp_poll_node(o, spec));
         }
     }
     if disp.is_some() {
@@ -839,50 +850,88 @@ fn boot_log_node(o: Object, spec: &BoardSpec) -> Node {
 
 fn uart1_node(o: Object, spec: &BoardSpec) -> Node {
     let base = uart1_base(spec);
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} @ {base:#x} — probe LSR (fault→absent via trap window) then IER.ERBFI",
+            o.why
+        )),
+        Op::La {
+            rd: T0,
+            addr: Addr::Abs(base),
+        },
+        // Probe read: on stock QEMU virt the UART1 window is unmapped — the
+        // store of any IER byte would fault. trap_fault marks UART1_DEAD and
+        // resumes at the next insn; the flag gates both these writes and the
+        // trap_uart drain.
+        Op::Li { rd: T1, imm: 0 },
+        Op::Lbu {
+            rd: T1,
+            rs: T0,
+            off: 5,
+        },
+        Op::La {
+            rd: T2,
+            addr: Addr::UartLine,
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T2,
+            off: UART1_DEAD_OFF as i32,
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "u1_absent".into(),
+        },
+        Op::La {
+            rd: T0,
+            addr: Addr::Abs(base),
+        },
+        Op::Sb {
+            rs2: X0,
+            rs1: T0,
+            off: 1,
+        },
+        Op::Li { rd: T1, imm: 3 },
+        Op::Sb {
+            rs2: T1,
+            rs1: T0,
+            off: 3,
+        },
+        Op::Li { rd: T1, imm: 7 },
+        Op::Sb {
+            rs2: T1,
+            rs1: T0,
+            off: 2,
+        },
+        Op::Li { rd: T1, imm: 3 },
+        Op::Sb {
+            rs2: T1,
+            rs1: T0,
+            off: 4,
+        },
+        Op::Li {
+            rd: T1,
+            imm: UART_IER_RX,
+        },
+        Op::Sb {
+            rs2: T1,
+            rs1: T0,
+            off: 1,
+        },
+        Op::Jal {
+            rd: X0,
+            to: "u1_done".into(),
+        },
+        Op::Label("u1_absent".into()),
+    ];
+    for ch in b"UART1-NONE\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.push(Op::Label("u1_done".into()));
     Node {
         purpose: Purpose::Uart1Repl,
-        ops: vec![
-            Op::Comment(format!(
-                "{} @ {base:#x} — IER.ERBFI then WFI (not a poll, not a NIC)",
-                o.why
-            )),
-            Op::La {
-                rd: T0,
-                addr: Addr::Abs(base),
-            },
-            Op::Sb {
-                rs2: X0,
-                rs1: T0,
-                off: 1,
-            },
-            Op::Li { rd: T1, imm: 3 },
-            Op::Sb {
-                rs2: T1,
-                rs1: T0,
-                off: 3,
-            },
-            Op::Li { rd: T1, imm: 7 },
-            Op::Sb {
-                rs2: T1,
-                rs1: T0,
-                off: 2,
-            },
-            Op::Li { rd: T1, imm: 3 },
-            Op::Sb {
-                rs2: T1,
-                rs1: T0,
-                off: 4,
-            },
-            Op::Li {
-                rd: T1,
-                imm: UART_IER_RX,
-            },
-            Op::Sb {
-                rs2: T1,
-                rs1: T0,
-                off: 1,
-            },
-        ],
+        ops,
     }
 }
 
@@ -921,42 +970,74 @@ fn mbox_call_node(o: Object) -> Node {
 
 fn mbox_init_node(o: Object, spec: &BoardSpec) -> Node {
     let base = parse_hex(&spec.loopback.base).unwrap_or(0x1010_0000);
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} @ {base:#x} irq {} — doorbell write+readback probe; absent → MBOX-NONE",
+            o.why, spec.loopback.irq
+        )),
+        Op::Glob("MboxInit".into()),
+        Op::Label("MboxInit".into()),
+        Op::La {
+            rd: T0,
+            addr: Addr::Abs(base),
+        },
+        Op::Li {
+            rd: T1,
+            imm: i64::from(MBOX_MAGIC),
+        },
+        // The store may fault on a fully-unmapped window (trap window marks
+        // MBOX_DEAD and resumes); on QEMU virt the address is the fw_cfg
+        // region — the write is absorbed but never echoes back.
+        Op::Sw {
+            rs2: T1,
+            rs1: T0,
+            off: MBOX_OFF_DOORBELL as i32,
+        },
+        Op::Li { rd: T2, imm: 0 },
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: MBOX_OFF_DOORBELL as i32,
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: T1,
+            to: "mb_none".into(),
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: MBOX_OFF_STATUS as i32,
+        },
+        Op::Li { rd: T1, imm: 1 },
+        Op::Sw {
+            rs2: T1,
+            rs1: T0,
+            off: MBOX_OFF_IRQ_EN as i32,
+        },
+    ];
+    for ch in b"MBOX-OK\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Jalr {
+            rd: X0,
+            rs: RA,
+            imm: 0,
+        },
+        Op::Label("mb_none".into()),
+    ]);
+    for ch in b"MBOX-NONE\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.push(Op::Jalr {
+        rd: X0,
+        rs: RA,
+        imm: 0,
+    });
     Node {
         purpose: Purpose::Mailbox,
-        ops: vec![
-            Op::Comment(format!("{} @ {base:#x} irq {}", o.why, spec.loopback.irq)),
-            Op::Glob("MboxInit".into()),
-            Op::Label("MboxInit".into()),
-            Op::La {
-                rd: T0,
-                addr: Addr::Abs(base),
-            },
-            Op::Li {
-                rd: T1,
-                imm: i64::from(MBOX_MAGIC),
-            },
-            Op::Sw {
-                rs2: T1,
-                rs1: T0,
-                off: MBOX_OFF_DOORBELL as i32,
-            },
-            Op::Sw {
-                rs2: X0,
-                rs1: T0,
-                off: MBOX_OFF_STATUS as i32,
-            },
-            Op::Li { rd: T1, imm: 1 },
-            Op::Sw {
-                rs2: T1,
-                rs1: T0,
-                off: MBOX_OFF_IRQ_EN as i32,
-            },
-            Op::Jalr {
-                rd: X0,
-                rs: RA,
-                imm: 0,
-            },
-        ],
+        ops,
     }
 }
 
@@ -1435,6 +1516,47 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 to: "trap_vio".into(),
             },
         ]);
+        if spec.wants_virtio_input() {
+            // Same irq = 1+slot mapping for the virtio-input device; its
+            // base is at __vio+VIO_INP_OFF (0 when no keyboard attached).
+            ops.extend([
+                Op::Comment("virtio-input PLIC source: irq 1 + input slot".into()),
+                Op::Lw {
+                    rd: T1,
+                    rs: T0,
+                    off: crate::vio::VIO_INP_OFF,
+                },
+                Op::Beq {
+                    rs1: T1,
+                    rs2: X0,
+                    to: "trap_done".into(),
+                },
+                Op::Li {
+                    rd: A2,
+                    imm: VIO_MMIO_BASE as i64,
+                },
+                Op::Sub {
+                    rd: T1,
+                    rs1: T1,
+                    rs2: A2,
+                },
+                Op::Srli {
+                    rd: T1,
+                    rs: T1,
+                    shamt: 12,
+                },
+                Op::Addi {
+                    rd: T1,
+                    rs: T1,
+                    imm: crate::vio::VIO_IRQ_BASE as i32,
+                },
+                Op::Beq {
+                    rs1: T2,
+                    rs2: T1,
+                    to: "trap_inp".into(),
+                },
+            ]);
+        }
     }
     ops.push(Op::Jal {
         rd: X0,
@@ -1485,6 +1607,41 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 to: "trap_done".into(),
             },
         ]);
+        if spec.wants_virtio_input() {
+            // trap_inp — virtio-input eventq used-buffer irq: read+ack the
+            // device ISR, drain events into the bounded key queue.
+            ops.extend([
+                Op::Label("trap_inp".into()),
+                Op::Lw {
+                    rd: T1,
+                    rs: T0,
+                    off: crate::vio::VIO_INP_OFF,
+                },
+                Op::Lw {
+                    rd: A0,
+                    rs: T1,
+                    off: crate::encode::VIO_REG_ISR_STATUS,
+                },
+                Op::Sw {
+                    rs2: A0,
+                    rs1: T1,
+                    off: crate::encode::VIO_REG_ISR_ACK,
+                },
+                Op::Comment(
+                    "jal InpDrain — clobbers ra like the DomPaint trap call; \
+                     the parked/WFI context keeps ra dead"
+                        .into(),
+                ),
+                Op::Jal {
+                    rd: RA,
+                    to: "InpDrain".into(),
+                },
+                Op::Jal {
+                    rd: X0,
+                    to: "trap_done".into(),
+                },
+            ]);
+        }
     }
     ops.extend([
         Op::Label("trap_ssi".into()),
@@ -1520,7 +1677,7 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
             to: "trap_done".into(),
         },
     ]);
-    ops.extend(trap_fault_ops(xlen));
+    ops.extend(trap_fault_ops(xlen, spec));
     ops.push(Op::Label("trap_done".into()));
     for (r, i) in saves {
         ops.push(load_op(xlen, r, SP, i * slot));
@@ -1587,6 +1744,22 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
     if has_u1 {
         ops.extend([
             Op::Label("uart1_drain".into()),
+            // Gate on the absent flag: when the boot probe faulted, UART1
+            // reads in trap context must not re-fault.
+            Op::La {
+                rd: T1,
+                addr: Addr::UartLine,
+            },
+            Op::Lbu {
+                rd: T1,
+                rs: T1,
+                off: UART1_DEAD_OFF as i32,
+            },
+            Op::Bne {
+                rs1: T1,
+                rs2: X0,
+                to: "trap_done".into(),
+            },
             Op::La {
                 rd: T0,
                 addr: Addr::Abs(u1),
@@ -1815,8 +1988,30 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             rs2: A2,
             to: "uart_get".into(),
         },
-        Op::Label("uart_view".into()),
     ]);
+    if spec.wants_virtio_input() {
+        ops.extend([
+            Op::Li {
+                rd: A2,
+                imm: i64::from(CMD_KEYS),
+            },
+            Op::Beq {
+                rs1: A1,
+                rs2: A2,
+                to: "uart_keys".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: i64::from(b'K'),
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: A2,
+                to: "uart_keys".into(),
+            },
+        ]);
+    }
+    ops.extend([Op::Label("uart_view".into())]);
     for ch in b"VIEW" {
         ops.extend(putc_ops(i64::from(*ch)));
     }
@@ -1976,6 +2171,24 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             to: "trap_done".into(),
         },
     ]);
+    if spec.wants_virtio_input() {
+        ops.extend([
+            Op::Label("uart_keys".into()),
+            Op::Comment(
+                "Keys — InpPoll: drain the virtio-input eventq and print \
+                 queued EV_KEY codes (KEY <hex>)"
+                    .into(),
+            ),
+            Op::Jal {
+                rd: RA,
+                to: "InpPoll".into(),
+            },
+            Op::Jal {
+                rd: X0,
+                to: "trap_done".into(),
+            },
+        ]);
+    }
     ops.push(Op::Label("uart_wakeup".into()));
     for ch in b"WAKE\n" {
         ops.extend(putc_ops(i64::from(*ch)));
@@ -2021,6 +2234,24 @@ fn trap_mbox_ops(spec: &BoardSpec) -> Vec<Op> {
     vec![
         Op::Label("trap_mbox".into()),
         Op::Comment("mailbox kick — View/Reboot/Shutdown/Wakeup/Ui/File/Get; not a netdev".into()),
+        // MBOX_DEAD gate: on a board without the g6lc-bios mailbox the claim
+        // can still land here if another source shares the irq line — the
+        // doorbell read must not take a nested access fault (nested traps
+        // clobber sepc).
+        Op::La {
+            rd: T1,
+            addr: Addr::UartLine,
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T1,
+            off: MBOX_DEAD_OFF as i32,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "trap_done".into(),
+        },
         Op::La {
             rd: T0,
             addr: Addr::Abs(base),
@@ -2370,11 +2601,155 @@ fn hex_loop_ops(label: &str, nibble_shamt: u32, nibbles: i64) -> Vec<Op> {
     ]
 }
 
-/// INT_FAULT rewrite: dump `TRAP-<scause>-<sepc>` then WFI (no sret loop).
-fn trap_fault_ops(xlen: u32) -> Vec<Op> {
+/// INT_FAULT rewrite: dump `TRAP-<scause>-<sepc>` then WFI (no sret loop) —
+/// except inside a declared probe window: a load/store access fault (scause
+/// 5/7) whose `stval` lands in the UART1 or loopback-mbox MMIO window marks
+/// the device absent (`__uart_line` flag) and resumes at `sepc+4`, so a
+/// BoardSpec that declares peripherals the platform lacks (stock QEMU virt
+/// has no g6lc-bios-mbox / second ns16550) still boots instead of parking.
+fn trap_fault_ops(xlen: u32, spec: &BoardSpec) -> Vec<Op> {
     let shamt = xlen.saturating_sub(4);
     let nibbles = i64::from(xlen / 4);
-    let mut ops = vec![Op::Label("trap_fault".into())];
+    let u1 = uart1_base(spec);
+    let mbox = parse_hex(&spec.loopback.base).unwrap_or(0);
+    let mut ops = vec![
+        Op::Label("trap_fault".into()),
+        Op::Comment(
+            "recoverable probe: scause 5/7 + stval in UART1/mbox window → \
+             absent flag + sepc+4; everything else is the TRAP dump + park"
+                .into(),
+        ),
+        // T0 = scause, T1 = sepc (from the trap entry reads).
+        Op::Srli {
+            rd: T2,
+            rs: T0,
+            shamt: xlen.saturating_sub(1),
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "tf_dump".into(),
+        },
+        Op::Andi {
+            rd: T2,
+            rs: T0,
+            imm: 0x1f,
+        },
+        Op::Li {
+            rd: A2,
+            imm: i64::from(SCAUSE_LOAD_ACCESS),
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: A2,
+            to: "tf_probe".into(),
+        },
+        Op::Li {
+            rd: A2,
+            imm: i64::from(SCAUSE_STORE_ACCESS),
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: A2,
+            to: "tf_dump".into(),
+        },
+        Op::Label("tf_probe".into()),
+        Op::Csrrs {
+            rd: A2,
+            csr: crate::encode::CSR_STVAL,
+            rs: X0,
+        },
+        Op::La {
+            rd: T2,
+            addr: Addr::Abs(u1),
+        },
+        Op::Sub {
+            rd: T2,
+            rs1: A2,
+            rs2: T2,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 4, // [u1, u1+0x10)
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "tf_u1".into(),
+        },
+    ];
+    if mbox != 0 {
+        ops.extend([
+            Op::La {
+                rd: T2,
+                addr: Addr::Abs(mbox),
+            },
+            Op::Sub {
+                rd: T2,
+                rs1: A2,
+                rs2: T2,
+            },
+            Op::Srli {
+                rd: T2,
+                rs: T2,
+                shamt: 5, // [mbox, mbox+0x20)
+            },
+            Op::Beq {
+                rs1: T2,
+                rs2: X0,
+                to: "tf_mb".into(),
+            },
+        ]);
+    }
+    ops.extend([
+        Op::Jal {
+            rd: X0,
+            to: "tf_dump".into(),
+        },
+        Op::Label("tf_u1".into()),
+        Op::La {
+            rd: T2,
+            addr: Addr::UartLine,
+        },
+        Op::Li { rd: A0, imm: 1 },
+        Op::Sb {
+            rs2: A0,
+            rs1: T2,
+            off: UART1_DEAD_OFF as i32,
+        },
+        Op::Jal {
+            rd: X0,
+            to: "tf_skip".into(),
+        },
+        Op::Label("tf_mb".into()),
+        Op::La {
+            rd: T2,
+            addr: Addr::UartLine,
+        },
+        Op::Li { rd: A0, imm: 1 },
+        Op::Sb {
+            rs2: A0,
+            rs1: T2,
+            off: MBOX_DEAD_OFF as i32,
+        },
+        Op::Label("tf_skip".into()),
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: 4,
+        },
+        Op::Csrrw {
+            rd: X0,
+            csr: CSR_SEPC,
+            rs: T1,
+        },
+        Op::Jal {
+            rd: X0,
+            to: "trap_done".into(),
+        },
+        Op::Label("tf_dump".into()),
+    ]);
     ops.extend(putc_ops(b'T' as i64));
     ops.extend(putc_ops(b'R' as i64));
     ops.extend(putc_ops(b'A' as i64));
@@ -2510,24 +2885,34 @@ fn gl_call_node(o: Object) -> Node {
     }
 }
 
-fn vio_call_node(o: Object) -> Node {
+fn vio_call_node(o: Object, spec: &BoardSpec) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!("{} — jal VioProbe / VioInit / VioScan", o.why)),
+        Op::Jal {
+            rd: RA,
+            to: "VioProbe".into(),
+        },
+        Op::Jal {
+            rd: RA,
+            to: "VioInit".into(),
+        },
+        Op::Jal {
+            rd: RA,
+            to: "VioScan".into(),
+        },
+    ];
+    if spec.wants_virtio_input() {
+        ops.push(Op::Comment(
+            "InpInit — virtio-keyboard eventq (8 posted event buffers)".into(),
+        ));
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "InpInit".into(),
+        });
+    }
     Node {
         purpose: Purpose::Virtio,
-        ops: vec![
-            Op::Comment(format!("{} — jal VioProbe / VioInit / VioScan", o.why)),
-            Op::Jal {
-                rd: RA,
-                to: "VioProbe".into(),
-            },
-            Op::Jal {
-                rd: RA,
-                to: "VioInit".into(),
-            },
-            Op::Jal {
-                rd: RA,
-                to: "VioScan".into(),
-            },
-        ],
+        ops,
     }
 }
 

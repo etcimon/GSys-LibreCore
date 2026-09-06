@@ -64,6 +64,61 @@ after:
 	/* TimerInit rewrite: sie.STIE + sstatus.SIE + SBI TIME (RISC-V Priv ch3) — jal before park/uart (not fall-through) */
 	jal	ra, TimerInit
 
+/* purpose=uart1-repl home=t0=uart1 */
+	/* SSH+HolyC dual-band UART1 ns16550 RX irq (chardev, not a NIC, not a poll) @ 0x10009000 — probe LSR (fault→absent via trap window) then IER.ERBFI */
+	la	t0, 0x10009000
+	li	t1, 0
+	lbu	t1, 5(t0)
+	la	t2, __uart_line
+	lbu	t2, 132(t2)
+	bnez	t2, u1_absent
+	la	t0, 0x10009000
+	sb	zero, 1(t0)
+	li	t1, 3
+	sb	t1, 3(t0)
+	li	t1, 7
+	sb	t1, 2(t0)
+	li	t1, 3
+	sb	t1, 4(t0)
+	li	t1, 1
+	sb	t1, 1(t0)
+	j	u1_done
+u1_absent:
+	li	a0, 0x55
+	li	a7, 1
+	ecall
+	li	a0, 0x41
+	li	a7, 1
+	ecall
+	li	a0, 0x52
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0x31
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x45
+	li	a7, 1
+	ecall
+	li	a0, 0xa
+	li	a7, 1
+	ecall
+u1_done:
+
 /* purpose=uncore home=clint|plic|ddr|pcie */
 	/* PLIC S-mode ctx1 claim/complete (UART irq 1, mbox irq); not x86 EOI — jal PlicInit (S-mode ctx1) */
 	jal	ra, PlicInit
@@ -71,6 +126,10 @@ after:
 /* purpose=topology home=cores×threads×issue */
 	/* SBI HSM hart_start + IPI for every hart except self (MultiProc rewrite); Adam on the boot hart — jal HartStart (SBI HSM+IPI) */
 	jal	ra, HartStart
+
+/* purpose=mailbox home=mbox-mmio */
+	/* sideband mbox MMIO (doorbell/status/irq_en); not a netdev — jal MboxInit */
+	jal	ra, MboxInit
 
 /* purpose=display-proxy home=gr-plane→scanout */
 	/* SysGrInit GR16 header + 4bpp plane at __gr_plane; 640×480 scaled to high-DPI scanout — jal GrInit (SysGrInit rewrite) */
@@ -85,6 +144,8 @@ after:
 	jal	ra, VioProbe
 	jal	ra, VioInit
 	jal	ra, VioScan
+	/* InpInit — virtio-keyboard eventq (8 posted event buffers) */
+	jal	ra, InpInit
 
 /* purpose=file-serve home=g6ui+html|js|wasm */
 	/* HolyC kernel file server: G6UI blob + generated HTML/JS/WASM; not a Linux VFS — jal UiInit (guest G6UI blob) */
@@ -105,6 +166,10 @@ after:
 /* purpose=ui-dom home=__ui_dom→__gr_plane */
 	/* WASM MVP JIT for svelte-d UI; not wasmtime — jal WasmUi (lowered wasm _start → DOM → DomPaint) */
 	jal	ra, WasmUi
+
+/* purpose=virtio home=vio-mmio */
+	/* virtio-mmio probe 0x10001000+0x200*N for GPU device_id 16 (QEMU virt; queues/scanout open) — jal VioPaint (__gr_plane → __scan_fb → TRANSFER+FLUSH) */
+	jal	ra, VioPaint
 
 /* purpose=park home=wfi */
 	/* non-handoff harts WFI; the a1=fdt handoff hart runs Adam (boot hart is a lottery, not always 0); UART1 is irq-driven WFI (not a busy poll) */
@@ -146,17 +211,45 @@ trap_sei:
 	lw	t2, 0(t0)
 	beqz	t2, trap_done
 	sw	t2, 0(t0)
-	li	t1, 1
+	li	t1, 0xa
 	beq	t2, t1, trap_uart
+	li	t1, 3
+	beq	t2, t1, trap_mbox
+	/* virtio-mmio PLIC source: irq 16 + mmio slot */
+	la	t0, __vio
+	lw	t1, 1008(t0)
+	beqz	t1, trap_done
+	li	a2, 0x10001000
+	sub	t1, t1, a2
+	srli	t1, t1, 12
+	addi	t1, t1, 1
+	beq	t2, t1, trap_vio
+	/* virtio-input PLIC source: irq 1 + input slot */
+	lw	t1, 1016(t0)
+	beqz	t1, trap_done
+	li	a2, 0x10001000
+	sub	t1, t1, a2
+	srli	t1, t1, 12
+	addi	t1, t1, 1
+	beq	t2, t1, trap_inp
 	j	trap_done
 trap_uart:
 	/* PLIC irq 1 ns16550 RX + linebuf View/Reboot (not a poll, not 0x3F8) */
 	la	t0, 0x10000000
 	lbu	t1, 5(t0)
 	andi	t1, t1, 1
-	beqz	t1, trap_done
+	beqz	t1, uart1_drain
 	lbu	a0, 0(t0)
 	j	uart_take
+uart1_drain:
+	la	t1, __uart_line
+	lbu	t1, 132(t1)
+	bnez	t1, trap_done
+	la	t0, 0x10009000
+	lbu	t1, 5(t0)
+	andi	t1, t1, 1
+	beqz	t1, trap_done
+	lbu	a0, 0(t0)
 uart_take:
 	mv	t2, a0
 	li	a7, 1
@@ -204,6 +297,10 @@ uart_line_go:
 	beq	a1, a2, uart_get
 	li	a2, 0x47
 	beq	t1, a2, uart_get
+	li	a2, 0x7379654b
+	beq	a1, a2, uart_keys
+	li	a2, 0x4b
+	beq	t1, a2, uart_keys
 uart_view:
 	li	a0, 0x56
 	li	a7, 1
@@ -260,6 +357,8 @@ uart_ui:
 	ecall
 	/* Ui → DomPaint: re-dump live __ui_dom rows (bounded) */
 	jal	ra, DomPaint
+	/* Ui → VioPaint: push repainted plane to the virtio-gpu scanout */
+	jal	ra, VioPaint
 	j	trap_done
 uart_file:
 	/* FileServe("/ui") — HolyC kernel file server rewrite */
@@ -268,6 +367,10 @@ uart_file:
 uart_get:
 	/* Get("/ui/ui.wasm") — mailbox/UART HTTP GET rewrite; not a netdev */
 	jal	ra, GetFile
+	j	trap_done
+uart_keys:
+	/* Keys — InpPoll: drain the virtio-input eventq and print queued EV_KEY codes (KEY <hex>) */
+	jal	ra, InpPoll
 	j	trap_done
 uart_wakeup:
 	li	a0, 0x57
@@ -300,6 +403,106 @@ uart_shutdown:
 	li	a1, 0
 	ecall
 	j	trap_done
+trap_mbox:
+	/* mailbox kick — View/Reboot/Shutdown/Wakeup/Ui/File/Get; not a netdev */
+	la	t1, __uart_line
+	lbu	t1, 133(t1)
+	bnez	t1, trap_done
+	la	t0, 0x10100000
+	lw	t1, 0(t0)
+	li	t2, 1
+	bne	t1, t2, trap_done
+	sw	zero, 0(t0)
+	li	t1, 1
+	sw	t1, 8(t0)
+	lbu	t1, 16(t0)
+	li	t2, 0x52
+	beq	t1, t2, mbox_reboot
+	li	t2, 0x53
+	beq	t1, t2, mbox_shutdown
+	li	t2, 0x57
+	beq	t1, t2, mbox_wakeup
+	li	t2, 0x55
+	beq	t1, t2, mbox_ui
+	li	t2, 0x46
+	beq	t1, t2, mbox_file
+	li	t2, 0x47
+	beq	t1, t2, mbox_get
+mbox_view:
+	li	t1, 0x57454956
+	sw	t1, 272(t0)
+	li	t1, 0xa
+	sb	t1, 276(t0)
+	li	t1, 5
+	sw	t1, 4(t0)
+	li	t1, 2
+	sw	t1, 8(t0)
+	j	trap_done
+mbox_wakeup:
+	li	t1, 0x454b4157
+	sw	t1, 272(t0)
+	li	t1, 4
+	sw	t1, 4(t0)
+	li	t1, 2
+	sw	t1, 8(t0)
+	j	trap_done
+mbox_file:
+	li	t1, 0x454c4946
+	sw	t1, 272(t0)
+	li	t1, 4
+	sw	t1, 4(t0)
+	li	t1, 2
+	sw	t1, 8(t0)
+	j	trap_done
+mbox_get:
+	/* GET /ui/ui.wasm — RSP = \0asm + size (not a netdev) */
+	la	t2, __ui_blob
+	lw	t1, 24(t2)
+	sw	t1, 272(t0)
+	lw	t1, 4(t2)
+	sw	t1, 276(t0)
+	li	t1, 8
+	sw	t1, 4(t0)
+	li	t1, 2
+	sw	t1, 8(t0)
+	j	trap_done
+mbox_ui:
+	li	t1, 0xa4955
+	sw	t1, 272(t0)
+	li	t1, 3
+	sw	t1, 4(t0)
+	li	t1, 2
+	sw	t1, 8(t0)
+	j	trap_done
+mbox_reboot:
+	li	a7, 0x53525354
+	li	a6, 0
+	li	a0, 1
+	li	a1, 0
+	ecall
+	j	trap_done
+mbox_shutdown:
+	li	a7, 0x53525354
+	li	a6, 0
+	li	a0, 0
+	li	a1, 0
+	ecall
+	j	trap_done
+trap_vio:
+	lw	t1, 1008(t0)
+	lw	a0, 96(t1)
+	sw	a0, 100(t1)
+	lw	a0, 1012(t0)
+	addi	a0, a0, 1
+	sw	a0, 1012(t0)
+	j	trap_done
+trap_inp:
+	lw	t1, 1016(t0)
+	lw	a0, 96(t1)
+	sw	a0, 100(t1)
+	/* jal InpDrain — clobbers ra like the DomPaint trap call; the parked/WFI context keeps ra dead */
+	jal	ra, InpDrain
+	j	trap_done
 trap_ssi:
 	/* supervisor software interrupt — SBI IPI wake from wfi */
 	j	trap_done
@@ -313,6 +516,39 @@ trap_timer:
 	ecall
 	j	trap_done
 trap_fault:
+	/* recoverable probe: scause 5/7 + stval in UART1/mbox window → absent flag + sepc+4; everything else is the TRAP dump + park */
+	srli	t2, t0, 63
+	bnez	t2, tf_dump
+	andi	t2, t0, 31
+	li	a2, 5
+	beq	t2, a2, tf_probe
+	li	a2, 7
+	bne	t2, a2, tf_dump
+tf_probe:
+	csrrs	a2, 0x143, zero
+	la	t2, 0x10009000
+	sub	t2, a2, t2
+	srli	t2, t2, 4
+	beqz	t2, tf_u1
+	la	t2, 0x10100000
+	sub	t2, a2, t2
+	srli	t2, t2, 5
+	beqz	t2, tf_mb
+	j	tf_dump
+tf_u1:
+	la	t2, __uart_line
+	li	a0, 1
+	sb	a0, 132(t2)
+	j	tf_skip
+tf_mb:
+	la	t2, __uart_line
+	li	a0, 1
+	sb	a0, 133(t2)
+tf_skip:
+	addi	t1, t1, 4
+	csrrw	zero, 0x141, t1
+	j	trap_done
+tf_dump:
 	li	a0, 0x54
 	li	a7, 1
 	ecall
@@ -402,13 +638,21 @@ PlicInit:
 	la	t0, 0xc000000
 	li	t1, 1
 	sw	t1, 4(t0)
+	sw	t1, 8(t0)
 	sw	t1, 12(t0)
+	sw	t1, 16(t0)
+	sw	t1, 20(t0)
+	sw	t1, 24(t0)
+	sw	t1, 28(t0)
+	sw	t1, 32(t0)
+	sw	t1, 40(t0)
+	/* source priorities set; S-mode ctx = 2*tp+1 next */
 	slli	t2, tp, 1
 	addi	t2, t2, 1
 	la	t0, 0xc002000
 	slli	t3, t2, 7
 	add	t0, t0, t3
-	li	t1, 0xa
+	li	t1, 0x5fe
 	sw	t1, 0(t0)
 	la	t0, 0xc200000
 	slli	t3, t2, 12
@@ -453,6 +697,77 @@ hsm_mask:
 	li	a1, 0
 	li	a6, 0
 	li	a7, 0x735049
+	ecall
+	ret
+
+/* purpose=mailbox home=mbox-mmio */
+	/* sideband mbox MMIO (doorbell/status/irq_en); not a netdev @ 0x10100000 irq 3 — doorbell write+readback probe; absent → MBOX-NONE */
+.globl MboxInit
+MboxInit:
+	la	t0, 0x10100000
+	li	t1, 0x47364d42
+	sw	t1, 0(t0)
+	li	t2, 0
+	lw	t2, 0(t0)
+	bne	t2, t1, mb_none
+	sw	zero, 8(t0)
+	li	t1, 1
+	sw	t1, 12(t0)
+	li	a0, 0x4d
+	li	a7, 1
+	ecall
+	li	a0, 0x42
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x58
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x4b
+	li	a7, 1
+	ecall
+	li	a0, 0xa
+	li	a7, 1
+	ecall
+	ret
+mb_none:
+	li	a0, 0x4d
+	li	a7, 1
+	ecall
+	li	a0, 0x42
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x58
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x45
+	li	a7, 1
+	ecall
+	li	a0, 0xa
+	li	a7, 1
 	ecall
 	ret
 
@@ -594,6 +909,78 @@ ProxyScale:
 	ret
 
 /* purpose=virtio home=vio-mmio */
+	/* FbExpand — __gr_plane 640x480 (4bpp) → __scan_fb 1920x1080 (X8R8G8B8) scale 2x2 +(320,60) via vio_pal */
+.globl FbExpand
+FbExpand:
+	addi	sp, sp, -32
+	sd	t3, 0(sp)
+	sd	t4, 8(sp)
+	sd	t5, 16(sp)
+	sd	t6, 24(sp)
+	la	t0, __gr_plane
+	addi	t0, t0, 64
+	la	t1, __scan_fb
+	li	a2, 0x70d00
+	add	t1, t1, a2
+	la	t5, vio_pal
+	li	t6, 0x1e0
+vp_row:
+	li	t2, 2
+vp_rep:
+	mv	t3, t0
+	li	t4, 0x140
+vp_byte:
+	lbu	a0, 0(t3)
+	srli	a2, a0, 4
+	slli	a2, a2, 2
+	add	a2, a2, t5
+	lw	a2, 0(a2)
+	sw	a2, 0(t1)
+	sw	a2, 4(t1)
+	addi	t1, t1, 8
+	andi	a2, a0, 15
+	slli	a2, a2, 2
+	add	a2, a2, t5
+	lw	a2, 0(a2)
+	sw	a2, 0(t1)
+	sw	a2, 4(t1)
+	addi	t1, t1, 8
+	addi	t3, t3, 1
+	addi	t4, t4, -1
+	bnez	t4, vp_byte
+	li	a2, 0xa00
+	add	t1, t1, a2
+	addi	t2, t2, -1
+	bnez	t2, vp_rep
+	li	a2, 0x140
+	add	t0, t0, a2
+	addi	t6, t6, -1
+	bnez	t6, vp_row
+	ld	t3, 0(sp)
+	ld	t4, 8(sp)
+	ld	t5, 16(sp)
+	ld	t6, 24(sp)
+	addi	sp, sp, 32
+	ret
+vio_pal:
+	.word	0
+	.word	170
+	.word	43520
+	.word	43690
+	.word	11141120
+	.word	11141290
+	.word	11162880
+	.word	11184810
+	.word	5592405
+	.word	5592575
+	.word	5635925
+	.word	5636095
+	.word	16733525
+	.word	16733695
+	.word	16777045
+	.word	16777215
+
+/* purpose=virtio home=vio-mmio */
 	/* virtio-mmio probe 0x10001000+0x200*N for GPU device_id 16 (QEMU virt; queues/scanout open) — read-only slot scan */
 .globl VioProbe
 VioProbe:
@@ -726,6 +1113,8 @@ vi2_next:
 	bnez	t1, vi2_slot
 	ret
 vi2_dev:
+	la	t5, __vio
+	sw	t0, 1008(t5)
 	sw	zero, 112(t0)
 	li	t4, 4
 vi2_rst:
@@ -842,14 +1231,15 @@ vi2_ack:
 	sw	t3, 128(t5)
 	fence
 	sw	zero, 80(t0)
-	li	t4, 0x1000
+	li	t4, 0x400000
 vi2_poll:
 	lw	t2, 192(t5)
 	srli	t2, t2, 16
 	bnez	t2, vi2_got
 	addi	t4, t4, -1
-	bnez	t4, vi2_poll
-	j	vi2_fail
+	beqz	t4, vi2_fail
+	wfi
+	j	vi2_poll
 vi2_got:
 	lw	t2, 384(t5)
 	li	t3, 0x1101
@@ -977,14 +1367,19 @@ VioCmd:
 	sw	t3, 128(t5)
 	fence
 	sw	zero, 80(t6)
-	li	t4, 0x1000
+	li	t4, 0x400000
 vqc_poll:
 	lw	t2, 192(t5)
 	srli	t2, t2, 16
 	beq	t2, t1, vqc_done
 	addi	t4, t4, -1
-	bnez	t4, vqc_poll
+	beqz	t4, vqc_ret0
+	wfi
+	j	vqc_poll
 vqc_ret0:
+	li	a0, 0x58
+	li	a7, 1
+	ecall
 	li	a0, 0
 	ret
 vqc_done:
@@ -994,7 +1389,7 @@ vqc_done:
 	ret
 
 /* purpose=virtio home=vio-mmio */
-	/* VioScan — 640x480 scanout: create/attach/scanout/transfer/flush */
+	/* VioScan — 1920x1080 scanout: create/attach/scanout/transfer/flush */
 .globl VioScan
 VioScan:
 	addi	sp, sp, -16
@@ -1033,9 +1428,9 @@ vi3_dev:
 	sw	t3, 24(t2)
 	li	t3, 2
 	sw	t3, 28(t2)
-	li	t3, 0x280
+	li	t3, 0x780
 	sw	t3, 32(t2)
-	li	t3, 0x1e0
+	li	t3, 0x438
 	sw	t3, 36(t2)
 	li	a0, 0x28
 	li	a1, 0x200
@@ -1055,10 +1450,10 @@ vi3_dev:
 	sw	t3, 24(t2)
 	li	t3, 1
 	sw	t3, 28(t2)
-	la	t3, __vio_fb
+	la	t3, __scan_fb
 	sw	t3, 32(t2)
 	sw	zero, 36(t2)
-	li	t3, 0x12c000
+	li	t3, 0x7e9000
 	sw	t3, 40(t2)
 	li	t3, 0
 	sw	t3, 44(t2)
@@ -1078,9 +1473,9 @@ vi3_dev:
 	sw	zero, 20(t2)
 	sw	zero, 24(t2)
 	sw	zero, 28(t2)
-	li	t3, 0x280
+	li	t3, 0x780
 	sw	t3, 32(t2)
-	li	t3, 0x1e0
+	li	t3, 0x438
 	sw	t3, 36(t2)
 	li	t3, 0
 	sw	t3, 40(t2)
@@ -1091,9 +1486,9 @@ vi3_dev:
 	jal	ra, VioCmd
 	li	t3, 0x1100
 	bne	a0, t3, vs_fail
-	la	t2, __vio_fb
+	la	t2, __scan_fb
 	li	t3, 0xaa00
-	li	t4, 0xa000
+	li	t4, 0x1e000
 vs_fill:
 	sw	t3, 0(t2)
 	addi	t2, t2, 4
@@ -1110,7 +1505,7 @@ vs_fill:
 	sw	zero, 20(t2)
 	sw	zero, 24(t2)
 	sw	zero, 28(t2)
-	li	t3, 0x280
+	li	t3, 0x780
 	sw	t3, 32(t2)
 	li	t3, 0x40
 	sw	t3, 36(t2)
@@ -1136,7 +1531,7 @@ vs_fill:
 	sw	zero, 20(t2)
 	sw	zero, 24(t2)
 	sw	zero, 28(t2)
-	li	t3, 0x280
+	li	t3, 0x780
 	sw	t3, 32(t2)
 	li	t3, 0x40
 	sw	t3, 36(t2)
@@ -1237,6 +1632,557 @@ vs_fail:
 	ecall
 vs_out:
 	ld	ra, 8(sp)
+	addi	sp, sp, 16
+	ret
+
+/* purpose=virtio home=vio-mmio */
+	/* VioPaint — jal FbExpand (__gr_plane → __scan_fb 1920x1080 X8R8G8B8), then full-frame TRANSFER+FLUSH */
+.globl VioPaint
+VioPaint:
+	addi	sp, sp, -48
+	sd	ra, 0(sp)
+	sd	t3, 8(sp)
+	sd	t4, 16(sp)
+	sd	t5, 24(sp)
+	sd	t6, 32(sp)
+	la	t5, __vio
+	lw	t6, 1008(t5)
+	beqz	t6, vp_out
+	jal	ra, FbExpand
+	la	t5, __vio
+	addi	t2, t5, 288
+	li	t3, 0x105
+	sw	t3, 0(t2)
+	sw	zero, 4(t2)
+	sw	zero, 8(t2)
+	sw	zero, 12(t2)
+	sw	zero, 16(t2)
+	sw	zero, 20(t2)
+	sw	zero, 24(t2)
+	sw	zero, 28(t2)
+	li	t3, 0x780
+	sw	t3, 32(t2)
+	li	t3, 0x438
+	sw	t3, 36(t2)
+	sw	zero, 40(t2)
+	sw	zero, 44(t2)
+	li	t3, 1
+	sw	t3, 48(t2)
+	li	t3, 0
+	sw	t3, 52(t2)
+	li	a0, 0x38
+	li	a1, 0x200
+	jal	ra, VioCmd
+	li	t3, 0x1100
+	bne	a0, t3, vp_fail
+	la	t5, __vio
+	addi	t2, t5, 288
+	li	t3, 0x104
+	sw	t3, 0(t2)
+	sw	zero, 4(t2)
+	sw	zero, 8(t2)
+	sw	zero, 12(t2)
+	sw	zero, 16(t2)
+	sw	zero, 20(t2)
+	sw	zero, 24(t2)
+	sw	zero, 28(t2)
+	li	t3, 0x780
+	sw	t3, 32(t2)
+	li	t3, 0x438
+	sw	t3, 36(t2)
+	li	t3, 1
+	sw	t3, 40(t2)
+	li	t3, 0
+	sw	t3, 44(t2)
+	li	a0, 0x30
+	li	a1, 0x200
+	jal	ra, VioCmd
+	li	t3, 0x1100
+	bne	a0, t3, vp_fail
+	li	a0, 0x56
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x52
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x50
+	li	a7, 1
+	ecall
+	li	a0, 0x41
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0xa
+	li	a7, 1
+	ecall
+	j	vp_out
+vp_fail:
+	li	a0, 0x56
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x52
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x50
+	li	a7, 1
+	ecall
+	li	a0, 0x41
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x46
+	li	a7, 1
+	ecall
+	li	a0, 0x41
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4c
+	li	a7, 1
+	ecall
+	li	a0, 0xa
+	li	a7, 1
+	ecall
+vp_out:
+	ld	ra, 0(sp)
+	ld	t3, 8(sp)
+	ld	t4, 16(sp)
+	ld	t5, 24(sp)
+	ld	t6, 32(sp)
+	addi	sp, sp, 48
+	ret
+
+/* purpose=virtio home=vio-mmio */
+	/* virtio-mmio probe 0x10001000+0x200*N for GPU device_id 16 (QEMU virt; queues/scanout open) — slot scan for DeviceID 18, then eventq handshake + 8 posted event buffers */
+.globl InpInit
+InpInit:
+	la	t0, 0x10001000
+	li	t1, 8
+	li	t4, 0x1000
+ipi_slot:
+	lw	t2, 0(t0)
+	li	t3, 0x74726976
+	bne	t2, t3, ipi_next
+	lw	t2, 8(t0)
+	li	t3, 0x12
+	beq	t2, t3, ipi_dev
+ipi_next:
+	add	t0, t0, t4
+	addi	t1, t1, -1
+	bnez	t1, ipi_slot
+	li	a0, 0x56
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x52
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x50
+	li	a7, 1
+	ecall
+	li	a0, 0x55
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x45
+	li	a7, 1
+	ecall
+	li	a0, 0xa
+	li	a7, 1
+	ecall
+	ret
+ipi_dev:
+	la	t5, __vio
+	sw	t0, 1016(t5)
+	mv	t6, t0
+	sw	zero, 112(t6)
+	li	t4, 4
+ipi_rst:
+	lw	t2, 112(t6)
+	beqz	t2, ipi_ack
+	addi	t4, t4, -1
+	bnez	t4, ipi_rst
+	j	ipi_fail
+ipi_ack:
+	li	t2, 3
+	sw	t2, 112(t6)
+	sw	zero, 20(t6)
+	lw	t2, 16(t6)
+	sw	zero, 36(t6)
+	sw	zero, 32(t6)
+	li	t2, 1
+	sw	t2, 20(t6)
+	lw	t3, 16(t6)
+	andi	t3, t3, 1
+	li	t2, 1
+	sw	t2, 36(t6)
+	sw	t3, 32(t6)
+	lw	t2, 112(t6)
+	addi	t2, t2, 8
+	sw	t2, 112(t6)
+	lw	t2, 112(t6)
+	andi	t2, t2, 8
+	beqz	t2, ipi_fail
+	sw	zero, 48(t6)
+	lw	t2, 52(t6)
+	beqz	t2, ipi_fail
+	li	t3, 8
+	sw	t3, 56(t6)
+	addi	t3, t5, 1088
+	sw	t3, 128(t6)
+	sw	zero, 132(t6)
+	addi	t3, t5, 1216
+	sw	t3, 144(t6)
+	sw	zero, 148(t6)
+	addi	t3, t5, 1248
+	sw	t3, 160(t6)
+	sw	zero, 164(t6)
+	li	t3, 1
+	sw	t3, 68(t6)
+	addi	t2, t5, 1088
+	addi	t3, t5, 1328
+	li	t4, 8
+ipi_buf:
+	sw	t3, 0(t2)
+	sw	zero, 4(t2)
+	li	t1, 8
+	sw	t1, 8(t2)
+	li	t1, 2
+	sw	t1, 12(t2)
+	addi	t2, t2, 16
+	addi	t3, t3, 8
+	addi	t4, t4, -1
+	bnez	t4, ipi_buf
+	sw	zero, 1216(t5)
+	li	t1, 0x10000
+	sw	t1, 1220(t5)
+	li	t1, 0x30002
+	sw	t1, 1224(t5)
+	li	t1, 0x50004
+	sw	t1, 1228(t5)
+	li	t1, 0x70006
+	sw	t1, 1232(t5)
+	fence
+	li	t1, 0x80000
+	sw	t1, 1216(t5)
+	fence
+	sw	zero, 80(t6)
+	lw	t2, 112(t6)
+	addi	t2, t2, 4
+	sw	t2, 112(t6)
+	li	a0, 0x56
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x52
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x50
+	li	a7, 1
+	ecall
+	li	a0, 0x55
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x4b
+	li	a7, 1
+	ecall
+	li	a0, 0xa
+	li	a7, 1
+	ecall
+ipi_ret:
+	ret
+ipi_fail:
+	li	a0, 0x56
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x52
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4f
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x50
+	li	a7, 1
+	ecall
+	li	a0, 0x55
+	li	a7, 1
+	ecall
+	li	a0, 0x54
+	li	a7, 1
+	ecall
+	li	a0, 0x2d
+	li	a7, 1
+	ecall
+	li	a0, 0x46
+	li	a7, 1
+	ecall
+	li	a0, 0x41
+	li	a7, 1
+	ecall
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4c
+	li	a7, 1
+	ecall
+	li	a0, 0xa
+	li	a7, 1
+	ecall
+	ret
+
+/* purpose=virtio home=vio-mmio */
+	/* virtio-mmio probe 0x10001000+0x200*N for GPU device_id 16 (QEMU virt; queues/scanout open) — eventq used-ring drain → INP_KQ + re-post */
+.globl InpDrain
+InpDrain:
+	la	t5, __vio
+	lw	t6, 1016(t5)
+	beqz	t6, ipd_ret
+	lw	t4, 1392(t5)
+ipd_next:
+	lw	t1, 1248(t5)
+	srli	t1, t1, 16
+	beq	t1, t4, ipd_done
+	andi	t2, t4, 7
+	slli	t2, t2, 3
+	addi	t2, t2, 1252
+	add	t2, t2, t5
+	lw	t3, 0(t2)
+	andi	t2, t3, 7
+	slli	t2, t2, 3
+	addi	t2, t2, 1328
+	add	t2, t2, t5
+	lw	a2, 4(t2)
+	lbu	a1, 0(t2)
+	li	t1, 1
+	bne	a1, t1, ipd_repost
+	lw	a1, 0(t2)
+	srli	a1, a1, 16
+	slli	a1, a1, 8
+	andi	a2, a2, 255
+	xor	a1, a1, a2
+	lw	t1, 1396(t5)
+	andi	t2, t1, 15
+	slli	t2, t2, 2
+	addi	t2, t2, 1408
+	add	t2, t2, t5
+	sw	a1, 0(t2)
+	addi	t1, t1, 1
+	sw	t1, 1396(t5)
+	li	a0, 0x49
+	li	a7, 1
+	ecall
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x50
+	li	a7, 1
+	ecall
+	li	a0, 0xa
+	li	a7, 1
+	ecall
+ipd_repost:
+	lw	t2, 1216(t5)
+	srli	t2, t2, 16
+	andi	t1, t2, 7
+	slli	t1, t1, 1
+	addi	t1, t1, 1220
+	add	t1, t1, t5
+	sb	t3, 0(t1)
+	srli	t3, t3, 8
+	sb	t3, 1(t1)
+	addi	t2, t2, 1
+	slli	t2, t2, 16
+	sw	t2, 1216(t5)
+	addi	t4, t4, 1
+	sw	t4, 1392(t5)
+	j	ipd_next
+ipd_done:
+	fence
+	sw	zero, 80(t6)
+ipd_ret:
+	ret
+
+/* purpose=virtio home=vio-mmio */
+	/* virtio-mmio probe 0x10001000+0x200*N for GPU device_id 16 (QEMU virt; queues/scanout open) — jal InpDrain then pop INP_KQ */
+.globl InpPoll
+InpPoll:
+	addi	sp, sp, -16
+	sd	ra, 0(sp)
+	jal	ra, InpDrain
+	la	t5, __vio
+ipp_next:
+	lw	t1, 1400(t5)
+	lw	t2, 1396(t5)
+	beq	t1, t2, ipp_done
+	andi	t2, t1, 15
+	slli	t2, t2, 2
+	addi	t2, t2, 1408
+	add	t2, t2, t5
+	lw	t0, 0(t2)
+	addi	t1, t1, 1
+	sw	t1, 1400(t5)
+	li	a0, 0x4b
+	li	a7, 1
+	ecall
+	li	a0, 0x45
+	li	a7, 1
+	ecall
+	li	a0, 0x59
+	li	a7, 1
+	ecall
+	li	a0, 0x20
+	li	a7, 1
+	ecall
+	li	a2, 8
+ipp_hex:
+	srli	t2, t0, 28
+	andi	t2, t2, 15
+	slli	t0, t0, 4
+	la	a6, hexdig
+	add	a6, a6, t2
+	lbu	a0, 0(a6)
+	li	a7, 1
+	ecall
+	addi	a2, a2, -1
+	bnez	a2, ipp_hex
+	li	a0, 0xa
+	li	a7, 1
+	ecall
+	j	ipp_next
+ipp_done:
+	ld	ra, 0(sp)
 	addi	sp, sp, 16
 	ret
 
@@ -2113,7 +3059,7 @@ dom_done:
 
 .section .rodata
 boot_log:
-.asciz "KSTART-XLEN-64\nKSTART-HARTS-2\nKSTART-CORES-1\nKSTART-THREADS-2\nKSTART-ISSUE-2\nKSTART-HART\nKSTART-SATP-BARE\nKSTART-UART0\nKSTART-UART0-8N1\nKSTART-STACK\nKSTART-STACKS-2\nKSTART-STVEC\nKSTART-TIMER\nKMAIN\nKSTART-SMT\nKSTART-PROXY\nKSTART-PLIC\nKSTART-HSM\nKSTART-UART-IRQ\nKSTART-UART-LINE\nKSTART-UART-CMD\nKSTART-UART-VIEWSEC\nKSTART-UART-UI\nKSTART-UART-FILE\nKSTART-UART-GET\nKSTART-GR\nKSTART-GR-PLANE\nKSTART-GR-FONT\nKSTART-PROXY-SCALE\nKSTART-UI\nKSTART-FILE\nKSTART-GET\nKSTART-HTTP\nKSTART-WASM-JIT\nKSTART-WASM-UI\nKSTART-DOM\n"
+.asciz "KSTART-XLEN-64\nKSTART-HARTS-2\nKSTART-CORES-1\nKSTART-THREADS-2\nKSTART-ISSUE-2\nKSTART-HART\nKSTART-SATP-BARE\nKSTART-UART0\nKSTART-UART0-8N1\nKSTART-STACK\nKSTART-STACKS-2\nKSTART-STVEC\nKSTART-TIMER\nKMAIN\nKSTART-SMT\nKSTART-PROXY\nKSTART-PLIC\nKSTART-HSM\nKSTART-MBOX\nKSTART-UART-IRQ\nKSTART-UART-LINE\nKSTART-UART-CMD\nKSTART-UART-VIEWSEC\nKSTART-UART-UI\nKSTART-UART-FILE\nKSTART-UART-GET\nKSTART-GR\nKSTART-GR-PLANE\nKSTART-GR-FONT\nKSTART-PROXY-SCALE\nKSTART-UI\nKSTART-FILE\nKSTART-GET\nKSTART-HTTP\nKSTART-WASM-JIT\nKSTART-WASM-UI\nKSTART-DOM\n"
 __ui_wasm:
 .byte 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x10, 0x03, 0x60, 0x04, 0x7f, 0x7f, 0x7f
 .byte 0x7f, 0x00, 0x60, 0x02, 0x7f, 0x7f, 0x00, 0x60, 0x00, 0x00, 0x02, 0x22, 0x02, 0x03, 0x65, 0x6e
@@ -2292,12 +3238,12 @@ __stacks_end:
 __gr_plane:
 .space 0x25840
 __uart_line:
-.space 0x84
+.space 0x88
 __ui_blob:
 .space 0x20
 __ui_dom:
 .space 0x610
 __vio:
-.space 0x400
-__vio_fb:
-.space 0x12c000
+.space 0x600
+__scan_fb:
+.space 0x7e9000

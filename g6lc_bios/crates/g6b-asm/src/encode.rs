@@ -39,6 +39,8 @@ pub const CSR_STVEC: u32 = 0x105;
 pub const CSR_SATP: u32 = 0x180;
 pub const CSR_SEPC: u32 = 0x141;
 pub const CSR_SCAUSE: u32 = 0x142;
+/// Supervisor trap value (`stval`) — fault address on access faults.
+pub const CSR_STVAL: u32 = 0x143;
 /// Unprivileged `time` CSR (`rdtime`). S-mode; OpenSBI may trap-and-emulate.
 pub const CSR_TIME: u32 = 0xC01;
 pub const SRET: u32 = 0x1020_0073;
@@ -103,6 +105,9 @@ pub const VIO_MMIO_STEP: u64 = 0x1000;
 pub const VIO_MMIO_SLOTS: i64 = 8;
 pub const VIO_MAGIC: u32 = 0x7472_6976;
 pub const VIO_DEV_GPU: u32 = 16;
+/// virtio-input device id (virtio spec 5.8) — `virtio-keyboard-device` /
+/// `virtio-tablet-device` attach to their own virtio-mmio slot.
+pub const VIO_DEV_INPUT: u32 = 18;
 /// virtio-mmio register offsets (modern interface; `Version` = 2).
 pub const VIO_REG_FEATURES: i32 = 0x10;
 pub const VIO_REG_FEATURES_SEL: i32 = 0x14;
@@ -137,6 +142,15 @@ pub const VIO_GPU_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 pub const VIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 pub const VIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 pub const VIO_GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
+/// `virtio_input_event` field values: `type` (EV_KEY key/button events)
+/// is what `InpDrain` pushes into `__vio`'s bounded key queue; the statusq
+/// (queue 1) is unused — the guest is a passive consumer.
+pub const VIO_INP_EV_KEY: u32 = 1;
+/// `scause` exception codes for MMIO access faults — `trap_fault` treats
+/// these inside a bounded probe window as "device absent" and resumes.
+pub const SCAUSE_LOAD_ACCESS: u32 = 5;
+/// Store/AMO access fault (Priv ch3 table).
+pub const SCAUSE_STORE_ACCESS: u32 = 7;
 /// `VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM` — X8R8G8B8 little-endian words.
 pub const VIO_GPU_FMT_B8G8R8X8: u32 = 2;
 /// Controlq depth (descriptors) and descriptor flag bits.
@@ -151,6 +165,7 @@ pub const CMD_WAKE: u32 = 0x656b_6157; // "Wake"
 pub const CMD_UI: u32 = 0x0000_6955; // "Ui\0\0"
 pub const CMD_FILE: u32 = 0x656c_6946; // "File"
 pub const CMD_GET: u32 = 0x0074_6547; // "Get\0"
+pub const CMD_KEYS: u32 = 0x7379_654b; // "Keys" — dump the virtio-input key queue
 /// SBI TIME extension id (`'TIME'`).
 pub const SBI_TIME_EID: i64 = 0x5449_4d45;
 /// QEMU virt / OpenSBI default timebase (Hz). Interval = TIMEBASE / fps.

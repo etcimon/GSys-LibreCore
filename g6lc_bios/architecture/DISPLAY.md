@@ -165,15 +165,33 @@ hardware acceleration is not inferred from API availability.
    nonzero priority (QEMU resets them to 0) and enables irqs 1..=8 +
    UART(10), and `trap_vio` claims the used-buffer irq, acks the device
    ISR, and bumps `__vio+VIO_IRQF_OFF` — QEMU `xp` reads `irqf == 8`
-   (6 scan + 2 paint completions). `VioCmd` still polls `used.idx` as the
-   bounded fallback. Still open:
-   eventq/input delivery. The
-   mailbox (`loopback`)
-   and second ns16550 (dual-band UART1) do not exist on stock QEMU virt —
-   the mailbox address `0x10100000` is QEMU's `fw_cfg` — so the QEMU-verified
-   path uses `fixtures/g6lc64-qemu.json`, which keeps the virtio-gpu lane and
-   disables both; the full `g6lc64-virt.json` still describes the custom
-   board for a device model that does provide them.
+   (6 scan + 2 paint completions). `VioCmd`'s completion wait and `VioInit`'s
+   used-ring wait are **WFI-driven** when `uncore.plic` armed SEIE: a poll
+   miss sleeps until the used-buffer irq (or any enabled source — the
+   iteration bound still caps wake-check cycles and the periodic timer keeps
+   wakes coming, so a silent device degrades to the bounded timeout).
+   **virtio-input landed**: `InpInit` probes the slots for DeviceID 18
+   (`virtio-keyboard-device` in `qemu-args` under `wants_virtio_input()`),
+   handshakes, sets up the eventq (queue 0) with 8 posted
+   `virtio_input_event` buffers in `__vio+INP_*` and notifies; `trap_inp`
+   (PLIC irq `1+input slot`) acks the ISR and `InpDrain` pushes each
+   `EV_KEY` as `(code<<8)|value` into the bounded `INP_KQ` queue (serial
+   `INP`) and re-posts the buffer; UART `Keys`/`K` dumps the queue via
+   `InpPoll` (`KEY <hex>`). Exec-model verified (`host_inp_kick` is the
+   `sendkey` stand-in); a QEMU `sendkey` run is pending a QEMU host.
+   **Absent-device tolerance**: unmapped MMIO faults (scause 5/7) inside the
+   UART1/mbox probe windows are recoverable — `trap_fault` reads `stval`,
+   marks the `__uart_line` absent flag and resumes at `sepc+4`, so
+   `g6lc64-virt.json` boots on stock `virt` (no g6lc-bios mailbox, no second
+   ns16550) instead of parking on `TRAP`; `MboxInit` also readback-checks the
+   doorbell so a mapped-but-foreign region (QEMU `fw_cfg` at `0x10100000`)
+   reports `MBOX-NONE` rather than absorbing the magic write. The `uart1`
+   probe runs before `PlicInit` arms the irq, and `trap_mbox`/`uart1_drain`
+   gate on the absent flags — a trap-context MMIO read on a missing device
+   would take a nested fault and clobber `sepc`. `exec::run_module_bare` is
+   the stock-QEMU shape (no mbox, no UART1) and
+   `stock_qemu_absent_devices_recover` asserts the `MBOX-NONE`/`UART1-NONE`
+   path with the GPU/input lanes still live.
    Host-side inspection exists: `exec::Smoke::gr_frame` carries the executed
    plane and `g6b smoke --out f.ppm` renders it via `g6b-gr::plane_to_ppm`;
    `g6b smoke --out-vio f.ppm` renders the device-side `vio_fb` scanout
@@ -217,12 +235,15 @@ selected by BoardSpec:
   guest identically (BIOS and Linux share the QEMU console → one VNC serves
   both). No guest change.
 - **Host GL** — `proxy.gl:true` emits `virtio-gpu-gl-device` +
-  `-display egl-headless,gl=on` (virgl). Requires a host DRM render node;
-  without one QEMU refuses the device (`opengl is not available`) — use
-  `qemu-args --no-gl` for the 2D `virtio-gpu-device` fallback. The guest
-  path is identical either way; GL only changes host-side composite.
-  `GL-ADAPTER`/ProxyScale RVV is a *guest-side* scale accel listing, not
-  QEMU virgl — do not equate them.
+  `-display egl-headless,gl=on` (virgl). **Requires a host DRM render node**
+  (`/dev/dri/renderD*`, readable EGL/GLES driver): `egl-headless` is
+  surfaceless EGL, *not* software GL — on a host without a render node
+  (containers, WSL without GPU passthrough, headless servers) QEMU refuses
+  the device (`opengl is not available`). Use `qemu-args --no-gl` for the 2D
+  `virtio-gpu-device` fallback. The guest command stream is identical either
+  way — virgl only accelerates host-side composite; the BIOS does not emit
+  3D commands. `GL-ADAPTER`/ProxyScale RVV is a *guest-side* scale accel
+  listing, not QEMU virgl — do not equate them.
 
 Conformity: HDMI TMDS / DisplayPort PHY stay in `corev_apu` / board (REQUIREMENTS).
 This package emits the register contract, timing metadata and the scaled

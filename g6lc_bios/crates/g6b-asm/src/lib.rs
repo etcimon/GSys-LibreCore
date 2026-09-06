@@ -404,9 +404,14 @@ pub fn gr_bss_len(w: u32, h: u32, colors: u32) -> u64 {
     GR_HEADER_BYTES.saturating_add(gr_plane_len(w, h, colors))
 }
 
-/// UART line: 128 data bytes + u32 length.
+/// UART line: 128 data bytes + u32 length + probe-absent flags.
 pub const UART_LINE_CAP: u32 = 128;
-pub const UART_LINE_BSS: u64 = 132;
+/// `__uart_line+132` — set by `trap_fault` when an MMIO access fault hits
+/// the UART1 probe window (absent second ns16550, e.g. stock QEMU virt).
+pub const UART1_DEAD_OFF: u32 = 132;
+/// `__uart_line+133` — set by `trap_fault` for the loopback mailbox window.
+pub const MBOX_DEAD_OFF: u32 = 133;
+pub const UART_LINE_BSS: u64 = 136;
 /// `G6UI` magic + size + flags + accel + wasm pointer + magic echo + nfiles.
 pub const UI_HEADER_BYTES: u64 = 32;
 

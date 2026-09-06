@@ -35,17 +35,45 @@ trap_sei:
 	lw	t2, 0(t0)
 	beqz	t2, trap_done
 	sw	t2, 0(t0)
-	li	t1, 1
+	li	t1, 0xa
 	beq	t2, t1, trap_uart
+	li	t1, 3
+	beq	t2, t1, trap_mbox
+	/* virtio-mmio PLIC source: irq 16 + mmio slot */
+	la	t0, __vio
+	lw	t1, 1008(t0)
+	beqz	t1, trap_done
+	li	a2, 0x10001000
+	sub	t1, t1, a2
+	srli	t1, t1, 12
+	addi	t1, t1, 1
+	beq	t2, t1, trap_vio
+	/* virtio-input PLIC source: irq 1 + input slot */
+	lw	t1, 1016(t0)
+	beqz	t1, trap_done
+	li	a2, 0x10001000
+	sub	t1, t1, a2
+	srli	t1, t1, 12
+	addi	t1, t1, 1
+	beq	t2, t1, trap_inp
 	j	trap_done
 trap_uart:
 	/* PLIC irq 1 ns16550 RX + linebuf View/Reboot (not a poll, not 0x3F8) */
 	la	t0, 0x10000000
 	lbu	t1, 5(t0)
 	andi	t1, t1, 1
-	beqz	t1, trap_done
+	beqz	t1, uart1_drain
 	lbu	a0, 0(t0)
 	j	uart_take
+uart1_drain:
+	la	t1, __uart_line
+	lbu	t1, 132(t1)
+	bnez	t1, trap_done
+	la	t0, 0x10009000
+	lbu	t1, 5(t0)
+	andi	t1, t1, 1
+	beqz	t1, trap_done
+	lbu	a0, 0(t0)
 uart_take:
 	mv	t2, a0
 	li	a7, 1
@@ -93,6 +121,10 @@ uart_line_go:
 	beq	a1, a2, uart_get
 	li	a2, 0x47
 	beq	t1, a2, uart_get
+	li	a2, 0x7379654b
+	beq	a1, a2, uart_keys
+	li	a2, 0x4b
+	beq	t1, a2, uart_keys
 uart_view:
 	li	a0, 0x56
 	li	a7, 1
@@ -149,6 +181,8 @@ uart_ui:
 	ecall
 	/* Ui → DomPaint: re-dump live __ui_dom rows (bounded) */
 	jal	ra, DomPaint
+	/* Ui → VioPaint: push repainted plane to the virtio-gpu scanout */
+	jal	ra, VioPaint
 	j	trap_done
 uart_file:
 	/* FileServe("/ui") — HolyC kernel file server rewrite */
@@ -157,6 +191,10 @@ uart_file:
 uart_get:
 	/* Get("/ui/ui.wasm") — mailbox/UART HTTP GET rewrite; not a netdev */
 	jal	ra, GetFile
+	j	trap_done
+uart_keys:
+	/* Keys — InpPoll: drain the virtio-input eventq and print queued EV_KEY codes (KEY <hex>) */
+	jal	ra, InpPoll
 	j	trap_done
 uart_wakeup:
 	li	a0, 0x57
@@ -189,6 +227,106 @@ uart_shutdown:
 	li	a1, 0
 	ecall
 	j	trap_done
+trap_mbox:
+	/* mailbox kick — View/Reboot/Shutdown/Wakeup/Ui/File/Get; not a netdev */
+	la	t1, __uart_line
+	lbu	t1, 133(t1)
+	bnez	t1, trap_done
+	la	t0, 0x10100000
+	lw	t1, 0(t0)
+	li	t2, 1
+	bne	t1, t2, trap_done
+	sw	zero, 0(t0)
+	li	t1, 1
+	sw	t1, 8(t0)
+	lbu	t1, 16(t0)
+	li	t2, 0x52
+	beq	t1, t2, mbox_reboot
+	li	t2, 0x53
+	beq	t1, t2, mbox_shutdown
+	li	t2, 0x57
+	beq	t1, t2, mbox_wakeup
+	li	t2, 0x55
+	beq	t1, t2, mbox_ui
+	li	t2, 0x46
+	beq	t1, t2, mbox_file
+	li	t2, 0x47
+	beq	t1, t2, mbox_get
+mbox_view:
+	li	t1, 0x57454956
+	sw	t1, 272(t0)
+	li	t1, 0xa
+	sb	t1, 276(t0)
+	li	t1, 5
+	sw	t1, 4(t0)
+	li	t1, 2
+	sw	t1, 8(t0)
+	j	trap_done
+mbox_wakeup:
+	li	t1, 0x454b4157
+	sw	t1, 272(t0)
+	li	t1, 4
+	sw	t1, 4(t0)
+	li	t1, 2
+	sw	t1, 8(t0)
+	j	trap_done
+mbox_file:
+	li	t1, 0x454c4946
+	sw	t1, 272(t0)
+	li	t1, 4
+	sw	t1, 4(t0)
+	li	t1, 2
+	sw	t1, 8(t0)
+	j	trap_done
+mbox_get:
+	/* GET /ui/ui.wasm — RSP = \0asm + size (not a netdev) */
+	la	t2, __ui_blob
+	lw	t1, 24(t2)
+	sw	t1, 272(t0)
+	lw	t1, 4(t2)
+	sw	t1, 276(t0)
+	li	t1, 8
+	sw	t1, 4(t0)
+	li	t1, 2
+	sw	t1, 8(t0)
+	j	trap_done
+mbox_ui:
+	li	t1, 0xa4955
+	sw	t1, 272(t0)
+	li	t1, 3
+	sw	t1, 4(t0)
+	li	t1, 2
+	sw	t1, 8(t0)
+	j	trap_done
+mbox_reboot:
+	li	a7, 0x53525354
+	li	a6, 0
+	li	a0, 1
+	li	a1, 0
+	ecall
+	j	trap_done
+mbox_shutdown:
+	li	a7, 0x53525354
+	li	a6, 0
+	li	a0, 0
+	li	a1, 0
+	ecall
+	j	trap_done
+trap_vio:
+	lw	t1, 1008(t0)
+	lw	a0, 96(t1)
+	sw	a0, 100(t1)
+	lw	a0, 1012(t0)
+	addi	a0, a0, 1
+	sw	a0, 1012(t0)
+	j	trap_done
+trap_inp:
+	lw	t1, 1016(t0)
+	lw	a0, 96(t1)
+	sw	a0, 100(t1)
+	/* jal InpDrain — clobbers ra like the DomPaint trap call; the parked/WFI context keeps ra dead */
+	jal	ra, InpDrain
+	j	trap_done
 trap_ssi:
 	/* supervisor software interrupt — SBI IPI wake from wfi */
 	j	trap_done
@@ -202,6 +340,39 @@ trap_timer:
 	ecall
 	j	trap_done
 trap_fault:
+	/* recoverable probe: scause 5/7 + stval in UART1/mbox window → absent flag + sepc+4; everything else is the TRAP dump + park */
+	srli	t2, t0, 63
+	bnez	t2, tf_dump
+	andi	t2, t0, 31
+	li	a2, 5
+	beq	t2, a2, tf_probe
+	li	a2, 7
+	bne	t2, a2, tf_dump
+tf_probe:
+	csrrs	a2, 0x143, zero
+	la	t2, 0x10009000
+	sub	t2, a2, t2
+	srli	t2, t2, 4
+	beqz	t2, tf_u1
+	la	t2, 0x10100000
+	sub	t2, a2, t2
+	srli	t2, t2, 5
+	beqz	t2, tf_mb
+	j	tf_dump
+tf_u1:
+	la	t2, __uart_line
+	li	a0, 1
+	sb	a0, 132(t2)
+	j	tf_skip
+tf_mb:
+	la	t2, __uart_line
+	li	a0, 1
+	sb	a0, 133(t2)
+tf_skip:
+	addi	t1, t1, 4
+	csrrw	zero, 0x141, t1
+	j	trap_done
+tf_dump:
 	li	a0, 0x54
 	li	a7, 1
 	ecall
@@ -508,6 +679,6 @@ GetFile:
 
 .section .bss
 __uart_line:
-.space 0x84
+.space 0x88
 __ui_blob:
 .space 0x20
