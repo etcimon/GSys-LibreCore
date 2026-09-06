@@ -1467,6 +1467,19 @@ so a wide array is not wasted on narrow formats (INT4 gains nothing from width, 
 for INT4 every lane past 8 is pure area). Ganging past 32 lanes should only be
 bought where single-job latency matters more than area.
 
+**Logic depth: a weak proxy that does not support a frequency claim.** Yosys `ltp`
+on the same coarse netlists gives a longest topological path of 1493 levels at 8
+lanes, 1540 at 16, 1583 at 32 and 1626 at 64 - about `+43` levels per doubling,
+i.e. one reduction-tree stage, and only `+8.9%` in total from 8 to 64 lanes. Taken
+at face value that would mean ganging costs far less in frequency than in area.
+It should not be taken at face value: these are untechmapped generic structures
+(`opt -fast`, no ABC), so wide arithmetic is still ripple-shaped and real mapping
+would restructure it. Selecting the pipelined float dot (`DotPipe=1`) changes the
+path by four levels (1497 at 8 lanes, 1630 at 64) while adding **+55% cells**
+(596,485 at 8 lanes, 3,753,800 at 64), which shows the deep path is not in the
+dot product at all. **No STA, no frequency, and no timing closure evidence exists
+for any lane width**, and a 6.3x-area block could still lose at the clock.
+
 Two hard limits on the above. First, **multi-cluster is advertised but not
 implemented**: `Clusters`/`ClustersEnabled` appear in `island_cfg_legal` and the
 CAP window, while `g6lc_ai_island_top` instantiates exactly one

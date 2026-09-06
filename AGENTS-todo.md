@@ -187,6 +187,12 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   AXI response back from the request and let synthesis constant-fold the MAC
   arrays away (2838 -> 3079 cells from 8 to 64 lanes); those figures are retracted
   and the AXI pair now crosses the boundary as real ports.
+- [x] Logic-depth proxy measured (ltp on coarse netlists): 1493/1540/1583/1626
+  levels at 8/16/32/64 lanes, ~+43 per doubling (one reduction-tree stage), +8.9%
+  total. Treat as weak: untechmapped ripple arithmetic, no ABC. Selecting the
+  pipelined float dot moves the path by four levels while adding +55% cells
+  (596,485 at 8 lanes, 3,753,800 at 64), so the deep path is not in the dot.
+  tb_g6lc_ai_gemm_area gained a DotPipe parameter for that comparison.
 - [ ] Full synth/timing for the datapath is still open: with a sound harness Yosys
   stalls in SAT resource sharing (554k variables at 16 lanes) and then in ABC, so
   only coarse generic cells exist and there is no STA/frequency evidence. A

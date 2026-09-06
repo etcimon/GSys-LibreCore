@@ -29,6 +29,11 @@ module tb_g6lc_ai_gemm_area
     parameter int unsigned Lanes    = 8,
     parameter int unsigned ArOut    = 2,
     parameter int unsigned Channels = 1,
+    // 0 selects the combinational float dot, 1 the pipelined one. This matters
+    // for any depth/timing statement: the combinational variant is what makes the
+    // longest topological path enormous, and it is not the configuration a float
+    // build would ship.
+    parameter bit          DotPipe  = 1'b0,
     // Generous flat widths for the struct-typed AXI pair, declared here so the
     // port list can use them; the casts inside pick out exactly the struct bits.
     parameter int unsigned AXI_REQ_BITS  = 512,
@@ -90,7 +95,7 @@ module tb_g6lc_ai_gemm_area
       .IdWidth    ( ID_W ),
       .MaxDim     ( 16 ),
       .PeLanes    ( Lanes ),
-      .DotPipeFloat( 1'b0 ),
+      .DotPipeFloat( DotPipe ),
       .MaxAROut   ( ArOut ),
       .NrChannels ( Channels ),
       .ChanShift  ( AI_DRAM_CHAN_SHIFT_DEFAULT ),
