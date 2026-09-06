@@ -15,12 +15,12 @@ use crate::encode::{
     A0, A1, A2, A6, A7, CMD_FILE, CMD_GET, CMD_KEYS, CMD_REBO, CMD_SHUT, CMD_UI, CMD_VIEW,
     CMD_WAKE, CSR_SATP, CSR_SCAUSE, CSR_SEPC, CSR_SIE, CSR_SSTATUS, CSR_STVEC, CSR_TIME,
     GR16_MAGIC, GR_FILL_WORD, MBOX_MAGIC, MBOX_OFF_CMD, MBOX_OFF_DOORBELL, MBOX_OFF_IRQ_EN,
-    MBOX_OFF_LENGTH, MBOX_OFF_RSP, MBOX_OFF_STATUS, MBOX_RSP_FILE, MBOX_RSP_UI, MBOX_RSP_VIEW,
-    MBOX_RSP_WAKE, MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE, PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1,
-    SBI_HSM_EID, SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID, SCAUSE_LOAD_ACCESS,
-    SCAUSE_STORE_ACCESS, SIE_SEIE, SIE_SSIE, SIE_STIE, SP, SSTATUS_SIE, T0, T1, T2, T3, T4, TP,
-    UART_IER_RX, UART_IRQ, UART_LSR_DR, UI_MAGIC, VIO_DEV_GPU, VIO_MAGIC, VIO_MMIO_BASE,
-    VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
+    MBOX_OFF_LENGTH, MBOX_OFF_RSP, MBOX_OFF_STATUS, MBOX_RSP_FILE, MBOX_RSP_KEYS, MBOX_RSP_UI,
+    MBOX_RSP_VIEW, MBOX_RSP_WAKE, MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE, PLIC_CTXT_BASE,
+    PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID, SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID,
+    SCAUSE_LOAD_ACCESS, SCAUSE_STORE_ACCESS, SIE_SEIE, SIE_SSIE, SIE_STIE, SP, SSTATUS_SIE, T0, T1,
+    T2, T3, T4, TP, UART_IER_RX, UART_IRQ, UART_LSR_DR, UI_MAGIC, VIO_DEV_GPU, VIO_MAGIC,
+    VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
 };
 use crate::{
     gr_bss_len, gr_stride, Addr, Module, Node, Op, Purpose, BIOS_UI_WASM, GR_HEADER_BYTES,
@@ -2231,7 +2231,7 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
 /// Sideband mailbox command: Linux `write()` doorbell=1, first CMD byte V/R/S/W/U.
 fn trap_mbox_ops(spec: &BoardSpec) -> Vec<Op> {
     let base = parse_hex(&spec.loopback.base).unwrap_or(0x1010_0000);
-    vec![
+    let mut ops = vec![
         Op::Label("trap_mbox".into()),
         Op::Comment("mailbox kick — View/Reboot/Shutdown/Wakeup/Ui/File/Get; not a netdev".into()),
         // MBOX_DEAD gate: on a board without the g6lc-bios mailbox the claim
@@ -2340,6 +2340,21 @@ fn trap_mbox_ops(spec: &BoardSpec) -> Vec<Op> {
             rs2: T2,
             to: "mbox_get".into(),
         },
+    ];
+    if spec.wants_virtio_input() {
+        ops.extend([
+            Op::Li {
+                rd: T2,
+                imm: i64::from(b'K'),
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: T2,
+                to: "mbox_keys".into(),
+            },
+        ]);
+    }
+    ops.extend([
         Op::Label("mbox_view".into()),
         Op::Li {
             rd: T1,
@@ -2533,7 +2548,47 @@ fn trap_mbox_ops(spec: &BoardSpec) -> Vec<Op> {
             rd: X0,
             to: "trap_done".into(),
         },
-    ]
+    ]);
+    if spec.wants_virtio_input() {
+        // `K` doorbell → drain the key queue over serial (KEY <hex> lines via
+        // InpPoll) and answer RSP = `KEYS`.
+        ops.extend([
+            Op::Label("mbox_keys".into()),
+            Op::Jal {
+                rd: RA,
+                to: "InpPoll".into(),
+            },
+            Op::Li {
+                rd: T1,
+                imm: i64::from(MBOX_RSP_KEYS),
+            },
+            Op::Sw {
+                rs2: T1,
+                rs1: T0,
+                off: MBOX_OFF_RSP as i32,
+            },
+            Op::Li { rd: T1, imm: 4 },
+            Op::Sw {
+                rs2: T1,
+                rs1: T0,
+                off: MBOX_OFF_LENGTH as i32,
+            },
+            Op::Li {
+                rd: T1,
+                imm: i64::from(MBOX_ST_RSP),
+            },
+            Op::Sw {
+                rs2: T1,
+                rs1: T0,
+                off: MBOX_OFF_STATUS as i32,
+            },
+            Op::Jal {
+                rd: X0,
+                to: "trap_done".into(),
+            },
+        ]);
+    }
+    ops
 }
 
 fn putc_ops(ch: i64) -> Vec<Op> {

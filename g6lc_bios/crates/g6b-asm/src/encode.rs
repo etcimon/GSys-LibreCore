@@ -82,11 +82,12 @@ pub const MBOX_ST_RSP: u32 = 0x2;
 pub const MBOX_ST_DELEG: u32 = 0x4;
 /// Linux `write()` doorbell kick (not the `G6MB` identity word).
 pub const MBOX_KICK: u32 = 1;
-/// Little-endian `VIEW` / `WAKE` / `UI` response words.
+/// Little-endian `VIEW` / `WAKE` / `UI` / `FILE` / `KEYS` response words.
 pub const MBOX_RSP_VIEW: u32 = 0x5745_4956;
 pub const MBOX_RSP_WAKE: u32 = 0x454b_4157;
 pub const MBOX_RSP_UI: u32 = 0x000a_4955;
 pub const MBOX_RSP_FILE: u32 = 0x454c_4946;
+pub const MBOX_RSP_KEYS: u32 = 0x5359_454b;
 /// SysGrInit plane magic `GR16` (640×480×16; not VGA).
 pub const GR16_MAGIC: u32 = 0x3631_5247;
 /// Guest UI blob ident at `__ui_blob` (`G6UI`).

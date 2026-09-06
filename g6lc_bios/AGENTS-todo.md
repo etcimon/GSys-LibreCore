@@ -253,8 +253,11 @@ used elem → InterruptStatus → PLIC irq `1+slot`). `trap_inp` acks the device
 ISR and `jal`s `InpDrain`, which pushes each `EV_KEY` event as
 `(code<<8)|value` into the bounded 16-entry `INP_KQ` key queue (serial
 marker `INP`) and re-posts every consumed buffer so the device never runs
-dry. UART `Keys`/`K` (`CMD_KEYS`) runs `InpPoll` → `KEY <8-hex>` dump per
-queued entry. `qemu-args` emits `-device virtio-keyboard-device` under
+dry. UART `Keys`/`K` (`CMD_KEYS`) and the mailbox `K` doorbell both run
+`InpPoll` → `KEY <8-hex>` dump per queued entry (mbox answers
+`RSP = "KEYS"`); the model feeds `Keys\n` after the canned keypress and the
+smoke prints `KEY 00001e01` — the full sendkey→eventq→irq→queue→command
+loop is exec-verified. `qemu-args` emits `-device virtio-keyboard-device` under
 `BoardSpec::wants_virtio_input()` (= `wants_virtio_gpu && kernel.wasm.enable`).
 **WFI-driven waits:** `VioInit`'s used-ring wait and `VioCmd`'s completion
 wait insert `wfi` between a poll miss and the loop-back when `uncore.plic`

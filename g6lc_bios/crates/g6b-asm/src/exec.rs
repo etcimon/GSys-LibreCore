@@ -447,12 +447,15 @@ fn run_with_kick(
                 if host_mbox_kick(&mut csr, kick) && take_pending_sei(xlen, &mut pc, &mut csr) {
                     continue;
                 }
-                if host_uart_kick(&mut csr) && take_pending_sei(xlen, &mut pc, &mut csr) {
-                    continue;
-                }
+                // Input before UART: the canned key lands in INP_KQ early so a
+                // `Keys` command later in the UART sequence finds it queued
+                // (QEMU `sendkey` arrives asynchronously the same way).
                 if host_inp_kick(&mut csr, &mut ram, entry)
                     && take_pending_sei(xlen, &mut pc, &mut csr)
                 {
+                    continue;
+                }
+                if host_uart_kick(&mut csr) && take_pending_sei(xlen, &mut pc, &mut csr) {
                     continue;
                 }
                 return Ok(done(console, steps, h, &csr, &ram, entry));
@@ -1758,18 +1761,25 @@ fn host_uart_kick(csr: &mut Csr) -> bool {
     if ier & 1 == 0 {
         return false;
     }
-    const SEQ: [u8; 34] = *b"ViewSection(\"config\")\nUi\nFile\nGet\n";
+    const SEQ: &[u8] = b"ViewSection(\"config\")\nUi\nFile\nGet\n";
+    // On boards with the virtio-input lane, follow up with `Keys` — the
+    // canned host_inp_kick keypress should already sit in INP_KQ.
+    const SEQ_KEYS: &[u8] = b"Keys\n";
     let i = csr.uart_seq_i as usize;
-    if i >= SEQ.len() {
+    let byte = if i < SEQ.len() {
+        SEQ[i]
+    } else if csr.vio_inp && i < SEQ.len() + SEQ_KEYS.len() {
+        SEQ_KEYS[i - SEQ.len()]
+    } else {
         return false;
-    }
+    };
     csr.uart_seq_i = csr.uart_seq_i.saturating_add(1);
     let u = if csr.uart1_repl {
         &mut csr.uart1
     } else {
         &mut csr.uart0
     };
-    u.rx = SEQ[i];
+    u.rx = byte;
     u.rx_valid = true;
     if (csr.plic_enable & (1u32 << UART_IRQ)) != 0 {
         csr.plic_pending |= 1u32 << UART_IRQ;
@@ -2758,6 +2768,13 @@ mod tests {
         assert!(!s.console.contains("VIRTIO-INPUT-FAIL"), "{}", s.console);
         // The drained EV_KEY event marker.
         assert!(s.console.contains("INP\n"), "{}", s.console);
+        // The UART `Keys` command drains INP_KQ → `KEY <8-hex>`; the canned
+        // host key is KEY_A (code 30) pressed (value 1) → (30<<8)|1 = 0x1e01.
+        assert!(
+            s.console.contains("KEY 00001e01"),
+            "Keys dump: {}",
+            s.console
+        );
         assert!(!s.console.contains("TRAP-"), "{}", s.console);
         assert!(matches!(s.halt, Halt::Wfi), "{:?}", s.halt);
     }
