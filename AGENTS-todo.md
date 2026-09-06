@@ -169,12 +169,29 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   +300% figure is 4x a measured single cluster, not a measured four-cluster
   system. Implementing replication (plus per-cluster descriptor/queue fan-out and
   re-measured bandwidth on a steady-state fixture) is the actual +300% work item.
-- [ ] BLOCKER for any GEMM area/timing claim: read_slang cannot elaborate
+- [x] Priced the format return now that the datapath elaborates. Coarse generic
+  cells (relative proxy; full synth still stalls in SAT sharing then ABC):
+  8 lanes 383,575; 16 lanes 619,197 (1.61x); 32 lanes 1,146,467 (2.99x);
+  64 lanes 2,416,615 (6.30x). FP32 16x16 buys 4.20x throughput for 6.30x area,
+  so throughput-per-area falls 1.000 -> 0.964 (32 lanes) -> 0.667 (64 lanes).
+  Four 8-lane clusters reach the same 4x for 4.00x area, i.e. replication is
+  ~1.58x cheaper in area than ganging. Conclusion: replicate for throughput, gang
+  only where single-job latency outweighs area, and use format-driven grouping so
+  narrow formats do not pay for width they cannot use.
+- [x] RESOLVED (was a blocker): read_slang could not elaborate
   g6lc_ai_gemm_seq (line 1164 loop bounded by runtime mac_step; unroll limit
-  exhausted at 12000, host memory exhausted at 200000). Give that loop a
-  constant bound derived from PeLanes/MaxDim so the datapath synthesises; until
-  then there are zero gate-level cells for it and only the policy controllers
-  have synthesis evidence. Harness: verif/tb/ai_island/tb_g6lc_ai_gemm_area.sv.
+  exhausted at 12000, host memory exhausted at 200000). Fixed by bounding the
+  loop with the PeLanes parameter (mac_step <= PeLanes on that branch), verified
+  behaviour-neutral: directed PASS and byte-identical measured cycles.
+  Harness: verif/tb/ai_island/tb_g6lc_ai_gemm_area.sv, whose first version fed the
+  AXI response back from the request and let synthesis constant-fold the MAC
+  arrays away (2838 -> 3079 cells from 8 to 64 lanes); those figures are retracted
+  and the AXI pair now crosses the boundary as real ports.
+- [ ] Full synth/timing for the datapath is still open: with a sound harness Yosys
+  stalls in SAT resource sharing (554k variables at 16 lanes) and then in ABC, so
+  only coarse generic cells exist and there is no STA/frequency evidence. A
+  commercial frontend or a much cheaper mapping recipe is needed before any
+  technology area or timing claim.
 - [x] Built the remote-only research basis verif/regress/ai-gemm-codec-basis.py
   (dispatches through testharness_proxy, refuses local runs): six provisioning
   points (PeLanes 8/16/32 x MaxAROut 2/8) x five codec shape classes x seven

@@ -1434,6 +1434,39 @@ each operand eight times (4 MAC/byte), which is generous - real LLM shapes reuse
 less, so per-cluster bandwidth must be re-measured on a steady-state fixture
 before committing to a cluster count.
 
+### Pricing the format return: area now measured, and it changes the answer
+
+`g6lc_ai_gemm_seq` now elaborates under Yosys (the operand loop was given a
+constant `PeLanes` bound), so lane width can finally be priced. Counts below are
+**coarse generic cells** (pre-ABC, memories unmapped, so an absolute cell count is
+not a technology area) used purely as a *relative* proxy across lane widths; full
+`synth` did not converge here, stalling in SAT resource sharing and then ABC.
+
+| Lanes | Coarse cells | Area vs 8 | FP32 16x16 throughput | Throughput per area |
+|--:|--:|--:|--:|--:|
+| 8 | 383,575 | 1.00x | 1.00x | 1.000 |
+| 16 | 619,197 | 1.61x | - | - |
+| 32 | 1,146,467 | 2.99x | 2.88x | 0.964 |
+| 64 | 2,416,615 | 6.30x | **4.20x** | **0.667** |
+
+So the measured `+320%` on FP32 is real but **costs 6.30x the arithmetic area**,
+and lane ganging loses area efficiency as it widens: break-even holds to 32 lanes
+(0.964) and degrades badly at 64 (0.667). Comparing the two routes to the same
+`+300%`:
+
+| Route to 4x throughput | Area cost |
+|---|--:|
+| Lane ganging, 64 lanes | 6.30x (measured) |
+| Four 8-lane clusters | 4.00x (linear by construction, needs 4x bandwidth) |
+
+**Cluster replication is about 1.58x cheaper in area than ganging for the same 4x**,
+which confirms the earlier per-lane efficiency argument with real cell counts
+rather than reasoning. The two remain complementary but their roles are now
+precise: replicate clusters to buy throughput, and use format-driven lane grouping
+so a wide array is not wasted on narrow formats (INT4 gains nothing from width, so
+for INT4 every lane past 8 is pure area). Ganging past 32 lanes should only be
+bought where single-job latency matters more than area.
+
 Two hard limits on the above. First, **multi-cluster is advertised but not
 implemented**: `Clusters`/`ClustersEnabled` appear in `island_cfg_legal` and the
 CAP window, while `g6lc_ai_island_top` instantiates exactly one
