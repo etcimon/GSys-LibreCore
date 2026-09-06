@@ -93,8 +93,11 @@ slots for DeviceID 18 (`virtio-keyboard-device` under
 eventq, and `trap_inp`→`InpDrain` pushes each `EV_KEY` into the bounded
 `INP_KQ` queue (`INP` marker, buffer re-posted); UART `Keys`/`K` and the
 mailbox `K` doorbell dump it via `InpPoll` (`KEY <8-hex>`; mbox answers
-`RSP="KEYS"`), and `DomKey` (`kernel.wasm.jit`) mirrors the newest entry
-into an `inp.last` DOM row so `Ui`/`DomPaint` show it (`DOM| key <hex>`).
+`RSP="KEYS"`), and `DomKey`/`DomNav` (`kernel.wasm.jit`) mirror the queue
+into the DOM: `inp.last` = the newest key (`DOM| key <hex>`), `nav.sel` =
+menu navigation (arrows move `sel` over `spec.menus()`, Enter opens →
+`NAV <name>` serial + `open <name>` row; `NAV_SEEN` watermark scan — the
+physical ring stays for the `Keys` dump).
 **QEMU 8.2-verified** on `g6lc64-virt.json` (WSL2, stock virt, OpenSBI
 fw_dynamic): monitor `sendkey` → `INP`, serial `Keys` → the exact Linux
 keycodes, `Ui` → `DOM| key …` + `VIRTIO-PAINT`, QMP `screendump` =

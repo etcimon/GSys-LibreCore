@@ -28,9 +28,15 @@ cat <&4 > /tmp/g6b_mon.log &
 MONPID=$!
 sleep 6
 printf "sendkey a\n" >&4
-sleep 2
-printf "sendkey b\n" >&4
-sleep 2
+sleep 1
+printf "sendkey down\n" >&4
+sleep 1
+printf "sendkey ret\n" >&4
+sleep 1
+printf "sendkey down\n" >&4
+sleep 1
+printf "sendkey up\n" >&4
+sleep 1
 # UART Keys command → InpPoll dump
 printf "Keys\n" >&3
 sleep 2

@@ -1,7 +1,0 @@
-/* Generated — not a netdev. UART irq=1 SPI irq=2; this mailbox uses irq 3. */
-bios_mbox: bios-mbox@10100000 {
-	compatible = "gsys,g6lc-bios-mbox";
-	reg = <0x0 0x10100000 0x0 0x1000>;
-	interrupt-parent = <&PLIC0>;
-	interrupts = <3>;
-};

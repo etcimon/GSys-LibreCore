@@ -465,8 +465,9 @@ pub fn kstart(spec: &BoardSpec) -> Module {
             m.push(crate::vio::inp_poll_node(o, spec));
             if spec.kernel.wasm.jit {
                 // DOM-input bridge — `WasmDomText` exists only under the
-                // jit lane (dom::attach), so DomKey needs the same gate.
+                // jit lane (dom::attach), so DomKey/DomNav need the same gate.
                 m.push(crate::vio::dom_key_node(o, spec));
+                m.push(crate::vio::dom_nav_node(o, spec));
             }
         }
     }
@@ -1643,10 +1644,16 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 },
             ]);
             if spec.kernel.wasm.jit {
-                // DOM-input bridge: mirror the newest key into the `inp.last`
-                // row — no repaint in irq context (a keypress dirty-marks the
-                // row; the frame is pushed by an explicit Keys/Ui refresh,
-                // like a browser input event vs its next animation frame).
+                // DOM-input bridge: DomNav consumes new queue entries as menu
+                // input (arrows → nav.sel, Enter → open; watermark scan —
+                // the physical ring stays for the Keys dump), then DomKey
+                // mirrors the newest key into `inp.last`. No repaint in irq
+                // context — the frame is pushed by an explicit Keys/Ui
+                // refresh (like a browser input event vs its next frame).
+                ops.push(Op::Jal {
+                    rd: RA,
+                    to: "DomNav".into(),
+                });
                 ops.push(Op::Jal {
                     rd: RA,
                     to: "DomKey".into(),
@@ -2200,8 +2207,12 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             },
         ]);
         if spec.kernel.wasm.jit {
-            // Refresh the inp.last row after the drain — the repaint is left
-            // to the next Ui/refresh (a query command shouldn't flush a frame).
+            // Refresh the nav.sel/inp.last rows after the drain — the repaint
+            // is left to the next Ui/refresh (a query shouldn't flush a frame).
+            ops.push(Op::Jal {
+                rd: RA,
+                to: "DomNav".into(),
+            });
             ops.push(Op::Jal {
                 rd: RA,
                 to: "DomKey".into(),
@@ -2583,10 +2594,16 @@ fn trap_mbox_ops(spec: &BoardSpec) -> Vec<Op> {
             },
         ]);
         if spec.kernel.wasm.jit {
-            ops.extend([Op::Jal {
-                rd: RA,
-                to: "DomKey".into(),
-            }]);
+            ops.extend([
+                Op::Jal {
+                    rd: RA,
+                    to: "DomNav".into(),
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "DomKey".into(),
+                },
+            ]);
         }
         ops.extend([
             Op::Li {

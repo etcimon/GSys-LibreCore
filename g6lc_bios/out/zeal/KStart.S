@@ -64,61 +64,6 @@ after:
 	/* TimerInit rewrite: sie.STIE + sstatus.SIE + SBI TIME (RISC-V Priv ch3) — jal before park/uart (not fall-through) */
 	jal	ra, TimerInit
 
-/* purpose=uart1-repl home=t0=uart1 */
-	/* SSH+HolyC dual-band UART1 ns16550 RX irq (chardev, not a NIC, not a poll) @ 0x10009000 — probe LSR (fault→absent via trap window) then IER.ERBFI */
-	la	t0, 0x10009000
-	li	t1, 0
-	lbu	t1, 5(t0)
-	la	t2, __uart_line
-	lbu	t2, 132(t2)
-	bnez	t2, u1_absent
-	la	t0, 0x10009000
-	sb	zero, 1(t0)
-	li	t1, 3
-	sb	t1, 3(t0)
-	li	t1, 7
-	sb	t1, 2(t0)
-	li	t1, 3
-	sb	t1, 4(t0)
-	li	t1, 1
-	sb	t1, 1(t0)
-	j	u1_done
-u1_absent:
-	li	a0, 0x55
-	li	a7, 1
-	ecall
-	li	a0, 0x41
-	li	a7, 1
-	ecall
-	li	a0, 0x52
-	li	a7, 1
-	ecall
-	li	a0, 0x54
-	li	a7, 1
-	ecall
-	li	a0, 0x31
-	li	a7, 1
-	ecall
-	li	a0, 0x2d
-	li	a7, 1
-	ecall
-	li	a0, 0x4e
-	li	a7, 1
-	ecall
-	li	a0, 0x4f
-	li	a7, 1
-	ecall
-	li	a0, 0x4e
-	li	a7, 1
-	ecall
-	li	a0, 0x45
-	li	a7, 1
-	ecall
-	li	a0, 0xa
-	li	a7, 1
-	ecall
-u1_done:
-
 /* purpose=uncore home=clint|plic|ddr|pcie */
 	/* PLIC S-mode ctx1 claim/complete (UART irq 1, mbox irq); not x86 EOI — jal PlicInit (S-mode ctx1) */
 	jal	ra, PlicInit
@@ -126,10 +71,6 @@ u1_done:
 /* purpose=topology home=cores×threads×issue */
 	/* SBI HSM hart_start + IPI for every hart except self (MultiProc rewrite); Adam on the boot hart — jal HartStart (SBI HSM+IPI) */
 	jal	ra, HartStart
-
-/* purpose=mailbox home=mbox-mmio */
-	/* sideband mbox MMIO (doorbell/status/irq_en); not a netdev — jal MboxInit */
-	jal	ra, MboxInit
 
 /* purpose=display-proxy home=gr-plane→scanout */
 	/* SysGrInit GR16 header + 4bpp plane at __gr_plane; 640×480 scaled to high-DPI scanout — jal GrInit (SysGrInit rewrite) */
@@ -213,8 +154,6 @@ trap_sei:
 	sw	t2, 0(t0)
 	li	t1, 0xa
 	beq	t2, t1, trap_uart
-	li	t1, 3
-	beq	t2, t1, trap_mbox
 	/* virtio-mmio PLIC source: irq 16 + mmio slot */
 	la	t0, __vio
 	lw	t1, 1008(t0)
@@ -238,18 +177,9 @@ trap_uart:
 	la	t0, 0x10000000
 	lbu	t1, 5(t0)
 	andi	t1, t1, 1
-	beqz	t1, uart1_drain
-	lbu	a0, 0(t0)
-	j	uart_take
-uart1_drain:
-	la	t1, __uart_line
-	lbu	t1, 132(t1)
-	bnez	t1, trap_done
-	la	t0, 0x10009000
-	lbu	t1, 5(t0)
-	andi	t1, t1, 1
 	beqz	t1, trap_done
 	lbu	a0, 0(t0)
+	j	uart_take
 uart_take:
 	mv	t2, a0
 	li	a7, 1
@@ -371,6 +301,8 @@ uart_get:
 uart_keys:
 	/* Keys — InpPoll: drain the virtio-input eventq and print queued EV_KEY codes (KEY <hex>) */
 	jal	ra, InpPoll
+	jal	ra, DomNav
+	jal	ra, DomKey
 	j	trap_done
 uart_wakeup:
 	li	a0, 0x57
@@ -403,91 +335,6 @@ uart_shutdown:
 	li	a1, 0
 	ecall
 	j	trap_done
-trap_mbox:
-	/* mailbox kick — View/Reboot/Shutdown/Wakeup/Ui/File/Get; not a netdev */
-	la	t1, __uart_line
-	lbu	t1, 133(t1)
-	bnez	t1, trap_done
-	la	t0, 0x10100000
-	lw	t1, 0(t0)
-	li	t2, 1
-	bne	t1, t2, trap_done
-	sw	zero, 0(t0)
-	li	t1, 1
-	sw	t1, 8(t0)
-	lbu	t1, 16(t0)
-	li	t2, 0x52
-	beq	t1, t2, mbox_reboot
-	li	t2, 0x53
-	beq	t1, t2, mbox_shutdown
-	li	t2, 0x57
-	beq	t1, t2, mbox_wakeup
-	li	t2, 0x55
-	beq	t1, t2, mbox_ui
-	li	t2, 0x46
-	beq	t1, t2, mbox_file
-	li	t2, 0x47
-	beq	t1, t2, mbox_get
-mbox_view:
-	li	t1, 0x57454956
-	sw	t1, 272(t0)
-	li	t1, 0xa
-	sb	t1, 276(t0)
-	li	t1, 5
-	sw	t1, 4(t0)
-	li	t1, 2
-	sw	t1, 8(t0)
-	j	trap_done
-mbox_wakeup:
-	li	t1, 0x454b4157
-	sw	t1, 272(t0)
-	li	t1, 4
-	sw	t1, 4(t0)
-	li	t1, 2
-	sw	t1, 8(t0)
-	j	trap_done
-mbox_file:
-	li	t1, 0x454c4946
-	sw	t1, 272(t0)
-	li	t1, 4
-	sw	t1, 4(t0)
-	li	t1, 2
-	sw	t1, 8(t0)
-	j	trap_done
-mbox_get:
-	/* GET /ui/ui.wasm — RSP = \0asm + size (not a netdev) */
-	la	t2, __ui_blob
-	lw	t1, 24(t2)
-	sw	t1, 272(t0)
-	lw	t1, 4(t2)
-	sw	t1, 276(t0)
-	li	t1, 8
-	sw	t1, 4(t0)
-	li	t1, 2
-	sw	t1, 8(t0)
-	j	trap_done
-mbox_ui:
-	li	t1, 0xa4955
-	sw	t1, 272(t0)
-	li	t1, 3
-	sw	t1, 4(t0)
-	li	t1, 2
-	sw	t1, 8(t0)
-	j	trap_done
-mbox_reboot:
-	li	a7, 0x53525354
-	li	a6, 0
-	li	a0, 1
-	li	a1, 0
-	ecall
-	j	trap_done
-mbox_shutdown:
-	li	a7, 0x53525354
-	li	a6, 0
-	li	a0, 0
-	li	a1, 0
-	ecall
-	j	trap_done
 trap_vio:
 	lw	t1, 1008(t0)
 	lw	a0, 96(t1)
@@ -502,6 +349,8 @@ trap_inp:
 	sw	a0, 100(t1)
 	/* jal InpDrain — clobbers ra like the DomPaint trap call; the parked/WFI context keeps ra dead */
 	jal	ra, InpDrain
+	jal	ra, DomNav
+	jal	ra, DomKey
 	j	trap_done
 trap_ssi:
 	/* supervisor software interrupt — SBI IPI wake from wfi */
@@ -697,77 +546,6 @@ hsm_mask:
 	li	a1, 0
 	li	a6, 0
 	li	a7, 0x735049
-	ecall
-	ret
-
-/* purpose=mailbox home=mbox-mmio */
-	/* sideband mbox MMIO (doorbell/status/irq_en); not a netdev @ 0x10100000 irq 3 — doorbell write+readback probe; absent → MBOX-NONE */
-.globl MboxInit
-MboxInit:
-	la	t0, 0x10100000
-	li	t1, 0x47364d42
-	sw	t1, 0(t0)
-	li	t2, 0
-	lw	t2, 0(t0)
-	bne	t2, t1, mb_none
-	sw	zero, 8(t0)
-	li	t1, 1
-	sw	t1, 12(t0)
-	li	a0, 0x4d
-	li	a7, 1
-	ecall
-	li	a0, 0x42
-	li	a7, 1
-	ecall
-	li	a0, 0x4f
-	li	a7, 1
-	ecall
-	li	a0, 0x58
-	li	a7, 1
-	ecall
-	li	a0, 0x2d
-	li	a7, 1
-	ecall
-	li	a0, 0x4f
-	li	a7, 1
-	ecall
-	li	a0, 0x4b
-	li	a7, 1
-	ecall
-	li	a0, 0xa
-	li	a7, 1
-	ecall
-	ret
-mb_none:
-	li	a0, 0x4d
-	li	a7, 1
-	ecall
-	li	a0, 0x42
-	li	a7, 1
-	ecall
-	li	a0, 0x4f
-	li	a7, 1
-	ecall
-	li	a0, 0x58
-	li	a7, 1
-	ecall
-	li	a0, 0x2d
-	li	a7, 1
-	ecall
-	li	a0, 0x4e
-	li	a7, 1
-	ecall
-	li	a0, 0x4f
-	li	a7, 1
-	ecall
-	li	a0, 0x4e
-	li	a7, 1
-	ecall
-	li	a0, 0x45
-	li	a7, 1
-	ecall
-	li	a0, 0xa
-	li	a7, 1
 	ecall
 	ret
 
@@ -2186,6 +1964,212 @@ ipp_done:
 	addi	sp, sp, 16
 	ret
 
+/* purpose=virtio home=vio-mmio */
+	/* virtio-mmio probe 0x10001000+0x200*N for GPU device_id 16 (QEMU virt; queues/scanout open) — INP_KQ[head-1] → DOM row inp.last */
+.globl DomKey
+DomKey:
+	addi	sp, sp, -16
+	sd	ra, 0(sp)
+	la	t5, __vio
+	lw	t1, 1396(t5)
+	beqz	t1, dkey_done
+	addi	t0, t1, -1
+	andi	t0, t0, 15
+	slli	t0, t0, 2
+	addi	t0, t0, 1408
+	add	t0, t0, t5
+	lw	t0, 0(t0)
+	li	t3, 0x2079656b
+	sw	t3, 1472(t5)
+	addi	t6, t5, 1476
+	li	t4, 8
+dkey_hex:
+	srli	t3, t0, 28
+	andi	t3, t3, 15
+	slli	t0, t0, 4
+	la	a6, hexdig
+	add	a6, a6, t3
+	lbu	t3, 0(a6)
+	sb	t3, 0(t6)
+	addi	t6, t6, 1
+	addi	t4, t4, -1
+	bnez	t4, dkey_hex
+	la	a0, domkey_id
+	li	a1, 8
+	addi	a2, t5, 1472
+	li	a3, 0xc
+	jal	ra, WasmDomText
+dkey_done:
+	ld	ra, 0(sp)
+	addi	sp, sp, 16
+	ret
+domkey_id:
+	.word	779120233
+	.word	1953718636
+
+/* purpose=virtio home=vio-mmio */
+	/* virtio-mmio probe 0x10001000+0x200*N for GPU device_id 16 (QEMU virt; queues/scanout open) — INP_KQ nav: arrows→nav.sel, Enter→open (watermark scan) */
+.globl DomNav
+DomNav:
+	addi	sp, sp, -48
+	sd	ra, 0(sp)
+	sd	t1, 8(sp)
+	sd	t2, 16(sp)
+	sd	t5, 24(sp)
+	la	t5, __vio
+	lw	t1, 1396(t5)
+	lw	t2, 1488(t5)
+dnav_next:
+	beq	t2, t1, dnav_done
+	andi	t3, t2, 15
+	slli	t3, t3, 2
+	addi	t3, t3, 1408
+	add	t3, t3, t5
+	lw	t3, 0(t3)
+	andi	t4, t3, 255
+	srli	t0, t3, 8
+	beqz	t4, dnav_skip
+	li	t6, 0x1c
+	beq	t0, t6, dnav_enter
+	li	t6, 1
+	beq	t0, t6, dnav_esc
+	li	t6, 0x67
+	beq	t0, t6, dnav_prev
+	li	t6, 0x69
+	beq	t0, t6, dnav_prev
+	li	t6, 0x6c
+	beq	t0, t6, dnav_fwd
+	li	t6, 0x6a
+	beq	t0, t6, dnav_fwd
+	j	dnav_skip
+dnav_prev:
+	lw	t3, 1492(t5)
+	bnez	t3, dnav_prev_dec
+	li	t3, 7
+dnav_prev_dec:
+	addi	t3, t3, -1
+	j	dnav_set
+dnav_fwd:
+	lw	t3, 1492(t5)
+	addi	t3, t3, 1
+	li	t6, 7
+	bne	t3, t6, dnav_set
+	li	t3, 0
+dnav_set:
+	sw	t3, 1492(t5)
+	sw	zero, 1496(t5)
+	j	dnav_show
+dnav_esc:
+	sw	zero, 1492(t5)
+	sw	zero, 1496(t5)
+	j	dnav_show
+dnav_enter:
+	li	t3, 1
+	sw	t3, 1496(t5)
+	j	dnav_show
+dnav_skip:
+	addi	t2, t2, 1
+	j	dnav_next
+dnav_show:
+	lw	t3, 1496(t5)
+	bnez	t3, dnav_open_txt
+	li	t3, 0x2076616e
+	sw	t3, 1504(t5)
+	li	t6, 4
+	j	dnav_name
+dnav_open_txt:
+	li	t3, 0x6e65706f
+	sw	t3, 1504(t5)
+	li	t3, 0x20
+	sb	t3, 1508(t5)
+	li	t6, 5
+dnav_name:
+	lw	t3, 1492(t5)
+	slli	t3, t3, 3
+	la	t4, domnav_names
+	add	t3, t3, t4
+	addi	t4, t5, 1504
+	add	t4, t4, t6
+	li	t0, 0
+dnav_ncopy:
+	li	a6, 8
+	beq	t0, a6, dnav_ncopied
+	add	a6, t3, t0
+	lbu	a6, 0(a6)
+	beqz	a6, dnav_ncopied
+	sb	a6, 0(t4)
+	addi	t4, t4, 1
+	addi	t0, t0, 1
+	j	dnav_ncopy
+dnav_ncopied:
+	add	a3, t6, t0
+	lw	t6, 1496(t5)
+	beqz	t6, dnav_dom
+	li	a0, 0x4e
+	li	a7, 1
+	ecall
+	li	a0, 0x41
+	li	a7, 1
+	ecall
+	li	a0, 0x56
+	li	a7, 1
+	ecall
+	li	a0, 0x20
+	li	a7, 1
+	ecall
+	li	t4, 0
+dnav_pname:
+	beq	t4, t0, dnav_pnamed
+	add	a0, t3, t4
+	lbu	a0, 0(a0)
+	li	a7, 1
+	ecall
+	addi	t4, t4, 1
+	j	dnav_pname
+dnav_pnamed:
+	li	a0, 0xa
+	li	a7, 1
+	ecall
+dnav_dom:
+	la	a0, domnav_id
+	li	a1, 7
+	addi	a2, t5, 1504
+	sd	t1, 8(sp)
+	sd	t2, 16(sp)
+	sd	t5, 24(sp)
+	jal	ra, WasmDomText
+	ld	t1, 8(sp)
+	ld	t2, 16(sp)
+	ld	t5, 24(sp)
+	addi	t2, t2, 1
+	j	dnav_next
+dnav_done:
+	sw	t2, 1488(t5)
+	ld	ra, 0(sp)
+	ld	t1, 8(sp)
+	ld	t2, 16(sp)
+	ld	t5, 24(sp)
+	addi	sp, sp, 48
+	ret
+domnav_id:
+	.word	779510126
+	.word	7103859
+domnav_names:
+	.word	1852399981
+	.word	0
+	.word	7696483
+	.word	0
+	.word	1869440365
+	.word	31090
+	.word	1868787317
+	.word	25970
+	.word	1769366884
+	.word	7562595
+	.word	1953460066
+	.word	0
+	.word	1953785203
+	.word	1936158313
+
 /* purpose=file-serve home=g6ui+html|js|wasm */
 	/* HolyC kernel file server: G6UI blob + generated HTML/JS/WASM; not a Linux VFS — G6UI magic + wasm size/ptr at __ui_blob (not a VFS) */
 .globl UiInit
@@ -3059,7 +3043,7 @@ dom_done:
 
 .section .rodata
 boot_log:
-.asciz "KSTART-XLEN-64\nKSTART-HARTS-2\nKSTART-CORES-1\nKSTART-THREADS-2\nKSTART-ISSUE-2\nKSTART-HART\nKSTART-SATP-BARE\nKSTART-UART0\nKSTART-UART0-8N1\nKSTART-STACK\nKSTART-STACKS-2\nKSTART-STVEC\nKSTART-TIMER\nKMAIN\nKSTART-SMT\nKSTART-PROXY\nKSTART-PLIC\nKSTART-HSM\nKSTART-MBOX\nKSTART-UART-IRQ\nKSTART-UART-LINE\nKSTART-UART-CMD\nKSTART-UART-VIEWSEC\nKSTART-UART-UI\nKSTART-UART-FILE\nKSTART-UART-GET\nKSTART-GR\nKSTART-GR-PLANE\nKSTART-GR-FONT\nKSTART-PROXY-SCALE\nKSTART-UI\nKSTART-FILE\nKSTART-GET\nKSTART-HTTP\nKSTART-WASM-JIT\nKSTART-WASM-UI\nKSTART-DOM\n"
+.asciz "KSTART-XLEN-64\nKSTART-HARTS-2\nKSTART-CORES-1\nKSTART-THREADS-2\nKSTART-ISSUE-2\nKSTART-HART\nKSTART-SATP-BARE\nKSTART-UART0\nKSTART-UART0-8N1\nKSTART-STACK\nKSTART-STACKS-2\nKSTART-STVEC\nKSTART-TIMER\nKMAIN\nKSTART-SMT\nKSTART-PROXY\nKSTART-PLIC\nKSTART-HSM\nKSTART-UART-IRQ\nKSTART-UART-LINE\nKSTART-UART-CMD\nKSTART-UART-VIEWSEC\nKSTART-UART-UI\nKSTART-UART-FILE\nKSTART-UART-GET\nKSTART-GR\nKSTART-GR-PLANE\nKSTART-GR-FONT\nKSTART-PROXY-SCALE\nKSTART-UI\nKSTART-FILE\nKSTART-GET\nKSTART-HTTP\nKSTART-WASM-JIT\nKSTART-WASM-UI\nKSTART-DOM\n"
 __ui_wasm:
 .byte 0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x10, 0x03, 0x60, 0x04, 0x7f, 0x7f, 0x7f
 .byte 0x7f, 0x00, 0x60, 0x02, 0x7f, 0x7f, 0x00, 0x60, 0x00, 0x00, 0x02, 0x22, 0x02, 0x03, 0x65, 0x6e

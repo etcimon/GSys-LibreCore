@@ -37,8 +37,6 @@ trap_sei:
 	sw	t2, 0(t0)
 	li	t1, 0xa
 	beq	t2, t1, trap_uart
-	li	t1, 3
-	beq	t2, t1, trap_mbox
 	/* virtio-mmio PLIC source: irq 16 + mmio slot */
 	la	t0, __vio
 	lw	t1, 1008(t0)
@@ -62,18 +60,9 @@ trap_uart:
 	la	t0, 0x10000000
 	lbu	t1, 5(t0)
 	andi	t1, t1, 1
-	beqz	t1, uart1_drain
-	lbu	a0, 0(t0)
-	j	uart_take
-uart1_drain:
-	la	t1, __uart_line
-	lbu	t1, 132(t1)
-	bnez	t1, trap_done
-	la	t0, 0x10009000
-	lbu	t1, 5(t0)
-	andi	t1, t1, 1
 	beqz	t1, trap_done
 	lbu	a0, 0(t0)
+	j	uart_take
 uart_take:
 	mv	t2, a0
 	li	a7, 1
@@ -195,6 +184,8 @@ uart_get:
 uart_keys:
 	/* Keys — InpPoll: drain the virtio-input eventq and print queued EV_KEY codes (KEY <hex>) */
 	jal	ra, InpPoll
+	jal	ra, DomNav
+	jal	ra, DomKey
 	j	trap_done
 uart_wakeup:
 	li	a0, 0x57
@@ -227,91 +218,6 @@ uart_shutdown:
 	li	a1, 0
 	ecall
 	j	trap_done
-trap_mbox:
-	/* mailbox kick — View/Reboot/Shutdown/Wakeup/Ui/File/Get; not a netdev */
-	la	t1, __uart_line
-	lbu	t1, 133(t1)
-	bnez	t1, trap_done
-	la	t0, 0x10100000
-	lw	t1, 0(t0)
-	li	t2, 1
-	bne	t1, t2, trap_done
-	sw	zero, 0(t0)
-	li	t1, 1
-	sw	t1, 8(t0)
-	lbu	t1, 16(t0)
-	li	t2, 0x52
-	beq	t1, t2, mbox_reboot
-	li	t2, 0x53
-	beq	t1, t2, mbox_shutdown
-	li	t2, 0x57
-	beq	t1, t2, mbox_wakeup
-	li	t2, 0x55
-	beq	t1, t2, mbox_ui
-	li	t2, 0x46
-	beq	t1, t2, mbox_file
-	li	t2, 0x47
-	beq	t1, t2, mbox_get
-mbox_view:
-	li	t1, 0x57454956
-	sw	t1, 272(t0)
-	li	t1, 0xa
-	sb	t1, 276(t0)
-	li	t1, 5
-	sw	t1, 4(t0)
-	li	t1, 2
-	sw	t1, 8(t0)
-	j	trap_done
-mbox_wakeup:
-	li	t1, 0x454b4157
-	sw	t1, 272(t0)
-	li	t1, 4
-	sw	t1, 4(t0)
-	li	t1, 2
-	sw	t1, 8(t0)
-	j	trap_done
-mbox_file:
-	li	t1, 0x454c4946
-	sw	t1, 272(t0)
-	li	t1, 4
-	sw	t1, 4(t0)
-	li	t1, 2
-	sw	t1, 8(t0)
-	j	trap_done
-mbox_get:
-	/* GET /ui/ui.wasm — RSP = \0asm + size (not a netdev) */
-	la	t2, __ui_blob
-	lw	t1, 24(t2)
-	sw	t1, 272(t0)
-	lw	t1, 4(t2)
-	sw	t1, 276(t0)
-	li	t1, 8
-	sw	t1, 4(t0)
-	li	t1, 2
-	sw	t1, 8(t0)
-	j	trap_done
-mbox_ui:
-	li	t1, 0xa4955
-	sw	t1, 272(t0)
-	li	t1, 3
-	sw	t1, 4(t0)
-	li	t1, 2
-	sw	t1, 8(t0)
-	j	trap_done
-mbox_reboot:
-	li	a7, 0x53525354
-	li	a6, 0
-	li	a0, 1
-	li	a1, 0
-	ecall
-	j	trap_done
-mbox_shutdown:
-	li	a7, 0x53525354
-	li	a6, 0
-	li	a0, 0
-	li	a1, 0
-	ecall
-	j	trap_done
 trap_vio:
 	lw	t1, 1008(t0)
 	lw	a0, 96(t1)
@@ -326,6 +232,8 @@ trap_inp:
 	sw	a0, 100(t1)
 	/* jal InpDrain — clobbers ra like the DomPaint trap call; the parked/WFI context keeps ra dead */
 	jal	ra, InpDrain
+	jal	ra, DomNav
+	jal	ra, DomKey
 	j	trap_done
 trap_ssi:
 	/* supervisor software interrupt — SBI IPI wake from wfi */

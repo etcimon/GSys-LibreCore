@@ -84,6 +84,26 @@ pub const INP_KQ_OFF: i32 = 0x580;
 /// 16B scratch: `DomKey` builds `"key <8hex>"` here before `WasmDomText`
 /// copies it into the `inp.last` DOM row (0x5c0..0x5d0 of `__vio`).
 pub const INP_KEYTXT_OFF: i32 = 0x5c0;
+/// `NAV_SEEN` — `INP_KQ` index watermark: entries before it are already
+/// consumed by `DomNav` (non-destructive — `Keys` still dumps the ring).
+pub const NAV_SEEN_OFF: i32 = 0x5d0;
+/// `NAV_SEL` — selected menu index (0..`spec.menus().len()`).
+pub const NAV_SEL_OFF: i32 = 0x5d4;
+/// `NAV_OPEN` — Enter latch: 1 = the selected menu is "open".
+pub const NAV_OPEN_OFF: i32 = 0x5d8;
+/// `NAV_TEXT` — 16B scratch holding the `nav.sel` row text
+/// (`"nav <name>"`/`"open <name>"`). `WasmDomText` stores the pointer, so
+/// this must be a dedicated buffer — not the `INP_KEYTXT` scratch `DomKey`
+/// rewrites on every key.
+pub const NAV_TEXT_OFF: i32 = 0x5e0;
+/// Linux `EV_KEY` codes the menu navigator consumes (virtio-input carries
+/// the kernel's `KEY_*` codes verbatim — QEMU `sendkey down`/`ret`).
+pub const VIO_KEY_ESC: i64 = 1;
+pub const VIO_KEY_ENTER: i64 = 28;
+pub const VIO_KEY_UP: i64 = 103;
+pub const VIO_KEY_LEFT: i64 = 105;
+pub const VIO_KEY_RIGHT: i64 = 106;
+pub const VIO_KEY_DOWN: i64 = 108;
 /// Uncore display-engine presence magic (`architecture/uncore/hdmi-display.md`).
 pub const DISP_MAGIC: u32 = u32::from_le_bytes(*b"G6DS");
 /// `G6FB` descriptor magic.
@@ -112,6 +132,13 @@ fn putc_str(ops: &mut Vec<Op>, s: &str) {
             },
             Op::Ecall,
         ]);
+    }
+}
+
+fn jump(to: &str) -> Op {
+    Op::Jal {
+        rd: X0,
+        to: to.into(),
     }
 }
 
@@ -1464,6 +1491,400 @@ pub fn dom_key_node(o: Object, spec: &BoardSpec) -> Node {
         Op::Word(u32::from_le_bytes(*b"inp.")),
         Op::Word(u32::from_le_bytes(*b"last")),
     ];
+    Node {
+        purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// `DomNav` — menu navigation over `INP_KQ`: walks entries from the
+/// `NAV_SEEN` watermark to `INP_KQ_HEAD` (non-destructive — the physical
+/// ring stays intact for the `Keys` dump), applies press events (value≥1):
+/// UP/LEFT → sel-1, DOWN/RIGHT → sel+1 (wrap over `spec.menus()`), ESC →
+/// sel=0+closed, ENTER → open latch + serial `NAV <name>`. The `nav.sel`
+/// DOM row shows `"nav <name>"` / `"open <name>"` via `WasmDomText`
+/// (find-or-create; t1/t2/t5 saved across the call — the DOM op clobbers
+/// all t/a regs). Menu names come from `spec.menus()` as 8-byte rodata
+/// slots — generated, not hard-coded.
+pub fn dom_nav_node(o: Object, spec: &BoardSpec) -> Node {
+    let xlen = spec.isa.xlen;
+    let n = spec.menus().len() as i64;
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — INP_KQ nav: arrows→nav.sel, Enter→open (watermark scan)",
+            o.why
+        )),
+        Op::Glob("DomNav".into()),
+        Op::Label("DomNav".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -48,
+        },
+        st_x(xlen, RA, SP, 0),
+        st_x(xlen, T1, SP, 8),
+        st_x(xlen, T2, SP, 16),
+        st_x(xlen, T5, SP, 24),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T1, T5, INP_KQ_HEAD),
+        lw(T2, T5, NAV_SEEN_OFF),
+        Op::Label("dnav_next".into()),
+        Op::Beq {
+            rs1: T2,
+            rs2: T1,
+            to: "dnav_done".into(),
+        },
+        // t3 = KQ[t2 & 15] = (code<<8)|value
+        Op::Andi {
+            rd: T3,
+            rs: T2,
+            imm: 15,
+        },
+        Op::Slli {
+            rd: T3,
+            rs: T3,
+            shamt: 2,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T3,
+            imm: INP_KQ_OFF,
+        },
+        Op::Add {
+            rd: T3,
+            rs1: T3,
+            rs2: T5,
+        },
+        lw(T3, T3, 0),
+        Op::Andi {
+            rd: T4,
+            rs: T3,
+            imm: 0xff,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T3,
+            shamt: 8,
+        },
+        // press/repeat only — releases (value 0) don't navigate.
+        Op::Beq {
+            rs1: T4,
+            rs2: X0,
+            to: "dnav_skip".into(),
+        },
+        Op::Li {
+            rd: T6,
+            imm: VIO_KEY_ENTER,
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: T6,
+            to: "dnav_enter".into(),
+        },
+        Op::Li {
+            rd: T6,
+            imm: VIO_KEY_ESC,
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: T6,
+            to: "dnav_esc".into(),
+        },
+        Op::Li {
+            rd: T6,
+            imm: VIO_KEY_UP,
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: T6,
+            to: "dnav_prev".into(),
+        },
+        Op::Li {
+            rd: T6,
+            imm: VIO_KEY_LEFT,
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: T6,
+            to: "dnav_prev".into(),
+        },
+        Op::Li {
+            rd: T6,
+            imm: VIO_KEY_DOWN,
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: T6,
+            to: "dnav_fwd".into(),
+        },
+        Op::Li {
+            rd: T6,
+            imm: VIO_KEY_RIGHT,
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: T6,
+            to: "dnav_fwd".into(),
+        },
+        jump("dnav_skip"),
+        Op::Label("dnav_prev".into()),
+        lw(T3, T5, NAV_SEL_OFF),
+        Op::Bne {
+            rs1: T3,
+            rs2: X0,
+            to: "dnav_prev_dec".into(),
+        },
+        Op::Li { rd: T3, imm: n },
+        Op::Label("dnav_prev_dec".into()),
+        Op::Addi {
+            rd: T3,
+            rs: T3,
+            imm: -1,
+        },
+        jump("dnav_set"),
+        Op::Label("dnav_fwd".into()),
+        lw(T3, T5, NAV_SEL_OFF),
+        Op::Addi {
+            rd: T3,
+            rs: T3,
+            imm: 1,
+        },
+        Op::Li { rd: T6, imm: n },
+        Op::Bne {
+            rs1: T3,
+            rs2: T6,
+            to: "dnav_set".into(),
+        },
+        Op::Li { rd: T3, imm: 0 },
+        Op::Label("dnav_set".into()),
+        sw(T3, T5, NAV_SEL_OFF),
+        // moving the selection closes any open menu
+        sw(X0, T5, NAV_OPEN_OFF),
+        jump("dnav_show"),
+        Op::Label("dnav_esc".into()),
+        sw(X0, T5, NAV_SEL_OFF),
+        sw(X0, T5, NAV_OPEN_OFF),
+        jump("dnav_show"),
+        Op::Label("dnav_enter".into()),
+        Op::Li { rd: T3, imm: 1 },
+        sw(T3, T5, NAV_OPEN_OFF),
+        jump("dnav_show"),
+        Op::Label("dnav_skip".into()),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: 1,
+        },
+        jump("dnav_next"),
+        // ---- nav_show: "nav <name>" / "open <name>" → nav.sel DOM row;
+        // on open also print "NAV <name>\n" over serial.
+        Op::Label("dnav_show".into()),
+        lw(T3, T5, NAV_OPEN_OFF),
+        Op::Bne {
+            rs1: T3,
+            rs2: X0,
+            to: "dnav_open_txt".into(),
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(u32::from_le_bytes(*b"nav ")),
+        },
+        sw(T3, T5, NAV_TEXT_OFF),
+        Op::Li { rd: T6, imm: 4 },
+        jump("dnav_name"),
+        Op::Label("dnav_open_txt".into()),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(u32::from_le_bytes(*b"open")),
+        },
+        sw(T3, T5, NAV_TEXT_OFF),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(b' '),
+        },
+        Op::Sb {
+            rs2: T3,
+            rs1: T5,
+            off: NAV_TEXT_OFF + 4,
+        },
+        Op::Li { rd: T6, imm: 5 },
+        Op::Label("dnav_name".into()),
+        // t3 = domnav_names + sel*8 (8-byte slots)
+        lw(T3, T5, NAV_SEL_OFF),
+        Op::Slli {
+            rd: T3,
+            rs: T3,
+            shamt: 3,
+        },
+        Op::La {
+            rd: T4,
+            addr: Addr::Label("domnav_names".into()),
+        },
+        Op::Add {
+            rd: T3,
+            rs1: T3,
+            rs2: T4,
+        },
+        // dst cursor t4 = NAV_TEXT + prefix len; copy ≤8, stop at NUL; t0 = i
+        Op::Addi {
+            rd: T4,
+            rs: T5,
+            imm: NAV_TEXT_OFF,
+        },
+        Op::Add {
+            rd: T4,
+            rs1: T4,
+            rs2: T6,
+        },
+        Op::Li { rd: T0, imm: 0 },
+        Op::Label("dnav_ncopy".into()),
+        Op::Li { rd: A6, imm: 8 },
+        Op::Beq {
+            rs1: T0,
+            rs2: A6,
+            to: "dnav_ncopied".into(),
+        },
+        Op::Add {
+            rd: A6,
+            rs1: T3,
+            rs2: T0,
+        },
+        Op::Lbu {
+            rd: A6,
+            rs: A6,
+            off: 0,
+        },
+        Op::Beq {
+            rs1: A6,
+            rs2: X0,
+            to: "dnav_ncopied".into(),
+        },
+        Op::Sb {
+            rs2: A6,
+            rs1: T4,
+            off: 0,
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: 1,
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T0,
+            imm: 1,
+        },
+        jump("dnav_ncopy"),
+        Op::Label("dnav_ncopied".into()),
+        // text len = prefix(t6) + name i(t0) — compute before the open
+        // latch read below reuses t6.
+        Op::Add {
+            rd: A3,
+            rs1: T6,
+            rs2: T0,
+        },
+        // open latch → serial "NAV <name>\n" (t3 = name src, t0 = copied len)
+        lw(T6, T5, NAV_OPEN_OFF),
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: "dnav_dom".into(),
+        },
+    ];
+    putc_str(&mut ops, "NAV ");
+    ops.extend([
+        Op::Li { rd: T4, imm: 0 },
+        Op::Label("dnav_pname".into()),
+        Op::Beq {
+            rs1: T4,
+            rs2: T0,
+            to: "dnav_pnamed".into(),
+        },
+        Op::Add {
+            rd: A0,
+            rs1: T3,
+            rs2: T4,
+        },
+        Op::Lbu {
+            rd: A0,
+            rs: A0,
+            off: 0,
+        },
+        Op::Li {
+            rd: A7,
+            imm: SBI_PUTCHAR,
+        },
+        Op::Ecall,
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: 1,
+        },
+        jump("dnav_pname"),
+        Op::Label("dnav_pnamed".into()),
+    ]);
+    putc_str(&mut ops, "\n");
+    ops.extend([
+        Op::Label("dnav_dom".into()),
+        // WasmDomText(a0=id_ptr, a1=id_len, a2=text_ptr, a3=text_len) —
+        // "nav.sel" (7) ← NAV_TEXT (dedicated — the row keeps the pointer),
+        // a3 already holds the text length.
+        Op::La {
+            rd: A0,
+            addr: Addr::Label("domnav_id".into()),
+        },
+        Op::Li { rd: A1, imm: 7 },
+        Op::Addi {
+            rd: A2,
+            rs: T5,
+            imm: NAV_TEXT_OFF,
+        },
+        // The DOM call clobbers all t/a regs — save the nav state.
+        st_x(xlen, T1, SP, 8),
+        st_x(xlen, T2, SP, 16),
+        st_x(xlen, T5, SP, 24),
+        Op::Jal {
+            rd: RA,
+            to: "WasmDomText".into(),
+        },
+        ld_x(xlen, T1, SP, 8),
+        ld_x(xlen, T2, SP, 16),
+        ld_x(xlen, T5, SP, 24),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: 1,
+        },
+        jump("dnav_next"),
+        Op::Label("dnav_done".into()),
+        sw(T2, T5, NAV_SEEN_OFF),
+        ld_x(xlen, RA, SP, 0),
+        ld_x(xlen, T1, SP, 8),
+        ld_x(xlen, T2, SP, 16),
+        ld_x(xlen, T5, SP, 24),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 48,
+        },
+        ret(),
+        // Inline rodata (never executed — sits after ret): row id + the
+        // spec-derived menu ids as 8-byte slots.
+        Op::Label("domnav_id".into()),
+        Op::Word(u32::from_le_bytes(*b"nav.")),
+        Op::Word(u32::from_le_bytes([b's', b'e', b'l', 0])),
+        Op::Label("domnav_names".into()),
+    ]);
+    for m in spec.menus() {
+        let mut b = [0u8; 8];
+        let id = m.id.as_bytes();
+        b[..id.len().min(8)].copy_from_slice(&id[..id.len().min(8)]);
+        ops.push(Op::Word(u32::from_le_bytes([b[0], b[1], b[2], b[3]])));
+        ops.push(Op::Word(u32::from_le_bytes([b[4], b[5], b[6], b[7]])));
+    }
     Node {
         purpose: Purpose::Virtio,
         ops,

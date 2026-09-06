@@ -90,6 +90,11 @@ pub struct Smoke {
     /// A DOM row with id `inp.last` exists — `DomKey` mirrored a queued
     /// virtio-input EV_KEY into the DOM (the guest input→DOM bridge).
     pub dom_lastkey: bool,
+    /// A DOM row with id `nav.sel` exists — `DomNav` drove the menu
+    /// selection from queued EV_KEY events (input → menu navigation).
+    pub dom_nav: bool,
+    /// `nav.sel` row text (`"nav <name>"` or `"open <name>"` after Enter).
+    pub dom_navtext: String,
     /// First painted 4bpp word at the DOM text origin (y=DOM_Y0).
     pub dom_pix0: u32,
     /// Executed `__gr_plane` bytes (GR16 header + 4bpp plane) when Gr live.
@@ -516,10 +521,12 @@ fn done(
     } else {
         Vec::new()
     };
-    // Walk the DOM row table for the `inp.last` row DomKey mirrors the
-    // newest queued key into (input → DOM bridge evidence).
-    let dom_lastkey = csr.dom_base != 0
-        && (0..csr.dom_rows.min(48)).any(|i| {
+    // Walk the DOM row table for a row id → (text_ptr, text_len).
+    let dom_find = |id: &[u8]| -> Option<(u64, u32)> {
+        if csr.dom_base == 0 {
+            return None;
+        }
+        (0..csr.dom_rows.min(48)).find_map(|i| {
             let row = csr.dom_base.wrapping_add(16 + u64::from(i) * 32);
             let idp = if xlen == 64 {
                 load_u64(ram, base, row).unwrap_or(0)
@@ -527,11 +534,33 @@ fn done(
                 u64::from(load_u32(ram, base, row).unwrap_or(0))
             };
             let idl = load_u32(ram, base, row + 16).unwrap_or(0);
-            idl == 8
-                && (0..8u64).all(|k| {
-                    load_u8(ram, base, idp.wrapping_add(k)) == Some(b"inp.last"[k as usize])
-                })
-        });
+            if idl != id.len() as u32
+                || !(0..u64::from(idl))
+                    .all(|k| load_u8(ram, base, idp.wrapping_add(k)) == Some(id[k as usize]))
+            {
+                return None;
+            }
+            let tp = if xlen == 64 {
+                load_u64(ram, base, row + 8).unwrap_or(0)
+            } else {
+                u64::from(load_u32(ram, base, row + 8).unwrap_or(0))
+            };
+            Some((tp, load_u32(ram, base, row + 20).unwrap_or(0)))
+        })
+    };
+    // `inp.last` (DomKey) — newest queued key mirrored into the DOM.
+    let dom_lastkey = dom_find(b"inp.last").is_some();
+    // `nav.sel` (DomNav) — menu navigation row: "nav <name>" / "open <name>".
+    let nav = dom_find(b"nav.sel");
+    let dom_nav = nav.is_some();
+    let dom_navtext = nav
+        .map(|(tp, tl)| {
+            (0..tl.min(24))
+                .filter_map(|k| load_u8(ram, base, tp.wrapping_add(u64::from(k))))
+                .map(char::from)
+                .collect()
+        })
+        .unwrap_or_default();
     Smoke {
         console,
         steps,
@@ -570,6 +599,8 @@ fn done(
         ui_nfiles: csr.ui_nfiles,
         dom_rows: csr.dom_rows,
         dom_lastkey,
+        dom_nav,
+        dom_navtext,
         dom_pix0: csr.dom_pix0,
         gr_frame,
         vio_status: csr.vio_status,
@@ -1369,30 +1400,42 @@ fn inp_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
     }
 }
 
-/// Inject one canned `EV_KEY` (KEY_A, press) into the next posted eventq
-/// buffer — models QEMU `sendkey a` at idle. Fills the desc buffer, publishes
-/// the used elem and raises PLIC irq 1+slot(=2) for the virtio-mmio slot.
+/// Inject a canned `sendkey` burst into the posted eventq buffers — models
+/// QEMU `sendkey a; sendkey down; sendkey ret` at idle (press events only;
+/// QEMU also emits releases, which `InpDrain`/`DomNav` ignore by value).
+/// Fills the desc buffers, publishes used elems and raises PLIC irq
+/// 1+slot(=2) for the virtio-mmio slot.
 fn host_inp_kick(csr: &mut Csr, ram: &mut [u8], base: u64) -> bool {
     if !csr.vio_inp || csr.inp_poked || !csr.inp_ready || csr.inp_qused == 0 {
         return false;
     }
-    let Some(head) = csr.inp_bufs.pop() else {
-        return false;
-    };
     csr.inp_poked = true;
-    // virtio_input_event {u16 type=EV_KEY, u16 code=30 (KEY_A), u32 value=1}.
-    let daddr = load_u64(ram, base, csr.inp_qdesc.wrapping_add(u64::from(head) * 16)).unwrap_or(0);
-    let _ = store_u32(ram, base, daddr, 1 | (30 << 16));
-    let _ = store_u32(ram, base, daddr + 4, 1);
+    // virtio_input_event {u16 type=EV_KEY, u16 code, u32 value}: 'a' (30),
+    // KEY_DOWN (108), KEY_ENTER (28) — a non-nav letter, a nav arrow and an
+    // activation in one burst.
+    const SEQ: [(u16, u32); 3] = [(30, 1), (108, 1), (28, 1)];
     let used = csr.inp_qused;
-    let ui = csr.inp_used_idx % 8;
-    let _ = store_u32(ram, base, used + 4 + u64::from(ui) * 8, u32::from(head));
-    let _ = store_u32(ram, base, used + 8 + u64::from(ui) * 8, 8);
-    csr.inp_used_idx = csr.inp_used_idx.wrapping_add(1);
-    let _ = store_u32(ram, base, used, u32::from(csr.inp_used_idx) << 16);
-    csr.inp_isr |= 1;
-    csr.plic_pending |= 1 << 2;
-    true
+    let mut pushed = false;
+    for &(code, val) in &SEQ {
+        let Some(head) = csr.inp_bufs.pop() else {
+            break;
+        };
+        let daddr =
+            load_u64(ram, base, csr.inp_qdesc.wrapping_add(u64::from(head) * 16)).unwrap_or(0);
+        let _ = store_u32(ram, base, daddr, 1 | (u32::from(code) << 16));
+        let _ = store_u32(ram, base, daddr + 4, val);
+        let ui = csr.inp_used_idx % 8;
+        let _ = store_u32(ram, base, used + 4 + u64::from(ui) * 8, u32::from(head));
+        let _ = store_u32(ram, base, used + 8 + u64::from(ui) * 8, 8);
+        csr.inp_used_idx = csr.inp_used_idx.wrapping_add(1);
+        pushed = true;
+    }
+    if pushed {
+        let _ = store_u32(ram, base, used, u32::from(csr.inp_used_idx) << 16);
+        csr.inp_isr |= 1;
+        csr.plic_pending |= 1 << 2;
+    }
+    pushed
 }
 
 /// Walk one descriptor chain (≤8): OUT descriptors carry `ctrl_hdr.type`, the
@@ -2812,18 +2855,21 @@ mod tests {
         let s = run_module(&spec, &m, 0x8020_0000).unwrap();
         assert!(s.console.contains("VIRTIO-INPUT-OK"), "{}", s.console);
         assert!(!s.console.contains("VIRTIO-INPUT-FAIL"), "{}", s.console);
-        // The drained EV_KEY event marker.
-        assert!(s.console.contains("INP\n"), "{}", s.console);
-        // The UART `Keys` command drains INP_KQ → `KEY <8-hex>`; the canned
-        // host key is KEY_A (code 30) pressed (value 1) → (30<<8)|1 = 0x1e01.
-        assert!(
-            s.console.contains("KEY 00001e01"),
-            "Keys dump: {}",
-            s.console
-        );
-        // DomKey mirrored the queued key into the `inp.last` DOM row and the
-        // irq path repainted (DomPaint + VioPaint under kernel.wasm.jit).
+        // The drained EV_KEY event markers — the canned burst is
+        // `sendkey a` + `sendkey down` + `sendkey ret` (press only).
+        assert_eq!(s.console.matches("INP\n").count(), 3, "{}", s.console);
+        // The UART `Keys` command drains INP_KQ → `KEY <8-hex>` per queued
+        // press: KEY_A(30)→0x1e01, KEY_DOWN(108)→0x6c01, KEY_ENTER(28)→0x1c01.
+        for line in ["KEY 00001e01", "KEY 00006c01", "KEY 00001c01"] {
+            assert!(s.console.contains(line), "Keys dump: {}", s.console);
+        }
+        // DomKey mirrored the newest queued key (enter) into `inp.last`.
         assert!(s.dom_lastkey, "no inp.last DOM row: {}", s.console);
+        // DomNav consumed the burst: 'a' ignored, DOWN → sel=1 (`cpu`),
+        // ENTER → open latch + serial `NAV cpu`; nav.sel row = "open cpu".
+        assert!(s.dom_nav, "no nav.sel DOM row: {}", s.console);
+        assert_eq!(s.dom_navtext, "open cpu", "{}", s.console);
+        assert!(s.console.contains("NAV cpu\n"), "{}", s.console);
         assert!(!s.console.contains("TRAP-"), "{}", s.console);
         assert!(matches!(s.halt, Halt::Wfi), "{:?}", s.halt);
     }

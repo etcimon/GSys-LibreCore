@@ -188,7 +188,15 @@ hardware acceleration is not inferred from API availability.
    QEMU. The following `Ui` repaint echoes `DOM| key 00003000` — the
    `inp.last` row holds the last event and is painted to the virtio-gpu
    scanout (`VIRTIO-PAINT`), input→DOM→display verified end to end on the
-   emulator.
+   emulator. `DomNav` (same jit gate) adds **menu input**: it walks the
+   queue with a `NAV_SEEN` watermark (non-destructive — `Keys` still dumps
+   the ring), and press events navigate the spec-derived menu tree —
+   UP/LEFT sel-1, DOWN/RIGHT sel+1 (wrap over `spec.menus()`), ESC reset,
+   ENTER sets the open latch + serial `NAV <name>`; the `nav.sel` DOM row
+   shows `nav <name>` / `open <name>` in its own `NAV_TEXT` scratch
+   (`WasmDomText` stores the pointer — never share scratch between rows).
+   QEMU-verified: `sendkey down`/`ret`/`up` → `NAV cpu` + `DOM| nav cpu`
+   on the `Ui` repaint.
    **Absent-device tolerance**: unmapped MMIO faults (scause 5/7) inside the
    UART1/mbox probe windows are recoverable — `trap_fault` reads `stval`,
    marks the `__uart_line` absent flag and resumes at `sepc+4`, so
@@ -211,8 +219,10 @@ hardware acceleration is not inferred from API availability.
    band **and** for the DOM/Gr plane — `VioPaint` transfers the
    palette-expanded `__gr_plane` (which `DomPaint` mutates from the WASM
    lane's `__ui_dom` rows) to the virtio-gpu scanout; the QMP `screendump`
-   histogram matches the host-modelled framebuffer exactly. Remaining: menu
-   input, pending/rejected await and background frames concurrently —
+   histogram matches the host-modelled framebuffer exactly. **Menu input is
+   QEMU-verified** (`DomNav`: `sendkey` arrows/enter → `NAV <menu>` serial +
+   `nav.sel` DOM row + repaint). Remaining: pending/rejected await and
+   background frames concurrently —
    record framebuffer/event evidence, not just UART markers. Later hardware
    timing/PMA/PMP/cache/IRQ validation remains distinct from QEMU evidence.
 

@@ -1,4 +1,4 @@
-// Generated PostBoot.ZC — enable=runtime access=kvm
+// Generated PostBoot.ZC — enable=never access=view
 // Immutable after Linux handoff (viewable, writes disabled):
 //   config
 //   keys

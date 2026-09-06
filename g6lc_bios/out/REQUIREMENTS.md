@@ -1,11 +1,4 @@
 # Inferred architecture requirements (from BoardSpec)
-- reserved DRAM carve-out 0x100000 for runtime BIOS (Linux maps view-only)
-- SBI SRST (or equivalent) for reboot/shutdown from the management port
-- KVM face HTML+JS: in-kernel viewport (UART/Gr, then mailbox ToHtml)
-- KVM face SSH+HolyC: ZealOS CLI backend (holyc-repl); OpenSSH is B13
-- NIC until-delegate: BIOS may bind adapter for gateway/web and SSH+HolyC
-- adapter ports: BIOS HTTPS :443 SSH+HolyC :2222 (not a netdev after NET-DELEGATE)
-- LinuxHandoff drops the adapter (NET-DELEGATE); Linux owns eth/wifi
 - SysGrInit rewrite: 640x480x16 backend=virtio-gpu (8x8 font; not VGA ports)
 - QEMU virt: -global virtio-mmio.force-legacy=false -device virtio-gpu-device; serial stays -nographic
 - display-proxy 640x480 → 1920x1080 dpi=192 fps=120 link=hdmi gl=true
@@ -24,11 +17,7 @@
 - USB host MSC FAT32 flash=true key-fm=true ntfs=true ext4=true (not a netdev)
 - HolyC TLS (Botan spec): SHA-256, AES-128, HMAC, RSA PKCS#1, ECDSA P-256, X.509; not OpenSSL
 - HttpsGet on pre-delegate NIC or mailbox after NET-DELEGATE; never a netdev
-- APU mailbox 0x10100000 irq 3 compatible=gsys,g6lc-bios-mbox → /dev/g6lc-bios (not a netdev; MEI/SMC/IPMI-BT shape)
-- PMA device region; dedicated PLIC line; Linux miscdriver, no alloc_netdev
 - always-on domain or Wake-on-LAN on the management path (not the OS NIC after delegate)
-- PMP/PMA lock of immutable sections after handoff: config,keys,boot-policy
-- QEMU UART1 -serial tcp:127.0.0.1:2222,server,nowait (ssh-like HolyC REPL)
 - S-mode timer: sie.STIE + sstatus.SIE + SBI TIME (Priv ch3 / SBI TIME); not PIT
 - display-proxy scale_mode=dpi 640x480→1920x1080 dpi=192 fps=120
 - HolyC ISel MemCpy is scalar (RVV not live)

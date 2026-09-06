@@ -267,7 +267,19 @@ on the explicit `Ui`/refresh path (a per-keypress `VioPaint` is not the
 irq's job and would blow the bounded step budget). `Smoke::dom_lastkey`
 walks `__ui_dom` for the row; `vio_input_eventq_delivers_key` asserts it
 plus `KEY 00001e01`, and the `Ui` repaint echoes `DOM| key 00001e01` —
-input→eventq→irq→queue→DOM→paint is exec-verified end to end. `qemu-args` emits `-device virtio-keyboard-device` under
+input→eventq→irq→queue→DOM→paint is exec-verified end to end.
+**Menu navigation (`DomNav`, jit-gated):** the canned kick is now a
+3-event `sendkey` burst (`a` + `down` + `ret`) — DomNav walks `INP_KQ`
+from a `NAV_SEEN` watermark (non-destructive; `Keys` still dumps the ring)
+and press events drive the spec-derived menu tree: UP/LEFT sel-1,
+DOWN/RIGHT sel+1 (wrap over `spec.menus()`), ESC reset, ENTER → open latch
++ serial `NAV <name>`; the `nav.sel` row shows `nav <name>`/`open <name>`
+from its own `NAV_TEXT` scratch (WasmDomText stores the text *pointer* —
+rows can never share a scratch buffer). `Smoke::dom_nav`/`dom_navtext`
+walk `__ui_dom` — `vio_input_eventq_delivers_key` asserts
+`NAV cpu` + `open cpu` + the three `KEY` lines; **QEMU-verified**:
+`sendkey a/down/ret/down/up` → `INP`×10 → `NAV cpu` → `Ui` repaint echoes
+`DOM| key 00006700` + `DOM| nav cpu`. `qemu-args` emits `-device virtio-keyboard-device` under
 `BoardSpec::wants_virtio_input()` (= `wants_virtio_gpu && kernel.wasm.enable`).
 **WFI-driven waits:** `VioInit`'s used-ring wait and `VioCmd`'s completion
 wait insert `wfi` between a poll miss and the loop-back when `uncore.plic`

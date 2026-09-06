@@ -24,7 +24,6 @@ U0 KMain()
 {
 	Print("G6LC-BIOS\n");
 	HolycInit();
-	Print("DUAL-BAND uart+tcp:2222\n");
 	SysGrInit();
 	TimerInit();
 	UiBoot();
