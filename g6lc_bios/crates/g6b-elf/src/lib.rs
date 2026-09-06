@@ -63,9 +63,18 @@ fn payload_text(spec: &BoardSpec) -> Vec<u8> {
     b
 }
 
-/// KStart64 rewrite: analyze BoardSpec → ASM IR → words. Same Module as `KStart.S`.
+/// KStart64 rewrite: analyze BoardSpec → ASM IR → words. Same Module as
+/// `KStart.S` plus the guest `WasmStart` lowering when `kernel.wasm.jit`.
+fn payload_module(spec: &BoardSpec, msg: &[u8]) -> Result<g6b_asm::Module, String> {
+    let mut module = g6b_asm::analyze::payload(spec, msg);
+    if spec.kernel.wasm.enable && spec.kernel.wasm.jit {
+        g6b_wasm::install_start(&mut module, spec.isa.xlen)?;
+    }
+    Ok(module)
+}
+
 fn assemble(spec: &BoardSpec, entry: u64, msg: &[u8]) -> Result<(Vec<u8>, u32, u64), String> {
-    let module = g6b_asm::analyze::payload(spec, msg);
+    let module = payload_module(spec, msg)?;
     let (insns, rodata) = module.to_words(entry)?;
     let mut out = Vec::with_capacity(insns.len() * 4 + rodata.len());
     for w in insns {
@@ -78,7 +87,10 @@ fn assemble(spec: &BoardSpec, entry: u64, msg: &[u8]) -> Result<(Vec<u8>, u32, u
         module
             .gr_bytes
             .saturating_add(module.line_bytes)
-            .saturating_add(module.ui_bytes),
+            .saturating_add(module.ui_bytes)
+            .saturating_add(module.dom_bytes)
+            .saturating_add(module.vio_bytes)
+            .saturating_add(module.vio_fb_bytes),
     ))
 }
 
@@ -173,7 +185,7 @@ fn parse_hex(s: &str) -> Result<u64, String> {
 pub fn smoke(spec: &BoardSpec) -> Result<g6b_asm::exec::Smoke, String> {
     let entry = load_addr(spec)?;
     let text = payload_text(spec);
-    let module = g6b_asm::analyze::payload(spec, &text);
+    let module = payload_module(spec, &text)?;
     g6b_asm::exec::run_module(spec, &module, entry)
 }
 
@@ -294,6 +306,7 @@ mod tests {
         let s = String::from_utf8_lossy(&elf);
         assert!(s.contains("KSTART-UI"), "{s}");
         assert!(s.contains("KSTART-WASM-JIT"), "{s}");
+        assert!(s.contains("KSTART-WASM-UI"), "{s}");
         assert!(
             elf.windows(4).any(|w| w == b"\0asm"),
             "missing bios-ui.wasm in ELF"
@@ -304,9 +317,43 @@ mod tests {
             payload_memsz(
                 filesz,
                 spec.harts.max(1),
-                g6b_asm::UART_LINE_BSS + g6b_asm::UI_HEADER_BYTES,
+                g6b_asm::UART_LINE_BSS + g6b_asm::UI_HEADER_BYTES + g6b_asm::dom::UI_DOM_BYTES,
             )
         );
+    }
+
+    #[test]
+    fn wasm_jit_smoke_runs_dom_imports() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"gr":{"enable":true},"wasm":{"enable":true,"jit":true}},"postboot":{"enable":"never"}}"#,
+        )
+        .unwrap();
+        let s = smoke(&spec).unwrap();
+        assert!(s.console.contains("KSTART-WASM-UI"), "{}", s.console);
+        assert!(s.dom_rows > 0, "no guest DOM rows: {}", s.console);
+        assert!(s.console.contains("DOM|"), "{}", s.console);
+        assert!(s.dom_pix0 != 0, "no DOM glyphs painted: {}", s.console);
+        assert!(s.faults == 0, "guest faults: {}", s.faults);
+        // Executed __gr_plane decodes (guest-painted DOM text included).
+        let ppm = g6b_kernel::frame_ppm(&s.gr_frame).expect("executed GR16 plane");
+        assert!(ppm.starts_with(b"P6\n640 480\n255\n"));
+        // UART `Ui` re-dumps the live DOM store (boot paint + Ui repaint).
+        assert!(
+            s.console.matches("DOM| UI-BOOT").count() >= 2,
+            "Ui should re-dump DOM: {}",
+            s.console
+        );
+    }
+
+    #[test]
+    fn wasm_jit_smoke_serial_only_without_gr() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"wasm":{"enable":true,"jit":true}},"postboot":{"enable":"never"}}"#,
+        )
+        .unwrap();
+        let s = smoke(&spec).unwrap();
+        assert!(s.dom_rows > 0, "no guest DOM rows: {}", s.console);
+        assert!(s.console.contains("DOM|"), "{}", s.console);
     }
 
     #[test]

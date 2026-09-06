@@ -1,4 +1,4 @@
-// Generated PostBoot.ZC — enable=runtime access=kvm
+// Generated PostBoot.ZC — enable=never access=view
 // Immutable after Linux handoff (viewable, writes disabled):
 //   config
 //   keys
@@ -6,6 +6,11 @@
 U0 LinuxHandoff()
 {
 	Print("POSTBOOT-LIVE\n");
+}
+
+U0 SshHolyc()
+{
+	Print("SSH-HOLYC\n");
 }
 
 U0 ViewSection(U8 *name)

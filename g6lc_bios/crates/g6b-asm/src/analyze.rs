@@ -16,10 +16,10 @@ use crate::encode::{
     CSR_SATP, CSR_SCAUSE, CSR_SEPC, CSR_SIE, CSR_SSTATUS, CSR_STVEC, CSR_TIME, GR16_MAGIC,
     GR_FILL_WORD, MBOX_MAGIC, MBOX_OFF_CMD, MBOX_OFF_DOORBELL, MBOX_OFF_IRQ_EN, MBOX_OFF_LENGTH,
     MBOX_OFF_RSP, MBOX_OFF_STATUS, MBOX_RSP_FILE, MBOX_RSP_UI, MBOX_RSP_VIEW, MBOX_RSP_WAKE,
-    MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE, PLIC_CLAIM_S0, PLIC_ENABLE_S0, PLIC_THRESH_S0, RA, S1,
-    SBI_HSM_EID, SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID, SIE_SEIE, SIE_SSIE,
-    SIE_STIE, SP, SSTATUS_SIE, T0, T1, T2, TP, UART_IER_RX, UART_IRQ, UART_LSR_DR, UI_MAGIC,
-    VTYPE_E8_M1_TA_MA, X0,
+    MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE, PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID,
+    SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID, SIE_SEIE, SIE_SSIE, SIE_STIE, SP,
+    SSTATUS_SIE, T0, T1, T2, T3, T4, TP, UART_IER_RX, UART_IRQ, UART_LSR_DR, UI_MAGIC, VIO_DEV_GPU,
+    VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
 };
 use crate::{
     gr_bss_len, gr_stride, Addr, Module, Node, Op, Purpose, BIOS_UI_WASM, GR_HEADER_BYTES,
@@ -84,7 +84,7 @@ pub fn objects(spec: &BoardSpec) -> Vec<Object> {
         Object {
             purpose: Purpose::Park,
             live: true,
-            why: "hart≠0 WFI; hart0 Adam; UART1 is irq-driven WFI (not a busy poll)",
+            why: "non-handoff harts WFI; the a1=fdt handoff hart runs Adam (boot hart is a lottery, not always 0); UART1 is irq-driven WFI (not a busy poll)",
         },
         Object {
             purpose: Purpose::Trap,
@@ -115,6 +115,16 @@ pub fn objects(spec: &BoardSpec) -> Vec<Object> {
             purpose: Purpose::GlAdapter,
             live: spec.kernel.proxy.enable && spec.kernel.proxy.gl,
             why: "OpenGL-ES2 listing paints DOM status on the high-res plane",
+        },
+        Object {
+            purpose: Purpose::Virtio,
+            live: spec.wants_virtio_gpu(),
+            why: "virtio-mmio probe 0x10001000+0x200*N for GPU device_id 16 (QEMU virt; queues/scanout open)",
+        },
+        Object {
+            purpose: Purpose::DispScan,
+            live: spec.wants_disp_scan(),
+            why: "uncore display-engine commit (architecture/uncore/hdmi-display.md) — __scan_fb is the BIOS+Linux simplefb handoff",
         },
         Object {
             purpose: Purpose::Tls,
@@ -197,7 +207,7 @@ pub fn objects(spec: &BoardSpec) -> Vec<Object> {
                 || spec.geo.issue_ports > 1
                 || spec.geo.ooo
                 || spec.geo.stream,
-            why: "SBI HSM hart_start + IPI for extra harts (MultiProc rewrite); Adam on hart 0",
+            why: "SBI HSM hart_start + IPI for every hart except self (MultiProc rewrite); Adam on the boot hart",
         },
         Object {
             purpose: Purpose::Hypervisor,
@@ -248,7 +258,9 @@ pub fn payload(spec: &BoardSpec, boot_log: &[u8]) -> Module {
 
 /// KStart listing / payload prefix.
 ///
-/// Linear flow: **all harts** set tp/dtb/sp/stvec, then hart≠0 parks; hart0
+/// Linear flow: **all harts** set tp/dtb/sp/stvec, then harts without an FDT
+/// handoff (SBI-HSM secondaries, a1=opaque=0) park; the OpenSBI boot hart —
+/// whichever id the lottery picked —
 /// prints the boot log, `jal TimerInit` / `PlicInit` / `HartStart` / `MboxInit`
 /// / `GrInit` / `ProxyScale` / `UiInit` / `FileServe` / `GetFile` / `WasmJit`, UART1 IER, park WFI. Trap
 /// and init bodies sit after park (QEMU OpenSBI next-stage, all-harts entry).
@@ -264,6 +276,8 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     let mut timer = None;
     let mut proxy = None;
     let mut gl = None;
+    let mut vio = None;
+    let mut disp = None;
     let mut ui = None;
     let mut fileserve = None;
     let mut getfile = None;
@@ -285,6 +299,8 @@ pub fn kstart(spec: &BoardSpec) -> Module {
             Purpose::Timer => timer = Some(o),
             Purpose::DisplayProxy => proxy = Some(o),
             Purpose::GlAdapter => gl = Some(o),
+            Purpose::Virtio => vio = Some(o),
+            Purpose::DispScan => disp = Some(o),
             Purpose::FileServe => {
                 ui = Some(o);
                 fileserve = Some(o);
@@ -329,7 +345,8 @@ pub fn kstart(spec: &BoardSpec) -> Module {
             | Purpose::Settings
             | Purpose::Usb
             | Purpose::Hypervisor
-            | Purpose::Menu => {}
+            | Purpose::Menu
+            | Purpose::UiDom => {}
         }
     }
     if let Some(o) = timer {
@@ -352,6 +369,22 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     if let Some(o) = gl {
         m.push(gl_call_node(o));
     }
+    if vio.is_some() || disp.is_some() {
+        m.vio_bytes = crate::vio::VIO_BSS;
+        let gp = g6b_spec_proxy(spec);
+        // The scanout surface is the high-res proxy target (gp.2×gp.3) —
+        // `FbExpand` scale-expands the low-res `__gr_plane` into it and each
+        // backend commits it (virtio TRANSFER+FLUSH or the uncore display
+        // engine's DispPaint).
+        let fb = u64::from(gp.2)
+            .saturating_mul(u64::from(gp.3))
+            .saturating_mul(4)
+            .min(crate::vio::VIO_FB_MAX);
+        m.vio_fb_bytes = fb;
+    }
+    if let Some(o) = vio {
+        m.push(vio_call_node(o));
+    }
     if let Some(o) = ui {
         m.ui_bytes = UI_HEADER_BYTES;
         m.ui_wasm = ui_wasm_bytes(spec).to_vec();
@@ -365,6 +398,20 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     }
     if let Some(o) = wasm_jit {
         m.push(wasm_jit_call_node(o));
+        m.push(wasm_ui_call_node(o));
+    }
+    // The paint pass must run after the last __gr_plane painter (DomPaint
+    // inside WasmUi, or GrInit when the DOM lane is absent): FbExpand
+    // converts the plane into __scan_fb and each backend commits it —
+    // TRANSFER+FLUSH to the bound virtio-gpu (VioPaint) and/or the uncore
+    // display-engine register commit (DispPaint).
+    if let Some(o) = vio {
+        if spec.kernel.gr.enable || spec.kernel.proxy.enable {
+            m.push(vio_paint_call_node(o));
+        }
+    }
+    if let Some(o) = disp {
+        m.push(disp_paint_call_node(o));
     }
     if let Some(o) = uart {
         m.push(uart1_node(o, spec));
@@ -394,6 +441,22 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     if let Some(o) = gl {
         m.push(gl_adapter_node(o, spec));
     }
+    // FbExpand is shared by every scanout backend that paints the plane.
+    if (vio.is_some() || disp.is_some()) && (spec.kernel.gr.enable || spec.kernel.proxy.enable) {
+        m.push(crate::vio::expand_node(spec));
+    }
+    if let Some(o) = vio {
+        m.push(vio_probe_node(o));
+        m.push(crate::vio::init_node(o));
+        m.push(crate::vio::cmd_node());
+        m.push(crate::vio::scan_node(spec));
+        if spec.kernel.gr.enable || spec.kernel.proxy.enable {
+            m.push(crate::vio::paint_node(spec));
+        }
+    }
+    if disp.is_some() {
+        m.push(crate::vio::disp_paint_node(spec));
+    }
     if let Some(o) = ui {
         m.push(ui_init_node(o, spec));
     }
@@ -401,6 +464,7 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     m.push(get_file_node(spec));
     if let Some(o) = wasm_jit {
         m.push(wasm_jit_node(o));
+        crate::dom::attach(&mut m, spec);
     }
     if m.rodata.is_empty() {
         m.rodata = kstart_msg(spec);
@@ -533,6 +597,8 @@ pub fn kstart_msg(spec: &BoardSpec) -> Vec<u8> {
     }
     if spec.kernel.wasm.jit {
         s.push_str("KSTART-WASM-JIT\n");
+        s.push_str("KSTART-WASM-UI\n");
+        s.push_str("KSTART-DOM\n");
     }
     s.push('\0');
     s.into_bytes()
@@ -547,9 +613,19 @@ pub fn uart0_base(spec: &BoardSpec) -> u64 {
         .unwrap_or(0x1000_0000)
 }
 
-/// UART1 base: uart0 + 0x1000 on QEMU virt, else 0x10001000.
+/// UART1 base: `uart0 + 0x1000` would land on QEMU virt's first virtio-mmio
+/// transport — all 8 exist (0x1000-strided, attached or not) — so the modeled
+/// second UART sits just above the window at `VIO_MMIO_BASE + 8*0x1000`
+/// (`uart0 + 0x9000` on virt). QEMU virt has only one real ns16550; this
+/// keeps the host-modeled dual-band face consistent with the real device map.
 pub fn uart1_base(spec: &BoardSpec) -> u64 {
-    uart0_base(spec).wrapping_add(0x1000)
+    let base = uart0_base(spec).wrapping_add(0x1000);
+    let window_end = VIO_MMIO_BASE + (VIO_MMIO_SLOTS as u64) * VIO_MMIO_STEP;
+    if base >= VIO_MMIO_BASE && base < window_end {
+        window_end
+    } else {
+        base
+    }
 }
 
 fn hart_id_node(o: Object) -> Node {
@@ -660,8 +736,11 @@ fn boot_log_node(o: Object, spec: &BoardSpec) -> Node {
         purpose: Purpose::BootLog,
         ops: vec![
             Op::Comment(format!("{} @ uart0 {uart0:#x}", o.why)),
-            Op::Bne {
-                rs1: TP,
+            // Primary = the hart OpenSBI handed off to (a1=fdt, nonzero — the
+            // boot-hart lottery may pick any hart id). Harts started later via
+            // SBI HSM enter `_start` with a1=opaque=0 and park here.
+            Op::Beq {
+                rs1: S1,
                 rs2: X0,
                 to: "park".into(),
             },
@@ -896,7 +975,9 @@ fn hsm_call_node(o: Object) -> Node {
 
 fn hsm_init_node(o: Object, spec: &BoardSpec) -> Node {
     let n = i64::from(spec.harts.max(1));
-    let mask = ((1i64 << n) - 1) & !1;
+    // The primary is whichever hart OpenSBI handed off to (tp = a0 = its
+    // hartid), so start every hart except self and IPI that same set.
+    let all = (1i64 << n) - 1;
     Node {
         purpose: Purpose::Topology,
         ops: vec![
@@ -912,13 +993,18 @@ fn hsm_init_node(o: Object, spec: &BoardSpec) -> Node {
                 csr: CSR_SIE,
                 rs: T0,
             },
-            Op::Li { rd: T0, imm: 1 },
+            Op::Li { rd: T0, imm: 0 },
             Op::Label("hsm_loop".into()),
             Op::Li { rd: T1, imm: n },
             Op::Beq {
                 rs1: T0,
                 rs2: T1,
                 to: "hsm_ipi".into(),
+            },
+            Op::Beq {
+                rs1: T0,
+                rs2: TP,
+                to: "hsm_next".into(),
             },
             Op::Addi {
                 rd: A0,
@@ -936,6 +1022,7 @@ fn hsm_init_node(o: Object, spec: &BoardSpec) -> Node {
                 imm: SBI_HSM_EID,
             },
             Op::Ecall,
+            Op::Label("hsm_next".into()),
             Op::Addi {
                 rd: T0,
                 rs: T0,
@@ -946,7 +1033,45 @@ fn hsm_init_node(o: Object, spec: &BoardSpec) -> Node {
                 to: "hsm_loop".into(),
             },
             Op::Label("hsm_ipi".into()),
-            Op::Li { rd: A0, imm: mask },
+            // hart_mask = all ^ (1<<tp) — every hart except the primary.
+            Op::Li { rd: T2, imm: all },
+            Op::Li { rd: T3, imm: 1 },
+            Op::Addi {
+                rd: T4,
+                rs: TP,
+                imm: 0,
+            },
+            Op::Label("hsm_sh".into()),
+            Op::Beq {
+                rs1: T4,
+                rs2: X0,
+                to: "hsm_mask".into(),
+            },
+            Op::Slli {
+                rd: T3,
+                rs: T3,
+                shamt: 1,
+            },
+            Op::Addi {
+                rd: T4,
+                rs: T4,
+                imm: -1,
+            },
+            Op::Jal {
+                rd: X0,
+                to: "hsm_sh".into(),
+            },
+            Op::Label("hsm_mask".into()),
+            Op::Xor {
+                rd: T2,
+                rs1: T2,
+                rs2: T3,
+            },
+            Op::Addi {
+                rd: A0,
+                rs: T2,
+                imm: 0,
+            },
             Op::Li { rd: A1, imm: 0 },
             Op::Li { rd: A6, imm: 0 },
             Op::Li {
@@ -977,67 +1102,118 @@ fn plic_call_node(o: Object) -> Node {
 }
 
 fn plic_init_node(o: Object, spec: &BoardSpec) -> Node {
-    let uart_irq = 1i64;
+    let uart_irq = UART_IRQ;
     let mbox_irq = i64::from(spec.loopback.irq.max(1));
-    let enable = (1i64 << uart_irq) | (1i64 << mbox_irq);
+    // QEMU virt: virtio-mmio slot i → PLIC irq 1+i (DTB `interrupts =
+    // <1+i>`); enable the whole 8-slot range (1..=8) — unattached slots
+    // never drive a line.
+    let vio_irqs = if spec.wants_virtio_gpu() {
+        0xFFi64 << 1
+    } else {
+        0
+    };
+    let enable = (1i64 << uart_irq) | (1i64 << mbox_irq) | vio_irqs;
+    // A PLIC source with priority 0 never asserts — QEMU reset value is 0,
+    // so every enabled source needs an explicit nonzero priority.
+    let mut prio: Vec<i64> = vec![uart_irq, mbox_irq];
+    if spec.wants_virtio_gpu() {
+        prio.extend(1..=8);
+    }
+    prio.sort_unstable();
+    prio.dedup();
+    let mut ops = vec![
+        Op::Comment(o.why.into()),
+        Op::Glob("PlicInit".into()),
+        Op::Label("PlicInit".into()),
+        Op::La {
+            rd: T0,
+            addr: Addr::Abs(PLIC_BASE),
+        },
+        Op::Li { rd: T1, imm: 1 },
+    ];
+    for irq in &prio {
+        ops.push(Op::Sw {
+            rs2: T1,
+            rs1: T0,
+            off: (*irq * 4) as i32,
+        });
+    }
+    ops.extend([
+        Op::Comment("source priorities set; S-mode ctx = 2*tp+1 next".into()),
+        // S-mode context for the *running* hart: ctx = 2*tp + 1 (the boot
+        // hart is not always hart 0 — OpenSBI's lottery picks).
+        Op::Slli {
+            rd: T2,
+            rs: TP,
+            shamt: 1,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: 1,
+        },
+        // enable block = PLIC_ENABLE_BASE + ctx*0x80
+        Op::La {
+            rd: T0,
+            addr: Addr::Abs(PLIC_ENABLE_BASE),
+        },
+        Op::Slli {
+            rd: T3,
+            rs: T2,
+            shamt: 7,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T3,
+        },
+        Op::Li {
+            rd: T1,
+            imm: enable,
+        },
+        Op::Sw {
+            rs2: T1,
+            rs1: T0,
+            off: 0,
+        },
+        // threshold page = PLIC_CTXT_BASE + ctx*0x1000
+        Op::La {
+            rd: T0,
+            addr: Addr::Abs(PLIC_CTXT_BASE),
+        },
+        Op::Slli {
+            rd: T3,
+            rs: T2,
+            shamt: 12,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T3,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: 0,
+        },
+        Op::Li {
+            rd: T0,
+            imm: SIE_SEIE,
+        },
+        Op::Csrrs {
+            rd: X0,
+            csr: CSR_SIE,
+            rs: T0,
+        },
+        Op::Jalr {
+            rd: X0,
+            rs: RA,
+            imm: 0,
+        },
+    ]);
     Node {
         purpose: Purpose::Uncore,
-        ops: vec![
-            Op::Comment(o.why.into()),
-            Op::Glob("PlicInit".into()),
-            Op::Label("PlicInit".into()),
-            Op::La {
-                rd: T0,
-                addr: Addr::Abs(PLIC_BASE),
-            },
-            Op::Li { rd: T1, imm: 1 },
-            Op::Sw {
-                rs2: T1,
-                rs1: T0,
-                off: 4,
-            },
-            Op::Sw {
-                rs2: T1,
-                rs1: T0,
-                off: (mbox_irq * 4) as i32,
-            },
-            Op::La {
-                rd: T0,
-                addr: Addr::Abs(PLIC_ENABLE_S0),
-            },
-            Op::Li {
-                rd: T1,
-                imm: enable,
-            },
-            Op::Sw {
-                rs2: T1,
-                rs1: T0,
-                off: 0,
-            },
-            Op::La {
-                rd: T0,
-                addr: Addr::Abs(PLIC_THRESH_S0),
-            },
-            Op::Sw {
-                rs2: X0,
-                rs1: T0,
-                off: 0,
-            },
-            Op::Li {
-                rd: T0,
-                imm: SIE_SEIE,
-            },
-            Op::Csrrs {
-                rd: X0,
-                csr: CSR_SIE,
-                rs: T0,
-            },
-            Op::Jalr {
-                rd: X0,
-                rs: RA,
-                imm: 0,
-            },
-        ],
+        ops,
     }
 }
 
@@ -1151,9 +1327,31 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
         },
         Op::Label("trap_sei".into()),
         Op::Comment("supervisor external interrupt → PLIC claim/complete (not x86 EOI)".into()),
+        // claim = PLIC_CTXT_BASE + (2*tp + 1)*0x1000 + 4 — the S-mode context
+        // of the hart running the trap, not a fixed hart-0 context.
+        Op::Slli {
+            rd: T1,
+            rs: TP,
+            shamt: 1,
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: 1,
+        },
+        Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: 12,
+        },
         Op::La {
             rd: T0,
-            addr: Addr::Abs(PLIC_CLAIM_S0),
+            addr: Addr::Abs(PLIC_CTXT_BASE + 4),
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
         },
         Op::Lw {
             rd: T2,
@@ -1191,19 +1389,102 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 rs2: T1,
                 to: "trap_mbox".into(),
             },
+        ]);
+    }
+    if spec.wants_virtio_gpu() {
+        // virtio-mmio irq = 16 + (dev - VIO_MMIO_BASE)/0x1000; the bound
+        // device base is at __vio+VIO_DEV_OFF (0 → nothing claimed yet).
+        ops.extend([
+            Op::Comment("virtio-mmio PLIC source: irq 16 + mmio slot".into()),
+            Op::La {
+                rd: T0,
+                addr: Addr::VioBss,
+            },
+            Op::Lw {
+                rd: T1,
+                rs: T0,
+                off: crate::vio::VIO_DEV_OFF,
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: X0,
+                to: "trap_done".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: VIO_MMIO_BASE as i64,
+            },
+            Op::Sub {
+                rd: T1,
+                rs1: T1,
+                rs2: A2,
+            },
+            Op::Srli {
+                rd: T1,
+                rs: T1,
+                shamt: 12, // VIO_MMIO_STEP
+            },
+            Op::Addi {
+                rd: T1,
+                rs: T1,
+                imm: crate::vio::VIO_IRQ_BASE as i32,
+            },
+            Op::Beq {
+                rs1: T2,
+                rs2: T1,
+                to: "trap_vio".into(),
+            },
+        ]);
+    }
+    ops.push(Op::Jal {
+        rd: X0,
+        to: "trap_done".into(),
+    });
+    ops.extend(trap_uart_ops(spec));
+    if spec.loopback.enable {
+        ops.extend(trap_mbox_ops(spec));
+    }
+    if spec.wants_virtio_gpu() {
+        // trap_vio — virtio used-buffer irq: read InterruptStatus, write it
+        // to InterruptACK (clears the device level so it does not storm),
+        // bump __vio+VIO_IRQF_OFF, done. t0 still holds __vio.
+        ops.extend([
+            Op::Label("trap_vio".into()),
+            Op::Lw {
+                rd: T1,
+                rs: T0,
+                off: crate::vio::VIO_DEV_OFF,
+            },
+            Op::Lw {
+                rd: A0,
+                rs: T1,
+                off: crate::encode::VIO_REG_ISR_STATUS,
+            },
+            Op::Sw {
+                rs2: A0,
+                rs1: T1,
+                off: crate::encode::VIO_REG_ISR_ACK,
+            },
+            Op::Lw {
+                rd: A0,
+                rs: T0,
+                off: crate::vio::VIO_IRQF_OFF,
+            },
+            Op::Addi {
+                rd: A0,
+                rs: A0,
+                imm: 1,
+            },
+            Op::Sw {
+                rs2: A0,
+                rs1: T0,
+                off: crate::vio::VIO_IRQF_OFF,
+            },
             Op::Jal {
                 rd: X0,
                 to: "trap_done".into(),
             },
         ]);
-        ops.extend(trap_uart_ops(spec));
-        ops.extend(trap_mbox_ops(spec));
-    } else {
-        ops.push(Op::Jal {
-            rd: X0,
-            to: "trap_done".into(),
-        });
-        ops.extend(trap_uart_ops(spec));
     }
     ops.extend([
         Op::Label("trap_ssi".into()),
@@ -1259,9 +1540,13 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
 }
 
 /// PLIC irq 1: drain one ns16550 RBR, echo, append to `__uart_line`; newline → V/R/S/W.
+/// The UART1 drain is emitted only when the board actually has the second
+/// ns16550 (`dual_band.tcp`); on stock QEMU virt that MMIO is unmapped and a
+/// load would fault inside the trap.
 fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
     let u0 = uart0_base(spec);
     let u1 = uart1_base(spec);
+    let has_u1 = spec.holyc.dual_band.tcp.enable;
     let cap = i64::from(UART_LINE_CAP);
     let mut ops = vec![
         Op::Label("trap_uart".into()),
@@ -1283,7 +1568,11 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
         Op::Beq {
             rs1: T1,
             rs2: X0,
-            to: "uart1_drain".into(),
+            to: if has_u1 {
+                "uart1_drain".into()
+            } else {
+                "trap_done".into()
+            },
         },
         Op::Lbu {
             rd: A0,
@@ -1294,31 +1583,37 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             rd: X0,
             to: "uart_take".into(),
         },
-        Op::Label("uart1_drain".into()),
-        Op::La {
-            rd: T0,
-            addr: Addr::Abs(u1),
-        },
-        Op::Lbu {
-            rd: T1,
-            rs: T0,
-            off: 5,
-        },
-        Op::Andi {
-            rd: T1,
-            rs: T1,
-            imm: UART_LSR_DR as i32,
-        },
-        Op::Beq {
-            rs1: T1,
-            rs2: X0,
-            to: "trap_done".into(),
-        },
-        Op::Lbu {
-            rd: A0,
-            rs: T0,
-            off: 0,
-        },
+    ];
+    if has_u1 {
+        ops.extend([
+            Op::Label("uart1_drain".into()),
+            Op::La {
+                rd: T0,
+                addr: Addr::Abs(u1),
+            },
+            Op::Lbu {
+                rd: T1,
+                rs: T0,
+                off: 5,
+            },
+            Op::Andi {
+                rd: T1,
+                rs: T1,
+                imm: UART_LSR_DR as i32,
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: X0,
+                to: "trap_done".into(),
+            },
+            Op::Lbu {
+                rd: A0,
+                rs: T0,
+                off: 0,
+            },
+        ]);
+    }
+    ops.extend([
         Op::Label("uart_take".into()),
         Op::Addi {
             rd: T2,
@@ -1521,7 +1816,7 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             to: "uart_get".into(),
         },
         Op::Label("uart_view".into()),
-    ];
+    ]);
     for ch in b"VIEW" {
         ops.extend(putc_ops(i64::from(*ch)));
     }
@@ -1636,6 +1931,24 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
     ops.push(Op::Label("uart_ui".into()));
     for ch in b"UI\n" {
         ops.extend(putc_ops(i64::from(*ch)));
+    }
+    if spec.kernel.wasm.enable && spec.kernel.wasm.jit {
+        ops.push(Op::Comment(
+            "Ui → DomPaint: re-dump live __ui_dom rows (bounded)".into(),
+        ));
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "DomPaint".into(),
+        });
+    }
+    if spec.wants_virtio_gpu() && (spec.kernel.gr.enable || spec.kernel.proxy.enable) {
+        ops.push(Op::Comment(
+            "Ui → VioPaint: push repainted plane to the virtio-gpu scanout".into(),
+        ));
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "VioPaint".into(),
+        });
     }
     ops.push(Op::Jal {
         rd: X0,
@@ -2197,6 +2510,180 @@ fn gl_call_node(o: Object) -> Node {
     }
 }
 
+fn vio_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::Virtio,
+        ops: vec![
+            Op::Comment(format!("{} — jal VioProbe / VioInit / VioScan", o.why)),
+            Op::Jal {
+                rd: RA,
+                to: "VioProbe".into(),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "VioInit".into(),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "VioScan".into(),
+            },
+        ],
+    }
+}
+
+fn vio_paint_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::Virtio,
+        ops: vec![
+            Op::Comment(format!(
+                "{} — jal VioPaint (__gr_plane → __scan_fb → TRANSFER+FLUSH)",
+                o.why
+            )),
+            Op::Jal {
+                rd: RA,
+                to: "VioPaint".into(),
+            },
+        ],
+    }
+}
+
+fn disp_paint_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::DispScan,
+        ops: vec![
+            Op::Comment(format!(
+                "{} — jal DispPaint (__gr_plane → __scan_fb → uncore commit + G6FB)",
+                o.why
+            )),
+            Op::Jal {
+                rd: RA,
+                to: "DispPaint".into(),
+            },
+        ],
+    }
+}
+
+/// Virtio-mmio slot scan: QEMU virt exposes 8 transports at
+/// `VIO_MMIO_BASE + VIO_MMIO_STEP*i`; MagicValue "virt" + DeviceID 16 = GPU.
+/// Prints `VIRTIO-GPU <slot>` on a match, else `VIRTIO-GPU-NONE`. Leaf, t-regs
+/// only — enumeration evidence, not a virtqueue, DMA or scanout command.
+fn vio_probe_node(o: Object) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!("{} — read-only slot scan", o.why)),
+        Op::Glob("VioProbe".into()),
+        Op::Label("VioProbe".into()),
+        Op::La {
+            rd: T0,
+            addr: Addr::Abs(VIO_MMIO_BASE),
+        },
+        Op::Li {
+            rd: T1,
+            imm: VIO_MMIO_SLOTS,
+        },
+        // The 0x1000 slot stride does not fit an addi immediate.
+        Op::Li {
+            rd: T4,
+            imm: VIO_MMIO_STEP as i64,
+        },
+        Op::Label("vio_slot".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: 0,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_MAGIC),
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vio_next".into(),
+        },
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_DEV_GPU),
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vio_gpu".into(),
+        },
+        Op::Label("vio_next".into()),
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T4,
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vio_slot".into(),
+        },
+    ];
+    for ch in b"VIRTIO-GPU-NONE\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Jalr {
+            rd: X0,
+            rs: RA,
+            imm: 0,
+        },
+        Op::Label("vio_gpu".into()),
+    ]);
+    for ch in b"VIRTIO-GPU " {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Comment("slot index = VIO_MMIO_SLOTS - remaining".into()),
+        Op::Li {
+            rd: T2,
+            imm: VIO_MMIO_SLOTS,
+        },
+        Op::Sub {
+            rd: T2,
+            rs1: T2,
+            rs2: T1,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: i32::from(b'0'),
+        },
+        Op::Addi {
+            rd: A0,
+            rs: T2,
+            imm: 0,
+        },
+        Op::Li {
+            rd: A7,
+            imm: SBI_PUTCHAR,
+        },
+        Op::Ecall,
+    ]);
+    ops.extend(putc_ops(i64::from(b'\n')));
+    ops.push(Op::Jalr {
+        rd: X0,
+        rs: RA,
+        imm: 0,
+    });
+    Node {
+        purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
 fn ui_call_node(o: Object) -> Node {
     Node {
         purpose: Purpose::FileServe,
@@ -2404,6 +2891,22 @@ fn wasm_jit_call_node(o: Object) -> Node {
             Op::Jal {
                 rd: RA,
                 to: "WasmJit".into(),
+            },
+        ],
+    }
+}
+
+fn wasm_ui_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::UiDom,
+        ops: vec![
+            Op::Comment(format!(
+                "{} — jal WasmUi (lowered wasm _start → DOM → DomPaint)",
+                o.why
+            )),
+            Op::Jal {
+                rd: RA,
+                to: "WasmUi".into(),
             },
         ],
     }
@@ -2785,7 +3288,7 @@ fn proxy_geom_node(o: Object, spec: &BoardSpec) -> Node {
     }
 }
 
-fn g6b_spec_proxy(spec: &BoardSpec) -> (u32, u32, u32, u32, u32, u32, String, u32) {
+pub(crate) fn g6b_spec_proxy(spec: &BoardSpec) -> (u32, u32, u32, u32, u32, u32, String, u32) {
     let g = &spec.kernel.gr;
     let p = &spec.kernel.proxy;
     let lw = if g.enable { g.w.max(8) } else { 640 };
@@ -3063,6 +3566,32 @@ mod tests {
     }
 
     #[test]
+    fn kstart_probes_virtio_gpu_only_when_argv_would_attach() {
+        let spec = spec_json(
+            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"}}}"#,
+        );
+        assert!(live_objects(&spec)
+            .iter()
+            .any(|o| o.purpose == Purpose::Virtio));
+        let s = kstart(&spec).to_asm();
+        let jal = s.find("jal\tra, VioProbe").unwrap_or(usize::MAX);
+        let park = s.find("\npark:").unwrap_or(0);
+        let body = s.find("\nVioProbe:").unwrap_or(0);
+        assert!(jal < park, "VioProbe must be called before park:\n{s}");
+        assert!(park < body, "VioProbe body must sit after park:\n{s}");
+        // Marker text is emitted as `li` immediates; the magic is literal.
+        assert!(s.contains("0x74726976"), "{s}"); // "virt" MagicValue
+        assert!(s.contains("0x10001000"), "{s}");
+        // No GPU backend → no probe object, no marker.
+        let spec_off = spec_json(r#"{"schema_version":1,"isa":{"xlen":64}}"#);
+        assert!(!live_objects(&spec_off)
+            .iter()
+            .any(|o| o.purpose == Purpose::Virtio));
+        let s_off = kstart(&spec_off).to_asm();
+        assert!(!s_off.contains("VioProbe"), "{s_off}");
+    }
+
+    #[test]
     fn kstart_calls_timerinit_before_park() {
         let spec = spec_json(r#"{"schema_version":1,"isa":{"xlen":64}}"#);
         let s = kstart(&spec).to_asm();
@@ -3160,7 +3689,15 @@ mod tests {
         assert!(live_objects(&spec)
             .iter()
             .any(|o| o.purpose == Purpose::Uart1Repl));
-        assert_eq!(uart1_base(&spec), 0x1000_1000);
+        // QEMU virt instantiates all 8 virtio-mmio transports (0x1000 stride)
+        // whether or not a device is attached — the modeled UART1 sits above
+        // the window either way.
+        assert_eq!(uart1_base(&spec), 0x1000_9000);
+        let spec_gpu = spec_json(
+            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"gr":{"enable":true,"backend":"virtio-gpu"}},"holyc":{"dual_band":{"tcp":{"enable":true,"host_port":2222}}}}"#,
+        );
+        assert!(spec_gpu.wants_virtio_gpu());
+        assert_eq!(uart1_base(&spec_gpu), 0x1000_9000);
         let s = kstart(&spec).to_asm();
         assert!(s.contains("IER.ERBFI"), "{s}");
         assert!(!s.contains("uart1_poll"), "{s}");
@@ -3208,7 +3745,7 @@ mod tests {
         );
         let s = kstart(&spec).to_asm();
         let stvec = s.find("csrw\tstvec").expect(&s);
-        let split = s.find("bnez\ttp, park").expect(&s);
+        let split = s.find("beqz\ts1, park").expect(&s);
         let park = s.find("\npark:").expect(&s);
         assert!(stvec < split, "stvec must be set on every hart:\n{s}");
         assert!(split < park, "secondaries park after stvec:\n{s}");

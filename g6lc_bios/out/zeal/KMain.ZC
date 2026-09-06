@@ -10,10 +10,21 @@ U0 UiBoot()
 	Print("UI-BOOT\n");
 }
 
+U0 SysGrInit()
+{
+	Print("GR-INIT 640x480x16 backend=virtio-gpu\n");
+}
+
+U0 TimerInit()
+{
+	Print("TIMER-READY SBI-TIME\n");
+}
+
 U0 KMain()
 {
 	Print("G6LC-BIOS\n");
 	HolycInit();
-	Print("DUAL-BAND uart+tcp:2222\n");
+	SysGrInit();
+	TimerInit();
 	UiBoot();
 }

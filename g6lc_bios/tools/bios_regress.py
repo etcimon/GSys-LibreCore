@@ -535,10 +535,19 @@ def case_gr_framebuffer(spec: Path) -> None:
     if "GR-INIT 640x480x16" not in p.stdout:
         raise RuntimeError(f"missing GR-INIT: {p.stdout!r}")
     qa = run_g6b(["qemu-args", "--spec", str(spec)])
-    if "virtio-gpu-device" not in qa.stdout:
+    # proxy.gl → virgl GL device + EGL display; the 2D device is the
+    # documented --no-gl fallback for hosts without a DRM render node.
+    if "virtio-gpu-gl-device" not in qa.stdout and "virtio-gpu-device" not in qa.stdout:
         raise RuntimeError(f"missing virtio-gpu: {qa.stdout!r}")
     if "virtio-net" in qa.stdout:
         raise RuntimeError("gpu path must not add virtio-net")
+    qa2 = run_g6b(["qemu-args", "--spec", str(spec), "--no-gl", "--vnc", "9"])
+    if "virtio-gpu-device" not in qa2.stdout:
+        raise RuntimeError(f"--no-gl must fall back to the 2D device: {qa2.stdout!r}")
+    if "virtio-gpu-gl" in qa2.stdout or "-display egl-headless" in qa2.stdout:
+        raise RuntimeError(f"--no-gl must drop the GL display/device: {qa2.stdout!r}")
+    if "-vnc 127.0.0.1:9" not in qa2.stdout:
+        raise RuntimeError(f"--vnc must emit the VNC frontend: {qa2.stdout!r}")
     ppm_path = package_root() / "out" / "setup.ppm"
     g = run_g6b(["gr", "--spec", str(spec), "--out", str(ppm_path)])
     if g.returncode != 0:
@@ -572,6 +581,23 @@ def case_boot_sideband(spec: Path) -> None:
         raise RuntimeError(f"missing ssh-holyc kvm face: {out!r}")
 
 
+def case_disp_scan(_spec: Path) -> None:
+    # Native uncore display engine — the `display`-class peripheral selects
+    # the MMIO scanout contract (architecture/uncore/hdmi-display.md); no
+    # virtio transport is emitted for it.
+    hdmi = package_root() / "fixtures" / "g6lc64-hdmi.json"
+    p = run_g6b(["smoke", "--spec", str(hdmi)])
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr or p.stdout)
+    out = p.stdout
+    if "DISP-OK" not in out:
+        raise RuntimeError(f"missing DISP-OK (display-engine commit): {out!r}")
+    if "DISP-FAIL" in out:
+        raise RuntimeError(f"display-engine commit failed: {out!r}")
+    if "VIRTIO" in out:
+        raise RuntimeError(f"hdmi board must not emit virtio display: {out!r}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="bios-regress")
     ap.add_argument("--spec")
@@ -597,6 +623,7 @@ def main() -> int:
         ("elf_payload", case_elf_payload),
         ("elf_smoke", case_elf_smoke),
         ("gr_framebuffer", case_gr_framebuffer),
+        ("disp_scan", case_disp_scan),
     ]
     failed = []
     for name, fn in cases:

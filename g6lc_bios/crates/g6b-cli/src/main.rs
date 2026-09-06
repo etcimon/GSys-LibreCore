@@ -53,7 +53,33 @@ fn main() -> ExitCode {
         "qemu-args" => match load_spec(spec_path.as_deref()) {
             Err(c) => c,
             Ok(spec) => {
-                println!("{}", g6b_kernel::qemu_dual_band_argv(&spec).join(" "));
+                let mut argv = g6b_kernel::qemu_dual_band_argv(&spec);
+                // --vnc N: host-side display frontend on 5900+N — the QEMU
+                // console (BIOS scanout, and whatever a later OS puts on it)
+                // is exported over VNC; composes with -nographic since the
+                // command console is the TCP serial backend.
+                if let Some(v) = flag_value(&args, "--vnc") {
+                    argv.push("-vnc".into());
+                    argv.push(format!("127.0.0.1:{v}"));
+                }
+                // --no-gl: host has no DRM render node → 2D virtio-gpu
+                // fallback (identical guest commands; no virgl).
+                if flag_present(&args, "--no-gl") {
+                    let mut i = 0;
+                    while i < argv.len() {
+                        if argv[i] == "-display" {
+                            argv.drain(i..=i + 1);
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    for a in argv.iter_mut() {
+                        if a == "virtio-gpu-gl-device" {
+                            *a = "virtio-gpu-device".into();
+                        }
+                    }
+                }
+                println!("{}", argv.join(" "));
                 ExitCode::SUCCESS
             }
         },
@@ -138,9 +164,56 @@ fn main() -> ExitCode {
                         println!();
                     }
                     eprintln!(
-                        "g6b: smoke halt={:?} steps={} satp={:#x}",
-                        s.halt, s.steps, s.satp
+                        "g6b: smoke halt={:?} steps={} satp={:#x} dom_rows={} dom_pix0={:#x} \
+                         vio={:#x}/{:#x}/{:#x} scanout={} flushes={} irqs={}",
+                        s.halt,
+                        s.steps,
+                        s.satp,
+                        s.dom_rows,
+                        s.dom_pix0,
+                        s.vio_status,
+                        s.vio_last_cmd,
+                        s.vio_last_resp,
+                        s.vio_scanout,
+                        s.vio_flushes,
+                        s.vio_irqs
                     );
+                    // --out FILE: executed __gr_plane (incl. DomPaint) → PPM.
+                    if let Some(out) = flag_value(&args, "--out") {
+                        match g6b_kernel::frame_ppm(&s.gr_frame) {
+                            Some(ppm) => {
+                                if let Some(parent) = Path::new(out).parent() {
+                                    if !parent.as_os_str().is_empty() {
+                                        let _ = fs::create_dir_all(parent);
+                                    }
+                                }
+                                if let Err(e) = fs::write(out, ppm) {
+                                    eprintln!("g6b: smoke --out: {e}");
+                                    return ExitCode::from(1);
+                                }
+                                eprintln!("g6b: wrote {out}");
+                            }
+                            None => eprintln!("g6b: smoke: no live GR16 plane to export"),
+                        }
+                    }
+                    // --out-vio FILE: device-side virtio-gpu scanout → PPM.
+                    if let Some(out) = flag_value(&args, "--out-vio") {
+                        match g6b_kernel::scanout_ppm(s.vio_fb_w, s.vio_fb_h, &s.vio_fb) {
+                            Some(ppm) => {
+                                if let Some(parent) = Path::new(out).parent() {
+                                    if !parent.as_os_str().is_empty() {
+                                        let _ = fs::create_dir_all(parent);
+                                    }
+                                }
+                                if let Err(e) = fs::write(out, ppm) {
+                                    eprintln!("g6b: smoke --out-vio: {e}");
+                                    return ExitCode::from(1);
+                                }
+                                eprintln!("g6b: wrote {out}");
+                            }
+                            None => eprintln!("g6b: smoke: no virtio scanout surface to export"),
+                        }
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

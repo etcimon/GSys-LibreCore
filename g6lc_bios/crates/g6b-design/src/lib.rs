@@ -793,7 +793,14 @@ fn emit_gr_zc(spec: &BoardSpec) -> String {
 }
 
 fn emit_kstart_s(spec: &BoardSpec) -> String {
-    g6b_asm::analyze::kstart(spec).to_asm()
+    let mut m = g6b_asm::analyze::kstart(spec);
+    // Same merge g6b-elf applies: the `WasmStart` anchor carries the lowered
+    // `_start` so the .S listing does not diverge from the payload.
+    if spec.kernel.wasm.enable && spec.kernel.wasm.jit {
+        // Listing is best-effort: an unloadable UI wasm leaves the stub.
+        let _ = g6b_wasm::install_start(&mut m, spec.isa.xlen);
+    }
+    m.to_asm()
 }
 
 fn emit_kints_s(spec: &BoardSpec) -> String {

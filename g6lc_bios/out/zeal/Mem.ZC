@@ -1,4 +1,4 @@
-// Generated MemCpy — scalar (RVV absent)
+// Generated MemCpy — HolyC; RISC-V in MemCpy.S (ISEL-SCALAR)
 U0 MemCpy(U8 *dst, U8 *src, INative n)
 {
 	while (n) { *dst++ = *src++; n--; }

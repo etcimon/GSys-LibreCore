@@ -1,0 +1,25 @@
+// Generated Browser.ZC — lightweight BIOS browser (not Chromium, not goja runtime)
+// js=aot display=html-js gl=1
+// WEBIDL-LIVE Attr
+// WEBIDL-LIVE CharacterData
+// WEBIDL-LIVE ChildNode
+// WEBIDL-LIVE Comment
+// WEBIDL-LIVE Console
+// WEBIDL-LIVE Document
+// WEBIDL-LIVE DocumentFragment
+// WEBIDL-LIVE DOMStringMap
+// WEBIDL-LIVE Fetch
+// WEBIDL-STUB WebGLRenderingContext
+// ui=svelte-d (kernel-spec/svelte-d; not LDC, not SvelteKit)
+// USB-FAT32 flash picker (always); firmware .bin/.elf/.img only
+// USB-FILES FileMgr fat32/ntfs/ext4 (two-pane; fetch /bios/files)
+// browser-UI: fetch /bios/menu/{main,cpu,memory,uncore,devices,boot,settings}
+U0 BrowserInit()
+{
+	Print("BROWSER-READY\n");
+	Print("WASM-JIT\n");
+	Print("SVELTE-LIVE NodeDef\n");
+	Print("SVELTE-LIVE FileMgr\n");
+	Print("USB-FAT32\n");
+	Print("USB-FILES fat32/ntfs/ext4\n");
+}

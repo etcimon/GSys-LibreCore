@@ -194,3 +194,49 @@ Validation added: 105 memory cases cross-checked against native WebAssembly;
 1,358 JIT differential cases on each XLEN (2,716 machine executions); async
 fulfillment/rejection/throw/cancel/budget tests; actual LDC-compiled deterministic
 particle-state stepping. These do not constitute guest UI, RTL or GPU evidence.
+
+## B53 guest lane: `_start` lowering -> `__ui_dom` -> `DomPaint`
+
+When `kernel.wasm.jit` is live, `g6b-elf::payload_module` replaces the
+`WasmStart` anchor (emitted as a `ret` stub by `g6b-asm::dom::nodes`) with
+`g6b_wasm::jit::start_ops` output: the guest ISel of the MVP wasm `_start`.
+The supported form is strictly straight-line `i32.const` pushes followed by
+`call` to the known `env` imports, ending in `end`/`return`. Locals, other
+instructions, non-`env` calls, local calls, arity mismatch and leftover
+operands all fail closed at build time - this is not an on-guest general
+compiler, and `jit_riscv` remains the separate numeric-leaf lane.
+
+Import mapping (pointer args resolve as `__wasm_data + i32 offset`; the data
+image is `jit::data_image`, the module's initialized linear memory trimmed to
+its last non-zero byte, 4-aligned, capped at 16 KiB of `.rodata`):
+
+| `env` import | Guest stub | Args | Effect |
+|---|---|---|---|
+| `set_inner_text` | `WasmDomText` | id ptr/len, text ptr/len | find-or-insert `__ui_dom` row; sets visible+text |
+| `set_visible` | `WasmDomVisible` | id ptr/len, on | flag flip only; row and text retained |
+| `fetch` / `Object_Call_string__Handle` | `WasmFetch` | url ptr/len | `GET <path>` over serial (same shape as `GetFile`) |
+| `console_log` | `WasmLog` | ptr/len | `LOG <text>` over serial |
+
+`__ui_dom` is a bounded BSS table (`UI_DOM_BYTES` = 16 + 48x32): a count and
+dirty counter plus 48 rows of `{id_ptr, text_ptr, id_len, text_len, flags}`.
+Bounds: id <= 96 bytes (longer ids dropped), <= 48 rows (overflow dropped),
+96 printed bytes per `GET`/`LOG`, 72 characters per painted row, rows painted
+from `DOM_Y0` (y=24) while they fit the plane. `DomPaint` emits `DOM| <text>`
+on SBI serial and, when Gr/proxy is live, blits glyphs from `__font`
+(`g6b-asm::font`, first-party 8x8, `0x20`-`0x7E` with `a-z` folded to `A-Z`,
+box fallback) into the 4bpp `__gr_plane`. The boot log gains
+`KSTART-WASM-UI` and `KSTART-DOM` markers; the hart-0 call order ends
+`... jal WasmJit; jal WasmUi; park`.
+
+`g6b_asm::exec` models `__ui_dom` (`smoke.dom_rows`) and the first painted
+word at the DOM origin (`smoke.dom_pix0`); `payload_memsz` covers the DOM BSS.
+`g6b-elf` smoke on `kernel.wasm.jit` specs shows `DOM| ` lines carrying the
+generated menu text and nonzero `dom_pix0`. The same `payload_module` feeds
+ELF packing and host smoke, so the assembled payload cannot diverge from what
+the host executes.
+
+**Still open and not implied:** arbitrary wasm control flow or indirect calls,
+guest-native JS execution, a second `WasmStart` invocation after boot (the DOM
+lane runs once from KStart), input delivery, virtio-gpu resource/scanout
+commands (the `DOM|` serial transcript is the observable channel until that
+exists), asyncify continuations and EH unwinding on guest code.

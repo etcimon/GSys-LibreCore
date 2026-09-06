@@ -92,19 +92,142 @@ hardware acceleration is not inferred from API availability.
 3. **Guest execution:** persistent WASM memory/globals/tables, i64/floating-point,
    indirect calls and EH/continuation semantics; port required allocation/clock/
    transport primitives to the S-mode runtime. Current numeric JIT and Rust
-   scheduler tests do not satisfy this gate.
+   scheduler tests do not satisfy this gate. A bounded first step landed:
+   `g6b-wasm::jit::start_ops` lowers the straight-line `_start`
+   (`i32.const` + `env` DOM/fetch/log imports) onto the payload `WasmStart`
+   anchor, and `g6b-asm::dom` executes it against a 48-row `__ui_dom` store
+   (`DOM| ` serial + 4bpp glyph paint into `__gr_plane`) — verified by host
+   `g6b-elf` smoke (`dom_rows`, `dom_pix0`), not a QEMU run.
 4. **Guest display/input:** enumerate and drive virtio-gpu resources, transfer,
    flush and scanout; route input into a bounded normal-context event queue;
-   advance/resume scripts independently of refresh. The existing GR16 boot
-   pattern plus `virtio-gpu-device` argv is not a connected UI scanout.
-5. **Acceptance:** capture QEMU scanout showing text actually mutated by WASM,
-   then menu input, pending/rejected await and background frames concurrently;
+   advance/resume scripts independently of refresh. `DomPaint` writes into the
+   existing `GR16` boot plane (`__gr_plane`, `DOM_Y0` rows), which is still not
+   a connected UI scanout — the plane has no virtio-gpu backing yet and the
+   `virtio-gpu-device` argv alone is not evidence. Progress on stage 4: the
+   payload runs `VioProbe` (Purpose `virtio`) — a bounded read-only scan of
+   the QEMU-virt virtio-mmio window (`0x10001000 + 0x1000*i`, 8 slots; QEMU
+   instantiates all 8 transports at a 0x1000 stride and attaches `-device`
+   backends to the last free bus — observed slot 7) for
+   MagicValue `virt` + DeviceID 16, printing `VIRTIO-GPU <slot>` or
+   `VIRTIO-GPU-NONE` — followed by `VioInit`: the virtio 1.x handshake
+   (reset, ACK|DRIVER, `VIRTIO_F_VERSION_1`, FEATURES_OK readback,
+   DRIVER_OK), controlq (queue 0) with desc/avail/used rings in `__vio` BSS,
+   and one real `GET_DISPLAY_INFO` descriptor-chain round-trip —
+   `VIRTIO-INFO` on `RESP_OK_DISPLAY_INFO` (`0x1101`), else
+   `VIRTIO-GPU-FAIL`. `VioScan` then runs the pixel command sequence through
+   the shared `VioCmd` submit-one routine: `RESOURCE_CREATE_2D` (resource 1,
+   `B8G8R8X8`, the **high-res** proxy target `high_w×high_h`) →
+   `RESOURCE_ATTACH_BACKING` (`__scan_fb`, `high_w*high_h*4`) →
+   `SET_SCANOUT` (scanout 0, the full high-res rect) → a guest-filled green
+   band (`0x0000AA00`, first 64 rows) → `TRANSFER_TO_HOST_2D` →
+   `RESOURCE_FLUSH`, printing `VIRTIO-SCAN` when every response is
+   `RESP_OK_NODATA` (`0x1100`).
+   **Verified on real QEMU 8.2 + OpenSBI 1.5** (`fixtures/g6lc64-qemu.json`,
+   `qemu-system-riscv64 -M virt -nographic -global
+   virtio-mmio.force-legacy=false -device virtio-gpu-device`): serial shows
+   `VIRTIO-GPU 7` → `VIRTIO-GPU-OK` → `VIRTIO-INFO` → `VIRTIO-SCAN`, and a QMP
+   `screendump` PPM shows the 64-row green band (`0x00AA00`) — actual guest
+   pixel→scanout evidence, not a host artifact. Two QEMU-virt realities the
+   code now encodes: (a) the default `virtio-mmio` transports are legacy
+   (Version=1) which silently ignores the v2 queue registers — `qemu-args`
+   therefore emits `-global virtio-mmio.force-legacy=false`; (b) QEMU
+   services `QueueNotify` on an iothread, so `VIO_POLL_MAX` is `1<<22`, not a
+   few thousand iterations.
+   The host executor models the same slot-0 device under
+   `BoardSpec::wants_virtio_gpu` (shared with argv emission): status/feature/
+   queue registers, notify doorbell, chain walk, response write, used-elem
+   publish, ISR, and now resource/scanout state — attach validates the
+   backing pointer/len against `__vio_fb`, set_scanout latches the bound
+   rectangle, transfer copies backing→device surface at the given offset,
+   flush counts (`Smoke::vio_flushes`, `vio_scanout`, `vio_fb*`), and each
+   used publish asserts InterruptStatus bit 0 — the guest reads it and
+   writes it back to InterruptACK after every command (`Smoke::vio_irqs`
+   counts the assertions, 6 per boot). Both present and absent
+   (`exec::run_module_no_gpu`) paths are exercised.
+   `FbExpand` (emitted when a scanout backend ∧ a Gr/proxy plane exists)
+   palette-expands the 4bpp `__gr_plane` into the X8R8G8B8 `__scan_fb`
+   surface (inline `vio_pal` table, same values as `g6b-gr::PALETTE`) with
+   the **display-proxy scale semantics** — `fit`/`dpi` use the resolved
+   uniform `scale` in a *centered* letterbox (same `ox/oy` math as
+   `Proxy::to_ppm`), `fill` does a bounded per-axis integer stretch — all
+   gen-time constants, branch-free bounded nest. `VioPaint` then submits a
+   full-frame `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` of the high-res
+   surface; it runs after the boot painters (`DomPaint` inside `WasmUi`, or
+   `GrInit`) and again on the UART `Ui` re-dump (`VIRTIO-PAINT` /
+   `VIRTIO-PAINT-FAIL`; silent bail when no device bound). **QEMU-verified**
+   at the real high-res geometry: `screendump` is `P6 1920×1080` with the
+   640×480 DOM/Gr plane ×2 (dpi=192 → scale 2) centered at (320,60) — DOM
+   glyphs and the boot band land exactly where `to_ppm`'s content window
+   puts them; letterboxes black. `VIO_FB_MAX` is 16 MiB so the 8.3 MB
+   1080p surface fits. Completion is
+   interrupt-driven too: QEMU virt maps virtio-mmio slot i to PLIC irq
+   `1+i` (GPU slot 7 → irq 8); `PlicInit` gives every enabled source a
+   nonzero priority (QEMU resets them to 0) and enables irqs 1..=8 +
+   UART(10), and `trap_vio` claims the used-buffer irq, acks the device
+   ISR, and bumps `__vio+VIO_IRQF_OFF` — QEMU `xp` reads `irqf == 8`
+   (6 scan + 2 paint completions). `VioCmd` still polls `used.idx` as the
+   bounded fallback. Still open:
+   eventq/input delivery. The
+   mailbox (`loopback`)
+   and second ns16550 (dual-band UART1) do not exist on stock QEMU virt —
+   the mailbox address `0x10100000` is QEMU's `fw_cfg` — so the QEMU-verified
+   path uses `fixtures/g6lc64-qemu.json`, which keeps the virtio-gpu lane and
+   disables both; the full `g6lc64-virt.json` still describes the custom
+   board for a device model that does provide them.
+   Host-side inspection exists: `exec::Smoke::gr_frame` carries the executed
+   plane and `g6b smoke --out f.ppm` renders it via `g6b-gr::plane_to_ppm`;
+   `g6b smoke --out-vio f.ppm` renders the device-side `vio_fb` scanout
+   surface via `g6b-gr::x8r8_to_ppm`/`g6b_kernel::scanout_ppm` — both are
+   host-executed artifacts, not QEMU scanout captures.
+5. **Acceptance:** QEMU scanout evidence now exists for the guest-painted
+   band **and** for the DOM/Gr plane — `VioPaint` transfers the
+   palette-expanded `__gr_plane` (which `DomPaint` mutates from the WASM
+   lane's `__ui_dom` rows) to the virtio-gpu scanout; the QMP `screendump`
+   histogram matches the host-modelled framebuffer exactly. Remaining: menu
+   input, pending/rejected await and background frames concurrently —
    record framebuffer/event evidence, not just UART markers. Later hardware
    timing/PMA/PMP/cache/IRQ validation remains distinct from QEMU evidence.
 
-Stages 3–5 remain open. Do not remove `-nographic` or claim a screenshot by
-changing argv alone; connect and verify the actual guest scanout path first.
+Stages 3 and 5 remain open; stage 4 is QEMU-verified for probe → handshake →
+controlq → resource/scanout/flush **at the high-res proxy geometry**
+(1920×1080 scanout, centered ×2 content) on `fixtures/g6lc64-qemu.json`. Do
+not remove `-nographic` or claim a screenshot by changing argv alone.
+
+### Output backends — QEMU and the uncore port
+
+The scanout surface is backend-agnostic: `__scan_fb` is a linear
+X8R8G8B8 high-res buffer; `FbExpand` is the only blit; the transport is
+selected by BoardSpec:
+
+- **QEMU / virtio-mmio** — `wants_virtio_gpu()`: `VioScan`+`VioPaint` drive
+  the ctrlq commands (verified on `qemu-system-riscv64 -M virt`).
+- **Uncore HDMI/DisplayPort** — a `peripherals[]` entry with
+  `class:"display"` declares the native engine and *disables* the virtio
+  transport for proxy links (`wants_virtio_gpu` yields). `DispPaint` expands
+  the plane into `__scan_fb`, programs the engine register window
+  (`MAGIC/FB/W/H/STRIDE/FORMAT/COMMIT/STATUS`), and writes the `G6FB`
+  handoff descriptor at `__vio+0x400` — the `simple-framebuffer`-shaped
+  surface a Linux `simplefb`/`simpledrm` node inherits, so the same scanout
+  serves the BIOS **and** the OS. Contract and evidence model:
+  `architecture/uncore/hdmi-display.md`; fixture `fixtures/g6lc64-hdmi.json`
+  (exec-model verified: `DISP-OK`, `disp_committed`, descriptor
+  `1920×1080` x8r8g8b8).
+- **VNC** — `g6b qemu-args --vnc N` appends `-vnc 127.0.0.1:N`: a host-side
+  frontend on the QEMU console that shows the BIOS scanout and any later
+  guest identically (BIOS and Linux share the QEMU console → one VNC serves
+  both). No guest change.
+- **Host GL** — `proxy.gl:true` emits `virtio-gpu-gl-device` +
+  `-display egl-headless,gl=on` (virgl). Requires a host DRM render node;
+  without one QEMU refuses the device (`opengl is not available`) — use
+  `qemu-args --no-gl` for the 2D `virtio-gpu-device` fallback. The guest
+  path is identical either way; GL only changes host-side composite.
+  `GL-ADAPTER`/ProxyScale RVV is a *guest-side* scale accel listing, not
+  QEMU virgl — do not equate them.
 
 Conformity: HDMI TMDS / DisplayPort PHY stay in `corev_apu` / board (REQUIREMENTS).
-This package emits timing metadata and a scaled framebuffer, not a TMDS encoder.
-QEMU still uses `-nographic` plus optional `virtio-gpu-device`. No `-netdev`.
+This package emits the register contract, timing metadata and the scaled
+framebuffer, not a TMDS encoder. QEMU still uses `-nographic` plus
+`virtio-gpu-device` (or `virtio-gpu-gl-device` under `proxy.gl`) with
+`-global virtio-mmio.force-legacy=false` (the virt machine's mmio transports
+default to the legacy v1 interface, which ignores the v2 queue registers).
+No `-netdev`.

@@ -451,24 +451,42 @@ fn paint_response(dom: &mut Node, url: &str, body: &str) -> Result<(), String> {
 
 /// QEMU extra argv: `-smp` from BoardSpec harts, UART1 chardev for SSH+HolyC.
 /// Never a guest netdev. `virtio-gpu-device` when Gr/proxy wants a high-res stand-in.
+/// Default host TCP port for the BIOS command console when `dual_band.tcp`
+/// is off — the UART0/`trap_uart` path (View/Ui/File/Get) needs a
+/// bidirectional backend; `-serial file:` would make commands unreachable.
+pub const G6B_UART_CONSOLE_PORT: u16 = 4567;
+
 pub fn qemu_dual_band_argv(spec: &BoardSpec) -> Vec<String> {
     let mut a = vec!["-nographic".to_string()];
     a.push("-smp".into());
     a.push(spec.harts.max(1).to_string());
-    if let Some(port) = spec.holyc_tcp_port() {
-        a.push("-serial".into());
-        a.push(format!("tcp:127.0.0.1:{port},server,nowait"));
-    }
-    let gpu = spec.kernel.gr.enable
-        && (spec.kernel.gr.backend == "virtio-gpu"
-            || spec.kernel.proxy.enable
-                && matches!(
-                    spec.kernel.proxy.link.as_str(),
-                    "virtio-gpu" | "hdmi" | "displayport" | "host-gl"
-                ));
-    if gpu {
-        a.push("-device".into());
-        a.push("virtio-gpu-device".into());
+    // UART0 command console — always bidirectional (tcp server) so the
+    // trap_uart command lane works on QEMU for every spec, not only
+    // dual_band.tcp.
+    let port = spec.holyc_tcp_port().unwrap_or(G6B_UART_CONSOLE_PORT);
+    a.push("-serial".into());
+    a.push(format!("tcp:127.0.0.1:{port},server,nowait"));
+    if spec.wants_virtio_gpu() {
+        // QEMU virt creates all virtio-mmio transports with force-legacy=1
+        // (Version reg reads 1); the payload uses the non-legacy v2 register
+        // map (QueueDesc/Avail/Used/Ready at 0x80/0x90/0xa0/0x44).
+        a.push("-global".into());
+        a.push("virtio-mmio.force-legacy=false".into());
+        if spec.kernel.proxy.enable && spec.kernel.proxy.gl {
+            // `proxy.gl` → virgl host-GL scanout: the gl device + an EGL
+            // display context. Requires a host DRM render node
+            // (`egl-headless`/`gtk`/`sdl` with gl=on); on a host without
+            // one QEMU refuses the device (`opengl is not available`) —
+            // run `qemu-args --no-gl` for the 2D fallback (the guest path
+            // is identical: CREATE_2D/ATTACH/SCANOUT/TRANSFER/FLUSH).
+            a.push("-display".into());
+            a.push("egl-headless,gl=on".into());
+            a.push("-device".into());
+            a.push("virtio-gpu-gl-device".into());
+        } else {
+            a.push("-device".into());
+            a.push("virtio-gpu-device".into());
+        }
     }
     a
 }
@@ -797,6 +815,20 @@ pub fn gr_ppm(spec: &BoardSpec) -> Vec<u8> {
     frame.to_ppm()
 }
 
+/// PPM of an *executed* `__gr_plane` (`exec::Smoke::gr_frame` — GR16 + 4bpp
+/// as the payload left it, including `DomPaint` glyphs). `None` when the run
+/// had no live Gr plane or the header is invalid.
+pub fn frame_ppm(plane: &[u8]) -> Option<Vec<u8>> {
+    g6b_gr::plane_to_ppm(plane)
+}
+
+/// PPM of the device-side virtio-gpu scanout surface (`exec::Smoke::vio_fb`
+/// as `TRANSFER_TO_HOST_2D` left it — B8G8R8X8 LE). `None` when the run had
+/// no virtio-gpu device. Host-modelled scanout, not a QEMU capture.
+pub fn scanout_ppm(w: u32, h: u32, fb: &[u8]) -> Option<Vec<u8>> {
+    g6b_gr::x8r8_to_ppm(w, h, fb)
+}
+
 fn rendered_dom(spec: &BoardSpec) -> Node {
     match BrowserSession::new(spec) {
         Ok(session) => session.dom,
@@ -866,6 +898,24 @@ mod tests {
             "BIOS path must not steal a NIC: {argv}"
         );
         assert!(!argv.contains("virtio-net"), "{argv}");
+    }
+
+    #[test]
+    fn qemu_argv_serial_is_bidirectional_without_dual_band() {
+        // The UART0/trap_uart console must accept commands (View/Ui/File/Get)
+        // on QEMU for every spec — an output-only backend would strand them.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let argv = qemu_dual_band_argv(&spec).join(" ");
+        assert!(
+            argv.contains(&format!(
+                "-serial tcp:127.0.0.1:{},server,nowait",
+                G6B_UART_CONSOLE_PORT
+            )),
+            "{argv}"
+        );
     }
 
     #[test]

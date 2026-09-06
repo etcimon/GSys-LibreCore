@@ -5,8 +5,8 @@
 
 #![allow(missing_docs)]
 
-use g6b_asm::encode::{A0, A1, A2, RA, SP, T0, T1, T2, X0};
-use g6b_asm::{Module, Node, Op, Purpose};
+use g6b_asm::encode::{A0, A1, A2, A3, RA, SP, T0, T1, T2, X0};
+use g6b_asm::{Addr, Module, Node, Op, Purpose};
 
 pub const MAX_JIT_SLOTS: usize = 256;
 pub const MAX_JIT_INSTRUCTIONS: usize = 4096;
@@ -585,6 +585,228 @@ pub fn jit_add_i32() -> Module {
     m
 }
 
+/// Byte cap for the guest `__wasm_data` rodata image (data section only).
+pub const MAX_WASM_DATA: usize = 16 * 1024;
+
+/// Guest `env` import stubs provided by `g6b-asm::dom` (lirx-dom-shaped DOM
+/// store + kernel router). `Ptr` args index the wasm data image (`__wasm_data`).
+#[derive(Clone, Copy)]
+enum Arg {
+    Ptr,
+    Imm,
+}
+
+fn import_stub(name: &str) -> Option<(&'static str, &'static [Arg])> {
+    match name {
+        crate::IMPORT_SET_INNER_TEXT => {
+            Some(("WasmDomText", &[Arg::Ptr, Arg::Imm, Arg::Ptr, Arg::Imm]))
+        }
+        crate::IMPORT_SET_VISIBLE => Some(("WasmDomVisible", &[Arg::Ptr, Arg::Imm, Arg::Imm])),
+        crate::IMPORT_FETCH | crate::IMPORT_OBJECT_CALL => {
+            Some(("WasmFetch", &[Arg::Ptr, Arg::Imm]))
+        }
+        crate::IMPORT_LOG => Some(("WasmLog", &[Arg::Ptr, Arg::Imm])),
+        _ => None,
+    }
+}
+
+/// Linear-memory snapshot for `__wasm_data`: the decoded data image trimmed to
+/// its last non-zero byte (4-aligned). Strings referenced by `_start` imports
+/// resolve as `__wasm_data + ptr`.
+pub fn data_image(m: &crate::Module) -> Result<Vec<u8>, String> {
+    let end = m.memory.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+    let end = end.div_ceil(4) * 4;
+    if end > MAX_WASM_DATA {
+        return Err("wasm data image limit".into());
+    }
+    Ok(m.memory[..end].to_vec())
+}
+
+/// Lower a straight-line `_start` (`i32.const` + `call` env imports + `end`)
+/// to the guest `WasmStart` routine — the WASM-JIT UI path. The ops reference
+/// `WasmDomText`/`WasmDomVisible`/`WasmFetch`/`WasmLog` and `__wasm_data`,
+/// provided by `g6b-asm::dom` / `Module::wasm_data` at ELF build. Anything
+/// else fails closed.
+pub fn start_ops(m: &crate::Module, xlen: u32) -> Result<Vec<Op>, String> {
+    use crate::Instr;
+    if !matches!(xlen, 32 | 64) {
+        return Err("WasmStart requires RV32IM or RV64IM".into());
+    }
+    let idx = m
+        .exports
+        .iter()
+        .find(|e| e.kind == 0 && e.name == "_start")
+        .ok_or("no _start export")?
+        .idx;
+    let local = (idx as usize)
+        .checked_sub(m.imports.len())
+        .ok_or("cannot JIT the _start import")?;
+    let ty = crate::binary::func_type(m, idx)?;
+    if ty.params != 0 || ty.results != 0 {
+        return Err("_start must be () -> ()".into());
+    }
+    if m.locals.get(local).copied().unwrap_or(0) != 0 {
+        return Err("_start locals unsupported in guest JIT".into());
+    }
+    let body = m.bodies.get(local).ok_or("_start body")?;
+    if body.len() > MAX_JIT_INSTRUCTIONS {
+        return Err("JIT instruction limit".into());
+    }
+    let (st_ra, ld_ra) = if xlen == 64 {
+        (
+            Op::Sd {
+                rs2: RA,
+                rs1: SP,
+                off: 8,
+            },
+            Op::Ld {
+                rd: RA,
+                rs: SP,
+                off: 8,
+            },
+        )
+    } else {
+        (
+            Op::Sw {
+                rs2: RA,
+                rs1: SP,
+                off: 8,
+            },
+            Op::Lw {
+                rd: RA,
+                rs: SP,
+                off: 8,
+            },
+        )
+    };
+    let mut ops = vec![
+        Op::Comment("WasmStart — guest ISel of wasm _start: i32.const + env import calls".into()),
+        Op::Glob("WasmStart".into()),
+        Op::Label("WasmStart".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -16,
+        },
+        st_ra,
+    ];
+    let mut stack: Vec<i32> = Vec::new();
+    let mut ended = false;
+    for (pc, ins) in body.iter().enumerate() {
+        match ins {
+            Instr::I32Const(v) => {
+                stack.push(*v);
+                if stack.len() > 8 {
+                    return Err("_start operand stack limit".into());
+                }
+            }
+            Instr::Call(f) => {
+                let im = m
+                    .imports
+                    .get(*f as usize)
+                    .ok_or("guest JIT supports env imports only (no local calls)")?;
+                if im.module != "env" {
+                    return Err(format!("unknown import module {}", im.module));
+                }
+                let params = crate::binary::func_type(m, *f)?.params as usize;
+                let (stub, kinds) = import_stub(&im.name)
+                    .ok_or_else(|| format!("unsupported guest import {}", im.name))?;
+                if params != kinds.len() {
+                    return Err(format!("import {} arity mismatch", im.name));
+                }
+                let base = stack
+                    .len()
+                    .checked_sub(params)
+                    .ok_or("call argument underflow")?;
+                let args: Vec<i32> = stack.split_off(base);
+                for (i, (v, kind)) in args.iter().zip(kinds).enumerate() {
+                    let reg = A0 + i as u32;
+                    if reg > A3 {
+                        return Err("guest import arity limit".into());
+                    }
+                    match kind {
+                        Arg::Ptr => {
+                            ops.push(Op::La {
+                                rd: reg,
+                                addr: Addr::WasmData,
+                            });
+                            ops.push(Op::Li {
+                                rd: T0,
+                                imm: i64::from(*v),
+                            });
+                            ops.push(Op::Add {
+                                rd: reg,
+                                rs1: reg,
+                                rs2: T0,
+                            });
+                        }
+                        Arg::Imm => ops.push(Op::Li {
+                            rd: reg,
+                            imm: i64::from(*v),
+                        }),
+                    }
+                }
+                ops.push(Op::Jal {
+                    rd: RA,
+                    to: stub.into(),
+                });
+            }
+            Instr::End | Instr::Return if pc + 1 == body.len() => {
+                ended = true;
+                break;
+            }
+            _ => {
+                return Err(format!(
+                    "unsupported _start instruction {ins:?} (guest JIT is straight-line)"
+                ))
+            }
+        }
+    }
+    if !ended || !stack.is_empty() {
+        return Err("_start did not end cleanly for guest JIT".into());
+    }
+    ops.extend([
+        ld_ra,
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        Op::Jalr {
+            rd: X0,
+            rs: RA,
+            imm: 0,
+        },
+    ]);
+    Ok(ops)
+}
+
+/// Install `start_ops` onto a payload module's `WasmStart` anchor and set
+/// `module.wasm_data` — the shared merge used by `g6b-elf` (ELF + smoke) and
+/// `g6b-design` (`KStart.S`) so the listing cannot diverge from the payload.
+/// The anchor label must already exist (`g6b-asm::dom::attach`).
+pub fn install_start(module: &mut Module, xlen: u32) -> Result<(), String> {
+    let wm = crate::decode(crate::BIOS_UI_WASM)?;
+    let ops = start_ops(&wm, xlen)?;
+    let data = data_image(&wm)?;
+    let mut merged = false;
+    for n in &mut module.nodes {
+        if n.ops
+            .iter()
+            .any(|o| matches!(o, Op::Label(l) if l == "WasmStart"))
+        {
+            n.ops = ops.clone();
+            merged = true;
+            break;
+        }
+    }
+    if !merged {
+        return Err("WasmStart anchor missing in payload".into());
+    }
+    module.wasm_data = data;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,5 +1054,95 @@ mod tests {
         ops.push(0x0b);
         let m = decode(&numeric(0, 0, 0, &ops)).unwrap();
         assert!(jit_riscv(&m, "main", 64).is_err());
+    }
+
+    /// Guest `_start` lowering: `i32.const` + `env` calls → `WasmStart`,
+    /// executed against the real `g6b-asm::dom` stubs on both xlens.
+    #[test]
+    fn start_ops_executes_dom_imports_in_guest_ir() {
+        let bytes = crate::encode_ui_module("status", "UI-BOOT");
+        let wm = decode(&bytes).unwrap();
+        for xlen in [64, 32] {
+            let spec = g6b_spec::BoardSpec::from_json_str(&format!(
+                r#"{{"schema_version":1,"isa":{{"xlen":{xlen}}},"kernel":{{"wasm":{{"enable":true,"jit":true}}}}}}"#
+            ))
+            .unwrap();
+            let ops = start_ops(&wm, xlen).unwrap();
+            let mut m = Module {
+                nharts: 1,
+                line_bytes: g6b_asm::UART_LINE_BSS,
+                ui_bytes: g6b_asm::UI_HEADER_BYTES,
+                wasm_data: data_image(&wm).unwrap(),
+                ..Default::default()
+            };
+            g6b_asm::dom::attach(&mut m, &spec);
+            let mut merged = false;
+            for n in &mut m.nodes {
+                if n.ops
+                    .iter()
+                    .any(|o| matches!(o, Op::Label(l) if l == "WasmStart"))
+                {
+                    n.ops = ops.clone();
+                    merged = true;
+                }
+            }
+            assert!(merged, "WasmStart anchor");
+            m.nodes.insert(
+                0,
+                Node {
+                    purpose: Purpose::WasmJit,
+                    ops: vec![
+                        Op::La {
+                            rd: SP,
+                            addr: Addr::StacksEnd,
+                        },
+                        Op::Jal {
+                            rd: RA,
+                            to: "WasmUi".into(),
+                        },
+                        Op::Wfi,
+                    ],
+                },
+            );
+            let smoke = exec::run_module(&spec, &m, 0x0001_0000).unwrap();
+            assert_eq!(
+                smoke.halt,
+                exec::Halt::Wfi,
+                "xlen={xlen} asm={}",
+                m.to_asm()
+            );
+            assert_eq!(smoke.dom_rows, 1, "xlen={xlen}");
+            assert_eq!(smoke.console, "DOM| UI-BOOT\n", "xlen={xlen}");
+        }
+    }
+
+    #[test]
+    fn start_ops_fail_closed() {
+        let wm = decode(&crate::encode_ui_module("status", "UI-BOOT")).unwrap();
+        assert!(start_ops(&wm, 16).is_err());
+        let mut m = wm.clone();
+        m.bodies[0] = vec![crate::Instr::Call(9), crate::Instr::End];
+        assert!(start_ops(&m, 64).is_err(), "non-import call must fail");
+        let mut m = wm.clone();
+        m.bodies[0] = vec![
+            crate::Instr::I32Const(0),
+            crate::Instr::Call(0),
+            crate::Instr::Nop,
+            crate::Instr::End,
+        ];
+        assert!(start_ops(&m, 64).is_err(), "non-straight-line must fail");
+        let mut m = wm.clone();
+        m.bodies[0] = vec![crate::Instr::I32Const(0), crate::Instr::End];
+        assert!(start_ops(&m, 64).is_err(), "leftover operand must fail");
+        let m = decode(&numeric(0, 1, 0, &[0x41, 7, 0x0b])).unwrap();
+        assert!(start_ops(&m, 64).is_err(), "no _start export must fail");
+    }
+
+    #[test]
+    fn data_image_trims_to_data_content() {
+        let wm = decode(&crate::encode_ui_module("status", "UI-BOOT")).unwrap();
+        let img = data_image(&wm).unwrap();
+        assert!(img.len() <= MAX_WASM_DATA);
+        assert!(img.windows(7).any(|w| w == b"UI-BOOT"));
     }
 }

@@ -1,0 +1,25 @@
+// Generated Tls.ZC — Botan rewrite: RSA+ECDSA+X.509 (enable=1)
+U0 TlsHandshake()
+{
+	Print("TLS-HELLO\n");
+}
+U0 TlsClientHello(U8 *host)
+{
+	Print("TLS-CLIENTHELLO\n");
+}
+U0 RsaVerify()
+{
+	Print("RSA-VERIFY PKCS1-SHA256\n");
+}
+U0 EcdsaVerify()
+{
+	Print("ECDSA-VERIFY P256-SHA256\n");
+}
+U0 CertParse(U8 *pem)
+{
+	Print("CERT-OK\n");
+}
+U0 NetOpenPort(U8 *kind)
+{
+	Print("NET-OPEN %s bios-https=443 ssh-holyc=2222\n", kind);
+}

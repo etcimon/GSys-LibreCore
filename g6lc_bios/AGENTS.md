@@ -26,13 +26,18 @@ share the menu tree. JS `fetch` and HolyC share one router. SvelteKit refused.
 The OpenSBI ELF `jal`s `TimerInit` (SBI TIME + `rdtime`) before park and takes
 supervisor timer irq 5 with the scause interrupt bit. Every hart sets `sp` and
 `stvec` before the park split; stacks sit in BSS after the image. Display-proxy
-geom is payload words; QEMU virt uses `-smp` + `virtio-gpu-device` (never `-netdev`).
+geom is payload words; QEMU virt uses `-smp` + `virtio-gpu-device`
+(`virtio-gpu-gl-device` under `proxy.gl`, `--no-gl` fallback, `--vnc`
+frontend; never `-netdev`).
 `g6b smoke` runs the S-mode payload on the host (SBI putchar/TIME + UART0 THR)
 until park. Hart 0 `wfi` takes irq 5 once (IRQ_TIMER). Secondary harts WFI after
 `satp`/`sp`/`stvec` with no tick. Unexpected traps print `TRAP-<scause>-<sepc>`
 and park (INT_FAULT), not an `sret` loop. `uncore.plic` runs `PlicInit` (S-mode
-ctx1) and trap irq 9 claim/complete: UART irq 1 (`trap_uart` ns16550 RX) and
-mbox irq 3. `harts>1` runs `HartStart` (SBI HSM + IPI); trap irq 1 (SSI) `sret`s.
+ctx1) — sets a nonzero priority for every enabled source (QEMU resets
+priorities to 0) and trap irq 9 claim/complete: UART irq 10 (QEMU virt
+ns16550; `trap_uart` RX), virtio-mmio irqs 1..=8 (slot i → irq 1+i,
+`trap_vio` ISR read/ack + `__vio` irq counter — QEMU-verified), and mbox
+irq 3. `harts>1` runs `HartStart` (SBI HSM + IPI); trap irq 1 (SSI) `sret`s.
 `loopback.enable` runs `MboxInit` (`G6MB` + irq_en at `0x10100000`); trap irq 3
 services doorbell kicks (`View` → ST_RSP, `Reboot` → SBI SRST). Dual-band UART1
 sets `IER.ERBFI` and waits with `WFI` (not a busy poll, never a netdev). UART
@@ -40,12 +45,51 @@ RX appends `__uart_line`; a newline matches `View`/`Reboot`/`Shutdown`/`Wakeup`
 (4-char prefix or first letter). `ViewSection("name")` prints `VIEW name`.
 `GrInit` writes a `GR16` header at `__gr_plane` (after stacks), a 4bpp 640×480
 plane with a boot scanline, and an 8×8 `G6LC` blit; QEMU still uses
-`virtio-gpu-device` (never `-netdev`). `ProxyScale` runs when `kernel.proxy.gl`.
+`virtio-gpu-device` (never `-netdev`; `proxy.gl` selects
+`virtio-gpu-gl-device` + `egl-headless,gl=on`). `ProxyScale` runs when
+`kernel.proxy.gl`.
 `UiInit` publishes a `G6UI` header at `__ui_blob`; the ELF carries
 `bios-ui.wasm` in `.rodata`. UART/mbox `Ui` prints `UI`. `FileServe` echoes
 `\0asm` and prints `/ui/` paths; UART/mbox `File` lists them. `GetFile` is GET
 `/ui/ui.wasm` (mailbox RSP `\0asm`+size; not a netdev). `WasmJit` is the
-`i32.add` leaf when `kernel.wasm.jit`.
+`i32.add` leaf when `kernel.wasm.jit`; `WasmUi` then runs `WasmStart`
+(lowered straight-line wasm `_start` import calls) against `__ui_dom` and
+`DomPaint` (`DOM| ` serial + 8x8 glyphs into `__gr_plane`) — a bounded
+boot-time lane, not a guest browser or JIT install. UART `Ui` re-dumps the
+live DOM via `DomPaint`. `VioProbe` (`Purpose::Virtio`, live when
+`wants_virtio_gpu`) scans QEMU-virt virtio-mmio slots `0x10001000+0x1000*i`
+(all 8 transports exist at a 0x1000 stride; `-device` attaches to the last
+free bus) for DeviceID 16 and prints `VIRTIO-GPU <slot>`/`VIRTIO-GPU-NONE`;
+`VioInit` then performs the virtio 1.x handshake (reset → ACK|DRIVER →
+FEATURES_OK readback → DRIVER_OK), sets up controlq rings in `__vio` BSS,
+completes one `GET_DISPLAY_INFO` descriptor round-trip (`VIRTIO-INFO`), and
+`VioScan` drives the pixel sequence (`RESOURCE_CREATE_2D` →
+`RESOURCE_ATTACH_BACKING` → `SET_SCANOUT` → band fill →
+`TRANSFER_TO_HOST_2D` → `RESOURCE_FLUSH` → `VIRTIO-SCAN`) — the resource and
+rects are the **high-res proxy target** (`proxy.high_w×high_h`), and
+`FbExpand` scale-expands the 4bpp `__gr_plane` into the X8R8G8B8
+`__scan_fb` with the `Proxy::to_ppm` semantics (`fit`/`dpi` = uniform
+scale, centered letterbox; `fill` = per-axis stretch) — then `VioPaint`
+TRANSFER+FLUSHes the full frame (`VIRTIO-PAINT`) after `WasmUi`/`DomPaint`
+and on the UART `Ui` re-dump. **Verified on QEMU 8.2 + OpenSBI 1.5** via
+`fixtures/g6lc64-qemu.json`: QMP `screendump` is 1920×1080 with the 640×480
+DOM/Gr plane ×2 centered at (320,60) — matching the host-modelled
+framebuffer and the `display-proxy` PPM geometry exactly. A `display`-class
+peripheral (`fixtures/g6lc64-hdmi.json`) selects the native uncore scanout:
+`DispPaint` commits `__scan_fb` to the engine contract
+(`architecture/uncore/hdmi-display.md`) plus a `G6FB` descriptor — the
+`simple-framebuffer`-shaped BIOS→Linux handoff — and `wants_virtio_gpu`
+yields to it. `qemu-args` emits `virtio-gpu-gl-device` + `egl-headless,gl=on`
+under `proxy.gl` (needs a host DRM render node; `--no-gl` → 2D fallback)
+and `--vnc N` exports the console for BIOS+Linux alike. QEMU needs
+`-global virtio-mmio.force-legacy=false` (the default legacy v1 transport
+ignores the v2 queue registers — `qemu-args` emits it) and the used-ring
+poll is `1<<22` (QueueNotify is iothread-async). The modeled
+UART1 sits at `uart0+0x9000` — above the always-present virtio-mmio window
+(QEMU virt has no second real ns16550). `g6lc64-qemu.json` is the
+stock-virt-faithful spec: `loopback` off (mbox `0x10100000` is QEMU `fw_cfg`),
+`dual_band.tcp` off, `postboot`/`net_expose` never; `g6lc64-virt.json`
+remains the custom-board spec for a device model that provides them.
 
 B50–B52 add bounded JS/DOM and validated i32 WASM execution, shared complete
 menu rows, native-browser navigation/imports, `kernel.browser.start_menu`,

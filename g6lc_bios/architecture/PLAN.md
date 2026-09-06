@@ -50,11 +50,15 @@ executes the ELF until park/UART and prints the boot log (QEMU stand-in, never
 Variane). Boot log is UART0 ns16550 THR plus SBI putchar so QEMU `-nographic`
 shows it. Host smoke takes supervisor timer irq 5 on `wfi` (SIE+STIE) and
 `sret`s. Unexpected traps dump `TRAP-<scause>-<sepc>` over SBI and WFI (INT_FAULT
-rewrite). S-mode PLIC (QEMU virt `0x0c000000` ctx1) enables UART/mbox and
-claims/completes SEI. Hart 0 `HartStart` uses SBI HSM+IPI for extra harts; SSI
+rewrite). S-mode PLIC (QEMU virt `0x0c000000` ctx1) writes a nonzero priority to every
+enabled source (QEMU resets them to 0), enables UART/virtio-mmio/mbox, and
+claims/completes SEI — the virtio-mmio source resolves to `irq = 1 + slot`
+from `__vio+VIO_DEV_OFF` → `trap_vio` (ISR read + ACK + `__vio` counter;
+QEMU-verified: `irqf == 8` after boot). Hart 0 `HartStart` uses SBI HSM+IPI for extra harts; SSI
 (irq 1) wakes `wfi`. `MboxInit` writes `G6MB` + irq_en at `loopback.base`
 (default `0x10100000`); trap irq 3 services doorbell kicks (`View` → ST_RSP,
-`Reboot`/`Shutdown` → SBI SRST). UART RX is PLIC irq 1 (`trap_uart` drains
+`Reboot`/`Shutdown` → SBI SRST). UART RX is PLIC irq 10 — QEMU virt's
+ns16550 line, per the machine DTB (`trap_uart` drains
 ns16550 RBR into `__uart_line`; newline matches `View`/`Rebo`/`Shut`/`Wake` or
 the first-letter shortcuts; `ViewSection("name")` prints `VIEW name`). Dual-band
 UART1 enables `IER.ERBFI` and parks with `WFI` (not a busy poll). `GrInit` writes a `GR16` ident + geom header at `__gr_plane` after
@@ -84,8 +88,8 @@ on-guest JIT. Detailed supported/refused boundaries: `BROWSER.md`, `WASM.md`.
 |---|---|
 | Spec forks | `kernel-spec/ZealOS`, `TempleOS`, `goja`, `lirx-dom`, `webidl/`, `svelte-d`, `botan`, `libwasm` (WASM druntime / fetch). Not Cargo members. |
 | Rewrite surface | BoardSpec → generated `KMain.ZC` / `Adam.ZC` / `PostBoot.ZC` / `Loopback.ZC`; host HolyC subset; HTML+JS viewport; SSH+HolyC KVM face |
-| Payload | `g6b elf` RV32/64 ET_EXEC: KStart rewrite (`tp`=hartid, `sp`, `stvec`, hart0 KMain, others WFI). Map: `KERNEL-RV.md` |
-| QEMU | `g6q --loader bios` + UART1 `-serial tcp:127.0.0.1:2222`. No `-netdev`. Hypothesis only |
+| Payload | `g6b elf` RV32/64 ET_EXEC: KStart rewrite (`tp`=hartid, `sp`, `stvec`, handoff-hart KMain — OpenSBI `a1≠0`, any hart id — others WFI). Map: `KERNEL-RV.md` |
+| QEMU | `g6q --loader bios` + UART1 `-serial tcp:127.0.0.1:2222` for the custom board; **stock-virt verified**: `fixtures/g6lc64-qemu.json` + `qemu-args` (`-nographic -smp N -global virtio-mmio.force-legacy=false -device virtio-gpu-device` — or `virtio-gpu-gl-device` + `egl-headless,gl=on` under `proxy.gl`, `--no-gl` fallback, `--vnc N` frontend) boots under OpenSBI 1.5/QEMU 8.2 to `VIRTIO-SCAN`+`VIRTIO-PAINT` with a **1920×1080 QMP screendump** (640×480 DOM/Gr plane ×2 centered — `FbExpand` = `Proxy::to_ppm` semantics). Native uncore HDMI/DP: `display`-class peripheral → `DispPaint` register commit + `G6FB` simplefb handoff (`architecture/uncore/hdmi-display.md`, `fixtures/g6lc64-hdmi.json`, exec-modelled). No `-netdev`. `g6lc64-virt.json` still needs a custom mbox/UART1 device model for QEMU |
 | Post-boot | `until-delegate` NIC then `LOOPBACK-MBOX` + PLIC IRQ 3 @ `0x10100000` → `/dev/g6lc-bios`. Immutable view-only; Reboot/Shutdown/Wakeup |
 | Gr / proxy | `g6b-gr` 640×480×16 plane + display-proxy `fit`/`fill`/`dpi` to HDMI/DP / host-GL (30/60/120 fps, high DPI, up to 8K). OpenGL-ES2 listing. Docs: `DISPLAY.md` |
 | Browser | `g6b-webidl` + `browser-ui` (svelte-d NodeDef + **FileMgr**, **not SvelteKit**) + `g6b-wasm` JIT on the g6b kernel. Fetch is live via kernel HTTP. `BROWSER.md` `USB.md` `WASM.md` `KERNEL-API.md` |
@@ -156,7 +160,7 @@ RTL mailbox / DTS merge into `corev_apu` is an inference recorded in
 | **B50** | Bounded JS AOT, strict strings/HTML, local DOM mutations and non-destructive visibility | landed (host) |
 | **B51** | Shared configurable menu rows; executable host/native-browser presentations; post-script framebuffer and bounded HTTP transport | landed (host) |
 | **B52** | Validated i32 WASM interpreter with fuel and real numeric RV32/RV64 ASM lowering | landed (host generation + machine-word tests) |
-| **B53** | Guest JS/DOM runtime, input/GPU scanout and JIT installation/trampolines/cache synchronization | host prerequisites advanced; guest gates open |
+| **B53** | Guest JS/DOM runtime, input/GPU scanout and JIT installation/trampolines/cache synchronization | host prerequisites advanced; bounded guest `_start`→DOM→Gr lane landed (host smoke); runtime/scanout gates open |
 | **B54** | Real persistent settings/flash backend and authenticated production TLS | open |
 | **B55** | Mutable per-run WASM memory (`i32.load/store*`, `memory.size/grow`) + extended i32 lowering (bitwise, shifts, rotates, signed/unsigned ordering) through `g6b-asm` | landed (host; RV32/RV64 differential machine-word tests) |
 | **B56** | Bounded nonblocking JS async: `await` fetch tokens, throw/catch, cancellation, stale/duplicate rejection, per-task/tick budgets; kernel poll integration | landed (host) |
@@ -184,15 +188,25 @@ remain the sole authority; OpenSBI remains M-mode and BIOS stays S-mode.
   D-generated particle state, extracted Svelte CSS, native WebGL frame pacing,
   pause/reduced-motion/failure handling. This is a component scaffold, not full
   Svelte compilation or a guest browser.
+- Implemented guest lane (bounded): `g6b-wasm::jit::start_ops` lowers the
+  straight-line wasm `_start` (`i32.const` + `env` import calls) onto the
+  payload's `WasmStart` anchor; `g6b-asm::dom` supplies `WasmDomFind` /
+  `WasmDomText` / `WasmDomVisible` (a 48-row `__ui_dom` BSS store),
+  `WasmFetch`/`WasmLog` (bounded serial `GET `/`LOG `), and `DomPaint`
+  (`DOM| ` serial rows + 8x8 first-party font glyphs into the 4bpp
+  `__gr_plane`). `__wasm_data`/`__font` are payload `.rodata`. Evidence is
+  host `g6b-elf` smoke (`dom_rows`, `DOM|`, `dom_pix0`), not a QEMU scanout.
 - Required before full libwasm: persistent instance globals/tables and indirect
   calls, numeric types beyond i32, EH cleanup, real callback/Promise handles,
   allocation/GC semantics for exercised paths, full component lifetime/reactivity
   and a verified Asyncify or native continuation transform. Binaryen requests
   currently fail explicitly; numeric JIT code cannot suspend/unwind yet.
 - Required before QEMU display: compile/install the guest runtime, connect IRQ
-  input and transport completion to normal-context polls, implement real GPU
-  resource/scanout commands and capture WASM-driven pixels. Never substitute a
-  static boot pattern or host-browser screenshot for that evidence.
+  input and transport completion to normal-context polls, and capture real
+  QEMU scanout of guest-mutated pixels. The virtio-gpu command sequence is
+  exercised host-side (`VioScan` + exec model, `smoke --out-vio`); QEMU has
+  not yet presented a window, so never substitute the modeled surface, a
+  static boot pattern, or a host-browser screenshot for that evidence.
 - Reproducibility follow-up: the verified `runtime-v1.43.0` carry is now
   vendored under `browser-ui/libwasm/` and tracked; compiler
   provenance/preflight detects drift but does not provision a missing runtime.

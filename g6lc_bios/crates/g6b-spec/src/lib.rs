@@ -1190,6 +1190,28 @@ impl BoardSpec {
         self.peripherals.iter().any(|p| p.class == "ai-island")
     }
 
+    /// Native scanout engine (uncore display port) when a `display`-class
+    /// peripheral is declared — the MMIO contract of
+    /// `architecture/uncore/hdmi-display.md` (TMDS/PHY bring-up is SoC
+    /// vendor IP; the BIOS programs FB_BASE/W/H/STRIDE/COMMIT). Returns the
+    /// register-window base.
+    pub fn display_ctrl(&self) -> Option<u64> {
+        self.peripherals
+            .iter()
+            .find(|p| p.class == "display")
+            .and_then(|p| parse_hex(&p.base))
+    }
+
+    /// True when the guest should drive the declared native display engine —
+    /// a `display` peripheral plus a graphics plane or display proxy. The
+    /// scanout surface is the same scaled X8R8G8B8 `__scan_fb` the
+    /// virtio-gpu path uses, so the blit is backend-agnostic; the descriptor
+    /// is also the `simple-framebuffer`-shaped handoff a Linux `simplefb`/
+    /// `simpledrm` node consumes (works for the BIOS and Linux).
+    pub fn wants_disp_scan(&self) -> bool {
+        self.display_ctrl().is_some() && (self.kernel.gr.enable || self.kernel.proxy.enable)
+    }
+
     /// Optional high-DPI GL/scale accelerator. Default `off`.
     pub fn proxy_accel(&self) -> ProxyAccel {
         match self.kernel.proxy.accel.as_str() {
@@ -1206,6 +1228,22 @@ impl BoardSpec {
             }
             _ => ProxyAccel::Off,
         }
+    }
+
+    /// True when the QEMU argv should attach `virtio-gpu-device` — single
+    /// predicate shared by argv emission, payload probing and host device
+    /// models so they cannot drift.
+    pub fn wants_virtio_gpu(&self) -> bool {
+        self.kernel.gr.enable
+            && (self.kernel.gr.backend == "virtio-gpu"
+                || self.kernel.proxy.enable
+                    // A declared native display engine takes the link —
+                    // virtio-gpu is the QEMU-virt transport fallback.
+                    && self.display_ctrl().is_none()
+                    && matches!(
+                        self.kernel.proxy.link.as_str(),
+                        "virtio-gpu" | "hdmi" | "displayport" | "host-gl"
+                    ))
     }
 
     /// Dual-band HolyC TCP host port when that band is live.
@@ -1277,7 +1315,11 @@ impl BoardSpec {
                 self.kernel.gr.w, self.kernel.gr.h, self.kernel.gr.colors, self.kernel.gr.backend
             ));
             if self.kernel.gr.backend == "virtio-gpu" {
-                req.push("QEMU virt: -device virtio-gpu-device; serial stays -nographic".into());
+                req.push(
+                    "QEMU virt: -global virtio-mmio.force-legacy=false -device virtio-gpu-device; \
+                     serial stays -nographic"
+                        .into(),
+                );
             }
         }
         if self.kernel.proxy.enable {

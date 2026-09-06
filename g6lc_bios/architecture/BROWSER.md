@@ -131,6 +131,16 @@ property setters, HTML injection, URL properties and event setters are refused.
 Unmount detaches without invalidating the retained handle. The current contract
 is initialization-only, not a callback/reactive object bridge.
 
+A bounded **guest** lane also exists when `kernel.wasm.jit` is live
+(`WASM.md` B53): `g6b-elf` merges `g6b-wasm::jit::start_ops` into the
+payload's `WasmStart` anchor and KStart `jal WasmUi` runs it once at boot.
+The guest `__ui_dom` table mirrors the same menu text into a bounded row
+store; `DomPaint` echoes `DOM| <text>` on serial and blits the first-party
+8x8 font into `__gr_plane`. This is a one-shot boot-time render of the
+straight-line `_start` — the ES6-shaped host `BrowserSession`, reactivity,
+input, async continuations and virtio-gpu scanout remain separate lanes or
+open gates, and the guest lane never replaces them.
+
 Browser limits: 1 MiB module, 16 MiB observed WASM memory, 4,096 handles,
 16,384 imports, 64 KiB individual/1 MiB total decoded strings, DOM depth 64.
 The fixed generated particle step uses no DOM imports after commit. Native

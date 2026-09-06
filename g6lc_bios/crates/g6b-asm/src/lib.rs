@@ -8,9 +8,12 @@
 
 pub mod analyze;
 pub mod crypto;
+pub mod dom;
 pub mod encode;
 pub mod exec;
+pub mod font;
 pub mod task;
+pub mod vio;
 
 use std::collections::BTreeMap;
 
@@ -58,6 +61,10 @@ pub enum Purpose {
     Mailbox,
     Menu,
     FileServe,
+    UiDom,
+    Virtio,
+    /// Uncore display-engine scanout (HDMI/DP — `architecture/uncore/hdmi-display.md`).
+    DispScan,
 }
 
 impl Purpose {
@@ -97,6 +104,9 @@ impl Purpose {
             Self::Mailbox => "mailbox",
             Self::Menu => "menu",
             Self::FileServe => "file-serve",
+            Self::UiDom => "ui-dom",
+            Self::Virtio => "virtio",
+            Self::DispScan => "disp-scan",
         }
     }
 
@@ -137,6 +147,9 @@ impl Purpose {
             Self::Mailbox => "mbox-mmio",
             Self::Menu => "setup tree",
             Self::FileServe => "g6ui+html|js|wasm",
+            Self::UiDom => "__ui_dom→__gr_plane",
+            Self::Virtio => "vio-mmio",
+            Self::DispScan => "disp-mmio",
         }
     }
 }
@@ -157,6 +170,18 @@ pub enum Addr {
     UiBlob,
     /// `browser-ui/out/bios-ui.wasm` in `.rodata` after the boot log.
     UiWasm,
+    /// Decoded wasm data image (`__wasm_data`) in `.rodata` after `__ui_wasm`.
+    WasmData,
+    /// First-party 8x8 font (`__font`) in `.rodata` after `__wasm_data`.
+    UiFont,
+    /// Bounded guest DOM row table (`__ui_dom`) in BSS after `__ui_blob`.
+    UiDom,
+    /// Virtio-mmio virtqueue + request/response area (`__vio`) after `__ui_dom`.
+    VioBss,
+    /// Linear X8R8G8B8 scanout surface (`__scan_fb`) after `__vio` —
+    /// backend-agnostic: the virtio-gpu TRANSFER or the uncore display
+    /// engine's `DispCommit` both scan this same buffer.
+    ScanFb,
     /// Deprecated alias of [`Addr::StacksEnd`] (hart0-only layout).
     StackTop,
 }
@@ -309,6 +334,9 @@ pub enum Op {
     Word(u32),
     /// `sfence.vma` (satp bare; not `invlpg`).
     SfenceVma,
+    /// `fence` (`fence iorw,iorw`) — required between virtqueue descriptor/ring
+    /// writes and the avail-idx / doorbell update.
+    Fence,
 }
 
 /// Purpose-tagged sequence of ops (one analyzed object).
@@ -333,6 +361,18 @@ pub struct Module {
     pub ui_bytes: u64,
     /// Guest copy of `browser-ui/out/bios-ui.wasm` (rodata after the boot log; not a VFS).
     pub ui_wasm: Vec<u8>,
+    /// Decoded wasm data image (`__wasm_data`) — the linear-memory snapshot the
+    /// lowered `WasmStart` resolves string pointers against.
+    pub wasm_data: Vec<u8>,
+    /// First-party 8x8 font bytes (`__font`) for `DomPaint` glyph lookup.
+    pub font: Vec<u8>,
+    /// Bounded guest DOM row table BSS (`__ui_dom`) when `kernel.wasm.jit`.
+    pub dom_bytes: u64,
+    /// Virtio virtqueue/request BSS (`__vio`) when `wants_virtio_gpu`.
+    pub vio_bytes: u64,
+    /// Linear X8R8G8B8 scanout BSS (`__scan_fb`) when a display path is
+    /// live (`wants_virtio_gpu` or `wants_disp_scan`).
+    pub vio_fb_bytes: u64,
 }
 
 /// BSS after the payload: 16-byte aligned image + one stack per hart.
@@ -389,6 +429,8 @@ impl Module {
         code_bytes
             .saturating_add(self.rodata.len() as u64)
             .saturating_add(self.ui_wasm.len() as u64)
+            .saturating_add(self.wasm_data.len() as u64)
+            .saturating_add(self.font.len() as u64)
     }
 
     pub fn push(&mut self, n: Node) {
@@ -418,7 +460,11 @@ impl Module {
                 s.push('\n');
             }
         }
-        if !self.rodata.is_empty() || !self.ui_wasm.is_empty() {
+        if !self.rodata.is_empty()
+            || !self.ui_wasm.is_empty()
+            || !self.wasm_data.is_empty()
+            || !self.font.is_empty()
+        {
             s.push_str("\n.section .rodata\n");
             if !self.rodata.is_empty() {
                 s.push_str("boot_log:\n");
@@ -427,6 +473,14 @@ impl Module {
             if !self.ui_wasm.is_empty() {
                 s.push_str("__ui_wasm:\n");
                 s.push_str(&rodata_listing(&self.ui_wasm));
+            }
+            if !self.wasm_data.is_empty() {
+                s.push_str("__wasm_data:\n");
+                s.push_str(&rodata_listing(&self.wasm_data));
+            }
+            if !self.font.is_empty() {
+                s.push_str("__font:\n");
+                s.push_str(&rodata_listing(&self.font));
             }
         }
         if self.nodes.iter().any(|n| n.purpose == Purpose::Stack) {
@@ -449,6 +503,36 @@ impl Module {
                 s.push_str("\n.section .bss\n");
             }
             s.push_str(&format!("__ui_blob:\n.space {:#x}\n", self.ui_bytes));
+        }
+        if self.dom_bytes > 0 {
+            if !self.nodes.iter().any(|n| n.purpose == Purpose::Stack)
+                && self.line_bytes == 0
+                && self.ui_bytes == 0
+            {
+                s.push_str("\n.section .bss\n");
+            }
+            s.push_str(&format!("__ui_dom:\n.space {:#x}\n", self.dom_bytes));
+        }
+        if self.vio_bytes > 0 {
+            if !self.nodes.iter().any(|n| n.purpose == Purpose::Stack)
+                && self.line_bytes == 0
+                && self.ui_bytes == 0
+                && self.dom_bytes == 0
+            {
+                s.push_str("\n.section .bss\n");
+            }
+            s.push_str(&format!("__vio:\n.space {:#x}\n", self.vio_bytes));
+        }
+        if self.vio_fb_bytes > 0 {
+            if !self.nodes.iter().any(|n| n.purpose == Purpose::Stack)
+                && self.line_bytes == 0
+                && self.ui_bytes == 0
+                && self.dom_bytes == 0
+                && self.vio_bytes == 0
+            {
+                s.push_str("\n.section .bss\n");
+            }
+            s.push_str(&format!("__scan_fb:\n.space {:#x}\n", self.vio_fb_bytes));
         }
         s
     }
@@ -482,11 +566,33 @@ impl Module {
                         Addr::Abs(v) => *v,
                         Addr::Rodata => rodata_addr,
                         Addr::UiWasm => rodata_addr.wrapping_add(self.rodata.len() as u64),
+                        Addr::WasmData => rodata_addr
+                            .wrapping_add(self.rodata.len() as u64)
+                            .wrapping_add(self.ui_wasm.len() as u64),
+                        Addr::UiFont => rodata_addr
+                            .wrapping_add(self.rodata.len() as u64)
+                            .wrapping_add(self.ui_wasm.len() as u64)
+                            .wrapping_add(self.wasm_data.len() as u64),
                         Addr::StacksEnd | Addr::StackTop | Addr::GrPlane => stacks,
                         Addr::UartLine => stacks.wrapping_add(self.gr_bytes),
                         Addr::UiBlob => stacks
                             .wrapping_add(self.gr_bytes)
                             .wrapping_add(self.line_bytes),
+                        Addr::UiDom => stacks
+                            .wrapping_add(self.gr_bytes)
+                            .wrapping_add(self.line_bytes)
+                            .wrapping_add(self.ui_bytes),
+                        Addr::VioBss => stacks
+                            .wrapping_add(self.gr_bytes)
+                            .wrapping_add(self.line_bytes)
+                            .wrapping_add(self.ui_bytes)
+                            .wrapping_add(self.dom_bytes),
+                        Addr::ScanFb => stacks
+                            .wrapping_add(self.gr_bytes)
+                            .wrapping_add(self.line_bytes)
+                            .wrapping_add(self.ui_bytes)
+                            .wrapping_add(self.dom_bytes)
+                            .wrapping_add(self.vio_bytes),
                         Addr::Label(l) => {
                             let at = *labels.get(l).ok_or_else(|| format!("unknown label {l}"))?;
                             entry.wrapping_add((at * 4) as u64)
@@ -517,6 +623,8 @@ impl Module {
         }
         let mut rod = self.rodata.clone();
         rod.extend_from_slice(&self.ui_wasm);
+        rod.extend_from_slice(&self.wasm_data);
+        rod.extend_from_slice(&self.font);
         Ok((words, rod))
     }
 }
@@ -557,6 +665,7 @@ fn encode_op(op: &Op, pc: usize, labels: &BTreeMap<String, usize>) -> Result<u32
         Op::Ecall => encode::ecall(),
         Op::Wfi => encode::wfi(),
         Op::SfenceVma => encode::sfence_vma(),
+        Op::Fence => 0x0330_000f,
         Op::Sret => encode::SRET,
         Op::Vsetvli { rd, rs1, vtype } => encode::vsetvli(*rd, *rs1, *vtype),
         Op::Vle8 { vd, rs1 } => encode::vle8(*vd, *rs1),
@@ -710,6 +819,11 @@ fn op_to_asm(op: &Op) -> String {
             Addr::UartLine => format!("\tla\t{}, __uart_line", reg_name(*rd)),
             Addr::UiBlob => format!("\tla\t{}, __ui_blob", reg_name(*rd)),
             Addr::UiWasm => format!("\tla\t{}, __ui_wasm", reg_name(*rd)),
+            Addr::WasmData => format!("\tla\t{}, __wasm_data", reg_name(*rd)),
+            Addr::UiFont => format!("\tla\t{}, __font", reg_name(*rd)),
+            Addr::UiDom => format!("\tla\t{}, __ui_dom", reg_name(*rd)),
+            Addr::VioBss => format!("\tla\t{}, __vio", reg_name(*rd)),
+            Addr::ScanFb => format!("\tla\t{}, __scan_fb", reg_name(*rd)),
         },
         Op::Li { rd, imm } if *imm > 9 || *imm < 0 => {
             format!("\tli\t{}, {imm:#x}", reg_name(*rd))
@@ -718,6 +832,7 @@ fn op_to_asm(op: &Op) -> String {
         Op::Ecall => "\tecall".into(),
         Op::Wfi => "\twfi".into(),
         Op::SfenceVma => "\tsfence.vma".into(),
+        Op::Fence => "\tfence".into(),
         Op::Sret => "\tsret".into(),
         Op::Vsetvli { rd, rs1, .. } => {
             format!(

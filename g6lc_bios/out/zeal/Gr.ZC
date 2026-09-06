@@ -1,0 +1,3 @@
+// Generated Gr.ZC — rewrite of kernel-spec SysGrInit (not VGA ports)
+// backend=virtio-gpu 640x480x16
+U0 SysGrInit();

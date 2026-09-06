@@ -1,0 +1,15 @@
+// Generated Svelte.ZC — svelte-d NodeDef catalog (ui=svelte-d)
+// SVELTE-LIVE NodeDef
+// SVELTE-LIVE @prop
+// SVELTE-LIVE @child
+// SVELTE-LIVE @visible
+// SVELTE-LIVE _start
+// SVELTE-LIVE FileMgr
+// SVELTE-LIVE Menu
+// SVELTE-LIVE Settings
+// SVELTE-STUB {#await}
+U0 SvelteInit()
+{
+	Print("SVELTE-LIVE NodeDef\n");
+	Print("SVELTE-LIVE FileMgr\n");
+}

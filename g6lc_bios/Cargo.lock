@@ -50,6 +50,7 @@ dependencies = [
  "g6b-asm",
  "g6b-kernel",
  "g6b-spec",
+ "g6b-wasm",
 ]
 
 [[package]]
@@ -144,6 +145,7 @@ version = "0.1.0"
 dependencies = [
  "g6b-asm",
  "g6b-dom",
+ "g6b-spec",
 ]
 
 [[package]]

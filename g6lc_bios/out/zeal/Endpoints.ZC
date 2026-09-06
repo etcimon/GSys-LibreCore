@@ -1,0 +1,62 @@
+// Generated Endpoints.ZC — kernel HTTP (http1=1 http2=1); not SvelteKit
+U0 RegisterEndpoint(U8 *path, U8 *method)
+{
+	Print("EP-REG %s %s\n", method, path);
+}
+U0 HttpHandle(U8 *raw)
+{
+	Print("HTTP-OK\n");
+}
+U0 KernelGet(U8 *path)
+{
+	Print("KERNEL-GET %s\n", path);
+}
+U0 BiosClocks() { KernelGet("/bios/clocks"); }
+U0 FlashImage(U8 *img)
+{
+	Print("FLASH-IMAGE %s\n", img);
+}
+U0 BiosUpdate()
+{
+	Print("BIOS-UPDATE self\n");
+}
+U0 SettingsExport(U8 *via)
+{
+	Print("SETTINGS-EXPORT via=%s\n", via);
+}
+U0 SettingsImport(U8 *via)
+{
+	Print("SETTINGS-IMPORT via=%s\n", via);
+}
+U0 UsbLs(U8 *kind)
+{
+	Print("USB-LS %s\n", kind);
+}
+U0 UsbFlash(U8 *name)
+{
+	Print("USB-FLASH fat32 %s\n", name);
+}
+U0 UsbKey(U8 *op)
+{
+	Print("USB-KEY %s\n", op);
+}
+U0 Menu(U8 *id)
+{
+	KernelGet("/bios/menu");
+}
+U0 MenuCpu()
+{
+	KernelGet("/bios/menu/cpu");
+}
+U0 MenuUncore()
+{
+	KernelGet("/bios/menu/uncore");
+}
+U0 FileServe(U8 *path)
+{
+	KernelGet(path);
+}
+U0 HttpFile(U8 *path)
+{
+	KernelGet(path);
+}

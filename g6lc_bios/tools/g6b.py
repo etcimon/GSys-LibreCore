@@ -114,6 +114,10 @@ def cmd_qemu_args(args: argparse.Namespace) -> int:
     argv = ["run", "-p", "g6b-cli", "--", "qemu-args"]
     if args.spec:
         argv += ["--spec", args.spec]
+    if args.vnc is not None:
+        argv += ["--vnc", args.vnc]
+    if args.no_gl:
+        argv += ["--no-gl"]
     return run_cargo(argv)
 
 
@@ -157,6 +161,8 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     argv = ["run", "-p", "g6b-cli", "--", "smoke"]
     if args.spec:
         argv += ["--spec", args.spec]
+    if getattr(args, "out", None):
+        argv += ["--out", args.out]
     return run_cargo(argv)
 
 
@@ -191,6 +197,9 @@ def main() -> int:
     boot.add_argument("--spec")
     qa = sub.add_parser("qemu-args")
     qa.add_argument("--spec")
+    qa.add_argument("--vnc", help="VNC display number (host frontend, 5900+N)")
+    qa.add_argument("--no-gl", action="store_true",
+                    help="2D virtio-gpu fallback for hosts without a DRM render node")
     he = sub.add_parser("holyc-eval")
     he.add_argument("--spec")
     hs = sub.add_parser("holyc-serve")
@@ -212,6 +221,7 @@ def main() -> int:
     elfp.add_argument("--out")
     smk = sub.add_parser("smoke")
     smk.add_argument("--spec")
+    smk.add_argument("--out")
     grp = sub.add_parser("gr")
     grp.add_argument("--spec")
     grp.add_argument("--out")

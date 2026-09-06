@@ -17,7 +17,10 @@ pub use binary::{
 pub use interp::{
     run, run_start, run_with_fuel, DomHost, Host, DEFAULT_FUEL, MAX_CALL_DEPTH, MAX_FUEL,
 };
-pub use jit::{jit_add_i32, jit_riscv, MAX_JIT_INSTRUCTIONS, MAX_JIT_SLOTS};
+pub use jit::{
+    data_image, install_start, jit_add_i32, jit_riscv, start_ops, MAX_JIT_INSTRUCTIONS,
+    MAX_JIT_SLOTS, MAX_WASM_DATA,
+};
 
 /// Boot / generated-source marker.
 pub const MARKER: &str = "WASM-JIT";

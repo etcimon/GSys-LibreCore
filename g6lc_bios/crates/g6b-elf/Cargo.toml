@@ -14,6 +14,7 @@ description = "BoardSpec → RISC-V ELF OpenSBI next-stage payload (host-generat
 g6b-spec = { workspace = true }
 g6b-kernel = { workspace = true }
 g6b-asm = { workspace = true }
+g6b-wasm = { workspace = true }
 
 [lints]
 workspace = true

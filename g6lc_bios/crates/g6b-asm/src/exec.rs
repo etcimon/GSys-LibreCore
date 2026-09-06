@@ -22,9 +22,11 @@ use crate::{
     gr_bss_len, gr_stride, payload_memsz, stack_memsz, Module, GR_HEADER_BYTES, UART_LINE_BSS,
 };
 
-const STEP_LIMIT: u32 = 2_000_000;
+/// Host-executor step bound. The guest's `VioPaint` 4bpp→X8R8G8B8 expand is a
+/// real w*h/2-iteration loop (≈2M words at 640×480) plus DOM paint and the
+/// rest of boot; real QEMU has no such bound.
+const STEP_LIMIT: u32 = 16_000_000;
 const UART0: u64 = 0x1000_0000;
-const UART1: u64 = 0x1000_1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Halt {
@@ -83,6 +85,35 @@ pub struct Smoke {
     pub ui_wasm_magic: u32,
     /// Number of `/ui/` paths FileServe published.
     pub ui_nfiles: u32,
+    /// Guest DOM row count at `__ui_dom` (WasmStart `set_inner_text` calls).
+    pub dom_rows: u32,
+    /// First painted 4bpp word at the DOM text origin (y=DOM_Y0).
+    pub dom_pix0: u32,
+    /// Executed `__gr_plane` bytes (GR16 header + 4bpp plane) when Gr live.
+    pub gr_frame: Vec<u8>,
+    /// Final virtio STATUS register (0xF = ACK|DRIVER|FEATURES_OK|DRIVER_OK).
+    pub vio_status: u32,
+    /// Last ctrlq `type` the device model serviced (0x0100 = GET_DISPLAY_INFO).
+    pub vio_last_cmd: u32,
+    /// Last response `type` written to a device-write desc (0x1101 = DISPLAY_INFO).
+    pub vio_last_resp: u32,
+    /// Device-side X8R8G8B8 scanout surface written by `TRANSFER_TO_HOST_2D`.
+    pub vio_fb: Vec<u8>,
+    /// Scanout surface geometry (resource w/h).
+    pub vio_fb_w: u32,
+    pub vio_fb_h: u32,
+    /// `SET_SCANOUT` completed.
+    pub vio_scanout: bool,
+    /// `RESOURCE_FLUSH` count.
+    pub vio_flushes: u32,
+    /// Used-buffer interrupt assertions (InterruptStatus bit 0 sets).
+    pub vio_irqs: u32,
+    /// Uncore display engine latched a scanout commit (`disp`-class
+    /// peripheral; `architecture/uncore/hdmi-display.md`).
+    pub disp_committed: bool,
+    /// Display-engine framebuffer descriptor: (fb, width, height, stride,
+    /// format) latched at COMMIT.
+    pub disp_desc: (u64, u32, u32, u32, u32),
 }
 
 /// Lower `module` at `entry` and run hart 0 until park/UART/SBI SRST.
@@ -109,9 +140,20 @@ pub fn run_module_hart(
         module
             .gr_bytes
             .saturating_add(module.line_bytes)
-            .saturating_add(module.ui_bytes),
+            .saturating_add(module.ui_bytes)
+            .saturating_add(module.dom_bytes)
+            .saturating_add(module.vio_bytes)
+            .saturating_add(module.vio_fb_bytes),
     );
-    run_with_kick(spec, &image, entry, memsz, hartid, b'V')
+    run_with_kick(
+        spec,
+        &image,
+        entry,
+        memsz,
+        hartid,
+        b'V',
+        spec.wants_virtio_gpu(),
+    )
 }
 
 /// Same as [`run_module`] but the host poke uses `cmd` as the first mailbox byte.
@@ -133,9 +175,35 @@ pub fn run_module_kick(
         module
             .gr_bytes
             .saturating_add(module.line_bytes)
-            .saturating_add(module.ui_bytes),
+            .saturating_add(module.ui_bytes)
+            .saturating_add(module.dom_bytes)
+            .saturating_add(module.vio_bytes)
+            .saturating_add(module.vio_fb_bytes),
     );
-    run_with_kick(spec, &image, entry, memsz, 0, kick)
+    run_with_kick(spec, &image, entry, memsz, 0, kick, spec.wants_virtio_gpu())
+}
+
+/// Same as [`run_module`] but overrides whether the virtio-gpu mmio device is
+/// modeled — for the `VIRTIO-GPU-NONE` (absent device) path.
+pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Result<Smoke, String> {
+    let (insns, rodata) = module.to_words(entry)?;
+    let mut image = Vec::with_capacity(insns.len() * 4 + rodata.len());
+    for w in insns {
+        image.extend_from_slice(&w.to_le_bytes());
+    }
+    image.extend_from_slice(&rodata);
+    let memsz = payload_memsz(
+        image.len() as u64,
+        module.n_harts(),
+        module
+            .gr_bytes
+            .saturating_add(module.line_bytes)
+            .saturating_add(module.ui_bytes)
+            .saturating_add(module.dom_bytes)
+            .saturating_add(module.vio_bytes)
+            .saturating_add(module.vio_fb_bytes),
+    );
+    run_with_kick(spec, &image, entry, memsz, 0, b'V', false)
 }
 
 pub fn run(
@@ -145,9 +213,18 @@ pub fn run(
     memsz: u64,
     hartid: u64,
 ) -> Result<Smoke, String> {
-    run_with_kick(spec, image, entry, memsz, hartid, b'V')
+    run_with_kick(
+        spec,
+        image,
+        entry,
+        memsz,
+        hartid,
+        b'V',
+        spec.wants_virtio_gpu(),
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_with_kick(
     spec: &BoardSpec,
     image: &[u8],
@@ -155,6 +232,7 @@ fn run_with_kick(
     memsz: u64,
     hartid: u64,
     kick: u8,
+    vio_gpu: bool,
 ) -> Result<Smoke, String> {
     let xlen = spec.isa.xlen;
     if xlen != 32 && xlen != 64 {
@@ -167,7 +245,11 @@ fn run_with_kick(
     ram[..image.len()].copy_from_slice(image);
     let mut x = [0u64; 32];
     x[10] = hartid; // a0 hartid
-    x[11] = 0; // a1 dtb (unused after mv s1)
+                    // a1 models the OpenSBI handoff: the *boot* hart gets the FDT pointer
+                    // (nonzero), harts started via SBI HSM get a1=opaque=0 — the payload
+                    // parks on a1==0, so any hart id can be primary. The model's boot hart
+                    // is hart 0; the marker is never dereferenced.
+    x[11] = if hartid == 0 { 0x8fe0_0000 } else { 0 };
     let mut pc = entry;
     let mut csr = Csr {
         mbox_base: if spec.loopback.enable {
@@ -179,6 +261,18 @@ fn run_with_kick(
         mbox_cmd: vec![0; 256],
         mbox_rsp: vec![0; 256],
         uart1_repl: spec.holyc.dual_band.tcp.enable,
+        uart1_base: crate::analyze::uart1_base(spec),
+        vio_gpu,
+        vio_disp_w: if spec.kernel.gr.enable {
+            spec.kernel.gr.w.max(8)
+        } else {
+            640
+        },
+        vio_disp_h: if spec.kernel.gr.enable {
+            spec.kernel.gr.h.max(8)
+        } else {
+            480
+        },
         gr_bytes: if spec.kernel.gr.enable || spec.kernel.proxy.enable {
             let w = if spec.kernel.gr.enable {
                 spec.kernel.gr.w.max(8)
@@ -212,6 +306,17 @@ fn run_with_kick(
         } else {
             0
         },
+        gr_dom_off: if spec.kernel.gr.enable || spec.kernel.proxy.enable {
+            let w = if spec.kernel.gr.enable {
+                spec.kernel.gr.w.max(8)
+            } else {
+                640
+            };
+            let stride = gr_stride(w, spec.kernel.gr.colors.max(16));
+            GR_HEADER_BYTES + crate::dom::DOM_Y0 as u64 * u64::from(stride)
+        } else {
+            0
+        },
         ui_base: {
             let stacks = entry.wrapping_add(stack_memsz(image.len() as u64, spec.harts.max(1)));
             let gr = if spec.kernel.gr.enable || spec.kernel.proxy.enable {
@@ -235,6 +340,33 @@ fn run_with_kick(
                 0
             }
         },
+        dom_base: {
+            let stacks = entry.wrapping_add(stack_memsz(image.len() as u64, spec.harts.max(1)));
+            let gr = if spec.kernel.gr.enable || spec.kernel.proxy.enable {
+                let w = if spec.kernel.gr.enable {
+                    spec.kernel.gr.w.max(8)
+                } else {
+                    640
+                };
+                let h = if spec.kernel.gr.enable {
+                    spec.kernel.gr.h.max(8)
+                } else {
+                    480
+                };
+                gr_bss_len(w, h, spec.kernel.gr.colors.max(16))
+            } else {
+                0
+            };
+            if spec.kernel.wasm.enable && spec.kernel.wasm.jit {
+                stacks
+                    .wrapping_add(gr)
+                    .wrapping_add(UART_LINE_BSS)
+                    .wrapping_add(crate::UI_HEADER_BYTES)
+            } else {
+                0
+            }
+        },
+        disp_base: spec.display_ctrl().unwrap_or(0),
         ..Default::default()
     };
     let mut console = String::new();
@@ -242,7 +374,7 @@ fn run_with_kick(
     let mut steps = 0u32;
     loop {
         if steps >= STEP_LIMIT {
-            return Ok(done(console, steps, Halt::Limit, &csr));
+            return Ok(done(console, steps, Halt::Limit, &csr, &ram, entry));
         }
         steps += 1;
         csr.time = csr.time.wrapping_add(1);
@@ -251,7 +383,7 @@ fn run_with_kick(
         }
         let w = match fetch_u32(&ram, entry, pc) {
             Some(w) => w,
-            None => return Ok(done(console, steps, Halt::Unimp(0), &csr)),
+            None => return Ok(done(console, steps, Halt::Unimp(0), &csr, &ram, entry)),
         };
         match step(
             xlen,
@@ -272,7 +404,7 @@ fn run_with_kick(
                 if host_uart_kick(&mut csr) && take_pending_sei(xlen, &mut pc, &mut csr) {
                     continue;
                 }
-                return Ok(done(console, steps, h, &csr));
+                return Ok(done(console, steps, h, &csr, &ram, entry));
             }
         }
         if uart_polls > 16 && !console.is_empty() {
@@ -284,12 +416,23 @@ fn run_with_kick(
                 uart_polls = 0;
                 continue;
             }
-            return Ok(done(console, steps, Halt::UartPoll, &csr));
+            return Ok(done(console, steps, Halt::UartPoll, &csr, &ram, entry));
         }
     }
 }
 
-fn done(console: String, steps: u32, halt: Halt, csr: &Csr) -> Smoke {
+fn done(console: String, steps: u32, halt: Halt, csr: &Csr, ram: &[u8], base: u64) -> Smoke {
+    let gr_frame = if csr.gr_base != 0 && csr.gr_bytes != 0 {
+        let off = csr.gr_base.wrapping_sub(base) as usize;
+        let end = off.saturating_add(csr.gr_bytes as usize).min(ram.len());
+        if off < end {
+            ram[off..end].to_vec()
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
     Smoke {
         console,
         steps,
@@ -326,6 +469,26 @@ fn done(console: String, steps: u32, halt: Halt, csr: &Csr) -> Smoke {
         ui_accel: csr.ui_accel,
         ui_wasm_magic: csr.ui_wasm_magic,
         ui_nfiles: csr.ui_nfiles,
+        dom_rows: csr.dom_rows,
+        dom_pix0: csr.dom_pix0,
+        gr_frame,
+        vio_status: csr.vio_status,
+        vio_last_cmd: csr.vio_last_cmd,
+        vio_last_resp: csr.vio_last_resp,
+        vio_fb: csr.vio_fb.clone(),
+        vio_fb_w: csr.vio_res_w,
+        vio_fb_h: csr.vio_res_h,
+        vio_scanout: csr.vio_scanout,
+        vio_flushes: csr.vio_flushes,
+        vio_irqs: csr.vio_irqs,
+        disp_committed: csr.disp_committed,
+        disp_desc: (
+            csr.disp_regs[3] as u64 | ((csr.disp_regs[4] as u64) << 32),
+            csr.disp_regs[5],
+            csr.disp_regs[6],
+            csr.disp_regs[7],
+            csr.disp_regs[8],
+        ),
     }
 }
 
@@ -363,6 +526,7 @@ struct Csr {
     uart0: Uart16550,
     uart1: Uart16550,
     uart1_repl: bool,
+    uart1_base: u64,
     uart_rxs: u32,
     uart_seq_i: u8,
     gr_base: u64,
@@ -378,6 +542,56 @@ struct Csr {
     ui_accel: u32,
     ui_wasm_magic: u32,
     ui_nfiles: u32,
+    dom_base: u64,
+    dom_rows: u32,
+    dom_pix0: u32,
+    gr_dom_off: u64,
+    /// Modelled virtio-mmio GPU at slot 0 (matches `qemu_dual_band_argv`).
+    vio_gpu: bool,
+    /// Virtio device registers/status for the slot-0 model.
+    vio_status: u32,
+    vio_feat_sel: u32,
+    vio_drv_sel: u32,
+    vio_qsel: u32,
+    vio_qnum: u32,
+    vio_qdesc: u64,
+    vio_qavail: u64,
+    vio_qused: u64,
+    vio_ready: bool,
+    vio_isr: u32,
+    vio_used_idx: u16,
+    /// Used-buffer interrupt assertions (bit 0 of InterruptStatus).
+    vio_irqs: u32,
+    /// Last ctrlq `type` word serviced (e.g. `GET_DISPLAY_INFO` = 0x0100).
+    vio_last_cmd: u32,
+    /// Last response `type` word written into a device-write desc.
+    vio_last_resp: u32,
+    /// Modelled pmode geometry (BoardSpec `kernel.gr.w/h`).
+    vio_disp_w: u32,
+    vio_disp_h: u32,
+    /// Single-resource 2D model: created resource id and geometry.
+    vio_res_id: u32,
+    vio_res_w: u32,
+    vio_res_h: u32,
+    /// `ATTACH_BACKING` guest base/length.
+    vio_backing: u64,
+    vio_backing_len: u64,
+    /// `SET_SCANOUT` completed for the resource.
+    vio_scanout: bool,
+    /// `RESOURCE_FLUSH` count (scanout present updates).
+    vio_flushes: u32,
+    /// Device-side X8R8G8B8 surface filled by `TRANSFER_TO_HOST_2D` — the
+    /// host-modelled analogue of the QEMU scanout pixels.
+    vio_fb: Vec<u8>,
+    /// Uncore display-engine window base (`display`-class peripheral;
+    /// `architecture/uncore/hdmi-display.md`) — 0 = absent.
+    disp_base: u64,
+    /// Display-engine register file (off/4) for the RW window.
+    disp_regs: [u32; 16],
+    /// COMMIT latched a scanout (fb/w/h/stride/format valid).
+    disp_committed: bool,
+    /// STATUS readback: 1 after COMMIT.
+    disp_status: u32,
 }
 
 #[derive(Default)]
@@ -455,7 +669,7 @@ fn step(
         }
         0x03 => {
             let addr = x[rs1 as usize].wrapping_add(iimm(w) as u64);
-            if is_uart1(addr) {
+            if is_uart1(csr, addr) {
                 *uart_polls += 1;
                 wr(xlen, x, rd, uart_load(csr, addr));
                 *pc = npc;
@@ -476,6 +690,16 @@ fn step(
                 *pc = npc;
                 return Step::Cont;
             }
+            if is_vio_mmio(addr) {
+                wr(xlen, x, rd, u64::from(vio_load(csr, addr)));
+                *pc = npc;
+                return Step::Cont;
+            }
+            if is_disp(csr, addr) {
+                wr(xlen, x, rd, u64::from(disp_load(csr, addr)));
+                *pc = npc;
+                return Step::Cont;
+            }
             *uart_polls = 0;
             let v = match f3 {
                 2 => load_u32(ram, base, addr).map(|v| sext32(v as i32, xlen)),
@@ -492,7 +716,7 @@ fn step(
         0x23 => {
             let addr = x[rs1 as usize].wrapping_add(simm(w) as u64);
             let val = x[rs2 as usize];
-            if is_uart0(addr) || is_uart1(addr) {
+            if is_uart0(addr) || is_uart1(csr, addr) {
                 uart_store(csr, addr, val as u8);
                 *pc = npc;
                 return Step::Cont;
@@ -504,6 +728,18 @@ fn step(
             }
             if is_mbox(csr, addr) {
                 mbox_store(csr, addr, val as u32, f3);
+                *pc = npc;
+                return Step::Cont;
+            }
+            if is_vio_mmio(addr) {
+                if f3 == 2 {
+                    vio_store(csr, ram, base, addr, val as u32);
+                }
+                *pc = npc;
+                return Step::Cont;
+            }
+            if is_disp(csr, addr) {
+                disp_store(csr, addr, val as u32);
                 *pc = npc;
                 return Step::Cont;
             }
@@ -524,6 +760,8 @@ fn step(
                     csr.gr_pix0 = val as u32;
                 } else if off == csr.gr_glyph_off {
                     csr.gr_glyph0 = val as u32;
+                } else if off == csr.gr_dom_off {
+                    csr.dom_pix0 = val as u32;
                 }
             }
             if csr.ui_base != 0 {
@@ -536,6 +774,12 @@ fn step(
                     24 => csr.ui_wasm_magic = val as u32,
                     28 => csr.ui_nfiles = val as u32,
                     _ => {}
+                }
+            }
+            if csr.dom_base != 0 {
+                let off = addr.wrapping_sub(csr.dom_base);
+                if off == 0 {
+                    csr.dom_rows = val as u32;
                 }
             }
             *pc = npc;
@@ -553,6 +797,10 @@ fn step(
             } else {
                 npc
             };
+        }
+        0x0f => {
+            // fence — no ordering state to model.
+            *pc = npc;
         }
         0x6f => {
             wr(xlen, x, rd, npc);
@@ -673,6 +921,36 @@ fn mbox_load(csr: &Csr, addr: u64, f3: u32) -> u32 {
     }
 }
 
+/// Uncore display-engine window (`architecture/uncore/hdmi-display.md`):
+/// `+0x00` MAGIC RO 'G6DS', `+0x04` REV RO 1, `+0x08..+0x24` RW
+/// (CTRL/FB_LO/FB_HI/W/H/STRIDE/FORMAT/COMMIT), `+0x28` STATUS RO.
+fn is_disp(csr: &Csr, addr: u64) -> bool {
+    csr.disp_base != 0 && addr.wrapping_sub(csr.disp_base) < 0x40
+}
+
+fn disp_load(csr: &Csr, addr: u64) -> u32 {
+    match addr.wrapping_sub(csr.disp_base) {
+        0 => crate::vio::DISP_MAGIC,
+        4 => 1,
+        0x28 => csr.disp_status,
+        o if o < 0x40 => csr.disp_regs[(o / 4) as usize],
+        _ => 0,
+    }
+}
+
+fn disp_store(csr: &mut Csr, addr: u64, val: u32) {
+    let off = addr.wrapping_sub(csr.disp_base);
+    if off >= 0x40 {
+        return;
+    }
+    csr.disp_regs[(off / 4) as usize] = val;
+    if off == 0x24 && val != 0 {
+        // COMMIT — latch the programmed surface and go live.
+        csr.disp_committed = true;
+        csr.disp_status = 1;
+    }
+}
+
 fn mbox_store(csr: &mut Csr, addr: u64, val: u32, f3: u32) {
     let off = addr.wrapping_sub(csr.mbox_base);
     match off {
@@ -755,8 +1033,259 @@ fn is_plic(addr: u64) -> bool {
     (0x0c00_0000..0x0c40_0000).contains(&addr)
 }
 
+/// QEMU virt virtio-mmio transports (`VIO_MMIO_BASE + VIO_MMIO_STEP*i`, 8
+/// slots, each only 0x200 wide — the stride gaps are unmapped). Only slot 0
+/// is populated when the spec's `virtio-gpu-device` argv condition holds;
+/// absent slots read 0 (magic mismatch → probe skips).
+fn is_vio_mmio(addr: u64) -> bool {
+    use crate::encode::{VIO_MMIO_BASE, VIO_MMIO_STEP};
+    let off = addr.wrapping_sub(VIO_MMIO_BASE);
+    off < VIO_MMIO_STEP * 8 && off % VIO_MMIO_STEP < 0x200
+}
+
+fn vio_load(csr: &Csr, addr: u64) -> u32 {
+    use crate::encode::{VIO_DEV_GPU, VIO_F_VERSION_1, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_STEP};
+    let off = addr - VIO_MMIO_BASE;
+    let slot = off / VIO_MMIO_STEP;
+    if slot != 0 || !csr.vio_gpu {
+        return 0;
+    }
+    match off % VIO_MMIO_STEP {
+        0x00 => VIO_MAGIC,
+        0x04 => 2, // non-legacy (virtio 1.x) interface version
+        0x08 => VIO_DEV_GPU,
+        0x10 => {
+            if csr.vio_feat_sel == 1 {
+                VIO_F_VERSION_1
+            } else {
+                0
+            }
+        }
+        0x14 => csr.vio_feat_sel,
+        0x24 => csr.vio_drv_sel,
+        0x30 => csr.vio_qsel,
+        0x34 => 1024, // QueueNumMax
+        0x38 => csr.vio_qnum,
+        0x44 => u32::from(csr.vio_ready),
+        0x60 => csr.vio_isr,
+        0x70 => csr.vio_status,
+        _ => 0,
+    }
+}
+
+/// virtio-mmio writes for the slot-0 model. A `STATUS == 0` write resets the
+/// device; `QUEUE_NOTIFY` walks the avail ring and services descriptor chains.
+fn vio_store(csr: &mut Csr, ram: &mut [u8], base: u64, addr: u64, v: u32) {
+    use crate::encode::{VIO_MMIO_BASE, VIO_MMIO_STEP};
+    let off = addr - VIO_MMIO_BASE;
+    let slot = off / VIO_MMIO_STEP;
+    if slot != 0 || !csr.vio_gpu {
+        return;
+    }
+    match off % VIO_MMIO_STEP {
+        0x14 => csr.vio_feat_sel = v,
+        0x20 => {} // driver features accepted without a gate
+        0x24 => csr.vio_drv_sel = v,
+        0x30 => csr.vio_qsel = v,
+        0x38 => csr.vio_qnum = v,
+        0x44 => csr.vio_ready = v != 0,
+        0x50 => vio_notify(csr, ram, base),
+        0x64 => csr.vio_isr &= !v,
+        0x70 => {
+            csr.vio_status = v;
+            if v == 0 {
+                csr.vio_qnum = 0;
+                csr.vio_ready = false;
+                csr.vio_isr = 0;
+                csr.vio_irqs = 0;
+                csr.vio_used_idx = 0;
+                csr.vio_last_cmd = 0;
+                csr.vio_last_resp = 0;
+            }
+        }
+        0x80 => csr.vio_qdesc = (csr.vio_qdesc & !0xffff_ffff) | u64::from(v),
+        0x84 => csr.vio_qdesc = (csr.vio_qdesc & 0xffff_ffff) | (u64::from(v) << 32),
+        0x90 => csr.vio_qavail = (csr.vio_qavail & !0xffff_ffff) | u64::from(v),
+        0x94 => csr.vio_qavail = (csr.vio_qavail & 0xffff_ffff) | (u64::from(v) << 32),
+        0xa0 => csr.vio_qused = (csr.vio_qused & !0xffff_ffff) | u64::from(v),
+        0xa4 => csr.vio_qused = (csr.vio_qused & 0xffff_ffff) | (u64::from(v) << 32),
+        _ => {}
+    }
+}
+
+/// Service newly-published avail entries on the selected queue: walk each
+/// descriptor chain, execute the ctrlq command, push used elems, set ISR.
+fn vio_notify(csr: &mut Csr, ram: &mut [u8], base: u64) {
+    if !csr.vio_ready || csr.vio_qsel != 0 || csr.vio_qdesc == 0 {
+        return;
+    }
+    let avail = csr.vio_qavail;
+    let used = csr.vio_qused;
+    let idx = load_u32(ram, base, avail)
+        .map(|w| (w >> 16) as u16)
+        .unwrap_or(0);
+    let mut pending = idx.wrapping_sub(csr.vio_used_idx).min(8);
+    while pending > 0 {
+        pending -= 1;
+        let ri = csr.vio_used_idx % 8;
+        // avail.ring[ri]: u16 slots packed two per word.
+        let word = load_u32(ram, base, avail + 4 + u64::from(ri & !1) * 2).unwrap_or(0);
+        let head = ((word >> ((ri & 1) * 16)) & 0xffff) as u16;
+        let wrote = vio_exec_chain(csr, ram, base, head);
+        let ui = csr.vio_used_idx % 8;
+        store_u32(ram, base, used + 4 + u64::from(ui) * 8, u32::from(head));
+        store_u32(ram, base, used + 8 + u64::from(ui) * 8, wrote);
+        csr.vio_used_idx = csr.vio_used_idx.wrapping_add(1);
+        store_u32(ram, base, used, u32::from(csr.vio_used_idx) << 16);
+        csr.vio_isr |= 1;
+        csr.vio_irqs += 1;
+        // QEMU virt raises PLIC irq 1+slot for the used-buffer update; the
+        // modelled device sits at slot 0 → irq 1 (claimed by trap_vio when
+        // PlicInit enabled the 1..=8 range).
+        csr.plic_pending |= 1 << 1;
+    }
+}
+
+/// Walk one descriptor chain (≤8): OUT descriptors carry `ctrl_hdr.type`, the
+/// first WRITE descriptor gets the response. Returns used-elem `len`.
+fn vio_exec_chain(csr: &mut Csr, ram: &mut [u8], base: u64, head: u16) -> u32 {
+    use crate::encode::{VIO_DESC_NEXT, VIO_DESC_WRITE, VIO_GPU_RESP_OK_DISPLAY_INFO};
+    use crate::vio::VIO_RESP_DISPLAY_INFO;
+    let mut d = u64::from(head);
+    let mut wrote = 0u32;
+    let mut pending: Option<u32> = None;
+    for _ in 0..8 {
+        let dbase = csr.vio_qdesc.wrapping_add(d.wrapping_mul(16));
+        let daddr = load_u64(ram, base, dbase).unwrap_or(0);
+        let dlen = load_u32(ram, base, dbase + 8).unwrap_or(0);
+        let dfl = load_u32(ram, base, dbase + 12).unwrap_or(0);
+        if dfl & VIO_DESC_WRITE == 0 {
+            let ty = load_u32(ram, base, daddr).unwrap_or(0);
+            csr.vio_last_cmd = ty;
+            pending = Some(vio_cmd(csr, ram, base, daddr, ty));
+        } else if let Some(ty) = pending.take() {
+            store_u32(ram, base, daddr, ty);
+            csr.vio_last_resp = ty;
+            if ty == VIO_GPU_RESP_OK_DISPLAY_INFO {
+                // pmodes[0]: enabled, flags, x, y, w, h (24-byte resp hdr).
+                for (i, v) in [1u32, 0, 0, 0, csr.vio_disp_w, csr.vio_disp_h]
+                    .iter()
+                    .enumerate()
+                {
+                    store_u32(ram, base, daddr + 24 + (i as u64) * 4, *v);
+                }
+            }
+            let cap = if ty == VIO_GPU_RESP_OK_DISPLAY_INFO {
+                VIO_RESP_DISPLAY_INFO
+            } else {
+                24
+            };
+            wrote = wrote.saturating_add(dlen.min(cap));
+        }
+        if dfl & VIO_DESC_NEXT == 0 {
+            break;
+        }
+        d = u64::from((dfl >> 16) & 0xffff);
+    }
+    wrote
+}
+
+/// Execute one ctrlq command read from `req` in guest RAM; returns the
+/// `resp_hdr.type` the device would write (virtio spec 5.7.6/5.7.8–5.7.10).
+fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, req: u64, ty: u32) -> u32 {
+    use crate::encode::{
+        VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING, VIO_GPU_RESOURCE_CREATE_2D,
+        VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_ERR_UNSPEC, VIO_GPU_RESP_OK_DISPLAY_INFO,
+        VIO_GPU_RESP_OK_NODATA, VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_TO_HOST_2D,
+    };
+    use crate::vio::VIO_FB_MAX;
+    let rd = |o: u64| load_u32(ram, base, req + o).unwrap_or(0);
+    match ty {
+        VIO_GPU_GET_DISPLAY_INFO => VIO_GPU_RESP_OK_DISPLAY_INFO,
+        VIO_GPU_RESOURCE_CREATE_2D => {
+            let (res, w, h) = (rd(24), rd(32), rd(36));
+            if res == 0 || w == 0 || h == 0 || u64::from(w) * u64::from(h) * 4 > VIO_FB_MAX {
+                VIO_GPU_RESP_ERR_UNSPEC
+            } else {
+                csr.vio_res_id = res;
+                csr.vio_res_w = w;
+                csr.vio_res_h = h;
+                csr.vio_fb = vec![0; (w as usize) * (h as usize) * 4];
+                csr.vio_backing = 0;
+                csr.vio_scanout = false;
+                csr.vio_flushes = 0;
+                VIO_GPU_RESP_OK_NODATA
+            }
+        }
+        VIO_GPU_RESOURCE_ATTACH_BACKING => {
+            let (res, nr) = (rd(24), rd(28));
+            let addr = load_u64(ram, base, req + 32).unwrap_or(0);
+            let len = rd(40);
+            if res != csr.vio_res_id || nr == 0 || addr == 0 {
+                VIO_GPU_RESP_ERR_UNSPEC
+            } else {
+                csr.vio_backing = addr;
+                csr.vio_backing_len = u64::from(len);
+                VIO_GPU_RESP_OK_NODATA
+            }
+        }
+        VIO_GPU_SET_SCANOUT => {
+            let (scanout, res) = (rd(40), rd(44));
+            if scanout != 0 || res != csr.vio_res_id || csr.vio_fb.is_empty() {
+                VIO_GPU_RESP_ERR_UNSPEC
+            } else {
+                csr.vio_scanout = true;
+                VIO_GPU_RESP_OK_NODATA
+            }
+        }
+        VIO_GPU_TRANSFER_TO_HOST_2D => {
+            let (x, y, rw, rh) = (rd(24), rd(28), rd(32), rd(36));
+            let off = load_u64(ram, base, req + 40).unwrap_or(0);
+            let res = rd(48);
+            if res != csr.vio_res_id || csr.vio_backing == 0 || csr.vio_fb.is_empty() {
+                return VIO_GPU_RESP_ERR_UNSPEC;
+            }
+            let stride = u64::from(csr.vio_res_w) * 4;
+            let rows = rh.min(csr.vio_res_h.saturating_sub(y));
+            for row in 0..rows {
+                let pix = u64::from(y + row) * stride + u64::from(x) * 4;
+                let len = u64::from(rw.min(csr.vio_res_w.saturating_sub(x))) * 4;
+                let so = csr
+                    .vio_backing
+                    .wrapping_add(off)
+                    .wrapping_add(pix)
+                    .wrapping_sub(base) as usize;
+                let di = pix as usize;
+                if let Some(src) = ram.get(so..so + len as usize) {
+                    if di + len as usize <= csr.vio_fb.len() {
+                        csr.vio_fb[di..di + len as usize].copy_from_slice(src);
+                    }
+                }
+            }
+            VIO_GPU_RESP_OK_NODATA
+        }
+        VIO_GPU_RESOURCE_FLUSH => {
+            if rd(40) == csr.vio_res_id && !csr.vio_fb.is_empty() {
+                csr.vio_flushes = csr.vio_flushes.wrapping_add(1);
+                VIO_GPU_RESP_OK_NODATA
+            } else {
+                VIO_GPU_RESP_ERR_UNSPEC
+            }
+        }
+        _ => VIO_GPU_RESP_ERR_UNSPEC,
+    }
+}
+
+/// True when `addr` is an S-mode PLIC context register: `base` is the
+/// hart-0 S address and `stride` is the per-*hart* spacing (S contexts are
+/// the odd contexts: ctx = 2*h + 1). Single-context model — whichever hart
+/// programs it owns the same state.
+fn plic_s_ctx(addr: u64, base: u64, stride: u64) -> bool {
+    addr >= base && (addr - base) % stride == 0 && (addr - base) / stride < 32
+}
+
 fn plic_load(csr: &mut Csr, addr: u64) -> u32 {
-    if addr == PLIC_CLAIM_S0 {
+    if plic_s_ctx(addr, PLIC_CLAIM_S0, 0x2000) {
         let bits = csr.plic_pending & csr.plic_enable;
         if bits == 0 {
             return 0;
@@ -765,9 +1294,9 @@ fn plic_load(csr: &mut Csr, addr: u64) -> u32 {
         csr.plic_pending &= !1u32.wrapping_shl(irq);
         csr.plic_claim = irq;
         irq
-    } else if addr == PLIC_ENABLE_S0 {
+    } else if plic_s_ctx(addr, PLIC_ENABLE_S0, 0x100) {
         csr.plic_enable
-    } else if addr == PLIC_THRESH_S0 {
+    } else if plic_s_ctx(addr, PLIC_THRESH_S0, 0x2000) {
         csr.plic_threshold
     } else {
         0
@@ -775,15 +1304,17 @@ fn plic_load(csr: &mut Csr, addr: u64) -> u32 {
 }
 
 fn plic_store(csr: &mut Csr, addr: u64, val: u32) {
-    if addr == PLIC_ENABLE_S0 {
+    if plic_s_ctx(addr, PLIC_ENABLE_S0, 0x100) {
         csr.plic_enable = val;
         if !csr.plic_injected {
-            csr.plic_pending |= 1 << 1;
+            // One UART RX injection so the trap_uart path is exercised; irq
+            // 10 is QEMU virt UART0 (1..=8 are the virtio-mmio slots).
+            csr.plic_pending |= 1 << UART_IRQ;
             csr.plic_injected = true;
         }
-    } else if addr == PLIC_THRESH_S0 {
+    } else if plic_s_ctx(addr, PLIC_THRESH_S0, 0x2000) {
         csr.plic_threshold = val;
-    } else if addr == PLIC_CLAIM_S0 && val == csr.plic_claim {
+    } else if plic_s_ctx(addr, PLIC_CLAIM_S0, 0x2000) && val == csr.plic_claim {
         csr.plic_claim = 0;
     }
 }
@@ -953,12 +1484,12 @@ fn is_uart0(addr: u64) -> bool {
     (UART0..UART0 + 0x100).contains(&addr)
 }
 
-fn is_uart1(addr: u64) -> bool {
-    (UART1..UART1 + 0x100).contains(&addr)
+fn is_uart1(csr: &Csr, addr: u64) -> bool {
+    (csr.uart1_base..csr.uart1_base + 0x100).contains(&addr)
 }
 
 fn uart_dev(csr: &mut Csr, addr: u64) -> &mut Uart16550 {
-    if is_uart1(addr) {
+    if is_uart1(csr, addr) {
         &mut csr.uart1
     } else {
         &mut csr.uart0
@@ -967,7 +1498,7 @@ fn uart_dev(csr: &mut Csr, addr: u64) -> &mut Uart16550 {
 
 fn uart_load(csr: &mut Csr, addr: u64) -> u64 {
     let off = addr & 0x7;
-    let uart1 = is_uart1(addr);
+    let uart1 = is_uart1(csr, addr);
     match off {
         0 => {
             let b = {
@@ -1792,6 +2323,214 @@ mod tests {
             "VIEW rsp word {:#x}",
             s.mbox_rsp
         );
+    }
+
+    #[test]
+    fn vio_probe_finds_modelled_gpu_at_slot0() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("VIRTIO-GPU 0"), "{}", s.console);
+        assert!(!s.console.contains("VIRTIO-GPU-NONE"), "{}", s.console);
+        // Full handshake + ctrlq GET_DISPLAY_INFO round-trip.
+        assert!(s.console.contains("VIRTIO-GPU-OK"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-INFO"), "{}", s.console);
+        assert!(!s.console.contains("VIRTIO-GPU-FAIL"), "{}", s.console);
+        assert_eq!(s.vio_status, 0x0f); // ACK|DRIVER|FEATURES_OK|DRIVER_OK
+        assert_eq!(s.vio_last_cmd, 0x0104); // last cmd = RESOURCE_FLUSH
+        assert_eq!(s.vio_last_resp, 0x1100); // RESP_OK_NODATA
+                                             // Pixel path: scanout bound; after the band transfer,
+                                             // VioPaint pushed the palette-expanded __gr_plane over the full
+                                             // framebuffer and flushed it (once per paint pass).
+        assert!(s.console.contains("VIRTIO-SCAN"), "{}", s.console);
+        assert!(s.vio_scanout);
+        let paints = s.console.matches("VIRTIO-PAINT\n").count() as u32;
+        assert!(paints >= 1, "{}", s.console);
+        assert_eq!(s.vio_flushes, 1 + paints);
+        // Six scan chains (INFO + CREATE + ATTACH + SET_SCANOUT + TRANSFER +
+        // FLUSH) plus TRANSFER + FLUSH per paint → used-buffer interrupts,
+        // each raising PLIC irq 1+slot and claimed by trap_vio through the
+        // modelled PLIC (plus the one-shot UART injection claim).
+        assert_eq!(s.vio_irqs, 6 + 2 * paints);
+        assert!(
+            s.sei_claims >= 6 + 2 * paints,
+            "virtio SEIs not claimed through PLIC: sei={} console={}",
+            s.sei_claims,
+            s.console
+        );
+        assert_eq!((s.vio_fb_w, s.vio_fb_h), (640, 480));
+        // vio_fb is the X8R8G8B8 expansion of the executed __gr_plane 4bpp
+        // image (high nibble = even pixel) through the same 16-colour VGA
+        // palette as g6b-gr (kept crate-independent here).
+        const PAL: [u32; 16] = [
+            0x0000_0000,
+            0x0000_00AA,
+            0x0000_AA00,
+            0x0000_AAAA,
+            0x00AA_0000,
+            0x00AA_00AA,
+            0x00AA_5500,
+            0x00AA_AAAA,
+            0x0055_5555,
+            0x0055_55FF,
+            0x0055_FF55,
+            0x0055_FFFF,
+            0x00FF_5555,
+            0x00FF_55FF,
+            0x00FF_FF55,
+            0x00FF_FFFF,
+        ];
+        let hdr = u32::from_le_bytes(s.gr_frame[40..44].try_into().unwrap()) as usize;
+        for (i, &b) in s.gr_frame[hdr..].iter().enumerate() {
+            let o = i * 8;
+            assert_eq!(
+                u32::from_le_bytes(s.vio_fb[o..o + 4].try_into().unwrap()),
+                PAL[(b >> 4) as usize],
+                "even pixel of plane byte {i}"
+            );
+            assert_eq!(
+                u32::from_le_bytes(s.vio_fb[o + 4..o + 8].try_into().unwrap()),
+                PAL[(b & 0xf) as usize],
+                "odd pixel of plane byte {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn vio_paint_scale_expands_to_proxy_high_res() {
+        // Display-proxy live (1920×1080, dpi mode → scale 2): the scanout
+        // resource is the *high-res* surface and FbExpand paints the 4bpp
+        // plane into a centered 1280×960 window — the `Proxy::to_ppm`
+        // semantics (ox=(1920-1280)/2=320, oy=(1080-960)/2=60).
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":120,
+         "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("VIRTIO-SCAN"), "{}", s.console);
+        assert!(s.vio_scanout);
+        assert_eq!((s.vio_fb_w, s.vio_fb_h), (1920, 1080));
+        assert!(s.console.contains("VIRTIO-PAINT"), "{}", s.console);
+        // Sampled scale-parity: dst(x,y) in the content window equals the
+        // palette colour of src(x/2, y/2); letterbox rows/cols stay black.
+        let pal_px = |lx: u32, ly: u32| -> u32 {
+            let hdr = u32::from_le_bytes(s.gr_frame[40..44].try_into().unwrap()) as usize;
+            let b = s.gr_frame[hdr + (ly * 320 + lx / 2) as usize];
+            const PAL: [u32; 16] = [
+                0x0000_0000,
+                0x0000_00AA,
+                0x0000_AA00,
+                0x0000_AAAA,
+                0x00AA_0000,
+                0x00AA_00AA,
+                0x00AA_5500,
+                0x00AA_AAAA,
+                0x0055_5555,
+                0x0055_55FF,
+                0x0055_FF55,
+                0x0055_FFFF,
+                0x00FF_5555,
+                0x00FF_55FF,
+                0x00FF_FF55,
+                0x00FF_FFFF,
+            ];
+            PAL[if lx % 2 == 0 {
+                (b >> 4) as usize
+            } else {
+                (b & 0xf) as usize
+            }]
+        };
+        let (ox, oy, sc) = (320u32, 60u32, 2u32);
+        let dp = |x: u32, y: u32| -> u32 {
+            u32::from_le_bytes(
+                s.vio_fb[(y * 1920 + x) as usize * 4..][..4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        for y in (oy..oy + 480 * sc).step_by(47) {
+            for x in (ox..ox + 640 * sc).step_by(53) {
+                assert_eq!(
+                    dp(x, y),
+                    pal_px((x - ox) / sc, (y - oy) / sc),
+                    "dst({x},{y})"
+                );
+            }
+        }
+        // Centered letterbox: left of ox and right of ox+used_w stay black
+        // below the VioScan top band (the band fills rows 0..63 across the
+        // full width before FbExpand runs).
+        for y in (oy.max(64)..1080).step_by(61) {
+            assert_eq!(dp(10, y), 0, "left letterbox y={y}");
+            assert_eq!(dp(1900, y), 0, "right letterbox y={y}");
+        }
+        for x in (0..1920).step_by(97) {
+            assert_eq!(dp(x, 1070), 0, "bottom letterbox x={x}");
+        }
+    }
+
+    #[test]
+    fn disp_commit_scans_the_shared_fb() {
+        // Native uncore display engine (`display`-class peripheral) — no
+        // virtio transport: FbExpand fills __scan_fb and DispPaint programs
+        // the engine + G6FB descriptor. `wants_virtio_gpu` must be false so
+        // the VIRTIO lines never appear.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"hdmi":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"hdmi"},
+"proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":120,
+         "high_w":1920,"high_h":1080,"scale_mode":"dpi"}},
+"peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}],
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        assert!(!spec.wants_virtio_gpu(), "native display engine wins");
+        assert!(spec.wants_disp_scan());
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(!s.console.contains("VIRTIO"), "{}", s.console);
+        assert!(s.console.contains("DISP-OK"), "{}", s.console);
+        assert!(!s.console.contains("DISP-FAIL"), "{}", s.console);
+        assert!(s.disp_committed);
+        let (fb, w, h, stride, fmt) = s.disp_desc;
+        assert_ne!(fb, 0, "committed fb base");
+        assert_eq!((w, h), (1920, 1080));
+        assert_eq!(stride, 1920 * 4);
+        assert_eq!(fmt, 1);
+    }
+
+    #[test]
+    fn vio_probe_reports_none_when_device_not_modelled() {
+        // Same spec for payload and host; device flag off → reads return 0,
+        // magic mismatches, probe reports NONE (fail-closed).
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"gr":{"enable":true,"backend":"virtio-gpu"}},"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let s = run_module_no_gpu(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            s.console.contains("VIRTIO-GPU-NONE"),
+            "halt={:?} steps={}\n{}",
+            s.halt,
+            s.steps,
+            s.console
+        );
+        assert!(!s.console.contains("VIRTIO-GPU 0"), "{}", s.console);
+        // No device → VioInit returns silently after the rescan.
+        assert!(!s.console.contains("VIRTIO-GPU-OK"), "{}", s.console);
+        assert_eq!(s.vio_status, 0);
+        assert_eq!(s.vio_last_cmd, 0);
     }
 
     #[test]

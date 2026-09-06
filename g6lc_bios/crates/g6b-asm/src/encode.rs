@@ -12,12 +12,25 @@ pub const TP: u32 = 4;
 pub const T0: u32 = 5;
 pub const T1: u32 = 6;
 pub const T2: u32 = 7;
+pub const S0: u32 = 8;
 pub const S1: u32 = 9;
 pub const A0: u32 = 10;
 pub const A1: u32 = 11;
 pub const A2: u32 = 12;
+pub const A3: u32 = 13;
+pub const A4: u32 = 14;
+pub const A5: u32 = 15;
 pub const A6: u32 = 16;
 pub const A7: u32 = 17;
+pub const S2: u32 = 18;
+pub const S3: u32 = 19;
+pub const S4: u32 = 20;
+pub const S5: u32 = 21;
+pub const S6: u32 = 22;
+pub const T3: u32 = 28;
+pub const T4: u32 = 29;
+pub const T5: u32 = 30;
+pub const T6: u32 = 31;
 
 pub const CSR_SSTATUS: u32 = 0x100;
 pub const CSR_SIE: u32 = 0x104;
@@ -36,13 +49,18 @@ pub const SIE_STIE: i64 = 1 << 5;
 /// `sie` supervisor external interrupt (PLIC / SEI, Priv ch. 3).
 pub const SIE_SEIE: i64 = 1 << 9;
 pub const SSTATUS_SIE: i64 = 1 << 1;
-/// QEMU virt / SiFive PLIC (S-mode context 1 = hart0).
+/// QEMU virt / SiFive PLIC. S-mode context for hart `h` is `2*h + 1`:
+/// enable block `+0x2000 + ctx*0x80`, claim/threshold page `+0x200000 +
+/// ctx*0x1000` (ctx1 = hart0 shown for reference).
 pub const PLIC_BASE: u64 = 0x0c00_0000;
-pub const PLIC_ENABLE_S0: u64 = 0x0c00_2080;
-pub const PLIC_THRESH_S0: u64 = 0x0c20_1000;
-pub const PLIC_CLAIM_S0: u64 = 0x0c20_1004;
-/// BoardSpec UART PLIC line (QEMU virt ns16550; not COM1).
-pub const UART_IRQ: i64 = 1;
+pub const PLIC_ENABLE_BASE: u64 = PLIC_BASE + 0x2000;
+pub const PLIC_CTXT_BASE: u64 = PLIC_BASE + 0x20_0000;
+pub const PLIC_ENABLE_S0: u64 = PLIC_ENABLE_BASE + 0x80;
+pub const PLIC_THRESH_S0: u64 = PLIC_CTXT_BASE + 0x1000;
+pub const PLIC_CLAIM_S0: u64 = PLIC_CTXT_BASE + 0x1004;
+/// QEMU virt ns16550 UART0 PLIC line — `interrupts = <0x0a>` in the
+/// machine DTB (not COM1, and *not* irq 1: that is virtio-mmio slot 0).
+pub const UART_IRQ: i64 = 10;
 /// ns16550 IER received-data bit (`ERBFI`).
 pub const UART_IER_RX: i64 = 1;
 /// ns16550 LSR data-ready bit.
@@ -75,6 +93,56 @@ pub const UI_MAGIC: u32 = 0x4955_3647;
 pub const WASM_MAGIC: u32 = 0x6d73_6100;
 /// Packed 4bpp colour-1 word for the boot scanline.
 pub const GR_FILL_WORD: u32 = 0x1111_1111;
+/// QEMU virt virtio-mmio transports: 8 slots at `0x10001000 + 0x200*i`.
+/// Register offsets: +0x00 MagicValue `0x74726976` ("virt"), +0x04 Version,
+/// +0x08 DeviceID (16 = GPU). Probed read-only; virtqueues/scanout are open.
+pub const VIO_MMIO_BASE: u64 = 0x1000_1000;
+/// QEMU virt instantiates all 8 virtio-mmio transports at a 0x1000 stride
+/// (each region is 0x200 wide; the gaps are unmapped and fault on access).
+pub const VIO_MMIO_STEP: u64 = 0x1000;
+pub const VIO_MMIO_SLOTS: i64 = 8;
+pub const VIO_MAGIC: u32 = 0x7472_6976;
+pub const VIO_DEV_GPU: u32 = 16;
+/// virtio-mmio register offsets (modern interface; `Version` = 2).
+pub const VIO_REG_FEATURES: i32 = 0x10;
+pub const VIO_REG_FEATURES_SEL: i32 = 0x14;
+pub const VIO_REG_DRV_FEATURES: i32 = 0x20;
+pub const VIO_REG_DRV_FEATURES_SEL: i32 = 0x24;
+pub const VIO_REG_QUEUE_SEL: i32 = 0x30;
+pub const VIO_REG_QUEUE_NUM_MAX: i32 = 0x34;
+pub const VIO_REG_QUEUE_NUM: i32 = 0x38;
+pub const VIO_REG_QUEUE_READY: i32 = 0x44;
+pub const VIO_REG_QUEUE_NOTIFY: i32 = 0x50;
+pub const VIO_REG_ISR_STATUS: i32 = 0x60;
+pub const VIO_REG_ISR_ACK: i32 = 0x64;
+pub const VIO_REG_STATUS: i32 = 0x70;
+pub const VIO_REG_QUEUE_DESC: i32 = 0x80;
+pub const VIO_REG_QUEUE_AVAIL: i32 = 0x90;
+pub const VIO_REG_QUEUE_USED: i32 = 0xa0;
+/// virtio status bits (STATUS register).
+pub const VIO_ST_ACK: i32 = 1;
+pub const VIO_ST_DRIVER: i32 = 2;
+pub const VIO_ST_DRIVER_OK: i32 = 4;
+pub const VIO_ST_FEATURES_OK: i32 = 8;
+/// `VIRTIO_F_VERSION_1` — bit 32 of the feature space = bit 0 of word 1.
+pub const VIO_F_VERSION_1: u32 = 1;
+/// virtio-gpu ctrlq commands (`ctrl_hdr.type`; virtio spec 5.7.6).
+pub const VIO_GPU_GET_DISPLAY_INFO: u32 = 0x0100;
+pub const VIO_GPU_RESOURCE_CREATE_2D: u32 = 0x0101;
+pub const VIO_GPU_SET_SCANOUT: u32 = 0x0103;
+pub const VIO_GPU_RESOURCE_FLUSH: u32 = 0x0104;
+pub const VIO_GPU_TRANSFER_TO_HOST_2D: u32 = 0x0105;
+pub const VIO_GPU_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+/// virtio-gpu response types (`resp_hdr.type`).
+pub const VIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
+pub const VIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+pub const VIO_GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
+/// `VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM` — X8R8G8B8 little-endian words.
+pub const VIO_GPU_FMT_B8G8R8X8: u32 = 2;
+/// Controlq depth (descriptors) and descriptor flag bits.
+pub const VIO_QUEUE_NUM: i64 = 8;
+pub const VIO_DESC_NEXT: u32 = 1;
+pub const VIO_DESC_WRITE: u32 = 2;
 /// Little-endian 4-char UART/HolyC command prefixes.
 pub const CMD_VIEW: u32 = 0x7765_6956; // "View"
 pub const CMD_REBO: u32 = 0x6f62_6552; // "Rebo"
@@ -105,28 +173,39 @@ pub fn auipc(rd: u32, imm20: u32) -> u32 {
     (imm20 << 12) | (rd << 7) | 0x17
 }
 
+/// I/S-type immediates are 12-bit signed — trap silently-truncated offsets
+/// (a `0x1000` step once encoded as `addi rd,rs,0` → an infinite rescan).
+#[inline]
+fn check_imm12(imm: i32) -> u32 {
+    assert!(
+        (-2048..=2047).contains(&imm),
+        "imm12 out of range: {imm} (use li+add / la)"
+    );
+    (imm as u32) & 0xfff
+}
+
 pub fn addi(rd: u32, rs1: u32, imm: i32) -> u32 {
-    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (rd << 7) | 0x13
+    (check_imm12(imm) << 20) | (rs1 << 15) | (rd << 7) | 0x13
 }
 
 pub fn andi(rd: u32, rs1: u32, imm: i32) -> u32 {
-    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (0x7 << 12) | (rd << 7) | 0x13
+    (check_imm12(imm) << 20) | (rs1 << 15) | (0x7 << 12) | (rd << 7) | 0x13
 }
 
 pub fn lbu(rd: u32, rs1: u32, imm: i32) -> u32 {
-    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (0x4 << 12) | (rd << 7) | 0x03
+    (check_imm12(imm) << 20) | (rs1 << 15) | (0x4 << 12) | (rd << 7) | 0x03
 }
 
 pub fn lw(rd: u32, rs1: u32, imm: i32) -> u32 {
-    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (0x2 << 12) | (rd << 7) | 0x03
+    (check_imm12(imm) << 20) | (rs1 << 15) | (0x2 << 12) | (rd << 7) | 0x03
 }
 
 pub fn ld(rd: u32, rs1: u32, imm: i32) -> u32 {
-    (((imm as u32) & 0xfff) << 20) | (rs1 << 15) | (0x3 << 12) | (rd << 7) | 0x03
+    (check_imm12(imm) << 20) | (rs1 << 15) | (0x3 << 12) | (rd << 7) | 0x03
 }
 
 pub fn sb(rs2: u32, rs1: u32, imm: i32) -> u32 {
-    let imm = (imm as u32) & 0xfff;
+    let imm = check_imm12(imm);
     ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | ((imm & 0x1f) << 7) | 0x23
 }
 
@@ -136,7 +215,7 @@ pub fn sw(rs2: u32, rs1: u32, imm: i32) -> u32 {
 }
 
 pub fn sd(rs2: u32, rs1: u32, imm: i32) -> u32 {
-    let imm = (imm as u32) & 0xfff;
+    let imm = check_imm12(imm);
     ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | (0x3 << 12) | ((imm & 0x1f) << 7) | 0x23
 }
 

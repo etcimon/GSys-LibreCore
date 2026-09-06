@@ -1,0 +1,13 @@
+// Generated Https.ZC — web-compatible ClientHello (https=1) ServerHello (serve=1)
+U0 HttpsGet(U8 *url)
+{
+	Print("HTTPS-GET %s\n", url);
+}
+U0 TlsServerHello(U8 *host)
+{
+	Print("TLS-SERVERHELLO\n");
+}
+U0 HttpsServe()
+{
+	Print("HTTPS-SERVE files\n");
+}

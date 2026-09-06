@@ -36,7 +36,7 @@ those knobs emit is an analyzed IR, not a string template.
 | `Stack` | `sp` | always | per-hart BSS after payload; `sp = stacks_end-(hartid+1)*0x8000` |
 | `TrapVec` | `stvec` | always | `KInterrupts` — not an IDT |
 | `BootLog` | `sbi+uart0` | always | UART0 8N1 THR + SBI putchar (QEMU `-nographic`) |
-| `Uart1Repl` | `t0` = UART1 | `holyc.dual_band.tcp.enable` | SSH+HolyC chardev; linebuf `View`/`ViewSection("name")`/`Rebo`/`Shut`/`Wake` (not a poll, not a NIC) |
+| `Uart1Repl` | `t0` = UART1 | `holyc.dual_band.tcp.enable` | SSH+HolyC chardev; linebuf `View`/`ViewSection("name")`/`Rebo`/`Shut`/`Wake` (not a poll, not a NIC). Modeled base `uart0+0x1000` → `uart0+0x2000` when `wants_virtio_gpu` (QEMU virt virtio-mmio occupies `0x10001000..0x10002000`) |
 | `Park` | `wfi` | always | hart≠0 waits; hart0 after KMain (UART RX is irq-driven) |
 | `Trap` | `scause` | always | irq 5 → SBI TIME; irq 9 PLIC (`trap_uart` irq 1 linebuf, `trap_mbox` irq 3); else dump `TRAP-<scause>-<sepc>` and WFI |
 | `Timer` | `sie+sstatus+SBI-TIME` | always | KStart `jal TimerInit` before park; `rdtime` + interval; not PIT |
@@ -64,6 +64,9 @@ those knobs emit is an analyzed IR, not a string template.
 | `Mailbox` | `mbox-mmio` | `loopback.enable` | `MboxInit` doorbell/status/irq_en; `trap_mbox` View/Reboot/Shutdown/Wakeup; not a netdev |
 | `Menu` | `setup tree` | HTTP or HolyC fast init | one model, two UIs |
 | `FileServe` | `g6ui+html\|js\|wasm` | `kernel.wasm` or `kernel.http.files` | `UiInit` `G6UI` header; `jal FileServe` echoes `\0asm` + `/ui/` listing; HolyC HTTPS file server on the host |
+| `UiDom` | `__ui_dom→__gr_plane` | `kernel.wasm.jit` | `g6b-asm::dom` row store + `WasmStart` (from `g6b-wasm::jit::start_ops`) + `DomPaint` (`DOM| ` serial + `__font` glyphs) |
+| `Virtio` | `vio-mmio` | `wants_virtio_gpu` | `VioProbe` slot scan for GPU DeviceID 16 + `VioInit` handshake/ctrlq/`GET_DISPLAY_INFO` + `VioCmd` submit-one + `VioScan` (`CREATE_2D`/`ATTACH_BACKING`/`SET_SCANOUT`/band-fill/`TRANSFER`/`FLUSH` at the high-res proxy geometry) (`VIRTIO-GPU n`/`NONE`/`OK`/`INFO`/`SCAN`/`FAIL`); `__vio` BSS rings + `__scan_fb` (shared high-res surface); host-modelled + QEMU `screendump` captured (1920×1080) |
+| `DispScan` | `disp-mmio` | `wants_disp_scan` (`display`-class peripheral) | `FbExpand` (shared scale-blit, `Proxy::to_ppm` semantics) + `DispPaint` — register-window commit + `G6FB` simplefb handoff at `__vio+0x400` (`architecture/uncore/hdmi-display.md`); `DISP-OK`/`DISP-FAIL` |
 
 ## Crate surface
 

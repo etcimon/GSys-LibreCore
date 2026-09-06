@@ -1,0 +1,109 @@
+// Generated HolycUi.ZC — CLI setup (not the browser viewport)
+// Separation: HolyC-UI prints menus; browser-UI fetches the same JSON.
+// topology=smt cores=1 threads=2 issue=2 ooo=0 stream=0 H=0 V=0
+U0 HolycUiInit()
+{
+	Print("HOLYC-UI\n");
+	Print("MENU main Main\n");
+	Print("MENU cpu CPU\n");
+	Print("MENU memory Memory\n");
+	Print("MENU uncore Uncore\n");
+	Print("MENU devices Devices\n");
+	Print("MENU boot Boot\n");
+	Print("MENU settings Settings\n");
+}
+U0 MenuMainPrint()
+{
+	Print("  product=desktop\n");
+	Print("  profile=full\n");
+	Print("  xlen=64\n");
+	Print("  march=rv64imafdc\n");
+	Print("  mmu=sv39\n");
+	KernelGet("/bios/menu/main");
+}
+U0 MenuCpuPrint()
+{
+	Print("  cores=1\n");
+	Print("  threads=2\n");
+	Print("  harts=2\n");
+	Print("  topology=smt\n");
+	Print("  smt=yes\n");
+	Print("  stream=no\n");
+	Print("  issue=2\n");
+	Print("  ooo=no\n");
+	Print("  hypervisor=absent\n");
+	Print("  rvv=absent\n");
+	Print("  cpu_hz=1000000000\n");
+	Print("  gl_accel=off\n");
+	KernelGet("/bios/menu/cpu");
+}
+U0 MenuMemoryPrint()
+{
+	Print("  dram_base=0x80000000\n");
+	Print("  dram_len=0x40000000\n");
+	Print("  ddr=no\n");
+	Print("  text_offset=0x200000\n");
+	KernelGet("/bios/menu/memory");
+}
+U0 MenuUncorePrint()
+{
+	Print("  clint=yes\n");
+	Print("  plic=yes\n");
+	Print("  ddr=no\n");
+	Print("  pcie=no\n");
+	Print("  ethernet=no\n");
+	Print("  storage=no\n");
+	Print("  hdmi=yes\n");
+	Print("  usb=yes\n");
+	KernelGet("/bios/menu/uncore");
+}
+U0 MenuDevicesPrint()
+{
+	Print("  sbi=yes\n");
+	Print("  uart=yes\n");
+	Print("  spi=yes\n");
+	Print("  gpio=yes\n");
+	Print("  pmu=yes\n");
+	Print("  uart0=0x10000000\n");
+	Print("  gpio0=0x40001000\n");
+	Print("  spi0=0x20000000\n");
+	KernelGet("/bios/menu/devices");
+}
+U0 MenuBootPrint()
+{
+	Print("  next=opensbi\n");
+	Print("  edk2=yes\n");
+	Print("  uboot=yes\n");
+	Print("  flash=yes\n");
+	Print("  flash_backend=mailbox\n");
+	Print("  hotkey=DEL\n");
+	Print("  timeout_ms=2000\n");
+	KernelGet("/bios/menu/boot");
+}
+U0 MenuSettingsPrint()
+{
+	Print("  ui=svelte-d\n");
+	Print("  js=aot\n");
+	Print("  start_menu=main\n");
+	Print("  wasm=yes\n");
+	Print("  wasm_jit=yes\n");
+	Print("  tasking=no\n");
+	Print("  ui_hart=0\n");
+	Print("  task_limit=128\n");
+	Print("  worker_limit=0\n");
+	Print("  task_stack=32768\n");
+	Print("  export=yes\n");
+	Print("  import=yes\n");
+	Print("  uart=yes\n");
+	Print("  mailbox=yes\n");
+	Print("  usb_key=yes\n");
+	KernelGet("/bios/menu/settings");
+}
+U0 ClocksPrint()
+{
+	KernelGet("/bios/clocks");
+}
+U0 SettingsUsbPrint()
+{
+	KernelGet("/bios/settings/usb");
+}

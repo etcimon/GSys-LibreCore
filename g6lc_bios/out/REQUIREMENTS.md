@@ -1,8 +1,26 @@
 # Inferred architecture requirements (from BoardSpec)
-- reserved DRAM carve-out 0x100000 for runtime BIOS (Linux maps view-only)
-- SBI SRST (or equivalent) for reboot/shutdown from the management port
-- in-kernel HTML+JS display stays mapped for KVM-over-port
-- HolyC dual-band TCP remains open after Linux handoff
-- always-on domain or Wake-on-LAN on the management port
-- PMP/PMA lock of immutable sections after handoff: config,keys,boot-policy
-- QEMU UART1 -serial tcp:127.0.0.1:2222,server,nowait (ssh-like HolyC REPL)
+- SysGrInit rewrite: 640x480x16 backend=virtio-gpu (8x8 font; not VGA ports)
+- QEMU virt: -device virtio-gpu-device; serial stays -nographic
+- display-proxy 640x480 → 1920x1080 dpi=192 fps=120 link=hdmi gl=true
+- uncore HDMI TMDS scanout (architecture/uncore/hdmi-display.md); EDID refresh
+- BIOS UI designed in svelte-d (kernel-spec/svelte-d); NodeDef live, not LDC/Binaryen
+- WASM MVP JIT (g6b-wasm): env.set_inner_text; svelte-d _start; not wasmtime
+- BIOS profile full
+- kernel HTTP endpoints http1=true http2=true js-proxy=true serve=true (not SvelteKit, not a netdev)
+- HolyC file server root=/ui html=true js=true wasm=true https=true (adapter until NET-DELEGATE)
+- BIOS clocks cpu_hz=1000000000 uart_baud=115200
+- BIOS param /bios/edk2 (view-only; EDK2 is a loader, not this payload)
+- BIOS param /bios/u-boot (view-only)
+- BIOS param /bios/bootloader next=opensbi
+- BIOS flash image=openwrt backend=mailbox openwrt=true self_update=true
+- BIOS settings export=true import=true uart=true mailbox=true usb_key=true
+- USB host MSC FAT32 flash=true key-fm=true ntfs=true ext4=true (not a netdev)
+- HolyC TLS (Botan spec): SHA-256, AES-128, HMAC, RSA PKCS#1, ECDSA P-256, X.509; not OpenSSL
+- HttpsGet on pre-delegate NIC or mailbox after NET-DELEGATE; never a netdev
+- always-on domain or Wake-on-LAN on the management path (not the OS NIC after delegate)
+- S-mode timer: sie.STIE + sstatus.SIE + SBI TIME (Priv ch3 / SBI TIME); not PIT
+- display-proxy scale_mode=dpi 640x480→1920x1080 dpi=192 fps=120
+- HolyC ISel MemCpy is scalar (RVV not live)
+- display-proxy GLES2 scale is scalar nearest-neighbour (proxy.accel=off)
+- CPU topology smt cores=1 threads=2 harts=2 issue=2 ooo=false (BIOS Adam on hart 0; others WFI)
+- uncore clint=true plic=true ddr=false pcie=false eth=false storage=false hdmi=true (setup menus; not Linux drivers)

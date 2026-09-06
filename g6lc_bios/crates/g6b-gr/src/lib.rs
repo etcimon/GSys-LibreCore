@@ -152,6 +152,59 @@ impl Frame {
     }
 }
 
+/// Decode an executed `GR16` 4bpp plane (`__gr_plane`, header included, as
+/// written by payload `GrInit` + `DomPaint`) into a binary P6 PPM.
+/// `None` on a bad/missing header or truncated pixels.
+pub fn plane_to_ppm(plane: &[u8]) -> Option<Vec<u8>> {
+    fn u32_at(b: &[u8], off: usize) -> Option<u32> {
+        Some(u32::from_le_bytes(b.get(off..off + 4)?.try_into().ok()?))
+    }
+    if u32_at(plane, 0)? != u32::from_le_bytes(*b"GR16") {
+        return None;
+    }
+    let w = u32_at(plane, 4)?;
+    let h = u32_at(plane, 8)?;
+    let stride = u32_at(plane, 36)? as usize;
+    let hdr = u32_at(plane, 40)? as usize;
+    let (w, h) = (w as usize, h as usize);
+    if w == 0 || h == 0 || w > 4096 || h > 4096 || stride < w.div_ceil(2) {
+        return None;
+    }
+    let px = plane.get(hdr..hdr + stride.checked_mul(h)?)?;
+    let mut body = Vec::with_capacity(w * h * 3);
+    for y in 0..h {
+        let row = &px[y * stride..y * stride + w.div_ceil(2)];
+        for x in 0..w {
+            let byte = row[x / 2];
+            let nib = if x % 2 == 0 { byte >> 4 } else { byte & 0x0f };
+            body.extend_from_slice(&PALETTE[(nib % 16) as usize]);
+        }
+    }
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    out.extend_from_slice(&body);
+    Some(out)
+}
+
+/// Decode a virtio-gpu `B8G8R8X8` scanout surface (the device-side
+/// `Smoke::vio_fb` filled by `TRANSFER_TO_HOST_2D`) into a binary P6 PPM.
+/// `None` on an empty/mismatched buffer. This is the host-modelled analogue
+/// of what QEMU's scanout would display — not a QEMU capture.
+pub fn x8r8_to_ppm(w: u32, h: u32, fb: &[u8]) -> Option<Vec<u8>> {
+    let (w, h) = (w as usize, h as usize);
+    let px = w.checked_mul(h)?.checked_mul(4)?;
+    if w == 0 || h == 0 || w > 4096 || h > 4096 || fb.len() < px {
+        return None;
+    }
+    let mut body = Vec::with_capacity(w * h * 3);
+    for i in 0..w * h {
+        let o = i * 4;
+        body.extend_from_slice(&[fb[o + 2], fb[o + 1], fb[o]]);
+    }
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    out.extend_from_slice(&body);
+    Some(out)
+}
+
 /// 8×8 glyph row (MSB = left). Letters used by the BIOS banner are distinct.
 fn glyph_row(ch: u8, row: u32) -> u8 {
     let r = row as usize;
@@ -204,5 +257,28 @@ mod tests {
         assert!(f.init_line().contains("virtio-gpu"));
         let plane = f.to_text_plane();
         assert!(plane.contains("G6LC-BIOS"), "{plane}");
+    }
+
+    #[test]
+    fn plane_ppm_decodes_executed_gr16_4bpp() {
+        // 8x8 GR16 frame: stride=4, hdr=64 — one lit pixel at (0,0).
+        let mut plane = vec![0u8; 64 + 4 * 8];
+        plane[0..4].copy_from_slice(b"GR16");
+        for (off, v) in [(4usize, 8u32), (8, 8), (12, 16), (36, 4), (40, 64)] {
+            plane[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        plane[64] = 0xF0; // px0 = colour 15, px1 = colour 0
+        let ppm = plane_to_ppm(&plane).unwrap();
+        let head = b"P6\n8 8\n255\n";
+        assert!(ppm.starts_with(head));
+        let body = &ppm[head.len()..];
+        assert_eq!(&body[0..3], &PALETTE[15]);
+        assert_eq!(&body[3..6], &PALETTE[0]);
+        // Fail closed: empty, bad magic, truncated pixels.
+        assert!(plane_to_ppm(&[]).is_none());
+        let mut bad = plane.clone();
+        bad[0] = 0;
+        assert!(plane_to_ppm(&bad).is_none());
+        assert!(plane_to_ppm(&plane[..80]).is_none());
     }
 }
