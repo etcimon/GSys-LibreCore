@@ -80,16 +80,32 @@ peripheral (`fixtures/g6lc64-hdmi.json`) selects the native uncore scanout:
 (`architecture/uncore/hdmi-display.md`) plus a `G6FB` descriptor — the
 `simple-framebuffer`-shaped BIOS→Linux handoff — and `wants_virtio_gpu`
 yields to it. `qemu-args` emits `virtio-gpu-gl-device` + `egl-headless,gl=on`
-under `proxy.gl` (needs a host DRM render node; `--no-gl` → 2D fallback)
+under `proxy.gl` (needs a host DRM render node `/dev/dri/renderD*` —
+surfaceless EGL is not software GL; `--no-gl` → 2D fallback)
 and `--vnc N` exports the console for BIOS+Linux alike. QEMU needs
 `-global virtio-mmio.force-legacy=false` (the default legacy v1 transport
 ignores the v2 queue registers — `qemu-args` emits it) and the used-ring
-poll is `1<<22` (QueueNotify is iothread-async). The modeled
+poll is `1<<22` (QueueNotify is iothread-async) — with SEIE armed the
+`VioInit`/`VioCmd` waits `wfi` on the used-buffer irq instead of pure spin
+(bounded by the same budget plus the periodic timer). `InpInit` probes the
+slots for DeviceID 18 (`virtio-keyboard-device` under
+`wants_virtio_input()`), posts 8 `virtio_input_event` buffers on the
+eventq, and `trap_inp`→`InpDrain` pushes each `EV_KEY` into the bounded
+`INP_KQ` queue (`INP` marker, buffer re-posted); UART `Keys`/`K` and the
+mailbox `K` doorbell dump it via `InpPoll` (`KEY <8-hex>`; mbox answers
+`RSP="KEYS"`). Absent-device tolerance: unmapped MMIO raises scause 5/7
+with `stval`; `trap_fault` recovers probe-window faults (UART1 /
+loopback-mbox) so `g6lc64-virt.json` now boots on stock QEMU virt too —
+`MboxInit` also readback-checks the doorbell so QEMU's `fw_cfg` at
+`0x10100000` reports `MBOX-NONE` instead of swallowing `G6MB`, and the
+`uart1` probe runs before `PlicInit` arms the irq (a trap-context fault on
+a missing device would nested-trap and clobber `sepc`). The modeled
 UART1 sits at `uart0+0x9000` — above the always-present virtio-mmio window
 (QEMU virt has no second real ns16550). `g6lc64-qemu.json` is the
 stock-virt-faithful spec: `loopback` off (mbox `0x10100000` is QEMU `fw_cfg`),
 `dual_band.tcp` off, `postboot`/`net_expose` never; `g6lc64-virt.json`
-remains the custom-board spec for a device model that provides them.
+keeps those lanes enabled — the probes degrade to `MBOX-NONE`/`UART1-NONE`
+on stock virt instead of parking.
 
 B50–B52 add bounded JS/DOM and validated i32 WASM execution, shared complete
 menu rows, native-browser navigation/imports, `kernel.browser.start_menu`,

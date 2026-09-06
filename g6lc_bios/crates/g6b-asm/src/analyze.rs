@@ -463,6 +463,11 @@ pub fn kstart(spec: &BoardSpec) -> Module {
             m.push(crate::vio::inp_init_node(o));
             m.push(crate::vio::inp_drain_node(o));
             m.push(crate::vio::inp_poll_node(o, spec));
+            if spec.kernel.wasm.jit {
+                // DOM-input bridge — `WasmDomText` exists only under the
+                // jit lane (dom::attach), so DomKey needs the same gate.
+                m.push(crate::vio::dom_key_node(o, spec));
+            }
         }
     }
     if disp.is_some() {
@@ -1636,11 +1641,21 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                     rd: RA,
                     to: "InpDrain".into(),
                 },
-                Op::Jal {
-                    rd: X0,
-                    to: "trap_done".into(),
-                },
             ]);
+            if spec.kernel.wasm.jit {
+                // DOM-input bridge: mirror the newest key into the `inp.last`
+                // row — no repaint in irq context (a keypress dirty-marks the
+                // row; the frame is pushed by an explicit Keys/Ui refresh,
+                // like a browser input event vs its next animation frame).
+                ops.push(Op::Jal {
+                    rd: RA,
+                    to: "DomKey".into(),
+                });
+            }
+            ops.push(Op::Jal {
+                rd: X0,
+                to: "trap_done".into(),
+            });
         }
     }
     ops.extend([
@@ -2183,11 +2198,19 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
                 rd: RA,
                 to: "InpPoll".into(),
             },
-            Op::Jal {
-                rd: X0,
-                to: "trap_done".into(),
-            },
         ]);
+        if spec.kernel.wasm.jit {
+            // Refresh the inp.last row after the drain — the repaint is left
+            // to the next Ui/refresh (a query command shouldn't flush a frame).
+            ops.push(Op::Jal {
+                rd: RA,
+                to: "DomKey".into(),
+            });
+        }
+        ops.push(Op::Jal {
+            rd: X0,
+            to: "trap_done".into(),
+        });
     }
     ops.push(Op::Label("uart_wakeup".into()));
     for ch in b"WAKE\n" {
@@ -2558,6 +2581,14 @@ fn trap_mbox_ops(spec: &BoardSpec) -> Vec<Op> {
                 rd: RA,
                 to: "InpPoll".into(),
             },
+        ]);
+        if spec.kernel.wasm.jit {
+            ops.extend([Op::Jal {
+                rd: RA,
+                to: "DomKey".into(),
+            }]);
+        }
+        ops.extend([
             Op::Li {
                 rd: T1,
                 imm: i64::from(MBOX_RSP_KEYS),

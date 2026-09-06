@@ -87,6 +87,9 @@ pub struct Smoke {
     pub ui_nfiles: u32,
     /// Guest DOM row count at `__ui_dom` (WasmStart `set_inner_text` calls).
     pub dom_rows: u32,
+    /// A DOM row with id `inp.last` exists — `DomKey` mirrored a queued
+    /// virtio-input EV_KEY into the DOM (the guest input→DOM bridge).
+    pub dom_lastkey: bool,
     /// First painted 4bpp word at the DOM text origin (y=DOM_Y0).
     pub dom_pix0: u32,
     /// Executed `__gr_plane` bytes (GR16 header + 4bpp plane) when Gr live.
@@ -420,7 +423,7 @@ fn run_with_kick(
     let mut steps = 0u32;
     loop {
         if steps >= STEP_LIMIT {
-            return Ok(done(console, steps, Halt::Limit, &csr, &ram, entry));
+            return Ok(done(console, steps, Halt::Limit, &csr, &ram, entry, xlen));
         }
         steps += 1;
         csr.time = csr.time.wrapping_add(1);
@@ -429,7 +432,17 @@ fn run_with_kick(
         }
         let w = match fetch_u32(&ram, entry, pc) {
             Some(w) => w,
-            None => return Ok(done(console, steps, Halt::Unimp(0), &csr, &ram, entry)),
+            None => {
+                return Ok(done(
+                    console,
+                    steps,
+                    Halt::Unimp(0),
+                    &csr,
+                    &ram,
+                    entry,
+                    xlen,
+                ))
+            }
         };
         match step(
             xlen,
@@ -458,7 +471,7 @@ fn run_with_kick(
                 if host_uart_kick(&mut csr) && take_pending_sei(xlen, &mut pc, &mut csr) {
                     continue;
                 }
-                return Ok(done(console, steps, h, &csr, &ram, entry));
+                return Ok(done(console, steps, h, &csr, &ram, entry, xlen));
             }
         }
         if uart_polls > 16 && !console.is_empty() {
@@ -470,12 +483,28 @@ fn run_with_kick(
                 uart_polls = 0;
                 continue;
             }
-            return Ok(done(console, steps, Halt::UartPoll, &csr, &ram, entry));
+            return Ok(done(
+                console,
+                steps,
+                Halt::UartPoll,
+                &csr,
+                &ram,
+                entry,
+                xlen,
+            ));
         }
     }
 }
 
-fn done(console: String, steps: u32, halt: Halt, csr: &Csr, ram: &[u8], base: u64) -> Smoke {
+fn done(
+    console: String,
+    steps: u32,
+    halt: Halt,
+    csr: &Csr,
+    ram: &[u8],
+    base: u64,
+    xlen: u32,
+) -> Smoke {
     let gr_frame = if csr.gr_base != 0 && csr.gr_bytes != 0 {
         let off = csr.gr_base.wrapping_sub(base) as usize;
         let end = off.saturating_add(csr.gr_bytes as usize).min(ram.len());
@@ -487,6 +516,22 @@ fn done(console: String, steps: u32, halt: Halt, csr: &Csr, ram: &[u8], base: u6
     } else {
         Vec::new()
     };
+    // Walk the DOM row table for the `inp.last` row DomKey mirrors the
+    // newest queued key into (input → DOM bridge evidence).
+    let dom_lastkey = csr.dom_base != 0
+        && (0..csr.dom_rows.min(48)).any(|i| {
+            let row = csr.dom_base.wrapping_add(16 + u64::from(i) * 32);
+            let idp = if xlen == 64 {
+                load_u64(ram, base, row).unwrap_or(0)
+            } else {
+                u64::from(load_u32(ram, base, row).unwrap_or(0))
+            };
+            let idl = load_u32(ram, base, row + 16).unwrap_or(0);
+            idl == 8
+                && (0..8u64).all(|k| {
+                    load_u8(ram, base, idp.wrapping_add(k)) == Some(b"inp.last"[k as usize])
+                })
+        });
     Smoke {
         console,
         steps,
@@ -524,6 +569,7 @@ fn done(console: String, steps: u32, halt: Halt, csr: &Csr, ram: &[u8], base: u6
         ui_wasm_magic: csr.ui_wasm_magic,
         ui_nfiles: csr.ui_nfiles,
         dom_rows: csr.dom_rows,
+        dom_lastkey,
         dom_pix0: csr.dom_pix0,
         gr_frame,
         vio_status: csr.vio_status,
@@ -2758,7 +2804,7 @@ mod tests {
         // kick (QEMU `sendkey` stand-in) fills one with EV_KEY KEY_A, raises
         // PLIC irq 2 → trap_inp → InpDrain pushes the key queue + INP marker.
         let spec = BoardSpec::from_json_str(
-            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},"kernel":{"gr":{"enable":true,"backend":"virtio-gpu"},"wasm":{"enable":true}},"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},"kernel":{"gr":{"enable":true,"backend":"virtio-gpu"},"wasm":{"enable":true,"jit":true}},"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
         )
         .unwrap();
         assert!(spec.wants_virtio_input());
@@ -2775,6 +2821,9 @@ mod tests {
             "Keys dump: {}",
             s.console
         );
+        // DomKey mirrored the queued key into the `inp.last` DOM row and the
+        // irq path repainted (DomPaint + VioPaint under kernel.wasm.jit).
+        assert!(s.dom_lastkey, "no inp.last DOM row: {}", s.console);
         assert!(!s.console.contains("TRAP-"), "{}", s.console);
         assert!(matches!(s.halt, Halt::Wfi), "{:?}", s.halt);
     }

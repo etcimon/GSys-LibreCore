@@ -16,7 +16,7 @@
 #![allow(missing_docs)]
 
 use crate::analyze::{g6b_spec_proxy, Object};
-use crate::encode::{A0, A1, A2, A6, A7, RA, SP, T0, T1, T2, T3, T4, T5, T6, X0};
+use crate::encode::{A0, A1, A2, A3, A6, A7, RA, SP, T0, T1, T2, T3, T4, T5, T6, X0};
 use crate::encode::{
     SBI_PUTCHAR, VIO_DESC_NEXT, VIO_DESC_WRITE, VIO_DEV_GPU, VIO_DEV_INPUT, VIO_F_VERSION_1,
     VIO_GPU_FMT_B8G8R8X8, VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING,
@@ -81,6 +81,9 @@ pub const INP_KQ_TAIL: i32 = 0x578;
 /// 16 u32 entries `(code << 8) | value` — consumed by the `Keys` UART
 /// command / the DOM input lane.
 pub const INP_KQ_OFF: i32 = 0x580;
+/// 16B scratch: `DomKey` builds `"key <8hex>"` here before `WasmDomText`
+/// copies it into the `inp.last` DOM row (0x5c0..0x5d0 of `__vio`).
+pub const INP_KEYTXT_OFF: i32 = 0x5c0;
 /// Uncore display-engine presence magic (`architecture/uncore/hdmi-display.md`).
 pub const DISP_MAGIC: u32 = u32::from_le_bytes(*b"G6DS");
 /// `G6FB` descriptor magic.
@@ -1308,6 +1311,159 @@ pub fn inp_poll_node(o: Object, spec: &BoardSpec) -> Node {
         },
     ]);
     ops.push(ret());
+    Node {
+        purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// `DomKey` — DOM-input bridge: mirror the newest `INP_KQ` entry into the
+/// `inp.last` DOM row (`"key <8hex>"`, 12 bytes in `INP_KEYTXT`) via
+/// `WasmDomText` (find-or-create, bounded like every DOM op). No-op when the
+/// queue is empty. Emitted only when both the virtio-input lane and the DOM
+/// lane (`kernel.wasm.jit`) are live; `trap_inp` and the `Keys`/`K` commands
+/// `jal` it, then repaint. t-regs are trap-clobberable (InpDrain convention).
+pub fn dom_key_node(o: Object, spec: &BoardSpec) -> Node {
+    let xlen = spec.isa.xlen;
+    let ops = vec![
+        Op::Comment(format!("{} — INP_KQ[head-1] → DOM row inp.last", o.why)),
+        Op::Glob("DomKey".into()),
+        Op::Label("DomKey".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -16,
+        },
+        st_x(xlen, RA, SP, 0),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T1, T5, INP_KQ_HEAD),
+        Op::Beq {
+            rs1: T1,
+            rs2: X0,
+            to: "dkey_done".into(),
+        },
+        // t0 = KQ[(head-1) & 15] — the newest queued key.
+        Op::Addi {
+            rd: T0,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Andi {
+            rd: T0,
+            rs: T0,
+            imm: 15,
+        },
+        Op::Slli {
+            rd: T0,
+            rs: T0,
+            shamt: 2,
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T0,
+            imm: INP_KQ_OFF,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T5,
+        },
+        lw(T0, T0, 0),
+        // text "key " + 8 hex digits into INP_KEYTXT.
+        Op::Li {
+            rd: T3,
+            imm: i64::from(u32::from_le_bytes(*b"key ")),
+        },
+        sw(T3, T5, INP_KEYTXT_OFF),
+        Op::Addi {
+            rd: T6,
+            rs: T5,
+            imm: INP_KEYTXT_OFF + 4,
+        },
+        Op::Li { rd: T4, imm: 8 },
+        Op::Label("dkey_hex".into()),
+        Op::Srli {
+            rd: T3,
+            rs: T0,
+            shamt: 28,
+        },
+        Op::Andi {
+            rd: T3,
+            rs: T3,
+            imm: 0xf,
+        },
+        Op::Slli {
+            rd: T0,
+            rs: T0,
+            shamt: 4,
+        },
+        Op::La {
+            rd: A6,
+            addr: Addr::Label("hexdig".into()),
+        },
+        Op::Add {
+            rd: A6,
+            rs1: A6,
+            rs2: T3,
+        },
+        Op::Lbu {
+            rd: T3,
+            rs: A6,
+            off: 0,
+        },
+        Op::Sb {
+            rs2: T3,
+            rs1: T6,
+            off: 0,
+        },
+        Op::Addi {
+            rd: T6,
+            rs: T6,
+            imm: 1,
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: "dkey_hex".into(),
+        },
+        // WasmDomText(a0=id_ptr, a1=id_len, a2=text_ptr, a3=text_len) —
+        // find-or-create the `inp.last` row.
+        Op::La {
+            rd: A0,
+            addr: Addr::Label("domkey_id".into()),
+        },
+        Op::Li { rd: A1, imm: 8 },
+        Op::Addi {
+            rd: A2,
+            rs: T5,
+            imm: INP_KEYTXT_OFF,
+        },
+        Op::Li { rd: A3, imm: 12 },
+        Op::Jal {
+            rd: RA,
+            to: "WasmDomText".into(),
+        },
+        Op::Label("dkey_done".into()),
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        ret(),
+        // Inline rodata (never executed — sits after ret): the DOM row id.
+        Op::Label("domkey_id".into()),
+        Op::Word(u32::from_le_bytes(*b"inp.")),
+        Op::Word(u32::from_le_bytes(*b"last")),
+    ];
     Node {
         purpose: Purpose::Virtio,
         ops,

@@ -257,7 +257,16 @@ dry. UART `Keys`/`K` (`CMD_KEYS`) and the mailbox `K` doorbell both run
 `InpPoll` → `KEY <8-hex>` dump per queued entry (mbox answers
 `RSP = "KEYS"`); the model feeds `Keys\n` after the canned keypress and the
 smoke prints `KEY 00001e01` — the full sendkey→eventq→irq→queue→command
-loop is exec-verified. `qemu-args` emits `-device virtio-keyboard-device` under
+loop is exec-verified. **DOM-input bridge:** `DomKey` (`kernel.wasm.jit`
+gated — `WasmDomText` lives on that lane) mirrors the newest `INP_KQ`
+entry into an `inp.last` DOM row (`"key <8hex>"` in `INP_KEYTXT` scratch),
+called from `trap_inp` after `InpDrain` and after `InpPoll` in the `Keys`
+paths — dirty-marks the row like a browser input event; the repaint stays
+on the explicit `Ui`/refresh path (a per-keypress `VioPaint` is not the
+irq's job and would blow the bounded step budget). `Smoke::dom_lastkey`
+walks `__ui_dom` for the row; `vio_input_eventq_delivers_key` asserts it
+plus `KEY 00001e01`, and the `Ui` repaint echoes `DOM| key 00001e01` —
+input→eventq→irq→queue→DOM→paint is exec-verified end to end. `qemu-args` emits `-device virtio-keyboard-device` under
 `BoardSpec::wants_virtio_input()` (= `wants_virtio_gpu && kernel.wasm.enable`).
 **WFI-driven waits:** `VioInit`'s used-ring wait and `VioCmd`'s completion
 wait insert `wfi` between a poll miss and the loop-back when `uncore.plic`
