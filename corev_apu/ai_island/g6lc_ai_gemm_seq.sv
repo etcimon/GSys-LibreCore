@@ -1161,11 +1161,18 @@ module g6lc_ai_gemm_seq #(
             // FP16/BF16 it is two bytes little-endian; for FP32 it is four.
             // INT4 stays in its own branch above.
             if (numfmt_q != 3'd1) begin
-              for (int unsigned e = 0; int'(e) < int'(mac_step); e++) begin
+              // Bounded by the PeLanes parameter, not by the runtime mac_step:
+              // on this branch (numfmt != INT4) mac_step is PeLanes/bytes, so it
+              // can never exceed PeLanes and the extra iterations are inert.  A
+              // constant bound is what makes this loop elaborate under an open
+              // synthesis frontend -- with the runtime bound, Yosys read_slang
+              // tries to unroll it and exhausts its limit, which left the whole
+              // GEMM datapath without any gate-level area or timing evidence.
+              for (int unsigned e = 0; e < PeLanes; e++) begin
                 automatic logic [31:0] elem_t;
                 automatic logic [31:0] off;
                 elem_t = t_q + 32'(e);
-                if (elem_t < k_q) begin
+                if (int'(e) < int'(mac_step) && elem_t < k_q) begin
                   off = 32'(e) * ai_fmt_bytes();
                   case (ai_fmt_bytes())
                     32'd1: begin

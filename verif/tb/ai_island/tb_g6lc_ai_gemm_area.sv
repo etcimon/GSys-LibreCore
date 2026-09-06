@@ -28,7 +28,11 @@ module tb_g6lc_ai_gemm_area
 #(
     parameter int unsigned Lanes    = 8,
     parameter int unsigned ArOut    = 2,
-    parameter int unsigned Channels = 1
+    parameter int unsigned Channels = 1,
+    // Generous flat widths for the struct-typed AXI pair, declared here so the
+    // port list can use them; the casts inside pick out exactly the struct bits.
+    parameter int unsigned AXI_REQ_BITS  = 512,
+    parameter int unsigned AXI_RESP_BITS = 256
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
@@ -49,7 +53,14 @@ module tb_g6lc_ai_gemm_area
     output logic        err_o,
     output logic [31:0] pmu_r_beats_o,
     output logic [31:0] pmu_w_beats_o,
-    output logic [31:0] pmu_cycles_o
+    output logic [31:0] pmu_cycles_o,
+    // The AXI pair must cross the boundary as real ports. An earlier version of
+    // this harness fed the response back from the request, which let synthesis
+    // constant-fold the whole operand path: the MAC arrays vanished and the cell
+    // count barely moved between 8 and 64 lanes. Any area number from a harness
+    // that internally closes this loop is meaningless.
+    output logic [AXI_REQ_BITS-1:0] axi_req_o,
+    input  logic [AXI_RESP_BITS-1:0] axi_resp_i
 );
   localparam int unsigned ADDR_W = 40;
   localparam int unsigned DATA_W = 64;
@@ -66,10 +77,10 @@ module tb_g6lc_ai_gemm_area
   gbus_resp_t gemm_resp;
   logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r_beats, ch_w_beats;
 
-  // Sink the request side into an OR reduction and drive the response side from
-  // the request so nothing is optimised away as unconnected, without adding a
-  // memory model that would swamp the arithmetic being measured.
-  assign gemm_resp = gbus_resp_t'(gemm_req);
+  // Both directions leave the module, so no operand or result bit can be
+  // resolved to a constant and pruned.
+  assign axi_req_o = AXI_REQ_BITS'(gemm_req);
+  assign gemm_resp = gbus_resp_t'(axi_resp_i);
   assign ch_r_beats = '0;
   assign ch_w_beats = '0;
 
