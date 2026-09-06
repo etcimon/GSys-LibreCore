@@ -79,11 +79,16 @@ package g6lc_ai_policy_pkg;
   // useful as separate groups working on separate outputs, while wide formats
   // want every lane ganged onto one dot (FP32 gained up to +188.2%).
   //
-  // Caveats kept explicit: the basis only provisioned up to 32 lanes, so FP32's
-  // requirement is a lower bound - the rule asks for 64 and was never measured
-  // there.  Unknown/unsupported formats fail closed to "gang everything, split
-  // nothing".  Both functions are pure decisions: no datapath consumes them yet,
-  // so they change no behaviour on their own.
+  // FP32's 64-lane requirement was confirmed by a follow-up 8/32/64-lane run
+  // (ai-gemm-codec-basis-20260906T172019Z): FP32 wins at 64 lanes for every
+  // shape class, up to +320.0% against the shipped 8-lane provisioning on 16x16,
+  // while INT4 still gains nothing past 8 and INT8/FP8 nothing past 16.  The
+  // "twice the element width" rule therefore holds across the whole measured
+  // range rather than being extrapolated at its top end.
+  //
+  // Unknown/unsupported formats fail closed to "gang everything, split nothing".
+  // Both functions are pure decisions: no datapath consumes them yet, so they
+  // change no behaviour on their own.
   function automatic logic [2:0] policy_dot_lanes_log2(input logic [2:0] numfmt);
     if (!policy_format_known(numfmt)) return 3'd6;
     return 3'(policy_element_bits_log2(numfmt) + 3'd1);

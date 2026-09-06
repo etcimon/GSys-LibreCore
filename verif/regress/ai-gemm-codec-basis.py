@@ -76,9 +76,13 @@ INCLUDES = (
     ("vendor/pulp-platform/common_cells/include/common_cells/registers.svh", "common_cells"),
     ("vendor/pulp-platform/common_cells/include/common_cells/assertions.svh", "common_cells"),
 )
-# Provisioning points. Lanes below the 8-byte beat are excluded because
-# SplitArId requires PeLanes >= BytesPerBeat and PeLanes=4 deadlocks.
-POINTS = ((8, 2), (8, 8), (16, 2), (16, 8), (32, 2), (32, 8))
+# Default provisioning points. Lanes below the 8-byte beat are excluded because
+# SplitArId requires PeLanes >= BytesPerBeat and PeLanes=4 deadlocks the directed
+# phase. The baseline point (8,2) is the shipped live provisioning and must stay
+# in any point set, because every reported gain is measured against it.
+DEFAULT_LANES = (8, 16, 32)
+DEFAULT_AR = (2, 8)
+BASELINE = (8, 2)
 TOP = "tb_g6lc_ai_gemm_backend"
 FORMATS = {0: "INT8", 1: "INT4", 3: "FP8_E4M3", 4: "FP8_E5M2", 5: "FP16", 6: "BF16", 7: "FP32"}
 # Shape class -> the policy code the frozen codec assigns it (policy_encode:
@@ -118,7 +122,9 @@ def analyse(points):
     not simply better for every class, because a uniformly better point is a
     static configuration change, not something the codec adds value by choosing.
     """
-    baseline = (8, 2)
+    baseline = BASELINE
+    if baseline not in points:
+        raise RuntimeError("the shipped baseline point must be measured for gains to mean anything")
     shapes = sorted({(run["m"], run["n"]) for runs in points.values() for run in runs})
     report = {"baseline_point": {"lanes": baseline[0], "ar": baseline[1]},
               "shape_classes": [], "codec_value": {}}
@@ -220,7 +226,7 @@ def remote(args):
 
     try:
         collected = {}
-        for lanes, ar in POINTS:
+        for lanes, ar in args.points:
             name = "l%d-a%d" % (lanes, ar)
             mdir = work / name
             command = [tool, "--binary", "--timing", "-Wno-fatal", "-Wno-TIMESCALEMOD",
@@ -286,7 +292,9 @@ def dispatch(args):
     launcher = ["wsl.exe", "--exec", "python3"] if os.name == "nt" else [sys.executable]
     command = [*launcher, proxy_path(proxy), "py", proxy_path(Path(__file__).resolve()),
                "--tag", tag, "--threads", "1", "--pull",
-               "--env", "AI_GEMM_BASIS_CHANNELS=" + str(args.channels)]
+               "--env", "AI_GEMM_BASIS_CHANNELS=" + str(args.channels),
+               "--env", "AI_GEMM_BASIS_LANES=" + args.lanes,
+               "--env", "AI_GEMM_BASIS_AR=" + args.ar]
     for path in files:
         command.extend(("--data", proxy_path(path)))
     print("PROXY_ONLY " + shlex.join(command), flush=True)
@@ -300,11 +308,36 @@ def main():
     parser.add_argument("--channels", type=int,
                         default=int(os.environ.get("AI_GEMM_BASIS_CHANNELS", "1")),
                         help="DRAM stripe channels (default 1: no striping, isolates provisioning)")
+    parser.add_argument("--lanes", default=os.environ.get("AI_GEMM_BASIS_LANES",
+                        ",".join(map(str, DEFAULT_LANES))),
+                        help="comma-separated PeLanes provisioning points (>= 8; must include 8)")
+    parser.add_argument("--ar", default=os.environ.get("AI_GEMM_BASIS_AR",
+                        ",".join(map(str, DEFAULT_AR))),
+                        help="comma-separated MaxAROut provisioning points in [1,8] (must include 2)")
     parser.add_argument("--dry-run", action="store_true",
                         help="print the proxy command without running it")
     args = parser.parse_args()
     if args.channels not in (1, 2, 4, 8):
         parser.error("--channels must be 1, 2, 4 or 8")
+
+    def points(text, name, low, high):
+        try:
+            values = sorted({int(part) for part in text.split(",") if part.strip()})
+        except ValueError:
+            parser.error("--" + name + " must be a comma-separated integer list")
+        if not values or any(not low <= value <= high for value in values):
+            parser.error("--" + name + " values must lie in [%d,%d]" % (low, high))
+        if any(value & (value - 1) for value in values) and name == "lanes":
+            parser.error("--lanes values must be powers of two")
+        return values
+
+    # PeLanes below BytesPerBeat=8 deadlock the sequencer, so they are refused
+    # rather than measured and explained away.
+    lanes = points(args.lanes, "lanes", 8, 256)
+    ar = points(args.ar, "ar", 1, 8)
+    if BASELINE[0] not in lanes or BASELINE[1] not in ar:
+        parser.error("the shipped baseline point (lanes 8, ar 2) must be included")
+    args.points = [(l, a) for l in lanes for a in ar]
     if os.environ.get("TH_DATA_DIR"):
         if args.dry_run:
             parser.error("--dry-run is a local dispatch option")

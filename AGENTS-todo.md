@@ -189,6 +189,15 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   wins. So the codec's productive output is format-driven lane grouping, and the
   positive-return path to +300% is that (up to +188%) combined with the 2.11x
   cluster replication advantage.
+- [x] Closed the open end of the format table: an 8/32/64-lane run
+  (ai-gemm-codec-basis-20260906T172019Z, status=PASS) shows FP32 wins at 64 lanes
+  for every shape class, +320.0% on 16x16 (2352 -> 560 cycles) and +203.6% on 8x8,
+  while INT4 still gains nothing past 8 and INT8/FP8 nothing past 16. The
+  "twice the element width in lanes" rule is now measured across its whole range.
+  +300% is measured-exceeded for FP32 by lane ganging alone, no clusters needed.
+  policy_dot_lanes_log2/policy_lane_groups_log2 and their pinned assertions
+  already encode this; the basis runner now takes --lanes/--ar and refuses point
+  sets that omit the shipped baseline or use non-power-of-two/<8 lane counts.
 - [ ] Needs RTL that does not exist: selectable lane gang/split so narrow formats
   split a wide array into independent groups (more concurrent jobs) and wide
   formats gang lanes for one job. Until then the +188% is a return of

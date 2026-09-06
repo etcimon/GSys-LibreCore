@@ -1469,7 +1469,15 @@ already a codec feature and a `policy_topology` input:
 | INT4 | 8 | 0% at every shape - wider lanes never help |
 | INT8, FP8 E4M3/E5M2 | 16 | +0.94% (tall) - **+69.6%** (16x16) |
 | FP16, BF16 | 32 | +12.9% - **+177.8%** (16x16) |
-| FP32 | 32 | +38.8% - **+188.2%** (16x16) |
+| FP32 | 64 | +39.4% - **+320.0%** (16x16) |
+
+A follow-up 8/32/64-lane run (`ai-gemm-codec-basis-20260906T172019Z`) closed the
+open end of that table: FP32 keeps improving to 64 lanes and wins there for every
+shape class, reaching **+320.0%** on 16x16 (2352 -> 560 cycles) and +203.6% on
+8x8. INT4 still gains nothing past 8 lanes and INT8/FP8 nothing past 16, so the
+"twice the element width in lanes" rule now holds across the whole measured range
+instead of being extrapolated at its top end. **The +300% target is therefore
+measured-exceeded for FP32 by lane ganging alone, with no cluster replication.**
 
 `MaxAROut` 8 never won: AR 2 ties or wins everywhere, confirming again that AR
 depth is not a productive codec output.
