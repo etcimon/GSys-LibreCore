@@ -150,6 +150,48 @@ module tb_g6lc_ai_policy_subcode #(
   assign steer_subcode_topology_o = s_selected[1];
   assign steer_baseline_cycles_o = s_baseline_cycles[1];
   assign steer_selected_cycles_o = s_selected_cycles[1];
+
+  // pragma translate_off
+  // Pin policy_dot_lanes_log2 / policy_lane_groups_log2 to the measured
+  // provisioning basis (ai-gemm-codec-basis-20260906T165957Z-718434a9a9d1):
+  // best lanes were 8 for INT4, 16 for INT8/FP8, 32 for FP16/BF16/FP32.  If
+  // someone retunes these functions without new measured evidence, this fails.
+  initial begin
+    assert (policy_dot_lanes_log2(3'(config_pkg::AI_FMT_INT4)) == 3'd3)
+      else $fatal(1, "INT4 measured optimum is 8 lanes");
+    assert (policy_dot_lanes_log2(3'(config_pkg::AI_FMT_INT)) == 3'd4)
+      else $fatal(1, "INT8 measured optimum is 16 lanes");
+    assert (policy_dot_lanes_log2(3'(config_pkg::AI_FMT_FP8_E4M3)) == 3'd4)
+      else $fatal(1, "FP8 E4M3 measured optimum is 16 lanes");
+    assert (policy_dot_lanes_log2(3'(config_pkg::AI_FMT_FP8_E5M2)) == 3'd4)
+      else $fatal(1, "FP8 E5M2 measured optimum is 16 lanes");
+    assert (policy_dot_lanes_log2(3'(config_pkg::AI_FMT_FP16)) == 3'd5)
+      else $fatal(1, "FP16 measured optimum is 32 lanes");
+    assert (policy_dot_lanes_log2(3'(config_pkg::AI_FMT_BF16)) == 3'd5)
+      else $fatal(1, "BF16 measured optimum is 32 lanes");
+    // FP32 asks for 64: the basis only provisioned to 32, so this is a lower
+    // bound that was never measured at its own optimum.
+    assert (policy_dot_lanes_log2(3'(config_pkg::AI_FMT_FP32)) == 3'd6)
+      else $fatal(1, "FP32 wants at least 32 lanes; rule asks 64");
+    // Unsupported format must gang everything and split nothing.
+    assert (policy_dot_lanes_log2(3'(config_pkg::AI_FMT_SP24)) == 3'd6 &&
+            policy_lane_groups_log2(3'(config_pkg::AI_FMT_SP24), 3'd5) == 3'd0)
+      else $fatal(1, "unknown format must fail closed to a single group");
+    // A 32-lane array (log2 5) splits 4 ways for INT4, 2 for INT8/FP8 and not
+    // at all for the 16/32-bit formats.
+    assert (policy_lane_groups_log2(3'(config_pkg::AI_FMT_INT4), 3'd5) == 3'd2)
+      else $fatal(1, "INT4 leaves 32 lanes idle enough for four groups");
+    assert (policy_lane_groups_log2(3'(config_pkg::AI_FMT_INT), 3'd5) == 3'd1)
+      else $fatal(1, "INT8 splits a 32-lane array in two");
+    assert (policy_lane_groups_log2(3'(config_pkg::AI_FMT_FP16), 3'd5) == 3'd0 &&
+            policy_lane_groups_log2(3'(config_pkg::AI_FMT_FP32), 3'd5) == 3'd0)
+      else $fatal(1, "16/32-bit formats gang a 32-lane array");
+    // Never split below the shipped 8-lane provisioning.
+    for (int unsigned fmt = 0; fmt < 8; fmt++)
+      assert (policy_lane_groups_log2(3'(fmt), 3'd3) == 3'd0)
+        else $fatal(1, "an 8-lane array must never be split");
+  end
+  // pragma translate_on
 endmodule
 
 module tb_g6lc_ai_policy_subcode_instance #(

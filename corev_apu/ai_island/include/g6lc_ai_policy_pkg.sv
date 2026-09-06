@@ -61,6 +61,42 @@ package g6lc_ai_policy_pkg;
     endcase
   endfunction
 
+  // Lane grouping, fitted to measured RTL cycles rather than to the cost model.
+  //
+  // The remote provisioning basis (verif/regress/ai-gemm-codec-basis.py, run
+  // ai-gemm-codec-basis-20260906T165957Z-718434a9a9d1: six provisioning points x
+  // five shape classes x seven formats x every legal AR depth, digest-stable)
+  // showed the best PeLanes count depends on the numeric format and NOT on the
+  // matrix shape - the winning point was identical across all five shape classes
+  // for every format.  Measured optima were 8 lanes for INT4, 16 for INT8 and
+  // both FP8 formats, and 32 for FP16/BF16/FP32, i.e. exactly twice the element
+  // width in lanes, which is what these two functions encode.
+  //
+  // `policy_dot_lanes_log2` is the lane count one dot product can keep busy for
+  // a format.  `policy_lane_groups_log2` is how many independent lane groups a
+  // provisioned array can therefore be split into: narrow formats leave lanes
+  // idle (INT4 gained 0% from going past 8 lanes) and those lanes are only
+  // useful as separate groups working on separate outputs, while wide formats
+  // want every lane ganged onto one dot (FP32 gained up to +188.2%).
+  //
+  // Caveats kept explicit: the basis only provisioned up to 32 lanes, so FP32's
+  // requirement is a lower bound - the rule asks for 64 and was never measured
+  // there.  Unknown/unsupported formats fail closed to "gang everything, split
+  // nothing".  Both functions are pure decisions: no datapath consumes them yet,
+  // so they change no behaviour on their own.
+  function automatic logic [2:0] policy_dot_lanes_log2(input logic [2:0] numfmt);
+    if (!policy_format_known(numfmt)) return 3'd6;
+    return 3'(policy_element_bits_log2(numfmt) + 3'd1);
+  endfunction
+
+  function automatic logic [2:0] policy_lane_groups_log2(
+      input logic [2:0] numfmt, input logic [2:0] lanes_log2
+  );
+    logic [2:0] wanted;
+    wanted = policy_dot_lanes_log2(numfmt);
+    return (lanes_log2 > wanted) ? 3'(lanes_log2 - wanted) : 3'd0;
+  endfunction
+
   function automatic logic [63:0] policy_normalize_sample(
       input logic [255:0] sample, input logic [2:0] numfmt
   );
