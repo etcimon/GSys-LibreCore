@@ -240,8 +240,9 @@ falls back to `virtio-gpu-device` (identical guest commands), and `--vnc N`
 appends `-vnc 127.0.0.1:N` — a host frontend over the QEMU console that
 serves the BIOS scanout and a later Linux guest identically. Still open:
 host render-node availability for real virgl (`egl-headless,gl=on` needs
-`/dev/dri/renderD*` — `--no-gl` is the fallback), QEMU `sendkey` verification
-of the input lane.
+`/dev/dri/renderD*` — `--no-gl` is the fallback; WSL2 confirmed the gate:
+`egl: no drm render node available`). QEMU `sendkey` verification of the
+input lane is **done** — see the follow-on-8 QEMU note below.
 
 B53 follow-on 8 (2026-09) — **virtio-input eventq + WFI waits + absent-device
 tolerance.** `VIO_DEV_INPUT` (DeviceID 18) is scanned on the virtio-mmio
@@ -293,6 +294,18 @@ no UART1) — `stock_qemu_absent_devices_recover` asserts `MBOX-NONE` +
 `UART1-NONE` + `VIRTIO-GPU-OK` + `VIRTIO-INPUT-OK` + `INP` with no `TRAP-`
 and a `Wfi` halt; `vio_input_eventq_delivers_key` covers the eventq round
 trip. `48/48` exec tests, `python tools/g6b.py check` green.
+**QEMU-verified (2026-09, WSL2 QEMU 8.2.2 + bundled OpenSBI 1.3
+fw_dynamic, stock `-M virt`):** `g6lc64-virt.json` boots end to end —
+OpenSBI → `KSTART-*` → `UART1-NONE` + `MBOX-NONE` (QEMU's fw_cfg at
+`0x10100000` correctly rejected) → `VIRTIO-GPU 7`-`OK` → `INFO` → `SCAN` →
+`PAINT` (QMP `screendump` = P6 1920×1080 with nonzero guest pixels →
+`out/g6b_qemu_screen.ppm`) → `VIRTIO-INPUT-OK` → monitor `sendkey a`/`b`
+→ `INP` ×4 → serial `Keys` → `KEY 00001e01`/`1e00`/`3001`/`3000` (exact
+Linux codes) → `Ui` → `DOM| key 00003000` (the `inp.last` row on the
+live DOM) → `VIRTIO-PAINT`. Virgl attempt confirmed the documented host
+gate: `egl: no drm render node available` (WSL2 has no `/dev/dri`; the
+d3d12 WSLg driver is not a DRM render node) — `--no-gl`/`virtio-gpu-device`
+is the verified path. Runner script: `out/g6b_qemu_run.sh`.
 
 B50–B52 verification (2026-09-05): `python tools/g6b.py check` passed
 independence, 15 Bun tests/build, fmt, strict Clippy and 196 Rust tests;

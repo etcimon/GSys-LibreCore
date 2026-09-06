@@ -93,7 +93,14 @@ slots for DeviceID 18 (`virtio-keyboard-device` under
 eventq, and `trap_inp`→`InpDrain` pushes each `EV_KEY` into the bounded
 `INP_KQ` queue (`INP` marker, buffer re-posted); UART `Keys`/`K` and the
 mailbox `K` doorbell dump it via `InpPoll` (`KEY <8-hex>`; mbox answers
-`RSP="KEYS"`). Absent-device tolerance: unmapped MMIO raises scause 5/7
+`RSP="KEYS"`), and `DomKey` (`kernel.wasm.jit`) mirrors the newest entry
+into an `inp.last` DOM row so `Ui`/`DomPaint` show it (`DOM| key <hex>`).
+**QEMU 8.2-verified** on `g6lc64-virt.json` (WSL2, stock virt, OpenSBI
+fw_dynamic): monitor `sendkey` → `INP`, serial `Keys` → the exact Linux
+keycodes, `Ui` → `DOM| key …` + `VIRTIO-PAINT`, QMP `screendump` =
+P6 1920×1080 with guest pixels; `MBOX-NONE`/`UART1-NONE` on the absent
+stock-virt devices, and `egl-headless,gl=on` correctly refuses with
+`egl: no drm render node available` (WSL2 has no `/dev/dri`). Absent-device tolerance: unmapped MMIO raises scause 5/7
 with `stval`; `trap_fault` recovers probe-window faults (UART1 /
 loopback-mbox) so `g6lc64-virt.json` now boots on stock QEMU virt too —
 `MboxInit` also readback-checks the doorbell so QEMU's `fw_cfg` at

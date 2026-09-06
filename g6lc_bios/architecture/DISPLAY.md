@@ -177,8 +177,18 @@ hardware acceleration is not inferred from API availability.
    (PLIC irq `1+input slot`) acks the ISR and `InpDrain` pushes each
    `EV_KEY` as `(code<<8)|value` into the bounded `INP_KQ` queue (serial
    `INP`) and re-posts the buffer; UART `Keys`/`K` dumps the queue via
-   `InpPoll` (`KEY <hex>`). Exec-model verified (`host_inp_kick` is the
-   `sendkey` stand-in); a QEMU `sendkey` run is pending a QEMU host.
+   `InpPoll` (`KEY <hex>`) and `DomKey` (`kernel.wasm.jit`) mirrors the
+   newest entry into the `inp.last` DOM row — a keypress dirty-marks the
+   row like a browser input event; the repaint stays on the explicit
+   `Ui`/refresh path rather than flushing a frame per keypress.
+   **QEMU 8.2 verified** on `g6lc64-virt.json`: monitor `sendkey a` /
+   `sendkey b` each deliver press+release → `INP` ×4, and a serial `Keys`
+   reads `KEY 00001e01` / `KEY 00001e00` / `KEY 00003001` / `KEY 00003000`
+   (Linux codes 30/48, value 1/0) — the exact exec-model values on real
+   QEMU. The following `Ui` repaint echoes `DOM| key 00003000` — the
+   `inp.last` row holds the last event and is painted to the virtio-gpu
+   scanout (`VIRTIO-PAINT`), input→DOM→display verified end to end on the
+   emulator.
    **Absent-device tolerance**: unmapped MMIO faults (scause 5/7) inside the
    UART1/mbox probe windows are recoverable — `trap_fault` reads `stval`,
    marks the `__uart_line` absent flag and resumes at `sepc+4`, so
@@ -206,9 +216,13 @@ hardware acceleration is not inferred from API availability.
    record framebuffer/event evidence, not just UART markers. Later hardware
    timing/PMA/PMP/cache/IRQ validation remains distinct from QEMU evidence.
 
-Stages 3 and 5 remain open; stage 4 is QEMU-verified for probe → handshake →
+Stage 5 remains open; stage 3 (virtio-input) is now **QEMU-verified**
+(`sendkey` → `INP` → `KEY`/`DOM| key` on `g6lc64-virt.json`, stock virt +
+`virtio-keyboard-device`), and stage 4 is QEMU-verified for probe → handshake →
 controlq → resource/scanout/flush **at the high-res proxy geometry**
-(1920×1080 scanout, centered ×2 content) on `fixtures/g6lc64-qemu.json`. Do
+(1920×1080 scanout, centered ×2 content; QMP `screendump` P6 with nonzero
+guest pixels). `g6lc64-virt.json` boots clean on stock QEMU virt —
+`MBOX-NONE`/`UART1-NONE` are reported, not parked. Do
 not remove `-nographic` or claim a screenshot by changing argv alone.
 
 ### Output backends — QEMU and the uncore port
@@ -239,7 +253,9 @@ selected by BoardSpec:
   (`/dev/dri/renderD*`, readable EGL/GLES driver): `egl-headless` is
   surfaceless EGL, *not* software GL — on a host without a render node
   (containers, WSL without GPU passthrough, headless servers) QEMU refuses
-  the device (`opengl is not available`). Use `qemu-args --no-gl` for the 2D
+  the device (`egl: no drm render node available` — confirmed on WSL2 QEMU
+  8.2.2, whose d3d12/WSLg driver is not a DRM render node). Use
+  `qemu-args --no-gl` for the 2D
   `virtio-gpu-device` fallback. The guest command stream is identical either
   way — virgl only accelerates host-side composite; the BIOS does not emit
   3D commands. `GL-ADAPTER`/ProxyScale RVV is a *guest-side* scale accel
