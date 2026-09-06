@@ -159,6 +159,27 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   8->16 gives +52.9%, 16->32 a further +23.8% (+89.2% cumulative), all nine
   configs golden-clean. INT8 saturates at 16 lanes because k=16 completes a
   reduction in one cycle. PeLanes=4 is invalid (SplitArId needs lanes >= beat).
+- [x] Chip-surface efficiency: per-lane throughput falls -23.6% (16 lanes) and
+  -52.7% (32 lanes) versus 8 lanes. At equal 32-lane arithmetic, one wide engine
+  measures 6.662 MAC/cyc (+89.2%) while four 8-lane clusters project 14.083
+  (+300.0%), a 2.11x replication advantage. Operand bandwidth 5.45 B/cycle for
+  four clusters against ~8 B/cycle per 64-bit port fits; eight clusters would not.
+- [ ] CLUSTERS ARE NOT IMPLEMENTED: Clusters/ClustersEnabled exist only in
+  island_cfg_legal and the CAP window; island_top instantiates one gemm_seq. The
+  +300% figure is 4x a measured single cluster, not a measured four-cluster
+  system. Implementing replication (plus per-cluster descriptor/queue fan-out and
+  re-measured bandwidth on a steady-state fixture) is the actual +300% work item.
+- [ ] BLOCKER for any GEMM area/timing claim: read_slang cannot elaborate
+  g6lc_ai_gemm_seq (line 1164 loop bounded by runtime mac_step; unroll limit
+  exhausted at 12000, host memory exhausted at 200000). Give that loop a
+  constant bound derived from PeLanes/MaxDim so the datapath synthesises; until
+  then there are zero gate-level cells for it and only the policy controllers
+  have synthesis evidence. Harness: verif/tb/ai_island/tb_g6lc_ai_gemm_area.sv.
+- [ ] Sub-code/group tuning has zero throughput leverage while nothing consumes
+  the codec output. Do not tune it for performance. It becomes productive only
+  with a provisioning consumer that RAISES a bound - cluster count or lane
+  grouping - which is worth a measured 2.11x and is the natural fit for the
+  eight-state code plus 3-bit subcode.
 - [ ] 300% VERDICT: not reachable by parameters. Measured ceiling at this tile
   geometry is ~+89% and already saturating, with utilisation falling 68->52->26%
   of peak as lanes widen. A 4x class needs three coupled changes, none a knob:

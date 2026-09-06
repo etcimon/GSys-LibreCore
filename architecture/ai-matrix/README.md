@@ -1402,6 +1402,64 @@ datapath the topology model assumed and the RTL does not have. Widening lanes
 without the other two only lowers utilisation, which is visible above as 68% ->
 52% -> 26% of peak.
 
+### Chip surface efficiency: wider engine versus more clusters
+
+Per-lane efficiency (measured throughput divided by arithmetic width) falls hard
+as the single engine widens, because `k=16` stops feeding the lanes:
+
+| Lanes | All-format MAC/cyc | Per lane | INT8 MAC/cyc | Per lane | Per-lane vs 8 |
+|--:|--:|--:|--:|--:|--:|
+| 8 | 3.521 | 0.4401 | 5.447 | 0.6809 | 0% |
+| 16 | 5.381 | 0.3363 | 8.258 | 0.5161 | **-23.6%** |
+| 32 | 6.662 | 0.2082 | 8.258 | 0.2581 | **-52.7%** |
+
+Comparing the two ways to spend the same 32 MAC lanes of silicon:
+
+| Spend | Measured MAC/cyc | vs 8-lane baseline |
+|---|--:|--:|
+| One 32-lane engine | 6.662 | +89.2% |
+| Four 8-lane clusters | 14.083 | **+300.0%** |
+
+**Replication is 2.11x more efficient than widening at equal arithmetic area,**
+and four clusters is exactly the +300% target. The reason is structural: a
+cluster keeps per-lane efficiency at the measured 0.4401, while widening one
+engine past `k` throws half of it away. Small-surface replication therefore beats
+a large monolithic datapath here, and it also avoids the `PeLanes >= BytesPerBeat`
+constraint that makes narrow lanes illegal.
+
+Bandwidth check at this tile: operands are 256 B per 1024 INT8 MACs, so 8 lanes
+consume 1.36 B/cycle and four clusters 5.45 B/cycle against roughly 8 B/cycle for
+one 64-bit port. Four clusters fit; eight would not. **Caveat:** this tile reuses
+each operand eight times (4 MAC/byte), which is generous - real LLM shapes reuse
+less, so per-cluster bandwidth must be re-measured on a steady-state fixture
+before committing to a cluster count.
+
+Two hard limits on the above. First, **multi-cluster is advertised but not
+implemented**: `Clusters`/`ClustersEnabled` appear in `island_cfg_legal` and the
+CAP window, while `g6lc_ai_island_top` instantiates exactly one
+`g6lc_ai_gemm_seq`, so the 4x figure is four times a measured single cluster, not
+a measured four-cluster system. Second, **no gate-level area exists for the GEMM
+datapath at all**: `read_slang` cannot elaborate `g6lc_ai_gemm_seq` because the
+operand-assembly loop at line 1164 is bounded by the runtime `mac_step`, which
+exhausts the unroll limit (see `tb_g6lc_ai_gemm_area.sv`). Area here is therefore
+reasoned per MAC lane, not measured in cells; published synthesis evidence still
+covers only the policy controllers.
+
+### Where sub-codes and groups can and cannot help
+
+Tuning subcode/group parameters cannot move MAC/s today, for a structural reason
+rather than a tuning one: nothing consumes their output. The codec's candidate
+topologies were already modelled at `0.998x`, and the one output that did reach
+hardware (`prefetch_depth`) could only lower a bound and has been removed.
+
+The productive reframing is that the codec needs a consumer that *raises*
+provisioning. Cluster count and lane grouping are exactly such knobs: choosing
+"four clusters of 8" over "one engine of 32" is worth a measured 2.11x, and it is
+precisely the kind of shape-driven decision the eight-state codec plus 3-bit
+subcode was built to express. Until cluster replication or selectable lane
+grouping exists in RTL, subcode work has zero throughput leverage and should not
+be tuned further for performance.
+
 **Structural conclusion: the knob cannot win.** `prefetch_depth` can only lower
 the cap below `MaxAROut` (0 falls back to `MaxAROut`), measured throughput rises
 monotonically with depth, so "do not cap" — which is exactly policy-off — is the
