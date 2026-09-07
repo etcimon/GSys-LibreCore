@@ -165,9 +165,61 @@ module tb_g6lc_ai_gemm_concurrent
   // fixture cannot express.  The bound is kept at the plan's declared 1 ppm
   // rather than tightened to the observed 0, because 0 is a property of THESE
   // operands and not of the recipe.
+  //
+  // UPDATE: the last sentence of that paragraph was too pessimistic about the
+  // HARNESS, not about the arithmetic.  Operands of the form mantissa * 2^exp
+  // with positive exponents only are still whole numbers -- no fractional
+  // operand path is needed -- and a wide enough exponent ladder does make the
+  // accumulator round mid-reduction.  That is the `wide_exponent` data class
+  // below; the small-integer class and its 0 ULP measurement stay exactly as
+  // they are, because they are still the right control.
   localparam int unsigned LOSSLESS_FP_ULP_BOUND = 8;
+  // Second data class over the SAME pairs: WIDE EXPONENT.  Values are
+  // sign * mantissa * 2^exponent, with the mantissa bounded by the TARGET's
+  // explicit mantissa bits (BF16 7 -> <= 127, FP16 10 -> <= 1023) so every
+  // element remains EXACTLY representable in the target -- proved element by
+  // element through the same element_exact_in over both tiles that the
+  // small-integer class uses, never assumed -- and with mantissa * 2^max_exp
+  // kept inside the target's finite range (FP16: 1023 * 2^6 = 65472 <= 65504).
+  //
+  // Why the ladder is what makes the difference appear.  The engine's reduction
+  // window is mac_step = PeLanes / bytes_per_element (g6lc_ai_gemm_seq F1), so
+  // an FP32 tile folds 2 products at a time and a BF16/FP16 tile folds 4.  Each
+  // window is summed EXACTLY by the block-float tree and rounded once, and the
+  // windows are then combined by g6lc_ai_fp_pkg::fp32_add.  Regrouping can
+  // therefore only move the result where a fold actually rounds, and a fold only
+  // rounds when the terms in flight differ in magnitude by more than FP32's
+  // 24-bit significand.  The exponent ladder manufactures exactly that: the
+  // small products fall below the ULP of the running sum, and WHERE they fall
+  // below it depends on the window -- which is the whole effect being measured.
+  localparam int unsigned LOSSLESS_CLASSES = 2;
+  // Bound for the float pairs under the wide-exponent class, again stated in
+  // FP32 ULPs of the raw C word.  MEASURED here: 32 ULP with 38/64 elements
+  // differing (FP32 -> BF16) and 5 ULP with 19/64 (FP32 -> FP16), which an
+  // independent host model of the same window/fold structure reproduces exactly.
+  // 256 is 8x the worst observation -- loose enough that a different PE_LANES or
+  // fold order stays inside it -- and still ~64x BELOW the smallest move a LOSSY
+  // narrowing could make: dropping even one BF16 mantissa bit perturbs an
+  // element by 2^-8 relative, so a product of the same order as C moves C by
+  // >= 2^-9 relative, i.e. >= 2^14 = 16384 ULP.  The bound therefore separates
+  // "the accumulator regrouped" from "the operands changed", which is the only
+  // distinction this experiment has to make.
+  localparam int unsigned LOSSLESS_WIDE_ULP_BOUND = 256;
   logic [31:0] loss_ref_c [JOB_M*JOB_N];
   longint loss_max_diff;
+  // Element-resolved companions to loss_max_diff: how many C words moved between
+  // the two runs, and how many are still the poison value (i.e. were never
+  // written).  Both are maintained unconditionally by compare_c and are only
+  // ASSERTED on by the wide-exponent class, so the small-integer class's output
+  // and checks are untouched.
+  int unsigned loss_diff_elems, loss_poison_elems;
+  // Wide-exponent data-class state.  `wide_exp_data` swaps a_value/b_value over
+  // to the ladder and `wide_exp_dst` is the target format whose mantissa/range
+  // envelope the ladder must respect.  Both default off and are only raised by
+  // run_lossless, exactly as the lossless request itself is, so no other
+  // experiment can see this data.
+  bit wide_exp_data;
+  logic [2:0] wide_exp_dst;
 
   function automatic config_pkg::ai_cfg_t test_cfg();
     config_pkg::ai_cfg_t cfg;
@@ -633,8 +685,68 @@ module tb_g6lc_ai_gemm_concurrent
     return {v < 0, 8'(127 + exp), norm[22:0]};
   endfunction
 
+  // ---------------------------------------------------------------------------
+  // WIDE-EXPONENT DATA CLASS.  The envelope is a pure function of the TARGET
+  // format, which is what makes every element provably exact in it:
+  //   * mant_max is the target's explicit mantissa bit count expressed as a
+  //     bound (BF16 7 bits -> 127, FP16 10 bits -> 1023).  INT4 has no mantissa
+  //     field at all, so its only usable ladder is 1 * 2^e with |v| <= 7; that
+  //     degenerate case is deliberate -- integer accumulation is exact at ANY
+  //     magnitude, so the integer pair must stay bit-identical under this class
+  //     too and is worth running as the control.
+  //   * exp_step * (exp_slots - 1) is the top of the ladder, chosen so that
+  //     mant_max << top stays inside the target's finite range (FP16 max finite
+  //     is 65504 and 1023 << 6 = 65472) and, for INT4, inside -8..7.
+  // Every value is a whole number: the exponents are all >= 0, so nothing here
+  // needs a fractional operand path, and fp32_whole/encode_element/
+  // element_exact_in take these values unchanged (the widest is 127 << 12 =
+  // 520192, an FP32 exponent of 19, well inside their existing domain).
+  function automatic int unsigned wide_mant_max(input logic [2:0] dst);
+    case (dst)
+      3'd1:    return 1;      // INT4: no mantissa field, ladder is 1 * 2^e
+      3'd5:    return 1023;   // FP16 keeps 10 explicit mantissa bits
+      3'd6:    return 127;    // BF16 keeps 7
+      default: return 1;
+    endcase
+  endfunction
+
+  function automatic int unsigned wide_exp_slots(input logic [2:0] dst);
+    return (dst == 3'd1) ? 3 : 4;
+  endfunction
+
+  function automatic int unsigned wide_exp_step(input logic [2:0] dst);
+    case (dst)
+      3'd1:    return 1;   // 0,1,2   -> |v| <= 4, inside INT4's -8..7
+      3'd5:    return 2;   // 0,2,4,6 -> 1023 << 6 = 65472 <= 65504 (FP16 max)
+      3'd6:    return 4;   // 0,4,8,12
+      default: return 0;
+    endcase
+  endfunction
+
+  // The A and B ladders use different mantissa and exponent mixes so a product
+  // pairs a large operand with a small one as often as not; that is what puts
+  // terms of very different magnitude inside ONE reduction window.
+  function automatic int wide_a_value(input int unsigned r, t);
+    int unsigned m, e;
+    int v;
+    m = 1 + ((r * 13 + t * 29 + (r / 2) * 7) % wide_mant_max(wide_exp_dst));
+    e = wide_exp_step(wide_exp_dst) * ((t + r) % wide_exp_slots(wide_exp_dst));
+    v = int'(m << e);
+    return ((r + t / 2) % 2 != 0) ? -v : v;
+  endfunction
+
+  function automatic int wide_b_value(input int unsigned c, t);
+    int unsigned m, e;
+    int v;
+    m = 1 + ((c * 17 + t * 23 + (c / 3) * 11) % wide_mant_max(wide_exp_dst));
+    e = wide_exp_step(wide_exp_dst) * ((t * 3 + c) % wide_exp_slots(wide_exp_dst));
+    v = int'(m << e);
+    return ((c + t / 3) % 2 != 0) ? -v : v;
+  endfunction
+
   function automatic int a_value(input int unsigned i, r, t);
     int v;
+    if (wide_exp_data) return wide_a_value(r, t);
     if (!signed_data) return 1;
     v = 1 + int'((i * 3 + r * 2 + t * (1 + r % 3) + (r / 3) * (t / 2)) % 7);
     return ((r + t / 3 + i) % 2 != 0) ? -v : v;
@@ -642,6 +754,7 @@ module tb_g6lc_ai_gemm_concurrent
 
   function automatic int b_value(input int unsigned owner, c, t, version);
     int v;
+    if (wide_exp_data) return wide_b_value(c, t);
     if (!signed_data) return 1;
     v = 1 + int'((owner * 2 + c * 3 + t * (1 + c % 4) + (c / 4) * (t / 3) + version * 2) % 7);
     return ((c + t / 5 + version + owner) % 2 != 0) ? -v : v;
@@ -882,9 +995,23 @@ module tb_g6lc_ai_gemm_concurrent
     end
   endtask
 
+  // The poison a C element pair is pre-loaded with, and the 32-bit word of it
+  // that one element sees.  Factored out of poison_engine (whose value is
+  // unchanged) so a reader can ask "is this word still poison, i.e. did the
+  // engine never write it?" against exactly the same constant.
+  function automatic logic [63:0] poison_pair(input int unsigned i, e);
+    return 64'hDEAD_BEEF_BADC_0FFE ^ 64'(i * 256 + e);
+  endfunction
+
+  function automatic logic [31:0] poison_word(input int unsigned i, e, lane);
+    logic [63:0] p;
+    p = poison_pair(i, e);
+    return p[lane * 32 +: 32];
+  endfunction
+
   task automatic poison_engine(input int unsigned i);
     for (int unsigned e = 0; e < m_v[i] * n_v[i]; e += 2)
-      wr8(pc_v[i] + 64'(e * 4), 64'hDEAD_BEEF_BADC_0FFE ^ 64'(i * 256 + e));
+      wr8(pc_v[i] + 64'(e * 4), poison_pair(i, e));
   endtask
 
   task automatic poison_all;
@@ -1583,18 +1710,26 @@ module tb_g6lc_ai_gemm_concurrent
   // LOSSLESS_FP_ULP_BOUND is stated in.  Both runs of a pair compute the same
   // real numbers, so no sign crossing can arise; were one to arise anyway the
   // raw distance is enormous and the bound fails loudly, which is correct.
+  // It also counts, for the run it is looking at, how many C words are still the
+  // poison value -- "this element was never written" is a different failure from
+  // "this element is wrong", and the wide-exponent class has no golden with
+  // which to catch the former.  A real result could in principle collide with
+  // its poison word; that is a 2^-32 coincidence per element and the count is
+  // only ever asserted to be zero, never used as a pass condition.
   task automatic compare_c(input int unsigned i, input bit store_ref,
                            input bit integer_domain);
     logic [DATA_W-1:0] got;
     logic [31:0] word;
     longint diff;
     int unsigned idx;
+    loss_poison_elems = 0;
     for (int unsigned e = 0; e < m_v[i] * n_v[i]; e += 2) begin
       rd8(pc_v[i] + 64'(e * 4), got);
       for (int unsigned lane = 0; lane < 2; lane++) begin
         idx = e + lane;
         if (idx < m_v[i] * n_v[i]) begin
           word = got[lane * 32 +: 32];
+          if (word === poison_word(i, e, lane)) loss_poison_elems++;
           if (store_ref) begin
             loss_ref_c[idx] = word;
           end else begin
@@ -1602,6 +1737,7 @@ module tb_g6lc_ai_gemm_concurrent
                  ? (longint'($signed(word)) - longint'($signed(loss_ref_c[idx])))
                  : (longint'(word) - longint'(loss_ref_c[idx]));
             if (diff < 0) diff = -diff;
+            if (diff != 0) loss_diff_elems++;
             if (diff > loss_max_diff) loss_max_diff = diff;
           end
         end
@@ -1618,11 +1754,34 @@ module tb_g6lc_ai_gemm_concurrent
   // nothing else.  Neither run holds a lease, so both pay the FULL operand
   // traffic and the byte-ratio law below measures storage width and not a
   // skipped load.
-  task automatic run_lossless(input logic [2:0] src_fmt, input logic [2:0] dst_fmt);
+  //
+  // `wide` selects the second data class instead: sign * mantissa * 2^exponent
+  // off the target's ladder (see wide_mant_max).  The exactness proof below is
+  // the SAME proof over BOTH tiles -- it is what makes the class legitimate, and
+  // if it ever stops firing the fixture is wrong and must be fixed, never the
+  // proof relaxed.  What the wide class trades away is golden checking: the two
+  // runs deliberately produce DIFFERENT answers, so no single golden can check
+  // both, and golden_element cannot model FP32 windowed accumulation anyway.  In
+  // exchange it gets regrouping OBSERVABILITY, which is the one thing the
+  // small-integer class provably cannot deliver.  In its place the wide class
+  // demands: no engine error, no C word left at its poison value (so both runs
+  // really did write all 64 elements), a BOUNDED run-to-run difference, and a
+  // NON-ZERO one.  The small-integer class keeps full element-by-element golden
+  // checking and its max_abs_diff == 0 assertions, unchanged; so does the
+  // integer pair under the wide class, whose golden is exact at any magnitude.
+  task automatic run_lossless(input logic [2:0] src_fmt, input logic [2:0] dst_fmt,
+                              input bit wide);
     int unsigned src_cy, dst_cy, src_r, dst_r, expected_w;
-    bit both_int;
+    bit both_int, golden_ok;
     both_int = policy_integer_format(src_fmt) && policy_integer_format(dst_fmt);
     signed_data = 1'b1;
+    wide_exp_dst = dst_fmt;
+    wide_exp_data = wide;
+    // golden_element sums i32 products in the order it likes, which is exactly
+    // what the hardware computes for an integer tile at ANY magnitude, so the
+    // integer pair keeps its golden under both data classes.  Only the float
+    // pairs under the wide class have no checkable golden.
+    golden_ok = !wide || both_int;
     expected_w = JOB_M * JOB_N / 2;
 
     configure_engine(0, src_fmt, 1'b0);
@@ -1649,11 +1808,18 @@ module tb_g6lc_ai_gemm_concurrent
     store_engine(0, exp_pattern(src_fmt), exp_bpe(src_fmt), src_fmt == 3'd1, 1'b0);
     poison_engine(0);
     run_one(0, 1'b0, 1'b0, 1'b0, src_cy);
-    check_engine(0);
+    if (golden_ok) check_engine(0);
     src_r = pmu_r_v[0];
     assert (pmu_w_v[0] == expected_w)
       else $fatal(1, "lossless src=%0d w=%0d/%0d", src_fmt, pmu_w_v[0], expected_w);
     compare_c(0, 1'b1, both_int);
+    // (b) for the wide class: with no golden on the src run, "every element was
+    // written" has to be checked directly.  run_one has already checked (a),
+    // err_v[0] == 0.
+    if (wide)
+      assert (loss_poison_elems == 0)
+        else $fatal(1, "LOSSLESS wide src=%0d: %0d C words never written (still poison)",
+                    src_fmt, loss_poison_elems);
 
     // The dst run keeps the lossless request up with the SAME target, where
     // numfmt now equals it.  An equal-width pair buys no beats, so no NARROWING
@@ -1669,22 +1835,35 @@ module tb_g6lc_ai_gemm_concurrent
     store_engine(0, exp_pattern(dst_fmt), exp_bpe(dst_fmt), dst_fmt == 3'd1, 1'b0);
     poison_engine(0);
     run_one(0, 1'b0, 1'b0, 1'b0, dst_cy);
-    check_engine(0);
+    if (golden_ok) check_engine(0);
     dst_r = pmu_r_v[0];
     assert (pmu_w_v[0] == expected_w)
       else $fatal(1, "lossless dst=%0d w=%0d/%0d", dst_fmt, pmu_w_v[0], expected_w);
     loss_max_diff = 0;
+    loss_diff_elems = 0;
     compare_c(0, 1'b0, both_int);
     @(negedge clk);
     lossless_v[0] = 1'b0;
+    wide_exp_data = 1'b0;
 
     // Reported BEFORE the assertions so the measurement survives a failure --
     // a pair that violates the bound is a finding, and a finding with no number
     // attached is useless.
-    $display("LOSSLESS src=%0d dst=%0d src_cycles=%0d dst_cycles=%0d speedup_x1000=%0d src_r=%0d dst_r=%0d max_abs_diff=%0d bit_identical=%0d",
-             src_fmt, dst_fmt, src_cy, dst_cy,
-             dst_cy != 0 ? src_cy * 1000 / dst_cy : 0, src_r, dst_r,
-             loss_max_diff, loss_max_diff == 0);
+    //
+    // The wide class prints its own line, tagged with the data class and
+    // carrying differing_elements, so the small-integer line above stays exactly
+    // the string it has always been and the two classes can never be confused
+    // for one another in a log.
+    if (!wide)
+      $display("LOSSLESS src=%0d dst=%0d src_cycles=%0d dst_cycles=%0d speedup_x1000=%0d src_r=%0d dst_r=%0d max_abs_diff=%0d bit_identical=%0d",
+               src_fmt, dst_fmt, src_cy, dst_cy,
+               dst_cy != 0 ? src_cy * 1000 / dst_cy : 0, src_r, dst_r,
+               loss_max_diff, loss_max_diff == 0);
+    else
+      $display("LOSSLESS data=wide_exponent src=%0d dst=%0d src_cycles=%0d dst_cycles=%0d speedup_x1000=%0d src_r=%0d dst_r=%0d max_abs_diff=%0d bit_identical=%0d differing_elements=%0d/%0d",
+               src_fmt, dst_fmt, src_cy, dst_cy,
+               dst_cy != 0 ? src_cy * 1000 / dst_cy : 0, src_r, dst_r,
+               loss_max_diff, loss_max_diff == 0, loss_diff_elems, JOB_M * JOB_N);
 
     assert (src_r == job_read_beats(JOB_M, JOB_N, JOB_K, src_fmt, 1'b0, 1'b0) &&
             dst_r == job_read_beats(JOB_M, JOB_N, JOB_K, dst_fmt, 1'b0, 1'b0))
@@ -1703,14 +1882,36 @@ module tb_g6lc_ai_gemm_concurrent
                   src_fmt, dst_fmt, src_cy, dst_cy);
     if (both_int)
       // Not a tolerance: integer -> integer has no rounding site anywhere, so
-      // anything but zero here is a REAL defect in the claim, not noise.
+      // anything but zero here is a REAL defect in the claim, not noise.  This
+      // holds under BOTH data classes -- i32 accumulation is exact at every
+      // magnitude, so the wide-exponent ladder must not move it either; if it
+      // ever does, that is a bug to report, not a tolerance to widen.
       assert (loss_max_diff == 0)
         else $fatal(1, "INT src=%0d -> dst=%0d is NOT bit-identical: max_abs_diff=%0d",
                     src_fmt, dst_fmt, loss_max_diff);
-    else
+    else if (!wide)
       assert (loss_max_diff <= longint'(LOSSLESS_FP_ULP_BOUND))
         else $fatal(1, "lossless src=%0d dst=%0d differs by %0d ULP, above the %0d ULP (1 ppm) bound",
                     src_fmt, dst_fmt, loss_max_diff, LOSSLESS_FP_ULP_BOUND);
+    else begin
+      // (b) the dst run wrote every element too.
+      assert (loss_poison_elems == 0)
+        else $fatal(1, "LOSSLESS wide dst=%0d: %0d C words never written (still poison)",
+                    dst_fmt, loss_poison_elems);
+      // (c) BOUNDED.  Above this, the difference is no longer explicable as the
+      // accumulator regrouping: it would mean the PRODUCTS changed, i.e. the
+      // narrowing is not actually lossless in hardware.  That is the single most
+      // important thing this experiment can find, so it fails loudly and says so.
+      assert (loss_max_diff <= longint'(LOSSLESS_WIDE_ULP_BOUND))
+        else $fatal(1, "LOSSLESS wide src=%0d dst=%0d differs by %0d ULP, above the %0d ULP regrouping bound -- too large for a fold reorder, so the NARROWING ITSELF LOOKS LOSSY (a product changed, not just the grouping)",
+                    src_fmt, dst_fmt, loss_max_diff, LOSSLESS_WIDE_ULP_BOUND);
+      // (d) NON-ZERO, for at least one element.  This is the point of the
+      // fixture: a zero here means the ladder failed to make any fold round, so
+      // the experiment measured nothing and the claim stays unwitnessed.
+      assert (loss_diff_elems > 0)
+        else $fatal(1, "LOSSLESS wide src=%0d dst=%0d is bit-identical: the exponent ladder did not make any accumulator fold round, so regrouping was NOT observed",
+                    src_fmt, dst_fmt);
+    end
   endtask
 
   initial begin
@@ -1744,6 +1945,10 @@ module tb_g6lc_ai_gemm_concurrent
     policy_enable_v = '0;
     lossless_v = '0;
     loss_max_diff = 0;
+    loss_diff_elems = 0;
+    loss_poison_elems = 0;
+    wide_exp_data = 1'b0;
+    wide_exp_dst = 3'd0;
     signed_data = 1'b0;
     clr_seen = 0;
     aw_set = 0; w_set = 0; ar_set = 0;
@@ -1813,9 +2018,14 @@ module tb_g6lc_ai_gemm_concurrent
                dual_fmt(d) == 3'd1);
 
     // Proven-exact narrowing pairs: the same logical matrix at both widths.
-    // Table-driven for the same compile-time reason as the EXPERIMENTS loop.
-    for (int unsigned p = 0; p < LOSSLESS_PAIRS; p++)
-      run_lossless(lossless_src(p), lossless_dst(p));
+    // Table-driven for the same compile-time reason as the EXPERIMENTS loop --
+    // and the data class is the OUTER loop index, not a second literal call
+    // sequence, for that same reason.  Class 0 (small integer) runs first and in
+    // the original order, so its three lines are byte-identical to what they
+    // were before the wide-exponent class existed.
+    for (int unsigned dc = 0; dc < LOSSLESS_CLASSES; dc++)
+      for (int unsigned p = 0; p < LOSSLESS_PAIRS; p++)
+        run_lossless(lossless_src(p), lossless_dst(p), dc != 0);
 
     if (straddle) begin
       $error("an engine burst straddled a channel stripe");

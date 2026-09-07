@@ -417,12 +417,31 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   round nothing cannot move the result. The test was NOT tuned to produce a number;
   the bound stays at the declared 1 ppm with a comment saying the observed 0 is a
   property of these operands, not of the recipe.
-- [ ] Still outstanding: the "not bit-identical for float pairs" claim is UNWITNESSED
-  in RTL -- nothing contradicts it, nothing demonstrates it. Needs a fractional
-  target-exact fixture (BF16-exact values, wide exponent spread) and a matching
-  golden. Also: no production consumer mask bit for 1/3/17, and zero-skip (recipe 2)
-  is still integer-gated, which is the other exact FP32 lever the same argument
-  applies to.
+- [x] THE REGROUPING CLAIM IS NOW WITNESSED IN RTL, and it needed no fractional
+  operand path -- that blocker was pessimism about the HARNESS, not about the
+  arithmetic. `mantissa * 2^exponent` with POSITIVE exponents only is still a whole
+  number, and a wide enough ladder makes the accumulator round mid-reduction. The
+  mantissa is bounded by the target's explicit mantissa bits (BF16 <= 127, FP16
+  <= 1023) so exactness is preserved and proven element by element, and
+  `mantissa << max_exp` stays inside the target's finite range (FP16 1023<<6 =
+  65,472 <= 65,504). Remote `ai-gemm-reuse-20260907T202101Z-6f8842a4669a` PASS:
+  wide_exponent FP32->BF16 max_diff 32 ULP with 38/64 elements differing,
+  FP32->FP16 5 ULP with 19/64, both bit_identical=0 -- while INT8->INT4 stays
+  BIT-IDENTICAL at wide magnitudes (0 ULP, 0/64), which is the strong prediction:
+  integer accumulation has no rounding site at any scale. The small-integer class
+  is retained as the control and still reports 0 everywhere.
+- [x] THE MAGNITUDE PROVES IT IS REGROUPING, NOT LOST BITS. 32 ULP is <= 3.8 ppm on
+  the worst element; dropping even ONE BF16 mantissa bit perturbs an element by
+  2^-8 relative and moves a same-order C element by >= 2^-9 = 1,953 ppm = 16,384
+  ULP. The observation is ~512x below that floor, so the 256 ULP bound (8x the worst
+  observation) separates "the accumulator regrouped" from "the operands changed",
+  which is the only distinction the experiment must make. NOTE the metrics are not
+  interchangeable: the host 5.803/0.323 ppm are Frobenius-norm ratios over the tile,
+  these are worst-element ULP distances -- same scale, different quantity.
+- [ ] Still outstanding: no PRODUCTION consumer mask bit for 1/3/17 (the harness has
+  one; enabling it in `g6lc_ai_island_top` needs a descriptor field to carry the
+  proof, i.e. an ABI change), and zero-skip (recipe 2) is still integer-gated, the
+  other exact FP32 lever the same argument applies to.
 - [x] FITTING IS COMPLETE: every format now carries a bound, native FP32 included.
   Native FP32 is the ONE candidate the windowed kappa may legitimately multiply,
   because nothing perturbs its products (exact 48-bit significand product, exact

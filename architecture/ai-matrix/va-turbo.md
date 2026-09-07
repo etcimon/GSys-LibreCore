@@ -706,22 +706,54 @@ Cycles and beats match the predicted native figures exactly, and the byte ratio
 is asserted rather than eyeballed. `INT8 -> INT4` bit-identity is now **witnessed
 in hardware**, compared as raw two's-complement int32 over all 64 C words.
 
-The float pairs also came out at **0 ULP**, and that is a *qualification* of the
-5.803 / 0.323 ppm host figures rather than a confirmation of them. The harness
-operand path is integer-only (`a_value`/`b_value`/`encode_element`/
-`golden_element` all produce small whole numbers), so every product and partial
-sum sits far inside FP32's 24-bit significand and **no fold rounds at all** --
-and regrouping folds that round nothing cannot move the result. The test was not
-tuned to produce a number; the bound is left at the plan's declared 1 ppm (8 ULP)
-with a comment saying that the observed 0 is a property of these operands, not of
-the recipe.
+The float pairs came out at **0 ULP** on that fixture, which qualifies rather than
+confirms the host figures: its operands are small whole numbers, so every product
+and partial sum sits far inside FP32's 24-bit significand, **no fold rounds at
+all**, and regrouping folds that round nothing cannot move the result. That class
+is kept as the control.
 
-So the "not bit-identical for float pairs" claim above is currently
-**unwitnessed in RTL**: nothing contradicts it, but nothing demonstrates it
-either. Witnessing it needs a fractional, target-exact fixture (BF16-exact values
-with a wide exponent spread) and a matching golden, which is a larger change than
-extending the harness. Recorded as outstanding rather than quietly counted as
-verified.
+### The regrouping difference, witnessed
+
+A second data class closes it. The blocker was thought to be the harness's
+integer-only operand path, but that was too pessimistic about the harness rather
+than about the arithmetic: values of the form `mantissa * 2^exponent` with
+**positive exponents only** are still whole numbers, and a wide enough exponent
+ladder does force the accumulator to round mid-reduction. The mantissa is bounded
+by the target's explicit mantissa bits (BF16 7 -> <= 127, FP16 10 -> <= 1023) so
+every element stays exactly representable, and `mantissa << max_exp` is kept
+inside the target's finite range (FP16: `1023 << 6` = 65,472 <= 65,504).
+
+| Data class | Pair | max diff | Elements differing | Bit-identical |
+|---|---|--:|--:|:--|
+| small integer | INT8 -> INT4 | 0 | 0/64 | **yes** |
+| small integer | FP32 -> BF16 | 0 | 0/64 | yes |
+| small integer | FP32 -> FP16 | 0 | 0/64 | yes |
+| **wide exponent** | INT8 -> INT4 | **0** | **0/64** | **yes** |
+| **wide exponent** | FP32 -> BF16 | **32 ULP** | **38/64** | **no** |
+| **wide exponent** | FP32 -> FP16 | **5 ULP** | **19/64** | **no** |
+
+So the claim is now witnessed: the float pairs really are not bit-identical, and
+**`INT8 -> INT4` stays bit-identical even at wide magnitudes**, which is the
+strong prediction -- integer accumulation has no rounding site at any scale.
+
+The magnitude confirms it is regrouping and not lost operand bits. 32 ULP is
+<= 3.8 ppm on the worst element, whereas dropping even **one** BF16 mantissa bit
+perturbs an element by 2^-8 relative, which moves a same-order C element by
+>= 2^-9 = 1,953 ppm = **16,384 ULP**. The observation sits ~512x below that
+floor, so the bound (256 ULP, 8x the worst observation) cleanly separates "the
+accumulator regrouped" from "the operands changed" -- the only distinction this
+experiment has to make.
+
+Note the metrics differ and should not be compared directly: the host figures
+(5.803 / 0.323 ppm) are Frobenius-norm ratios over the whole tile, while these are
+worst-element ULP distances. Same scale, different quantity.
+
+Because the two runs disagree by design here, this class has no single golden. It
+asserts instead that neither run errored, that **no C word is still the poison
+value** (so both runs wrote every element), that the difference is bounded, and
+that it is nonzero somewhere. That trade -- golden checking for regrouping
+observability -- applies only to this class; the small-integer class keeps full
+element-by-element golden checking.
 
 ### Scope: 17 pairs, not one
 
@@ -776,10 +808,12 @@ originally listed as outstanding:
    ~0.007 ppm instead of the storage format's epsilon. That is the user-visible
    payoff: FP16-class speed at FP32-class accuracy, when the data permits it.
 
-What is genuinely left: a fractional target-exact fixture to witness the
-regrouping difference in RTL, a production consumer mask bit, and the zero-skip
-lever (recipe 2), which is still integer-gated and is the other exact FP32
-opportunity this section's argument applies to.
+The regrouping witness is now closed too (see above), and it needed no fractional
+operand path after all. What is genuinely left: a **production** consumer mask bit
+(the harness has one; `g6lc_ai_island_top` compiles none, and enabling it needs a
+descriptor field to carry the proof, i.e. an ABI change), and the zero-skip lever
+(recipe 2), still integer-gated and the other exact FP32 opportunity this
+section's argument applies to.
 
 ## 14. FP8 E5M2 was unreachable; recipe 18 code 3 now carries it
 
