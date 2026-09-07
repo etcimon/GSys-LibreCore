@@ -424,6 +424,16 @@ package g6lc_ai_island_cfg_pkg;
     ok  = 1'b1;
     noc = noc_peak_gbps(c.NocWidth, c.ClockKhz);
     if (c.Clusters == 0 || c.ClustersEnabled > c.Clusters) ok = 1'b0;
+    // Replication is not implemented: g6lc_ai_island_top instantiates exactly
+    // one g6lc_ai_gemm_seq, while these two fields are published to software
+    // through CAP_OFF_CLUSTERS and CAP_OFF_CLUSTER_EN.  Accepting Clusters > 1
+    // would elaborate a single engine while advertising several, which is a
+    // false capability rather than a configuration choice, so it fails closed
+    // here.  This is a marker for the work, not a decision against it: measured
+    // evidence makes replication the cheaper way to buy throughput (4.00x area
+    // for 4x, versus 6.30x for lane ganging to 4.20x).  Raise this bound in the
+    // same change that adds per-cluster GEMM/descriptor/queue fan-out.
+    if (c.Clusters > 1 || c.ClustersEnabled > 1) ok = 1'b0;
     if (c.MaxAROut < 1 || c.MaxAROut > AI_MAX_AR_OUT_DRAM) ok = 1'b0;
     if ((c.DramCas == 0) != (c.DramTrcd == 0) || (c.DramCas == 0) != (c.DramTrp == 0))
       ok = 1'b0;
