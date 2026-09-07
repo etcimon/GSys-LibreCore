@@ -801,6 +801,14 @@ def local_synthesis(args):
                     # Composition is a package function and therefore free until
                     # instantiated; this top is what makes its area measurable.
                     "tb_g6lc_ai_va_turbo_compose_on"):
+            # `tb_g6lc_ai_va_turbo_stack_on` is deliberately NOT synthesised here.
+            # Request-side composition chains select -> fold -> select into one
+            # combinational cone of roughly twice the depth, and ABC technology
+            # mapping stalls on it (measured: >13 min at 1.5% CPU, versus 31s for
+            # the parallel plan-side form). That is a real result about the
+            # STRUCTURE, not a tool bug: request-side stacking belongs behind a
+            # register or in software, where the two selections are separated in
+            # time. Adding it to this gate would hang CI for no evidence.
             netlist = out / (top + ".json")
             script = ("read_slang --top " + top + " " + sources +
                       "; synth -top " + top + " -flatten; check -assert; write_json " +

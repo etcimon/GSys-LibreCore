@@ -204,6 +204,26 @@ package g6lc_ai_policy_pkg;
     logic [3:0] approx_param;
     logic window_valid;
     logic [31:0] qualified_mask;
+    // BOUND already incurred by an earlier stage of a stack, in ppm, carried
+    // forward so a composed plan can be selected in ONE pass.  See
+    // `va_turbo_stack_request`.
+    //
+    // A BOUND and not an epsilon, for two reasons that turned out to be the same
+    // reason.  Correctness: the earlier stage's bound was already scaled by ITS
+    // kappa, so adding an epsilon here and letting it through this selection's
+    // `eps * kappa` would scale that error by a second kappa - conservative,
+    // since kappa >= 1, but wrong in form.  Cost: an epsilon summed before the
+    // multiply makes the multiplicand data-dependent, which de-constants the
+    // per-recipe multiply that 32 folded constants otherwise collapse to.  The
+    // first attempt did exactly that and ABC technology mapping stalled for
+    // over half an hour on a top that had been synthesising in seconds.
+    //
+    // So this term is ADDED after the multiply, never into it.  It can only make
+    // a composed bound larger, which is the direction that keeps it sound.
+    logic [19:0] prior_bound_ppm;
+    // Set when an earlier stage was admitted under a waiver, so the composed
+    // plan cannot silently upgrade an empirical promise into a proven one.
+    logic prior_bound_waived;
   } va_turbo_request_t;
 
   // How a recipe's arithmetic relates to the native result.
@@ -637,8 +657,14 @@ package g6lc_ai_policy_pkg;
         (r.flatness_valid && r.flatness_q8 != 10'd0 && r.flatness_q8 <= 10'd512)
             ? r.flatness_q8 : 10'd512);
     p.arith_specified = arith.kind != VA_ARITH_NONE;
-    p.arith_kind = arith.kind;
+    // `eps_ppm` stays THIS stage's per-recipe constant, so the `eps * kappa`
+    // multiply below stays constant-folded per recipe.  A carried stage shows up
+    // in `bound_ppm`, added after the multiply.
     p.eps_ppm = arith.eps_ppm;
+    // An exact stage cannot erase a prior one: promote the kind so the accuracy
+    // admission gates below apply to the STACK rather than to this stage alone.
+    p.arith_kind = (r.prior_bound_ppm != 20'd0 && arith.kind == VA_ARITH_EXACT)
+        ? VA_ARITH_REL : arith.kind;
     p.budget_ppm = va_turbo_budget_ppm(r.level);
     p.bound_ppm = va_turbo_bound_ppm(arith, r.kappa_valid ? r.kappa_q8 : 16'd0);
     // Prefer the moving-window bound, but ONLY when the caller's window is the
@@ -653,7 +679,7 @@ package g6lc_ai_policy_pkg;
     // the per-product term, so the reported bound can only grow here - which is
     // the point: the previous report omitted both terms and was therefore
     // optimistic, not conservative.
-    if (arith.kind != VA_ARITH_EXACT) begin
+    if (p.arith_kind != VA_ARITH_EXACT) begin
       p.bound_accum_ppm = p.window_matched
           ? va_turbo_accum_bound_ppm(r.kappa_window_q8, va_turbo_accum_sites(r.k, p.window_log2))
           : 20'd0;
@@ -661,6 +687,10 @@ package g6lc_ai_policy_pkg;
           ? r.abs_floor_ppm : 20'd0;
       p.bound_ppm = va_turbo_total_bound_ppm(p.bound_ppm, p.bound_accum_ppm, p.bound_floor_ppm);
     end
+    // The carried stage, added AFTER the multiply. Zero for a single-stage
+    // request, so this is the identity in the common case.
+    if (r.prior_bound_ppm != 20'd0)
+      p.bound_ppm = va_turbo_total_bound_ppm(p.bound_ppm, r.prior_bound_ppm, 20'd0);
     // Every one of the 32 IDs now has specified arithmetic, so `supported`
     // tracks whether a selection predicate exists rather than whether the
     // namespace slot is defined.
@@ -740,10 +770,15 @@ package g6lc_ai_policy_pkg;
         arith.kind = VA_ARITH_REL;
         arith.eps_ppm = VA_FP32_RNE_PPM;
       end
-      p.arith_kind = arith.kind;
+      // A prior stage's error survives this override too: a lossless narrowing
+      // cannot un-approximate what an earlier stage already approximated.  Same
+      // discipline as above - the epsilon stays constant, the carried bound is
+      // added after the multiply.
       p.eps_ppm = arith.eps_ppm;
+      p.arith_kind = (r.prior_bound_ppm != 20'd0 && arith.kind == VA_ARITH_EXACT)
+          ? VA_ARITH_REL : arith.kind;
       p.bound_ppm = va_turbo_bound_ppm(arith, r.kappa_valid ? r.kappa_q8 : 16'd0);
-      if (arith.kind != VA_ARITH_EXACT) begin
+      if (p.arith_kind != VA_ARITH_EXACT) begin
         p.bound_accum_ppm = p.window_matched
             ? va_turbo_accum_bound_ppm(r.kappa_window_q8,
                                        va_turbo_accum_sites(r.k, p.window_log2))
@@ -753,14 +788,18 @@ package g6lc_ai_policy_pkg;
         p.bound_ppm = va_turbo_total_bound_ppm(p.bound_ppm, p.bound_accum_ppm,
                                                p.bound_floor_ppm);
       end
+      if (r.prior_bound_ppm != 20'd0)
+        p.bound_ppm = va_turbo_total_bound_ppm(p.bound_ppm, r.prior_bound_ppm, 20'd0);
     end
 
     // Accuracy admission, required for every non-exact recipe.  Both gates must
     // pass: the analytic bound derived from the arithmetic, and the caller's
     // independently supplied (measured or proven) bound.  Neither substitutes
     // for the other - the analytic bound cannot see the data, and a measured
-    // bound is only as good as its sample.
-    if (arith.kind != VA_ARITH_EXACT) begin
+    // bound is only as good as its sample.  Uses p.arith_kind, not arith.kind:
+    // a carried prior error promotes an exact stage to REL, and the admission
+    // gates must then apply to it rather than being skipped.
+    if (p.arith_kind != VA_ARITH_EXACT) begin
       // A REL recipe still needs its domain premise, but that premise is now
       // satisfiable two ways: either the operands stay in the normal range, or
       // the caller supplies the absolute floor that covers the subnormal and
@@ -1116,6 +1155,75 @@ package g6lc_ai_policy_pkg;
       POLICY_SPARSE:    return {2'd1, 4'd5, 4'd6, 4'd7, 1'b1, 2'd1};
       default:          return {2'd3, 4'd3, 4'd6, 4'd3, 1'b0, 2'd3};
     endcase
+  endfunction
+
+  // ---------------------------------------------------------------------------
+  // REQUEST-SIDE COMPOSITION
+  //
+  // Fold a finished stage INTO the request, then run `va_turbo_select` again.
+  // The second selection sees a request that already describes the post-stage
+  // machine, so it derives the bound, the window and the budget at the FINAL
+  // format using the arithmetic it already contains - instead of the ~3,387
+  // cells (measured) `va_turbo_compose` spends re-deriving them.
+  //
+  // Three properties come out structurally rather than as checks, which is the
+  // real argument for this form:
+  //
+  //   * NARROWING COLLAPSES.  After the transform `numfmt` IS the target, so a
+  //     second narrowing to the same target fails the strictly-narrower test.
+  //     Idempotence needs no special case.
+  //   * THE WINDOW FOLLOWS THE ENDPOINT.  `select` computes it from `r.numfmt`,
+  //     which the transform has already advanced, so there is nothing to
+  //     recompute and no way to sum per-stage windows by mistake.
+  //   * THE RESIDENCY HAZARD IS MODELLED, NOT GUARDED.  The hardware's residency
+  //     keys include the format, so a format change is a miss; here the
+  //     transform CLEARS `reuse_*_valid` on a format change unless the caller
+  //     states the resident tile is already at the target.  The model then fails
+  //     the same way the silicon does, rather than by a separate rule that could
+  //     drift away from it.
+  //
+  // What must be carried explicitly is the error, since the next selection
+  // cannot see the previous stage's arithmetic: `prior_bound_ppm` accumulates
+  // each finished stage's BOUND and `va_turbo_select` adds it AFTER its own
+  // `eps * kappa` multiply, so the earlier stage is not re-scaled by a second
+  // kappa and this selection's multiply stays constant-folded per recipe.
+  function automatic va_turbo_request_t va_turbo_stack_request(
+      input va_turbo_request_t r,
+      input va_turbo_plan_t stage,
+      // The resident tile is already stored at `stage.target_numfmt`, i.e. the
+      // conversion happened once at load rather than inside the reuse window.
+      input logic resident_at_target
+  );
+    va_turbo_request_t next;
+    next = r;
+    if (!stage.apply) return r;   // an unapplied stage changes nothing
+
+    if (stage.convert) begin
+      next.numfmt = stage.target_numfmt;
+      // The narrowing has happened; a further lossless claim must be re-proven
+      // against the NEW format by the caller, never inherited.
+      next.lossless_proven = 1'b0;
+      next.lossless_narrow_valid = 1'b0;
+      next.lossless_narrow_target = 3'd0;
+      // Zero and flatness proofs were made about the old representation.
+      next.exact_zero_proven = 1'b0;
+      next.flatness_valid = 1'b0;
+      if (stage.target_numfmt != r.numfmt && !resident_at_target) begin
+        next.reuse_a_valid = 1'b0;
+        next.reuse_b_valid = 1'b0;
+      end
+    end
+    // A stage that won residency keeps it for the next selection.
+    next.reuse_a_valid = next.reuse_a_valid || stage.reuse_a;
+    next.reuse_b_valid = next.reuse_b_valid || stage.reuse_b;
+    // Error accumulates; a waiver is sticky so an empirical promise cannot be
+    // upgraded to a proven one by a later exact stage.
+    // Carry the finished stage's BOUND, which already includes its own kappa,
+    // accumulation and floor terms - not its epsilon.
+    next.prior_bound_ppm = va_turbo_total_bound_ppm(r.prior_bound_ppm, stage.bound_ppm, 20'd0);
+    next.prior_bound_waived = r.prior_bound_waived || stage.bound_waived;
+    next.worst_case_waived = r.worst_case_waived || stage.bound_waived;
+    return next;
   endfunction
 
   // ---------------------------------------------------------------------------

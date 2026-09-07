@@ -408,10 +408,33 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   dispatch to stop being an exclusive if/else-if chain. The non-exclusive dispatch
   refactor therefore now has a MEASURED justification (~3.4k cells) rather than a
   stylistic one; plan-side compose is the low-risk step that works today.
-- [ ] Next on this line: request-side composition (non-exclusive class dispatch), an
-  `ai_tensor` `pipeline()` that validates an ordered recipe sequence against these
-  rules, and only then the C-port widening -- which narrowing is what makes worth
-  building, since narrowing pushes the engine from compute-bound to retire-bound.
+- [x] REQUEST-SIDE COMPOSITION BUILT (`va_turbo_stack_request`), and measurement then
+  REVERSED MY OWN RECOMMENDATION TWICE. Both reversals are constraints on any future
+  planner, so both are recorded rather than tidied away.
+  (1) Carrying the earlier stage's EPSILON and summing it into `arith.eps_ppm` before
+  the `eps * kappa` multiply was wrong twice over: the earlier bound had ALREADY been
+  scaled by its own kappa, so a second multiply scales it twice (conservative since
+  kappa >= 1, but wrong in form), AND a summed epsilon makes the multiplicand
+  data-dependent, de-constanting the per-recipe multiply that 32 folded constants
+  otherwise collapse to. ABC stalled >31 MINUTES at 0.1% CPU on a top that had been
+  synthesising in seconds. Fixed by carrying the finished stage's BOUND
+  (`prior_bound_ppm`) and adding it AFTER the multiply: correct, and synthesis back to
+  16s. Costs the selector +339 cells (4,567 -> 4,906).
+  (2) With that fixed the request-side top STILL stalled ABC (>13 min at 1.5% CPU vs
+  31s plan-side), and the reason is structural: `select -> fold -> select` is ONE
+  combinational cone of ~2x the depth, while plan-side keeps two selections PARALLEL
+  and joins at the end. So plan-side composition is the COMBINATIONAL form and
+  request-side stacking belongs BEHIND A REGISTER or in software, where the two
+  selections are separated in time. `prior_bound_ppm` is retained precisely because
+  it is what makes that pipelined/software form possible.
+  Consequence: the non-exclusive dispatch refactor is NOT justified by this
+  measurement after all -- it would only help a form that should not be combinational.
+  The request-side top is kept for simulation and excluded from the synthesis gate,
+  with the reason recorded at the exclusion site so CI cannot silently hang on it.
+- [ ] Next on this line: the C-port widening -- which narrowing is what makes worth
+  building, since narrowing pushes the engine from compute-bound to retire-bound --
+  and a pipelined (registered) stacking path if multi-stage selection is ever wanted
+  in hardware rather than in the host planner.
 - [x] LOSSLESS NARROWING LANDED: the exact traffic lever FP32 never had. Bit-preserving
   FP32 had exactly ONE implemented speedup (recipe 16 residency, 1.279x) because the
   two exact levers that could help it -- lossless repack 1/3/17 and zero-skip 2 --

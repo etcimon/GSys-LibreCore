@@ -739,15 +739,55 @@ Combinational and stateless, and it costs **nothing** until instantiated, being 
 package function.
 
 That number is dominated by **re-deriving the error bound** (`va_turbo_bound_ppm`
-and `va_turbo_accum_bound_ppm` carry 36- and 44-bit multiplies), and it changes
-the recommendation for the next step. Composing *plans* pays for bound arithmetic
-the selector already contains. Composing *requests* -- setting the target format
-and reuse flags on one request and running `va_turbo_select` **once** -- would get
-the bound for free, but it needs the selector's class dispatch to stop being an
-exclusive `if/else-if` chain. So the non-exclusive dispatch refactor now has a
-measured justification (~3.4k cells) rather than a stylistic one. Plan-side
-composition is the low-risk step that works today; request-side is the cheaper
-end state.
+and `va_turbo_accum_bound_ppm` carry 36- and 44-bit multiplies), which suggested
+composing *requests* instead: advance the format and reuse flags on one request,
+select again, and re-use the arithmetic in place. That was built
+(`va_turbo_stack_request`) and it works -- and then measurement reversed the
+recommendation twice. Both reversals are recorded below because each is a
+constraint on any future planner, not a detour.
+
+### Reversal 1: a carried epsilon must not enter the multiply
+
+The first version carried the earlier stage's **epsilon** and summed it into
+`arith.eps_ppm` before the `eps * kappa` multiply. Two things were wrong with
+that, and they turned out to be the same thing:
+
+* **Correctness.** The earlier stage's bound had *already* been scaled by its own
+  kappa, so letting it through a second multiply scales that error by kappa
+  twice. Conservative, since kappa >= 1, but wrong in form.
+* **Cost.** A summed epsilon makes the multiplicand data-dependent, which
+  de-constants the per-recipe multiply that 32 folded constants otherwise
+  collapse to. ABC technology mapping stalled for **over 31 minutes at 0.1% CPU**
+  on a top that had been synthesising in seconds.
+
+The fix is to carry the finished stage's **bound** (`prior_bound_ppm`) and add it
+**after** the multiply. Correct, and synthesis returned to 16s. Supporting it
+costs the selector +339 cells (4,567 -> 4,906).
+
+### Reversal 2: request-side composition is inherently serial
+
+With that fixed, the request-side top still stalled ABC -- **>13 minutes at 1.5%
+CPU against 31s** for the plan-side form. The reason is structural rather than
+arithmetic: `select -> fold -> select` is **one combinational cone of roughly
+twice the depth**, while plan-side composition keeps two selections **parallel**
+and joins them only at the end.
+
+| Form | cells | mapping | shape |
+|---|--:|--:|---|
+| plan-side (`va_turbo_compose`) | 12,975 | 31s | two parallel selections, joined |
+| request-side (`va_turbo_stack_request`) | - | stalls | one serial chain, ~2x depth |
+
+So the conclusion is the opposite of the one the first area number suggested, and
+better founded: **plan-side composition is the combinational form**, and
+request-side stacking belongs **behind a register or in software**, where the two
+selections are separated in time. `prior_bound_ppm` is what makes that pipelined
+or software form possible, and it is retained for exactly that. The request-side
+top is kept for simulation and deliberately excluded from the synthesis gate,
+with the reason recorded at the exclusion site.
+
+The non-exclusive dispatch refactor is therefore **not** justified by this
+measurement after all: it would only help a form that should not be
+combinational.
 
 Note also that the selector itself *shrank* 4,619 -> 4,567 cells in this pass,
 because composition exposed an error in the lossless classification (below).

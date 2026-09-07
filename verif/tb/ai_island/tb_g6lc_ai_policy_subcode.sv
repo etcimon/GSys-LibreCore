@@ -512,6 +512,118 @@ module tb_g6lc_ai_policy_subcode #(
     $display("VA_COMPOSE PASS union=1 conflicts=refused eps=additive window=recomputed fmt_hazard=refused");
   endtask
 
+  // REQUEST-SIDE composition: fold a finished stage into the request and select
+  // again, so the second selection derives the bound/window/budget at the final
+  // format with arithmetic it already contains.  The properties that were
+  // explicit CHECKS in va_turbo_compose should here be structural consequences.
+  task automatic va_stack_request_checks();
+    config_pkg::ai_cfg_t cfg;
+    va_turbo_request_t r, r2;
+    va_turbo_plan_t narrow, stacked, approx;
+    cfg = config_pkg::AiCfgOff;
+    cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
+    cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
+    cfg.PolicySubcodeEn = 1'b1; cfg.IslandFpEn = 1'b1;
+    r = '0;
+    r.enable = 1'b1; r.code = POLICY_BULK;
+    r.m = 16'd16; r.n = 16'd16; r.k = 16'd16;
+    r.numfmt = 3'(config_pkg::AI_FMT_FP32);
+    r.regular_layout = 1'b1; r.ready_jobs = 9'd16;
+    r.free_accumulators = 9'd16; r.bank_groups = 9'd16;
+    r.range_safe = 1'b1; r.scale_valid = 1'b1; r.accuracy_valid = 1'b1;
+    r.relative_domain_valid = 1'b1;
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
+    r.window_valid = 1'b1; r.qualified_mask = '1; r.level = 4'd15;
+
+    // Stage 1: lossless FP32 -> INT8, then fold it into the request.
+    r.lossless_proven = 1'b1; r.lossless_narrow_valid = 1'b1;
+    r.lossless_narrow_target = 3'(config_pkg::AI_FMT_INT);
+    r.reuse_a_valid = 1'b1; r.reuse_b_valid = 1'b1;
+    r.bank = 2'd0; r.subcode = 3'd1;
+    narrow = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (narrow.apply && narrow.convert) else $fatal(1, "VA stack: stage 1 did not apply");
+
+    // THE HAZARD, MODELLED RATHER THAN GUARDED.  The format changed, so the
+    // resident tile would miss -- the transform must CLEAR the reuse evidence,
+    // which is exactly how the hardware key behaves.
+    r2 = va_turbo_stack_request(r, narrow, 1'b0);
+    assert (r2.numfmt == 3'(config_pkg::AI_FMT_INT))
+      else $fatal(1, "VA stack: request numfmt must advance to the target");
+    assert (!r2.reuse_a_valid && !r2.reuse_b_valid)
+      else $fatal(1, "VA stack MUST clear reuse evidence when the format changes");
+    // With the tile already at the target, the evidence survives.
+    r2 = va_turbo_stack_request(r, narrow, 1'b1);
+    assert (r2.reuse_a_valid && r2.reuse_b_valid)
+      else $fatal(1, "VA stack: resident_at_target must preserve reuse evidence");
+
+    // NARROWING COLLAPSES STRUCTURALLY: numfmt is now INT8, so narrowing to
+    // INT8 again fails the strictly-narrower test with no special case.
+    r2.lossless_proven = 1'b1; r2.lossless_narrow_valid = 1'b1;
+    r2.lossless_narrow_target = 3'(config_pkg::AI_FMT_INT);
+    r2.bank = 2'd0; r2.subcode = 3'd1;
+    stacked = va_turbo_select(cfg, r2, 64, 8, 8, '1);
+    assert (!stacked.lossless_narrowed)
+      else $fatal(1, "VA stack: re-narrowing to the same format must not be a narrowing");
+
+    // Stage 2 as residency, selected against the ADVANCED request: the window
+    // and bound now follow INT8 rather than FP32, with nothing recomputed.
+    r2.lossless_narrow_valid = 1'b0;
+    r2.bank = 2'd2; r2.subcode = 3'd0;
+    stacked = va_turbo_select(cfg, r2, 64, 8, 8, '1);
+    assert (stacked.apply && stacked.reuse_a && stacked.reuse_b)
+      else $fatal(1, "VA stack: stage 2 residency did not apply on the folded request");
+    assert (stacked.window_log2 == va_turbo_window_log2(3'(config_pkg::AI_FMT_INT),
+                                                        va_turbo_pow2_log2(64)))
+      else $fatal(1, "VA stack: window must follow the ADVANCED format, got %0d",
+                  stacked.window_log2);
+    // Both stages were exact, so the stack is exact -- prior_eps stayed 0.
+    assert (stacked.eps_ppm == 20'd0 && stacked.arith_kind == VA_ARITH_EXACT)
+      else $fatal(1, "VA stack: two exact stages must stay exact, eps=%0d", stacked.eps_ppm);
+
+    // A CARRIED ERROR CANNOT BE ERASED by a later exact stage.  Fold an
+    // approximate BF16 conversion, then select an exact recipe: the exact stage
+    // must be reported REL with the prior term intact, not EXACT.
+    r.lossless_narrow_valid = 1'b0; r.lossless_proven = 1'b0;
+    r.bank = 2'd0; r.subcode = 3'd5;         // approximate FP32 -> BF16
+    approx = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (approx.apply && approx.eps_ppm == 20'd7828)
+      else $fatal(1, "VA stack: approximate BF16 stage eps=%0d", approx.eps_ppm);
+    r2 = va_turbo_stack_request(r, approx, 1'b1);
+    // The carried term is the finished stage's BOUND (kappa/accum/floor already
+    // applied), not its epsilon -- see the request field comment.
+    assert (r2.prior_bound_ppm == approx.bound_ppm && r2.prior_bound_ppm >= 20'd7828 &&
+            r2.numfmt == 3'(config_pkg::AI_FMT_BF16))
+      else $fatal(1, "VA stack: prior_bound=%0d (stage %0d) numfmt=%0d",
+                  r2.prior_bound_ppm, approx.bound_ppm, r2.numfmt);
+    r2.bank = 2'd2; r2.subcode = 3'd0;       // recipe 16, exact residency
+    stacked = va_turbo_select(cfg, r2, 64, 8, 8, '1);
+    assert (stacked.apply) else $fatal(1, "VA stack: exact stage after an approximate one must apply");
+    // The exact stage's OWN epsilon stays 0 (it is exact), but the stack's BOUND
+    // carries the earlier stage and the kind is promoted so the admission gates
+    // apply to the stack rather than to this stage alone.
+    assert (stacked.eps_ppm == 20'd0 && stacked.arith_kind == VA_ARITH_REL &&
+            stacked.bound_ppm >= approx.bound_ppm)
+      else $fatal(1, "VA stack: an exact stage MUST NOT erase a carried bound, eps=%0d kind=%0d bound=%0d",
+                  stacked.eps_ppm, stacked.arith_kind, stacked.bound_ppm);
+
+    // And the carried error is re-gated against the budget, so stacking cannot
+    // spend a budget one stage at a time.
+    r2.level = 4'd1;                          // 100 ppm
+    r2.worst_case_waived = 1'b0;
+    stacked = va_turbo_select(cfg, r2, 64, 8, 8, '1);
+    assert (!stacked.apply)
+      else $fatal(1, "VA stack MUST re-gate a carried error against the budget");
+
+    // prior_bound_ppm = 0 must be the identity, or every single-stage plan in
+    // the suite would have shifted.
+    r.prior_bound_ppm = 20'd0;
+    r.bank = 2'd0; r.subcode = 3'd5;
+    assert (va_turbo_select(cfg, r, 64, 8, 8, '1) === approx)
+      else $fatal(1, "VA stack: prior_eps=0 must leave selection bit-identical");
+
+    $display("VA_STACK_REQUEST PASS fold=1 collapse=structural hazard=modelled bound=carried budget=regated");
+  endtask
+
   task automatic va_lossless_narrow_checks();
     config_pkg::ai_cfg_t cfg;
     va_turbo_request_t r;
@@ -1037,6 +1149,7 @@ module tb_g6lc_ai_policy_subcode #(
     va_e5m2_target_checks();
     va_lossless_narrow_checks();
     va_compose_checks();
+    va_stack_request_checks();
     cfg = config_pkg::AiCfgOff;
     cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
     cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
@@ -1479,6 +1592,49 @@ module tb_g6lc_ai_va_turbo_plan_on (
   output g6lc_ai_policy_pkg::va_turbo_plan_t plan_o
 );
   tb_g6lc_ai_va_turbo_plan #(.Enabled(1'b1)) i_on (.*);
+endmodule
+
+// REQUEST-SIDE composition, kept for simulation but NOT in the synthesis gate.
+//
+// It does what it was supposed to: the second stage selects against a request the
+// first has already advanced, so the bound/window/budget arithmetic is re-used in
+// place rather than re-derived, and collapse/window/hazard become structural.
+//
+// But it chains `select -> fold -> select` into ONE combinational cone of roughly
+// twice the depth, and ABC technology mapping stalls on it -- measured >13 minutes
+// at 1.5% CPU against 31s for the parallel plan-side form. That is a result about
+// the structure rather than a tool defect: plan-side composition keeps two
+// selections PARALLEL and joins them at the end, while request-side is inherently
+// serial. So request-side stacking belongs behind a register, or in software,
+// where the two selections are separated in time. This module documents the shape
+// and lets simulation check the semantics; `ai-policy-subcode.py` says why it is
+// excluded from synthesis.
+module tb_g6lc_ai_va_turbo_stack_on (
+  input g6lc_ai_policy_pkg::va_turbo_request_t request_i,
+  input logic [31:0] consumer_mask_i,
+  input logic resident_at_target_i,
+  output g6lc_ai_policy_pkg::va_turbo_plan_t plan_o
+);
+  g6lc_ai_policy_pkg::va_turbo_plan_t stage1;
+  g6lc_ai_policy_pkg::va_turbo_request_t folded;
+  function automatic config_pkg::ai_cfg_t va_cfg();
+    config_pkg::ai_cfg_t cfg;
+    cfg = config_pkg::AiCfgOff;
+    cfg.MatrixEn = 1'b1;
+    cfg.Queues = 1;
+    cfg.PolicyCodecEn = 1'b1;
+    cfg.PolicyBenefitEn = 1'b1;
+    cfg.PolicySubcodeEn = 1'b1;
+    cfg.IslandFpEn = 1'b1;
+    cfg.VaTurboEn = 1'b1;
+    return cfg;
+  endfunction
+  assign stage1 = g6lc_ai_policy_pkg::va_turbo_select(va_cfg(), request_i, 64, 8, 8,
+                                                      consumer_mask_i);
+  assign folded = g6lc_ai_policy_pkg::va_turbo_stack_request(request_i, stage1,
+                                                             resident_at_target_i);
+  assign plan_o = g6lc_ai_policy_pkg::va_turbo_select(va_cfg(), folded, 64, 8, 8,
+                                                      consumer_mask_i);
 endmodule
 
 // Synthesis witness for plan COMPOSITION.  `va_turbo_compose` is a package
