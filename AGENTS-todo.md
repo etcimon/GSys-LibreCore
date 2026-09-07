@@ -358,6 +358,40 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   resource, so the levers multiply rather than overlap. Operand read beats halve
   at every engine count and every C element is still checked. One shared-port
   fixture with repeated same-weight jobs; not MAC/s, not silicon, not inference.
+- [x] INTRA-ENGINE LANE GROUPING IS REFUTED, and the blocker is the C side. One
+  element is written on its last reduction step (single `c_w_req`/`c_w_addr`/
+  `c_w_data`), so an engine retires at most ONE element per cycle whatever the
+  lane count; and idle lanes exist exactly when `k_bytes < PeLanes`, which is
+  exactly when a reduction already finishes in one step. The two conditions are
+  mutually exclusive, so there is no configuration with spare lanes AND retire
+  headroom. Measured on current RTL: INT8 k=16 at PE_LANES=16 and 32 is
+  byte-identical (250 baseline / 200 warm / 125 cold), while 8 -> 16 lanes does
+  pay (189 -> 125 per job). Grouping is a C-side widening (more write ports and
+  accumulators), not free use of idle lanes. Profitable directions stay: operand
+  reuse, and larger k where lanes bind (INT8 k=64: 668 -> 284 cycles, 8 -> 32).
+- [x] OPPORTUNISTIC HIT RATE MEASURED, and it is linear. Mixed eight-job streams
+  where misses genuinely change B identity: INT8 1.034x / 1.070x / 1.110x /
+  1.130x at 2, 4, 6, 7 hits of 8, with read beats falling exactly linearly
+  (256 -> 144); FP32 1.028x -> 1.105x. Each hit saves 25 of 189 cycles (13.2%)
+  for INT8 and 73 of 669 (10.9%) for FP32, and measured speedup matches
+  `1/(1-0.132h)` to three decimals. So the headline 1.36x needs BOTH ~100% hits
+  and multi-engine contention; a realistic 50% hit rate on one engine is +7%.
+  The harness asserts the hit count equals the intended count and re-checks C
+  after every job.
+- [x] THE BUILD WAS SERIAL AND `-j` COULD NOT FIX IT -- a parallelism claim needs
+  a CPU percentage next to it, and mine did not have one. Measured 101% CPU on a
+  3,712 s four-engine build while passing `-j 12 --build-jobs 12
+  --verilate-jobs 12` and `MAKEFLAGS=-j12`. Host `make` parallelises fine
+  (36 s -> 3 s synthetic), and `VM_PARALLEL_BUILDS` was already 1. The real cause
+  was MY testbench: with `--timing` every task inlines into the one `initial`
+  block, which Verilator emits as a single `VlCoroutine` that
+  `--output-split-cfuncs` cannot split, and eighteen literal `run_experiment`
+  calls produced a 321,102-line function in one 27.4 MB translation unit. Driving
+  the experiments from a table (identical order and arguments) halved it to
+  145,977 lines: 1-engine build 215 s -> 42 s, 4-engine 3,712 s -> 68 s, 4-engine
+  total 3,740 s -> 100 s (54x on the build). Verilate is 1.5-2.7 s and simulation
+  2-20 s, so the object build was the entire cost. Table-driving the directed
+  cases is the next step and is not needed for correctness.
 - [x] BUILD NO LONGER SELF-LIMITS: the remote compile was pinned at `-j 2`, which
   is what made the four-engine build hit the 1800 s cap and look like a failure.
   It now saturates the remote cores (`--jobs 0` default, 12 used) with a

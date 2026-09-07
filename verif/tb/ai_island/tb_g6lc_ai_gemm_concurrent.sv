@@ -110,6 +110,13 @@ module tb_g6lc_ai_gemm_concurrent
   localparam int unsigned REPEATS = 2;
   localparam logic [31:0] REUSE_MASK = 32'h1 << 16;
 
+  // Opportunistic mixed-hit sequence: fixed length and fixed denominator so
+  // every hit fraction runs exactly the same amount of useful work.
+  localparam int unsigned EXPERIMENTS   = 18;
+  localparam int unsigned JOBS_PER_SEQ  = 8;
+  localparam int unsigned OPP_FRACTIONS = 5;
+  int unsigned opp_cy, opp_r, opp_w, opp_hit_count;
+
   function automatic config_pkg::ai_cfg_t test_cfg();
     config_pkg::ai_cfg_t cfg;
     cfg = config_pkg::AiCfgOff;
@@ -786,6 +793,161 @@ module tb_g6lc_ai_gemm_concurrent
              numfmt, shared_b, pmu_cy_v, pmu_r_v, pmu_w_v, reuse_hit_v);
   endtask
 
+  // The experiment table.  Entries 0..10 are the all-ones set and 11..17 the
+  // signed set, in the original order.
+  function automatic logic [2:0] exp_fmt(input int unsigned e);
+    case (e)
+      0, 1, 11: return 3'd0;
+      2, 3, 12: return 3'd1;
+      4, 5, 15: return 3'd5;
+      6, 7, 17: return 3'd7;
+      8, 13:    return 3'd3;
+      9, 14:    return 3'd4;
+      default:  return 3'd6;
+    endcase
+  endfunction
+
+  function automatic bit exp_shared(input int unsigned e);
+    return e inside {1, 3, 5, 7, 9, 12, 14, 16};
+  endfunction
+
+  function automatic bit exp_signed(input int unsigned e);
+    return e >= 11;
+  endfunction
+
+  function automatic logic [DATA_W-1:0] exp_pattern(input logic [2:0] fmt);
+    case (fmt)
+      3'd1:    return INT4_1;
+      3'd3:    return FP8_E4M3_1;
+      3'd4:    return FP8_E5M2_1;
+      3'd5:    return FP16_1;
+      3'd6:    return BF16_1;
+      3'd7:    return FP32_1;
+      default: return ONES8;
+    endcase
+  endfunction
+
+  function automatic int unsigned exp_bpe(input logic [2:0] fmt);
+    return (element_bits(fmt) + 7) / 8;
+  endfunction
+
+  function automatic int unsigned opp_fraction(input int unsigned idx);
+    case (idx)
+      0: return 0;
+      1: return 2;
+      2: return 4;
+      3: return 6;
+      default: return 7;
+    endcase
+  endfunction
+
+  // Which jobs of the sequence reuse the resident B.  Job 0 can never hit --
+  // nothing is resident at sequence start -- so the `hits` hits are spread
+  // evenly over jobs 1..JOBS_PER_SEQ-1 by the integer-slope test below, which
+  // steps exactly `hits` times across that range.
+  function automatic bit opp_want_hit(input int unsigned job, hits);
+    if (job == 0) return 1'b0;
+    return ((job * hits) / (JOBS_PER_SEQ - 1)) >
+           (((job - 1) * hits) / (JOBS_PER_SEQ - 1));
+  endfunction
+
+  // One opportunistic job stream on engine 0: JOBS_PER_SEQ jobs, `hits` of
+  // which reuse the resident B while the rest deliberately change B identity
+  // (bump b_version + epoch, restage through store_engine) so residency must
+  // miss.  The feature stays fully enabled throughout -- this measures a mixed
+  // weight stream, not a disabled recipe.  b_version feeds b_value, so every
+  // restage moves the golden C as well, which check_engine re-verifies.
+  task automatic run_opportunistic(
+      input logic [2:0]        numfmt,
+      input logic [DATA_W-1:0] pattern,
+      input int unsigned       bpe,
+      input logic              is_packed,
+      input int unsigned       hits
+  );
+    int unsigned cy, words_per_row, expected_r, expected_w;
+    bit want_hit;
+    assert (hits < JOBS_PER_SEQ)
+      else $fatal(1, "opportunistic hits=%0d leaves no cold job", hits);
+    configure_engine(0, numfmt, 1'b0);
+    invalidate_all();
+    opp_cy = 0;
+    opp_r = 0;
+    opp_w = 0;
+    opp_hit_count = 0;
+    words_per_row = (JOB_K * element_bits(numfmt) + 63) / 64;
+    expected_w = JOB_M * JOB_N / 2;
+    for (int unsigned j = 0; j < JOBS_PER_SEQ; j++) begin
+      want_hit = opp_want_hit(j, hits) && VA_TURBO;
+      if (!opp_want_hit(j, hits)) begin
+        @(negedge clk);
+        b_version_v[0]++;
+        epoch_v[0]++;
+        store_engine(0, pattern, bpe, is_packed, 1'b0);
+      end
+      poison_engine(0);
+      run_one(0, want_hit, 1'b0, cy);
+      check_engine(0);
+      expected_r = (JOB_M + (want_hit ? 0 : JOB_N)) * words_per_row;
+      assert (pmu_r_v[0] == expected_r && pmu_w_v[0] == expected_w)
+        else $fatal(1, "opportunistic fmt=%0d job%0d traffic r=%0d/%0d w=%0d/%0d",
+                    numfmt, j, pmu_r_v[0], expected_r, pmu_w_v[0], expected_w);
+      opp_cy += cy;
+      opp_r += pmu_r_v[0];
+      opp_w += pmu_w_v[0];
+      opp_hit_count += reuse_hit_v[0] ? 32'd1 : 32'd0;
+    end
+    assert (opp_hit_count == (VA_TURBO ? hits : 0))
+      else $fatal(1, "opportunistic fmt=%0d hits=%0d counted=%0d", numfmt, hits,
+                  opp_hit_count);
+  endtask
+
+  // Hit-fraction sweep for one format.  The all-miss sequence is the speedup
+  // reference; it must be the first fraction so the reference exists.
+  task automatic run_opportunistic_sweep(
+      input logic [2:0]        numfmt,
+      input logic [DATA_W-1:0] pattern,
+      input int unsigned       bpe,
+      input logic              is_packed
+  );
+    int unsigned ref_cy, prev_cy, prev_r, prev_hits, hits;
+    @(negedge clk);
+    // A forced miss only moves the golden when the operands depend on
+    // b_version, so the mixed stream is only honest with signed data.
+    signed_data = 1'b1;
+    ref_cy = 0;
+    prev_cy = 0;
+    prev_r = 0;
+    prev_hits = 0;
+    for (int unsigned f = 0; f < OPP_FRACTIONS; f++) begin
+      hits = opp_fraction(f);
+      run_opportunistic(numfmt, pattern, bpe, is_packed, hits);
+      if (f == 0) begin
+        assert (hits == 0) else $fatal(1, "opportunistic sweep needs an all-miss reference");
+        ref_cy = opp_cy;
+      end else begin
+        assert (hits > prev_hits) else $fatal(1, "opportunistic fractions must ascend");
+        assert (opp_cy <= prev_cy)
+          else $fatal(1, "opportunistic fmt=%0d hits=%0d cycles=%0d above hits=%0d cycles=%0d",
+                      numfmt, hits, opp_cy, prev_hits, prev_cy);
+        if (VA_TURBO)
+          assert (opp_r < prev_r)
+            else $fatal(1, "opportunistic fmt=%0d hits=%0d r=%0d not below hits=%0d r=%0d",
+                        numfmt, hits, opp_r, prev_hits, prev_r);
+        else
+          assert (opp_cy == ref_cy && opp_r == prev_r)
+            else $fatal(1, "opportunistic disabled fmt=%0d hits=%0d cycles=%0d/%0d r=%0d/%0d",
+                        numfmt, hits, opp_cy, ref_cy, opp_r, prev_r);
+      end
+      $display("OPP fmt=%0d hits=%0d of=%0d enabled=%0d cycles=%0d r=%0d w=%0d hit_count=%0d expected_hits=%0d speedup_x1000=%0d",
+               numfmt, hits, JOBS_PER_SEQ, VA_TURBO, opp_cy, opp_r, opp_w,
+               opp_hit_count, VA_TURBO ? hits : 0,
+               opp_cy != 0 ? ref_cy * 1000 / opp_cy : 0);
+      prev_cy = opp_cy;
+      prev_r = opp_r;
+      prev_hits = hits;
+    end
+  endtask
+
   task automatic directed_job(input string name, input bit want_hit, input bit stage);
     int unsigned cy, expected_r, expected_w;
     bit hit;
@@ -1001,26 +1163,24 @@ module tb_g6lc_ai_gemm_concurrent
 
     // Independent regions, then shared-B, across the format set.  INT4 is
     // packed; the float formats all expect FP32 k.0 on the golden path.
-    run_experiment(3'd0, ONES8,      1, 1'b0, 1'b0);  // INT8 independent
-    run_experiment(3'd0, ONES8,      1, 1'b0, 1'b1);  // INT8 shared B
-    run_experiment(3'd1, INT4_1,     1, 1'b1, 1'b0);  // INT4 independent
-    run_experiment(3'd1, INT4_1,     1, 1'b1, 1'b1);  // INT4 shared B
-    run_experiment(3'd5, FP16_1,     2, 1'b0, 1'b0);  // FP16 independent
-    run_experiment(3'd5, FP16_1,     2, 1'b0, 1'b1);  // FP16 shared B
-    run_experiment(3'd7, FP32_1,     4, 1'b0, 1'b0);  // FP32 independent
-    run_experiment(3'd7, FP32_1,     4, 1'b0, 1'b1);  // FP32 shared B
-    run_experiment(3'd3, FP8_E4M3_1, 1, 1'b0, 1'b0);  // FP8 E4M3 independent
-    run_experiment(3'd4, FP8_E5M2_1, 1, 1'b0, 1'b1);  // FP8 E5M2 shared B
-    run_experiment(3'd6, BF16_1,     2, 1'b0, 1'b0);  // BF16 independent
+    //
+    // Driven from a table rather than as literal calls, and NOT for tidiness:
+    // with --timing every task inlines into this one `initial`, which Verilator
+    // emits as a single VlCoroutine that no output-split can break up.  As
+    // literal calls the coroutine reached 321,102 lines in one 27.4 MB
+    // translation unit, so the object build was one serial g++ no matter what
+    // -j said.  A runtime-indexed loop emits the body once.  The order and
+    // arguments below are exactly the previous call sequence.
+    for (int unsigned e = 0; e < EXPERIMENTS; e++) begin
+      signed_data = exp_signed(e);
+      run_experiment(exp_fmt(e), exp_pattern(exp_fmt(e)), exp_bpe(exp_fmt(e)),
+                     exp_fmt(e) == 3'd1, exp_shared(e));
+    end
 
-    signed_data = 1'b1;
-    run_experiment(3'd0, ONES8,      1, 1'b0, 1'b0);
-    run_experiment(3'd1, INT4_1,     1, 1'b1, 1'b1);
-    run_experiment(3'd3, FP8_E4M3_1, 1, 1'b0, 1'b0);
-    run_experiment(3'd4, FP8_E5M2_1, 1, 1'b0, 1'b1);
-    run_experiment(3'd5, FP16_1,     2, 1'b0, 1'b0);
-    run_experiment(3'd6, BF16_1,     2, 1'b0, 1'b1);
-    run_experiment(3'd7, FP32_1,     4, 1'b0, 1'b0);
+    // Mixed job streams: throughput as a function of hit rate, not just the
+    // 0% and 100% corners the phase experiments above measure.
+    run_opportunistic_sweep(3'd0, ONES8,  1, 1'b0);
+    run_opportunistic_sweep(3'd7, FP32_1, 4, 1'b0);
     run_directed();
 
     if (straddle) begin

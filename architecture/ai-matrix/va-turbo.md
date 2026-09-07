@@ -536,15 +536,101 @@ class-0 SRAM model; it is not MAC/s, not silicon, and not model inference. The
 first load into each engine is still paid, and the reported
 `baseline_including_prime` keeps that cost visible.
 
+### Opportunistic hits: throughput is linear in hit rate
+
+Real job streams are not all-same-weight, so the 0% and 100% corners above are
+not the operating point. A mixed sequence of eight jobs on one engine, where the
+misses genuinely change B identity (version + epoch bumped and B restaged, so the
+golden moves too), gives:
+
+| Hit rate | INT8 speedup | INT8 read beats | FP32 speedup | FP32 read beats |
+|---|--:|--:|--:|--:|
+| 0/8 | 1.000x | 256 | 1.000x | 1024 |
+| 2/8 | 1.034x | 224 | 1.028x | 896 |
+| 4/8 | 1.070x | 192 | 1.057x | 768 |
+| 6/8 | 1.110x | 160 | 1.089x | 640 |
+| 7/8 | 1.130x | 144 | 1.105x | 576 |
+
+Each hit saves exactly 25 cycles of a 189-cycle INT8 job (13.2%) and 73 of a
+669-cycle FP32 job (10.9%), and read beats fall exactly linearly. Measured
+speedup matches `1 / (1 - 0.132 h)` to three decimals at every point, so the
+mechanism is understood rather than merely observed. The harness asserts the hit
+count equals the intended count -- a hit that did not happen, or one that
+happened unasked, is a bug and not a speedup -- and re-checks C after every job.
+
+**So the headline 1.36x needs both conditions: a ~100% hit rate and multi-engine
+contention.** At a realistic 50% hit rate on one engine the gain is 7%.
+
+### Intra-engine lane groups: refuted, with the reason
+
+The plan was to spend idle lanes on concurrent output groups. That cannot work in
+this datapath, and the blocker is not the lanes:
+
+- one output element is written on its last reduction step
+  (`sum_last_q` drives a single `c_w_req`/`c_w_addr`/`c_w_data`), so the engine
+  retires **at most one element per cycle** whatever the lane count;
+- idle lanes exist exactly when `k_bytes < PeLanes`, which is exactly when a
+  reduction already completes in one step, i.e. when the engine is already at
+  that one-element-per-cycle ceiling.
+
+The two conditions are mutually exclusive: every configuration with spare lanes
+is already retire-bound, and every configuration with retire headroom
+(`k_bytes > PeLanes`) has no spare lanes. Measured confirmation on the current
+RTL: INT8 `k=16` at `PE_LANES=16` and `PE_LANES=32` are **byte-identical** (250
+baseline, 200 warm, 125 cold), so the second sixteen lanes buy exactly nothing,
+while 8 -> 16 lanes does pay (189 -> 125 per job).
+
+Grouping is therefore a C-side widening -- more write ports and accumulators --
+not a free use of idle lanes, and it should only be revisited if a workload shows
+retire saturation with lanes simultaneously idle, which this rule forbids. The
+profitable directions remain operand reuse (above) and larger `k` tiles, where
+lanes genuinely bind (measured INT8 `k=64`: 668 -> 284 cycles from 8 -> 32 lanes).
+
 Reproduce with `python -B verif/regress/ai-gemm-reuse.py --engines 4 --channels 1
---va 1 --build-timeout 7200 --sim-timeout 1800`. Compilation saturates the remote
-cores (`--jobs 0`, the default) and uses a persistent ccache outside the run
-directory, so a four-engine build is repeatable rather than a timeout. The runner uses the remote proxy, uploads a source-hashed
+--va 1`. The runner verilates and builds as separate measured steps and records
+`/usr/bin/time` CPU percentages, because "it passes `-j 12`" is not evidence that
+anything ran in parallel: it did not. See §12. The runner uses the remote proxy, uploads a source-hashed
 snapshot, enables assertions and preserves build/simulation logs and status.
 Reports pair forced reload and reuse on identical physical resources, separate
 cold priming from warm operation, check all C elements and poison outputs before
 execution. Signed native-format fixtures, metadata changes, permission gates,
 error recovery and alias cases accompany the throughput samples.
+
+## 12. The build was serial, and `-j` could not fix it
+
+The four-engine run first looked like a design problem: a 3,712 s build that hit
+the timeout. Measurement showed it was **101% CPU** -- one core -- while the
+command carried `-j 12`, `--build-jobs 12`, `--verilate-jobs 12` and
+`MAKEFLAGS=-j12`. Three findings, in order:
+
+1. `make` on the host parallelises correctly (36 s -> 3 s on a synthetic
+   twelve-target check), so the tool was not at fault.
+2. `verilated.mk` concatenates every generated `.cpp` into one `__ALL.cpp` unless
+   `VM_PARALLEL_BUILDS=1`; its own comment calls that mode "not parallelizable".
+   Verilator already set it here, so this was not the cause either -- but the
+   variable is now passed explicitly rather than assumed.
+3. The actual cause was **in the testbench**. With `--timing`, every task inlines
+   into the single `initial` block, which Verilator emits as one `VlCoroutine`;
+   coroutines cannot be split by `--output-split-cfuncs`. Eighteen literal
+   `run_experiment` calls produced a **321,102-line function in one 27.4 MB
+   translation unit**, so the build was one serial `g++` by construction.
+
+Driving those experiments from a table -- same order, same arguments -- emits the
+body once and halves the coroutine to 145,977 lines. Result:
+
+| | before | after |
+|---|--:|--:|
+| 1-engine build | 215 s @ 104% | **42 s @ 148%** |
+| 4-engine build | 3,712 s @ 101% | **68 s @ 168%** |
+| 4-engine total | 3,740 s | **100 s** |
+
+Verilation is 1.5-2.7 s and simulation 2-20 s, so the object build was and
+remains the whole cost. CPU is 148-168% rather than ~1200% because one
+translation unit still dominates; table-driving the directed cases the same way
+is the next available step and is not required for correctness.
+
+The lesson is the measurement, not the flags: a parallelism claim needs a CPU
+percentage next to it.
 
 ## 11. Not implemented
 

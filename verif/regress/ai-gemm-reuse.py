@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import signal
 import sys
+import time
 
 sys.dont_write_bytecode = True
 BASIS_PATH = "verif/regress/ai-gemm-codec-basis.py"
@@ -69,8 +70,11 @@ def host_jobs(requested):
         return max(1, os.cpu_count() or 1)
 
 
-def build_env(cache_dir):
+def build_env(cache_dir, jobs):
     env = dict(os.environ)
+    # Verilator hands the object build to make; MAKEFLAGS keeps that sub-make
+    # parallel even if a future flag rename stops --build-jobs reaching it.
+    env["MAKEFLAGS"] = "-j%d" % jobs
     objcache = basis.shutil.which("ccache")
     if objcache is None:
         return env, None
@@ -80,8 +84,46 @@ def build_env(cache_dir):
     return env, objcache
 
 
+def measured_command(command, out_name):
+    """Wrap in /usr/bin/time so CPU utilisation is recorded, not assumed."""
+    timer = "/usr/bin/time"
+    if not Path(timer).is_file():
+        return list(command), None
+    stats = out_name + ".time"
+    return [timer, "-v", "-o", stats, *command], stats
+
+
+def cpu_percent(path):
+    if path is None or not Path(path).is_file():
+        return None
+    for line in Path(path).read_text(errors="replace").splitlines():
+        if "Percent of CPU this job got" in line:
+            return line.split(":")[-1].strip()
+    return None
+
+
+def make_command(mdir, args):
+    # VM_PARALLEL_BUILDS=1 is load-bearing: without it verilated.mk concatenates
+    # every generated .cpp into one __ALL.cpp and compiles that single object,
+    # which its own comment calls "not parallelizable". Measured 110% CPU before
+    # this variable and it is what -j alone could never fix.
+    return ["make", "-C", str(mdir), "-f", "V" + TOP + ".mk",
+            "-j", str(host_jobs(args.jobs)), "VM_PARALLEL_BUILDS=1", TOP]
+
+
 def build_command(tool, root, mdir, args):
-    command = [str(tool), "--binary", "--timing", "--assert", "-j", str(host_jobs(args.jobs)),
+    jobs = host_jobs(args.jobs)
+    # Verilate only: `--binary` would also run the object build, and measurement
+    # showed that build stays serial (101% CPU over 54 compiles) whatever
+    # -j/--build-jobs/MAKEFLAGS say, so the make step is issued separately below.
+    command = [str(tool), "--cc", "--main", "--exe", "--timing", "--assert",
+               "-j", str(jobs), "--verilate-jobs", str(jobs),
+               # Measured: without these the top module lands in ONE 27.4 MB
+               # translation unit, 16x the next largest, and a single g++ on it
+               # is the whole build. --output-split alone cannot break it up
+               # because it is one huge C function, so the cfuncs split is the
+               # flag that actually lets -j do anything.
+               "--output-split", "20000", "--output-split-cfuncs", "20000",
                "-Wno-fatal", "-Wno-TIMESCALEMOD", "-Wno-UNUSED", "-Wno-UNOPTFLAT",
                "-Wno-WIDTHTRUNC", "-Wno-WIDTHEXPAND", "-Wno-PINCONNECTEMPTY", "-Wno-CASEINCOMPLETE"]
     include_dirs = [Path(header).parent.parent for header, _ in INCLUDES]
@@ -157,7 +199,8 @@ def validate_output(text, args):
 def run_logged(command, name, cwd, out, timeout, report, env=None):
     command = list(map(str, command))
     entry = {"name": name, "command": command, "log": name + ".log", "timeout_seconds": timeout,
-             "returncode": None, "timed_out": False}
+             "returncode": None, "timed_out": False, "duration_seconds": None}
+    started = time.monotonic()
     report["commands"].append(entry)
     process = None
     with (out / entry["log"]).open("wb") as log:
@@ -180,6 +223,7 @@ def run_logged(command, name, cwd, out, timeout, report, env=None):
             log.write((str(error) + "\n").encode("utf-8", errors="replace"))
         finally:
             log.flush()
+    entry["duration_seconds"] = round(time.monotonic() - started, 3)
     return entry
 
 
@@ -247,16 +291,24 @@ def remote(args):
         cache_dir = Path(os.environ.get("AI_GEMM_CONC_CCACHE_DIR",
                                         str(Path(os.environ["TH_RUN_DIR"]).parent / "ccache-gemm-reuse")))
         cache_dir.mkdir(parents=True, exist_ok=True)
-        env, objcache = build_env(cache_dir)
+        env, objcache = build_env(cache_dir, host_jobs(args.jobs))
         report["build_jobs"] = host_jobs(args.jobs)
+        report["host_cpus"] = host_jobs(0)
         report["objcache"] = objcache
         report["ccache_dir"] = str(cache_dir) if objcache else None
-        build = run_logged(build_command(tool, snapshot, mdir, args), "build", snapshot, out,
-                           args.build_timeout, report, env=env)
+        command, stats = measured_command(build_command(tool, snapshot, mdir, args), str(out / "verilate"))
+        verilate = run_logged(command, "verilate", snapshot, out, args.build_timeout, report, env=env)
+        report["verilate_cpu_percent"] = cpu_percent(stats)
+        check_command(verilate)
+        command, stats = measured_command(make_command(mdir, args), str(out / "build"))
+        build = run_logged(command, "build", snapshot, out, args.build_timeout, report, env=env)
+        report["build_cpu_percent"] = cpu_percent(stats)
         if objcache:
             run_logged([objcache, "--show-stats"], "ccache-stats", snapshot, out, 60, report, env=env)
         check_command(build)
-        simulation = run_logged([mdir / TOP], "simulation", snapshot, out, args.sim_timeout, report)
+        sim_command, sim_stats = measured_command([mdir / TOP], str(out / "simulation"))
+        simulation = run_logged(sim_command, "simulation", snapshot, out, args.sim_timeout, report)
+        report["simulation_cpu_percent"] = cpu_percent(sim_stats)
         text = (out / simulation["log"]).read_text(encoding="utf-8", errors="replace")
         report.update(validate_output(text, args))
         check_command(simulation)
@@ -269,7 +321,7 @@ def remote(args):
     finally:
         write_json(out / "manifest.json", {"files": list(MANIFEST), "sha256": report["sha256"]})
         write_json(out / "results.json", report)
-        if work is not None:
+        if work is not None and not os.environ.get("AI_GEMM_CONC_KEEP"):
             basis.shutil.rmtree(work, ignore_errors=True)
     print("GEMM_REUSE %s results=%s" % (report["status"], out / "results.json"), flush=True)
     return 0 if report["status"] == "PASS" else 1
@@ -301,6 +353,8 @@ def dispatch(args):
     for name, value in settings.items():
         command += ["--env", "AI_GEMM_CONC_%s=%s" % (name.upper(), value)]
     command += ["--env", "PYTHONDONTWRITEBYTECODE=1"]
+    if os.environ.get("AI_GEMM_CONC_KEEP"):
+        command += ["--env", "AI_GEMM_CONC_KEEP=1"]
     for path in files:
         command += ["--data", proxy_path(path)]
     print("PROXY_ONLY " + basis.shlex.join(command), flush=True)
@@ -351,9 +405,21 @@ def self_test():
     explicit = build_command("verilator", Path("s"), Path("o"), args)
     assert explicit[explicit.index("-j") + 1] == "3"
     args.jobs = 0
-    cached, objcache = build_env(Path("cache"))
+    cached, objcache = build_env(Path("cache"), 7)
+    assert cached["MAKEFLAGS"] == "-j7"
     assert (objcache is None) == (cached.get("OBJCACHE") is None)
     assert objcache is None or (cached["OBJCACHE"] == "ccache" and cached["CCACHE_DIR"] == "cache")
+    assert command[command.index("--verilate-jobs") + 1] == str(host_jobs(0))
+    assert "--binary" not in command and "--cc" in command and "--main" in command
+    assert command[command.index("--output-split") + 1] == "20000"
+    assert command[command.index("--output-split-cfuncs") + 1] == "20000"
+    made = make_command(Path("obj_dir"), args)
+    assert made[made.index("-j") + 1] == str(host_jobs(0)) and made[-1] == TOP
+    assert "VM_PARALLEL_BUILDS=1" in made
+    wrapped, stats = measured_command(["x"], "out/build")
+    assert (stats is None) == (wrapped == ["x"])
+    assert stats is None or wrapped[:2] == ["/usr/bin/time", "-v"]
+    assert cpu_percent(None) is None
     for name, parameter, choices, _ in KNOBS:
         for value in choices:
             setattr(args, name, value)
