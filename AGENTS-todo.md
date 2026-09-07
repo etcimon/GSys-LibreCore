@@ -307,7 +307,28 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   100%, level 0 still off. `error_bound_q4` is a ladder index, rounded up. The
   suite now asserts the ladder is strictly increasing and that every declared eps
   is expressible by some level.
-- [ ] REMAINING CONSERVATISM IS THE FULL KIND, and it is quantified. Measured gap
+- [x] TWO OF MY OWN FULL CONSTANTS WERE UNSOUND: 7,887 and 147,908 ppm were
+  understated against the exact 7,889.52 and 147,959.18, i.e. bounds that could be
+  exceeded. Corrected, and every division in the quantisation bound now rounds UP
+  (a bound rounded down is not a bound); the suite asserts the rounding direction,
+  not just the values.
+- [x] FLATNESS TIGHTENING LANDED AND MEASURED. The FULL reference no longer
+  hardcodes "every element at the maximum": it takes fa = sum|a|/(K*max|a|) so the
+  bound is K*A*B*[(fa+fb)/(2L) + 1/(4L^2)], with an absent or out-of-range value
+  falling back to the worst case fa+fb=2 rather than anything optimistic. Measured
+  fa+fb = 0.920 of 2.0, tightening FULL kinds 2.17x: INT8 675,768 -> 310,931 ppm,
+  slack 36.5x -> 16.8x, required level 14 -> 13.
+- [x] DESIGN QUESTION SETTLED: real but insufficient. Level 13 still authorises
+  41% error for a recipe whose real error is 1.85%, because the residual
+  conservatism is error CANCELLATION across the reduction, which a worst-case
+  bound may not assume away. A worst-case full-scale guarantee and a usable INT8
+  path are incompatible on real data, so the trade is now EXPLICIT and AUDITABLE
+  rather than resolved by loosening the bound: `worst_case_waived` waives the
+  analytic gate only, the measured bound still applies, and the plan reports
+  `bound_waived` so an empirical promise never looks like a proven one. Tested
+  that a waiver cannot bypass the measured bound, accuracy evidence or kappa, and
+  is never reported for an exact recipe.
+- [ ] SUPERSEDED, kept for the trail: REMAINING CONSERVATISM IS THE FULL KIND. Measured gap
   between the level the analytic bound demands and the level a tight bound would
   demand: FP16 7 vs 3 (9.5x), BF16 10 vs 7 (6.2x), mantissa-8 9 vs 7 (3.9x),
   FP8 E4M3 14 vs 11 (8.2x), Mitchell 15 vs 12 (6.0x), INT4 15 vs 13 (3.3x), and

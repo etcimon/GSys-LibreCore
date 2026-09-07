@@ -205,7 +205,10 @@ def kappa_fullscale(a, b):
 ANALYTIC_EPS_PPM = {
     "FP16": (977, "rel"), "BF16": (7828, "rel"),
     "FP8_E4M3": (128906, "rel"), "FP8_E5M2": (265625, "rel"),
-    "INT8": (7887, "full"), "INT4": (147908, "full"),
+    # Corrected: the earlier 7,887 / 147,908 were understated against the exact
+    # 7,889.52 / 147,959.18 and were therefore unsound. These are the values the
+    # RTL's two-step ceiling actually produces at worst-case flatness.
+    "INT8": (7892, "full"), "INT4": (147961, "full"),
     "mantissa_truncated:10": (977, "rel"), "mantissa_truncated:8": (3910, "rel"),
     "mantissa_truncated:6": (15686, "rel"), "mantissa_truncated:4": (63477, "rel"),
     "mantissa_truncated:2": (265625, "rel"),
@@ -242,6 +245,15 @@ def validate_bounds(report, tile_set):
                                    if "mantissa_bits_kept" in row else "")
         observed[label] = row["rel_error_max"]
 
+    # Operand flatness fa = sum|a| / (K*max|a|), which the RTL uses to tighten
+    # the FULL-kind bound. The worst case it falls back to is fa + fb = 2.
+    def flatness(a, b):
+        k = a.shape[1]
+        fa = a.abs().sum(dim=1).max().item() / (k * a.abs().max().item()) if a.abs().max() > 0 else 1.0
+        fb = b.abs().sum(dim=0).max().item() / (k * b.abs().max().item()) if b.abs().max() > 0 else 1.0
+        return fa + fb
+
+    flat_worst = max(flatness(a, b) for _, a, b in tile_set)
     rel_stats = [kappa_relative(a, b) for _, a, b in tile_set]
     full_stats = [kappa_fullscale(a, b) for _, a, b in tile_set]
     kappa_rel_element = max(s[0] for s in rel_stats)
@@ -253,11 +265,14 @@ def validate_bounds(report, tile_set):
             continue
         kappa = kappa_rel_frob if kind == "rel" else kappa_full_frob
         strict = kappa_rel_element if kind == "rel" else kappa_full_element
-        bound_ppm = min(1_000_000.0, eps_ppm * kappa)
+        # FULL kinds scale with measured flatness; REL kinds do not.
+        eps_used = eps_ppm * (flat_worst / 2.0) if kind == "full" else eps_ppm
+        bound_ppm = min(1_000_000.0, eps_used * kappa)
         strict_ppm = min(1_000_000.0, eps_ppm * strict)
         observed_ppm = observed[label] * 1e6
         rows.append({
             "candidate": label, "bound_kind": kind, "eps_ppm": eps_ppm,
+            "eps_after_flatness_ppm": eps_used,
             "kappa_frobenius": kappa, "kappa_element_worst": strict,
             "matched_bound_ppm": bound_ppm,
             "element_worst_bound_ppm": strict_ppm,
@@ -272,6 +287,7 @@ def validate_bounds(report, tile_set):
             "level_needed_observed": level_for(observed_ppm),
         })
     return {
+        "flatness_worst": flat_worst,
         "kappa_relative_element_worst": kappa_rel_element,
         "kappa_fullscale_element_worst": kappa_full_element,
         "kappa_relative_frobenius": kappa_rel_frob,
@@ -476,6 +492,8 @@ def main(argv=None):
           % (bounds["kappa_relative_element_worst"], bounds["kappa_fullscale_element_worst"]))
     print("  kappa Frobenius-matched: relative %.3f, full-scale %.3f  -> comparable to the metric"
           % (bounds["kappa_relative_frobenius"], bounds["kappa_fullscale_frobenius"]))
+    print("  operand flatness fa+fb: %.3f of a worst case 2.0  -> tightens FULL kinds %.2fx"
+          % (bounds["flatness_worst"], 2.0 / bounds["flatness_worst"]))
     print("  %-24s %-6s %-10s %-12s %-12s %-6s %-7s %s"
           % ("candidate", "kind", "eps ppm", "bound ppm", "observed", "slack",
              "lvl req", "lvl if tight"))

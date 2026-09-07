@@ -139,6 +139,18 @@ package g6lc_ai_policy_pkg;
     // proven value instead of the selector assuming one.
     logic kappa_valid;
     logic [15:0] kappa_q8;
+    // Operand flatness (fa + fb) in Q8 for the FULL kinds, where
+    // fa = sum|a| / (K*max|a|) in (0,1].  Absent or out-of-range values fall
+    // back to the untightened worst case of 2.0, never to something looser.
+    logic flatness_valid;
+    logic [9:0] flatness_q8;
+    // Explicit, auditable waiver of the ANALYTIC worst-case gate.  A worst-case
+    // full-scale bound and a usable INT8 path are mutually exclusive on real
+    // data, so rather than silently picking one, the approver may waive the
+    // analytic gate while the caller's measured bound still applies.  The plan
+    // reports that it was admitted under a waiver so observability cannot lose
+    // the distinction between a proven and an empirical promise.
+    logic worst_case_waived;
     // Per-recipe arithmetic parameter; its meaning is recipe specific and
     // documented in va_turbo_arith (retained mantissa bits, block exponent
     // spread, refinement steps, or a conversion target selector).
@@ -161,6 +173,7 @@ package g6lc_ai_policy_pkg;
     logic [19:0] eps_ppm;   // parts per million, 0 for exact
     logic needs_param;      // requires approx_param to be valid
     logic narrows_storage;  // changes k_bytes, so it can also buy grouping
+    logic [7:0] quant_levels; // FULL kinds only: 127 for INT8, 7 for INT4
   } va_turbo_arith_t;
 
   typedef struct packed {
@@ -184,8 +197,41 @@ package g6lc_ai_policy_pkg;
     logic [19:0] eps_ppm;
     logic [19:0] bound_ppm;
     logic [19:0] budget_ppm;
+    // Set when the analytic worst-case gate was waived and only the caller's
+    // measured bound applied.  An applied plan with this bit set carries an
+    // EMPIRICAL promise, not a proven one.
+    logic bound_waived;
     logic [18:0] row_bytes;
   } va_turbo_plan_t;
+
+  // Full-scale quantisation bound for a symmetric integer format with `levels`
+  // positive levels (127 for INT8, 7 for INT4).  Per operand |d| <= A/(2L), so
+  //
+  //   |sum(a'b' - ab)| <= K*A*B * [ (fa + fb)/(2L) + 1/(4L^2) ]
+  //
+  // where fa = sum|a| / (K*max|a|) in (0,1] is the operand's FLATNESS.  The
+  // earlier form hardcoded fa = fb = 1, i.e. it assumed every element sits at
+  // the maximum; supplying the real flatness tightens the bound by up to 2x.
+  // `flat_q8` is (fa + fb) in Q8, so 512 is the untightened worst case and it is
+  // the value used whenever the caller cannot prove better.
+  //
+  // Division is rounded UP: a bound rounded down is not a bound.  The previous
+  // literals (7,887 and 147,908 ppm) were understated against the exact values
+  // 7,889.52 and 147,959.18, so they were unsound by 3 and 51 ppm and are
+  // corrected here rather than preserved.
+  function automatic logic [19:0] va_turbo_quant_eps_ppm(
+      input logic [7:0] levels, input logic [9:0] flat_q8
+  );
+    logic [31:0] per_unit, constant_term, scaled;
+    case (levels)
+      8'd127:  begin per_unit = 32'd3938;  constant_term = 32'd16;   end  // ceil(1e6/254), ceil(1e6/64516)
+      8'd7:    begin per_unit = 32'd71429; constant_term = 32'd5103; end  // ceil(1e6/14),  ceil(1e6/196)
+      default: return 20'd1000000;
+    endcase
+    scaled = ((per_unit * 32'(flat_q8)) + 32'd255) >> 8;
+    scaled = scaled + constant_term;
+    return (scaled > 32'd1000000) ? 20'd1000000 : 20'(scaled);
+  endfunction
 
   // Conversion target for recipe 18, whose target is caller-selected because a
   // shared conversion serves several consumers that must agree on the format.
@@ -269,7 +315,8 @@ package g6lc_ai_policy_pkg;
   function automatic va_turbo_arith_t va_turbo_arith(
       input logic [4:0] id,
       input logic [2:0] numfmt,
-      input logic [3:0] approx_param
+      input logic [3:0] approx_param,
+      input logic [9:0] flat_q8
   );
     va_turbo_arith_t a;
     logic [4:0] native_bits, effective_bits;
@@ -283,7 +330,8 @@ package g6lc_ai_policy_pkg;
                   a.narrows_storage = 1'b1; end
       5'd5: begin a.kind = VA_ARITH_REL; a.eps_ppm = va_turbo_round_eps_ppm(5'd7);
                   a.narrows_storage = 1'b1; end
-      5'd6: begin a.kind = VA_ARITH_FULL; a.eps_ppm = 20'd7887;
+      5'd6: begin a.kind = VA_ARITH_FULL; a.quant_levels = 8'd127;
+                  a.eps_ppm = va_turbo_quant_eps_ppm(8'd127, flat_q8);
                   a.narrows_storage = 1'b1; end
       5'd7: begin a.kind = VA_ARITH_REL; a.eps_ppm = va_turbo_round_eps_ppm(5'd3);
                   a.narrows_storage = 1'b1; end
@@ -297,12 +345,15 @@ package g6lc_ai_policy_pkg;
         case (approx_param[1:0])
           2'd0: begin a.kind = VA_ARITH_REL; a.eps_ppm = va_turbo_round_eps_ppm(5'd10); end
           2'd1: begin a.kind = VA_ARITH_REL; a.eps_ppm = va_turbo_round_eps_ppm(5'd7); end
-          2'd2: begin a.kind = VA_ARITH_FULL; a.eps_ppm = 20'd7887; end
+          2'd2: begin a.kind = VA_ARITH_FULL; a.quant_levels = 8'd127;
+                      a.eps_ppm = va_turbo_quant_eps_ppm(8'd127, flat_q8); end
           default: a.kind = VA_ARITH_NONE;
         endcase
       end
-      5'd19: begin a.kind = VA_ARITH_FULL; a.eps_ppm = 20'd7887; end
-      5'd20: begin a.kind = VA_ARITH_FULL; a.eps_ppm = 20'd7887;
+      5'd19: begin a.kind = VA_ARITH_FULL; a.quant_levels = 8'd127;
+                   a.eps_ppm = va_turbo_quant_eps_ppm(8'd127, flat_q8); end
+      5'd20: begin a.kind = VA_ARITH_FULL; a.quant_levels = 8'd127;
+                   a.eps_ppm = va_turbo_quant_eps_ppm(8'd127, flat_q8);
                    a.narrows_storage = 1'b1; end
       5'd21: begin a.kind = VA_ARITH_REL; a.needs_param = 1'b1;
                    a.eps_ppm = va_turbo_round_eps_ppm({1'b0, approx_param}); end
@@ -319,7 +370,8 @@ package g6lc_ai_policy_pkg;
         a.eps_ppm = va_turbo_round_eps_ppm(effective_bits);
       end
       5'd27, 5'd28: begin a.kind = VA_ARITH_REL; a.eps_ppm = 20'd250000; end
-      5'd29: begin a.kind = VA_ARITH_FULL; a.eps_ppm = 20'd147908;
+      5'd29: begin a.kind = VA_ARITH_FULL; a.quant_levels = 8'd7;
+                   a.eps_ppm = va_turbo_quant_eps_ppm(8'd7, flat_q8);
                    a.narrows_storage = 1'b1; end
       5'd30, 5'd31: begin a.kind = VA_ARITH_REL; a.needs_param = 1'b1;
                           a.eps_ppm = va_turbo_round_eps_ppm({1'b0, approx_param}); end
@@ -385,7 +437,11 @@ package g6lc_ai_policy_pkg;
     p = '0;
     p.target_numfmt = r.numfmt;
     id = {r.bank, r.subcode};
-    arith = va_turbo_arith(id, r.numfmt, r.approx_param);
+    // Flatness only ever tightens: an absent or unphysical value falls back to
+    // the worst case rather than to something optimistic.
+    arith = va_turbo_arith(id, r.numfmt, r.approx_param,
+        (r.flatness_valid && r.flatness_q8 != 10'd0 && r.flatness_q8 <= 10'd512)
+            ? r.flatness_q8 : 10'd512);
     p.arith_specified = arith.kind != VA_ARITH_NONE;
     p.arith_kind = arith.kind;
     p.eps_ppm = arith.eps_ppm;
@@ -423,9 +479,15 @@ package g6lc_ai_policy_pkg;
     if (arith.kind != VA_ARITH_EXACT) begin
       if (!r.accuracy_valid || !r.kappa_valid || r.kappa_q8 < 16'd256 ||
           (arith.needs_param && !r.approx_param_valid) ||
-          r.error_bound_q4 > {4'd0, r.level} ||
-          p.bound_ppm > p.budget_ppm)
+          r.error_bound_q4 > {4'd0, r.level})
         return p;
+      // The analytic worst-case gate, unless it has been explicitly waived.
+      // The waiver never removes the measured-bound gate above, and it is
+      // recorded in the plan so an empirical admission stays distinguishable.
+      if (p.bound_ppm > p.budget_ppm) begin
+        if (!r.worst_case_waived) return p;
+        p.bound_waived = 1'b1;
+      end
     end
 
     p.eligible = 1'b1;

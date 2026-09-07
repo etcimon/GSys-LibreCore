@@ -154,11 +154,11 @@ module tb_g6lc_ai_policy_subcode #(
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply) else $fatal(1, "VA INT8 missing scale");
     r.scale_valid = 1;
-    // INT8's 7,887 ppm full-scale bound is now expressible, which the old linear
+    // INT8's full-scale bound is now expressible, which the old linear
     // ladder could not do at any level.
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.apply && p.target_numfmt == 0 && p.groups_log2 == 2 &&
-            p.bound_ppm == 20'd7887 && p.budget_ppm == 20'd12800)
+            p.bound_ppm == 20'd7892 && p.budget_ppm == 20'd12800)
       else $fatal(1, "VA INT8 recipe");
     r.level = 4'd5;
     r.subcode = 2; r.exact_zero_proven = 1;
@@ -255,7 +255,7 @@ module tb_g6lc_ai_policy_subcode #(
     for (int id = 0; id < 32; id++) begin
       for (int fmt = 0; fmt < 8; fmt++) begin
         for (int par = 0; par < 16; par++) begin
-          a = va_turbo_arith(5'(id), 3'(fmt), 4'(par));
+          a = va_turbo_arith(5'(id), 3'(fmt), 4'(par), 10'd512);
           assert (a.kind != VA_ARITH_NONE || (id == 18 && par[1:0] == 2'd3))
             else $fatal(1, "VA arith unspecified id=%0d fmt=%0d par=%0d", id, fmt, par);
           if (a.kind == VA_ARITH_EXACT)
@@ -266,7 +266,7 @@ module tb_g6lc_ai_policy_subcode #(
           checks++;
         end
       end
-      a = va_turbo_arith(5'(id), 3'(config_pkg::AI_FMT_FP32), 4'd10);
+      a = va_turbo_arith(5'(id), 3'(config_pkg::AI_FMT_FP32), 4'd10, 10'd512);
       if (a.kind != VA_ARITH_NONE) specified++;
       if (a.kind == VA_ARITH_EXACT) exact_ids++;
       if (a.kind == VA_ARITH_REL) rel_ids++;
@@ -289,7 +289,7 @@ module tb_g6lc_ai_policy_subcode #(
 
     // Bound composition: monotone non-decreasing in kappa, saturating at 100%,
     // and exactly eps at kappa=1.
-    a = va_turbo_arith(5'd4, 3'(config_pkg::AI_FMT_FP32), 4'd0);
+    a = va_turbo_arith(5'd4, 3'(config_pkg::AI_FMT_FP32), 4'd0, 10'd512);
     assert (va_turbo_bound_ppm(a, 16'd256) == 20'd977) else $fatal(1, "kappa=1 identity");
     assert (va_turbo_bound_ppm(a, 16'd512) == 20'd1954) else $fatal(1, "kappa=2 doubling");
     prev_bound = 0;
@@ -300,7 +300,7 @@ module tb_g6lc_ai_policy_subcode #(
       prev_bound = bound;
       checks++;
     end
-    a = va_turbo_arith(5'd27, 3'(config_pkg::AI_FMT_FP32), 4'd0);
+    a = va_turbo_arith(5'd27, 3'(config_pkg::AI_FMT_FP32), 4'd0, 10'd512);
     assert (a.eps_ppm == 20'd250000) else $fatal(1, "Mitchell supremum");
     assert (va_turbo_bound_ppm(a, 16'd65535) == 20'd1000000) else $fatal(1, "bound saturation");
 
@@ -319,7 +319,7 @@ module tb_g6lc_ai_policy_subcode #(
     // Every declared eps must be expressible by some level, or the encoding
     // would again be the blocker rather than the arithmetic.
     for (int id = 0; id < 32; id++) begin
-      a = va_turbo_arith(5'(id), 3'(config_pkg::AI_FMT_FP32), 4'd10);
+      a = va_turbo_arith(5'(id), 3'(config_pkg::AI_FMT_FP32), 4'd10, 10'd512);
       if (a.kind != VA_ARITH_EXACT && a.kind != VA_ARITH_NONE)
         assert (a.eps_ppm <= va_turbo_budget_ppm(4'd15))
           else $fatal(1, "VA id=%0d eps inexpressible by any level", id);
@@ -422,6 +422,87 @@ module tb_g6lc_ai_policy_subcode #(
     r.lossless_proven = 1'b1;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.apply && p.bound_ppm == 0) else $fatal(1, "VA lossless packing");
+    // Corrected full-scale constants.  The previous literals (7,887 and 147,908
+    // ppm) were understated against the exact values 7,889.52 and 147,959.18,
+    // so they were UNSOUND.  The two-step ceiling used here lands slightly above
+    // the exact ceiling (7,892 and 147,961), which is the safe direction; the
+    // soundness assertion below is the one that matters, the equalities merely
+    // pin the implemented arithmetic.
+    assert (va_turbo_quant_eps_ppm(8'd127, 10'd512) == 20'd7892)
+      else $fatal(1, "INT8 full-scale worst case");
+    assert (va_turbo_quant_eps_ppm(8'd7, 10'd512) == 20'd147961)
+      else $fatal(1, "INT4 full-scale worst case");
+    assert (va_turbo_quant_eps_ppm(8'd127, 10'd512) > 20'd7889 &&
+            va_turbo_quant_eps_ppm(8'd7, 10'd512) > 20'd147959)
+      else $fatal(1, "quantisation bound must round UP, never down");
+    // Flatness only ever tightens, monotonically, and never below the constant
+    // term that survives at zero flatness.
+    for (int flat = 1; flat < 512; flat++) begin
+      assert (va_turbo_quant_eps_ppm(8'd127, 10'(flat)) <=
+              va_turbo_quant_eps_ppm(8'd127, 10'(flat + 1)))
+        else $fatal(1, "INT8 flatness not monotone at %0d", flat);
+      assert (va_turbo_quant_eps_ppm(8'd127, 10'(flat)) <= 20'd7892)
+        else $fatal(1, "flatness must not loosen the worst case");
+      checks++;
+    end
+    assert (va_turbo_quant_eps_ppm(8'd127, 10'd256) == 20'd3954)
+      else $fatal(1, "INT8 at unity flatness");
+    assert (va_turbo_quant_eps_ppm(8'd255, 10'd512) == 20'd1000000)
+      else $fatal(1, "unknown level count must bound at 100%%");
+
+    // An absent or unphysical flatness must fall back to the worst case, not to
+    // an optimistic value.
+    r.bank = 2'd0; r.subcode = 3'd6; r.level = 4'd8;  // INT8 conversion
+    r.numfmt = 3'(config_pkg::AI_FMT_FP32);
+    r.range_safe = 1'b1; r.scale_valid = 1'b1; r.accuracy_valid = 1'b1;
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256; r.error_bound_q4 = 8'd0;
+    r.approx_param_valid = 1'b1; r.worst_case_waived = 1'b0;
+    r.flatness_valid = 1'b0; r.flatness_q8 = 10'd128;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.bound_ppm == 20'd7892 && !p.bound_waived)
+      else $fatal(1, "invalid flatness must fall back to the worst case");
+    r.flatness_valid = 1'b1; r.flatness_q8 = 10'd1023;  // out of range
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.bound_ppm == 20'd7892)
+      else $fatal(1, "out-of-range flatness must fall back");
+    r.flatness_q8 = 10'd256;  // fa+fb = 1.0
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.bound_ppm == 20'd3954)
+      else $fatal(1, "flatness must tighten the bound");
+
+    // The waiver: at a realistic full-scale kappa the analytic gate refuses
+    // INT8, and only an explicit waiver admits it - recorded as such.
+    // Measured full-scale kappa is 85.681, i.e. 21,934 in Q8, which takes the
+    // INT8 bound to about 676,000 ppm - far above any budget anyone would sign.
+    r.flatness_valid = 1'b0; r.kappa_q8 = 16'd21934;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && p.bound_ppm > p.budget_ppm && p.bound_ppm > 20'd600000)
+      else $fatal(1, "realistic kappa must refuse INT8 without a waiver");
+    r.worst_case_waived = 1'b1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.bound_waived && p.bound_ppm > p.budget_ppm)
+      else $fatal(1, "waiver must admit and must record itself");
+    // A waiver never removes the measured-bound gate.
+    r.error_bound_q4 = 8'd9;  // above level 8
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "waiver must not bypass the measured bound");
+    r.error_bound_q4 = 8'd0; r.accuracy_valid = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "waiver must not bypass accuracy evidence");
+    r.accuracy_valid = 1'b1; r.kappa_valid = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "waiver must not bypass kappa");
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256; r.worst_case_waived = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && !p.bound_waived)
+      else $fatal(1, "an in-budget plan must not be marked waived");
+    // Exact recipes are never waived, because they have nothing to waive.
+    r.bank = 2'd1; r.subcode = 3'd1; r.numfmt = 3'(config_pkg::AI_FMT_INT);
+    r.worst_case_waived = 1'b1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && !p.bound_waived && p.bound_ppm == 0)
+      else $fatal(1, "exact recipe must not report a waiver");
+
     $display("VA_ARITH PASS ids=32 specified=%0d exact=%0d rel=%0d full=%0d checks=%0d bound=eps_times_kappa",
              specified, exact_ids, rel_ids, full_ids, checks);
   end

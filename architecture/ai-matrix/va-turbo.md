@@ -276,14 +276,15 @@ the identical `VA_HEURISTICS PASS sweep_checks=18473` marker in all ten profiles
 the unchanged codec suite also passes
 (`ai-policy-codec-20260907T012056Z-4686d331a62b`).
 Local explicit Yosys synthesis of the externally driven selector at
-64 lane-bytes / eight-byte minimum / eight groups reports **2,852 generic cells,
+64 lane-bytes / eight-byte minimum / eight groups reports **3,685 generic cells,
 zero sequential cells and zero latches**. The disabled wrapper reports zero
 cells and constant-zero outputs. Artifact:
-`ai-policy-subcode-synth-20260907T020430Z-3e321d31b7e7`. Two earlier builds
+`ai-policy-subcode-synth-20260907T022507Z-edf4e2c3949f`. Two earlier builds
 measured 518 and 540 cells, before the matrix-plane/queue prerequisites and then
 the §9 arithmetic and bound tables were added; both figures are superseded. The
-growth from 540 to 2,852 is the cost of the 32-recipe arithmetic table, the ppm
-bound tables and the wider plan word - still combinational and stateless, but no
+growth from 540 to 3,685 is the cost of the 32-recipe arithmetic table, the ppm
+bound tables, the flatness-parameterised quantisation bound and the wider plan
+word - still combinational and stateless, but no
 longer negligible, and it must be budgeted against the consumer's timing path
 when one exists.
 These are isolated generic-cell results, not technology area or STA. The selector
@@ -321,8 +322,8 @@ operands carries `(1+u)^2 - 1 = 2u + u^2`:
 | BF16 | `u = 2^-8` | 7,828 |
 | FP8 E4M3 | `u = 2^-4` | 128,906 |
 | FP8 E5M2 | `u = 2^-3` | 265,625 |
-| INT8, 127 levels | `2/254 + 1/254^2`, full scale | 7,887 |
-| INT4, 7 levels | `2/14 + 1/196`, full scale | 147,908 |
+| INT8, 127 levels | `(fa+fb)/254 + 1/254^2`, full scale | 7,892 |
+| INT4, 7 levels | `(fa+fb)/14 + 1/196`, full scale | 147,961 |
 | Mitchell `(1+ma)(1+mb) ~= 1+ma+mb` | `sup ma*mb/((1+ma)(1+mb)) = 1/4` | 250,000 |
 
 The Mitchell figure is the supremum of **this** formulation. The textbook 11.1%
@@ -395,7 +396,7 @@ demands and the level a tight bound would demand is the tuning target:
 | Mantissa 4 bits | rel | 13 | 11 | 3.6x |
 | FP8 E4M3 | rel | 14 | 11 | 8.2x |
 | Mitchell | rel | 15 | 12 | 6.0x |
-| **INT8** | **full** | **14 (82% budget)** | **9 (2.5%)** | **36.5x** |
+| **INT8** | **full** | **13 (41% budget, was 14)** | **9 (2.5%)** | **16.8x, was 36.5x** |
 | INT4 | full | 15 | 13 | 3.3x |
 
 The `REL` kinds sit at 3.6x-9.5x, which is the ordinary price of a worst-case
@@ -405,11 +406,43 @@ case *and* that the result norm is small against that product. Authorising level
 14 would mean permitting 82% error to admit a recipe whose real error is 1.85%,
 which no one should sign.
 
-So the next tightening is specific rather than vague: replace the `FULL`
-reference with actual operand norms (`sum|a|`, `sum|b|`) instead of
-`K x max x max`, which needs the caller to supply norm metadata. That should move
-INT8 from level 14 toward its observed level 9. **Do not instead widen the bound
-to make INT8 pass** — that would make the gate lie.
+**Finding 4 - two of my own `FULL` constants were unsound.** The literals 7,887
+and 147,908 ppm were *understated* against the exact values 7,889.52 and
+147,959.18, so they were bounds that could be exceeded. They are corrected, and
+every division in the quantisation bound now rounds **up**: a bound rounded down
+is not a bound. The suite asserts the rounding direction rather than only the
+values.
+
+### The flatness tightening, measured
+
+The `FULL` reference no longer hardcodes "every element sits at the maximum". It
+takes the operand **flatness** `fa = sum|a| / (K x max|a|)` in `(0,1]`, so
+
+```
+|sum(a'b' - ab)| <= K*A*B * [ (fa + fb)/(2L) + 1/(4L^2) ]
+```
+
+with `L` the positive level count (127 for INT8, 7 for INT4). An absent or
+out-of-range flatness falls back to the worst case `fa + fb = 2`, never to
+something optimistic.
+
+Measured on the real tiles, `fa + fb = 0.920` against a worst case of 2.0, which
+tightens the `FULL` kinds by **2.17x**: INT8's bound drops from 675,768 to
+**310,931 ppm**, its slack from 36.5x to **16.8x**, and its required level from
+14 to **13**.
+
+**That is real but insufficient, and it settles the design question.** Level 13
+still means authorising 41% error to admit a recipe whose real error is 1.85%. A
+worst-case full-scale guarantee and a usable INT8 path are simply incompatible on
+real data, because the remaining conservatism is error *cancellation* across the
+reduction, which a worst-case bound may not assume away.
+
+So the trade is made **explicit and auditable** instead of being resolved by
+quietly loosening the bound. `worst_case_waived` lets an approver waive the
+analytic gate; the caller's measured bound still applies, and the plan reports
+`bound_waived` so an **empirical** promise never becomes indistinguishable from a
+**proven** one. The suite checks that a waiver cannot bypass the measured bound,
+the accuracy evidence or `kappa`, and that an exact recipe never reports one.
 
 ## 10. Not implemented
 
