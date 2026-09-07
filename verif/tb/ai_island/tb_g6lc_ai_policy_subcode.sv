@@ -353,6 +353,129 @@ module tb_g6lc_ai_policy_subcode #(
   // code 3 to INT8 while `va_turbo_arith` gave it VA_ARITH_NONE - a target and
   // an arithmetic that disagreed.  Code 3 now carries E5M2, and this pins both
   // halves so they cannot drift apart again.
+  // Lossless narrowing: the only EXACT way to cut operand traffic, and it is
+  // not an FP32-only lever.  What matters is that every element round-trips
+  // into a strictly narrower container, which happens all along the ladder.
+  task automatic va_lossless_narrow_checks();
+    config_pkg::ai_cfg_t cfg;
+    va_turbo_request_t r;
+    va_turbo_plan_t p, approx;
+    int unsigned admitted;
+    cfg = config_pkg::AiCfgOff;
+    cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
+    cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
+    cfg.PolicySubcodeEn = 1'b1; cfg.IslandFpEn = 1'b1;
+    r = '0;
+    r.enable = 1'b1; r.code = POLICY_BULK;
+    r.m = 16'd16; r.n = 16'd16; r.k = 16'd16;
+    r.regular_layout = 1'b1; r.ready_jobs = 9'd16;
+    r.free_accumulators = 9'd16; r.bank_groups = 9'd16;
+    r.range_safe = 1'b1; r.scale_valid = 1'b1; r.accuracy_valid = 1'b1;
+    r.relative_domain_valid = 1'b1;
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
+    r.window_valid = 1'b1; r.qualified_mask = '1;
+    r.level = 4'd15;
+    r.lossless_proven = 1'b1; r.lossless_narrow_valid = 1'b1;
+    r.bank = 2'd0; r.subcode = 3'd1;   // id 1, lossless repack
+    admitted = 0;
+    // Every strictly-narrower pair must admit, whatever the source; every
+    // equal-or-wider pair must be refused, because it saves no beats.
+    for (int src = 0; src < 8; src++)
+      for (int dst = 0; dst < 8; dst++) begin
+        automatic bit narrower;
+        r.numfmt = 3'(src);
+        r.lossless_narrow_target = 3'(dst);
+        narrower = policy_format_known(3'(src)) && policy_format_known(3'(dst)) &&
+                   policy_element_bits_log2(3'(dst)) < policy_element_bits_log2(3'(src));
+        p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+        if (!narrower) begin
+          assert (!p.lossless_narrowed)
+            else $fatal(1, "VA lossless must refuse src=%0d dst=%0d (not narrower)", src, dst);
+        end else begin
+          automatic logic [18:0] src_bytes;
+          src_bytes = 3'(src) == 3'(config_pkg::AI_FMT_INT4)
+              ? ((19'd16 + 19'd1) >> 1)
+              : (19'd16 << (policy_element_bits_log2(3'(src)) - 3'd3));
+          assert (p.apply && p.lossless_narrowed && p.convert &&
+                  p.target_numfmt == 3'(dst))
+            else $fatal(1, "VA lossless src=%0d dst=%0d apply=%0b narrowed=%0b",
+                        src, dst, p.apply, p.lossless_narrowed);
+          // The traffic really has to shrink, or there was nothing to win.
+          assert (p.row_bytes < src_bytes)
+            else $fatal(1, "VA lossless src=%0d dst=%0d row_bytes %0d not below %0d",
+                        src, dst, p.row_bytes, src_bytes);
+          // Integer-to-integer is BIT-IDENTICAL: exact integer product, exact
+          // integer reduction, exact integer accumulate - no rounding site.
+          if (policy_integer_format(3'(src)) && policy_integer_format(3'(dst))) begin
+            assert (p.arith_kind == VA_ARITH_EXACT && p.eps_ppm == 20'd0 &&
+                    p.bound_ppm == 20'd0 && !p.eps_per_window)
+              else $fatal(1, "VA int->int lossless must be exact src=%0d dst=%0d eps=%0d",
+                          src, dst, p.eps_ppm);
+          end else begin
+            // Anything touching the FP32 accumulator regroups its folds, so the
+            // epsilon is the ACCUMULATOR's 1 ppm - never the target format's.
+            assert (p.arith_kind == VA_ARITH_REL && p.eps_ppm == VA_FP32_RNE_PPM &&
+                    p.eps_per_window)
+              else $fatal(1, "VA float lossless eps src=%0d dst=%0d kind=%0d eps=%0d",
+                          src, dst, p.arith_kind, p.eps_ppm);
+          end
+          admitted++;
+        end
+      end
+    // 17 strictly-narrower ordered pairs over the 7 known formats:
+    //   FP32 -> 6 (INT8, INT4, E4M3, E5M2, FP16, BF16)
+    //   FP16 -> 4, BF16 -> 4 (INT8, INT4, E4M3, E5M2)
+    //   INT8 -> 1, E4M3 -> 1, E5M2 -> 1 (INT4);  INT4 -> 0
+    // Exactly one of them is integer-to-integer, i.e. bit-identical: INT8->INT4.
+    assert (admitted == 17)
+      else $fatal(1, "VA expected 17 narrower pairs over the 7 known formats, got %0d",
+                  admitted);
+    // The whole point: a lossless narrowing must be bounded FAR below the same
+    // storage change done approximately. FP32 -> BF16 is 1 ppm against 7,828.
+    r.numfmt = 3'(config_pkg::AI_FMT_FP32);
+    r.lossless_narrow_target = 3'(config_pkg::AI_FMT_BF16);
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    r.bank = 2'd0; r.subcode = 3'd5;   // id 5, the APPROXIMATE FP32->BF16 twin
+    approx = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (approx.apply && approx.eps_ppm == 20'd7828)
+      else $fatal(1, "VA approximate BF16 twin eps=%0d", approx.eps_ppm);
+    assert (p.eps_ppm * 20'd1000 < approx.eps_ppm)
+      else $fatal(1, "VA lossless BF16 (%0d ppm) must be far under approximate (%0d ppm)",
+                  p.eps_ppm, approx.eps_ppm);
+    // Same row_bytes either way: the traffic saving is identical, only the
+    // bound differs. That is the entire value proposition.
+    assert (p.row_bytes == approx.row_bytes && p.row_bytes == 19'd32)
+      else $fatal(1, "VA lossless/approx row_bytes %0d vs %0d", p.row_bytes, approx.row_bytes);
+    // Evidence is mandatory: a narrowing claim without the proof is refused.
+    r.bank = 2'd0; r.subcode = 3'd1;
+    r.lossless_proven = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA lossless needs lossless_proven");
+    r.lossless_proven = 1'b1; r.lossless_narrow_valid = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    // Without a narrowing claim, a FLOAT source falls back to the integer-only
+    // repack rule and is refused; the integer path is unchanged.
+    assert (!p.apply && !p.lossless_narrowed)
+      else $fatal(1, "VA float repack without a target must stay refused");
+    r.numfmt = 3'(config_pkg::AI_FMT_INT);
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && !p.lossless_narrowed && p.arith_kind == VA_ARITH_EXACT)
+      else $fatal(1, "VA integer repack must still work without a narrow target");
+    // Recipe 17 additionally requires the resident-B lease, narrowing or not.
+    r.bank = 2'd2; r.subcode = 3'd1;   // id 17
+    r.numfmt = 3'(config_pkg::AI_FMT_FP32);
+    r.lossless_narrow_valid = 1'b1;
+    r.lossless_narrow_target = 3'(config_pkg::AI_FMT_FP16);
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA id17 needs reuse_b_valid");
+    r.reuse_b_valid = 1'b1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.lossless_narrowed && p.reuse_b)
+      else $fatal(1, "VA id17 must combine lossless narrowing with resident B");
+    $display("VA_LOSSLESS_NARROW PASS pairs=64 admitted=%0d int_exact=1 float_eps=%0d ppm",
+             admitted, VA_FP32_RNE_PPM);
+  endtask
+
   task automatic va_e5m2_target_checks();
     config_pkg::ai_cfg_t cfg;
     va_turbo_request_t r;
@@ -744,6 +867,7 @@ module tb_g6lc_ai_policy_subcode #(
     va_window_bound_checks();
     va_window_admission_checks();
     va_e5m2_target_checks();
+    va_lossless_narrow_checks();
     cfg = config_pkg::AiCfgOff;
     cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
     cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;

@@ -358,6 +358,46 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   resource, so the levers multiply rather than overlap. Operand read beats halve
   at every engine count and every C element is still checked. One shared-port
   fixture with repeated same-weight jobs; not MAC/s, not silicon, not inference.
+- [x] LOSSLESS NARROWING LANDED: the exact traffic lever FP32 never had. Bit-preserving
+  FP32 had exactly ONE implemented speedup (recipe 16 residency, 1.279x) because the
+  two exact levers that could help it -- lossless repack 1/3/17 and zero-skip 2 --
+  were locked to integer formats by `policy_integer_format(r.numfmt)`. That GATE, not
+  the arithmetic, excluded FP32 from every exact optimisation in the catalog. The
+  property that matters is only "every element round-trips into a strictly narrower
+  container exactly", which holds for weights trained narrow and widened, quantised
+  values parked in a float container, or 4-bit weights in an INT8 container. Then the
+  products are the SAME real numbers and the target format's per-product epsilon does
+  not apply: the only difference is the wider `mac_step` regrouping the FP32
+  accumulator folds, so the error site moves from per-PRODUCT to per-WINDOW and the
+  bound becomes the accumulation epsilon (1 ppm) instead of the storage epsilon.
+  Measured: FP32->BF16 5.803 ppm vs 7,828 (1,349x tighter), FP32->FP16 0.323 vs 977
+  (3,025x), FP16/BF16->FP8 exactly 0.000 ppm (an E4M3 product is <=8 significant bits,
+  so a window of 8 still fits FP32's 24 and the accumulation is exact), and INT8->INT4
+  BIT-IDENTICAL by construction (same integers, exact 640-bit reduction, integer
+  accumulator with no rounding site) -- reported as VA_ARITH_EXACT eps=0, while any
+  float accumulator gets VA_ARITH_REL at 1 ppm. NOT bit-identical for the float pairs,
+  and saying otherwise would be wrong; it is a ~1,350-3,000x smaller difference than
+  the approximate conversion saving the identical traffic. In one trial the narrowed
+  run beat native FP32 (0.000 vs 0.385 ppm) because fewer windows means fewer roundings.
+- [x] NOT FP32-ONLY, deliberately: 17 strictly narrower ordered pairs over the seven
+  known formats (FP32 to six, FP16/BF16 to four each, INT8/E4M3/E5M2 to INT4), with
+  measured speedups 1.917x / 1.847x / 1.734x. `VA_LOSSLESS_NARROW` sweeps all 64
+  (src,dst) combinations and admits exactly those 17. Equal-width pairs are refused on
+  purpose -- FP16 <-> BF16 saves no beats, so attaching a bound to it would be
+  claiming a plan that buys nothing.
+- [x] AREA AND RETURN, isolated by swapping package+testbench as a pair against HEAD:
+  selector 4,002 -> 4,619 cells (+617, +15.4%), still 0 sequential and 0 latches, and
+  the disabled wrapper still zero. That is +8.2% of one 7,530-cell GEMM engine, so
+  FP32->FP16 returns 11.2x per %area -- the same league as residency's 14.7x against
+  0.8x for lane widening. Throughput needs NO new RTL measurement: a narrowed job is an
+  ordinary native job at the target format, so its cycles are the already-measured
+  native figure.
+- [ ] Still required before this is a throughput CLAIM: (1) a producer for
+  `lossless_proven`/`lossless_narrow_target` -- the round-trip check is cheap but
+  nothing in-tree computes it; (2) a consumer mask bit, since 1/3/17 are in no
+  compiled mask; (3) paired GEMM measurement with the proof asserted, same protocol
+  residency used; (4) ai-tensor exposure so the trade-off surface can offer
+  FP16-class speed at FP32-class accuracy where the data permits.
 - [x] FITTING IS COMPLETE: every format now carries a bound, native FP32 included.
   Native FP32 is the ONE candidate the windowed kappa may legitimately multiply,
   because nothing perturbs its products (exact 48-bit significand product, exact

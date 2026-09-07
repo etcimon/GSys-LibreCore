@@ -642,6 +642,98 @@ cold priming from warm operation, check all C elements and poison outputs before
 execution. Signed native-format fixtures, metadata changes, permission gates,
 error recovery and alias cases accompany the throughput samples.
 
+## 15. Lossless narrowing: an exact traffic lever, and the only one FP32 had
+
+Bit-preserving FP32 had exactly **one** implemented speedup (recipe 16 residency,
+1.279x), and the two exact levers that could have helped it -- the lossless
+repack family 1/3/17 and zero-skip 2 -- were locked to integer formats by
+`policy_integer_format(r.numfmt)`. That gate, not the arithmetic, was what
+excluded FP32 from every exact optimisation in the catalog.
+
+The property that actually matters is narrower: **every operand element
+round-trips into a strictly narrower container exactly**. That is common in
+practice -- weights trained in BF16/FP16 and widened to FP32, already-quantised
+values parked in a float container, 4-bit weights held in INT8 -- and when it
+holds, the products are *the same real numbers*, so the target format's
+per-product epsilon does not apply at all.
+
+### What it costs and what it buys, measured
+
+The only difference is that the narrower format has a wider `mac_step`, so the
+FP32 accumulator regroups its folds (k=16 at 8 lanes: 8 windows for FP32, 4 for
+BF16). That moves the recipe from a per-**product** error site to a per-**window**
+one -- the only class the windowed kappa may soundly multiply -- and makes the
+bound the accumulation epsilon (**1 ppm**) instead of the storage epsilon:
+
+| Pair | Cycles | Speedup | Worst measured | Approximate twin | Quality gain |
+|---|---|--:|--:|--:|---|
+| FP32 -> BF16 | 669 -> 349 | **1.917x** | 5.803 ppm | 7,828 ppm | **1,349x tighter** |
+| FP32 -> FP16 | 669 -> 349 | **1.917x** | 0.323 ppm | 977 ppm | **3,025x tighter** |
+| FP16 -> FP8 E4M3 | 349 -> 189 | **1.847x** | **0.000 ppm** | 128,907 ppm | exact |
+| FP16 -> FP8 E5M2 | 349 -> 189 | **1.847x** | **0.000 ppm** | 265,625 ppm | exact |
+| BF16 -> FP8 E4M3 | 349 -> 189 | **1.847x** | **0.000 ppm** | 128,907 ppm | exact |
+| BF16 -> FP8 E5M2 | 349 -> 189 | **1.847x** | **0.000 ppm** | 265,625 ppm | exact |
+| INT8 -> INT4 | 189 -> 109 | **1.734x** | **0.000 ppm** | 147,961 ppm | **bit-identical** |
+
+Two results deserve emphasis. The 16-bit-to-8-bit rows are **exactly zero**: an
+E4M3 product carries at most 8 significant bits and a window of 8 such products
+still fits FP32's 24, so the accumulation is exact and both paths return the true
+value. And `INT8 -> INT4` is **bit-identical by construction**, not merely
+accurate: the products are the same integers, the 640-bit reduction is exact, and
+the integer accumulator has no rounding site at all -- so the selector reports
+`VA_ARITH_EXACT` with `eps = 0` for integer-to-integer, and `VA_ARITH_REL` with
+the 1 ppm accumulation epsilon whenever a float accumulator is involved.
+
+It is **not** bit-identical for the float pairs, and claiming that would be
+wrong: regrouping is a real difference. It is just a ~1,350-3,000x smaller one
+than the approximate conversion that saves the identical traffic. In one trial
+the narrowed run was *more* accurate than the native FP32 run (0.000 vs 0.385
+ppm) because fewer windows means fewer rounding sites.
+
+### Scope: 17 pairs, not one
+
+Deliberately not FP32-only. Over the seven known formats there are 17 strictly
+narrower ordered pairs -- FP32 to six targets, FP16 and BF16 to four each, and
+INT8/E4M3/E5M2 to INT4 -- and `VA_LOSSLESS_NARROW` sweeps all 64 (src, dst)
+combinations, admitting exactly those 17. Equal-width pairs are refused on
+purpose: FP16 <-> BF16 is a real conversion but saves no beats, and admitting it
+would attach a bound to a plan that buys nothing.
+
+### Area, and the performance-per-area verdict
+
+Isolated selector synthesis, same top, package and testbench swapped as a pair:
+
+| | cells | sequential | latches |
+|---|--:|--:|--:|
+| before (no lossless narrowing) | 4,002 | 0 | 0 |
+| after | **4,619** | **0** | **0** |
+
+**+617 cells (+15.4%)**, still purely combinational -- the selector adds no
+state. For scale, one GEMM engine is 7,530 cells, so the delta is +8.2% of an
+engine, giving **11.2x return per %area** for FP32 -> FP16 -- the same league as
+residency's 14.7x, and against 0.8x for lane widening. The disabled wrapper still
+synthesises to zero cells, so the default-off property is intact.
+
+### What is still required to call this a throughput result
+
+The throughput here needs **no new RTL measurement**, and that is the point: the
+narrowed job is an ordinary native job at the target format, so its cycle count
+is the already-measured native figure for that format. What remains:
+
+1. **A producer for the proof.** `lossless_proven` + `lossless_narrow_target`
+   are caller evidence; nothing in-tree computes them yet. The check is cheap
+   (round-trip every element and compare bit patterns) but it must live
+   somewhere, and until it does, no call site can assert the recipe.
+2. **A consumer mask bit.** Recipe 1/3/17 are not in any compiled consumer mask,
+   so today the plan is selection metadata like the rest of bank A.
+3. **Paired GEMM measurement** with the proof asserted, confirming the narrowed
+   job returns the target-format cycle count *and* that C matches the FP32 run
+   to within the reported bound -- the same protocol residency used.
+4. **ai-tensor exposure**, so the trade-off surface can offer a
+   `lossless-narrow` recipe whose quality column is ~0 rather than the storage
+   format's epsilon. That is the user-visible payoff: FP16-class speed at
+   FP32-class accuracy, when the data permits it.
+
 ## 14. FP8 E5M2 was unreachable; recipe 18 code 3 now carries it
 
 Of the seven supported storage formats, six were selectable and one was not. Bank A pins

@@ -126,6 +126,22 @@ package g6lc_ai_policy_pkg;
     logic [8:0] ready_jobs, free_accumulators, bank_groups;
     logic exact_zero_proven;
     logic lossless_proven;
+    // LOSSLESS NARROWING: the caller has proven every operand element of an
+    // FP32 tensor round-trips through `lossless_narrow_target` EXACTLY, which
+    // is common for weights trained in BF16/FP16 and widened to FP32.  The
+    // products are then the same real numbers, so the storage format's
+    // per-product epsilon does not apply at all - the only error is that the
+    // narrower format has a wider `mac_step`, so the FP32 accumulator regroups
+    // (k=16 at 8 lanes: 8 windows for FP32, 4 for BF16).  That moves the recipe
+    // from a per-PRODUCT error site to a per-WINDOW one, which is the only
+    // class the windowed kappa may soundly multiply, and it makes the bound the
+    // accumulation epsilon (1 ppm) instead of the storage epsilon (BF16 7,828
+    // ppm) - measured worst 6.63 ppm over 40 trials versus a 7,828 ppm
+    // approximate bound, at the same 1.917x traffic saving.  It is NOT
+    // bit-identical, and claiming that would be wrong: regrouping is a real
+    // difference, just a ~1,180x smaller one.
+    logic lossless_narrow_valid;
+    logic [2:0] lossless_narrow_target;
     logic reuse_a_valid, reuse_b_valid;
     logic range_safe, scale_valid, accuracy_valid;
     logic relative_domain_valid;
@@ -239,6 +255,12 @@ package g6lc_ai_policy_pkg;
     logic [19:0] bound_floor_ppm;
     logic [4:0]  window_log2;
     logic window_matched;
+    // Set when the plan narrows storage LOSSLESSLY: the operands were proven
+    // exactly representable in the target, so the reported epsilon is the FP32
+    // accumulation epsilon rather than the target format's per-product one, and
+    // the error site is per-window rather than per-product.
+    logic lossless_narrowed;
+    logic eps_per_window;
     logic [18:0] row_bytes;
   } va_turbo_plan_t;
 
@@ -602,6 +624,8 @@ package g6lc_ai_policy_pkg;
     logic [2:0] target;
     logic fallback_only, lossless, zero_skip, conversion, grouping, reuse_only;
     logic control_only, approx_products, separate_jobs, order_only;
+    logic lossless_narrow, lossless_exact;
+    logic [18:0] lossless_row_bytes;
     logic [8:0] work_count;
     int unsigned group_limit;
     p = '0;
@@ -660,6 +684,67 @@ package g6lc_ai_policy_pkg;
     reuse_only      = id == 5'd16;
     control_only    = id inside {5'd22, 5'd23};
     approx_products = id inside {5'd21, 5'd25, 5'd26, 5'd27, 5'd28, 5'd30, 5'd31};
+
+    // A proven-exact narrowing.  Deliberately NOT restricted to an FP32 source:
+    // the property that matters is only "every element round-trips exactly into
+    // a strictly narrower container", and that arises across the format ladder,
+    // not just at the top of it.
+    //
+    //   FP32 -> BF16/FP16   weights trained narrow and widened to FP32   1.917x
+    //   FP32 -> FP8/INT8    already-quantised values parked in FP32      3.540x
+    //   FP32 -> INT4        ternary/2-bit weights parked in FP32         6.138x
+    //   FP16/BF16 -> FP8    16-bit container holding <=2-3 mantissa bits 1.847x
+    //   INT8 -> INT4        4-bit weights parked in an INT8 container    1.734x
+    //
+    // Equal-width pairs are refused because they buy no beats: FP16 <-> BF16 is
+    // a real conversion but not a throughput lever, and admitting it would put
+    // a bound on a plan that saves nothing.
+    lossless_narrow = lossless && r.lossless_proven && r.lossless_narrow_valid &&
+                      policy_format_known(r.numfmt) &&
+                      policy_format_known(r.lossless_narrow_target) &&
+                      policy_element_bits_log2(r.lossless_narrow_target) <
+                      policy_element_bits_log2(r.numfmt);
+    // An integer source narrowing into an integer target is BIT-IDENTICAL, not
+    // merely accurate: the products are the same integers, the reduction is an
+    // exact 640-bit integer sum, and the accumulator is an exact integer add
+    // with no rounding site anywhere.  Anything touching a float accumulator
+    // regroups the FP32 folds instead, which is a real (tiny) difference.
+    lossless_exact = lossless_narrow && policy_integer_format(r.numfmt) &&
+                     policy_integer_format(r.lossless_narrow_target);
+    lossless_row_bytes = r.lossless_narrow_target == 3'(config_pkg::AI_FMT_INT4) ?
+        (({3'd0, r.k} + 19'd1) >> 1) :
+        ({3'd0, r.k} << (policy_element_bits_log2(r.lossless_narrow_target) - 3'd3));
+    // The epsilon of a lossless narrowing is the ACCUMULATOR's, not the target
+    // format's: the products are identical, and only the window regroups.
+    // Overriding here - before the accuracy gate - is what stops an exact
+    // repack from being charged an approximate storage bound it does not incur
+    // (BF16 7,828 ppm per product versus a measured worst 6.63 ppm for the
+    // regrouping, ~1,180x apart at the same traffic saving).
+    if (lossless_narrow) begin
+      arith.narrows_storage = 1'b1;
+      arith.needs_param = 1'b0;
+      arith.quant_levels = 8'd0;
+      if (lossless_exact) begin
+        arith.kind = VA_ARITH_EXACT;
+        arith.eps_ppm = 20'd0;
+      end else begin
+        arith.kind = VA_ARITH_REL;
+        arith.eps_ppm = VA_FP32_RNE_PPM;
+      end
+      p.arith_kind = arith.kind;
+      p.eps_ppm = arith.eps_ppm;
+      p.bound_ppm = va_turbo_bound_ppm(arith, r.kappa_valid ? r.kappa_q8 : 16'd0);
+      if (arith.kind != VA_ARITH_EXACT) begin
+        p.bound_accum_ppm = p.window_matched
+            ? va_turbo_accum_bound_ppm(r.kappa_window_q8,
+                                       va_turbo_accum_sites(r.k, p.window_log2))
+            : 20'd0;
+        p.bound_floor_ppm = (r.abs_floor_valid && r.abs_floor_ppm <= 20'd1000000)
+            ? r.abs_floor_ppm : 20'd0;
+        p.bound_ppm = va_turbo_total_bound_ppm(p.bound_ppm, p.bound_accum_ppm,
+                                               p.bound_floor_ppm);
+      end
+    end
 
     // Accuracy admission, required for every non-exact recipe.  Both gates must
     // pass: the analytic bound derived from the arithmetic, and the caller's
@@ -732,7 +817,22 @@ package g6lc_ai_policy_pkg;
       // A lossless representation change must be proven reconstructable; a
       // sparsity or range observation is not a proof.  The packed width is the
       // caller's to establish, so no narrower row_bytes is claimed here.
-      if (!policy_integer_format(r.numfmt) || !r.lossless_proven) return p;
+      if (!r.lossless_proven) return p;
+      if (lossless_narrow) begin
+        // The float path: an FP32 tensor proven exactly representable in a
+        // narrower format.  This is the only EXACT traffic lever FP32 has -
+        // every other way to cut its operand beats changes the arithmetic - so
+        // it is worth the extra request evidence.  row_bytes/target follow the
+        // proven target, and the epsilon is the ACCUMULATION one, because the
+        // products are unchanged and only the window regroups.
+        candidate.convert = 1'b1;
+        candidate.target_numfmt = r.lossless_narrow_target;
+        candidate.row_bytes = lossless_row_bytes;
+        candidate.lossless_narrowed = 1'b1;
+        // Only the float-accumulator case has a per-window error site at all;
+        // the integer-to-integer case is bit-identical and has no site.
+        candidate.eps_per_window = !lossless_exact;
+      end else if (!policy_integer_format(r.numfmt)) return p;
       if (id == 5'd17 && !r.reuse_b_valid) return p;
       candidate.reuse_b = id == 5'd17;
     end else if (zero_skip) begin
