@@ -75,7 +75,206 @@ export function verifyLibwasmAbi(bytes: Uint8Array, lane: "app" | "fx-probe" = "
     createElement: "127->127",
     appendChild: "127,127->",
     setProperty: "127,127,127,127,127->",
+    fetch: "127,127->127",
+    holyc: "127,127->127",
+    register_endpoint: "127,127,127,127->",
+    libwasm_await__void: "127->",
+    libwasm_await_supported: "->127",
+    libwasm_await_failed: "->127",
+    libwasm_await_error: "127->",
+    libwasm_await_value: "127->",
+    libwasm_note_await_fail: "127->",
+    libwasm_note_await_ok: "127->",
+    libwasm_get__string: "127,127->",
+    libwasm_add__string: "127,127->127",
+    libwasm_add__object: "->127",
+    // B72: resolve a browser-instance global to a protected object handle.
+    libwasm_global: "127,127->127",
+    libwasm_removeObject: "127->",
+    libwasm_copyObjectRef: "127->127",
+
+    // B62 scalar box/unbox.  127=i32, 126=i64, 125=f32, 124=f64.
+    libwasm_add__bool: "127->127",
+    libwasm_add__int: "127->127",
+    libwasm_add__uint: "127->127",
+    libwasm_add__long: "126->127",
+    libwasm_add__ulong: "126->127",
+    libwasm_add__short: "127->127",
+    libwasm_add__ushort: "127->127",
+    libwasm_add__float: "125->127",
+    libwasm_add__double: "124->127",
+    libwasm_add__byte: "127->127",
+    libwasm_add__ubyte: "127->127",
+    libwasm_add__ints: "127,127->127",
+
+    // B70: DOM event host boundary.
+    addEventListener: "127,127,127,127,127,127->",
+    removeEventListener: "127->",
+    dispatchEvent: "127,127,127,127,127,127->127",
+    libwasm_add__uints: "127,127->127",
+
+    libwasm_get__bool: "127->127",
+    libwasm_get__int: "127->127",
+    libwasm_get__uint: "127->127",
+    libwasm_get__long: "127->126",
+    libwasm_get__ulong: "127->126",
+    libwasm_get__short: "127->127",
+    libwasm_get__ushort: "127->127",
+    libwasm_get__float: "127->125",
+    libwasm_get__double: "127->124",
+    libwasm_get__byte: "127->127",
+    libwasm_get__ubyte: "127->127",
+    // B63 property registry scaffold and typed getter/call core.
+    libwasm_get__field: "127,127,127->127",
+    libwasm_get_idx__field: "127,127->127",
+    ...Object.fromEntries(
+      (() => {
+        const entries: [string, string][] = [];
+        for (const t of ["int", "uint", "ushort", "bool"]) {
+          entries.push([`Object_Getter__${t}`, "127,127,127->127"]);
+        }
+        entries.push(["Object_Getter__float", "127,127,127->125"]);
+        entries.push(["Object_Getter__double", "127,127,127->124"]);
+        entries.push(["Object_Getter__Handle", "127,127,127->127"]);
+        entries.push(["Object_Getter__string", "127,127,127,127->"]);
+        // B64 Optional!T getters: value at raw, presence flag at raw+sizeof(T).
+        for (const t of ["Handle", "Uint", "Double", "String", "Bool"]) {
+          entries.push([`Object_Getter__Optional${t}`, "127,127,127,127->"]);
+        }
+        const calls: [string, string[], string][] = [
+          ["", [], "void"],
+          ["string", ["127", "127"], "void"],
+          ["uint", ["127"], "void"],
+          ["int", ["127"], "void"],
+          ["bool", ["127"], "void"],
+          ["double", ["124"], "void"],
+          ["float", ["125"], "void"],
+          ["Handle", ["127"], "void"],
+          ["string_string", ["127", "127", "127", "127"], "void"],
+          ["double_double", ["124", "124"], "void"],
+          ["string", ["127", "127"], "Handle"],
+          ["uint", ["127"], "Handle"],
+          ["int", ["127"], "Handle"],
+          ["bool", ["127"], "Handle"],
+          ["Handle", ["127"], "Handle"],
+          ["string_string", ["127", "127", "127", "127"], "Handle"],
+          ["string", ["127", "127"], "bool"],
+          ["string", ["127", "127"], "string"],
+          ["uint", ["127"], "string"],
+          ["uint_uint", ["127", "127"], "string"],
+        ];
+        for (const [argPart, argSig, ret] of calls) {
+          const name = `Object_Call_${argPart}__${ret}`;
+          const sret = ret === "string" ? ["127"] : [];
+          const params = [...sret, "127", "127", "127", ...argSig];
+          const result =
+            ret === "void" || ret === "string"
+              ? ""
+              : ret === "Handle" || ret === "bool" || ret === "int" || ret === "uint" || ret === "ushort"
+              ? "127"
+              : ret === "float"
+              ? "125"
+              : "124";
+          entries.push([name, params.join(",") + "->" + result]);
+        }
+        // B64 Optional!T method calls: optional Handle or string result only.
+        for (const [argPart, argSig] of [
+          ["string", ["127", "127"]],
+          ["uint", ["127"]],
+          ["int", ["127"]],
+          ["bool", ["127"]],
+        ] as [string, string[]][]) {
+          for (const ret of ["OptionalHandle", "OptionalString"]) {
+            const name = `Object_Call_${argPart}__${ret}`;
+            const params = ["127", "127", "127", "127", ...argSig];
+            entries.push([name, params.join(",") + "->"]);
+          }
+        }
+        return entries;
+      })(),
+    ),
+
+    // B65 JSON codec.
+    JSON_parse_string: "127,127->127",
+    JSON_stringify: "127,127->",
+
+    // B65 overload-resolving vararg calls.  The wasm import is
+    //   (sret?, handle, method_len, method_ptr, argsdef_len, argsdef_ptr, args_len, args_ptr) -> ret
+    ...Object.fromEntries(["void", "bool", "int", "uint", "short", "ushort", "long", "ulong", "float", "double", "Handle", "string"].map((ret) => {
+      const sret = ret === "string" ? ["127"] : [];
+      const params = [...sret, "127", "127", "127", "127", "127", "127", "127"];
+      const result =
+        ret === "void" || ret === "string"
+          ? ""
+          : ret === "Handle" || ret === "bool" || ret === "int" || ret === "uint" || ret === "short" || ret === "ushort"
+          ? "127"
+          : ret === "float"
+          ? "125"
+          : "124";
+      return [`Object_VarArgCall__${ret}`, params.join(",") + "->" + result];
+    })),
+
+    // B67 getTimeStamp returns a D `long` (i64 milliseconds).
+    getTimeStamp: "->126",
+
+    // B68 promise combinators: each takes a handle to a handle-array and
+    // returns a new promise handle.
+    libasync_promise_all__promise: "127->127",
+    libasync_promise_any__promise: "127->127",
+    libasync_promise_allsettled__promise: "127->127",
+
+    // B68 typed array / DataView Create: a D slice (len, ptr) -> Handle.
+    Int8Array_Create: "127,127->127",
+
+    // B67 Moment: first-party Date handle creation.
+    libwasm_moment_now: "->127",
+    libwasm_moment_from_millis: "126->127",
+
+    // B69: bounded ES6 Map host surface.
+    libwasm_map_create: "->127",
+    libwasm_map_set: "127,127,127,127,127->",
+    libwasm_map_get__OptionalString: "127,127,127,127->",
+    libwasm_map_has: "127,127,127->127",
+    libwasm_map_delete: "127,127,127->",
+    libwasm_map_clear: "127->",
+
+    // Object_Call result kinds expanded for Moment method calls.
+    Object_Call_string__uint: "127,127,127,127->127",
+    Object_Call_string__int: "127,127,127,127->127",
+    Object_Call_string__double: "127,127,127,127->124",
+    Int32Array_Create: "127,127->127",
+    Uint8Array_Create: "127,127->127",
+    Float32Array_Create: "127,127->127",
+    DataView_Create: "127,127->127",
+
+    // B66 named delegates and event handlers.
+    // libwasm_set__function(name, ctx, ptr) and unset are host-controlled.
+    libwasm_set__function: "127,127,127,127->",
+    libwasm_unset__function: "127,127->",
+    // setTimeout/setInterval take (ctx, ptr, ms) and return a timer id.
+    setTimeout: "127,127,127->127",
+    setInterval: "127,127,127->127",
+    clearTimeout: "127->",
+    clearInterval: "127->",
+    // Object_Call_EventHandler__void(handle, name, defined, ctx, ptr) -> void.
+    Object_Call_EventHandler__void: "127,127,127,127,127,127->",
+    // Object_Getter__EventHandler(sret, handle, name) -> void (sret holds ctx, ptr, defined).
+    Object_Getter__EventHandler: "127,127,127,127->",
+
     __cpp_exception: "127->",
+    // B67 Lodash: 3 init kinds x 4 result kinds. A `string` result is sret
+    // (leading i32); a `string` init is (len, ptr) plus a trailing eval flag;
+    // a `long` init is a real i64 and `long`/`double` results are i64/f64.
+    // 127=i32, 126=i64, 124=f64 (LIBWASM-ABI.md §2).
+    ...Object.fromEntries(["Handle", "long", "string"].flatMap((k) =>
+      ["string", "long", "double", "Handle"].map((r) => {
+        const init = k === "long" ? ["126"] : k === "string" ? ["127", "127"] : ["127"];
+        const params = [...(r === "string" ? ["127"] : []), ...init, "127", "127", "127", "127", "127", "127",
+          ...(k === "string" ? ["127"] : [])];
+        const result = r === "string" ? "" : r === "long" ? "126" : r === "double" ? "124" : "127";
+        return [`ldexec_${k}__${r}`, params.join(",") + "->" + result];
+      }),
+    )),
   };
   while (offset < bytes.length) {
     end = bytes.length;
@@ -237,6 +436,30 @@ function posix(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
+function winToWsl(p: string): string {
+  return posix(p).replace(/^([A-Za-z]):/, (__, drive) => `/mnt/${drive.toLowerCase()}`);
+}
+
+function isElfLikeWasmOpt(bin: string): boolean {
+  if (!existsSync(bin) || bin.toLowerCase().endsWith(".exe")) return false;
+  try {
+    const head = readFileSync(bin).subarray(0, 4);
+    return head[0] === 0x7f && head[1] === 0x45 && head[2] === 0x4c && head[3] === 0x46;
+  } catch {
+    return false;
+  }
+}
+
+type SpawnResult = ReturnType<typeof spawnSync>;
+
+function runWasmOpt(bin: string, args: string[], run = spawnSync): SpawnResult {
+  if (process.platform === "win32" && isElfLikeWasmOpt(bin)) {
+    const wslArgs = [winToWsl(bin), ...args.map((a) => /^[A-Za-z]:[\\\/]/.test(a) ? winToWsl(a) : a)];
+    return run("wsl", wslArgs, { encoding: "utf8", shell: false, maxBuffer: 32 * 1024 * 1024 });
+  }
+  return run(bin, args, { encoding: "utf8", shell: false, maxBuffer: 32 * 1024 * 1024 });
+}
+
 /** Engine `dub.sdl` (wasm-eh / ldc-master), BIOS target names. */
 export function engineDubSdl(libwasm: string): string {
   const lib = `dependency "libwasm" path=${JSON.stringify(posix(libwasm || "../libwasm"))}\n`;
@@ -318,7 +541,10 @@ export function cachedWasmCell(ws: string, tc: Toolchain): WasmCellResult {
     checkCellArtifact(readFileSync(result.ship), provenance, cellInputHash(ws, tc, provenance.buildType));
     result.artifact = "fresh";
     result.provenance = provenance;
-    result.reason = "verified cached LDC component-shell artifact (not full Svelte tree)";
+    const asyncified = provenance.imports.includes("libwasm_await__void");
+    result.reason = asyncified
+      ? "verified cached asyncified LDC artifact (wasm EH + asyncify)"
+      : "verified cached LDC component-shell artifact (not full Svelte tree)";
   } catch (error) {
     result.artifact = "stale";
     result.reason = String(error);
@@ -344,9 +570,14 @@ export function buildWasmCell(
     writeFileSync(join(ws, ".svelte-d", "wasm-build.log"), log);
     return result;
   };
-  const awaitSource = existsSync(join(ws, "src-svelte")) && readdirSync(join(ws, "src-svelte")).filter((name) => name.endsWith(".svelte")).some((name) => /\{#await\b|\bawait\s/.test(readFileSync(join(ws, "src-svelte", name), "utf8")));
-  if (opts.asyncify || process.env.G6B_WASM_ASYNCIFY === "1" || awaitSource) {
-    return finish(3, "Asyncify with wasm EH is unverified; nonblocking await transformation is unavailable");
+  const svelteAwait = existsSync(join(ws, "src-svelte")) && readdirSync(join(ws, "src-svelte")).filter((name) => name.endsWith(".svelte")).some((name) => /\{#await\b/.test(readFileSync(join(ws, "src-svelte", name), "utf8")));
+  if (svelteAwait) {
+    return finish(3, "Svelte markup `{#await}` is not yet lowered to the libwasm D cell");
+  }
+  const dAwait = existsSync(join(ws, "src-d")) && readdirSync(join(ws, "src-d")).filter((name) => name.endsWith(".d")).some((name) => /\bawait\s*\(|libwasm_await__void/.test(readFileSync(join(ws, "src-d", name), "utf8")));
+  const doAsyncify = opts.asyncify || process.env.G6B_WASM_ASYNCIFY === "1" || dAwait;
+  if (doAsyncify && !tc.wasmOpt) {
+    return finish(3, "wasm-opt required for asyncify; set SVELTE_D_WASM_OPT or add binaryen to PATH");
   }
   const errors = runtimePreflight(tc);
   if (errors.length) return finish(3, errors.join("; "));
@@ -363,13 +594,24 @@ export function buildWasmCell(
     if (r.status !== 0) return finish(2, `dub failed (status ${r.status}, signal ${r.signal})`, log);
     if (!existsSync(raw)) return finish(2, "dub succeeded without producing the requested raw artifact", log);
     if (cellInputHash(ws, tc, buildType) !== inputs) return finish(2, "build inputs changed during compilation; rebuild required", log);
-    const bytes = readFileSync(raw);
-    const imports = verifyLibwasmAbi(bytes);
+    let bytes = readFileSync(raw);
+    let imports = verifyLibwasmAbi(bytes, "app");
+    if (doAsyncify) {
+      const asyncifyArgs = ["--enable-bulk-memory", "--enable-exception-handling", "--enable-reference-types", "--asyncify", "--pass-arg=asyncify-imports@env.libwasm_await__void", raw, "-o", ship];
+      log += `+ ${tc.wasmOpt} ${asyncifyArgs.join(" ")}\n`;
+      const opt = runWasmOpt(tc.wasmOpt, asyncifyArgs, opts.run);
+      log += `${opt.stdout || ""}${opt.stderr || ""}${opt.error || ""}`;
+      if (opt.status !== 0) return finish(2, `wasm-opt --asyncify failed (status ${opt.status}, signal ${opt.signal})`, log);
+      if (!existsSync(ship)) return finish(2, "wasm-opt succeeded without producing the requested artifact", log);
+      bytes = readFileSync(ship);
+    } else {
+      writeFileSync(ship, bytes);
+    }
+    imports = verifyLibwasmAbi(bytes, "app");
     verifyLibwasmStartup(bytes);
     const provenance: CellProvenance = { schema: "g6lc-libwasm-artifact/v1", abi: LIBWASM_ABI, inputs, sha256: sha256(bytes), buildType, compiler: tc.versionLine, imports };
-    writeFileSync(ship, bytes);
     writeFileSync(manifest, JSON.stringify(provenance, null, 2) + "\n");
-    return finish(0, "verified LDC component-shell artifact (not full Svelte tree)", log, provenance);
+    return finish(0, doAsyncify ? "verified asyncified LDC artifact (wasm EH + asyncify)" : "verified LDC component-shell artifact (not full Svelte tree)", log, provenance);
   } catch (error) {
     rmSync(ship, { force: true });
     rmSync(manifest, { force: true });

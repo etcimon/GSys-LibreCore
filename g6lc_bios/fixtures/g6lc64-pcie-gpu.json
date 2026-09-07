@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "profile": "full",
+  "product": "desktop",
+  "isa": {
+    "xlen": 64,
+    "march": "rv64imafdc",
+    "mmu": "sv39",
+    "extensions": {
+      "c": "live",
+      "v": "absent",
+      "f": "live",
+      "d": "live",
+      "zba": "absent",
+      "zicboz": "absent"
+    }
+  },
+  "kernel": {
+    "shape": "zeal",
+    "gr": { "enable": true, "w": 640, "h": 480, "colors": 16, "backend": "virtio-gpu" },
+    "proxy": {
+      "enable": true,
+      "link": "virtio-gpu",
+      "dpi": 192,
+      "fps": 0,
+      "detected_hz": 120,
+      "high_w": 1920,
+      "high_h": 1080,
+      "scale_mode": "dpi",
+      "gl": false
+    },
+    "tls": { "enable": true, "https": true, "rsa": true, "ecdsa": true, "certificates": true },
+    "http": { "enable": true, "http1": true, "http2": true, "proxy_js": true },
+    "params": {
+      "clocks": true,
+      "edk2": true,
+      "uboot": true,
+      "bootloader": true,
+      "cpu_hz": 1000000000,
+      "uart_baud": 115200,
+      "next": "opensbi"
+    },
+    "ui": "svelte-d",
+    "wasm": { "enable": true, "jit": true },
+    "cli": "zealc",
+    "display": "html-js",
+    "browser": {
+      "html": true,
+      "dom": true,
+      "view": true,
+      "css": false,
+      "js": "aot",
+      "js_live": false,
+      "html_subset": "setup",
+      "ui": "svelte-d",
+      "wasm": { "enable": true, "jit": true }
+    }
+  },
+  "pcie": {
+    "scan_display": true,
+    "ecam": "0x30000000",
+    "mmio": "0x60000000",
+    "mmio_len": "0x10000000"
+  },
+  "connectors": {
+    "core": ["sbi", "pmu", "opp"],
+    "apu": ["uart", "gpio", "spi"],
+    "uncore": ["pcie"]
+  },
+  "peripherals": [
+    { "id": "uart0", "class": "uart", "model": "ns16550", "base": "0x10000000" },
+    { "id": "spi0", "class": "blk", "model": "sifive-spi-nor", "base": "0x20000000" }
+  ],
+  "memory": {
+    "dram_base": "0x80000000",
+    "dram_len": "0x40000000",
+    "text_offset": "0x200000"
+  },
+  "harts": { "count": 2, "cores": 1, "threads": 2 },
+  "core": { "issue_ports": 2, "ooo": false, "stream": false },
+  "uncore": { "clint": true, "plic": true, "pcie": true },
+  "entry": { "hotkey": "DEL", "timeout_ms": 2000 },
+  "holyc": {
+    "fast_init": true,
+    "dual_band": {
+      "uart": false,
+      "tcp": { "enable": false, "host_port": 2222, "guest_port": 22, "proto": "holyc-repl" }
+    }
+  },
+  "postboot": {
+    "enable": "never",
+    "access": "view"
+  },
+  "net_expose": {
+    "mode": "never",
+    "via": "adapter",
+    "web": false,
+    "ssh_holyc": false
+  },
+  "loopback": {
+    "enable": false,
+    "transport": "mbox",
+    "compatible": "gsys,g6lc-bios-mbox",
+    "base": "0x10100000",
+    "len": "0x1000",
+    "irq": 3,
+    "chardev": "/dev/g6lc-bios"
+  },
+  "faces": {
+    "display": "html-js",
+    "cli": "ssh-holyc",
+    "kvm_backends": ["html-js", "ssh-holyc"],
+    "remote_http": { "enable": "never" }
+  }
+}

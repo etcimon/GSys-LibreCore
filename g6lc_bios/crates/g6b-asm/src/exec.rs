@@ -25,7 +25,9 @@ use crate::{
 /// Host-executor step bound. The guest's `VioPaint` 4bpp→X8R8G8B8 expand is a
 /// real w*h/2-iteration loop (≈2M words at 640×480) plus DOM paint and the
 /// rest of boot; real QEMU has no such bound.
-const STEP_LIMIT: u32 = 16_000_000;
+/// Host-model step ceiling — raised for the timer-tick background repaint
+/// (DomPaint+VioPaint per dirty tick) plus the await/dom-nav lane.
+const STEP_LIMIT: u32 = 24_000_000;
 const UART0: u64 = 0x1000_0000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +124,13 @@ pub struct Smoke {
     /// Display-engine framebuffer descriptor: (fb, width, height, stride,
     /// format) latched at COMMIT.
     pub disp_desc: (u64, u32, u32, u32, u32),
+    /// `DispSel` result read out of `__disp`: `(class, surface, w, h, stride,
+    /// hpd)`. Class/surface follow `g6b_spec::OutputClass::code` and
+    /// `Surface::code`; `hpd` is one of `vio::HPD_*`.
+    pub disp_sel: (u32, u32, u32, u32, u32, u32),
+    /// `PciProbe` result: `(bar0, vendor<<16|device)`, both 0 when nothing was
+    /// accepted.
+    pub pci_fb: (u32, u32),
 }
 
 /// Lower `module` at `entry` and run hart 0 until park/UART/SBI SRST.
@@ -162,6 +171,7 @@ pub fn run_module_hart(
         b'V',
         spec.wants_virtio_gpu(),
         true,
+        module.vio_bss_addr(entry).unwrap_or(0),
     )
 }
 
@@ -198,6 +208,7 @@ pub fn run_module_kick(
         kick,
         spec.wants_virtio_gpu(),
         true,
+        module.vio_bss_addr(entry).unwrap_or(0),
     )
 }
 
@@ -221,7 +232,17 @@ pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Resul
             .saturating_add(module.vio_bytes)
             .saturating_add(module.vio_fb_bytes),
     );
-    run_with_kick(spec, &image, entry, memsz, 0, b'V', false, true)
+    run_with_kick(
+        spec,
+        &image,
+        entry,
+        memsz,
+        0,
+        b'V',
+        false,
+        true,
+        module.vio_bss_addr(entry).unwrap_or(0),
+    )
 }
 
 /// Same as [`run_module`] but models *stock QEMU virt*: no g6lc-bios mailbox
@@ -254,6 +275,7 @@ pub fn run_module_bare(spec: &BoardSpec, module: &Module, entry: u64) -> Result<
         b'V',
         spec.wants_virtio_gpu(),
         false,
+        module.vio_bss_addr(entry).unwrap_or(0),
     )
 }
 
@@ -273,6 +295,9 @@ pub fn run(
         b'V',
         spec.wants_virtio_gpu(),
         true,
+        // Raw-image entry point: no module, so the `__vio` layout is unknown
+        // and the display-mux read-out is skipped rather than guessed.
+        0,
     )
 }
 
@@ -286,6 +311,9 @@ fn run_with_kick(
     kick: u8,
     vio_gpu: bool,
     extras: bool,
+    // Resolved `__vio` address so `done()` can read the `DispSel`/`PciProbe`
+    // result block. `0` when the caller has no module to resolve it from.
+    vio_base: u64,
 ) -> Result<Smoke, String> {
     let xlen = spec.isa.xlen;
     if xlen != 32 && xlen != 64 {
@@ -317,6 +345,17 @@ fn run_with_kick(
         uart1_base: crate::analyze::uart1_base(spec),
         vio_gpu,
         vio_inp: vio_gpu && spec.wants_virtio_input(),
+        vio_base,
+        pci_ecam: spec.pcie_ecam().unwrap_or(0),
+        // One modelled bus-0 display controller when the board asks for the
+        // scan: QEMU-stdvga-shaped (vendor 0x1234), base class 0x03, with BAR0
+        // parked at the declared window base so it is inside `pcie.mmio`. This
+        // stands in for "firmware already mode-set an adapter"; there is no
+        // AtomBIOS/GSP model because there is no such guest code to exercise.
+        pci_dev: spec.pcie_ecam().and_then(|_| {
+            let (mmio, _) = spec.pcie_mmio_window()?;
+            Some((1u64, 0x1234_1111u32, 0x0300_0000u32, mmio as u32))
+        }),
         vio_disp_w: if spec.kernel.gr.enable {
             spec.kernel.gr.w.max(8)
         } else {
@@ -527,7 +566,9 @@ fn done(
             return None;
         }
         (0..csr.dom_rows.min(48)).find_map(|i| {
-            let row = csr.dom_base.wrapping_add(16 + u64::from(i) * 32);
+            let row = csr
+                .dom_base
+                .wrapping_add(crate::dom::DOM_HDR as u64 + u64::from(i) * 32);
             let idp = if xlen == 64 {
                 load_u64(ram, base, row).unwrap_or(0)
             } else {
@@ -620,6 +661,33 @@ fn done(
             csr.disp_regs[7],
             csr.disp_regs[8],
         ),
+        disp_sel: {
+            let at = |off: i32| {
+                if csr.vio_base == 0 {
+                    0
+                } else {
+                    load_u32(ram, base, csr.vio_base.wrapping_add(off as u64)).unwrap_or(0)
+                }
+            };
+            (
+                at(crate::vio::DISP_SEL_CLASS),
+                at(crate::vio::DISP_SEL_SURFACE),
+                at(crate::vio::DISP_SEL_W),
+                at(crate::vio::DISP_SEL_H),
+                at(crate::vio::DISP_SEL_STRIDE),
+                at(crate::vio::DISP_SEL_HPD),
+            )
+        },
+        pci_fb: {
+            let at = |off: i32| {
+                if csr.vio_base == 0 {
+                    0
+                } else {
+                    load_u32(ram, base, csr.vio_base.wrapping_add(off as u64)).unwrap_or(0)
+                }
+            };
+            (at(crate::vio::DISP_PCI_FB), at(crate::vio::DISP_PCI_ID))
+        },
     }
 }
 
@@ -746,6 +814,13 @@ struct Csr {
     disp_committed: bool,
     /// STATUS readback: 1 after COMMIT.
     disp_status: u32,
+    /// Resolved `__vio` base, for reading the `DispSel`/`PciProbe` block.
+    vio_base: u64,
+    /// PCIe ECAM window base — 0 = no host bridge modelled.
+    pci_ecam: u64,
+    /// Modelled bus-0 display controller: `(dev, vendor<<16|device, class_word,
+    /// bar0)`. `None` = no PCIe display device present.
+    pci_dev: Option<(u64, u32, u32, u32)>,
 }
 
 #[derive(Default)]
@@ -816,6 +891,10 @@ fn step(
                 (0, 0x20) => a.wrapping_sub(b),
                 (0, 1) => a.wrapping_mul(b),
                 (4, 0) => a ^ b,
+                // sltu — unsigned compare, used by `PciProbe`'s BAR window
+                // check. On rv32 the registers are already zero-extended by
+                // `wr`, so the u64 compare is the u32 compare.
+                (3, 0) => u64::from(a < b),
                 _ => return Step::Halt(Halt::Unimp(w)),
             };
             wr(xlen, x, rd, v);
@@ -851,6 +930,11 @@ fn step(
             }
             if is_disp(csr, addr) {
                 wr(xlen, x, rd, u64::from(disp_load(csr, addr)));
+                *pc = npc;
+                return Step::Cont;
+            }
+            if is_pci_ecam(csr, addr) {
+                wr(xlen, x, rd, u64::from(pci_load(csr, addr)));
                 *pc = npc;
                 return Step::Cont;
             }
@@ -988,9 +1072,24 @@ fn step(
                 if take_pending_sei(xlen, pc, csr) {
                     return Step::Cont;
                 }
-                if timer_armed(csr) && csr.ticks < 1 && csr.stvec != 0 {
+                // Timer tick budget: one boot tick (existing) plus, once the
+                // input burst has been delivered, one more — the post-input
+                // tick exercises trap_timer's dirty-check background repaint
+                // (DomNav/await mutations flushed without a Ui command).
+                let tick_budget = 1 + u32::from(csr.inp_poked);
+                if timer_armed(csr) && csr.ticks < tick_budget && csr.stvec != 0 {
                     take_timer_trap(xlen, *pc, csr);
                     *pc = csr.stvec;
+                    return Step::Cont;
+                }
+                // Inside a trap (SIE masked, SPIE latched) a `wfi` is a
+                // bounded poll pause, not a halt: the caller's loop
+                // re-checks the used ring, which the model completes
+                // synchronously at notify. Returning Halt here would abort
+                // the run mid-trap the moment a pending kick can't be
+                // delivered (SIE is off, so SEI can never be taken).
+                if (csr.sstatus & SSTATUS_SIE as u64) == 0 && (csr.sstatus & SSTATUS_SPIE) != 0 {
+                    *pc = npc;
                     return Step::Cont;
                 }
                 *pc = npc;
@@ -1047,7 +1146,10 @@ fn take_sei_trap(xlen: u32, pc: u64, csr: &mut Csr) {
 }
 
 fn take_pending_sei(xlen: u32, pc: &mut u64, csr: &mut Csr) -> bool {
-    if csr.stvec == 0 || csr.sei_claims >= 64 || !sei_ready(csr) {
+    // Bounded irq-storm guard: covers the canned SEQ (per-byte UART claims),
+    // the input burst, virtqueue used-buffer irqs (2 per repaint) and a
+    // headroom margin — 128 still fails a runaway storm closed.
+    if csr.stvec == 0 || csr.sei_claims >= 128 || !sei_ready(csr) {
         return false;
     }
     take_sei_trap(xlen, *pc, csr);
@@ -1103,6 +1205,30 @@ fn disp_load(csr: &Csr, addr: u64) -> u32 {
         0x28 => csr.disp_status,
         o if o < 0x40 => csr.disp_regs[(o / 4) as usize],
         _ => 0,
+    }
+}
+
+/// PCIe ECAM config window: `bus << 20 | dev << 15 | fn << 12 | off`. Only bus
+/// 0 function 0 is modelled, which is what `PciProbe` walks. Reads are
+/// **read-only** — the BIOS never writes config space, so there is no store
+/// path here, and an absent slot returns all-ones exactly like real hardware.
+fn is_pci_ecam(csr: &Csr, addr: u64) -> bool {
+    csr.pci_ecam != 0 && addr.wrapping_sub(csr.pci_ecam) < (1 << 20)
+}
+
+fn pci_load(csr: &Csr, addr: u64) -> u32 {
+    let off = addr.wrapping_sub(csr.pci_ecam);
+    let dev = off >> 15;
+    let reg = (off & 0xfff) as i32;
+    match csr.pci_dev {
+        Some((d, id, class, bar0)) if d == dev => match reg {
+            crate::vio::PCI_CFG_ID => id,
+            crate::vio::PCI_CFG_CLASS => class,
+            crate::vio::PCI_CFG_BAR0 => bar0,
+            _ => 0,
+        },
+        // No device in this slot: all-ones is the architectural "absent" reply.
+        _ => u32::MAX,
     }
 }
 
@@ -1852,13 +1978,24 @@ fn host_uart_kick(csr: &mut Csr) -> bool {
     }
     const SEQ: &[u8] = b"ViewSection(\"config\")\nUi\nFile\nGet\n";
     // On boards with the virtio-input lane, follow up with `Keys` — the
-    // canned host_inp_kick keypress should already sit in INP_KQ.
+    // canned host_inp_kick keypress should already sit in INP_KQ — then
+    // `Await`×5 (4 slots + the bounded-capacity `AWAIT-REJ full`) + `Throw`
+    // (reject the newest pending → `AWAIT-THROW`) + `Ui` (the DomAwait poll
+    // drains the 3 still-pending slots).
     const SEQ_KEYS: &[u8] = b"Keys\n";
+    const SEQ_AWAIT: &[u8] = b"Await\nAwait\nAwait\nAwait\nAwait\nThrow\nUi\n";
     let i = csr.uart_seq_i as usize;
+    // Segments past SEQ only exist when their lane is live; the AWAIT base
+    // skips the KEYS segment on input-less specs.
+    let keys_len = if csr.vio_inp { SEQ_KEYS.len() } else { 0 };
+    let await_base = SEQ.len() + keys_len;
     let byte = if i < SEQ.len() {
         SEQ[i]
-    } else if csr.vio_inp && i < SEQ.len() + SEQ_KEYS.len() {
+    } else if i < await_base {
         SEQ_KEYS[i - SEQ.len()]
+    } else if csr.dom_base != 0 && i < await_base + SEQ_AWAIT.len() {
+        // `Await` only exists under the jit DOM lane (dom_base latched).
+        SEQ_AWAIT[i - await_base]
     } else {
         return false;
     };
@@ -2711,18 +2848,25 @@ mod tests {
 
     #[test]
     fn vio_paint_scale_expands_to_proxy_high_res() {
-        // Display-proxy live (1920×1080, dpi mode → scale 2): the scanout
-        // resource is the *high-res* surface and FbExpand paints the 4bpp
-        // plane into a centered 1280×960 window — the `Proxy::to_ppm`
-        // semantics (ox=(1920-1280)/2=320, oy=(1080-960)/2=60).
+        // Display-proxy live (1920×1080, dpi mode → scale 2) on the **VGA
+        // surface**: the scanout resource is the high-res surface and
+        // `FbExpand` paints the 4bpp plane into a centered 1280×960 window —
+        // the `Proxy::to_ppm` semantics (ox=(1920-1280)/2=320,
+        // oy=(1080-960)/2=60).
+        //
+        // `proxy.surface:"vga"` is explicit because this board's output is
+        // GPU-class, whose *default* is now the 1:1 native surface — that is
+        // the whole point of the split, and the upscale path must still be
+        // provable on demand rather than quietly becoming unreachable.
         let spec = BoardSpec::from_json_str(
             r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
 "kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
 "proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":120,
-         "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":true}},
+         "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":true,"surface":"vga"}},
 "holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
         )
         .unwrap();
+        assert_eq!(spec.default_surface(), g6b_spec::Surface::Vga);
         let m = analyze::kstart(&spec);
         let s = run_module(&spec, &m, 0x8020_0000).unwrap();
         assert!(s.console.contains("VIRTIO-SCAN"), "{}", s.console);
@@ -2785,6 +2929,173 @@ mod tests {
         for x in (0..1920).step_by(97) {
             assert_eq!(dp(x, 1070), 0, "bottom letterbox x={x}");
         }
+    }
+
+    #[test]
+    fn gpu_surface_places_the_plane_1to1_instead_of_magnifying_it() {
+        // Same board, but on the **default** surface for a GPU-class output.
+        // `FbExpandSel` must pick `FbExpand1`, so the 640×480 plane lands at
+        // scale 1 centred at ((1920-640)/2, (1080-480)/2) = (640, 300) rather
+        // than being blown up ×2. This is the regression that fails if the
+        // low-res plane ever goes back to being magnified onto a GPU output.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":120,
+         "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            spec.default_surface(),
+            g6b_spec::Surface::Gpu,
+            "an accelerated output defaults to the native surface"
+        );
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert_eq!(s.disp_sel.1, g6b_spec::Surface::Gpu.code());
+        let pal_px = |lx: u32, ly: u32| -> u32 {
+            let hdr = u32::from_le_bytes(s.gr_frame[40..44].try_into().unwrap()) as usize;
+            let b = s.gr_frame[hdr + (ly * 320 + lx / 2) as usize];
+            let idx = if lx % 2 == 0 { b >> 4 } else { b & 0xf } as usize;
+            crate::vio::vio_palette()[idx]
+        };
+        let dp = |x: u32, y: u32| -> u32 {
+            u32::from_le_bytes(
+                s.vio_fb[(y * 1920 + x) as usize * 4..][..4]
+                    .try_into()
+                    .unwrap(),
+            )
+        };
+        let (ox, oy) = (640u32, 300u32);
+        for y in (oy..oy + 480).step_by(47) {
+            for x in (ox..ox + 640).step_by(53) {
+                assert_eq!(dp(x, y), pal_px(x - ox, y - oy), "1:1 dst({x},{y})");
+            }
+        }
+        // Everything outside the 1:1 window stays black below the VioScan band.
+        for y in (oy.max(64)..1080).step_by(61) {
+            assert_eq!(dp(10, y), 0, "left of the 1:1 window y={y}");
+        }
+    }
+
+    #[test]
+    fn disp_sel_picks_the_uncore_engine_over_virtio_and_reports_hpd_unknown() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"hdmi":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"hdmi"},
+"proxy":{"enable":true,"link":"hdmi","dpi":192,"high_w":1920,"high_h":1080,"scale_mode":"dpi"}},
+"peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}],
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        // class 2 = uncore-scanout, surface 1 = gpu.
+        let (class, surface, w, h, stride, hpd) = s.disp_sel;
+        assert_eq!(class, g6b_spec::OutputClass::UncoreScanout.code());
+        assert_eq!(surface, g6b_spec::Surface::Gpu.code());
+        assert_eq!((w, h), (1920, 1080));
+        assert_eq!(stride, 1920 * 4);
+        // The host model reports contract revision 1, which has no HPD
+        // register — so the guest must say "unknown", never "connected".
+        assert_eq!(hpd as i64, crate::vio::HPD_UNKNOWN);
+        assert!(s.console.contains("DISP-SEL 21"), "{}", s.console);
+    }
+
+    #[test]
+    fn disp_sel_falls_to_vga_when_no_output_is_present() {
+        // Gr plane over UART: the mux still runs and must record the `none`
+        // rung with the VGA surface rather than leaving the block zeroed by
+        // accident — class 0 *is* the answer here, so check the geometry too.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"uart"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        assert!(!spec.wants_virtio_gpu());
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        let (class, surface, w, h, _, hpd) = s.disp_sel;
+        assert_eq!(class, g6b_spec::OutputClass::None.code());
+        assert_eq!(surface, g6b_spec::Surface::Vga.code());
+        assert_eq!((w, h), (640, 480), "the low-res plane geometry");
+        assert_eq!(hpd as i64, crate::vio::HPD_UNKNOWN);
+        assert!(s.console.contains("DISP-SEL 00"), "{}", s.console);
+    }
+
+    #[test]
+    fn pci_probe_accepts_a_linear_bar_and_wins_the_ladder() {
+        // A PCIe display controller with a BAR inside the declared window
+        // outranks the virtio transport. The window is deliberately *not* at
+        // 0x40000000 — that is QEMU virt's PCIe MMIO base and also the
+        // ai-island block, a combination `check_display` refuses.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"proxy":{"enable":true,"link":"virtio-gpu","dpi":192,"high_w":1920,"high_h":1080}},
+"pcie":{"scan_display":true,"ecam":"0x30000000","mmio":"0x60000000","mmio_len":"0x10000000"},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        assert!(spec.wants_pci_scan());
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("PCI-GPU"), "{}", s.console);
+        assert!(!s.console.contains("PCI-GPU-NONE"), "{}", s.console);
+        let (bar, id) = s.pci_fb;
+        assert_eq!(bar, 0x6000_0000, "the accepted linear BAR");
+        assert_eq!(id, 0x1234_1111);
+        let (class, surface, ..) = s.disp_sel;
+        assert_eq!(
+            class,
+            g6b_spec::OutputClass::PcieLinearFb.code(),
+            "pcie outranks virtio-gpu once a usable framebuffer exists"
+        );
+        assert_eq!(surface, g6b_spec::Surface::Gpu.code());
+        assert!(s.console.contains("DISP-SEL 31"), "{}", s.console);
+    }
+
+    #[test]
+    fn pci_probe_reports_none_and_demotes_when_no_bar_is_usable() {
+        // Same board, but the modelled controller's BAR lands outside the
+        // declared window, so it must be refused and the mux must fall through
+        // to virtio-gpu rather than trusting an out-of-window address.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"proxy":{"enable":true,"link":"virtio-gpu","dpi":192,"high_w":1920,"high_h":1080}},
+"pcie":{"scan_display":true,"ecam":"0x30000000","mmio":"0x60000000","mmio_len":"0x1000"},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        // BAR0 == window base, window is only 0x1000 long, so the BAR *is*
+        // inside it — this board accepts. Narrow it further by moving the BAR
+        // out via a window that starts above it.
+        assert_eq!(s.pci_fb.0, 0x6000_0000);
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"proxy":{"enable":true,"link":"virtio-gpu","dpi":192,"high_w":1920,"high_h":1080}},
+"pcie":{"scan_display":true,"ecam":"0x30000000","mmio":"0x00000000","mmio_len":"0x1000"},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        // BAR0 is the window base 0 → masked to 0 → refused as "not a
+        // framebuffer", so the controller is demoted, not driven.
+        assert_eq!(s.pci_fb.0, 0, "an unusable BAR is never accepted");
+        assert!(s.console.contains("PCI-GPU-DEMOTED"), "{}", s.console);
+        let (class, ..) = s.disp_sel;
+        assert_eq!(
+            class,
+            g6b_spec::OutputClass::VirtioGpu.code(),
+            "demoted pcie falls through to the next rung"
+        );
     }
 
     #[test]
@@ -2870,6 +3181,34 @@ mod tests {
         assert!(s.dom_nav, "no nav.sel DOM row: {}", s.console);
         assert_eq!(s.dom_navtext, "open cpu", "{}", s.console);
         assert!(s.console.contains("NAV cpu\n"), "{}", s.console);
+        // Bounded await lane, 4 slots: `Await`×4 claim `await.0`..`await.3`
+        // (pending), the fifth is the bounded-capacity `AWAIT-REJ full`,
+        // `Throw` rejects the newest pending (slot 3 → `AWAIT-THROW` →
+        // `await.3` row = "rejected menu"), and the `Ui` DomAwait poll
+        // drains the three still-pending slots (`AWAIT-GET` + "resolved
+        // menu" rows). The post-input timer tick also flushed a background
+        // repaint (VIRTIO-PAINT without a Ui).
+        for line in [
+            "AWAIT pending 0\n",
+            "AWAIT pending 3\n",
+            "AWAIT-REJ full\n",
+            "AWAIT-THROW /bios/menu\n",
+            "AWAIT-GET /bios/menu\n",
+            "rejected menu",
+        ] {
+            assert!(s.console.contains(line), "await lane: {}", s.console);
+        }
+        assert_eq!(
+            s.console.matches("AWAIT-GET /bios/menu\n").count(),
+            3,
+            "slots 0-2 resolve, slot 3 was thrown: {}",
+            s.console
+        );
+        assert!(
+            s.console.matches("VIRTIO-PAINT\n").count() >= 3,
+            "background repaint missing: {}",
+            s.console
+        );
         assert!(!s.console.contains("TRAP-"), "{}", s.console);
         assert!(matches!(s.halt, Halt::Wfi), "{:?}", s.halt);
     }

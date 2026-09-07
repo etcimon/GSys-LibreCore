@@ -36,7 +36,19 @@ nothrow:
   void construct() @trusted { }
   void onMount() { }
   enum g6bStaticDom = true;
-  void ready() { }
+  void ready() {
+    try {
+      g6b_fetch("/bios/clocks");
+      auto p1 = g6b_fetch("/bios/menu");
+      libwasm_await__void(p1);
+      g6b_holyc("UsbLs(\"fat32\")");
+      g6b_holyc("MenuCpu()");
+      g6b_register("/bios/custom", "GET");
+    } catch (Exception e) {
+      // bounded catch: rejection state is exposed through the
+      // libwasm host; the app may inspect or log if it chooses.
+    }
+  }
   void onUnmount() { }
 }
 mixin Spa!App;

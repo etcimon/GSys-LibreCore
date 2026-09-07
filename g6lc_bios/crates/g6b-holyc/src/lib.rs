@@ -438,6 +438,7 @@ fn legacy_builtin_name(name: &str) -> bool {
             | "RegisterEndpoint"
             | "HttpHandle"
             | "KernelGet"
+            | "DisplaySurface"
             | "SettingsExport"
             | "SettingsImport"
             | "FlashImage"
@@ -808,6 +809,28 @@ impl Program {
                     resp.status,
                     resp.body_str()
                 )))
+            }
+            // Flip the scanout surface through the same `/bios/display` route
+            // the browser toggle POSTs to, so the HolyC and browser lanes
+            // cannot diverge. Fail-closed twice: an unknown surface name is
+            // refused here, and a board with no accelerated output has no POST
+            // route registered, so the router answers non-200.
+            "DisplaySurface" => {
+                let want = args
+                    .first()
+                    .map(|a| self.eval_str(a))
+                    .unwrap_or_else(|| "vga".into());
+                if want != "vga" && want != "gpu" {
+                    return Err(format!("DisplaySurface takes vga or gpu, got {want}"));
+                }
+                let resp = self.router.fetch("POST", "/bios/display");
+                if resp.status != 200 {
+                    return Ok(Some(format!(
+                        "DISP-SURFACE-REFUSED {} {}\n",
+                        want, resp.status
+                    )));
+                }
+                Ok(Some(format!("DISP-SURFACE {want}\n")))
             }
             "SettingsExport" => {
                 let via = args

@@ -23,6 +23,9 @@ _FORBIDDEN = [
     re.compile(r"\bcore/include\b"),
 ]
 
+# External crates that are pinned in pins.toml and KD0-explicitly allowed.
+_ALLOWED_EXTERNAL = {"fontdue"}
+
 _SKIP = {".git", "target", ".tools", "out", "__pycache__", "kernel-spec"}
 
 
@@ -43,6 +46,8 @@ def main() -> int:
             continue
         name, _, body = line.strip().partition("=")
         name = name.strip()
+        if name in _ALLOWED_EXTERNAL:
+            continue
         m = _PATH_DEP.search(body)
         if not m:
             errors.append(f"{ws}:{lineno}: workspace dep `{name}` is not an in-package path")
@@ -69,8 +74,10 @@ def main() -> int:
             name, _, body = line.strip().partition("=")
             name, body = name.strip(), body.strip()
             if _WORKSPACE_DEP.search(body):
-                if name not in inheritable:
+                if name not in inheritable and name not in _ALLOWED_EXTERNAL:
                     errors.append(f"{man}:{lineno}: `{name}` not a workspace path dep")
+                continue
+            if name in _ALLOWED_EXTERNAL:
                 continue
             m = _PATH_DEP.search(body)
             if not m:

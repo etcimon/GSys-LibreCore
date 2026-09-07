@@ -87,3 +87,28 @@ for the 2D `virtio-gpu-device` fallback (identical guest commands).
   peripheral at `0x40003000`; no virtio transport).
 - Not modeled: TMDS/PHY link training, EDID/DPCD reads, pixel-clock PLL,
   hotplug IRQ — those live in the SoC uncore, not this BIOS package.
+
+## REQUIREMENTS ask — HPD + EDID for output selection (open)
+
+`architecture/DISPLAY.md` "Display outputs and surface selection" ranks this
+engine above virtio-gpu, but the ladder can only ask *"is the engine present"*
+(`MAGIC == 'G6DS'`), never *"is a cable connected"*. The 64-byte window has no
+hot-plug or mode information, so a display-proxy that switches output when an
+HDMI cable is plugged in is **not implementable against contract revision 1**.
+
+Proposed revision 2 additions, behind a bumped `REV` so revision-1 boards keep
+working unchanged:
+
+| off | name | access | meaning |
+|---|---|---|---|
+| `0x2c` | `HPD` | RO | bit0 sink connected; bit1 HPD-change latched (write-1-clear) |
+| `0x30` | `EDID_W` | RO | preferred-mode width from EDID/DPCD, 0 = unknown |
+| `0x34` | `EDID_H` | RO | preferred-mode height, 0 = unknown |
+| `0x38` | `EDID_HZ` | RO | preferred refresh in Hz, 0 = unknown |
+| `0x3c` | `IRQ` | RW | bit0 raise a PLIC interrupt on HPD change |
+
+Until that exists the BIOS must treat a declared engine as *possibly*
+disconnected: `DispSel` accepts it on `MAGIC` alone and reports
+`DISP-SEL ... hpd=unknown`, and `kernel.proxy.detected_hz` stays a
+human-authored BoardSpec field rather than a probe result. Do not describe the
+current behaviour as hot-plug detection.

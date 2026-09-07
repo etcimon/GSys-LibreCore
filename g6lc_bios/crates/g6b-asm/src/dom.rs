@@ -26,10 +26,27 @@ use crate::{gr_stride, Addr, Module, Node, Op, Purpose, GR_HEADER_BYTES};
 pub const DOM_ROWS: i64 = 48;
 /// One row: id_ptr(x) +8 text_ptr(x) +16 id_len(u32) +20 text_len(u32) +24 flags(u32).
 pub const DOM_ROW_BYTES: i64 = 32;
-/// Table header: +0 count(u32), +4 dirty(u32).
-pub const DOM_HDR: i32 = 16;
+/// Table header: +0 count(u32), +4 dirty(u32), +8 painted(u32),
+/// +12 npend(u32), +16..+28 await slots[4](u32).
+pub const DOM_HDR: i32 = 32;
+/// Header +8: dirty watermark the last background repaint covered
+/// (`trap_timer` paints when `dirty != painted`).
+pub const DOM_PAINTED: i32 = 8;
+/// Header +12: pending-await count — the cheap "any pending" test for the
+/// `DomAwait` poll; `Await` increments, `DomAwait` decrements per resolve.
+pub const DOM_AWAIT: i32 = 12;
+/// Header +16: `AWAIT_SLOTS` u32 slots — 0 idle, 1 pending, 2 resolved,
+/// 3 rejected. A `Await` claims the first non-pending slot; all-pending is
+/// the bounded `AWAIT-REJ full` (fail closed). Pending ops resolve on the
+/// poll points (timer tick or `Ui`/`Keys`), never inline — `await` does
+/// not block DOM events.
+pub const AWAIT_SLOT_OFF: i32 = 16;
+pub const AWAIT_SLOTS: i64 = 4;
+pub const AWAIT_PEND: i64 = 1;
+pub const AWAIT_DONE: i64 = 2;
+pub const AWAIT_REJ: i64 = 3;
 /// `__ui_dom` BSS size.
-pub const UI_DOM_BYTES: u64 = 16 + 48 * 32;
+pub const UI_DOM_BYTES: u64 = 32 + 48 * 32;
 /// id byte-length cap (longer ids are dropped, fail-closed).
 pub const DOM_ID_MAX: i64 = 96;
 /// Bytes a `fetch`/`log` string may print.
@@ -91,7 +108,7 @@ fn jump(to: &str) -> Op {
     }
 }
 
-fn signbit(xlen: u32) -> u32 {
+pub(crate) fn signbit(xlen: u32) -> u32 {
     xlen.saturating_sub(1)
 }
 
@@ -110,7 +127,732 @@ pub fn nodes(spec: &BoardSpec) -> Vec<Node> {
         wasm_fetch_node(xlen),
         wasm_log_node(xlen),
         dom_paint_node(spec),
+        dom_await_node(xlen),
+        wasm_await_node(xlen),
+        wasm_throw_node(xlen),
+        wasm_catch_node(xlen),
     ]
+}
+
+/// `WasmAwait` — the `env.await` import (also `uart_await`'s body): claim
+/// the first non-pending await slot of `AWAIT_SLOTS` u32s at `__ui_dom`
+/// header +16 — state → 1=pending, `npend` (+12) increments, the `await.N`
+/// row is set to `"pending menu"` and `AWAIT pending N` prints. All slots
+/// pending → `AWAIT-REJ full` (bounded capacity, fail closed). The claim
+/// never blocks: resolution happens on the `DomAwait` poll points, so an
+/// awaited op never stalls DOM events. s0=slot index, s1=`__ui_dom` —
+/// both framed (caller-saved-in-trap and wasm callers alike).
+fn wasm_await_node(xlen: u32) -> Node {
+    let mut ops = vec![
+        Op::Comment(
+            "WasmAwait — env.await: claim a bounded pending slot (await.N row); full → AWAIT-REJ"
+                .into(),
+        ),
+        Op::Glob("WasmAwait".into()),
+        Op::Label("WasmAwait".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -32,
+        },
+        st_x(xlen, RA, SP, 24),
+        st_x(xlen, S0, SP, 16),
+        st_x(xlen, S1, SP, 8),
+        Op::La {
+            rd: S1,
+            addr: Addr::UiDom,
+        },
+        Op::Li { rd: S0, imm: 0 },
+        Op::Label("wawait_find".into()),
+        Op::Li {
+            rd: T6,
+            imm: AWAIT_SLOTS,
+        },
+        Op::Beq {
+            rs1: S0,
+            rs2: T6,
+            to: "wawait_full".into(),
+        },
+        Op::Slli {
+            rd: T4,
+            rs: S0,
+            shamt: 2,
+        },
+        Op::Add {
+            rd: T4,
+            rs1: S1,
+            rs2: T4,
+        },
+        Op::Lw {
+            rd: T1,
+            rs: T4,
+            off: AWAIT_SLOT_OFF,
+        },
+        Op::Li {
+            rd: T6,
+            imm: AWAIT_PEND,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T6,
+            to: "wawait_got".into(),
+        },
+        Op::Addi {
+            rd: S0,
+            rs: S0,
+            imm: 1,
+        },
+        Op::Jal {
+            rd: X0,
+            to: "wawait_find".into(),
+        },
+        Op::Label("wawait_got".into()),
+        Op::Li {
+            rd: T1,
+            imm: AWAIT_PEND,
+        },
+        Op::Sw {
+            rs2: T1,
+            rs1: T4,
+            off: AWAIT_SLOT_OFF,
+        },
+        Op::Lw {
+            rd: T2,
+            rs: S1,
+            off: DOM_AWAIT,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: 1,
+        },
+        Op::Sw {
+            rs2: T2,
+            rs1: S1,
+            off: DOM_AWAIT,
+        },
+        // id = domawait_ids + i*8 ("await.N\0") → row "pending menu".
+        Op::La {
+            rd: A0,
+            addr: Addr::Label("domawait_ids".into()),
+        },
+        Op::Slli {
+            rd: T4,
+            rs: S0,
+            shamt: 3,
+        },
+        Op::Add {
+            rd: A0,
+            rs1: A0,
+            rs2: T4,
+        },
+        Op::Li { rd: A1, imm: 7 },
+        Op::La {
+            rd: A2,
+            addr: Addr::Label("domawait_pend".into()),
+        },
+        Op::Li { rd: A3, imm: 12 },
+        Op::Jal {
+            rd: RA,
+            to: "WasmDomText".into(),
+        },
+    ];
+    ops.extend(puts_str("AWAIT pending "));
+    ops.extend([
+        Op::Addi {
+            rd: A0,
+            rs: S0,
+            imm: i32::from(b'0'),
+        },
+        Op::Li {
+            rd: A7,
+            imm: SBI_PUTCHAR,
+        },
+        Op::Ecall,
+        Op::Li {
+            rd: A0,
+            imm: i64::from(b'\n'),
+        },
+        Op::Li {
+            rd: A7,
+            imm: SBI_PUTCHAR,
+        },
+        Op::Ecall,
+        Op::Jal {
+            rd: X0,
+            to: "wawait_ret".into(),
+        },
+        Op::Label("wawait_full".into()),
+    ]);
+    ops.extend(puts_str("AWAIT-REJ full\n"));
+    ops.extend([
+        Op::Li { rd: S0, imm: -1 },
+        Op::Label("wawait_ret".into()),
+        // a0 = claimed slot index (or -1 when full) — the env.await result.
+        Op::Addi {
+            rd: A0,
+            rs: S0,
+            imm: 0,
+        },
+        Op::Label("wawait_out".into()),
+        ld_x(xlen, S1, SP, 8),
+        ld_x(xlen, S0, SP, 16),
+        ld_x(xlen, RA, SP, 24),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 32,
+        },
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::UiDom,
+        ops,
+    }
+}
+
+/// `WasmThrow` — the `env.throw` import (also `uart_throw`'s body): reject
+/// the newest pending await slot — state → 3=rejected, `npend`--, the
+/// `await.N` row is set to `"rejected menu"` (the caught state, visible in
+/// the next repaint) and `AWAIT-THROW /bios/menu` prints. Nothing pending
+/// → `AWAIT-THROW none` (a throw with no in-flight await is a no-op, not
+/// an abort). A rejected slot is reclaimable like a resolved one.
+/// s0=newest pending idx (AWAIT_SLOTS sentinel = none), s1=`__ui_dom`.
+fn wasm_throw_node(xlen: u32) -> Node {
+    let mut ops = vec![
+        Op::Comment(
+            "WasmThrow — env.throw: reject the newest pending await (AWAIT-THROW; row → rejected)"
+                .into(),
+        ),
+        Op::Glob("WasmThrow".into()),
+        Op::Label("WasmThrow".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -32,
+        },
+        st_x(xlen, RA, SP, 24),
+        st_x(xlen, S0, SP, 16),
+        st_x(xlen, S1, SP, 8),
+        Op::La {
+            rd: S1,
+            addr: Addr::UiDom,
+        },
+        // a0 < 0 → the newest-pending scan (the UART Throw path);
+        // 0 <= a0 < AWAIT_SLOTS → targeted reject (the env.throw(i32)
+        // import — the rejected slot is the awaiter's own, not always the
+        // newest). Anything else / non-pending → AWAIT-THROW none.
+        Op::Srli {
+            rd: T6,
+            rs: A0,
+            shamt: signbit(xlen),
+        },
+        Op::Bne {
+            rs1: T6,
+            rs2: X0,
+            to: "wthrow_scan".into(),
+        },
+        // Bounds: t6 = SLOTS - a0 must be > 0.
+        Op::Li {
+            rd: T6,
+            imm: AWAIT_SLOTS,
+        },
+        Op::Sub {
+            rd: T6,
+            rs1: T6,
+            rs2: A0,
+        },
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: "wthrow_none".into(),
+        },
+        Op::Srli {
+            rd: T6,
+            rs: T6,
+            shamt: signbit(xlen),
+        },
+        Op::Bne {
+            rs1: T6,
+            rs2: X0,
+            to: "wthrow_none".into(),
+        },
+        Op::Addi {
+            rd: S0,
+            rs: A0,
+            imm: 0,
+        },
+        // Targeted slot must actually be pending.
+        Op::Slli {
+            rd: T4,
+            rs: S0,
+            shamt: 2,
+        },
+        Op::Add {
+            rd: T4,
+            rs1: S1,
+            rs2: T4,
+        },
+        Op::Lw {
+            rd: T1,
+            rs: T4,
+            off: AWAIT_SLOT_OFF,
+        },
+        Op::Li {
+            rd: T6,
+            imm: AWAIT_PEND,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T6,
+            to: "wthrow_none".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "wthrow_reject".into(),
+        },
+        Op::Label("wthrow_scan".into()),
+        Op::Li {
+            rd: S0,
+            imm: AWAIT_SLOTS,
+        },
+        Op::Li { rd: T3, imm: 0 },
+        Op::Label("wthrow_loop".into()),
+        Op::Li {
+            rd: T6,
+            imm: AWAIT_SLOTS,
+        },
+        Op::Beq {
+            rs1: T3,
+            rs2: T6,
+            to: "wthrow_pick".into(),
+        },
+        Op::Slli {
+            rd: T4,
+            rs: T3,
+            shamt: 2,
+        },
+        Op::Add {
+            rd: T4,
+            rs1: S1,
+            rs2: T4,
+        },
+        Op::Lw {
+            rd: T1,
+            rs: T4,
+            off: AWAIT_SLOT_OFF,
+        },
+        Op::Li {
+            rd: T6,
+            imm: AWAIT_PEND,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T6,
+            to: "wthrow_next".into(),
+        },
+        Op::Addi {
+            rd: S0,
+            rs: T3,
+            imm: 0,
+        },
+        Op::Label("wthrow_next".into()),
+        Op::Addi {
+            rd: T3,
+            rs: T3,
+            imm: 1,
+        },
+        Op::Jal {
+            rd: X0,
+            to: "wthrow_loop".into(),
+        },
+        Op::Label("wthrow_pick".into()),
+        Op::Li {
+            rd: T6,
+            imm: AWAIT_SLOTS,
+        },
+        Op::Beq {
+            rs1: S0,
+            rs2: T6,
+            to: "wthrow_none".into(),
+        },
+        Op::Label("wthrow_reject".into()),
+        Op::Slli {
+            rd: T4,
+            rs: S0,
+            shamt: 2,
+        },
+        Op::Add {
+            rd: T4,
+            rs1: S1,
+            rs2: T4,
+        },
+        Op::Li {
+            rd: T1,
+            imm: AWAIT_REJ,
+        },
+        Op::Sw {
+            rs2: T1,
+            rs1: T4,
+            off: AWAIT_SLOT_OFF,
+        },
+        Op::Lw {
+            rd: T0,
+            rs: S1,
+            off: DOM_AWAIT,
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T0,
+            imm: -1,
+        },
+        Op::Sw {
+            rs2: T0,
+            rs1: S1,
+            off: DOM_AWAIT,
+        },
+    ];
+    ops.extend(puts_str("AWAIT-THROW /bios/menu\n"));
+    ops.extend([
+        Op::La {
+            rd: A0,
+            addr: Addr::Label("domawait_ids".into()),
+        },
+        Op::Slli {
+            rd: T4,
+            rs: S0,
+            shamt: 3,
+        },
+        Op::Add {
+            rd: A0,
+            rs1: A0,
+            rs2: T4,
+        },
+        Op::Li { rd: A1, imm: 7 },
+        Op::La {
+            rd: A2,
+            addr: Addr::Label("domawait_rej".into()),
+        },
+        Op::Li { rd: A3, imm: 13 },
+        Op::Jal {
+            rd: RA,
+            to: "WasmDomText".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "wthrow_out".into(),
+        },
+        Op::Label("wthrow_none".into()),
+    ]);
+    ops.extend(puts_str("AWAIT-THROW none\n"));
+    ops.extend([
+        Op::Label("wthrow_out".into()),
+        ld_x(xlen, S1, SP, 8),
+        ld_x(xlen, S0, SP, 16),
+        ld_x(xlen, RA, SP, 24),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 32,
+        },
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::UiDom,
+        ops,
+    }
+}
+
+/// `WasmCatch` — the `env.catch` import: `a0=slot` → `a0=1` iff that slot
+/// is currently rejected (`AWAIT_REJ`=3), else 0. Leaf — no frame. Bounds
+/// out-of-range or negative slots as 0.
+fn wasm_catch_node(xlen: u32) -> Node {
+    let mut ops = vec![
+        Op::Comment("WasmCatch — env.catch(slot)->i32: 1 iff the slot is rejected".into()),
+        Op::Glob("WasmCatch".into()),
+        Op::Label("WasmCatch".into()),
+    ];
+    // a0 < 0 → 0
+    ops.push(Op::Srli {
+        rd: T6,
+        rs: A0,
+        shamt: signbit(xlen),
+    });
+    ops.push(Op::Bne {
+        rs1: T6,
+        rs2: X0,
+        to: "wcatch_zero".into(),
+    });
+    // a0 >= AWAIT_SLOTS → 0 (t6 = AWAIT_SLOTS - a0; t6 <= 0)
+    ops.push(Op::Li {
+        rd: T6,
+        imm: AWAIT_SLOTS,
+    });
+    ops.push(Op::Sub {
+        rd: T6,
+        rs1: T6,
+        rs2: A0,
+    });
+    ops.push(Op::Beq {
+        rs1: T6,
+        rs2: X0,
+        to: "wcatch_zero".into(),
+    });
+    ops.push(Op::Srli {
+        rd: T6,
+        rs: T6,
+        shamt: signbit(xlen),
+    });
+    ops.push(Op::Bne {
+        rs1: T6,
+        rs2: X0,
+        to: "wcatch_zero".into(),
+    });
+    // state = __ui_dom[AWAIT_SLOT_OFF + a0*4]
+    ops.push(Op::La {
+        rd: T5,
+        addr: Addr::UiDom,
+    });
+    ops.push(Op::Slli {
+        rd: T4,
+        rs: A0,
+        shamt: 2,
+    });
+    ops.push(Op::Add {
+        rd: T4,
+        rs1: T5,
+        rs2: T4,
+    });
+    ops.push(Op::Lw {
+        rd: T1,
+        rs: T4,
+        off: AWAIT_SLOT_OFF,
+    });
+    // a0 = (state == AWAIT_REJ). State is at most AWAIT_REJ, so
+    // t1 = state - AWAIT_REJ is 0 iff rejected, negative otherwise.
+    // a0 = 1 - sign_bit(t1).
+    ops.push(Op::Li {
+        rd: T6,
+        imm: AWAIT_REJ,
+    });
+    ops.push(Op::Sub {
+        rd: T1,
+        rs1: T1,
+        rs2: T6,
+    });
+    ops.push(Op::Srli {
+        rd: T6,
+        rs: T1,
+        shamt: signbit(xlen),
+    });
+    ops.push(Op::Li { rd: A0, imm: 1 });
+    ops.push(Op::Sub {
+        rd: A0,
+        rs1: A0,
+        rs2: T6,
+    });
+    ops.push(ret());
+    ops.push(Op::Label("wcatch_zero".into()));
+    ops.push(Op::Li { rd: A0, imm: 0 });
+    ops.push(ret());
+    Node {
+        purpose: Purpose::UiDom,
+        ops,
+    }
+}
+
+/// `DomAwait` — the bounded pending-op poll: drains the await slots
+/// (`__ui_dom` header +16, `AWAIT_SLOTS` u32s) — every slot marked
+/// 1=pending resolves in order: state → 2=resolved, `npend` (+12)
+/// decrements, the deferred router call prints (`AWAIT-GET /bios/menu`)
+/// and the `await.N` row is set to `"resolved menu"` via `WasmDomText`
+/// (which bumps `dirty`, so the next `trap_timer` background repaint
+/// picks it up). Draining is bounded by `AWAIT_SLOTS`; an idle scan is a
+/// no-op. Row texts are fixed rodata — a slot only ever awaits the one
+/// bounded fetch, never an arbitrary path. Called from `trap_timer` and
+/// the `Ui`/`Keys` polls. s0=i/s1=base live across `WasmDomText`, which
+/// clobbers only caller-saved t/a regs.
+fn dom_await_node(xlen: u32) -> Node {
+    let mut ops = vec![
+        Op::Comment(
+            "DomAwait — resolve at most one pending await slot per call \
+             (pending→resolved); bounded O(1) work so the timer/IRQ context \
+             never spins. Callers that must drain (Ui/Keys polls) call it \
+             AWAIT_SLOTS times."
+                .into(),
+        ),
+        Op::Glob("DomAwait".into()),
+        Op::Label("DomAwait".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -32,
+        },
+        st_x(xlen, RA, SP, 24),
+        st_x(xlen, S0, SP, 16),
+        st_x(xlen, S1, SP, 8),
+        Op::La {
+            rd: S1,
+            addr: Addr::UiDom,
+        },
+        // Fast path: npend == 0 → nothing to resolve.
+        Op::Lw {
+            rd: T0,
+            rs: S1,
+            off: DOM_AWAIT,
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: X0,
+            to: "dawait_out".into(),
+        },
+        Op::Li { rd: S0, imm: 0 },
+        Op::Label("dawait_scan".into()),
+        Op::Li {
+            rd: T6,
+            imm: AWAIT_SLOTS,
+        },
+        Op::Beq {
+            rs1: S0,
+            rs2: T6,
+            to: "dawait_out".into(),
+        },
+        Op::Slli {
+            rd: T4,
+            rs: S0,
+            shamt: 2,
+        },
+        Op::Add {
+            rd: T4,
+            rs1: S1,
+            rs2: T4,
+        },
+        Op::Lw {
+            rd: T1,
+            rs: T4,
+            off: AWAIT_SLOT_OFF,
+        },
+        Op::Li {
+            rd: T6,
+            imm: AWAIT_PEND,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T6,
+            to: "dawait_next".into(),
+        },
+        // Resolve slot i.
+        Op::Li {
+            rd: T1,
+            imm: AWAIT_DONE,
+        },
+        Op::Sw {
+            rs2: T1,
+            rs1: T4,
+            off: AWAIT_SLOT_OFF,
+        },
+        Op::Lw {
+            rd: T0,
+            rs: S1,
+            off: DOM_AWAIT,
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T0,
+            imm: -1,
+        },
+        Op::Sw {
+            rs2: T0,
+            rs1: S1,
+            off: DOM_AWAIT,
+        },
+    ];
+    ops.extend(puts_str("AWAIT-GET /bios/menu\n"));
+    ops.extend([
+        // id = domawait_ids + i*8 ("await.N\0", 7 chars)
+        Op::La {
+            rd: A0,
+            addr: Addr::Label("domawait_ids".into()),
+        },
+        Op::Slli {
+            rd: T4,
+            rs: S0,
+            shamt: 3,
+        },
+        Op::Add {
+            rd: A0,
+            rs1: A0,
+            rs2: T4,
+        },
+        Op::Li { rd: A1, imm: 7 },
+        Op::La {
+            rd: A2,
+            addr: Addr::Label("domawait_ok".into()),
+        },
+        Op::Li { rd: A3, imm: 13 },
+        Op::Jal {
+            rd: RA,
+            to: "WasmDomText".into(),
+        },
+        // Resolved one slot — stop. Bounded per-call work; the drain
+        // callers loop this routine.
+        Op::Jal {
+            rd: X0,
+            to: "dawait_out".into(),
+        },
+        Op::Label("dawait_next".into()),
+        Op::Addi {
+            rd: S0,
+            rs: S0,
+            imm: 1,
+        },
+        Op::Jal {
+            rd: X0,
+            to: "dawait_scan".into(),
+        },
+        Op::Label("dawait_out".into()),
+        ld_x(xlen, S1, SP, 8),
+        ld_x(xlen, S0, SP, 16),
+        ld_x(xlen, RA, SP, 24),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 32,
+        },
+        ret(),
+        // Inline rodata (after ret): the four 8B row ids + the two fixed
+        // await texts. "await.N\0" per slot.
+        Op::Label("domawait_ids".into()),
+        Op::Word(u32::from_le_bytes(*b"awai")),
+        Op::Word(u32::from_le_bytes(*b"t.0\0")),
+        Op::Word(u32::from_le_bytes(*b"awai")),
+        Op::Word(u32::from_le_bytes(*b"t.1\0")),
+        Op::Word(u32::from_le_bytes(*b"awai")),
+        Op::Word(u32::from_le_bytes(*b"t.2\0")),
+        Op::Word(u32::from_le_bytes(*b"awai")),
+        Op::Word(u32::from_le_bytes(*b"t.3\0")),
+        // "pending menu" (12B) — the text uart_await points the row at.
+        Op::Label("domawait_pend".into()),
+        Op::Word(u32::from_le_bytes(*b"pend")),
+        Op::Word(u32::from_le_bytes(*b"ing ")),
+        Op::Word(u32::from_le_bytes(*b"menu")),
+        // "resolved menu" (13B).
+        Op::Label("domawait_ok".into()),
+        Op::Word(u32::from_le_bytes(*b"reso")),
+        Op::Word(u32::from_le_bytes(*b"lved")),
+        Op::Word(u32::from_le_bytes(*b" men")),
+        Op::Word(u32::from_le_bytes(*b"u\0\0\0")),
+        // "rejected menu" (13B) — the `Throw` path's caught state.
+        Op::Label("domawait_rej".into()),
+        Op::Word(u32::from_le_bytes(*b"reje")),
+        Op::Word(u32::from_le_bytes(*b"cted")),
+        Op::Word(u32::from_le_bytes(*b" men")),
+        Op::Word(u32::from_le_bytes(*b"u\0\0\0")),
+    ]);
+    Node {
+        purpose: Purpose::UiDom,
+        ops,
+    }
 }
 
 /// `WasmUi` — kernel browser entry: lowered `_start` then repaint.

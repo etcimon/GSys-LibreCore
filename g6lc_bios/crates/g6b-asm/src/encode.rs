@@ -167,6 +167,8 @@ pub const CMD_UI: u32 = 0x0000_6955; // "Ui\0\0"
 pub const CMD_FILE: u32 = 0x656c_6946; // "File"
 pub const CMD_GET: u32 = 0x0074_6547; // "Get\0"
 pub const CMD_KEYS: u32 = 0x7379_654b; // "Keys" — dump the virtio-input key queue
+pub const CMD_AWAI: u32 = 0x6961_7741; // "Awai" — Await: claim a bounded pending slot
+pub const CMD_THRO: u32 = 0x6f72_6854; // "Thro" — Throw: reject the newest pending await
 /// SBI TIME extension id (`'TIME'`).
 pub const SBI_TIME_EID: i64 = 0x5449_4d45;
 /// QEMU virt / OpenSBI default timebase (Hz). Interval = TIMEBASE / fps.
@@ -258,6 +260,11 @@ pub fn xor(rd: u32, rs1: u32, rs2: u32) -> u32 {
 
 pub fn sub(rd: u32, rs1: u32, rs2: u32) -> u32 {
     (0x20 << 25) | (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x33
+}
+
+/// `sltu rd, rs1, rs2` — R-type, funct3=0b011.
+pub fn sltu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (0x3 << 12) | (rd << 7) | 0x33
 }
 
 pub fn beq(rs1: u32, rs2: u32, imm: i32) -> u32 {
@@ -411,6 +418,9 @@ mod tests {
         assert_eq!(CMD_UI, u32::from_le_bytes(*b"Ui\0\0"));
         assert_eq!(CMD_FILE, u32::from_le_bytes(*b"File"));
         assert_eq!(CMD_GET, u32::from_le_bytes(*b"Get\0"));
+        assert_eq!(CMD_KEYS, u32::from_le_bytes(*b"Keys"));
+        assert_eq!(CMD_AWAI, u32::from_le_bytes(*b"Awai"));
+        assert_eq!(CMD_THRO, u32::from_le_bytes(*b"Thro"));
         assert_eq!(MBOX_RSP_UI, u32::from_le_bytes(*b"UI\n\0"));
         assert_eq!(MBOX_RSP_FILE, u32::from_le_bytes(*b"FILE"));
         assert_eq!(WASM_MAGIC, u32::from_le_bytes(*b"\0asm"));

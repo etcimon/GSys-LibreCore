@@ -2,7 +2,7 @@
   import { fetchBios, holycEval, registerEndpoint } from "./kernel.ts";
   let status = "UI-BOOT";
   fetchBios("/bios/clocks");
-  fetchBios("/bios/menu");
+  await fetchBios("/bios/menu");
   holycEval("UsbLs(\"fat32\")");
   holycEval("MenuCpu()");
   registerEndpoint("/bios/custom");

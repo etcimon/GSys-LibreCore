@@ -65,6 +65,12 @@ pub enum Purpose {
     Virtio,
     /// Uncore display-engine scanout (HDMI/DP — `architecture/uncore/hdmi-display.md`).
     DispScan,
+    /// Read-only PCIe ECAM scan for a class-0x03 display controller with a
+    /// pre-initialized linear framebuffer (`architecture/DISPLAY.md`).
+    PciScan,
+    /// Runtime display-output arbitration: pick the highest-priority output
+    /// that is actually present and latch its surface (`DispSel`).
+    DisplayMux,
 }
 
 impl Purpose {
@@ -107,6 +113,8 @@ impl Purpose {
             Self::UiDom => "ui-dom",
             Self::Virtio => "virtio",
             Self::DispScan => "disp-scan",
+            Self::PciScan => "pci-scan",
+            Self::DisplayMux => "display-mux",
         }
     }
 
@@ -150,6 +158,8 @@ impl Purpose {
             Self::UiDom => "__ui_dom→__gr_plane",
             Self::Virtio => "vio-mmio",
             Self::DispScan => "disp-mmio",
+            Self::PciScan => "pcie-ecam",
+            Self::DisplayMux => "__disp sel",
         }
     }
 }
@@ -224,6 +234,14 @@ pub enum Op {
         rs2: u32,
     },
     Sub {
+        rd: u32,
+        rs1: u32,
+        rs2: u32,
+    },
+    /// `sltu rd, rs1, rs2` — unsigned less-than. Needed for real range checks
+    /// (a BAR inside a window); the sign-bit tricks elsewhere in this IR are
+    /// signed and would mis-classify a high address.
+    Sltu {
         rd: u32,
         rs1: u32,
         rs2: u32,
@@ -542,6 +560,29 @@ impl Module {
         s
     }
 
+    /// Resolved `__vio` BSS address for a module loaded at `entry`.
+    ///
+    /// Same arithmetic `to_words` uses for `Addr::VioBss`; exposed so the exec
+    /// model can read the `DispSel`/`PciProbe` result block out of RAM without
+    /// duplicating (and eventually diverging from) the layout. `None` when the
+    /// module allocates no `__vio`.
+    pub fn vio_bss_addr(&self, entry: u64) -> Option<u64> {
+        if self.vio_bytes == 0 {
+            return None;
+        }
+        let (words, _) = self.to_words(entry).ok()?;
+        let code_bytes = (words.len() * 4) as u64;
+        let filesz = self.image_filesz(code_bytes);
+        let stacks = entry.wrapping_add(stack_memsz(filesz, self.n_harts()));
+        Some(
+            stacks
+                .wrapping_add(self.gr_bytes)
+                .wrapping_add(self.line_bytes)
+                .wrapping_add(self.ui_bytes)
+                .wrapping_add(self.dom_bytes),
+        )
+    }
+
     /// Machine words then rodata. `entry` is the load address of the first insn.
     pub fn to_words(&self, entry: u64) -> Result<(Vec<u32>, Vec<u8>), String> {
         let flat: Vec<&Op> = self.nodes.iter().flat_map(|n| n.ops.iter()).collect();
@@ -658,6 +699,7 @@ fn encode_op(op: &Op, pc: usize, labels: &BTreeMap<String, usize>) -> Result<u32
         Op::Sb { rs2, rs1, off } => encode::sb(*rs2, *rs1, *off),
         Op::Add { rd, rs1, rs2 } => encode::add(*rd, *rs1, *rs2),
         Op::Sub { rd, rs1, rs2 } => encode::sub(*rd, *rs1, *rs2),
+        Op::Sltu { rd, rs1, rs2 } => encode::sltu(*rd, *rs1, *rs2),
         Op::Mul { rd, rs1, rs2 } => encode::mul(*rd, *rs1, *rs2),
         Op::Xor { rd, rs1, rs2 } => encode::xor(*rd, *rs1, *rs2),
         Op::Beq { rs1, rs2, to } => encode::beq(*rs1, *rs2, rel(to)?),
@@ -749,6 +791,12 @@ fn op_to_asm(op: &Op) -> String {
         ),
         Op::Sub { rd, rs1, rs2 } => format!(
             "\tsub\t{}, {}, {}",
+            reg_name(*rd),
+            reg_name(*rs1),
+            reg_name(*rs2)
+        ),
+        Op::Sltu { rd, rs1, rs2 } => format!(
+            "\tsltu\t{}, {}, {}",
             reg_name(*rd),
             reg_name(*rs1),
             reg_name(*rs2)

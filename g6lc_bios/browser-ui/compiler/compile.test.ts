@@ -8,7 +8,7 @@ import { catalogJson, marker, refuseKit } from "./constructs.ts";
 import { compileProject, loadProject, projectHtml } from "./index.ts";
 import { emitWasm } from "./emit-wasm.ts";
 import { printG6bJs } from "./print-ts.ts";
-import { createWasmHost, createBrowserApp, createLibwasmHost, createParticleBackground } from "../src/kernel.ts";
+import { createWasmHost, createBrowserApp, createLibwasmHost, createParticleBackground, createRenderInspector, createBrowserContext } from "../src/kernel.ts";
 import { isLdc143Text, resolveToolchain } from "./ldc.ts";
 import { parseSvelte } from "./parse.ts";
 
@@ -51,6 +51,16 @@ class TestNode {
   getAttribute(key: string) { return this.attrs.get(key) ?? null; }
   setAttribute(key: string, value: string) { this.attrs.set(key, value); }
   removeAttribute(key: string) { this.attrs.delete(key); }
+  classList = {
+    list: new Set<string>(),
+    add: (c: string) => { this.classList.list.add(c); },
+    remove: (c: string) => { this.classList.list.delete(c); },
+    toggle: (c: string) => {
+      if (this.classList.list.has(c)) { this.classList.list.delete(c); return false; }
+      this.classList.list.add(c); return true;
+    },
+    contains: (c: string) => this.classList.list.has(c),
+  };
   addEventListener(key: string, callback: Function) { this.listeners.set(key, callback); }
   removeEventListener(key: string, callback: Function) { if (this.listeners.get(key) === callback) this.listeners.delete(key); }
   querySelectorAll(selector: string) {
@@ -262,6 +272,41 @@ fetchBios("/bios/menu/cpu");
     expect(text.textContent).toBe("original");
   });
 
+  test("env.catch reports rejection without consuming it and throw handles negative slot", async () => {
+    const text = new TestNode("x");
+    text.textContent = "original";
+    const host = createWasmHost(testDocument([text]), new Set(), async () => {});
+    const memory = new WebAssembly.Memory({ initial: 1 });
+    host.bind(memory);
+    new Uint8Array(memory.buffer).set(new TextEncoder().encode("x"));
+    const env = host.imports.env;
+    expect(env.catch(0)).toBe(0);
+    expect(env.catch(-1)).toBe(0);
+    expect(env.catch(5)).toBe(0);
+    const s0 = env.await();
+    const s1 = env.await();
+    expect(s0).toBe(0);
+    expect(s1).toBe(1);
+    expect(env.catch(0)).toBe(0);
+    env.throw(-1); // reject newest pending (slot 1)
+    expect(env.catch(1)).toBe(1);
+    expect(env.catch(1)).toBe(1); // non-destructive query
+    env.throw(0); // reject slot 0 as well
+    expect(env.catch(0)).toBe(1);
+    expect(env.catch(1)).toBe(1);
+    // set_visible with catch result: 1 -> visible
+    env.set_visible(0, 1, env.catch(0));
+    expect(text.hidden).toBe(false);
+    // A new await reuses slot 0 and resets its rejected state
+    const s2 = env.await();
+    expect(s2).toBe(0);
+    expect(env.catch(0)).toBe(0);
+    // Out-of-range and idle slots stay 0
+    expect(env.catch(2)).toBe(0);
+    expect(env.catch(3)).toBe(0);
+    expect(env.catch(4)).toBe(0);
+  });
+
   test("native menu navigation refreshes values and flags without mutation routes", async () => {
     const ui = new TestNode("bios-ui");
     const status = new TestNode("status");
@@ -322,6 +367,299 @@ describe("libwasm DOM kernel", () => {
     };
     return { host, memory, mount, original, doc, string, env: host.imports.env };
   }
+
+  test("object handles are refcounted and released slots are reused", () => {
+    const { env, string } = fixture();
+    // JsHandle copy/destruct semantics: a copy is the same handle, and the
+    // object survives until the matching number of releases.
+    const h = env.libwasm_add__object();
+    expect(h).toBeGreaterThanOrEqual(0x100000);
+    expect(env.libwasm_copyObjectRef(h)).toBe(h);
+    env.libwasm_removeObject(h);
+    expect(env.libwasm_copyObjectRef(h)).toBe(h); // still live after one release
+    env.libwasm_removeObject(h);
+    env.libwasm_removeObject(h); // last reference releases
+    expect(env.libwasm_add__object()).toBe(h); // slot reused, not leaked
+
+    // Roots are identity under copy and are not stored in the table.
+    for (const root of [1, 2]) expect(env.libwasm_copyObjectRef(root)).toBe(root);
+    const s = env.libwasm_add__string(...string("menu"));
+    expect(s).not.toBe(h);
+    env.libwasm_get__string(64, s);
+  });
+
+  // Every lifetime violation is a trap, and a trap aborts the whole staged
+  // transaction — so each case needs its own fixture.
+  test.each([
+    ["double free", (env: any, h: number) => { env.libwasm_removeObject(h); env.libwasm_removeObject(h); }, /freed handle/],
+    ["copy after free", (env: any, h: number) => { env.libwasm_removeObject(h); env.libwasm_copyObjectRef(h); }, /freed handle/],
+    ["read after free", (env: any, h: number) => { env.libwasm_removeObject(h); env.libwasm_get__string(64, h); }, /freed handle/],
+    ["free the DOM root", (env: any) => env.libwasm_removeObject(1), /protected root/],
+    ["free the scope root", (env: any) => env.libwasm_removeObject(2), /protected root/],
+    ["free a never-allocated handle", (env: any) => env.libwasm_removeObject(0x100000 + 50), /freed handle/],
+  ])("object lifetime violation fails closed: %s", (_name, act, message) => {
+    const { host, env } = fixture();
+    expect(() => act(env, env.libwasm_add__object())).toThrow(message);
+    // The transaction is poisoned, so nothing can be committed afterwards.
+    expect(() => host.commit()).toThrow(/transaction is failed/);
+  });
+
+  test("the object table is bounded and a release makes room", () => {
+    const { env } = fixture();
+    const live: number[] = [];
+    for (let i = 0; i < 4096; i++) live.push(env.libwasm_add__object());
+    expect(() => env.libwasm_add__object()).toThrow(/budget exceeded/);
+
+    const fresh = fixture().env;
+    const first = fresh.libwasm_add__object();
+    for (let i = 1; i < 4096; i++) fresh.libwasm_add__object();
+    fresh.libwasm_removeObject(first);
+    expect(fresh.libwasm_add__object()).toBe(first);
+  });
+
+  test("scalar box/unbox round-trips preserve width and sign", () => {
+    const { env, memory } = fixture();
+
+    // i64: a value outside the i32 range must not truncate.
+    const long = 8_589_934_592n;
+    const hLong = env.libwasm_add__long(long);
+    expect(env.libwasm_get__long(hLong)).toBe(long);
+
+    // u64: 2^64 - 1 survives as an unsigned 64-bit value.
+    const ulong = (1n << 64n) - 1n;
+    const hUlong = env.libwasm_add__ulong(ulong);
+    expect(env.libwasm_get__ulong(hUlong)).toBe(ulong);
+
+    // f64: -0.5 must stay a distinct f64, not collapse to 0.
+    const hDouble = env.libwasm_add__double(-0.5);
+    expect(env.libwasm_get__double(hDouble)).toBe(-0.5);
+
+    // f32: sign and exponent fit in 32 bits.
+    const hFloat = env.libwasm_add__float(Math.fround(1.5));
+    expect(env.libwasm_get__float(hFloat)).toBe(Math.fround(1.5));
+
+    // i32 round-trip with sign extension (i32::MAX -> u32::MAX when read back
+    // through get__uint is the same bit pattern, i.e. -1).
+    const hInt = env.libwasm_add__int(-1);
+    expect(env.libwasm_get__int(hInt)).toBe(-1);
+    const hUint = env.libwasm_add__uint(0xffffffff);
+    expect(env.libwasm_get__uint(hUint)).toBe(0xffffffff);
+
+    // bool, byte, and the narrow signed/unsigned widths.
+    const hBool = env.libwasm_add__bool(1);
+    expect(env.libwasm_get__bool(hBool)).toBe(1);
+    const hByte = env.libwasm_add__byte(-128);
+    expect(env.libwasm_get__byte(hByte)).toBe(-128);
+    const hUbyte = env.libwasm_add__ubyte(255);
+    expect(env.libwasm_get__ubyte(hUbyte)).toBe(255);
+    const hShort = env.libwasm_add__short(-32768);
+    expect(env.libwasm_get__short(hShort)).toBe(-32768);
+    const hUshort = env.libwasm_add__ushort(65535);
+    expect(env.libwasm_get__ushort(hUshort)).toBe(65535);
+
+    // int[] / uint[] arrays are stored as vectors and count as distinct objects.
+    const i32s = new Int32Array(memory.buffer, 256, 3);
+    i32s.set([1, 2, 3]);
+    const hInts = env.libwasm_add__ints(3, 256);
+    expect(typeof hInts).toBe("number");
+    const u32s = new Uint32Array(memory.buffer, 256, 3);
+    u32s.set([4, 5, 6]);
+    const hUints = env.libwasm_add__uints(3, 256);
+    expect(typeof hUints).toBe("number");
+  });
+
+  test("typed object getter/call dispatch fail-closed and box results", () => {
+    const { env, string, memory } = fixture();
+
+    // A boxed string is an object-like receiver for property/method access.
+    const s = env.libwasm_add__string(...string("hello"));
+    const [mLen, mPtr] = string("concat");
+    const [argLen, argPtr] = string(" world");
+    const h = env.Object_Call_string__Handle(s, mLen, mPtr, argLen, argPtr);
+
+    // The result is a new boxed string.
+    env.libwasm_get__string(512, h);
+    const u32 = new Uint32Array(memory.buffer);
+    const [len, ptr] = [u32[128], u32[129]];
+    const result = new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+    expect(result).toBe("hello world");
+
+    // Numeric and string getters work on the boxed result.
+    const [lLen, lPtr] = string("length");
+    expect(env.Object_Getter__uint(h, lLen, lPtr)).toBe(11);
+    env.Object_Getter__string(512, h, lLen, lPtr);
+    expect(new TextDecoder().decode(new Uint8Array(memory.buffer, u32[129], u32[128]))).toBe("11");
+
+  });
+
+  test("typed object getter/call fail-closed on unknown property, method and handle", () => {
+    const { env, string } = fixture();
+    const s = env.libwasm_add__string(...string("hello"));
+    const [pLen, pPtr] = string("nope");
+    expect(() => env.Object_Getter__uint(s, pLen, pPtr)).toThrow(/no property/);
+
+    const f2 = fixture();
+    const s2 = f2.env.libwasm_add__string(...f2.string("hello"));
+    expect(() => f2.env.Object_Call_string__Handle(s2, ...f2.string("nope"), ...f2.string("x"))).toThrow(/no method/);
+
+    const f3 = fixture();
+    const [lLen, lPtr] = f3.string("length");
+    expect(() => f3.env.Object_Getter__uint(0, lLen, lPtr)).toThrow(/unknown/);
+  });
+
+  test("Optional!T getters and calls write sret and treat null/missing as None", () => {
+    const { env, string, memory } = fixture();
+    const s = env.libwasm_add__string(...string("hello"));
+    let u8 = new Uint8Array(memory.buffer);
+    let u32 = new Uint32Array(memory.buffer);
+
+    // OptionalUint present property: value 5, defined 1.
+    const [pLen, pPtr] = string("length");
+    env.Object_Getter__OptionalUint(256, s, pLen, pPtr);
+    u32 = new Uint32Array(memory.buffer);
+    u8 = new Uint8Array(memory.buffer);
+    expect(u32[64]).toBe(5);
+    expect(u8[260]).toBe(1);
+
+    // OptionalUint missing property: value 0, defined 0.
+    const [nLen, nPtr] = string("nope");
+    env.Object_Getter__OptionalUint(264, s, nLen, nPtr);
+    u32 = new Uint32Array(memory.buffer);
+    u8 = new Uint8Array(memory.buffer);
+    expect(u32[66]).toBe(0);
+    expect(u8[268]).toBe(0);
+
+    // OptionalString present property: "5", defined 1.
+    env.Object_Getter__OptionalString(272, s, pLen, pPtr);
+    u32 = new Uint32Array(memory.buffer);
+    u8 = new Uint8Array(memory.buffer);
+    const [len, ptr] = [u32[68], u32[69]];
+    expect(len).toBe(1);
+    expect(u8[280]).toBe(1);
+    expect(new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len))).toBe("5");
+
+    // OptionalHandle call: s.toString() -> boxed "hello".
+    const [mLen, mPtr] = string("toString");
+    env.Object_Call_string__OptionalHandle(288, s, mLen, mPtr, ...string(""));
+    u32 = new Uint32Array(memory.buffer);
+    u8 = new Uint8Array(memory.buffer);
+    const handle = u32[72];
+    expect(handle).toBeGreaterThanOrEqual(0x100000);
+    expect(u8[292]).toBe(1);
+    env.libwasm_get__string(512, handle);
+    const out = new Uint32Array(memory.buffer);
+    expect(new TextDecoder().decode(new Uint8Array(memory.buffer, out[129], out[128]))).toBe("hello");
+
+    // OptionalString call: s.toString() -> "hello".
+    env.Object_Call_string__OptionalString(296, s, mLen, mPtr, ...string(""));
+    u32 = new Uint32Array(memory.buffer);
+    u8 = new Uint8Array(memory.buffer);
+    const [sLen, sPtr] = [u32[74], u32[75]];
+    expect(u8[304]).toBe(1);
+    expect(new TextDecoder().decode(new Uint8Array(memory.buffer, sPtr, sLen))).toBe("hello");
+  });
+
+  test("JSON and vararg calls parse, stringify and dispatch Optional!T / SumType", () => {
+    const { env, memory, string } = fixture();
+
+    // JSON_parse_string + JSON_stringify round-trip.
+    const [jLen, jPtr] = string(`{"items":[1,2]}`);
+    const h = env.JSON_parse_string(jLen, jPtr);
+    const raw = 1024;
+    env.JSON_stringify(raw, h);
+    const u32 = new Uint32Array(memory.buffer);
+    const jsonOut = new TextDecoder().decode(new Uint8Array(memory.buffer, u32[raw / 4 + 1], u32[raw / 4]));
+    expect(jsonOut).toBe(`{"items":[1,2]}`);
+
+    // Object_VarArgCall__int: "hello".indexOf("lo") -> 3.
+    const s = env.libwasm_add__string(...string("hello"));
+    const [m1, p1] = string("indexOf");
+    const [d1, dp1] = string("string");
+    const [a1, ap1] = string(`["lo"]`);
+    expect(env.Object_VarArgCall__int(s, m1, p1, d1, dp1, a1, ap1)).toBe(3);
+
+    // Object_VarArgCall__string: "hello".concat(" world") -> "hello world".
+    const [m2, p2] = string("concat");
+    const [d2, dp2] = string("string");
+    const [a2, ap2] = string(`[" world"]`);
+    const out = 1024;
+    env.Object_VarArgCall__string(out, s, m2, p2, d2, dp2, a2, ap2);
+    const u2 = new Uint32Array(memory.buffer);
+    const str = new TextDecoder().decode(new Uint8Array(memory.buffer, u2[out / 4 + 1], u2[out / 4]));
+    expect(str).toBe("hello world");
+
+    // Optional!string: "hello".concat(" BIOS") with defined=true.
+    const [m3, p3] = string("concat");
+    const [d3, dp3] = string("Optional!string");
+    const [a3, ap3] = string(`[true," BIOS"]`);
+    const out2 = 1040;
+    env.Object_VarArgCall__string(out2, s, m3, p3, d3, dp3, a3, ap3);
+    const u3 = new Uint32Array(memory.buffer);
+    const str2 = new TextDecoder().decode(new Uint8Array(memory.buffer, u3[out2 / 4 + 1], u3[out2 / 4]));
+    expect(str2).toBe("hello BIOS");
+
+    // SumType!(string,Handle): string wins.
+    const [m4, p4] = string("concat");
+    const [d4, dp4] = string("SumType!(string,Handle)");
+    const [a4, ap4] = string(`[0,"-",0]`);
+    const out3 = 1056;
+    env.Object_VarArgCall__string(out3, s, m4, p4, d4, dp4, a4, ap4);
+    const u4 = new Uint32Array(memory.buffer);
+    const str3 = new TextDecoder().decode(new Uint8Array(memory.buffer, u4[out3 / 4 + 1], u4[out3 / 4]));
+    expect(str3).toBe("hello-");
+
+    // Fail-closed on unknown descriptor.
+    const [d5, dp5] = string("unknown");
+    const [a5, ap5] = string(`[1]`);
+    expect(() => env.Object_VarArgCall__int(s, m1, p1, d5, dp5, a5, ap5)).toThrow(/unsupported/);
+  });
+
+  test("lodash chains execute over the command buffer without host eval", () => {
+    const { env, string, memory } = fixture();
+    const chain = (init: number, src: string) => {
+      const [cLen, cOff] = string(src);
+      env.ldexec_Handle__string(4096, init, cLen, cOff, 0, 0, 0, 0);
+      // Re-take the view: writeString may grow memory, detaching the old buffer.
+      const out = new Uint32Array(memory.buffer);
+      const [len, ptr] = [out[1024], out[1025]];
+      return new TextDecoder().decode(new Uint8Array(memory.buffer, ptr, len));
+    };
+    // `libwasm_add__object` is an identity with no properties until B63, and
+    // both backends must agree it stringifies as "[object Object]".
+    const obj = env.libwasm_add__object();
+    expect(chain(obj, '[{"func":"toString","params":[]}]')).toBe("[object Object]");
+
+    const [sLen, sOff] = string("  BIOS  ");
+    const s = env.libwasm_add__string(sLen, sOff);
+    expect(chain(s, '[{"func":"trim","params":[]},{"func":"toLower","params":[]},{"func":"capitalize","params":[]}]')).toBe("Bios");
+    expect(chain(s, '[{"func":"trim","params":[]},{"func":"size","params":[]}]')).toBe("4");
+
+    // A numeric seed goes through the i64 init operand and the i64 result.
+    const [nLen, nOff] = string('[{"func":"toNumber","params":[]}]');
+    expect(env.ldexec_long__long(7n, nLen, nOff, 0, 0, 0, 0)).toBe(7n);
+    expect(env.ldexec_long__double(7n, nLen, nOff, 0, 0, 0, 0)).toBe(7);
+  });
+
+  test("lodash refuses host eval but dispatches the generated iteratee into the guest", () => {
+    const boilerplate = "(o,i)=>{let hndl=ao(o);return !!sifg(cbPtr)(cbCtx,BigInt(i),hndl);}";
+
+    // Arbitrary JS in an `=(...)` parameter is refused by name.
+    for (const hostile of ["=(()=>fetch('http://evil/'))()", "=window.location", "=alert(1);"]) {
+      const { env, string } = fixture();
+      const [cLen, cOff] = string(JSON.stringify([{ func: "filter", params: [hostile] }]));
+      expect(() => env.ldexec_Handle__Handle(0, cLen, cOff, 0, 0, 0, 0)).toThrow(/refuses host eval/);
+    }
+
+    // The generated boilerplate is recognised, and with no instance bound
+    // there is no table to call, so the chain fails closed rather than
+    // silently dropping the predicate.
+    const { env, string } = fixture();
+    const [cLen, cOff] = string(JSON.stringify([
+      { local: "cb", value: "=" + boilerplate },
+      { func: "filter", params: ["=cb"] },
+    ]));
+    expect(() => env.ldexec_Handle__Handle(0, cLen, cOff, 7, 9, 0, 0)).toThrow(/needs a guest iteratee/);
+  });
 
   test("stages D length-pointer strings and restores original node identity on rollback", () => {
     const { host, env, mount, original, string } = fixture();
@@ -471,6 +809,487 @@ describe("libwasm DOM kernel", () => {
     expect(note.textContent).toContain("start trap");
     expect(main.hidden).toBe(true);
     expect(cpu.hidden).toBe(false);
+  });
+
+  test.each([
+    "libasync_promise_all__promise",
+    "libasync_promise_any__promise",
+    "libasync_promise_allsettled__promise",
+  ])("B68: %s rejects a non-promise handle array", (fn) => {
+    const { env, memory } = fixture();
+    const u32 = new Uint32Array(memory.buffer);
+    u32[0] = env.libwasm_add__int(1);
+    u32[1] = env.libwasm_add__int(2);
+    const arr = env.libwasm_add__uints(2, 0);
+    expect(() => env[fn](arr)).toThrow(/not a promise/);
+  });
+
+  test("B68: typed array and DataView Create read from guest memory", () => {
+    const { env, memory, string } = fixture();
+    const u8 = new Uint8Array(memory.buffer);
+    const i32 = new Int32Array(memory.buffer, 16, 4);
+    const f32 = new Float32Array(memory.buffer, 32, 4);
+    for (let i = 0; i < 4; i++) {
+      u8[i] = i;
+      i32[i] = 100 + i;
+      f32[i] = i + 0.5;
+    }
+    const i8h = env.Int8Array_Create(4, 0);
+    const u8h = env.Uint8Array_Create(4, 0);
+    const i32h = env.Int32Array_Create(4, 16);
+    const f32h = env.Float32Array_Create(4, 32);
+    const dvh = env.DataView_Create(4, 0);
+
+    expect(env.libwasm_get__int(env.libwasm_get_idx__field(i8h, 1))).toBe(1);
+    expect(env.libwasm_get__int(env.libwasm_get_idx__field(u8h, 2))).toBe(2);
+    expect(env.libwasm_get__int(env.libwasm_get_idx__field(i32h, 2))).toBe(102);
+    expect(env.libwasm_get__float(env.libwasm_get_idx__field(f32h, 3))).toBe(3.5);
+    expect(env.libwasm_get__int(env.libwasm_get_idx__field(dvh, 3))).toBe(3);
+    expect(env.libwasm_get__int(env.libwasm_get__field(u8h, ...string("length")))).toBe(4);
+    expect(env.libwasm_get__int(env.libwasm_get__field(dvh, ...string("length")))).toBe(4);
+  });
+
+  test("B67: first-party Moment creates Date handles and reads scalar methods", () => {
+    const { env, memory, string } = fixture();
+    const t = 1_700_000_000_000n;
+    const now = env.libwasm_moment_now();
+    const fixed = env.libwasm_moment_from_millis(t);
+    expect(now).toBeGreaterThanOrEqual(0x100000);
+    expect(fixed).toBeGreaterThanOrEqual(0x100000);
+
+    const v = env.Object_Call_string__double(fixed, ...string("getTime"), ...string(""));
+    expect(v).toBe(1_700_000_000_000);
+    expect(env.Object_Call_string__uint(fixed, ...string("getFullYear"), ...string(""))).toBe(2023);
+    expect(env.Object_Call_string__uint(fixed, ...string("getMonth"), ...string(""))).toBe(10);
+    expect(env.Object_Call_string__uint(fixed, ...string("getDate"), ...string(""))).toBe(14);
+    env.Object_Call_string__string(64, fixed, ...string("toISOString"), ...string(""));
+    const u32 = new Uint32Array(memory.buffer, 64, 2);
+    const u8 = new Uint8Array(memory.buffer);
+    const s = new TextDecoder().decode(u8.subarray(u32[1], u32[1] + u32[0]));
+    expect(s).toMatch(/^2023-11-14T/);
+  });
+
+  test("B69: generic DOM method calls handle setAttribute, getAttribute, removeAttribute and classList", () => {
+    const { env, memory, string } = fixture();
+    const node = env.createElement(26); // div
+
+    env.Object_Call_string_string__void(node, ...string("setAttribute"), ...string("data-x"), ...string("hello"));
+    env.Object_Call_string_string__void(node, ...string("setAttribute"), ...string("data-y"), ...string("world"));
+
+    const raw = 256;
+    env.Object_Call_string__OptionalString(raw, node, ...string("getAttribute"), ...string("data-x"));
+    const u8 = new Uint8Array(memory.buffer);
+    const u32 = new Uint32Array(memory.buffer, raw, 2);
+    const len = u32[0];
+    const ptr = u32[1];
+    expect(u8[raw + 8]).toBe(1);
+    expect(new TextDecoder().decode(u8.subarray(ptr, ptr + len))).toBe("hello");
+
+    const missing = 320;
+    env.Object_Call_string__OptionalString(missing, node, ...string("getAttribute"), ...string("absent"));
+    expect(u8[missing + 8]).toBe(0);
+
+    env.Object_Call_string__void(node, ...string("removeAttribute"), ...string("data-y"));
+    env.Object_Call_string__OptionalString(raw, node, ...string("getAttribute"), ...string("data-y"));
+    expect(u8[raw + 8]).toBe(0);
+
+    const cl = env.Object_Getter__Handle(node, ...string("classList"));
+    expect(cl).toBeGreaterThanOrEqual(0x100000);
+    env.Object_Call_string__void(cl, ...string("add"), ...string("bios"));
+    env.Object_Call_string__void(cl, ...string("add"), ...string("g6lc"));
+    expect(env.Object_Call_string__bool(cl, ...string("contains"), ...string("bios"))).toBe(1);
+    expect(env.Object_Call_string__bool(cl, ...string("contains"), ...string("missing"))).toBe(0);
+    env.Object_Call_string__void(cl, ...string("remove"), ...string("bios"));
+    expect(env.Object_Call_string__bool(cl, ...string("contains"), ...string("bios"))).toBe(0);
+    expect(env.Object_Call_string__bool(cl, ...string("toggle"), ...string("flash"))).toBe(1);
+    expect(env.Object_Call_string__bool(cl, ...string("toggle"), ...string("flash"))).toBe(0);
+  });
+
+  test("B69: bounded ES6 Map surface round-trips string keys and values", () => {
+    const { env, memory, string } = fixture();
+    const m = env.libwasm_map_create();
+    expect(m).toBeGreaterThanOrEqual(0x100000);
+
+    env.libwasm_map_set(m, ...string("k1"), ...string("v1"));
+    env.libwasm_map_set(m, ...string("k2"), ...string("v2"));
+    expect(env.libwasm_map_has(m, ...string("k1"))).toBe(1);
+    expect(env.libwasm_map_has(m, ...string("missing"))).toBe(0);
+
+    const raw = 256;
+    env.libwasm_map_get__OptionalString(raw, m, ...string("k1"));
+    const u8 = new Uint8Array(memory.buffer);
+    const u32 = new Uint32Array(memory.buffer, raw, 2);
+    expect(u8[raw + 8]).toBe(1);
+    const len = u32[0], ptr = u32[1];
+    expect(new TextDecoder().decode(u8.subarray(ptr, ptr + len))).toBe("v1");
+
+    const missing = 320;
+    env.libwasm_map_get__OptionalString(missing, m, ...string("missing"));
+    expect(u8[missing + 8]).toBe(0);
+
+    env.libwasm_map_delete(m, ...string("k1"));
+    expect(env.libwasm_map_has(m, ...string("k1"))).toBe(0);
+    env.libwasm_map_clear(m);
+    expect(env.libwasm_map_has(m, ...string("k2"))).toBe(0);
+  });
+
+  test("B67: getTimeStamp returns current epoch milliseconds as i64", () => {
+    const { env } = fixture();
+    const before = BigInt(Date.now());
+    const ts = env.getTimeStamp();
+    const after = BigInt(Date.now());
+    expect(typeof ts).toBe("bigint");
+    expect(ts >= before && ts <= after).toBe(true);
+  });
+
+  test("B66: named delegates, timers and event handlers can be set and read back", () => {
+    const { env, memory, string } = fixture();
+
+    // Named delegate registry round-trips.
+    const [n1, p1] = string("navigate_to");
+    env.libwasm_set__function(n1, p1, 42, 7);
+    env.libwasm_unset__function(n1, p1);
+
+    // Timer ids are positive and clearable even without an asyncify host.
+    const id1 = env.setTimeout(1, 2, 10);
+    expect(id1).toBeGreaterThan(0);
+    const id2 = env.setInterval(3, 4, 20);
+    expect(id2).toBeGreaterThan(id1);
+    env.clearTimeout(id1);
+    env.clearInterval(id2);
+
+    // Event handler set/get round-trip on a DOM node.
+    const node = env.createElement(26);
+    const [m1, mp1] = string("onclick");
+    env.Object_Call_EventHandler__void(node, m1, mp1, 1, 5, 6);
+    const raw = 1024;
+    env.Object_Getter__EventHandler(raw, node, m1, mp1);
+    const u32 = new Uint32Array(memory.buffer);
+    expect(u32[raw / 4]).toBe(5);
+    expect(u32[raw / 4 + 1]).toBe(6);
+    expect(new Uint8Array(memory.buffer)[raw + 8]).toBe(1);
+
+    // Clearing the handler zeroes the optional.
+    env.Object_Call_EventHandler__void(node, m1, mp1, 0, 0, 0);
+    env.Object_Getter__EventHandler(raw, node, m1, mp1);
+    expect(u32[raw / 4]).toBe(0);
+    expect(u32[raw / 4 + 1]).toBe(0);
+    expect(new Uint8Array(memory.buffer)[raw + 8]).toBe(0);
+  });
+});
+
+describe("browser context", () => {
+  function ctxFixture(opts: any = {}) {
+    const panel = new TestNode("devtools-console");
+    const target = new TestNode("status");
+    const doc = testDocument([panel, target]);
+    let t = 1000;
+    const ctx = createBrowserContext(doc as any, { now: () => t++, ...opts });
+    return { ctx, panel, target, doc };
+  }
+
+  test("is engine-agnostic: no WebAssembly or libwasm needed to construct or use", () => {
+    // The whole point of the decoupling — a context is usable from plain JS.
+    const { ctx } = ctxFixture();
+    ctx.console.log("hello");
+    expect(ctx.consolePage().entries[0].data).toBe("hello");
+    expect(ctx.globalNames().sort()).toEqual(["console", "document", "window"]);
+  });
+
+  test("exposes console, window and document singletons that are stable", () => {
+    const { ctx } = ctxFixture();
+    expect(ctx.global("console")).toBe(ctx.console);
+    expect(ctx.global("window")).toBe(ctx.window);
+    expect(ctx.global("document")).toBe(ctx.document);
+    // window reaches the same singleton objects, not copies.
+    expect(ctx.window.console).toBe(ctx.console);
+    expect(ctx.window.document).toBe(ctx.document);
+    // bindings() is a fresh map but the same objects.
+    const b = ctx.bindings();
+    expect(b.console).toBe(ctx.console);
+    expect(ctx.bindings()).not.toBe(b);
+  });
+
+  test("unknown globals are absent rather than fabricated", () => {
+    const { ctx } = ctxFixture();
+    expect(ctx.global("eval")).toBeUndefined();
+    expect(ctx.global("fetch")).toBeUndefined();
+    expect(ctx.global("localStorage")).toBeUndefined();
+  });
+
+  test("all five levels record, and an unknown level is refused", () => {
+    const { ctx } = ctxFixture();
+    for (const level of ctx.console.levels()) ctx.console[level](level + "-msg");
+    const page = ctx.consolePage();
+    expect(page.entries.map((e: any) => e.level)).toEqual(["log", "info", "warn", "error", "debug"]);
+    expect((ctx.console as any).table).toBeUndefined();
+  });
+
+  test("polling is incremental via pageRevision", () => {
+    const { ctx } = ctxFixture();
+    ctx.console.log("one");
+    const first = ctx.consolePage();
+    expect(first.entries).toHaveLength(1);
+    expect(ctx.consolePage(first.pageRevision).entries).toHaveLength(0);
+    ctx.console.warn("two");
+    const second = ctx.consolePage(first.pageRevision);
+    expect(second.entries.map((e: any) => e.data)).toEqual(["two"]);
+    expect(second.pageRevision).toBeGreaterThan(first.pageRevision);
+  });
+
+  test("the ring is bounded and reports dropped and missed instead of lying", () => {
+    const { ctx } = ctxFixture({ consoleLimit: 3 });
+    for (let i = 1; i <= 6; i++) ctx.console.log("m" + i);
+    const page = ctx.consolePage();
+    expect(page.entries.map((e: any) => e.data)).toEqual(["m4", "m5", "m6"]);
+    expect(page.dropped).toBe(3);
+    // A poller whose cursor fell behind the ring is told how many it missed.
+    const stale = ctx.consolePage(1);
+    expect(stale.missed).toBe(2); // seq 2 and 3 were evicted
+  });
+
+  test("oversized and non-string arguments are bounded, not dropped", () => {
+    const { ctx } = ctxFixture();
+    ctx.console.log("a".repeat(9000));
+    expect(ctx.consolePage().entries[0].data).toContain("...[truncated]");
+    ctx.console.clear();
+    ctx.console.log("n", 42, true, null, undefined, { a: 1 });
+    expect(ctx.consolePage(0).entries.pop().data).toBe('n 42 true null undefined {"a":1}');
+  });
+
+  test("a circular object logs a marker rather than throwing", () => {
+    const { ctx } = ctxFixture();
+    const cycle: any = {}; cycle.self = cycle;
+    expect(() => ctx.console.log("c", cycle)).not.toThrow();
+    expect(ctx.consolePage().entries[0].data).toContain("[uncloneable]");
+  });
+
+  test("instances are isolated, so a frame context cannot interleave into the parent", () => {
+    const { ctx: parent, doc } = ctxFixture({ contextId: "main" });
+    const frame = createBrowserContext(doc as any, { contextId: "frame-1" });
+    parent.console.log("parent-only");
+    frame.console.error("frame-only");
+    expect(parent.consolePage().entries.map((e: any) => e.data)).toEqual(["parent-only"]);
+    expect(frame.consolePage().entries.map((e: any) => e.data)).toEqual(["frame-only"]);
+    expect(parent.consolePage().contextId).toBe("main");
+    expect(frame.consolePage().contextId).toBe("frame-1");
+    expect(frame.console).not.toBe(parent.console);
+  });
+
+  test("a DOM element can be painted with the console contents", () => {
+    const { ctx, panel } = ctxFixture();
+    ctx.console.log("first");
+    ctx.console.error("second");
+    const cursor = ctx.renderConsoleInto(panel);
+    expect(panel.childNodes).toHaveLength(2);
+    expect(panel.childNodes[0].textContent).toBe("LOG first");
+    expect(panel.childNodes[0].getAttribute("data-console-level")).toBe("log");
+    expect(panel.childNodes[1].getAttribute("data-console-level")).toBe("error");
+    // Incremental append from the returned cursor does not repaint history.
+    ctx.console.warn("third");
+    ctx.renderConsoleInto(panel, cursor);
+    expect(panel.childNodes).toHaveLength(3);
+    expect(panel.childNodes[2].textContent).toBe("WARN third");
+  });
+
+  test("logged markup is displayed as text, never parsed as HTML", () => {
+    const { ctx, panel } = ctxFixture();
+    ctx.console.log("<img src=x onerror=alert(1)>");
+    ctx.renderConsoleInto(panel);
+    expect(panel.childNodes[0].textContent).toContain("<img src=x onerror=alert(1)>");
+    expect(panel.childNodes[0].childNodes).toHaveLength(0);
+  });
+
+  test("a dropped-entry notice is rendered so the panel never looks complete when it is not", () => {
+    const { ctx, panel } = ctxFixture({ consoleLimit: 2 });
+    for (let i = 1; i <= 5; i++) ctx.console.log("m" + i);
+    ctx.renderConsoleInto(panel, 1);
+    expect(panel.childNodes[0].textContent).toMatch(/earlier entries dropped/);
+  });
+
+  test("mirroring forwards entries without recursing", () => {
+    const seen: any[] = [];
+    const { ctx } = ctxFixture({ mirror: (e: any, id: string) => seen.push([id, e.level, e.data]) });
+    ctx.console.warn("w");
+    expect(seen).toEqual([["main", "warn", "w"]]);
+  });
+
+  test("bad construction and bad render targets are refused", () => {
+    const doc = testDocument([]);
+    expect(() => createBrowserContext(doc as any, { consoleLimit: 0 })).toThrow(/limit/);
+    const ctx = createBrowserContext(doc as any);
+    expect(() => ctx.renderConsoleInto(null as any)).toThrow(/unavailable/);
+  });
+
+  test("window geometry reads the view and degrades to zero without one", () => {
+    const doc = testDocument([]);
+    const withView = createBrowserContext(doc as any, { view: { innerWidth: 1920, innerHeight: 1080, devicePixelRatio: 2, location: { href: "http://x/ui/" } } });
+    expect(withView.window.innerWidth).toBe(1920);
+    expect(withView.window.devicePixelRatio).toBe(2);
+    expect(withView.window.href).toBe("http://x/ui/");
+    const bare = createBrowserContext(doc as any);
+    expect(bare.window.innerWidth).toBe(0);
+    expect(bare.window.devicePixelRatio).toBe(1);
+    expect(bare.window.href).toBe("");
+  });
+});
+
+describe("browser context as a libwasm consumer", () => {
+  test("libwasm_global resolves singletons to protected handles and console.log reaches the ring", () => {
+    const mount = new TestNode("libwasm-root");
+    mount.appendChild(new TestNode("original"));
+    const doc = testDocument([mount]);
+    const ctx = createBrowserContext(doc as any, { contextId: "wasm" });
+    const host = createLibwasmHost(doc, mount, WebAssembly, { context: ctx });
+    const memory = new WebAssembly.Memory({ initial: 8 });
+    host.bind(memory);
+    let offset = 0;
+    const string = (v: string): [number, number] => {
+      const bytes = new TextEncoder().encode(v);
+      const ptr = offset; offset += bytes.length;
+      new Uint8Array(memory.buffer).set(bytes, ptr);
+      return [bytes.length, ptr];
+    };
+    const env = host.imports.env;
+
+    const c = env.libwasm_global(...string("console"));
+    expect(c).toBeGreaterThanOrEqual(0x100000);
+    // Stable across calls — a singleton, not a fresh object each time.
+    expect(env.libwasm_global(...string("console"))).toBe(c);
+    expect(env.libwasm_global(...string("window"))).not.toBe(c);
+
+    // No console ABI needed: the existing typed call family reaches log().
+    env.Object_Call_string__void(c, ...string("log"), ...string("from guest"));
+    const page = ctx.consolePage();
+    expect(page.contextId).toBe("wasm");
+    expect(page.entries.map((e: any) => e.data)).toEqual(["from guest"]);
+
+    // Singletons are protected roots: copy is identity, and a free throws.
+    // The free must come last — an import error marks the transaction failed
+    // by design, so no further import may be called after it.
+    expect(env.libwasm_copyObjectRef(c)).toBe(c);
+    expect(() => env.libwasm_removeObject(c)).toThrow(/protected root/);
+  });
+
+  test("an unknown global and a host with no context both fail closed with handle 0", () => {
+    const mount = new TestNode("libwasm-root");
+    mount.appendChild(new TestNode("original"));
+    const doc = testDocument([mount]);
+    const memory = new WebAssembly.Memory({ initial: 8 });
+    const put = (m: WebAssembly.Memory, v: string): [number, number] => {
+      const bytes = new TextEncoder().encode(v);
+      new Uint8Array(m.buffer).set(bytes, 0);
+      return [bytes.length, 0];
+    };
+
+    const withCtx = createLibwasmHost(doc, mount, WebAssembly, { context: createBrowserContext(doc as any) });
+    withCtx.bind(memory);
+    expect(withCtx.imports.env.libwasm_global(...put(memory, "eval"))).toBe(0);
+
+    // No context bound at all: still 0, never a fabricated object.
+    const noCtx = createLibwasmHost(doc, mount, WebAssembly);
+    noCtx.bind(memory);
+    expect(noCtx.imports.env.libwasm_global(...put(memory, "console"))).toBe(0);
+  });
+});
+
+describe("render inspector", () => {
+  // A host whose getComputedStyle/rect we control, standing in for a real
+  // browser so the diff logic itself is under test.
+  function hostFixture(style: Record<string, string>, rect = { width: 130, height: 26 }) {
+    const el = new TestNode("status") as any;
+    el.tagName = "DIV";
+    el.getBoundingClientRect = () => rect;
+    const doc = testDocument([el]);
+    const view = {
+      getComputedStyle: () => ({ getPropertyValue: (p: string) => style[p] ?? "" }),
+    };
+    return { inspector: createRenderInspector(doc as any, view as any), el };
+  }
+
+  // Shape mirrors g6b_css::inspect::StyleReport::to_json.
+  const report = (props: Record<string, string>, box: any = { borderBoxWidth: 130, borderBoxHeight: 26 }) => ({
+    element: "div#status",
+    properties: Object.entries(props).map(([property, value]) => ({ property, value, candidates: [] })),
+    box,
+  });
+
+  test("agreeing values report ok with the compared list", () => {
+    const { inspector } = hostFixture({ width: "100px", display: "block", "padding-left": "10px" });
+    const out = inspector.diff("status", report({ width: "100px", display: "block", "padding-left": "10px" }));
+    expect(out.ok).toBe(true);
+    expect(out.mismatches).toEqual([]);
+    expect(out.compared.sort()).toEqual(["display", "padding-left", "width"]);
+  });
+
+  test("a wrong length localises the property and reports both sides", () => {
+    const { inspector } = hostFixture({ width: "100px", "margin-top": "4px" });
+    const out = inspector.diff("status", report({ width: "97px", "margin-top": "4px" }));
+    expect(out.ok).toBe(false);
+    expect(out.mismatches).toHaveLength(1);
+    expect(out.mismatches[0]).toMatchObject({ property: "width", ours: "97px", theirs: "100px", delta: 3, kind: "length" });
+  });
+
+  test("tolerance is in whole pixels and applies to lengths only", () => {
+    const { inspector } = hostFixture({ width: "100px", display: "block" });
+    expect(inspector.diff("status", report({ width: "98px", display: "block" }), 2).ok).toBe(true);
+    expect(inspector.diff("status", report({ width: "98px", display: "block" }), 1).ok).toBe(false);
+    // A keyword never gets tolerance slack.
+    const kw = inspector.diff("status", report({ width: "100px", display: "flex" }), 99);
+    expect(kw.ok).toBe(false);
+    expect(kw.mismatches[0].kind).toBe("keyword");
+  });
+
+  test("keyword comparison is case-insensitive but unit mismatches are loud", () => {
+    const { inspector } = hostFixture({ display: "BLOCK", width: "auto" });
+    expect(inspector.diff("status", report({ display: "block" })).ok).toBe(true);
+    // Ours is a length, the host's is a keyword: a type disagreement.
+    const out = inspector.diff("status", report({ width: "100px" }));
+    expect(out.mismatches[0].kind).toBe("unit-mismatch");
+  });
+
+  test("box model is diffed against the layout rect the browser used", () => {
+    const { inspector } = hostFixture({ width: "100px" }, { width: 140, height: 26 });
+    const out = inspector.diff("status", report({ width: "100px" }, { borderBoxWidth: 130, borderBoxHeight: 26 }));
+    expect(out.ok).toBe(false);
+    expect(out.box).toEqual([{ metric: "borderBoxWidth", ours: 130, theirs: 140, delta: 10 }]);
+  });
+
+  test("a refused box is not silently treated as agreement", () => {
+    const { inspector } = hostFixture({ width: "100px" });
+    const out = inspector.diff("status", report({ width: "100px" }, { refused: "css length 2em is not supported" }));
+    expect(out.box).toEqual([]);
+    expect(out.ok).toBe(true); // properties agreed; the box was not comparable
+  });
+
+  test("properties the host does not report are skipped explicitly, not passed", () => {
+    const { inspector } = hostFixture({ width: "100px" });
+    const out = inspector.diff("status", report({ width: "100px", "background-color": "red" }));
+    expect(out.compared).toEqual(["width"]);
+    expect(out.skipped).toEqual([{ property: "background-color", reason: "host did not report this property" }]);
+  });
+
+  test("a host without getComputedStyle fails loudly instead of reporting a pass", () => {
+    const el = new TestNode("status");
+    const doc = testDocument([el]);
+    const inspector = createRenderInspector(doc as any, {} as any);
+    expect(() => inspector.diff("status", report({ width: "1px" }))).toThrow(/getComputedStyle/);
+  });
+
+  test("unknown elements and malformed reports are rejected", () => {
+    const { inspector } = hostFixture({ width: "100px" });
+    expect(() => inspector.diff("missing", report({ width: "1px" }))).toThrow(/unknown element/);
+    expect(() => inspector.diff("status", { element: "x" } as any)).toThrow(/properties array/);
+    // JSON text is accepted, matching StyleReport::to_json output.
+    expect(inspector.diff("status", JSON.stringify(report({ width: "100px" }))).ok).toBe(true);
+  });
+
+  test("describe dumps the host view including the layout rect", () => {
+    const { inspector } = hostFixture({ width: "100px", display: "block" });
+    const text = inspector.describe("status");
+    expect(text).toContain("div#status");
+    expect(text).toContain("width: 100px");
+    expect(text).toContain("rect: 130x26");
   });
 });
 

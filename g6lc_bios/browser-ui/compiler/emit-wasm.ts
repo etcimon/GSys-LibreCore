@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: MIT
 /**
  * First-party WASM MVP encoder matching g6b-wasm.
- * Imports: env.set_inner_text(i32,i32,i32,i32), env.fetch(i32,i32).
+ * Imports: env.set_inner_text(i32,i32,i32,i32), env.fetch(i32,i32),
+ * env.await() — a bounded nonblocking await-slot claim (WasmAwait on the
+ * guest, the host's deferred-completion queue in the browser).
  * Export: memory, _start.
  */
 
@@ -14,6 +16,7 @@ export function emitWasm(files: SvelteFile[]): Uint8Array {
   const visible: VisibleOp[] = [];
   const seenT = new Set<string>();
   const seenF = new Set<string>();
+  let awaits = 0;
   for (const f of files) {
     for (const o of f.ops) {
       if (o.kind === "text") {
@@ -28,16 +31,18 @@ export function emitWasm(files: SvelteFile[]): Uint8Array {
         fetches.push(o);
       } else if (o.kind === "visible") {
         visible.push(o);
+      } else if (o.kind === "await") {
+        awaits++;
       }
     }
   }
   if (texts.length === 0) {
     texts.push({ kind: "text", id: "status", value: "UI-BOOT" });
   }
-  return encode(texts, fetches, visible);
+  return encode(texts, fetches, visible, awaits);
 }
 
-function encode(texts: TextOp[], fetches: FetchOp[], visible: VisibleOp[]): Uint8Array {
+function encode(texts: TextOp[], fetches: FetchOp[], visible: VisibleOp[], awaits: number): Uint8Array {
   type Slot = { off: number; len: number };
   const mem: number[] = [];
   const intern = (s: string): Slot => {
@@ -51,7 +56,11 @@ function encode(texts: TextOp[], fetches: FetchOp[], visible: VisibleOp[]): Uint
   const fetchSlots = fetches.map((f) => intern(f.url));
   const visibleSlots = visible.map((v) => ({ id: intern(v.id), on: v.on }));
   const hasVisibility = visibleSlots.length > 0;
-  const importCount = hasVisibility ? 3 : 2;
+  const hasAwait = awaits > 0;
+  const importCount = 2 + (hasVisibility ? 1 : 0) + (hasAwait ? 1 : 0);
+  const awaitIdx = importCount - 1;
+  // env.await's ()->i32 type is appended after set_visible's entry.
+  const awaitTypeIdx = 2 + (hasVisibility ? 1 : 0) + (hasAwait ? 1 : 0);
   if (mem.length < 64) {
     while (mem.length < 64) mem.push(0);
   }
@@ -60,11 +69,12 @@ function encode(texts: TextOp[], fetches: FetchOp[], visible: VisibleOp[]): Uint
   out.push(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00);
 
   const types: number[] = [];
-  pushUleb(types, hasVisibility ? 4 : 3);
+  pushUleb(types, 3 + (hasVisibility ? 1 : 0) + (hasAwait ? 1 : 0));
   types.push(0x60, 4, 0x7f, 0x7f, 0x7f, 0x7f, 0); // set_inner_text
   types.push(0x60, 2, 0x7f, 0x7f, 0); // fetch
   types.push(0x60, 0, 0); // _start
   if (hasVisibility) types.push(0x60, 3, 0x7f, 0x7f, 0x7f, 0);
+  if (hasAwait) types.push(0x60, 0, 1, 0x7f); // await: ()->i32
   section(out, 1, types);
 
   const imports: number[] = [];
@@ -82,6 +92,14 @@ function encode(texts: TextOp[], fetches: FetchOp[], visible: VisibleOp[]): Uint
     putName(imports, "set_visible");
     imports.push(0x00);
     pushUleb(imports, 3);
+  }
+  if (hasAwait) {
+    // env.await(): ()->i32 — the claimed slot (or -1 when the bounded
+    // queue is full).
+    putName(imports, "env");
+    putName(imports, "await");
+    imports.push(0x00);
+    pushUleb(imports, awaitTypeIdx);
   }
   section(out, 2, imports);
 
@@ -137,6 +155,14 @@ function encode(texts: TextOp[], fetches: FetchOp[], visible: VisibleOp[]): Uint
     pushIleb(body, f.len);
     body.push(0x10);
     pushUleb(body, 1);
+  }
+  // `await fetch(...)` ops: the request started above; `call env.await`
+  // claims a bounded completion slot — it never blocks the caller. The
+  // returned slot index is dropped (the completion arrives via the queue).
+  for (let i = 0; i < awaits; i++) {
+    body.push(0x10);
+    pushUleb(body, awaitIdx);
+    body.push(0x1a); // drop
   }
   body.push(0x0b);
   const code: number[] = [];

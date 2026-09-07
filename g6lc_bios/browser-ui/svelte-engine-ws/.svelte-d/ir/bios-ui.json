@@ -15,6 +15,9 @@
           "url": "/bios/menu"
         },
         {
+          "kind": "await"
+        },
+        {
           "kind": "holyc",
           "line": "UsbLs(\"fat32\")"
         },

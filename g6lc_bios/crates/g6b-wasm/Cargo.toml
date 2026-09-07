@@ -13,8 +13,6 @@ description = "WASM MVP decoder + host JIT + RISC-V lower for BIOS UI"
 [dependencies]
 g6b-asm = { workspace = true }
 g6b-dom = { workspace = true }
-
-[dev-dependencies]
 g6b-spec = { workspace = true }
 
 [lints]

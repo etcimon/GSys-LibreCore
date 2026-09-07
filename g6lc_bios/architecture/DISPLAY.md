@@ -44,6 +44,145 @@ with colour 1; 8×8 `G6LC` blit at (0,8) using the same bits as `g6b-gr`). When
 `virtio-gpu-device` / host-GL scale that plane. Not assembler-only `.word`
 directives, not VGA.
 
+## Display outputs and surface selection
+
+Before B75 the low-res plane was the **only** scanout source: `FbExpand`
+expanded the 4bpp `__gr_plane` into `__scan_fb` and every backend committed
+that, so the upscaled ZealOS-intent plane *was* the HDMI/virtio-gpu picture.
+There was no output arbitration at all — `wants_virtio_gpu()` /
+`wants_disp_scan()` chose a transport at **generate** time.
+
+Two orthogonal concepts now exist.
+
+**Output** (`g6b_spec::OutputClass`) — where pixels go, in priority order:
+
+| rung | class | gate | detection |
+|---:|---|---|---|
+| 3 | `pcie-linear-fb` | `pcie.scan_display` + ECAM + BAR window | class-0x03 config-space scan |
+| 2 | `uncore-scanout` | `display` peripheral | `MAGIC == 'G6DS'` |
+| 1 | `virtio-gpu` | `wants_virtio_gpu()` | virtio-mmio DeviceID 16 |
+| 0 | `none` | always | the fallback that cannot fail |
+
+The ladder is over **validated linear framebuffers, never over vendors**. A
+PCIe display controller outranks the others only when it yields a usable
+pre-initialized framebuffer; otherwise it is demoted with a diagnostic and the
+next rung wins. `BoardSpec::display_outputs()` gives the declared candidate
+set; presence is a boot-time fact, so the runtime `DispSel` mux does the actual
+resolution.
+
+**Surface** (`g6b_spec::Surface`) — what is rendered:
+
+| surface | source | scaling |
+|---|---|---|
+| `vga` | 4bpp `__gr_plane`, 8×8 font, UART cells | proxy `fit`/`fill`/`dpi` + letterbox |
+| `gpu` | rendering at the output's own geometry | none |
+
+The default follows the active output's class, so **the low-res plane is never
+upscaled onto a GPU-class output unless explicitly asked for**.
+`kernel.proxy.surface` (`vga` \| `gpu`, empty = follow the class) forces it, and
+the display-proxy toggle flips it at runtime. Two consequences on the host path:
+`Proxy::to_ppm_gpu` **refuses** a canvas whose size disagrees with the output
+rather than stretching it, and `bar_h` is `0` on the GPU surface because the
+status is a real DOM node rendered natively — overlaying the synthetic low-res
+strip there would reintroduce the artefact the split removes.
+
+### The toggle
+
+`/bios/display` is the single mechanism, shared by all three lanes:
+
+| method | registered when | body |
+|---|---|---|
+| `GET` | always | active output, surface, `toggle` flag, and every candidate with its priority |
+| `POST` | `surface_toggle()` only | the surface the flip switches to |
+
+- **Browser lane** — `setup_html` emits `#disp-toggle` plus a `#disp-status`
+  line, but only when `surface_toggle()`. The button is
+  `position:absolute; top:0; right:0` with **no positioned ancestor**, so its
+  containing block is the initial one — the viewport in a browser, the canvas in
+  the CSS raster — putting it in the top-right corner in both lanes without
+  pushing the in-flow menus down. `BrowserSession::dispatch_pointer` finds it
+  through its own CSS hit box.
+- **HolyC lane** — `DisplayPrint` prints the ladder and `KernelGet`s the same
+  route; `DisplayToggle` calls the `DisplaySurface(vga|gpu)` builtin, which
+  POSTs through the router.
+- **Kernel state** — `BrowserSession::surface` and `BrowserSession::proxy()`
+  keep the DOM, the router and `g6b_gr::proxy` on one decision.
+
+Fail-closed at both ends: an unknown surface name is refused by the builtin, and
+a board with no accelerated output registers **no POST route**, so the toggle is
+neither rendered nor callable and `toggle_surface()` errors.
+
+`position:absolute` was added to `g6b-css` for this, along with `top`/`right`/
+`bottom`/`left`. `relative`, `fixed` and `sticky` are **refused** by the strict
+parser and **survey-dropped-and-reported** by the lenient one — the BIOS UI's own
+`App.svelte` uses `position:fixed`/`relative` for particle-canvas stacking, which
+is correct for a real browser and simply has no equivalent in this raster. Two
+related corrections landed with it: an out-of-flow box requires an explicit
+`width`/`height` (shrink-to-fit needs intrinsic sizing, and guessing would
+mis-place a right-anchored box), and `DrawText::No` now actually suppresses
+glyphs — it had been threaded through every layout function and never read.
+
+### Guest side: probe, mux, surface-gated blit
+
+The ASM IR carries the same three concepts:
+
+| routine | purpose | output |
+|---|---|---|
+| `PciProbe` | bus-0/fn-0 ECAM walk for base class `0x03`; BAR0 accepted only if it is a memory BAR, nonzero, and inside `pcie.mmio` | `PCI-GPU` / `PCI-GPU-DEMOTED` / `PCI-GPU-NONE` |
+| `DispSel` | walk the candidate ladder, latch the first **present** rung into `__disp` | `DISP-SEL <class><surface>` (two hex digits) |
+| `FbExpandSel` | pick the blit from the latched surface | — |
+
+`proxy_geom` gained a `proxy_outputs` table after its eight legacy words:
+a `{count, default_idx, default_surface}` header then one
+`{class, priority, w, h, stride, surface}` record per candidate. The legacy
+offsets are unchanged, so existing readers are unaffected.
+
+`__disp` lives at `__vio + 0x600` (`DISP_SEL_*`) and holds the resolved class,
+index, surface, geometry, framebuffer and HPD state, plus the `PciProbe`
+result. `DispSel` runs after every probe and before anything paints.
+
+**The blit is surface-gated.** `FbExpand` (upscale + letterbox) and `FbExpand1`
+(scale 1, centred) are two specialisations of one generator; `FbExpandSel`
+reads `__disp.surface` and calls the right one, and both `VioPaint` and
+`DispPaint` go through it. That is the concrete fix for "the low-res plane is
+magnified onto the GPU display": on a GPU-class output the 640×480 plane is now
+placed 1:1 at (640, 300) of a 1920×1080 scanout instead of being blown up ×2.
+
+Deliberately **not** a per-output jump table: every accelerated candidate
+currently resolves to the same `high_geometry()`, so per-output arms would be
+identical. That table becomes necessary only when outputs report *different*
+modes, which needs the EDID registers drafted in `uncore/hdmi-display.md`.
+
+Still open: `DomPaint32`, a native-resolution 32bpp glyph paint. `FbExpand1`
+removes the magnification artefact but still sources the 8×8 plane, so the GPU
+surface currently shows *unmagnified* text, not *more* text. Crisp
+native-resolution rendering is the next step, and this document should not be
+read as claiming it already happens.
+
+### Refusals, stated rather than implied
+
+- **No AMD/NVIDIA modesetting.** AMD needs AtomBIOS/DCN and modern NVIDIA needs
+  GSP devinit firmware; neither is carried here, and writing one is a DRM
+  driver, not a BIOS package. A PCIe adapter is used only as a framebuffer some
+  earlier agent (EFI GOP handoff, legacy VGA/VBE, QEMU `stdvga`/`virtio-vga`)
+  already initialized.
+- **No PCIe BAR assignment.** Enumeration is read-only; only BARs firmware
+  already programmed are accepted, and only inside the declared `pcie.mmio`
+  window.
+- **No HDMI hot-plug yet.** `hdmi-display.md` has no HPD or EDID register, so
+  "an HDMI cable was connected" is not observable. It is a contract-revision
+  REQUIREMENTS ask on the SoC uncore, listed by `inferred_arch()`.
+- **The guest GPU surface is not the Rust CSS engine and not WebGL.** Those
+  live in the host/browser lanes.
+
+### Address-map hazard, enforced
+
+QEMU virt's 32-bit PCIe MMIO window is `0x40000000..0x80000000` (ECAM
+`0x30000000`, size `0x10000000`) — exactly where the ai-island GEMM block sits.
+Every scanned BAR would land on top of it, so `BoardSpec::check_display()`
+**refuses** any peripheral, `dram_base`, or the ECAM base itself falling inside
+`pcie.mmio`. This is a spec error, not a runtime surprise.
+
 ## Executed UI versus guest bring-up (B51)
 
 `g6b-kernel::boot`, `gr_ppm` and `proxy_ppm` consume an executed
@@ -58,6 +197,22 @@ This fixes the former PPM path that painted HTML before JS/WASM. It does not
 turn the guest's boot scanline/font demonstration into a complete interactive
 virtio-gpu driver or prove display timing on RTL. Guest event routing and
 framebuffer scanout integration remain separate work.
+
+## TTF font display unit
+
+`g6b-ttf` is a first-party wrapper around the pinned `fontdue` crate. It loads
+a single TrueType/OpenType font up to `2 MiB`, rasterizes one glyph at a time
+with a `px` size between `1` and `64`, and blits the coverage bitmap into a
+`g6b-gr::Canvas` with a 16-colour foreground threshold. It does **not** shape,
+Kern, hint, subset or cache beyond `fontdue`'s internal tables; complex scripts
+and colour/CFF fonts are not in scope. The 8×8 built-in font remains the
+fallback for guest text/Gr planes; TTF is used for the CSS-raster host UI path
+and for any font file embedded in the HTML/CSS/WASM/JS payload.
+
+The CSS renderer also emits `HitBox` records (path, bounding rect, `id`/`name`)
+for every block it paints. `BrowserSession` keeps the hit boxes from the most
+recent `ui_ppm_output` and uses them for reverse lookup in `dispatch_pointer`.
+This is how CSS output, DOM nodes, and pointer/keyboard events stay linked.
 
 ## Native-browser particle presentation (B53 prerequisite)
 
@@ -221,10 +376,14 @@ hardware acceleration is not inferred from API availability.
    lane's `__ui_dom` rows) to the virtio-gpu scanout; the QMP `screendump`
    histogram matches the host-modelled framebuffer exactly. **Menu input is
    QEMU-verified** (`DomNav`: `sendkey` arrows/enter → `NAV <menu>` serial +
-   `nav.sel` DOM row + repaint). Remaining: pending/rejected await and
-   background frames concurrently —
-   record framebuffer/event evidence, not just UART markers. Later hardware
-   timing/PMA/PMP/cache/IRQ validation remains distinct from QEMU evidence.
+   `nav.sel` DOM row + repaint). **The bounded await lane and background
+   frames are QEMU-verified** (`Await`×4 → `AWAIT pending 0..3` → `Throw`
+   → `AWAIT-THROW` rejects the newest pending → the timer tick drains the
+   rest — `AWAIT-GET`×3 + `DOM| resolved menu`×3 + `DOM| rejected menu`
+   repaint; resolved/rejected slots are reusable; all-pending is the
+   bounded `AWAIT-REJ full`, exec-verified) — see "Async frames and
+   IRQ-context paint safety" below. Later hardware timing/PMA/PMP/cache/
+   IRQ validation remains distinct from QEMU evidence.
 
 Stage 5 remains open; stage 3 (virtio-input) is now **QEMU-verified**
 (`sendkey` → `INP` → `KEY`/`DOM| key` on `g6lc64-virt.json`, stock virt +
@@ -234,6 +393,34 @@ controlq → resource/scanout/flush **at the high-res proxy geometry**
 guest pixels). `g6lc64-virt.json` boots clean on stock QEMU virt —
 `MBOX-NONE`/`UART1-NONE` are reported, not parked. Do
 not remove `-nographic` or claim a screenshot by changing argv alone.
+
+### Async frames and IRQ-context paint safety
+
+- **Poll points, not blocking waits.** The periodic timer irq
+  (`trap_timer`) runs `DomAwait` (drain the `AWAIT_SLOTS`=4 pending slots
+  at `__ui_dom+16` — each pending → `AWAIT-GET /bios/menu` → `await.N`
+  row → dirty) and then flushes a repaint only when the DOM dirty counter
+  moved past the `DOM_PAINTED` watermark (`__ui_dom+8`). `Ui` and `Keys`
+  poll `DomAwait` too. This is the "doesn't block on DOM events" half:
+  input, navigation and await mutations happen on their own irqs; frames
+  flush on the tick.
+- **Trap frame preserves the interrupted context.** The trap entry saves
+  `ra` + `t0..t6` + `a0..a7` (16 slots). An irq landing mid-`VioCmd` (its
+  completion `wfi`) must not corrupt the in-flight transaction's
+  registers — before the fix a timer tick resumed `vqc_poll` with a
+  clobbered `t5` and took a load-access fault (diagnosed via `stval`).
+  `s0..s11`/`gp`/`tp` remain callee-saved per the ABI.
+- **`VIO_BUSY` guards the ctrlq** (`__vio+0x5f0`): `VioCmd` sets it for
+  the transaction and clears on every exit; `VioPaint` skips while set.
+  Register save/restore alone cannot protect shared ring state — a
+  trap-time paint interleaving mid-transaction would corrupt descriptors
+  and the avail index.
+- **In-trap `wfi` is a bounded poll pause.** The exec model treats `wfi`
+  with `sstatus.SIE` masked (in-trap, `SPIE` latched) as a loop-back, not
+  a halt — a pending kick can never take an SEI there, so halting would
+  abort mid-trap. QEMU wakes `wfi` on masked-but-pending interrupts, so
+  the same instruction also keeps the `vqc_poll` wait irq-driven on real
+  hardware.
 
 ### Output backends — QEMU and the uncore port
 

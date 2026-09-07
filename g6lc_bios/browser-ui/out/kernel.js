@@ -41,6 +41,8 @@ export const jsExports = {
 export function createWasmHost(doc, allowed, request, log = (message) => console.log(message)) {
   let memory;
   let calls = 0;
+  const pending = new Set();
+  const rejected = new Set();
   const queue = [];
   const queued = new Set();
   const saved = new Map();
@@ -87,6 +89,50 @@ export function createWasmHost(doc, allowed, request, log = (message) => console
         },
         fetch: fetchImport,
         Object_Call_string__Handle: fetchImport,
+        // env.await/env.throw — the host correlate of the guest's bounded
+        // AWAIT_SLOTS=4 queue: await() claims a slot and returns its index
+        // (-1 when full — guest parity), throw(slot) rejects that slot
+        // (the targeted reject, guest parity with a0>=0); drain() resolves
+        // every pending slot.
+        await() {
+          if (pending.size >= 4) return -1;
+          let slot = 0;
+          while (pending.has(slot)) slot++;
+          pending.add(slot);
+          rejected.delete(slot); // reset if the slot is being reused
+          log("AWAIT pending " + slot);
+          return slot;
+        },
+        throw(slot) {
+          if (slot < 0) {
+            const newest = Array.from(pending).pop();
+            if (newest === undefined) {
+              log("AWAIT-THROW none");
+              return;
+            }
+            slot = newest;
+          }
+          if (!pending.delete(slot)) {
+            log("AWAIT-THROW none");
+            return;
+          }
+          rejected.add(slot);
+          log("AWAIT-THROW /bios/menu");
+        },
+        catch(slot) {
+          // Query-only: does not clear the rejected state (guest parity).
+          return rejected.has(slot) ? 1 : 0;
+        },
+        addEventListener(tPtr, tLen, tyPtr, tyLen, listener, capture) {
+          log("WASM addEventListener " + text(tPtr, tLen) + " " + text(tyPtr, tyLen) + " " + listener + " " + capture);
+        },
+        removeEventListener(listener) {
+          log("WASM removeEventListener " + listener);
+        },
+        dispatchEvent(tPtr, tLen, tyPtr, tyLen, dPtr, dLen) {
+          log("WASM dispatchEvent " + text(tPtr, tLen) + " " + text(tyPtr, tyLen) + " " + text(dPtr, dLen));
+          return 1;
+        },
       },
     },
     bind(value) {
@@ -95,6 +141,10 @@ export function createWasmHost(doc, allowed, request, log = (message) => console
     },
     async drain() {
       while (queue.length) await request(queue.shift());
+      for (const slot of pending) {
+        log("AWAIT-GET /bios/menu");
+      }
+      pending.clear();
     },
     rollback() {
       queue.length = 0;
@@ -120,15 +170,51 @@ const LIBWASM_TAGS =
  * Bounded like createWasmHost: the handle table is capped, strings are
  * bounds-checked, and a failed `_start` never unmounts the static view.
  */
-export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly) {
+export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, opts = {}) {
   if (!mount || typeof mount.replaceChildren !== "function") throw new Error("libwasm mount unavailable");
   if (!wasmApi || typeof wasmApi.Tag !== "function") throw new Error("WebAssembly exception tags unavailable");
+  const asyncify = opts.asyncify ? new LibwasmAsyncify() : null;
+  const fetchFn = opts.fetchFn || (() => { throw new Error("libwasm fetchFn not provided"); });
+  // B61 refcounted libwasm object table. `struct JsHandle` frees on destruct
+  // and calls copyObjectRef on copy, so entries carry a reference count and a
+  // release at zero. Handles 1 (staging DOM root) and 2 (BoardSpec scope) are
+  // roots the guest never frees. See architecture/LIBWASM-ABI.md §3.
+  const OBJ_BASE = 0x100000, OBJ_MAX = 4096;
+  const objects = new Map();
+  const objFree = [];
+  let objNextSlot = 0;
+  // Optional browser instance (createBrowserContext). The bridge is ONE import
+  // plus a reserved root per binding: the engine consumes the generic
+  // `bindings()` map, so the context stays engine-agnostic and a context with
+  // extra globals needs no change here.
+  const ctx = opts.context || null;
+  const globalRoots = new Map();       // name -> object handle
+  const globalRootHandles = new Set(); // the same handles, for the root check
+  const objIsRoot = (h) => h === 1 || h === 2 || globalRootHandles.has(h);
+  function objAdd(value) {
+    if (objects.size >= OBJ_MAX) throw new Error("libwasm object budget exceeded");
+    const slot = objFree.length ? objFree.pop() : objNextSlot++;
+    const handle = OBJ_BASE + slot;
+    objects.set(handle, { value, refs: 1 });
+    return handle;
+  }
+  function objEntry(handle, what) {
+    if (objIsRoot(handle)) throw new Error("libwasm handle " + handle + " is a protected root");
+    const e = objects.get(handle);
+    if (!e) throw new Error("libwasm " + what + " on freed handle " + handle);
+    return e;
+  }
+  function objGet(handle) {
+    const e = objects.get(handle);
+    return e ? e.value : undefined;
+  }
   const tags = new Set("a abbr address article aside b bdi bdo blockquote br button caption cite code col colgroup data datalist dd del dfn div dl dt em fieldset figcaption figure footer h1 h2 h3 h4 h5 h6 header hr i input ins kbd label legend li main mark meter nav ol optgroup option output p pre progress q rb rp rt rtc ruby s samp section select small span strong sub sup table tbody td textarea tfoot th thead time tr u ul var wbr".split(" "));
   const root = doc.createElement("div");
   const handles = new Map([[1, root]]);
   const decoder = new TextDecoder("utf-8", { fatal: true });
-  let memory, prior;
-  let next = 2, calls = 0, stringBytes = 0;
+  const encoder = new TextEncoder();
+  let memory, prior, wasmInstance;
+  let next = 2, calls = 0, stringBytes = 0, stringPool = 0;
   let state = "staging";
   function checkMemory(value) {
     if (!value || !value.buffer || !Number.isInteger(value.buffer.byteLength) || value.buffer.byteLength > 16 * 1024 * 1024) {
@@ -144,6 +230,36 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly) 
     stringBytes += len;
     if (stringBytes > 1024 * 1024) throw new Error("WASM string budget exceeded");
     return decoder.decode(new Uint8Array(memory.buffer, ptr, len));
+  }
+  function writeString(raw, s) {
+    checkMemory(memory);
+    if (!Number.isInteger(raw) || raw < 0 || raw + 8 > memory.buffer.byteLength) {
+      throw new Error("WASM string result out of bounds");
+    }
+    const bytes = encoder.encode(String(s));
+    if (bytes.length > 65536) throw new Error("WASM string result too long");
+    let ptr;
+    if (wasmInstance?.exports?.allocString && typeof wasmInstance.exports.allocString === "function") {
+      ptr = wasmInstance.exports.allocString(bytes.length);
+      if (!Number.isInteger(ptr) || ptr < 0) throw new Error("WASM allocString failed");
+    } else {
+      const pageSize = 65536;
+      let end = memory.buffer.byteLength;
+      if (stringPool === 0) stringPool = end;
+      if (stringPool + bytes.length > end) {
+        const delta = Math.ceil((stringPool + bytes.length - end) / pageSize);
+        const old = memory.grow(delta);
+        if (old < 0) throw new Error("WASM memory grow failed");
+        stringPool = end;
+        end = memory.buffer.byteLength;
+      }
+      ptr = stringPool;
+      stringPool += bytes.length;
+    }
+    new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+    const u32 = new Uint32Array(memory.buffer, raw, 2);
+    u32[0] = bytes.length;
+    u32[1] = ptr;
   }
   function node(handle, writable = false) {
     if (!Number.isInteger(handle) || !handles.has(handle) || (writable && handle === 1)) {
@@ -172,7 +288,576 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly) 
     p.insertBefore(c, s);
   }
   function detach(child) { node(child, true).remove(); }
+  // B67 Lodash backend. `struct Lodash` ships a JSON command buffer through
+  // the twelve ldexec_* imports; libwasm's own putLocal emits one of five fixed
+  // arrow-function iteratees whose body just calls the guest's indirect
+  // function table. We recognise those by identity and dispatch into wasm —
+  // the iteratee runs in the guest, so no host `eval` is needed or accepted.
+  // Anything else `=(...)` is refused. See architecture/LIBWASM-ABI.md §5.
+  const CB_BOILERPLATE = new Set([
+    "(o,s)=>{let hndl=ao(o);let str=es(0,s,null,true);return !!sifg(cbPtr)(cbCtx,str[0],str[1],hndl);}",
+    "(o,i)=>{let hndl=ao(o);return !!sifg(cbPtr)(cbCtx,BigInt(i),hndl);}",
+    "(s1,s2)=>{let str1=es(0,s1,null,true);let str2=es(0,s2,null,true);return !!sifg(cbPtr)(cbCtx,str2[0],str2[1],str1[0],str1[1]);}",
+    "(s,i)=>{let str=es(0,s,null,true);return !!sifg(cbPtr)(cbCtx,BigInt(i),str[0],str[1]);}",
+    "(i1,i2)=>{return !!sifg(cbPtr)(cbCtx, BigInt(i2), BigInt(i1));}",
+  ]);
+  const LODASH_MAX_COMMANDS = 256, LODASH_MAX_COLLECTION = 4096;
+
+  // String(v) that agrees with g6b-js JsValue::to_js_string in the kernel lane.
+  // Plain String() throws on a null-prototype object (libwasm_add__object), and
+  // the two backends must not disagree about a chain's result.
+  function jsString(v) {
+    if (v === null) return "null";
+    if (v === undefined) return "undefined";
+    if (Array.isArray(v)) return v.map((x) => (x === null || x === undefined ? "" : jsString(x))).join(",");
+    if (typeof v === "object") return "[object Object]";
+    return String(v);
+  }
+
+  function lodashSigil(raw) {
+    if (raw.startsWith("\\")) return { v: raw.slice(1) };
+    if (!raw.startsWith("=")) return { v: raw };
+    const e = raw.slice(1);
+    if (e === "true") return { v: true };
+    if (e === "false") return { v: false };
+    if (e === "null") return { v: null };
+    if (e === "undefined") return { v: undefined };
+    if (e === "cb" || CB_BOILERPLATE.has(e)) return { cb: true };
+    const n = Number(e);
+    if (e !== "" && Number.isFinite(n)) return { v: n };
+    throw new Error("libwasm lodash refuses host eval of " + JSON.stringify(e));
+  }
+  function lodashParse(src) {
+    const raw = JSON.parse(src.endsWith(",]") ? src.slice(0, -2) + "]" : src);
+    if (!Array.isArray(raw)) throw new Error("libwasm lodash command buffer is not an array");
+    if (raw.length > LODASH_MAX_COMMANDS) throw new Error("libwasm lodash budget exceeded: commands");
+    const param = (p) => (typeof p === "string" ? lodashSigil(p) : { v: p });
+    return raw.map((c) => {
+      if (c && typeof c.local === "string") return { local: c.local, value: param(c.value) };
+      if (c && typeof c.func === "string") {
+        if (!Array.isArray(c.params)) throw new Error("libwasm lodash func without params");
+        return { func: c.func, params: c.params.map(param) };
+      }
+      throw new Error("malformed libwasm lodash command");
+    });
+  }
+  /** Bind the guest delegate at (ctx, ptr) as a native predicate. */
+  function guestIteratee(ctx, ptr) {
+    if (!(ptr > 0)) return null;
+    const table = wasmInstance?.exports?.__indirect_function_table;
+    if (!table || typeof table.get !== "function") return null;
+    const fn = table.get(ptr);
+    if (typeof fn !== "function") return null;
+    return (value, key) => {
+      // The generated boilerplates box the element as a handle and pass the
+      // key either as a string pair or a BigInt, matching the five shapes.
+      const h = objAdd(value);
+      try {
+        return !!fn(ctx, typeof key === "string" ? key.length : key, h);
+      } finally { functions.libwasm_removeObject(h); }
+    };
+  }
+  function lodashRun(init, commandsSrc, cbCtx, cbPtr) {
+    const commands = lodashParse(commandsSrc);
+    const cb = guestIteratee(cbCtx, cbPtr);
+    const list = (v) => {
+      const out = Array.isArray(v) ? v
+        : typeof v === "string" ? Array.from(v)
+        : v === null || v === undefined ? []
+        : typeof v === "object" ? Object.values(v) : [v];
+      if (out.length > LODASH_MAX_COLLECTION) throw new Error("libwasm lodash budget exceeded: collection");
+      return out;
+    };
+    const need = (p, m) => { if (!p || p.cb) throw new Error("libwasm lodash " + m + " needs a value parameter"); return p.v; };
+    const pred = (params, m) => {
+      if (!params.length) return (v) => !!v;
+      if (params[0].cb) {
+        if (!cb) throw new Error("libwasm lodash " + m + " needs a guest iteratee and none is bound");
+        return cb;
+      }
+      const prop = params[0].v;
+      return (v) => !!(v && typeof v === "object" && v[prop]);
+    };
+    let acc = init;
+    for (const c of commands) {
+      if (c.local) continue; // `cb` names the callback; it has no value
+      const p = c.params;
+      switch (c.func) {
+        case "identity": break;
+        case "defaultTo": acc = acc === null || acc === undefined || Number.isNaN(acc) ? need(p[0], "defaultTo") : acc; break;
+        case "toString": acc = jsString(acc); break;
+        case "toNumber": acc = Number(acc); break;
+        case "size": acc = typeof acc === "string" ? Array.from(acc).length : list(acc).length; break;
+        case "first": case "head": acc = list(acc)[0]; break;
+        case "last": { const l = list(acc); acc = l[l.length - 1]; break; }
+        case "keys": acc = Array.isArray(acc) ? list(acc).map((_, i) => i) : Object.keys(acc ?? {}); break;
+        case "values": acc = list(acc); break;
+        case "reverse": acc = list(acc).reverse(); break;
+        case "compact": acc = list(acc).filter(Boolean); break;
+        case "uniq": acc = Array.from(new Set(list(acc))); break;
+        case "flatten": acc = list(acc).flat(1); break;
+        case "sortBy": acc = list(acc).slice().sort((a, b) => jsString(a) < jsString(b) ? -1 : jsString(a) > jsString(b) ? 1 : 0); break;
+        case "join": acc = list(acc).map(jsString).join(p.length ? jsString(need(p[0], "join")) : ","); break;
+        case "concat": acc = list(acc).concat(...p.map((x) => need(x, "concat"))); break;
+        case "chunk": { const n = Math.max(1, Number(need(p[0], "chunk"))), l = list(acc), o = []; for (let i = 0; i < l.length; i += n) o.push(l.slice(i, i + n)); acc = o; break; }
+        case "take": acc = list(acc).slice(0, Math.max(0, Number(need(p[0], "take")))); break;
+        case "drop": acc = list(acc).slice(Math.max(0, Number(need(p[0], "drop")))); break;
+        case "nth": { const l = list(acc), i = Number(need(p[0], "nth")); acc = l[i < 0 ? l.length + i : i]; break; }
+        case "trim": acc = jsString(acc).trim(); break;
+        case "toUpper": acc = jsString(acc).toUpperCase(); break;
+        case "toLower": acc = jsString(acc).toLowerCase(); break;
+        case "capitalize": { const s = jsString(acc); acc = s.charAt(0).toUpperCase() + s.slice(1).toLowerCase(); break; }
+        case "sum": acc = list(acc).reduce((a, b) => a + Number(b), 0); break;
+        case "min": acc = list(acc).reduce((a, b) => (Number(b) < Number(a) ? b : a), list(acc)[0]); break;
+        case "max": acc = list(acc).reduce((a, b) => (Number(b) > Number(a) ? b : a), list(acc)[0]); break;
+        case "includes": acc = typeof acc === "string" ? acc.includes(jsString(need(p[0], "includes"))) : list(acc).includes(need(p[0], "includes")); break;
+        case "indexOf": acc = list(acc).indexOf(need(p[0], "indexOf")); break;
+        case "get": { let cur = acc; for (const seg of jsString(need(p[0], "get")).split(".")) cur = cur == null ? undefined : cur[seg]; acc = cur === undefined && p[1] ? need(p[1], "get") : cur; break; }
+        case "filter": { const f = pred(p, "filter"); acc = list(acc).filter((v, i) => f(v, i)); break; }
+        case "reject": { const f = pred(p, "reject"); acc = list(acc).filter((v, i) => !f(v, i)); break; }
+        case "map": { const f = pred(p, "map"); acc = list(acc).map((v, i) => !!f(v, i)); break; }
+        case "find": { const f = pred(p, "find"); acc = list(acc).find((v, i) => f(v, i)); break; }
+        case "every": { const f = pred(p, "every"); acc = list(acc).every((v, i) => f(v, i)); break; }
+        case "some": { const f = pred(p, "some"); acc = list(acc).some((v, i) => f(v, i)); break; }
+        case "countBy": { const f = pred(p, "countBy"), o = { true: 0, false: 0 }; list(acc).forEach((v, i) => o[f(v, i) ? "true" : "false"]++); acc = o; break; }
+        default: throw new Error("libwasm lodash method " + JSON.stringify(c.func) + " is not implemented");
+      }
+    }
+    return acc;
+  }
+  /** The twelve ldexec_* imports: 3 init kinds x 4 result kinds. */
+  function ldexecImports() {
+    const out = {};
+    const seed = {
+      Handle: (a) => ({ init: objGet(a[0]), n: 1 }),
+      long: (a) => ({ init: Number(a[0]), n: 1 }),
+      string: (a) => ({ init: text(a[0], a[1]), n: 2, evalTail: true }),
+    };
+    for (const kind of ["Handle", "long", "string"]) {
+      for (const ret of ["string", "long", "double", "Handle"]) {
+        out[`ldexec_${kind}__${ret}`] = (...args) => {
+          let i = 0;
+          const raw = ret === "string" ? args[i++] : 0;
+          const s = seed[kind](args.slice(i));
+          i += s.n;
+          const commands = text(args[i], args[i + 1]); i += 2;
+          const cbCtx = args[i++], cbPtr = args[i++];
+          i += 2; // onError (ctx, ptr): a thrown chain is a host trap here
+          if (s.evalTail && args[i++]) {
+            throw new Error("libwasm lodash refuses an eval seed: no host JS evaluator");
+          }
+          const v = lodashRun(s.init, commands, cbCtx, cbPtr);
+          if (ret === "string") return writeString(raw, v === undefined || v === null ? "" : jsString(v));
+          if (ret === "long") return BigInt(Math.trunc(Number(v)) || 0);
+          if (ret === "double") return Number(v);
+          return typeof v === "number" && Number.isInteger(v) && v >= 0x100000 ? v : objAdd(v);
+        };
+      }
+    }
+    return out;
+  }
+
+  // B63 typed object getter/call imports.  The object table is the receiver;
+  // DOM handles are resolved lazily so the two handle spaces can merge later.
+  const libwasmObjectAccess = (() => {
+    const out = {};
+    const resolve = (handle) => {
+      if (handle < OBJ_BASE) {
+        if (!handles.has(handle)) throw new Error("WASM object resolve unknown DOM handle " + handle);
+        return handles.get(handle);
+      }
+      const e = objects.get(handle);
+      if (!e) throw new Error("WASM object resolve unknown handle " + handle);
+      return e.value;
+    };
+    const convertTo = (v, type) => {
+      switch (type) {
+        case "int": return Number(v) | 0;
+        case "uint": return Number(v) >>> 0;
+        case "short": return (Number(v) << 16) >> 16;
+        case "ushort": return Number(v) & 0xFFFF;
+        case "bool": return (v === true || v === 1 || (typeof v === "number" && v !== 0)) ? 1 : 0;
+        case "float": return Math.fround(Number(v));
+        case "double": return Number(v);
+        case "long": return BigInt.asIntN(64, BigInt(Math.trunc(Number(v))));
+        case "ulong": return BigInt.asUintN(64, BigInt(Math.trunc(Number(v))));
+        case "Handle": return objAdd(v);
+        default: throw new Error("libwasm unsupported object getter type " + type);
+      }
+    };
+    const readArg = (type, args, at) => {
+      switch (type) {
+        case "string": return text(args[at.i++], args[at.i++]);
+        case "int": return args[at.i++] | 0;
+        case "uint": return args[at.i++] >>> 0;
+        case "bool": return args[at.i++] !== 0;
+        case "long": return BigInt.asIntN(64, BigInt(args[at.i++]));
+        case "ulong": return BigInt.asUintN(64, BigInt(args[at.i++]));
+        case "float": return Math.fround(args[at.i++]);
+        case "double": return Number(args[at.i++]);
+        case "Handle": return resolve(args[at.i++]);
+        default: throw new Error("libwasm unsupported object call arg type " + type);
+      }
+    };
+    const getter = (handle, len, ptr, type) => {
+      const prop = text(len, ptr);
+      const obj = resolve(handle);
+      if (obj == null) throw new Error("libwasm object getter on null receiver");
+      const boxed = Object(obj);
+      if (!(prop in boxed)) throw new Error("libwasm object has no property " + prop);
+      return convertTo(boxed[prop], type);
+    };
+    for (const t of ["int", "uint", "ushort", "bool", "float", "double", "Handle"]) {
+      out["Object_Getter__" + t] = (handle, len, ptr) => getter(handle, len, ptr, t);
+    }
+    out["Object_Getter__string"] = (raw, handle, len, ptr) => {
+      const prop = text(len, ptr);
+      const obj = resolve(handle);
+      if (obj == null) throw new Error("libwasm object getter on null receiver");
+      const boxed = Object(obj);
+      if (!(prop in boxed)) throw new Error("libwasm object has no property " + prop);
+      writeString(raw, jsString(boxed[prop]));
+    };
+    const callSpecs = [
+      ["", [], "void"],
+      ["string", ["string"], "void"],
+      ["uint", ["uint"], "void"],
+      ["int", ["int"], "void"],
+      ["bool", ["bool"], "void"],
+      ["double", ["double"], "void"],
+      ["float", ["float"], "void"],
+      ["Handle", ["Handle"], "void"],
+      ["string_string", ["string", "string"], "void"],
+      ["double_double", ["double", "double"], "void"],
+      ["string", ["string"], "Handle"],
+      ["uint", ["uint"], "Handle"],
+      ["int", ["int"], "Handle"],
+      ["bool", ["bool"], "Handle"],
+      ["Handle", ["Handle"], "Handle"],
+      ["string_string", ["string", "string"], "Handle"],
+      ["string", ["string"], "bool"],
+      ["string", ["string"], "string"],
+      ["uint", ["uint"], "string"],
+      ["uint_uint", ["uint", "uint"], "string"],
+      // B67 Moment: string-argument methods returning scalars.
+      ["string", ["string"], "uint"],
+      ["string", ["string"], "int"],
+      ["string", ["string"], "double"],
+    ];
+    for (const [argPart, argTypes, ret] of callSpecs) {
+      const name = "Object_Call_" + argPart + "__" + ret;
+      const sret = (ret === "string");
+      out[name] = (...args) => {
+        const at = { i: 0 };
+        const raw = sret ? args[at.i++] : 0;
+        const handle = args[at.i++];
+        const mlen = args[at.i++];
+        const mptr = args[at.i++];
+        const method = text(mlen, mptr);
+        const obj = resolve(handle);
+        if (obj == null) throw new Error("libwasm object call on null receiver");
+        const target = Object(obj);
+        const callArgs = argTypes.map((t) => readArg(t, args, at));
+        if (typeof target[method] !== "function") throw new Error("libwasm object has no method " + method);
+        const result = target[method](...callArgs);
+        if (ret === "void") return;
+        if (ret === "string") { writeString(raw, jsString(result)); return; }
+        return convertTo(result, ret);
+      };
+    }
+    // B64 Optional!T sret writers.  Layout is `T _value; bool defined;`,
+    // so the value is at `raw` and the presence flag at `raw + sizeof(T)`.
+    const OPTIONAL_TYPES = { Handle: "Handle", Uint: "uint", Double: "double", String: "string", Bool: "bool" };
+    function writeOptional(raw, v, type) {
+      checkMemory(memory);
+      if (!Number.isInteger(raw) || raw < 0) throw new Error("WASM optional result pointer invalid");
+      const off = type === "Handle" || type === "uint" ? 4 : type === "double" || type === "string" ? 8 : 1;
+      if (off + 1 > memory.buffer.byteLength - raw) throw new Error("WASM optional result out of bounds");
+      const missing = v === undefined || v === null;
+      const view = new DataView(memory.buffer);
+      const setDef = () => { new Uint8Array(memory.buffer)[raw + off] = missing ? 0 : 1; };
+      if (missing) {
+        if (type === "string") {
+          view.setUint32(raw, 0, true);
+          view.setUint32(raw + 4, 0, true);
+        } else if (type === "double") {
+          view.setFloat64(raw, 0, true);
+        } else if (type === "Handle" || type === "uint") {
+          view.setUint32(raw, 0, true);
+        } else {
+          view.setUint8(raw, 0);
+        }
+        setDef();
+        return;
+      }
+      if (type === "string") {
+        writeString(raw, jsString(v));
+      } else if (type === "double") {
+        view.setFloat64(raw, Number(v), true);
+      } else if (type === "Handle") {
+        view.setUint32(raw, objAdd(v), true);
+      } else if (type === "uint") {
+        view.setUint32(raw, Number(v) >>> 0, true);
+      } else {
+        view.setUint8(raw, (v === true || v === 1 || (typeof v === "number" && v !== 0)) ? 1 : 0);
+      }
+      setDef();
+    }
+    for (const t of ["Handle", "Uint", "Double", "String", "Bool"]) {
+      const type = OPTIONAL_TYPES[t];
+      out["Object_Getter__Optional" + t] = (raw, handle, len, ptr) => {
+        const prop = text(len, ptr);
+        const obj = resolve(handle);
+        if (obj == null) { writeOptional(raw, null, type); return; }
+        const boxed = Object(obj);
+        if (!(prop in boxed) || boxed[prop] == null) { writeOptional(raw, null, type); return; }
+        writeOptional(raw, boxed[prop], type);
+      };
+    }
+    const OPTIONAL_CALL_TYPES = { OptionalHandle: "Handle", OptionalString: "string" };
+    const optionalCallSpecs = [
+      ["string", ["string"], "OptionalHandle"],
+      ["uint", ["uint"], "OptionalHandle"],
+      ["int", ["int"], "OptionalHandle"],
+      ["bool", ["bool"], "OptionalHandle"],
+      ["string", ["string"], "OptionalString"],
+    ];
+    for (const [argPart, argTypes, ret] of optionalCallSpecs) {
+      const name = "Object_Call_" + argPart + "__" + ret;
+      const type = OPTIONAL_CALL_TYPES[ret];
+      out[name] = (...args) => {
+        const at = { i: 0 };
+        const raw = args[at.i++];
+        const handle = args[at.i++];
+        const mlen = args[at.i++];
+        const mptr = args[at.i++];
+        const method = text(mlen, mptr);
+        const obj = resolve(handle);
+        if (obj == null) throw new Error("libwasm object call on null receiver");
+        const target = Object(obj);
+        const callArgs = argTypes.map((t) => readArg(t, args, at));
+        if (typeof target[method] !== "function") throw new Error("libwasm object has no method " + method);
+        const result = target[method](...callArgs);
+        writeOptional(raw, result, type);
+      };
+    }
+
+    // B65 JSON codec.
+    out.JSON_parse_string = (len, ptr) => {
+      const s = text(len, ptr);
+      let v;
+      try { v = JSON.parse(s); } catch (e) { throw new Error("JSON parse error: " + e.message); }
+      if (v === undefined) v = null;
+      return objAdd(v);
+    };
+    out.JSON_stringify = (raw, handle) => {
+      const v = objGet(handle);
+      const s = v === undefined ? "" : JSON.stringify(v);
+      writeString(raw, s);
+    };
+
+    // B65 overload-resolving vararg call.  The D host serializes the tuple as a
+    // flat JSON array and passes an `argsdef` descriptor.
+    function splitTypes(inner) {
+      const out = [];
+      let depth = 0, start = 0;
+      for (let i = 0; i < inner.length; i++) {
+        const c = inner[i];
+        if (c === "(") depth++;
+        else if (c === ")") depth--;
+        else if (c === "," && depth === 0) { out.push(inner.slice(start, i)); start = i + 1; }
+      }
+      out.push(inner.slice(start));
+      return out;
+    }
+    function readVarArg(type, json, at, resolveHandles = true) {
+      if (type.startsWith("Optional!")) {
+        const inner = type.slice(9);
+        const defined = !!json[at.i++];
+        if (defined) return readVarArg(inner, json, at, resolveHandles);
+        readVarArg(inner, json, at, resolveHandles);
+        return undefined;
+      }
+      if (type.startsWith("SumType!")) {
+        const inner = type.slice(8);
+        const body = inner.slice(1, -1);
+        const disc = Number(json[at.i++]) || 0;
+        const types = splitTypes(body);
+        const values = [];
+        for (let i = 0; i < types.length; i++) {
+          values.push(readVarArg(types[i].trim(), json, at, resolveHandles && i === disc));
+        }
+        return values[disc];
+      }
+      const v = json[at.i++];
+      switch (type) {
+        case "bool": return !!v;
+        case "int": return Number(v) | 0;
+        case "uint": return Number(v) >>> 0;
+        case "short": return (Number(v) << 16) >> 16;
+        case "ushort": return Number(v) & 0xFFFF;
+        case "long": return BigInt.asIntN(64, BigInt(Math.trunc(Number(v))));
+        case "ulong": return BigInt.asUintN(64, BigInt(Math.trunc(Number(v))));
+        case "float": return Math.fround(Number(v));
+        case "double": return Number(v);
+        case "string": return String(v);
+        case "Handle": return resolveHandles ? resolve(Number(v)) : Number(v);
+        default: throw new Error("libwasm unsupported vararg type " + type);
+      }
+    }
+    const varargSpecs = ["void", "bool", "int", "uint", "short", "ushort", "long", "ulong", "float", "double", "Handle", "string"];
+    for (const ret of varargSpecs) {
+      const sret = ret === "string";
+      out["Object_VarArgCall__" + ret] = (...args) => {
+        const at = { i: 0 };
+        const raw = sret ? args[at.i++] : 0;
+        const handle = args[at.i++];
+        const mlen = args[at.i++], mptr = args[at.i++];
+        const method = text(mlen, mptr);
+        const dlen = args[at.i++], dptr = args[at.i++];
+        const argsdef = text(dlen, dptr);
+        const alen = args[at.i++], aptr = args[at.i++];
+        const jsonArgs = JSON.parse(text(alen, aptr));
+        if (!Array.isArray(jsonArgs)) throw new Error("Object_VarArgCall args must be a JSON array");
+        const types = argsdef.split(";").filter((t) => t);
+        const callAt = { i: 0 };
+        const callArgs = types.map((t) => readVarArg(t.trim(), jsonArgs, callAt));
+        const obj = resolve(handle);
+        if (obj == null) throw new Error("libwasm vararg call on null receiver");
+        const target = Object(obj);
+        if (typeof target[method] !== "function") throw new Error("libwasm object has no method " + method);
+        const result = target[method](...callArgs);
+        if (ret === "void") return;
+        if (ret === "string") { writeString(raw, jsString(result)); return; }
+        return convertTo(result, ret);
+      };
+    }
+
+    // B66 named delegates, event handlers, and timers. Re-entry is guarded by
+    // the DOM transaction state and, when asyncify is present, the asyncify
+    // state: the instance is not called while staging/unwinding/rewinding.
+    const eventsEnabled = opts.events ?? !!asyncify;
+    const delegateRegistry = new Map();
+    const eventRegistry = new Map();
+    let nextTimerId = 1;
+    const timers = new Map();
+    function callDelegate(ptr, ctx, ...args) {
+      if (!(ptr > 0)) throw new Error("libwasm delegate pointer invalid");
+      const table = wasmInstance?.exports?.__indirect_function_table;
+      if (!table || typeof table.get !== "function") throw new Error("libwasm indirect function table not available");
+      const fn = table.get(ptr);
+      if (typeof fn !== "function") throw new Error("libwasm delegate pointer not in table");
+      return fn(ctx, ...args);
+    }
+    function canReenter() {
+      if (state !== "committed") return false;
+      if (asyncify && asyncify.getState() !== 0) return false;
+      return true;
+    }
+    function scheduleTimer(ctx, ptr, ms, interval) {
+      const id = nextTimerId++;
+      if (!eventsEnabled) {
+        timers.set(id, { ctx, ptr, interval: false });
+        return id;
+      }
+      const handle = (interval ? setInterval : setTimeout)(() => {
+        if (!canReenter()) return;
+        try { callDelegate(ptr, ctx); } catch (e) { /* host event failures are not guest traps */ }
+      }, ms);
+      timers.set(id, { handle, ctx, ptr, interval });
+      return id;
+    }
+    out.libwasm_set__function = (nlen, nptr, ctx, ptr) => {
+      const name = text(nlen, nptr);
+      if (name.length > 256) throw new Error("libwasm delegate name too long");
+      delegateRegistry.set(name, { ctx, ptr });
+    };
+    out.libwasm_unset__function = (nlen, nptr) => {
+      delegateRegistry.delete(text(nlen, nptr));
+    };
+    out.setTimeout = (ctx, ptr, ms) => scheduleTimer(ctx, ptr, ms, false);
+    out.setInterval = (ctx, ptr, ms) => scheduleTimer(ctx, ptr, ms, true);
+    out.clearTimeout = (id) => {
+      const t = timers.get(id);
+      if (t?.handle) clearTimeout(t.handle);
+      timers.delete(id);
+    };
+    out.clearInterval = (id) => {
+      const t = timers.get(id);
+      if (t?.handle) clearInterval(t.handle);
+      timers.delete(id);
+    };
+    out.Object_Call_EventHandler__void = (handle, mlen, mptr, defined, ctx, ptr) => {
+      const name = text(mlen, mptr);
+      const eventType = name.startsWith("on") ? name.slice(2) : name;
+      const target = resolve(handle);
+      if (target == null || (typeof target !== "object" && typeof target !== "function")) throw new Error("libwasm event handler target invalid");
+      if (typeof target.addEventListener !== "function" && typeof target[name] === "undefined") throw new Error("libwasm event handler target has no event interface");
+      const key = `${handle}:${name}`;
+      const prev = eventRegistry.get(key);
+      if (prev?.listener) {
+        try { target.removeEventListener(eventType, prev.listener); } catch {}
+      }
+      if (!defined) { eventRegistry.delete(key); return; }
+      if (!(ptr > 0)) throw new Error("libwasm event handler pointer invalid");
+      const listener = (event) => {
+        if (!canReenter()) return;
+        const eventHandle = objAdd({ target, type: event?.type ?? eventType });
+        try { callDelegate(ptr, ctx, eventHandle); } finally { /* event object is released on guest side if it frees the handle */ }
+      };
+      eventRegistry.set(key, { ctx, ptr, listener });
+      if (typeof target.addEventListener === "function") target.addEventListener(eventType, listener);
+      else target[name] = listener;
+    };
+    out.Object_Getter__EventHandler = (raw, handle, mlen, mptr) => {
+      const name = text(mlen, mptr);
+      const key = `${handle}:${name}`;
+      const stored = eventRegistry.get(key);
+      checkMemory(memory);
+      const view = new DataView(memory.buffer);
+      view.setUint32(raw, stored ? stored.ctx : 0, true);
+      view.setUint32(raw + 4, stored ? stored.ptr : 0, true);
+      new Uint8Array(memory.buffer)[raw + 8] = stored ? 1 : 0;
+    };
+
+    return out;
+  })();
+
   const functions = {
+    getTimeStamp() {
+      return BigInt(Date.now());
+    },
+    fetch(ptr, len) {
+      const url = text(len, ptr);
+      if (!/^\/bios\//.test(url)) throw new Error("libwasm fetch URL not in /bios/ router: " + url);
+      if (!asyncify) return 1;
+      const promise = fetchFn(url, { method: "GET", credentials: "same-origin", redirect: "error" }).then((r) => {
+        if (typeof r === "string") return r;
+        if (!r || typeof r.ok !== "boolean") throw new Error("libwasm fetch returned non-Response");
+        if (!r.ok) throw new Error(url + " HTTP " + r.status);
+        return r.text();
+      });
+      return objAdd(promise);
+    },
+    holyc(ptr, len) {
+      const line = text(len, ptr);
+      if (line.length > 256) throw new Error("libwasm holyc line too long");
+      const host = globalThis.kernel;
+      if (asyncify && host && typeof host.holyc === "function") {
+        return objAdd(Promise.resolve(host.holyc(line)));
+      }
+      return 0;
+    },
+    register_endpoint(pathPtr, pathLen, methodPtr, methodLen) {
+      const path = text(pathLen, pathPtr);
+      const method = text(methodLen, methodPtr);
+      if (!/^\/bios\//.test(path)) throw new Error("libwasm register path not in /bios/: " + path);
+      if (!/^(GET|POST|PUT|DELETE)$/.test(method)) throw new Error("libwasm register method unsupported: " + method);
+      const host = globalThis.kernel;
+      if (asyncify && host && typeof host.register === "function") {
+        host.register(path, method);
+      }
+    },
     createElement(tag) {
       if (!Number.isInteger(tag)) throw new Error("WASM invalid DOM tag ordinal");
       return create(LIBWASM_TAGS[tag]);
@@ -188,6 +873,200 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly) 
       else if (name === "className" || name === "title" || name === "value") n[name] = value;
       else throw new Error("WASM unsupported DOM property: " + name);
     },
+    libwasm_await__void(handle) {
+      if (!Number.isInteger(handle) || handle < 0) throw new Error("libwasm await handle invalid");
+      if (!asyncify) return; // build/verification no-op
+      const promise = objGet(handle);
+      if (!promise) return null;
+      if (typeof promise.then !== "function") return promise;
+      return promise;
+    },
+    libwasm_await_supported() {
+      return asyncify ? 1 : 0;
+    },
+    libwasm_await_failed() {
+      return asyncify && asyncify.failed ? 1 : 0;
+    },
+    libwasm_await_error(raw) {
+      const e = asyncify ? asyncify.lastError : null;
+      writeString(raw, e ? (e.message || String(e)) : "");
+    },
+    libwasm_await_value(raw) {
+      const v = asyncify ? asyncify.value : null;
+      writeString(raw, v === undefined || v === null ? "" : String(v));
+    },
+    libwasm_note_await_fail(handle) {
+      const obj = objGet(handle);
+      if (asyncify) {
+        asyncify.failed = true;
+        asyncify.lastError = obj instanceof Error ? obj : new Error(String(obj ?? "rejected"));
+        asyncify.value = null;
+      }
+    },
+    libwasm_note_await_ok(handle) {
+      const obj = objGet(handle);
+      if (asyncify) {
+        asyncify.failed = false;
+        asyncify.lastError = null;
+        asyncify.value = obj;
+      }
+    },
+    libasync_promise_all__promise(handle) {
+      const arr = objGet(handle);
+      if (!Array.isArray(arr)) throw new Error("libwasm promise all expects a handle array");
+      const promises = arr.map((h, i) => {
+        const p = objGet(h);
+        if (!isPromise(p)) throw new Error(`libwasm promise all handle ${i} is not a promise`);
+        return p;
+      });
+      return objAdd(Promise.all(promises).then((values) => objAdd(values), (err) => Promise.reject(objAdd(err))));
+    },
+    libasync_promise_any__promise(handle) {
+      const arr = objGet(handle);
+      if (!Array.isArray(arr)) throw new Error("libwasm promise any expects a handle array");
+      const promises = arr.map((h, i) => {
+        const p = objGet(h);
+        if (!isPromise(p)) throw new Error(`libwasm promise any handle ${i} is not a promise`);
+        return p;
+      });
+      return objAdd(Promise.any(promises).then((value) => objAdd(value), (err) => Promise.reject(objAdd(err))));
+    },
+    libasync_promise_allsettled__promise(handle) {
+      const arr = objGet(handle);
+      if (!Array.isArray(arr)) throw new Error("libwasm promise allSettled expects a handle array");
+      const promises = arr.map((h, i) => {
+        const p = objGet(h);
+        if (!isPromise(p)) throw new Error(`libwasm promise allSettled handle ${i} is not a promise`);
+        return p;
+      });
+      return objAdd(Promise.allSettled(promises).then((results) => objAdd(results), (err) => Promise.reject(objAdd(err))));
+    },
+    libwasm_get__string(raw, ptr) {
+      if (ptr === 0) return writeString(raw, ""); // D null handle
+      const obj = objEntry(ptr, "get__string").value;
+      if (typeof obj !== "string") throw new Error("libwasm object is not a string");
+      writeString(raw, obj);
+    },
+    libwasm_add__string(len, ptr) {
+      return objAdd(text(len, ptr));
+    },
+    libwasm_add__object() {
+      return objAdd(Object.create(null));
+    },
+    // Resolve a browser-instance global (`console`, `window`, `document`, ...)
+    // to a stable, protected object handle. Returns 0 when no context is bound
+    // or the name is not in `bindings()` — fail closed, so guest code that
+    // asks for an unavailable global gets a null handle it must check, not a
+    // fake object that silently swallows writes.
+    //
+    // Everything else flows through the existing typed machinery: with the
+    // handle in hand, `Object_Call_string__void(h, "log", msg)` already works.
+    // That is why this is one import and not a console ABI.
+    libwasm_global(len, ptr) {
+      if (!ctx) return 0;
+      const name = text(len, ptr);
+      const existing = globalRoots.get(name);
+      if (existing !== undefined) return existing;
+      const value = ctx.global(name);
+      if (value === undefined) return 0;
+      const handle = objAdd(value);
+      globalRoots.set(name, handle);
+      globalRootHandles.add(handle);
+      return handle;
+    },
+    libwasm_copyObjectRef(handle) {
+      if (objIsRoot(handle)) return handle; // roots are never refcounted
+      objEntry(handle, "copyObjectRef").refs++;
+      return handle;
+    },
+    libwasm_removeObject(handle) {
+      const e = objEntry(handle, "removeObject");
+      if (--e.refs > 0) return;
+      objects.delete(handle);
+      objFree.push(handle - OBJ_BASE);
+    },
+    libwasm_add__bool(v) { return objAdd(!!v ? 1 : 0); },
+    libwasm_add__int(v) { return objAdd(v | 0); },
+    libwasm_add__uint(v) { return objAdd(v >>> 0); },
+    libwasm_add__long(v) { return objAdd(typeof v === "bigint" ? BigInt.asIntN(64, v) : BigInt.asIntN(64, BigInt(Math.trunc(Number(v))))); },
+    libwasm_add__ulong(v) { return objAdd(typeof v === "bigint" ? BigInt.asUintN(64, v) : BigInt.asUintN(64, BigInt(Math.trunc(Number(v))))); },
+    libwasm_add__short(v) { return objAdd((v << 16) >> 16); },
+    libwasm_add__ushort(v) { return objAdd(v & 0xFFFF); },
+    libwasm_add__float(v) { return objAdd(Math.fround(Number(v))); },
+    libwasm_add__double(v) { return objAdd(Number(v)); },
+    libwasm_add__byte(v) { return objAdd((v << 24) >> 24); },
+    libwasm_add__ubyte(v) { return objAdd(v & 0xFF); },
+    libwasm_add__ints(len, ptr) { return objAdd(Array.from(new Int32Array(memory.buffer, ptr, len))); },
+    libwasm_add__uints(len, ptr) { return objAdd(Array.from(new Uint32Array(memory.buffer, ptr, len))); },
+    libwasm_moment_now() { return objAdd(new Date()); },
+    libwasm_moment_from_millis(ms) { return objAdd(new Date(Number(ms))); },
+    libwasm_map_create() { return objAdd(new Map()); },
+    libwasm_map_set(handle, klen, kptr, vlen, vptr) {
+      const map = objGet(handle);
+      if (!(map instanceof Map)) throw new Error("libwasm map_set on non-Map");
+      map.set(text(klen, kptr), text(vlen, vptr));
+    },
+    libwasm_map_get__OptionalString(raw, handle, klen, kptr) {
+      const map = objGet(handle);
+      if (!(map instanceof Map)) throw new Error("libwasm map_get on non-Map");
+      const v = map.get(text(klen, kptr));
+      if (v === undefined) {
+        writeString(raw, "");
+        new Uint8Array(memory.buffer)[raw + 8] = 0;
+      } else {
+        writeString(raw, jsString(v));
+        new Uint8Array(memory.buffer)[raw + 8] = 1;
+      }
+    },
+    libwasm_map_has(handle, klen, kptr) {
+      const map = objGet(handle);
+      if (!(map instanceof Map)) return 0;
+      return map.has(text(klen, kptr)) ? 1 : 0;
+    },
+    libwasm_map_delete(handle, klen, kptr) {
+      const map = objGet(handle);
+      if (!(map instanceof Map)) throw new Error("libwasm map_delete on non-Map");
+      map.delete(text(klen, kptr));
+    },
+    libwasm_map_clear(handle) {
+      const map = objGet(handle);
+      if (!(map instanceof Map)) throw new Error("libwasm map_clear on non-Map");
+      map.clear();
+    },
+    Int8Array_Create(len, ptr) { return objAdd(new Int8Array(memory.buffer, ptr, len)); },
+    Int32Array_Create(len, ptr) { return objAdd(new Int32Array(memory.buffer, ptr, len)); },
+    Uint8Array_Create(len, ptr) { return objAdd(new Uint8Array(memory.buffer, ptr, len)); },
+    Float32Array_Create(len, ptr) { return objAdd(new Float32Array(memory.buffer, ptr, len)); },
+    DataView_Create(len, ptr) { return objAdd(new DataView(memory.buffer, ptr, len)); },
+    libwasm_get__bool(handle) { const v = objGet(handle); return (v === true || v === 1 || (typeof v === "number" && v !== 0)) ? 1 : 0; },
+    libwasm_get__int(handle) { return Number(objGet(handle)) | 0; },
+    libwasm_get__uint(handle) { return Number(objGet(handle)) >>> 0; },
+    libwasm_get__long(handle) { const v = objGet(handle); return typeof v === "bigint" ? BigInt.asIntN(64, v) : BigInt.asIntN(64, BigInt(Math.trunc(Number(v)))); },
+    libwasm_get__ulong(handle) { const v = objGet(handle); return typeof v === "bigint" ? BigInt.asUintN(64, v) : BigInt.asUintN(64, BigInt(Math.trunc(Number(v)))); },
+    libwasm_get__short(handle) { return (Number(objGet(handle)) << 16) >> 16; },
+    libwasm_get__ushort(handle) { return Number(objGet(handle)) & 0xFFFF; },
+    libwasm_get__float(handle) { return Math.fround(Number(objGet(handle))); },
+    libwasm_get__double(handle) { return Number(objGet(handle)); },
+    libwasm_get__byte(handle) { return (Number(objGet(handle)) << 24) >> 24; },
+    libwasm_get__ubyte(handle) { return Number(objGet(handle)) & 0xFF; },
+    libwasm_get__field(handle, len, ptr) {
+      const name = text(len, ptr);
+      const obj = objGet(handle);
+      if (obj === undefined || obj === null) return 0;
+      if (obj instanceof DataView) {
+        if (name === "length" || name === "byteLength") return objAdd(obj.byteLength);
+        if (name === "byteOffset") return objAdd(obj.byteOffset);
+      }
+      return objAdd(obj[name]);
+    },
+    libwasm_get_idx__field(handle, idx) {
+      const obj = objGet(handle);
+      if (obj === undefined || obj === null) return 0;
+      if (obj instanceof DataView) return objAdd(obj.getUint8(idx));
+      if (ArrayBuffer.isView(obj)) return objAdd(obj[idx]);
+      return objAdd(obj[idx]);
+    },
+    ...libwasmObjectAccess,
     setPropertyBool(handle, nameLen, namePtr, value) {
       const n = node(handle, true), name = text(nameLen, namePtr);
       if (!["hidden", "disabled", "checked", "readOnly"].includes(name) || (value !== 0 && value !== 1)) {
@@ -204,8 +1083,20 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly) 
     },
     addClass(handle, len, ptr) { node(handle, true).classList.add(text(len, ptr)); },
     removeClass(handle, len, ptr) { node(handle, true).classList.remove(text(len, ptr)); },
+    addEventListener(targetPtr, targetLen, typePtr, typeLen, listener, capture) {
+      log("WASM addEventListener " + text(targetPtr, targetLen) + " " + text(typePtr, typeLen) + " " + listener + " " + capture);
+    },
+    removeEventListener(listener) {
+      log("WASM removeEventListener " + listener);
+    },
+    dispatchEvent(targetPtr, targetLen, typePtr, typeLen, detailPtr, detailLen) {
+      log("WASM dispatchEvent " + text(targetPtr, targetLen) + " " + text(typePtr, typeLen) + " " + text(detailPtr, detailLen));
+      return 1;
+    },
+    ...ldexecImports(),
   };
-  const env = Object.fromEntries(Object.entries(functions).map(([name, fn]) => [name, (...args) => {
+  const baseFunctions = asyncify ? asyncify.wrapModuleImports(functions) : functions;
+  const env = Object.fromEntries(Object.entries(baseFunctions).map(([name, fn]) => [name, (...args) => {
     try {
       if (state !== "staging") throw new Error("WASM DOM transaction is " + state);
       if (++calls > 16384) throw new Error("WASM import budget exceeded");
@@ -214,7 +1105,7 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly) 
     } catch (error) { state = "failed"; throw error; }
   }]));
   env.__cpp_exception = new wasmApi.Tag({ parameters: ["i32"] });
-  return {
+  const host = {
     imports: { env },
     nodeCount() { return handles.size - 1; },
     bind(value) { checkMemory(value); memory = value; },
@@ -232,6 +1123,295 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly) 
       root.replaceChildren();
       handles.clear();
       state = "aborted";
+    },
+  };
+  if (asyncify) {
+    host.start = async (instance, heap) => {
+      wasmInstance = instance;
+      asyncify.init(instance, host.imports);
+      return await asyncify.exports._start(heap);
+    };
+    host.exports = () => asyncify.exports;
+  }
+  return host;
+}
+
+// A browser instance: the `console` / `window` / `document` singletons that a
+// UI is built on, plus a bounded pollable console ring.
+//
+// Deliberately ENGINE-AGNOSTIC. Nothing here mentions WebAssembly, libwasm or
+// the object table: the contract offered to any engine is `bindings()`, a plain
+// `name -> object` map, plus `consolePage()` for polling. libwasm consumes it
+// through one optional import (`libwasm_global`); the MVP `createWasmHost` can
+// route its `log` into the same ring; a devtools panel or plain JS can use it
+// directly. Adding a second engine must not require touching this function.
+//
+// Multiple instances coexist, each with its own `contextId`, handle vocabulary
+// and console ring — that is what lets an embedded frame get its own browser
+// instance without its output interleaving into the parent's console.
+//
+// Console shape follows `kernel-spec/goosie` `internal/browsercontrol/types.go`:
+// `ConsoleEntry{level, data, timestamp}` and a bounded
+// `ConsolePage{contextId, pageRevision, entries, dropped}`. The bounded-ring
+// -that-reports-drops detail is taken from there deliberately: silently losing
+// console output is how a debugging tool lies to you.
+export function createBrowserContext(doc, opts = {}) {
+  const contextId = String(opts.contextId || "main");
+  const LIMIT = Number.isInteger(opts.consoleLimit) ? opts.consoleLimit : 512;
+  if (LIMIT < 1) throw new Error("browser context console limit must be >= 1");
+  // goosie ConsoleMessage.Level, minus "table" (needs a table renderer we do
+  // not have; an unknown level is refused rather than silently downgraded).
+  const LEVELS = ["log", "info", "warn", "error", "debug"];
+  const MAX_TEXT = 4096;
+
+  const entries = [];      // ring, oldest first
+  let nextSeq = 1;         // monotonic; also the pageRevision cursor
+  let dropped = 0;         // total evicted by the bound, never silently hidden
+  const mirror = typeof opts.mirror === "function" ? opts.mirror : null;
+  const clock = typeof opts.now === "function" ? opts.now : () => Date.now();
+
+  function record(level, parts) {
+    if (!LEVELS.includes(level)) throw new Error("browser console unknown level " + level);
+    // Formatting is deliberately dumb: String() each argument. No %s/%o
+    // interpolation, because a format-string mini-language is a parser, and an
+    // unbounded one at that.
+    let data = parts.map((p) => {
+      if (typeof p === "string") return p;
+      if (p === null || p === undefined || typeof p !== "object") return String(p);
+      try { return JSON.stringify(p); } catch { return "[uncloneable]"; }
+    }).join(" ");
+    if (data.length > MAX_TEXT) data = data.slice(0, MAX_TEXT) + "...[truncated]";
+    const entry = { seq: nextSeq++, level, data, timestamp: clock() };
+    entries.push(entry);
+    while (entries.length > LIMIT) { entries.shift(); dropped++; }
+    if (mirror) mirror(entry, contextId);
+    return entry;
+  }
+
+  const console_ = {};
+  for (const level of LEVELS) console_[level] = (...parts) => { record(level, parts); };
+  console_.clear = () => { entries.length = 0; };
+  // console.count/group would each need state or nesting semantics; refuse
+  // rather than pretend.
+  console_.levels = () => LEVELS.slice();
+
+  const view = opts.view || doc.defaultView || null;
+  // Bounded `document`: an allow-listed projection, not the host document.
+  // Anything not listed is absent, so guest or UI code cannot reach cookies,
+  // scripts, or navigation through this singleton.
+  const document_ = {
+    contextId,
+    getElementById: (id) => doc.getElementById(id),
+    querySelectorAll: (sel) => (typeof doc.querySelectorAll === "function" ? doc.querySelectorAll(sel) : []),
+    createElement: (tag) => doc.createElement(tag),
+    get title() { return typeof doc.title === "string" ? doc.title : ""; },
+  };
+  // Bounded `window`: geometry and the two singletons. No open/eval/fetch/
+  // location-assignment — those are the BIOS kernel's business, not a UI
+  // global's, and `location` is exposed read-only as a string.
+  const window_ = {
+    contextId,
+    console: console_,
+    document: document_,
+    get innerWidth() { return view && Number.isFinite(view.innerWidth) ? view.innerWidth : 0; },
+    get innerHeight() { return view && Number.isFinite(view.innerHeight) ? view.innerHeight : 0; },
+    get devicePixelRatio() { return view && Number.isFinite(view.devicePixelRatio) ? view.devicePixelRatio : 1; },
+    get href() {
+      const l = view && view.location;
+      return l && typeof l.href === "string" ? l.href : "";
+    },
+  };
+
+  const BINDINGS = { console: console_, window: window_, document: document_ };
+
+  return {
+    contextId,
+    console: console_,
+    window: window_,
+    document: document_,
+
+    /// The engine-facing contract: an allow-listed `name -> object` map.
+    /// A name absent here is absent everywhere, which is what keeps a new
+    /// engine from widening the surface by accident.
+    bindings() { return { ...BINDINGS }; },
+    /// Resolve one global by name; `undefined` (never a throw) when unknown,
+    /// so an engine can decide whether an unknown global is fatal.
+    global(name) { return Object.prototype.hasOwnProperty.call(BINDINGS, name) ? BINDINGS[name] : undefined; },
+    globalNames() { return Object.keys(BINDINGS); },
+
+    /// Poll the console. Returns entries newer than `sinceRevision`, the new
+    /// cursor, the lifetime `dropped` count, and `missed` — how many entries
+    /// this caller can never see because the ring evicted them while its cursor
+    /// was behind. A poller that silently skips is worse than one that reports.
+    consolePage(sinceRevision = 0) {
+      const since = Number.isFinite(sinceRevision) ? Math.max(0, Math.trunc(sinceRevision)) : 0;
+      const fresh = entries.filter((e) => e.seq > since);
+      const oldest = entries.length ? entries[0].seq : nextSeq;
+      const missed = since > 0 && oldest > since + 1 ? oldest - since - 1 : 0;
+      return {
+        contextId,
+        pageRevision: nextSeq - 1,
+        entries: fresh.map((e) => ({ level: e.level, data: e.data, timestamp: e.timestamp, seq: e.seq })),
+        dropped,
+        missed,
+      };
+    },
+
+    /// Paint the console into a DOM element — the devtools panel.
+    ///
+    /// Text is written through textContent, never innerHTML, so a logged
+    /// string containing markup is displayed rather than parsed. Returns the
+    /// cursor to pass back on the next call for incremental appends.
+    renderConsoleInto(el, sinceRevision = 0) {
+      if (!el || typeof el.appendChild !== "function") throw new Error("console target unavailable");
+      const page = this.consolePage(sinceRevision);
+      if (sinceRevision === 0 && typeof el.replaceChildren === "function") el.replaceChildren();
+      if (page.missed) {
+        const note = doc.createElement("div");
+        note.setAttribute("data-console-level", "warn");
+        note.textContent = "[" + page.missed + " earlier entries dropped]";
+        el.appendChild(note);
+      }
+      for (const entry of page.entries) {
+        const row = doc.createElement("div");
+        row.setAttribute("data-console-level", entry.level);
+        row.setAttribute("data-console-seq", String(entry.seq));
+        row.textContent = entry.level.toUpperCase() + " " + entry.data;
+        el.appendChild(row);
+      }
+      return page.pageRevision;
+    },
+  };
+}
+
+// Render debugging (see architecture/RENDER-VALIDATION.md §7).
+//
+// A DevTools-like inspector over the *first-party* g6b-css engine. Two jobs:
+//
+//   describe(el)      dump what the real browser computed for an element, in
+//                     the same property vocabulary g6b-css uses.
+//   diff(el, report)  compare a `g6b_css::inspect::StyleReport` JSON against
+//                     the real browser's getComputedStyle for the same element.
+//
+// `diff` is the useful one: the host browser is an *external* oracle for
+// computed values, so a mismatch localises a cascade or box-model bug to one
+// property instead of one wrong pixel. This is NOT a conformance score — see
+// RENDER-VALIDATION.md §1 on why recognition/self-reported numbers mean
+// nothing. It is a dev facility and is never on the BIOS render path.
+export function createRenderInspector(doc, view = doc.defaultView || globalThis) {
+  // The longhands g6b-css models. Keep in sync with SUPPORTED_PROPERTIES.
+  const PROPERTIES = [
+    "display", "width", "height", "box-sizing",
+    "margin-top", "margin-right", "margin-bottom", "margin-left",
+    "padding-top", "padding-right", "padding-bottom", "padding-left",
+    "border-top-width", "border-right-width", "border-bottom-width", "border-left-width",
+    "color", "background-color", "visibility",
+  ];
+
+  function resolve(target) {
+    const el = typeof target === "string" ? doc.getElementById(target) : target;
+    if (!el) throw new Error("render inspector: unknown element " + target);
+    return el;
+  }
+
+  // getComputedStyle is absent in the bun/TestNode harness; callers get an
+  // explicit failure rather than a silently empty diff that looks like a pass.
+  function computed(el) {
+    if (typeof view.getComputedStyle !== "function") {
+      throw new Error("render inspector: host has no getComputedStyle");
+    }
+    const style = view.getComputedStyle(el);
+    const out = {};
+    for (const p of PROPERTIES) {
+      const v = style.getPropertyValue(p);
+      if (v !== undefined && v !== null && v !== "") out[p] = String(v).trim();
+    }
+    return out;
+  }
+
+  // "10px" -> 10. Returns null when the value is not a whole-pixel length, so
+  // a unit we cannot compare is reported as such instead of coerced to 0.
+  function px(value) {
+    if (value === undefined || value === null) return null;
+    const m = /^(-?\d+)(?:px)?$/.exec(String(value).trim());
+    return m ? Number(m[1]) : null;
+  }
+
+  return {
+    properties: PROPERTIES,
+    computed(target) { return computed(resolve(target)); },
+
+    /// Text dump of the browser's own view of an element, plus its box.
+    describe(target) {
+      const el = resolve(target);
+      const style = computed(el);
+      const lines = [el.tagName ? el.tagName.toLowerCase() : "?"];
+      if (el.id) lines[0] += "#" + el.id;
+      for (const p of PROPERTIES) {
+        if (p in style) lines.push("  " + p + ": " + style[p]);
+      }
+      const box = typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null;
+      if (box) lines.push("  rect: " + Math.round(box.width) + "x" + Math.round(box.height));
+      return lines.join("\n");
+    },
+
+    /// Diff a g6b-css StyleReport (object or JSON text) against the browser.
+    ///
+    /// `tolerance` is in whole pixels and applies only to length comparisons;
+    /// keyword values must match exactly. Returns every disagreement with both
+    /// values, so the caller can see *which* side is wrong.
+    diff(target, report, tolerance = 0) {
+      const parsed = typeof report === "string" ? JSON.parse(report) : report;
+      if (!parsed || !Array.isArray(parsed.properties)) {
+        throw new Error("render inspector: report has no properties array");
+      }
+      const el = resolve(target);
+      const actual = computed(el);
+      const mismatches = [];
+      const compared = [];
+      const skipped = [];
+
+      for (const trace of parsed.properties) {
+        const property = trace.property;
+        const ours = trace.value;
+        if (!(property in actual)) {
+          skipped.push({ property, reason: "host did not report this property" });
+          continue;
+        }
+        const theirs = actual[property];
+        const a = px(ours);
+        const b = px(theirs);
+        compared.push(property);
+        if (a !== null && b !== null) {
+          const delta = Math.abs(a - b);
+          if (delta > tolerance) {
+            mismatches.push({ property, ours, theirs, delta, kind: "length" });
+          }
+        } else if (a === null && b === null) {
+          if (ours.toLowerCase() !== theirs.toLowerCase()) {
+            mismatches.push({ property, ours, theirs, kind: "keyword" });
+          }
+        } else {
+          // One side is a length and the other is not: a real disagreement
+          // about the *type* of the value, which is worth surfacing loudly.
+          mismatches.push({ property, ours, theirs, kind: "unit-mismatch" });
+        }
+      }
+
+      // The box model is the pixel-accuracy signal; compare it to the layout
+      // rect the browser actually used.
+      const boxDiff = [];
+      const rect = typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null;
+      if (rect && parsed.box && !parsed.box.refused) {
+        for (const [key, got] of [["borderBoxWidth", rect.width], ["borderBoxHeight", rect.height]]) {
+          const ours = parsed.box[key];
+          if (typeof ours !== "number") continue;
+          const delta = Math.abs(ours - Math.round(got));
+          if (delta > tolerance) boxDiff.push({ metric: key, ours, theirs: Math.round(got), delta });
+        }
+      }
+
+      return { element: parsed.element, ok: !mismatches.length && !boxDiff.length, compared, skipped, mismatches, box: boxDiff };
     },
   };
 }
@@ -709,10 +1889,15 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
         try {
           if (!wasmApi) throw new Error("WebAssembly is unavailable");
           if (!localWasmUrl(libwasmUrl)) throw new Error("WASM URL must be local");
-          host = createLibwasmHost(doc, libwasmRoot, wasmApi);
           const response = await fetchFn(libwasmUrl, { method: "GET", credentials: "same-origin", redirect: "error" });
           if (!response.ok) throw new Error("WASM HTTP " + response.status);
           const bytes = await response.arrayBuffer();
+          const isLibwasmWasm = bytes.byteLength >= 8 &&
+            new Uint8Array(bytes)[0] === 0x00 &&
+            new Uint8Array(bytes)[1] === 0x61 &&
+            new Uint8Array(bytes)[2] === 0x73 &&
+            new Uint8Array(bytes)[3] === 0x6d;
+          host = createLibwasmHost(doc, libwasmRoot, wasmApi, { asyncify: isLibwasmWasm, fetchFn });
           if (bytes.byteLength < 8 || bytes.byteLength > 1024 * 1024) throw new Error("WASM module size budget exceeded");
           const { instance } = await wasmApi.instantiate(bytes, host.imports);
           host.bind(instance.exports.memory);
@@ -721,10 +1906,12 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
           if (!Number.isInteger(heap) || heap < 0 || heap > instance.exports.memory.buffer.byteLength) {
             throw new Error("WASM heap base export invalid");
           }
-          // LDC/libwasm `_start(heap_base)`; extra args on 0-param exports are ignored.
-          instance.exports._start(heap);
+          // LDC/libwasm `_start(heap_base)` is wrapped by the asyncify driver
+          // only when the module is a real libwasm asyncified binary.
+          if (host.start) await host.start(instance, heap);
+          else instance.exports._start(heap);
           host.commit();
-          if (note) note.textContent = "libwasm component scaffold: " + host.nodeCount() + " allocated nodes (LDC wasm-eh cell)";
+          if (note) note.textContent = "libwasm SPA: " + host.nodeCount() + " allocated nodes (LDC wasm-eh " + (host.start ? "asyncify" : "scaffold") + ")";
           createParticleBackground(doc, ui, instance.exports);
         } catch (error) {
           if (host) host.rollback();
@@ -733,6 +1920,121 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
       }
     },
   };
+}
+
+const ASYNCIFY_DATA_ADDR = 524288;
+const ASYNCIFY_DATA_START = ASYNCIFY_DATA_ADDR + 8;
+const ASYNCIFY_DATA_END = 1048576;
+const ASYNCIFY_EXPORTS = ["_start"];
+
+function isPromise(obj) {
+  return !!obj && (typeof obj === "object" || typeof obj === "function") && typeof obj.then === "function";
+}
+
+class LibwasmAsyncify {
+  constructor() {
+    this.exports = null;
+    this.value = undefined;
+    this.lastError = null;
+    this.failed = false;
+    this.lastExport = "";
+    this.queue = Promise.resolve();
+  }
+
+  getState() {
+    return this.exports ? this.exports.asyncify_get_state() : 0;
+  }
+
+  assertNoneState() {
+    const s = this.getState();
+    if (s !== 0) throw new Error(`Invalid asyncify state ${s}, expected 0`);
+  }
+
+  wrapImportFn(fn) {
+    return (...args) => {
+      const curState = this.getState();
+      if (curState === 2) {
+        this.exports.asyncify_stop_rewind();
+        return this.value;
+      }
+      this.assertNoneState();
+      const value = fn(...args);
+      if (!isPromise(value)) return value;
+      this.exports.asyncify_start_unwind(ASYNCIFY_DATA_ADDR);
+      this.value = value;
+    };
+  }
+
+  wrapModuleImports(mod) {
+    const out = Object.create(null);
+    for (const [name, value] of Object.entries(mod)) {
+      out[name] = typeof value === "function" ? this.wrapImportFn(value) : value;
+    }
+    return out;
+  }
+
+  wrapImports(imports) {
+    if (!imports) return undefined;
+    const out = Object.create(null);
+    for (const [name, value] of Object.entries(imports)) {
+      out[name] = name === "env" && typeof value === "object" ? this.wrapModuleImports(value) : value;
+    }
+    return out;
+  }
+
+  wrapExportFn(fn, exportName) {
+    const run = async (...args) => {
+      this.assertNoneState();
+      this.lastExport = exportName;
+      try {
+        let result = await fn(...args);
+        while (this.getState() === 1) {
+          this.exports.asyncify_stop_unwind();
+          try {
+            this.value = await this.value;
+            this.lastError = null;
+            this.failed = false;
+          } catch (error) {
+            this.lastError = error;
+            this.failed = true;
+            this.value = null;
+          }
+          this.assertNoneState();
+          this.exports.asyncify_start_rewind(ASYNCIFY_DATA_ADDR);
+          result = await fn(...args);
+        }
+        this.assertNoneState();
+        return result;
+      } catch (error) {
+        throw error;
+      }
+    };
+    return (...args) => {
+      const p = this.queue.then(() => run(...args), () => run(...args));
+      this.queue = p.then(() => undefined, () => undefined);
+      return p;
+    };
+  }
+
+  wrapExports(exports) {
+    const out = Object.create(null);
+    for (const [name, value] of Object.entries(exports)) {
+      if (typeof value === "function" && ASYNCIFY_EXPORTS.includes(name)) {
+        out[name] = this.wrapExportFn(value, name);
+      } else {
+        out[name] = value;
+      }
+    }
+    this.exports = out;
+    return out;
+  }
+
+  init(instance, imports) {
+    const memory = instance.exports.memory || (imports && imports.env && imports.env.memory);
+    if (!memory) throw new Error("libwasm memory export missing");
+    new Int32Array(memory.buffer, ASYNCIFY_DATA_ADDR).set([ASYNCIFY_DATA_START, ASYNCIFY_DATA_END]);
+    this.wrapExports(instance.exports);
+  }
 }
 
 if (typeof document !== "undefined") {

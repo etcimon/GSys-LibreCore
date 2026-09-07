@@ -15,6 +15,7 @@ validated against LibreCore (`PLAN.md` §0–§3).
 | `BROWSER.md` | Lightweight BIOS browser (WebIDL live/stub, goja/lirx specs) |
 | `TLS.md` | Botan-spec RSA/ECDSA/X.509 + HolyC HTTPS + adapter ports |
 | `WASM.md` | WASM-JIT + svelte-d UI (NodeDef, not LDC, not SvelteKit) |
+| `LIBWASM-ABI.md` | **Plan.** Full 116-import libwasm host surface; B61–B68 completion sequence |
 | `KERNEL-API.md` | HTTP/1.1+HTTP/2 kernel endpoints; JS↔HolyC; compiled BIOS params |
 | `USB.md` | USB host: always-on FAT32 flash; USB-key FileMgr FAT32/NTFS/ext4 |
 | `MENUS.md` | Inferred setup tree; HolyC-UI ⊥ browser-UI; topology + uncore |

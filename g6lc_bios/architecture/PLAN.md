@@ -102,7 +102,7 @@ on-guest JIT. Detailed supported/refused boundaries: `BROWSER.md`, `WASM.md`.
 | QEMU | `g6q --loader bios` + UART1 `-serial tcp:127.0.0.1:2222` for the custom board; **stock-virt verified**: `fixtures/g6lc64-qemu.json` + `qemu-args` (`-nographic -smp N -global virtio-mmio.force-legacy=false -device virtio-gpu-device` — or `virtio-gpu-gl-device` + `egl-headless,gl=on` under `proxy.gl`, `--no-gl` fallback, `--vnc N` frontend) boots under OpenSBI 1.5/QEMU 8.2 to `VIRTIO-SCAN`+`VIRTIO-PAINT` with a **1920×1080 QMP screendump** (640×480 DOM/Gr plane ×2 centered — `FbExpand` = `Proxy::to_ppm` semantics). Native uncore HDMI/DP: `display`-class peripheral → `DispPaint` register commit + `G6FB` simplefb handoff (`architecture/uncore/hdmi-display.md`, `fixtures/g6lc64-hdmi.json`, exec-modelled). No `-netdev`. `g6lc64-virt.json` still needs a custom mbox/UART1 device model for QEMU |
 | Post-boot | `until-delegate` NIC then `LOOPBACK-MBOX` + PLIC IRQ 3 @ `0x10100000` → `/dev/g6lc-bios`. Immutable view-only; Reboot/Shutdown/Wakeup |
 | Gr / proxy | `g6b-gr` 640×480×16 plane + display-proxy `fit`/`fill`/`dpi` to HDMI/DP / host-GL (30/60/120 fps, high DPI, up to 8K). OpenGL-ES2 listing. Docs: `DISPLAY.md` |
-| Browser | `g6b-webidl` + `browser-ui` (svelte-d NodeDef + **FileMgr**, **not SvelteKit**) + `g6b-wasm` JIT on the g6b kernel. Fetch is live via kernel HTTP. `BROWSER.md` `USB.md` `WASM.md` `KERNEL-API.md` |
+| Browser | `g6b-webidl` + `browser-ui` (svelte-d NodeDef + **FileMgr**, **not SvelteKit**) + `g6b-wasm` JIT on the g6b kernel. Fetch is live via kernel HTTP. B69 adds generic DOM methods (`setAttribute`, `classList`) and a bounded ES6 `Map` host surface. `BROWSER.md` `USB.md` `WASM.md` `KERNEL-API.md` |
 | TLS | `g6b-tls` SHA-256, AES-128, HMAC, RSA PKCS#1, ECDSA P-256, X.509; ClientHello rsa+ecdsa. Botan spec, not linked. `TLS.md` |
 | HTTP / endpoints | `g6b-http` HTTP/1.1 + HTTP/2+HPACK; HolyC/JS register the same router; `/bios/{clocks,edk2,u-boot,bootloader,flash,update,settings,usb,files}` |
 | File server | generated `/ui/index.html` `/ui/app.js` `/ui/ui.wasm`; HolyC `FileServe` / `HttpsServe`; TLS ServerHello. `FILE-SERVER.md` |
@@ -176,7 +176,7 @@ RTL mailbox / DTS merge into `corev_apu` is an inference recorded in
 | **B56** | Bounded nonblocking JS async: `await` fetch tokens, throw/catch, cancellation, stale/duplicate rejection, per-task/tick budgets; kernel poll integration | landed (host) |
 | **B57** | Transactional DOM: Rust `DomTransaction` + native-browser DOM-kernel host (validated handles, rollback, property allowlist); explicit libwasm ABI mount with startup verification | landed (host) |
 | **B58** | Cooperative RV32/RV64 task-switch IR, bounded multicore scheduler/task services, DedicatedWorker compute protocol (SHA-256/AES-GCM) shared by browser and HolyC menus | landed (host IR + host services; guest dispatch open) |
-| **B59** | LDC 1.43 + carried `runtime-v1.43.0` libwasm cell: DUB workspace generation, provenance/ABI/startup-gated publication, Asyncify fail-closed, D particle exports + WebGL backdrop | landed (component-shell artifact; full Svelte tree open) |
+| **B59** | LDC 1.43 + carried `runtime-v1.43.0` libwasm cell: DUB workspace generation, provenance/ABI/startup-gated publication, `g6b-wasm::Asyncify` runtime, D particle exports + WebGL backdrop | landed (component-shell artifact; full Svelte tree open, non-MVP opcodes fail-closed) |
 
 Kernel-spec RISC-V map: [`KERNEL-RV.md`](KERNEL-RV.md). Generated `zeal/KStart.S`
 and `zeal/KInts.S` match `g6b-elf` because both lower `g6b-asm` IR
@@ -209,16 +209,29 @@ remain the sole authority; OpenSBI remains M-mode and BIOS stays S-mode.
 - Required before full libwasm: persistent instance globals/tables and indirect
   calls, numeric types beyond i32, EH cleanup, real callback/Promise handles,
   allocation/GC semantics for exercised paths, full component lifetime/reactivity
-  and a verified Asyncify or native continuation transform. Binaryen requests
-  currently fail explicitly; numeric JIT code cannot suspend/unwind yet.
-- Required before QEMU display: compile/install the guest runtime, wire the
-  `INP_KQ` key queue into the DOM input consumers (the virtio-input eventq →
-  `InpDrain` → bounded queue lane is landed; QEMU `sendkey` verification is
-  pending a QEMU host run), and capture real QEMU scanout of guest-mutated
-  pixels. The virtio-gpu command sequence is exercised host-side (`VioScan` +
-  exec model, `smoke --out-vio`); QEMU has not yet presented a window, so
-  never substitute the modeled surface, a static boot pattern, or a
-  host-browser screenshot for that evidence.
+  and a verified Asyncify or native continuation transform. The `g6b-wasm::Asyncify`
+  runtime and `run_with_fuel_mut` persistent state are now in place; non-MVP
+  opcodes (i64/f32/f64, call_indirect, bulk memory, EH) are still rejected by
+  `validate`/`run`, and the `env.libwasm_await__void` host hook is not yet wired.
+- QEMU display + input are now **verified** (QEMU 8.2.2 + OpenSBI
+  fw_dynamic, stock `-M virt`, `fixtures/g6lc64-virt.json`): the
+  virtio-input eventq → `InpDrain` → `INP_KQ` → `DomKey`/`DomNav` DOM lane
+  carries monitor `sendkey` to `nav.sel`/`inp.last` rows (`NAV cpu`,
+  `DOM| key <hex>`), the QMP `screendump` is a P6 1920×1080 scanout with
+  guest-painted pixels, and the bounded 4-slot await lane (`Await` →
+  `AWAIT pending N` → timer-tick `AWAIT-GET` drain → `DOM| resolved menu`
+  + `VIRTIO-PAINT`; `Throw` → `AWAIT-THROW` reject → `rejected menu`;
+  all-pending → `AWAIT-REJ full`; resolved/rejected slots reusable) runs
+  concurrent with input.
+  Still required before a full guest runtime: compile/install the runtime
+  itself and guest JS `Promise`/`catch` object semantics — the slot queue
+  is the `env.await`/`env.throw` wasm import and the shipped `bios-ui.wasm`
+  `_start` calls `env.await` (the `await fetchBios` Svelte op), but there
+  is no JS-visible `Promise` object or guest JS runtime. The trap frame saves `ra`+`t0..t6`+`a0..a7` and `VIO_BUSY`
+  guards the shared ctrlq against trap-context repaints — see `DISPLAY.md`
+  "Async frames and IRQ-context paint safety". Never substitute the
+  modeled surface, a static boot pattern, or a host-browser screenshot for
+  QEMU evidence.
 - Reproducibility follow-up: the verified `runtime-v1.43.0` carry is now
   vendored under `browser-ui/libwasm/` and tracked; compiler
   provenance/preflight detects drift but does not provision a missing runtime.

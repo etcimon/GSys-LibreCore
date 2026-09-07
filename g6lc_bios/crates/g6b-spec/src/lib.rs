@@ -12,7 +12,7 @@ mod json;
 mod menu;
 mod profile;
 
-pub use json::{parse_json, quote_json, Json};
+pub use json::{parse_json, quote_json, stringify_json, Json};
 pub use menu::{Menu, MenuItem};
 pub use profile::BiosProfile;
 
@@ -134,6 +134,9 @@ pub struct DisplayProxy {
     pub scale_mode: String,
     /// Optional GL/scale accel: `off` | `auto` | `rvv` | `ai-island`.
     pub accel: String,
+    /// Forced scanout surface: `vga` | `gpu`. Empty = follow the active
+    /// output's class (`BoardSpec::default_surface`).
+    pub surface: String,
 }
 
 impl Default for DisplayProxy {
@@ -149,8 +152,155 @@ impl Default for DisplayProxy {
             gl: false,
             scale_mode: "fit".into(),
             accel: "off".into(),
+            surface: String::new(),
         }
     }
+}
+
+/// A display *output* the BIOS may scan out to, in priority order.
+///
+/// The ladder is over **validated linear framebuffers**, never over vendors:
+/// a PCIe display controller outranks the others only when it actually yields
+/// a usable pre-initialized framebuffer. See `architecture/DISPLAY.md`
+/// "Display outputs and surface selection".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum OutputClass {
+    /// No accelerated output — the low-res Gr plane over UART only.
+    None,
+    /// virtio-gpu over virtio-mmio (the QEMU-virt transport).
+    VirtioGpu,
+    /// Declared uncore scanout engine behind an HDMI/DP PHY
+    /// (`architecture/uncore/hdmi-display.md`).
+    UncoreScanout,
+    /// PCIe display controller exposing a pre-initialized linear framebuffer.
+    /// **Not** a modesetting driver: AMD AtomBIOS/DCN and NVIDIA GSP devinit
+    /// are vendor firmware this package does not carry, so an uninitialized
+    /// part is demoted rather than driven.
+    PcieLinearFb,
+}
+
+impl OutputClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::VirtioGpu => "virtio-gpu",
+            Self::UncoreScanout => "uncore-scanout",
+            Self::PcieLinearFb => "pcie-linear-fb",
+        }
+    }
+
+    /// Priority rung; higher wins when the output yields a validated
+    /// framebuffer. Matches the `DispSel` runtime ladder.
+    pub fn priority(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::VirtioGpu => 1,
+            Self::UncoreScanout => 2,
+            Self::PcieLinearFb => 3,
+        }
+    }
+
+    pub fn code(self) -> u32 {
+        self.priority()
+    }
+
+    /// True when this class is GPU-grade — i.e. the default surface is the
+    /// native-resolution one, not the upscaled low-res plane.
+    pub fn is_accelerated(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// Which UI surface feeds the scanout.
+///
+/// This is the split the display-proxy toggle flips. The default follows the
+/// active [`OutputClass`]: an accelerated output gets [`Surface::Gpu`], so the
+/// low-res plane is **never** upscaled onto a GPU-class output unless the user
+/// asks for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    /// The 4bpp `__gr_plane` (ZealOS Gr intent, 8x8 font, UART cells),
+    /// scaled and letterboxed by the display-proxy.
+    Vga,
+    /// Native-resolution rendering at the output's own geometry, no upscale.
+    Gpu,
+}
+
+impl Surface {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Vga => "vga",
+            Self::Gpu => "gpu",
+        }
+    }
+
+    pub fn code(self) -> u32 {
+        match self {
+            Self::Vga => 0,
+            Self::Gpu => 1,
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "vga" => Some(Self::Vga),
+            "gpu" => Some(Self::Gpu),
+            _ => None,
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Vga => Self::Gpu,
+            Self::Gpu => Self::Vga,
+        }
+    }
+}
+
+/// One candidate scanout output with its geometry and default surface.
+///
+/// Geometry here is what BoardSpec *declares*; the runtime `DispSel` mux is
+/// what decides which candidate is live, because presence (a virtio DeviceID,
+/// a `G6DS` magic, an HPD bit, a PCIe class code) is only knowable at boot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayOutput {
+    pub class: OutputClass,
+    /// Stable id for menus, diagnostics and the `/bios/display` endpoint.
+    pub id: String,
+    /// Register-window or ECAM base when the class has one.
+    pub base: Option<u64>,
+    pub w: u32,
+    pub h: u32,
+    /// Default surface for this output.
+    pub surface: Surface,
+    /// Why this output exists / what still gates it. Never a capability claim.
+    pub why: String,
+}
+
+impl DisplayOutput {
+    pub fn stride(&self) -> u32 {
+        self.w.saturating_mul(4)
+    }
+
+    /// Bytes a full X8R8G8B8 surface needs at this geometry.
+    pub fn fb_bytes(&self) -> u64 {
+        u64::from(self.w)
+            .saturating_mul(u64::from(self.h))
+            .saturating_mul(4)
+    }
+}
+
+/// PCIe host-bridge windows the BIOS may enumerate. Read-only: this package
+/// never *assigns* a BAR, it only accepts one firmware already programmed.
+#[derive(Debug, Clone, Default)]
+pub struct Pcie {
+    /// ECAM config-space base (QEMU virt: `0x30000000`).
+    pub ecam: String,
+    /// 32-bit MMIO window base (QEMU virt: `0x40000000`).
+    pub mmio: String,
+    pub mmio_len: String,
+    /// Scan the config space for a class-0x03 display controller.
+    pub scan_display: bool,
 }
 
 /// Resolved display-proxy scale/GL accelerator (optional build).
@@ -733,6 +883,8 @@ pub struct BoardSpec {
     pub threads: u32,
     pub geo: CoreGeo,
     pub uncore: Uncore,
+    /// PCIe host-bridge windows for the read-only display-controller scan.
+    pub pcie: Pcie,
 }
 
 impl Default for BoardSpec {
@@ -761,6 +913,7 @@ impl Default for BoardSpec {
                 stream: false,
             },
             uncore: Uncore::default(),
+            pcie: Pcie::default(),
         }
     }
 }
@@ -869,6 +1022,9 @@ impl BoardSpec {
         if let Json::Obj(_) = v.get("uncore") {
             apply_uncore(&mut spec.uncore, v.get("uncore"));
         }
+        if let Json::Obj(_) = v.get("pcie") {
+            apply_pcie(&mut spec.pcie, v.get("pcie"));
+        }
         spec.infer_geo()?;
         spec.infer_uncore();
         if let Json::Obj(_) = v.get("holyc") {
@@ -945,6 +1101,7 @@ impl BoardSpec {
                 "gpio strap must not sit at 0x40000000 when an ai-island peripheral is live".into(),
             );
         }
+        self.check_display()?;
         if self.postboot.enable == PostbootMode::MgmtHart && self.harts < 2 {
             return Err("postboot.enable=mgmt-hart needs harts.count >= 2".into());
         }
@@ -1212,6 +1369,193 @@ impl BoardSpec {
         self.display_ctrl().is_some() && (self.kernel.gr.enable || self.kernel.proxy.enable)
     }
 
+    /// Display-output legality: surface names, PCIe windows, and the address
+    /// overlaps that would make a scanned BAR unusable.
+    fn check_display(&self) -> Result<(), String> {
+        let s = &self.kernel.proxy.surface;
+        if !s.is_empty() && Surface::parse(s).is_none() {
+            return Err(format!(
+                "proxy.surface must be vga or gpu (empty = follow the output class), got {s}"
+            ));
+        }
+        if !self.pcie.scan_display {
+            return Ok(());
+        }
+        let ecam = parse_hex(&self.pcie.ecam)
+            .ok_or("pcie.scan_display needs pcie.ecam (the config-space base)")?;
+        let (mmio, len) = self
+            .pcie_mmio_window()
+            .ok_or("pcie.scan_display needs pcie.mmio (the 32-bit BAR window)")?;
+        if len == 0 {
+            return Err("pcie.mmio_len must be nonzero".into());
+        }
+        let end = mmio.saturating_add(len);
+        // A BAR the firmware assigned inside this window must be readable
+        // memory, so anything else claiming the same range makes every
+        // scanned framebuffer unusable. QEMU virt puts the 32-bit PCIe MMIO
+        // window at 0x40000000..0x80000000, which is exactly where the
+        // ai-island GEMM block lives — the two cannot coexist.
+        for p in &self.peripherals {
+            if let Some(base) = parse_hex(&p.base) {
+                if base >= mmio && base < end {
+                    return Err(format!(
+                        "peripheral {} at {} sits inside the PCIe MMIO window {}..{:#x}; \
+                         every scanned BAR would overlap it — move the peripheral or \
+                         drop pcie.scan_display",
+                        p.id, p.base, self.pcie.mmio, end
+                    ));
+                }
+            }
+        }
+        if let Some(dram) = parse_hex(&self.dram_base) {
+            if dram >= mmio && dram < end {
+                return Err(format!(
+                    "dram_base {} sits inside the PCIe MMIO window {}..{:#x}",
+                    self.dram_base, self.pcie.mmio, end
+                ));
+            }
+        }
+        if ecam >= mmio && ecam < end {
+            return Err(format!(
+                "pcie.ecam {} must not sit inside the PCIe MMIO window {}..{:#x}",
+                self.pcie.ecam, self.pcie.mmio, end
+            ));
+        }
+        Ok(())
+    }
+
+    /// ECAM config-space base when a PCIe display scan is asked for.
+    pub fn pcie_ecam(&self) -> Option<u64> {
+        if !self.pcie.scan_display {
+            return None;
+        }
+        parse_hex(&self.pcie.ecam)
+    }
+
+    /// 32-bit PCIe MMIO window (`base`, `len`) a BAR must land inside for the
+    /// framebuffer to be accepted. `None` when unset — a BAR outside a known
+    /// window is refused rather than trusted.
+    pub fn pcie_mmio_window(&self) -> Option<(u64, u64)> {
+        let base = parse_hex(&self.pcie.mmio)?;
+        let len = parse_hex(&self.pcie.mmio_len).unwrap_or(0x4000_0000);
+        Some((base, len))
+    }
+
+    /// True when the guest should run the read-only PCIe display-controller
+    /// scan (`PciProbe`). Requires an ECAM base *and* a graphics plane to
+    /// paint — scanning for a framebuffer nobody will use is pointless.
+    pub fn wants_pci_scan(&self) -> bool {
+        self.pcie_ecam().is_some() && (self.kernel.gr.enable || self.kernel.proxy.enable)
+    }
+
+    /// High-res target the accelerated outputs scan out at, i.e. the
+    /// display-proxy geometry when enabled, else the Gr plane geometry.
+    fn high_geometry(&self) -> (u32, u32) {
+        let g = &self.kernel.gr;
+        let p = &self.kernel.proxy;
+        let (lw, lh) = if g.enable {
+            (g.w.max(8), g.h.max(8))
+        } else {
+            (640, 480)
+        };
+        if p.enable {
+            (p.high_w.max(lw), p.high_h.max(lh))
+        } else {
+            (lw, lh)
+        }
+    }
+
+    /// Candidate scanout outputs, **highest priority first**.
+    ///
+    /// This is the declared candidate set, not a detection result: whether a
+    /// virtio DeviceID, a `G6DS` magic, an HPD bit or a PCIe class code is
+    /// actually present is only knowable at boot, which is what the runtime
+    /// `DispSel` mux resolves. `OutputClass::None` is always last so the
+    /// ladder can never come up empty.
+    pub fn display_outputs(&self) -> Vec<DisplayOutput> {
+        let (hw, hh) = self.high_geometry();
+        let mut outs = Vec::new();
+        if self.wants_pci_scan() {
+            outs.push(DisplayOutput {
+                class: OutputClass::PcieLinearFb,
+                id: "pcie0".into(),
+                base: self.pcie_ecam(),
+                w: hw,
+                h: hh,
+                surface: Surface::Gpu,
+                why: "PCIe class-0x03 controller with a pre-initialized linear framebuffer; \
+                      no AMD AtomBIOS/DCN or NVIDIA GSP modeset — an uninitialized part is demoted"
+                    .into(),
+            });
+        }
+        if self.wants_disp_scan() {
+            outs.push(DisplayOutput {
+                class: OutputClass::UncoreScanout,
+                id: "disp0".into(),
+                base: self.display_ctrl(),
+                w: hw,
+                h: hh,
+                surface: Surface::Gpu,
+                why: "uncore scanout engine (architecture/uncore/hdmi-display.md); \
+                      HPD/EDID is a contract-revision ask, not implemented"
+                    .into(),
+            });
+        }
+        if self.wants_virtio_gpu() {
+            outs.push(DisplayOutput {
+                class: OutputClass::VirtioGpu,
+                id: "vio0".into(),
+                base: None,
+                w: hw,
+                h: hh,
+                surface: Surface::Gpu,
+                why: "virtio-gpu over virtio-mmio (QEMU virt transport)".into(),
+            });
+        }
+        let (lw, lh) = if self.kernel.gr.enable {
+            (self.kernel.gr.w.max(8), self.kernel.gr.h.max(8))
+        } else {
+            (640, 480)
+        };
+        outs.push(DisplayOutput {
+            class: OutputClass::None,
+            id: "vga0".into(),
+            base: None,
+            w: lw,
+            h: lh,
+            surface: Surface::Vga,
+            why: "low-res Gr plane over UART cells; the fallback that always exists".into(),
+        });
+        outs.sort_by(|a, b| b.class.priority().cmp(&a.class.priority()));
+        outs
+    }
+
+    /// The output `DispSel` would pick if every candidate were present — the
+    /// declared default, used for gen-time geometry and menus.
+    pub fn default_output(&self) -> DisplayOutput {
+        self.display_outputs()
+            .into_iter()
+            .next()
+            .expect("display_outputs always yields the None fallback")
+    }
+
+    /// Surface that feeds the scanout by default.
+    ///
+    /// An explicit `kernel.proxy.surface` wins; otherwise the default follows
+    /// the highest-priority output's class, so the low-res plane is never
+    /// upscaled onto a GPU-class output unless the user asks.
+    pub fn default_surface(&self) -> Surface {
+        Surface::parse(&self.kernel.proxy.surface).unwrap_or(self.default_output().surface)
+    }
+
+    /// True when both surfaces are reachable, so the display-proxy should
+    /// offer the VGA/GPU toggle.
+    pub fn surface_toggle(&self) -> bool {
+        self.display_outputs()
+            .iter()
+            .any(|o| o.class.is_accelerated())
+    }
+
     /// Optional high-DPI GL/scale accelerator. Default `off`.
     pub fn proxy_accel(&self) -> ProxyAccel {
         match self.kernel.proxy.accel.as_str() {
@@ -1356,6 +1700,32 @@ impl BoardSpec {
                 ),
                 _ => {}
             }
+        }
+        let outs = self.display_outputs();
+        req.push(format!(
+            "display outputs (priority order): {} — active surface {} by default",
+            outs.iter()
+                .map(|o| format!("{}={}", o.id, o.class.as_str()))
+                .collect::<Vec<_>>()
+                .join(" "),
+            self.default_surface().as_str()
+        ));
+        if outs.iter().any(|o| o.class == OutputClass::UncoreScanout) {
+            req.push(
+                "uncore display engine must add HPD + EDID mode registers to the \
+                 hdmi-display.md window before hot-plug output selection is possible; \
+                 the BIOS cannot infer a connected cable today"
+                    .into(),
+            );
+        }
+        if outs.iter().any(|o| o.class == OutputClass::PcieLinearFb) {
+            req.push(format!(
+                "PCIe root complex with ECAM at {} and BAR window {} must present \
+                 firmware-assigned BARs; the BIOS enumerates read-only and accepts only a \
+                 pre-initialized linear framebuffer — no AMD AtomBIOS/DCN and no NVIDIA GSP \
+                 devinit is carried, so an uninitialized adapter is demoted, not driven",
+                self.pcie.ecam, self.pcie.mmio
+            ));
         }
         if self.kernel.ui == "svelte-d" {
             req.push(
@@ -1578,6 +1948,21 @@ fn apply_geo(g: &mut CoreGeo, v: &Json) {
     }
     if let Some(b) = v.get("stream").as_bool() {
         g.stream = b;
+    }
+}
+
+fn apply_pcie(p: &mut Pcie, v: &Json) {
+    if let Some(s) = v.get("ecam").as_str() {
+        p.ecam = s.to_string();
+    }
+    if let Some(s) = v.get("mmio").as_str() {
+        p.mmio = s.to_string();
+    }
+    if let Some(s) = v.get("mmio_len").as_str() {
+        p.mmio_len = s.to_string();
+    }
+    if let Some(b) = v.get("scan_display").as_bool() {
+        p.scan_display = b;
     }
 }
 
@@ -1956,6 +2341,9 @@ fn apply_proxy(p: &mut DisplayProxy, v: &Json) {
     }
     if let Some(s) = v.get("accel").as_str() {
         p.accel = s.to_string();
+    }
+    if let Some(s) = v.get("surface").as_str() {
+        p.surface = s.to_string();
     }
 }
 
@@ -2351,6 +2739,112 @@ mod tests {
         let req = spec.inferred_arch().join("\n");
         assert!(req.contains("display-proxy"), "{req}");
         assert!(req.contains("HDMI"), "{req}");
+    }
+
+    #[test]
+    fn display_outputs_rank_pcie_over_uncore_over_virtio_over_none() {
+        let spec = BoardSpec::from_json_str(
+            r#"{
+            "schema_version":1,
+            "isa":{"xlen":64,"march":"rv64imac"},
+            "kernel":{"gr":{"enable":true,"backend":"hdmi"},
+                      "proxy":{"enable":true,"link":"hdmi","dpi":192,"high_w":1920,"high_h":1080}},
+            "pcie":{"scan_display":true,"ecam":"0x30000000","mmio":"0x60000000","mmio_len":"0x10000000"},
+            "peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}]
+        }"#,
+        )
+        .unwrap();
+        let ids: Vec<_> = spec
+            .display_outputs()
+            .iter()
+            .map(|o| (o.id.clone(), o.class))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("pcie0".into(), OutputClass::PcieLinearFb),
+                ("disp0".into(), OutputClass::UncoreScanout),
+                ("vga0".into(), OutputClass::None),
+            ],
+            "a declared uncore engine takes the link from virtio-gpu"
+        );
+        assert_eq!(spec.default_output().class, OutputClass::PcieLinearFb);
+        assert_eq!(spec.default_surface(), Surface::Gpu);
+        assert!(spec.surface_toggle());
+        assert!(spec.wants_pci_scan());
+        let req = spec.inferred_arch().join("\n");
+        assert!(req.contains("pcie0=pcie-linear-fb"), "{req}");
+        // Both refusals must be stated, not implied.
+        assert!(req.contains("AtomBIOS"), "{req}");
+        assert!(req.contains("HPD"), "{req}");
+    }
+
+    #[test]
+    fn pcie_scan_refuses_a_bar_window_that_swallows_a_peripheral() {
+        // QEMU virt puts the 32-bit PCIe MMIO window at 0x40000000, which is
+        // exactly where the ai-island GEMM block lives. The two cannot
+        // coexist, and that must be a refusal rather than a runtime surprise.
+        let err = BoardSpec::from_json_str(
+            r#"{
+            "schema_version":1,
+            "isa":{"xlen":64,"march":"rv64imac"},
+            "kernel":{"gr":{"enable":true,"backend":"virtio-gpu"}},
+            "pcie":{"scan_display":true,"ecam":"0x30000000","mmio":"0x40000000","mmio_len":"0x40000000"},
+            "peripherals":[{"id":"ai0","class":"ai-island","model":"g6lc","base":"0x40000000"}]
+        }"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("ai0"), "{err}");
+        assert!(err.contains("PCIe MMIO window"), "{err}");
+        // Moving the window off the ai-island makes it legal again.
+        let spec = BoardSpec::from_json_str(
+            r#"{
+            "schema_version":1,
+            "isa":{"xlen":64,"march":"rv64imac"},
+            "kernel":{"gr":{"enable":true,"backend":"virtio-gpu"}},
+            "pcie":{"scan_display":true,"ecam":"0x30000000","mmio":"0x60000000","mmio_len":"0x10000000"},
+            "peripherals":[{"id":"ai0","class":"ai-island","model":"g6lc","base":"0x40000000"}]
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(spec.pcie_mmio_window(), Some((0x6000_0000, 0x1000_0000)));
+    }
+
+    #[test]
+    fn pcie_scan_and_surface_fail_closed_on_incomplete_input() {
+        for (json, want) in [
+            (
+                r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"gr":{"enable":true}},"pcie":{"scan_display":true}}"#,
+                "pcie.ecam",
+            ),
+            (
+                r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"gr":{"enable":true}},"pcie":{"scan_display":true,"ecam":"0x30000000"}}"#,
+                "pcie.mmio",
+            ),
+            (
+                r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"proxy":{"enable":true,"surface":"opengl"}}}"#,
+                "proxy.surface",
+            ),
+        ] {
+            let err = BoardSpec::from_json_str(json).unwrap_err();
+            assert!(err.contains(want), "expected {want} in {err}");
+        }
+    }
+
+    #[test]
+    fn explicit_surface_overrides_the_output_default() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+            "kernel":{"gr":{"enable":true,"backend":"virtio-gpu"},
+                      "proxy":{"enable":true,"link":"virtio-gpu","surface":"vga"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.default_output().class, OutputClass::VirtioGpu);
+        assert_eq!(
+            spec.default_surface(),
+            Surface::Vga,
+            "an explicit surface wins over the class default"
+        );
     }
 
     #[test]

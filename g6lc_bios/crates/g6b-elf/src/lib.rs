@@ -291,7 +291,13 @@ mod tests {
             payload_memsz(
                 filesz,
                 spec.harts.max(1),
-                g6b_asm::gr_bss_len(640, 480, 16) + g6b_asm::UART_LINE_BSS,
+                g6b_asm::gr_bss_len(640, 480, 16)
+                    + g6b_asm::UART_LINE_BSS
+                    // `DispSel` latches the resolved output into `__vio`, so the
+                    // mux allocates that block on any board with a Gr plane or
+                    // display proxy. The scanout surface itself is not
+                    // allocated here — no backend commits it on this fixture.
+                    + g6b_asm::vio::VIO_BSS,
             )
         );
     }

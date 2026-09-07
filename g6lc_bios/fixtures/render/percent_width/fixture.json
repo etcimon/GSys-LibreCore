@@ -1,0 +1,8 @@
+{
+  "name": "percent_width",
+  "w": 64,
+  "h": 32,
+  "tolerance": 0,
+  "golden": "fixtures/render/golden/percent_width.ppm",
+  "note": "50% width and 25% left margin on a 64px canvas"
+}

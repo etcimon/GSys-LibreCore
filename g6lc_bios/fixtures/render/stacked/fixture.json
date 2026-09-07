@@ -1,0 +1,8 @@
+{
+  "name": "stacked",
+  "w": 64,
+  "h": 64,
+  "tolerance": 0,
+  "golden": "fixtures/render/golden/stacked.ppm",
+  "note": "two block-flow siblings stacked vertically, red then blue"
+}

@@ -78,11 +78,41 @@ export function printApp(files: SvelteFile[]): string {
   // `ready` keeps libwasm `Spa` off the JS router: without it _start calls
   // router().navigateTo(document().location()…), which needs browser-only
   // Object_Getter imports the g6b cell does not provide.
+  const readyBody = printReady(app);
   const body = printModule(app, kids).replace(
     "  void onMount() { }",
-    "  void onMount() { }\n  enum g6bStaticDom = true;\n  void ready() { }",
+    "  void onMount() { }\n  enum g6bStaticDom = true;\n" + readyBody,
   );
   return body + "mixin Spa!App;\n" + printFxD();
+}
+
+export function printReady(file: SvelteFile): string {
+  const lines: string[] = [];
+  lines.push("  void ready() {");
+  lines.push("    try {");
+  for (let i = 0; i < file.ops.length; i++) {
+    const op = file.ops[i];
+    if (op.kind === "fetch") {
+      const needsAwait = file.ops[i + 1]?.kind === "await";
+      if (needsAwait) {
+        lines.push(`      auto p${i} = g6b_fetch("${escapeD(op.url)}");`);
+        lines.push(`      libwasm_await__void(p${i});`);
+        i++; // skip the await op
+      } else {
+        lines.push(`      g6b_fetch("${escapeD(op.url)}");`);
+      }
+    } else if (op.kind === "holyc") {
+      lines.push(`      g6b_holyc("${escapeD(op.line)}");`);
+    } else if (op.kind === "register") {
+      lines.push(`      g6b_register("${escapeD(op.path)}", "${escapeD(op.method)}");`);
+    }
+  }
+  lines.push("    } catch (Exception e) {");
+  lines.push("      // bounded catch: rejection state is exposed through the");
+  lines.push("      // libwasm host; the app may inspect or log if it chooses.");
+  lines.push("    }");
+  lines.push("  }");
+  return lines.join("\n");
 }
 
 export function printFxD(): string {

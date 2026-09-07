@@ -11,6 +11,8 @@ pub enum Json {
     Null,
     Bool(bool),
     Int(i64),
+    /// B65: libwasm varargs and JSON codec carry `double`/`float` values.
+    F64(f64),
     Str(String),
     Arr(Vec<Json>),
     Obj(BTreeMap<String, Json>),
@@ -42,6 +44,42 @@ impl Json {
         match self {
             Json::Bool(b) => Some(*b),
             _ => None,
+        }
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Json::F64(v) => Some(*v),
+            Json::Int(i) => Some(*i as f64),
+            _ => None,
+        }
+    }
+
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Json::Int(i) => Some(*i),
+            Json::F64(v)
+                if v.is_finite()
+                    && *v == v.trunc()
+                    && *v >= i64::MIN as f64
+                    && *v <= i64::MAX as f64 =>
+            {
+                Some(*v as i64)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn truthy(&self) -> bool {
+        match self {
+            Json::Null => false,
+            Json::Bool(b) => *b,
+            Json::Int(0) => false,
+            Json::F64(v) => *v != 0.0,
+            Json::Str(s) => !s.is_empty(),
+            Json::Arr(a) => !a.is_empty(),
+            Json::Obj(o) => !o.is_empty(),
+            _ => true,
         }
     }
 }
@@ -170,9 +208,37 @@ impl Parser<'_> {
         while matches!(self.peek(), Some(b'0'..=b'9')) {
             self.i += 1;
         }
+        let mut is_float = false;
+        if self.peek() == Some(b'.') {
+            is_float = true;
+            self.i += 1;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.i += 1;
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            is_float = true;
+            self.i += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.i += 1;
+            }
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.i += 1;
+            }
+        }
         let slice = std::str::from_utf8(&self.s[start..self.i]).unwrap();
-        let n: i64 = slice.parse().map_err(|_| format!("bad int {slice}"))?;
-        Ok(Json::Int(n))
+        if is_float {
+            let n: f64 = slice.parse().map_err(|_| format!("bad float {slice}"))?;
+            Ok(Json::F64(n))
+        } else {
+            match slice.parse::<i64>() {
+                Ok(n) => Ok(Json::Int(n)),
+                Err(_) => {
+                    let n: f64 = slice.parse().map_err(|_| format!("bad int {slice}"))?;
+                    Ok(Json::F64(n))
+                }
+            }
+        }
     }
 
     fn array(&mut self) -> Result<Json, String> {
@@ -217,6 +283,50 @@ impl Parser<'_> {
                 Some(b',') => continue,
                 _ => return Err("expected , or } in object".into()),
             }
+        }
+    }
+}
+
+pub fn stringify_json(v: &Json) -> String {
+    match v {
+        Json::Null => "null".to_string(),
+        Json::Bool(true) => "true".to_string(),
+        Json::Bool(false) => "false".to_string(),
+        Json::Int(i) => i.to_string(),
+        Json::F64(f) if f.is_nan() => "NaN".to_string(),
+        Json::F64(f) if f.is_infinite() => {
+            if *f > 0.0 {
+                "Infinity".to_string()
+            } else {
+                "-Infinity".to_string()
+            }
+        }
+        Json::F64(f) if f.is_finite() && f.fract() == 0.0 => format!("{:e}", f),
+        Json::F64(f) => format!("{}", f),
+        Json::Str(s) => quote_json(s),
+        Json::Arr(items) => {
+            let mut out = String::from("[");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&stringify_json(item));
+            }
+            out.push(']');
+            out
+        }
+        Json::Obj(map) => {
+            let mut out = String::from("{");
+            for (i, (k, v)) in map.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&quote_json(k));
+                out.push(':');
+                out.push_str(&stringify_json(v));
+            }
+            out.push('}');
+            out
         }
     }
 }
@@ -272,5 +382,17 @@ mod tests {
             Json::Arr(a) => assert_eq!(a[1].as_str(), Some("x")),
             _ => panic!(),
         }
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant)]
+    fn parses_and_stringifies_floats() {
+        let v = parse_json(r#"{"pi":3.14,"exp":1e-3,"neg":-2.5,"big":1.0e20}"#).unwrap();
+        assert_eq!(v.get("pi").as_f64(), Some(3.14_f64));
+        assert_eq!(v.get("exp").as_f64(), Some(0.001));
+        assert_eq!(v.get("neg").as_f64(), Some(-2.5));
+        assert!(v.get("big").as_f64().unwrap() > 1e19);
+        assert_eq!(stringify_json(v.get("neg")), "-2.5");
+        assert_eq!(parse_json(&stringify_json(&v)).unwrap(), v);
     }
 }

@@ -63,6 +63,14 @@ path = "kernel-spec/ZealOS"
 license = "Unlicense"
 note = "not a crate; not linked; refresh with kernel-spec/fetch.ps1"
 
+[font]
+name = "fontdue"
+spec = "fontdue"
+spec_url = "https://github.com/mooman219/fontdue"
+rev = "0.8.0"
+license = "MIT OR Apache-2.0 OR Zlib"
+note = "external TTF parser/rasterizer; pinned per KD0; std-only no simd/parallel"
+
 [templeos]
 role = "kernel-spec-reference"
 url = "https://github.com/cia-foundation/TempleOS.git"

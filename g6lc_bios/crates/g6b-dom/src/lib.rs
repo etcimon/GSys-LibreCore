@@ -5,6 +5,9 @@
 
 #![allow(missing_docs)]
 
+mod event;
+pub use event::*;
+
 use std::collections::BTreeMap;
 
 /// A node in the BIOS DOM.
@@ -17,6 +20,7 @@ pub struct Node {
     pub dirty: bool,
     pub hidden: bool,
     pub attributes: BTreeMap<String, String>,
+    pub event_listeners: Vec<event::Listener>,
 }
 
 impl Node {
@@ -29,6 +33,7 @@ impl Node {
             dirty: true,
             hidden: false,
             attributes: BTreeMap::new(),
+            event_listeners: Vec::new(),
         }
     }
 
@@ -41,6 +46,7 @@ impl Node {
             dirty: true,
             hidden: false,
             attributes: BTreeMap::new(),
+            event_listeners: Vec::new(),
         }
     }
 

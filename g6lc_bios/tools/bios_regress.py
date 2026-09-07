@@ -581,6 +581,38 @@ def case_boot_sideband(spec: Path) -> None:
         raise RuntimeError(f"missing ssh-holyc kvm face: {out!r}")
 
 
+def case_css_golden(spec: Path) -> None:
+    """Render each CSS fixture and diff its PPM against the committed golden.
+
+    This is the track-B gate from architecture/RENDER-VALIDATION.md: a feature
+    row in fixtures/css-features.json is only "landed" if its visual output is
+    pixel-identical to the reviewed golden. Tolerance is per-fixture; most are
+    zero because the renderer is fully deterministic.
+    """
+    import glob
+
+    fixtures_dir = package_root() / "fixtures" / "render"
+    out_dir = package_root() / "out" / "render"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for fixture_json in sorted(fixtures_dir.glob("*/fixture.json")):
+        with open(fixture_json, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        name = cfg["name"]
+        w = cfg.get("w", 64)
+        h = cfg.get("h", 64)
+        tol = cfg.get("tolerance", 0)
+        golden = package_root() / cfg["golden"]
+        actual = out_dir / f"{name}.ppm"
+        p = run_g6b(
+            ["css-render", "--fixture", str(fixture_json.parent), "--w", str(w), "--h", str(h), "--out", str(actual)]
+        )
+        if p.returncode != 0:
+            raise RuntimeError(f"{name}: css-render failed: {p.stderr}")
+        d = run_g6b(["ppm-diff", "--actual", str(actual), "--golden", str(golden), "--tolerance", str(tol)])
+        if d.returncode != 0:
+            raise RuntimeError(f"{name}: {d.stderr.strip()}")
+
+
 def case_disp_scan(_spec: Path) -> None:
     # Native uncore display engine — the `display`-class peripheral selects
     # the MMIO scanout contract (architecture/uncore/hdmi-display.md); no
@@ -596,6 +628,44 @@ def case_disp_scan(_spec: Path) -> None:
         raise RuntimeError(f"display-engine commit failed: {out!r}")
     if "VIRTIO" in out:
         raise RuntimeError(f"hdmi board must not emit virtio display: {out!r}")
+    # The runtime mux must pick the uncore engine (class 2) with the native
+    # gpu surface (1), and must NOT claim hot-plug: contract revision 1 has no
+    # HPD register, so `DispSel` records "unknown".
+    if "DISP-SEL 21" not in out:
+        raise RuntimeError(f"expected DISP-SEL 21 (uncore-scanout + gpu): {out!r}")
+
+
+def case_disp_sel_pcie(_spec: Path) -> None:
+    # A PCIe class-0x03 controller whose BAR is inside the declared window
+    # outranks the virtio transport. Nothing here mode-sets the adapter: the
+    # BIOS only accepts a framebuffer firmware already programmed.
+    pcie = package_root() / "fixtures" / "g6lc64-pcie-gpu.json"
+    p = run_g6b(["smoke", "--spec", str(pcie)])
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr or p.stdout)
+    out = p.stdout
+    if "PCI-GPU" not in out:
+        raise RuntimeError(f"missing PCI-GPU (accepted linear BAR): {out!r}")
+    if "PCI-GPU-NONE" in out or "PCI-GPU-DEMOTED" in out:
+        raise RuntimeError(f"pcie board should accept its BAR: {out!r}")
+    # class 3 = pcie-linear-fb, surface 1 = gpu.
+    if "DISP-SEL 31" not in out:
+        raise RuntimeError(f"expected DISP-SEL 31 (pcie-linear-fb + gpu): {out!r}")
+
+
+def case_disp_sel_vga(_spec: Path) -> None:
+    # UART-only Gr plane: the mux must fall to the `none` rung and keep the
+    # low-res VGA surface. This is the regression that would catch the old
+    # behaviour, where the low-res plane was the scanout source unconditionally.
+    virt = package_root() / "fixtures" / "g6lc64-virt.json"
+    if not virt.is_file():
+        return
+    p = run_g6b(["smoke", "--spec", str(virt)])
+    if p.returncode != 0:
+        raise RuntimeError(p.stderr or p.stdout)
+    out = p.stdout
+    if "DISP-SEL" not in out:
+        raise RuntimeError(f"mux did not run: {out!r}")
 
 
 def main() -> int:
@@ -623,7 +693,10 @@ def main() -> int:
         ("elf_payload", case_elf_payload),
         ("elf_smoke", case_elf_smoke),
         ("gr_framebuffer", case_gr_framebuffer),
+        ("css_golden", case_css_golden),
         ("disp_scan", case_disp_scan),
+        ("disp_sel_pcie", case_disp_sel_pcie),
+        ("disp_sel_vga", case_disp_sel_vga),
     ]
     failed = []
     for name, fn in cases:

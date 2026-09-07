@@ -12,15 +12,15 @@
 use g6b_spec::BoardSpec;
 
 use crate::encode::{
-    A0, A1, A2, A6, A7, CMD_FILE, CMD_GET, CMD_KEYS, CMD_REBO, CMD_SHUT, CMD_UI, CMD_VIEW,
-    CMD_WAKE, CSR_SATP, CSR_SCAUSE, CSR_SEPC, CSR_SIE, CSR_SSTATUS, CSR_STVEC, CSR_TIME,
-    GR16_MAGIC, GR_FILL_WORD, MBOX_MAGIC, MBOX_OFF_CMD, MBOX_OFF_DOORBELL, MBOX_OFF_IRQ_EN,
-    MBOX_OFF_LENGTH, MBOX_OFF_RSP, MBOX_OFF_STATUS, MBOX_RSP_FILE, MBOX_RSP_KEYS, MBOX_RSP_UI,
-    MBOX_RSP_VIEW, MBOX_RSP_WAKE, MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE, PLIC_CTXT_BASE,
-    PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID, SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID,
-    SCAUSE_LOAD_ACCESS, SCAUSE_STORE_ACCESS, SIE_SEIE, SIE_SSIE, SIE_STIE, SP, SSTATUS_SIE, T0, T1,
-    T2, T3, T4, TP, UART_IER_RX, UART_IRQ, UART_LSR_DR, UI_MAGIC, VIO_DEV_GPU, VIO_MAGIC,
-    VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
+    A0, A1, A2, A3, A4, A5, A6, A7, CMD_AWAI, CMD_FILE, CMD_GET, CMD_KEYS, CMD_REBO, CMD_SHUT,
+    CMD_THRO, CMD_UI, CMD_VIEW, CMD_WAKE, CSR_SATP, CSR_SCAUSE, CSR_SEPC, CSR_SIE, CSR_SSTATUS,
+    CSR_STVEC, CSR_TIME, GR16_MAGIC, GR_FILL_WORD, MBOX_MAGIC, MBOX_OFF_CMD, MBOX_OFF_DOORBELL,
+    MBOX_OFF_IRQ_EN, MBOX_OFF_LENGTH, MBOX_OFF_RSP, MBOX_OFF_STATUS, MBOX_RSP_FILE, MBOX_RSP_KEYS,
+    MBOX_RSP_UI, MBOX_RSP_VIEW, MBOX_RSP_WAKE, MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE,
+    PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID, SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID,
+    SBI_TIME_EID, SCAUSE_LOAD_ACCESS, SCAUSE_STORE_ACCESS, SIE_SEIE, SIE_SSIE, SIE_STIE, SP,
+    SSTATUS_SIE, T0, T1, T2, T3, T4, T5, T6, TP, UART_IER_RX, UART_IRQ, UART_LSR_DR, UI_MAGIC,
+    VIO_DEV_GPU, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
 };
 use crate::{
     gr_bss_len, gr_stride, Addr, Module, Node, Op, Purpose, BIOS_UI_WASM, GR_HEADER_BYTES,
@@ -127,6 +127,16 @@ pub fn objects(spec: &BoardSpec) -> Vec<Object> {
             purpose: Purpose::DispScan,
             live: spec.wants_disp_scan(),
             why: "uncore display-engine commit (architecture/uncore/hdmi-display.md) — __scan_fb is the BIOS+Linux simplefb handoff",
+        },
+        Object {
+            purpose: Purpose::PciScan,
+            live: spec.wants_pci_scan(),
+            why: "read-only PCIe ECAM scan for a class-0x03 controller with a firmware-assigned linear BAR; no AMD/NVIDIA modeset",
+        },
+        Object {
+            purpose: Purpose::DisplayMux,
+            live: spec.kernel.gr.enable || spec.kernel.proxy.enable,
+            why: "DispSel — latch the highest-priority PRESENT output and its surface into __disp",
         },
         Object {
             purpose: Purpose::Tls,
@@ -280,6 +290,8 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     let mut gl = None;
     let mut vio = None;
     let mut disp = None;
+    let mut pci = None;
+    let mut dmux = None;
     let mut ui = None;
     let mut fileserve = None;
     let mut getfile = None;
@@ -303,6 +315,8 @@ pub fn kstart(spec: &BoardSpec) -> Module {
             Purpose::GlAdapter => gl = Some(o),
             Purpose::Virtio => vio = Some(o),
             Purpose::DispScan => disp = Some(o),
+            Purpose::PciScan => pci = Some(o),
+            Purpose::DisplayMux => dmux = Some(o),
             Purpose::FileServe => {
                 ui = Some(o);
                 fileserve = Some(o);
@@ -378,8 +392,15 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     if let Some(o) = gl {
         m.push(gl_call_node(o));
     }
-    if vio.is_some() || disp.is_some() {
+    // `__vio` also carries the `DispSel`/`PciProbe` result block, so the mux
+    // needs it allocated even on a board with no virtio or display engine.
+    if vio.is_some() || disp.is_some() || dmux.is_some() {
         m.vio_bytes = crate::vio::VIO_BSS;
+    }
+    // The scanout surface itself is only allocated when something actually
+    // commits it — a UART-only board must not carry an 8 MB framebuffer just
+    // because the mux runs.
+    if vio.is_some() || disp.is_some() {
         let gp = g6b_spec_proxy(spec);
         // The scanout surface is the high-res proxy target (gp.2×gp.3) —
         // `FbExpand` scale-expands the low-res `__gr_plane` into it and each
@@ -393,6 +414,16 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     }
     if let Some(o) = vio {
         m.push(vio_call_node(o, spec));
+    }
+    // PciProbe runs before the mux so its result is available to the top rung,
+    // and after VioScan so a failed ECAM read cannot strand the virtio lane.
+    if let Some(o) = pci {
+        m.push(pci_call_node(o));
+    }
+    // DispSel must see every probe result, so it comes after all of them and
+    // before anything that paints.
+    if let Some(o) = dmux {
+        m.push(disp_sel_call_node(o));
     }
     if let Some(o) = ui {
         m.ui_bytes = UI_HEADER_BYTES;
@@ -448,8 +479,12 @@ pub fn kstart(spec: &BoardSpec) -> Module {
         m.push(gl_adapter_node(o, spec));
     }
     // FbExpand is shared by every scanout backend that paints the plane.
+    // `FbExpand1` is its scale-1 twin for the native surface, and
+    // `FbExpandSel` picks between them from the surface `DispSel` latched.
     if (vio.is_some() || disp.is_some()) && (spec.kernel.gr.enable || spec.kernel.proxy.enable) {
         m.push(crate::vio::expand_node(spec));
+        m.push(crate::vio::expand1_node(spec));
+        m.push(crate::vio::expand_sel_node(spec));
     }
     if let Some(o) = vio {
         m.push(vio_probe_node(o));
@@ -473,6 +508,12 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     }
     if disp.is_some() {
         m.push(crate::vio::disp_paint_node(spec));
+    }
+    if pci.is_some() {
+        m.push(crate::vio::pci_probe_node(spec));
+    }
+    if dmux.is_some() {
+        m.push(crate::vio::disp_sel_node(spec));
     }
     if let Some(o) = ui {
         m.push(ui_init_node(o, spec));
@@ -1341,16 +1382,29 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
     let xlen = spec.isa.xlen;
     let shamt = xlen.saturating_sub(1);
     let slot = if xlen == 64 { 8i32 } else { 4i32 };
-    let frame = slot * 8;
+    // The frame saves the full caller-clobberable set: ra + t0..t6 +
+    // a0..a7. Trap-context `jal`s (DomNav/DomPaint/VioPaint/InpDrain/…)
+    // overwrite ra and every t/a register — an irq landing mid-`VioCmd`
+    // (its wfi) must not destroy the interrupted transaction's registers.
+    // s0..s11/gp/tp are callee-saved and trap-called code preserves them.
+    let frame = slot * 16;
     let saves = [
-        (T0, 0i32),
-        (T1, 1),
-        (T2, 2),
-        (A0, 3),
-        (A1, 4),
-        (A2, 5),
-        (A6, 6),
-        (A7, 7),
+        (RA, 0i32),
+        (T0, 1),
+        (T1, 2),
+        (T2, 3),
+        (T3, 4),
+        (T4, 5),
+        (T5, 6),
+        (T6, 7),
+        (A0, 8),
+        (A1, 9),
+        (A2, 10),
+        (A3, 11),
+        (A4, 12),
+        (A5, 13),
+        (A6, 14),
+        (A7, 15),
     ];
     let mut ops = vec![
         Op::Comment(format!(
@@ -1694,11 +1748,65 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
             imm: SBI_TIME_EID,
         },
         Op::Ecall,
-        Op::Jal {
-            rd: X0,
-            to: "trap_done".into(),
-        },
     ]);
+    if spec.kernel.wasm.jit {
+        // Background frame + await poll on the periodic tick: resolve a
+        // pending Await, then repaint only when the DOM dirty counter moved
+        // since the last tick-covered paint (the DOM_PAINTED watermark).
+        // This is the "doesn't block on DOM events" half: input/mutation
+        // stay on their own irqs, frames flush here.
+        ops.extend([
+            Op::Jal {
+                rd: RA,
+                to: "DomAwait".into(),
+            },
+            Op::La {
+                rd: T0,
+                addr: Addr::UiDom,
+            },
+            Op::Lw {
+                rd: T1,
+                rs: T0,
+                off: 4,
+            },
+            Op::Lw {
+                rd: T2,
+                rs: T0,
+                off: crate::dom::DOM_PAINTED,
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: T2,
+                to: "trap_timer_clean".into(),
+            },
+            Op::Sw {
+                rs2: T1,
+                rs1: T0,
+                off: crate::dom::DOM_PAINTED,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "DomPaint".into(),
+            },
+        ]);
+        if spec.wants_virtio_gpu() && (spec.kernel.gr.enable || spec.kernel.proxy.enable) {
+            ops.push(Op::Jal {
+                rd: RA,
+                to: "VioPaint".into(),
+            });
+        }
+        if spec.wants_disp_scan() {
+            ops.push(Op::Jal {
+                rd: RA,
+                to: "DispPaint".into(),
+            });
+        }
+        ops.push(Op::Label("trap_timer_clean".into()));
+    }
+    ops.extend([Op::Jal {
+        rd: X0,
+        to: "trap_done".into(),
+    }]);
     ops.extend(trap_fault_ops(xlen, spec));
     ops.push(Op::Label("trap_done".into()));
     for (r, i) in saves {
@@ -2033,6 +2141,46 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             },
         ]);
     }
+    if spec.kernel.wasm.jit {
+        ops.extend([
+            Op::Li {
+                rd: A2,
+                imm: i64::from(CMD_AWAI),
+            },
+            Op::Beq {
+                rs1: A1,
+                rs2: A2,
+                to: "uart_await".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: i64::from(b'A'),
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: A2,
+                to: "uart_await".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: i64::from(CMD_THRO),
+            },
+            Op::Beq {
+                rs1: A1,
+                rs2: A2,
+                to: "uart_throw".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: i64::from(b'T'),
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: A2,
+                to: "uart_throw".into(),
+            },
+        ]);
+    }
     ops.extend([Op::Label("uart_view".into())]);
     for ch in b"VIEW" {
         ops.extend(putc_ops(i64::from(*ch)));
@@ -2151,6 +2299,18 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
     }
     if spec.kernel.wasm.enable && spec.kernel.wasm.jit {
         ops.push(Op::Comment(
+            "Ui poll: drain the await slots before the repaint (DomAwait resolves \
+             one slot per call — AWAIT_SLOTS calls is the bounded drain; the timer \
+             tick calls it once so IRQ context stays O(1))"
+                .into(),
+        ));
+        for _ in 0..crate::dom::AWAIT_SLOTS {
+            ops.push(Op::Jal {
+                rd: RA,
+                to: "DomAwait".into(),
+            });
+        }
+        ops.push(Op::Comment(
             "Ui → DomPaint: re-dump live __ui_dom rows (bounded)".into(),
         ));
         ops.push(Op::Jal {
@@ -2217,11 +2377,101 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
                 rd: RA,
                 to: "DomKey".into(),
             });
+            ops.push(Op::Jal {
+                rd: RA,
+                to: "DomAwait".into(),
+            });
         }
         ops.push(Op::Jal {
             rd: X0,
             to: "trap_done".into(),
         });
+    }
+    if spec.kernel.wasm.jit {
+        // Await — the `env.await` entry: `WasmAwait` claims the first
+        // non-pending await slot (`AWAIT_SLOTS`=4 at `__ui_dom`+16) →
+        // `AWAIT pending N`; all pending → `AWAIT-REJ full`. The slot
+        // logic lives in `g6b-asm::dom` (`WasmAwait`), shared with the
+        // lowered wasm `call env.await` — this UART path is a thin jal.
+        // Resolution happens on the DomAwait poll points (trap_timer tick
+        // + Ui/Keys), never inline — `await` doesn't block DOM events.
+        ops.extend([
+            Op::Label("uart_await".into()),
+            Op::Comment("Await — jal WasmAwait (env.await: bounded slot claim)".into()),
+            Op::Jal {
+                rd: RA,
+                to: "WasmAwait".into(),
+            },
+            Op::Jal {
+                rd: X0,
+                to: "trap_done".into(),
+            },
+        ]);
+        // Throw — the `env.throw` entry: `WasmThrow` rejects the newest
+        // pending slot → `AWAIT-THROW`; nothing pending → `AWAIT-THROW
+        // none`. The slot logic lives in `g6b-asm::dom` (`WasmThrow`),
+        // shared with the lowered wasm `call env.throw`.
+        ops.extend([
+            Op::Label("uart_throw".into()),
+            Op::Comment(
+                "Throw — jal WasmThrow (env.throw). `Throw N` (N=slot) rejects that \
+                 slot; plain `Throw` keeps a0=-1 → newest pending."
+                    .into(),
+            ),
+            Op::Li { rd: A0, imm: -1 },
+            // Optional arg: the char after "Throw " (offset 6 in
+            // `__uart_line`). In-range digit → a0 = slot; anything else
+            // (newline, NUL, junk) → keep -1.
+            Op::La {
+                rd: T4,
+                addr: Addr::UartLine,
+            },
+            Op::Lbu {
+                rd: T4,
+                rs: T4,
+                off: 6,
+            },
+            Op::Addi {
+                rd: T4,
+                rs: T4,
+                imm: -48, // '0'
+            },
+            // Reject negative (sign bit) or >= 4 (any bit above bit1).
+            Op::Srli {
+                rd: T6,
+                rs: T4,
+                shamt: crate::dom::signbit(spec.isa.xlen),
+            },
+            Op::Bne {
+                rs1: T6,
+                rs2: X0,
+                to: "uthrow_go".into(),
+            },
+            Op::Andi {
+                rd: T6,
+                rs: T4,
+                imm: -4,
+            },
+            Op::Bne {
+                rs1: T6,
+                rs2: X0,
+                to: "uthrow_go".into(),
+            },
+            Op::Addi {
+                rd: A0,
+                rs: T4,
+                imm: 0,
+            },
+            Op::Label("uthrow_go".into()),
+            Op::Jal {
+                rd: RA,
+                to: "WasmThrow".into(),
+            },
+            Op::Jal {
+                rd: X0,
+                to: "trap_done".into(),
+            },
+        ]);
     }
     ops.push(Op::Label("uart_wakeup".into()));
     for ch in b"WAKE\n" {
@@ -2866,6 +3116,14 @@ fn trap_fault_ops(xlen: u32, spec: &BoardSpec) -> Vec<Op> {
         imm: 0,
     });
     ops.extend(hex_loop_ops("hex_sepc", shamt, nibbles));
+    ops.extend(putc_ops(b'-' as i64));
+    // stval — the faulting address for access faults (0 for illegal insn).
+    ops.push(Op::Csrrs {
+        rd: T0,
+        csr: crate::encode::CSR_STVAL,
+        rs: X0,
+    });
+    ops.extend(hex_loop_ops("hex_stval", shamt, nibbles));
     ops.extend(putc_ops(b'\n' as i64));
     ops.extend([
         Op::Label("trap_halt".into()),
@@ -3030,6 +3288,32 @@ fn vio_paint_call_node(o: Object) -> Node {
             Op::Jal {
                 rd: RA,
                 to: "VioPaint".into(),
+            },
+        ],
+    }
+}
+
+fn pci_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::PciScan,
+        ops: vec![
+            Op::Comment(format!("{} — jal PciProbe (read-only ECAM walk)", o.why)),
+            Op::Jal {
+                rd: RA,
+                to: "PciProbe".into(),
+            },
+        ],
+    }
+}
+
+fn disp_sel_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::DisplayMux,
+        ops: vec![
+            Op::Comment(format!("{} — jal DispSel (after every probe)", o.why)),
+            Op::Jal {
+                rd: RA,
+                to: "DispSel".into(),
             },
         ],
     }
@@ -3770,11 +4054,55 @@ fn proxy_geom_node(o: Object, spec: &BoardSpec) -> Node {
     for w in [p.0, p.1, p.2, p.3, p.4, p.5, p.7, spec.proxy_accel().code()] {
         ops.push(Op::Word(w));
     }
+    // Output table, appended after the eight legacy geometry words so existing
+    // readers keep their fixed offsets. Header is
+    // `{count, default_idx, default_surface}`, then one 6-word record per
+    // candidate output: `{class_code, priority, w, h, stride, surface}`.
+    // These are the *declared* candidates — `DispSel` resolves which one is
+    // actually present at boot and latches the answer in `__disp`.
+    let outs = spec.display_outputs();
+    let default_surface = spec.default_surface();
+    ops.push(Op::Comment(format!(
+        "proxy_outputs — {} candidate(s), default {} surface={}",
+        outs.len(),
+        outs.first().map(|o| o.id.as_str()).unwrap_or("none"),
+        default_surface.as_str()
+    )));
+    ops.push(Op::Label("proxy_outputs".into()));
+    for w in [outs.len() as u32, 0, default_surface.code()] {
+        ops.push(Op::Word(w));
+    }
+    for o in &outs {
+        ops.push(Op::Comment(format!(
+            "  {} {} pri={} {}x{} surface={}",
+            o.id,
+            o.class.as_str(),
+            o.class.priority(),
+            o.w,
+            o.h,
+            o.surface.as_str()
+        )));
+        for w in [
+            o.class.code(),
+            o.class.priority(),
+            o.w,
+            o.h,
+            o.stride(),
+            o.surface.code(),
+        ] {
+            ops.push(Op::Word(w));
+        }
+    }
     Node {
         purpose: Purpose::DisplayProxy,
         ops,
     }
 }
+
+/// Words per `proxy_outputs` record: `{class, priority, w, h, stride, surface}`.
+pub const PROXY_OUT_WORDS: usize = 6;
+/// Header words before the first record: `{count, default_idx, surface}`.
+pub const PROXY_OUT_HEADER: usize = 3;
 
 pub(crate) fn g6b_spec_proxy(spec: &BoardSpec) -> (u32, u32, u32, u32, u32, u32, String, u32) {
     let g = &spec.kernel.gr;

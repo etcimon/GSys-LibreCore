@@ -1,0 +1,8 @@
+{
+  "name": "box_basic",
+  "w": 64,
+  "h": 64,
+  "tolerance": 0,
+  "golden": "fixtures/render/golden/box_basic.ppm",
+  "note": "content-box: 30x20 content, 8px padding, 4px red border, 4px margin, blue background"
+}

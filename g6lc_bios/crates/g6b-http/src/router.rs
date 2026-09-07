@@ -44,6 +44,60 @@ impl Default for Router {
     }
 }
 
+/// `/bios/display` body: the candidate outputs in priority order, the one that
+/// would win, and the surface feeding it. Declared state — actual presence is a
+/// boot-time fact the guest `DispSel` mux resolves.
+fn display_json(spec: &BoardSpec) -> String {
+    let outs: Vec<String> = spec
+        .display_outputs()
+        .iter()
+        .map(|o| {
+            format!(
+                "{{\"id\":\"{}\",\"class\":\"{}\",\"priority\":{},\"w\":{},\"h\":{},\"surface\":\"{}\"}}",
+                escape(&o.id),
+                o.class.as_str(),
+                o.class.priority(),
+                o.w,
+                o.h,
+                o.surface.as_str()
+            )
+        })
+        .collect();
+    let active = spec.default_output();
+    format!(
+        "{{\"active\":\"{}\",\"class\":\"{}\",\"surface\":\"{}\",\"toggle\":{},\"outputs\":[{}]}}",
+        escape(&active.id),
+        active.class.as_str(),
+        spec.default_surface().as_str(),
+        if spec.surface_toggle() {
+            "true"
+        } else {
+            "false"
+        },
+        outs.join(",")
+    )
+}
+
+/// POST body: the surface the toggle switches to from the default.
+fn display_toggle_json(spec: &BoardSpec) -> String {
+    format!(
+        "{{\"ok\":true,\"action\":\"surface\",\"surface\":\"{}\"}}",
+        spec.default_surface().toggled().as_str()
+    )
+}
+
+/// Minimal JSON string escaping for ids that come from BoardSpec.
+fn escape(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            '"' => vec!['\\', '"'],
+            '\\' => vec!['\\', '\\'],
+            c if (c as u32) < 0x20 => vec![' '],
+            c => vec![c],
+        })
+        .collect()
+}
+
 impl Router {
     /// BoardSpec-compiled BIOS parameter endpoints.
     pub fn from_spec(spec: &BoardSpec) -> Self {
@@ -135,6 +189,14 @@ impl Router {
         );
         for m in spec.menus() {
             r.insert("GET", &format!("/bios/menu/{}", m.id), "bios", m.json());
+        }
+        // Display outputs and the VGA/GPU surface split. GET always exists so a
+        // UI can report which output won; POST is only registered when both
+        // surfaces are actually reachable, so toggling cannot be offered on a
+        // board that has nowhere to toggle to.
+        r.insert("GET", "/bios/display", "bios", display_json(spec));
+        if spec.surface_toggle() {
+            r.insert("POST", "/bios/display", "bios", display_toggle_json(spec));
         }
         let f = &spec.kernel.flash;
         if f.enable {
@@ -457,6 +519,51 @@ mod tests {
         assert_eq!(u.status, 200);
         assert!(u.body_str().contains("openwrt.bin"), "{}", u.body_str());
         assert_eq!(r.fetch_get("/bios/files").status, 404);
+    }
+
+    #[test]
+    fn display_endpoint_ranks_outputs_and_gates_the_toggle() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","isa":{"xlen":64},
+            "kernel":{"gr":{"enable":true,"backend":"virtio-gpu"},
+                      "proxy":{"enable":true,"link":"virtio-gpu","high_w":1920,"high_h":1080}}}"#,
+        )
+        .unwrap();
+        let r = Router::from_spec(&spec);
+        let body = r.fetch_get("/bios/display").body_str();
+        assert!(body.contains("\"active\":\"vio0\""), "{body}");
+        assert!(body.contains("\"class\":\"virtio-gpu\""), "{body}");
+        assert!(body.contains("\"surface\":\"gpu\""), "{body}");
+        assert!(body.contains("\"toggle\":true"), "{body}");
+        // Priorities are carried so a client never re-derives the ladder.
+        assert!(body.contains("\"priority\":1"), "{body}");
+        assert!(body.contains("\"priority\":0"), "{body}");
+        // The response parses as JSON, not just as a substring match.
+        let v = g6b_spec::parse_json(&body).unwrap();
+        assert_eq!(v.get("active").as_str(), Some("vio0"));
+        let post = r.fetch("POST", "/bios/display");
+        assert_eq!(post.status, 200);
+        assert!(
+            post.body_str().contains("\"surface\":\"vga\""),
+            "{}",
+            post.body_str()
+        );
+    }
+
+    #[test]
+    fn display_toggle_is_absent_without_an_accelerated_output() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","isa":{"xlen":64},
+            "kernel":{"gr":{"enable":true,"backend":"uart"}}}"#,
+        )
+        .unwrap();
+        let r = Router::from_spec(&spec);
+        let body = r.fetch_get("/bios/display").body_str();
+        assert!(body.contains("\"class\":\"none\""), "{body}");
+        assert!(body.contains("\"toggle\":false"), "{body}");
+        // No POST route: the surface cannot be flipped where there is nothing
+        // to flip to.
+        assert_ne!(r.fetch("POST", "/bios/display").status, 200);
     }
 
     #[test]

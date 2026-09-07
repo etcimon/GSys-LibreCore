@@ -10,6 +10,7 @@
 
 #![allow(missing_docs)]
 
+pub mod canvas;
 pub mod gl;
 pub mod proxy;
 
@@ -206,7 +207,7 @@ pub fn x8r8_to_ppm(w: u32, h: u32, fb: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// 8×8 glyph row (MSB = left). Letters used by the BIOS banner are distinct.
-fn glyph_row(ch: u8, row: u32) -> u8 {
+pub fn glyph_row(ch: u8, row: u32) -> u8 {
     let r = row as usize;
     if r > 7 {
         return 0;

@@ -1,0 +1,18 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-ttf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Bounded TTF loader and rasterizer for the BIOS display-proxy"
+
+[dependencies]
+fontdue = { workspace = true }
+g6b-gr = { workspace = true }
+
+[lints]
+workspace = true

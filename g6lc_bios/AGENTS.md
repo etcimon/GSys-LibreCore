@@ -97,7 +97,36 @@ mailbox `K` doorbell dump it via `InpPoll` (`KEY <8-hex>`; mbox answers
 into the DOM: `inp.last` = the newest key (`DOM| key <hex>`), `nav.sel` =
 menu navigation (arrows move `sel` over `spec.menus()`, Enter opens →
 `NAV <name>` serial + `open <name>` row; `NAV_SEEN` watermark scan — the
-physical ring stays for the `Keys` dump).
+physical ring stays for the `Keys` dump). UART `Await`/`A` (jit-gated)
+claims a bounded await slot (`__ui_dom` header +16, `AWAIT_SLOTS`=4 u32s —
+idle/pending/resolved/rejected, `npend` count at +12) → `AWAIT pending N`
++ `await.N` row = `"pending menu"`; all four pending → `AWAIT-REJ full`
+(fail closed); a resolved slot is reusable. `Throw`/`T` rejects the newest
+pending slot (`AWAIT-THROW /bios/menu` → `await.N` = `"rejected menu"`) —
+the thrown rejection, caught and visible in the DOM. The slot logic lives
+in `WasmAwait`/`WasmThrow`/`WasmCatch` (the UART commands are thin `jal`s)
+— and lowered wasm can drive the same queue: `env.await()->i32` returns
+the claimed slot (-1 when full), `env.throw(i32)` rejects that slot
+(-1 → newest), and `env.catch(i32)->i32` returns 1 iff the slot is
+rejected, all `import_stub` entries — the shipped `bios-ui.wasm` does
+exactly that for `await` (`await fetchBios("/bios/menu")` in `App.svelte`
+→ `call env.await` at `_start`, resolved by the next timer tick;
+QEMU-verified). `start_ops` lowers i32 locals, `drop` and single-i32
+call results through a bounded s2..s5 pool. `DomAwait` resolves one slot
+per call (the `Ui`/`Keys` polls loop it `AWAIT_SLOTS` times); `Throw N`
+targets slot N. `DomAwait` polls
+drain the ready set on the `trap_timer` tick and the `Ui`/`Keys` paths
+(`AWAIT-GET /bios/menu` per slot → `resolved menu`), so `await` never
+blocks DOM events. The
+timer tick also flushes a dirty-watermark-gated background repaint
+(`DomPaint`+`VioPaint`/`DispPaint`) — input/nav/await mutations reach the
+scanout without a `Ui`. The trap frame now saves `ra`+`t0..t6`+`a0..a7`
+(16 slots): a trap-time `jal` must not destroy the interrupted context —
+a tick landing inside a normal-context `VioCmd` `wfi` faulted `vqc_poll`
+with a clobbered `t5` before the fix (diagnosed via `stval` —
+`TRAP-<scause>-<sepc>-<stval>`). `VIO_BUSY` (`__vio+0x5f0`) guards the
+ctrlq: `VioCmd` holds it per transaction and `VioPaint` skips when busy,
+so a trap-time repaint can never interleave mid-transaction.
 **QEMU 8.2-verified** on `g6lc64-virt.json` (WSL2, stock virt, OpenSBI
 fw_dynamic): monitor `sendkey` → `INP`, serial `Keys` → the exact Linux
 keycodes, `Ui` → `DOM| key …` + `VIRTIO-PAINT`, QMP `screendump` =
@@ -125,7 +154,9 @@ bounded nonblocking JS async scheduler (`await`/throw/catch with budgets and
 cancellation), transactional DOM in both Rust and the native-browser kernel,
 cooperative RV32/RV64 task-switch IR with bounded scheduler/task services, a
 DedicatedWorker compute protocol, and a provenance-gated LDC 1.43 libwasm
-component-shell cell (Asyncify and full Svelte semantics fail closed). The host
+component-shell cell (Asyncify build path landed with the custom binaryen;
+full Svelte semantics and the D `await`/`catch` host driver still fail closed).
+The host
 `BrowserSession` and served native app are executable. The guest ELF still
 has bring-up helpers, not the complete browser runtime or arbitrary JIT code
 installation. Read `BROWSER.md` / `WASM.md` for supported subsets and limits;
@@ -160,6 +191,72 @@ QEMU `--loader bios` is hypothesis, never Variane evidence.
    names each object's purpose and architectural home. Do not add a second
    `format!(.s)` / `Vec<u32>` encoder. See `architecture/CODEGEN.md`.
 
+## Render debugging methodology (CSS / DOM / pixel accuracy)
+
+Ancestor: `kernel-spec/goosie` (MIT, `1039ae6`) — the spec of record for
+**rendering logic**: `internal/css` for tokenizing, selector matching and
+cascade ordering; `internal/renderer` for the box model, layout passes, display
+list and dirty regions. Read it, then write first-party Rust in `crates/g6b-css`
+(prime directive 1). Its Go source, Goja embedding, Fyne windowing and
+Playwright/Chromium verification gate are **refused** — precedence and the full
+keep/refuse map are in `kernel-spec/README.md` and
+`architecture/RENDER-VALIDATION.md` §5.
+
+The **browser instance** (`createBrowserContext`) owns the `console` / `window` /
+`document` singletons a UI is built on. It is engine-agnostic on purpose: the
+contract is `bindings()` (an allow-listed `name -> object` map) plus
+`consolePage()`, so libwasm consumes it through a single `libwasm_global` import
+while plain JS and the devtools panel use it directly. Instances are isolated by
+`contextId`, so an embedded frame gets its own console ring. Console shape and
+the bounded-ring-that-reports-drops behaviour follow goosie's
+`internal/browsercontrol/types.go`. Details: `RENDER-VALIDATION.md` §6.
+
+Four facilities, in the order you should reach for them:
+
+1. **`g6b_css::parse_survey`** — *what is missing.* Point it at real-world CSS;
+   it returns the stylesheet plus the sorted list of properties this engine does
+   not implement, instead of refusing the sheet. Use it to grow
+   `fixtures/css-features.json`. The strict `parse` still refuses the same
+   input, so a survey can never widen the render path.
+2. **`g6b_css::inspect::explain`** — *why is this value what it is.* A
+   DevTools-shaped report: winning declaration first, every overridden candidate
+   kept visible with the reason it lost (`!important` / specificity / source
+   order), plus the resolved box. `to_text()` for a serial log or console,
+   `to_json()` for the browser inspector. It reads the winner out of `cascade`
+   itself, so the report can never disagree with the engine it describes.
+3. **`createBrowserContext(...).renderConsoleInto(el)`** — *what did the UI
+   report.* Paints the bounded console ring into a DOM element, i.e. the
+   devtools console panel. `consolePage(since)` polls incrementally and reports
+   `dropped`/`missed` rather than silently skipping.
+4. **`createRenderInspector`** (`browser-ui/src/kernel.ts`) — *are we
+   pixel-accurate.* `diff(el, report, tolerance)` compares an `explain` JSON
+   against the host browser's `getComputedStyle` and
+   `getBoundingClientRect` for the same element. Length mismatches get a
+   whole-pixel tolerance; keyword mismatches never do. `describe(el)` dumps the
+   host's own view.
+
+Why the third one is legitimate where a conformance score is not: the host
+browser is an **external oracle** for computed values, so a disagreement
+localises a cascade or box-model bug to one property. A recognition score from
+`@browserscore/supports` — or from our own engine answering its own
+`supports()` — is self-reported and measures nothing;
+`architecture/RENDER-VALIDATION.md` §1 has the evidence. Track A (feature
+inventory) says *what to build*; track B (golden PPM diff) says *whether it is
+right*. A feature row is flipped to `landed` only by track-B evidence.
+
+Rules that have already caught bugs here:
+
+- A property outside `SUPPORTED_PROPERTIES` is **refused**, not ignored. A
+  silently dropped `float` produces a confidently wrong layout and makes a
+  backlog row look landed.
+- Fractional and `em`/`rem` lengths are refused, not truncated — the raster is a
+  whole-pixel grid.
+- An unsupported selector shape (descendant, child, attribute) parses to
+  `matchable == false` so it never matches, rather than matching the wrong node.
+- Unsupported at-rules are skipped past their **matching** brace. Taking the
+  first `}` leaked `@media`'s nested rules into the sheet as a malformed rule.
+- Never raise a tolerance budget or re-record a golden to turn a test green.
+
 ## Daily commands
 
 ```
@@ -179,7 +276,9 @@ python tools/g6b.py regress
 
 Navigate: plan of record `architecture/PLAN.md`; keep/refuse map `architecture/ZEAL.md`;
 codegen philosophy `architecture/CODEGEN.md`; display-proxy `architecture/DISPLAY.md`;
-browser `architecture/BROWSER.md`; USB `architecture/USB.md`; menus
+browser `architecture/BROWSER.md`; render validation + CSS methodology
+`architecture/RENDER-VALIDATION.md`; libwasm host ABI + completion plan
+`architecture/LIBWASM-ABI.md`; USB `architecture/USB.md`; menus
 `architecture/MENUS.md`; file server `architecture/FILE-SERVER.md`; TLS
 `architecture/TLS.md`; kernel HTTP `architecture/KERNEL-API.md`; spec checkouts
 `kernel-spec/README.md`.

@@ -106,7 +106,7 @@ export function writeOut(root: string, result: CompileResult): void {
   writeFileSync(join(out, "bios-ui-libwasm.json"), JSON.stringify({
     schema: "g6lc-libwasm-status/v1", available: optional.length > 0,
     status: cell?.artifact ?? "unavailable", reason: cell?.reason ?? "LDC build not requested",
-    scope: "component-shell preview and particle state; not full Svelte CSS/reactivity/tree or async await",
+    scope: "component-shell preview and particle state; Asyncify build path landed; not full Svelte CSS/reactivity/tree or D await/catch host driver",
     provenance: optional.length ? cell?.provenance : null,
   }, null, 2) + "\n");
   writeFileSync(join(out, "build.json"), JSON.stringify({

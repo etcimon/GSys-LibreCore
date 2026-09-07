@@ -19,10 +19,12 @@ members = [
     "crates/g6b-doldoc",
     "crates/g6b-html",
     "crates/g6b-dom",
+    "crates/g6b-css",
     "crates/g6b-holyc",
     "crates/g6b-js",
     "crates/g6b-kernel",
     "crates/g6b-gr",
+    "crates/g6b-ttf",
     "crates/g6b-webidl",
     "crates/g6b-tls",
     "crates/g6b-http",
@@ -47,6 +49,7 @@ g6b-design = { path = "crates/g6b-design" }
 g6b-doldoc = { path = "crates/g6b-doldoc" }
 g6b-html = { path = "crates/g6b-html" }
 g6b-dom = { path = "crates/g6b-dom" }
+g6b-css = { path = "crates/g6b-css" }
 g6b-holyc = { path = "crates/g6b-holyc" }
 g6b-js = { path = "crates/g6b-js" }
 g6b-kernel = { path = "crates/g6b-kernel" }
@@ -56,8 +59,10 @@ g6b-tls = { path = "crates/g6b-tls" }
 g6b-http = { path = "crates/g6b-http" }
 g6b-fs = { path = "crates/g6b-fs" }
 g6b-wasm = { path = "crates/g6b-wasm" }
+g6b-ttf = { path = "crates/g6b-ttf" }
 g6b-ui = { path = "crates/g6b-ui" }
 g6b-elf = { path = "crates/g6b-elf" }
+fontdue = { version = "0.8.0", default-features = false }
 
 [workspace.lints.rust]
 missing_docs = "warn"

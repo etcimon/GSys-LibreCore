@@ -5,7 +5,7 @@
 
 #![allow(missing_docs)]
 
-use g6b_asm::encode::{A0, A1, A2, A3, RA, SP, T0, T1, T2, X0};
+use g6b_asm::encode::{A0, A1, A2, A3, RA, S2, S3, S4, S5, SP, T0, T1, T2, X0};
 use g6b_asm::{Addr, Module, Node, Op, Purpose};
 
 pub const MAX_JIT_SLOTS: usize = 256;
@@ -34,10 +34,10 @@ pub fn jit_riscv(m: &crate::Module, export: &str, xlen: u32) -> Result<Module, S
         .checked_sub(m.imports.len())
         .ok_or("cannot JIT host import")?;
     let ty = crate::binary::func_type(m, idx)?;
-    let locals = ty.params as usize + m.locals[local] as usize;
+    let locals = ty.params.len() + m.locals[local] as usize;
     let slots = locals + analysis[local].max_stack;
     let body = &m.bodies[local];
-    if ty.params > 3 || slots > MAX_JIT_SLOTS || body.len() > MAX_JIT_INSTRUCTIONS {
+    if ty.params.len() > 3 || slots > MAX_JIT_SLOTS || body.len() > MAX_JIT_INSTRUCTIONS {
         return Err("JIT numeric resource limit".into());
     }
     for (pc, ins) in body.iter().enumerate() {
@@ -88,7 +88,7 @@ pub fn jit_riscv(m: &crate::Module, export: &str, xlen: u32) -> Result<Module, S
     ];
     for i in 0..locals {
         ops.push(store(
-            if i < ty.params as usize {
+            if i < ty.params.len() {
                 A0 + i as u32
             } else {
                 X0
@@ -240,7 +240,7 @@ pub fn jit_riscv(m: &crate::Module, export: &str, xlen: u32) -> Result<Module, S
                 ops.push(store(T0, locals + height - 1));
             }
             Instr::Return | Instr::End => {
-                if ty.results == 1 {
+                if ty.results.len() == 1 {
                     ops.push(load(A0, locals + height - 1));
                 }
                 break;
@@ -592,20 +592,31 @@ pub const MAX_WASM_DATA: usize = 16 * 1024;
 /// store + kernel router). `Ptr` args index the wasm data image (`__wasm_data`).
 #[derive(Clone, Copy)]
 enum Arg {
+    /// `__wasm_data` offset — a folded constant only.
     Ptr,
+    /// Literal i32 — a folded constant only.
     Imm,
+    /// Any value — a constant or a live pool register (`mv`/`li`).
+    Val,
 }
 
-fn import_stub(name: &str) -> Option<(&'static str, &'static [Arg])> {
+/// `env` name → (guest stub, arg kinds, i32 result count).
+fn import_stub(name: &str) -> Option<(&'static str, &'static [Arg], u32)> {
     match name {
         crate::IMPORT_SET_INNER_TEXT => {
-            Some(("WasmDomText", &[Arg::Ptr, Arg::Imm, Arg::Ptr, Arg::Imm]))
+            Some(("WasmDomText", &[Arg::Ptr, Arg::Imm, Arg::Ptr, Arg::Imm], 0))
         }
-        crate::IMPORT_SET_VISIBLE => Some(("WasmDomVisible", &[Arg::Ptr, Arg::Imm, Arg::Imm])),
+        crate::IMPORT_SET_VISIBLE => Some(("WasmDomVisible", &[Arg::Ptr, Arg::Imm, Arg::Val], 0)),
         crate::IMPORT_FETCH | crate::IMPORT_OBJECT_CALL => {
-            Some(("WasmFetch", &[Arg::Ptr, Arg::Imm]))
+            Some(("WasmFetch", &[Arg::Ptr, Arg::Imm], 0))
         }
-        crate::IMPORT_LOG => Some(("WasmLog", &[Arg::Ptr, Arg::Imm])),
+        crate::IMPORT_LOG => Some(("WasmLog", &[Arg::Ptr, Arg::Imm], 0)),
+        // env.await() -> i32 — the claimed slot (or -1 when full).
+        crate::IMPORT_AWAIT => Some(("WasmAwait", &[], 1)),
+        // env.throw(i32) — the slot to reject (-1 → the newest pending).
+        crate::IMPORT_THROW => Some(("WasmThrow", &[Arg::Val], 0)),
+        // env.catch(i32) -> i32 — 1 if the slot is rejected, 0 otherwise.
+        crate::IMPORT_CATCH => Some(("WasmCatch", &[Arg::Val], 1)),
         _ => None,
     }
 }
@@ -642,63 +653,99 @@ pub fn start_ops(m: &crate::Module, xlen: u32) -> Result<Vec<Op>, String> {
         .checked_sub(m.imports.len())
         .ok_or("cannot JIT the _start import")?;
     let ty = crate::binary::func_type(m, idx)?;
-    if ty.params != 0 || ty.results != 0 {
+    if !ty.params.is_empty() || !ty.results.is_empty() {
         return Err("_start must be () -> ()".into());
     }
-    if m.locals.get(local).copied().unwrap_or(0) != 0 {
-        return Err("_start locals unsupported in guest JIT".into());
-    }
+    // i32 locals live in the s2.. pool (bounded — see below).
     let body = m.bodies.get(local).ok_or("_start body")?;
     if body.len() > MAX_JIT_INSTRUCTIONS {
         return Err("JIT instruction limit".into());
     }
-    let (st_ra, ld_ra) = if xlen == 64 {
-        (
-            Op::Sd {
-                rs2: RA,
-                rs1: SP,
-                off: 8,
-            },
-            Op::Ld {
-                rd: RA,
-                rs: SP,
-                off: 8,
-            },
-        )
-    } else {
-        (
-            Op::Sw {
-                rs2: RA,
-                rs1: SP,
-                off: 8,
-            },
-            Op::Lw {
-                rd: RA,
-                rs: SP,
-                off: 8,
-            },
-        )
+    // Locals + call results live in a bounded s-reg pool (s2..s5): locals
+    // claim s2..s2+n at entry (initialized to 0), call results and
+    // `local.set` values claim fresh pool regs (SSA-style — a pushed
+    // `local.get` keeps the value it read even if the local is re-set).
+    let nlocals = m.locals.get(local).copied().unwrap_or(0);
+    if nlocals > 4 {
+        return Err("_start locals limit (4 i32)".into());
+    }
+    let st_x = |rs2: u32, off: i32| {
+        if xlen == 64 {
+            Op::Sd { rs2, rs1: SP, off }
+        } else {
+            Op::Sw { rs2, rs1: SP, off }
+        }
+    };
+    let ld_x = |rd: u32, off: i32| {
+        if xlen == 64 {
+            Op::Ld { rd, rs: SP, off }
+        } else {
+            Op::Lw { rd, rs: SP, off }
+        }
     };
     let mut ops = vec![
-        Op::Comment("WasmStart — guest ISel of wasm _start: i32.const + env import calls".into()),
+        Op::Comment(
+            "WasmStart — guest ISel of wasm _start: i32.const + locals + env import calls".into(),
+        ),
         Op::Glob("WasmStart".into()),
         Op::Label("WasmStart".into()),
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: -16,
+            imm: -48,
         },
-        st_ra,
+        st_x(RA, 40),
+        st_x(S2, 32),
+        st_x(S3, 24),
+        st_x(S4, 16),
+        st_x(S5, 8),
     ];
-    let mut stack: Vec<i32> = Vec::new();
+    // Locals default to 0 in their own pool regs.
+    let mut local_reg = [0u32; 4];
+    for (i, slot) in local_reg.iter_mut().enumerate().take(nlocals as usize) {
+        ops.push(Op::Li {
+            rd: S2 + i as u32,
+            imm: 0,
+        });
+        *slot = S2 + i as u32;
+    }
+    let mut scratch = S2 + nlocals;
+    let mut stack: Vec<Stk> = Vec::new();
     let mut ended = false;
     for (pc, ins) in body.iter().enumerate() {
         match ins {
-            Instr::I32Const(v) => {
-                stack.push(*v);
-                if stack.len() > 8 {
-                    return Err("_start operand stack limit".into());
+            Instr::I32Const(v) => stack.push(Stk::Const(*v)),
+            Instr::LocalGet(i) => {
+                let i = *i as usize;
+                if i >= nlocals as usize {
+                    return Err("local.get index out of range".into());
                 }
+                stack.push(Stk::Reg(local_reg[i]));
+            }
+            Instr::LocalSet(i) | Instr::LocalTee(i) => {
+                let i = *i as usize;
+                if i >= nlocals as usize {
+                    return Err("local.set index out of range".into());
+                }
+                let v = if matches!(ins, Instr::LocalTee(_)) {
+                    stack.last().copied()
+                } else {
+                    stack.pop()
+                }
+                .ok_or("local.set operand underflow")?;
+                // Repoint the local at the value's own reg (the popped
+                // entry is consumed, so no earlier push can alias it);
+                // a constant materializes in the local's current reg.
+                match v {
+                    Stk::Const(v) => ops.push(Op::Li {
+                        rd: local_reg[i],
+                        imm: i64::from(v),
+                    }),
+                    Stk::Reg(src) => local_reg[i] = src,
+                }
+            }
+            Instr::Drop => {
+                stack.pop().ok_or("drop operand underflow")?;
             }
             Instr::Call(f) => {
                 let im = m
@@ -708,24 +755,24 @@ pub fn start_ops(m: &crate::Module, xlen: u32) -> Result<Vec<Op>, String> {
                 if im.module != "env" {
                     return Err(format!("unknown import module {}", im.module));
                 }
-                let params = crate::binary::func_type(m, *f)?.params as usize;
-                let (stub, kinds) = import_stub(&im.name)
+                let ty = crate::binary::func_type(m, *f)?;
+                let (stub, kinds, results) = import_stub(&im.name)
                     .ok_or_else(|| format!("unsupported guest import {}", im.name))?;
-                if params != kinds.len() {
-                    return Err(format!("import {} arity mismatch", im.name));
+                if ty.params.len() != kinds.len() || ty.results.len() != results as usize {
+                    return Err(format!("import {} signature mismatch", im.name));
                 }
                 let base = stack
                     .len()
-                    .checked_sub(params)
+                    .checked_sub(kinds.len())
                     .ok_or("call argument underflow")?;
-                let args: Vec<i32> = stack.split_off(base);
+                let args: Vec<Stk> = stack.split_off(base);
                 for (i, (v, kind)) in args.iter().zip(kinds).enumerate() {
                     let reg = A0 + i as u32;
                     if reg > A3 {
                         return Err("guest import arity limit".into());
                     }
-                    match kind {
-                        Arg::Ptr => {
+                    match (kind, v) {
+                        (Arg::Ptr, Stk::Const(v)) => {
                             ops.push(Op::La {
                                 rd: reg,
                                 addr: Addr::WasmData,
@@ -740,16 +787,39 @@ pub fn start_ops(m: &crate::Module, xlen: u32) -> Result<Vec<Op>, String> {
                                 rs2: T0,
                             });
                         }
-                        Arg::Imm => ops.push(Op::Li {
+                        (Arg::Imm | Arg::Val, Stk::Const(v)) => ops.push(Op::Li {
                             rd: reg,
                             imm: i64::from(*v),
                         }),
+                        (Arg::Val, Stk::Reg(src)) => {
+                            if *src != reg {
+                                ops.push(Op::Addi {
+                                    rd: reg,
+                                    rs: *src,
+                                    imm: 0,
+                                });
+                            }
+                        }
+                        (_, Stk::Reg(_)) => {
+                            return Err("computed value into a const-only import arg".into());
+                        }
                     }
                 }
                 ops.push(Op::Jal {
                     rd: RA,
                     to: stub.into(),
                 });
+                if results == 1 {
+                    // The a0 result survives into a fresh pool reg so the
+                    // next call's argument materialization cannot clobber it.
+                    let r = alloc(&mut scratch)?;
+                    ops.push(Op::Addi {
+                        rd: r,
+                        rs: A0,
+                        imm: 0,
+                    });
+                    stack.push(Stk::Reg(r));
+                }
             }
             Instr::End | Instr::Return if pc + 1 == body.len() => {
                 ended = true;
@@ -761,16 +831,23 @@ pub fn start_ops(m: &crate::Module, xlen: u32) -> Result<Vec<Op>, String> {
                 ))
             }
         }
+        if stack.len() > 8 {
+            return Err("_start operand stack limit".into());
+        }
     }
     if !ended || !stack.is_empty() {
         return Err("_start did not end cleanly for guest JIT".into());
     }
     ops.extend([
-        ld_ra,
+        ld_x(S5, 8),
+        ld_x(S4, 16),
+        ld_x(S3, 24),
+        ld_x(S2, 32),
+        ld_x(RA, 40),
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: 16,
+            imm: 48,
         },
         Op::Jalr {
             rd: X0,
@@ -779,6 +856,23 @@ pub fn start_ops(m: &crate::Module, xlen: u32) -> Result<Vec<Op>, String> {
         },
     ]);
     Ok(ops)
+}
+
+/// A live `_start` operand: a folded constant or a value in a pool register.
+#[derive(Clone, Copy)]
+enum Stk {
+    Const(i32),
+    Reg(u32),
+}
+
+/// Claim a pool register (s2..s5) for a local or a call result.
+fn alloc(scratch: &mut u32) -> Result<u32, String> {
+    let r = *scratch;
+    if r > S5 {
+        return Err("guest local/result register limit".into());
+    }
+    *scratch += 1;
+    Ok(r)
 }
 
 /// Install `start_ops` onto a payload module's `WasmStart` anchor and set
@@ -1113,6 +1207,303 @@ mod tests {
             );
             assert_eq!(smoke.dom_rows, 1, "xlen={xlen}");
             assert_eq!(smoke.console, "DOM| UI-BOOT\n", "xlen={xlen}");
+        }
+    }
+
+    /// Guest `_start` lowering of the `env.await`/`env.throw` imports with
+    /// an i32 result + i32 locals: `local slot0 = await()` claims slot 0,
+    /// `local slot1 = await()` claims slot 1, `throw(slot0)` rejects the
+    /// *targeted* slot (not the newest) — `await.0` → rejected while
+    /// `await.1` stays pending. The guest code path (not just the UART
+    /// command) drives the queue.
+    #[test]
+    fn start_ops_executes_await_throw_imports() {
+        let wm = crate::Module {
+            types: vec![
+                crate::FuncType {
+                    params: vec![],
+                    results: vec![crate::ValType::I32],
+                },
+                crate::FuncType {
+                    params: vec![crate::ValType::I32],
+                    results: vec![],
+                },
+                crate::FuncType {
+                    params: vec![],
+                    results: vec![],
+                },
+            ],
+            imports: vec![
+                crate::Import {
+                    module: "env".into(),
+                    name: crate::IMPORT_AWAIT.into(),
+                    typeidx: 0,
+                },
+                crate::Import {
+                    module: "env".into(),
+                    name: crate::IMPORT_THROW.into(),
+                    typeidx: 1,
+                },
+            ],
+            func_types: vec![2],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![crate::Export {
+                name: "_start".into(),
+                kind: 0,
+                idx: 2,
+            }],
+            // slot0 = await(); slot1 = await(); throw(slot0)
+            bodies: vec![vec![
+                crate::Instr::Call(0),
+                crate::Instr::LocalSet(0),
+                crate::Instr::Call(0),
+                crate::Instr::LocalSet(1),
+                crate::Instr::LocalGet(0),
+                crate::Instr::Call(1),
+                crate::Instr::End,
+            ]],
+            memory: Vec::new(),
+            locals: vec![2],
+            has_memory: false,
+            tags: Vec::new(),
+            globals: Vec::new(),
+            tables: Vec::new(),
+            elements: Vec::new(),
+            data_count: None,
+            data_segments: Vec::new(),
+        };
+        for xlen in [64, 32] {
+            let spec = g6b_spec::BoardSpec::from_json_str(&format!(
+                r#"{{"schema_version":1,"isa":{{"xlen":{xlen}}},"kernel":{{"wasm":{{"enable":true,"jit":true}}}}}}"#
+            ))
+            .unwrap();
+            let ops = start_ops(&wm, xlen).unwrap();
+            let mut m = Module {
+                nharts: 1,
+                line_bytes: g6b_asm::UART_LINE_BSS,
+                ui_bytes: g6b_asm::UI_HEADER_BYTES,
+                wasm_data: data_image(&wm).unwrap(),
+                ..Default::default()
+            };
+            g6b_asm::dom::attach(&mut m, &spec);
+            let mut merged = false;
+            for n in &mut m.nodes {
+                if n.ops
+                    .iter()
+                    .any(|o| matches!(o, Op::Label(l) if l == "WasmStart"))
+                {
+                    n.ops = ops.clone();
+                    merged = true;
+                }
+            }
+            assert!(merged, "WasmStart anchor");
+            m.nodes.insert(
+                0,
+                Node {
+                    purpose: Purpose::WasmJit,
+                    ops: vec![
+                        Op::La {
+                            rd: SP,
+                            addr: Addr::StacksEnd,
+                        },
+                        Op::Jal {
+                            rd: RA,
+                            to: "WasmUi".into(),
+                        },
+                        Op::Wfi,
+                    ],
+                },
+            );
+            let smoke = exec::run_module(&spec, &m, 0x0001_0000).unwrap();
+            assert_eq!(smoke.halt, exec::Halt::Wfi, "xlen={xlen}");
+            for line in [
+                "AWAIT pending 0\n",
+                "AWAIT pending 1\n",
+                "AWAIT-THROW /bios/menu\n",
+                "DOM| pending menu",
+                "DOM| rejected menu",
+            ] {
+                assert!(
+                    smoke.console.contains(line),
+                    "xlen={xlen} {}",
+                    smoke.console
+                );
+            }
+        }
+    }
+
+    /// Guest `_start` lowering with `env.catch` → `env.set_visible`:
+    /// await a slot, throw it, create a hidden "CAUGHT" row, then
+    /// `catch(slot)` returns 1 and `set_visible(id, 1)` makes it visible.
+    /// Proves `env.catch(i32)->i32` and `set_visible`'s computed `on`
+    /// flag (Arg::Val) are lowered on both xlens.
+    #[test]
+    fn start_ops_catch_reveals_a_rejected_row() {
+        let mut memory = vec![0u8; 64];
+        memory[0..4].copy_from_slice(b"x\0\0\0");
+        memory[8..16].copy_from_slice(b"CAUGHT\0\0");
+        let wm = crate::Module {
+            types: vec![
+                // 0: await ()->i32
+                crate::FuncType {
+                    params: vec![],
+                    results: vec![crate::ValType::I32],
+                },
+                // 1: throw (i32)->()
+                crate::FuncType {
+                    params: vec![crate::ValType::I32],
+                    results: vec![],
+                },
+                // 2: catch (i32)->i32
+                crate::FuncType {
+                    params: vec![crate::ValType::I32],
+                    results: vec![crate::ValType::I32],
+                },
+                // 3: set_visible (i32,i32,i32)->()
+                crate::FuncType {
+                    params: vec![crate::ValType::I32; 3],
+                    results: vec![],
+                },
+                // 4: set_inner_text (i32,i32,i32,i32)->()
+                crate::FuncType {
+                    params: vec![crate::ValType::I32; 4],
+                    results: vec![],
+                },
+                // 5: _start ()->()
+                crate::FuncType {
+                    params: vec![],
+                    results: vec![],
+                },
+            ],
+            imports: vec![
+                crate::Import {
+                    module: "env".into(),
+                    name: crate::IMPORT_AWAIT.into(),
+                    typeidx: 0,
+                },
+                crate::Import {
+                    module: "env".into(),
+                    name: crate::IMPORT_THROW.into(),
+                    typeidx: 1,
+                },
+                crate::Import {
+                    module: "env".into(),
+                    name: crate::IMPORT_CATCH.into(),
+                    typeidx: 2,
+                },
+                crate::Import {
+                    module: "env".into(),
+                    name: crate::IMPORT_SET_VISIBLE.into(),
+                    typeidx: 3,
+                },
+                crate::Import {
+                    module: "env".into(),
+                    name: crate::IMPORT_SET_INNER_TEXT.into(),
+                    typeidx: 4,
+                },
+            ],
+            func_types: vec![5],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![crate::Export {
+                name: "_start".into(),
+                kind: 0,
+                idx: 5,
+            }],
+            bodies: vec![vec![
+                // slot = await(); throw(slot)
+                crate::Instr::Call(0),
+                crate::Instr::LocalSet(0),
+                crate::Instr::LocalGet(0),
+                crate::Instr::Call(1),
+                // set_inner_text("x","CAUGHT") — row exists, visible by default
+                crate::Instr::I32Const(0),
+                crate::Instr::I32Const(1),
+                crate::Instr::I32Const(8),
+                crate::Instr::I32Const(6),
+                crate::Instr::Call(4),
+                // set_visible("x", 0) — hide it
+                crate::Instr::I32Const(0),
+                crate::Instr::I32Const(1),
+                crate::Instr::I32Const(0),
+                crate::Instr::Call(3),
+                // flag = catch(slot); set_visible("x", flag)
+                crate::Instr::LocalGet(0),
+                crate::Instr::Call(2),
+                crate::Instr::LocalSet(1),
+                crate::Instr::I32Const(0),
+                crate::Instr::I32Const(1),
+                crate::Instr::LocalGet(1),
+                crate::Instr::Call(3),
+                crate::Instr::End,
+            ]],
+            memory,
+            locals: vec![2],
+            has_memory: false,
+            tags: Vec::new(),
+            globals: Vec::new(),
+            tables: Vec::new(),
+            elements: Vec::new(),
+            data_count: None,
+            data_segments: Vec::new(),
+        };
+        for xlen in [64, 32] {
+            let spec = g6b_spec::BoardSpec::from_json_str(&format!(
+                r#"{{"schema_version":1,"isa":{{"xlen":{xlen}}},"kernel":{{"wasm":{{"enable":true,"jit":true}}}}}}"#
+            ))
+            .unwrap();
+            let ops = start_ops(&wm, xlen).unwrap();
+            let mut m = Module {
+                nharts: 1,
+                line_bytes: g6b_asm::UART_LINE_BSS,
+                ui_bytes: g6b_asm::UI_HEADER_BYTES,
+                wasm_data: data_image(&wm).unwrap(),
+                ..Default::default()
+            };
+            g6b_asm::dom::attach(&mut m, &spec);
+            let mut merged = false;
+            for n in &mut m.nodes {
+                if n.ops
+                    .iter()
+                    .any(|o| matches!(o, Op::Label(l) if l == "WasmStart"))
+                {
+                    n.ops = ops.clone();
+                    merged = true;
+                }
+            }
+            assert!(merged, "WasmStart anchor");
+            m.nodes.insert(
+                0,
+                Node {
+                    purpose: Purpose::WasmJit,
+                    ops: vec![
+                        Op::La {
+                            rd: SP,
+                            addr: Addr::StacksEnd,
+                        },
+                        Op::Jal {
+                            rd: RA,
+                            to: "WasmUi".into(),
+                        },
+                        Op::Wfi,
+                    ],
+                },
+            );
+            let smoke = exec::run_module(&spec, &m, 0x0001_0000).unwrap();
+            assert_eq!(smoke.halt, exec::Halt::Wfi, "xlen={xlen}");
+            for line in [
+                "AWAIT pending 0\n",
+                "AWAIT-THROW /bios/menu\n",
+                "DOM| CAUGHT",
+                "DOM| rejected menu",
+            ] {
+                assert!(
+                    smoke.console.contains(line),
+                    "xlen={xlen} {}",
+                    smoke.console
+                );
+            }
         }
     }
 

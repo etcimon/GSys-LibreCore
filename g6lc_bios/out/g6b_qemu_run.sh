@@ -40,6 +40,14 @@ sleep 1
 # UART Keys command → InpPoll dump
 printf "Keys\n" >&3
 sleep 2
+# Await lifecycle: 4 slots pending → `Throw 1` rejects slot 1 (the targeted
+# env.throw(i32) path; plain `Throw` = newest) → Ui poll drains the rest
+printf "Await\n" >&3
+printf "Await\n" >&3
+printf "Await\n" >&3
+printf "Await\n" >&3
+printf "Throw 1\n" >&3
+sleep 1
 printf "Ui\n" >&3
 sleep 3
 printf "screendump /tmp/g6b_screen.ppm\n" >&4

@@ -22,7 +22,7 @@ configuration "library" {
     subConfiguration "fast-wasm" "ldc-master"
     subConfiguration "optional-wasm" "ldc-master"
     versions "G6LC_G6B"
-    dflags "-fvisibility=hidden" "-fno-moduleinfo" "-mattr=+exception-handling" "--wasm-enable-eh" "-link-internally" "-defaultlib=" "--foptimize-nothrow=false"
+    dflags "-fvisibility=hidden" "-fno-moduleinfo" "-mattr=+exception-handling" "--wasm-enable-eh" "-link-internally" "-defaultlib="
     lflags "-allow-undefined" "--export-table" "--export=_start" "--export=allocString" "--export=dumpApp" "--export=loadApp" "-export=__heap_base"
 }
 
@@ -53,7 +53,7 @@ configuration "ldc-master" {
     subConfiguration "fast-wasm" "ldc-master"
     subConfiguration "optional-wasm" "ldc-master"
     versions "G6LC_G6B"
-    dflags "-fvisibility=hidden" "-fno-moduleinfo" "-mattr=+exception-handling" "--wasm-enable-eh" "-link-internally" "-defaultlib=" "--foptimize-nothrow=false"
+    dflags "-fvisibility=hidden" "-fno-moduleinfo" "-mattr=+exception-handling" "--wasm-enable-eh" "-link-internally" "-defaultlib="
     lflags "-allow-undefined" "--export-table" "--export=_start" "--export=allocString" "--export=dumpApp" "--export=loadApp" "-export=__heap_base"
 }
 

@@ -269,6 +269,34 @@ pub fn holyc_print_src(spec: &BoardSpec) -> String {
     if spec.kernel.settings.enable {
         out.push_str("U0 SettingsUsbPrint()\n{\n\tKernelGet(\"/bios/settings/usb\");\n}\n");
     }
+    // Display outputs and the surface split, same router path the browser
+    // toggle uses — HolyC prints, browser-UI fetches, one endpoint.
+    let out_active = spec.default_output();
+    out.push_str(&format!(
+        "U0 DisplayPrint()\n{{\n\tPrint(\"DISP {} {} {}x{}\\n\");\n",
+        escape_holyc_string(&out_active.id),
+        out_active.class.as_str(),
+        out_active.w,
+        out_active.h
+    ));
+    for o in spec.display_outputs() {
+        out.push_str(&format!(
+            "\tPrint(\"  {}={} pri={}\\n\");\n",
+            escape_holyc_string(&o.id),
+            o.class.as_str(),
+            o.class.priority()
+        ));
+    }
+    out.push_str(&format!(
+        "\tPrint(\"  surface={}\\n\");\n\tKernelGet(\"/bios/display\");\n}}\n",
+        spec.default_surface().as_str()
+    ));
+    if spec.surface_toggle() {
+        out.push_str(&format!(
+            "U0 DisplayToggle()\n{{\n\tDisplaySurface(\"{}\");\n}}\n",
+            spec.default_surface().toggled().as_str()
+        ));
+    }
     out
 }
 
@@ -297,6 +325,9 @@ pub fn setup_reads(spec: &BoardSpec) -> Vec<&'static str> {
     reads.extend(faces_for(spec).iter().map(|face| face.fetch));
     if spec.kernel.params.bootloader {
         reads.push("/bios/bootloader");
+    }
+    if spec.surface_toggle() {
+        reads.push("/bios/display");
     }
     if spec.kernel.settings.enable {
         reads.push("/bios/settings");
@@ -394,10 +425,47 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
             String::new()
         }
     };
+    // Top-right display surface toggle. Only rendered when both surfaces are
+    // reachable, so the control can never promise a switch the board cannot do.
+    // It is absolutely positioned with no positioned ancestor, so its
+    // containing block is the initial one — the viewport in a browser, the
+    // canvas in the CSS raster — which puts it in the top-right corner in both
+    // lanes without disturbing the in-flow menu layout.
+    let disp_toggle = if spec.surface_toggle() {
+        let surface = spec.default_surface();
+        let out = spec.default_output();
+        format!(
+            "<button type=\"button\" id=\"disp-toggle\" data-surface=\"{}\" data-output=\"{}\"{}>{}</button>\n\
+             <p id=\"disp-status\" role=\"status\">{} {} {}x{}</p>\n",
+            surface.as_str(),
+            escape_html(&out.id),
+            fetch_attr("/bios/display"),
+            // The label names the surface the click switches *to*.
+            if surface == g6b_spec::Surface::Gpu {
+                "VGA view"
+            } else {
+                "GPU view"
+            },
+            out.class.as_str(),
+            surface.as_str(),
+            out.w,
+            out.h
+        )
+    } else {
+        String::new()
+    };
+    // `width`/`height` are explicit because the raster refuses shrink-to-fit
+    // on an out-of-flow box (see g6b_css::computed_absolute_box).
+    let disp_css = if spec.surface_toggle() {
+        "#disp-toggle{position:absolute;top:0;right:0;width:12ch;height:24px;\
+         background-color:#00aaaa;color:#ffffff;border:1px solid #00ffff}"
+    } else {
+        ""
+    };
     let mut html = format!(
         "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>G6LC-BIOS</title>\n\
-         <style>body{{font:16px \"Courier New\",monospace;background:#0000aa;color:#c8c8c8;margin:0;padding:1ch}}#bios-ui{{max-width:80ch;margin:auto}}h1#banner{{background:#00aaaa;color:#ffffff;text-align:center;padding:0 1ch;margin:0;font-weight:bold}}h2{{color:#ffffff;margin:.5ch 0}}a{{color:#ffff55}}nav a,button{{margin:0 .5ch;display:inline-block}}a[aria-current=page]{{background:#00aaaa;color:#ffffff}}table{{border-collapse:collapse;width:100%;border:1px solid #00aaaa}}th,td{{text-align:left;padding:0 1ch;border-bottom:1px solid #000077;overflow-wrap:anywhere}}th{{color:#00ffff}}tr[data-writable=\"true\"] th{{color:#ffff55}}pre{{white-space:pre-wrap}}[hidden]{{display:none!important}}button{{font:inherit;background:#00aaaa;color:#ffffff;border:1px outset #00ffff}}section{{margin-block:1ch;border:1px solid #00aaaa;padding:0 1ch}}#status{{color:#ffff55}}#bios-nav{{color:#00ffff}}footer,#libwasm-status{{color:#00ffff}}{css}</style></head>\n\
-         <body>{backdrop}<main id=\"bios-ui\" data-start-menu=\"{}\"{wasm}{workers}><h1 id=\"banner\">G6LC-BIOS | GSys LibreCore</h1>\n\
+         <style>body{{font:16px \"Courier New\",monospace;background:#0000aa;color:#c8c8c8;margin:0;padding:1ch}}#bios-ui{{max-width:80ch;margin:auto}}h1#banner{{background:#00aaaa;color:#ffffff;text-align:center;padding:0 1ch;margin:0;font-weight:bold}}h2{{color:#ffffff;margin:.5ch 0}}a{{color:#ffff55}}nav a,button{{margin:0 .5ch;display:inline-block}}a[aria-current=page]{{background:#00aaaa;color:#ffffff}}table{{border-collapse:collapse;width:100%;border:1px solid #00aaaa}}th,td{{text-align:left;padding:0 1ch;border-bottom:1px solid #000077;overflow-wrap:anywhere}}th{{color:#00ffff}}tr[data-writable=\"true\"] th{{color:#ffff55}}pre{{white-space:pre-wrap}}[hidden]{{display:none!important}}button{{font:inherit;background:#00aaaa;color:#ffffff;border:1px outset #00ffff}}section{{margin-block:1ch;border:1px solid #00aaaa;padding:0 1ch}}#status{{color:#ffff55}}#bios-nav{{color:#00ffff}}footer,#libwasm-status{{color:#00ffff}}{disp_css}{css}</style></head>\n\
+         <body>{backdrop}{disp_toggle}<main id=\"bios-ui\" data-start-menu=\"{}\"{wasm}{workers}><h1 id=\"banner\">G6LC-BIOS | GSys LibreCore</h1>\n\
          <p id=\"status\" role=\"status\">Static BoardSpec view</p><p id=\"profile\">{}</p>\n\
          <p id=\"bios-nav\">{}</p><nav id=\"bios-menu\" aria-label=\"Setup menus\"{}><p id=\"menu-title\">Setup menus</p>\n",
         escape_html(&spec.kernel.start_menu),

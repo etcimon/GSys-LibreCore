@@ -1,0 +1,45 @@
+{
+  "_comment": [
+    "Track A feature inventory for architecture/RENDER-VALIDATION.md.",
+    "Schema follows @browserscore/supports (MIT) feature ids so the queue can be",
+    "regenerated from upstream. This is a BUILD-TIME BACKLOG, not a score, and it",
+    "is never consulted at BIOS runtime.",
+    "state is set ONLY by track-B evidence (a reviewed golden image or a unit",
+    "test), NEVER by a supports()/CSS.supports() call - see RENDER-VALIDATION.md",
+    "section 1.2 on self-scoring circularity."
+  ],
+  "features": [
+    { "id": "css.property.display",           "kind": "property", "state": "bounded", "note": "parsed and cascaded; only block flow is laid out" },
+    { "id": "css.property.width",             "kind": "property", "state": "landed",  "note": "px, %, auto; g6b-css::computed_box" },
+    { "id": "css.property.height",            "kind": "property", "state": "landed",  "note": "px only; % needs a container height pass" },
+    { "id": "css.property.box-sizing",        "kind": "property", "state": "landed",  "note": "content-box + border-box, clamped at zero" },
+    { "id": "css.property.margin",            "kind": "property", "state": "bounded", "note": "longhands only; shorthand expansion not implemented" },
+    { "id": "css.property.padding",           "kind": "property", "state": "bounded", "note": "longhands only" },
+    { "id": "css.property.border-width",      "kind": "property", "state": "bounded", "note": "longhands only; style/colour not modelled" },
+    { "id": "css.property.color",             "kind": "property", "state": "bounded", "note": "cascaded but not yet rasterised" },
+    { "id": "css.property.background-color",  "kind": "property", "state": "bounded", "note": "cascaded but not yet rasterised" },
+    { "id": "css.property.visibility",        "kind": "property", "state": "bounded", "note": "cascaded; g6b-dom hidden path is separate" },
+
+    { "id": "css.selector.type",              "kind": "selector", "state": "landed",  "note": "specificity (0,0,1)" },
+    { "id": "css.selector.class",             "kind": "selector", "state": "landed",  "note": "compound classes require all to match" },
+    { "id": "css.selector.id",                "kind": "selector", "state": "landed",  "note": "specificity (1,0,0)" },
+    { "id": "css.selector.universal",         "kind": "selector", "state": "landed",  "note": "specificity (0,0,0)" },
+    { "id": "css.cascade.important",          "kind": "cascade",  "state": "landed",  "note": "outranks specificity" },
+    { "id": "css.cascade.source-order",       "kind": "cascade",  "state": "landed",  "note": "later wins at equal specificity" },
+
+    { "id": "css.selector.descendant",        "kind": "selector", "state": "planned", "note": "parsed as non-matchable; never mismatches" },
+    { "id": "css.selector.child",             "kind": "selector", "state": "planned", "note": "as above" },
+    { "id": "css.selector.attribute",         "kind": "selector", "state": "planned", "note": "as above" },
+    { "id": "css.cascade.inheritance",        "kind": "cascade",  "state": "planned", "note": "no inherited-property pass yet" },
+    { "id": "css.property.shorthand-expansion","kind": "property","state": "planned", "note": "margin/padding/border shorthands" },
+    { "id": "css.atrule.media",               "kind": "atrule",   "state": "planned", "note": "skipped whole, never half-applied" },
+
+    { "id": "css.property.float",             "kind": "property", "state": "refused", "note": "out of BIOS layout scope; parse refuses it" },
+    { "id": "css.layout.flexbox",             "kind": "layout",   "state": "refused", "note": "not required by BoardSpec-driven menus" },
+    { "id": "css.layout.grid",                "kind": "layout",   "state": "refused", "note": "as above" },
+    { "id": "css.text.shaping",               "kind": "text",     "state": "refused", "note": "first-party 8x8 bitmap font only; no shaper" },
+    { "id": "css.unit.em",                    "kind": "unit",     "state": "refused", "note": "whole-pixel raster; refused not truncated" },
+    { "id": "css.unit.rem",                   "kind": "unit",     "state": "refused", "note": "as above" },
+    { "id": "css.property.custom-property",   "kind": "property", "state": "refused", "note": "needs a variable resolution pass" }
+  ]
+}

@@ -11,7 +11,8 @@ export type FetchOp = { kind: "fetch"; url: string };
 export type HolycOp = { kind: "holyc"; line: string };
 export type RegisterOp = { kind: "register"; path: string; method: string };
 export type VisibleOp = { kind: "visible"; id: string; on: boolean };
-export type UiOp = TextOp | FetchOp | HolycOp | RegisterOp | VisibleOp;
+export type AwaitOp = { kind: "await" };
+export type UiOp = TextOp | FetchOp | HolycOp | RegisterOp | VisibleOp | AwaitOp;
 
 export type SvelteFile = {
   rel: string;
@@ -79,10 +80,13 @@ function parseLets(body: string): Binding[] {
 
 function parseCalls(body: string): UiOp[] {
   const ops: UiOp[] = [];
-  const fetchRe = /(?:fetchBios|fetch)\(\s*(["'])([^"']+)\1\s*\)/g;
+  const fetchRe = /(await\s+)?(?:fetchBios|fetch)\(\s*(["'])([^"']+)\2\s*\)/g;
   let m: RegExpExecArray | null;
   while ((m = fetchRe.exec(body))) {
-    ops.push({ kind: "fetch", url: m[2] });
+    ops.push({ kind: "fetch", url: m[3] });
+    // `await fetch(...)` → the request op plus a bounded await-slot claim
+    // (`env.await`): the guest's nonblocking correlate of `await`.
+    if (m[1] !== undefined) ops.push({ kind: "await" });
   }
   const holycRe = /(?:holycEval|kernel\.holyc)\(\s*(["'])((?:\\.|[^\\'"])*)\1\s*\)/g;
   while ((m = holycRe.exec(body))) {

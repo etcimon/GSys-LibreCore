@@ -19,7 +19,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         eprintln!(
-            "usage: g6b <design-compile|display|boot|tohtml|holyc-eval|holyc-serve|http-serve|loopback|qemu-args|elf|smoke|gr|display-proxy> \
+            "usage: g6b <design-compile|display|boot|tohtml|holyc-eval|holyc-serve|http-serve|loopback|qemu-args|elf|smoke|gr|display-proxy|css-paint|css-render|ppm-diff> \
              [--spec FILE] [--out DIR|FILE] [--port N] [--once]"
         );
         return ExitCode::from(2);
@@ -155,6 +155,9 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         },
+        "css-paint" => css_paint(&args),
+        "css-render" => css_render(&args),
+        "ppm-diff" => ppm_diff(&args),
         "smoke" => match load_spec(spec_path.as_deref()) {
             Err(c) => c,
             Ok(spec) => match g6b_elf::smoke(&spec) {
@@ -603,6 +606,153 @@ fn load_spec(path: Option<&Path>) -> Result<g6b_spec::BoardSpec, ExitCode> {
         eprintln!("g6b: spec {}: {e}", p.display());
         ExitCode::from(1)
     })
+}
+
+fn css_paint(args: &[String]) -> ExitCode {
+    let out = flag_value(args, "--out").unwrap_or("out/ui.ppm");
+    let spec_path = flag_value(args, "--spec").map(Path::new);
+    let spec = match load_spec(spec_path) {
+        Ok(s) => s,
+        Err(c) => return c,
+    };
+    match g6b_kernel::ui_ppm(&spec) {
+        Ok(ppm) => {
+            if let Some(parent) = Path::new(out).parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
+            if let Err(e) = fs::write(out, ppm) {
+                eprintln!("g6b css-paint: write {out}: {e}");
+                return ExitCode::from(1);
+            }
+            eprintln!("g6b: wrote {out}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("g6b css-paint: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn css_render(args: &[String]) -> ExitCode {
+    let html = flag_value(args, "--html");
+    let css = flag_value(args, "--css");
+    let fixture = flag_value(args, "--fixture");
+    let (html, css) = match (html, css, fixture) {
+        (Some(h), Some(c), None) => (fs::read_to_string(h), fs::read_to_string(c)),
+        (None, None, Some(f)) => load_render_fixture(f),
+        _ => {
+            eprintln!("g6b css-render: --html + --css, or --fixture");
+            return ExitCode::from(2);
+        }
+    };
+    let html = match html {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("g6b css-render: read html: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let css = match css {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("g6b css-render: read css: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let w = flag_value(args, "--w")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(128);
+    let h = flag_value(args, "--h")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(96);
+
+    match g6b_css::render::render_to_canvas(&html, &css, w, h) {
+        Ok(canvas) => {
+            let out = flag_value(args, "--out").unwrap_or("out/css-render.ppm");
+            if let Some(parent) = Path::new(out).parent() {
+                if !parent.as_os_str().is_empty() {
+                    let _ = fs::create_dir_all(parent);
+                }
+            }
+            if let Err(e) = fs::write(out, canvas.to_ppm()) {
+                eprintln!("g6b css-render: write {out}: {e}");
+                return ExitCode::from(1);
+            }
+            eprintln!("g6b: wrote {out}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("g6b css-render: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn load_render_fixture(
+    f: &str,
+) -> (
+    Result<String, std::io::Error>,
+    Result<String, std::io::Error>,
+) {
+    // A fixture is a JSON file with { html, css } or a directory containing
+    // `fixture.html` and `fixture.css`.
+    let path = Path::new(f);
+    let (html_path, css_path) = if path.is_dir() {
+        (path.join("fixture.html"), path.join("fixture.css"))
+    } else {
+        (path.with_extension("html"), path.with_extension("css"))
+    };
+    (fs::read_to_string(html_path), fs::read_to_string(css_path))
+}
+
+fn ppm_diff(args: &[String]) -> ExitCode {
+    let a = flag_value(args, "--actual");
+    let g = flag_value(args, "--golden");
+    let tol = flag_value(args, "--tolerance")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let (Some(a), Some(g)) = (a, g) else {
+        eprintln!("g6b ppm-diff: --actual FILE --golden FILE [--tolerance N]");
+        return ExitCode::from(2);
+    };
+    let actual = match fs::read(a) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("g6b ppm-diff: read {a}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let golden = match fs::read(g) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("g6b ppm-diff: read {g}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    match g6b_gr::canvas::compare_ppm(&actual, &golden, tol) {
+        Some(d) if d.same => {
+            println!(
+                "OK: {} pixels, max_delta={}",
+                d.total_pixels, d.max_channel_delta
+            );
+            ExitCode::SUCCESS
+        }
+        Some(d) => {
+            eprintln!(
+                "g6b ppm-diff: FAIL different={}/{} max_delta={} bad={} ratio={:.4}",
+                d.different_pixels, d.total_pixels, d.max_channel_delta, d.bad_pixels, d.ratio
+            );
+            ExitCode::from(1)
+        }
+        None => {
+            eprintln!("g6b ppm-diff: could not parse one of the PPM files");
+            ExitCode::from(1)
+        }
+    }
 }
 
 #[cfg(test)]

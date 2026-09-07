@@ -8,6 +8,7 @@ Not Chromium, not Go goja, not puppeteer. Specs:
 | lirx-js/dom | `kernel-spec/lirx-dom` | MIT | DOM mutation locality; **not linked** |
 | WebIDL | `kernel-spec/webidl/definitions` | MPL-2.0 | interface catalog |
 | svelte-d | `kernel-spec/svelte-d` | MIT | Svelte → libwasm/WASM UI; **not LDC** |
+| goosie | `kernel-spec/goosie` | MIT | CSS cascade / box model / display-list contract for `g6b-css`; **not compiled, no Go, no Fyne, no Playwright gate** |
 
 First-party MIT implementation (B50–B52):
 
@@ -68,7 +69,8 @@ output budgets bound compilation. There is no Go runtime.
 
 A separate `compile_async` / `AsyncScheduler` handles the bounded await/throw/
 catch subset described in `WASM.md`. It is not silently enabled in static
-`compile`, and it does not implement D Asyncify. `BrowserSession` admits scripts
+`compile`; the LDC/libwasm build path now runs Binaryen Asyncify, but the D
+`await`/`catch` Promise-continuation host driver is still a stub. `BrowserSession` admits scripts
 only when BoardSpec enables JS, services read-only configured kernel endpoints
 without a network wait, and resumes completed requests on the next poll.
 Left/Right/Home/End menu input stays independent of suspended scripts; navigation
@@ -82,6 +84,37 @@ HTML subset, attributes/entities and raw script/style contents; unsupported
 or malformed markup returns an error rather than a partially mounted tree.
 UART painting skips hidden/script/style nodes and keeps table rows separate.
 This is lirx-style mutation locality, not a complete lirx reactive runtime.
+
+## DOM event model
+
+`g6b-dom::event` provides a bounded HTML5-style `Event`, `EventInit`,
+`addEventListener`, `removeEventListener` and `dispatch_event`. Propagation
+runs capture phase (root → target), then bubble phase (target → root) if
+`bubbles` is true. `stopPropagation` cancels the rest of the tree;
+`stopImmediatePropagation` cancels siblings on the current node;
+`preventDefault` is recorded and returned from `dispatch_event` so the caller
+can decide whether to run a default action (e.g. link navigation). Listeners
+are stored as data (`event_listeners` on `Node`) and invoked through an
+`EventHost` trait, so `g6b-js` and `libwasm` each provide their own callback
+mapping without making `Node` non-`Clone`. The model is intentionally narrow:
+no `EventTarget` interface object, no `CustomEvent` subclassing, no default
+action dispatch inside `g6b-dom`; those live in the host layers.
+
+`BrowserSession` owns a `BrowserEventHost` (callback table), `hit_boxes` from the
+last CSS raster, and `dispatch_pointer` / `dispatch_key` helpers. A pointer event
+performs a reverse hit-box lookup using the CSS-rendered `HitBox` list, constructs
+an `Event` whose `target` is the rendered node's `id`, and runs
+`g6b-dom::dispatch_event` on the `<body>` subtree. `g6b-css::render_sheet_to_output`
+now attaches the `Canvas` to the `Cursor` so nested blocks are painted and recorded
+as hit boxes; without this the hit list only contained top-level blocks.
+`BrowserEventHost::invoke` records triggered listeners; `BrowserSession` then
+runs the concrete AOT `g6b_js` program or libwasm re-entry after the DOM borrow
+is released. AOT listeners execute `g6b_js::run` with a `{detail}` placeholder
+replaced by `event.detail`. libwasm listeners re-enter `g6b_wasm::run_with_fuel_mut`
+with the stored module, object table and DOM handles, passing an event object
+handle plus the original listener handle. `KernelHost` collects libwasm listener
+registrations during `_start`; `BrowserSession` persists `wasm_module`,
+`wasm_objects`, and `wasm_handles` across re-entries.
 
 ## Configuration and execution
 
@@ -131,15 +164,95 @@ property setters, HTML injection, URL properties and event setters are refused.
 Unmount detaches without invalidating the retained handle. The current contract
 is initialization-only, not a callback/reactive object bridge.
 
+The libwasm host also exposes the libwasm await/object-string ABI:
+`env.libwasm_await_supported`, `env.libwasm_await_failed`,
+`env.libwasm_await_error`, `env.libwasm_await_value`,
+`env.libwasm_note_await_fail`, `env.libwasm_note_await_ok`,
+`env.libwasm_get__string` and `env.libwasm_add__string`. These are the host
+imports that the `await_status` D module (and `g6b_kernel.d`) use to read and
+record `.await` settlement after an `env.libwasm_await__void` rewind. The
+`createLibwasmHost` JS implementation bounds-checks the sret pointer, allocates
+UTF-8 payload memory, and writes a D `(length, ptr)` string struct. Rejected
+await state maps to a string via `libwasm_await_error`; resolved values map to
+`libwasm_await_value`; `libwasm_get__string` copies an object-table string back
+into guest memory. Object handles start at `0x0010_0000` and are owned by the
+host; the guest cannot create arbitrary JS objects. The `env.fetch` promise
+resolves to the response body text (or rejects on non-2xx), so
+`libwasm_await_value` writes the body and `libwasm_await_error` writes the
+rejection reason after a rewind.
+
+Since B61 that table is **refcounted**, matching `struct JsHandle`:
+`libwasm_copyObjectRef` increments and returns the same handle,
+`libwasm_removeObject` decrements and frees at zero, freed slots are reused,
+and the table is capped at 4,096 live objects. Handles `1` (staging DOM root)
+and `2` (BoardSpec scope) are protected roots — copy is identity, release is an
+error. Double free, use-after-free and over-budget allocation all throw, and
+because import errors mark the transaction `failed`, a lifetime violation can
+never commit a partial tree. Object handles still carry no properties; the
+per-receiver property registry is B63.
+
+The browser host also runs **Lodash chains** (B67). `struct Lodash` ships a
+JSON command buffer through the twelve `ldexec_*` imports; `createLibwasmHost`
+parses it and evaluates it over the same bounded value model as the kernel's
+`g6b-js` backend. There is no `eval`: when a chain carries a D-delegate
+iteratee, libwasm emits one of five fixed generated arrow functions, and the
+host recognises those by identity and calls the guest's
+`__indirect_function_table` instead — so the predicate runs in wasm. Any other
+`=(…)` payload, and any `VarType.eval` chain seed, is refused. Unlike the
+kernel lane, the browser lane *can* dispatch the iteratee, because it can
+re-enter the instance. The full object/property/event surface the bindings
+expect is [`LIBWASM-ABI.md`](LIBWASM-ABI.md).
+
+Since **B69** the generic `Object_Call`/`Object_Getter` machinery also serves
+`Element.setAttribute` / `getAttribute` / `removeAttribute` and
+`Element.classList` (`add` / `remove` / `toggle` / `contains`) on the browser
+host, using the existing B63/B64 call families and the `TestNode` `classList`
+mock in `browser-ui/compiler/compile.test.ts`. The first bounded ES6+ host
+object, `Map`, is exposed through the new `libwasm_map_*` imports and creates a
+real JS `Map` for string keys and values.
+
 A bounded **guest** lane also exists when `kernel.wasm.jit` is live
 (`WASM.md` B53): `g6b-elf` merges `g6b-wasm::jit::start_ops` into the
 payload's `WasmStart` anchor and KStart `jal WasmUi` runs it once at boot.
 The guest `__ui_dom` table mirrors the same menu text into a bounded row
 store; `DomPaint` echoes `DOM| <text>` on serial and blits the first-party
-8x8 font into `__gr_plane`. This is a one-shot boot-time render of the
-straight-line `_start` — the ES6-shaped host `BrowserSession`, reactivity,
-input, async continuations and virtio-gpu scanout remain separate lanes or
-open gates, and the guest lane never replaces them.
+8x8 font into `__gr_plane`, and `VioPaint` pushes it to the virtio-gpu
+scanout. The guest lane now also bridges input (`InpDrain` → `DomKey`/
+`DomNav` → `inp.last`/`nav.sel` rows, QEMU `sendkey`-verified) and a
+**bounded multi-slot await**: UART `Await` claims the first non-pending
+slot of `AWAIT_SLOTS`=4 at `__ui_dom+16` (`AWAIT pending N`; all four
+pending → `AWAIT-REJ full`; a resolved/rejected slot is reusable), and
+`DomAwait` — polled on the `trap_timer` tick (one slot per call, O(1)
+bounded IRQ work) and the `Ui`/`Keys` paths (`AWAIT_SLOTS` calls to
+drain) — resolves pending slots (`AWAIT-GET /bios/menu` per slot → `await.N` =
+`"resolved menu"`, dirty-marked; the tick's dirty-watermark repaint
+carries it to the scanout without a `Ui`). `Throw`/`T` rejects a pending
+slot — `Throw N` targets slot `N`, plain `Throw` the newest pending
+(`AWAIT-THROW /bios/menu` → `await.N` = `"rejected menu"`) — the thrown
+rejection, caught and visible in the DOM; nothing pending is a no-op
+(`AWAIT-THROW none`). All three are also **guest imports**: `env.await()
+-> i32` returns the claimed slot (-1 when full), `env.throw(i32)`
+rejects the given slot (-1 → newest), and `env.catch(i32) -> i32`
+returns 1 when that slot is currently rejected (0 otherwise, including
+out-of-range). They are lowered to `WasmAwait`/`WasmThrow`/`WasmCatch`
+(the same routines the UART commands `jal`), so a lowered wasm `call
+env.await`/`call env.throw`/`call env.catch` drives the queue from guest
+code — including a `local.set`/`local.get`-held slot for a *targeted*
+reject or catch (`jit::tests::start_ops_executes_await_throw_imports` and
+`start_ops_catch_reveals_a_rejected_row`, both xlens). The shipped
+`bios-ui.wasm` uses it end to end — `await fetchBios("/bios/menu")` in
+`App.svelte` emits `call env.await` at `_start`, claiming a slot at `Ui`
+that the next timer tick resolves (QEMU-verified); the browser host binds
+`env.await`/`env.throw`/`env.catch` as bounded `Set`s of pending and
+rejected slots resolved by `drain()`, and the interpreter `Host` gains
+default `await_op`/`throw_op`/`catch_op` no-ops. This is the guest-side correlate of the host async scheduler's
+semantics — pending/drain/bounded-capacity-reject/throw-reject with the
+kernel's poll integration — at a fixed 4-slot queue, not the full ES6
+Promise/event-loop model. The ES6-shaped host `BrowserSession`,
+reactivity, per-task promise graphs and a JS-visible `Promise`/`catch`
+object remain separate lanes or open gates, and the guest lane never
+replaces them. See `DISPLAY.md` "Async frames and IRQ-context paint safety" for
+the trap-frame/`VIO_BUSY` concurrency contract this rests on.
 
 Browser limits: 1 MiB module, 16 MiB observed WASM memory, 4,096 handles,
 16,384 imports, 64 KiB individual/1 MiB total decoded strings, DOM depth 64.

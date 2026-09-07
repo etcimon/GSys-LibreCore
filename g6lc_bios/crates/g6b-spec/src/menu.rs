@@ -184,6 +184,16 @@ fn menu_uncore(spec: &BoardSpec) -> Menu {
             MenuItem::row("plic", "PLIC", yn(spec.uncore.plic)),
             MenuItem::row("ddr", "DDR", yn(spec.uncore.ddr)),
             MenuItem::row("pcie", "PCIe RC", yn(spec.uncore.pcie)),
+            MenuItem::row(
+                "display_out",
+                "Display output",
+                spec.default_output().class.as_str(),
+            ),
+            MenuItem::row(
+                "display_surface",
+                "UI surface",
+                spec.default_surface().as_str(),
+            ),
             MenuItem::row("ethernet", "Ethernet MAC", yn(spec.uncore.ethernet)),
             MenuItem::row("storage", "Storage (SATA/NVMe/SD)", yn(spec.uncore.storage)),
             MenuItem::row("hdmi", "HDMI/DP", yn(spec.uncore.hdmi)),

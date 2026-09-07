@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-css"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Bounded first-party CSS parse, cascade and box model for the BIOS display"
+
+[dependencies]
+g6b-dom = { workspace = true }
+g6b-gr = { workspace = true }
+g6b-html = { workspace = true }
+g6b-ttf = { workspace = true }
+
+[lints]
+workspace = true

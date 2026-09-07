@@ -1,0 +1,8 @@
+{
+  "name": "border_box",
+  "w": 64,
+  "h": 64,
+  "tolerance": 0,
+  "golden": "fixtures/render/golden/border_box.ppm",
+  "note": "border-box: 48x32 total, 8/8/4/4 padding, 4px green border, 2px margin, yellow background"
+}

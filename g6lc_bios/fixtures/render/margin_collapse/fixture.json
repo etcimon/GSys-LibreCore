@@ -1,0 +1,8 @@
+{
+  "name": "margin_collapse",
+  "w": 64,
+  "h": 64,
+  "tolerance": 0,
+  "golden": "fixtures/render/golden/margin_collapse.ppm",
+  "note": "vertical margins do not collapse in this minimal renderer (gap = sum); this golden documents the current behaviour"
+}

@@ -46,6 +46,10 @@ invalid ABI or trapping startup fail the requested build. The current local
 runtime carry contains time/demangle/invariant/source-set repairs; those still
 need recording in the adaptation generator or a vendored carry for reprovisioning.
 
+Set `G6B_WASM_ASYNCIFY=1` to run the custom Binaryen `wasm-opt --asyncify` pass
+after LDC link (enabling the D `await`/`catch` build path). Asyncify is skipped
+when no D source uses `await` unless explicitly requested.
+
 Without `G6B_DUB_WASM=1`, `bun run build` generates MVP/JS/HTML/CSS and retains
 an optional LDC module only if source/runtime/compiler/adapter hashes and startup
 verification still match. Stale or absent optional output becomes an empty file
@@ -81,7 +85,10 @@ Use local HTTP; production authenticated TLS is not implemented by this preview.
   CSS is extracted static CSS, not CSS executed as WASM or full Svelte scoping.
 - The Rust JS continuation subset supports nonblocking await-fetch/throw/catch
   through explicit scheduler polls. This does **not** imply D Asyncify or general
-  JS Promises. Await-bearing Svelte/Asyncify requests are currently rejected.
+  JS Promises. The LDC/libwasm build path now runs Binaryen Asyncify when
+  requested or when the generated D source uses `await`; the full D
+  `await`/`catch` Promise-continuation host driver and Svelte lowering are still
+  open.
 - The S-mode ELF still carries the MVP G6UI blob and bring-up helpers. Full LDC
   WASM execution, guest JS continuation installation, RISC-V EH/JIT suspension,
   GPU scanout and an interactive QEMU WASM interface remain open.

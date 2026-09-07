@@ -41,7 +41,47 @@ use g6b_spec::BoardSpec;
 /// desc table @0x440 (8×16B), avail @0x4c0, used @0x4e0 (72B used), event
 /// buffers @0x530 (8×8B `virtio_input_event`), used-idx shadow @0x570,
 /// key-queue head/tail @0x574/0x578, key codes @0x580 (16×4B).
-pub const VIO_BSS: u64 = 0x600;
+pub const VIO_BSS: u64 = 0x680;
+
+/// `DispSel` result block in `__vio` — the *runtime* answer to "which output
+/// won and what feeds it". Written once at boot by `DispSel`, read by the paint
+/// path and dumped by the UART `Disp` command. Everything before `0x600` is the
+/// virtio/input/G6FB state; this block is appended so those offsets are stable.
+pub const DISP_SEL_OFF: i32 = 0x600;
+/// Resolved [`g6b_spec::OutputClass`] code (0 none, 1 virtio-gpu, 2
+/// uncore-scanout, 3 pcie-linear-fb).
+pub const DISP_SEL_CLASS: i32 = DISP_SEL_OFF;
+/// Index into the gen-time `proxy_outputs` table.
+pub const DISP_SEL_IDX: i32 = DISP_SEL_OFF + 0x04;
+/// Resolved [`g6b_spec::Surface`] code (0 vga, 1 gpu).
+pub const DISP_SEL_SURFACE: i32 = DISP_SEL_OFF + 0x08;
+pub const DISP_SEL_W: i32 = DISP_SEL_OFF + 0x0c;
+pub const DISP_SEL_H: i32 = DISP_SEL_OFF + 0x10;
+pub const DISP_SEL_STRIDE: i32 = DISP_SEL_OFF + 0x14;
+/// Framebuffer the winning output scans out of, low/high 32.
+pub const DISP_SEL_FB_LO: i32 = DISP_SEL_OFF + 0x18;
+pub const DISP_SEL_FB_HI: i32 = DISP_SEL_OFF + 0x1c;
+/// Hot-plug state: `0` unknown (contract rev 1 has no HPD register — see
+/// `architecture/uncore/hdmi-display.md`), `1` connected, `2` disconnected.
+pub const DISP_SEL_HPD: i32 = DISP_SEL_OFF + 0x20;
+/// `PciProbe` result: BAR0 of a class-0x03 controller with a usable linear
+/// framebuffer, or `0` when none was accepted.
+pub const DISP_PCI_FB: i32 = DISP_SEL_OFF + 0x24;
+/// `vendor << 16 | device` of the accepted controller, for diagnostics.
+pub const DISP_PCI_ID: i32 = DISP_SEL_OFF + 0x28;
+
+/// HPD state codes.
+pub const HPD_UNKNOWN: i64 = 0;
+pub const HPD_CONNECTED: i64 = 1;
+pub const HPD_ABSENT: i64 = 2;
+/// Contract revision that adds `HPD`/`EDID_*`. Revision 1 boards report
+/// `HPD_UNKNOWN` and are still accepted on `MAGIC` alone.
+pub const DISP_REV_HPD: u32 = 2;
+/// Revision-2 register offsets (`architecture/uncore/hdmi-display.md`).
+pub const DISP_REG_REV: i32 = 0x04;
+pub const DISP_REG_HPD: i32 = 0x2c;
+pub const DISP_REG_EDID_W: i32 = 0x30;
+pub const DISP_REG_EDID_H: i32 = 0x34;
 pub const VIO_AVAIL_OFF: i32 = 0x80;
 pub const VIO_USED_OFF: i32 = 0xc0;
 pub const VIO_REQ_OFF: i32 = 0x120;
@@ -96,6 +136,12 @@ pub const NAV_OPEN_OFF: i32 = 0x5d8;
 /// this must be a dedicated buffer — not the `INP_KEYTXT` scratch `DomKey`
 /// rewrites on every key.
 pub const NAV_TEXT_OFF: i32 = 0x5e0;
+/// `VIO_BUSY` — ctrlq re-entrancy guard: `VioCmd` sets it for the length of
+/// a transaction and clears on every exit; `VioPaint`/`trap_timer` skip the
+/// repaint while set so a trap-time paint can never preempt a boot-time
+/// `VioCmd` mid-transaction and corrupt the shared rings (the trap frame
+/// saves registers, but the descriptor chain is shared state, not regs).
+pub const VIO_BUSY_OFF: i32 = 0x5f0;
 /// Linux `EV_KEY` codes the menu navigator consumes (virtio-input carries
 /// the kernel's `KEY_*` codes verbatim — QEMU `sendkey down`/`ret`).
 pub const VIO_KEY_ESC: i64 = 1;
@@ -483,6 +529,400 @@ fn sw_i(ops: &mut Vec<Op>, rs: u32, off: i32, v: i64) {
     ops.push(sw(T3, rs, off));
 }
 
+/// PCI config-space offsets used by the display scan.
+pub const PCI_CFG_ID: i32 = 0x00;
+pub const PCI_CFG_CLASS: i32 = 0x08;
+pub const PCI_CFG_BAR0: i32 = 0x10;
+/// Base class 0x03 = display controller.
+pub const PCI_CLASS_DISPLAY: i64 = 0x03;
+/// Devices probed on bus 0, function 0 only. Bounded, and enough for the
+/// single-bus topologies this BIOS supports.
+pub const PCI_MAX_DEV: i64 = 32;
+/// ECAM stride per device on bus 0 function 0 (`dev << 15`).
+pub const PCI_DEV_STRIDE: i64 = 0x8000;
+
+/// `PciProbe` — read-only PCIe display-controller scan.
+///
+/// Walks bus 0, function 0, devices `0..PCI_MAX_DEV` in the declared ECAM
+/// window looking for base class `0x03`, then accepts BAR0 **only** if it is a
+/// memory BAR (bit0 clear) whose address is nonzero and inside the declared
+/// `pcie.mmio` window. The accepted address lands in `DISP_PCI_FB` and
+/// `vendor<<16|device` in `DISP_PCI_ID`; otherwise `DISP_PCI_FB` stays 0 and
+/// the mux falls to the next rung.
+///
+/// What this deliberately does **not** do:
+/// - assign or size BARs (that is resource allocation, which needs the host
+///   bridge's window arbiter — only firmware-assigned BARs are honoured);
+/// - touch AMD AtomBIOS/DCN or NVIDIA GSP devinit, so an adapter that has not
+///   already been mode-set by something else is *demoted, not driven*;
+/// - probe buses behind a bridge.
+///
+/// Prints `PCI-GPU <vendor:device hex>` on acceptance, `PCI-GPU-DEMOTED` when a
+/// display controller was found without a usable linear BAR, `PCI-GPU-NONE`
+/// when none was found at all. Leaf, t-regs only.
+pub fn pci_probe_node(spec: &BoardSpec) -> Node {
+    let ecam = spec.pcie_ecam().unwrap_or(0) as i64;
+    let (mmio, len) = spec.pcie_mmio_window().unwrap_or((0, 0));
+    let (lo, hi) = (mmio as i64, mmio.saturating_add(len) as i64);
+    let mut ops = vec![
+        Op::Comment(format!(
+            "PciProbe — ECAM {ecam:#x} bus0 fn0 dev0..{PCI_MAX_DEV}, class 0x03, \
+             BAR0 must land in {lo:#x}..{hi:#x} (read-only; no modeset)"
+        )),
+        Op::Glob("PciProbe".into()),
+        Op::Label("PciProbe".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        // Fail-closed default: no framebuffer accepted.
+        sw(X0, T5, DISP_PCI_FB),
+        sw(X0, T5, DISP_PCI_ID),
+        Op::Li { rd: T1, imm: ecam },
+        Op::Li {
+            rd: T2,
+            imm: PCI_MAX_DEV,
+        },
+        // t4 tracks "saw a display controller but could not use it".
+        Op::Li { rd: T4, imm: 0 },
+        Op::Label("pci_dev".into()),
+        // Vendor/device: 0xffffffff means no device in this slot.
+        lw(T0, T1, PCI_CFG_ID),
+        Op::Li { rd: T3, imm: -1 },
+        Op::Beq {
+            rs1: T0,
+            rs2: T3,
+            to: "pci_next".into(),
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: X0,
+            to: "pci_next".into(),
+        },
+        // Base class is the top byte of the class word.
+        lw(T3, T1, PCI_CFG_CLASS),
+        Op::Srli {
+            rd: T3,
+            rs: T3,
+            shamt: 24,
+        },
+        Op::Andi {
+            rd: T3,
+            rs: T3,
+            imm: 0xff,
+        },
+        Op::Li {
+            rd: A1,
+            imm: PCI_CLASS_DISPLAY,
+        },
+        Op::Bne {
+            rs1: T3,
+            rs2: A1,
+            to: "pci_next".into(),
+        },
+        // A display controller exists; remember that even if its BAR is
+        // unusable, so the diagnostic can say "demoted" rather than "none".
+        Op::Li { rd: T4, imm: 1 },
+        Op::Addi {
+            rd: A3,
+            rs: T0,
+            imm: 0,
+        },
+        // BAR0: bit0 set => I/O space, which is not a framebuffer.
+        lw(T3, T1, PCI_CFG_BAR0),
+        Op::Andi {
+            rd: A1,
+            rs: T3,
+            imm: 1,
+        },
+        Op::Bne {
+            rs1: A1,
+            rs2: X0,
+            to: "pci_next".into(),
+        },
+        // Mask the memory-BAR type/prefetch bits (low 4) to get the address.
+        Op::Andi {
+            rd: T3,
+            rs: T3,
+            imm: -16,
+        },
+        Op::Beq {
+            rs1: T3,
+            rs2: X0,
+            to: "pci_next".into(),
+        },
+    ];
+    // Window check: refuse a BAR firmware left outside the declared window.
+    // Unsigned compare is synthesised from the two bounds with `sltu`-free
+    // arithmetic: (bar - lo) must be < (hi - lo).
+    ops.extend([
+        Op::Li { rd: A1, imm: lo },
+        Op::Sub {
+            rd: A2,
+            rs1: T3,
+            rs2: A1,
+        },
+        Op::Li {
+            rd: A1,
+            imm: hi.saturating_sub(lo),
+        },
+        Op::Sltu {
+            rd: A2,
+            rs1: A2,
+            rs2: A1,
+        },
+        Op::Beq {
+            rs1: A2,
+            rs2: X0,
+            to: "pci_next".into(),
+        },
+        // Accepted.
+        sw(T3, T5, DISP_PCI_FB),
+        sw(A3, T5, DISP_PCI_ID),
+    ]);
+    putc_str(&mut ops, "PCI-GPU\n");
+    ops.push(ret());
+    ops.extend([
+        Op::Label("pci_next".into()),
+        Op::Li {
+            rd: A1,
+            imm: PCI_DEV_STRIDE,
+        },
+        Op::Add {
+            rd: T1,
+            rs1: T1,
+            rs2: A1,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "pci_dev".into(),
+        },
+        // Exhausted: distinguish "found one but unusable" from "found none".
+        Op::Beq {
+            rs1: T4,
+            rs2: X0,
+            to: "pci_none".into(),
+        },
+    ]);
+    putc_str(&mut ops, "PCI-GPU-DEMOTED\n");
+    ops.push(ret());
+    ops.push(Op::Label("pci_none".into()));
+    putc_str(&mut ops, "PCI-GPU-NONE\n");
+    ops.push(ret());
+    Node {
+        purpose: Purpose::PciScan,
+        ops,
+    }
+}
+
+/// `DispSel` — the runtime display-output mux.
+///
+/// Walks the candidate ladder from `BoardSpec::display_outputs()` **highest
+/// priority first** and latches the first rung that is actually present into
+/// the `__disp` block (`DISP_SEL_*` in `__vio`). The candidate set and every
+/// geometry constant are gen-time; only *presence* is a boot-time fact, which
+/// is exactly what needs resolving at runtime:
+///
+/// | rung | presence test |
+/// |---|---|
+/// | `pcie-linear-fb` | `DISP_PCI_FB != 0` — `PciProbe` accepted a linear BAR |
+/// | `uncore-scanout` | `MAGIC == 'G6DS'` at the declared window |
+/// | `virtio-gpu` | `VIO_DEV_OFF != 0` — `VioProbe` bound a DeviceID-16 slot |
+/// | `none` | always taken last |
+///
+/// The surface latched with the winner is that output's default, so the low-res
+/// plane is never upscaled onto a GPU-class output unless something later
+/// overrides it. On the uncore rung, `REV >= 2` reads the `HPD` register;
+/// revision 1 has none, so `HPD_UNKNOWN` is recorded and the engine is still
+/// accepted on `MAGIC` alone — do not read that as hot-plug detection.
+///
+/// Prints `DISP-SEL <class><surface>` as two hex digits (the shared `hexdig`
+/// table). Leaf, t-regs only.
+pub fn disp_sel_node(spec: &BoardSpec) -> Node {
+    let outs = spec.display_outputs();
+    // An explicit `kernel.proxy.surface` overrides every rung's class default,
+    // exactly as `BoardSpec::default_surface()` does on the host — otherwise
+    // the guest and the host would disagree about which surface is live.
+    let forced = g6b_spec::Surface::parse(&spec.kernel.proxy.surface);
+    let mut ops = vec![
+        Op::Comment(format!(
+            "DispSel — resolve {} candidate output(s) at boot, highest priority first",
+            outs.len()
+        )),
+        Op::Glob("DispSel".into()),
+        Op::Label("DispSel".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+    ];
+    // Each rung stores its constants then jumps to the shared report tail.
+    for (idx, o) in outs.iter().enumerate() {
+        let next = format!("ds_try{}", idx + 1);
+        ops.push(Op::Comment(format!(
+            "  rung {} {} pri={} {}x{} surface={}",
+            o.id,
+            o.class.as_str(),
+            o.class.priority(),
+            o.w,
+            o.h,
+            o.surface.as_str()
+        )));
+        match o.class {
+            g6b_spec::OutputClass::PcieLinearFb => {
+                ops.extend([
+                    lw(T0, T5, DISP_PCI_FB),
+                    Op::Beq {
+                        rs1: T0,
+                        rs2: X0,
+                        to: next.clone(),
+                    },
+                    sw(T0, T5, DISP_SEL_FB_LO),
+                ]);
+                sw_i(&mut ops, T5, DISP_SEL_HPD, HPD_CONNECTED);
+            }
+            g6b_spec::OutputClass::UncoreScanout => {
+                let base = o.base.unwrap_or(0) as i64;
+                ops.extend([
+                    Op::Li { rd: T1, imm: base },
+                    lw(T0, T1, 0),
+                    Op::Li {
+                        rd: T2,
+                        imm: i64::from(DISP_MAGIC),
+                    },
+                    Op::Bne {
+                        rs1: T0,
+                        rs2: T2,
+                        to: next.clone(),
+                    },
+                    // Contract-revision gate. Only the revision that actually
+                    // defines `HPD` is read; revision 1 has no such register
+                    // and must report unknown rather than reading a reserved
+                    // offset. A later revision has to opt in here explicitly —
+                    // there is no `blt` in this IR and guessing forward
+                    // compatibility on a register map is how you read garbage.
+                    lw(T0, T1, DISP_REG_REV),
+                    Op::Li {
+                        rd: T2,
+                        imm: i64::from(DISP_REV_HPD),
+                    },
+                    Op::Bne {
+                        rs1: T0,
+                        rs2: T2,
+                        to: format!("ds_norev{idx}"),
+                    },
+                    // HPD bit0: set = sink connected. Map 1 -> HPD_CONNECTED,
+                    // 0 -> HPD_ABSENT via `2 - bit`.
+                    lw(T0, T1, DISP_REG_HPD),
+                    Op::Andi {
+                        rd: T0,
+                        rs: T0,
+                        imm: 1,
+                    },
+                    Op::Li {
+                        rd: T2,
+                        imm: HPD_ABSENT,
+                    },
+                    Op::Sub {
+                        rd: T0,
+                        rs1: T2,
+                        rs2: T0,
+                    },
+                    Op::Jal {
+                        rd: X0,
+                        to: format!("ds_hpd{idx}"),
+                    },
+                    Op::Label(format!("ds_norev{idx}")),
+                    Op::Li {
+                        rd: T0,
+                        imm: HPD_UNKNOWN,
+                    },
+                    Op::Label(format!("ds_hpd{idx}")),
+                    sw(T0, T5, DISP_SEL_HPD),
+                ]);
+                sw_i(&mut ops, T5, DISP_SEL_FB_LO, 0);
+            }
+            g6b_spec::OutputClass::VirtioGpu => {
+                ops.extend([
+                    lw(T0, T5, VIO_DEV_OFF),
+                    Op::Beq {
+                        rs1: T0,
+                        rs2: X0,
+                        to: next.clone(),
+                    },
+                ]);
+                sw_i(&mut ops, T5, DISP_SEL_HPD, HPD_UNKNOWN);
+                sw_i(&mut ops, T5, DISP_SEL_FB_LO, 0);
+            }
+            g6b_spec::OutputClass::None => {
+                sw_i(&mut ops, T5, DISP_SEL_HPD, HPD_UNKNOWN);
+                sw_i(&mut ops, T5, DISP_SEL_FB_LO, 0);
+            }
+        }
+        sw_i(&mut ops, T5, DISP_SEL_CLASS, i64::from(o.class.code()));
+        sw_i(&mut ops, T5, DISP_SEL_IDX, idx as i64);
+        sw_i(
+            &mut ops,
+            T5,
+            DISP_SEL_SURFACE,
+            i64::from(forced.unwrap_or(o.surface).code()),
+        );
+        sw_i(&mut ops, T5, DISP_SEL_W, i64::from(o.w));
+        sw_i(&mut ops, T5, DISP_SEL_H, i64::from(o.h));
+        sw_i(&mut ops, T5, DISP_SEL_STRIDE, i64::from(o.stride()));
+        sw_i(&mut ops, T5, DISP_SEL_FB_HI, 0);
+        ops.push(jump("ds_report"));
+        ops.push(Op::Label(next));
+    }
+    // The `none` rung always stores, so the last `ds_tryN` label is only
+    // reachable if the table were empty — `display_outputs()` guarantees it is
+    // not, but fall through to the report rather than into whatever follows.
+    ops.push(Op::Label("ds_report".into()));
+    putc_str(&mut ops, "DISP-SEL ");
+    // Two hex digits: class then surface, via the shared `hexdig` table.
+    for off in [DISP_SEL_CLASS, DISP_SEL_SURFACE] {
+        ops.extend([
+            lw(T0, T5, off),
+            Op::Andi {
+                rd: T0,
+                rs: T0,
+                imm: 0xf,
+            },
+            Op::La {
+                rd: A6,
+                addr: Addr::Label("hexdig".into()),
+            },
+            Op::Add {
+                rd: A6,
+                rs1: A6,
+                rs2: T0,
+            },
+            Op::Lbu {
+                rd: A0,
+                rs: A6,
+                off: 0,
+            },
+            Op::Li {
+                rd: A7,
+                imm: SBI_PUTCHAR,
+            },
+            Op::Ecall,
+        ]);
+    }
+    putc_str(&mut ops, "\n");
+    ops.push(ret());
+    Node {
+        purpose: Purpose::DisplayMux,
+        ops,
+    }
+}
+
 /// Zeroed ctrl_hdr with `type` at `__vio+VIO_REQ_OFF` (t2 = req, t5 = `__vio`).
 fn req_hdr(ops: &mut Vec<Op>, ty: u32) {
     ops.extend([
@@ -557,6 +997,17 @@ pub fn cmd_node(spec: &BoardSpec) -> Node {
             rd: T5,
             addr: Addr::VioBss,
         },
+        // Re-entrancy: a trap-context repaint (trap_timer/Ui) may land while
+        // a boot-context VioCmd sleeps on its wfi — the shared desc chain
+        // and avail idx would be corrupted. Fail closed: busy → a0=0.
+        lw(T2, T5, VIO_BUSY_OFF),
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "vqc_busy".into(),
+        },
+        Op::Li { rd: T2, imm: 1 },
+        sw(T2, T5, VIO_BUSY_OFF),
         lw(T6, T5, VIO_DEV_OFF),
         Op::Beq {
             rs1: T6,
@@ -684,7 +1135,13 @@ pub fn cmd_node(spec: &BoardSpec) -> Node {
             rd: X0,
             to: "vqc_poll".into(),
         },
+        // Entered while another context holds the ctrlq — return a0=0
+        // without touching the flag (it belongs to the outer transaction).
+        Op::Label("vqc_busy".into()),
+        Op::Li { rd: A0, imm: 0 },
+        ret(),
         Op::Label("vqc_ret0".into()),
+        sw(X0, T5, VIO_BUSY_OFF),
         Op::Li {
             rd: A0,
             imm: i64::from(b'X'),
@@ -702,6 +1159,7 @@ pub fn cmd_node(spec: &BoardSpec) -> Node {
         lw(T3, T6, VIO_REG_ISR_STATUS),
         sw(T3, T6, VIO_REG_ISR_ACK),
         lw(A0, T5, VIO_RSP_OFF),
+        sw(X0, T5, VIO_BUSY_OFF),
         ret(),
     ]);
     Node {
@@ -2095,6 +2553,12 @@ pub fn scan_node(spec: &BoardSpec) -> Node {
     }
 }
 
+/// The scanout palette, for host-side checks that must agree with the guest
+/// blit rather than re-listing the values.
+pub fn vio_palette() -> [u32; 16] {
+    VIO_PAL
+}
+
 /// VGA-like 16-colour palette as X8R8G8B8 words (0x00RRGGBB) — same values
 /// as `g6b-gr::PALETTE` so the QEMU scanout matches the host PPM renders.
 const VIO_PAL: [u32; 16] = [
@@ -2140,11 +2604,95 @@ const VIO_PAL: [u32; 16] = [
 /// low_w even, each byte → two pixels. Saves t3..t6 (trap-safe); callers
 /// need no frame for it.
 pub fn expand_node(spec: &BoardSpec) -> Node {
+    expand_node_named(spec, "FbExpand", None)
+}
+
+/// `FbExpand1` — the **native-surface** blit: the same palette expansion at
+/// scale 1, centred, with no magnification.
+///
+/// This is the `Surface::Gpu` half of the split. It exists because upscaling
+/// the 640×480 ZealOS-intent plane onto a 1920×1080 output is exactly the
+/// artefact the surface split removes: on a GPU-class output the plane is
+/// placed 1:1 instead of being blown up ×2. Native-resolution *glyph*
+/// rasterization (a 32bpp `DomPaint`) is a further step and is not this
+/// routine — see `architecture/DISPLAY.md`.
+pub fn expand1_node(spec: &BoardSpec) -> Node {
+    expand_node_named(spec, "FbExpand1", Some(1))
+}
+
+/// `FbExpandSel` — surface-gated dispatcher.
+///
+/// Reads the surface `DispSel` latched and calls the matching blit, so the
+/// scanout source follows the resolved output rather than being hard-wired to
+/// the upscaled low-res plane. One dispatcher rather than one blit per output:
+/// every accelerated candidate currently shares `high_geometry()`, so a
+/// per-output jump table would have identical arms. It becomes necessary when
+/// outputs report *different* modes, which needs the EDID registers drafted in
+/// `architecture/uncore/hdmi-display.md`.
+pub fn expand_sel_node(spec: &BoardSpec) -> Node {
+    let xlen = spec.isa.xlen;
+    let mut ops = vec![
+        Op::Comment(
+            "FbExpandSel — __disp.surface: gpu → FbExpand1 (1:1), vga → FbExpand (upscale)".into(),
+        ),
+        Op::Glob("FbExpandSel".into()),
+        Op::Label("FbExpandSel".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -16,
+        },
+        st_x(xlen, RA, SP, 8),
+        Op::La {
+            rd: T0,
+            addr: Addr::VioBss,
+        },
+        lw(T1, T0, DISP_SEL_SURFACE),
+        Op::Li {
+            rd: T2,
+            imm: i64::from(g6b_spec::Surface::Gpu.code()),
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T2,
+            to: "fbs_vga".into(),
+        },
+        Op::Jal {
+            rd: RA,
+            to: "FbExpand1".into(),
+        },
+        jump("fbs_out"),
+        Op::Label("fbs_vga".into()),
+        Op::Jal {
+            rd: RA,
+            to: "FbExpand".into(),
+        },
+        Op::Label("fbs_out".into()),
+        ld_x(xlen, RA, SP, 8),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        ret(),
+    ];
+    ops.push(Op::Comment(format!(
+        "  candidates share {}x{}, so one dispatcher suffices",
+        g6b_spec_proxy(spec).2,
+        g6b_spec_proxy(spec).3
+    )));
+    Node {
+        purpose: Purpose::DisplayMux,
+        ops,
+    }
+}
+
+fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) -> Node {
     let xlen = spec.isa.xlen;
     let gp = g6b_spec_proxy(spec);
     let (low_w, low_h, hi_w, hi_h) = (gp.0, gp.1, gp.2, gp.3);
-    let s = gp.7.max(1);
-    let (sx, sy) = if gp.6 == "fill" {
+    let s = force_scale.unwrap_or(gp.7).max(1);
+    let (sx, sy) = if force_scale.is_none() && gp.6 == "fill" {
         (
             (hi_w / low_w.max(1)).clamp(1, 64),
             (hi_h / low_h.max(1)).clamp(1, 64),
@@ -2161,13 +2709,16 @@ pub fn expand_node(spec: &BoardSpec) -> Node {
     let origin = i64::from(oy.saturating_mul(hi_w).saturating_add(ox)).saturating_mul(4);
     let row_pad = i64::from(hi_w.saturating_sub(used_w)).saturating_mul(4);
     let row_bytes = i64::from(low_w / 2);
+    // Loop labels are per-copy: two blits with the same internal label names
+    // would collide in the label map and branch into each other's body.
+    let tag = label.to_ascii_lowercase();
     let mut ops = vec![
         Op::Comment(format!(
-            "FbExpand — __gr_plane {low_w}x{low_h} (4bpp) → __scan_fb \
+            "{label} — __gr_plane {low_w}x{low_h} (4bpp) → __scan_fb \
              {hi_w}x{hi_h} (X8R8G8B8) scale {sx}x{sy} +({ox},{oy}) via vio_pal"
         )),
-        Op::Glob("FbExpand".into()),
-        Op::Label("FbExpand".into()),
+        Op::Glob(label.into()),
+        Op::Label(label.into()),
         Op::Addi {
             rd: SP,
             rs: SP,
@@ -2210,12 +2761,12 @@ pub fn expand_node(spec: &BoardSpec) -> Node {
             rd: T6,
             imm: i64::from(low_h),
         },
-        Op::Label("vp_row".into()),
+        Op::Label(format!("{tag}_row")),
         Op::Li {
             rd: T2,
             imm: i64::from(sy),
         },
-        Op::Label("vp_rep".into()),
+        Op::Label(format!("{tag}_rep")),
         Op::Addi {
             rd: T3,
             rs: T0,
@@ -2225,7 +2776,7 @@ pub fn expand_node(spec: &BoardSpec) -> Node {
             rd: T4,
             imm: row_bytes,
         },
-        Op::Label("vp_byte".into()),
+        Op::Label(format!("{tag}_byte")),
         Op::Lbu {
             rd: A0,
             rs: T3,
@@ -2306,7 +2857,7 @@ pub fn expand_node(spec: &BoardSpec) -> Node {
         Op::Bne {
             rs1: T4,
             rs2: X0,
-            to: "vp_byte".into(),
+            to: format!("{tag}_byte"),
         },
     ]);
     if row_pad > 0 {
@@ -2331,7 +2882,7 @@ pub fn expand_node(spec: &BoardSpec) -> Node {
         Op::Bne {
             rs1: T2,
             rs2: X0,
-            to: "vp_rep".into(),
+            to: format!("{tag}_rep"),
         },
         Op::Li {
             rd: A2,
@@ -2350,7 +2901,7 @@ pub fn expand_node(spec: &BoardSpec) -> Node {
         Op::Bne {
             rs1: T6,
             rs2: X0,
-            to: "vp_row".into(),
+            to: format!("{tag}_row"),
         },
         ld_x(xlen, T3, SP, 0),
         ld_x(xlen, T4, SP, 8),
@@ -2362,11 +2913,14 @@ pub fn expand_node(spec: &BoardSpec) -> Node {
             imm: 32,
         },
         ret(),
-        // Inline rodata (never executed — sits after ret).
-        Op::Label("vio_pal".into()),
     ]);
-    for w32 in VIO_PAL {
-        ops.push(Op::Word(w32));
+    // Inline rodata (never executed — sits after ret). Emitted once, by the
+    // primary copy; `FbExpand1` shares the same table via its `La`.
+    if force_scale.is_none() {
+        ops.push(Op::Label("vio_pal".into()));
+        for w32 in VIO_PAL {
+            ops.push(Op::Word(w32));
+        }
     }
     Node {
         purpose: Purpose::Virtio,
@@ -2415,9 +2969,12 @@ pub fn disp_paint_node(spec: &BoardSpec) -> Node {
             rs2: T2,
             to: "dp_out".into(),
         },
+        // Surface-gated: the resolved surface decides whether the plane is
+        // upscaled or placed 1:1, so a GPU-class output never gets the
+        // magnified low-res picture by default.
         Op::Jal {
             rd: RA,
-            to: "FbExpand".into(),
+            to: "FbExpandSel".into(),
         },
         Op::Li { rd: T0, imm: base },
         Op::La {
@@ -2521,9 +3078,20 @@ pub fn paint_node(spec: &BoardSpec) -> Node {
             rs2: X0,
             to: "vp_out".into(),
         },
+        // Re-entrancy: a trap-context paint (trap_timer tick / Ui) may land
+        // while a boot-context VioCmd sleeps on its wfi — the shared ctrlq
+        // can't interleave, so skip the frame (the in-flight transaction's
+        // own flush covers it).
+        lw(T6, T5, VIO_BUSY_OFF),
+        Op::Bne {
+            rs1: T6,
+            rs2: X0,
+            to: "vp_out".into(),
+        },
+        // Surface-gated (see DispPaint): upscale only on the VGA surface.
         Op::Jal {
             rd: RA,
-            to: "FbExpand".into(),
+            to: "FbExpandSel".into(),
         },
     ];
     // TRANSFER_TO_HOST_2D — rect {0,0,hi_w,hi_h}, backing offset 0, res 1.

@@ -5,7 +5,7 @@
 
 #![allow(missing_docs)]
 
-use g6b_spec::{BoardSpec, ProxyAccel};
+use g6b_spec::{BoardSpec, DisplayOutput, ProxyAccel, Surface};
 
 use crate::Frame;
 
@@ -24,6 +24,12 @@ pub struct Proxy {
     pub scale_mode: String,
     /// Optional RVV / AI-island scale path (`off` unless BoardSpec asks).
     pub accel: ProxyAccel,
+    /// Candidate scanout outputs, highest priority first.
+    pub outputs: Vec<DisplayOutput>,
+    /// Index into `outputs` of the output the proxy is driving.
+    pub active: usize,
+    /// Which UI surface feeds the scanout.
+    pub surface: Surface,
 }
 
 impl Proxy {
@@ -55,7 +61,49 @@ impl Proxy {
                 p.scale_mode.clone()
             },
             accel: spec.proxy_accel(),
+            outputs: spec.display_outputs(),
+            active: 0,
+            surface: spec.default_surface(),
         }
+    }
+
+    /// The output currently being driven.
+    pub fn output(&self) -> &DisplayOutput {
+        self.outputs
+            .get(self.active)
+            .unwrap_or_else(|| &self.outputs[0])
+    }
+
+    /// Select an output by id. Fails closed on an unknown id rather than
+    /// silently keeping the previous one.
+    pub fn select_output(&mut self, id: &str) -> Result<(), String> {
+        let idx = self
+            .outputs
+            .iter()
+            .position(|o| o.id == id)
+            .ok_or_else(|| format!("unknown display output {id}"))?;
+        self.active = idx;
+        self.surface = self.outputs[idx].surface;
+        Ok(())
+    }
+
+    /// Flip between the low-res VGA surface and the native GPU surface.
+    /// Refused when no accelerated output exists — there is nothing to flip to.
+    pub fn set_surface(&mut self, surface: Surface) -> Result<(), String> {
+        if surface == Surface::Gpu && !self.output().class.is_accelerated() {
+            return Err(format!(
+                "output {} is {} — the gpu surface needs an accelerated output",
+                self.output().id,
+                self.output().class.as_str()
+            ));
+        }
+        self.surface = surface;
+        Ok(())
+    }
+
+    pub fn toggle_surface(&mut self) -> Result<Surface, String> {
+        self.set_surface(self.surface.toggled())?;
+        Ok(self.surface)
     }
 
     fn fit_scale(&self) -> u32 {
@@ -94,6 +142,49 @@ impl Proxy {
             self.scale_mode,
             self.accel.as_str()
         )
+    }
+
+    /// Marker naming the resolved output and surface — the display-output
+    /// counterpart of `init_line`. Emitted by the boot log and mirrored by
+    /// the guest `DispSel` mux.
+    pub fn select_line(&self) -> String {
+        let o = self.output();
+        format!(
+            "DISP-SEL {} {} {} {}x{} outputs={}",
+            o.id,
+            o.class.as_str(),
+            self.surface.as_str(),
+            o.w,
+            o.h,
+            self.outputs.len()
+        )
+    }
+
+    /// Native-resolution scanout of an already-rendered high-DPI canvas.
+    ///
+    /// This is the `Surface::Gpu` path: the canvas is expected to be rendered
+    /// **at the output's own geometry**, so nothing is scaled, letterboxed, or
+    /// overlaid — that is the whole point of splitting the surfaces. A canvas
+    /// whose size disagrees with the output is refused rather than stretched,
+    /// because silently upscaling here would reintroduce exactly the low-res
+    /// artefact the split removes.
+    pub fn to_ppm_gpu(&self, canvas: &crate::canvas::Canvas) -> Result<Vec<u8>, String> {
+        let o = self.output();
+        if !o.class.is_accelerated() {
+            return Err(format!(
+                "output {} is {} — no native surface to scan out",
+                o.id,
+                o.class.as_str()
+            ));
+        }
+        if canvas.w != o.w || canvas.h != o.h {
+            return Err(format!(
+                "gpu surface canvas is {}x{} but output {} is {}x{}; \
+                 render at the output geometry instead of scaling",
+                canvas.w, canvas.h, o.id, o.w, o.h
+            ));
+        }
+        Ok(canvas.to_ppm())
     }
 
     /// High-res PPM: nearest-neighbour `fit` (letterbox), `fill` (stretch), or `dpi`.
@@ -181,7 +272,14 @@ fn sample(
     }
 }
 
+/// Status-strip height. Zero on the native GPU surface: there the status is a
+/// real DOM node rendered at native resolution, so overlaying a synthetic
+/// low-res strip on top of it would be the same artefact the surface split
+/// exists to remove.
 fn bar_h(p: &Proxy) -> u32 {
+    if p.surface == Surface::Gpu {
+        return 0;
+    }
     ((p.dpi / 6).max(16)).min(p.high_h / 8)
 }
 
@@ -260,5 +358,86 @@ mod tests {
         let b = Proxy::from_spec(&off).to_ppm(&f, "UI-BOOT");
         assert_eq!(a, b);
         assert!(Proxy::from_spec(&spec).init_line().contains("accel=rvv"));
+    }
+
+    fn virtio_spec() -> BoardSpec {
+        BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+            "kernel":{"gr":{"enable":true,"w":640,"h":480,"backend":"virtio-gpu"},
+                      "proxy":{"enable":true,"link":"virtio-gpu","dpi":192,
+                               "high_w":1920,"high_h":1080}}}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn accelerated_output_defaults_to_the_gpu_surface() {
+        let spec = virtio_spec();
+        let p = Proxy::from_spec(&spec);
+        assert_eq!(p.surface, Surface::Gpu);
+        assert_eq!(p.output().id, "vio0");
+        assert_eq!(p.output().class.as_str(), "virtio-gpu");
+        assert!(p
+            .select_line()
+            .contains("DISP-SEL vio0 virtio-gpu gpu 1920x1080"));
+    }
+
+    #[test]
+    fn no_accelerated_output_stays_on_the_vga_surface() {
+        // Gr plane only, no proxy and no scanout transport.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+            "kernel":{"gr":{"enable":true,"w":640,"h":480,"backend":"uart"}}}"#,
+        )
+        .unwrap();
+        let p = Proxy::from_spec(&spec);
+        assert_eq!(p.surface, Surface::Vga);
+        assert_eq!(p.output().class.as_str(), "none");
+        assert!(!spec.surface_toggle());
+        // The gpu surface is refused, not silently accepted.
+        let mut p = p;
+        assert!(p.set_surface(Surface::Gpu).is_err());
+        assert!(p.toggle_surface().is_err());
+    }
+
+    #[test]
+    fn gpu_surface_suppresses_the_low_res_status_strip() {
+        let spec = virtio_spec();
+        let mut f = Frame::from_spec(&spec);
+        f.paint_lines(&["G6LC-BIOS".into()]);
+        let gpu = Proxy::from_spec(&spec);
+        assert_eq!(bar_h(&gpu), 0, "no synthetic strip over a native surface");
+        let mut vga = gpu.clone();
+        vga.set_surface(Surface::Vga).unwrap();
+        assert!(bar_h(&vga) > 0, "the vga surface keeps its strip");
+        // The strip is the only difference, so the two frames must differ.
+        assert_ne!(
+            gpu.to_ppm(&f, "DOM status=UI-BOOT"),
+            vga.to_ppm(&f, "DOM status=UI-BOOT")
+        );
+    }
+
+    #[test]
+    fn gpu_surface_refuses_a_canvas_that_is_not_native_geometry() {
+        let spec = virtio_spec();
+        let p = Proxy::from_spec(&spec);
+        // A low-res canvas must be refused, never upscaled — that upscale is
+        // exactly the artefact the surface split removes.
+        let low = crate::canvas::Canvas::white(640, 480);
+        let err = p.to_ppm_gpu(&low).unwrap_err();
+        assert!(err.contains("640x480"), "{err}");
+        assert!(err.contains("1920x1080"), "{err}");
+        let native = crate::canvas::Canvas::white(1920, 1080);
+        let ppm = p.to_ppm_gpu(&native).unwrap();
+        assert!(ppm.starts_with(b"P6\n1920 1080\n255\n"));
+    }
+
+    #[test]
+    fn select_output_fails_closed_on_an_unknown_id() {
+        let spec = virtio_spec();
+        let mut p = Proxy::from_spec(&spec);
+        assert!(p.select_output("nope").is_err());
+        p.select_output("vga0").unwrap();
+        assert_eq!(p.surface, Surface::Vga, "vga0 brings the vga surface");
     }
 }

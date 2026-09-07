@@ -7,13 +7,15 @@
 
 #![allow(missing_docs)]
 
-use g6b_dom::Node;
+use g6b_dom::{Event, EventHost, EventInit, Node};
 use g6b_holyc::{eval_src, Program, ReplResult};
 use g6b_html::{parse, script_sources, to_uart_lines};
 use g6b_http::Router;
+use g6b_js::JsValue;
 use g6b_js::Op;
 use g6b_spec::BoardSpec;
-use g6b_wasm::Host;
+use g6b_wasm::{Host, Ldexec, LdexecInit, LibwasmValue, ObjectKind, ObjectTable};
+use std::collections::BTreeMap;
 
 pub mod task_services;
 pub mod tasks;
@@ -40,9 +42,154 @@ struct KernelHost<'a> {
     router: &'a Router,
     spec: &'a BoardSpec,
     diagnostics: Vec<String>,
+    handles: Vec<Node>,
+    pending_slot: Option<i32>,
+    objects: ObjectTable<LibwasmValue>,
+    /// Event listeners registered by the libwasm `_start` call and collected
+    /// after `run_start` returns so `BrowserSession` can own them.
+    pending_event_listeners: Vec<(String, String, u64, bool)>,
+    pending_event_removals: Vec<u64>,
+    last_await_failed: bool,
+    last_await_error: String,
+    last_await_value: String,
+}
+
+impl KernelHost<'_> {
+    fn node(&self, h: i32) -> Result<&Node, String> {
+        match h {
+            1 => Ok(self.dom),
+            h if h >= 2 => self
+                .handles
+                .get((h - 2) as usize)
+                .ok_or_else(|| format!("invalid dom handle {h}")),
+            _ => Err(format!("invalid dom handle {h}")),
+        }
+    }
+
+    fn node_mut(&mut self, h: i32) -> Result<&mut Node, String> {
+        match h {
+            1 => Ok(self.dom),
+            h if h >= 2 => self
+                .handles
+                .get_mut((h - 2) as usize)
+                .ok_or_else(|| format!("invalid dom handle {h}")),
+            _ => Err(format!("invalid dom handle {h}")),
+        }
+    }
+
+    fn get_object(&self, h: i32) -> Result<&LibwasmValue, String> {
+        self.objects.get(h)
+    }
+
+    fn record_await(&mut self, h: i32) -> Result<(), String> {
+        let s = g6b_wasm::string_of(self.get_object(h)?);
+        let failed = matches!(self.get_object(h)?, LibwasmValue::Error(_));
+        self.record_await_from_string(s, failed);
+        Ok(())
+    }
+
+    fn libwasm_value_to_js(value: &LibwasmValue, handle: i32) -> JsValue {
+        match value {
+            LibwasmValue::Object { .. } => JsValue::Handle(handle),
+            LibwasmValue::String(s) | LibwasmValue::Error(s) => JsValue::Str(s.clone()),
+            LibwasmValue::Bool(b) => JsValue::Bool(*b),
+            LibwasmValue::I8(v) => JsValue::Num(f64::from(*v)),
+            LibwasmValue::U8(v) => JsValue::Num(f64::from(*v)),
+            LibwasmValue::I16(v) => JsValue::Num(f64::from(*v)),
+            LibwasmValue::U16(v) => JsValue::Num(f64::from(*v)),
+            LibwasmValue::I32(v) => JsValue::Num(f64::from(*v)),
+            LibwasmValue::U32(v) => JsValue::Num(f64::from(*v)),
+            LibwasmValue::I64(v) => JsValue::Num(*v as f64),
+            LibwasmValue::U64(v) => JsValue::Num(*v as f64),
+            LibwasmValue::F32(v) => JsValue::Num(f64::from(*v)),
+            LibwasmValue::F64(v) => JsValue::Num(*v),
+            LibwasmValue::I32Vec(items) => JsValue::Str(
+                items
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            LibwasmValue::U32Vec(items) => JsValue::Str(
+                items
+                    .iter()
+                    .map(|v| v.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+            LibwasmValue::None => JsValue::Null,
+        }
+    }
+
+    fn libwasm_value_from_js(value: &JsValue) -> LibwasmValue {
+        match value {
+            JsValue::Undefined | JsValue::Null => LibwasmValue::empty(ObjectKind::Empty),
+            JsValue::Bool(b) => LibwasmValue::Bool(*b),
+            JsValue::Num(n) if n.is_nan() || n.is_infinite() => LibwasmValue::F64(*n),
+            JsValue::Num(n) if n.fract() == 0.0 && n.abs() <= i64::MAX as f64 => {
+                LibwasmValue::I64(*n as i64)
+            }
+            JsValue::Num(n) => LibwasmValue::F64(*n),
+            JsValue::Str(s) => LibwasmValue::String(s.clone()),
+            other => LibwasmValue::String(other.to_js_string()),
+        }
+    }
+
+    fn intern_value(&mut self, value: LibwasmValue) -> Result<i32, String> {
+        self.objects.add(value)
+    }
+
+    /// Run one Lodash chain through the first-party JS backend (`g6b-js`).
+    ///
+    /// The kernel host cannot re-enter the wasm instance to run a D iteratee —
+    /// that is the B66 re-entrancy seam — so a chain carrying a callback fails
+    /// closed here with a precise diagnostic rather than silently dropping the
+    /// predicate and returning a wrong answer.
+    fn run_lodash(&mut self, call: Ldexec<'_>) -> Result<JsValue, String> {
+        let init = match &call.init {
+            LdexecInit::Handle(0) => JsValue::Null,
+            LdexecInit::Handle(h) => match self.get_object(*h) {
+                Ok(v) => Self::libwasm_value_to_js(v, *h),
+                Err(e) => return Err(e),
+            },
+            // `VarType.eval` means "evaluate this JS to seed the chain".
+            // There is no host evaluator; BoardSpec scope lookup is B63.
+            LdexecInit::Str { text, eval: true } => {
+                return Err(format!(
+                    "WASM lodash refuses an eval seed {text:?}: no host JS evaluator"
+                ))
+            }
+            LdexecInit::Str { text, eval: false } => JsValue::Str(text.clone()),
+            LdexecInit::Long(v) => JsValue::Num(*v as f64),
+        };
+        let commands = g6b_js::lodash_parse(call.commands).map_err(|e| e.to_string())?;
+        let value = g6b_js::lodash_execute(init, &commands, None).map_err(|e| e.to_string())?;
+        self.diagnostics
+            .push(format!("WASM-LODASH {} steps", commands.len()));
+        Ok(value)
+    }
+
+    fn record_await_from_string(&mut self, s: String, failed: bool) {
+        if failed {
+            self.last_await_failed = true;
+            self.last_await_error = s;
+            self.last_await_value.clear();
+        } else {
+            self.last_await_failed = false;
+            self.last_await_error.clear();
+            self.last_await_value = s;
+        }
+    }
 }
 
 impl Host for KernelHost<'_> {
+    fn libwasm_objects(&self) -> Option<&ObjectTable<LibwasmValue>> {
+        Some(&self.objects)
+    }
+    fn libwasm_objects_mut(&mut self) -> Option<&mut ObjectTable<LibwasmValue>> {
+        Some(&mut self.objects)
+    }
+
     fn set_inner_text(&mut self, id: &str, val: &str) -> Result<(), String> {
         if let Some(n) = self.dom.get_element_by_id(id) {
             if n.get_attribute("data-preserve") != Some("true") {
@@ -71,7 +218,7 @@ impl Host for KernelHost<'_> {
         }
     }
 
-    fn fetch(&mut self, url: &str) -> Result<String, String> {
+    fn fetch(&mut self, url: &str) -> Result<i32, String> {
         let path = url.split(['?', '#']).next().unwrap_or(url);
         let path = match path {
             "/bios/cpu" => "/bios/menu/cpu",
@@ -84,16 +231,148 @@ impl Host for KernelHost<'_> {
         {
             self.diagnostics
                 .push(format!("WASM-SKIP-FETCH {url}: disabled or unavailable"));
-            return Ok(String::new());
+            return Ok(0);
         }
         let resp = self.router.fetch_get(path);
         self.diagnostics
             .push(format!("WASM-FETCH {url} {}", resp.status));
         if resp.status != 200 {
-            return Err(format!("WASM fetch {url}: HTTP {}", resp.status));
+            let msg = format!("WASM fetch {url}: HTTP {}", resp.status);
+            return self.intern_value(LibwasmValue::Error(msg));
         }
         paint_response(self.dom, path, &resp.body_str())?;
-        Ok(resp.body_str())
+        self.intern_value(LibwasmValue::String(resp.body_str()))
+    }
+
+    fn create_element(&mut self, tag: &str) -> Result<i32, String> {
+        let idx = self.handles.len() as i32;
+        self.handles.push(Node::elem(tag));
+        Ok(idx + 2)
+    }
+
+    fn append_child(&mut self, parent: i32, child: i32) -> Result<(), String> {
+        let child = self.node(child)?.clone();
+        self.node_mut(parent)?.children.push(child);
+        Ok(())
+    }
+
+    fn set_property(&mut self, obj: i32, key: &str, value: &str) -> Result<(), String> {
+        let n = self.node_mut(obj)?;
+        match key {
+            "innerText" | "textContent" => n.set_inner_text(value),
+            _ => {
+                n.attributes.insert(key.into(), value.into());
+                n.dirty = true;
+            }
+        }
+        Ok(())
+    }
+
+    fn libwasm_await_void(&mut self, slot: i32) -> Result<(), String> {
+        self.diagnostics
+            .push(format!("WASM-AWAIT-VOID slot={slot}"));
+        self.pending_slot = Some(slot);
+        Ok(())
+    }
+
+    fn take_slot(&mut self) -> Option<i32> {
+        self.pending_slot.take()
+    }
+
+    fn resolve_slot(&mut self, slot: i32) -> Result<(), String> {
+        self.diagnostics
+            .push(format!("WASM-AWAIT-RESOLVED slot={slot}"));
+        self.record_await(slot)
+    }
+
+    fn holyc(&mut self, _ptr: i32, _len: i32) -> Result<i32, String> {
+        self.diagnostics.push("WASM-HOLYC".into());
+        Ok(0)
+    }
+
+    fn register_endpoint(&mut self, _a: i32, _b: i32, _c: i32, _d: i32) -> Result<i32, String> {
+        self.diagnostics.push("WASM-REGISTER-ENDPOINT".into());
+        Ok(0)
+    }
+
+    fn add_event_listener(
+        &mut self,
+        target_id: &str,
+        event_type: &str,
+        listener_id: u64,
+        capture: bool,
+    ) -> Result<(), String> {
+        self.diagnostics.push(format!(
+            "WASM-ADD-EVENT-LISTENER {target_id} {event_type} {listener_id} capture={capture}"
+        ));
+        self.pending_event_listeners.push((
+            target_id.into(),
+            event_type.into(),
+            listener_id,
+            capture,
+        ));
+        Ok(())
+    }
+
+    fn remove_event_listener(&mut self, listener_id: u64) -> Result<(), String> {
+        self.diagnostics
+            .push(format!("WASM-REMOVE-EVENT-LISTENER {listener_id}"));
+        self.pending_event_removals.push(listener_id);
+        Ok(())
+    }
+
+    fn await_failed(&self) -> i32 {
+        i32::from(self.last_await_failed)
+    }
+
+    fn await_error(&self) -> String {
+        self.last_await_error.clone()
+    }
+
+    fn await_value(&self) -> String {
+        self.last_await_value.clone()
+    }
+
+    fn note_await_fail(&mut self, handle: i32) -> Result<(), String> {
+        let s = if handle == 0 {
+            String::new()
+        } else {
+            g6b_wasm::string_of(self.get_object(handle)?)
+        };
+        self.record_await_from_string(s, true);
+        Ok(())
+    }
+
+    fn note_await_ok(&mut self, handle: i32) -> Result<(), String> {
+        let s = if handle == 0 {
+            String::new()
+        } else {
+            g6b_wasm::string_of(self.get_object(handle)?)
+        };
+        self.record_await_from_string(s, false);
+        Ok(())
+    }
+
+    fn ldexec_string(&mut self, call: Ldexec<'_>) -> Result<String, String> {
+        Ok(self.run_lodash(call)?.to_js_string())
+    }
+
+    fn ldexec_long(&mut self, call: Ldexec<'_>) -> Result<i64, String> {
+        let n = self.run_lodash(call)?.to_number();
+        Ok(if n.is_finite() { n as i64 } else { 0 })
+    }
+
+    fn ldexec_double(&mut self, call: Ldexec<'_>) -> Result<f64, String> {
+        Ok(self.run_lodash(call)?.to_number())
+    }
+
+    fn ldexec_handle(&mut self, call: Ldexec<'_>) -> Result<i32, String> {
+        let value = self.run_lodash(call)?;
+        match value {
+            JsValue::Handle(h) => Ok(h),
+            JsValue::Undefined | JsValue::Null => Ok(0),
+            _ => self.intern_value(Self::libwasm_value_from_js(&value)),
+        }
     }
 }
 
@@ -135,12 +414,78 @@ fn optional_ui_id(spec: &BoardSpec, id: &str) -> bool {
     }
 }
 
+/// A registered event listener. AOT listeners carry a `DomProgram`; libwasm
+/// listeners carry a guest function index / object handle.
+#[derive(Clone)]
+pub enum Listener {
+    Aot(Vec<Op>),
+    Wasm { function_index: u32, handle: i32 },
+}
+
+/// Host-side callback table for DOM listeners. Kept separate from `Node` so
+/// `Node` stays `Clone` and so AOT/libwasm callbacks can be owned by the
+/// `BrowserSession`.
+pub struct BrowserEventHost {
+    next_id: u64,
+    listeners: BTreeMap<u64, Listener>,
+    /// Listeners triggered during an in-progress `dispatch_event`. Processed
+    /// after propagation completes so the DOM is not borrowed twice.
+    triggered: Vec<(u64, Event)>,
+}
+
+impl Default for BrowserEventHost {
+    fn default() -> Self {
+        Self {
+            next_id: 1,
+            listeners: BTreeMap::new(),
+            triggered: Vec::new(),
+        }
+    }
+}
+
+impl BrowserEventHost {
+    pub fn register(&mut self, listener: Listener) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.listeners.insert(id, listener);
+        id
+    }
+
+    pub fn remove(&mut self, id: u64) {
+        self.listeners.remove(&id);
+    }
+
+    pub fn take_triggered(&mut self) -> Vec<(u64, Event)> {
+        std::mem::take(&mut self.triggered)
+    }
+}
+
+impl EventHost for BrowserEventHost {
+    fn invoke(&mut self, listener_id: u64, event: &mut Event) {
+        // Record for deferred execution; the concrete AOT/WASM callback runs
+        // after `dispatch_event` returns, when the DOM borrow is free.
+        self.triggered.push((listener_id, event.clone()));
+    }
+}
+
 pub struct BrowserSession {
     pub dom: Node,
     pub program: Program,
     pub diagnostics: Vec<String>,
     pub wasm_executed: bool,
     pub task_services: Option<task_services::TaskServices>,
+    pub hit_boxes: Vec<g6b_css::render::HitBox>,
+    pub event_host: BrowserEventHost,
+    /// Decoded libwasm module; kept for listener re-entry.
+    pub wasm_module: Option<g6b_wasm::Module>,
+    /// libwasm object table persisted from `_start`.
+    pub wasm_objects: Option<ObjectTable<LibwasmValue>>,
+    /// libwasm DOM handles persisted from `_start`.
+    pub wasm_handles: Option<Vec<Node>>,
+    /// Which UI surface feeds the scanout. Starts at the BoardSpec default
+    /// (which follows the highest-priority output's class) and is flipped by
+    /// the `#disp-toggle` control or `DisplaySurface` in the HolyC lane.
+    pub surface: g6b_spec::Surface,
     selected_menu: String,
     async_scripts: g6b_js::AsyncScheduler,
     spec: BoardSpec,
@@ -162,6 +507,12 @@ impl BrowserSession {
             } else {
                 None
             },
+            hit_boxes: Vec::new(),
+            event_host: BrowserEventHost::default(),
+            wasm_module: None,
+            wasm_objects: None,
+            wasm_handles: None,
+            surface: spec.default_surface(),
             selected_menu: spec.kernel.start_menu.clone(),
             async_scripts: g6b_js::AsyncScheduler::default(),
             spec: spec.clone(),
@@ -178,11 +529,33 @@ impl BrowserSession {
                 router: &session.program.router,
                 spec,
                 diagnostics: Vec::new(),
+                handles: Vec::new(),
+                pending_slot: None,
+                objects: ObjectTable::new(),
+                pending_event_listeners: Vec::new(),
+                pending_event_removals: Vec::new(),
+                last_await_failed: false,
+                last_await_error: String::new(),
+                last_await_value: String::new(),
             };
             g6b_wasm::run_start(&module, &mut host)?;
             session.wasm_executed = true;
-            session.diagnostics.extend(host.diagnostics);
+            session
+                .diagnostics
+                .extend(std::mem::take(&mut host.diagnostics));
             session.diagnostics.push("WASM-INTERPRETER _start".into());
+            let pending = std::mem::take(&mut host.pending_event_listeners);
+            let removals = std::mem::take(&mut host.pending_event_removals);
+            let objects = std::mem::take(&mut host.objects);
+            let handles = std::mem::take(&mut host.handles);
+            drop(host);
+            session.wasm_module = Some(module);
+            session.wasm_objects = Some(objects);
+            session.wasm_handles = Some(handles);
+            session.apply_pending_wasm_listeners(&pending)?;
+            for id in &removals {
+                session.remove_event_listener(*id);
+            }
             session.refresh()?;
         }
         session.select_menu(&spec.kernel.start_menu)?;
@@ -327,6 +700,53 @@ impl BrowserSession {
         Ok(())
     }
 
+    /// Flip the scanout surface through the shared `/bios/display` route.
+    ///
+    /// Fail-closed: a board with no accelerated output has no POST route, so
+    /// the router answers non-200 and the surface is left alone. On success the
+    /// status line and the toggle's `data-surface` are repainted, so the DOM,
+    /// the router and `Proxy` agree without a second source of truth.
+    pub fn toggle_surface(&mut self) -> Result<g6b_spec::Surface, String> {
+        if !self.spec.surface_toggle() {
+            return Err("no accelerated display output to toggle to".into());
+        }
+        let response = self.program.router.fetch("POST", "/bios/display");
+        if response.status != 200 {
+            return Err(format!("display toggle HTTP {}", response.status));
+        }
+        let want = self.surface.toggled();
+        self.surface = want;
+        let out = self.spec.default_output();
+        if let Some(node) = self.dom.get_element_by_id("disp-status") {
+            node.set_inner_text(&format!(
+                "{} {} {}",
+                out.class.as_str(),
+                want.as_str(),
+                out.id
+            ));
+        }
+        if let Some(node) = self.dom.get_element_by_id("disp-toggle") {
+            node.set_attribute("data-surface", want.as_str())?;
+            node.set_inner_text(if want == g6b_spec::Surface::Gpu {
+                "VGA view"
+            } else {
+                "GPU view"
+            });
+        }
+        self.diagnostics
+            .push(format!("DISP-SURFACE {}", want.as_str()));
+        Ok(want)
+    }
+
+    /// A `Proxy` reflecting this session's live surface, for the host PPM
+    /// paths. Keeps `BrowserSession` and `g6b_gr::proxy` on one decision.
+    pub fn proxy(&self) -> g6b_gr::proxy::Proxy {
+        let mut p = g6b_gr::proxy::Proxy::from_spec(&self.spec);
+        // A refused surface leaves the proxy default rather than lying.
+        let _ = p.set_surface(self.surface);
+        p
+    }
+
     pub fn select_menu(&mut self, id: &str) -> Result<(), String> {
         if !g6b_ui::MENUS.iter().any(|face| face.id == id) {
             return Err(format!("unknown menu {id}"));
@@ -359,6 +779,331 @@ impl BrowserSession {
 
     pub fn lines(&self, width: usize) -> Vec<String> {
         to_uart_lines(&self.dom, width)
+    }
+
+    /// Refresh the CSS-raster output and update the hit boxes for this session.
+    pub fn render_hit_boxes(&mut self) -> Result<(), String> {
+        let html = setup_html(&self.spec);
+        let css = extract_style(&html);
+        let w = self.spec.kernel.gr.w.max(320);
+        let h = self.spec.kernel.gr.h.max(200);
+        let out = g6b_css::render::render_ui_to_output(&html, &css, w, h)?;
+        self.hit_boxes = out.hit_boxes;
+        Ok(())
+    }
+
+    /// Register a listener on the node at `target_path` and return its id.
+    /// The `listener` closure is invoked when an event of `event_type` reaches
+    /// the node in the given phase.
+    /// Register a listener on the node whose `id` attribute is `target_id`.
+    pub fn add_event_listener_by_id(
+        &mut self,
+        target_id: &str,
+        event_type: &str,
+        capture: bool,
+        listener: Listener,
+    ) -> Result<u64, String> {
+        let path = path_to_id(&self.dom, target_id).ok_or_else(|| format!("no id={target_id}"))?;
+        self.add_event_listener(&path, event_type, capture, listener)
+    }
+
+    pub fn add_event_listener(
+        &mut self,
+        target_path: &[usize],
+        event_type: &str,
+        capture: bool,
+        listener: Listener,
+    ) -> Result<u64, String> {
+        let body = body_node(&mut self.dom).ok_or("no body node")?;
+        let mut node = body;
+        for &i in target_path {
+            if i >= node.children.len() {
+                return Err("hit box path out of range".into());
+            }
+            node = &mut node.children[i];
+        }
+        let id = self.event_host.register(listener);
+        node.add_event_listener(event_type, capture, id);
+        Ok(id)
+    }
+
+    /// Register listeners recorded by `KernelHost` during libwasm `_start`.
+    pub fn apply_pending_wasm_listeners(
+        &mut self,
+        pending: &[(String, String, u64, bool)],
+    ) -> Result<(), String> {
+        for (target_id, event_type, listener_id, capture) in pending {
+            self.add_event_listener_by_id(
+                target_id,
+                event_type,
+                *capture,
+                Listener::Wasm {
+                    function_index: *listener_id as u32,
+                    handle: 0,
+                },
+            )
+            .unwrap_or_else(|e| {
+                self.diagnostics.push(format!(
+                    "WASM-EVENT-REGISTER-FAILED {target_id} {event_type}: {e}"
+                ));
+                0
+            });
+        }
+        Ok(())
+    }
+
+    /// Remove a listener from both the host table and from any DOM node.
+    pub fn remove_event_listener(&mut self, id: u64) {
+        self.event_host.remove(id);
+        remove_listener_from_node(&mut self.dom, id);
+    }
+
+    /// Dispatch a pointer event at the first hit box containing `(x, y)`.
+    /// Returns `true` if the default action may run.
+    pub fn dispatch_pointer(
+        &mut self,
+        x: i32,
+        y: i32,
+        event_type: &str,
+        detail: &str,
+    ) -> Result<bool, String> {
+        let body = body_node(&mut self.dom).ok_or("no body node")?;
+        let hit = self
+            .hit_boxes
+            .iter()
+            .rev()
+            .find(|h| x >= h.x && x < h.x + h.w && y >= h.y && y < h.y + h.h)
+            .ok_or("no hit target")?;
+        let mut event = Event::new(
+            event_type,
+            EventInit {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                detail: detail.into(),
+            },
+        );
+        event.target = hit.id.clone();
+        let allowed = Node::dispatch_event(body, &hit.path, &mut event, &mut self.event_host);
+        self.run_triggered();
+        Ok(allowed)
+    }
+
+    /// Dispatch a keyboard event to the currently focused target. If no target
+    /// is provided, the selected menu row is used.
+    pub fn dispatch_key(
+        &mut self,
+        target_path: &[usize],
+        key: &str,
+        event_type: &str,
+    ) -> Result<bool, String> {
+        let body = body_node(&mut self.dom).ok_or("no body node")?;
+        let mut node = &mut *body;
+        for &i in target_path {
+            if i >= node.children.len() {
+                return Err("key dispatch path out of range".into());
+            }
+            node = &mut node.children[i];
+        }
+        let mut event = Event::new(
+            event_type,
+            EventInit {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                detail: key.into(),
+            },
+        );
+        event.target = node.id.clone();
+        let path: Vec<usize> = target_path.to_vec();
+        let allowed = Node::dispatch_event(body, &path, &mut event, &mut self.event_host);
+        self.run_triggered();
+        Ok(allowed)
+    }
+
+    fn run_triggered(&mut self) {
+        for (id, _event) in self.event_host.take_triggered() {
+            let _ = self.listeners_run(id, _event);
+        }
+    }
+
+    fn listeners_run(&mut self, id: u64, event: Event) -> Result<(), String> {
+        match self.event_host.listeners.get(&id).cloned() {
+            Some(Listener::Aot(ops)) => {
+                // AOT listener programs run in a follow-up pass once the DOM
+                // borrow from `dispatch_event` is released. The event detail is
+                // substituted for the literal string "{detail}" inside string
+                // payload fields so simple handlers can echo it.
+                let ops = substitute_detail(&ops, &event.detail);
+                if let Err(e) = g6b_js::run(&ops, &mut self.dom) {
+                    self.diagnostics.push(format!("EVENT-AOT-ERROR {id}: {e}"));
+                } else {
+                    self.diagnostics.push(format!("EVENT-AOT-TRIGGERED {id}"));
+                }
+            }
+            Some(Listener::Wasm {
+                function_index,
+                handle,
+            }) => {
+                // libwasm re-entry: the host calls the guest listener function
+                // with `handle` as its first argument.
+                match self.wasm_module {
+                    Some(ref mut module) => {
+                        let objects = self.wasm_objects.take().unwrap_or_default();
+                        let handles = self.wasm_handles.take().unwrap_or_default();
+                        let mut host = KernelHost {
+                            dom: &mut self.dom,
+                            router: &self.program.router,
+                            spec: &self.spec,
+                            diagnostics: Vec::new(),
+                            handles,
+                            pending_slot: None,
+                            objects,
+                            pending_event_listeners: Vec::new(),
+                            pending_event_removals: Vec::new(),
+                            last_await_failed: false,
+                            last_await_error: String::new(),
+                            last_await_value: String::new(),
+                        };
+                        // Build an event object handle and pass the original
+                        // `handle` as a second argument for libwasm delegates.
+                        let event_handle = host
+                            .objects
+                            .add(LibwasmValue::Object {
+                                kind: g6b_wasm::ObjectKind::Element,
+                                props: [
+                                    ("type".into(), LibwasmValue::String(event.event_type)),
+                                    ("detail".into(), LibwasmValue::String(event.detail)),
+                                ]
+                                .into(),
+                            })
+                            .map_err(|e| e.to_string())?;
+                        let args = if handle != 0 {
+                            vec![handle, event_handle]
+                        } else {
+                            vec![event_handle]
+                        };
+                        let fuel = g6b_wasm::DEFAULT_FUEL;
+                        match g6b_wasm::run_with_fuel_mut(
+                            module,
+                            function_index,
+                            &args,
+                            &mut host,
+                            fuel,
+                        ) {
+                            Ok(_) => self.diagnostics.push(format!("EVENT-WASM-TRIGGERED {id}")),
+                            Err(e) => self.diagnostics.push(format!("EVENT-WASM-ERROR {id}: {e}")),
+                        }
+                        self.diagnostics.extend(host.diagnostics);
+                        self.wasm_objects = Some(host.objects);
+                        self.wasm_handles = Some(host.handles);
+                    }
+                    None => {
+                        self.diagnostics.push(format!(
+                            "EVENT-WASM-NO-MODULE {id} fn={function_index} h={handle}"
+                        ));
+                    }
+                }
+            }
+            None => {}
+        }
+        Ok(())
+    }
+}
+
+fn substitute_detail(ops: &[Op], detail: &str) -> Vec<Op> {
+    let sub = |s: &str| s.replace("{detail}", detail);
+    let mutate = |m: &g6b_js::Mutation| match m.clone() {
+        g6b_js::Mutation::SetInnerText { value } => {
+            g6b_js::Mutation::SetInnerText { value: sub(&value) }
+        }
+        g6b_js::Mutation::SetAttribute { name, value } => g6b_js::Mutation::SetAttribute {
+            name,
+            value: sub(&value),
+        },
+        g6b_js::Mutation::AppendText { value } => {
+            g6b_js::Mutation::AppendText { value: sub(&value) }
+        }
+        other => other,
+    };
+    ops.iter()
+        .map(|op| match op.clone() {
+            Op::SetInnerText { id, value } => Op::SetInnerText {
+                id,
+                value: sub(&value),
+            },
+            Op::Log { value } => Op::Log { value: sub(&value) },
+            Op::HolycEval { line } => Op::HolycEval { line: sub(&line) },
+            Op::SetAttribute { id, name, value } => Op::SetAttribute {
+                id,
+                name,
+                value: sub(&value),
+            },
+            Op::AppendText { id, value } => Op::AppendText {
+                id,
+                value: sub(&value),
+            },
+            Op::QuerySelector { selector, mutation } => Op::QuerySelector {
+                selector,
+                mutation: mutate(&mutation),
+            },
+            Op::DomTransaction { program } => Op::DomTransaction { program },
+            other => other,
+        })
+        .collect()
+}
+
+fn body_node(node: &mut Node) -> Option<&mut Node> {
+    if node.name.eq_ignore_ascii_case("body") {
+        return Some(node);
+    }
+    for child in &mut node.children {
+        if let Some(n) = body_node(child) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+fn path_to_id(root: &Node, id: &str) -> Option<Vec<usize>> {
+    fn walk(node: &Node, id: &str, path: &mut Vec<usize>) -> Option<Vec<usize>> {
+        if node.id.as_deref() == Some(id) {
+            return Some(path.clone());
+        }
+        for (i, child) in node.children.iter().enumerate() {
+            path.push(i);
+            if let Some(p) = walk(child, id, path) {
+                return Some(p);
+            }
+            path.pop();
+        }
+        None
+    }
+    // Locate the <body> node and return the path from there, matching the
+    // CSS hit-box convention used by `BrowserSession`.
+    fn find_body<'a>(node: &'a Node, path: &mut Vec<usize>) -> Option<&'a Node> {
+        if node.name.eq_ignore_ascii_case("body") {
+            return Some(node);
+        }
+        for (i, child) in node.children.iter().enumerate() {
+            path.push(i);
+            if let Some(b) = find_body(child, path) {
+                return Some(b);
+            }
+            path.pop();
+        }
+        None
+    }
+    if let Some(body) = find_body(root, &mut Vec::new()) {
+        return walk(body, id, &mut Vec::new());
+    }
+    walk(root, id, &mut Vec::new())
+}
+
+fn remove_listener_from_node(node: &mut Node, id: u64) {
+    node.remove_event_listener(id);
+    for child in &mut node.children {
+        remove_listener_from_node(child, id);
     }
 }
 
@@ -432,6 +1177,20 @@ fn paint_response(dom: &mut Node, url: &str, body: &str) -> Result<(), String> {
             }
         } else if let Some(node) = dom.get_element_by_id(face.paint_id()) {
             node.set_inner_text(body);
+        }
+    } else if url == "/bios/display" {
+        // Compact summary rather than raw JSON: the status line is read by a
+        // human and by the UART/Gr lanes, and it must agree with `DISP-SEL`.
+        let v = g6b_spec::parse_json(body)?;
+        let class = v.get("class").as_str().ok_or("display missing class")?;
+        let surface = v.get("surface").as_str().ok_or("display missing surface")?;
+        let active = v.get("active").as_str().ok_or("display missing active")?;
+        if let Some(node) = dom.get_element_by_id("disp-status") {
+            node.set_inner_text(&format!("{class} {surface} {active}"));
+        }
+        if let Some(node) = dom.get_element_by_id("disp-toggle") {
+            node.set_attribute("data-surface", surface)?;
+            node.set_attribute("data-output", active)?;
         }
     } else {
         let id = match url {
@@ -822,6 +1581,37 @@ pub fn gr_ppm(spec: &BoardSpec) -> Vec<u8> {
     let dom = rendered_dom(spec);
     frame.paint_lines(&to_uart_lines(&dom, frame.cols as usize));
     frame.to_ppm()
+}
+
+/// CSS-raster PPM of the setup page. Parses the stylesheet embedded in
+/// `g6b_ui::setup_html` and renders the body with colour, background and text.
+/// This is the track-B "real UI" output from architecture/RENDER-VALIDATION.md.
+pub fn ui_ppm(spec: &BoardSpec) -> Result<Vec<u8>, String> {
+    let html = g6b_ui::setup_html(spec);
+    let css = extract_style(&html);
+    let w = spec.kernel.gr.w.max(320);
+    let h = spec.kernel.gr.h.max(200);
+    let out = g6b_css::render::render_ui_to_output(&html, &css, w, h)?;
+    Ok(out.canvas.to_ppm())
+}
+
+/// CSS-raster output of the setup page including the hit boxes for event
+/// dispatch.
+pub fn ui_ppm_output(spec: &BoardSpec) -> Result<g6b_css::render::RenderOutput, String> {
+    let html = g6b_ui::setup_html(spec);
+    let css = extract_style(&html);
+    let w = spec.kernel.gr.w.max(320);
+    let h = spec.kernel.gr.h.max(200);
+    g6b_css::render::render_ui_to_output(&html, &css, w, h)
+}
+
+fn extract_style(html: &str) -> String {
+    if let (Some(start), Some(end)) = (html.find("<style>"), html.find("</style>")) {
+        if end > start {
+            return html[start + "<style>".len()..end].to_string();
+        }
+    }
+    String::new()
 }
 
 /// PPM of an *executed* `__gr_plane` (`exec::Smoke::gr_frame` — GR16 + 4bpp
@@ -1247,6 +2037,308 @@ mod tests {
     }
 
     #[test]
+    fn browser_session_runs_aot_event_listener() {
+        let spec = desktop();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let path = path_to_id(&session.dom, "status").expect("status id");
+        let listener = Listener::Aot(vec![g6b_js::Op::SetInnerText {
+            id: "status".into(),
+            value: "AOT-EVENT-OK".into(),
+        }]);
+        session
+            .add_event_listener(&path, "click", false, listener)
+            .unwrap();
+        let allowed = session.dispatch_key(&path, "Enter", "click").unwrap();
+        assert!(allowed);
+        assert_eq!(
+            session
+                .dom
+                .get_element_by_id("status")
+                .unwrap()
+                .inner_text(),
+            "AOT-EVENT-OK"
+        );
+    }
+
+    #[test]
+    fn browser_session_pointer_dispatch_uses_css_hit_box() {
+        let spec = desktop();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        session.render_hit_boxes().unwrap();
+        eprintln!(
+            "hit boxes: {:?}",
+            session
+                .hit_boxes
+                .iter()
+                .map(|h| (&h.id, &h.name, h.path.clone()))
+                .collect::<Vec<_>>()
+        );
+        let hit = session
+            .hit_boxes
+            .iter()
+            .find(|h| h.id.as_deref() == Some("status"))
+            .expect("status hit box")
+            .clone();
+        let listener = Listener::Aot(vec![g6b_js::Op::SetInnerText {
+            id: "status".into(),
+            value: "POINTER-HIT-OK".into(),
+        }]);
+        session
+            .add_event_listener(&hit.path, "click", false, listener)
+            .unwrap();
+        let x = hit.x + hit.w / 2;
+        let y = hit.y + hit.h / 2;
+        let allowed = session.dispatch_pointer(x, y, "click", "detail").unwrap();
+        assert!(allowed);
+        assert_eq!(
+            session
+                .dom
+                .get_element_by_id("status")
+                .unwrap()
+                .inner_text(),
+            "POINTER-HIT-OK"
+        );
+    }
+
+    #[test]
+    fn browser_session_pointer_dispatch_propagates_capture_then_bubble() {
+        let spec = desktop();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        session.render_hit_boxes().unwrap();
+        let hit = session
+            .hit_boxes
+            .iter()
+            .find(|h| h.id.as_deref() == Some("status"))
+            .expect("status hit box")
+            .clone();
+        let main = session
+            .hit_boxes
+            .iter()
+            .find(|h| h.id.as_deref() == Some("bios-ui"))
+            .expect("main hit box")
+            .clone();
+
+        // Capture on main, then target, then bubble on main. The final text
+        // on the two different elements proves the three phases fired in order.
+        session
+            .add_event_listener(
+                &main.path,
+                "click",
+                true,
+                Listener::Aot(vec![g6b_js::Op::SetInnerText {
+                    id: "status".into(),
+                    value: "CAPTURE".into(),
+                }]),
+            )
+            .unwrap();
+        session
+            .add_event_listener(
+                &hit.path,
+                "click",
+                false,
+                Listener::Aot(vec![g6b_js::Op::SetInnerText {
+                    id: "status".into(),
+                    value: "TARGET".into(),
+                }]),
+            )
+            .unwrap();
+        session
+            .add_event_listener(
+                &main.path,
+                "click",
+                false,
+                Listener::Aot(vec![g6b_js::Op::SetInnerText {
+                    id: "profile".into(),
+                    value: "BUBBLE".into(),
+                }]),
+            )
+            .unwrap();
+
+        let x = hit.x + hit.w / 2;
+        let y = hit.y + hit.h / 2;
+        let allowed = session.dispatch_pointer(x, y, "click", "detail").unwrap();
+        assert!(allowed);
+        assert_eq!(
+            session
+                .dom
+                .get_element_by_id("status")
+                .unwrap()
+                .inner_text(),
+            "TARGET"
+        );
+        assert_eq!(
+            session
+                .dom
+                .get_element_by_id("profile")
+                .unwrap()
+                .inner_text(),
+            "BUBBLE"
+        );
+    }
+
+    fn gpu_spec() -> BoardSpec {
+        BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","isa":{"xlen":64,"march":"rv64imac"},
+            "kernel":{"gr":{"enable":true,"w":640,"h":480,"backend":"virtio-gpu"},
+                      "proxy":{"enable":true,"link":"virtio-gpu","dpi":192,
+                               "high_w":1920,"high_h":1080}}}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn holyc_and_browser_lanes_share_the_display_route() {
+        let spec = gpu_spec();
+        let src = g6b_ui::holyc_print_src(&spec);
+        // HolyC prints the ladder and reads the same endpoint the browser uses.
+        assert!(src.contains("DISP vio0 virtio-gpu 1920x1080"), "{src}");
+        assert!(src.contains("vio0=virtio-gpu pri=1"), "{src}");
+        assert!(src.contains("vga0=none pri=0"), "{src}");
+        assert!(src.contains("surface=gpu"), "{src}");
+        assert!(src.contains("KernelGet(\"/bios/display\")"), "{src}");
+        assert!(src.contains("DisplaySurface(\"vga\")"), "{src}");
+
+        // And the builtin actually flips through the router, fail-closed.
+        let mut prog = load_program(&spec).unwrap();
+        prog.router = g6b_http::Router::from_spec(&spec);
+        match prog.repl(r#"DisplaySurface("vga");"#).unwrap() {
+            ReplResult::Output(s) => assert!(s.contains("DISP-SURFACE vga"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(prog.repl(r#"DisplaySurface("opengl");"#).is_err());
+
+        // A board with no accelerated output has no POST route, so the same
+        // call reports a refusal instead of claiming success.
+        let plain = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","isa":{"xlen":64,"march":"rv64imac"},
+            "kernel":{"gr":{"enable":true,"backend":"uart"}}}"#,
+        )
+        .unwrap();
+        assert!(!g6b_ui::holyc_print_src(&plain).contains("DisplaySurface("));
+        let mut prog = load_program(&plain).unwrap();
+        prog.router = g6b_http::Router::from_spec(&plain);
+        match prog.repl(r#"DisplaySurface("gpu");"#).unwrap() {
+            ReplResult::Output(s) => assert!(s.contains("DISP-SURFACE-REFUSED"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn gpu_output_starts_on_the_gpu_surface_and_offers_the_toggle() {
+        let spec = gpu_spec();
+        assert!(spec.surface_toggle());
+        let mut session = BrowserSession::new(&spec).unwrap();
+        assert_eq!(session.surface, g6b_spec::Surface::Gpu);
+        // The control exists and names the surface a click switches *to*.
+        let toggle = session
+            .dom
+            .get_element_by_id("disp-toggle")
+            .expect("toggle button");
+        assert_eq!(toggle.get_attribute("data-surface"), Some("gpu"));
+        assert_eq!(toggle.inner_text(), "VGA view");
+        // And the proxy the host PPM path uses agrees with the session.
+        assert_eq!(session.proxy().surface, g6b_spec::Surface::Gpu);
+    }
+
+    #[test]
+    fn toggling_the_surface_updates_dom_router_and_proxy_together() {
+        let spec = gpu_spec();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let now = session.toggle_surface().unwrap();
+        assert_eq!(now, g6b_spec::Surface::Vga);
+        assert_eq!(session.surface, g6b_spec::Surface::Vga);
+        assert_eq!(session.proxy().surface, g6b_spec::Surface::Vga);
+        assert_eq!(
+            session
+                .dom
+                .get_element_by_id("disp-toggle")
+                .unwrap()
+                .get_attribute("data-surface"),
+            Some("vga")
+        );
+        assert!(session
+            .dom
+            .get_element_by_id("disp-status")
+            .unwrap()
+            .inner_text()
+            .contains("vga"));
+        assert!(session.diagnostics.iter().any(|d| d == "DISP-SURFACE vga"));
+        // Flipping back is symmetric.
+        assert_eq!(session.toggle_surface().unwrap(), g6b_spec::Surface::Gpu);
+    }
+
+    #[test]
+    fn a_board_without_an_accelerated_output_has_no_toggle_at_all() {
+        // Gr plane over UART only: no virtio-gpu, no proxy, no display engine.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","isa":{"xlen":64,"march":"rv64imac"},
+            "kernel":{"gr":{"enable":true,"w":640,"h":480,"backend":"uart"}}}"#,
+        )
+        .unwrap();
+        assert!(!spec.surface_toggle());
+        let mut session = BrowserSession::new(&spec).unwrap();
+        assert_eq!(session.surface, g6b_spec::Surface::Vga);
+        assert!(session.dom.get_element_by_id("disp-toggle").is_none());
+        // Refused, not silently ignored.
+        assert!(session.toggle_surface().is_err());
+        // And the POST route was never registered.
+        assert_ne!(
+            session.program.router.fetch("POST", "/bios/display").status,
+            200
+        );
+    }
+
+    #[test]
+    fn clicking_the_toggle_hit_box_dispatches_a_surface_event() {
+        let spec = gpu_spec();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        session.render_hit_boxes().unwrap();
+        // The absolutely positioned button must have its own hit box, anchored
+        // to the top-right of the canvas rather than shoved into the flow.
+        let hit = session
+            .hit_boxes
+            .iter()
+            .find(|h| h.id.as_deref() == Some("disp-toggle"))
+            .expect("toggle hit box")
+            .clone();
+        let banner = session
+            .hit_boxes
+            .iter()
+            .find(|h| h.id.as_deref() == Some("banner"))
+            .expect("banner hit box");
+        assert!(
+            hit.x > banner.x + banner.w / 2,
+            "toggle sits right of centre: toggle.x={} banner={}..{}",
+            hit.x,
+            banner.x,
+            banner.x + banner.w
+        );
+        assert_eq!(hit.y, 0, "and at the top");
+
+        // A pointer click on it runs an AOT listener, proving the CSS hit box,
+        // the event path and the surface state are one chain.
+        let listener = Listener::Aot(vec![g6b_js::Op::SetInnerText {
+            id: "status".into(),
+            value: "DISP-CLICK".into(),
+        }]);
+        session
+            .add_event_listener(&hit.path, "click", false, listener)
+            .unwrap();
+        let allowed = session
+            .dispatch_pointer(hit.x + hit.w / 2, hit.y + hit.h / 2, "click", "surface")
+            .unwrap();
+        assert!(allowed);
+        assert_eq!(
+            session
+                .dom
+                .get_element_by_id("status")
+                .unwrap()
+                .inner_text(),
+            "DISP-CLICK"
+        );
+    }
+
+    #[test]
     fn browser_preserves_filesystem_gates_and_surfaces_host_errors() {
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full","kernel":{"usb":{"fs_ntfs":false,"fs_ext4":false}}}"#).unwrap();
         let mut session = BrowserSession::new(&spec).unwrap();
@@ -1264,6 +2356,14 @@ mod tests {
             router: &session.program.router,
             spec: &spec,
             diagnostics: Vec::new(),
+            handles: Vec::new(),
+            pending_slot: None,
+            objects: ObjectTable::new(),
+            pending_event_listeners: Vec::new(),
+            pending_event_removals: Vec::new(),
+            last_await_failed: false,
+            last_await_error: String::new(),
+            last_await_value: String::new(),
         };
         assert!(host.set_inner_text("not-a-target", "oops").is_err());
         assert!(host.set_visible("not-a-target", false).is_err());

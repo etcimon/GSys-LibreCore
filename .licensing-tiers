@@ -119,6 +119,7 @@ U   g6lc_bios/kernel-spec/webidl/**
 U   g6lc_bios/kernel-spec/svelte-d/**
 U   g6lc_bios/kernel-spec/botan/**
 U   g6lc_bios/kernel-spec/libwasm/**
+U   g6lc_bios/kernel-spec/goosie/**
 # linux-dist OpenWrt trees are upstream GPL (etcimon forks of official). Leave
 # them verbatim (E-UPSTREAMWRITE). First-party linux-dist/*.md and ubuntu/
 # scaffold stay tier T via the g6lc_qemu/** rule above; last match wins.

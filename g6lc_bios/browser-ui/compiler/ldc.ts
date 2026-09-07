@@ -138,10 +138,43 @@ export function findLdc(start?: string): string {
 }
 
 export function findDub(ldc = findLdc()): string {
+  const name = process.platform === "win32" ? "dub.exe" : "dub";
   if (ldc) {
-    const name = process.platform === "win32" ? "dub.exe" : "dub";
     const cand = join(dirname(ldc), name);
     if (existsSync(cand)) return cand;
+  }
+  const seeds: string[] = [];
+  const add = (p?: string) => {
+    if (p && existsSync(p)) seeds.push(resolve(p));
+  };
+  add(process.env.SVELTE_D_DUB);
+  if (ldc) {
+    add(join(dirname(dirname(ldc)), "_tools", "dmd2", "windows", "bin"));
+    add(join(dirname(dirname(ldc)), "_tools", "dmd2", "windows", "bin64"));
+    add(join(dirname(dirname(ldc)), "toolchains"));
+    add(join(dirname(ldc), "..", "toolchains"));
+  }
+  add("E:\\cva6\\riscv-dev\\_tools\\dmd2\\windows\\bin");
+  add("E:\\cva6\\riscv-dev\\_tools\\dmd2\\windows\\bin64");
+  add("E:\\cva6\\riscv-dev\\toolchains");
+  add("E:\\cva6\\riscv-dev");
+  for (const seed of [...new Set(seeds)]) {
+    for (const rel of ["", "bin", "bin64"]) {
+      const cand = join(seed, rel, name);
+      if (existsSync(cand)) return cand;
+    }
+    try {
+      for (const entry of readdirSync(seed)) {
+        if (/dub|dmd|ldc/i.test(entry)) {
+          for (const rel of ["", "bin", "bin64"]) {
+            const cand = join(seed, entry, rel, name);
+            if (existsSync(cand)) return cand;
+          }
+        }
+      }
+    } catch {
+      // not a directory or unreadable
+    }
   }
   return which("dub");
 }
@@ -167,19 +200,29 @@ export function findLibwasmCheckout(start?: string): string {
   return "";
 }
 
+const CUSTOM_BINARYEN = "C:\\Users\\etcim\\.grok\\worktrees\\cva6\\svelte-dev-2\\riscv-dev\\svelte-D\\binaryen";
+
 export function findWasmOpt(start?: string): string {
-  const exe = process.platform === "win32" ? "wasm-opt.exe" : "wasm-opt";
+  const windowsNames = ["wasm-opt.exe", "wasm-opt"];
+  const names = process.platform === "win32" ? windowsNames : ["wasm-opt"];
   for (const k of ["SVELTE_D_WASM_OPT", "WASM_OPT"]) {
     const v = process.env[k];
     if (v && existsSync(v)) return v;
   }
-  for (const seed of ldcSeeds(start)) {
-    for (const rel of [
-      join("binaryen-build", "bin", exe),
-      join("toolchains", "binaryen-svelte-d", "bin", exe),
-    ]) {
-      const cand = join(seed, rel);
-      if (existsSync(cand)) return cand;
+  const seeds = [...ldcSeeds(start), CUSTOM_BINARYEN];
+  const rels = [
+    join("build", "bin"),
+    join("binaryen-build", "bin"),
+    join("toolchains", "binaryen-svelte-d", "bin"),
+    join("bin"),
+    "",
+  ];
+  for (const seed of [...new Set(seeds)]) {
+    for (const rel of rels) {
+      for (const name of names) {
+        const cand = join(seed, rel, name);
+        if (existsSync(cand)) return cand;
+      }
     }
   }
   return which("wasm-opt");
