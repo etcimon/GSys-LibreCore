@@ -358,6 +358,49 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   resource, so the levers multiply rather than overlap. Operand read beats halve
   at every engine count and every C element is still checked. One shared-port
   fixture with repeated same-weight jobs; not MAC/s, not silicon, not inference.
+- [x] FITTING IS COMPLETE: every format now carries a bound, native FP32 included.
+  Native FP32 is the ONE candidate the windowed kappa may legitimately multiply,
+  because nothing perturbs its products (exact 48-bit significand product, exact
+  640-bit reduction) so its only roundings are the 2W-1 sites AT window
+  boundaries. Measured against an EXACT RATIONAL reference, not float64: eps 1
+  ppm, bound 10 ppm, level 1, measured **0.0672 ppm** -- FP32 accumulation is not
+  the accuracy limiter at K=16, which is what makes narrowing worth taking on
+  accuracy grounds. Full table in `architecture/ai-matrix/va-turbo.md` §13:
+  FP16 level 6, BF16 9, INT8 12, FP8 E4M3 13, E5M2 14, Mitchell 14, mantissa
+  10/8/6/4 at 7/9/11/13; INT4 and 2-bit truncation refused with a stated reason
+  rather than a zero. 52 host tests pass.
+- [x] FP32 QUALIFIES FROBENIUS-MATCHED, NOT PER-ELEMENT, AND THE BLOCKER WAS A
+  FIELD WIDTH. The worst-ELEMENT windowed kappa is 962.3 and its bound (962 ppm)
+  sits inside budget level 4, but `kappa_window_q8` was Q8.8 in 16 bits and
+  saturates at 255.996, so it failed closed on metadata rather than on
+  arithmetic -- the wrong reason to refuse. Widened to 24 bits (65,535.996),
+  selector wiring only. At a 1 ppm epsilon even the widest kappa the field holds
+  gives 65,536 ppm, so the accumulation term is bounded by ~6.55% by
+  construction and can never be what refuses a plan.
+- [x] MY OWN ACCUMULATION BOUND DOUBLE-COUNTED. `va_turbo_accum_bound_ppm`
+  multiplied by the site count on top of a kappa that ALREADY sums all 2W-1 site
+  magnitudes over |R|, over-stating the term by 2W-1 -- a 15x error at K=16,
+  window 2 (135 ppm where the model says 10). It now charges eps*kappa once and
+  keeps `sites` only as the validity guard, with a test asserting independence
+  from the site count above that guard.
+- [x] THE 640-BIT ALIGNMENT DROP IS DEAD CODE, AND NOW PROVABLY SO.
+  `fp_dot_product_aligned` returns zero when a shift reaches FP_DOT_MAXW, which
+  would drop the LARGEST term in a window -- a wrong answer, not a rounding.
+  `block_exp` is the MINIMUM lane exponent so the shift is non-negative, and the
+  product exponent spans [-298,208] for FP32 and [-266,240] for BF16: worst case
+  506 + 48 product bits + 8 bits of 256-lane headroom = 562 of 640. Unreachable
+  for every supported format, but NOTHING CHECKED IT, so a future MAXW reduction
+  or wider-exponent format would have reached it silently. Now a per-cycle
+  simulation invariant in `g6lc_ai_pe_dot_float` plus directed worst-case-spread
+  vectors (max normal squared beside min subnormal squared in one window) for all
+  five float formats; 5,024 checks pass. An output-only check could never catch
+  this: the dropped term is below the ULP of the surviving one, so the rounded
+  answer is identical either way.
+- [x] REMAINING ASYMMETRY, recorded not fixed: the measured column is now exact
+  while `kappa_windowed` still comes from float64 partial sums, so the BOUND is
+  now the weaker side. And the per-format ppm figures are from a seeded
+  FP32-resident fixture at the shipped shape, not the pinned model snapshot,
+  which is absent on this host.
 - [x] THE MOVING-WINDOW BOUND IS REAL BUT DOES NOT RESCUE THE PER-PRODUCT TERM,
   and my premise going in was wrong. The datapath does re-center: the float dot
   is block floating point per step (block_exp from that step's lanes, exact

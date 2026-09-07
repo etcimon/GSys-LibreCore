@@ -153,8 +153,14 @@ package g6lc_ai_policy_pkg;
     // Only honoured when `window_log2` matches the geometry the hardware will
     // actually use; a caller cannot buy a tighter bound by claiming a window
     // the datapath does not implement.
+    // 24 bits, not 16: a Q8.8 word saturates at 255.996 and the measured
+    // worst-ELEMENT windowed kappa of a native FP32 tile is 962.3, whose bound
+    // (962 ppm) sits comfortably inside budget level 4.  The 16-bit field was
+    // therefore refusing a per-element FP32 guarantee on metadata width rather
+    // than on arithmetic, which is the wrong reason to fail closed.  Q8 in 24
+    // bits reaches 65,535.996 and costs only selector wiring.
     logic kappa_window_valid;
-    logic [15:0] kappa_window_q8;
+    logic [23:0] kappa_window_q8;
     logic [4:0]  window_log2;
     // Absolute error floor in ppm of the caller's reference magnitude, for the
     // subnormal/underflow term the pure relative model cannot express
@@ -513,15 +519,23 @@ package g6lc_ai_policy_pkg;
     return 6'((windows << 1) - 17'd1);
   endfunction
 
+  // FP32 RNE unit roundoff is 2^-24 = 0.0596 ppm, charged as a whole ppm so the
+  // term always rounds UP.
+  localparam logic [19:0] VA_FP32_RNE_PPM = 20'd1;
+
   function automatic logic [19:0] va_turbo_accum_bound_ppm(
-      input logic [15:0] kappa_window_q8, input logic [5:0] sites
+      input logic [23:0] kappa_window_q8, input logic [5:0] sites
   );
-    logic [35:0] scaled;
-    if (kappa_window_q8 < 16'd256 || sites == 6'd0) return 20'd0;
-    // FP32 RNE unit roundoff is 2^-24, i.e. 0.0596 ppm; charged as a whole ppm
-    // per site so the term always rounds UP.
-    scaled = (36'(sites) * 36'(kappa_window_q8) + 36'd255) >> 8;
-    return (scaled > 36'd1000000) ? 20'hfffff : 20'(scaled);
+    logic [43:0] scaled;
+    if (kappa_window_q8 < 24'd256 || sites == 6'd0) return 20'd0;
+    // eps * kappa ONCE.  An earlier revision multiplied by `sites` as well,
+    // which double-counted: the windowed kappa is already the sum of all 2W-1
+    // site magnitudes over |R|, so charging the site count again over-stated the
+    // term by 2W-1 - a 15x error at K=16, window 2.  `sites` remains as the
+    // validity guard (a reduction with no rounding site has no term), which is
+    // the only thing it can soundly be used for here.
+    scaled = (44'(VA_FP32_RNE_PPM) * 44'(kappa_window_q8) + 44'd255) >> 8;
+    return (scaled > 44'd1000000) ? 20'hfffff : 20'(scaled);
   endfunction
 
   // Total = per-product term + post-reduction accumulation term + absolute
@@ -600,7 +614,7 @@ package g6lc_ai_policy_pkg;
     // when unclaimed, so an absent floor cannot make the bound smaller.
     p.window_log2 = va_turbo_window_log2(r.numfmt, va_turbo_pow2_log2(lane_bytes));
     p.window_matched = r.kappa_window_valid && r.window_log2 == p.window_log2 &&
-                       p.window_log2 != 5'd0 && r.kappa_window_q8 >= 16'd256;
+                       p.window_log2 != 5'd0 && r.kappa_window_q8 >= 24'd256;
     // The window ADDS the accumulation term and the floor.  It never replaces
     // the per-product term, so the reported bound can only grow here - which is
     // the point: the previous report omitted both terms and was therefore

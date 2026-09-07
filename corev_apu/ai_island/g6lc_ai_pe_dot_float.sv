@@ -177,6 +177,28 @@ module g6lc_ai_pe_dot_float #(
   initial begin
     assert (Lanes >= 1) else $error("g6lc_ai_pe_dot_float: Lanes must be >= 1");
   end
+
+  // MAXW sufficiency is an INVARIANT, not a comment.  `fp_dot_product_aligned`
+  // silently returns zero when a product's alignment shift reaches MAXW, which
+  // would drop the LARGEST term in the window - a wrong answer, not a rounding.
+  // The width is provably sufficient today: with the integer-significand
+  // convention the product exponent spans [-298, 208] for FP32 and [-266, 240]
+  // for BF16, so the worst-case shift is 506, plus a 48-bit product and 8 bits
+  // of headroom for 256 lanes gives 562 of the 640 available.  Every narrower
+  // format is far smaller (FP16 80, FP8 <= 64).  So the zeroing arm is dead
+  // code - but nothing checked that, and a future MAXW reduction or a wider
+  // exponent format would reach it without a single failing test.  This checks
+  // it every cycle in simulation instead.
+  always_comb begin
+    for (int unsigned l = 0; l < Lanes; l++) begin
+      if (valid_arr[l] && !prod[l].is_nan && !prod[l].is_inf && !prod[l].is_zero) begin
+        assert (int'(prod[l].exp) - int'(block_exp) >= 0 &&
+                int'(prod[l].exp) - int'(block_exp) < MAXW)
+          else $error("g6lc_ai_pe_dot_float: lane %0d alignment shift %0d outside [0,%0d) - product would be DROPPED",
+                      l, int'(prod[l].exp) - int'(block_exp), MAXW);
+      end
+    end
+  end
   // pragma translate_on
 
 endmodule

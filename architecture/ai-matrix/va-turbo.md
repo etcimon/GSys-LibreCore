@@ -719,11 +719,79 @@ trade is finally *evaluable*. It is still not enabled: no approximate consumer
 exists in the datapath, and these are float64 reference proxies on a seeded
 fixture, not model-quality results.
 
-Two exactness gaps in the proxy are recorded rather than hidden: float64 partial
-sums are themselves rounded while the RTL reduction is exact, and
-`fp_dot_product_aligned` **zeroes** any product whose alignment shift reaches
-640, which the proxy does not model at all -- a window with a >640-bit exponent
-spread silently loses a product in hardware. That wants a directed RTL test.
+### Gap closed: the 640-bit alignment drop is dead code, and now provably so
+
+`fp_dot_product_aligned` silently returns zero when a product's alignment shift
+reaches `FP_DOT_MAXW`, which would drop the **largest** term in a window -- a
+wrong answer, not a rounding. Because `block_exp` is the **minimum** lane
+exponent, the shift is always non-negative, and in the integer-significand
+convention the product exponent spans:
+
+| format | product exponent | spread | product bits | width needed |
+|---|---|--:|--:|--:|
+| FP32 | [-298, 208] | 506 | 48 | **554** |
+| BF16 | [-266, 240] | 506 | 16 | 522 |
+| FP16 | [-48, 10] | 58 | 22 | 80 |
+| FP8 E5M2 | [-32, 26] | 58 | 6 | 64 |
+
+With 8 bits of headroom for 256 lanes the worst case is 562 of the 640
+available, so the zeroing arm is **unreachable for every supported format**. It
+was unreachable before too -- but nothing checked it, so a future `MAXW`
+reduction or a wider-exponent format would have reached it without a single
+failing test. It is now a per-cycle simulation invariant in
+`g6lc_ai_pe_dot_float`, and `pe_dot_float_main.cpp` drives the true worst-case
+spread (max normal squared beside min subnormal squared in one window) for all
+five float formats. 5,024 checks pass. Note that an output-only check could never
+have caught a drop here: the tiny term is far below the ULP of the huge one, so
+the correctly rounded answer is identical either way -- which is exactly why the
+invariant belongs inside the DUT.
+
+### Fitting complete: every format has a bound, including native FP32
+
+Native FP32 is the one candidate the windowed kappa may legitimately multiply.
+Nothing perturbs its products: both operands decode exactly, the 24-bit
+significands multiply into an exact 48-bit integer, and the reduction is exact.
+The only roundings are the one RNE per window and the FP32 accumulator folds --
+`2W-1` sites, all **at window boundaries**. So its error site is `per_window`
+and the windowed bound is sound for it, the opposite of the 12 per-product
+candidates. Measured against an **exact rational** reference rather than float64:
+
+| candidate | storage | win | W | sites | kappa_win | eps ppm | bound ppm | level | measured ppm | site |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|---|
+| native FP32 | 4 | 2 | 8 | 15 | 8.007 | **1** | **10** | **1** | **0.0672** | per_window |
+| FP16 | 2 | 4 | 4 | 7 | 4.921 | 977 | 2,743 | 6 | 325 | per_product |
+| BF16 | 2 | 4 | 4 | 7 | 4.921 | 7,828 | 21,902 | 9 | 2,644 | per_product |
+| INT8 | 1 | 8 | 2 | 3 | 3.198 | 3,124 | 123,037 | 12 | 10,490 | per_product |
+| FP8 E4M3 | 1 | 8 | 2 | 3 | 3.198 | 128,907 | 380,966 | 13 | 37,550 | per_product |
+| FP8 E5M2 | 1 | 8 | 2 | 3 | 3.198 | 265,625 | 743,085 | 14 | 81,940 | per_product |
+| INT4 | 0.5 | 16 | 1 | 1 | 2 | 61,465 | **refused** | none | 206,600 | per_product |
+| mantissa 10/8/6/4 | 4 | 2 | 8 | 15 | 8.007 | 1,953..121,094 | 5,475..338,697 | 7..13 | 852..50,740 | per_product |
+| mantissa 2 | 4 | 2 | 8 | 15 | 8.007 | 437,500 | **refused** | none | 183,300 | per_product |
+| Mitchell | 4 | 2 | 8 | 15 | 8.007 | 250,000 | 699,231 | 14 | 112,200 | per_product |
+
+FP32 accumulation costs **0.0672 ppm measured against a 10 ppm bound**, i.e. it
+is not the accuracy limiter at K=16 -- which is what makes the narrowing trade
+worth taking on accuracy grounds. Refused cells carry a reason, never a zero.
+
+**FP32 qualifies Frobenius-matched, not per-element, and the reason was a field
+width rather than arithmetic.** The worst-ELEMENT windowed kappa is 962.3, whose
+bound (962 ppm) sits inside budget level 4 -- but `kappa_window_q8` was Q8.8 in
+16 bits, saturating at 255.996, so it failed closed on metadata. The field is now
+24 bits (reaching 65,535.996), which costs selector wiring only. At a 1 ppm
+epsilon even the widest kappa the field can hold yields 65,536 ppm, so this term
+is bounded by ~6.55% by construction and can never be what refuses a plan.
+
+A second correction, to my own RTL: `va_turbo_accum_bound_ppm` multiplied by the
+site count on top of a kappa that **already sums all 2W-1 site magnitudes**,
+over-stating the term by 2W-1 -- a 15x error at K=16, window 2. It now charges
+`eps * kappa` once, with `sites` retained only as the validity guard, which is
+the only thing it can soundly be.
+
+One asymmetry remains and is not fixed: the measured column is now exact, while
+`kappa_windowed` is still computed from float64 partial sums. The bound side is
+now the weaker of the two. And the per-format ppm figures come from a seeded
+FP32-resident fixture at the shipped shape, not from the pinned model snapshot,
+which is not present on this host.
 
 ## 12. The build was serial, and `-j` could not fix it
 

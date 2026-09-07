@@ -190,20 +190,38 @@ module tb_g6lc_ai_policy_subcode #(
     assert (va_turbo_accum_sites(16'd0, 5'd3) == 6'd0 &&
             va_turbo_accum_sites(16'd16, 5'd0) == 6'd0)
       else $fatal(1, "VA accum sites must be zero without work or a window");
-    // The accumulation term and the additive total, against a rational oracle.
+    // The accumulation term: eps * kappa ONCE.  The windowed kappa already sums
+    // every site magnitude, so multiplying by the site count again would
+    // over-state the term by 2W-1; `sites` is only a validity guard.
     for (int sites = 0; sites <= 63; sites++) begin
-      for (int kq = 0; kq <= 1024; kq++) begin
-        product = 64'(sites) * 64'(kq);
+      for (int kq = 0; kq <= 4096; kq++) begin
+        product = 64'(VA_FP32_RNE_PPM) * 64'(kq);
         expected = (kq < 256 || sites == 0)
             ? 64'd0 : product / 64'd256 + 64'((product % 64'd256) != 0);
         if (expected > 64'd1000000) expected = 64'hfffff;
-        actual = va_turbo_accum_bound_ppm(16'(kq), 6'(sites));
+        actual = va_turbo_accum_bound_ppm(24'(kq), 6'(sites));
         assert (64'(actual) == expected)
           else $fatal(1, "VA accum bound sites=%0d kq=%0d got=%0d expected=%0d",
                       sites, kq, actual, expected);
+        // Independence from the site count, above the validity guard.
+        if (sites > 0 && kq >= 256)
+          assert (actual == va_turbo_accum_bound_ppm(24'(kq), 6'd1))
+            else $fatal(1, "VA accum bound must not scale with sites=%0d", sites);
         checks++;
       end
     end
+    // A Q8.8 word saturated at 255.996 and refused a per-element FP32 bound on
+    // metadata width rather than arithmetic; 24 bits must carry the 962.3 the
+    // measurement actually produces.
+    assert (va_turbo_accum_bound_ppm(24'(962 * 256), 6'd15) == 20'd962)
+      else $fatal(1, "VA 24-bit kappa must express a per-element FP32 bound");
+    // At a 1 ppm epsilon even the widest kappa the field can hold yields
+    // 65,536 ppm, so this term is bounded by ~6.55% BY CONSTRUCTION and the
+    // sentinel is unreachable through magnitude alone.  Worth asserting: it is
+    // the reason the FP32 accumulation term can never be what refuses a plan.
+    assert (va_turbo_accum_bound_ppm(24'hffffff, 6'd1) == 20'd65536)
+      else $fatal(1, "VA max 24-bit kappa must give 65536 ppm, got %0d",
+                  va_turbo_accum_bound_ppm(24'hffffff, 6'd1));
     for (int p_case = 0; p_case < 4; p_case++) begin
       for (int a_case = 0; a_case < 3; a_case++) begin
         for (int f_case = 0; f_case < 3; f_case++) begin
@@ -266,7 +284,7 @@ module tb_g6lc_ai_policy_subcode #(
     // term is added.  This is the guard against a window the hardware does not
     // implement -- which for these recipes would UNDER-state the bound, since
     // the per-product term is the one that matters.
-    r.kappa_window_valid = 1'b1; r.kappa_window_q8 = 16'd512;
+    r.kappa_window_valid = 1'b1; r.kappa_window_q8 = 24'd512;
     for (int bad = 0; bad <= 8; bad++) begin
       if (5'(bad) != 5'd4) begin
         r.window_log2 = 5'(bad);
@@ -289,17 +307,17 @@ module tb_g6lc_ai_policy_subcode #(
     assert (p.bound_ppm >= element_only.bound_ppm)
       else $fatal(1, "VA window must never reduce the reported bound");
     // A windowed kappa below one rounding is not evidence.
-    r.kappa_window_q8 = 16'd255;
+    r.kappa_window_q8 = 24'd255;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.window_matched && p.bound_ppm == element_only.bound_ppm)
       else $fatal(1, "VA sub-unity windowed kappa must be refused");
     // A larger windowed kappa may only ever cost more, never less.
-    r.kappa_window_q8 = 16'd1024;
+    r.kappa_window_q8 = 24'd1024;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.bound_ppm > element_only.bound_ppm)
       else $fatal(1, "VA larger windowed kappa must cost more");
     // The floor only ever adds, and it is reported separately.
-    r.kappa_window_q8 = 16'd512;
+    r.kappa_window_q8 = 24'd512;
     r.abs_floor_valid = 1'b1; r.abs_floor_ppm = 20'd1000;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.bound_floor_ppm == 20'd1000 &&

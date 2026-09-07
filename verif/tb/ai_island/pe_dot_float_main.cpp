@@ -268,6 +268,43 @@ int main(int argc, char** argv) {
                  {0x00000001U, 0x00000001U, 0U, 0U},
                  {true, true, false, false});
 
+        // Directed WORST-CASE EXPONENT SPREAD, aimed at the one arm of
+        // fp_dot_product_aligned that silently returns zero: a product whose
+        // alignment shift reaches FP_DOT_MAXW is DROPPED, which loses the
+        // largest term in the window rather than rounding it. With the
+        // integer-significand convention the FP32 product exponent spans
+        // [-298, 208], so the widest possible shift is 506, and 506 + 48 bits
+        // of product + 8 bits of lane headroom is 562 of the 640 available.
+        // These cases put the largest and smallest representable products in
+        // ONE window, so the shift sits at that 506-bit maximum and the RTL
+        // assertion added in g6lc_ai_pe_dot_float.sv is exercised at its limit
+        // instead of only on benign data. The tiny term is far below the ULP of
+        // the huge one, so the correctly rounded answer is the huge product --
+        // which is exactly why an output-only check could never catch a drop
+        // here, and why the invariant is asserted inside the DUT.
+        //
+        // FP32: max normal^2 alongside min subnormal^2.
+        test.dot(7, {0x7f7fffffU, 0x00000001U, 0x00000001U, 0x7f7fffffU},
+                 {0x7f7fffffU, 0x00000001U, 0x7f7fffffU, 0x00000001U},
+                 {true, true, true, true});
+        // FP32: min normal^2 against max normal^2, both signs, to sweep the
+        // block exponent to the bottom of its range with a live large term.
+        test.dot(7, {0x00800000U, 0xff7fffffU, 0x80800000U, 0x7f7fffffU},
+                 {0x00800000U, 0x7f7fffffU, 0x00800000U, 0x00800000U},
+                 {true, true, true, true});
+        // BF16: same shape, 506-bit spread with a 16-bit product.
+        test.dot(6, {0x7f7fU, 0x0001U, 0x0001U, 0x7f7fU},
+                 {0x7f7fU, 0x0001U, 0x7f7fU, 0x0001U},
+                 {true, true, true, true});
+        // FP16 and both FP8 formats at their own extremes.
+        test.dot(5, {0x7bffU, 0x0001U, 0x0001U, 0xfbffU},
+                 {0x7bffU, 0x0001U, 0x7bffU, 0x0001U},
+                 {true, true, true, true});
+        test.dot(3, {0x7eU, 0x01U, 0x01U, 0xfeU}, {0x7eU, 0x01U, 0x7eU, 0x01U},
+                 {true, true, true, true});
+        test.dot(4, {0x7bU, 0x01U, 0x01U, 0xfbU}, {0x7bU, 0x01U, 0x7bU, 0x01U},
+                 {true, true, true, true});
+
         // Directed NaN and Inf propagation.
         // E5M2: 1.0 * Inf = Inf
         test.dot(4, {0x3cU, 0x00U, 0U, 0U}, {0xfcU, 0x00U, 0U, 0U},

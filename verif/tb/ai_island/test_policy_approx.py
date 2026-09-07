@@ -206,6 +206,115 @@ class ArithmeticTests(unittest.TestCase):
         self.assertEqual(policy.abs_floor_ppm("FP16", scale), ceil_fraction(exact))
         self.assertGreater(policy.abs_floor_ppm("FP16", scale), exact)
 
+    def test_ppm_ceiling_is_shared_and_never_rounds_down(self):
+        self.assertEqual(policy.ppm_ceil(1, 3), ceil_fraction(1_000_000 * Fraction(1, 3)))
+        self.assertEqual(policy.ppm_ceil(1, 3), 333334)
+        self.assertEqual(policy.ppm_ceil(0, 3), 0)
+        self.assertEqual(policy.ppm_ceil(3, 1), 3_000_000)
+        for args in ((1, 0), (1, -1), (-1, 1), (1.0, 1), (1, 1.0), (1, True),
+                     (True, 1), (None, 1), (1, None)):
+            with self.subTest(args=args):
+                self.assertIsNone(policy.ppm_ceil(*args))
+
+    def test_native_fp32_epsilon_is_derived_and_rounds_up(self):
+        # 2^-24 is 0.0596 ppm, which no integer ppm can represent exactly, so the
+        # only sound integer is the one above it.
+        exact = 1_000_000 * Fraction(1, 2 ** 24)
+        self.assertEqual(exact, Fraction(15625, 262144))
+        self.assertNotEqual(exact.denominator, 1)
+        self.assertEqual(policy.native_fp32_eps_ppm(), ceil_fraction(exact))
+        self.assertEqual(policy.native_fp32_eps_ppm(), 1)
+        self.assertGreater(policy.native_fp32_eps_ppm(), exact)
+        # A formula at every precision, not one hand-written constant.
+        for bits in range(24):
+            with self.subTest(bits=bits):
+                u = Fraction(1, 2 ** (bits + 1))
+                self.assertEqual(policy.rne_unit_roundoff_ppm(bits),
+                                 ceil_fraction(1_000_000 * u))
+                self.assertGreaterEqual(policy.rne_unit_roundoff_ppm(bits),
+                                        1_000_000 * u)
+                # u is the epsilon of ONE rounding, so it is never the 2u+u^2 a
+                # product of two rounded operands carries.
+                self.assertLessEqual(policy.rne_unit_roundoff_ppm(bits),
+                                     policy.ROUND_EPS_PPM[bits])
+        self.assertEqual(policy.rne_unit_roundoff_ppm(0), 500000)
+        for bits in (-1, 24, 31, 1.0, True, None):
+            with self.subTest(bits=bits):
+                self.assertEqual(policy.rne_unit_roundoff_ppm(bits), 0xfffff)
+
+    def test_kappa_ceiling_names_the_binding_wall(self):
+        ceiling = policy.kappa_ceiling(policy.native_fp32_eps_ppm())
+        self.assertEqual(ceiling["binding"], "q8_metadata_word")
+        self.assertAlmostEqual(ceiling["kappa_ceiling"], 65535 / 256)
+        self.assertEqual(ceiling["budget_ceiling"], 1_000_000)
+        # A coarse epsilon runs out of budget long before it runs out of Q8.
+        self.assertEqual(policy.kappa_ceiling(7828)["binding"], "budget_100_percent")
+        self.assertAlmostEqual(policy.kappa_ceiling(7828)["kappa_ceiling"],
+                               1_000_000 / 7828)
+        for eps in (0, -1, 1_000_001, None, 1.0, True):
+            with self.subTest(eps=eps):
+                self.assertEqual(policy.kappa_ceiling(eps)["binding"], "invalid_epsilon")
+                self.assertEqual(policy.kappa_ceiling(eps)["kappa_ceiling"], 0.0)
+
+    def test_site_gated_bounds_refuse_in_both_directions(self):
+        self.assertEqual(len(policy.ANALYTIC_EPS_PPM), 12)
+        for label in policy.ANALYTIC_EPS_PPM:
+            with self.subTest(label=label):
+                self.assertEqual(policy.windowed_error_site(label), "per_product")
+                # A per-product epsilon can never obtain a SOUND windowed bound.
+                self.assertEqual(policy.sound_windowed_bound_ppm(label, 977, 512, 1),
+                                 0xfffff)
+                # The diagnostic is still computable, and is a real number: that
+                # is what makes the refusal structural rather than arithmetic.
+                self.assertEqual(policy.windowed_bound_ppm(977, 512, 1), 1954)
+                self.assertEqual(policy.per_product_bound_ppm(label, 977, 512), 1954)
+        self.assertEqual(policy.windowed_error_site(policy.NATIVE_FP32), "per_window")
+        self.assertEqual(
+            policy.sound_windowed_bound_ppm(policy.NATIVE_FP32, 977, 512, 1), 1954)
+        # ... and the mirror image: there is no per-product epsilon to charge the
+        # native datapath, because nothing perturbs its products.
+        self.assertEqual(policy.per_product_bound_ppm(policy.NATIVE_FP32, 977, 512),
+                         0xfffff)
+        # The gate is on the SITE, so it still fails closed on bad arithmetic.
+        for args in ((0xfffff, 512, 1), (977, 255, 1), (977, 512, 0), (977, None, 1)):
+            with self.subTest(args=args):
+                self.assertEqual(
+                    policy.sound_windowed_bound_ppm(policy.NATIVE_FP32, *args), 0xfffff)
+
+    def test_fp32_rounding_is_round_to_nearest_even_on_exact_rationals(self):
+        self.assertEqual(policy.round_half_even(3, 2), 2)
+        self.assertEqual(policy.round_half_even(5, 2), 2)
+        self.assertEqual(policy.round_half_even(7, 2), 4)
+        self.assertEqual(policy.round_half_even(-5, 2), -2)
+        self.assertEqual(policy.fraction_to_fp32(Fraction(0)), Fraction(0))
+        self.assertEqual(policy.fraction_to_fp32(Fraction(3, 2)), Fraction(3, 2))
+        # Exactly halfway between 1 and 1+2^-23: the even significand is 2^23.
+        self.assertEqual(policy.fraction_to_fp32(1 + Fraction(1, 2 ** 24)), 1)
+        self.assertEqual(policy.fraction_to_fp32(-1 - Fraction(1, 2 ** 24)), -1)
+        # Exactly halfway between 1+2^-23 and 1+2^-22: the even one is the upper.
+        self.assertEqual(policy.fraction_to_fp32(1 + Fraction(3, 2 ** 24)),
+                         1 + Fraction(1, 2 ** 22))
+        # Gradual underflow onto the 2^-149 subnormal grid, ties to even again.
+        self.assertEqual(policy.fraction_to_fp32(Fraction(1, 2 ** 149)),
+                         Fraction(1, 2 ** 149))
+        self.assertEqual(policy.fraction_to_fp32(Fraction(1, 2 ** 150)), Fraction(0))
+        # 1.5 subnormal ulps is a tie between 1 and 2 ulps; 2 is the even one.
+        self.assertEqual(policy.fraction_to_fp32(Fraction(3, 2 ** 150)),
+                         Fraction(1, 2 ** 148))
+        # Largest finite FP32 survives; the next binade overflows and says so.
+        self.assertEqual(policy.fraction_to_fp32(Fraction(2 ** 24 - 1) * 2 ** 104),
+                         Fraction(2 ** 24 - 1) * 2 ** 104)
+        self.assertIsNone(policy.fraction_to_fp32(Fraction(2) ** 128))
+
+    def test_storage_bytes_does_not_round_int4_up_to_a_whole_byte(self):
+        for label, size in (("FP32", 4.0), ("BF16", 2.0), ("FP16", 2.0),
+                            ("FP8_E4M3", 1.0), ("INT8", 1.0), ("INT4", 0.5),
+                            ("mitchell_logarithmic", 4.0),
+                            ("mantissa_truncated:4", 4.0),
+                            (policy.NATIVE_FP32, 4.0)):
+            with self.subTest(label=label):
+                self.assertEqual(policy.storage_bytes(label), size)
+
     def test_total_bound_sums_and_fails_closed(self):
         self.assertEqual(policy.total_bound_ppm(1, 2, 3), 6)
         self.assertEqual(policy.total_bound_ppm(), 0)
@@ -525,6 +634,165 @@ class TensorTests(unittest.TestCase):
         json.loads(text, parse_constant=lambda value: self.fail(value))
         self.assertNotIn("Infinity", text)
         self.assertNotIn("NaN", text)
+
+    def test_exact_rational_reference_disagrees_with_the_float64_reference(self):
+        # Products 1 and 2^-60: float64 cannot hold their sum, so a float64
+        # "reference" is itself rounded to 1.0 and would report the FP32 datapath
+        # as exact. The rational reference reports the error that is really there.
+        tiles = self.tile([[1, 2 ** -60]], [[1], [1]])
+        measurement = policy.native_fp32_measurement(tiles, policy.mac_step("FP32"))
+        self.assertEqual(measurement["status"], "exact_rational_reference")
+        self.assertEqual((measurement["tiles_measured"], measurement["windows"]), (1, 1))
+        self.assertEqual(measurement["rounding_sites"], 1)
+        self.assertFalse(measurement["subset_of_tile_set"])
+        self.assertTrue(measurement["operand_cast_to_fp32_lossless"])
+        self.assertGreater(measurement["measured_ppm"], 0.0)
+        self.assertEqual(measurement["float64_reference_ppm"], 0.0)
+        self.assertGreater(measurement["reference_gap_ppm"], 0.0)
+        error = Fraction(1, 2 ** 60)
+        self.assertAlmostEqual(
+            measurement["measured_ppm"] / (1_000_000.0 * float(error / (1 + error))),
+            1.0, places=9)
+        # A reduced sample is reported as reduced, never as the whole set.
+        reduced = policy.native_fp32_measurement(tiles * 3, policy.mac_step("FP32"), 1)
+        self.assertEqual((reduced["tiles_measured"], reduced["tiles_available"]), (1, 3))
+        self.assertTrue(reduced["subset_of_tile_set"])
+        for window in (0, -1, None, 2.0):
+            with self.subTest(window=window):
+                self.assertEqual(policy.native_fp32_measurement(tiles, window)["status"],
+                                 "invalid_window_or_empty_sample")
+        self.assertEqual(policy.native_fp32_measurement([], 2)["tiles_available"], 0)
+        nonfinite = self.tile([[math.inf, 1]], [[1], [1]])
+        self.assertEqual(policy.native_fp32_measurement(nonfinite, 2)["status"],
+                         "nonfinite_or_undefined_metric")
+
+    def test_native_fp32_all_positive_single_window_is_two_eps_plus_floor(self):
+        # One window, no cancellation: s_1 = A_1 = R, so the windowed kappa is
+        # exactly the two roundings the RTL still performs and the bound is
+        # exactly 2*eps plus the absolute floor. Nothing else is charged.
+        tiles = self.tile([[1, 2]], [[1], [1]])
+        bounds = policy.validate_bounds(
+            {"format_narrowing": [], "approximate_multiplier": []}, tiles)
+        row = bounds["native_fp32"]
+        self.assertEqual(row["candidate"], policy.NATIVE_FP32)
+        self.assertEqual(row["windowed_error_site"], "per_window")
+        self.assertTrue(row["windowed_model_applies"])
+        self.assertTrue(row["windowed_bound_is_sound"])
+        self.assertEqual((row["window"], row["windows"], row["rounding_sites"]), (2, 1, 1))
+        self.assertEqual(row["kappa_windowed"], 2.0)
+        self.assertEqual(row["kappa_windowed_element_worst"], 2.0)
+        self.assertEqual(row["kappa_windowed_q8"], 512)
+        self.assertEqual(row["eps_ppm"], policy.native_fp32_eps_ppm())
+        self.assertEqual(row["bound_windowed_ppm"], 2 * row["eps_ppm"])
+        self.assertEqual(row["bound_total_ppm"],
+                         2 * row["eps_ppm"] + row["abs_floor_ppm"])
+        self.assertGreater(row["abs_floor_ppm"], 0)
+        # There is no per-product epsilon to charge, so that column is refused.
+        self.assertEqual(row["per_product_bound_ppm"], 0xfffff)
+        self.assertTrue(row["per_product_bound_refused"])
+        self.assertEqual(row["measurement"]["status"], "exact_rational_reference")
+        self.assertEqual(row["measured_ppm"], 0.0)
+        self.assertTrue(row["empirical_holds"])
+        self.assertTrue(row["empirical_holds_element_worst"])
+        self.assertEqual(row["level_needed"], 1)
+        self.assertEqual(row["qualification_scope"], "per_element_worst")
+        self.assertEqual(row["element_worst_refused_by"], "none")
+        self.assertIn("PER-ELEMENT", row["qualification_note"])
+        self.assertEqual(row["status"], "sample_qualified")
+        self.assertFalse(row["universal_proof"])
+        self.assertEqual(bounds["windowed_bound_sound_for"], [policy.NATIVE_FP32])
+
+    def test_native_fp32_cancelling_tile_exceeds_one_hundred_percent_and_is_refused(self):
+        # Window 1 sums to +1, window 2 to -(1 - 2^-20): the FP32 accumulator
+        # fold is where the cancellation lands, and no relative bound survives it.
+        tiles = self.tile([[1, 1, 1, 1]], [[1], [0], [-1], [2 ** -20]])
+        bounds = policy.validate_bounds(
+            {"format_narrowing": [], "approximate_multiplier": []}, tiles)
+        row = bounds["native_fp32"]
+        self.assertEqual((row["window"], row["windows"], row["rounding_sites"]), (2, 2, 3))
+        self.assertAlmostEqual(row["kappa_windowed"] / (3 * 2 ** 20), 1.0, places=9)
+        self.assertGreater(row["bound_unclipped_ppm"], 1_000_000)
+        self.assertGreater(row["bound_element_worst_unclipped_ppm"], 1_000_000)
+        # Refused, not clipped: the Q8 kappa word cannot even hold it.
+        self.assertIsNone(row["kappa_windowed_q8"])
+        self.assertEqual(row["bound_windowed_ppm"], 0xfffff)
+        self.assertEqual(row["bound_total_ppm"], 0xfffff)
+        self.assertEqual(row["status"], "above_maximum_budget")
+        self.assertFalse(row["admissible"])
+        self.assertIsNone(row["level_needed"])
+        self.assertIsNone(row["level_needed_element_worst"])
+        self.assertEqual(row["qualification_scope"], "unqualified_at_any_level")
+        self.assertEqual(row["element_worst_refused_by"], "budget_above_100_percent")
+        self.assertIn("unbounded RELATIVE error", row["qualification_note"])
+        # The honest form of the result: a ceiling, not a pass.
+        self.assertEqual(row["kappa_ceiling"]["binding"], "q8_metadata_word")
+        self.assertLess(row["kappa_ceiling"]["kappa_ceiling"], row["kappa_windowed"])
+        entry = next(r for r in bounds["fitting_table"]
+                     if r["candidate"] == policy.NATIVE_FP32)
+        self.assertFalse(entry["bound_available"])
+        self.assertIn("above_maximum_budget", entry["unavailable_reason"])
+        self.assertIn("not zero", entry["unavailable_reason"])
+
+    def test_native_fp32_can_qualify_frobenius_matched_but_not_per_element(self):
+        # Output element 0 is well conditioned and carries the Frobenius norm;
+        # element 1 cancels across the window boundary. The aggregate bound
+        # qualifies, the worst element does not, and the two are reported apart
+        # instead of the first being quoted as if it covered the second.
+        tiles = self.tile([[1, 1, 1, 1]],
+                          [[1, 1], [1, 0], [1, -1], [1, 2 ** -10]])
+        row = policy.validate_bounds(
+            {"format_narrowing": [], "approximate_multiplier": []}, tiles)["native_fp32"]
+        self.assertAlmostEqual(row["kappa_windowed_element_worst"] / (3 * 2 ** 10),
+                               1.0, places=9)
+        self.assertLess(row["kappa_windowed"], 3.0)
+        self.assertEqual(row["status"], "sample_qualified")
+        self.assertTrue(row["admissible"])
+        self.assertIsNotNone(row["level_needed"])
+        # The worst element's bound is INSIDE 100%, so the refusal is the Q8
+        # kappa word and not the budget - a different result, said differently.
+        self.assertLess(row["bound_element_worst_unclipped_ppm"], 1_000_000)
+        self.assertIsNone(row["kappa_windowed_element_worst_q8"])
+        self.assertEqual(row["bound_element_worst_total_ppm"], 0xfffff)
+        self.assertIsNone(row["empirical_holds_element_worst"])
+        self.assertIsNone(row["level_needed_element_worst"])
+        self.assertEqual(row["qualification_scope"], "frobenius_matched_only")
+        self.assertEqual(row["element_worst_refused_by"], "q8_kappa_word")
+        self.assertIn("NOT per-element", row["qualification_note"])
+
+    def test_fitting_table_covers_every_format_and_never_shows_zero_for_missing(self):
+        tiles = self.tile([[8, .2, -.1, .03], [.01, 2, .5, -.4]],
+                          [[4, .002], [.1, .7], [-.3, .05], [.9, -.6]])
+        report = policy.evaluate(tiles)
+        bounds = policy.validate_bounds(report, tiles)
+        table = bounds["fitting_table"]
+        self.assertEqual(len(table), len(bounds["entries"]) + 1)
+        self.assertEqual(table[-1]["candidate"], policy.NATIVE_FP32)
+        self.assertEqual({row["storage_format"] for row in table},
+                         {"FP32", "BF16", "FP16", "FP8_E4M3", "FP8_E5M2", "INT8", "INT4"})
+        self.assertEqual(next(r for r in table if r["candidate"] == "INT4")["storage_bytes"],
+                         0.5)
+        sites = [row["windowed_error_site"] for row in table]
+        self.assertEqual(sites.count("per_window"), 1)
+        self.assertEqual(sites.count("per_product"), len(bounds["entries"]))
+        for row in table:
+            with self.subTest(candidate=row["candidate"]):
+                self.assertIsNotNone(row["rounding_sites"])
+                self.assertEqual(row["rounding_sites"], 2 * row["windows"] - 1)
+                unavailable = (not row["bound_available"] or row["level"] is None
+                               or row["holds"] is None)
+                self.assertEqual(bool(row["unavailable_reason"]), unavailable)
+        # Every per-product candidate is refused a sound windowed bound, by
+        # construction rather than by coincidence of the numbers.
+        for row in bounds["entries"]:
+            with self.subTest(candidate=row["candidate"]):
+                self.assertEqual(row["windowed_error_site"], "per_product")
+                self.assertEqual(row["bound_windowed_sound_ppm"], 0xfffff)
+                self.assertFalse(row["windowed_bound_is_sound"])
+        self.assertEqual(bounds["windowed_bound_sound_for"], [policy.NATIVE_FP32])
+        self.assertEqual(len(bounds["windowed_bound_diagnostic_only"]),
+                         len(bounds["entries"]))
+        self.assertEqual(bounds["native_fp32_model_version"], 1)
+        json.loads(policy.report_json(bounds), parse_constant=lambda value: self.fail(value))
 
     def test_main_zero_reference_report_is_robust(self):
         tiles = self.tile([[0, 0]], [[1], [1]])
