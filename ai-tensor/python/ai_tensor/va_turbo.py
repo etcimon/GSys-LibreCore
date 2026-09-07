@@ -136,6 +136,12 @@ RESIDENCIES = ("none", "a", "b", "both")
 #: than a member of the narrowing catalog.
 RESIDENCY_RECIPE_ID = 16
 
+#: Lane count of the configuration every measured cycle number below was taken from.
+#: It is not a free parameter here: change it and the cycle table no longer describes the
+#: machine that produced it. It also sets `mac_step`, and therefore the accumulation
+#: window, which `ai_tensor.lossless` needs.
+PE_LANES = 8
+
 CYCLE_PROVENANCE_NOTE = (
     "RTL simulation of g6lc_ai_gemm_seq at m=n=8, k=16, PeLanes=8, NCH=1, one engine, "
     "class-0 SRAM memory model, VA_TURBO=1. Verilator cycles are a traffic/latency PROXY: "

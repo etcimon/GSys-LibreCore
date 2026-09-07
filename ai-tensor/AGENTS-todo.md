@@ -242,6 +242,37 @@ Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or 
 - Verified: 191 pytest pass (1 skipped), `check_independence.py` ok, `c_abi` lockstep ok;
   remote `ai-policy-subcode` PASS including the new `VA_E5M2_TARGET` checks.
 
+## 2026-09-08 (later still) — lossless narrowing, the exact traffic lever
+
+- [x] `python/ai_tensor/lossless.py`: the producer the RTL recipe needed. `prove(a, b, target)`
+  is a **bit-pattern** comparison, not a tolerance — a "nearly exact" round trip is an
+  approximate conversion wearing an exact label — and reports how many elements failed.
+  Integer targets check integrality plus range, which is what makes `INT8 -> INT4` real:
+  4-bit weights held in an INT8 array. `best_target` returns the NARROWEST exact target,
+  since the point is the largest saving the data allows; full-precision tensors return
+  `None`, which is a correct answer and not a failure.
+- [x] `windowed_matmul` models the cost honestly: one RNE per window plus the accumulator
+  fold, and NO rounding for integer formats because the RTL accumulates integers exactly.
+  So the reported error is REGROUPING, never storage error. Measured on BF16-origin
+  weights: 1.917x at ~0.007 ppm against the approximate FP16 twin's 977 ppm — ~130,000x
+  tighter at identical traffic, windows 32 -> 16.
+- [x] `INT8 -> INT4` reports `bit_identical=True` and the float pairs report `False`, with a
+  test asserting the latter: claiming bit-identity for a regrouped accumulation would be
+  this module's worst failure mode.
+- [x] A test bug worth recording: the "nearly lossless must be refused" case originally
+  perturbed by `1e-8`, which rounds straight back to the original float32 near 1.0 — so it
+  proved nothing and passed for the wrong reason. It now uses `1 + 2^-20`, exactly
+  FP32-representable and needing 20 mantissa bits that BF16's 8 cannot hold.
+- [x] `PE_LANES` moved into `va_turbo` beside the cycle table rather than duplicated: it is
+  part of the configuration those measurements came from, and it sets `mac_step`.
+- [ ] Open: no consumer mask bit exists for recipes 1/3/17, so `plan()` says plainly that the
+  island will not act on it; the cycle figures are the measured NATIVE ones per format
+  because a narrowed job IS a native job; and a paired GEMM run asserting the proof is still
+  the missing piece before this is a throughput claim.
+- Verified: 203 pytest pass (2 skipped — one is E4M3 data legitimately not being
+  E5M2-representable, 3 mantissa bits versus 2, i.e. the proof working),
+  `check_independence.py` ok, `c_abi` lockstep ok.
+
 ## Open design notes
 
 - **Completion DMA vs PLIC claim:** island soak keeps `CTL.wr_cpl_en=0` for pure claim tests;

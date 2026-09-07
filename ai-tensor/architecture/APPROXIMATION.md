@@ -281,6 +281,46 @@ one block contains roughly six matmuls.
 
 ---
 
+## 5b. Lossless narrowing: exact traffic, measured per data
+
+`ai_tensor.lossless` is the one path that cuts operand traffic **without** changing the
+arithmetic. It does not make the data narrower; it proves the data **already was**.
+
+`prove(a, b, target)` is a bit-pattern comparison, not a tolerance -- a "nearly exact"
+round trip is an approximate conversion wearing an exact label, so one bad element refuses
+the whole claim and the count is reported. Integer targets check integrality plus range,
+which is what makes `INT8 -> INT4` a real case rather than a curiosity: 4-bit weights held
+in an INT8 array.
+
+`best_target(a, b)` returns the **narrowest** exact target, because the point is the largest
+traffic saving the data allows. Full-precision tensors yield `None`, and that is a correct
+answer rather than a failure.
+
+What it costs is **regrouping, never storage error**. The narrower format has a wider
+`mac_step`, so the FP32 accumulator folds fewer times (k=64 at 8 lanes: 32 windows for FP32,
+16 for BF16). `windowed_matmul` models exactly that -- one RNE per window plus the
+accumulator fold, and **no rounding at all** for integer formats, since the RTL accumulates
+integers exactly. Measured on BF16-origin weights:
+
+| | value |
+|---|---|
+| speedup | **1.917x** (measured native cycles, 669 -> 349) |
+| error | ~0.007 ppm |
+| approximate FP16 twin | 977 ppm |
+| quality gain | **~130,000x tighter** at identical traffic |
+| windows | 32 -> 16 |
+
+`INT8 -> INT4` reports `bit_identical=True`: same integers, exact reduction, integer
+accumulator with no rounding site. The float pairs report `bit_identical=False`, and the
+tests assert that -- claiming bit-identity there would be the module's worst failure mode.
+
+Two honest limits. `plan()` carries a note saying no consumer mask bit exists for recipes
+1/3/17, so the island will not act on the plan yet. And the cycle figures are the measured
+**native** ones for each format, because a narrowed job *is* a native job -- there is no
+separate lossless datapath to measure.
+
+---
+
 ## 6. Recipe id map
 
 Read from `corev_apu/ai_island/include/g6lc_ai_policy_pkg.sv` (`va_turbo_arith`) and
