@@ -10,7 +10,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
 OUT="${AI_GEMM_CONC_OUT:-$ROOT/build-platform/workspace/build/g6lc-ai-gemm-concurrent}"
-JOBS="${AI_GEMM_CONC_JOBS:-2}"
+JOBS="${AI_GEMM_CONC_JOBS:-0}"
+if [[ "$JOBS" == 0 ]]; then
+  JOBS="$( (command -v nproc >/dev/null 2>&1 && nproc) || echo 2 )"
+fi
+CCACHE_DIR="${CCACHE_DIR:-$ROOT/build-platform/workspace/build/ccache-gemm-concurrent}"
+if command -v ccache >/dev/null 2>&1; then
+  export OBJCACHE=ccache CCACHE_DIR
+  export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-16G}"
+  export CCACHE_COMPILERCHECK="${CCACHE_COMPILERCHECK:-content}"
+  mkdir -p "$CCACHE_DIR"
+fi
 VA_TURBO="${VA_TURBO:-1}"
 DOT_PIPE_FLOAT="${DOT_PIPE_FLOAT:-0}"
 PE_LANES="${PE_LANES:-0}"
@@ -18,7 +28,10 @@ MAX_DIM="${MAX_DIM:-0}"
 DRAM_CLASS="${DRAM_CLASS:-0}"
 RUN_TIMEOUT="${AI_GEMM_CONC_TIMEOUT:-300}"
 VERILATOR="${VERILATOR:-verilator}"
-case "$JOBS" in 1|2|3|4|5|6|7|8) ;; *) echo "FAIL AI_GEMM_CONC_JOBS must be 1..8" >&2; exit 2;; esac
+if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]] || (( JOBS > 256 )); then
+  echo "FAIL AI_GEMM_CONC_JOBS must be 0 (auto) or 1..256" >&2
+  exit 2
+fi
 case "$VA_TURBO" in 0|1) ;; *) echo "FAIL VA_TURBO must be 0 or 1" >&2; exit 2;; esac
 case "$DOT_PIPE_FLOAT" in 0|1) ;; *) echo "FAIL DOT_PIPE_FLOAT must be 0 or 1" >&2; exit 2;; esac
 case "$PE_LANES" in 0|8|16|32|64|128|256) ;; *) echo "FAIL invalid PE_LANES" >&2; exit 2;; esac

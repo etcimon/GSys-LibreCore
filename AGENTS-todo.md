@@ -346,6 +346,24 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   directed safety cases passing. `reuse_b_i` is a LEASE, not coherence: the caller
   must hold B immutable and advance the epoch or invalidate before any writer,
   ownership change or epoch wrap.
+- [x] REUSE AND CONCURRENCY COMPOSE, and the reuse gain GROWS with contention.
+  Measured at one, two and four engines on the same shared port
+  (`ai-gemm-reuse-20260907T044438Z-6694e3e3bcc6`, `...T045844Z-2464ca922d94`):
+  INT8 reuse 1.152x -> 1.255x -> 1.358x, FP16 1.133x -> 1.230x -> 1.374x, FP32
+  1.122x -> 1.216x -> 1.355x. Four-engine concurrency then improves from 2.077x
+  to 2.448x (INT8), 2.374x to 2.879x (FP16) and 2.433x to 2.936x (FP32), i.e.
+  51.9-60.8% of ideal 4x becomes 61.2-73.4%, for a combined serial-cold to
+  concurrent-warm 2.821x / 3.262x / 3.296x. The mechanism is the one the earlier
+  measurement identified: the beats reuse removes are exactly the contended
+  resource, so the levers multiply rather than overlap. Operand read beats halve
+  at every engine count and every C element is still checked. One shared-port
+  fixture with repeated same-weight jobs; not MAC/s, not silicon, not inference.
+- [x] BUILD NO LONGER SELF-LIMITS: the remote compile was pinned at `-j 2`, which
+  is what made the four-engine build hit the 1800 s cap and look like a failure.
+  It now saturates the remote cores (`--jobs 0` default, 12 used) with a
+  persistent ccache kept OUTSIDE the per-run directory, since a cache inside the
+  run tree is cold on every dispatch. `run-gemm-concurrent.sh` defaults to
+  `nproc` on the same terms.
 - [x] THE ALL-ONES FIXTURES WERE HIDING TWO REAL DEFECTS. (1) Operand banks were
   sized `ceil(MaxDim/PeLanes)` while A/B addresses count BYTES, so at MaxDim=16,
   PeLanes=8 an FP32 row 0 byte 16 aliased row 1 byte 0. Now

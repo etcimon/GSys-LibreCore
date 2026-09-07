@@ -60,8 +60,28 @@ def configuration(args):
     return {name: getattr(args, name) for name, _, _, _ in KNOBS}
 
 
+def host_jobs(requested):
+    if requested:
+        return requested
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)
+
+
+def build_env(cache_dir):
+    env = dict(os.environ)
+    objcache = basis.shutil.which("ccache")
+    if objcache is None:
+        return env, None
+    env.update(OBJCACHE="ccache", CCACHE_DIR=str(cache_dir),
+               CCACHE_MAXSIZE=env.get("CCACHE_MAXSIZE", "16G"),
+               CCACHE_COMPILERCHECK=env.get("CCACHE_COMPILERCHECK", "content"))
+    return env, objcache
+
+
 def build_command(tool, root, mdir, args):
-    command = [str(tool), "--binary", "--timing", "--assert", "-j", "2",
+    command = [str(tool), "--binary", "--timing", "--assert", "-j", str(host_jobs(args.jobs)),
                "-Wno-fatal", "-Wno-TIMESCALEMOD", "-Wno-UNUSED", "-Wno-UNOPTFLAT",
                "-Wno-WIDTHTRUNC", "-Wno-WIDTHEXPAND", "-Wno-PINCONNECTEMPTY", "-Wno-CASEINCOMPLETE"]
     include_dirs = [Path(header).parent.parent for header, _ in INCLUDES]
@@ -134,7 +154,7 @@ def validate_output(text, args):
     return result
 
 
-def run_logged(command, name, cwd, out, timeout, report):
+def run_logged(command, name, cwd, out, timeout, report, env=None):
     command = list(map(str, command))
     entry = {"name": name, "command": command, "log": name + ".log", "timeout_seconds": timeout,
              "returncode": None, "timed_out": False}
@@ -145,7 +165,7 @@ def run_logged(command, name, cwd, out, timeout, report):
             process = basis.subprocess.Popen(command, cwd=cwd, stdout=log,
                                              stderr=basis.subprocess.STDOUT,
                                              stdin=basis.subprocess.DEVNULL,
-                                             start_new_session=True)
+                                             env=env, start_new_session=True)
             try:
                 entry["returncode"] = process.wait(timeout=timeout)
             except basis.subprocess.TimeoutExpired:
@@ -221,8 +241,20 @@ def remote(args):
         check_command(version)
         report["verilator"] = (out / version["log"]).read_text(encoding="utf-8", errors="replace").strip()
         mdir = work / "obj_dir"
+        # Compilation is the dominant cost at four engines, so it uses every
+        # available core and a ccache kept OUTSIDE the per-run directory: a cache
+        # inside the run tree would be cold on every dispatch.
+        cache_dir = Path(os.environ.get("AI_GEMM_CONC_CCACHE_DIR",
+                                        str(Path(os.environ["TH_RUN_DIR"]).parent / "ccache-gemm-reuse")))
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        env, objcache = build_env(cache_dir)
+        report["build_jobs"] = host_jobs(args.jobs)
+        report["objcache"] = objcache
+        report["ccache_dir"] = str(cache_dir) if objcache else None
         build = run_logged(build_command(tool, snapshot, mdir, args), "build", snapshot, out,
-                           args.build_timeout, report)
+                           args.build_timeout, report, env=env)
+        if objcache:
+            run_logged([objcache, "--show-stats"], "ccache-stats", snapshot, out, 60, report, env=env)
         check_command(build)
         simulation = run_logged([mdir / TOP], "simulation", snapshot, out, args.sim_timeout, report)
         text = (out / simulation["log"]).read_text(encoding="utf-8", errors="replace")
@@ -265,7 +297,7 @@ def dispatch(args):
     command = [*launcher, proxy_path(proxy), "py", proxy_path(Path(__file__).resolve()),
                "--tag", tag, "--threads", "1", "--pull"]
     settings = configuration(args)
-    settings.update(build_timeout=args.build_timeout, sim_timeout=args.sim_timeout)
+    settings.update(build_timeout=args.build_timeout, sim_timeout=args.sim_timeout, jobs=args.jobs)
     for name, value in settings.items():
         command += ["--env", "AI_GEMM_CONC_%s=%s" % (name.upper(), value)]
     command += ["--env", "PYTHONDONTWRITEBYTECODE=1"]
@@ -287,7 +319,7 @@ def self_test():
     assert VENDOR is basis.VENDOR and INCLUDES is basis.INCLUDES and FORMATS is basis.FORMATS
     assert SOURCES.count(POLICY) == 1 and SOURCES[-1].endswith(TOP + ".sv")
     assert not any(Path(source).stem == basis.TOP for source in SOURCES)
-    args = basis.argparse.Namespace(**{name: default for name, _, _, default in KNOBS})
+    args = basis.argparse.Namespace(jobs=0, **{name: default for name, _, _, default in KNOBS})
     conc = ["CONC fmt=%d shared_b=0 eng=1 macs_total=1024 serial=101 concurrent=100" % fmt for fmt in FORMATS]
     reuse = "REUSE fmt=0 case=warm hits=1 r_beats=16"
     passed = "PASS g6lc_ai_gemm_concurrent class=0 nch=1 eng=1 lanes=8 va_turbo=1"
@@ -314,7 +346,14 @@ def self_test():
         else:
             raise AssertionError("invalid manifest accepted")
     command = build_command("verilator", Path("snapshot"), Path("obj_dir"), args)
-    assert "--assert" in command and command[command.index("-j") + 1] == "2"
+    assert "--assert" in command and int(command[command.index("-j") + 1]) == host_jobs(0) >= 1
+    args.jobs = 3
+    explicit = build_command("verilator", Path("s"), Path("o"), args)
+    assert explicit[explicit.index("-j") + 1] == "3"
+    args.jobs = 0
+    cached, objcache = build_env(Path("cache"))
+    assert (objcache is None) == (cached.get("OBJCACHE") is None)
+    assert objcache is None or (cached["OBJCACHE"] == "ccache" and cached["CCACHE_DIR"] == "cache")
     for name, parameter, choices, _ in KNOBS:
         for value in choices:
             setattr(args, name, value)
@@ -343,6 +382,9 @@ def main(argv=None):
         parser.add_argument("--" + name.replace("_", "-"), type=int,
                             default=os.environ.get("AI_GEMM_CONC_" + name.upper(), str(default)),
                             help="positive timeout in seconds (default %d)" % default)
+    parser.add_argument("--jobs", "-j", type=int,
+                        default=os.environ.get("AI_GEMM_CONC_JOBS", "0"),
+                        help="remote compile jobs; 0 (default) saturates the remote cores")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="print commands without dispatching or writing files")
     mode.add_argument("--self-test", action="store_true", help="no-write local syntax and parser checks; no RTL execution")
@@ -352,6 +394,8 @@ def main(argv=None):
             parser.error("invalid AI_GEMM_CONC_" + name.upper())
     if min(args.build_timeout, args.sim_timeout) <= 0:
         parser.error("timeouts must be positive")
+    if not 0 <= args.jobs <= 256:
+        parser.error("--jobs must be 0 (auto) or 1..256")
     if args.self_test:
         return self_test()
     if os.environ.get("TH_DATA_DIR"):

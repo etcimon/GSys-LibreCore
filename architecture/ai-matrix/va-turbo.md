@@ -508,8 +508,38 @@ arithmetic path. Metadata updates use the existing clock and active-low reset;
 SRAM and testmode seams are unchanged. No new clock, latch, ISA/DTS encoding or
 production format grant is added. Synthesis smoke is not STA or mapped area.
 
-Reproduce with `python -B verif/regress/ai-gemm-reuse.py --engines 1 --channels 1
---va 1` (one line). The runner uses the remote proxy, uploads a source-hashed
+### Measured: reuse and concurrency compose
+
+Reuse was measured at one, two and four engines on the same shared port. The
+gain **grows with contention**, because the beats it removes are the scarce
+resource:
+
+| Format | reuse at 1 engine | at 2 engines | at 4 engines |
+|---|--:|--:|--:|
+| INT8 | 1.152x | 1.255x | **1.358x** |
+| FP16 | 1.133x | 1.230x | **1.374x** |
+| FP32 | 1.122x | 1.216x | **1.355x** |
+
+Concurrency also improves once reuse has removed the weight traffic, so the two
+levers multiply instead of overlapping:
+
+| Format | 4-engine concurrency, cold | with reuse | combined serial-cold to concurrent-warm |
+|---|--:|--:|--:|
+| INT8 | 2.077x (51.9% of 4x) | **2.448x (61.2%)** | **2.821x** |
+| FP16 | 2.374x (59.4%) | **2.879x (72.0%)** | **3.262x** |
+| FP32 | 2.433x (60.8%) | **2.936x (73.4%)** | **3.296x** |
+
+Operand read beats halve at every engine count (INT8 4-engine 256 -> 128), and
+each result is still checked element by element against the independent
+reference. This is one shared-port fixture with repeated same-weight jobs on the
+class-0 SRAM model; it is not MAC/s, not silicon, and not model inference. The
+first load into each engine is still paid, and the reported
+`baseline_including_prime` keeps that cost visible.
+
+Reproduce with `python -B verif/regress/ai-gemm-reuse.py --engines 4 --channels 1
+--va 1 --build-timeout 7200 --sim-timeout 1800`. Compilation saturates the remote
+cores (`--jobs 0`, the default) and uses a persistent ccache outside the run
+directory, so a four-engine build is repeatable rather than a timeout. The runner uses the remote proxy, uploads a source-hashed
 snapshot, enables assertions and preserves build/simulation logs and status.
 Reports pair forced reload and reuse on identical physical resources, separate
 cold priming from warm operation, check all C elements and poison outputs before
