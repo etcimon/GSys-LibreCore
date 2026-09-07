@@ -164,6 +164,15 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   measures 6.662 MAC/cyc (+89.2%) while four 8-lane clusters project 14.083
   (+300.0%), a 2.11x replication advantage. Operand bandwidth 5.45 B/cycle for
   four clusters against ~8 B/cycle per 64-bit port fits; eight clusters would not.
+- [ ] CLUSTER LINEARITY IS UNTESTED, and the 4.00x-for-4x figure depends on it.
+  Related measurement only: one engine given 1 -> 8 memory channels changes by
+  -3.8% aggregate with -16.7%..+3.2% per-format scatter, i.e. inside the noise
+  floor, so a single engine is not bandwidth-starved at 1.36 B/cycle against ~8
+  B/cycle of port. That is consistent with replication headroom but does NOT
+  measure contention between engines sharing one port. The decisive experiment is
+  N gemm_seq instances running concurrently against one dram_backend through an
+  N+1-port axi_mux (shared A/B, per-engine C to keep the preload small); no
+  testbench builds that today. Do not quote 4x cluster throughput until it does.
 - [ ] CLUSTERS ARE NOT IMPLEMENTED: Clusters/ClustersEnabled exist only in
   island_cfg_legal and the CAP window; island_top instantiates one gemm_seq. The
   +300% figure is 4x a measured single cluster, not a measured four-cluster

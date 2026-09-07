@@ -1488,6 +1488,22 @@ therefore the only area evidence that exists for the arithmetic array, and the
 gang-versus-replicate decision needs a commercial flow (or a mapping recipe cheap
 enough to finish) before it is settled on cost.
 
+**The cluster linearity assumption is still an assumption.** The 4.00x-for-4x
+figure above is linear *by construction*, and the honest test of it has not been
+run. What exists is a weaker, related measurement: giving one engine more memory
+parallelism does nothing for it. Across the DRAM-class corpus at the deepest AR
+depth, going from one channel to eight moves aggregate cycles by only `-3.8%`,
+with per-format scatter from `-16.7%` to `+3.2%` - scatter larger than the effect,
+and inside the 2.8%-mean / 25%-worst noise floor of that memory model.
+
+So a single engine at this tile is not bandwidth-starved: it cannot exploit 8x more
+memory parallelism, which is consistent with the 1.36 B/cycle it actually consumes
+against roughly 8 B/cycle of port. That is **consistent with** headroom for
+replication, but it is not the same experiment: it measures one engine's ability
+to use parallelism, not contention between several engines sharing one port.
+Deciding cluster scaling needs N engines running concurrently against one memory,
+which no testbench currently builds.
+
 Two hard limits on the above. First, **multi-cluster is advertised but not
 implemented**: `Clusters`/`ClustersEnabled` appear in `island_cfg_legal` and the
 CAP window, while `g6lc_ai_island_top` instantiates exactly one
