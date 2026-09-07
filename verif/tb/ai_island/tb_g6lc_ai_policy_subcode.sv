@@ -156,6 +156,12 @@ module tb_g6lc_ai_policy_subcode #(
   // provisioning basis (ai-gemm-codec-basis-20260906T165957Z-718434a9a9d1):
   // best lanes were 8 for INT4, 16 for INT8/FP8, 32 for FP16/BF16/FP32.  If
   // someone retunes these functions without new measured evidence, this fails.
+  //
+  // These expectations are k=16 values.  The underlying quantity is
+  // fmt_row_bytes(k) (the operand row in bytes), which only equals twice the
+  // element width at k=16; the basis could not measure other k because MaxDim
+  // caps it.  If a k sweep lands, these assertions must be re-derived rather
+  // than relaxed.
   initial begin
     assert (policy_dot_lanes_log2(3'(config_pkg::AI_FMT_INT4)) == 3'd3)
       else $fatal(1, "INT4 measured optimum is 8 lanes");

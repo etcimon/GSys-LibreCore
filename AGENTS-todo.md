@@ -245,6 +245,25 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   hypothetical provisioning, since lanes are fixed at elaboration.
 - [ ] Register ai-gemm-codec-basis in build-platform test suites and the Makefile
   once the lane-grouping consumer exists; it is currently a research runner.
+- [ ] SUB-CODE HYPOTHESIS (analysis, not a result; architecture/ai-matrix
+  README has the argument). The current sub-code loses for three independent
+  measured reasons: the optimum is shape-independent so its 8-candidate shape
+  search scans a flat space; the search costs 4,880 cells + 340 flops + 593 cache
+  cells and a 32-cycle tax that is the measured cause of the 0.998x on captured
+  traces; and nothing consumes its output. The decision that does carry return is
+  a lookup, not a search - four lane values from a 3-bit format input - so a
+  combinational table is tens of cells and zero cycles, recovers ~5,470 cells and
+  makes the repeat cache pointless. The search is what fails, not the concept.
+- [ ] CORRECTION to the fitted rule: policy_dot_lanes_log2 is k=16-specific.
+  mac_step = 2*PeLanes (INT4) or PeLanes/bytes, and a reduction ends when
+  mac_step >= k, so usable lanes = fmt_row_bytes(k) = the operand row in bytes.
+  At k=16 that equals twice the element width, which is why the fit reproduced
+  8/16/32/64. Scope notes added to the package and the pinned assertions.
+- [ ] DECIDING EXPERIMENT for the hypothesis: raise MaxDim above 16 and sweep k
+  against lane width per format. The rule predicts the optimum tracks k_bytes
+  (INT4 at k=64 should want 32 lanes, not 8). If the optimum instead stays at the
+  element-width fit, the decision is not runtime-varying and the honest answer to
+  "can sub-codes pay?" is no. Blocked on regenerating golden-C constants per k.
 - [ ] Sub-code/group tuning has zero throughput leverage while nothing consumes
   the codec output. Do not tune it for performance. It becomes productive only
   with a provisioning consumer that RAISES a bound - cluster count or lane

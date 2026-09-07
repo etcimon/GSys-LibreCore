@@ -79,6 +79,17 @@ package g6lc_ai_policy_pkg;
   // useful as separate groups working on separate outputs, while wide formats
   // want every lane ganged onto one dot (FP32 gained up to +188.2%).
   //
+  // SCOPE, important: this fit is k=16-specific.  The mechanism in
+  // g6lc_ai_gemm_seq is mac_step = 2*PeLanes for INT4 and PeLanes/bytes
+  // otherwise, and a reduction ends when mac_step >= k, so the lanes a dot can
+  // actually use is fmt_row_bytes(k) -- the operand row in bytes -- not a
+  // function of the element width alone.  At k=16 those coincide (8/16/32/64 for
+  // INT4/INT8/FP16/FP32), which is why "twice the element width" reproduces the
+  // measurements.  For other k it does not follow, and the whole basis was
+  // measured at k=16 only because MaxDim caps k there.  Treat these functions as
+  // valid at k=16 and re-derive against k_bytes before using them elsewhere; see
+  // the sub-code hypothesis section in architecture/ai-matrix/README.md.
+  //
   // FP32's 64-lane requirement was confirmed by a follow-up 8/32/64-lane run
   // (ai-gemm-codec-basis-20260906T172019Z): FP32 wins at 64 lanes for every
   // shape class, up to +320.0% against the shipped 8-lane provisioning on 16x16,

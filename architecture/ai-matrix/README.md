@@ -1569,6 +1569,72 @@ grouping in the datapath (gang/split), which does not exist yet. Until it does,
 these are measured returns of *hypothetical provisioning*, not of the shipped
 island, and no gate is enabled on their strength.
 
+### Hypothesis: sub-codes can pay, but not as currently built
+
+This section is a hypothesis and a design argument, not a result. It is written
+because the measured evidence explains *why* the current sub-code loses and
+points at a cheaper form that could win.
+
+**Why the current sub-code cannot win.** It spends a 32-cycle, 8-candidate search
+choosing an alternate row/column tile shape. Three measured facts each defeat it
+independently:
+
+1. The provisioning optimum is **shape-independent** - identical across all five
+   shape classes for every format - so a search over shapes is searching a flat
+   space.
+2. The search costs `4,880` generic cells and `340` flops, plus `593` cells for
+   the repeat cache, and charges a 32-cycle evaluation tax that made captured
+   LLM traces come out at `0.998x`, i.e. the tax exceeded the benefit.
+3. Nothing consumes the chosen topology, so even a correct choice changes no
+   cycles.
+
+**The decision that does carry return is nearly free.** The measured optimum is a
+lookup, not a search: `INT4 -> 8`, `INT8/FP8 -> 16`, `FP16/BF16 -> 32`,
+`FP32 -> 64` lanes. Four values, expressible in two bits, from a three-bit input.
+A combinational table is tens of cells and zero cycles against `4,880` cells and
+32 cycles - and it deletes the evaluation tax that is the measured cause of the
+`0.998x`. The repeat cache also becomes unnecessary, since a combinational lookup
+has nothing to memoise. **The concept is not what fails; the search is.**
+
+**The mechanism, which corrects the fitted rule.** `g6lc_ai_gemm_seq` sets
+`mac_step = 2*PeLanes` for INT4 and `PeLanes/bytes` otherwise, and a reduction
+completes when `mac_step >= k`. Solving for lanes gives `L >= k/2` for INT4 and
+`L >= k*bytes` otherwise - both of which are exactly `fmt_row_bytes(k)`, the
+operand row length in bytes. So the general rule is:
+
+> **useful lanes = k_bytes**, the operand row in bytes; beyond that, lanes idle.
+
+At `k=16` that yields 8/16/32/64 for INT4/INT8/FP16/FP32 - precisely the four
+measured optima, which is why the "twice the element width" fit appeared to work.
+**That fit is therefore `k=16`-specific, and `policy_dot_lanes_log2` is only
+validated at `k=16`.** The general rule depends on `k`.
+
+**Why that matters for sub-codes specifically.** `k` is a per-job runtime value.
+A decision that depends on `(k, format)` is *not* a static configuration choice,
+which is exactly the property the codec needs to be worth having: a fixed build
+cannot pick the right lane grouping for every job, but a three-bit sub-code
+computed per descriptor can. This is the first identified decision that is both
+runtime-varying and tied to measured cycles.
+
+**Efficiency and area path.**
+
+| Step | Area | Latency | Contingency |
+|---|---|---|---|
+| Replace the candidate search with a `(k, format) -> groups_log2` table | ~tens of cells, recovering ~4,880 + 593 | 32 cycles -> 0 | none; pure simplification |
+| Re-purpose the 3-bit field as `groups_log2` (2 bits) + 1 reserved | unchanged encoding | - | none; wire-compatible |
+| Add gang/split lane grouping to the datapath | the real cost, unmeasured | - | this is what unlocks any gain |
+
+Only the third step buys anything, and it is the expensive one. The first two make
+the codec side almost free and remove the measured reason it currently loses.
+
+**The experiment that would confirm or kill this.** Raise `MaxDim` above 16 and
+sweep `k` against lane width for each format: the rule predicts the optimum tracks
+`k_bytes`, so INT4 at `k=64` should want 32 lanes rather than 8. If the optimum
+instead stays at the element-width fit, the `k` dependence is wrong and the
+sub-code has no runtime-varying decision to make - which would return the honest
+answer to "can sub-codes pay?" as **no**. That sweep needs the golden-C constants
+regenerated per `k`, which is why it has not been run.
+
 ### Where sub-codes and groups can and cannot help
 
 Tuning subcode/group parameters cannot move MAC/s today, for a structural reason
