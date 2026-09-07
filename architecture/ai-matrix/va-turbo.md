@@ -45,14 +45,31 @@ arithmetic-changing feature unreachable, not to switch it on.
 
 ### 2.2 Runtime parameter — planned, not implemented
 
-One `va_turbo_level` field, an **error budget in sixteenths** rather than an
-opaque aggressiveness dial, so the runtime knob has the same units as the
-promotion gate:
+One `va_turbo_level` field, an **error budget** rather than an opaque
+aggressiveness dial, so the runtime knob has the same units as the promotion
+gate. The ladder is **geometric**: 100 ppm, doubling per step, saturating at
+100%.
 
-| Level | Meaning |
-|---|---|
-| `0` | off — exact path, bit-identical to `VaTurboEn=0` |
-| `1..15` | admit bank entries whose measured p95 tile error is `<= level/16 %` |
+| Level | Budget | Meaning |
+|---|--:|---|
+| `0` | 0 | off — exact path, bit-identical to `VaTurboEn=0` |
+| `1` | 100 ppm | tightest expressible budget |
+| `5` | 1,600 ppm | admits FP16 at `kappa = 1` |
+| `8` | 12,800 ppm | admits BF16 and INT8 at `kappa = 1` |
+| `15` | 1,000,000 ppm | saturated (100%) |
+
+**A linear ladder was wrong and is retracted.** The first revision made this
+linear in sixteenths of a percentage point (625 ppm per step, 9,375 ppm at level
+15). That is a *range* error, not a tuning choice: useful budgets span from
+FP16's ~1,000 ppm to a logarithmic multiply's 250,000 ppm, so a 625-ppm step
+spends all fifteen codes inside the first decade and cannot express the rest at
+all. Measured INT8 error (18,527 ppm) fell outside the entire old range, which
+made the **encoding**, not the arithmetic, the blocker. Doubling steps put fine
+resolution where fine budgets live and coarse resolution where only coarse
+budgets are plausible, at the same 4 bits.
+
+`error_bound_q4` is the caller's own bound expressed as an index on this same
+ladder, rounded up, so it compares directly against the authorised level.
 
 `0` must be bit-exact, not approximately exact: that is what makes the feature
 safely shippable-but-disabled. Plumbing (aicfg field or MMIO, PMU readback of
@@ -259,13 +276,13 @@ the identical `VA_HEURISTICS PASS sweep_checks=18473` marker in all ten profiles
 the unchanged codec suite also passes
 (`ai-policy-codec-20260907T012056Z-4686d331a62b`).
 Local explicit Yosys synthesis of the externally driven selector at
-64 lane-bytes / eight-byte minimum / eight groups reports **2,859 generic cells,
+64 lane-bytes / eight-byte minimum / eight groups reports **2,852 generic cells,
 zero sequential cells and zero latches**. The disabled wrapper reports zero
 cells and constant-zero outputs. Artifact:
-`ai-policy-subcode-synth-20260907T015130Z-ba620cdc9338`. Two earlier builds
+`ai-policy-subcode-synth-20260907T020430Z-3e321d31b7e7`. Two earlier builds
 measured 518 and 540 cells, before the matrix-plane/queue prerequisites and then
 the §9 arithmetic and bound tables were added; both figures are superseded. The
-growth from 540 to 2,859 is the cost of the 32-recipe arithmetic table, the ppm
+growth from 540 to 2,852 is the cost of the 32-recipe arithmetic table, the ppm
 bound tables and the wider plan word - still combinational and stateless, but no
 longer negligible, and it must be budgeted against the consumer's timing path
 when one exists.
@@ -324,8 +341,8 @@ For exact accumulation and per-product relative error `eps`,
 would silently assume no cancellation. A missing or sub-unity `kappa` fails
 closed.
 
-The runtime level is an error budget in sixteenths of a percentage point, so one
-step is 625 ppm and level 15 is 9,375 ppm. Admission requires **both** the
+The runtime level is an error budget on the geometric ladder of §2.2 (100 ppm
+doubling per step). Admission requires **both** the
 analytic bound and the caller's independently supplied bound to fit the budget:
 the analytic bound cannot see the data, and a measured bound is only as good as
 its sample.
@@ -358,16 +375,41 @@ granularity. Against the Frobenius-matched `kappa` (**3.292** relative,
 **12 of 12 hold**, with 3.3x-36.5x slack, so the composition is sound and
 conservative.
 
-**Finding 2 - the level field cannot express what INT8 needs.** With the measured
-`kappa`, INT8's sound bound is `675,768` ppm (67.6%) and even its *observed*
-error is `18,527` ppm (1.85%), while the maximum budget is 9,375 ppm (0.94%).
-INT8 is therefore unreachable through this interface at any level — the RTL gate
-is correct, but a realistic `kappa` makes it inadmissible. Only FP16-class
-narrowing fits. Closing that needs one of: a wider level field, a tighter
-derivation (per-channel or statistical rather than worst-case), or accepting that
-INT8 rides the measured-bound path with a separately approved profile. **Do not
-"fix" this by widening the bound to make INT8 pass** — that would make the gate
-lie.
+**Finding 2 (fixed) - the level ladder could not express what INT8 needs.** With
+the measured `kappa`, INT8's sound bound is `675,768` ppm and even its *observed*
+error is `18,527` ppm, while the old linear ladder topped out at 9,375 ppm. INT8
+was unreachable at any level, so the encoding was the blocker rather than the
+arithmetic. That is what the geometric ladder in §2.2 fixes: **every declared
+`eps` is now expressible**, and the test suite asserts exactly that for all 32
+recipes rather than leaving it to inspection.
+
+**Finding 3 - the remaining conservatism is concentrated in the `FULL` kind.**
+With the ladder in place, the measured gap between the level the analytic bound
+demands and the level a tight bound would demand is the tuning target:
+
+| Candidate | Kind | Level the analytic bound needs | Level if the bound were tight | Slack |
+|---|---|--:|--:|--:|
+| FP16 | rel | 7 | 3 | 9.5x |
+| BF16 | rel | 10 | 7 | 6.2x |
+| Mantissa 8 bits | rel | 9 | 7 | 3.9x |
+| Mantissa 4 bits | rel | 13 | 11 | 3.6x |
+| FP8 E4M3 | rel | 14 | 11 | 8.2x |
+| Mitchell | rel | 15 | 12 | 6.0x |
+| **INT8** | **full** | **14 (82% budget)** | **9 (2.5%)** | **36.5x** |
+| INT4 | full | 15 | 13 | 3.3x |
+
+The `REL` kinds sit at 3.6x-9.5x, which is the ordinary price of a worst-case
+bound. `INT8` at **36.5x** is the outlier, because the `FULL` reference
+`K x max|a| x max|b|` is doubly pessimistic: it assumes every element hits worst
+case *and* that the result norm is small against that product. Authorising level
+14 would mean permitting 82% error to admit a recipe whose real error is 1.85%,
+which no one should sign.
+
+So the next tightening is specific rather than vague: replace the `FULL`
+reference with actual operand norms (`sum|a|`, `sum|b|`) instead of
+`K x max x max`, which needs the caller to supply norm metadata. That should move
+INT8 from level 14 toward its observed level 9. **Do not instead widen the bound
+to make INT8 pass** — that would make the gate lie.
 
 ## 10. Not implemented
 

@@ -297,13 +297,28 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   cancel, so every bound saturates to 100% and "holds" becomes trivially true. A
   bound and its observation must share a granularity; the earlier all-saturated
   run was a vacuous pass, not validation.
-- [ ] FINDING: the 4-bit level cannot express INT8. With measured kappa, INT8's
-  sound bound is 675,768 ppm (67.6%) and even its OBSERVED error is 18,527 ppm
-  (1.85%), against a 9,375 ppm (0.94%) maximum budget, so INT8 is unreachable at
-  any level and only FP16-class narrowing fits. Options: widen the level field,
-  derive a tighter (per-channel or statistical) bound, or route INT8 through the
-  measured-bound path under a separately approved profile. DO NOT widen the
-  analytic bound to make INT8 pass; that would make the gate lie.
+- [x] FIXED, and it was my own design error: the level ladder was linear in
+  sixteenths of a percent (625 ppm/step, 9,375 ppm at level 15), which is a RANGE
+  error rather than a tuning choice. Useful budgets span FP16's ~1,000 ppm to a
+  logarithmic multiply's 250,000 ppm, so a 625-ppm step spent all fifteen codes in
+  the first decade and could not express the rest; measured INT8 error (18,527
+  ppm) sat outside the whole range, making the ENCODING the blocker. Replaced with
+  a geometric ladder at the same 4 bits: 100 ppm doubling per step, saturating at
+  100%, level 0 still off. `error_bound_q4` is a ladder index, rounded up. The
+  suite now asserts the ladder is strictly increasing and that every declared eps
+  is expressible by some level.
+- [ ] REMAINING CONSERVATISM IS THE FULL KIND, and it is quantified. Measured gap
+  between the level the analytic bound demands and the level a tight bound would
+  demand: FP16 7 vs 3 (9.5x), BF16 10 vs 7 (6.2x), mantissa-8 9 vs 7 (3.9x),
+  FP8 E4M3 14 vs 11 (8.2x), Mitchell 15 vs 12 (6.0x), INT4 15 vs 13 (3.3x), and
+  INT8 14 vs 9 (36.5x). The REL kinds at 3.6x-9.5x are the ordinary price of a
+  worst-case bound; INT8 is the outlier because the FULL reference
+  K*max|a|*max|b| assumes every element hits worst case AND that the result norm
+  is small against that product. Authorising level 14 would permit 82% error to
+  admit a recipe whose real error is 1.85%. Next tightening is specific: replace
+  the FULL reference with actual operand norms (sum|a|, sum|b|), which needs norm
+  metadata from the caller and should move INT8 from level 14 toward level 9. DO
+  NOT widen the bound to make INT8 pass; that would make the gate lie.
 - [ ] Connect qualified V/A plans to actual consumers and window ownership before
   claiming acceleration. No precision conversion, multi-output arithmetic, new
   runtime ABI or approximation quality was implemented in the selector pass.

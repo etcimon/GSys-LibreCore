@@ -124,13 +124,17 @@ module tb_g6lc_ai_policy_subcode #(
     r.m = 16; r.n = 16; r.k = 16; r.code = POLICY_BULK;
     r.numfmt = 7; r.bank = 0; r.subcode = 4;
     r.free_accumulators = 8; r.ready_jobs = 8; r.bank_groups = 8;
-    r.range_safe = 1; r.accuracy_valid = 1; r.error_bound_q4 = 2; r.level = 2;
+    // FP16 needs 977 ppm, which on the geometric ladder is level 5 (1,600 ppm).
+    r.range_safe = 1; r.accuracy_valid = 1; r.error_bound_q4 = 3; r.level = 5;
     // Conversions now also carry the analytic bound, so kappa is mandatory.
     r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.apply && p.convert && p.target_numfmt == 5 && p.groups_log2 == 1 && p.row_bytes == 32)
       else $fatal(1, "VA FP16 bound equality");
-    r.error_bound_q4 = 3;
+    r.level = 4'd4;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA FP16 must not fit an 800 ppm budget");
+    r.level = 4'd5; r.error_bound_q4 = 6;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply && p.target_numfmt == 7 && !p.convert) else $fatal(1, "VA excessive error");
     r.error_bound_q4 = 1; r.accuracy_valid = 0;
@@ -140,20 +144,23 @@ module tb_g6lc_ai_policy_subcode #(
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply) else $fatal(1, "VA unqualified range");
     r.range_safe = 1; r.subcode = 5;
-    // BF16 costs 7,828 ppm, so it needs level 13 (8,125 ppm); level 2 refuses it.
+    // BF16 costs 7,828 ppm, so it needs level 8 (12,800 ppm); level 5 refuses it.
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
-    assert (!p.apply) else $fatal(1, "VA BF16 must not fit a 1250 ppm budget");
-    r.level = 4'd13;
+    assert (!p.apply) else $fatal(1, "VA BF16 must not fit a 1600 ppm budget");
+    r.level = 4'd8;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.apply && p.target_numfmt == 6) else $fatal(1, "VA BF16 recipe");
     r.subcode = 6; r.scale_valid = 0;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply) else $fatal(1, "VA INT8 missing scale");
     r.scale_valid = 1;
+    // INT8's 7,887 ppm full-scale bound is now expressible, which the old linear
+    // ladder could not do at any level.
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
-    assert (p.apply && p.target_numfmt == 0 && p.groups_log2 == 2)
+    assert (p.apply && p.target_numfmt == 0 && p.groups_log2 == 2 &&
+            p.bound_ppm == 20'd7887 && p.budget_ppm == 20'd12800)
       else $fatal(1, "VA INT8 recipe");
-    r.level = 4'd2;
+    r.level = 4'd5;
     r.subcode = 2; r.exact_zero_proven = 1;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply) else $fatal(1, "VA floating zero skip forbidden");
@@ -297,10 +304,26 @@ module tb_g6lc_ai_policy_subcode #(
     assert (a.eps_ppm == 20'd250000) else $fatal(1, "Mitchell supremum");
     assert (va_turbo_bound_ppm(a, 16'd65535) == 20'd1000000) else $fatal(1, "bound saturation");
 
-    // Budget: one level step is 625 ppm and level 15 is 0.9375%.
+    // Budget ladder: 100 ppm doubling per step, saturating at 100%, level 0 off.
+    // The ladder must span the whole useful range, which is the defect the old
+    // linear 625-ppm form had: it could not express INT8's measured error.
     assert (va_turbo_budget_ppm(4'd0) == 20'd0) else $fatal(1, "level 0 budget");
-    assert (va_turbo_budget_ppm(4'd1) == 20'd625) else $fatal(1, "level 1 budget");
-    assert (va_turbo_budget_ppm(4'd15) == 20'd9375) else $fatal(1, "level 15 budget");
+    assert (va_turbo_budget_ppm(4'd1) == 20'd100) else $fatal(1, "level 1 budget");
+    assert (va_turbo_budget_ppm(4'd5) == 20'd1600) else $fatal(1, "level 5 budget");
+    assert (va_turbo_budget_ppm(4'd8) == 20'd12800) else $fatal(1, "level 8 budget");
+    assert (va_turbo_budget_ppm(4'd14) == 20'd819200) else $fatal(1, "level 14 budget");
+    assert (va_turbo_budget_ppm(4'd15) == 20'd1000000) else $fatal(1, "level 15 saturation");
+    for (int lv = 0; lv < 15; lv++)
+      assert (va_turbo_budget_ppm(4'(lv)) < va_turbo_budget_ppm(4'(lv + 1)))
+        else $fatal(1, "VA budget ladder not strictly increasing at %0d", lv);
+    // Every declared eps must be expressible by some level, or the encoding
+    // would again be the blocker rather than the arithmetic.
+    for (int id = 0; id < 32; id++) begin
+      a = va_turbo_arith(5'(id), 3'(config_pkg::AI_FMT_FP32), 4'd10);
+      if (a.kind != VA_ARITH_EXACT && a.kind != VA_ARITH_NONE)
+        assert (a.eps_ppm <= va_turbo_budget_ppm(4'd15))
+          else $fatal(1, "VA id=%0d eps inexpressible by any level", id);
+    end
 
     // Admission: the analytic bound gates independently of the caller's bound.
     r = '0;
@@ -314,18 +337,19 @@ module tb_g6lc_ai_policy_subcode #(
     r.approx_param_valid = 1'b1; r.approx_param = 4'd10;
     r.window_valid = 1'b1; r.qualified_mask = '1;
     r.error_bound_q4 = 8'd0;
-    // FP16 needs 977 ppm, so level 2 (1250 ppm) admits and level 1 (625) does not.
-    r.level = 4'd2;
+    // FP16 needs 977 ppm: level 5 (1,600 ppm) admits, level 4 (800) does not.
+    r.level = 4'd5;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
-    assert (p.apply && p.bound_ppm == 20'd977 && p.budget_ppm == 20'd1250 &&
+    assert (p.apply && p.bound_ppm == 20'd977 && p.budget_ppm == 20'd1600 &&
             p.arith_kind == VA_ARITH_REL && p.convert)
       else $fatal(1, "VA FP16 analytic admission");
-    r.level = 4'd1;
+    r.level = 4'd4;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply && p.eligible == 1'b0 && p.bound_ppm == 20'd977)
       else $fatal(1, "VA analytic bound must refuse over budget");
-    // Cancellation alone can push an otherwise fine recipe out of budget.
-    r.level = 4'd2; r.kappa_q8 = 16'd512;
+    // Cancellation alone can push an otherwise fine recipe out of budget:
+    // 977 x 2 = 1,954 ppm exceeds level 5's 1,600.
+    r.level = 4'd5; r.kappa_q8 = 16'd512;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply && p.bound_ppm == 20'd1954)
       else $fatal(1, "VA kappa must widen the bound");
@@ -337,30 +361,36 @@ module tb_g6lc_ai_policy_subcode #(
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply) else $fatal(1, "VA kappa below unity");
     r.kappa_q8 = 16'd256;
-    // BF16 at 7828 ppm cannot fit any level, since level 15 is 9375 ppm... it can.
-    r.subcode = 3'd5; r.level = 4'd13;
+    // BF16 at 7,828 ppm sits between level 7 (6,400) and level 8 (12,800).
+    r.subcode = 3'd5; r.level = 4'd8;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
-    assert (p.apply && p.bound_ppm == 20'd7828 && p.budget_ppm == 20'd8125)
-      else $fatal(1, "VA BF16 admission at level 13");
-    r.level = 4'd12;
+    assert (p.apply && p.bound_ppm == 20'd7828 && p.budget_ppm == 20'd12800)
+      else $fatal(1, "VA BF16 admission at level 8");
+    r.level = 4'd7;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
-    assert (!p.apply) else $fatal(1, "VA BF16 refused at level 12");
-    // FP8 and INT4 exceed every representable level, so they can never apply
-    // through this interface no matter what the caller claims.
+    assert (!p.apply) else $fatal(1, "VA BF16 refused at level 7");
+    // FP8 E4M3 (128,906 ppm) and INT4 (147,908 ppm) are now EXPRESSIBLE, but
+    // only against a budget above 10%, so they cannot slip in under a small one.
+    // Expressible is not the same as acceptable; that is an approval decision.
     for (int id = 0; id < 32; id++) begin
       if (id inside {7, 29}) begin
-        r.bank = 2'(id >> 3); r.subcode = 3'(id); r.level = 4'd15;
-        r.error_bound_q4 = 8'd0;
+        r.bank = 2'(id >> 3); r.subcode = 3'(id); r.error_bound_q4 = 8'd0;
+        r.level = 4'd11;  // 102,400 ppm
         p = va_turbo_select(cfg, r, 64, 8, 8, '1);
         assert (!p.apply && p.bound_ppm > p.budget_ppm)
-          else $fatal(1, "VA id=%0d must exceed every level", id);
+          else $fatal(1, "VA id=%0d must not fit a 10%% budget", id);
+        r.level = 4'd12;  // 204,800 ppm
+        p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+        assert (p.bound_ppm <= p.budget_ppm)
+          else $fatal(1, "VA id=%0d must be expressible at level 12", id);
         checks++;
       end
     end
+    r.level = 4'd5;
     // Exact recipes need no accuracy evidence at all.  INT8 rather than FP32:
     // an FP32 row at k=16 is 64 bytes and consumes the whole lane width, so
     // grouping is correctly impossible there and would not isolate the point.
-    r.bank = 2'd1; r.subcode = 3'd1; r.level = 4'd1;
+    r.bank = 2'd1; r.subcode = 3'd1; r.level = 4'd1; r.error_bound_q4 = 8'd0;
     r.numfmt = 3'(config_pkg::AI_FMT_INT);
     r.accuracy_valid = 1'b0; r.kappa_valid = 1'b0; r.approx_param_valid = 1'b0;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
@@ -370,7 +400,8 @@ module tb_g6lc_ai_policy_subcode #(
     // Approximate-product recipes never report concurrency.
     r.numfmt = 3'(config_pkg::AI_FMT_FP32);
     r.accuracy_valid = 1'b1; r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
-    r.approx_param_valid = 1'b1; r.approx_param = 4'd12; r.level = 4'd1;
+    // 12 retained mantissa bits is 244 ppm, which fits level 3 (400 ppm).
+    r.approx_param_valid = 1'b1; r.approx_param = 4'd12; r.level = 4'd3;
     r.bank = 2'd3; r.subcode = 3'd1;  // id 25, mantissa reduction
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.apply && p.approx_products && p.groups_log2 == 0 && !p.convert &&

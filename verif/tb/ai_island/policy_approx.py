@@ -213,6 +213,20 @@ ANALYTIC_EPS_PPM = {
 }
 
 
+# Mirror of va_turbo_budget_ppm: geometric ladder, 100 ppm doubling per step,
+# saturating at 100%. Level 0 is off.
+def budget_ppm(level):
+    return 0 if level == 0 else min(1_000_000, 100 << (level - 1))
+
+
+def level_for(ppm):
+    """Smallest level whose budget covers `ppm`, or None if nothing does."""
+    for level in range(1, 16):
+        if budget_ppm(level) >= ppm:
+            return level
+    return None
+
+
 def validate_bounds(report, tile_set):
     """Check the analytic bound is not exceeded by the observed per-tile error.
 
@@ -251,6 +265,11 @@ def validate_bounds(report, tile_set):
             "holds": observed_ppm <= bound_ppm,
             "slack_factor": (bound_ppm / observed_ppm) if observed_ppm > 0 else None,
             "element_bound_vacuous": strict_ppm >= 1_000_000.0,
+            # The tuning output: the level a caller must authorise under the
+            # analytic bound, versus the level the observed error would need if
+            # the bound were tight. The gap is what a tighter derivation buys.
+            "level_needed_analytic": level_for(bound_ppm),
+            "level_needed_observed": level_for(observed_ppm),
         })
     return {
         "kappa_relative_element_worst": kappa_rel_element,
@@ -457,14 +476,17 @@ def main(argv=None):
           % (bounds["kappa_relative_element_worst"], bounds["kappa_fullscale_element_worst"]))
     print("  kappa Frobenius-matched: relative %.3f, full-scale %.3f  -> comparable to the metric"
           % (bounds["kappa_relative_frobenius"], bounds["kappa_fullscale_frobenius"]))
-    print("  %-24s %-6s %-10s %-12s %-12s %-8s %s"
-          % ("candidate", "kind", "eps ppm", "bound ppm", "observed", "holds", "slack"))
+    print("  %-24s %-6s %-10s %-12s %-12s %-6s %-7s %s"
+          % ("candidate", "kind", "eps ppm", "bound ppm", "observed", "slack",
+             "lvl req", "lvl if tight"))
     for row in bounds["entries"]:
-        print("  %-24s %-6s %-10d %-12.0f %-12.0f %-8s %s"
+        print("  %-24s %-6s %-10d %-12.0f %-12.0f %-6s %-7s %s%s"
               % (row["candidate"], row["bound_kind"], row["eps_ppm"],
                  row["matched_bound_ppm"], row["observed_max_ppm"],
-                 "yes" if row["holds"] else "NO",
-                 ("%.2fx" % row["slack_factor"]) if row["slack_factor"] else "-"))
+                 ("%.1fx" % row["slack_factor"]) if row["slack_factor"] else "-",
+                 str(row["level_needed_analytic"] or "none"),
+                 str(row["level_needed_observed"] or "none"),
+                 "" if row["holds"] else "   BOUND UNSOUND"))
     if bounds["unsound"]:
         print("  UNSOUND (widen the RTL bound): " + ", ".join(bounds["unsound"]))
     if bounds["vacuous_at_element_granularity"]:

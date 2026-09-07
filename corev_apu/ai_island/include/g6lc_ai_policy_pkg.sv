@@ -128,6 +128,9 @@ package g6lc_ai_policy_pkg;
     logic lossless_proven;
     logic reuse_a_valid, reuse_b_valid;
     logic range_safe, scale_valid, accuracy_valid;
+    // The caller's own (measured or proven) bound, expressed as an index on the
+    // same geometric ladder as `level` and rounded UP.  Kept as a ladder index
+    // rather than raw ppm so it compares directly against the authorised level.
     logic [7:0] error_bound_q4;
     // Cancellation amplification kappa in Q8 (256 = 1.0).  For a relative
     // per-product bound this is sum|a_i b_i| / |sum a_i b_i|; for a full-scale
@@ -340,10 +343,26 @@ package g6lc_ai_policy_pkg;
     return (scaled > 36'd1000000) ? 20'd1000000 : 20'(scaled);
   endfunction
 
-  // Runtime level is an error budget in sixteenths of a percentage point, so
-  // one level step is 625 ppm and level 15 is 9,375 ppm (0.9375%).
+  // Runtime level is an error budget on a GEOMETRIC ladder: 100 ppm, doubling
+  // per step, saturating at 100%.
+  //
+  // An earlier revision made this linear in sixteenths of a percentage point,
+  // which was a RANGE ERROR rather than a tuning choice.  Useful budgets span
+  // from FP16's ~1,000 ppm to a logarithmic multiply's 250,000 ppm, and a
+  // 625-ppm step spends all fifteen codes inside the first decade while being
+  // unable to express the rest at all: measured INT8 error (18,527 ppm) fell
+  // outside the entire old range, so the ENCODING was the blocker, not the
+  // arithmetic.  Doubling steps put fine resolution where fine budgets live and
+  // coarse resolution where only coarse budgets are plausible.
+  //
+  // Level 0 stays "off" with a zero budget, so no non-exact recipe can pass.
+  // Whether a large budget is ACCEPTABLE is an approval question, deliberately
+  // kept separate from whether it is EXPRESSIBLE.
   function automatic logic [19:0] va_turbo_budget_ppm(input logic [3:0] level);
-    return 20'(level) * 20'd625;
+    logic [23:0] scaled;
+    if (level == 4'd0) return 20'd0;
+    scaled = 24'd100 << (level - 4'd1);
+    return (scaled > 24'd1000000) ? 20'd1000000 : 20'(scaled);
   endfunction
 
   function automatic va_turbo_plan_t va_turbo_select(
