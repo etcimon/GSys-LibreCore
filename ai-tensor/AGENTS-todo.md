@@ -161,6 +161,44 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 
 Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or physical PCIe contracts changed. MIT/Etienne Cimon headers retained or added to first-party code/config; Markdown kept header-free. No out-of-package Rust dependencies. Intermediate failures (missing APIs in new red tests, Rust moved-value/format-argument compile errors, stale virtual ragged-tile C) were corrected and rerun; the remaining denied/unsupported validations above are not soft-passed.
 
+## 2026-09-08 — V/A-Turbo approximation as a measured trade-off (`ai_tensor.va_turbo`)
+
+- [x] Approximation is no longer modelled as an admit/refuse gate. `python/ai_tensor/va_turbo.py`
+  exposes two independent axes — a **throughput** estimate from measured RTL cycles, and a
+  **quality** score measured by emulating the recipe's arithmetic on the caller's own torch
+  tensors — plus `plans()`, `pareto()` and `autotune()`. Design: `architecture/APPROXIMATION.md`.
+- [x] **The hardware-execution gate is the load-bearing honesty here.** The island RTL has no
+  approximate execution consumer, so every plan carries `executable_on_hardware`: `True` only
+  for `native-fp32` and the recipe-16 residency plan, `False` for all twelve approximate
+  recipes. The API can *predict* up to 6.14x (INT4) but can only *execute* **1.279x** today
+  (FP32 with both operands resident, measured). Nothing in the module or the doc may imply
+  otherwise, and a test asserts an autotuned approximate plan still reports False.
+- [x] All seven formats are MEASURED at m=n=8, k=16, PeLanes=8, NCH=1, one engine, class-0 SRAM:
+  INT8 189, INT4 109, FP8 E4M3 189, FP8 E5M2 189, FP16 349, BF16 349, FP32 669 cycles/job,
+  from the `signed=1` lines (the fixture that checks every C element). BF16 and E5M2 were
+  briefly carried as `inferred_from_k_bytes` and then promoted after re-reading the log — the
+  inferred values had matched exactly, which validates the equal-traffic rule but is not a
+  reason to keep quoting a derived number. `INFERRED_TRAFFIC_TWIN` is now empty by result, and
+  a test injects an entry so the flagging path cannot rot while unused.
+- [x] `autotune` optimises **the axis the caller left free**: a quality budget maximises speed,
+  but `min_speedup` alone maximises QUALITY among the recipes that reach it. The first
+  implementation maximised speed in both cases, which returned INT4 at ~190,000 ppm when INT8
+  at ~9,000 ppm also cleared 3x — spending accuracy nobody offered. Fixed and pinned by a test
+  that asserts the property against the recipe set, not a recipe name.
+- [x] Two results worth keeping visible: mantissa truncation and Mitchell score a **1.000x**
+  cycle speedup (they narrow no storage, so they buy no operand traffic — they are area/depth
+  levers, and recipe 19 exists to keep that visible), and INT8 beats FP8 E4M3 at *identical*
+  traffic (~9,000 vs ~34,600 ppm on the fixture). Format choice at a given speedup is not
+  arbitrary.
+- [ ] Open: `convert-fp8-e5m2` has `id=None` because no `va_turbo_arith` slot carries the E5M2
+  epsilon; left unset rather than guessed. Quality figures are proxies on synthetic fixtures,
+  not model-quality results — a real network has to be run before any accuracy claim is made
+  about a model. And the whole approximate surface stays prediction-only until the RTL grows a
+  consumer.
+- Verified: 177 pytest pass (1 skipped), `tools/check_independence.py` ok, `c_abi` lockstep ok.
+  KD0 respected — no monorepo import; the bound formulas were read from the monorepo and
+  re-derived locally rather than imported.
+
 ## Open design notes
 
 - **Completion DMA vs PLIC claim:** island soak keeps `CTL.wr_cpl_en=0` for pure claim tests;

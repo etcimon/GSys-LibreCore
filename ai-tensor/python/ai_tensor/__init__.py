@@ -25,6 +25,10 @@ from .policy import WaitPolicy, recommend_policy
 from .probe import probe_dict
 from .profile import Profile
 
+# Throughput-vs-quality selection. Imported eagerly because it needs neither torch nor
+# numpy to answer the cycle-model, recipe-catalog and ppm-ladder half of its API.
+from . import va_turbo
+
 __all__ = [
     "Caps",
     "Device",
@@ -45,6 +49,7 @@ __all__ = [
     "recommend_policy",
     "run_golden_suite",
     "tile_gemm",
+    "va_turbo",
     "verify_header_present",
     "VirtCardSession",
     "__version__",

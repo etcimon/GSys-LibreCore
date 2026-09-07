@@ -12,6 +12,7 @@ this directory is the **host backend** plan (frameworks → island). Nothing her
 | [`ABI-CONTRACT.md`](ABI-CONTRACT.md) | What we implement from the frozen ISA/descriptor contract |
 | [`RUNTIME.md`](RUNTIME.md) | Device, memory, queues, poll/IRQ, backends |
 | [`FRAMEWORKS.md`](FRAMEWORKS.md) | PyTorch / TensorFlow attachment strategy |
+| [`APPROXIMATION.md`](APPROXIMATION.md) | V/A-Turbo throughput-vs-quality selection: two axes, provenance, ppm ladder, hardware gate |
 | [`VERSIONING.md`](VERSIONING.md) | Selectable cross-connect to monorepo + island revisions |
 | [`HOST.md`](HOST.md) | Optional LibreCore `build-platform` adapter |
 | [`../AGENTS.md`](../AGENTS.md) | Package purpose and agent rules |
