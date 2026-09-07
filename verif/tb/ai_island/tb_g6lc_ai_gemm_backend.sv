@@ -30,7 +30,11 @@ module tb_g6lc_ai_gemm_backend
     // raises the outstanding-AR bound, which is the only direction that can add
     // throughput: policy prefetch_depth could merely lower it.
     parameter int unsigned PE_LANES     = 0,
-    parameter int unsigned AR_PROVISION = 0
+    parameter int unsigned AR_PROVISION = 0,
+    // MAX_DIM raises the sequencer's MaxDim so the +measure_k sweep can push k
+    // past 16. It grows the tile SRAM (BankWords = MaxDim*ceil(MaxDim/PeLanes)),
+    // so it is opt-in and 0 keeps the directed value.
+    parameter int unsigned MAX_DIM      = 0
 );
   localparam int unsigned ID_W    = 4;
   localparam int unsigned MST_ID  = ID_W + 1;
@@ -174,11 +178,12 @@ module tb_g6lc_ai_gemm_backend
                                                                    : AI_MAX_AR_OUT_DRAM;
   localparam int GEMM_MAX_AR = (AR_PROVISION == 0) ? GEMM_SHIPPED_AR : int'(AR_PROVISION);
   localparam int GEMM_LANES  = (PE_LANES == 0) ? 8 : int'(PE_LANES);
+  localparam int GEMM_MAXDIM = (MAX_DIM == 0) ? 16 : int'(MAX_DIM);
   g6lc_ai_gemm_seq #(
       .AddrWidth  ( ADDR_W ),
       .DataWidth  ( DATA_W ),
       .IdWidth    ( ID_W ),
-      .MaxDim     ( 16 ),
+      .MaxDim     ( GEMM_MAXDIM ),
       .PeLanes    ( GEMM_LANES ),
       .DotPipeFloat( DOT_PIPE_FLOAT ),
       .MaxAROut   ( GEMM_MAX_AR ),
@@ -510,6 +515,12 @@ module tb_g6lc_ai_gemm_backend
   // Opt-in measurement sweep (+measure).  Sim-only and strictly additive.
   // ---------------------------------------------------------------------------
 
+  // FP32 encoding of a whole power-of-two value: sign 0, exponent 127+log2(v),
+  // zero mantissa.  Used for the all-ones golden C, where the dot equals k.
+  function automatic logic [31:0] fp32_whole(input int unsigned v);
+    return {1'b0, 8'(127 + $clog2(v)), 23'b0};
+  endfunction
+
   // Store the m x k and n x k all-ones operand rows for one measurement job,
   // using the same byte/stride convention as run_fmt_float.
   task automatic measure_store(
@@ -557,7 +568,12 @@ module tb_g6lc_ai_gemm_backend
     logic [31:0] start_cy, run_cy;
     logic [DATA_W-1:0] golden, ref0, ref1;
     logic have_ref, straddle_pre;
-    golden      = (numfmt == 3'd0 || numfmt == 3'd1) ? C16 : FP_C16;
+    // All-ones operands make the dot exactly k, so the integer golden is k in
+    // both packed 32-bit halves and the float golden is k.0 in FP32.  At k=16
+    // these reduce to the directed C16 / FP_C16 constants, which is what lets
+    // the k sweep reuse this task instead of needing a constant per k.
+    golden      = (numfmt == 3'd0 || numfmt == 3'd1) ? {2{32'(gemm_k)}}
+                                                     : {2{fp32_whole(gemm_k)}};
     have_ref    = 1'b0;
     ref0        = '0;
     ref1        = '0;
@@ -652,6 +668,48 @@ module tb_g6lc_ai_gemm_backend
         measure_fmt(3'd6, BF16_1,     2, 1'b0);  // BF16
         measure_fmt(3'd7, FP32_1,     4, 1'b0);  // FP32
         $display("MEASURE_END runs=%0d formats=7 ar_max=%0d", meas_runs, GEMM_MAX_AR);
+      end
+    end
+    ar_max_val  = 4'(GEMM_MAX_AR);
+    gemm_numfmt = 3'd0;
+    cycles = saved_cycles;
+  endtask
+
+  // `+measure_k`: sweep the reduction length k against lane width to test the
+  // k_bytes rule.  g6lc_ai_gemm_seq ends a reduction when mac_step >= k, with
+  // mac_step = 2*PeLanes for INT4 and PeLanes/bytes otherwise, so the lanes a
+  // dot can actually use should be fmt_row_bytes(k) -- the operand row in bytes
+  // -- rather than a function of element width alone.  The +measure sweep only
+  // ever ran k=16, where the two coincide.  Prediction under the rule: INT4's
+  // optimum moves 8 -> 16 -> 32 lanes as k goes 16 -> 32 -> 64, and INT8's moves
+  // 16 -> 32 -> 64.  If instead the optimum stays put, the decision is not
+  // k-dependent and the sub-code has no runtime-varying choice to make.
+  //
+  // Integer formats only: the golden C is exactly k, and one byte per element
+  // keeps a 64-element row inside the 8 KiB model at 1 KiB region spacing.
+  task automatic measure_k_sweep;
+    int unsigned saved_cycles, ki, pass;
+    int unsigned klist [3] = '{16, 32, 64};
+    saved_cycles = cycles;
+    gemm_m   = 32'd8;
+    gemm_n   = 32'd8;
+    gemm_pa  = 64'h8000_0400;
+    gemm_pb  = 64'h8000_0800;
+    gemm_pc  = 64'h8000_0C00;
+    for (ki = 0; ki < 3; ki++) begin
+      if (klist[ki] <= unsigned'(GEMM_MAXDIM)) begin
+        gemm_k   = 32'(klist[ki]);
+        gemm_lda = 16'(klist[ki]);
+        gemm_ldb = 16'(klist[ki]);
+        for (pass = 0; pass < MeasPasses; pass++) begin
+          meas_runs = 0;
+          $display("MEASURE_BEGIN schema=g6lc.policy-measure.v1 tb=tb_g6lc_ai_gemm_backend cycle_source=free_running_rtl_counter class=%0d nch=%0d dpf=%0d ar_max=%0d pass=%0d lanes=%0d",
+                   DRAM_CLASS, NCH, DOT_PIPE_FLOAT, GEMM_MAX_AR,
+                   ki * MeasPasses + pass, GEMM_LANES);
+          measure_fmt(3'd0, ONES8,  1, 1'b0);  // INT8
+          measure_fmt(3'd1, INT4_1, 1, 1'b1);  // INT4
+          $display("MEASURE_END runs=%0d formats=2 ar_max=%0d", meas_runs, GEMM_MAX_AR);
+        end
       end
     end
     ar_max_val  = 4'(GEMM_MAX_AR);
@@ -811,8 +869,13 @@ module tb_g6lc_ai_gemm_backend
       run_wide;
 
     // Opt-in and last: the directed phase above is untouched when it is off.
+    // `+measure` is the committed shape/format/AR basis; `+measure_k` is the
+    // separate k-versus-lanes experiment, kept apart so the earlier evidence
+    // stays reproducible byte for byte.
     if ($test$plusargs("measure"))
       measure_sweep;
+    if ($test$plusargs("measure_k"))
+      measure_k_sweep;
 
     if (errors == 0)
       $display("PASS g6lc_ai_gemm_backend class=%0d nch=%0d ar=%0d cycles=%0d r=%0d/%0d goldenC=16 cap%s",

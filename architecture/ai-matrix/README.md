@@ -1627,13 +1627,53 @@ runtime-varying and tied to measured cycles.
 Only the third step buys anything, and it is the expensive one. The first two make
 the codec side almost free and remove the measured reason it currently loses.
 
-**The experiment that would confirm or kill this.** Raise `MaxDim` above 16 and
-sweep `k` against lane width for each format: the rule predicts the optimum tracks
-`k_bytes`, so INT4 at `k=64` should want 32 lanes rather than 8. If the optimum
-instead stays at the element-width fit, the `k` dependence is wrong and the
-sub-code has no runtime-varying decision to make - which would return the honest
-answer to "can sub-codes pay?" as **no**. That sweep needs the golden-C constants
-regenerated per `k`, which is why it has not been run.
+**The experiment was run, and the rule holds: 6 of 6.** `run-gemm-ksweep.sh`
+(`+measure_k`, `MaxDim=64`, integer formats where the golden C is exactly `k`,
+492 records, all golden-clean) sweeps `k` against lane width:
+
+| Format | k | k_bytes | l8 | l16 | l32 | Best | Predicted |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| INT4 | 16 | 8 | **66** | 66 | 66 | 8 | 8 |
+| INT4 | 32 | 16 | 188 | **124** | 124 | 16 | 16 |
+| INT4 | 64 | 32 | 348 | 220 | **156** | 32 | 32 |
+| INT8 | 16 | 16 | 99 | **83** | 83 | 16 | 16 |
+| INT8 | 32 | 32 | 348 | 220 | **156** | 32 | 32 |
+| INT8 | 64 | 64 | 668 | 412 | **284** | 32 (capped) | 64 |
+
+The optimum moves with `k` exactly as `k_bytes` predicts, so the earlier
+element-width fit was indeed a `k=16` coincidence, and the decision genuinely
+varies at runtime.
+
+**But the same data kills the obvious use of it.** Choosing the gang width per job
+is worth **`+0.0%`** against simply provisioning wide: extra lanes *idle* at
+identical cycles rather than hurting (INT4 at `k=16` is 66 cycles at 8, 16 and 32
+lanes alike). A knob whose wrong settings cost nothing cannot earn anything by
+being set correctly. So the sub-code's value is **not** in selecting a gang width.
+
+**The whole opportunity is the idle lanes.** The sequencer bounds per-tile `k` by
+`MaxDim`, so at the shipped `MaxDim=16` on a 32-lane array:
+
+| Format | k_bytes | Lanes used | Lanes idle | Concurrent groups |
+|---|--:|--:|--:|--:|
+| INT4 | 8 | 8 | **24** | **4x** |
+| INT8, FP8 | 16 | 16 | 16 | **2x** |
+| FP16 | 32 | 32 | 0 | 1x (saturated) |
+| FP32 | 64 | 32 | 0 | wants more than 32 |
+
+Those idle lanes are only monetisable by running *several jobs at once* in
+independent groups - which needs per-group accumulators and descriptor slots, the
+same multi-output capability the topology model always assumed. And because
+format varies per job, the split factor varies per job, so it is a real runtime
+decision rather than a build-time constant.
+
+**Refined answer to "can sub-codes pay?"** Yes, but only in one narrow form: a
+combinational `(format, tile-k) -> groups_log2` split factor, worth up to 4x
+concurrency on INT4 and 2x on INT8/FP8, and worth nothing on FP16/FP32 which
+already saturate. Not by searching shapes, not by choosing gang widths, and not
+at all until per-group accumulators exist. The honest caveat is that the payoff
+is a *utilisation* argument measured on a small fixture, not an end-to-end
+throughput measurement, and it inherits the untested concurrency assumption that
+also limits the cluster case.
 
 ### Where sub-codes and groups can and cannot help
 

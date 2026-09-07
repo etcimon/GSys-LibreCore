@@ -259,11 +259,24 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   mac_step >= k, so usable lanes = fmt_row_bytes(k) = the operand row in bytes.
   At k=16 that equals twice the element width, which is why the fit reproduced
   8/16/32/64. Scope notes added to the package and the pinned assertions.
-- [ ] DECIDING EXPERIMENT for the hypothesis: raise MaxDim above 16 and sweep k
-  against lane width per format. The rule predicts the optimum tracks k_bytes
-  (INT4 at k=64 should want 32 lanes, not 8). If the optimum instead stays at the
-  element-width fit, the decision is not runtime-varying and the honest answer to
-  "can sub-codes pay?" is no. Blocked on regenerating golden-C constants per k.
+- [x] DECIDING EXPERIMENT RUN (run-gemm-ksweep.sh, +measure_k, MaxDim=64, integer
+  formats, 492 records, golden-clean). The k_bytes rule holds 6/6: INT4 best lanes
+  8/16/32 at k=16/32/64 and INT8 16/32/32(capped, predicts 64). The optimum does
+  move with k, so the decision is genuinely runtime-varying and the earlier
+  element-width fit was a k=16 coincidence.
+- [x] ...but the same data kills the obvious use: choosing gang width per job is
+  worth +0.0% versus provisioning wide, because surplus lanes idle at identical
+  cycles (INT4 k=16 is 66 cycles at 8, 16 and 32 lanes alike). A knob whose wrong
+  settings cost nothing cannot earn anything by being set right.
+- [ ] REFINED SUB-CODE TARGET: the value is the idle lanes, not the gang width.
+  Per-tile k is bounded by MaxDim, so at MaxDim=16 on a 32-lane array INT4 leaves
+  24 of 32 lanes idle (4x concurrency), INT8/FP8 leave 16 (2x), FP16 saturates and
+  FP32 wants more than 32. Monetising that needs per-group accumulators and
+  descriptor slots (the multi-output capability), and the split factor varies per
+  job because format does. Sub-code reduces to a combinational
+  (format, tile-k) -> groups_log2 lookup. Caveat: this is a utilisation argument
+  on a small fixture, and it inherits the same untested concurrency assumption as
+  the cluster case.
 - [ ] Sub-code/group tuning has zero throughput leverage while nothing consumes
   the codec output. Do not tune it for performance. It becomes productive only
   with a provisioning consumer that RAISES a bound - cluster count or lane
