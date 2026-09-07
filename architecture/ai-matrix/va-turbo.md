@@ -642,6 +642,22 @@ cold priming from warm operation, check all C elements and poison outputs before
 execution. Signed native-format fixtures, metadata changes, permission gates,
 error recovery and alias cases accompany the throughput samples.
 
+## 14. FP8 E5M2 was unreachable; recipe 18 code 3 now carries it
+
+Of the seven supported storage formats, six were selectable and one was not. Bank A pins
+FP16 (4), BF16 (5), INT8 (6) and FP8 E4M3 (7); recipe 18's caller-selected map covered only
+FP16, BF16 and INT8. So `va_turbo_round_eps_ppm(2)` = 265,625 ppm — E5M2's two-mantissa-bit
+bound — existed in the table with **nothing able to reach it**, and code `2'd3` was worse than
+merely unused: `approx_param_target` returned INT8 for it while `va_turbo_arith` gave the same
+code `VA_ARITH_NONE`, a target and an arithmetic that disagreed.
+
+Code 3 now selects FP8 E5M2 in both halves, and **both** FP8 targets require `scale_valid`:
+eight bits of storage cannot cover a tensor's dynamic range unscaled, whichever way the
+exponent/mantissa split falls. `VA_E5M2_TARGET` pins the target map, the arithmetic, the
+`row_bytes`, the scale requirement, and — by sweeping all 32 ids across all 16 parameter
+values — that the epsilon is now reachable at all, so the format cannot quietly become
+orphaned again.
+
 ## 13. The moving window is real, but it does not rescue the per-product term
 
 The datapath genuinely re-centers. `g6lc_ai_pe_dot_float` is block floating

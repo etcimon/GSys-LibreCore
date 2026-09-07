@@ -348,6 +348,78 @@ module tb_g6lc_ai_policy_subcode #(
     $display("VA_WINDOW_ADMISSION PASS window=4 mismatches=8 floor_cases=4 subnormal_admission=1");
   endtask
 
+  // FP8 E5M2 was the one supported storage format no recipe could select:
+  // bank A covers FP16/BF16/INT8/E4M3 and recipe 18's caller-selected map sent
+  // code 3 to INT8 while `va_turbo_arith` gave it VA_ARITH_NONE - a target and
+  // an arithmetic that disagreed.  Code 3 now carries E5M2, and this pins both
+  // halves so they cannot drift apart again.
+  task automatic va_e5m2_target_checks();
+    config_pkg::ai_cfg_t cfg;
+    va_turbo_request_t r;
+    va_turbo_plan_t p;
+    va_turbo_arith_t a;
+    cfg = config_pkg::AiCfgOff;
+    cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
+    cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
+    cfg.PolicySubcodeEn = 1'b1; cfg.IslandFpEn = 1'b1;
+    // Every conversion code maps to exactly one target, and all four differ.
+    assert (approx_param_target(4'd0) == 3'(config_pkg::AI_FMT_FP16) &&
+            approx_param_target(4'd1) == 3'(config_pkg::AI_FMT_BF16) &&
+            approx_param_target(4'd2) == 3'(config_pkg::AI_FMT_INT) &&
+            approx_param_target(4'd3) == 3'(config_pkg::AI_FMT_FP8_E5M2))
+      else $fatal(1, "VA recipe-18 target map");
+    // The arithmetic must agree with the target: E5M2 has two mantissa bits.
+    a = va_turbo_arith(5'd18, 3'(config_pkg::AI_FMT_FP32), 4'd3, 10'd512);
+    assert (a.kind == VA_ARITH_REL && a.eps_ppm == va_turbo_round_eps_ppm(5'd2) &&
+            a.eps_ppm == 20'd265625 && a.narrows_storage && a.needs_param)
+      else $fatal(1, "VA E5M2 arith kind=%0d eps=%0d", a.kind, a.eps_ppm);
+    // Every one of the 32 ids can now reach every supported storage format
+    // that any of them narrows to; E5M2 is no longer the unreachable one.
+    begin
+      automatic bit reached_e5m2;
+      reached_e5m2 = 1'b0;
+      for (int id = 0; id < 32; id++)
+        for (int par = 0; par < 16; par++) begin
+          a = va_turbo_arith(5'(id), 3'(config_pkg::AI_FMT_FP32), 4'(par), 10'd512);
+          if (a.narrows_storage && a.kind == VA_ARITH_REL &&
+              a.eps_ppm == 20'd265625) reached_e5m2 = 1'b1;
+        end
+      assert (reached_e5m2) else $fatal(1, "VA no recipe reaches the E5M2 epsilon");
+    end
+    // End to end through the selector, including the FP8 scale requirement.
+    r = '0;
+    r.enable = 1'b1; r.code = POLICY_BULK;
+    r.numfmt = 3'(config_pkg::AI_FMT_FP32);
+    r.m = 16'd16; r.n = 16'd16; r.k = 16'd16;
+    r.regular_layout = 1'b1; r.ready_jobs = 9'd16;
+    r.free_accumulators = 9'd16; r.bank_groups = 9'd16;
+    r.range_safe = 1'b1; r.accuracy_valid = 1'b1; r.relative_domain_valid = 1'b1;
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
+    r.approx_param_valid = 1'b1; r.approx_param = 4'd3;
+    r.reuse_a_valid = 1'b1;   // recipe 18 is a shared conversion
+    r.window_valid = 1'b1; r.qualified_mask = '1;
+    r.bank = 2'd2; r.subcode = 3'd2;   // id 18
+    r.level = 4'd15;
+    r.scale_valid = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply)
+      else $fatal(1, "VA E5M2 must require scale metadata");
+    r.scale_valid = 1'b1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.convert && p.recipe == 18 &&
+            p.target_numfmt == 3'(config_pkg::AI_FMT_FP8_E5M2) &&
+            p.row_bytes == 19'd16 && p.eps_ppm == 20'd265625)
+      else $fatal(1, "VA E5M2 plan target=%0d row_bytes=%0d eps=%0d",
+                  p.target_numfmt, p.row_bytes, p.eps_ppm);
+    // E4M3 keeps its own slot and its own (finer) epsilon.
+    r.bank = 2'd0; r.subcode = 3'd7;   // id 7
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.target_numfmt == 3'(config_pkg::AI_FMT_FP8_E4M3) &&
+            p.eps_ppm == 20'd128907 && p.eps_ppm < 20'd265625)
+      else $fatal(1, "VA E4M3 slot must stay distinct from E5M2");
+    $display("VA_E5M2_TARGET PASS codes=4 ids=32 params=16 recipe18_param3=fp8_e5m2 eps=265625");
+  endtask
+
   task automatic va_admission_boundary_checks();
     config_pkg::ai_cfg_t cfg;
     va_turbo_request_t r;
@@ -671,6 +743,7 @@ module tb_g6lc_ai_policy_subcode #(
     va_admission_boundary_checks();
     va_window_bound_checks();
     va_window_admission_checks();
+    va_e5m2_target_checks();
     cfg = config_pkg::AiCfgOff;
     cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
     cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;

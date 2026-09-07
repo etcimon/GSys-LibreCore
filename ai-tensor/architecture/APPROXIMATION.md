@@ -183,19 +183,101 @@ Measured ordering on a well-conditioned 32x64 @ 64x32 fixture (seed 1234), which
 
 Every returned plan carries `executable_on_hardware: bool` and a `why` string.
 
+An earlier revision of this document said the gate was False for **every** approximate
+recipe. That was wrong, and wrong in the direction that understated the hardware. The engine
+executes **all seven numeric formats natively** -- that is where the measured
+189/109/189/189/349/349/669 cycle counts come from -- and a conversion recipe's entire gain is
+narrower *storage*, i.e. fewer operand read beats. So the approximation happens **once, in
+software, on the way in**, and the GEMM that follows is an ordinary native one. Nothing new is
+needed in RTL to collect that speedup.
+
 | Class | Recipes | `executable_on_hardware` |
 |---|---|---|
-| `exact-native` | 0 | **True** — the datapath the island runs today |
+| `exact-native` | 0 | **True** -- the datapath the island runs today |
 | `exact-residency` | 16 | **True**, with a caveat: wired to real GEMM execution in the *verification harness*; production `g6lc_ai_island_top` ties runtime reuse off and invalidation on until an ownership/epoch ABI exists, and `reuse_b_i` is permission, not coherence |
-| `emulated-only` | every approximate recipe | **False** |
+| `native-narrowed` | the six conversions (4, 5, 6, 7, 18 code 3, 29) | **True**, when the active profile advertises the target format. The approximate arithmetic is the software conversion; the GEMM is native |
+| `needs-rtl-consumer` | 19, 21, 27/28 -- in-place quantise, truncation, Mitchell | **False**, and it would buy nothing: these narrow no storage, so they measure exactly **1.000x**. An RTL consumer for them is area for zero throughput |
 
-It is False for **every** approximate recipe because `va_turbo_select` produces selection
-metadata only: there is no production call site and no nonzero consumer mask. So the speedup
-attached to an approximate plan is what that format's operand traffic costs today — *what such a
-consumer would be worth* — not a measurement of approximate hardware, because none exists.
+The split is by **storage, not by exactness** -- which is the useful distinction, because
+storage is what the memory system charges for.
 
-Choosing an approximate recipe from this API means choosing a **prediction**. The tests assert
-the flag and the wording for every recipe so the API cannot drift into implying otherwise.
+### Executability is per profile, not a constant
+
+A `native-narrowed` recipe is executable only where the profile advertises the format in its
+`dtype_mask`:
+
+| Profile | `dtype_mask` | FP16 | INT8 | native FP32 |
+|---|---|:--|:--|:--|
+| `sim-v0`, `island-p3-v1` | `0x0001` | False | **True** | **False** |
+| `software-reference-v2` | `0x00fb` | **True** | **True** | **True** |
+
+The last column caught a bug in this model: gating only the narrowed recipes claimed the
+*exact* FP32 path was executable on a backend that answers `ST_BAD_FMT: numfmt 7 not granted
+by 0x1`. The mask check now applies to every recipe, exact ones included.
+
+### `emulate()` predicts, `execute()` runs
+
+`execute(a, b, recipe, ...)` converts the operands, submits a **native** descriptor at the
+narrower format through the existing path, and returns the result together with the backend's
+own `meta` (ticket, status, PMU) as the evidence the run happened. Measured: `convert-int8`
+through the sim backend returns `status=0` at ~9,100 ppm against the FP32 reference, matching
+its emulated prediction of ~9,000 ppm. The two paths agreeing is the point of having both.
+
+For INT8/INT4 the scale is **returned, not silently folded away**, because the island returns
+integer accumulators; handing a caller raw INT32 as though it were the FP32 answer is the
+classic way a quantised path reports nonsense. `execute` refuses loudly for a
+`needs-rtl-consumer` recipe or an unadvertised format.
+
+Choosing a `needs-rtl-consumer` recipe still means choosing a **prediction**. The tests assert
+the classification, the profile dependence and the refusal wording for every recipe.
+
+---
+
+## 5a. End to end: does per-tile error compound across layers?
+
+A single-tile score cannot answer the question a network poses. `ai_tensor.va_turbo_net`
+routes **every matmul** of a transformer stack (LayerNorm, QKV, scaled dot-product attention,
+output projection, GELU MLP, residuals, logit head) through `emulate`, keeping everything the
+island does not accelerate in FP32, and scores the **logits**.
+
+End-to-end relative error in ppm, by depth (`d_model=64, heads=4, d_ff=256, seq=16, batch=4`):
+
+| recipe | d=1 | d=2 | d=4 | d=8 | d=12 | exponent | R^2 | d=1 -> d=12 |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|
+| FP16 | 377 | 427 | 475 | 571 | 661 | 0.220 | 0.975 | 1.76x |
+| BF16 | 2,896 | 3,335 | 3,800 | 4,410 | 4,568 | 0.189 | 0.994 | 1.58x |
+| INT8 | 15,757 | 19,987 | 24,371 | 26,029 | 27,895 | 0.224 | 0.950 | 1.77x |
+| FP8 E4M3 | 47,083 | 55,839 | 59,577 | 70,333 | 80,276 | 0.202 | 0.975 | 1.70x |
+| INT4 | 297,268 | 370,983 | 445,607 | 476,093 | 515,128 | 0.214 | 0.959 | 1.73x |
+
+**Error grows as roughly `depth**0.21`, not `depth`.** Twelve times the depth costs about
+1.7x the error, with R^2 0.95-0.99 across every recipe. Per-layer error does not compound
+multiplicatively; it accumulates more slowly even than a random walk (`depth**0.5`). So a
+single-tile figure is a *conservative* proxy for a deep stack rather than a per-layer tax.
+
+The decision metric matters more than the norm, and it separates the formats far more sharply
+(depth 12):
+
+| recipe | logit ppm | SQNR | top-1 agreement | KL (nats) |
+|---|--:|--:|--:|--:|
+| native FP32 | 0 | inf | **1.000** | 0 |
+| FP16 | 661 | 63.6 dB | **1.000** | 2.7e-07 |
+| BF16 | 4,568 | 46.8 dB | **1.000** | 1.3e-05 |
+| INT8 | 27,895 | 31.1 dB | **0.984** | 5.6e-04 |
+| FP8 E4M3 | 80,276 | 21.9 dB | 0.938 | 4.2e-03 |
+| INT4 | 515,128 | 5.8 dB | **0.594** | 1.5e-01 |
+
+FP16 and BF16 change no decision at all; INT8 changes 1.6% of them for 3.54x; INT4 changes
+40% for 6.14x, which is not a trade so much as a different network. Note also that depth-1
+end-to-end error already exceeds the single-tile figure (INT8 15,757 vs ~9,000 ppm), because
+one block contains roughly six matmuls.
+
+> **Random weights.** These are seeded Xavier-initialised networks, not a trained checkpoint,
+> so this measures **error propagation through a real architecture** -- not model accuracy.
+> Top-1 agreement is agreement with *this same random network's* FP32 output, not
+> classification accuracy. A real checkpoint is required for an accuracy claim and none is
+> available on this host. Both runs accumulate in float64 and round to FP32 identically, so
+> the accumulation domain is not charged to the recipe.
 
 ---
 
@@ -213,7 +295,7 @@ Read from `corev_apu/ai_island/include/g6lc_ai_policy_pkg.sv` (`va_turbo_arith`)
 | `convert-int8` | 20 | INT8 quantisation that narrows storage |
 | `quantise-int8-in-place` | 19 | same quantisation, no narrowing |
 | `convert-fp8-e4m3` | 7 | carries the E4M3 epsilon (precision code 3) |
-| `convert-fp8-e5m2` | **None** | **uncertain**: no id in `va_turbo_arith` carries the E5M2 epsilon; left unset rather than guessed |
+| `convert-fp8-e5m2` | **18**, param code 3 | was **None**: no id carried the E5M2 epsilon at all. Recipe 18 code 3 previously returned INT8 as a target while `va_turbo_arith` gave it `VA_ARITH_NONE` -- a target and an arithmetic that disagreed. It now carries E5M2 (eps 265,625 = `round_eps_ppm(2)`), and both FP8 targets require scale metadata |
 | `convert-int4` | 29 | the only FULL / `quant_levels=7` slot that narrows storage |
 | `truncate-mantissa-*` | 21 | `approx_param` = retained mantissa bits |
 | `mitchell` | 27 | 28 carries **identical** arithmetic metadata and the RTL does not specify how its correction differs, so 28 is not separately emulated |

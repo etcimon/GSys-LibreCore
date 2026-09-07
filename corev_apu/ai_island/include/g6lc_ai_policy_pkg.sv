@@ -273,11 +273,18 @@ package g6lc_ai_policy_pkg;
 
   // Conversion target for recipe 18, whose target is caller-selected because a
   // shared conversion serves several consumers that must agree on the format.
+  // `2'd3` was previously swallowed by the `default` arm, which returned INT8
+  // as a target while `va_turbo_arith` gave the same code VA_ARITH_NONE - a
+  // target and an arithmetic that disagreed.  It now carries FP8 E5M2, which
+  // was the one supported storage format no recipe could select: bank A covers
+  // FP16 (4), BF16 (5), INT8 (6) and E4M3 (7), and `va_turbo_round_eps_ppm(2)`
+  // = 265,625 ppm existed with nothing able to reach it.
   function automatic logic [2:0] approx_param_target(input logic [3:0] approx_param);
     case (approx_param[1:0])
       2'd0: return 3'(config_pkg::AI_FMT_FP16);
       2'd1: return 3'(config_pkg::AI_FMT_BF16);
-      default: return 3'(config_pkg::AI_FMT_INT);
+      2'd2: return 3'(config_pkg::AI_FMT_INT);
+      default: return 3'(config_pkg::AI_FMT_FP8_E5M2);
     endcase
   endfunction
 
@@ -416,7 +423,10 @@ package g6lc_ai_policy_pkg;
           2'd1: begin a.kind = VA_ARITH_REL; a.eps_ppm = va_turbo_round_eps_ppm(5'd7); end
           2'd2: begin a.kind = VA_ARITH_FULL; a.quant_levels = 8'd127;
                       a.eps_ppm = va_turbo_quant_eps_ppm(8'd127, flat_q8); end
-          default: a.kind = VA_ARITH_NONE;
+          // FP8 E5M2: two explicit mantissa bits.  Reachable only here, so
+          // this arm is what makes the format selectable at all.
+          default: begin a.kind = VA_ARITH_REL;
+                         a.eps_ppm = va_turbo_round_eps_ppm(5'd2); end
         endcase
       end
       5'd19: begin a.kind = VA_ARITH_FULL; a.quant_levels = 8'd127;
@@ -703,7 +713,11 @@ package g6lc_ai_policy_pkg;
         default: target = 3'(config_pkg::AI_FMT_INT);
       endcase
       if (policy_integer_format(target) && !r.scale_valid) return p;
-      if (target == 3'(config_pkg::AI_FMT_FP8_E4M3) && !r.scale_valid) return p;
+      // Both FP8 targets need scale metadata: 8 bits of storage cannot cover a
+      // tensor's dynamic range unscaled, whichever way the exponent/mantissa
+      // split falls.
+      if (target inside {3'(config_pkg::AI_FMT_FP8_E4M3),
+                         3'(config_pkg::AI_FMT_FP8_E5M2)} && !r.scale_valid) return p;
       if (id == 5'd18 && !r.reuse_a_valid) return p;
       if (id inside {5'd20, 5'd29} && !r.approx_param_valid) return p;
       candidate.convert = 1'b1;

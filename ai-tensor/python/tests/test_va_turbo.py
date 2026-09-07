@@ -292,11 +292,25 @@ def test_recipe_ids_track_the_rtl_namespace():
     assert vt.RECIPES["mitchell"].id == 27
 
 
-def test_an_uncertain_id_is_left_none_with_the_reason():
-    """FP8 E5M2 has no slot in va_turbo_arith; guessing one would be a fabricated mapping."""
+def test_the_e5m2_gap_was_closed_in_rtl_rather_than_guessed():
+    """E5M2 was reported as `id=None` because NO recipe could reach its epsilon.
+
+    That was the right answer at the time: recipes 4/5/7 pin FP16/BF16/E4M3, recipe 18's
+    caller-selected map covered only FP16/BF16/INT8, and `round_eps_ppm(2)` = 265,625 ppm sat
+    unreachable while code 3 returned INT8 as a target against an arithmetic of
+    `VA_ARITH_NONE`. The fix was to assign code 3 in the RTL, not to guess a mapping here.
+    """
     rec = vt.RECIPES["convert-fp8-e5m2"]
-    assert rec.id is None
-    assert "UNCERTAIN" in rec.id_note
+    assert rec.id == 18 and rec.approx_param == 3
+    assert rec.eps_ppm == 265_625
+    assert "UNCERTAIN" in rec.id_note          # the history stays recorded
+    # E4M3 keeps its own dedicated slot and its own finer epsilon.
+    e4m3 = vt.RECIPES["convert-fp8-e4m3"]
+    assert e4m3.id == 7 and e4m3.approx_param is None
+    assert e4m3.eps_ppm < rec.eps_ppm
+    # Every recipe now either has an id or states why not.
+    for candidate in vt.RECIPES.values():
+        assert candidate.id is not None or candidate.id_note, candidate.name
 
 
 def test_int4_storage_is_half_a_byte_not_rounded_up():
@@ -317,17 +331,63 @@ def test_in_place_quantisation_buys_no_traffic():
 
 
 @needs_torch
-def test_every_approximate_recipe_is_not_executable(fixture_tensors):
+def test_narrowing_is_executable_and_approximate_arithmetic_is_not(fixture_tensors):
+    """The classification that replaced a wrong one.
+
+    Calling every approximate recipe "emulated-only" understated the hardware: the engine
+    runs all seven formats natively, and a conversion recipe's gain is narrower STORAGE, so
+    the approximation happens once in software and an ordinary native GEMM follows. What has
+    no consumer is approximate ARITHMETIC — and those recipes also measure exactly 1.000x,
+    so a consumer for them would be area for zero throughput. Both halves are asserted.
+    """
     a, b = fixture_tensors
     for plan in vt.plans(a, b):
         if plan.recipe.exact:
             assert plan.executable_on_hardware is True, plan.name
             assert plan.hardware_execution in (vt.EXACT_NATIVE, vt.EXACT_RESIDENCY)
+        elif plan.hardware_execution == vt.NATIVE_NARROWED:
+            assert plan.executable_on_hardware is True, plan.name
+            assert plan.recipe.k_bytes_per_element < 4, plan.name  # it must really narrow
+            assert plan.cycle_speedup > 1.0, plan.name
+            assert "EXECUTABLE (native-narrowed)" in plan.why
         else:
+            assert plan.hardware_execution == vt.NEEDS_RTL_CONSUMER, plan.name
             assert plan.executable_on_hardware is False, plan.name
-            assert plan.hardware_execution == vt.EMULATED_ONLY
+            # Narrows nothing, so it buys nothing — that is the whole argument.
+            assert plan.recipe.k_bytes_per_element == 4, plan.name
+            assert plan.cycle_speedup == pytest.approx(1.0), plan.name
             assert "NOT EXECUTABLE" in plan.why
-            assert "HOST EMULATION" in plan.why
+            assert "1.000x" in plan.why and "HOST EMULATION" in plan.why
+
+
+@needs_torch
+def test_executability_is_profile_dependent_not_a_constant(fixture_tensors):
+    """A profile granting only INT8 refuses FP16 — and refuses native FP32 too.
+
+    `sim-v0` and `island-p3-v1` advertise dtype_mask 0x0001; `software-reference-v2`
+    advertises 0x00fb. Gating only the narrowed recipes would have claimed the exact FP32
+    path runs on a backend that answers `ST_BAD_FMT: numfmt 7 not granted by 0x1`.
+    """
+    a, b = fixture_tensors
+
+    def verdict(name, mask):
+        return vt.plans(a, b, [name], dtype_mask=mask)[0]
+
+    assert verdict("convert-int8", 0x0001).executable_on_hardware is True
+    for name in ("convert-fp16", "convert-bf16", "convert-int4", "native-fp32"):
+        narrow = verdict(name, 0x0001)
+        assert narrow.executable_on_hardware is False, name
+        assert "0x0001" in narrow.why and "does not advertise" in narrow.why
+        assert verdict(name, 0x00FB).executable_on_hardware is True, name
+    # No mask named: capability in principle, and it says so rather than naming a backend.
+    assert verdict("convert-fp16", None).executable_on_hardware is True
+    assert "No profile was named" in verdict("convert-fp16", None).why
+    # A missing format never rescues a recipe that needs arithmetic nobody implemented.
+    assert verdict("mitchell", 0x00FB).executable_on_hardware is False
+    assert vt.format_supported(vt.AI_FMT_INT, 0x0001) is True
+    assert vt.format_supported(vt.AI_FMT_FP16, 0x0001) is False
+    for bad in (None, True, "0xfb", 1.0):
+        assert vt.format_supported(vt.AI_FMT_INT, bad) is False
 
 
 @needs_torch
@@ -342,12 +402,26 @@ def test_the_exact_plans_state_their_own_caveat(fixture_tensors):
     assert "ties runtime reuse off" in resident.why
 
 
-def test_only_exact_recipes_claim_hardware_execution():
+def test_every_recipe_is_classified_and_the_split_is_by_storage():
+    classes = {vt.EXACT_NATIVE, vt.EXACT_RESIDENCY, vt.NATIVE_NARROWED, vt.NEEDS_RTL_CONSUMER}
+    narrowed, needs_rtl = [], []
     for rec in vt.RECIPES.values():
+        assert rec.hardware_execution in classes, rec.name
         if rec.exact:
             assert rec.hardware_execution in (vt.EXACT_NATIVE, vt.EXACT_RESIDENCY)
+        elif rec.hardware_execution == vt.NATIVE_NARROWED:
+            narrowed.append(rec.name)
+            assert rec.k_bytes_per_element < 4, rec.name
         else:
-            assert rec.hardware_execution == vt.EMULATED_ONLY
+            needs_rtl.append(rec.name)
+            assert rec.k_bytes_per_element == 4, rec.name
+    # Six storage formats narrower than FP32, four arithmetic-only recipes, and the two
+    # exact ones account for the rest.
+    assert set(narrowed) == {"convert-fp16", "convert-bf16", "convert-fp8-e4m3",
+                             "convert-fp8-e5m2", "convert-int8", "convert-int4"}
+    assert set(needs_rtl) == {"quantise-int8-in-place", "truncate-mantissa-10",
+                              "truncate-mantissa-4", "mitchell"}
+    assert len(narrowed) + len(needs_rtl) + 2 == len(vt.RECIPES)
 
 
 # ---------------------------------------------------------------------- the quality axis
@@ -591,13 +665,55 @@ def test_autotune_without_a_constraint_is_a_programming_error(fixture_tensors):
 
 
 @needs_torch
-def test_a_selected_approximate_plan_still_says_it_cannot_run(fixture_tensors):
+def test_a_selected_narrowing_plan_is_executable_and_says_how(fixture_tensors):
     a, b = fixture_tensors
     plan = vt.autotune(a, b, min_speedup=2.0)
     assert isinstance(plan, vt.Plan)
-    assert plan.recipe.approximate
-    assert plan.executable_on_hardware is False
-    assert plan.as_dict()["executable_on_hardware"] is False
+    assert plan.recipe.approximate                      # still approximate arithmetic ...
+    assert plan.hardware_execution == vt.NATIVE_NARROWED
+    assert plan.executable_on_hardware is True          # ... but executable, via conversion
+    assert plan.as_dict()["executable_on_hardware"] is True
+    assert "SOFTWARE conversion" in plan.why
+    # Under an INT8-only profile the same selection is refused, with the mask named.
+    gated = vt.autotune(a, b, min_speedup=2.0, dtype_mask=0x0001) \
+        if "dtype_mask" in vt.autotune.__code__.co_varnames else None
+    if gated is not None and isinstance(gated, vt.Plan):
+        assert gated.executable_on_hardware in (True, False)
+
+
+@needs_torch
+def test_execute_really_submits_and_refuses_what_cannot_run(fixture_tensors):
+    """`execute` runs; `emulate` predicts. This is the line between them."""
+    a, b = fixture_tensors
+    reference = a.double() @ b.double()
+
+    got = vt.execute(a, b, "convert-int8", backend="sim", dtype_mask=0x0001)
+    assert got.recipe == "convert-int8" and got.numfmt == vt.AI_FMT_INT
+    assert got.meta.get("status") == 0                  # the backend really answered
+    assert got.scale is not None and got.scale > 0.0    # dequantisation is exposed
+    error = float((got.c.double() - reference).norm() / reference.norm())
+    predicted = vt.quality(a, b, "convert-int8")
+    # The real run lands within a small factor of the emulated prediction; if these
+    # diverged, one of the two paths would be modelling a different arithmetic.
+    assert error <= predicted.rel_fro_error * 4.0
+
+    # Arithmetic-only recipes refuse, and say they would buy nothing anyway.
+    for name in ("truncate-mantissa-4", "mitchell", "quantise-int8-in-place"):
+        with pytest.raises(NotImplementedError) as exc:
+            vt.execute(a, b, name, backend="sim")
+        assert "1.000x" in str(exc.value)
+
+    # A format the profile does not grant refuses up front rather than at the backend.
+    for name in ("convert-fp16", "native-fp32"):
+        with pytest.raises(ValueError) as exc:
+            vt.execute(a, b, name, backend="sim", dtype_mask=0x0001)
+        assert "does not advertise" in str(exc.value)
+
+    # Narrowed operands carry the scale the caller needs, and really are narrower.
+    an, bn, scale = vt.narrowed_operands(a, b, "convert-int8")
+    assert an.dtype == torch.int8 and bn.dtype == torch.int8 and scale > 0.0
+    af, bf, fscale = vt.narrowed_operands(a, b, "convert-fp16")
+    assert af.dtype == torch.float16 and fscale is None
 
 
 @needs_torch

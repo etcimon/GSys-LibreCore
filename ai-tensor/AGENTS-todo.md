@@ -199,6 +199,49 @@ Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or 
   KD0 respected — no monorepo import; the bound formulas were read from the monorepo and
   re-derived locally rather than imported.
 
+## 2026-09-08 (later) — the three deferred items, and one correction to the last pass
+
+- [x] **The "no approximate execution consumer" framing was wrong, in the direction that
+  understated the hardware.** The engine runs ALL SEVEN formats natively (that is where the
+  measured 189/109/189/189/349/349/669 cycles come from), and a conversion recipe's whole gain
+  is narrower STORAGE. So the approximation happens once, in software, on the way in, and an
+  ordinary native GEMM follows: **no new RTL is needed to collect those speedups.** What has
+  no consumer is approximate ARITHMETIC — truncation, Mitchell, in-place quantise — and those
+  measure exactly 1.000x, so a consumer for them would be area for zero throughput. Classes
+  are now `exact-native` / `exact-residency` / `native-narrowed` / `needs-rtl-consumer`, split
+  by storage rather than by exactness.
+- [x] `executable_on_hardware` is a checked predicate, not a constant: a `native-narrowed`
+  recipe needs the active profile to advertise the format. `sim-v0`/`island-p3-v1` grant
+  `0x0001` (INT8 only), `software-reference-v2` grants `0x00fb`. This caught a bug in my own
+  gate — applying the mask check only to narrowed recipes claimed the EXACT FP32 path ran on
+  a backend that answers `ST_BAD_FMT: numfmt 7 not granted by 0x1`. It applies to every
+  recipe now.
+- [x] `execute()` makes the predicted narrowing speedups real: convert, submit a NATIVE
+  descriptor at the narrower format through the existing path, return the backend's own
+  `meta` as evidence. Measured `convert-int8` on the sim backend: `status=0`, ~9,100 ppm
+  against the FP32 reference versus ~9,000 ppm predicted by `emulate` — the two paths agree.
+  INT8/INT4 return the scale rather than folding it away, because the island returns integer
+  accumulators and raw INT32 presented as an FP32 answer is how a quantised path lies.
+- [x] **End-to-end quality through a real architecture** (`va_turbo_net`): every matmul of a
+  transformer stack routed through the recipe, everything the island does not accelerate left
+  in FP32, logits scored. Error grows as roughly **depth^0.21** (R^2 0.95-0.99), so 12x the
+  depth costs ~1.7x the error — per-layer error does NOT compound multiplicatively, and a
+  single-tile bound is a conservative proxy. Decisions separate the formats much more sharply
+  than norms do: FP16/BF16 change no top-1 decision, INT8 changes 1.6% for 3.54x, INT4
+  changes 40% for 6.14x. Weights are seeded Xavier, NOT a trained checkpoint, so this is
+  error propagation through a real architecture and not a model-accuracy claim.
+- [x] **FP8 E5M2 gap closed in the RTL, not guessed here.** No recipe could reach its epsilon:
+  4/5/7 pin FP16/BF16/E4M3, recipe 18's map covered only FP16/BF16/INT8, and code 3 returned
+  INT8 as a target while `va_turbo_arith` gave the same code `VA_ARITH_NONE` — a target and an
+  arithmetic that disagreed. Code 3 now carries E5M2 (eps 265,625 = `round_eps_ppm(2)`) and
+  both FP8 targets require scale metadata. `convert-fp8-e5m2` is `id=18, approx_param=3`.
+- [ ] Still open: a trained checkpoint for a real accuracy claim (none on this host); the
+  `native-narrowed` path is verified against the sim/software backends, not silicon; and
+  `execute()` converts on the host, so a production path would want the conversion done where
+  the weights are stored rather than per call.
+- Verified: 191 pytest pass (1 skipped), `check_independence.py` ok, `c_abi` lockstep ok;
+  remote `ai-policy-subcode` PASS including the new `VA_E5M2_TARGET` checks.
+
 ## Open design notes
 
 - **Completion DMA vs PLIC claim:** island soak keeps `CTL.wr_cpl_en=0` for pure claim tests;
