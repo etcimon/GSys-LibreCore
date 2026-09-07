@@ -28,6 +28,7 @@ from .profile import Profile
 # Throughput-vs-quality selection. Imported eagerly because it needs neither torch nor
 # numpy to answer the cycle-model, recipe-catalog and ppm-ladder half of its API.
 from . import lossless
+from . import pipeline
 from . import va_turbo
 
 __all__ = [
@@ -51,6 +52,7 @@ __all__ = [
     "run_golden_suite",
     "tile_gemm",
     "lossless",
+    "pipeline",
     "va_turbo",
     "verify_header_present",
     "VirtCardSession",

@@ -273,6 +273,33 @@ Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or 
   E5M2-representable, 3 mantissa bits versus 2, i.e. the proof working),
   `check_independence.py` ok, `c_abi` lockstep ok.
 
+## 2026-09-08 (pipeline) — stacking on the host
+
+- [x] python/ai_tensor/pipeline.py: the host mirror of the RTL `va_turbo_compose`, plus
+  the cost model. `cycles ~= steps + beta(fmt)*read_beats + 11` reproduces ALL TEN measured
+  points to the cycle (four format totals, six residency points) from one beta per format and
+  ONE shared constant. The FP32/INT8 single-operand points are genuine predictions: beta came
+  from the 0-vs-full-beats endpoints, so the midpoints fitted nothing, and the constant
+  falling out as 11 for both swept formats is why the decomposition is believable rather than
+  merely fitted. beta RISES as the format narrows (traffic hides under compute; a narrow job
+  has less compute to hide it under), which is why residency is worth MORE after narrowing.
+- [x] The measured 4.813x stack (FP32->INT8 + both resident, 139 vs 669) is labelled
+  `measured` because BOTH endpoints are in the measured table; one modelled endpoint taints
+  the whole ratio, which is tested. Encoded trap: compose with the TARGET's residency gain
+  (1.359x), not the source's (1.279x), or the stack is understated as 4.53x.
+- [x] The refusals are the point, not the multiplication. Ordering hazard refused by DEFAULT
+  (residency keys include the format, so narrow-then-reuse is a guaranteed miss unless the
+  tile was already converted), and order-insensitively, since the hazard is a property of the
+  pair. Also refused: two conversion targets, two group geometries, widening, and EQUAL width
+  (BF16 <-> FP16 saves no beats). Narrowing twice COLLAPSES rather than accumulating. Error
+  terms ADD and the budget gates the COMPOSED bound.
+- [x] Each lever states what it does not buy: approximate arithmetic 1.000x with its error
+  intact, grouping 1.000x with the single-C-port reason, zero-skip cuts the STEP term only
+  (a skipped product was still read) and is always `modeled` since no RTL consumer exists.
+- [x] Quantified why zero-skip is correctly last: it competes with narrowing for the same
+  term. FP32 spends 512 of 669 cycles on steps, INT4 only 64 of 109, so the same skip
+  fraction is worth strictly less after narrowing. A test pins the ordering.
+- Verified: 218 pytest pass (2 skipped), independence ok, c_abi lockstep ok.
 ## Open design notes
 
 - **Completion DMA vs PLIC claim:** island soak keeps `CTL.wr_cpl_en=0` for pure claim tests;
