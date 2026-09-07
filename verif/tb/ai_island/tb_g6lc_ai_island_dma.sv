@@ -50,6 +50,7 @@ module tb_g6lc_ai_island_dma (
     PolicyBenefitEn: 1'b1,
     PolicySubcodeEn: 1'b0,
     PolicySubcodeCacheEn: 1'b0,
+    VaTurboEn: 1'b0,
     IslandFpEn: 1'b1,
     Int4En: 1'b1,
     Sparse24En: 1'b0,

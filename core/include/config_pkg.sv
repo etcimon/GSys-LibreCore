@@ -152,6 +152,11 @@ package config_pkg;
     bit          PolicyBenefitEn;
     bit          PolicySubcodeEn;
     bit          PolicySubcodeCacheEn;
+    // V/A-Turbo (Virtual Analog Turbo): the compartment for per-job precision
+    // and lane-group selection. Gated separately from the sub-code because it
+    // is the only policy feature that may CHANGE ARITHMETIC, so it can never be
+    // reached by enabling steering alone. See architecture/ai-matrix/va-turbo.md.
+    bit          VaTurboEn;
     bit          IslandFpEn;
     // Datatype options. These are GRANT gates, not encodings: aicfg carries the
     // request, and ai.setcfg downgrades to the nearest supported value rather
@@ -987,6 +992,14 @@ package config_pkg;
       else $error("AiCfg.PolicySubcodeEn requires policy benefit steering");
     assert (!(Cfg.AiCfg.PolicySubcodeCacheEn && !Cfg.AiCfg.PolicySubcodeEn))
       else $error("AiCfg.PolicySubcodeCacheEn requires policy subcode evaluation");
+    // V/A-Turbo needs the sub-code to carry its (groups_log2, precision_class)
+    // word, and it needs the float plane because its measured-best step is FP16.
+    // No datapath consumes it yet, so the gate exists to keep an
+    // arithmetic-changing feature unreachable rather than to switch it on.
+    assert (!(Cfg.AiCfg.VaTurboEn && !Cfg.AiCfg.PolicySubcodeEn))
+      else $error("AiCfg.VaTurboEn requires policy subcode evaluation");
+    assert (!(Cfg.AiCfg.VaTurboEn && !Cfg.AiCfg.IslandFpEn))
+      else $error("AiCfg.VaTurboEn requires the island floating-point plane");
     assert (!(Cfg.AiCfg.IslandFpEn && (!Cfg.AiCfg.MatrixEn || Cfg.AiCfg.Queues == 0 ||
               !Cfg.RVF || !Cfg.RVD)))
       else $error("AiCfg.IslandFpEn requires the matrix plane, a T2 queue, RVF and RVD");

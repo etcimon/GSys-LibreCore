@@ -214,6 +214,57 @@ def evaluate(tile_set):
     return report
 
 
+# V/A-Turbo heuristic bank.  Entries are DERIVED from the S0 measurements rather
+# than invented: each is a (precision_class, groups_log2) pair carrying its own
+# measured error, and an entry is admitted only if that error is inside the
+# caller's budget.  The bank is what the 3-bit sub-code indexes per group, so a
+# bank of 8 covers one sub-code word and 32 covers four groups' worth.
+PRECISION_CLASS = {"FP32": 0, "FP16": 1, "INT8": 2}
+
+
+def emit_bank(report, entries, budget_percent, lanes):
+    """Rank measured (precision, groups) options by gain per unit error.
+
+    Refuses anything outside the budget, and refuses precision classes S0 found
+    dominated, so the bank cannot silently contain a topology the accuracy study
+    already rejected.
+    """
+    rows = []
+    for row in report["format_narrowing"]:
+        fmt = row["format"]
+        if fmt not in PRECISION_CLASS:
+            continue  # BF16/FP8/INT4 are dominated on measured error; see S0.
+        groups = (lanes // row["k_bytes_at_k16"]) if row["k_bytes_at_k16"] <= lanes else 0
+        if groups < 1:
+            continue
+        err = row["rel_error_p95"] * 100.0
+        if err > budget_percent:
+            continue
+        rows.append({
+            "precision_class": fmt, "precision_code": PRECISION_CLASS[fmt],
+            "groups": groups, "groups_log2": max(0, groups.bit_length() - 1),
+            "rel_error_p95_percent": err,
+            "concurrency_gain": groups,
+            "gain_per_percent_error": (groups / err) if err > 0 else None,
+            "measured": True,
+        })
+    rows.sort(key=lambda r: (-(r["gain_per_percent_error"] or float("inf")), r["precision_code"]))
+    bank = rows[:entries]
+    # A short bank is reported as short.  Padding it with invented topologies to
+    # reach 8 or 32 would be exactly the "stub that looks like a capability"
+    # failure the licensing/verification rules warn about.
+    return {
+        "bank_size_requested": entries, "bank_size_admitted": len(bank),
+        "lanes_assumed": lanes, "error_budget_percent": budget_percent,
+        "entries": bank,
+        "unpadded": "A bank shorter than requested is reported short; entries are never invented to fill it",
+        "excluded_by_measurement": ["BF16 (10x the FP16 error at identical k_bytes)",
+                                    "FP8 E4M3/E5M2 (3.3x/6.5x the INT8 error at identical k_bytes)",
+                                    "INT4 (~25% tile error)",
+                                    "mantissa truncation and Mitchell (buy no concurrency; S0 lever 2)"],
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description="S0 accuracy study for AI-island approximate compute (host-only, no RTL)")
@@ -224,9 +275,21 @@ def main(argv=None):
     parser.add_argument("--layers", type=int, default=6)
     parser.add_argument("--tiles-per-layer", type=int, default=8)
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--emit-bank", type=int, metavar="N",
+                        help="also emit a V/A-Turbo heuristic bank of up to N measured entries (8..32)")
+    parser.add_argument("--error-budget-percent", type=float, default=2.0,
+                        help="admit a bank entry only if its measured p95 tile error is within this")
+    parser.add_argument("--bank-lanes", type=int, default=64,
+                        help="provisioned lanes the bank's group counts assume")
     args = parser.parse_args(argv)
     if args.out and args.out.suffix.lower() != ".json":
         parser.error("report output must be JSON")
+    if args.emit_bank is not None and not 8 <= args.emit_bank <= 32:
+        parser.error("--emit-bank must be in [8,32]: 8 fills one 3-bit sub-code word, 32 covers four")
+    if not 0.0 < args.error_budget_percent <= 100.0:
+        parser.error("--error-budget-percent must be in (0,100]")
+    if args.bank_lanes not in (8, 16, 32, 64, 128, 256):
+        parser.error("--bank-lanes must be a supported power-of-two lane count")
     if not 1 <= args.layers <= 64 or not 1 <= args.tiles_per_layer <= 256:
         parser.error("layers and tiles-per-layer must be small positive counts")
 
@@ -246,6 +309,9 @@ def main(argv=None):
         "Per-tile scaling is applied for FP8/INT8/INT4, which is what a real path does; without it those formats would measure far worse.",
         "Accumulation is exact everywhere, so these figures do not cover accumulator-width effects.",
     ]
+    if args.emit_bank is not None:
+        report["va_turbo_bank"] = emit_bank(report, args.emit_bank,
+                                            args.error_budget_percent, args.bank_lanes)
     text = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.write_text(text, encoding="utf-8")
@@ -264,6 +330,18 @@ def main(argv=None):
         label = row["topology"] + (":%d" % row["mantissa_bits_kept"] if "mantissa_bits_kept" in row else "")
         print("  %-26s err median %-11.3e p95 %-11.3e max %.3e"
               % (label, row["rel_error_median"], row["rel_error_p95"], row["rel_error_max"]))
+    if "va_turbo_bank" in report:
+        bank = report["va_turbo_bank"]
+        print("\nV/A-Turbo bank: %d of %d requested admitted at <=%.2f%% error, %d lanes"
+              % (bank["bank_size_admitted"], bank["bank_size_requested"],
+                 bank["error_budget_percent"], bank["lanes_assumed"]))
+        for i, row in enumerate(bank["entries"]):
+            print("  [%d] precision=%-5s code=%d groups=%d (log2=%d) err=%.4f%% gain/%%err=%s"
+                  % (i, row["precision_class"], row["precision_code"], row["groups"],
+                     row["groups_log2"], row["rel_error_p95_percent"],
+                     ("%.1f" % row["gain_per_percent_error"]) if row["gain_per_percent_error"] else "inf"))
+        for line in bank["excluded_by_measurement"]:
+            print("  excluded: " + line)
     print("\nTile Frobenius error is a proxy, not a model-quality result.")
     if args.out:
         print("artifact: " + str(args.out))
