@@ -561,6 +561,52 @@ happened unasked, is a bug and not a speedup -- and re-checks C after every job.
 **So the headline 1.36x needs both conditions: a ~100% hit rate and multi-engine
 contention.** At a realistic 50% hit rate on one engine the gain is 7%.
 
+### Both operands resident: the best speedup per unit area measured
+
+Resident B serves one weight tile against many activations (decode). The mirror
+case -- one activation tile against many weight tiles (prefill, attention) -- is
+resident A, the same recipe 16 with an independent key: `ptr_a`, `m`, `k`, `lda`,
+numfmt and its own epoch, with `n` deliberately absent exactly as `m` is absent
+from the B key. The two keys are independent, so a job may hit neither, either or
+both. Measured on one engine, identical work, C checked element by element:
+
+| Format | no reuse | A only | B only | **both** |
+|---|--:|--:|--:|--:|
+| INT8 cycles | 189 | 164 (1.152x) | 164 (1.152x) | **139 (1.359x)** |
+| INT8 read beats | 32 | 16 | 16 | **0** |
+| FP32 cycles | 669 | 596 (1.122x) | 596 (1.122x) | **523 (1.279x)** |
+| FP32 read beats | 128 | 64 | 64 | **0** |
+
+With both operands resident the engine issues **no operand reads at all** -- only
+the C writes remain, so it becomes pure compute plus output traffic. Note the
+comparison that matters: **1.359x on a single engine equals the 1.358x that
+resident B alone needed four contended engines to reach**, and it gets there
+without contention.
+
+Cost, from the isolated GEMM synthesis (generic cells, zero latches in all three
+configurations):
+
+| Configuration | cells | sequential | area | speedup | return per %area |
+|---|--:|--:|--:|--:|--:|
+| off | 7,530 | 62 | - | - | - |
+| resident B | 7,635 | 74 | +1.39% | 1.152x | 10.9x |
+| **resident A+B** | **7,714** | **84** | **+2.44%** | **1.359x** | **14.7x** |
+| 8 -> 16 PE lanes | 619,197 | - | +61.4% | 1.510x | 0.8x |
+| 16 -> 32 PE lanes | 1,146,467 | - | +85.2% | 1.000x | 0.0x |
+
+That is the whole argument for preferring residency over width: two orders of
+magnitude better return per unit area, and it is exact. 32 directed A cases pass
+(cold, warm, epoch/pointer/lda/m/k/format mismatch, `n` not part of the A key,
+explicit invalidation, missing lease, A/C alias refusal, error and RRESP
+recovery), and `VA_TURBO=0` reports 1.000x on all four points with no hits.
+
+Two defects were found and fixed while landing this, both worth recording because
+the harness caught them rather than the review: the A skip keyed off `cacheable_q`
+which is still clear in `ST_CHK` where A decides, making the skip dead code while
+the PMU still claimed a hit; and `pmu_reuse_b_hit_o` only fired on `ST_LA ->
+ST_MAC`, so it under-reported precisely in the both-resident case that saves the
+most traffic. Both now derive from the same term the FSM uses.
+
 ### Intra-engine lane groups: refuted, with the reason
 
 The plan was to spend idle lanes on concurrent output groups. That cannot work in

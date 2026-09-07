@@ -381,6 +381,7 @@ module g6lc_ai_island_top
         .PeLanes   (IslandCfg.MacsPerCycle),
         .MaxAROut  (IslandCfg.MaxAROut),
         .ReuseBEn  (AiCfg.VaTurboEn),
+        .ReuseAEn  (AiCfg.VaTurboEn),
         .MaxElementBytes(AiCfg.IslandFpEn ? 4 : 1),
         .NrChannels(IslandCfg.DramChannels),
         .ChanShift (IslandCfg.DramChanShift),
@@ -411,6 +412,10 @@ module g6lc_ai_island_top
         .reuse_b_epoch_i(32'd0),
         .reuse_b_invalidate_i(1'b1),
         .pmu_reuse_b_hit_o(),
+        .reuse_a_i(1'b0),
+        .reuse_a_epoch_i(32'd0),
+        .reuse_a_invalidate_i(1'b1),
+        .pmu_reuse_a_hit_o(),
         .axi_req_o  (gemm_axi_req),
         .axi_resp_i (dma_resp_int)
     );

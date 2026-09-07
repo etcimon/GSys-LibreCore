@@ -101,6 +101,12 @@ module tb_g6lc_ai_gemm_concurrent
   logic [15:0] lda_v [N_ENGINES], ldb_v [N_ENGINES];
   logic [N_ENGINES-1:0] reuse_v, invalidate_v, reuse_hit_v, lease_v;
   logic [31:0] epoch_v [N_ENGINES];
+  // Resident-A mirror of the four B-side residency signals.  A and B residency
+  // are two INDEPENDENT keys of the same recipe 16 -- one job may hit neither,
+  // either or both -- so the lease, the epoch and the invalidation are all
+  // per-engine and per-side, never shared.
+  logic [N_ENGINES-1:0] reuse_a_v, invalidate_a_v, reuse_hit_a_v, lease_a_v;
+  logic [31:0] epoch_a_v [N_ENGINES];
   logic [N_ENGINES-1:0] permission_v, window_v, policy_enable_v;
   logic [3:0] level_v [N_ENGINES];
   va_turbo_request_t request_v [N_ENGINES];
@@ -116,6 +122,13 @@ module tb_g6lc_ai_gemm_concurrent
   localparam int unsigned JOBS_PER_SEQ  = 8;
   localparam int unsigned OPP_FRACTIONS = 5;
   int unsigned opp_cy, opp_r, opp_w, opp_hit_count;
+
+  // Directed A-residency set and the four-point A/B combination experiment,
+  // both driven from tables for the compile-time reason spelled out at the
+  // EXPERIMENTS loop in the stimulus block below.
+  localparam int unsigned A_CASES     = 32;
+  localparam int unsigned DUAL_FMTS   = 2;
+  localparam int unsigned DUAL_POINTS = 4;
 
   function automatic config_pkg::ai_cfg_t test_cfg();
     config_pkg::ai_cfg_t cfg;
@@ -215,25 +228,43 @@ module tb_g6lc_ai_gemm_concurrent
       request_v[i].k = 16'(k_v[i]);
       request_v[i].regular_layout = 1'b1;
       request_v[i].reuse_b_valid = lease_v[i];
+      request_v[i].reuse_a_valid = lease_a_v[i];
       request_v[i].window_valid = window_v[i];
       request_v[i].qualified_mask = permission_v[i] ? REUSE_MASK : 32'd0;
       plan_v[i] = va_turbo_select(TEST_CFG, request_v[i], GEMM_LANES, 8, 1, REUSE_MASK);
       reuse_v[i] = plan_v[i].apply && plan_v[i].reuse_b;
+      // Same real plan, other operand: recipe 16 publishes the two residencies
+      // separately, so an A lease alone is enough for the plan to apply.
+      reuse_a_v[i] = plan_v[i].apply && plan_v[i].reuse_a;
     end
 
     always @(posedge clk) begin
       if (rst_ni) begin
         if (start_v[i]) begin
-          assert (reuse_v[i] == (VA_TURBO && policy_enable_v[i] && level_v[i] != 0 &&
-                                 lease_v[i] && window_v[i] && permission_v[i] &&
-                                 m_v[i] != 0 && n_v[i] != 0 && k_v[i] != 0 &&
-                                 m_v[i] <= 256 && n_v[i] <= 256 && k_v[i] <= 256 &&
-                                 policy_format_known(numfmt_v[i])))
+          automatic bit recipe16_ok;
+          // Everything recipe 16 demands EXCEPT the owner lease.  The two sides
+          // share every other gate, so factoring it out is what keeps the A and
+          // B expectations provably identical apart from which lease is held.
+          recipe16_ok = VA_TURBO && policy_enable_v[i] && level_v[i] != 0 &&
+                        window_v[i] && permission_v[i] &&
+                        m_v[i] != 0 && n_v[i] != 0 && k_v[i] != 0 &&
+                        m_v[i] <= 256 && n_v[i] <= 256 && k_v[i] <= 256 &&
+                        policy_format_known(numfmt_v[i]);
+          assert (reuse_v[i] == (recipe16_ok && lease_v[i]))
             else $fatal(1, "eng%0d recipe16 permission mismatch", i);
+          assert (reuse_a_v[i] == (recipe16_ok && lease_a_v[i]))
+            else $fatal(1, "eng%0d recipe16 A permission mismatch", i);
           if (plan_v[i].apply)
+            // A plan that claims resident A is still the SAME exact recipe: no
+            // conversion, no approximation, no grouping, no format change.  It
+            // must also claim at least one residency, or recipe 16 bought
+            // nothing and should not have applied.
             assert (plan_v[i].recipe == 16 && plan_v[i].arith_kind == VA_ARITH_EXACT &&
-                    !plan_v[i].convert && !plan_v[i].approx_products && !plan_v[i].reuse_a &&
-                    plan_v[i].groups_log2 == 0 && plan_v[i].target_numfmt == numfmt_v[i])
+                    !plan_v[i].convert && !plan_v[i].approx_products &&
+                    !plan_v[i].skip_products && !plan_v[i].split_rows &&
+                    plan_v[i].groups_log2 == 0 && plan_v[i].target_numfmt == numfmt_v[i] &&
+                    (plan_v[i].reuse_a || plan_v[i].reuse_b) &&
+                    plan_v[i].reuse_a == lease_a_v[i] && plan_v[i].reuse_b == lease_v[i])
               else $fatal(1, "eng%0d unsupported plan reached consumer", i);
         end
         if (eng_resp[i].r_valid && eng_req[i].r_ready)
@@ -253,6 +284,7 @@ module tb_g6lc_ai_gemm_concurrent
         .PeLanes    ( GEMM_LANES ),
         .DotPipeFloat( DOT_PIPE_FLOAT ),
         .ReuseBEn   ( VA_TURBO ),
+        .ReuseAEn   ( VA_TURBO ),
         .MaxAROut   ( GEMM_MAX_AR ),
         .NrChannels ( NCH ),
         .ChanShift  ( AI_DRAM_CHAN_SHIFT_DEFAULT ),
@@ -272,6 +304,10 @@ module tb_g6lc_ai_gemm_concurrent
         .reuse_b_epoch_i ( epoch_v[i] ),
         .reuse_b_invalidate_i ( invalidate_v[i] ),
         .pmu_reuse_b_hit_o ( reuse_hit_v[i] ),
+        .reuse_a_i    ( reuse_a_v[i] ),
+        .reuse_a_epoch_i ( epoch_a_v[i] ),
+        .reuse_a_invalidate_i ( invalidate_a_v[i] ),
+        .pmu_reuse_a_hit_o ( reuse_hit_a_v[i] ),
         .numfmt_i     ( numfmt_v[i] ),
         .ar_max_i     ( 4'(GEMM_MAX_AR) ),  // AR-cap consumer was removed: always max
         .ptr_a_i      ( pa_v[i] ),
@@ -502,6 +538,18 @@ module tb_g6lc_ai_gemm_concurrent
     endcase
   endfunction
 
+  // Operand read beats for ONE job.  A contributes m rows and B contributes n
+  // rows, each of words_per_row beats, and a resident operand contributes none.
+  // The two terms vanish INDEPENDENTLY: A and B are separate keys, so an
+  // expectation that can only lose the B term (as this harness assumed while
+  // only resident B existed) is wrong the moment an A lease is held.
+  function automatic int unsigned job_read_beats(
+      input int unsigned m, n, k, input logic [2:0] fmt, input bit a_hit, b_hit
+  );
+    return (m * (a_hit ? 0 : 1) + n * (b_hit ? 0 : 1)) *
+           ((k * element_bits(fmt) + 63) / 64);
+  endfunction
+
   function automatic logic [31:0] golden_element(input int unsigned i, r, c);
     int sum;
     sum = 0;
@@ -569,7 +617,8 @@ module tb_g6lc_ai_gemm_concurrent
   // Serial phase: engines one at a time.  Returns the summed wall cycles of
   // the N individual start->done windows in `total_cy`.
   task automatic run_one(input int unsigned i, input bit expected_hit,
-                         input bit expected_error, output int unsigned wall_cy);
+                         input bit expected_hit_a, input bit expected_error,
+                         output int unsigned wall_cy);
     logic [31:0] t0;
     @(negedge clk);
     cycles = 0;
@@ -592,6 +641,9 @@ module tb_g6lc_ai_gemm_concurrent
       else $fatal(1, "serial eng%0d err=%b expected=%b", i, err_v[i], expected_error);
     assert (reuse_hit_v[i] == expected_hit)
       else $fatal(1, "serial eng%0d reuse_hit=%b expected=%b", i, reuse_hit_v[i], expected_hit);
+    assert (reuse_hit_a_v[i] == expected_hit_a)
+      else $fatal(1, "serial eng%0d reuse_hit_a=%b expected=%b", i, reuse_hit_a_v[i],
+                  expected_hit_a);
     wall_cy = free_cy - t0;
   endtask
 
@@ -602,7 +654,7 @@ module tb_g6lc_ai_gemm_concurrent
     total_r = 0;
     total_w = 0;
     for (int unsigned i = 0; i < N_ENGINES; i++) begin
-      run_one(i, expected_hit, 1'b0, wall_cy);
+      run_one(i, expected_hit, 1'b0, 1'b0, wall_cy);
       total_cy += wall_cy;
       total_r += pmu_r_v[i];
       total_w += pmu_w_v[i];
@@ -639,6 +691,10 @@ module tb_g6lc_ai_gemm_concurrent
     if (err_v != '0) $fatal(1, "concurrent err=%b", err_v);
     assert (reuse_hit_v == {N_ENGINES{expected_hit}})
       else $fatal(1, "concurrent reuse_hit=%b expected=%b", reuse_hit_v, expected_hit);
+    // The phase experiments never take an A lease, so a resident-A hit here
+    // would mean the engine skipped a load nobody asked it to skip.
+    assert (reuse_hit_a_v == '0)
+      else $fatal(1, "concurrent reuse_hit_a=%b without an A lease", reuse_hit_a_v);
     wall_cy = free_cy - t0;
     for (int unsigned i = 0; i < N_ENGINES; i++) begin
       total_r += pmu_r_v[i];
@@ -689,6 +745,16 @@ module tb_g6lc_ai_gemm_concurrent
     invalidate_v = '0;
   endtask
 
+  // The A invalidation is a separate port: flushing resident B must not flush
+  // resident A, so the B-side cases below keep using invalidate_all alone.
+  task automatic invalidate_a_all;
+    @(negedge clk);
+    invalidate_a_v = '1;
+    tick;
+    @(negedge clk);
+    invalidate_a_v = '0;
+  endtask
+
   task automatic configure_engine(input int unsigned i, input logic [2:0] fmt,
                                   input bit shared_b);
     @(negedge clk);
@@ -704,7 +770,12 @@ module tb_g6lc_ai_gemm_concurrent
     b_owner_v[i] = shared_b ? 0 : i;
     b_version_v[i] = 0;
     epoch_v[i]++;
+    epoch_a_v[i]++;
     lease_v[i] = 1'b1;
+    // Reconfiguration never carries an A lease: the B-side and phase
+    // experiments must stay byte-for-byte the measurements they were, so the A
+    // path is only ever armed by the A cases that explicitly ask for it.
+    lease_a_v[i] = 1'b0;
     permission_v[i] = 1'b1;
     window_v[i] = 1'b1;
     policy_enable_v[i] = 1'b1;
@@ -734,11 +805,15 @@ module tb_g6lc_ai_gemm_concurrent
     int unsigned base_cy [2], base_r [2], base_w [2];
     int unsigned warm_cy [2], warm_r [2], warm_w [2];
     int unsigned cold_cy, cold_r, cold_w, cy, rb, wb, expected_r, expected_w, base_prime_cy;
+    int unsigned warm_expected_r;
     for (int unsigned i = 0; i < N_ENGINES; i++) begin
       configure_engine(i, numfmt, shared_b);
       store_engine(i, pattern, bpe, is_packed, shared_b);
     end
-    expected_r = N_ENGINES * (JOB_M + JOB_N) * ((JOB_K * element_bits(numfmt) + 63) / 64);
+    // These phases lease B only (configure_engine leaves the A lease low), so
+    // the warm expectation loses the B term and keeps the whole A term.
+    expected_r = N_ENGINES * job_read_beats(JOB_M, JOB_N, JOB_K, numfmt, 1'b0, 1'b0);
+    warm_expected_r = N_ENGINES * job_read_beats(JOB_M, JOB_N, JOB_K, numfmt, 1'b0, VA_TURBO);
     expected_w = N_ENGINES * JOB_M * JOB_N / 2;
     for (int unsigned mode = 0; mode < 2; mode++) begin
       base_cy[mode] = 0;
@@ -769,13 +844,18 @@ module tb_g6lc_ai_gemm_concurrent
         else $fatal(1, "cold prime traffic fmt=%0d", numfmt);
       for (int unsigned rep = 0; rep < REPEATS; rep++) begin
         measured_phase(mode != 0, VA_TURBO, numfmt, cy, rb, wb);
-        assert (rb * (VA_TURBO ? 2 : 1) == expected_r && wb == expected_w)
-          else $fatal(1, "warm traffic fmt=%0d r=%0d w=%0d", numfmt, rb, wb);
+        assert (rb == warm_expected_r && wb == expected_w)
+          else $fatal(1, "warm traffic fmt=%0d r=%0d/%0d w=%0d", numfmt, rb,
+                      warm_expected_r, wb);
         warm_cy[mode] += cy;
         warm_r[mode] += rb;
         warm_w[mode] += wb;
       end
-      assert (warm_r[mode] * (VA_TURBO ? 2 : 1) == base_r[mode] &&
+      // Stated against the per-phase expectations rather than as a ratio: the
+      // old "warm is half of baseline" factor was only true because m == n and
+      // because B was the only operand that could go resident.
+      assert (base_r[mode] == REPEATS * expected_r &&
+              warm_r[mode] == REPEATS * warm_expected_r &&
               warm_w[mode] == base_w[mode]) else $fatal(1, "reuse PMU sum mismatch");
       $display("REUSE fmt=%0d shared_b=%0d signed=%0d enabled=%0d eng=%0d concurrent=%0d repeats=%0d baseline=%0d cold_prime=%0d warm=%0d reuse_including_prime=%0d warm_speedup_x1000=%0d base_r=%0d cold_r=%0d warm_r=%0d base_w=%0d cold_w=%0d warm_w=%0d baseline_including_prime=%0d batches_including_prime=%0d",
                numfmt, shared_b, signed_data, VA_TURBO, N_ENGINES, mode, REPEATS,
@@ -864,7 +944,7 @@ module tb_g6lc_ai_gemm_concurrent
       input logic              is_packed,
       input int unsigned       hits
   );
-    int unsigned cy, words_per_row, expected_r, expected_w;
+    int unsigned cy, expected_r, expected_w;
     bit want_hit;
     assert (hits < JOBS_PER_SEQ)
       else $fatal(1, "opportunistic hits=%0d leaves no cold job", hits);
@@ -874,7 +954,6 @@ module tb_g6lc_ai_gemm_concurrent
     opp_r = 0;
     opp_w = 0;
     opp_hit_count = 0;
-    words_per_row = (JOB_K * element_bits(numfmt) + 63) / 64;
     expected_w = JOB_M * JOB_N / 2;
     for (int unsigned j = 0; j < JOBS_PER_SEQ; j++) begin
       want_hit = opp_want_hit(j, hits) && VA_TURBO;
@@ -885,9 +964,10 @@ module tb_g6lc_ai_gemm_concurrent
         store_engine(0, pattern, bpe, is_packed, 1'b0);
       end
       poison_engine(0);
-      run_one(0, want_hit, 1'b0, cy);
+      run_one(0, want_hit, 1'b0, 1'b0, cy);
       check_engine(0);
-      expected_r = (JOB_M + (want_hit ? 0 : JOB_N)) * words_per_row;
+      // No A lease is taken in this stream, so only the B term may vanish.
+      expected_r = job_read_beats(JOB_M, JOB_N, JOB_K, numfmt, 1'b0, want_hit);
       assert (pmu_r_v[0] == expected_r && pmu_w_v[0] == expected_w)
         else $fatal(1, "opportunistic fmt=%0d job%0d traffic r=%0d/%0d w=%0d/%0d",
                     numfmt, j, pmu_r_v[0], expected_r, pmu_w_v[0], expected_w);
@@ -948,23 +1028,28 @@ module tb_g6lc_ai_gemm_concurrent
     end
   endtask
 
-  task automatic directed_job(input string name, input bit want_hit, input bit stage);
+  // `want_hit_a` defaults low so every B-side case below reads exactly as it did
+  // when resident B was the only residency: those cases hold no A lease, so the
+  // A term of the read-beat expectation can never vanish there.
+  task automatic directed_job(input string name, input bit want_hit, input bit stage,
+                              input bit want_hit_a = 1'b0);
     int unsigned cy, expected_r, expected_w;
-    bit hit;
+    bit hit, hit_a;
     hit = VA_TURBO && want_hit;
+    hit_a = VA_TURBO && want_hit_a;
     poison_engine(0);
     if (stage)
       store_engine(0, ONES8, (element_bits(numfmt_v[0]) + 7) / 8,
                    numfmt_v[0] == 3'd1, 1'b0);
-    run_one(0, hit, 1'b0, cy);
+    run_one(0, hit, hit_a, 1'b0, cy);
     check_engine(0);
-    expected_r = (m_v[0] + (hit ? 0 : n_v[0])) * ((k_v[0] * element_bits(numfmt_v[0]) + 63) / 64);
+    expected_r = job_read_beats(m_v[0], n_v[0], k_v[0], numfmt_v[0], hit_a, hit);
     expected_w = m_v[0] * (n_v[0][0] ? n_v[0] : n_v[0] / 2);
     assert (pmu_r_v[0] == expected_r && pmu_w_v[0] == expected_w)
       else $fatal(1, "%s traffic r=%0d/%0d w=%0d/%0d", name, pmu_r_v[0], expected_r,
                   pmu_w_v[0], expected_w);
-    $display("REUSE_CASE name=%s enabled=%0d hit=%0d cycles=%0d r=%0d w=%0d",
-             name, VA_TURBO, reuse_hit_v[0], cy, pmu_r_v[0], pmu_w_v[0]);
+    $display("REUSE_CASE name=%s enabled=%0d hit=%0d hit_a=%0d cycles=%0d r=%0d w=%0d",
+             name, VA_TURBO, reuse_hit_v[0], reuse_hit_a_v[0], cy, pmu_r_v[0], pmu_w_v[0]);
   endtask
 
   task automatic prime_directed;
@@ -1058,7 +1143,7 @@ module tb_g6lc_ai_gemm_concurrent
 
     @(negedge clk);
     m_v[0] = 0;
-    run_one(0, 1'b0, 1'b1, cy);
+    run_one(0, 1'b0, 1'b0, 1'b1, cy);
     @(negedge clk);
     m_v[0] = 4;
     directed_job("error_clears_residency", 1'b0, 1'b0);
@@ -1091,11 +1176,217 @@ module tb_g6lc_ai_gemm_concurrent
 
     @(negedge clk);
     inject_r_error[0] = 1'b1;
-    run_one(0, 1'b0, 1'b1, cy);
+    run_one(0, 1'b0, 1'b0, 1'b1, cy);
     @(negedge clk);
     inject_r_error[0] = 1'b0;
     directed_job("RRESP_error_invalidates", 1'b0, 1'b0);
     directed_job("RRESP_error_recovery_warm", 1'b1, 1'b0);
+  endtask
+
+  // ---------------------------------------------------------------------------
+  // Directed resident-A set, the mirror of run_directed above.  It is a TABLE
+  // and a runtime loop, not a list of literal calls, for the same compile-time
+  // reason as the EXPERIMENTS table: one call site emits the job body once.
+  //
+  // `a_case_op` is the mutation applied immediately before case `c` runs, so
+  // each row inherits the state the previous row left behind -- the order is
+  // load-bearing, exactly as in the B-side sequence.
+  function automatic int unsigned a_case_op(input int unsigned c);
+    case (c)
+      2:      return 1;   // bump the A epoch: same bytes, new generation
+      4:      return 2;   // move ptr_a inside the A slot
+      6:      return 3;   // widen lda without changing k
+      8:      return 4;   // change m -- part of the A key
+      10:     return 5;   // change k -- part of both keys
+      12:     return 6;   // change n -- part of NEITHER A key term
+      13:     return 7;   // change the element format
+      15:     return 8;   // pulse reuse_a_invalidate_i
+      17:     return 9;   // drop the A owner lease
+      18:     return 10;  // restore the A owner lease
+      19:     return 11;  // full reset to INT8 8x8x16 with both keys flushed
+      20, 23: return 12;  // alias C over A
+      21, 24: return 13;  // restore C to its own region
+      26:     return 14;  // m=0: a job that must error
+      27:     return 15;  // restore m
+      29:     return 16;  // inject an AXI read error
+      30:     return 17;  // stop injecting
+      default: return 0;
+    endcase
+  endfunction
+
+  function automatic string a_case_name(input int unsigned c);
+    case (c)
+      0:  return "A_cold_miss";
+      1:  return "A_warm_hit";
+      2:  return "A_changed_epoch";
+      3:  return "A_changed_epoch_warm";
+      4:  return "A_pointer_mismatch";
+      5:  return "A_pointer_warm";
+      6:  return "A_lda_stride_mismatch";
+      7:  return "A_lda_stride_warm";
+      8:  return "A_m_shape_mismatch";
+      9:  return "A_m_shape_warm";
+      10: return "A_k_mismatch";
+      11: return "A_k_mismatch_warm";
+      12: return "n_not_A_key";
+      13: return "A_format_mismatch";
+      14: return "A_format_warm";
+      15: return "A_explicit_invalidation";
+      16: return "A_explicit_invalidation_warm";
+      17: return "A_missing_owner_lease";
+      18: return "A_owner_lease_warm";
+      19: return "A_reset_cold";
+      20: return "C_alias_A_cold";
+      21: return "C_alias_A_not_resident";
+      22: return "C_alias_A_recovery_warm";
+      23: return "C_alias_A_warm_refused";
+      24: return "C_alias_A_reload";
+      25: return "C_alias_A_rewarm";
+      26: return "A_error_job";
+      27: return "A_error_clears_residency";
+      28: return "A_error_recovery_warm";
+      29: return "A_RRESP_error_job";
+      30: return "A_RRESP_error_invalidates";
+      default: return "A_RRESP_error_recovery_warm";
+    endcase
+  endfunction
+
+  // Case 12 is the point of the whole set: n is the B-side dimension, so
+  // changing it must NOT cost the A residency, exactly as changing m does not
+  // cost the B residency ("m_not_B_key" above).
+  function automatic bit a_case_hit(input int unsigned c);
+    return c inside {1, 3, 5, 7, 9, 11, 12, 14, 16, 18, 22, 25, 28, 31};
+  endfunction
+
+  // Restaging is required wherever the previous row moved the A image (new
+  // pointer, new stride, new format) or wherever the previous job's C store
+  // landed on top of A because C was aliased over it.
+  function automatic bit a_case_stage(input int unsigned c);
+    return c inside {0, 4, 6, 13, 19, 20, 21, 23, 24};
+  endfunction
+
+  function automatic bit a_case_error(input int unsigned c);
+    return c inside {26, 29};
+  endfunction
+
+  // The B owner lease is held LOW for the whole set, so B is refetched by every
+  // job and the only read beats that may vanish are A's.  That is what makes
+  // each expectation attributable to the A key alone.
+  task automatic run_directed_a;
+    int unsigned cy;
+    signed_data = 1'b1;
+    configure_engine(0, 3'd0, 1'b0);
+    invalidate_all();
+    invalidate_a_all();
+    @(negedge clk);
+    lease_v[0] = 1'b0;
+    lease_a_v[0] = 1'b1;
+    for (int unsigned c = 0; c < A_CASES; c++) begin
+      @(negedge clk);
+      case (a_case_op(c))
+        1:  epoch_a_v[0]++;
+        2:  pa_v[0] += 64'd128;
+        3:  lda_v[0] = 16'd24;
+        4:  m_v[0] = 4;
+        5:  k_v[0] = 8;
+        6:  n_v[0] = 6;
+        7:  numfmt_v[0] = 3'd3;
+        8:  invalidate_a_all();
+        9:  lease_a_v[0] = 1'b0;
+        10: lease_a_v[0] = 1'b1;
+        11: begin
+          configure_engine(0, 3'd0, 1'b0);
+          invalidate_all();
+          invalidate_a_all();
+          @(negedge clk);
+          lease_v[0] = 1'b0;
+          lease_a_v[0] = 1'b1;
+        end
+        12: pc_v[0] = pa_v[0];
+        13: pc_v[0] = eng_a(0) + 64'(OFF_C);
+        14: m_v[0] = 0;
+        15: m_v[0] = JOB_M;
+        16: inject_r_error[0] = 1'b1;
+        17: inject_r_error[0] = 1'b0;
+        default: ;
+      endcase
+      // An erroring job publishes nothing, so it is run bare: there is no
+      // golden C to check and no traffic law to hold once err_o is set.
+      if (a_case_error(c)) run_one(0, 1'b0, 1'b0, 1'b1, cy);
+      else directed_job(a_case_name(c), 1'b0, a_case_stage(c), a_case_hit(c));
+    end
+  endtask
+
+  // ---------------------------------------------------------------------------
+  // The combined experiment: four residency points on ONE physical engine with
+  // IDENTICAL work -- no reuse, A only, B only, both.  The leases are the only
+  // thing that moves between points, so every difference in read beats is
+  // attributable to residency and to nothing else.
+  //
+  // The points must run in this order: each point's job is what publishes the
+  // residency the next point hits, and point 0 (no lease) is the reference.
+  function automatic bit dual_reuse_a(input int unsigned p);
+    return p inside {1, 3};
+  endfunction
+
+  function automatic bit dual_reuse_b(input int unsigned p);
+    return p inside {2, 3};
+  endfunction
+
+  // One integer and one float format: the residency key carries numfmt, and the
+  // float path is the one whose row is widest (FP32 k=16 is 8 beats a row).
+  function automatic logic [2:0] dual_fmt(input int unsigned d);
+    return (d == 0) ? 3'd0 : 3'd7;
+  endfunction
+
+  task automatic run_dual(
+      input logic [2:0]        numfmt,
+      input logic [DATA_W-1:0] pattern,
+      input int unsigned       bpe,
+      input logic              is_packed
+  );
+    int unsigned cy, rb, wb, expected_r, expected_w, ref_cy;
+    int unsigned point_r [DUAL_POINTS];
+    bit want_a, want_b;
+    signed_data = 1'b1;
+    configure_engine(0, numfmt, 1'b0);
+    store_engine(0, pattern, bpe, is_packed, 1'b0);
+    invalidate_all();
+    invalidate_a_all();
+    ref_cy = 0;
+    expected_w = JOB_M * JOB_N / 2;
+    for (int unsigned p = 0; p < DUAL_POINTS; p++) begin
+      want_a = VA_TURBO && dual_reuse_a(p);
+      want_b = VA_TURBO && dual_reuse_b(p);
+      @(negedge clk);
+      lease_a_v[0] = dual_reuse_a(p);
+      lease_v[0]   = dual_reuse_b(p);
+      poison_engine(0);
+      run_one(0, want_b, want_a, 1'b0, cy);
+      check_engine(0);
+      rb = pmu_r_v[0];
+      wb = pmu_w_v[0];
+      expected_r = job_read_beats(JOB_M, JOB_N, JOB_K, numfmt, want_a, want_b);
+      assert (rb == expected_r && wb == expected_w)
+        else $fatal(1, "dual fmt=%0d point%0d traffic r=%0d/%0d w=%0d/%0d",
+                    numfmt, p, rb, expected_r, wb, expected_w);
+      point_r[p] = rb;
+      if (p == 0) ref_cy = cy;
+      $display("DUAL fmt=%0d reuse_a=%0d reuse_b=%0d cycles=%0d r=%0d w=%0d hit_a=%0d hit_b=%0d speedup_x1000=%0d",
+               numfmt, dual_reuse_a(p), dual_reuse_b(p), cy, rb, wb,
+               reuse_hit_a_v[0], reuse_hit_v[0], cy != 0 ? ref_cy * 1000 / cy : 0);
+    end
+    if (VA_TURBO) begin
+      assert (point_r[1] < point_r[0] && point_r[2] < point_r[0])
+        else $fatal(1, "dual fmt=%0d single-hit r not below no-reuse: a=%0d b=%0d none=%0d",
+                    numfmt, point_r[1], point_r[2], point_r[0]);
+      assert (point_r[3] < point_r[1] && point_r[3] < point_r[2])
+        else $fatal(1, "dual fmt=%0d both-hit r=%0d not below single-hit a=%0d b=%0d",
+                    numfmt, point_r[3], point_r[1], point_r[2]);
+    end else
+      assert (point_r[0] == point_r[1] && point_r[1] == point_r[2] &&
+              point_r[2] == point_r[3])
+        else $fatal(1, "dual disabled fmt=%0d read beats moved %p", numfmt, point_r);
   endtask
 
   initial begin
@@ -1121,7 +1412,9 @@ module tb_g6lc_ai_gemm_concurrent
     inject_r_error = '0;
     start_v = '0;
     invalidate_v = '0;
+    invalidate_a_v = '0;
     lease_v = '0;
+    lease_a_v = '0;
     permission_v = '0;
     window_v = '0;
     policy_enable_v = '0;
@@ -1138,6 +1431,7 @@ module tb_g6lc_ai_gemm_concurrent
       lda_v[i] = 16'(JOB_K);
       ldb_v[i] = 16'(JOB_K);
       epoch_v[i] = 0;
+      epoch_a_v[i] = 0;
       level_v[i] = 0;
       b_owner_v[i] = unsigned'(i);
       b_version_v[i] = 0;
@@ -1182,6 +1476,14 @@ module tb_g6lc_ai_gemm_concurrent
     run_opportunistic_sweep(3'd0, ONES8,  1, 1'b0);
     run_opportunistic_sweep(3'd7, FP32_1, 4, 1'b0);
     run_directed();
+    run_directed_a();
+
+    // Four residency points per format on one engine: the A and B keys must
+    // compose, not merely coexist.  Table-driven for the same compile-time
+    // reason as the EXPERIMENTS loop above.
+    for (int unsigned d = 0; d < DUAL_FMTS; d++)
+      run_dual(dual_fmt(d), exp_pattern(dual_fmt(d)), exp_bpe(dual_fmt(d)),
+               dual_fmt(d) == 3'd1);
 
     if (straddle) begin
       $error("an engine burst straddled a channel stripe");

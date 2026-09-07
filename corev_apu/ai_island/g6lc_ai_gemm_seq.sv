@@ -49,6 +49,7 @@ module g6lc_ai_gemm_seq #(
     parameter int unsigned NrChannels = 1,
     parameter int unsigned ChanShift  = 6,
     parameter bit          ReuseBEn   = 1'b0,
+    parameter bit          ReuseAEn   = 1'b0,
     parameter int unsigned MaxElementBytes = 4,
     parameter type         axi_req_t  = logic,
     parameter type         axi_resp_t = logic
@@ -78,6 +79,10 @@ module g6lc_ai_gemm_seq #(
     input  logic [31:0] reuse_b_epoch_i,
     input  logic        reuse_b_invalidate_i,
     output logic        pmu_reuse_b_hit_o,
+    input  logic        reuse_a_i,
+    input  logic [31:0] reuse_a_epoch_i,
+    input  logic        reuse_a_invalidate_i,
+    output logic        pmu_reuse_a_hit_o,
     output axi_req_t    axi_req_o,
     input  axi_resp_t   axi_resp_i
 );
@@ -519,7 +524,11 @@ module g6lc_ai_gemm_seq #(
                          numfmt_q inside {3'd0, 3'd1, 3'd3, 3'd4, 3'd5, 3'd6, 3'd7};
     assign disjoint = !b_end[AddrWidth] && !c_end[AddrWidth] &&
                       ({1'b0, pc_q} >= b_end || {1'b0, pb_q} >= c_end);
-    assign reuse_b_safe = cacheable_q;
+    // Combinational, not `cacheable_q`: the skip is now decided in ST_CHK too
+    // (when A is also resident) and `cacheable_q` is still clear at that point.
+    // The job's shape and pointers are latched at start and do not move, so this
+    // is the same value `cacheable_q` carries from ST_CHK onward.
+    assign reuse_b_safe = geometry_ok && disjoint && !invalidated_q;
     assign response_error = (axi_resp_i.r_valid && axi_req_o.r_ready && axi_resp_i.r.resp[1]) ||
                             (axi_resp_i.b_valid && axi_req_o.b_ready && axi_resp_i.b.resp[1]);
 
@@ -550,7 +559,10 @@ module g6lc_ai_gemm_seq #(
         end
         if (state_q == ST_CHK)
           cacheable_q <= geometry_ok && disjoint;
-        if (state_q == ST_LA && state_d == ST_MAC)
+        // ST_LA -> ST_MAC is a B skip with A loaded; ST_CHK -> ST_MAC is a B
+        // skip with A resident too.  Both must report, or the counter would
+        // under-report exactly when the engine saved the most traffic.
+        if ((state_q == ST_LA || state_q == ST_CHK) && state_d == ST_MAC)
           pmu_reuse_b_hit_o <= 1'b1;
         if (state_q == ST_DONE) begin
           valid_q <= cacheable_q && !invalidated_q && !err_q;
@@ -572,6 +584,95 @@ module g6lc_ai_gemm_seq #(
     assign reuse_b_skip_q = 1'b0;
     assign reuse_b_safe = 1'b0;
     assign pmu_reuse_b_hit_o = 1'b0;
+  end
+
+  // Resident A, the mirror of the B path above and the same recipe 16.  B
+  // residency serves one weight tile against many activations; A residency
+  // serves one activation tile against many weight tiles, which is the other
+  // half of the workload and costs the same key registers.  N is deliberately
+  // absent from the A key exactly as M is absent from the B key: neither
+  // dimension addresses the tile it is excluded from.
+  logic reuse_a_skip_q, reuse_a_safe;
+  if (ReuseAEn) begin : gen_reuse_a
+    logic valid_q, cacheable_q, invalidated_q;
+    logic [AddrWidth-1:0] ptr_q;
+    logic [8:0] m_saved_q, k_saved_q;
+    logic [15:0] lda_saved_q;
+    logic [2:0] fmt_q;
+    logic [31:0] epoch_q, job_epoch_q;
+    logic [31:0] a_span, c_span;
+    logic [AddrWidth:0] a_end, c_end;
+    logic geometry_ok, disjoint, response_error;
+
+    assign a_span = 32'(m_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, lda_q}) + k_bytes;
+    assign c_span = (32'(m_q[8:0]) * 32'(n_q[8:0])) << 2;
+    assign a_end = {1'b0, pa_q} + (AddrWidth+1)'(a_span);
+    assign c_end = {1'b0, pc_q} + (AddrWidth+1)'(c_span);
+    assign geometry_ok = m_q > 0 && m_q <= 256 && n_q > 0 && n_q <= 256 &&
+                         k_q > 0 && k_q <= 256 && lda_q >= k_q[15:0] &&
+                         numfmt_q inside {3'd0, 3'd1, 3'd3, 3'd4, 3'd5, 3'd6, 3'd7};
+    assign disjoint = !a_end[AddrWidth] && !c_end[AddrWidth] &&
+                      ({1'b0, pc_q} >= a_end || {1'b0, pa_q} >= c_end);
+    // Combinational for the same reason as the B side, and here it is load
+    // bearing: A's skip is decided in ST_CHK, where `cacheable_q` has just been
+    // cleared by the start handshake, so keying off it would make the skip dead
+    // code while the PMU still claimed a hit.
+    assign reuse_a_safe = geometry_ok && disjoint && !invalidated_q;
+    assign response_error = (axi_resp_i.r_valid && axi_req_o.r_ready && axi_resp_i.r.resp[1]) ||
+                            (axi_resp_i.b_valid && axi_req_o.b_ready && axi_resp_i.b.resp[1]);
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        valid_q <= 1'b0;
+        cacheable_q <= 1'b0;
+        invalidated_q <= 1'b0;
+        ptr_q <= '0;
+        m_saved_q <= '0;
+        k_saved_q <= '0;
+        lda_saved_q <= '0;
+        fmt_q <= '0;
+        epoch_q <= '0;
+        job_epoch_q <= '0;
+        reuse_a_skip_q <= 1'b0;
+        pmu_reuse_a_hit_o <= 1'b0;
+      end else begin
+        if (state_q == ST_IDLE && start_i) begin
+          job_epoch_q <= reuse_a_epoch_i;
+          reuse_a_skip_q <= reuse_a_i && valid_q && ptr_q == ptr_a_i &&
+                            {23'd0, m_saved_q} == m_i && {23'd0, k_saved_q} == k_i &&
+                            lda_saved_q == lda_i && fmt_q == numfmt_i && epoch_q == reuse_a_epoch_i;
+          valid_q <= 1'b0;
+          cacheable_q <= 1'b0;
+          invalidated_q <= 1'b0;
+          pmu_reuse_a_hit_o <= 1'b0;
+        end
+        if (state_q == ST_CHK) begin
+          cacheable_q <= geometry_ok && disjoint;
+          // Exactly the FSM's skip condition, so the flag cannot disagree.
+          if (reuse_a_skip_q && reuse_a_safe && !reuse_a_invalidate_i)
+            pmu_reuse_a_hit_o <= 1'b1;
+        end
+        if (state_q == ST_DONE) begin
+          valid_q <= cacheable_q && !invalidated_q && !err_q;
+          ptr_q <= pa_q;
+          m_saved_q <= m_q[8:0];
+          k_saved_q <= k_q[8:0];
+          lda_saved_q <= lda_q;
+          fmt_q <= numfmt_q;
+          epoch_q <= job_epoch_q;
+        end
+        if (reuse_a_invalidate_i || response_error) begin
+          valid_q <= 1'b0;
+          reuse_a_skip_q <= 1'b0;
+          invalidated_q <= 1'b1;
+          pmu_reuse_a_hit_o <= 1'b0;
+        end
+      end
+    end
+  end else begin : gen_no_reuse_a
+    assign reuse_a_skip_q = 1'b0;
+    assign reuse_a_safe = 1'b0;
+    assign pmu_reuse_a_hit_o = 1'b0;
   end
 
   // I3 PMU accumulators (active while not IDLE/DONE)
@@ -888,6 +989,16 @@ module g6lc_ai_gemm_seq #(
           ar_t_en = 1'b1; ar_t_d = '0;
           ar_j_en = 1'b1; ar_j_d = '0;
           state_d       = ST_LA;
+          // A resident: skip its load.  If B is resident too there is nothing
+          // left to fetch, so go straight to the MAC with a cleared
+          // accumulator, which is what ST_LB's exit would otherwise do.
+          if (ReuseAEn && reuse_a_skip_q && reuse_a_safe && !reuse_a_invalidate_i) begin
+            if (ReuseBEn && reuse_b_skip_q && reuse_b_safe && !reuse_b_invalidate_i) begin
+              state_d = ST_MAC;
+              acc_d   = '0;
+            end else
+              state_d = ST_LB;
+          end
         end
       end
 
@@ -1794,6 +1905,11 @@ module g6lc_ai_gemm_seq #(
         pmu_cy_q <= '0;
       end
 
+      if (state_q == ST_CHK && (state_d == ST_LB || state_d == ST_MAC)) begin
+        i_q <= '0;
+        j_q <= '0;
+        t_q <= '0;
+      end
       if (state_q == ST_LA && (state_d == ST_LB || state_d == ST_MAC)) begin
         i_q <= '0;
         j_q <= '0;

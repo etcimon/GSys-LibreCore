@@ -358,6 +358,26 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   resource, so the levers multiply rather than overlap. Operand read beats halve
   at every engine count and every C element is still checked. One shared-port
   fixture with repeated same-weight jobs; not MAC/s, not silicon, not inference.
+- [x] BOTH OPERANDS RESIDENT IS THE BEST SPEEDUP-PER-AREA LEVER MEASURED. Resident
+  A mirrors resident B under the same recipe 16 with an INDEPENDENT key (ptr_a, m,
+  k, lda, numfmt, own epoch; `n` absent exactly as `m` is absent from the B key),
+  so a job may hit neither, either or both. One engine, identical work, every C
+  element checked: INT8 189 -> 164 (A) / 164 (B) / **139 both** = 1.359x, FP32
+  669 -> 596 / 596 / **523** = 1.279x, and operand read beats reach **ZERO**
+  (32 -> 0, 128 -> 0) so only C writes remain. The comparison that matters:
+  1.359x on ONE engine equals the 1.358x resident B alone needed four contended
+  engines to reach. Cost +184 cells (+2.44%) and +22 FF over the 7,530-cell
+  baseline, zero latches, giving 14.7x return per %area against 0.8x for
+  8 -> 16 lanes and 0.0x for 16 -> 32. 32 directed A cases pass and VA_TURBO=0
+  reports 1.000x with no hits.
+- [x] TWO DEFECTS IN MY OWN A IMPLEMENTATION, caught by the harness and not by my
+  review. (1) The A skip keyed off `cacheable_q`, but A decides in ST_CHK where
+  that register has just been cleared by the start handshake, so the skip was DEAD
+  CODE while the PMU arm -- using the combinational term -- still reported a hit:
+  a hit flag that disagreed with the FSM. (2) `pmu_reuse_b_hit_o` fired only on
+  `ST_LA -> ST_MAC`, so with both residencies (which goes `ST_CHK -> ST_MAC`) it
+  under-reported exactly when the engine saved the most traffic. Both now derive
+  from the same term the FSM uses, so flag and behaviour cannot diverge.
 - [x] INTRA-ENGINE LANE GROUPING IS REFUTED, and the blocker is the C side. One
   element is written on its last reduction step (single `c_w_req`/`c_w_addr`/
   `c_w_data`), so an engine retires at most ONE element per cycle whatever the
