@@ -109,12 +109,23 @@ module tb_g6lc_ai_gemm_concurrent
   logic [31:0] epoch_a_v [N_ENGINES];
   logic [N_ENGINES-1:0] permission_v, window_v, policy_enable_v;
   logic [3:0] level_v [N_ENGINES];
+  // LOSSLESS NARROWING control, per engine.  `lossless_v` swaps the whole
+  // request over to recipe 1 (bank 0 sub-code 1) and `lossless_target_v` is the
+  // proven-exact target format.  Both default low/zero and are only raised by
+  // run_lossless, exactly as the A lease is, so no other experiment can see a
+  // lossless request.
+  logic [N_ENGINES-1:0] lossless_v;
+  logic [2:0] lossless_target_v [N_ENGINES];
   va_turbo_request_t request_v [N_ENGINES];
   va_turbo_plan_t plan_v [N_ENGINES];
   int unsigned b_owner_v [N_ENGINES], b_version_v [N_ENGINES];
   bit signed_data;
   localparam int unsigned REPEATS = 2;
   localparam logic [31:0] REUSE_MASK = 32'h1 << 16;
+  // Recipe 1 is the lossless repack; it shares the family with 3 and 17 but is
+  // the plain one (17 additionally demands the B lease, which these runs
+  // deliberately do not hold so both runs pay full operand traffic).
+  localparam logic [31:0] LOSSLESS_MASK = 32'h1 << 1;
 
   // Opportunistic mixed-hit sequence: fixed length and fixed denominator so
   // every hit fraction runs exactly the same amount of useful work.
@@ -129,6 +140,34 @@ module tb_g6lc_ai_gemm_concurrent
   localparam int unsigned A_CASES     = 32;
   localparam int unsigned DUAL_FMTS   = 2;
   localparam int unsigned DUAL_POINTS = 4;
+
+  // Proven-exact narrowing pairs, table driven for the same compile-time reason
+  // as everything else here.  One integer pair (which must be BIT-IDENTICAL)
+  // and the two float pairs (which may only regroup the FP32 accumulator).
+  localparam int unsigned LOSSLESS_PAIRS = 3;
+  // Bound for the float pairs, stated in FP32 ULPs of the C word because that
+  // is the only integer metric the raw 32-bit C storage supports.  FP32 RNE has
+  // a 2^-23 relative spacing, so the 1 ppm the selector reports for a float
+  // lossless narrowing (VA_FP32_RNE_PPM, eps_per_window) is ~8.4 ULP: 8 ULP is
+  // therefore the plan's own promise expressed in the storage domain.  It is
+  // also ~4 orders of magnitude tighter than any change to the PRODUCTS: C here
+  // is a whole number of magnitude <= 784, so one unit of C is >= 16,384 ULP.
+  // A regrouping difference can hide under this bound; a wrong product cannot.
+  //
+  // MEASURED: all three pairs come out at 0 ULP, the float pairs included.  That
+  // is not the host model's ~5.8 ppm (BF16) / ~0.3 ppm (FP16) and it does not
+  // contradict it -- it bounds where those figures can come from.  This fixture's
+  // operands are small whole numbers, so every partial sum is a whole number
+  // well inside FP32's 24-bit significand and NO fold rounds; regrouping folds
+  // that round nothing cannot move the result.  A non-zero float difference
+  // needs operands that are exact in the target yet mantissa-rich enough to make
+  // the FP32 accumulator round mid-reduction, which this harness's integer
+  // fixture cannot express.  The bound is kept at the plan's declared 1 ppm
+  // rather than tightened to the observed 0, because 0 is a property of THESE
+  // operands and not of the recipe.
+  localparam int unsigned LOSSLESS_FP_ULP_BOUND = 8;
+  logic [31:0] loss_ref_c [JOB_M*JOB_N];
+  longint loss_max_diff;
 
   function automatic config_pkg::ai_cfg_t test_cfg();
     config_pkg::ai_cfg_t cfg;
@@ -219,8 +258,11 @@ module tb_g6lc_ai_gemm_concurrent
       request_v[i] = '0;
       request_v[i].enable = policy_enable_v[i];
       request_v[i].level = level_v[i];
-      request_v[i].bank = 2'd2;
-      request_v[i].subcode = 3'd0;
+      // Recipe 16 is bank 2 sub-code 0; the lossless repack is recipe 1, i.e.
+      // bank 0 sub-code 1.  One request publishes one plan, so the sub-code and
+      // the consumer mask below move together with `lossless_v`.
+      request_v[i].bank = lossless_v[i] ? 2'd0 : 2'd2;
+      request_v[i].subcode = lossless_v[i] ? 3'd1 : 3'd0;
       request_v[i].code = POLICY_BULK;
       request_v[i].numfmt = numfmt_v[i];
       request_v[i].m = 16'(m_v[i]);
@@ -230,8 +272,27 @@ module tb_g6lc_ai_gemm_concurrent
       request_v[i].reuse_b_valid = lease_v[i];
       request_v[i].reuse_a_valid = lease_a_v[i];
       request_v[i].window_valid = window_v[i];
-      request_v[i].qualified_mask = permission_v[i] ? REUSE_MASK : 32'd0;
-      plan_v[i] = va_turbo_select(TEST_CFG, request_v[i], GEMM_LANES, 8, 1, REUSE_MASK);
+      // LOSSLESS NARROWING evidence.  Every field is gated on `lossless_v`, so
+      // it reads as a hard zero for the reuse, opportunistic, directed and dual
+      // experiments and cannot move any of their measurements.
+      request_v[i].lossless_proven        = lossless_v[i];
+      request_v[i].lossless_narrow_valid  = lossless_v[i];
+      request_v[i].lossless_narrow_target = lossless_v[i] ? lossless_target_v[i] : 3'd0;
+      // A float target makes recipe 1 report VA_ARITH_REL at 1 ppm, so it has to
+      // clear the accuracy admission gate; the integer pair reports EXACT and
+      // never reaches that gate at all.  kappa is caller evidence the harness
+      // cannot honestly measure here, so it supplies the neutral Q8 1.0 floor
+      // the gate demands -- the accuracy claim this test actually makes is the
+      // MEASURED max_abs_diff below, not the selector's reported bound.
+      request_v[i].accuracy_valid         = lossless_v[i];
+      request_v[i].kappa_valid            = lossless_v[i];
+      request_v[i].kappa_q8               = lossless_v[i] ? 16'd256 : 16'd0;
+      request_v[i].range_safe             = lossless_v[i];
+      request_v[i].relative_domain_valid  = lossless_v[i];
+      request_v[i].qualified_mask = permission_v[i]
+          ? (lossless_v[i] ? LOSSLESS_MASK : REUSE_MASK) : 32'd0;
+      plan_v[i] = va_turbo_select(TEST_CFG, request_v[i], GEMM_LANES, 8, 1,
+                                  lossless_v[i] ? LOSSLESS_MASK : REUSE_MASK);
       reuse_v[i] = plan_v[i].apply && plan_v[i].reuse_b;
       // Same real plan, other operand: recipe 16 publishes the two residencies
       // separately, so an A lease alone is enough for the plan to apply.
@@ -240,7 +301,10 @@ module tb_g6lc_ai_gemm_concurrent
 
     always @(posedge clk) begin
       if (rst_ni) begin
-        if (start_v[i]) begin
+        // A lossless job publishes recipe 1, not recipe 16, so the recipe-16
+        // expectations below cannot apply to it; they are guarded rather than
+        // weakened, and the recipe-1 plan gets its own complete set instead.
+        if (start_v[i] && !lossless_v[i]) begin
           automatic bit recipe16_ok;
           // Everything recipe 16 demands EXCEPT the owner lease.  The two sides
           // share every other gate, so factoring it out is what keeps the A and
@@ -266,6 +330,74 @@ module tb_g6lc_ai_gemm_concurrent
                     (plan_v[i].reuse_a || plan_v[i].reuse_b) &&
                     plan_v[i].reuse_a == lease_a_v[i] && plan_v[i].reuse_b == lease_v[i])
               else $fatal(1, "eng%0d unsupported plan reached consumer", i);
+        end
+        if (start_v[i] && lossless_v[i]) begin
+          automatic bit narrower, both_int, gates_ok, lossless_ok;
+          // STRICTLY narrower is what makes it a NARROWING: an equal-width pair
+          // buys no beats, so the selector refuses to CONVERT one.  It does not
+          // follow that it refuses the request: recipe 1 is the lossless repack
+          // family, and its pre-existing integer arm admits a proven-exact
+          // INTEGER tensor at unchanged width (convert=0, lossless_narrowed=0).
+          // Measured, not assumed -- an INT4 request with an INT4 target does
+          // apply.  So the dst run below is a live check of BOTH rules at once:
+          // the float pair must be refused outright, the integer pair must fall
+          // back to the plain repack and must NOT claim a narrowing.
+          narrower = policy_format_known(numfmt_v[i]) &&
+                     policy_format_known(lossless_target_v[i]) &&
+                     policy_element_bits_log2(lossless_target_v[i]) <
+                     policy_element_bits_log2(numfmt_v[i]);
+          both_int = policy_integer_format(numfmt_v[i]) &&
+                     policy_integer_format(lossless_target_v[i]);
+          gates_ok = VA_TURBO && policy_enable_v[i] && level_v[i] != 0 &&
+                     window_v[i] && permission_v[i] &&
+                     m_v[i] != 0 && n_v[i] != 0 && k_v[i] != 0 &&
+                     m_v[i] <= 256 && n_v[i] <= 256 && k_v[i] <= 256 &&
+                     policy_format_known(numfmt_v[i]);
+          lossless_ok = gates_ok &&
+                        (narrower || policy_integer_format(numfmt_v[i]));
+          assert (plan_v[i].apply == lossless_ok)
+            else $fatal(1, "eng%0d lossless apply=%0b expected=%0b fmt=%0d target=%0d",
+                        i, plan_v[i].apply, lossless_ok, numfmt_v[i],
+                        lossless_target_v[i]);
+          if (plan_v[i].apply) begin
+            // Whichever arm applied, recipe 1 changes STORAGE and nothing else:
+            // same products, no approximation, no grouping, no residency (that
+            // is recipe 17's job and this plan never takes a lease).
+            assert (plan_v[i].recipe == 5'd1 &&
+                    !plan_v[i].approx_products && !plan_v[i].skip_products &&
+                    !plan_v[i].split_rows && plan_v[i].groups_log2 == 0 &&
+                    !plan_v[i].reuse_a && !plan_v[i].reuse_b &&
+                    plan_v[i].lossless_narrowed == narrower)
+              else $fatal(1, "eng%0d lossless plan recipe=%0d narrowed=%0b expected_narrowed=%0b",
+                          i, plan_v[i].recipe, plan_v[i].lossless_narrowed, narrower);
+            if (narrower)
+              // The arithmetic split is the load-bearing part: an integer
+              // source narrowing into an integer target has no rounding site
+              // anywhere (EXACT, eps 0, no window term), while anything that
+              // reaches the FP32 accumulator merely regroups its folds and is
+              // charged the accumulation epsilon per WINDOW, not the target
+              // format's per-product one.
+              assert (plan_v[i].convert &&
+                      plan_v[i].target_numfmt == lossless_target_v[i] &&
+                      plan_v[i].arith_kind == (both_int ? VA_ARITH_EXACT : VA_ARITH_REL) &&
+                      plan_v[i].eps_ppm == (both_int ? 20'd0 : VA_FP32_RNE_PPM) &&
+                      plan_v[i].eps_per_window == !both_int)
+                else $fatal(1, "eng%0d lossless narrow convert=%0b target=%0d kind=%0d eps=%0d per_window=%0b",
+                            i, plan_v[i].convert, plan_v[i].target_numfmt,
+                            plan_v[i].arith_kind, plan_v[i].eps_ppm,
+                            plan_v[i].eps_per_window);
+            else
+              // The plain integer repack: no conversion, no format change, and
+              // exact by construction, so it may claim no per-window site.
+              assert (!plan_v[i].convert &&
+                      plan_v[i].target_numfmt == numfmt_v[i] &&
+                      plan_v[i].arith_kind == VA_ARITH_EXACT &&
+                      plan_v[i].eps_ppm == 20'd0 && !plan_v[i].eps_per_window)
+                else $fatal(1, "eng%0d lossless repack convert=%0b target=%0d kind=%0d eps=%0d per_window=%0b",
+                            i, plan_v[i].convert, plan_v[i].target_numfmt,
+                            plan_v[i].arith_kind, plan_v[i].eps_ppm,
+                            plan_v[i].eps_per_window);
+          end
         end
         if (eng_resp[i].r_valid && eng_req[i].r_ready)
           assert (eng_resp[i].r.resp == axi_pkg::RESP_OKAY)
@@ -535,6 +667,28 @@ module tb_g6lc_ai_gemm_concurrent
       3'd5, 3'd6: return 16;
       3'd7: return 32;
       default: return 8;
+    endcase
+  endfunction
+
+  // Is the whole number `v` representable in `fmt` with NOTHING discarded?
+  // This is the proof `lossless_proven` stands for, done for real rather than
+  // assumed: the integer formats need the value inside their two's-complement
+  // range, and every narrow float format needs each FP32 mantissa bit it drops
+  // to already be zero.  The exponent never binds for the small whole numbers
+  // this harness uses (|v| <= 7 is exponent 0..2, inside every format's range),
+  // and fp32_whole only ever emits normals, so the mantissa test is sufficient.
+  function automatic bit element_exact_in(input int v, input logic [2:0] fmt);
+    logic [31:0] f;
+    f = fp32_whole(v);
+    case (fmt)
+      3'd0:    return v >= -128 && v <= 127;   // INT8
+      3'd1:    return v >= -8 && v <= 7;       // INT4
+      3'd5:    return f[12:0] == 13'd0;        // FP16 keeps 10 of 23 mantissa bits
+      3'd6:    return f[15:0] == 16'd0;        // BF16 keeps 7
+      3'd7:    return 1'b1;                    // FP32 is the source domain
+      3'd3:    return f[19:0] == 20'd0;        // FP8 E4M3 keeps 3
+      3'd4:    return f[20:0] == 21'd0;        // FP8 E5M2 keeps 2
+      default: return 1'b0;                    // SP24 is not a supported target
     endcase
   endfunction
 
@@ -1389,6 +1543,176 @@ module tb_g6lc_ai_gemm_concurrent
         else $fatal(1, "dual disabled fmt=%0d read beats moved %p", numfmt, point_r);
   endtask
 
+  // ---------------------------------------------------------------------------
+  // LOSSLESS NARROWING.  A narrowing is lossless when every operand element is
+  // exactly representable in the narrower format; the products are then the
+  // SAME real numbers, so the narrowed job differs from the source job ONLY in
+  // that the narrower format has a wider mac_step and therefore regroups the
+  // FP32 accumulator folds.  Nothing in the datapath consumes the plan yet --
+  // the narrowed job IS an ordinary native job at the target format, which is
+  // precisely the claim -- so the measurement is: run the SAME logical matrix
+  // twice, once native at src and once native at dst, and compare.
+  //
+  // The pairs.  One integer pair, which the selector calls VA_ARITH_EXACT and
+  // which must therefore come out BIT-IDENTICAL, and the two float pairs, which
+  // it calls VA_ARITH_REL at 1 ppm per window.
+  function automatic logic [2:0] lossless_src(input int unsigned p);
+    case (p)
+      0:       return 3'd0;   // INT8
+      default: return 3'd7;   // FP32
+    endcase
+  endfunction
+
+  function automatic logic [2:0] lossless_dst(input int unsigned p);
+    case (p)
+      0:       return 3'd1;   // INT8 -> INT4
+      1:       return 3'd6;   // FP32 -> BF16
+      default: return 3'd5;   // FP32 -> FP16
+    endcase
+  endfunction
+
+  // Capture (store_ref) or compare engine i's whole C tile in the RAW 32-bit
+  // storage domain, accumulating the largest absolute difference in
+  // `loss_max_diff`.
+  //
+  // Integer C is a two's-complement int32, so the difference of the raw words
+  // IS the arithmetic difference and the metric needs no interpretation.  Float
+  // C is IEEE FP32, whose bit pattern is monotone in magnitude within one sign,
+  // so the unsigned difference of the raw words is the ULP distance -- the
+  // natural integer metric for "how far apart are these two floats" and the one
+  // LOSSLESS_FP_ULP_BOUND is stated in.  Both runs of a pair compute the same
+  // real numbers, so no sign crossing can arise; were one to arise anyway the
+  // raw distance is enormous and the bound fails loudly, which is correct.
+  task automatic compare_c(input int unsigned i, input bit store_ref,
+                           input bit integer_domain);
+    logic [DATA_W-1:0] got;
+    logic [31:0] word;
+    longint diff;
+    int unsigned idx;
+    for (int unsigned e = 0; e < m_v[i] * n_v[i]; e += 2) begin
+      rd8(pc_v[i] + 64'(e * 4), got);
+      for (int unsigned lane = 0; lane < 2; lane++) begin
+        idx = e + lane;
+        if (idx < m_v[i] * n_v[i]) begin
+          word = got[lane * 32 +: 32];
+          if (store_ref) begin
+            loss_ref_c[idx] = word;
+          end else begin
+            diff = integer_domain
+                 ? (longint'($signed(word)) - longint'($signed(loss_ref_c[idx])))
+                 : (longint'(word) - longint'(loss_ref_c[idx]));
+            if (diff < 0) diff = -diff;
+            if (diff > loss_max_diff) loss_max_diff = diff;
+          end
+        end
+      end
+    end
+  endtask
+
+  // One proven-exact narrowing pair on ONE engine.
+  //
+  // The operands are the signed fixture's small whole numbers in -7..7, which
+  // are exact in FP32, FP16, BF16, INT8 and INT4 alike; that is not assumed but
+  // asserted element by element through element_exact_in before either run, so
+  // the narrowing really is lossless and any C difference is regrouping and
+  // nothing else.  Neither run holds a lease, so both pay the FULL operand
+  // traffic and the byte-ratio law below measures storage width and not a
+  // skipped load.
+  task automatic run_lossless(input logic [2:0] src_fmt, input logic [2:0] dst_fmt);
+    int unsigned src_cy, dst_cy, src_r, dst_r, expected_w;
+    bit both_int;
+    both_int = policy_integer_format(src_fmt) && policy_integer_format(dst_fmt);
+    signed_data = 1'b1;
+    expected_w = JOB_M * JOB_N / 2;
+
+    configure_engine(0, src_fmt, 1'b0);
+    for (int unsigned r = 0; r < JOB_M; r++)
+      for (int unsigned t = 0; t < JOB_K; t++)
+        assert (element_exact_in(a_value(0, r, t), dst_fmt) &&
+                element_exact_in(a_value(0, r, t), src_fmt))
+          else $fatal(1, "A[%0d][%0d]=%0d is not exact in src=%0d dst=%0d",
+                      r, t, a_value(0, r, t), src_fmt, dst_fmt);
+    for (int unsigned c = 0; c < JOB_N; c++)
+      for (int unsigned t = 0; t < JOB_K; t++)
+        assert (element_exact_in(b_value(0, c, t, 0), dst_fmt) &&
+                element_exact_in(b_value(0, c, t, 0), src_fmt))
+          else $fatal(1, "B[%0d][%0d]=%0d is not exact in src=%0d dst=%0d",
+                      c, t, b_value(0, c, t, 0), src_fmt, dst_fmt);
+
+    @(negedge clk);
+    lease_v[0]   = 1'b0;
+    lease_a_v[0] = 1'b0;
+    lossless_target_v[0] = dst_fmt;
+    lossless_v[0] = 1'b1;
+    invalidate_all();
+    invalidate_a_all();
+    store_engine(0, exp_pattern(src_fmt), exp_bpe(src_fmt), src_fmt == 3'd1, 1'b0);
+    poison_engine(0);
+    run_one(0, 1'b0, 1'b0, 1'b0, src_cy);
+    check_engine(0);
+    src_r = pmu_r_v[0];
+    assert (pmu_w_v[0] == expected_w)
+      else $fatal(1, "lossless src=%0d w=%0d/%0d", src_fmt, pmu_w_v[0], expected_w);
+    compare_c(0, 1'b1, both_int);
+
+    // The dst run keeps the lossless request up with the SAME target, where
+    // numfmt now equals it.  An equal-width pair buys no beats, so no NARROWING
+    // may be claimed; the gen_eng assertion checks that outcome (refused for
+    // the float pairs, demoted to the plain integer repack for the integer
+    // pair) rather than this task having to know which arm wins.
+    configure_engine(0, dst_fmt, 1'b0);
+    @(negedge clk);
+    lease_v[0]   = 1'b0;
+    lease_a_v[0] = 1'b0;
+    invalidate_all();
+    invalidate_a_all();
+    store_engine(0, exp_pattern(dst_fmt), exp_bpe(dst_fmt), dst_fmt == 3'd1, 1'b0);
+    poison_engine(0);
+    run_one(0, 1'b0, 1'b0, 1'b0, dst_cy);
+    check_engine(0);
+    dst_r = pmu_r_v[0];
+    assert (pmu_w_v[0] == expected_w)
+      else $fatal(1, "lossless dst=%0d w=%0d/%0d", dst_fmt, pmu_w_v[0], expected_w);
+    loss_max_diff = 0;
+    compare_c(0, 1'b0, both_int);
+    @(negedge clk);
+    lossless_v[0] = 1'b0;
+
+    // Reported BEFORE the assertions so the measurement survives a failure --
+    // a pair that violates the bound is a finding, and a finding with no number
+    // attached is useless.
+    $display("LOSSLESS src=%0d dst=%0d src_cycles=%0d dst_cycles=%0d speedup_x1000=%0d src_r=%0d dst_r=%0d max_abs_diff=%0d bit_identical=%0d",
+             src_fmt, dst_fmt, src_cy, dst_cy,
+             dst_cy != 0 ? src_cy * 1000 / dst_cy : 0, src_r, dst_r,
+             loss_max_diff, loss_max_diff == 0);
+
+    assert (src_r == job_read_beats(JOB_M, JOB_N, JOB_K, src_fmt, 1'b0, 1'b0) &&
+            dst_r == job_read_beats(JOB_M, JOB_N, JOB_K, dst_fmt, 1'b0, 1'b0))
+      else $fatal(1, "lossless src=%0d dst=%0d read beats %0d/%0d %0d/%0d",
+                  src_fmt, dst_fmt, src_r,
+                  job_read_beats(JOB_M, JOB_N, JOB_K, src_fmt, 1'b0, 1'b0), dst_r,
+                  job_read_beats(JOB_M, JOB_N, JOB_K, dst_fmt, 1'b0, 1'b0));
+    // Operand beats must drop by exactly the element-width ratio: that is the
+    // entire mechanism by which a lossless narrowing buys anything.
+    assert (src_r * element_bits(dst_fmt) == dst_r * element_bits(src_fmt))
+      else $fatal(1, "lossless src=%0d dst=%0d beats %0d->%0d not the %0d:%0d byte ratio",
+                  src_fmt, dst_fmt, src_r, dst_r, element_bits(src_fmt),
+                  element_bits(dst_fmt));
+    assert (dst_cy < src_cy)
+      else $fatal(1, "lossless src=%0d dst=%0d cycles %0d -> %0d did not fall",
+                  src_fmt, dst_fmt, src_cy, dst_cy);
+    if (both_int)
+      // Not a tolerance: integer -> integer has no rounding site anywhere, so
+      // anything but zero here is a REAL defect in the claim, not noise.
+      assert (loss_max_diff == 0)
+        else $fatal(1, "INT src=%0d -> dst=%0d is NOT bit-identical: max_abs_diff=%0d",
+                    src_fmt, dst_fmt, loss_max_diff);
+    else
+      assert (loss_max_diff <= longint'(LOSSLESS_FP_ULP_BOUND))
+        else $fatal(1, "lossless src=%0d dst=%0d differs by %0d ULP, above the %0d ULP (1 ppm) bound",
+                    src_fmt, dst_fmt, loss_max_diff, LOSSLESS_FP_ULP_BOUND);
+  endtask
+
   initial begin
     assert (encode_element(-7, 3'd0) == 32'h000000f9 &&
             encode_element(-7, 3'd1) == 32'h00000009)
@@ -1418,6 +1742,8 @@ module tb_g6lc_ai_gemm_concurrent
     permission_v = '0;
     window_v = '0;
     policy_enable_v = '0;
+    lossless_v = '0;
+    loss_max_diff = 0;
     signed_data = 1'b0;
     clr_seen = 0;
     aw_set = 0; w_set = 0; ar_set = 0;
@@ -1425,6 +1751,7 @@ module tb_g6lc_ai_gemm_concurrent
     r_ready_en = 0;
     for (int i = 0; i < N_ENGINES; i++) begin
       numfmt_v[i] = 3'd0;
+      lossless_target_v[i] = 3'd0;
       m_v[i] = JOB_M;
       n_v[i] = JOB_N;
       k_v[i] = JOB_K;
@@ -1484,6 +1811,11 @@ module tb_g6lc_ai_gemm_concurrent
     for (int unsigned d = 0; d < DUAL_FMTS; d++)
       run_dual(dual_fmt(d), exp_pattern(dual_fmt(d)), exp_bpe(dual_fmt(d)),
                dual_fmt(d) == 3'd1);
+
+    // Proven-exact narrowing pairs: the same logical matrix at both widths.
+    // Table-driven for the same compile-time reason as the EXPERIMENTS loop.
+    for (int unsigned p = 0; p < LOSSLESS_PAIRS; p++)
+      run_lossless(lossless_src(p), lossless_dst(p));
 
     if (straddle) begin
       $error("an engine burst straddled a channel stripe");

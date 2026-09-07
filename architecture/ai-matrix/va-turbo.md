@@ -690,14 +690,56 @@ than the approximate conversion that saves the identical traffic. In one trial
 the narrowed run was *more* accurate than the native FP32 run (0.000 vs 0.385
 ppm) because fewer windows means fewer rounding sites.
 
+### Witnessed in RTL, with one claim still outstanding
+
+The GEMM harness now runs each pair twice on one engine -- same logical matrix at
+the source format and at the target -- with per-element exactness **proven** on
+both tiles before either run, C poisoned between them, and every C word compared:
+
+| Pair | Cycles | Speedup | Read beats | max diff |
+|---|---|--:|---|--:|
+| INT8 -> INT4 | 189 -> 109 | **1.733x** | 32 -> 16 | **0** |
+| FP32 -> BF16 | 669 -> 349 | **1.916x** | 128 -> 64 | **0** |
+| FP32 -> FP16 | 669 -> 349 | **1.916x** | 128 -> 64 | **0** |
+
+Cycles and beats match the predicted native figures exactly, and the byte ratio
+is asserted rather than eyeballed. `INT8 -> INT4` bit-identity is now **witnessed
+in hardware**, compared as raw two's-complement int32 over all 64 C words.
+
+The float pairs also came out at **0 ULP**, and that is a *qualification* of the
+5.803 / 0.323 ppm host figures rather than a confirmation of them. The harness
+operand path is integer-only (`a_value`/`b_value`/`encode_element`/
+`golden_element` all produce small whole numbers), so every product and partial
+sum sits far inside FP32's 24-bit significand and **no fold rounds at all** --
+and regrouping folds that round nothing cannot move the result. The test was not
+tuned to produce a number; the bound is left at the plan's declared 1 ppm (8 ULP)
+with a comment saying that the observed 0 is a property of these operands, not of
+the recipe.
+
+So the "not bit-identical for float pairs" claim above is currently
+**unwitnessed in RTL**: nothing contradicts it, but nothing demonstrates it
+either. Witnessing it needs a fractional, target-exact fixture (BF16-exact values
+with a wide exponent spread) and a matching golden, which is a larger change than
+extending the harness. Recorded as outstanding rather than quietly counted as
+verified.
+
 ### Scope: 17 pairs, not one
 
 Deliberately not FP32-only. Over the seven known formats there are 17 strictly
 narrower ordered pairs -- FP32 to six targets, FP16 and BF16 to four each, and
 INT8/E4M3/E5M2 to INT4 -- and `VA_LOSSLESS_NARROW` sweeps all 64 (src, dst)
-combinations, admitting exactly those 17. Equal-width pairs are refused on
-purpose: FP16 <-> BF16 is a real conversion but saves no beats, and admitting it
-would attach a bound to a plan that buys nothing.
+combinations, admitting exactly those 17 as narrowings.
+
+**Refined by an assertion firing in the GEMM harness:** "equal-width pairs are
+refused" is true of the **narrowing arm only**, and the first version of this
+section overstated it. Recipe 1's pre-existing integer repack arm still admits an
+equal-width request on an *integer* source -- INT4 source with an INT4 target
+comes back `apply=1` but with `convert=0`, `lossless_narrowed=0`,
+`target_numfmt == numfmt`, `VA_ARITH_EXACT` and eps 0. That is correct and worth
+having: a repack that claims no traffic saving is a legitimate exact plan, it
+simply is not a narrowing. Float sources with an equal-width target are refused
+outright, because the repack arm is integer-only. The harness models both arms
+rather than the simpler rule.
 
 ### Area, and the performance-per-area verdict
 
@@ -716,23 +758,28 @@ synthesises to zero cells, so the default-off property is intact.
 
 ### What is still required to call this a throughput result
 
-The throughput here needs **no new RTL measurement**, and that is the point: the
+The throughput here needed **no new RTL datapath**, and that is the point: the
 narrowed job is an ordinary native job at the target format, so its cycle count
-is the already-measured native figure for that format. What remains:
+is the already-measured native figure. Status of the four items this section
+originally listed as outstanding:
 
-1. **A producer for the proof.** `lossless_proven` + `lossless_narrow_target`
-   are caller evidence; nothing in-tree computes them yet. The check is cheap
-   (round-trip every element and compare bit patterns) but it must live
-   somewhere, and until it does, no call site can assert the recipe.
-2. **A consumer mask bit.** Recipe 1/3/17 are not in any compiled consumer mask,
-   so today the plan is selection metadata like the rest of bank A.
-3. **Paired GEMM measurement** with the proof asserted, confirming the narrowed
-   job returns the target-format cycle count *and* that C matches the FP32 run
-   to within the reported bound -- the same protocol residency used.
-4. **ai-tensor exposure**, so the trade-off surface can offer a
-   `lossless-narrow` recipe whose quality column is ~0 rather than the storage
-   format's epsilon. That is the user-visible payoff: FP16-class speed at
-   FP32-class accuracy, when the data permits it.
+1. **A producer for the proof** -- **done**, `ai_tensor.lossless.prove()` is a
+   bit-pattern comparison (not a tolerance) reporting how many elements failed,
+   with integrality-and-range for integer targets. `best_target()` returns the
+   narrowest exact target; full-precision tensors correctly yield nothing.
+2. **A consumer mask bit** -- **done in the harness** (`LOSSLESS_MASK = 1 << 1`).
+   Production `g6lc_ai_island_top` still compiles no mask bit for 1/3/17, so the
+   island will not act on the plan outside verification.
+3. **Paired GEMM measurement** -- **done**, see the table above.
+4. **ai-tensor exposure** -- **done**, `ai_tensor.lossless.plan()` reports the
+   narrowest exact target with the measured native cycles and a quality column of
+   ~0.007 ppm instead of the storage format's epsilon. That is the user-visible
+   payoff: FP16-class speed at FP32-class accuracy, when the data permits it.
+
+What is genuinely left: a fractional target-exact fixture to witness the
+regrouping difference in RTL, a production consumer mask bit, and the zero-skip
+lever (recipe 2), which is still integer-gated and is the other exact FP32
+opportunity this section's argument applies to.
 
 ## 14. FP8 E5M2 was unreachable; recipe 18 code 3 now carries it
 

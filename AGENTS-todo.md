@@ -392,12 +392,37 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   0.8x for lane widening. Throughput needs NO new RTL measurement: a narrowed job is an
   ordinary native job at the target format, so its cycles are the already-measured
   native figure.
-- [ ] Still required before this is a throughput CLAIM: (1) a producer for
-  `lossless_proven`/`lossless_narrow_target` -- the round-trip check is cheap but
-  nothing in-tree computes it; (2) a consumer mask bit, since 1/3/17 are in no
-  compiled mask; (3) paired GEMM measurement with the proof asserted, same protocol
-  residency used; (4) ai-tensor exposure so the trade-off surface can offer
-  FP16-class speed at FP32-class accuracy where the data permits.
+- [x] WITNESSED IN RTL. The GEMM harness runs each pair twice on one engine (same
+  logical matrix at source and target format), proves per-element exactness on both
+  tiles BEFORE either run, poisons C between them and compares every C word.
+  Remote `ai-gemm-reuse-20260907T194820Z-3bf33be6b3dc` PASS:
+  INT8->INT4 189->109 (1.733x) beats 32->16 max_diff=0 BIT-IDENTICAL;
+  FP32->BF16 and FP32->FP16 669->349 (1.916x) beats 128->64 max_diff=0.
+  Cycles and beats match the predicted native figures exactly and the byte ratio is
+  asserted, not eyeballed. All four originally-outstanding items are now closed:
+  the proof producer (`ai_tensor.lossless.prove`), the harness consumer mask bit
+  (`LOSSLESS_MASK`), the paired measurement, and ai-tensor exposure
+  (`lossless.plan`, quality ~0.007 ppm instead of the storage epsilon).
+- [x] TWO CORRECTIONS THE MEASUREMENT FORCED, both mine. (1) "Equal-width pairs are
+  refused" was overstated: it holds for the NARROWING arm only. Recipe 1's
+  pre-existing integer repack arm still admits an equal-width integer request
+  (INT4->INT4 gives `apply=1`, `convert=0`, `lossless_narrowed=0`, EXACT, eps 0),
+  which is correct -- a repack claiming no traffic saving is a legitimate exact plan,
+  just not a narrowing. Float sources with an equal-width target stay refused because
+  the repack arm is integer-only. An assertion firing on the first run caught this,
+  and the harness now models both arms. (2) The float pairs measured 0 ULP, which
+  QUALIFIES rather than confirms the 5.803/0.323 ppm host figures: the harness
+  operand path is integer-only, so every product and partial sum sits far inside
+  FP32's 24-bit significand and no fold rounds at all -- and regrouping folds that
+  round nothing cannot move the result. The test was NOT tuned to produce a number;
+  the bound stays at the declared 1 ppm with a comment saying the observed 0 is a
+  property of these operands, not of the recipe.
+- [ ] Still outstanding: the "not bit-identical for float pairs" claim is UNWITNESSED
+  in RTL -- nothing contradicts it, nothing demonstrates it. Needs a fractional
+  target-exact fixture (BF16-exact values, wide exponent spread) and a matching
+  golden. Also: no production consumer mask bit for 1/3/17, and zero-skip (recipe 2)
+  is still integer-gated, which is the other exact FP32 lever the same argument
+  applies to.
 - [x] FITTING IS COMPLETE: every format now carries a bound, native FP32 included.
   Native FP32 is the ONE candidate the windowed kappa may legitimately multiply,
   because nothing perturbs its products (exact 48-bit significand product, exact
