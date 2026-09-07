@@ -125,12 +125,40 @@ package g6lc_ai_policy_pkg;
     logic independent_jobs;
     logic [8:0] ready_jobs, free_accumulators, bank_groups;
     logic exact_zero_proven;
+    logic lossless_proven;
     logic reuse_a_valid, reuse_b_valid;
     logic range_safe, scale_valid, accuracy_valid;
     logic [7:0] error_bound_q4;
+    // Cancellation amplification kappa in Q8 (256 = 1.0).  For a relative
+    // per-product bound this is sum|a_i b_i| / |sum a_i b_i|; for a full-scale
+    // bound it is K*max|a|*max|b| / |sum a_i b_i|.  Both are >= 1 and both are
+    // data dependent, which is exactly why the caller must supply a measured or
+    // proven value instead of the selector assuming one.
+    logic kappa_valid;
+    logic [15:0] kappa_q8;
+    // Per-recipe arithmetic parameter; its meaning is recipe specific and
+    // documented in va_turbo_arith (retained mantissa bits, block exponent
+    // spread, refinement steps, or a conversion target selector).
+    logic approx_param_valid;
+    logic [3:0] approx_param;
     logic window_valid;
     logic [31:0] qualified_mask;
   } va_turbo_request_t;
+
+  // How a recipe's arithmetic relates to the native result.
+  typedef enum logic [1:0] {
+    VA_ARITH_EXACT = 2'd0,  // bit-identical to native; no error term at all
+    VA_ARITH_REL   = 2'd1,  // per-product relative bound
+    VA_ARITH_FULL  = 2'd2,  // bound referenced to full scale K*max|a|*max|b|
+    VA_ARITH_NONE  = 2'd3   // arithmetic not specified; unusable by construction
+  } va_arith_kind_e;
+
+  typedef struct packed {
+    va_arith_kind_e kind;
+    logic [19:0] eps_ppm;   // parts per million, 0 for exact
+    logic needs_param;      // requires approx_param to be valid
+    logic narrows_storage;  // changes k_bytes, so it can also buy grouping
+  } va_turbo_arith_t;
 
   typedef struct packed {
     logic supported;
@@ -144,8 +172,179 @@ package g6lc_ai_policy_pkg;
     logic reuse_a, reuse_b;
     logic skip_products;
     logic convert;
+    // Products are approximated while storage width is unchanged, so this
+    // buys multiplier cost and never buys concurrency.  Kept distinct from
+    // `convert` because conflating the two is what made the first plan wrong.
+    logic approx_products;
+    logic arith_specified;
+    va_arith_kind_e arith_kind;
+    logic [19:0] eps_ppm;
+    logic [19:0] bound_ppm;
+    logic [19:0] budget_ppm;
     logic [18:0] row_bytes;
   } va_turbo_plan_t;
+
+  // Conversion target for recipe 18, whose target is caller-selected because a
+  // shared conversion serves several consumers that must agree on the format.
+  function automatic logic [2:0] approx_param_target(input logic [3:0] approx_param);
+    case (approx_param[1:0])
+      2'd0: return 3'(config_pkg::AI_FMT_FP16);
+      2'd1: return 3'(config_pkg::AI_FMT_BF16);
+      default: return 3'(config_pkg::AI_FMT_INT);
+    endcase
+  endfunction
+
+  // Relative bound, in ppm, on a product of two operands each rounded to `bits`
+  // explicit mantissa bits with round-to-nearest.  Per-operand relative error is
+  // u = 2^-(bits+1), so the product carries (1+u)^2 - 1 = 2u + u^2.  Tabulated
+  // rather than computed because ppm of a negative power of two is not an
+  // integer shift, and a silently truncated bound would be unsound.
+  function automatic logic [19:0] va_turbo_round_eps_ppm(input logic [4:0] bits);
+    case (bits)
+      5'd0:    return 20'd1000000;  // 1.25 saturated to 100%
+      5'd1:    return 20'd562500;
+      5'd2:    return 20'd265625;
+      5'd3:    return 20'd128906;
+      5'd4:    return 20'd63477;
+      5'd5:    return 20'd31494;
+      5'd6:    return 20'd15686;
+      5'd7:    return 20'd7828;
+      5'd8:    return 20'd3910;
+      5'd9:    return 20'd1954;
+      5'd10:   return 20'd977;
+      5'd11:   return 20'd488;
+      5'd12:   return 20'd244;
+      5'd13:   return 20'd122;
+      5'd14:   return 20'd61;
+      5'd15:   return 20'd31;
+      default: return 20'd0;        // >= 16 bits rounds below 1 ppm
+    endcase
+  endfunction
+
+  // Explicit mantissa bits per storage format, which is what sets the rounding
+  // bound above.  INT4/INT8 have no mantissa field; their bound is a full-scale
+  // quantisation bound instead and is handled separately.
+  function automatic logic [4:0] va_turbo_mantissa_bits(input logic [2:0] numfmt);
+    case (numfmt)
+      3'(config_pkg::AI_FMT_FP32):     return 5'd23;
+      3'(config_pkg::AI_FMT_FP16):     return 5'd10;
+      3'(config_pkg::AI_FMT_BF16):     return 5'd7;
+      3'(config_pkg::AI_FMT_FP8_E4M3): return 5'd3;
+      3'(config_pkg::AI_FMT_FP8_E5M2): return 5'd2;
+      default:                         return 5'd0;
+    endcase
+  endfunction
+
+  // The arithmetic each recipe performs, and the bound that follows from it.
+  //
+  // Kinds: EXACT recipes reorganise work without touching arithmetic, so their
+  // bound is identically zero and no accuracy evidence is required.  REL recipes
+  // perturb each product by a relative factor.  FULL recipes (integer
+  // quantisation) have an ABSOLUTE per-element error, so no relative per-product
+  // bound exists - a small element can be perturbed by 100% - and the bound is
+  // instead referenced to full scale K*max|a|*max|b|.  Conflating those two
+  // references would understate integer error badly, which is why the kind is
+  // carried explicitly rather than assumed.
+  //
+  // Derivations, with u = 2^-(p+1) for p explicit mantissa bits:
+  //   FP16  u = 2^-11 -> 2u+u^2 =   977 ppm      BF16 u = 2^-8  -> 7,828 ppm
+  //   FP8 E4M3 u = 2^-4 -> 128,906 ppm           FP8 E5M2 u = 2^-3 -> 265,625 ppm
+  //   INT8 symmetric, 127 levels: |d| <= A/254, so the full-scale bound is
+  //     2/254 + 1/254^2 = 7,887 ppm
+  //   INT4 symmetric, 7 levels:   |d| <= A/14,   2/14 + 1/196 = 147,908 ppm
+  //   Mitchell (1+ma)(1+mb) ~= 1+ma+mb has relative error ma*mb/((1+ma)(1+mb)),
+  //     whose supremum as ma,mb -> 1 is 1/4 = 250,000 ppm.  Note this is the
+  //     bound for THIS formulation; the textbook 11.1% figure belongs to the
+  //     log-domain formulation and must not be substituted for it.
+  //
+  // Recipes whose correction terms can only REDUCE error (21, 27, 28, 30, 31)
+  // deliberately report the uncorrected supremum, so the analytic bound stays
+  // conservative instead of encoding an unmeasured improvement factor.
+  //
+  // approx_param meaning: retained mantissa bits (21, 25, 30, 31), block
+  // exponent spread (26), conversion target 0=FP16/1=BF16/2=INT8 (18).
+  function automatic va_turbo_arith_t va_turbo_arith(
+      input logic [4:0] id,
+      input logic [2:0] numfmt,
+      input logic [3:0] approx_param
+  );
+    va_turbo_arith_t a;
+    logic [4:0] native_bits, effective_bits;
+    a = '0;
+    a.kind = VA_ARITH_EXACT;
+    native_bits = va_turbo_mantissa_bits(numfmt);
+    case (id)
+      // Bank A - representation.
+      5'd0, 5'd1, 5'd2, 5'd3: a.kind = VA_ARITH_EXACT;
+      5'd4: begin a.kind = VA_ARITH_REL; a.eps_ppm = va_turbo_round_eps_ppm(5'd10);
+                  a.narrows_storage = 1'b1; end
+      5'd5: begin a.kind = VA_ARITH_REL; a.eps_ppm = va_turbo_round_eps_ppm(5'd7);
+                  a.narrows_storage = 1'b1; end
+      5'd6: begin a.kind = VA_ARITH_FULL; a.eps_ppm = 20'd7887;
+                  a.narrows_storage = 1'b1; end
+      5'd7: begin a.kind = VA_ARITH_REL; a.eps_ppm = va_turbo_round_eps_ppm(5'd3);
+                  a.narrows_storage = 1'b1; end
+      // Bank B - exact concurrency and placement.
+      5'd8, 5'd9, 5'd10, 5'd11, 5'd12, 5'd13, 5'd14, 5'd15: a.kind = VA_ARITH_EXACT;
+      // Bank C - reuse and predictive compression.
+      5'd16, 5'd17: a.kind = VA_ARITH_EXACT;
+      5'd18: begin
+        a.needs_param = 1'b1;
+        a.narrows_storage = 1'b1;
+        case (approx_param[1:0])
+          2'd0: begin a.kind = VA_ARITH_REL; a.eps_ppm = va_turbo_round_eps_ppm(5'd10); end
+          2'd1: begin a.kind = VA_ARITH_REL; a.eps_ppm = va_turbo_round_eps_ppm(5'd7); end
+          2'd2: begin a.kind = VA_ARITH_FULL; a.eps_ppm = 20'd7887; end
+          default: a.kind = VA_ARITH_NONE;
+        endcase
+      end
+      5'd19: begin a.kind = VA_ARITH_FULL; a.eps_ppm = 20'd7887; end
+      5'd20: begin a.kind = VA_ARITH_FULL; a.eps_ppm = 20'd7887;
+                   a.narrows_storage = 1'b1; end
+      5'd21: begin a.kind = VA_ARITH_REL; a.needs_param = 1'b1;
+                   a.eps_ppm = va_turbo_round_eps_ppm({1'b0, approx_param}); end
+      5'd22, 5'd23: a.kind = VA_ARITH_EXACT;
+      // Bank D - approximate arithmetic.
+      5'd24: a.kind = VA_ARITH_EXACT;
+      5'd25: begin a.kind = VA_ARITH_REL; a.needs_param = 1'b1;
+                   a.eps_ppm = va_turbo_round_eps_ppm({1'b0, approx_param}); end
+      5'd26: begin
+        a.kind = VA_ARITH_REL;
+        a.needs_param = 1'b1;
+        effective_bits = (native_bits > {1'b0, approx_param}) ?
+            5'(native_bits - {1'b0, approx_param}) : 5'd0;
+        a.eps_ppm = va_turbo_round_eps_ppm(effective_bits);
+      end
+      5'd27, 5'd28: begin a.kind = VA_ARITH_REL; a.eps_ppm = 20'd250000; end
+      5'd29: begin a.kind = VA_ARITH_FULL; a.eps_ppm = 20'd147908;
+                   a.narrows_storage = 1'b1; end
+      5'd30, 5'd31: begin a.kind = VA_ARITH_REL; a.needs_param = 1'b1;
+                          a.eps_ppm = va_turbo_round_eps_ppm({1'b0, approx_param}); end
+      default: a.kind = VA_ARITH_NONE;
+    endcase
+    return a;
+  endfunction
+
+  // Tile bound = eps * kappa, where kappa >= 1 absorbs cancellation.  For a
+  // dot product with exact accumulation and per-product relative error eps,
+  // |sum p' - sum p| <= eps * sum|p|, so relative to |sum p| the bound is
+  // eps * (sum|p| / |sum p|).  kappa is data dependent and therefore an input,
+  // never an assumption: kappa = 1 would silently assume no cancellation.
+  function automatic logic [19:0] va_turbo_bound_ppm(
+      input va_turbo_arith_t a, input logic [15:0] kappa_q8
+  );
+    logic [35:0] scaled;
+    if (a.kind == VA_ARITH_EXACT) return 20'd0;
+    if (a.kind == VA_ARITH_NONE) return 20'd1000000;
+    scaled = (36'(a.eps_ppm) * 36'(kappa_q8)) >> 8;
+    return (scaled > 36'd1000000) ? 20'd1000000 : 20'(scaled);
+  endfunction
+
+  // Runtime level is an error budget in sixteenths of a percentage point, so
+  // one level step is 625 ppm and level 15 is 9,375 ppm (0.9375%).
+  function automatic logic [19:0] va_turbo_budget_ppm(input logic [3:0] level);
+    return 20'(level) * 20'd625;
+  endfunction
 
   function automatic va_turbo_plan_t va_turbo_select(
       input config_pkg::ai_cfg_t cfg,
@@ -156,17 +355,27 @@ package g6lc_ai_policy_pkg;
       input logic [31:0] consumer_mask
   );
     va_turbo_plan_t p, candidate;
+    va_turbo_arith_t arith;
     logic [4:0] id;
     logic [18:0] row_bytes;
     logic [2:0] target;
-    logic conversion, separate_jobs;
+    logic fallback_only, lossless, zero_skip, conversion, grouping, reuse_only;
+    logic control_only, approx_products, separate_jobs, order_only;
     logic [8:0] work_count;
     int unsigned group_limit;
     p = '0;
     p.target_numfmt = r.numfmt;
     id = {r.bank, r.subcode};
-    p.supported = id inside {5'd0, 5'd2, 5'd4, 5'd5, 5'd6, 5'd9, 5'd10,
-                             5'd11, 5'd13, 5'd16};
+    arith = va_turbo_arith(id, r.numfmt, r.approx_param);
+    p.arith_specified = arith.kind != VA_ARITH_NONE;
+    p.arith_kind = arith.kind;
+    p.eps_ppm = arith.eps_ppm;
+    p.budget_ppm = va_turbo_budget_ppm(r.level);
+    p.bound_ppm = va_turbo_bound_ppm(arith, r.kappa_valid ? r.kappa_q8 : 16'd0);
+    // Every one of the 32 IDs now has specified arithmetic, so `supported`
+    // tracks whether a selection predicate exists rather than whether the
+    // namespace slot is defined.
+    p.supported = p.arith_specified;
     if (!p.supported || !cfg.VaTurboEn || !cfg.PolicySubcodeEn ||
         !cfg.PolicyBenefitEn || !cfg.PolicyCodecEn || !cfg.IslandFpEn ||
         !cfg.MatrixEn || cfg.Queues == 0 || !r.enable || r.level == 0 || !policy_format_known(r.numfmt) ||
@@ -177,23 +386,52 @@ package g6lc_ai_policy_pkg;
         (min_group_bytes & (min_group_bytes - 1)) != 0 ||
         max_groups == 0 || max_groups > 32 || (max_groups & (max_groups - 1)) != 0)
       return p;
-    if (id == 0) begin
-      p.eligible = 1'b1;
-      return p;
+
+    fallback_only   = id inside {5'd0, 5'd8, 5'd24};
+    lossless        = id inside {5'd1, 5'd3, 5'd17};
+    zero_skip       = id == 5'd2;
+    conversion      = id inside {5'd4, 5'd5, 5'd6, 5'd7, 5'd18, 5'd19, 5'd20, 5'd29};
+    grouping        = id inside {5'd9, 5'd10, 5'd11, 5'd12, 5'd13, 5'd14, 5'd15};
+    reuse_only      = id == 5'd16;
+    control_only    = id inside {5'd22, 5'd23};
+    approx_products = id inside {5'd21, 5'd25, 5'd26, 5'd27, 5'd28, 5'd30, 5'd31};
+
+    // Accuracy admission, required for every non-exact recipe.  Both gates must
+    // pass: the analytic bound derived from the arithmetic, and the caller's
+    // independently supplied (measured or proven) bound.  Neither substitutes
+    // for the other - the analytic bound cannot see the data, and a measured
+    // bound is only as good as its sample.
+    if (arith.kind != VA_ARITH_EXACT) begin
+      if (!r.accuracy_valid || !r.kappa_valid || r.kappa_q8 < 16'd256 ||
+          (arith.needs_param && !r.approx_param_valid) ||
+          r.error_bound_q4 > {4'd0, r.level} ||
+          p.bound_ppm > p.budget_ppm)
+        return p;
     end
+
+    p.eligible = 1'b1;
+    if (fallback_only) return p;
+
     candidate = p;
     candidate.recipe = id;
     target = r.numfmt;
-    conversion = id inside {5'd4, 5'd5, 5'd6};
     if (conversion) begin
-      if (r.numfmt != 3'(config_pkg::AI_FMT_FP32) || !r.range_safe ||
-          !r.accuracy_valid || r.error_bound_q4 > {4'd0, r.level} ||
-          (id == 6 && !r.scale_valid)) return p;
+      // Storage narrowing needs a representable range, and the integer targets
+      // additionally need scale metadata.  Only FP32 sources are admitted so a
+      // second narrowing of an already narrow operand cannot be requested.
+      if (r.numfmt != 3'(config_pkg::AI_FMT_FP32) || !r.range_safe) return p;
       case (id)
-        5'd4: target = 3'(config_pkg::AI_FMT_FP16);
-        5'd5: target = 3'(config_pkg::AI_FMT_BF16);
+        5'd4:  target = 3'(config_pkg::AI_FMT_FP16);
+        5'd5:  target = 3'(config_pkg::AI_FMT_BF16);
+        5'd7:  target = 3'(config_pkg::AI_FMT_FP8_E4M3);
+        5'd29: target = 3'(config_pkg::AI_FMT_INT4);
+        5'd18: target = approx_param_target(r.approx_param);
         default: target = 3'(config_pkg::AI_FMT_INT);
       endcase
+      if (policy_integer_format(target) && !r.scale_valid) return p;
+      if (target == 3'(config_pkg::AI_FMT_FP8_E4M3) && !r.scale_valid) return p;
+      if (id == 5'd18 && !r.reuse_a_valid) return p;
+      if (id inside {5'd20, 5'd29} && !r.approx_param_valid) return p;
       candidate.convert = 1'b1;
     end
     row_bytes = target == 3'(config_pkg::AI_FMT_INT4) ?
@@ -201,21 +439,42 @@ package g6lc_ai_policy_pkg;
         ({3'd0, r.k} << (policy_element_bits_log2(target) - 3'd3));
     candidate.target_numfmt = target;
     candidate.row_bytes = row_bytes;
-    if (id == 2) begin
+
+    if (lossless) begin
+      // A lossless representation change must be proven reconstructable; a
+      // sparsity or range observation is not a proof.  The packed width is the
+      // caller's to establish, so no narrower row_bytes is claimed here.
+      if (!policy_integer_format(r.numfmt) || !r.lossless_proven) return p;
+      if (id == 5'd17 && !r.reuse_b_valid) return p;
+      candidate.reuse_b = id == 5'd17;
+    end else if (zero_skip) begin
       if (!policy_integer_format(r.numfmt) || !r.exact_zero_proven) return p;
       candidate.skip_products = 1'b1;
-    end else if (id == 16) begin
+    end else if (reuse_only) begin
       if (!r.reuse_a_valid && !r.reuse_b_valid) return p;
       candidate.reuse_a = r.reuse_a_valid;
       candidate.reuse_b = r.reuse_b_valid;
-    end else begin
-      separate_jobs = id == 11;
+    end else if (control_only) begin
+      // Plan prefetch and context separation change no arithmetic and consume
+      // no arithmetic resource; they still require a fresh window, which the
+      // permission stage below enforces.
+      candidate.groups_log2 = 3'd0;
+    end else if (approx_products) begin
+      // Storage width is unchanged, so these buy multiplier cost and depth and
+      // never buy concurrency.  Reporting a group count here would repeat the
+      // conflation the accuracy study already disproved.
+      candidate.approx_products = 1'b1;
+      candidate.groups_log2 = 3'd0;
+    end else if (grouping || conversion) begin
+      order_only   = id == 5'd14;
+      separate_jobs = id inside {5'd11, 5'd12, 5'd15};
       if (!r.regular_layout || (separate_jobs && !r.independent_jobs)) return p;
-      candidate.split_rows = !separate_jobs && (r.code == POLICY_TALL || r.n == 1);
-      if (id == 9 || id == 10) candidate.split_rows = 1'b0;
+      candidate.split_rows = !separate_jobs && !order_only &&
+                             (r.code == POLICY_TALL || r.n == 1);
+      if (id inside {5'd9, 5'd10}) candidate.split_rows = 1'b0;
       work_count = separate_jobs ? r.ready_jobs :
                    candidate.split_rows ? 9'(r.m) : 9'(r.n);
-      group_limit = id == 9 ? 2 : id == 10 ? 4 : max_groups;
+      group_limit = id == 5'd9 ? 2 : id == 5'd10 ? 4 : id == 5'd12 ? 2 : max_groups;
       for (int unsigned log_groups = 1; log_groups <= 5; log_groups++) begin
         if ((32'd1 << log_groups) <= max_groups &&
             (32'd1 << log_groups) <= group_limit &&
@@ -226,17 +485,25 @@ package g6lc_ai_policy_pkg;
             (lane_bytes >> log_groups) >= 32'(row_bytes))
           candidate.groups_log2 = 3'(log_groups);
       end
-      if (candidate.groups_log2 == 0 && !conversion) return p;
-      if (id == 9 && candidate.groups_log2 != 1) return p;
-      if (id == 10 && candidate.groups_log2 != 2) return p;
+      if (order_only) begin
+        // A read-order change needs independent banks, not extra groups.
+        if (r.bank_groups < 9'd2) return p;
+        candidate.groups_log2 = 3'd0;
+      end else begin
+        if (candidate.groups_log2 == 0 && !conversion) return p;
+        if (id == 5'd9 && candidate.groups_log2 != 1) return p;
+        if (id == 5'd10 && candidate.groups_log2 != 2) return p;
+      end
       if (r.free_accumulators == 0 || r.bank_groups == 0) return p;
-      if (!separate_jobs && candidate.groups_log2 != 0) begin
+      if (!separate_jobs && !order_only && candidate.groups_log2 != 0) begin
         candidate.reuse_a = !candidate.split_rows;
         candidate.reuse_b = candidate.split_rows;
         candidate.tail_outputs = 5'(work_count & ((9'd1 << candidate.groups_log2) - 9'd1));
       end
+    end else begin
+      return p;
     end
-    p.eligible = 1'b1;
+
     if (consumer_mask[id] && r.window_valid && r.qualified_mask[id]) begin
       candidate.eligible = 1'b1;
       candidate.apply = 1'b1;

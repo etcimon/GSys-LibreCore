@@ -277,6 +277,33 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   Remote five cache-off/on profiles PASS with 18,473 swept cases plus directed
   guards (`ai-policy-subcode-20260907T012755Z-43d44da4f6cb`). Selector synthesis:
   540 generic cells, no sequential cells/latches; disabled wrapper zero.
+- [x] V/A-Turbo arithmetic + error bounds for all 32 recipes (architecture
+  va-turbo.md §9). Each ID declares a bound KIND: EXACT (zero), REL (per-product
+  relative), FULL (integer quantisation, whose per-element error is ABSOLUTE so no
+  relative per-product bound exists and the reference is full scale K*maxA*maxB),
+  or NONE (unusable, bounds to 100%). Derived from 2u+u^2 with u=2^-(p+1): FP16 977
+  ppm, BF16 7,828, FP8 E4M3 128,906, E5M2 265,625; INT8 2/254+1/254^2 = 7,887 and
+  INT4 2/14+1/196 = 147,908 full scale; Mitchell sup ma*mb/((1+ma)(1+mb)) = 1/4 =
+  250,000 ppm for THIS formulation (the textbook 11.1% is the log-domain variant
+  and is not interchangeable). Recipes 21/27/28/30/31 report the UNCORRECTED
+  supremum so a correction factor is never assumed. Bound = eps*kappa with kappa a
+  REQUIRED input; missing or sub-unity kappa fails closed. Level is 625 ppm per
+  step; admission needs the analytic AND the caller's supplied bound.
+- [x] MEASURED BOUND VALIDATION (policy-approx-bounds.json): 12/12 candidates hold
+  with 3.3x-36.5x slack at Frobenius-matched kappa (3.292 relative, 85.681 full
+  scale), so the composition is sound and conservative.
+- [x] FINDING: a per-element bound is VACUOUS. Worst-case per-element kappa is
+  47,637 (relative) and 639,792 (full scale) because single output elements nearly
+  cancel, so every bound saturates to 100% and "holds" becomes trivially true. A
+  bound and its observation must share a granularity; the earlier all-saturated
+  run was a vacuous pass, not validation.
+- [ ] FINDING: the 4-bit level cannot express INT8. With measured kappa, INT8's
+  sound bound is 675,768 ppm (67.6%) and even its OBSERVED error is 18,527 ppm
+  (1.85%), against a 9,375 ppm (0.94%) maximum budget, so INT8 is unreachable at
+  any level and only FP16-class narrowing fits. Options: widen the level field,
+  derive a tighter (per-channel or statistical) bound, or route INT8 through the
+  measured-bound path under a separately approved profile. DO NOT widen the
+  analytic bound to make INT8 pass; that would make the gate lie.
 - [ ] Connect qualified V/A plans to actual consumers and window ownership before
   claiming acceleration. No precision conversion, multi-output arithmetic, new
   runtime ABI or approximation quality was implemented in the selector pass.

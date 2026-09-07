@@ -259,12 +259,16 @@ the identical `VA_HEURISTICS PASS sweep_checks=18473` marker in all ten profiles
 the unchanged codec suite also passes
 (`ai-policy-codec-20260907T012056Z-4686d331a62b`).
 Local explicit Yosys synthesis of the externally driven selector at
-64 lane-bytes / eight-byte minimum / eight groups reports **540 generic cells,
+64 lane-bytes / eight-byte minimum / eight groups reports **2,859 generic cells,
 zero sequential cells and zero latches**. The disabled wrapper reports zero
 cells and constant-zero outputs. Artifact:
-`ai-policy-subcode-synth-20260907T012757Z-42bd9c8b8389`. An earlier build
-measured 518 cells before the matrix-plane and queue prerequisites were added to
-the predicate; that figure is superseded.
+`ai-policy-subcode-synth-20260907T015130Z-ba620cdc9338`. Two earlier builds
+measured 518 and 540 cells, before the matrix-plane/queue prerequisites and then
+the §9 arithmetic and bound tables were added; both figures are superseded. The
+growth from 540 to 2,859 is the cost of the 32-recipe arithmetic table, the ppm
+bound tables and the wider plan word - still combinational and stateless, but no
+longer negligible, and it must be budgeted against the consumer's timing path
+when one exists.
 These are isolated generic-cell results, not technology area or STA. The selector
 adds no sequential search, clock, reset, memory array or changes to the GEMM
 critical path because it is not connected there. Integration must budget its
@@ -272,7 +276,100 @@ combinational delay and actual conversion/reuse/grouping costs. No new formal
 proof is claimed. Existing package/TB flists already include the changed files;
 no sources or licence annotations were added.
 
-## 9. Not implemented
+## 9. Arithmetic and error bounds for all 32 recipes
+
+All 32 IDs now carry **specified arithmetic**, so `supported` no longer means
+"this slot is defined" but "a selection predicate exists". Each recipe declares a
+bound *kind*, because relative and absolute error are not interchangeable:
+
+| Kind | Meaning | Bound reference |
+|---|---|---|
+| `EXACT` | reorganises work, arithmetic untouched | identically zero |
+| `REL` | perturbs each product by a relative factor | per-product relative |
+| `FULL` | integer quantisation, whose per-element error is **absolute** | full scale `K x max|a| x max|b|` |
+| `NONE` | unspecified | unusable, bounds to 100% |
+
+`FULL` exists because a quantised small element can be perturbed by 100%, so no
+relative per-product bound exists for integer formats. Treating the two kinds
+alike would understate integer error badly.
+
+### Derived per-product bounds
+
+With `u = 2^-(p+1)` for `p` explicit mantissa bits, a product of two rounded
+operands carries `(1+u)^2 - 1 = 2u + u^2`:
+
+| Arithmetic | Derivation | eps (ppm) |
+|---|---|--:|
+| FP16 | `u = 2^-11` | 977 |
+| BF16 | `u = 2^-8` | 7,828 |
+| FP8 E4M3 | `u = 2^-4` | 128,906 |
+| FP8 E5M2 | `u = 2^-3` | 265,625 |
+| INT8, 127 levels | `2/254 + 1/254^2`, full scale | 7,887 |
+| INT4, 7 levels | `2/14 + 1/196`, full scale | 147,908 |
+| Mitchell `(1+ma)(1+mb) ~= 1+ma+mb` | `sup ma*mb/((1+ma)(1+mb)) = 1/4` | 250,000 |
+
+The Mitchell figure is the supremum of **this** formulation. The textbook 11.1%
+belongs to the log-domain formulation and is not interchangeable with it.
+
+Recipes whose correction terms can only *reduce* error (21, 27, 28, 30, 31)
+deliberately report the **uncorrected** supremum, so the analytic bound stays
+conservative rather than encoding an unmeasured improvement factor.
+
+### Bound composition, and why kappa is an input
+
+For exact accumulation and per-product relative error `eps`,
+`|sum p' - sum p| <= eps * sum|p|`, so relative to `|sum p|` the bound is
+`eps * kappa` with `kappa = sum|p| / |sum p| >= 1` absorbing cancellation.
+`kappa` is **data dependent**, so it is a required input: defaulting it to 1
+would silently assume no cancellation. A missing or sub-unity `kappa` fails
+closed.
+
+The runtime level is an error budget in sixteenths of a percentage point, so one
+step is 625 ppm and level 15 is 9,375 ppm. Admission requires **both** the
+analytic bound and the caller's independently supplied bound to fit the budget:
+the analytic bound cannot see the data, and a measured bound is only as good as
+its sample.
+
+### Measured validation, and two findings that matter
+
+`policy_approx.py` now measures `kappa` on the real pinned-model tiles and checks
+the analytic bound against observed error. Artifact:
+`policy-approx-bounds.json`.
+
+**Finding 1 - a per-element bound is vacuous.** Worst-case per-element `kappa`
+reaches **47,637** (relative) and **639,792** (full scale) on these tiles,
+because single output elements nearly cancel. Every candidate's bound then
+saturates to 100% and "the bound holds" becomes trivially true — a vacuous pass,
+not validation. A bound and its observation must be taken at the same
+granularity. Against the Frobenius-matched `kappa` (**3.292** relative,
+**85.681** full scale) the comparison is meaningful:
+
+| Candidate | Kind | eps ppm | Bound ppm | Observed ppm | Holds | Slack |
+|---|---|--:|--:|--:|---|--:|
+| FP16 | rel | 977 | 3,217 | 339 | yes | 9.48x |
+| BF16 | rel | 7,828 | 25,772 | 4,179 | yes | 6.17x |
+| FP8 E4M3 | rel | 128,906 | 424,397 | 51,936 | yes | 8.17x |
+| FP8 E5M2 | rel | 265,625 | 874,517 | 100,704 | yes | 8.68x |
+| INT8 | full | 7,887 | 675,768 | 18,527 | yes | 36.47x |
+| INT4 | full | 147,908 | 1,000,000 | 302,839 | yes | 3.30x |
+| Mantissa 10/8/6/4/2 bits | rel | 977..265,625 | 3,217..874,517 | 511..205,650 | yes | 3.65-6.29x |
+| Mitchell | rel | 250,000 | 823,074 | 136,859 | yes | 6.01x |
+
+**12 of 12 hold**, with 3.3x-36.5x slack, so the composition is sound and
+conservative.
+
+**Finding 2 - the level field cannot express what INT8 needs.** With the measured
+`kappa`, INT8's sound bound is `675,768` ppm (67.6%) and even its *observed*
+error is `18,527` ppm (1.85%), while the maximum budget is 9,375 ppm (0.94%).
+INT8 is therefore unreachable through this interface at any level — the RTL gate
+is correct, but a realistic `kappa` makes it inadmissible. Only FP16-class
+narrowing fits. Closing that needs one of: a wider level field, a tighter
+derivation (per-channel or statistical rather than worst-case), or accepting that
+INT8 rides the measured-bound path with a separately approved profile. **Do not
+"fix" this by widening the bound to make INT8 pass** — that would make the gate
+lie.
+
+## 10. Not implemented
 
 Per-group arithmetic/accumulators, operand converters, exact-zero and residency
 proof producers, descriptor/MMIO runtime plumbing, applied-plan PMU readback and

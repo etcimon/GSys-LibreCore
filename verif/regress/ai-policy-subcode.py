@@ -631,10 +631,15 @@ def remote(args):
                  snapshots / "policy_subcode_main.cpp"], name + "-build")
             _, text = run([mdir / ("V" + TOP), args.seed], name + "-simulation")
             va_marker = re.search(r"^VA_HEURISTICS PASS sweep_checks=\d+ formats=8 k=1\.\.256 "
-                                  r"banks=0\.\.8 reserved=fail_closed$", text, re.M)
+                                  r"banks=0\.\.8 unauthorised=native_fallback$", text, re.M)
             if va_marker is None:
                 raise RuntimeError(name + " missing V/A heuristic check marker")
             variant["va_heuristics"] = va_marker.group(0)
+            arith_marker = re.search(r"^VA_ARITH PASS ids=32 specified=32 exact=\d+ rel=\d+ "
+                                     r"full=\d+ checks=\d+ bound=eps_times_kappa$", text, re.M)
+            if arith_marker is None:
+                raise RuntimeError(name + " missing V/A arithmetic/error-bound marker")
+            variant["va_arithmetic"] = arith_marker.group(0)
             marker = re.search(r"^PASS policy_subcode cases=\d+ eligible=\d+ ineligible=\d+ checks=\d+$", text, re.M)
             if marker is None:
                 raise RuntimeError(name + " missing scoreboard pass marker")
@@ -667,10 +672,15 @@ def remote(args):
                  snapshots / "policy_subcode_main.cpp"], name + "-build")
             _, text = run([mdir / ("V" + TOP), args.seed], name + "-simulation")
             va_marker = re.search(r"^VA_HEURISTICS PASS sweep_checks=\d+ formats=8 k=1\.\.256 "
-                                  r"banks=0\.\.8 reserved=fail_closed$", text, re.M)
+                                  r"banks=0\.\.8 unauthorised=native_fallback$", text, re.M)
             if va_marker is None:
                 raise RuntimeError(name + " missing V/A heuristic check marker")
             variant["va_heuristics"] = va_marker.group(0)
+            arith_marker = re.search(r"^VA_ARITH PASS ids=32 specified=32 exact=\d+ rel=\d+ "
+                                     r"full=\d+ checks=\d+ bound=eps_times_kappa$", text, re.M)
+            if arith_marker is None:
+                raise RuntimeError(name + " missing V/A arithmetic/error-bound marker")
+            variant["va_arithmetic"] = arith_marker.group(0)
             marker = re.search(r"^CACHE PASS hits=\d+ misses=\d+ steer_hits=\d+ checks=\d+ "
                                r"hit_cycles=1 miss_cycles=32 key_bits=all cancel_ages=0\.\.31 "
                                r"legacy_equivalence=all_outputs$", text, re.M)

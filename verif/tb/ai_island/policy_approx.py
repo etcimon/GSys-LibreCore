@@ -161,6 +161,114 @@ def rel_error(candidate, reference):
     return num / den if den else 0.0
 
 
+# The RTL bound is eps * kappa, so validating it needs the same kappa the RTL
+# would be handed.  Two definitions, matching the two bound kinds:
+#   relative kinds:   kappa = sum|a_i b_i| / |sum a_i b_i|
+#   full-scale kinds: kappa = K * max|a| * max|b| / |sum a_i b_i|
+# Both are per-output-element; the tile value is the worst element, because the
+# bound has to hold for every element, not on average.
+def kappa_relative(a, b):
+    """Per-element worst case, and the Frobenius-matched aggregate.
+
+    The per-element worst case is the mathematically strict figure, but it is
+    dominated by any single output element whose exact value nearly cancels, and
+    it therefore saturates. The Frobenius ratio is the figure that matches the
+    Frobenius error metric it will be compared against - a bound and its
+    observation have to be taken at the same granularity or the comparison is
+    meaningless.
+    """
+    import torch
+    products = a.unsqueeze(2) * b.unsqueeze(0)          # (M, K, N)
+    abs_sum = products.abs().sum(dim=1)
+    exact_signed = products.sum(dim=1)
+    exact = exact_signed.abs()
+    ratio = torch.where(exact > 0, abs_sum / exact, torch.zeros_like(exact))
+    frob = abs_sum.norm().item() / exact_signed.norm().item() if exact_signed.norm() > 0 else 0.0
+    return ratio.max().item(), frob
+
+
+def kappa_fullscale(a, b):
+    import torch
+    k = a.shape[1]
+    scale = float(k) * a.abs().max().item() * b.abs().max().item()
+    exact = (a @ b)
+    ratio = torch.where(exact.abs() > 0, scale / exact.abs(), torch.zeros_like(exact))
+    elements = float(exact.numel()) ** 0.5
+    frob = (elements * scale / exact.norm().item()) if exact.norm() > 0 else 0.0
+    return ratio.max().item(), frob
+
+
+# Analytic per-product bounds in ppm, mirroring va_turbo_arith in
+# g6lc_ai_policy_pkg.sv.  Kept as literals so a divergence between the RTL table
+# and the measurement is visible as a mismatch rather than hidden by a shared
+# helper computing both sides from one formula.
+ANALYTIC_EPS_PPM = {
+    "FP16": (977, "rel"), "BF16": (7828, "rel"),
+    "FP8_E4M3": (128906, "rel"), "FP8_E5M2": (265625, "rel"),
+    "INT8": (7887, "full"), "INT4": (147908, "full"),
+    "mantissa_truncated:10": (977, "rel"), "mantissa_truncated:8": (3910, "rel"),
+    "mantissa_truncated:6": (15686, "rel"), "mantissa_truncated:4": (63477, "rel"),
+    "mantissa_truncated:2": (265625, "rel"),
+    "mitchell_logarithmic": (250000, "rel"),
+}
+
+
+def validate_bounds(report, tile_set):
+    """Check the analytic bound is not exceeded by the observed per-tile error.
+
+    A violation means the RTL bound is UNSOUND and must be widened; slack means
+    it is conservative and how much budget tuning could reclaim.
+    """
+    rows = []
+    observed = {}
+    for row in report["format_narrowing"]:
+        observed[row["format"]] = row["rel_error_max"]
+    for row in report["approximate_multiplier"]:
+        label = row["topology"] + (":%d" % row["mantissa_bits_kept"]
+                                   if "mantissa_bits_kept" in row else "")
+        observed[label] = row["rel_error_max"]
+
+    rel_stats = [kappa_relative(a, b) for _, a, b in tile_set]
+    full_stats = [kappa_fullscale(a, b) for _, a, b in tile_set]
+    kappa_rel_element = max(s[0] for s in rel_stats)
+    kappa_full_element = max(s[0] for s in full_stats)
+    kappa_rel_frob = max(s[1] for s in rel_stats)
+    kappa_full_frob = max(s[1] for s in full_stats)
+    for label, (eps_ppm, kind) in sorted(ANALYTIC_EPS_PPM.items()):
+        if label not in observed:
+            continue
+        kappa = kappa_rel_frob if kind == "rel" else kappa_full_frob
+        strict = kappa_rel_element if kind == "rel" else kappa_full_element
+        bound_ppm = min(1_000_000.0, eps_ppm * kappa)
+        strict_ppm = min(1_000_000.0, eps_ppm * strict)
+        observed_ppm = observed[label] * 1e6
+        rows.append({
+            "candidate": label, "bound_kind": kind, "eps_ppm": eps_ppm,
+            "kappa_frobenius": kappa, "kappa_element_worst": strict,
+            "matched_bound_ppm": bound_ppm,
+            "element_worst_bound_ppm": strict_ppm,
+            "observed_max_ppm": observed_ppm,
+            "holds": observed_ppm <= bound_ppm,
+            "slack_factor": (bound_ppm / observed_ppm) if observed_ppm > 0 else None,
+            "element_bound_vacuous": strict_ppm >= 1_000_000.0,
+        })
+    return {
+        "kappa_relative_element_worst": kappa_rel_element,
+        "kappa_fullscale_element_worst": kappa_full_element,
+        "kappa_relative_frobenius": kappa_rel_frob,
+        "kappa_fullscale_frobenius": kappa_full_frob,
+        "entries": rows,
+        "unsound": [r["candidate"] for r in rows if not r["holds"]],
+        "vacuous_at_element_granularity": [r["candidate"] for r in rows
+                                           if r["element_bound_vacuous"]],
+        "note": ("Bound and observation must share a granularity. The per-element worst-case kappa "
+                 "is strictly correct but saturates to 100% on these tiles because single output "
+                 "elements nearly cancel, which makes that comparison vacuous rather than passing. "
+                 "The Frobenius-matched kappa is the figure compared against the Frobenius error. "
+                 "A violation means the RTL bound is unsound; slack is specific to these tiles."),
+    }
+
+
 def evaluate(tile_set):
     """Exact float64 reference; every candidate accumulates exactly."""
     import torch
@@ -309,6 +417,7 @@ def main(argv=None):
         "Per-tile scaling is applied for FP8/INT8/INT4, which is what a real path does; without it those formats would measure far worse.",
         "Accumulation is exact everywhere, so these figures do not cover accumulator-width effects.",
     ]
+    report["bound_validation"] = validate_bounds(report, tile_set)
     if args.emit_bank is not None:
         report["va_turbo_bank"] = emit_bank(report, args.emit_bank,
                                             args.error_budget_percent, args.bank_lanes)
@@ -342,6 +451,26 @@ def main(argv=None):
                      ("%.1f" % row["gain_per_percent_error"]) if row["gain_per_percent_error"] else "inf"))
         for line in bank["excluded_by_measurement"]:
             print("  excluded: " + line)
+    bounds = report["bound_validation"]
+    print("\nRTL analytic bound check (bound = eps x kappa):")
+    print("  kappa per-element worst: relative %.1f, full-scale %.1f  -> saturates the bound"
+          % (bounds["kappa_relative_element_worst"], bounds["kappa_fullscale_element_worst"]))
+    print("  kappa Frobenius-matched: relative %.3f, full-scale %.3f  -> comparable to the metric"
+          % (bounds["kappa_relative_frobenius"], bounds["kappa_fullscale_frobenius"]))
+    print("  %-24s %-6s %-10s %-12s %-12s %-8s %s"
+          % ("candidate", "kind", "eps ppm", "bound ppm", "observed", "holds", "slack"))
+    for row in bounds["entries"]:
+        print("  %-24s %-6s %-10d %-12.0f %-12.0f %-8s %s"
+              % (row["candidate"], row["bound_kind"], row["eps_ppm"],
+                 row["matched_bound_ppm"], row["observed_max_ppm"],
+                 "yes" if row["holds"] else "NO",
+                 ("%.2fx" % row["slack_factor"]) if row["slack_factor"] else "-"))
+    if bounds["unsound"]:
+        print("  UNSOUND (widen the RTL bound): " + ", ".join(bounds["unsound"]))
+    if bounds["vacuous_at_element_granularity"]:
+        print("  Vacuous at per-element granularity (bound saturates to 100%): "
+              + str(len(bounds["vacuous_at_element_granularity"])) + " of "
+              + str(len(bounds["entries"])) + " candidates")
     print("\nTile Frobenius error is a proxy, not a model-quality result.")
     if args.out:
         print("artifact: " + str(args.out))

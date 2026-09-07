@@ -125,6 +125,8 @@ module tb_g6lc_ai_policy_subcode #(
     r.numfmt = 7; r.bank = 0; r.subcode = 4;
     r.free_accumulators = 8; r.ready_jobs = 8; r.bank_groups = 8;
     r.range_safe = 1; r.accuracy_valid = 1; r.error_bound_q4 = 2; r.level = 2;
+    // Conversions now also carry the analytic bound, so kappa is mandatory.
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.apply && p.convert && p.target_numfmt == 5 && p.groups_log2 == 1 && p.row_bytes == 32)
       else $fatal(1, "VA FP16 bound equality");
@@ -138,6 +140,10 @@ module tb_g6lc_ai_policy_subcode #(
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply) else $fatal(1, "VA unqualified range");
     r.range_safe = 1; r.subcode = 5;
+    // BF16 costs 7,828 ppm, so it needs level 13 (8,125 ppm); level 2 refuses it.
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA BF16 must not fit a 1250 ppm budget");
+    r.level = 4'd13;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.apply && p.target_numfmt == 6) else $fatal(1, "VA BF16 recipe");
     r.subcode = 6; r.scale_valid = 0;
@@ -147,6 +153,7 @@ module tb_g6lc_ai_policy_subcode #(
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.apply && p.target_numfmt == 0 && p.groups_log2 == 2)
       else $fatal(1, "VA INT8 recipe");
+    r.level = 4'd2;
     r.subcode = 2; r.exact_zero_proven = 1;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply) else $fatal(1, "VA floating zero skip forbidden");
@@ -186,12 +193,23 @@ module tb_g6lc_ai_policy_subcode #(
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (!p.apply && !p.eligible) else $fatal(1, "VA queue prerequisite");
     cfg.Queues = 1;
+    // All 32 IDs now carry specified arithmetic, so the invariant is no longer
+    // "most IDs are unsupported" but "an unauthorised or inadmissible plan takes
+    // no action and leaves the native format in place".
     for (int id = 0; id < 32; id++) begin
       r.bank = 2'(id >> 3); r.subcode = 3'(id);
       p = va_turbo_select(cfg, r, 64, 8, 8, '1);
-      if (!(id inside {0, 2, 4, 5, 6, 9, 10, 11, 13, 16}))
-        assert (!p.supported && !p.apply && p.recipe == 0)
-          else $fatal(1, "VA reserved recipe applied: %0d", id);
+      assert (p.supported && p.arith_specified)
+        else $fatal(1, "VA id=%0d has no specified arithmetic", id);
+      if (!p.apply)
+        assert (p.recipe == 0 && p.target_numfmt == r.numfmt && !p.convert &&
+                !p.approx_products && !p.skip_products && !p.reuse_a && !p.reuse_b &&
+                p.groups_log2 == 0 && p.tail_outputs == 0)
+          else $fatal(1, "VA id=%0d acted without permission", id);
+      if (p.apply && p.arith_kind == VA_ARITH_EXACT)
+        assert (p.bound_ppm == 0) else $fatal(1, "VA exact id=%0d bound", id);
+      if (p.apply)
+        assert (p.bound_ppm <= p.budget_ppm) else $fatal(1, "VA id=%0d over budget", id);
       checks++;
     end
     r.bank = 1; r.subcode = 5;
@@ -207,7 +225,174 @@ module tb_g6lc_ai_policy_subcode #(
     r.regular_layout = 1;
     p = va_turbo_select(cfg, r, 63, 8, 8, '1);
     assert (!p.apply) else $fatal(1, "VA invalid provisioning");
-    $display("VA_HEURISTICS PASS sweep_checks=%0d formats=8 k=1..256 banks=0..8 reserved=fail_closed", checks);
+    $display("VA_HEURISTICS PASS sweep_checks=%0d formats=8 k=1..256 banks=0..8 unauthorised=native_fallback", checks);
+  end
+
+  // Arithmetic and error-bound checks.  These are about soundness of the bound,
+  // not about performance: a bound that can be exceeded is worse than none.
+  initial begin : va_arith_checks
+    config_pkg::ai_cfg_t cfg;
+    va_turbo_request_t r;
+    va_turbo_plan_t p;
+    va_turbo_arith_t a;
+    int unsigned specified, exact_ids, rel_ids, full_ids, checks;
+    logic [19:0] prev_bound, bound;
+    cfg = config_pkg::AiCfgOff;
+    cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
+    cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
+    cfg.PolicySubcodeEn = 1'b1; cfg.IslandFpEn = 1'b1;
+
+    // Every ID in the 32-recipe namespace must have specified arithmetic, and
+    // an unspecified one must be unusable rather than optimistically exact.
+    specified = 0; exact_ids = 0; rel_ids = 0; full_ids = 0; checks = 0;
+    for (int id = 0; id < 32; id++) begin
+      for (int fmt = 0; fmt < 8; fmt++) begin
+        for (int par = 0; par < 16; par++) begin
+          a = va_turbo_arith(5'(id), 3'(fmt), 4'(par));
+          assert (a.kind != VA_ARITH_NONE || (id == 18 && par[1:0] == 2'd3))
+            else $fatal(1, "VA arith unspecified id=%0d fmt=%0d par=%0d", id, fmt, par);
+          if (a.kind == VA_ARITH_EXACT)
+            assert (a.eps_ppm == 0) else $fatal(1, "VA exact recipe carries error id=%0d", id);
+          if (a.kind == VA_ARITH_NONE)
+            assert (va_turbo_bound_ppm(a, 16'd256) == 20'd1000000)
+              else $fatal(1, "VA unspecified arithmetic must bound at 100%%");
+          checks++;
+        end
+      end
+      a = va_turbo_arith(5'(id), 3'(config_pkg::AI_FMT_FP32), 4'd10);
+      if (a.kind != VA_ARITH_NONE) specified++;
+      if (a.kind == VA_ARITH_EXACT) exact_ids++;
+      if (a.kind == VA_ARITH_REL) rel_ids++;
+      if (a.kind == VA_ARITH_FULL) full_ids++;
+    end
+    assert (specified == 32) else $fatal(1, "VA specified=%0d of 32", specified);
+
+    // Derived per-product bounds must match the closed form 2u+u^2 exactly at
+    // the format mantissa widths that matter.
+    assert (va_turbo_round_eps_ppm(5'd10) == 20'd977)   else $fatal(1, "FP16 eps");
+    assert (va_turbo_round_eps_ppm(5'd7)  == 20'd7828)  else $fatal(1, "BF16 eps");
+    assert (va_turbo_round_eps_ppm(5'd3)  == 20'd128906) else $fatal(1, "FP8E4M3 eps");
+    assert (va_turbo_round_eps_ppm(5'd2)  == 20'd265625) else $fatal(1, "FP8E5M2 eps");
+    assert (va_turbo_round_eps_ppm(5'd0)  == 20'd1000000) else $fatal(1, "eps saturation");
+    assert (va_turbo_round_eps_ppm(5'd16) == 20'd0)      else $fatal(1, "sub-ppm eps");
+    // Monotone in retained bits: more precision may never bound worse.
+    for (int bits = 0; bits < 31; bits++)
+      assert (va_turbo_round_eps_ppm(5'(bits)) >= va_turbo_round_eps_ppm(5'(bits + 1)))
+        else $fatal(1, "VA eps not monotone at %0d", bits);
+
+    // Bound composition: monotone non-decreasing in kappa, saturating at 100%,
+    // and exactly eps at kappa=1.
+    a = va_turbo_arith(5'd4, 3'(config_pkg::AI_FMT_FP32), 4'd0);
+    assert (va_turbo_bound_ppm(a, 16'd256) == 20'd977) else $fatal(1, "kappa=1 identity");
+    assert (va_turbo_bound_ppm(a, 16'd512) == 20'd1954) else $fatal(1, "kappa=2 doubling");
+    prev_bound = 0;
+    for (int kq = 256; kq <= 65535; kq += 137) begin
+      bound = va_turbo_bound_ppm(a, 16'(kq));
+      assert (bound >= prev_bound) else $fatal(1, "VA bound not monotone in kappa");
+      assert (bound <= 20'd1000000) else $fatal(1, "VA bound exceeds 100%%");
+      prev_bound = bound;
+      checks++;
+    end
+    a = va_turbo_arith(5'd27, 3'(config_pkg::AI_FMT_FP32), 4'd0);
+    assert (a.eps_ppm == 20'd250000) else $fatal(1, "Mitchell supremum");
+    assert (va_turbo_bound_ppm(a, 16'd65535) == 20'd1000000) else $fatal(1, "bound saturation");
+
+    // Budget: one level step is 625 ppm and level 15 is 0.9375%.
+    assert (va_turbo_budget_ppm(4'd0) == 20'd0) else $fatal(1, "level 0 budget");
+    assert (va_turbo_budget_ppm(4'd1) == 20'd625) else $fatal(1, "level 1 budget");
+    assert (va_turbo_budget_ppm(4'd15) == 20'd9375) else $fatal(1, "level 15 budget");
+
+    // Admission: the analytic bound gates independently of the caller's bound.
+    r = '0;
+    r.enable = 1'b1; r.bank = 2'd0; r.subcode = 3'd4; r.code = POLICY_BULK;
+    r.numfmt = 3'(config_pkg::AI_FMT_FP32);
+    r.m = 16'd16; r.n = 16'd16; r.k = 16'd16;
+    r.regular_layout = 1'b1; r.ready_jobs = 9'd16;
+    r.free_accumulators = 9'd16; r.bank_groups = 9'd16;
+    r.range_safe = 1'b1; r.scale_valid = 1'b1; r.accuracy_valid = 1'b1;
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
+    r.approx_param_valid = 1'b1; r.approx_param = 4'd10;
+    r.window_valid = 1'b1; r.qualified_mask = '1;
+    r.error_bound_q4 = 8'd0;
+    // FP16 needs 977 ppm, so level 2 (1250 ppm) admits and level 1 (625) does not.
+    r.level = 4'd2;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.bound_ppm == 20'd977 && p.budget_ppm == 20'd1250 &&
+            p.arith_kind == VA_ARITH_REL && p.convert)
+      else $fatal(1, "VA FP16 analytic admission");
+    r.level = 4'd1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && p.eligible == 1'b0 && p.bound_ppm == 20'd977)
+      else $fatal(1, "VA analytic bound must refuse over budget");
+    // Cancellation alone can push an otherwise fine recipe out of budget.
+    r.level = 4'd2; r.kappa_q8 = 16'd512;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && p.bound_ppm == 20'd1954)
+      else $fatal(1, "VA kappa must widen the bound");
+    // Missing or unphysical kappa fails closed rather than assuming kappa=1.
+    r.kappa_q8 = 16'd256; r.kappa_valid = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA missing kappa");
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd255;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA kappa below unity");
+    r.kappa_q8 = 16'd256;
+    // BF16 at 7828 ppm cannot fit any level, since level 15 is 9375 ppm... it can.
+    r.subcode = 3'd5; r.level = 4'd13;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.bound_ppm == 20'd7828 && p.budget_ppm == 20'd8125)
+      else $fatal(1, "VA BF16 admission at level 13");
+    r.level = 4'd12;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA BF16 refused at level 12");
+    // FP8 and INT4 exceed every representable level, so they can never apply
+    // through this interface no matter what the caller claims.
+    for (int id = 0; id < 32; id++) begin
+      if (id inside {7, 29}) begin
+        r.bank = 2'(id >> 3); r.subcode = 3'(id); r.level = 4'd15;
+        r.error_bound_q4 = 8'd0;
+        p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+        assert (!p.apply && p.bound_ppm > p.budget_ppm)
+          else $fatal(1, "VA id=%0d must exceed every level", id);
+        checks++;
+      end
+    end
+    // Exact recipes need no accuracy evidence at all.  INT8 rather than FP32:
+    // an FP32 row at k=16 is 64 bytes and consumes the whole lane width, so
+    // grouping is correctly impossible there and would not isolate the point.
+    r.bank = 2'd1; r.subcode = 3'd1; r.level = 4'd1;
+    r.numfmt = 3'(config_pkg::AI_FMT_INT);
+    r.accuracy_valid = 1'b0; r.kappa_valid = 1'b0; r.approx_param_valid = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.arith_kind == VA_ARITH_EXACT && p.bound_ppm == 0 &&
+            !p.convert && !p.approx_products)
+      else $fatal(1, "VA exact grouping must not require accuracy evidence");
+    // Approximate-product recipes never report concurrency.
+    r.numfmt = 3'(config_pkg::AI_FMT_FP32);
+    r.accuracy_valid = 1'b1; r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
+    r.approx_param_valid = 1'b1; r.approx_param = 4'd12; r.level = 4'd1;
+    r.bank = 2'd3; r.subcode = 3'd1;  // id 25, mantissa reduction
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.approx_products && p.groups_log2 == 0 && !p.convert &&
+            p.target_numfmt == r.numfmt && p.bound_ppm == 20'd244)
+      else $fatal(1, "VA approximate products must not claim grouping");
+    r.approx_param = 4'd4;  // 63,477 ppm at 4 retained bits
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA coarse mantissa must exceed budget");
+    r.approx_param = 4'd12; r.approx_param_valid = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA missing arithmetic parameter");
+    // Lossless recipes demand a reconstruction proof, not a residue.
+    r.approx_param_valid = 1'b1;
+    r.bank = 2'd0; r.subcode = 3'd1; r.numfmt = 3'(config_pkg::AI_FMT_INT);
+    r.exact_zero_proven = 1'b1; r.lossless_proven = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA lossless requires a proof");
+    r.lossless_proven = 1'b1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.bound_ppm == 0) else $fatal(1, "VA lossless packing");
+    $display("VA_ARITH PASS ids=32 specified=%0d exact=%0d rel=%0d full=%0d checks=%0d bound=eps_times_kappa",
+             specified, exact_ids, rel_ids, full_ids, checks);
   end
 
   g6lc_ai_policy_subcode #(
