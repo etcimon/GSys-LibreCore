@@ -1675,6 +1675,80 @@ is a *utilisation* argument measured on a small fixture, not an end-to-end
 throughput measurement, and it inherits the untested concurrency assumption that
 also limits the cluster case.
 
+### Planned upgrade: concurrency plus sub-code-steered approximate compute
+
+**This whole section is a plan.** Nothing in it is implemented and no number in
+it is a result except where it cites the measured rule. It is written because the
+`k_bytes` finding turns "approximate compute" from a vague idea into an
+arithmetic one.
+
+**Why precision is the right knob.** Usable lanes are `k_bytes = k x bytes`, so
+element width *is* lane demand. Halving the element width halves `k_bytes` and
+therefore doubles the groups a fixed array can host:
+
+| Format | bytes | k_bytes (k=16) | Groups @ L=32 | Groups @ L=64 |
+|---|--:|--:|--:|--:|
+| FP32 | 4 | 64 | needs >32 | 1 |
+| FP16/BF16 | 2 | 32 | 1 | 2 |
+| FP8, INT8 | 1 | 16 | 2 | 4 |
+| INT4 | 0.5 | 8 | 4 | 8 |
+
+**2x concurrency per precision halving**, derived from the measured rule rather
+than assumed. That is the numerator of the "performance gain per accuracy drop"
+ratio. The denominator is not measured at all, and measuring it is task one.
+
+**The analog-imitating part, made concrete.** "Combinational data imitating
+analog" maps onto approximate multiplier topologies that are pure combinational
+logic: mantissa-truncated products, and logarithmic (Mitchell-style) multiply
+where a product becomes an exponent add plus a corrected mantissa. Both trade
+per-product accuracy for area and depth, like an analog multiplier trades
+precision for density. The accuracy-preserving discipline is standard and cheap:
+**approximate the products, accumulate exactly** in a wide accumulator, so error
+does not compound across the reduction. That single rule is what makes a high
+gain-to-loss ratio plausible.
+
+**Sub-code as the experiment harness, which is what it is actually good for.**
+The codec already has hysteresis, feature-hash silence, PMU observability,
+config gating and a default-off posture - a safe per-job selector that took real
+verification effort to build. Re-purposed, the 3-bit sub-code carries
+`groups_log2` plus a precision/approximation class instead of a candidate index,
+so the same frozen group codes steer an experiment without redesigning muxes.
+
+**Staged plan, ordered so the cheap disqualifier comes first.**
+
+| Stage | Work | Needs hardware? | Gate |
+|---|---|---|---|
+| S0 | Accuracy harness: error of each approximate topology versus exact FP32, on **captured LLM matrices** | No | Reject any topology outside the error budget before any RTL |
+| S1 | Per-group accumulators + descriptor slots; measure real concurrency | Yes | Groups must convert to throughput; this is the untested concurrency assumption |
+| S2 | Approximate multiplier options behind a parameter, exact wide accumulate | Yes | Latch-free, bounded depth, no new clock |
+| S3 | Sub-code emits `(groups_log2, precision_class)`; search replaced by the `(format, tile-k)` lookup | Yes | Recovers ~5,470 cells; 32-cycle tax -> 0 |
+| S4 | Promotion: paired performance **and** accuracy evidence on held-out captures | - | Ratio above an explicit threshold, or it stays off |
+
+S0 first is deliberate: it needs no RTL, and if the accuracy loss is
+unacceptable the rest of the plan is void. It is also the stage this project can
+actually complete today.
+
+**Area works in our favour here, unusually.** Truncated and logarithmic
+multipliers are *smaller* than exact ones, and deleting the 8-candidate search
+frees roughly 5,470 cells to spend on per-group accumulators. So precision
+reduction buys lanes **and** area, which is the opposite of the lane-ganging
+trade where 4.20x throughput cost 6.30x area.
+
+**Four risks that must not be glossed over.**
+
+1. **Every measurement so far depended on bit-exact digests.** Approximate
+   arithmetic breaks that invariant by design, so this work needs a different
+   verification mode: error bounds against an exact reference, not equality. The
+   existing suites must keep their exact checks for exact modes.
+2. **The all-ones fixture is useless for accuracy.** It has no cancellation and
+   no dynamic range, so it would flatter any approximation. S0 must use captured
+   matrices, which is why the capture corpus already in the tree matters.
+3. **The concurrency assumption is still untested**, shared with the cluster
+   case, and it gates the entire numerator.
+4. **Accuracy is a model-quality question, not a matrix-error question.** Frobenius
+   error on a tile is a proxy; a perplexity-level claim needs an end-to-end run
+   that this project cannot currently perform. Report the proxy as a proxy.
+
 ### Where sub-codes and groups can and cannot help
 
 Tuning subcode/group parameters cannot move MAC/s today, for a structural reason

@@ -268,6 +268,26 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   worth +0.0% versus provisioning wide, because surplus lanes idle at identical
   cycles (INT4 k=16 is 66 cycles at 8, 16 and 32 lanes alike). A knob whose wrong
   settings cost nothing cannot earn anything by being set right.
+- [ ] PLANNED UPGRADE (plan only, nothing implemented; architecture README has the
+  staged table). Precision is the lane-demand knob because usable lanes = k_bytes,
+  so each halving of element width halves k_bytes and doubles hostable groups:
+  2x concurrency per precision step, derived from the measured rule. Approximate
+  topologies are combinational (mantissa-truncated and Mitchell-style logarithmic
+  products) with EXACT wide accumulation so error does not compound. Sub-code
+  becomes the experiment harness, carrying (groups_log2, precision_class) instead
+  of a candidate index, reusing the existing hysteresis/feature-hash/PMU/gating.
+  Stages: S0 accuracy harness on CAPTURED matrices (no RTL, and it can disqualify
+  everything - do this first); S1 per-group accumulators and measured concurrency;
+  S2 approximate multiplier options; S3 lookup replaces the search (recovers
+  ~5,470 cells, 32-cycle tax -> 0); S4 promotion on paired performance AND accuracy
+  evidence. Area favours this direction: approximate multipliers are smaller than
+  exact ones, unlike lane ganging which cost 6.30x area for 4.20x.
+  Risks to hold onto: approximation breaks the bit-exact digest invariant every
+  measurement so far relied on, so exact modes must keep exact checks and
+  approximate modes need error bounds; the all-ones fixture cannot measure
+  accuracy (no cancellation, no dynamic range) so S0 must use the capture corpus;
+  the concurrency assumption is still untested and gates the whole numerator; and
+  tile Frobenius error is a proxy, not a model-quality claim.
 - [ ] REFINED SUB-CODE TARGET: the value is the idle lanes, not the gang width.
   Per-tile k is bounded by MaxDim, so at MaxDim=16 on a 32-lane array INT4 leaves
   24 of 32 lanes idle (4x concurrency), INT8/FP8 leave 16 (2x), FP16 saturates and
