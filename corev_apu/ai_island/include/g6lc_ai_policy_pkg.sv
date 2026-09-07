@@ -140,6 +140,29 @@ package g6lc_ai_policy_pkg;
     // proven value instead of the selector assuming one.
     logic kappa_valid;
     logic [15:0] kappa_q8;
+    // Moving-window kappa, in Q8, for the SAME quantity measured over the
+    // hardware's actual re-centering granularity rather than per element.  The
+    // float dot is block floating point: each reduction step picks its own
+    // block exponent, aligns into a 640-bit integer, reduces EXACTLY and rounds
+    // once.  So intra-window cancellation is free and a dot of length K carries
+    // ceil(K/window) roundings, not K.  This is what makes an element-level
+    // kappa vacuous on real tiles while a windowed one stays usable: the error
+    // is re-centered every window and not carried across the boundary.
+    //   kappa_window = (sum_w |s_w| + sum_w |A_w|) / |R|
+    // over window partial sums s_w and running accumulator magnitudes A_w.
+    // Only honoured when `window_log2` matches the geometry the hardware will
+    // actually use; a caller cannot buy a tighter bound by claiming a window
+    // the datapath does not implement.
+    logic kappa_window_valid;
+    logic [15:0] kappa_window_q8;
+    logic [4:0]  window_log2;
+    // Absolute error floor in ppm of the caller's reference magnitude, for the
+    // subnormal/underflow term the pure relative model cannot express
+    // (|fl(x)-x| <= u|x| + eta/2).  Supplying it ADDS a term, so it admits
+    // formats whose operands leave the normal range instead of refusing them,
+    // without ever loosening the relative part.
+    logic abs_floor_valid;
+    logic [19:0] abs_floor_ppm;
     // Operand flatness (fa + fb) in Q8 for the FULL kinds, where
     // fa = sum|a| / (K*max|a|) in (0,1].  Absent or out-of-range values fall
     // back to the untightened worst case of 2.0, never to something looser.
@@ -202,6 +225,14 @@ package g6lc_ai_policy_pkg;
     // measured bound applied.  An applied plan with this bit set carries an
     // EMPIRICAL promise, not a proven one.
     logic bound_waived;
+    // The moving-window bound and the window it was computed over.  `matched`
+    // records that the caller's claimed window equalled the datapath's actual
+    // re-centering granularity, which is the only condition under which the
+    // windowed number was allowed to replace the element-level one.
+    logic [19:0] bound_accum_ppm;
+    logic [19:0] bound_floor_ppm;
+    logic [4:0]  window_log2;
+    logic window_matched;
     logic [18:0] row_bytes;
   } va_turbo_plan_t;
 
@@ -426,6 +457,90 @@ package g6lc_ai_policy_pkg;
     return (scaled > 36'd1000000) ? 20'hfffff : 20'(scaled);
   endfunction
 
+  // The window a caller may legitimately claim: the number of elements the
+  // datapath actually reduces EXACTLY before it rounds once and re-centers.
+  // That is the MAC step, so it follows the provisioned lanes and the format,
+  // never the caller's preference.  Returning it here rather than trusting
+  // `window_log2` is the guard that stops a tighter bound being bought with a
+  // window the hardware does not implement.
+  // log2 of an exact power of two in [1, 256], by search rather than $clog2 so
+  // the argument may be a runtime value without depending on tool handling of
+  // a non-constant system function.
+  function automatic logic [4:0] va_turbo_pow2_log2(input int unsigned value);
+    logic [4:0] result;
+    result = '0;
+    for (int unsigned bit_index = 0; bit_index <= 8; bit_index++)
+      if (value == (32'd1 << bit_index)) result = 5'(bit_index);
+    return result;
+  endfunction
+
+  function automatic logic [4:0] va_turbo_window_log2(
+      input logic [2:0] numfmt, input logic [4:0] lanes_log2
+  );
+    if (!policy_format_known(numfmt)) return 5'd0;
+    if (numfmt == 3'(config_pkg::AI_FMT_INT4)) return 5'(lanes_log2 + 5'd1);
+    return 5'(lanes_log2 - (5'(policy_element_bits_log2(numfmt)) - 5'd3));
+  endfunction
+
+  // WHERE the error enters decides whether a window can help, and getting this
+  // wrong produces an unsound bound rather than a tighter one.
+  //
+  // The moving window is real in the datapath: each reduction step picks its own
+  // block exponent, sums EXACTLY in a 640-bit integer and rounds once, so the
+  // error from THAT rounding is re-centered per window and not carried across
+  // the boundary.  But every non-exact recipe here perturbs the PRODUCT before
+  // it reaches the reduction - storage conversion, mantissa truncation,
+  // logarithmic multiply, integer quantisation - and for a per-product
+  // perturbation |sum p_i(1+e_i) - sum p_i| <= eps * sum|p_i| is TIGHT.
+  // Intra-window cancellation is therefore not free for those recipes, the
+  // element-level kappa is the truth rather than pessimism, and substituting a
+  // windowed kappa is measurably wrong: INT8 measures 37,134 ppm against a
+  // windowed 6,419 ppm, a 5.8x violation, and INT4 violates by 3.9x.
+  //
+  // So a window may only ever ADD the post-reduction accumulation term, never
+  // replace the per-product term.  The term itself is `sites` FP32 roundings
+  // against the windowed kappa: honest, and small.
+  // Rounding sites for a K-long reduction at a given window: W block-float
+  // conversions plus W-1 accumulator folds, because the first fold is a plain
+  // copy (`sum_first_q ? sum_q : fp32_add(...)`) and rounds nothing.
+  function automatic logic [5:0] va_turbo_accum_sites(
+      input logic [15:0] k, input logic [4:0] window_log2
+  );
+    logic [16:0] windows;
+    if (k == 16'd0 || window_log2 == 5'd0) return 6'd0;
+    windows = (17'(k) + (17'd1 << window_log2) - 17'd1) >> window_log2;
+    if (windows > 17'd32) return 6'd63;
+    return 6'((windows << 1) - 17'd1);
+  endfunction
+
+  function automatic logic [19:0] va_turbo_accum_bound_ppm(
+      input logic [15:0] kappa_window_q8, input logic [5:0] sites
+  );
+    logic [35:0] scaled;
+    if (kappa_window_q8 < 16'd256 || sites == 6'd0) return 20'd0;
+    // FP32 RNE unit roundoff is 2^-24, i.e. 0.0596 ppm; charged as a whole ppm
+    // per site so the term always rounds UP.
+    scaled = (36'(sites) * 36'(kappa_window_q8) + 36'd255) >> 8;
+    return (scaled > 36'd1000000) ? 20'hfffff : 20'(scaled);
+  endfunction
+
+  // Total = per-product term + post-reduction accumulation term + absolute
+  // floor.  Every term ADDS, so this is sound wherever the per-product term
+  // alone was; the floor carries the subnormal/underflow part
+  // (|fl(x)-x| <= u|x| + eta/2) that a pure relative model cannot express,
+  // which is what lets a format whose operands leave the normal range be
+  // admitted instead of refused.  Overflow fails closed.
+  function automatic logic [19:0] va_turbo_total_bound_ppm(
+      input logic [19:0] product_ppm, input logic [19:0] accum_ppm,
+      input logic [19:0] floor_ppm
+  );
+    logic [35:0] total;
+    if (product_ppm > 20'd1000000 || accum_ppm > 20'd1000000 ||
+        floor_ppm > 20'd1000000) return 20'hfffff;
+    total = 36'(product_ppm) + 36'(accum_ppm) + 36'(floor_ppm);
+    return (total > 36'd1000000) ? 20'hfffff : 20'(total);
+  endfunction
+
   // Runtime level is an error budget on a GEOMETRIC ladder: 100 ppm, doubling
   // per step, saturating at 100%.
   //
@@ -478,6 +593,26 @@ package g6lc_ai_policy_pkg;
     p.eps_ppm = arith.eps_ppm;
     p.budget_ppm = va_turbo_budget_ppm(r.level);
     p.bound_ppm = va_turbo_bound_ppm(arith, r.kappa_valid ? r.kappa_q8 : 16'd0);
+    // Prefer the moving-window bound, but ONLY when the caller's window is the
+    // one the datapath will really use and the windowed kappa is no smaller
+    // than a single rounding.  Otherwise fall back to the element-level bound,
+    // which is pessimistic but never optimistic.  The floor term is dropped
+    // when unclaimed, so an absent floor cannot make the bound smaller.
+    p.window_log2 = va_turbo_window_log2(r.numfmt, va_turbo_pow2_log2(lane_bytes));
+    p.window_matched = r.kappa_window_valid && r.window_log2 == p.window_log2 &&
+                       p.window_log2 != 5'd0 && r.kappa_window_q8 >= 16'd256;
+    // The window ADDS the accumulation term and the floor.  It never replaces
+    // the per-product term, so the reported bound can only grow here - which is
+    // the point: the previous report omitted both terms and was therefore
+    // optimistic, not conservative.
+    if (arith.kind != VA_ARITH_EXACT) begin
+      p.bound_accum_ppm = p.window_matched
+          ? va_turbo_accum_bound_ppm(r.kappa_window_q8, va_turbo_accum_sites(r.k, p.window_log2))
+          : 20'd0;
+      p.bound_floor_ppm = (r.abs_floor_valid && r.abs_floor_ppm <= 20'd1000000)
+          ? r.abs_floor_ppm : 20'd0;
+      p.bound_ppm = va_turbo_total_bound_ppm(p.bound_ppm, p.bound_accum_ppm, p.bound_floor_ppm);
+    end
     // Every one of the 32 IDs now has specified arithmetic, so `supported`
     // tracks whether a selection predicate exists rather than whether the
     // namespace slot is defined.
@@ -508,8 +643,19 @@ package g6lc_ai_policy_pkg;
     // for the other - the analytic bound cannot see the data, and a measured
     // bound is only as good as its sample.
     if (arith.kind != VA_ARITH_EXACT) begin
+      // A REL recipe still needs its domain premise, but that premise is now
+      // satisfiable two ways: either the operands stay in the normal range, or
+      // the caller supplies the absolute floor that covers the subnormal and
+      // underflow part the relative model cannot express.  Refusing outright
+      // when only the second holds was over-strict: the floor ADDS a term, so
+      // the combined bound is sound where the pure relative one was merely
+      // inapplicable.  A floor claimed without the matched window does not
+      // count, because then it was never added to the reported bound.
       if (!r.accuracy_valid || !r.kappa_valid || r.kappa_q8 < 16'd256 ||
-          !r.range_safe || (arith.kind == VA_ARITH_REL && !r.relative_domain_valid) ||
+          !r.range_safe ||
+          (arith.kind == VA_ARITH_REL && !r.relative_domain_valid &&
+           !(r.abs_floor_valid && p.window_matched &&
+             r.abs_floor_ppm <= 20'd1000000)) ||
           p.bound_ppm > 20'd1000000 ||
           (arith.needs_param && !r.approx_param_valid) ||
           r.error_bound_q4 > {4'd0, r.level})

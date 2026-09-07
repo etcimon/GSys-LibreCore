@@ -358,6 +358,44 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   resource, so the levers multiply rather than overlap. Operand read beats halve
   at every engine count and every C element is still checked. One shared-port
   fixture with repeated same-weight jobs; not MAC/s, not silicon, not inference.
+- [x] THE MOVING-WINDOW BOUND IS REAL BUT DOES NOT RESCUE THE PER-PRODUCT TERM,
+  and my premise going in was wrong. The datapath does re-center: the float dot
+  is block floating point per step (block_exp from that step's lanes, exact
+  640-bit reduction, ONE rounding), so a K-long dot carries 2*ceil(K/mac_step)-1
+  roundings, not K. But every non-exact recipe perturbs the PRODUCT before the
+  reduction, and for a per-product perturbation eps*sum|p_i| is TIGHT, so
+  intra-window cancellation is NOT free and the element-level kappa is the truth
+  rather than pessimism. Substituting a windowed kappa is measurably unsound:
+  INT8 measures 37,134 ppm against a windowed 6,419 (5.8x violation) and INT4
+  332,762 against 86,101 (3.9x). The selector therefore ADDS the post-reduction
+  accumulation term and never replaces the per-product one, and honours a claimed
+  window only when it equals `va_turbo_window_log2(numfmt, lanes)` -- a window
+  the hardware does not implement would UNDER-state the bound. What windowing
+  legitimately buys is the previously unmodeled accumulation term: 3 sites at
+  kappa 3.04 instead of 31 at kappa 17.1, a real 5.6x on THAT term, which is a
+  few ppm and moves no level.
+- [x] THE PREMISES DID LOOSEN, VIA THE ABSOLUTE FLOOR, NOT THE WINDOW. FP16 and
+  both FP8 formats were refused outright because their operands leave the normal
+  range and a relative-only model says nothing about subnormals. The standard
+  mixed bound |fl(x)-x| <= u|x| + eta/2 ADDS a term, so it is sound exactly where
+  the relative bound was inapplicable: FP16 now qualifies at level 5, FP8 E4M3
+  and E5M2 at level 13. E4M3's bound is ~22.7% and the FLOOR dominates it
+  (59,737 ppm of 6%, eta=2^-9 against the tile scale) -- a real result about
+  E4M3. Cost of honesty: every already-admitted candidate's bound got slightly
+  WORSE (BF16 10,152 -> 10,161, INT8 510,889 -> 510,894, Mitchell
+  324,219 -> 324,232) because the FP32 accumulation term the old report listed as
+  "not modeled" is now included; no level moves and a test locks the direction.
+  `mantissa_truncated:*` stays unqualified on a different premise entirely
+  (`fp32_input_rounding_not_modeled`), which no floor excuses.
+- [x] THE TRADE-OFF IS NOW EVALUABLE, NOT ENABLED. FP32 -> FP16 halves operand
+  read beats, measured 669 -> 349 cycles per job (1.92x) on the class-0 model,
+  and FP16 finally has a bound (level 5) to weigh it against. Still no
+  approximate consumer in the datapath, and these are float64 reference proxies
+  on a seeded fixture -- not model quality. Two proxy gaps recorded: float64
+  partial sums are rounded while the RTL reduction is exact, and
+  `fp_dot_product_aligned` ZEROES any product whose alignment shift reaches 640,
+  which the proxy does not model -- a >640-bit exponent spread silently drops a
+  product in hardware. Wants a directed RTL test.
 - [x] BOTH OPERANDS RESIDENT IS THE BEST SPEEDUP-PER-AREA LEVER MEASURED. Resident
   A mirrors resident B under the same recipe 16 with an INDEPENDENT key (ptr_a, m,
   k, lda, numfmt, own epoch; `n` absent exactly as `m` is absent from the B key),

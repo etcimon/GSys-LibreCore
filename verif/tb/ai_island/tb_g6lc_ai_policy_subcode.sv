@@ -147,6 +147,189 @@ module tb_g6lc_ai_policy_subcode #(
     $display("VA_BOUND_RATIONAL PASS eps_cases=12 kappa_q8=0..65535 oracle_bits=64");
   endtask
 
+  // The moving-window bound.  Two properties matter more than the arithmetic:
+  // the window a caller claims must be the one the datapath actually reduces
+  // exactly before rounding, and a window can only ever make the reported
+  // bound tighter, never looser.
+  task automatic va_window_bound_checks();
+    va_turbo_arith_t a;
+    logic [63:0] product, expected;
+    logic [19:0] actual;
+    int unsigned checks;
+    a = '0;
+    a.kind = VA_ARITH_REL;
+    checks = 0;
+    // The datapath's window is lanes/element_bytes, doubled for INT4.  Anything
+    // else is a claim the hardware cannot honour.
+    for (int lanes_log = 3; lanes_log <= 8; lanes_log++) begin
+      assert (va_turbo_pow2_log2(32'd1 << lanes_log) == 5'(lanes_log))
+        else $fatal(1, "VA pow2 log2 lanes_log=%0d", lanes_log);
+      assert (va_turbo_window_log2(3'(config_pkg::AI_FMT_INT), 5'(lanes_log)) == 5'(lanes_log))
+        else $fatal(1, "VA INT8 window must equal the lane count");
+      assert (va_turbo_window_log2(3'(config_pkg::AI_FMT_INT4), 5'(lanes_log)) == 5'(lanes_log + 1))
+        else $fatal(1, "VA INT4 window packs two per byte");
+      assert (va_turbo_window_log2(3'(config_pkg::AI_FMT_FP16), 5'(lanes_log)) == 5'(lanes_log - 1))
+        else $fatal(1, "VA FP16 window halves with element bytes");
+      assert (va_turbo_window_log2(3'(config_pkg::AI_FMT_FP32), 5'(lanes_log)) == 5'(lanes_log - 2))
+        else $fatal(1, "VA FP32 window quarters with element bytes");
+    end
+    assert (va_turbo_pow2_log2(32'd0) == 5'd0 && va_turbo_pow2_log2(32'd3) == 5'd0 &&
+            va_turbo_pow2_log2(32'd1000) == 5'd0)
+      else $fatal(1, "VA pow2 log2 must reject non-powers of two");
+    // Rounding sites: W block-float conversions plus W-1 accumulator folds.
+    for (int window_log = 1; window_log <= 5; window_log++) begin
+      for (int k = 1; k <= 256; k++) begin
+        logic [16:0] windows;
+        windows = (17'(k) + (17'd1 << window_log) - 17'd1) >> window_log;
+        expected = windows > 17'd32 ? 64'd63 : (64'(windows) * 64'd2) - 64'd1;
+        assert (64'(va_turbo_accum_sites(16'(k), 5'(window_log))) == expected)
+          else $fatal(1, "VA accum sites k=%0d window_log=%0d", k, window_log);
+        checks++;
+      end
+    end
+    assert (va_turbo_accum_sites(16'd0, 5'd3) == 6'd0 &&
+            va_turbo_accum_sites(16'd16, 5'd0) == 6'd0)
+      else $fatal(1, "VA accum sites must be zero without work or a window");
+    // The accumulation term and the additive total, against a rational oracle.
+    for (int sites = 0; sites <= 63; sites++) begin
+      for (int kq = 0; kq <= 1024; kq++) begin
+        product = 64'(sites) * 64'(kq);
+        expected = (kq < 256 || sites == 0)
+            ? 64'd0 : product / 64'd256 + 64'((product % 64'd256) != 0);
+        if (expected > 64'd1000000) expected = 64'hfffff;
+        actual = va_turbo_accum_bound_ppm(16'(kq), 6'(sites));
+        assert (64'(actual) == expected)
+          else $fatal(1, "VA accum bound sites=%0d kq=%0d got=%0d expected=%0d",
+                      sites, kq, actual, expected);
+        checks++;
+      end
+    end
+    for (int p_case = 0; p_case < 4; p_case++) begin
+      for (int a_case = 0; a_case < 3; a_case++) begin
+        for (int f_case = 0; f_case < 3; f_case++) begin
+          logic [19:0] pp, ap, fp;
+          pp = p_case == 0 ? 20'd0 : p_case == 1 ? 20'd7828 :
+               p_case == 2 ? 20'd1000000 : 20'd1000001;
+          ap = a_case == 0 ? 20'd0 : a_case == 1 ? 20'd6 : 20'd1000001;
+          fp = f_case == 0 ? 20'd0 : f_case == 1 ? 20'd59737 : 20'd1000001;
+          expected = 64'(pp) + 64'(ap) + 64'(fp);
+          if (pp > 20'd1000000 || ap > 20'd1000000 || fp > 20'd1000000 ||
+              expected > 64'd1000000)
+            expected = 64'hfffff;
+          actual = va_turbo_total_bound_ppm(pp, ap, fp);
+          assert (64'(actual) == expected)
+            else $fatal(1, "VA total bound %0d+%0d+%0d got=%0d expected=%0d",
+                        pp, ap, fp, actual, expected);
+          // Adding terms must never reduce the bound.
+          assert (actual == 20'hfffff || actual >= pp)
+            else $fatal(1, "VA total bound must never fall below the product term");
+          checks++;
+        end
+      end
+    end
+    $display("VA_WINDOW_BOUND PASS lanes_log=3..8 sites_k=1..256 accum_kappa=0..1024 totals=36 checks=%0d",
+             checks);
+  endtask
+
+  // A windowed bound must be earned: matched window, valid windowed kappa, and
+  // it may only replace the element-level number by being smaller.
+  task automatic va_window_admission_checks();
+    config_pkg::ai_cfg_t cfg;
+    va_turbo_request_t r;
+    va_turbo_plan_t p, element_only;
+    cfg = config_pkg::AiCfgOff;
+    cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
+    cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
+    cfg.PolicySubcodeEn = 1'b1; cfg.IslandFpEn = 1'b1;
+    r = '0;
+    r.enable = 1'b1; r.code = POLICY_BULK;
+    r.numfmt = 3'(config_pkg::AI_FMT_FP32);
+    r.m = 16'd16; r.n = 16'd16; r.k = 16'd16;
+    r.regular_layout = 1'b1; r.ready_jobs = 9'd16;
+    r.free_accumulators = 9'd16; r.bank_groups = 9'd16;
+    r.range_safe = 1'b1; r.scale_valid = 1'b1; r.accuracy_valid = 1'b1;
+    r.relative_domain_valid = 1'b1;
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd65535;   // element level: vacuous
+    r.approx_param_valid = 1'b1; r.approx_param = 4'd10;
+    r.window_valid = 1'b1; r.qualified_mask = '1;
+    r.bank = 2'd2; r.subcode = 3'd5;                 // recipe 21, REL, truncation
+    r.level = 4'd15;
+    r.kappa_q8 = 16'd300;                            // finite, so terms are visible
+    element_only = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    // 64-byte lanes with FP32 gives a 16-element window.
+    assert (element_only.window_log2 == 5'd4)
+      else $fatal(1, "VA reported window must follow lanes and format, got %0d",
+                  element_only.window_log2);
+    assert (!element_only.window_matched && element_only.bound_accum_ppm == 20'd0)
+      else $fatal(1, "VA unclaimed window must not be matched or charged");
+    // Right kappa, WRONG window: refused as a window claim, so no accumulation
+    // term is added.  This is the guard against a window the hardware does not
+    // implement -- which for these recipes would UNDER-state the bound, since
+    // the per-product term is the one that matters.
+    r.kappa_window_valid = 1'b1; r.kappa_window_q8 = 16'd512;
+    for (int bad = 0; bad <= 8; bad++) begin
+      if (5'(bad) != 5'd4) begin
+        r.window_log2 = 5'(bad);
+        p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+        assert (!p.window_matched && p.bound_ppm == element_only.bound_ppm &&
+                p.bound_accum_ppm == 20'd0)
+          else $fatal(1, "VA mismatched window_log2=%0d must not be charged", bad);
+      end
+    end
+    // Matched window: the accumulation term is ADDED, never substituted.  A
+    // windowed kappa cannot buy a tighter bound, because every non-exact recipe
+    // here perturbs the product BEFORE the exact reduction, and substituting a
+    // windowed kappa for those is measurably unsound (INT8 violates by 5.8x).
+    r.window_log2 = 5'd4;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.window_matched && p.bound_accum_ppm > 20'd0 &&
+            p.bound_ppm == element_only.bound_ppm + p.bound_accum_ppm)
+      else $fatal(1, "VA matched window must ADD its term: total=%0d element=%0d accum=%0d",
+                  p.bound_ppm, element_only.bound_ppm, p.bound_accum_ppm);
+    assert (p.bound_ppm >= element_only.bound_ppm)
+      else $fatal(1, "VA window must never reduce the reported bound");
+    // A windowed kappa below one rounding is not evidence.
+    r.kappa_window_q8 = 16'd255;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.window_matched && p.bound_ppm == element_only.bound_ppm)
+      else $fatal(1, "VA sub-unity windowed kappa must be refused");
+    // A larger windowed kappa may only ever cost more, never less.
+    r.kappa_window_q8 = 16'd1024;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.bound_ppm > element_only.bound_ppm)
+      else $fatal(1, "VA larger windowed kappa must cost more");
+    // The floor only ever adds, and it is reported separately.
+    r.kappa_window_q8 = 16'd512;
+    r.abs_floor_valid = 1'b1; r.abs_floor_ppm = 20'd1000;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.bound_floor_ppm == 20'd1000 &&
+            p.bound_ppm == element_only.bound_ppm + p.bound_accum_ppm + 20'd1000)
+      else $fatal(1, "VA floor term must add exactly");
+    // Out-of-range floor is ignored rather than trusted.
+    r.abs_floor_ppm = 20'd1000001;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.bound_floor_ppm == 20'd0)
+      else $fatal(1, "VA out-of-range floor must be ignored, not applied");
+    r.abs_floor_ppm = 20'd1000;
+    // The subnormal-domain admission: no relative domain, but a floor plus a
+    // matched window is now sufficient, and without the floor it is refused.
+    r.abs_floor_valid = 1'b0; r.relative_domain_valid = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && !p.eligible)
+      else $fatal(1, "VA REL without domain or floor must stay refused");
+    r.abs_floor_valid = 1'b1; r.abs_floor_ppm = 20'd1000;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.window_matched)
+      else $fatal(1, "VA floor plus matched window must admit a subnormal REL");
+    // ...but a floor WITHOUT a matched window must not, because then the floor
+    // was never added to the reported bound.
+    r.window_log2 = 5'd2;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && !p.eligible)
+      else $fatal(1, "VA floor without a matched window must not admit");
+    $display("VA_WINDOW_ADMISSION PASS window=4 mismatches=8 floor_cases=4 subnormal_admission=1");
+  endtask
+
   task automatic va_admission_boundary_checks();
     config_pkg::ai_cfg_t cfg;
     va_turbo_request_t r;
@@ -468,6 +651,8 @@ module tb_g6lc_ai_policy_subcode #(
     va_eps_rational_checks();
     va_bound_rational_checks();
     va_admission_boundary_checks();
+    va_window_bound_checks();
+    va_window_admission_checks();
     cfg = config_pkg::AiCfgOff;
     cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
     cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;

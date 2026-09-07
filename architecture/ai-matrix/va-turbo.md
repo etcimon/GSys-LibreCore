@@ -642,6 +642,89 @@ cold priming from warm operation, check all C elements and poison outputs before
 execution. Signed native-format fixtures, metadata changes, permission gates,
 error recovery and alias cases accompany the throughput samples.
 
+## 13. The moving window is real, but it does not rescue the per-product term
+
+The datapath genuinely re-centers. `g6lc_ai_pe_dot_float` is block floating
+point per reduction step: it picks `block_exp` from that step's lanes only,
+aligns every product into a 640-bit integer, reduces **exactly**, and rounds
+once. So a dot of length K carries `2*ceil(K/mac_step) - 1` roundings -- W block
+conversions plus W-1 accumulator folds, the first fold being a plain copy -- not
+K roundings, and the error from those is re-centered per window rather than
+carried across the boundary.
+
+The tempting conclusion is that the element-level kappa was pessimistic and a
+windowed kappa should replace it. **That conclusion is wrong, and the data says
+so.** Every non-exact recipe here perturbs the *product* before it ever reaches
+the reduction: storage conversion, mantissa truncation, logarithmic multiply and
+integer quantisation all act on `a_i * b_i`. For a per-product perturbation
+
+    |sum p_i (1 + e_i) - sum p_i| <= eps * sum |p_i|
+
+is **tight**, so intra-window cancellation is not free and the element-level
+kappa is the truth rather than pessimism. Substituting the windowed kappa is
+measurably unsound on real tiles:
+
+| candidate | windowed total | measured | violation |
+|---|--:|--:|--:|
+| INT8 | 6,419 ppm | 37,134 ppm | **5.8x over** |
+| INT4 | 86,101 ppm | 332,762 ppm | **3.9x over** |
+
+So the window may only ever **add** the post-reduction accumulation term, never
+replace the per-product one. What it legitimately buys is the term the previous
+report omitted entirely: at window 8 the accumulation term is 3 rounding sites
+against kappa 3.04, instead of 31 sites against kappa 17.1 -- a real 5.6x
+reduction *of that term*. The term is a few ppm, so it moves no level. Anyone
+quoting an improvement from windowing should be quoting it about the accumulation
+term only.
+
+The selector therefore computes `bound = per_product + accumulation + floor`,
+every term rounding up and overflow failing closed, and honours a claimed window
+only when it equals `va_turbo_window_log2(numfmt, lanes)` -- the granularity the
+datapath actually reduces exactly. A window the hardware does not implement
+would *under-state* the bound here, so the match is a soundness guard, not a
+formality.
+
+### What did loosen the premises: the absolute floor
+
+FP16 and both FP8 formats were previously refused outright as
+`unqualified_arithmetic_premises`, because their operands leave the normal range
+on real tiles and a pure relative model says nothing about subnormals. The fix is
+the standard mixed bound, `|fl(x) - x| <= u|x| + eta/2`: supplying the absolute
+floor **adds** a term, so it is sound exactly where the relative-only bound was
+inapplicable. Those three formats now carry real levels:
+
+| format | previous | now | required level | floor share |
+|---|---|---|--:|--:|
+| FP16 | refused | qualified | **5** | 4 ppm |
+| FP8 E4M3 | refused | qualified | **13** | 59,737 ppm (**6%**, dominates) |
+| FP8 E5M2 | refused | qualified | **13** | 468 ppm |
+
+E4M3's honest bound is ~22.7% and it is the *floor*, not the mantissa, that
+dominates it -- eta = 2^-9 against a per-tile max scale. That is a real result
+about E4M3, not a defect in the model.
+
+Two consequences worth stating plainly. **Every already-admitted candidate's
+bound got slightly worse** (BF16 10,152 -> 10,161 ppm, INT8 510,889 -> 510,894,
+Mitchell 324,219 -> 324,232), because the report now includes the FP32
+accumulation term it previously listed as "not modeled". No level moves, and a
+test asserts the direction so it can never silently invert. And
+`mantissa_truncated:*` stays unqualified for a different reason -- its fixture
+operands are not FP32-representable (`fp32_input_rounding_not_modeled`), which is
+a modelling gap no additive floor excuses.
+
+Throughput context, so the trade-off is legible: FP32 -> FP16 narrowing halves
+operand read beats and is measured at 669 -> 349 cycles per job (1.92x) on the
+class-0 model. FP16 now has a bound (level 5) where before it had none, so that
+trade is finally *evaluable*. It is still not enabled: no approximate consumer
+exists in the datapath, and these are float64 reference proxies on a seeded
+fixture, not model-quality results.
+
+Two exactness gaps in the proxy are recorded rather than hidden: float64 partial
+sums are themselves rounded while the RTL reduction is exact, and
+`fp_dot_product_aligned` **zeroes** any product whose alignment shift reaches
+640, which the proxy does not model at all -- a window with a >640-bit exponent
+spread silently loses a product in hardware. That wants a directed RTL test.
+
 ## 12. The build was serial, and `-j` could not fix it
 
 The four-engine run first looked like a design problem: a 3,712 s build that hit
