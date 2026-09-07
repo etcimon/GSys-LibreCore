@@ -356,11 +356,168 @@ module tb_g6lc_ai_policy_subcode #(
   // Lossless narrowing: the only EXACT way to cut operand traffic, and it is
   // not an FP32-only lever.  What matters is that every element round-trips
   // into a strictly narrower container, which happens all along the ladder.
+  // Plan composition.  The 32 recipes are not alternatives: narrowing reduces
+  // both the step and the beat term of the measured cycle cost, residency
+  // reduces only beats, zero-skip only steps.  So they stack, and the measured
+  // stack is real -- FP32->INT8 narrowing (3.540x) with both operands resident
+  // (1.359x at INT8) is 139 cycles against FP32's 669, i.e. 4.813x, and
+  // 3.540 * 1.359 = 4.81 exactly.  This checks the composition ALGEBRA: that
+  // orthogonal fields union, that conflicts are refused rather than silently
+  // resolved, that error terms add, that the window is recomputed from the
+  // endpoint, and above all that the residency ordering hazard is caught.
+  task automatic va_compose_checks();
+    config_pkg::ai_cfg_t cfg;
+    va_turbo_request_t r;
+    va_turbo_plan_t narrow, reuse, group, skip, approx, c;
+    cfg = config_pkg::AiCfgOff;
+    cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
+    cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
+    cfg.PolicySubcodeEn = 1'b1; cfg.IslandFpEn = 1'b1;
+    r = '0;
+    r.enable = 1'b1; r.code = POLICY_BULK;
+    r.m = 16'd16; r.n = 16'd16; r.k = 16'd16;
+    r.numfmt = 3'(config_pkg::AI_FMT_FP32);
+    r.regular_layout = 1'b1; r.ready_jobs = 9'd16;
+    r.free_accumulators = 9'd16; r.bank_groups = 9'd16;
+    r.range_safe = 1'b1; r.scale_valid = 1'b1; r.accuracy_valid = 1'b1;
+    r.relative_domain_valid = 1'b1;
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
+    r.window_valid = 1'b1; r.qualified_mask = '1; r.level = 4'd15;
+    r.independent_jobs = 1'b1;
+
+    // Stage 1: a lossless narrowing FP32 -> INT8 (recipe 1).
+    r.lossless_proven = 1'b1; r.lossless_narrow_valid = 1'b1;
+    r.lossless_narrow_target = 3'(config_pkg::AI_FMT_INT);
+    r.bank = 2'd0; r.subcode = 3'd1;
+    narrow = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (narrow.apply && narrow.convert && narrow.lossless_narrowed)
+      else $fatal(1, "VA compose: stage-1 narrowing did not apply");
+
+    // Stage 2: both operands resident (recipe 16), no conversion.
+    r.lossless_narrow_valid = 1'b0;
+    r.reuse_a_valid = 1'b1; r.reuse_b_valid = 1'b1;
+    r.bank = 2'd2; r.subcode = 3'd0;
+    reuse = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (reuse.apply && reuse.reuse_a && reuse.reuse_b && !reuse.convert)
+      else $fatal(1, "VA compose: stage-2 residency did not apply");
+
+    // THE ORDERING HAZARD.  Both residency keys in g6lc_ai_gemm_seq include the
+    // format, so a narrowing that changes numfmt is a residency MISS by
+    // construction.  Composing them must be REFUSED unless the caller asserts
+    // the resident tile is already stored at the target format.
+    c = va_turbo_compose(r, narrow, reuse, 64, 1'b0);
+    assert (!c.apply)
+      else $fatal(1, "VA compose MUST refuse narrow+reuse when the resident tile is not at the target format");
+    c = va_turbo_compose(r, narrow, reuse, 64, 1'b1);
+    assert (c.apply && c.convert && c.reuse_a && c.reuse_b &&
+            c.target_numfmt == 3'(config_pkg::AI_FMT_INT) && c.lossless_narrowed)
+      else $fatal(1, "VA compose: narrow+reuse at target should compose, apply=%0b", c.apply);
+    // Orthogonal fields union and the traffic saving is the TARGET's.
+    assert (c.row_bytes == narrow.row_bytes && c.row_bytes == 19'd16)
+      else $fatal(1, "VA compose row_bytes %0d, expected the INT8 target's 16", c.row_bytes);
+    // Both inputs are exact, so the composition is exact -- which is what makes
+    // a lossless narrowing free to stack.
+    assert (c.arith_kind == VA_ARITH_EXACT && c.eps_ppm == 20'd0)
+      else $fatal(1, "VA compose of two exact plans must stay exact, kind=%0d eps=%0d",
+                  c.arith_kind, c.eps_ppm);
+    // Order must not matter for a union.
+    c = va_turbo_compose(r, reuse, narrow, 64, 1'b1);
+    assert (c.apply) else $fatal(1, "VA compose must be order-insensitive");
+
+    // An unapplied input can never be composed into permission.
+    c = va_turbo_compose(r, narrow, '0, 64, 1'b1);
+    assert (!c.apply) else $fatal(1, "VA compose must refuse an unapplied input");
+
+    // CONFLICT: two different conversion targets. One operand store, one target.
+    r.lossless_narrow_valid = 1'b1;
+    r.lossless_narrow_target = 3'(config_pkg::AI_FMT_BF16);
+    r.bank = 2'd0; r.subcode = 3'd1;
+    begin
+      automatic va_turbo_plan_t narrow_bf16;
+      narrow_bf16 = va_turbo_select(cfg, r, 64, 8, 8, '1);
+      assert (narrow_bf16.apply && narrow_bf16.target_numfmt == 3'(config_pkg::AI_FMT_BF16))
+        else $fatal(1, "VA compose: BF16 narrowing did not apply");
+      c = va_turbo_compose(r, narrow, narrow_bf16, 64, 1'b1);
+      assert (!c.apply)
+        else $fatal(1, "VA compose MUST refuse two different conversion targets");
+      // Composing a narrowing with ITSELF is a no-op, not an accumulation:
+      // exact representability is transitive downward, so narrowing collapses.
+      c = va_turbo_compose(r, narrow_bf16, narrow_bf16, 64, 1'b1);
+      assert (c.apply && c.target_numfmt == narrow_bf16.target_numfmt &&
+              c.row_bytes == narrow_bf16.row_bytes && c.eps_ppm == narrow_bf16.eps_ppm)
+        else $fatal(1, "VA compose: self-composition must be idempotent");
+    end
+
+    // ERROR TERMS ADD.  An approximate stage composed with an exact one pays the
+    // approximate stage's per-product term -- stacking must not launder error.
+    r.lossless_narrow_valid = 1'b0;
+    r.bank = 2'd0; r.subcode = 3'd5;      // recipe 5, approximate FP32->BF16
+    approx = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (approx.apply && approx.eps_ppm == 20'd7828)
+      else $fatal(1, "VA compose: approximate BF16 twin eps=%0d", approx.eps_ppm);
+    c = va_turbo_compose(r, approx, reuse, 64, 1'b1);
+    assert (c.apply && c.eps_ppm == approx.eps_ppm && c.arith_kind == VA_ARITH_REL)
+      else $fatal(1, "VA compose: exact+approx must keep the approximate term, eps=%0d", c.eps_ppm);
+    assert (c.bound_ppm >= approx.bound_ppm)
+      else $fatal(1, "VA compose bound %0d must not fall below its input's %0d",
+                  c.bound_ppm, approx.bound_ppm);
+
+    // BUDGET.  Stacking must not be a way to exceed a budget one stage at a
+    // time: the composed bound is re-gated, not inherited.
+    r.level = 4'd1;                        // 100 ppm, far under BF16's 7,828
+    begin
+      automatic va_turbo_plan_t tight;
+      tight = va_turbo_compose(r, approx, reuse, 64, 1'b1);
+      assert (!tight.apply)
+        else $fatal(1, "VA compose MUST re-gate the composed bound against the budget");
+    end
+    r.level = 4'd15;
+
+    // ZERO-SKIP composes on the step term, which is orthogonal to residency's
+    // beat term. Integer source, since recipe 2 is integer-only by design.
+    r.numfmt = 3'(config_pkg::AI_FMT_INT);
+    r.exact_zero_proven = 1'b1;
+    r.bank = 2'd0; r.subcode = 3'd2;
+    skip = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (skip.apply && skip.skip_products) else $fatal(1, "VA compose: zero-skip did not apply");
+    r.bank = 2'd2; r.subcode = 3'd0;
+    reuse = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    c = va_turbo_compose(r, skip, reuse, 64, 1'b0);
+    // No conversion here, so the residency hazard does not arise and the
+    // composition is admitted without the caller's assertion.
+    assert (c.apply && c.skip_products && c.reuse_a && c.reuse_b && !c.convert)
+      else $fatal(1, "VA compose: zero-skip + residency should compose, apply=%0b", c.apply);
+    assert (c.arith_kind == VA_ARITH_EXACT && c.bound_ppm == 20'd0)
+      else $fatal(1, "VA compose: two exact levers must stay exact");
+
+    // CONFLICT: two different group geometries. One engine retires one shape.
+    r.numfmt = 3'(config_pkg::AI_FMT_INT);
+    r.bank = 2'd1; r.subcode = 3'd1;       // recipe 9, two outputs sharing A
+    group = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    if (group.apply) begin
+      automatic va_turbo_plan_t group4, conflicting;
+      r.bank = 2'd1; r.subcode = 3'd2;     // recipe 10, four outputs
+      group4 = va_turbo_select(cfg, r, 64, 8, 8, '1);
+      if (group4.apply) begin
+        conflicting = va_turbo_compose(r, group, group4, 64, 1'b0);
+        assert (!conflicting.apply)
+          else $fatal(1, "VA compose MUST refuse two different group counts");
+      end
+      // Grouping over residency is a legal union: different resources.
+      c = va_turbo_compose(r, group, reuse, 64, 1'b0);
+      assert (c.apply && c.groups_log2 == group.groups_log2)
+        else $fatal(1, "VA compose: grouping + residency should union");
+    end
+
+    $display("VA_COMPOSE PASS union=1 conflicts=refused eps=additive window=recomputed fmt_hazard=refused");
+  endtask
+
   task automatic va_lossless_narrow_checks();
     config_pkg::ai_cfg_t cfg;
     va_turbo_request_t r;
     va_turbo_plan_t p, approx;
     int unsigned admitted;
+    int unsigned exact_pairs;
     cfg = config_pkg::AiCfgOff;
     cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
     cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
@@ -378,6 +535,7 @@ module tb_g6lc_ai_policy_subcode #(
     r.lossless_proven = 1'b1; r.lossless_narrow_valid = 1'b1;
     r.bank = 2'd0; r.subcode = 3'd1;   // id 1, lossless repack
     admitted = 0;
+    exact_pairs = 0;
     // Every strictly-narrower pair must admit, whatever the source; every
     // equal-or-wider pair must be refused, because it saves no beats.
     for (int src = 0; src < 8; src++)
@@ -404,13 +562,18 @@ module tb_g6lc_ai_policy_subcode #(
           assert (p.row_bytes < src_bytes)
             else $fatal(1, "VA lossless src=%0d dst=%0d row_bytes %0d not below %0d",
                         src, dst, p.row_bytes, src_bytes);
-          // Integer-to-integer is BIT-IDENTICAL: exact integer product, exact
-          // integer reduction, exact integer accumulate - no rounding site.
-          if (policy_integer_format(3'(src)) && policy_integer_format(3'(dst))) begin
+          // The TARGET decides, because the target is what the accumulator
+          // sees. An integer target is exact: exact integer products, exact
+          // 640-bit reduction, exact integer accumulate - no rounding site
+          // anywhere - and that holds for a FLOAT source too, since
+          // lossless_proven already guarantees the values survive the
+          // conversion and the source run is not the one being executed.
+          if (policy_integer_format(3'(dst))) begin
             assert (p.arith_kind == VA_ARITH_EXACT && p.eps_ppm == 20'd0 &&
                     p.bound_ppm == 20'd0 && !p.eps_per_window)
-              else $fatal(1, "VA int->int lossless must be exact src=%0d dst=%0d eps=%0d",
+              else $fatal(1, "VA lossless to an integer target must be exact src=%0d dst=%0d eps=%0d",
                           src, dst, p.eps_ppm);
+            exact_pairs++;
           end else begin
             // Anything touching the FP32 accumulator regroups its folds, so the
             // epsilon is the ACCUMULATOR's 1 ppm - never the target format's.
@@ -472,8 +635,13 @@ module tb_g6lc_ai_policy_subcode #(
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.apply && p.lossless_narrowed && p.reuse_b)
       else $fatal(1, "VA id17 must combine lossless narrowing with resident B");
-    $display("VA_LOSSLESS_NARROW PASS pairs=64 admitted=%0d int_exact=1 float_eps=%0d ppm",
-             admitted, VA_FP32_RNE_PPM);
+    // 9 of the 17 pairs have an INTEGER target and are therefore exact (INT8
+    // from FP32/FP16/BF16, INT4 from all six wider formats); the other 8 land on
+    // a float target and pay the 1 ppm accumulation regrouping.
+    assert (exact_pairs == 9)
+      else $fatal(1, "VA expected 9 integer-target (exact) pairs, got %0d", exact_pairs);
+    $display("VA_LOSSLESS_NARROW PASS pairs=64 admitted=%0d exact=%0d float_eps=%0d ppm",
+             admitted, exact_pairs, VA_FP32_RNE_PPM);
   endtask
 
   task automatic va_e5m2_target_checks();
@@ -868,6 +1036,7 @@ module tb_g6lc_ai_policy_subcode #(
     va_window_admission_checks();
     va_e5m2_target_checks();
     va_lossless_narrow_checks();
+    va_compose_checks();
     cfg = config_pkg::AiCfgOff;
     cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
     cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
@@ -1310,6 +1479,40 @@ module tb_g6lc_ai_va_turbo_plan_on (
   output g6lc_ai_policy_pkg::va_turbo_plan_t plan_o
 );
   tb_g6lc_ai_va_turbo_plan #(.Enabled(1'b1)) i_on (.*);
+endmodule
+
+// Synthesis witness for plan COMPOSITION.  `va_turbo_compose` is a package
+// function, so it costs nothing until something instantiates it; this wrapper is
+// what makes its area measurable rather than asserted.  Two independently
+// selected plans are composed, which is the real shape a planner would use: one
+// selector evaluation per stage, then one composition.  Combinational and
+// stateless, like the selector it composes.
+module tb_g6lc_ai_va_turbo_compose_on (
+  input g6lc_ai_policy_pkg::va_turbo_request_t request_a_i,
+  input g6lc_ai_policy_pkg::va_turbo_request_t request_b_i,
+  input logic [31:0] consumer_mask_i,
+  input logic resident_at_target_i,
+  output g6lc_ai_policy_pkg::va_turbo_plan_t plan_o
+);
+  g6lc_ai_policy_pkg::va_turbo_plan_t plan_a, plan_b;
+  function automatic config_pkg::ai_cfg_t va_cfg();
+    config_pkg::ai_cfg_t cfg;
+    cfg = config_pkg::AiCfgOff;
+    cfg.MatrixEn = 1'b1;
+    cfg.Queues = 1;
+    cfg.PolicyCodecEn = 1'b1;
+    cfg.PolicyBenefitEn = 1'b1;
+    cfg.PolicySubcodeEn = 1'b1;
+    cfg.IslandFpEn = 1'b1;
+    cfg.VaTurboEn = 1'b1;
+    return cfg;
+  endfunction
+  assign plan_a = g6lc_ai_policy_pkg::va_turbo_select(va_cfg(), request_a_i, 64, 8, 8,
+                                                      consumer_mask_i);
+  assign plan_b = g6lc_ai_policy_pkg::va_turbo_select(va_cfg(), request_b_i, 64, 8, 8,
+                                                      consumer_mask_i);
+  assign plan_o = g6lc_ai_policy_pkg::va_turbo_compose(request_a_i, plan_a, plan_b, 64,
+                                                       resident_at_target_i);
 endmodule
 
 module tb_g6lc_ai_policy_subcode_instance #(

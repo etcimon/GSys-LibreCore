@@ -358,6 +358,60 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   resource, so the levers multiply rather than overlap. Operand read beats halve
   at every engine count and every C element is still checked. One shared-port
   fixture with repeated same-weight jobs; not MAC/s, not silicon, not inference.
+- [x] PLAN COMPOSITION LANDED (`va_turbo_compose`): the 32 recipes stack, and the
+  measured cycle model says how. Fitting the per-job cycles against work terms gives
+  `cycles ~= steps + beta(fmt)*read_beats + 11` with `steps = m*n*ceil(k_bytes/PeLanes)`
+  and beta = 1.14/1.28/1.56/2.13 for FP32/FP16/INT8/INT4, measured straight off the
+  residency sweeps (FP32 669->523 over 128 beats, INT8 189->139 over 32) with the +11
+  falling out identically for both. beta RISES as the format narrows because traffic
+  hides under compute and a narrow job has less compute to hide it under. Narrowing
+  cuts steps AND beats, residency only beats, zero-skip only steps, grouping only
+  retirement -- which is the whole composition rule. MEASURED STACK: FP32->INT8
+  narrowing plus both operands resident is 139 cycles against 669 = 4.813x, and
+  3.540 x 1.359 = 4.81 exactly. Note WHICH residency figure: composing with FP32's
+  1.279x predicts 4.53x and understates it, so the stack is mildly
+  super-multiplicative.
+- [x] NO LOOPBACK SEQUENCER, for two structural reasons. (1) Narrowing COLLAPSES:
+  exact representability is transitive downward, so FP32->BF16->FP8 is identical to
+  FP32->FP8, and iterating gains nothing beyond picking the narrowest exact target
+  once -- `va_turbo_compose(a, a) == a` is an exact law in the implementation.
+  (2) Every lever strictly decreases a monotone quantity (k_bytes, then steps, then
+  beats), so a staged pipeline terminates by construction and there is nothing for a
+  cycle detector to detect. `va_turbo_plan_t` was already resource-orthogonal, which
+  is why recipe 17 could hard-code lossless+resident-B in ONE plan; compose
+  generalises that rather than adding 30 more hard-coded pairs.
+- [x] THE ORDERING HAZARD, caught by construction. Both residency keys in
+  `g6lc_ai_gemm_seq` include the format (ptr/n/k/ldb/FMT/epoch, lines 554 and 643), so
+  a narrowing that changes numfmt is a residency MISS BY CONSTRUCTION. Composing them
+  is refused unless the caller asserts the resident tile is already at the target
+  format -- convert ONCE at load, then reuse across many jobs. A planner that narrowed
+  INSIDE a reuse window would silently destroy the residency it was stacking with.
+  Also enforced: conflicts refused not resolved (two targets, two group geometries),
+  per-product error terms ADD so stacking cannot launder error, the budget is re-gated
+  from the REQUEST rather than inherited, and the window is RECOMPUTED from the
+  endpoint because mac_step is a property of the final format.
+- [x] A REAL CORRECTION COMPOSITION EXPOSED: lossless exactness depends on the TARGET,
+  not on both ends. The previous rule required both source and target integer, so
+  FP32->INT8 on integer-valued data was reported REL at 1 ppm even though an INT8 job
+  accumulates in EXACT integers and returns the exact dot product. The source's
+  accumulation domain is irrelevant once `lossless_proven` holds -- the source run is
+  not the one executed. Now `policy_integer_format(target)`: exact pairs go from 1 to
+  9 of 17, the measured 4.81x stack becomes an EXACT plan, and the selector got
+  SMALLER (4,619 -> 4,567 cells, one comparison removed).
+- [x] AREA, and it changes the next recommendation. One selector 4,567 cells; two
+  selectors + compose 12,521; so compose is ~3,387 cells (a LOWER bound, since any
+  sharing Yosys found between the two selectors shifts more onto compose), 0
+  sequential, 0 latches, and zero until instantiated. That cost is dominated by
+  RE-DERIVING the error bound (36- and 44-bit multiplies the selector already
+  contains). So composing REQUESTS -- set the target and reuse flags on one request,
+  run select ONCE -- would get the bound for free, but needs the selector's class
+  dispatch to stop being an exclusive if/else-if chain. The non-exclusive dispatch
+  refactor therefore now has a MEASURED justification (~3.4k cells) rather than a
+  stylistic one; plan-side compose is the low-risk step that works today.
+- [ ] Next on this line: request-side composition (non-exclusive class dispatch), an
+  `ai_tensor` `pipeline()` that validates an ordered recipe sequence against these
+  rules, and only then the C-port widening -- which narrowing is what makes worth
+  building, since narrowing pushes the engine from compute-bound to retire-bound.
 - [x] LOSSLESS NARROWING LANDED: the exact traffic lever FP32 never had. Bit-preserving
   FP32 had exactly ONE implemented speedup (recipe 16 residency, 1.279x) because the
   two exact levers that could help it -- lossless repack 1/3/17 and zero-skip 2 --

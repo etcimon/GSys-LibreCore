@@ -642,6 +642,116 @@ cold priming from warm operation, check all C elements and poison outputs before
 execution. Signed native-format fixtures, metadata changes, permission gates,
 error recovery and alias cases accompany the throughput samples.
 
+## 16. Plan composition: the 32 recipes stack, and the cycle model says how
+
+The recipes are not alternatives. Fitting the measured per-job cycles against
+work terms decomposes them:
+
+```
+cycles ~= steps + beta(fmt)*read_beats + 11
+steps   = m*n*ceil(k_bytes/PeLanes)
+beta    = 1.14 (FP32)  1.28 (FP16)  1.56 (INT8)  2.13 (INT4)
+```
+
+`beta` is measured directly from the residency sweeps (FP32 669->523 over 128
+beats; INT8 189->139 over 32) and the `+11` constant falls out identically for
+both. It **rises** as the format narrows, because traffic hides under compute and
+a narrow job has less compute to hide it under.
+
+Which term each family touches is the entire composition rule:
+
+| Family | `steps` | `beats` | Retirement |
+|---|:-:|:-:|:-:|
+| narrowing (1/3/17, 4-7, 18-20, 29) | yes | yes | - |
+| residency (16, 17) | - | yes | - |
+| zero-skip (2) | yes | - | - |
+| grouping (9-15) | - | - | yes (blocked: one C write port) |
+| approx arithmetic (21/25/27/28/30/31) | - | - | - |
+
+### The measured stack
+
+| Stack | Cycles | vs FP32 | Source |
+|---|--:|--:|---|
+| FP32 native | 669 | 1.000x | measured |
+| + residency | 523 | 1.279x | measured |
+| -> BF16 lossless | 349 | 1.916x | measured |
+| -> INT8 lossless | 189 | 3.540x | measured |
+| **-> INT8 lossless + residency** | **139** | **4.813x** | **measured** |
+| -> INT4 lossless + residency | ~75 | ~8.9x | predicted |
+
+And `3.540 x 1.359 = 4.81` exactly. Note **which** residency figure: composing
+with FP32's 1.279x instead predicts 4.53x and understates the stack, because
+`beta` is larger at the narrower format. Residency is worth *more* after
+narrowing, so the stack is mildly super-multiplicative.
+
+### Why a function and not a loopback sequencer
+
+Two structural facts remove the need for one:
+
+1. **Narrowing collapses.** Exact representability is transitive downward, so
+   FP32 -> BF16 -> FP8 is identical to FP32 -> FP8. Iterating gains nothing
+   beyond picking the narrowest exact target once, which `best_target()` already
+   does. `va_turbo_compose(a, a) == a` is an exact law in the implementation.
+2. **Every lever strictly decreases a monotone quantity** (`k_bytes`, then
+   `steps`, then `beats`), so a staged pipeline terminates by construction.
+   There is nothing for a cycle detector to detect.
+
+`va_turbo_plan_t` was already resource-orthogonal, which is why recipe 17 could
+hard-code lossless-narrowing + resident-B in one plan. `va_turbo_compose`
+generalises that instead of adding 30 more hard-coded pairs.
+
+### The rules it enforces
+
+- **Orthogonal fields union**; the composed `row_bytes` is the target's.
+- **Conflicts are refused, never silently resolved**: two different conversion
+  targets (one operand store, one target), or two different group geometries.
+- **Per-product error terms ADD.** An exact input contributes 0, which is what
+  makes a lossless narrowing free to stack; an approximate stage composed with an
+  exact one still pays its own term, so stacking cannot launder error.
+- **The budget is re-gated from the REQUEST**, not inherited from an input plan.
+  Otherwise a plan selected under a loose level would carry that level into a
+  composition made under a tighter one.
+- **The window is recomputed from the endpoint, never summed.** `mac_step` is a
+  property of the final storage format, so summing per-stage window terms would
+  charge a window that never existed. This is the one field that cannot union.
+
+### The ordering hazard, which is why the function takes a fourth argument
+
+Both residency keys in `g6lc_ai_gemm_seq` include the format (the
+`ptr`/`n`/`k`/`ldb`/**`fmt`**/`epoch` tuple, lines 554 and 643), so a narrowing
+that changes `numfmt` is a residency **miss by construction**. Composing them is
+only valid when the resident tile is already stored at the target format --
+convert **once** at load, then reuse across many jobs, which is exactly the
+operational pattern. The default is refusal and the caller must assert otherwise;
+a planner that narrowed *inside* a reuse window would silently destroy the
+residency it was trying to stack with.
+
+### Area, and what it argues for next
+
+| Top | cells | sequential | latches |
+|---|--:|--:|--:|
+| one selector | 4,567 | 0 | 0 |
+| two selectors + compose | 12,521 | 0 | 0 |
+
+So composition is **~3,387 cells** -- a lower bound, since any sharing Yosys
+found between the two selector instances shifts more of the total onto compose.
+Combinational and stateless, and it costs **nothing** until instantiated, being a
+package function.
+
+That number is dominated by **re-deriving the error bound** (`va_turbo_bound_ppm`
+and `va_turbo_accum_bound_ppm` carry 36- and 44-bit multiplies), and it changes
+the recommendation for the next step. Composing *plans* pays for bound arithmetic
+the selector already contains. Composing *requests* -- setting the target format
+and reuse flags on one request and running `va_turbo_select` **once** -- would get
+the bound for free, but it needs the selector's class dispatch to stop being an
+exclusive `if/else-if` chain. So the non-exclusive dispatch refactor now has a
+measured justification (~3.4k cells) rather than a stylistic one. Plan-side
+composition is the low-risk step that works today; request-side is the cheaper
+end state.
+
+Note also that the selector itself *shrank* 4,619 -> 4,567 cells in this pass,
+because composition exposed an error in the lossless classification (below).
+
 ## 15. Lossless narrowing: an exact traffic lever, and the only one FP32 had
 
 Bit-preserving FP32 had exactly **one** implemented speedup (recipe 16 residency,
@@ -754,6 +864,24 @@ value** (so both runs wrote every element), that the difference is bounded, and
 that it is nonzero somewhere. That trade -- golden checking for regrouping
 observability -- applies only to this class; the small-integer class keeps full
 element-by-element golden checking.
+
+### Correction: the TARGET decides exactness, not both ends
+
+The first version of this section required **both** source and target to be
+integer for a lossless narrowing to be `VA_ARITH_EXACT`. That was wrong in the
+one direction that mattered, and plan composition is what exposed it. The target
+is what the accumulator sees: an INT8 job accumulates in **exact integers**, so
+`FP32 -> INT8` on integer-valued data (quantised weights parked in FP32) returns
+the exact dot product and was nonetheless reported as `REL` at 1 ppm. The
+source's own accumulation domain is irrelevant once `lossless_proven` guarantees
+the values survive the conversion -- the source run is simply not the one being
+executed.
+
+The rule is now `policy_integer_format(target)`, which takes the count of exact
+pairs from 1 to **9 of the 17** (INT8 from FP32/FP16/BF16; INT4 from all six
+wider formats). The other 8 land on a float target and pay the 1 ppm regrouping.
+This makes the measured 4.81x stack an **exact** plan, and it made the selector
+*smaller* by one comparison.
 
 ### Scope: 17 pairs, not one
 

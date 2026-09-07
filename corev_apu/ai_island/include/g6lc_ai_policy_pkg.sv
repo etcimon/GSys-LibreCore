@@ -704,12 +704,21 @@ package g6lc_ai_policy_pkg;
                       policy_format_known(r.lossless_narrow_target) &&
                       policy_element_bits_log2(r.lossless_narrow_target) <
                       policy_element_bits_log2(r.numfmt);
-    // An integer source narrowing into an integer target is BIT-IDENTICAL, not
-    // merely accurate: the products are the same integers, the reduction is an
-    // exact 640-bit integer sum, and the accumulator is an exact integer add
-    // with no rounding site anywhere.  Anything touching a float accumulator
-    // regroups the FP32 folds instead, which is a real (tiny) difference.
-    lossless_exact = lossless_narrow && policy_integer_format(r.numfmt) &&
+    // The TARGET decides, because the target is what the accumulator sees.  An
+    // earlier revision required BOTH source and target to be integer, which was
+    // wrong in the one direction that mattered: FP32 -> INT8 on integer-valued
+    // data (quantised weights parked in FP32) was reported REL at 1 ppm even
+    // though the INT8 job accumulates in EXACT integers and therefore returns
+    // the exact dot product.  The source's own accumulation domain is
+    // irrelevant once `lossless_proven` guarantees the values survive the
+    // conversion - the source run is simply not the one being executed.
+    //
+    // So: an integer target is exact (same integers, exact 640-bit reduction,
+    // integer accumulator, no rounding site anywhere), and a float target
+    // regroups the FP32 folds instead, which is a real if tiny difference.
+    // Note this makes the measured 4.81x stack (FP32 -> INT8 narrowing plus both
+    // operands resident, 139 cycles against 669) an EXACT plan.
+    lossless_exact = lossless_narrow &&
                      policy_integer_format(r.lossless_narrow_target);
     lossless_row_bytes = r.lossless_narrow_target == 3'(config_pkg::AI_FMT_INT4) ?
         (({3'd0, r.k} + 19'd1) >> 1) :
@@ -1107,5 +1116,191 @@ package g6lc_ai_policy_pkg;
       POLICY_SPARSE:    return {2'd1, 4'd5, 4'd6, 4'd7, 1'b1, 2'd1};
       default:          return {2'd3, 4'd3, 4'd6, 4'd3, 1'b0, 2'd3};
     endcase
+  endfunction
+
+  // ---------------------------------------------------------------------------
+  // PLAN COMPOSITION
+  //
+  // The 32 recipes are not alternatives; several of them reduce DIFFERENT terms
+  // of the measured cycle cost and therefore stack.  Fitting the measured
+  // per-job cycles (m=n=8, k=16, PeLanes=8, one engine) against work terms gives
+  //
+  //   cycles ~= steps + beta(fmt)*read_beats + 11
+  //   steps   = m*n*ceil(k_bytes/PeLanes)
+  //   beta    = 1.14 (FP32) 1.28 (FP16) 1.56 (INT8) 2.13 (INT4)
+  //
+  // where beta is the marginal cost of an operand beat, measured directly from
+  // the residency sweeps (FP32 669->523 over 128 beats; INT8 189->139 over 32),
+  // and the +11 constant falls out identically for both.  beta RISES as the
+  // format narrows because traffic hides under compute and a narrow job has less
+  // compute to hide it under.
+  //
+  // Which term each family touches is then the whole composition rule:
+  //
+  //   narrowing (1/3/17, 4-7, 18-20, 29)  steps AND beats
+  //   residency (16, 17)                  beats only
+  //   zero-skip (2)                       steps only
+  //   grouping  (9-15)                    retirement (blocked: one C write port)
+  //   approx arithmetic (21/25/27/28/30/31) neither - measured 1.000x
+  //
+  // Measured composition: FP32->INT8 narrowing (3.540x) with both operands
+  // resident (1.359x AT INT8) is 139 cycles against FP32's 669, i.e. 4.813x -
+  // and 3.540 * 1.359 = 4.81 exactly.  Note WHICH residency figure: composing
+  // with FP32's 1.279x instead would predict 4.53x and understate the stack,
+  // because beta is larger at the narrower format.
+  //
+  // WHY THIS IS A FUNCTION AND NOT A SEQUENCER.  Two structural facts remove the
+  // need for a loopback:
+  //
+  //   1. Narrowing COLLAPSES.  Exact representability is transitive downward, so
+  //      FP32->BF16->FP8 is identical to FP32->FP8.  Iterating gains nothing
+  //      beyond picking the narrowest exact target once.
+  //   2. Every lever strictly DECREASES a monotone quantity (k_bytes, then
+  //      steps, then beats), so a staged pipeline terminates by construction.
+  //      There is nothing for a cycle detector to detect.
+  //
+  // And `va_turbo_plan_t` is already resource-orthogonal: `convert`,
+  // `reuse_a`/`reuse_b`, `skip_products`, `groups_log2` and `approx_products` are
+  // independent fields, which is why recipe 17 could hard-code
+  // lossless-narrowing + resident-B in ONE plan.  Composition already exists in
+  // the namespace; this function generalises it instead of adding 30 more
+  // hard-coded pairs.
+  //
+  // Conflicts are refused rather than silently resolved: a composed plan that
+  // quietly dropped one input's requirement would be worse than no composition.
+  function automatic va_turbo_plan_t va_turbo_compose(
+      input va_turbo_request_t r,
+      input va_turbo_plan_t a,
+      input va_turbo_plan_t b,
+      // Same provisioning argument `va_turbo_select` takes: the window is a
+      // function of the format AND the byte-lane provisioning, so it cannot be
+      // recomputed without it.
+      input int unsigned lane_bytes,
+      // The caller asserts the resident tile is ALREADY stored at the composed
+      // plan's target format.  Without it, composing a format change with
+      // residency is refused - see the ordering hazard below.
+      input logic resident_at_target
+  );
+    va_turbo_plan_t p;
+    logic [2:0] target;
+    logic converts;
+    logic reuses;
+    logic [4:0] window;
+    logic [5:0] sites;
+    logic [19:0] product_ppm;
+
+    p = '0;
+    p.recipe = a.recipe;
+
+    // Both inputs must be real applied plans. Composing an unapplied plan would
+    // manufacture permission the selector refused to give.
+    if (!a.apply || !b.apply) return p;
+    if (!a.arith_specified || !b.arith_specified) return p;
+
+    // IDEMPOTENCE.  Composing a plan with itself is one stage, not two, and the
+    // additive error rule below would otherwise charge its epsilon twice.  That
+    // would be conservative rather than unsound, but it would also be wrong
+    // about the physics: there is ONE operand store, so a conversion happens
+    // once, which is the same reason narrowing collapses (FP32->BF16->FP8 is
+    // FP32->FP8).  Making `compose(a, a) == a` an exact law keeps the algebra
+    // checkable instead of merely safe.
+    if (a === b) return a;
+
+    converts = a.convert || b.convert;
+    reuses   = a.reuse_a || b.reuse_a || a.reuse_b || b.reuse_b;
+
+    // CONFLICT: two different conversion targets. There is one operand store, so
+    // one target; picking either would violate the other input's bound.
+    if (a.convert && b.convert && a.target_numfmt != b.target_numfmt) return p;
+    target = a.convert ? a.target_numfmt : (b.convert ? b.target_numfmt : r.numfmt);
+
+    // CONFLICT: two different group counts, or a grouping composed with a split
+    // in the other direction. One engine retires one geometry.
+    if (a.groups_log2 != 3'd0 && b.groups_log2 != 3'd0) begin
+      if (a.groups_log2 != b.groups_log2) return p;
+      if (a.split_rows != b.split_rows) return p;
+    end
+
+    // THE ORDERING HAZARD, and the reason this function takes a fourth
+    // argument.  Both residency keys in g6lc_ai_gemm_seq include the format
+    // (`fmt_q == numfmt_i`, the ptr/n/k/ldb/fmt/epoch tuple), so a narrowing
+    // that changes numfmt is a residency MISS BY CONSTRUCTION.  Composing them
+    // is only valid when the resident tile is already at the target format -
+    // i.e. convert ONCE at load, then reuse across many jobs, which is exactly
+    // the operational pattern.  A planner that narrowed INSIDE a reuse window
+    // would silently destroy the residency it was trying to stack with, so the
+    // default is refusal and the caller must assert otherwise.
+    if (converts && reuses && target != r.numfmt && !resident_at_target) return p;
+
+    // Orthogonal resource fields union.
+    p.supported     = 1'b1;
+    p.eligible      = 1'b1;
+    p.apply         = 1'b1;
+    p.convert       = converts;
+    p.target_numfmt = target;
+    // `select` already set row_bytes from each plan's own target, so a
+    // non-converting plan carries the SOURCE row bytes and is the right default.
+    p.row_bytes     = a.convert ? a.row_bytes : (b.convert ? b.row_bytes : a.row_bytes);
+    p.reuse_a       = a.reuse_a || b.reuse_a;
+    p.reuse_b       = a.reuse_b || b.reuse_b;
+    p.skip_products = a.skip_products || b.skip_products;
+    p.approx_products = a.approx_products || b.approx_products;
+    p.groups_log2   = (a.groups_log2 != 3'd0) ? a.groups_log2 : b.groups_log2;
+    p.split_rows    = (a.groups_log2 != 3'd0) ? a.split_rows : b.split_rows;
+    p.tail_outputs  = (a.groups_log2 != 3'd0) ? a.tail_outputs : b.tail_outputs;
+    p.lossless_narrowed = a.lossless_narrowed || b.lossless_narrowed;
+    p.arith_specified = 1'b1;
+    // The budget comes from the REQUEST, not from an input plan.  Inheriting it
+    // would let a plan selected under a loose level carry that level into a
+    // composition made under a tighter one - i.e. stacking would become a way
+    // to launder the budget, which is exactly what the re-gate below prevents.
+    p.budget_ppm    = va_turbo_budget_ppm(r.level);
+    p.bound_waived  = a.bound_waived || b.bound_waived;
+
+    // ERROR ACCOUNTING.  Per-product terms ADD: each stage perturbs the product
+    // before it reaches the reduction, and those perturbations compose.  An
+    // EXACT input contributes 0, which is what makes a lossless narrowing free
+    // to stack.  The composed kind is the weaker of the two.
+    product_ppm = va_turbo_total_bound_ppm(a.eps_ppm, b.eps_ppm, 20'd0);
+    p.eps_ppm   = product_ppm;
+    if (a.arith_kind == VA_ARITH_NONE || b.arith_kind == VA_ARITH_NONE)
+      p.arith_kind = VA_ARITH_NONE;
+    else if (a.arith_kind == VA_ARITH_FULL || b.arith_kind == VA_ARITH_FULL)
+      p.arith_kind = VA_ARITH_FULL;
+    else if (a.arith_kind == VA_ARITH_REL || b.arith_kind == VA_ARITH_REL)
+      p.arith_kind = VA_ARITH_REL;
+    else
+      p.arith_kind = VA_ARITH_EXACT;
+
+    // THE WINDOW IS A PROPERTY OF THE ENDPOINT, NOT OF THE PATH.  `mac_step`
+    // comes from the FINAL storage format, so the accumulation term must be
+    // RECOMPUTED from the composed target - never summed across stages, which
+    // would charge a window that never existed.  This is the one field that
+    // cannot be unioned.
+    window = va_turbo_window_log2(target, va_turbo_pow2_log2(lane_bytes));
+    sites  = va_turbo_accum_sites(r.k, window);
+    p.window_log2 = window;
+    // Same guards `va_turbo_select` applies: the caller's claimed window must be
+    // the one the datapath will really use, and the windowed kappa must be at
+    // least one rounding, or the term is dropped rather than guessed.
+    p.window_matched = r.kappa_window_valid && r.window_log2 == window &&
+                       window != 5'd0 && r.kappa_window_q8 >= 24'd256;
+    p.eps_per_window = a.eps_per_window || b.eps_per_window;
+    p.bound_accum_ppm = (p.arith_kind != VA_ARITH_EXACT && p.window_matched)
+        ? va_turbo_accum_bound_ppm(r.kappa_window_q8, sites) : 20'd0;
+    p.bound_floor_ppm = (r.abs_floor_valid && r.abs_floor_ppm <= 20'd1000000)
+        ? r.abs_floor_ppm : 20'd0;
+    p.bound_ppm = va_turbo_total_bound_ppm(
+        va_turbo_bound_ppm('{kind: p.arith_kind, eps_ppm: p.eps_ppm,
+                             needs_param: 1'b0, narrows_storage: p.convert,
+                             quant_levels: 8'd0},
+                           r.kappa_valid ? r.kappa_q8 : 16'd0),
+        p.bound_accum_ppm, p.bound_floor_ppm);
+
+    // A composed plan is still subject to the budget it was composed under.
+    // Stacking must not be a way to exceed an error budget one stage at a time.
+    if (p.arith_kind == VA_ARITH_NONE) return '0;
+    if (p.bound_ppm > p.budget_ppm && !p.bound_waived) return '0;
+    return p;
   endfunction
 endpackage

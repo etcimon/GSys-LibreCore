@@ -797,7 +797,10 @@ def local_synthesis(args):
         sources = " ".join(files)
         report["synthesis"] = {}
         for top in (SYNTH_TOP, DISABLED_TOP, CACHE_SYNTH_TOP,
-                    "tb_g6lc_ai_va_turbo_plan_on", "tb_g6lc_ai_va_turbo_plan"):
+                    "tb_g6lc_ai_va_turbo_plan_on", "tb_g6lc_ai_va_turbo_plan",
+                    # Composition is a package function and therefore free until
+                    # instantiated; this top is what makes its area measurable.
+                    "tb_g6lc_ai_va_turbo_compose_on"):
             netlist = out / (top + ".json")
             script = ("read_slang --top " + top + " " + sources +
                       "; synth -top " + top + " -flatten; check -assert; write_json " +
@@ -818,7 +821,7 @@ def local_synthesis(args):
                 for name, port in module["ports"].items():
                     if port["direction"] == "output" and any(bit != "0" for bit in port["bits"]):
                         raise RuntimeError("Enabled=0 output is not constant zero: " + name)
-            elif top == "tb_g6lc_ai_va_turbo_plan_on":
+            elif top in ("tb_g6lc_ai_va_turbo_plan_on", "tb_g6lc_ai_va_turbo_compose_on"):
                 if not cells or sequential:
                     raise RuntimeError("V/A selector must retain combinational logic without state")
             elif not cells or not sequential:
