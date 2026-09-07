@@ -26,6 +26,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -134,9 +135,11 @@ def quantize_format(t, fmt):
 def truncate_mantissa(t, keep):
     """Keep `keep` mantissa bits of an FP32 operand: a cheaper multiplier, same width."""
     import torch
-    bits = torch.tensor(t.to(torch.float32).numpy().view("uint32").copy())
-    mask = (0xFFFFFFFF << (23 - keep)) & 0xFFFFFFFF
-    return torch.tensor((bits.numpy() & mask).view("float32").copy()).to(torch.float64)
+    if not isinstance(keep, int) or not 0 <= keep <= 23:
+        raise ValueError("retained mantissa bits must be in [0,23]")
+    bits = t.to(torch.float32).contiguous().view(torch.int32)
+    mask = -1 << (23 - keep)
+    return (bits & mask).view(torch.float32).to(torch.float64)
 
 
 def mitchell_product(a, b):
@@ -156,9 +159,12 @@ def mitchell_product(a, b):
 
 
 def rel_error(candidate, reference):
-    num = (candidate - reference).norm().item()
+    difference = candidate - reference
+    num = difference.norm().item()
     den = reference.norm().item()
-    return num / den if den else 0.0
+    if not math.isfinite(num) or not math.isfinite(den):
+        return math.inf
+    return num / den if den else (math.inf if difference.any().item() else 0.0)
 
 
 # The RTL bound is eps * kappa, so validating it needs the same kappa the RTL
@@ -182,8 +188,12 @@ def kappa_relative(a, b):
     abs_sum = products.abs().sum(dim=1)
     exact_signed = products.sum(dim=1)
     exact = exact_signed.abs()
-    ratio = torch.where(exact > 0, abs_sum / exact, torch.zeros_like(exact))
-    frob = abs_sum.norm().item() / exact_signed.norm().item() if exact_signed.norm() > 0 else 0.0
+    if not torch.isfinite(abs_sum).all() or not torch.isfinite(exact).all():
+        return math.inf, math.inf
+    ratio = torch.where(exact > 0, abs_sum / exact, torch.full_like(exact, math.inf))
+    den = exact_signed.norm().item()
+    num = abs_sum.norm().item()
+    frob = num / den if den > 0 and math.isfinite(den) and math.isfinite(num) else math.inf
     return ratio.max().item(), frob
 
 
@@ -192,9 +202,12 @@ def kappa_fullscale(a, b):
     k = a.shape[1]
     scale = float(k) * a.abs().max().item() * b.abs().max().item()
     exact = (a @ b)
-    ratio = torch.where(exact.abs() > 0, scale / exact.abs(), torch.zeros_like(exact))
+    if not math.isfinite(scale) or not torch.isfinite(exact).all():
+        return math.inf, math.inf
+    ratio = torch.where(exact.abs() > 0, scale / exact.abs(), torch.full_like(exact, math.inf))
     elements = float(exact.numel()) ** 0.5
-    frob = (elements * scale / exact.norm().item()) if exact.norm() > 0 else 0.0
+    den = exact.norm().item()
+    frob = elements * scale / den if den > 0 and math.isfinite(den) else math.inf
     return ratio.max().item(), frob
 
 
@@ -204,14 +217,14 @@ def kappa_fullscale(a, b):
 # helper computing both sides from one formula.
 ANALYTIC_EPS_PPM = {
     "FP16": (977, "rel"), "BF16": (7828, "rel"),
-    "FP8_E4M3": (128906, "rel"), "FP8_E5M2": (265625, "rel"),
+    "FP8_E4M3": (128907, "rel"), "FP8_E5M2": (265625, "rel"),
     # Corrected: the earlier 7,887 / 147,908 were understated against the exact
     # 7,889.52 / 147,959.18 and were therefore unsound. These are the values the
     # RTL's two-step ceiling actually produces at worst-case flatness.
     "INT8": (7892, "full"), "INT4": (147961, "full"),
-    "mantissa_truncated:10": (977, "rel"), "mantissa_truncated:8": (3910, "rel"),
-    "mantissa_truncated:6": (15686, "rel"), "mantissa_truncated:4": (63477, "rel"),
-    "mantissa_truncated:2": (265625, "rel"),
+    "mantissa_truncated:10": (1953, "rel"), "mantissa_truncated:8": (7798, "rel"),
+    "mantissa_truncated:6": (31006, "rel"), "mantissa_truncated:4": (121094, "rel"),
+    "mantissa_truncated:2": (437500, "rel"),
     "mitchell_logarithmic": (250000, "rel"),
 }
 
@@ -224,10 +237,137 @@ def budget_ppm(level):
 
 def level_for(ppm):
     """Smallest level whose budget covers `ppm`, or None if nothing does."""
+    if ppm is None or not math.isfinite(ppm) or not 0 <= ppm <= 1_000_000:
+        return None
     for level in range(1, 16):
         if budget_ppm(level) >= ppm:
             return level
     return None
+
+
+BOUND_SENTINEL_PPM = 0xfffff
+ROUND_EPS_PPM = (
+    1250000, 562500, 265625, 128907, 63477, 31495, 15687, 7828,
+    3911, 1955, 977, 489, 245, 123, 62, 31, 16, 8, 4, 2, 1, 1, 1, 1,
+)
+
+
+def round_eps_ppm(bits):
+    if not isinstance(bits, int) or not 0 <= bits <= 23:
+        return BOUND_SENTINEL_PPM
+    return ROUND_EPS_PPM[bits] if ROUND_EPS_PPM[bits] <= 1_000_000 else BOUND_SENTINEL_PPM
+
+
+def trunc_eps_ppm(bits):
+    if not isinstance(bits, int) or not 0 <= bits <= 23:
+        return BOUND_SENTINEL_PPM
+    denominator = 1 << (2 * bits)
+    numerator = 1_000_000 * ((2 << bits) - 1)
+    return (numerator + denominator - 1) // denominator
+
+
+def fullscale_eps_ppm(levels, flatness):
+    if levels not in (7, 127) or not math.isfinite(flatness) or not 0 <= flatness <= 2:
+        return math.inf
+    return 1_000_000 * (flatness / (2 * levels) + 1 / (4 * levels * levels))
+
+
+def q8_ceil(value, maximum):
+    if value is None or not math.isfinite(value) or value < 0:
+        return None
+    numerator, denominator = value.as_integer_ratio()
+    quantized = (numerator * 256 + denominator - 1) // denominator
+    return quantized if quantized <= maximum else None
+
+
+def quant_eps_ppm(levels, flat_q8):
+    if levels not in (7, 127) or not isinstance(flat_q8, int) or not 0 <= flat_q8 <= 1023:
+        return BOUND_SENTINEL_PPM
+    per_unit, constant = (3938, 16) if levels == 127 else (71429, 5103)
+    return (per_unit * flat_q8 + 255) // 256 + constant
+
+
+def bound_ppm(eps_ppm, kappa_q8):
+    if (not isinstance(eps_ppm, int) or not 0 <= eps_ppm <= 1_000_000
+            or not isinstance(kappa_q8, int) or not 256 <= kappa_q8 <= 65535):
+        return BOUND_SENTINEL_PPM
+    scaled = (eps_ppm * kappa_q8 + 255) // 256
+    return scaled if scaled <= 1_000_000 else BOUND_SENTINEL_PPM
+
+
+def report_json(report):
+    nonfinite = []
+
+    def clean(value, path):
+        if isinstance(value, float) and not math.isfinite(value):
+            nonfinite.append({"path": path, "status": "undefined" if math.isnan(value) else "infinite"})
+            return None
+        if isinstance(value, dict):
+            return {key: clean(item, path + "/" + str(key)) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [clean(item, path + "/" + str(index)) for index, item in enumerate(value)]
+        return value
+
+    result = clean(report, "")
+    result["serialization_status"] = "nonfinite_values_replaced_with_null" if nonfinite else "finite"
+    result["nonfinite_fields"] = nonfinite
+    return json.dumps(result, indent=2, sort_keys=True, allow_nan=False) + "\n"
+
+
+def candidate_premises(label, tile_set):
+    import torch
+    failures = []
+    formats = {"FP32": torch.float32, "FP16": torch.float16, "BF16": torch.bfloat16,
+               "FP8_E4M3": torch.float8_e4m3fn, "FP8_E5M2": torch.float8_e5m2}
+    for index, (_, a, b) in enumerate(tile_set):
+        for side, operand in (("A", a), ("B", b)):
+            prefix = "tile%d:%s:" % (index, side)
+            if not torch.isfinite(operand).all():
+                failures.append(prefix + "nonfinite_operand")
+                continue
+            if label in formats:
+                dtype = formats[label]
+                target_input = operand
+                if label.startswith("FP8"):
+                    scale = operand.abs().max().item()
+                    target_input = operand / scale if scale else operand
+                limits = torch.finfo(dtype)
+                nonzero = operand != 0
+                if not torch.all((~nonzero) | ((target_input.abs() >= limits.tiny)
+                                              & (target_input.abs() <= limits.max))):
+                    failures.append(prefix + "outside_finite_normal_conversion_domain")
+                converted = target_input.to(dtype).to(torch.float64)
+                if not torch.all(torch.isfinite(converted) & ((~nonzero) | (converted.abs() >= limits.tiny))):
+                    failures.append(prefix + "subnormal_underflow_or_overflow_conversion")
+            elif label.startswith("mantissa_truncated:"):
+                native = operand.to(torch.float32).to(torch.float64)
+                if not torch.equal(native, operand):
+                    failures.append(prefix + "fp32_input_rounding_not_modeled")
+                if not torch.all(torch.isfinite(native) & ((operand == 0)
+                                                          | (native.abs() >= torch.finfo(torch.float32).tiny))):
+                    failures.append(prefix + "outside_finite_normal_fp32_domain")
+            elif label in ("INT8", "INT4"):
+                levels = 127 if label == "INT8" else 7
+                maximum = operand.abs().max().item()
+                scale = maximum / levels
+                if maximum and (not math.isfinite(scale) or scale < torch.finfo(torch.float64).tiny):
+                    failures.append(prefix + "invalid_or_subnormal_quantization_scale")
+            elif label == "mitchell_logarithmic":
+                if not torch.all((operand == 0) | (operand.abs() >= torch.finfo(torch.float64).tiny)):
+                    failures.append(prefix + "outside_finite_normal_host_domain")
+            else:
+                failures.append(prefix + "unknown_arithmetic")
+        products = a.unsqueeze(2) * b.unsqueeze(0)
+        nonzero_products = (a.unsqueeze(2) != 0) & (b.unsqueeze(0) != 0)
+        if not torch.all(torch.isfinite(products) & ((~nonzero_products)
+                                                     | (products.abs() >= torch.finfo(torch.float64).tiny))):
+            failures.append("tile%d:host_product_underflow_or_overflow" % index)
+        if not torch.isfinite(a @ b).all():
+            failures.append("tile%d:nonfinite_float64_reference_proxy" % index)
+    if not tile_set:
+        failures.append("no_samples")
+    return {"satisfied": not failures, "failures": failures,
+            "qualification": "Sample finite-normal conversion domain (zeros allowed); subnormal, underflow and overflow cases are not covered. Truncation additionally requires FP32-representable inputs. Float64 scaling/products/accumulation are proxies; RTL FP32 accumulation is not modeled."}
 
 
 def validate_bounds(report, tile_set):
@@ -236,6 +376,8 @@ def validate_bounds(report, tile_set):
     A violation means the RTL bound is UNSOUND and must be widened; slack means
     it is conservative and how much budget tuning could reclaim.
     """
+    if not tile_set:
+        raise ValueError("bound validation requires at least one tile")
     rows = []
     observed = {}
     for row in report["format_narrowing"]:
@@ -253,7 +395,11 @@ def validate_bounds(report, tile_set):
         fb = b.abs().sum(dim=0).max().item() / (k * b.abs().max().item()) if b.abs().max() > 0 else 1.0
         return fa + fb
 
-    flat_worst = max(flatness(a, b) for _, a, b in tile_set)
+    flat_values = [flatness(a, b) for _, a, b in tile_set]
+    flat_worst = max(flat_values) if all(math.isfinite(f) for f in flat_values) else math.inf
+    flat_q8 = q8_ceil(flat_worst, 1023)
+    flat_valid = flat_q8 is not None and 0 < flat_q8 <= 512
+    flat_q8 = flat_q8 if flat_valid else 512
     rel_stats = [kappa_relative(a, b) for _, a, b in tile_set]
     full_stats = [kappa_fullscale(a, b) for _, a, b in tile_set]
     kappa_rel_element = max(s[0] for s in rel_stats)
@@ -266,53 +412,103 @@ def validate_bounds(report, tile_set):
         kappa = kappa_rel_frob if kind == "rel" else kappa_full_frob
         strict = kappa_rel_element if kind == "rel" else kappa_full_element
         # FULL kinds scale with measured flatness; REL kinds do not.
-        eps_used = eps_ppm * (flat_worst / 2.0) if kind == "full" else eps_ppm
-        bound_ppm = min(1_000_000.0, eps_used * kappa)
-        strict_ppm = min(1_000_000.0, eps_ppm * strict)
+        levels = 127 if label == "INT8" else 7
+        eps_used = fullscale_eps_ppm(levels, flat_worst) if kind == "full" else eps_ppm
+        rtl_eps = quant_eps_ppm(levels, flat_q8) if kind == "full" else eps_ppm
+        matched_ppm = eps_used * kappa
+        strict_ppm = eps_used * strict
         observed_ppm = observed[label] * 1e6
+        kappa_q8 = q8_ceil(kappa, 65535)
+        strict_q8 = q8_ceil(strict, 65535)
+        premises = candidate_premises(label, tile_set)
+        comparable = (premises["satisfied"] and math.isfinite(matched_ppm)
+                      and math.isfinite(observed_ppm) and observed_ppm >= 0)
+        empirical_holds = observed_ppm <= matched_ppm if comparable else None
+        rtl_matched = bound_ppm(rtl_eps, kappa_q8) if premises["satisfied"] else BOUND_SENTINEL_PPM
+        rtl_strict = bound_ppm(rtl_eps, strict_q8) if premises["satisfied"] else BOUND_SENTINEL_PPM
+        admissible = (comparable and matched_ppm <= 1_000_000
+                      and rtl_matched <= 1_000_000 and empirical_holds)
+        if not premises["satisfied"]:
+            status = "unqualified_arithmetic_premises"
+        elif not comparable:
+            status = "nonfinite_or_undefined_metric"
+        elif kappa_q8 is None:
+            status = "kappa_q8_unrepresentable"
+        elif rtl_matched > 1_000_000:
+            status = "above_maximum_budget"
+        elif not empirical_holds:
+            status = "sample_bound_violation"
+        else:
+            status = "sample_qualified"
         rows.append({
             "candidate": label, "bound_kind": kind, "eps_ppm": eps_ppm,
-            "eps_after_flatness_ppm": eps_used,
+            "eps_after_flatness_ppm": eps_used, "rtl_eps_ppm": rtl_eps,
+            "flatness_q8": flat_q8 if kind == "full" else None,
             "kappa_frobenius": kappa, "kappa_element_worst": strict,
-            "matched_bound_ppm": bound_ppm,
+            "kappa_frobenius_q8": kappa_q8, "kappa_element_worst_q8": strict_q8,
+            "matched_bound_ppm": matched_ppm,
             "element_worst_bound_ppm": strict_ppm,
+            "rtl_matched_bound_ppm": rtl_matched,
+            "rtl_element_worst_bound_ppm": rtl_strict,
             "observed_max_ppm": observed_ppm,
-            "holds": observed_ppm <= bound_ppm,
-            "slack_factor": (bound_ppm / observed_ppm) if observed_ppm > 0 else None,
-            "element_bound_vacuous": strict_ppm >= 1_000_000.0,
+            "holds": empirical_holds, "empirical_holds": empirical_holds,
+            "universal_proof": False,
+            "premises_satisfied": premises["satisfied"],
+            "premise_failures": premises["failures"],
+            "premise_qualification": premises["qualification"],
+            "analytic_admissible": admissible, "status": status,
+            "slack_factor": (matched_ppm / observed_ppm) if comparable and observed_ppm > 0 else None,
+            "element_bound_vacuous": not math.isfinite(strict_ppm) or strict_ppm > 1_000_000.0,
             # The tuning output: the level a caller must authorise under the
             # analytic bound, versus the level the observed error would need if
             # the bound were tight. The gap is what a tighter derivation buys.
-            "level_needed_analytic": level_for(bound_ppm),
+            "level_needed_analytic": level_for(rtl_matched) if admissible else None,
+            "level_needed_analytic_raw": level_for(matched_ppm) if comparable else None,
             "level_needed_observed": level_for(observed_ppm),
         })
     return {
-        "flatness_worst": flat_worst,
+        "schema_version": 2,
+        "flatness_worst": flat_worst, "flatness_q8": flat_q8,
+        "flatness_q8_status": "upward_quantized" if flat_valid else "fallback_to_worst_case",
+        "bound_sentinel_ppm": BOUND_SENTINEL_PPM, "maximum_budget_ppm": 1_000_000,
+        "universal_proof": False,
         "kappa_relative_element_worst": kappa_rel_element,
         "kappa_fullscale_element_worst": kappa_full_element,
         "kappa_relative_frobenius": kappa_rel_frob,
         "kappa_fullscale_frobenius": kappa_full_frob,
         "entries": rows,
-        "unsound": [r["candidate"] for r in rows if not r["holds"]],
+        "unsound": [r["candidate"] for r in rows if r["empirical_holds"] is False],
+        "unqualified": [r["candidate"] for r in rows if r["empirical_holds"] is None],
         "vacuous_at_element_granularity": [r["candidate"] for r in rows
                                            if r["element_bound_vacuous"]],
-        "note": ("Bound and observation must share a granularity. The per-element worst-case kappa "
-                 "is strictly correct but saturates to 100% on these tiles because single output "
-                 "elements nearly cancel, which makes that comparison vacuous rather than passing. "
-                 "The Frobenius-matched kappa is the figure compared against the Frobenius error. "
-                 "A violation means the RTL bound is unsound; slack is specific to these tiles."),
+        "field_semantics": {
+            "matched_bound_ppm": "Unclipped mathematical-formula bound evaluated with float64-reference proxy statistics; FULL first and constant terms are separate.",
+            "rtl_matched_bound_ppm": "Integer-ceiled eps times upward-Q8 Frobenius kappa, or 1048575 for invalid/unrepresentable/over-budget bounds. This is a Frobenius-matched helper result, not a per-element RTL guarantee.",
+            "rtl_element_worst_bound_ppm": "Integer-ceiled bound using upward-Q8 worst-element kappa; cancellation or unrepresentable metadata fails closed to 1048575.",
+            "level_needed_analytic": "Smallest budget level covering the sample-qualified Q8 matched bound; null for failed premises, violations, invalid metadata or bounds above 100%.",
+            "holds": "Compatibility alias for empirical_holds: sample comparison only; null when unqualified. Never a universal arithmetic proof.",
+            "unsound": "Compatibility list of sample bound violations under checked premises, not a proof that RTL arithmetic is unsound.",
+        },
+        "note": ("Bound and observation must share a granularity. Mathematical bounds are not clipped "
+                 "to 100%; values above the maximum budget are inadmissible. Zero-reference cancellation "
+                 "has infinite or undefined kappa, never zero. Global-max full scale and max row/column "
+                 "sums use a consistent conservative normalization. Sample empirical holds and float64 "
+                 "proxy statistics do not prove universal arithmetic safety or RTL FP32 accumulation."),
     }
 
 
 def evaluate(tile_set):
     """Exact float64 reference; every candidate accumulates exactly."""
     import torch
+    if not tile_set:
+        raise ValueError("accuracy evaluation requires at least one tile")
     formats = ("FP32", "BF16", "FP16", "FP8_E4M3", "FP8_E5M2", "INT8", "INT4")
     k_bytes = {"FP32": 64, "BF16": 32, "FP16": 32, "FP8_E4M3": 16, "FP8_E5M2": 16,
                "INT8": 16, "INT4": 8}
     report = {"tiles": len(tile_set), "tile_shape": [TILE_M, TILE_N, TILE_K],
-              "reference": "float64 exact products and accumulation",
-              "accumulation": "exact in every candidate",
+              "reference": "float64-reference proxy, not a mathematical exact result",
+              "accumulation": "float64 in every candidate; RTL FP32 accumulation not modeled",
+              "universal_proof": False,
               "format_narrowing": [], "approximate_multiplier": []}
     refs = [(a @ b) for _, a, b in tile_set]
 
@@ -354,6 +550,9 @@ def evaluate(tile_set):
         "rel_error_p95": errs[min(len(errs) - 1, int(0.95 * len(errs)))],
         "rel_error_max": errs[-1],
     })
+    for row in report["format_narrowing"] + report["approximate_multiplier"]:
+        row["status"] = ("finite_sample_errors" if math.isfinite(row["rel_error_max"])
+                         else "nonfinite_or_undefined_error")
     return report
 
 
@@ -381,7 +580,8 @@ def emit_bank(report, entries, budget_percent, lanes):
         if groups < 1:
             continue
         err = row["rel_error_p95"] * 100.0
-        if err > budget_percent:
+        if (not math.isfinite(err) or err < 0 or err > budget_percent
+                or not math.isfinite(row.get("rel_error_max", row["rel_error_p95"]))):
             continue
         rows.append({
             "precision_class": fmt, "precision_code": PRECISION_CLASS[fmt],
@@ -398,6 +598,7 @@ def emit_bank(report, entries, budget_percent, lanes):
     # failure the licensing/verification rules warn about.
     return {
         "bank_size_requested": entries, "bank_size_admitted": len(bank),
+        "evidence": "empirical_p95_only_no_analytic_admission", "universal_proof": False,
         "lanes_assumed": lanes, "error_budget_percent": budget_percent,
         "entries": bank,
         "unpadded": "A bank shorter than requested is reported short; entries are never invented to fill it",
@@ -450,16 +651,18 @@ def main(argv=None):
         "Operands are real activations and weights from one pinned model and one prompt, not a workload distribution.",
         "Format narrowing is the only lever that changes k_bytes and therefore concurrency; the approximate multipliers buy area and depth at unchanged concurrency.",
         "Per-tile scaling is applied for FP8/INT8/INT4, which is what a real path does; without it those formats would measure far worse.",
-        "Accumulation is exact everywhere, so these figures do not cover accumulator-width effects.",
+        "Float64 products, scaling and accumulation are host proxies, not mathematical exact results; RTL FP32 accumulation is not modeled.",
+        "Finite normal conversion premises are checked on samples only; subnormal conversion/underflow/overflow is not covered by relative epsilon formulas.",
+        "Empirical holds on these tiles is not a universal arithmetic proof; mathematical bounds above 100% remain unclipped and cannot fit any budget.",
     ]
     report["bound_validation"] = validate_bounds(report, tile_set)
     if args.emit_bank is not None:
         report["va_turbo_bank"] = emit_bank(report, args.emit_bank,
                                             args.error_budget_percent, args.bank_lanes)
-    text = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    text = report_json(report)
     if args.out:
         args.out.write_text(text, encoding="utf-8")
-    print("S0 ACCURACY STUDY  tiles=%d  shape=%dx%dx%d  reference=float64 exact"
+    print("S0 ACCURACY STUDY  tiles=%d  shape=%dx%dx%d  reference=float64-reference proxy"
           % (report["tiles"], TILE_M, TILE_N, TILE_K))
     print("\nLever 1 - format narrowing (changes k_bytes, buys concurrency):")
     print("  %-10s %-8s %-7s %-7s %-11s %-11s %s"
@@ -487,13 +690,13 @@ def main(argv=None):
         for line in bank["excluded_by_measurement"]:
             print("  excluded: " + line)
     bounds = report["bound_validation"]
-    print("\nRTL analytic bound check (bound = eps x kappa):")
-    print("  kappa per-element worst: relative %.1f, full-scale %.1f  -> saturates the bound"
+    print("\nSample analytic bound comparison (not a universal proof; RTL FP32 accumulation not modeled):")
+    print("  kappa per-element worst: relative %.1f, full-scale %.1f  -> bounds are not clipped"
           % (bounds["kappa_relative_element_worst"], bounds["kappa_fullscale_element_worst"]))
     print("  kappa Frobenius-matched: relative %.3f, full-scale %.3f  -> comparable to the metric"
           % (bounds["kappa_relative_frobenius"], bounds["kappa_fullscale_frobenius"]))
-    print("  operand flatness fa+fb: %.3f of a worst case 2.0  -> tightens FULL kinds %.2fx"
-          % (bounds["flatness_worst"], 2.0 / bounds["flatness_worst"]))
+    print("  operand flatness fa+fb: %.3f of a worst case 2.0; upward Q8=%d (FULL first term only)"
+          % (bounds["flatness_worst"], bounds["flatness_q8"]))
     print("  %-24s %-6s %-10s %-12s %-12s %-6s %-7s %s"
           % ("candidate", "kind", "eps ppm", "bound ppm", "observed", "slack",
              "lvl req", "lvl if tight"))
@@ -504,11 +707,15 @@ def main(argv=None):
                  ("%.1fx" % row["slack_factor"]) if row["slack_factor"] else "-",
                  str(row["level_needed_analytic"] or "none"),
                  str(row["level_needed_observed"] or "none"),
-                 "" if row["holds"] else "   BOUND UNSOUND"))
+                 "   " + row["status"]))
+        print("    Q8/RTL helper matched=%d element=%d ppm; empirical_holds=%s"
+              % (row["rtl_matched_bound_ppm"], row["rtl_element_worst_bound_ppm"], row["empirical_holds"]))
     if bounds["unsound"]:
-        print("  UNSOUND (widen the RTL bound): " + ", ".join(bounds["unsound"]))
+        print("  SAMPLE BOUND VIOLATIONS (investigate model and premises): " + ", ".join(bounds["unsound"]))
+    if bounds["unqualified"]:
+        print("  UNQUALIFIED (no empirical bound conclusion): " + ", ".join(bounds["unqualified"]))
     if bounds["vacuous_at_element_granularity"]:
-        print("  Vacuous at per-element granularity (bound saturates to 100%): "
+        print("  Inadmissible at per-element granularity (nonfinite or above 100%): "
               + str(len(bounds["vacuous_at_element_granularity"])) + " of "
               + str(len(bounds["entries"])) + " candidates")
     print("\nTile Frobenius error is a proxy, not a model-quality result.")

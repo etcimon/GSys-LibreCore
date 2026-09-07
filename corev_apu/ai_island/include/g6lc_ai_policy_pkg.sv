@@ -128,6 +128,7 @@ package g6lc_ai_policy_pkg;
     logic lossless_proven;
     logic reuse_a_valid, reuse_b_valid;
     logic range_safe, scale_valid, accuracy_valid;
+    logic relative_domain_valid;
     // The caller's own (measured or proven) bound, expressed as an index on the
     // same geometric ladder as `level` and rounded UP.  Kept as a ladder index
     // rather than raw ppm so it compares directly against the authorised level.
@@ -226,11 +227,11 @@ package g6lc_ai_policy_pkg;
     case (levels)
       8'd127:  begin per_unit = 32'd3938;  constant_term = 32'd16;   end  // ceil(1e6/254), ceil(1e6/64516)
       8'd7:    begin per_unit = 32'd71429; constant_term = 32'd5103; end  // ceil(1e6/14),  ceil(1e6/196)
-      default: return 20'd1000000;
+      default: return 20'hfffff;
     endcase
     scaled = ((per_unit * 32'(flat_q8)) + 32'd255) >> 8;
     scaled = scaled + constant_term;
-    return (scaled > 32'd1000000) ? 20'd1000000 : 20'(scaled);
+    return (scaled > 32'd1000000) ? 20'hfffff : 20'(scaled);
   endfunction
 
   // Conversion target for recipe 18, whose target is caller-selected because a
@@ -250,23 +251,56 @@ package g6lc_ai_policy_pkg;
   // integer shift, and a silently truncated bound would be unsound.
   function automatic logic [19:0] va_turbo_round_eps_ppm(input logic [4:0] bits);
     case (bits)
-      5'd0:    return 20'd1000000;  // 1.25 saturated to 100%
+      5'd0:    return 20'hfffff;  // 1.25 saturated to 100%
       5'd1:    return 20'd562500;
       5'd2:    return 20'd265625;
-      5'd3:    return 20'd128906;
+      5'd3:    return 20'd128907;
       5'd4:    return 20'd63477;
-      5'd5:    return 20'd31494;
-      5'd6:    return 20'd15686;
+      5'd5:    return 20'd31495;
+      5'd6:    return 20'd15687;
       5'd7:    return 20'd7828;
-      5'd8:    return 20'd3910;
-      5'd9:    return 20'd1954;
+      5'd8:    return 20'd3911;
+      5'd9:    return 20'd1955;
       5'd10:   return 20'd977;
-      5'd11:   return 20'd488;
-      5'd12:   return 20'd244;
-      5'd13:   return 20'd122;
-      5'd14:   return 20'd61;
+      5'd11:   return 20'd489;
+      5'd12:   return 20'd245;
+      5'd13:   return 20'd123;
+      5'd14:   return 20'd62;
       5'd15:   return 20'd31;
-      default: return 20'd0;        // >= 16 bits rounds below 1 ppm
+      5'd16:   return 20'd16;
+      5'd17:   return 20'd8;
+      5'd18:   return 20'd4;
+      5'd19:   return 20'd2;
+      5'd20, 5'd21, 5'd22, 5'd23: return 20'd1;
+      default: return 20'hfffff;        // >= 16 bits rounds below 1 ppm
+    endcase
+  endfunction
+
+  function automatic logic [19:0] va_turbo_trunc_eps_ppm(input logic [4:0] bits);
+    case (bits)
+      5'd0:    return 20'd1000000;
+      5'd1:    return 20'd750000;
+      5'd2:    return 20'd437500;
+      5'd3:    return 20'd234375;
+      5'd4:    return 20'd121094;
+      5'd5:    return 20'd61524;
+      5'd6:    return 20'd31006;
+      5'd7:    return 20'd15564;
+      5'd8:    return 20'd7798;
+      5'd9:    return 20'd3903;
+      5'd10:   return 20'd1953;
+      5'd11:   return 20'd977;
+      5'd12:   return 20'd489;
+      5'd13:   return 20'd245;
+      5'd14:   return 20'd123;
+      5'd15:   return 20'd62;
+      5'd16:   return 20'd31;
+      5'd17:   return 20'd16;
+      5'd18:   return 20'd8;
+      5'd19:   return 20'd4;
+      5'd20:   return 20'd2;
+      5'd21, 5'd22, 5'd23: return 20'd1;
+      default: return 20'hfffff;
     endcase
   endfunction
 
@@ -319,10 +353,8 @@ package g6lc_ai_policy_pkg;
       input logic [9:0] flat_q8
   );
     va_turbo_arith_t a;
-    logic [4:0] native_bits, effective_bits;
     a = '0;
     a.kind = VA_ARITH_EXACT;
-    native_bits = va_turbo_mantissa_bits(numfmt);
     case (id)
       // Bank A - representation.
       5'd0, 5'd1, 5'd2, 5'd3: a.kind = VA_ARITH_EXACT;
@@ -356,25 +388,23 @@ package g6lc_ai_policy_pkg;
                    a.eps_ppm = va_turbo_quant_eps_ppm(8'd127, flat_q8);
                    a.narrows_storage = 1'b1; end
       5'd21: begin a.kind = VA_ARITH_REL; a.needs_param = 1'b1;
-                   a.eps_ppm = va_turbo_round_eps_ppm({1'b0, approx_param}); end
+                   a.eps_ppm = va_turbo_trunc_eps_ppm({1'b0, approx_param}); end
       5'd22, 5'd23: a.kind = VA_ARITH_EXACT;
       // Bank D - approximate arithmetic.
       5'd24: a.kind = VA_ARITH_EXACT;
       5'd25: begin a.kind = VA_ARITH_REL; a.needs_param = 1'b1;
-                   a.eps_ppm = va_turbo_round_eps_ppm({1'b0, approx_param}); end
+                   a.eps_ppm = va_turbo_trunc_eps_ppm({1'b0, approx_param}); end
       5'd26: begin
         a.kind = VA_ARITH_REL;
         a.needs_param = 1'b1;
-        effective_bits = (native_bits > {1'b0, approx_param}) ?
-            5'(native_bits - {1'b0, approx_param}) : 5'd0;
-        a.eps_ppm = va_turbo_round_eps_ppm(effective_bits);
+        a.eps_ppm = 20'hfffff;
       end
       5'd27, 5'd28: begin a.kind = VA_ARITH_REL; a.eps_ppm = 20'd250000; end
       5'd29: begin a.kind = VA_ARITH_FULL; a.quant_levels = 8'd7;
                    a.eps_ppm = va_turbo_quant_eps_ppm(8'd7, flat_q8);
                    a.narrows_storage = 1'b1; end
       5'd30, 5'd31: begin a.kind = VA_ARITH_REL; a.needs_param = 1'b1;
-                          a.eps_ppm = va_turbo_round_eps_ppm({1'b0, approx_param}); end
+                          a.eps_ppm = va_turbo_trunc_eps_ppm({1'b0, approx_param}); end
       default: a.kind = VA_ARITH_NONE;
     endcase
     return a;
@@ -389,10 +419,11 @@ package g6lc_ai_policy_pkg;
       input va_turbo_arith_t a, input logic [15:0] kappa_q8
   );
     logic [35:0] scaled;
+    if (a.eps_ppm > 20'd1000000) return 20'hfffff;
     if (a.kind == VA_ARITH_EXACT) return 20'd0;
-    if (a.kind == VA_ARITH_NONE) return 20'd1000000;
-    scaled = (36'(a.eps_ppm) * 36'(kappa_q8)) >> 8;
-    return (scaled > 36'd1000000) ? 20'd1000000 : 20'(scaled);
+    if (a.kind == VA_ARITH_NONE || kappa_q8 < 16'd256) return 20'hfffff;
+    scaled = (36'(a.eps_ppm) * 36'(kappa_q8) + 36'd255) >> 8;
+    return (scaled > 36'd1000000) ? 20'hfffff : 20'(scaled);
   endfunction
 
   // Runtime level is an error budget on a GEOMETRIC ladder: 100 ppm, doubling
@@ -478,6 +509,8 @@ package g6lc_ai_policy_pkg;
     // bound is only as good as its sample.
     if (arith.kind != VA_ARITH_EXACT) begin
       if (!r.accuracy_valid || !r.kappa_valid || r.kappa_q8 < 16'd256 ||
+          !r.range_safe || (arith.kind == VA_ARITH_REL && !r.relative_domain_valid) ||
+          p.bound_ppm > 20'd1000000 ||
           (arith.needs_param && !r.approx_param_valid) ||
           r.error_bound_q4 > {4'd0, r.level})
         return p;

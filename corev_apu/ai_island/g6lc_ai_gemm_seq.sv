@@ -48,6 +48,8 @@ module g6lc_ai_gemm_seq #(
     // INCR at the 64 B stripe so GEMM and core L2 fills share one map.
     parameter int unsigned NrChannels = 1,
     parameter int unsigned ChanShift  = 6,
+    parameter bit          ReuseBEn   = 1'b0,
+    parameter int unsigned MaxElementBytes = 4,
     parameter type         axi_req_t  = logic,
     parameter type         axi_resp_t = logic
 ) (
@@ -72,6 +74,10 @@ module g6lc_ai_gemm_seq #(
     output logic [31:0] pmu_r_beats_o,
     output logic [31:0] pmu_w_beats_o,
     output logic [31:0] pmu_cycles_o,
+    input  logic        reuse_b_i,
+    input  logic [31:0] reuse_b_epoch_i,
+    input  logic        reuse_b_invalidate_i,
+    output logic        pmu_reuse_b_hit_o,
     output axi_req_t    axi_req_o,
     input  axi_resp_t   axi_resp_i
 );
@@ -80,6 +86,9 @@ module g6lc_ai_gemm_seq #(
   localparam int unsigned KPerBank     = (MaxDim + PeLanes - 1) / PeLanes;
   localparam int unsigned BankWords    = MaxDim * KPerBank;
   localparam int unsigned BankAddrW    = (BankWords > 1) ? $clog2(BankWords) : 1;
+  localparam int unsigned OperandKPerBank = (MaxElementBytes * MaxDim + PeLanes - 1) / PeLanes;
+  localparam int unsigned OperandBankWords = MaxDim * OperandKPerBank;
+  localparam int unsigned OperandBankAddrW = (OperandBankWords > 1) ? $clog2(OperandBankWords) : 1;
   localparam int unsigned LaneW        = (PeLanes > 1) ? $clog2(PeLanes) : 1;
   // AXI beat geometry (I3: wider DataWidth raises BytesPerBeat without RTL rewrite)
   localparam int unsigned BytesPerBeat  = DataWidth / 8;
@@ -103,6 +112,8 @@ module g6lc_ai_gemm_seq #(
   localparam logic [IdWidth-1:0] ArIdBase = IdWidth'(2);
   // pragma translate_off
   initial begin
+    assert (MaxElementBytes inside {1, 2, 4})
+      else $error("g6lc_ai_gemm_seq: MaxElementBytes must be 1, 2 or 4");
     assert (MaxAROut >= 1 && MaxAROut <= 8)
       else $error("g6lc_ai_gemm_seq: MaxAROut=%0d not in [1,8] (I3)", MaxAROut);
     assert (g6lc_ai_island_cfg_pkg::dram_channels_ok(NrChannels))
@@ -203,17 +214,17 @@ module g6lc_ai_gemm_seq #(
 
   // ---- Banked A/B tile ports ----
   logic                 a_r_req  [PeLanes];
-  logic [BankAddrW-1:0] a_r_addr [PeLanes];
+  logic [OperandBankAddrW-1:0] a_r_addr [PeLanes];
   logic [7:0]           a_r_data [PeLanes];
   logic                 a_w_req  [PeLanes];
-  logic [BankAddrW-1:0] a_w_addr [PeLanes];
+  logic [OperandBankAddrW-1:0] a_w_addr [PeLanes];
   logic [7:0]           a_w_data [PeLanes];
 
   logic                 b_r_req  [PeLanes];
-  logic [BankAddrW-1:0] b_r_addr [PeLanes];
+  logic [OperandBankAddrW-1:0] b_r_addr [PeLanes];
   logic [7:0]           b_r_data [PeLanes];
   logic                 b_w_req  [PeLanes];
-  logic [BankAddrW-1:0] b_w_addr [PeLanes];
+  logic [OperandBankAddrW-1:0] b_w_addr [PeLanes];
   logic [7:0]           b_w_data [PeLanes];
   // AI-X9: the I3 same-bank multi-write ports (w2..w8) are gone. They existed
   // only because a row-major B burst ran along j and therefore landed a whole
@@ -239,7 +250,7 @@ module g6lc_ai_gemm_seq #(
 
   for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_a_banks
     g6lc_ai_tile_sram #(
-        .NumWords (BankWords),
+        .NumWords (OperandBankWords),
         .DataWidth(8),
         .NumPorts (2),
         .ImplKey  ("g6lc_ai_tile_a")
@@ -259,7 +270,7 @@ module g6lc_ai_gemm_seq #(
 
   for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_b_banks
     g6lc_ai_tile_sram #(
-        .NumWords (BankWords),
+        .NumWords (OperandBankWords),
         .DataWidth(8),
         .NumPorts (2),  // AI-X9: 1R1W, same as A (was 8 for the oct drain)
         .ImplKey  ("g6lc_ai_tile_b")
@@ -487,6 +498,82 @@ module g6lc_ai_gemm_seq #(
       ? (sum_first_q ? sum_q : mac_fp32_add[31:0])
       : ((sum_first_q ? '0 : acc_q) + sum_q);
 
+  logic reuse_b_skip_q, reuse_b_safe;
+  if (ReuseBEn) begin : gen_reuse_b
+    logic valid_q, cacheable_q, invalidated_q;
+    logic [AddrWidth-1:0] ptr_q;
+    logic [8:0] n_saved_q, k_saved_q;
+    logic [15:0] ldb_saved_q;
+    logic [2:0] fmt_q;
+    logic [31:0] epoch_q, job_epoch_q;
+    logic [31:0] b_span, c_span;
+    logic [AddrWidth:0] b_end, c_end;
+    logic geometry_ok, disjoint, response_error;
+
+    assign b_span = 32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes;
+    assign c_span = (32'(m_q[8:0]) * 32'(n_q[8:0])) << 2;
+    assign b_end = {1'b0, pb_q} + (AddrWidth+1)'(b_span);
+    assign c_end = {1'b0, pc_q} + (AddrWidth+1)'(c_span);
+    assign geometry_ok = m_q > 0 && m_q <= 256 && n_q > 0 && n_q <= 256 &&
+                         k_q > 0 && k_q <= 256 && ldb_q >= k_q[15:0] &&
+                         numfmt_q inside {3'd0, 3'd1, 3'd3, 3'd4, 3'd5, 3'd6, 3'd7};
+    assign disjoint = !b_end[AddrWidth] && !c_end[AddrWidth] &&
+                      ({1'b0, pc_q} >= b_end || {1'b0, pb_q} >= c_end);
+    assign reuse_b_safe = cacheable_q;
+    assign response_error = (axi_resp_i.r_valid && axi_req_o.r_ready && axi_resp_i.r.resp[1]) ||
+                            (axi_resp_i.b_valid && axi_req_o.b_ready && axi_resp_i.b.resp[1]);
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        valid_q <= 1'b0;
+        cacheable_q <= 1'b0;
+        invalidated_q <= 1'b0;
+        ptr_q <= '0;
+        n_saved_q <= '0;
+        k_saved_q <= '0;
+        ldb_saved_q <= '0;
+        fmt_q <= '0;
+        epoch_q <= '0;
+        job_epoch_q <= '0;
+        reuse_b_skip_q <= 1'b0;
+        pmu_reuse_b_hit_o <= 1'b0;
+      end else begin
+        if (state_q == ST_IDLE && start_i) begin
+          job_epoch_q <= reuse_b_epoch_i;
+          reuse_b_skip_q <= reuse_b_i && valid_q && ptr_q == ptr_b_i &&
+                            {23'd0, n_saved_q} == n_i && {23'd0, k_saved_q} == k_i &&
+                            ldb_saved_q == ldb_i && fmt_q == numfmt_i && epoch_q == reuse_b_epoch_i;
+          valid_q <= 1'b0;
+          cacheable_q <= 1'b0;
+          invalidated_q <= 1'b0;
+          pmu_reuse_b_hit_o <= 1'b0;
+        end
+        if (state_q == ST_CHK)
+          cacheable_q <= geometry_ok && disjoint;
+        if (state_q == ST_LA && state_d == ST_MAC)
+          pmu_reuse_b_hit_o <= 1'b1;
+        if (state_q == ST_DONE) begin
+          valid_q <= cacheable_q && !invalidated_q && !err_q;
+          ptr_q <= pb_q;
+          n_saved_q <= n_q[8:0];
+          k_saved_q <= k_q[8:0];
+          ldb_saved_q <= ldb_q;
+          fmt_q <= numfmt_q;
+          epoch_q <= job_epoch_q;
+        end
+        if (reuse_b_invalidate_i || response_error) begin
+          valid_q <= 1'b0;
+          reuse_b_skip_q <= 1'b0;
+          invalidated_q <= 1'b1;
+        end
+      end
+    end
+  end else begin : gen_no_reuse_b
+    assign reuse_b_skip_q = 1'b0;
+    assign reuse_b_safe = 1'b0;
+    assign pmu_reuse_b_hit_o = 1'b0;
+  end
+
   // I3 PMU accumulators (active while not IDLE/DONE)
   logic [31:0] pmu_r_q, pmu_w_q, pmu_cy_q;
 
@@ -638,16 +725,16 @@ module g6lc_ai_gemm_seq #(
     return LaneW'(t % PeLanes);
   endfunction
 
-  function automatic logic [BankAddrW-1:0] a_bank_addr(
+  function automatic logic [OperandBankAddrW-1:0] a_bank_addr(
       input logic [31:0] i, t
   );
-    return BankAddrW'(int'(i) * KPerBank + int'(t / PeLanes));
+    return OperandBankAddrW'(int'(i) * OperandKPerBank + int'(t / PeLanes));
   endfunction
 
-  function automatic logic [BankAddrW-1:0] b_bank_addr(
+  function automatic logic [OperandBankAddrW-1:0] b_bank_addr(
       input logic [31:0] t, j
   );
-    return BankAddrW'(int'(j) * KPerBank + int'(t / PeLanes));
+    return OperandBankAddrW'(int'(j) * OperandKPerBank + int'(t / PeLanes));
   endfunction
 
   // C bank map: bank = j % PeLanes; local = i * KPerBank + j / PeLanes
@@ -790,6 +877,7 @@ module g6lc_ai_gemm_seq #(
         // AI-X9: B is k-major, so ldb must hold a row of k elements (was n).
         if (m_q == 0 || n_q == 0 || k_q == 0
             || m_q > MaxDim || n_q > MaxDim || k_q > MaxDim
+            || ai_fmt_bytes() > MaxElementBytes
             || lda_q < k_q[15:0] || ldb_q < k_q[15:0]) begin
           err_d   = 1'b1;
           state_d = ST_DONE;
@@ -925,6 +1013,16 @@ module g6lc_ai_gemm_seq #(
               state_d = ST_LB;
           end else if (state_d == ST_LB)
             ar_inflight_d = '0;
+          if (state_d == ST_LB && ReuseBEn && reuse_b_skip_q && reuse_b_safe &&
+              !reuse_b_invalidate_i && !err_q &&
+              !(axi_resp_i.r_valid && axi_req_o.r_ready && axi_resp_i.r.resp[1])) begin
+            state_d = ST_MAC;
+            acc_d = '0;
+            ar_inflight_d = '0;
+            ar_i_en = 1'b1; ar_i_d = '0;
+            ar_j_en = 1'b1; ar_j_d = '0;
+            ar_t_en = 1'b1; ar_t_d = '0;
+          end
         end
       end
 
@@ -1696,7 +1794,7 @@ module g6lc_ai_gemm_seq #(
         pmu_cy_q <= '0;
       end
 
-      if (state_q == ST_LA && state_d == ST_LB) begin
+      if (state_q == ST_LA && (state_d == ST_LB || state_d == ST_MAC)) begin
         i_q <= '0;
         j_q <= '0;
         t_q <= '0;
@@ -1766,6 +1864,8 @@ module g6lc_ai_gemm_seq #(
       // Store cursor (trail during MAC or dedicated ST_STC)
       if (stc_i_en) stc_i_q <= stc_i_d;
       if (stc_j_en) stc_j_q <= stc_j_d;
+      if (SplitArId && axi_resp_i.r_valid && axi_req_o.r_ready && axi_resp_i.r.resp[1])
+        err_q <= 1'b1;
     end
   end
 

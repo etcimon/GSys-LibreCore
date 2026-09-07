@@ -164,15 +164,23 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   measures 6.662 MAC/cyc (+89.2%) while four 8-lane clusters project 14.083
   (+300.0%), a 2.11x replication advantage. Operand bandwidth 5.45 B/cycle for
   four clusters against ~8 B/cycle per 64-bit port fits; eight clusters would not.
-- [ ] CLUSTER LINEARITY IS UNTESTED, and the 4.00x-for-4x figure depends on it.
-  Related measurement only: one engine given 1 -> 8 memory channels changes by
-  -3.8% aggregate with -16.7%..+3.2% per-format scatter, i.e. inside the noise
-  floor, so a single engine is not bandwidth-starved at 1.36 B/cycle against ~8
-  B/cycle of port. That is consistent with replication headroom but does NOT
-  measure contention between engines sharing one port. The decisive experiment is
-  N gemm_seq instances running concurrently against one dram_backend through an
-  N+1-port axi_mux (shared A/B, per-engine C to keep the preload small); no
-  testbench builds that today. Do not quote 4x cluster throughput until it does.
+- [x] CLUSTER LINEARITY IS NOW TESTED AND FALSE ON A SHARED PORT. The decisive
+  experiment is built: `tb_g6lc_ai_gemm_concurrent.sv` runs N gemm_seq instances
+  through the real N+1-port axi_mux into one dram_backend. N={1,2,4}, nch={1,4},
+  seven formats, 8x8x16, serial versus concurrent with golden C=k re-checked
+  after BOTH phases; all PASS. N=1 is exactly 1.000x, checking the harness itself.
+  Four-engine speedup is 1.48x (INT4) to 2.43x (FP32) at one channel, i.e. 37-61%
+  efficiency, not 4.00x. Per-engine PMU inflates roughly 1.8x and engines retire
+  in a staggered cascade: one mux/backend port serialises the transactions.
+  Channel count matters ~1%, so the scarcity is transactions, not bandwidth.
+  Shared-B mode is bit-identical to private weights in all 22 comparisons: no
+  coalescing exists, so weight reuse needs a read multicast or tile cache.
+  This DISCOUNTS the old 4.00x-for-4x projection by roughly half at four-way
+  sharing, and inverts the idle-lane story: narrow formats gain LEAST from
+  engine replication (INT4 1.48x) yet have the MOST idle lanes. For narrow
+  formats the payoff therefore points to intra-engine lane groups sharing one
+  frontend, not more engines; that payoff is still unmeasured. Class-0 SRAM sim
+  cycles only: a contention answer, not MAC/s, silicon, or real DRAM queueing.
 - [ ] CLUSTERS ARE NOT IMPLEMENTED: Clusters/ClustersEnabled exist only in
   island_cfg_legal and the CAP window; island_top instantiates one gemm_seq. The
   +300% figure is 4x a measured single cluster, not a measured four-cluster
@@ -307,6 +315,48 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   100%, level 0 still off. `error_bound_q4` is a ladder index, rounded up. The
   suite now asserts the ladder is strictly increasing and that every declared eps
   is expressible by some level.
+- [x] ARITHMETIC GATES CORRECTED AGAIN, and the previous "12/12 holds" reading is
+  withdrawn. A sample cannot prove a bound. Found and fixed: RNE table entries that
+  rounded DOWN (E4M3 needs 128,907 not 128,906, and p=16..23 were zeroed), a final
+  eps*kappa that truncated, truncation recipes carrying a round-to-nearest bound
+  (toward-zero truncation is 2u-u^2 with u=2^-p, roughly 2x larger), recipe 26
+  claiming a bound with no derivation, and saturation at 100% turning an
+  out-of-budget candidate into an admissible one. `20'hfffff` is now an
+  invalid/overflow sentinel above the maximum budget that a waiver may NOT
+  override; REL additionally requires `relative_domain_valid`, because the normal
+  relative-error formula does not cover subnormal/underflow/overflow conversion.
+  Evidence: remote FAILED first at E4M3 (`ai-policy-subcode-20260907T033251Z-f86e57c24c7e`),
+  then PASSED (`...T034054Z-8edb3d5bfd7c`); host adds 25 tests.
+- [x] THE RECORDED 310,931 ppm INT8 BOUND WAS NOT RTL-MATCHED. The host scaled the
+  whole epsilon by flatness, including the constant 1/(4L^2) term. Corrected: raw
+  311,550 ppm, upward Q8 metadata giving 312,489 ppm at level 13. INT4 and 2-bit
+  truncation now exceed 100% and are REFUSED rather than clipped into range. FP16
+  and both FP8 formats came back `unqualified_arithmetic_premises` on these tiles,
+  which is a real finding, not a pass: those conversions leave the normal domain
+  the bound assumes. My earlier claim that usable INT8 and worst-case guarantees
+  are universally incompatible was too strong; it holds for this sample only.
+- [x] FIRST EXACT THROUGHPUT CONSUMER LANDED AND MEASURED: recipe 16 resident-B.
+  `g6lc_ai_gemm_seq.ReuseBEn` (default off) skips ST_LB when the retained key
+  (ptr_b, n, k, ldb, numfmt, 32-bit epoch) matches; M is deliberately NOT part of
+  the B key. Residency publishes only after a successful job and is refused on
+  error, invalidation, wrapped range or C/B overlap. Measured eng=1/nch=1
+  (`ai-gemm-reuse-20260907T035117Z-6c1a1a1cf00c`): warm 1.12x-1.18x with operand
+  read beats EXACTLY halved at m=n (INT8 378->328 cy, r 64->32; FP16 698->616,
+  r 128->64; FP32 1338->1192, r 256->128), cold prime charged separately, and 21
+  directed safety cases passing. `reuse_b_i` is a LEASE, not coherence: the caller
+  must hold B immutable and advance the epoch or invalidate before any writer,
+  ownership change or epoch wrap.
+- [x] THE ALL-ONES FIXTURES WERE HIDING TWO REAL DEFECTS. (1) Operand banks were
+  sized `ceil(MaxDim/PeLanes)` while A/B addresses count BYTES, so at MaxDim=16,
+  PeLanes=8 an FP32 row 0 byte 16 aliased row 1 byte 0. Now
+  `ceil(MaxElementBytes*MaxDim/PeLanes)` with a runtime width reject; the island
+  picks 1 byte integer-only and 4 with IslandFpEn, so the integer production
+  allocation is unchanged. (2) The first signed run FAILED
+  (`exp=0000000d got=ffffffff`) on a harness bug where packed negative elements
+  sign-extended across their neighbours. Every C element is now checked against an
+  independent reference, C is poisoned between phases, and an RRESP error is
+  injected. A speedup measured with all-ones data and partial checking is not a
+  speedup.
 - [x] TWO OF MY OWN FULL CONSTANTS WERE UNSOUND: 7,887 and 147,908 ppm were
   understated against the exact 7,889.52 and 147,959.18, i.e. bounds that could be
   exceeded. Corrected, and every division in the quantisation bound now rounds UP
@@ -517,14 +567,14 @@ Priors: `architecture/ai-matrix/numeric-formats-datapath.md`, AI policy §10–�
 
 ## Current phase
 **SMT2 × AI attunement:** soft-ladder DI residual + dual-hart topology **and** ai-tensor /
-PyTorch staged track (branch **`smt2-ai-tensor-linux`**).  
+PyTorch staged track (branch **`smt2-ai-tensor-linux`**).
 Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual matrix
-`AGENTS-build-platform.md` §5–§7 · live RTL table `architecture/README.md` ·  
-**soft ladder** `architecture/multi-threading/soft-ladder/` ·  
-**topology** `architecture/multi-threading/fdt-topology-soft-ladder.md` ·  
-**AI×SMT track** `architecture/multi-threading/smt2-ai-tensor-linux.md` ·  
-**multi-threading map** `architecture/multi-threading/README.md` (AI attunement §) ·  
-**MT harness of record** `architecture/multi-threading/testharness-proxy.md` (proxy-only Spike/soak/peel) ·  
+`AGENTS-build-platform.md` §5–§7 · live RTL table `architecture/README.md` ·
+**soft ladder** `architecture/multi-threading/soft-ladder/` ·
+**topology** `architecture/multi-threading/fdt-topology-soft-ladder.md` ·
+**AI×SMT track** `architecture/multi-threading/smt2-ai-tensor-linux.md` ·
+**multi-threading map** `architecture/multi-threading/README.md` (AI attunement §) ·
+**MT harness of record** `architecture/multi-threading/testharness-proxy.md` (proxy-only Spike/soak/peel) ·
 **Linux-boot scale** `architecture/multi-threading/linux-boot-scale.md` (OpenSBI × fetch_B combos × envelopes).
 
 ### Landed plane (state + priors to retrieve)
@@ -561,7 +611,7 @@ Isolation ladder (narrow → wide): `mc-mini-veri` → `mc-spo-spike` → `mc-sp
 
 **Active edge (residual scaffold + SMT topology) — build-platform home, RTL-max:**
 
-Phases: **P0** platform register → **P1** directed mini → **P2** B1 RTL → **P3** osbi climb/peel → **P4** retire soft → **P5** B2 policy only → **P6** generalize.  
+Phases: **P0** platform register → **P1** directed mini → **P2** B1 RTL → **P3** osbi climb/peel → **P4** retire soft → **P5** B2 policy only → **P6** generalize.
 Full map: `architecture/multi-threading/soft-ladder/README.md`.
 
 **Resume order (review pass 2026-08-29).** The O3 residual is **not a fetch class** and the S1
@@ -606,8 +656,8 @@ re-soak. **Nothing in that pass is claimed green:** the host had no `verilator` 
 | **SL-F** | **Fetch_B unaligned I$ data alignment** | P2 | **Proxy build done; fix does not fully resolve residual.** The pre-shift removal was reverted to the original `frontend.sv` pre-shift contract; the fetch `leftover_branch_bp_fire` is the landed fetch_B change. Remote B-harness (`work-ver-smt2-fw64-B`, 12-thread, Verilator 5.008) builds clean and DI is 12/16 best pass but flaky; the remaining failures are not a fetch pre-shift issue. Trace of `mini_fdt_next_tag_lbu` points to a **scoreboard/issue/branch ordering** problem around `c.addi16sp` + `c.sdsp`/`c.ldsp`/`c.jr` at 2-byte aligned function boundaries. OpenSBI `PEEL_FDT_GETPROP=1 PEEL_FDT_NEXT_TAG=1` still fails at `npc0≈0x800138a8`. See `architecture/multi-threading/soft-ladder/b1-rtl-residuals.md` §Fetch_B unaligned I$ data alignment. |
 | **SL-T** | **SMT2 × ai-tensor / PyTorch** | parallel + after SL-C | **Active on `smt2-ai-tensor-linux`.** Driver: `smt2-ai-tensor-track.sh` (`fast`→`di`→`hold`→`peel`→`dual`→`tensor`→`mt-soft`→`hard`). T4 soft pytorch **green**. T5 dual workers need SL-C + Image. AI CSR banked. Map: `smt2-ai-tensor-linux.md`. |
 
-Soft-ladder SUCCESS = trapdump **`51b1babe` only** (not harness tohost SUCCESS) — suite metadata.  
-Harness preference: **`work-ver-smt2-slfix`** (iter-013 / S4) for hold/cookie; `fw64` is PEEL-pin reference only.  
+Soft-ladder SUCCESS = trapdump **`51b1babe` only** (not harness tohost SUCCESS) — suite metadata.
+Harness preference: **`work-ver-smt2-slfix`** (iter-013 / S4) for hold/cookie; `fw64` is PEEL-pin reference only.
 Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`**. Holding cookie: `SOFT_LADDER_ELF=software/smt2-linux/soft-ladder/build/fw_payload_r3a_c15_plat_skip.held.elf` or rebuild with `SOFT_HART_INIT=1`.
 
 ### 2026-08-31 bootrom / DI validation residual
@@ -1239,7 +1289,7 @@ Transport: `architecture/uncore/pcie-endpoint.md`.
      **9/9** hard PASS after same `DeepSpecEn=1` STQ deepen (log
      `mc-spo-veri-server-math-full.log`). Compact linker + Verilator 5.008.
    Root cause was STQ `DEPTH_COMMIT=4` (hang ≥40 B fill→verify). Dual-hart live CRT
-   optional on multi-hart packages; smt2 dual_park LIVE_HARD greened (hold+grace).  
+   optional on multi-hart packages; smt2 dual_park LIVE_HARD greened (hold+grace).
    **Priors:** `mc-spo-veri.sh` · `mini_stream_plane.S` · `store_buffer.sv` ·
    `cv64a6_imafdc_sv39_config_pkg.sv` · `g6lc64_server_math_config_pkg.sv`.
 
@@ -1283,14 +1333,14 @@ Transport: `architecture/uncore/pcie-endpoint.md`.
 
 8. ~~**AMOCAS.Q deferred**~~ **done (functional)** — `zacas-policy` hard green 4/4:
    odd-pair illegal + W/D/Q mini on Variane; plan `architecture/zacas-amocas-q.md`.
-   Decode/pair RF/128b multi-beat RMW/dual WB; Spike never CAS golden.  
+   Decode/pair RF/128b multi-beat RMW/dual WB; Spike never CAS golden.
    **Priors:** `verif/regress/zacas-policy.sh` · `mini_amocas_{w,d,q,q_illegal}.S` ·
    `software/zacas/` · `architecture/zacas-amocas-q.md` · maps Zacas rows.
 
 9. **Lab-only FO4/STA** — **host re-validated** (`s9-lab-gate`: doctor + lab-run fixture +
    retune guard). Still **lab-blocked**: S3b-lab `fo4-v1.toml` retune from **real** STA;
    S4b OpenROAD+LEF under `pd/pdk/`; full `./build.sh verify` when tools provisioned
-   (`S9_FULL_VERIFY=1`). Do **not** retune FO4 from synthetic fixture STA.  
+   (`S9_FULL_VERIFY=1`). Do **not** retune FO4 from synthetic fixture STA.
    **Priors:** `verif/regress/s9-lab-gate.sh` · `architecture/build-platform-opensta-from-timing.md`
    · `AGENTS-build-platform.md` §7 · `sv-timing/architecture/STA-HANDOFF.md` ·
    `architecture/build-platform-workspace-lifecycle.md` · `AGENTS-technology.md` ·
@@ -1767,7 +1817,7 @@ Tick as completed. Each is `agents/spec/<filename>`.
     sub-files via `agents/spec/INDEX.md` · program snapshot `architecture/remaining-upgrade-sequence.md` §0.
 - [x] Spike Zacas cosim remains **unavailable** (ISS); hard-gate CAS on RTL mini / `zacas-policy`.
   → **§8**; priors: `software/zacas/README.md`, `mc-mini-veri.sh`, `zacas-policy.sh`.
-- [x] `g6lc64_server_math` L2 bare-metal CRT 9/9 (DeepSpecEn=1; NrHarts=1 / NrCores=2).  
+- [x] `g6lc64_server_math` L2 bare-metal CRT 9/9 (DeepSpecEn=1; NrHarts=1 / NrCores=2).
   → **§2**; logs `mc-spo-veri-server-math-full.log`. Dual-hart live park greened on smt2 (`a0c410f3d`).
 - [x] H-edge Spike + RTL Variane litmus 3/3 (hedeleg WARL, virt-instr 22, VS ecall/MPV,
   dual re-entry). SPV residual optional.

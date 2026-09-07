@@ -56,6 +56,226 @@ module tb_g6lc_ai_policy_subcode #(
   assign format_min_reduction_o = FormatMinReductionLog2;
   assign group_shapes_o = GroupShapeLog2;
 
+  task automatic va_eps_rational_checks();
+    logic [63:0] unit_den, numerator, denominator, expected;
+    logic [19:0] actual;
+    for (int bits = 0; bits <= 23; bits++) begin
+      unit_den = 64'd1 << (bits + 1);
+      numerator = 64'd1000000 * (64'd2 * unit_den + 64'd1);
+      denominator = unit_den * unit_den;
+      expected = (numerator + denominator - 64'd1) / denominator;
+      if (expected > 64'd1000000) expected = 64'hfffff;
+      actual = va_turbo_round_eps_ppm(5'(bits));
+      assert (64'(actual) == expected)
+        else $fatal(1, "VA RNE rational p=%0d got=%0d expected=%0d", bits, actual, expected);
+      unit_den = 64'd1 << bits;
+      numerator = 64'd1000000 * (64'd2 * unit_den - 64'd1);
+      denominator = unit_den * unit_den;
+      expected = (numerator + denominator - 64'd1) / denominator;
+      actual = va_turbo_trunc_eps_ppm(5'(bits));
+      assert (64'(actual) == expected)
+        else $fatal(1, "VA trunc rational p=%0d got=%0d expected=%0d", bits, actual, expected);
+    end
+    for (int bits = 24; bits <= 31; bits++) begin
+      assert (va_turbo_round_eps_ppm(5'(bits)) == 20'hfffff)
+        else $fatal(1, "VA RNE invalid precision p=%0d", bits);
+      assert (va_turbo_trunc_eps_ppm(5'(bits)) == 20'hfffff)
+        else $fatal(1, "VA trunc invalid precision p=%0d", bits);
+    end
+    for (int levels = 0; levels <= 255; levels++) begin
+      if (levels inside {7, 127}) begin
+        for (int flat = 0; flat <= 512; flat++) begin
+          numerator = 64'd1000000 * (64'(flat) * 64'd2 * 64'(levels) + 64'd256);
+          denominator = 64'd1024 * 64'(levels) * 64'(levels);
+          expected = (numerator + denominator - 64'd1) / denominator;
+          actual = va_turbo_quant_eps_ppm(8'(levels), 10'(flat));
+          assert (64'(actual) >= expected && actual <= 20'd1000000)
+            else $fatal(1, "VA quant rational levels=%0d flat=%0d", levels, flat);
+        end
+      end else
+        assert (va_turbo_quant_eps_ppm(8'(levels), 10'd512) == 20'hfffff)
+          else $fatal(1, "VA invalid quant level count=%0d", levels);
+    end
+    $display("VA_EPS_RATIONAL PASS rne_p=0..31 trunc_p=0..31 quant_levels=0..255 oracle_bits=64");
+  endtask
+
+  task automatic va_bound_rational_checks();
+    va_turbo_arith_t a;
+    logic [63:0] product, expected;
+    logic [19:0] actual;
+    a = '0;
+    a.kind = VA_ARITH_REL;
+    for (int sample_id = 0; sample_id < 12; sample_id++) begin
+      case (sample_id)
+        0: a.eps_ppm = 20'd1;
+        1: a.eps_ppm = 20'd2;
+        2: a.eps_ppm = 20'd16;
+        3: a.eps_ppm = 20'd31;
+        4: a.eps_ppm = 20'd489;
+        5: a.eps_ppm = 20'd977;
+        6: a.eps_ppm = 20'd7828;
+        7: a.eps_ppm = 20'd250000;
+        8: a.eps_ppm = 20'd999999;
+        9: a.eps_ppm = 20'd1000000;
+        10: a.eps_ppm = 20'd1000001;
+        default: a.eps_ppm = 20'hfffff;
+      endcase
+      for (int kq = 0; kq <= 65535; kq++) begin
+        product = 64'(a.eps_ppm) * 64'(kq);
+        expected = product / 64'd256 + 64'((product % 64'd256) != 0);
+        if (kq < 256 || a.eps_ppm > 20'd1000000 || expected > 64'd1000000)
+          expected = 64'hfffff;
+        actual = va_turbo_bound_ppm(a, 16'(kq));
+        assert (64'(actual) == expected)
+          else $fatal(1, "VA composition eps=%0d kq=%0d got=%0d expected=%0d",
+                      a.eps_ppm, kq, actual, expected);
+      end
+    end
+    a.eps_ppm = 20'd1;
+    assert (va_turbo_bound_ppm(a, 16'd257) == 20'd2)
+      else $fatal(1, "VA fractional ppm must round upward");
+    a.eps_ppm = 20'd250000;
+    assert (va_turbo_bound_ppm(a, 16'd1024) == 20'd1000000 &&
+            va_turbo_bound_ppm(a, 16'd1025) == 20'hfffff)
+      else $fatal(1, "VA numeric maximum and overflow must differ");
+    a.kind = VA_ARITH_NONE; a.eps_ppm = 20'd0;
+    assert (va_turbo_bound_ppm(a, 16'd256) == 20'hfffff)
+      else $fatal(1, "VA NONE must be INVALID even with zero epsilon");
+    a.kind = VA_ARITH_EXACT;
+    assert (va_turbo_bound_ppm(a, 16'd0) == 20'd0)
+      else $fatal(1, "VA exact requires no kappa");
+    $display("VA_BOUND_RATIONAL PASS eps_cases=12 kappa_q8=0..65535 oracle_bits=64");
+  endtask
+
+  task automatic va_admission_boundary_checks();
+    config_pkg::ai_cfg_t cfg;
+    va_turbo_request_t r;
+    va_turbo_plan_t p;
+    va_turbo_arith_t a;
+    int unsigned checks;
+    cfg = config_pkg::AiCfgOff;
+    cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
+    cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
+    cfg.PolicySubcodeEn = 1'b1; cfg.IslandFpEn = 1'b1;
+    r = '0;
+    r.enable = 1'b1; r.code = POLICY_BULK;
+    r.numfmt = 3'(config_pkg::AI_FMT_FP32);
+    r.m = 16'd16; r.n = 16'd16; r.k = 16'd16;
+    r.regular_layout = 1'b1; r.ready_jobs = 9'd16;
+    r.free_accumulators = 9'd16; r.bank_groups = 9'd16;
+    r.range_safe = 1'b1; r.scale_valid = 1'b1; r.accuracy_valid = 1'b1;
+    r.kappa_valid = 1'b1; r.kappa_q8 = 16'd412;
+    r.approx_param_valid = 1'b1; r.approx_param = 4'd15;
+    r.window_valid = 1'b1; r.qualified_mask = '1;
+    r.reuse_a_valid = 1'b1;
+    r.bank = 2'd3; r.subcode = 3'd1; r.level = 4'd1;
+    assert (!r.relative_domain_valid) else $fatal(1, "VA REL domain must default false");
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && !p.eligible) else $fatal(1, "VA REL requires normal-domain evidence");
+    r.worst_case_waived = 1'b1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && !p.bound_waived) else $fatal(1, "VA waiver must not bypass REL domain");
+    r.relative_domain_valid = 1'b1; r.worst_case_waived = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.eps_ppm == 20'd62 && p.bound_ppm == 20'd100 && !p.bound_waived)
+      else $fatal(1, "VA upward-rounded budget equality");
+    r.kappa_q8 = 16'd413;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && !p.eligible && p.bound_ppm == 20'd101)
+      else $fatal(1, "VA fractional excess must fail the 100 ppm budget");
+    r.worst_case_waived = 1'b1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.bound_waived && p.bound_ppm == 20'd101)
+      else $fatal(1, "VA finite overbudget waiver remains available");
+    r.kappa_q8 = 16'd412;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && !p.bound_waived) else $fatal(1, "VA unnecessary waiver must stay clear");
+    checks = 0;
+    r.level = 4'd15; r.kappa_q8 = 16'd256; r.approx_param = 4'd10;
+    for (int id = 0; id < 32; id++) begin
+      r.bank = 2'(id >> 3); r.subcode = 3'(id);
+      a = va_turbo_arith(5'(id), r.numfmt, r.approx_param, 10'd512);
+      if (a.kind != VA_ARITH_EXACT && a.kind != VA_ARITH_NONE) begin
+        r.range_safe = 1'b0; r.relative_domain_valid = 1'b1;
+        p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+        assert (!p.apply && !p.eligible && !p.bound_waived)
+          else $fatal(1, "VA non-exact range prerequisite id=%0d", id);
+        r.range_safe = 1'b1; r.relative_domain_valid = 1'b0;
+        p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+        if (a.kind == VA_ARITH_REL)
+          assert (!p.apply && !p.eligible && !p.bound_waived)
+            else $fatal(1, "VA REL domain prerequisite id=%0d", id);
+        else
+          assert (p.apply) else $fatal(1, "VA FULL must not need the REL domain id=%0d", id);
+        r.relative_domain_valid = 1'b1;
+        for (int missing = 0; missing < 3; missing++) begin
+          r.kappa_valid = missing != 0;
+          r.kappa_q8 = missing == 2 ? 16'd255 : 16'd0;
+          p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+          assert (!p.apply && !p.bound_waived && p.bound_ppm == 20'hfffff)
+            else $fatal(1, "VA invalid/missing kappa must preserve INVALID id=%0d", id);
+          checks++;
+        end
+        r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
+      end
+    end
+    for (int id = 0; id < 32; id++) begin
+      if (id inside {21, 25, 30, 31}) begin
+        r.bank = 2'(id >> 3); r.subcode = 3'(id);
+        for (int par = 0; par < 16; par++) begin
+          r.approx_param = 4'(par);
+          p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+          assert (p.apply && p.approx_products && !p.convert && p.groups_log2 == 0 &&
+                  p.eps_ppm == va_turbo_trunc_eps_ppm(5'(par)) && !p.bound_waived)
+            else $fatal(1, "VA truncation mapping id=%0d p=%0d", id, par);
+          checks++;
+        end
+        r.approx_param_valid = 1'b0;
+        p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+        assert (!p.apply) else $fatal(1, "VA truncation missing parameter id=%0d", id);
+        r.approx_param_valid = 1'b1;
+      end
+    end
+    r.bank = 2'd3; r.subcode = 3'd3;
+    r.kappa_q8 = 16'd1024;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.bound_ppm == 20'd1000000 && !p.bound_waived)
+      else $fatal(1, "VA genuine 100 percent bound remains numeric");
+    for (int waive = 0; waive <= 1; waive++) begin
+      r.worst_case_waived = 1'(waive);
+      for (int kcase = 0; kcase < 2; kcase++) begin
+        r.kappa_q8 = kcase == 0 ? 16'd1025 : 16'd65535;
+        p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+        assert (!p.apply && !p.eligible && !p.bound_waived && p.bound_ppm == 20'hfffff &&
+                p.recipe == 0 && p.target_numfmt == r.numfmt && !p.approx_products)
+          else $fatal(1, "VA max-budget overflow cannot be waived kq=%0d", r.kappa_q8);
+        checks++;
+      end
+    end
+    r.subcode = 3'd2; r.kappa_q8 = 16'd256;
+    for (int fmt = 0; fmt < 8; fmt++) begin
+      r.numfmt = 3'(fmt);
+      for (int par = 0; par < 16; par++) begin
+        r.approx_param = 4'(par);
+        for (int waive = 0; waive <= 1; waive++) begin
+          r.worst_case_waived = 1'(waive);
+          p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+          assert (p.supported && p.arith_specified && p.eps_ppm == 20'hfffff &&
+                  p.bound_ppm == 20'hfffff && !p.apply && !p.eligible && !p.bound_waived)
+            else $fatal(1, "VA block exponent has no valid derivation fmt=%0d par=%0d", fmt, par);
+          checks++;
+        end
+      end
+    end
+    r.bank = 2'd1; r.subcode = 3'd1; r.numfmt = 3'(config_pkg::AI_FMT_INT);
+    r.range_safe = 1'b0; r.relative_domain_valid = 1'b0;
+    r.accuracy_valid = 1'b0; r.kappa_valid = 1'b0; r.approx_param_valid = 1'b0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.bound_ppm == 0 && !p.bound_waived)
+      else $fatal(1, "VA exact path must not require non-exact prerequisites");
+    $display("VA_ADMISSION_BOUNDARIES PASS checks=%0d sentinel=1048575 domain_default=0", checks);
+  endtask
+
   initial begin : va_heuristic_checks
     config_pkg::ai_cfg_t cfg;
     va_turbo_request_t r;
@@ -126,6 +346,7 @@ module tb_g6lc_ai_policy_subcode #(
     r.free_accumulators = 8; r.ready_jobs = 8; r.bank_groups = 8;
     // FP16 needs 977 ppm, which on the geometric ladder is level 5 (1,600 ppm).
     r.range_safe = 1; r.accuracy_valid = 1; r.error_bound_q4 = 3; r.level = 5;
+    r.relative_domain_valid = 1'b1;
     // Conversions now also carry the analytic bound, so kappa is mandatory.
     r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
@@ -244,6 +465,9 @@ module tb_g6lc_ai_policy_subcode #(
     va_turbo_arith_t a;
     int unsigned specified, exact_ids, rel_ids, full_ids, checks;
     logic [19:0] prev_bound, bound;
+    va_eps_rational_checks();
+    va_bound_rational_checks();
+    va_admission_boundary_checks();
     cfg = config_pkg::AiCfgOff;
     cfg.VaTurboEn = 1'b1; cfg.MatrixEn = 1'b1; cfg.Queues = 1;
     cfg.PolicyCodecEn = 1'b1; cfg.PolicyBenefitEn = 1'b1;
@@ -261,8 +485,8 @@ module tb_g6lc_ai_policy_subcode #(
           if (a.kind == VA_ARITH_EXACT)
             assert (a.eps_ppm == 0) else $fatal(1, "VA exact recipe carries error id=%0d", id);
           if (a.kind == VA_ARITH_NONE)
-            assert (va_turbo_bound_ppm(a, 16'd256) == 20'd1000000)
-              else $fatal(1, "VA unspecified arithmetic must bound at 100%%");
+            assert (va_turbo_bound_ppm(a, 16'd256) == 20'hfffff)
+              else $fatal(1, "VA unspecified arithmetic must return INVALID");
           checks++;
         end
       end
@@ -278,13 +502,15 @@ module tb_g6lc_ai_policy_subcode #(
     // the format mantissa widths that matter.
     assert (va_turbo_round_eps_ppm(5'd10) == 20'd977)   else $fatal(1, "FP16 eps");
     assert (va_turbo_round_eps_ppm(5'd7)  == 20'd7828)  else $fatal(1, "BF16 eps");
-    assert (va_turbo_round_eps_ppm(5'd3)  == 20'd128906) else $fatal(1, "FP8E4M3 eps");
+    assert (va_turbo_round_eps_ppm(5'd3)  == 20'd128907) else $fatal(1, "FP8E4M3 eps");
     assert (va_turbo_round_eps_ppm(5'd2)  == 20'd265625) else $fatal(1, "FP8E5M2 eps");
-    assert (va_turbo_round_eps_ppm(5'd0)  == 20'd1000000) else $fatal(1, "eps saturation");
-    assert (va_turbo_round_eps_ppm(5'd16) == 20'd0)      else $fatal(1, "sub-ppm eps");
+    assert (va_turbo_round_eps_ppm(5'd0)  == 20'hfffff) else $fatal(1, "eps overflow");
+    assert (va_turbo_round_eps_ppm(5'd16) == 20'd16)      else $fatal(1, "p16 eps ceiling");
+    assert (va_turbo_round_eps_ppm(5'd23) == 20'd1) else $fatal(1, "sub-ppm eps must be nonzero");
     // Monotone in retained bits: more precision may never bound worse.
-    for (int bits = 0; bits < 31; bits++)
-      assert (va_turbo_round_eps_ppm(5'(bits)) >= va_turbo_round_eps_ppm(5'(bits + 1)))
+    for (int bits = 0; bits < 23; bits++)
+      assert (va_turbo_round_eps_ppm(5'(bits)) >= va_turbo_round_eps_ppm(5'(bits + 1)) &&
+              va_turbo_trunc_eps_ppm(5'(bits)) >= va_turbo_trunc_eps_ppm(5'(bits + 1)))
         else $fatal(1, "VA eps not monotone at %0d", bits);
 
     // Bound composition: monotone non-decreasing in kappa, saturating at 100%,
@@ -302,7 +528,7 @@ module tb_g6lc_ai_policy_subcode #(
     end
     a = va_turbo_arith(5'd27, 3'(config_pkg::AI_FMT_FP32), 4'd0, 10'd512);
     assert (a.eps_ppm == 20'd250000) else $fatal(1, "Mitchell supremum");
-    assert (va_turbo_bound_ppm(a, 16'd65535) == 20'd1000000) else $fatal(1, "bound saturation");
+    assert (va_turbo_bound_ppm(a, 16'd65535) == 20'hfffff) else $fatal(1, "bound overflow");
 
     // Budget ladder: 100 ppm doubling per step, saturating at 100%, level 0 off.
     // The ladder must span the whole useful range, which is the defect the old
@@ -321,7 +547,7 @@ module tb_g6lc_ai_policy_subcode #(
     for (int id = 0; id < 32; id++) begin
       a = va_turbo_arith(5'(id), 3'(config_pkg::AI_FMT_FP32), 4'd10, 10'd512);
       if (a.kind != VA_ARITH_EXACT && a.kind != VA_ARITH_NONE)
-        assert (a.eps_ppm <= va_turbo_budget_ppm(4'd15))
+        assert (a.eps_ppm == 20'hfffff || a.eps_ppm <= va_turbo_budget_ppm(4'd15))
           else $fatal(1, "VA id=%0d eps inexpressible by any level", id);
     end
 
@@ -333,6 +559,7 @@ module tb_g6lc_ai_policy_subcode #(
     r.regular_layout = 1'b1; r.ready_jobs = 9'd16;
     r.free_accumulators = 9'd16; r.bank_groups = 9'd16;
     r.range_safe = 1'b1; r.scale_valid = 1'b1; r.accuracy_valid = 1'b1;
+    r.relative_domain_valid = 1'b1;
     r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
     r.approx_param_valid = 1'b1; r.approx_param = 4'd10;
     r.window_valid = 1'b1; r.qualified_mask = '1;
@@ -401,11 +628,11 @@ module tb_g6lc_ai_policy_subcode #(
     r.numfmt = 3'(config_pkg::AI_FMT_FP32);
     r.accuracy_valid = 1'b1; r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256;
     // 12 retained mantissa bits is 244 ppm, which fits level 3 (400 ppm).
-    r.approx_param_valid = 1'b1; r.approx_param = 4'd12; r.level = 4'd3;
+    r.approx_param_valid = 1'b1; r.approx_param = 4'd12; r.level = 4'd4;
     r.bank = 2'd3; r.subcode = 3'd1;  // id 25, mantissa reduction
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
     assert (p.apply && p.approx_products && p.groups_log2 == 0 && !p.convert &&
-            p.target_numfmt == r.numfmt && p.bound_ppm == 20'd244)
+            p.target_numfmt == r.numfmt && p.bound_ppm == 20'd489)
       else $fatal(1, "VA approximate products must not claim grouping");
     r.approx_param = 4'd4;  // 63,477 ppm at 4 retained bits
     p = va_turbo_select(cfg, r, 64, 8, 8, '1);
@@ -447,14 +674,15 @@ module tb_g6lc_ai_policy_subcode #(
     end
     assert (va_turbo_quant_eps_ppm(8'd127, 10'd256) == 20'd3954)
       else $fatal(1, "INT8 at unity flatness");
-    assert (va_turbo_quant_eps_ppm(8'd255, 10'd512) == 20'd1000000)
-      else $fatal(1, "unknown level count must bound at 100%%");
+    assert (va_turbo_quant_eps_ppm(8'd255, 10'd512) == 20'hfffff)
+      else $fatal(1, "unknown level count must return INVALID");
 
     // An absent or unphysical flatness must fall back to the worst case, not to
     // an optimistic value.
     r.bank = 2'd0; r.subcode = 3'd6; r.level = 4'd8;  // INT8 conversion
     r.numfmt = 3'(config_pkg::AI_FMT_FP32);
     r.range_safe = 1'b1; r.scale_valid = 1'b1; r.accuracy_valid = 1'b1;
+    r.relative_domain_valid = 1'b1;
     r.kappa_valid = 1'b1; r.kappa_q8 = 16'd256; r.error_bound_q4 = 8'd0;
     r.approx_param_valid = 1'b1; r.worst_case_waived = 1'b0;
     r.flatness_valid = 1'b0; r.flatness_q8 = 10'd128;

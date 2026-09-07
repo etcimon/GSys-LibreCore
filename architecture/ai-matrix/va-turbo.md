@@ -5,9 +5,11 @@ LibreCore AI island. It is the only policy feature that may change arithmetic,
 so it is isolated behind its own gate, its own verification mode and its own
 promotion evidence.
 
-**Status: default-off config gate, host bank generator and bounded SV recipe
-selection are implemented. No GEMM datapath consumes the new recipe plans; no
-throughput, approximation-quality or physical-area gain is claimed.**
+**Status: default-off config gate, host bank generator, corrected bounded SV
+selection and an exact resident-B consumer are implemented. Recipe 16 is wired
+to real GEMM execution in the verification harness; production runtime requests
+remain tied off pending an ownership/epoch ABI. No approximate arithmetic,
+model-quality gain, physical-area gain or silicon throughput is claimed.**
 
 The name is descriptive of the intent — trading numeric precision for parallel
 throughput the way an analog multiplier trades precision for density — but the
@@ -139,11 +141,72 @@ away and needs no RTL. Until then, claiming 8 entries would be inventing 5.
 | surplus lanes idle, so gang-width choice is worth `+0.0%` | same sweep | **measured** |
 | precision narrowing therefore buys `2x` groups per halving | derived from the rule | **derived** |
 | per-precision tile error | `policy_approx.py` on real pinned-model tensors | **measured (proxy)** |
-| groups convert to throughput | — | **assumed; the gating unknown** |
+| concurrency converts to throughput, sub-linearly | `run-gemm-concurrent.sh`, 4 engines / 1 port | **measured** |
+| shared weights cost the same as private weights | same harness, `shared_b` mode | **measured** |
+| lane groups inside one engine convert to throughput | — | **still assumed** |
 
-The last row is the load-bearing assumption, shared with the cluster case. No
-concurrency measurement exists, so the entire performance side of V/A-Turbo is
-unproven even though its accuracy side is measured.
+The load-bearing assumption has been narrowed, not eliminated. Concurrency itself
+is now measured rather than projected (§4.1), but it was measured across *whole
+engines*, and V/A-Turbo's grouping claim is about *lanes inside one engine*. The
+two share the same frontend arithmetic and now the same measured tax.
+
+### 4.1 The concurrency measurement
+
+`verif/tb/ai_island/tb_g6lc_ai_gemm_concurrent.sv` runs N `g6lc_ai_gemm_seq`
+engines through the real `axi_mux_intf` into one shared `g6lc_ai_dram_backend`,
+and compares the wall cycles of N jobs run back to back against the same N jobs
+started on the same cycle. Every engine computes an 8x8x16 all-ones GEMM, so the
+golden C is exactly `k` and is re-checked after **both** phases: a concurrency
+result that changed an output would be a bug, not a speedup.
+
+| Format | 1 engine | 2 engines | 4 engines | 4-engine efficiency |
+|---|--:|--:|--:|--:|
+| INT8 | 189 cy | 1.60x | 2.08x | 52% |
+| INT4 | 109 cy | 1.41x | 1.48x | 37% |
+| FP16 | 349 cy | 1.63x | 2.37x | 59% |
+| BF16 | 349 cy | 1.63x | 2.37x | 59% |
+| FP32 | 669 cy | 1.65x | 2.43x | 61% |
+| FP8 E4M3/E5M2 | 189 cy | 1.60x | 2.08x | 52% |
+
+At `N=1` the measured speedup is exactly `1.000x` for every format, which is the
+harness checking itself: the serial and concurrent paths must coincide when there
+is nothing to overlap.
+
+Three results, each of which changes the plan:
+
+**Concurrency is real but decays with N.** Two engines keep about 80% efficiency,
+four keep 37-61%. The INT8 per-engine PMU cycles inflate under four-way contention
+(191 -> 345-360 in the earlier four-channel fixture), with staggered completion.
+This measures whole-engine replication, not a universal tax on intra-engine
+`groups = L / k_bytes`: shared operand delivery can have a different traffic and
+scheduling cost.
+
+**Channel scaling is modest on this fixture.** Four channels reduce four-engine
+wall time by 0.3-4.5%, depending on format, not uniformly 1%. The shared port,
+short transactions and load/compute/store scheduling constrain the result;
+phase and stall counters are needed to distinguish their contributions.
+
+**Narrow formats gain the least from engine replication** - INT4 is worst at
+1.48x - because a short job cannot amortise the fixed per-job transaction cost.
+This is the exact inverse of the idle-lane picture, where INT4 has the *most*
+spare lanes. Both point the same way: for narrow formats the payoff is in
+**lane groups sharing one frontend**, not in more engines. This measurement does
+not prove that payoff, but it does put a measured price on the shared-memory tax
+any such design must pay.
+
+**Sharing only the B address saved no traffic in the original paired modes.**
+The backend serves each engine's reads independently; it does not multicast.
+The resident-B consumer in §10 instead avoids reloading each engine's existing
+tile on later jobs. It does not eliminate the first load into each engine.
+
+The table above is historical diagnostic evidence: all-ones operands and partial
+C checking could hide misrouting and byte-bank aliasing. The strengthened harness
+checks every output, poisons C between phases and includes distinct signed data.
+New paired reports, not the old table, qualify the resident-B consumer.
+
+These are Verilator cycles against the class-0 SRAM model. They are a contention
+answer, not MAC/s, not silicon, and not a claim about a real DRAM controller's
+queueing.
 
 ## 5. Reuse of the existing sub-code control path
 
@@ -191,9 +254,11 @@ All four, or it stays off:
 `corev_apu/ai_island/include/g6lc_ai_policy_pkg.sv` now provides
 `va_turbo_request_t`, `va_turbo_plan_t` and the pure combinational
 `va_turbo_select(cfg, request, lane_bytes, min_group_bytes, max_groups, consumer_mask)`.
-The namespace matches the proposed four-bank catalog; only the following ten
-recipes have implemented selection predicates. Every other ID returns
-`supported=0`, `apply=0`, native-format fallback, and no action flags.
+The namespace matches the proposed four-bank catalog. The table below lists the
+original ten selection entry points, not a list of qualified execution hardware.
+All 32 IDs now carry arithmetic metadata; recipe 26's unspecified bound is an
+invalid sentinel. The only nonzero consumer mask in the new GEMM harness is
+recipe 16 (resident B). Metadata does not establish datapath support.
 
 | ID | Selection calculation | Necessary metadata |
 |--:|---|---|
@@ -244,16 +309,14 @@ When permission is absent, the action fields remain zero and `target_numfmt`
 remains the native input format, even when `eligible=1`. There is no production
 call site or nonzero production consumer mask yet.
 
-Conversion predicates compare an externally supplied `error_bound_q4` against
-`level` in sixteenths of a percentage point. Bounds must be rounded upward by
-the provider. This is an admission-contract check, not an on-chip measurement
-of accuracy: a tile p95 observation is not a universal error bound. Profile
-approval must cover the actual source format, range, scaling, operation and
-context. BF16 remains a candidate because one small FP32-model capture does not
-prove it globally dominated by FP16.
-
-The current four-bit level reaches only 15/16 percent. The older host bank
-example at 2 percent therefore cannot automatically authorise INT8 here.
+Conversion predicates compare the caller's upward-rounded geometric ladder index
+`error_bound_q4` against `level`. The maximum budget is 1,000,000 ppm; an error
+estimate exceeding it is invalid for analytic admission, not clamped into it.
+Every approximate recipe requires range evidence; REL recipes additionally
+require `relative_domain_valid`, covering the normal-domain rounding premises.
+A tile p95 observation is not a universal bound, and float64 host accumulation is
+not the RTL FP32 accumulation contract. BF16 remains a candidate because one
+small FP32-model capture does not establish global dominance by FP16.
 
 The caller must invalidate the window on profile, bank, level, tensor identity,
 format or context changes. This combinational function holds no state and does
@@ -320,7 +383,7 @@ operands carries `(1+u)^2 - 1 = 2u + u^2`:
 |---|---|--:|
 | FP16 | `u = 2^-11` | 977 |
 | BF16 | `u = 2^-8` | 7,828 |
-| FP8 E4M3 | `u = 2^-4` | 128,906 |
+| FP8 E4M3 | `u = 2^-4` | 128,907 |
 | FP8 E5M2 | `u = 2^-3` | 265,625 |
 | INT8, 127 levels | `(fa+fb)/254 + 1/254^2`, full scale | 7,892 |
 | INT4, 7 levels | `(fa+fb)/14 + 1/196`, full scale | 147,961 |
@@ -348,106 +411,115 @@ analytic bound and the caller's independently supplied bound to fit the budget:
 the analytic bound cannot see the data, and a measured bound is only as good as
 its sample.
 
-### Measured validation, and two findings that matter
+### Corrected arithmetic contract and validation
 
-`policy_approx.py` now measures `kappa` on the real pinned-model tiles and checks
-the analytic bound against observed error. Artifact:
-`policy-approx-bounds.json`.
+The earlier `policy-approx-bounds.json` reported 12/12 sample comparisons as a
+proof of sound composition. That interpretation is withdrawn. Sample success
+cannot prove a bound, and the earlier implementation also floored several RNE
+constants, truncated `eps*kappa`, assigned RNE bounds to truncation, and clipped
+larger errors to 100%. Relative error is unbounded near cancellation; saturation
+must not make an out-of-budget candidate admissible.
 
-**Finding 1 - a per-element bound is vacuous.** Worst-case per-element `kappa`
-reaches **47,637** (relative) and **639,792** (full scale) on these tiles,
-because single output elements nearly cancel. Every candidate's bound then
-saturates to 100% and "the bound holds" becomes trivially true — a vacuous pass,
-not validation. A bound and its observation must be taken at the same
-granularity. Against the Frobenius-matched `kappa` (**3.292** relative,
-**85.681** full scale) the comparison is meaningful:
+The corrected contract is:
 
-| Candidate | Kind | eps ppm | Bound ppm | Observed ppm | Holds | Slack |
-|---|---|--:|--:|--:|---|--:|
-| FP16 | rel | 977 | 3,217 | 339 | yes | 9.48x |
-| BF16 | rel | 7,828 | 25,772 | 4,179 | yes | 6.17x |
-| FP8 E4M3 | rel | 128,906 | 424,397 | 51,936 | yes | 8.17x |
-| FP8 E5M2 | rel | 265,625 | 874,517 | 100,704 | yes | 8.68x |
-| INT8 | full | 7,887 | 675,768 | 18,527 | yes | 36.47x |
-| INT4 | full | 147,908 | 1,000,000 | 302,839 | yes | 3.30x |
-| Mantissa 10/8/6/4/2 bits | rel | 977..265,625 | 3,217..874,517 | 511..205,650 | yes | 3.65-6.29x |
-| Mitchell | rel | 250,000 | 823,074 | 136,859 | yes | 6.01x |
+- RNE bounds use the upward integer ceiling of `1e6*(2u+u^2)` for valid mantissa
+  widths. Even positive errors below one ppm return one, not zero.
+- Toward-zero truncation uses `1e6*(2u-u^2)`, `u=2^-p`, rounded upward. Recipes
+  21/25/30/31 use this bound; recipe 26 has no established derivation and is
+  analytically unavailable.
+- `20'hfffff` is an **invalid/overflow sentinel**, never a numeric bound. It is
+  above the maximum 1,000,000-ppm budget. Invalid precision/count/kappa and
+  composed bounds above 100% return it. A waiver cannot override this refusal.
+- Composition is `(eps_ppm*kappa_q8 + 255)>>8`. Provider metadata must also
+  round upward and must not wrap or saturate an unrepresentable kappa into range.
+- Approximation needs range evidence; REL additionally needs
+  `relative_domain_valid`. Subnormal conversion, underflow, overflow and special
+  values are not covered by an unchecked normal-relative-error formula.
+- A finite, representable overbudget bound may still be explicitly waived, with
+  `bound_waived` reported. This permits empirical admission, not a worst-case
+  guarantee. Missing evidence and unsupported bounds remain refused.
 
-**12 of 12 hold**, with 3.3x-36.5x slack, so the composition is sound and
-conservative.
+`test_policy_approx.py` has 25 passing tests, including independent rational
+oracles, cancellation, zero references, subnormal/overflow refusal and strict
+JSON serialization. Nonfinite metrics serialize as null with explicit status;
+`bound_validation.schema_version=2` separates raw bounds, Q8 RTL-helper bounds,
+sample comparisons and admission. `universal_proof` is false. The FP64-reference
+proxy does not model RTL FP32 accumulation. Frobenius and per-element metadata
+are separate contracts, not interchangeable values.
 
-**Finding 2 (fixed) - the level ladder could not express what INT8 needs.** With
-the measured `kappa`, INT8's sound bound is `675,768` ppm and even its *observed*
-error is `18,527` ppm, while the old linear ladder topped out at 9,375 ppm. INT8
-was unreachable at any level, so the encoding was the blocker rather than the
-arithmetic. That is what the geometric ladder in §2.2 fixes: **every declared
-`eps` is now expressible**, and the test suite asserts exactly that for all 32
-recipes rather than leaving it to inspection.
+Remote `ai-policy-subcode` first failed the new rational oracle at E4M3
+(`128906` versus `128907`, run `20260907T033251Z-f86e57c24c7e`), then passed
+both default/cache-default profiles (`20260907T034054Z-8edb3d5bfd7c`). The tests
+sweep all precision codes and Q8 kappa values, and exercise 369 directed
+admission checks. They prove these finite calculations, not arithmetic consumers
+or universal model accuracy.
 
-**Finding 3 - the remaining conservatism is concentrated in the `FULL` kind.**
-With the ladder in place, the measured gap between the level the analytic bound
-demands and the level a tight bound would demand is the tuning target:
+### Flatness with matching units
 
-| Candidate | Kind | Level the analytic bound needs | Level if the bound were tight | Slack |
-|---|---|--:|--:|--:|
-| FP16 | rel | 7 | 3 | 9.5x |
-| BF16 | rel | 10 | 7 | 6.2x |
-| Mantissa 8 bits | rel | 9 | 7 | 3.9x |
-| Mantissa 4 bits | rel | 13 | 11 | 3.6x |
-| FP8 E4M3 | rel | 14 | 11 | 8.2x |
-| Mitchell | rel | 15 | 12 | 6.0x |
-| **INT8** | **full** | **13 (41% budget, was 14)** | **9 (2.5%)** | **16.8x, was 36.5x** |
-| INT4 | full | 15 | 13 | 3.3x |
-
-The `REL` kinds sit at 3.6x-9.5x, which is the ordinary price of a worst-case
-bound. `INT8` at **36.5x** is the outlier, because the `FULL` reference
-`K x max|a| x max|b|` is doubly pessimistic: it assumes every element hits worst
-case *and* that the result norm is small against that product. Authorising level
-14 would mean permitting 82% error to admit a recipe whose real error is 1.85%,
-which no one should sign.
-
-**Finding 4 - two of my own `FULL` constants were unsound.** The literals 7,887
-and 147,908 ppm were *understated* against the exact values 7,889.52 and
-147,959.18, so they were bounds that could be exceeded. They are corrected, and
-every division in the quantisation bound now rounds **up**: a bound rounded down
-is not a bound. The suite asserts the rounding direction rather than only the
-values.
-
-### The flatness tightening, measured
-
-The `FULL` reference no longer hardcodes "every element sits at the maximum". It
-takes the operand **flatness** `fa = sum|a| / (K x max|a|)` in `(0,1]`, so
+For integer quantization the absolute bound remains
 
 ```
 |sum(a'b' - ab)| <= K*A*B * [ (fa + fb)/(2L) + 1/(4L^2) ]
 ```
 
-with `L` the positive level count (127 for INT8, 7 for INT4). An absent or
-out-of-range flatness falls back to the worst case `fa + fb = 2`, never to
-something optimistic.
+The constant second term must not be multiplied by flatness. With the historical
+sample statistics `fa+fb=0.9196460738857746`, `kappa=85.68121868438433`, the raw
+INT8 formula gives 311,550.09 ppm. Upward metadata gives `flatness_q8=236`,
+`kappa_q8=21935`, epsilon 3,647 ppm and composed bound **312,489 ppm** (level 13).
+This replaces 310,931 ppm, which was not RTL-matched. The same INT4 calculation
+exceeds 100% and is refused instead of being clipped to an admissible value.
+These statistics do not establish that usable INT8 and worst-case guarantees
+are universally incompatible; that earlier conclusion was too broad.
 
-Measured on the real tiles, `fa + fb = 0.920` against a worst case of 2.0, which
-tightens the `FULL` kinds by **2.17x**: INT8's bound drops from 675,768 to
-**310,931 ppm**, its slack from 36.5x to **16.8x**, and its required level from
-14 to **13**.
+## 10. Exact resident-B execution consumer
 
-**That is real but insufficient, and it settles the design question.** Level 13
-still means authorising 41% error to admit a recipe whose real error is 1.85%. A
-worst-case full-scale guarantee and a usable INT8 path are simply incompatible on
-real data, because the remaining conservatism is error *cancellation* across the
-reduction, which a worst-case bound may not assume away.
+`g6lc_ai_gemm_seq.ReuseBEn` is default off. The verification harness instantiates
+the real recipe-16 selector with consumer mask `1<<16` and routes only
+`plan.apply && plan.reuse_b` to the sequencer. No arithmetic is changed and no
+new tile array or engine is added. A miss follows the existing load path; a hit
+skips `ST_LB` after A has drained and enters MAC with reset cursors.
 
-So the trade is made **explicit and auditable** instead of being resolved by
-quietly loosening the bound. `worst_case_waived` lets an approver waive the
-analytic gate; the caller's measured bound still applies, and the plan reports
-`bound_waived` so an **empirical** promise never becomes indistinguishable from a
-**proven** one. The suite checks that a waiver cannot bypass the measured bound,
-the accuracy evidence or `kappa`, and that an exact recipe never reports one.
+The retained key is B pointer, N, K, LDB, number format and a 32-bit epoch.
+M is deliberately not part of the B key. Residency is published only after a
+successful job. Reset, invalidation, AXI response errors or descriptor errors
+prevent reuse. Wrapped ranges and C/B overlap refuse reuse and residency.
+`pmu_reuse_b_hit_o` is sticky per job; existing read/write/cycle PMUs quantify
+actual saved traffic.
 
-## 10. Not implemented
+**Ownership contract:** `reuse_b_i` is permission, not a coherence mechanism.
+The caller must keep B immutable from its load through each accepted reuse,
+advance its epoch or invalidate before any writer or ownership/context change,
+and invalidate before epoch wrap/reuse. All engines holding affected B copies
+must receive invalidation. Only quiescent jobs may change the backing tensor.
+Hardware key comparisons do not substitute for this lease. Production
+`g6lc_ai_island_top` binds presence to `AiCfg.VaTurboEn` but ties runtime reuse
+off and invalidation on until a descriptor/MMIO ownership ABI exists.
 
-Per-group arithmetic/accumulators, operand converters, exact-zero and residency
-proof producers, descriptor/MMIO runtime plumbing, applied-plan PMU readback and
-window-to-request wiring remain open. Reserved recipes (including logarithmic
-products, residual correction and outlier streams) remain disabled. There is no
-new numerical approximation or measured MAC/s improvement in this increment.
+A related byte-storage defect was corrected: operand rows now use
+`ceil(MaxElementBytes*MaxDim/PeLanes)` words per bank, separately from C's element
+row stride. `MaxElementBytes` is 1/2/4, default 4 in the standalone sequencer;
+the island selects 1 without floating support and 4 with it. Wider runtime
+formats fail the capacity check. This prevents FP16/FP32 rows from aliasing while
+preserving the integer-only production allocation.
+
+Timing/DFT/power: key comparisons are sampled at job acceptance, range checks
+are registered in the existing check phase, and the skip is outside the MAC
+arithmetic path. Metadata updates use the existing clock and active-low reset;
+SRAM and testmode seams are unchanged. No new clock, latch, ISA/DTS encoding or
+production format grant is added. Synthesis smoke is not STA or mapped area.
+
+Reproduce with `python -B verif/regress/ai-gemm-reuse.py --engines 1 --channels 1
+--va 1` (one line). The runner uses the remote proxy, uploads a source-hashed
+snapshot, enables assertions and preserves build/simulation logs and status.
+Reports pair forced reload and reuse on identical physical resources, separate
+cold priming from warm operation, check all C elements and poison outputs before
+execution. Signed native-format fixtures, metadata changes, permission gates,
+error recovery and alias cases accompany the throughput samples.
+
+## 11. Not implemented
+
+Independent lane groups, compact exact floating reductions, operand converters,
+production residency/accuracy proof producers, descriptor/MMIO runtime plumbing,
+applied-plan PMU readback and automatic evidence-window wiring remain open.
+Approximate arithmetic consumers and production multi-cluster support remain
+disabled. The resident-B experiment is not model inference or silicon MAC/s.

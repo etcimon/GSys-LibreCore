@@ -29,6 +29,7 @@ module tb_g6lc_ai_gemm_area
     parameter int unsigned Lanes    = 8,
     parameter int unsigned ArOut    = 2,
     parameter int unsigned Channels = 1,
+    parameter bit ReuseBEn = 1'b0,
     // 0 selects the combinational float dot, 1 the pipelined one. This matters
     // for any depth/timing statement: the combinational variant is what makes the
     // longest topological path enormous, and it is not the configuration a float
@@ -59,6 +60,10 @@ module tb_g6lc_ai_gemm_area
     output logic [31:0] pmu_r_beats_o,
     output logic [31:0] pmu_w_beats_o,
     output logic [31:0] pmu_cycles_o,
+    input logic reuse_b_i,
+    input logic [31:0] reuse_b_epoch_i,
+    input logic reuse_b_invalidate_i,
+    output logic pmu_reuse_b_hit_o,
     // The AXI pair must cross the boundary as real ports. An earlier version of
     // this harness fed the response back from the request, which let synthesis
     // constant-fold the whole operand path: the MAC arrays vanished and the cell
@@ -96,6 +101,7 @@ module tb_g6lc_ai_gemm_area
       .MaxDim     ( 16 ),
       .PeLanes    ( Lanes ),
       .DotPipeFloat( DotPipe ),
+      .ReuseBEn(ReuseBEn),
       .MaxAROut   ( ArOut ),
       .NrChannels ( Channels ),
       .ChanShift  ( AI_DRAM_CHAN_SHIFT_DEFAULT ),
@@ -117,6 +123,7 @@ module tb_g6lc_ai_gemm_area
       .axi_resp_i   ( gemm_resp ),
       .pmu_r_beats_o( pmu_r_beats_o ),
       .pmu_w_beats_o( pmu_w_beats_o ),
-      .pmu_cycles_o ( pmu_cycles_o )
+      .pmu_cycles_o ( pmu_cycles_o ),
+      .reuse_b_i, .reuse_b_epoch_i, .reuse_b_invalidate_i, .pmu_reuse_b_hit_o
   );
 endmodule

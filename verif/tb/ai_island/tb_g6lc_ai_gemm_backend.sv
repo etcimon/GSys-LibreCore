@@ -212,6 +212,8 @@ module tb_g6lc_ai_gemm_backend
       .pmu_r_beats_o( pmu_r ),
       .pmu_w_beats_o( pmu_w ),
       .pmu_cycles_o ( pmu_cy ),
+      .reuse_b_i(1'b0), .reuse_b_epoch_i(32'd0), .reuse_b_invalidate_i(1'b1),
+      .pmu_reuse_b_hit_o(),
       .axi_req_o    ( gemm_req ),
       .axi_resp_i   ( gemm_resp )
   );
