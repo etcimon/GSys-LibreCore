@@ -5,8 +5,9 @@ LibreCore AI island. It is the only policy feature that may change arithmetic,
 so it is isolated behind its own gate, its own verification mode and its own
 promotion evidence.
 
-**Status: specification. The config gate exists and is off. Nothing else is
-implemented, no datapath consumes it, and there is no throughput claim.**
+**Status: default-off config gate, host bank generator and bounded SV recipe
+selection are implemented. No GEMM datapath consumes the new recipe plans; no
+throughput, approximation-quality or physical-area gain is claimed.**
 
 The name is descriptive of the intent — trading numeric precision for parallel
 throughput the way an analog multiplier trades precision for density — but the
@@ -59,10 +60,16 @@ the level actually applied) is unimplemented.
 
 ### 2.3 Sub-code word — repurposed, not widened
 
-The existing 3-bit sub-code carries a bank index instead of a candidate index.
-No new field, no policy-mux change, no ABI growth. Each bank entry decodes to
-`(groups_log2, precision_code)` where `precision_code` is `0=FP32, 1=FP16,
-2=INT8`.
+The SV research request uses `{bank[1:0], subcode[2:0]}` for a 32-recipe namespace.
+The bank is separate context: three bits alone cannot identify 32 independent
+recipes. The frozen policy group remains unchanged. The existing topology
+subcode evaluator has not been replaced or repurposed; it remains a comparator
+for later experiments. No descriptor, MMIO or ISA ABI was changed in this pass.
+
+`va_turbo_select` decodes a request into a bounded execution plan, not an
+arithmetic result. The previous host-generated three-entry precision bank is a
+separate artifact and must not be loaded as this recipe namespace without an
+explicit adapter.
 
 ## 3. The heuristic bank
 
@@ -162,9 +169,113 @@ All four, or it stays off:
 4. accuracy validated beyond the tile proxy — the current metric is Frobenius
    error on one small model and one prompt, which is not a model-quality result.
 
-## 8. Not implemented
+## 8. Implemented SV recipe calculations
 
-The runtime level and its plumbing; the bank in RTL; per-group accumulators and
-descriptor slots; the FP16/INT8 selectable operand path; the error-bounded
-verification mode; PMU readback. The config gate and the measured bank generator
-are the whole of what exists.
+`corev_apu/ai_island/include/g6lc_ai_policy_pkg.sv` now provides
+`va_turbo_request_t`, `va_turbo_plan_t` and the pure combinational
+`va_turbo_select(cfg, request, lane_bytes, min_group_bytes, max_groups, consumer_mask)`.
+The namespace matches the proposed four-bank catalog; only the following ten
+recipes have implemented selection predicates. Every other ID returns
+`supported=0`, `apply=0`, native-format fallback, and no action flags.
+
+| ID | Selection calculation | Necessary metadata |
+|--:|---|---|
+| 0 | Native exact fallback | Valid native job; never asserts `apply` |
+| 2 | Skip proven integer-zero products | Full-domain zero proof; floating zero skipping is forbidden |
+| 4 | FP32-to-FP16 plan | Approved accuracy bound and representable range |
+| 5 | FP32-to-BF16 plan | Approved accuracy bound and representable range |
+| 6 | FP32-to-scaled-INT8 plan | Approved bound, safe range and valid scale metadata |
+| 9 | Two outputs sharing A | Two columns and sufficient independent bank/accumulator capacity |
+| 10 | Four outputs sharing A | Four columns and sufficient capacity; otherwise fallback, not a silent downgrade |
+| 11 | Pack independent jobs | Explicit independence and ready-job count |
+| 13 | Occupancy-based output grouping | Prefer rows for TALL or N=1, otherwise columns; return tail count |
+| 16 | Reuse resident operands | Caller-validated A/B tensor identity, version and residency |
+
+The equations replace speculative constants:
+
+- `row_bytes = ceil(K * element_bits / 8)`; INT4 uses `(K+1)>>1`, other
+  formats use shifts. Odd packed tails cannot underallocate a group.
+- For powers of two `G=2..32`, choose the largest permitted G such that
+  `lane_bytes/G >= max(row_bytes, min_group_bytes)` and G does not exceed
+  configured group capacity, ready work, free accumulators or bank capacity.
+- The loop is fixed at five comparisons; division by G is a shift. M/N/K are
+  limited to 1..256, lane-byte provisioning to powers of two in 8..256, and
+  minimum group width is a provisioned power of two of at least eight bytes.
+- Tail outputs are `work_count & (G-1)`. They remain work to execute, not work
+  silently dropped by the plan. A full-row-per-group fit is conservative; it is
+  not a proof that smaller multi-cycle groups would be slower.
+
+`PeLanes` in this model controls byte-lane provisioning. A group estimate does
+not prove enough physical arithmetic or SRAM ports exist for concurrent outputs.
+The caller must provide actual bank and accumulator capacities; no group count
+here is a measured speedup.
+
+### Eligibility is not execution permission
+
+`supported` means the selection rule is implemented. `eligible` means the
+metadata and resource predicates pass. `apply` additionally requires all of:
+
+1. `VaTurboEn` and its subcode/benefit/codec/float gates, plus the matrix plane
+   and at least one queue (the same prerequisites `check_cfg` enforces, checked
+   again here so a hand-built `ai_cfg_t` cannot bypass them);
+2. runtime enable and nonzero level;
+3. the recipe bit in a **compiled-consumer mask**;
+4. the recipe bit in the caller's approved-profile mask;
+5. `window_valid` from the opportunity-window owner.
+
+When permission is absent, the action fields remain zero and `target_numfmt`
+remains the native input format, even when `eligible=1`. There is no production
+call site or nonzero production consumer mask yet.
+
+Conversion predicates compare an externally supplied `error_bound_q4` against
+`level` in sixteenths of a percentage point. Bounds must be rounded upward by
+the provider. This is an admission-contract check, not an on-chip measurement
+of accuracy: a tile p95 observation is not a universal error bound. Profile
+approval must cover the actual source format, range, scaling, operation and
+context. BF16 remains a candidate because one small FP32-model capture does not
+prove it globally dominated by FP16.
+
+The current four-bit level reaches only 15/16 percent. The older host bank
+example at 2 percent therefore cannot automatically authorise INT8 here.
+
+The caller must invalidate the window on profile, bank, level, tensor identity,
+format or context changes. This combinational function holds no state and does
+not implement hysteresis, hash caching or evidence authentication itself. It
+preserves the existing window controller for later integration rather than
+claiming that control is already wired.
+
+### Verification and integration scope
+
+The existing subcode TB now runs 18,473 swept cases plus directed checks:
+8 format encodings, K=1..256, bank capacity=0..8, odd tails, TALL layout,
+independent-job and accumulator limits, all 32 IDs, inclusive error bounds,
+missing scale/range/accuracy evidence, stale windows and off/approval/consumer
+gates. The first remote run failed before the new API existed; after implementation,
+all five cache-off and five cache-on parameter profiles pass and retain original
+steering-output equivalence. The runner requires a `VA_HEURISTICS PASS` marker.
+
+Evidence: `ai-policy-subcode-20260907T012755Z-43d44da4f6cb`, `status=PASS` with
+the identical `VA_HEURISTICS PASS sweep_checks=18473` marker in all ten profiles;
+the unchanged codec suite also passes
+(`ai-policy-codec-20260907T012056Z-4686d331a62b`).
+Local explicit Yosys synthesis of the externally driven selector at
+64 lane-bytes / eight-byte minimum / eight groups reports **540 generic cells,
+zero sequential cells and zero latches**. The disabled wrapper reports zero
+cells and constant-zero outputs. Artifact:
+`ai-policy-subcode-synth-20260907T012757Z-42bd9c8b8389`. An earlier build
+measured 518 cells before the matrix-plane and queue prerequisites were added to
+the predicate; that figure is superseded.
+These are isolated generic-cell results, not technology area or STA. The selector
+adds no sequential search, clock, reset, memory array or changes to the GEMM
+critical path because it is not connected there. Integration must budget its
+combinational delay and actual conversion/reuse/grouping costs. No new formal
+proof is claimed. Existing package/TB flists already include the changed files;
+no sources or licence annotations were added.
+
+## 9. Not implemented
+
+Per-group arithmetic/accumulators, operand converters, exact-zero and residency
+proof producers, descriptor/MMIO runtime plumbing, applied-plan PMU readback and
+window-to-request wiring remain open. Reserved recipes (including logarithmic
+products, residual correction and outlier streams) remain disabled. There is no
+new numerical approximation or measured MAC/s improvement in this increment.

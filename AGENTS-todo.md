@@ -268,6 +268,19 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   worth +0.0% versus provisioning wide, because surplus lanes idle at identical
   cycles (INT4 k=16 is 66 cycles at 8, 16 and 32 lanes alike). A knob whose wrong
   settings cost nothing cannot earn anything by being set right.
+- [x] V/A-Turbo SV recipe calculations: `va_turbo_select` implements ten supported
+  selection predicates in a 32-ID namespace (native fallback, integer-zero product
+  skip, FP16/BF16/INT8 conversion plans, paired/four-output/independent/occupancy
+  grouping and validated operand reuse). K-byte demand, tail count, banks and
+  accumulator limits are calculated with bounded shifts/comparisons. Runtime
+  level, compiled-consumer mask, profile approval and window validity gate apply.
+  Remote five cache-off/on profiles PASS with 18,473 swept cases plus directed
+  guards (`ai-policy-subcode-20260907T012755Z-43d44da4f6cb`). Selector synthesis:
+  540 generic cells, no sequential cells/latches; disabled wrapper zero.
+- [ ] Connect qualified V/A plans to actual consumers and window ownership before
+  claiming acceleration. No precision conversion, multi-output arithmetic, new
+  runtime ABI or approximation quality was implemented in the selector pass.
+  Reserved recipes stay unsupported; existing subcode search stays intact.
 - [x] S0 DONE (verif/tb/ai_island/policy_approx.py, artifact
   policy-approx-s0-pythia.json): 48 real activation-by-weight tiles from pinned
   pythia-70m-deduped through a real forward pass, 8x8x16, exact float64 reference

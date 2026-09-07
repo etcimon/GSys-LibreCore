@@ -113,6 +113,138 @@ package g6lc_ai_policy_pkg;
     return (lanes_log2 > wanted) ? 3'(lanes_log2 - wanted) : 3'd0;
   endfunction
 
+  typedef struct packed {
+    logic enable;
+    logic [3:0] level;
+    logic [1:0] bank;
+    logic [2:0] subcode;
+    policy_code_t code;
+    logic [2:0] numfmt;
+    logic [15:0] m, n, k;
+    logic regular_layout;
+    logic independent_jobs;
+    logic [8:0] ready_jobs, free_accumulators, bank_groups;
+    logic exact_zero_proven;
+    logic reuse_a_valid, reuse_b_valid;
+    logic range_safe, scale_valid, accuracy_valid;
+    logic [7:0] error_bound_q4;
+    logic window_valid;
+    logic [31:0] qualified_mask;
+  } va_turbo_request_t;
+
+  typedef struct packed {
+    logic supported;
+    logic eligible;
+    logic apply;
+    logic [4:0] recipe;
+    logic [2:0] target_numfmt;
+    logic [2:0] groups_log2;
+    logic [4:0] tail_outputs;
+    logic split_rows;
+    logic reuse_a, reuse_b;
+    logic skip_products;
+    logic convert;
+    logic [18:0] row_bytes;
+  } va_turbo_plan_t;
+
+  function automatic va_turbo_plan_t va_turbo_select(
+      input config_pkg::ai_cfg_t cfg,
+      input va_turbo_request_t r,
+      input int unsigned lane_bytes,
+      input int unsigned min_group_bytes,
+      input int unsigned max_groups,
+      input logic [31:0] consumer_mask
+  );
+    va_turbo_plan_t p, candidate;
+    logic [4:0] id;
+    logic [18:0] row_bytes;
+    logic [2:0] target;
+    logic conversion, separate_jobs;
+    logic [8:0] work_count;
+    int unsigned group_limit;
+    p = '0;
+    p.target_numfmt = r.numfmt;
+    id = {r.bank, r.subcode};
+    p.supported = id inside {5'd0, 5'd2, 5'd4, 5'd5, 5'd6, 5'd9, 5'd10,
+                             5'd11, 5'd13, 5'd16};
+    if (!p.supported || !cfg.VaTurboEn || !cfg.PolicySubcodeEn ||
+        !cfg.PolicyBenefitEn || !cfg.PolicyCodecEn || !cfg.IslandFpEn ||
+        !cfg.MatrixEn || cfg.Queues == 0 || !r.enable || r.level == 0 || !policy_format_known(r.numfmt) ||
+        r.code == POLICY_MOVEMENT || r.m == 0 || r.n == 0 || r.k == 0 ||
+        r.m > 256 || r.n > 256 || r.k > 256 ||
+        lane_bytes < 8 || lane_bytes > 256 || (lane_bytes & (lane_bytes - 1)) != 0 ||
+        min_group_bytes < 8 || min_group_bytes > lane_bytes ||
+        (min_group_bytes & (min_group_bytes - 1)) != 0 ||
+        max_groups == 0 || max_groups > 32 || (max_groups & (max_groups - 1)) != 0)
+      return p;
+    if (id == 0) begin
+      p.eligible = 1'b1;
+      return p;
+    end
+    candidate = p;
+    candidate.recipe = id;
+    target = r.numfmt;
+    conversion = id inside {5'd4, 5'd5, 5'd6};
+    if (conversion) begin
+      if (r.numfmt != 3'(config_pkg::AI_FMT_FP32) || !r.range_safe ||
+          !r.accuracy_valid || r.error_bound_q4 > {4'd0, r.level} ||
+          (id == 6 && !r.scale_valid)) return p;
+      case (id)
+        5'd4: target = 3'(config_pkg::AI_FMT_FP16);
+        5'd5: target = 3'(config_pkg::AI_FMT_BF16);
+        default: target = 3'(config_pkg::AI_FMT_INT);
+      endcase
+      candidate.convert = 1'b1;
+    end
+    row_bytes = target == 3'(config_pkg::AI_FMT_INT4) ?
+        (({3'd0, r.k} + 19'd1) >> 1) :
+        ({3'd0, r.k} << (policy_element_bits_log2(target) - 3'd3));
+    candidate.target_numfmt = target;
+    candidate.row_bytes = row_bytes;
+    if (id == 2) begin
+      if (!policy_integer_format(r.numfmt) || !r.exact_zero_proven) return p;
+      candidate.skip_products = 1'b1;
+    end else if (id == 16) begin
+      if (!r.reuse_a_valid && !r.reuse_b_valid) return p;
+      candidate.reuse_a = r.reuse_a_valid;
+      candidate.reuse_b = r.reuse_b_valid;
+    end else begin
+      separate_jobs = id == 11;
+      if (!r.regular_layout || (separate_jobs && !r.independent_jobs)) return p;
+      candidate.split_rows = !separate_jobs && (r.code == POLICY_TALL || r.n == 1);
+      if (id == 9 || id == 10) candidate.split_rows = 1'b0;
+      work_count = separate_jobs ? r.ready_jobs :
+                   candidate.split_rows ? 9'(r.m) : 9'(r.n);
+      group_limit = id == 9 ? 2 : id == 10 ? 4 : max_groups;
+      for (int unsigned log_groups = 1; log_groups <= 5; log_groups++) begin
+        if ((32'd1 << log_groups) <= max_groups &&
+            (32'd1 << log_groups) <= group_limit &&
+            (32'd1 << log_groups) <= 32'(work_count) &&
+            (32'd1 << log_groups) <= 32'(r.free_accumulators) &&
+            (32'd1 << log_groups) <= 32'(r.bank_groups) &&
+            (lane_bytes >> log_groups) >= min_group_bytes &&
+            (lane_bytes >> log_groups) >= 32'(row_bytes))
+          candidate.groups_log2 = 3'(log_groups);
+      end
+      if (candidate.groups_log2 == 0 && !conversion) return p;
+      if (id == 9 && candidate.groups_log2 != 1) return p;
+      if (id == 10 && candidate.groups_log2 != 2) return p;
+      if (r.free_accumulators == 0 || r.bank_groups == 0) return p;
+      if (!separate_jobs && candidate.groups_log2 != 0) begin
+        candidate.reuse_a = !candidate.split_rows;
+        candidate.reuse_b = candidate.split_rows;
+        candidate.tail_outputs = 5'(work_count & ((9'd1 << candidate.groups_log2) - 9'd1));
+      end
+    end
+    p.eligible = 1'b1;
+    if (consumer_mask[id] && r.window_valid && r.qualified_mask[id]) begin
+      candidate.eligible = 1'b1;
+      candidate.apply = 1'b1;
+      return candidate;
+    end
+    return p;
+  endfunction
+
   function automatic logic [63:0] policy_normalize_sample(
       input logic [255:0] sample, input logic [2:0] numfmt
   );

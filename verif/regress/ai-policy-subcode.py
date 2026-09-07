@@ -630,6 +630,11 @@ def remote(args):
                  "--Mdir", mdir, "-CFLAGS", "-std=c++17 -Wall -Wextra -Werror", *overrides, *sv,
                  snapshots / "policy_subcode_main.cpp"], name + "-build")
             _, text = run([mdir / ("V" + TOP), args.seed], name + "-simulation")
+            va_marker = re.search(r"^VA_HEURISTICS PASS sweep_checks=\d+ formats=8 k=1\.\.256 "
+                                  r"banks=0\.\.8 reserved=fail_closed$", text, re.M)
+            if va_marker is None:
+                raise RuntimeError(name + " missing V/A heuristic check marker")
+            variant["va_heuristics"] = va_marker.group(0)
             marker = re.search(r"^PASS policy_subcode cases=\d+ eligible=\d+ ineligible=\d+ checks=\d+$", text, re.M)
             if marker is None:
                 raise RuntimeError(name + " missing scoreboard pass marker")
@@ -661,6 +666,11 @@ def remote(args):
                  "--Mdir", mdir, "-CFLAGS", "-std=c++17 -Wall -Wextra -Werror", *overrides, *sv,
                  snapshots / "policy_subcode_main.cpp"], name + "-build")
             _, text = run([mdir / ("V" + TOP), args.seed], name + "-simulation")
+            va_marker = re.search(r"^VA_HEURISTICS PASS sweep_checks=\d+ formats=8 k=1\.\.256 "
+                                  r"banks=0\.\.8 reserved=fail_closed$", text, re.M)
+            if va_marker is None:
+                raise RuntimeError(name + " missing V/A heuristic check marker")
+            variant["va_heuristics"] = va_marker.group(0)
             marker = re.search(r"^CACHE PASS hits=\d+ misses=\d+ steer_hits=\d+ checks=\d+ "
                                r"hit_cycles=1 miss_cycles=32 key_bits=all cancel_ages=0\.\.31 "
                                r"legacy_equivalence=all_outputs$", text, re.M)
@@ -776,7 +786,8 @@ def local_synthesis(args):
         report["yosys_command"] = list(map(str, frontend))
         sources = " ".join(files)
         report["synthesis"] = {}
-        for top in (SYNTH_TOP, DISABLED_TOP, CACHE_SYNTH_TOP):
+        for top in (SYNTH_TOP, DISABLED_TOP, CACHE_SYNTH_TOP,
+                    "tb_g6lc_ai_va_turbo_plan_on", "tb_g6lc_ai_va_turbo_plan"):
             netlist = out / (top + ".json")
             script = ("read_slang --top " + top + " " + sources +
                       "; synth -top " + top + " -flatten; check -assert; write_json " +
@@ -791,12 +802,15 @@ def local_synthesis(args):
                    for cell in cells.values()):
                 raise RuntimeError(top + " contains unflattened/unknown cells")
             sequential = sum("dff" in cell["type"].lower() for cell in cells.values())
-            if top == DISABLED_TOP:
+            if top in (DISABLED_TOP, "tb_g6lc_ai_va_turbo_plan"):
                 if cells:
                     raise RuntimeError("Enabled=0 retained cells")
                 for name, port in module["ports"].items():
                     if port["direction"] == "output" and any(bit != "0" for bit in port["bits"]):
                         raise RuntimeError("Enabled=0 output is not constant zero: " + name)
+            elif top == "tb_g6lc_ai_va_turbo_plan_on":
+                if not cells or sequential:
+                    raise RuntimeError("V/A selector must retain combinational logic without state")
             elif not cells or not sequential:
                 raise RuntimeError("enabled top lost its sequential implementation")
             report["synthesis"][top] = {"status": "PASS", "cells": len(cells),

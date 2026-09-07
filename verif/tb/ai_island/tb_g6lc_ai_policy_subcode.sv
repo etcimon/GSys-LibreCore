@@ -56,6 +56,160 @@ module tb_g6lc_ai_policy_subcode #(
   assign format_min_reduction_o = FormatMinReductionLog2;
   assign group_shapes_o = GroupShapeLog2;
 
+  initial begin : va_heuristic_checks
+    config_pkg::ai_cfg_t cfg;
+    va_turbo_request_t r;
+    va_turbo_plan_t p;
+    int unsigned bytes_per_row, expected_groups, checks;
+    cfg = config_pkg::AiCfgOff;
+    cfg.VaTurboEn = 1'b1;
+    cfg.MatrixEn = 1'b1;
+    cfg.Queues = 1;
+    cfg.PolicyCodecEn = 1'b1;
+    cfg.PolicyBenefitEn = 1'b1;
+    cfg.PolicySubcodeEn = 1'b1;
+    cfg.IslandFpEn = 1'b1;
+    r = '0;
+    r.enable = 1'b1;
+    r.level = 4'd15;
+    r.bank = 2'd1;
+    r.subcode = 3'd5;
+    r.code = POLICY_BULK;
+    r.m = 16'd16;
+    r.n = 16'd16;
+    r.regular_layout = 1'b1;
+    r.ready_jobs = 9'd16;
+    r.free_accumulators = 9'd16;
+    r.bank_groups = 9'd16;
+    r.qualified_mask = '1;
+    r.window_valid = 1'b1;
+    checks = 0;
+    for (int fmt = 0; fmt < 8; fmt++) begin
+      r.numfmt = 3'(fmt);
+      for (int k = 1; k <= 256; k++) begin
+        r.k = 16'(k);
+        bytes_per_row = (k * (fmt == 1 ? 4 : fmt == 5 || fmt == 6 ? 16 : fmt == 7 ? 32 : 8) + 7) / 8;
+        for (int bank_cap = 0; bank_cap <= 8; bank_cap++) begin
+          r.bank_groups = 9'(bank_cap);
+          p = va_turbo_select(cfg, r, 64, 8, 8, 32'hffffffff);
+          expected_groups = 1;
+          for (int g = 2; g <= 8; g *= 2)
+            if (fmt != 2 && bytes_per_row <= 64/g && 8 <= 64/g && g <= bank_cap)
+              expected_groups = g;
+          assert (p.apply == (expected_groups > 1) &&
+                  (1 << p.groups_log2) == expected_groups)
+            else $fatal(1, "VA group capacity fmt=%0d k=%0d banks=%0d", fmt, k, bank_cap);
+          if (p.apply)
+            assert (p.reuse_a && !p.reuse_b && !p.convert && p.target_numfmt == r.numfmt)
+              else $fatal(1, "VA exact grouping changed arithmetic");
+          checks++;
+        end
+      end
+    end
+    r.numfmt = 3'd1; r.k = 16'd17; r.bank_groups = 9'd8;
+    r.code = POLICY_TALL; r.m = 16'd3; r.n = 16'd1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.groups_log2 == 1 && p.tail_outputs == 1 &&
+            p.split_rows && p.reuse_b && !p.reuse_a)
+      else $fatal(1, "VA tall odd-tail grouping");
+    r.bank = 1; r.subcode = 3; r.independent_jobs = 1;
+    for (int jobs = 0; jobs <= 8; jobs++) begin
+      r.ready_jobs = 9'(jobs);
+      r.free_accumulators = 9'd3;
+      p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+      assert (p.apply == (jobs >= 2) && p.groups_log2 == (jobs >= 2 ? 1 : 0))
+        else $fatal(1, "VA independent-job/accumulator bound");
+      checks++;
+    end
+    r.m = 16; r.n = 16; r.k = 16; r.code = POLICY_BULK;
+    r.numfmt = 7; r.bank = 0; r.subcode = 4;
+    r.free_accumulators = 8; r.ready_jobs = 8; r.bank_groups = 8;
+    r.range_safe = 1; r.accuracy_valid = 1; r.error_bound_q4 = 2; r.level = 2;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.convert && p.target_numfmt == 5 && p.groups_log2 == 1 && p.row_bytes == 32)
+      else $fatal(1, "VA FP16 bound equality");
+    r.error_bound_q4 = 3;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && p.target_numfmt == 7 && !p.convert) else $fatal(1, "VA excessive error");
+    r.error_bound_q4 = 1; r.accuracy_valid = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA missing accuracy contract");
+    r.accuracy_valid = 1; r.range_safe = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA unqualified range");
+    r.range_safe = 1; r.subcode = 5;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.target_numfmt == 6) else $fatal(1, "VA BF16 recipe");
+    r.subcode = 6; r.scale_valid = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA INT8 missing scale");
+    r.scale_valid = 1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.target_numfmt == 0 && p.groups_log2 == 2)
+      else $fatal(1, "VA INT8 recipe");
+    r.subcode = 2; r.exact_zero_proven = 1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA floating zero skip forbidden");
+    r.numfmt = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.skip_products) else $fatal(1, "VA integer-zero recipe");
+    r.exact_zero_proven = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA sparse residue is not proof");
+    r.bank = 2; r.subcode = 0; r.reuse_a_valid = 1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.reuse_a && !p.reuse_b) else $fatal(1, "VA resident operand reuse");
+    r.reuse_a_valid = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA stale reuse");
+    r.bank = 1; r.subcode = 1;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.groups_log2 == 1) else $fatal(1, "VA paired output");
+    r.subcode = 2;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (p.apply && p.groups_log2 == 2) else $fatal(1, "VA four outputs");
+    p = va_turbo_select(cfg, r, 64, 8, 8, '0);
+    assert (!p.apply && p.eligible && p.recipe == 0) else $fatal(1, "VA absent consumer gate");
+    r.qualified_mask = '0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && p.eligible) else $fatal(1, "VA approval gate");
+    r.qualified_mask = '1; r.window_valid = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && p.eligible) else $fatal(1, "VA stale opportunity window");
+    r.window_valid = 1; r.level = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && !p.eligible) else $fatal(1, "VA level zero");
+    r.level = 2; cfg.VaTurboEn = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && !p.eligible) else $fatal(1, "VA compile gate");
+    cfg.VaTurboEn = 1; cfg.Queues = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply && !p.eligible) else $fatal(1, "VA queue prerequisite");
+    cfg.Queues = 1;
+    for (int id = 0; id < 32; id++) begin
+      r.bank = 2'(id >> 3); r.subcode = 3'(id);
+      p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+      if (!(id inside {0, 2, 4, 5, 6, 9, 10, 11, 13, 16}))
+        assert (!p.supported && !p.apply && p.recipe == 0)
+          else $fatal(1, "VA reserved recipe applied: %0d", id);
+      checks++;
+    end
+    r.bank = 1; r.subcode = 5;
+    r.k = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA zero K");
+    r.k = 257;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA oversized K");
+    r.k = 16; r.regular_layout = 0;
+    p = va_turbo_select(cfg, r, 64, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA irregular layout");
+    r.regular_layout = 1;
+    p = va_turbo_select(cfg, r, 63, 8, 8, '1);
+    assert (!p.apply) else $fatal(1, "VA invalid provisioning");
+    $display("VA_HEURISTICS PASS sweep_checks=%0d formats=8 k=1..256 banks=0..8 reserved=fail_closed", checks);
+  end
+
   g6lc_ai_policy_subcode #(
     .Enabled(1'b1), .CacheEn(CacheEn), .ReadBytesPerCycle(ReadBytesPerCycle),
     .MinSavingsCycles(MinSavingsCycles), .SwitchCycles(SwitchCycles),
@@ -198,6 +352,39 @@ module tb_g6lc_ai_policy_subcode #(
         else $fatal(1, "an 8-lane array must never be split");
   end
   // pragma translate_on
+endmodule
+
+module tb_g6lc_ai_va_turbo_plan #(
+  parameter bit Enabled = 1'b0
+) (
+  input g6lc_ai_policy_pkg::va_turbo_request_t request_i,
+  input logic [31:0] consumer_mask_i,
+  output g6lc_ai_policy_pkg::va_turbo_plan_t plan_o
+);
+  function automatic config_pkg::ai_cfg_t va_cfg();
+    config_pkg::ai_cfg_t cfg = config_pkg::AiCfgOff;
+    cfg.MatrixEn = 1'b1;
+    cfg.Queues = 1;
+    cfg.PolicyCodecEn = Enabled;
+    cfg.PolicyBenefitEn = Enabled;
+    cfg.PolicySubcodeEn = Enabled;
+    cfg.IslandFpEn = Enabled;
+    cfg.VaTurboEn = Enabled;
+    return cfg;
+  endfunction
+  if (Enabled) begin : gen_on
+    assign plan_o = g6lc_ai_policy_pkg::va_turbo_select(va_cfg(), request_i, 64, 8, 8, consumer_mask_i);
+  end else begin : gen_off
+    assign plan_o = '0;
+  end
+endmodule
+
+module tb_g6lc_ai_va_turbo_plan_on (
+  input g6lc_ai_policy_pkg::va_turbo_request_t request_i,
+  input logic [31:0] consumer_mask_i,
+  output g6lc_ai_policy_pkg::va_turbo_plan_t plan_o
+);
+  tb_g6lc_ai_va_turbo_plan #(.Enabled(1'b1)) i_on (.*);
 endmodule
 
 module tb_g6lc_ai_policy_subcode_instance #(
