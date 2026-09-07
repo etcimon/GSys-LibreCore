@@ -179,6 +179,7 @@ path = [
   "verif/tb/ai_island/policy_motifs.py",
   "verif/tb/ai_island/test_policy_motifs.py",
   "verif/tb/ai_island/policy_measure.py",
+  "verif/tb/ai_island/policy_approx.py",
   "verif/tb/ai_island/test_policy_measure.py",
   "verif/tb/ai_island/run-gemm-scaling.sh",
   "verif/tb/ai_island/run-gemm-ksweep.sh",

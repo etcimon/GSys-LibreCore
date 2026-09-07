@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Etienne Cimon
+#
+# S0 of the approximate-compute plan: measure the ACCURACY side before any RTL
+# exists, because if the error is unacceptable the rest of the plan is void.
+#
+# Two levers are measured separately, because they buy different things and an
+# earlier revision of the plan conflated them:
+#
+#   1. FORMAT NARROWING (fewer bytes per element) reduces k_bytes, and k_bytes is
+#      what the measured lane rule says a dot can use.  Each halving therefore
+#      doubles the groups a fixed array can host -> it buys CONCURRENCY.
+#   2. APPROXIMATE MULTIPLIERS at a fixed format (mantissa truncation, Mitchell
+#      logarithmic multiply) do NOT change the stored element width, so they buy
+#      no lanes at all -> they buy MULTIPLIER AREA AND DEPTH only.
+#
+# Both are reported against the same exact reference, so the two ratios are not
+# mixed up.  Accumulation is exact (float64) in every candidate: the whole
+# premise is "approximate the products, accumulate exactly".
+#
+# Operands are real tensors from a pinned model, taken through a real forward
+# pass, because an all-ones fixture has no cancellation and no dynamic range and
+# would flatter every approximation.  The error metric here is tile-level and is
+# a PROXY: it is not a perplexity or model-quality claim.
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sys
+
+TILE_M = 8
+TILE_N = 8
+TILE_K = 16  # the shipped MaxDim, which is what bounds per-tile k
+
+
+def revision_arg(value):
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise argparse.ArgumentTypeError("revision must be an immutable 40-hex commit SHA")
+    return value
+
+
+def snapshot_dir(cache_dir, model_id, revision):
+    path = (Path(cache_dir).absolute() / ("models--" + model_id.replace("/", "--"))
+            / "snapshots" / revision)
+    if not path.is_dir():
+        raise SystemExit("pinned snapshot missing (no download is attempted): " + str(path))
+    return path
+
+
+def collect_operands(snapshot, revision, prompt, max_layers):
+    """Real (activation, weight) pairs from a real forward pass.
+
+    The activation is the genuine input to a Linear, so operand A carries real
+    dynamic range and sign structure rather than a synthetic distribution.
+    """
+    import torch
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+    common = {"local_files_only": True, "trust_remote_code": False, "revision": revision}
+    AutoConfig.from_pretrained(str(snapshot), **common)
+    tokenizer = AutoTokenizer.from_pretrained(str(snapshot), **common)
+    model = AutoModelForCausalLM.from_pretrained(str(snapshot), torch_dtype=torch.float32, **common)
+    model.eval()
+
+    captured = []
+
+    def hook(name):
+        def fn(_module, args, _out):
+            if len(captured) < max_layers and args and args[0] is not None:
+                act = args[0].detach().reshape(-1, args[0].shape[-1]).to(torch.float64)
+                weight = _module.weight.detach().to(torch.float64)
+                if act.shape[0] >= TILE_M and act.shape[1] >= TILE_K and weight.shape[0] >= TILE_N:
+                    captured.append((name, act, weight))
+        return fn
+
+    handles = [module.register_forward_hook(hook(name))
+               for name, module in model.named_modules()
+               if module.__class__.__name__ == "Linear"]
+    with torch.no_grad():
+        model(**tokenizer(prompt, return_tensors="pt"))
+    for handle in handles:
+        handle.remove()
+    if not captured:
+        raise SystemExit("no Linear operands captured; the fixture would be synthetic")
+    return captured
+
+
+def tiles(captured, count):
+    """(A, B) float64 tile pairs shaped (TILE_M, TILE_K) x (TILE_K, TILE_N)."""
+    out = []
+    for name, act, weight in captured:
+        for step in range(count):
+            r = (step * TILE_M) % (act.shape[0] - TILE_M + 1)
+            c = (step * TILE_K) % (act.shape[1] - TILE_K + 1)
+            o = (step * TILE_N) % (weight.shape[0] - TILE_N + 1)
+            a = act[r:r + TILE_M, c:c + TILE_K]
+            b = weight[o:o + TILE_N, c:c + TILE_K].transpose(0, 1)
+            if a.abs().sum().item() > 0 and b.abs().sum().item() > 0:
+                out.append((name, a, b))
+    return out
+
+
+# ---------------------------------------------------------------- lever 1
+def quantize_format(t, fmt):
+    """Round operands to a storage format. This is what changes k_bytes."""
+    import torch
+    if fmt == "FP32":
+        return t.to(torch.float32).to(torch.float64)
+    if fmt == "BF16":
+        return t.to(torch.bfloat16).to(torch.float64)
+    if fmt == "FP16":
+        return t.to(torch.float16).to(torch.float64)
+    if fmt in ("FP8_E4M3", "FP8_E5M2"):
+        dtype = torch.float8_e4m3fn if fmt == "FP8_E4M3" else torch.float8_e5m2
+        scale = t.abs().max()
+        if scale == 0:
+            return t.clone()
+        # Per-tile scaling, which is what any real FP8 path does; without it FP8
+        # would be measured on its raw exponent range and look far worse.
+        return (t / scale).to(dtype).to(torch.float64) * scale
+    if fmt in ("INT8", "INT4"):
+        levels = 127 if fmt == "INT8" else 7
+        scale = t.abs().max() / levels
+        if scale == 0:
+            return t.clone()
+        return torch.clamp(torch.round(t / scale), -levels - 1, levels) * scale
+    raise SystemExit("unknown format " + fmt)
+
+
+# ---------------------------------------------------------------- lever 2
+def truncate_mantissa(t, keep):
+    """Keep `keep` mantissa bits of an FP32 operand: a cheaper multiplier, same width."""
+    import torch
+    bits = torch.tensor(t.to(torch.float32).numpy().view("uint32").copy())
+    mask = (0xFFFFFFFF << (23 - keep)) & 0xFFFFFFFF
+    return torch.tensor((bits.numpy() & mask).view("float32").copy()).to(torch.float64)
+
+
+def mitchell_product(a, b):
+    """Mitchell logarithmic multiply: exponent add plus a linear mantissa term.
+
+    (1+ma) * (1+mb) ~= 1 + ma + mb, the classic analog-like approximation. This
+    replaces a multiplier array with an adder, at a known ~ -11% worst-case
+    per-product error.
+    """
+    import torch
+    sign = torch.sign(a) * torch.sign(b)
+    aa, ab = a.abs(), b.abs()
+    ea, eb = torch.floor(torch.log2(aa)), torch.floor(torch.log2(ab))
+    ma, mb = aa / torch.pow(2.0, ea) - 1.0, ab / torch.pow(2.0, eb) - 1.0
+    approx = torch.pow(2.0, ea + eb) * (1.0 + ma + mb)
+    return torch.where((aa == 0) | (ab == 0), torch.zeros_like(approx), sign * approx)
+
+
+def rel_error(candidate, reference):
+    num = (candidate - reference).norm().item()
+    den = reference.norm().item()
+    return num / den if den else 0.0
+
+
+def evaluate(tile_set):
+    """Exact float64 reference; every candidate accumulates exactly."""
+    import torch
+    formats = ("FP32", "BF16", "FP16", "FP8_E4M3", "FP8_E5M2", "INT8", "INT4")
+    k_bytes = {"FP32": 64, "BF16": 32, "FP16": 32, "FP8_E4M3": 16, "FP8_E5M2": 16,
+               "INT8": 16, "INT4": 8}
+    report = {"tiles": len(tile_set), "tile_shape": [TILE_M, TILE_N, TILE_K],
+              "reference": "float64 exact products and accumulation",
+              "accumulation": "exact in every candidate",
+              "format_narrowing": [], "approximate_multiplier": []}
+    refs = [(a @ b) for _, a, b in tile_set]
+
+    for fmt in formats:
+        errs = [rel_error(quantize_format(a, fmt) @ quantize_format(b, fmt), ref)
+                for (_, a, b), ref in zip(tile_set, refs)]
+        errs.sort()
+        kb = k_bytes[fmt]
+        report["format_narrowing"].append({
+            "format": fmt, "k_bytes_at_k16": kb,
+            "groups_at_32_lanes": (32 // kb) if kb <= 32 else 0,
+            "groups_at_64_lanes": 64 // kb,
+            "rel_error_median": errs[len(errs) // 2],
+            "rel_error_p95": errs[min(len(errs) - 1, int(0.95 * len(errs)))],
+            "rel_error_max": errs[-1],
+        })
+
+    for keep in (10, 8, 6, 4, 2):
+        errs = [rel_error(truncate_mantissa(a, keep) @ truncate_mantissa(b, keep), ref)
+                for (_, a, b), ref in zip(tile_set, refs)]
+        errs.sort()
+        report["approximate_multiplier"].append({
+            "topology": "mantissa_truncated", "mantissa_bits_kept": keep,
+            "buys": "multiplier area and depth only; k_bytes and concurrency unchanged",
+            "rel_error_median": errs[len(errs) // 2],
+            "rel_error_p95": errs[min(len(errs) - 1, int(0.95 * len(errs)))],
+            "rel_error_max": errs[-1],
+        })
+
+    errs = []
+    for (_, a, b), ref in zip(tile_set, refs):
+        prod = mitchell_product(a.unsqueeze(2), b.unsqueeze(0)).sum(dim=1)
+        errs.append(rel_error(prod, ref))
+    errs.sort()
+    report["approximate_multiplier"].append({
+        "topology": "mitchell_logarithmic",
+        "buys": "replaces the multiplier array with an adder; concurrency unchanged",
+        "rel_error_median": errs[len(errs) // 2],
+        "rel_error_p95": errs[min(len(errs) - 1, int(0.95 * len(errs)))],
+        "rel_error_max": errs[-1],
+    })
+    return report
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="S0 accuracy study for AI-island approximate compute (host-only, no RTL)")
+    parser.add_argument("--cache-dir", type=Path, required=True)
+    parser.add_argument("--model-id", required=True)
+    parser.add_argument("--revision", required=True, type=revision_arg)
+    parser.add_argument("--prompt", default="The GSys LibreCore AI island computes a matrix product.")
+    parser.add_argument("--layers", type=int, default=6)
+    parser.add_argument("--tiles-per-layer", type=int, default=8)
+    parser.add_argument("--out", type=Path)
+    args = parser.parse_args(argv)
+    if args.out and args.out.suffix.lower() != ".json":
+        parser.error("report output must be JSON")
+    if not 1 <= args.layers <= 64 or not 1 <= args.tiles_per_layer <= 256:
+        parser.error("layers and tiles-per-layer must be small positive counts")
+
+    os.environ["HF_HOME"] = str(args.cache_dir.absolute().parent)
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    snapshot = snapshot_dir(args.cache_dir, args.model_id, args.revision)
+    captured = collect_operands(snapshot, args.revision, args.prompt, args.layers)
+    tile_set = tiles(captured, args.tiles_per_layer)
+    report = evaluate(tile_set)
+    report["source"] = {"model_id": args.model_id, "revision": args.revision,
+                        "prompt_sha256": hashlib.sha256(args.prompt.encode()).hexdigest(),
+                        "modules": sorted({name for name, _, _ in tile_set})}
+    report["limitations"] = [
+        "Tile-level relative Frobenius error is a PROXY; it is not a perplexity or model-quality claim.",
+        "Operands are real activations and weights from one pinned model and one prompt, not a workload distribution.",
+        "Format narrowing is the only lever that changes k_bytes and therefore concurrency; the approximate multipliers buy area and depth at unchanged concurrency.",
+        "Per-tile scaling is applied for FP8/INT8/INT4, which is what a real path does; without it those formats would measure far worse.",
+        "Accumulation is exact everywhere, so these figures do not cover accumulator-width effects.",
+    ]
+    text = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    if args.out:
+        args.out.write_text(text, encoding="utf-8")
+    print("S0 ACCURACY STUDY  tiles=%d  shape=%dx%dx%d  reference=float64 exact"
+          % (report["tiles"], TILE_M, TILE_N, TILE_K))
+    print("\nLever 1 - format narrowing (changes k_bytes, buys concurrency):")
+    print("  %-10s %-8s %-7s %-7s %-11s %-11s %s"
+          % ("format", "k_bytes", "g@32", "g@64", "err median", "err p95", "err max"))
+    for row in report["format_narrowing"]:
+        print("  %-10s %-8d %-7s %-7d %-11.3e %-11.3e %.3e"
+              % (row["format"], row["k_bytes_at_k16"],
+                 row["groups_at_32_lanes"] or ">32", row["groups_at_64_lanes"],
+                 row["rel_error_median"], row["rel_error_p95"], row["rel_error_max"]))
+    print("\nLever 2 - approximate multipliers (area/depth only, concurrency unchanged):")
+    for row in report["approximate_multiplier"]:
+        label = row["topology"] + (":%d" % row["mantissa_bits_kept"] if "mantissa_bits_kept" in row else "")
+        print("  %-26s err median %-11.3e p95 %-11.3e max %.3e"
+              % (label, row["rel_error_median"], row["rel_error_p95"], row["rel_error_max"]))
+    print("\nTile Frobenius error is a proxy, not a model-quality result.")
+    if args.out:
+        print("artifact: " + str(args.out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

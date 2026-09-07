@@ -1728,6 +1728,61 @@ S0 first is deliberate: it needs no RTL, and if the accuracy loss is
 unacceptable the rest of the plan is void. It is also the stage this project can
 actually complete today.
 
+#### S0 result: measured on real tensors
+
+`policy_approx.py` ran against the pinned `EleutherAI/pythia-70m-deduped`
+(revision `e93a9faa...`) through a real forward pass, taking 48 genuine
+activation-by-weight tiles at the shipped `8x8x16` geometry. Reference is exact
+`float64` products *and* accumulation; every candidate accumulates exactly.
+Artifact: `policy-approx-s0-pythia.json`.
+
+Lever 1, format narrowing - the only lever that changes `k_bytes`:
+
+| Format | k_bytes | Groups @64 lanes | Rel err p95 | Gain per 1% error |
+|---|--:|--:|--:|--:|
+| FP32 | 64 | 1 | 0 (lossless: the model is FP32) | - |
+| FP16 | 32 | 2 | `2.96e-04` | **67.6** |
+| BF16 | 32 | 2 | `3.18e-03` | 6.3 |
+| INT8 | 16 | 4 | `1.49e-02` | 2.7 |
+| FP8 E4M3 | 16 | 4 | `4.89e-02` | 0.8 |
+| FP8 E5M2 | 16 | 4 | `9.62e-02` | 0.4 |
+| INT4 | 8 | 8 | `2.49e-01` | 0.3 |
+
+Three findings that change the plan:
+
+1. **FP16 is the standout**: 2x concurrency for `0.03%` error, an order of
+   magnitude better ratio than anything else, and 10x more accurate than BF16 at
+   identical `k_bytes`. If only one precision step is taken, it is this one.
+2. **At equal concurrency, INT8 beats both FP8 encodings** - 3.3x more accurate
+   than E4M3 and 6.5x than E5M2 for the same one byte per element. Narrowing to
+   one byte should prefer INT8 here, which is not what the format list would
+   suggest.
+3. **INT4 costs `25%` tile error for its 8 groups.** That is almost certainly
+   past any usable budget, so the 4x-INT4-concurrency headroom identified
+   earlier is largely unreachable on this model.
+
+Lever 2, approximate multipliers, is **dominated** and the study says so:
+
+- 8-bit mantissa truncation lands at `3.22e-03`, statistically the same as BF16's
+  `3.18e-03` - but truncation keeps 4-byte storage, so it buys **no**
+  concurrency. Whenever the format can be narrowed instead, narrowing strictly
+  wins because it buys lanes as well.
+- Mitchell logarithmic multiply is `8.2x` less accurate than INT8 *and* buys no
+  lanes. On this evidence it should not be built.
+
+So the honest S0 verdict: **the plan survives, but only in a narrower form than
+proposed.** The value is a per-job FP32/FP16/INT8 precision choice - which is
+exactly a `precision_class` a sub-code can carry - and not the approximate
+multiplier topologies that motivated the "analog-imitating" framing. Mantissa
+truncation remains defensible only where FP32 range is required and its storage
+cannot be narrowed.
+
+Caveats that bound all of the above: tile Frobenius error is a proxy, not a
+perplexity result; the operands come from one small model and one prompt, not a
+workload distribution; FP8/INT8/INT4 are measured *with* per-tile scaling, which
+flatters them relative to an unscaled path; and accumulation is exact everywhere,
+so accumulator-width effects are not covered.
+
 **Area works in our favour here, unusually.** Truncated and logarithmic
 multipliers are *smaller* than exact ones, and deleting the 8-candidate search
 frees roughly 5,470 cells to spend on per-group accumulators. So precision

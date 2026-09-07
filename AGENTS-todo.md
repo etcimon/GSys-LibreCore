@@ -268,6 +268,28 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   worth +0.0% versus provisioning wide, because surplus lanes idle at identical
   cycles (INT4 k=16 is 66 cycles at 8, 16 and 32 lanes alike). A knob whose wrong
   settings cost nothing cannot earn anything by being set right.
+- [x] S0 DONE (verif/tb/ai_island/policy_approx.py, artifact
+  policy-approx-s0-pythia.json): 48 real activation-by-weight tiles from pinned
+  pythia-70m-deduped through a real forward pass, 8x8x16, exact float64 reference
+  and exact accumulation. Format narrowing (the only lever that changes k_bytes):
+  FP16 2x groups for 2.96e-04 p95 error = 67.6 gain per 1% error (best by an order
+  of magnitude, and 10x more accurate than BF16 at the same k_bytes); INT8 4x for
+  1.49e-02 (2.7); FP8 E4M3 4.89e-02 and E5M2 9.62e-02, i.e. INT8 is 3.3x/6.5x more
+  accurate at EQUAL concurrency so one-byte narrowing should prefer INT8; INT4 8x
+  for 2.49e-01 = 25% tile error, almost certainly unusable, so the INT4 4x
+  headroom found earlier is largely unreachable.
+- [x] S0 KILLED LEVER 2: 8-bit mantissa truncation errs 3.22e-03 versus BF16
+  3.18e-03 - same error, but truncation keeps 4-byte storage so it buys no
+  concurrency; narrowing strictly dominates it. Mitchell logarithmic multiply is
+  8.2x less accurate than INT8 and also buys no lanes; on this evidence do not
+  build it. Mantissa truncation stays defensible only where FP32 range is required
+  and storage cannot narrow.
+- [ ] REVISED TARGET after S0: sub-code carries a per-job precision_class over
+  {FP32, FP16, INT8} plus groups_log2. The approximate-multiplier topologies that
+  motivated the analog framing are dominated and drop out of the plan. Caveats:
+  tile Frobenius error is a proxy not perplexity; one model and one prompt;
+  FP8/INT8/INT4 measured WITH per-tile scaling which flatters them; accumulation
+  exact so accumulator-width effects uncovered.
 - [ ] PLANNED UPGRADE (plan only, nothing implemented; architecture README has the
   staged table). Precision is the lane-demand knob because usable lanes = k_bytes,
   so each halving of element width halves k_bytes and doubles hostable groups:
