@@ -5,20 +5,68 @@ GSys LibreCore BIOS kernel (not a port). Nothing here is compiled, flisted, or
 linked into `g6b-*` crates. Inferences are validated against LibreCore
 (`architecture/PLAN.md` §3) before they become BoardSpec fields or ELF bytes.
 
-| Tree | Upstream | License |
-|---|---|---|
-| [`ZealOS/`](ZealOS/) | https://github.com/Zeal-Operating-System/ZealOS | Unlicense |
-| [`TempleOS/`](TempleOS/) | https://github.com/cia-foundation/TempleOS | Public domain |
-| [`goja/`](goja/) | https://github.com/dop251/goja | MIT |
-| [`lirx-dom/`](lirx-dom/) | https://github.com/lirx-js/dom | MIT |
-| [`webidl/`](webidl/) | Gecko WebIDL via libwasm (WHATWG/W3C) | MPL-2.0 |
-| [`svelte-d/`](svelte-d/) | https://github.com/etcimon/svelte-d | MIT |
-| [`botan/`](botan/) | `riscv-dev/botan` (Botan D port) | BSD-2-Clause |
-| [`libwasm/`](libwasm/) | `riscv-compilers/libwasm` | MIT |
-| [`goosie/`](goosie/) | https://github.com/vyquocvu/goosie | MIT |
+| Tree | Upstream | License | Tracking |
+|---|---|---|---|
+| [`ZealOS/`](ZealOS/) | https://github.com/Zeal-Operating-System/ZealOS | Unlicense | vendored |
+| [`TempleOS/`](TempleOS/) | https://github.com/cia-foundation/TempleOS | Public domain | **submodule** |
+| [`goja/`](goja/) | https://github.com/dop251/goja | MIT | **submodule** |
+| [`lirx-dom/`](lirx-dom/) | https://github.com/lirx-js/dom | MIT | **submodule** |
+| [`webidl/`](webidl/) | Gecko WebIDL via libwasm (WHATWG/W3C) | MPL-2.0 | vendored |
+| [`svelte-d/`](svelte-d/) | https://github.com/etcimon/svelte-d | MIT | vendored |
+| [`botan/`](botan/) | `riscv-dev/botan` (Botan D port) | BSD-2-Clause | vendored |
+| [`libwasm/`](libwasm/) | `riscv-compilers/libwasm` | MIT | vendored |
+| [`goosie/`](goosie/) | https://github.com/vyquocvu/goosie | MIT | **submodule** |
 
 See [`NOTICE`](NOTICE). Governance: `g6lc_bios/AGENTS-licensing.md`,
 `architecture/ZEAL.md`.
+
+## Submodule vs vendored, and why the split is not arbitrary
+
+Four forks are git submodules pinned to a **real upstream commit**. The rest stay
+vendored (their files tracked directly in this repository). The rule is a
+verification result, not a preference: a submodule is only correct if the
+vendored content actually *is* some upstream commit, because the gitlink records
+a SHA that `git clone --recurse-submodules` must be able to fetch. A pin invented
+from a local commit would resolve on one machine and fail everywhere else.
+
+`tools/vendor_to_submodule.ps1` performs that check. It fetches the real history
+and accepts a candidate commit only when nothing is added, modified or renamed
+relative to it. Two tolerances are deliberate and bounded:
+
+- **Filemode** is ignored (`core.fileMode false`). Windows checkouts lose the
+  executable bit, which is not a content difference.
+- **Pure deletions** are tolerated *and then re-verified*: vendoring ran under
+  the parent repo's ignore rules, so paths the fork tracks upstream could be
+  stripped (root `.gitignore: build/` removed 28 files from `lirx-dom`). The
+  script then asserts every missing path really is parent-ignored, so the
+  tolerance cannot hide genuine drift. Those files return on checkout, which
+  repairs the fork rather than changing it.
+
+Pinned commits: `TempleOS` `c26482bb`, `goja` `f87b40ad`, `lirx-dom` `deef354d`,
+`goosie` `1039ae6f`.
+
+**`ZealOS` and `svelte-d` are deliberately still vendored** — the script refused
+them, and the refusal is the useful finding:
+
+- `ZealOS` matches **no** commit in its history (all 1367 were checked). Against
+  `main` 58 binary `.ZC`/`.DD` DolDoc files differ; against the `32bit-gfx` tip
+  130 do. It is not line-ending damage (CR/LF counts are identical) and the files
+  are not corrupt — `src/Demo/Games/FlapBat.ZC` is a legitimate upstream blob
+  that exists only on `32bit-gfx`. So the directory is a **mixture of blobs from
+  different branches** and no single SHA describes it.
+- `svelte-d` carries 2,692 files and ~1.2M lines that upstream's tip does not
+  have, including the vendored `binaryen/` fork. It is a working-tree snapshot,
+  not a clone.
+
+Converting either would mean fabricating a pin, so they keep their current,
+honest form. Re-running the script after a clean re-clone of those two upstreams
+is the way to promote them later.
+
+Licensing is unaffected: `.licensing-tiers` already globs every
+`g6lc_bios/kernel-spec/*/​**` path as tier **U** (upstream, verbatim, never
+rewritten), and `REUSE.toml` does not reference `kernel-spec` paths. Note that a
+plain `git clone` without `--recurse-submodules` now leaves the four submodule
+directories empty; `git submodule update --init` restores them.
 
 ## Precedence: fork `AGENTS.md` files are not governance
 
@@ -66,15 +114,27 @@ Do not compile goja, lirx-dom, WebIDL, svelte-d, LDC, or Binaryen. Display is
 in-kernel HTML+JS / svelte-d NodeDef on the display-proxy; the other KVM face
 is SSH+HolyC.
 
-Refresh (do not rewrite history inside the forks):
+First checkout — the four submodules are empty until initialised:
 
 ```
-git -C kernel-spec/ZealOS pull --ff-only
+git submodule update --init -- g6lc_bios/kernel-spec
+```
+
+Refresh (do not rewrite history inside the forks). The submodules advance by
+moving the pin, so the new SHA is reviewable in the superproject diff:
+
+```
+# submodules: fetch, move the pin, then commit the gitlink here
 git -C kernel-spec/TempleOS pull --ff-only
-git -C kernel-spec/goja pull --ff-only
+git -C kernel-spec/goja     pull --ff-only
 git -C kernel-spec/lirx-dom pull --ff-only
-git -C kernel-spec/svelte-d pull --ff-only
-git -C kernel-spec/goosie pull --ff-only   # never `go build` / `go run` it
-# botan: copy from riscv-dev/botan (exclude build/); not a git remote
-# libwasm: copy from riscv-compilers/libwasm (exclude tmp/, runtime-v1.*, *.a)
+git -C kernel-spec/goosie   pull --ff-only   # never `go build` / `go run` it
+git add kernel-spec/TempleOS kernel-spec/goja kernel-spec/lirx-dom kernel-spec/goosie
+
+# vendored: replace the directory contents in place
+# ZealOS:   re-clone from Zeal-Operating-System/ZealOS (see the split note above:
+#           the current copy mixes branches, so do not `pull` it)
+# svelte-d: copy from etcimon/svelte-d (working-tree snapshot incl. binaryen/)
+# botan:    copy from riscv-dev/botan (exclude build/); not a git remote
+# libwasm:  copy from riscv-compilers/libwasm (exclude tmp/, runtime-v1.*, *.a)
 ```

@@ -85,3 +85,15 @@
 [submodule "vendor/litex/litedram"]
 	path = vendor/litex/litedram
 	url = https://github.com/enjoy-digital/litedram.git
+[submodule "g6lc_bios/kernel-spec/goosie"]
+	path = g6lc_bios/kernel-spec/goosie
+	url = https://github.com/vyquocvu/goosie.git
+[submodule "g6lc_bios/kernel-spec/goja"]
+	path = g6lc_bios/kernel-spec/goja
+	url = https://github.com/dop251/goja.git
+[submodule "g6lc_bios/kernel-spec/lirx-dom"]
+	path = g6lc_bios/kernel-spec/lirx-dom
+	url = https://github.com/lirx-js/dom.git
+[submodule "g6lc_bios/kernel-spec/TempleOS"]
+	path = g6lc_bios/kernel-spec/TempleOS
+	url = https://github.com/cia-foundation/TempleOS.git
