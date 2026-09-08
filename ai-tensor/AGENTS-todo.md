@@ -350,6 +350,28 @@ Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or 
 - [ ] Therefore the next MEASUREMENT is resident-B at m=1, not more square tiles, and not
   C-ports (a prefill lever worth 1.6-2.1x). Then +measure_k for the general lane rule.
 - Verified: 225 pytest pass (2 skipped), independence ok, c_abi lockstep ok.
+- [x] ITEM 4 DONE, and it REOPENED a family I had written off. Truncation (21/25/30/31)
+  and Mitchell (27/28) measure exactly 1.000x in cycles -- correct, but the conclusion I
+  drew was too strong. They are cycle-neutral BY CONSTRUCTION (no operand byte, no
+  reduction step changes), so CYCLES ARE THE WRONG INSTRUMENT; their path is
+  area -> lanes -> steps. Isolated synthesis of g6lc_ai_pe_dot: 2,868 / 5,867 / 11,834
+  cells at 4 / 8 / 16 lanes, i.e. ~735 cells per lane and **78% of the 7,530-cell engine
+  at 8 lanes**. The engine is essentially all multiplier, so the area target is LARGE.
+- [x] Quantified the trade: the array is linear and dominant, so constant area buys lanes
+  in proportion, and lanes cut steps until lanes >= row_bytes. FP32 at k=16: 2x shrink ->
+  16 lanes -> 1.62x; 4x -> 32 -> 2.35x; 8x -> 64 -> 3.04x; and then it STOPS (measured:
+  32->64 lanes gave FP16 nothing). Ceiling 3.04x, needing an 8x smaller multiplier.
+- [x] Verdict: narrowing DOMINATES wherever the data permits -- FP32->INT8 lossless is
+  3.54x at ZERO error and FREES area rather than re-spending it. But the niche survives:
+  narrowing needs the values to fit the target's RANGE and truncation does not (it drops
+  mantissa bits, keeps the FP32 exponent), and 	runcate-10 at 1,953 ppm is 4x more
+  accurate than BF16 while preserving FP32 range -- a ladder point no conversion covers.
+  Structural tension named: narrowing lowers the lane optimum and leaves a big array
+  over-provisioned, truncation keeps row_bytes and makes each lane cheaper. Two routes to
+  the same goal; the data decides, not preference.
+- [ ] What would settle it: an actual truncated g6lc_ai_pe_dot variant synthesised for
+  cells and Fmax. The area above is measured but the shrink factor R is an ASSUMPTION --
+  no truncated datapath exists.
 ## Open design notes
 
 - **Completion DMA vs PLIC claim:** island soak keeps `CTL.wr_cpl_en=0` for pure claim tests;

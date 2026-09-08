@@ -642,6 +642,71 @@ cold priming from warm operation, check all C elements and poison outputs before
 execution. Signed native-format fixtures, metadata changes, permission gates,
 error recovery and alias cases accompany the throughput samples.
 
+## 19. The approximate-arithmetic family, measured on the right axis
+
+Truncation (21/25/30/31) and Mitchell (27/28) measure **exactly 1.000x** in cycles,
+which is why earlier passes set them aside. That measurement is correct and the
+conclusion drawn from it was too strong: they are cycle-neutral *by construction*
+-- they change no operand byte and no reduction step -- so **cycles are the wrong
+instrument**. Their only path to throughput is **area -> lanes -> steps**.
+
+So the question is what area they could recover. Isolated synthesis of
+`g6lc_ai_pe_dot` answers it:
+
+| Lanes | dot cells | per lane | share of the 7,530-cell engine |
+|---|--:|--:|--:|
+| 4 | 2,868 | 717 | 38% |
+| 8 | **5,867** | 733 | **78%** |
+| 16 | 11,834 | 740 | 157% |
+
+**The engine is essentially all multiplier**, at a near-constant ~735 cells per
+lane. The area target is large, not marginal -- the opposite of what
+"cycle-neutral" might suggest.
+
+Because the array is linear and dominant, a constant-area budget buys lanes in
+proportion, and lanes reduce `steps` until `lanes >= row_bytes`:
+
+| Multiplier shrink | Lanes | FP32 cycles | Speedup |
+|---|--:|--:|--:|
+| 1x | 8 | 668 | 1.00x |
+| 2x | 16 | 412 | 1.62x |
+| 4x | 32 | 284 | 2.35x |
+| **8x** | **64** | **220** | **3.04x** |
+| 16x | 64 | 220 | 3.04x (capped) |
+
+### The verdict, and the niche that survives
+
+The trade has a **hard ceiling of 3.04x** for FP32 at k=16, it needs an **8x**
+smaller multiplier to reach it, and it stops dead at the lane optimum -- measured:
+32 -> 64 lanes gave FP16 exactly nothing.
+
+Against that, on the same engine and shape:
+
+| Strategy | Speedup | Error | Area |
+|---|--:|--:|---|
+| lossless narrow FP32 -> BF16 | 1.92x | ~0 ppm | **frees** area |
+| lossless narrow FP32 -> INT8 | **3.54x** | **0 ppm** (exact) | **frees** area |
+| truncate-10 + 8x-smaller multiplier | 3.04x | 1,953 ppm | constant |
+| Mitchell + 8x-smaller multiplier | 3.04x | 250,000 ppm | constant |
+
+So narrowing **dominates** wherever the data permits it: more speedup, no error,
+and it *reduces* area instead of merely re-spending it. But the niche does not
+vanish. Narrowing needs the values to fit the target's **range**, and truncation
+does not: it drops mantissa bits while keeping the FP32 exponent. `truncate-10` at
+1,953 ppm is **4x more accurate than BF16** (7,828) *while preserving FP32 range* --
+a point on the ladder no conversion recipe covers.
+
+There is also a structural tension worth naming: narrowing reduces `row_bytes`,
+which *lowers* the lane optimum and leaves a big array over-provisioned;
+truncation keeps `row_bytes` and makes each lane cheaper instead. They are two
+routes to the same goal -- more effective MACs per unit area -- and which one
+applies is decided by whether the data can be narrowed, not by preference.
+
+**What would settle it:** an actual truncated `g6lc_ai_pe_dot` variant, synthesised
+for cells and Fmax. Everything above uses the measured exact-array area and a
+*hypothetical* shrink factor; no truncated datapath exists, so `R` is an
+assumption, not a result.
+
 ## 18. The cycle model, validated out of sample — and what it says to measure next
 
 `cycles = steps + beta(fmt)*read_beats + c` was fitted on the

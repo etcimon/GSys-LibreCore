@@ -298,6 +298,35 @@ def test_prefill_and_decode_invert_the_optimisation_priority():
     assert prefill.b_share_of_traffic == pytest.approx(0.5)
 
 
+def test_the_mac_array_dominates_the_engine_so_approximate_area_matters():
+    """The measurement that reopens the approximate-arithmetic family.
+
+    Truncation and Mitchell are cycle-neutral BY CONSTRUCTION, which made them look
+    worthless. But cycles are the wrong instrument: their path is area -> lanes -> steps,
+    and isolated synthesis says the MAC array is 78% of the engine at ~733 cells/lane.
+    The area target is large, not marginal.
+    """
+    assert P.MEASURED_DOT_CELLS[8] / P.MEASURED_ENGINE_CELLS > 0.75
+    # Near-constant per-lane cost is what makes area proportional to lanes.
+    per_lane = [cells / lanes for lanes, cells in P.MEASURED_DOT_CELLS.items()]
+    assert max(per_lane) - min(per_lane) < 25.0
+    # The trade has a HARD CEILING at the lane optimum, and it is measurable.
+    ceiling = P.MEASURED_LANE_SWEEP[AI_FMT_FP32][8] / P.MEASURED_LANE_SWEEP[AI_FMT_FP32][64]
+    lanes, speedup = P.area_to_lanes(AI_FMT_FP32, 16, 8.0)
+    assert lanes == P.optimal_lanes(AI_FMT_FP32, 16) == 64
+    assert speedup == pytest.approx(ceiling, rel=0.01)
+    # Beyond it, a smaller multiplier buys nothing more -- extra lanes are pure area.
+    assert P.area_to_lanes(AI_FMT_FP32, 16, 64.0) == P.area_to_lanes(AI_FMT_FP32, 16, 8.0)
+    # And it is DOMINATED where narrowing applies: INT8 gives more, exactly.
+    narrowing = (P.MEASURED_LANE_SWEEP[AI_FMT_FP32][8]
+                 / P.MEASURED_LANE_SWEEP[AI_FMT_INT][8])
+    assert narrowing > speedup
+    # A format already at its lane optimum gains nothing from a cheaper multiplier.
+    assert P.area_to_lanes(AI_FMT_INT4, 16, 8.0)[1] == pytest.approx(1.0)
+    with pytest.raises(ValueError):
+        P.area_to_lanes(AI_FMT_FP32, 16, 0.0)
+
+
 def test_the_retire_ceiling_explains_three_measured_dead_ends_at_once():
     """Lanes and C ports are ONE joint requirement, not two independent levers.
 

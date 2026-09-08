@@ -67,6 +67,8 @@ __all__ = [
     "BETA",
     "MODEL_CONSTANT",
     "CycleModel",
+    "MEASURED_DOT_CELLS",
+    "MEASURED_ENGINE_CELLS",
     "MEASURED_LANE_SWEEP",
     "MODEL_CONSTANT_BY_HARNESS",
     "RetireAnalysis",
@@ -76,6 +78,7 @@ __all__ = [
     "PipelineResult",
     "row_bytes",
     "lane_groups",
+    "area_to_lanes",
     "optimal_lanes",
     "shape_analysis",
     "retire_analysis",
@@ -148,6 +151,48 @@ MODELED = "modeled_from_decomposition"
 def row_bytes(numfmt: int, k: int) -> int:
     """Operand row in bytes -- what a dot product actually consumes."""
     return int(math.ceil(k * vt._K_BYTES[numfmt]))
+
+
+#: MEASURED area of the combinational MAC array (`g6lc_ai_pe_dot`), isolated synthesis,
+#: {lanes: generic cells}. Zero sequential cells at every point.
+#:
+#: The headline: at 8 lanes the array is **5,867 of the engine's 7,530 cells, i.e. 78%**,
+#: at a near-constant ~733 cells per lane. The engine is essentially all multiplier.
+#:
+#: That is the number that decides the approximate-arithmetic family (truncation 21/25/
+#: 30/31, Mitchell 27/28). Those recipes are cycle-neutral BY CONSTRUCTION -- they change
+#: no operand byte and no reduction step -- so cycles are the wrong instrument for them.
+#: Their only path to throughput is AREA -> LANES -> steps, and this table says the area
+#: target is large rather than marginal, which is the opposite of what "cycle-neutral"
+#: might suggest.
+MEASURED_DOT_CELLS: Dict[int, int] = {4: 2868, 8: 5867, 16: 11834}
+
+#: Whole-engine cells at 8 lanes, for the fraction above.
+MEASURED_ENGINE_CELLS = 7530
+
+
+def area_to_lanes(numfmt: int, k: int, shrink: float,
+                  base_lanes: int = vt.PE_LANES) -> Tuple[int, float]:
+    """What a `shrink`-times-smaller multiplier buys, as (lanes, cycle speedup).
+
+    The array is linear and dominates, so a constant AREA budget buys `shrink` times the
+    lanes. Lanes then reduce `steps` until `lanes >= row_bytes`, after which they are pure
+    area -- measured: 32 -> 64 lanes gave FP16 exactly nothing.
+
+    So the trade has a hard ceiling, and for FP32 at k=16 it is `668/220 = 3.04x`, needing
+    an 8x smaller multiplier. Lossless narrowing to INT8 already gives 3.54x at zero error
+    *and* frees area, so it dominates whenever the data permits it. The niche that remains
+    for truncation is data whose RANGE forbids conversion: it drops mantissa bits while
+    keeping the FP32 exponent, and `truncate-10` at 1,953 ppm is 4x more accurate than
+    BF16 while preserving FP32 range -- a point no conversion recipe covers.
+    """
+    if shrink <= 0:
+        raise ValueError("shrink must be positive")
+    lanes = min(int(base_lanes * shrink), optimal_lanes(numfmt, k))
+    lanes = max(lanes, 1)
+    base = model_cycles(numfmt, 8, 8, k, lanes=base_lanes)
+    got = model_cycles(numfmt, 8, 8, k, lanes=lanes)
+    return lanes, base / got
 
 
 def optimal_lanes(numfmt: int, k: int) -> int:
