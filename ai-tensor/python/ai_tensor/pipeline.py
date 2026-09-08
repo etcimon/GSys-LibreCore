@@ -67,12 +67,17 @@ __all__ = [
     "BETA",
     "MODEL_CONSTANT",
     "CycleModel",
+    "MEASURED_LANE_SWEEP",
+    "MODEL_CONSTANT_BY_HARNESS",
     "RetireAnalysis",
+    "ShapeAnalysis",
     "Stage",
     "PipelineRefused",
     "PipelineResult",
     "row_bytes",
     "lane_groups",
+    "optimal_lanes",
+    "shape_analysis",
     "retire_analysis",
     "steps_for",
     "beats_for",
@@ -81,10 +86,24 @@ __all__ = [
     "pipeline",
 ]
 
-#: Marginal cycles per operand read beat, per format, measured from the residency sweeps.
-#: FP32 (669-523)/128 = 1.14 and INT8 (189-139)/32 = 1.5625 are DIRECT measurements; FP16
-#: and INT4 are solved from their measured totals against the same +11 constant, so they are
-#: consistent with the model rather than independently observed.
+#: Marginal cycles per operand read beat, per format.
+#:
+#: VALIDATED OUT-OF-SAMPLE ACROSS THE LANE AXIS. These were first fitted on the
+#: `tb_g6lc_ai_gemm_concurrent` residency sweeps at PeLanes=8 -- FP32 (669-523)/128 and
+#: INT8 (189-139)/32 -- and then checked against the independent
+#: `ai-gemm-codec-basis` lane sweeps on `tb_g6lc_ai_gemm_backend`, which cover
+#: PeLanes 8/16/32/64. Solving `beta = (cycles - steps - c)/beats` at every one of those
+#: 16 points (4 formats x 4 lane counts) gives a spread of EXACTLY zero per format and
+#: reproduces the numbers below to the digit. See `MEASURED_LANE_SWEEP`.
+#:
+#: Two consequences worth stating, because they are what make the model usable off the
+#: reference shape:
+#:
+#: * `beta` is INDEPENDENT of lane count. Lanes move the `steps` term only, which is why
+#:   the same constant predicts a 64-lane job from an 8-lane fit.
+#: * the two testbenches differ by exactly ONE cycle in the additive constant (11 for
+#:   `gemm_concurrent`, 10 for `gemm_backend`) and not at all in `beta`, so the constant
+#:   is per-harness overhead while `beta` is the machine.
 BETA: Dict[int, float] = {
     AI_FMT_FP32: 1.140625,
     vt.AI_FMT_FP16: 1.28125,
@@ -95,9 +114,32 @@ BETA: Dict[int, float] = {
     AI_FMT_INT4: 2.125,
 }
 
-#: Fixed per-job cost. Falls out identically (11) for the two independently swept formats,
-#: which is the reason to believe the decomposition rather than merely fit it.
+#: Fixed per-job cost on `tb_g6lc_ai_gemm_concurrent`, which is where the measured cycle
+#: table comes from. Falls out identically for the two independently swept formats there,
+#: and the backend testbench's own sweeps land on 10 with the SAME beta -- see `BETA`.
 MODEL_CONSTANT = 11
+
+#: Per-harness overhead. Not a tuning knob: the difference between these two is one cycle
+#: of testbench, and any new harness should be fitted rather than assumed.
+MODEL_CONSTANT_BY_HARNESS: Dict[str, int] = {
+    "gemm_concurrent": 11,
+    "gemm_backend": 10,
+}
+
+#: The out-of-sample validation set: `tb_g6lc_ai_gemm_backend` +measure at m=n=8, k=16,
+#: from `ai-gemm-codec-basis` runs, as {format: {lanes: cycles}}. Every entry is
+#: reproduced exactly by `steps + BETA*beats + 10`, which is the evidence that the
+#: decomposition is the machine's and not the fit's.
+#:
+#: It also shows the lane optima *as a consequence* rather than as a table: cycles stop
+#: falling once `lanes >= row_bytes`, i.e. INT4 saturates at 8, INT8 at 16, FP16 at 32 and
+#: FP32 at 64. That is `optimal_lanes` below.
+MEASURED_LANE_SWEEP: Dict[int, Dict[int, int]] = {
+    AI_FMT_INT:  {8: 188, 16: 124, 32: 124, 64: 124},
+    AI_FMT_INT4: {8: 108, 16: 108, 32: 108, 64: 108},
+    vt.AI_FMT_FP16: {8: 348, 16: 220, 32: 156, 64: 156},
+    AI_FMT_FP32: {8: 668, 16: 412, 32: 284, 64: 220},
+}
 
 MEASURED = vt.MEASURED
 MODELED = "modeled_from_decomposition"
@@ -106,6 +148,22 @@ MODELED = "modeled_from_decomposition"
 def row_bytes(numfmt: int, k: int) -> int:
     """Operand row in bytes -- what a dot product actually consumes."""
     return int(math.ceil(k * vt._K_BYTES[numfmt]))
+
+
+def optimal_lanes(numfmt: int, k: int) -> int:
+    """Lanes beyond which a single dot gains nothing: ``row_bytes``.
+
+    The RTL ends a reduction when ``mac_step >= k``, so a dot can use at most
+    ``row_bytes`` lanes and `steps` bottoms out when ``ceil(row_bytes/lanes) == 1``.
+
+    This *derives* the measured lane optima instead of tabulating them. The policy
+    package records the rule as "twice the element width in lanes" with a warning that the
+    fit is k=16-specific; that is this rule evaluated at k=16, where ``row_bytes`` happens
+    to equal twice the element width in bytes. `MEASURED_LANE_SWEEP` confirms all four
+    saturation points (INT4 8, INT8 16, FP16 32, FP32 64), and the general form is what
+    should be used at other k.
+    """
+    return row_bytes(numfmt, k)
 
 
 def lane_groups(numfmt: int, k: int, lanes: int = vt.PE_LANES) -> int:
@@ -165,6 +223,60 @@ def model_cycles(numfmt: int, m: int = 8, n: int = 8, k: int = 16,
     steps = steps_for(numfmt, m, n, k, lanes, c_ports) * (1.0 - skip_fraction)
     beats = beats_for(numfmt, m, n, k, resident_a, resident_b)
     return steps + BETA[numfmt] * beats + MODEL_CONSTANT
+
+
+@dataclass(frozen=True)
+class ShapeAnalysis:
+    """Where a shape's cycles actually go, and therefore which lever applies.
+
+    The two terms scale differently -- `steps` with ``m*n`` and `beats` with ``m+n`` --
+    so the optimisation priority INVERTS between shapes. A square prefill tile is
+    compute-bound and wants lanes and steps; a decode row (m=1) is traffic-bound and
+    almost all of that traffic is B, the weight matrix, re-read for every token.
+    """
+
+    numfmt: int
+    m: int
+    n: int
+    k: int
+    lanes: int
+    steps: int
+    beats: int
+    a_beats: int
+    b_beats: int
+    cycles: float
+    traffic_share: float
+    b_share_of_traffic: float
+    resident_b_speedup: float
+    resident_both_speedup: float
+
+
+def shape_analysis(numfmt: int, m: int, n: int, k: int,
+                   lanes: int = vt.PE_LANES) -> ShapeAnalysis:
+    """Quantify the prefill/decode inversion for one shape.
+
+    The decode case is the one worth running: at m=1 the weight matrix is essentially all
+    of the traffic, so resident-B -- recipe 16, already implemented and verified -- is
+    worth far more than the 1.279x measured on a square tile, which is the least
+    favourable shape for it.
+    """
+    rb = row_bytes(numfmt, k)
+    a_beats = math.ceil(m * rb / 8)
+    b_beats = math.ceil(n * rb / 8)
+    steps = steps_for(numfmt, m, n, k, lanes)
+    total = model_cycles(numfmt, m, n, k, lanes=lanes)
+    traffic = BETA[numfmt] * (a_beats + b_beats)
+    warm_b = model_cycles(numfmt, m, n, k, resident_b=True, lanes=lanes)
+    warm_both = model_cycles(numfmt, m, n, k, resident_a=True, resident_b=True, lanes=lanes)
+    return ShapeAnalysis(
+        numfmt=numfmt, m=m, n=n, k=k, lanes=lanes,
+        steps=steps, beats=a_beats + b_beats, a_beats=a_beats, b_beats=b_beats,
+        cycles=total,
+        traffic_share=traffic / total,
+        b_share_of_traffic=b_beats / (a_beats + b_beats) if a_beats + b_beats else 0.0,
+        resident_b_speedup=total / warm_b,
+        resident_both_speedup=total / warm_both,
+    )
 
 
 @dataclass(frozen=True)

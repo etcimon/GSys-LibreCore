@@ -642,6 +642,75 @@ cold priming from warm operation, check all C elements and poison outputs before
 execution. Signed native-format fixtures, metadata changes, permission gates,
 error recovery and alias cases accompany the throughput samples.
 
+## 18. The cycle model, validated out of sample — and what it says to measure next
+
+`cycles = steps + beta(fmt)*read_beats + c` was fitted on the
+`tb_g6lc_ai_gemm_concurrent` residency sweeps at **PeLanes=8**. The
+`ai-gemm-codec-basis` runs already on disk are an independent test of it: a
+different testbench (`tb_g6lc_ai_gemm_backend` `+measure`), **four** lane counts
+and five shape classes.
+
+**The beat formula is exact on 140/140 points**:
+`read_beats = ceil(m*row_bytes/8) + ceil(n*row_bytes/8)`, every format, every
+shape, every lane count.
+
+**Beta is exact and lane-independent.** Solving `beta = (cycles - steps - c)/beats`
+at all 16 (format x lane) points of the 8x8x16 job:
+
+| Format | 8 lanes | 16 | 32 | 64 | solved beta | spread |
+|---|--:|--:|--:|--:|--:|--:|
+| INT8 | 188 | 124 | 124 | 124 | 1.562500 | **0** |
+| INT4 | 108 | 108 | 108 | 108 | 2.125000 | **0** |
+| FP16 | 348 | 220 | 156 | 156 | 1.281250 | **0** |
+| FP32 | 668 | 412 | 284 | 220 | 1.140625 | **0** |
+
+Those are the same four constants the 8-lane fit produced, to the digit, from a
+harness the fit never saw. The two testbenches differ by **exactly one cycle** in
+the additive constant (11 for `gemm_concurrent`, 10 for `gemm_backend`) and not at
+all in `beta` -- so the constant is per-harness overhead and `beta` is the machine.
+
+### The lane rule is now derived rather than tabulated
+
+`steps` bottoms out when `ceil(row_bytes/lanes) == 1`, so the optimum is simply
+
+```
+optimal_lanes = row_bytes = k * bytes_per_element
+```
+
+which reproduces all four measured saturation points (INT4 8, INT8 16, FP16 32,
+FP32 64). §"Lane grouping" records the rule as "twice the element width in lanes"
+with a warning that the fit is k=16-specific; this is that rule's general form, and
+at k=16 `row_bytes` simply happens to equal twice the element width. It predicts the
+optimum **moves with k** -- INT4 8 -> 16 -> 32 and INT8 16 -> 32 -> 64 as k goes
+16 -> 32 -> 64 -- which is exactly what the `+measure_k` sweep was written to test.
+**No `k>16` data exists on disk**, so that remains a prediction shared by the model
+and the testbench comment, and `+measure_k` is the run that settles it.
+
+### The priority INVERTS between prefill and decode
+
+`steps` scales with `m*n` and `beats` with `m+n`, so the shape decides the lever.
+At each shape's own optimal lane count, FP32:
+
+| Shape | steps | beats | traffic | B share | resident_B | resident_both |
+|---|--:|--:|--:|--:|--:|--:|
+| prefill 8x8x16 | 64 | 128 | 66% | 50% | 1.49x | 2.95x |
+| prefill 16x16x16 | 256 | 256 | 52% | 50% | 1.35x | 2.09x |
+| prefill 256x256x256 | 65,536 | 65,536 | 53% | 50% | 1.36x | 2.14x |
+| **decode 1x16x16** | 16 | 136 | **85%** | **94%** | **5.04x** | 6.75x |
+| **decode 1x256x256** | 256 | 32,896 | **99%** | **100%** | **91.5x** | 141x |
+
+At m=1 the weight matrix B is essentially **all** of the traffic, re-read for every
+token. So **recipe 16 -- already implemented and verified -- is the largest
+opportunity in the catalog**, and the measured 1.279x is from a square tile, which
+is the *least* favourable shape for it. A square tile at its own optimal lane count
+is exactly balanced (`steps == beats`, because `steps/beats = 4n/lanes` and
+`lanes = k*bytes` gives 1 at `n == k`), which is why residency caps near 2x there
+and does not scale with tile size.
+
+The decode rows are **projections** at shapes never measured; 1x16x16 is a measured
+*shape* but its residency was never swept. The next measurement should be
+resident-B at m=1, not more square tiles.
+
 ## 17. The retire ceiling: lanes and C ports are one joint requirement
 
 Three measurements each looked like an independent dead end:

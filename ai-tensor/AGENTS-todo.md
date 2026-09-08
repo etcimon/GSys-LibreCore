@@ -322,6 +322,34 @@ Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or 
   the other side. All of it labelled modeled: no RTL has more than one C port, so the
   2.06x is a prediction and says so.
 - Verified: 222 pytest pass (2 skipped), independence ok, c_abi lockstep ok.
+## 2026-09-08 (validation) — the model holds out of sample, and it reorders the roadmap
+
+- [x] ITEM 1 DONE, better than hoped. cycles = steps + beta*beats + c was fitted on the
+  CONCURRENT tb at PeLanes=8; the i-gemm-codec-basis runs already on disk test it on a
+  DIFFERENT tb (gemm_backend +measure) at PeLanes 8/16/32/64. The beat formula is exact
+  on 140/140 points, and solving beta at all 16 (format x lane) points of the 8x8x16 job
+  gives a spread of EXACTLY ZERO per format, reproducing 1.5625/2.125/1.28125/1.140625 to
+  the digit. The two harnesses differ by exactly ONE cycle in the constant (11 vs 10) and
+  not at all in beta -- so the constant is harness overhead and beta is the machine.
+  beta is LANE-INDEPENDENT, which is why an 8-lane fit predicts 64 lanes.
+- [x] The lane rule is now DERIVED, not tabulated: optimal_lanes = row_bytes =
+  k*bytes_per_element, which reproduces all four measured saturations (INT4 8, INT8 16,
+  FP16 32, FP32 64). The policy package's "twice the element width" is this rule at k=16.
+  It predicts the optimum MOVES with k (INT4 8->16->32, INT8 16->32->64) -- exactly what
+  +measure_k was written to test, and NO k>16 data exists on disk, so that stays a
+  prediction shared by the model and the tb comment.
+- [x] ITEM 2: the priority INVERTS between prefill and decode, and it reorders the
+  roadmap. steps scales with m*n and beats with m+n, so at m=1 the weight matrix B is
+  essentially ALL the traffic, re-read per token. At each shape's own optimal lane count,
+  FP32 resident-B is worth 1.36-1.49x on square tiles but 5.04x at decode 1x16x16 and a
+  projected 91.5x at 1x256x256 (B = 94-100% of traffic vs 50% square). So RECIPE 16 --
+  already implemented and verified -- is the largest opportunity in the catalog, and the
+  measured 1.279x came from the LEAST favourable shape for it. A square tile at its own
+  optimal lane count is exactly balanced (steps == beats, since steps/beats = 4n/lanes
+  and lanes = k*bytes gives 1 at n == k), which is why residency caps near 2x there.
+- [ ] Therefore the next MEASUREMENT is resident-B at m=1, not more square tiles, and not
+  C-ports (a prefill lever worth 1.6-2.1x). Then +measure_k for the general lane rule.
+- Verified: 225 pytest pass (2 skipped), independence ok, c_abi lockstep ok.
 ## Open design notes
 
 - **Completion DMA vs PLIC claim:** island soak keeps `CTL.wr_cpl_en=0` for pure claim tests;

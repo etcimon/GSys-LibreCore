@@ -211,6 +211,93 @@ def test_off_reference_shapes_are_modelled_and_labelled():
     assert result and result.provenance == P.MODELED
 
 
+def test_the_model_holds_out_of_sample_across_the_lane_axis():
+    """The validation that turns a fit into a claim.
+
+    BETA was fitted on `tb_g6lc_ai_gemm_concurrent` residency sweeps at PeLanes=8. These
+    16 points come from the independent `ai-gemm-codec-basis` lane sweeps on
+    `tb_g6lc_ai_gemm_backend` at PeLanes 8/16/32/64 -- a different harness and three lane
+    counts the fit never saw. Every one is reproduced exactly, and the two harnesses
+    differ by exactly one cycle in the constant and not at all in beta.
+    """
+    c = P.MODEL_CONSTANT_BY_HARNESS["gemm_backend"]
+    assert c == P.MODEL_CONSTANT - 1
+    checked = 0
+    for numfmt, table in P.MEASURED_LANE_SWEEP.items():
+        for lanes, measured in table.items():
+            predicted = (P.steps_for(numfmt, 8, 8, 16, lanes)
+                         + P.BETA[numfmt] * P.beats_for(numfmt, 8, 8, 16) + c)
+            assert predicted == pytest.approx(measured), (numfmt, lanes)
+            checked += 1
+    assert checked == 16
+    # beta is LANE-INDEPENDENT: lanes move the step term only. Solving it at each lane
+    # count must give the same number, which is why an 8-lane fit predicts 64 lanes.
+    for numfmt, table in P.MEASURED_LANE_SWEEP.items():
+        beats = P.beats_for(numfmt, 8, 8, 16)
+        solved = {(cy - P.steps_for(numfmt, 8, 8, 16, lanes) - c) / beats
+                  for lanes, cy in table.items()}
+        assert len(solved) == 1, (numfmt, solved)
+        assert solved.pop() == pytest.approx(P.BETA[numfmt])
+
+
+def test_the_lane_optima_are_derived_not_tabulated():
+    """`optimal_lanes == row_bytes`, which reproduces all four measured saturations.
+
+    The policy package records "twice the element width in lanes" with a warning that the
+    fit is k=16-specific. That is this rule at k=16. The general form predicts the
+    optimum MOVES with k -- INT4 8 -> 16 -> 32 and INT8 16 -> 32 -> 64 as k goes
+    16 -> 32 -> 64 -- which is exactly the prediction the `+measure_k` sweep was written
+    to test and which no run has yet settled.
+    """
+    for numfmt, expected in ((AI_FMT_INT4, 8), (AI_FMT_INT, 16),
+                             (AI_FMT_FP16, 32), (AI_FMT_FP32, 64)):
+        assert P.optimal_lanes(numfmt, 16) == expected
+        # Saturation in the measured sweep must occur AT that lane count.
+        table = P.MEASURED_LANE_SWEEP.get(numfmt)
+        if table:
+            at_opt = table[min(expected, 64)]
+            for lanes, cy in table.items():
+                if lanes >= expected:
+                    assert cy == at_opt, (numfmt, lanes)   # flat beyond the optimum
+                else:
+                    assert cy > at_opt, (numfmt, lanes)    # still falling before it
+    # The rule scales with k, which is the part still unmeasured.
+    assert P.optimal_lanes(AI_FMT_INT4, 64) == 32
+    assert P.optimal_lanes(AI_FMT_INT, 64) == 64
+
+
+def test_prefill_and_decode_invert_the_optimisation_priority():
+    """`steps` scales with m*n and `beats` with m+n, so the shape decides the lever.
+
+    At m=1 the weight matrix B is essentially ALL of the traffic, re-read for every
+    token, so resident-B -- recipe 16, already implemented and verified -- is worth far
+    more than the 1.279x measured on a square tile. That square tile is the LEAST
+    favourable shape for residency, so the headline number understates the case that
+    matters most.
+    """
+    square = P.shape_analysis(AI_FMT_FP32, 8, 8, 16, lanes=P.optimal_lanes(AI_FMT_FP32, 16))
+    decode = P.shape_analysis(AI_FMT_FP32, 1, 16, 16, lanes=P.optimal_lanes(AI_FMT_FP32, 16))
+    # A square tile splits traffic evenly between A and B; a decode row does not.
+    assert square.b_share_of_traffic == pytest.approx(0.5)
+    assert decode.b_share_of_traffic > 0.9
+    # Decode is traffic-dominated, so residency is worth far more there.
+    assert decode.traffic_share > square.traffic_share
+    assert decode.resident_b_speedup > 2 * square.resident_b_speedup
+    # And it grows with the weight matrix, which is what a real decode has.
+    big = P.shape_analysis(AI_FMT_FP32, 1, 256, 256, lanes=P.optimal_lanes(AI_FMT_FP32, 256))
+    assert big.b_share_of_traffic > 0.99
+    assert big.resident_b_speedup > 50.0        # PROJECTION: shape never measured
+    # Large square prefill stays compute-bound, so residency does NOT scale there.
+    prefill = P.shape_analysis(AI_FMT_FP32, 256, 256, 256,
+                               lanes=P.optimal_lanes(AI_FMT_FP32, 256))
+    assert prefill.resident_b_speedup < 2.0
+    # A square tile at its OWN optimal lane count is exactly balanced, which is a
+    # property of the ratio rather than a coincidence: steps/beats = 4n/lanes, and
+    # lanes = row_bytes = k*bytes, so at n == k the ratio is exactly 1.
+    assert prefill.steps == prefill.beats
+    assert prefill.b_share_of_traffic == pytest.approx(0.5)
+
+
 def test_the_retire_ceiling_explains_three_measured_dead_ends_at_once():
     """Lanes and C ports are ONE joint requirement, not two independent levers.
 
