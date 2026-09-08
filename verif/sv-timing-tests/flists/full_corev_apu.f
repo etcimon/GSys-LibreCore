@@ -1,13 +1,23 @@
 # Full corev_apu structural FO4 soak (excl. tb/test/deprecated).
 # Packages from core/include for config/types.
+# Fetch supply is fetch_B only — never core/fetch_A.
++define+G6LC_FETCH_B
 +incdir+${CVA6_REPO_DIR}/core/include
 +incdir+${CVA6_REPO_DIR}/corev_apu/include
++incdir+${CVA6_REPO_DIR}/corev_apu/ai_island/include
 +incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include/
 +incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/include/
 ${CVA6_REPO_DIR}/core/include/config_pkg.sv
 ${CVA6_REPO_DIR}/core/include/riscv_pkg.sv
 ${CVA6_REPO_DIR}/core/include/ariane_pkg.sv
 ${CVA6_REPO_DIR}/core/include/cv64a6_imafdc_sv39_config_pkg.sv
+# Live instruction supply (Flist.fetch_B). Mutually exclusive with fetch_A.
+${CVA6_REPO_DIR}/core/fetch_B/g6lc_fetch_pkg.sv
+${CVA6_REPO_DIR}/core/fetch_B/instr_realign.sv
+${CVA6_REPO_DIR}/core/fetch_B/instr_scan.sv
+${CVA6_REPO_DIR}/core/fetch_B/instr_queue.sv
+${CVA6_REPO_DIR}/core/fetch_B/frontend.sv
+${CVA6_REPO_DIR}/core/fetch_B/g6lc_fetch_dbg.sv
 ${CVA6_REPO_DIR}/corev_apu/altera/src/cva6_altera.sv
 ${CVA6_REPO_DIR}/corev_apu/altera/src/cva6_altera_peripherals.sv
 ${CVA6_REPO_DIR}/corev_apu/altera/src/dmi_vjtag.sv
@@ -160,4 +170,28 @@ ${CVA6_REPO_DIR}/corev_apu/src/g6lc_ai_litedram_wrap.sv
 ${CVA6_REPO_DIR}/corev_apu/src/g6lc_ai_dram_channels.sv
 ${CVA6_REPO_DIR}/corev_apu/src/g6lc_axi_lrsc.sv
 ${CVA6_REPO_DIR}/corev_apu/src/g6lc_axi_atomics_wrap.sv
+# AI island (SoC T2): packages then RTL. Previously only g6lc_ai_dram_timing.sv
+# was listed, so full_corev_apu analysed no island compute. Keep core-side
+# g6lc_ai_exec on full_core (Flist.cva6); this is the APU island.
+${CVA6_REPO_DIR}/corev_apu/include/g6lc_ai_island_cfg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/include/g6lc_ai_policy_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_addr_check.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_cap_window.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_cpl_fifo.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_desc_engine.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_desc_fetch.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_dram_timing.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_fp_mac.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_gemm_seq.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_island_apb.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_mem_store.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_policy_codec.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_policy_steer.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_policy_subcode.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_tile_sram.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_island_top.sv

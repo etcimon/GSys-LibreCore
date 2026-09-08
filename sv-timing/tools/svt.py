@@ -7,7 +7,7 @@
 #
 #   python tools/svt.py setup
 #   python tools/svt.py doctor
-#   python tools/svt.py vendor-sv-parser
+#   python tools/svt.py vendor-sv-parser   # Rust etcimon/sv-parser submodule (not Python)
 #   python tools/svt.py build | test | check | run | cargo | python | clean | env
 
 from __future__ import annotations
@@ -476,7 +476,7 @@ def main(argv: list[str] | None = None) -> int:
         "command",
         nargs="?",
         default="help",
-        help="setup|doctor|vendor-sv-parser|build|test|check|run|flist|monorepo-soak|js-test|verif-regress|clean|env|cargo|python",
+        help="setup|doctor|vendor-sv-parser|build|test|check|run|flist|monorepo-soak|js-test|verif-regress|fetch-opensta|clean|env|cargo|python",
     )
     parser.add_argument("rest", nargs=argparse.REMAINDER, help="args passed to subcommand")
     args = parser.parse_args(argv)
@@ -513,6 +513,16 @@ def main(argv: list[str] | None = None) -> int:
             cmd_flist(root, env, rest)
         elif cmd in ("monorepo-soak", "soak", "host-soak"):
             cmd_monorepo_soak(root, env, rest)
+        elif cmd in ("fetch-opensta", "opensta"):
+            script = _TOOLS / "fetch_opensta.py"
+            if not script.is_file():
+                err(f"missing {script}")
+                return 1
+            py = sys.executable or find_host_python()
+            if not py:
+                err("no Python interpreter found for fetch-opensta")
+                return 1
+            run([py, str(script), *rest], cwd=root, env=env, check=True)
         elif cmd in ("verif-regress", "regress"):
             cmd_verif_regress(root, env, rest)
         elif cmd == "clean":

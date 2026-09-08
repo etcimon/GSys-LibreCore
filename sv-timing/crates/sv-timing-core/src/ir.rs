@@ -579,6 +579,18 @@ pub struct TimingDesign {
     /// Post-emptive path exceptions / classifications (also denormalized on each path).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub path_exceptions: Vec<crate::path_class::PathException>,
+    /// Parallel-timing scratchboards keyed by module name (every module + function).
+    ///
+    /// Timing basis: ASAP/ALAP FO4 on the procedural ref-tree; `cycle_count =
+    /// ceil(makespan / budget_fo4)`. Not STA.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parallel_timing: BTreeMap<String, crate::parallel_timing::ModuleParallelTiming>,
+    /// Per-module algorithm-set cleanliness (explore → pick working solution).
+    ///
+    /// Timing basis: FO4 slack vs budget. Objective favours `always_ff` /
+    /// `always_comb` density and penalises aggressiveness and timing fail.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub module_cleanliness: BTreeMap<String, crate::cleanliness::ModuleSolution>,
     /// Versions.
     pub versions: VersionBanner,
 }
@@ -598,6 +610,8 @@ impl TimingDesign {
             param_map_keys: Vec::new(),
             package_mode: false,
             path_exceptions: Vec::new(),
+            parallel_timing: BTreeMap::new(),
+            module_cleanliness: BTreeMap::new(),
             versions: VersionBanner {
                 package: crate::PACKAGE_VERSION.to_string(),
                 ir: crate::IR_VERSION.to_string(),

@@ -149,6 +149,43 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
     tag_multi_cycle_paths(design);
     // Post-emptive exclusive-case / atomic exceptions; cheap under-budget short-circuit.
     crate::path_class::classify_and_adjust_paths(design, model, None);
+    crate::parallel_timing::fill_design_parallel_timing(design);
+    crate::cleanliness::fill_design_cleanliness(design);
+    refresh_primary_locs(design);
+}
+
+/// Point `primary_loc` at the highest-FO4 node on each path.
+///
+/// Lowering used to keep the **last** statement in the region, so soak traces
+/// blamed `default: state_d = ST_IDLE` for a 56 FO4 MMA multiply and
+/// `early_out_valid_o` for the fpnew FMA product.
+pub fn refresh_primary_locs(design: &mut TimingDesign) {
+    for path in &mut design.paths {
+        let Some(module) = design.modules.get(&path.module) else {
+            continue;
+        };
+        let mut best_cost = f64::NEG_INFINITY;
+        let mut best_loc: Option<crate::loc::SourceLoc> = None;
+        for id in &path.nodes {
+            let Some(n) = module.nodes.get(id) else {
+                continue;
+            };
+            let c = n.fo4_cost;
+            let atomic = matches!(
+                n.op_class,
+                Some(OperatorClass::Mul) | Some(OperatorClass::DivRem)
+            );
+            let take = c > best_cost + 1e-9
+                || ((c - best_cost).abs() < 1e-9 && atomic);
+            if take {
+                best_cost = c;
+                best_loc = Some(n.loc.clone());
+            }
+        }
+        if let Some(loc) = best_loc {
+            path.primary_loc = loc;
+        }
+    }
 }
 
 /// Max clock (MHz) for which path cost `total_fo4` still meets margin.
@@ -451,6 +488,15 @@ fn module_looks_multi_cycle(name: &str) -> bool {
         || n.contains("div_sqrt")
         || n.contains("norm_div")
         || n.contains("fpnew_divsqrt")
+        // Iterative SRT / C910 / PULP FPU control — not single-cycle EX.
+        // Trace: 181 InsertRegs on `ct_vfdsu_srt_radix16_with_sqrt` at 4 GHz.
+        || n.contains("vfdsu")
+        || n.contains("fdsu")
+        || n.contains("srt_radix")
+        || n.contains("control_mvp")
+        || n.contains("preprocess_mvp")
+        || n.contains("iteration_div")
+        || n.contains("nrbd_nrsc")
         // Memory macros / wrappers — not single-cycle EX pressure
         || n.contains("tc_sram")
         || n.contains("syncdpram")
@@ -460,6 +506,8 @@ fn module_looks_multi_cycle(name: &str) -> bool {
         || (n.contains("sram") && (n.contains("wrapper") || n.contains("cache")))
         || n == "sram"
         || n.ends_with("_ram")
+        || n.ends_with("_sva")
+        || n.contains("_sva")
 }
 
 /// Suggest opportunities from over-budget paths.
@@ -582,51 +630,79 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
             }
         }
 
-        // InsertReg only for plain over-budget paths (exclusive/atomic handled above).
+        // InsertReg only for plain comb datapath. Exclusive/atomic/FPU/SVA
+        // lanes never get a spray-on flop (4 GHz: 181 InsertRegs on vfdsu).
         if exclusive {
             continue;
         }
-        let cut_idx = if path.nodes.len() == 1 {
-            0
-        } else {
-            path.nodes.len() / 2 - 1
-        };
-        let after = path.nodes[cut_idx];
-        let loc = design
-            .modules
-            .get(&path.module)
-            .and_then(|m| m.nodes.get(&after))
-            .map(|n| n.loc.clone())
-            .unwrap_or_else(|| path.primary_loc.clone());
-        // Critical-chain half rather than opaque 0.5× when single-node path has expr depth.
-        let after_est = if path.nodes.len() == 1 {
-            if let Some(n) = module.and_then(|m| m.nodes.get(&after)) {
-                if let Some(ref ex) = n.rhs_expr {
-                    // Balanced half-depth heuristic after a reg cut through mid expr.
-                    (ex.depth() as f64 * 0.5).max(1.0) / (ex.depth() as f64).max(1.0) * path.total_fo4
-                } else {
-                    path.total_fo4 * 0.5
-                }
+        if !crate::cone_lane::cone_lane(design, path).allows_insert_reg() {
+            continue;
+        }
+        // Timing basis §5: InsertReg only on the scratchboard's just-in-time
+        // cycle boundaries (critical ops whose ASAP end crosses k·B), not a
+        // mid-path index. Prefer the kept region scratch (always_ff stays
+        // clock-aware: bars are that clock's period). Fall back to a mid cut
+        // if the board has no bar.
+        let budget = design.target.budget_fo4;
+        let empty = std::collections::BTreeMap::new();
+        let jit: Vec<u32> = if let Some(m) = module {
+            let cuts = if let Some(s) = design
+                .parallel_timing
+                .get(&m.name)
+                .and_then(|b| b.scratch_for_region(path.region_id))
+            {
+                s.jit_cuts_on_clock()
+            } else if let Some(reg) = m.regions.get(&path.region_id) {
+                crate::parallel_timing::ParallelScratch::schedule_for_region(
+                    m,
+                    reg,
+                    &design.target,
+                    &empty,
+                )
+                .jit_cuts_on_clock()
             } else {
-                path.total_fo4 * 0.5
-            }
+                crate::parallel_timing::ParallelScratch::schedule(m, &path.nodes, budget, &empty)
+                    .jit_cuts(budget)
+            };
+            cuts.into_iter()
+                .filter(|nid| path.nodes.contains(nid))
+                .collect()
         } else {
-            path.total_fo4 * 0.5
+            Vec::new()
         };
-        out.push(Opportunity {
-            kind: OpportunityKind::InsertReg,
-            path_id: path.id,
-            insert_after: after,
-            estimated_fo4_before: path.total_fo4,
-            estimated_fo4_after: after_est,
-            loc,
-            rationale: format!(
-                "path {} slack {:.1} FO4 under budget (cut after node {after}; class=plain)",
-                path.id, path.slack_fo4
-            ),
-            requires_clock_in_scope: true,
-            changes_latency: true,
-        });
+        let cut_nodes: Vec<u32> = if jit.is_empty() {
+            let cut_idx = if path.nodes.len() == 1 {
+                0
+            } else {
+                path.nodes.len() / 2 - 1
+            };
+            vec![path.nodes[cut_idx]]
+        } else {
+            jit
+        };
+        for after in cut_nodes {
+            let loc = design
+                .modules
+                .get(&path.module)
+                .and_then(|m| m.nodes.get(&after))
+                .map(|n| n.loc.clone())
+                .unwrap_or_else(|| path.primary_loc.clone());
+            let after_est = (path.total_fo4 - budget).max(budget);
+            out.push(Opportunity {
+                kind: OpportunityKind::InsertReg,
+                path_id: path.id,
+                insert_after: after,
+                estimated_fo4_before: path.total_fo4,
+                estimated_fo4_after: after_est,
+                loc,
+                rationale: format!(
+                    "path {} JIT cut after node {after} (scratchboard cycle bar; slack {:.1} FO4)",
+                    path.id, path.slack_fo4
+                ),
+                requires_clock_in_scope: true,
+                changes_latency: true,
+            });
+        }
     }
     out
 }
@@ -679,6 +755,9 @@ pub fn remeasure_path_slacks_with_hints(
         Some(&hints)
     };
     crate::path_class::classify_and_adjust_paths(design, &model, hint_ref);
+    crate::parallel_timing::fill_design_parallel_timing(design);
+    crate::cleanliness::fill_design_cleanliness(design);
+    refresh_primary_locs(design);
     design.opportunities = suggest_opportunities(design);
 }
 
@@ -802,8 +881,13 @@ mod tests {
     fn tag_multi_cycle_serdiv_by_name() {
         assert!(module_looks_multi_cycle("serdiv"));
         assert!(module_looks_multi_cycle("Serial_Div_Unit"));
+        assert!(module_looks_multi_cycle("ct_vfdsu_srt_radix16_with_sqrt"));
+        assert!(module_looks_multi_cycle("control_mvp"));
+        assert!(module_looks_multi_cycle("pa_fdsu_ctrl"));
         assert!(!module_looks_multi_cycle("alu"));
         assert!(!module_looks_multi_cycle("multiplier"));
+        assert!(!module_looks_multi_cycle("fpnew_fma"));
+        assert!(module_looks_multi_cycle("dm_top_sva"));
     }
 
     #[test]
@@ -834,5 +918,87 @@ mod tests {
         assert_eq!(ids1[0], 1);
         assert_eq!(ids1[1], 2);
         assert_eq!(ids1[2], 3);
+    }
+
+    #[test]
+    fn primary_loc_is_hottest_node_not_last_statement() {
+        use crate::ir::{IrNode, TimingModule};
+        use std::collections::BTreeMap as Map;
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        nodes.insert(
+            0,
+            IrNode {
+                id: 0,
+                op_class: Some(OperatorClass::Mul),
+                width: 32,
+                fo4_cost: 56.0,
+                gate: None,
+                loc: loc(340),
+                fans_in: vec![],
+                fans_out: vec![],
+                width_defaulted: true,
+                reads_reg: false,
+                lhs: Some("acc_d".into()),
+                rhs: Some("a * b".into()),
+                lhs_expr: None,
+                rhs_expr: None,
+                case_labels: Vec::new(),
+                case_is_default: false,
+                case_selector: None,
+                fo4_locked: false,
+            },
+        );
+        nodes.insert(
+            1,
+            IrNode {
+                id: 1,
+                op_class: Some(OperatorClass::Other),
+                width: 1,
+                fo4_cost: 1.0,
+                gate: None,
+                loc: loc(680),
+                fans_in: vec![],
+                fans_out: vec![],
+                width_defaulted: true,
+                reads_reg: false,
+                lhs: Some("state_d".into()),
+                rhs: Some("ST_IDLE".into()),
+                lhs_expr: None,
+                rhs_expr: None,
+                case_labels: Vec::new(),
+                case_is_default: true,
+                case_selector: None,
+                fo4_locked: false,
+            },
+        );
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "g6lc_ai_exec".into(),
+                file: "g6lc_ai_exec.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(1),
+            },
+        );
+        let mut p = sample_path(1, -47.0, 57.0);
+        p.nodes = vec![0, 1];
+        p.primary_loc = loc(680);
+        p.module = 0;
+        design.paths.push(p);
+        refresh_primary_locs(&mut design);
+        assert_eq!(
+            design.paths[0].primary_loc.start_line, 340,
+            "must blame the mul, not default: state_d"
+        );
     }
 }

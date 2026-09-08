@@ -200,7 +200,7 @@ sv-timing/                        # SELF-CONTAINED package root
   resources/
     fo4-v1.toml
   crates/
-    sv-parser/                    # vendored upstream (local customization)
+    sv-parser/                    # git submodule: etcimon/sv-parser (g6lc; Rust, not Python)
     sv-timing-core/
     sv-timing-transform/
     sv-timing-emit/
@@ -211,9 +211,8 @@ sv-timing/                        # SELF-CONTAINED package root
   fixtures/                       # ONLY RTL the package tests against by default
   tests/
   tools/
-    vendor-sv-parser.md           # self-contained refresh (git clone + patch apply)
-    refresh-sv-parser.sh
-    refresh-sv-parser.ps1
+    vendor-sv-parser.md           # submodule refresh (etcimon/sv-parser)
+    refresh_sv_parser.py
   patches/
     sv-parser/
   js/                             # optional: types + thin wrapper (no monorepo deps)
@@ -445,7 +444,10 @@ PRAGMA busy_timeout=5000;
 
 ### 1. Local `sv-parser` customization + location architecture
 
-**Upstream:** [dalance/sv-parser](https://github.com/dalance/sv-parser). License preserved verbatim.
+**Parser:** git submodule [etcimon/sv-parser](https://github.com/etcimon/sv-parser) branch `g6lc`
+(fork of [dalance/sv-parser](https://github.com/dalance/sv-parser) v0.13.5). **Rust CST,
+not Python.** License MIT OR Apache-2.0 preserved verbatim. Extensions: `G6LC.md` on the fork
+(Verilator chained select, comment-aware `/`).
 
 #### Location architecture (implementable)
 
@@ -499,33 +501,23 @@ pub fn locate_to_source(
 - When `sv-parser-pp` provides source mapping, `primary_loc` and line reports **must** point into the **original** `.sv` (or package) path.
 - **Failure mode:** if origin is lost, emit location against the expanded buffer path **and** set `OriginKind::Unknown` + warning `LOC_ORIGIN_LOST` in the report header (never silent).
 
-**Vendor patches (only if adapter cannot get lines for the minimum set):**
-
-| Patch file (ordered) | Intent |
-|---|---|
-| `0001-expose-origin-map-api.patch` | Stable API to query include/macro origin from pp (if missing upstream) |
-| `0002-locate-helpers.patch` | Helpers to walk Locate on always/assign/ops if gaps found |
+**Parser customizations** land on the `g6lc` branch of
+[etcimon/sv-parser](https://github.com/etcimon/sv-parser), not as overlay patches
+in this package. Location adapter still prefers `sv-timing-core` over CST churn.
 
 PR 1 acceptance: golden tests under `fixtures/multi_file/` (include + `` `define ``) assert `primary_loc.file` ends with the **user** `.sv` name, not only a temp expand path, when origin map exists.
 
-#### Vendor workflow (package-owned, v1)
-
-**Primary (works without monorepo tooling):**
+#### Vendor workflow (package-owned)
 
 ```bash
-# from sv-timing/
-./tools/refresh-sv-parser.sh <git-rev-or-tag>
-# Windows: .\tools\refresh-sv-parser.ps1 <git-rev-or-tag>
+# from sv-timing/  (Rust parser submodule; not Python)
+python tools/svt.py vendor-sv-parser
+# from monorepo root:
+git submodule update --init sv-timing/crates/sv-parser
 ```
 
-Scripts: pin rev in `tools/sv-parser.rev`, clone dalance/sv-parser into `crates/sv-parser`, apply `patches/sv-parser/*.patch` in order, retain upstream LICENSE/NOTICE.
-
-**Optional monorepo convenience only** (not required to build):
-
-```bash
-# from monorepo root, if desired:
-python3 util/vendor.py --update sv-timing/sv-parser.vendor.hjson
-```
+Pin: `tools/sv-parser.rev` (`g6lc`). Gitlink SHA is the recorded commit.
+Do not run `util/vendor.py` over the submodule.
 
 Document both in `sv-timing/tools/vendor-sv-parser.md`. **Never** re-license parser crates as proprietary.
 
@@ -627,6 +619,8 @@ pub fn line_report(design: &TimingDesign) -> Vec<LineCost>;
 | Topic | v1 rule |
 |---|---|
 | **Region** | One `always_comb` **or** one continuous `assign` **or** the combinational RHS cloud feeding one `always_ff` NBA cluster. Line-by-line cost attributes each operator node’s FO4 to its `SourceLoc` line; region total = sum of nodes in the cone. |
+| **Clock-aware `always_ff` scratch** | Every `always_ff` region **keeps** a sequential `ParallelScratch` (`ClockDomain`: name, edge, period_ns, budget \(B\)). Fill walks IR regions first so NBA-only processes are stored even without a `TimingPath`. Path overlay must not demote that board to combinational `schedule(path.nodes)`. Cycle bars are capturing edges of **that** clock. See `OPENSTA-CORRECTION-WORKFLOW.md`. |
+| **Module cleanliness** | After classification, each module explores a catalog of logical algorithm sets and solves \(\max C(s)=w_{ff}D_{ff}+w_{comb}D_{comb}-w_a A-w_t 1[\neg pass]\) over applicable \(s\), preferring timing-pass sets. Weights favour `always_ff` / `always_comb` density; InsertReg/multi-cut are high \(A\). See `cleanliness.rs`. |
 | **Path inside region** | Longest FO4-weighted operator chain from region inputs (ports, reg Q, opaque refs) to region outputs (NBA LHS, assign LHS, ports). **As built (P14):** paths are extracted from the **def-use DAG** (`measure::extract_paths`) and therefore span regions freely — one path per combinational sink, cost = DAG longest path, and a register terminates the cone (`IrNode::reads_reg` recovers the `reg→` startpoint). |
 | **Width** | Prefer declared LHS/RHS width; if unknown, use `--assume-xlen N` when set, else **1** for bit ops. Document when default applied (`width_defaulted: true`). Hosts may pass 64 for RV64. **As built (P14):** width comes from the LHS declaration (port dims verbatim from source, or a local `logic/wire/reg` decl) resolved through `--param-map` / `--assume-xlen` / module parameter defaults; unresolved ⇒ `width_defaulted` and costed at the **reference width 32**, so the published table values are unchanged. Scaling is normalized to that reference — see `OPTIMIZATION-LEVELS.md` §1.1(2). |
 | **Enable gating** | Signals used only as `if (valid)` guards on NBA are recorded in `GateInfo.enable` and **do not** add Mul/Div FO4 on the data path when the model can separate control vs data; if inseparable, cost the full expression and tag `enable_merged: true`. |
@@ -1074,7 +1068,9 @@ sv-timing status --cache ./.sv-timing-cache/cache.sqlite
 
 ### Alternative 4 — Python parsers
 
-**Verdict:** Rejected for core.
+**Verdict:** Rejected for core. Production frontend is the **Rust** `sv-parser`
+submodule (`etcimon/sv-parser`, branch `g6lc`). pyslang is optional *emit lint*
+only; slang is the formal/Yosys path. Do not describe this crate as a Python parser.
 
 ### Alternative 5 — size:mtime only / no SQLite
 
@@ -1114,7 +1110,7 @@ sv-timing status --cache ./.sv-timing-cache/cache.sqlite
 | # | Decision | Rationale |
 |---|---|---|
 | **KD0** | **`sv-timing/` is project-independent**; hosts integrate only via CLI/JSON/FFI/import of DTOs | Reuse outside monorepo; `cargo test` without RTL tree |
-| KD1 | Rust workspace + **package-owned** vendored sv-parser | Parse→IR→transform ownership |
+| KD1 | Rust workspace + **package-owned** `etcimon/sv-parser` submodule (`g6lc`; not Python) | Parse→IR→transform ownership |
 | KD2 | SQLite + CRC-32C hex; **caller chooses cache path** (default `./.sv-timing-cache/`) | Partial rebuild without host path hardcoding |
 | KD3 | **CLI JSON first; Bun FFI (dlopen) post-v1; preferNative false** | Portable; hosts with zero npm keep subprocess path |
 | KD4 | Frequency is **caller-supplied** (package default 1000 MHz); hosts may pass SoC MHz | No `soc` dependency in package |

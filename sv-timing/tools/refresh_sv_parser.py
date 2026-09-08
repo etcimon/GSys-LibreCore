@@ -2,29 +2,23 @@
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 #
-# refresh_sv_parser.py — Fetch a pinned dalance/sv-parser tree into crates/sv-parser
-# and apply ordered patches from patches/sv-parser/. Stdlib only (no pip deps).
+# refresh_sv_parser.py — Ensure crates/sv-parser is the etcimon/sv-parser
+# submodule (branch from tools/sv-parser.rev). Stdlib + git only.
 #
-# Invoked by: ./svt.sh vendor-sv-parser | .\svt.ps1 vendor-sv-parser
-# Expects: git on PATH; run from package root or pass --root.
+# Invoked by: python tools/svt.py vendor-sv-parser
+# This is a *Rust* SystemVerilog parser (dalance/sv-parser fork). It is not
+# Python, pyslang, or slang.
 
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import subprocess
-import sys
-import tempfile
 from pathlib import Path
 
 
-UPSTREAM = "https://github.com/dalance/sv-parser.git"
-DEFAULT_EXCLUDE = {
-    ".git",
-    ".github",
-    "target",
-}
+UPSTREAM = "https://github.com/etcimon/sv-parser.git"
+BASED_ON = "dalance/sv-parser v0.13.5"
 
 
 def run(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
@@ -36,7 +30,6 @@ def read_rev(rev_file: Path) -> str:
     text = rev_file.read_text(encoding="utf-8").strip()
     if not text or text.startswith("#"):
         raise SystemExit(f"empty or invalid rev file: {rev_file}")
-    # first non-empty non-comment line
     for line in text.splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
@@ -53,59 +46,37 @@ def which_git() -> str:
     return g
 
 
-def copy_tree(src: Path, dst: Path) -> None:
-    if dst.exists():
-        shutil.rmtree(dst)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-
-    def ignore(directory: str, names: list[str]) -> set[str]:
-        return {n for n in names if n in DEFAULT_EXCLUDE}
-
-    shutil.copytree(src, dst, ignore=ignore)
+def is_git_checkout(path: Path) -> bool:
+    git = path / ".git"
+    return git.is_file() or git.is_dir()
 
 
-def apply_patches(pkg_root: Path, dest: Path) -> None:
-    patch_dir = pkg_root / "patches" / "sv-parser"
-    if not patch_dir.is_dir():
-        print(f"no patch dir {patch_dir}; skipping patches")
-        return
-    patches = sorted(patch_dir.glob("*.patch"))
-    if not patches:
-        print("no *.patch files; skipping patches")
-        return
-    git = which_git()
-    for p in patches:
-        print(f"applying {p.name}")
-        # Prefer git apply from dest so paths in patches are relative to tree root
-        r = run([git, "apply", "--verbose", str(p)], cwd=dest, check=False)
-        if r.returncode != 0:
-            # fallback: patch -p1 if available
-            patch_bin = shutil.which("patch")
-            if not patch_bin:
-                raise SystemExit(f"failed to apply {p} (git apply exit {r.returncode})")
-            run([patch_bin, "-p1", "-i", str(p)], cwd=dest, check=True)
-
-
-def write_notice(pkg_root: Path, rev: str) -> None:
+def write_notice(pkg_root: Path, rev: str, head: str) -> None:
     notice = pkg_root / "LICENSE.NOTICE-sv-parser"
     notice.write_text(
-        f"""# NOTICE — vendored sv-parser
+        f"""# NOTICE — sv-parser submodule
 
-This package vendors [dalance/sv-parser]({UPSTREAM}) at pin `{rev}` under
-`crates/sv-parser/`.
+This package uses a git submodule at `crates/sv-parser/` pointing at
+[{UPSTREAM}]({UPSTREAM}) branch/pin `{rev}` (HEAD `{head}`).
 
-Upstream is dual-licensed MIT OR Apache-2.0. See the LICENSE files inside
-`crates/sv-parser/` (and per-crate LICENSE-MIT / LICENSE-APACHE where present).
+That tree is a fork of [dalance/sv-parser](https://github.com/dalance/sv-parser)
+({BASED_ON}). It is a **Rust** SystemVerilog parser (IEEE 1800 CST). It is
+**not** a Python parser, pyslang, or slang.
 
-Do not re-license the vendored tree. Local patches live in `patches/sv-parser/`.
-Refresh with `svt vendor-sv-parser` (see tools/vendor-sv-parser.md).
+Upstream (and this fork) is dual-licensed MIT OR Apache-2.0. See the LICENSE
+files inside `crates/sv-parser/`. Do not re-license the parser tree.
+
+GSys LibreCore extensions live on branch `g6lc` (see `crates/sv-parser/G6LC.md`).
+Refresh with `python tools/svt.py vendor-sv-parser`.
 """,
         encoding="utf-8",
     )
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Vendor dalance/sv-parser into crates/sv-parser")
+    ap = argparse.ArgumentParser(
+        description="Clone or update the etcimon/sv-parser submodule under crates/sv-parser"
+    )
     ap.add_argument(
         "--root",
         type=Path,
@@ -115,12 +86,12 @@ def main() -> int:
     ap.add_argument(
         "--rev",
         default=None,
-        help="Override tools/sv-parser.rev (tag or commit)",
+        help="Override tools/sv-parser.rev (branch, tag, or commit)",
     )
     ap.add_argument(
         "--force",
         action="store_true",
-        help="Replace existing crates/sv-parser even if present",
+        help="Replace a non-git crates/sv-parser tree with a fresh clone",
     )
     args = ap.parse_args()
 
@@ -129,55 +100,52 @@ def main() -> int:
     rev_file = tools_dir / "sv-parser.rev"
     rev = args.rev or read_rev(rev_file)
     dest = pkg_root / "crates" / "sv-parser"
-
-    if dest.exists() and not args.force:
-        # Allow re-run with --force; otherwise update in place via replace
-        print(f"{dest} exists; replacing (--force not required for refresh)")
     git = which_git()
 
-    with tempfile.TemporaryDirectory(prefix="sv-parser-vendor-") as tmp:
-        tmp_path = Path(tmp)
-        clone_dir = tmp_path / "sv-parser"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    if dest.exists() and not is_git_checkout(dest):
+        if not args.force:
+            raise SystemExit(
+                f"{dest} exists but is not a git checkout; re-run with --force to replace"
+            )
+        print(f"{dest} is not a git checkout; replacing")
+        shutil.rmtree(dest)
+
+    if not dest.exists():
         run(
             [
                 git,
                 "clone",
-                "--depth",
-                "1",
                 "--branch",
                 rev,
                 UPSTREAM,
-                str(clone_dir),
+                str(dest),
             ],
             check=True,
         )
-        # If rev is a full commit not a branch/tag, shallow branch clone may fail —
-        # retry full fetch of that commit.
-        if not clone_dir.exists():
-            run([git, "clone", UPSTREAM, str(clone_dir)], check=True)
-            run([git, "checkout", rev], cwd=clone_dir, check=True)
+    else:
+        run([git, "fetch", "origin"], cwd=dest, check=True)
+        # Prefer origin/<rev> when rev is a branch; fall back to the raw rev.
+        probe = run(
+            [git, "rev-parse", "--verify", f"origin/{rev}"],
+            cwd=dest,
+            check=False,
+        )
+        target = f"origin/{rev}" if probe.returncode == 0 else rev
+        run([git, "checkout", "--detach", target], cwd=dest, check=False)
+        # Stay on a named branch when possible (submodule branch = g6lc).
+        run([git, "checkout", rev], cwd=dest, check=False)
+        run([git, "merge", "--ff-only", target], cwd=dest, check=False)
 
-        # Record exact commit
-        head = subprocess.check_output(
-            [git, "rev-parse", "HEAD"], cwd=str(clone_dir), text=True
-        ).strip()
-        print(f"vendoring {rev} @ {head}")
-
-        copy_tree(clone_dir, dest)
-        # Drop nested .git if any slipped through
-        nested_git = dest / ".git"
-        if nested_git.exists():
-            shutil.rmtree(nested_git)
-
-        # Stamp
-        stamp = dest / "VENDOR_STAMP"
-        stamp.write_text(f"rev={rev}\ncommit={head}\nupstream={UPSTREAM}\n", encoding="utf-8")
-
-    apply_patches(pkg_root, dest)
-    write_notice(pkg_root, rev)
-    print(f"OK: sv-parser vendored at {dest}")
+    head = subprocess.check_output(
+        [git, "rev-parse", "HEAD"], cwd=str(dest), text=True
+    ).strip()
+    print(f"sv-parser {rev} @ {head} ({UPSTREAM})")
+    write_notice(pkg_root, rev, head)
+    print(f"OK: sv-parser at {dest}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

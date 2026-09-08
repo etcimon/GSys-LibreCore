@@ -247,7 +247,9 @@ impl Expr {
                         .max(body.fo4_critical_cost(base))
             }
             Expr::Index { base: b, index } => {
-                b.fo4_critical_cost(base).max(index.fo4_critical_cost(base))
+                // Part-select bounds (`VpnLen/PtLevels * lvl`) are index math, not a 56-FO4 mul.
+                b.fo4_critical_cost(base)
+                    .max(index.fo4_critical_cost_as_index(base))
             }
             Expr::Call { args, .. } => {
                 base(OperatorClass::Other)
@@ -255,6 +257,94 @@ impl Expr {
                         .iter()
                         .map(|a| a.fo4_critical_cost(base))
                         .fold(0.0_f64, f64::max)
+            }
+        }
+    }
+
+    /// Index/part-select arithmetic: `*` `/` are scale, never datapath mul/div.
+    pub fn fo4_critical_cost_as_index(&self, base: &dyn Fn(OperatorClass) -> f64) -> f64 {
+        self.fo4_critical_cost(&|c| match c {
+            OperatorClass::Mul | OperatorClass::DivRem => base(OperatorClass::Other),
+            other => base(other),
+        })
+    }
+
+    /// Visit identifier names (not function names).
+    pub fn walk_idents(&self, f: &mut dyn FnMut(&str)) {
+        match self {
+            Expr::Ident { name } => f(name),
+            Expr::Literal { .. } | Expr::Opaque { .. } => {}
+            Expr::Unary { arg, .. } => arg.walk_idents(f),
+            Expr::Binary { left, right, .. } => {
+                left.walk_idents(f);
+                right.walk_idents(f);
+            }
+            Expr::Ternary {
+                cond,
+                then_e,
+                else_e,
+            } => {
+                cond.walk_idents(f);
+                then_e.walk_idents(f);
+                else_e.walk_idents(f);
+            }
+            Expr::Concat { parts } => {
+                for p in parts {
+                    p.walk_idents(f);
+                }
+            }
+            Expr::Replicate { count, body } => {
+                count.walk_idents(f);
+                body.walk_idents(f);
+            }
+            Expr::Index { base, index } => {
+                base.walk_idents(f);
+                index.walk_idents(f);
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    a.walk_idents(f);
+                }
+            }
+        }
+    }
+
+    /// Visit function / system-function calls (`name`, args).
+    pub fn walk_calls(&self, f: &mut dyn FnMut(&str, &[Expr])) {
+        match self {
+            Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => {}
+            Expr::Unary { arg, .. } => arg.walk_calls(f),
+            Expr::Binary { left, right, .. } => {
+                left.walk_calls(f);
+                right.walk_calls(f);
+            }
+            Expr::Ternary {
+                cond,
+                then_e,
+                else_e,
+            } => {
+                cond.walk_calls(f);
+                then_e.walk_calls(f);
+                else_e.walk_calls(f);
+            }
+            Expr::Concat { parts } => {
+                for p in parts {
+                    p.walk_calls(f);
+                }
+            }
+            Expr::Replicate { count, body } => {
+                count.walk_calls(f);
+                body.walk_calls(f);
+            }
+            Expr::Index { base, index } => {
+                base.walk_calls(f);
+                index.walk_calls(f);
+            }
+            Expr::Call { name, args } => {
+                f(name, args);
+                for a in args {
+                    a.walk_calls(f);
+                }
             }
         }
     }
@@ -948,23 +1038,70 @@ fn parse_unsized_decimal(text: &str) -> Option<u32> {
 }
 
 /// `*` used as array/genvar index scale, not datapath multiply.
-fn is_addr_scale_mul(_op: &str, left: &Expr, right: &Expr) -> bool {
+fn is_addr_scale_mul(op: &str, left: &Expr, right: &Expr) -> bool {
+    if op == "**" {
+        return true;
+    }
     is_scale_tree(left) && is_scale_tree(right)
 }
 
 fn is_scale_tree(e: &Expr) -> bool {
     match e {
-        Expr::Ident { name } => !looks_like_datapath_ident(name),
+        Expr::Ident { name } => ident_is_scale_leaf(name),
         Expr::Literal { .. } => true,
         Expr::Unary { arg, .. } => is_scale_tree(arg),
         Expr::Binary { op, left, right, .. }
-            if matches!(op.as_str(), "+" | "-" | "*" | "<<" | ">>") =>
+            if matches!(op.as_str(), "+" | "-" | "*" | "**" | "<<" | ">>") =>
         {
             is_scale_tree(left) && is_scale_tree(right)
         }
         Expr::Index { base, index } => is_scale_tree(base) && is_scale_tree(index),
         _ => false,
     }
+}
+
+/// Leaf is a localparam / genvar / width, not a datapath operand.
+///
+/// `mantissa_a * mantissa_b` (fpnew FMA product) must NOT match — that is the
+/// 56 FO4 array multiply. `(i+1)*8` and `CVA6Cfg.PtLevels * VpnLen` must.
+fn ident_is_scale_leaf(name: &str) -> bool {
+    let leaf = name
+        .rsplit('.')
+        .next()
+        .unwrap_or(name)
+        .trim();
+    if leaf.is_empty() {
+        return false;
+    }
+    if leaf.len() <= 2 {
+        return true; // i, j, k, n, lvl
+    }
+    if leaf
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+        && leaf.chars().any(|c| c.is_ascii_uppercase())
+    {
+        return true; // HYP_EXT, PRECISION_BITS
+    }
+    let n = leaf.to_ascii_lowercase();
+    let full = name.to_ascii_lowercase();
+    if looks_like_datapath_ident(name) {
+        return false;
+    }
+    // Hierarchical params (`CVA6Cfg.PtLevels`) keep the package prefix; the
+    // leaf alone (`PtLevels`) is mixed-case and would otherwise look datapath.
+    n.contains("cfg")
+        || full.contains("cfg")
+        || n.contains("width")
+        || n.contains("bits")
+        || n.contains("len")
+        || n.contains("size")
+        || n.contains("count")
+        || n.contains("num_")
+        || n.contains("nr_")
+        || n.ends_with("_w")
+        || n.starts_with("cva6")
+        || full.starts_with("cva6")
 }
 
 fn looks_like_datapath_ident(name: &str) -> bool {
@@ -977,6 +1114,9 @@ fn looks_like_datapath_ident(name: &str) -> bool {
     leaf.contains("operand")
         || leaf.contains("op_a")
         || leaf.contains("op_b")
+        || leaf.contains("mantissa")
+        || leaf.contains("product")
+        || leaf.contains("multiplic")
         || leaf.contains("result")
         || leaf.contains("rdata")
         || leaf.contains("wdata")
@@ -1038,7 +1178,8 @@ pub fn dominant_op_class_measured(e: &Expr) -> OperatorClass {
             }
             Expr::Index { base, index } => {
                 walk(base, f);
-                walk(index, f);
+                // Demote * / % inside part-selects (PTW VPN slice arithmetic).
+                walk_index_scale(index, f);
             }
             Expr::Call { args, .. } => {
                 f(OperatorClass::Other);
@@ -1056,6 +1197,61 @@ pub fn dominant_op_class_measured(e: &Expr) -> OperatorClass {
         }
     });
     best
+}
+
+fn walk_index_scale(e: &Expr, f: &mut dyn FnMut(OperatorClass)) {
+    match e {
+        Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => {}
+        Expr::Unary { arg, op, .. } => {
+            f(classify_unary(op));
+            walk_index_scale(arg, f);
+        }
+        Expr::Binary {
+            op_class,
+            left,
+            right,
+            ..
+        } => {
+            if matches!(*op_class, OperatorClass::Mul | OperatorClass::DivRem) {
+                f(OperatorClass::Other);
+            } else {
+                f(*op_class);
+            }
+            walk_index_scale(left, f);
+            walk_index_scale(right, f);
+        }
+        Expr::Ternary {
+            cond,
+            then_e,
+            else_e,
+        } => {
+            f(OperatorClass::Mux);
+            walk_index_scale(cond, f);
+            walk_index_scale(then_e, f);
+            walk_index_scale(else_e, f);
+        }
+        Expr::Concat { parts } => {
+            f(OperatorClass::Concat);
+            for p in parts {
+                walk_index_scale(p, f);
+            }
+        }
+        Expr::Replicate { count, body } => {
+            f(OperatorClass::Concat);
+            walk_index_scale(count, f);
+            walk_index_scale(body, f);
+        }
+        Expr::Index { base, index } => {
+            walk_index_scale(base, f);
+            walk_index_scale(index, f);
+        }
+        Expr::Call { args, .. } => {
+            f(OperatorClass::Other);
+            for a in args {
+                walk_index_scale(a, f);
+            }
+        }
+    }
 }
 
 fn paren_if_needed(e: &Expr) -> String {
@@ -1086,6 +1282,8 @@ pub fn classify_binary_op(sym: &str) -> OperatorClass {
     match sym.trim() {
         "+" | "-" => OperatorClass::AddSub,
         "*" => OperatorClass::Mul,
+        // `2 ** lvl` is a decoder / shift, not a 56-FO4 datapath multiply.
+        "**" => OperatorClass::ShiftConst,
         "/" | "%" => OperatorClass::DivRem,
         "<<" | ">>" | "<<<" | ">>>" => OperatorClass::ShiftConst,
         "==" | "!=" | "===" | "!==" | "<" | ">" | "<=" | ">=" => OperatorClass::Compare,
@@ -1120,8 +1318,35 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_ws(&mut self) {
-        while self.i < self.src.len() && self.src[self.i].is_ascii_whitespace() {
-            self.i += 1;
+        loop {
+            while self.i < self.src.len() && self.src[self.i].is_ascii_whitespace() {
+                self.i += 1;
+            }
+            if self.i + 1 < self.src.len()
+                && self.src[self.i] == b'/'
+                && self.src[self.i + 1] == b'/'
+            {
+                while self.i < self.src.len() && self.src[self.i] != b'\n' {
+                    self.i += 1;
+                }
+                continue;
+            }
+            if self.i + 1 < self.src.len()
+                && self.src[self.i] == b'/'
+                && self.src[self.i + 1] == b'*'
+            {
+                self.i += 2;
+                while self.i + 1 < self.src.len()
+                    && !(self.src[self.i] == b'*' && self.src[self.i + 1] == b'/')
+                {
+                    self.i += 1;
+                }
+                if self.i + 1 < self.src.len() {
+                    self.i += 2;
+                }
+                continue;
+            }
+            break;
         }
     }
 
@@ -1199,7 +1424,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_mul(&mut self) -> Option<Expr> {
-        self.parse_bin_left(&["*", "/", "%"], |p| p.parse_unary())
+        // `**` before `*` so power is not two Mul nodes.
+        self.parse_bin_left(&["**", "*", "/", "%"], |p| p.parse_unary())
     }
 
     fn parse_bin_left(
@@ -1235,6 +1461,13 @@ impl<'a> Parser<'a> {
                 // Avoid matching < when next is = if <= not in this set — ok
                 // Don't eat part of identifier
                 if op.len() == 1 && op.as_bytes()[0].is_ascii_alphanumeric() {
+                    continue;
+                }
+                // `/` starting `//` or `/*` is a comment, not DivRem.
+                if op == "/"
+                    && self.i + 1 < self.src.len()
+                    && (self.src[self.i + 1] == b'/' || self.src[self.i + 1] == b'*')
+                {
                     continue;
                 }
                 // For single-char ops that start multi-char ops of higher precedence
@@ -1457,6 +1690,16 @@ mod tests {
     }
 
     #[test]
+    fn comment_slashes_are_not_division() {
+        let e = Expr::parse("a + b // //////////////////////////\n");
+        assert_eq!(e.dominant_op_class(), OperatorClass::AddSub, "{e:?}");
+        let e2 = Expr::parse("//////////////////////////\na + b");
+        assert_eq!(e2.dominant_op_class(), OperatorClass::AddSub, "{e2:?}");
+        let e3 = Expr::parse("a /* / not div / */ + b");
+        assert_eq!(e3.dominant_op_class(), OperatorClass::AddSub, "{e3:?}");
+    }
+
+    #[test]
     fn parse_ternary_and_logic() {
         let e = Expr::parse("(en) ? a & b : c");
         assert!(matches!(e, Expr::Ternary { .. }), "{e:?}");
@@ -1505,6 +1748,19 @@ mod tests {
         let data = Expr::parse("operand_a_i * operand_b_i");
         assert!(data.fo4_critical_cost(&base) >= 56.0);
         assert_eq!(data.dominant_op_class(), OperatorClass::Mul);
+        // fpnew FMA product — mixed-case datapath names, not genvar scale.
+        let fma = Expr::parse("mantissa_a * mantissa_b");
+        assert_eq!(fma.dominant_op_class(), OperatorClass::Mul);
+        assert!(fma.fo4_critical_cost(&base) >= 56.0);
+        // Parameter/cast-width multiply stays cheap.
+        let cast_w = Expr::parse("(CVA6Cfg.PtLevels + HYP_EXT) * VpnLen");
+        assert_ne!(cast_w.dominant_op_class(), OperatorClass::Mul);
+        assert!(cast_w.fo4_critical_cost(&base) < 30.0);
+        let pow = Expr::parse("2 ** lvl");
+        assert_ne!(pow.dominant_op_class(), OperatorClass::Mul);
+        // Part-select bound arithmetic is not a datapath mul (PTW VPN slice).
+        let idx = Expr::parse("vaddr_q[(WIDTH / 8) * i]");
+        assert_ne!(idx.dominant_op_class(), OperatorClass::Mul, "{idx:?}");
     }
 
     #[test]

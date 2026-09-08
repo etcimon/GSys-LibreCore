@@ -91,9 +91,10 @@ ceiling derives from. Any frequency frontier taken before that fix (including th
   of a range select; `slang` agrees with the vendored parser that this is an error
   (`cannot chain select expressions after a range select`), so it is non-LRM RTL leaning on
   a Verilator extension, not a parser gap.
-- **`corev_apu` does not cover the island.** Only one `ai_island` file reaches the
-  `full_corev_apu` package and it contributes no analysed module, so island timing must be
-  read from `full_core`.
+- **Island compute is split across two soaks.** Core CVXIF (`g6lc_ai_exec` /
+  `g6lc_ai_coprocessor` / `g6lc_ai_acc_bank`) is on `full_core` via `Flist.cva6`.
+  The SoC island (`corev_apu/ai_island/*`, including `g6lc_ai_island_top`, GEMM,
+  policy, FP MAC/dot) is on `full_corev_apu`. Read both.
 - The `g6lc_ai_*` RTL and this document are tier **R** (`CERN-OHL-S-2.0 OR
   LicenseRef-GSys-Commercial`).
 

@@ -29,6 +29,8 @@ Live checklist: [`../AGENTS-todo.md`](../AGENTS-todo.md). Soak playbook + number
 | [`JS-TYPESCRIPT.md`](JS-TYPESCRIPT.md) | Bun + **TypeScript** client (`js/`), JSON contracts, connection tests |
 | [`FREQUENCY-CLOSURE.md`](FREQUENCY-CLOSURE.md) | Startpoint/endpoint path kinds, FO4 budget, precompiler + verif regress |
 | [`STA-HANDOFF.md`](STA-HANDOFF.md) | Structural FO4 → STA/SDC handoff contract (not sign-off) |
+| [`OPENSTA-CORRECTION-WORKFLOW.md`](OPENSTA-CORRECTION-WORKFLOW.md) | Clock-aware `always_ff` scratch → review-only OpenSTA `report_timing` loop |
+| Per-module cleanliness | `crates/sv-timing-core/src/cleanliness.rs` — algorithm-set explorer + \(C\) objective |
 | [`PROJECT-AUTOCORRECT.md`](PROJECT-AUTOCORRECT.md) | Multi-file/module projects: portable `.f`, `--out-dir`, new modules, emit flist |
 | [`OPTIMIZATION-LEVELS.md`](OPTIMIZATION-LEVELS.md) | **Design delta (P14–P15, P19):** measurement-truth corrections + `-O0..-O3/-Os/-Oz` presets and the ten optimization dials |
 | [`PERF-CACHE.md`](PERF-CACHE.md) | **Design delta (P16–P18):** analyze-throughput bottlenecks, pre-compiled per-file `units` cache tier, frequency sweep / calibration |

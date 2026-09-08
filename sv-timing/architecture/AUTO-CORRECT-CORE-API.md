@@ -70,7 +70,16 @@ Analogous to a **profiler**: attribute structural cost, order worst first, never
 | `rank_paths_by_slack` | `paths, TimingTarget` → `RankedPaths` | Sort by ascending slack (worst first); multi-cycle segregated. |
 | `rank_regions_by_cost` | `&TimingDesign, top_n` → `Vec<RegionReport>` | Hottest combinational clouds. |
 | `line_cost_map` | `&TimingDesign` → `BTreeMap<(FileId,line), f64>` | Line-by-line cost for reports. |
-| `suggest_opportunities` | `&TimingDesign, Policy` → `Vec<Opportunity>` | InsertReg / SplitAssign candidates. |
+| `suggest_opportunities` | `&TimingDesign, Policy` → `Vec<Opportunity>` | InsertReg / SplitAssign candidates. Gated by [`ConeLane`](../crates/sv-timing-core/src/cone_lane.rs) (InsertReg only on `CombDatapath`). |
+| `RefOrderTree::from_nodes` | `&TimingModule, &[NodeId]` | Procedural use-def: per-var write/read/forward-read, per-call count + **parameter-use**, write→read edges, `procedural_ok`. Comb lanes serialize only forward edges. |
+| `cone_lane` | `&TimingDesign, &TimingPath` → `ConeLane` | Virtual 4 GHz concern (AtomicMul / IterativeArith / ExclusiveMux / NextStateFsm / CombDatapath / PipelinedUnit / Screening). |
+| `ParallelScratch::schedule` | `&TimingModule, nodes, budget, callee_lat` | ASAP/ALAP FO4 scratchboard on the ref-tree. Makespan = max completion; cycles = ceil(M/B); JIT cuts at k·B on zero-slack ops. Comb board (`clock` not sequential). |
+| `ParallelScratch::schedule_for_region` | `&TimingModule, &CombRegion, &TimingTarget, callee_lat` | Same board, **clock-aware for `always_ff`**: `ClockDomain` from `GateInfo` (name, edge, period_ns, \(B\)). Cycle bars are capturing edges of that clock. |
+| `ParallelScratch::bind_always_ff_clock` | `&GateInfo, &TimingTarget` | Re-bind a leaked combinational board onto the capturing edge. Factorizer / fill **keep** this; never replace with `ClockDomain::combinational`. |
+| `ModuleParallelTiming::keep_region_scratch` | `region_id, ParallelScratch, merge_fn` | Persist the full region board (ops **and** `clock`) on `design.parallel_timing`. Fill walks IR regions first so NBA-only `always_ff` (no `TimingPath`) still has a sequential scratch. |
+| `fill_design_parallel_timing` | `&mut TimingDesign` | One board per **module** and one [`FunctionTiming`] per **function** (declared + called). `always_ff` scratches stay sequential; path overlay must not demote them. |
+| `factor_always_ff_regions` | `&mut PassContext` | Review-only staged `always_ff` comments from the **kept** clock-aware scratch (OpenSTA `create_clock` + `report_timing -from clk -to q`). |
+| `explore_module` / `fill_design_cleanliness` | `&TimingDesign, &TimingModule, weights` | Per-module **algorithm-set explorer**. Catalog (classify, clock-aware `always_ff`, exclusive comb, split, JIT, multi-cycle honesty, aggressive pipeline) is applied only when logically applicable (region kind + cone lane). Objective \(C = w_{ff} D_{ff} + w_{comb} D_{comb} - w_a A - w_t 1[\neg pass]\) with default weights favouring `always_ff`/`always_comb` density. Timing-passing sets are a hard constraint when any exist; otherwise max \(C\) with the fail penalty. Final cleanliness is \(C(s^*)\). InsertReg is permitted only when the winner is jit/multi-cut. |
 | `remeasure` | `&mut PassContext` | After a transform: re-cost + re-extract + re-rank only dirty modules. |
 
 ### 3.3 Naming & expansion conventions
@@ -168,6 +177,7 @@ See [`PROJECT-AUTOCORRECT.md`](PROJECT-AUTOCORRECT.md) for CLI `--out-dir` / `--
 | `debug_dump_name_table` | `&NameTable, path` | Mangling / uniqueness audit. |
 | `debug_dump_edit_trace` | `&EditTrace, path` | Auto-correct justification. |
 | `debug_snapshot_pass` | `&PassContext, dir, tag` | Full bundle after pass *N* (for flaky transforms). |
+| `AlgoTrace` / `--trace-log` | JSONL file | Streaming algorithm decisions: `analyze`, `measure`, `scale`, `worklist`, `apply`, `refuse`, `run.stop`. One object/line. Summarize with `python tools/algo_trace_report.py <jsonl>`. |
 
 ---
 

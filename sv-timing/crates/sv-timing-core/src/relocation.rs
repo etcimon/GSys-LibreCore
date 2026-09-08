@@ -714,6 +714,10 @@ fn options_for_path(
                 "Atomic op exceeds single-cycle FO4 budget — exclude from primary InsertReg pressure"
                     .into(),
             ));
+            // Prep cannot dissolve an operator that already needs ≥2 internal
+            // stages (56 FO4 mul vs 10 FO4 @ 4 GHz). Auto-correcting it burns
+            // worklist slots; T3 stage count is the real ask.
+            let prep_auto = stages <= 1;
             opts.push(scored_option(
                 "t1_prep_stage",
                 RelocationTier::T1,
@@ -722,11 +726,17 @@ fn options_for_path(
                 fo4,
                 (fo4 - 5.0).max(budget),
                 0,
-                true,
+                prep_auto,
                 0.5,
                 "medium",
                 vec!["expand_expr_spine_for_path".into()],
-                "Prep FO4 is small vs mul base; incremental only".into(),
+                if prep_auto {
+                    "Prep FO4 is small vs mul base; incremental only".into()
+                } else {
+                    format!(
+                        "prep is not auto: unit needs {stages} stages — T3 arch_multicycle, not spine expand"
+                    )
+                },
             ));
             opts.push(scored_option(
                 "t3_arch_multicycle_mul",

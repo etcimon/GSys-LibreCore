@@ -20,6 +20,7 @@
 //! Multi-pass transform orchestration lives in `sv-timing-transform`; emission in
 //! `sv-timing-emit`. See `architecture/AUTO-CORRECT-CORE-API.md`.
 
+pub mod algo_trace;
 pub mod cost_table;
 pub mod debug_export;
 pub mod error;
@@ -34,9 +35,14 @@ pub mod opt;
 pub mod param_map;
 pub mod parse;
 pub mod path_class;
+pub mod cone_lane;
+pub mod ref_order;
+pub mod parallel_timing;
+pub mod cleanliness;
 pub mod relocation;
 pub mod version;
 
+pub use algo_trace::{AlgoTrace, AlgoTraceEvent};
 pub use cost_table::{
     default_fo4_v1_embedded, load_cost_model_path, load_fo4_v1_default, parse_fo4_toml,
 };
@@ -54,7 +60,7 @@ pub use loc::{OriginKind, SourceLoc};
 pub use lower::{analyze_files, lower_unit, AnalyzeOutput, LowerOptions};
 pub use measure::{
     attribute_costs, frequency_closure, line_cost_map, max_freq_mhz_for_path, rank_paths_by_slack,
-    rank_regions_by_cost, remeasure_path_slacks, remeasure_path_slacks_with_hints,
+    rank_regions_by_cost, refresh_primary_locs, remeasure_path_slacks, remeasure_path_slacks_with_hints,
     sta_hints_from_design, suggest_opportunities, tag_multi_cycle_paths, CostModel,
     FrequencyClosure, RankedPaths, StaHint,
 };
@@ -62,6 +68,16 @@ pub use path_class::{
     classify_and_adjust_paths, hints_from_exceptions, path_class_summary, path_signature,
     PathClassHint, PathClassKind, PathClassSummary, PathException, PatternAttempt,
     PATH_CLASS_DETECTOR_VERSION,
+};
+pub use cone_lane::{cone_lane, ConeLane};
+pub use ref_order::{ident_base, CallRefCount, RefOrderTree, VarRefCount};
+pub use parallel_timing::{
+    fill_design_parallel_timing, ClockDomain, FunctionTiming, ModuleParallelTiming, ParallelScratch,
+    ScratchOp,
+};
+pub use cleanliness::{
+    algo_set_catalog, explore_module, fill_design_cleanliness, AlgoSetCandidate, AlgoSetId,
+    AlgoSetSpec, CleanlinessWeights, ModuleSolution,
 };
 pub use relocation::{
     build_relocation_plan, is_measure_only, opportunity_to_relocation_kind,

@@ -33,11 +33,12 @@ Environment variables set by `svt.py` for child processes:
 |---|---|
 | `setup` | Install rustup (if needed), install toolchain from `rust-toolchain.toml`, create venv, pip install, vendor parser if missing |
 | `doctor` | Print readiness |
-| `vendor-sv-parser` | Run `refresh_sv_parser.py` |
+| `vendor-sv-parser` | Fetch/clone the **Rust** `etcimon/sv-parser` submodule (`refresh_sv_parser.py`). Not Python. |
 | `build` / `test` / `check` | cargo (+ independence on check) |
 | `run -- …` | `cargo run -p sv-timing-cli -- …` |
 | `flist --in … --out …` | Expand nested/env filelist → portable `.f` (`tools/flist_expand.py`) |
 | `flist --selftest` | Smoke-test expander |
+| `fetch-opensta` | Shallow-clone OpenSTA for host STA (not a crate dep; see `architecture/OPENSTA-CORRECTION-WORKFLOW.md`) |
 | `cargo …` / `python …` | Proxies with contained env |
 | `clean` | `cargo clean` + remove `target/`, `.sv-timing-out/`, `.sv-timing-cache/` |
 | `clean --all` | Same as `clean`, then remove contained `.tools/` (rustup/cargo/venv); re-run `setup` after |

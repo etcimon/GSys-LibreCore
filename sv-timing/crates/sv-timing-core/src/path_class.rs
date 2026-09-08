@@ -22,6 +22,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::ir::{NodeId, OperatorClass, PathId, TimingDesign};
 use crate::measure::CostModel;
+use crate::parallel_timing::ParallelScratch;
+use crate::ref_order::{ident_base, RefOrderTree};
 
 /// Coarse path class used by measure, suggest, correct, and cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -49,7 +51,7 @@ pub enum PathClassKind {
 }
 
 /// Detector pipeline version — bump when adding detectors so plain cache hits re-scan.
-pub const PATH_CLASS_DETECTOR_VERSION: u32 = 8;
+pub const PATH_CLASS_DETECTOR_VERSION: u32 = 13;
 
 impl PathClassKind {
     /// True when InsertReg multi-cut is a poor first tool.
@@ -212,6 +214,11 @@ pub fn classify_and_adjust_paths(
                     },
                 ));
             } else {
+                // Still run exclusive/dense so iterative FPU FSMs (control_mvp 714
+                // nodes) report max-arm FO4 instead of the statement-order serial
+                // sum. Class stays MultiCycleTagged — InsertReg stays off.
+                let (adj, conf, ev, attempted) =
+                    deflate_or_raw(module, &path.nodes, raw, budget, model);
                 updates.push((
                     idx,
                     PathException {
@@ -219,10 +226,10 @@ pub fn classify_and_adjust_paths(
                         module_name: mod_name,
                         path_class: PathClassKind::MultiCycleTagged,
                         raw_fo4: raw,
-                        adjusted_fo4: raw,
-                        confidence: 1.0,
-                        evidence: "multi_cycle tag — skip expensive FO4 pattern scan".into(),
-                        attempted: Vec::new(),
+                        adjusted_fo4: adj,
+                        confidence: conf,
+                        evidence: format!("multi_cycle tag; {ev}"),
+                        attempted,
                         signature: sig,
                     },
                 ));
@@ -257,7 +264,9 @@ pub fn classify_and_adjust_paths(
             if reusable {
                 // Scale if node FO4 changed proportionally; else use absolute if close.
                 let adjusted = if matches!(h.path_class, PathClassKind::AtomicOverBudget) {
-                    raw // keep honest raw for atomic
+                    // Operator cost (or prior merged companion), not the
+                    // statement-order serial sum of the enclosing always_comb.
+                    h.adjusted_fo4.clamp(0.0, raw)
                 } else if h.raw_fo4 > 1e-9 {
                     let ratio = h.adjusted_fo4 / h.raw_fo4;
                     (raw * ratio).clamp(0.0, raw)
@@ -289,109 +298,7 @@ pub fn classify_and_adjust_paths(
         }
 
         // --- expensive detectors (high FO4 only) ---
-        let mut attempted = Vec::new();
-        let mut best: Option<(PathClassKind, f64, f64, String)> = None; // class, adj, conf, evidence
-
-        // 1) Atomic op over budget (soft multi-cycle screening applied on commit)
-        if let Some((adj, conf, ev)) = try_atomic_over_budget(module, &path.nodes, raw, budget, model)
-        {
-            attempted.push(PatternAttempt {
-                detector: "atomic_over_budget".into(),
-                matched: true,
-                candidate_fo4: Some(adj),
-                note: ev.clone(),
-            });
-            best = Some((PathClassKind::AtomicOverBudget, adj, conf, ev));
-        } else {
-            attempted.push(PatternAttempt {
-                detector: "atomic_over_budget".into(),
-                matched: false,
-                candidate_fo4: None,
-                note: "no Mul/DivRem node alone over budget".into(),
-            });
-        }
-
-        // 2) Exclusive case-style (shared LHS arms → max + log mux)
-        if let Some((adj, conf, ev)) =
-            try_exclusive_shared_lhs(module, &path.nodes, raw, model, /*priority=*/ false)
-        {
-            attempted.push(PatternAttempt {
-                detector: "exclusive_case_mux".into(),
-                matched: true,
-                candidate_fo4: Some(adj),
-                note: ev.clone(),
-            });
-            let cand = (PathClassKind::ExclusiveCaseMux, adj, conf, ev);
-            best = pick_better(best, cand);
-        } else {
-            attempted.push(PatternAttempt {
-                detector: "exclusive_case_mux".into(),
-                matched: false,
-                candidate_fo4: None,
-                note: "no dominant shared-LHS arm sum".into(),
-            });
-        }
-
-        // 3) Exclusive if-chain (priority mux costing)
-        if let Some((adj, conf, ev)) =
-            try_exclusive_shared_lhs(module, &path.nodes, raw, model, /*priority=*/ true)
-        {
-            attempted.push(PatternAttempt {
-                detector: "exclusive_if_chain".into(),
-                matched: true,
-                candidate_fo4: Some(adj),
-                note: ev.clone(),
-            });
-            let cand = (PathClassKind::ExclusiveIfChain, adj, conf, ev);
-            best = pick_better(best, cand);
-        } else {
-            attempted.push(PatternAttempt {
-                detector: "exclusive_if_chain".into(),
-                matched: false,
-                candidate_fo4: None,
-                note: "no if-chain exclusive pattern".into(),
-            });
-        }
-
-        // 4) Independent LHS bundle (always_comb multi-assign, statement-order chain)
-        if let Some((adj, conf, ev)) =
-            try_independent_lhs_bundle(module, &path.nodes, raw, model)
-        {
-            attempted.push(PatternAttempt {
-                detector: "independent_lhs_bundle".into(),
-                matched: true,
-                candidate_fo4: Some(adj),
-                note: ev.clone(),
-            });
-            let cand = (PathClassKind::IndependentLhsBundle, adj, conf, ev);
-            best = pick_better(best, cand);
-        } else {
-            attempted.push(PatternAttempt {
-                detector: "independent_lhs_bundle".into(),
-                matched: false,
-                candidate_fo4: None,
-                note: "not a multi-LHS statement-order bundle".into(),
-            });
-        }
-
-        // 5) Dense control / FSM always_comb (many small ops, no multi-LHS recovery)
-        if let Some((adj, conf, ev)) = try_dense_control_cone(module, &path.nodes, raw, model) {
-            attempted.push(PatternAttempt {
-                detector: "dense_control_cone".into(),
-                matched: true,
-                candidate_fo4: Some(adj),
-                note: ev.clone(),
-            });
-            let cand = (PathClassKind::DenseControlCone, adj, conf, ev);
-            best = pick_better(best, cand);
-        } else {
-            attempted.push(PatternAttempt {
-                detector: "dense_control_cone".into(),
-                matched: false,
-                candidate_fo4: None,
-                note: "not a dense small-op control cone".into(),
-            });
-        }
+        let (best, attempted) = scan_deflate_detectors(module, &path.nodes, raw, budget, model, true);
 
         if let Some((class, adj, conf, ev)) = best {
             updates.push((
@@ -462,15 +369,25 @@ fn pick_better(
     match cur {
         None => Some(cand),
         Some(c) => {
-            // Atomic soft multi-cycle must win over dense/exclusive deflation.
-            // Otherwise dense_control_cone undercuts Mul/DivRem primary FO4
-            // (te_reg path 611: atomic raw kept primary via dense 141 FO4).
+            // Atomic class must win (InsertReg cannot cut a mul/div) but the
+            // adjusted FO4 is max(operator, companion exclusive/dense/bundle)
+            // — not the statement-order serial sum of the enclosing FSM.
+            // full_core g6lc_ai_exec was 545 FO4 raw on `default: state_d`
+            // because 235 next-state assigns were summed around a 56 FO4 Mul.
             use PathClassKind::AtomicOverBudget;
-            if cand.0 == AtomicOverBudget {
-                return Some(cand);
-            }
-            if c.0 == AtomicOverBudget {
-                return Some(c);
+            if cand.0 == AtomicOverBudget || c.0 == AtomicOverBudget {
+                let (atom, other) = if cand.0 == AtomicOverBudget {
+                    (cand, c)
+                } else {
+                    (c, cand)
+                };
+                let adj = atom.1.max(other.1);
+                return Some((
+                    AtomicOverBudget,
+                    adj,
+                    atom.2.max(other.2),
+                    format!("{}; companion {}", atom.3, other.3),
+                ));
             }
             // Prefer lower adjusted FO4; tie-break higher confidence.
             if cand.1 + 1e-9 < c.1 || ((cand.1 - c.1).abs() < 1e-9 && cand.2 > c.2) {
@@ -493,7 +410,7 @@ fn lhs_histogram(
     for id in nodes {
         if let Some(n) = m.nodes.get(id) {
             if let Some(ref lhs) = n.lhs {
-                let key = lhs.trim().to_string();
+                let key = lhs_base(lhs.trim());
                 if !key.is_empty() {
                     *h.entry(key).or_insert(0) += 1;
                 }
@@ -506,7 +423,7 @@ fn lhs_histogram(
 fn try_atomic_over_budget(
     module: Option<&crate::ir::TimingModule>,
     nodes: &[NodeId],
-    raw: f64,
+    _raw: f64,
     budget: f64,
     model: &CostModel,
 ) -> Option<(f64, f64, String)> {
@@ -525,9 +442,10 @@ fn try_atomic_over_budget(
         }
     }
     let (nid, cost, cls) = worst?;
-    // Do not reduce FO4 — flag so InsertReg is discouraged; keep raw for honesty.
+    // Adjusted FO4 is the operator, not the enclosing always_comb serial sum.
+    // Class still discourages InsertReg; T3 stage count uses this cost.
     Some((
-        raw,
+        cost,
         0.95,
         format!(
             "atomic {cls:?} node {nid} fo4≈{cost:.1} > budget {budget:.1} (model base mul={:.1})",
@@ -547,6 +465,7 @@ fn try_independent_lhs_bundle(
     module: Option<&crate::ir::TimingModule>,
     nodes: &[NodeId],
     raw: f64,
+    budget: f64,
     model: &CostModel,
 ) -> Option<(f64, f64, String)> {
     let m = module?;
@@ -561,7 +480,7 @@ fn try_independent_lhs_bundle(
         let Some(n) = m.nodes.get(id) else {
             continue;
         };
-        match n.lhs.as_ref().map(|s| s.trim().to_string()) {
+        match n.lhs.as_ref().map(|s| lhs_base(s.trim())) {
             Some(lhs) if !lhs.is_empty() => {
                 let e = by_lhs_cost.entry(lhs.clone()).or_insert(0.0);
                 *e = e.max(n.fo4_cost.max(0.0));
@@ -599,20 +518,289 @@ fn try_independent_lhs_bundle(
     if (with_lhs as f64) < (nodes.len() as f64) * 0.5 {
         return None;
     }
-    let wire = model.other * (n_lhs as f64).log2().max(1.0) * 2.0;
-    let adjusted = max_field + wire + no_lhs.min(raw * 0.15) * 0.5;
+    let tree = RefOrderTree::from_nodes(m, nodes);
+    let next_state = is_sequential_next_state_bundle(&by_lhs_cost, Some(&tree));
+    // Timing basis: independent writes share a time slot (ASAP max), so the
+    // scratchboard makespan replaces max_field when the ref-tree is parallel.
+    // Log-mux wire tax stays only when this is *not* a next-state / write-only bundle.
+    let scratch = ParallelScratch::schedule(m, nodes, budget, &BTreeMap::new());
+    let wire = if next_state {
+        model.other
+    } else {
+        model.other * (n_lhs as f64).log2().max(1.0) * 2.0
+    };
+    let core = scratch.makespan_fo4.max(max_field);
+    let adjusted = core + wire + no_lhs.min(raw * 0.15) * 0.5;
     let adjusted = adjusted.clamp(0.0, raw);
     if adjusted >= raw * 0.85 {
         return None;
     }
     let conf = (0.5 + 0.04 * (n_lhs as f64).min(10.0)).min(0.88);
+    let wo = tree.write_only_lhs(by_lhs_cost.keys());
     Some((
         adjusted,
         conf,
         format!(
-            "independent-LHS bundle lhs={n_lhs} writes={with_lhs} max_writes={max_writes} max_field={max_field:.1} sum_fields={sum_fields:.1} wire={wire:.1} raw={raw:.1}→{adjusted:.1}"
+            "independent-LHS bundle lhs={n_lhs} writes={with_lhs} max_writes={max_writes} max_field={max_field:.1} sum_fields={sum_fields:.1} makespan={:.1} cycles={} wire={wire:.1} next_state={next_state} write_only={wo} depth={} calls={} procedural_ok={} raw={raw:.1}→{adjusted:.1}",
+            scratch.makespan_fo4,
+            scratch.cycle_count,
+            tree.procedural_depth(),
+            tree.calls.len(),
+            tree.procedural_ok
         ),
     ))
+}
+
+/// Plain comb whose statement-order sum is a ghost: ASAP makespan on the
+/// ref-tree is the delay. Timing basis: M = max_s C(s), C(s)=S(s)+L(s),
+/// S(s)=max producer completions (0 if independent).
+fn try_parallel_timing(
+    module: Option<&crate::ir::TimingModule>,
+    nodes: &[NodeId],
+    raw: f64,
+    budget: f64,
+) -> Option<(f64, f64, String)> {
+    let m = module?;
+    if nodes.len() < 4 {
+        return None;
+    }
+    let scratch = ParallelScratch::schedule(m, nodes, budget, &BTreeMap::new());
+    if !scratch.procedural_ok {
+        return None;
+    }
+    let adj = scratch.makespan_fo4;
+    if adj < 1e-9 || adj >= raw * 0.85 {
+        return None;
+    }
+    let n_lhs = {
+        let mut s = BTreeMap::new();
+        for id in nodes {
+            if let Some(n) = m.nodes.get(id) {
+                if let Some(ref l) = n.lhs {
+                    let b = ident_base(l);
+                    if !b.is_empty() {
+                        *s.entry(b).or_insert(0u32) += 1;
+                    }
+                }
+            }
+        }
+        s.len()
+    };
+    let conf = 0.7;
+    Some((
+        adj,
+        conf,
+        format!(
+            "parallel-timing makespan={adj:.1} cycles={} deps={} lhs={n_lhs} vars_ready={} fns={} raw={raw:.1}→{adj:.1}",
+            scratch.cycle_count,
+            scratch.dep_edges,
+            scratch.var_ready_fo4.len(),
+            scratch.functions.len()
+        ),
+    ))
+}
+
+/// True when an assignment LHS is sequential next-state (`foo_d`, `bar_n[3:0]`).
+fn lhs_is_next_state(lhs: &str) -> bool {
+    let ident = lhs
+        .split('[')
+        .next()
+        .unwrap_or(lhs)
+        .trim()
+        .trim_end_matches(|c: char| c == ' ' || c == '\t');
+    let ident = ident.rsplit('.').next().unwrap_or(ident);
+    ident.ends_with("_d")
+        || ident.ends_with("_n")
+        || ident.ends_with("_ns")
+        || ident.ends_with("_nxt")
+        || ident.ends_with("_next")
+}
+
+fn sequential_next_state_frac(by_lhs: &BTreeMap<String, f64>) -> f64 {
+    if by_lhs.is_empty() {
+        return 0.0;
+    }
+    let n = by_lhs.len() as f64;
+    let ns = by_lhs.keys().filter(|k| lhs_is_next_state(k)).count() as f64;
+    ns / n
+}
+
+/// Combo FSM with a handful of `_d` flops plus many 1-bit ports (`axi_req_o.*`).
+/// Frac 0.6 missed axi_adapter (8 next-state vs 50 LHS). Four `_d` fields is enough.
+/// The reference-ordering tree treats write-only vars (no forward read) as parallel.
+fn is_sequential_next_state_bundle(
+    by_lhs: &BTreeMap<String, f64>,
+    tree: Option<&RefOrderTree>,
+) -> bool {
+    let ns = by_lhs.keys().filter(|k| lhs_is_next_state(k)).count();
+    let wo = tree
+        .map(|t| t.write_only_lhs(by_lhs.keys()))
+        .unwrap_or(0);
+    let parallel = tree
+        .map(|t| t.procedural_depth() == 0 && by_lhs.len() >= 4)
+        .unwrap_or(false);
+    ns >= 4 || wo >= 4 || sequential_next_state_frac(by_lhs) >= 0.6 || parallel
+}
+
+/// Strip bit/part selects so `rdata[31:0]` groups with `rdata` (clint MMIO mux).
+fn lhs_base(lhs: &str) -> String {
+    ident_base(lhs)
+}
+
+fn deflate_or_raw(
+    module: Option<&crate::ir::TimingModule>,
+    nodes: &[NodeId],
+    raw: f64,
+    budget: f64,
+    model: &CostModel,
+) -> (f64, f64, String, Vec<PatternAttempt>) {
+    let (best, attempted) = scan_deflate_detectors(module, nodes, raw, budget, model, false);
+    match best {
+        Some((_, adj, conf, ev)) => (adj, conf, ev, attempted),
+        None => (
+            raw,
+            1.0,
+            "no exclusive/dense deflation".into(),
+            attempted,
+        ),
+    }
+}
+
+fn scan_deflate_detectors(
+    module: Option<&crate::ir::TimingModule>,
+    nodes: &[NodeId],
+    raw: f64,
+    budget: f64,
+    model: &CostModel,
+    include_atomic: bool,
+) -> (
+    Option<(PathClassKind, f64, f64, String)>,
+    Vec<PatternAttempt>,
+) {
+    let mut attempted = Vec::new();
+    let mut best: Option<(PathClassKind, f64, f64, String)> = None;
+
+    if include_atomic {
+        if let Some((adj, conf, ev)) = try_atomic_over_budget(module, nodes, raw, budget, model) {
+            attempted.push(PatternAttempt {
+                detector: "atomic_over_budget".into(),
+                matched: true,
+                candidate_fo4: Some(adj),
+                note: ev.clone(),
+            });
+            best = Some((PathClassKind::AtomicOverBudget, adj, conf, ev));
+        } else {
+            attempted.push(PatternAttempt {
+                detector: "atomic_over_budget".into(),
+                matched: false,
+                candidate_fo4: None,
+                note: "no Mul/DivRem node alone over budget".into(),
+            });
+        }
+    }
+
+    if let Some((adj, conf, ev)) =
+        try_exclusive_shared_lhs(module, nodes, raw, model, /*priority=*/ false)
+    {
+        attempted.push(PatternAttempt {
+            detector: "exclusive_case_mux".into(),
+            matched: true,
+            candidate_fo4: Some(adj),
+            note: ev.clone(),
+        });
+        best = pick_better(best, (PathClassKind::ExclusiveCaseMux, adj, conf, ev));
+    } else {
+        attempted.push(PatternAttempt {
+            detector: "exclusive_case_mux".into(),
+            matched: false,
+            candidate_fo4: None,
+            note: "no dominant shared-LHS arm sum".into(),
+        });
+    }
+
+    if let Some((adj, conf, ev)) =
+        try_exclusive_shared_lhs(module, nodes, raw, model, /*priority=*/ true)
+    {
+        attempted.push(PatternAttempt {
+            detector: "exclusive_if_chain".into(),
+            matched: true,
+            candidate_fo4: Some(adj),
+            note: ev.clone(),
+        });
+        best = pick_better(best, (PathClassKind::ExclusiveIfChain, adj, conf, ev));
+    } else {
+        attempted.push(PatternAttempt {
+            detector: "exclusive_if_chain".into(),
+            matched: false,
+            candidate_fo4: None,
+            note: "no if-chain exclusive pattern".into(),
+        });
+    }
+
+    if let Some((adj, conf, ev)) =
+        try_independent_lhs_bundle(module, nodes, raw, budget, model)
+    {
+        attempted.push(PatternAttempt {
+            detector: "independent_lhs_bundle".into(),
+            matched: true,
+            candidate_fo4: Some(adj),
+            note: ev.clone(),
+        });
+        best = pick_better(best, (PathClassKind::IndependentLhsBundle, adj, conf, ev));
+    } else {
+        attempted.push(PatternAttempt {
+            detector: "independent_lhs_bundle".into(),
+            matched: false,
+            candidate_fo4: None,
+            note: "not a multi-LHS statement-order bundle".into(),
+        });
+    }
+
+    if let Some((adj, conf, ev)) = try_dense_control_cone(module, nodes, raw, budget, model) {
+        attempted.push(PatternAttempt {
+            detector: "dense_control_cone".into(),
+            matched: true,
+            candidate_fo4: Some(adj),
+            note: ev.clone(),
+        });
+        best = pick_better(best, (PathClassKind::DenseControlCone, adj, conf, ev));
+    } else {
+        attempted.push(PatternAttempt {
+            detector: "dense_control_cone".into(),
+            matched: false,
+            candidate_fo4: None,
+            note: "not a dense small-op control cone".into(),
+        });
+    }
+
+    // Parallel-timing scratchboard: statement-order *sum* is not silicon delay.
+    // ASAP on the ref-tree is the FO4 we trust for *plain* comb that exclusive /
+    // bundle / dense did not claim. Exclusive arms are not all live — never steal.
+    if best.is_none() {
+        if let Some((adj, conf, ev)) = try_parallel_timing(module, nodes, raw, budget) {
+            attempted.push(PatternAttempt {
+                detector: "parallel_timing".into(),
+                matched: true,
+                candidate_fo4: Some(adj),
+                note: ev.clone(),
+            });
+            let class = if ev.contains("lhs=") {
+                PathClassKind::IndependentLhsBundle
+            } else {
+                PathClassKind::DenseControlCone
+            };
+            best = Some((class, adj, conf, ev));
+        } else {
+            attempted.push(PatternAttempt {
+                detector: "parallel_timing".into(),
+                matched: false,
+                candidate_fo4: None,
+                note: "makespan not below serial sum".into(),
+            });
+        }
+    }
+
+    (best, attempted)
 }
 
 /// Dense always_comb / FSM: many modest nodes chained by IR statement order.
@@ -624,6 +812,7 @@ fn try_dense_control_cone(
     module: Option<&crate::ir::TimingModule>,
     nodes: &[NodeId],
     raw: f64,
+    budget: f64,
     model: &CostModel,
 ) -> Option<(f64, f64, String)> {
     let m = module?;
@@ -641,7 +830,7 @@ fn try_dense_control_cone(
         };
         let c = nd.fo4_cost.max(0.0);
         costs.push(c);
-        if let Some(lhs) = nd.lhs.as_ref().map(|s| s.trim().to_string()) {
+        if let Some(lhs) = nd.lhs.as_ref().map(|s| lhs_base(s.trim())) {
             if !lhs.is_empty() {
                 with_lhs += 1;
                 *by_lhs_writes.entry(lhs.clone()).or_insert(0) += 1;
@@ -686,10 +875,22 @@ fn try_dense_control_cone(
     // Prefer cases where LHS recovery is sparse (binary-op heavy FSM extract)
     // or mixed — but independent_lhs already handled rich multi-LHS.
     let n_f = costs.len() as f64;
-    // unique-case / one-hot FSM style: log₂ select depth (not priority×log).
-    let select = model.mux * n_f.log2().max(2.0);
-    let wire = model.other * n_f.log2().max(1.0);
-    let adjusted = max_n + select + wire;
+    let tree = RefOrderTree::from_nodes(m, nodes);
+    let next_state = is_sequential_next_state_bundle(&by_lhs_cost, Some(&tree));
+    // Timing basis: dense FSM delay is ASAP makespan (parallel next-state) plus
+    // a small select/wire tax — not the serial sum of every statement.
+    let scratch = ParallelScratch::schedule(m, nodes, budget, &BTreeMap::new());
+    let select = if next_state {
+        model.mux * 2.0
+    } else {
+        model.mux * n_f.log2().max(2.0)
+    };
+    let wire = if next_state {
+        model.other
+    } else {
+        model.other * n_f.log2().max(1.0)
+    };
+    let adjusted = scratch.makespan_fo4.max(max_n) + select + wire;
     let adjusted = adjusted.clamp(0.0, raw);
     if adjusted >= raw * 0.88 {
         return None;
@@ -699,8 +900,10 @@ fn try_dense_control_cone(
         adjusted,
         conf,
         format!(
-            "dense control cone nodes={} with_lhs={with_lhs} max_node={max_n:.1} avg={avg:.1} select={select:.1} wire={wire:.1} raw={raw:.1}→{adjusted:.1}",
-            costs.len()
+            "dense control cone nodes={} with_lhs={with_lhs} max_node={max_n:.1} avg={avg:.1} makespan={:.1} cycles={} select={select:.1} wire={wire:.1} next_state={next_state} raw={raw:.1}→{adjusted:.1}",
+            costs.len(),
+            scratch.makespan_fo4,
+            scratch.cycle_count
         ),
     ))
 }
@@ -724,7 +927,7 @@ fn try_exclusive_shared_lhs(
         let Some(n) = m.nodes.get(id) else {
             continue;
         };
-        match n.lhs.as_ref().map(|s| s.trim().to_string()) {
+        match n.lhs.as_ref().map(|s| lhs_base(s.trim())) {
             Some(lhs) if !lhs.is_empty() => {
                 by_lhs.entry(lhs).or_default().push(n.fo4_cost.max(0.0));
             }
@@ -1288,7 +1491,368 @@ mod tests {
             "bundle should collapse ~96 FO4 serial sum, got {}",
             p.total_fo4
         );
+    }
+
+    #[test]
+    fn sequential_next_state_bundle_drops_log_mux_tax() {
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        // budget ≈ 10 FO4. 8 next-state `_d` fields at 10 FO4 each → raw 80.
+        // Old wire tax 2*other*log2(8) ≈ 6 kept the cone ~16–19 FO4 (axi_adapter).
+        let mut nodes = Map::new();
+        for i in 0..8u32 {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::AddSub),
+                    width: 32,
+                    fo4_cost: 10.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: if i == 0 { vec![] } else { vec![i - 1] },
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some(format!("field_{i}_d")),
+                    rhs: Some(format!("expr_{i}")),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "axi_adapter".into(),
+                file: "axi_adapter.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("axi_adapter".into(), 0);
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
+        design.paths.push(TimingPath {
+            id: 3951,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "axi_adapter.in0".into(),
+            endpoint: "axi_adapter.out0".into(),
+            nodes: (0..8).collect(),
+            total_fo4: 80.0,
+            slack_fo4: -70.0,
+            max_freq_mhz: 400.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_eq!(p.path_class, PathClassKind::IndependentLhsBundle);
+        assert!(
+            p.total_fo4 <= 12.0,
+            "next-state bundle should be ~max_field, got {}",
+            p.total_fo4
+        );
+        assert!(
+            p.class_note
+                .as_deref()
+                .is_some_and(|n| n.contains("next_state=true")),
+            "note={:?}",
+            p.class_note
+        );
         assert!(p.path_class.discourages_insert_reg());
+    }
+
+    #[test]
+    fn mixed_next_state_and_ports_still_drops_wire_tax() {
+        // axi_adapter: 6 `_d` flops + many `axi_req_o.*` ports. Frac 0.6 missed this.
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        for i in 0..6u32 {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::AddSub),
+                    width: 32,
+                    fo4_cost: 10.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: vec![],
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some(format!("field_{i}_d")),
+                    rhs: Some("x".into()),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                },
+            );
+        }
+        for i in 6..26u32 {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::Other),
+                    width: 1,
+                    fo4_cost: 1.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: vec![],
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some(format!("axi_req_o.w{i}")),
+                    rhs: Some("1'b0".into()),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "axi_adapter".into(),
+                file: "axi_adapter.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("axi_adapter".into(), 0);
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
+        design.paths.push(TimingPath {
+            id: 1,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "axi_adapter.in0".into(),
+            endpoint: "axi_adapter.out0".into(),
+            nodes: (0..26).collect(),
+            total_fo4: 80.0,
+            slack_fo4: -70.0,
+            max_freq_mhz: 400.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert!(
+            p.class_note
+                .as_deref()
+                .is_some_and(|n| n.contains("next_state=true")),
+            "note={:?}",
+            p.class_note
+        );
+        assert!(
+            p.total_fo4 <= 16.0,
+            "mixed _d + ports should drop wire tax, got {}",
+            p.total_fo4
+        );
+    }
+
+    #[test]
+    fn sliced_lhs_groups_as_exclusive_mux() {
+        // clint rdata / rdata[31:0] / rdata[63:32] are one result mux.
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        let slices = ["rdata", "rdata[31:0]", "rdata[63:32]", "rdata", "rdata[31:0]", "rdata[63:32]"];
+        for (i, lhs) in slices.iter().enumerate() {
+            let i = i as u32;
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::Other),
+                    width: 64,
+                    fo4_cost: 20.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: vec![],
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some((*lhs).into()),
+                    rhs: Some("mtime_q".into()),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: vec![format!("{i}")],
+                    case_is_default: false,
+                    case_selector: Some("register_address".into()),
+                    fo4_locked: false,
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "clint".into(),
+                file: "clint.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("clint".into(), 0);
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
+        design.paths.push(TimingPath {
+            id: 1,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "clint.in0".into(),
+            endpoint: "clint.out0".into(),
+            nodes: (0..6).collect(),
+            total_fo4: 120.0,
+            slack_fo4: -110.0,
+            max_freq_mhz: 300.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_eq!(p.path_class, PathClassKind::ExclusiveCaseMux);
+        assert!(
+            p.total_fo4 < 40.0,
+            "sliced rdata mux should be max-arm, got {}",
+            p.total_fo4
+        );
+    }
+
+    #[test]
+    fn multi_cycle_tagged_still_deflates_exclusive() {
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        for i in 0..8u32 {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::Other),
+                    width: 32,
+                    fo4_cost: 10.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: vec![],
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some("qt_next".into()),
+                    rhs: Some("x".into()),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: vec![format!("{i}")],
+                    case_is_default: false,
+                    case_selector: Some("state_q".into()),
+                    fo4_locked: false,
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "control_mvp".into(),
+                file: "control_mvp.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("control_mvp".into(), 0);
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
+        design.paths.push(TimingPath {
+            id: 1,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "control_mvp.in0".into(),
+            endpoint: "control_mvp.out0".into(),
+            nodes: (0..8).collect(),
+            total_fo4: 80.0,
+            slack_fo4: -70.0,
+            max_freq_mhz: 400.0,
+            primary_loc: loc(),
+            multi_cycle: true,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_eq!(p.path_class, PathClassKind::MultiCycleTagged);
+        assert!(
+            p.total_fo4 < 30.0,
+            "tagged FPU FSM must still deflate serial 80, got {}",
+            p.total_fo4
+        );
+        assert!(p.multi_cycle);
     }
 
     #[test]
@@ -1455,5 +2019,96 @@ mod tests {
             design.paths[0].multi_cycle,
             "atomic must soft multi_cycle off primary"
         );
+        assert!(
+            design.paths[0].total_fo4 <= 125.0,
+            "atomic adj is the DivRem, not the 177 serial sum, got {}",
+            design.paths[0].total_fo4
+        );
+    }
+
+    #[test]
+    fn atomic_in_exclusive_fsm_is_operator_not_serial_sum() {
+        // g6lc_ai_exec-style: unique-case next-state with a 56 FO4 mul in one arm.
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        for i in 0..12u32 {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(if i == 3 {
+                        OperatorClass::Mul
+                    } else {
+                        OperatorClass::Other
+                    }),
+                    width: 32,
+                    fo4_cost: if i == 3 { 56.0 } else { 2.0 },
+                    gate: None,
+                    loc: loc(),
+                    fans_in: vec![],
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some("state_d".into()),
+                    rhs: Some(if i == 3 { "a * b".into() } else { "ST_IDLE".into() }),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: vec![format!("{i}")],
+                    case_is_default: i == 11,
+                    case_selector: Some("state_q".into()),
+                    fo4_locked: false,
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "g6lc_ai_exec".into(),
+                file: "g6lc_ai_exec.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("g6lc_ai_exec".into(), 0);
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
+        let raw = 56.0 + 11.0 * 2.0;
+        design.paths.push(TimingPath {
+            id: 1,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "g6lc_ai_exec.in0".into(),
+            endpoint: "g6lc_ai_exec.out0".into(),
+            nodes: (0..12).collect(),
+            total_fo4: raw,
+            slack_fo4: -raw,
+            max_freq_mhz: 100.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_eq!(p.path_class, PathClassKind::AtomicOverBudget);
+        assert!(
+            p.total_fo4 < 70.0,
+            "FSM+mul must not keep serial {raw}, got {}",
+            p.total_fo4
+        );
+        assert!(p.multi_cycle);
     }
 }

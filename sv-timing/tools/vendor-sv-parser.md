@@ -1,41 +1,38 @@
-# Vendoring sv-parser (integral in-tree copy)
+# sv-parser submodule (Rust, not Python)
 
-The package carries a full copy of [dalance/sv-parser](https://github.com/dalance/sv-parser)
-under `crates/sv-parser/` so builds never depend on crates.io network access for the
-parser and local location patches can be applied.
+The package uses a **git submodule** of the GSys LibreCore fork
+[etcimon/sv-parser](https://github.com/etcimon/sv-parser) (branch `g6lc`) under
+`crates/sv-parser/`. That fork is [dalance/sv-parser](https://github.com/dalance/sv-parser)
+v0.13.5 plus Verilator chained-select and comment-aware `/`. See `crates/sv-parser/G6LC.md`.
+
+This is a **Rust** IEEE-1800 CST parser. It is **not** a Python parser, pyslang, or slang.
+pyslang is only an optional lint of *emitted* SV in `verif/regress`.
 
 ## Pin
 
-- Tag / rev file: `tools/sv-parser.rev` (currently `v0.13.5`)
-- Upstream license: MIT OR Apache-2.0 (kept verbatim under `crates/sv-parser/`)
+- Branch / rev file: `tools/sv-parser.rev` (currently `g6lc`)
+- Gitlink SHA is the recorded commit in the parent repo
+- License: MIT OR Apache-2.0 (kept verbatim)
 
 ## Refresh (cross-platform)
 
 From `sv-timing/`:
 
 ```bash
-./svt.sh setup                 # rustup + cargo + python venv (contained)
-./svt.sh vendor-sv-parser      # re-fetch pin into crates/sv-parser + apply patches
+python tools/svt.py vendor-sv-parser
 ```
 
-```powershell
-.\svt.ps1 setup
-.\svt.ps1 vendor-sv-parser
+In a git checkout of the monorepo, prefer:
+
+```bash
+git submodule update --init sv-timing/crates/sv-parser
 ```
 
-Both commands use:
-
-- Contained `RUSTUP_HOME` / `CARGO_HOME` under `.tools/`
-- Contained Python venv under `.tools/python-venv`
-- `tools/refresh_sv_parser.py` (stdlib only)
-
-## Patches
-
-Ordered files in `patches/sv-parser/*.patch` are applied after clone.
-Prefer adapter-layer changes in `sv-timing-core` over deep parser forks.
+`vendor-sv-parser` clones or fast-forwards the checkout when the tree is used
+outside git (package extract) or when the submodule is missing.
 
 ## Do not
 
 - Re-license parser crates as proprietary
-- Point Cargo.toml at crates.io `sv-parser` for production builds of this package
-  (path dependency only)
+- Point Cargo.toml at crates.io `sv-parser` for production builds (path dependency only)
+- Treat pyslang / a Python SV parser as the production frontend

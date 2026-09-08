@@ -1,1 +1,4 @@
-v0.13.5
+g6lc
+# Fork: https://github.com/etcimon/sv-parser (branch g6lc)
+# Based on dalance/sv-parser v0.13.5 (2a4d5d0)
+# This is a Rust SystemVerilog parser, not Python / pyslang / slang.

@@ -13,11 +13,13 @@
 
 pub mod case_recover;
 pub mod edit;
+pub mod factor_always_ff;
 pub mod pass;
 pub mod pipeline;
 pub mod worklist;
 
 pub use edit::{EditKind, EditRecord, EditTrace, EmitRhsRewrite};
+pub use factor_always_ff::factor_always_ff_regions;
 pub use pass::{run_correct_passes, PassContext, PassPolicy, TransformError, TransformResult};
 pub use pipeline::{
     balance_mux_on_path, expand_expr_spine_for_path, insert_register, rebalance_associative_node,

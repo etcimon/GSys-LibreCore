@@ -10,6 +10,143 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 
 
 
+## 2026-09-08 — trace-driven algorithms (path_class v10, 4 GHz)
+
+Soak traces (`full_core` 645 InsertReg / 192 BalanceMux; residual `axi_adapter` 19.2 FO4;
+`g6lc_ai_exec` 545.5 last-statement loc; `ct_vfdsu` 181 InsertRegs; APU `g6lc_ai_gemm_seq`
+1317.5 serial-sum atomic) showed the inferred fixes were measurement artefacts.
+Algorithms added so the tool reports structure instead of spraying registers:
+
+- [x] **v9** sequential next-state `_d`/`_n` drops IndependentLhsBundle log-mux wire tax
+  (`axi_adapter` FSM). Iterative FPU names (`vfdsu`/`srt_radix`/`control_mvp`) tagged
+  multi-cycle. `t1_prep_stage` auto only if stages≤1. InsertReg cap = `max_stages_per_region`.
+- [x] **v10** `primary_loc` = hottest node (not last statement). Atomic adjusted FO4 =
+  operator cost (merged with exclusive/dense companion), **not** the enclosing
+  always_comb serial sum. `mantissa_a * mantissa_b` is datapath Mul; `CVA6Cfg.*` /
+  `2 ** lvl` / `*'` casts are not. Design-key includes `PATH_CLASS_DETECTOR_VERSION`.
+- [x] Re-soak after v10 @ 4000 MHz / 20 ps / `-O3`: InsertReg **645→280**, vfdsu
+  applies **181→0**, APU gemm_seq **1317.5→59.5** (operator, loc on the mul). Residual:
+  axi_adapter still 19.2 (`next_state=false` because 8 `_d` vs 50 `axi_req_o.*` ports),
+  control_mvp **4560** kept serial because MultiCycleTagged skipped exclusive/dense,
+  clint 114 FO4 `rdata` vs `rdata[31:0]` split LHS, fpnew_fma 95/30 leftover after
+  InsertReg cap=8.
+- [x] **v11** mixed next-state (`>=4` `_d` fields, not 60% frac); MultiCycleTagged still
+  deflates exclusive/dense; sliced LHS (`rdata[31:0]`) groups as one exclusive mux.
+- [x] Re-soak v11 @ 4000/20/`-O3`: InsertReg **645→281**, vfdsu **0**, worst_all
+  **545.5→187.5** (control_mvp 4560 deflated), APU gemm **1317→59.5** loc on mul,
+  clint 114 FO4 gone (sliced `rdata` exclusive). axi_adapter refuse **19.2→17.1**
+  DenseControlCone (not IndependentLhs). Residual primary is fpnew_fma 95→30
+  after InsertReg cap=8 — T3 `NumPipeRegs`, not more spray.
+
+4 GHz at 20 ps is a **10 FO4** budget. What produces it is T3 pipelining of real
+56 FO4 muls (FMA mantissa, AI MMA, PE dot, integer `multiplier`) to 6 stages /
+`NumPipeRegs`, plus exclusive/bundle costing of FSMs — not `-O3` InsertReg.
+
+## 2026-09-08 — cone lanes + procedural ref-order tree (v12)
+
+Compartmentalize the five 4 GHz concerns so comb exploration, atomics, iterative
+FPU, next-state FSMs, and process budget do not share one InsertReg cascade.
+
+- [x] `RefOrderTree`: per-variable write/read/forward-read counters, per-call
+  counts with **parameter-use** counters, write→read edges in statement order,
+  `procedural_ok` (call args not produced only after the call).
+- [x] Comb: serialize only forward write→read edges; write-only `_d` / ports stay
+  parallel (`procedural_depth == 0`).
+- [x] `ConeLane` view: AtomicMul / IterativeArith / ExclusiveMux / NextStateFsm /
+  CombDatapath / PipelinedUnit / Screening. InsertReg only on CombDatapath;
+  comb algos (exclusive/dense/bundle/BalanceMux) still run where `explore_comb`.
+- [x] Part-select `*`/`/` demoted (PTW VPN slice). SVA (`*_sva`) tagged multi-cycle.
+- [x] Re-soak v12 @ 4000/20/`-O3`: InsertReg **645→241** (fpnew FMA/cast **refused** as
+  PipelinedUnit — primary stays 95 FO4 honest FMA comb, T3 `NumPipeRegs` not spray).
+  APU primary **46→11**; `dm_top_sva` no longer headline. Comb BalanceMux still runs
+  (124 applies). `procedural_ok` + write-only depth on IndependentLhsBundle notes.
+
+## 2026-09-08 — parallel-timing scratchboard (v13)
+
+Timing basis (FO4, not STA): `S(s)=max producer C`, `C(s)=S(s)+L(s)`, `M=max C`,
+`N=ceil(M/B)` cycles to reference-ready. Independent ops share a slot; only
+ref-tree write→read edges serialize. Just-in-time InsertReg sits on critical
+ops whose ASAP end crosses `k·B`.
+
+- [x] `ParallelScratch` + `ModuleParallelTiming` for **every module** and
+  `FunctionTiming` for **every function** (declared stubs + call/param counts).
+- [x] Classifiers use makespan (bundle/dense/plain parallel-timing detector).
+- [x] `suggest_opportunities` JIT cuts from the scratchboard, not mid-path index.
+- [x] Re-soak v13 @ 4000/20/`-O3`: core primary **95→52 FO4** (FMA valid-OR serial
+  ghost gone), InsertReg **241→186**, IndependentLhsBundle **72→144** (parallel
+  schedule), APU InsertReg **125→76**, APU analyze primary **46→35.6**. Comb
+  BalanceMux still runs (138). fpnew FMA 52 FO4 remains PipelinedUnit T3
+  (`NumPipeRegs`), not spray.
+
+## 2026-09-08 — clock-aware always_ff scratch + OpenSTA seeds
+
+`always_ff` must **keep** a sequential `ParallelScratch` (clock name, edge,
+period_ns, budget \(B\)). Fill walks IR regions first so NBA-only processes
+are not dropped; path overlay must not demote them to combinational
+`schedule(path.nodes)`. Factorize comments + JIT cuts read that board.
+
+- [x] `ClockDomain.sequential` so unresolved clock names still stay sequential.
+- [x] `ModuleParallelTiming.regions` stores the full `ParallelScratch` (not ops-only).
+- [x] `keep_region_scratch` / `bind_always_ff_clock` / `jit_cuts_on_clock`.
+- [x] `factor_always_ff_regions` reuses the kept board and writes it back.
+- [x] Review-only OpenSTA workflow: `architecture/OPENSTA-CORRECTION-WORKFLOW.md`.
+- [x] Host clone of OpenSTA into `build-platform/workspace/tooling/opensta`
+  (`python tools/svt.py fetch-opensta`); gitignored workspace, not a crate dep.
+- [ ] Optional STA smoke once `sta` + liberty are present (KD0: not a crate dep).
+
+## 2026-09-08 — per-module cleanliness optimization
+
+Modules explore a catalog of **logical** algorithm sets and pick a working
+solution by cleanliness, weighted toward `always_ff` / `always_comb` density,
+with timing pass/fail as a constraint and aggressiveness as a penalty.
+
+- [x] Catalog: classify, ff_factor_clock, comb_exclusive, comb_split,
+  seq_plus_comb, jit_datapath, multicycle_honest, aggressive_pipeline.
+- [x] Applicability from region kind + cone lane (never InsertReg on exclusive /
+  atomic / always_ff-only).
+- [x] Objective \(C = w_{ff} D_{ff} + w_{comb} D_{comb} - w_a A - w_t 1[\neg pass]\)
+  (defaults 0.40 / 0.40 / 0.20 / 0.50). Feasible = timing-pass sets if any.
+- [x] `fill_design_cleanliness` after parallel-timing; correct loop skips
+  opportunities the winner forbids; analyze JSON `module_cleanliness`.
+
+## 2026-09-08 — algorithm `--trace-log` JSONL
+
+- [x] `sv-timing-core::AlgoTrace` (disabled no-op; `--trace-log` JSONL).
+- [x] Correct loop emits `run.start` / `scale` / `pass.start` / `worklist` / `apply` / `refuse` / `measure` / `run.end`.
+- [x] Analyze emits class histogram + top relocation cards.
+- [x] Soak writes `algo-trace.jsonl`; `tools/algo_trace_report.py` summarizes.
+- [x] `full_corev_apu.f` now lists the live `corev_apu/ai_island/` RTL (not only
+  `g6lc_ai_dram_timing.sv`). `full_core` still takes `Flist.cva6` (CVXIF AI exec).
+- [x] Both profiles carry `+define+G6LC_FETCH_B` and exclude `/core/fetch_A/`
+  (retired frontend + g1* recover). `full_corev_apu.f` also lists `Flist.fetch_B`
+  supply files. Predictors stay in `core/frontend`.
+- [x] Soak portable writer: if `core/fetch_B/<name>` is present, drop shadowed
+  twins under `core/` or `core/frontend/` with the same basename
+  (`frontend.sv`, `instr_queue.sv`, `instr_scan.sv`, `instr_realign.sv`,
+  `g6lc_fetch_{pkg,dbg}.sv`). Unique predictors (btb/ras/FTQ) are kept.
+- [x] Soak `full_core` + `full_corev_apu` @ 4000 MHz / 20 ps / `-O3` with `--trace-log`.
+  `full_core`: 184 modules, 4255 paths, primary 95→19.2 FO4, worst_all 545.5
+  (`g6lc_ai_exec`; SyncDpRam 720 comment artefact gone), 1114 edits, 837 apply /
+  2 refuse (`axi_adapter` IndependentLhsBundle 19.2 FO4 is residual primary).
+  `full_corev_apu`: island+fetch_B in portable.f, primary 114→10 IR-closes, emitted
+  350.9 MHz, worst_all 1317.5 unchanged (atomic). Traces under
+  `build-platform/workspace/build/sv-timing/monorepo-soak/<profile>/algo-trace.jsonl`.
+
+## 2026-09-08 — Rust sv-parser fork (not Python) as submodule
+
+Corrected the misleading “Python parser” claim: production frontend is
+**Rust** [etcimon/sv-parser](https://github.com/etcimon/sv-parser) `g6lc`
+(dalance/sv-parser v0.13.5). pyslang remains emit-lint only.
+
+- [x] Validated in-tree copy was **byte-identical** to dalance v0.13.5 (only `VENDOR_STAMP` + dropped `.github/`).
+- [x] Forked to `github.com/etcimon/sv-parser` (did not exist).
+- [x] `g6lc` branch: Verilator chained select (`SelectSuffix`) + comment-aware `/`.
+- [x] Replaced `sv-timing/crates/sv-parser` vendor copy with submodule `branch = g6lc` @ `977cb3f`.
+- [x] Host-side: `expr.rs` skips `//` / `/*` in the homemade RHS parser; `lower.rs` drops comment-slash `BinaryOperator`s.
+- [x] Fixtures `parse/chained_select.sv`, `parse/comment_slashes.sv`.
+- [ ] `--allow-parse-errors` **kept** for truly unparsable files (`sram.sv` translate_off / `unparsable.sv`). `core/alu.sv` xperm8 should no longer need it.
+- [ ] Re-run `full_core` soak without `--allow-parse-errors` and confirm `SyncDpRam` is not the 720 FO4 comment artefact.
+
 ## CURRENT STATE — AI island at a high clock (2026-09-10)
 
 Read [`architecture/FREQUENCY-CLOSURE.md`](architecture/FREQUENCY-CLOSURE.md)

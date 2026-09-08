@@ -145,6 +145,18 @@ Rules:
 2. Hierarchical names must be resolved against the **elaborated** netlist, not assumed equal to SV instance names.
 3. Multi-cycle and false-path constraints stay host/STA owned.
 
+### 6.1 Clock-aware `always_ff` factorize comments
+
+Each sequential region keeps a [`ParallelScratch`](../crates/sv-timing-core/src/parallel_timing.rs) bound to its capturing edge (`clk_i` / `posedge` / period_ns / budget \(B\)). Auto-correct injects **review-only** comments from that board — not a combinational FO4 counter:
+
+```tcl
+# from emit snippet (not a sign-off SDC)
+create_clock -name clk_i -period 0.250000 [get_ports clk_i]
+report_timing -from clk_i -to state_q
+```
+
+Workflow (package-side, OpenSTA binary is host-owned): [`OPENSTA-CORRECTION-WORKFLOW.md`](OPENSTA-CORRECTION-WORKFLOW.md). Crates never link OpenSTA (KD0).
+
 ---
 
 ## 7. JSON schema notes

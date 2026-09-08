@@ -1,10 +1,14 @@
-# NOTICE — vendored sv-parser
+# NOTICE — sv-parser submodule
 
-This package vendors [dalance/sv-parser](https://github.com/dalance/sv-parser.git) at pin `v0.13.5` under
-`crates/sv-parser/`.
+This package uses a git submodule at `crates/sv-parser/` pointing at
+[https://github.com/etcimon/sv-parser.git](https://github.com/etcimon/sv-parser.git) branch/pin `g6lc` (HEAD `977cb3f51e00ebd04322c8c75f1d63472030f3a6`).
 
-Upstream is dual-licensed MIT OR Apache-2.0. See the LICENSE files inside
-`crates/sv-parser/` (and per-crate LICENSE-MIT / LICENSE-APACHE where present).
+That tree is a fork of [dalance/sv-parser](https://github.com/dalance/sv-parser)
+(dalance/sv-parser v0.13.5). It is a **Rust** SystemVerilog parser (IEEE 1800 CST). It is
+**not** a Python parser, pyslang, or slang.
 
-Do not re-license the vendored tree. Local patches live in `patches/sv-parser/`.
-Refresh with `svt vendor-sv-parser` (see tools/vendor-sv-parser.md).
+Upstream (and this fork) is dual-licensed MIT OR Apache-2.0. See the LICENSE
+files inside `crates/sv-parser/`. Do not re-license the parser tree.
+
+GSys LibreCore extensions live on branch `g6lc` (see `crates/sv-parser/G6LC.md`).
+Refresh with `python tools/svt.py vendor-sv-parser`.

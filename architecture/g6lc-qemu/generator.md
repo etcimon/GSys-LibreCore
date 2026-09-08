@@ -44,9 +44,9 @@ guessing a default. A field it cannot resolve becomes `unresolved`, which the co
 surfaces and `--conform strict` treats as fatal.
 
 > **Escalation, recorded now so it is not a surprise later.** If the narrow reader proves brittle
-> across packages, the package vendors **dalance/sv-parser** exactly as `sv-timing` does
-> (`sv-timing/AGENTS-vendor-sv-parser.md`: integral in-tree copy under `crates/sv-parser`, path
-> dependency, pin file, patches in sort order). The Q1 gate — all seven `g6lc64_*` packages plus the
+> across packages, the package vendors **sv-parser** exactly as `sv-timing` does
+> (`sv-timing/AGENTS-vendor-sv-parser.md`: **Rust** submodule `etcimon/sv-parser` branch `g6lc`
+> under `crates/sv-parser`, path dependency — not a Python parser). The Q1 gate — all seven `g6lc64_*` packages plus the
 > `cv{32,64}a6*` family round-tripping to golden JSON — is what makes brittleness *detectable*
 > instead of latent.
 

@@ -3,6 +3,7 @@
 The **authoritative** design and package agent guides live inside the package:
 
 - [`sv-timing/AGENTS.md`](../../sv-timing/AGENTS.md) — package guider
+- Parser is the **Rust** submodule `etcimon/sv-parser` (`g6lc`), not a Python parser. See `sv-timing/AGENTS-vendor-sv-parser.md`.
 - [`sv-timing/AGENTS-todo.md`](../../sv-timing/AGENTS-todo.md) — live todo / state
 - [`sv-timing/architecture/DESIGN.md`](../../sv-timing/architecture/DESIGN.md) — architecture design (rev 4+)
 - [`sv-timing/architecture/OPTIMIZATION-LEVELS.md`](../../sv-timing/architecture/OPTIMIZATION-LEVELS.md) — `-O` levels + dials design delta

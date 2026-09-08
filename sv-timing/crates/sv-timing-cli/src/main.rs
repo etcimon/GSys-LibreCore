@@ -16,7 +16,7 @@ use sv_timing_cache::{
 use sv_timing_core::{
     analyze_files, banner, build_relocation_plan, debug_snapshot_pass, frequency_closure,
     load_filelist_default, load_fo4_v1_default, path_class_summary, rank_paths_by_slack,
-    resolve_opt, sta_hints_from_design, CacheMode, CutStrategy, DebugOptions, FileList,
+    resolve_opt, sta_hints_from_design, AlgoTrace, CacheMode, CutStrategy, DebugOptions, FileList,
     LowerOptions, NameTable, OptEffort, OptLevel, OptOptions, OptOverrides, ParamMap,
     ParseOptions, TimingDesign, TimingTarget, IR_VERSION, MEASUREMENT_VERSION, PARSER_PIN_HINT,
 };
@@ -210,6 +210,9 @@ enum Commands {
         /// Skip files the parser rejects instead of failing the run (reported, never silent).
         #[arg(long = "allow-parse-errors", default_value_t = false)]
         allow_parse_errors: bool,
+        /// JSONL algorithm trace (path_class / relocation / correct loop).
+        #[arg(long = "trace-log")]
+        trace_log: Option<PathBuf>,
         /// Optimization level + dials (analysis dials apply here).
         #[command(flatten)]
         opt: OptArgs,
@@ -298,6 +301,9 @@ enum Commands {
         /// Skip input files the parser rejects (integrity reparse of emitted SV stays strict).
         #[arg(long = "allow-parse-errors", default_value_t = false)]
         allow_parse_errors: bool,
+        /// JSONL algorithm trace (measure / scale / worklist / apply / refuse).
+        #[arg(long = "trace-log")]
+        trace_log: Option<PathBuf>,
         /// Optimization level + the ten dials.
         #[command(flatten)]
         opt: OptArgs,
@@ -365,6 +371,77 @@ fn write_json(path: &PathBuf, value: &serde_json::Value) -> Result<(), String> {
     }
     let body = serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?;
     std::fs::write(path, body).map_err(|e| e.to_string())
+}
+
+fn write_analyze_algo_trace(
+    path: &PathBuf,
+    design: &TimingDesign,
+    target_mhz: f64,
+    fo4_ps: f64,
+) -> Result<(), String> {
+    let t = AlgoTrace::to_file(path).map_err(|e| e.to_string())?;
+    let summary = path_class_summary(design);
+    let plan = build_relocation_plan(design);
+    let failing = design
+        .paths
+        .iter()
+        .filter(|p| !p.multi_cycle && p.slack_fo4 < 0.0)
+        .count();
+    let worst_all = design
+        .paths
+        .iter()
+        .map(|p| p.total_fo4)
+        .fold(0.0_f64, f64::max);
+    t.emit(
+        "analyze",
+        0,
+        AlgoTrace::kv([
+            ("target_mhz", serde_json::json!(target_mhz)),
+            ("fo4_ps", serde_json::json!(fo4_ps)),
+            ("budget_fo4", serde_json::json!(design.target.budget_fo4)),
+            ("modules", serde_json::json!(design.modules.len())),
+            ("paths", serde_json::json!(design.paths.len())),
+            ("failing_primary", serde_json::json!(failing)),
+            ("worst_all_fo4", serde_json::json!(worst_all)),
+            ("class_counts", serde_json::json!(summary.counts)),
+            ("class_adjusted_paths", serde_json::json!(summary.adjusted_paths)),
+        ]),
+    );
+    t.emit(
+        "reloc.summary",
+        0,
+        AlgoTrace::kv([
+            ("cards", serde_json::json!(plan.summary.cards)),
+            ("t3_only", serde_json::json!(plan.summary.t3_only_cards)),
+            ("by_pattern", serde_json::json!(plan.summary.by_pattern)),
+            ("auto_correct_options", serde_json::json!(plan.summary.auto_correct_options)),
+        ]),
+    );
+    // Hottest failing cards (cap so full_core stays readable).
+    for card in plan.cards.iter().take(24) {
+        let preferred = card
+            .options
+            .iter()
+            .find(|o| Some(&o.id) == card.preferred_auto.as_ref())
+            .or_else(|| card.options.first());
+        t.emit_path(
+            "reloc.card",
+            0,
+            Some(card.path_id),
+            Some(card.module.clone()),
+            AlgoTrace::kv([
+                ("pattern", serde_json::json!(format!("{:?}", card.pattern))),
+                ("class", serde_json::json!(format!("{:?}", card.path_class))),
+                ("fo4", serde_json::json!(card.total_fo4)),
+                ("slack", serde_json::json!(card.slack_fo4)),
+                ("preferred", serde_json::json!(preferred.map(|o| o.id.clone()))),
+                ("tier", serde_json::json!(preferred.map(|o| format!("{:?}", o.tier)))),
+                ("file", serde_json::json!(card.primary_loc.file)),
+                ("line", serde_json::json!(card.primary_loc.start_line)),
+            ]),
+        );
+    }
+    Ok(())
 }
 
 fn parse_module_list(s: &str) -> Vec<String> {
@@ -491,6 +568,7 @@ fn design_to_analyze_json(
                     })
                 })
                 .collect();
+            let cleanliness = design.module_cleanliness.get(&m.name);
             serde_json::json!({
                 "id": m.id,
                 "name": m.name,
@@ -505,6 +583,18 @@ fn design_to_analyze_json(
                 "package_imports": m.package_imports,
                 "instances": instances,
                 "regions": regions,
+                "cleanliness": cleanliness.map(|s| serde_json::json!({
+                    "chosen": s.chosen.as_str(),
+                    "C": s.cleanliness,
+                    "timing_pass": s.timing_pass,
+                    "timing_now": s.timing_now,
+                    "feasible": s.feasible,
+                    "D_ff": s.always_ff_density,
+                    "D_comb": s.always_comb_density,
+                    "n_always_ff": s.n_always_ff,
+                    "n_always_comb": s.n_always_comb,
+                    "rationale": s.rationale,
+                })),
             })
         })
         .collect();
@@ -667,6 +757,17 @@ fn design_to_analyze_json(
         "cross_module_paths": cross_paths_json,
         "paths": paths_json,
         "path_class_summary": path_class_summary(design),
+        "module_cleanliness": {
+            "modules": design.module_cleanliness.len(),
+            "mean_C": if design.module_cleanliness.is_empty() {
+                0.0
+            } else {
+                design.module_cleanliness.values().map(|s| s.cleanliness).sum::<f64>()
+                    / design.module_cleanliness.len() as f64
+            },
+            "timing_pass": design.module_cleanliness.values().filter(|s| s.timing_pass).count(),
+            "weights": { "always_ff": 0.40, "always_comb": 0.40, "aggressiveness": 0.20, "timing_fail": 0.50 },
+        },
         "path_exceptions": design.path_exceptions,
         "relocation_plan": build_relocation_plan(design),
         "opportunities": opportunities,
@@ -781,6 +882,7 @@ fn main() -> ExitCode {
             assume_xlen,
             package_mode,
             allow_parse_errors,
+            trace_log,
             opt,
         } => {
             let opt = match opt.resolve(None) {
@@ -877,6 +979,12 @@ fn main() -> ExitCode {
                     println!("modules={}", out.design.modules.len());
                     println!("paths={}", out.design.paths.len());
                     println!("opportunities={}", out.design.opportunities.len());
+                    if let Some(tp) = &trace_log {
+                        match write_analyze_algo_trace(tp, &out.design, target_mhz, fo4_ps) {
+                            Ok(()) => println!("trace_log={}", tp.display()),
+                            Err(e) => eprintln!("warning: --trace-log: {e}"),
+                        }
+                    }
                     if !out.skipped_files.is_empty() {
                         println!(
                             "skipped_files={} (parse errors; reading covers the rest)",
@@ -991,6 +1099,7 @@ fn main() -> ExitCode {
             assume_xlen,
             package_mode,
             allow_parse_errors,
+            trace_log,
             opt,
         } => {
             let opt = match opt.resolve(max_passes) {
@@ -1140,6 +1249,15 @@ fn main() -> ExitCode {
             let mut ctx = PassContext::new(design, names, policy);
             ctx.assume_clk = assume_clk;
             ctx.cost_model = load_fo4_v1_default();
+            if let Some(tp) = trace_log {
+                match AlgoTrace::to_file(&tp) {
+                    Ok(t) => {
+                        println!("trace_log={}", tp.display());
+                        ctx = ctx.with_algo_trace(t);
+                    }
+                    Err(e) => eprintln!("warning: --trace-log: {e}"),
+                }
+            }
             let fo4_before = ctx
                 .design
                 .paths

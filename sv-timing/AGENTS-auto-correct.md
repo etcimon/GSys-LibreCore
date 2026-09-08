@@ -19,6 +19,16 @@
    improvement reports `gain = 0` and is rejected by `opt_min_gain_fo4`.
 9. Cut sites are chosen by **cost**, not by node index (M5); relocation targets the IR node's
    byte span, not a nearby source line (M7).
+10. **`always_ff` keeps a clock-aware scratch.** `ParallelScratch::schedule_for_region`
+    binds `ClockDomain` from `GateInfo`; `fill_design_parallel_timing` stores the
+    full board on `ModuleParallelTiming.regions[id]`. Never replace that with a
+    combinational `schedule` of `path.nodes`. Factorize / JIT / OpenSTA seeds
+    read `scratch.clock` (name, edge, period, \(B\)).
+11. **Per-module cleanliness.** Explore only logically applicable algorithm sets
+    (region kind + cone lane). Pick a timing-passing set when one exists, else
+    max \(C\) with the fail penalty. Weight \(C\) toward `always_ff` /
+    `always_comb` density; more aggressive sets (InsertReg, multi-cut) score
+    less clean. The winner’s \(C\) is the module’s final cleanliness.
 
 ## Pass loop (copy for PR descriptions)
 
@@ -47,5 +57,6 @@ When diagnosing a bad rewrite, call / CLI-export:
 - `debug_dump_paths_csv`
 - `debug_dump_edit_trace`
 - `debug_snapshot_pass` (per-pass directory)
+- `--trace-log PATH` JSONL algorithm trace (`measure` / `scale` / `worklist` / `apply` / `refuse`)
 
 Never ship auto-correct without origin comments on new constructs.

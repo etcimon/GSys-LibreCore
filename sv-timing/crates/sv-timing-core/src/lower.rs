@@ -106,15 +106,9 @@ pub fn lower_unit(unit: &ParsedUnit, opts: &LowerOptions) -> CoreResult<AnalyzeO
     apply_param_map_to_design(&mut design, &opts.param_map);
 
     attribute_costs(&mut design, &opts.cost_model);
-    // Refresh primary_loc only — do **not** re-sum FO4 here (would wipe exclusive-case
-    // adjustments applied inside attribute_costs / classify_and_adjust_paths).
-    for path in &mut design.paths {
-        if let Some(module) = design.modules.get(&path.module) {
-            if let Some(last) = path.nodes.last().and_then(|id| module.nodes.get(id)) {
-                path.primary_loc = last.loc.clone();
-            }
-        }
-    }
+    // Hottest node, not the last statement in the always_comb (that was
+    // `default: state_d = ST_IDLE` on g6lc_ai_exec / gemm_seq / fpnew_fma).
+    crate::measure::refresh_primary_locs(&mut design);
     resolve_instance_child_ids(&mut design);
     stitch_cross_module_paths(&mut design, &mut next_path);
     // Cross-module paths need classification; local paths already classified.
@@ -1375,8 +1369,11 @@ where
         match node {
             RefNode::BinaryOperator(bin) => {
                 let sym = tree.get_str(&bin.nodes.0).unwrap_or("");
-                let class = classify_binary(sym);
                 let loc = locate_to_source(line_index, path_str, &bin.nodes.0.nodes.0);
+                if operator_is_comment_slash(bytes, &loc, sym) {
+                    continue;
+                }
+                let class = classify_binary(sym);
                 ops.push(OpExtract {
                     op_class: class,
                     loc,
@@ -1430,7 +1427,7 @@ where
                 if let Some(ref rhs) = a.rhs {
                     if rhs.contains('+') || rhs.contains('-') {
                         a.op_class = OperatorClass::AddSub;
-                    } else if rhs.contains('*') {
+                    } else if rhs_has_mul_not_pow(rhs) {
                         a.op_class = OperatorClass::Mul;
                     } else if rhs.contains('?') {
                         a.op_class = OperatorClass::Mux;
@@ -1733,10 +1730,59 @@ fn split_assign_text(text: &str) -> (Option<String>, Option<String>) {
     (None, Some(t.to_string()))
 }
 
+/// True when a `/` (or `*`) token sits on a `//` / `/*` comment, not an operator.
+fn operator_is_comment_slash(bytes: &[u8], loc: &SourceLoc, sym: &str) -> bool {
+    let s = sym.trim();
+    if s != "/" && s != "*" {
+        return false;
+    }
+    let i = loc.byte_start as usize;
+    if i < bytes.len() {
+        let next = bytes.get(i + 1).copied();
+        if s == "/" && (next == Some(b'/') || next == Some(b'*')) {
+            return true;
+        }
+        if s == "*" && i > 0 && bytes[i - 1] == b'/' {
+            return true;
+        }
+    }
+    let line_start = bytes
+        .get(..i.min(bytes.len()))
+        .and_then(|p| p.iter().rposition(|&b| b == b'\n').map(|p| p + 1))
+        .unwrap_or(0);
+    let rest = bytes.get(line_start..).unwrap_or(&[]);
+    let line_end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
+    let trimmed = std::str::from_utf8(&rest[..line_end])
+        .unwrap_or("")
+        .trim_start();
+    trimmed.starts_with("//") || trimmed.starts_with("/*")
+}
+
+/// True when RHS has a datapath `*`, not `**` power or `*'` sized-cast.
+fn rhs_has_mul_not_pow(rhs: &str) -> bool {
+    let b = rhs.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'*' {
+            let prev = if i > 0 { b[i - 1] } else { 0 };
+            let next = b.get(i + 1).copied().unwrap_or(0);
+            if prev != b'*' && next != b'*' && next != b'\'' {
+                return true;
+            }
+            if next == b'*' || next == b'\'' {
+                i += 1;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 fn classify_binary(sym: &str) -> OperatorClass {
     match sym.trim() {
         "+" | "-" => OperatorClass::AddSub,
         "*" => OperatorClass::Mul,
+        "**" => OperatorClass::ShiftConst,
         "/" | "%" => OperatorClass::DivRem,
         "<<" | ">>" | "<<<" | ">>>" => OperatorClass::ShiftConst,
         "==" | "!=" | "===" | "!==" | "<" | ">" | "<=" | ">=" => OperatorClass::Compare,
@@ -1838,6 +1884,26 @@ mod tests {
             !out.design.opportunities.is_empty() || p0.slack_fo4 >= 0.0,
             "either opportunity or positive slack"
         );
+    }
+
+    #[test]
+    fn comment_slash_banners_are_not_divrem() {
+        let path = fixture("parse/comment_slashes.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        for n in out.design.modules.values().flat_map(|m| m.nodes.values()) {
+            assert_ne!(
+                n.op_class,
+                Some(OperatorClass::DivRem),
+                "banner // must not lower as DivRem at {}:{}",
+                n.loc.file,
+                n.loc.start_line
+            );
+        }
     }
 
     #[test]

@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 #
 # sv-timing workspace — project-independent SystemVerilog timing IR package.
-# Vendored parser lives under crates/sv-parser (path deps only; no crates.io sv-parser).
+# Parser is the etcimon/sv-parser git submodule under crates/sv-parser
+# (Rust CST; not Python / pyslang). Path deps only; no crates.io sv-parser.
 
 [workspace]
 resolver = "2"
@@ -13,7 +14,7 @@ members = [
     "crates/sv-timing-emit",
     "crates/sv-timing-cli",
 ]
-# Nested upstream tree is path-only. Never auto-include it in `cargo test --workspace`.
+# Nested parser submodule is path-only. Never auto-include it in `cargo test --workspace`.
 exclude = [
     "crates/sv-parser",
     "crates/sv-parser/*",
@@ -36,7 +37,7 @@ sv-timing-cache = { path = "crates/sv-timing-cache" }
 sv-timing-transform = { path = "crates/sv-timing-transform" }
 sv-timing-emit = { path = "crates/sv-timing-emit" }
 
-# Vendored integral copy (refreshed via `svt vendor-sv-parser`)
+# Submodule etcimon/sv-parser (refreshed via `svt vendor-sv-parser`)
 sv-parser = { path = "crates/sv-parser/sv-parser" }
 sv-parser-error = { path = "crates/sv-parser/sv-parser-error" }
 sv-parser-pp = { path = "crates/sv-parser/sv-parser-pp" }

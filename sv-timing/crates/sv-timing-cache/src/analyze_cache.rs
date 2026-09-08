@@ -69,6 +69,10 @@ pub fn analyze_with_cache(
     // transform dials cannot change an analyze result, so they must not evict the cache.
     let mut param_keys = lower.param_map.keys();
     param_keys.push(format!("#measurement={}", sv_timing_core::MEASUREMENT_VERSION));
+    param_keys.push(format!(
+        "#path_class={}",
+        sv_timing_core::PATH_CLASS_DETECTOR_VERSION
+    ));
     param_keys.push(format!("#opt={}", lower.opt.analysis_digest()));
     // These two DO change the analyze result, so they must evict.
     //

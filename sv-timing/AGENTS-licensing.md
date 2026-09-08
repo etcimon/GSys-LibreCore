@@ -11,13 +11,13 @@
 | `AGENTS*.md`, `architecture/**`, `*.md` docs | No SPDX required |
 | Full proprietary text | Monorepo `LICENSE.Proprietary` when present |
 
-## Vendored sv-parser
+## sv-parser submodule (Rust fork)
 
 | Kind | Policy |
 |---|---|
-| `crates/sv-parser/**` | **Upstream MIT OR Apache-2.0** — never rewrite headers |
-| `LICENSE.NOTICE-sv-parser` | Pointer written by vendor script |
-| Patches in `patches/sv-parser/` | Keep minimal; do not relicense |
+| `crates/sv-parser/**` | **MIT OR Apache-2.0** (dalance + etcimon/g6lc) — never rewrite headers, never CERN-OHL |
+| `LICENSE.NOTICE-sv-parser` | Pointer written by `refresh_sv_parser.py` |
+| Customizations | Land on the fork (`g6lc` branch), not as overlay patches here |
 
 ## Corrected emit
 

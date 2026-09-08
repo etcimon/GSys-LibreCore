@@ -16,7 +16,7 @@
 | **Frequency closure** | [`architecture/FREQUENCY-CLOSURE.md`](architecture/FREQUENCY-CLOSURE.md) | Budget model + **high-frequency findings** (`-O` surface, `fo4_ps` as process input, known caveats) |
 | **PERF-CACHE** | [`architecture/PERF-CACHE.md`](architecture/PERF-CACHE.md) | IR-only SQLite analyze cache (CRC + design/module hits) |
 | **Toolchain / setup** | [`AGENTS-toolchain.md`](AGENTS-toolchain.md) | Contained rustup/cargo + Python venv; **Python-first** CLI |
-| **Vendor parser** | [`AGENTS-vendor-sv-parser.md`](AGENTS-vendor-sv-parser.md) | Integral in-tree `crates/sv-parser` |
+| **Vendor parser** | [`AGENTS-vendor-sv-parser.md`](AGENTS-vendor-sv-parser.md) | Submodule: `etcimon/sv-parser` (`g6lc`). **Rust**, not Python |
 | **Host integration** | [`AGENTS-host.md`](AGENTS-host.md) | How external tools import/interact (no monorepo hardcoding) |
 | **Auto-correct passes** | [`AGENTS-auto-correct.md`](AGENTS-auto-correct.md) | Multi-pass IR transforms; integrity tests |
 | **Core function catalog** | [`architecture/AUTO-CORRECT-CORE-API.md`](architecture/AUTO-CORRECT-CORE-API.md) | Naming, rank, pipeline, emit, debug APIs |
@@ -47,8 +47,12 @@ When this package is checked into a larger repo, also respect that repo’s SoC/
    - `RUSTUP_HOME=.tools/rustup`, `CARGO_HOME=.tools/cargo` (rustup + cargo via official installers)
    - Python venv `.tools/python-venv` for tooling scripts and `requirements.txt`
    - Never require a pre-installed global Rust; host Python is a bootstrap seed for the venv only.
-5. **Integral sv-parser.** Parser source is vendored under `crates/sv-parser/` (not crates.io for
-   production path deps). Refresh with `python tools/svt.py vendor-sv-parser`. See
+5. **Forked Rust sv-parser (submodule).** Production frontend is
+   [etcimon/sv-parser](https://github.com/etcimon/sv-parser) branch `g6lc` under
+   `crates/sv-parser/` (dalance/sv-parser v0.13.5 + Verilator chained-select). **Not
+   a Python parser**, not pyslang, not slang. Path deps only; not crates.io.
+   Refresh with `python tools/svt.py vendor-sv-parser` or
+   `git submodule update --init sv-timing/crates/sv-parser`. See
    `AGENTS-vendor-sv-parser.md`.
 6. **Licensing.** First-party code: `MIT` + Etienne Cimon when under the
    monorepo policy. Vendored parser: MIT OR Apache-2.0 unchanged. See `AGENTS-licensing.md`.
@@ -73,6 +77,7 @@ sv-timing/
     svt.py                  ← PRIMARY CLI (setup/doctor/build/test/vendor/…)
     refresh_sv_parser.py
     check_independence.py
+    fetch_opensta.py        ← host OpenSTA clone (not a crate dep)
     env_common.py
     sv-parser.rev
   svt.sh / svt.ps1          ← thin wrappers → tools/svt.py (no business logic)
@@ -80,7 +85,7 @@ sv-timing/
   rust-toolchain.toml
   requirements.txt          ← venv pins
   crates/
-    sv-parser/              ← VENDORED upstream (integral copy)
+    sv-parser/              ← submodule: etcimon/sv-parser (g6lc; Rust, not Python)
     sv-timing-core/         ← loc, parse, IR (growing)
     sv-timing-cache/
     sv-timing-transform/
@@ -222,7 +227,7 @@ section "High-frequency targets", AI island in
 |---|---|
 | Change architecture | Edit `architecture/DESIGN.md` + note in `AGENTS-todo.md` |
 | Add toolchain command | Implement in `tools/svt.py` (not shell) |
-| Refresh parser | `tools/refresh_sv_parser.py` via `svt.py vendor-sv-parser` |
+| Refresh parser | `tools/refresh_sv_parser.py` via `svt.py vendor-sv-parser` (submodule fetch, not a Python SV parser) |
 | New IR / cost / path logic | `crates/sv-timing-core` |
 | Cache | `crates/sv-timing-cache` |
 | Auto-correct | `crates/sv-timing-transform` + `emit` |

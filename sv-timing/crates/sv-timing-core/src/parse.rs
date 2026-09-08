@@ -294,6 +294,28 @@ mod tests {
     }
 
     #[test]
+    fn chained_select_parses_without_allow_parse_errors() {
+        let f = fixture("parse/chained_select.sv");
+        if !f.exists() {
+            return;
+        }
+        let unit = parse_paths(&[f], &ParseOptions::default())
+            .expect("Verilator chained select must parse on the g6lc sv-parser fork");
+        assert_eq!(unit.files.len(), 1);
+        assert!(unit.skipped.is_empty());
+    }
+
+    #[test]
+    fn comment_slash_banner_parses() {
+        let f = fixture("parse/comment_slashes.sv");
+        if !f.exists() {
+            return;
+        }
+        parse_paths(&[f], &ParseOptions::default())
+            .expect("banner // comments must parse");
+    }
+
+    #[test]
     fn allow_parse_errors_skips_and_reports_instead_of_aborting() {
         // A monorepo file list must not be sunk by one file outside the strict grammar.
         let good = fixture("comb_adder_cloud.sv");

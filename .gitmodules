@@ -105,3 +105,7 @@
 	path = g6lc_bios/svelte-d
 	url = https://github.com/etcimon/svelte-d.git
 	branch = g6lc_bios
+[submodule "sv-timing/crates/sv-parser"]
+	path = sv-timing/crates/sv-parser
+	url = https://github.com/etcimon/sv-parser.git
+	branch = g6lc

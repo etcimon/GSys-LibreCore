@@ -160,19 +160,12 @@ DEFAULT_PROFILE_SPECS: list[dict] = [
         # The 4 oracle frontend copies are not on this flist at all; they come only from
         # -f Flist.smt_legacy, which must never be combined with fetch_B (two
         # `module frontend`).
+        # Never analyse core/fetch_A (retired frontend + g1* recover). Live
+        # supply is fetch_B via Flist.cva6 +define+G6LC_FETCH_B.
         "exclude": [
-            "/core/fetch_A/smt_legacy/g6lc_present.sv",
-            "/core/fetch_A/smt_legacy/g6lc_leftover.sv",
-            "/core/fetch_A/smt_legacy/g6lc_fe_keep.sv",
-            "/core/fetch_A/smt_legacy/g6lc_fe_kill.sv",
-            "/core/fetch_A/smt_legacy/g6lc_iq_hide.sv",
-            "/core/fetch_A/smt_legacy/g6lc_lj_hide.sv",
-            "/core/fetch_A/smt_legacy/g6lc_sib_cjalr.sv",
-            "/core/fetch_A/smt_legacy/g6lc_rvc_enc.sv",
-            "/core/fetch_A/smt_legacy/g6lc_jalr_usable.sv",
-            "/core/fetch_A/smt_legacy/g6lc_cf_unissued.sv",
+            "/core/fetch_A/",
         ],
-        "notes": "Entire core/Flist.cva6 (excl. g1* recover) — all modules structural FO4",
+        "notes": "Entire core/Flist.cva6 with fetch_B only (excl. core/fetch_A) + CVXIF AI",
     },
     {
         "id": "full_corev_apu",
@@ -181,7 +174,10 @@ DEFAULT_PROFILE_SPECS: list[dict] = [
         "all_modules": True,
         "param_map": "verif/sv-timing-tests/param-maps/cv64a6_imafdc_xlen64.json",
         "soft_missing": True,
-        "notes": "Entire corev_apu RTL (excl. tb/test/deprecated) + core packages",
+        "exclude": [
+            "/core/fetch_A/",
+        ],
+        "notes": "corev_apu + ai_island + fetch_B supply; never core/fetch_A",
     },
 ]
 
@@ -292,7 +288,7 @@ def write_filtered_portable(
     build input, so superseded RTL kept in-tree for reference is filtered HERE rather
     than by forking the flist or enumerating ~200 files that would then drift.
 
-    Returns (portable_path, dropped, kept_files, excluded).
+    Returns (portable_path, dropped, kept_files, excluded, superseded).
     """
     patterns = [e for e in (exclude or []) if e]
     kept_files: list[Path] = []
@@ -311,6 +307,7 @@ def write_filtered_portable(
             dropped.append(posix)
             if not soft:
                 raise FileNotFoundError(str(p))
+    kept_files, superseded = prefer_fetch_b_equivalents(kept_files)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     def write_variant(path: Path, mapper) -> None:
@@ -339,7 +336,29 @@ def write_filtered_portable(
     # Host-normalized for Windows build-platform validate / Yosys
     host_path = out_path.with_name("portable.host.f")
     write_variant(host_path, host_portable_path)
-    return out_path, dropped, kept_files, excluded
+    return out_path, dropped, kept_files, excluded, superseded
+
+
+def prefer_fetch_b_equivalents(files: list[Path]) -> tuple[list[Path], list[str]]:
+    """When fetch_B and core/ or core/frontend/ share a basename, keep fetch_B.
+
+    Live supply is `core/fetch_B/{frontend,instr_queue,instr_scan,instr_realign,
+    g6lc_fetch_pkg,g6lc_fetch_dbg}.sv`. Predictors in `core/frontend/` that have
+    no fetch_B twin (btb, ras, FTQ, …) are left alone.
+    """
+    pairs = [(p, host_portable_path(p)) for p in files]
+    fetch_b_names = {Path(px).name for _, px in pairs if "/core/fetch_B/" in px}
+    if not fetch_b_names:
+        return files, []
+    kept: list[Path] = []
+    superseded: list[str] = []
+    for p, px in pairs:
+        name = Path(px).name
+        if name in fetch_b_names and "/core/fetch_B/" not in px and "/core/" in px:
+            superseded.append(px)
+            continue
+        kept.append(p)
+    return kept, superseded
 
 
 def cargo_bin(pkg: Path) -> Path | None:
@@ -656,6 +675,7 @@ def run_analyze(
         extra.extend(["--opt-level", str(opt_level)])
     if allow_parse_errors:
         extra.append("--allow-parse-errors")
+    extra.extend(["--trace-log", str(out_dir / "algo-trace-analyze.jsonl")])
     code, _ = run_svt(
         pkg,
         subcmd="analyze",
@@ -708,6 +728,7 @@ def run_correct(
         extra.append("--allow-latency")
     if allow_parse_errors:
         extra.append("--allow-parse-errors")
+    extra.extend(["--trace-log", str(out_dir / "algo-trace.jsonl")])
     if emit:
         emit_dir = out_dir / "corrected"
         extra.extend(["--emit", "--out-dir", str(emit_dir)])
@@ -1251,7 +1272,7 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=repo,
                 strict=False,
             )
-            portable, dropped, kept_files, excluded = write_filtered_portable(
+            portable, dropped, kept_files, excluded, superseded = write_filtered_portable(
                 expanded.files,
                 expanded.incdirs,
                 portable,
@@ -1270,6 +1291,11 @@ def main(argv: list[str] | None = None) -> int:
                 log(
                     f"profile {prof.id} excluded {len(excluded)} file(s) by "
                     f"pattern {prof.exclude}"
+                )
+            if superseded:
+                log(
+                    f"profile {prof.id} fetch_B wins {len(superseded)} shadowed "
+                    f"core/ or core/frontend/ twin(s)"
                 )
             # Also keep full expand via write_portable_f for debugging
             write_portable_f(

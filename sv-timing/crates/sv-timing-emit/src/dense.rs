@@ -254,21 +254,27 @@ pub fn emit_blocks_for_trace_src(
         .collect();
 
     // Collect snippets; demote unless emit_balance_mux_rtl + scope-safe (R12d).
+    // always_ff factorize comments are comment-only — always inject.
     let mut snippets: Vec<&str> = Vec::new();
-    if opts.emit_balance_mux_rtl {
-        for r in &trace.records {
-            if let Some(s) = r.emit_snippet.as_ref() {
-                if s.trim().is_empty() {
-                    continue;
-                }
-                let safe = source
-                    .map(|src| crate::rhs::balance_mux_snippet_safe(src, s, r.origin.start_line))
-                    .unwrap_or_else(|| !snippet_unsafe_at_module_scope(s));
-                if !safe {
-                    continue; // demoted — FO4 credit already on the edit
-                }
-                snippets.push(s.as_str());
+    for r in &trace.records {
+        if let Some(s) = r.emit_snippet.as_ref() {
+            if s.trim().is_empty() {
+                continue;
             }
+            if s.contains("always_ff factorize") {
+                snippets.push(s.as_str());
+                continue;
+            }
+            if !opts.emit_balance_mux_rtl {
+                continue;
+            }
+            let safe = source
+                .map(|src| crate::rhs::balance_mux_snippet_safe(src, s, r.origin.start_line))
+                .unwrap_or_else(|| !snippet_unsafe_at_module_scope(s));
+            if !safe {
+                continue; // demoted — FO4 credit already on the edit
+            }
+            snippets.push(s.as_str());
         }
     }
 

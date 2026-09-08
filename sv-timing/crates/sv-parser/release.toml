@@ -1,5 +1,0 @@
-consolidate-commits        = true
-pre-release-commit-message = "Prepare to release"
-tag-message                = "Bump version to v{{version}}"
-tag-prefix                 = ""
-dependent-version          = "upgrade"
