@@ -1,5 +1,11 @@
 # V/A-Turbo — Virtual Analog Turbo
 
+> **Timing companion:** [`AI-ISLAND-TIMING.md`](AI-ISLAND-TIMING.md) covers what
+> limits the island's *clock* (`g6lc_ai_exec` is the core's worst real path at 545.5
+> FO4, needing a 6-stage multiply at 4 GHz/20 ps). This document covers *throughput*.
+> A deeper multiply interacts with the retire ceiling recorded here, so plan both
+> together.
+
 Compartment for per-job **precision and lane-group selection** in the GSys
 LibreCore AI island. It is the only policy feature that may change arithmetic,
 so it is isolated behind its own gate, its own verification mode and its own

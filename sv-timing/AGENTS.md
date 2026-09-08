@@ -13,6 +13,7 @@
 | **Architecture index** | [`architecture/README.md`](architecture/README.md) | Short map of architecture docs |
 | **Relocation FO4 plan** | [`architecture/RELOCATION-ANALYSIS.md`](architecture/RELOCATION-ANALYSIS.md) | Pattern → T0–T3 relocation options for bottlenecks |
 | **Optimization levels** | [`architecture/OPTIMIZATION-LEVELS.md`](architecture/OPTIMIZATION-LEVELS.md) | L0–L5 measure → path_class → BalanceMux → InsertReg |
+| **Frequency closure** | [`architecture/FREQUENCY-CLOSURE.md`](architecture/FREQUENCY-CLOSURE.md) | Budget model + **high-frequency findings** (`-O` surface, `fo4_ps` as process input, known caveats) |
 | **PERF-CACHE** | [`architecture/PERF-CACHE.md`](architecture/PERF-CACHE.md) | IR-only SQLite analyze cache (CRC + design/module hits) |
 | **Toolchain / setup** | [`AGENTS-toolchain.md`](AGENTS-toolchain.md) | Contained rustup/cargo + Python venv; **Python-first** CLI |
 | **Vendor parser** | [`AGENTS-vendor-sv-parser.md`](AGENTS-vendor-sv-parser.md) | Integral in-tree `crates/sv-parser` |
@@ -185,6 +186,33 @@ from synthetic STA fixtures—only real STA + host `timings retune-propose` (S3b
 `--target-mhz` tightens the budget; residual exclusive/LSU cones may still estimate ~1.4–1.7 GHz
 after latency-neutral rewrites (need microarch / multi-cycle, not FO4 credit games). Design:
 `architecture/FO4-ALGORITHM-UPGRADES.md`, `RELOCATION-ANALYSIS.md`, `FREQUENCY-CLOSURE.md`.
+
+### 3.2.1 Chasing a multi-GHz target (read before quoting a number)
+
+Measured 2026-09-10 on `full_core`; detail and provenance in `FREQUENCY-CLOSURE.md`
+section "High-frequency targets", AI island in
+`../architecture/ai-matrix/AI-ISLAND-TIMING.md`.
+
+1. **`--fo4-ps` is a process input, not a knob.** The 4000 MHz budget is 10.0 FO4 at 20 ps,
+   16.7 at 12 ps, 33.3 at 6 ps -- so a target can be made to "close" by choosing the node.
+   Quote `fo4_ps` with every frequency claim. The host target of record is 1.25 GHz / 12 nm.
+2. **Do not reach for `-O3`.** Against `-O2` at the same point it produced 163 more edits
+   (928 -> 1091) and an **identical** emitted result. The limiting cones are
+   `AtomicOverBudget` and no cut strategy reaches inside an indivisible operator, so more
+   passes / wider worklist / multi-cut cannot help them.
+3. **The actionable output is the T3 stage count.** `t3_arch_multicycle_mul` reports
+   `ceil(atomic_cost / budget)` internal stages and scales with the target (a 56 FO4
+   multiply: 2 stages at 1250 MHz/20 ps, **6** at 4000 MHz/20 ps). Treat it as the
+   microarchitectural ask, not a dead end.
+4. **Never quote `post_closure` alone.** `primary_fo4` excludes `atomic_over_budget` and
+   multi-cycle, so the IR can report `closes=true` for a design that does not close --
+   measured: APU IR `closes=true 4000.0` vs emitted **350.9 MHz**. Read `post_analyze_sv`,
+   which re-analyses the *emitted* RTL, beside it.
+5. **Known lowering bug:** comment slashes are lowered as `DivRem` nodes, so a path whose
+   `primary_loc` is a comment line is invalid. It currently owns the core's worst path
+   (`SyncDpRam` 720 FO4 on a row of slashes; 3 of 24 atomic paths, 5.3% of total FO4).
+   Frequency frontiers taken before that fix will move.
+
 
 ---
 

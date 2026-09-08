@@ -9,6 +9,28 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 
 
 
+
+## CURRENT STATE — AI island at a high clock (2026-09-10)
+
+Read [`architecture/FREQUENCY-CLOSURE.md`](architecture/FREQUENCY-CLOSURE.md)
+§"High-frequency targets" and
+[`../architecture/ai-matrix/AI-ISLAND-TIMING.md`](../architecture/ai-matrix/AI-ISLAND-TIMING.md)
+before quoting any frequency. Dated entries below have the provenance.
+
+| Question | Answer, measured |
+|---|---|
+| Is the island analysed at all? | **Yes, since 2026-09-10.** Two defects hid it: dropped `+define+` and a `design_key` that omitted `allow_parse_errors`/`package_mode` (139-module cache hit vs 177 cold, zero `g6lc_*`). |
+| What limits the core? | **`g6lc_ai_exec`, 545.5 FO4** — the worst *real* path. OoO blocks are healthy (≤ 25.1 FO4). |
+| Why does it not improve? | `AtomicOverBudget`: a single 56 FO4 `Mul`. No cut strategy reaches inside an operator. |
+| Does more aggressivity help? | **No.** `-O3` vs `-O2`: +163 edits, identical emitted result. |
+| So what is the ask? | T3 `arch_multicycle`: **6 internal stages** at 4000 MHz/20 ps (2 at 1250/20, 4 at 4000/12). |
+| Is 4 GHz credible? | Not on the documented node. `fo4_ps` is a process input; the host target of record is **1.25 GHz / 12 nm** and no 12 nm reference part exceeds 2.0 GHz. |
+| Biggest measurement risk | **Comment slashes lower as `DivRem`.** Owns the reported worst path (`SyncDpRam` 720 FO4 on a row of slashes). Frontiers taken before the fix will move. |
+
+**Next, in order:** (1) stop comment content reaching operator extraction, (2) re-run the
+frontier, (3) pipeline the `g6lc_ai_exec` multiply and re-check the `va-turbo.md` retire
+ceiling, (4) only then widen the flist.
+
 ## 2026-09-10 (f) — 4 GHz support: the T3 requirement now scales, and the worst path is a comment
 
 - [x] **`t3_arch_multicycle_mul` hardcoded its own answer.** `latency_delta: 2` and
