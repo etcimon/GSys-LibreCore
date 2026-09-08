@@ -70,6 +70,7 @@ __all__ = [
     "DECODE_N16_RESIDUAL",
     "MEASURED_DECODE",
     "MEASURED_DECODE_N16",
+    "MEASURED_DECODE_SWEEP",
     "MEASURED_DOT_CELLS",
     "MEASURED_ENGINE_CELLS",
     "MEASURED_LANE_SWEEP",
@@ -84,6 +85,7 @@ __all__ = [
     "area_to_lanes",
     "optimal_lanes",
     "decode_b_share",
+    "decode_residual",
     "decode_residency_ceiling",
     "shape_analysis",
     "retire_analysis",
@@ -334,19 +336,58 @@ MEASURED_DECODE_N16: Dict[int, Tuple[int, int, int, int]] = {
     AI_FMT_FP32: (298, 288, 153, 143),
 }
 
-#: KNOWN MODEL RESIDUAL at decode n=16: the model is 3 cycles LOW for every one of the
-#: four formats, and exact at n=8.
-#:
-#: Recorded rather than fitted away, because two points cannot determine the term and
-#: the obvious candidate is already refuted: C write beats double from 4 to 8 between
-#: those points, and a 0.75 cy/beat write term fits BOTH decode points exactly -- then
-#: over-predicts the square 8x8 tile by 22 cycles (32 write beats). So the C drain
-#: appears to be hidden under compute when `steps` is large (512 on the square tile) and
-#: exposed when it is small (128 at decode), which is a `max`-shaped effect rather than a
-#: linear one. Pinning it needs a third n.
-#:
-#: The residual is format-INDEPENDENT, so it is not a beta error.
+#: KNOWN MODEL RESIDUAL at decode n=16: the model is 3 cycles LOW for all four formats
+#: and exact at n=8. Retained as the name the n=16 pass introduced; the general form is
+#: `decode_residual` below, measured over n = 8/16/24/32.
 DECODE_N16_RESIDUAL = 3
+
+#: The decode n-sweep: `{n: {format: (cold, warm_a, warm_b, warm_both)}}`, m=1, k=16,
+#: PeLanes=8, one engine. 64 measured points.
+#:
+#: The residency ratio CONVERGES, exactly as the closed-form ceiling said it must
+#: (FP32 resident-B): 1.859x -> 1.948x -> 1.982x -> 2.000x at n = 8/16/24/32, against a
+#: ceiling of 2.141x approached from below. Resident-both goes the other way and settles
+#: at ~2.07x, because once no operand reads remain the ratio is set by `steps + c`.
+MEASURED_DECODE_SWEEP: Dict[int, Dict[int, Tuple[int, int, int, int]]] = {
+    8:  {AI_FMT_INT: (56, 52, 31, 27), AI_FMT_INT4: (39, 36, 22, 19),
+         vt.AI_FMT_FP16: (90, 84, 49, 43), AI_FMT_FP32: (158, 148, 85, 75)},
+    16: {AI_FMT_INT: (100, 96, 51, 47), AI_FMT_INT4: (67, 64, 34, 31),
+         vt.AI_FMT_FP16: (166, 160, 85, 79), AI_FMT_FP32: (298, 288, 153, 143)},
+    24: {AI_FMT_INT: (144, 140, 71, 67), AI_FMT_INT4: (95, 92, 46, 43),
+         vt.AI_FMT_FP16: (242, 236, 121, 115), AI_FMT_FP32: (438, 428, 221, 211)},
+    32: {AI_FMT_INT: (188, 184, 91, 87), AI_FMT_INT4: (123, 120, 58, 55),
+         vt.AI_FMT_FP16: (318, 312, 157, 151), AI_FMT_FP32: (578, 568, 289, 279)},
+}
+
+
+def decode_residual(n: int, resident_b: bool) -> int:
+    """The m=1 correction the base model does not capture, measured not derived.
+
+    Over n = 8/16/24/32 the residual is EXACTLY linear and format-independent, with two
+    slopes depending on whether B streams:
+
+        B streams  (cold, warm_A):   0.375*n - 3   ==  0.75 * (w_beats - 4)
+        B resident (warm_B, both):   0.5*n   - 4   ==  1.00 * (w_beats - 4)
+
+    where `w_beats = n/2` (C is written in 64-bit pairs). Both are zero at n=8.
+
+    The two slopes are the interesting part: **C writes are MORE exposed when B is
+    resident**, i.e. when there is no read traffic left for them to hide behind. That is
+    a coherent mechanism and it is what a write buffer draining against reads would look
+    like.
+
+    It is nonetheless labelled EMPIRICAL and kept out of `model_cycles`, because it does
+    not extend to the square tile: 8x8 has 32 write beats and would want a +21 correction
+    by the same rule, yet it measures exactly 0 -- both cold and both-resident. So the
+    exposure depends on something these four points do not separate (m, or C bank
+    sequencing at m=1), and inventing a mechanism to cover both would be fitting a story
+    to eight numbers.
+    """
+    if n <= 0:
+        raise ValueError("n must be positive")
+    w_beats = n / 2.0
+    slope = 1.0 if resident_b else 0.75
+    return max(0, int(round(slope * (w_beats - 4))))
 
 
 def decode_b_share(m: int, n: int) -> float:

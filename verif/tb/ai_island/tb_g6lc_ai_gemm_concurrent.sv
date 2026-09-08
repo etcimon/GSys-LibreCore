@@ -2141,18 +2141,35 @@ module tb_g6lc_ai_gemm_concurrent
             GEMM_LANES >= 8 && GEMM_LANES <= 256 &&
             (GEMM_LANES & (GEMM_LANES - 1)) == 0)
       else $fatal(1, "MAX_DIM must cover JOB_M/JOB_N/JOB_K (>=1 each); PE_LANES must be power of two in [8,256]");
-    // The A/B/C sub-slots are 512 B each and every bound is taken at 4 bytes per
-    // element, the widest format staged.  This is the guard that now decides
-    // which geometries a build may ask for: JOB_N=16 with JOB_K=16 needs 1024 B
-    // of B and is refused HERE, loudly, rather than silently overwriting C.
-    // The C bound rounds m*n UP to an even element count because poison_engine
-    // writes C in 64-bit pairs and so pads an ODD tile by one word; an even tile
-    // (the 8x8 default among them) is charged nothing extra and may fill the
+    // The sub-slots are now derived (see their declaration), so this checks the
+    // derivation rather than a fixed 512 B: every region must hold its tile at 4
+    // bytes per element, the widest format staged, and the whole engine array
+    // must fit the memory model.  The C bound rounds m*n UP to an even element
+    // count because poison_engine writes C in 64-bit pairs and so pads an ODD
+    // tile by one word; an even tile is charged nothing extra and may fill the
     // sub-slot exactly.
     assert (ENG_BASE - 64'h8000_0000 + 64'(N_ENGINES * SLOT) <= 64'(NWORDS * 8) &&
             JOB_M * JOB_K * 4 <= OFF_B && JOB_N * JOB_K * 4 <= OFF_C - OFF_B &&
             (JOB_M * JOB_N + (JOB_M * JOB_N) % 2) * 4 <= SLOT - OFF_C)
       else $fatal(1, "measurement slots exceed memory");
+    // THE GEOMETRY AXIS MAY ONLY GROW THE SHAPE, NOT SHRINK IT.
+    //
+    // The directed suites perturb the shape with LITERALS -- n_v[0] = 6 and 7,
+    // m_v[0] = 4, k_v[0] = 8 -- because they are testing which fields are part
+    // of the reuse key.  Several of those cases deliberately do NOT re-stage the
+    // operands, so they rely on the nominal staging already covering the larger
+    // shape: at the 8x8x16 default, B rows 4 and 5 exist because eight were
+    // staged, and the n=6 case reads them.
+    //
+    // Below the default that stops being true and the failure is confusing
+    // rather than loud: JOB_N=4 reports `C row0 col4` -- a column the nominal
+    // tile does not even have -- because the n=6 case read two B rows nobody
+    // staged.  So the axis is bounded here instead, with the reason, rather
+    // than leaving a smaller geometry to produce a golden mismatch that looks
+    // like an RTL bug.  Making the literals relative to the parameters would
+    // lift this, and would also change what the directed cases test.
+    assert (JOB_M >= 8 && JOB_N >= 8 && JOB_K >= 16)
+      else $fatal(1, "JOB_M/JOB_N must be >= 8 and JOB_K >= 16: the directed cases perturb the shape with literals (n=6,7 m=4 k=8) and some do not re-stage, so a SMALLER nominal shape leaves them reading operands that were never written");
     // ROW STRIDE ALIGNMENT.  configure_engine sets lda = ldb = JOB_K, so the row
     // stride in bytes is JOB_K * element_bits / 8, and the narrowest format in
     // the tables is INT4 at 4 bits.  A stride that is not a whole number of

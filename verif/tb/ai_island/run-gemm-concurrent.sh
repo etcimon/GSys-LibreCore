@@ -94,9 +94,9 @@ build_cfg() {
     -GDOT_PIPE_FLOAT="$DOT_PIPE_FLOAT" \
     -GPE_LANES="$PE_LANES" \
     -GMAX_DIM="$MAX_DIM" \
-      -GJOB_M="$JOB_M" \
-      -GJOB_N="$JOB_N" \
-      -GJOB_K="$JOB_K" \
+    -GJOB_M="$JOB_M" \
+    -GJOB_N="$JOB_N" \
+    -GJOB_K="$JOB_K" \
     -GDRAM_CLASS="$DRAM_CLASS" \
   -I"$AXI/include" \
   -I"$CCELLS/include" \

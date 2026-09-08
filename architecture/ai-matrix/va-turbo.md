@@ -839,15 +839,55 @@ multi-engine address is unchanged (verified -- the default run is byte-identical
 Against predictions of **1.980x / 2.122x** -- right to ~1.6% -- and B's share came
 out `941/1000`, exactly `n/(m+n) = 16/17`.
 
-**A known residual, recorded rather than fitted away.** The model is **3 cycles low
-for every one of the four formats** at n=16, and exact at n=8. It is
-format-independent, so it is not a `beta` error. The obvious candidate is already
-refuted: C write beats double from 4 to 8 between those points, and a 0.75 cy/beat
-write term fits *both* decode points exactly -- then over-predicts the square 8x8
-tile by 22 cycles (32 write beats). So the C drain looks **hidden under compute
-when `steps` is large** (512 on the square tile) and **exposed when it is small**
-(128 at decode), which is a `max`-shaped effect rather than a linear one. Two points
-cannot determine that term; a third n would.
+### The residual, pinned over four n
+
+n = 8/16/24/32 x four formats x four residency states is 64 measured points, and
+they settle the term the n=16 pass could only report. It is **exactly linear and
+format-independent**, with **two slopes**:
+
+| B state | residual | in write beats (`w = n/2`) |
+|---|---|---|
+| streams (cold, warm_A) | `0.375n - 3` | `0.75 * (w - 4)` |
+| resident (warm_B, both) | `0.5n - 4` | `1.00 * (w - 4)` |
+
+Both are zero at n=8, and with the correction applied the model is **exact on all
+64 points**.
+
+The two slopes are the informative part: **C writes are more exposed when B is
+resident**, i.e. when there is no read traffic left for them to hide behind. That is
+what a write buffer draining against reads would look like, and it is the first
+evidence in this work for a write-side term at all.
+
+It is still labelled EMPIRICAL and kept out of the base model, because it does not
+extend to the square tile: 8x8 has 32 write beats and the same rule would want a
++21 correction, yet it measures exactly **0** -- cold and both-resident alike. So
+the exposure depends on something these points do not separate (m, or C bank
+sequencing at m=1), and covering both with one story would be fitting eight numbers.
+
+### The ratio converges, as the ceiling required
+
+| n | cold | resident B | ratio | resident both | ratio |
+|--:|--:|--:|--:|--:|--:|
+| 8 | 158 | 85 | 1.859x | 75 | 2.107x |
+| 16 | 298 | 153 | 1.948x | 143 | 2.084x |
+| 24 | 438 | 221 | 1.982x | 211 | 2.076x |
+| 32 | 578 | 289 | **2.000x** | 279 | 2.072x |
+
+Resident-B climbs with diminishing steps toward the closed-form ceiling of
+**2.141x**, approached from below exactly as predicted. Resident-both goes the
+*other* way and settles near 2.07x, because once no operand reads remain the ratio
+is set by `steps + c` rather than by traffic -- the same cap that makes INT4 the
+worst decode case.
+
+**A pre-existing assumption the axis exposed.** `JOB_N` below 8 fails, and
+confusingly: `JOB_N=4` reports a golden mismatch at `C row0 col4`, a column the
+nominal tile does not have. The directed suites perturb the shape with *literals*
+(`n = 6, 7`, `m = 4`, `k = 8`) to test which fields are part of the reuse key, and
+several deliberately do not re-stage the operands -- so they rely on the nominal
+staging already covering the larger shape. At the 8x8 default, B rows 4 and 5 exist
+because eight were staged. Below it they do not. The axis is now bounded at
+`JOB_M, JOB_N >= 8` and `JOB_K >= 16` with that reason, rather than letting a
+smaller geometry produce a mismatch that reads like an RTL bug.
 
 `run-gemm-concurrent.sh` now takes `JOB_M`/`JOB_N`/`JOB_K`, so the geometry axis is
 no longer manual-invocation only, and it rejects `JOB_K % 16 != 0` while INT4 is in

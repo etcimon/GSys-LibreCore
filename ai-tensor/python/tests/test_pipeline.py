@@ -356,6 +356,57 @@ def test_decode_at_n16_confirms_the_prediction_and_exposes_a_known_residual():
         assert P.model_cycles(numfmt, 1, 8, 16, lanes=8) == cold
 
 
+def test_the_decode_residual_is_exactly_linear_over_four_n():
+    """64 measured points pin the residual the n=16 pass could only report.
+
+    Two slopes, format-independent, both zero at n=8: `0.375n-3` while B streams and
+    `0.5n-4` once B is resident. With the correction applied the model is EXACT on all
+    64 points, which is what makes it a characterisation rather than a fudge.
+    """
+    checked = 0
+    for n, table in P.MEASURED_DECODE_SWEEP.items():
+        for numfmt, states in table.items():
+            for idx, (ra, rb) in enumerate(((False, False), (True, False),
+                                            (False, True), (True, True))):
+                base = P.model_cycles(numfmt, 1, n, 16, resident_a=ra, resident_b=rb,
+                                      lanes=8)
+                assert base + P.decode_residual(n, rb) == states[idx], (n, numfmt, idx)
+                checked += 1
+    assert checked == 64
+    # Zero at n=8, and strictly growing after -- so it is an n-term, not a constant.
+    assert P.decode_residual(8, False) == P.decode_residual(8, True) == 0
+    assert [P.decode_residual(n, False) for n in (16, 24, 32)] == [3, 6, 9]
+    assert [P.decode_residual(n, True) for n in (16, 24, 32)] == [4, 8, 12]
+    # Writes are MORE exposed with B resident: nothing is left to hide them behind.
+    assert P.decode_residual(32, True) > P.decode_residual(32, False)
+    with pytest.raises(ValueError):
+        P.decode_residual(0, False)
+
+
+def test_the_decode_residency_ratio_converges_as_the_ceiling_predicted():
+    """The ceiling said the ratio must converge in n rather than diverge. It does."""
+    ratios = []
+    for n in sorted(P.MEASURED_DECODE_SWEEP):
+        cold, _, warm_b, warm_both = P.MEASURED_DECODE_SWEEP[n][AI_FMT_FP32]
+        ratios.append(cold / warm_b)
+    # Monotone increasing, and every value under the closed-form ceiling.
+    assert ratios == sorted(ratios)
+    ceiling = P.decode_residency_ceiling(AI_FMT_FP32, 16, lanes=8)
+    assert all(r < ceiling for r in ratios)
+    assert ratios[0] == pytest.approx(1.859, abs=1e-3)
+    assert ratios[-1] == pytest.approx(2.000, abs=1e-3)
+    # Converging: each step adds less than the one before.
+    steps = [ratios[i + 1] - ratios[i] for i in range(len(ratios) - 1)]
+    assert steps == sorted(steps, reverse=True)
+    # Resident-BOTH settles instead of climbing, because with no reads left the ratio
+    # is set by `steps + c` rather than by traffic.
+    both = [P.MEASURED_DECODE_SWEEP[n][AI_FMT_FP32][0]
+            / P.MEASURED_DECODE_SWEEP[n][AI_FMT_FP32][3]
+            for n in sorted(P.MEASURED_DECODE_SWEEP)]
+    assert both[0] > both[-1]
+    assert all(2.0 < b < 2.2 for b in both)
+
+
 def test_b_dominates_decode_traffic_for_geometric_reasons_only():
     """Measured 888/1000 for EVERY format, because row_bytes and beta cancel."""
     assert P.decode_b_share(1, 8) == pytest.approx(8 / 9)

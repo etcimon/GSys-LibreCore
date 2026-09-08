@@ -474,13 +474,32 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   INT8 1.961x, INT4 1.971x, FP16 1.953x. `run-gemm-concurrent.sh` now takes
   JOB_M/JOB_N/JOB_K so the geometry axis is no longer manual-invocation only, and it
   rejects JOB_K%16 != 0 while INT4 is in the tables (the row-stride guard).
-- [ ] KNOWN RESIDUAL, kept rather than fitted away: the model is 3 cycles LOW for all
-  four formats at decode n=16 and EXACT at n=8. Format-independent, so not a beta error.
-  The obvious candidate is refuted -- C write beats double 4->8 between those points and
-  a 0.75 cy/beat write term fits BOTH decode points exactly, then over-predicts the
-  square 8x8 tile by 22 cycles (32 write beats). So the C drain looks hidden under
-  compute when steps is large (512 square) and exposed when small (128 decode), i.e. a
-  max-shaped effect, not linear. Two points cannot determine it; a third n would.
+- [x] RESIDUAL PINNED over four n. n = 8/16/24/32 x 4 formats x 4 residency states = 64
+  measured points. It is EXACTLY linear and format-independent with TWO slopes, both
+  zero at n=8: `0.375n - 3` while B streams (cold, warm_A) and `0.5n - 4` once B is
+  resident (warm_B, both) -- i.e. `0.75*(w-4)` and `1.00*(w-4)` in write beats, w = n/2.
+  With the correction the model is EXACT on all 64 points. The two slopes are the
+  informative part: C writes are MORE exposed when B is resident, i.e. when no read
+  traffic is left to hide them behind, which is what a write buffer draining against
+  reads looks like and is the first write-side evidence in this work. Still labelled
+  EMPIRICAL and kept OUT of the base model, because it does not extend to the square
+  tile: 8x8 has 32 write beats and the same rule wants +21, yet it measures exactly 0
+  both cold and both-resident. So exposure depends on something these points do not
+  separate (m, or C bank sequencing at m=1), and one story covering both would be
+  fitting eight numbers.
+- [x] THE RATIO CONVERGES, as the closed form required. FP32 resident-B 1.859x ->
+  1.948x -> 1.982x -> 2.000x at n = 8/16/24/32 with diminishing steps, all below the
+  2.141x ceiling and approaching from below. Resident-BOTH moves the other way and
+  settles at ~2.07x, because with no operand reads left the ratio is set by `steps + c`
+  rather than traffic -- the same cap that makes INT4 the worst decode case.
+- [x] A PRE-EXISTING ASSUMPTION THE AXIS EXPOSED, now bounded with its reason: JOB_N
+  below 8 fails, and confusingly (JOB_N=4 reports a golden mismatch at `C row0 col4`, a
+  column the nominal tile does not have). The directed suites perturb the shape with
+  LITERALS (n=6,7 m=4 k=8) to test which fields are part of the reuse key, and several
+  deliberately do NOT re-stage, so they rely on the nominal staging already covering the
+  larger shape -- at 8x8, B rows 4 and 5 exist because eight were staged. The axis is
+  now asserted at JOB_M,JOB_N >= 8 and JOB_K >= 16 rather than letting a smaller
+  geometry produce a mismatch that reads like an RTL bug.
 - [x] LOSSLESS NARROWING LANDED: the exact traffic lever FP32 never had. Bit-preserving
   FP32 had exactly ONE implemented speedup (recipe 16 residency, 1.279x) because the
   two exact levers that could help it -- lossless repack 1/3/17 and zero-skip 2 --
