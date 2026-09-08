@@ -11,7 +11,7 @@
 // The package itself remains monorepo-independent: hosts prepare inputs and
 // consume JSON / emit trees. See sv-timing/AGENTS-host.md.
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import type { PlatformContext } from "../context.ts";
@@ -140,6 +140,8 @@ export interface TimingsSoakDashboard {
   reportJson: string | null;
   ok: boolean;
   note: string;
+  closureSource?: "original" | "ir-dry-run" | "emitted" | "unavailable";
+  timingStatus?: "CLOSES" | "MISS" | "INCONCLUSIVE";
   targetMhz?: number;
   fo4Ps?: number;
   budgetFo4?: number;
@@ -170,6 +172,109 @@ function num(v: unknown): number | undefined {
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+function object(v: unknown): Record<string, unknown> | undefined {
+  return v !== null && typeof v === "object" && !Array.isArray(v)
+    ? v as Record<string, unknown>
+    : undefined;
+}
+
+interface TimingsEvidence {
+  report: Record<string, unknown>;
+  closureSource: NonNullable<TimingsSoakDashboard["closureSource"]>;
+  issues: TimingsValidateIssue[];
+}
+
+function readTimingsEvidence(
+  reportJson: string,
+  raw: Record<string, unknown>,
+  dir: string,
+  requireEmit = false,
+): TimingsEvidence {
+  const unavailable = (code: string, message: string): TimingsEvidence => ({
+    report: {},
+    closureSource: "unavailable",
+    issues: [{ level: requireEmit ? "error" : "warn", code, message }],
+  });
+  let correction = reportJson.toLowerCase().endsWith("correct.json") ||
+    "post_closure" in raw || "post_analyze" in raw || "dry_run" in raw
+    ? raw : undefined;
+  if (!correction) {
+    const beside = join(dir, "correct.json");
+    if (existsSync(beside)) {
+      try {
+        correction = object(JSON.parse(readFileSync(beside, "utf8")));
+        if (!correction) return unavailable("emit-report-not-object", "correct.json root must be an object");
+      } catch (e) {
+        return unavailable("emit-report-parse", `failed to parse correct.json: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+  const emitPresent = !!readStampIfPresent(dir)?.emitDir ||
+    ["corrected", "emit", "out", "svt_corrected.f", "corrected.f"]
+      .some((name) => existsSync(join(dir, name)));
+  const emitDeclared = correction && (
+    correction.dry_run === false || correction.post_analyze != null ||
+    str(correction.emit_dir) || str(correction.out_dir) || str(correction.filelist) ||
+    str(correction.manifest) ||
+    (Array.isArray(correction.project_entries) && correction.project_entries.length > 0)
+  );
+  if (correction?.dry_run === true && !requireEmit && !emitPresent && !emitDeclared) {
+    return { report: correction, closureSource: "ir-dry-run", issues: [] };
+  }
+  if (!correction && !emitPresent && !requireEmit) {
+    return { report: raw, closureSource: "original", issues: [] };
+  }
+  if (correction?.dry_run === true) {
+    return unavailable("emit-dry-run", "dry-run IR cannot validate an emitted package");
+  }
+  if (correction?.post_analyze_valid === false) {
+    return unavailable("emit-analysis-unverified", "post_analyze did not validate the complete emitted project");
+  }
+  const integrity = object(correction?.integrity) ?? {};
+  if (integrity.skipped === true || integrity.status === "skipped") {
+    return unavailable("emit-integrity-skipped", "emitted SV integrity checks were skipped");
+  }
+  if (
+    correction?.integrity_hard_fail === true || integrity.reparse_ok === false ||
+    integrity.structural_ok === false ||
+    (integrity.joint_ok === false && integrity.context_soft !== true)
+  ) {
+    return unavailable("emit-integrity-failed", "emitted SV failed integrity checks; IR closure is not emitted evidence");
+  }
+  const post = object(correction?.post_analyze);
+  if (!post) {
+    return unavailable("emit-analysis-missing", "no post_analyze emitted SV measurement; IR closure is not emitted evidence");
+  }
+  if (post.skipped === true || post.status === "skipped" ||
+    (Array.isArray(post.skipped_files) && post.skipped_files.length > 0)) {
+    return unavailable("emit-analysis-skipped", "post_analyze emitted SV measurement was skipped");
+  }
+  if (post.paths !== undefined && (
+    !Array.isArray(post.paths) || post.paths.some((p) => num(object(p)?.total_fo4) === undefined)
+  )) {
+    return unavailable("emit-analysis-invalid", "post_analyze contains invalid measured paths");
+  }
+  const pathCount = Array.isArray(post.paths) ? post.paths.length : num(object(post.ast)?.path_count) ?? 0;
+  if (pathCount <= 0) {
+    return unavailable("emit-analysis-empty", "post_analyze has no measured paths; emitted timing is inconclusive");
+  }
+  const closure = object(post.frequency_closure);
+  if (
+    !closure || typeof closure.closes !== "boolean" ||
+    (num(closure.max_freq_mhz) ?? 0) <= 0 || (num(closure.worst_path_fo4) ?? 0) <= 0
+  ) {
+    return unavailable("emit-closure-missing", "post_analyze.frequency_closure lacks measurable emitted timing evidence");
+  }
+  return {
+    report: post,
+    closureSource: "emitted",
+    issues: integrity.context_soft === true ? [{
+      level: "warn", code: "emit-context-soft",
+      message: "emitted SV has unresolved joint context; review-only, not production STA",
+    }] : [],
+  };
 }
 
 /**
@@ -226,6 +331,8 @@ export function summarizeTimingsPackage(
       reportJson: null,
       ok: false,
       note,
+      closureSource: "unavailable",
+      timingStatus: "INCONCLUSIVE",
       pathCount: 0,
       moduleCount: 0,
       opportunityCount: 0,
@@ -238,13 +345,17 @@ export function summarizeTimingsPackage(
 
   let raw: Record<string, unknown>;
   try {
-    raw = JSON.parse(readFileSync(reportJson, "utf8")) as Record<string, unknown>;
+    const parsed = object(JSON.parse(readFileSync(reportJson, "utf8")));
+    if (!parsed) throw new Error("report JSON root must be an object");
+    raw = parsed;
   } catch (e) {
     return {
       source,
       reportJson: posixPath(reportJson),
       ok: false,
       note,
+      closureSource: "unavailable",
+      timingStatus: "INCONCLUSIVE",
       pathCount: 0,
       moduleCount: 0,
       opportunityCount: 0,
@@ -255,19 +366,33 @@ export function summarizeTimingsPackage(
     };
   }
 
-  const paths = Array.isArray(raw.paths) ? (raw.paths as Record<string, unknown>[]) : [];
+  const packageOk = issues.length === 0;
+  const evidence = readTimingsEvidence(reportJson, raw, source);
+  raw = evidence.report;
+  for (const issue of evidence.issues) {
+    const text = `[${issue.code}] ${issue.message}`;
+    if (!issues.includes(text)) issues.push(text);
+  }
+  const paths = Array.isArray(raw.paths) ? raw.paths.filter((p): p is Record<string, unknown> => object(p) !== undefined) : [];
   const modules = Array.isArray(raw.modules) ? raw.modules : [];
   const opportunities = Array.isArray(raw.opportunities) ? raw.opportunities : [];
   const staHints = Array.isArray(raw.sta_hints) ? raw.sta_hints : [];
   const ast = (raw.ast ?? {}) as Record<string, unknown>;
   // analyze.json uses frequency_closure; correct.json uses post_closure (primary after transforms).
   let closure = (raw.frequency_closure ?? raw.post_closure ?? {}) as Record<string, unknown>;
-  let reportNote = note;
+  let reportNote = `${note}; ${evidence.closureSource === "emitted"
+    ? "review-only emitted SV; closure from correct.json post_analyze.frequency_closure"
+    : evidence.closureSource === "ir-dry-run"
+      ? "IR-only dry-run; closure from correct.json post_closure, not emitted SV"
+      : evidence.closureSource === "original"
+        ? "original SV analysis (not corrected emit)"
+        : "emitted SV timing INCONCLUSIVE; no valid measurable evidence"}`;
   // When the loaded report is analyze.json but correct.json exists beside it, overlay
   // post_closure so host dashboard shows post-correct primary FO4 (not pre-BalanceMux).
   const pkgDir = source;
   const correctBeside = join(pkgDir, "correct.json");
   if (
+    evidence.closureSource === "ir-dry-run" &&
     reportJson.toLowerCase().endsWith("analyze.json") &&
     existsSync(correctBeside)
   ) {
@@ -277,7 +402,7 @@ export function summarizeTimingsPackage(
       if (typeof post.closes === "boolean" || post.worst_path_fo4 != null) {
         closure = { ...closure, ...post };
         reportNote =
-          "structural FO4 estimates only — not STA sign-off; closure from correct.json post_closure";
+          "structural FO4 estimates only — not STA sign-off; IR-only dry-run; closure from correct.json post_closure, not emitted SV";
       }
     } catch {
       /* keep analyze closure */
@@ -308,8 +433,10 @@ export function summarizeTimingsPackage(
   const dashboard: TimingsSoakDashboard = {
     source,
     reportJson: posixPath(reportJson),
-    ok: true,
+    ok: packageOk && evidence.closureSource !== "unavailable",
     note: reportNote,
+    closureSource: evidence.closureSource,
+    timingStatus: closure.closes === true ? "CLOSES" : closure.closes === false ? "MISS" : "INCONCLUSIVE",
     targetMhz: num(raw.target_mhz) ?? num(closure.target_mhz),
     fo4Ps: num(raw.fo4_ps),
     budgetFo4: num(raw.budget_fo4) ?? num(closure.budget_fo4),
@@ -333,12 +460,12 @@ export function summarizeTimingsPackage(
   return dashboard;
 }
 
-function readStampIfPresent(dir: string): { exitCode?: number } | null {
+function readStampIfPresent(dir: string): { exitCode?: number; emitDir?: string } | null {
   const p = join(dir, "stamp.json");
   if (!existsSync(p)) return null;
   try {
     const j = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
-    return { exitCode: typeof j.exitCode === "number" ? j.exitCode : undefined };
+    return { exitCode: num(j.exitCode), emitDir: str(j.emitDir) };
   } catch {
     return null;
   }
@@ -350,6 +477,7 @@ export function formatTimingsDashboardLines(d: TimingsSoakDashboard): string[] {
   lines.push(`source   : ${d.source}`);
   if (d.reportJson) lines.push(`report   : ${d.reportJson}`);
   lines.push(`note     : ${d.note}`);
+  if (d.timingStatus === "INCONCLUSIVE") lines.push("closure  : INCONCLUSIVE");
   if (!d.ok) {
     for (const i of d.issues) lines.push(`issue    : ${i}`);
     return lines;
@@ -949,16 +1077,19 @@ export function validateTimingsOutDir(
   }
 
   let schemaHint: string | null = null;
+  let report: Record<string, unknown> | undefined;
   if (reportJson) {
     try {
       const raw = readFileSync(reportJson, "utf8");
-      const j = JSON.parse(raw) as Record<string, unknown>;
+      const parsed = JSON.parse(raw);
+      const j = object(parsed) ?? {};
+      report = object(parsed);
       if (typeof j.schema === "string") schemaHint = j.schema;
       else if (typeof j.schema_version === "string") schemaHint = j.schema_version;
       else if (typeof j.version === "string") schemaHint = j.version;
       else schemaHint = "unknown";
       // Soft accept: any parseable JSON object is structurally ok for v1 host gate.
-      if (typeof j !== "object" || j === null || Array.isArray(j)) {
+      if (!report) {
         issues.push({
           level: "error",
           code: "report-not-object",
@@ -1048,6 +1179,41 @@ export function validateTimingsOutDir(
         message: "require-emit: no corrected/ tree or svt_corrected.f in out-dir",
       });
     }
+    if (!correctedFlist) {
+      issues.push({
+        level: "error", code: "emit-flist-missing",
+        message: "require-emit: no corrected source filelist in out-dir or emit tree",
+      });
+    } else {
+      try {
+        const paths = parsePortableFlistPaths(readFileSync(correctedFlist, "utf8"));
+        if (paths.length === 0) {
+          issues.push({
+            level: "error", code: "emit-flist-empty",
+            message: "require-emit: corrected filelist has no source file paths",
+          });
+        } else {
+          const missing = paths.filter((p) => {
+            const abs = isAbsolute(p) || /^[A-Za-z]:[\\/]/.test(p) ? p : join(dirname(correctedFlist), p);
+            try { return !statSync(abs).isFile(); } catch { return true; }
+          });
+          if (missing.length > 0) {
+            issues.push({
+              level: "error", code: "emit-sources-missing",
+              message: `require-emit: ${missing.length} corrected filelist source path(s) missing or not files`,
+            });
+          }
+        }
+      } catch (e) {
+        issues.push({
+          level: "error", code: "emit-flist-read",
+          message: `require-emit: failed to read corrected filelist: ${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+    }
+  }
+  if (reportJson && report) {
+    issues.push(...readTimingsEvidence(reportJson, report, dir, opts.requireEmit).issues);
   }
 
   const ok = !issues.some((i) => i.level === "error");

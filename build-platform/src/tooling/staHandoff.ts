@@ -9,6 +9,7 @@
 // Soft-skip when tools/liberty missing. See architecture/build-platform-opensta-from-timing.md.
 // sv-timing package remains independent — we only consume analyze JSON + portable.f.
 
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -255,26 +256,33 @@ export function parseOpenStaPathReport(text: string): {
   // Match lines like:  slack (VIOLATED) -0.12 or Startpoint: foo / Endpoint: bar
   let start: string | undefined;
   let end: string | undefined;
-  let slack: number | undefined;
+  const number = "[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?";
+  const label = "slack(?:\\s*\\((?:MET|VIOLATED)\\))?";
+  const slackLine = new RegExp(
+    `^\\s*(?:(${number})\\s+${label}|${label}\\s+(${number}))\\s*$`,
+    "i",
+  );
   for (const line of text.split(/\r?\n/)) {
-    const s = /Startpoint:\s+(\S+)/i.exec(line);
-    if (s) start = s[1];
-    const e = /Endpoint:\s+(\S+)/i.exec(line);
+    const s = /^\s*Startpoint:\s+(\S+)/i.exec(line);
+    if (s) {
+      start = s[1];
+      end = undefined;
+    }
+    const e = /^\s*Endpoint:\s+(\S+)/i.exec(line);
     if (e) end = e[1];
-    const sl = /slack\s*(?:\([^)]*\))?\s+(-?\d+(?:\.\d+)?)/i.exec(line);
+    const sl = slackLine.exec(line);
     if (sl) {
-      slack = Number(sl[1]);
-      if (start || end || slack != null) {
+      const slack = Number(sl[1] ?? sl[2]);
+      if (start && end && Number.isFinite(slack)) {
         rows.push({
           rank: rows.length + 1,
           start,
           end,
           slack,
         });
-        start = undefined;
-        end = undefined;
-        slack = undefined;
       }
+      start = undefined;
+      end = undefined;
     }
   }
   return rows.slice(0, 32);
@@ -444,7 +452,7 @@ async function runOpenStaSmoke(opts: {
 }> {
   mkdirSync(opts.openstaDir, { recursive: true });
   const tclPath = join(opts.openstaDir, "run.tcl");
-  const reportPath = join(opts.openstaDir, "paths.rpt");
+  const reportPath = join(opts.openstaDir, `paths-${randomUUID()}.rpt`);
   const wnsPath = join(opts.openstaDir, "wns.txt");
   const logPath = join(opts.openstaDir, "opensta.log");
 
@@ -481,23 +489,39 @@ async function runOpenStaSmoke(opts: {
     "utf8",
   );
 
-  if (!result.ok && !existsSync(reportPath)) {
+  if (!result.ok) {
     return {
       status: "fail",
       detail: `opensta exit ${result.code} (see opensta.log); check liberty vs netlist`,
     };
   }
-  const reportText = existsSync(reportPath)
-    ? readFileSync(reportPath, "utf8")
-    : result.stdout;
-  if (!existsSync(reportPath) && result.stdout) {
-    writeFileSync(reportPath, result.stdout, "utf8");
+  if (/^\s*Error(?:\s|:)/im.test(`${result.stdout}\n${result.stderr}`)) {
+    return {
+      status: "fail",
+      detail: "opensta reported errors (see opensta.log); check liberty, netlist and SDC",
+    };
   }
+  if (!existsSync(reportPath)) {
+    return { status: "fail", detail: "opensta ok but no report from this invocation" };
+  }
+  const reportText = readFileSync(reportPath, "utf8");
   const staRows = parseOpenStaPathReport(reportText);
+  if (staRows.length === 0) {
+    return {
+      status: "fail",
+      detail: "opensta report has no complete path blocks with finite slack; check constraints (see opensta.log)",
+    };
+  }
+  const pathBlocks = reportText.split(/^\s*Startpoint:/im).slice(1);
+  if (pathBlocks.some((block) => parseOpenStaPathReport(`Startpoint:${block}`).length === 0)) {
+    return { status: "fail", detail: "opensta report contains incomplete path blocks" };
+  }
+  const publishedReport = join(opts.openstaDir, "paths.rpt");
+  writeFileSync(publishedReport, reportText, "utf8");
   return {
-    status: result.ok || existsSync(reportPath) ? "pass" : "fail",
+    status: "pass",
     detail: `paths.rpt (${staRows.length} parsed path blocks)`,
-    report: posixPath(reportPath),
+    report: posixPath(publishedReport),
     staRows,
   };
 }
@@ -602,6 +626,7 @@ export async function runStaHandoff(
 
   // --- S1 Yosys synth + S2 OpenSTA (optional, soft-skip) ---
   let netlistPath: string | undefined;
+  let staReportPath: string | undefined;
   let staRows: ReturnType<typeof parseOpenStaPathReport> = [];
   const top = pickTopModule(raw, opts.top);
   const synthDir = join(resolvedOut, "synth");
@@ -686,7 +711,10 @@ export async function runStaHandoff(
         status: sta.status,
         detail: sta.detail,
       });
-      if (sta.staRows) staRows = sta.staRows;
+      if (sta.status === "pass" && sta.report && sta.staRows?.length) {
+        staRows = sta.staRows;
+        staReportPath = sta.report;
+      }
     }
 
     // S4: write OpenROAD floorplan TCL when netlist exists; run only if openroad + try
@@ -776,11 +804,16 @@ export async function runStaHandoff(
     // Always (re)write so re-runs stay reproducible and the stage is visible.
     const fixturePath = resolveStaFixturePath(ctx, pkgDir, opts.injectStaFixture);
     if (fixturePath && existsSync(fixturePath)) {
-      writeFileSync(staReport, readFileSync(fixturePath, "utf8"), "utf8");
+      const fixtureText = readFileSync(fixturePath, "utf8");
+      writeFileSync(staReport, fixtureText, "utf8");
+      staRows = parseOpenStaPathReport(fixtureText);
+      staReportPath = staReport;
       stages.push({
         id: "s2-opensta-fixture",
-        status: "pass",
-        detail: `injected synthetic paths.rpt from ${posixPath(fixturePath)} (not real STA)`,
+        status: staRows.length > 0 ? "pass" : "fail",
+        detail: staRows.length > 0
+          ? `injected synthetic paths.rpt from ${posixPath(fixturePath)} (not real STA)`
+          : `synthetic fixture has no complete path blocks: ${posixPath(fixturePath)}`,
       });
     } else {
       stages.push({
@@ -802,10 +835,7 @@ export async function runStaHandoff(
   }
 
   // --- S3 correlate ---
-  const staPresent = existsSync(staReport) || staRows.length > 0;
-  if (staPresent && staRows.length === 0 && existsSync(staReport)) {
-    staRows = parseOpenStaPathReport(readFileSync(staReport, "utf8"));
-  }
+  const staPresent = staReportPath != null;
   const overlap = computeOverlap(rows, staRows);
   const correlate = {
     schema: "cva6-sta-correlate.v0",
@@ -826,12 +856,12 @@ export async function runStaHandoff(
     missing_in_sta: overlap.missing_in_sta,
     missing_in_fo4: overlap.missing_in_fo4,
     overlap_score:
-      rows.length === 0
+      rows.length === 0 || staRows.length === 0
         ? null
         : Number((overlap.overlap.length / rows.length).toFixed(3)),
-    sta_report: staPresent ? posixPath(staReport) : null,
+    sta_report: staReportPath ? posixPath(staReportPath) : null,
     netlist: netlistPath ?? null,
-    stages_pending: staPresent
+    stages_pending: staPresent && staRows.length > 0
       ? []
       : ["s1-yosys-synth", "s2-opensta"].filter(
           (id) => !stages.some((s) => s.id === id && s.status === "pass"),
@@ -847,7 +877,7 @@ export async function runStaHandoff(
   } else if (staPresent) {
     stages.push({
       id: "s3-correlate",
-      status: "pass",
+      status: "skip",
       detail: "sta report present but no path blocks parsed — FO4 ranks only",
     });
   } else {
@@ -871,7 +901,7 @@ export async function runStaHandoff(
       correlate: posixPath(correlatePath),
       soakDashboard: posixPath(join(resolvedOut, "soak-dashboard.json")),
       netlist: netlistPath ?? null,
-      openstaReport: staPresent ? posixPath(staReport) : null,
+      openstaReport: staReportPath ? posixPath(staReportPath) : null,
     },
     stages,
     disclaimer: "structural FO4 is not STA sign-off",
@@ -880,8 +910,9 @@ export async function runStaHandoff(
 
   // S0 is success even if S1 fails on heavy packages (informational PD path)
   const s0ok = stages.some((s) => s.id === "s0-sdc-seeds" && s.status === "pass");
+  issues.push(...stages.filter((s) => s.status === "fail").map((s) => `${s.id}: ${s.detail}`));
   return {
-    ok: s0ok,
+    ok: s0ok && !stages.some((s) => s.status === "fail"),
     outDir: posixPath(resolvedOut),
     seedsSdc: posixPath(sdcPath),
     fo4Csv: posixPath(csvPath),

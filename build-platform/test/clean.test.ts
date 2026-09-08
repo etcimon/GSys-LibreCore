@@ -3,7 +3,7 @@
 //
 // clean.test.ts — unit tests for workspace clean inventory / filters / allowlist.
 
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -38,6 +38,7 @@ import {
   runStaHandoff,
 } from "../src/tooling/staHandoff.ts";
 import { which } from "../src/platform/exec.ts";
+import * as exec from "../src/platform/exec.ts";
 import { checkFo4Golden } from "../src/tooling/fo4Golden.ts";
 import { parseBenchLog } from "../src/tooling/benchMetrics.ts";
 import { buildLabReport, formatLabReportMarkdown } from "../src/tooling/labReport.ts";
@@ -426,6 +427,222 @@ test("summarizeTimingsPackage builds soak dashboard from analyze.json", () => {
   expect(existsSync(join(dir, "soak-dashboard.json"))).toBe(true);
 });
 
+function timingEvidenceFixture(name: string, correction: Record<string, unknown>) {
+  const dir = join(FIX, "ws", "build", "sv-timing", name);
+  const ctx = fakeCtx(join(FIX, "repo"), makePaths(join(FIX, "ws")));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "portable.f"), "original.sv\n");
+  writeFileSync(join(dir, "analyze.json"), JSON.stringify({
+    paths: [{ path_id: 1, total_fo4: 12, startpoint: "original" }],
+    frequency_closure: { closes: true, max_freq_mhz: 4000, worst_path_fo4: 12 },
+  }));
+  writeFileSync(join(dir, "correct.json"), JSON.stringify(correction));
+  return { ctx, dir };
+}
+
+function emittedTimingEvidence() {
+  return {
+    target_mhz: 4000,
+    fo4_ps: 20,
+    budget_fo4: 10,
+    paths: [
+      { path_id: 2, total_fo4: 114, startpoint: "emitted/q", endpoint: "emitted/d", closes: false },
+      { path_id: 3, total_fo4: 200, multi_cycle: true },
+    ],
+    modules: [{ name: "emitted" }],
+    ast: { files_parsed: 3, path_count: 2 },
+    frequency_closure: {
+      closes: false, max_freq_mhz: 350.9, worst_path_fo4: 114,
+      worst_slack_fo4: -104, failing_paths: 1,
+      worst_startpoint: "emitted/q", worst_endpoint: "emitted/d",
+    },
+  };
+}
+
+function emittedCorrection(overrides: Record<string, unknown> = {}) {
+  return {
+    dry_run: false,
+    post_closure: { closes: true, max_freq_mhz: 4000, worst_path_fo4: 10 },
+    post_analyze: emittedTimingEvidence(),
+    integrity: { reparse_ok: true, structural_ok: true, joint_ok: true },
+    ...overrides,
+  };
+}
+
+function materializeTimingEmit(dir: string) {
+  mkdirSync(join(dir, "corrected"), { recursive: true });
+  writeFileSync(join(dir, "corrected", "emitted.sv"), "module emitted; endmodule\n");
+  writeFileSync(join(dir, "corrected", "svt_corrected.f"), "emitted.sv\n");
+}
+
+test("summarizeTimingsPackage emitted evidence overrides optimistic IR and original paths", () => {
+  const { ctx, dir } = timingEvidenceFixture("dashboard-emitted", emittedCorrection());
+  materializeTimingEmit(dir);
+  for (const input of [dir, join(dir, "analyze.json"), join(dir, "correct.json")]) {
+    const dash = summarizeTimingsPackage(ctx, input);
+    expect(dash.ok).toBe(true);
+    expect(dash.closureSource).toBe("emitted");
+    expect(dash.timingStatus).toBe("MISS");
+    expect(dash.closes).toBe(false);
+    expect(dash.maxFreqMhz).toBe(350.9);
+    expect(dash.worstPathFo4).toBe(114);
+    expect(dash.worstSlackFo4).toBe(-104);
+    expect(dash.worstStart).toBe("emitted/q");
+    expect(dash.worstEnd).toBe("emitted/d");
+    expect(dash.failingPaths).toBe(1);
+    expect(dash.targetMhz).toBe(4000);
+    expect(dash.fo4Ps).toBe(20);
+    expect(dash.pathCount).toBe(2);
+    expect(dash.filesParsed).toBe(3);
+    expect(dash.hottest[0]?.pathId).toBe(2);
+    expect(dash.multiCyclePathCount).toBe(1);
+    expect(dash.note).toContain("post_analyze.frequency_closure");
+    expect(dash.note).toContain("review-only");
+    expect(dash.note).toContain("not STA sign-off");
+    expect(formatTimingsDashboardLines(dash).join("\n")).toContain("MISS");
+    expect(formatTimingsDashboardLines(dash).join("\n")).not.toContain("CLOSES");
+  }
+  expect(validateTimingsOutDir(ctx, { fromTiming: dir, requireEmit: true, checkSourcePaths: false }).ok).toBe(true);
+});
+
+const invalidTimingEvidence: [string, Record<string, unknown>][] = [
+  ["missing", { post_analyze: null }],
+  ["legacy-missing", { post_analyze: undefined }],
+  ["zero-paths", { post_analyze: { ...emittedTimingEvidence(), paths: [], ast: { path_count: 2 } } }],
+  ["invalid-paths", { post_analyze: { ...emittedTimingEvidence(), paths: [null] } }],
+  ["non-array-paths", { post_analyze: { ...emittedTimingEvidence(), paths: "invalid" } }],
+  ["no-closure", { post_analyze: { paths: [{ total_fo4: 10 }] } }],
+  ["nonfinite-closure", { post_analyze: { ...emittedTimingEvidence(), frequency_closure: { closes: true, max_freq_mhz: null } } }],
+  ["skipped-analysis", { post_analyze: { ...emittedTimingEvidence(), skipped: true } }],
+  ["partial-analysis", { post_analyze: { ...emittedTimingEvidence(), skipped_files: [{ path: "missing.sv" }] } }],
+  ["unverified-analysis", { post_analyze_valid: false }],
+  ["skipped-integrity", { integrity: { skipped: true, reparse_ok: true } }],
+  ["hard-reparse", { integrity: { reparse_ok: false, soft: false } }],
+  ["soft-reparse", { integrity: { reparse_ok: false, soft: true } }],
+  ["hard-structural", { integrity: { reparse_ok: true, structural_ok: false, soft: true } }],
+  ["hard-joint", { integrity: { reparse_ok: true, joint_ok: false, context_soft: false } }],
+];
+
+for (const [name, override] of invalidTimingEvidence) {
+  test(`summarizeTimingsPackage and validateTimingsOutDir reject ${name} emit evidence without IR fallback`, () => {
+    const { ctx, dir } = timingEvidenceFixture(`dashboard-invalid-${name}`, emittedCorrection(override));
+    materializeTimingEmit(dir);
+    for (const input of [dir, join(dir, "analyze.json"), join(dir, "correct.json")]) {
+      const dash = summarizeTimingsPackage(ctx, input);
+      expect(dash.closureSource).toBe("unavailable");
+      expect(dash.timingStatus).toBe("INCONCLUSIVE");
+      expect(dash.closes).toBeUndefined();
+      expect(dash.maxFreqMhz).toBeUndefined();
+      expect(dash.worstPathFo4).toBeUndefined();
+      expect(dash.hottest).toEqual([]);
+      expect(dash.issues.length).toBeGreaterThan(0);
+      expect(formatTimingsDashboardLines(dash).join("\n")).not.toContain("CLOSES");
+    }
+    const result = validateTimingsOutDir(ctx, { fromTiming: dir, requireEmit: true, checkSourcePaths: false });
+    expect(result.ok).toBe(false);
+    expect(result.issues.some((i) => i.level === "error" && i.code.startsWith("emit-"))).toBe(true);
+  });
+}
+
+test("summarizeTimingsPackage explicitly labels pure dry-run IR, not emitted timing", () => {
+  const { ctx, dir } = timingEvidenceFixture("dashboard-dry-run", emittedCorrection({
+    dry_run: true, post_analyze: null,
+  }));
+  const dash = summarizeTimingsPackage(ctx, dir);
+  expect(dash.ok).toBe(true);
+  expect(dash.closes).toBe(true);
+  expect(dash.maxFreqMhz).toBe(4000);
+  expect(dash.closureSource).toBe("ir-dry-run");
+  expect(dash.note).toContain("IR-only dry-run");
+  expect(dash.hottest).toEqual([]);
+  expect(validateTimingsOutDir(ctx, { fromTiming: dir, checkSourcePaths: false }).ok).toBe(true);
+  materializeTimingEmit(dir);
+  const withEmit = summarizeTimingsPackage(ctx, dir);
+  expect(withEmit.closes).toBeUndefined();
+  expect(withEmit.timingStatus).toBe("INCONCLUSIVE");
+  expect(validateTimingsOutDir(ctx, { fromTiming: dir, requireEmit: true, checkSourcePaths: false }).ok).toBe(false);
+});
+
+test("summarizeTimingsPackage keeps original packages compatible and identifies invalid JSON", () => {
+  const { ctx, dir } = timingEvidenceFixture("dashboard-original", emittedCorrection());
+  rmSync(join(dir, "correct.json"));
+  const dash = summarizeTimingsPackage(ctx, dir);
+  expect(dash.ok).toBe(true);
+  expect(dash.closureSource).toBe("original");
+  expect(dash.closes).toBe(true);
+  expect(dash.hottest[0]?.start).toBe("original");
+  materializeTimingEmit(dir);
+  expect(summarizeTimingsPackage(ctx, dir).closes).toBeUndefined();
+  expect(validateTimingsOutDir(ctx, { fromTiming: dir, requireEmit: true, checkSourcePaths: false }).ok).toBe(false);
+  writeFileSync(join(dir, "correct.json"), "{broken");
+  expect(summarizeTimingsPackage(ctx, dir).closes).toBeUndefined();
+  expect(validateTimingsOutDir(ctx, { fromTiming: dir, requireEmit: true, checkSourcePaths: false }).ok).toBe(false);
+  for (const root of ["null", "[]", "false"]) {
+    writeFileSync(join(dir, "correct.json"), root);
+    const bad = summarizeTimingsPackage(ctx, join(dir, "correct.json"));
+    expect(bad.ok).toBe(false);
+    expect(bad.closes).toBeUndefined();
+  }
+});
+
+test("summarizeTimingsPackage missing stamped emit cannot fall back to original analysis", () => {
+  const { ctx, dir } = timingEvidenceFixture("dashboard-missing-stamped-emit", emittedCorrection());
+  rmSync(join(dir, "correct.json"));
+  writeFileSync(join(dir, "stamp.json"), JSON.stringify({ emitDir: join(dir, "corrected"), exitCode: 1 }));
+  const dash = summarizeTimingsPackage(ctx, dir);
+  expect(dash.closes).toBeUndefined();
+  expect(dash.timingStatus).toBe("INCONCLUSIVE");
+  expect(dash.stampExitCode).toBe(1);
+});
+
+test("summarizeTimingsPackage correct-only legacy emit can close using measured paths", () => {
+  const post = emittedTimingEvidence();
+  post.frequency_closure = {
+    ...post.frequency_closure, closes: true, max_freq_mhz: 4500,
+    worst_path_fo4: 8, worst_slack_fo4: 2, failing_paths: 0,
+  };
+  post.paths = post.paths.map((p) => ({ ...p, total_fo4: 8 }));
+  const { ctx, dir } = timingEvidenceFixture("dashboard-legacy-correct-only", emittedCorrection({
+    schema_version: "0", post_analyze: post,
+  }));
+  rmSync(join(dir, "analyze.json"));
+  materializeTimingEmit(dir);
+  const dash = summarizeTimingsPackage(ctx, dir);
+  expect(dash.ok).toBe(true);
+  expect(dash.closes).toBe(true);
+  expect(dash.maxFreqMhz).toBe(4500);
+  expect(dash.closureSource).toBe("emitted");
+  expect(dash.timingStatus).toBe("CLOSES");
+  expect(validateTimingsOutDir(ctx, { fromTiming: dir, requireEmit: true, checkSourcePaths: false }).ok).toBe(true);
+});
+
+test("validateTimingsOutDir requireEmit checks a nonempty filelist and existing emitted sources", () => {
+  const { ctx, dir } = timingEvidenceFixture("validation-emit-files", emittedCorrection());
+  mkdirSync(join(dir, "corrected"), { recursive: true });
+  const validate = () => validateTimingsOutDir(ctx, { fromTiming: dir, requireEmit: true, checkSourcePaths: false });
+  expect(validate().issues.some((i) => i.code === "emit-flist-missing")).toBe(true);
+  const flist = join(dir, "corrected", "svt_corrected.f");
+  writeFileSync(flist, "\n");
+  expect(validate().issues.some((i) => i.code === "emit-flist-empty")).toBe(true);
+  writeFileSync(flist, "missing.sv\n");
+  expect(validate().issues.some((i) => i.code === "emit-sources-missing")).toBe(true);
+  materializeTimingEmit(dir);
+  expect(validate().ok).toBe(true);
+});
+
+test("summarizeTimingsPackage context-soft emitted evidence stays review-only", () => {
+  const { ctx, dir } = timingEvidenceFixture("dashboard-context-soft", emittedCorrection({
+    integrity: { reparse_ok: true, structural_ok: true, joint_ok: false, context_soft: true, soft: true },
+  }));
+  materializeTimingEmit(dir);
+  const dash = summarizeTimingsPackage(ctx, dir);
+  expect(dash.ok).toBe(true);
+  expect(dash.closes).toBe(false);
+  expect(dash.note).toContain("review-only");
+  expect(dash.note).toContain("not STA sign-off");
+  expect(validateTimingsOutDir(ctx, { fromTiming: dir, requireEmit: true, checkSourcePaths: false }).ok).toBe(true);
+});
+
 test("runStaHandoff S0 writes seeds.sdc and correlate scaffold", async () => {
   const paths = makePaths(join(FIX, "ws"));
   const ctx = fakeCtx(join(FIX, "repo"), paths);
@@ -500,6 +717,171 @@ test("runStaHandoff S0 writes seeds.sdc and correlate scaffold", async () => {
   expect(seeds).toContain("period");
 });
 
+const realStaReport = "Startpoint: u_a/q\nEndpoint: u_b/d\n  2.89 slack (MET)\n";
+const handoffCases: {
+  name: string;
+  report?: string;
+  staCode?: number;
+  stdout?: string;
+  stderr?: string;
+  yosysCode?: number;
+  openroadCode?: number;
+  noTools?: boolean;
+  noSta?: boolean;
+  dryRun?: boolean;
+  injectFixture?: boolean;
+  s1?: "pass" | "skip" | "fail";
+  s2: "pass" | "skip" | "fail";
+  ok: boolean;
+}[] = [
+  { name: "fresh MET report", report: realStaReport, s2: "pass", ok: true },
+  {
+    name: "fresh VIOLATED report is execution evidence, not timing closure",
+    report: realStaReport.replace("2.89 slack (MET)", "-1.2e-3 slack (VIOLATED)"),
+    s2: "pass", ok: true,
+  },
+  { name: "nonzero exit with fresh report", report: realStaReport, staCode: 1, s2: "fail", ok: false },
+  { name: "nonzero exit with stale report", staCode: 1, s2: "fail", ok: false },
+  { name: "zero exit with stale report only", s2: "fail", ok: false },
+  { name: "stdout is not the redirected report", stdout: realStaReport, s2: "fail", ok: false },
+  { name: "empty report", report: "", s2: "fail", ok: false },
+  { name: "unconstrained report", report: "No paths found.\n", s2: "fail", ok: false },
+  { name: "partial report", report: "Startpoint: u_a/q\nEndpoint: u_b/d\n", s2: "fail", ok: false },
+  {
+    name: "truncated report after a complete path",
+    report: `${realStaReport}Startpoint: next_a\nEndpoint: next_b\n`, s2: "fail", ok: false,
+  },
+  {
+    name: "Tcl errors on stdout despite zero exit",
+    report: realStaReport, stdout: "Error: run.tcl, 4 link failed\n", s2: "fail", ok: false,
+  },
+  {
+    name: "Tcl errors on stderr despite zero exit",
+    report: realStaReport, stderr: "Error: run.tcl, 5 invalid SDC\n", s2: "fail", ok: false,
+  },
+  { name: "S1 failure", yosysCode: 1, s1: "fail", s2: "skip", ok: false },
+  {
+    name: "fixture cannot rescue S1 failure", yosysCode: 1, injectFixture: true,
+    s1: "fail", s2: "skip", ok: false,
+  },
+  {
+    name: "fixture cannot rescue S2 failure", staCode: 1, injectFixture: true,
+    s2: "fail", ok: false,
+  },
+  { name: "S4 failure", report: realStaReport, openroadCode: 1, s2: "pass", ok: false },
+  { name: "missing tools", noTools: true, s1: "skip", s2: "skip", ok: true },
+  { name: "missing OpenSTA", noSta: true, s2: "skip", ok: true },
+  { name: "dry run", dryRun: true, s1: "skip", s2: "skip", ok: true },
+];
+
+for (const scenario of handoffCases) {
+  test(`runStaHandoff mocked tools: ${scenario.name}`, async () => {
+    const root = join(FIX, "handoff-cases", scenario.name.replace(/\W+/g, "-"));
+    const paths = makePaths(join(root, "ws"));
+    const ctx = fakeCtx(root, paths);
+    ctx.dryRun = scenario.dryRun ?? false;
+    const pkg = join(root, "pkg");
+    const out = join(paths.build, "sta-handoff");
+    mkdirSync(pkg, { recursive: true });
+    mkdirSync(join(out, "opensta"), { recursive: true });
+    const source = join(pkg, "top.v");
+    const liberty = join(pkg, "study.lib");
+    const fixture = join(pkg, "fixture.rpt");
+    writeFileSync(source, "module top; endmodule\n");
+    writeFileSync(liberty, "library(study) {}\n");
+    writeFileSync(fixture, realStaReport);
+    writeFileSync(join(pkg, "portable.f"), `${source}\n`);
+    writeFileSync(join(pkg, "analyze.json"), JSON.stringify({
+      target_mhz: 1250,
+      modules: [{ name: "top" }],
+      paths: [{ path_id: 1, startpoint: "u_a/q", endpoint: "u_b/d", total_fo4: 12 }],
+    }));
+    const staleReport = "Startpoint: stale_a\nEndpoint: stale_b\n99 slack (MET)\n";
+    const published = join(out, "opensta", "paths.rpt");
+    writeFileSync(published, staleReport);
+    const available = (cmd: string) => !scenario.noTools && (
+      cmd === "yosys" || (cmd === "sta" && !scenario.noSta) ||
+      (cmd === "openroad" && scenario.openroadCode != null)
+    );
+    const whichSpy = spyOn(exec, "which").mockImplementation((cmd) => available(cmd) ? cmd : null);
+    const hasSpy = spyOn(exec, "hasBinary").mockImplementation(available);
+    const attemptedReports: string[] = [];
+    const runSpy = spyOn(exec, "run").mockImplementation(async (cmd, args = []) => {
+      let code = 0;
+      let stdout = "";
+      let stderr = "";
+      if (cmd === "yosys") {
+        code = scenario.yosysCode ?? 0;
+        const netlist = /write_verilog -noattr (.+)$/.exec(args.at(-1) ?? "")?.[1];
+        expect(netlist).toBeDefined();
+        if (code === 0) writeFileSync(netlist!, "module top; endmodule\n");
+      } else if (cmd === "sta") {
+        code = scenario.staCode ?? 0;
+        stdout = scenario.stdout ?? "";
+        stderr = scenario.stderr ?? "";
+        const tcl = readFileSync(args[1]!, "utf8");
+        const reportPath = /report_checks[^\r\n]* > (.+)/.exec(tcl)?.[1];
+        expect(reportPath).toBeDefined();
+        expect(reportPath).not.toBe(published.replace(/\\/g, "/"));
+        attemptedReports.push(reportPath!);
+        if (scenario.report != null) writeFileSync(reportPath!, scenario.report);
+      } else {
+        expect(cmd).toBe("openroad");
+        code = scenario.openroadCode ?? 0;
+      }
+      return { command: cmd, code, ok: code === 0, stdout, stderr, durationMs: 0, dryRun: false };
+    });
+    try {
+      const result = await runStaHandoff(ctx, {
+        fromTiming: pkg, outDir: out, tryTools: true, liberty,
+        injectStaFixture: scenario.injectFixture ? fixture : false,
+      });
+      expect(result.ok).toBe(scenario.ok);
+      expect(result.stages.find((s) => s.id === "s1-yosys-synth")?.status).toBe(scenario.s1 ?? "pass");
+      expect(result.stages.find((s) => s.id === "s2-opensta")?.status).toBe(scenario.s2);
+      if (scenario.openroadCode != null) {
+        expect(result.stages.find((s) => s.id === "s4-openroad")?.status).toBe("fail");
+      }
+      if (scenario.noTools || scenario.dryRun) expect(runSpy).not.toHaveBeenCalled();
+      const correlate = JSON.parse(readFileSync(result.correlate, "utf8"));
+      const manifest = JSON.parse(readFileSync(result.manifest, "utf8"));
+      expect(manifest.stages).toEqual(result.stages);
+      const accepted = scenario.s2 === "pass" || scenario.injectFixture;
+      if (accepted) {
+        expect(correlate.sta_rank).toEqual(parseOpenStaPathReport(scenario.report ?? realStaReport));
+        expect(correlate.overlap_score).toBe(1);
+        expect(correlate.sta_report).toBe(published.replace(/\\/g, "/"));
+        expect(result.stages.find((s) => s.id === "s3-correlate")?.status).toBe("pass");
+      } else {
+        expect(correlate.sta_rank).toEqual([]);
+        expect(correlate.overlap_score).toBeNull();
+        expect(correlate.sta_report).toBeNull();
+        expect(manifest.files.openstaReport).toBeNull();
+        expect(correlate.stages_pending).toContain("s2-opensta");
+        expect(result.stages.find((s) => s.id === "s3-correlate")?.status).toBe("skip");
+        expect(readFileSync(published, "utf8")).toBe(staleReport);
+      }
+      const rerun = await runStaHandoff(ctx, {
+        fromTiming: pkg, outDir: out, tryTools: true, liberty,
+        injectStaFixture: scenario.injectFixture ? fixture : false,
+      });
+      expect(rerun.ok).toBe(scenario.ok);
+      expect(new Set(attemptedReports).size).toBe(attemptedReports.length);
+      const offline = await runStaHandoff(ctx, { fromTiming: pkg, outDir: out, tryTools: false });
+      const offlineCorrelate = JSON.parse(readFileSync(offline.correlate, "utf8"));
+      expect(offline.ok).toBe(true);
+      expect(offlineCorrelate.sta_rank).toEqual([]);
+      expect(offlineCorrelate.overlap_score).toBeNull();
+      expect(offlineCorrelate.sta_report).toBeNull();
+      expect(existsSync(published)).toBe(true);
+    } finally {
+      runSpy.mockRestore();
+      hasSpy.mockRestore();
+      whichSpy.mockRestore();
+    }
+  });
+}
+
 test("materializeStaSmokePackage + S1 when yosys present", async () => {
   const paths = makePaths(join(FIX, "ws"));
   const ctx = fakeCtx(join(FIX, "repo"), paths);
@@ -522,7 +904,7 @@ test("materializeStaSmokePackage + S1 when yosys present", async () => {
     tryTools: true,
     top: "comb_adder",
   });
-  expect(result.ok).toBe(true);
+  expect(result.ok).toBe(!result.stages.some((s) => s.status === "fail"));
   expect(existsSync(join(out, "seeds.sdc"))).toBe(true);
   const yosys =
     which("yosys") ||
@@ -613,6 +995,35 @@ test("injectStaFixture fills correlate overlap_score offline", async () => {
   ).toBe(true);
 });
 
+test.each([
+  ["", null, "fail"],
+  ["Startpoint: other_a\nEndpoint: other_b\n0 slack (MET)\n", 0, "pass"],
+] as const)("runStaHandoff fixture distinguishes no rows from zero overlap: %s", async (report, score, status) => {
+  const root = join(FIX, "fixture-rows", status);
+  const paths = makePaths(join(root, "ws"));
+  const ctx = fakeCtx(root, paths);
+  const pkg = join(root, "pkg");
+  mkdirSync(pkg, { recursive: true });
+  writeFileSync(join(pkg, "analyze.json"), JSON.stringify({
+    target_mhz: 1250,
+    paths: [{ startpoint: "a", endpoint: "b", total_fo4: 1 }],
+  }));
+  const fixture = join(pkg, "fixture.rpt");
+  writeFileSync(fixture, report);
+  const result = await runStaHandoff(ctx, {
+    fromTiming: pkg, tryTools: false, injectStaFixture: fixture,
+  });
+  expect(result.ok).toBe(status === "pass");
+  expect(result.stages.find((s) => s.id === "s2-opensta")?.status).toBe("skip");
+  expect(result.stages.find((s) => s.id === "s2-opensta-fixture")?.status).toBe(status);
+  expect(result.stages.find((s) => s.id === "s3-correlate")?.status).toBe(
+    status === "pass" ? "pass" : "skip",
+  );
+  const correlate = JSON.parse(readFileSync(result.correlate, "utf8"));
+  expect(correlate.overlap_score).toBe(score);
+  expect(correlate.sta_rank).toHaveLength(status === "pass" ? 1 : 0);
+});
+
 test("checkFo4Golden matches sta_smoke fixture", async () => {
   const { loadConfig } = await import("../src/config/load.ts");
   const { repoRoot } = await loadConfig();
@@ -682,8 +1093,83 @@ Endpoint: b
   slack (MET) 0.05
 `;
   const rows = parseOpenStaPathReport(rpt);
-  expect(rows.length).toBeGreaterThanOrEqual(1);
-  expect(rows[0]?.start).toBe("u_a/q");
+  expect(rows).toEqual([
+    { rank: 1, start: "u_a/q", end: "u_b/d", slack: -0.12 },
+    { rank: 2, start: "a", end: "b", slack: 0.05 },
+  ]);
+});
+
+test("parseOpenStaPathReport reads the search_tag_path_analysis OpenSTA layout", () => {
+  const report = [
+    "Startpoint: in3 (input port clocked by clk2)",
+    "Endpoint: reg2 (rising edge-triggered flip-flop clocked by clk1)",
+    "Path Group: clk1",
+    "Path Type: max",
+    "          19.97   data required time",
+    "         -17.07   data arrival time",
+    "---------------------------------------------------------",
+    "           2.89   slack (MET)",
+    "Startpoint: reg1 (rising edge-triggered flip-flop clocked by clk1)",
+    "Endpoint: reg3 (rising edge-triggered flip-flop clocked by clk2)",
+    "           4.88   slack (MET)",
+  ].join("\r\n");
+  expect(parseOpenStaPathReport(report)).toEqual([
+    { rank: 1, start: "in3", end: "reg2", slack: 2.89 },
+    { rank: 2, start: "reg1", end: "reg3", slack: 4.88 },
+  ]);
+});
+
+const openStaGolden = join(
+  import.meta.dir,
+  "../../sv-timing/specs/OpenSTA/search/test/search_tag_path_analysis.ok",
+);
+
+test.skipIf(!existsSync(openStaGolden))("parseOpenStaPathReport reads the available upstream OpenSTA golden", () => {
+  const rows = parseOpenStaPathReport(readFileSync(openStaGolden, "utf8"));
+  expect(rows).toHaveLength(32);
+  expect(rows.slice(0, 4)).toEqual([
+    { rank: 1, start: "in3", end: "reg2", slack: 2.89 },
+    { rank: 2, start: "reg1", end: "reg3", slack: 4.88 },
+    { rank: 3, start: "in2", end: "reg1", slack: 1.04 },
+    { rank: 4, start: "reg1", end: "reg3", slack: 0.08 },
+  ]);
+});
+
+test.each([
+  ["-1.2e-3 slack (VIOLATED)", -0.0012],
+  ["+.5E+1 slack (MET)", 5],
+  ["0 slack (MET)", 0],
+  ["slack (VIOLATED) -2.E-2", -0.02],
+  ["slack (MET) +1.3e-1", 0.13],
+  ["slack .25", 0.25],
+  ["+2 slack", 2],
+] as const)("parseOpenStaPathReport accepts %s", (line, slack) => {
+  expect(parseOpenStaPathReport(`Startpoint: a\nEndpoint: b\n ${line}\n`)).toEqual([
+    { rank: 1, start: "a", end: "b", slack },
+  ]);
+});
+
+test.each([
+  "",
+  "No paths found.",
+  "slack (MET) 0.13",
+  "Startpoint: a\nEndpoint: b",
+  "Startpoint: a\nEndpoint: b\nslack (MET) null",
+  "Startpoint: a\nEndpoint: b\nslack (MET) NaN",
+  "Startpoint: a\nEndpoint: b\n1e999 slack (MET)",
+  "Startpoint: a\nEndpoint: b\nslack (MET) 1e-",
+  "Startpoint: a\nEndpoint: b\nslack (MET) 0.13junk",
+  "Startpoint: a\nEndpoint: b\nStartpoint: c\n0.13 slack (MET)",
+])("parseOpenStaPathReport rejects absent or incomplete timing: %s", (report) => {
+  expect(parseOpenStaPathReport(report)).toEqual([]);
+});
+
+test("parseOpenStaPathReport preserves the 32-row cap", () => {
+  const rows = parseOpenStaPathReport(
+    "Startpoint: a\nEndpoint: b\n0.13 slack (MET)\n".repeat(40),
+  );
+  expect(rows).toHaveLength(32);
+  expect(rows.at(-1)?.rank).toBe(32);
 });
 
 test("selectCleanTargets --execution failed/ok uses stamp.json", () => {

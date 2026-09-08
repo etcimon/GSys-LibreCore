@@ -627,6 +627,9 @@ fn apply_work_item(
         return Ok(false);
     };
     let origin = opp.loc.clone();
+    if origin.origin != sv_timing_core::OriginKind::UserFile {
+        return Ok(false);
+    }
     let node = opp.insert_after;
     let reloc_id = item.relocation_option_id.as_deref().unwrap_or("");
     let path_mc = ctx

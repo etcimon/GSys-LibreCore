@@ -1330,6 +1330,7 @@ fn main() -> ExitCode {
             let mut project_entries: Vec<serde_json::Value> = Vec::new();
             let mut density = DensityReport::default();
             let mut post_analyze_json: Option<serde_json::Value> = None;
+            let mut post_analyze_valid = false;
 
             if !dry && !source_pairs.is_empty() && !ctx.trace.records.is_empty() {
                 let dir =
@@ -1477,28 +1478,18 @@ fn main() -> ExitCode {
                                 .map(|e| PathBuf::from(&e.emit_path))
                                 .filter(|p| p.is_file())
                                 .collect();
-                            let rewritten: std::collections::BTreeSet<String> = proj
+                            let rewritten: std::collections::BTreeMap<PathBuf, PathBuf> = proj
                                 .entries
                                 .iter()
                                 .filter(|e| !e.is_new)
-                                .filter_map(|e| {
-                                    PathBuf::from(&e.emit_path)
-                                        .file_name()
-                                        .map(|f| f.to_string_lossy().replace("__svt", ""))
-                                })
+                                .map(|e| (PathBuf::from(&e.source), PathBuf::from(&e.emit_path)))
                                 .collect();
                             // Inputs that were NOT rewritten still supply packages and
                             // parameters; without them the emitted files lower to nothing.
-                            let mut post_paths: Vec<PathBuf> = paths
+                            let post_paths: Vec<PathBuf> = paths
                                 .iter()
-                                .filter(|p| {
-                                    p.file_name()
-                                        .map(|f| !rewritten.contains(&f.to_string_lossy().to_string()))
-                                        .unwrap_or(true)
-                                })
-                                .cloned()
+                                .map(|p| rewritten.get(p).unwrap_or(p).clone())
                                 .collect();
-                            post_paths.extend(emitted.iter().cloned());
 
                             if emitted.is_empty() {
                                 println!("  post_analyze_sv INCONCLUSIVE: no rewritten file to re-analyze");
@@ -1544,6 +1535,14 @@ fn main() -> ExitCode {
                                             fo4_ps,
                                             budget_margin,
                                         ));
+                                        post_analyze_valid = !post.design.paths.is_empty()
+                                            && post.skipped_files.is_empty()
+                                            && rep.reparse_ok && rep.structural_ok && rep.joint_ok;
+                                        if let Some(report) = post_analyze_json.as_mut() {
+                                            report["skipped_files"] = serde_json::json!(post.skipped_files.iter()
+                                                .map(|f| serde_json::json!({"path": f.path, "message": f.message}))
+                                                .collect::<Vec<_>>());
+                                        }
                                         let pc = frequency_closure(&post.design);
                                         if post.design.paths.is_empty() {
                                             // No paths means nothing was measured. Saying
@@ -1593,6 +1592,8 @@ fn main() -> ExitCode {
                 }
             }
 
+            let emitted_validation_failed = !dry && !paths.is_empty()
+                && emit_dir_s.is_some() && !post_analyze_valid;
             let min_dens = min_density_score_for_trace(&ctx.trace);
             let density_ok = ctx.trace.records.is_empty() || density.score() >= min_dens;
 
@@ -1652,6 +1653,8 @@ fn main() -> ExitCode {
                         "reg_to_reg_paths": post_closure.reg_to_reg_paths,
                     },
                     "post_analyze": post_analyze_json,
+                    "post_analyze_valid": post_analyze_valid,
+                    "production_validated": false,
                     "density": {
                         "score": density.score(),
                         "min_required": min_dens,
@@ -1682,7 +1685,8 @@ fn main() -> ExitCode {
                 println!("json_out={}", out.display());
             }
             println!("{note}");
-            if integrity_hard_fail {
+            if integrity_hard_fail || emitted_validation_failed {
+                eprintln!("error: emitted project validation incomplete or failed; reports remain review-only");
                 ExitCode::from(1)
             } else {
                 ExitCode::SUCCESS

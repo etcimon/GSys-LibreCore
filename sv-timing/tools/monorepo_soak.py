@@ -76,6 +76,9 @@ class SoakProfile:
     #: Substrings matched against the POSIX path; any hit is left out of the package.
     #: For subsetting a production flist that must not itself be edited.
     exclude: list[str] = field(default_factory=list)
+    #: Config-package basename substituted for `${TARGET_CFG}` (host `Makefile` §114).
+    #: Must agree with `param_map`, or the analysed parameters describe another target.
+    target_cfg: str | None = None
     notes: str = ""
 
 
@@ -165,6 +168,13 @@ DEFAULT_PROFILE_SPECS: list[dict] = [
         "exclude": [
             "/core/fetch_A/",
         ],
+        # Flist.cva6 spells the config package `${TARGET_CFG}_config_pkg.sv` and reaches
+        # HPDcache through `-F ${HPDCACHE_DIR}/rtl/hpdcache.Flist`. Unset, BOTH silently
+        # dropped: 7 sources vanished (the config package + 6 HPDcache files) and the
+        # nested flist never contributed `+incdir+${HPDCACHE_DIR}/rtl/include`, so
+        # `hpdcache_typedef.svh` was unresolvable and the subsystem/wrapper were skipped.
+        # Value must match `param_map` (cv64a6_imafdc_xlen64).
+        "target_cfg": "cv64a6_imafdc_sv39",
         "notes": "Entire core/Flist.cva6 with fetch_B only (excl. core/fetch_A) + CVXIF AI",
     },
     {
@@ -174,8 +184,23 @@ DEFAULT_PROFILE_SPECS: list[dict] = [
         "all_modules": True,
         "param_map": "verif/sv-timing-tests/param-maps/cv64a6_imafdc_xlen64.json",
         "soft_missing": True,
+        # FPGA *board tops* are excluded: they are not the ASIC being timed, and neither
+        # is self-contained, so leaving them in only produces silent drops that inflate
+        # the apparent file coverage.
+        #   - altera/src/cva6_altera*.sv include "src/agilex7.svh", which is not in this
+        #     tree at all (Agilex 7 board glue), so they cannot parse for any tool.
+        #   - fpga/src/ariane_xilinx.sv calls `AXI_TYPEDEF_ALL` while including only
+        #     "axi/assign.svh", never "axi/typedef.svh". It builds today purely because a
+        #     single-unit compile leaks that macro in from an earlier file. Per-file
+        #     analysis cannot see it. That is a real self-containment defect in the board
+        #     top; it is recorded in AGENTS-todo.md rather than patched here, because
+        #     editing it is an RTL change owed the root AGENTS.md §0.2 checklist.
+        # Everything whose headers do exist (Xilinx peripherals, OpenPiton, APB, GPIO,
+        # register-interface, PLIC) is now measured via the incdirs added to the flist.
         "exclude": [
             "/core/fetch_A/",
+            "/corev_apu/altera/src/cva6_altera",
+            "/corev_apu/fpga/src/ariane_xilinx.sv",
         ],
         "notes": "corev_apu + ai_island + fetch_B supply; never core/fetch_A",
     },
@@ -206,6 +231,7 @@ def load_profile_toml(path: Path) -> SoakProfile:
         assume_clk=bool(data.get("assume_clk", True)),
         soft_missing=bool(data.get("soft_missing", True)),
         exclude=[str(x) for x in data.get("exclude", [])],
+        target_cfg=str(data["target_cfg"]) if data.get("target_cfg") else None,
         notes=str(data.get("notes", "")),
     )
 
@@ -224,6 +250,7 @@ def profiles_from_defaults(repo: Path) -> list[SoakProfile]:
                 param_map=spec.get("param_map"),
                 soft_missing=bool(spec.get("soft_missing", True)),
                 exclude=list(spec.get("exclude") or []),
+                target_cfg=spec.get("target_cfg"),
                 notes=str(spec.get("notes", "")),
             )
         )
@@ -278,7 +305,7 @@ def write_filtered_portable(
     soft: bool,
     exclude: list[str] | None = None,
     defines: list[tuple[str, str | None]] | None = None,
-) -> tuple[Path, list[str], list[Path], list[str]]:
+) -> tuple[Path, list[str], list[Path], list[str], list[str]]:
     """Write portable.f (native paths for this OS CLI) + portable.host.f (Windows form).
 
     `exclude` holds substrings matched against the POSIX-normalised path; a file hitting
@@ -294,6 +321,7 @@ def write_filtered_portable(
     kept_files: list[Path] = []
     dropped: list[str] = []
     excluded: list[str] = []
+    unresolved: list[str] = []
     for p in expanded_files:
         posix = host_portable_path(p)
         hit = next((pat for pat in patterns if pat in posix), None)
@@ -303,10 +331,21 @@ def write_filtered_portable(
             continue
         if p.is_file():
             kept_files.append(p)
-        else:
-            dropped.append(posix)
-            if not soft:
-                raise FileNotFoundError(str(p))
+            continue
+        # A surviving `${VAR}` is an unset-variable bug in the caller's environment,
+        # not a deleted file, and `soft` must not launder it into ordinary absence:
+        # the design silently shrinks while the run still reports success.
+        if "${" in posix or "$(" in posix:
+            unresolved.append(posix)
+        dropped.append(posix)
+        if not soft:
+            raise FileNotFoundError(str(p))
+    if unresolved:
+        raise ValueError(
+            "unexpanded filelist variable(s) — export them (see repo Makefile) "
+            "or set the profile field; refusing to analyse a silently shrunken design:\n  "
+            + "\n  ".join(unresolved)
+        )
     kept_files, superseded = prefer_fetch_b_equivalents(kept_files)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -421,6 +460,17 @@ def metrics_from_report(json_path: Path) -> dict:
         if isinstance(before, (int, float)) and isinstance(after, (int, float)):
             out["fo4_delta_all_paths"] = float(after) - float(before)
         pc = data.get("post_closure") or {}
+        out["ir_closes"] = pc.get("closes")
+        out["ir_max_freq_mhz"] = pc.get("max_freq_mhz")
+        if data.get("dry_run") is not True:
+            post = data.get("post_analyze") or {}
+            valid = data.get("post_analyze_valid") is not False and bool(post.get("paths"))
+            valid = valid and not post.get("skipped_files")
+            out["emit_analysis_valid"] = valid
+            pc = (post.get("frequency_closure") or {}) if valid else {}
+            out["closure_source"] = "emitted" if valid else "unavailable"
+        else:
+            out["closure_source"] = "ir-dry-run"
         out["closes"] = pc.get("closes")
         out["max_freq_mhz"] = pc.get("max_freq_mhz")
         # Primary FO4 after correct = post_closure worst (excludes multi_cycle ranking).
@@ -778,8 +828,12 @@ def run_correct(
     if cm.get("reloc_failing_primary") is not None:
         result["reloc_failing_primary_after"] = cm["reloc_failing_primary"]
         result["reloc_cards_after"] = cm.get("reloc_cards")
-    if cm.get("integrity_ok") is False:
+    if cm.get("integrity_ok") is False or (emit and cm.get("emit_analysis_valid") is False):
         result["emit_integrity_failed"] = True
+        result["correct_exit"] = code or 1
+    result["closes_after_correct"] = cm.get("closes")
+    result["max_freq_mhz_after_correct"] = cm.get("max_freq_mhz")
+    result["closure_source"] = cm.get("closure_source")
     corr = out_dir / "corrected"
     if corr.is_dir():
         result["corrected_dir"] = str(corr)
@@ -802,7 +856,7 @@ def write_from_timing_package(
     """Materialize stamp.json + param-map so build-platform --from-timing validates."""
     import time
 
-    report = out_dir / "correct.json" if (out_dir / "correct.json").is_file() else out_dir / "analyze.json"
+    report = out_dir / ("correct.json" if correct_meta is not None else "analyze.json")
     portable = out_dir / "portable.f"
     stamp = {
         "schema": "cva6-timings-stamp.v0",
@@ -813,7 +867,7 @@ def write_from_timing_package(
         "modules": profile.modules,
         "allModules": profile.all_modules or not profile.modules,
         "command": "monorepo-soak",
-        "exitCode": 0 if analyze_ok else 1,
+        "exitCode": 0 if analyze_ok and (correct_meta is None or correct_meta.get("correct_exit") == 0) else 1,
         "mtimeMs": int(time.time() * 1000),
         "portableF": str(portable).replace("\\", "/"),
         "reportJson": str(report).replace("\\", "/") if report.is_file() else None,
@@ -1261,14 +1315,27 @@ def main(argv: list[str] | None = None) -> int:
         portable = prof_out / "portable.f"
 
         try:
+            # Production flists reference more than the repo root. The host exports
+            # TARGET_CFG and HPDCACHE_DIR (repo `Makefile` §114/§125,
+            # build-platform `eda.ts`); passing only the root left `${TARGET_CFG}` and
+            # `${HPDCACHE_DIR}` unexpanded, which silently shrank the analysed design
+            # instead of failing. HPDCACHE_DIR mirrors the Makefile default; an already
+            # exported value wins so a relocated submodule still resolves.
+            flist_env = {
+                "CVA6_REPO_DIR": repo_posix,
+                "SVT_MONOREPO_ROOT": repo_posix,
+                "REPO": repo_posix,
+                "ROOT": repo_posix,
+                "HPDCACHE_DIR": os.environ.get("HPDCACHE_DIR", "").strip()
+                or f"{repo_posix}/core/cache_subsystem/hpdcache",
+            }
+            if prof.target_cfg:
+                flist_env["TARGET_CFG"] = prof.target_cfg
+            elif os.environ.get("TARGET_CFG", "").strip():
+                flist_env["TARGET_CFG"] = os.environ["TARGET_CFG"].strip()
             expanded = expand_filelist(
                 flist_path,
-                env={
-                    "CVA6_REPO_DIR": repo_posix,
-                    "SVT_MONOREPO_ROOT": repo_posix,
-                    "REPO": repo_posix,
-                    "ROOT": repo_posix,
-                },
+                env=flist_env,
                 cwd=repo,
                 strict=False,
             )
@@ -1395,10 +1462,8 @@ def main(argv: list[str] | None = None) -> int:
                     r["fo4_delta"] = float(corr_prim) - float(analyze_primary)
                     r["fo4_improved"] = r["fo4_delta"] < -0.01
                     r["fo4_delta_kind"] = "primary"
-                if correct_meta.get("closes_after_correct") is not None:
-                    r["closes"] = correct_meta["closes_after_correct"]
-                if correct_meta.get("max_freq_mhz_after_correct") is not None:
-                    r["max_freq_mhz"] = correct_meta["max_freq_mhz_after_correct"]
+                r["closes"] = correct_meta.get("closes_after_correct")
+                r["max_freq_mhz"] = correct_meta.get("max_freq_mhz_after_correct")
                 if correct_meta.get("correct_exit", 1) != 0:
                     hard_fail = True
                     log(f"profile {prof.id} correct FAILED — fix package first")

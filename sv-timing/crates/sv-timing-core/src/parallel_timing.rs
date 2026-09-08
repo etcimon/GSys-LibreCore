@@ -416,6 +416,7 @@ impl ParallelScratch {
     /// [`Self::schedule`] was used on NBA by mistake — the clock must stay.
     pub fn bind_always_ff_clock(&mut self, gate: &GateInfo, target: &TimingTarget) {
         self.clock = ClockDomain::from_gate(gate, target);
+        self.procedural_ok &= self.dep_edges == 0;
         let b = self.clock.budget_fo4.max(1.0);
         for op in &mut self.ops {
             op.ready_cycle = (op.asap_end / b).ceil().max(1.0) as u32;
@@ -428,6 +429,9 @@ impl ParallelScratch {
     /// statement *after which* a flop captures a value that would otherwise
     /// miss the next cycle boundary.
     pub fn jit_cuts(&self, budget_fo4: f64) -> Vec<NodeId> {
+        if !self.procedural_ok {
+            return Vec::new();
+        }
         let b = budget_fo4.max(1.0);
         let mut cuts = Vec::new();
         let mut next_bar = b;
@@ -607,6 +611,168 @@ mod tests {
             instances: vec![],
             loc: loc(),
         }
+    }
+
+    fn lower_sequential_body(body: &str) -> TimingDesign {
+        let text = format!(
+            "module sequential_test(input logic clk_i, input logic [31:0] d, a, b, c, output logic [31:0] q, r);\nlogic [31:0] t;\nalways_ff @(posedge clk_i) begin\n{body}\nend\nendmodule\n"
+        );
+        let path = std::path::PathBuf::from("sequential_test.sv");
+        let defines: sv_parser::Defines = Default::default();
+        let (tree, _) = sv_parser::parse_sv_str(
+            &text,
+            &path,
+            &defines,
+            &[] as &[std::path::PathBuf],
+            false,
+            false,
+        )
+        .expect("parse sequential source");
+        let file = crate::parse::ParsedFile {
+            path: path.clone(),
+            bytes: text.as_bytes().to_vec(),
+            line_index: crate::loc::LineIndex::from_bytes(path, text.as_bytes()),
+            tree,
+        };
+        crate::lower::lower_unit(
+            &crate::parse::ParsedUnit {
+                files: vec![file],
+                skipped: vec![],
+            },
+            &crate::lower::LowerOptions {
+                target: TimingTarget::new(4000.0, 20.0, 0.2),
+                ..crate::lower::LowerOptions::default()
+            },
+        )
+        .expect("lower sequential source")
+        .design
+    }
+
+    #[test]
+    fn lowered_nba_and_blocking_writes_cannot_be_distinguished_by_node_metadata() {
+        let nba = lower_sequential_body("q <= d + a;\nr <= q + b;");
+        let blocking = lower_sequential_body("q  = d + a;\nr <= q + b;");
+        let nba_module = nba.modules.values().next().unwrap();
+        let blocking_module = blocking.modules.values().next().unwrap();
+        let nba_q = nba_module
+            .nodes
+            .values()
+            .find(|n| n.lhs.as_deref() == Some("q"))
+            .unwrap();
+        let blocking_q = blocking_module
+            .nodes
+            .values()
+            .find(|n| n.lhs.as_deref() == Some("q"))
+            .unwrap();
+        assert_eq!(nba_q.gate, blocking_q.gate);
+        assert_eq!(nba_q.rhs, blocking_q.rhs);
+        assert_eq!(nba_q.rhs_expr, blocking_q.rhs_expr);
+        assert_eq!(nba_q.reads_reg, blocking_q.reads_reg);
+        assert_eq!(nba_q.loc, blocking_q.loc);
+        for design in [&nba, &blocking] {
+            let module = design.modules.values().next().unwrap();
+            let region = module
+                .regions
+                .values()
+                .find(|r| r.kind == RegionKind::AlwaysFf)
+                .unwrap();
+            let scratch = ParallelScratch::schedule_for_region(
+                module,
+                region,
+                &design.target,
+                &BTreeMap::new(),
+            );
+            assert!(scratch.clock.is_sequential());
+            assert!(scratch.dep_edges > 0);
+            assert!(
+                !scratch.procedural_ok,
+                "assignment kind is unavailable; do not certify the current-write q -> r edge"
+            );
+            assert!(scratch.jit_cuts_on_clock().is_empty());
+            let board = &design.parallel_timing[&module.name];
+            assert!(!board.procedural_ok);
+            assert!(!board.scratch_for_region(region.id).unwrap().procedural_ok);
+        }
+    }
+
+    #[test]
+    fn lowered_blocking_temporary_dependency_is_preserved_when_sequential_kind_is_unknown() {
+        let design = lower_sequential_body("t = d + a;\nq <= t;");
+        let module = design.modules.values().next().unwrap();
+        let region = module
+            .regions
+            .values()
+            .find(|r| r.kind == RegionKind::AlwaysFf)
+            .unwrap();
+        let scratch = ParallelScratch::schedule_for_region(
+            module,
+            region,
+            &design.target,
+            &BTreeMap::new(),
+        );
+        let consumer = scratch
+            .ops
+            .iter()
+            .find(|op| module.nodes[&op.node_id].lhs.as_deref() == Some("q"))
+            .unwrap();
+        assert!(scratch.dep_edges > 0);
+        assert!(consumer.asap_start > 0.0, "blocking temporary must still chain");
+        assert!(!scratch.procedural_ok);
+        assert!(scratch.jit_cuts_on_clock().is_empty());
+    }
+
+    #[test]
+    fn lowered_independent_nba_assignments_remain_parallel() {
+        let design = lower_sequential_body("q <= d + a;\nr <= b + c;");
+        let module = design.modules.values().next().unwrap();
+        let region = module
+            .regions
+            .values()
+            .find(|r| r.kind == RegionKind::AlwaysFf)
+            .unwrap();
+        let scratch = ParallelScratch::schedule_for_region(
+            module,
+            region,
+            &design.target,
+            &BTreeMap::new(),
+        );
+        assert!(scratch.clock.is_sequential());
+        assert!(scratch.procedural_ok);
+        assert_eq!(scratch.dep_edges, 0);
+        assert!(scratch.ops.iter().all(|op| op.asap_start == 0.0));
+    }
+
+    #[test]
+    fn binding_sequential_clock_refuses_ambiguous_ir_dependencies_without_erasing_them() {
+        let mut nodes = Map::new();
+        nodes.insert(0, node(0, "t", "d + a", 10.0));
+        nodes.insert(1, node(1, "q", "t + b", 10.0));
+        let module = module_with(nodes);
+        let target = TimingTarget::new(4000.0, 20.0, 0.2);
+        let mut scratch = ParallelScratch::schedule(
+            &module,
+            &[0, 1],
+            target.budget_fo4,
+            &BTreeMap::new(),
+        );
+        assert!(scratch.procedural_ok);
+        assert_eq!(scratch.dep_edges, 1);
+        assert_eq!(scratch.makespan_fo4, 20.0);
+        assert_eq!(scratch.ops[1].asap_start, 10.0);
+        assert!(!scratch.jit_cuts(target.budget_fo4).is_empty());
+        let gate = GateInfo {
+            clock_name: Some("clk_i".into()),
+            edge: Some(EdgeKind::Posedge),
+            is_comb: false,
+            ..GateInfo::default()
+        };
+        scratch.bind_always_ff_clock(&gate, &target);
+        assert!(scratch.clock.is_sequential());
+        assert!(!scratch.procedural_ok);
+        assert_eq!(scratch.dep_edges, 1);
+        assert_eq!(scratch.makespan_fo4, 20.0);
+        assert_eq!(scratch.ops[1].asap_start, 10.0);
+        assert!(scratch.jit_cuts_on_clock().is_empty());
     }
 
     #[test]

@@ -37,9 +37,8 @@ pub fn factor_always_ff_regions(ctx: &mut PassContext) {
         String,
         u32,
         sv_timing_core::SourceLoc,
-        String,
+        Option<String>,
         ParallelScratch,
-        f64,
     )> = Vec::new();
 
     for module in ctx.design.modules.values() {
@@ -64,19 +63,20 @@ pub fn factor_always_ff_regions(ctx: &mut PassContext) {
             if !scratch.clock.is_sequential() {
                 scratch.bind_always_ff_clock(&region.gate, &target);
             }
-            let sv = render_factor_sv(module.name.as_str(), region, &scratch, &target);
+            let sv = scratch
+                .procedural_ok
+                .then(|| render_factor_sv(module.name.as_str(), region, &scratch, &target));
             pending.push((
                 module.name.clone(),
                 region.id,
                 region.loc_span.clone(),
                 sv,
                 scratch,
-                target.budget_fo4,
             ));
         }
     }
 
-    for (mod_name, rid, origin, sv, scratch, b) in pending {
+    for (mod_name, rid, origin, sv, scratch) in pending {
         let m = scratch.makespan_fo4;
         let board = ctx
             .design
@@ -88,6 +88,9 @@ pub fn factor_always_ff_regions(ctx: &mut PassContext) {
                 ..ModuleParallelTiming::default()
             });
         board.keep_region_scratch(rid, scratch, false);
+        let Some(sv) = sv else {
+            continue;
+        };
         ctx.trace.record_edit(EditRecord {
             id: 0,
             kind: EditKind::Annotate,
@@ -96,7 +99,7 @@ pub fn factor_always_ff_regions(ctx: &mut PassContext) {
             node_id: None,
             new_name: None,
             fo4_before: Some(m),
-            fo4_after: Some(b.min(m)),
+            fo4_after: Some(m),
             rationale: "always_ff factorize (clock-aware ParallelScratch; OpenSTA order expect)"
                 .into(),
             emit_rhs: None,
@@ -238,8 +241,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn factor_comments_name_clock_and_cycles() {
+    fn factor_context(dependent: bool) -> crate::pass::PassContext {
         let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
         let mut nodes = BTreeMap::new();
         nodes.insert(
@@ -248,7 +250,7 @@ mod tests {
                 id: 0,
                 op_class: Some(OperatorClass::Other),
                 width: 1,
-                fo4_cost: 1.0,
+                fo4_cost: 20.0,
                 gate: None,
                 loc: loc(),
                 fans_in: vec![],
@@ -282,7 +284,7 @@ mod tests {
                 label: None,
                 gate,
                 nodes: vec![0],
-                total_fo4: 1.0,
+                total_fo4: 20.0,
                 loc_span: loc(),
                 multi_cycle: false,
             },
@@ -305,13 +307,53 @@ mod tests {
                 loc: loc(),
             },
         );
+        if dependent {
+            let module = design.modules.get_mut(&0).unwrap();
+            let mut consumer = module.nodes[&0].clone();
+            consumer.id = 1;
+            consumer.lhs = Some("next_q".into());
+            consumer.rhs = Some("state_q + 1".into());
+            module.nodes.insert(1, consumer);
+            module.regions.get_mut(&0).unwrap().nodes.push(1);
+            module.regions.get_mut(&0).unwrap().total_fo4 += 20.0;
+        }
         let mut policy = crate::pass::PassPolicy::default();
         policy.correct_enabled = true;
         policy.correct_allow_modules = vec!["u_ff".into()];
         sv_timing_core::fill_design_parallel_timing(&mut design);
-        let mut ctx = crate::pass::PassContext::new(design, sv_timing_core::NameTable::new(), policy);
+        crate::pass::PassContext::new(design, sv_timing_core::NameTable::new(), policy)
+    }
+
+    #[test]
+    fn ambiguous_sequential_scratch_does_not_emit_staged_factorization() {
+        for fallback in 0..3 {
+            let mut ctx = factor_context(true);
+            if fallback == 1 {
+                ctx.design.parallel_timing.clear();
+            } else if fallback == 2 {
+                ctx.design.parallel_timing.get_mut("u_ff").unwrap()
+                    .regions.get_mut(&0).unwrap().clock = Default::default();
+            }
+            let original = serde_json::to_value(&ctx.design.modules).unwrap();
+            factor_always_ff_regions(&mut ctx);
+            assert!(ctx.trace.records.is_empty(), "fallback mode {fallback}");
+            assert_eq!(serde_json::to_value(&ctx.design.modules).unwrap(), original);
+            let board = &ctx.design.parallel_timing["u_ff"];
+            let scratch = board.scratch_for_region(0).unwrap();
+            assert!(scratch.clock.is_sequential());
+            assert!(!scratch.procedural_ok);
+        }
+    }
+
+    #[test]
+    fn factor_comments_name_clock_and_cycles() {
+        let mut ctx = factor_context(false);
+        let original = serde_json::to_value(&ctx.design.modules).unwrap();
         factor_always_ff_regions(&mut ctx);
         assert!(!ctx.trace.records.is_empty());
+        assert_eq!(serde_json::to_value(&ctx.design.modules).unwrap(), original);
+        assert_eq!(ctx.trace.records[0].fo4_before, Some(20.0));
+        assert_eq!(ctx.trace.records[0].fo4_after, Some(20.0));
         let snip = ctx.trace.records[0].emit_snippet.as_deref().unwrap_or("");
         assert!(snip.contains("clk_i"), "{snip}");
         assert!(snip.contains("posedge"), "{snip}");

@@ -646,25 +646,32 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
         let budget = design.target.budget_fo4;
         let empty = std::collections::BTreeMap::new();
         let jit: Vec<u32> = if let Some(m) = module {
-            let cuts = if let Some(s) = design
+            let computed;
+            let scratch = if let Some(s) = design
                 .parallel_timing
                 .get(&m.name)
                 .and_then(|b| b.scratch_for_region(path.region_id))
             {
-                s.jit_cuts_on_clock()
-            } else if let Some(reg) = m.regions.get(&path.region_id) {
-                crate::parallel_timing::ParallelScratch::schedule_for_region(
-                    m,
-                    reg,
-                    &design.target,
-                    &empty,
-                )
-                .jit_cuts_on_clock()
+                s
             } else {
-                crate::parallel_timing::ParallelScratch::schedule(m, &path.nodes, budget, &empty)
-                    .jit_cuts(budget)
+                computed = if let Some(reg) = m.regions.get(&path.region_id) {
+                    crate::parallel_timing::ParallelScratch::schedule_for_region(
+                        m,
+                        reg,
+                        &design.target,
+                        &empty,
+                    )
+                } else {
+                    crate::parallel_timing::ParallelScratch::schedule(m, &path.nodes, budget, &empty)
+                };
+                &computed
             };
-            cuts.into_iter()
+            if !scratch.procedural_ok {
+                continue;
+            }
+            scratch
+                .jit_cuts_on_clock()
+                .into_iter()
                 .filter(|nid| path.nodes.contains(nid))
                 .collect()
         } else {
@@ -888,6 +895,98 @@ mod tests {
         assert!(!module_looks_multi_cycle("multiplier"));
         assert!(!module_looks_multi_cycle("fpnew_fma"));
         assert!(module_looks_multi_cycle("dm_top_sva"));
+    }
+
+    fn opportunity_design(process: &str) -> TimingDesign {
+        let text = format!(
+            "module opportunity_test(input logic clk_i, input logic [31:0] a, b, c, output logic [31:0] q, r);\n{process} begin\nq = a + b;\nr = q + c;\nend\nendmodule\n"
+        );
+        let path = std::path::PathBuf::from("opportunity_test.sv");
+        let defines: sv_parser::Defines = Default::default();
+        let (tree, _) = sv_parser::parse_sv_str(
+            &text,
+            &path,
+            &defines,
+            &[] as &[std::path::PathBuf],
+            false,
+            false,
+        )
+        .expect("parse opportunity source");
+        let file = crate::parse::ParsedFile {
+            path: path.clone(),
+            bytes: text.as_bytes().to_vec(),
+            line_index: crate::loc::LineIndex::from_bytes(path, text.as_bytes()),
+            tree,
+        };
+        let mut design = crate::lower::lower_unit(
+            &crate::parse::ParsedUnit {
+                files: vec![file],
+                skipped: vec![],
+            },
+            &crate::lower::LowerOptions {
+                target: TimingTarget::new(4000.0, 20.0, 0.2),
+                ..crate::lower::LowerOptions::default()
+            },
+        )
+        .expect("lower opportunity source")
+        .design;
+        for path in &mut design.paths {
+            path.path_class = crate::path_class::PathClassKind::Plain;
+        }
+        design
+    }
+
+    #[test]
+    fn unverified_sequential_scratch_never_falls_back_to_midpoint_cut() {
+        for fallback in 0..3 {
+            let mut design = opportunity_design("always_ff @(posedge clk_i)");
+            assert!(design.paths.iter().any(|p| p.slack_fo4 < 0.0));
+            assert!(!design.parallel_timing["opportunity_test"].procedural_ok);
+            if fallback >= 1 {
+                design.parallel_timing.clear();
+            }
+            if fallback == 2 {
+                for module in design.modules.values_mut() {
+                    module.regions.clear();
+                }
+            }
+            assert!(
+                suggest_opportunities(&design)
+                    .iter()
+                    .all(|op| op.kind != OpportunityKind::InsertReg),
+                "unverified scratch with fallback mode {fallback} must not yield InsertReg"
+            );
+        }
+    }
+
+    #[test]
+    fn cached_unverified_comb_scratch_never_falls_back_to_midpoint_cut() {
+        let mut design = opportunity_design("always_comb");
+        assert!(suggest_opportunities(&design)
+            .iter()
+            .any(|op| op.kind == OpportunityKind::InsertReg));
+        for board in design.parallel_timing.values_mut() {
+            board.procedural_ok = false;
+            for scratch in board.regions.values_mut() {
+                scratch.procedural_ok = false;
+            }
+        }
+        assert!(suggest_opportunities(&design)
+            .iter()
+            .all(|op| op.kind != OpportunityKind::InsertReg));
+    }
+
+    #[test]
+    fn verified_comb_scratch_still_allows_insert_reg_with_or_without_cached_board() {
+        let mut design = opportunity_design("always_comb");
+        for cached in [true, false] {
+            if !cached {
+                design.parallel_timing.clear();
+            }
+            assert!(suggest_opportunities(&design)
+                .iter()
+                .any(|op| op.kind == OpportunityKind::InsertReg));
+        }
     }
 
     #[test]

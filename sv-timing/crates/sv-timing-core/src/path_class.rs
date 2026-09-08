@@ -261,7 +261,9 @@ pub fn classify_and_adjust_paths(
                 PathClassKind::Plain | PathClassKind::UnderBudget
             ) && (h.adjusted_fo4 + 1e-9 < raw
                 || matches!(h.path_class, PathClassKind::AtomicOverBudget));
-            if reusable {
+            if reusable
+                && module.is_some_and(|m| classification_scratch(m, &path.nodes, budget).procedural_ok)
+            {
                 // Scale if node FO4 changed proportionally; else use absolute if close.
                 let adjusted = if matches!(h.path_class, PathClassKind::AtomicOverBudget) {
                     // Operator cost (or prior merged companion), not the
@@ -454,6 +456,31 @@ fn try_atomic_over_budget(
     ))
 }
 
+fn classification_scratch(
+    module: &crate::ir::TimingModule,
+    nodes: &[NodeId],
+    budget: f64,
+) -> ParallelScratch {
+    let mut scratch = ParallelScratch::schedule(module, nodes, budget, &BTreeMap::new());
+    if scratch.procedural_ok && scratch.dep_edges > 0 {
+        let sequential_nodes: std::collections::BTreeSet<_> = module
+            .regions
+            .values()
+            .filter(|region| region.kind == crate::ir::RegionKind::AlwaysFf)
+            .flat_map(|region| region.nodes.iter().copied())
+            .collect();
+        if !sequential_nodes.is_empty() {
+            let tree = RefOrderTree::from_nodes(module, nodes);
+            if tree.edges.iter().any(|edge| {
+                sequential_nodes.contains(&nodes[edge.from_stmt as usize])
+            }) {
+                scratch.procedural_ok = false;
+            }
+        }
+    }
+    scratch
+}
+
 /// Many distinct LHS in one always_comb: IR chains them in source order, but
 /// silicon evaluates independent assigns in parallel. Cost ≈ max(per-LHS FO4)
 /// + small bundle/wiring overhead.
@@ -523,7 +550,10 @@ fn try_independent_lhs_bundle(
     // Timing basis: independent writes share a time slot (ASAP max), so the
     // scratchboard makespan replaces max_field when the ref-tree is parallel.
     // Log-mux wire tax stays only when this is *not* a next-state / write-only bundle.
-    let scratch = ParallelScratch::schedule(m, nodes, budget, &BTreeMap::new());
+    let scratch = classification_scratch(m, nodes, budget);
+    if !scratch.procedural_ok {
+        return None;
+    }
     let wire = if next_state {
         model.other
     } else {
@@ -564,7 +594,7 @@ fn try_parallel_timing(
     if nodes.len() < 4 {
         return None;
     }
-    let scratch = ParallelScratch::schedule(m, nodes, budget, &BTreeMap::new());
+    let scratch = classification_scratch(m, nodes, budget);
     if !scratch.procedural_ok {
         return None;
     }
@@ -879,7 +909,10 @@ fn try_dense_control_cone(
     let next_state = is_sequential_next_state_bundle(&by_lhs_cost, Some(&tree));
     // Timing basis: dense FSM delay is ASAP makespan (parallel next-state) plus
     // a small select/wire tax — not the serial sum of every statement.
-    let scratch = ParallelScratch::schedule(m, nodes, budget, &BTreeMap::new());
+    let scratch = classification_scratch(m, nodes, budget);
+    if !scratch.procedural_ok {
+        return None;
+    }
     let select = if next_state {
         model.mux * 2.0
     } else {
@@ -1156,6 +1189,124 @@ mod tests {
             class_note: None,
         });
         design
+    }
+
+    fn make_scratch_design(is_comb: bool) -> TimingDesign {
+        let mut design = make_exclusive_design();
+        design.target = TimingTarget::new(4000.0, 20.0, 0.2);
+        let module = design.modules.get_mut(&0).unwrap();
+        let template = module.nodes[&0].clone();
+        module.nodes.clear();
+        for id in 0..20 {
+            let mut node = template.clone();
+            node.id = id;
+            node.fo4_cost = 4.0;
+            node.lhs = Some(format!("value_{id}"));
+            node.rhs = Some(if id == 1 {
+                "value_0 + b".into()
+            } else {
+                format!("input_{id} + a")
+            });
+            node.gate = Some(crate::ir::GateInfo {
+                is_comb,
+                ..crate::ir::GateInfo::default()
+            });
+            node.fans_in.clear();
+            module.nodes.insert(id, node);
+        }
+        design.paths[0].nodes = (0..20).collect();
+        design.paths[0].total_fo4 = 80.0;
+        design.paths[0].slack_fo4 = -70.0;
+        design
+    }
+
+    #[test]
+    fn independent_bundle_requires_verified_scratch() {
+        for is_comb in [false, true] {
+            let design = make_scratch_design(is_comb);
+            let result = try_independent_lhs_bundle(
+                design.modules.get(&0),
+                &design.paths[0].nodes,
+                80.0,
+                10.0,
+                &CostModel::default(),
+            );
+            assert_eq!(result.is_some(), is_comb, "{result:?}");
+        }
+    }
+
+    #[test]
+    fn dense_control_requires_verified_scratch() {
+        for is_comb in [false, true] {
+            let design = make_scratch_design(is_comb);
+            let result = try_dense_control_cone(
+                design.modules.get(&0),
+                &design.paths[0].nodes,
+                80.0,
+                10.0,
+                &CostModel::default(),
+            );
+            assert_eq!(result.is_some(), is_comb, "{result:?}");
+        }
+    }
+
+    #[test]
+    fn unverified_scratch_cannot_reuse_cached_deflation() {
+        let mut design = make_scratch_design(true);
+        let model = CostModel::default();
+        classify_and_adjust_paths(&mut design, &model, None);
+        assert!(design.paths[0].total_fo4 < 80.0);
+        let hints = hints_from_exceptions(&design.path_exceptions);
+        design.modules.get_mut(&0).unwrap().nodes.get_mut(&0).unwrap()
+            .gate.as_mut().unwrap().is_comb = false;
+        design.paths[0].total_fo4 = 80.0;
+        design.paths[0].total_fo4_raw = None;
+        design.paths[0].path_class = PathClassKind::Plain;
+        classify_and_adjust_paths(&mut design, &model, Some(&hints));
+        assert_eq!(design.paths[0].total_fo4, 80.0);
+        assert_eq!(design.paths[0].slack_fo4, -70.0);
+        assert_eq!(design.paths[0].path_class, PathClassKind::Plain);
+    }
+
+    #[test]
+    fn sequential_region_refusal_survives_missing_per_node_gates() {
+        for cached in [false, true] {
+            let mut design = make_scratch_design(true);
+            let model = CostModel::default();
+            classify_and_adjust_paths(&mut design, &model, None);
+            let hints = hints_from_exceptions(&design.path_exceptions);
+            let module = design.modules.get_mut(&0).unwrap();
+            for node in module.nodes.values_mut() {
+                node.gate = None;
+            }
+            module.regions.insert(0, crate::ir::CombRegion {
+                id: 0,
+                module: 0,
+                kind: crate::ir::RegionKind::AlwaysFf,
+                label: None,
+                gate: crate::ir::GateInfo {
+                    is_comb: false,
+                    ..crate::ir::GateInfo::default()
+                },
+                nodes: (0..20).collect(),
+                total_fo4: 80.0,
+                loc_span: loc(),
+                multi_cycle: false,
+            });
+            let scratch = ParallelScratch::schedule_for_region(
+                module,
+                &module.regions[&0],
+                &design.target,
+                &BTreeMap::new(),
+            );
+            assert!(!scratch.procedural_ok);
+            design.paths[0].total_fo4 = 80.0;
+            design.paths[0].total_fo4_raw = None;
+            design.paths[0].path_class = PathClassKind::Plain;
+            classify_and_adjust_paths(&mut design, &model, cached.then_some(&hints));
+            assert_eq!(design.paths[0].total_fo4, 80.0);
+            assert_eq!(design.paths[0].path_class, PathClassKind::Plain);
+        }
     }
 
     #[test]

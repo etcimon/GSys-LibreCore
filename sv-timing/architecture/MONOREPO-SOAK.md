@@ -132,8 +132,33 @@ modules = ["alu", "mult"]
 param_map = "verif/sv-timing-tests/param-maps/cv64a6_imafdc_xlen64.json"
 target_mhz = 1250.0
 soft_missing = true
+target_cfg = "cv64a6_imafdc_sv39"   # substituted for ${TARGET_CFG}
 notes = "example"
 ```
+
+### 4.1 Input closure is part of the profile contract
+
+A production flist references more than the repo root, and a silently shrunken design is
+worse than a failed run because it still reports a frequency. Rules:
+
+- **Export every variable the flist spells.** The host exports `TARGET_CFG` and
+  `HPDCACHE_DIR` (repo `Makefile` §114/§125, build-platform `eda.ts`); the soak passes
+  both. Unset, `core/Flist.cva6` dropped its config package and 6 HPDcache sources, and
+  the nested `-F ${HPDCACHE_DIR}/rtl/hpdcache.Flist` never contributed
+  `+incdir+${HPDCACHE_DIR}/rtl/include`, so `hpdcache_typedef.svh` was unresolvable.
+- **A surviving `${VAR}` is fatal**, even under `soft_missing`. `soft_missing` covers
+  genuinely absent files, never an unset-variable bug.
+- **`target_cfg` must agree with `param_map`.** Otherwise the analysed parameters
+  describe a different target than the config package.
+- **Supply include dirs for headers the RTL includes**, not only for the top. The APU
+  profile needs `fpga/src/apb/include`, `register_interface/include` and
+  `instr_tracing/ITI/include`; without them 17 uncore files were dropped.
+- **Excluding a file is a claim.** State why. FPGA board tops are excluded because they
+  are not the ASIC *and* are not self-contained (`cva6_altera*` include a header absent
+  from the tree; `ariane_xilinx` relies on single-unit macro leakage for
+  `` `AXI_TYPEDEF_ALL ``). Do not exclude a file merely because it fails.
+- **Check the skip count, not just the exit code.** `--allow-parse-errors` is a
+  diagnostic escape hatch; a production reading has zero skips.
 
 ---
 

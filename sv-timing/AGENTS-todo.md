@@ -147,26 +147,198 @@ Corrected the misleading “Python parser” claim: production frontend is
 - [ ] `--allow-parse-errors` **kept** for truly unparsable files (`sram.sv` translate_off / `unparsable.sv`). `core/alu.sv` xperm8 should no longer need it.
 - [ ] Re-run `full_core` soak without `--allow-parse-errors` and confirm `SyncDpRam` is not the 720 FO4 comment artefact.
 
-## CURRENT STATE — AI island at a high clock (2026-09-10)
+## Current correctness audit — ir-v1 / delay-v2
 
-Read [`architecture/FREQUENCY-CLOSURE.md`](architecture/FREQUENCY-CLOSURE.md)
-§"High-frequency targets" and
-[`../architecture/ai-matrix/AI-ISLAND-TIMING.md`](../architecture/ai-matrix/AI-ISLAND-TIMING.md)
-before quoting any frequency. Dated entries below have the provenance.
+This section supersedes the older frequency headlines below. They are historical
+structural estimates, not measured processor clock limits. A 4 GHz target remains
+0.250 ns; no technology/PVT-specific closure or full-core equivalence is established.
 
-| Question | Answer, measured |
-|---|---|
-| Is the island analysed at all? | **Yes, since 2026-09-10.** Two defects hid it: dropped `+define+` and a `design_key` that omitted `allow_parse_errors`/`package_mode` (139-module cache hit vs 177 cold, zero `g6lc_*`). |
-| What limits the core? | **`g6lc_ai_exec`, 545.5 FO4** — the worst *real* path. OoO blocks are healthy (≤ 25.1 FO4). |
-| Why does it not improve? | `AtomicOverBudget`: a single 56 FO4 `Mul`. No cut strategy reaches inside an operator. |
-| Does more aggressivity help? | **No.** `-O3` vs `-O2`: +163 edits, identical emitted result. |
-| So what is the ask? | T3 `arch_multicycle`: **6 internal stages** at 4000 MHz/20 ps (2 at 1250/20, 4 at 4000/12). |
-| Is 4 GHz credible? | Not on the documented node. `fo4_ps` is a process input; the host target of record is **1.25 GHz / 12 nm** and no 12 nm reference part exceeds 2.0 GHz. |
-| Biggest measurement risk | **Comment slashes lower as `DivRem`.** Owns the reported worst path (`SyncDpRam` 720 FO4 on a row of slashes). Frontiers taken before the fix will move. |
+### Implemented and regression-tested
 
-**Next, in order:** (1) stop comment content reaching operator extraction, (2) re-run the
-frontier, (3) pipeline the `g6lc_ai_exec` multiply and re-check the `va-turbo.md` retire
-ceiling, (4) only then widen the flist.
+- [x] Source-coordinate repair: expressions/case text come from the preprocessed CST;
+  anchors map through `get_origin`, not raw offsets into original bytes. Conditional
+  preprocessing and macro expansion have directed tests. Macro/include/unknown origins
+  cannot authorize automatic source edits. Same-basename files in distinct directories
+  no longer share edits; post-analysis uses the manifest's source mapping in input order.
+- [x] Runtime `*`, `/`, `%` cannot be discounted based on short/uppercase/config-like
+  names or index position. Proven literal power-of-two multiplication remains cheap;
+  unresolved constants are conservatively charged. The cost table was not retuned.
+- [x] Cleanliness coverage: JIT or multi-cycle candidates must cover **every failing
+  path**, not merely have a matching lane somewhere in the module. Density weights
+  cannot manufacture coverage. Feasibility remains a proposal, not emitted closure.
+- [x] Sequential safety: IR currently loses blocking versus NBA assignment kind.
+  Dependency-bearing sequential scratches remain unverified, retaining clocks and costs.
+  They cannot produce scratch-based deflation, midpoint fallback cuts, or staged
+  factorization comments. Comment-only annotations claim zero FO4 improvement.
+- [x] Emitter insertion: comments, quoted text and escaped identifiers cannot supply
+  process/endmodule anchors. The partial APU run reproduced an injection inside
+  `//always_ff` that uncommented the line; unit regressions now preserve it unchanged.
+- [x] Host validity: emitted measurements replace optimistic IR in dashboards. Missing,
+  partial or invalid evidence is INCONCLUSIVE. `correct --emit`, soak status/stamps and
+  host `--require-emit` validation fail rather than reporting invalid output as success.
+- [x] OpenSTA handoff: native numeric-first slack lines, signed/exponent values and
+  incomplete reports are tested. Only fresh successful S2 evidence is accepted; stale
+  files and synthetic fixtures cannot rescue failed execution. Missing tools are SKIP.
+- [x] IR/measurement identifiers bumped to invalidate old cached lowering and costs.
+  No production RTL, budgets, weight defaults, licensing policies or user staging changed.
+
+### Validation results for this audit
+
+- `python tools/svt.py test`: **193 passed** (core 118, cache 16, emit 35,
+  transform 24). Regression tests were first observed failing for the repaired cases.
+- Host `bun test test/clean.test.ts test/fo4-inventory.test.ts`: **95 passed**;
+  `bun run typecheck` passed. Includes real OpenSTA golden-text parsing and mocked
+  stage failures; it does not execute real processor STA.
+- Soak metric/stamp selection: seven mocked Python cases passed (emitted versus IR,
+  missing evidence, dry-run, and analysis/correction exit-status combinations).
+- **The input contract is now closed.** Both profiles run strict — no
+  `--allow-parse-errors`, **zero skipped files** — after four input/parse fixes:
+  `TARGET_CFG` + `HPDCACHE_DIR` are exported to filelist expansion (repo `Makefile`
+  §114/§125); the APU flist gained the apb / register-interface / ITI include dirs;
+  unexpanded `${VAR}` is now a hard error instead of a soft "missing file"; and
+  `// synthesis translate_off` regions are honoured.
+- **Coverage was materially understated before.** Closing the inputs did not shift a
+  frequency, it revealed design that was never analysed:
+
+  | Profile | Modules (was → now) | Paths (was → now) | Files |
+  |---|---|---|---:|
+  | `full_core` | 184 → **233** | 4594 → **5410** | 258 |
+  | `full_corev_apu` | 145 → **167** | 1888 → **4636** | 181 |
+
+  The APU path count grew ~2.5x. Every frequency statement taken before this — including
+  all pre-audit entries below — described an incomplete design.
+- Strict run, 4000 MHz / 20 ps / -O3, closure read from emitted `post_analyze`:
+
+  | Profile | Closure | Structural max | Worst path | FO4 | Slack | Failing | Edits | primary ΔFO4 |
+  |---|---|---:|---|---:|---:|---:|---:|---:|
+  | `full_core` | MISS | ~571.4 MHz | `g6lc_ftq.reg0/CP → .reg1/D` | 70.0 | -60.0 | 556 | 462 | **0.0** |
+  | `full_corev_apu` | MISS | ~131.4 MHz | `g6lc_ai_gemm_seq.reg0/CP → .reg1/D` | 304.5 | -294.5 | 172 | 308 | **0.0** |
+
+  Host `timings validate --require-emit` reports **structure OK** for both with
+  `stamp exitCode=0`, and closure **MISS** — a valid package that does not close, which
+  is the distinction the audit existed to make possible.
+- **Auto-correct is not moving the limiting paths.** 462 and 308 applied edits changed
+  primary FO4 by **0.0** on both profiles. The emitted tree is structurally valid and
+  re-analysable, and it buys nothing at this target. Treat the transform worklist as
+  unproven for high-frequency work rather than as a closure mechanism.
+- **Root cause of the 0.0 delta: IR credit that the emitted RTL does not realise.**
+  On `full_core` the same run reports `post_closure` (IR) **56.0 FO4 / 714.3 MHz /
+  344 failing** against `post_analyze` (re-analysis of its own emitted SV) **70.0 FO4 /
+  571.4 MHz / 556 failing**. Integrity is clean (`joint reparse ok: 258 files`,
+  `structural_ok`), so this is not an emit failure — the IR books BalanceMux-style credit
+  for structure that the review-only output does not actually contain. The host and soak
+  now report the emitted number, so the optimism is contained rather than published, but
+  **the transform's own accounting is still wrong** and is the next thing to fix.
+- **`delay-v4`: fixed part-select bounds were being billed as dividers.** IEEE 1800
+  §11.5.1 makes both bounds of `[msb:lsb]` constant expressions, so parameter arithmetic
+  there is elaboration-time. Removing the name heuristics had left
+  `vaddr_q[12+((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*(...))-1 : 12+(...)]`
+  (`core/cva6_mmu/cva6_ptw.sv:189`) charged as a 202.0 FO4 `DivRem` with `node_count=1` —
+  the worst raw path in `full_core`, for a slice that synthesises to wires. The rule is
+  now language-grounded, not name-based: only the `:` form is trusted, and `+:` / `-:`
+  parse to `Opaque` so an indexed part-select base can never be excused by it. Measured:
+
+  | | `full_core` v3 → v4 | `full_corev_apu` v3 → v4 |
+  |---|---|---|
+  | worst raw path | 202.0 `cva6_ptw` → **176.0** `fpnew_opgroup_block` | 304.5 → 304.5 (real) |
+  | `atomic_over_budget` | 45 → **35** | 12 → **10** |
+  | MMU atomic paths | 12 → **6** | 0 → 0 |
+  | opportunities | 630 → **442** | 246 → **191** |
+  | failing (emitted) | 556 → **427** | 172 → **133** |
+
+  The surviving AI-island atomics are real multipliers (`g6lc_ai_gemm_seq` 304.5/131.0,
+  `g6lc_ai_pe_dot` 130.0), and 6 MMU atomics remain unexplained — treat those as open.
+- The worst core path is no longer an AI-island cone. With comment/`translate_off`
+  artifacts and name-based arithmetic discounts removed it is `g6lc_ftq` (fetch target
+  queue) at 70.0 FO4; `SyncDpRam` 720.0 and `g6lc_ai_exec` 545.5 do not reproduce.
+- Actual host `sta-handoff --try-tools --no-sta-fixture`: S0 generated seeds; S1
+  found Yosys 0.67+92 but failed on missing common_cells includes/macros. S2 did not
+  run; S3/S4 skipped. Overall exit is now 1, not success from S0 alone.
+- Fixture integration `verif/regress/run_regress.py`: **six cases still fail**;
+  density/syntax-shape requirements and some incomplete emitted measurements remain.
+  Four emitted fixture groups pass pyslang syntax, which is not functional equivalence.
+- Independence check still fails on existing monorepo-symbol rules; it was not relaxed.
+  The documented host `diag run licensing` command is unavailable (`Unknown: licensing`);
+  edited first-party files retain existing MIT/Etienne Cimon headers and tier T.
+
+### Pattern analysis → planned pass strategy
+
+Trace-log and path-distribution analysis of the strict corpus is written up in
+[`architecture/PASS-STRATEGY.md`](architecture/PASS-STRATEGY.md): nine measured pattern
+signatures (P1–P9), a pre-pass planner that triages artifact-vs-real before spending
+edits, and an ordered S0–S5 schedule. Recognizers and schedule are **not implemented**.
+The load-bearing measurements:
+
+- **~half the hard FO4 mass is still artifact.** Of `full_core`'s 35 failing
+  `atomic_over_budget` paths, **17 (1601.0 of 3158.5 FO4, 51%)** are arithmetic between
+  elaboration constants — `3 * PRECISION_BITS + 4`, `NUM_LANES/INTERNAL_LANES`,
+  `$clog2(CVA6Cfg.AxiDataWidth / 8)`, and two **replication counts**
+  (`{HPDcacheCfg.reqDataWidth/64{...}}`, `{{(DataWidth/8-4){1'b0}}, 4'hF}`) that the LRM
+  requires to be constant. `delay-v4` fixed this for `[msb:lsb]` bounds only; P1 is that
+  fix generalized via a constant lattice seeded by the param-map.
+- **Comment lowering is still incomplete**: block-comment interiors
+  (`te_priority.sv:139`, 56.0 FO4) and trailing `//` on continued statements
+  (`cva6_shared_tlb.sv:260`, 136.0 FO4) still bill as arithmetic.
+- **The workload is shallow, not monstrous.** 469 of 621 core failures (75%) and 87 of 144
+  APU failures sit in [10,20) FO4 — one rebalance or one register each. Only 15 core paths
+  exceed 80 FO4. Schedule from the bulk, not from the worst path.
+- **204 core paths (Σ 4692.5 FO4) have `node_count<=1`** and so cannot be cut by any
+  strategy; that is why `worst_all` stayed 176.0 across the entire run.
+- **`atomic` is applied to whole paths on the strength of one node** — `cache_ctrl` 125.0
+  FO4 has **117 nodes**, `wt_axi_adapter` 121.5 has **71**. The path-level verdict
+  suppresses cutting the ordinary remainder.
+- **423 of 621 core failures are `intoout` fragments**, not flop-to-flop paths, so the
+  failing count is inflated and cuts are misdirected.
+- **Passes are mostly idle**: `full_core` reached its best `primary_fo4` in **pass 1** and
+  spent 13 more passes flat; **1 refusal in ~193 applies** on each profile. A fixpoint stop
+  would end the core run at pass 3.
+- **The APU's worst path is cuttable and the plan already exists**: 304.5 FO4,
+  `nodes=144`, `plain`, `regtoreg`, and the IR found a 3.2x cut (304.5 → 96.5) that the
+  emitted SV does not contain. Highest-value fix remains the IR/emit credit contract.
+
+### Remaining gates
+
+Fresh full-soak artifacts are under host `workspace/build/sv-timing/audit-delay-v2-*`.
+Both profiles carry `G6LC_FETCH_B`, exclude `core/fetch_A`, retain the live SMT2 helpers,
+and include their respective CVXIF/SoC island source sets. File presence is **not** proof
+that all SMT2/8-issue/8-core/RVV/H/AI features are enabled in one elaborated target.
+
+- [x] Strict profile input closure — done; both profiles parse every file.
+- [ ] Two FPGA **board tops** are excluded, not measured, and both are honest gaps:
+  `altera/src/cva6_altera*.sv` include `src/agilex7.svh`, which is absent from the tree;
+  `fpga/src/ariane_xilinx.sv` calls `` `AXI_TYPEDEF_ALL `` while including only
+  `axi/assign.svh`, so it builds solely on single-unit macro leakage. The latter is a
+  **real self-containment defect** in board RTL — fixing it is an RTL change owed the
+  root `AGENTS.md` §0.2 checklist, so it is filed here, not patched from a timing run.
+- [ ] Full emitted elaboration and equivalence still unproven: the emitted tree
+  re-parses and re-analyses, which is neither elaboration of a top nor an equivalence
+  check. Nothing here shows the corrected RTL is functionally identical.
+- [ ] **Fix the IR/emitted accounting split** (diagnosed above): make IR post-correct
+  credit contingent on structure actually present in the emitted output, so
+  `post_closure` cannot claim 56.0 FO4 while its own emitted SV re-analyses at 70.0.
+  Until then `post_closure` is not a reportable number.
+- [ ] Explain the 6 residual `cva6_*` MMU `atomic_over_budget` paths (136.0 FO4 worst).
+  Determine whether they are real arithmetic, `+:`-form `Opaque` fallbacks, or another
+  constant-expression context not yet covered, before ranking them as datapath work.
+- [ ] Extend the constant-expression rule to the other LRM-constant contexts
+  (`+:`/`-:` **width**, packed dimensions, replication counts) instead of relying on the
+  `Opaque` fallback, and give the hand parser explicit select-kind nodes rather than
+  encoding `[msb:lsb]` as a `":"` binary.
+- [ ] Preserve assignment kind in IR to implement actual NBA old-Q versus blocking
+  temporary dependencies; do not infer extra clock edges from `ceil(FO4/budget)`.
+- [ ] Module-scoped lowering, complete function-body/call timing, resolved parameter and
+  genvar arithmetic, and genuine register/clock-domain path boundaries need further work.
+- [ ] Compare legal transformed netlists with constrained OpenSTA setup/hold analysis.
+  S1 currently fails on missing include/macro context; no S2 processor timing exists.
+  Reference report parsing and mocked stages are not a real STA run.
+- [ ] Feature-max production Flist/config/legality and RTL/formal/functional validation
+  remain open. QEMU validates software/device contracts, not timing or emitted SV.
+- [ ] Keep core CVXIF and SoC island arithmetic/area evidence separate. T3 stage counts
+  are idealized estimates; datapath changes must include valid/ready, reset/flush,
+  exceptions, numerical behavior and measured throughput/area/STA evidence.
+
+See `architecture/DESIGN.md`, `FREQUENCY-CLOSURE.md`, and
+`OPENSTA-CORRECTION-WORKFLOW.md` for the updated algorithm/evidence contracts.
 
 ## 2026-09-10 (f) — 4 GHz support: the T3 requirement now scales, and the worst path is a comment
 

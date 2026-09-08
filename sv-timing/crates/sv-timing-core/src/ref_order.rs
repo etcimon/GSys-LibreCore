@@ -162,6 +162,14 @@ impl RefOrderTree {
                 if let Some(&wstmt) = last_write.get(r) {
                     if wstmt < stmt_ord {
                         e.forward_reads += 1;
+                        if module
+                            .nodes
+                            .get(&nodes[wstmt as usize])
+                            .and_then(|writer| writer.gate.as_ref())
+                            .is_some_and(|gate| !gate.is_comb)
+                        {
+                            tree.procedural_ok = false;
+                        }
                         tree.edges.push(RefEdge {
                             from_stmt: wstmt,
                             to_stmt: stmt_ord,
@@ -188,7 +196,7 @@ impl RefOrderTree {
             }
         }
 
-        tree.procedural_ok = tree.assert_procedural_use();
+        tree.procedural_ok &= tree.assert_procedural_use();
         tree
     }
 
@@ -419,6 +427,20 @@ mod tests {
         assert_eq!(t.edges[0].var, "tmp");
         assert_eq!(t.procedural_depth(), 1);
         assert!(!t.is_write_only("tmp"));
+        assert!(t.procedural_ok);
+
+        let mut sequential = m.clone();
+        sequential.nodes.get_mut(&0).unwrap().gate = Some(crate::ir::GateInfo {
+            is_comb: false,
+            ..crate::ir::GateInfo::default()
+        });
+        let uncertain = RefOrderTree::from_nodes(&sequential, &[0, 1]);
+        assert_eq!(uncertain.edges, t.edges);
+        assert_eq!(uncertain.procedural_depth(), 1);
+        assert!(!uncertain.procedural_ok);
+
+        sequential.nodes.get_mut(&0).unwrap().gate.as_mut().unwrap().is_comb = true;
+        assert!(RefOrderTree::from_nodes(&sequential, &[0, 1]).procedural_ok);
     }
 
     #[test]

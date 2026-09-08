@@ -209,9 +209,9 @@ impl Expr {
                 left,
                 right,
             } => {
-                // Address/index scale (`i*8`, `i*OPERANDS_PER_INSTR+2`) is not a 56-FO4 mul.
+                // Only literal power-of-two multiplication proves wiring without symbol resolution.
                 let op_cost = if matches!(*op_class, OperatorClass::Mul | OperatorClass::DivRem)
-                    && is_addr_scale_mul(op, left, right)
+                    && is_literal_power_of_two_mul(op, left, right)
                 {
                     base(OperatorClass::Other)
                 } else {
@@ -247,7 +247,11 @@ impl Expr {
                         .max(body.fo4_critical_cost(base))
             }
             Expr::Index { base: b, index } => {
-                // Part-select bounds (`VpnLen/PtLevels * lvl`) are index math, not a 56-FO4 mul.
+                // A fixed `[msb:lsb]` bound is constant by LRM rule, so it contributes no
+                // delay. Any other index (bit-select, `+:` base) may be runtime data.
+                if is_constant_range_select(index) {
+                    return b.fo4_critical_cost(base);
+                }
                 b.fo4_critical_cost(base)
                     .max(index.fo4_critical_cost_as_index(base))
             }
@@ -261,12 +265,9 @@ impl Expr {
         }
     }
 
-    /// Index/part-select arithmetic: `*` `/` are scale, never datapath mul/div.
+    /// Index/part-select arithmetic retains the cost of dynamic operations.
     pub fn fo4_critical_cost_as_index(&self, base: &dyn Fn(OperatorClass) -> f64) -> f64 {
-        self.fo4_critical_cost(&|c| match c {
-            OperatorClass::Mul | OperatorClass::DivRem => base(OperatorClass::Other),
-            other => base(other),
-        })
+        self.fo4_critical_cost(base)
     }
 
     /// Visit identifier names (not function names).
@@ -367,10 +368,10 @@ impl Expr {
                 s
             }
             Expr::Binary {
+                op,
                 op_class,
                 left,
                 right,
-                ..
             } => {
                 let lc = left.fo4_critical_cost(base);
                 let rc = right.fo4_critical_cost(base);
@@ -379,7 +380,14 @@ impl Expr {
                 } else {
                     right.critical_spine_ops(base)
                 };
-                s.push((*op_class, base(*op_class)));
+                let cls = if matches!(*op_class, OperatorClass::Mul | OperatorClass::DivRem)
+                    && is_literal_power_of_two_mul(op, left, right)
+                {
+                    OperatorClass::Other
+                } else {
+                    *op_class
+                };
+                s.push((cls, base(cls)));
                 s
             }
             Expr::Ternary {
@@ -425,6 +433,9 @@ impl Expr {
                 s
             }
             Expr::Index { base: b, index } => {
+                if is_constant_range_select(index) {
+                    return b.critical_spine_ops(base);
+                }
                 let bc = b.fo4_critical_cost(base);
                 let ic = index.fo4_critical_cost(base);
                 if bc >= ic {
@@ -1037,93 +1048,60 @@ fn parse_unsized_decimal(text: &str) -> Option<u32> {
     text.trim().parse::<u32>().ok()
 }
 
-/// `*` used as array/genvar index scale, not datapath multiply.
-fn is_addr_scale_mul(op: &str, left: &Expr, right: &Expr) -> bool {
-    if op == "**" {
-        return true;
-    }
-    is_scale_tree(left) && is_scale_tree(right)
-}
-
-fn is_scale_tree(e: &Expr) -> bool {
-    match e {
-        Expr::Ident { name } => ident_is_scale_leaf(name),
-        Expr::Literal { .. } => true,
-        Expr::Unary { arg, .. } => is_scale_tree(arg),
-        Expr::Binary { op, left, right, .. }
-            if matches!(op.as_str(), "+" | "-" | "*" | "**" | "<<" | ">>") =>
-        {
-            is_scale_tree(left) && is_scale_tree(right)
-        }
-        Expr::Index { base, index } => is_scale_tree(base) && is_scale_tree(index),
-        _ => false,
-    }
-}
-
-/// Leaf is a localparam / genvar / width, not a datapath operand.
+/// True for the index of a **fixed** part-select `base[msb:lsb]`.
 ///
-/// `mantissa_a * mantissa_b` (fpnew FMA product) must NOT match — that is the
-/// 56 FO4 array multiply. `(i+1)*8` and `CVA6Cfg.PtLevels * VpnLen` must.
-fn ident_is_scale_leaf(name: &str) -> bool {
-    let leaf = name
-        .rsplit('.')
-        .next()
-        .unwrap_or(name)
-        .trim();
-    if leaf.is_empty() {
-        return false;
-    }
-    if leaf.len() <= 2 {
-        return true; // i, j, k, n, lvl
-    }
-    if leaf
-        .chars()
-        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
-        && leaf.chars().any(|c| c.is_ascii_uppercase())
-    {
-        return true; // HYP_EXT, PRECISION_BITS
-    }
-    let n = leaf.to_ascii_lowercase();
-    let full = name.to_ascii_lowercase();
-    if looks_like_datapath_ident(name) {
-        return false;
-    }
-    // Hierarchical params (`CVA6Cfg.PtLevels`) keep the package prefix; the
-    // leaf alone (`PtLevels`) is mixed-case and would otherwise look datapath.
-    n.contains("cfg")
-        || full.contains("cfg")
-        || n.contains("width")
-        || n.contains("bits")
-        || n.contains("len")
-        || n.contains("size")
-        || n.contains("count")
-        || n.contains("num_")
-        || n.contains("nr_")
-        || n.ends_with("_w")
-        || n.starts_with("cva6")
-        || full.starts_with("cva6")
+/// IEEE 1800 §11.5.1 requires both bounds of a fixed part-select to be *constant
+/// expressions*, so their arithmetic is resolved at elaboration and costs no hardware.
+/// A variable select must use `[base +: width]` / `[base -: width]` instead, so this
+/// carries no risk of excusing a runtime index.
+///
+/// This is a language guarantee, not an identifier-name guess: it is the sound form of
+/// the demotion that was removed with the name heuristics. Without it, parameter
+/// arithmetic in a slice bound is billed as a real divider -- measured on
+/// `core/cva6_mmu/cva6_ptw.sv:189`, where
+/// `vaddr_q[12+((CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)*(...))-1 : 12+(...)]` was reported as a
+/// 202.0 FO4 `atomic_over_budget` DivRem, the worst raw path in `full_core`, for a slice
+/// that synthesises to wires. Only the `:` form is trusted; `+:` bases stay charged.
+fn is_constant_range_select(index: &Expr) -> bool {
+    matches!(index, Expr::Binary { op, .. } if op == ":")
 }
 
-fn looks_like_datapath_ident(name: &str) -> bool {
-    let n = name.to_ascii_lowercase();
-    let leaf = n.rsplit('.').next().unwrap_or(n.as_str());
-    // Short genvars / loop indices are not datapath.
-    if leaf.len() <= 2 {
-        return false;
+/// `*` used as array/genvar index scale, not datapath multiply.
+fn is_literal_power_of_two_mul(op: &str, left: &Expr, right: &Expr) -> bool {
+    op == "*"
+        && [left, right]
+            .into_iter()
+            .any(|e| positive_literal_value(e).is_some_and(u128::is_power_of_two))
+}
+
+fn positive_literal_value(e: &Expr) -> Option<u128> {
+    let Expr::Literal { text } = e else {
+        return None;
+    };
+    let text = text.replace('_', "");
+    let Some((width, digits)) = text.split_once('\'') else {
+        return text.parse::<u128>().ok().filter(|v| *v <= i32::MAX as u128);
+    };
+    let width = if width.is_empty() {
+        32
+    } else {
+        width.parse::<u32>().ok()?
+    };
+    let signed = digits.starts_with(['s', 'S']);
+    let digits = if signed { &digits[1..] } else { digits };
+    let radix = match digits.as_bytes().first()? {
+        b'b' | b'B' => 2,
+        b'o' | b'O' => 8,
+        b'd' | b'D' => 10,
+        b'h' | b'H' => 16,
+        _ => return None,
+    };
+    let value = u128::from_str_radix(digits.get(1..)?, radix).ok()?;
+    let bits = u128::BITS - value.leading_zeros();
+    if width == 0 || bits > width || (signed && bits == width) {
+        return None;
     }
-    leaf.contains("operand")
-        || leaf.contains("op_a")
-        || leaf.contains("op_b")
-        || leaf.contains("mantissa")
-        || leaf.contains("product")
-        || leaf.contains("multiplic")
-        || leaf.contains("result")
-        || leaf.contains("rdata")
-        || leaf.contains("wdata")
-        || leaf.contains("rs1")
-        || leaf.contains("rs2")
-        || leaf.contains("rs3")
-        || (leaf.ends_with("_i") && leaf.len() > 6 && !leaf.contains("valid") && !leaf.contains("en"))
+    Some(value)
 }
 
 /// Dominant op for coarse class: do not rank addr-scale mul as full Mul.
@@ -1146,7 +1124,7 @@ pub fn dominant_op_class_measured(e: &Expr) -> OperatorClass {
                 ..
             } => {
                 if matches!(*op_class, OperatorClass::Mul | OperatorClass::DivRem)
-                    && is_addr_scale_mul(op, left, right)
+                    && is_literal_power_of_two_mul(op, left, right)
                 {
                     f(OperatorClass::Other);
                 } else {
@@ -1178,8 +1156,11 @@ pub fn dominant_op_class_measured(e: &Expr) -> OperatorClass {
             }
             Expr::Index { base, index } => {
                 walk(base, f);
-                // Demote * / % inside part-selects (PTW VPN slice arithmetic).
-                walk_index_scale(index, f);
+                // Constant `[msb:lsb]` bounds must not nominate the path's class: the
+                // ptw slice above would otherwise rank as a DivRem cone.
+                if !is_constant_range_select(index) {
+                    walk(index, f);
+                }
             }
             Expr::Call { args, .. } => {
                 f(OperatorClass::Other);
@@ -1197,61 +1178,6 @@ pub fn dominant_op_class_measured(e: &Expr) -> OperatorClass {
         }
     });
     best
-}
-
-fn walk_index_scale(e: &Expr, f: &mut dyn FnMut(OperatorClass)) {
-    match e {
-        Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => {}
-        Expr::Unary { arg, op, .. } => {
-            f(classify_unary(op));
-            walk_index_scale(arg, f);
-        }
-        Expr::Binary {
-            op_class,
-            left,
-            right,
-            ..
-        } => {
-            if matches!(*op_class, OperatorClass::Mul | OperatorClass::DivRem) {
-                f(OperatorClass::Other);
-            } else {
-                f(*op_class);
-            }
-            walk_index_scale(left, f);
-            walk_index_scale(right, f);
-        }
-        Expr::Ternary {
-            cond,
-            then_e,
-            else_e,
-        } => {
-            f(OperatorClass::Mux);
-            walk_index_scale(cond, f);
-            walk_index_scale(then_e, f);
-            walk_index_scale(else_e, f);
-        }
-        Expr::Concat { parts } => {
-            f(OperatorClass::Concat);
-            for p in parts {
-                walk_index_scale(p, f);
-            }
-        }
-        Expr::Replicate { count, body } => {
-            f(OperatorClass::Concat);
-            walk_index_scale(count, f);
-            walk_index_scale(body, f);
-        }
-        Expr::Index { base, index } => {
-            walk_index_scale(base, f);
-            walk_index_scale(index, f);
-        }
-        Expr::Call { args, .. } => {
-            f(OperatorClass::Other);
-            for a in args {
-                walk_index_scale(a, f);
-            }
-        }
-    }
 }
 
 fn paren_if_needed(e: &Expr) -> String {
@@ -1752,15 +1678,208 @@ mod tests {
         let fma = Expr::parse("mantissa_a * mantissa_b");
         assert_eq!(fma.dominant_op_class(), OperatorClass::Mul);
         assert!(fma.fo4_critical_cost(&base) >= 56.0);
-        // Parameter/cast-width multiply stays cheap.
+        // Parameter-looking names do not prove compile-time values.
         let cast_w = Expr::parse("(CVA6Cfg.PtLevels + HYP_EXT) * VpnLen");
-        assert_ne!(cast_w.dominant_op_class(), OperatorClass::Mul);
-        assert!(cast_w.fo4_critical_cost(&base) < 30.0);
+        assert_eq!(cast_w.dominant_op_class(), OperatorClass::Mul);
+        assert_eq!(cast_w.fo4_critical_cost(&base), 66.0);
         let pow = Expr::parse("2 ** lvl");
         assert_ne!(pow.dominant_op_class(), OperatorClass::Mul);
-        // Part-select bound arithmetic is not a datapath mul (PTW VPN slice).
+        // Part-select bound arithmetic may use dynamic operands.
         let idx = Expr::parse("vaddr_q[(WIDTH / 8) * i]");
-        assert_ne!(idx.dominant_op_class(), OperatorClass::Mul, "{idx:?}");
+        assert_eq!(idx.dominant_op_class(), OperatorClass::DivRem, "{idx:?}");
+    }
+
+    fn arithmetic_base(c: OperatorClass) -> f64 {
+        match c {
+            OperatorClass::Mul => 56.0,
+            OperatorClass::DivRem => 120.0,
+            OperatorClass::AddSub => 10.0,
+            OperatorClass::Mux => 2.5,
+            _ => 1.0,
+        }
+    }
+
+    fn assert_arithmetic_cost(text: &str, class: OperatorClass, cost: f64) {
+        let e = Expr::parse(text);
+        assert_eq!(e.dominant_op_class(), class, "{text}: {e:?}");
+        assert_eq!(e.fo4_critical_cost(&arithmetic_base), cost, "{text}");
+        assert_eq!(e.fo4_critical_cost_as_index(&arithmetic_base), cost, "{text}");
+        assert!(cost <= e.fo4_cost(&arithmetic_base), "{text}");
+        let spine = e.critical_spine_ops(&arithmetic_base);
+        assert_eq!(
+            spine.iter().map(|(_, c)| c).sum::<f64>(),
+            cost,
+            "{text}: {spine:?}"
+        );
+        assert_eq!(
+            e.has_atomic_over_budget(&arithmetic_base, 10.0),
+            matches!(class, OperatorClass::Mul | OperatorClass::DivRem),
+            "{text}: {spine:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_arithmetic_is_not_constant_by_identifier_name() {
+        for (left, right) in [
+            ("a", "b"),
+            ("x", "y"),
+            ("i", "j"),
+            ("A", "B"),
+            ("WIDTH", "SIZE"),
+            ("count", "num_items"),
+            ("cfg.a", "cfg.b"),
+            ("ExampleCfg.PtLevels", "VpnLen"),
+            ("valid_count", "bit_width"),
+            ("operand_a_i", "operand_b_i"),
+            ("mantissa_a", "mantissa_b"),
+        ] {
+            for (op, class) in [
+                ("*", OperatorClass::Mul),
+                ("/", OperatorClass::DivRem),
+                ("%", OperatorClass::DivRem),
+            ] {
+                assert_arithmetic_cost(&format!("{left} {op} {right}"), class, arithmetic_base(class));
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_runtime_arithmetic_keeps_datapath_cost() {
+        for (text, class, cost) in [
+            ("mem[a * b]", OperatorClass::Mul, 56.0),
+            ("mem[a / b]", OperatorClass::DivRem, 120.0),
+            ("mem[a % b]", OperatorClass::DivRem, 120.0),
+            ("mem[operand_a_i * operand_b_i]", OperatorClass::Mul, 56.0),
+            ("mem[(a + b) * (c + d)]", OperatorClass::Mul, 66.0),
+            ("mem[sel ? a / b : c * d]", OperatorClass::DivRem, 122.5),
+            ("mem[other[a * b]]", OperatorClass::Mul, 56.0),
+            ("mem[f(a / b)]", OperatorClass::DivRem, 121.0),
+            ("mem[{a * b, c / d}]", OperatorClass::DivRem, 121.0),
+            // NOTE: `mem[a / b : 0]` is deliberately absent. A fixed `[msb:lsb]` bound
+            // must be a constant expression (IEEE 1800 §11.5.1), so that form is not a
+            // runtime divider -- it is illegal RTL -- and billing it as one produced the
+            // false 202.0 FO4 ptw path. Covered by
+            // `fixed_part_select_bounds_are_elaboration_constants`.
+            ("(a * b)[i]", OperatorClass::Mul, 56.0),
+            ("mem[(WIDTH / 8) * i]", OperatorClass::DivRem, 176.0),
+        ] {
+            assert_arithmetic_cost(text, class, cost);
+        }
+    }
+
+    #[test]
+    fn literal_power_of_two_multiplication_is_cheap() {
+        for literal in [
+            "1",
+            "8",
+            "1_024",
+            "8'd8",
+            "8'h08",
+            "8'b0000_1000",
+            "8'o10",
+            "8'sd8",
+            "8'sh08",
+            "16'H0100",
+            "'h8",
+            "128'h10000000000000000",
+        ] {
+            for text in [
+                format!("operand_a_i * {literal}"),
+                format!("{literal} * operand_a_i"),
+            ] {
+                assert_arithmetic_cost(&text, OperatorClass::Other, 1.0);
+            }
+        }
+        assert_arithmetic_cost("(i + 1) * 8 - 1", OperatorClass::AddSub, 21.0);
+        assert_arithmetic_cost("mem[i * 8]", OperatorClass::Other, 1.0);
+    }
+
+    #[test]
+    fn unproven_scales_keep_arithmetic_cost() {
+        for text in [
+            "a * 3",
+            "a * 0",
+            "a * -8",
+            "a * '1",
+            "a * 'x",
+            "a * 8'hx8",
+            "a * 8'hz8",
+            "a * 8'sh80",
+            "a * 4'sd8",
+            "a * 8'h100",
+            "a * 0'd8",
+            "a * 340282366920938463463374607431768211456",
+            "a * (b + 1)",
+            "(a + b) * (c + d)",
+            "a[i] * b[j]",
+            "a * WIDTH",
+            "WIDTH * 3",
+        ] {
+            let e = Expr::parse(text);
+            assert_eq!(e.dominant_op_class(), OperatorClass::Mul, "{text}: {e:?}");
+            assert!(e.fo4_critical_cost(&arithmetic_base) >= 56.0, "{text}");
+            assert!(e.has_atomic_over_budget(&arithmetic_base, 10.0), "{text}");
+        }
+        for text in ["a / 8", "8 / a", "a % 8", "8 % a", "a / 0", "a % 0"] {
+            assert_arithmetic_cost(text, OperatorClass::DivRem, 120.0);
+        }
+    }
+
+    #[test]
+    fn fixed_part_select_bounds_are_elaboration_constants() {
+        // Reduced from core/cva6_mmu/cva6_ptw.sv:189, reported as a 202.0 FO4
+        // atomic_over_budget DivRem -- the worst raw path in full_core -- for a slice
+        // that synthesises to wires.
+        let ptw = Expr::parse(
+            "vaddr_q[12+((ExampleCfg.VpnLen/ExampleCfg.PtLevels)*(ExampleCfg.PtLevels-z-1))-1:12+((ExampleCfg.VpnLen/ExampleCfg.PtLevels)*(ExampleCfg.PtLevels-z-2))]",
+        );
+        assert_ne!(ptw.dominant_op_class(), OperatorClass::DivRem, "{ptw:?}");
+        assert_ne!(ptw.dominant_op_class(), OperatorClass::Mul, "{ptw:?}");
+        assert!(
+            !ptw.has_atomic_over_budget(&arithmetic_base, 10.0),
+            "constant slice bound still reported as an over-budget operator"
+        );
+        // Pure wire slice off a plain signal: no operator delay at all.
+        assert_eq!(ptw.fo4_critical_cost(&arithmetic_base), 0.0);
+
+        // Only the `:` form is a language-guaranteed constant. A bit-select index is
+        // charged, and `+:` / `-:` do not even reach the rule -- they parse to `Opaque`,
+        // so an indexed part-select base can never be excused by it.
+        for text in ["mem[a / b]", "mem[a * b]", "mem[other[a / b]]"] {
+            let e = Expr::parse(text);
+            assert!(
+                e.fo4_critical_cost(&arithmetic_base) >= 56.0,
+                "{text} was excused: {e:?}"
+            );
+        }
+        for text in ["mem[(a / b) +: 8]", "operand_b[i << 3 +: 8]", "mem[x -: 4]"] {
+            let e = Expr::parse(text);
+            let Expr::Index { index, .. } = &e else {
+                assert!(matches!(e, Expr::Opaque { .. }), "{text}: {e:?}");
+                continue;
+            };
+            assert!(
+                !is_constant_range_select(index),
+                "{text}: indexed part-select treated as a constant range bound"
+            );
+        }
+
+        // The selected base is still measured through a constant slice.
+        assert_arithmetic_cost("(a * b)[7:0]", OperatorClass::Mul, 56.0);
+        assert_arithmetic_cost("mem[f(a / b)][7:0]", OperatorClass::DivRem, 121.0);
+    }
+
+    #[test]
+    fn cheap_scale_preserves_expensive_operand_subtrees() {
+        for (text, class, cost) in [
+            ("(a * b) * 8", OperatorClass::Mul, 57.0),
+            ("8 * (a / b)", OperatorClass::DivRem, 121.0),
+            ("8 * mem[a % b]", OperatorClass::DivRem, 121.0),
+            ("mem[(a * b) * 8]", OperatorClass::Mul, 57.0),
+            ("a * 8 + b / c", OperatorClass::DivRem, 130.0),
+        ] {
+            assert_arithmetic_cost(text, class, cost);
+        }
     }
 
     #[test]

@@ -42,7 +42,68 @@ Scale with monorepo-soak `--target-mhz`. See `MONOREPO-SOAK.md` §9 for validate
 
 ---
 
-## High-frequency targets (2026-09-10 measurements)
+## Current evidence rules (ir-v1 / delay-v2)
+
+A 4 GHz target is 0.250 ns. At 20 ps/FO4 and 20% margin the structural budget is
+10 FO4; this is an assumption, not process calibration. Inverting reported frequency
+must include the margin: `C = 1e6 * (1-margin) / (f_MHz * fo4_ps)`.
+The historical 503.1 MHz / 20 ps conversion below omitted that margin: it corresponds
+to about 79.5 FO4, not 99.4, under that formula. Neither value proves a silicon limit.
+
+Use original analysis, proposed IR result, emitted re-analysis, integrity and actual
+STA as separate evidence. Both `frequency_closure` summaries filter inferred
+multi-cycle paths; read all-path costs and coverage too. A successful parse is not
+an equivalence proof. Macro/include source locations, unresolved assignment semantics,
+and skipped files prevent production claims even if a filtered structural budget passes.
+
+Host dashboards now select emitted evidence instead of falling back to optimistic IR.
+`post_analyze_valid=false`, missing/empty post-analysis, and skipped files are
+INCONCLUSIVE. OpenSTA parsing accepts native numeric-before-slack reports; partial or
+stale files cannot turn failed tool execution into success. Missing tools are SKIP,
+not STA closure. The reference report tests do not calibrate `fo4-v1.toml`.
+
+## Current strict measurement (ir-v1 / delay-v4)
+
+First reading taken with a **closed input set**: both profiles parse every file, with no
+`--allow-parse-errors` and zero skips. 4000 MHz / 20 ps / margin 0.2 → 10.0 FO4, `-O3`.
+Closure is read from emitted `post_analyze`, not from IR `post_closure`.
+
+| Profile | Files | Modules | Paths | Closure | Structural max | Worst path | FO4 | Failing |
+|---|---:|---:|---:|---|---:|---|---:|---:|
+| `full_core` | 258 | 233 | 5557 | MISS | ~571.4 MHz | `g6lc_ftq.reg0/CP → .reg1/D` | 70.0 | 427 |
+| `full_corev_apu` | 181 | 167 | 4794 | MISS | ~131.4 MHz | `g6lc_ai_gemm_seq.reg0/CP → .reg1/D` | 304.5 | 133 |
+
+Worst **raw** (multi-cycle-inclusive) path is 176.0 FO4 `fpnew_opgroup_block` on the core
+and 304.5 FO4 `g6lc_ai_gemm_seq` on the APU. Under `delay-v3` the core's raw worst was a
+202.0 FO4 "divider" in `cva6_ptw` that turned out to be a constant part-select bound; see
+`AGENTS-todo.md` for the before/after counts.
+
+Three things this changes:
+
+1. **Earlier readings covered less design than they appeared to.** Closing the inputs
+   moved `full_core` from 184 to 233 modules and `full_corev_apu` from 1888 to 4636
+   paths. Any frequency taken before this described a subset, silently.
+2. **The worst core path is not an AI cone.** With comment artifacts, `translate_off`
+   regions and name-based arithmetic discounts removed, it is `g6lc_ftq` at 70.0 FO4.
+   `SyncDpRam` 720.0 and `g6lc_ai_exec` 545.5 do not reproduce.
+3. **Auto-correct moved primary FO4 by 0.0** on both profiles despite 462 and 308
+   applied edits. The emitted tree is valid and re-analysable; it does not improve this
+   target. Do not present the transform worklist as a path to a higher clock.
+4. **`post_closure` is not reportable.** The same `full_core` run books IR
+   **56.0 FO4 / 714.3 MHz / 344 failing** while re-analysis of its own emitted SV gives
+   **70.0 FO4 / 571.4 MHz / 556 failing**, with integrity clean. The IR credits structure
+   the review-only output does not contain. Read `post_analyze`, which is what the host
+   and soak now use.
+
+Both profiles are `structure OK` under host `timings validate --require-emit` while
+reporting MISS. That combination — a valid package that does not close — is the
+intended outcome, and it is still a structural estimate, not STA.
+
+## Historical high-frequency targets (2026-09-10 measurements)
+
+These pre-audit findings are retained as history, not current critical-path rankings.
+They were taken on an incomplete input set (see above) and do not establish that a
+particular source module limits the physical processor.
 
 Everything below is `full_core` with `+define+G6LC_FETCH_B` carried and the g1\* recover
 set retired. Read it before quoting any multi-GHz number.

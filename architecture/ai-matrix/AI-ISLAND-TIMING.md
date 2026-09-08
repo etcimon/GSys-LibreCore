@@ -5,8 +5,64 @@ Companion to [`va-turbo.md`](va-turbo.md) (throughput / codec work) and
 [`../../sv-timing/architecture/FREQUENCY-CLOSURE.md`](../../sv-timing/architecture/FREQUENCY-CLOSURE.md)
 (the model, the `-O` surface, and the caveats).
 
-Measurements: `sv-timing` `monorepo-soak --profile full_core`, `+define+G6LC_FETCH_B`
-carried, g1\* recover retired, `--allow-parse-errors` (for `core/alu.sv`, see §5).
+## Superseded: `g6lc_ai_exec` is not the core's worst path
+
+Re-measured with a closed input set (every file parsed, no `--allow-parse-errors`),
+corrected source-origin mapping, no name-based arithmetic discounts, and
+`// synthesis translate_off` regions excluded — 4000 MHz / 20 ps / 10.0 FO4, `-O3`:
+
+| Profile | Worst path | FO4 | Structural max | Closure |
+|---|---|---:|---:|---|
+| `full_core` | **`g6lc_ftq`** (fetch target queue) | 70.0 | ~571.4 MHz | MISS |
+| `full_corev_apu` | **`g6lc_ai_gemm_seq`** | 304.5 | ~131.4 MHz | MISS |
+
+`SyncDpRam` 720.0 FO4 and `g6lc_ai_exec` 545.5 FO4 **do not reproduce**. The first was
+a comment-lowering artifact; the second came from inflated arithmetic costs and an input
+set that omitted much of the design (`full_core` 184 → 233 modules, `full_corev_apu`
+1888 → 4636 paths once the inputs were closed).
+
+The island still holds the APU's worst structural path, but it is `g6lc_ai_gemm_seq`,
+not the core CVXIF execute unit — so the pipelining ask below is aimed at the wrong
+module and its 6-stage figure is not current. Auto-correct moved primary FO4 by **0.0**
+on both profiles across 462 and 308 edits, so no transform here has been shown to buy
+frequency. Re-derive any datapath ask from `sv-timing/architecture/FREQUENCY-CLOSURE.md`
+before acting on §2-§4 below.
+
+**These island paths do appear to be real arithmetic.** A separate correction
+(`delay-v4`) removed a class of false dividers created by parameter arithmetic in
+constant part-select bounds — that deleted the core's 202.0 FO4 `cva6_ptw` path and 10 of
+45 `atomic_over_budget` classifications, but left the island's ranking unchanged:
+`g6lc_ai_gemm_seq` 304.5 / 131.0 and `g6lc_ai_pe_dot` 130.0 FO4 all survived. Real
+multipliers in a dot-product datapath are the expected outcome. That justifies
+*investigating* island arithmetic; it still does not supply a stage count, an area
+figure, or any evidence that the surrounding control, retire and traffic ceilings admit
+one — and it is a structural estimate, not STA.
+
+## Evidence boundary: ir-v1 / delay-v3
+
+The figures and causal claims below are **historical structural diagnostics**, superseded
+by the measurements above. In particular, 545.5 FO4 is not an established physical
+critical path, six idealized partitions are not a proved six-stage implementation, and
+integer-dot cell counts do not measure the area of the floating-point SoC island or of
+`g6lc_ai_exec`.
+
+The audit found preprocessed offsets used against original source bytes, runtime
+arithmetic discounted by identifier names, and ambiguous NBA dependencies treated as
+procedural timing. Those defects affect both costs and proposed edits. Corrected source
+mapping and conservative refusals now precede any attempt to optimize the datapath.
+See `sv-timing/AGENTS-todo.md` and `sv-timing/architecture/DESIGN.md` from the repo root.
+
+Keep core CVXIF (`g6lc_ai_exec`/coprocessor/accumulator) separate from the SoC island
+(GEMM, native-format PE/FP dot, policy/V/A-Turbo, DMA and clustering). Both soak input
+sets must be checked against the actual top, config and feature enablement. A file being
+present does not prove a path is instantiated at the requested issue/core/hart count.
+
+4 GHz remains a 0.250 ns target. No mapped netlist, reviewed PVT/SDC/parasitics, timing
+closure, or emitted-RTL equivalence for the feature-max processor is established here.
+QEMU software/device tests cannot substitute for those gates.
+
+Historical measurements: `sv-timing` `monorepo-soak --profile full_core`,
+`+define+G6LC_FETCH_B` carried, g1\* recover retired, `--allow-parse-errors`.
 
 ---
 

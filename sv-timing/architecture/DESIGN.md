@@ -22,6 +22,23 @@
 
 ---
 
+## Current correctness audit: source origins and validation
+
+Preprocessed token offsets must never index the original file buffer. Expression and
+case text come from the syntax tree's preprocessed text; editable anchors must map back
+through the parser's origin map. A macro expansion or unresolved include origin may be
+analysed, but must not authorize a source rewrite at an assumed user-file offset.
+Regression coverage must compare active conditional branches, expanded RHS expressions,
+and original source anchors, not only successful parsing.
+
+Cleanliness is a ranking preference, not timing evidence. A projected algorithm benefit
+cannot make an unmodified region pass timing, and density cannot waive a register,
+reset, NBA, or data/control alignment dependency. Likewise an emitted-SV reparse is not
+functional equivalence, and inferred multi-cycle classes are not SDC exceptions.
+4 GHz means a 0.250 ns target; only constrained, technology-mapped STA can assess
+physical closure. The cost table and caller-supplied FO4 assumptions remain unchanged
+while these correctness defects are investigated.
+
 ## Overview
 
 Functionally correct SystemVerilog can still be structurally hostile to a high-frequency timing target. Long combinational clouds, expensive operators (multiply, divide, wide priority muxes), and weakly explicit sequencing typically surface only after synthesis and static timing analysis (STA), when restructuring is expensive. This design introduces a **standalone Rust package** under `sv-timing/` that **compiles an explicit list of SystemVerilog sources into a timing-oriented intermediate representation (IR)**: operators, sequential elements, gating conditions, and path endpoints, each tied to precise `file:line:column` origins.

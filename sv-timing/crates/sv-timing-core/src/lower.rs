@@ -1369,7 +1369,7 @@ where
         match node {
             RefNode::BinaryOperator(bin) => {
                 let sym = tree.get_str(&bin.nodes.0).unwrap_or("");
-                let loc = locate_to_source(line_index, path_str, &bin.nodes.0.nodes.0);
+                let loc = locate_to_source(tree, line_index, path_str, &bin.nodes.0.nodes.0);
                 if operator_is_comment_slash(bytes, &loc, sym) {
                     continue;
                 }
@@ -1497,7 +1497,7 @@ where
 
 fn case_expression_text(
     tree: &SyntaxTree,
-    bytes: &[u8],
+    _bytes: &[u8],
     expr: &sv_parser::CaseExpression,
 ) -> Option<String> {
     // Prefer raw source span of the case expression.
@@ -1512,10 +1512,9 @@ fn case_expression_text(
         }
     }
     if let (Some(s), Some(e)) = (start, end) {
-        let s = s as usize;
-        let e = (e as usize).min(bytes.len());
-        if s < e {
-            let t = String::from_utf8_lossy(&bytes[s..e]).trim().to_string();
+        let span = Locate { offset: s as usize, line: 0, len: (e - s) as usize };
+        if let Some(text) = tree.get_str(&span) {
+            let t = text.trim().to_string();
             if !t.is_empty() {
                 return Some(t);
             }
@@ -1586,7 +1585,7 @@ fn case_item_labels(
 
 fn case_item_expression_text(
     tree: &SyntaxTree,
-    bytes: &[u8],
+    _bytes: &[u8],
     cie: &sv_parser::CaseItemExpression,
 ) -> Option<String> {
     let mut start: Option<u32> = None;
@@ -1600,10 +1599,9 @@ fn case_item_expression_text(
         }
     }
     if let (Some(s), Some(e)) = (start, end) {
-        let s = s as usize;
-        let e = (e as usize).min(bytes.len());
-        if s < e {
-            let t = String::from_utf8_lossy(&bytes[s..e]).trim().to_string();
+        let span = Locate { offset: s as usize, line: 0, len: (e - s) as usize };
+        if let Some(text) = tree.get_str(&span) {
+            let t = text.trim().to_string();
             if !t.is_empty() {
                 return Some(t);
             }
@@ -1672,7 +1670,7 @@ fn assign_lhs_rhs<'a, T>(
 where
     T: IntoIterator<Item = RefNode<'a>> + Copy,
 {
-    let loc = first_locate_loc(tree, line_index, path_str, root);
+    let mut loc = first_locate_loc(tree, line_index, path_str, root);
     let mut start: Option<u32> = None;
     let mut end: Option<u32> = None;
     for node in root {
@@ -1684,14 +1682,15 @@ where
         }
     }
     let (lhs, rhs) = if let (Some(s), Some(e)) = (start, end) {
-        let s = s as usize;
-        let e = (e as usize).min(bytes.len());
-        if s < e {
-            let text = String::from_utf8_lossy(&bytes[s..e]);
-            split_assign_text(&text)
-        } else {
-            (None, None)
+        let span = Locate { offset: s as usize, line: 0, len: (e - s) as usize };
+        let text = tree.get_str(&span)?;
+        let source_start = loc.byte_start as usize;
+        if loc.origin == OriginKind::UserFile
+            && bytes.get(source_start..source_start + text.len()) != Some(text.as_bytes())
+        {
+            loc.origin = OriginKind::ExpandedMacro;
         }
+        split_assign_text(text)
     } else {
         (None, None)
     };
@@ -1793,7 +1792,7 @@ fn classify_binary(sym: &str) -> OperatorClass {
 }
 
 fn first_locate_loc<'a, T>(
-    _tree: &'a SyntaxTree,
+    tree: &'a SyntaxTree,
     line_index: &LineIndex,
     path_str: &str,
     root: T,
@@ -1803,7 +1802,7 @@ where
 {
     for node in root {
         if let RefNode::Locate(loc) = node {
-            return locate_to_source(line_index, path_str, loc);
+            return locate_to_source(tree, line_index, path_str, loc);
         }
     }
     SourceLoc {
@@ -1818,11 +1817,15 @@ where
     }
 }
 
-fn locate_to_source(line_index: &LineIndex, path_str: &str, loc: &Locate) -> SourceLoc {
+fn locate_to_source(tree: &SyntaxTree, line_index: &LineIndex, path_str: &str, loc: &Locate) -> SourceLoc {
     // Prefer origin map from preprocessor when available (via line_index path).
-    let start = loc.offset as u32;
-    let end = (loc.offset + loc.len) as u32;
-    let mut s = line_index.span(start, end, OriginKind::UserFile);
+    let (start, origin) = match tree.get_origin(loc) {
+        Some((path, offset)) if path == &line_index.path => (offset as u32, OriginKind::UserFile),
+        Some(_) => (loc.offset as u32, OriginKind::IncludeExpanded),
+        None => (loc.offset as u32, OriginKind::ExpandedMacro),
+    };
+    let end = start.saturating_add(loc.len as u32);
+    let mut s = line_index.span(start, end, origin);
     // Keep display path consistent with file path string.
     s.file = path_str.to_string();
     // sv-parser Locate.line is 1-based in preprocessed text; prefer line_index when possible.
@@ -1854,6 +1857,47 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures")
             .join(name)
+    }
+
+    fn analyze_inline_source(text: &str) -> AnalyzeOutput {
+        let path = PathBuf::from("origin_test.sv");
+        let defines: sv_parser::Defines = Default::default();
+        let (tree, _) = sv_parser::parse_sv_str(
+            text, &path, &defines, &[] as &[PathBuf], false, false,
+        ).expect("parse inline source");
+        let file = ParsedFile {
+            path: path.clone(),
+            bytes: text.as_bytes().to_vec(),
+            line_index: LineIndex::from_bytes(path, text.as_bytes()),
+            tree,
+        };
+        lower_unit(&ParsedUnit { files: vec![file], skipped: vec![] }, &LowerOptions::default())
+            .expect("lower inline source")
+    }
+
+    #[test]
+    fn preprocessing_preserves_assignment_text_and_original_anchor() {
+        let text = "`ifdef OMITTED\n////////////////////////////\nwire unused;\n`endif\nmodule origin_test(input logic [31:0] a, b, output logic [31:0] y);\nassign y = a / b;\nendmodule\n";
+        let out = analyze_inline_source(text);
+        let module = out.design.modules.values().find(|m| m.name == "origin_test").unwrap();
+        let node = module.nodes.values().find(|n| n.lhs.as_deref() == Some("y"))
+            .expect("assignment must survive preprocessing");
+        assert_eq!(node.rhs.as_deref(), Some("a / b"));
+        assert_eq!(node.op_class, Some(OperatorClass::DivRem));
+        assert_eq!(node.loc.start_line, 6);
+        assert!(text[node.loc.byte_start as usize..].starts_with('y'));
+    }
+
+    #[test]
+    fn macro_expansion_supplies_rhs_without_claiming_editable_origin() {
+        let text = "`define OP a * b\nmodule origin_test(input logic [31:0] a, b, output logic [31:0] y);\nassign y = `OP;\nendmodule\n";
+        let out = analyze_inline_source(text);
+        let module = out.design.modules.values().find(|m| m.name == "origin_test").unwrap();
+        let node = module.nodes.values().find(|n| n.lhs.as_deref() == Some("y"))
+            .expect("macro assignment");
+        assert_eq!(node.rhs.as_deref(), Some("a * b"));
+        assert_eq!(node.op_class, Some(OperatorClass::Mul));
+        assert_ne!(node.loc.origin, OriginKind::UserFile);
     }
 
     #[test]

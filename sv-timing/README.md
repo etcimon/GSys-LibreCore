@@ -10,6 +10,20 @@ path/cost reports → optional auto-correct. Structural FO4 estimates only — *
 | [`architecture/DESIGN.md`](architecture/DESIGN.md) | Full architecture |
 | [`AGENTS-toolchain.md`](AGENTS-toolchain.md) | Contained rustup/cargo + venv |
 
+## Correctness and production use
+
+Current `ir-v1` / `delay-v2` evidence separates source recovery, structural measurement,
+projected algorithm feasibility, emitted-SV validity and technology-mapped STA. A clean
+parse or a high cleanliness score is not a timing/equivalence proof. Emitted packages
+with incomplete re-analysis fail validation rather than inheriting the IR's closure.
+See [`architecture/DESIGN.md`](architecture/DESIGN.md) and the current audit in
+[`AGENTS-todo.md`](AGENTS-todo.md).
+
+The host flag is `build-platform timings ... --from-timing <package>` (singular).
+OpenSTA report parsing is checked against reference output; real setup/hold closure
+still needs Liberty, reviewed clock/I/O constraints and a mapped netlist. QEMU can check
+software/device contracts, not the corrected SV or a 4 GHz clock.
+
 ## Quick start (Python-first)
 
 Host needs **Python 3.9+** and **git**. Rust is installed **into `.tools/`** automatically.

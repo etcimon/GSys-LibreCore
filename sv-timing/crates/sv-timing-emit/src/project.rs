@@ -123,13 +123,17 @@ pub fn edits_for_source(trace: &EditTrace, source_path: &Path) -> EditTrace {
         .unwrap_or_default();
     let mut out = EditTrace::new();
     for r in &trace.records {
+        if r.origin.origin != sv_timing_core::OriginKind::UserFile {
+            continue;
+        }
         let of = normalize_path_key(Path::new(&r.origin.file));
         let origin_base = Path::new(&r.origin.file)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         // Exact basename only (copro_alu.sv ≠ alu.sv).
-        let base_match = !src_base.is_empty() && origin_base == src_base;
+        let base_match = !src_base.is_empty() && origin_base == src_base
+            && (of == origin_base || src_norm == src_base);
         // Full path: equality or path-suffix of the *full* normalized key
         // (e.g. `core/alu.sv` matches `/repo/core/alu.sv`), not bare basename.
         let full_match = !of.is_empty()
@@ -618,6 +622,16 @@ mod tests {
         );
         let copro = edits_for_source(&tr, Path::new("/mnt/e/cva6/core/cvxif_example/copro_alu.sv"));
         assert_eq!(copro.records.len(), 1);
+
+        let mut uncertain = tr.clone();
+        for origin in [OriginKind::ExpandedMacro, OriginKind::IncludeExpanded, OriginKind::Unknown] {
+            uncertain.records[0].origin.origin = origin;
+            assert!(edits_for_source(&uncertain, Path::new("leaf.sv")).records.is_empty());
+        }
+        let mut sibling = tr.clone();
+        sibling.records[0].origin.file = "/proj/first/leaf.sv".into();
+        assert!(edits_for_source(&sibling, Path::new("/proj/second/leaf.sv")).records.is_empty());
+        assert_eq!(edits_for_source(&sibling, Path::new("/proj/first/leaf.sv")).records.len(), 1);
     }
 
     #[test]

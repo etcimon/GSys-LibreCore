@@ -3,7 +3,22 @@
 Authoritative design for this package lives here (not under the monorepo `architecture/` tree,
 except as a pointer).
 
-## Current state (2026-08-03)
+## Current correctness boundary (ir-v1 / delay-v2)
+
+The table below is historical implementation progress, not production closure evidence.
+The current audit fixes preprocessed/original source-coordinate confusion, name-based
+arithmetic discounts, incomplete cleanliness candidate coverage, ambiguous sequential
+scratch certification, and host fallback to IR closure. See
+[`DESIGN.md`](DESIGN.md) (current correctness audit) and
+[`../AGENTS-todo.md`](../AGENTS-todo.md) for fresh verification results.
+
+`always_ff` metadata is not enough to infer blocking/NBA semantics. Parallel scheduling
+remains conservative when that distinction is unavailable. OpenSTA reference reports
+are parser tests; actual STA additionally needs an executable, mapped netlist, selected
+Liberty/PVT, reviewed SDC and parasitics. A 4 GHz target means 0.250 ns, not an inferred
+processor capability.
+
+## Historical state (2026-08-03)
 
 | Area | State |
 |------|--------|
@@ -38,6 +53,7 @@ Live checklist: [`../AGENTS-todo.md`](../AGENTS-todo.md). Soak playbook + number
 | [`MONOREPO-SOAK.md`](MONOREPO-SOAK.md) | Opt-in real-`core/` FO4 soak; package-first fix cycle; validated soak table |
 | [`FO4-ALGORITHM-UPGRADES.md`](FO4-ALGORITHM-UPGRADES.md) | Research map + **validated** BalanceMux / path_class / emit stack |
 | [`RELOCATION-ANALYSIS.md`](RELOCATION-ANALYSIS.md) | Relocation plan: patterns → T0–T3 options → JSON cards |
+| [`PASS-STRATEGY.md`](PASS-STRATEGY.md) | **Measured** pattern signatures (P1–P9) → pre-pass planner → ordered S0–S5 schedule; artifact-vs-real triage and fixpoint/admission policy |
 | [`../AGENTS.md`](../AGENTS.md) | Agent entry + playbook |
 | [`../AGENTS-auto-correct.md`](../AGENTS-auto-correct.md) | Auto-correct agent rules |
 | [`../AGENTS-js.md`](../AGENTS-js.md) | TypeScript package agent rules |

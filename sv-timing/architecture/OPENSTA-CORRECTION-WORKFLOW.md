@@ -23,10 +23,15 @@ B         = period_ns * 1000 / fo4_ps * (1 - margin)
 ready_cycle k = k-th posedge/negedge of clock_name after reset
 ```
 
-Independent NBA (no write→read edge) share cycle 1 of **that** clock. Forward
-deps serialize onto later edges of the same clock. `ClockDomain.sequential`
-stays true even if the clock net is unresolved, so the board is never demoted
-to combinational.
+For `q <= d; r <= q;`, both RHS expressions sample pre-edge state; `r` does not
+consume the newly scheduled write to `q`. A blocking temporary (`t = d + a;
+q <= t;`) has different semantics. The current IR does not retain that assignment-kind
+distinction. Dependency-bearing sequential boards therefore keep their costs and clock
+metadata but set `procedural_ok=false`; no scratch-derived timing reduction, JIT fallback
+or staged factorization annotation is authorized. Independent NBA RHS cones remain
+parallel. `ceil(M/B)` is a proposed partition count, **not** the implemented number of
+clock edges or permission to insert latency. `ClockDomain.sequential` stays true even
+if the clock net is unresolved.
 
 Fill (`fill_design_parallel_timing`) walks **IR regions first** and stores the
 full `ParallelScratch` on `ModuleParallelTiming.regions[id]` (ops **and**
@@ -86,10 +91,14 @@ Liberty is host-supplied (`CVA6_LIBERTY` / PD drop) — never committed.
      read_verilog <netlist>
      link_design <top>
      create_clock -name clk_i -period <period_ns> [get_ports clk_i]
-     report_timing -from clk_i -to <q>
-   Compare STA slack qualitatively to FO4 ready_cycle (same order, not
-   the same number). Refine path_class / ConeLane / scratch if STA
-   shows a different critical NBA than the board.
+     check_setup -verbose
+     report_checks -path_delay min_max -format full_clock_expanded
+   Map launch/capture pins and clock domains from the elaborated netlist; a clock
+   name alone is not a data startpoint. Review I/O delays, uncertainty, generated
+   clocks, reset recovery/removal and justified exceptions before interpreting slack.
+   Compare constrained paths, not procedural statement order, with the structural
+   estimates. Neither FO4 partition counts nor module-name heuristics authorize
+   `set_multicycle_path`. Functional equivalence is a separate check.
 
 5. Do **not** retune fo4-v1.toml from a synthetic/fixture STA report.
    Real-liberty residuals may inform a later cost-model PR only.

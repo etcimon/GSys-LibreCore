@@ -7,6 +7,16 @@
 +incdir+${CVA6_REPO_DIR}/corev_apu/ai_island/include
 +incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include/
 +incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/include/
+# Header supply for the uncore. Absent, these files do not parse at all and were
+# silently dropped from the soak: apb/* needs apb/typedef.svh + apb/assign.svh
+# (apb_cdc, apb_demux, apb_err_slv, apb_regs, reg_uart_wrap), the reg interface
+# needs register_interface/typedef.svh + assign.svh (gpio*, reg_mux,
+# axi_lite_to_reg, rv_plic, riscv_peripherals, ariane_peripherals_xilinx), and
+# ariane_xilinx needs iti_types.svh. These are include paths only — no RTL and
+# no define changes.
++incdir+${CVA6_REPO_DIR}/corev_apu/fpga/src/apb/include
++incdir+${CVA6_REPO_DIR}/corev_apu/register_interface/include
++incdir+${CVA6_REPO_DIR}/corev_apu/instr_tracing/ITI/include
 ${CVA6_REPO_DIR}/core/include/config_pkg.sv
 ${CVA6_REPO_DIR}/core/include/riscv_pkg.sv
 ${CVA6_REPO_DIR}/core/include/ariane_pkg.sv

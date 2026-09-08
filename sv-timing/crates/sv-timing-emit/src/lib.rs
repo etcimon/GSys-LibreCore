@@ -274,6 +274,52 @@ pub fn apply_edits_to_source_dense(
     out
 }
 
+fn masked_syntax(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut masked = bytes.to_vec();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        if bytes[i..].starts_with(b"//") {
+            while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+        } else if bytes[i..].starts_with(b"/*") {
+            i += 2;
+            while i < bytes.len() && !bytes[i..].starts_with(b"*/") { i += 1; }
+            i = (i + 2).min(bytes.len());
+        } else if bytes[i] == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+        } else if bytes[i] == b'\\' {
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() { i += 1; }
+        } else {
+            i += 1;
+            continue;
+        }
+        for ch in &mut masked[start..i] {
+            if *ch != b'\n' && *ch != b'\r' { *ch = b' '; }
+        }
+    }
+    String::from_utf8(masked).expect("mask preserves source UTF-8")
+}
+
+fn keyword_positions<'a>(text: &'a str, key: &'a str) -> impl Iterator<Item = usize> + 'a {
+    text.match_indices(key).filter_map(move |(i, _)| {
+        let ident = |b: &u8| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$');
+        let before = i.checked_sub(1).and_then(|j| text.as_bytes().get(j));
+        let after = text.as_bytes().get(i + key.len());
+        (!before.is_some_and(ident) && !after.is_some_and(ident)).then_some(i)
+    })
+}
+
 /// Insert `block` before the first procedural/continuous process in the module body.
 ///
 /// Used so BalanceMux intermediate wires are declared before origin RHS rewrites
@@ -283,20 +329,18 @@ fn inject_before_first_process(source: &str, block: &str) -> String {
         return source.to_string();
     }
     // Prefer first always_* / assign after module header.
-    let lower = source.to_ascii_lowercase();
+    let lower = masked_syntax(source);
     let mut best: Option<usize> = None;
     for key in [
         "always_comb",
         "always_ff",
         "always_latch",
-        "always @",
-        "always@",
-        "  assign ",
-        "\nassign ",
+        "always",
+        "assign",
     ] {
-        if let Some(i) = lower.find(key) {
+        if let Some(i) = keyword_positions(&lower, key).next() {
             // Only consider hits after "module "
-            if let Some(mod_i) = lower.find("module ") {
+            if let Some(mod_i) = keyword_positions(&lower, "module").next() {
                 if i > mod_i {
                     best = Some(best.map_or(i, |b| b.min(i)));
                 }
@@ -324,7 +368,8 @@ fn inject_before_endmodule(source: &str, block: &str) -> String {
     if block.trim().is_empty() {
         return source.to_string();
     }
-    if let Some(idx) = source.rfind("endmodule") {
+    let masked = masked_syntax(source);
+    if let Some(idx) = keyword_positions(&masked, "endmodule").last() {
         let mut out = String::with_capacity(source.len() + block.len() + 8);
         out.push_str(&source[..idx]);
         if !out.ends_with('\n') {
@@ -677,6 +722,31 @@ mod tests {
     use sv_timing_core::loc::{OriginKind, SourceLoc};
     use sv_timing_transform::{EditKind, EditRecord, EditTrace};
     // EditKind/EditRecord already imported via super for apply_edits test
+
+    #[test]
+    fn injection_preserves_commented_and_quoted_process_keywords() {
+        for decoy in [
+            "//always_ff @(posedge clk) begin\n//end\n",
+            "/* always_comb begin\nendmodule\nend */\n",
+            "localparam string TEXT = \"always_ff endmodule\";\n",
+            "logic always_ff_shadow;\n",
+            "wire \\always_comb ;\n",
+        ] {
+            let src = format!("module inject_test(input logic a, output logic y);\n{decoy}always_comb y = a;\nendmodule\n");
+            let block = "wire injected_wire;\n";
+            let emitted = inject_before_first_process(&src, block);
+            assert!(emitted.contains(decoy), "decoy corrupted: {emitted}");
+            assert!(emitted.contains("wire injected_wire;\nalways_comb"), "wrong insertion: {emitted}");
+            assert_eq!(emitted.replacen(block, "", 1), src);
+        }
+    }
+
+    #[test]
+    fn late_injection_ignores_trailing_comment_endmodule() {
+        let src = "module inject_test;\nendmodule\n// endmodule\n";
+        let emitted = inject_before_endmodule(src, "wire injected_wire;\n");
+        assert!(emitted.contains("wire injected_wire;\nendmodule\n// endmodule"));
+    }
 
     #[test]
     fn noop_passthrough_reparse() {

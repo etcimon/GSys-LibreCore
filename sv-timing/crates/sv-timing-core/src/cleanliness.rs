@@ -299,6 +299,8 @@ struct ModuleProfile {
     closes_now: bool,
     n_primary: u32,
     n_failing: u32,
+    n_failing_datapath: u32,
+    n_failing_multicycle: u32,
 }
 
 fn profile_of(design: &TimingDesign, module: &TimingModule) -> ModuleProfile {
@@ -318,6 +320,8 @@ fn profile_of(design: &TimingDesign, module: &TimingModule) -> ModuleProfile {
     let mut has_pipelined = false;
     let mut n_primary = 0u32;
     let mut n_failing = 0u32;
+    let mut n_failing_datapath = 0u32;
+    let mut n_failing_multicycle = 0u32;
     for p in design.paths.iter().filter(|p| p.module == module.id) {
         let lane = cone_lane(design, p);
         match lane {
@@ -346,11 +350,17 @@ fn profile_of(design: &TimingDesign, module: &TimingModule) -> ModuleProfile {
             // Still on the single-cycle books until an mc_tag set is chosen.
             n_primary += 1;
             n_failing += 1;
+            n_failing_multicycle += 1;
             continue;
         }
         n_primary += 1;
         if p.slack_fo4 < 0.0 {
             n_failing += 1;
+            match lane {
+                ConeLane::CombDatapath => n_failing_datapath += 1,
+                ConeLane::PipelinedUnit => n_failing_multicycle += 1,
+                _ => {}
+            }
         }
     }
     ModuleProfile {
@@ -364,6 +374,8 @@ fn profile_of(design: &TimingDesign, module: &TimingModule) -> ModuleProfile {
         closes_now: n_failing == 0,
         n_primary,
         n_failing,
+        n_failing_datapath,
+        n_failing_multicycle,
     }
 }
 
@@ -391,18 +403,14 @@ fn timing_pass(spec: &AlgoSetSpec, p: &ModuleProfile) -> bool {
         return true;
     }
     // Remaining failures: a set passes only if it has a closer for them.
-    if p.has_datapath && (spec.jit_reg || spec.multi_cut) {
+    if p.n_failing_datapath == p.n_failing && (spec.jit_reg || spec.multi_cut) {
         return true;
     }
-    if (p.has_atomic_iter || p.has_pipelined) && spec.mc_tag && !p.has_datapath && !p.has_exclusive
-    {
-        return true;
-    }
-    if (p.has_atomic_iter || p.has_pipelined) && spec.mc_tag && p.n_failing > 0 {
+    if spec.mc_tag {
         // MC tag removes atomic/iterative from the primary objective; if the
         // only failures were those lanes, treat as pass. Mixed datapath still
         // needs JIT — handled above.
-        if !p.has_datapath {
+        if p.n_failing_multicycle == p.n_failing {
             return true;
         }
     }
@@ -685,6 +693,172 @@ mod tests {
             loc_span: loc(),
             multi_cycle: false,
         }
+    }
+
+    fn design_with_paths(paths: &[(PathClassKind, f64, bool)]) -> TimingDesign {
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        assert_eq!(design.target.budget_fo4, 10.0);
+        let mut module = empty_module("mixed_lanes", BTreeMap::new());
+        for (id, &(class, fo4, multi_cycle)) in paths.iter().enumerate() {
+            let id = id as u32;
+            module
+                .nodes
+                .insert(id, node(id, &format!("out_{id}"), "a + b", fo4));
+            module.regions.insert(id, comb_region(id, vec![id]));
+            let mut p = path(id, id, fo4, design.target.budget_fo4, class, multi_cycle);
+            p.nodes = vec![id];
+            design.paths.push(p);
+        }
+        design.modules.insert(0, module);
+        design
+    }
+
+    #[test]
+    fn jit_does_not_cover_failing_exclusive_or_next_state_paths() {
+        for class in [
+            PathClassKind::ExclusiveCaseMux,
+            PathClassKind::ExclusiveIfChain,
+            PathClassKind::IndependentLhsBundle,
+            PathClassKind::DenseControlCone,
+        ] {
+            for datapath_fo4 in [1.0, 40.0] {
+                let design = design_with_paths(&[
+                    (PathClassKind::Plain, datapath_fo4, false),
+                    (class, 20.0, false),
+                ]);
+                let sol = explore_module(
+                    &design,
+                    design.modules.get(&0).unwrap(),
+                    CleanlinessWeights::default(),
+                );
+                for id in [AlgoSetId::JitDatapath, AlgoSetId::AggressivePipeline] {
+                    let candidate = sol.candidates.iter().find(|c| c.id == id).unwrap();
+                    assert!(candidate.applicable);
+                    assert!(
+                        !candidate.timing_pass,
+                        "{id:?} cannot cover {class:?}: {}",
+                        candidate.note
+                    );
+                }
+                assert!(!sol.timing_now);
+                assert!(!sol.timing_pass, "{}", sol.rationale);
+                assert!(!sol.feasible);
+            }
+        }
+    }
+
+    #[test]
+    fn jit_does_not_cover_failing_atomic_path() {
+        let design = design_with_paths(&[
+            (PathClassKind::Plain, 40.0, false),
+            (PathClassKind::AtomicOverBudget, 56.0, false),
+        ]);
+        let sol = explore_module(
+            &design,
+            design.modules.get(&0).unwrap(),
+            CleanlinessWeights::default(),
+        );
+        assert!(!sol.timing_now);
+        assert!(!sol.feasible, "{}", sol.rationale);
+        assert!(sol.candidates.iter().all(|c| !c.timing_pass));
+    }
+
+    #[test]
+    fn multicycle_does_not_cover_failing_exclusive_or_next_state_paths() {
+        for class in [
+            PathClassKind::ExclusiveCaseMux,
+            PathClassKind::ExclusiveIfChain,
+            PathClassKind::IndependentLhsBundle,
+            PathClassKind::DenseControlCone,
+        ] {
+            for tagged in [false, true] {
+                let design = design_with_paths(&[
+                    (PathClassKind::AtomicOverBudget, 56.0, tagged),
+                    (class, 20.0, false),
+                ]);
+                let sol = explore_module(
+                    &design,
+                    design.modules.get(&0).unwrap(),
+                    CleanlinessWeights::default(),
+                );
+                let mc = sol
+                    .candidates
+                    .iter()
+                    .find(|c| c.id == AlgoSetId::MulticycleHonest)
+                    .unwrap();
+                assert!(mc.applicable);
+                assert!(!mc.timing_pass, "MC cannot cover {class:?}: {}", mc.note);
+                assert!(!sol.timing_now);
+                assert!(!sol.timing_pass, "{}", sol.rationale);
+                assert!(!sol.feasible);
+            }
+        }
+    }
+
+    #[test]
+    fn multicycle_covers_atomic_with_only_passing_companion_paths() {
+        let design = design_with_paths(&[
+            (PathClassKind::AtomicOverBudget, 56.0, false),
+            (PathClassKind::Plain, 1.0, false),
+            (PathClassKind::ExclusiveCaseMux, 10.0, false),
+        ]);
+        let sol = explore_module(
+            &design,
+            design.modules.get(&0).unwrap(),
+            CleanlinessWeights::default(),
+        );
+        assert!(!sol.timing_now);
+        assert_eq!(sol.chosen, AlgoSetId::MulticycleHonest, "{}", sol.rationale);
+        assert!(sol.timing_pass && sol.feasible);
+        for candidate in &sol.candidates {
+            assert_eq!(
+                candidate.timing_pass,
+                candidate.id == AlgoSetId::MulticycleHonest,
+                "{}",
+                candidate.note
+            );
+        }
+    }
+
+    #[test]
+    fn jit_covers_datapath_with_only_passing_or_tagged_companion_paths() {
+        let design = design_with_paths(&[
+            (PathClassKind::Plain, 40.0, false),
+            (PathClassKind::ExclusiveCaseMux, 10.0, false),
+            (PathClassKind::AtomicOverBudget, 56.0, true),
+            (PathClassKind::MultiCycleTagged, 120.0, false),
+        ]);
+        let sol = explore_module(
+            &design,
+            design.modules.get(&0).unwrap(),
+            CleanlinessWeights::default(),
+        );
+        assert!(!sol.timing_now);
+        assert_eq!(sol.chosen, AlgoSetId::JitDatapath, "{}", sol.rationale);
+        assert!(sol.timing_pass && sol.feasible);
+        assert!(sol.allows_opportunity(OpportunityKind::InsertReg));
+    }
+
+    #[test]
+    fn density_weights_cannot_make_uncovered_failures_feasible() {
+        let design = design_with_paths(&[
+            (PathClassKind::Plain, 40.0, false),
+            (PathClassKind::ExclusiveCaseMux, 20.0, false),
+        ]);
+        let sol = explore_module(
+            &design,
+            design.modules.get(&0).unwrap(),
+            CleanlinessWeights {
+                always_ff: 1000.0,
+                always_comb: 1000.0,
+                aggressiveness: 0.0,
+                timing_fail: 0.0,
+            },
+        );
+        assert!(!sol.timing_now);
+        assert!(!sol.timing_pass, "{}", sol.rationale);
+        assert!(!sol.feasible);
+        assert!(sol.candidates.iter().all(|c| !c.timing_pass));
     }
 
     #[test]

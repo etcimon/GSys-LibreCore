@@ -201,22 +201,28 @@ section "High-frequency targets", AI island in
 1. **`--fo4-ps` is a process input, not a knob.** The 4000 MHz budget is 10.0 FO4 at 20 ps,
    16.7 at 12 ps, 33.3 at 6 ps -- so a target can be made to "close" by choosing the node.
    Quote `fo4_ps` with every frequency claim. The host target of record is 1.25 GHz / 12 nm.
-2. **Do not reach for `-O3`.** Against `-O2` at the same point it produced 163 more edits
-   (928 -> 1091) and an **identical** emitted result. The limiting cones are
-   `AtomicOverBudget` and no cut strategy reaches inside an indivisible operator, so more
-   passes / wider worklist / multi-cut cannot help them.
-3. **The actionable output is the T3 stage count.** `t3_arch_multicycle_mul` reports
-   `ceil(atomic_cost / budget)` internal stages and scales with the target (a 56 FO4
-   multiply: 2 stages at 1250 MHz/20 ps, **6** at 4000 MHz/20 ps). Treat it as the
-   microarchitectural ask, not a dead end.
-4. **Never quote `post_closure` alone.** `primary_fo4` excludes `atomic_over_budget` and
-   multi-cycle, so the IR can report `closes=true` for a design that does not close --
-   measured: APU IR `closes=true 4000.0` vs emitted **350.9 MHz**. Read `post_analyze_sv`,
-   which re-analyses the *emitted* RTL, beside it.
-5. **Known lowering bug:** comment slashes are lowered as `DivRem` nodes, so a path whose
-   `primary_loc` is a comment line is invalid. It currently owns the core's worst path
-   (`SyncDpRam` 720 FO4 on a row of slashes; 3 of 24 atomic paths, 5.3% of total FO4).
-   Frequency frontiers taken before that fix will move.
+2. **Tune only verified transformations.** More passes are useful only when fresh emitted
+   re-analysis and functional checks show a benefit. The earlier -O2/-O3 plateau is
+   historical, not proof of an immutable physical limit. Do not award cost reductions
+   for annotations, an algorithm's name, or a proposed register stage.
+3. **T3 stage counts are estimates, not implementations.** `ceil(atomic_cost / budget)`
+   assumes an ideally partitionable operator. Six estimated stages for a 56 FO4 multiply
+   at a 10 FO4 budget do not prove six feasible stages or whole-island closure. Surrounding
+   logic, control/valid alignment, reset, setup/hold and routing still require validation.
+4. **Separate IR, emitted SV, and STA.** The host reads `post_analyze.frequency_closure`
+   for emitted packages. Missing/partial/unverified results are INCONCLUSIVE, never an
+   optimistic fallback to `post_closure`. Both structural summaries still exclude
+   inferred multi-cycle paths; neither creates legal SDC exceptions or proves sign-off.
+5. **Validate source origins before correcting.** `Locate.offset` addresses preprocessed
+   text, not original file bytes. Read expressions from the CST and map anchors through
+   `get_origin`; macro/include/unknown anchors cannot authorize source edits. A reported
+   comment-line location may be a mapping error, not proof that the actual operator is
+   absent. `ir-v1` / `delay-v2` invalidate prior cached measurement semantics.
+6. **Cleanliness cannot waive failures.** Density and aggressiveness weights rank
+   candidates only after every failing path is covered. Candidate feasibility is still
+   projected, not emitted closure. Ambiguous sequential write/read dependencies are
+   unverified until blocking versus NBA assignment kinds are retained in IR; they must
+   not yield scratch-based deflation, fallback cuts, or staged factorization claims.
 
 
 ---

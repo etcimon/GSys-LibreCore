@@ -21,6 +21,30 @@ Never the reverse: STA does not drive the package CLI in v1.
 
 ---
 
+## Current executable evidence checks
+
+- An emitted package is measured using `correct.json.post_analyze`, not the proposed
+  `post_closure`. `post_analyze_valid=false`, absent/empty reports, skipped files and
+  failed integrity produce INCONCLUSIVE. `timings validate --from-timing <pkg>
+  --require-emit` rejects those cases. A measured structural MISS can still be a valid
+  diagnostic package; it is not production timing closure.
+- `correct --emit` now fails when the full emitted project cannot be validated, including
+  partial re-analysis permitted for diagnostic inspection by `--allow-parse-errors`.
+  A soak stamp reflects correction failure as well as analysis failure.
+- OpenSTA emits numeric-first lines such as `2.89 slack (MET)`; the host accepts those
+  and the legacy synthetic form. It requires complete startpoint/endpoint/slack records.
+- S2 uses a fresh report identity per invocation. A nonzero exit, Tcl error, missing,
+  empty, stale or truncated report is a failed stage. Failure is not rescued by a
+  synthetic fixture. Missing tools remain SKIP, distinct from PASS and from closure.
+- A parseable `slack (VIOLATED)` report proves execution, not timing success. S0 seed
+  generation alone is never evidence that OpenSTA ran.
+
+The reference tree `specs/OpenSTA` is external reference material, not linked into the
+Rust crates or copied into first-party algorithms. Its report golden exercises the host
+parser; it does not calibrate FO4 costs. Clock/load/transition/uncertainty constraints,
+Liberty/PVT, mapped cells and parasitics remain prerequisites for technology-specific
+setup/hold results.
+
 ## 2. When to stop trusting FO4 and open STA
 
 Use **sv-timing** when:

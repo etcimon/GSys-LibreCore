@@ -174,6 +174,130 @@ pub fn parse_paths(paths: &[PathBuf], opts: &ParseOptions) -> CoreResult<ParsedU
     Ok(unit)
 }
 
+/// Vendor keywords that introduce a synthesis-pragma comment.
+const PRAGMA_VENDORS: [&str; 6] = [
+    "synthesis",
+    "synopsys",
+    "pragma",
+    "cadence",
+    "xilinx",
+    "altera",
+];
+
+/// `translate_off` / `translate_on` directive carried by one comment, if any.
+fn pragma_directive(comment_body: &str) -> Option<bool> {
+    let mut words = comment_body.split_whitespace();
+    let vendor = words.next()?.to_ascii_lowercase();
+    if !PRAGMA_VENDORS.contains(&vendor.as_str()) {
+        return None;
+    }
+    match words.next()?.to_ascii_lowercase().as_str() {
+        "translate_off" => Some(true),
+        "translate_on" => Some(false),
+        _ => None,
+    }
+}
+
+/// Blank out `translate_off` regions, preserving byte offsets and line breaks.
+///
+/// Synthesis and Verilator honour these comment pragmas, so the enclosed text is **not**
+/// in the implemented hardware. Two consequences, both wrong to ignore in a timing tool:
+/// its cones must not be measured, and its constructs need not satisfy the synthesizable
+/// grammar. CVA6's `common/local/util/sram.sv` is the live example — bare named `begin`
+/// blocks at generate scope, illegal outside a procedural context, which aborted the file.
+///
+/// Replacement is space-for-byte (newlines kept) so every downstream offset, `LineIndex`
+/// line/column and `get_origin` anchor keeps pointing at the original source position.
+/// An unterminated region masks to end-of-file, matching synthesis behaviour.
+pub fn mask_translate_off(text: &str) -> (String, usize) {
+    let bytes = text.as_bytes();
+    let mut masked = bytes.to_vec();
+    let mut regions = 0usize;
+    let mut region_start: Option<usize> = None;
+    let mut i = 0usize;
+    // Comment/string aware: a pragma is only a pragma inside a real comment, and
+    // `"...//..."` or `"/*"` inside a string literal must not open one.
+    while i < bytes.len() {
+        if bytes[i..].starts_with(b"//") {
+            let start = i;
+            let mut end = i + 2;
+            while end < bytes.len() && bytes[end] != b'\n' {
+                end += 1;
+            }
+            let body = String::from_utf8_lossy(&bytes[start + 2..end]).into_owned();
+            i = end;
+            match (pragma_directive(&body), region_start) {
+                (Some(true), None) => region_start = Some(start),
+                (Some(false), Some(from)) => {
+                    for ch in &mut masked[from..end] {
+                        if *ch != b'\n' && *ch != b'\r' {
+                            *ch = b' ';
+                        }
+                    }
+                    regions += 1;
+                    region_start = None;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if bytes[i..].starts_with(b"/*") {
+            let start = i;
+            let mut end = i + 2;
+            while end < bytes.len() && !bytes[end..].starts_with(b"*/") {
+                end += 1;
+            }
+            let body_end = end.min(bytes.len());
+            end = (end + 2).min(bytes.len());
+            let body = String::from_utf8_lossy(&bytes[start + 2..body_end]).into_owned();
+            i = end;
+            match (pragma_directive(&body), region_start) {
+                (Some(true), None) => region_start = Some(start),
+                (Some(false), Some(from)) => {
+                    for ch in &mut masked[from..end] {
+                        if *ch != b'\n' && *ch != b'\r' {
+                            *ch = b' ';
+                        }
+                    }
+                    regions += 1;
+                    region_start = None;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        // Skip string literals only outside a masked region; inside one the bytes are
+        // going away anyway and an unterminated quote must not swallow `translate_on`.
+        if bytes[i] == b'"' && region_start.is_none() {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                } else if bytes[i] == b'"' || bytes[i] == b'\n' {
+                    i += 1;
+                    break;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    if let Some(from) = region_start {
+        for ch in &mut masked[from..] {
+            if *ch != b'\n' && *ch != b'\r' {
+                *ch = b' ';
+            }
+        }
+        regions += 1;
+    }
+    (
+        String::from_utf8(masked).expect("space masking preserves UTF-8 boundaries"),
+        regions,
+    )
+}
+
 /// Read + parse a single file (the unit of work shared by the serial and parallel paths).
 fn parse_one_file(
     path: &PathBuf,
@@ -186,11 +310,14 @@ fn parse_one_file(
         source,
     })?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
+    // Offsets are preserved, so the index is valid for both the original and the
+    // masked buffer; `bytes` stays the true file content for CRC/cache identity.
     let line_index = LineIndex::from_bytes(path.clone(), text.as_bytes());
+    let (synth_text, _masked_regions) = mask_translate_off(&text);
 
     // parse_sv_str(s, path, defines, includes, ignore_include_error, allow_incomplete)
     match parse_sv_str(
-        &text,
+        &synth_text,
         path,
         defines,
         includes,
@@ -291,6 +418,90 @@ mod tests {
             msg.contains("__no_such_a"),
             "expected the first failing path, got {msg}"
         );
+    }
+
+    #[test]
+    fn translate_off_masking_preserves_every_offset_and_line() {
+        // Offset stability is load-bearing: source anchors, LineIndex and get_origin
+        // all address this buffer, so masking must be byte-for-byte positional.
+        for src in [
+            "module m;\n// synthesis translate_off\nbegin: x end\n// synthesis translate_on\nassign y = a;\nendmodule\n",
+            "module m;\n//pragma translate_off\n illegal $$$ \n//pragma translate_on\nendmodule\n",
+            "module m;\n/* synopsys translate_off */ junk /* synopsys translate_on */\nendmodule\n",
+            "module m;\n// synthesis translate_off\nnever closed\nendmodule\n",
+            "module m;\nassign s = \"// synthesis translate_off\";\nassign y = a;\nendmodule\n",
+            "module m;\n// we document synthesis translate_off in prose\nassign y = a;\nendmodule\n",
+        ] {
+            let (masked, _) = mask_translate_off(src);
+            assert_eq!(masked.len(), src.len(), "byte length changed: {masked:?}");
+            assert_eq!(
+                masked.lines().count(),
+                src.lines().count(),
+                "line count changed: {masked:?}"
+            );
+            for (a, b) in masked.bytes().zip(src.bytes()) {
+                if a != b {
+                    assert_eq!(a, b' ', "masked to non-space");
+                    assert!(b != b'\n' && b != b'\r', "newline was masked");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn translate_off_regions_are_removed_and_live_rtl_is_kept() {
+        let (masked, regions) = mask_translate_off(
+            "module m;\nassign live0 = a;\n// synthesis translate_off\nassign dead = b;\n// synthesis translate_on\nassign live1 = c;\nendmodule\n",
+        );
+        assert_eq!(regions, 1);
+        assert!(!masked.contains("dead"), "sim-only cone survived: {masked}");
+        assert!(masked.contains("live0") && masked.contains("live1"), "{masked}");
+
+        // A quoted pragma must not open a region, and prose must not either.
+        let (quoted, regions) = mask_translate_off(
+            "module m;\nassign s = \"// synthesis translate_off\";\nassign live = a;\nendmodule\n",
+        );
+        assert_eq!(regions, 0);
+        assert!(quoted.contains("live"), "{quoted}");
+
+        // Unterminated region masks to EOF, as synthesis does.
+        let (open, regions) =
+            mask_translate_off("module m;\n// pragma translate_off\nassign dead = b;\nendmodule\n");
+        assert_eq!(regions, 1);
+        assert!(!open.contains("dead") && !open.contains("endmodule"), "{open}");
+    }
+
+    #[test]
+    fn sram_translate_off_block_parses_without_allow_parse_errors() {
+        // Real regression: bare named `begin` blocks at generate scope inside a
+        // `// synthesis translate_off` region. Illegal SystemVerilog, but not part of
+        // the synthesized design, so the file must analyse rather than be skipped.
+        let src = "module sram #(parameter int NUM_WORDS = 4) (input logic clk_i);\n\
+                   logic [63:0] ruser;\n\
+                   for (genvar k = 0; k < 2; k++) begin : gen_mem_user\n\
+                     assign ruser = '0;\n\
+                     // synthesis translate_off\n\
+                     begin: i_tc_sram_wrapper_user\n\
+                       begin: i_tc_sram\n\
+                         localparam type data_t = logic [63:0];\n\
+                         data_t sram [NUM_WORDS-1:0];\n\
+                       end\n\
+                     end\n\
+                     // synthesis translate_on\n\
+                   end\n\
+                   endmodule\n";
+        let (masked, regions) = mask_translate_off(src);
+        assert_eq!(regions, 1);
+        let defines: Defines = HashMap::new();
+        parse_sv_str(
+            &masked,
+            &PathBuf::from("sram.sv"),
+            &defines,
+            &[] as &[PathBuf],
+            true,
+            false,
+        )
+        .expect("translate_off region must not block the synthesizable grammar");
     }
 
     #[test]
