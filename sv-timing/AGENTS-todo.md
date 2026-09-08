@@ -5,6 +5,48 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 
 
 
+
+## 2026-09-10 (c) — the emit validity gate was vacuous, and fixing it falsifies the closure claims
+
+- [x] **`post_analyze_sv` measured nothing and reported it as a verdict.** It re-analysed
+  only the FIRST rewritten file, with `ParamMap::new()` (empty, so no `CVA6Cfg.*`
+  resolved) and `package_mode: false`, then printed `closes=false` from the resulting
+  empty design. Every part of that is wrong for a project: one file cannot see its
+  packages, and `paths=0` is *inconclusive*, not *failing*. It now re-analyses the whole
+  emitted project with the same param map and package mode as the real run (built once
+  and shared), substitutes emitted files for the originals they replace, and prints
+  `INCONCLUSIVE` with a reason when it cannot measure. Verified it reads what it claims:
+  `full_corev_apu` post-analysis shows `files=157 containing __svt=157`,
+  `modules=123 from emitted=123`, and the worst path's owner resolves to the emitted
+  `te_packet_emitter__svt.sv`.
+- [x] **With the gate working, the IR closure claims do not survive re-measurement.**
+
+  | profile | target | `post_closure` (IR, filtered) | `post_analyze_sv` (emitted RTL) |
+  |---|--:|---|---|
+  | `sparse_g6lc` | 2000 MHz | closes, 2000 MHz | **1594.3 MHz**, 85 paths |
+  | `full_corev_apu` | 4000 MHz | closes, 4000 MHz | **350.9 MHz**, 1566 paths |
+
+  The emitted designs still carry their original worst paths: `sparse_g6lc` retains
+  `g6lc_rename.out0` at 25.1 FO4 — exactly the pre-correction `primary_fo4` of 25.0888 —
+  and `full_corev_apu` retains `te_packet_emitter.out0` at 380.5 FO4, which the run's own
+  `max_path_fo4 380.5->380.5` already admitted. `full_corev_apu`'s 350.9 MHz is the same
+  figure the uncorrected baseline reported (350.877).
+- [x] **Why, and it is not a bug in the corrector so much as in how the gain is reported.**
+  Every top path in the re-analysed APU is `atomic_over_budget` — classified indivisible,
+  so no latency-neutral or latency-allowing rewrite applies. `primary_fo4` is taken from
+  `post_closure`, which excludes exactly those classes. So `primary_fo4 114.0 -> 10.0,
+  closes=true` is a true statement about the *actionable subset* and a false impression
+  about the design. The headline should carry both numbers.
+- [ ] **Consequence for the 4 GHz question.** On the emitted evidence the APU is limited
+  to ~350 MHz by the VENDORED RISC-V trace encoder (`te_packet_emitter`, `te_reg`,
+  `rv_tracer`, `framing_top` — `corev_apu/instr_tracing/rv_tracer-main`), not by core
+  logic. That subsystem is a candidate for the same treatment `smt_legacy` just got (a
+  profile `exclude`, or a multi-cycle/`atomic` declaration), because as long as it is in
+  the package it sets the reported ceiling for everything else. Deciding that is a host
+  call, not a package one.
+- [ ] Still open from (b): the `g6lc_ai_exec` 545.5 FO4 cone, and `core/alu.sv`'s non-LRM
+  chained select.
+
 ## 2026-09-10 (b) — full_core / full_corev_apu at 4 GHz, and a cache defect that hid the AI island
 
 Two more package defects, both found by pushing the whole design rather than a slice.

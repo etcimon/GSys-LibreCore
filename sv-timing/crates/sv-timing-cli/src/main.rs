@@ -1044,6 +1044,19 @@ fn main() -> ExitCode {
                 policy.correct_allow_modules = Vec::new();
             }
 
+            // Built ONCE so the post-emit re-analysis can reuse it. That gate used to
+            // construct `ParamMap::new()` — an empty map — which meant it lowered the
+            // emitted RTL without any of the `CVA6Cfg.*` values the real analysis had,
+            // produced no paths, and then reported that as a closure verdict.
+            let base_param_map = match build_param_map(param_map, cfg_snapshot, assume_xlen) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let base_package_mode = package_mode_on(&package_mode);
+
             let (design, names, source_pairs, allow) = if paths.is_empty()
                 || (!all_modules && allow.is_empty())
             {
@@ -1071,14 +1084,8 @@ fn main() -> ExitCode {
                     target: TimingTarget::new(target_mhz, fo4_ps, budget_margin),
                     cost_model: load_fo4_v1_default(),
                     module_filter,
-                    param_map: match build_param_map(param_map, cfg_snapshot, assume_xlen) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            eprintln!("error: {e}");
-                            return ExitCode::from(1);
-                        }
-                    },
-                    package_mode: package_mode_on(&package_mode),
+                    param_map: base_param_map.clone(),
+                    package_mode: base_package_mode,
                     opt: opt.clone(),
                 };
                 lower.cost_model.id = "fo4-v1".into();
@@ -1331,49 +1338,120 @@ fn main() -> ExitCode {
                                 eprintln!("  integrity: {m}");
                             }
                         }
-                        // Post-correct re-analyze of first rewritten source (not generated stubs)
+                        // Post-correct re-analyze of the EMITTED SV. This is the only gate
+                        // that measures what was actually written, so it has to be run the
+                        // same way the design was analysed in the first place.
+                        //
+                        // It previously took the first rewritten file alone, with an empty
+                        // param map and package mode off, and printed the result as a
+                        // closure verdict. Every one of those is wrong for a real project:
+                        // one file cannot see its packages, an empty param map leaves
+                        // `CVA6Cfg.*` unresolved, and the outcome was `paths=0` reported as
+                        // `closes=false` — an empty design dressed up as a failing one.
                         if rep.reparse_ok {
-                        if let Some(first_entry) = proj.entries.iter().find(|e| !e.is_new) {
-                            let first = PathBuf::from(&first_entry.emit_path);
-                            if first.is_file() {
+                            // Whole emitted project, original order, plus the untouched
+                            // inputs it still depends on. `is_new` entries are generated
+                            // stubs and stay out.
+                            let emitted: Vec<PathBuf> = proj
+                                .entries
+                                .iter()
+                                .filter(|e| !e.is_new)
+                                .map(|e| PathBuf::from(&e.emit_path))
+                                .filter(|p| p.is_file())
+                                .collect();
+                            let rewritten: std::collections::BTreeSet<String> = proj
+                                .entries
+                                .iter()
+                                .filter(|e| !e.is_new)
+                                .filter_map(|e| {
+                                    PathBuf::from(&e.emit_path)
+                                        .file_name()
+                                        .map(|f| f.to_string_lossy().replace("__svt", ""))
+                                })
+                                .collect();
+                            // Inputs that were NOT rewritten still supply packages and
+                            // parameters; without them the emitted files lower to nothing.
+                            let mut post_paths: Vec<PathBuf> = paths
+                                .iter()
+                                .filter(|p| {
+                                    p.file_name()
+                                        .map(|f| !rewritten.contains(&f.to_string_lossy().to_string()))
+                                        .unwrap_or(true)
+                                })
+                                .cloned()
+                                .collect();
+                            post_paths.extend(emitted.iter().cloned());
+
+                            if emitted.is_empty() {
+                                println!("  post_analyze_sv INCONCLUSIVE: no rewritten file to re-analyze");
+                            } else {
+                                let post_parse = ParseOptions {
+                                    include_paths: project.incdirs.clone(),
+                                    defines: project.defines_for_parse(),
+                                    ignore_include_error: false,
+                                    jobs: opt.jobs,
+                                    allow_parse_errors,
+                                };
                                 let mut lower = LowerOptions {
                                     target: TimingTarget::new(target_mhz, fo4_ps, budget_margin),
                                     cost_model: load_fo4_v1_default(),
-                                    module_filter: allow.clone(),
-                                    param_map: ParamMap::new(),
-                                    package_mode: false,
+                                    module_filter: if all_modules {
+                                        Vec::new()
+                                    } else {
+                                        allow.clone()
+                                    },
+                                    param_map: base_param_map.clone(),
+                                    package_mode: base_package_mode,
                                     opt: opt.clone(),
                                 };
                                 lower.cost_model.id = "fo4-v1".into();
-                                if let Ok(post) = analyze_files(
-                                    &[first.clone()],
-                                    &ParseOptions::default(),
-                                    &lower,
-                                ) {
-                                    let file_meta = vec![(
-                                        first.display().to_string(),
-                                        std::fs::metadata(&first)
-                                            .map(|m| m.len() as usize)
-                                            .unwrap_or(0),
-                                    )];
-                                    post_analyze_json = Some(design_to_analyze_json(
-                                        &post.design,
-                                        &file_meta,
-                                        serde_json::json!(allow.clone()),
-                                        target_mhz,
-                                        fo4_ps,
-                                        budget_margin,
-                                    ));
-                                    let pc = frequency_closure(&post.design);
-                                    println!(
-                                        "  post_analyze_sv closes={} max_mhz={:.1} paths={}",
-                                        pc.closes,
-                                        pc.max_freq_mhz,
-                                        post.design.paths.len()
-                                    );
+                                match analyze_files(&post_paths, &post_parse, &lower) {
+                                    Ok(post) => {
+                                        let file_meta: Vec<(String, usize)> = post_paths
+                                            .iter()
+                                            .map(|p| {
+                                                (
+                                                    p.display().to_string(),
+                                                    std::fs::metadata(p)
+                                                        .map(|m| m.len() as usize)
+                                                        .unwrap_or(0),
+                                                )
+                                            })
+                                            .collect();
+                                        post_analyze_json = Some(design_to_analyze_json(
+                                            &post.design,
+                                            &file_meta,
+                                            serde_json::json!(allow.clone()),
+                                            target_mhz,
+                                            fo4_ps,
+                                            budget_margin,
+                                        ));
+                                        let pc = frequency_closure(&post.design);
+                                        if post.design.paths.is_empty() {
+                                            // No paths means nothing was measured. Saying
+                                            // `closes=false` here would report an empty
+                                            // design as a timing failure.
+                                            println!(
+                                                "  post_analyze_sv INCONCLUSIVE: 0 paths from {} file(s); \
+                                                 emitted RTL not measured",
+                                                post_paths.len()
+                                            );
+                                        } else {
+                                            println!(
+                                                "  post_analyze_sv closes={} max_mhz={:.1} paths={} modules={} files={}",
+                                                pc.closes,
+                                                pc.max_freq_mhz,
+                                                post.design.paths.len(),
+                                                post.design.modules.len(),
+                                                post_paths.len()
+                                            );
+                                        }
+                                    }
+                                    Err(e) => {
+                                        println!("  post_analyze_sv INCONCLUSIVE: re-analyze failed: {e}");
+                                    }
                                 }
                             }
-                        }
                         } // end if rep.reparse_ok post-analyze
                         emit_dir_s = Some(proj.out_dir);
                     }
