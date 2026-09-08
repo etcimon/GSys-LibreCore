@@ -300,6 +300,28 @@ Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or 
   term. FP32 spends 512 of 669 cycles on steps, INT4 only 64 of 109, so the same skip
   fraction is worth strictly less after narrowing. A test pins the ordering.
 - Verified: 218 pytest pass (2 skipped), independence ok, c_abi lockstep ok.
+- [x] THE RETIRE CEILING resolves three measured dead ends as ONE mechanism, and says
+  what to build. steps = m*n*ceil(row_bytes/lanes) has floor m*n because the RTL
+  writes one C element on its last reduction step through a single c_w_req port: one
+  C port retires one element per cycle whatever the lane count. So (a) lanes stop
+  helping once row_bytes <= lanes, (b) C ports cannot help while groups == 1 since two
+  ports need two finished dots, and (c) groups > 1 exists only when lanes > row_bytes,
+  which is exactly what NARROWING manufactures. Testing either lever alone therefore
+  HAD to measure nothing -- which is precisely what INT4-past-8-lanes (0%),
+  16->32-lanes-byte-identical, and grouping-produces-nothing each reported.
+- [x] Quantified, doubling from the shipped 8 lanes / 1 port: FP32/FP16/INT8 are
+  lane-bound so lanes alone give 1.62/1.58/1.51x and ports alone give exactly 1.000x;
+  INT4 is already retire-bound so lanes alone give exactly 1.000x (the measurement,
+  reproduced) and only both together give 1.416x. At 64 lanes: FP32 groups=1 so ANY
+  number of C ports gives 1.000x (the control that proves the mechanism), INT8 groups=4
+  gives 1.623x (125 -> 77 cy), INT4 groups=8 gives 2.057x (109 -> 53 cy).
+- [x] Conclusion recorded in rchitecture/ai-matrix/va-turbo.md §17: C-port widening
+  is NOT a general throughput lever, it is the second half of narrowing's. Build it only
+  jointly with lanes, only for narrowed formats, and only up to the group count -- ports
+  beyond groups are pure area, the same trap the 16->32 lane experiment fell into from
+  the other side. All of it labelled modeled: no RTL has more than one C port, so the
+  2.06x is a prediction and says so.
+- Verified: 222 pytest pass (2 skipped), independence ok, c_abi lockstep ok.
 ## Open design notes
 
 - **Completion DMA vs PLIC claim:** island soak keeps `CTL.wr_cpl_en=0` for pure claim tests;

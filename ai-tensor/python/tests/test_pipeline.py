@@ -211,6 +211,77 @@ def test_off_reference_shapes_are_modelled_and_labelled():
     assert result and result.provenance == P.MODELED
 
 
+def test_the_retire_ceiling_explains_three_measured_dead_ends_at_once():
+    """Lanes and C ports are ONE joint requirement, not two independent levers.
+
+    Three RTL measurements each looked like a dead end on its own: INT4 gained 0% past 8
+    lanes, 16 -> 32 lanes was byte-identical for INT8, and grouping produced nothing.
+    The model explains all three with `steps >= m*n` -- one C port retires one element
+    per cycle -- and shows why testing either lever alone had to measure nothing.
+    """
+    # More lanes stop helping the moment row_bytes <= lanes.
+    assert P.row_bytes(AI_FMT_INT4, 16) == 8 and P.row_bytes(AI_FMT_FP32, 16) == 64
+    int4 = P.retire_analysis(AI_FMT_INT4)          # 8 lanes: row_bytes == lanes
+    assert int4.bound_by == "retire"
+    assert int4.steps == int4.elements == 64
+    assert int4.lanes_alone == pytest.approx(1.0)   # matches "INT4 gained 0% past 8"
+    # More C ports cannot help while there is only one lane group, because two ports
+    # need two dots to have finished in the same cycle.
+    assert int4.groups == 1
+    assert int4.c_ports_alone == pytest.approx(1.0)
+    # Together they do something, which is the joint requirement.
+    assert int4.both > 1.4
+    # The wider formats are still LANE-bound at 8 lanes, so lanes alone help there and
+    # C ports still do not.
+    for numfmt in (AI_FMT_FP32, AI_FMT_FP16, AI_FMT_INT):
+        analysis = P.retire_analysis(numfmt)
+        assert analysis.bound_by == "lanes"
+        assert analysis.lanes_alone > 1.4
+        assert analysis.c_ports_alone == pytest.approx(1.0)
+
+
+def test_idle_lane_groups_are_manufactured_by_narrowing():
+    """`groups > 1` requires lanes > row_bytes, which is exactly what narrowing buys."""
+    for lanes in (8, 16, 32, 64):
+        # FP32 uses every lane at 64, so it NEVER has an idle group -- the clean control.
+        assert P.lane_groups(AI_FMT_FP32, 16, lanes) == 1
+    assert P.lane_groups(AI_FMT_INT, 16, 64) == 4
+    assert P.lane_groups(AI_FMT_INT4, 16, 64) == 8
+    # Narrowing at a FIXED lane count is what creates them.
+    assert P.lane_groups(AI_FMT_INT4, 16, 32) > P.lane_groups(AI_FMT_FP32, 16, 32)
+
+
+def test_c_port_widening_pays_only_on_a_narrowed_format():
+    """The projection that says what to build, and what not to.
+
+    At 64 lanes FP32 gains NOTHING from any number of C ports, because it has one lane
+    group. INT8 and INT4 gain because narrowing left lanes idle. So C-port widening is
+    not a general throughput lever -- it is the second half of narrowing's.
+    """
+    for ports in (1, 2, 4, 8):
+        assert P.model_cycles(AI_FMT_FP32, lanes=64, c_ports=ports) == pytest.approx(
+            P.model_cycles(AI_FMT_FP32, lanes=64))
+    int8_gain = (P.model_cycles(AI_FMT_INT, lanes=64)
+                 / P.model_cycles(AI_FMT_INT, lanes=64, c_ports=4))
+    int4_gain = (P.model_cycles(AI_FMT_INT4, lanes=64)
+                 / P.model_cycles(AI_FMT_INT4, lanes=64, c_ports=8))
+    assert int8_gain > 1.6 and int4_gain > 2.0
+    # Ports beyond the group count are wasted, which is the area argument.
+    assert P.model_cycles(AI_FMT_INT, lanes=64, c_ports=4) == pytest.approx(
+        P.model_cycles(AI_FMT_INT, lanes=64, c_ports=16))
+    with pytest.raises(ValueError):
+        P.model_cycles(AI_FMT_INT, c_ports=0)
+
+
+def test_the_projection_never_claims_to_be_measured():
+    """No RTL has more than one C write port, so every c_ports>1 number is modelled."""
+    assert P.cycles_for(AI_FMT_INT4).provenance == P.MEASURED
+    # A widened configuration is off the reference shape by construction.
+    assert P.cycles_for(AI_FMT_INT4, lanes=64).provenance == P.MODELED
+    # And the retirement floor holds even in the model: one port, one element per cycle.
+    assert P.steps_for(AI_FMT_INT4, 8, 8, 16, lanes=1024) == 64
+
+
 def test_a_narrowing_stage_needs_a_target():
     refused = P.pipeline([P.Stage("narrow")])
     assert not refused and refused.rule == "narrow.target"

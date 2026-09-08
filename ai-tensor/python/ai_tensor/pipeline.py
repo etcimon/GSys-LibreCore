@@ -67,9 +67,13 @@ __all__ = [
     "BETA",
     "MODEL_CONSTANT",
     "CycleModel",
+    "RetireAnalysis",
     "Stage",
     "PipelineRefused",
     "PipelineResult",
+    "row_bytes",
+    "lane_groups",
+    "retire_analysis",
     "steps_for",
     "beats_for",
     "model_cycles",
@@ -99,10 +103,42 @@ MEASURED = vt.MEASURED
 MODELED = "modeled_from_decomposition"
 
 
-def steps_for(numfmt: int, m: int, n: int, k: int, lanes: int = vt.PE_LANES) -> int:
-    """Reduction steps: one per ``mac_step`` window per output element."""
-    k_bytes = int(math.ceil(k * vt._K_BYTES[numfmt]))
-    return m * n * max(1, int(math.ceil(k_bytes / lanes)))
+def row_bytes(numfmt: int, k: int) -> int:
+    """Operand row in bytes -- what a dot product actually consumes."""
+    return int(math.ceil(k * vt._K_BYTES[numfmt]))
+
+
+def lane_groups(numfmt: int, k: int, lanes: int = vt.PE_LANES) -> int:
+    """Independent dots a provisioned lane array can host, i.e. IDLE-LANE GROUPS.
+
+    A dot consumes ``row_bytes`` of lanes, so anything beyond that is idle and can only
+    be useful on a *different* output. This is the quantity narrowing manufactures: at
+    64 lanes and k=16, FP32 uses all 64 (``groups=1``) while INT8 uses 16
+    (``groups=4``) and INT4 uses 8 (``groups=8``).
+    """
+    needed = row_bytes(numfmt, k)
+    return max(1, lanes // needed) if needed <= lanes else 1
+
+
+def steps_for(numfmt: int, m: int, n: int, k: int, lanes: int = vt.PE_LANES,
+              c_ports: int = 1) -> int:
+    """Reduction steps: one per ``mac_step`` window per output element.
+
+    Note the floor: ``ceil(k_bytes/lanes)`` bottoms out at 1, so ``steps >= m*n``. That
+    floor **is** the retirement ceiling -- the RTL writes one C element on its last
+    reduction step through a single ``c_w_req`` port, so an engine cannot retire faster
+    than one element per cycle however many lanes it has.
+
+    ``c_ports`` models widening that port. It divides the step count only up to the
+    number of idle-lane groups actually available, because two C ports cannot retire two
+    elements per cycle unless two dots finished in that cycle. That joint constraint is
+    the whole result: see :func:`retire_analysis`.
+    """
+    if c_ports < 1:
+        raise ValueError("c_ports must be >= 1")
+    raw = m * n * max(1, int(math.ceil(row_bytes(numfmt, k) / lanes)))
+    usable = min(c_ports, lane_groups(numfmt, k, lanes))
+    return int(math.ceil(raw / usable))
 
 
 def beats_for(numfmt: int, m: int, n: int, k: int, resident_a: bool = False,
@@ -116,17 +152,75 @@ def beats_for(numfmt: int, m: int, n: int, k: int, resident_a: bool = False,
 
 def model_cycles(numfmt: int, m: int = 8, n: int = 8, k: int = 16,
                  resident_a: bool = False, resident_b: bool = False,
-                 lanes: int = vt.PE_LANES, skip_fraction: float = 0.0) -> float:
+                 lanes: int = vt.PE_LANES, skip_fraction: float = 0.0,
+                 c_ports: int = 1) -> float:
     """`steps + beta*beats + 11`, the decomposition above.
 
     ``skip_fraction`` models zero-skip, which removes a fraction of the STEP term only --
-    never the traffic, because a skipped product still had to be read.
+    never the traffic, because a skipped product still had to be read. ``c_ports`` models
+    widening the single C write port, which is a PROJECTION: no such RTL exists.
     """
     if not 0.0 <= skip_fraction < 1.0:
         raise ValueError("skip_fraction must be in [0, 1)")
-    steps = steps_for(numfmt, m, n, k, lanes) * (1.0 - skip_fraction)
+    steps = steps_for(numfmt, m, n, k, lanes, c_ports) * (1.0 - skip_fraction)
     beats = beats_for(numfmt, m, n, k, resident_a, resident_b)
     return steps + BETA[numfmt] * beats + MODEL_CONSTANT
+
+
+@dataclass(frozen=True)
+class RetireAnalysis:
+    """Why more lanes, or more C ports, buy nothing on their own."""
+
+    numfmt: int
+    lanes: int
+    k: int
+    row_bytes: int
+    steps: int
+    elements: int
+    groups: int
+    bound_by: str
+    lanes_alone: float
+    c_ports_alone: float
+    both: float
+
+
+def retire_analysis(numfmt: int, m: int = 8, n: int = 8, k: int = 16,
+                    lanes: int = vt.PE_LANES, widen: int = 2) -> RetireAnalysis:
+    """Quantify the JOINT constraint that the measured refutations were both halves of.
+
+    Three separate RTL measurements looked like dead ends individually:
+
+    * INT4 gained **0%** past 8 lanes, and INT8/FP8 nothing past 16;
+    * 16 -> 32 lanes was **byte-identical** for INT8 at the reference shape;
+    * grouping (recipes 9-15) produced no speedup at all.
+
+    The model explains all three with one mechanism, and shows they are not independent
+    failures. ``steps >= m*n`` because one C port retires one element per cycle, so:
+
+    * more **lanes** stop helping the moment ``row_bytes <= lanes`` (retire-bound);
+    * more **C ports** cannot help while ``groups == 1``, since two ports need two dots
+      to have finished;
+    * and ``groups > 1`` only exists when ``lanes > row_bytes`` -- which is exactly what
+      **narrowing manufactures**.
+
+    So lanes and C ports are a joint requirement on a narrowed format, and testing either
+    alone correctly measured nothing. FP32 is the clean control: at 64 lanes it uses all
+    64 (``groups == 1``), so no number of C ports helps it.
+    """
+    base = model_cycles(numfmt, m, n, k, lanes=lanes)
+    wider_lanes = model_cycles(numfmt, m, n, k, lanes=lanes * widen)
+    more_ports = model_cycles(numfmt, m, n, k, lanes=lanes, c_ports=widen)
+    both = model_cycles(numfmt, m, n, k, lanes=lanes * widen, c_ports=widen)
+    steps = steps_for(numfmt, m, n, k, lanes)
+    groups = lane_groups(numfmt, k, lanes)
+    return RetireAnalysis(
+        numfmt=numfmt, lanes=lanes, k=k, row_bytes=row_bytes(numfmt, k),
+        steps=steps, elements=m * n, groups=groups,
+        bound_by="retire" if steps == m * n else "lanes",
+        lanes_alone=base / wider_lanes,
+        c_ports_alone=base / more_ports,
+        both=base / both,
+    )
 
 
 @dataclass(frozen=True)

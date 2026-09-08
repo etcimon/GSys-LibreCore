@@ -642,6 +642,65 @@ cold priming from warm operation, check all C elements and poison outputs before
 execution. Signed native-format fixtures, metadata changes, permission gates,
 error recovery and alias cases accompany the throughput samples.
 
+## 17. The retire ceiling: lanes and C ports are one joint requirement
+
+Three measurements each looked like an independent dead end:
+
+* INT4 gained **0%** past 8 lanes, and INT8/FP8 nothing past 16;
+* 16 -> 32 lanes was **byte-identical** for INT8 at the reference shape;
+* grouping (recipes 9-15) produced **no** speedup at all.
+
+They are not three failures. They are one mechanism seen from three sides, and the
+cycle model states it in a line: `steps = m*n*ceil(row_bytes/lanes)`, whose floor
+is `m*n` because the RTL writes one C element on its last reduction step through a
+single `c_w_req` port. **One C port retires one element per cycle, whatever the
+lane count.** Therefore
+
+* more **lanes** stop helping the moment `row_bytes <= lanes` (retire-bound);
+* more **C ports** cannot help while `groups == 1`, because two ports need two
+  dots to have finished in the same cycle;
+* and `groups > 1` exists only when `lanes > row_bytes` -- which is precisely what
+  **narrowing manufactures**.
+
+So testing either lever alone had to measure nothing. Doubling from the shipped
+8 lanes / 1 port:
+
+| Format | row_bytes | steps | groups | bound by | lanes only | ports only | both |
+|---|--:|--:|--:|---|--:|--:|--:|
+| FP32 | 64 | 512 | 1 | lanes | 1.620x | **1.000x** | 1.620x |
+| FP16 | 32 | 256 | 1 | lanes | 1.579x | **1.000x** | 1.579x |
+| INT8 | 16 | 128 | 1 | lanes | 1.512x | **1.000x** | 1.512x |
+| INT4 | 8 | 64 | 1 | **retire** | **1.000x** | **1.000x** | 1.416x |
+
+The INT4 row is the measured refutation reproduced by the model: at 8 lanes it is
+already retire-bound, so lanes alone buy exactly nothing.
+
+### What C-port widening is actually worth, and for whom
+
+At 64 lanes -- FP32's measured optimum -- the picture separates cleanly:
+
+| Format | groups | all ports | cycles |
+|---|--:|--:|---|
+| FP32 | **1** | **1.000x** | 221 -> 221 |
+| INT8 | 4 | **1.623x** | 125 -> 77 |
+| INT4 | 8 | **2.057x** | 109 -> 53 |
+
+**FP32 gains nothing from any number of C ports**, because at 64 lanes it uses all
+64 and has one group. That is the control which proves the mechanism rather than
+merely fitting it.
+
+So C-port widening is **not a general throughput lever**: it is the second half of
+narrowing's. Build it only jointly with lanes, only for narrowed formats, and only
+up to the group count -- ports beyond `groups` are pure area, which is the same
+trap the 16 -> 32 lane experiment already fell into from the other direction.
+
+These are **projections** from a model fitted at 8 lanes and k=16; no RTL has more
+than one C write port, and `ai_tensor.pipeline` labels every such figure
+`modeled`. The independent lane-provisioning runs are consistent with the step term
+(FP32 measured up to +320% at 64 lanes on 16x16, against an 8x step reduction the
+model predicts before traffic), but the joint lanes+ports configuration has never
+been built and its 2.06x is a prediction, not a result.
+
 ## 16. Plan composition: the 32 recipes stack, and the cycle model says how
 
 The recipes are not alternatives. Fitting the measured per-job cycles against
