@@ -6,6 +6,69 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 
 
 
+
+## 2026-09-10 (d) — the analysis was screening the WRONG core; SMT2/fetch_B retired correctly
+
+- [x] **`+define+` was silently dropped from every soak package, so the wrong
+  configuration was analysed.** `flist_expand` collects defines and
+  `write_filtered_portable` wrote only `+incdir+` and file paths. For this repo that is
+  not cosmetic: `core/Flist.cva6` sets `+define+G6LC_FETCH_B` to select the fetch_B
+  instruction supply, so without it every `ifdef G6LC_FETCH_B` body was skipped while the
+  `ifndef` A-path / g1* recover bodies were analysed as if live. Every full_core number
+  before this entry describes a core that is not built. The CLI already accepts
+  `+define+` from a filelist, so the writer now emits them and the soak logs them
+  (`profile full_core defines: G6LC_FETCH_B`).
+- [x] **The previous blanket `/core/smt_legacy/` exclude was wrong and removed live SMT2
+  RTL.** `architecture/core-fetch/SMT-LEGACY.md` is authoritative: the directory is three
+  things, and `Flist.cva6` compiles 19 of 23 files individually. Of those 19, **9 are
+  LIVE on fetch_B** — `g6lc_thread_select`, `g6lc_hart_state`, `g6lc_smt_regfile`,
+  `g6lc_smt_pc_bank`, `g6lc_smt_csr_bank`, `g6lc_issue_barrier` (SMT2 banks and
+  scheduler) plus the `g6lc_ex_id` / `g6lc_sb_keep` / `g6lc_cf_pc` packages — and **10
+  are g1\* recover** whose call sites are skipped under `G6LC_FETCH_B`. Excluding all 19
+  deleted exactly the SMT2 infrastructure the profile exists to measure. The exclude now
+  names the 10 recover files and nothing else.
+- [x] **SMT2 / fetch_B configuration verified, not assumed.** With the define carried and
+  the recover set retired, `full_core` reports `modules=183 paths=4208`:
+  all six SMT2 bank/scheduler modules present; all ten recover modules absent; and the
+  instruction supply is **exclusively `core/fetch_B/`** — `frontend`, `instr_queue`,
+  `instr_scan` and `instr_realign` all resolve to `core/fetch_B/*`, so there is exactly
+  one `module frontend`, which is the invariant SMT-LEGACY.md §2 insists on.
+  `g6lc_ex_id` / `g6lc_sb_keep` / `g6lc_cf_pc` are **packages**, so their absence from
+  the module list is correct rather than a gap.
+- [x] **`sparse_frontend.f` was screening retired RTL.** It listed
+  `core/frontend/instr_queue.sv` and `core/frontend/instr_scan.sv`, which `Flist.cva6`
+  has commented out (L249-251) in favour of the fetch_B copies. It now uses
+  `core/fetch_B/{g6lc_fetch_pkg,instr_queue,instr_scan}.sv` with
+  `+define+G6LC_FETCH_B`, keeps the predictors in `core/frontend`, and carries a note
+  against ever adding a second `module frontend`.
+
+### The three instruction supplies, for the record
+
+| Path | Role | Selected by |
+|---|---|---|
+| `core/fetch_B/` (6 files) | **LIVE** supply | `+define+G6LC_FETCH_B` + `-f Flist.fetch_B` |
+| `core/smt_legacy/{frontend,instr_queue,instr_scan,instr_realign}.sv` | oracle alternative | `-f Flist.smt_legacy` only, never with fetch_B |
+| `core/frontend/{frontend,instr_queue,instr_scan}.sv` | **retired** | commented out in `Flist.cva6` |
+
+`core/frontend` otherwise holds the predictors, which are live. `core/smt/` holds an
+older `g6lc_fetch_{pkg,dbg}` pair reachable only through `Flist.fetch`; `Flist.cva6`
+comments out `core/smt/g6lc_fetch_dbg.sv` and takes fetch_B's copies instead.
+
+### full_core at 4 GHz on the CORRECTED configuration
+
+`analyze paths=4208 primary_fo4=134.0 worst_all=720.0`;
+`correct 134.0 -> 19.17 (1091 edits)`; `post_closure 2086.6 MHz` (worst `axi_adapter`,
+slack -9.2); **`post_analyze_sv 503.1 MHz`** over 6,102 paths / 206 modules / 230 files.
+The gap between the last two is the same reporting artefact recorded in (c): the IR
+figure excludes `atomic_over_budget` and multi-cycle classes, the emitted-RTL figure does
+not.
+
+- [ ] Not yet done from this request: a single production Flist covering SMT2 OoO
+  8-core / 8-issue stream plane + ai_island + RVV + hypervisor + APU while excluding
+  `rv_tracer-main`, and validation through `g6lc_qemu`. The retirement and define work
+  above is the prerequisite, since a feature-max flist built on the wrong define set
+  would have inherited the same defect.
+
 ## 2026-09-10 (c) — the emit validity gate was vacuous, and fixing it falsifies the closure claims
 
 - [x] **`post_analyze_sv` measured nothing and reported it as a verdict.** It re-analysed

@@ -146,12 +146,33 @@ DEFAULT_PROFILE_SPECS: list[dict] = [
         "all_modules": True,
         "param_map": "verif/sv-timing-tests/param-maps/cv64a6_imafdc_xlen64.json",
         "soft_missing": True,
-        # core/Flist.cva6 still carries the superseded SMT tree, and this profile is
-        # `-F` on that flist, so the subset is expressed here rather than by editing
-        # the real build input. Timing spent on retired RTL is timing not spent on the
-        # shipping pipeline, and its paths would rank alongside live ones.
-        "exclude": ["/core/smt_legacy/"],
-        "notes": "Entire core/Flist.cva6 (excl. smt_legacy) — all modules structural FO4",
+        # `core/smt_legacy/` is THREE things in one directory
+        # (architecture/core-fetch/SMT-LEGACY.md): of the 19 files Flist.cva6 compiles,
+        # 9 are LIVE on fetch_B and 10 are g1* recover whose call sites are skipped
+        # under +define+G6LC_FETCH_B. Only the recover set is retired here.
+        #
+        # LIVE, must be measured: g6lc_thread_select, g6lc_hart_state, g6lc_smt_regfile,
+        # g6lc_smt_pc_bank, g6lc_smt_csr_bank, g6lc_issue_barrier (SMT2 banks and
+        # scheduler) plus g6lc_ex_id, g6lc_sb_keep, g6lc_cf_pc (shared helpers still
+        # called on B). An earlier blanket "/core/smt_legacy/" exclude dropped all 19 and
+        # so removed exactly the SMT2 infrastructure this profile exists to measure.
+        #
+        # The 4 oracle frontend copies are not on this flist at all; they come only from
+        # -f Flist.smt_legacy, which must never be combined with fetch_B (two
+        # `module frontend`).
+        "exclude": [
+            "/core/smt_legacy/g6lc_present.sv",
+            "/core/smt_legacy/g6lc_leftover.sv",
+            "/core/smt_legacy/g6lc_fe_keep.sv",
+            "/core/smt_legacy/g6lc_fe_kill.sv",
+            "/core/smt_legacy/g6lc_iq_hide.sv",
+            "/core/smt_legacy/g6lc_lj_hide.sv",
+            "/core/smt_legacy/g6lc_sib_cjalr.sv",
+            "/core/smt_legacy/g6lc_rvc_enc.sv",
+            "/core/smt_legacy/g6lc_jalr_usable.sv",
+            "/core/smt_legacy/g6lc_cf_unissued.sv",
+        ],
+        "notes": "Entire core/Flist.cva6 (excl. g1* recover) — all modules structural FO4",
     },
     {
         "id": "full_corev_apu",
@@ -260,6 +281,7 @@ def write_filtered_portable(
     *,
     soft: bool,
     exclude: list[str] | None = None,
+    defines: list[tuple[str, str | None]] | None = None,
 ) -> tuple[Path, list[str], list[Path], list[str]]:
     """Write portable.f (native paths for this OS CLI) + portable.host.f (Windows form).
 
@@ -296,6 +318,15 @@ def write_filtered_portable(
             "# monorepo-soak portable.f (structural FO4 — not STA)",
             "# Prefer fixing sv-timing package when this analyze fails.",
         ]
+        # `+define+` MUST be carried. The expander collects defines and this writer used
+        # to drop them, so the analysis saw none of the flist's configuration selects.
+        # For this repo that silently analysed the WRONG core: `Flist.cva6` sets
+        # `+define+G6LC_FETCH_B` to choose the fetch_B instruction supply, and without it
+        # every `ifdef G6LC_FETCH_B` body was skipped while the `ifndef` A-path / g1*
+        # recover bodies were analysed as if live. The CLI accepts `+define+` from a
+        # filelist, so the fix is simply to emit them.
+        for name, value in (defines or []):
+            lines.append(f"+define+{name}" if value is None else f"+define+{name}={value}")
         for d in expanded_incdirs:
             if d.is_dir():
                 lines.append(f"+incdir+{mapper(d)}")
@@ -1226,7 +1257,15 @@ def main(argv: list[str] | None = None) -> int:
                 portable,
                 soft=prof.soft_missing,
                 exclude=prof.exclude,
+                defines=expanded.defines,
             )
+            if expanded.defines:
+                log(
+                    f"profile {prof.id} defines: "
+                    + " ".join(
+                        n if v is None else f"{n}={v}" for n, v in expanded.defines
+                    )
+                )
             if excluded:
                 log(
                     f"profile {prof.id} excluded {len(excluded)} file(s) by "
