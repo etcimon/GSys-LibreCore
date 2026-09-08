@@ -1,0 +1,49 @@
+{
+  "schema": "g6lc-ldc-pin/v1",
+  "comment": [
+    "Pinned LDC for the optional libwasm cell (out/bios-ui-libwasm.wasm).",
+    "Digests are the upstream ldc2-1.43.0-beta1.sha256sums.txt values, verbatim.",
+    "The wasm32-unknown-wasi 'addon' package is deliberately NOT pinned: the cell",
+    "builds with -defaultlib= against browser-ui/libwasm/runtime-v1.43.0, so no",
+    "prebuilt WASI druntime/phobos is linked. See browser-ui/README.md."
+  ],
+  "version": "1.43.0-beta1",
+  "tag": "v1.43.0-beta1",
+  "repository": "https://github.com/ldc-developers/ldc",
+  "releaseNotes": "https://github.com/ldc-developers/ldc/releases/tag/v1.43.0-beta1",
+  "frontend": "2.113.0",
+  "sums": "ldc2-1.43.0-beta1.sha256sums.txt",
+  "bundlesDub": true,
+  "assets": {
+    "windows-x64": {
+      "file": "ldc2-1.43.0-beta1-windows-x64.7z",
+      "dir": "ldc2-1.43.0-beta1-windows-x64",
+      "sha256": "096258f81f8d1b5885e199a40f2e1411e04828daac9abd7c333cbc5834d2c363",
+      "bytes": 45819606
+    },
+    "linux-x64": {
+      "file": "ldc2-1.43.0-beta1-linux-x86_64.tar.xz",
+      "dir": "ldc2-1.43.0-beta1-linux-x86_64",
+      "sha256": "36f18df050e85941adabf7758c7906937ac0c19c77dbefc0d78f472f2fa86889",
+      "bytes": 97281252
+    },
+    "linux-arm64": {
+      "file": "ldc2-1.43.0-beta1-linux-aarch64.tar.xz",
+      "dir": "ldc2-1.43.0-beta1-linux-aarch64",
+      "sha256": "2db648d9f205de4fc7981a87a8dabdcdb19f0c5385592a262203ee58713dd0ad",
+      "bytes": 81324364
+    },
+    "osx-x64": {
+      "file": "ldc2-1.43.0-beta1-osx-x86_64.tar.xz",
+      "dir": "ldc2-1.43.0-beta1-osx-x86_64",
+      "sha256": "6510ec3ce6c1695fc626a52dbbf5fac56eaf0954eab1ab9ee8850c7ebd79227e",
+      "bytes": 92742476
+    },
+    "osx-arm64": {
+      "file": "ldc2-1.43.0-beta1-osx-arm64.tar.xz",
+      "dir": "ldc2-1.43.0-beta1-osx-arm64",
+      "sha256": "e25ad061e0361e9d4e8f9b645c187a459ffaaf06e4b469fdba9e4934a950a3bd",
+      "bytes": 86408872
+    }
+  }
+}

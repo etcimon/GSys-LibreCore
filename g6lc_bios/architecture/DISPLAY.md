@@ -143,21 +143,69 @@ result. `DispSel` runs after every probe and before anything paints.
 
 **The blit is surface-gated.** `FbExpand` (upscale + letterbox) and `FbExpand1`
 (scale 1, centred) are two specialisations of one generator; `FbExpandSel`
-reads `__disp.surface` and calls the right one, and both `VioPaint` and
-`DispPaint` go through it. That is the concrete fix for "the low-res plane is
-magnified onto the GPU display": on a GPU-class output the 640×480 plane is now
-placed 1:1 at (640, 300) of a 1920×1080 scanout instead of being blown up ×2.
+reads `__disp.surface` and calls the right one, and `VioPaint`, `DispPaint`
+and `PciPaint` all go through it. That is the concrete fix for "the low-res
+plane is magnified onto the GPU display": on a GPU-class output the 640×480
+plane is now placed 1:1 at (640, 300) of a 1920×1080 scanout instead of being
+blown up ×2.
 
-Deliberately **not** a per-output jump table: every accelerated candidate
-currently resolves to the same `high_geometry()`, so per-output arms would be
-identical. That table becomes necessary only when outputs report *different*
-modes, which needs the EDID registers drafted in `uncore/hdmi-display.md`.
+**Output geometry is runtime.** `DispSel` latches the winning output's
+`w`/`h`/`stride` into `__disp`, and every downstream consumer reads them there
+rather than reusing the gen-time `g6b_spec_proxy` default: `FbExpand`/
+`FbExpand1` compute the integer scale (`Op::Divu` for `fit`/`fill`/`dpi`,
+clamped to 1..=64), the centred letterbox and the right-row pad from the latched
+mode; `DomPaint32` clears `w*h` words and addresses glyph rows by the latched
+stride; `VioScan` sizes CREATE_2D/TRANSFER/FLUSH from `__disp`; `DispPaint`
+programs the engine registers and the `G6FB` descriptor from it. So a rung that
+declares a different mode than the proxy default is honoured end-to-end without
+a per-output jump table — and `VioScan`/`VioPaint`/`DispPaint`/`PciPaint`
+additionally gate on `__disp.class`, so a backend never commits a surface it
+did not win. The **destination** is runtime too: `__disp.fb`
+(`DISP_SEL_FB_LO`) is nonzero only on the `pcie-linear-fb` rung, so the blits
+write the accepted BAR in place and `__scan_fb` is the shared fallback for
+outputs without their own linear window.
 
-Still open: `DomPaint32`, a native-resolution 32bpp glyph paint. `FbExpand1`
-removes the magnification artefact but still sources the 8×8 plane, so the GPU
-surface currently shows *unmagnified* text, not *more* text. Crisp
-native-resolution rendering is the next step, and this document should not be
-read as claiming it already happens.
+`DomPaint32` is the native-resolution 32bpp glyph paint. It reads the live
+`__ui_dom` rows at `DOM_Y0`, fetches 8×8 glyph bytes from `__font`, and writes
+foreground/background B8G8R8X8 pixels directly into the latched output
+framebuffer (`__disp.fb`, else `__scan_fb`) at the output's native geometry.
+`FbExpandSel` picks `DomPaint32` on a GPU-class surface when DOM rows are
+populated, `FbExpand1` when the GPU surface has no DOM content, and
+`FbExpand` (upscale + letterbox) on a VGA-class surface. `VioPaint`,
+`DispPaint` and `PciPaint` all call `FbExpandSel`, so the same surface logic
+covers the virtio-gpu, uncore and PCIe-linear-fb transports.
+
+The `FbExpand1` path is **not** native DOM rendering — it only places the old
+640×480 8×8 4bpp plane at scale 1 in the center of the scanout. The
+`DomPaint32` path is what produces more text at native resolution: each glyph
+fills its own 8×8 cell in the 32bpp framebuffer instead of being encoded into a
+4bpp nibble and then expanded.
+
+The host exec model copies the final `__scan_fb` into `Smoke::scan_fb` and the
+test `g6b_wasm::jit::tests::dom_paint32_paints_native_32bpp_text_on_gpu_surface`
+asserts native B8G8R8X8 pixels for the first glyph row. It uses the uncore
+`display`-class peripheral path (`DispPaint` → `FbExpandSel` → `DomPaint32`) so
+the test runs without the virtio input eventq and stays within the step budget.
+Three companion tests in the same `g6b-wasm::jit::tests` module cover the
+surface dispatch ladder: `dom_paint32_empty_dom_falls_back_to_fbexpand1`
+verifies the 1:1 centred plane when no DOM rows are set;
+`dom_paint32_vga_surface_stays_magnified` verifies the `kernel.proxy.surface`
+`"vga"` override still runs `FbExpand` (upscale) and reports `disp_sel.1 == 0`;
+`dom_paint32_paints_native_32bpp_text_on_gpu_surface_rv32` verifies the same
+native glyph paint on RV32.
+
+Runtime-geometry coverage lives in `g6b-asm::exec::tests`: a driver pokes
+`__disp` with a geometry *no* declared output carries, so the gen-time proxy
+would either paint the wrong pixels or store-fault past `__scan_fb`.
+`fb_expand_follows_the_disp_latch_not_the_gen_time_proxy` runs `FbExpand` at a
+latched 1280×720 (fit collapses to scale 1 at (320,120) instead of the proxy's
+scale 2 at (320,60)); `fb_expand_sel_dispatches_per_output_geometry` drives the
+same latched 1600×1200 through both surfaces — `vga` → `FbExpand` scale 2 at
+(160,120), `gpu` → `FbExpand1` scale 1 at (480,360);
+`dom_paint32_uses_the_disp_latch_geometry` runs `FbExpandSel` → `DomPaint32` at
+a latched 800×600 and checks the runtime-stride glyph cells pixel-for-pixel.
+All three run on RV32 and RV64. The low-res `__gr_plane` / `DomPaint` path
+remains intact for VGA-class output and for the legacy 4bpp UI re-dump.
 
 ### Refusals, stated rather than implied
 
@@ -441,6 +489,14 @@ selected by BoardSpec:
   `architecture/uncore/hdmi-display.md`; fixture `fixtures/g6lc64-hdmi.json`
   (exec-model verified: `DISP-OK`, `disp_committed`, descriptor
   `1920×1080` x8r8g8b8).
+- **PCIe linear framebuffer** — `pcie.scan_display` + an accepted BAR:
+  `PciPaint` runs `FbExpandSel` with the destination resolved from
+  `__disp.fb` (`DISP_SEL_FB_LO`), so the blit lands **directly in the device
+  BAR** — `__scan_fb` is only the fallback for outputs without their own
+  linear window, and a `fence` orders the (possibly WC) stores. No doorbell,
+  no modeset: the BAR is display memory already scanned by the adapter's own
+  refresh. `PCI-PAINT` marks the commit; exec-modelled via a bounded BAR
+  shadow (`Smoke::pci_fb_img`).
 - **VNC** — `g6b qemu-args --vnc N` appends `-vnc 127.0.0.1:N`: a host-side
   frontend on the QEMU console that shows the BIOS scanout and any later
   guest identically (BIOS and Linux share the QEMU console → one VNC serves

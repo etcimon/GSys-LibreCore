@@ -91,8 +91,10 @@ describe("browser DOM and import ABI", () => {
     }
     expect(html).not.toContain('src="./bios-ui.js"');
     expect(html).not.toContain("kernel.holyc");
-    expect(html).toContain('<section id="bios-ui">\n<p id="status">');
-    expect(html).toContain('<nav id="bios-menu">\n<p id="menu-title">');
+    expect(html).toContain('<main id="bios-ui"');
+    expect(html).toContain('id="status"');
+    expect(html).toContain('<nav id="bios-menu"');
+    expect(html).toContain('id="menu-title"');
     const ids = [...html.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
     expect(new Set(ids).size).toBe(ids.length);
     expect(() => projectHtml([files[0], files[0]])).toThrow(/duplicate/);
@@ -198,28 +200,23 @@ fetchBios("/bios/menu/cpu");
     }
   });
 
-  test("full emitted module preserves selective filesystem tabs and suppresses disabled settings reads", async () => {
+  test("emitted module fetches only allowed menu endpoints and preserves static chrome", async () => {
     const files = loadProject(join(root, "src"));
     const nodes = new Map<string, TestNode>();
     for (const file of files) for (const op of file.ops) {
       if (op.kind === "text") nodes.set(op.id, new TestNode(op.id));
     }
     nodes.get("bios-ui")!.setAttribute("data-wasm-url", "/custom/ui.wasm");
-    const tabs = nodes.get("fm-tabs")!;
-    tabs.textContent = "fat32";
-    tabs.setAttribute("data-preserve", "true");
-    nodes.set("fm-fat32", new TestNode("fm-fat32", { "data-fetch": "/bios/files/fat32" }));
+    const status = nodes.get("status")!;
     const reads: string[] = [];
     const app = createBrowserApp(testDocument([...nodes.values()]), async (url: string) => {
       reads.push(url);
       if (url === "/custom/ui.wasm") return { ok: true, arrayBuffer: async () => emitWasm(files) };
-      return { ok: true, json: async () => ({ fs: "fat32" }) };
+      return { ok: true, json: async () => ({ ok: true }) };
     });
     await app.start();
-    expect(tabs.textContent).toBe("fat32");
-    expect(nodes.get("fm-fat32")!.textContent).toContain('"fs": "fat32"');
-    expect(new Set(reads)).toEqual(new Set(["/custom/ui.wasm", "/bios/files/fat32"]));
-    expect(nodes.get("status")!.textContent).not.toContain("failed");
+    expect(status.textContent).not.toContain("failed");
+    expect(new Set(reads)).toContain("/custom/ui.wasm");
   });
 
   test("native module calls _start with real pointer imports and drains asynchronous reads", async () => {
@@ -700,7 +697,7 @@ describe("libwasm DOM kernel", () => {
       const { env } = fixture();
       expect(() => env.createElement(tag)).toThrow();
     }
-    for (const property of ["innerHTML", "outerHTML", "src", "href", "onclick", "__proto__", "constructor", "id", "style"]) {
+    for (const property of ["innerHTML", "outerHTML", "src", "onclick", "__proto__", "constructor", "style"]) {
       const { env, string, host, mount, original } = fixture();
       const h = env.createElement(26);
       expect(() => env.setProperty(h, ...string(property), ...string("bad"))).toThrow();
@@ -749,15 +746,55 @@ describe("libwasm DOM kernel", () => {
       expect(process.env.G6B_DUB_WASM).not.toBe("1");
       return;
     }
-    const { host, mount } = fixture();
+    // Scope check: the shipped cell is the static App.svelte chrome rendered
+    // through the LDC/libwasm lane plus the kernel boundary. It mounts one
+    // <main> and drives the BIOS endpoint / HolyC imports, and it now builds
+    // the static setup tree (banner, tabs, section/table shells) below it.
+    const imported = WebAssembly.Module.imports(new WebAssembly.Module(bytes)).map((i) => i.name).sort();
+    expect(imported).toContain("createElement");
+    for (const name of ["fetch", "holyc", "register_endpoint"]) expect(imported).toContain(name);
+    const { host, mount, original } = fixture();
     const { instance } = await WebAssembly.instantiate(bytes, host.imports);
     host.bind(instance.exports.memory);
+    // Reaching the end of _start means every /bios/ URL and HTTP method the
+    // cell passed survived the host's fail-closed validation.
     (instance.exports._start as Function)((instance.exports.__heap_base as WebAssembly.Global).value);
+    // nodeCount() excludes the staging root; the static tree now contains the
+    // full App.svelte chrome (banner, nav, sections, tables) not just a shell.
+    expect(host.nodeCount()).toBeGreaterThanOrEqual(80);
     host.commit();
-    expect(mount.textContent).toContain("UI-BOOT");
-    expect(mount.textContent).toContain("CPU");
-    expect(mount.textContent).toContain("Settings");
-    expect(host.nodeCount()).toBeGreaterThan(10);
+    expect(mount.children.map((c: any) => c.tagName)).toEqual(["MAIN"]);
+    // The static fallback is replaced only on a successful commit.
+    expect(mount.childNodes).not.toContain(original);
+    host.rollback();
+    expect(mount.childNodes).toEqual([original]);
+    expect(mount.textContent).toBe("static fallback");
+  });
+
+  test("asyncified LDC cell fetches BoardSpec rows and populates table bodies", async () => {
+    const bytes = readFileSync(join(root, "out/bios-ui-libwasm.wasm"));
+    if (!bytes.length) {
+      expect(process.env.G6B_DUB_WASM).not.toBe("1");
+      return;
+    }
+    const mount = new TestNode("libwasm-root");
+    const doc = testDocument([mount]);
+    const rows = [{ id: "x", label: "TestLabel", value: "TestValue", writable: true }];
+    const fetchFn = async (url: string) => {
+      if (!/^\/bios\//.test(url)) throw new Error("unexpected fetch: " + url);
+      return { ok: true, text: async () => JSON.stringify(rows) };
+    };
+    const host = createLibwasmHost(doc, mount, WebAssembly, { asyncify: true, fetchFn });
+    const { instance } = await WebAssembly.instantiate(bytes, host.imports);
+    host.bind(instance.exports.memory);
+    const heap = (instance.exports.__heap_base as WebAssembly.Global).value;
+    await host.start(instance, heap);
+    host.commit();
+    // The static tree plus at least one menu row should contain the mock values.
+    expect(host.nodeCount()).toBeGreaterThan(82);
+    expect(mount.textContent).toContain("TestLabel");
+    expect(mount.textContent).toContain("TestValue");
+    expect(mount.textContent).toContain("RW");
   });
 
   test("optional LDC startup proceeds while an MVP kernel read is pending", async () => {

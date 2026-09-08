@@ -14,12 +14,13 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use g6b_holyc::ReplResult;
+use g6b_img::{load_assets, AssetMap};
 
 fn main() -> ExitCode {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         eprintln!(
-            "usage: g6b <design-compile|display|boot|tohtml|holyc-eval|holyc-serve|http-serve|loopback|qemu-args|elf|smoke|gr|display-proxy|css-paint|css-render|ppm-diff> \
+            "usage: g6b <design-compile|display|boot|tohtml|holyc-eval|holyc-serve|http-serve|loopback|qemu-args|elf|smoke|gr|display-proxy|display-proxy-32|ui-ppm32|css-paint|css-render|ppm-diff> \
              [--spec FILE] [--out DIR|FILE] [--port N] [--once]"
         );
         return ExitCode::from(2);
@@ -135,6 +136,56 @@ fn main() -> ExitCode {
                 let _ = fs::write(&gl_path, g6b_kernel::gl_listing(&spec));
                 eprintln!("g6b: wrote {out} and {}", gl_path.display());
                 ExitCode::SUCCESS
+            }
+        },
+        "display-proxy-32" => match load_spec(spec_path.as_deref()) {
+            Err(c) => c,
+            Ok(spec) => {
+                let out = flag_value(&args, "--out").unwrap_or("out/proxy32.ppm");
+                match g6b_kernel::proxy_ppm32(&spec) {
+                    Ok(ppm) => {
+                        if let Some(parent) = Path::new(out).parent() {
+                            if !parent.as_os_str().is_empty() {
+                                let _ = fs::create_dir_all(parent);
+                            }
+                        }
+                        if let Err(e) = fs::write(out, ppm) {
+                            eprintln!("g6b: display-proxy-32: {e}");
+                            return ExitCode::from(1);
+                        }
+                        eprintln!("g6b: wrote {out}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("g6b: display-proxy-32: {e}");
+                        ExitCode::from(1)
+                    }
+                }
+            }
+        },
+        "ui-ppm32" => match load_spec(spec_path.as_deref()) {
+            Err(c) => c,
+            Ok(spec) => {
+                let out = flag_value(&args, "--out").unwrap_or("out/setup32.ppm");
+                match g6b_kernel::ui_ppm32(&spec) {
+                    Ok(ppm) => {
+                        if let Some(parent) = Path::new(out).parent() {
+                            if !parent.as_os_str().is_empty() {
+                                let _ = fs::create_dir_all(parent);
+                            }
+                        }
+                        if let Err(e) = fs::write(out, ppm) {
+                            eprintln!("g6b: ui-ppm32: {e}");
+                            return ExitCode::from(1);
+                        }
+                        eprintln!("g6b: wrote {out}");
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("g6b: ui-ppm32: {e}");
+                        ExitCode::from(1)
+                    }
+                }
             }
         },
         "gr" => match load_spec(spec_path.as_deref()) {
@@ -644,7 +695,7 @@ fn css_render(args: &[String]) -> ExitCode {
         (Some(h), Some(c), None) => (fs::read_to_string(h), fs::read_to_string(c)),
         (None, None, Some(f)) => load_render_fixture(f),
         _ => {
-            eprintln!("g6b css-render: --html + --css, or --fixture");
+            eprintln!("g6b css-render: --html + --css, or --fixture; [--modern] [--assets DIR] [--w N] [--h N] [--out FILE]");
             return ExitCode::from(2);
         }
     };
@@ -670,24 +721,61 @@ fn css_render(args: &[String]) -> ExitCode {
         .and_then(|s| s.parse().ok())
         .unwrap_or(96);
 
-    match g6b_css::render::render_to_canvas(&html, &css, w, h) {
-        Ok(canvas) => {
-            let out = flag_value(args, "--out").unwrap_or("out/css-render.ppm");
-            if let Some(parent) = Path::new(out).parent() {
-                if !parent.as_os_str().is_empty() {
-                    let _ = fs::create_dir_all(parent);
-                }
-            }
-            if let Err(e) = fs::write(out, canvas.to_ppm()) {
-                eprintln!("g6b css-render: write {out}: {e}");
+    if flag_present(args, "--modern") {
+        let fonts = match g6b_ttf::FontSet::default_set() {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("g6b css-render: fonts: {e:?}");
                 return ExitCode::from(1);
             }
-            eprintln!("g6b: wrote {out}");
-            ExitCode::SUCCESS
+        };
+        let assets = match load_asset_dir(args) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("g6b css-render: assets: {e}");
+                return ExitCode::from(1);
+            }
+        };
+        match g6b_css::render32::render32(&html, &css, w, h, &assets, &fonts) {
+            Ok(out) => {
+                let path = flag_value(args, "--out").unwrap_or("out/css-render.ppm");
+                if let Some(parent) = Path::new(path).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                }
+                if let Err(e) = fs::write(path, out.canvas.to_ppm()) {
+                    eprintln!("g6b css-render: write {path}: {e}");
+                    return ExitCode::from(1);
+                }
+                eprintln!("g6b: wrote {path}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("g6b css-render: {e}");
+                ExitCode::from(1)
+            }
         }
-        Err(e) => {
-            eprintln!("g6b css-render: {e}");
-            ExitCode::from(1)
+    } else {
+        match g6b_css::render::render_to_canvas(&html, &css, w, h) {
+            Ok(canvas) => {
+                let out = flag_value(args, "--out").unwrap_or("out/css-render.ppm");
+                if let Some(parent) = Path::new(out).parent() {
+                    if !parent.as_os_str().is_empty() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                }
+                if let Err(e) = fs::write(out, canvas.to_ppm()) {
+                    eprintln!("g6b css-render: write {out}: {e}");
+                    return ExitCode::from(1);
+                }
+                eprintln!("g6b: wrote {out}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("g6b css-render: {e}");
+                ExitCode::from(1)
+            }
         }
     }
 }
@@ -707,6 +795,32 @@ fn load_render_fixture(
         (path.with_extension("html"), path.with_extension("css"))
     };
     (fs::read_to_string(html_path), fs::read_to_string(css_path))
+}
+
+fn load_asset_dir(args: &[String]) -> Result<AssetMap, String> {
+    let Some(dir) = flag_value(args, "--assets") else {
+        return Ok(AssetMap::new());
+    };
+    let mut items = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("read assets dir {dir}: {e}"))? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if !matches!(ext, "png" | "svg") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .ok_or_else(|| "bad asset filename".to_string())?
+            .to_string();
+        let bytes = fs::read(&path).map_err(|e| format!("read {name}: {e}"))?;
+        items.push((name, bytes));
+    }
+    load_assets(items)
 }
 
 fn ppm_diff(args: &[String]) -> ExitCode {

@@ -16,7 +16,10 @@
 #![allow(missing_docs)]
 
 use crate::analyze::{g6b_spec_proxy, Object};
-use crate::encode::{A0, A1, A2, A3, A6, A7, RA, SP, T0, T1, T2, T3, T4, T5, T6, X0};
+use crate::dom::signbit;
+use crate::encode::{
+    A0, A1, A2, A3, A4, A5, A6, A7, RA, S0, S1, S2, S3, SP, T0, T1, T2, T3, T4, T5, T6, X0,
+};
 use crate::encode::{
     SBI_PUTCHAR, VIO_DESC_NEXT, VIO_DESC_WRITE, VIO_DEV_GPU, VIO_DEV_INPUT, VIO_F_VERSION_1,
     VIO_GPU_FMT_B8G8R8X8, VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING,
@@ -2357,26 +2360,22 @@ pub fn dom_nav_node(o: Object, spec: &BoardSpec) -> Node {
 /// completed (STATUS == 0xF). Non-leaf: saves `ra` for the `VioCmd` calls.
 pub fn scan_node(spec: &BoardSpec) -> Node {
     let xlen = spec.isa.xlen;
-    let gp = g6b_spec_proxy(spec);
-    // The scanout is the *high-res* proxy target (gp.2×gp.3 = proxy.high_w×
-    // high_h when `kernel.proxy` is live, else the `__gr_plane` geometry) —
-    // `VioPaint` scale-expands the 4bpp plane into it.
-    let (w, h) = (gp.2, gp.3);
-    let band = h.min(VIO_BAND_H);
-    let fill_words = i64::from(w.saturating_mul(band));
-    let fb_len = i64::from(w.saturating_mul(h).saturating_mul(4));
     let mut ops = vec![
-        Op::Comment(format!(
-            "VioScan — {w}x{h} scanout: create/attach/scanout/transfer/flush"
-        )),
+        Op::Comment(
+            "VioScan — __disp w×h scanout: create/attach/scanout/transfer/flush".to_string(),
+        ),
         Op::Glob("VioScan".into()),
         Op::Label("VioScan".into()),
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: -16,
+            imm: -40,
         },
-        st_x(xlen, RA, SP, 8),
+        st_x(xlen, RA, SP, 32),
+        st_x(xlen, S0, SP, 24),
+        st_x(xlen, S1, SP, 16),
+        st_x(xlen, S2, SP, 8),
+        st_x(xlen, S3, SP, 0),
         // rescan for the GPU transport (VioProbe/VioInit may have run first).
         Op::La {
             rd: T0,
@@ -2448,13 +2447,60 @@ pub fn scan_node(spec: &BoardSpec) -> Node {
             addr: Addr::VioBss,
         },
         sw(T0, T5, VIO_DEV_OFF),
+        // Only scan out when DispSel picked the virtio-gpu rung — the mux may
+        // have selected pcie/uncore instead, in which case the scanout belongs
+        // to that backend and this lane must not clobber it.
+        lw(T6, T5, DISP_SEL_CLASS),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(g6b_spec::OutputClass::VirtioGpu.code()),
+        },
+        Op::Bne {
+            rs1: T6,
+            rs2: T3,
+            to: "vs_out".into(),
+        },
+        // Geometry from `__disp`, not the gen-time proxy default: S0 = w,
+        // S1 = h, S2 = w*h*4, S3 = min(h, VIO_BAND_H).
+        lw(S0, T5, DISP_SEL_W),
+        lw(S1, T5, DISP_SEL_H),
+        Op::Mul {
+            rd: S2,
+            rs1: S0,
+            rs2: S1,
+        },
+        Op::Slli {
+            rd: S2,
+            rs: S2,
+            shamt: 2,
+        },
+        Op::Li {
+            rd: S3,
+            imm: i64::from(VIO_BAND_H),
+        },
+        Op::Sltu {
+            rd: T6,
+            rs1: S1,
+            rs2: S3,
+        },
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: "vs_band_ok".into(),
+        },
+        Op::Addi {
+            rd: S3,
+            rs: S1,
+            imm: 0,
+        },
+        Op::Label("vs_band_ok".into()),
     ];
     // 1. RESOURCE_CREATE_2D — res 1, B8G8R8X8, w×h.
     req_hdr(&mut ops, VIO_GPU_RESOURCE_CREATE_2D);
     sw_i(&mut ops, T2, 24, 1); // resource_id
     sw_i(&mut ops, T2, 28, i64::from(VIO_GPU_FMT_B8G8R8X8));
-    sw_i(&mut ops, T2, 32, i64::from(w));
-    sw_i(&mut ops, T2, 36, i64::from(h));
+    ops.push(sw(S0, T2, 32));
+    ops.push(sw(S1, T2, 36));
     submit_nodata(&mut ops, 40, "vs_fail");
     // 2. RESOURCE_ATTACH_BACKING — res 1, 1 entry → __scan_fb, w*h*4.
     req_hdr(&mut ops, VIO_GPU_RESOURCE_ATTACH_BACKING);
@@ -2468,15 +2514,15 @@ pub fn scan_node(spec: &BoardSpec) -> Node {
         sw(T3, T2, 32),
         sw(X0, T2, 36), // addr u64 hi
     ]);
-    sw_i(&mut ops, T2, 40, fb_len);
+    ops.push(sw(S2, T2, 40));
     sw_i(&mut ops, T2, 44, 0);
     submit_nodata(&mut ops, 48, "vs_fail");
     // 3. SET_SCANOUT — scanout 0, res 1, rect {0,0,w,h}.
     req_hdr(&mut ops, VIO_GPU_SET_SCANOUT);
     ops.push(sw(X0, T2, 24));
     ops.push(sw(X0, T2, 28));
-    sw_i(&mut ops, T2, 32, i64::from(w));
-    sw_i(&mut ops, T2, 36, i64::from(h));
+    ops.push(sw(S0, T2, 32));
+    ops.push(sw(S1, T2, 36));
     sw_i(&mut ops, T2, 40, 0); // scanout_id
     sw_i(&mut ops, T2, 44, 1); // resource_id
     submit_nodata(&mut ops, 48, "vs_fail");
@@ -2490,9 +2536,10 @@ pub fn scan_node(spec: &BoardSpec) -> Node {
             rd: T3,
             imm: VIO_BAND_COLOR,
         },
-        Op::Li {
+        Op::Mul {
             rd: T4,
-            imm: fill_words,
+            rs1: S0,
+            rs2: S3,
         },
         Op::Label("vs_fill".into()),
         sw(T3, T2, 0),
@@ -2516,8 +2563,8 @@ pub fn scan_node(spec: &BoardSpec) -> Node {
     req_hdr(&mut ops, VIO_GPU_TRANSFER_TO_HOST_2D);
     ops.push(sw(X0, T2, 24));
     ops.push(sw(X0, T2, 28));
-    sw_i(&mut ops, T2, 32, i64::from(w));
-    sw_i(&mut ops, T2, 36, i64::from(band));
+    ops.push(sw(S0, T2, 32));
+    ops.push(sw(S3, T2, 36));
     ops.push(sw(X0, T2, 40));
     ops.push(sw(X0, T2, 44)); // offset u64
     sw_i(&mut ops, T2, 48, 1);
@@ -2527,8 +2574,8 @@ pub fn scan_node(spec: &BoardSpec) -> Node {
     req_hdr(&mut ops, VIO_GPU_RESOURCE_FLUSH);
     ops.push(sw(X0, T2, 24));
     ops.push(sw(X0, T2, 28));
-    sw_i(&mut ops, T2, 32, i64::from(w));
-    sw_i(&mut ops, T2, 36, i64::from(band));
+    ops.push(sw(S0, T2, 32));
+    ops.push(sw(S3, T2, 36));
     sw_i(&mut ops, T2, 40, 1); // resource_id
     sw_i(&mut ops, T2, 44, 0);
     submit_nodata(&mut ops, 48, "vs_fail");
@@ -2540,11 +2587,15 @@ pub fn scan_node(spec: &BoardSpec) -> Node {
     ops.push(Op::Label("vs_fail".into()));
     putc_str(&mut ops, "VIRTIO-GPU-FAIL\n");
     ops.push(Op::Label("vs_out".into()));
-    ops.push(ld_x(xlen, RA, SP, 8));
+    ops.push(ld_x(xlen, S3, SP, 0));
+    ops.push(ld_x(xlen, S2, SP, 8));
+    ops.push(ld_x(xlen, S1, SP, 16));
+    ops.push(ld_x(xlen, S0, SP, 24));
+    ops.push(ld_x(xlen, RA, SP, 32));
     ops.push(Op::Addi {
         rd: SP,
         rs: SP,
-        imm: 16,
+        imm: 40,
     });
     ops.push(ret());
     Node {
@@ -2593,16 +2644,18 @@ const VIO_PAL: [u32; 16] = [
 /// `__gr_plane` into the X8R8G8B8 `__scan_fb` surface. Same semantics as
 /// the host display-proxy (`g6b_gr::proxy::Proxy`): `fit`/`dpi`/`""` use
 /// the resolved uniform `scale` with a *centered* letterbox
-/// (ox=(hi_w-low_w*sc)/2, oy=(hi_h-low_h*sc)/2, exactly like `to_ppm`'s
-/// sample window); `fill` stretches per axis (sx=hi_w/low_w,
-/// sy=hi_h/low_h — the bounded integer form of `to_ppm`'s continuous
-/// stretch; exact when the ratios are integral). All constants are
-/// gen-time, so the blit is a bounded branch-free nest. Backend-agnostic —
+/// (ox=(W-low_w*sc)/2, oy=(H-low_h*sc)/2, exactly like `to_ppm`'s
+/// sample window); `fill` stretches per axis (sx=W/low_w,
+/// sy=H/low_h — the bounded integer form of `to_ppm`'s continuous
+/// stretch; exact when the ratios are integral). W/H/stride are read from
+/// `__disp` at runtime — the output `DispSel` latched, not the gen-time
+/// proxy default — and `divu` supplies the scale so one routine covers
+/// every declared output geometry. Backend-agnostic —
 /// `VioPaint` (virtio TRANSFER+FLUSH) and `DispPaint` (uncore display
 /// engine commit, `architecture/uncore/hdmi-display.md`) both call it, so
 /// the BIOS scales the plane identically on every output path. 4bpp:
-/// low_w even, each byte → two pixels. Saves t3..t6 (trap-safe); callers
-/// need no frame for it.
+/// low_w even, each byte → two pixels. Saves t3..t6 + s0..s2 (trap-safe);
+/// callers need no frame for it.
 pub fn expand_node(spec: &BoardSpec) -> Node {
     expand_node_named(spec, "FbExpand", None)
 }
@@ -2625,15 +2678,15 @@ pub fn expand1_node(spec: &BoardSpec) -> Node {
 /// Reads the surface `DispSel` latched and calls the matching blit, so the
 /// scanout source follows the resolved output rather than being hard-wired to
 /// the upscaled low-res plane. One dispatcher rather than one blit per output:
-/// every accelerated candidate currently shares `high_geometry()`, so a
-/// per-output jump table would have identical arms. It becomes necessary when
-/// outputs report *different* modes, which needs the EDID registers drafted in
-/// `architecture/uncore/hdmi-display.md`.
+/// `FbExpand`/`FbExpand1`/`DomPaint32` all read their geometry from `__disp`
+/// at runtime, so differing per-output modes need no jump table — the scale
+/// and letterbox are computed from the latched output itself.
 pub fn expand_sel_node(spec: &BoardSpec) -> Node {
     let xlen = spec.isa.xlen;
+    let dom32 = spec.kernel.wasm.jit && (spec.wants_virtio_gpu() || spec.wants_disp_scan());
     let mut ops = vec![
         Op::Comment(
-            "FbExpandSel — __disp.surface: gpu → FbExpand1 (1:1), vga → FbExpand (upscale)".into(),
+            "FbExpandSel — __disp.surface: gpu → DomPaint32 (DOM rows) or FbExpand1 (no DOM), vga → FbExpand (upscale)".into(),
         ),
         Op::Glob("FbExpandSel".into()),
         Op::Label("FbExpandSel".into()),
@@ -2643,6 +2696,24 @@ pub fn expand_sel_node(spec: &BoardSpec) -> Node {
             imm: -16,
         },
         st_x(xlen, RA, SP, 8),
+        // Mark the current DOM dirty watermark as painted before the blit so a
+        // nested timer during the long native clear does not re-enter and paint
+        // again. The dirty counter is re-checked on the next tick; if it moved,
+        // a repaint is still scheduled.
+        Op::La {
+            rd: T0,
+            addr: Addr::UiDom,
+        },
+        Op::Lw {
+            rd: T1,
+            rs: T0,
+            off: 4,
+        },
+        Op::Sw {
+            rs2: T1,
+            rs1: T0,
+            off: crate::dom::DOM_PAINTED,
+        },
         Op::La {
             rd: T0,
             addr: Addr::VioBss,
@@ -2657,10 +2728,34 @@ pub fn expand_sel_node(spec: &BoardSpec) -> Node {
             rs2: T2,
             to: "fbs_vga".into(),
         },
-        Op::Jal {
+    ];
+    if dom32 {
+        // GPU + DOM live: paint the DOM rows directly into __scan_fb. If the
+        // DOM is empty, fall back to the native 1:1 plane blit.
+        ops.push(Op::La {
+            rd: T3,
+            addr: Addr::UiDom,
+        });
+        ops.push(lw(T4, T3, 0));
+        ops.push(Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: "fbs_dom32".into(),
+        });
+    }
+    ops.push(Op::Jal {
+        rd: RA,
+        to: "FbExpand1".into(),
+    });
+    ops.push(jump("fbs_out"));
+    if dom32 {
+        ops.push(Op::Label("fbs_dom32".into()));
+        ops.push(Op::Jal {
             rd: RA,
-            to: "FbExpand1".into(),
-        },
+            to: "DomPaint32".into(),
+        });
+    }
+    ops.extend([
         jump("fbs_out"),
         Op::Label("fbs_vga".into()),
         Op::Jal {
@@ -2675,12 +2770,7 @@ pub fn expand_sel_node(spec: &BoardSpec) -> Node {
             imm: 16,
         },
         ret(),
-    ];
-    ops.push(Op::Comment(format!(
-        "  candidates share {}x{}, so one dispatcher suffices",
-        g6b_spec_proxy(spec).2,
-        g6b_spec_proxy(spec).3
-    )));
+    ]);
     Node {
         purpose: Purpose::DisplayMux,
         ops,
@@ -2690,47 +2780,284 @@ pub fn expand_sel_node(spec: &BoardSpec) -> Node {
 fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) -> Node {
     let xlen = spec.isa.xlen;
     let gp = g6b_spec_proxy(spec);
-    let (low_w, low_h, hi_w, hi_h) = (gp.0, gp.1, gp.2, gp.3);
-    let s = force_scale.unwrap_or(gp.7).max(1);
-    let (sx, sy) = if force_scale.is_none() && gp.6 == "fill" {
-        (
-            (hi_w / low_w.max(1)).clamp(1, 64),
-            (hi_h / low_h.max(1)).clamp(1, 64),
-        )
-    } else {
-        (s.min(64), s.min(64))
-    };
-    // Content window (centered for the uniform-scale modes) and the
-    // right-letterbox pad in dst bytes per row.
-    let used_w = low_w.saturating_mul(sx);
-    let used_h = low_h.saturating_mul(sy);
-    let ox = hi_w.saturating_sub(used_w) / 2;
-    let oy = hi_h.saturating_sub(used_h) / 2;
-    let origin = i64::from(oy.saturating_mul(hi_w).saturating_add(ox)).saturating_mul(4);
-    let row_pad = i64::from(hi_w.saturating_sub(used_w)).saturating_mul(4);
+    let (low_w, low_h) = (gp.0, gp.1);
+    // The destination geometry is *not* a gen-time constant: it is the
+    // output `DispSel` latched into `__disp` (a pcie/uncore/virtio rung may
+    // declare a different mode than `proxy.high_w×high_h`, and the `none`
+    // fallback is the low-res geometry itself). Scale, letterbox and the
+    // right-row pad are therefore computed at runtime from `__disp.w/h/
+    // stride`; `divu` covers the `fit`/`fill`/`dpi` modes without a
+    // per-output jump table.
+    let dpi_cap = (i64::from(gp.4) / 96).max(1);
     let row_bytes = i64::from(low_w / 2);
     // Loop labels are per-copy: two blits with the same internal label names
     // would collide in the label map and branch into each other's body.
     let tag = label.to_ascii_lowercase();
+    // Clamp `reg` into 1..=64. Uses a scratch `T0`; `{tag}_cl{which}` labels
+    // keep the two legs apart.
+    let clamp = |ops: &mut Vec<Op>, reg: u32, which: &str| {
+        ops.extend([
+            Op::Li { rd: T0, imm: 1 },
+            Op::Sltu {
+                rd: T0,
+                rs1: reg,
+                rs2: T0,
+            },
+            Op::Beq {
+                rs1: T0,
+                rs2: X0,
+                to: format!("{tag}_cl{which}hi"),
+            },
+            Op::Li { rd: reg, imm: 1 },
+            Op::Label(format!("{tag}_cl{which}hi")),
+            Op::Li { rd: T0, imm: 64 },
+            Op::Sltu {
+                rd: T0,
+                rs1: T0,
+                rs2: reg,
+            },
+            Op::Beq {
+                rs1: T0,
+                rs2: X0,
+                to: format!("{tag}_cl{which}ok"),
+            },
+            Op::Li { rd: reg, imm: 64 },
+            Op::Label(format!("{tag}_cl{which}ok")),
+        ]);
+    };
     let mut ops = vec![
         Op::Comment(format!(
-            "{label} — __gr_plane {low_w}x{low_h} (4bpp) → __scan_fb \
-             {hi_w}x{hi_h} (X8R8G8B8) scale {sx}x{sy} +({ox},{oy}) via vio_pal"
+            "{label} — __gr_plane {low_w}x{low_h} (4bpp) → __scan_fb __disp.w×h \
+             (X8R8G8B8); runtime scale/letterbox from __disp via vio_pal"
         )),
         Op::Glob(label.into()),
         Op::Label(label.into()),
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: -32,
+            imm: -56,
         },
         st_x(xlen, T3, SP, 0),
         st_x(xlen, T4, SP, 8),
         st_x(xlen, T5, SP, 16),
         st_x(xlen, T6, SP, 24),
-        // t0 = src row base, t1 = dst word, t2 = vertical rep countdown,
-        // t3 = src byte cursor, t4 = row byte count, t5 = palette base,
-        // t6 = src rows left; a0 = byte, a2 = pixel word.
+        st_x(xlen, S0, SP, 32),
+        st_x(xlen, S1, SP, 40),
+        st_x(xlen, S2, SP, 48),
+        // Runtime output geometry: a3 = W, a4 = H, a5 = stride (bytes).
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(A3, T5, DISP_SEL_W),
+        lw(A4, T5, DISP_SEL_H),
+        lw(A5, T5, DISP_SEL_STRIDE),
+    ];
+    // sx → S0, sy → S1. `force_scale` pins both (FbExpand1's 1:1 placement);
+    // otherwise the mode string is a gen-time pick between runtime-divide
+    // forms.
+    match force_scale {
+        Some(s) => {
+            let s = i64::from(s.clamp(1, 64));
+            ops.push(Op::Li { rd: S0, imm: s });
+            ops.push(Op::Li { rd: S1, imm: s });
+        }
+        None if gp.6 == "fill" => {
+            ops.extend([
+                Op::Li {
+                    rd: T0,
+                    imm: i64::from(low_w),
+                },
+                Op::Divu {
+                    rd: S0,
+                    rs1: A3,
+                    rs2: T0,
+                },
+            ]);
+            clamp(&mut ops, S0, "x");
+            ops.extend([
+                Op::Li {
+                    rd: T0,
+                    imm: i64::from(low_h),
+                },
+                Op::Divu {
+                    rd: S1,
+                    rs1: A4,
+                    rs2: T0,
+                },
+            ]);
+            clamp(&mut ops, S1, "y");
+        }
+        None => {
+            // fit = min(W/low_w, H/low_h); dpi caps it at dpi/96.
+            ops.extend([
+                Op::Li {
+                    rd: T0,
+                    imm: i64::from(low_w),
+                },
+                Op::Divu {
+                    rd: T1,
+                    rs1: A3,
+                    rs2: T0,
+                },
+                Op::Li {
+                    rd: T0,
+                    imm: i64::from(low_h),
+                },
+                Op::Divu {
+                    rd: T2,
+                    rs1: A4,
+                    rs2: T0,
+                },
+                // s = min(qx, qy): sltu t0, qx, qy → qx<qy ⇒ keep qx.
+                Op::Sltu {
+                    rd: T0,
+                    rs1: T1,
+                    rs2: T2,
+                },
+                Op::Bne {
+                    rs1: T0,
+                    rs2: X0,
+                    to: format!("{tag}_fqx"),
+                },
+                Op::Addi {
+                    rd: T1,
+                    rs: T2,
+                    imm: 0,
+                },
+                Op::Label(format!("{tag}_fqx")),
+            ]);
+            if gp.6 == "dpi" {
+                ops.extend([
+                    Op::Li {
+                        rd: T0,
+                        imm: dpi_cap,
+                    },
+                    Op::Sltu {
+                        rd: T2,
+                        rs1: T0,
+                        rs2: T1,
+                    },
+                    Op::Beq {
+                        rs1: T2,
+                        rs2: X0,
+                        to: format!("{tag}_fdpi"),
+                    },
+                    Op::Addi {
+                        rd: T1,
+                        rs: T0,
+                        imm: 0,
+                    },
+                    Op::Label(format!("{tag}_fdpi")),
+                ]);
+            }
+            ops.push(Op::Addi {
+                rd: S0,
+                rs: T1,
+                imm: 0,
+            });
+            clamp(&mut ops, S0, "s");
+            ops.push(Op::Addi {
+                rd: S1,
+                rs: S0,
+                imm: 0,
+            });
+        }
+    }
+    ops.extend([
+        // used_w = low_w*sx → t2, used_h = low_h*sy → t3.
+        Op::Li {
+            rd: T0,
+            imm: i64::from(low_w),
+        },
+        Op::Mul {
+            rd: T2,
+            rs1: T0,
+            rs2: S0,
+        },
+        Op::Li {
+            rd: T0,
+            imm: i64::from(low_h),
+        },
+        Op::Mul {
+            rd: T3,
+            rs1: T0,
+            rs2: S1,
+        },
+        // ox = max(0, (W - used_w) >> 1) → t4; oy → t1.
+        Op::Sub {
+            rd: T4,
+            rs1: A3,
+            rs2: T2,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T4,
+            shamt: signbit(xlen),
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: format!("{tag}_oxz"),
+        },
+        Op::Srli {
+            rd: T4,
+            rs: T4,
+            shamt: 1,
+        },
+        jump(&format!("{tag}_oxd")),
+        Op::Label(format!("{tag}_oxz")),
+        Op::Li { rd: T4, imm: 0 },
+        Op::Label(format!("{tag}_oxd")),
+        Op::Sub {
+            rd: T1,
+            rs1: A4,
+            rs2: T3,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T1,
+            shamt: signbit(xlen),
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: format!("{tag}_oyz"),
+        },
+        Op::Srli {
+            rd: T1,
+            rs: T1,
+            shamt: 1,
+        },
+        jump(&format!("{tag}_oyd")),
+        Op::Label(format!("{tag}_oyz")),
+        Op::Li { rd: T1, imm: 0 },
+        Op::Label(format!("{tag}_oyd")),
+        // row_pad = max(0, stride - used_w*4) → s2.
+        Op::Slli {
+            rd: T6,
+            rs: T2,
+            shamt: 2,
+        },
+        Op::Sub {
+            rd: S2,
+            rs1: A5,
+            rs2: T6,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: S2,
+            shamt: signbit(xlen),
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: X0,
+            to: format!("{tag}_rpok"),
+        },
+        Op::Li { rd: S2, imm: 0 },
+        Op::Label(format!("{tag}_rpok")),
+        // t0 = src row base, t1 = dst = __scan_fb + oy*stride + ox*4,
+        // t5 = palette, t6 = src rows left.
         Op::La {
             rd: T0,
             addr: Addr::GrPlane,
@@ -2740,18 +3067,41 @@ fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) ->
             rs: T0,
             imm: crate::GR_HEADER_BYTES as i32,
         },
-        Op::La {
+        Op::Mul {
             rd: T1,
-            addr: Addr::ScanFb,
+            rs1: T1,
+            rs2: A5,
         },
-        Op::Li {
-            rd: A2,
-            imm: origin,
+        Op::Slli {
+            rd: T4,
+            rs: T4,
+            shamt: 2,
         },
         Op::Add {
             rd: T1,
             rs1: T1,
-            rs2: A2,
+            rs2: T4,
+        },
+        // Destination framebuffer: `DISP_SEL_FB_LO` is nonzero only on the
+        // pcie-linear-fb rung (the accepted BAR), so a latched linear window
+        // is painted in place and `__scan_fb` is the shared fallback for the
+        // virtio/uncore transports (which DMA or scan it themselves). T5 is
+        // still `__vio` here; it is rebound to the palette next.
+        lw(T4, T5, DISP_SEL_FB_LO),
+        Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: format!("{tag}_dst"),
+        },
+        Op::La {
+            rd: T4,
+            addr: Addr::ScanFb,
+        },
+        Op::Label(format!("{tag}_dst")),
+        Op::Add {
+            rd: T1,
+            rs1: T1,
+            rs2: T4,
         },
         Op::La {
             rd: T5,
@@ -2762,9 +3112,10 @@ fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) ->
             imm: i64::from(low_h),
         },
         Op::Label(format!("{tag}_row")),
-        Op::Li {
+        Op::Addi {
             rd: T2,
-            imm: i64::from(sy),
+            rs: S1,
+            imm: 0,
         },
         Op::Label(format!("{tag}_rep")),
         Op::Addi {
@@ -2782,7 +3133,7 @@ fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) ->
             rs: T3,
             off: 0,
         },
-        // even pixel = high nibble → sx scaled words
+        // even pixel = high nibble → sx scaled words (runtime count in a1)
         Op::Srli {
             rd: A2,
             rs: A0,
@@ -2803,15 +3154,27 @@ fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) ->
             rs: A2,
             off: 0,
         },
-    ];
-    for k in 0..sx {
-        ops.push(sw(A2, T1, (k * 4) as i32));
-    }
-    ops.extend([
+        Op::Addi {
+            rd: A1,
+            rs: S0,
+            imm: 0,
+        },
+        Op::Label(format!("{tag}_hx")),
+        sw(A2, T1, 0),
         Op::Addi {
             rd: T1,
             rs: T1,
-            imm: (sx * 4) as i32,
+            imm: 4,
+        },
+        Op::Addi {
+            rd: A1,
+            rs: A1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: A1,
+            rs2: X0,
+            to: format!("{tag}_hx"),
         },
         // odd pixel = low nibble → sx scaled words
         Op::Andi {
@@ -2834,15 +3197,27 @@ fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) ->
             rs: A2,
             off: 0,
         },
-    ]);
-    for k in 0..sx {
-        ops.push(sw(A2, T1, (k * 4) as i32));
-    }
-    ops.extend([
+        Op::Addi {
+            rd: A1,
+            rs: S0,
+            imm: 0,
+        },
+        Op::Label(format!("{tag}_lx")),
+        sw(A2, T1, 0),
         Op::Addi {
             rd: T1,
             rs: T1,
-            imm: (sx * 4) as i32,
+            imm: 4,
+        },
+        Op::Addi {
+            rd: A1,
+            rs: A1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: A1,
+            rs2: X0,
+            to: format!("{tag}_lx"),
         },
         Op::Addi {
             rd: T3,
@@ -2859,21 +3234,12 @@ fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) ->
             rs2: X0,
             to: format!("{tag}_byte"),
         },
-    ]);
-    if row_pad > 0 {
-        ops.extend([
-            Op::Li {
-                rd: A2,
-                imm: row_pad,
-            },
-            Op::Add {
-                rd: T1,
-                rs1: T1,
-                rs2: A2,
-            },
-        ]);
-    }
-    ops.extend([
+        // next dst row: skip the right-letterbox pad (0 on a full-width fill).
+        Op::Add {
+            rd: T1,
+            rs1: T1,
+            rs2: S2,
+        },
         Op::Addi {
             rd: T2,
             rs: T2,
@@ -2903,14 +3269,17 @@ fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) ->
             rs2: X0,
             to: format!("{tag}_row"),
         },
-        ld_x(xlen, T3, SP, 0),
-        ld_x(xlen, T4, SP, 8),
-        ld_x(xlen, T5, SP, 16),
+        ld_x(xlen, S2, SP, 48),
+        ld_x(xlen, S1, SP, 40),
+        ld_x(xlen, S0, SP, 32),
         ld_x(xlen, T6, SP, 24),
+        ld_x(xlen, T5, SP, 16),
+        ld_x(xlen, T4, SP, 8),
+        ld_x(xlen, T3, SP, 0),
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: 32,
+            imm: 56,
         },
         ret(),
     ]);
@@ -2939,25 +3308,26 @@ fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) ->
 pub fn disp_paint_node(spec: &BoardSpec) -> Node {
     let xlen = spec.isa.xlen;
     let base = spec.display_ctrl().unwrap_or(0) as i64;
-    let gp = g6b_spec_proxy(spec);
-    let (hi_w, hi_h) = (gp.2, gp.3);
     let mut ops = vec![
         Op::Comment(format!(
-            "DispPaint — FbExpand + display-engine commit @ {base:#x} \
-             ({hi_w}x{hi_h} x8r8g8b8) + G6FB descriptor"
+            "DispPaint — FbExpandSel + display-engine commit @ {base:#x} \
+             (geometry from __disp) + G6FB descriptor"
         )),
         Op::Glob("DispPaint".into()),
         Op::Label("DispPaint".into()),
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: -48,
+            imm: -64,
         },
-        st_x(xlen, RA, SP, 0),
-        st_x(xlen, T3, SP, 8),
-        st_x(xlen, T4, SP, 16),
-        st_x(xlen, T5, SP, 24),
-        st_x(xlen, T6, SP, 32),
+        st_x(xlen, RA, SP, 56),
+        st_x(xlen, T3, SP, 48),
+        st_x(xlen, T4, SP, 40),
+        st_x(xlen, T5, SP, 32),
+        st_x(xlen, T6, SP, 24),
+        st_x(xlen, S0, SP, 16),
+        st_x(xlen, S1, SP, 8),
+        st_x(xlen, S2, SP, 0),
         Op::Li { rd: T0, imm: base },
         lw(T1, T0, 0),
         Op::Li {
@@ -2969,6 +3339,27 @@ pub fn disp_paint_node(spec: &BoardSpec) -> Node {
             rs2: T2,
             to: "dp_out".into(),
         },
+        // Only commit when DispSel picked the uncore-scanout rung — a
+        // virtio/pcie winner means this engine is not the output.
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T6, T5, DISP_SEL_CLASS),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(g6b_spec::OutputClass::UncoreScanout.code()),
+        },
+        Op::Bne {
+            rs1: T6,
+            rs2: T3,
+            to: "dp_out".into(),
+        },
+        // Runtime geometry from `__disp` (the latched output), not the
+        // gen-time proxy default: S0 = w, S1 = h, S2 = stride.
+        lw(S0, T5, DISP_SEL_W),
+        lw(S1, T5, DISP_SEL_H),
+        lw(S2, T5, DISP_SEL_STRIDE),
         // Surface-gated: the resolved surface decides whether the plane is
         // upscaled or placed 1:1, so a GPU-class output never gets the
         // magnified low-res picture by default.
@@ -2989,9 +3380,9 @@ pub fn disp_paint_node(spec: &BoardSpec) -> Node {
         },
         sw(T4, T0, 0x10), // FB_HI
     ];
-    sw_i(&mut ops, T0, 0x14, i64::from(hi_w));
-    sw_i(&mut ops, T0, 0x18, i64::from(hi_h));
-    sw_i(&mut ops, T0, 0x1c, i64::from(hi_w).saturating_mul(4));
+    ops.push(sw(S0, T0, 0x14));
+    ops.push(sw(S1, T0, 0x18));
+    ops.push(sw(S2, T0, 0x1c));
     sw_i(&mut ops, T0, 0x20, 1); // FORMAT x8r8g8b8
     sw_i(&mut ops, T0, 0x08, 1); // CTRL enable
                                  // G6FB handoff descriptor at __vio+0x400.
@@ -3002,14 +3393,9 @@ pub fn disp_paint_node(spec: &BoardSpec) -> Node {
     sw_i(&mut ops, T5, DISP_DESC_OFF, i64::from(DISP_DESC_MAGIC));
     ops.push(sw(T6, T5, DISP_DESC_OFF + 4));
     ops.push(sw(T4, T5, DISP_DESC_OFF + 8));
-    sw_i(&mut ops, T5, DISP_DESC_OFF + 12, i64::from(hi_w));
-    sw_i(&mut ops, T5, DISP_DESC_OFF + 16, i64::from(hi_h));
-    sw_i(
-        &mut ops,
-        T5,
-        DISP_DESC_OFF + 20,
-        i64::from(hi_w).saturating_mul(4),
-    );
+    ops.push(sw(S0, T5, DISP_DESC_OFF + 12));
+    ops.push(sw(S1, T5, DISP_DESC_OFF + 16));
+    ops.push(sw(S2, T5, DISP_DESC_OFF + 20));
     sw_i(&mut ops, T5, DISP_DESC_OFF + 24, 1);
     // COMMIT → STATUS.
     ops.extend([
@@ -3030,15 +3416,18 @@ pub fn disp_paint_node(spec: &BoardSpec) -> Node {
     ops.push(Op::Label("dp_ok".into()));
     putc_str(&mut ops, "DISP-OK\n");
     ops.push(Op::Label("dp_out".into()));
-    ops.push(ld_x(xlen, RA, SP, 0));
-    ops.push(ld_x(xlen, T3, SP, 8));
-    ops.push(ld_x(xlen, T4, SP, 16));
-    ops.push(ld_x(xlen, T5, SP, 24));
-    ops.push(ld_x(xlen, T6, SP, 32));
+    ops.push(ld_x(xlen, S2, SP, 0));
+    ops.push(ld_x(xlen, S1, SP, 8));
+    ops.push(ld_x(xlen, S0, SP, 16));
+    ops.push(ld_x(xlen, T6, SP, 24));
+    ops.push(ld_x(xlen, T5, SP, 32));
+    ops.push(ld_x(xlen, T4, SP, 40));
+    ops.push(ld_x(xlen, T3, SP, 48));
+    ops.push(ld_x(xlen, RA, SP, 56));
     ops.push(Op::Addi {
         rd: SP,
         rs: SP,
-        imm: 48,
+        imm: 64,
     });
     ops.push(ret());
     Node {
@@ -3049,25 +3438,27 @@ pub fn disp_paint_node(spec: &BoardSpec) -> Node {
 
 pub fn paint_node(spec: &BoardSpec) -> Node {
     let xlen = spec.isa.xlen;
-    let gp = g6b_spec_proxy(spec);
-    let (hi_w, hi_h) = (gp.2, gp.3);
     let mut ops = vec![
-        Op::Comment(format!(
-            "VioPaint — jal FbExpand (__gr_plane → __scan_fb {hi_w}x{hi_h} \
-             X8R8G8B8), then full-frame TRANSFER+FLUSH"
-        )),
+        Op::Comment(
+            "VioPaint — jal FbExpandSel (__gr_plane → __scan_fb X8R8G8B8), \
+             then full-frame TRANSFER+FLUSH; geometry from __disp"
+                .to_string(),
+        ),
         Op::Glob("VioPaint".into()),
         Op::Label("VioPaint".into()),
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: -48,
+            imm: -64,
         },
-        st_x(xlen, RA, SP, 0),
-        st_x(xlen, T3, SP, 8),
-        st_x(xlen, T4, SP, 16),
-        st_x(xlen, T5, SP, 24),
-        st_x(xlen, T6, SP, 32),
+        st_x(xlen, RA, SP, 56),
+        st_x(xlen, T3, SP, 48),
+        st_x(xlen, T4, SP, 40),
+        st_x(xlen, T5, SP, 32),
+        st_x(xlen, T6, SP, 24),
+        st_x(xlen, S0, SP, 16),
+        st_x(xlen, S1, SP, 8),
+        st_x(xlen, S2, SP, 0),
         Op::La {
             rd: T5,
             addr: Addr::VioBss,
@@ -3088,29 +3479,45 @@ pub fn paint_node(spec: &BoardSpec) -> Node {
             rs2: X0,
             to: "vp_out".into(),
         },
+        // Only paint when DispSel picked the virtio-gpu rung; a pcie/uncore
+        // winner means this backend is not the committed output.
+        lw(T6, T5, DISP_SEL_CLASS),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(g6b_spec::OutputClass::VirtioGpu.code()),
+        },
+        Op::Bne {
+            rs1: T6,
+            rs2: T3,
+            to: "vp_out".into(),
+        },
+        // Runtime scanout geometry from `__disp` (the latched output), not
+        // the gen-time proxy default.
+        lw(S0, T5, DISP_SEL_W),
+        lw(S1, T5, DISP_SEL_H),
         // Surface-gated (see DispPaint): upscale only on the VGA surface.
         Op::Jal {
             rd: RA,
             to: "FbExpandSel".into(),
         },
     ];
-    // TRANSFER_TO_HOST_2D — rect {0,0,hi_w,hi_h}, backing offset 0, res 1.
+    // TRANSFER_TO_HOST_2D — rect {0,0,w,h}, backing offset 0, res 1.
     req_hdr(&mut ops, VIO_GPU_TRANSFER_TO_HOST_2D);
     ops.push(sw(X0, T2, 24));
     ops.push(sw(X0, T2, 28));
-    sw_i(&mut ops, T2, 32, i64::from(hi_w));
-    sw_i(&mut ops, T2, 36, i64::from(hi_h));
+    ops.push(sw(S0, T2, 32));
+    ops.push(sw(S1, T2, 36));
     ops.push(sw(X0, T2, 40));
     ops.push(sw(X0, T2, 44)); // offset u64
     sw_i(&mut ops, T2, 48, 1);
     sw_i(&mut ops, T2, 52, 0);
     submit_nodata(&mut ops, 56, "vp_fail");
-    // RESOURCE_FLUSH — rect {0,0,hi_w,hi_h}, res 1.
+    // RESOURCE_FLUSH — rect {0,0,w,h}, res 1.
     req_hdr(&mut ops, VIO_GPU_RESOURCE_FLUSH);
     ops.push(sw(X0, T2, 24));
     ops.push(sw(X0, T2, 28));
-    sw_i(&mut ops, T2, 32, i64::from(hi_w));
-    sw_i(&mut ops, T2, 36, i64::from(hi_h));
+    ops.push(sw(S0, T2, 32));
+    ops.push(sw(S1, T2, 36));
     sw_i(&mut ops, T2, 40, 1);
     sw_i(&mut ops, T2, 44, 0);
     submit_nodata(&mut ops, 48, "vp_fail");
@@ -3122,19 +3529,102 @@ pub fn paint_node(spec: &BoardSpec) -> Node {
     ops.push(Op::Label("vp_fail".into()));
     putc_str(&mut ops, "VIRTIO-PAINT-FAIL\n");
     ops.push(Op::Label("vp_out".into()));
-    ops.push(ld_x(xlen, RA, SP, 0));
-    ops.push(ld_x(xlen, T3, SP, 8));
-    ops.push(ld_x(xlen, T4, SP, 16));
-    ops.push(ld_x(xlen, T5, SP, 24));
-    ops.push(ld_x(xlen, T6, SP, 32));
+    ops.push(ld_x(xlen, S2, SP, 0));
+    ops.push(ld_x(xlen, S1, SP, 8));
+    ops.push(ld_x(xlen, S0, SP, 16));
+    ops.push(ld_x(xlen, T6, SP, 24));
+    ops.push(ld_x(xlen, T5, SP, 32));
+    ops.push(ld_x(xlen, T4, SP, 40));
+    ops.push(ld_x(xlen, T3, SP, 48));
+    ops.push(ld_x(xlen, RA, SP, 56));
     ops.push(Op::Addi {
         rd: SP,
         rs: SP,
-        imm: 48,
+        imm: 64,
     });
     ops.push(ret());
     Node {
         purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// `PciPaint` — commit the frame to a PCIe-linear-fb output.
+///
+/// There is no register window and no doorbell on this rung: the accepted BAR
+/// *is* the display memory the adapter scans out, so the commit is just the
+/// blit. `DispSel` copied the BAR into `DISP_SEL_FB_LO`, and the `FbExpand`/
+/// `FbExpand1`/`DomPaint32` destination pick writes it in place — `__scan_fb`
+/// is never touched on this rung. A `fence` orders the (possibly WC) stores
+/// before the frame is considered live. Prints `PCI-PAINT`; gates out silently
+/// when `DispSel` did not pick the pcie rung or no BAR was accepted — the
+/// other paint backends own their own surfaces.
+pub fn pci_paint_node(spec: &BoardSpec) -> Node {
+    let xlen = spec.isa.xlen;
+    let mut ops = vec![
+        Op::Comment(
+            "PciPaint — jal FbExpandSel straight into the accepted BAR \
+             (__disp.fb), then fence; class-gated on pcie-linear-fb"
+                .to_string(),
+        ),
+        Op::Glob("PciPaint".into()),
+        Op::Label("PciPaint".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -32,
+        },
+        st_x(xlen, RA, SP, 24),
+        st_x(xlen, T5, SP, 16),
+        st_x(xlen, T6, SP, 8),
+        st_x(xlen, T3, SP, 0),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        // Only paint when DispSel picked the pcie-linear-fb rung — a
+        // virtio/uncore winner means this backend is not the output.
+        lw(T6, T5, DISP_SEL_CLASS),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(g6b_spec::OutputClass::PcieLinearFb.code()),
+        },
+        Op::Bne {
+            rs1: T6,
+            rs2: T3,
+            to: "pp_out".into(),
+        },
+        // Fail closed when PciProbe accepted no BAR: there is no linear
+        // framebuffer to paint.
+        lw(T6, T5, DISP_PCI_FB),
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: "pp_out".into(),
+        },
+        Op::Jal {
+            rd: RA,
+            to: "FbExpandSel".into(),
+        },
+        // Order the framebuffer stores before the frame is considered live —
+        // the BAR may be mapped WC, so posted writes need a fence to be
+        // visible to the adapter's scanout in program order.
+        Op::Fence,
+    ];
+    putc_str(&mut ops, "PCI-PAINT\n");
+    ops.push(Op::Label("pp_out".into()));
+    ops.push(ld_x(xlen, T3, SP, 0));
+    ops.push(ld_x(xlen, T6, SP, 8));
+    ops.push(ld_x(xlen, T5, SP, 16));
+    ops.push(ld_x(xlen, RA, SP, 24));
+    ops.push(Op::Addi {
+        rd: SP,
+        rs: SP,
+        imm: 32,
+    });
+    ops.push(ret());
+    Node {
+        purpose: Purpose::PciScan,
         ops,
     }
 }

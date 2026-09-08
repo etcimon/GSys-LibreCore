@@ -21,6 +21,12 @@
 
 pub mod inspect;
 pub mod render;
+pub mod render32;
+
+// Re-export the asset/font types the modern renderer consumes so callers
+// do not have to pull in extra crates just to invoke `render32`.
+pub use g6b_img::{load_assets, Asset, AssetMap, RgbaImage};
+pub use g6b_ttf::FontSet;
 
 use std::collections::BTreeMap;
 
@@ -37,6 +43,11 @@ pub const SUPPORTED_PROPERTIES: &[&str] = &[
     "display",
     "width",
     "height",
+    // Width clamps. `max-width` with `margin: 0 auto` is the standard centered
+    // column, so the two land together — a `max-width` that did not constrain
+    // the auto-margin solve would centre nothing.
+    "max-width",
+    "min-width",
     "box-sizing",
     "margin-top",
     "margin-right",
@@ -68,6 +79,25 @@ pub const SUPPORTED_PROPERTIES: &[&str] = &[
     "padding",
     "border",
     "visibility",
+    // Alpha / modern-UI lane (render32). Every entry here is honoured by the
+    // RGBA renderer — a property in this list may never silently drop paint.
+    "opacity",
+    "border-radius",
+    "background-image",
+    "object-fit",
+    "font-family",
+    "font-size",
+    "font-weight",
+    "text-align",
+    // SVG presentation properties (rasterized by g6b-img on <svg> children).
+    "fill",
+    "fill-opacity",
+    "stroke",
+    "stroke-width",
+    "stroke-opacity",
+    // Additional shorthands expanded at parse time.
+    "background",
+    "font",
 ];
 
 /// Every way this crate refuses input. No variant is recoverable-by-guessing:
@@ -89,6 +119,9 @@ pub enum CssError {
     /// needs intrinsic sizing, which this renderer does not do — falling back
     /// to the containing-block width would silently mis-place the box.
     AbsoluteNeedsSize(&'static str),
+    /// A property whose value sits outside the implemented keyword set —
+    /// e.g. `background-image: linear-gradient(...)` or `text-align: justify`.
+    UnsupportedValue(String),
 }
 
 impl std::fmt::Display for CssError {
@@ -110,6 +143,7 @@ impl std::fmt::Display for CssError {
                 f,
                 "position:absolute needs an explicit {axis}; shrink-to-fit is not implemented"
             ),
+            Self::UnsupportedValue(v) => write!(f, "css value {v} is not implemented"),
         }
     }
 }
@@ -217,8 +251,109 @@ fn expand_shorthand(property: &str, value: &str) -> Vec<(String, String)> {
             let _ = style;
             out
         }
+        "background" => {
+            // Recognized tokens only: `url(...)` → background-image, a parseable
+            // colour → background-color. Any other *function* token
+            // (`linear-gradient(...)`, `image(...)`) is surfaced as a
+            // `background-image` value so `check_value` can refuse it rather
+            // than dropping it inside a shorthand. Plain keywords we do not
+            // implement (`center`, `no-repeat`, `cover`) are dropped — they
+            // change nothing this renderer would paint.
+            let mut out = Vec::new();
+            for tok in value_tokens(value) {
+                let lower = tok.to_ascii_lowercase();
+                if lower.starts_with("url(") {
+                    out.push(("background-image".into(), tok));
+                } else if g6b_gr::color::parse_rgba(&lower).is_some() {
+                    out.push(("background-color".into(), tok));
+                } else if lower.contains('(') {
+                    out.push(("background-image".into(), tok));
+                }
+            }
+            out
+        }
+        "font" => {
+            // `font: [weight] <size>[/<line-height>] <family-list>` — the size
+            // token splits the shorthand; everything after it is the family.
+            let tokens = value_tokens(value);
+            let mut out = Vec::new();
+            let mut family_start = None;
+            for (i, tok) in tokens.iter().enumerate() {
+                let lower = tok.to_ascii_lowercase();
+                // Weight keywords/numbers first: a bare `400` parses as a
+                // number but is a weight, not a size.
+                if matches!(lower.as_str(), "bold" | "bolder" | "lighter" | "normal")
+                    || lower.parse::<u32>().is_ok_and(|n| (100..=900).contains(&n))
+                {
+                    out.push(("font-weight".into(), lower));
+                    continue;
+                }
+                let size_tok = lower.split('/').next().unwrap_or(&lower);
+                if size_tok.ends_with("px")
+                    || size_tok.ends_with("em")
+                    || size_tok.ends_with('%')
+                    || size_tok.parse::<f64>().is_ok()
+                {
+                    family_start = Some(i + 1);
+                    out.push((
+                        "font-size".into(),
+                        tok.split('/').next().unwrap().to_string(),
+                    ));
+                    break;
+                }
+                // `italic`/`small-caps`/etc. are not implemented and are
+                // dropped — they only affect shaping, which this raster
+                // does not claim.
+            }
+            if let Some(start) = family_start {
+                if let Some(pos) = value.rfind(tokens[start - 1].as_str()) {
+                    let family = value[pos + tokens[start - 1].len()..].trim_start();
+                    if !family.is_empty() {
+                        out.push(("font-family".into(), family.to_string()));
+                    }
+                }
+            } else if !tokens.is_empty() {
+                // No size token: the whole value is a family list.
+                out.push(("font-family".into(), value.trim().to_string()));
+            }
+            out
+        }
         _ => vec![(property.into(), value.into())],
     }
+}
+
+/// Split a declaration value on whitespace that sits outside `(...)` and
+/// quotes — `rgba(0, 0, 64, .74)` and `font:16px "Courier New",monospace`
+/// must not be tokenized apart.
+fn value_tokens(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let (mut depth, mut quote) = (0usize, '\0');
+    for c in value.trim().chars() {
+        match c {
+            '(' | '[' if quote == '\0' => depth += 1,
+            ')' | ']' if quote == '\0' => depth = depth.saturating_sub(1),
+            '"' | '\'' => {
+                if quote == c {
+                    quote = '\0';
+                } else if quote == '\0' {
+                    quote = c;
+                }
+            }
+            _ => {}
+        }
+        if c.is_whitespace() && depth == 0 && quote == '\0' {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 fn is_border_style_word(w: &str) -> bool {
@@ -410,8 +545,41 @@ fn strip_comments(src: &str) -> String {
 /// (by `computed_box` / `parse_color`) because they depend on a containing
 /// block and a palette that parse time does not have.
 fn check_value(property: &str, value: &str) -> R<()> {
-    if property == "position" {
-        Position::parse(value)?;
+    let v = value.trim();
+    match property {
+        "position" => {
+            Position::parse(v)?;
+        }
+        // `url(...)` or `none` — gradients and image-set() are paint servers
+        // this renderer does not implement and must not silently drop.
+        "background-image" if !v.eq_ignore_ascii_case("none") && !v.starts_with("url(") => {
+            return Err(CssError::UnsupportedValue(format!("background-image {v}")));
+        }
+        "text-align"
+            if !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "left" | "right" | "center" | "start" | "end"
+            ) =>
+        {
+            return Err(CssError::UnsupportedValue(format!("text-align {v}")));
+        }
+        "object-fit"
+            if !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "fill" | "contain" | "cover" | "none"
+            ) =>
+        {
+            return Err(CssError::UnsupportedValue(format!("object-fit {v}")));
+        }
+        "font-weight"
+            if !matches!(
+                v.to_ascii_lowercase().as_str(),
+                "normal" | "bold" | "bolder" | "lighter"
+            ) && v.parse::<u32>().map_or(true, |n| !(100..=900).contains(&n)) =>
+        {
+            return Err(CssError::UnsupportedValue(format!("font-weight {v}")));
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -843,6 +1011,12 @@ pub fn computed_absolute_box(style: &ComputedStyle, cb_w: i32) -> R<BoxModel> {
     computed_box(style, cb_w)
 }
 
+fn is_auto(style: &ComputedStyle, property: &str) -> bool {
+    style
+        .get(property)
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("auto"))
+}
+
 /// Compute the box model for one element inside a `available_width` container.
 ///
 /// `box-sizing: border-box` subtracts padding and border from the declared
@@ -850,7 +1024,7 @@ pub fn computed_absolute_box(style: &ComputedStyle, cb_w: i32) -> R<BoxModel> {
 pub fn computed_box(style: &ComputedStyle, available_width: i32) -> R<BoxModel> {
     let padding = edge(style, "padding", "", available_width)?;
     let border = edge(style, "border", "-width", available_width)?;
-    let margin = edge(style, "margin", "", available_width)?;
+    let mut margin = edge(style, "margin", "", available_width)?;
 
     let sizing = match style.get("box-sizing") {
         Some(v) if v.eq_ignore_ascii_case("border-box") => BoxSizing::BorderBox,
@@ -869,6 +1043,46 @@ pub fn computed_box(style: &ComputedStyle, available_width: i32) -> R<BoxModel> 
     };
     if matches!(sizing, BoxSizing::BorderBox) && declared_width.is_some() {
         content_width -= padding.horizontal() + border.horizontal();
+    }
+
+    // `min-width`/`max-width` clamp the *used* width. Both are expressed
+    // against the same box the `width` property is, so `border-box` sizing
+    // subtracts the edges from the clamp too.
+    let edges = padding.horizontal() + border.horizontal();
+    let clamp = |v: &str| -> R<i32> {
+        let n = length(v, available_width)?;
+        Ok(if matches!(sizing, BoxSizing::BorderBox) {
+            (n - edges).max(0)
+        } else {
+            n
+        })
+    };
+    if let Some(v) = style.get("max-width") {
+        if !v.eq_ignore_ascii_case("none") && !v.eq_ignore_ascii_case("auto") {
+            content_width = content_width.min(clamp(v)?);
+        }
+    }
+    if let Some(v) = style.get("min-width") {
+        if !v.eq_ignore_ascii_case("auto") {
+            content_width = content_width.max(clamp(v)?);
+        }
+    }
+
+    // CSS 10.3.3: an over-constrained block with `auto` horizontal margins
+    // solves for them, which is the `margin: 0 auto` centered column. Without
+    // this a `max-width` box just sits flush left.
+    let auto_left = is_auto(style, "margin-left");
+    let auto_right = is_auto(style, "margin-right");
+    if auto_left || auto_right {
+        let free = (available_width - content_width.max(0) - edges).max(0);
+        match (auto_left, auto_right) {
+            (true, true) => {
+                margin.left = free / 2;
+                margin.right = free - free / 2;
+            }
+            (true, false) => margin.left = free,
+            _ => margin.right = free,
+        }
     }
 
     let mut content_height = match style.get("height") {

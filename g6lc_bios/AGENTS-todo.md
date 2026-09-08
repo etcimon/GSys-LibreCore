@@ -68,6 +68,7 @@ Green commands: `python tools/g6b.py check` (independence + Bun tests/build + fm
 | **B57** Transactional DOM (`DomTransaction` + native-browser DOM-kernel host); explicit libwasm ABI mount with startup verification | landed (host) |
 | **B58** Cooperative RV32/RV64 task-switch IR, bounded scheduler/task services, DedicatedWorker compute protocol shared by browser/HolyC menus | landed (host IR + services; guest dispatch open) |
 | **B59** LDC 1.43 + vendored `runtime-v1.43.0` libwasm cell: DUB workspace, provenance/ABI/startup-gated publication, Asyncify build path with custom binaryen, D particle exports + WebGL backdrop | landed (component-shell artifact; libwasm await status/object-string ABI, `g6b-wasm` dispatch and JS host `createLibwasmHost` landed; D `catch` rejection->wasm-EH throw and full Svelte tree still open) |
+| **B59b** pinned LDC toolchain: `browser-ui/toolchains/ldc.lock.json` (upstream `v1.43.0-beta1`, per-host SHA-256), `scripts/install-ldc.ts` verify-then-extract installer, pin-first discovery in `compiler/ldc.ts` | landed (host; replaces ambient `1.43.0-git` discovery — see below) |
 
 B53 guest-DOM increment (2026-09): `g6b-asm` gained `Purpose::UiDom`,
 `Addr::{WasmData,UiFont,UiDom}`, `Module.{wasm_data,font,dom_bytes}`, the
@@ -407,6 +408,45 @@ is the verified path. Runner script: `out/g6b_qemu_run.sh`.
   semantics differ per implementation (QEMU wakes on masked-pending; the
   model treats it as a poll pause).
 
+B53 follow-on 9 (2026-10) — **native 32bpp DOM text paint (`DomPaint32`).**
+`g6b-asm::dom` gained `DomPaint32`, a bounded native-resolution 32bpp glyph
+painter that reads live `__ui_dom` rows and the 8×8 `__font` table and writes
+B8G8R8X8 pixels directly into `__scan_fb` at the output's native geometry
+(`g6b_spec_proxy` `hi_w`/`hi_h`), plus a full-frame clear. `FbExpandSel` now
+dispatches GPU + DOM rows → `DomPaint32`, GPU + empty DOM → `FbExpand1`, and
+VGA → `FbExpand`. `VioPaint` and `DispPaint` both call `FbExpandSel`, so the
+same surface logic covers virtio-gpu and the uncore display engine. A
+DOM-dirty watermark update at the top of `FbExpandSel` prevents nested timer
+re-entry while the long native clear is running, and the `trap_timer` dirty
+watermark check keeps background repaints bounded.
+
+- `g6b-asm` gained `Module::scan_fb_addr()` and `exec::Smoke::scan_fb` so
+  regression tests can inspect the native 32bpp surface.
+- `g6b-wasm::jit::tests::dom_paint32_paints_native_32bpp_text_on_gpu_surface`
+  asserts the first row of the first glyph (`U` from `UI-BOOT`) in native
+  1920×1080 B8G8R8X8, and `DISP-OK`/`disp_committed` on a `display`-class
+  uncore peripheral (`wants_disp_scan`) to avoid the virtio-input eventq and
+  stay within `STEP_LIMIT`. It passed on both the focused `cargo test` and the
+  full `python tools/g6b.py check` (independence, Bun tests/build, fmt,
+  clippy, workspace tests, 13/13 `bios-regress`).
+- Follow-on tests added for the three-way surface dispatch:
+  - `dom_paint32_empty_dom_falls_back_to_fbexpand1` proves an empty
+    `__ui_dom` on a GPU-class output lands the 640×480 plane 1:1 at
+    `(640,300)` using `FbExpand1` instead of `DomPaint32`.
+  - `dom_paint32_vga_surface_stays_magnified` proves `kernel.proxy.surface`
+    `"vga"` forces `FbExpand` (×2 for 1920×1080 dpi=192) and reports
+    `disp_sel.1 == 0`.
+  - `dom_paint32_paints_native_32bpp_text_on_gpu_surface_rv32` proves the
+    same native glyph paint on RV32 when a low entry (`0x0001_0000`) keeps
+    the scanout address below the sign bit.
+  - `g6b-wasm::binary::encode_empty_ui_module` is the tiny empty `_start`
+    helper used by the fallback test.
+- The 4bpp `__gr_plane` / `DomPaint` path remains intact for VGA-class output
+  and for the legacy UART `Ui` re-dump.
+- Hardware support claims remain as documented in `architecture/DISPLAY.md`:
+  no AMD/NVIDIA modesetting, no PCIe BAR assignment, no HDMI hot-plug, the
+  guest GPU path is not the Rust CSS engine or WebGL.
+
 B50–B52 verification (2026-09-05): `python tools/g6b.py check` passed
 independence, 15 Bun tests/build, fmt, strict Clippy and 196 Rust tests;
 `python tools/g6b.py regress` passed all 13 cases, including shared UI HTTP,
@@ -572,6 +612,54 @@ signature verifier in `browser-ui/compiler/wasm-cell.ts`, and the fail-closed JS
 handlers in `browser-ui/src/kernel.ts` are all in place with Rust and Bun tests.
 The shipped asyncified LDC 1.43 artifact now uses the B63, B64, and B65 families when
 D code imports them. B67 Moment core, B68 typed arrays / DataView Create are now wired.
+
+**B59b (2026-09-08)** — the optional libwasm cell now has a **pinned**
+compiler instead of an ambient one. `browser-ui/toolchains/ldc.lock.json`
+names upstream `v1.43.0-beta1` (DMD 2.113.0, matching the carried
+`runtime-v1.43.0`) and carries the upstream
+`ldc2-1.43.0-beta1.sha256sums.txt` digest and byte size for each of the five
+published host assets. `bun scripts/install-ldc.ts` downloads the asset for
+the running host, checks size and SHA-256 **before** extracting, extracts into
+`browser-ui/toolchains/<asset-dir>/`, re-reads `ldc2 --version` and deletes the
+tree unless it is exactly the pin, then writes `toolchains/installed.json`.
+Only `.gitignore` and the lock file are tracked, so the ~220 MB tree is
+reproducible from the pin rather than vendored. `compiler/ldc-pin.ts` is the
+sole reader and validates schema, 1.43-ness, tag/version agreement and the
+upstream repository; a host with no published build (`windows-arm64`) is
+refused with that message rather than downgraded.
+
+`compiler/ldc.ts::findLdc` now prefers the pinned tree over every ambient
+toolchain (only the `SVELTE_D_LDC`/`LDC`/`WASM_LDC`/`SVELTE_D_WASM_LDC`
+env escape hatch outranks it), and `resolveToolchain().pinned` reports which
+won. This is a correctness fix, not ergonomics: `cellInputHash` hashes the
+compiler **binary content**, so the previously discovered host-built
+`1.43.0-git-1218a47` produced an `inputs` digest nobody else could reproduce —
+which is exactly why every build reported
+`artifact=stale ... source/runtime/toolchain/ABI mismatch` and shipped a
+zero-byte `out/bios-ui-libwasm.wasm`. With the pin installed,
+`G6B_DUB_WASM=1 bun scripts/build.ts` produces a verified `fresh` 37,253-byte
+artifact whose provenance records `LDC - the LLVM D compiler (1.43.0-beta1):`,
+and subsequent plain builds keep it fresh from cache. The release bundles DUB,
+so the LDC/DUB pair can no longer be mismatched. The `addon-wasi` package is
+deliberately not pinned: the cell links `-defaultlib=` against the carried
+runtime, so no prebuilt WASI druntime/phobos is used.
+
+Two tests that had never actually executed were corrected rather than left
+aspirational. `actual full LDC cell starts with the explicit DOM ABI` had a
+frozen four-import list and a hand-written stub env; it now derives both from
+the module and additionally checks that the provenance manifest matches the
+bytes and names the pinned compiler. `executes the shipped LDC cell through
+the actual host` asserted `UI-BOOT`/`CPU`/`Settings` text and >10 nodes — that
+was only ever green because the artifact was empty. The shipped cell is the
+component **shell** plus the kernel boundary: it mounts one `<main>` and drives
+18 `/bios/...` GETs, one `holyc` line and one `register_endpoint` call through
+`createLibwasmHost`'s fail-closed URL/method validation, and builds no setup
+tree. The test now asserts that, so the gap cannot be silently misread as
+implemented. Verified: `bun test` 96 pass / 2 skip / 0 fail; with
+`G6B_TEST_LDC_CELL=1 G6B_TEST_LDC_FX=1` the two real-compiler probes run and
+pass for the first time (14/14 in `build.test.ts`); `cargo test --workspace`
+green; `python tools/g6b.py check` and `bios-regress` OK. No RTL/silicon,
+guest JIT or guest-browser claim follows.
 
 **B72 (2026-09-07)** — browser instance: `createBrowserContext` in
 `browser-ui/src/kernel.ts` owns the `console`/`window`/`document` singletons,
@@ -786,7 +874,137 @@ override. HPD is read only at contract revision 2 and reported `HPD_UNKNOWN` on
 revision 1 — the model reports rev 1, so nothing claims hot-plug detection.
 New fixture `fixtures/g6lc64-pcie-gpu.json` plus `disp_sel_pcie` and
 `disp_sel_vga` regression cases; `disp_scan` now also asserts `DISP-SEL 21`.
-Still open: `DomPaint32` (native-resolution 32bpp glyphs — `FbExpand1` removes
-the magnification but still sources the 8×8 plane) and the per-output geometry
-jump table, which is unnecessary until EDID reports differing modes.
+`DomPaint32` is now implemented (see B53 follow-on 9 above). Still open:
+the per-output geometry jump table, which is unnecessary until EDID reports
+differing modes.
 `g6b.py check` and `bios-regress` green.
+
+B76 follow-on (2026-09-08) - **runtime `__disp` geometry.** The scanout path
+no longer reuses the gen-time `g6b_spec_proxy` default: `DispSel` latches the
+winning rung's `w`/`h`/`stride` into `__disp` and every consumer reads them
+there. `FbExpand`/`FbExpand1` compute the integer scale from the latched mode
+(new IR op `Op::Divu`, clamped 1..=64) plus the centred letterbox and
+right-row pad - the mode (`fit`/`fill`/`dpi`) is still a gen-time pick between
+divide forms, but the operands are runtime. `DomPaint32` clears `w*h` words and
+addresses glyph rows by the latched stride. `VioScan` runs *after* `DispSel`
+(it was emitted inside the earlier virtio call block), gates on
+`__disp.class == VirtioGpu`, and sizes CREATE_2D/TRANSFER/FLUSH from `__disp`;
+`DispPaint` gates on `UncoreScanout` and programs the engine + `G6FB`
+descriptor from the latch, so a backend never commits a surface it did not win
+(previously `DispPaint` painted whenever the engine MAGIC was present, even
+when PCIe won the ladder). `__scan_fb` is sized as the max across
+`display_outputs()` so every rung's mode fits. Per-output jump table retired
+entirely: the runtime scale covers differing output modes, and EDID (contract
+rev 2) can land without codegen changes. Encoder/executor gained `s8`/`s9`.
+Two host-model bugs found: `VioScan` ran before `DispSel` could not have read
+the latch (fixed by the reorder), and the executor never truncated effective
+addresses on RV32 - `la`/`auipc` at `0x8xxx_xxxx` sign-extended into the u64
+register file and every load/store/`jalr` bounds-check missed. `eff_addr`
+now wraps `rs1 + imm` at 32 bits for xlen=32. New exec tests:
+`fb_expand_follows_the_disp_latch_not_the_gen_time_proxy` (poked 1280x720,
+both xlens), `fb_expand_sel_dispatches_per_output_geometry` (one latched
+1600x1200, `vga` surface -> scale-2 fit at (160,120), `gpu` surface -> 1:1 at
+(480,360)), and `dom_paint32_uses_the_disp_latch_geometry` (`FbExpandSel` ->
+`DomPaint32` at a poked 800x600, pixel-checked glyph cells at the latched
+stride). The PCIe-linear-fb paint path is now closed: `DISP_SEL_FB_LO`
+doubles as the blit destination pick - nonzero means the latched output has
+its own linear window (the pcie rung's accepted BAR), so `FbExpand`/
+`FbExpand1`/`DomPaint32` write it in place and `PciPaint` is just
+`FbExpandSel` + `fence` + `PCI-PAINT` (gated on `__disp.class ==
+PcieLinearFb` and `DISP_PCI_FB != 0`; no doorbell, the BAR is the display
+memory). The exec model keeps a `VIO_FB_MAX`-sized BAR shadow
+(`Smoke::pci_fb_img`) - the aperture is device-sized because the read-only
+probe cannot size BARs. `PciPaint` is also wired into the `Ui` repaint lane
+and the timer tick beside `VioPaint`/`DispPaint` (each self-gates on
+`__disp.class`); `Ui` deliberately still skips `DispPaint` - the uncore
+repaint is covered by the timer's dirty-DOM watermark and a second full
+`FbExpandSel` inside UART IRQ context would double the frame cost.
+`pci_probe_accepts_a_linear_bar_and_wins_the_ladder`
+asserts `PCI-PAINT`, nonzero BAR pixels at the 1:1 offset, and an all-zero
+`__scan_fb` (proving the fallback was not painted); the demoted case stays
+quiet and falls through to virtio. `g6b.py check` and `bios-regress` green.
+
+B77 (2026-09-09) — modern RGBA render lane (`g6b-css::render32`) completed and
+wired into the host tool-chain. `g6b-gr` Canvas32 surfaces, `g6b-img` PNG/SVG/
+icon assets, `g6b-ttf` bundled fonts, `g6b-css` `rgba()`/opacity/rounded-corners/
+images/SVG/icons/font-properties all pass focused tests. The `render32` parser
+now uses `parse_survey` so real-world stylesheets with unsupported properties
+fail closed per-property, not per-page. `g6b-html` `to_uart_lines` emits `img`
+`alt` text and skips `svg`/`canvas` for the UART fallback lane. `g6b-cli`
+`css-render` gained `--modern` and `--assets DIR` to exercise the new lane from
+the command line. `g6b-kernel` exposes `ui_ppm32`/`ui_ppm32_output` (track-A true-
+colour setup-page PPM) and a regression test proving the setup page renders a
+non-empty RGBA PPM. `g6b-css` re-exports `AssetMap`/`FontSet` so callers can use
+`render32` without extra crate deps. Still open: `g6b-spec` `files.assets` flag +
+`g6b-http` asset mount, `g6b-ui`/`browser-ui` modern CSS (80s BIOS look + icons/
+logo) and render32 goldens in `bios_regress`. `g6b.py check` and `bios-regress`
+green.
+
+B78 (2026-09-09) — high-definition 80s BIOS look applied to the browser UI and
+static setup page. `browser-ui/src/App.svelte` now emits a dark navy/cyan/amber
+color scheme with rounded corners, Inconsolata typography, translucent panels and
+a clear status strip. The generated `out/bios-ui.css` is embedded into
+`g6b_ui::setup_html` and picked up by `g6b-kernel::ui_ppm32`; both `g6b-ui` tests
+and the `ui_ppm32_renders_setup_page` regression pass. Unsupported properties are
+ignored by `g6b-css::parse_survey` and apply only in real browsers. Still open:
+`g6b-spec` `files.assets` flag + `g6b-http` asset mount and render32 goldens in
+`bios_regress`. `g6b.py check` and `bios-regress` green.
+
+B79 (2026-09-09) — tabbed BIOS setup UI, and the three layout defects that were
+blocking it. Rendering the real page at the virtio-gpu scanout geometry showed
+a full-width column, table cells stacked one per line, and tabs that could only
+ever be coloured words. All three were `g6b-css` gaps, fixed against the
+`kernel-spec/goosie` `internal/renderer/layout.go` algorithms (rewritten, not
+ported) and documented in `architecture/RENDER-VALIDATION.md` §8:
+(1) `max-width`/`min-width` clamp the used width and CSS 2.1 §10.3.3 solves the
+`auto` horizontal margins, so `margin: 0 auto` centres;
+(2) the inline formatting context was split — `inline_children` appends into the
+caller's run instead of recursing into `children_layout`, whose trailing
+`flush_items` used to end the line after **every** inline element, which is why
+`<th>A</th><th>B</th>` stacked; `is_block_for` also honours `display`;
+(3) automatic table layout (`table_columns` max-content measurement +
+`distribute`, `row_layout` two-pass with a shared row height) and
+`display: inline-block` as an atomic inline that keeps its own background,
+border, padding and radius. No colspan/rowspan/`table-layout: fixed`/border
+collapse.
+UI: `g6b_ui::setup_html` now emits a tab strip (`role="tablist"`, per-tab
+`role="tab"`/`tabindex`/`aria-selected`, `.bios-tab`/`.bios-tab-active`) directly
+under the banner, a status bar beneath it, panelled sections and a keyboard hint
+footer; the chrome CSS lives in `setup_html` because `g6b-css` matches only
+element/`#id`/`.class` selectors, while `browser-ui/src/App.svelte` keeps only
+browser-side effects (hover, focus ring, zebra rows, scanline wash). New CLI
+`g6b display-proxy-32` and `g6b ui-ppm32`, `g6b_kernel::proxy_ppm32` +
+`Proxy::to_ppm32` (GPU surface renders at the scanout geometry instead of
+upscaling the 640x480 plane), and `tools/ppm2png.py` as a stdlib-only viewing aid.
+Real bug found in the harness: `tools/bios_regress.py` decoded BIOS stdout with
+the Windows locale codepage, so the first non-cp1252 UTF-8 byte in the new
+keyboard hint killed six cases with a `UnicodeDecodeError`; it now decodes
+`utf-8` explicitly. `g6b.py check` and `bios-regress` green.
+
+B80 (2026-09-10) - the generated libwasm cell now builds the real setup tree and
+fills it from BoardSpec JSON, and the guest engine was corrected to accept what
+LDC actually emits. Four defects, in the order they surfaced:
+(1) `compiler/parse.ts` pushed every non-self-closing element onto its parent
+*and* onto the stack, so each node was emitted twice and every close re-emitted
+the whole subtree - `App.svelte`'s 81-node chrome lowered to 1,020 `createElement`
+calls. Only the pop appends now.
+(2) `compiler/print-d.ts` emitted bare `setProperty`/`appendChild`; they are
+qualified through `libwasm.dom` and the startup verifier's `Element` double in
+`compiler/wasm-cell.ts` grew the attribute/property methods `_start` actually
+calls.
+(3) `printReady` now keeps every fetch handle and, behind
+`libwasm_await_supported()`, awaits `/bios/menu/<id>`, parses the response with
+`parseJSON!ThreadMemAllocator` (fast-wasm takes the allocator as its first
+template argument) and appends label/value/access rows into the matching
+`menu-<id>-body`. Data retrieval stays JSON/text only; Svelte still owns the HTML.
+(4) `g6b-wasm` refused the resulting artifact twice over. `0xc0..=0xc4` - the
+sign-extension proposal, which LDC 1.43 emits for D `byte`/`short` casts - is now
+decoded, validated and interpreted as a unary conversion (`i32.extend8_s` etc.),
+with `0xc5` still rejected. `MAX_FUNCTIONS` 256 -> 1,024 and `MAX_LOCALS`
+256 -> 4,096, because the real cell declares 942 functions; module bytes, memory
+pages, operand stack, control depth, instruction count and fuel are untouched, so
+the byte/memory/time envelope is unchanged. `architecture/WASM.md` records both.
+The shipped artifact is `via=dub artifact=fresh verified asyncified LDC artifact
+(wasm EH + asyncify)`; a new `compile.test.ts` case instantiates it through the
+real host with a mock `/bios/` fetch and asserts the injected rows are present.
+`bun test` 97 pass / 2 skip, `g6b.py check` and `bios-regress` green.

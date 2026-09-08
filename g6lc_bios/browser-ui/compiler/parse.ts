@@ -24,6 +24,12 @@ export type SvelteFile = {
   src: string;
 };
 
+export type MarkupNode = {
+  tag: string;
+  attrs: Record<string, string>;
+  children: (MarkupNode | string)[];
+};
+
 export function identFromRel(rel: string): string {
   return rel
     .replace(/\\/g, "/")
@@ -160,4 +166,57 @@ function parseVisibility(src: string, lets: Binding[]): VisibleOp[] {
 function firstTag(src: string): string | undefined {
   const m = src.match(/<(section|div|p|nav|main|article|header|footer)\b/i);
   return m?.[1]?.toLowerCase();
+}
+
+function parseAttrs(raw: string): Record<string, string> {
+  const attrs: Record<string, string> = {};
+  for (const m of raw.matchAll(/\b([a-z][a-z0-9-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/gi)) {
+    const name = m[1].toLowerCase();
+    const value = m[2] ?? m[3] ?? m[4] ?? "";
+    attrs[name] = value;
+  }
+  return attrs;
+}
+
+const VOID_TAGS = new Set([
+  "area", "base", "br", "col", "embed", "hr", "img", "input",
+  "link", "meta", "param", "source", "track", "wbr",
+]);
+
+export function parseMarkupTree(src: string): MarkupNode[] {
+  const markup = src.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
+  const roots: MarkupNode[] = [];
+  const stack: MarkupNode[] = [];
+  const tokenRe = /(<(\/?)([a-z][a-z0-9-]*)\b([^>]*)>)|([^<]+)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tokenRe.exec(markup)) !== null) {
+    if (m[1] !== undefined) {
+      const closing = m[2] !== "";
+      const tag = m[3].toLowerCase();
+      const attrStr = m[4];
+      if (closing) {
+        if (stack.length === 0 || stack.at(-1)!.tag !== tag) throw new Error("unmatched markup tag: " + tag);
+        const node = stack.pop()!;
+        if (stack.length) stack.at(-1)!.children.push(node);
+        else roots.push(node);
+        continue;
+      }
+      const selfClosing = attrStr.trimEnd().endsWith("/") || VOID_TAGS.has(tag);
+      const node: MarkupNode = { tag, attrs: parseAttrs(attrStr), children: [] };
+      if (selfClosing) {
+        if (stack.length) stack.at(-1)!.children.push(node);
+        else roots.push(node);
+      } else {
+        stack.push(node);
+      }
+    } else {
+      const text = m[5].replace(/\s+/g, " ").trim();
+      if (text) {
+        if (stack.length) stack.at(-1)!.children.push(text);
+        else roots.push({ tag: "span", attrs: {}, children: [text] });
+      }
+    }
+  }
+  if (stack.length) throw new Error("unclosed markup tag");
+  return roots;
 }

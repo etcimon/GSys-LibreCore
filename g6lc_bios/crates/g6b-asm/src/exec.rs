@@ -109,6 +109,9 @@ pub struct Smoke {
     pub vio_last_resp: u32,
     /// Device-side X8R8G8B8 scanout surface written by `TRANSFER_TO_HOST_2D`.
     pub vio_fb: Vec<u8>,
+    /// Native 32bpp `__scan_fb` contents at the end of the run (when the
+    /// module allocated a scanout surface; empty otherwise).
+    pub scan_fb: Vec<u8>,
     /// Scanout surface geometry (resource w/h).
     pub vio_fb_w: u32,
     pub vio_fb_h: u32,
@@ -131,6 +134,10 @@ pub struct Smoke {
     /// `PciProbe` result: `(bar0, vendor<<16|device)`, both 0 when nothing was
     /// accepted.
     pub pci_fb: (u32, u32),
+    /// Device-memory shadow of the accepted linear BAR — what `PciPaint`
+    /// blitted into it (`FbExpandSel` destination = `__disp.fb`). Empty when
+    /// no PCIe display device was modelled.
+    pub pci_fb_img: Vec<u8>,
 }
 
 /// Lower `module` at `entry` and run hart 0 until park/UART/SBI SRST.
@@ -172,6 +179,8 @@ pub fn run_module_hart(
         spec.wants_virtio_gpu(),
         true,
         module.vio_bss_addr(entry).unwrap_or(0),
+        module.scan_fb_addr(entry).unwrap_or(0),
+        module.vio_fb_bytes,
     )
 }
 
@@ -209,6 +218,8 @@ pub fn run_module_kick(
         spec.wants_virtio_gpu(),
         true,
         module.vio_bss_addr(entry).unwrap_or(0),
+        module.scan_fb_addr(entry).unwrap_or(0),
+        module.vio_fb_bytes,
     )
 }
 
@@ -242,6 +253,8 @@ pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Resul
         false,
         true,
         module.vio_bss_addr(entry).unwrap_or(0),
+        module.scan_fb_addr(entry).unwrap_or(0),
+        module.vio_fb_bytes,
     )
 }
 
@@ -276,6 +289,8 @@ pub fn run_module_bare(spec: &BoardSpec, module: &Module, entry: u64) -> Result<
         spec.wants_virtio_gpu(),
         false,
         module.vio_bss_addr(entry).unwrap_or(0),
+        module.scan_fb_addr(entry).unwrap_or(0),
+        module.vio_fb_bytes,
     )
 }
 
@@ -298,6 +313,10 @@ pub fn run(
         // Raw-image entry point: no module, so the `__vio` layout is unknown
         // and the display-mux read-out is skipped rather than guessed.
         0,
+        // Raw-image entry point: no module, so the `__scan_fb` layout is
+        // unknown and is skipped rather than guessed.
+        0,
+        0,
     )
 }
 
@@ -314,6 +333,10 @@ fn run_with_kick(
     // Resolved `__vio` address so `done()` can read the `DispSel`/`PciProbe`
     // result block. `0` when the caller has no module to resolve it from.
     vio_base: u64,
+    // Resolved `__scan_fb` address and size so `done()` can report the native
+    // 32bpp surface. Both `0` when the caller has no module to resolve it from.
+    scan_fb_base: u64,
+    scan_fb_bytes: u64,
 ) -> Result<Smoke, String> {
     let xlen = spec.isa.xlen;
     if xlen != 32 && xlen != 64 {
@@ -332,6 +355,27 @@ fn run_with_kick(
                     // is hart 0; the marker is never dereferenced.
     x[11] = if hartid == 0 { 0x8fe0_0000 } else { 0 };
     let mut pc = entry;
+    // One modelled bus-0 display controller when the board asks for the
+    // scan: QEMU-stdvga-shaped (vendor 0x1234), base class 0x03, with BAR0
+    // parked at the declared window base so it is inside `pcie.mmio`. This
+    // stands in for "firmware already mode-set an adapter"; there is no
+    // AtomBIOS/GSP model because there is no such guest code to exercise.
+    let pci_dev = spec.pcie_ecam().and_then(|_| {
+        let (mmio, _) = spec.pcie_mmio_window()?;
+        Some((1u64, 0x1234_1111u32, 0x0300_0000u32, mmio as u32))
+    });
+    // The accepted BAR is device memory, not guest RAM: `PciPaint` blits
+    // straight into it (`DISP_SEL_FB_LO`), so the model keeps a bounded shadow.
+    // The aperture is `VIO_FB_MAX` — the BAR's size is a device property the
+    // read-only `PciProbe` deliberately cannot discover (sizing needs a BAR
+    // write), so the modelled aperture is the largest surface a blit can
+    // produce. Stores past it still fault like any other unmapped MMIO.
+    let pci_fb_base = pci_dev.map(|d| u64::from(d.3)).unwrap_or(0);
+    let pci_fb_img = if pci_dev.is_some() {
+        vec![0u8; crate::vio::VIO_FB_MAX as usize]
+    } else {
+        Vec::new()
+    };
     let mut csr = Csr {
         mbox_base: if extras && spec.loopback.enable {
             hex_u64(&spec.loopback.base)
@@ -346,16 +390,12 @@ fn run_with_kick(
         vio_gpu,
         vio_inp: vio_gpu && spec.wants_virtio_input(),
         vio_base,
+        scan_fb_base,
+        scan_fb_bytes,
         pci_ecam: spec.pcie_ecam().unwrap_or(0),
-        // One modelled bus-0 display controller when the board asks for the
-        // scan: QEMU-stdvga-shaped (vendor 0x1234), base class 0x03, with BAR0
-        // parked at the declared window base so it is inside `pcie.mmio`. This
-        // stands in for "firmware already mode-set an adapter"; there is no
-        // AtomBIOS/GSP model because there is no such guest code to exercise.
-        pci_dev: spec.pcie_ecam().and_then(|_| {
-            let (mmio, _) = spec.pcie_mmio_window()?;
-            Some((1u64, 0x1234_1111u32, 0x0300_0000u32, mmio as u32))
-        }),
+        pci_dev,
+        pci_fb_base,
+        pci_fb_img,
         vio_disp_w: if spec.kernel.gr.enable {
             spec.kernel.gr.w.max(8)
         } else {
@@ -644,6 +684,19 @@ fn done(
         dom_navtext,
         dom_pix0: csr.dom_pix0,
         gr_frame,
+        scan_fb: if csr.scan_fb_base != 0 && csr.scan_fb_bytes != 0 {
+            let off = csr.scan_fb_base.wrapping_sub(base) as usize;
+            let end = off
+                .saturating_add(csr.scan_fb_bytes as usize)
+                .min(ram.len());
+            if off < end {
+                ram[off..end].to_vec()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        },
         vio_status: csr.vio_status,
         vio_last_cmd: csr.vio_last_cmd,
         vio_last_resp: csr.vio_last_resp,
@@ -688,6 +741,7 @@ fn done(
             };
             (at(crate::vio::DISP_PCI_FB), at(crate::vio::DISP_PCI_ID))
         },
+        pci_fb_img: csr.pci_fb_img.clone(),
     }
 }
 
@@ -816,11 +870,20 @@ struct Csr {
     disp_status: u32,
     /// Resolved `__vio` base, for reading the `DispSel`/`PciProbe` block.
     vio_base: u64,
+    /// Resolved `__scan_fb` base, for copying the native scanout into `Smoke`.
+    scan_fb_base: u64,
+    /// Bytes of `__scan_fb` to copy (0 when no native scanout is allocated).
+    scan_fb_bytes: u64,
     /// PCIe ECAM window base — 0 = no host bridge modelled.
     pci_ecam: u64,
     /// Modelled bus-0 display controller: `(dev, vendor<<16|device, class_word,
     /// bar0)`. `None` = no PCIe display device present.
     pci_dev: Option<(u64, u32, u32, u32)>,
+    /// Modelled BAR base (device memory, not guest RAM) — 0 when absent.
+    pci_fb_base: u64,
+    /// Shadow of the linear-framebuffer BAR; `PciPaint` blits straight into it
+    /// via `DISP_SEL_FB_LO`. Reported as `Smoke::pci_fb_img`.
+    pci_fb_img: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -890,6 +953,23 @@ fn step(
                 (0, 0) => a.wrapping_add(b),
                 (0, 0x20) => a.wrapping_sub(b),
                 (0, 1) => a.wrapping_mul(b),
+                // divu — runtime `FbExpand` scale (`__disp.w / low_w`).
+                // Registers hold sign-extended values on rv32, so mask to
+                // u32 first; div-by-zero yields all-ones per the spec.
+                (5, 1) => {
+                    if xlen == 32 {
+                        let (na, nb) = (a as u32, b as u32);
+                        if nb == 0 {
+                            u64::from(u32::MAX)
+                        } else {
+                            u64::from(na / nb)
+                        }
+                    } else if b == 0 {
+                        u64::MAX
+                    } else {
+                        a / b
+                    }
+                }
                 (4, 0) => a ^ b,
                 // sltu — unsigned compare, used by `PciProbe`'s BAR window
                 // check. On rv32 the registers are already zero-extended by
@@ -901,7 +981,7 @@ fn step(
             *pc = npc;
         }
         0x03 => {
-            let addr = x[rs1 as usize].wrapping_add(iimm(w) as u64);
+            let addr = eff_addr(xlen, x, rs1, iimm(w));
             if is_uart1(csr, addr) {
                 *uart_polls += 1;
                 wr(xlen, x, rd, uart_load(csr, addr));
@@ -961,7 +1041,7 @@ fn step(
             *pc = npc;
         }
         0x23 => {
-            let addr = x[rs1 as usize].wrapping_add(simm(w) as u64);
+            let addr = eff_addr(xlen, x, rs1, simm(w));
             let val = x[rs2 as usize];
             if is_uart0(addr) || is_uart1(csr, addr) {
                 uart_store(csr, addr, val as u8);
@@ -987,6 +1067,13 @@ fn step(
             }
             if is_disp(csr, addr) {
                 disp_store(csr, addr, val as u32);
+                *pc = npc;
+                return Step::Cont;
+            }
+            if is_pci_fb(csr, addr) {
+                if f3 == 2 {
+                    pci_fb_store(csr, addr, val as u32);
+                }
                 *pc = npc;
                 return Step::Cont;
             }
@@ -1060,7 +1147,7 @@ fn step(
         }
         0x67 => {
             let t = npc;
-            let target = x[rs1 as usize].wrapping_add(iimm(w) as u64) & !1;
+            let target = eff_addr(xlen, x, rs1, iimm(w)) & !1;
             wr(xlen, x, rd, t);
             *pc = target;
         }
@@ -1214,6 +1301,18 @@ fn disp_load(csr: &Csr, addr: u64) -> u32 {
 /// path here, and an absent slot returns all-ones exactly like real hardware.
 fn is_pci_ecam(csr: &Csr, addr: u64) -> bool {
     csr.pci_ecam != 0 && addr.wrapping_sub(csr.pci_ecam) < (1 << 20)
+}
+
+/// Inside the modelled linear-framebuffer BAR (device memory, not guest RAM).
+fn is_pci_fb(csr: &Csr, addr: u64) -> bool {
+    csr.pci_fb_base != 0 && addr.wrapping_sub(csr.pci_fb_base) < csr.pci_fb_img.len() as u64
+}
+
+fn pci_fb_store(csr: &mut Csr, addr: u64, v: u32) {
+    let off = addr.wrapping_sub(csr.pci_fb_base) as usize;
+    if off + 4 <= csr.pci_fb_img.len() {
+        csr.pci_fb_img[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
 }
 
 fn pci_load(csr: &Csr, addr: u64) -> u32 {
@@ -1848,6 +1947,18 @@ fn csr_write(c: &mut Csr, n: u32, v: u64) {
         crate::encode::CSR_STVAL => c.stval = v,
         CSR_TIME => c.time = v,
         _ => {}
+    }
+}
+
+/// Effective address for load/store/`jalr`. The RV32 register file holds
+/// sign-extended values (`wr`), so a `la`/`auipc` pair at `0x8xxx_xxxx`
+/// leaves `rs1` looking like `0xFFFF_FFFF_8xxx_xxxx`; the address must wrap
+/// at 32 bits, not carry the sign extension into the u64 compare.
+fn eff_addr(xlen: u32, x: &[u64; 32], rs1: u32, imm: i32) -> u64 {
+    if xlen == 32 {
+        u64::from((x[rs1 as usize] as u32).wrapping_add(imm as u32))
+    } else {
+        x[rs1 as usize].wrapping_add(imm as u64)
     }
 }
 
@@ -3055,6 +3166,35 @@ mod tests {
         );
         assert_eq!(surface, g6b_spec::Surface::Gpu.code());
         assert!(s.console.contains("DISP-SEL 31"), "{}", s.console);
+        // `PciPaint` is the commit on this rung: `FbExpandSel`'s destination
+        // pick resolved to `__disp.fb` (the accepted BAR), so the blit lands
+        // in the device shadow and the shared `__scan_fb` stays untouched —
+        // `VioScan` never attached it because the virtio rung lost.
+        assert!(s.console.contains("PCI-PAINT"), "{}", s.console);
+        // Boot paint + the UART `Ui` repaint: every repaint lane reaches the
+        // pcie rung, not just the boot-time paint pass.
+        assert!(
+            s.console.matches("PCI-PAINT").count() >= 2,
+            "Ui repaint must reach the pcie backend: {}",
+            s.console
+        );
+        assert!(
+            s.pci_fb_img.iter().any(|&b| b != 0),
+            "PciPaint wrote into the BAR shadow"
+        );
+        assert!(
+            s.scan_fb.iter().all(|&b| b == 0),
+            "pcie-linear-fb paints the BAR in place; __scan_fb is only the \
+             fallback for outputs without their own linear window"
+        );
+        // The 1:1 gpu-surface placement is still the blit's geometry: the
+        // first plane pixel lands at ((h-low_h)/2, (w-low_w)/2) of the BAR.
+        let (w, h) = (1920usize, 1080usize);
+        let off = ((h - 480) / 2 * w + (w - 640) / 2) * 4;
+        assert!(
+            s.pci_fb_img[off..off + 4].iter().any(|&b| b != 0),
+            "plane pixel at the 1:1 offset {off:#x} of the BAR"
+        );
     }
 
     #[test]
@@ -3076,6 +3216,7 @@ mod tests {
         // inside it — this board accepts. Narrow it further by moving the BAR
         // out via a window that starts above it.
         assert_eq!(s.pci_fb.0, 0x6000_0000);
+        assert!(s.console.contains("PCI-PAINT"), "{}", s.console);
         let spec = BoardSpec::from_json_str(
             r#"{"schema_version":1,"isa":{"xlen":64},
 "kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
@@ -3096,6 +3237,10 @@ mod tests {
             g6b_spec::OutputClass::VirtioGpu.code(),
             "demoted pcie falls through to the next rung"
         );
+        // No BAR was accepted, so the pcie paint path stays shut: `PciPaint`
+        // gates on `DISP_PCI_FB` and the virtio backend owns the surface.
+        assert!(!s.console.contains("PCI-PAINT"), "{}", s.console);
+        assert!(s.pci_fb_img.iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -3126,6 +3271,352 @@ mod tests {
         assert_eq!((w, h), (1920, 1080));
         assert_eq!(stride, 1920 * 4);
         assert_eq!(fmt, 1);
+    }
+
+    /// Driver module for the runtime-geometry tests: poke `__disp` with a
+    /// geometry no `display_outputs()` rung declares, seed two `__gr_plane`
+    /// bytes, then `jal` the named blit and `wfi`. The scanout BSS is sized
+    /// to the poked geometry, so a blit still using the gen-time proxy
+    /// (1920×1080) either lands at the wrong offset or runs past the buffer
+    /// into a store fault — both detectable.
+    fn disp_geom_module(spec: &BoardSpec, w: u32, h: u32, surface: u32, target: &str) -> Module {
+        use crate::encode::{RA, SP, T0, T5, T6};
+        let mut ops = vec![
+            Op::Comment(format!(
+                "test driver — poke __disp {w}x{h} surface={surface}, jal {target}"
+            )),
+            // sp = StacksEnd — the top of the stack region (`stacks` is where
+            // the stack bytes end and `__gr_plane` begins). `stack_node`
+            // subtracts (hartid+1)*STACK_BYTES, but the frames here only grow
+            // down a few dozen bytes, so the top of the region is correct and
+            // — unlike the underflowed bottom slot — cannot overwrite the code
+            // tail in a module with no rodata padding.
+            Op::La {
+                rd: SP,
+                addr: Addr::StacksEnd,
+            },
+            Op::La {
+                rd: T5,
+                addr: Addr::VioBss,
+            },
+        ];
+        for (off, v) in [
+            (crate::vio::DISP_SEL_W, w),
+            (crate::vio::DISP_SEL_H, h),
+            (crate::vio::DISP_SEL_STRIDE, w * 4),
+            (crate::vio::DISP_SEL_SURFACE, surface),
+        ] {
+            ops.push(Op::Li {
+                rd: T0,
+                imm: i64::from(v),
+            });
+            ops.push(Op::Sw {
+                rs2: T0,
+                rs1: T5,
+                off,
+            });
+        }
+        ops.extend([
+            // Seed plane bytes 0..4: 0x1c 0x2d 0x3e 0x4f → pixel pairs
+            // pal[hi]/pal[lo]. One `sw` writes them all little-endian.
+            Op::La {
+                rd: T6,
+                addr: Addr::GrPlane,
+            },
+            Op::Addi {
+                rd: T6,
+                rs: T6,
+                imm: GR_HEADER_BYTES as i32,
+            },
+            Op::Li {
+                rd: T0,
+                imm: 0x4f3e_2d1c,
+            },
+            Op::Sw {
+                rs2: T0,
+                rs1: T6,
+                off: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: target.into(),
+            },
+            Op::Wfi,
+        ]);
+        Module {
+            nodes: vec![
+                Node {
+                    purpose: Purpose::DisplayProxy,
+                    ops,
+                },
+                crate::vio::expand_node(spec),
+                crate::vio::expand1_node(spec),
+                crate::vio::expand_sel_node(spec),
+            ],
+            nharts: 1,
+            gr_bytes: gr_bss_len(640, 480, 16),
+            dom_bytes: crate::dom::UI_DOM_BYTES,
+            vio_bytes: crate::vio::VIO_BSS,
+            vio_fb_bytes: u64::from(w) * u64::from(h) * 4,
+            ..Module::default()
+        }
+    }
+
+    #[test]
+    fn fb_expand_follows_the_disp_latch_not_the_gen_time_proxy() {
+        // `proxy` says 1920×1080 (scale-2 fit → a 1280×960 window at
+        // (320,60)); the poked output is 1280×720, where fit is *1* and the
+        // 640×480 plane centres at (320,120). Gen-time geometry would either
+        // paint the wrong pixels or store-fault past `__scan_fb`.
+        for xlen in [32u32, 64] {
+            let spec = BoardSpec::from_json_str(&format!(
+                r#"{{"schema_version":1,"isa":{{"xlen":{xlen}}},
+"kernel":{{"gr":{{"enable":true,"w":640,"h":480,"colors":16,"backend":"uart"}},
+"proxy":{{"enable":true,"link":"hdmi","dpi":192,"high_w":1920,"high_h":1080,"scale_mode":"fit"}}}},
+"holyc":{{"dual_band":{{"tcp":{{"enable":false}}}}}}}}"#
+            ))
+            .unwrap();
+            let m = disp_geom_module(&spec, 1280, 720, g6b_spec::Surface::Vga.code(), "FbExpand");
+            let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+            assert!(
+                matches!(s.halt, Halt::Wfi),
+                "runtime geometry must stay inside the poked fb: {:?}",
+                s.halt
+            );
+            // Plane byte 0 = 0x1c: even pixel pal[1], odd pixel pal[0xc].
+            let dp = |x: u32, y: u32| -> u32 {
+                u32::from_le_bytes(
+                    s.scan_fb[(y * 1280 + x) as usize * 4..][..4]
+                        .try_into()
+                        .unwrap(),
+                )
+            };
+            let pal = crate::vio::vio_palette();
+            assert_eq!(dp(320, 120), pal[0x1], "scale-1 even pixel at (320,120)");
+            assert_eq!(dp(321, 120), pal[0xc], "scale-1 odd pixel");
+            assert_eq!(dp(322, 120), pal[0x2], "byte1 even pixel");
+            assert_eq!(dp(323, 120), pal[0xd], "byte1 odd pixel");
+            // Not the gen-time (320,60) origin, and not magnified: the
+            // letterbox ring and the next source row stay black.
+            assert_eq!(dp(320, 60), 0);
+            assert_eq!(dp(0, 0), 0);
+            assert_eq!(dp(320 + 640, 120), 0, "right letterbox");
+            assert_eq!(dp(320, 120 + 480), 0, "bottom letterbox");
+        }
+    }
+
+    #[test]
+    fn fb_expand_sel_dispatches_per_output_geometry() {
+        // Same poked 1600×1200 output, two surfaces: `vga` must run the
+        // `FbExpand` fit (scale 2 → 1280×960 at (160,120)) while `gpu` must
+        // run `FbExpand1` (scale 1 → 640×480 at (480,360)). One latched
+        // `__disp` geometry, two distinct placements — the per-output
+        // dispatch a fixed jump table would otherwise have to encode.
+        for xlen in [32u32, 64] {
+            let spec = BoardSpec::from_json_str(&format!(
+                r#"{{"schema_version":1,"isa":{{"xlen":{xlen}}},
+"kernel":{{"gr":{{"enable":true,"w":640,"h":480,"colors":16,"backend":"uart"}},
+"proxy":{{"enable":true,"link":"hdmi","dpi":192,"high_w":1920,"high_h":1080,"scale_mode":"fit"}}}},
+"holyc":{{"dual_band":{{"tcp":{{"enable":false}}}}}}}}"#
+            ))
+            .unwrap();
+            let pal = crate::vio::vio_palette();
+            let cases = [
+                // (surface, expected scale, ox, oy, used_w, used_h)
+                (
+                    g6b_spec::Surface::Vga.code(),
+                    2u32,
+                    160u32,
+                    120u32,
+                    1280u32,
+                    960u32,
+                ),
+                (
+                    g6b_spec::Surface::Gpu.code(),
+                    1u32,
+                    480u32,
+                    360u32,
+                    640u32,
+                    480u32,
+                ),
+            ];
+            for (surface, sc, ox, oy, uw, uh) in cases {
+                let m = disp_geom_module(&spec, 1600, 1200, surface, "FbExpandSel");
+                let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+                assert!(
+                    matches!(s.halt, Halt::Wfi),
+                    "xlen={xlen} surface={surface}: {:?}",
+                    s.halt
+                );
+                let dp = |x: u32, y: u32| -> u32 {
+                    u32::from_le_bytes(
+                        s.scan_fb[(y * 1600 + x) as usize * 4..][..4]
+                            .try_into()
+                            .unwrap(),
+                    )
+                };
+                // Byte 0 = 0x1c → src pixels pal[1] / pal[0xc]; at scale sc
+                // the first dst word of each sc-wide block is pal[1].
+                assert_eq!(dp(ox, oy), pal[0x1], "surface={surface} origin");
+                assert_eq!(
+                    dp(ox + sc, oy),
+                    pal[0xc],
+                    "surface={surface} second src pixel at scale {sc}"
+                );
+                assert_eq!(dp(ox + uw, oy), 0, "right letterbox");
+                assert_eq!(dp(ox, oy + uh), 0, "bottom letterbox");
+            }
+        }
+    }
+
+    #[test]
+    fn dom_paint32_uses_the_disp_latch_geometry() {
+        // `FbExpandSel` → `DomPaint32` on a GPU surface with a live DOM. The
+        // poked output is 800×600 — no `display_outputs()` rung declares it —
+        // so the native painter can only be correct if it reads `__disp`:
+        // the clear bound is `w*h` and row addressing uses the latched
+        // stride. A gen-time 1920×1080 clear would store-fault past the
+        // 800×600 buffer; a gen-time stride would mis-place glyph rows.
+        for xlen in [32u32, 64] {
+            let spec = BoardSpec::from_json_str(&format!(
+                r#"{{"schema_version":1,"isa":{{"xlen":{xlen}}},
+"kernel":{{"gr":{{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"}},
+"proxy":{{"enable":true,"link":"hdmi","dpi":192,"high_w":1920,"high_h":1080,"scale_mode":"fit"}},
+"wasm":{{"enable":true,"jit":true}}}},
+"holyc":{{"dual_band":{{"tcp":{{"enable":false}}}}}}}}"#
+            ))
+            .unwrap();
+            let st_text: fn(u32, u32, i32) -> Op = if xlen == 32 {
+                |rs2, rs1, off| Op::Sw { rs2, rs1, off }
+            } else {
+                |rs2, rs1, off| Op::Sd { rs2, rs1, off }
+            };
+            use crate::encode::{RA, SP, T0, T1, T5};
+            let mut ops = vec![
+                Op::Comment(
+                    "test driver — __disp 800x600 gpu + DOM row 'HI', jal FbExpandSel".into(),
+                ),
+                Op::La {
+                    rd: SP,
+                    addr: Addr::StacksEnd,
+                },
+                Op::La {
+                    rd: T5,
+                    addr: Addr::VioBss,
+                },
+            ];
+            for (off, v) in [
+                (crate::vio::DISP_SEL_W, 800u32),
+                (crate::vio::DISP_SEL_H, 600),
+                (crate::vio::DISP_SEL_STRIDE, 800 * 4),
+                (crate::vio::DISP_SEL_SURFACE, g6b_spec::Surface::Gpu.code()),
+            ] {
+                ops.push(Op::Li {
+                    rd: T0,
+                    imm: i64::from(v),
+                });
+                ops.push(Op::Sw {
+                    rs2: T0,
+                    rs1: T5,
+                    off,
+                });
+            }
+            ops.extend([
+                // __ui_dom: count=1; row0 = { text_ptr, len=2, flags=VISIBLE|TEXT }.
+                Op::La {
+                    rd: T5,
+                    addr: Addr::UiDom,
+                },
+                Op::Li { rd: T0, imm: 1 },
+                Op::Sw {
+                    rs2: T0,
+                    rs1: T5,
+                    off: 0,
+                },
+                Op::La {
+                    rd: T0,
+                    addr: Addr::Label("dom_txt".into()),
+                },
+                st_text(T0, T5, crate::dom::DOM_HDR + 8),
+                Op::Li { rd: T0, imm: 2 },
+                Op::Sw {
+                    rs2: T0,
+                    rs1: T5,
+                    off: crate::dom::DOM_HDR + 20,
+                },
+                Op::Li {
+                    rd: T0,
+                    imm: crate::dom::DOM_F_VISIBLE | crate::dom::DOM_F_TEXT,
+                },
+                Op::Sw {
+                    rs2: T0,
+                    rs1: T5,
+                    off: crate::dom::DOM_HDR + 24,
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "FbExpandSel".into(),
+                },
+                Op::Wfi,
+                // The row text lives in the code stream after the halting
+                // `wfi`; `DomPaint32` `lbu`s it as data.
+                Op::Label("dom_txt".into()),
+                Op::Word(0x0000_4948), // "HI"
+            ]);
+            let _ = T1;
+            let mut m = Module {
+                nodes: vec![
+                    Node {
+                        purpose: Purpose::DisplayProxy,
+                        ops,
+                    },
+                    crate::vio::expand_node(&spec),
+                    crate::vio::expand1_node(&spec),
+                    crate::vio::expand_sel_node(&spec),
+                ],
+                nharts: 1,
+                gr_bytes: gr_bss_len(640, 480, 16),
+                vio_bytes: crate::vio::VIO_BSS,
+                vio_fb_bytes: 800 * 600 * 4,
+                ..Module::default()
+            };
+            crate::dom::attach(&mut m, &spec);
+            let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+            assert!(
+                matches!(s.halt, Halt::Wfi),
+                "xlen={xlen}: DomPaint32 must stay inside the poked fb: {:?}",
+                s.halt
+            );
+            assert!(s.console.contains("DOM| HI"), "{}", s.console);
+            // Row 0 paints at y = DOM_Y0 = 24; glyph cell = row_base +
+            // col*32 bytes, glyph rows step by the latched stride (3200).
+            let font = crate::font::font_bytes();
+            let dp = |x: u32, y: u32| -> u32 {
+                u32::from_le_bytes(
+                    s.scan_fb[(y * 800 + x) as usize * 4..][..4]
+                        .try_into()
+                        .unwrap(),
+                )
+            };
+            for gy in 0..8u32 {
+                let bits = font[((b'H' - 0x20) as usize) * 8 + gy as usize];
+                for gx in 0..8u32 {
+                    let want = if bits & (0x80 >> gx) != 0 {
+                        0x00FF_FFFF
+                    } else {
+                        0
+                    };
+                    assert_eq!(
+                        dp(gx, 24 + gy),
+                        want,
+                        "xlen={xlen} 'H' glyph px ({gx},{gy})"
+                    );
+                }
+            }
+            // 'I' lands at the next 8px cell; everything past the painted
+            // glyph rows stays cleared.
+            assert_eq!(dp(0, 24 + 8), 0, "row band boundary");
+        }
     }
 
     #[test]

@@ -160,6 +160,94 @@ pub fn blit_glyph(
     }
 }
 
+/// Blit a glyph into a `g6b_gr::canvas32::Canvas32` with an RGBA foreground.
+/// Coverage multiplies the colour's alpha and blends source-over, so glyph
+/// anti-aliasing and `rgba()` text colours actually land.
+pub fn blit_glyph32(
+    canvas: &mut g6b_gr::canvas32::Canvas32,
+    baseline_x: i32,
+    baseline_y: i32,
+    glyph: &Glyph,
+    fg: g6b_gr::canvas32::Rgba,
+) {
+    let top = baseline_y - glyph.min_y - (glyph.height as i32 - 1);
+    canvas.blend_coverage(
+        baseline_x + glyph.min_x,
+        top,
+        glyph.width,
+        glyph.height,
+        &glyph.coverage,
+        fg,
+    );
+}
+
+/// Maximum registered families — font data is the largest bytes in the
+/// raster path, so the registry is budgeted like everything else.
+pub const MAX_FONTS: usize = 8;
+
+/// A `font-family` registry: name → `BiosFont`, with the bundled Inconsolata
+/// always present under `default`/`inconsolata`/`monospace`.
+///
+/// `resolve` implements the CSS comma-fallback rule (first listed family that
+/// is registered wins) so `font-family: "My Icon", monospace` picks the icon
+/// font and `font-family: "Missing", sans-serif` degrades to the default
+/// instead of vanishing.
+#[derive(Debug, Clone)]
+pub struct FontSet {
+    fonts: std::collections::BTreeMap<String, BiosFont>,
+    default_name: String,
+}
+
+impl FontSet {
+    /// A set containing only the bundled font, under the aliases the BIOS
+    /// stylesheets actually write.
+    pub fn default_set() -> Result<Self, TtfError> {
+        let mut fonts = std::collections::BTreeMap::new();
+        let f = default_bios_font()?;
+        for name in ["default", "inconsolata", "monospace", "sans-serif"] {
+            fonts.insert(name.to_string(), f.clone());
+        }
+        Ok(Self {
+            fonts,
+            default_name: "default".into(),
+        })
+    }
+
+    /// Register `bytes` under `name`. Fails closed on oversize/parse errors
+    /// and on a full registry — a bad font must not push out a good one.
+    pub fn register(&mut self, name: &str, bytes: &[u8]) -> Result<(), TtfError> {
+        let name = name.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            return Err(TtfError::Parse("empty family name".into()));
+        }
+        if !self.fonts.contains_key(&name) && self.fonts.len() >= MAX_FONTS {
+            return Err(TtfError::Oversized);
+        }
+        self.fonts.insert(name, BiosFont::from_bytes(bytes)?);
+        Ok(())
+    }
+
+    /// Resolve a CSS `font-family` list (`"A", 'B', monospace`) to a font.
+    /// Never fails: the default font is the final fallback.
+    pub fn resolve<'a>(&'a self, family_list: &str) -> &'a BiosFont {
+        for part in family_list.split(',') {
+            let name = part
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'')
+                .to_ascii_lowercase();
+            if let Some(f) = self.fonts.get(&name) {
+                return f;
+            }
+        }
+        self.default()
+    }
+
+    /// The fallback font (bundled Inconsolata).
+    pub fn default(&self) -> &BiosFont {
+        &self.fonts[&self.default_name]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +261,36 @@ mod tests {
             BiosFont::from_bytes(&huge),
             Err(TtfError::Oversized)
         ));
+    }
+
+    #[test]
+    fn font_set_resolves_fallback_chain() {
+        let mut set = FontSet::default_set().unwrap();
+        set.register("icons", DEFAULT_FONT_BYTES).unwrap();
+        // First registered name wins; unknown names fall through to default.
+        assert!(std::ptr::eq(
+            set.resolve("\"Icons\", monospace"),
+            &set.fonts["icons"]
+        ));
+        assert!(std::ptr::eq(
+            set.resolve("No Such Font, inconsolata"),
+            &set.fonts["inconsolata"]
+        ));
+        assert!(std::ptr::eq(set.resolve("nope"), set.default()));
+        assert!(set.register("", DEFAULT_FONT_BYTES).is_err());
+    }
+
+    #[test]
+    fn blit_glyph32_blends_coverage_alpha() {
+        let font = default_bios_font().unwrap();
+        let g = font.rasterize_for('O', 16.0);
+        let mut c = g6b_gr::canvas32::Canvas32::new(24, 24);
+        blit_glyph32(&mut c, 2, 20, &g, [255, 0, 0, 255]);
+        // Some interior pixel must be red with positive coverage.
+        assert!(c.pixels().chunks_exact(4).any(|p| p[0] == 255 && p[3] > 0));
+        // And a 50%-alpha glyph leaves a blended (not opaque) pixel.
+        let mut c2 = g6b_gr::canvas32::Canvas32::new(24, 24);
+        blit_glyph32(&mut c2, 2, 20, &g, [255, 0, 0, 128]);
+        assert!(c2.pixels().chunks_exact(4).any(|p| p[3] > 0 && p[3] < 255));
     }
 }

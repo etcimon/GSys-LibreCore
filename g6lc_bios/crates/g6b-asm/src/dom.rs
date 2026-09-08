@@ -16,8 +16,8 @@
 use g6b_spec::BoardSpec;
 
 use crate::encode::{
-    A0, A1, A2, A3, A4, A5, A6, A7, RA, S0, S1, S2, S3, S4, S5, SBI_PUTCHAR, SP, T0, T1, T2, T3,
-    T4, T5, T6, X0,
+    A0, A1, A2, A3, A4, A5, A6, A7, RA, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, SBI_PUTCHAR, SP,
+    T0, T1, T2, T3, T4, T5, T6, X0,
 };
 use crate::font::FONT_BOX;
 use crate::{gr_stride, Addr, Module, Node, Op, Purpose, GR_HEADER_BYTES};
@@ -78,6 +78,10 @@ fn st_x(xlen: u32, rs2: u32, rs1: u32, off: i32) -> Op {
     }
 }
 
+fn lw(rd: u32, rs: u32, off: i32) -> Op {
+    Op::Lw { rd, rs, off }
+}
+
 fn putc(ch: i64) -> Vec<Op> {
     vec![
         Op::Li { rd: A0, imm: ch },
@@ -117,7 +121,7 @@ pub(crate) fn signbit(xlen: u32) -> u32 {
 /// `g6b_wasm::jit::start_ops` output so the label always resolves.
 pub fn nodes(spec: &BoardSpec) -> Vec<Node> {
     let xlen = spec.isa.xlen;
-    vec![
+    let mut nodes = vec![
         wasm_ui_node(xlen),
         wasm_start_stub_node(),
         dom_find_node(xlen),
@@ -131,7 +135,11 @@ pub fn nodes(spec: &BoardSpec) -> Vec<Node> {
         wasm_await_node(xlen),
         wasm_throw_node(xlen),
         wasm_catch_node(xlen),
-    ]
+    ];
+    if spec.wants_virtio_gpu() || spec.wants_disp_scan() {
+        nodes.push(dom_paint32_node(spec));
+    }
+    nodes
 }
 
 /// `WasmAwait` — the `env.await` import (also `uart_await`'s body): claim
@@ -1988,6 +1996,551 @@ fn dom_paint_node(spec: &BoardSpec) -> Node {
             rd: SP,
             rs: SP,
             imm: 64,
+        },
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::UiDom,
+        ops,
+    }
+}
+
+/// `DomPaint32` — walk visible rows: `DOM| <text>` on serial, then 32bpp glyphs
+/// directly into `__scan_fb` at the resolved high-res geometry.
+///
+/// This is the GPU-surface native text path: instead of sourcing the 8×8
+/// low-res `__gr_plane` through `FbExpand1`, it paints the same DOM rows into
+/// the X8R8G8B8 scanout. The font stays 8×8, but the column count is the
+/// native `high_w / 8` rather than the low-res `DOM_TEXT_MAX`, so a single row
+/// can use more of the screen width. Source rows are still bounded (`DOM_ROWS`,
+/// `DOM_TEXT_MAX`), so a row longer than the screen width is truncated.
+fn dom_paint32_node(spec: &BoardSpec) -> Node {
+    let xlen = spec.isa.xlen;
+    let mut ops = vec![
+        Op::Comment(
+            "DomPaint32 — DOM| serial rows + 32bpp glyphs @ __scan_fb; geometry \
+             from __disp (runtime-selected output)"
+                .to_string(),
+        ),
+        Op::Glob("DomPaint32".into()),
+        Op::Label("DomPaint32".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -96,
+        },
+        st_x(xlen, RA, SP, 88),
+        st_x(xlen, S0, SP, 80),
+        st_x(xlen, S1, SP, 72),
+        st_x(xlen, S2, SP, 64),
+        st_x(xlen, S3, SP, 56),
+        st_x(xlen, S4, SP, 48),
+        st_x(xlen, S5, SP, 40),
+        st_x(xlen, S6, SP, 32),
+        st_x(xlen, S7, SP, 24),
+        st_x(xlen, S8, SP, 16),
+        st_x(xlen, S9, SP, 8),
+        // s0 = __ui_dom, s1 = dest fb, s2 = w, s3 = h, s4 = stride,
+        // s5 = paint row, s6 = row count, s7 = DOM row index. Geometry comes
+        // from `__disp` (DispSel's latch), not the gen-time proxy default, so
+        // the native painter follows the resolved output. The destination is
+        // the output's own linear window when `DispSel` latched one (the
+        // pcie-linear-fb rung stores the accepted BAR in `DISP_SEL_FB_LO`),
+        // else the shared `__scan_fb` the virtio/uncore transports commit.
+        Op::La {
+            rd: S0,
+            addr: Addr::UiDom,
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(S2, T5, crate::vio::DISP_SEL_W),
+        lw(S3, T5, crate::vio::DISP_SEL_H),
+        lw(S4, T5, crate::vio::DISP_SEL_STRIDE),
+        lw(S1, T5, crate::vio::DISP_SEL_FB_LO),
+        Op::Bne {
+            rs1: S1,
+            rs2: X0,
+            to: "dp32_dst".into(),
+        },
+        Op::La {
+            rd: S1,
+            addr: Addr::ScanFb,
+        },
+        Op::Label("dp32_dst".into()),
+        // paint_rows = clamp((h - DOM_Y0) >> 3, 0, DOM_ROWS). h is u32;
+        // a negative difference would come out of the sign-bit check.
+        Op::Addi {
+            rd: S8,
+            rs: S3,
+            imm: -DOM_Y0 as i32,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: S8,
+            shamt: signbit(xlen),
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: "dp32_rows_zero".into(),
+        },
+        Op::Srli {
+            rd: S8,
+            rs: S8,
+            shamt: 3,
+        },
+        Op::Li {
+            rd: T0,
+            imm: DOM_ROWS,
+        },
+        Op::Sltu {
+            rd: T1,
+            rs1: T0,
+            rs2: S8,
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: X0,
+            to: "dp32_rows_ok".into(),
+        },
+        Op::Addi {
+            rd: S8,
+            rs: T0,
+            imm: 0,
+        },
+        jump("dp32_rows_ok"),
+        Op::Label("dp32_rows_zero".into()),
+        Op::Li { rd: S8, imm: 0 },
+        Op::Label("dp32_rows_ok".into()),
+        // cols = clamp(w >> 3, 1, 1024). w ≥ 8 on every spec path, so the low
+        // clamp is defensive; the high clamp matches the serial row bound.
+        Op::Srli {
+            rd: S9,
+            rs: S2,
+            shamt: 3,
+        },
+        Op::Li { rd: T0, imm: 1 },
+        Op::Sltu {
+            rd: T1,
+            rs1: S9,
+            rs2: T0,
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: X0,
+            to: "dp32_cols_hi".into(),
+        },
+        Op::Li { rd: S9, imm: 1 },
+        Op::Label("dp32_cols_hi".into()),
+        Op::Li { rd: T0, imm: 1024 },
+        Op::Sltu {
+            rd: T1,
+            rs1: T0,
+            rs2: S9,
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: X0,
+            to: "dp32_cols_ok".into(),
+        },
+        Op::Li { rd: S9, imm: 1024 },
+        Op::Label("dp32_cols_ok".into()),
+        Op::Li { rd: S5, imm: 0 },
+        // Clear __scan_fb to black; total_words = w*h is runtime.
+        Op::Mul {
+            rd: T0,
+            rs1: S2,
+            rs2: S3,
+        },
+        Op::Li { rd: T1, imm: 0 },
+        Op::Label("dp32_clear".into()),
+        Op::Beq {
+            rs1: T1,
+            rs2: T0,
+            to: "dp32_done_clear".into(),
+        },
+        Op::Slli {
+            rd: T2,
+            rs: T1,
+            shamt: 2,
+        },
+        Op::Add {
+            rd: T2,
+            rs1: T2,
+            rs2: S1,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T2,
+            off: 0,
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: 1,
+        },
+        jump("dp32_clear"),
+        Op::Label("dp32_done_clear".into()),
+        Op::Lw {
+            rd: S6,
+            rs: S0,
+            off: 0,
+        },
+        Op::Li { rd: S7, imm: 0 },
+        Op::Li { rd: S5, imm: 0 },
+        Op::Label("dp32_row".into()),
+        Op::Beq {
+            rs1: S5,
+            rs2: S8,
+            to: "dp32_done".into(),
+        },
+        Op::Beq {
+            rs1: S7,
+            rs2: S6,
+            to: "dp32_done".into(),
+        },
+        Op::Slli {
+            rd: T3,
+            rs: S7,
+            shamt: 5,
+        },
+        Op::Add {
+            rd: T3,
+            rs1: T3,
+            rs2: S0,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T3,
+            imm: DOM_HDR,
+        },
+        Op::Lw {
+            rd: T4,
+            rs: T3,
+            off: 24,
+        },
+        Op::Andi {
+            rd: T4,
+            rs: T4,
+            imm: (DOM_F_VISIBLE | DOM_F_TEXT) as i32,
+        },
+        Op::Li {
+            rd: T5,
+            imm: DOM_F_VISIBLE | DOM_F_TEXT,
+        },
+        Op::Bne {
+            rs1: T4,
+            rs2: T5,
+            to: "dp32_next".into(),
+        },
+    ];
+    ops.extend(puts_str("DOM| "));
+    ops.extend([
+        ld_x(xlen, T4, T3, 8),
+        Op::Lw {
+            rd: T5,
+            rs: T3,
+            off: 20,
+        },
+        // clamp text_len ≤ cols.
+        Op::Sub {
+            rd: T0,
+            rs1: S9,
+            rs2: T5,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T0,
+            shamt: signbit(xlen),
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: X0,
+            to: "dp32_len_ok".into(),
+        },
+        Op::Addi {
+            rd: T5,
+            rs: S9,
+            imm: 0,
+        },
+        Op::Label("dp32_len_ok".into()),
+        Op::Li { rd: T6, imm: 0 },
+        Op::Label("dp32_ser".into()),
+        Op::Beq {
+            rs1: T6,
+            rs2: T5,
+            to: "dp32_ser_done".into(),
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T4,
+            rs2: T6,
+        },
+        Op::Lbu {
+            rd: A0,
+            rs: T0,
+            off: 0,
+        },
+        Op::Li {
+            rd: A7,
+            imm: SBI_PUTCHAR,
+        },
+        Op::Ecall,
+        Op::Addi {
+            rd: T6,
+            rs: T6,
+            imm: 1,
+        },
+        jump("dp32_ser"),
+        Op::Label("dp32_ser_done".into()),
+    ]);
+    ops.extend(putc(i64::from(b'\n')));
+    // 32bpp glyph paint for this row.
+    ops.extend([
+        // row_y = DOM_Y0 + paint_row * 8; row_base = __scan_fb + row_y * stride.
+        Op::Slli {
+            rd: A6,
+            rs: S5,
+            shamt: 3,
+        },
+        Op::Addi {
+            rd: A6,
+            rs: A6,
+            imm: DOM_Y0 as i32,
+        },
+        Op::Mul {
+            rd: A6,
+            rs1: A6,
+            rs2: S4,
+        },
+        Op::Add {
+            rd: A6,
+            rs1: S1,
+            rs2: A6,
+        },
+        // reload text pointer and clamped length for the pixel loop.
+        ld_x(xlen, T4, T3, 8),
+        Op::Lw {
+            rd: T5,
+            rs: T3,
+            off: 20,
+        },
+        Op::Sub {
+            rd: T0,
+            rs1: S9,
+            rs2: T5,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T0,
+            shamt: signbit(xlen),
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: X0,
+            to: "dp32_px_len".into(),
+        },
+        Op::Addi {
+            rd: T5,
+            rs: S9,
+            imm: 0,
+        },
+        Op::Label("dp32_px_len".into()),
+        Op::Li { rd: T6, imm: 0 },
+        Op::Label("dp32_px".into()),
+        Op::Beq {
+            rs1: T6,
+            rs2: T5,
+            to: "dp32_px_done".into(),
+        },
+        // a0 = ch, then a1 = glyph index.
+        Op::Add {
+            rd: A0,
+            rs1: T4,
+            rs2: T6,
+        },
+        Op::Lbu {
+            rd: A0,
+            rs: A0,
+            off: 0,
+        },
+        Op::Addi {
+            rd: A1,
+            rs: A0,
+            imm: -0x20,
+        },
+        Op::Srli {
+            rd: A2,
+            rs: A1,
+            shamt: signbit(xlen),
+        },
+        Op::Bne {
+            rs1: A2,
+            rs2: X0,
+            to: "dp32_px_box".into(),
+        },
+        Op::Addi {
+            rd: A2,
+            rs: A0,
+            imm: -0x7F,
+        },
+        Op::Srli {
+            rd: A2,
+            rs: A2,
+            shamt: signbit(xlen),
+        },
+        Op::Beq {
+            rs1: A2,
+            rs2: X0,
+            to: "dp32_px_box".into(),
+        },
+        jump("dp32_px_glyph"),
+        Op::Label("dp32_px_box".into()),
+        Op::Li {
+            rd: A1,
+            imm: i64::from(FONT_BOX),
+        },
+        Op::Label("dp32_px_glyph".into()),
+        // a3 = font base = __font + glyph_index * 8.
+        Op::La {
+            rd: A3,
+            addr: Addr::UiFont,
+        },
+        Op::Slli {
+            rd: A1,
+            rs: A1,
+            shamt: 3,
+        },
+        Op::Add {
+            rd: A3,
+            rs1: A3,
+            rs2: A1,
+        },
+        // a2 = destination base for this character = row_base + col * 32.
+        Op::Slli {
+            rd: A1,
+            rs: T6,
+            shamt: 5,
+        },
+        Op::Add {
+            rd: A2,
+            rs1: A6,
+            rs2: A1,
+        },
+        Op::Li {
+            rd: A7,
+            imm: 0x00FF_FFFF,
+        },
+        Op::Li { rd: A4, imm: 0 },
+        Op::Label("dp32_gy".into()),
+        Op::Add {
+            rd: A1,
+            rs1: A3,
+            rs2: A4,
+        },
+        Op::Lbu {
+            rd: A0,
+            rs: A1,
+            off: 0,
+        },
+        Op::Li { rd: A5, imm: 0 },
+        Op::Label("dp32_gx".into()),
+        Op::Andi {
+            rd: A1,
+            rs: A0,
+            imm: 0x80,
+        },
+        Op::Beq {
+            rs1: A1,
+            rs2: X0,
+            to: "dp32_nb".into(),
+        },
+        Op::Sw {
+            rs2: A7,
+            rs1: A2,
+            off: 0,
+        },
+        Op::Label("dp32_nb".into()),
+        Op::Slli {
+            rd: A0,
+            rs: A0,
+            shamt: 1,
+        },
+        Op::Addi {
+            rd: A2,
+            rs: A2,
+            imm: 4,
+        },
+        Op::Addi {
+            rd: A5,
+            rs: A5,
+            imm: 1,
+        },
+        Op::Li { rd: A1, imm: 8 },
+        Op::Bne {
+            rs1: A5,
+            rs2: A1,
+            to: "dp32_gx".into(),
+        },
+        // next glyph row: back to the start of this char column, then + stride.
+        Op::Addi {
+            rd: A2,
+            rs: A2,
+            imm: -32,
+        },
+        Op::Add {
+            rd: A2,
+            rs1: A2,
+            rs2: S4,
+        },
+        Op::Addi {
+            rd: A4,
+            rs: A4,
+            imm: 1,
+        },
+        Op::Li { rd: A1, imm: 8 },
+        Op::Bne {
+            rs1: A4,
+            rs2: A1,
+            to: "dp32_gy".into(),
+        },
+        Op::Addi {
+            rd: T6,
+            rs: T6,
+            imm: 1,
+        },
+        jump("dp32_px"),
+        Op::Label("dp32_px_done".into()),
+        Op::Addi {
+            rd: S5,
+            rs: S5,
+            imm: 1,
+        },
+        Op::Label("dp32_next".into()),
+        Op::Addi {
+            rd: S7,
+            rs: S7,
+            imm: 1,
+        },
+        jump("dp32_row"),
+        Op::Label("dp32_done".into()),
+        ld_x(xlen, S9, SP, 8),
+        ld_x(xlen, S8, SP, 16),
+        ld_x(xlen, S7, SP, 24),
+        ld_x(xlen, S6, SP, 32),
+        ld_x(xlen, S5, SP, 40),
+        ld_x(xlen, S4, SP, 48),
+        ld_x(xlen, S3, SP, 56),
+        ld_x(xlen, S2, SP, 64),
+        ld_x(xlen, S1, SP, 72),
+        ld_x(xlen, S0, SP, 80),
+        ld_x(xlen, RA, SP, 88),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 96,
         },
         ret(),
     ]);

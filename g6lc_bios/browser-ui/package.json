@@ -7,6 +7,9 @@
   "license": "MIT",
   "scripts": {
     "build": "bun scripts/build.ts",
+    "install-ldc": "bun scripts/install-ldc.ts",
+    "check-ldc": "bun scripts/install-ldc.ts --check",
+    "build-libwasm": "bun scripts/install-ldc.ts && G6B_DUB_WASM=1 bun scripts/build.ts",
     "test": "bun test",
     "check": "bun test && bun scripts/build.ts"
   },

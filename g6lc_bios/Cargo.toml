@@ -24,6 +24,7 @@ members = [
     "crates/g6b-js",
     "crates/g6b-kernel",
     "crates/g6b-gr",
+    "crates/g6b-img",
     "crates/g6b-ttf",
     "crates/g6b-webidl",
     "crates/g6b-tls",
@@ -54,6 +55,7 @@ g6b-holyc = { path = "crates/g6b-holyc" }
 g6b-js = { path = "crates/g6b-js" }
 g6b-kernel = { path = "crates/g6b-kernel" }
 g6b-gr = { path = "crates/g6b-gr" }
+g6b-img = { path = "crates/g6b-img" }
 g6b-webidl = { path = "crates/g6b-webidl" }
 g6b-tls = { path = "crates/g6b-tls" }
 g6b-http = { path = "crates/g6b-http" }

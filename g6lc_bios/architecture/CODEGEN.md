@@ -65,8 +65,8 @@ those knobs emit is an analyzed IR, not a string template.
 | `Menu` | `setup tree` | HTTP or HolyC fast init | one model, two UIs |
 | `FileServe` | `g6ui+html\|js\|wasm` | `kernel.wasm` or `kernel.http.files` | `UiInit` `G6UI` header; `jal FileServe` echoes `\0asm` + `/ui/` listing; HolyC HTTPS file server on the host |
 | `UiDom` | `__ui_dom→__gr_plane` | `kernel.wasm.jit` | `g6b-asm::dom` row store + `WasmStart` (from `g6b-wasm::jit::start_ops`) + `DomPaint` (`DOM| ` serial + `__font` glyphs) |
-| `Virtio` | `vio-mmio` | `wants_virtio_gpu` | `VioProbe` slot scan for GPU DeviceID 16 + `VioInit` handshake/ctrlq/`GET_DISPLAY_INFO` + `VioCmd` submit-one + `VioScan` (`CREATE_2D`/`ATTACH_BACKING`/`SET_SCANOUT`/band-fill/`TRANSFER`/`FLUSH` at the high-res proxy geometry) (`VIRTIO-GPU n`/`NONE`/`OK`/`INFO`/`SCAN`/`FAIL`); `__vio` BSS rings + `__scan_fb` (shared high-res surface); host-modelled + QEMU `screendump` captured (1920×1080) |
-| `DispScan` | `disp-mmio` | `wants_disp_scan` (`display`-class peripheral) | `FbExpand` (shared scale-blit, `Proxy::to_ppm` semantics) + `DispPaint` — register-window commit + `G6FB` simplefb handoff at `__vio+0x400` (`architecture/uncore/hdmi-display.md`); `DISP-OK`/`DISP-FAIL` |
+| `Virtio` | `vio-mmio` | `wants_virtio_gpu` | `VioProbe` slot scan for GPU DeviceID 16 + `VioInit` handshake/ctrlq/`GET_DISPLAY_INFO` + `VioCmd` submit-one + `VioScan` (`CREATE_2D`/`ATTACH_BACKING`/`SET_SCANOUT`/band-fill/`TRANSFER`/`FLUSH` at the `__disp`-latched output geometry) (`VIRTIO-GPU n`/`NONE`/`OK`/`INFO`/`SCAN`/`FAIL`); `__vio` BSS rings + `__scan_fb` (max-geometry shared surface); host-modelled + QEMU `screendump` captured (1920×1080) |
+| `DispScan` | `disp-mmio` | `wants_disp_scan` (`display`-class peripheral) | `FbExpand`/`FbExpand1`/`DomPaint32` (shared blits, `Proxy::to_ppm` semantics, geometry from `__disp` at runtime via `divu`) + `DispPaint` — register-window commit + `G6FB` simplefb handoff at `__vio+0x400` (`architecture/uncore/hdmi-display.md`); `DISP-OK`/`DISP-FAIL` |
 
 ## Crate surface
 
@@ -91,6 +91,13 @@ for the cooperative integer task ABI. The only added instruction operation is
 CSRRC, lowered/formatted/executed through the same pipeline. Tests execute
 repeated context alternations and handler/exit trampolines on RV32 and RV64;
 the executor's RV32 logical right shift now masks its operand to XLEN first.
+
+The display-geometry pass added `Op::Divu` (RVM `divu`) so the `FbExpand`
+family can derive the integer scale from `__disp` at runtime instead of baking
+the gen-time proxy geometry, and fixed the host executor's RV32 effective
+address: the register file keeps sign-extended values, so loads/stores/`jalr`
+at `0x8xxx_xxxx` must truncate `rs1 + imm` to 32 bits before the bounds check
+(`eff_addr`).
 
 `g6b-kernel::TaskServices` exposes the primitive modules and constructs validated
 XLEN-specific initial context bytes tied to scheduler hart ownership and the

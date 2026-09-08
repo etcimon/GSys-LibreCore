@@ -62,6 +62,7 @@ def run_g6b(argv: list[str], timeout: float = 60.0) -> subprocess.CompletedProce
         cwd=str(package_root()),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=timeout,
     )
 
@@ -162,6 +163,7 @@ def _http_server(spec: Path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
     )
     try:
         assert proc.stderr is not None
@@ -323,6 +325,7 @@ def case_dual_band_repl(spec: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
     )
     port = None
     assert proc.stderr is not None
@@ -382,6 +385,7 @@ def case_loopback_mbox(spec: Path) -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
     )
     port = None
     assert proc.stderr is not None

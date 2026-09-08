@@ -296,7 +296,7 @@ version (unittest)
 }
 else
 {
-  private extern (C)
+  public extern (C)
   {
     Handle createElement(NodeType type);
     Handle createCustomElement(string type);

@@ -2809,6 +2809,12 @@ fn convert_op(op: u8, v: Value) -> Result<Value, String> {
         0xbd => Value::F64(v.as_i64()? as u64),
         0xbe => Value::I32(v.as_f32()? as u32 as i32),
         0xbf => Value::I64(v.as_f64()? as u64 as i64),
+        // Sign-extension proposal: reinterpret the low 8/16/32 bits as signed.
+        0xc0 => Value::I32(i32::from(v.as_i32()? as i8)),
+        0xc1 => Value::I32(i32::from(v.as_i32()? as i16)),
+        0xc2 => Value::I64(i64::from(v.as_i64()? as i8)),
+        0xc3 => Value::I64(i64::from(v.as_i64()? as i16)),
+        0xc4 => Value::I64(i64::from(v.as_i64()? as i32)),
         _ => return Err(format!("unsupported convert opcode 0x{op:02x}")),
     })
 }
@@ -4373,6 +4379,33 @@ pub(crate) mod tests {
         assert!(run_with_fuel(&m, 0, &[], &mut TestHost::default(), 32)
             .unwrap_err()
             .contains("fuel exhausted"));
+    }
+
+    #[test]
+    fn sign_extension_opcodes_narrow_then_widen_signed() {
+        // 0xc0/0xc1 are i32.extend8_s / i32.extend16_s. LDC 1.43 emits them for
+        // D `byte`/`short` casts in the generated cell, so they must execute
+        // rather than fail closed as unknown opcodes.
+        for (opcode, input, expected) in [
+            (0xc0u8, 0x0000_00ff, -1),
+            (0xc0, 0x0000_007f, 127),
+            (0xc0, 0x1234_5680, -128),
+            (0xc1, 0x0000_ffff, -1),
+            (0xc1, 0x0000_7fff, 32767),
+            (0xc1, 0x1234_8000, -32768),
+        ] {
+            assert_eq!(
+                eval(1, 0, &[0x20, 0, opcode, 0x0b], &[input]).unwrap(),
+                [expected],
+                "{opcode:#x} on {input:#x}"
+            );
+        }
+        // The i64 forms decode and validate as unary conversions too.
+        for opcode in [0xc2u8, 0xc3, 0xc4] {
+            assert!(decode(&numeric(0, 0, 0, &[0x42, 0, opcode, 0x1a, 0x0b])).is_ok());
+        }
+        // 0xc5 is still unassigned and must remain rejected.
+        assert!(decode(&numeric(1, 0, 0, &[0x20, 0, 0xc5, 0x1a, 0x0b])).is_err());
     }
 
     #[test]

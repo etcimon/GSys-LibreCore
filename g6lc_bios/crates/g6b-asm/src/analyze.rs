@@ -401,14 +401,22 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     // commits it — a UART-only board must not carry an 8 MB framebuffer just
     // because the mux runs.
     if vio.is_some() || disp.is_some() {
-        let gp = g6b_spec_proxy(spec);
-        // The scanout surface is the high-res proxy target (gp.2×gp.3) —
-        // `FbExpand` scale-expands the low-res `__gr_plane` into it and each
-        // backend commits it (virtio TRANSFER+FLUSH or the uncore display
-        // engine's DispPaint).
-        let fb = u64::from(gp.2)
-            .saturating_mul(u64::from(gp.3))
-            .saturating_mul(4)
+        // `__scan_fb` must hold the largest output the runtime mux may pick,
+        // not just the legacy `g6b_spec_proxy` default. `DispSel` latches the
+        // winning output's geometry into `__disp`; `VioPaint`/`DispPaint` then
+        // commit that surface. Sizing the buffer to the declared maximum keeps
+        // every `proxy_outputs` record reachable without over-allocating on
+        // UART-only boards.
+        let fb = spec
+            .display_outputs()
+            .iter()
+            .map(|o| {
+                u64::from(o.w)
+                    .saturating_mul(u64::from(o.h))
+                    .saturating_mul(4)
+            })
+            .max()
+            .unwrap_or(0)
             .min(crate::vio::VIO_FB_MAX);
         m.vio_fb_bytes = fb;
     }
@@ -416,7 +424,7 @@ pub fn kstart(spec: &BoardSpec) -> Module {
         m.push(vio_call_node(o, spec));
     }
     // PciProbe runs before the mux so its result is available to the top rung,
-    // and after VioScan so a failed ECAM read cannot strand the virtio lane.
+    // and before VioScan so a failed ECAM read cannot strand the virtio lane.
     if let Some(o) = pci {
         m.push(pci_call_node(o));
     }
@@ -424,6 +432,11 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     // before anything that paints.
     if let Some(o) = dmux {
         m.push(disp_sel_call_node(o));
+    }
+    // VioScan runs after the mux so the scanout rect/resource follow the
+    // output `DispSel` latched, not the gen-time proxy default.
+    if let Some(o) = vio {
+        m.push(vio_scan_call_node(o));
     }
     if let Some(o) = ui {
         m.ui_bytes = UI_HEADER_BYTES;
@@ -453,6 +466,14 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     if let Some(o) = disp {
         m.push(disp_paint_call_node(o));
     }
+    // PCIe-linear-fb commit: the blit lands in the accepted BAR directly, so
+    // this runs last in the paint pass alongside the other backends (each
+    // self-gates on `__disp.class`).
+    if let Some(o) = pci {
+        if spec.kernel.gr.enable || spec.kernel.proxy.enable {
+            m.push(pci_paint_call_node(o));
+        }
+    }
     if let Some(o) = park {
         m.push(park_node(o));
     }
@@ -480,8 +501,11 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     }
     // FbExpand is shared by every scanout backend that paints the plane.
     // `FbExpand1` is its scale-1 twin for the native surface, and
-    // `FbExpandSel` picks between them from the surface `DispSel` latched.
-    if (vio.is_some() || disp.is_some()) && (spec.kernel.gr.enable || spec.kernel.proxy.enable) {
+    // `FbExpandSel` picks between them from the surface `DispSel` latched —
+    // the pcie rung needs them too (`PciPaint` blits into the accepted BAR).
+    if (vio.is_some() || disp.is_some() || pci.is_some())
+        && (spec.kernel.gr.enable || spec.kernel.proxy.enable)
+    {
         m.push(crate::vio::expand_node(spec));
         m.push(crate::vio::expand1_node(spec));
         m.push(crate::vio::expand_sel_node(spec));
@@ -511,6 +535,9 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     }
     if pci.is_some() {
         m.push(crate::vio::pci_probe_node(spec));
+        if spec.kernel.gr.enable || spec.kernel.proxy.enable {
+            m.push(crate::vio::pci_paint_node(spec));
+        }
     }
     if dmux.is_some() {
         m.push(crate::vio::disp_sel_node(spec));
@@ -1801,6 +1828,12 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 to: "DispPaint".into(),
             });
         }
+        if spec.wants_pci_scan() && (spec.kernel.gr.enable || spec.kernel.proxy.enable) {
+            ops.push(Op::Jal {
+                rd: RA,
+                to: "PciPaint".into(),
+            });
+        }
         ops.push(Op::Label("trap_timer_clean".into()));
     }
     ops.extend([Op::Jal {
@@ -2325,6 +2358,21 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
         ops.push(Op::Jal {
             rd: RA,
             to: "VioPaint".into(),
+        });
+    }
+    // `DispPaint` is deliberately absent here: the uncore repaint is covered
+    // by the timer tick's dirty-DOM watermark, and running a second full
+    // `FbExpandSel` inside UART IRQ context would double the frame cost.
+    // `PciPaint` joins `VioPaint` so an explicit `Ui` repaint reaches the BAR
+    // on a pcie-won board; it self-gates on `__disp.class` and costs a few
+    // instructions elsewhere.
+    if spec.wants_pci_scan() && (spec.kernel.gr.enable || spec.kernel.proxy.enable) {
+        ops.push(Op::Comment(
+            "Ui → PciPaint: BAR blit when the pcie-linear-fb rung won".into(),
+        ));
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "PciPaint".into(),
         });
     }
     ops.push(Op::Jal {
@@ -3248,7 +3296,7 @@ fn gl_call_node(o: Object) -> Node {
 
 fn vio_call_node(o: Object, spec: &BoardSpec) -> Node {
     let mut ops = vec![
-        Op::Comment(format!("{} — jal VioProbe / VioInit / VioScan", o.why)),
+        Op::Comment(format!("{} — jal VioProbe / VioInit", o.why)),
         Op::Jal {
             rd: RA,
             to: "VioProbe".into(),
@@ -3256,10 +3304,6 @@ fn vio_call_node(o: Object, spec: &BoardSpec) -> Node {
         Op::Jal {
             rd: RA,
             to: "VioInit".into(),
-        },
-        Op::Jal {
-            rd: RA,
-            to: "VioScan".into(),
         },
     ];
     if spec.wants_virtio_input() {
@@ -3277,6 +3321,22 @@ fn vio_call_node(o: Object, spec: &BoardSpec) -> Node {
     }
 }
 
+fn vio_scan_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::Virtio,
+        ops: vec![
+            Op::Comment(format!(
+                "{} — jal VioScan (after DispSel; scanout rect from __disp)",
+                o.why
+            )),
+            Op::Jal {
+                rd: RA,
+                to: "VioScan".into(),
+            },
+        ],
+    }
+}
+
 fn vio_paint_call_node(o: Object) -> Node {
     Node {
         purpose: Purpose::Virtio,
@@ -3288,6 +3348,22 @@ fn vio_paint_call_node(o: Object) -> Node {
             Op::Jal {
                 rd: RA,
                 to: "VioPaint".into(),
+            },
+        ],
+    }
+}
+
+fn pci_paint_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::PciScan,
+        ops: vec![
+            Op::Comment(format!(
+                "{} — jal PciPaint (__disp.fb = accepted BAR; FbExpandSel paints in place)",
+                o.why
+            )),
+            Op::Jal {
+                rd: RA,
+                to: "PciPaint".into(),
             },
         ],
     }

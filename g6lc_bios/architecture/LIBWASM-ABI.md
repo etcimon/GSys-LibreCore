@@ -33,6 +33,34 @@ boundary. The `extern(C)` declaration set in
 `browser-ui/libwasm/source/libwasm/types.d` is byte-identical to the reference
 checkout, so the inventory below is the real target, not an approximation.
 
+### 0.1 Pinned compiler
+
+The artifact is produced by exactly one upstream release, pinned in
+`browser-ui/toolchains/ldc.lock.json`:
+
+| | |
+|---|---|
+| release | `v1.43.0-beta1`, `github.com/ldc-developers/ldc` |
+| frontend | DMD 2.113.0 — the version `libwasm/runtime-v1.43.0` targets |
+| integrity | upstream `ldc2-1.43.0-beta1.sha256sums.txt` digest, checked before extraction |
+| install | `bun scripts/install-ldc.ts` into `browser-ui/toolchains/<asset-dir>/` |
+| DUB | bundled with the release, so the LDC/DUB pair is never mixed |
+
+This is a correctness requirement, not convenience: `cellInputHash` in
+`browser-ui/compiler/wasm-cell.ts` hashes the **compiler binary** along with
+the D/runtime/adapter sources, so a different 1.43 build (for example a
+host-compiled `1.43.0-git-<sha>`) yields a different `inputs` digest and marks
+a shipped `out/bios-ui-libwasm.wasm` stale. `compiler/ldc.ts` therefore
+prefers the pinned tree over any ambient toolchain, and `resolveToolchain()`
+reports `pinned` so the build log states which compiler was used. The pinned
+version is recorded in the artifact provenance
+(`svelte-engine-ws/.svelte-d/wasm-artifact.json` `compiler` field).
+
+The `addon-wasi` package is not pinned: the cell links `-defaultlib=` against
+the carried `runtime-v1.43.0`, so no prebuilt WASI druntime/phobos is linked.
+A host with no published LDC build is refused with that message; the
+first-party `out/bios-ui.wasm` lane needs no D toolchain at all.
+
 ## 1. The surface, measured
 
 `types.d` declares **116** distinct `extern(C)` host imports. Every one of the

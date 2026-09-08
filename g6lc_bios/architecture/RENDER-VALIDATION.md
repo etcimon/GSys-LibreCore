@@ -251,13 +251,83 @@ Limits, stated plainly:
 ## 7. Honest status
 
 - Track A and track B are **defined and wired** into `bios_regress.py` via the
-  `css_golden` case. Five CSS fixture families are golden-locked.
+  `css_golden` case. Five CSS fixture families are golden-locked (palette lane).
 - The §6 debugging facilities are **implemented and tested** (26 Rust tests in
   `g6b-css`, 10 Bun tests for the inspector).
-- `g6b-css` currently implements the declaration/cascade/box-model core only
-  (see its unit tests). It is **not** a web rendering engine: no float, grid,
-  flex, text shaping, fonts beyond the 8×8 first-party bitmap, or compositing.
-  `color` / `background-color` cascade but are not yet rasterised.
+- `g6b-css` implements a **bounded modern lane** (`render32.rs`) alongside the
+  16-colour palette lane (`render.rs`). The modern lane supports `rgba()`,
+  opacity, rounded corners, background images, `object-fit`, `font-family`/
+  `font-size`/`font-weight`, `text-align`, SVG/raster assets and icons via the
+  bundled TTF font set, plus the layout primitives in §8. It is still **not** a
+  web rendering engine: no float, grid, flex, text shaping, `@media`, or
+  advanced compositing.
+- `g6b-cli css-render --modern --assets DIR` and `g6b-kernel::ui_ppm32` expose
+  the modern lane to the command line and to the host setup-page PPM path.
+- `g6b-html` `to_uart_lines` now emits `img` `alt` text and skips `svg`/`canvas`
+  for the no-graphics UART fallback.
 - Nothing in this document claims `browserscore.dev` can be navigated,
   scored, or screenshotted by the BIOS. It cannot; §1 explains why that would
   not be meaningful even if it could.
+
+## 8. Layout primitives (2026-09-09) — the three defects the screenshots showed
+
+Rendering the real setup page at the virtio-gpu scanout geometry exposed three
+layout defects. They were fixed against the `kernel-spec/goosie`
+`internal/renderer/layout.go` algorithms, rewritten (prime directive 1), not
+ported.
+
+### 8.1 `max-width` + `margin: auto` — the centred column
+
+`#bios-ui { max-width: ...; margin: 0 auto }` did nothing: `max-width` was not
+in `SUPPORTED_PROPERTIES`, so `parse_survey` dropped it, and `auto` margins
+resolved to `0` through `length`.
+
+Goosie solves the auto margins against the **used border-box width**
+(`computeLayoutBox`, `layout.go:638-673`), and clamps that width with
+`MaxWidth` before the solve. `g6b_css::computed_box` now does the same:
+`min-width`/`max-width` clamp the used width (subtracting the edges under
+`box-sizing: border-box`), and CSS 2.1 §10.3.3 then distributes the free space
+across whichever horizontal margins are `auto`.
+
+### 8.2 The inline formatting context — why table cells stacked
+
+`<th>A</th><th>B</th>` painted on separate lines. Root cause was **not** the
+table: an inline element recursed into `children_layout`, whose trailing
+`flush_items` ends the line. Every inline element therefore ended its own line.
+
+`render32` now splits the two jobs: `children_layout` owns a block formatting
+context and flushes once at the end, while `inline_children` appends into the
+**caller's** item run. Only a block, a `<br>`, an absolutely-positioned box or
+the end of the BFC breaks a line. `display` can also promote or demote an
+element (`is_block_for`), so `display: block` on a `<span>` and
+`display: inline` on a `<div>` both behave.
+
+### 8.3 Automatic table layout, and atomic inlines
+
+- **Tables.** `table_columns` measures each column's max-content width
+  (`max_content_width`, bounded to depth 32 and `MAX_TABLE_COLS` = 16), then
+  `distribute` shares the container width in proportion, giving the rounding
+  remainder to the last column so a row tiles exactly. `<tr>` lays its cells out
+  through `row_layout`, in two passes: measure every cell, then paint them all
+  at the shared row height so a row reads as one band. Not implemented, and not
+  pretended: `colspan`, `rowspan`, `table-layout: fixed`, border collapsing.
+- **`display: inline-block`.** An atomic inline that keeps its own background,
+  border, padding and radius — the reason a tab strip reads as tabs rather than
+  coloured words. Sized shrink-to-fit (max-content plus edges, clamped to the
+  line) and bottom-aligned on the line box, matching the replaced-element path.
+
+### 8.4 Evidence
+
+Five `g6b-css` tests, each written to fail on the pre-fix engine:
+`max_width_with_auto_margins_centers_the_column` (and its flush-left control),
+`inline_elements_share_one_line_instead_of_stacking`,
+`inline_block_tabs_keep_their_own_boxes_on_one_line`, and
+`table_cells_lay_out_as_columns_and_share_a_row_height`. One `g6b-kernel` test,
+`setup_page_renders_a_keyboard_tab_strip_above_aligned_tables`, asserts the
+composed result on the actual setup page at 1280x720: one tab per menu, all on
+one row below the banner, non-overlapping and shrink-to-fit, above a table whose
+header cells share a row and ascend in `x`.
+
+**Not covered by a golden.** These are geometry assertions on hit boxes, not PPM
+diffs; the `css_golden` case still only locks the five palette-lane fixtures.
+A `render32` golden family is still open.

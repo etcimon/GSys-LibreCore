@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 /** Print libwasm D IR (mixin NodeDef / @prop / @child). Not LDC. */
 
-import type { SvelteFile } from "./parse.ts";
+import { type MarkupNode, parseMarkupTree, type SvelteFile } from "./parse.ts";
 
 // Member names that libwasm Spa!/NodeDef consult via __traits(hasMember) or
 // mixin-defined symbols; a @child field may not reuse them.
@@ -53,10 +53,6 @@ export function printModule(file: SvelteFile, children: string[] = []): string {
   lines.push("nothrow:");
   lines.push("  @trusted:");
   lines.push(`  mixin NodeDef!"${file.tag}";`);
-  const rootId = file.ops.find((o) => o.kind === "text" && o.value);
-  if (rootId && rootId.kind === "text") {
-    lines.push(`  @prop!"id" enum id = "${escapeD(rootId.id)}";`);
-  }
   for (const b of file.lets) {
     lines.push(`  @prop!"innerText" string ${b.name} = "${escapeD(b.value)}";`);
   }
@@ -90,16 +86,29 @@ export function printReady(file: SvelteFile): string {
   const lines: string[] = [];
   lines.push("  void ready() {");
   lines.push("    try {");
+  lines.push("      auto root = this.getNamedNode.node;");
+  const roots = parseMarkupTree(file.src);
+  const ctx: DTreeContext = { vars: new Map(), next: 0, tbody: new Map() };
+  const root = roots[0];
+  if (root) {
+    for (const [name, value] of Object.entries(root.attrs)) {
+      lines.push(`      setProperty(root, "${escapeD(name)}", "${escapeD(value)}");`);
+    }
+    for (const c of root.children) {
+      lines.push(...printDNode(c, "root", ctx, 6));
+    }
+  }
+  const fetches: { index: number; url: string; opIndex: number }[] = [];
   for (let i = 0; i < file.ops.length; i++) {
     const op = file.ops[i];
     if (op.kind === "fetch") {
       const needsAwait = file.ops[i + 1]?.kind === "await";
+      const h = fetches.length;
+      fetches.push({ index: h, url: op.url, opIndex: i });
+      lines.push(`      auto p${h} = g6b_fetch("${escapeD(op.url)}");`);
       if (needsAwait) {
-        lines.push(`      auto p${i} = g6b_fetch("${escapeD(op.url)}");`);
-        lines.push(`      libwasm_await__void(p${i});`);
+        lines.push(`      libwasm_await__void(p${h});`);
         i++; // skip the await op
-      } else {
-        lines.push(`      g6b_fetch("${escapeD(op.url)}");`);
       }
     } else if (op.kind === "holyc") {
       lines.push(`      g6b_holyc("${escapeD(op.line)}");`);
@@ -107,12 +116,104 @@ export function printReady(file: SvelteFile): string {
       lines.push(`      g6b_register("${escapeD(op.path)}", "${escapeD(op.method)}");`);
     }
   }
+  const rows = printRowFetches(fetches, ctx);
+  if (rows.length) {
+    lines.push("      if (libwasm_await_supported()) {");
+    lines.push(...rows.map((l) => "    " + l));
+    lines.push("      }");
+  }
   lines.push("    } catch (Exception e) {");
   lines.push("      // bounded catch: rejection state is exposed through the");
   lines.push("      // libwasm host; the app may inspect or log if it chooses.");
   lines.push("    }");
   lines.push("  }");
   return lines.join("\n");
+}
+
+type DTreeContext = {
+  vars: Map<string, string>;
+  next: number;
+  tbody: Map<string, string>;
+};
+
+function dVar(id: string | undefined, ctx: DTreeContext): string {
+  if (id) {
+    const safe = id.replace(/[^A-Za-z0-9_]/g, "_");
+    if (!ctx.vars.has(safe)) {
+      ctx.vars.set(safe, safe);
+      return safe;
+    }
+  }
+  return `n${ctx.next++}`;
+}
+
+function nodeTypeTag(tag: string): string {
+  // libwasm NodeType uses `body_` and `template_` for D reserved words.
+  if (tag === "body") return "body_";
+  if (tag === "template") return "template_";
+  return tag;
+}
+
+function menuTbodyId(url: string): string | undefined {
+  const m = url.match(/^\/bios\/menu\/([a-z0-9-]+)$/);
+  return m ? `menu-${m[1]}-body` : undefined;
+}
+
+function printRowFetches(fetches: { index: number; url: string }[], ctx: DTreeContext): string[] {
+  const lines: string[] = [];
+  for (const { index, url } of fetches) {
+    const tbodyId = menuTbodyId(url);
+    if (!tbodyId || !ctx.tbody.has(tbodyId)) continue;
+    const tbody = ctx.tbody.get(tbodyId)!;
+    const h = `p${index}`;
+    const j = `j${index}`;
+    lines.push(`libwasm_await__void(${h});`);
+    lines.push(`auto json_${h} = libwasm_await_value();`);
+    lines.push(`auto ${j} = parseJSON!ThreadMemAllocator(json_${h});`);
+    lines.push(`foreach (_; ${j}) {`);
+    lines.push(`  string id = "", label = "", value = "";`);
+    lines.push(`  bool writable = false;`);
+    lines.push(`  foreach (key; ${j}.byKey) {`);
+    lines.push(`    if (key == "id") id = ${j}.read!string;`);
+    lines.push(`    else if (key == "label") label = ${j}.read!string;`);
+    lines.push(`    else if (key == "value") value = ${j}.read!string;`);
+    lines.push(`    else if (key == "writable") writable = ${j}.read!bool;`);
+    lines.push(`    else ${j}.skipValue();`);
+    lines.push(`  }`);
+    lines.push(`  auto tr = createElement(NodeType.tr);`);
+    lines.push(`  auto td0 = createElement(NodeType.td);`);
+    lines.push(`  setProperty(td0, "innerText", label);`);
+    lines.push(`  appendChild(tr, td0);`);
+    lines.push(`  auto td1 = createElement(NodeType.td);`);
+    lines.push(`  setProperty(td1, "innerText", value);`);
+    lines.push(`  appendChild(tr, td1);`);
+    lines.push(`  auto td2 = createElement(NodeType.td);`);
+    lines.push(`  setProperty(td2, "innerText", writable ? "RW" : "R");`);
+    lines.push(`  appendChild(tr, td2);`);
+    lines.push(`  appendChild(${tbody}, tr);`);
+    lines.push(`}`);
+  }
+  return lines;
+}
+
+function printDNode(node: MarkupNode | string, parent: string, ctx: DTreeContext, indent: number): string[] {
+  const pad = " ".repeat(indent);
+  if (typeof node === "string") {
+    return [`${pad}setProperty(${parent}, "innerText", "${escapeD(node)}");`];
+  }
+  const id = node.attrs.id;
+  const varName = dVar(id, ctx);
+  const out: string[] = [];
+  out.push(`${pad}auto ${varName} = createElement(NodeType.${nodeTypeTag(node.tag)});`);
+  for (const [name, value] of Object.entries(node.attrs)) {
+    out.push(`${pad}setProperty(${varName}, "${escapeD(name)}", "${escapeD(value)}");`);
+  }
+  for (const c of node.children) {
+    out.push(...printDNode(c, varName, ctx, indent));
+  }
+  if (node.tag === "tbody" && id) ctx.tbody.set(id, varName);
+  out.push(`${pad}appendChild(${parent}, ${varName});`);
+  return out;
 }
 
 export function printFxD(): string {

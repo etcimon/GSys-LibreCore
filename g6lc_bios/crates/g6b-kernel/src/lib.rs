@@ -408,6 +408,9 @@ pub fn setup_html(spec: &BoardSpec) -> String {
 
 fn optional_ui_id(spec: &BoardSpec, id: &str) -> bool {
     match id {
+        // The refresh button is part of the Svelte shell but g6b-ui removes it
+        // when no JS proxy refresh path is available.
+        "refresh" => true,
         "fm-list" | "fm-tabs" => !spec.kernel.usb.enable || !spec.kernel.usb.key,
         "usb-title" | "usb-list" => !spec.kernel.usb.enable || !spec.kernel.usb.flash_fat32,
         _ => false,
@@ -1547,6 +1550,29 @@ pub fn proxy_ppm(spec: &BoardSpec) -> Vec<u8> {
     p.to_ppm(&frame, &format!("DOM status={status}"))
 }
 
+/// High-res RGBA display-proxy PPM: the modern `render32` lane scaled to the
+/// proxy output geometry, suitable for a virtio-gpu / high-DPI scanout preview.
+pub fn proxy_ppm32(spec: &BoardSpec) -> Result<Vec<u8>, String> {
+    let p = g6b_gr::proxy::Proxy::from_spec(spec);
+    // On the GPU surface the page is rendered at the scanout geometry, so
+    // nothing is magnified; on VGA it keeps the low-res plane and the proxy
+    // scales it, matching `proxy_ppm`.
+    let out = if p.surface == g6b_spec::Surface::Gpu {
+        let o = p.output();
+        return Ok(ui_ppm32_output_at(spec, o.w, o.h)?
+            .canvas
+            .to_ppm_over([0, 0, 0]));
+    } else {
+        ui_ppm32_output(spec)?
+    };
+    let mut dom = rendered_dom(spec);
+    let status = dom
+        .get_element_by_id("status")
+        .map(|n| n.inner_text())
+        .unwrap_or_default();
+    Ok(p.to_ppm32(&out.canvas, &format!("DOM status={status}")))
+}
+
 /// OpenGL-ES2 adapter listing for the display-proxy.
 pub fn gl_listing(spec: &BoardSpec) -> String {
     let p = g6b_gr::proxy::Proxy::from_spec(spec);
@@ -1603,6 +1629,41 @@ pub fn ui_ppm_output(spec: &BoardSpec) -> Result<g6b_css::render::RenderOutput, 
     let w = spec.kernel.gr.w.max(320);
     let h = spec.kernel.gr.h.max(200);
     g6b_css::render::render_ui_to_output(&html, &css, w, h)
+}
+
+/// Modern RGBA CSS-raster PPM of the setup page. Uses `g6b_css::render32`
+/// with the default bundled font set and an empty asset map (assets are a
+/// future `files.assets` mount). This is the track-A true-colour lane from
+/// `architecture/RENDER-VALIDATION.md`.
+pub fn ui_ppm32(spec: &BoardSpec) -> Result<Vec<u8>, String> {
+    let html = g6b_ui::setup_html(spec);
+    let css = extract_style(&html);
+    let w = spec.kernel.gr.w.max(320);
+    let h = spec.kernel.gr.h.max(200);
+    let fonts = g6b_css::FontSet::default_set().map_err(|e| format!("{e:?}"))?;
+    let assets = g6b_css::AssetMap::new();
+    let out = g6b_css::render32::render32(&html, &css, w, h, &assets, &fonts)?;
+    Ok(out.canvas.to_ppm())
+}
+
+/// Modern RGBA output including hit boxes for event dispatch.
+pub fn ui_ppm32_output(spec: &BoardSpec) -> Result<g6b_css::render32::Render32Output, String> {
+    ui_ppm32_output_at(spec, spec.kernel.gr.w.max(320), spec.kernel.gr.h.max(200))
+}
+
+/// Modern RGBA output at an explicit canvas geometry. The GPU-surface path
+/// renders the page **at the scanout's own resolution** instead of upscaling
+/// the 640x480 plane, which is the whole point of the surface split.
+pub fn ui_ppm32_output_at(
+    spec: &BoardSpec,
+    w: u32,
+    h: u32,
+) -> Result<g6b_css::render32::Render32Output, String> {
+    let html = g6b_ui::setup_html(spec);
+    let css = extract_style(&html);
+    let fonts = g6b_css::FontSet::default_set().map_err(|e| format!("{e:?}"))?;
+    let assets = g6b_css::AssetMap::new();
+    g6b_css::render32::render32(&html, &css, w.max(320), h.max(200), &assets, &fonts)
 }
 
 fn extract_style(html: &str) -> String {
@@ -1731,6 +1792,81 @@ mod tests {
         let argv = qemu_dual_band_argv(&spec).join(" ");
         assert!(argv.contains("virtio-gpu-device"), "{argv}");
         assert!(!argv.contains("virtio-net"), "{argv}");
+    }
+
+    #[test]
+    fn ui_ppm32_renders_setup_page() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let ppm = ui_ppm32(&spec).unwrap();
+        assert!(ppm.starts_with(b"P6\n"));
+        // The PPM header includes the requested geometry.
+        let header = String::from_utf8_lossy(&ppm[..32]);
+        assert!(header.contains("640 480\n255\n"), "{header}");
+        // The canvas is not all white: the modern lane paints at least one
+        // non-background (non-[255,255,255]) pixel.
+        let body = &ppm[ppm.iter().position(|&b| b == b'\n').unwrap() + 1..];
+        let body = &body[body.iter().position(|&b| b == b'\n').unwrap() + 1..];
+        let body = &body[body.iter().position(|&b| b == b'\n').unwrap() + 1..];
+        assert!(body.chunks_exact(3).any(|p| p != [255, 255, 255]));
+    }
+
+    #[test]
+    fn setup_page_renders_a_keyboard_tab_strip_above_aligned_tables() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        // At the GPU scanout geometry, where the strip is meant to be read.
+        // A 640px VGA plane legitimately wraps the seven tabs onto two rows.
+        let out = ui_ppm32_output_at(&spec, 1280, 720).unwrap();
+
+        let banner = out
+            .hit_boxes
+            .iter()
+            .find(|b| b.id.as_deref() == Some("banner"))
+            .expect("banner");
+        let tabs: Vec<_> = out
+            .hit_boxes
+            .iter()
+            .filter(|b| b.name == "a" && b.w > 0)
+            .collect();
+        assert_eq!(tabs.len(), spec.menus().len(), "one tab per menu");
+
+        // The strip sits under the banner and every tab shares one row, which
+        // is what "tabs at the top" has to mean in pixels.
+        assert!(tabs.iter().all(|t| t.y >= banner.y + banner.h));
+        assert!(tabs.iter().all(|t| t.y == tabs[0].y));
+        for pair in tabs.windows(2) {
+            assert!(pair[0].x < pair[1].x, "tabs run left to right");
+            assert!(
+                pair[0].x + pair[0].w <= pair[1].x + 1,
+                "tabs do not overlap"
+            );
+        }
+        // Shrink-to-fit, not one tab per line and not a full-width block.
+        assert!(tabs.iter().all(|t| t.w < 200));
+
+        // Each settings table is a real grid: cells side by side with aligned
+        // columns, rather than one cell per line.
+        let cells: Vec<_> = out
+            .hit_boxes
+            .iter()
+            .filter(|b| b.name == "th" || b.name == "td")
+            .collect();
+        assert!(cells.len() >= 6, "settings rows must produce cells");
+        let head: Vec<_> = cells.iter().filter(|c| c.y == cells[0].y).collect();
+        assert_eq!(head.len(), 3, "Setting / Value / Access share a row");
+        assert!(head[0].x < head[1].x && head[1].x < head[2].x);
+
+        // The keyboard contract the tabs advertise is the one the session
+        // actually implements.
+        let hint = g6b_ui::setup_html(&spec);
+        assert!(hint.contains("id=\"bios-hint\""));
+        assert!(hint.contains("role=\"tablist\""));
+        assert!(hint.contains("role=\"tab\""));
+        for key in ["ArrowLeft", "ArrowRight", "Home", "End"] {
+            assert!(
+                g6b_ui::menu_for_key(&spec.kernel.start_menu, key).is_some(),
+                "{key} must move the tab selection"
+            );
+        }
     }
 
     #[test]
@@ -2313,7 +2449,12 @@ mod tests {
             banner.x,
             banner.x + banner.w
         );
-        assert_eq!(hit.y, 0, "and at the top");
+        // Inset from the top so the absolutely positioned button does not touch
+        // the canvas edge and risk clipping on small surfaces.
+        assert!(
+            hit.y > 0 && hit.y <= 10,
+            "and near the top with a small inset"
+        );
 
         // A pointer click on it runs an AOT listener, proving the CSS hit box,
         // the event path and the surface state are one chain.

@@ -390,33 +390,7 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
     let libwasm = libwasm_url
         .filter(|_| js && files.wasm && spec.kernel.wasm.enable && spec.kernel.ui == "svelte-d");
     let effects = libwasm.is_some() && spec.kernel.proxy.enable && spec.kernel.proxy.gl;
-    let workers = if js && spec.worker_limit() > 0 {
-        format!(
-            " data-worker-url=\"{root}/worker.js\" data-worker-limit=\"{}\"",
-            spec.worker_limit()
-        )
-    } else {
-        String::new()
-    };
     let css = include_str!("../../../browser-ui/out/bios-ui.css");
-    let backdrop = if effects {
-        "<canvas id=\"bios-fx\" aria-hidden=\"true\" hidden></canvas>"
-    } else {
-        ""
-    };
-    let wasm = if js && files.wasm {
-        let mut attr = format!(" data-wasm-url=\"{root}/ui.wasm\"");
-        if let Some(url) = libwasm {
-            attr.push_str(&format!(" data-libwasm-url=\"{}\"", escape_html(url)));
-        }
-        if effects {
-            let proxy = &spec.kernel.proxy;
-            attr.push_str(&format!(" data-fx-gl=\"true\" data-fx-width=\"{}\" data-fx-height=\"{}\" data-fx-dpi=\"{}\" data-fx-fps=\"{}\"", proxy.high_w, proxy.high_h, proxy.dpi, proxy.refresh_hz()));
-        }
-        attr
-    } else {
-        String::new()
-    };
     let reads = setup_reads(spec);
     let fetch_attr = |url: &str| {
         if js && spec.kernel.http.proxy_js && reads.contains(&url) {
@@ -425,22 +399,135 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
             String::new()
         }
     };
+
+    // The browser-ui Svelte compiler owns the structural shell. g6b-ui injects
+    // BoardSpec rows, conditional utility panels, and the data attributes that
+    // the kernel AOT/WASM lanes consume.
+    let shell = include_str!("../../../browser-ui/out/index.html");
+    let mut html = shell.to_string();
+
+    // <main> attributes: start menu, wasm/worker URLs, optional libwasm + FX.
+    let mut main_open = format!(
+        "<main id=\"bios-ui\" data-start-menu=\"{}\"",
+        escape_html(&spec.kernel.start_menu)
+    );
+    if js && files.wasm {
+        main_open.push_str(&format!(" data-wasm-url=\"{root}/ui.wasm\""));
+        if let Some(url) = libwasm {
+            main_open.push_str(&format!(" data-libwasm-url=\"{}\"", escape_html(url)));
+        }
+        if effects {
+            let proxy = &spec.kernel.proxy;
+            main_open.push_str(&format!(
+                " data-fx-gl=\"true\" data-fx-width=\"{}\" data-fx-height=\"{}\" data-fx-dpi=\"{}\" data-fx-fps=\"{}\"",
+                proxy.high_w, proxy.high_h, proxy.dpi, proxy.refresh_hz()
+            ));
+        }
+    }
+    if js && spec.worker_limit() > 0 {
+        main_open.push_str(&format!(
+            " data-worker-url=\"{root}/worker.js\" data-worker-limit=\"{}\"",
+            spec.worker_limit()
+        ));
+    }
+    main_open.push('>');
+    html = html.replace(
+        "<main id=\"bios-ui\" data-start-menu=\"main\" data-worker-url=\"WORKER_URL_PLACEHOLDER\" data-worker-limit=\"WORKER_LIMIT_PLACEHOLDER\" data-wasm-url=\"WASM_URL_PLACEHOLDER\">",
+        &main_open,
+    );
+
+    // Profile is injected by g6b-ui so the Svelte shell stays spec-agnostic.
+    html = html.replace(
+        "<p id=\"profile\"></p>",
+        &format!(
+            "<p id=\"profile\">{}</p>",
+            escape_html(spec.kernel.profile.as_str())
+        ),
+    );
+
+    // Remove the refresh button when there is no JS proxy path to refresh.
+    if !(js && spec.kernel.http.proxy_js && !reads.is_empty()) {
+        html = html.replace(
+            "<button id=\"refresh\" type=\"button\">Refresh values</button>",
+            "",
+        );
+    }
+
+    // The nav strip can refresh its title from /bios/menu.
+    html = html.replace(
+        "<nav id=\"bios-menu\" role=\"tablist\" aria-label=\"Setup menus\">",
+        &format!(
+            "<nav id=\"bios-menu\" role=\"tablist\" aria-label=\"Setup menus\"{}>",
+            fetch_attr("/bios/menu")
+        ),
+    );
+
+    // Menu tabs, sections, and row bodies.
+    for menu in spec.menus() {
+        if menu.id == spec.kernel.start_menu {
+            let tab_inactive = format!(
+                "<a id=\"tab-{}\" class=\"bios-tab\" href=\"#menu-{}\" data-menu-link=\"{}\" role=\"tab\" tabindex=\"-1\" aria-selected=\"false\">{}</a>",
+                menu.id, menu.id, menu.id, escape_html(menu.title)
+            );
+            let tab_active = format!(
+                "<a id=\"tab-{}\" class=\"bios-tab bios-tab-active\" href=\"#menu-{}\" data-menu-link=\"{}\" role=\"tab\" tabindex=\"0\" aria-selected=\"true\" aria-current=\"page\">{}</a>",
+                menu.id, menu.id, menu.id, escape_html(menu.title)
+            );
+            html = html.replace(&tab_inactive, &tab_active);
+        }
+
+        html = html.replace(
+            &format!(
+                "<section id=\"menu-{}\" data-menu=\"{}\" aria-labelledby=\"{}-title\">",
+                menu.id, menu.id, menu.id
+            ),
+            &format!(
+                "<section id=\"menu-{}\" data-menu=\"{}\" aria-labelledby=\"{}-title\"{}>",
+                menu.id,
+                menu.id,
+                menu.id,
+                fetch_attr(&format!("/bios/menu/{}", menu.id))
+            ),
+        );
+
+        let mut rows = String::new();
+        for item in &menu.items {
+            let id = escape_html(&item.id);
+            rows.push_str(&format!(
+                "<tr data-item=\"{id}\" data-writable=\"{}\"><th scope=\"row\" id=\"label-{}-{id}\">{}</th><td id=\"row-{}-{id}\">{}</td><td id=\"access-{}-{id}\">{}</td></tr>\n",
+                item.writable,
+                menu.id,
+                escape_html(&item.label),
+                menu.id,
+                escape_html(&item.value),
+                menu.id,
+                if item.writable {
+                    "Writable in spec; editing unavailable"
+                } else {
+                    "Read-only"
+                }
+            ));
+        }
+        html = html.replace(
+            &format!("<tbody id=\"menu-{}-body\"></tbody>", menu.id),
+            &format!("<tbody id=\"menu-{}-body\">\n{}</tbody>", menu.id, rows),
+        );
+    }
+
+    // Conditional utility panels, display toggle, worker/fx/libwasm chrome.
+    let mut conditional = String::new();
+
     // Top-right display surface toggle. Only rendered when both surfaces are
     // reachable, so the control can never promise a switch the board cannot do.
-    // It is absolutely positioned with no positioned ancestor, so its
-    // containing block is the initial one — the viewport in a browser, the
-    // canvas in the CSS raster — which puts it in the top-right corner in both
-    // lanes without disturbing the in-flow menu layout.
-    let disp_toggle = if spec.surface_toggle() {
+    if spec.surface_toggle() {
         let surface = spec.default_surface();
         let out = spec.default_output();
-        format!(
+        conditional.push_str(&format!(
             "<button type=\"button\" id=\"disp-toggle\" data-surface=\"{}\" data-output=\"{}\"{}>{}</button>\n\
              <p id=\"disp-status\" role=\"status\">{} {} {}x{}</p>\n",
             surface.as_str(),
             escape_html(&out.id),
             fetch_attr("/bios/display"),
-            // The label names the surface the click switches *to*.
             if surface == g6b_spec::Surface::Gpu {
                 "VGA view"
             } else {
@@ -450,64 +537,9 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
             surface.as_str(),
             out.w,
             out.h
-        )
-    } else {
-        String::new()
-    };
-    // `width`/`height` are explicit because the raster refuses shrink-to-fit
-    // on an out-of-flow box (see g6b_css::computed_absolute_box).
-    let disp_css = if spec.surface_toggle() {
-        "#disp-toggle{position:absolute;top:0;right:0;width:12ch;height:24px;\
-         background-color:#00aaaa;color:#ffffff;border:1px solid #00ffff}"
-    } else {
-        ""
-    };
-    let mut html = format!(
-        "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>G6LC-BIOS</title>\n\
-         <style>body{{font:16px \"Courier New\",monospace;background:#0000aa;color:#c8c8c8;margin:0;padding:1ch}}#bios-ui{{max-width:80ch;margin:auto}}h1#banner{{background:#00aaaa;color:#ffffff;text-align:center;padding:0 1ch;margin:0;font-weight:bold}}h2{{color:#ffffff;margin:.5ch 0}}a{{color:#ffff55}}nav a,button{{margin:0 .5ch;display:inline-block}}a[aria-current=page]{{background:#00aaaa;color:#ffffff}}table{{border-collapse:collapse;width:100%;border:1px solid #00aaaa}}th,td{{text-align:left;padding:0 1ch;border-bottom:1px solid #000077;overflow-wrap:anywhere}}th{{color:#00ffff}}tr[data-writable=\"true\"] th{{color:#ffff55}}pre{{white-space:pre-wrap}}[hidden]{{display:none!important}}button{{font:inherit;background:#00aaaa;color:#ffffff;border:1px outset #00ffff}}section{{margin-block:1ch;border:1px solid #00aaaa;padding:0 1ch}}#status{{color:#ffff55}}#bios-nav{{color:#00ffff}}footer,#libwasm-status{{color:#00ffff}}{disp_css}{css}</style></head>\n\
-         <body>{backdrop}{disp_toggle}<main id=\"bios-ui\" data-start-menu=\"{}\"{wasm}{workers}><h1 id=\"banner\">G6LC-BIOS | GSys LibreCore</h1>\n\
-         <p id=\"status\" role=\"status\">Static BoardSpec view</p><p id=\"profile\">{}</p>\n\
-         <p id=\"bios-nav\">{}</p><nav id=\"bios-menu\" aria-label=\"Setup menus\"{}><p id=\"menu-title\">Setup menus</p>\n",
-        escape_html(&spec.kernel.start_menu),
-        spec.kernel.profile.as_str(),
-        nav_label(),
-        fetch_attr("/bios/menu")
-    );
-    for menu in spec.menus() {
-        html.push_str(&format!(
-            "<a href=\"#menu-{}\" data-menu-link=\"{}\">{}</a>\n",
-            menu.id, menu.id, menu.title
         ));
     }
-    html.push_str("</nav><p>Compiled settings are a read-only view. Editing, settings import, and flashing are unavailable here.</p>\n");
-    if js && spec.kernel.http.proxy_js && !reads.is_empty() {
-        html.push_str("<button type=\"button\" id=\"refresh\">Refresh values</button>\n");
-    }
-    for menu in spec.menus() {
-        html.push_str(&format!(
-            "<section id=\"menu-{}\" data-menu=\"{}\" aria-labelledby=\"{}-title\"{}><h2 id=\"{}-title\">{}</h2><table><thead><tr><th>Setting</th><th>Value</th><th>Access</th></tr></thead><tbody>\n",
-            menu.id,
-            menu.id,
-            menu.id,
-            fetch_attr(&format!("/bios/menu/{}", menu.id)),
-            menu.id,
-            menu.title
-        ));
-        for item in menu.items {
-            let id = escape_html(&item.id);
-            html.push_str(&format!(
-                "<tr data-item=\"{id}\" data-writable=\"{}\"><th scope=\"row\" id=\"label-{}-{id}\">{}</th><td id=\"row-{}-{id}\">{}</td><td id=\"access-{}-{id}\">{}</td></tr>\n",
-                item.writable,
-                menu.id,
-                escape_html(&item.label),
-                menu.id,
-                escape_html(&item.value),
-                menu.id,
-                if item.writable { "Writable in spec; editing unavailable" } else { "Read-only" }
-            ));
-        }
-        html.push_str("</tbody></table></section>\n");
-    }
+
     for face in faces_for(spec)
         .into_iter()
         .filter(|face| face.kind == Kind::Utility)
@@ -542,7 +574,7 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
             ),
             _ => continue,
         };
-        html.push_str(&format!(
+        conditional.push_str(&format!(
             "<section id=\"{section}\"><h2 id=\"{title}\">{}</h2><pre id=\"{body}\"{}>{}</pre>\n",
             face.title,
             fetch_attr(face.fetch),
@@ -557,46 +589,76 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
             ] {
                 if enabled {
                     names.push(name);
-                    html.push_str(&format!(
+                    conditional.push_str(&format!(
                         "<pre id=\"fm-{name}\"{}>{name}: not refreshed</pre>\n",
                         fetch_attr(path)
                     ));
                 }
             }
-            html.push_str(&format!(
+            conditional.push_str(&format!(
                 "<p id=\"fm-tabs\" data-preserve=\"true\">{}</p>\n",
                 names.join(" ")
             ));
         }
-        html.push_str("</section>\n");
+        conditional.push_str("</section>\n");
     }
+
     for (enabled, path, id, initial) in [
         (spec.kernel.params.bootloader, "/bios/bootloader", "bootloader-info", format!("Next bootloader: {}", spec.kernel.params.next)),
         (spec.kernel.settings.enable, "/bios/settings", "settings-info", format!("Settings capabilities: export={} import={} uart={} mailbox={} usb_key={}; no mutation operations", spec.kernel.settings.export, spec.kernel.settings.import, spec.kernel.settings.uart, spec.kernel.settings.mailbox, spec.kernel.settings.usb_key)),
     ] {
         if enabled {
-            html.push_str(&format!("<pre id=\"{id}\"{}>{}</pre>\n", fetch_attr(path), escape_html(&initial)));
+            conditional.push_str(&format!("<pre id=\"{id}\"{}>{}</pre>\n", fetch_attr(path), escape_html(&initial)));
         }
     }
-    if !workers.is_empty() {
-        html.push_str("<button type=\"button\" id=\"worker-check\">Verify compute worker</button><p id=\"worker-status\" role=\"status\">Dedicated workers ready on demand; ServiceWorker registration unavailable</p>\n");
+
+    if js && spec.worker_limit() > 0 {
+        conditional.push_str("<button type=\"button\" id=\"worker-check\">Verify compute worker</button><p id=\"worker-status\" role=\"status\">Dedicated workers ready on demand; ServiceWorker registration unavailable</p>\n");
     }
     if effects {
-        html.push_str("<button type=\"button\" id=\"fx-motion\">Pause background</button><p id=\"fx-status\" role=\"status\">D/WASM background pending</p>\n");
+        conditional.push_str("<button type=\"button\" id=\"fx-motion\">Pause background</button><p id=\"fx-status\" role=\"status\">D/WASM background pending</p>\n");
     }
     if libwasm.is_some() {
-        html.push_str(
+        conditional.push_str(
             "<section id=\"libwasm-spa\"><h2 id=\"libwasm-title\">LDC component scaffold</h2><div id=\"libwasm-root\"></div><p id=\"libwasm-status\">LDC cell: pending</p></section>\n",
         );
     }
-    html.push_str("<footer><p id=\"bios-hint\">G6LC-BIOS setup — Left/Right: menu; Home/End: first/last; F10: refresh (not save); read-only</p></footer>\n");
-    html.push_str("</main>\n");
+
+    html = html.replace("<div id=\"g6b-ui-conditional\"></div>", &conditional);
+
+    // `width`/`height` are explicit because the raster refuses shrink-to-fit
+    // on an out-of-flow box (see g6b_css::computed_absolute_box).
+    // Inset from the edge so the button border does not touch the canvas and
+    // risk clipping on small surfaces (640x480 GR plane).
+    let disp_css = if spec.surface_toggle() {
+        "#disp-toggle{position:absolute;top:8px;right:8px;width:12ch;height:26px;\
+         background-color:#0b7f96;color:#eaffff;border:1px solid #22d3ee;border-radius:5px}\
+         #disp-status{color:#7fd4e8;text-align:right;font-size:13px;margin:2px 0}"
+    } else {
+        ""
+    };
+    let backdrop = if effects {
+        "<canvas id=\"bios-fx\" aria-hidden=\"true\" hidden></canvas>"
+    } else {
+        ""
+    };
+
+    html = format!(
+        "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>G6LC-BIOS</title>\n\
+         <style>{}{}</style></head>\n\
+         <body>{}{}</body></html>\n",
+        css,
+        disp_css,
+        backdrop,
+        html
+    );
+
     if js {
-        html.push_str(&format!(
-            "<script type=\"module\" src=\"{root}/app.js\"></script>\n"
-        ));
+        html = html.replace(
+            "</body>",
+            &format!("<script type=\"module\" src=\"{root}/app.js\"></script>\n</body>"),
+        );
     }
-    html.push_str("</body></html>\n");
     html
 }
 
@@ -701,7 +763,7 @@ mod tests {
             assert!(html.contains(attr), "{attr}");
         }
         assert!(html.contains("prefers-reduced-motion"));
-        assert!(html.contains("rgba(0, 0, 64, .74)"));
+        assert!(html.contains("rgba(5, 10, 24, .78)"));
         spec.kernel.proxy.gl = false;
         let html = setup_html_libwasm(&spec, "/ui/ui-libwasm.wasm");
         assert!(!html.contains("<canvas"));

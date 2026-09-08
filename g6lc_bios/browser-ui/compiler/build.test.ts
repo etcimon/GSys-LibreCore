@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { dropWorkspace } from "./drop-ws.ts";
 import { compileProject, WasmBuildError, writeOut } from "./index.ts";
-import { isLdc143Text, resolveToolchain, runtimePreflight, wasmLdcConfig, type Toolchain } from "./ldc.ts";
+import { findPinnedLdc, hostTriple, isLdc143Text, resolveToolchain, runtimePreflight, wasmLdcConfig, type Toolchain } from "./ldc.ts";
+import { downloadUrl, isPinnedLdcText, pinnedAsset, pinnedLdcBin, readPin, toolchainsDir } from "./ldc-pin.ts";
 import { parseSvelte } from "./parse.ts";
 import { childFieldName, printApp, printFxD, printModule } from "./print-d.ts";
 import { buildWasmCell, cachedWasmCell, checkCellArtifact, engineDubSdl, LIBWASM_ABI, pinWasmLdc, sha256, verifyLibwasmAbi } from "./wasm-cell.ts";
@@ -66,6 +67,83 @@ function abiFixture(importName = "createElement", importParam = 0x7f, stepParam 
 function runResult(status: number, action = () => {}) {
   return ((...args: any[]) => { action(); return { status, signal: null, stdout: "test dub", stderr: "", pid: 0, output: [] }; }) as any;
 }
+
+describe("LDC pin", () => {
+  test("the lock names one upstream release with a usable digest per host", () => {
+    const pin = readPin(root);
+    expect(pin.schema).toBe("g6lc-ldc-pin/v1");
+    expect(pin.version).toBe("1.43.0-beta1");
+    expect(pin.tag).toBe("v1.43.0-beta1");
+    expect(pin.repository).toBe("https://github.com/ldc-developers/ldc");
+    // The carried runtime is runtime-v1.43.0 / DMD 2.113; the pin must agree.
+    expect(pin.frontend).toBe("2.113.0");
+    for (const triple of ["windows-x64", "linux-x64", "linux-arm64", "osx-x64", "osx-arm64"]) {
+      const asset = pinnedAsset(triple, root);
+      expect(asset.sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(asset.file).toContain("1.43.0-beta1");
+      expect(asset.bytes).toBeGreaterThan(0);
+      // Every download is an upstream release asset for the pinned tag only.
+      expect(downloadUrl(asset, pin)).toBe(
+        `https://github.com/ldc-developers/ldc/releases/download/v1.43.0-beta1/${asset.file}`,
+      );
+    }
+    // A host with no published build is refused, not silently downgraded.
+    expect(() => pinnedAsset("windows-arm64", root)).toThrow(/publishes no windows-arm64/);
+    expect(() => pinnedAsset("plan9-x64", root)).toThrow();
+  });
+
+  test("only the pinned version text counts as the pin", () => {
+    expect(isPinnedLdcText("LDC - the LLVM D compiler (1.43.0-beta1):", root)).toBe(true);
+    // An ambient 1.43 passes isLdc143Text but is NOT the pin: the cell's
+    // provenance hash covers the compiler binary, so it is a different build.
+    for (const line of [
+      "LDC - the LLVM D compiler (1.43.0-git-1218a47):",
+      "LDC - the LLVM D compiler (1.43.0):",
+      "LDC - the LLVM D compiler (1.42.0):",
+      "",
+    ]) {
+      expect(isPinnedLdcText(line, root)).toBe(false);
+    }
+    expect(isLdc143Text("LDC - the LLVM D compiler (1.43.0-beta1):")).toBe(true);
+  });
+
+  test("a lock that is not a 1.43 upstream release is refused", () => {
+    const dir = mkdtempSync(join(tmpdir(), "g6lc-pin-"));
+    temp.push(dir);
+    const base = readPin(root);
+    const write = (patch: Record<string, unknown>) =>
+      put(join(dir, "toolchains", "ldc.lock.json"), JSON.stringify({ ...base, ...patch }));
+    write({ schema: "g6lc-ldc-pin/v2" });
+    expect(() => readPin(dir)).toThrow(/schema/);
+    write({ version: "1.42.0", tag: "v1.42.0" });
+    expect(() => readPin(dir)).toThrow(/not a 1\.43 release/);
+    write({ tag: "v1.43.0" });
+    expect(() => readPin(dir)).toThrow(/tag does not match/);
+    write({ repository: "https://github.com/attacker/ldc" });
+    expect(() => readPin(dir)).toThrow(/upstream ldc-developers\/ldc/);
+    write({ assets: { "linux-x64": { ...base.assets["linux-x64"], sha256: "nope" } } });
+    expect(() => readPin(dir)).toThrow(/SHA-256/);
+    write({ assets: { "linux-x64": { ...base.assets["linux-x64"], file: "ldc2-1.42.0-linux-x86_64.tar.xz" } } });
+    expect(() => readPin(dir)).toThrow(/not from 1\.43\.0-beta1/);
+    rmSync(join(dir, "toolchains", "ldc.lock.json"));
+    expect(() => readPin(dir)).toThrow(/missing LDC pin/);
+  });
+
+  test("the pin is installed under browser-ui/toolchains and wins over ambient 1.43", () => {
+    const triple = hostTriple();
+    const expected = pinnedLdcBin(`${triple.os}-${triple.arch}`, triple.exe, root);
+    expect(expected.startsWith(toolchainsDir(root))).toBe(true);
+    const pinned = findPinnedLdc(root);
+    if (!pinned) return; // not installed on this host; `bun run install-ldc`
+    expect(pinned).toBe(expected);
+    const tc = resolveToolchain(root);
+    expect(tc.ldc).toBe(expected);
+    expect(tc.pinned).toBe(true);
+    expect(isPinnedLdcText(tc.versionLine, root)).toBe(true);
+    // The release bundles dub, so the cell never mixes a foreign dub/LDC pair.
+    expect(dirname(tc.dub)).toBe(dirname(expected));
+  });
+});
 
 describe("LDC build integrity", () => {
   test("Main cannot shadow Spa.main and colliding child fields are rejected", () => {
@@ -183,7 +261,19 @@ const realFxTest = process.env.G6B_TEST_LDC_FX === "1" ? test : test.skip;
 const fullCellTest = process.env.G6B_TEST_LDC_CELL === "1" ? test : test.skip;
 fullCellTest("actual full LDC cell starts with the explicit DOM ABI", () => {
   const bytes = readFileSync(join(root, "svelte-engine-ws/public/bios-ui.wasm"));
-  expect(verifyLibwasmAbi(bytes)).toEqual(["__cpp_exception", "appendChild", "createElement", "setProperty"]);
+  const imports = verifyLibwasmAbi(bytes);
+  // verifyLibwasmAbi already refuses any import outside the declared ABI, so
+  // the list is checked for the shell's own boundary rather than frozen: the
+  // set tracks what App.svelte declares, and did grow when the BIOS endpoint
+  // and HolyC operations landed.
+  expect(imports).toContain("__cpp_exception");
+  expect(imports).toEqual([...imports].sort());
+  for (const name of ["fetch", "holyc", "register_endpoint"]) expect(imports).toContain(name);
+  // The published artifact must be the one the pinned compiler produced.
+  const provenance = JSON.parse(readFileSync(join(root, "svelte-engine-ws/.svelte-d/wasm-artifact.json"), "utf8"));
+  expect(provenance.imports).toEqual(imports);
+  expect(provenance.sha256).toBe(sha256(bytes));
+  expect(isPinnedLdcText(provenance.compiler, root)).toBe(true);
   exerciseFx(bytes);
 });
 realFxTest("isolated generated D particle code compiles with LDC and remains finite, bounded and deterministic", () => {
@@ -207,9 +297,19 @@ realFxTest("isolated generated D particle code compiles with LDC and remains fin
 
 function exerciseFx(bytes: Uint8Array) {
   const module = new WebAssembly.Module(bytes);
+  // The particle lane must run with every declared import inert, so the stub
+  // is derived from the module rather than hand-listed: a new DOM/kernel
+  // import must not silently turn this into a link error instead of a test.
   const create = () => {
     let handle = 1;
-    const instance = new WebAssembly.Instance(module, { env: { createElement: () => ++handle, appendChild: () => {}, setProperty: () => {}, __cpp_exception: new WebAssembly.Tag({ parameters: ["i32"] }) } });
+    const env: Record<string, unknown> = {};
+    for (const entry of WebAssembly.Module.imports(module)) {
+      if (entry.module !== "env") throw new Error(`unexpected import module ${entry.module}`);
+      env[entry.name] = entry.kind === "tag"
+        ? new WebAssembly.Tag({ parameters: ["i32"] })
+        : () => (entry.name === "createElement" ? ++handle : 0);
+    }
+    const instance = new WebAssembly.Instance(module, { env });
     const e = instance.exports as any;
     if (e._start) e._start(e.__heap_base.value);
     e.g6b_fx_step(0);

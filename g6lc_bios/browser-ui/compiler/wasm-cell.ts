@@ -384,9 +384,18 @@ export function verifyLibwasmStartup(bytes: Uint8Array): void {
   class Element {
     children: Element[] = [];
     parentNode: Element | null = null;
+    id = "";
+    className = "";
+    title = "";
+    value = "";
+    attrs = new Map<string, string>();
     get childNodes() { return this.children; }
     set textContent(_: string) { this.replaceChildren(); }
+    get textContent(): string { return this.children.map((c) => c.textContent).join(""); }
     contains(node: Element): boolean { return this === node || this.children.some((child) => child.contains(node)); }
+    getAttribute(key: string) { return this.attrs.get(key) ?? null; }
+    setAttribute(key: string, value: string) { this.attrs.set(key, value); }
+    removeAttribute(key: string) { this.attrs.delete(key); }
     remove() {
       if (this.parentNode) this.parentNode.children.splice(this.parentNode.children.indexOf(this), 1);
       this.parentNode = null;

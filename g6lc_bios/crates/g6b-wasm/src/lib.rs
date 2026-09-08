@@ -16,9 +16,9 @@ mod values;
 
 pub use asyncify::{Asyncify, Step, STATE_NORMAL, STATE_REWINDING, STATE_UNWINDING};
 pub use binary::{
-    decode, encode_ui_module, validate, Export, FuncType, Import, Instr, Module, ValType,
-    MAX_CONTROL_DEPTH, MAX_FUNCTIONS, MAX_INSTRUCTIONS, MAX_LOCALS, MAX_MEMORY_PAGES,
-    MAX_MODULE_BYTES, MAX_STACK,
+    decode, encode_empty_ui_module, encode_ui_module, validate, Export, FuncType, Import, Instr,
+    Module, ValType, MAX_CONTROL_DEPTH, MAX_FUNCTIONS, MAX_INSTRUCTIONS, MAX_LOCALS,
+    MAX_MEMORY_PAGES, MAX_MODULE_BYTES, MAX_STACK,
 };
 pub use interp::{
     run, run_start, run_with_fuel, run_with_fuel_mut, DomHost, GuestFn, Host, Ldexec, LdexecInit,

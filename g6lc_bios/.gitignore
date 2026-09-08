@@ -20,6 +20,15 @@
 /out/*.elf
 /out/*.ppm
 /out/*.glsl
+/out/*.png
+/out/*.kra
+/out/render/
+
+# The pinned LDC download is ignored by browser-ui/toolchains/.gitignore, which
+# keeps ldc.lock.json as the single checked-in source of truth.
+
+# Asyncify / wasm-opt inspection artifacts, not shipped.
+/browser-ui/svelte-engine-ws/public/bios-ui-asyncify-inspect.*
 
 # Python
 **/__pycache__/

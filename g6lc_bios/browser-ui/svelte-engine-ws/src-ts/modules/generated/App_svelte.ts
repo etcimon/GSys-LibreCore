@@ -10,9 +10,24 @@ _reg.registerTs("App_svelte", "fetchBios", fetchBios);
 _reg.registerTs("App_svelte", "holycEval", holycEval);
 _reg.registerTs("App_svelte", "registerEndpoint", registerEndpoint);
 export function mount() {
-  fetchBios("/bios/clocks");
   fetchBios("/bios/menu");
-  holycEval("UsbLs(\"fat32\")");
-  holycEval("MenuCpu()");
-  registerEndpoint("/bios/custom", "GET");
+  fetchBios("/bios/menu/main");
+  fetchBios("/bios/menu/cpu");
+  fetchBios("/bios/menu/memory");
+  fetchBios("/bios/menu/uncore");
+  fetchBios("/bios/menu/devices");
+  fetchBios("/bios/menu/boot");
+  fetchBios("/bios/menu/settings");
+  fetchBios("/bios/clocks");
+  fetchBios("/bios/bootloader");
+  fetchBios("/bios/display");
+  fetchBios("/bios/settings");
+  fetchBios("/bios/settings/usb");
+  fetchBios("/bios/usb/ls");
+  fetchBios("/bios/files");
+  fetchBios("/bios/files/fat32");
+  fetchBios("/bios/files/ntfs");
+  fetchBios("/bios/files/ext4");
+  holycEval("Menu(\"main\")");
+  registerEndpoint("/bios/custom", "POST");
 }

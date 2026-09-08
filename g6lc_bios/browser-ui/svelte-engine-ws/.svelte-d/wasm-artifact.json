@@ -1,10 +1,10 @@
 {
   "schema": "g6lc-libwasm-artifact/v1",
   "abi": "g6lc-libwasm-dom-shell-fx/v1",
-  "inputs": "262ef6c0694620ab12ae5a46f3d023e3db93120a583794c325726e14d0985304",
-  "sha256": "496bad7e6b3e2cc10ae35c39564582ba1364dc4dbdda707ba02a68d99f1d870d",
+  "inputs": "2d4db41287b15aba1f71cb3f9196d0e1f766e096a6c37819794233995377bb83",
+  "sha256": "860da2036ab3599ef88a22f361950cd4283f4b485c56c2e48239cb8496638d0a",
   "buildType": "release",
-  "compiler": "LDC - the LLVM D compiler (1.43.0-git-1218a47):",
+  "compiler": "LDC - the LLVM D compiler (1.43.0-beta1):",
   "imports": [
     "__cpp_exception",
     "appendChild",
@@ -13,6 +13,8 @@
     "holyc",
     "libwasm_add__string",
     "libwasm_await__void",
+    "libwasm_await_supported",
+    "libwasm_await_value",
     "libwasm_removeObject",
     "register_endpoint",
     "setProperty"

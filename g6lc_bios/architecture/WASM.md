@@ -11,9 +11,10 @@ browser-ui/src/*.svelte
 browser-ui/svelte-engine-ws/     dub.sdl wasm-eh cell
         src-d/   mixin NodeDef / @prop / @child / mixin Spa!App
         src-ts/  jsExports + window.__svelteD.ts
-        .svelte-d/wasm-ldc.json   LDC 1.43 pin (never PATH 1.41/1.42)
+        .svelte-d/wasm-ldc.json   resolved LDC (never PATH 1.41/1.42)
         │
-        ├─ LDC 1.43 + dub --arch=wasm32-unknown-wasi
+        ├─ LDC 1.43.0-beta1 (browser-ui/toolchains/ldc.lock.json)
+        │  + bundled dub --arch=wasm32-unknown-wasi
         │    libwasm = local clone browser-ui/libwasm (G6LC_G6B)
         │    public/bios-ui.wasm
         │
@@ -74,11 +75,20 @@ planned rows as capabilities.
 | vibe.0 host cell | refused |
 | SvelteKit `+page` / `load` / `handleFetch` | **refused** |
 
-LDC discovery matches svelte-d `findLdc`: `SVELTE_D_LDC`,
-`~/.svelte-d/toolchains`, `riscv-compilers/ldc2-build/bin` (this host:
-`E:\cva6\riscv-compilers\ldc2-build\bin\ldc2.exe` 1.43.0-git). Full
-`dub build` of the ws cell: `G6B_DUB_WASM=1 bun run build`. Asyncify post-link
-with the custom binaryen: `G6B_DUB_WASM=1 G6B_WASM_ASYNCIFY=1 bun run build`.
+LDC is **pinned**, not discovered from the ambient host:
+`browser-ui/toolchains/ldc.lock.json` names upstream `v1.43.0-beta1` (DMD
+2.113.0) with the upstream SHA-256 per host asset, and
+`bun scripts/install-ldc.ts` verifies the digest before extracting into
+`browser-ui/toolchains/<asset-dir>/`. The release bundles DUB, so the pair is
+never mixed. Discovery order in `compiler/ldc.ts` is `SVELTE_D_LDC` (and the
+`LDC`/`WASM_LDC`/`SVELTE_D_WASM_LDC` aliases), then the pinned tree, then the
+svelte-d fallbacks (`DC`, `~/.svelte-d/toolchains`, `riscv-compilers/ldc2-build/bin`,
+`PATH`). The pin outranks an ambient 1.43 because `cellInputHash` hashes the
+compiler binary — a `1.43.0-git-<sha>` snapshot marks the shipped artifact
+stale everywhere else. Full `dub build` of the ws cell: `G6B_DUB_WASM=1 bun run
+build` (or `bun run build-libwasm`, which installs the pin first). Asyncify
+post-link with the custom binaryen: `G6B_DUB_WASM=1 G6B_WASM_ASYNCIFY=1 bun run
+build`.
 
 ## B52/B55: validated execution and widened structural parsing
 
@@ -94,7 +104,10 @@ Asyncify artifact: i32/i64/f32/f64 value types and constants, all
 load/store widths, `call_indirect`, `br_table`, bulk memory (`memory.copy`,
 `memory.fill`, `memory.init`, `data.drop`, `table.init`, `table.copy`,
 `table.fill`, `table.get/set/grow/size`), saturating float-to-int
-conversions, legacy exception-handling opcodes (`throw`/`rethrow`/
+conversions, the sign-extension proposal (`i32.extend8_s`,
+`i32.extend16_s`, `i64.extend8_s`, `i64.extend16_s`, `i64.extend32_s` —
+`0xc0`..`0xc4`, which LDC 1.43 emits for D's `byte`/`short` casts),
+legacy exception-handling opcodes (`throw`/`rethrow`/
 `try`/`catch`/`catch_all`/`delegate`/`try_table`), `return_call`,
 `call_ref` and unknown `0xfc`/`0xfd` prefixed opcodes. These are either
 validated and, when executable, interpreted, or `run` fails closed with a
@@ -135,14 +148,23 @@ engine.
 | Budget | Bound |
 |---|---|
 | Encoded module / declared memory | 1 MiB / 16 × 64 KiB |
-| Types, total functions, exports, data segments | 256 each |
+| Types, total functions, exports, data segments | 1,024 each |
 | Imports / UTF-8 name bytes | 64 / 256 |
 | Parameters / results | 32 / 0 or 1 |
-| Parameters + locals / operand stack | 256 / 256 per function |
+| Parameters + locals / operand stack | 4,096 / 256 per function |
 | Control frames / call depth | 64 / 64 |
 | Instructions | 65,536 per module |
 | Execution fuel | 100,000 default; caller-selectable up to 1,000,000 |
 | Numeric JIT | 4,096 instructions; 256 combined slots; ≤1,024-byte aligned frame |
+
+The function and per-function local bounds were raised from 256 when the
+Svelte-to-D lowering began emitting the whole `App.svelte` static tree
+into one generated `ready()`: the real asyncified cell declares 942
+functions and a comparable number of locals in that body. The bounds are
+still fixed, still checked before any effect, and every other budget
+(module bytes, memory pages, operand stack, control depth, instruction
+count and fuel) is unchanged, so a guest cannot use the larger counts to
+escape the byte, memory or time envelope.
 
 The import ABI now also covers the libwasm cell:
 `env.createElement(i32) -> i32` (NodeType enum), `env.appendChild(i32,i32)`,

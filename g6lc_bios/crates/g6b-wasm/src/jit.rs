@@ -1536,4 +1536,277 @@ mod tests {
         assert!(img.len() <= MAX_WASM_DATA);
         assert!(img.windows(7).any(|w| w == b"UI-BOOT"));
     }
+
+    /// End-to-end `DomPaint32` on the GPU surface: the 1920×1080 scanout is
+    /// cleared and the DOM text is painted as native 32bpp glyphs, not as the
+    /// 640×480 plane placed 1:1 at the centre.
+    #[test]
+    fn dom_paint32_paints_native_32bpp_text_on_gpu_surface() {
+        let bytes = crate::encode_ui_module("status", "UI-BOOT");
+        let wm = decode(&bytes).unwrap();
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64,"march":"rv64imafdc"},
+            "kernel":{
+                "gr":{"enable":false},
+                "proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":1,
+                         "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":false},
+                "wasm":{"enable":true,"jit":true}
+            },
+            "uncore":{"plic":true,"hdmi":true},
+            "peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}],
+            "holyc":{"dual_band":{"tcp":{"enable":false}}},
+            "postboot":{"enable":"never"}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        let ops = start_ops(&wm, 64).unwrap();
+        m.wasm_data = data_image(&wm).unwrap();
+        m.ui_wasm = bytes.to_vec();
+        let mut merged = false;
+        for n in &mut m.nodes {
+            if n.ops
+                .iter()
+                .any(|o| matches!(o, Op::Label(l) if l == "WasmStart"))
+            {
+                n.ops = ops;
+                merged = true;
+                break;
+            }
+        }
+        assert!(merged, "WasmStart anchor");
+        let s = exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert_eq!(s.halt, exec::Halt::Wfi, "{}", s.console);
+        assert!(s.console.contains("DOM| UI-BOOT"), "{}", s.console);
+        assert!(s.console.contains("DISP-OK"), "{}", s.console);
+        assert!(s.disp_committed, "display not committed");
+        assert_eq!(s.disp_desc.1, 1920);
+        assert_eq!(s.disp_desc.2, 1080);
+
+        // The 'U' glyph row 0 is 0x66 = 0b01100110 (MSB left). Native 32bpp
+        // text starts at y = DOM_Y0, x = 0. Pixel x=1 and x=2 are white;
+        // x=0 is black.
+        let fb = &s.scan_fb;
+        assert!(!fb.is_empty(), "scan_fb empty");
+        let stride = 1920usize;
+        let y = g6b_asm::dom::DOM_Y0 as usize;
+        let row = y * stride * 4;
+        let off0 = row;
+        assert_eq!(fb[off0], 0x00, "U pixel 0 B");
+        assert_eq!(fb[off0 + 1], 0x00, "U pixel 0 G");
+        assert_eq!(fb[off0 + 2], 0x00, "U pixel 0 R");
+        assert_eq!(fb[off0 + 3], 0x00, "U pixel 0 X");
+        let off1 = row + 4;
+        assert_eq!(fb[off1], 0xFF, "U pixel 1 B");
+        assert_eq!(fb[off1 + 1], 0xFF, "U pixel 1 G");
+        assert_eq!(fb[off1 + 2], 0xFF, "U pixel 1 R");
+        assert_eq!(fb[off1 + 3], 0x00, "U pixel 1 X");
+
+        // The 640×480 plane 1:1 origin (640,300) should be clear because
+        // DomPaint32 clears the full scanout and only paints the DOM text.
+        let plane_off = (300 * stride + 640) * 4;
+        assert_eq!(fb[plane_off], 0x00, "plane 1:1 origin should be clear");
+        assert_eq!(fb[plane_off + 3], 0x00, "plane 1:1 origin X");
+    }
+
+    /// GPU surface with an empty DOM falls back to `FbExpand1` (the 640×480
+    /// plane placed 1:1 at the centre), not `DomPaint32`.
+    #[test]
+    fn dom_paint32_empty_dom_falls_back_to_fbexpand1() {
+        let bytes = crate::encode_empty_ui_module();
+        let wm = decode(&bytes).unwrap();
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64,"march":"rv64imafdc"},
+            "kernel":{
+                "gr":{"enable":false},
+                "proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":1,
+                         "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":false},
+                "wasm":{"enable":true,"jit":true}
+            },
+            "uncore":{"plic":true,"hdmi":true},
+            "peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}],
+            "holyc":{"dual_band":{"tcp":{"enable":false}}},
+            "postboot":{"enable":"never"}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        let ops = start_ops(&wm, 64).unwrap();
+        m.wasm_data = data_image(&wm).unwrap();
+        m.ui_wasm = bytes.to_vec();
+        for n in &mut m.nodes {
+            if n.ops
+                .iter()
+                .any(|o| matches!(o, Op::Label(l) if l == "WasmStart"))
+            {
+                n.ops = ops;
+                break;
+            }
+        }
+        let s = exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert_eq!(s.halt, exec::Halt::Wfi, "{}", s.console);
+        assert!(
+            !s.console.contains("DOM| UI-BOOT"),
+            "empty wasm did not set a status row: {}",
+            s.console
+        );
+        assert!(s.console.contains("DISP-OK"), "{}", s.console);
+        assert!(s.disp_committed, "display not committed");
+
+        let pal = g6b_asm::vio::vio_palette();
+        let fb = &s.scan_fb;
+        assert!(!fb.is_empty(), "scan_fb empty");
+        let stride = 1920usize;
+        // 640×480 plane is centred at (640,300); the boot scanline (colour 1)
+        // is at that origin.
+        let origin = (300 * stride + 640) * 4;
+        assert_eq!(fb[origin], (pal[1] & 0xff) as u8, "plane origin B");
+        assert_eq!(
+            fb[origin + 1],
+            ((pal[1] >> 8) & 0xff) as u8,
+            "plane origin G"
+        );
+        assert_eq!(
+            fb[origin + 2],
+            ((pal[1] >> 16) & 0xff) as u8,
+            "plane origin R"
+        );
+        // The 8×8 G6LC blit at (0,8) uses colour 15; 'G' byte 0 is 0x3C, so
+        // pixels 2 and 3 are set, giving a white pixel at (642,308).
+        let glyph = (308 * stride + 642) * 4;
+        assert_eq!(fb[glyph], (pal[15] & 0xff) as u8, "G6LC blit B");
+        assert_eq!(fb[glyph + 1], ((pal[15] >> 8) & 0xff) as u8, "G6LC blit G");
+        assert_eq!(fb[glyph + 2], ((pal[15] >> 16) & 0xff) as u8, "G6LC blit R");
+    }
+
+    /// VGA surface on a GPU-class output stays on the magnified `FbExpand`
+    /// path and does not invoke `DomPaint32`.
+    #[test]
+    fn dom_paint32_vga_surface_stays_magnified() {
+        let bytes = crate::encode_ui_module("status", "UI-BOOT");
+        let wm = decode(&bytes).unwrap();
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64,"march":"rv64imafdc"},
+            "kernel":{
+                "gr":{"enable":false},
+                "proxy":{"enable":true,"link":"hdmi","surface":"vga","dpi":192,"detected_hz":1,
+                         "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":false},
+                "wasm":{"enable":true,"jit":true}
+            },
+            "uncore":{"plic":true,"hdmi":true},
+            "peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}],
+            "holyc":{"dual_band":{"tcp":{"enable":false}}},
+            "postboot":{"enable":"never"}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        let ops = start_ops(&wm, 64).unwrap();
+        m.wasm_data = data_image(&wm).unwrap();
+        m.ui_wasm = bytes.to_vec();
+        for n in &mut m.nodes {
+            if n.ops
+                .iter()
+                .any(|o| matches!(o, Op::Label(l) if l == "WasmStart"))
+            {
+                n.ops = ops;
+                break;
+            }
+        }
+        let s = exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert_eq!(s.halt, exec::Halt::Wfi, "{}", s.console);
+        assert!(s.console.contains("DOM| UI-BOOT"), "{}", s.console);
+        assert!(s.console.contains("DISP-OK"), "{}", s.console);
+        assert!(s.disp_committed, "display not committed");
+        // DispSel should report the forced VGA surface (0).
+        assert_eq!(
+            s.disp_sel.1, 0,
+            "surface should be VGA (0): {:?}",
+            s.disp_sel
+        );
+
+        let pal = g6b_asm::vio::vio_palette();
+        let fb = &s.scan_fb;
+        assert!(!fb.is_empty(), "scan_fb empty");
+        let stride = 1920usize;
+        // With dpi=192, fit=2 and dpi/96=2, so scale=2. The 640×480 plane is
+        // placed at (320,60). The boot scanline (colour 1) is at that origin.
+        let origin = (60 * stride + 320) * 4;
+        assert_eq!(fb[origin], (pal[1] & 0xff) as u8, "magnified origin B");
+        assert_eq!(
+            fb[origin + 1],
+            ((pal[1] >> 8) & 0xff) as u8,
+            "magnified origin G"
+        );
+        assert_eq!(
+            fb[origin + 2],
+            ((pal[1] >> 16) & 0xff) as u8,
+            "magnified origin R"
+        );
+        // G6LC blit at (0,8) in the plane -> (320,76) in scanout, scale 2.
+        // 'G' byte 0 is 0x3C, so pixel 2 is set -> (324,76).
+        let glyph = (76 * stride + 324) * 4;
+        assert_eq!(fb[glyph], (pal[15] & 0xff) as u8, "magnified G6LC B");
+        assert_eq!(
+            fb[glyph + 1],
+            ((pal[15] >> 8) & 0xff) as u8,
+            "magnified G6LC G"
+        );
+        assert_eq!(
+            fb[glyph + 2],
+            ((pal[15] >> 16) & 0xff) as u8,
+            "magnified G6LC R"
+        );
+    }
+
+    /// `DomPaint32` works on RV32 as well as RV64.
+    #[test]
+    fn dom_paint32_paints_native_32bpp_text_on_gpu_surface_rv32() {
+        let bytes = crate::encode_ui_module("status", "UI-BOOT");
+        let wm = decode(&bytes).unwrap();
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":32,"march":"rv32imafdc"},
+            "kernel":{
+                "gr":{"enable":false},
+                "proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":1,
+                         "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":false},
+                "wasm":{"enable":true,"jit":true}
+            },
+            "uncore":{"plic":true,"hdmi":true},
+            "peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}],
+            "holyc":{"dual_band":{"tcp":{"enable":false}}},
+            "postboot":{"enable":"never"}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        let ops = start_ops(&wm, 32).unwrap();
+        m.wasm_data = data_image(&wm).unwrap();
+        m.ui_wasm = bytes.to_vec();
+        for n in &mut m.nodes {
+            if n.ops
+                .iter()
+                .any(|o| matches!(o, Op::Label(l) if l == "WasmStart"))
+            {
+                n.ops = ops;
+                break;
+            }
+        }
+        // RV32: use a low entry so the scanout address stays below 0x8000_0000
+        // and is not sign-extended by the 32-bit register model.
+        let s = exec::run_module(&spec, &m, 0x0001_0000).unwrap();
+        assert_eq!(s.halt, exec::Halt::Wfi, "{}", s.console);
+        assert!(s.console.contains("DOM| UI-BOOT"), "{}", s.console);
+        assert!(s.console.contains("DISP-OK"), "{}", s.console);
+
+        let fb = &s.scan_fb;
+        assert!(!fb.is_empty(), "scan_fb empty");
+        let stride = 1920usize;
+        let y = g6b_asm::dom::DOM_Y0 as usize;
+        let row = y * stride * 4;
+        let off0 = row;
+        let off1 = row + 4;
+        assert_eq!(fb[off0], 0x00, "U pixel 0 B");
+        assert_eq!(fb[off0 + 1], 0x00, "U pixel 0 G");
+        assert_eq!(fb[off0 + 2], 0x00, "U pixel 0 R");
+        assert_eq!(fb[off1], 0xFF, "U pixel 1 B");
+        assert_eq!(fb[off1 + 1], 0xFF, "U pixel 1 G");
+        assert_eq!(fb[off1 + 2], 0xFF, "U pixel 1 R");
+    }
 }

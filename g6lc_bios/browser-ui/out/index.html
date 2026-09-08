@@ -1,42 +1,63 @@
-<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>G6LC-BIOS</title>
-<style>body{font:16px "Courier New",monospace;background:#0000aa;color:#c8c8c8;margin:0;padding:1ch}h1{background:#00aaaa;color:#fff;text-align:center;margin:0}section,nav{border:1px solid #00aaaa;padding:0 1ch;margin:1ch 0}[hidden]{display:none!important}</style></head>
-<body><h1>G6LC-BIOS</h1>
-<p>Static compile-product preview. The served setup menus are generated from BoardSpec.</p>
-<section id="bios-ui">
-<p id="status">UI-BOOT</p>
-<nav id="bios-nav">Main CPU Memory Uncore Devices Boot Settings</nav>
-</section>
-<section id="menu-boot">
-<p id="boot-title">Boot</p>
-</section>
-<section id="menu-cpu">
-<p id="cpu-title">CPU</p>
-</section>
-<section id="menu-devices">
-<p id="devices-title">Devices</p>
-</section>
-<section id="filemgr">
-<p id="fm-tabs">fat32 ntfs ext4</p>
-<p id="fm-list">USB-FILES</p>
-</section>
-<section id="usb-flash">
-<p id="usb-title">USB-FAT32</p>
-<p id="usb-list">Read-only USB image listing; not refreshed</p>
-</section>
-<section id="menu-main">
-<p id="main-title">Main</p>
-</section>
-<section id="menu-memory">
-<p id="memory-title">Memory</p>
-</section>
-<nav id="bios-menu">
-<p id="menu-title">Main CPU Memory Uncore Devices Boot Settings</p>
-</nav>
-<section id="menu-settings">
-<p id="settings-title">Settings</p>
-</section>
-<section id="menu-uncore">
-<p id="uncore-title">Uncore</p>
-</section>
-</body></html>
+<main id="bios-ui" data-start-menu="main" data-worker-url="WORKER_URL_PLACEHOLDER" data-worker-limit="WORKER_LIMIT_PLACEHOLDER" data-wasm-url="WASM_URL_PLACEHOLDER">
+<h1 id="banner">G6LC-BIOS | GSys LibreCore</h1><p id="profile"></p><nav id="bios-menu" role="tablist" aria-label="Setup menus">
+<span id="menu-title">SETUP</span><a id="tab-main" class="bios-tab" href="#menu-main" data-menu-link="main" role="tab" tabindex="-1" aria-selected="false">Main</a><a id="tab-cpu" class="bios-tab" href="#menu-cpu" data-menu-link="cpu" role="tab" tabindex="-1" aria-selected="false">CPU</a><a id="tab-memory" class="bios-tab" href="#menu-memory" data-menu-link="memory" role="tab" tabindex="-1" aria-selected="false">Memory</a><a id="tab-uncore" class="bios-tab" href="#menu-uncore" data-menu-link="uncore" role="tab" tabindex="-1" aria-selected="false">Uncore</a><a id="tab-devices" class="bios-tab" href="#menu-devices" data-menu-link="devices" role="tab" tabindex="-1" aria-selected="false">Devices</a><a id="tab-boot" class="bios-tab" href="#menu-boot" data-menu-link="boot" role="tab" tabindex="-1" aria-selected="false">Boot</a><a id="tab-settings" class="bios-tab" href="#menu-settings" data-menu-link="settings" role="tab" tabindex="-1" aria-selected="false">Settings</a>
+</nav><p id="status" role="status">UI-BOOT</p><p id="bios-nav">Main CPU Memory Uncore Devices Boot Settings</p><p id="read-only-note">Read-only BoardSpec view. Editing, settings import, and flashing are unavailable here.</p><button id="refresh" type="button">Refresh values</button><section id="menu-main" data-menu="main" aria-labelledby="main-title">
+<h2 id="main-title">Main</h2><table>
+<thead>
+<tr>
+<th class="col-head">Setting</th><th class="col-head">Value</th><th class="col-head">Access</th>
+</tr>
+</thead><tbody id="menu-main-body"></tbody>
+</table>
+</section><section id="menu-cpu" data-menu="cpu" aria-labelledby="cpu-title">
+<h2 id="cpu-title">CPU</h2><table>
+<thead>
+<tr>
+<th class="col-head">Setting</th><th class="col-head">Value</th><th class="col-head">Access</th>
+</tr>
+</thead><tbody id="menu-cpu-body"></tbody>
+</table>
+</section><section id="menu-memory" data-menu="memory" aria-labelledby="memory-title">
+<h2 id="memory-title">Memory</h2><table>
+<thead>
+<tr>
+<th class="col-head">Setting</th><th class="col-head">Value</th><th class="col-head">Access</th>
+</tr>
+</thead><tbody id="menu-memory-body"></tbody>
+</table>
+</section><section id="menu-uncore" data-menu="uncore" aria-labelledby="uncore-title">
+<h2 id="uncore-title">Uncore</h2><table>
+<thead>
+<tr>
+<th class="col-head">Setting</th><th class="col-head">Value</th><th class="col-head">Access</th>
+</tr>
+</thead><tbody id="menu-uncore-body"></tbody>
+</table>
+</section><section id="menu-devices" data-menu="devices" aria-labelledby="devices-title">
+<h2 id="devices-title">Devices</h2><table>
+<thead>
+<tr>
+<th class="col-head">Setting</th><th class="col-head">Value</th><th class="col-head">Access</th>
+</tr>
+</thead><tbody id="menu-devices-body"></tbody>
+</table>
+</section><section id="menu-boot" data-menu="boot" aria-labelledby="boot-title">
+<h2 id="boot-title">Boot</h2><table>
+<thead>
+<tr>
+<th class="col-head">Setting</th><th class="col-head">Value</th><th class="col-head">Access</th>
+</tr>
+</thead><tbody id="menu-boot-body"></tbody>
+</table>
+</section><section id="menu-settings" data-menu="settings" aria-labelledby="settings-title">
+<h2 id="settings-title">Settings</h2><table>
+<thead>
+<tr>
+<th class="col-head">Setting</th><th class="col-head">Value</th><th class="col-head">Access</th>
+</tr>
+</thead><tbody id="menu-settings-body"></tbody>
+</table>
+</section><div id="g6b-ui-conditional"></div><footer>
+<p id="bios-hint">ArrowLeft/ArrowRight Select tab   Home/End First/Last   F10 Refresh (not save)   Read-only BoardSpec view</p>
+</footer>
+</main>

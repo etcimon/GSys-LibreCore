@@ -11,6 +11,8 @@
 #![allow(missing_docs)]
 
 pub mod canvas;
+pub mod canvas32;
+pub mod color;
 pub mod gl;
 pub mod proxy;
 

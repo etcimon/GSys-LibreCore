@@ -3,142 +3,65 @@
     {
       "ident": "App_svelte",
       "rel": "src/App.svelte",
-      "tag": "section",
+      "tag": "main",
       "langTs": true,
       "ops": [
-        {
-          "kind": "fetch",
-          "url": "/bios/clocks"
-        },
         {
           "kind": "fetch",
           "url": "/bios/menu"
         },
         {
-          "kind": "await"
-        },
-        {
-          "kind": "holyc",
-          "line": "UsbLs(\"fat32\")"
-        },
-        {
-          "kind": "holyc",
-          "line": "MenuCpu()"
-        },
-        {
-          "kind": "register",
-          "path": "/bios/custom",
-          "method": "GET"
-        },
-        {
-          "kind": "text",
-          "id": "bios-ui",
-          "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "status",
-          "value": "UI-BOOT"
-        },
-        {
-          "kind": "text",
-          "id": "bios-nav",
-          "value": "Main CPU Memory Uncore Devices Boot Settings"
-        }
-      ]
-    },
-    {
-      "ident": "Boot_svelte",
-      "rel": "src/Boot.svelte",
-      "tag": "section",
-      "langTs": true,
-      "ops": [
-        {
           "kind": "fetch",
-          "url": "/bios/menu/boot"
+          "url": "/bios/menu/main"
         },
-        {
-          "kind": "fetch",
-          "url": "/bios/bootloader"
-        },
-        {
-          "kind": "holyc",
-          "line": "Menu(\"boot\")"
-        },
-        {
-          "kind": "text",
-          "id": "menu-boot",
-          "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "boot-title",
-          "value": "Boot"
-        }
-      ]
-    },
-    {
-      "ident": "Cpu_svelte",
-      "rel": "src/Cpu.svelte",
-      "tag": "section",
-      "langTs": true,
-      "ops": [
         {
           "kind": "fetch",
           "url": "/bios/menu/cpu"
         },
         {
           "kind": "fetch",
-          "url": "/bios/cpu"
+          "url": "/bios/menu/memory"
         },
         {
-          "kind": "holyc",
-          "line": "MenuCpu()"
+          "kind": "fetch",
+          "url": "/bios/menu/uncore"
         },
-        {
-          "kind": "text",
-          "id": "menu-cpu",
-          "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "cpu-title",
-          "value": "CPU"
-        }
-      ]
-    },
-    {
-      "ident": "Devices_svelte",
-      "rel": "src/Devices.svelte",
-      "tag": "section",
-      "langTs": true,
-      "ops": [
         {
           "kind": "fetch",
           "url": "/bios/menu/devices"
         },
         {
-          "kind": "holyc",
-          "line": "Menu(\"devices\")"
+          "kind": "fetch",
+          "url": "/bios/menu/boot"
         },
         {
-          "kind": "text",
-          "id": "menu-devices",
-          "value": ""
+          "kind": "fetch",
+          "url": "/bios/menu/settings"
         },
         {
-          "kind": "text",
-          "id": "devices-title",
-          "value": "Devices"
-        }
-      ]
-    },
-    {
-      "ident": "FileMgr_svelte",
-      "rel": "src/FileMgr.svelte",
-      "tag": "section",
-      "langTs": true,
-      "ops": [
+          "kind": "fetch",
+          "url": "/bios/clocks"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/bootloader"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/display"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/settings"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/settings/usb"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/usb/ls"
+        },
         {
           "kind": "fetch",
           "url": "/bios/files"
@@ -157,69 +80,92 @@
         },
         {
           "kind": "holyc",
-          "line": "UsbLs(\"ntfs\")"
-        },
-        {
-          "kind": "text",
-          "id": "filemgr",
-          "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "fm-tabs",
-          "value": "fat32 ntfs ext4"
-        },
-        {
-          "kind": "text",
-          "id": "fm-list",
-          "value": "USB-FILES"
-        }
-      ]
-    },
-    {
-      "ident": "Flash_svelte",
-      "rel": "src/Flash.svelte",
-      "tag": "section",
-      "langTs": true,
-      "ops": [
-        {
-          "kind": "fetch",
-          "url": "/bios/usb/ls"
-        },
-        {
-          "kind": "holyc",
-          "line": "UsbLs(\"fat32\")"
-        },
-        {
-          "kind": "text",
-          "id": "usb-flash",
-          "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "usb-title",
-          "value": "USB-FAT32"
-        },
-        {
-          "kind": "text",
-          "id": "usb-list",
-          "value": "Read-only USB image listing; not refreshed"
-        }
-      ]
-    },
-    {
-      "ident": "Main_svelte",
-      "rel": "src/Main.svelte",
-      "tag": "section",
-      "langTs": true,
-      "ops": [
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/main"
-        },
-        {
-          "kind": "holyc",
           "line": "Menu(\"main\")"
+        },
+        {
+          "kind": "register",
+          "path": "/bios/custom",
+          "method": "POST"
+        },
+        {
+          "kind": "text",
+          "id": "bios-ui",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "banner",
+          "value": "G6LC-BIOS | GSys LibreCore"
+        },
+        {
+          "kind": "text",
+          "id": "profile",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "bios-menu",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "menu-title",
+          "value": "SETUP"
+        },
+        {
+          "kind": "text",
+          "id": "tab-main",
+          "value": "Main"
+        },
+        {
+          "kind": "text",
+          "id": "tab-cpu",
+          "value": "CPU"
+        },
+        {
+          "kind": "text",
+          "id": "tab-memory",
+          "value": "Memory"
+        },
+        {
+          "kind": "text",
+          "id": "tab-uncore",
+          "value": "Uncore"
+        },
+        {
+          "kind": "text",
+          "id": "tab-devices",
+          "value": "Devices"
+        },
+        {
+          "kind": "text",
+          "id": "tab-boot",
+          "value": "Boot"
+        },
+        {
+          "kind": "text",
+          "id": "tab-settings",
+          "value": "Settings"
+        },
+        {
+          "kind": "text",
+          "id": "status",
+          "value": "UI-BOOT"
+        },
+        {
+          "kind": "text",
+          "id": "bios-nav",
+          "value": "Main CPU Memory Uncore Devices Boot Settings"
+        },
+        {
+          "kind": "text",
+          "id": "read-only-note",
+          "value": "Read-only BoardSpec view. Editing, settings import, and flashing are unavailable here."
+        },
+        {
+          "kind": "text",
+          "id": "refresh",
+          "value": "Refresh values"
         },
         {
           "kind": "text",
@@ -230,22 +176,26 @@
           "kind": "text",
           "id": "main-title",
           "value": "Main"
-        }
-      ]
-    },
-    {
-      "ident": "Memory_svelte",
-      "rel": "src/Memory.svelte",
-      "tag": "section",
-      "langTs": true,
-      "ops": [
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/memory"
         },
         {
-          "kind": "holyc",
-          "line": "Menu(\"memory\")"
+          "kind": "text",
+          "id": "menu-main-body",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "menu-cpu",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "cpu-title",
+          "value": "CPU"
+        },
+        {
+          "kind": "text",
+          "id": "menu-cpu-body",
+          "value": ""
         },
         {
           "kind": "text",
@@ -256,98 +206,11 @@
           "kind": "text",
           "id": "memory-title",
           "value": "Memory"
-        }
-      ]
-    },
-    {
-      "ident": "Menu_svelte",
-      "rel": "src/Menu.svelte",
-      "tag": "nav",
-      "langTs": true,
-      "ops": [
-        {
-          "kind": "fetch",
-          "url": "/bios/menu"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/cpu"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/uncore"
-        },
-        {
-          "kind": "holyc",
-          "line": "MenuCpu()"
-        },
-        {
-          "kind": "holyc",
-          "line": "MenuUncore()"
         },
         {
           "kind": "text",
-          "id": "bios-menu",
+          "id": "menu-memory-body",
           "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "menu-title",
-          "value": "Main CPU Memory Uncore Devices Boot Settings"
-        }
-      ]
-    },
-    {
-      "ident": "Settings_svelte",
-      "rel": "src/Settings.svelte",
-      "tag": "section",
-      "langTs": true,
-      "ops": [
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/settings"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/settings"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/settings/usb"
-        },
-        {
-          "kind": "holyc",
-          "line": "Menu(\"settings\")"
-        },
-        {
-          "kind": "text",
-          "id": "menu-settings",
-          "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "settings-title",
-          "value": "Settings"
-        }
-      ]
-    },
-    {
-      "ident": "Uncore_svelte",
-      "rel": "src/Uncore.svelte",
-      "tag": "section",
-      "langTs": true,
-      "ops": [
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/uncore"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/uncore"
-        },
-        {
-          "kind": "holyc",
-          "line": "MenuUncore()"
         },
         {
           "kind": "text",
@@ -358,6 +221,66 @@
           "kind": "text",
           "id": "uncore-title",
           "value": "Uncore"
+        },
+        {
+          "kind": "text",
+          "id": "menu-uncore-body",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "menu-devices",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "devices-title",
+          "value": "Devices"
+        },
+        {
+          "kind": "text",
+          "id": "menu-devices-body",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "menu-boot",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "boot-title",
+          "value": "Boot"
+        },
+        {
+          "kind": "text",
+          "id": "menu-boot-body",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "menu-settings",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "settings-title",
+          "value": "Settings"
+        },
+        {
+          "kind": "text",
+          "id": "menu-settings-body",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "g6b-ui-conditional",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "bios-hint",
+          "value": "ArrowLeft/ArrowRight Select tab   Home/End First/Last   F10 Refresh (not save)   Read-only BoardSpec view"
         }
       ]
     }

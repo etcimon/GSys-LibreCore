@@ -251,6 +251,15 @@ pub enum Op {
         rs1: u32,
         rs2: u32,
     },
+    /// `divu rd, rs1, rs2` — unsigned divide. `FbExpand` computes the
+    /// runtime fit/fill scale as `__disp.w / low_w`; the IR has no other
+    /// way to derive a per-output scale and a gen-time constant cannot
+    /// follow `DispSel`'s latch.
+    Divu {
+        rd: u32,
+        rs1: u32,
+        rs2: u32,
+    },
     Xor {
         rd: u32,
         rs1: u32,
@@ -583,6 +592,19 @@ impl Module {
         )
     }
 
+    /// Resolved `__scan_fb` BSS address for a module loaded at `entry`.
+    ///
+    /// Same arithmetic `to_words` uses for `Addr::ScanFb`; exposed so the exec
+    /// model can read the native 32bpp scanout for regression checks. `None`
+    /// when the module allocates no `__scan_fb`.
+    pub fn scan_fb_addr(&self, entry: u64) -> Option<u64> {
+        if self.vio_fb_bytes == 0 {
+            return None;
+        }
+        let vio = self.vio_bss_addr(entry)?;
+        Some(vio.wrapping_add(self.vio_bytes))
+    }
+
     /// Machine words then rodata. `entry` is the load address of the first insn.
     pub fn to_words(&self, entry: u64) -> Result<(Vec<u32>, Vec<u8>), String> {
         let flat: Vec<&Op> = self.nodes.iter().flat_map(|n| n.ops.iter()).collect();
@@ -701,6 +723,7 @@ fn encode_op(op: &Op, pc: usize, labels: &BTreeMap<String, usize>) -> Result<u32
         Op::Sub { rd, rs1, rs2 } => encode::sub(*rd, *rs1, *rs2),
         Op::Sltu { rd, rs1, rs2 } => encode::sltu(*rd, *rs1, *rs2),
         Op::Mul { rd, rs1, rs2 } => encode::mul(*rd, *rs1, *rs2),
+        Op::Divu { rd, rs1, rs2 } => encode::divu(*rd, *rs1, *rs2),
         Op::Xor { rd, rs1, rs2 } => encode::xor(*rd, *rs1, *rs2),
         Op::Beq { rs1, rs2, to } => encode::beq(*rs1, *rs2, rel(to)?),
         Op::Bne { rs1, rs2, to } => encode::bne(*rs1, *rs2, rel(to)?),
@@ -803,6 +826,12 @@ fn op_to_asm(op: &Op) -> String {
         ),
         Op::Mul { rd, rs1, rs2 } => format!(
             "\tmul\t{}, {}, {}",
+            reg_name(*rd),
+            reg_name(*rs1),
+            reg_name(*rs2)
+        ),
+        Op::Divu { rd, rs1, rs2 } => format!(
+            "\tdivu\t{}, {}, {}",
             reg_name(*rd),
             reg_name(*rs1),
             reg_name(*rs2)

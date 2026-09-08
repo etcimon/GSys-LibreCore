@@ -4,11 +4,20 @@
  * LDC 1.43+ discovery — same rules as kernel-spec/svelte-d
  * `packages/svelte-d/ts/platform.ts` / `workspace/ldc.d`.
  * Never returns 1.36 / 1.41 / 1.42 (PATH on this host is 1.41).
+ *
+ * Ordering is deliberate: an explicit env override, then the *pinned* release
+ * under `browser-ui/toolchains` (`toolchains/ldc.lock.json`, installed by
+ * `bun scripts/install-ldc.ts`), and only then the ambient host toolchains.
+ * The pin wins over an ambient 1.43 because the cell's provenance hash covers
+ * the compiler binary — a host-built 1.43.0-git snapshot is a *different*
+ * compiler and would invalidate the shipped artifact on every machine.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { isPinnedLdcText, pinnedLdcBin } from "./ldc-pin.ts";
 
 export const DEFAULT_LDC_VERSION = process.env.SVELTE_D_LDC_VERSION || "1.43.0-beta1";
 
@@ -113,6 +122,28 @@ export function ldcSeeds(start?: string): string[] {
   return [...new Set(seeds)];
 }
 
+/**
+ * The pinned `toolchains/<dir>/bin/ldc2` when it is installed and reports the
+ * pinned version. An installed-but-wrong-version tree is ignored rather than
+ * trusted, so a hand-edited toolchain cannot masquerade as the pin.
+ */
+export function findPinnedLdc(start?: string): string {
+  const triple = hostTriple();
+  for (const root of [start, resolve(dirname(fileURLToPath(import.meta.url)), "..")]) {
+    if (!root) continue;
+    let bin = "";
+    try {
+      bin = pinnedLdcBin(`${triple.os}-${triple.arch}`, triple.exe, resolve(root));
+    } catch {
+      return ""; // no pin, or the host is not covered by this release
+    }
+    if (!existsSync(bin)) continue;
+    const r = spawnSync(bin, ["--version"], { encoding: "utf8", shell: false });
+    if (r.status === 0 && isPinnedLdcText((r.stdout || "") + (r.stderr || ""))) return bin;
+  }
+  return "";
+}
+
 /** LDC 1.43+ for the wasm-eh cell. Never returns 1.42/1.41. */
 export function findLdc(start?: string): string {
   const exe = hostTriple().exe;
@@ -120,6 +151,8 @@ export function findLdc(start?: string): string {
     const v = process.env[k];
     if (v) return existsSync(v) && isLdc143(v) ? resolve(v) : "";
   }
+  const pinned = findPinnedLdc(start);
+  if (pinned) return pinned;
   const dc = process.env.DC;
   if (dc && existsSync(dc) && isLdc143(dc)) return dc;
   const cached = scanToolchainDir(toolchainHome(), exe);
@@ -235,6 +268,8 @@ export type Toolchain = {
   wasmOpt: string;
   versionLine: string;
   ok: boolean;
+  /** True when `ldc` is the pinned `toolchains/` release, not an ambient one. */
+  pinned?: boolean;
 };
 
 export function runtimePreflight(tc: Toolchain): string[] {
@@ -299,6 +334,12 @@ export function resolveToolchain(start?: string): Toolchain {
   const dub = findDub(ldc);
   const libwasm = findLibwasmCheckout(start);
   const wasmOpt = findWasmOpt(start);
+  let pinned = false;
+  try {
+    pinned = Boolean(ldc) && isPinnedLdcText(versionLine);
+  } catch {
+    pinned = false; // no readable pin: the toolchain is ambient by definition
+  }
   return {
     ldc,
     dub,
@@ -306,5 +347,6 @@ export function resolveToolchain(start?: string): Toolchain {
     wasmOpt,
     versionLine,
     ok: Boolean(ldc && dub && isLdc143(ldc)),
+    pinned,
   };
 }

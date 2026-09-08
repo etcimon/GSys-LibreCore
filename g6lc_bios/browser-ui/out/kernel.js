@@ -871,7 +871,10 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
       const n = node(handle, true), name = text(nameLen, namePtr), value = text(valueLen, valuePtr);
       if (name === "innerText" || name === "textContent") n.textContent = value;
       else if (name === "className" || name === "title" || name === "value") n[name] = value;
-      else throw new Error("WASM unsupported DOM property: " + name);
+      else if (name === "id") n.id = value;
+      else if (["innerHTML", "outerHTML", "src", "onclick", "__proto__", "constructor", "style"].includes(name)) {
+        throw new Error("WASM unsupported DOM property: " + name);
+      } else n.setAttribute(name, value);
     },
     libwasm_await__void(handle) {
       if (!Number.isInteger(handle) || handle < 0) throw new Error("libwasm await handle invalid");

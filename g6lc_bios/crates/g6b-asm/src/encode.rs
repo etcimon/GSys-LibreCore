@@ -27,6 +27,11 @@ pub const S3: u32 = 19;
 pub const S4: u32 = 20;
 pub const S5: u32 = 21;
 pub const S6: u32 = 22;
+pub const S7: u32 = 23;
+pub const S8: u32 = 24;
+pub const S9: u32 = 25;
+pub const S10: u32 = 26;
+pub const S11: u32 = 27;
 pub const T3: u32 = 28;
 pub const T4: u32 = 29;
 pub const T5: u32 = 30;
@@ -252,6 +257,11 @@ pub fn add(rd: u32, rs1: u32, rs2: u32) -> u32 {
 /// RV32M/RV64M `mul`.
 pub fn mul(rd: u32, rs1: u32, rs2: u32) -> u32 {
     (0x01 << 25) | (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x33
+}
+
+/// RV32M/RV64M `divu` — unsigned divide, funct3=0b101.
+pub fn divu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x01 << 25) | (rs2 << 20) | (rs1 << 15) | (0x5 << 12) | (rd << 7) | 0x33
 }
 
 pub fn xor(rd: u32, rs1: u32, rs2: u32) -> u32 {

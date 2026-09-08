@@ -35,13 +35,3 @@ export const jsExports = {
   },
 };
 // module App_svelte
-// module Boot_svelte
-// module Cpu_svelte
-// module Devices_svelte
-// module FileMgr_svelte
-// module Flash_svelte
-// module Main_svelte
-// module Memory_svelte
-// module Menu_svelte
-// module Settings_svelte
-// module Uncore_svelte

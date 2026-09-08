@@ -36,8 +36,8 @@ pub struct Module {
 
 pub const MAX_MODULE_BYTES: usize = 1 << 20;
 pub const MAX_MEMORY_PAGES: u32 = 32;
-pub const MAX_FUNCTIONS: usize = 256;
-pub const MAX_LOCALS: usize = 256;
+pub const MAX_FUNCTIONS: usize = 1024;
+pub const MAX_LOCALS: usize = 4096;
 pub const MAX_STACK: usize = 256;
 pub const MAX_CONTROL_DEPTH: usize = 64;
 pub const MAX_INSTRUCTIONS: usize = 65_536;
@@ -404,6 +404,48 @@ pub fn encode_ui_module(id: &str, val: &str) -> Vec<u8> {
     mem[..id.len()].copy_from_slice(id.as_bytes());
     mem[vo..vo + val.len()].copy_from_slice(val.as_bytes());
     encode_module(id.len() as i32, val.len() as i32, vo as i32, &mem)
+}
+
+/// UI helper: `_start` is empty, so `__ui_dom` is not dirtied. Used to test
+/// the GPU-surface `FbExpand1` fallback when the DOM has no visible rows.
+pub fn encode_empty_ui_module() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    // type: ()->()
+    let mut types = Vec::new();
+    push_uleb(&mut types, 1);
+    types.extend_from_slice(&[0x60, 0, 0]);
+    section(&mut out, 1, &types);
+
+    let mut funcs = Vec::new();
+    push_uleb(&mut funcs, 1);
+    push_uleb(&mut funcs, 0);
+    section(&mut out, 3, &funcs);
+
+    let mut memory = Vec::new();
+    push_uleb(&mut memory, 1);
+    memory.push(0x00);
+    memory.push(0x01); // 1 page
+    section(&mut out, 5, &memory);
+
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 0);
+    section(&mut out, 7, &exports);
+
+    let mut body = Vec::new();
+    push_uleb(&mut body, 0); // locals
+    body.push(0x0b); // end
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, body.len() as u32);
+    code.extend_from_slice(&body);
+    section(&mut out, 10, &code);
+    out
 }
 
 fn encode_module(id_len: i32, val_len: i32, val_off: i32, mem: &[u8]) -> Vec<u8> {
@@ -1657,7 +1699,10 @@ fn decode_expr(types: &[FuncType], p: &[u8]) -> Result<Vec<Instr>, String> {
             0x77 => Instr::I32Rotl,
             0x78 => Instr::I32Rotr,
             0x50..=0x69 | 0x79..=0xa6 => Instr::Numeric(op),
-            0xa7..=0xbf => Instr::Convert(op),
+            // 0xc0..=0xc4 are the sign-extension proposal (i32/i64.extend*_s).
+            // LDC 1.43 emits them for D's byte/short casts, so they decode as
+            // ordinary unary conversions.
+            0xa7..=0xc4 => Instr::Convert(op),
             0xfc => {
                 let (sub, ni) = uleb(p, i)?;
                 i = ni;
@@ -1889,8 +1934,9 @@ fn skip_opcode(op: u8, p: &[u8], i: &mut usize) -> Result<(), String> {
             *i = i.checked_add(8).ok_or("truncated f64.const")?;
             p.get(*i - 8..*i).ok_or("truncated f64.const")?;
         }
-        0x45..=0xbf => {
-            // one-byte numeric / comparison / conversion.
+        0x45..=0xc4 => {
+            // one-byte numeric / comparison / conversion, including the
+            // sign-extension proposal (i32/i64.extend8_s .. i64.extend32_s).
         }
         0xd0 => {
             // ref.null: reftype byte
@@ -1906,7 +1952,7 @@ fn skip_opcode(op: u8, p: &[u8], i: &mut usize) -> Result<(), String> {
             skip_fc(sub, p, i)?;
         }
         0xfd => return Err("unsupported wasm opcode 0xfd (SIMD)".into()),
-        0xc0..=0xcf | 0xd7..=0xdf | 0xe0..=0xeb | 0xfe..=0xff | 0x15 | 0x1c..=0x1e => {
+        0xc5..=0xcf | 0xd7..=0xdf | 0xe0..=0xeb | 0xfe..=0xff | 0x15 | 0x1c..=0x1e => {
             return Err(format!("unsupported wasm opcode {op:#x}"));
         }
         _ => return Err(format!("unsupported wasm opcode {op:#x}")),
@@ -2237,8 +2283,8 @@ pub(crate) mod tests {
             section(&mut bytes, 5, memory);
             assert!(decode(&bytes).is_err());
         }
-        assert!(decode(&numeric(0, 0, 257, &[0x0b])).is_err());
-        assert!(decode(&numeric(32, 0, 225, &[0x0b])).is_err());
+        assert!(decode(&numeric(0, 0, MAX_LOCALS as u32 + 1, &[0x0b])).is_err());
+        assert!(decode(&numeric(32, 0, MAX_LOCALS as u32 - 31, &[0x0b])).is_err());
         let mut ops = vec![];
         for _ in 0..=MAX_STACK {
             ops.extend([0x41, 0]);

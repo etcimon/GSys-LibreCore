@@ -54,8 +54,10 @@ dependencies = [
  "g6b-gr",
  "g6b-holyc",
  "g6b-http",
+ "g6b-img",
  "g6b-kernel",
  "g6b-spec",
+ "g6b-ttf",
 ]
 
 [[package]]
@@ -65,6 +67,7 @@ dependencies = [
  "g6b-dom",
  "g6b-gr",
  "g6b-html",
+ "g6b-img",
  "g6b-ttf",
 ]
 
@@ -139,6 +142,15 @@ dependencies = [
  "g6b-tls",
  "g6b-ui",
  "g6b-wasm",
+]
+
+[[package]]
+name = "g6b-img"
+version = "0.1.0"
+dependencies = [
+ "g6b-dom",
+ "g6b-gr",
+ "g6b-html",
 ]
 
 [[package]]

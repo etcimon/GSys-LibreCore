@@ -13,7 +13,8 @@ src/*.svelte → compiler/ → svelte-engine-ws/
                             src-ts/      host exports
                             .svelte-d/   IR, isolated LDC config, provenance
                               |
-                 LDC 1.43 + DUB + local libwasm/runtime-v1.43.0
+                 LDC 1.43.0-beta1 (pinned, toolchains/ldc.lock.json)
+                 + bundled DUB + local libwasm/runtime-v1.43.0
                               |
                  public/bios-ui.wasm → out/bios-ui-libwasm.wasm
 
@@ -25,12 +26,65 @@ Compiler preview       → out/index.html        not BoardSpec authority
 Catalog / hashes       → out/catalog.json, build.json, bios-ui-libwasm.json
 ```
 
+## Pinned LDC toolchain
+
+The optional libwasm cell is built by **one pinned upstream LDC release**, not
+by whatever `ldc2` the host happens to have. The pin is
+[`toolchains/ldc.lock.json`](toolchains/ldc.lock.json):
+
+| field | value |
+| --- | --- |
+| release | [`v1.43.0-beta1`](https://github.com/ldc-developers/ldc/releases/tag/v1.43.0-beta1) |
+| frontend | DMD 2.113.0 (what `libwasm/runtime-v1.43.0` is written against) |
+| source | `github.com/ldc-developers/ldc` release assets only |
+| integrity | upstream `ldc2-1.43.0-beta1.sha256sums.txt` digest per host asset |
+| DUB | bundled in the release (`bin/dub`), so LDC and DUB are never mismatched |
+
+Install it (idempotent, ~46-97 MB depending on host):
+
+```powershell
+bun run install-ldc          # or: bun scripts/install-ldc.ts
+bun run check-ldc            # report only; non-zero when not installed
+bun scripts/install-ldc.ts --force   # re-download and re-extract
+```
+
+The installer downloads the asset for the running host, **verifies the pinned
+SHA-256 before extracting**, extracts into
+`toolchains/ldc2-1.43.0-beta1-<host>/`, re-runs `ldc2 --version` and refuses
+anything that is not exactly the pinned release, then writes
+`toolchains/installed.json`. `toolchains/` is gitignored apart from the lock
+file, so the tree is reproducible from the pin rather than vendored.
+
+Then build the cell:
+
+```powershell
+bun run build-libwasm        # install-ldc + G6B_DUB_WASM=1 bun scripts/build.ts
+```
+
+`compiler/ldc.ts` prefers the pinned tree over any ambient toolchain, because
+the artifact provenance hash (`.svelte-d/wasm-artifact.json`) covers the
+compiler binary itself: a host-built `1.43.0-git-<sha>` snapshot is a
+*different* compiler and would mark the shipped artifact stale on every other
+machine. Precedence is:
+
+1. `SVELTE_D_LDC` / `LDC` / `WASM_LDC` / `SVELTE_D_WASM_LDC` (explicit escape hatch)
+2. `toolchains/ldc2-1.43.0-beta1-<host>/bin/ldc2` (the pin)
+3. `DC`, `~/.svelte-d/toolchains`, repo seeds, `PATH`
+
+`resolveToolchain().pinned` reports which of these won.
+
+`ldc2-1.43.0-beta1-addon-wasi.tar.xz` is deliberately **not** pinned: the cell
+links `-defaultlib=` against the carried `libwasm/runtime-v1.43.0`, so no
+prebuilt WASI druntime/phobos is used. A host with no published LDC build
+(`windows-arm64`) is refused with that message; only the optional cell is
+affected, `out/bios-ui.wasm` needs no D toolchain at all.
+
 ## Build and test
 
 From this directory in PowerShell:
 
 ```powershell
-$env:SVELTE_D_LDC="E:\cva6\riscv-compilers\ldc2-build\bin\ldc2.exe"
+bun run install-ldc
 $env:LIBWASM_ROOT="E:\cva6\g6lc_bios\browser-ui\libwasm"
 $env:G6B_DUB_WASM="1"
 bun scripts/build.ts
@@ -39,12 +93,13 @@ $env:G6B_TEST_LDC_FX="1"
 bun test
 ```
 
-On other hosts, set the two paths to an LDC **1.43** executable and the local
-BIOS libwasm adaptation. No stock LDC defaultlibs or inherited host imports are
-used. Missing/incomplete carried runtime, unmatched compiler, failed DUB,
-invalid ABI or trapping startup fail the requested build. The current local
-runtime carry contains time/demangle/invariant/source-set repairs; those still
-need recording in the adaptation generator or a vendored carry for reprovisioning.
+`LIBWASM_ROOT` is optional when the checkout is in its normal place; set it to
+the local BIOS libwasm adaptation if discovery fails. No stock LDC defaultlibs
+or inherited host imports are used. Missing/incomplete carried runtime,
+unmatched compiler, failed DUB, invalid ABI or trapping startup fail the
+requested build. The current local runtime carry contains
+time/demangle/invariant/source-set repairs; those still need recording in the
+adaptation generator or a vendored carry for reprovisioning.
 
 Set `G6B_WASM_ASYNCIFY=1` to run the custom Binaryen `wasm-opt --asyncify` pass
 after LDC link (enabling the D `await`/`catch` build path). Asyncify is skipped

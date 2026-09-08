@@ -122,53 +122,110 @@ export function projectCss(files: SvelteFile[]): string {
 
 export function projectHtml(files: SvelteFile[]): string {
   const visible = new Map<string, boolean>();
-  for (const file of files) for (const op of file.ops) {
-    if (op.kind === "visible") visible.set(op.id, op.on);
-  }
-  const escape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  const attrs = (id: string) => `id="${escape(id)}"${visible.get(id) === false ? " hidden" : ""}`;
+  const textOps = new Map<string, string>();
   const seen = new Set<string>();
-  const nodes = files.map((file) => {
-    const texts = file.ops.filter((op) => op.kind === "text");
-    for (const text of texts) {
-      if (seen.has(text.id)) throw new Error("duplicate compile-product DOM id: " + text.id);
-      seen.add(text.id);
+  for (const file of files) for (const op of file.ops) {
+    if (op.kind === "visible") {
+      if (visible.has(op.id)) throw new Error("duplicate compile-product visibility id: " + op.id);
+      visible.set(op.id, op.on);
     }
-    type PreviewNode = { tag: string; id: string; value: string; children: PreviewNode[] };
+    if (op.kind === "text") {
+      if (seen.has(op.id)) throw new Error("duplicate compile-product DOM id: " + op.id);
+      seen.add(op.id);
+      textOps.set(op.id, op.value);
+    }
+  }
+
+  const escape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const safeTags = new Set(["section", "div", "nav", "main", "article", "header", "footer", "p", "span", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code", "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "a", "button", "canvas", "template"]);
+  const voidTags = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
+
+  const stripSvelte = (src: string) =>
+    src
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
+      .replace(/<!--[\s\S]*?-->/g, "")
+      .replace(/{#if\s+[^}]+}|{:else[^}]*}|{\/if}/g, "");
+
+  const parseAttrs = (raw: string): Map<string, string> => {
+    const attrs = new Map<string, string>();
+    for (const m of raw.matchAll(/\b([a-z][a-z0-9-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/gi)) {
+      const name = m[1].toLowerCase();
+      const value = m[2] ?? m[3] ?? m[4] ?? "";
+      attrs.set(name, value);
+    }
+    return attrs;
+  };
+
+  type PreviewNode = { tag: string; attrs: Map<string, string>; children: (PreviewNode | string)[] };
+
+  const renderAttrs = (attrs: Map<string, string>): string => {
+    const out: string[] = [];
+    for (const [name, value] of attrs) {
+      if (value === "") out.push(name);
+      else out.push(`${name}="${escape(value)}"`);
+    }
+    return out.length ? " " + out.join(" ") : "";
+  };
+
+  const render = (node: PreviewNode, parentHidden: boolean): string => {
+    const id = node.attrs.get("id");
+    let hidden = parentHidden;
+    if (id && visible.has(id) && !visible.get(id)) {
+      hidden = true;
+    }
+    if (hidden && !node.attrs.has("hidden")) node.attrs.set("hidden", "");
+    if (!hidden && node.attrs.has("hidden")) node.attrs.delete("hidden");
+
+    if (id && textOps.has(id) && node.children.every((c) => typeof c === "string")) {
+      // Text op replaces the leaf text of this element; do not keep nested tags.
+      node.children = [textOps.get(id)!];
+    }
+
+    if (voidTags.has(node.tag)) {
+      return `<${node.tag}${renderAttrs(node.attrs)}>`;
+    }
+    const body = node.children.map((c) => typeof c === "string" ? escape(c) : render(c, hidden)).join("");
+    const hasBlockChildren = node.children.some((c) => typeof c !== "string");
+    return hasBlockChildren
+      ? `<${node.tag}${renderAttrs(node.attrs)}>\n${body}\n</${node.tag}>`
+      : `<${node.tag}${renderAttrs(node.attrs)}>${body}</${node.tag}>`;
+  };
+
+  const out: string[] = [];
+  for (const file of files) {
+    const markup = stripSvelte(file.src);
     const roots: PreviewNode[] = [];
-    const stack: { tag: string; children: PreviewNode[] }[] = [{ tag: "", children: roots }];
-    const values = new Map(texts.map((text) => [text.id, text.value]));
-    const found = new Set<string>();
-    const safeTags = new Set(["section", "div", "nav", "main", "article", "header", "footer", "p", "span", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code", "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "th", "td"]);
-    const voidTags = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
-    const markup = file.src.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "").replace(/<!--[\s\S]*?-->/g, "");
-    for (const match of markup.matchAll(/<(\/?)([a-z][a-z0-9-]*)\b([^>]*)>/gi)) {
-      const tag = match[2].toLowerCase();
-      if (match[1]) {
-        if (stack.length === 1 || stack.at(-1)!.tag !== tag) throw new Error("unmatched preview tag: " + tag);
-        stack.pop();
-        continue;
+    const stack: PreviewNode[] = [];
+    const tokenRe = /(<(\/?)([a-z][a-z0-9-]*)\b([^>]*)>)|([^<]+)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = tokenRe.exec(markup)) !== null) {
+      if (m[1] !== undefined) {
+        const closing = m[2] !== "";
+        const tag = m[3].toLowerCase();
+        const attrStr = m[4];
+        if (closing) {
+          if (stack.length === 0 || stack.at(-1)!.tag !== tag) throw new Error("unmatched preview tag: " + tag);
+          stack.pop();
+          continue;
+        }
+        const attrs = parseAttrs(attrStr);
+        const safeTag = safeTags.has(tag) ? tag : "div";
+        const selfClosing = m[4].trimEnd().endsWith("/") || voidTags.has(tag);
+        const node: PreviewNode = { tag: safeTag, attrs, children: [] };
+        if (stack.length) stack.at(-1)!.children.push(node);
+        else roots.push(node);
+        if (!selfClosing) stack.push(node);
+      } else {
+        const text = m[5].replace(/\s+/g, " ").trim();
+        if (text) {
+          if (stack.length) stack.at(-1)!.children.push(text);
+          else roots.push({ tag: "span", attrs: new Map(), children: [text] });
+        }
       }
-      let children = stack.at(-1)!.children;
-      const id = match[3].match(/\bid\s*=\s*(["'])(.*?)\1/)?.[2];
-      if (id !== undefined && values.has(id)) {
-        const node: PreviewNode = { tag: safeTags.has(tag) ? tag : "div", id, value: values.get(id)!, children: [] };
-        children.push(node);
-        children = node.children;
-        found.add(id);
-      }
-      if (!voidTags.has(tag) && !match[3].trimEnd().endsWith("/")) stack.push({ tag, children });
     }
-    if (stack.length !== 1 || texts.some((text) => !found.has(text.id))) throw new Error("incomplete preview markup: " + file.rel);
-    const render = (node: PreviewNode): string => `<${node.tag} ${attrs(node.id)}>${escape(node.value)}${node.children.length ? "\n" + node.children.map(render).join("\n") + "\n" : ""}</${node.tag}>`;
-    return roots.map(render).join("\n");
-  });
-  return `<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"><title>G6LC-BIOS</title>
-<style>body{font:16px "Courier New",monospace;background:#0000aa;color:#c8c8c8;margin:0;padding:1ch}h1{background:#00aaaa;color:#fff;text-align:center;margin:0}section,nav{border:1px solid #00aaaa;padding:0 1ch;margin:1ch 0}[hidden]{display:none!important}</style></head>
-<body><h1>G6LC-BIOS</h1>
-<p>Static compile-product preview. The served setup menus are generated from BoardSpec.</p>
-${nodes.join("\n")}
-</body></html>
-`;
+    if (stack.length) throw new Error("unclosed preview tag in " + file.rel);
+    for (const root of roots) out.push(render(root, false));
+  }
+  return out.join("\n");
 }

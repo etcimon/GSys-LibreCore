@@ -403,14 +403,14 @@ fn paint_absolute<'t>(
     Ok(())
 }
 
-fn find_body(root: &Node) -> Option<&Node> {
+pub(crate) fn find_body(root: &Node) -> Option<&Node> {
     if root.name.eq_ignore_ascii_case("body") {
         return Some(root);
     }
     root.children.iter().find_map(find_body)
 }
 
-fn is_block(name: &str) -> bool {
+pub(crate) fn is_block(name: &str) -> bool {
     matches!(
         name,
         "body"

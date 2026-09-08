@@ -1,0 +1,6 @@
+# The pinned LDC release is downloaded, not vendored: `ldc.lock.json` is the
+# checked-in source of truth (version + upstream SHA-256 per host), and
+# `bun scripts/install-ldc.ts` reproduces the tree from it.
+*
+!.gitignore
+!ldc.lock.json

@@ -32,7 +32,7 @@ port", not "virtio stand-in").
 | `0x08` | `CTRL` | RW | bit0 enable |
 | `0x0c` | `FB_LO` | RW | framebuffer physical address, low 32 |
 | `0x10` | `FB_HI` | RW | framebuffer physical address, high 32 |
-| `0x14` | `WIDTH` | RW | scanout width (the **high-res** proxy target) |
+| `0x14` | `WIDTH` | RW | scanout width (the `__disp`-latched output mode) |
 | `0x18` | `HEIGHT` | RW | scanout height |
 | `0x1c` | `STRIDE` | RW | bytes per row (`width*4`) |
 | `0x20` | `FORMAT` | RW | `1` = X8R8G8B8 little-endian |
@@ -40,10 +40,12 @@ port", not "virtio stand-in").
 | `0x28` | `STATUS` | RO | `1` = scanout live after COMMIT |
 
 The framebuffer is the shared `__scan_fb` BSS surface — the same buffer the
-virtio-gpu `TRANSFER_TO_HOST_2D` path pushes, filled by the shared `FbExpand`
-scale-blit (`g6b_gr::proxy::Proxy` semantics: `fit`/`dpi` = uniform integer
-scale, centered letterbox; `fill` = per-axis integer stretch). One blit,
-two transports.
+virtio-gpu `TRANSFER_TO_HOST_2D` path pushes, filled by the shared `FbExpand`/
+`FbExpand1`/`DomPaint32` blits (`g6b_gr::proxy::Proxy` semantics: `fit`/`dpi` =
+uniform integer scale, centered letterbox; `fill` = per-axis integer stretch).
+Scale, letterbox and row addressing read `__disp` w/h/stride at runtime, so the
+committed mode is whatever `DispSel` latched, not a compile-time default.
+One blit, two transports.
 
 ## `G6FB` handoff descriptor (Linux handoff)
 

@@ -233,6 +233,40 @@ impl Proxy {
         out.extend_from_slice(&body);
         out
     }
+
+    /// High-res PPM of a 32-bit RGBA canvas. The canvas is treated like the
+    /// low-res ZealOS plane: scaled to the proxy output geometry using the same
+    /// `fit`/`fill`/`dpi` rules, then composited over black. This is the modern
+    /// lane counterpart of `to_ppm` — the 4bpp plane is replaced by a `Canvas32`
+    /// already rendered by `g6b-css::render32`.
+    pub fn to_ppm32(&self, canvas: &crate::canvas32::Canvas32, dom_status: &str) -> Vec<u8> {
+        let sc = self.scale();
+        let used_w = self.low_w.saturating_mul(sc);
+        let used_h = self.low_h.saturating_mul(sc);
+        let ox = self.high_w.saturating_sub(used_w) / 2;
+        let oy = self.high_h.saturating_sub(used_h) / 2;
+        let bar = bar_h(self);
+        let fill = self.scale_mode == "fill";
+        let mut body = vec![0u8; (self.high_w * self.high_h * 3) as usize];
+        let mut y = 0u32;
+        while y < self.high_h {
+            let mut x = 0u32;
+            while x < self.high_w {
+                let i = ((y * self.high_w + x) * 3) as usize;
+                let rgb = sample32(
+                    self, canvas, x, y, bar, fill, ox, oy, used_w, used_h, sc, dom_status,
+                );
+                body[i] = rgb[0];
+                body[i + 1] = rgb[1];
+                body[i + 2] = rgb[2];
+                x += 1;
+            }
+            y += 1;
+        }
+        let mut out = format!("P6\n{} {}\n255\n", self.high_w, self.high_h).into_bytes();
+        out.extend_from_slice(&body);
+        out
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -276,6 +310,52 @@ fn sample(
 /// real DOM node rendered at native resolution, so overlaying a synthetic
 /// low-res strip on top of it would be the same artefact the surface split
 /// exists to remove.
+#[allow(clippy::too_many_arguments)]
+fn sample32(
+    p: &Proxy,
+    canvas: &crate::canvas32::Canvas32,
+    x: u32,
+    y: u32,
+    bar: u32,
+    fill: bool,
+    ox: u32,
+    oy: u32,
+    used_w: u32,
+    used_h: u32,
+    sc: u32,
+    dom_status: &str,
+) -> [u8; 3] {
+    if y < bar {
+        return bar_pixel(p, x, y, dom_status);
+    }
+    let (cx, cy) = if fill {
+        let avail_h = p.high_h.saturating_sub(bar).max(1);
+        let lx = (x * p.low_w) / p.high_w.max(1);
+        let ly = ((y - bar) * p.low_h) / avail_h;
+        (lx as i32, ly as i32)
+    } else if x >= ox && x < ox + used_w && y >= oy && y < oy + used_h {
+        let lx = ((x - ox) / sc.max(1)) as i32;
+        let ly = ((y - oy) / sc.max(1)) as i32;
+        (lx, ly)
+    } else {
+        return [0, 0, 0];
+    };
+    let c = canvas.get(cx, cy);
+    if c[3] == 255 {
+        [c[0], c[1], c[2]]
+    } else if c[3] == 0 {
+        [0, 0, 0]
+    } else {
+        // Compositing over black, so the background term is zero.
+        let a = c[3] as u32;
+        [
+            ((c[0] as u32 * a + 127) / 255) as u8,
+            ((c[1] as u32 * a + 127) / 255) as u8,
+            ((c[2] as u32 * a + 127) / 255) as u8,
+        ]
+    }
+}
+
 fn bar_h(p: &Proxy) -> u32 {
     if p.surface == Surface::Gpu {
         return 0;

@@ -66,12 +66,15 @@ completes one `GET_DISPLAY_INFO` descriptor round-trip (`VIRTIO-INFO`), and
 `VioScan` drives the pixel sequence (`RESOURCE_CREATE_2D` →
 `RESOURCE_ATTACH_BACKING` → `SET_SCANOUT` → band fill →
 `TRANSFER_TO_HOST_2D` → `RESOURCE_FLUSH` → `VIRTIO-SCAN`) — the resource and
-rects are the **high-res proxy target** (`proxy.high_w×high_h`), and
-`FbExpand` scale-expands the 4bpp `__gr_plane` into the X8R8G8B8
+rects are the **`__disp`-latched output mode** (`DispSel` runs first; the
+proxy default is the common case), and
+`FbExpand`/`FbExpand1`/`DomPaint32` fill the X8R8G8B8
 `__scan_fb` with the `Proxy::to_ppm` semantics (`fit`/`dpi` = uniform
-scale, centered letterbox; `fill` = per-axis stretch) — then `VioPaint`
+scale, centered letterbox; `fill` = per-axis stretch) computed from `__disp`
+w/h/stride at runtime — then `VioPaint` (virtio class only)
 TRANSFER+FLUSHes the full frame (`VIRTIO-PAINT`) after `WasmUi`/`DomPaint`
-and on the UART `Ui` re-dump. **Verified on QEMU 8.2 + OpenSBI 1.5** via
+and on the UART `Ui` re-dump, and `DispPaint` (uncore class only) commits
+the same surface to the display engine. **Verified on QEMU 8.2 + OpenSBI 1.5** via
 `fixtures/g6lc64-qemu.json`: QMP `screendump` is 1920×1080 with the 640×480
 DOM/Gr plane ×2 centered at (320,60) — matching the host-modelled
 framebuffer and the `display-proxy` PPM geometry exactly. A `display`-class

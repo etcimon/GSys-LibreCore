@@ -275,6 +275,16 @@ fn walk(n: &Node, lines: &mut Vec<String>, width: usize) {
     if n.name == "title" || n.name == "script" || n.name == "style" {
         return;
     }
+    // Replaced elements: represent what we can in text, skip the rest.
+    if n.name == "img" {
+        if let Some(alt) = n.get_attribute("alt") {
+            push_text(lines, alt, width);
+        }
+        return;
+    }
+    if matches!(n.name.as_str(), "svg" | "canvas") {
+        return;
+    }
     let block = matches!(
         n.name.as_str(),
         "h1" | "h2"
@@ -352,6 +362,18 @@ mod tests {
         assert_eq!(script_sources(&dom), vec!["console.log('a < b &amp;');"]);
         dom.get_element_by_id("panel").unwrap().set_visible(true);
         assert!(to_uart_lines(&dom, 80).join("\n").contains("secret"));
+    }
+
+    #[test]
+    fn replaced_elements_emit_alt_or_skip() {
+        let dom = parse_checked(
+            r#"<body><img src="a.png" alt="Logo"><svg><circle r="5"/></svg><canvas id="fx"></canvas></body>"#,
+        )
+        .unwrap();
+        let text = to_uart_lines(&dom, 80).join("\n");
+        assert!(text.contains("Logo"));
+        assert!(!text.contains("circle"));
+        assert!(!text.contains("fx"));
     }
 
     #[test]
