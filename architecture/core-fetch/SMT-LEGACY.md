@@ -3,9 +3,24 @@
 Companion to [`README.md`](README.md), [`SPEC.md`](SPEC.md) §8, [`LEDGER.md`](LEDGER.md) §2,
 [`NEGATIVE.md`](NEGATIVE.md), [`../firmware-boot-principles.md`](../firmware-boot-principles.md).
 
-`smt_legacy` is **three things in one directory**. Default `Flist.cva6` compiles 19 of 23 files.
-The other four are the g1\* frontend copies and are opt-in only (`Flist.smt_legacy`).
-`fetch_B` never instantiates that frontend and must not compile it (two `module frontend`).
+> **2026-09-10 — the directory has been split.** `smt_legacy` used to be *three things in
+> one directory*: 9 files live on B, 10 g1\* recover, and 4 oracle frontend copies. The
+> two retired groups now live under **`core/fetch_A/`**, so `core/` no longer holds a
+> duplicate of anything `core/fetch_B/` owns:
+>
+> | Now at | What | Reached by |
+> |---|---|---|
+> | `core/smt_legacy/` (9 files) | **LIVE on B** — SMT2 banks/scheduler + shared packages | `Flist.cva6` |
+> | `core/fetch_A/smt_legacy/` (10) | g1\* recover; call sites skipped under `G6LC_FETCH_B` | `Flist.cva6` (compiled for A / `id_stage` / oracle) |
+> | `core/fetch_A/smt_legacy/` (4) | oracle frontend copies | `-f Flist.smt_legacy` only |
+> | `core/fetch_A/frontend/` (3) | retired `frontend`/`instr_queue`/`instr_scan` | nothing; was commented out of `Flist.cva6` |
+> | `core/fetch_A/smt/` (2) | frozen-A `g6lc_fetch_{pkg,dbg}` | `-f Flist.fetch` only |
+>
+> `core/frontend/` now holds **predictors only**, and `core/smt/` is gone. The rule that
+> matters is unchanged and is now also structural: **never compile two `module
+> frontend`.** Tiering follows the files (`.licensing-tiers` gained `core/fetch_A/**` as
+> tier R) — retiring RTL does not relicense it. §1 below describes the 19 files
+> `Flist.cva6` still compiles; §2 the oracle set. Paths in both sections are updated.
 
 ## 1. Default `Flist.cva6` — 19 files
 
@@ -36,7 +51,8 @@ not in fetch.
 
 ### 1.3 g1\* recover packages — compiled, not fetch-B supply
 
-Listed in `Flist.cva6` so A/`id_stage` / the oracle frontend can call them.
+**Now under `core/fetch_A/smt_legacy/`.** Still listed in `Flist.cva6` so A/`id_stage` /
+the oracle frontend can call them; the move only stops them sitting beside live B RTL.
 `fetch_B` `{frontend,instr_realign,instr_queue}` import **`g6lc_fetch_pkg` only**.
 
 | File | What it papered over | B replacement |
@@ -73,7 +89,7 @@ Do not extend the keep list. B STQ flush keeps `!cancelled` spec stores
 
 ## 2. Not on the default flist — oracle frontend (4 files)
 
-Only via `-f Flist.smt_legacy` (drop `G6LC_FETCH_B` and `-f Flist.fetch_B`; leave predictors
+**Now under `core/fetch_A/smt_legacy/`.** Only via `-f Flist.smt_legacy` (drop `G6LC_FETCH_B` and `-f Flist.fetch_B`; leave predictors
 in `core/frontend`):
 
 - `frontend.sv`
@@ -83,7 +99,8 @@ in `core/frontend`):
 
 Same module names as `fetch_B` / frozen A. Do not compile two frontends.
 
-23 files in the directory = 19 default + 4 oracle.
+Formerly 23 files in one directory = 19 default + 4 oracle. After the split:
+`core/smt_legacy/` 9 live, `core/fetch_A/smt_legacy/` 14 (10 recover + 4 oracle).
 
 ## 3. `thread_select` in one paragraph
 
@@ -98,6 +115,6 @@ incoming hart when `g6lc_smt_pc_bank` restores. Controller flushes IF + unissued
 
 | Goal | Edit |
 |---|---|
-| R6–R11 / FDT / leftover present | `core/fetch_B/` (`g6lc_fetch_pkg`, realign, queue, frontend). Frozen A untouched |
-| SMT schedule / banks | `core/smt_legacy/g6lc_thread_select.sv` etc. + `cva6.sv` holds |
-| g1\* recover | **Do not.** Oracle-only. Skip remaining call sites with `G6LC_FETCH_B` |
+| R6–R11 / FDT / leftover present | `core/fetch_B/` (the only live supply) (`g6lc_fetch_pkg`, realign, queue, frontend). Frozen A untouched |
+| SMT schedule / banks | `core/smt_legacy/g6lc_thread_select.sv` etc. (still there) + `cva6.sv` holds |
+| g1\* recover | **Do not.** Oracle-only, now `core/fetch_A/smt_legacy/`. Skip remaining call sites with `G6LC_FETCH_B` |

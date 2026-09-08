@@ -228,7 +228,7 @@ non-trivial fraction of the file, and record the measurement.
 
 | File | Added | Deleted | Upstream lines | Verdict |
 |---|---|---|---|---|
-| `core/frontend/frontend.sv` | +347 | −12 | 557 | tier R |
+| `core/fetch_A/frontend/frontend.sv` | +347 | −12 | 557 | tier R |
 | `corev_apu/src/ariane.sv` | +288 | −78 | 136 | tier R |
 | `core/csr_regfile.sv` | +321 | −8 | 2979 | tier R |
 | `core/perf_counters.sv` | +176 | −38 | 201 | tier R |

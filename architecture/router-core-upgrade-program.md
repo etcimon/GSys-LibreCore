@@ -172,9 +172,9 @@ responsibility.
 
 ### U1 — Prediction fabric (TAGE-SC-lite + ITTAGE + loop + checkpointing)
 
-**Intent.** Replace the single-predictor selection in `core/frontend/frontend.sv:514-542` with a
+**Intent.** Replace the single-predictor selection in `core/fetch_A/frontend/frontend.sv:514-542` with a
 composable *fabric* that keeps the **exact existing port contract** — `bht_prediction_o` /
-`btb_prediction_o` arrays at `core/frontend/frontend.sv:139-143` — so the classification stage
+`btb_prediction_o` arrays at `core/fetch_A/frontend/frontend.sv:139-143` — so the classification stage
 (`210-221`) and the priority/selection logic (`236-294`) are **not touched**. This is the seam the
 branch-prediction playbook mandates (`agents/guides/AGENTS-branch-prediction.md` §4).
 
@@ -201,7 +201,7 @@ branch-prediction playbook mandates (`agents/guides/AGENTS-branch-prediction.md`
   `BPCkptDepth ≥ NrScoreboardEntries` when `SpeculativeSb`.
 
 **Timing.** Read is F0-indexed / F1-consumed, matching today's `btb_q`/`bht_q` registration at
-`core/frontend/frontend.sv:463-465`. The new critical path is *tag compare → provider priority mux →
+`core/fetch_A/frontend/frontend.sv:463-465`. The new critical path is *tag compare → provider priority mux →
 taken mux*. Mitigations, all mandatory: (a) **folded history registers** so index/tag hashes are one
 XOR level, never a combinational fold of a 64-bit GHR; (b) provider priority encode is a **balanced
 tree**, not a linear priority chain (`AGENTS-configuration.md` §2.1); (c) allocation/decay logic is

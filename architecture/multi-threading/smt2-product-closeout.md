@@ -23,7 +23,7 @@ at the micro-architecture. Each property is removed when its item is retired.
 
 | Item | Locus | Acceptance | Status | FDT property |
 |------|-------|------------|--------|--------------|
-| `fetch_B` / `instr_queue` leftover → jump-to-0 | `core/frontend/instr_queue.sv`, `core/frontend/frontend.sv`, `g6lc_thread_select.sv` | Natural OpenSBI FDT walk reaches cookie `51b1babe` without `PEEL_FDT_GETPROP`, `SOFT_HART_INIT`, or `SOFT_PLAT_OPS` | Open | none; fix is pure RTL |
+| `fetch_B` / `instr_queue` leftover → jump-to-0 | `core/fetch_A/frontend/instr_queue.sv`, `core/fetch_A/frontend/frontend.sv`, `g6lc_thread_select.sv` | Natural OpenSBI FDT walk reaches cookie `51b1babe` without `PEEL_FDT_GETPROP`, `SOFT_HART_INIT`, or `SOFT_PLAT_OPS` | Open | none; fix is pure RTL |
 
 The S4 live pin is `mepc=0` after `sbi_trap_redirect` (`ra=0x12994`, offset_ptr
 jump). `12958` illegal is closed; `leftover_retake` and `leftover-complete slot0

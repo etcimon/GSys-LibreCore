@@ -340,7 +340,7 @@ where useful, the source line `specs/riscv-spec.html:<n>`. A code reference is a
 | Branch prediction, BTB/BHT/RAS, mispredict | `agents/guides/AGENTS-branch-prediction.md` | `#ext:zifencei` (4.1), `#unpriv-cfi` (4.17), `#priv-cfi` (6.9), `#smctr` (6.8) | `core/frontend/{bht.sv,bht2lvl.sv,btb.sv,ras.sv,frontend.sv}`, `core/branch_unit.sv` |
 | L2/L3 cache, cache blocks, CMO, coherence | `agents/guides/AGENTS-l2l3-cache.md` | `#memorymodel` (3.1), `#pma` (3.6), `#ext:zic64b` (4.15), `#cmo` (4.20) | `core/cache_subsystem/*`, `core/cva6.sv:1400-1560` |
 | RAM, DRAM regions, MMU, address translation | `agents/guides/AGENTS-ram-memory.md` | `#sec:intro-memory` (1.4), `#pma` (3.6), `#pmp` (3.7), `#sv39` (4.4) | `core/load_store_unit.sv`, `core/cva6_mmu/`, `core/pmp/`, `corev_apu/axi_mem_if/` |
-| Speculative execution, flush, recovery, ordering | `agents/guides/AGENTS-speculation.md` | `#memorymodel` (3.1), `#ext:zifencei` (4.1), `#ext:a` (5.1), `#ext:zawrs` (5.5) | `core/scoreboard.sv`, `core/commit_stage.sv`, `core/controller.sv`, `core/frontend/frontend.sv` |
+| Speculative execution, flush, recovery, ordering | `agents/guides/AGENTS-speculation.md` | `#memorymodel` (3.1), `#ext:zifencei` (4.1), `#ext:a` (5.1), `#ext:zawrs` (5.5) | `core/scoreboard.sv`, `core/commit_stage.sv`, `core/controller.sv`, `core/fetch_A/frontend/frontend.sv` |
 | RVV / vector, Ara attach, `misa.V`, AVX-like memcpy | `agents/guides/AGENTS-vector.md` | `#ext:v` (I-9), `#_vector_extension_overview`, `#memorymodel` | `core/acc_dispatcher.sv`, `core/csr_regfile.sv` (`misa.V`), `corev_apu/src/g6lc_ara_attach.sv`, `vendor/ara/` |
 | Vendored uncore controllers/PHY (DDR4, PCIe, Ethernet, HDMI, SATA/SD), `vendor sync/scan`, `corev_apu` integration | `agents/guides/AGENTS-controller-readiness.md` | (not ISA-normative; see `AGENTS-vendor.md` + `architecture/uncore/*`) | `build-platform/src/config/defaults.ts`, `build-platform/src/tooling/vendor.ts`, `corev_apu/src/ariane.sv:67-68`, `core/include/config_pkg.sv` |
 | **Foundry PDK / technology optimization**, memory compilers, tech-cell macros, ASIC tape-out mapping | `agents/guides/AGENTS-technology-optimization.md` (+ `AGENTS-technology.md`) | (not ISA-normative; PDK-swap seam) | `vendor/pulp-platform/tech_cells_generic/src/rtl/{tc_sram.sv,tc_clk.sv}`, `common/local/util/sram_cache.sv`, `pd/synth/Makefile`, `pd/pdk/` |
@@ -393,7 +393,7 @@ else -> `std_cache_subsystem` (deprecated write-back) at `1516+`. All bind insta
 **Branch prediction (microarchitectural; no normative section).** Spec constrains only control-transfer
 semantics (JAL/JALR/branches in `#base`/`#rv32`), fetch fence `#ext:zifencei` (4.1), and optionally CFI
 `#unpriv-cfi`/`#priv-cfi` and control-transfer records `#smctr` (6.8). Code: predictor structures in
-`core/frontend/frontend.sv:71-91`, control-flow classification `frontend.sv:210-221` (branch->BHT,
+`core/fetch_A/frontend/frontend.sv:71-91`, control-flow classification `frontend.sv:210-221` (branch->BHT,
 call/return->RAS, jalr->BTB), resolution `frontend.sv:236-294`, mispredict `frontend.sv:308`; resolve in
 `core/branch_unit.sv`. Sizing via `BPType/BTBEntries/BHTEntries/BHTHist/RASDepth`.
 

@@ -25,7 +25,7 @@
 +incdir+${CVA6_REPO_DIR}/core/include/
 +incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include/
 
-${CVA6_REPO_DIR}/core/smt_legacy/instr_realign.sv
-${CVA6_REPO_DIR}/core/smt_legacy/instr_scan.sv
-${CVA6_REPO_DIR}/core/smt_legacy/instr_queue.sv
-${CVA6_REPO_DIR}/core/smt_legacy/frontend.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/instr_realign.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/instr_scan.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/instr_queue.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/frontend.sv

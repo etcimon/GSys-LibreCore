@@ -39,6 +39,14 @@ R   core/smt/g6lc_fetch_pkg.sv
 R   core/smt/g6lc_fetch_dbg.sv
 R   core/smt_legacy/g6lc_*.sv
 R   core/smt_legacy/frontend.sv
+# Retired frozen-A / oracle supplies, moved out of core/{smt,smt_legacy,frontend} so the
+# tree holds no duplicate of what core/fetch_B owns. Retiring RTL does not relicense it:
+# these keep the tier they had before the move, and the default `U **` rule would
+# otherwise have silently reclassified LibreCore-original work as someone else's.
+R   core/fetch_A/**
+R   core/fetch_A/smt/**
+R   core/fetch_A/smt_legacy/**
+R   core/fetch_A/frontend/**
 R   core/fetch_B/g6lc_fetch_pkg.sv
 R   core/fetch_B/g6lc_fetch_dbg.sv
 R   core/fetch_B/formal/**

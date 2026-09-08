@@ -21,11 +21,11 @@ Sub-files: `../spec/riscv-spec-I-3.1-rvwmo.html`, `-I-4.1-zifencei.html`, `-I-5.
 
 ## 2. Code map
 The speculation pipeline is a composition, not one module:
-- Predict: `core/frontend/frontend.sv` (see `AGENTS-branch-prediction.md`).
+- Predict: `core/fetch_A/frontend/frontend.sv` (see `AGENTS-branch-prediction.md`).
 - Track in-flight: `core/scoreboard.sv` (the speculative window; operands via `core/issue_read_operands.sv`).
 - Execute: `core/ex_stage.sv`; branch resolution `core/branch_unit.sv` -> `resolved_branch_i`.
 - Retire in order: `core/commit_stage.sv` (architectural state changes only here).
-- Flush/redirect: `core/controller.sv` (`flush_i` sequencing) -> frontend redirect `core/frontend/frontend.sv:48,308`.
+- Flush/redirect: `core/controller.sv` (`flush_i` sequencing) -> frontend redirect `core/fetch_A/frontend/frontend.sv:48,308`.
 - Memory speculation: `core/load_unit.sv` (speculative loads / hazard checks), `core/store_buffer.sv` (speculative vs committed stores), `core/lsu_bypass.sv`, `core/amo_buffer.sv`.
 
 ## 3. Config knobs (`core/include/config_pkg.sv`)

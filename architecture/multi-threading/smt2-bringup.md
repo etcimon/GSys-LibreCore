@@ -369,7 +369,7 @@ true dual-issue data-path (pointer/PC) corruption in FDT walks and CSR expected-
 `mv a0,s1` setup — RAS/Return wrong-path with a0=-4 (BADOFFSET) → unbounded
 memchr → R Response storm. Not a path[0] LBU miss at commit.
 
-**RTL (`core/frontend/frontend.sv`):** when `is_return` and `!ras_predict.valid`,
+**RTL (`core/fetch_A/frontend/frontend.sv`):** when `is_return` and `!ras_predict.valid`,
 set `cf_type=NoCF` (not `Return` with garbage target). `branch_unit` then always
 mispredicts JALR with `cf==NoCF` and redirects to rs1/ra.
 

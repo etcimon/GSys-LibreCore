@@ -23,7 +23,7 @@ The config surface is already in place in `core/include/config_pkg.sv`: `Supersc
   - `core/issue_stage.sv` / `core/issue_read_operands.sv` — dual issue/arbitration, operand read/forwarding.
   - `core/scoreboard.sv` — `NR_SB_ENTRIES` and `trans_id` tracking for two in-flight instructions.
   - `core/ex_stage.sv` — dual `alu_valid_o`/`mult_valid_o`/`lsu_valid_o`, FU ready gating.
-  - `core/id_stage.sv` and `core/frontend/instr_queue.sv` — two decoded instructions per cycle.
+  - `core/id_stage.sv` and `core/fetch_A/frontend/instr_queue.sv` — two decoded instructions per cycle.
   - `core/commit_stage.sv` / `core/ariane_regfile_ff.sv` — two commits/write ports.
 - Add/update `check_cfg` assertions in `core/include/config_pkg.sv`.
 - Add a build-platform regression suite in `verif/regress/` / `build-platform/src/tests/`.
@@ -67,7 +67,7 @@ This phase builds the recovery mechanisms OoO will later depend on, without yet 
 - **Extend the speculative scoreboard** in `core/scoreboard.sv` — the `cancelled` bit and `SpeculativeSb` path already let you squash younger-than-branch instructions; harden this so loads, stores, CSR ops, and CVXIF transactions are rolled back precisely.
 - **Improve speculative memory execution** in `core/load_unit.sv`, `core/store_buffer.sv`, `core/lsu_bypass.sv`, `core/amo_buffer.sv`: store-to-load forwarding, load replay on alias/mispredict, and memory-dependence prediction.
 - **Deepen buffers** (`NrScoreboardEntries`, `NrLoadBufEntries`, `MaxOutstandingStores`, `WtDcacheWbufDepth`) and ensure the flush fan-out from `core/controller.sv` clears every new speculative structure atomically.
-- **Branch predictor checkpointing** in `core/frontend/frontend.sv` and `core/controller.sv` so a mispredict can restore the frontend without a full pipeline flush.
+- **Branch predictor checkpointing** in `core/fetch_A/frontend/frontend.sv` and `core/controller.sv` so a mispredict can restore the frontend without a full pipeline flush.
 
 ### 2.2 Phase 1 — Register rename + Physical Register File (PRF)
 

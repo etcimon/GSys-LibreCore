@@ -52,7 +52,7 @@ Line numbers are cited only where stable/known; otherwise the file is cited at m
 | Traps / exceptions (1.6, `#trap-defn`) | implemented | `core/commit_stage.sv`, `core/csr_regfile.sv`, `core/controller.sv` | — |
 | RVWMO memory model (3.1, `#memorymodel`) | implemented | `core/load_unit.sv`, `core/store_buffer.sv`, `core/lsu_bypass.sv`, `core/amo_buffer.sv` | `NrLoadBufEntries`, `MaxOutstandingStores` |
 | Ztso total store order (3.2, `#ext:ztso`) | absent | — | — |
-| Zifencei / FENCE.I (4.1, `#ext:zifencei`) | implemented | `core/controller.sv`, `core/frontend/frontend.sv`, `core/csr_regfile.sv` | `DcacheFlushOnFenceI` |
+| Zifencei / FENCE.I (4.1, `#ext:zifencei`) | implemented | `core/controller.sv`, `core/fetch_A/frontend/frontend.sv`, `core/csr_regfile.sv` | `DcacheFlushOnFenceI` |
 
 ### Scalar integer extensions (ch4)
 | Spec (anchor) | Status | Primary RTL loci | Config knob |
@@ -104,7 +104,7 @@ Line numbers are cited only where stable/known; otherwise the file is cited at m
 |---|---|---|---|
 | F / D floating point (ch6, `#zf`) | config | `core/fpu_wrap.sv`, `core/cvfpu/` | `RVF`, `RVD`, `FpuEn` |
 | Q quad / Zfh half | absent / config | `core/cvfpu/` (Zfh only) | `RVZfh` |
-| C compressed (ch7, `#zc`) | config | `core/compressed_decoder.sv` (identity `c.li`; SMT+SS G1ba leftover-RVI mash recover), `core/instr_realign.sv`, `core/frontend/instr_scan.sv` | `RVC` |
+| C compressed (ch7, `#zc`) | config | `core/compressed_decoder.sv` (identity `c.li`; SMT+SS G1ba leftover-RVI mash recover), `core/instr_realign.sv`, `core/fetch_A/frontend/instr_scan.sv` | `RVC` |
 | Zcmt (table jump) | config | `core/zcmt_decoder.sv` | `RVZCMT` |
 | Zcb / Zcmp | config / partial | `core/compressed_decoder.sv`, `core/macro_decoder.sv` | target-dependent |
 | Zba / Zbb / Zbs bitmanip (ch8, `#bits`) | config | `core/alu.sv`, `core/decoder.sv` | `RVB` |

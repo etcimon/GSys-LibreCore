@@ -21,12 +21,12 @@ Transfer Records — a taken-branch/call/return log that a predictor's classific
 Sub-files: `../spec/riscv-spec-I-2.1-rv32i.html`, `-I-4.1-zifencei.html`, `-I-4.17-cfi.html`.
 
 ## 2. Code map
-- Predictor struct types: `core/frontend/frontend.sv:71-91` (`bht_update_t`, `btb_prediction_t`, `btb_update_t`, `ras_t`).
-- Registered last-cycle predictions: `core/frontend/frontend.sv:104-105`; prediction arrays `139-143`.
-- RVC unaligned prediction shifting: `core/frontend/frontend.sv:180-197`.
-- Control-flow classification: `core/frontend/frontend.sv:210-221` — branch->BHT, call/return->RAS, immediate jump resolved inline, `jalr`->BTB.
-- Prediction selection/priority (lower-most wins): `core/frontend/frontend.sv:236-294`; RAS push/pop only when instruction consumed `261,290`.
-- Mispredict detect: `core/frontend/frontend.sv:308` (`resolved_branch_i.valid & .is_mispredict`); BHT/BTB update `324+`.
+- Predictor struct types: `core/fetch_A/frontend/frontend.sv:71-91` (`bht_update_t`, `btb_prediction_t`, `btb_update_t`, `ras_t`).
+- Registered last-cycle predictions: `core/fetch_A/frontend/frontend.sv:104-105`; prediction arrays `139-143`.
+- RVC unaligned prediction shifting: `core/fetch_A/frontend/frontend.sv:180-197`.
+- Control-flow classification: `core/fetch_A/frontend/frontend.sv:210-221` — branch->BHT, call/return->RAS, immediate jump resolved inline, `jalr`->BTB.
+- Prediction selection/priority (lower-most wins): `core/fetch_A/frontend/frontend.sv:236-294`; RAS push/pop only when instruction consumed `261,290`.
+- Mispredict detect: `core/fetch_A/frontend/frontend.sv:308` (`resolved_branch_i.valid & .is_mispredict`); BHT/BTB update `324+`.
 - Predictor modules: `core/frontend/bht.sv` (bimodal), `core/frontend/bht2lvl.sv` (PH_BHT, private-history 2-level), `core/frontend/btb.sv` (BTB), `core/frontend/ras.sv` (RAS).
 - Resolution source: `core/branch_unit.sv` computes taken/target -> `resolved_branch_i` (EXECUTE).
 - Flush/redirect: `core/controller.sv` on mispredict.
@@ -42,7 +42,7 @@ To add a predictor (for example gshare or TAGE), the change is config-first. Ext
 `core/include/config_pkg.sv` with the new kind, add sizing fields, and add matching `check_cfg`
 assertions; then set the value in the per-target packages under `core/include/cv*_config_pkg.sv`.
 Implement the predictor as a new module in `core/frontend/` mirroring the port shape of
-`core/frontend/bht2lvl.sv`, instantiate it in `core/frontend/frontend.sv` under a `generate` gated on
+`core/frontend/bht2lvl.sv`, instantiate it in `core/fetch_A/frontend/frontend.sv` under a `generate` gated on
 `CVA6Cfg.BPType`, and drive the existing `bht_prediction`/`btb_prediction` arrays
 (`frontend.sv:139-143`) so the downstream selection logic (`236-294`) is untouched. Feed training
 from the resolution path (`resolved_branch_i` at `frontend.sv:48`) into the update logic (`324+`).

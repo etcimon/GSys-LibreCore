@@ -61,7 +61,7 @@ Tooling — `build-platform/`, `sv-timing/`, `verif/` scripting, `docs/`,
 
 Some tier-R files are *substantially modified upstream files* rather than new
 ones (`core/csr_regfile.sv`, `core/decoder.sv`, `core/perf_counters.sv`,
-`core/frontend/frontend.sv`, `core/frontend/ras.sv`,
+`core/fetch_A/frontend/frontend.sv`, `core/frontend/ras.sv`,
 `core/cache_subsystem/g6lc_icache.sv`, `corev_apu/src/ariane.sv`). Those files
 **retain their original copyright notices and licence identifiers verbatim**; only
 the file as a whole carries an additional outbound offer, as Apache-2.0 §4

@@ -520,7 +520,7 @@ reliably for years.
 | CVXIF coprocessor seam | `core/cvxif_fu.sv`, `core/acc_dispatcher.sv`, `core/cva6.sv:337-340` |
 | In-order commit / precise exceptions | `core/commit_stage.sv`, `core/scoreboard.sv` |
 | Store ordering / speculation | `core/store_buffer.sv`, `core/load_store_unit.sv` |
-| Branch / flush timing | `core/frontend/frontend.sv`, `core/branch_unit.sv`, `core/controller.sv` |
+| Branch / flush timing | `core/fetch_A/frontend/frontend.sv`, `core/branch_unit.sv`, `core/controller.sv` |
 | PMP/PMA security boundary | `core/pmp/src/pmp.sv`, `core/include/config_pkg.sv:472-502` |
 | RVFI / debug / PMU observability | `core/cva6_rvfi.sv`, `core/cva6_rvfi_probes.sv`, `core/perf_counters.sv` |
 | Linux device-tree cross-validation | `AGENTS-dts-validation.md`, `build-platform/scripts/fetch-linux-dts.{sh,ps1}`, `corev_apu/bootrom/ariane.dts` |

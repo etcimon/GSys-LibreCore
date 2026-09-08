@@ -189,13 +189,13 @@ def main():
     if args.gen_ports_folder is not None:
         file = []
         file.append("../core/cva6.sv")
-        file.append("../core/frontend/frontend.sv")
+        file.append("../core/fetch_A/frontend/frontend.sv")
         file.append("../core/frontend/bht.sv")
         file.append("../core/frontend/bht2lvl.sv")
         file.append("../core/frontend/btb.sv")
         file.append("../core/frontend/ras.sv")
-        file.append("../core/frontend/instr_queue.sv")
-        file.append("../core/frontend/instr_scan.sv")
+        file.append("../core/fetch_A/frontend/instr_queue.sv")
+        file.append("../core/fetch_A/frontend/instr_scan.sv")
         file.append("../core/instr_realign.sv")
         file.append("../core/id_stage.sv")
         file.append("../core/issue_stage.sv")

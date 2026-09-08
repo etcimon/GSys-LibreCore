@@ -45,7 +45,7 @@ ${CVA6_REPO_DIR}/vendor/pulp-platform/fpga-support/rtl/SyncDpRam_ind_r_w.sv
 // Define early; include the flist after config_pkg/ariane_pkg (same slot
 // as frozen-A supply). A top-of-file -f reparse hits PKGNODECL.
 +define+G6LC_FETCH_B
-// ${CVA6_REPO_DIR}/core/smt/g6lc_fetch_pkg.sv
+// ${CVA6_REPO_DIR}/core/fetch_A/smt/g6lc_fetch_pkg.sv
 
 // Floating point unit
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_pkg.sv
@@ -152,16 +152,16 @@ ${CVA6_REPO_DIR}/core/aes.sv
 // Note: depends on fpnew_pkg, above
 ${CVA6_REPO_DIR}/core/fpu_wrap.sv
 // EXTRACT E2–E9 + leftover packages (before branch_unit / controller / compressed_decoder)
-${CVA6_REPO_DIR}/core/smt_legacy/g6lc_rvc_enc.sv
-${CVA6_REPO_DIR}/core/smt_legacy/g6lc_jalr_usable.sv
-${CVA6_REPO_DIR}/core/smt_legacy/g6lc_cf_unissued.sv
-${CVA6_REPO_DIR}/core/smt_legacy/g6lc_fe_keep.sv
-${CVA6_REPO_DIR}/core/smt_legacy/g6lc_fe_kill.sv
-${CVA6_REPO_DIR}/core/smt_legacy/g6lc_iq_hide.sv
-${CVA6_REPO_DIR}/core/smt_legacy/g6lc_sib_cjalr.sv
-${CVA6_REPO_DIR}/core/smt_legacy/g6lc_present.sv
-${CVA6_REPO_DIR}/core/smt_legacy/g6lc_leftover.sv
-${CVA6_REPO_DIR}/core/smt_legacy/g6lc_lj_hide.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_rvc_enc.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_jalr_usable.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_cf_unissued.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_fe_keep.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_fe_kill.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_iq_hide.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_sib_cjalr.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_present.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_leftover.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_lj_hide.sv
 // G1r: per-instr CF PC (before branch_unit)
 ${CVA6_REPO_DIR}/core/smt_legacy/g6lc_cf_pc.sv
 // I14: CF issue-port pick (before branch_unit / IRO / ex_stage)
@@ -246,10 +246,10 @@ ${CVA6_REPO_DIR}/core/frontend/g6lc_loop_buffer.sv
 ${CVA6_REPO_DIR}/core/cache_subsystem/g6lc_way_predictor.sv
 ${CVA6_REPO_DIR}/core/cache_subsystem/g6lc_rrip_repl.sv
 ${CVA6_REPO_DIR}/core/frontend/ras.sv
-// ${CVA6_REPO_DIR}/core/frontend/instr_scan.sv
-// ${CVA6_REPO_DIR}/core/frontend/instr_queue.sv
-// ${CVA6_REPO_DIR}/core/frontend/frontend.sv
-// ${CVA6_REPO_DIR}/core/smt/g6lc_fetch_dbg.sv
+// ${CVA6_REPO_DIR}/core/fetch_A/frontend/instr_scan.sv
+// ${CVA6_REPO_DIR}/core/fetch_A/frontend/instr_queue.sv
+// ${CVA6_REPO_DIR}/core/fetch_A/frontend/frontend.sv
+// ${CVA6_REPO_DIR}/core/fetch_A/smt/g6lc_fetch_dbg.sv
 -f ${CVA6_REPO_DIR}/core/Flist.fetch_B
 
 // Cache subsystem

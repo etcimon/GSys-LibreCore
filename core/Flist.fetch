@@ -27,5 +27,5 @@
 +incdir+${CVA6_REPO_DIR}/core/include/
 +incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include/
 
-${CVA6_REPO_DIR}/core/smt/g6lc_fetch_pkg.sv
-${CVA6_REPO_DIR}/core/smt/g6lc_fetch_dbg.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt/g6lc_fetch_pkg.sv
+${CVA6_REPO_DIR}/core/fetch_A/smt/g6lc_fetch_dbg.sv
