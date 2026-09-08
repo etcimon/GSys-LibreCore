@@ -8,6 +8,48 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 
 
 
+
+## 2026-09-10 (f) — 4 GHz support: the T3 requirement now scales, and the worst path is a comment
+
+- [x] **`t3_arch_multicycle_mul` hardcoded its own answer.** `latency_delta: 2` and
+  `expected_fo4_after: budget`, regardless of how far over budget the operator was. That
+  is right at ~1.25 GHz -- a 56 FO4 `mul` against a 32 FO4 budget needs `ceil(56/32) = 2`
+  stages -- and it under-reports as the target rises: at 4 GHz the budget is 10 FO4 and
+  the same multiply needs 6. Since `AtomicOverBudget` is exactly the class no cut strategy
+  can touch, this card is the ONLY actionable output for the paths that set the
+  high-frequency ceiling, so describing one operating point made the tool useless above
+  it. Stage count is now `ceil(atomic_cost / budget)` from `dominant_atomic_op` -- the
+  same most-expensive `Mul`/`DivRem` node `try_atomic_over_budget` selects, so the
+  requirement is derived from the operator that caused the classification rather than from
+  the path sum. Test `arch_multicycle_stage_count_scales_with_the_target` pins
+  1250/2000/4000 MHz at 20 ps and 4000 at 12 ps (2/3/6/4 stages).
+- [x] It works on the real core. At 4000 MHz / 20 ps, `full_core` yields 24 `atomic_op`
+  cards with per-path requirements: `fpnew_cast_multi` DivRem 120 FO4 -> 12 stages,
+  `cva6_ptw` Mul 102 -> 11, `cva6_tlb` Mul 78 -> 8, `g6lc_ai_exec` Mul 56 -> 6. That is a
+  microarchitectural work list instead of a dead end.
+
+### And it exposed a measurement defect that corrupts the headline
+
+- [ ] **The worst path in the whole core is a COMMENT.** `SyncDpRam.out0`, 720.0 FO4,
+  `atomic_over_budget`, `nodes=1`, `primary_loc SyncDpRam.sv:136` -- and line 136 is
+  `   ////////////////////////////`. The file contains **zero** `/` or `%` operators
+  outside comments (348 `/` characters, all in comments), and 720 = 6 x the model's
+  `div_rem` base of 120. Comment slashes are being lowered as `DivRem` nodes.
+- [ ] Scope, measured rather than assumed: **3 of 24** atomic paths sit on comment lines,
+  and comment lines carry **1,577 of 29,925 FO4 (5.3%)**. So the defect is narrow -- but
+  it owns the single worst path, which is what every reported ceiling is derived from.
+  With comment-line paths removed the worst becomes **545.5 FO4 `g6lc_ai_exec`**, which is
+  real code.
+- [ ] **Consequence for the earlier conclusions.** The "emitted core floors at ~99.4 FO4 /
+  ~503 MHz at 20 ps" result from (e) is contaminated: it was measured against a design
+  whose worst path is a comment artefact, and `SyncDpRam` was cited in (b), (c) and (e) as
+  a real (if suspect) behavioural-model cone. It is not a model artefact -- it is a
+  lowering bug. The AI-island finding survives, since `g6lc_ai_exec` at 545.5 FO4 is on
+  real code and is now the genuine worst path.
+- [ ] Fix belongs in parse/lower: comment content must never reach operator extraction.
+  Until then, treat any path whose `primary_loc` is a comment line as invalid, and re-run
+  the frequency frontier afterwards -- the numbers in (e) should be expected to move.
+
 ## 2026-09-10 (e) — the -O surface measured, and where the emitted core actually floors
 
 Every 4 GHz run before this used **-O2** (`max_passes=4 worklist_width=1

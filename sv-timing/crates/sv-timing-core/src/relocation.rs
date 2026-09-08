@@ -524,6 +524,35 @@ fn pattern_from_class(class: PathClassKind, multi_cycle: bool) -> RelocationPatt
     }
 }
 
+/// Cost and kind of the dominant indivisible operator on a path.
+///
+/// Mirrors `path_class::try_atomic_over_budget`'s selection -- the most expensive `Mul`
+/// or `DivRem` node -- so the T3 stage count is derived from the same operator that
+/// caused the `AtomicOverBudget` classification, rather than from the whole path sum.
+/// Using the path total here would over-state the requirement whenever the atomic op
+/// shares its path with ordinary logic.
+fn dominant_atomic_op(
+    design: &TimingDesign,
+    path: &crate::ir::TimingPath,
+) -> Option<(f64, String)> {
+    use crate::ir::OperatorClass;
+    let module = design.modules.get(&path.module)?;
+    let mut worst: Option<(f64, OperatorClass)> = None;
+    for id in &path.nodes {
+        let Some(n) = module.nodes.get(id) else {
+            continue;
+        };
+        let Some(cls) = n.op_class else { continue };
+        if !matches!(cls, OperatorClass::Mul | OperatorClass::DivRem) {
+            continue;
+        }
+        if worst.map(|(c, _)| n.fo4_cost > c).unwrap_or(true) {
+            worst = Some((n.fo4_cost, cls));
+        }
+    }
+    worst.map(|(c, cls)| (c, format!("{cls:?}")))
+}
+
 fn function_hint(pattern: RelocationPattern, class: PathClassKind) -> String {
     match pattern {
         RelocationPattern::ExclusiveSelect => {
@@ -646,6 +675,30 @@ fn options_for_path(
             ));
         }
         RelocationPattern::AtomicOp => {
+            // How deeply the unit must actually be pipelined at THIS budget.
+            //
+            // The T3 card below used to hardcode `latency_delta: 2` and
+            // `expected_fo4_after: budget`. That is right at roughly 1.25 GHz -- a 56 FO4
+            // `mul` against a 32 FO4 budget needs `ceil(56/32) = 2` stages -- and it
+            // silently under-reports as the target rises: at 4 GHz the budget is 10 FO4
+            // and the same multiply needs 6. Since `atomic_over_budget` is precisely the
+            // class that no cut strategy can touch, this card is the only actionable
+            // output for the paths that set the high-frequency ceiling, so it has to
+            // scale with the target instead of describing one operating point.
+            let (atomic_cost, atomic_kind) =
+                dominant_atomic_op(design, path).unwrap_or((raw.max(fo4), "operator".to_string()));
+            let stages = if budget > 0.0 {
+                (atomic_cost / budget).ceil().max(1.0) as u32
+            } else {
+                1
+            };
+            // A single-cycle unit is the baseline, so N stages cost N-1 extra cycles.
+            let arch_latency = stages.saturating_sub(1).max(1);
+            let arch_after = if stages > 0 {
+                (atomic_cost / stages as f64).max(budget)
+            } else {
+                budget
+            };
             opts.push(scored_option(
                 "t0_soft_multicycle",
                 RelocationTier::T0,
@@ -681,8 +734,8 @@ fn options_for_path(
                 RelocationKind::ArchMulticycle,
                 "Architectural multi-cycle multiply unit",
                 fo4,
-                budget,
-                2,
+                arch_after,
+                arch_latency,
                 false,
                 0.75,
                 "high",
@@ -691,7 +744,12 @@ fn options_for_path(
                     "CVA6Cfg MulLatency".into(),
                     "scoreboard".into(),
                 ],
-                "Only real dissolve when model mul FO4 > period budget".into(),
+                format!(
+                    "atomic {atomic_kind} is {atomic_cost:.1} FO4 against a {budget:.1} FO4 \
+                     budget, so the unit needs {stages} internal stage(s) \
+                     (+{arch_latency} cycle(s), ~{arch_after:.1} FO4 each). No cut strategy \
+                     reaches inside it, so this is the only real dissolve for this path."
+                ),
             ));
             opts.push(scored_option(
                 "t3_cvxif_offload",
@@ -1214,5 +1272,147 @@ mod tests {
             .options
             .iter()
             .any(|o| o.kind == RelocationKind::SoftMulticycle));
+
+        // At 1250 MHz / 20 ps the budget is 32 FO4, so a 56 FO4 multiply needs
+        // ceil(56/32) = 2 stages, i.e. +1 cycle over a single-cycle unit.
+        let arch = card
+            .options
+            .iter()
+            .find(|o| o.kind == RelocationKind::ArchMulticycle)
+            .expect("arch option");
+        assert_eq!(arch.latency_delta, 1, "56 FO4 over a 32 FO4 budget is 2 stages");
+        assert!(arch.rationale.contains("2 internal stage"), "{}", arch.rationale);
+    }
+
+    /// The T3 requirement must scale with the target, which is what makes it usable
+    /// above ~1.25 GHz.
+    ///
+    /// `AtomicOverBudget` is exactly the class no cut strategy can touch, so this card is
+    /// the only actionable output for the paths that set the high-frequency ceiling. It
+    /// used to hardcode `latency_delta: 2` and `expected_fo4_after: budget`, which is
+    /// correct at 1.25 GHz (56 FO4 against 32 needs 2 stages) and under-reports as the
+    /// target rises: at 4 GHz the budget is 10 FO4 and the same multiply needs 6.
+    #[test]
+    fn arch_multicycle_stage_count_scales_with_the_target() {
+        // (target MHz, fo4_ps, expected budget FO4, expected stages)
+        let cases = [
+            (1250.0, 20.0, 32.0, 2u32),
+            (2000.0, 20.0, 20.0, 3),
+            (4000.0, 20.0, 10.0, 6),
+            (4000.0, 12.0, 16.666_666, 4),
+        ];
+        for (mhz, fo4_ps, want_budget, want_stages) in cases {
+            let mut design = TimingDesign::empty(TimingTarget::new(mhz, fo4_ps, 0.2));
+            assert!(
+                (design.target.budget_fo4 - want_budget).abs() < 0.01,
+                "budget at {mhz} MHz / {fo4_ps} ps was {}",
+                design.target.budget_fo4
+            );
+            let mut nodes = BTreeMap::new();
+            nodes.insert(0, mul_node(56.0));
+            design.modules.insert(0, module_with(nodes));
+            design.module_names.insert("multiplier".into(), 0);
+            design.paths.push(atomic_path(56.0));
+            classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+            let plan = build_relocation_plan(&design);
+            let card = plan
+                .cards
+                .iter()
+                .find(|c| c.path_id == 1)
+                .expect("atomic card");
+            let arch = card
+                .options
+                .iter()
+                .find(|o| o.kind == RelocationKind::ArchMulticycle)
+                .expect("arch option");
+            assert_eq!(
+                arch.latency_delta,
+                want_stages - 1,
+                "at {mhz} MHz / {fo4_ps} ps a 56 FO4 mul needs {want_stages} stages; \
+                 rationale={}",
+                arch.rationale
+            );
+            // Each stage carries roughly cost/stages, never less than the budget.
+            assert!(
+                arch.expected_fo4_after >= design.target.budget_fo4 - 1e-6,
+                "per-stage FO4 {} below budget {}",
+                arch.expected_fo4_after,
+                design.target.budget_fo4
+            );
+            assert!(
+                arch.expected_fo4_after <= 56.0,
+                "per-stage FO4 cannot exceed the whole operator"
+            );
+            assert!(
+                arch.rationale.contains(&format!("{want_stages} internal stage")),
+                "{}",
+                arch.rationale
+            );
+        }
+    }
+
+    fn mul_node(cost: f64) -> IrNode {
+        IrNode {
+            id: 0,
+            op_class: Some(OperatorClass::Mul),
+            width: 64,
+            fo4_cost: cost,
+            gate: None,
+            loc: loc(),
+            fans_in: vec![],
+            fans_out: vec![],
+            width_defaulted: true,
+            reads_reg: false,
+            lhs: Some("p".into()),
+            rhs: Some("a*b".into()),
+            lhs_expr: None,
+            rhs_expr: None,
+            case_labels: Vec::new(),
+            case_is_default: false,
+            case_selector: None,
+            fo4_locked: false,
+        }
+    }
+
+    fn module_with(nodes: BTreeMap<crate::ir::NodeId, IrNode>) -> TimingModule {
+        TimingModule {
+            id: 0,
+            name: "multiplier".into(),
+            file: "m.sv".into(),
+            nodes,
+            regions: BTreeMap::new(),
+            localparams: vec![],
+            parameters: vec![],
+            ports: vec![],
+            gen_loops: vec![],
+            functions: vec![],
+            package_imports: vec![],
+            instances: vec![],
+            loc: loc(),
+        }
+    }
+
+    fn atomic_path(fo4: f64) -> TimingPath {
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
+        TimingPath {
+            id: 1,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "multiplier.in0".into(),
+            endpoint: "multiplier.out0".into(),
+            nodes: vec![0],
+            total_fo4: fo4,
+            slack_fo4: -24.0,
+            max_freq_mhz: 500.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        }
     }
 }
