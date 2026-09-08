@@ -74,6 +74,7 @@ __all__ = [
     "MEASURED_DOT_CELLS",
     "MEASURED_ENGINE_CELLS",
     "MEASURED_LANE_SWEEP",
+    "MEASURED_RESIDUAL_PROBES",
     "MODEL_CONSTANT_BY_HARNESS",
     "RetireAnalysis",
     "ShapeAnalysis",
@@ -361,33 +362,55 @@ MEASURED_DECODE_SWEEP: Dict[int, Dict[int, Tuple[int, int, int, int]]] = {
 
 
 def decode_residual(n: int, resident_b: bool) -> int:
-    """The m=1 correction the base model does not capture, measured not derived.
+    """The correction the base model does not capture: `alpha * (n - 8)`, measured.
 
-    Over n = 8/16/24/32 the residual is EXACTLY linear and format-independent, with two
-    slopes depending on whether B streams:
+        B streams  (cold, warm_A):   0.375 * (n - 8)
+        B resident (warm_B, both):   0.5   * (n - 8)
 
-        B streams  (cold, warm_A):   0.375*n - 3   ==  0.75 * (w_beats - 4)
-        B resident (warm_B, both):   0.5*n   - 4   ==  1.00 * (w_beats - 4)
+    Format-independent, and zero at n=8 -- which is why the square 8x8 tile fits the
+    base model exactly. It is a function of **n alone**.
 
-    where `w_beats = n/2` (C is written in 64-bit pairs). Both are zero at n=8.
+    THREE MECHANISMS TESTED AND REFUTED, which is most of what is known about it:
 
-    The two slopes are the interesting part: **C writes are MORE exposed when B is
-    resident**, i.e. when there is no read traffic left for them to hide behind. That is
-    a coherent mechanism and it is what a write buffer draining against reads would look
-    like.
+    * **C write beats.** The first reading of the n-sweep was `0.75*(w_beats - 4)`,
+      which fits perfectly at m=1 because `w_beats == n/2` there. Sweeping m at fixed
+      n=32 breaks it: `w_beats` grows 32x (16 -> 512) while the residual stays at
+      +9/+12. It is not writes.
+    * **Hiding behind compute (m).** Flat across m = 1, 8, 16, 32 for the A-resident
+      states, so a longer `steps` term does not absorb it.
+    * **C bank conflicts.** C is banked by `j % PeLanes`, so a column collision would
+      have to vanish once `PeLanes >= n`. Measured at PeLanes 8/16/32 with n=32: the
+      residual is +9/+12 at every one, including PeLanes == n. Not banking.
 
-    It is nonetheless labelled EMPIRICAL and kept out of `model_cycles`, because it does
-    not extend to the square tile: 8x8 has 32 write beats and would want a +21 correction
-    by the same rule, yet it measures exactly 0 -- both cold and both-resident. So the
-    exposure depends on something these four points do not separate (m, or C bank
-    sequencing at m=1), and inventing a mechanism to cover both would be fitting a story
-    to eight numbers.
+    What survives: it scales with n and with nothing else, and it is LARGER when B is
+    resident. The one residual pattern still suggestive is that the two states whose A
+    operand STREAMS (cold, warm_B) drop below the law at large m (+9 -> +6, +12 -> +9 at
+    m=32) while the A-resident states stay exactly on it -- i.e. A read traffic hides
+    some of it. Naming the term needs RTL instrumentation (a stall counter), not more
+    black-box sweeps, so it stays empirical and out of `model_cycles`.
     """
     if n <= 0:
         raise ValueError("n must be positive")
-    w_beats = n / 2.0
-    slope = 1.0 if resident_b else 0.75
-    return max(0, int(round(slope * (w_beats - 4))))
+    slope = 0.5 if resident_b else 0.375
+    return max(0, int(round(slope * (n - 8))))
+
+
+#: The m and lane sweeps that refuted three candidate mechanisms for the residual.
+#: FP32, n=32, k=16: `{("m", m): (cold, warm_a, warm_b, both)}` at PeLanes=8, and
+#: `{("lanes", L): ...}` at m=1. See `decode_residual`.
+#:
+#: `w_beats` grows 32x across the m sweep (16 -> 512) and `steps` 32x, while the
+#: A-resident residuals stay pinned at +9/+12; the lane sweep holds the residual at
+#: +9/+12 even at PeLanes == n, where a `j % PeLanes` bank conflict cannot exist.
+MEASURED_RESIDUAL_PROBES: Dict[Tuple[str, int], Tuple[int, int, int, int]] = {
+    ("m", 1):     (578, 568, 289, 279),
+    ("m", 8):     (2433, 2360, 2144, 2071),
+    ("m", 16):    (4553, 4408, 4264, 4119),
+    ("m", 32):    (8793, 8504, 8504, 8215),
+    ("lanes", 8): (578, 568, 289, 279),
+    ("lanes", 16): (450, 440, 161, 151),
+    ("lanes", 32): (386, 376, 97, 87),
+}
 
 
 def decode_b_share(m: int, n: int) -> float:

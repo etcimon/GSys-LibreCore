@@ -839,30 +839,46 @@ multi-engine address is unchanged (verified -- the default run is byte-identical
 Against predictions of **1.980x / 2.122x** -- right to ~1.6% -- and B's share came
 out `941/1000`, exactly `n/(m+n) = 16/17`.
 
-### The residual, pinned over four n
+### The residual: a precise law, and three refuted mechanisms
 
-n = 8/16/24/32 x four formats x four residency states is 64 measured points, and
-they settle the term the n=16 pass could only report. It is **exactly linear and
-format-independent**, with **two slopes**:
+n = 8/16/24/32 x four formats x four residency states is 64 measured points. The
+term is **exactly linear, format-independent, and a function of n ALONE**:
 
-| B state | residual | in write beats (`w = n/2`) |
-|---|---|---|
-| streams (cold, warm_A) | `0.375n - 3` | `0.75 * (w - 4)` |
-| resident (warm_B, both) | `0.5n - 4` | `1.00 * (w - 4)` |
+| B state | residual |
+|---|---|
+| streams (cold, warm_A) | `0.375 * (n - 8)` |
+| resident (warm_B, both) | `0.5 * (n - 8)` |
 
-Both are zero at n=8, and with the correction applied the model is **exact on all
-64 points**.
+It is zero at n=8, which is also **why the square 8x8 tile fits the base model
+exactly** -- the square tile never violated the law, it sits at the law's root. With
+the correction applied the model is exact on all 64 points.
 
-The two slopes are the informative part: **C writes are more exposed when B is
-resident**, i.e. when there is no read traffic left for them to hide behind. That is
-what a write buffer draining against reads would look like, and it is the first
-evidence in this work for a write-side term at all.
+Three structural explanations were tested and **all three are refuted**, which is
+most of what is now known about it:
 
-It is still labelled EMPIRICAL and kept out of the base model, because it does not
-extend to the square tile: 8x8 has 32 write beats and the same rule would want a
-+21 correction, yet it measures exactly **0** -- cold and both-resident alike. So
-the exposure depends on something these points do not separate (m, or C bank
-sequencing at m=1), and covering both with one story would be fitting eight numbers.
+* **Not C write beats.** The first reading was `0.75 * (w_beats - 4)`, which fits
+  perfectly at m=1 -- because `w_beats == n/2` there. Sweeping m at fixed n=32
+  breaks it: `w_beats` grows **32x** (16 -> 512) while the residual stays at +9/+12.
+* **Not hiding behind compute.** The same sweep grows `steps` 32x (256 -> 8,192)
+  with the A-resident residuals pinned at exactly +9/+12.
+* **Not C bank conflicts.** C is banked by `j % PeLanes`, so a column collision must
+  vanish once `PeLanes >= n`. Measured at PeLanes 8/16/32 with n=32, the residual is
+  +9/+12 at **every** one, including `PeLanes == n`.
+
+| probe | steps | w_beats | cold | warm_A | warm_B | both |
+|---|--:|--:|--:|--:|--:|--:|
+| m=1, 8 lanes | 256 | 16 | +9 | +9 | +12 | +12 |
+| m=8 | 2,048 | 128 | +9 | +9 | +12 | +12 |
+| m=16 | 4,096 | 256 | +8 | +9 | +11 | +12 |
+| m=32 | 8,192 | 512 | +6 | +9 | +9 | +12 |
+| m=1, 16 lanes | 128 | 16 | +9 | +9 | +12 | +12 |
+| m=1, 32 lanes | 64 | 16 | +9 | +9 | +12 | +12 |
+
+What survives is the law plus one suggestive pattern: the two states whose **A
+operand streams** (cold, warm_B) fall below the law at large m (+9 -> +6, +12 -> +9),
+while the A-resident states stay exactly on it. So A read traffic hides part of it.
+Naming the term needs RTL instrumentation -- a stall counter -- rather than more
+black-box sweeps, so it stays empirical and out of the base model.
 
 ### The ratio converges, as the ceiling required
 

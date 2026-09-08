@@ -474,6 +474,20 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   INT8 1.961x, INT4 1.971x, FP16 1.953x. `run-gemm-concurrent.sh` now takes
   JOB_M/JOB_N/JOB_K so the geometry axis is no longer manual-invocation only, and it
   rejects JOB_K%16 != 0 while INT4 is in the tables (the row-stride guard).
+- [x] RESIDUAL MECHANISM NARROWED BY THREE REFUTATIONS. Sweeping m at fixed n=32 and
+  sweeping PeLanes at m=1 killed every structural explanation, and corrected the one I
+  had published. (1) NOT C write beats: the first reading was 0.75*(w-4), which fits
+  perfectly at m=1 only because w == n/2 there; across m = 1/8/16/32 the write beats
+  grow 32x (16 -> 512) while the residual stays at +9/+12. (2) NOT compute hiding: the
+  same sweep grows steps 32x (256 -> 8,192) with the A-resident residuals pinned. (3)
+  NOT C bank conflicts: C is banked by j % PeLanes so a collision must vanish once
+  PeLanes >= n, and at PeLanes 8/16/32 with n=32 the residual is +9/+12 at EVERY one,
+  including PeLanes == n. So the law is `alpha*(n-8)` with alpha 0.375 (B streams) /
+  0.5 (B resident) -- a function of n ALONE, which is also why the square 8x8 tile fits
+  the base model exactly: it sits at the law's root rather than violating it. One
+  pattern survives: the states whose A operand STREAMS drop below the law at large m
+  (+9 -> +6, +12 -> +9) while A-resident states stay on it, so A traffic hides part of
+  it. Naming it needs RTL instrumentation (a stall counter), not more black-box sweeps.
 - [x] RESIDUAL PINNED over four n. n = 8/16/24/32 x 4 formats x 4 residency states = 64
   measured points. It is EXACTLY linear and format-independent with TWO slopes, both
   zero at n=8: `0.375n - 3` while B streams (cold, warm_A) and `0.5n - 4` once B is

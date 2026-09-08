@@ -374,13 +374,54 @@ def test_the_decode_residual_is_exactly_linear_over_four_n():
                 checked += 1
     assert checked == 64
     # Zero at n=8, and strictly growing after -- so it is an n-term, not a constant.
+    # Zero at n=8 is also why the square 8x8 tile fits the base model exactly.
     assert P.decode_residual(8, False) == P.decode_residual(8, True) == 0
     assert [P.decode_residual(n, False) for n in (16, 24, 32)] == [3, 6, 9]
     assert [P.decode_residual(n, True) for n in (16, 24, 32)] == [4, 8, 12]
-    # Writes are MORE exposed with B resident: nothing is left to hide them behind.
     assert P.decode_residual(32, True) > P.decode_residual(32, False)
     with pytest.raises(ValueError):
         P.decode_residual(0, False)
+
+
+def test_three_mechanisms_for_the_residual_are_refuted_by_measurement():
+    """What the residual is NOT, which is most of what is known about it.
+
+    The first reading was `0.75*(w_beats-4)`, which fits perfectly at m=1 only because
+    `w_beats == n/2` there. Two further sweeps break every structural explanation and
+    leave a term that scales with n and nothing else.
+    """
+    probe = P.MEASURED_RESIDUAL_PROBES
+    n, k, beta = 32, 16, P.BETA[AI_FMT_FP32]
+
+    def residuals(m, lanes, measured):
+        steps = P.steps_for(AI_FMT_FP32, m, n, k, lanes)
+        wpr = P.row_bytes(AI_FMT_FP32, k) // 8
+        got = []
+        for r, meas in zip((m * wpr + n * wpr, n * wpr, m * wpr, 0), measured):
+            got.append(meas - (math.ceil(steps + beta * r) + P.MODEL_CONSTANT))
+        return got
+
+    # 1. NOT write beats: w grows 32x across the m sweep, the residual does not move.
+    a_resident = []
+    for m in (1, 8, 16, 32):
+        cold, warm_a, warm_b, both = residuals(m, 8, probe[("m", m)])
+        a_resident.append((warm_a, both))
+        w_beats = (m * n + 1) // 2
+        assert w_beats == (16, 128, 256, 512)[(1, 8, 16, 32).index(m)]
+    assert a_resident == [(9, 12)] * 4          # flat while w_beats spans 16..512
+
+    # 2. NOT compute hiding: the same flatness across a 32x range of `steps`.
+    assert P.steps_for(AI_FMT_FP32, 32, n, k, 8) == 32 * P.steps_for(AI_FMT_FP32, 1, n, k, 8)
+
+    # 3. NOT C bank conflicts: C is banked by `j % PeLanes`, so a collision must vanish
+    #    once PeLanes >= n. It does not -- the residual is identical at PeLanes == n.
+    for lanes in (8, 16, 32):
+        cold, warm_a, warm_b, both = residuals(1, lanes, probe[("lanes", lanes)])
+        assert (cold, warm_a, warm_b, both) == (9, 9, 12, 12), lanes
+    assert P.lane_groups(AI_FMT_FP32, k, 32) == 1   # and no grouping is in play either
+
+    # What survives: the law itself, on the A-resident states at every m and lane count.
+    assert P.decode_residual(n, False) == 9 and P.decode_residual(n, True) == 12
 
 
 def test_the_decode_residency_ratio_converges_as_the_ceiling_predicted():
