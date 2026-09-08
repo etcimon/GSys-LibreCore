@@ -765,16 +765,72 @@ At each shape's own optimal lane count, FP32:
 | **decode 1x256x256** | 256 | 32,896 | **99%** | **100%** | **91.5x** | 141x |
 
 At m=1 the weight matrix B is essentially **all** of the traffic, re-read for every
-token. So **recipe 16 -- already implemented and verified -- is the largest
-opportunity in the catalog**, and the measured 1.279x is from a square tile, which
-is the *least* favourable shape for it. A square tile at its own optimal lane count
-is exactly balanced (`steps == beats`, because `steps/beats = 4n/lanes` and
-`lanes = k*bytes` gives 1 at `n == k`), which is why residency caps near 2x there
-and does not scale with tile size.
+token, so the measured 1.279x came from a square tile -- the *least* favourable
+shape for residency. A square tile at its own optimal lane count is exactly
+balanced (`steps == beats`, because `steps/beats = 4n/lanes` and `lanes = k*bytes`
+gives 1 at `n == k`), which is why residency caps near 2x there.
 
-The decode rows are **projections** at shapes never measured; 1x16x16 is a measured
-*shape* but its residency was never swept. The next measurement should be
-resident-B at m=1, not more square tiles.
+### Measured: decode residency, and the ceiling that reconciles the numbers
+
+`tb_g6lc_ai_gemm_concurrent` now runs a `DECODE` experiment (m=1) alongside the
+square `DUAL` one, so both appear in the same run:
+
+| Format | shape | cold | resident B | resident both |
+|---|---|--:|--:|--:|
+| FP32 | square 8x8 | 669 | 596 = **1.1225x** | 523 = **1.2792x** |
+| FP32 | **decode 1x8** | 158 | 85 = **1.859x** | 75 = **2.107x** |
+| INT8 | square 8x8 | 189 | 164 = 1.1524x | 139 = 1.3597x |
+| INT8 | **decode 1x8** | 56 | 31 = **1.806x** | 27 = **2.074x** |
+| FP16 | decode 1x8 | 90 | 49 = 1.837x | 43 = 2.093x |
+| INT4 | decode 1x8 | 39 | 22 = 1.773x | 19 = 2.053x |
+
+So the direction is confirmed -- decode residency is **1.53-1.66x larger** than the
+square tile's -- and two of my earlier statements need correcting.
+
+**Correction 1: the model needed a ceil.** Every square-tile point has an integral
+`beta*beats`, so it was invisible that the work terms must be rounded UP. At m=1
+every fractional case landed on `.125` and measured exactly one cycle higher: a
+partial beat costs a whole cycle. With `ceil(steps + beta*beats) + 11` the model is
+exact on all 16 new decode points -- out-of-sample at a new *shape*, not just new
+beat counts.
+
+**Correction 2: "the largest opportunity in the catalog" was overstated.** At 8
+lanes the decode gain **saturates near 2x**, and the cap is `steps + c`, not
+traffic: for INT4 the additive constant alone is 58% of the resident-both time,
+which is why INT4 has the *worst* decode ratio (1.773x) despite B being the same
+8/9 of its traffic. Resident-A is worth almost nothing at decode (1.068x), so at
+m=1 "residency" effectively means "resident B".
+
+The two figures are reconciled by a closed form. At m=1 both `steps` and `beats`
+grow linearly in n, so the ratio **converges** rather than diverging:
+
+```
+decode resident-B ceiling  =  1 + beta * (row_bytes/8) / ceil(row_bytes/lanes)
+```
+
+| Format | at 8 lanes | measured (n=8) | at 64 lanes |
+|---|--:|--:|--:|
+| FP32 | 2.14x | 1.859x | **10.12x** |
+| INT8 | 2.56x | 1.806x | 4.12x |
+| INT4 | 3.12x | 1.773x | 3.12x (already 1 step/elem) |
+
+The ceiling **rises as lanes shrink the step term**, which is why the same
+mechanism gives ~2.1x on the 8-lane test corner and a far larger figure on the
+shipped 256-lane SKU, where `ceil(row_bytes/lanes) == 1` for every format at
+k <= 256. B's share itself is `n/(m+n)` and nothing else -- measured identically
+at 888/1000 for all four formats, because `row_bytes` and `beta` cancel, so it is a
+property of the shape alone.
+
+**Not measured:** n=16 and above. The harness B sub-slot is 512 B
+(`OFF_C - OFF_B = 0x200`) and FP32 at n=16, k=16 needs 1,024 B, so the predicted
+1.99x point needs the memory map enlarged -- a change that moves every
+multi-engine address and therefore wants an explicit decision.
+
+**Latent bug found while probing that point:** at `JOB_N=16, JOB_K=8` the harness
+sets `lda = ldb = k`, giving INT4 a 4-byte row stride, and the loader does not read
+non-8-byte-aligned rows back correctly. All-ones fixtures pass (uniform data cannot
+detect a shifted read); the first *signed* INT4 tile fails golden. Guarded rather
+than papered over, and recorded as a real constraint on the new geometry axis.
 
 ## 17. The retire ceiling: lanes and C ports are one joint requirement
 

@@ -42,7 +42,24 @@ module tb_g6lc_ai_gemm_concurrent
     parameter bit          DOT_PIPE_FLOAT = 1'b0,
     parameter int unsigned PE_LANES     = 0,
     parameter int unsigned MAX_DIM      = 0,
-    parameter bit          VA_TURBO     = 1'b1
+    parameter bit          VA_TURBO     = 1'b1,
+    // Measurement geometry.  Defaults are the historical fixed 8x8x16 tile
+    // (1024 MACs per engine), so an unset build is byte-for-byte the build it
+    // always was; overriding them makes SHAPE an axis of this TB as well as of
+    // the single-engine one.  They are held constant WITHIN a run, which is the
+    // property the serial-vs-concurrent comparison actually needs: both phases
+    // must do the same work.  The DECODE experiment at the bottom of the file is
+    // the one deliberate exception -- it drives m = 1 while keeping n and k on
+    // these parameters, because the whole point there is that shape moves the
+    // answer.
+    //
+    // Bounds are checked in the initial block: m, n, k must each be <= MaxDim,
+    // and the 512-byte A/B/C sub-slots must hold the tile at 4 bytes/element
+    // (so e.g. JOB_N=16 with JOB_K=16 does NOT fit the B sub-slot and is
+    // rejected there rather than corrupting a neighbour).
+    parameter int unsigned JOB_M        = 8,
+    parameter int unsigned JOB_N        = 8,
+    parameter int unsigned JOB_K        = 16
 );
   localparam int unsigned ID_W    = 4;
   // The mux prepends idx_width(NO_SLV_PORTS) port bits to the slave ID.
@@ -62,12 +79,12 @@ module tb_g6lc_ai_gemm_concurrent
   localparam int unsigned OFF_B      = 16'h0200;
   localparam int unsigned OFF_C      = 16'h0400;
 
-  // Fixed measurement geometry: 8x8x16, 1024 MACs per engine.  Kept constant
-  // so serial and concurrent phases are the same work; geometry is a separate
-  // axis (the +measure / +measure_k sweeps on the single-engine TB).
-  localparam int unsigned JOB_M = 8;
-  localparam int unsigned JOB_N = 8;
-  localparam int unsigned JOB_K = 16;
+  // The measurement geometry (default 8x8x16, 1024 MACs per engine) is now the
+  // JOB_M/JOB_N/JOB_K module parameters above.  It is still kept CONSTANT across
+  // the serial and concurrent phases -- that is what makes them the same work --
+  // but it is no longer a compile-time constant of this file, so shape is an
+  // axis here too and not only on the single-engine TB's +measure / +measure_k
+  // sweeps.
 
   localparam logic [DATA_W-1:0] ONES8      = 64'h0101_0101_0101_0101;
   localparam logic [DATA_W-1:0] INT4_1     = {8{8'h11}};
@@ -817,6 +834,17 @@ module tb_g6lc_ai_gemm_concurrent
            ((k * element_bits(fmt) + 63) / 64);
   endfunction
 
+  // C write beats for ONE job.  A C row is n 32-bit words, so it pairs into
+  // n/2 64-bit beats only when n is EVEN; an odd row costs one beat per element
+  // because the tail word cannot be paired with the next row's head.  The
+  // shorthand `m * n / 2` that the phase experiments used is therefore a
+  // property of the square 8x8 default and not a law -- it is wrong for any odd
+  // n, and it happens to survive an odd m.  This is the same expression
+  // directed_job has always used, factored out so no site can disagree.
+  function automatic int unsigned job_write_beats(input int unsigned m, n);
+    return m * ((n % 2 != 0) ? n : n / 2);
+  endfunction
+
   function automatic logic [31:0] golden_element(input int unsigned i, r, c);
     int sum;
     sum = 0;
@@ -1095,7 +1123,7 @@ module tb_g6lc_ai_gemm_concurrent
     // the warm expectation loses the B term and keeps the whole A term.
     expected_r = N_ENGINES * job_read_beats(JOB_M, JOB_N, JOB_K, numfmt, 1'b0, 1'b0);
     warm_expected_r = N_ENGINES * job_read_beats(JOB_M, JOB_N, JOB_K, numfmt, 1'b0, VA_TURBO);
-    expected_w = N_ENGINES * JOB_M * JOB_N / 2;
+    expected_w = N_ENGINES * job_write_beats(JOB_M, JOB_N);
     for (int unsigned mode = 0; mode < 2; mode++) begin
       base_cy[mode] = 0;
       base_r[mode] = 0;
@@ -1235,7 +1263,7 @@ module tb_g6lc_ai_gemm_concurrent
     opp_r = 0;
     opp_w = 0;
     opp_hit_count = 0;
-    expected_w = JOB_M * JOB_N / 2;
+    expected_w = job_write_beats(JOB_M, JOB_N);
     for (int unsigned j = 0; j < JOBS_PER_SEQ; j++) begin
       want_hit = opp_want_hit(j, hits) && VA_TURBO;
       if (!opp_want_hit(j, hits)) begin
@@ -1325,7 +1353,7 @@ module tb_g6lc_ai_gemm_concurrent
     run_one(0, hit, hit_a, 1'b0, cy);
     check_engine(0);
     expected_r = job_read_beats(m_v[0], n_v[0], k_v[0], numfmt_v[0], hit_a, hit);
-    expected_w = m_v[0] * (n_v[0][0] ? n_v[0] : n_v[0] / 2);
+    expected_w = job_write_beats(m_v[0], n_v[0]);
     assert (pmu_r_v[0] == expected_r && pmu_w_v[0] == expected_w)
       else $fatal(1, "%s traffic r=%0d/%0d w=%0d/%0d", name, pmu_r_v[0], expected_r,
                   pmu_w_v[0], expected_w);
@@ -1635,7 +1663,7 @@ module tb_g6lc_ai_gemm_concurrent
     invalidate_all();
     invalidate_a_all();
     ref_cy = 0;
-    expected_w = JOB_M * JOB_N / 2;
+    expected_w = job_write_beats(JOB_M, JOB_N);
     for (int unsigned p = 0; p < DUAL_POINTS; p++) begin
       want_a = VA_TURBO && dual_reuse_a(p);
       want_b = VA_TURBO && dual_reuse_b(p);
@@ -1782,7 +1810,7 @@ module tb_g6lc_ai_gemm_concurrent
     // integer pair keeps its golden under both data classes.  Only the float
     // pairs under the wide class have no checkable golden.
     golden_ok = !wide || both_int;
-    expected_w = JOB_M * JOB_N / 2;
+    expected_w = job_write_beats(JOB_M, JOB_N);
 
     configure_engine(0, src_fmt, 1'b0);
     for (int unsigned r = 0; r < JOB_M; r++)
@@ -1914,19 +1942,205 @@ module tb_g6lc_ai_gemm_concurrent
     end
   endtask
 
+  // ---------------------------------------------------------------------------
+  // DECODE RESIDENCY.  The four residency points of run_dual again -- cold, A,
+  // B, both, one engine, identical work -- but on the shape a token-by-token
+  // decode actually issues: ONE output row, m = 1, with n and k left on the
+  // module parameters so it is the SAME weight matrix the square tile saw.
+  //
+  // Why the shape is the whole question.  The out-of-sample-validated cycle
+  // model is
+  //     cycles     = steps + beta(fmt) * read_beats + c
+  //     steps      = m * n * ceil(row_bytes / PeLanes)
+  //     read_beats = ceil(m * row_bytes / 8) + ceil(n * row_bytes / 8)
+  // so STEPS grow with m*n while BEATS grow with m+n.  A square tile is
+  // therefore step-dominated and a decode row is traffic-dominated, and within
+  // that traffic B is n / (m + n) of every beat -- 8/9 = 888 thousandths at the
+  // default n = 8, 16/17 = 941 at n = 16.  B is also the operand that is re-read
+  // for every token while A is one row of activations.  If residency is worth
+  // more where traffic dominates, the resident-B gain measured here must sit far
+  // above the square tile's; if it comes out near the square figure instead, the
+  // shape reasoning is simply wrong.  That is a finding, not a failure, so
+  // NOTHING about the speedup is asserted and the numbers are printed BEFORE any
+  // assertion runs.
+  //
+  // What IS asserted is only what must hold whichever way the measurement goes:
+  //   * every residency point produces a BIT-IDENTICAL C tile to the cold point
+  //     (skipping an operand load is not an arithmetic change) -- this is the
+  //     real correctness content and it is checked on top of, not instead of,
+  //     the per-point golden check;
+  //   * the read beats of each point are exactly the cold beats minus the
+  //     contribution of whichever operands went resident;
+  //   * warm_b does not exceed cold;
+  //   * the PMU reuse-hit flags come up exactly where the leases were taken.
+  //
+  // Table-driven with a runtime loop for the same compile-time reason as every
+  // other multi-point experiment in this file: literal repeated call sites inline
+  // into the single VlCoroutine and cost a serial multi-thousand-second build.
+  localparam int unsigned DECODE_M    = 1;
+  localparam int unsigned DECODE_FMTS = 4;
+
+  // Two integer and two float widths, spanning the narrowest and the widest row
+  // this harness can stage, so `beta` and row_bytes both move across the set.
+  function automatic logic [2:0] decode_fmt(input int unsigned d);
+    case (d)
+      0:       return 3'd0;   // INT8
+      1:       return 3'd1;   // INT4, the narrowest row
+      2:       return 3'd5;   // FP16
+      default: return 3'd7;   // FP32, the widest row
+    endcase
+  endfunction
+
+  task automatic run_decode(input logic [2:0] numfmt);
+    int unsigned cy, expected_w, cold_beats, a_beats, b_beats;
+    int unsigned point_cy [DUAL_POINTS];
+    int unsigned point_rb [DUAL_POINTS];
+    int unsigned point_wb [DUAL_POINTS];
+    int unsigned point_diff [DUAL_POINTS];
+    bit point_hit_a [DUAL_POINTS];
+    bit point_hit_b [DUAL_POINTS];
+    bit want_a, want_b;
+    signed_data = 1'b1;
+    configure_engine(0, numfmt, 1'b0);
+    // m is the ONLY thing that leaves the shared geometry.  configure_engine has
+    // just set m/n/k from the parameters, so this is a one-field override and
+    // every downstream helper (store_engine, poison_engine, check_engine,
+    // compare_c) reads the new m out of m_v[0] with no duplication.
+    @(negedge clk);
+    m_v[0] = DECODE_M;
+    store_engine(0, exp_pattern(numfmt), exp_bpe(numfmt), numfmt == 3'd1, 1'b0);
+    invalidate_all();
+    invalidate_a_all();
+    // job_read_beats with the OTHER operand marked resident IS that operand's
+    // contribution, so B's share needs no second formula that could disagree
+    // with the expectation the assertions use.
+    cold_beats = job_read_beats(DECODE_M, JOB_N, JOB_K, numfmt, 1'b0, 1'b0);
+    a_beats    = job_read_beats(DECODE_M, JOB_N, JOB_K, numfmt, 1'b0, 1'b1);
+    b_beats    = job_read_beats(DECODE_M, JOB_N, JOB_K, numfmt, 1'b1, 1'b0);
+    // The general C law, not the square tile's `m * n / 2`: at m = 1 the whole
+    // tile is one row, so nothing about m*n being even is available to lean on.
+    expected_w = job_write_beats(DECODE_M, JOB_N);
+    for (int unsigned p = 0; p < DUAL_POINTS; p++) begin
+      want_a = VA_TURBO && dual_reuse_a(p);
+      want_b = VA_TURBO && dual_reuse_b(p);
+      @(negedge clk);
+      lease_a_v[0] = dual_reuse_a(p);
+      lease_v[0]   = dual_reuse_b(p);
+      poison_engine(0);
+      run_one(0, want_b, want_a, 1'b0, cy);
+      check_engine(0);
+      // Cross-run identity in the RAW storage domain against the cold tile.
+      // check_engine already proves each point matches the golden; this proves
+      // the four points match EACH OTHER bit for bit, which is the property
+      // residency has to have and the one thing a tolerance could hide.
+      loss_max_diff   = 0;
+      loss_diff_elems = 0;
+      compare_c(0, p == 0, policy_integer_format(numfmt));
+      point_cy[p]    = cy;
+      point_rb[p]    = pmu_r_v[0];
+      point_wb[p]    = pmu_w_v[0];
+      point_diff[p]  = loss_diff_elems;
+      point_hit_a[p] = reuse_hit_a_v[0];
+      point_hit_b[p] = reuse_hit_v[0];
+    end
+
+    // Printed before a single assertion below, so a violating case still reports
+    // its numbers.  b_share is B's contribution over the MEASURED cold beats.
+    $display("DECODE fmt=%0d m=%0d n=%0d k=%0d cold=%0d warm_a=%0d warm_b=%0d warm_both=%0d cold_r=%0d warm_b_r=%0d b_share_x1000=%0d",
+             numfmt, DECODE_M, JOB_N, JOB_K, point_cy[0], point_cy[1],
+             point_cy[2], point_cy[3], point_rb[0], point_rb[2],
+             point_rb[0] != 0 ? b_beats * 1000 / point_rb[0] : 0);
+
+    for (int unsigned p = 0; p < DUAL_POINTS; p++) begin
+      assert (point_diff[p] == 0)
+        else $fatal(1, "decode fmt=%0d point%0d changed C in %0d elements -- residency is not arithmetically neutral",
+                    numfmt, p, point_diff[p]);
+      assert (point_rb[p] == job_read_beats(DECODE_M, JOB_N, JOB_K, numfmt,
+                                            VA_TURBO && dual_reuse_a(p),
+                                            VA_TURBO && dual_reuse_b(p)) &&
+              point_wb[p] == expected_w)
+        else $fatal(1, "decode fmt=%0d point%0d traffic r=%0d/%0d w=%0d/%0d",
+                    numfmt, p, point_rb[p],
+                    job_read_beats(DECODE_M, JOB_N, JOB_K, numfmt,
+                                   VA_TURBO && dual_reuse_a(p),
+                                   VA_TURBO && dual_reuse_b(p)),
+                    point_wb[p], expected_w);
+      assert (point_hit_a[p] == (VA_TURBO && dual_reuse_a(p)) &&
+              point_hit_b[p] == (VA_TURBO && dual_reuse_b(p)))
+        else $fatal(1, "decode fmt=%0d point%0d hit_a=%0b hit_b=%0b expected %0b/%0b",
+                    numfmt, p, point_hit_a[p], point_hit_b[p],
+                    VA_TURBO && dual_reuse_a(p), VA_TURBO && dual_reuse_b(p));
+    end
+    assert (point_rb[0] == cold_beats)
+      else $fatal(1, "decode fmt=%0d cold beats %0d != %0d", numfmt, point_rb[0],
+                  cold_beats);
+    if (VA_TURBO) begin
+      // The beats a resident operand buys are EXACTLY that operand's own, no
+      // more and no less: an over-count would mean the engine dropped a load it
+      // still needed, an under-count that residency did not actually engage.
+      assert (point_rb[0] - point_rb[2] == b_beats)
+        else $fatal(1, "decode fmt=%0d resident B saved %0d beats, not B's %0d",
+                    numfmt, point_rb[0] - point_rb[2], b_beats);
+      assert (point_rb[0] - point_rb[1] == a_beats)
+        else $fatal(1, "decode fmt=%0d resident A saved %0d beats, not A's %0d",
+                    numfmt, point_rb[0] - point_rb[1], a_beats);
+      assert (point_rb[3] == 0)
+        else $fatal(1, "decode fmt=%0d both-resident still read %0d operand beats",
+                    numfmt, point_rb[3]);
+      // Deliberately an inequality and nothing more.  How MUCH warm_b is below
+      // cold is the measurement; that it is not above it is the law.
+      assert (point_cy[2] <= point_cy[0])
+        else $fatal(1, "decode fmt=%0d resident B cycles %0d exceed cold %0d",
+                    numfmt, point_cy[2], point_cy[0]);
+    end else
+      assert (point_rb[0] == point_rb[1] && point_rb[1] == point_rb[2] &&
+              point_rb[2] == point_rb[3])
+        else $fatal(1, "decode disabled fmt=%0d read beats moved %p", numfmt,
+                    point_rb);
+    @(negedge clk);
+    m_v[0] = JOB_M;
+  endtask
+
   initial begin
     assert (encode_element(-7, 3'd0) == 32'h000000f9 &&
             encode_element(-7, 3'd1) == 32'h00000009)
       else $fatal(1, "packed negative element leaked sign bits into adjacent elements");
     assert (N_ENGINES inside {1, 2, 4}) else $fatal(1, "N_ENGINES must be 1, 2 or 4");
     assert (dram_channels_ok(NCH)) else $fatal(1, "invalid NCH=%0d", NCH);
-    assert (GEMM_MAXDIM >= JOB_K && GEMM_LANES >= 8 && GEMM_LANES <= 256 &&
+    // Now that the geometry is a parameter, MaxDim has to cover every one of its
+    // three dimensions, not just k: the engine's own bound is m,n,k in
+    // [1, MaxDim] and it raises err_o outside it.
+    assert (GEMM_MAXDIM >= JOB_K && GEMM_MAXDIM >= JOB_M && GEMM_MAXDIM >= JOB_N &&
+            JOB_M >= 1 && JOB_N >= 1 && JOB_K >= 1 &&
+            GEMM_LANES >= 8 && GEMM_LANES <= 256 &&
             (GEMM_LANES & (GEMM_LANES - 1)) == 0)
-      else $fatal(1, "MAX_DIM must cover k=16; PE_LANES must be power of two in [8,256]");
+      else $fatal(1, "MAX_DIM must cover JOB_M/JOB_N/JOB_K (>=1 each); PE_LANES must be power of two in [8,256]");
+    // The A/B/C sub-slots are 512 B each and every bound is taken at 4 bytes per
+    // element, the widest format staged.  This is the guard that now decides
+    // which geometries a build may ask for: JOB_N=16 with JOB_K=16 needs 1024 B
+    // of B and is refused HERE, loudly, rather than silently overwriting C.
+    // The C bound rounds m*n UP to an even element count because poison_engine
+    // writes C in 64-bit pairs and so pads an ODD tile by one word; an even tile
+    // (the 8x8 default among them) is charged nothing extra and may fill the
+    // sub-slot exactly.
     assert (ENG_BASE - 64'h8000_0000 + 64'(N_ENGINES * SLOT) <= 64'(NWORDS * 8) &&
             JOB_M * JOB_K * 4 <= OFF_B && JOB_N * JOB_K * 4 <= OFF_C - OFF_B &&
-            JOB_M * JOB_N * 4 <= SLOT - OFF_C)
+            (JOB_M * JOB_N + (JOB_M * JOB_N) % 2) * 4 <= SLOT - OFF_C)
       else $fatal(1, "measurement slots exceed memory");
+    // ROW STRIDE ALIGNMENT.  configure_engine sets lda = ldb = JOB_K, so the row
+    // stride in bytes is JOB_K * element_bits / 8, and the narrowest format in
+    // the tables is INT4 at 4 bits.  A stride that is not a whole number of
+    // 64-bit words puts row r at a non-8-byte-aligned address, which the loader
+    // does not read back correctly -- MEASURED at JOB_K=8, where INT4 gets a
+    // 4-byte stride: the all-ones tiles still pass (uniform data cannot detect a
+    // shifted read) and the first SIGNED INT4 tile fails its golden.  It is the
+    // STRIDE and not the row content that binds: the directed "INT4_odd_n_k"
+    // case runs k=7 happily because it leaves ldb at 16, i.e. a partial row
+    // inside an aligned stride.  So JOB_K must be a multiple of 16 while INT4 is
+    // in the format tables; k=16 (the default) is the smallest legal value.
+    assert ((JOB_K * 4) % 64 == 0)
+      else $fatal(1, "JOB_K=%0d gives INT4 a %0d-byte row stride: lda/ldb = JOB_K must make every format's row a whole number of 64-bit words, so JOB_K must be a multiple of 16",
+                  JOB_K, (JOB_K * 4) / 8);
     assert (int'(gen_eng[0].i_gemm.a_bank_addr(0, 4 * GEMM_MAXDIM - 1)) <
             int'(gen_eng[0].i_gemm.a_bank_addr(1, 0)) &&
             int'(gen_eng[0].i_gemm.b_bank_addr(4 * GEMM_MAXDIM - 1, 0)) <
@@ -2026,6 +2240,13 @@ module tb_g6lc_ai_gemm_concurrent
     for (int unsigned dc = 0; dc < LOSSLESS_CLASSES; dc++)
       for (int unsigned p = 0; p < LOSSLESS_PAIRS; p++)
         run_lossless(lossless_src(p), lossless_dst(p), dc != 0);
+
+    // The same four residency points on the DECODE shape (m = 1).  Runs last and
+    // touches nothing above it, so every line printed before this point is
+    // exactly the line it was.  Table-driven for the compile-time reason spelled
+    // out at the EXPERIMENTS loop.
+    for (int unsigned d = 0; d < DECODE_FMTS; d++)
+      run_decode(decode_fmt(d));
 
     if (straddle) begin
       $error("an engine burst straddled a channel stripe");

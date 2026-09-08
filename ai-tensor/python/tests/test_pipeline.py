@@ -298,6 +298,75 @@ def test_prefill_and_decode_invert_the_optimisation_priority():
     assert prefill.b_share_of_traffic == pytest.approx(0.5)
 
 
+def test_the_measured_decode_residency_and_the_ceil_refinement():
+    """Out-of-sample at a new SHAPE (m=1), and it corrected the model.
+
+    Every square-tile point has an integral `beta*beats`, so it was invisible that the
+    work terms must be CEIL'd. At m=1 every fractional case landed on .125 and measured
+    exactly one cycle higher: a partial beat costs a whole cycle.
+    """
+    for numfmt, (cold, warm_a, warm_b, warm_both) in P.MEASURED_DECODE.items():
+        # Order matches the DECODE line: cold, warm_A, warm_B, both. Note warm_a holds
+        # A resident (so B still streams) and is therefore the SLOWER of the two.
+        got = tuple(P.model_cycles(numfmt, 1, 8, 16, resident_a=ra, resident_b=rb, lanes=8)
+                    for ra, rb in ((False, False), (True, False), (False, True), (True, True)))
+        assert got == (cold, warm_a, warm_b, warm_both), numfmt
+    # Decode really is a better shape for residency than a square tile.
+    fp32 = P.MEASURED_DECODE[AI_FMT_FP32]
+    decode_b = fp32[0] / fp32[2]
+    square_b = 669 / 596
+    assert decode_b == pytest.approx(1.859, abs=1e-3)
+    assert decode_b / square_b > 1.5
+    # But at 8 lanes it SATURATES near 2x, and the cap is steps+c rather than traffic.
+    assert fp32[0] / fp32[3] < 2.2
+    # INT4 has the WORST decode ratio despite the same B share, because the additive
+    # constant is a larger fraction of its (much shorter) resident-both time.
+    int4 = P.MEASURED_DECODE[AI_FMT_INT4]
+    assert int4[0] / int4[2] < decode_b
+    assert P.MODEL_CONSTANT / int4[3] > 0.5
+    # Resident-A is nearly worthless at decode: A is 1/(m+n) of the traffic.
+    assert fp32[0] / fp32[1] < 1.1
+
+
+def test_b_dominates_decode_traffic_for_geometric_reasons_only():
+    """Measured 888/1000 for EVERY format, because row_bytes and beta cancel."""
+    assert P.decode_b_share(1, 8) == pytest.approx(8 / 9)
+    # The harness reports x1000 in INTEGER arithmetic, i.e. truncated: 8/9 -> 888, not
+    # the 889 a round() would give. Matching its convention is what makes the measured
+    # line comparable to this function.
+    assert int(1000 * P.decode_b_share(1, 8)) == 888
+    assert int(1000 * P.decode_b_share(1, 16)) == 941
+    # Format-independent, so one measurement covered all four.
+    shares = {P.decode_b_share(1, 8) for _ in P.MEASURED_DECODE}
+    assert len(shares) == 1
+    # A square tile splits evenly; that is the whole difference.
+    assert P.decode_b_share(8, 8) == pytest.approx(0.5)
+
+
+def test_the_decode_ceiling_reconciles_2x_with_the_large_projection():
+    """`1 + beta*(row_bytes/8)/steps_per_elem` -- converges in n, rises with lanes.
+
+    At m=1 both steps and beats grow linearly in n, so the ratio CONVERGES: that is the
+    measured saturation near 2x. But the limit is divided by ceil(row_bytes/lanes), so
+    provisioning more lanes raises it -- which is why the same mechanism gives 2.1x on
+    the 8-lane test corner and a far larger figure on the 256-lane SKU.
+    """
+    at8 = P.decode_residency_ceiling(AI_FMT_FP32, 16, lanes=8)
+    at64 = P.decode_residency_ceiling(AI_FMT_FP32, 16, lanes=64)
+    assert at8 == pytest.approx(2.14, abs=0.01)
+    assert at64 == pytest.approx(10.12, abs=0.01)
+    assert at64 > 4 * at8
+    # The measured n=8 point sits below its own ceiling, approaching from below.
+    fp32 = P.MEASURED_DECODE[AI_FMT_FP32]
+    assert fp32[0] / fp32[2] < at8
+    # INT4 is already at steps_per_elem == 1 at 8 lanes, so lanes change nothing.
+    assert (P.decode_residency_ceiling(AI_FMT_INT4, 16, lanes=8)
+            == P.decode_residency_ceiling(AI_FMT_INT4, 16, lanes=64))
+    # Larger k raises it too, since row_bytes grows while steps_per_elem stays 1.
+    assert (P.decode_residency_ceiling(AI_FMT_FP32, 256, lanes=1024)
+            > P.decode_residency_ceiling(AI_FMT_FP32, 16, lanes=64))
+
+
 def test_the_mac_array_dominates_the_engine_so_approximate_area_matters():
     """The measurement that reopens the approximate-arithmetic family.
 

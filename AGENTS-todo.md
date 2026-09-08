@@ -435,6 +435,40 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   building, since narrowing pushes the engine from compute-bound to retire-bound --
   and a pipelined (registered) stacking path if multi-stage selection is ever wanted
   in hardware rather than in the host planner.
+- [x] DECODE RESIDENCY MEASURED, and it corrected two of my own claims. Remote
+  i-gemm-reuse-20260908T010220Z-bddf7872d7ad PASS: a new DECODE experiment (m=1)
+  runs alongside the square DUAL one in the SAME run. FP32 decode resident-B 158->85 =
+  1.859x and resident-both 158->75 = 2.107x, against the square tile's 1.1225x/1.2792x --
+  so decode residency is 1.53-1.66x LARGER, confirming that a square tile is the least
+  favourable shape for recipe 16. INT8 1.806x/2.074x, FP16 1.837x, INT4 1.773x.
+- [x] CORRECTION 1, a real model fix: the work terms must be CEIL'd. Every square-tile
+  point has an integral beta*beats so it was invisible; at m=1 every fractional case
+  landed on .125 and measured exactly one cycle higher -- a partial beat costs a whole
+  cycle. With ceil(steps + beta*beats) + 11 the model is exact on all 16 new decode
+  points, which is out-of-sample at a new SHAPE rather than just new beat counts.
+- [x] CORRECTION 2: "the largest opportunity in the catalog" was overstated. At 8 lanes
+  the decode gain SATURATES near 2x and the cap is steps + c, not traffic: for INT4 the
+  constant alone is 58% of the resident-both time, which is why INT4 has the WORST decode
+  ratio (1.773x) despite B being the same 8/9 of its traffic. Resident-A is worth ~1.068x
+  at decode, so at m=1 "residency" means "resident B" and the A-side has no decode story.
+- [x] The two figures reconcile in closed form: at m=1 both steps and beats grow linearly
+  in n, so the ratio CONVERGES to 1 + beta*(row_bytes/8)/ceil(row_bytes/lanes) -- 2.14x
+  for FP32 at 8 lanes (measured 1.859x, approaching from below) but 10.12x at 64 lanes.
+  The ceiling RISES as lanes shrink the step term, which is why the same mechanism gives
+  ~2.1x on the 8-lane corner and much more on the 256-lane SKU where ceil(rb/lanes)==1.
+  B's share is 
+/(m+n) and nothing else -- measured 888/1000 for ALL formats, since
+  row_bytes and beta cancel, so it is a property of the shape alone.
+- [x] LATENT LOADER BUG FOUND while probing n=16: at JOB_N=16/JOB_K=8 the harness sets
+  lda=ldb=k, giving INT4 a 4-byte row stride, and the loader does not read
+  non-8-byte-aligned rows back correctly. All-ones fixtures PASS (uniform data cannot
+  detect a shifted read); the first SIGNED INT4 tile fails golden. Guarded rather than
+  papered over. Also: JOB_M/N/K are now parameters, the m*n-even assumption is gone
+  (job_write_beats), and MaxDim guards now cover m and n rather than only k.
+- [ ] Not measured: n>=16 needs the harness B sub-slot enlarged (OFF_C-OFF_B = 0x200 =
+  512 B; FP32 at n=16,k=16 needs 1,024 B), which moves every multi-engine address and so
+  wants an explicit decision. un-gemm-concurrent.sh also does not yet pass
+  -GJOB_M/-GJOB_N/-GJOB_K, so the geometry axis is manual-invocation only.
 - [x] LOSSLESS NARROWING LANDED: the exact traffic lever FP32 never had. Bit-preserving
   FP32 had exactly ONE implemented speedup (recipe 16 residency, 1.279x) because the
   two exact levers that could help it -- lossless repack 1/3/17 and zero-skip 2 --

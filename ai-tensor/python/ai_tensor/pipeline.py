@@ -67,6 +67,7 @@ __all__ = [
     "BETA",
     "MODEL_CONSTANT",
     "CycleModel",
+    "MEASURED_DECODE",
     "MEASURED_DOT_CELLS",
     "MEASURED_ENGINE_CELLS",
     "MEASURED_LANE_SWEEP",
@@ -80,6 +81,8 @@ __all__ = [
     "lane_groups",
     "area_to_lanes",
     "optimal_lanes",
+    "decode_b_share",
+    "decode_residency_ceiling",
     "shape_analysis",
     "retire_analysis",
     "steps_for",
@@ -267,7 +270,11 @@ def model_cycles(numfmt: int, m: int = 8, n: int = 8, k: int = 16,
         raise ValueError("skip_fraction must be in [0, 1)")
     steps = steps_for(numfmt, m, n, k, lanes, c_ports) * (1.0 - skip_fraction)
     beats = beats_for(numfmt, m, n, k, resident_a, resident_b)
-    return steps + BETA[numfmt] * beats + MODEL_CONSTANT
+    # CEIL the work terms before adding the constant. Every square-tile point has an
+    # integral `beta*beats`, so this was invisible until the decode measurement: at
+    # m=1 every fractional case landed on .125 and measured exactly one cycle higher.
+    # A partial beat still costs a whole cycle.
+    return math.ceil(steps + BETA[numfmt] * beats) + MODEL_CONSTANT
 
 
 @dataclass(frozen=True)
@@ -294,6 +301,55 @@ class ShapeAnalysis:
     b_share_of_traffic: float
     resident_b_speedup: float
     resident_both_speedup: float
+
+
+#: MEASURED decode residency, m=1 n=8 k=16 PeLanes=8, one engine, from the
+#: `DECODE` lines of `tb_g6lc_ai_gemm_concurrent`:
+#: {format: (cold, warm_a, warm_b, warm_both)}.
+#:
+#: Against the SQUARE tile's 1.1225x (B) and 1.2792x (both) for FP32, decode measures
+#: 1.859x and 2.107x -- confirming that a square tile is the least favourable shape for
+#: residency. But it also corrects the projection: at 8 lanes the decode gain SATURATES
+#: near 2x, and the cap is `steps + c`, not traffic. For INT4 the constant alone is 58%
+#: of the resident-both time, which is why INT4 has the WORST decode ratio (1.773x)
+#: despite B being the same 8/9 of its traffic.
+MEASURED_DECODE: Dict[int, Tuple[int, int, int, int]] = {
+    AI_FMT_INT:  (56, 52, 31, 27),
+    AI_FMT_INT4: (39, 36, 22, 19),
+    vt.AI_FMT_FP16: (90, 84, 49, 43),
+    AI_FMT_FP32: (158, 148, 85, 75),
+}
+
+
+def decode_b_share(m: int, n: int) -> float:
+    """B's share of read beats: ``n/(m+n)``, and nothing else.
+
+    Measured identically at 888/1000 for every format, because `row_bytes` and `beta`
+    cancel. B's dominance of decode traffic is a property of the SHAPE ALONE, so it does
+    not need re-measuring per format -- which is why one number covered all four.
+    """
+    return n / (m + n) if (m + n) else 0.0
+
+
+def decode_residency_ceiling(numfmt: int, k: int, lanes: int = vt.PE_LANES) -> float:
+    """The ``n -> inf`` limit of decode resident-B: ``1 + beta*(row_bytes/8)/steps_per_elem``.
+
+    This reconciles two figures that looked contradictory. At m=1 both `steps` and
+    `beats` grow linearly in n, so the ratio converges rather than diverging -- which is
+    the "saturates near 2x" the measurement found at 8 lanes. But the limit is divided by
+    ``ceil(row_bytes/lanes)``, so it RISES as lanes shrink the step term:
+
+        FP32 k=16 at 8 lanes   -> 2.14x   (measured 1.859x at n=8, approaching it)
+        FP32 k=16 at 64 lanes  -> 10.12x
+        FP32 k=256 at 1024     -> ~147x
+
+    So decode residency is worth much more on a well-provisioned array than on the
+    8-lane test corner, and the shipped SKU (PeLanes=256) has ``steps_per_elem == 1``
+    for every format at k <= 256. The ceiling ignores the additive constant, so it is
+    approached from below and is an upper bound at finite n.
+    """
+    rb = row_bytes(numfmt, k)
+    return 1.0 + BETA[numfmt] * (rb / 8.0) / max(1, math.ceil(rb / lanes))
 
 
 def shape_analysis(numfmt: int, m: int, n: int, k: int,
