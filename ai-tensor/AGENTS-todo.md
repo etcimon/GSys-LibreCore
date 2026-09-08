@@ -315,7 +315,7 @@ Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or 
   reproduced) and only both together give 1.416x. At 64 lanes: FP32 groups=1 so ANY
   number of C ports gives 1.000x (the control that proves the mechanism), INT8 groups=4
   gives 1.623x (125 -> 77 cy), INT4 groups=8 gives 2.057x (109 -> 53 cy).
-- [x] Conclusion recorded in rchitecture/ai-matrix/va-turbo.md §17: C-port widening
+- [x] Conclusion recorded in rchitecture/ai-matrix/va-turbo.md §17: C-port widening
   is NOT a general throughput lever, it is the second half of narrowing's. Build it only
   jointly with lanes, only for narrowed formats, and only up to the group count -- ports
   beyond groups are pure area, the same trap the 16->32 lane experiment fell into from
@@ -325,7 +325,7 @@ Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or 
 ## 2026-09-08 (validation) — the model holds out of sample, and it reorders the roadmap
 
 - [x] ITEM 1 DONE, better than hoped. cycles = steps + beta*beats + c was fitted on the
-  CONCURRENT tb at PeLanes=8; the i-gemm-codec-basis runs already on disk test it on a
+  CONCURRENT tb at PeLanes=8; the i-gemm-codec-basis runs already on disk test it on a
   DIFFERENT tb (gemm_backend +measure) at PeLanes 8/16/32/64. The beat formula is exact
   on 140/140 points, and solving beta at all 16 (format x lane) points of the 8x8x16 job
   gives a spread of EXACTLY ZERO per format, reproducing 1.5625/2.125/1.28125/1.140625 to
@@ -372,6 +372,26 @@ Software-only timing/DFT review: no RTL, core grants, codepolicy, DTS/config or 
 - [ ] What would settle it: an actual truncated g6lc_ai_pe_dot variant synthesised for
   cells and Fmax. The area above is measured but the shrink factor R is an ASSUMPTION --
   no truncated datapath exists.
+- [x] SHRINK FACTOR R MEASURED, and it CLOSES the approximate-arithmetic family. Scope
+  correction first: the 78%-of-engine figure was the INTEGER dot, but truncation and
+  Mitchell are FLOATING-point, so the relevant module is g6lc_ai_pe_dot_float, whose
+  product is one 24x24 multiply per lane (g6lc_ai_fp_pkg.sv:215). Masking the decoded
+  mantissas ahead of the SAME package function the datapath calls: 4,094 / 1,257 / 665 /
+  558 cells at keep = 23 / 10 / 4 / 1, i.e. shrink 1.00 / 3.26 / 6.16 / 7.34x.
+- [x] Those are UPPER BOUNDS and the distinction decides the recipe: only the product
+  path shrinks, while the 640-bit alignment and reduction tree do not, so with X
+  non-shrinking cells per lane R = (4094+X)/(1257+X) -- 3.26x at X=0, 1.87x at X=2,000,
+  1.53x at X=4,094. X could NOT be measured: the whole float dot stalls ABC on the
+  640-bit alignment cone (>14 min at 4% CPU), the same pathology that excluded the
+  request-side composition top. Bound reported, point value not invented.
+- [x] CONCLUSION: the area->lanes ladder needs R >= 8 for its 3.04x ceiling. Even at the
+  impossible X=0 truncate-10 gives 3.26x -> about 2.0-2.35x by the measured lane sweep,
+  and any real alignment cost lowers it. Lossless narrow FP32->INT8 is 3.540x at ZERO
+  error and FREES area instead of re-spending it. So the approximate family cannot beat
+  narrowing even on its own best route -- now a measurement, not an argument. Niche
+  unchanged: data whose RANGE forbids conversion, where truncate-10 (1,953 ppm) is 4x
+  more accurate than BF16 with FP32 range preserved. No production RTL touched.
+
 ## Open design notes
 
 - **Completion DMA vs PLIC claim:** island soak keeps `CTL.wr_cpl_en=0` for pure claim tests;

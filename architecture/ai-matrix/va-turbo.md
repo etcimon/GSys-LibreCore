@@ -702,10 +702,45 @@ truncation keeps `row_bytes` and makes each lane cheaper instead. They are two
 routes to the same goal -- more effective MACs per unit area -- and which one
 applies is decided by whether the data can be narrowed, not by preference.
 
-**What would settle it:** an actual truncated `g6lc_ai_pe_dot` variant, synthesised
-for cells and Fmax. Everything above uses the measured exact-array area and a
-*hypothetical* shrink factor; no truncated datapath exists, so `R` is an
-assumption, not a result.
+### The shrink factor, measured -- and it closes the family
+
+`R` was an assumption in everything above. It is now measured, on the FLOAT lane,
+which is the one that matters: truncation and Mitchell are floating-point
+approximations, while the 78% figure above is the *integer* dot. The float product
+is one 24x24 multiply per lane (`g6lc_ai_fp_pkg.sv:215`), so truncating to `keep`
+explicit mantissa bits makes it `(keep+1)` squared. Masking the decoded mantissas
+ahead of the **same package function** the datapath calls:
+
+| keep | mantissa | cells | shrink vs exact |
+|--:|---|--:|--:|
+| 23 (exact FP32) | 24x24 | 4,094 | 1.00x |
+| **10** (`truncate-10`) | 11x11 | **1,257** | **3.26x** |
+| 4 (`truncate-4`) | 5x5 | 665 | 6.16x |
+| 1 | 2x2 | 558 | 7.34x |
+
+Those are **upper bounds**, and the distinction decides the recipe. Only the product
+path shrinks; the 640-bit alignment and the reduction tree do not. With `X`
+non-shrinking cells per lane the achievable factor is `(4094 + X)/(1257 + X)`:
+
+| X | 0 | 2,000 | 4,094 | 8,000 |
+|---|--:|--:|--:|--:|
+| R | 3.26x | 1.87x | 1.53x | 1.31x |
+
+`X` could not be measured: synthesising the whole float dot **stalls ABC on the
+640-bit alignment cone** (>14 minutes at 4% CPU), the same pathology that excluded
+the request-side composition top from the synthesis gate. So the bound is reported
+and the point value is not invented.
+
+**The conclusion.** The area->lanes ladder needs `R >= 8` to reach its 3.04x
+ceiling. Even at the impossible `X = 0`, `truncate-10` gives 3.26x, which the
+measured lane sweep turns into roughly **2.0-2.35x** -- and any real alignment cost
+pushes it lower. Against that, lossless narrowing to INT8 is **3.540x at zero error
+and it frees area rather than re-spending it**.
+
+So the approximate-arithmetic family **cannot beat narrowing even on its own best
+route**. That is now a measurement rather than an argument, and the niche is exactly
+what it was: data whose *range* forbids conversion, where `truncate-10` at 1,953 ppm
+is still 4x more accurate than BF16 with FP32 range preserved.
 
 ## 18. The cycle model, validated out of sample — and what it says to measure next
 

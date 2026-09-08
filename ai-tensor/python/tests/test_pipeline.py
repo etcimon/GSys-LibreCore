@@ -516,6 +516,36 @@ def test_the_mac_array_dominates_the_engine_so_approximate_area_matters():
         P.area_to_lanes(AI_FMT_FP32, 16, 0.0)
 
 
+def test_measured_truncation_shrink_cannot_reach_the_area_lanes_ceiling():
+    """Replaces the assumed shrink factor R, and closes the approximate family.
+
+    Every earlier projection carried a hypothetical R. Measuring the float lane's
+    product path under mantissa truncation gives an UPPER bound of 3.26x for
+    `truncate-10`, while the area->lanes ladder needs R >= 8 to reach its 3.04x
+    ceiling. Lossless narrowing already beats the best case at zero error.
+    """
+    assert P.truncation_shrink_bound(10) == pytest.approx(3.257, abs=1e-3)
+    assert P.truncation_shrink_bound(4) == pytest.approx(6.157, abs=1e-3)
+    assert P.truncation_shrink_bound(23) == 1.0
+    # Monotone: keeping fewer bits shrinks more, and it saturates (decode does not
+    # shrink at all, so even a 2x2 multiply cannot approach the cell count of zero).
+    bounds = [P.truncation_shrink_bound(k) for k in (23, 10, 4, 1)]
+    assert bounds == sorted(bounds)
+    assert bounds[-1] < 8.0
+    # Even the IMPOSSIBLE X=0 case falls short of the ladder's requirement.
+    _, best = P.area_to_lanes(AI_FMT_FP32, 16, P.truncation_shrink_bound(10))
+    ceiling = (P.MEASURED_LANE_SWEEP[AI_FMT_FP32][8]
+               / P.MEASURED_LANE_SWEEP[AI_FMT_FP32][64])
+    assert best < ceiling
+    # And it loses to lossless narrowing, which costs nothing in accuracy and FREES
+    # area instead of re-spending it.
+    narrowing = (P.MEASURED_LANE_SWEEP[AI_FMT_FP32][8]
+                 / P.MEASURED_LANE_SWEEP[AI_FMT_INT][8])
+    assert narrowing > best
+    with pytest.raises(ValueError):
+        P.truncation_shrink_bound(7)
+
+
 def test_the_retire_ceiling_explains_three_measured_dead_ends_at_once():
     """Lanes and C ports are ONE joint requirement, not two independent levers.
 

@@ -75,6 +75,7 @@ __all__ = [
     "MEASURED_ENGINE_CELLS",
     "MEASURED_LANE_SWEEP",
     "MEASURED_RESIDUAL_PROBES",
+    "MEASURED_TRUNC_CELLS",
     "MODEL_CONSTANT_BY_HARNESS",
     "RetireAnalysis",
     "ShapeAnalysis",
@@ -84,6 +85,7 @@ __all__ = [
     "row_bytes",
     "lane_groups",
     "area_to_lanes",
+    "truncation_shrink_bound",
     "optimal_lanes",
     "decode_b_share",
     "decode_residual",
@@ -177,6 +179,47 @@ MEASURED_DOT_CELLS: Dict[int, int] = {4: 2868, 8: 5867, 16: 11834}
 
 #: Whole-engine cells at 8 lanes, for the fraction above.
 MEASURED_ENGINE_CELLS = 7530
+
+#: MEASURED shrink of the FLOAT lane's product path under mantissa truncation, as
+#: {retained explicit mantissa bits: cells}. Isolated synthesis of one lane's
+#: `fp_dot_decode_value` + `fp_dot_product` with the mantissas masked ahead of the
+#: multiply -- the same package function the datapath uses, so this is the real
+#: arithmetic and not a re-implementation. 23 is the exact FP32 path.
+#:
+#: This replaces the ASSUMED shrink factor every earlier projection carried. The
+#: product is one 24x24 multiply per lane (`g6lc_ai_fp_pkg.sv:215`), and truncating to
+#: `keep` explicit bits makes it (keep+1) squared.
+MEASURED_TRUNC_CELLS: Dict[int, int] = {23: 4094, 10: 1257, 4: 665, 1: 558}
+
+
+def truncation_shrink_bound(keep: int) -> float:
+    """Upper bound on the multiplier shrink factor R for `truncate-<keep>`.
+
+    An UPPER bound, not a value, and the distinction decides the recipe. Only the
+    product path shrinks; the rest of the lane -- 640-bit alignment and the reduction
+    tree -- does not. So with `X` non-shrinking cells per lane the achievable factor is
+    `(4094 + X) / (cells[keep] + X)`, which is largest at X=0:
+
+        X=0     -> 3.26x        X=2000 -> 1.87x
+        X=4094  -> 1.53x        X=8000 -> 1.31x
+
+    `X` could not be measured: synthesising the whole float dot stalls ABC on the
+    640-bit alignment cone (>14 min at 4% CPU), the same pathology that excluded the
+    request-side composition top. So the bound is reported and the point value is not
+    invented.
+
+    THE CONCLUSION THIS SETTLES. The area->lanes ladder needs `R >= 8` to reach its
+    3.04x ceiling. Even at the impossible X=0, `truncate-10` gives 3.26x, which the
+    measured lane sweep turns into roughly 2.0-2.35x -- and any real alignment cost
+    pushes it lower. Against that, lossless narrowing to INT8 is **3.540x at zero
+    error and it FREES area rather than re-spending it**.
+
+    So the approximate-arithmetic family cannot beat narrowing even on its own best
+    route. Its niche stays what §19 said: data whose RANGE forbids conversion.
+    """
+    if keep not in MEASURED_TRUNC_CELLS:
+        raise ValueError(f"no measurement for keep={keep}; have {sorted(MEASURED_TRUNC_CELLS)}")
+    return MEASURED_TRUNC_CELLS[23] / MEASURED_TRUNC_CELLS[keep]
 
 
 def area_to_lanes(numfmt: int, k: int, shrink: float,
