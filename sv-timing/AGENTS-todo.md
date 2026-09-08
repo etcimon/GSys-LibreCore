@@ -7,6 +7,54 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 
 
 
+
+## 2026-09-10 (e) — the -O surface measured, and where the emitted core actually floors
+
+Every 4 GHz run before this used **-O2** (`max_passes=4 worklist_width=1
+cut=cost-balanced stages=1 min_gain=2 balanced`) at the package default `fo4_ps=20`.
+**-O3** is the aggressivity/reordering surface the request was aiming at
+(`max_passes=16 worklist_width=4 cut=budget-fit stages=8 min_gain=1 thorough`,
+per `architecture/OPTIMIZATION-LEVELS.md` §3.1). Both were run on `full_core`, and the
+emitted-RTL figure is converted to FO4 so rows at different `fo4_ps` are comparable.
+
+| target | fo4_ps | opt | budget FO4 | edits | IR closure | emitted | emitted FO4 |
+|--:|--:|---|--:|--:|---|--:|--:|
+| 4000 | 20 | -O2 | 10.0 | 928 | false 2086.6 | 503.1 | **99.4** |
+| 4000 | 20 | **-O3** | 10.0 | **1091** | false 2086.6 | 503.1 | **99.4** |
+| 4000 | 12 | -O3 | 16.7 | 443 | **true 4000.0** | 838.6 | **99.4** |
+| 2500 | 12 | -O3 | 26.7 | 156 | false 1833.3 | 701.8 | 118.7 |
+| 2000 | 12 | -O3 | 33.3 | 48 | false 1833.3 | 701.8 | 118.7 |
+| 1250 | 12 | -O3 | 53.3 | 4 | true 1257.9 | 701.8 | 118.7 |
+
+- [x] **-O3 buys nothing over -O2 here, measured.** Same operating point, +163 edits
+  (928 -> 1091), and an **identical** emitted result (99.4 FO4) and identical IR figure
+  (2086.6 MHz). Sixteen passes, worklist 4, budget-fit multi-cut to 8 stages/region and
+  thorough effort do not move the emitted critical path. So "increase passes / raise
+  aggressivity" is not the lever; that is now a measurement rather than an expectation.
+- [x] **The emitted design floors at ~99.4 FO4** and will not go below it at any target or
+  opt level. Aiming at 4 GHz rather than 2 GHz does buy a real 118.7 -> 99.4 FO4 (16%)
+  improvement, and then stops. The limit is the `atomic_over_budget` classification on the
+  worst cones (`SyncDpRam` 720, `g6lc_ai_exec` 545.5, `axi_adapter`): indivisible, so no
+  cut strategy applies however many passes it is given.
+- [x] **What 99.4 FO4 means for 4 GHz.** 4 GHz is a 250 ps period, so 99.4 FO4 needs
+  `FO4 <= 2.5 ps` — below any current or announced node. Per node the emitted core is
+  ~503 MHz at 20 ps, ~839 MHz at 12 ps, ~1.68 GHz at 6 ps. Reaching 4 GHz needs the
+  emitted depth down to ~41 FO4 at 7 nm, a 2.4x reduction, which is microarchitectural
+  pipelining of those specific cones and not an `-O` dial.
+- [x] **`fo4_ps` is a process input, not a tuning knob.** At 4000 MHz the budget is 10.0
+  FO4 at 20 ps, 16.7 at 12 ps, 33.3 at 6 ps, so "closing at 4 GHz" can be manufactured by
+  choosing the node. The row that does report `closes=true 4000.0` (4000/12) has an
+  emitted figure of 838.6 MHz — the IR closure is the `primary_fo4` artefact from (c),
+  not a result. `AGENTS-configuration.md` puts the target of record at **1.25 GHz /
+  12 nm**, with the reference shelf at 1.25-2.2 GHz on 12-14 nm and no 12 nm part above
+  2.0 GHz.
+- [ ] **Feature-max production Flist not built.** Deliberately deferred: the tuning result
+  above says the ceiling is set by a handful of atomic cones, so a wider flist would add
+  modules without moving the frontier, and 8-core / 8-issue / hypervisor are
+  `cva6_cfg_t` + `check_cfg` feature enablement rather than a file list. The useful
+  sequence is: pipeline `g6lc_ai_exec`, decide the `SyncDpRam` behavioural-model question,
+  and settle whether the vendored `rv_tracer` belongs in the package -- then widen.
+
 ## 2026-09-10 (d) — the analysis was screening the WRONG core; SMT2/fetch_B retired correctly
 
 - [x] **`+define+` was silently dropped from every soak package, so the wrong
