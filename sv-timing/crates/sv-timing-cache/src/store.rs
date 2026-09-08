@@ -501,6 +501,17 @@ CREATE INDEX IF NOT EXISTS idx_paths_run ON paths(run_id);
             )
             .map_err(map_sql)?;
 
+        // UPSERT, not plain INSERT. `path_exceptions` is a push-only log: `classify`
+        // appends one entry per path per invocation, and `correct` re-classifies on every
+        // pass (up to --max-passes 16), so a multi-pass run legitimately carries several
+        // entries for the same path_id. This table is the DENORMALISED CURRENT view --
+        // its `PRIMARY KEY (design_key, path_id)` says so -- so the latest classification
+        // for a path is the right row and earlier ones are superseded.
+        //
+        // Previously the plain INSERT turned that into
+        // `UNIQUE constraint failed: path_class.design_key, path_class.path_id`, which
+        // aborted the whole run. It only bit at scale: the small profiles converge in one
+        // pass, so `full_core` was the first design to re-classify anything.
         for ex in &design.path_exceptions {
             let attempted = serde_json::to_string(&ex.attempted).unwrap_or_else(|_| "[]".into());
             let class = format!("{:?}", ex.path_class);
@@ -509,7 +520,17 @@ CREATE INDEX IF NOT EXISTS idx_paths_run ON paths(run_id);
                     "INSERT INTO path_class(
                        design_key, path_id, module_name, signature, path_class,
                        raw_fo4, adjusted_fo4, confidence, evidence, attempted_json, stored_at)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                     ON CONFLICT(design_key, path_id) DO UPDATE SET
+                       module_name = excluded.module_name,
+                       signature = excluded.signature,
+                       path_class = excluded.path_class,
+                       raw_fo4 = excluded.raw_fo4,
+                       adjusted_fo4 = excluded.adjusted_fo4,
+                       confidence = excluded.confidence,
+                       evidence = excluded.evidence,
+                       attempted_json = excluded.attempted_json,
+                       stored_at = excluded.stored_at",
                     params![
                         design_key,
                         ex.path_id as i64,
@@ -880,6 +901,73 @@ mod tests {
         cache.put_design("key1", "fo4-v1", &design).unwrap();
         let got = cache.get_design("key1", "fo4-v1").unwrap().unwrap();
         assert_eq!(got.target.target_mhz, 1000.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A design may legitimately carry several exceptions for one path.
+    ///
+    /// `path_exceptions` is a push-only log and `correct` re-classifies on every pass
+    /// (`--max-passes 16`), so the second pass onward produces repeat `path_id`s. The
+    /// plain INSERT that used to be here failed the run outright with
+    /// `UNIQUE constraint failed: path_class.design_key, path_class.path_id`. Small
+    /// profiles converge in one pass and never hit it; `full_core` did.
+    ///
+    /// The table is the denormalised CURRENT view (`PRIMARY KEY (design_key, path_id)`),
+    /// so the last classification must win rather than abort.
+    #[test]
+    fn repeat_path_ids_upsert_instead_of_failing() {
+        use sv_timing_core::path_class::{PathClassKind, PathException};
+
+        let dir = std::env::temp_dir().join(format!(
+            "svt_cache_pc_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let db = dir.join("pc.sqlite");
+        let cache = TimingCache::open(CacheConfig::at(&db)).unwrap();
+
+        let mut design =
+            sv_timing_core::TimingDesign::empty(TimingTarget::new(1000.0, 20.0, 0.2));
+        let ex = |class: PathClassKind, adjusted: f64| PathException {
+            path_id: 7,
+            module_name: "m".into(),
+            path_class: class,
+            raw_fo4: 40.0,
+            adjusted_fo4: adjusted,
+            confidence: 1.0,
+            evidence: String::new(),
+            signature: "sig".into(),
+            attempted: Vec::new(),
+        };
+        // Same path_id twice, as consecutive correct passes produce.
+        design
+            .path_exceptions
+            .push(ex(PathClassKind::AtomicOverBudget, 40.0));
+        design
+            .path_exceptions
+            .push(ex(PathClassKind::UnderBudget, 18.0));
+
+        cache
+            .put_design("dk", "fo4-v1", &design)
+            .expect("duplicate path_id must not abort the run");
+
+        // Exactly one row survives, and it is the LAST classification.
+        let (rows, adjusted, class): (i64, f64, String) = cache
+            .conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM path_class WHERE design_key='dk'),
+                        adjusted_fo4, path_class
+                 FROM path_class WHERE design_key='dk' AND path_id=7",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "upsert must collapse repeats, not accumulate");
+        assert_eq!(adjusted, 18.0, "last classification wins");
+        assert_eq!(class, "UnderBudget");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

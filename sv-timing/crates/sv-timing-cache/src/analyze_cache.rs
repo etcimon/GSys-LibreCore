@@ -70,6 +70,18 @@ pub fn analyze_with_cache(
     let mut param_keys = lower.param_map.keys();
     param_keys.push(format!("#measurement={}", sv_timing_core::MEASUREMENT_VERSION));
     param_keys.push(format!("#opt={}", lower.opt.analysis_digest()));
+    // These two DO change the analyze result, so they must evict.
+    //
+    // `allow_parse_errors` decides whether a file the parser rejects is skipped (its
+    // modules absent from the design) or the run aborts; `package_mode` changes the
+    // lowering surface. Neither is part of `pp_fingerprint`, which digests file content,
+    // include dirs, defines and the cost model — so without these tokens two runs over
+    // byte-identical inputs but different options share a `design_key` and can serve each
+    // other's blob. Observed on `full_core`: a cache hit returned a 139-module design
+    // where a cold run over the same files produced 177, silently dropping every OoO and
+    // ai_island module from the report.
+    param_keys.push(format!("#allow_parse_errors={}", parse.allow_parse_errors));
+    param_keys.push(format!("#package_mode={}", lower.package_mode));
     let design_key =
         crate::store::compute_design_key_with_params(&pp_fp, &lower.module_filter, &digests, &param_keys);
 

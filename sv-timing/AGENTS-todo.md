@@ -4,6 +4,66 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
 
+
+## 2026-09-10 (b) — full_core / full_corev_apu at 4 GHz, and a cache defect that hid the AI island
+
+Two more package defects, both found by pushing the whole design rather than a slice.
+
+- [x] **`path_class` write aborted any multi-pass design.** `put_path_classes` DELETEs
+  by `design_key` then plain-INSERTs one row per exception, but `path_exceptions` is a
+  push-only log and `correct` re-classifies on every pass (`--max-passes 16`), so repeat
+  `path_id`s are normal. The result was
+  `UNIQUE constraint failed: path_class.design_key, path_class.path_id`, which killed
+  `full_core` and `full_corev_apu` outright. The table is the denormalised CURRENT view
+  (`PRIMARY KEY (design_key, path_id)`), so the write is now an UPSERT and the last
+  classification wins. Small profiles converge in one pass, which is why only the full
+  designs ever hit it. Regression test: `repeat_path_ids_upsert_instead_of_failing`.
+- [x] **`design_key` omitted options that change the result — it silently served a
+  wrong, smaller design.** The key digests file content, incdirs, defines, cost model,
+  module filter and param keys, but NOT `allow_parse_errors` or `package_mode`. Both
+  change the analyze output: the first decides whether a rejected file is skipped (its
+  modules absent) or the run aborts, the second changes the lowering surface. Measured on
+  `full_core`: a cache hit returned **139 modules / 3,608 paths** where a cold run over
+  byte-identical inputs produced **177 modules / 4,130 paths** — same `design_key`,
+  `design_hit=true`, `files_changed=0`. Both are now `#`-prefixed tokens in the key
+  (the existing mechanism for "this must evict"), and cold/warm now agree at 177/4,130.
+- [x] **What the stale design was hiding: every OoO and ai_island module.** The 139-module
+  report contained *zero* `g6lc_*` modules. With the key fixed, `full_core` covers all 10
+  OoO blocks (`g6lc_rob`, `g6lc_rename`, `g6lc_freelist`, `g6lc_rat`, `g6lc_prf`,
+  `g6lc_iq`, `g6lc_lsq`, `g6lc_memdep`, `g6lc_ooo_dispatch`, `g6lc_ooo_backend`) and the
+  3 AI-island modules. This is the whole reason the defect mattered: the blocks under
+  active development were the ones missing from the timing report.
+- [x] **`full_core` no longer analyses `core/smt_legacy`.** `full_core.f` is
+  `-F core/Flist.cva6`, and that flist is the real build input, so the subset is expressed
+  as a new declarative `exclude` on the soak profile (`["/core/smt_legacy/"]`, reported
+  not silent) rather than by forking the flist or enumerating ~200 files that would drift.
+  19 files excluded; 198 remain.
+
+### Measured at `--target-mhz 4000 --correct --emit --allow-latency`
+
+| profile | primary FO4 | edits | post_closure | blocker |
+|---|---|--:|---|---|
+| `full_corev_apu` | 114.0 -> **10.0** | 267 | **closes, 4000 MHz** | — |
+| `full_core` | 134.0 -> **19.17** | 1096 | 2086.6 MHz | `axi_adapter` (slack -9.2) |
+| `sparse_issue_lsu` | 31.67 -> 26.0 | 18 | 1538.5 MHz | `store_buffer` |
+
+- [ ] **The raw worst cones do not move and are the real 4 GHz story.**
+  `max_path_fo4` is unchanged by correction in every full run: 720.0 (`SyncDpRam`,
+  vendored FPGA behavioural memory — likely a model artefact, not logic), 545.5
+  (**`g6lc_ai_exec`**, the AI island execute cone — 54x over a 10 FO4 budget and the
+  second-worst path in the core), 380.5 (`te_packet_emitter`, APU trace). The OoO blocks
+  are by contrast healthy at <= 25.1 FO4 (`g6lc_rename` 25.1, `g6lc_rob` 23.3,
+  `g6lc_iq` 21.8). So the ai_island exec cone, not the OoO rename set, is what needs
+  microarchitectural pipelining before 4 GHz is meaningful for the core.
+- [ ] **Emit validity is only partly gated.** `full_core` reports
+  `integrity: joint reparse failed` on `core/alu__svt.sv` (the non-LRM chained select,
+  see the previous entry) and `full_corev_apu` reports a missing `src/agilex7.svh`
+  include with `edited integrity ok (files=71 hard=0 context=2)`. Separately,
+  `post_analyze_sv` re-analyses only the FIRST rewritten file with an EMPTY param map and
+  `package_mode:false`, so it reports `paths=0` and a meaningless `closes=false` — a
+  vacuous gate that should either analyse the emitted project properly or say
+  "inconclusive". Not fixed here.
+
 ## 2026-09-10 — host-environment robustness + a real 4 GHz answer
 
 Two tool defects fixed (package-first), then the tool run in anger.

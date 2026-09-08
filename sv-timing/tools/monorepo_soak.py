@@ -73,6 +73,9 @@ class SoakProfile:
     fo4_ps: float = 20.0
     assume_clk: bool = True
     soft_missing: bool = True
+    #: Substrings matched against the POSIX path; any hit is left out of the package.
+    #: For subsetting a production flist that must not itself be edited.
+    exclude: list[str] = field(default_factory=list)
     notes: str = ""
 
 
@@ -143,7 +146,12 @@ DEFAULT_PROFILE_SPECS: list[dict] = [
         "all_modules": True,
         "param_map": "verif/sv-timing-tests/param-maps/cv64a6_imafdc_xlen64.json",
         "soft_missing": True,
-        "notes": "Entire core/Flist.cva6 — all modules structural FO4",
+        # core/Flist.cva6 still carries the superseded SMT tree, and this profile is
+        # `-F` on that flist, so the subset is expressed here rather than by editing
+        # the real build input. Timing spent on retired RTL is timing not spent on the
+        # shipping pipeline, and its paths would rank alongside live ones.
+        "exclude": ["/core/smt_legacy/"],
+        "notes": "Entire core/Flist.cva6 (excl. smt_legacy) — all modules structural FO4",
     },
     {
         "id": "full_corev_apu",
@@ -180,6 +188,7 @@ def load_profile_toml(path: Path) -> SoakProfile:
         fo4_ps=float(data.get("fo4_ps", 20.0)),
         assume_clk=bool(data.get("assume_clk", True)),
         soft_missing=bool(data.get("soft_missing", True)),
+        exclude=[str(x) for x in data.get("exclude", [])],
         notes=str(data.get("notes", "")),
     )
 
@@ -197,6 +206,7 @@ def profiles_from_defaults(repo: Path) -> list[SoakProfile]:
                 all_modules=bool(spec.get("all_modules", False)),
                 param_map=spec.get("param_map"),
                 soft_missing=bool(spec.get("soft_missing", True)),
+                exclude=list(spec.get("exclude") or []),
                 notes=str(spec.get("notes", "")),
             )
         )
@@ -249,18 +259,34 @@ def write_filtered_portable(
     out_path: Path,
     *,
     soft: bool,
-) -> tuple[Path, list[str], list[Path]]:
+    exclude: list[str] | None = None,
+) -> tuple[Path, list[str], list[Path], list[str]]:
     """Write portable.f (native paths for this OS CLI) + portable.host.f (Windows form).
 
-    Returns (portable_path, dropped, kept_files).
+    `exclude` holds substrings matched against the POSIX-normalised path; a file hitting
+    any of them is left out of the package entirely. This exists because a profile can
+    legitimately want a subset of a production flist that the flist itself must not be
+    edited to express: `full_core` is `-F core/Flist.cva6`, and that flist is the real
+    build input, so superseded RTL kept in-tree for reference is filtered HERE rather
+    than by forking the flist or enumerating ~200 files that would then drift.
+
+    Returns (portable_path, dropped, kept_files, excluded).
     """
+    patterns = [e for e in (exclude or []) if e]
     kept_files: list[Path] = []
     dropped: list[str] = []
+    excluded: list[str] = []
     for p in expanded_files:
+        posix = host_portable_path(p)
+        hit = next((pat for pat in patterns if pat in posix), None)
+        if hit is not None:
+            # Reported, never silent: the same discipline `dropped` follows.
+            excluded.append(posix)
+            continue
         if p.is_file():
             kept_files.append(p)
         else:
-            dropped.append(host_portable_path(p))
+            dropped.append(posix)
             if not soft:
                 raise FileNotFoundError(str(p))
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -282,7 +308,7 @@ def write_filtered_portable(
     # Host-normalized for Windows build-platform validate / Yosys
     host_path = out_path.with_name("portable.host.f")
     write_variant(host_path, host_portable_path)
-    return out_path, dropped, kept_files
+    return out_path, dropped, kept_files, excluded
 
 
 def cargo_bin(pkg: Path) -> Path | None:
@@ -1194,12 +1220,18 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=repo,
                 strict=False,
             )
-            portable, dropped, kept_files = write_filtered_portable(
+            portable, dropped, kept_files, excluded = write_filtered_portable(
                 expanded.files,
                 expanded.incdirs,
                 portable,
                 soft=prof.soft_missing,
+                exclude=prof.exclude,
             )
+            if excluded:
+                log(
+                    f"profile {prof.id} excluded {len(excluded)} file(s) by "
+                    f"pattern {prof.exclude}"
+                )
             # Also keep full expand via write_portable_f for debugging
             write_portable_f(
                 prof_out / "portable.full.f",
