@@ -18,6 +18,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { isPinnedLdcText, pinnedLdcBin } from "./ldc-pin.ts";
+import { resolveWasmOpt } from "./binaryen.ts";
 
 export const DEFAULT_LDC_VERSION = process.env.SVELTE_D_LDC_VERSION || "1.43.0-beta1";
 
@@ -216,49 +217,59 @@ function isLibwasmRoot(p: string): boolean {
   return existsSync(join(p, "source", "libwasm", "dom.d")) && existsSync(join(p, "dub.sdl"));
 }
 
-/** Spec checkout only (kernel-spec/libwasm). Never a DUB cache tree. */
+/**
+ * A libwasm checkout carrying the g6lc_bios customizations, i.e. the
+ * `g6lc-bios` dub configuration and the `libwasm.g6b_kernel` module that
+ * configuration substitutes for the default import block. A plain upstream
+ * checkout is *not* usable for the BIOS cell, so recognising it here keeps the
+ * failure at resolution time with a clear reason instead of surfacing as a
+ * missing-symbol link error.
+ */
+export function isG6bLibwasmRoot(p: string): boolean {
+  if (!isLibwasmRoot(p)) return false;
+  if (!existsSync(join(p, "source", "libwasm", "g6b_kernel.d"))) return false;
+  try {
+    return /configuration\s+"g6lc-bios"/.test(readFileSync(join(p, "dub.sdl"), "utf8"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The libwasm source tree for the cell: the `g6lc_bios/libwasm` submodule on its
+ * `g6lc_bios` branch. `browser-ui/libwasm` was an untracked local fork of
+ * v0.9.0-11 that drifted from upstream; the customizations now live on a branch
+ * of the real repository so they are reviewable and rebasable.
+ *
+ * Never a DUB cache tree.
+ */
 export function findLibwasmCheckout(start?: string): string {
   const env = process.env.LIBWASM_ROOT;
-  if (env) return isLibwasmRoot(env) ? resolve(env) : "";
+  if (env) return isG6bLibwasmRoot(env) ? resolve(env) : "";
   for (const seed of ldcSeeds(start)) {
     for (const cand of [
       join(seed, "libwasm"),
-      join(seed, "browser-ui", "libwasm"),
-      join(seed, "g6lc_bios", "browser-ui", "libwasm"),
+      join(seed, "g6lc_bios", "libwasm"),
       join(seed, "riscv-compilers", "libwasm"),
     ]) {
-      if (isLibwasmRoot(cand)) return cand;
+      if (isG6bLibwasmRoot(cand)) return cand;
     }
   }
   return "";
 }
 
-const CUSTOM_BINARYEN = "C:\\Users\\etcim\\.grok\\worktrees\\cva6\\svelte-dev-2\\riscv-dev\\svelte-D\\binaryen";
-
-export function findWasmOpt(start?: string): string {
-  const windowsNames = ["wasm-opt.exe", "wasm-opt"];
-  const names = process.platform === "win32" ? windowsNames : ["wasm-opt"];
-  for (const k of ["SVELTE_D_WASM_OPT", "WASM_OPT"]) {
-    const v = process.env[k];
-    if (v && existsSync(v)) return v;
-  }
-  const seeds = [...ldcSeeds(start), CUSTOM_BINARYEN];
-  const rels = [
-    join("build", "bin"),
-    join("binaryen-build", "bin"),
-    join("toolchains", "binaryen-svelte-d", "bin"),
-    join("bin"),
-    "",
-  ];
-  for (const seed of [...new Set(seeds)]) {
-    for (const rel of rels) {
-      for (const name of names) {
-        const cand = join(seed, rel, name);
-        if (existsSync(cand)) return cand;
-      }
-    }
-  }
-  return which("wasm-opt");
+/**
+ * The forked `wasm-opt`, resolved by `compiler/binaryen.ts` from the
+ * `g6lc_bios/svelte-d` submodule and its nested `binaryen/` fork.
+ *
+ * This used to be a hardcoded absolute path into one developer's worktree,
+ * which meant the asyncify lane silently only worked on that machine. The
+ * provider now has an ordered, documented search (in-tree toolchain, the
+ * submodule's `binaryen-build/`, `~/.svelte-d`, a local cmake build, PATH) and
+ * `bun scripts/install-wasm-opt.ts` populates the in-tree location.
+ */
+export function findWasmOpt(_start?: string): string {
+  return resolveWasmOpt().bin;
 }
 
 export type Toolchain = {
@@ -277,8 +288,11 @@ export function runtimePreflight(tc: Toolchain): string[] {
   if (!tc.ok || !tc.ldc || !tc.dub || !isLdc143Text(tc.versionLine)) {
     errors.push("LDC 1.43 and dub are required for runtime-v1.43.0 (DMD 2.113)");
   }
+  // kernel-spec/ is the read-only spec of record and is never compiled; a DUB
+  // or toolchain cache is not a reviewable source either. The cell must build
+  // from the g6lc_bios/libwasm submodule on its `g6lc_bios` branch.
   if (!tc.libwasm || /(?:^|[\\/])(?:kernel-spec|riscv-compilers)(?:[\\/]|$)/i.test(tc.libwasm)) {
-    errors.push("LIBWASM_ROOT must select the local browser-ui/libwasm adaptation, not a spec/toolchain checkout");
+    errors.push("libwasm must be the g6lc_bios/libwasm submodule (g6lc_bios branch), not a spec/toolchain checkout");
     return errors;
   }
   const requireText = (rel: string, patterns: RegExp[]) => {
@@ -290,8 +304,19 @@ export function runtimePreflight(tc: Toolchain): string[] {
     const text = readFileSync(file, "utf8");
     if (patterns.some((pattern) => !pattern.test(text))) errors.push(`incompatible carried runtime configuration: ${file}`);
   };
-  requireText("dub.sdl", [/configuration\s+"ldc-master"\s*\{[^}]*dependency\s+"druntime-wasm-143"\s+path="\.\/runtime-v1\.43\.0"/s, /"-defaultlib="/]);
+  // The cell builds `--config=g6lc-bios`, which is what carries `G6LC_G6B` and
+  // exports `_start`. `druntime-wasm-143` is the disambiguated runtime name: on
+  // the g6lc_bios branch it is renamed away from upstream's `druntime-wasm`,
+  // which collided with ./druntime-wasm and made every config unresolvable.
+  requireText("dub.sdl", [
+    /configuration\s+"g6lc-bios"\s*\{[^}]*dependency\s+"druntime-wasm-143"\s+path="\.\/runtime-v1\.43\.0"/s,
+    /configuration\s+"g6lc-bios"\s*\{[^}]*versions\s+"G6LC_G6B"/s,
+    /configuration\s+"g6lc-bios"\s*\{[^}]*--export=_start/s,
+    /"-defaultlib="/,
+  ]);
   requireText("source/libwasm/g6b_kernel.d", [/module libwasm\.g6b_kernel;/]);
+  // The G6LC_G6B substitution only works if types.d actually routes to it.
+  requireText("source/libwasm/types.d", [/version\s*\(G6LC_G6B\)\s*\{\s*public import libwasm\.g6b_kernel;/s]);
   requireText("runtime-v1.43.0/dub.sdl", [/name\s+"druntime-wasm-143"/, /version\s+"1\.43\.0"/, /versions\s+"CRuntime_LIBWASM"/, /targetType\s+"sourceLibrary"/]);
   requireText("runtime-v1.43.0/object.d", [/version\s*\(CRuntime_LIBWASM\)/]);
   for (const rel of ["core/exception.d", "core/memory.d", "ldc/attributes.d", "std/format/package.d", "rt/lifetime.d"]) {

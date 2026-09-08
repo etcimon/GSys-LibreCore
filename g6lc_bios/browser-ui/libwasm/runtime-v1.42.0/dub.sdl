@@ -1,0 +1,8 @@
+name "druntime-wasm-142"
+description "Carried CRuntime_LIBWASM tree for LDC 1.42.0 (runtime-adapt --carry)"
+version "1.42.0"
+targetType "sourceLibrary"
+targetArch "wasm32-unknown-wasi"
+versions "CRuntime_LIBWASM"
+sourcePaths "core" "rt" "ldc" "std"
+sourceFiles "object.d"

@@ -26,12 +26,17 @@ host, verifier, and the LDC 1.43 artifact), **B67's Lodash backend**
 **B67/B68 Moment, getTimeStamp, typed-array and promise-combinator** host
 imports. Open: the full Moment method set and `Object_VarArgCall__*`.
 
-Scope boundary: the BIOS never compiles `kernel-spec/libwasm`. The compiled
-tree is the local clone `browser-ui/libwasm` (pin `02f21a6`, v0.9.0-11), whose
-`version(G6LC_G6B)` branch replaces the JS import table with the g6b kernel
-boundary. The `extern(C)` declaration set in
-`browser-ui/libwasm/source/libwasm/types.d` is byte-identical to the reference
-checkout, so the inventory below is the real target, not an approximation.
+Scope boundary: the BIOS never compiles `kernel-spec/libwasm`. The compiled tree
+is the **`g6lc_bios/libwasm` submodule on its `g6lc_bios` branch**
+(`etcimon/libwasm`, branched from v0.11.1), built with `--config=g6lc-bios`.
+That configuration sets `version(G6LC_G6B)`, which replaces the JS import table
+with the g6b kernel boundary in `libwasm/source/libwasm/types.d`.
+
+This supersedes the retired untracked clone at `browser-ui/libwasm`, which was
+pinned at v0.9.0-11 (`02f21a6`) and had drifted from upstream without review.
+The customizations are now commits on a branch of the real repository, so the
+delta against upstream is diffable; see `kernel-spec/README.md` for the
+submodule-versus-vendored policy and the exact list of changes.
 
 ### 0.1 Pinned compiler
 
@@ -283,7 +288,7 @@ engine. Any text that implies otherwise is wrong.
 ## 7. What exists today
 
 Implemented in `g6b-wasm::call_import` + `g6b-kernel::KernelHost` +
-`browser-ui/src/kernel.ts` + `browser-ui/libwasm/source/libwasm/g6b_kernel.d`:
+`browser-ui/src/kernel.ts` + `libwasm/source/libwasm/g6b_kernel.d`:
 
 | Import | Origin | Lane |
 |---|---|---|
@@ -367,7 +372,7 @@ converts boxed values to `g6b_js::JsValue` for Lodash execution.
 Browser parity is in `browser-ui/src/kernel.ts` (numeric box/unbox and the
 `libwasm_get__field` / `libwasm_get_idx__field` property-map lookups), the
 libwasm D kernel imports are declared in
-`browser-ui/libwasm/source/libwasm/g6b_kernel.d`, and the verifier manifest in
+`libwasm/source/libwasm/g6b_kernel.d`, and the verifier manifest in
 `browser-ui/compiler/wasm-cell.ts` accepts the B62 and B63-scaffold signatures.
 
 Verified: `cargo test --workspace`, `bun test`, `bun run build` with LDC 1.43
@@ -395,7 +400,7 @@ name, reads method/argument strings from linear memory, and marshals the typed
 result. `TestHost` demonstrates a bounded method registry (`double`, `concat`,
 `echo`, `name`).
 
-The same family is now wired end-to-end: `browser-ui/libwasm/source/libwasm/g6b_kernel.d`
+The same family is now wired end-to-end: `libwasm/source/libwasm/g6b_kernel.d`
 declares the core `Object_Getter__*` / `Object_Call__*` imports, the verifier in
 `browser-ui/compiler/wasm-cell.ts` accepts their signatures, and
 `browser-ui/src/kernel.ts` provides fail-closed JS handlers that resolve object
@@ -426,7 +431,7 @@ artifact through the full chain:
   property or a `null`/`undefined` method result as `None` (defined = 0).
 - `browser-ui/src/kernel.ts` mirrors the layout in `writeOptional` and adds
   `Object_Getter__Optional*` and `Object_Call_*__Optional*` handlers.
-- `browser-ui/libwasm/source/libwasm/g6b_kernel.d` declares the imports instead
+- `libwasm/source/libwasm/g6b_kernel.d` declares the imports instead
   of stubbing them, and `browser-ui/compiler/wasm-cell.ts` verifies their
   signatures.
 - Rust and Bun tests cover present and missing/null `Optional` properties and
@@ -455,7 +460,7 @@ new `g6b-wasm::json` descriptor reader.
 - `browser-ui/src/kernel.ts` mirrors the same dispatch in JS, with bounds
   checking, budget limits, and fail-closed descriptor handling.
 - `browser-ui/compiler/wasm-cell.ts` verifies the new import signatures and
-  `browser-ui/libwasm/source/libwasm/g6b_kernel.d` declares them as imports.
+  `libwasm/source/libwasm/g6b_kernel.d` declares them as imports.
 - Rust and Bun tests cover JSON parse/stringify round-trips, `Optional!T` and
   `SumType!(string,Handle)` vararg decoding, and fail-closed behavior on unknown
   descriptors and arity mismatches.
@@ -603,12 +608,12 @@ No stage is complete without all of:
 
 ## Loci
 
-`browser-ui/libwasm/source/libwasm/types.d:23` `alias Handle`;
+`libwasm/source/libwasm/types.d:23` `alias Handle`;
 `:326-349` `jsCallback`; `:353-383` `Serialize_Object_VarArgCall`;
 `:454-490` `struct JsHandle`; `:182-269` the host import table.
-`browser-ui/libwasm/source/libwasm/bindings/EventHandler.d:37-38` handler aliases.
-`browser-ui/libwasm/source/libwasm/lodash.d:14-26` `VarType`; `:325` `struct Lodash`.
-`browser-ui/libwasm/source/libwasm/g6b_kernel.d` the g6b substitution and stubs.
+`libwasm/source/libwasm/bindings/EventHandler.d:37-38` handler aliases.
+`libwasm/source/libwasm/lodash.d:14-26` `VarType`; `:325` `struct Lodash`.
+`libwasm/source/libwasm/g6b_kernel.d` the g6b substitution and stubs.
 `crates/g6b-wasm/src/objects.rs` the B61 refcounted `ObjectTable`.
 `crates/g6b-js/src/lodash.rs` the B67 command parser, `JsValue` and evaluator.
 `crates/g6b-wasm/src/interp.rs` `Host` trait, `call_import`,

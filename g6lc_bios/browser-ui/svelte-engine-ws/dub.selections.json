@@ -1,14 +1,13 @@
 {
 	"fileVersion": 1,
 	"versions": {
-		"diet-wasm": {"path":"../libwasm/diet-wasm"},
-		"druntime-wasm": {"path":"../libwasm/druntime-wasm"},
-		"druntime-wasm-142": {"path":"../libwasm/runtime-v1.42.0"},
-		"druntime-wasm-143": {"path":"../libwasm/runtime-v1.43.0"},
-		"fast-wasm": {"path":"../libwasm/fast-wasm"},
-		"libwasm": {"path":"../libwasm"},
-		"memutils-wasm": {"path":"../libwasm/memutils-wasm"},
-		"optional-wasm": {"path":"../libwasm/optional-wasm"},
+		"diet-wasm": {"path":"../../libwasm/diet-wasm"},
+		"druntime-wasm": {"path":"../../libwasm/druntime-wasm"},
+		"druntime-wasm-143": {"path":"../../libwasm/runtime-v1.43.0"},
+		"fast-wasm": {"path":"../../libwasm/fast-wasm"},
+		"libwasm": {"path":"../../libwasm"},
+		"memutils-wasm": {"path":"../../libwasm/memutils-wasm"},
+		"optional-wasm": {"path":"../../libwasm/optional-wasm"},
 		"unit-threaded": "2.2.5"
 	}
 }

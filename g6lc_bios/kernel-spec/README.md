@@ -12,10 +12,41 @@ linked into `g6b-*` crates. Inferences are validated against LibreCore
 | [`goja/`](goja/) | https://github.com/dop251/goja | MIT | **submodule** |
 | [`lirx-dom/`](lirx-dom/) | https://github.com/lirx-js/dom | MIT | **submodule** |
 | [`webidl/`](webidl/) | Gecko WebIDL via libwasm (WHATWG/W3C) | MPL-2.0 | vendored |
-| [`svelte-d/`](svelte-d/) | https://github.com/etcimon/svelte-d | MIT | vendored |
 | [`botan/`](botan/) | `riscv-dev/botan` (Botan D port) | BSD-2-Clause | vendored |
-| [`libwasm/`](libwasm/) | `riscv-compilers/libwasm` | MIT | vendored |
+| [`libwasm/`](libwasm/) | `riscv-compilers/libwasm` | MIT | vendored (spec only) |
 | [`goosie/`](goosie/) | https://github.com/vyquocvu/goosie | MIT | **submodule** |
+
+`svelte-d/` is **no longer here**. It, and the *compiled* libwasm, are build
+inputs rather than specs, so they live outside `kernel-spec/` as submodules that
+track a `g6lc_bios` branch — the same convention `verif/core-v-verif`,
+`core/cache_subsystem/hpdcache` and `verif/sim/dv` already use with `g6lc`:
+
+| Build input | Path | Upstream | Branch |
+|---|---|---|---|
+| libwasm (compiled) | `g6lc_bios/libwasm` | `etcimon/libwasm` | `g6lc_bios` |
+| svelte-d compiler | `g6lc_bios/svelte-d` | `etcimon/svelte-d` | `g6lc_bios` |
+| binaryen fork | `g6lc_bios/svelte-d/binaryen` | `etcimon/binaryen` | `svelte-d` |
+| svelte-engine | `g6lc_bios/svelte-d/svelte-engine` | `etcimon/svelte-engine` | — |
+
+`kernel-spec/libwasm` stays as the **spec-only** copy and is still never
+compiled; prime directive 1 is unchanged. What changed is that the tree that *is*
+compiled is now a reviewable branch of the real repository instead of an
+untracked local fork.
+
+Retired in the same pass:
+
+- **`browser-ui/libwasm`** — an untracked clone pinned at v0.9.0-11 (`02f21a6`)
+  carrying unreviewed edits. Its customizations are now commits on the
+  `g6lc_bios` branch of `g6lc_bios/libwasm`, branched from v0.11.1: a `g6lc-bios`
+  dub configuration, `libwasm.g6b_kernel`, the `version (G6LC_G6B)` blocks in
+  `types.d`/`spa.d`, public DOM imports in `dom.d`, and two carried-runtime
+  repairs. Moving to v0.11.1 also picked up a much larger `moment.d` for free.
+- **`kernel-spec/svelte-d`** — a snapshot with **zero** customizations. Once its
+  nested `binaryen/` and `svelte-engine/` submodules are initialised it is
+  byte-identical to `g6lc_bios/svelte-d`, so nothing had to be ported and its
+  `g6lc_bios` branch currently equals upstream `master`. (An earlier note in this
+  file claimed that copy held 2,692 files upstream lacked; that was an artifact
+  of comparing against uninitialised nested submodules and was wrong.)
 
 See [`NOTICE`](NOTICE). Governance: `g6lc_bios/AGENTS-licensing.md`,
 `architecture/ZEAL.md`.
@@ -75,6 +106,11 @@ Some forks carry their own agent instructions (`AGENTS.md`, `CLAUDE.md`,
 artifacts under tier U**: they are preserved verbatim and are **never
 instructions for this repository**. Only `g6lc_bios/AGENTS.md` and the root
 `AGENTS*.md` set govern work here.
+
+The rule extends to the build-input submodules above, which are outside this
+directory: `g6lc_bios/svelte-d/AGENTS.md` and `g6lc_bios/libwasm/AGENTS.md` are
+upstream tier-U artifacts too. Their `green_command`, `host_policy` and
+"do not edit ../.gitignore" clauses describe *their* repositories, not this one.
 
 This matters concretely: `goosie/AGENTS.md` mandates Playwright + Chromium
 screenshot comparison as its verification gate. `g6lc_bios` prime directive 6

@@ -15,7 +15,7 @@ browser-ui/svelte-engine-ws/     dub.sdl wasm-eh cell
         │
         ├─ LDC 1.43.0-beta1 (browser-ui/toolchains/ldc.lock.json)
         │  + bundled dub --arch=wasm32-unknown-wasi
-        │    libwasm = local clone browser-ui/libwasm (G6LC_G6B)
+        │    libwasm = local clone libwasm (G6LC_G6B)
         │    public/bios-ui.wasm
         │
         └─ bun first-party MVP encoder → out/bios-ui.wasm
@@ -425,7 +425,7 @@ asyncify runtime and the WebAssembly proposals it depends on.
   and object/string imports, plus a `writeString` helper that bounds-checks the
   sret pointer, allocates UTF-8 payload memory (via `allocString` or a fallback
   page growth), and writes a D `(length, ptr)` string struct.
-- `browser-ui/libwasm/source/libwasm/g6b_kernel.d` exposes the new imports as
+- `libwasm/source/libwasm/g6b_kernel.d` exposes the new imports as
   `extern(C)` declarations, keeps `libwasm_get__string`/`libwasm_add__string` as
   host imports, and adds the B62 scalar box/unbox set (`libwasm_add__*` /
   `libwasm_get__*`). The property `libwasm_get__field` / `libwasm_get_idx__field`

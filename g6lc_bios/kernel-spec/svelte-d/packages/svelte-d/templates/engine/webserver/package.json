@@ -1,8 +1,0 @@
-{
-  "private": true,
-  "name": "svelte-engine-server",
-  "description": "vibe.0 host for svelte-engine-ws",
-  "version": "0.2.0",
-  "dependencies": {},
-  "devDependencies": {}
-}

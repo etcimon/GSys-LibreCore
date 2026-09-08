@@ -4,7 +4,7 @@
     "Pinned LDC for the optional libwasm cell (out/bios-ui-libwasm.wasm).",
     "Digests are the upstream ldc2-1.43.0-beta1.sha256sums.txt values, verbatim.",
     "The wasm32-unknown-wasi 'addon' package is deliberately NOT pinned: the cell",
-    "builds with -defaultlib= against browser-ui/libwasm/runtime-v1.43.0, so no",
+    "builds with -defaultlib= against libwasm/runtime-v1.43.0, so no",
     "prebuilt WASI druntime/phobos is linked. See browser-ui/README.md."
   ],
   "version": "1.43.0-beta1",

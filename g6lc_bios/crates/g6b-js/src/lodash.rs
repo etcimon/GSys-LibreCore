@@ -3,7 +3,7 @@
 
 //! First-party JS backend for `libwasm.lodash` (B67).
 //!
-//! `struct Lodash` (`browser-ui/libwasm/source/libwasm/lodash.d:325`) does not
+//! `struct Lodash` (`libwasm/source/libwasm/lodash.d:325`) does not
 //! call JS directly. It appends to a **command buffer** and ships it through one
 //! of the twelve `ldexec_*` imports. This module parses that buffer and executes
 //! it over a bounded [`JsValue`] model — the "JS backend" the chain pipes into.

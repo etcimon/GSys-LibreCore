@@ -124,10 +124,19 @@ U   g6lc_bios/kernel-spec/TempleOS/**
 U   g6lc_bios/kernel-spec/goja/**
 U   g6lc_bios/kernel-spec/lirx-dom/**
 U   g6lc_bios/kernel-spec/webidl/**
-U   g6lc_bios/kernel-spec/svelte-d/**
 U   g6lc_bios/kernel-spec/botan/**
 U   g6lc_bios/kernel-spec/libwasm/**
 U   g6lc_bios/kernel-spec/goosie/**
+# Build-input submodules outside kernel-spec/. These are upstream repositories
+# (etcimon/libwasm, etcimon/svelte-d and its nested binaryen + svelte-engine)
+# that we contribute to on a `g6lc_bios` branch, so they stay tier U: upstream
+# copyright lines, SPDX identifiers, attribution and NOTICE content are left
+# verbatim (E-UPSTREAMWRITE). Classified explicitly rather than relying on the
+# default `U **`, so the intent is recorded rather than inferred. First-party
+# files we add there carry their own MIT header, e.g.
+# g6lc_bios/libwasm/source/libwasm/g6b_kernel.d.
+U   g6lc_bios/libwasm/**
+U   g6lc_bios/svelte-d/**
 # linux-dist OpenWrt trees are upstream GPL (etcimon forks of official). Leave
 # them verbatim (E-UPSTREAMWRITE). First-party linux-dist/*.md and ubuntu/
 # scaffold stay tier T via the g6lc_qemu/** rule above; last match wins.

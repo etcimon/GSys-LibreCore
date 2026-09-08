@@ -233,7 +233,7 @@ remain the sole authority; OpenSBI remains M-mode and BIOS stays S-mode.
   modeled surface, a static boot pattern, or a host-browser screenshot for
   QEMU evidence.
 - Reproducibility follow-up: the verified `runtime-v1.43.0` carry is now
-  vendored under `browser-ui/libwasm/` and tracked; compiler
+  vendored under `libwasm/` and tracked; compiler
   provenance/preflight detects drift but does not provision a missing runtime.
 
 Detailed contracts and acceptance ladder: `WASM.md`, `BROWSER.md`, `DISPLAY.md`,

@@ -3,7 +3,7 @@
 
 //! Refcounted libwasm object table (B61).
 //!
-//! `struct JsHandle` in `browser-ui/libwasm/source/libwasm/types.d:454-490` is
+//! `struct JsHandle` in `libwasm/source/libwasm/types.d:454-490` is
 //! explicitly refcounted, not garbage collected: the destructor calls
 //! `libwasm_removeObject(handle)` when `handle > 2` and the copy constructor
 //! calls `libwasm_copyObjectRef(rhs.handle)`. A host that ignores either one is

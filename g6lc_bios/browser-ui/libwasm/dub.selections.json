@@ -1,0 +1,11 @@
+{
+	"fileVersion": 1,
+	"versions": {
+		"diet-wasm": {"path":"diet-wasm"},
+		"druntime-wasm": {"path":"druntime-wasm"},
+		"fast-wasm": {"path":"fast-wasm"},
+		"memutils-wasm": {"path":"memutils-wasm"},
+		"optional-wasm": {"path":"optional-wasm"},
+		"unit-threaded": "2.2.5"
+	}
+}

@@ -489,14 +489,14 @@ configuration "application" {
     targetType "executable"
     dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false"
     lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
-    ${lib}    subConfiguration "libwasm" "ldc-master"
+    ${lib}    subConfiguration "libwasm" "g6lc-bios"
 }
 
 configuration "ldc-master" {
     targetType "executable"
     dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false"
     lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
-    ${lib}    subConfiguration "libwasm" "ldc-master"
+    ${lib}    subConfiguration "libwasm" "g6lc-bios"
 }
 
 buildType "debug" {
@@ -592,6 +592,24 @@ export function buildWasmCell(
   if (errors.length) return finish(3, errors.join("; "));
   if (!existsSync(join(ws, "dub.sdl")) || readFileSync(join(ws, "dub.sdl"), "utf8") !== engineDubSdl(tc.libwasm)) {
     return finish(3, "generated dub.sdl does not match the pinned local libwasm cell");
+  }
+  // A `dub.selections.json` left over from an earlier libwasm location silently
+  // overrides the path in dub.sdl: when browser-ui/libwasm was retired in favour
+  // of the g6lc_bios/libwasm submodule, a stale selections file kept resolving
+  // `libwasm` to `../libwasm` and dub then reported the `g6lc-bios`
+  // configuration as non-existent. Selections are a lockfile for *registry*
+  // versions and carry no information we need for an all-path graph, so a stale
+  // one is dropped rather than trusted.
+  const selections = join(ws, "dub.selections.json");
+  if (existsSync(selections)) {
+    let stale = true;
+    try {
+      const picked = JSON.parse(readFileSync(selections, "utf8"))?.versions?.libwasm?.path;
+      stale = typeof picked !== "string" || posix(join(ws, picked)) !== posix(tc.libwasm);
+    } catch {
+      stale = true; // unparsable is stale by definition
+    }
+    if (stale) rmSync(selections, { force: true });
   }
   const buildType = opts.buildType ?? "release";
   const args = ["build", "--arch=wasm32-unknown-wasi", `--compiler=${tc.ldc}`, "--config=application", `--build=${buildType}`, "--force", "--verbose"];

@@ -97,3 +97,11 @@
 [submodule "g6lc_bios/kernel-spec/TempleOS"]
 	path = g6lc_bios/kernel-spec/TempleOS
 	url = https://github.com/cia-foundation/TempleOS.git
+[submodule "g6lc_bios/libwasm"]
+	path = g6lc_bios/libwasm
+	url = https://github.com/etcimon/libwasm.git
+	branch = g6lc_bios
+[submodule "g6lc_bios/svelte-d"]
+	path = g6lc_bios/svelte-d
+	url = https://github.com/etcimon/svelte-d.git
+	branch = g6lc_bios

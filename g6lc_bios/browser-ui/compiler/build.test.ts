@@ -3,12 +3,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { dropWorkspace } from "./drop-ws.ts";
 import { compileProject, WasmBuildError, writeOut } from "./index.ts";
-import { findPinnedLdc, hostTriple, isLdc143Text, resolveToolchain, runtimePreflight, wasmLdcConfig, type Toolchain } from "./ldc.ts";
+import { findPinnedLdc, hostTriple, isLdc143Text, isG6bLibwasmRoot, resolveToolchain, runtimePreflight, wasmLdcConfig, type Toolchain } from "./ldc.ts";
 import { downloadUrl, isPinnedLdcText, pinnedAsset, pinnedLdcBin, readPin, toolchainsDir } from "./ldc-pin.ts";
 import { parseSvelte } from "./parse.ts";
 import { childFieldName, printApp, printFxD, printModule } from "./print-d.ts";
@@ -24,9 +24,19 @@ function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "g6lc-build-"));
   temp.push(dir);
   const lib = join(dir, "libwasm");
-  put(join(lib, "dub.sdl"), 'configuration "ldc-master" { dependency "druntime-wasm-143" path="./runtime-v1.43.0" dflags "-defaultlib=" }');
+  // Mirrors the g6lc_bios branch of the libwasm submodule: the cell builds
+  // `--config=g6lc-bios`, which is what carries `G6LC_G6B` and exports `_start`.
+  put(
+    join(lib, "dub.sdl"),
+    'configuration "g6lc-bios" { dependency "druntime-wasm-143" path="./runtime-v1.43.0"' +
+      ' versions "G6LC_G6B" dflags "-defaultlib=" lflags "--export=_start" }',
+  );
   put(join(lib, "source/libwasm/g6b_kernel.d"), "module libwasm.g6b_kernel;");
   put(join(lib, "source/libwasm/dom.d"), "module libwasm.dom;");
+  put(
+    join(lib, "source/libwasm/types.d"),
+    "module libwasm.types;\nversion (G6LC_G6B)\n{\n  public import libwasm.g6b_kernel;\n}\nelse\nextern (C) {}\n",
+  );
   put(join(lib, "runtime-v1.43.0/dub.sdl"), 'name "druntime-wasm-143"\nversion "1.43.0"\nversions "CRuntime_LIBWASM"\ntargetType "sourceLibrary"');
   put(join(lib, "runtime-v1.43.0/object.d"), "version (CRuntime_LIBWASM) {}");
   for (const name of ["core/exception.d", "core/memory.d", "core/stdc/time.d", "core/sys/wasi/time.d", "ldc/attributes.d", "std/format/package.d", "rt/lifetime.d", "etc/stub.d"]) put(join(lib, "runtime-v1.43.0", name));
@@ -173,6 +183,52 @@ describe("LDC build integrity", () => {
     expect(runtimePreflight(tc)).toEqual([]);
     rmSync(join(tc.libwasm, "runtime-v1.43.0/object.d"));
     expect(runtimePreflight(tc).join("\n")).toContain("missing carried runtime");
+  });
+
+  test("the cell requires the g6lc_bios libwasm branch, not a plain upstream checkout", () => {
+    const { tc } = fixture();
+    expect(runtimePreflight(tc)).toEqual([]);
+    // A stock upstream checkout has neither the g6lc-bios configuration nor
+    // libwasm.g6b_kernel, so it must be refused at resolution rather than
+    // discovered as a link error. `browser-ui/libwasm` (the retired untracked
+    // fork) is likewise not a candidate any more.
+    expect(isG6bLibwasmRoot(tc.libwasm)).toBe(true);
+    put(join(tc.libwasm, "dub.sdl"), 'configuration "ldc-master" { dependency "druntime-wasm" path="./runtime-v1.43.0" }');
+    expect(isG6bLibwasmRoot(tc.libwasm)).toBe(false);
+    expect(runtimePreflight(tc).join("\n")).toContain("incompatible carried runtime configuration");
+    // Upstream's colliding runtime name is refused too: ./druntime-wasm and
+    // ./runtime-v1.43.0 both calling themselves "druntime-wasm" is what made
+    // every dub configuration unresolvable.
+    const { tc: tc2 } = fixture();
+    put(join(tc2.libwasm, "runtime-v1.43.0/dub.sdl"), 'name "druntime-wasm"\nversion "1.43.0"\nversions "CRuntime_LIBWASM"\ntargetType "sourceLibrary"');
+    expect(runtimePreflight(tc2).join("\n")).toContain("incompatible carried runtime configuration");
+    // And the G6LC_G6B substitution must actually be wired in types.d, or the
+    // cell would declare imports the kernel host does not implement.
+    const { tc: tc3 } = fixture();
+    put(join(tc3.libwasm, "source/libwasm/types.d"), "module libwasm.types;\nextern (C) {}\n");
+    expect(runtimePreflight(tc3).join("\n")).toContain("incompatible carried runtime configuration");
+  });
+
+  test("a stale dub.selections.json cannot pin a retired libwasm location", () => {
+    const { ws, tc } = fixture();
+    const selections = join(ws, "dub.selections.json");
+    // The real failure: after browser-ui/libwasm was retired, the selections
+    // file still resolved `libwasm` to a *different* tree than dub.sdl names, so
+    // dub reported the g6lc-bios configuration as non-existent even though
+    // dub.sdl was correct. Selections override the path, so a disagreeing one is
+    // dropped rather than trusted.
+    put(selections, JSON.stringify({ fileVersion: 1, versions: { libwasm: { path: "../retired-libwasm" } } }));
+    buildWasmCell(ws, tc, { run: runResult(0), force: true });
+    expect(existsSync(selections)).toBe(false);
+    // Unparsable is stale by definition.
+    put(selections, "{ not json");
+    buildWasmCell(ws, tc, { run: runResult(0), force: true });
+    expect(existsSync(selections)).toBe(false);
+    // One that already agrees with the resolved tree is left alone, so this does
+    // not gratuitously discard dub's own lockfile on every build.
+    put(selections, JSON.stringify({ fileVersion: 1, versions: { libwasm: { path: relative(ws, tc.libwasm).replace(/\\/g, "/") } } }));
+    buildWasmCell(ws, tc, { run: runResult(0), force: true });
+    expect(existsSync(selections)).toBe(true);
   });
 
   test("missing runtime, failed dub and missing new output never reuse old artifacts", () => {
