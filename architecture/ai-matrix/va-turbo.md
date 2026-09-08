@@ -821,10 +821,37 @@ k <= 256. B's share itself is `n/(m+n)` and nothing else -- measured identically
 at 888/1000 for all four formats, because `row_bytes` and `beta` cancel, so it is a
 property of the shape alone.
 
-**Not measured:** n=16 and above. The harness B sub-slot is 512 B
-(`OFF_C - OFF_B = 0x200`) and FP32 at n=16, k=16 needs 1,024 B, so the predicted
-1.99x point needs the memory map enlarged -- a change that moves every
-multi-engine address and therefore wants an explicit decision.
+### n=16, now measured -- and a residual worth keeping
+
+The blocker was the harness's fixed 512 B B sub-slot, which correctly refused FP32
+at n=16, k=16 (it needs 1,024 B). Deriving the slots from the geometry lifts that
+without moving anything at the default: each region keeps a 512 B floor, so
+`OFF_B`/`OFF_C`/`SLOT` come out `0x200`/`0x400`/`0x600` exactly as before and every
+multi-engine address is unchanged (verified -- the default run is byte-identical).
+
+| Format | cold | resident B | resident both | B share |
+|---|--:|--:|--:|--:|
+| INT8 | 100 | 51 = 1.961x | 47 = 2.128x | 941 |
+| INT4 | 67 | 34 = 1.971x | 31 = 2.161x | 941 |
+| FP16 | 166 | 85 = 1.953x | 79 = 2.101x | 941 |
+| **FP32** | **298** | **153 = 1.948x** | **143 = 2.084x** | **941** |
+
+Against predictions of **1.980x / 2.122x** -- right to ~1.6% -- and B's share came
+out `941/1000`, exactly `n/(m+n) = 16/17`.
+
+**A known residual, recorded rather than fitted away.** The model is **3 cycles low
+for every one of the four formats** at n=16, and exact at n=8. It is
+format-independent, so it is not a `beta` error. The obvious candidate is already
+refuted: C write beats double from 4 to 8 between those points, and a 0.75 cy/beat
+write term fits *both* decode points exactly -- then over-predicts the square 8x8
+tile by 22 cycles (32 write beats). So the C drain looks **hidden under compute
+when `steps` is large** (512 on the square tile) and **exposed when it is small**
+(128 at decode), which is a `max`-shaped effect rather than a linear one. Two points
+cannot determine that term; a third n would.
+
+`run-gemm-concurrent.sh` now takes `JOB_M`/`JOB_N`/`JOB_K`, so the geometry axis is
+no longer manual-invocation only, and it rejects `JOB_K % 16 != 0` while INT4 is in
+the format tables -- the guard for the latent row-stride bug below.
 
 **Latent bug found while probing that point:** at `JOB_N=16, JOB_K=8` the harness
 sets `lda = ldb = k`, giving INT4 a 4-byte row stride, and the loader does not read

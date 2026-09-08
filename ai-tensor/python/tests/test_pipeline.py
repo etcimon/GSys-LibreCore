@@ -328,6 +328,34 @@ def test_the_measured_decode_residency_and_the_ceil_refinement():
     assert fp32[0] / fp32[1] < 1.1
 
 
+def test_decode_at_n16_confirms_the_prediction_and_exposes_a_known_residual():
+    """The point the fixed harness memory map had refused, now measured.
+
+    FP32 resident-B 298 -> 153 = 1.948x against a 1.980x prediction, and B's share came
+    out 941/1000 = 16/17 exactly. The model is 3 cycles LOW for EVERY format here while
+    exact at n=8 -- recorded, not fitted away, because two points cannot determine the
+    term and the obvious candidate is refuted (see DECODE_N16_RESIDUAL).
+    """
+    fp32 = P.MEASURED_DECODE_N16[AI_FMT_FP32]
+    assert fp32[0] / fp32[2] == pytest.approx(1.948, abs=1e-3)
+    assert fp32[0] / fp32[3] == pytest.approx(2.084, abs=1e-3)
+    # Still bounded by the closed-form ceiling, and closer to it than n=8 was.
+    ceiling = P.decode_residency_ceiling(AI_FMT_FP32, 16, lanes=8)
+    n8 = P.MEASURED_DECODE[AI_FMT_FP32]
+    assert n8[0] / n8[2] < fp32[0] / fp32[2] < ceiling
+    # B's share is purely geometric.
+    assert int(1000 * P.decode_b_share(1, 16)) == 941
+    # The residual is a CONSTANT +3 across formats -- so it is not a beta error.
+    residuals = set()
+    for numfmt, (cold, _, _, _) in P.MEASURED_DECODE_N16.items():
+        residuals.add(cold - P.model_cycles(numfmt, 1, 16, 16, lanes=8))
+    assert residuals == {P.DECODE_N16_RESIDUAL}
+    assert P.DECODE_N16_RESIDUAL == 3
+    # And the n=8 points remain exact, so the residual is n-dependent.
+    for numfmt, (cold, _, _, _) in P.MEASURED_DECODE.items():
+        assert P.model_cycles(numfmt, 1, 8, 16, lanes=8) == cold
+
+
 def test_b_dominates_decode_traffic_for_geometric_reasons_only():
     """Measured 888/1000 for EVERY format, because row_bytes and beta cancel."""
     assert P.decode_b_share(1, 8) == pytest.approx(8 / 9)

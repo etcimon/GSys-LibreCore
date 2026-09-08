@@ -436,7 +436,7 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   and a pipelined (registered) stacking path if multi-stage selection is ever wanted
   in hardware rather than in the host planner.
 - [x] DECODE RESIDENCY MEASURED, and it corrected two of my own claims. Remote
-  i-gemm-reuse-20260908T010220Z-bddf7872d7ad PASS: a new DECODE experiment (m=1)
+  `ai-gemm-reuse-20260908T010220Z-bddf7872d7ad` PASS: a new DECODE experiment (m=1)
   runs alongside the square DUAL one in the SAME run. FP32 decode resident-B 158->85 =
   1.859x and resident-both 158->75 = 2.107x, against the square tile's 1.1225x/1.2792x --
   so decode residency is 1.53-1.66x LARGER, confirming that a square tile is the least
@@ -456,8 +456,7 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   for FP32 at 8 lanes (measured 1.859x, approaching from below) but 10.12x at 64 lanes.
   The ceiling RISES as lanes shrink the step term, which is why the same mechanism gives
   ~2.1x on the 8-lane corner and much more on the 256-lane SKU where ceil(rb/lanes)==1.
-  B's share is 
-/(m+n) and nothing else -- measured 888/1000 for ALL formats, since
+  B's share is `n/(m+n)` and nothing else -- measured 888/1000 for ALL formats, since
   row_bytes and beta cancel, so it is a property of the shape alone.
 - [x] LATENT LOADER BUG FOUND while probing n=16: at JOB_N=16/JOB_K=8 the harness sets
   lda=ldb=k, giving INT4 a 4-byte row stride, and the loader does not read
@@ -465,10 +464,23 @@ not a change to the I3-before-I2 ordering or the production GEMM traversal.
   detect a shifted read); the first SIGNED INT4 tile fails golden. Guarded rather than
   papered over. Also: JOB_M/N/K are now parameters, the m*n-even assumption is gone
   (job_write_beats), and MaxDim guards now cover m and n rather than only k.
-- [ ] Not measured: n>=16 needs the harness B sub-slot enlarged (OFF_C-OFF_B = 0x200 =
-  512 B; FP32 at n=16,k=16 needs 1,024 B), which moves every multi-engine address and so
-  wants an explicit decision. un-gemm-concurrent.sh also does not yet pass
-  -GJOB_M/-GJOB_N/-GJOB_K, so the geometry axis is manual-invocation only.
+- [x] n=16 NOW MEASURED. The blocker was the harness's fixed 512 B B sub-slot, which
+  correctly refused FP32 at n=16,k=16 (needs 1,024 B). The slots are now DERIVED from the
+  geometry with a 512 B floor per region, so OFF_B/OFF_C/SLOT come out 0x200/0x400/0x600
+  exactly as before and every multi-engine address is unchanged -- verified byte-identical
+  on the default run, and NWORDS only grows when a larger geometry needs it. Measured
+  FP32 decode n=16: cold 298, resident-B 153 = 1.948x, both 143 = 2.084x, against
+  predictions of 1.980x/2.122x -- right to ~1.6%. B share 941/1000 = 16/17 exactly.
+  INT8 1.961x, INT4 1.971x, FP16 1.953x. `run-gemm-concurrent.sh` now takes
+  JOB_M/JOB_N/JOB_K so the geometry axis is no longer manual-invocation only, and it
+  rejects JOB_K%16 != 0 while INT4 is in the tables (the row-stride guard).
+- [ ] KNOWN RESIDUAL, kept rather than fitted away: the model is 3 cycles LOW for all
+  four formats at decode n=16 and EXACT at n=8. Format-independent, so not a beta error.
+  The obvious candidate is refuted -- C write beats double 4->8 between those points and
+  a 0.75 cy/beat write term fits BOTH decode points exactly, then over-predicts the
+  square 8x8 tile by 22 cycles (32 write beats). So the C drain looks hidden under
+  compute when steps is large (512 square) and exposed when small (128 decode), i.e. a
+  max-shaped effect, not linear. Two points cannot determine it; a third n would.
 - [x] LOSSLESS NARROWING LANDED: the exact traffic lever FP32 never had. Bit-preserving
   FP32 had exactly ONE implemented speedup (recipe 16 residency, 1.279x) because the
   two exact levers that could help it -- lossless repack 1/3/17 and zero-skip 2 --

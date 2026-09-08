@@ -67,17 +67,43 @@ module tb_g6lc_ai_gemm_concurrent
   localparam int unsigned MST_ID  = ID_W + ((N_PORTS > 1) ? $clog2(N_PORTS) : 1);
   localparam int unsigned ADDR_W  = 64;
   localparam int unsigned DATA_W  = 64;
-  localparam int unsigned NWORDS  = 1024;   // 8 KiB model
   localparam int unsigned TO_HS   = 8000;
   localparam int unsigned TO_RSP  = 60000;
 
-  // Per-engine memory slots inside the 8 KiB model.  A and B each get 512 B
-  // (8 rows x k_bytes up to 64 B), C gets 512 B (8x8 x 4 B = 256 B used).
-  // Slot i starts at 0x0400 + i*0x600; four engines end at 0x1C00 < 0x2000.
+  // Per-engine memory slots, DERIVED from the geometry rather than fixed.
+  //
+  // They used to be constants sized for the 8x8x16 default (A and B 512 B each,
+  // C 512 B, slot 0x600), which is exactly what blocked the decode point the
+  // shape analysis asked for: FP32 at n=16, k=16 needs 1,024 B of B and the
+  // guard correctly refused it.  Deriving them lifts that limit without moving
+  // anything at the default -- each sub-slot keeps a 512 B FLOOR, so
+  // OFF_B/OFF_C/SLOT come out 0x200/0x400/0x600 exactly as before and every
+  // multi-engine address is unchanged.  Only a larger geometry grows them.
+  //
+  // Bounds are taken at 4 bytes per element, the widest format staged.  C is
+  // charged an even element count because poison_engine writes 64-bit pairs.
+  localparam int unsigned SUBSLOT_MIN = 16'h0200;
+  localparam int unsigned A_BYTES = JOB_M * JOB_K * 4;
+  localparam int unsigned B_BYTES = JOB_N * JOB_K * 4;
+  localparam int unsigned C_BYTES = ((JOB_M * JOB_N + 1) / 2) * 8;
+  // Round each region up to a 64-byte boundary so a row never straddles the
+  // next region's first beat.
+  localparam int unsigned A_SPAN = ((A_BYTES < SUBSLOT_MIN ? SUBSLOT_MIN : A_BYTES) + 63) / 64 * 64;
+  localparam int unsigned B_SPAN = ((B_BYTES < SUBSLOT_MIN ? SUBSLOT_MIN : B_BYTES) + 63) / 64 * 64;
+  localparam int unsigned C_SPAN = ((C_BYTES < SUBSLOT_MIN ? SUBSLOT_MIN : C_BYTES) + 63) / 64 * 64;
   localparam logic [63:0] ENG_BASE   = 64'h8000_0400;
-  localparam int unsigned SLOT       = 16'h0600;
-  localparam int unsigned OFF_B      = 16'h0200;
-  localparam int unsigned OFF_C      = 16'h0400;
+  localparam int unsigned OFF_B      = A_SPAN;
+  localparam int unsigned OFF_C      = A_SPAN + B_SPAN;
+  localparam int unsigned SLOT       = A_SPAN + B_SPAN + C_SPAN;
+
+  // 8 KiB model, or as much more as the derived slots need. The floor keeps the
+  // default build at exactly 1024 words (0x400 + 4*0x600 = 0x1C00 fits), so the
+  // memory model is byte-identical unless a larger geometry is asked for.
+  // Declared after SLOT because it depends on it.
+  localparam int unsigned NWORDS_MIN  = 1024;
+  localparam int unsigned NWORDS_NEED = (16'h0400 + N_ENGINES * SLOT + 7) / 8;
+  localparam int unsigned NWORDS      =
+      (NWORDS_NEED > NWORDS_MIN) ? NWORDS_NEED : NWORDS_MIN;
 
   // The measurement geometry (default 8x8x16, 1024 MACs per engine) is now the
   // JOB_M/JOB_N/JOB_K module parameters above.  It is still kept CONSTANT across

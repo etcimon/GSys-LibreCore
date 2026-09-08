@@ -67,7 +67,9 @@ __all__ = [
     "BETA",
     "MODEL_CONSTANT",
     "CycleModel",
+    "DECODE_N16_RESIDUAL",
     "MEASURED_DECODE",
+    "MEASURED_DECODE_N16",
     "MEASURED_DOT_CELLS",
     "MEASURED_ENGINE_CELLS",
     "MEASURED_LANE_SWEEP",
@@ -319,6 +321,32 @@ MEASURED_DECODE: Dict[int, Tuple[int, int, int, int]] = {
     vt.AI_FMT_FP16: (90, 84, 49, 43),
     AI_FMT_FP32: (158, 148, 85, 75),
 }
+
+#: The same experiment at n=16, reached by deriving the harness memory slots from the
+#: geometry (the fixed 512 B B-sub-slot had refused FP32 at n=16, k=16, which needs
+#: 1,024 B). FP32 resident-B measures 298 -> 153 = **1.948x** and resident-both
+#: 298 -> 143 = 2.084x, against predictions of 1.980x / 2.122x -- right to ~1.6%. B's
+#: share came out 941/1000, exactly `n/(m+n) = 16/17`.
+MEASURED_DECODE_N16: Dict[int, Tuple[int, int, int, int]] = {
+    AI_FMT_INT:  (100, 96, 51, 47),
+    AI_FMT_INT4: (67, 64, 34, 31),
+    vt.AI_FMT_FP16: (166, 160, 85, 79),
+    AI_FMT_FP32: (298, 288, 153, 143),
+}
+
+#: KNOWN MODEL RESIDUAL at decode n=16: the model is 3 cycles LOW for every one of the
+#: four formats, and exact at n=8.
+#:
+#: Recorded rather than fitted away, because two points cannot determine the term and
+#: the obvious candidate is already refuted: C write beats double from 4 to 8 between
+#: those points, and a 0.75 cy/beat write term fits BOTH decode points exactly -- then
+#: over-predicts the square 8x8 tile by 22 cycles (32 write beats). So the C drain
+#: appears to be hidden under compute when `steps` is large (512 on the square tile) and
+#: exposed when it is small (128 at decode), which is a `max`-shaped effect rather than a
+#: linear one. Pinning it needs a third n.
+#:
+#: The residual is format-INDEPENDENT, so it is not a beta error.
+DECODE_N16_RESIDUAL = 3
 
 
 def decode_b_share(m: int, n: int) -> float:

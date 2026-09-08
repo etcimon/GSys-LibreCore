@@ -26,6 +26,13 @@ DOT_PIPE_FLOAT="${DOT_PIPE_FLOAT:-0}"
 PE_LANES="${PE_LANES:-0}"
 MAX_DIM="${MAX_DIM:-0}"
 DRAM_CLASS="${DRAM_CLASS:-0}"
+# Job geometry. 8/8/16 is the measured default and every published cycle number
+# is at it; the axis exists because shape moves the answer (a decode row is
+# traffic-bound where a square tile is not), and the memory slots are derived
+# from these so a larger geometry no longer needs a hand-edited memory map.
+JOB_M="${JOB_M:-8}"
+JOB_N="${JOB_N:-8}"
+JOB_K="${JOB_K:-16}"
 RUN_TIMEOUT="${AI_GEMM_CONC_TIMEOUT:-300}"
 VERILATOR="${VERILATOR:-verilator}"
 if [[ ! "$JOBS" =~ ^[1-9][0-9]*$ ]] || (( JOBS > 256 )); then
@@ -40,6 +47,21 @@ if [[ ! "$MAX_DIM" =~ ^(0|[1-9][0-9]*)$ ]] || (( MAX_DIM != 0 && (MAX_DIM < 16 |
   exit 2
 fi
 case "$DRAM_CLASS" in 0|1) ;; *) echo "FAIL DRAM_CLASS must be 0 or 1" >&2; exit 2;; esac
+for g in JOB_M JOB_N JOB_K; do
+  v="${!g}"
+  if [[ ! "$v" =~ ^[1-9][0-9]*$ ]] || (( v > 256 )); then
+    echo "FAIL $g must be 1..256" >&2
+    exit 2
+  fi
+done
+# INT4 stages a packed nibble row, and the loader only reads 8-byte-aligned rows
+# back correctly; k must therefore keep the row stride on an 8-byte boundary.
+# Caught by a signed INT4 tile failing golden at JOB_K=8 -- all-ones fixtures
+# pass there, because uniform data cannot detect a shifted read.
+if (( JOB_K % 16 != 0 )); then
+  echo "FAIL JOB_K must be a multiple of 16 while INT4 is in the format tables" >&2
+  exit 2
+fi
 if [[ ! "$RUN_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
   echo "FAIL AI_GEMM_CONC_TIMEOUT must be positive seconds" >&2
   exit 2
@@ -72,6 +94,9 @@ build_cfg() {
     -GDOT_PIPE_FLOAT="$DOT_PIPE_FLOAT" \
     -GPE_LANES="$PE_LANES" \
     -GMAX_DIM="$MAX_DIM" \
+      -GJOB_M="$JOB_M" \
+      -GJOB_N="$JOB_N" \
+      -GJOB_K="$JOB_K" \
     -GDRAM_CLASS="$DRAM_CLASS" \
   -I"$AXI/include" \
   -I"$CCELLS/include" \
