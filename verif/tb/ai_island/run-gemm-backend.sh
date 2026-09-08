@@ -13,10 +13,26 @@ if ! command -v verilator >/dev/null 2>&1; then
 fi
 CCELLS="$ROOT/vendor/pulp-platform/common_cells"
 AXI="$ROOT/vendor/pulp-platform/axi"
-# Opt-in RTL measurement sweep. Unset / not "1" => byte-identical default run.
+# Opt-in RTL measurement sweeps. Unset / not "1" => byte-identical default run.
 PLUSARGS=()
 if [[ "${AI_GEMM_BACKEND_MEASURE:-0}" == "1" ]]; then
   PLUSARGS+=(+measure)
+fi
+# `+measure_k` sweeps k = 16/32/64 against the lane width to test whether the
+# lane optimum tracks `row_bytes` rather than the element width. It needs
+# MaxDim >= 64 to reach k=64, which is why MAX_DIM is exposed below: the sweep
+# existed in the testbench but nothing could drive it past the default MaxDim.
+if [[ "${AI_GEMM_BACKEND_MEASURE_K:-0}" == "1" ]]; then
+  PLUSARGS+=(+measure_k)
+fi
+# Provisioning overrides for the measurement sweeps only. 0 keeps the shipped
+# value, so an unset build is byte-identical to the directed configuration.
+PE_LANES="${PE_LANES:-0}"
+MAX_DIM="${MAX_DIM:-0}"
+case "$PE_LANES" in 0|8|16|32|64|128|256) ;; *) echo "FAIL invalid PE_LANES" >&2; exit 2;; esac
+if [[ ! "$MAX_DIM" =~ ^(0|[1-9][0-9]*)$ ]] || (( MAX_DIM != 0 && (MAX_DIM < 16 || MAX_DIM > 256) )); then
+  echo "FAIL MAX_DIM must be 0 or 16..256" >&2
+  exit 2
 fi
 build_nch() {
   local nch="$1"
@@ -27,6 +43,8 @@ build_nch() {
     -GDOT_PIPE_FLOAT="$dpf" \
     -Wno-WIDTHTRUNC -Wno-WIDTHEXPAND -Wno-PINCONNECTEMPTY -Wno-CASEINCOMPLETE \
     -GNCH="$nch" \
+    -GPE_LANES="$PE_LANES" \
+    -GMAX_DIM="$MAX_DIM" \
   -I"$AXI/include" \
   -I"$CCELLS/include" \
   -I"$ROOT/core/include" \

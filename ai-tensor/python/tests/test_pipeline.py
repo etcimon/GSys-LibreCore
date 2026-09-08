@@ -240,6 +240,39 @@ def test_the_model_holds_out_of_sample_across_the_lane_axis():
         assert solved.pop() == pytest.approx(P.BETA[numfmt])
 
 
+def test_k_above_16_shows_beta_is_row_bytes_not_format():
+    """The k>16 sweep separated two things the k=16 corner had fused.
+
+    At k=16 `row_bytes` and format are in 1:1 correspondence, so a per-format beta table
+    and a per-`row_bytes` one are indistinguishable -- the same trap as "twice the
+    element width in lanes". Off k=16 they separate, and the per-format table is wrong.
+    """
+    c = P.MODEL_CONSTANT_BY_HARNESS["gemm_backend"]
+    for (numfmt, k), measured in P.MEASURED_K_SWEEP.items():
+        # The reformulated model is exact.
+        assert P.model_cycles(numfmt, 8, 8, k, lanes=8) + (c - P.MODEL_CONSTANT) == measured
+        # The old per-format beta would have been wrong by a lot.
+        steps = P.steps_for(numfmt, 8, 8, k, 8)
+        beats = P.beats_for(numfmt, 8, 8, k)
+        per_format = math.ceil(steps + P.BETA[numfmt] * beats) + c
+        if P.row_bytes(numfmt, k) != P.row_bytes(numfmt, 16):
+            assert per_format > measured, (numfmt, k)
+
+    # beta is `1 + 9/row_bytes`, and the k=16 table is now a CONSEQUENCE of that.
+    for numfmt, tabulated in P.BETA.items():
+        assert P.beta_for(numfmt, 16) == pytest.approx(tabulated)
+    assert P.beta_for(AI_FMT_INT, 32) == pytest.approx(P.beta_for(AI_FMT_FP16, 16))
+    assert P.ROW_COST == 1.125
+
+    # The cross-check that makes it unambiguous: INT8 at k=32 and FP16 at k=16 have the
+    # same row_bytes, and the same measured cycles. Format does not enter.
+    assert P.row_bytes(AI_FMT_INT, 32) == P.row_bytes(AI_FMT_FP16, 16) == 32
+    assert P.MEASURED_K_SWEEP[(AI_FMT_INT, 32)] == P.MEASURED_LANE_SWEEP[AI_FMT_FP16][8]
+    # ... and likewise INT4 at k=64 against FP16 at k=16.
+    assert P.row_bytes(AI_FMT_INT4, 64) == 32
+    assert P.MEASURED_K_SWEEP[(AI_FMT_INT4, 64)] == P.MEASURED_LANE_SWEEP[AI_FMT_FP16][8]
+
+
 def test_the_lane_optima_are_derived_not_tabulated():
     """`optimal_lanes == row_bytes`, which reproduces all four measured saturations.
 

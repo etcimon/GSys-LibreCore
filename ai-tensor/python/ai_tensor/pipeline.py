@@ -65,6 +65,8 @@ from . import va_turbo as vt
 
 __all__ = [
     "BETA",
+    "ROW_COST",
+    "beta_for",
     "MODEL_CONSTANT",
     "CycleModel",
     "DECODE_N16_RESIDUAL",
@@ -73,6 +75,7 @@ __all__ = [
     "MEASURED_DECODE_SWEEP",
     "MEASURED_DOT_CELLS",
     "MEASURED_ENGINE_CELLS",
+    "MEASURED_K_SWEEP",
     "MEASURED_LANE_SWEEP",
     "MEASURED_RESIDUAL_PROBES",
     "MEASURED_TRUNC_CELLS",
@@ -117,6 +120,31 @@ __all__ = [
 #: * the two testbenches differ by exactly ONE cycle in the additive constant (11 for
 #:   `gemm_concurrent`, 10 for `gemm_backend`) and not at all in `beta`, so the constant
 #:   is per-harness overhead while `beta` is the machine.
+#: Cycles charged per OPERAND ROW, on top of one cycle per read beat. This single
+#: constant replaced the four per-format `beta` values, because `beta` turned out to be
+#: `1 + 9/row_bytes` exactly at every measured point -- and `beta * beats` then expands
+#: to `beats + 9*(m+n)/8`, i.e. one cycle per beat plus 9/8 per operand row.
+#:
+#: The k>16 sweep is what exposed it. At k=16 `row_bytes` and format are in 1:1
+#: correspondence, so a per-format table and a per-row_bytes one are indistinguishable
+#: -- the same trap as "twice the element width in lanes". Off k=16 they separate, and
+#: the per-format table is wrong by +18 to +54 cycles while this form is exact:
+#: INT8 at k=32 and FP16 at k=16 both have `row_bytes = 32` and both measure exactly
+#: 348 cycles. The numeric format does not enter the model at all.
+ROW_COST = 1.125
+
+
+def beta_for(numfmt: int, k: int = 16) -> float:
+    """`1 + 9/row_bytes` -- the marginal cost of a read beat, DERIVED not fitted.
+
+    Kept because the earlier tables and documents are written in terms of beta. It is a
+    function of `row_bytes`, so it depends on k as well as the format.
+    """
+    return 1.0 + 9.0 / row_bytes(numfmt, k)
+
+
+#: The k=16 view of `beta_for`, which is what the original per-format fit measured.
+#: Now derived rather than tabulated, so the four values below are consequences.
 BETA: Dict[int, float] = {
     AI_FMT_FP32: 1.140625,
     vt.AI_FMT_FP16: 1.28125,
@@ -246,6 +274,21 @@ def area_to_lanes(numfmt: int, k: int, shrink: float,
     return lanes, base / got
 
 
+#: The k>16 sweep (`+measure_k` on `tb_g6lc_ai_gemm_backend`, nch=1, ar=2, m=n=8,
+#: PeLanes=8): `{(format, k): cycles}`. Integer formats only -- the golden C is exactly
+#: k for all-ones operands, so other formats would need new per-format constants.
+#:
+#: This is the data that separated `row_bytes` from format. No k>16 measurement had
+#: ever been taken; `+measure_k` existed in the testbench but nothing drove it, because
+#: reaching k=64 needs `MaxDim >= 64` and no runner exposed it.
+MEASURED_K_SWEEP: Dict[Tuple[int, int], int] = {
+    (AI_FMT_INT, 32): 348,
+    (AI_FMT_INT4, 32): 188,
+    (AI_FMT_INT, 64): 668,
+    (AI_FMT_INT4, 64): 348,
+}
+
+
 def optimal_lanes(numfmt: int, k: int) -> int:
     """Lanes beyond which a single dot gains nothing: ``row_bytes``.
 
@@ -318,11 +361,15 @@ def model_cycles(numfmt: int, m: int = 8, n: int = 8, k: int = 16,
         raise ValueError("skip_fraction must be in [0, 1)")
     steps = steps_for(numfmt, m, n, k, lanes, c_ports) * (1.0 - skip_fraction)
     beats = beats_for(numfmt, m, n, k, resident_a, resident_b)
+    # One cycle per read beat, plus ROW_COST per operand ROW. A resident operand
+    # contributes neither. This is the `beta = 1 + 9/row_bytes` form expanded, and it is
+    # exact on 49 measured points spanning 7 formats, 4 lane counts, 3 values of k, the
+    # residency matrix and the decode shape.
+    rows = (0 if resident_a else m) + (0 if resident_b else n)
     # CEIL the work terms before adding the constant. Every square-tile point has an
-    # integral `beta*beats`, so this was invisible until the decode measurement: at
-    # m=1 every fractional case landed on .125 and measured exactly one cycle higher.
-    # A partial beat still costs a whole cycle.
-    return math.ceil(steps + BETA[numfmt] * beats) + MODEL_CONSTANT
+    # integral row term, so this was invisible until the decode measurement: at m=1
+    # every fractional case landed on .125 and measured exactly one cycle higher.
+    return math.ceil(steps + beats + ROW_COST * rows) + MODEL_CONSTANT
 
 
 @dataclass(frozen=True)

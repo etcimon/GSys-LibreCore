@@ -769,6 +769,45 @@ harness the fit never saw. The two testbenches differ by **exactly one cycle** i
 the additive constant (11 for `gemm_concurrent`, 10 for `gemm_backend`) and not at
 all in `beta` -- so the constant is per-harness overhead and `beta` is the machine.
 
+### k>16 collapses the model: `beta` is `row_bytes`, not format
+
+`+measure_k` existed in the testbench and had never been run -- reaching k=64 needs
+`MaxDim >= 64` and no runner exposed it. Driving it (integer formats, nch=1, ar=2,
+m=n=8, PeLanes=8) breaks the per-format `beta` table:
+
+| Format | k | row_bytes | cycles | per-format beta | per-`row_bytes` |
+|---|--:|--:|--:|--:|--:|
+| INT8 | 32 | 32 | 348 | +18 | **0** |
+| INT4 | 32 | 16 | 188 | +18 | **0** |
+| INT8 | 64 | 64 | 668 | +54 | **0** |
+| INT4 | 64 | 32 | 348 | +54 | **0** |
+
+At k=16 `row_bytes` and format are in 1:1 correspondence, so the two tables were
+indistinguishable -- **the same trap as "twice the element width in lanes"**. The
+cross-check is unambiguous: **INT8 at k=32 and FP16 at k=16 both have
+`row_bytes = 32` and both measure exactly 348 cycles.** The numeric format does not
+enter the model at all.
+
+And `beta = 1 + 9/row_bytes` exactly at every point, which expands
+`beta * beats` into `beats + 9*(m+n)/8`. So the whole model reduces to
+
+```
+cycles = ceil(steps + read_beats + 1.125 * operand_rows) + c
+steps        = m*n*ceil(row_bytes/lanes)
+read_beats   = ceil(m*row_bytes/8) + ceil(n*row_bytes/8)   (0 for a resident operand)
+operand_rows = m + n                                       (0 for a resident operand)
+```
+
+**one cycle per read beat plus 9/8 cycles per operand row**, with a single fitted
+constant instead of four per-format ones. It is exact on **49 measured points**: seven
+formats at k=16, the full residency matrix, sixteen lane-sweep points, four k>16
+points and sixteen decode points. The four `beta` values are now consequences.
+
+A pre-existing gotcha found on the way: `$test$plusargs("measure")` **prefix-matches**
+`+measure_k`, so asking for the k sweep silently runs the shape sweep too. Harmless
+here (the shape sweep is idempotent) but it means the k lines appear after a full
+`+measure` block.
+
 ### The lane rule is now derived rather than tabulated
 
 `steps` bottoms out when `ceil(row_bytes/lanes) == 1`, so the optimum is simply
