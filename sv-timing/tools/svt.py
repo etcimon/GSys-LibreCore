@@ -36,6 +36,7 @@ from env_common import (  # noqa: E402
     rustup_home,
     tools_dir,
     venv_python,
+    venv_python_works,
 )
 
 
@@ -189,9 +190,14 @@ def install_rustup(root: Path, env: dict[str, str]) -> None:
 def install_venv(root: Path) -> Path:
     ensure_dirs(root)
     vpy = venv_python(root)
-    if vpy.is_file():
+    if venv_python_works(root):
         log(f"python venv already present: {subprocess.check_output([str(vpy), '--version'], text=True).strip()}")
     else:
+        if vpy.is_file():
+            # Dead shim: the recorded base interpreter is gone. Recreating over it is
+            # what `setup` is for, so say so rather than failing later.
+            log(f"python venv at {vpy} is STALE (base interpreter missing); recreating")
+            shutil.rmtree(python_venv(root), ignore_errors=True)
         host = find_host_python()
         if not host:
             err("no host Python 3 found; install Python 3 and re-run setup")
@@ -229,7 +235,7 @@ def parser_vendored(root: Path) -> bool:
 
 def cmd_vendor(root: Path, env: dict[str, str]) -> None:
     vpy = venv_python(root)
-    py = str(vpy) if vpy.is_file() else (find_host_python() or sys.executable)
+    py = str(vpy) if venv_python_works(root) else (find_host_python() or sys.executable)
     script = root / "tools" / "refresh_sv_parser.py"
     run([py, str(script), "--root", str(root), "--force"], cwd=root, env=env, check=True)
 
@@ -262,8 +268,12 @@ def cmd_doctor(root: Path, env: dict[str, str]) -> None:
     else:
         print("  cargo          = MISSING")
     vpy = venv_python(root)
-    if vpy.is_file():
+    if venv_python_works(root):
         print(f"  venv python    = {subprocess.check_output([str(vpy), '--version'], text=True).strip()} ({vpy})")
+    elif vpy.is_file():
+        # The file exists but the interpreter it shims is gone. Reporting this as
+        # MISSING would send the reader looking for the wrong problem.
+        print(f"  venv python    = STALE at {vpy} (base interpreter gone; run: python tools/svt.py setup)")
     else:
         print("  venv python    = MISSING (run: python tools/svt.py setup)")
     git = shutil.which("git")
@@ -317,7 +327,7 @@ def cmd_test(root: Path, env: dict[str, str], rest: list[str]) -> None:
 def cmd_check(root: Path, env: dict[str, str], rest: list[str]) -> None:
     c = need_cargo(root)
     vpy = venv_python(root)
-    py = str(vpy) if vpy.is_file() else (find_host_python() or sys.executable)
+    py = str(vpy) if venv_python_works(root) else (find_host_python() or sys.executable)
     run([py, str(root / "tools" / "check_independence.py")], cwd=root, env=env, check=True)
     run([str(c), "fmt", "--all", "--", "--check"], cwd=root, env=env, check=True)
     run(
@@ -514,8 +524,8 @@ def main(argv: list[str] | None = None) -> int:
             run([str(c), *rest], cwd=root, env=env, check=True)
         elif cmd in ("python", "py"):
             vpy = venv_python(root)
-            if not vpy.is_file():
-                err("venv missing; run: python tools/svt.py setup")
+            if not venv_python_works(root):
+                err("venv missing or stale; run: python tools/svt.py setup")
                 return 1
             run([str(vpy), *rest], cwd=root, env=env, check=True)
         else:

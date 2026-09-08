@@ -23,7 +23,12 @@ _TOOLS = Path(__file__).resolve().parent
 if str(_TOOLS) not in sys.path:
     sys.path.insert(0, str(_TOOLS))
 
+from env_common import force_utf8_stdio  # noqa: E402
 from flist_expand import expand_filelist, write_portable_f  # noqa: E402
+
+# The summaries below use `->` arrows; a cp1252 console would otherwise abort a
+# COMPLETED soak while printing its own result.
+force_utf8_stdio()
 
 
 def log(msg: str) -> None:

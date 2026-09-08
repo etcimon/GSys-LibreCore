@@ -3,6 +3,62 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+
+## 2026-09-10 — host-environment robustness + a real 4 GHz answer
+
+Two tool defects fixed (package-first), then the tool run in anger.
+
+- [x] **Stale venv was undetectable.** Every call site gated on `Path.is_file()`, which is
+  true for a Windows venv shim whose base interpreter has been uninstalled. The venv here
+  recorded `home = ...\Python39` and the host is now 3.14.3, so `doctor` exited 1 with the
+  shim's own `No Python at '...'` and every other command silently selected a dead
+  interpreter. Added `env_common.venv_python_works()` (runs the interpreter, not `stat`);
+  `doctor` now reports **STALE** distinctly from **MISSING**, `install_venv` recreates a
+  stale tree instead of reusing it, and the two interpreter-selection sites plus
+  `svt.py py` route through the probe. `setup` then rebuilt cleanly on 3.14.3; 132 tests
+  pass.
+- [x] **A completed soak could die printing its own result.** `monorepo_soak.py` writes
+  every file with `encoding="utf-8"` but never reconfigured stdout, so on a cp1252
+  console the `->` arrows in the summary raised
+  `UnicodeEncodeError: 'charmap' codec can't encode character '\u2192'` — *after* the
+  correct+emit work had succeeded, turning a good run into `exit=1`. Added
+  `env_common.force_utf8_stdio()` (`errors="replace"` as a backstop: a report should
+  degrade to a question mark, never abort the run that produced it) and called it from
+  the soak entry point.
+
+### Auto-correct actually improves timing (measured)
+
+| profile | target | primary FO4 | edits | closes | note |
+|---|--:|---|--:|---|---|
+| `sparse_g6lc` | 2000 MHz | 25.09 -> **20.0** | 4 | **yes** | worst after: `g6lc_bp_gshare` |
+| `sparse_g6lc` | 4000 MHz | 25.09 -> **10.0** | 14 | **yes** | dens=91, latency-allowing |
+| `sparse_issue_lsu` | 4000 MHz | 31.67 -> 26.0 | 18 | **no** | worst_all **78.0 -> 78.0** |
+
+- [x] **The 4 GHz question has a measured answer, and §3.2 called it.** The g6lc
+  frontend/OoO/SMT set re-pipelines to the 10 FO4 budget and closes at 4 GHz. The
+  issue/LSU cluster does not: `worst_all` is unmoved by 18 edits (78.0 -> 78.0) and
+  `post_closure` reports `closes=false worst=store_buffer.in0 -> store_buffer.out0
+  slack=-16.0 **max_mhz=1538.5**`. That is squarely inside the "~1.4-1.7 GHz residual
+  after latency-neutral rewrites" this guider already predicts, and it is the same
+  conclusion by a different route: LSU/issue needs microarch or multi-cycle, not FO4
+  credit. Host `timings validate --from-timing` ranks the cluster 26-32 FO4 —
+  `store_unit`/`scoreboard`/`issue_read_operands` as `dense_control_cone`,
+  `load_unit` as `exclusive_case_mux`, `store_buffer` as `independent_lhs_bundle`.
+- [ ] **`sparse_ex` is blocked by non-LRM RTL, not by this package.** `core/alu.sv:276`
+  chains a select onto the result of a range select
+  (`operand_b[i << 3 +: 8][$clog2(CVA6Cfg.XLEN)-4:0]`), introduced by `d05660170` when the
+  xperm8 line was rewritten for Verilator widths. sv-parser rejects it; **slang agrees**
+  (`cannot chain select expressions after a range select`, error) while the
+  named-temporary form compiles clean. So the vendored parser is correct and the RTL is
+  relying on a Verilator extension — a portability risk for tier-R RTL under the host's
+  own synthesizability rule. Fix belongs to the host with the SoC checklist, not here;
+  the stored `full_core` package parsed this file at `byte_len=16147` before the change,
+  so it is a regression.
+- [ ] No real STA is reachable on this host: `timings doctor` reports
+  `yosys: no  opensta: no  openroad: no` and `liberty (unset)`, so S1/S2 soft-skip and
+  everything above stays structural screening. The only correlate on record is the
+  `lab-run` fixture (`overlap_score=1`, 2/2), explicitly `not real STA`.
+
 ## Current phase
 
 **P14 measurement truth — DONE**, **P15 `-O` surface — DONE**,
