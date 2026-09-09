@@ -169,6 +169,23 @@ outputs without their own linear window.
 `__ui_dom` rows at `DOM_Y0`, fetches 8×8 glyph bytes from `__font`, and writes
 foreground/background B8G8R8X8 pixels directly into the latched output
 framebuffer (`__disp.fb`, else `__scan_fb`) at the output's native geometry.
+
+**High-DPI text.** `DomPaint32` derives the *same* uniform scale `N` and centred
+letterbox as `FbExpand` — `N = min(W/low_w, H/low_h)`, capped at `dpi/96` in
+`dpi` mode, clamped to 1..=16, with `ox=(W-low_w*N)/2, oy=(H-low_h*N)/2` — and
+paints each font pixel as an `N`×`N` block on a `8N` pitch starting at
+`(ox, oy + DOM_Y0*N)`. It previously hardcoded an 8px cell at the framebuffer
+origin, so on the `g6lc64-virt` proxy output (1920×1080, dpi 192, `scale_mode:
+"dpi"`) `PROXY-INIT` reported `scale=2` while the text was painted 1:1 in the
+corner: a measured 839×183 ink box in a 1920×1080 frame, about 4% of the panel.
+With the shared derivation the same content measures 1276×366 at `x=322..1597,
+y=108..473`, i.e. exactly `ox=320`/`oy+DOM_Y0*2=108` and four times the area.
+`fill` is deliberately treated as `fit` here — stretching glyphs by unequal
+per-axis integers makes them illegible and the 8×8 font has no non-square form —
+while the plane blit still honours `fill`.
+
+Duplicating the *derivation* rather than the *value* is the point: the earlier
+defect was precisely that the two paths disagreed, one scaling and one not.
 `FbExpandSel` picks `DomPaint32` on a GPU-class surface when DOM rows are
 populated, `FbExpand1` when the GPU surface has no DOM content, and
 `FbExpand` (upscale + letterbox) on a VGA-class surface. `VioPaint`,
@@ -203,7 +220,12 @@ scale 2 at (320,60)); `fb_expand_sel_dispatches_per_output_geometry` drives the
 same latched 1600×1200 through both surfaces — `vga` → `FbExpand` scale 2 at
 (160,120), `gpu` → `FbExpand1` scale 1 at (480,360);
 `dom_paint32_uses_the_disp_latch_geometry` runs `FbExpandSel` → `DomPaint32` at
-a latched 800×600 and checks the runtime-stride glyph cells pixel-for-pixel.
+a latched 800×600 and checks the runtime-stride glyph cells pixel-for-pixel — at
+that geometry `N` collapses to 1 but the origin is still the letterbox (80,60),
+so the case pins the offset independently of the scale. The two
+`dom_paint32_paints_native_32bpp_text_on_gpu_surface*` tests assert every device
+pixel of each `N`×`N` block at `N=2`, which is what makes them scale assertions
+rather than offset ones, and additionally assert the old 1:1 origin is now clear.
 All three run on RV32 and RV64. The low-res `__gr_plane` / `DomPaint` path
 remains intact for VGA-class output and for the legacy 4bpp UI re-dump.
 

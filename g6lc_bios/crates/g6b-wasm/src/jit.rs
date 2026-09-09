@@ -1582,30 +1582,50 @@ mod tests {
         assert_eq!(s.disp_desc.1, 1920);
         assert_eq!(s.disp_desc.2, 1080);
 
-        // The 'U' glyph row 0 is 0x66 = 0b01100110 (MSB left). Native 32bpp
-        // text starts at y = DOM_Y0, x = 0. Pixel x=1 and x=2 are white;
-        // x=0 is black.
+        // High-DPI placement. The text surface uses the SAME uniform scale and
+        // centred letterbox as FbExpand, derived from this spec:
+        //   fit  = min(1920/640, 1080/480) = 2 ; dpi cap = 192/96 = 2 → N = 2
+        //   ox   = (1920 - 640*2)/2 = 320 ; oy = (1080 - 480*2)/2 = 60
+        // Before this, DomPaint32 painted 8x8 glyphs 1:1 at (0, DOM_Y0), so the
+        // whole BIOS sat in ~4% of a 1920x1080 panel while PROXY-INIT already
+        // reported scale=2.
         let fb = &s.scan_fb;
         assert!(!fb.is_empty(), "scan_fb empty");
         let stride = 1920usize;
-        let y = g6b_asm::dom::DOM_Y0 as usize;
-        let row = y * stride * 4;
-        let off0 = row;
-        assert_eq!(fb[off0], 0x00, "U pixel 0 B");
-        assert_eq!(fb[off0 + 1], 0x00, "U pixel 0 G");
-        assert_eq!(fb[off0 + 2], 0x00, "U pixel 0 R");
-        assert_eq!(fb[off0 + 3], 0x00, "U pixel 0 X");
-        let off1 = row + 4;
-        assert_eq!(fb[off1], 0xFF, "U pixel 1 B");
-        assert_eq!(fb[off1 + 1], 0xFF, "U pixel 1 G");
-        assert_eq!(fb[off1 + 2], 0xFF, "U pixel 1 R");
-        assert_eq!(fb[off1 + 3], 0x00, "U pixel 1 X");
-
-        // The 640×480 plane 1:1 origin (640,300) should be clear because
-        // DomPaint32 clears the full scanout and only paints the DOM text.
-        let plane_off = (300 * stride + 640) * 4;
-        assert_eq!(fb[plane_off], 0x00, "plane 1:1 origin should be clear");
-        assert_eq!(fb[plane_off + 3], 0x00, "plane 1:1 origin X");
+        let n = 2usize;
+        let ox = (1920 - 640 * n) / 2;
+        let oy = (1080 - 480 * n) / 2;
+        let y0 = oy + g6b_asm::dom::DOM_Y0 as usize * n;
+        let px = |x: usize, y: usize| (y * stride + x) * 4;
+        // 'U' glyph row 0 is 0x66 = 0b01100110, MSB leftmost. So font columns
+        // 1,2,5,6 are ink and 0,3,4,7 are not.
+        for (col, ink) in [(0, false), (1, true), (2, true), (3, false)] {
+            // Every device pixel of the N×N block must agree, which is what
+            // makes this a scale assertion and not just an offset one.
+            for dy in 0..n {
+                for dx in 0..n {
+                    let o = px(ox + col * n + dx, y0 + dy);
+                    let want = if ink { 0xFF } else { 0x00 };
+                    assert_eq!(fb[o], want, "U col {col} block ({dx},{dy}) B");
+                    assert_eq!(fb[o + 1], want, "U col {col} block ({dx},{dy}) G");
+                    assert_eq!(fb[o + 2], want, "U col {col} block ({dx},{dy}) R");
+                }
+            }
+        }
+        // Nothing may be painted left of or above the letterbox origin.
+        assert_eq!(
+            fb[px(ox - 1, y0)],
+            0x00,
+            "left of letterbox must stay clear"
+        );
+        assert_eq!(fb[px(ox + n, oy)], 0x00, "above the first text row");
+        // The unscaled origin the old code used must now be empty, which is the
+        // regression this test exists to catch.
+        assert_eq!(
+            fb[px(1, g6b_asm::dom::DOM_Y0 as usize)],
+            0x00,
+            "1:1 origin must be clear"
+        );
     }
 
     /// GPU surface with an empty DOM falls back to `FbExpand1` (the 640×480
@@ -1795,18 +1815,30 @@ mod tests {
         assert!(s.console.contains("DOM| UI-BOOT"), "{}", s.console);
         assert!(s.console.contains("DISP-OK"), "{}", s.console);
 
+        // Same high-DPI geometry as the RV64 case (N=2, ox=320, oy=60): the
+        // scale is derived from the spec, so it must not depend on XLEN.
         let fb = &s.scan_fb;
         assert!(!fb.is_empty(), "scan_fb empty");
         let stride = 1920usize;
-        let y = g6b_asm::dom::DOM_Y0 as usize;
-        let row = y * stride * 4;
-        let off0 = row;
-        let off1 = row + 4;
-        assert_eq!(fb[off0], 0x00, "U pixel 0 B");
-        assert_eq!(fb[off0 + 1], 0x00, "U pixel 0 G");
-        assert_eq!(fb[off0 + 2], 0x00, "U pixel 0 R");
-        assert_eq!(fb[off1], 0xFF, "U pixel 1 B");
-        assert_eq!(fb[off1 + 1], 0xFF, "U pixel 1 G");
-        assert_eq!(fb[off1 + 2], 0xFF, "U pixel 1 R");
+        let n = 2usize;
+        let ox = (1920 - 640 * n) / 2;
+        let oy = (1080 - 480 * n) / 2;
+        let y0 = oy + g6b_asm::dom::DOM_Y0 as usize * n;
+        let px = |x: usize, y: usize| (y * stride + x) * 4;
+        for (col, ink) in [(0, false), (1, true), (2, true), (3, false)] {
+            for dy in 0..n {
+                for dx in 0..n {
+                    let o = px(ox + col * n + dx, y0 + dy);
+                    let want = if ink { 0xFF } else { 0x00 };
+                    assert_eq!(fb[o], want, "U col {col} block ({dx},{dy}) B");
+                    assert_eq!(fb[o + 2], want, "U col {col} block ({dx},{dy}) R");
+                }
+            }
+        }
+        assert_eq!(
+            fb[px(1, g6b_asm::dom::DOM_Y0 as usize)],
+            0x00,
+            "1:1 origin must be clear"
+        );
     }
 }

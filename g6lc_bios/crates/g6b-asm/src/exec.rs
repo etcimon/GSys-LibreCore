@@ -3588,9 +3588,14 @@ mod tests {
                 s.halt
             );
             assert!(s.console.contains("DOM| HI"), "{}", s.console);
-            // Row 0 paints at y = DOM_Y0 = 24; glyph cell = row_base +
-            // col*32 bytes, glyph rows step by the latched stride (3200).
+            // Geometry comes from the *latched* 800x600, and the text surface
+            // now uses the same uniform scale + centred letterbox as FbExpand:
+            //   N  = min(800/640, 600/480) = 1   (no room to magnify here)
+            //   ox = (800-640)/2 = 80 ; oy = (600-480)/2 = 60
+            // So the scale is 1:1 for this output but the origin is the
+            // letterbox, not (0,0) — which is what this assertion pins.
             let font = crate::font::font_bytes();
+            let (n, ox, oy) = (1u32, (800 - 640) / 2, (600 - 480) / 2);
             let dp = |x: u32, y: u32| -> u32 {
                 u32::from_le_bytes(
                     s.scan_fb[(y * 800 + x) as usize * 4..][..4]
@@ -3598,6 +3603,7 @@ mod tests {
                         .unwrap(),
                 )
             };
+            let y0 = oy + 24 * n;
             for gy in 0..8u32 {
                 let bits = font[((b'H' - 0x20) as usize) * 8 + gy as usize];
                 for gx in 0..8u32 {
@@ -3607,15 +3613,17 @@ mod tests {
                         0
                     };
                     assert_eq!(
-                        dp(gx, 24 + gy),
+                        dp(ox + gx * n, y0 + gy * n),
                         want,
                         "xlen={xlen} 'H' glyph px ({gx},{gy})"
                     );
                 }
             }
-            // 'I' lands at the next 8px cell; everything past the painted
+            // 'I' lands at the next scaled cell; everything past the painted
             // glyph rows stays cleared.
-            assert_eq!(dp(0, 24 + 8), 0, "row band boundary");
+            assert_eq!(dp(ox, y0 + 8 * n), 0, "row band boundary");
+            // Nothing outside the letterbox.
+            assert_eq!(dp(0, y0), 0, "left of letterbox stays clear");
         }
     }
 

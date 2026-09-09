@@ -7,7 +7,7 @@
     "worker.js": "ae38aa0b7010caca57f2ed751451a080541a75fc043f679d41418f3d5f014fdc",
     "bios-ui.css": "9225db25139bf600c5561b87d57d6f38f78c9be99440c6807e014697ec45511a",
     "index.html": "aec25360c2526e1b010ffa33d9dbe79bd27970ef0f890eede698f50f3c1926c3",
-    "bios-ui-libwasm.wasm": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    "bios-ui-libwasm.wasm": "b0a9b1d443a1280f93c46214e4763732822d502f3aeaaacef785b83bdb5b02cb"
   },
-  "libwasmAvailable": false
+  "libwasmAvailable": true
 }

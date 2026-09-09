@@ -2014,6 +2014,191 @@ fn dom_paint_node(spec: &BoardSpec) -> Node {
 /// native `high_w / 8` rather than the low-res `DOM_TEXT_MAX`, so a single row
 /// can use more of the screen width. Source rows are still bounded (`DOM_ROWS`,
 /// `DOM_TEXT_MAX`), so a row longer than the screen width is truncated.
+/// Low-res plane width the letterbox is computed against — the same
+/// `g6b_spec_proxy` tuple `FbExpand` uses, so both blits share one geometry.
+fn dom_low_w(spec: &BoardSpec) -> u32 {
+    crate::analyze::g6b_spec_proxy(spec).0
+}
+
+fn dom_low_h(spec: &BoardSpec) -> u32 {
+    crate::analyze::g6b_spec_proxy(spec).1
+}
+
+/// Emit the uniform scale + centred letterbox for the native text surface.
+///
+/// Deliberately the same formula as `FbExpand` (`vio.rs`): `fit`/`dpi` take
+/// `min(W/low_w, H/low_h)` with `dpi` capped at `dpi/96`, clamped to 1..=16, and
+/// the letterbox is `ox=(W-low_w*s)/2, oy=(H-low_h*s)/2`. Duplicating the
+/// *value* rather than the *derivation* is what previously let the 4bpp path
+/// scale while the 32bpp text path stayed at 1:1.
+///
+/// `fill` is intentionally treated as `fit` here: stretching text per-axis by
+/// unequal integer factors makes glyphs illegible, and the 8x8 font has no
+/// non-square form. The plane blit still honours `fill`.
+///
+/// Leaves N at `sp+0`, ox at `sp+96`, oy at `sp+104` and cell=8N at `sp+112`.
+/// Clobbers t0..t2 and a0..a2; expects w in s2, h in s3.
+fn dom_scale_ops(spec: &BoardSpec, xlen: u32) -> Vec<Op> {
+    let gp = crate::analyze::g6b_spec_proxy(spec);
+    let (low_w, low_h, dpi) = (gp.0, gp.1, gp.4);
+    let dpi_cap = (i64::from(dpi) / 96).max(1);
+    let mut ops = vec![Op::Comment(format!(
+        "high-DPI text scale: fit=min(w/{low_w}, h/{low_h}) capped at dpi/96={dpi_cap}, \
+         centred letterbox — same derivation as FbExpand"
+    ))];
+    ops.extend([
+        Op::Li {
+            rd: T0,
+            imm: i64::from(low_w),
+        },
+        Op::Divu {
+            rd: T1,
+            rs1: S2,
+            rs2: T0,
+        },
+        Op::Li {
+            rd: T0,
+            imm: i64::from(low_h),
+        },
+        Op::Divu {
+            rd: T2,
+            rs1: S3,
+            rs2: T0,
+        },
+        // a0 = min(qx, qy)
+        Op::Sltu {
+            rd: T0,
+            rs1: T1,
+            rs2: T2,
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: "dp32_sc_x".into(),
+        },
+        Op::Addi {
+            rd: A0,
+            rs: T2,
+            imm: 0,
+        },
+        jump("dp32_sc_min"),
+        Op::Label("dp32_sc_x".into()),
+        Op::Addi {
+            rd: A0,
+            rs: T1,
+            imm: 0,
+        },
+        Op::Label("dp32_sc_min".into()),
+    ]);
+    if !spec.kernel.proxy.scale_mode.is_empty() && spec.kernel.proxy.scale_mode == "dpi" {
+        // dpi mode: cap the fit scale at dpi/96 so a high-DPI panel does not
+        // magnify beyond the declared pixel density.
+        ops.extend([
+            Op::Li {
+                rd: T0,
+                imm: dpi_cap,
+            },
+            Op::Sltu {
+                rd: T1,
+                rs1: T0,
+                rs2: A0,
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: X0,
+                to: "dp32_sc_cap".into(),
+            },
+            Op::Addi {
+                rd: A0,
+                rs: T0,
+                imm: 0,
+            },
+            Op::Label("dp32_sc_cap".into()),
+        ]);
+    }
+    // clamp to 1..=16: 0 would divide by zero below, and an absurd scale would
+    // put a single glyph across the panel.
+    ops.extend([
+        Op::Li { rd: T0, imm: 1 },
+        Op::Sltu {
+            rd: T1,
+            rs1: A0,
+            rs2: T0,
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: X0,
+            to: "dp32_sc_lo".into(),
+        },
+        Op::Li { rd: A0, imm: 1 },
+        Op::Label("dp32_sc_lo".into()),
+        Op::Li { rd: T0, imm: 16 },
+        Op::Sltu {
+            rd: T1,
+            rs1: T0,
+            rs2: A0,
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: X0,
+            to: "dp32_sc_hi".into(),
+        },
+        Op::Li { rd: A0, imm: 16 },
+        Op::Label("dp32_sc_hi".into()),
+        st_x(xlen, A0, SP, 0),
+        // cell = 8*N
+        Op::Slli {
+            rd: T0,
+            rs: A0,
+            shamt: 3,
+        },
+        st_x(xlen, T0, SP, 112),
+        // ox = (w - low_w*N) / 2
+        Op::Li {
+            rd: T0,
+            imm: i64::from(low_w),
+        },
+        Op::Mul {
+            rd: T0,
+            rs1: T0,
+            rs2: A0,
+        },
+        Op::Sub {
+            rd: T0,
+            rs1: S2,
+            rs2: T0,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T0,
+            shamt: 1,
+        },
+        st_x(xlen, T0, SP, 96),
+        // oy = (h - low_h*N) / 2
+        Op::Li {
+            rd: T0,
+            imm: i64::from(low_h),
+        },
+        Op::Mul {
+            rd: T0,
+            rs1: T0,
+            rs2: A0,
+        },
+        Op::Sub {
+            rd: T0,
+            rs1: S3,
+            rs2: T0,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T0,
+            shamt: 1,
+        },
+        st_x(xlen, T0, SP, 104),
+    ]);
+    ops
+}
+
 fn dom_paint32_node(spec: &BoardSpec) -> Node {
     let xlen = spec.isa.xlen;
     let mut ops = vec![
@@ -2027,7 +2212,7 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: -96,
+            imm: -128,
         },
         st_x(xlen, RA, SP, 88),
         st_x(xlen, S0, SP, 80),
@@ -2069,12 +2254,46 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
             addr: Addr::ScanFb,
         },
         Op::Label("dp32_dst".into()),
-        // paint_rows = clamp((h - DOM_Y0) >> 3, 0, DOM_ROWS). h is u32;
-        // a negative difference would come out of the sign-bit check.
-        Op::Addi {
+    ];
+    // High-DPI text: derive the SAME uniform scale and centred letterbox that
+    // `FbExpand` uses (`crates/g6b-asm/src/vio.rs`), so the native 32bpp text
+    // surface and the 4bpp plane blit agree on one geometry instead of two.
+    // Without this the glyphs were painted 1:1 at the origin, so on the
+    // 1920x1080 / 192-DPI proxy output the whole BIOS occupied ~4% of the
+    // panel in the top-left corner while `PROXY-INIT` reported scale=2.
+    //
+    // Spills, because every s-register already holds loop state:
+    //   sp+0   scale N        sp+96  ox (letterbox x)
+    //   sp+104 oy             sp+112 cell (8*N, the scaled glyph pitch)
+    ops.extend(dom_scale_ops(spec, xlen));
+    ops.extend([
+        // paint_rows = clamp((used_h - DOM_Y0*N) / cell, 0, DOM_ROWS), where
+        // used_h = low_h*N is the letterboxed window height rather than the
+        // whole output, so text cannot run past the plane's scaled extent.
+        ld_x(xlen, T1, SP, 112),
+        Op::Li {
+            rd: T2,
+            imm: i64::from(dom_low_h(spec)),
+        },
+        ld_x(xlen, T0, SP, 0),
+        Op::Mul {
+            rd: T2,
+            rs1: T2,
+            rs2: T0,
+        },
+        Op::Li {
             rd: S8,
-            rs: S3,
-            imm: -DOM_Y0 as i32,
+            imm: DOM_Y0,
+        },
+        Op::Mul {
+            rd: S8,
+            rs1: S8,
+            rs2: T0,
+        },
+        Op::Sub {
+            rd: S8,
+            rs1: T2,
+            rs2: S8,
         },
         Op::Srli {
             rd: T0,
@@ -2086,10 +2305,10 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
             rs2: X0,
             to: "dp32_rows_zero".into(),
         },
-        Op::Srli {
+        Op::Divu {
             rd: S8,
-            rs: S8,
-            shamt: 3,
+            rs1: S8,
+            rs2: T1,
         },
         Op::Li {
             rd: T0,
@@ -2114,12 +2333,23 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
         Op::Label("dp32_rows_zero".into()),
         Op::Li { rd: S8, imm: 0 },
         Op::Label("dp32_rows_ok".into()),
-        // cols = clamp(w >> 3, 1, 1024). w ≥ 8 on every spec path, so the low
+        // cols = clamp(used_w / cell, 1, 1024) with used_w = low_w*N. The low
         // clamp is defensive; the high clamp matches the serial row bound.
-        Op::Srli {
+        Op::Li {
             rd: S9,
-            rs: S2,
-            shamt: 3,
+            imm: i64::from(dom_low_w(spec)),
+        },
+        ld_x(xlen, T0, SP, 0),
+        Op::Mul {
+            rd: S9,
+            rs1: S9,
+            rs2: T0,
+        },
+        ld_x(xlen, T1, SP, 112),
+        Op::Divu {
+            rd: S9,
+            rs1: S9,
+            rs2: T1,
         },
         Op::Li { rd: T0, imm: 1 },
         Op::Sltu {
@@ -2235,7 +2465,7 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
             rs2: T5,
             to: "dp32_next".into(),
         },
-    ];
+    ]);
     ops.extend(puts_str("DOM| "));
     ops.extend([
         ld_x(xlen, T4, T3, 8),
@@ -2299,7 +2529,8 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
     ops.extend(putc(i64::from(b'\n')));
     // 32bpp glyph paint for this row.
     ops.extend([
-        // row_y = DOM_Y0 + paint_row * 8; row_base = __scan_fb + row_y * stride.
+        // row_y = oy + (DOM_Y0 + paint_row * 8) * N;
+        // row_base = fb + row_y * stride + ox * 4.
         Op::Slli {
             rd: A6,
             rs: S5,
@@ -2310,6 +2541,18 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
             rs: A6,
             imm: DOM_Y0 as i32,
         },
+        ld_x(xlen, T0, SP, 0),
+        Op::Mul {
+            rd: A6,
+            rs1: A6,
+            rs2: T0,
+        },
+        ld_x(xlen, T1, SP, 104),
+        Op::Add {
+            rd: A6,
+            rs1: A6,
+            rs2: T1,
+        },
         Op::Mul {
             rd: A6,
             rs1: A6,
@@ -2319,6 +2562,17 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
             rd: A6,
             rs1: S1,
             rs2: A6,
+        },
+        ld_x(xlen, T1, SP, 96),
+        Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: 2,
+        },
+        Op::Add {
+            rd: A6,
+            rs1: A6,
+            rs2: T1,
         },
         // reload text pointer and clamped length for the pixel loop.
         ld_x(xlen, T4, T3, 8),
@@ -2418,11 +2672,17 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
             rs1: A3,
             rs2: A1,
         },
-        // a2 = destination base for this character = row_base + col * 32.
+        // a2 = destination base for this character = row_base + col * cell * 4.
+        ld_x(xlen, A1, SP, 112),
+        Op::Mul {
+            rd: A1,
+            rs1: A1,
+            rs2: T6,
+        },
         Op::Slli {
             rd: A1,
-            rs: T6,
-            shamt: 5,
+            rs: A1,
+            shamt: 2,
         },
         Op::Add {
             rd: A2,
@@ -2457,10 +2717,58 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
             rs2: X0,
             to: "dp32_nb".into(),
         },
+        // Set bit → paint an N×N block, so one font pixel becomes one *device*
+        // pixel only at N=1. t0=dy, t1=dx, t2=row cursor. t3 is free here: the
+        // DOM row pointer is recomputed per row at dp32_row.
+        ld_x(xlen, T3, SP, 0),
+        Op::Li { rd: T0, imm: 0 },
+        Op::Addi {
+            rd: T2,
+            rs: A2,
+            imm: 0,
+        },
+        Op::Label("dp32_by".into()),
+        Op::Li { rd: T1, imm: 0 },
+        Op::Label("dp32_bx".into()),
+        Op::Slli {
+            rd: A1,
+            rs: T1,
+            shamt: 2,
+        },
+        Op::Add {
+            rd: A1,
+            rs1: T2,
+            rs2: A1,
+        },
         Op::Sw {
             rs2: A7,
-            rs1: A2,
+            rs1: A1,
             off: 0,
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: 1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T3,
+            to: "dp32_bx".into(),
+        },
+        Op::Add {
+            rd: T2,
+            rs1: T2,
+            rs2: S4,
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T0,
+            imm: 1,
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: T3,
+            to: "dp32_by".into(),
         },
         Op::Label("dp32_nb".into()),
         Op::Slli {
@@ -2468,10 +2776,17 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
             rs: A0,
             shamt: 1,
         },
-        Op::Addi {
+        // advance one scaled glyph column = N pixels = N*4 bytes.
+        ld_x(xlen, A1, SP, 0),
+        Op::Slli {
+            rd: A1,
+            rs: A1,
+            shamt: 2,
+        },
+        Op::Add {
             rd: A2,
-            rs: A2,
-            imm: 4,
+            rs1: A2,
+            rs2: A1,
         },
         Op::Addi {
             rd: A5,
@@ -2484,16 +2799,29 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
             rs2: A1,
             to: "dp32_gx".into(),
         },
-        // next glyph row: back to the start of this char column, then + stride.
-        Op::Addi {
+        // next glyph row: rewind the 8 scaled columns (cell*4 bytes), then drop
+        // N display rows.
+        ld_x(xlen, A1, SP, 112),
+        Op::Slli {
+            rd: A1,
+            rs: A1,
+            shamt: 2,
+        },
+        Op::Sub {
             rd: A2,
-            rs: A2,
-            imm: -32,
+            rs1: A2,
+            rs2: A1,
+        },
+        ld_x(xlen, T0, SP, 0),
+        Op::Mul {
+            rd: A1,
+            rs1: S4,
+            rs2: T0,
         },
         Op::Add {
             rd: A2,
             rs1: A2,
-            rs2: S4,
+            rs2: A1,
         },
         Op::Addi {
             rd: A4,
@@ -2540,7 +2868,7 @@ fn dom_paint32_node(spec: &BoardSpec) -> Node {
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: 96,
+            imm: 128,
         },
         ret(),
     ]);
