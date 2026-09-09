@@ -317,7 +317,9 @@ module wt_dcache_wbuffer
       assign inv_idx_o            = '0;
       assign inv_way_oh_o         = '0;
       assign inv_vld_bits_o       = '0;
-      assign ack_wr_active        = 1'b0;
+      // ack_wr_active is NOT tied off here: p_tx_stat drives it procedurally in
+      // every config, and only gen_fixup_queue reads it. A tie-off would be a
+      // second driver on a procedurally-assigned variable.
       assign fixup_pm_void_ack    = 1'b0;
       assign fixup_pm_write       = 1'b0;
       assign fixup_pm_inval       = 1'b0;

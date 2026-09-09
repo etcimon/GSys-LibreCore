@@ -272,8 +272,12 @@ module alu
     genvar i, m, n, q;
     for (i = 0; i < (CVA6Cfg.XLEN / 8); i++) begin : brev8_xperm8_gen
       // Generating xperm8_result by extracting bytes from operand a based on indices from operand b
-      assign xperm8_result[i << 3 +: 8] = (operand_b[i << 3 +: 8] < 8'(CVA6Cfg.XLEN / 8))
-          ? operand_a[{operand_b[i << 3 +: 8][$clog2(CVA6Cfg.XLEN)-4:0], 3'b0} +: 8]
+      // The index byte is given a name instead of being re-sliced inline: a bit
+      // select chained directly onto a part-select is not legal SystemVerilog.
+      logic [7:0] xperm8_idx;
+      assign xperm8_idx = operand_b[i << 3 +: 8];
+      assign xperm8_result[i << 3 +: 8] = (xperm8_idx < 8'(CVA6Cfg.XLEN / 8))
+          ? operand_a[{xperm8_idx[$clog2(CVA6Cfg.XLEN)-4:0], 3'b0} +: 8]
           : 8'b0;
       // Generate brev8_reversed by reversing bits within each byte
       for (m = 0; m < 8; m++) begin : reverse_bits

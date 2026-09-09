@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 21.05.2017
 // Description: Issue stage dispatches instructions to the FUs and keeps track of them
 //              in a scoreboard like data-structure.
@@ -400,6 +401,12 @@ module issue_stage
   // ---------------------------------------------------------
   // 3. Issue instruction and read operand, also commit
   // ---------------------------------------------------------
+  // G1gq commit-JALR RF read port: declared before the instance because its
+  // port map below connects them (see the G1gq block further down).
+  logic [4:0] g1gq_raddr;
+  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] g1gq_rhart;
+  logic [CVA6Cfg.XLEN-1:0] g1gq_rdata;
+
   issue_read_operands #(
       .CVA6Cfg(CVA6Cfg),
       .branchpredict_sbe_t(branchpredict_sbe_t),
@@ -490,9 +497,8 @@ module issue_stage
   // JumpR pend — MINI-FAIL FDT printed 42
   // (P3 0x2a offset_ptr NULL) @782. Do not
   // re-land (too wide: yanks live jalr).
-  logic [4:0] g1gq_raddr;
-  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] g1gq_rhart;
-  logic [CVA6Cfg.XLEN-1:0] g1gq_rdata;
+  // g1gq_raddr / g1gq_rhart / g1gq_rdata are declared above the instance that
+  // connects them; only the state local to this block stays here.
   logic g1gq_pend_q;
   logic g1gq_ack_jalr;
   // G1jf prev-cycle aligned-00 + this-cycle

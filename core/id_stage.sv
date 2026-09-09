@@ -166,10 +166,13 @@ module id_stage #(
 //pragma translate_off
   // I1-at-supply oracle enable, latched once (see the checker further down).
   logic i1_chk_en;
+  // Counters for that checker. They live here, next to the enable, purely so
+  // the whole oracle's state is declared in one sim-only place. Being 2-state
+  // they start at 0, so nothing clears them: the checker's always_ff below is
+  // deliberately their only writer.
+  int unsigned i1_bad, i1_seen;
   initial begin
     i1_chk_en = $test$plusargs("fetch_i1_check");
-    i1_bad    = 0;
-    i1_seen   = 0;
   end
 //pragma translate_on
 
@@ -1255,7 +1258,8 @@ module id_stage #(
   logic [127:0]    i1_win;
   logic [31:0]     i1_want;
   int unsigned     i1_sh;
-  int unsigned     i1_bad, i1_seen;
+  // i1_bad / i1_seen are declared with i1_chk_en at the top of the module;
+  // the always_ff below is their only writer.
 
   // verilog_lint: waive always-ff-non-reset
   always_ff @(posedge clk_i) begin

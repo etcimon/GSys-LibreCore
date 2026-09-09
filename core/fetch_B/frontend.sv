@@ -141,6 +141,15 @@ module frontend
   logic [CVA6Cfg.GPLEN-1:0] icache_gpaddr_q;
   logic [31:0] icache_tinst_q;
   logic icache_gva_q;
+  // Unregistered counterparts of the three above. I22 repointed the realigner
+  // from icache_{valid,vaddr,data}_q to this same-cycle path, and the realigner
+  // is instantiated far above the logic that drives them, so they are declared
+  // here beside the registers they replaced rather than at their drivers.
+  logic [CVA6Cfg.FETCH_WIDTH-1:0] icache_data;
+  logic icache_take;
+  // FTQ / loop-buffer substitutes used by that same feed when the I$ is silent.
+  logic [CVA6Cfg.VLEN-1:0] ftq_head_vaddr;
+  logic [CVA6Cfg.FETCH_WIDTH-1:0] lbuf_data;
   logic instr_queue_ready;
   logic [NrInstr-1:0] instr_queue_consumed;
   // upper-most branch-prediction from last cycle
@@ -643,10 +652,9 @@ module frontend
   // I$ ready. With an FTQ the NPC advances against queue space, demand fetch
   // drains the queue head, and FDIP may steal idle I$ cycles.
   logic ftq_full, ftq_head_valid, ftq_pop, ftq_push;
-  logic [CVA6Cfg.VLEN-1:0] ftq_head_vaddr, ftq_peek_vaddr, ftq_push_vaddr;
+  logic [CVA6Cfg.VLEN-1:0] ftq_peek_vaddr, ftq_push_vaddr;
   logic ftq_peek_valid;
   logic lbuf_hit, lbuf_consume, lbuf_inject;
-  logic [CVA6Cfg.FETCH_WIDTH-1:0] lbuf_data;
   logic pf_req;
   logic [CVA6Cfg.VLEN-1:0] pf_vaddr;
   logic demand_req, demand_fire;
@@ -852,13 +860,11 @@ module frontend
   // ------------------------------------------------------------------
   // I$ response pipeline register
   // ------------------------------------------------------------------
-  logic [CVA6Cfg.FETCH_WIDTH-1:0] icache_data;
   // re-align the cache line
   assign icache_data = icache_dreq_i.data >> {shamt, 4'b0};
   // loop-buffer inject: present as a 1-cycle I$ response without a request
   assign lbuf_inject = FtqEn && CVA6Cfg.LoopBufEn && lbuf_consume;
 
-  logic icache_take;
   // Do not register the next I$ return while IQ is replaying an
   // overflowed leftover-complete packet (s4-v-iq8-twice: 12960 taken
   // while 12958 replay'd), except leftover_complete of a still-pending

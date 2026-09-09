@@ -437,6 +437,17 @@ module instr_queue
   logic iqt_en;
   initial iqt_en = $test$plusargs("iq_trace");
 
+  // The probe prints four fixed columns, but NrFifo is 2 in narrow configs.
+  // Absent FIFOs read as zero rather than indexing past the array.
+  logic [3:0][CVA6Cfg.VLEN-1:0] dbg_pc;
+  logic [3:0][15:0] dbg_seq;
+  always_comb begin
+    for (int unsigned k = 0; k < 4; k++) begin
+      dbg_pc[k]  = (k < NrFifo) ? instr_data_out[(k < NrFifo) ? k : 0].pc : '0;
+      dbg_seq[k] = (k < NrFifo) ? instr_data_out[(k < NrFifo) ? k : 0].push_seq : '0;
+    end
+  end
+
   always @(negedge clk_i) begin
     if (rst_ni && iqt_en && $time() < 200000) begin
       if ((|push_instr_fifo) || (|consumed_o) || (|fetch_entry_valid_o)) begin
@@ -446,10 +457,8 @@ module instr_queue
                  $time, push_seq_q, push_seq_d, idx_is_q, idx_ds_q, idx_ds_d, push_instr_fifo, valid,
                  fire_prefix, consumed_o, instr_queue_full, ready_o,
                  fetch_entry_o[0].address,
-                 instr_data_out[0].pc, instr_data_out[1].pc,
-                 instr_data_out[2].pc, instr_data_out[3].pc,
-                 instr_data_out[0].push_seq, instr_data_out[1].push_seq,
-                 instr_data_out[2].push_seq, instr_data_out[3].push_seq);
+                 dbg_pc[0], dbg_pc[1], dbg_pc[2], dbg_pc[3],
+                 dbg_seq[0], dbg_seq[1], dbg_seq[2], dbg_seq[3]);
       end
     end
   end

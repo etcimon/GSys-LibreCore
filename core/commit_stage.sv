@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 15.04.2017
 // Description: Commits to the architectural state resulting from the scoreboard.
 
@@ -110,6 +111,18 @@ module commit_stage
   //     .probe9(1'b0) // input wire [0:0]  probe9
   // );
 
+  // AMOCAS.Q dual-write helpers. Declared ahead of gen_waddr / gen_whart
+  // because both generate blocks below read them.
+  logic casq_hi_pending_q, casq_hi_pending_d;
+  logic [CVA6Cfg.XLEN-1:0] casq_hi_data_q;
+  logic [4:0] casq_hi_rd_q;
+  logic casq_dual_now;
+  // I4am: leftover dual_we/ack must not retarget waddr[1] = rd|1 on a
+  // normal retire (s1=x9 vs s0=x8 is rd[0]). Only AMOCAS.Q owns that path.
+  assign casq_dual_now = CVA6Cfg.RVA && CVA6Cfg.RVZacas &&
+                        amo_resp_i.dual_we && amo_resp_i.ack &&
+                        (commit_instr_i[0].op == ariane_pkg::AMO_CASQ);
+
   for (genvar i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin : gen_waddr
     if (i == 0) begin
       assign waddr_o[0] = casq_hi_pending_q ? casq_hi_rd_q
@@ -155,16 +168,6 @@ module commit_stage
   logic instr_0_is_amo;
   logic [CVA6Cfg.NrCommitPorts-1:0] commit_macro_ack;
   assign instr_0_is_amo = is_amo(commit_instr_i[0].op);
-  // AMOCAS.Q dual-write helpers
-  logic casq_hi_pending_q, casq_hi_pending_d;
-  logic [CVA6Cfg.XLEN-1:0] casq_hi_data_q;
-  logic [4:0] casq_hi_rd_q;
-  logic casq_dual_now;
-  // I4am: leftover dual_we/ack must not retarget waddr[1] = rd|1 on a
-  // normal retire (s1=x9 vs s0=x8 is rd[0]). Only AMOCAS.Q owns that path.
-  assign casq_dual_now = CVA6Cfg.RVA && CVA6Cfg.RVZacas &&
-                        amo_resp_i.dual_we && amo_resp_i.ack &&
-                        (commit_instr_i[0].op == ariane_pkg::AMO_CASQ);
   // -------------------
   // Commit Instruction
   // -------------------
