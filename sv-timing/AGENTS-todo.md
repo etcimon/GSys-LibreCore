@@ -3,6 +3,138 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## 2026-09-09 — delay-v21 leftover measurement (general)
+
+Derived from v42 leftover-specific proper changes, host-agnostic:
+
+- [x] **A** const-select offset add: `x + (c ? lit : lit)` is LogicBit
+      (RAS `addr[i]+(rvc?2:4)`). Runtime arms stay AddSub
+      (`addr[i]+(taken?rvc_imm:rvi_imm)`).
+- [x] **B** width-cast collapse of `W'(const)` / `W'(ident)` / `W'(ident±1)`
+      including numeric `32'(…)` (`PLEN'(LINE_B)`, `IDX_W'(int'(rr_q)+1)`).
+      `32'(n_q[8:0]-1)*row` still unparsed (delay-v19).
+- [x] **C** const-condition `?:` is elaboration (no mux tax). Runtime `en?`
+      stays Mux. Seeded genvar `i < CNT ? add : 0` is the add only.
+- [x] Soak `audit-remain-v43/` integrity green but **do not quote APU 40.5**:
+      collapsing `int'(group_q)` exposed `*6` as Mul 56 (policy_subcode P4
+      remainder). Core 20.0→15.0 and store_unit 11 gone were real.
+- [x] Type-name `'(` (`int`/`unsigned`/…) does **not** collapse; numeric and
+      `PLEN`/`IDX_W` width-casts still do. Test covers `int'(q)*6` ≁ Mul.
+- [x] Soak `audit-remain-v44/` GREEN integrity. Core **20.0→15.0** P10 trigger;
+      store_unit 11 / snoop 11 gone. APU headline **17.0** pe_dot
+      `sum != MAXW'(0)` (was 12 adder, now zero-detect+mux). Do not treat
+      APU 17 as a win over v42 16 P10.
+- [x] **D** `==`/`!=` vs 0 is zero-detect (LogicBit), not Compare 4.
+- [x] Soak **`audit-remain-v45/`** GREEN. Integrity joint/reparse/structural
+      OK both. delay-v21. IR edits 556 / 184. Soak of record.
+      Core **30.0→20.0 became 38.5→15.0** (P10 trigger 20→15; store_unit 11
+      gone). APU headline still **16.0 P10** inval_bus; pe_dot adder 12 gone
+      (now 14.0 fp-convert mux, under the P10); snoop 11 gone.
+      Do not quote v43 40.5 (int' Mul) or v44 17 pe_dot.
+
+- [x] **E** delay-v22: nested `c ? Const : (c2 ? Const : … : datapath)` is
+      one mux on the runtime spine (pe_dot NaN/Inf/zero encodings). Runtime
+      then-arms do not flatten. Test `delay_v22_const_then_mux_chain_is_one_mux`.
+- [x] Soak `audit-remain-v46/` GREEN integrity, headlines unchanged 15/16.
+      pe_dot 14 stayed: Inf arm `{sign, 8'hff, 0}` is not Const.
+- [x] Encoding-then: concat of flags+const fields flattens; bare ident / `{a,b}`
+      do not. Still delay-v22.
+- [x] Soak `audit-remain-v47/` GREEN, pe_dot 14 stayed: `sign[LEVELS]` is a
+      const-index bit-select, not a bare ident.
+- [x] Encoding-then parts include `ident[CONST]` / `ident[LEVELS]`.
+- [x] Soak **`audit-remain-v48/`** GREEN. Integrity joint/reparse/structural
+      OK both. delay-v22. IR edits 556 / 184. Soak of record for delay-v22.
+      Headlines unchanged: core **15.0 P10** trigger, APU **16.0 P10** inval_bus.
+      pe_dot **14.0→13.0** (encoding-then flatten). axi2mem wrap 14 still next.
+      Do not quote v46/v47 pe_dot 14 as the encoding-then result.
+
+## 2026-09-09 — leftover algorithms (deduced, not soaked)
+
+From v48 unique leftovers. Host-agnostic. Already landed A–E stay.
+
+- **F** `x + (1<<n)` is a mux of increments (decoder stride), not CPA+shift.
+      Edge: `x + (a<<n)` runtime `a` stays AddSub. `x + (1<<CONST)` already LogicBit.
+- **G** `{x[MSB:K],0} + (y<<K)` is a field insert/concat, not CPA (axi2mem
+      aligned/wrap stride). Edge: x not proven zero in low K bits stays AddSub.
+      InsertReg on that add is still a functional break.
+- **H** wrap-boundary function is a mux of bit-clears (len is 1/3/7/15), not
+      an adder. Edge: other burst types stay datapath.
+- **I** signed `x>0`/`x>=0` is the sign bit (LogicBit). Does **not** close
+      fpnew 12.5 (the sub remains). `x>y` two runtime stays Compare.
+- **J** exclusive leftover=0 is S3 floor (csr/bht/tlb). No extra InsertReg.
+- **K–M** P10: posted indexed CSR write; tail-line Q for coalesce; delay
+      `{pulse, index}` together. Never InsertReg one net of the pair.
+- **N** unknown function body: measure the function, or bill convert as
+      Mux+Add not Other 1. Edge: `fmt_row_bytes`/`$clog2` stay as today.
+- **O** `mem[ptr_q]` of a flop array is a mux of Qs; combo bypass+EQ is real
+      (refill_hit). Flopping the D-arm EQ misses same-cycle hit.
+- **P** next-state counter `q + cast(elem)` plus hold mux is Mux+Add (gemm
+      12 / axi_adapter 11). IndependentLhsBundle: no InsertReg.
+- **Q** saturating 2-bit `sat±1` with clamp is inc+mux, not AddSub (bht
+      leftover=0 if an arm is still billed 10).
+- **R** PC+imm in a fetch-slot loop is parallel adders; `[i]` scalar pipe
+      forbidden. Runtime-imm add stays 12.5. Const-select offset already A.
+
+## 2026-09-09 — delay-v23 auto-const + F/G/H/I/N/Q
+
+- [x] Module first-pass **auto-const** from `RefOrderTree`: expression-less
+      combo/continuous assign, exclusive writer, value is read (not write-only
+      `_d`, not NBA, not multi-writer, not `[i]`). Copy-propagates ident aliases.
+      Tests `auto_const_expression_less_exclusive_read` + skip NBA/write-only.
+- [x] **F** `x + (1<<n)` mux of increments; `x + (a<<n)` stays AddSub.
+- [x] **G** `{x[MSB:K],{K{0}}} + (y<<K)` field insert (not CPA). Unaligned
+      `wrap+(cnt<<K)` stays AddSub. InsertReg on wrap-add still forbidden.
+- [x] **H/N** unknown call stays Other. v49 billed 2-arg as Mux and
+      **gemm 12→15** — reverted. Wrap/convert needs function-body inline.
+      `$clog2` const / `fmt_row_bytes` unchanged.
+- [x] **I** signed `x>0` is sign bit; `a>b` stays Compare.
+- [x] **Q** `sat+1` already increment (delay-v18).
+- [x] Soak `audit-remain-v49/` GREEN integrity but **do not quote gemm 15**.
+      dm_sba 12 gone (F). Headlines 15/16 P10. 2-arg Mux tax reverted.
+- [x] Soak **`audit-remain-v50/`** GREEN. Integrity joint/reparse/structural
+      OK both. delay-v23. Soak of record. Headlines **15.0/16.0 P10**.
+      **dm_sba 12 gone** (F). gemm back at 12 (N mux tax not in this soak).
+      axi2mem wrap 14 / pe_dot 13 / fpnew 12.5 unchanged. Do not quote v49
+      gemm 15.
+- [x] Pyslang lint of v50 edited `__svt.sv` (216 files, 439 total):
+      **hard_fail=0**. Context 33+14 include/macro (same class as v41).
+      `dm_sba` / frontend / gemm / wt_dcache clean.
+
+## 2026-09-09 — delay-v24 aligned-net first pass
+
+- [x] `ConstSeed.aligned` + exclusive `{x[MSB:K],{K{0}}}` (and ident aliases)
+      seed `ident + (y<<K)` as Concat. Wrap ident from a Call is not aligned.
+- [x] Edge: `{{LOG}{1'b0}}` is a one-part concat wrapping the replicate count
+      (axi2mem). `alignment_key` / `zero_fill_count` unwrap it so the named
+      seed fires. `{K{0}}` literal pad still works.
+- [x] Soak **`audit-remain-v51/`** GREEN integrity joint/reparse/structural
+      both. delay-v24. Core **38.5→15.0** P10 trigger (unchanged).
+      APU emit **75.0→22.0** axi2mem WRAP-beyond BM
+      `addr + ((cnt-len)<<LOG)` at L123 — **do not quote 22 as a win**
+      over v50 16 P10. v50 hid the same 22 as **intoout**; v51 compose
+      chains it flop→`req_addr_d` (regtoreg Plain n=6). FSM wrap add
+      14→13 (cons_addr Concat, BM n469 gone). inval_bus 16 P10 still
+      present. InsertReg on wrap-add still forbidden.
+
+## 2026-09-09 — delay-v25 staged shift temp (BalanceMux G)
+
+v50 leftover L143/L150 is BalanceMux staging:
+`t = cnt << LOG; cons = aligned + t` and
+`t = (len+1)<<LOG; upper = wrap + t`.
+delay-v24 matches `ident + (y<<K)` but not `ident + t`.
+
+- [x] Exclusive `t = y << K` seeds `shifted[t]=K`. `aligned + t` with
+      matching K is Concat. `wrap + t` stays AddSub. Copy-propagates
+      ident aliases. Tests `auto_const_aligned_plus_staged_shift_temp`.
+- [x] Soak **`audit-remain-v52/`** GREEN integrity joint/reparse/structural
+      both. delay-v25. Same emit as v51: core **15.0 P10** trigger,
+      APU **22.0** axi2mem WRAP-beyond BM L123. Staged-shift seed does
+      not close `addr + t` (addr is not aligned). **Do not quote APU 22**
+      over v50 **16.0 P10** inval_bus. Soak of record for delay-v25.
+      Next toward 10: K–M P10 RTL (trigger/inval_bus); wrap-beyond is a
+      real flop path (`req_addr_d = addr_o`); exclusive leftover=0
+      (csr/bht/tlb) is S3 floor. InsertReg on wrap-add still forbidden.
+
 
 
 
@@ -123,6 +255,18 @@ Soak of record remains **`audit-remain-v27/` 18.5**. Do not quote v29.
       (named generate-if), extras skipped claimed lines. Fired instead on
       `check_wr` `(|wbuffer_q[i].valid)` / `(|rd_hit_oh_q)`. Do not quote v40.
       Soak of record: **`audit-remain-v41/`** (frontend 13) + v39 same 13-close.
+- [x] Pyslang syntax lint of v41 edited `__svt.sv` (211 files): **0 hard
+      errors**. 47 context include/macro (RVFI, hpdcache_typedef) — same
+      class as soak integrity context. Frontend / wt_dcache / gemm clean.
+- [x] Or-reduce inside keyword `generate`/`generate-if` when `|ident` is a
+      module-level net (wt_dcache `gen_fixup_queue` `!(|tocheck)`). Test
+      `or_reduce_preps_inside_generate_if`.
+- [x] Soak **`audit-remain-v42/`** GREEN both profiles. Integrity
+      joint/reparse/structural OK. `fixup_rd_req` samples
+      `pipe_svt_red_tocheck_389`; unique 12.0 wt_dcache leftover **gone**.
+      Core RegToReg failing 192→191. Residual wt_dcache **10.5** at
+      `refill_hit_d` (EQ+AND). Headlines still S5: APU **16.0 P10**, core
+      **20.0 P10**. Soak of record: **`audit-remain-v42/`**.
 
 ## 2026-09-09 — ALGORITHMS-EXPERTS.md (expert manual)
 

@@ -36,10 +36,15 @@ pub const IR_VERSION: &str = "ir-v1";
 /// | `delay-v18` | P1 package scope `pkg::NAME` is Const (not `.`-only); `x+1` is increment not 10 FO4 add |
 /// | `delay-v19` | only `(W)'(1)` is an increment; general `(W)'(v)` is not parsed (gemm `32'(n-1)*row` stays uncast) |
 /// | `delay-v20` | `fmt_row_bytes` / `ai_fmt_bytes` calls are mux-of-shifts, not Mul; still no general `(W)'(v)` |
+/// | `delay-v21` | const-select offset add; numeric/`PLEN`/`IDX_W` `W'(const|ident|ident±1)` collapse (not `int'(x)`); const-condition `?:` is elaboration; `==`/`!=` vs 0 is zero-detect not Compare. Still no general `(W)'(expr)` |
+/// | `delay-v22` | nested `c ? Const : (c2 ? Const : … : datapath)` is one mux on the runtime spine (NaN/Inf/zero encodings), not a serial mux chain. Concat of flags+const fields (`{sign, 8'hff, 0}`) counts as an encoding arm; bare ident / `{a,b}` do not flatten |
+/// | `delay-v23` | module first-pass auto-const from the reference tree (expression-less exclusive-read assigns); `x+(1<<n)` is a mux of increments; aligned `{x,0}+(y<<K)` is concat; signed `x>0` is a sign bit. Unknown user calls stay Other (2-arg Mux tax reverted). Still no general `(W)'(expr)` |
+/// | `delay-v24` | first-pass aligned-net seed: exclusive `{x[MSB:K],{K{0}}}` (and aliases) make `ident+(y<<K)` a field insert. Wrap ident from a call is not assumed aligned |
+/// | `delay-v25` | exclusive `t = y << K` temps (BalanceMux shift staging) make `aligned + t` a field insert. Wrap ident + t stays CPA |
 ///
 /// Reports must surface this so a number produced by one scheme is never compared
 /// with the other. See `architecture/OPTIMIZATION-LEVELS.md` §1.
-pub const MEASUREMENT_VERSION: &str = "delay-v20";
+pub const MEASUREMENT_VERSION: &str = "delay-v25";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

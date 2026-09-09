@@ -99,10 +99,11 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
         .map(|(id, m)| (*id, ConstSeed::from_names(design.elaboration_const_names(m))))
         .collect();
     for module in design.modules.values_mut() {
-        let base_seed = seeds
+        let mut base_seed = seeds
             .get(&module.id)
             .cloned()
             .unwrap_or_else(ConstSeed::heuristic);
+        crate::ref_order::extend_seed_auto_const(module, &mut base_seed);
         let gen_spans: Vec<(u32, u32, String)> = module
             .gen_loops
             .iter()

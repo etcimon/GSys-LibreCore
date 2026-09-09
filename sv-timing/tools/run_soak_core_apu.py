@@ -11,8 +11,8 @@ from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parent
 PKG = TOOLS.parent
-OUT = Path(r"E:\cva6\build-platform\workspace\build\sv-timing\audit-remain-v41")
-LOG = Path(r"E:\cva6\build-platform\workspace\build\sv-timing\soak_remain_v41.log")
+OUT = Path(r"E:\cva6\build-platform\workspace\build\sv-timing\audit-remain-v52")
+LOG = Path(r"E:\cva6\build-platform\workspace\build\sv-timing\soak_remain_v52.log")
 
 cargo_bin = Path.home() / ".cargo" / "bin"
 env = os.environ.copy()

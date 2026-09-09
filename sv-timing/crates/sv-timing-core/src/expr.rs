@@ -181,6 +181,13 @@ impl ConstClass {
 pub struct ConstSeed {
     /// Exact names (`CVA6Cfg.XLEN`, `PRECISION_BITS`, …).
     pub names: std::collections::BTreeSet<String>,
+    /// Nets proven zero in the low `K` bits (`aligned_address` → `LOG_NR_BYTES`).
+    /// First-pass exclusive `{x[MSB:K], {K{0}}}` assigns. `ident + (y << K)` is
+    /// then a field insert, not a CPA.
+    pub aligned: std::collections::BTreeMap<String, String>,
+    /// Exclusive `t = y << K` temps (BalanceMux stages the shift off the add).
+    /// `aligned + t` with matching `K` is a field insert.
+    pub shifted: std::collections::BTreeMap<String, String>,
 }
 
 impl ConstSeed {
@@ -248,6 +255,49 @@ impl ConstSeed {
         }
         ident_is_screaming_param(base)
     }
+
+    /// Record that `name` is zero in the low `k` bits (`k` is ident or literal key).
+    pub fn set_aligned(&mut self, name: impl Into<String>, k: impl Into<String>) {
+        let n = ident_align_base(&name.into());
+        let k = k.into();
+        if n.is_empty() || k.is_empty() {
+            return;
+        }
+        self.aligned.insert(n, k);
+    }
+
+    /// Alignment key `K` when `name` was proven `{x[MSB:K], {K{0}}}`.
+    pub fn aligned_k(&self, name: &str) -> Option<&str> {
+        let n = ident_align_base(name);
+        self.aligned.get(&n).map(String::as_str)
+    }
+
+    /// Record that `name` is an exclusive `y << k` temp.
+    pub fn set_shifted(&mut self, name: impl Into<String>, k: impl Into<String>) {
+        let n = ident_align_base(&name.into());
+        let k = k.into();
+        if n.is_empty() || k.is_empty() {
+            return;
+        }
+        self.shifted.insert(n, k);
+    }
+
+    /// Shift amount key `K` when `name` was proven `y << K`.
+    pub fn shifted_k(&self, name: &str) -> Option<&str> {
+        let n = ident_align_base(name);
+        self.shifted.get(&n).map(String::as_str)
+    }
+}
+
+fn ident_align_base(name: &str) -> String {
+    name.split('[')
+        .next()
+        .unwrap_or(name)
+        .rsplit('.')
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .to_string()
 }
 
 fn ident_is_screaming_param(base: &str) -> bool {
@@ -370,6 +420,22 @@ impl Expr {
         matches!(self, Expr::Opaque { .. })
     }
 
+    /// RHS is a primary only (ident or literal) — no operators, concat, or calls.
+    pub fn is_expression_less(&self) -> bool {
+        matches!(self, Expr::Ident { .. } | Expr::Literal { .. })
+    }
+
+    /// `K` when this tree is `{high, {K{1'b0}}}` (aligned zero-pad concat).
+    pub fn zero_pad_align_key(&self) -> Option<String> {
+        let (_, k) = concat_high_and_zero_pad(self)?;
+        alignment_key(k)
+    }
+
+    /// `K` when this tree is `y << K` / `y <<< K`.
+    pub fn shift_align_key(&self) -> Option<String> {
+        alignment_key(shl_amount(self)?)
+    }
+
     /// Structural FO4 estimate: **sum** of operator-node base costs (idents free).
     ///
     /// Useful for area-like totals. For critical-path screening prefer
@@ -433,6 +499,23 @@ impl Expr {
                 then_e,
                 else_e,
             } => {
+                // Const condition is generate-if / param select: one arm exists
+                // in the netlist, so there is no 2.5 FO4 mux (pe_dot `i < CNT`).
+                if cond.const_class(seed).is_const() {
+                    return then_e
+                        .fo4_critical_cost_latticed(base, seed)
+                        .max(else_e.fo4_critical_cost_latticed(base, seed));
+                }
+                // Nested `c ? Const : (c2 ? Const : … : datapath)` is one mux
+                // on the runtime spine (exception encodings vs datapath), not
+                // a serial mux per arm. `c ? runtime : …` does not flatten.
+                if let Some((conds, tail)) = const_then_chain(self, seed) {
+                    let mut m = tail.fo4_critical_cost_latticed(base, seed);
+                    for c in conds {
+                        m = m.max(c.fo4_critical_cost_latticed(base, seed));
+                    }
+                    return base(OperatorClass::Mux) + m;
+                }
                 base(OperatorClass::Mux)
                     + cond
                         .fo4_critical_cost_latticed(base, seed)
@@ -472,12 +555,7 @@ impl Expr {
                 {
                     return 0.0;
                 }
-                let call_op = if is_fmt_scale_fn(name) {
-                    // INT4 `(elems+1)>>1` else `elems << log2(1|2|4)`.
-                    OperatorClass::Mux
-                } else {
-                    OperatorClass::Other
-                };
+                let call_op = user_function_op_class(name, args.len());
                 base(call_op)
                     + args
                         .iter()
@@ -699,6 +777,29 @@ impl Expr {
                 then_e,
                 else_e,
             } => {
+                if cond.const_class(seed).is_const() {
+                    let tc = then_e.fo4_critical_cost_latticed(base, seed);
+                    let ec = else_e.fo4_critical_cost_latticed(base, seed);
+                    return if tc >= ec {
+                        then_e.critical_spine_ops_latticed(base, seed)
+                    } else {
+                        else_e.critical_spine_ops_latticed(base, seed)
+                    };
+                }
+                if let Some((conds, tail)) = const_then_chain(self, seed) {
+                    let mut best: &Expr = tail;
+                    let mut best_c = tail.fo4_critical_cost_latticed(base, seed);
+                    for c in conds {
+                        let cc = c.fo4_critical_cost_latticed(base, seed);
+                        if cc > best_c {
+                            best_c = cc;
+                            best = c;
+                        }
+                    }
+                    let mut s = best.critical_spine_ops_latticed(base, seed);
+                    s.push((OperatorClass::Mux, base(OperatorClass::Mux)));
+                    return s;
+                }
                 let arms: [&Expr; 3] = [cond.as_ref(), then_e.as_ref(), else_e.as_ref()];
                 let best = arms
                     .into_iter()
@@ -1399,6 +1500,17 @@ fn is_fmt_scale_fn(name: &str) -> bool {
     matches!(name, "fmt_row_bytes" | "ai_fmt_bytes")
 }
 
+/// User function FO4 class. `fmt_row_bytes` is a mux-of-shifts. Unknown
+/// calls stay Other: billing every 2-arg call as Mux re-inflated gemm
+/// next-state (v49 12→15). Wrap/convert bodies are a later inline pass.
+fn user_function_op_class(name: &str, _nargs: usize) -> OperatorClass {
+    if is_fmt_scale_fn(name) {
+        OperatorClass::Mux
+    } else {
+        OperatorClass::Other
+    }
+}
+
 fn is_fmt_scale_call(e: &Expr) -> bool {
     matches!(e, Expr::Call { name, .. } if is_fmt_scale_fn(name))
 }
@@ -1464,12 +1576,319 @@ fn billed_binary_class(
     {
         return OperatorClass::LogicBit;
     }
+    // `addr + (c ? 2 : 4)` / `pc + (compressed ? 'h2 : 'h4)`: both arms are
+    // elaboration constants, so the add is a selected increment, not CPA+mux.
+    // `addr + (taken ? rvc_imm : rvi_imm)` stays AddSub (runtime arms).
+    if matches!(op_class, OperatorClass::AddSub)
+        && matches!(op, "+" | "-")
+        && (is_const_select_mux(left, seed) || is_const_select_mux(right, seed))
+    {
+        return OperatorClass::LogicBit;
+    }
+    // `x != 0` / `x == '0` is an or-reduce / is-zero, not a magnitude compare
+    // (pe_dot `final_bfp_sum != MAXW'(0)`). `x != y` stays Compare.
+    if matches!(op_class, OperatorClass::Compare)
+        && matches!(op, "==" | "!=" | "===" | "!==")
+        && (is_zero_literal(left) || is_zero_literal(right))
+    {
+        return OperatorClass::LogicBit;
+    }
+    // Signed `x > 0` / `x >= 0` / `x < 0` is the sign bit, not a magnitude
+    // compare (fpnew `exponent_difference > 0`). `x > y` stays Compare.
+    if matches!(op_class, OperatorClass::Compare)
+        && matches!(op, ">" | ">=" | "<" | "<=")
+        && (is_zero_literal(left) || is_zero_literal(right))
+    {
+        return OperatorClass::LogicBit;
+    }
+    // `1 << n` is a one-hot decoder, not a barrel (dm_sba `32'h1 << sbaccess`).
+    if matches!(op, "<<" | "<<<") && is_const_pow2_shl(left, right, seed) {
+        return OperatorClass::Mux;
+    }
+    // `x + (1 << n)` is a mux of increments, not CPA+shift.
+    // `x + (a << n)` with runtime `a` stays AddSub.
+    if matches!(op_class, OperatorClass::AddSub)
+        && matches!(op, "+" | "-")
+        && (is_one_hot_stride(left, seed) || is_one_hot_stride(right, seed))
+    {
+        return OperatorClass::Mux;
+    }
+    // `{x[MSB:K], {K{0}}} + (y << K)` is a field insert (axi2mem aligned stride).
+    if matches!(op_class, OperatorClass::AddSub)
+        && matches!(op, "+")
+        && is_aligned_field_insert(left, right, seed)
+    {
+        return OperatorClass::Concat;
+    }
     op_class
+}
+
+/// Ternary whose *arms* are Const (the condition may be runtime).
+fn is_const_select_mux(e: &Expr, seed: &ConstSeed) -> bool {
+    match e {
+        Expr::Ternary {
+            then_e, else_e, ..
+        } => then_e.const_class(seed).is_const() && else_e.const_class(seed).is_const(),
+        _ => false,
+    }
+}
+
+/// Nested `c ? Const : (c2 ? Const : … : tail)`. One mux on the runtime spine.
+fn const_then_chain<'a>(e: &'a Expr, seed: &ConstSeed) -> Option<(Vec<&'a Expr>, &'a Expr)> {
+    let Expr::Ternary {
+        cond,
+        then_e,
+        else_e,
+    } = e
+    else {
+        return None;
+    };
+    if !is_encoding_then(then_e, seed) {
+        return None;
+    }
+    if let Some((mut conds, tail)) = const_then_chain(else_e, seed) {
+        conds.insert(0, cond.as_ref());
+        Some((conds, tail))
+    } else {
+        Some((vec![cond.as_ref()], else_e.as_ref()))
+    }
+}
+
+/// Then-arm that is a canonical encoding, not datapath: Const, or a concat that
+/// packs flags into const fields (`{sign, 8'hff, 23'd0}` Inf). Bare ident / `{a,b}`
+/// stay datapath so `en ? a : (f ? C : d)` does not flatten.
+fn is_encoding_then(e: &Expr, seed: &ConstSeed) -> bool {
+    if e.const_class(seed).is_const() {
+        return true;
+    }
+    match e {
+        Expr::Concat { parts } => {
+            !parts.is_empty()
+                && parts.iter().any(|p| p.const_class(seed).is_const())
+                && parts.iter().all(|p| is_encoding_then_part(p, seed))
+        }
+        Expr::Replicate { body, .. } => is_encoding_then(body, seed),
+        _ => false,
+    }
+}
+
+fn is_encoding_then_part(e: &Expr, seed: &ConstSeed) -> bool {
+    if e.const_class(seed).is_const() {
+        return true;
+    }
+    match e {
+        Expr::Ident { .. } | Expr::Literal { .. } => true,
+        Expr::Concat { parts } => parts.iter().all(|p| is_encoding_then_part(p, seed)),
+        Expr::Replicate { body, .. } => is_encoding_then_part(body, seed),
+        Expr::Index { base, index }
+            if is_constant_range_select(index) || index.const_class(seed).is_const() =>
+        {
+            is_encoding_then_part(base, seed)
+        }
+        Expr::Unary { op, arg } if matches!(op.as_str(), "~" | "!") => {
+            is_encoding_then_part(arg, seed)
+        }
+        _ => false,
+    }
+}
+
+fn is_bare_ident(e: &Expr) -> bool {
+    matches!(e, Expr::Ident { .. })
+}
+
+/// `ident ± 1` / `1 ± ident` (not `ident[sel] ± 1`, which is gemm `n_q[8:0]-1`).
+fn is_ident_unit_increment(e: &Expr) -> bool {
+    let Expr::Binary {
+        op, left, right, ..
+    } = e
+    else {
+        return false;
+    };
+    matches!(op.as_str(), "+" | "-")
+        && is_unit_increment_operand(left, right)
+        && (is_bare_ident(left) || is_bare_ident(right))
+}
+
+/// Inner of `W'(…)` that may collapse without reopening general `(W)'(expr)`.
+fn is_width_cast_collapsible(val: &Expr, seed: &ConstSeed) -> bool {
+    if val.const_class(seed).is_const() {
+        return true;
+    }
+    if is_bare_ident(val) {
+        return true;
+    }
+    is_ident_unit_increment(val)
+}
+
+/// IEEE 1800 type-name left of `'(…)`. Collapsing these exposes later `*`/`+`
+/// (`int'(group_q)*6` → Mul 56). Width names (`32`, `PLEN`, `IDX_W`) are not types.
+fn is_sv_type_cast_width(e: &Expr) -> bool {
+    let Expr::Ident { name } = e else {
+        return false;
+    };
+    let base = name
+        .rsplit("::")
+        .next()
+        .unwrap_or(name)
+        .rsplit('.')
+        .next()
+        .unwrap_or(name);
+    matches!(
+        base,
+        "int"
+            | "integer"
+            | "shortint"
+            | "longint"
+            | "byte"
+            | "bit"
+            | "logic"
+            | "reg"
+            | "wire"
+            | "unsigned"
+            | "signed"
+            | "time"
+            | "real"
+            | "shortreal"
+            | "string"
+            | "void"
+    )
 }
 
 fn is_unit_increment_operand(left: &Expr, right: &Expr) -> bool {
     matches!(positive_literal_value(left), Some(1))
         || matches!(positive_literal_value(right), Some(1))
+}
+
+fn is_zero_literal(e: &Expr) -> bool {
+    matches!(positive_literal_value(e), Some(0))
+}
+
+/// `C << n` with C a constant power of two and n runtime (one-hot decoder).
+fn is_const_pow2_shl(left: &Expr, right: &Expr, seed: &ConstSeed) -> bool {
+    if right.const_class(seed).is_const() {
+        return false;
+    }
+    positive_literal_value(left).is_some_and(u128::is_power_of_two)
+}
+
+fn is_one_hot_stride(e: &Expr, seed: &ConstSeed) -> bool {
+    let Expr::Binary {
+        op, left, right, ..
+    } = e
+    else {
+        return false;
+    };
+    matches!(op.as_str(), "<<" | "<<<") && is_const_pow2_shl(left, right, seed)
+}
+
+fn is_zero_fill(e: &Expr) -> bool {
+    match e {
+        Expr::Literal { .. } => is_zero_literal(e),
+        Expr::Replicate { body, .. } => is_zero_fill(body),
+        Expr::Concat { parts } => !parts.is_empty() && parts.iter().all(is_zero_fill),
+        _ => false,
+    }
+}
+
+fn zero_fill_count(e: &Expr) -> Option<&Expr> {
+    match e {
+        Expr::Replicate { count, body } if is_zero_fill(body) => Some(count.as_ref()),
+        // `{ {K{1'b0}} }` is a one-part concat wrapping a replicate (axi2mem).
+        Expr::Concat { parts } if parts.len() == 1 => zero_fill_count(&parts[0]),
+        _ => None,
+    }
+}
+
+fn concat_high_and_zero_pad(e: &Expr) -> Option<(&Expr, &Expr)> {
+    let Expr::Concat { parts } = e else {
+        return None;
+    };
+    if parts.len() != 2 {
+        return None;
+    }
+    let zc = zero_fill_count(&parts[1])?;
+    Some((&parts[0], zc))
+}
+
+fn alignment_key(e: &Expr) -> Option<String> {
+    let e = expr_align_leaf(e);
+    match e {
+        Expr::Ident { name } => {
+            let b = ident_align_base(name);
+            if b.is_empty() {
+                None
+            } else {
+                Some(b)
+            }
+        }
+        Expr::Literal { .. } => positive_literal_value(e).map(|v| v.to_string()),
+        _ => None,
+    }
+}
+
+/// `{LOG}` / `{ {LOG} }` wrappers around a replicate count are still `LOG`.
+fn expr_align_leaf(e: &Expr) -> &Expr {
+    match e {
+        Expr::Concat { parts } if parts.len() == 1 => expr_align_leaf(&parts[0]),
+        _ => e,
+    }
+}
+
+fn shl_amount(e: &Expr) -> Option<&Expr> {
+    match e {
+        Expr::Binary { op, right, .. } if matches!(op.as_str(), "<<" | "<<<") => {
+            Some(right.as_ref())
+        }
+        _ => None,
+    }
+}
+
+fn expr_same_constish(a: &Expr, b: &Expr) -> bool {
+    let a = expr_align_leaf(a);
+    let b = expr_align_leaf(b);
+    match (a, b) {
+        (Expr::Ident { name: n1 }, Expr::Ident { name: n2 }) => n1 == n2,
+        (Expr::Literal { text: t1 }, Expr::Literal { text: t2 }) if t1 == t2 => true,
+        _ => match (positive_literal_value(a), positive_literal_value(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        },
+    }
+}
+
+/// `{x[MSB:K], {K{1'b0}}} + (y << K)` — aligned field insert, not a CPA.
+/// Also `aligned_ident + (y << K)` when the first pass seeded `aligned_ident`,
+/// and `aligned_ident + shifted_ident` when the shift was staged off the add.
+fn is_aligned_field_insert(left: &Expr, right: &Expr, seed: &ConstSeed) -> bool {
+    for (a, b) in [(left, right), (right, left)] {
+        if let Some((_, zcount)) = concat_high_and_zero_pad(a) {
+            if let Some(amt) = shl_amount(b) {
+                if expr_same_constish(zcount, amt) {
+                    return true;
+                }
+                if zcount.const_class(seed).is_const() && amt.const_class(seed).is_const() {
+                    return true;
+                }
+            }
+        }
+        if let Expr::Ident { name } = a {
+            if let Some(amt) = shl_amount(b) {
+                if let (Some(ak), Some(kk)) = (seed.aligned_k(name), alignment_key(amt)) {
+                    if ak == kk {
+                        return true;
+                    }
+                }
+            }
+            if let Expr::Ident { name: other } = b {
+                if let (Some(ak), Some(sk)) = (seed.aligned_k(name), seed.shifted_k(other)) {
+                    if ak == sk {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 fn is_const_divisor_scale(right: &Expr, seed: &ConstSeed) -> bool {
@@ -1556,6 +1975,19 @@ fn dominant_op_class_measured_seeded(e: &Expr, seed: &ConstSeed) -> OperatorClas
                 then_e,
                 else_e,
             } => {
+                if cond.const_class(seed).is_const() {
+                    walk(then_e, seed, f);
+                    walk(else_e, seed, f);
+                    return;
+                }
+                if let Some((conds, tail)) = const_then_chain(e, seed) {
+                    f(OperatorClass::Mux);
+                    for c in conds {
+                        walk(c, seed, f);
+                    }
+                    walk(tail, seed, f);
+                    return;
+                }
                 f(OperatorClass::Mux);
                 walk(cond, seed, f);
                 walk(then_e, seed, f);
@@ -1588,13 +2020,8 @@ fn dominant_op_class_measured_seeded(e: &Expr, seed: &ConstSeed) -> OperatorClas
                     && args.iter().all(|a| a.const_class(seed).is_const())
                 {
                     // P1 $clog2/$bits of constants — not an operator class.
-                } else if is_fmt_scale_fn(name) {
-                    f(OperatorClass::Mux);
-                    for a in args {
-                        walk(a, seed, f);
-                    }
                 } else {
-                    f(OperatorClass::Other);
+                    f(user_function_op_class(name, args.len()));
                     for a in args {
                         walk(a, seed, f);
                     }
@@ -1923,31 +2350,45 @@ impl<'a> Parser<'a> {
                     e = Expr::Call { name, args };
                 }
                 Some(b'\'') if self.src.get(self.i + 1) == Some(&b'(') => {
-                    // Narrow: only `(W)'(1)` / `idx'(1'b1)` is a unit increment
-                    // (l2_mshr `count_q - (IDX_W+1)'(1)`). General `(W)'(v)`
-                    // backtracks — delay-v19 collapsing every cast made gemm
-                    // `32'(n-1)*row+k` a 67.5 Mul+add (audit-remain-v25).
-                    let save = self.i;
-                    self.bump();
-                    self.bump();
-                    match self.parse_expr() {
-                        Some(val) if matches!(positive_literal_value(&val), Some(1)) => {
-                            self.skip_ws();
-                            if self.peek() == Some(b')') {
-                                self.bump();
-                            }
-                            e = val;
-                        }
-                        _ => {
-                            self.i = save;
-                            break;
-                        }
+                    // delay-v21: collapse `W'(const)` / `W'(ident)` / `W'(ident±1)`
+                    // (store_unit `PLEN'(LINE_B)`, snoop `IDX_W'(int'(rr)+1)`,
+                    // numeric `32'(LINE_B)`). Type-name casts (`int'(x)`) stay
+                    // unparsed — collapsing `int'(group_q)*6` re-exposes a Mul
+                    // (policy_subcode v43). General `(W)'(expr)` still
+                    // backtracks — delay-v19 gemm `32'(n_q[8:0]-1)*row`.
+                    if is_sv_type_cast_width(&e) {
+                        break;
+                    }
+                    match self.try_collapse_width_cast() {
+                        Some(val) => e = val,
+                        None => break,
                     }
                 }
                 _ => break,
             }
         }
         Some(e)
+    }
+
+    /// `'(expr)` / consume `'(` after a width primary. Backtracks when the
+    /// inner tree is not a safe collapse (gemm `32'(index-1)*row`).
+    fn try_collapse_width_cast(&mut self) -> Option<Expr> {
+        let save = self.i;
+        self.bump();
+        self.bump();
+        match self.parse_expr() {
+            Some(val) if is_width_cast_collapsible(&val, &ConstSeed::heuristic()) => {
+                self.skip_ws();
+                if self.peek() == Some(b')') {
+                    self.bump();
+                }
+                Some(val)
+            }
+            _ => {
+                self.i = save;
+                None
+            }
+        }
     }
 
     fn parse_primary(&mut self) -> Option<Expr> {
@@ -1963,6 +2404,8 @@ impl<'a> Parser<'a> {
                 Some(e)
             }
             b'{' => self.parse_concat_or_repl(),
+            // Unsized `'(1)` / `'(LINE_B)` — same collapse rules as `W'(…)`.
+            b'\'' if self.src.get(self.i + 1) == Some(&b'(') => self.try_collapse_width_cast(),
             b'\'' | b'0'..=b'9' => self.parse_literal(),
             c if c == b'_' || c.is_ascii_alphabetic() || c == b'$' => self.parse_ident_or_call_name(),
             _ => {
@@ -2029,10 +2472,18 @@ impl<'a> Parser<'a> {
     fn parse_literal(&mut self) -> Option<Expr> {
         let start = self.i;
         // sized: 32'hff  1'b0  8'd10
+        // Do **not** swallow `'( ` — that is a width-cast (`32'(LINE_B)`),
+        // handled by [`Self::try_collapse_width_cast`].
         while self.i < self.src.len() {
             let c = self.src[self.i];
+            if c == b'\'' {
+                if self.src.get(self.i + 1) == Some(&b'(') {
+                    break;
+                }
+                self.i += 1;
+                continue;
+            }
             if c.is_ascii_alphanumeric()
-                || c == b'\''
                 || c == b'_'
                 || c == b'x'
                 || c == b'X'
@@ -2043,6 +2494,9 @@ impl<'a> Parser<'a> {
             } else {
                 break;
             }
+        }
+        if self.i == start {
+            return None;
         }
         // trailing unit-less
         let text = String::from_utf8_lossy(&self.src[start..self.i]).into_owned();
@@ -2359,6 +2813,316 @@ mod tests {
             scaled.dominant_op_class(),
             OperatorClass::Mul,
             "elems * ai_fmt_bytes is a shift, got {scaled:?}"
+        );
+    }
+
+    #[test]
+    fn delay_v21_const_select_mux_and_width_cast() {
+        // RAS `addr[i] + (rvc ? 2 : 4)` is a selected increment, not CPA+mux.
+        let ras = Expr::parse("addr[i] + (rvc_call[i] ? 2 : 4)");
+        let ras_c = ras.fo4_critical_cost(&arithmetic_base);
+        assert!(
+            ras_c < 8.0,
+            "const-select offset add billed as CPA: {ras_c} {ras:?}"
+        );
+        assert_ne!(ras.dominant_op_class(), OperatorClass::AddSub, "{ras:?}");
+        // Branch target `addr + (taken ? rvc_imm : rvi_imm)` keeps the adder.
+        let tgt = Expr::parse("addr[i] + (taken_rvc_cf[i] ? rvc_imm[i] : rvi_imm[i])");
+        assert_eq!(
+            tgt.dominant_op_class(),
+            OperatorClass::AddSub,
+            "runtime-imm add must stay CPA: {tgt:?}"
+        );
+        assert!(
+            tgt.fo4_critical_cost(&arithmetic_base) >= 12.0,
+            "runtime-imm add under-billed: {} {tgt:?}",
+            tgt.fo4_critical_cost(&arithmetic_base)
+        );
+
+        // store_unit mask: `PLEN'(LINE_B) - PLEN'(1)` is Const∘Const.
+        let mask = Expr::parse("paddr_i & ~(CVA6Cfg.PLEN'(CBOZ_LINE_B) - CVA6Cfg.PLEN'(1))");
+        assert!(
+            mask.fo4_critical_cost(&arithmetic_base) < 4.0,
+            "width-cast const mask billed as add: {} {mask:?}",
+            mask.fo4_critical_cost(&arithmetic_base)
+        );
+        // Numeric width + ident±1 (snoop `IDX_W'(int'(rr_q)+1)`).
+        let rr = Expr::parse("IDX_W'(int'(rr_q) + 1)");
+        assert!(
+            rr.fo4_critical_cost(&arithmetic_base) < 4.0,
+            "ident±1 width-cast billed as add: {} {rr:?}",
+            rr.fo4_critical_cost(&arithmetic_base)
+        );
+        let ncast = Expr::parse("32'(count_q + 1)");
+        assert!(
+            ncast.fo4_critical_cost(&arithmetic_base) < 4.0,
+            "numeric 32'(ident+1) billed as add: {} {ncast:?}",
+            ncast.fo4_critical_cost(&arithmetic_base)
+        );
+        // Based literals still parse (`32'hff` must not become a width-cast).
+        assert_eq!(Expr::parse("32'hff").width_class_hint(), Some(32));
+        assert_eq!(
+            Expr::parse("32'(CBOZ_LINE_B)")
+                .const_class(&ConstSeed::heuristic()),
+            ConstClass::Const,
+            "32'(SCREAMING) must collapse to the const ident"
+        );
+
+        // delay-v19 guard: general `(W)'(expr)` must not expose the inner Mul.
+        let gemm = Expr::parse(
+            "32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes",
+        );
+        assert_ne!(
+            gemm.dominant_op_class(),
+            OperatorClass::Mul,
+            "index±1 width-cast must not collapse: {gemm:?}"
+        );
+        assert_ne!(
+            Expr::parse("32'(a + b)").dominant_op_class(),
+            OperatorClass::AddSub,
+            "32'(a+b) must not collapse to a+b"
+        );
+        // Type-name casts stay unparsed so a later `* K` is not a datapath Mul
+        // (policy_subcode `GroupShapeLog2[int'(group_q)*6 +: 6]`).
+        let packed = Expr::parse("GroupShapeLog2[int'(group_q)*6 +: 6]");
+        assert_ne!(
+            packed.dominant_op_class(),
+            OperatorClass::Mul,
+            "int'(ident)*K index must not expose Mul: {packed:?}"
+        );
+        assert_ne!(
+            Expr::parse("int'(r) + int'(c)").dominant_op_class(),
+            OperatorClass::AddSub,
+            "int'(r)+int'(c) must not collapse to r+c"
+        );
+
+        // Const-condition mux is elaboration (pe_dot `i < CNT` / `WIDTH ?`).
+        let gen = Expr::parse("WIDTH ? (a + b) : c");
+        assert_eq!(
+            gen.fo4_critical_cost(&arithmetic_base),
+            10.0,
+            "const-cond mux still taxed: {} {gen:?}",
+            gen.fo4_critical_cost(&arithmetic_base)
+        );
+        assert_eq!(gen.dominant_op_class(), OperatorClass::AddSub, "{gen:?}");
+        let gv = ConstSeed::from_names(["i", "CNT"]);
+        let pe = Expr::parse("i < CNT ? (red_l + red_r) : 0");
+        assert_eq!(
+            pe.fo4_critical_cost_latticed(&arithmetic_base, &gv),
+            10.0,
+            "genvar cond mux still taxed: {} {pe:?}",
+            pe.fo4_critical_cost_latticed(&arithmetic_base, &gv)
+        );
+        // Runtime condition keeps the mux on top of the add.
+        let rt = Expr::parse("en ? (a + b) : c");
+        assert_eq!(
+            rt.fo4_critical_cost(&arithmetic_base),
+            12.5,
+            "runtime mux under-billed: {} {rt:?}",
+            rt.fo4_critical_cost(&arithmetic_base)
+        );
+
+        // pe_dot `sum != MAXW'(0)` is zero-detect, not a 4 FO4 compare.
+        let z = Expr::parse(
+            "(red_fin[LEVELS] && final_bfp_sum != MAXW'(0)) ? s2_block_exp_piped[LEVELS] : 16'sd0",
+        );
+        assert!(
+            z.fo4_critical_cost(&arithmetic_base) < 8.0,
+            "zero-detect mux billed as compare: {} {z:?}",
+            z.fo4_critical_cost(&arithmetic_base)
+        );
+        assert_eq!(
+            Expr::parse("final_bfp_sum != MAXW'(0)").dominant_op_class(),
+            OperatorClass::LogicBit,
+            "!= 0 must be zero-detect"
+        );
+        assert_eq!(
+            Expr::parse("a != b").dominant_op_class(),
+            OperatorClass::Compare,
+            "runtime != runtime must stay Compare"
+        );
+        assert_eq!(
+            Expr::parse("idx == paddr_cl_idx").dominant_op_class(),
+            OperatorClass::Compare,
+            "runtime==runtime must stay Compare"
+        );
+    }
+
+    #[test]
+    fn delay_v22_const_then_mux_chain_is_one_mux() {
+        // pe_dot NaN/Inf/zero encodings: const thens, datapath else.
+        let chain = Expr::parse(
+            "red_nan ? 32'h7fc00000 : red_inf ? 32'h7f800000 : red_zero ? 32'd0 : datapath",
+        );
+        assert_eq!(
+            chain.fo4_critical_cost(&arithmetic_base),
+            2.5,
+            "const-then chain billed as serial muxes: {} {chain:?}",
+            chain.fo4_critical_cost(&arithmetic_base)
+        );
+        assert_eq!(chain.dominant_op_class(), OperatorClass::Mux, "{chain:?}");
+        // A cheap invert on a flag still sits beside the single mux, not 3× mux.
+        let inv = Expr::parse(
+            "red_nan ? 32'h7fc00000 : red_inf ? 32'h7f800000 : (!red_fin) ? 32'd0 : datapath",
+        );
+        assert_eq!(
+            inv.fo4_critical_cost(&arithmetic_base),
+            3.5,
+            "flag invert + const-then chain: {} {inv:?}",
+            inv.fo4_critical_cost(&arithmetic_base)
+        );
+        let with_call = Expr::parse(
+            "n ? 32'h7fc00000 : i ? 32'h7f800000 : (!f) ? 32'd0 : pack(sum, exp)",
+        );
+        assert!(
+            with_call.fo4_critical_cost(&arithmetic_base) < 6.0,
+            "const-then + call still chained: {} {with_call:?}",
+            with_call.fo4_critical_cost(&arithmetic_base)
+        );
+        // Runtime then in the middle must keep its own mux (not flatten across).
+        let mixed = Expr::parse("n ? 32'h1 : (i ? datapath : 32'h2)");
+        assert_eq!(
+            mixed.fo4_critical_cost(&arithmetic_base),
+            5.0,
+            "runtime-then must not flatten: {} {mixed:?}",
+            mixed.fo4_critical_cost(&arithmetic_base)
+        );
+        // Single runtime mux is unchanged.
+        assert_eq!(
+            Expr::parse("en ? a : b").fo4_critical_cost(&arithmetic_base),
+            2.5
+        );
+        // Inf encoding `{sign[LEVELS], 8'hff, 0}` is still an exception arm (pe_dot).
+        let inf = Expr::parse(
+            "nan[LEVELS] ? {5'b10000, 32'h7fc00000} : inf[LEVELS] ? {5'b00100, {sign[LEVELS], 8'hff, 23'd0}} : (!fin[LEVELS]) ? {5'd0, 32'd0} : pack(sum, exp)",
+        );
+        assert!(
+            inf.fo4_critical_cost(&arithmetic_base) < 6.0,
+            "sign-pack encoding still serial mux: {} {inf:?}",
+            inf.fo4_critical_cost(&arithmetic_base)
+        );
+        // Bare ident then is datapath — do not flatten.
+        let ident_then = Expr::parse("en ? a : (f ? 32'h1 : datapath)");
+        assert_eq!(
+            ident_then.fo4_critical_cost(&arithmetic_base),
+            5.0,
+            "ident then flattened: {} {ident_then:?}",
+            ident_then.fo4_critical_cost(&arithmetic_base)
+        );
+        // `{a, b}` with no const field is datapath pack, not an encoding.
+        let pack = Expr::parse("en ? {a, b} : (f ? 32'h1 : datapath)");
+        assert_eq!(
+            pack.fo4_critical_cost(&arithmetic_base),
+            5.0,
+            "ident concat flattened: {} {pack:?}",
+            pack.fo4_critical_cost(&arithmetic_base)
+        );
+    }
+
+    #[test]
+    fn delay_v23_stride_add_aligned_insert_sign_and_call() {
+        // F: `addr + (1 << n)` is a mux of increments, not CPA+shift.
+        let stride = Expr::parse("sbaddress_i + (32'h1 << sbaccess_i)");
+        assert_ne!(
+            stride.dominant_op_class(),
+            OperatorClass::AddSub,
+            "one-hot stride billed as CPA: {stride:?}"
+        );
+        assert!(
+            stride.fo4_critical_cost(&arithmetic_base) < 8.0,
+            "one-hot stride still CPA: {} {stride:?}",
+            stride.fo4_critical_cost(&arithmetic_base)
+        );
+        // Runtime offset stays an add.
+        assert_eq!(
+            Expr::parse("addr + (offset << size)").dominant_op_class(),
+            OperatorClass::AddSub
+        );
+        // G: aligned `{x[MSB:K], {K{0}}} + (y << K)` is a field insert, not CPA.
+        // The `cnt << 3` child is still a const shift (honest dominant).
+        let aligned = Expr::parse("{addr[31:3], {3{1'b0}}} + (cnt << 3)");
+        assert_ne!(
+            aligned.dominant_op_class(),
+            OperatorClass::AddSub,
+            "aligned field insert billed as add: {aligned:?}"
+        );
+        assert!(
+            aligned.fo4_critical_cost(&arithmetic_base) < 4.0,
+            "aligned insert still CPA: {} {aligned:?}",
+            aligned.fo4_critical_cost(&arithmetic_base)
+        );
+        // Unaligned add stays CPA.
+        assert_eq!(
+            Expr::parse("wrap + (cnt << 3)").dominant_op_class(),
+            OperatorClass::AddSub
+        );
+        // I: signed `x > 0` is the sign bit.
+        assert_eq!(
+            Expr::parse("exponent_difference > 0").dominant_op_class(),
+            OperatorClass::LogicBit
+        );
+        assert_eq!(
+            Expr::parse("a > b").dominant_op_class(),
+            OperatorClass::Compare
+        );
+        // N: unknown user function stays Other (gemm v49: 2-arg Mux tax).
+        // fmt / $clog2 unchanged. Wrap-boundary body is a later inline pass.
+        assert_eq!(
+            Expr::parse("get_wrap_boundary(addr, len)").dominant_op_class(),
+            OperatorClass::Other
+        );
+        assert_ne!(
+            Expr::parse("fmt_row_bytes(k_q)").dominant_op_class(),
+            OperatorClass::Mul
+        );
+        assert_eq!(
+            Expr::parse("$clog2(WIDTH)").fo4_critical_cost(&arithmetic_base),
+            0.0
+        );
+        // Q: saturating `sat + 1` is already an increment (delay-v18).
+        assert_ne!(
+            Expr::parse("saturation_counter + 1").dominant_op_class(),
+            OperatorClass::AddSub
+        );
+        // delay-v24: named aligned net + (y<<K).
+        let mut seed = ConstSeed::heuristic();
+        seed.set_aligned("aligned_address", "3");
+        assert_ne!(
+            Expr::parse("aligned_address + (cnt << 3)").dominant_op_class_latticed(&seed),
+            OperatorClass::AddSub
+        );
+        assert_eq!(
+            Expr::parse("wrap_boundary + (cnt << 3)").dominant_op_class_latticed(&seed),
+            OperatorClass::AddSub
+        );
+        // axi2mem: `{{LOG}{1'b0}}` wraps the replicate count in a one-part concat.
+        let axi_pad = Expr::parse(
+            "{addr[AXI_ADDR_WIDTH-1:LOG_NR_BYTES], {{LOG_NR_BYTES}{1'b0}}}",
+        );
+        assert_eq!(
+            axi_pad.zero_pad_align_key().as_deref(),
+            Some("LOG_NR_BYTES"),
+            "double-brace zero-pad must seed K: {axi_pad:?}"
+        );
+        let axi_insert = Expr::parse(
+            "{addr[AXI_ADDR_WIDTH-1:LOG_NR_BYTES], {{LOG_NR_BYTES}{1'b0}}} + (cnt << LOG_NR_BYTES)",
+        );
+        assert_ne!(
+            axi_insert.dominant_op_class(),
+            OperatorClass::AddSub,
+            "axi2mem aligned stride billed as CPA: {axi_insert:?}"
+        );
+        // delay-v25: BalanceMux stages `t = y << K`; `aligned + t` is still insert.
+        seed.set_shifted("svt_bm_shift", "3");
+        assert_ne!(
+            Expr::parse("aligned_address + svt_bm_shift").dominant_op_class_latticed(&seed),
+            OperatorClass::AddSub,
+            "staged aligned + t billed as CPA"
+        );
+        assert_eq!(
+            Expr::parse("wrap_boundary + svt_bm_shift").dominant_op_class_latticed(&seed),
+            OperatorClass::AddSub,
+            "staged wrap + t must stay CPA"
         );
     }
 

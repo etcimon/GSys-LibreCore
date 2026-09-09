@@ -16,8 +16,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::expr::Expr;
-use crate::ir::{NodeId, TimingModule};
+use crate::expr::{ConstSeed, Expr};
+use crate::ir::{AssignKind, NodeId, TimingModule};
 
 /// Strip bit/part selects so `rdata[31:0]` and `foo_d[i]` share one name.
 pub fn ident_base(name: &str) -> String {
@@ -257,6 +257,155 @@ impl RefOrderTree {
     /// Count of write-only variables among `lhs` keys.
     pub fn write_only_lhs(&self, lhs: impl Iterator<Item = impl AsRef<str>>) -> usize {
         lhs.filter(|k| self.is_write_only(k.as_ref())).count()
+    }
+}
+
+/// First-pass module auto-const from the reference tree.
+///
+/// For each **expression-less** combo/continuous assign (`x = 4`, `x = WIDTH`,
+/// `x = y` of a const) whose LHS is a **single exclusive writer** and is
+/// **read** (not a write-only next-state `_d`), add the LHS to [`ConstSeed`].
+/// Copy-propagates through ident aliases to a fixpoint. NBA / indexed LHS /
+/// multi-writer nets stay runtime.
+pub fn extend_seed_auto_const(module: &TimingModule, seed: &mut ConstSeed) {
+    let ids: Vec<NodeId> = module.nodes.keys().copied().collect();
+    if ids.is_empty() {
+        return;
+    }
+    let tree = RefOrderTree::from_nodes(module, &ids);
+    let mut exclusive_assigns: Vec<(String, Expr)> = Vec::new();
+    for n in module.nodes.values() {
+        if !matches!(
+            n.assign_kind,
+            AssignKind::Blocking | AssignKind::Continuous | AssignKind::Unknown
+        ) {
+            continue;
+        }
+        let Some(lhs_raw) = n.lhs.as_deref() else {
+            continue;
+        };
+        if lhs_raw.contains('[') {
+            continue;
+        }
+        let lhs = ident_base(lhs_raw);
+        if lhs.is_empty() {
+            continue;
+        }
+        let Some(vc) = tree.vars.get(&lhs) else {
+            continue;
+        };
+        // Exclusive writer, and the value is actually read (not write-only `_d`).
+        if vc.writes != 1 || vc.reads == 0 {
+            continue;
+        }
+        let rhs = n
+            .rhs_expr
+            .clone()
+            .or_else(|| n.rhs.as_deref().map(Expr::parse));
+        let Some(rhs) = rhs else {
+            continue;
+        };
+        if !rhs.is_expression_less() {
+            continue;
+        }
+        exclusive_assigns.push((lhs, rhs));
+    }
+    if !exclusive_assigns.is_empty() {
+        for _ in 0..32 {
+            let mut added = false;
+            for (lhs, rhs) in &exclusive_assigns {
+                if seed.looks_const(lhs) {
+                    continue;
+                }
+                let const_rhs = match rhs {
+                    Expr::Literal { .. } => true,
+                    Expr::Ident { name } => seed.looks_const(name),
+                    _ => false,
+                };
+                if const_rhs {
+                    seed.add(lhs.clone());
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+    }
+    extend_seed_aligned(module, &tree, seed);
+}
+
+/// First-pass aligned nets: exclusive combo `{x[MSB:K], {K{0}}}` (and ident
+/// aliases of those nets). `ident + (y << K)` then bills as a field insert.
+/// Exclusive `t = y << K` temps (BalanceMux shift staging) make
+/// `aligned + t` a field insert with matching `K`.
+fn extend_seed_aligned(
+    module: &TimingModule,
+    tree: &RefOrderTree,
+    seed: &mut ConstSeed,
+) {
+    let mut exclusive: Vec<(String, Expr)> = Vec::new();
+    for n in module.nodes.values() {
+        if !matches!(
+            n.assign_kind,
+            AssignKind::Blocking | AssignKind::Continuous | AssignKind::Unknown
+        ) {
+            continue;
+        }
+        let Some(lhs_raw) = n.lhs.as_deref() else {
+            continue;
+        };
+        if lhs_raw.contains('[') {
+            continue;
+        }
+        let lhs = ident_base(lhs_raw);
+        if lhs.is_empty() {
+            continue;
+        }
+        let Some(vc) = tree.vars.get(&lhs) else {
+            continue;
+        };
+        if vc.writes != 1 || vc.reads == 0 {
+            continue;
+        }
+        let rhs = n
+            .rhs_expr
+            .clone()
+            .or_else(|| n.rhs.as_deref().map(Expr::parse));
+        let Some(rhs) = rhs else {
+            continue;
+        };
+        exclusive.push((lhs, rhs));
+    }
+    for _ in 0..32 {
+        let mut added = false;
+        for (lhs, rhs) in &exclusive {
+            if seed.aligned_k(lhs).is_none() {
+                if let Some(k) = rhs.zero_pad_align_key() {
+                    seed.set_aligned(lhs.clone(), k);
+                    added = true;
+                } else if let Expr::Ident { name } = rhs {
+                    if let Some(k) = seed.aligned_k(name).map(str::to_string) {
+                        seed.set_aligned(lhs.clone(), k);
+                        added = true;
+                    }
+                }
+            }
+            if seed.shifted_k(lhs).is_none() {
+                if let Some(k) = rhs.shift_align_key() {
+                    seed.set_shifted(lhs.clone(), k);
+                    added = true;
+                } else if let Expr::Ident { name } = rhs {
+                    if let Some(k) = seed.shifted_k(name).map(str::to_string) {
+                        seed.set_shifted(lhs.clone(), k);
+                        added = true;
+                    }
+                }
+            }
+        }
+        if !added {
+            break;
+        }
     }
 }
 
@@ -534,5 +683,276 @@ mod tests {
             t.calls
         );
         assert!(t.procedural_ok);
+    }
+
+    #[test]
+    fn auto_const_expression_less_exclusive_read() {
+        let mut nodes = Map::new();
+        let mut k = node(0, "k", "4", OperatorClass::Other, 0.0);
+        k.assign_kind = crate::ir::AssignKind::Continuous;
+        let mut alias = node(1, "k_alias", "k", OperatorClass::Other, 0.0);
+        alias.assign_kind = crate::ir::AssignKind::Continuous;
+        let mut y = node(2, "y", "a + k_alias", OperatorClass::AddSub, 10.0);
+        y.assign_kind = crate::ir::AssignKind::Continuous;
+        nodes.insert(0, k);
+        nodes.insert(1, alias);
+        nodes.insert(2, y);
+        let m = TimingModule {
+            id: 0,
+            name: "m".into(),
+            file: "m.sv".into(),
+            nodes,
+            regions: Map::new(),
+            localparams: vec![],
+            parameters: vec![],
+            ports: vec![],
+            gen_loops: vec![],
+            functions: vec![],
+            package_imports: vec![],
+            instances: vec![],
+            loc: loc(),
+        };
+        let mut seed = crate::expr::ConstSeed::heuristic();
+        super::extend_seed_auto_const(&m, &mut seed);
+        assert!(seed.looks_const("k"), "literal assign must seed k");
+        assert!(
+            seed.looks_const("k_alias"),
+            "ident alias of const must seed k_alias"
+        );
+        assert!(
+            !seed.looks_const("y"),
+            "a+k is not expression-less"
+        );
+        assert!(
+            !seed.looks_const("a"),
+            "undriven ident must stay runtime"
+        );
+        assert_eq!(
+            crate::expr::Expr::parse("a + k_alias").dominant_op_class_latticed(&seed),
+            crate::ir::OperatorClass::LogicBit,
+            "const-offset add after auto-const"
+        );
+    }
+
+    #[test]
+    fn auto_const_skips_nba_and_write_only_and_multi_writer() {
+        let mut nodes = Map::new();
+        let mut q = node(0, "q", "4", OperatorClass::Other, 0.0);
+        q.assign_kind = crate::ir::AssignKind::Nonblocking;
+        let mut d = node(1, "state_d", "IDLE", OperatorClass::Other, 0.0);
+        d.assign_kind = crate::ir::AssignKind::Blocking;
+        // write-only: state_d never read
+        let mut w1 = node(2, "shared", "1", OperatorClass::Other, 0.0);
+        w1.assign_kind = crate::ir::AssignKind::Continuous;
+        let mut w2 = node(3, "shared", "0", OperatorClass::Other, 0.0);
+        w2.assign_kind = crate::ir::AssignKind::Continuous;
+        let mut use_q = node(4, "y", "q + shared", OperatorClass::AddSub, 10.0);
+        use_q.assign_kind = crate::ir::AssignKind::Continuous;
+        nodes.insert(0, q);
+        nodes.insert(1, d);
+        nodes.insert(2, w1);
+        nodes.insert(3, w2);
+        nodes.insert(4, use_q);
+        let m = TimingModule {
+            id: 0,
+            name: "m".into(),
+            file: "m.sv".into(),
+            nodes,
+            regions: Map::new(),
+            localparams: vec![],
+            parameters: vec![],
+            ports: vec![],
+            gen_loops: vec![],
+            functions: vec![],
+            package_imports: vec![],
+            instances: vec![],
+            loc: loc(),
+        };
+        let mut seed = crate::expr::ConstSeed::heuristic();
+        super::extend_seed_auto_const(&m, &mut seed);
+        assert!(!seed.looks_const("q"), "NBA must not auto-const");
+        assert!(
+            !seed.looks_const("state_d"),
+            "write-only next-state must not auto-const"
+        );
+        assert!(
+            !seed.looks_const("shared"),
+            "multi-writer must not auto-const"
+        );
+    }
+
+    #[test]
+    fn auto_const_aligned_zero_pad_names_field_insert() {
+        let mut nodes = Map::new();
+        let mut al = node(
+            0,
+            "aligned_address",
+            "{addr[31:3], {3{1'b0}}}",
+            OperatorClass::Concat,
+            1.0,
+        );
+        al.assign_kind = crate::ir::AssignKind::Blocking;
+        let mut cons = node(
+            1,
+            "cons_addr",
+            "aligned_address + (cnt << 3)",
+            OperatorClass::AddSub,
+            10.0,
+        );
+        cons.assign_kind = crate::ir::AssignKind::Blocking;
+        nodes.insert(0, al);
+        nodes.insert(1, cons);
+        let m = TimingModule {
+            id: 0,
+            name: "axi2mem".into(),
+            file: "a.sv".into(),
+            nodes,
+            regions: Map::new(),
+            localparams: vec![],
+            parameters: vec![],
+            ports: vec![],
+            gen_loops: vec![],
+            functions: vec![],
+            package_imports: vec![],
+            instances: vec![],
+            loc: loc(),
+        };
+        let mut seed = crate::expr::ConstSeed::heuristic();
+        super::extend_seed_auto_const(&m, &mut seed);
+        assert_eq!(seed.aligned_k("aligned_address"), Some("3"));
+        assert_ne!(
+            crate::expr::Expr::parse("aligned_address + (cnt << 3)")
+                .dominant_op_class_latticed(&seed),
+            crate::ir::OperatorClass::AddSub,
+            "named aligned + (y<<K) must not be CPA"
+        );
+        assert_eq!(
+            crate::expr::Expr::parse("wrap_boundary + (cnt << 3)")
+                .dominant_op_class_latticed(&seed),
+            crate::ir::OperatorClass::AddSub,
+            "unproven wrap ident must stay CPA"
+        );
+    }
+
+    #[test]
+    fn auto_const_aligned_double_brace_ident_pad() {
+        let mut nodes = Map::new();
+        let mut al = node(
+            0,
+            "aligned_address",
+            "{ax_req_q.addr[AXI_ADDR_WIDTH-1:LOG_NR_BYTES], {{LOG_NR_BYTES}{1'b0}}}",
+            OperatorClass::Concat,
+            1.0,
+        );
+        al.assign_kind = crate::ir::AssignKind::Blocking;
+        let mut cons = node(
+            1,
+            "cons_addr",
+            "aligned_address + (cnt_q << LOG_NR_BYTES)",
+            OperatorClass::AddSub,
+            10.0,
+        );
+        cons.assign_kind = crate::ir::AssignKind::Blocking;
+        nodes.insert(0, al);
+        nodes.insert(1, cons);
+        let m = TimingModule {
+            id: 0,
+            name: "axi2mem".into(),
+            file: "a.sv".into(),
+            nodes,
+            regions: Map::new(),
+            localparams: vec![],
+            parameters: vec![],
+            ports: vec![],
+            gen_loops: vec![],
+            functions: vec![],
+            package_imports: vec![],
+            instances: vec![],
+            loc: loc(),
+        };
+        let mut seed = crate::expr::ConstSeed::heuristic();
+        super::extend_seed_auto_const(&m, &mut seed);
+        assert_eq!(
+            seed.aligned_k("aligned_address"),
+            Some("LOG_NR_BYTES"),
+            "double-brace ident pad must seed K"
+        );
+        assert_ne!(
+            crate::expr::Expr::parse("aligned_address + (cnt_q << LOG_NR_BYTES)")
+                .dominant_op_class_latticed(&seed),
+            crate::ir::OperatorClass::AddSub,
+            "named aligned + (y<<LOG) must not be CPA"
+        );
+        assert_eq!(
+            crate::expr::Expr::parse(
+                "wrap_boundary + ((ax_req_q.len + 1) << LOG_NR_BYTES)"
+            )
+            .dominant_op_class_latticed(&seed),
+            crate::ir::OperatorClass::AddSub,
+            "wrap ident from a call must stay CPA"
+        );
+    }
+
+    #[test]
+    fn auto_const_aligned_plus_staged_shift_temp() {
+        let mut nodes = Map::new();
+        let mut al = node(
+            0,
+            "aligned_address",
+            "{addr[31:3], {3{1'b0}}}",
+            OperatorClass::Concat,
+            1.0,
+        );
+        al.assign_kind = crate::ir::AssignKind::Blocking;
+        let mut sh = node(
+            1,
+            "svt_bm_shift",
+            "cnt_q << 3",
+            OperatorClass::ShiftConst,
+            2.0,
+        );
+        sh.assign_kind = crate::ir::AssignKind::Blocking;
+        let mut cons = node(
+            2,
+            "cons_addr",
+            "aligned_address + svt_bm_shift",
+            OperatorClass::AddSub,
+            10.0,
+        );
+        cons.assign_kind = crate::ir::AssignKind::Blocking;
+        nodes.insert(0, al);
+        nodes.insert(1, sh);
+        nodes.insert(2, cons);
+        let m = TimingModule {
+            id: 0,
+            name: "axi2mem".into(),
+            file: "a.sv".into(),
+            nodes,
+            regions: Map::new(),
+            localparams: vec![],
+            parameters: vec![],
+            ports: vec![],
+            gen_loops: vec![],
+            functions: vec![],
+            package_imports: vec![],
+            instances: vec![],
+            loc: loc(),
+        };
+        let mut seed = crate::expr::ConstSeed::heuristic();
+        super::extend_seed_auto_const(&m, &mut seed);
+        assert_eq!(seed.aligned_k("aligned_address"), Some("3"));
+        assert_eq!(seed.shifted_k("svt_bm_shift"), Some("3"));
+        assert_ne!(
+            crate::expr::Expr::parse("aligned_address + svt_bm_shift")
+                .dominant_op_class_latticed(&seed),
+            crate::ir::OperatorClass::AddSub,
+            "BM-staged aligned + t must not be CPA"
+        );
+        assert_eq!(
+            crate::expr::Expr::parse("wrap_boundary + svt_bm_shift")
+                .dominant_op_class_latticed(&seed),
+            crate::ir::OperatorClass::AddSub,
+            "BM-staged wrap + t must stay CPA"
+        );
     }
 }

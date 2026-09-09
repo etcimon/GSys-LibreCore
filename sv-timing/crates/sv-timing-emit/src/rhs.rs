@@ -1650,13 +1650,12 @@ pub fn or_reduce_prep_cuts(
         if claimed.contains(&ln) || !line_is_continuous_assign(source, ln) {
             continue;
         }
-        if line_inside_generate(source, ln) {
-            continue;
-        }
         let Some((lhs, rhs, _, end)) = parse_assign_multiline(source, ln, 8) else {
             continue;
         };
         let base = lhs_base_ident(&lhs);
+        // Generate-if locals (wt_dcache `gen_fixup_queue`) may sample a
+        // module-scope 1-bit reduce pipe. Skip generate-for `[i]` lvalues.
         if base.ends_with("_o") || has_free_gen_index(&lhs) || lhs.contains('[') {
             continue;
         }
@@ -1668,6 +1667,12 @@ pub fn or_reduce_prep_cuts(
             continue;
         }
         if reduces.len() < 2 && count_bool_binops(&rhs) < 2 {
+            continue;
+        }
+        if reduces
+            .iter()
+            .any(|(_, _, ident)| !lhs_is_module_level_net(source, ident) || has_free_gen_index(ident))
+        {
             continue;
         }
         let mut new_rhs = rhs.clone();
@@ -3429,5 +3434,69 @@ endmodule
             !rewritten.contains("assign we = (cache_wren pipe_svt_red"),
             "must not delete bitwise |:\n{rewritten}"
         );
+    }
+
+    #[test]
+    fn or_reduce_preps_inside_generate_if() {
+        let src = r#"
+module wbuf_gen (
+    input  logic clk_i, rst_ni,
+    input  logic [7:0] tocheck,
+    input  logic hit_q, en_q, en_q1,
+    input  logic [1:0] state_q
+);
+  logic t1, req;
+  assign t1 = 1'b1;
+  generate
+    if (1) begin : gen_fixup_queue
+      assign req = (state_q == 2'd1) && !hit_q && !(|tocheck) && !en_q && !en_q1;
+    end
+  endgenerate
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) ;
+    else         ;
+  end
+endmodule
+"#;
+        let line_t1 = src
+            .lines()
+            .position(|l| l.contains("assign t1"))
+            .expect("t1") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("wbuf_gen.sv", line_t1),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(12.0),
+            fo4_after: Some(10.0),
+            rationale: "t1".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        let extras = all_emit_extra_cuts(src, &cuts);
+        let reds: Vec<&str> = extras
+            .iter()
+            .filter(|c| c.pipe_name.contains("pipe_svt_red_"))
+            .map(|c| c.rhs.as_str())
+            .collect();
+        assert_eq!(reds, vec!["|tocheck"], "generate-if mixed cone: {reds:?}");
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        assert!(
+            rewritten.contains("or-reduce preps for req"),
+            "expected generate-if or-reduce rewrite:\n{rewritten}"
+        );
+        let live = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("assign req") && t.contains("|tocheck") && !t.starts_with("//")
+        });
+        assert!(!live, "live |tocheck left on generate-if req:\n{rewritten}");
     }
 }

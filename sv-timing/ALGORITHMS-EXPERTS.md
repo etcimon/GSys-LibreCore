@@ -11,8 +11,8 @@ diffs. The architectural design is treated as first-class theory: the same objec
 (budget, path, class, lane, cleanliness set, pass stage, emit origin) that the code
 manipulates.
 
-**What this is not.** STA. Structural FO4 is a screening model. A number of 18.5 FO4
-does not mean a place-and-route path of 370 ps. It means: under `fo4-v1`, delay-v19,
+**What this is not.** STA. Structural FO4 is a screening model. A number of 15 FO4
+does not mean a place-and-route path of 300 ps. It means: under `fo4-v1`, delay-v25,
 path_class detector 24, and the current compose/classify/pass loop, this cone is the
 worst remaining single-cycle primary.
 
@@ -24,16 +24,20 @@ worst remaining single-cycle primary.
 | `fo4_ps` | 20 | process input, not a retune knob |
 | margin | 0.2 | same |
 | Budget \(B\) | **10 FO4** | \((1000/f_{\mathrm{MHz}})\times(1000/\mathrm{fo4\_ps})\times(1-m)\) |
-| Measurement | `delay-v19` | `crates/sv-timing-core/src/version.rs` |
+| Measurement | `delay-v25` | `crates/sv-timing-core/src/version.rs` |
 | Path-class detector | **24** | `PATH_CLASS_DETECTOR_VERSION` in `path_class.rs` |
-| Soak of record | `audit-remain-v27/` emit primary **18.5 FO4 / 2162 MHz** | CLI `correct` + post_analyze |
-| Failed experiment | `audit-remain-v28/` 30.5 FO4 | S4-continue-on-flat-primary, **reverted** |
-| Remaining gap to \(B=10\) | **8.5 FO4 on the emit primary**, plus a floor that is not 10 | Part VII |
+| Quoted soak of record | `audit-remain-v50/` emit **15.0 P10 / 16.0 P10** | CLI `correct` + post_analyze; delay-v23 |
+| Latest soak | `audit-remain-v52/` delay-v25 integrity green | core **15.0 P10**; APU **22.0** axi2mem WRAP-beyond — **do not quote 22** over v50 16 P10 |
+| Historical | `audit-remain-v27/` 18.5 gemm span | VII.A/B/D/E later closed that headline |
+| Failed experiments | v25 general `(W)'(v)` 40.5; v28 S4-continue 30.5; v49 2-arg Mux tax gemm 15 | all **reverted** |
+| Remaining gap to \(B=10\) | **5 FO4** on core P10 trigger; APU floor 16 P10 inval_bus (or 22 wrap-beyond if quoted) | Part VII |
 
 **How to read.** Read Part 0 once. Then read algorithms in pipeline order (I → VI) the
 first time. After that, jump by name: the table of contents is the algorithm index.
 When a leftover surprises you, start at **P1–P10**, then **cone lane**, then **S3/S4
 fixpoint**, then **emit origin (M7)**. Those four explain almost every soak regression.
+Campaign leftover letters in `AGENTS-todo.md` (A–R) map to **M20–M29** here;
+they are not A1–A49.
 
 ---
 
@@ -43,13 +47,13 @@ fixpoint**, then **emit origin (M7)**. Those four explain almost every soak regr
 1. [A1 Budget FO4](#a1--budget-fo4)
 2. [A2 Cost table `fo4-v1`](#a2--cost-table-fo4-v1)
 3. [A3 Inverse: max frequency from a path](#a3--inverse-max-frequency-from-a-path)
-4. [A4 Measurement versioning](#a4--measurement-versioning-delay-v19)
+4. [A4 Measurement versioning](#a4--measurement-versioning-delay-v25)
 5. [A5 Parse](#a5--parse)
 6. [A6 Lower to timing IR](#a6--lower-to-timing-ir)
 7. [A7 Expression AST](#a7--expression-ast)
 8. [A8 Constant lattice (P1)](#a8--constant-lattice-p1)
 9. [A9 Billed binary class](#a9--billed-binary-class)
-10. [A10 Narrow width-cast (delay-v19)](#a10--narrow-width-cast-delay-v19)
+10. [A10 Narrow width-cast (delay-v19/v21)](#a10--narrow-width-cast-delay-v19v21)
 11. [A11 Comment interiors (P2)](#a11--comment-interiors-p2)
 12. [A12 Genvar / generate lattice](#a12--genvar--generate-lattice)
 13. [A13 Comb-for unroll](#a13--comb-for-unroll)
@@ -89,51 +93,61 @@ fixpoint**, then **emit origin (M7)**. Those four explain almost every soak regr
 47. [A47 Module-diverse batch](#a47--module-diverse-batch)
 48. [A48 Fixpoint and the primary-flat stop](#a48--fixpoint-and-the-primary-flat-stop)
 49. [A49 Failed experiment: S4-continue (v28)](#a49--failed-experiment-s4-continue-v28)
-50. [Part VII Remaining gap to 10 FO4](#part-vii--remaining-gap-to-10-fo4)
-51. [Part VIII Maintenance playbook](#part-viii--maintenance-playbook)
-52. [Appendix. File map, glossary, anti-patterns](#appendix--file-map-glossary-anti-patterns)
-53. [Part IX Supporting algorithms](#part-ix--supporting-algorithms-the-pass-loop-actually-calls)
-54. [Part X Formal invariants](#part-x--formal-invariants-the-type-system)
-55. [Part XI Laboratory walkthroughs](#part-xi--laboratory-walkthroughs)
-56. [Part XII Decision trees](#part-xii--decision-trees-for-a-maintainer)
-57. [Part XIII Operator billing atlas](#part-xiii--operator-billing-atlas)
-58. [Part XIV Pass loop state machine](#part-xiv--pass-loop-state-machine-full)
-59. [Part XV Emit pipeline](#part-xv--emit-pipeline-full)
-60. [Part XVI 4 GHz campaign](#part-xvi--strategic-reading-of-the-4-ghz-campaign)
-61. [Part XVII Worked numeric examples](#part-xvii--worked-numeric-examples-keep-a-pencil-here)
-62. [Part XVIII Mutation catalog](#part-xviii--mutation-catalog-what-each-algorithm-may-rewrite)
-63. [Part XIX Study order](#part-xix--suggested-study-order-for-a-systems-programmer)
-64. [Part XX FAQ](#part-xx--faq-the-soaks-already-answered)
-65. [Part XXI Future-detector fixtures](#part-xxi--copy-paste-fixtures-for-future-detectors)
-66. [Part XXII Trace glossary](#part-xxii--glossary-expansion-terms-you-will-see-in-traces)
-67. [Part XXIII SoC dual](#part-xxiii--dual-of-the-soc-prime-directive-inside-this-package)
-68. [Part XXIV Test index](#part-xxiv--index-of-tests-that-pin-theory)
-69. [Part XXV Closing](#part-xxv--closing-what-maintain-the-codebase-himself-means)
-70. [Part XXVI Detector internals](#part-xxvi--detector-internals-the-first-patch-will-hit)
-71. [Part XXVII P1–P10 labs](#part-xxvii--pattern-catalog-one-lab-each-p1p10)
-72. [Part XXVIII Soak chronicle](#part-xxviii--soak-chronicle-why-the-code-is-this-shape)
-73. [Part XXIX Lowering details](#part-xxix--lowering-details-that-timing-depends-on)
-74. [Part XXX Parallel timing worked schedule](#part-xxx--parallel-timing-worked-schedule)
-75. [Part XXXI InsertReg allow matrix](#part-xxxi--insertreg-apply-vs-refuse-a-complete-matrix)
-76. [Part XXXII SV mutation atlas](#part-xxxii--systemverilog-mutation-atlas-copybook)
-77. [Part XXXIII Algo-trace reading](#part-xxxiii--how-to-read-a-refuseapply-algo_trace-event)
-78. [Part XXXIV Relocation scoring](#part-xxxiv--relocation-scoring-why-t1-is-first)
-79. [Part XXXV Naming collisions](#part-xxxv--naming-collisions-and-file-suffix)
-80. [Part XXXVI Near-10 numbers](#part-xxxvi--what-near-10-fo4-means-numerically)
-81. [Part XXXVII Anti-pattern patches](#part-xxxvii--anti-pattern-catalog-with-the-patch-that-would-do-it)
-82. [Part XXXVIII Gemm debug transcript](#part-xxxviii--a-day-in-the-life-debug-of-gemm-185)
-83. [Part XXXIX Function map](#part-xxxix--function-level-map-grep-anchors)
-84. [Part XL Night-before-S4 recap](#part-xl--final-recap-the-night-before-you-patch-s4)
-85. [Part XLI Apply-work-item](#part-xli--apply_work_item-the-inner-interpreter)
-86. [Part XLII Dense sidecar](#part-xlii--dense-sidecar-lean-vs-real-feeds)
-87. [Part XLIII Worklist ordering](#part-xliii--worklist-ordering-in-full)
-88. [Part XLIV Clock domains](#part-xliv--clock-domains-and-cycle-bars)
-89. [Part XLV Cache key](#part-xlv--cache-key-composition)
-90. [Part XLVI Remaining-gap proof](#part-xlvi--remaining-gap-proof-from-the-invariants)
-91. [Part XLVII insert_register IR](#part-xlvii--insert_register-ir-mutation-what-remeasure-sees)
-92. [Part XLVIII Allowlist](#part-xlviii--allowlist-refuse-prefixes-module_allowed)
-93. [Part XLIX Ranking leftover counts](#part-xlix--ranking-primary-vs-all-kinds-leftover-counts)
-94. [Part L Maintenance contract](#part-l--maintenance-contract-sign-here)
+50. [M20 Named `fmt_row_bytes` (delay-v20)](#m20--named-fmt_row_bytes-delay-v20)
+51. [M21 Const-select offset add](#m21--const-select-offset-add)
+52. [M22 Const-condition mux](#m22--const-condition-mux)
+53. [M23 Zero-detect](#m23--zero-detect)
+54. [M24 Const-then mux chain](#m24--const-then-mux-chain)
+55. [M25 Module auto-const](#m25--module-auto-const)
+56. [M26 One-hot stride add](#m26--one-hot-stride-add)
+57. [M27 Aligned field insert](#m27--aligned-field-insert)
+58. [M28 Signed compare vs 0](#m28--signed-compare-vs-0)
+59. [M29 Remaining leftover catalog H–R](#m29--remaining-leftover-catalog-hr)
+60. [Part VII Remaining gap to 10 FO4](#part-vii--remaining-gap-to-10-fo4)
+61. [Part VIII Maintenance playbook](#part-viii--maintenance-playbook)
+62. [Appendix. File map, glossary, anti-patterns](#appendix--file-map-glossary-anti-patterns)
+63. [Part IX Supporting algorithms](#part-ix--supporting-algorithms-the-pass-loop-actually-calls)
+64. [Part X Formal invariants](#part-x--formal-invariants-the-type-system)
+65. [Part XI Laboratory walkthroughs](#part-xi--laboratory-walkthroughs)
+66. [Part XII Decision trees](#part-xii--decision-trees-for-a-maintainer)
+67. [Part XIII Operator billing atlas](#part-xiii--operator-billing-atlas)
+68. [Part XIV Pass loop state machine](#part-xiv--pass-loop-state-machine-full)
+69. [Part XV Emit pipeline](#part-xv--emit-pipeline-full)
+70. [Part XVI 4 GHz campaign](#part-xvi--strategic-reading-of-the-4-ghz-campaign)
+71. [Part XVII Worked numeric examples](#part-xvii--worked-numeric-examples-keep-a-pencil-here)
+72. [Part XVIII Mutation catalog](#part-xviii--mutation-catalog-what-each-algorithm-may-rewrite)
+73. [Part XIX Study order](#part-xix--suggested-study-order-for-a-systems-programmer)
+74. [Part XX FAQ](#part-xx--faq-the-soaks-already-answered)
+75. [Part XXI Future-detector fixtures](#part-xxi--copy-paste-fixtures-for-future-detectors)
+76. [Part XXII Trace glossary](#part-xxii--glossary-expansion-terms-you-will-see-in-traces)
+77. [Part XXIII SoC dual](#part-xxiii--dual-of-the-soc-prime-directive-inside-this-package)
+78. [Part XXIV Test index](#part-xxiv--index-of-tests-that-pin-theory)
+79. [Part XXV Closing](#part-xxv--closing-what-maintain-the-codebase-himself-means)
+80. [Part XXVI Detector internals](#part-xxvi--detector-internals-the-first-patch-will-hit)
+81. [Part XXVII P1–P10 labs](#part-xxvii--pattern-catalog-one-lab-each-p1p10)
+82. [Part XXVIII Soak chronicle](#part-xxviii--soak-chronicle-why-the-code-is-this-shape)
+83. [Part XXIX Lowering details](#part-xxix--lowering-details-that-timing-depends-on)
+84. [Part XXX Parallel timing worked schedule](#part-xxx--parallel-timing-worked-schedule)
+85. [Part XXXI InsertReg allow matrix](#part-xxxi--insertreg-apply-vs-refuse-a-complete-matrix)
+86. [Part XXXII SV mutation atlas](#part-xxxii--systemverilog-mutation-atlas-copybook)
+87. [Part XXXIII Algo-trace reading](#part-xxxiii--how-to-read-a-refuseapply-algo_trace-event)
+88. [Part XXXIV Relocation scoring](#part-xxxiv--relocation-scoring-why-t1-is-first)
+89. [Part XXXV Naming collisions](#part-xxxv--naming-collisions-and-file-suffix)
+90. [Part XXXVI Near-10 numbers](#part-xxxvi--what-near-10-fo4-means-numerically)
+91. [Part XXXVII Anti-pattern patches](#part-xxxvii--anti-pattern-catalog-with-the-patch-that-would-do-it)
+92. [Part XXXVIII Gemm debug transcript](#part-xxxviii--a-day-in-the-life-debug-of-gemm-185)
+93. [Part XXXIX Function map](#part-xxxix--function-level-map-grep-anchors)
+94. [Part XL Night-before-S4 recap](#part-xl--final-recap-the-night-before-you-patch-s4)
+95. [Part XLI Apply-work-item](#part-xli--apply_work_item-the-inner-interpreter)
+96. [Part XLII Dense sidecar](#part-xlii--dense-sidecar-lean-vs-real-feeds)
+97. [Part XLIII Worklist ordering](#part-xliii--worklist-ordering-in-full)
+98. [Part XLIV Clock domains](#part-xliv--clock-domains-and-cycle-bars)
+99. [Part XLV Cache key](#part-xlv--cache-key-composition)
+100. [Part XLVI Remaining-gap proof](#part-xlvi--remaining-gap-proof-from-the-invariants)
+101. [Part XLVII insert_register IR](#part-xlvii--insert_register-ir-mutation-what-remeasure-sees)
+102. [Part XLVIII Allowlist](#part-xlviii--allowlist-refuse-prefixes-module_allowed)
+103. [Part XLIX Ranking leftover counts](#part-xlix--ranking-primary-vs-all-kinds-leftover-counts)
+104. [Part L Maintenance contract](#part-l--maintenance-contract-sign-here)
 
 ---
 
@@ -500,14 +514,14 @@ assign y_o = acc * k;          // 56 FO4 InToOut fragment — P5, not primary
 
 ---
 
-## A4 — Measurement versioning (delay-v19)
+## A4 — Measurement versioning (delay-v25)
 
 **Implementation.** `MEASUREMENT_VERSION` in `crates/sv-timing-core/src/version.rs`.
 
 ### Summary
 
 A linear log of **how** delay is computed. Reports and cache keys must carry
-this string. Comparing a delay-v17 number to a delay-v19 number is invalid.
+this string. Comparing a delay-v17 number to a delay-v25 number is invalid.
 Each bump is a measurement correction unless the comment says otherwise.
 
 ### Low-level basics (the chain, condensed)
@@ -534,6 +548,12 @@ Each bump is a measurement correction unless the comment says otherwise.
 | delay-v17 | NBA write→later-read in one `always_ff` is Q, not combo |
 | delay-v18 | `pkg::NAME` Const; `x+1` increment not CPA |
 | delay-v19 | **only** `(W)'(1)` is an increment; general `(W)'(v)` is **not** parsed |
+| delay-v20 | `fmt_row_bytes` / `ai_fmt_bytes` are mux-of-shifts, not Mul (M20) |
+| delay-v21 | const-select offset add (M21); numeric/`PLEN`/`IDX_W` `W'(const\|ident\|ident±1)` collapse, **not** `int'(x)` (A10); const-condition `?:` (M22); `==`/`!=` vs 0 (M23) |
+| delay-v22 | nested const-then mux chain is one mux (M24); encoding-then concat + `ident[CONST]` |
+| delay-v23 | module auto-const (M25); `x+(1<<n)` mux of increments (M26); `{x,0}+(y<<K)` concat (M27); signed `x>0` sign bit (M28). Unknown calls stay Other (M29 N; 2-arg Mux tax **reverted**) |
+| delay-v24 | exclusive `{x[MSB:K],{K{0}}}` seeds `ident+(y<<K)` as field insert (M27). Wrap ident from a Call is not aligned. `{{LOG}{1'b0}}` unwrap |
+| delay-v25 | exclusive `t = y << K` temps: `aligned + t` is field insert (M27). `wrap + t` stays CPA |
 
 ### High-level basis
 
@@ -793,6 +813,14 @@ Seed (`ConstSeed::looks_const`):
 2. Last segment after `::` **and** after `.` (`te_pkg::XLEN` → `XLEN`).
 3. `*Cfg.` fields (`CVA6Cfg.XLEN`, `HPDcacheCfg.reqDataWidth`).
 4. SCREAMING_CASE with ≥ 2 letters (`XLEN`, `PRIV_LEN`, `IDX_W`).
+5. **delay-v23 auto-const (M25):** exclusive expression-less combo/continuous
+   assign whose LHS is read. Copy-propagates ident aliases to a fixpoint
+   (cap 32). NBA / indexed LHS / multi-writer / write-only `_d` stay runtime.
+   Mixed-case **localparams** (`MaxBurstBeats`) are already step 1 — auto-const
+   is for *nets*, not for `localparam` declarations.
+6. **delay-v24/v25 aligned / shifted maps (M27):** exclusive
+   `{x[MSB:K],{K{0}}}` seeds `ConstSeed.aligned`; exclusive `t = y << K`
+   seeds `ConstSeed.shifted`. Not Const — they only demote matching adds.
 
 delay-v18 split `::` as well as `.`. Before that, `te_pkg::XLEN` was Runtime
 and `used_bits += te_pkg::XLEN` was a 10 FO4 add.
@@ -855,19 +883,27 @@ Demote them before charging.
 
 ### Low-level basics
 
-Order of demotion:
+Order of demotion (after lattice; see also M20–M28):
 
 1. `*` of a literal power of two → `Other` (shift / index scale). `8`, `1_024`,
    `'h8`, `8'sd8` all count (`positive_literal_value`).
-2. `/` or `%` whose **divisor** is Const (literal or seeded name) → `Other`.
+2. `*` whose operand is `fmt_row_bytes` / `ai_fmt_bytes` → Mux (M20).
+3. `/` or `%` whose **divisor** is Const (literal or seeded name) → `Other`.
    `8 / a` (runtime divisor) stays `DivRem`.
-3. `+`/`-` with a unit operand `1` / `1'd1` / `(W)'(1)` → `LogicBit`
+4. `+`/`-` with a unit operand `1` / `1'd1` / `(W)'(1)` → `LogicBit`
    (increment, not 10 FO4 CPA).
-4. `+`/`-` with one Const operand → `LogicBit` (const offset folded onto the
+5. `+`/`-` with one Const operand → `LogicBit` (const offset folded onto the
    runtime spine).
-5. Else the original `op_class`.
+6. `x + (c ? lit : lit)` → `LogicBit` (M21). Runtime mux arms stay AddSub.
+7. `x + (1 << n)` with runtime `n` → `Mux` (M26). `x + (a << n)` stays AddSub.
+8. `{x[MSB:K],{K{0}}} + (y << K)` / `aligned + (y<<K)` / `aligned + t` →
+   `Concat` (M27). Wrap ident from a Call stays AddSub.
+9. signed `x > 0` / `x >= 0` / `x < 0` → `LogicBit` (M28). `x > y` stays Compare.
+10. `==` / `!=` vs 0 → `LogicBit` (M23).
+11. Else the original `op_class`.
 
-`**` is already `ShiftConst` at classify time (decoder).
+`**` is already `ShiftConst` at classify time (decoder). Unknown user `Call`
+stays `Other` (M29 N). Do not bill 2-arg unknown calls as Mux (v49 gemm 12→15).
 
 ### High-level basis
 
@@ -915,18 +951,23 @@ assign q = 8 / a;
 ```
 
 Test: `plus_one_is_increment_not_carry_propagate_add`,
-`literal_power_of_two_multiplication_is_cheap`.
+`literal_power_of_two_multiplication_is_cheap`,
+`delay_v23_stride_add_aligned_insert_sign_and_call`.
 
 ---
 
-## A10 — Narrow width-cast (delay-v19)
+## A10 — Narrow width-cast (delay-v19/v21)
 
-**Implementation.** expression primary parser in `expr.rs`; tests as above.
+**Implementation.** expression primary parser in `expr.rs`; tests
+`delay_v21_const_select_mux_and_width_cast`.
 
 ### Summary
 
-Postfix `'(` is collapsed **only** when the cast value is literal `1`.
-General `32'(expr)` is **not** parsed. This is a protective incomplete parse.
+Postfix `'(` collapses when the **width token** is numeric or a seeded name
+(`32`, `PLEN`, `IDX_W`) **and** the value is `const`, `ident`, or `ident±1`.
+Type-name casts (`int'(x)`, `unsigned'(x)`) do **not** collapse. General
+`32'(n-1)*row` is still unparsed. Protective incomplete parse plus a narrow
+delay-v21 hole.
 
 ### Low-level basics
 
@@ -935,26 +976,30 @@ inner `n-1` add and the `*` mul, which `billed_binary_class` will then charge
 as Mul 56 plus adds. Soak `audit-remain-v25/` did that: gemm 87.5/67.5, emit
 primary **40.5**. Reverted.
 
-Narrow rule: `(IDX_W+1)'(1)` is the integer 1, so `count_q - (IDX_W+1)'(1)` is
-an increment (A9). Anything else with `'( ` backtracks and the region becomes
-Opaque or a coarser tree that does **not** nominate Mul.
+delay-v21 reopened **only** `W'(const|ident|ident±1)` when `W` is a number or
+`PLEN`/`IDX_W`. `PLEN'(LINE_B)` and `IDX_W'(int'(rr_q)+1)` collapse. Soak
+`audit-remain-v43/` collapsed `int'(group_q)` and exposed `*6` as Mul 56
+(policy_subcode); type-name `'(` was taken back out. Test covers
+`int'(q)*6` ≁ Mul.
+
+Narrow v19 still: `(IDX_W+1)'(1)` is the integer 1, so
+`count_q - (IDX_W+1)'(1)` is an increment (A9).
 
 ### High-level basis
 
 Completeness of the expression parser is **not** a monotonic good. At \(B=10\),
-exposing a mul that is actually a format-dependent shift (`fmt_row_bytes` is
-`(elems+1)>>1` or `elems * {1,2,4}`) creates a T3-looking primary that S4
-cannot legally cut (atomic mul) and that S3 cannot BalanceMux. The honest
-fix is a **named-function** demotion (Part VII addition D), not a general
-cast parser.
+exposing a mul that is actually a format-dependent shift (`fmt_row_bytes`,
+M20) creates a T3-looking primary. Type-name casts wrap runtime integers
+(`int'(group_q)*6`); collapsing them is a measurement lie of the v25 class.
 
 ### Purpose
 
-Keep increment detection for width-cast 1 without reopening gemm as Mul.
+Keep increment detection and narrow `W'(ident)` without reopening gemm as Mul
+or policy_subcode as Mul 56.
 
 ### Mutations
 
-None. Do not “finish” the cast parser without a `fmt_row_bytes`-style guard.
+None. Do not finish the cast parser. Do not collapse type-name `'(` .
 
 ### Behavioural study
 
@@ -962,11 +1007,14 @@ None. Do not “finish” the cast parser without a `fmt_row_bytes`-style guard.
 // Narrow v19: increment.
 assign nwait = count_q - (IDX_W+1)'(1);
 
-// Must stay uncast. Incomplete parse → leftover 18.5 geometry, NOT 67.5 Mul.
-assign b_span = 32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes;
+// delay-v21: numeric / PLEN / IDX_W of ident±1 collapses.
+assign nxt = IDX_W'(int'(rr_q) + 1);
 
-// Forbidden future patch:
-//   parse 32'(n-1) → Binary -, then * → Mul 56. Soak emit 40.5. Already done. Reverted.
+// Type-name does NOT collapse (v43 Mul 56).
+assign scaled = int'(group_q) * 6;   // stays Mul
+
+// Must stay uncast. Incomplete parse, NOT 67.5 Mul.
+assign b_span = 32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes;
 ```
 
 ---
@@ -3036,6 +3084,427 @@ any pass.rs change; soaks prefer `target/release/sv-timing.exe`.
 
 ---
 
+## M20 — Named `fmt_row_bytes` (delay-v20)
+
+**Implementation.** `is_fmt_scale_call` / call class in `expr.rs`. Campaign
+letter **D** in `AGENTS-todo.md` (VII.D landed).
+
+### Summary
+
+Calls named `fmt_row_bytes` / `ai_fmt_bytes` are a mux of shifts, not a
+multiplier. `x * fmt_row_bytes(...)` demotes to Mux, not Mul 56.
+
+### Low-level basics
+
+INT4 is `(elems+1)>>1`. Other formats are `elems << log2(1|2|4)`. The
+function name is the proof; the body is not inlined. Unknown calls stay
+Other (M29 N). `$clog2(CONST)` stays 0.
+
+### High-level basis
+
+The honest alternative to parsing `32'(n-1)*fmt_row_bytes` (A10, v25 40.5)
+is to name the scale function. Gemm 18.5 geometry used this call; after
+delay-v20 the remaining leftover is the uncast `32'(n-1)` plus the add,
+not a 56 FO4 mul.
+
+### Purpose
+
+Remove phantom Mul on format-dependent byte counts.
+
+### Mutations
+
+None.
+
+### Behavioural study
+
+```systemverilog
+// - Mul 56 if the `*` is parsed as datapath
+// + Mux of shifts
+assign row = fmt_row_bytes({16'd0, ldb_q});
+```
+
+Test: `delay_v21_const_select_mux_and_width_cast` (fmt_row_bytes ≁ Mul).
+
+---
+
+## M21 — Const-select offset add
+
+**Implementation.** `is_const_select_mux` in `billed_binary_class`
+(`expr.rs`). Campaign letter **A**. delay-v21.
+
+### Summary
+
+`x + (c ? lit : lit)` is a mux of two const offsets: LogicBit, not CPA.
+Runtime arms stay AddSub.
+
+### Low-level basics
+
+Both ternary arms must be Const. The condition may be runtime. RAS
+`addr[i] + (rvc ? 2 : 4)` matches. Frontend
+`addr[i] + (taken ? rvc_imm : rvi_imm)` does **not** (`[i]` scalar pipe
+still forbidden, M29 R).
+
+### High-level basis
+
+A 2/4 byte increment is wiring + a mux, not a 10 FO4 adder. Billing it
+as AddSub made RAS the period at \(B=10\).
+
+### Purpose
+
+Demote const-select PC/addr offsets.
+
+### Mutations
+
+None.
+
+### Behavioural study
+
+```systemverilog
+// + LogicBit
+ras_update = addr[i] + (rvc_call[i] ? 2 : 4);
+// stays AddSub (runtime immediates)
+predict_address = addr[i] + (taken_rvc_cf[i] ? rvc_imm[i] : rvi_imm[i]);
+```
+
+Test: `delay_v21_const_select_mux_and_width_cast`.
+
+---
+
+## M22 — Const-condition mux
+
+**Implementation.** ternary arm in `fo4_critical_cost_latticed` (`expr.rs`).
+Campaign letter **C**. delay-v21.
+
+### Summary
+
+A `?:` whose **condition** is Const is generate-if / param select: one arm
+exists in the netlist, so there is no 2.5 FO4 mux. Runtime `en ?` stays Mux.
+
+### Low-level basics
+
+`cond.const_class(seed).is_const()` → return the live arm only. Seeded
+genvar `i < CNT ? add : 0` is the add. A runtime flag is Mux + max(arms).
+
+### High-level basis
+
+IEEE 1800 constant conditions are elaborated away. Taxing them as muxes
+invented delay on generate-shaped pe_dot `i < CNT`.
+
+### Purpose
+
+Elaboration muxes cost 0.
+
+### Mutations
+
+None.
+
+---
+
+## M23 — Zero-detect
+
+**Implementation.** `billed_binary_class` for `==` / `!=` vs 0. Campaign
+letter **D**. delay-v21.
+
+### Summary
+
+`x == 0` / `x != 0` is an OR-tree / zero-detect (LogicBit), not Compare 4.
+
+### Low-level basics
+
+One side must be a zero literal (`0`, `'0`, `32'd0`, `MAXW'(0)` after A10
+collapse). Two runtime operands stay Compare.
+
+### High-level basis
+
+Soak v44 billed pe_dot `sum != MAXW'(0)` as Compare 4 on top of the mux
+and made APU 17 the headline. Zero-detect is what silicon does.
+
+### Purpose
+
+Do not spend 4 FO4 on `!= 0`.
+
+### Mutations
+
+None.
+
+### Behavioural study
+
+```systemverilog
+// + LogicBit (zero-detect), not Compare 4
+assign nz = (sum != MAXW'(0));
+```
+
+---
+
+## M24 — Const-then mux chain
+
+**Implementation.** `const_then_chain` / `is_encoding_then` in `expr.rs`.
+Campaign letter **E**. delay-v22.
+
+### Summary
+
+Nested `c ? Const : (c2 ? Const : … : datapath)` is **one** mux on the
+runtime spine, not a serial mux chain. Encoding arms include concat of
+flags+const fields and `ident[CONST]` / `ident[LEVELS]`. Bare ident and
+`{a,b}` do **not** flatten.
+
+### Low-level basics
+
+Walk else-arms while then-arm is an encoding. Cost = Mux 2.5 + max(conds,
+tail). Invert (`!red_fin`) beside the chain is a separate LogicBit (test
+splits bare-flag 2.5 vs invert 3.5).
+
+Inf `{sign, 8'hff, 0}` is encoding because a part is Const. `{a,b}` is
+not. `sign[LEVELS]` is a const-index bit-select, treated as encoding.
+
+### High-level basis
+
+NaN/Inf/zero encodings in pe_dot are a priority mux onto one convert
+tail, not three mux delays. Flattening a runtime then-arm would hide
+real datapath.
+
+### Purpose
+
+One mux tax for encoding cascades.
+
+### Mutations
+
+None.
+
+### Behavioural study
+
+```systemverilog
+// one mux + tail, not mux+mux+mux
+assign fp = nan ? {1'b0, 8'hff, 23'd1}
+          : inf ? {sign, 8'hff, 23'd0}
+          :      mantissa_path;
+```
+
+Test: `delay_v22_const_then_mux_chain_is_one_mux`.
+
+---
+
+## M25 — Module auto-const
+
+**Implementation.** `extend_seed_auto_const` in `ref_order.rs`; hooked from
+`attribute_costs` after elaboration seed. delay-v23.
+
+### Summary
+
+First pass on a module using `RefOrderTree`. For each **expression-less**
+combo/continuous assign (`x=4`, `x=WIDTH`, `x=y` of a const) whose LHS is
+a **single exclusive writer** and is **read**, add the LHS to `ConstSeed`.
+Copy-propagate ident aliases to a fixpoint (cap 32).
+
+### Low-level basics
+
+Skip: NBA, indexed LHS (`[i]`), writes≠1, reads=0 (write-only `_d`).
+Empty expression-less list must still run aligned seed (M27); no early
+return. Mixed-case **localparams** (`MaxBurstBeats`) are A8 step 1, not
+this pass — there is no `assign MaxBurstBeats = 255`.
+
+### High-level basis
+
+IEEE blocking assign of a literal to an exclusive net is elaboration if
+the net is never rewritten. Seeding it lets later `x + 1` / `== x` fold.
+Seeding defaults that are later overwritten (`ready_o = 1'b0` then a
+branch) would lie; the write-count guard is the proof.
+
+### Purpose
+
+Const-propagate exclusive combo literals/aliases without rewriting RTL.
+Auto-const **does not emit** a `const` keyword into `corrected/**`.
+
+### Mutations
+
+None to RTL.
+
+### Behavioural study
+
+```systemverilog
+assign WIDTH_N = 32;          // exclusive, read → seed
+assign nbeats  = pairs_rem;
+if (nbeats > MaxBurstBeats)
+  nbeats = MaxBurstBeats;     // multi-writer → not seeded
+```
+
+Tests: `auto_const_expression_less_exclusive_read`,
+`auto_const_skips_nba_and_write_only_and_multi_writer`.
+
+---
+
+## M26 — One-hot stride add
+
+**Implementation.** `is_one_hot_stride` / `is_const_pow2_shl` in `expr.rs`.
+Campaign letter **F**. delay-v23.
+
+### Summary
+
+`x + (1 << n)` with runtime `n` is a mux of increments (decoder stride),
+not CPA+shift. `x + (a << n)` with runtime `a` stays AddSub.
+`x + (1 << CONST)` was already LogicBit (A9 offset).
+
+### Low-level basics
+
+The shifted operand must be a const power of two (`1`, `32'h1`). dm_sba
+`sbaddress_i + (32'h1 << sbaccess_i)` matches. Soak v50: dm_sba 12 gone.
+
+### High-level basis
+
+`base + (1<<k)` is “set bit k of a one-hot and add into a sparse field”,
+implementable as a mux of `base+1`, `base+2`, … not a 10 FO4 CPA.
+
+### Purpose
+
+Close decoder-stride leftovers.
+
+### Mutations
+
+None. InsertReg on that add is still a functional break if it is an
+address.
+
+### Behavioural study
+
+```systemverilog
+// + Mux of increments
+assign nxt = sbaddress_i + (32'h1 << sbaccess_i);
+// stays AddSub
+assign nxt = addr + (offset << size);
+```
+
+Test: `delay_v23_stride_add_aligned_insert_sign_and_call`.
+
+---
+
+## M27 — Aligned field insert
+
+**Implementation.** `is_aligned_field_insert`, `ConstSeed.aligned` /
+`shifted`, `extend_seed_aligned` in `expr.rs` / `ref_order.rs`. Campaign
+letter **G**. delay-v23 inline concat; delay-v24 named aligned net;
+delay-v25 staged shift temp.
+
+### Summary
+
+`{x[MSB:K], {K{0}}} + (y << K)` is a field insert (Concat), not a CPA.
+Exclusive combo of that pad seeds `aligned[name]=K`, so `ident + (y<<K)`
+matches. Exclusive `t = y << K` (BalanceMux staging) seeds `shifted[t]=K`,
+so `aligned + t` matches. Wrap ident from a **Call** is not assumed
+aligned. `wrap + t` stays AddSub.
+
+### Low-level basics
+
+`zero_pad_align_key` requires a two-part concat whose low part is a
+zero-fill replicate. `{{LOG}{1'b0}}` is a one-part concat wrapping the
+replicate count (axi2mem); `zero_fill_count` / `alignment_key` /
+`expr_align_leaf` unwrap it. K is ident or literal; matching is by key
+string (`LOG_NR_BYTES` vs `3`).
+
+InsertReg on wrap-add remains a functional break (A32).
+
+### High-level basis
+
+AXI beat alignment is `{addr[MSB:LOG], zeros} + (cnt<<LOG)`: wiring, not
+a carry-propagate add. WRAP `get_wrap_boundary(...)` is a function of
+runtime `len`; assuming that result is zero in the same K bits is a
+false-positive that would hide a real CPA (`upper = wrap + ((len+1)<<LOG)`).
+
+BalanceMux stages `t = cnt<<LOG; cons = aligned + t`. delay-v24 saw
+`ident + ident` and billed AddSub. delay-v25 seeds `t`.
+
+v51: cons_addr Concat so BM dropped that stage; WRAP-beyond
+`addr + ((cnt-len)<<LOG)` composed flop→`req_addr_d` as Plain 22.
+**Do not quote APU 22** over v50 16 P10. The 22 cone is real; v50 hid it
+as intoout.
+
+### Purpose
+
+Bill aligned stride as concat; refuse wrap-from-call as concat.
+
+### Mutations
+
+None. Do not InsertReg wrap-add. Do not seed Call results as aligned.
+
+### Behavioural study
+
+```systemverilog
+aligned_address = {ax_req_q.addr[AXI_ADDR_WIDTH-1:LOG_NR_BYTES],
+                   {{LOG_NR_BYTES}{1'b0}}};
+cons_addr = aligned_address + (cnt_q << LOG_NR_BYTES);   // Concat
+wrap_boundary = get_wrap_boundary(ax_req_q.addr, ax_req_q.len);
+upper = wrap_boundary + ((ax_req_q.len + 1) << LOG_NR_BYTES); // AddSub
+```
+
+Tests: `auto_const_aligned_zero_pad_names_field_insert`,
+`auto_const_aligned_double_brace_ident_pad`,
+`auto_const_aligned_plus_staged_shift_temp`.
+
+---
+
+## M28 — Signed compare vs 0
+
+**Implementation.** `billed_binary_class` for `>`/`>=`/`<`/`<=` vs 0.
+Campaign letter **I**. delay-v23.
+
+### Summary
+
+Signed `x > 0` / `x >= 0` / `x < 0` is the sign bit (LogicBit), not
+Compare 4. `x > y` two runtime stays Compare. Does **not** close fpnew
+12.5 (the subtract remains).
+
+### Low-level basics
+
+One operand must be a zero literal. Magnitude compares stay Compare.
+
+### High-level basis
+
+`exponent_difference > 0` is `~sign`. Billing Compare 4 next to a 10 FO4
+sub invented 14.5-looking FMA cones; after I the sub is still 10+mux.
+
+### Purpose
+
+Sign-bit tests are LogicBit.
+
+### Mutations
+
+None.
+
+Test: `delay_v23_stride_add_aligned_insert_sign_and_call`.
+
+---
+
+## M29 — Remaining leftover catalog H–R
+
+**Implementation.** Deduced from v48/v50 unique leftovers. Not all landed.
+Campaign letters in `AGENTS-todo.md`.
+
+### Summary
+
+Host-agnostic leftovers that are **policy**, **RTL**, or **unlanded
+measure**. Do not implement them as InsertReg.
+
+| Letter | Shape | Status |
+|---|---|---|
+| **H** | `get_wrap_boundary` is a mux of bit-clears (len 1/3/7/15) | unlanded; needs function-body inline. Other burst types stay datapath |
+| **J** | exclusive leftover=0 (csr/bht/tlb 12.5–13) | S3 floor. max_arm 10 + mux 2.5. No extra InsertReg |
+| **K–M** | P10: posted indexed CSR write; tail-line Q for coalesce; delay `{pulse,index}` together | RTL. Never InsertReg one net of the pair |
+| **N** | unknown function body | **stays Other**. v49 billed 2-arg as Mux, gemm 12→15, **reverted**. `fmt_row_bytes` is M20; `$clog2` const is 0 |
+| **O** | `mem[ptr_q]` of a flop array is a mux of Qs | combo bypass+EQ is real (refill_hit). Flopping the D-arm EQ misses same-cycle hit |
+| **P** | next-state `q + cast(elem)` + hold mux | Mux+Add. IndependentLhsBundle: no InsertReg (gemm 12 / axi_adapter 11) |
+| **Q** | saturating 2-bit `sat±1` with clamp | already increment (delay-v18 / A9) |
+| **R** | PC+imm in a fetch-slot loop | parallel adders; `[i]` scalar pipe **forbidden**. Runtime-imm add stays 12.5. Const-select is M21 |
+
+### High-level basis
+
+H/N need a function-body measure that does not repeat v49. J is exclusive
+deflation working. K–M are handshake protocol. P/R are IndependentLhsBundle
+and `[i]` constraints already in A23/A30.
+
+### Mutations
+
+None of these may InsertReg a P10 pair, a wrap-add, or a `[i]` scalar.
+
+---
+
 # Part VI — Cross-cutting pass-failure modes
 
 These are not extra algorithms. They are the failure modes of the ones
@@ -3059,13 +3528,15 @@ different span names. Action: VII.A LHS-ident-in-named-block.
 
 ### F4 — Incomplete `32'(expr)` parse is protective
 
-A10. Symptom: temptation to “fix parse” on gemm. Action: do not. Add
-named-function demotion (VII.D) if you must touch `*`.
+A10. Symptom: temptation to “fix parse” on gemm. Action: do not parse
+general `(W)'(expr)`. Named-function demotion **landed** (M20). Do not
+collapse type-name `'(` (`int'(q)*6` is v43 Mul 56).
 
 ### F5 — IndependentLhsBundle thresholds miss 2-field FSMs
 
-A23. Symptom: `dm_sba` / `g6lc_snoop_filter` 12 FO4 Plain n=2–6.
-Action: VII.C `n_lhs≥2` + `_d`/`_q` → max_field. Do not globalize `_q`.
+A23. Symptom: was `dm_sba` 12; **dm_sba gone** (M26). Residual:
+fpnew/frontend 12.5, gemm 12, axi_adapter 11 (M29 P). Action: do not
+globalize `_q`. Do not InsertReg IndependentLhsBundle.
 
 ### F6 — Cleanliness is module-global
 
@@ -3075,8 +3546,20 @@ exception policy already admits; if still refused, check lane (P10) and
 
 ### F7 — P10 / wrap / T3 working as designed
 
-A27/A32/A25. Symptom: leftover 16 / 14 / 56. Action: S5, not S4. These
-are the **floor**.
+A27/A32/A25. Symptom: leftover 16 P10 / wrap-add / 56. Action: S5, not
+S4. These are the **floor**. InsertReg on wrap-add is still forbidden.
+
+### F8 — Unknown-call Mux tax (v49)
+
+M29 N. Symptom: billing 2-arg unknown `Call` as Mux made gemm 12→15.
+Action: unknown calls stay Other. Reverted. Do not re-tax.
+
+### F9 — BalanceMux wrap-beyond compose (v51)
+
+M27 / A37. Symptom: delay-v24 made `cons_addr` Concat so BM dropped that
+stage; WRAP-beyond `addr+((cnt-len)<<LOG)` composed flop→`req_addr_d` as
+Plain 22. v50 hid the same 22 as **intoout**. Action: **do not quote 22**
+over v50 16 P10. Do not InsertReg wrap-add. Do not revert M27 to hide it.
 
 ---
 
@@ -3088,35 +3571,43 @@ which algorithm is allowed to touch it.
 
 ## Soak of record
 
-`audit-remain-v27/`: emit primary **18.5 FO4 / 2162 MHz**, integrity green,
-186 edits, ExclusiveCaseMux 82, analyze max_adj **74.5** (T3 mul still
-present in analyze, correctly not the emit primary). Path-class v24.
-delay-v19 narrow.
+Quoted: `audit-remain-v50/` delay-v23. Integrity joint/reparse/structural
+OK both. Core emit **15.0 P10** `trigger_module`; APU emit **16.0 P10**
+`g6lc_inval_bus`. Path-class v24.
 
-Do not quote v28. Do not quote v25.
+Latest: `audit-remain-v52/` delay-v25, same core 15.0 P10; APU emit 22.0
+axi2mem WRAP-beyond (F9). **Do not quote 22** over v50 16 P10.
 
-## Leftover unique RegToReg (budget 10, post_analyze)
+Historical v27 18.5 gemm span is **closed** (VII.A/B/D/E + M20). Do not
+quote v25 40.5, v28 30.5, v43 40.5 `int'` Mul, v44 pe_dot 17, v49 gemm 15.
+
+## Leftover unique RegToReg (budget 10, post_analyze v50; v52 notes)
 
 | Module | FO4 | Class / note | Algorithm that owns it | Can auto close to 10? |
 |---|---:|---|---|---|
-| gemm `b_span`/`a_span` L951/L1042 | **18.5** | Plain n=4, makespan 18.5 cycles=2, no P10 | S4 sibling + twin-by-LHS (VII.A+B) | **yes, if rewrite lands** |
-| `g6lc_inval_bus` `fifo_q[head]` | 16 | P10 | none (handshake) | no — S5 |
-| `instr_queue` | 15.5 | Plain n=9 remainder | one budget-fit cut, origin re-anchored (VII.E) | likely |
-| `axi2mem` | 14 | Plain n=39 wrap/WRITE FSM | wrap lock / fat FSM | no — S5 |
-| frontend L1026 | 13 | Plain BHT generate-if | twin/span discipline | maybe T1 |
-| frontend L582 | 12.5 | next-state bundle `redirect_*` | A23 thresholds (VII.C) | measure |
-| `g6lc_ai_pe_dot_float_pipe` | 12 | corrected loc | T3-ish pipe unit | S5 / T3 |
-| `dm_sba` | 12 | n=2–6 port/`state_d` | VII.C | measure |
-| gemm dense/bundle L1639/L1493 | 12 | max_field | already classified | no S4 |
-| `rv_plic_target` | 11 | P10 | none | no |
-| `g6lc_snoop_filter` `mem_q<=mem_d` | 11 | next-state | VII.C | measure |
-| gemm L987/L1076 | 11 | bundle+P10 | S3 / P10 | no S4 on P10 |
-| `g6lc_ai_island_top` | 10.5 | P10 | none | no |
+| `trigger_module` L177 | **15.0** | Plain n=3 P10 indexed CSR pack | M29 K–M / A27 | no — S5 RTL |
+| `csr_regfile` `csr_rdata` | 13.0 | Exclusive leftover=0, mux=2.5 max_arm=10 | M29 J | no — S3 floor |
+| `fpnew_fma_multi` | 12.5 | IndependentLhsBundle mux+sub | A23 / M28 (sub remains) | no S4 |
+| `bht` `bht_updated` | 12.5 | Exclusive leftover=0 | M29 J / M29 Q | no |
+| frontend `predict_address` | 12.5 | IndependentLhsBundle `addr[i]+(imm:imm)` | M21 no; M29 R | no `[i]` pipe |
+| `cva6_tlb` `gppn` | 12.5 | Exclusive leftover=0 | M29 J | no |
+| `g6lc_thread_select` | 11.0 | Plain P10 | A27 | no |
+| `axi_adapter` | 11.0 | IndependentLhsBundle next-state | M29 P | no InsertReg |
+| hpdcache upsize/uncached | 11.0 | Plain | measure / FSM | maybe T1 |
+| `wt_dcache_wbuffer` | 10.5 | Plain refill/fixup | M29 O | combo EQ is real |
+| `g6lc_inval_bus` L150 | **16.0** | Plain n=3 P10 | M29 K–M | no — S5 RTL |
+| axi2mem WRAP-beyond | 22.0 | v51/v52 Plain n=6 BM; v50 intoout 22 | M27 F9 | no wrap InsertReg |
+| axi2mem wrap add | 13.0 | was 14; cons_addr Concat (M27) | A32 / M29 H | no |
+| `g6lc_ai_pe_dot_float_pipe` | 13.0 | Plain P10 convert | M24 helped 14→13; M29 N | no |
+| gemm next-state | 12.0 | IndependentLhsBundle `(n_q-stc_j_q)>>1` | M29 P | no |
+| `g6lc_ai_island_top` | 10.5 | P10 | A27 | no |
 | T3 mul (analyze max_adj) | **56** | Atomic | T3 `NumPipeRegs` | no auto |
 
-Intoout leftovers are not flop primaries (P5).
+Intoout leftovers are not flop primaries (P5). `MaxBurstBeats` is a
+localparam on gemm (A8); auto-const (M25) does not stamp `const` in
+corrected RTL.
 
-## Why gemm 18.5 is the headline
+## Why gemm 18.5 *was* the headline (v27, closed)
 
 Signature `n4|b_end:1,b_span:1,disjoint:1,k_bytes:1`. Live assign:
 
@@ -3135,13 +3626,12 @@ is still a claimable net (`lhs_is_module_level_net` allows `b_span`).
 `schedule_pipeline_cuts` would cut `b_span`. **Fixpoint stopped first**
 (F1).
 
-## Combinable small additions (A–F)
+## Combinable small additions (A–F) — status after delay-v25
 
-These are the only additions the current theory supports without repeating
-v25/v28. They are **not implemented** in this pass; they are the
-extrapolation.
+v27 listed these as unimplemented. Emit extras in commit `7e9f78197` plus
+M20–M28 discharged the **18.5 headline**. Status:
 
-### Addition A — Generate-if span pair by LHS ident in named block
+### Addition A — Generate-if span pair by LHS ident in named block (landed)
 
 **Theory.** A44 copies by identical RHS because that is a syntactic
 equivalence proof. `a_span`/`b_span` are **role-equivalent** (row-span
@@ -3171,7 +3661,7 @@ If they are `if/else` mutually exclusive, one pipe is correct. If they
 are two independent `if (En)` that can both be 1, they need **two** pipes
 and two origin cuts (addition B), not one shared pipe.
 
-### Addition B — One bounded sibling S4
+### Addition B — One bounded sibling S4 (landed as uncut-span extra; no-op on APU)
 
 **Theory.** A48/A49. After an accepted InsertReg, allow **one** more
 same-module S4 **only if**:
@@ -3212,7 +3702,7 @@ end
 // + max_field ≤ 10 (C)
 ```
 
-### Addition D — `fmt_row_bytes` / `ai_fmt_bytes` as mux-of-shifts
+### Addition D — `fmt_row_bytes` / `ai_fmt_bytes` as mux-of-shifts (landed, M20)
 
 **Theory.** A10/A9. Only when a `*` operand is **that call**, demote to
 shift/mux. Never general-parse `32'(expr)`.
@@ -3229,7 +3719,7 @@ This can **remove** the 18.5 primary without InsertReg if the remaining
 add+disjoint fit \(B\). If disjoint still serial-adds past 10, combine
 with A/B.
 
-### Addition E — One budget-fit extra cut on `instr_queue`
+### Addition E — One budget-fit extra cut on `instr_queue` (landed; sandwich remainder)
 
 **Theory.** P6 remainder after earlier cuts (L215 20→10 and 27→20).
 nodes=9, Plain. Origin must be re-anchored (F2) so the extra cut does
@@ -3252,28 +3742,31 @@ sv-timing InsertReg.
 
 | If you implement | Expected emit primary | Why |
 |---|---|---|
-| nothing (v27) | **18.5** | current |
-| A+B, rewrite lands | **~10** (then instr_queue 15.5 becomes headline unless E) | sibling span cut |
-| A+B+E | **~10–13** | queue remainder / frontend |
-| A+B+C+E | **~10–12** | 2-field FSMs deflated |
-| A+B+C+D+E | **~10** on all auto-admitted Plain | D may make gemm T1 |
-| +F (do nothing) | floor **16 P10 / 14 wrap / 56 T3** | not 10, by design |
+| v27 (historical) | **18.5** | gemm sibling span |
+| VII.A/B/D/E + M20 (landed) | **15/16 P10** | v50 quoted |
+| + M21–M28 (landed) | still **15/16 P10** | dm_sba 12 gone; wrap 14→13; pe_dot 14→13 |
+| delay-v24/v25 (v52) | core 15 P10; APU 22 wrap-beyond | F9; do not quote 22 |
+| M29 H function-body | wrap-boundary Mux, wrap **add** stays | will not close 13/22 |
+| M29 K–M RTL | P10 15/16 may drop | handshake, not S4 |
+| +F (do nothing on P10/wrap/T3) | floor **15–16 P10 / wrap / 56 T3** | not 10, by design |
 
 **Closing the campaign to “every path ≤ 10” is not a property of S4.**
-It is A+B (or D) for the headline, E for the queue, C for measure on
-small FSMs, and a **human T3/P10** decision on the floor.
+VII.A/B/D/E closed 18.5. The remaining floor is handshake (A27), wrap-add
+(A32/M27), exclusive leftover=0 (M29 J), IndependentLhsBundle (M29 P/R),
+and T3 mul. Human RTL on K–M; no InsertReg on those.
 
 The architectural design, taken as first-class theory, therefore
 **determines**:
 
-1. The current state is 18.5 because S4's fixpoint + twin-RHS + protective
-   parse left a P6 Plain sibling.
-2. The next honest auto step is a **named, bounded** sibling/span
-   algorithm, not a longer S4.
+1. The v27 state was 18.5 because S4's fixpoint + twin-RHS + protective
+   parse left a P6 Plain sibling. That headline is **gone**.
+2. The current quoted state is **15.0/16.0 P10** (v50). delay-v25 does
+   not move it. v51/v52 APU 22 is F9, not a win.
 3. The number 10 is reachable on **admitted** cones and **not** on
    handshake/wrap/mul without microarchitecture.
-4. Any experiment that generalizes parse or generalizes S4-continue has
-   already been run (v25, v28) and **raised** FO4.
+4. Any experiment that generalizes parse, generalizes S4-continue, or
+   taxes unknown Calls as Mux has already been run (v25, v28, v49) and
+   **raised** FO4.
 
 ---
 
@@ -3375,7 +3868,7 @@ A30; `cleanliness.rs` A31; `relocation.rs` A33; `opt.rs` A34 A41;
 | P6 | Shallow over budget, one slice |
 | P10 | Same-edge handshake lock |
 | M7 | Emit origin is line-based |
-| delay-v19 | Narrow `(W)'(1)` only |
+| delay-v19 | Narrow `(W)'(1)` only; delay-v25 is current |
 | detector 24 | 2-arm flop-D exclusive; mux=model.mux |
 
 ## Anti-patterns (cost drivers)
@@ -3418,10 +3911,12 @@ not 10. Maintain the types; do not lengthen S4.
 
 # Part IX — Supporting algorithms the pass loop actually calls
 
-The named blocks A1–A49 are the timing core. The pass loop also depends on
-a second ring of algorithms that do not have P-ids but that a maintainer
-will touch the first time a name collides, a cache lies, or an opportunity
-is missing. Each is still a theory object.
+The named blocks A1–A49 are the pass/classify/emit core. **M20–M29** (after
+A49) are leftover-measurement algorithms (delay-v20…v25). **A50–A59 in this
+part** are the supporting ring (opportunity, names, cache, CLI). A later
+ring (A60+) covers reset convention, cheap exits, and cleanliness. The pass
+loop depends on that supporting ring the first time a name collides, a cache
+lies, or an opportunity is missing. Each is still a theory object.
 
 ## A50 — Opportunity suggestion
 
@@ -4203,12 +4698,25 @@ notes.”
 | `[i +: W]` | index base | | W const, i maybe runtime |
 | `$clog2(CONST)` | 0 | | P1 |
 | `$clog2(runtime)` | Other | 1 + max | |
+| `fmt_row_bytes` / `ai_fmt_bytes` | Mux | 2.5 + shifts | M20; not Mul |
+| unknown `f(a,b)` | Other | 1 | A69 N; **not** Mux (v49) |
 | `pkg::SCREAM` | Const | 0 | delay-v18 |
+| mixed-case localparam (`MaxBurstBeats`) | Const | 0 | A8 localparams, not M25 |
+| exclusive `x = 4` combo | Const | 0 | M25 auto-const |
 | `Cfg.field` | Const | 0 | |
 | genvar in span | Const | 0 | delay-v13/15 |
 | comb-for index | Const | 0 | delay-v16 |
 | `32'(1)` | 1 | | narrow v19 |
-| `32'(expr)` | Opaque / uncast | | **do not parse** |
+| `32'(ident)` / `PLEN'(x)` | ident | | delay-v21 A10; not `int'(x)` |
+| `32'(n-1)*row` | Opaque / uncast | | **do not parse** |
+| `x + (c?lit:lit)` | LogicBit | 1 | M21 |
+| const-condition `?:` | live arm | | A62; no mux |
+| `x == 0` / `x != 0` | LogicBit | 1 | M23 |
+| `c?Const:(c2?Const:tail)` | one Mux | 2.5 + tail | A64 |
+| `x + (1<<n)` | Mux | 2.5 | M26 |
+| `{x, {K{0}}} + (y<<K)` / `aligned+(y<<K)` / `aligned+t` | Concat | ~0.5 | M27 |
+| wrap-from-Call `+ (y<<K)` | AddSub | 10 | A67; InsertReg forbidden |
+| signed `x > 0` | LogicBit | 1 | A68 |
 | comment `*` | none | 0 | P2 |
 | translate_off | excluded | | delay-v3 |
 | bare genvar `i*N` no RHS | Other×2 | 2 | not Mul |
@@ -4539,7 +5047,7 @@ A. v25 already did. Emit 40.5. I14.
 A. Only as VII.B (bounded, LHS sibling). v28 unbounded continue → 30.5.
 
 **Q. Why is analyze max_adj 74.5 when emit is 18.5?**
-A. T3 mul still exists; it is not the emit primary. A53.
+A. T3 mul still exists; it is not the emit primary. A63.
 
 **Q. Why did cleanliness refuse gemm InsertReg?**
 A. Module-global SeqPlusComb. A32 exception is the hole. If still
@@ -4685,6 +5193,14 @@ one `--lib` filter per invocation.
 | `embedded_fo4_matches_mul` | A2 |
 | `p6_shallow_is_one_slice_over_budget` | A29 |
 | `empty_design_does_not_abort` | A29 S0 |
+| `delay_v21_const_select_mux_and_width_cast` | A10 M20 M21 M22 M23 |
+| `delay_v22_const_then_mux_chain_is_one_mux` | M24 |
+| `delay_v23_stride_add_aligned_insert_sign_and_call` | M26 M27 M28 M29 N |
+| `auto_const_expression_less_exclusive_read` | M25 |
+| `auto_const_skips_nba_and_write_only_and_multi_writer` | M25 |
+| `auto_const_aligned_zero_pad_names_field_insert` | M27 |
+| `auto_const_aligned_double_brace_ident_pad` | M27 axi2mem `{{LOG}{0}}` |
+| `auto_const_aligned_plus_staged_shift_temp` | M27 delay-v25 |
 
 If you delete one of these to make a refactor green, you deleted a
 piece of the 4 GHz theory. Restore it.
@@ -5040,8 +5556,23 @@ Each row is an algorithm identity, not a diary.
 | audit-remain-v24 | 20.0 / 2000 | path_class v23; **new** primary l2_mshr 20 (2-arm miss) |
 | audit-remain-v25 | **40.5 / 988** | general width-cast; **reverted** (I14) |
 | audit-remain-v26 | 20.0 | narrow `(W)'(1)` does not move l2_mshr (not a cast-1 problem) |
-| **audit-remain-v27** | **18.5 / 2162** | v24 2-arm exclusive; l2_mshr gone; **soak of record** |
+| **audit-remain-v27** | **18.5 / 2162** | v24 2-arm exclusive; l2_mshr gone; historical soak of record |
 | audit-remain-v28 | **30.5 / 1311** | S4-continue; **reverted** (I10, I15) |
+| v29–v32 | 30.5 then 18.5 | sibling extra recut `c_span`; fat-FSM 16→24; extra-S4 no-op on APU |
+| v33–v36 | gemm 18.5 gone | star-add / remainder sandwich (VII.A/E) |
+| v37 | FAIL integrity | comma-assign list; **do not quote** |
+| v38 | core 20 P10 | full_core GREEN; trigger 20 |
+| v39–v42 | APU 16 / core 20 P10 | or-reduce; unique 12 wt_dcache gone |
+| v40 | FAIL integrity | unary `\|` vs bitwise `\|`; **do not quote** |
+| v43 | APU 40.5 | `int'(group_q)*6` Mul; type-name `'(` **not** collapsed |
+| v44 | APU 17 pe_dot | `!= 0` Compare; A63 not yet |
+| **v45** | core **15 P10** / APU 16 P10 | delay-v21 A–D; store_unit/snoop 11 gone |
+| v46–v47 | pe_dot 14 | Inf concat / `sign[LEVELS]` not encoding yet |
+| **v48** | delay-v22 | pe_dot 14→13; headlines 15/16 |
+| v49 | gemm 15 | 2-arg Mux tax; **reverted** (F8) |
+| **v50** | **15.0/16.0 P10** | delay-v23; dm_sba 12 gone (A66); **quoted soak of record** |
+| v51 | APU 22 axi2mem | delay-v24; F9 WRAP-beyond compose; **do not quote 22** |
+| **v52** | delay-v25 | same 15 / 22; staged shift (A67) does not close `addr+t` |
 
 Read this table **before** proposing a patch that “just parses more” or
 “just loops S4 more.” Both are already in the table as regressions.
@@ -5424,20 +5955,23 @@ Let \(F^\star\) be emit primary after a proposed patch.
 | 10.5 | 3810 | island P10 — S5 |
 | 11–12 | 3333–3636 | small FSM / bundle leftover — VII.C |
 | 13–15.5 | 2581–3077 | frontend / queue — VII.E |
-| **18.5** | **2162** | **current (v27)** |
+| **15.0** | **2667** | **quoted core headline (v50 P10 trigger)** |
+| **16.0** | **2500** | **quoted APU headline (v50 P10 inval_bus)** |
+| 18.5 | 2162 | historical v27 gemm span (closed) |
 | 20.0 | 2000 | v24 l2_mshr class miss |
+| 22.0 | 1818 | v51/v52 axi2mem WRAP-beyond — do not quote |
 | 26–30.5 | 1538–1311 | origin steal / pre-v18 exclusive tax |
-| 40.5 | 988 | v25 parse Mul |
+| 40.5 | 988 | v25 parse Mul / v43 `int'` |
 | 56 | 714 | T3 mul as primary (should never be emit headline) |
 
 “Near-10” in the user request is \(F^\star \le 10\) on **S4-admitted**
 cones, with P10/wrap/T3 named as floor. It is **not** “average FO4 10”
 and not “edit until analyze max_adj is 10.”
 
-Expected after A+B land: gemm spans ≤10, headline becomes instr_queue
-15.5 or frontend 13 unless E also lands. Expected after A+B+C+D+E:
-headline on the P10 floor (16) or wrap (14). That is success of the
-**package**. Closing 16 handshake is success of the **RTL**.
+VII.A/B/D/E landed: gemm spans ≤10, queue/frontend remainder closed or
+deflated. Quoted headline is the P10 floor (15/16). That is success of
+the **package**. Closing 16/15 handshake is success of the **RTL**
+(A69 K–M). v52 APU 22 is F9, not a new package win.
 
 ---
 
@@ -5455,7 +5989,7 @@ headline on the P10 floor (16) or wrap (14). That is success of the
 | InsertReg WRAP | resilient on axi2mem | protocol break | A32 |
 | Drop `assign` | in-place RHS replace | v21 Parse | A45 |
 | BM after comments | emit order swap | v22 wrong origin | I10 |
-| Reuse sqlite | same out-dir | from_cache lie | A54 |
+| Reuse sqlite | same out-dir | from_cache lie | Part XLV |
 | Debug CLI soak | skip release rebuild | stale numbers | playbook |
 | Compare delay-v18 to v19 | quote 18.5 vs 20 without versions | incomparable | I11 |
 | S4 intoout | treat P5 as primary | wrong cone | P5 |
@@ -5501,7 +6035,7 @@ algorithm.
 | `compose_reg_to_reg_paths` | measure.rs | A16 |
 | `refresh_primary_locs` | measure.rs | A17 |
 | `tag_multi_cycle_paths` | measure.rs | A18 |
-| `suggest_opportunities` | measure.rs | A50 |
+| `suggest_opportunities` | measure.rs | A60 |
 | `RefOrderTree::from_nodes` | ref_order.rs | A19 |
 | `ParallelScratch::schedule` | parallel_timing.rs | A20 |
 | `classify_and_adjust_paths` | path_class.rs | A21 A61 A62 |
@@ -5530,7 +6064,7 @@ algorithm.
 | `rewrite_origin_assigns` | emit rhs.rs | A43 |
 | `apply_edits_to_source_dense` | emit lib.rs | A43 A45 |
 | `integrity_reparse` | emit lib.rs | A45 |
-| `mangle_identifier` | naming.rs | A51 |
+| `mangle_identifier` | naming.rs | A61 |
 
 ---
 
@@ -5805,11 +6339,13 @@ analyze.
 
 # Part XLVI — Remaining-gap proof from the invariants
 
-Claim: under delay-v19, detector 24, S3-then-S4 two-flat, BM-before-IR,
-real-cut-feeds, wrap/P10/fat/lzc locks, the emit primary of a full-core
-soak is **18.5 FO4**, and the only auto-correct steps that can move it
-to \(\le 10\) without violating I1–I15 are VII.A, VII.B, or VII.D, after
-which the headline becomes a different leftover owned by VII.E/C or S5.
+Claim (discharged): under delay-v19, detector 24, S3-then-S4 two-flat,
+BM-before-IR, real-cut-feeds, wrap/P10/fat/lzc locks, the emit primary
+of a full-core soak **was** **18.5 FO4** (v27). VII.A/B/D/E + A60 moved
+it. The current quoted claim: under delay-v25, detector 24, the emit
+primary is **15.0 P10** (core) / **16.0 P10** (APU v50). Auto-correct
+cannot move those without violating I8 (P10) / wrap lock. v52 APU 22 is
+F9, not a counterexample to the P10 floor.
 
 ### Proof sketch
 
@@ -5835,7 +6371,7 @@ which the headline becomes a different leftover owned by VII.E/C or S5.
    (VII.D), I14 stays (no general cast parse), billed class drops,
    chain may fit \(B\) (T1). If disjoint still serial-adds past 10,
    combine with A/B.
-6. **After gemm ≤10.** Rank (A53) promotes the next worst: instr_queue
+6. **After gemm ≤10.** Rank (A63) promotes the next worst: instr_queue
    15.5 Plain n=9 (VII.E, P6, origin re-anchor I10), or frontend 13,
    or P10 16 (I8, cannot auto), or wrap 14 (A32, cannot auto).
 7. **Floor.** I6 (mul 56), I8 (handshake 16), wrap 14 are not 10.

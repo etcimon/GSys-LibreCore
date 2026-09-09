@@ -74,7 +74,9 @@ pub use path_class::{
     PATH_CLASS_DETECTOR_VERSION,
 };
 pub use cone_lane::{cone_lane, ConeLane};
-pub use ref_order::{ident_base, CallRefCount, RefOrderTree, VarRefCount};
+pub use ref_order::{
+    extend_seed_auto_const, ident_base, CallRefCount, RefOrderTree, VarRefCount,
+};
 pub use parallel_timing::{
     fill_design_parallel_timing, ClockDomain, FunctionTiming, ModuleParallelTiming, ParallelScratch,
     ScratchOp,
