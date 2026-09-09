@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba <zarubaf@iis.ee.ethz.ch>
+// Modified by: Etienne Cimon
 // Description: Instruction Re-aligner
 //
 // A fetch block is a stream of halfwords. The frontend right-shifts the I$ line
@@ -106,6 +107,9 @@ module instr_realign
     assign hw_compressed[j] = (g6lc_fetch_pkg::ilen_of(CVA6Cfg, hw[j]) == 2);
   end
 
+  // hw_first is how many halfwords the fetch alignment skipped; hw_avail is what
+  // is left in this block. The cursor runs 0..hw_avail because the host already
+  // right-shifted the line, so slot 0 is always the addressed halfword.
   assign hw_first = CVA6Cfg.RVC ? CurW'(g6lc_fetch_pkg::hw_off(CVA6Cfg, 64'(address_i))) : '0;
   assign hw_avail = CurW'(NrHalfWords) - hw_first;
 
@@ -131,6 +135,8 @@ module instr_realign
 
     // a carried half always completes into an RVI with halfword 0 of this block
     if (carry_ok) begin
+      // Slot 0 is the CARRIED pc, not address_i: the instruction began in the
+      // previous window. cur starts at 1 so the completing high half is consumed.
       valid_o[0] = valid_i;
       instr_o[0] = {hw[0], carry_instr_q};
       addr_o[0]  = carry_addr_q;
@@ -142,7 +148,12 @@ module instr_realign
         nxt = cur + CurW'(1);
         tail = nxt >= hw_avail;
         lo = hw[cur[HwIdxW-1:0]];
+        // On the last halfword there is no successor to read. hi is only used by
+        // the RVI arms, and `tail` sends a split RVI to the carry instead, so the
+        // zero is never emitted as instruction bytes (I2 / A_no_fabricate).
         hi = tail ? 16'b0 : hw[nxt[HwIdxW-1:0]];
+        // cur is a halfword index, so the trailing 1'b0 is the byte scale; this
+        // is a concatenation rather than a multiply on purpose.
         slot_addr = address_i + {{(CVA6Cfg.VLEN - CurW - 1) {1'b0}}, cur, 1'b0};
 
         unique case ({
@@ -181,6 +192,9 @@ module instr_realign
       carry_instr_bank_q <= '0;
       carry_addr_bank_q  <= '0;
     end else begin
+      // Kill and flush are INERT on carry state (SPEC L1): only a valid unkilled
+      // window may consume or overwrite it. carry_valid_d defaults to 0, so a
+      // foreign window drops the carry rather than keeping it (I4az).
       if (g6lc_fetch_pkg::leftover_update(flush_i, valid_i, kill_i)) begin
         carry_instr_bank_q[hart_i] <= carry_instr_d;
         carry_addr_bank_q[hart_i]  <= carry_addr_d;

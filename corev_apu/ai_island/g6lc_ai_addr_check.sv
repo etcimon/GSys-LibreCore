@@ -71,8 +71,12 @@ module g6lc_ai_addr_check #(
       perm  = perm_q[check_qid_i];
       v     = valid_q[check_qid_i];
       addr  = check_addr_i;
+      // Zero length means a one-byte probe, so a null-length request can never
+      // pass by describing an empty range.
       span  = (check_len_i == '0) ? addr_t'(1) : check_len_i;
       last  = addr + span - addr_t'(1);
+      // `last >= addr` is the wrap guard: without it a span that overflows the
+      // address space would produce a `last` below `base` and read as in-range.
       in_range = v
           && (limit > base)
           && (addr >= base)

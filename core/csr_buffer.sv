@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 05.05.2017
 // Description: Buffer to hold CSR address, this acts like a functional unit
 //              to the scoreboard.
@@ -57,6 +58,8 @@ module csr_buffer
     // by default we are ready
     csr_ready_o = 1'b1;
     // if we have a valid uncommitted csr req or are just getting one WITHOUT a commit in, we are not ready
+    // Depth one on purpose: a second CSR must not be accepted before the first
+    // retires, or the two side effects could be applied out of program order.
     if ((csr_reg_q.valid || csr_valid_i) && ~csr_commit_i) csr_ready_o = 1'b0;
     // if we got a valid from the scoreboard
     // store the CSR address

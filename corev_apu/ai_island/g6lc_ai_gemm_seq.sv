@@ -105,6 +105,9 @@ module g6lc_ai_gemm_seq #(
   localparam int unsigned AROutW = (MaxAROut <= 1) ? 1 : $clog2(MaxAROut + 1);
   // Dynamic AR cap from policy prefetch_depth (0 = fall back to MaxAROut)
   logic [AROutW-1:0] ar_max_eff;
+  // The runtime input can only LOWER the depth, never raise it past the
+  // parameterised MaxAROut the AR bookkeeping (ar_slot_q, ar_lane_mem_q) is
+  // sized for; out-of-range and zero both fall back to the parameter.
   assign ar_max_eff = (ar_max_i != '0 && ar_max_i <= AROutW'(MaxAROut))
                       ? AROutW'(ar_max_i)
                       : AROutW'(MaxAROut);
@@ -437,6 +440,8 @@ module g6lc_ai_gemm_seq #(
   // (FP8 E4M3/E5M2, FP16, BF16, FP32).  SP24 and reserved codes stay on the
   // integer path where the sequencer's numfmt check / descriptor grant will
   // reject them before the MAC.
+  // Static per job (numfmt_q is latched at start), so this is a configuration
+  // select rather than a per-cycle mux in the MAC's critical path.
   assign pe_float_en = (numfmt_q inside {3'd3, 3'd4, 3'd5, 3'd6, 3'd7});
   assign pe_sum = pe_float_en ? pe_sum_float : pe_sum_int;
 
@@ -953,6 +958,9 @@ module g6lc_ai_gemm_seq #(
     c_lo_we_d       = 1'b0;
     stc_w_left_d    = stc_w_left_q;
     stc_elem_d      = stc_elem_q;
+    // Default is the FULL open-AW element count: one B response retires the
+    // whole multi-beat burst, so the cursor advance must match what the AW
+    // covered rather than a single element.
     stc_n_d         = stc_elem_q;  // default: retire full open AW on B
     stc_i_en        = 1'b0;
     stc_j_en        = 1'b0;
@@ -1300,6 +1308,9 @@ module g6lc_ai_gemm_seq #(
           last_step  = (t_next >= k_q);
           t_byte_base= (numfmt_q == 3'd1) ? (t_q >> 1)
                                           : (t_q * ai_fmt_bytes());
+          // Trail-store only when no float dot is in flight: a pending result
+          // still has to write its C bank, and that write must not race an AXI
+          // read of the same bank from the store side.
           can_trail  = DualCRead && (DataWidth >= 64) &&
                        (dot_pending_q == '0) &&
                        (stc_i_q < i_q ||
@@ -1856,6 +1867,9 @@ module g6lc_ai_gemm_seq #(
       c_pair_hold_q <= c_pair_hold_d;
       stc_w_left_q  <= stc_w_left_d;
       stc_elem_q    <= stc_elem_d;
+      // Outstanding pipelined dot transactions. This is the ONLY thing that
+      // keeps ST_MAC from exiting while results are still in the FP pipe --
+      // i_q reaching m only means issue finished, not that C is written.
       dot_pending_q <= DotPipeFloat && pe_float_en
                        ? dot_pending_q
                          + (dot_start ? 1'd1 : 1'd0)
@@ -1871,6 +1885,8 @@ module g6lc_ai_gemm_seq #(
       if (state_q != ST_IDLE && state_q != ST_DONE &&
           axi_req_o.r_ready && axi_resp_i.r_valid)
         pmu_r_q <= pmu_r_q + 32'd1;
+      // Count W handshakes, not B responses: a multi-beat AW produces one B for
+      // many beats, so counting B would understate write traffic in the PMU.
       if (state_q != ST_IDLE && state_q != ST_DONE &&
           axi_req_o.w_valid && axi_resp_i.w_ready)
         pmu_w_q <= pmu_w_q + 32'd1;

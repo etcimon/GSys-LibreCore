@@ -53,6 +53,8 @@ module g6lc_ai_mem_store #(
 
     // Non-modifiable / non-bufferable: completion word is a device write.
     // ID=1 distinguishes from desc-fetch (id=0) on the shared DMA master port.
+    // ID 1 keeps the completion word distinguishable from the descriptor fetch
+    // (0) and the GEMM traffic (2) on the one shared island DMA master.
     axi_req_o.aw.id     = IdWidth'(1);
     axi_req_o.aw.addr   = addr_q;
     axi_req_o.aw.len    = '0;

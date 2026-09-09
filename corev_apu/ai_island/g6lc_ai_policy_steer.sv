@@ -98,6 +98,9 @@ module g6lc_ai_policy_steer
 
     assign accept = valid_i && ready_o;
     assign format_known = policy_format_known(numfmt_i);
+    // A format change starts a new batch: the codec's hysteresis is fitted per
+    // format, so carrying votes across a switch would commit a code that was
+    // only ever measured for the previous element width.
     assign new_format = metadata_q.seen && metadata_q.numfmt != numfmt_i;
     assign normalized_sample = policy_normalize_sample(sample_i, numfmt_i);
 

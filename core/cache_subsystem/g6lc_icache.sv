@@ -157,6 +157,8 @@ module g6lc_icache
   assign cl_tag_d  = (areq_i.fetch_valid) ? areq_i.fetch_paddr[CVA6Cfg.ICACHE_TAG_WIDTH+CVA6Cfg.ICACHE_INDEX_WIDTH-1:CVA6Cfg.ICACHE_INDEX_WIDTH] : cl_tag_q;
 
   // noncacheable if request goes to I/O space, or if cache is disabled
+  // This decode gates the hit/bypass decision, so it sits on the critical
+  // path out of the tag compare; sv-timing stages it in the corrected build.
   assign paddr_is_nc = (~cache_en_q) | (~config_pkg::is_inside_cacheable_regions(
       CVA6Cfg, {{64 - CVA6Cfg.PLEN{1'b0}}, cl_tag_d, {CVA6Cfg.ICACHE_INDEX_WIDTH{1'b0}}}
   ));

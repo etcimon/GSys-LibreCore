@@ -205,6 +205,8 @@ module frontend
   logic [CVA6Cfg.VLEN-1:0] inflight_addr_q;
   logic [63:0] snap_nb;
   // address will always be 16 bit aligned, make this explicit here
+  // shamt is in HALFWORDS, not bytes (bit 0 is dropped). Without RVC every
+  // fetch is window-aligned, so there is nothing to shift and the mux folds.
   assign shamt = CVA6Cfg.RVC ? icache_dreq_i.vaddr[IdxW:1] : '0;
 
   // Re-align: leftover_kill is misp/flush/replay except leftover-complete
@@ -442,6 +444,8 @@ module frontend
 
   // CSR or AMO instructions do not exist in a compressed form, so commit + 4;
   // if commit is halted just take the PC of the instruction sitting there
+  // +4 is unconditional because no CSR/AMO has a compressed form, so this can
+  // never land mid-instruction the way a blind +4 would elsewhere in fetch.
   assign commit_next_pc = pc_commit_i + (halt_i ? '0 : {{CVA6Cfg.VLEN - 3{1'b0}}, 3'b100});
   assign debug_halt_pc = CVA6Cfg.DmBaseAddress[CVA6Cfg.VLEN-1:0]
                          + CVA6Cfg.HaltAddress[CVA6Cfg.VLEN-1:0];
@@ -559,6 +563,8 @@ module frontend
       bp_pend_q     <= 1'b0;
       bp_misp_ttl_q <= '0;
     end else if (bp_misp_ttl_q != 3'd0) begin
+      // I23 bound on the mispredict hold: if the resolve target's window never
+      // comes back, the TTL releases pend instead of filtering every return.
       if (bp_misp_ttl_q == 3'd1) bp_pend_q <= 1'b0;
       bp_misp_ttl_q <= bp_misp_ttl_q - 3'd1;
     end
@@ -589,6 +595,8 @@ module frontend
     end else if (redirect_tail_q) begin
       // hold only while that split instruction is still waiting for its second
       // half, so a stalled pipeline cannot block a switch indefinitely
+      // The condition is self-clearing: once the next window is registered the
+      // carry either completed or was dropped, so there is nothing left to wait on.
       redirect_tail_q <= serving_unaligned & ~icache_valid_q;
       redirect_trap_q <= redirect_trap_q & serving_unaligned & ~icache_valid_q;
     end else if (redirect_pend_q) begin
@@ -776,6 +784,8 @@ module frontend
     assign icache_dreq_o.req = demand_req | pf_req;
   end
 
+  // Three mutually exclusive suppliers, priority-encoded rather than OR'd:
+  // demand (FTQ head) > FDIP prefetch > the direct redirect/NPC path.
   assign icache_dreq_o.vaddr = (FtqEn && demand_req) ? ftq_head_vaddr :
       (FtqEn && pf_req) ? pf_vaddr : fetch_address;
 
@@ -818,6 +828,9 @@ module frontend
   logic speculative_q, speculative_d;
   assign speculative_d = (speculative_q && !resolved_branch_i.valid
                           || |is_branch || |is_return || |is_jalr) && !flush_i;
+  // FDIP is speculative by construction; a demand fetch is speculative only
+  // while an unresolved CF is outstanding. Do not reuse this as a leftover
+  // gate: spec_req is high on ordinary sequential fetch (NEGATIVE I3 keep).
   assign spec_req = (FtqEn && pf_req && !demand_req) ? 1'b1 : speculative_d;
   assign icache_dreq_o.spec = spec_req;
 

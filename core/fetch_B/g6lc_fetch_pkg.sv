@@ -46,6 +46,8 @@ package g6lc_fetch_pkg;
     g.issue       = cfg.NrIssuePorts;
     g.harts       = cfg.NrHarts;
     g.hart_idx_w  = (cfg.NrHarts > 1) ? $clog2(cfg.NrHarts) : 1;
+    // Every hold needs an explicit bound (I23). With an FTQ the queue depth is
+    // that bound; without one a redirect can only be re-presented per slot.
     g.hold_max    = (cfg.FtqDepth != 0) ? cfg.FtqDepth : cfg.INSTR_PER_FETCH;
     g.smt         = cfg.NrHarts > 1;
     g.rvc         = cfg.RVC;
@@ -66,6 +68,8 @@ package g6lc_fetch_pkg;
     en = e;
   endfunction
 
+  // L1-L4's ONLY encoding knowledge (SPEC §1): [1:0]==2'b11 is a 32-bit RVI.
+  // Opcode class belongs to instr_scan and the decoder; L2/L3 must not consult it.
   function automatic int unsigned ilen_of(input cva6_cfg_t cfg, input logic [15:0] hw);
     if (!cfg.RVC) ilen_of = 4;
     else ilen_of = (hw[1:0] == 2'b11) ? 4 : 2;
@@ -84,6 +88,8 @@ package g6lc_fetch_pkg;
   endfunction
 
   // Halfword offset inside the fetch window. Replaces A [ALIGN-1:1] / [2:1].
+  // Halfword index WITHIN the window, so the mask drops one more bit than
+  // win_base: bit 0 of a PC is always 0 and carries no offset information.
   function automatic logic [7:0] hw_off(
       input cva6_cfg_t cfg,
       input logic [63:0] pc
@@ -330,6 +336,9 @@ package g6lc_fetch_pkg;
     window_expected = hold ? redirect_pc : vaddr;
   endfunction
 
+  // Monotonic-progress filter: only sound because fetch addresses increase
+  // within a window. A leftover head is the PREVIOUS window and is exempt,
+  // otherwise the carry it completes would always compare below `exp`.
   function automatic logic slot_ge_expected(
       input logic lo_head,
       input logic [63:0] pc,
@@ -385,6 +394,8 @@ package g6lc_fetch_pkg;
       input int unsigned n
   );
     packet_upto_cf = '0;
+    // Bound the loop by the 8-slot geometry ceiling, not by `n`: a constant
+    // bound is what keeps this elaborating under an open synthesis frontend.
     for (int unsigned i = 0; i < 8; i++) begin
       if (i < n) begin
         packet_upto_cf[i] = 1'b1;

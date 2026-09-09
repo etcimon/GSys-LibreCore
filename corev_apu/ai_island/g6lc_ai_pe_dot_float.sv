@@ -130,6 +130,9 @@ module g6lc_ai_pe_dot_float #(
   assign inf_sign      = has_neg_inf;  // irrelevant when both signs present (NaN)
 
   // Block exponent = minimum exponent over all valid, finite, non-zero lanes.
+  // The MINIMUM, so every alignment shift is non-negative and no product is
+  // ever right-shifted out of the window; NO_EXP keeps invalid lanes from
+  // pulling the block down and wasting the 640-bit budget on nothing.
   logic signed [15:0] exp_min [0:LEVELS][0:P2-1];
   always_comb begin
     for (int unsigned l = 0; l < P2; l++) begin

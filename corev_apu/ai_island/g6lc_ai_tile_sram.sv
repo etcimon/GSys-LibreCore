@@ -72,6 +72,9 @@ module g6lc_ai_tile_sram #(
     logic [1:0][BeWidth-1:0]    be;
     logic [1:0][DataWidth-1:0]  rdata;
 
+    // Port 0 is shared read/second-write: the caller guarantees r_req and w2_req
+    // are mutually exclusive, which is what buys a 1R1W bank from a 2-port macro
+    // instead of a genuinely dual-write one.
     assign req[0]   = r_req_i | w2_req_i;
     assign we[0]    = w2_req_i;
     assign addr[0]  = w2_req_i ? w2_addr_i : r_addr_i;
@@ -90,6 +93,9 @@ module g6lc_ai_tile_sram #(
         .DataWidth  (DataWidth),
         .ByteWidth  (8),
         .NumPorts   (2),
+        // Latency 0: the sequencer reads operands and drives the PE in the same
+        // cycle, so a registered macro output would cost a whole MAC cycle.
+        // This is the seam a PDK swap re-times, not the sequencer.
         .Latency    (0),
         .SimInit    ("none"),
         .PrintSimCfg(1'b0),

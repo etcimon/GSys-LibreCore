@@ -130,6 +130,8 @@ module scoreboard #(
   logic [$clog2(CVA6Cfg.NR_SB_ENTRIES+1)-1:0] sb_issued_cnt, sb_free_cnt;
 
   for (genvar i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+    // A cancelled entry still occupies its slot and still retires in order as
+    // a commit_drop, but it must never source a forward: it is wrong-path.
     assign still_issued[i] = mem_q[i].issued & ~mem_q[i].cancelled;
   end
 

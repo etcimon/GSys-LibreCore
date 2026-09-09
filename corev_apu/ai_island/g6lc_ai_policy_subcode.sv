@@ -144,6 +144,9 @@ module g6lc_ai_policy_subcode
       winner = better ? candidate_q : best_q;
       winner_index = better ? index_q : best_index_q;
       winner_cost = better ? cost_q : best_cost_q;
+      // The evaluator charges ITSELF: a candidate must beat the baseline after
+      // paying the switch cost, the 32-cycle evaluation tax and a minimum
+      // margin. Without those terms it would report wins it cannot bank.
       choose = winner_index != 0 &&
           64'(winner_cost) + 64'(SwitchCycles) + 64'(EvaluationCycles) +
           64'(MinSavingsCycles) < 64'(base_cost_q);

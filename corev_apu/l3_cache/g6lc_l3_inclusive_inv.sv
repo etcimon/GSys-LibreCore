@@ -41,6 +41,9 @@ module g6lc_l3_inclusive_inv
         inv_o[c] = '0;
       end
 
+      // Inclusion is only restored once EVERY core has accepted the
+      // invalidation, so done_q accumulates per-core acks and the victim
+      // cannot be reused while any L1 may still hold the line.
       if (pend_q) begin
         for (int unsigned c = 0; c < NR_CORES; c++) begin
           if (!done_q[c]) begin

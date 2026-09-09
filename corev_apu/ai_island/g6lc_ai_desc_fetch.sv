@@ -62,6 +62,8 @@ module g6lc_ai_desc_fetch
   always_comb begin
     axi_req_o          = '0;
     axi_req_o.b_ready  = 1'b1;
+    // Read-only master, but the request struct still carries a write channel;
+    // ID 0 is this unit's identity on the shared DMA port (store uses 1, GEMM 2).
     axi_req_o.ar.id    = '0;
     axi_req_o.ar.addr  = addr_q;
     axi_req_o.ar.len   = axi_pkg::len_t'(Beats - 1);
@@ -101,6 +103,9 @@ module g6lc_ai_desc_fetch
           desc_d[beat_q*DataWidth +: DataWidth] = axi_resp_i.r.data;
           if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
             err_d = 1'b1;
+          // Two exit conditions, not one: r.last is the slave's word, the beat
+          // count is ours. A slave that under- or over-runs the burst cannot
+          // leave this FSM stuck or let it write past the descriptor.
           if (axi_resp_i.r.last || (beat_q == BeatW'(Beats - 1))) begin
             state_d = ST_DONE;
           end else begin

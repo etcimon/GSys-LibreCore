@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: SHL-0.51
 
 // Author: Nils Wistoff <nwistoff@iis.ee.ethz.ch>
+// Modified by: Etienne Cimon
 
 // Module stub for the cva6_accel_first_pass_decoder. Replace this with your accelerator's
 // first pass decoder.
@@ -22,6 +23,8 @@ module cva6_accel_first_pass_decoder
     output logic                     is_control_flow_instr_o  // is a control flow instruction
 );
 
+  // Tied off so an EnableAccelerator build still elaborates; the $error below
+  // is the real contract. Ara supplies the functional decoder of this name.
   assign is_accel_o              = 1'b0;
   assign instruction_o           = '0;
   assign illegal_instr_o         = 1'b0;

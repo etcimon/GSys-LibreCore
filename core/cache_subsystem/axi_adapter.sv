@@ -10,6 +10,7 @@
  *
  * File:  axi_adapter.sv
  * Author: Florian Zaruba <zarubaf@iis.ee.ethz.ch>
+ * Modified by: Etienne Cimon
  * Date:   1.8.2018
  *
  * Description: Manages communication with the AXI Bus
@@ -376,6 +377,9 @@ module axi_adapter #(
           // if the request was not an atomic we can possibly issue
           // other requests while waiting for the response
         end else begin
+          // An atomic is excluded from this early release: it must stay in the
+          // FSM until its B (and R, for a fetch-type AMO) has returned, or the
+          // read half could be reordered against a later write.
           if ((amo_q == ariane_pkg::AMO_NONE) && (outstanding_aw_cnt_q != MAX_OUTSTANDING_AW)) begin
             state_d = IDLE;
             outstanding_aw_cnt_d = outstanding_aw_cnt_q + 1;

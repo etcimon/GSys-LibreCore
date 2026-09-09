@@ -175,6 +175,8 @@ package g6lc_ai_fp_pkg;
         d.is_nan = 1'b1;
     end else if (!has_inf && (exp_enc == max_exp) && (man_enc == max_man)) begin
       // E4M3: only the all-ones pattern at the top exponent is NaN.
+      // The format has no infinities, so the rest of the top exponent range is
+      // ordinary finite data -- treating it as Inf would delete real values.
       d.is_nan = 1'b1;
     end else begin
       d.is_zero = 1'b0;

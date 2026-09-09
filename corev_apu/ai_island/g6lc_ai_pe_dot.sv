@@ -140,6 +140,8 @@ module g6lc_ai_pe_dot #(
       for (int unsigned i = 0; i < cnt / 2; i++) node[i] = node[2*i] + node[2*i+1];
       // Odd tail: promote unchanged, which keeps a non-power-of-two `2*Lanes`
       // exact without introducing a zero term.
+      // Promotion, not zero-padding: padding would be equally correct here but
+      // costs an adder per odd level for no arithmetic gain.
       if (cnt % 2 == 1) node[cnt/2] = node[cnt-1];
       cnt = (cnt + 1) / 2;
     end

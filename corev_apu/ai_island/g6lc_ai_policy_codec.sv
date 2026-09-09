@@ -110,6 +110,8 @@ module g6lc_ai_policy_codec
       end
     end
 
+    // Re-encode only on a new batch or a genuine feature change; a steady shape
+    // reuses the committed candidate so the encoder is not in the per-job path.
     assign evaluate = accept && (new_batch || features != state_q.signature);
     assign encode_features = evaluate ? features : policy_features_t'('0);
     assign candidate = evaluate ? policy_encode(encode_features) : state_q.candidate;
@@ -157,6 +159,9 @@ module g6lc_ai_policy_codec
               state_d.votes = VoteBits'(1);
             else if (state_q.votes < VoteBits'(HoldWork))
               state_d.votes = state_q.votes + 1'b1;
+            // Two independent gates: votes prove the new candidate is stable,
+            // dwell proves the CURRENT code has been held long enough. Either
+            // alone lets a workload oscillate between two codes.
             if (state_d.votes >= VoteBits'(HoldWork) &&
                 state_d.dwell >= DwellBits'(DwellWork)) begin
               state_d.code = candidate;

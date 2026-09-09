@@ -174,6 +174,9 @@ module g6lc_ai_desc_engine
     check_req_o    = 1'b0;
     check_qid_o    = qid_q;
     check_addr_o   = '0;
+    // 8 is the PROBE width, not the transfer size: this stage only proves the
+    // pointer itself lands in the queue's region. Full-extent checking of the
+    // m*n*k footprint is the GEMM sequencer's job, not the engine's.
     check_len_o    = AddrWidth'(8);  // pointer-sized accesses
     check_need_r_o = 1'b0;
     check_need_w_o = 1'b0;
@@ -256,6 +259,8 @@ module g6lc_ai_desc_engine
       end
 
       ST_CHK_SCALE: begin
+        // ptr_scale is optional, so a null pointer skips the check rather than
+        // failing it; only a non-null pointer has to be inside the region.
         if (desc_q.ptr_scale == '0) begin
           state_d = ST_CHK_DONE;
         end else begin
@@ -301,6 +306,9 @@ module g6lc_ai_desc_engine
       end
 
       ST_GEMM: begin
+        // gemm_issued_q makes start a one-shot: gemm_start_o is combinational
+        // out of this state, so without the latch it would re-fire every cycle
+        // the sequencer is still ready.
         if (!gemm_issued_q && gemm_ready_i) begin
           gemm_start_n  = 1'b1;
           gemm_issued_d = 1'b1;
@@ -362,6 +370,8 @@ module g6lc_ai_desc_engine
       done_valid_q  <= done_valid_d;
       wr_issued_q   <= wr_issued_d;
       gemm_issued_q <= gemm_issued_d;
+      // last_status_q is sticky for STATUS[31:16]: status_q is reused by the
+      // next job, so the MMIO view has to latch it at completion.
       if (done_valid_d) last_status_q <= status_d;
     end
   end

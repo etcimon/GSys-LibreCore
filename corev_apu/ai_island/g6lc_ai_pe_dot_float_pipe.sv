@@ -125,6 +125,8 @@ module g6lc_ai_pe_dot_float_pipe #(
   end
 
   // Stage 1 register: only load when start_i is asserted.
+  // Gating on start_i is what makes back-to-back issue safe: a cycle with no
+  // new transaction must hold S1 so the downstream stages keep a stable product.
   generate
     for (genvar g = 0; g < P2; g++) begin : gen_s1_reg
       always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -383,6 +385,8 @@ module g6lc_ai_pe_dot_float_pipe #(
                                                                      final_block_exp);
 
   // valid_o tracks the start pulse through the pipeline. LATENCY = LEVELS + 4.
+  // A shift register rather than a counter: with one issue per cycle there can
+  // be LATENCY transactions in flight, and each needs its own valid slot.
   logic [LATENCY-1:0] vld;
 
   always_ff @(posedge clk_i or negedge rst_ni) begin

@@ -116,6 +116,8 @@ module g6lc_ai_island_apb
       end
       S_WAIT: begin
         // Keep req low after first cycle; wait for registered rvalid
+        // Writes complete without rvalid because the island reg file commits
+        // them in the same cycle it sampled req; only reads have a latency.
         if (is_rvalid || pwrite_i) begin
           // Writes also complete after 1 cycle of processing
           pready_o = 1'b1;

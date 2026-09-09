@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 26.10.2018
 //
 // Description: Instruction Queue, separates instruction front-end from processor
@@ -166,6 +167,8 @@ module instr_queue
   // ----------------------
   // Input interface
   // ----------------------
+  // I7 is all-or-nothing, so readiness is the AND over every FIFO plus the shared
+  // target queue: one full slot must stall the whole packet, not part of it.
   assign ready_o = ~(|instr_queue_full) & ~full_address;
 
   for (genvar i = 0; i < NrFifo; i++) begin : gen_taken
@@ -181,6 +184,8 @@ module instr_queue
     branch_mask = mask8[NrFifo-1:0];
   end
 
+  // Slots past the first predicted-taken CF are dropped here, not in L1: the
+  // realigner still emitted them, and L2/L3 may drop but never modify (SPEC §0).
   assign valid = valid_i & branch_mask;
   // input slot i is served by FIFO (i + idx_is_q)
   assign fifo_pos = rotate_left(valid, idx_is_q);
@@ -197,8 +202,12 @@ module instr_queue
       : (fifo_pos & {NrFifo{g6lc_fetch_pkg::packet_accept(instr_overflow)}});
   assign push_instr_fifo = push_instr
       & {NrFifo{g6lc_fetch_pkg::packet_accept(address_overflow)}};
+  // Rotated BACK into realigner slot order: the frontend's cf_consumed / ras_push
+  // index by input slot, so returning FIFO order here would credit the wrong slot.
   assign consumed_o = rotate_right(push_instr_fifo, idx_is_q);
 
+  // First unpushed slot after a leftover-complete slot0 push. Replay must resume
+  // there, not at the completing window, or the carry would be dropped again.
   always_comb begin : gen_rest_addr
     rest_addr = exception_addr_i;
     rest_found = 1'b0;
@@ -393,12 +402,16 @@ module instr_queue
     assign fire_prefix[p] = fetch_entry_fire[p] & fire_prefix[p-1];
   end
 
+  // One shared branch-target FIFO for all issue ports, so any firing CF pops it.
+  // fire_prefix (not fetch_entry_fire) keeps the pop aligned with the drain order.
   assign pop_address = |(fetch_entry_is_cf & fire_prefix);
 
   always_comb begin : gen_rotate_head
     // The age-ordered selection already gives the oldest non-empty FIFO. Keep
     // the registered pointer there for the trace, but the next cycle's
     // gen_age_pointers is independent of it.
+    // Fall back to a one-hot slot 0 when nothing was selected: an all-zero
+    // pointer would present a bogus pc=0 entry and then wedge fire_prefix.
     idx_ds_d = (|idx_ds[0]) ? idx_ds[0] : {{NrFifo - 1{1'b0}}, 1'b1};
   end
 

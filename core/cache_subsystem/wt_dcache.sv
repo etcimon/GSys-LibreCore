@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Michael Schaffner <schaffner@iis.ee.ethz.ch>, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 13.09.2018
 // Description: Write-Through Data cache that is compatible with openpiton.
 
@@ -213,6 +214,9 @@ module wt_dcache
   // 0 is used by MMU or implicit read by zcmt, 1 by READ access requests
   for (genvar k = 0; k < NumPorts - 1; k++) begin : gen_rd_ports
     // set these to high prio ports
+    // Page walks and demand loads block the pipeline while they are pending,
+    // so they outrank the write path; without this the store stream can starve
+    // a PTW and stall fetch behind it.
     if ((k == 0 && (CVA6Cfg.MmuPresent || CVA6Cfg.RVZCMT )) || (k == 1) || (k == 2 && CVA6Cfg.EnableAccelerator)) begin
       assign rd_prio[k] = 1'b1;
       wt_dcache_ctrl #(

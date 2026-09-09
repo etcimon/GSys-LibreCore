@@ -220,6 +220,9 @@ module g6lc_bp_top
     assign sc_pred = loop_pred;
   end
 
+  // Direction is the end of the override chain TAGE -> loop -> statistical
+  // corrector; each stage above tied itself through when disabled, so this is
+  // a single assign rather than a mux. Indirect targets are ITTAGE's, below.
   assign bht_prediction_o = sc_pred;
 
   if (CVA6Cfg.BPIndirectEn) begin : gen_ittage

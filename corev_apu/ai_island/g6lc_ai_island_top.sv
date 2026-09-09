@@ -81,6 +81,9 @@ module g6lc_ai_island_top
   localparam int unsigned NumQueues = (IslandCfg.Queues == 0) ? 1 : IslandCfg.Queues;
   localparam int unsigned QidWidth  = (NumQueues > 1) ? $clog2(NumQueues) : 1;
   // Completion FIFO: host may claim multiple finishes; engine still single-outstanding.
+  // Depth is clamped, not scaled: the FIFO only has to cover how many finishes
+  // may pile up before software claims, and QueueDepth=64 would buy 4x the
+  // flops for a queue the single-outstanding engine can never fill.
   localparam int unsigned CplFifoDepth =
       (IslandCfg.QueueDepth == 0) ? 4 :
       (IslandCfg.QueueDepth > 16) ? 16 : IslandCfg.QueueDepth;
@@ -98,6 +101,9 @@ module g6lc_ai_island_top
   logic [31:0] cap_rdata;
   logic        cap_rvalid;
   logic        cap_sel;
+  // The capability window owns the first 256 bytes of the 4 KiB island BAR, so
+  // one byte compare separates discovery (RO, registered inside i_cap) from
+  // every control/descriptor/PMU register decoded in this file.
   assign cap_sel = req_i && (addr_i[15:8] == 8'h00);
 
   // Forward declared: PMU hold lives with other regs below; default 0 until first GEMM
@@ -426,6 +432,8 @@ module g6lc_ai_island_top
     logic store_active, gemm_active;
     assign store_active = (!wr_ready || wr_start);
     assign gemm_active  = (!gemm_ready || gemm_start);
+    // The final '0 arm is the important one: an idle master that still drives
+    // b_ready/r_ready will accept a response addressed to someone else.
     assign dma_mux_req = store_active ? store_axi_req
                        : gemm_active  ? gemm_axi_req
                        : (!fetch_ready ? fetch_axi_req : '0);
@@ -450,6 +458,8 @@ module g6lc_ai_island_top
           .mst_resp_i (axi_dma_resp_i)
       );
     end
+    // Any active DMA sub-unit counts as busy, so STATUS[1] tells software the
+    // island still owns the bus even when the descriptor engine itself is idle.
     assign fetch_busy = !fetch_ready || sb_fetch_pending_q || !wr_ready || !gemm_ready;
   end else begin : gen_no_dma_fetch
     assign fetch_ready = 1'b1;
@@ -701,6 +711,8 @@ module g6lc_ai_island_top
       off = (addr_i[15:0] - 16'h0120) & 16'h1f;
       if (q < NumQueues && off[4:2] == 3'd4) begin
         // Commit region on perm write; base/limit already stored
+        // Perm is the commit trigger so a half-programmed region can never go
+        // live: base/lo/hi land in local regs first and only this write arms them.
         prog_we    = 1'b1;
         prog_qid   = QidWidth'(q);
         prog_base  = AddrWidth'(base_q[q]);
@@ -896,6 +908,8 @@ module g6lc_ai_island_top
       cap_pending_q <= 1'b0;
     end else begin
       cap_pending_q <= cap_sel;
+      // i_cap already registered its own read, so a cap access must NOT be
+      // registered a second time here -- select last cycle's cap result instead.
       if (cap_pending_q) begin
         rdata_q  <= cap_rdata;
         rvalid_q <= cap_rvalid;
@@ -909,6 +923,8 @@ module g6lc_ai_island_top
   assign rdata_o  = rdata_q;
   assign rvalid_o = rvalid_q;
   // Level IRQ while head completion requested IRQ (claim pops head)
+  // Level, not pulse: PLIC needs the source held until the claim retires it,
+  // and popping the head is what deasserts it (or re-arms it for the next one).
   assign irq_o = done_sticky_q && head_irq;
 
   assign sb_last_ticket_o     = done_ticket_hold_q;

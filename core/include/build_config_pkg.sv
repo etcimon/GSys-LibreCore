@@ -63,6 +63,8 @@ package build_config_pkg;
 
     cfg.SuperscalarEn = CVA6Cfg.SuperscalarEn;
     // Issue width: explicit 1..8, or auto from SuperscalarEn (legacy: SS→2, else 1).
+    // This is a pipeline width, never a software-visible hart: the logical hart
+    // count the DTS and OpenSBI see is NrCores * NrHarts.
     if (CVA6Cfg.NrIssuePorts == 0) begin
       cfg.NrIssuePorts = unsigned'(CVA6Cfg.SuperscalarEn ? 2 : 1);
     end else begin

@@ -169,6 +169,9 @@ module g6lc_server_prefetcher #(
       end
 
       // Inject PF AR when upper AR idle and no PF OT
+      // Demand always wins the AR channel, and only one prefetch may be in
+      // flight: the PF response is absorbed here, so a second one would have
+      // no reserved id to come back on.
       if (pf_pending_q && !up_req_i.ar_valid && !pf_ot_q) begin
         dn_req_o.ar_valid = 1'b1;
         dn_req_o.ar       = up_req_i.ar;  // inherit size/burst/cache defaults

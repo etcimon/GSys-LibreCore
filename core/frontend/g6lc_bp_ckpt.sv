@@ -67,6 +67,8 @@ module g6lc_bp_ckpt
   assign full_o  = (count_q[hsel] == DEPTH[PTR_W:0]);
   // Oldest (head) of the selected bank is what we restore / pop
   assign restore_ghist_o = mem_q[hsel][head_q[hsel]].ghist;
+  // An empty bank means the checkpoint was already consumed or never taken;
+  // the consumer must then fall back to a GHR flush rather than restore junk.
   assign restore_valid_o = restore_i && !empty_o;
 
   if (RAS_DEPTH == 0) begin : gen_no_ras

@@ -110,6 +110,9 @@ module g6lc_ooo_dispatch
   assign iq_full_o  = iq_full;
   // LSQ pressure only blocks when a mem op wants to dispatch
   assign lsq_disp_block = ((|is_ld) && ld_full) || ((|is_st) && st_full);
+  // Dispatch is all-or-nothing across the group: partial allocation would leave
+  // ROB/rename/LSQ indices out of program order and break flush recovery, which
+  // walks those structures assuming contiguous in-order allocation.
   assign can_go = !rob_full && !iq_full && !ren_stall && !flush_unissued_i && !lsq_disp_block;
   assign rename_stall_o = (|dispatch_valid_i) && !can_go;
   assign freelist_empty_o = ren_stall;

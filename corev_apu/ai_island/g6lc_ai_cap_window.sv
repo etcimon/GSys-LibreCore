@@ -46,6 +46,8 @@ module g6lc_ai_cap_window
   logic [15:0] meas_milli;
 
   // Saturate measured milli-GB/s into high half of CAP_DRAM
+  // Saturate rather than truncate: a wrapped value would read as a plausible
+  // low bandwidth. Software that needs >= 66 GB/s reads CAP_OFF_DRAM_MEAS_X1000.
   assign meas_milli = (dram_gbps_meas_x1000_i > 32'h0000_FFFF)
                     ? 16'hFFFF
                     : dram_gbps_meas_x1000_i[15:0];
@@ -71,6 +73,9 @@ module g6lc_ai_cap_window
         rdata_n = ch_w_beats_i[ch_w_idx];
         occ_hit = 1'b1;
       end
+      // Occupancy windows are checked first and short-circuit the case: they are
+      // two 8-entry ranges, which a flat CAP_OFF_* case would have to spell out
+      // as 16 separate arms.
       if (!occ_hit) unique case (addr_i[15:2])  // word index of CAP_OFF_*
         CAP_OFF_VERSION[15:2]:
           rdata_n = {16'h0, AiIslandCapVersion};

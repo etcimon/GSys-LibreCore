@@ -10,6 +10,7 @@
 //
 // Author: Florian Zaruba    <zarubaf@iis.ee.ethz.ch>, ETH Zurich
 //         Michael Schaffner <schaffner@iis.ee.ethz.ch>, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 15.08.2018
 // Description: Standard Ariane cache subsystem with instruction cache and
 //              write-back data cache.
@@ -175,6 +176,9 @@ module std_cache_subsystem
   // to forward the correct write data.
   always_comb begin
     w_select = 0;
+    // These ID patterns are the routing contract: the R/B demux further down
+    // decodes the same encoding, so a new master must claim a disjoint group
+    // in both places or its responses are silently delivered elsewhere.
     unique casez (axi_req_o.aw.id)
       4'b0111: w_select = 2;  // dcache
       4'b1???: w_select = 1;  // bypass

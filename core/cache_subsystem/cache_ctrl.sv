@@ -10,6 +10,7 @@
 //
 // File:   cache_ctrl.svh
 // Author: Florian Zaruba <zarubaf@ethz.ch>
+// Modified by: Etienne Cimon
 // Date:   14.10.2017
 //
 // Copyright (C) 2017 ETH Zurich, University of Bologna
@@ -444,6 +445,9 @@ module cache_ctrl
 
     endcase
 
+    // A killed request still pulses data_rvalid: the requester's handshake is
+    // outstanding either way, and dropping it would strand the arbiter. The
+    // load unit discards the payload for slots it has marked flushed/killed.
     if (req_port_i.kill_req) begin
       req_port_o.data_rvalid = 1'b1;
       if (!(state_q inside {WAIT_REFILL_GNT, WAIT_REFILL_VALID, WAIT_CRITICAL_WORD})) begin

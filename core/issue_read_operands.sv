@@ -285,6 +285,8 @@ module issue_read_operands
 
   // TODO check only for 1st instruction ??
   // Allow a cvxif transaction if we WaW condition are ok.
+  // Port 0 only, and check_cfg forbids CvxifEn with NrIssuePorts>1: a CVXIF op
+  // arriving on any other port would never be offered to the coprocessor.
   assign cvxif_req_allowed = (issue_instr_i[0].fu == CVXIF);
   assign cvxif_instruction_valid = !issue_instr_i[0].ex.valid && issue_instr_valid_i[0] && cvxif_req_allowed;
   assign x_transaction_accepted_o = x_issue_valid_o && x_issue_ready_i && x_issue_resp_i.accept;

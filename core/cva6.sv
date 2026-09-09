@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 19.03.2017
 // Description: CVA6 Top-level module
 
@@ -1273,6 +1274,8 @@ module cva6
     assign wbdata_ex_id[X_WB]   = x_result_ex_id;
     assign ex_ex_ex_id[X_WB]    = x_exception_ex_id;
     assign wt_valid_ex_id[X_WB] = x_valid_ex_id;
+  // Exclusive with the CVXIF arm above (asserted below): both would drive the
+  // same writeback slot, so the accelerator owns ACC_WB and CVXIF is tied off.
   end else if (CVA6Cfg.EnableAccelerator) begin
     assign cvxif_req = '0;
     assign trans_id_ex_id[ACC_WB] = acc_trans_id_ex_id;

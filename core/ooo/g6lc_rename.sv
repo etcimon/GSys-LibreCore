@@ -93,6 +93,9 @@ module g6lc_rename #(
 
     for (int unsigned p = 0; p < NR_PORTS; p++) begin
       automatic logic [PRF_W-1:0] p1, p2, old, picked;
+      // map_d, not map_q: earlier ports in this same cycle have already written
+      // it, so a younger op in the group sees its older sibling's rename and
+      // intra-group WAW/WAR resolve without a stall.
       p1  = (rs1_i[p] == 5'd0) ? '0 : map_d[rs1_i[p]];
       p2  = (rs2_i[p] == 5'd0) ? '0 : map_d[rs2_i[p]];
       old = (rd_i[p] == 5'd0) ? '0 : map_d[rd_i[p]];

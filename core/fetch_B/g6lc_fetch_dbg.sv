@@ -175,6 +175,9 @@ module g6lc_fetch_dbg
           64'(slot_pc_i[k]) <= fetch_snap_hi)
         snap_in_win = 1'b1;
     end
+    // Without an address filter, print on EVENTS only: a per-cycle dump of a
+    // 10M-cycle firmware run is unreadable, and these are the states a fetch
+    // pin is ever diagnosed from.
     snap_edge = serving_unaligned_i || leftover_pending_i || snap.leftover_drop
         || (icache_valid_q_i && !snap.accept) || smt_restore_i
         || (spec_i && kill_s2_i) || redirect_hold_i || arch_valid_i
@@ -191,6 +194,8 @@ module g6lc_fetch_dbg
       automatic logic [15:0] mem_hw;
       hi = 0;
       mem_hw = '0;
+      // A leftover head came from the PREVIOUS window, so there is no halfword
+      // in data_q to compare it against; its own contract is checked below.
       if (slot_same_win[k] && !(k == 0 && serving_unaligned_i)) begin
         hi = 32'((64'(slot_pc_i[k]) - 64'(vaddr_q_i)) >> 1);
         if (hi < HwPerW) begin

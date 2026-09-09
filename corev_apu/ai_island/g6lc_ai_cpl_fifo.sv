@@ -74,6 +74,8 @@ module g6lc_ai_cpl_fifo #(
         end
         2'b11: begin
           // Simultaneous push+pop: replace head slot stream — write at wr, advance both
+          // Occupancy is unchanged, so count_q must NOT be touched; incrementing
+          // and decrementing in the same cycle is what corrupts a full FIFO.
           mem_q[wr_q].ticket <= ticket_i;
           mem_q[wr_q].status <= status_i;
           mem_q[wr_q].irq    <= irq_i;

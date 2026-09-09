@@ -11,6 +11,7 @@
 // Date: 08.02.2018
 // Migrated: Luis Vitorio Cargnini, IEEE
 // Date: 09.06.2018
+// Modified by: Etienne Cimon
 
 // ------------------------------
 // Instruction Scanner
@@ -76,11 +77,15 @@ module instr_scan #(
   assign is_xret = logic'(instr_i[31:30] == 2'b00) & logic'(instr_i[28:0] == 29'b10000001000000000000001110011);
 
   // check that rs1 is either x1 or x5 and that rd is not rs1
+  // rd != rs1 is what separates a RAS pop from a call through the link register:
+  // if the jump also rewrites its own source it is not a plain return.
   assign rvi_return_o = rvi_jalr_o & ((instr_i[19:15] == 5'd1) | instr_i[19:15] == 5'd5)
                                      & (instr_i[19:15] != instr_i[11:7]);
   // Opcode is JAL[R] and destination register is either x1 or x5
   assign rvi_call_o = (rvi_jalr_o | rvi_jump_o) & ((instr_i[11:7] == 5'd1) | instr_i[11:7] == 5'd5);
   // differentiates between JAL and BRANCH opcode, JALR comes from BHT
+  // xret has no immediate: its target comes from a CSR, so a zero here keeps the
+  // predictor from computing a bogus pc-relative target for it.
   assign rvi_imm_o = is_xret ? '0 : (instr_i[3]) ? uj_imm(instr_i) : sb_imm(instr_i);
   assign rvi_branch_o = (instr_i[6:0] == riscv::OpcodeBranch);
   assign rvi_jalr_o = (instr_i[6:0] == riscv::OpcodeJalr);
@@ -94,6 +99,8 @@ module instr_scan #(
   assign is_jal_r     = (instr_i[15:13] == riscv::OpcodeC2JalrMvAdd)
                         & (instr_i[6:2] == 5'b00000)
                         & (instr_i[1:0] == riscv::OpcodeC2);
+  // c.jr and c.jalr share one encoding and differ only in bit 12; the link write
+  // is what makes one a call and the other a candidate return.
   assign rvc_jr_o = is_jal_r & ~instr_i[12];
   // always links to register 1 e.g.: it is a jump
   assign rvc_jalr_o = is_jal_r & instr_i[12];

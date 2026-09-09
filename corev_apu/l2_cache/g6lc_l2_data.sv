@@ -69,6 +69,9 @@ module g6lc_l2_data #(
   assign a_baddr = baddr_of(a_waddr);
   assign b_baddr = baddr_of(b_waddr);
 
+  // Banking exists so a demand hit and a refill can proceed in the same cycle.
+  // Only a same-bank collision costs anything, and port A (demand) wins it so
+  // the core read stays single-cycle; the fill simply retries next cycle.
   assign bank_conflict_o = a_req_i && b_req_i && (a_bank == b_bank);
 
   // Per-bank ports: mux A/B with A priority on conflict

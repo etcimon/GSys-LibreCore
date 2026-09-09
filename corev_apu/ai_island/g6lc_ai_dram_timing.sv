@@ -58,6 +58,10 @@ module g6lc_ai_dram_timing #(
     );
       logic [BankBits-1:0] b;
       b = bank_of(a);
+      // Three cases in DDR4 cost order: page hit pays CAS only, a wrong open
+      // row pays a precharge first (tRP + tRCD + CAS), a closed bank pays
+      // activate + CAS. Getting the middle case wrong is what makes the model
+      // look optimistic on strided GEMM traffic.
       if (open_v_q[b] && open_row_q[b] == row_of(a))
         return wait_t'(CasCycles);
       else if (open_v_q[b])
@@ -71,6 +75,9 @@ module g6lc_ai_dram_timing #(
     assign aw_go = aw_busy_q && (aw_wait_q == '0);
 
     always_comb begin
+      // Only the address-phase valid/ready pair is gated. R/W/B pass straight
+      // through, so this adds command latency without touching data timing or
+      // the SRAM backing store behind it.
       mst_req_o          = slv_req_i;
       slv_resp_o         = mst_resp_i;
       mst_req_o.ar_valid = slv_req_i.ar_valid && ar_go;

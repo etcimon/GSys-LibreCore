@@ -10,6 +10,7 @@
 //
 // Authors: Matheus Cavalcante, ETH Zurich
 //          Nils Wistoff, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 20.11.2020
 // Description: Functional unit that dispatches CVA6 instructions to accelerators.
 
@@ -105,6 +106,8 @@ module acc_dispatcher
   `FF(acc_valid_q, acc_valid_d, '0)
 
   assign acc_valid_ex_o = acc_valid_q;
+  // The vector/RVV seam: the first-pass accelerator decoder marks the op
+  // FU==ACCEL, and this is the only place it enters the accelerator queue.
   assign acc_valid_d    = ~issue_instr_i.ex.valid &
                           issue_instr_hs_i &
                           (issue_instr_i.fu == ACCEL) &
