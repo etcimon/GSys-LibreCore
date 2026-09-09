@@ -161,11 +161,17 @@ impl RefOrderTree {
                 });
                 if let Some(&wstmt) = last_write.get(r) {
                     if wstmt < stmt_ord {
+                        let writer = module.nodes.get(&nodes[wstmt as usize]);
+                        // NBA updates after the timestep (IEEE 1800). A later
+                        // statement reading that LHS sees Q, not a combo chain.
+                        // Treating it as a forward edge poisoned always_ff
+                        // IndependentLhsBundle (gemm 144-node 161.5 serial sum).
+                        if writer.is_some_and(|w| w.assign_kind.is_seq_def()) {
+                            continue;
+                        }
                         e.forward_reads += 1;
-                        if module
-                            .nodes
-                            .get(&nodes[wstmt as usize])
-                            .and_then(|writer| writer.gate.as_ref())
+                        if writer
+                            .and_then(|w| w.gate.as_ref())
                             .is_some_and(|gate| !gate.is_comb)
                         {
                             tree.procedural_ok = false;
@@ -371,6 +377,7 @@ mod tests {
             case_is_default: false,
             case_selector: None,
             fo4_locked: false,
+            assign_kind: Default::default(),
         }
     }
 
@@ -441,6 +448,49 @@ mod tests {
 
         sequential.nodes.get_mut(&0).unwrap().gate.as_mut().unwrap().is_comb = true;
         assert!(RefOrderTree::from_nodes(&sequential, &[0, 1]).procedural_ok);
+    }
+
+    #[test]
+    fn nba_write_is_not_forward_comb_edge() {
+        // always_ff: `a_q <= b_i; c_q <= a_q + 1;` — second NBA reads Q, not combo.
+        let mut nodes = Map::new();
+        let mut a = node(0, "a_q", "b_i", OperatorClass::Other, 1.0);
+        a.assign_kind = crate::ir::AssignKind::Nonblocking;
+        a.gate = Some(crate::ir::GateInfo {
+            is_comb: false,
+            ..crate::ir::GateInfo::default()
+        });
+        let mut c = node(1, "c_q", "a_q + 1", OperatorClass::AddSub, 10.0);
+        c.assign_kind = crate::ir::AssignKind::Nonblocking;
+        c.gate = Some(crate::ir::GateInfo {
+            is_comb: false,
+            ..crate::ir::GateInfo::default()
+        });
+        nodes.insert(0, a);
+        nodes.insert(1, c);
+        let m = TimingModule {
+            id: 0,
+            name: "seq".into(),
+            file: "s.sv".into(),
+            nodes,
+            regions: Map::new(),
+            localparams: vec![],
+            parameters: vec![],
+            ports: vec![],
+            gen_loops: vec![],
+            functions: vec![],
+            package_imports: vec![],
+            instances: vec![],
+            loc: loc(),
+        };
+        let t = RefOrderTree::from_nodes(&m, &[0, 1]);
+        assert!(
+            t.edges.is_empty(),
+            "NBA→NBA must not be a combo edge: {:?}",
+            t.edges
+        );
+        assert!(t.procedural_ok);
+        assert_eq!(t.procedural_depth(), 0);
     }
 
     #[test]

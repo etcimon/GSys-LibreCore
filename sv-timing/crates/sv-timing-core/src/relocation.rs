@@ -1060,6 +1060,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+            assign_kind: Default::default(),
                 },
             );
         }
@@ -1228,6 +1229,7 @@ mod tests {
                 case_is_default: false,
                 case_selector: None,
                 fo4_locked: false,
+            assign_kind: Default::default(),
             },
         );
         design.modules.insert(
@@ -1381,6 +1383,7 @@ mod tests {
             case_is_default: false,
             case_selector: None,
             fo4_locked: false,
+            assign_kind: Default::default(),
         }
     }
 

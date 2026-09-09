@@ -462,6 +462,7 @@ def metrics_from_report(json_path: Path) -> dict:
         pc = data.get("post_closure") or {}
         out["ir_closes"] = pc.get("closes")
         out["ir_max_freq_mhz"] = pc.get("max_freq_mhz")
+        out["ir_reportable"] = pc.get("reportable")
         if data.get("dry_run") is not True:
             post = data.get("post_analyze") or {}
             valid = data.get("post_analyze_valid") is not False and bool(post.get("paths"))
@@ -761,6 +762,7 @@ def run_correct(
     allow_parse_errors: bool = False,
     real_cut_feeds: bool = False,
     emit_balance_mux_rtl: bool = False,
+    opt_max_stages_per_region: int | None = None,
 ) -> dict:
     """Run auto-correct; optionally emit corrected tree for --from-timing / STA."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -776,6 +778,8 @@ def run_correct(
         extra.extend(["--max-passes", "16"])
     if allow_latency:
         extra.append("--allow-latency")
+    if opt_max_stages_per_region is not None:
+        extra.extend(["--opt-max-stages-per-region", str(opt_max_stages_per_region)])
     if allow_parse_errors:
         extra.append("--allow-parse-errors")
     extra.extend(["--trace-log", str(out_dir / "algo-trace.jsonl")])
@@ -823,6 +827,8 @@ def run_correct(
         result["closes_after_correct"] = cm["closes"]
     if cm.get("max_freq_mhz") is not None:
         result["max_freq_mhz_after_correct"] = cm["max_freq_mhz"]
+    if cm.get("ir_reportable") is not None:
+        result["ir_reportable"] = cm["ir_reportable"]
     if cm.get("edits") is not None:
         result["edits"] = cm["edits"]
     if cm.get("reloc_failing_primary") is not None:
@@ -1194,6 +1200,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Pass --opt-level to analyze/correct (0|1|2|3|s|z, e.g. 3 for -O3)",
     )
     ap.add_argument(
+        "--opt-max-stages-per-region",
+        type=int,
+        default=None,
+        help="Pass --opt-max-stages-per-region to correct (InsertReg cap; -O3 default 8)",
+    )
+    ap.add_argument(
         "--allow-parse-errors",
         action="store_true",
         help="Pass --allow-parse-errors (skip bad files; report skipped_files)",
@@ -1447,6 +1459,7 @@ def main(argv: list[str] | None = None) -> int:
                     allow_parse_errors=bool(getattr(args, "allow_parse_errors", False)),
                     real_cut_feeds=bool(getattr(args, "real_cut_feeds", False)),
                     emit_balance_mux_rtl=bool(getattr(args, "emit_balance_mux_rtl", False)),
+                    opt_max_stages_per_region=getattr(args, "opt_max_stages_per_region", None),
                 )
                 r.update(correct_meta)
                 # Prefer analyze→correct primary FO4 Δ when both sides known.

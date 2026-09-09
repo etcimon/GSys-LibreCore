@@ -51,7 +51,7 @@ pub enum PathClassKind {
 }
 
 /// Detector pipeline version — bump when adding detectors so plain cache hits re-scan.
-pub const PATH_CLASS_DETECTOR_VERSION: u32 = 13;
+pub const PATH_CLASS_DETECTOR_VERSION: u32 = 24;
 
 impl PathClassKind {
     /// True when InsertReg multi-cut is a poor first tool.
@@ -302,7 +302,17 @@ pub fn classify_and_adjust_paths(
         // --- expensive detectors (high FO4 only) ---
         let (best, attempted) = scan_deflate_detectors(module, &path.nodes, raw, budget, model, true);
 
-        if let Some((class, adj, conf, ev)) = best {
+        if let Some((class, mut adj, conf, mut ev)) = best {
+            if class != PathClassKind::AtomicOverBudget {
+                if let Some((nid, cost, cls, peel)) =
+                    p4_peel_amount(module, &path.nodes, budget, adj)
+                {
+                    adj = (adj - peel).max(0.0);
+                    ev = format!(
+                        "{ev}; P4 remainder − atomic {cls:?} node {nid} fo4≈{cost:.1} peel={peel:.1} is T3"
+                    );
+                }
+            }
             updates.push((
                 idx,
                 PathException {
@@ -318,6 +328,33 @@ pub fn classify_and_adjust_paths(
                 },
             ));
         } else {
+            // P4: keep the path cuttable, but do not let the T3 atomic node's
+            // FO4 set the remainder cost (pe_dot 333 included a 130 DivRem).
+            let (adj, evidence) = if let Some((nid, cost, cls, peel)) =
+                p4_peel_amount(module, &path.nodes, budget, raw)
+            {
+                let rem = (raw - peel).max(0.0);
+                (
+                    rem,
+                    format!(
+                        "P4 remainder; atomic {cls:?} node {nid} fo4≈{cost:.1} peel={peel:.1} is T3, remainder {rem:.1} cuttable"
+                    ),
+                )
+            } else if let Some((nid, cost, cls)) =
+                hottest_over_budget_atomic(module, &path.nodes, budget)
+            {
+                (
+                    raw,
+                    format!(
+                        "P4 remainder; atomic {cls:?} node {nid} fo4≈{cost:.1} is T3, remainder {raw:.1} cuttable"
+                    ),
+                )
+            } else {
+                (
+                    raw,
+                    "over-budget plain path — no exclusive/atomic exception".into(),
+                )
+            };
             updates.push((
                 idx,
                 PathException {
@@ -325,9 +362,9 @@ pub fn classify_and_adjust_paths(
                     module_name: mod_name,
                     path_class: PathClassKind::Plain,
                     raw_fo4: raw,
-                    adjusted_fo4: raw,
+                    adjusted_fo4: adj,
                     confidence: 0.7,
-                    evidence: "over-budget plain path — no exclusive/atomic exception".into(),
+                    evidence,
                     attempted,
                     signature: sig,
                 },
@@ -422,13 +459,58 @@ fn lhs_histogram(
     h
 }
 
-fn try_atomic_over_budget(
+/// P4 remainder: subtract the T3 atomic when it should not set the path FO4.
+///
+/// Keep a short serial mul chain (`gemm_span` 56/68, leftover 12 < 56) so
+/// InsertReg still sees the operator. Subtract when:
+/// - it owns the cone (`hpdcache` 120/125), or
+/// - another copy sits beside it (`hpdcache` 3-node 120+120+1), or
+/// - the cone is wide (`nodes >= 8`, `pe_dot` / `policy_subcode`).
+const P4_ATOMIC_DOMINANCE: f64 = 0.90;
+
+fn p4_subtract_dominating_atomic(n_nodes: usize, adj: f64, cost: f64) -> bool {
+    if n_nodes <= 1 || adj <= 1e-9 {
+        return false;
+    }
+    let rem = (adj - cost).max(0.0);
+    cost / adj >= P4_ATOMIC_DOMINANCE || rem + 1e-9 >= cost || n_nodes >= 8
+}
+
+/// FO4 to peel from a cuttable remainder: the hottest T3 node, plus every
+/// other over-budget DivRem (hpdcache `way / Cfg` and `way % Cfg` as twins).
+/// Real serial muls (`gemm_span`) do not qualify, so they are not peeled.
+fn p4_peel_amount(
     module: Option<&crate::ir::TimingModule>,
     nodes: &[NodeId],
-    _raw: f64,
     budget: f64,
-    model: &CostModel,
-) -> Option<(f64, f64, String)> {
+    adj: f64,
+) -> Option<(NodeId, f64, OperatorClass, f64)> {
+    let (nid, cost, cls) = hottest_over_budget_atomic(module, nodes, budget)?;
+    if !p4_subtract_dominating_atomic(nodes.len(), adj, cost) {
+        return None;
+    }
+    let mut peel = cost;
+    if let Some(m) = module {
+        for id in nodes {
+            if *id == nid {
+                continue;
+            }
+            let Some(n) = m.nodes.get(id) else {
+                continue;
+            };
+            if n.op_class == Some(OperatorClass::DivRem) && n.fo4_cost > budget + 1e-9 {
+                peel += n.fo4_cost;
+            }
+        }
+    }
+    Some((nid, cost, cls, peel))
+}
+
+fn hottest_over_budget_atomic(
+    module: Option<&crate::ir::TimingModule>,
+    nodes: &[NodeId],
+    budget: f64,
+) -> Option<(NodeId, f64, OperatorClass)> {
     let m = module?;
     let mut worst: Option<(NodeId, f64, OperatorClass)> = None;
     for id in nodes {
@@ -437,13 +519,30 @@ fn try_atomic_over_budget(
         if !matches!(cls, OperatorClass::Mul | OperatorClass::DivRem) {
             continue;
         }
-        if n.fo4_cost > budget + 1e-9 {
-            if worst.map(|(_, c, _)| n.fo4_cost > c).unwrap_or(true) {
-                worst = Some((*id, n.fo4_cost, cls));
-            }
+        if n.fo4_cost > budget + 1e-9
+            && worst.map(|(_, c, _)| n.fo4_cost > c).unwrap_or(true)
+        {
+            worst = Some((*id, n.fo4_cost, cls));
         }
     }
-    let (nid, cost, cls) = worst?;
+    worst
+}
+
+fn try_atomic_over_budget(
+    module: Option<&crate::ir::TimingModule>,
+    nodes: &[NodeId],
+    _raw: f64,
+    budget: f64,
+    model: &CostModel,
+) -> Option<(f64, f64, String)> {
+    let (nid, cost, cls) = hottest_over_budget_atomic(module, nodes, budget)?;
+    // PASS-STRATEGY P4: atomicity is a node property. A 117-node path with one
+    // over-budget operator is mostly ordinary logic — do not brand the whole
+    // path atomic (that suppressed remainder cuts on cache_ctrl / wt_axi_adapter
+    // in audit-strict-v4). Single-node cones stay AtomicOverBudget (P3/P8).
+    if nodes.len() > 1 {
+        return None;
+    }
     // Adjusted FO4 is the operator, not the enclosing always_comb serial sum.
     // Class still discourages InsertReg; T3 stage count uses this cost.
     Some((
@@ -526,11 +625,17 @@ fn try_independent_lhs_bundle(
     if max_writes >= 3 && (max_writes as f64) >= (with_lhs as f64) * 0.5 {
         return None;
     }
-    // Per-field cost including overwrite mux when multi-written.
+    if (with_lhs as f64) < (nodes.len() as f64) * 0.5 {
+        return None;
+    }
+    let tree = RefOrderTree::from_nodes(m, nodes);
+    let next_state = is_sequential_next_state_bundle(&by_lhs_cost, Some(&tree));
+    // Per-field cost. Next-state `_d` overwrites are exclusive flop-D arms,
+    // not a log2 mux stacked on max_field (prefetcher pf_addr_d 10+log2(7)*2.5=17).
     let mut field_costs: Vec<f64> = Vec::new();
     for (lhs, &base) in &by_lhs_cost {
         let w = *by_lhs_writes.get(lhs).unwrap_or(&1) as f64;
-        let c = if w >= 3.0 {
+        let c = if !next_state && w >= 3.0 {
             base + model.mux * w.log2().max(1.0)
         } else {
             base
@@ -542,24 +647,26 @@ fn try_independent_lhs_bundle(
     if max_field >= raw * 0.55 {
         return None;
     }
-    if (with_lhs as f64) < (nodes.len() as f64) * 0.5 {
-        return None;
-    }
-    let tree = RefOrderTree::from_nodes(m, nodes);
-    let next_state = is_sequential_next_state_bundle(&by_lhs_cost, Some(&tree));
     // Timing basis: independent writes share a time slot (ASAP max), so the
     // scratchboard makespan replaces max_field when the ref-tree is parallel.
-    // Log-mux wire tax stays only when this is *not* a next-state / write-only bundle.
+    // Independent flop D pins do not share a wire tree.
     let scratch = classification_scratch(m, nodes, budget);
     if !scratch.procedural_ok {
         return None;
     }
     let wire = if next_state {
-        model.other
+        0.0
     } else {
         model.other * (n_lhs as f64).log2().max(1.0) * 2.0
     };
-    let core = scratch.makespan_fo4.max(max_field);
+    // Next-state `_d` fields are independent flop D pins. Makespan through
+    // shared temps / ident_base-collapsed struct writes is not the capture
+    // delay (coherence_hub 67-node 30 FO4 makespan vs max_field 10).
+    let core = if next_state {
+        max_field
+    } else {
+        scratch.makespan_fo4.max(max_field)
+    };
     let adjusted = core + wire + no_lhs.min(raw * 0.15) * 0.5;
     let adjusted = adjusted.clamp(0.0, raw);
     if adjusted >= raw * 0.85 {
@@ -630,6 +737,25 @@ fn try_parallel_timing(
     ))
 }
 
+/// True when the exclusive LHS is a flop D/Q capture (`foo_d`, `aw_wait_q`).
+///
+/// `_q` is *not* in [`lhs_is_next_state`]: tagging gemm always_ff `_q` NBAs as
+/// a next-state bundle would skip IndependentLhsBundle-skip-on-compose and
+/// starve S4 InsertReg. Exclusive of a single `_q` result is still a flop D.
+fn lhs_is_flop_capture(lhs: &str) -> bool {
+    lhs_is_next_state(lhs) || {
+        let ident = lhs
+            .split('[')
+            .next()
+            .unwrap_or(lhs)
+            .trim()
+            .rsplit('.')
+            .next()
+            .unwrap_or(lhs);
+        ident.ends_with("_q")
+    }
+}
+
 /// True when an assignment LHS is sequential next-state (`foo_d`, `bar_n[3:0]`).
 fn lhs_is_next_state(lhs: &str) -> bool {
     let ident = lhs
@@ -677,6 +803,57 @@ fn lhs_base(lhs: &str) -> String {
     ident_base(lhs)
 }
 
+/// True when path nodes come from two or more regions (P5 compose).
+fn path_spans_multiple_regions(
+    module: Option<&crate::ir::TimingModule>,
+    nodes: &[NodeId],
+) -> bool {
+    let Some(m) = module else {
+        return false;
+    };
+    if nodes.len() < 2 || m.regions.len() < 2 {
+        return false;
+    }
+    let mut regs = std::collections::BTreeSet::new();
+    for (&rid, region) in &m.regions {
+        if nodes.iter().any(|id| region.nodes.contains(id)) {
+            regs.insert(rid);
+            if regs.len() >= 2 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// True when a composed path is a next-state / write-only FSM, not a serial
+/// named-temp datapath. IndependentLhsBundle is the right deflation there.
+fn composed_is_next_state_fsm(
+    module: Option<&crate::ir::TimingModule>,
+    nodes: &[NodeId],
+) -> bool {
+    let Some(m) = module else {
+        return false;
+    };
+    let mut by_lhs: BTreeMap<String, f64> = BTreeMap::new();
+    for id in nodes {
+        let Some(n) = m.nodes.get(id) else {
+            continue;
+        };
+        if let Some(lhs) = n.lhs.as_ref().map(|s| lhs_base(s.trim())) {
+            if !lhs.is_empty() {
+                let e = by_lhs.entry(lhs).or_insert(0.0);
+                *e = e.max(n.fo4_cost.max(0.0));
+            }
+        }
+    }
+    if by_lhs.len() < 4 {
+        return false;
+    }
+    let tree = RefOrderTree::from_nodes(m, nodes);
+    is_sequential_next_state_bundle(&by_lhs, Some(&tree))
+}
+
 fn deflate_or_raw(
     module: Option<&crate::ir::TimingModule>,
     nodes: &[NodeId],
@@ -709,6 +886,18 @@ fn scan_deflate_detectors(
 ) {
     let mut attempted = Vec::new();
     let mut best: Option<(PathClassKind, f64, f64, String)> = None;
+    // P5 compose wires assign/comb fragments. Independent-LHS bundle on that
+    // blob treated gemm as parallel fields and refused InsertReg. Exclusive
+    // case / dense / parallel-timing still apply (csr_regfile 370, decoder 428).
+    let composed = path_spans_multiple_regions(module, nodes);
+    if composed {
+        attempted.push(PatternAttempt {
+            detector: "p5_composed_cone".into(),
+            matched: true,
+            candidate_fo4: None,
+            note: "P5 composed cone — exclusive/dense/parallel-timing; IndependentLhsBundle only if next-state FSM".into(),
+        });
+    }
 
     if include_atomic {
         if let Some((adj, conf, ev)) = try_atomic_over_budget(module, nodes, raw, budget, model) {
@@ -767,7 +956,19 @@ fn scan_deflate_detectors(
         });
     }
 
-    if let Some((adj, conf, ev)) =
+    // Skip IndependentLhsBundle on composed *serial datapath* (gemm named
+    // temps) so InsertReg still sees Plain. Next-state FSMs composed across
+    // assign/comb fragments (coherence_hub) must still bundle: sibling `_d`
+    // fields are parallel flop D pins, not a gemm mul chain.
+    let skip_bundle = composed && !composed_is_next_state_fsm(module, nodes);
+    if skip_bundle {
+        attempted.push(PatternAttempt {
+            detector: "independent_lhs_bundle".into(),
+            matched: false,
+            candidate_fo4: None,
+            note: "skipped on P5 composed cone (gemm serial chain)".into(),
+        });
+    } else if let Some((adj, conf, ev)) =
         try_independent_lhs_bundle(module, nodes, raw, budget, model)
     {
         attempted.push(PatternAttempt {
@@ -814,7 +1015,12 @@ fn scan_deflate_detectors(
                 candidate_fo4: Some(adj),
                 note: ev.clone(),
             });
-            let class = if ev.contains("lhs=") {
+            // Composed cones keep Plain so InsertReg still sees CombDatapath
+            // (IndependentLhsBundle is ExclusiveMux lane). Serial gemm makespan
+            // ≈ raw and does not match; parallel CSR/decoder still deflate.
+            let class = if composed {
+                PathClassKind::Plain
+            } else if ev.contains("lhs=") {
                 PathClassKind::IndependentLhsBundle
             } else {
                 PathClassKind::DenseControlCone
@@ -914,16 +1120,21 @@ fn try_dense_control_cone(
         return None;
     }
     let select = if next_state {
-        model.mux * 2.0
+        0.0
     } else {
         model.mux * n_f.log2().max(2.0)
     };
     let wire = if next_state {
-        model.other
+        0.0
     } else {
         model.other * n_f.log2().max(1.0)
     };
-    let adjusted = scratch.makespan_fo4.max(max_n) + select + wire;
+    let core = if next_state {
+        max_n
+    } else {
+        scratch.makespan_fo4.max(max_n)
+    };
+    let adjusted = core + select + wire;
     let adjusted = adjusted.clamp(0.0, raw);
     if adjusted >= raw * 0.88 {
         return None;
@@ -950,7 +1161,9 @@ fn try_exclusive_shared_lhs(
     priority: bool,
 ) -> Option<(f64, f64, String)> {
     let m = module?;
-    if nodes.len() < 4 {
+    // 2-node flop-D leftovers (l2_mshr waiter shift + nwait on `mem_d`) were
+    // Plain-sum 20 because the old floor was 4 nodes / 3 arms.
+    if nodes.len() < 2 {
         return None;
     }
     // Group FO4 by LHS
@@ -971,7 +1184,8 @@ fn try_exclusive_shared_lhs(
         .iter()
         .max_by_key(|(_, v)| v.len())
         .map(|(k, v)| (k.clone(), v.clone()))?;
-    if arms.len() < 3 {
+    let flop_capture = lhs_is_flop_capture(&lhs);
+    if arms.len() < 3 && !(flop_capture && arms.len() >= 2) {
         return None;
     }
     let arm_sum: f64 = arms.iter().sum();
@@ -980,15 +1194,21 @@ fn try_exclusive_shared_lhs(
     }
     let max_arm = arms.iter().copied().fold(0.0_f64, f64::max);
     let n = arms.len() as f64;
-    let mux = if priority {
+    // Flop D / Q capture (`_d` / `_q`): the unique-case *is* the D pin mux.
+    // Charging max_arm + mux + leftover put dram_timing `aw_wait_q` at 15.6
+    // and dm_mem `rdata_d` at 12.5 with max_arm already at budget 10.
+    let mux = if flop_capture {
+        0.0
+    } else if priority {
         model.priority_mux_per_level * n
     } else {
-        // balanced select tree depth ~ log2(n)
-        model.mux * n.log2().max(1.0)
+        // Unique-case is one-hot AND-OR of the selected arm, not a log2(n)
+        // 2:1 tree stacked on max_arm. `log2(7)*2.5 ≈ 7` left timer / l2_mshr
+        // exclusive residuals at 18 FO4 with max_arm already at budget 10.
+        model.mux
     };
     // Non-dominant LHS (temps like rolw/bit_indx) feed *some* exclusive arms in
     // parallel with other arms — not a serial residual of (raw − Σ arm FO4).
-    // Critical arm ≈ max(max_result_write, prep_temp + light use), then + select mux.
     let mut other_field_max = 0.0_f64;
     for (k, costs) in &by_lhs {
         if k == &lhs {
@@ -1002,20 +1222,23 @@ fn try_exclusive_shared_lhs(
     } else {
         0.0
     };
-    // Prep + concat/sign-extend onto result is max'd with other exclusive arms.
-    let prep_arm = if other_field_max > 0.0 {
+    // Sibling exclusive fields are parallel flop D pins, not concat onto result.
+    let prep_arm = if flop_capture {
+        other_field_max
+    } else if other_field_max > 0.0 {
         other_field_max + model.concat
     } else {
         0.0
     };
     let critical_arm = max_arm.max(prep_arm);
-    let uncat = uncategorized.min(raw * 0.08) * 0.15;
-    // Only when arms do not dominate the raw sum, keep a light leftover tax.
-    let leftover = if dominance >= 0.75 {
+    let uncat = if flop_capture {
         0.0
     } else {
-        (raw - arm_sum).max(0.0) * 0.12
+        uncategorized.min(raw * 0.08) * 0.15
     };
+    // Prep is already max'd with the hot arm. A (raw − Σ arm) leftover is a
+    // serial ghost (dram_timing leftover 2.6 on dominance 0.48).
+    let leftover = 0.0;
     let adjusted = critical_arm + mux + uncat + leftover;
     let adjusted = adjusted.clamp(0.0, raw);
     if adjusted >= raw * 0.92 {
@@ -1145,6 +1368,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1354,6 +1578,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1380,6 +1605,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1428,9 +1654,9 @@ mod tests {
         classify_and_adjust_paths(&mut design, &model, None);
         let p = &design.paths[0];
         assert_eq!(p.path_class, PathClassKind::ExclusiveCaseMux);
-        // max(max_arm=20, prep_arm=12+concat) + log2(16)*mux≈10 → ~30–35, not residual inflate
+        // max(max_arm=20, prep_arm) + unique-case mux (not log2(n)*mux)
         assert!(
-            p.total_fo4 < 40.0,
+            p.total_fo4 < 30.0,
             "parallel prep must max with hot arm, not re-inflate, got {}",
             p.total_fo4
         );
@@ -1511,6 +1737,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1591,6 +1818,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1672,6 +1900,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1719,8 +1948,8 @@ mod tests {
         let p = &design.paths[0];
         assert_eq!(p.path_class, PathClassKind::IndependentLhsBundle);
         assert!(
-            p.total_fo4 <= 12.0,
-            "next-state bundle should be ~max_field, got {}",
+            p.total_fo4 <= 10.5,
+            "next-state bundle should be max_field with no wire tax, got {}",
             p.total_fo4
         );
         assert!(
@@ -1728,6 +1957,565 @@ mod tests {
                 .as_deref()
                 .is_some_and(|n| n.contains("next_state=true")),
             "note={:?}",
+            p.class_note
+        );
+        assert!(p.path_class.discourages_insert_reg());
+    }
+
+    #[test]
+    fn next_state_multi_write_field_is_max_not_log_mux() {
+        // server_prefetcher: 7 exclusive overwrites of pf_addr_d at 10 FO4
+        // used to bill 10 + log2(7)*2.5 = 17.
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        let mut id = 0u32;
+        // Three exclusive overwrites (w>=3 trips the old log-mux). Keep the
+        // field below 50% of writes so exclusive does not steal the bundle.
+        for _ in 0..3u32 {
+            nodes.insert(
+                id,
+                IrNode {
+                    id,
+                    op_class: Some(OperatorClass::AddSub),
+                    width: 64,
+                    fo4_cost: 10.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: vec![],
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some("pf_addr_d".into()),
+                    rhs: Some("demand_line + stride".into()),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: Default::default(),
+                },
+            );
+            id += 1;
+        }
+        for f in 1..7u32 {
+            for _ in 0..2u32 {
+                nodes.insert(
+                    id,
+                    IrNode {
+                        id,
+                        op_class: Some(OperatorClass::Other),
+                        width: 1,
+                        fo4_cost: 8.0,
+                        gate: None,
+                        loc: loc(),
+                        fans_in: vec![],
+                        fans_out: vec![],
+                        width_defaulted: true,
+                        reads_reg: false,
+                        lhs: Some(format!("field_{f}_d")),
+                        rhs: Some("x".into()),
+                        lhs_expr: None,
+                        rhs_expr: None,
+                        case_labels: Vec::new(),
+                        case_is_default: false,
+                        case_selector: None,
+                        fo4_locked: false,
+                        assign_kind: Default::default(),
+                    },
+                );
+                id += 1;
+            }
+        }
+        let n_nodes = id;
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "g6lc_server_prefetcher".into(),
+                file: "pf.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("g6lc_server_prefetcher".into(), 0);
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 1,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "pf.reg0/CP".into(),
+            endpoint: "pf.reg1/D".into(),
+            nodes: (0..n_nodes).collect(),
+            total_fo4: 126.0,
+            slack_fo4: -96.0,
+            max_freq_mhz: 400.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_eq!(p.path_class, PathClassKind::IndependentLhsBundle);
+        assert!(
+            p.total_fo4 <= 10.5,
+            "next-state multi-write field must not add log2 mux, got {} note={:?}",
+            p.total_fo4,
+            p.class_note
+        );
+    }
+
+    #[test]
+    fn exclusive_flop_capture_is_max_arm_not_mux_plus_leftover() {
+        // dram_timing `aw_wait_q` / dm_mem `rdata_d`: unique-case flop D.
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        for i in 0..4u32 {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::AddSub),
+                    width: 32,
+                    fo4_cost: 10.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: vec![],
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some("aw_wait_q".into()),
+                    rhs: Some(format!("arm_{i}")),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: Default::default(),
+                },
+            );
+        }
+        for i in 4..8u32 {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::AddSub),
+                    width: 32,
+                    fo4_cost: 8.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: vec![],
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some(format!("other_{i}_q")),
+                    rhs: Some("sib".into()),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: Default::default(),
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "g6lc_ai_dram_timing".into(),
+                file: "dram.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("g6lc_ai_dram_timing".into(), 0);
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 1,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "dram.reg0/CP".into(),
+            endpoint: "dram.reg1/D".into(),
+            nodes: (0..8).collect(),
+            total_fo4: 72.0,
+            slack_fo4: -62.0,
+            max_freq_mhz: 400.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_eq!(p.path_class, PathClassKind::ExclusiveCaseMux);
+        assert!(
+            p.total_fo4 <= 10.5,
+            "flop-capture exclusive should be max_arm, got {} note={:?}",
+            p.total_fo4,
+            p.class_note
+        );
+    }
+
+    #[test]
+    fn exclusive_flop_capture_two_arms_is_max_not_sum() {
+        // l2_mshr: waiter shift + nwait decrement both write `mem_d` (2-node
+        // Plain 20). Exclusive used to require 3 arms / 4 nodes.
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        for (i, rhs) in [
+            (0u32, "mem_q[idx].waiters[w+1]"),
+            (1u32, "mem_q[idx].nwait - 1'b1"),
+        ] {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::AddSub),
+                    width: 32,
+                    fo4_cost: 10.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: vec![],
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some(if i == 0 {
+                        "mem_d[idx].waiters[w]".into()
+                    } else {
+                        "mem_d[idx].nwait".into()
+                    }),
+                    rhs: Some(rhs.into()),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: Default::default(),
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "g6lc_l2_mshr".into(),
+                file: "mshr.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("g6lc_l2_mshr".into(), 0);
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 1,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "mshr.reg0/CP".into(),
+            endpoint: "mshr.reg1/D".into(),
+            nodes: vec![0, 1],
+            total_fo4: 20.0,
+            slack_fo4: -10.0,
+            max_freq_mhz: 2000.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_eq!(p.path_class, PathClassKind::ExclusiveCaseMux);
+        assert!(
+            p.total_fo4 <= 10.5,
+            "2-arm mem_d capture should be max_arm, got {} note={:?}",
+            p.total_fo4,
+            p.class_note
+        );
+    }
+
+    #[test]
+    fn always_ff_nba_bundle_deflates_q_on_rhs_serial_sum() {
+        // g6lc_ai_gemm_seq always_ff: sibling NBAs (some reading Q) were a
+        // 144-node Plain serial sum because NBA→later-read poisoned
+        // procedural_ok. IEEE NBA schedule: those reads are Q, not combo.
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let seq_gate = crate::ir::GateInfo {
+            is_comb: false,
+            ..crate::ir::GateInfo::default()
+        };
+        let mut nodes = Map::new();
+        for i in 0..8u32 {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::AddSub),
+                    width: 32,
+                    fo4_cost: 12.0,
+                    gate: Some(seq_gate.clone()),
+                    loc: loc(),
+                    fans_in: if i == 0 { vec![] } else { vec![i - 1] },
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: true,
+                    lhs: Some(format!("field_{i}_q")),
+                    rhs: Some(if i == 0 {
+                        "d_i".into()
+                    } else {
+                        format!("field_{}_q + 1", i - 1)
+                    }),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: crate::ir::AssignKind::Nonblocking,
+                },
+            );
+        }
+        let mut regions = Map::new();
+        regions.insert(
+            0,
+            crate::ir::CombRegion {
+                id: 0,
+                module: 0,
+                kind: crate::ir::RegionKind::AlwaysFf,
+                label: None,
+                gate: seq_gate,
+                nodes: (0..8).collect(),
+                total_fo4: 96.0,
+                loc_span: loc(),
+                multi_cycle: false,
+            },
+        );
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "g6lc_ai_gemm_seq".into(),
+                file: "gemm.sv".into(),
+                nodes,
+                regions,
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("g6lc_ai_gemm_seq".into(), 0);
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 3131,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "g6lc_ai_gemm_seq.reg0/CP".into(),
+            endpoint: "g6lc_ai_gemm_seq.reg1/D".into(),
+            nodes: (0..8).collect(),
+            total_fo4: 96.0,
+            slack_fo4: -86.0,
+            max_freq_mhz: 247.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_ne!(
+            p.path_class,
+            PathClassKind::Plain,
+            "always_ff NBA siblings must not stay serial Plain: class={:?} note={:?}",
+            p.path_class,
+            p.class_note
+        );
+        assert!(
+            p.total_fo4 < 40.0,
+            "144-node-shaped NBA bundle should collapse ~96 FO4 serial sum, got {} class={:?} note={:?}",
+            p.total_fo4,
+            p.path_class,
+            p.class_note
+        );
+        assert!(p.path_class.discourages_insert_reg());
+    }
+
+    #[test]
+    fn composed_next_state_fsm_bundles_to_max_field_not_makespan() {
+        // coherence_hub: P5 compose + `_d` fields. Shared winner temps serialize
+        // the scratchboard makespan (~3× max_field) but each flop D is one field.
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        for i in 0..8u32 {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::AddSub),
+                    width: 32,
+                    fo4_cost: 10.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: if i == 0 { vec![] } else { vec![i - 1] },
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some(format!("field_{i}_d")),
+                    rhs: Some(if i == 0 {
+                        "a_i + b_i".into()
+                    } else {
+                        format!("field_{}_d + 1", i - 1)
+                    }),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: crate::ir::AssignKind::Blocking,
+                },
+            );
+        }
+        let mut regions = Map::new();
+        regions.insert(
+            0,
+            crate::ir::CombRegion {
+                id: 0,
+                module: 0,
+                kind: crate::ir::RegionKind::ContAssign,
+                label: None,
+                gate: crate::ir::GateInfo {
+                    is_comb: true,
+                    ..crate::ir::GateInfo::default()
+                },
+                nodes: (0..4).collect(),
+                total_fo4: 40.0,
+                loc_span: loc(),
+                multi_cycle: false,
+            },
+        );
+        regions.insert(
+            1,
+            crate::ir::CombRegion {
+                id: 1,
+                module: 0,
+                kind: crate::ir::RegionKind::AlwaysComb,
+                label: None,
+                gate: crate::ir::GateInfo {
+                    is_comb: true,
+                    ..crate::ir::GateInfo::default()
+                },
+                nodes: (4..8).collect(),
+                total_fo4: 40.0,
+                loc_span: loc(),
+                multi_cycle: false,
+            },
+        );
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "g6lc_coherence_hub".into(),
+                file: "hub.sv".into(),
+                nodes,
+                regions,
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("g6lc_coherence_hub".into(), 0);
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 3635,
+            region_id: 1,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "g6lc_coherence_hub.reg0/CP".into(),
+            endpoint: "g6lc_coherence_hub.reg1/D".into(),
+            nodes: (0..8).collect(),
+            total_fo4: 80.0,
+            slack_fo4: -70.0,
+            max_freq_mhz: 400.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_eq!(
+            p.path_class,
+            PathClassKind::IndependentLhsBundle,
+            "composed next-state must bundle, got {:?} note={:?}",
+            p.path_class,
+            p.class_note
+        );
+        assert!(
+            p.total_fo4 <= 10.5,
+            "next-state capture is max_field not makespan, got {} note={:?}",
+            p.total_fo4,
             p.class_note
         );
         assert!(p.path_class.discourages_insert_reg());
@@ -1760,6 +2548,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1785,6 +2574,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1873,6 +2663,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: Some("register_address".into()),
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1952,6 +2743,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: Some("state_q".into()),
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -2031,6 +2823,7 @@ mod tests {
                 case_is_default: false,
                 case_selector: None,
                 fo4_locked: false,
+                assign_kind: Default::default(),
             },
         );
         design.modules.insert(
@@ -2114,6 +2907,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
             ids.push(i);
@@ -2160,19 +2954,17 @@ mod tests {
             class_note: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
-        assert_eq!(
+        // P4 (audit-strict-v4 cache_ctrl 117 nodes): one DivRem does not brand
+        // the whole 20-node cone atomic — remainder stays cuttable.
+        assert_ne!(
             design.paths[0].path_class,
             PathClassKind::AtomicOverBudget,
             "note={}",
             design.paths[0].class_note.as_deref().unwrap_or("")
         );
         assert!(
-            design.paths[0].multi_cycle,
-            "atomic must soft multi_cycle off primary"
-        );
-        assert!(
             design.paths[0].total_fo4 <= 125.0,
-            "atomic adj is the DivRem, not the 177 serial sum, got {}",
+            "bundle/parallel deflate, not the 177 serial sum, got {}",
             design.paths[0].total_fo4
         );
     }
@@ -2208,6 +3000,7 @@ mod tests {
                     case_is_default: i == 11,
                     case_selector: Some("state_q".into()),
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -2254,12 +3047,471 @@ mod tests {
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
-        assert_eq!(p.path_class, PathClassKind::AtomicOverBudget);
+        // P4: a 12-node exclusive FSM is not path-atomic because one node is a mul.
+        assert_ne!(
+            p.path_class,
+            PathClassKind::AtomicOverBudget,
+            "remainder must stay cuttable: {:?}",
+            p.path_class
+        );
         assert!(
             p.total_fo4 < 70.0,
             "FSM+mul must not keep serial {raw}, got {}",
             p.total_fo4
         );
-        assert!(p.multi_cycle);
+    }
+
+    #[test]
+    fn p4_remainder_notes_atomic_node_and_stays_cuttable() {
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        nodes.insert(
+            0,
+            IrNode {
+                id: 0,
+                op_class: Some(OperatorClass::Mul),
+                width: 32,
+                fo4_cost: 56.0,
+                gate: None,
+                loc: loc(),
+                fans_in: vec![],
+                fans_out: vec![1],
+                width_defaulted: true,
+                reads_reg: false,
+                lhs: Some("prod".into()),
+                rhs: Some("a * b".into()),
+                lhs_expr: None,
+                rhs_expr: None,
+                case_labels: Vec::new(),
+                case_is_default: false,
+                case_selector: None,
+                fo4_locked: false,
+                assign_kind: Default::default(),
+            },
+        );
+        nodes.insert(
+            1,
+            IrNode {
+                id: 1,
+                op_class: Some(OperatorClass::AddSub),
+                width: 32,
+                fo4_cost: 10.0,
+                gate: None,
+                loc: loc(),
+                fans_in: vec![0],
+                fans_out: vec![2],
+                width_defaulted: true,
+                reads_reg: false,
+                lhs: Some("acc".into()),
+                rhs: Some("prod + c".into()),
+                lhs_expr: None,
+                rhs_expr: None,
+                case_labels: Vec::new(),
+                case_is_default: false,
+                case_selector: None,
+                fo4_locked: false,
+                assign_kind: Default::default(),
+            },
+        );
+        nodes.insert(
+            2,
+            IrNode {
+                id: 2,
+                op_class: Some(OperatorClass::ShiftConst),
+                width: 32,
+                fo4_cost: 2.0,
+                gate: None,
+                loc: loc(),
+                fans_in: vec![1],
+                fans_out: vec![],
+                width_defaulted: true,
+                reads_reg: false,
+                lhs: Some("c_span".into()),
+                rhs: Some("acc << 2".into()),
+                lhs_expr: None,
+                rhs_expr: None,
+                case_labels: Vec::new(),
+                case_is_default: false,
+                case_selector: None,
+                fo4_locked: false,
+                assign_kind: Default::default(),
+            },
+        );
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "gemm_span".into(),
+                file: "gemm_span.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 0,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "gemm_span.reg0/CP".into(),
+            endpoint: "gemm_span.reg1/D".into(),
+            nodes: vec![0, 1, 2],
+            total_fo4: 68.0,
+            slack_fo4: -58.0,
+            max_freq_mhz: 100.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_ne!(p.path_class, PathClassKind::AtomicOverBudget);
+        assert!(
+            crate::pass_strategy::admits_insert_reg(p),
+            "P4 remainder must admit InsertReg class={:?} mc={} n={}",
+            p.path_class,
+            p.multi_cycle,
+            p.nodes.len()
+        );
+        let note = p.class_note.as_deref().unwrap_or("");
+        assert!(
+            note.contains("P4 remainder") && note.contains("T3"),
+            "expected P4 T3 remainder note, got {note}"
+        );
+        // Short serial mul chain keeps the operator in the period (gemm_span).
+        assert!(
+            p.total_fo4 > 50.0,
+            "3-node mul chain must keep the 56 FO4 mul, got {}",
+            p.total_fo4
+        );
+    }
+
+    #[test]
+    fn p4_remainder_subtracts_when_atomic_dominates_small_bundle() {
+        // hpdcache_memctrl :472 — 6-node IndependentLhsBundle at 125 FO4 whose
+        // max field is a 120 DivRem (`way % dataWaysPerRamWord`). Dominance
+        // (120/125 ≥ 0.90) subtracts; gemm_span (56/68) does not.
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        for i in 0..6u32 {
+            let is_div = i == 0;
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(if is_div {
+                        OperatorClass::DivRem
+                    } else {
+                        OperatorClass::Other
+                    }),
+                    width: 32,
+                    fo4_cost: if is_div { 120.0 } else { 1.0 },
+                    gate: None,
+                    loc: loc(),
+                    fans_in: if i == 0 { vec![] } else { vec![i - 1] },
+                    fans_out: if i == 5 { vec![] } else { vec![i + 1] },
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some(format!("f{i}")),
+                    rhs: Some(if is_div {
+                        "way % HPDcacheCfg.u.dataWaysPerRamWord".into()
+                    } else {
+                        format!("f{}", i - 1)
+                    }),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: Default::default(),
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "hpdcache_memctrl".into(),
+                file: "hpdcache_memctrl.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 0,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "hpdcache_memctrl.reg0/CP".into(),
+            endpoint: "hpdcache_memctrl.reg1/D".into(),
+            nodes: vec![0, 1, 2, 3, 4, 5],
+            total_fo4: 125.0,
+            slack_fo4: -115.0,
+            max_freq_mhz: 100.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_ne!(p.path_class, PathClassKind::AtomicOverBudget);
+        assert!(
+            p.total_fo4 < 20.0,
+            "dominated 120 DivRem must leave a small remainder, got {}",
+            p.total_fo4
+        );
+        let note = p.class_note.as_deref().unwrap_or("");
+        assert!(
+            note.contains("P4 remainder") && note.contains("T3"),
+            "expected P4 T3 remainder note, got {note}"
+        );
+    }
+
+    #[test]
+    fn p4_remainder_subtracts_twin_atomics_in_short_cone() {
+        // hpdcache_memctrl :472 — `way / Cfg` and `way % Cfg` as two 120 FO4
+        // DivRems plus a wire (241). Dominance is 120/241 ≈ 0.50, but leftover
+        // 121 ≥ 120 so P4 still peels one copy. gemm_span leftover 12 < 56 keeps.
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        for (i, (cls, cost, lhs, rhs)) in [
+            (
+                OperatorClass::DivRem,
+                120.0,
+                "ram_y",
+                "way / HPDcacheCfg.u.dataWaysPerRamWord",
+            ),
+            (
+                OperatorClass::DivRem,
+                120.0,
+                "ram_w",
+                "way % HPDcacheCfg.u.dataWaysPerRamWord",
+            ),
+            (OperatorClass::Other, 1.0, "sel", "ram_w"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let i = i as u32;
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(cls),
+                    width: 32,
+                    fo4_cost: cost,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: if i == 0 { vec![] } else { vec![i - 1] },
+                    fans_out: if i == 2 { vec![] } else { vec![i + 1] },
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some(lhs.into()),
+                    rhs: Some(rhs.into()),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: Default::default(),
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "hpdcache_memctrl".into(),
+                file: "hpdcache_memctrl.sv".into(),
+                nodes,
+                regions: Map::new(),
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 0,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "hpdcache_memctrl.reg0/CP".into(),
+            endpoint: "hpdcache_memctrl.reg1/D".into(),
+            nodes: vec![0, 1, 2],
+            total_fo4: 241.0,
+            slack_fo4: -231.0,
+            max_freq_mhz: 100.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_ne!(p.path_class, PathClassKind::AtomicOverBudget);
+        assert!(
+            p.total_fo4 < 10.0,
+            "twin 120 DivRems must both peel, got {}",
+            p.total_fo4
+        );
+    }
+
+    #[test]
+    fn composed_exclusive_cone_still_deflates() {
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = Map::new();
+        for i in 0..8u32 {
+            nodes.insert(
+                i,
+                IrNode {
+                    id: i,
+                    op_class: Some(OperatorClass::AddSub),
+                    width: 64,
+                    fo4_cost: 40.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: if i == 0 { vec![] } else { vec![i - 1] },
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some("result_o".into()),
+                    rhs: Some(format!("arm_{i}")),
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: vec![format!("{i}")],
+                    case_is_default: false,
+                    case_selector: Some("sel".into()),
+                    fo4_locked: false,
+                    assign_kind: Default::default(),
+                },
+            );
+        }
+        let mut regions = Map::new();
+        regions.insert(
+            0,
+            crate::ir::CombRegion {
+                id: 0,
+                module: 0,
+                kind: crate::ir::RegionKind::ContAssign,
+                label: None,
+                gate: crate::ir::GateInfo {
+                    is_comb: true,
+                    ..crate::ir::GateInfo::default()
+                },
+                nodes: (0..4).collect(),
+                total_fo4: 160.0,
+                loc_span: loc(),
+                multi_cycle: false,
+            },
+        );
+        regions.insert(
+            1,
+            crate::ir::CombRegion {
+                id: 1,
+                module: 0,
+                kind: crate::ir::RegionKind::AlwaysComb,
+                label: None,
+                gate: crate::ir::GateInfo {
+                    is_comb: true,
+                    ..crate::ir::GateInfo::default()
+                },
+                nodes: (4..8).collect(),
+                total_fo4: 160.0,
+                loc_span: loc(),
+                multi_cycle: false,
+            },
+        );
+        design.modules.insert(
+            0,
+            TimingModule {
+                id: 0,
+                name: "csr_regfile".into(),
+                file: "csr_regfile.sv".into(),
+                nodes,
+                regions,
+                localparams: vec![],
+                parameters: vec![],
+                ports: vec![],
+                gen_loops: vec![],
+                functions: vec![],
+                package_imports: vec![],
+                instances: vec![],
+                loc: loc(),
+            },
+        );
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 0,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: PathKind::from_endpoints(&start, &end),
+            startpoint: "csr_regfile.reg0/CP".into(),
+            endpoint: "csr_regfile.reg1/D".into(),
+            nodes: (0..8).collect(),
+            total_fo4: 320.0,
+            slack_fo4: -310.0,
+            max_freq_mhz: 100.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        classify_and_adjust_paths(&mut design, &CostModel::default(), None);
+        let p = &design.paths[0];
+        assert_eq!(
+            p.path_class,
+            PathClassKind::ExclusiveCaseMux,
+            "composed exclusive must still deflate: {:?} {}",
+            p.path_class,
+            p.class_note.as_deref().unwrap_or("")
+        );
+        assert!(
+            p.total_fo4 < 80.0,
+            "exclusive max-arm, not 320 serial, got {}",
+            p.total_fo4
+        );
     }
 }

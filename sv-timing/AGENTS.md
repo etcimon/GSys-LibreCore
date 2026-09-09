@@ -8,6 +8,7 @@
 | Artifact | Path | Role |
 |---|---|---|
 | **This guider** | `AGENTS.md` | Navigation, invariants, extension playbook |
+| **Algorithms expert manual** | [`ALGORITHMS-EXPERTS.md`](ALGORITHMS-EXPERTS.md) | Self-contained theory of every timing algorithm (implementation-cited; remaining gap to 10 FO4) |
 | **Live todo / state** | [`AGENTS-todo.md`](AGENTS-todo.md) | Phase checklist; update every pass |
 | **Architecture design** | [`architecture/DESIGN.md`](architecture/DESIGN.md) | Full multi-step design (IR, cache, hosts, PRs) |
 | **Architecture index** | [`architecture/README.md`](architecture/README.md) | Short map of architecture docs |

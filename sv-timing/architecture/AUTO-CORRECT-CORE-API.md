@@ -79,7 +79,9 @@ Analogous to a **profiler**: attribute structural cost, order worst first, never
 | `ModuleParallelTiming::keep_region_scratch` | `region_id, ParallelScratch, merge_fn` | Persist the full region board (ops **and** `clock`) on `design.parallel_timing`. Fill walks IR regions first so NBA-only `always_ff` (no `TimingPath`) still has a sequential scratch. |
 | `fill_design_parallel_timing` | `&mut TimingDesign` | One board per **module** and one [`FunctionTiming`] per **function** (declared + called). `always_ff` scratches stay sequential; path overlay must not demote them. |
 | `factor_always_ff_regions` | `&mut PassContext` | Review-only staged `always_ff` comments from the **kept** clock-aware scratch (OpenSTA `create_clock` + `report_timing -from clk -to q`). |
-| `explore_module` / `fill_design_cleanliness` | `&TimingDesign, &TimingModule, weights` | Per-module **algorithm-set explorer**. Catalog (classify, clock-aware `always_ff`, exclusive comb, split, JIT, multi-cycle honesty, aggressive pipeline) is applied only when logically applicable (region kind + cone lane). Objective \(C = w_{ff} D_{ff} + w_{comb} D_{comb} - w_a A - w_t 1[\neg pass]\) with default weights favouring `always_ff`/`always_comb` density. Timing-passing sets are a hard constraint when any exist; otherwise max \(C\) with the fail penalty. Final cleanliness is \(C(s^*)\). InsertReg is permitted only when the winner is jit/multi-cut. |
+| `explore_module` / `fill_design_cleanliness` | `&TimingDesign, &TimingModule, weights` | Per-module **algorithm-set explorer**. Catalog (classify, clock-aware `always_ff`, exclusive comb, split, JIT, multi-cycle honesty, aggressive pipeline) is applied only when logically applicable (region kind + cone lane). Objective \(C = w_{ff} D_{ff} + w_{comb} D_{comb} - w_a A - w_t 1[\neg pass]\) with default weights favouring `always_ff`/`always_comb` density. Timing-passing sets are a hard constraint when any exist; otherwise max \(C\) with the fail penalty. Final cleanliness is \(C(s^*)\). InsertReg is permitted only when the winner is jit/multi-cut **or** `exception_policy` admits a resilient datapath. |
+| `exception_policy` | `&TimingDesign, &TimingPath` → `Option<ExceptionPolicy>` | Path-level override of the module winner. `ResilientDatapath` (Plain `RegToReg` > budget, not real P10) admits S4 InsertReg on gemm/P6 remainders; incidental P10 class_note still yields at ≥ 2·budget. `HandshakeLock` never does. |
+| `plan_from_design` | `&TimingDesign` → `PassPlan` | PASS-STRATEGY P1–P9 recognizers. Abort correct on residual P1/P2 artifacts. Indicative logs: `E:/cva6/build-platform/workspace/build/sv-timing/audit-strict-v4/{full_core,full_corev_apu}/analyze.json`. |
 | `remeasure` | `&mut PassContext` | After a transform: re-cost + re-extract + re-rank only dirty modules. |
 
 ### 3.3 Naming & expansion conventions
@@ -154,7 +156,7 @@ See [`PROJECT-AUTOCORRECT.md`](PROJECT-AUTOCORRECT.md) for CLI `--out-dir` / `--
 
 | Function | Args | Description |
 |---|---|---|
-| `PassPolicy` | allowlist, max_passes, allow_latency, refuse_*, budget | Gates from DESIGN. |
+| `PassPolicy` | allowlist, max_passes, allow_latency, refuse_*, `emit_structural`, budget | Gates from DESIGN. `emit_structural` is true in library tests; CLI sets it from `--real-cut-feeds` / `--emit-balance-mux-rtl`. When false, InsertReg/BalanceMux refuse IR credit (lean sidecar does not rewrite origin). |
 | `run_correct_passes` | `PassContext, PassPolicy` → `Result<PassContext>` | Loop: measure → order_worklist → one transform → remeasure → stop. |
 | `run_analyze_only` | `paths, options` → `TimingDesign` | No transforms. |
 

@@ -13,9 +13,10 @@ use sv_parser::{unwrap_node, Locate, RefNode, SyntaxTree};
 use crate::error::CoreResult;
 use crate::expr::Expr;
 use crate::ir::{
-    CombRegion, CrossModulePath, EdgeKind, GateInfo, GenerateLoop, IrNode, ModuleId, ModuleInstance,
-    ModulePort, NodeId, OperatorClass, PathEndpoint, PathId, PortConnection, RegionId, RegionKind,
-    ResetInfo, TimingDesign, TimingModule, TimingPackage, TimingPath, TimingTarget, TypedParameter,
+    AssignKind, CombRegion, CrossModulePath, EdgeKind, GateInfo, GenerateLoop, IrNode, ModuleId,
+    ModuleInstance, ModulePort, NodeId, OperatorClass, PathEndpoint, PathId, PortConnection,
+    RegionId, RegionKind, ResetInfo, TimingDesign, TimingModule, TimingPackage, TimingPath,
+    TimingTarget, TypedParameter,
 };
 use crate::loc::{LineIndex, OriginKind, SourceLoc};
 use crate::measure::{
@@ -111,6 +112,9 @@ pub fn lower_unit(unit: &ParsedUnit, opts: &LowerOptions) -> CoreResult<AnalyzeO
     crate::measure::refresh_primary_locs(&mut design);
     resolve_instance_child_ids(&mut design);
     stitch_cross_module_paths(&mut design, &mut next_path);
+    // P5: compose assign fragments into launch→capture cones, then
+    // remeasure so InsertReg sees flop-to-flop paths (gemm_span / gemm_seq).
+    crate::measure::compose_reg_to_reg_paths(&mut design);
     // Cross-module paths need classification; local paths already classified.
     crate::measure::remeasure_path_slacks(&mut design);
     design.versions.cost_model = opts.cost_model.id.clone();
@@ -336,6 +340,7 @@ struct OpExtract {
     case_labels: Vec<String>,
     case_is_default: bool,
     case_selector: Option<String>,
+    assign_kind: AssignKind,
 }
 
 /// Intermediate region extract before IR materialization.
@@ -345,6 +350,13 @@ struct RegionExtract {
     label: Option<String>,
     gate: GateInfo,
     ops: Vec<OpExtract>,
+}
+
+/// One module's CST slice (PERF-CACHE B3). `RefNode` is not a lazy cursor.
+struct ModuleScope<'a> {
+    name: String,
+    loc: SourceLoc,
+    nodes: Vec<RefNode<'a>>,
 }
 
 fn lower_file(
@@ -371,49 +383,19 @@ fn lower_file(
         }
     }
 
-    // Collect module name + a span of interest by walking once.
-    let mut modules_found: Vec<(String, SourceLoc)> = Vec::new();
-    for node in tree {
-        match node {
-            RefNode::ModuleDeclarationAnsi(x) => {
-                if let Some(name) = module_name(tree, unwrap_node!(x, ModuleIdentifier)) {
-                    let loc = first_locate_loc(tree, li, &path_str, x);
-                    modules_found.push((name, loc));
-                }
-            }
-            RefNode::ModuleDeclarationNonansi(x) => {
-                if let Some(name) = module_name(tree, unwrap_node!(x, ModuleIdentifier)) {
-                    let loc = first_locate_loc(tree, li, &path_str, x);
-                    modules_found.push((name, loc));
-                }
-            }
-            _ => {}
-        }
-    }
-
+    let mut scopes = collect_module_scopes(tree, li, &path_str);
     // If no modules, synthesize a file-scoped pseudo-module for operator discovery.
-    if modules_found.is_empty() && design.packages.is_empty() {
-        modules_found.push((
-            format!("_file_{}", sanitize_stem(&path_str)),
-            SourceLoc::file_start(&file.path),
-        ));
+    if scopes.is_empty() && design.packages.is_empty() {
+        scopes.push(ModuleScope {
+            name: format!("_file_{}", sanitize_stem(&path_str)),
+            loc: SourceLoc::file_start(&file.path),
+            nodes: tree.into_iter().collect(),
+        });
     }
 
-    // File-level localparams / functions / imports shared into each module in this file (v1).
-    let file_localparams = collect_localparam_names(tree);
-    let file_functions = collect_function_names(tree);
-    let file_imports = collect_package_imports(tree);
-
-    // Prefer one-module-per-file attribution for instances (typical RTL layout).
-    let parent_for_instances: Option<(String, /* mid filled later */ ())> =
-        if modules_found.len() == 1 {
-            Some((modules_found[0].0.clone(), ()))
-        } else {
-            None
-        };
-    let mut pending_file_instances: Option<Vec<ModuleInstance>> = None;
-
-    for (mod_name, mod_loc) in modules_found {
+    for scope in scopes {
+        let mod_name = scope.name.clone();
+        let mod_loc = scope.loc.clone();
         if !opts.module_filter.is_empty() && !opts.module_filter.iter().any(|m| m == &mod_name) {
             continue;
         }
@@ -421,9 +403,17 @@ fn lower_file(
         let mid = *next_module;
         *next_module += 1;
 
-        let parameters = collect_typed_parameters(tree);
-        let ports = collect_module_ports(tree);
-        let gen_loops = collect_genvar_loops(tree, li, &path_str);
+        let parameters = collect_typed_parameters_in(tree, scope.nodes.iter().cloned());
+        let ports = collect_module_ports_in(tree, scope.nodes.iter().cloned());
+        let gen_loops = collect_genvar_loops_in(tree, li, &path_str, scope.nodes.iter().cloned());
+        let insts = collect_module_instances_in(
+            tree,
+            li,
+            &path_str,
+            mid,
+            &mod_name,
+            scope.nodes.iter().cloned(),
+        );
 
         let mut module = TimingModule {
             id: mid,
@@ -431,31 +421,20 @@ fn lower_file(
             file: path_str.clone(),
             nodes: BTreeMap::new(),
             regions: BTreeMap::new(),
-            localparams: file_localparams.clone(),
+            localparams: collect_localparam_names_in(tree, scope.nodes.iter().cloned()),
             parameters,
             ports,
             gen_loops,
-            functions: file_functions.clone(),
-            package_imports: file_imports.clone(),
-            instances: Vec::new(),
+            functions: collect_function_names_in(tree, scope.nodes.iter().cloned()),
+            package_imports: collect_package_imports_in(tree, scope.nodes.iter().cloned()),
+            instances: insts.clone(),
             loc: mod_loc,
         };
-
-        // Instance graph: when the file has a single module, attach all instantiations
-        // to it (covers project_mini / typical CVA6 one-module files).
-        if parent_for_instances
-            .as_ref()
-            .map(|(n, _)| n == &mod_name)
-            .unwrap_or(false)
-        {
-            let insts = collect_module_instances(tree, li, &path_str, mid, &mod_name);
-            module.instances = insts.clone();
-            pending_file_instances = Some(insts);
-        }
+        design.instances.extend(insts);
 
         let mut region_ops: Vec<RegionExtract> = Vec::new();
 
-        for node in tree {
+        for node in scope.nodes.iter().cloned() {
             match node {
                 RefNode::AlwaysConstruct(x) => {
                     let kind = match &x.nodes.0 {
@@ -500,9 +479,15 @@ fn lower_file(
             }
         }
 
-        // Fallback: whole-file binary ops as one always_comb region.
+        // Fallback: this module's CST slice, not the whole file.
         if region_ops.is_empty() {
-            let ops = collect_ops_and_assigns(tree, li, &path_str, &file.bytes, tree);
+            let ops = collect_ops_and_assigns(
+                tree,
+                li,
+                &path_str,
+                &file.bytes,
+                scope.nodes.iter().cloned(),
+            );
             if !ops.is_empty() {
                 region_ops.push(RegionExtract {
                     kind: RegionKind::AlwaysComb,
@@ -534,11 +519,13 @@ fn lower_file(
                 }
                 let lhs_expr = op.lhs.as_ref().map(|s| Expr::parse(s));
                 let rhs_expr = op.rhs.as_ref().map(|s| Expr::parse(s));
-                let op_class = rhs_expr
-                    .as_ref()
-                    .map(|e| e.dominant_op_class())
-                    .filter(|c| *c != OperatorClass::Other)
-                    .unwrap_or(op.op_class);
+                // Trust a parsed tree, including Other (P1 Const∘Const / wire
+                // slice). Discarding Other used to restore the string-heuristic
+                // Mul/DivRem from `*` `/` `%` inside `[msb:lsb]` / replication.
+                let op_class = match rhs_expr.as_ref() {
+                    Some(e) if !e.is_opaque() => e.dominant_op_class(),
+                    _ => op.op_class,
+                };
                 module.nodes.insert(
                     nid,
                     IrNode {
@@ -560,6 +547,7 @@ fn lower_file(
                         case_is_default: op.case_is_default,
                         case_selector: op.case_selector.clone(),
                         fo4_locked: false,
+                        assign_kind: op.assign_kind,
                     },
                 );
                 node_ids.push(nid);
@@ -590,6 +578,7 @@ fn lower_file(
                         case_is_default: false,
                         case_selector: None,
                         fo4_locked: false,
+                        assign_kind: AssignKind::Unknown,
                     },
                 );
                 node_ids.push(nid);
@@ -646,24 +635,58 @@ fn lower_file(
 
         design.module_names.insert(mod_name.clone(), mid);
         design.modules.insert(mid, module);
-        if let Some(insts) = pending_file_instances.take() {
-            design.instances.extend(insts);
-        }
     }
 
     Ok(())
 }
 
-/// Collect `type inst (.formal(actual), …);` module instantiations in a syntax tree.
-fn collect_module_instances(
-    tree: &SyntaxTree,
+fn collect_module_scopes<'a>(
+    tree: &'a SyntaxTree,
+    li: &LineIndex,
+    path_str: &str,
+) -> Vec<ModuleScope<'a>> {
+    let mut out = Vec::new();
+    for node in tree {
+        match node {
+            RefNode::ModuleDeclarationAnsi(x) => {
+                if let Some(name) = module_name(tree, unwrap_node!(x, ModuleIdentifier)) {
+                    let loc = first_locate_loc(tree, li, path_str, x);
+                    out.push(ModuleScope {
+                        name,
+                        loc,
+                        nodes: x.into_iter().collect(),
+                    });
+                }
+            }
+            RefNode::ModuleDeclarationNonansi(x) => {
+                if let Some(name) = module_name(tree, unwrap_node!(x, ModuleIdentifier)) {
+                    let loc = first_locate_loc(tree, li, path_str, x);
+                    out.push(ModuleScope {
+                        name,
+                        loc,
+                        nodes: x.into_iter().collect(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn collect_module_instances_in<'a, T>(
+    tree: &'a SyntaxTree,
     li: &LineIndex,
     path_str: &str,
     parent_id: ModuleId,
     parent_name: &str,
-) -> Vec<ModuleInstance> {
+    root: T,
+) -> Vec<ModuleInstance>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
     let mut out = Vec::new();
-    for node in tree {
+    for node in root {
         let RefNode::ModuleInstantiation(mi) = node else {
             continue;
         };
@@ -789,11 +812,14 @@ fn hierarchical_path(root: &str, member: &str) -> String {
 ///
 /// Scope pieces come from AST `PackageScope` / `ClassType` / type identifiers
 /// (anything that appears as the left of `::`), never a hard-coded package list.
-fn collect_typed_parameters(tree: &SyntaxTree) -> Vec<TypedParameter> {
+fn collect_typed_parameters_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<TypedParameter>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
     let mut out = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
 
-    for node in tree {
+    for node in root {
         match node {
             RefNode::ParameterDeclarationParam(p) => {
                 let mut param_ids: Vec<String> = Vec::new();
@@ -945,11 +971,14 @@ fn collect_typed_parameters(tree: &SyntaxTree) -> Vec<TypedParameter> {
 }
 
 /// Port list: direction + type + optional hierarchical packed dims (`root.member`).
-fn collect_module_ports(tree: &SyntaxTree) -> Vec<ModulePort> {
+fn collect_module_ports_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<ModulePort>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
     let mut ports = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
 
-    for node in tree {
+    for node in root {
         if let RefNode::AnsiPortDeclaration(port) = node {
             let mut direction = "unknown".to_string();
             let mut type_name: Option<String> = None;
@@ -1058,16 +1087,27 @@ fn tree_keyword_or_ident(tree: &SyntaxTree, node: RefNode<'_>) -> Option<String>
 }
 
 /// `for (genvar i = 0; i < root.member; i++)` — bound via hierarchical `root.member`.
-fn collect_genvar_loops(
-    tree: &SyntaxTree,
+fn collect_genvar_loops_in<'a, T>(
+    tree: &'a SyntaxTree,
     li: &LineIndex,
     path_str: &str,
-) -> Vec<GenerateLoop> {
+    root: T,
+) -> Vec<GenerateLoop>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
     let mut loops = Vec::new();
-    for node in tree {
+    for node in root {
         if let RefNode::LoopGenerateConstruct(lg) = node {
-            let loc = first_locate_loc(tree, li, path_str, lg);
+            let loc = if let Some((s, e)) = locate_byte_span(lg) {
+                let mut sl = li.span(s, e, OriginKind::UserFile);
+                sl.file = path_str.to_string();
+                sl
+            } else {
+                first_locate_loc(tree, li, path_str, lg)
+            };
             let mut genvar = "i".to_string();
+            let mut saw_own_genvar = false;
             let mut label: Option<String> = None;
             let mut body_assign_count = 0u32;
             let mut idents: Vec<String> = Vec::new();
@@ -1076,7 +1116,12 @@ fn collect_genvar_loops(
                 match n {
                     RefNode::GenvarIdentifier(g) => {
                         if let Some(s) = identifier_str(tree, RefNode::GenvarIdentifier(g)) {
-                            genvar = s.clone();
+                            // Nested generate-for walks inner genvars too; the
+                            // first identifier is this loop's own genvar.
+                            if !saw_own_genvar {
+                                genvar = s.clone();
+                                saw_own_genvar = true;
+                            }
                             idents.push(s);
                         }
                     }
@@ -1152,12 +1197,52 @@ fn collect_genvar_loops(
                 body_assign_count,
             });
         }
+        // always_comb `for (int unsigned w = 0; w < Cfg.N; w++)` unrolls;
+        // `w` is elaboration-constant in each body copy (hpdcache_mshr hit_comb).
+        if let RefNode::LoopStatementFor(lf) = node {
+            let loc = if let Some((s, e)) = locate_byte_span(lf) {
+                let mut sl = li.span(s, e, OriginKind::UserFile);
+                sl.file = path_str.to_string();
+                sl
+            } else {
+                first_locate_loc(tree, li, path_str, lf)
+            };
+            let mut idx = String::new();
+            let mut saw = false;
+            let mut body_assign_count = 0u32;
+            for n in lf {
+                match n {
+                    RefNode::VariableIdentifier(v) => {
+                        if !saw {
+                            if let Some(s) =
+                                identifier_str(tree, RefNode::VariableIdentifier(v))
+                            {
+                                idx = s;
+                                saw = true;
+                            }
+                        }
+                    }
+                    RefNode::BlockingAssignment(_)
+                    | RefNode::NonblockingAssignment(_)
+                    | RefNode::NetAssignment(_)
+                    | RefNode::VariableAssignment(_) => {
+                        body_assign_count += 1;
+                    }
+                    _ => {}
+                }
+            }
+            if saw {
+                loops.push(GenerateLoop {
+                    genvar: idx,
+                    bound_hint: None,
+                    label: None,
+                    loc,
+                    body_assign_count,
+                });
+            }
+        }
     }
     loops
-}
-
-fn collect_localparam_names(tree: &SyntaxTree) -> Vec<String> {
-    collect_localparam_names_in(tree, tree)
 }
 
 fn collect_localparam_names_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<String>
@@ -1189,10 +1274,6 @@ where
     names
 }
 
-fn collect_function_names(tree: &SyntaxTree) -> Vec<String> {
-    collect_function_names_in(tree, tree)
-}
-
 fn collect_function_names_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<String>
 where
     T: IntoIterator<Item = RefNode<'a>>,
@@ -1210,9 +1291,12 @@ where
     names
 }
 
-fn collect_package_imports(tree: &SyntaxTree) -> Vec<String> {
+fn collect_package_imports_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<String>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
     let mut names = Vec::new();
-    for node in tree {
+    for node in root {
         if let RefNode::PackageIdentifier(p) = node {
             if let Some(s) = identifier_str(tree, RefNode::PackageIdentifier(p)) {
                 // Heuristic: package identifiers near import appear in import items;
@@ -1364,13 +1448,17 @@ where
     // Pass 1: CaseItem-aware assigns (labels + selector from CST, not source scan).
     let case_meta =
         collect_case_assign_meta(tree, line_index, path_str, bytes, nodes.iter().cloned());
+    // IEEE 1800: packed/unpacked dimensions, case-item labels, fixed part-select
+    // bounds, indexed-select widths, and replication counts are constant
+    // expressions. Do not bill their `/` `*` `%` as datapath (PASS-STRATEGY P1).
+    let lrm_spans = lrm_constant_spans(nodes.iter().cloned());
 
     for node in nodes {
         match node {
             RefNode::BinaryOperator(bin) => {
                 let sym = tree.get_str(&bin.nodes.0).unwrap_or("");
                 let loc = locate_to_source(tree, line_index, path_str, &bin.nodes.0.nodes.0);
-                if operator_is_comment_slash(bytes, &loc, sym) {
+                if operator_token_in_comment(bytes, &loc) || loc_in_spans(&loc, &lrm_spans) {
                     continue;
                 }
                 let class = classify_binary(sym);
@@ -1382,25 +1470,44 @@ where
                     case_labels: Vec::new(),
                     case_is_default: false,
                     case_selector: None,
+                    assign_kind: AssignKind::Unknown,
                 });
             }
             RefNode::NetAssignment(na) => {
-                if let Some(a) = assign_lhs_rhs(tree, line_index, path_str, bytes, na) {
+                if let Some(a) = assign_lhs_rhs(
+                    tree,
+                    line_index,
+                    path_str,
+                    bytes,
+                    na,
+                    AssignKind::Continuous,
+                ) {
                     assigns.push(a);
                 }
             }
             RefNode::VariableAssignment(va) => {
-                if let Some(a) = assign_lhs_rhs(tree, line_index, path_str, bytes, va) {
+                if let Some(a) =
+                    assign_lhs_rhs(tree, line_index, path_str, bytes, va, AssignKind::Blocking)
+                {
                     assigns.push(a);
                 }
             }
             RefNode::BlockingAssignment(ba) => {
-                if let Some(a) = assign_lhs_rhs(tree, line_index, path_str, bytes, ba) {
+                if let Some(a) =
+                    assign_lhs_rhs(tree, line_index, path_str, bytes, ba, AssignKind::Blocking)
+                {
                     assigns.push(a);
                 }
             }
             RefNode::NonblockingAssignment(nba) => {
-                if let Some(a) = assign_lhs_rhs(tree, line_index, path_str, bytes, nba) {
+                if let Some(a) = assign_lhs_rhs(
+                    tree,
+                    line_index,
+                    path_str,
+                    bytes,
+                    nba,
+                    AssignKind::Nonblocking,
+                ) {
                     assigns.push(a);
                 }
             }
@@ -1634,22 +1741,40 @@ where
     for node in root {
         match node {
             RefNode::NetAssignment(na) => {
-                if let Some(a) = assign_lhs_rhs(tree, line_index, path_str, bytes, na) {
+                if let Some(a) = assign_lhs_rhs(
+                    tree,
+                    line_index,
+                    path_str,
+                    bytes,
+                    na,
+                    AssignKind::Continuous,
+                ) {
                     assigns.push(a);
                 }
             }
             RefNode::VariableAssignment(va) => {
-                if let Some(a) = assign_lhs_rhs(tree, line_index, path_str, bytes, va) {
+                if let Some(a) =
+                    assign_lhs_rhs(tree, line_index, path_str, bytes, va, AssignKind::Blocking)
+                {
                     assigns.push(a);
                 }
             }
             RefNode::BlockingAssignment(ba) => {
-                if let Some(a) = assign_lhs_rhs(tree, line_index, path_str, bytes, ba) {
+                if let Some(a) =
+                    assign_lhs_rhs(tree, line_index, path_str, bytes, ba, AssignKind::Blocking)
+                {
                     assigns.push(a);
                 }
             }
             RefNode::NonblockingAssignment(nba) => {
-                if let Some(a) = assign_lhs_rhs(tree, line_index, path_str, bytes, nba) {
+                if let Some(a) = assign_lhs_rhs(
+                    tree,
+                    line_index,
+                    path_str,
+                    bytes,
+                    nba,
+                    AssignKind::Nonblocking,
+                ) {
                     assigns.push(a);
                 }
             }
@@ -1666,6 +1791,7 @@ fn assign_lhs_rhs<'a, T>(
     path_str: &str,
     bytes: &[u8],
     root: T,
+    assign_kind: AssignKind,
 ) -> Option<OpExtract>
 where
     T: IntoIterator<Item = RefNode<'a>> + Copy,
@@ -1690,7 +1816,11 @@ where
         {
             loc.origin = OriginKind::ExpandedMacro;
         }
-        split_assign_text(text)
+        let (lhs, rhs) = split_assign_text(text);
+        (
+            lhs.map(|s| blank_sv_comments(&s)),
+            rhs.map(|s| blank_sv_comments(&s)),
+        )
     } else {
         (None, None)
     };
@@ -1705,6 +1835,7 @@ where
         case_labels: Vec::new(),
         case_is_default: false,
         case_selector: None,
+        assign_kind,
     })
 }
 
@@ -1729,32 +1860,216 @@ fn split_assign_text(text: &str) -> (Option<String>, Option<String>) {
     (None, Some(t.to_string()))
 }
 
-/// True when a `/` (or `*`) token sits on a `//` / `/*` comment, not an operator.
-fn operator_is_comment_slash(bytes: &[u8], loc: &SourceLoc, sym: &str) -> bool {
-    let s = sym.trim();
-    if s != "/" && s != "*" {
+/// True when a CST operator token sits inside a `//` / `/*` comment.
+///
+/// PASS-STRATEGY P2: skip **every** operator in comments, not only `/` and `*`.
+/// `te_priority.sv:139` billed 56 FO4 on `/*|| (` (`||` and `*` inside a block
+/// comment); `cva6_shared_tlb.sv:260` billed 136 FO4 on a trailing `//`
+/// continuation. Restricting the skip to slash tokens left those interiors live.
+fn lrm_constant_spans<'a, T>(root: T) -> Vec<(u32, u32)>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut out = Vec::new();
+    for node in root {
+        let span = match node {
+            RefNode::PackedDimension(x) => locate_byte_span(x),
+            RefNode::PackedDimensionRange(x) => locate_byte_span(x),
+            RefNode::UnpackedDimension(x) => locate_byte_span(x),
+            RefNode::UnpackedDimensionRange(x) => locate_byte_span(x),
+            RefNode::CaseItemExpression(x) => locate_byte_span(x),
+            // `[msb:lsb]` / constant `+:`/`-:` — both sides are constant expressions.
+            RefNode::ConstantRange(x) => locate_byte_span(x),
+            RefNode::ConstantIndexedRange(x) => locate_byte_span(x),
+            // Indexed `[base +: width]` / `[base -: width]`: width only (base may be runtime).
+            RefNode::IndexedRange(x) => locate_byte_span(&x.nodes.2),
+            // `{count{body}}`: count is LRM-constant; body may be datapath.
+            RefNode::MultipleConcatenation(x) => locate_byte_span(&x.nodes.0.nodes.1.0),
+            RefNode::ConstantMultipleConcatenation(x) => locate_byte_span(&x.nodes.0.nodes.1.0),
+            // Generate-for header (init / condition / step) is elaboration-constant.
+            RefNode::GenvarInitialization(x) => locate_byte_span(x),
+            RefNode::GenvarExpression(x) => locate_byte_span(x),
+            RefNode::GenvarIteration(x) => locate_byte_span(x),
+            // if-generate / case-generate conditions, not the body.
+            RefNode::IfGenerateConstruct(x) => locate_byte_span(&x.nodes.1.nodes.1),
+            RefNode::CaseGenerateConstruct(x) => locate_byte_span(&x.nodes.1.nodes.1),
+            _ => None,
+        };
+        if let Some(s) = span {
+            out.push(s);
+        }
+    }
+    out
+}
+
+fn locate_byte_span<'a, T>(root: T) -> Option<(u32, u32)>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut start: Option<u32> = None;
+    let mut end: Option<u32> = None;
+    for node in root {
+        if let RefNode::Locate(l) = node {
+            let s = l.offset as u32;
+            let e = (l.offset + l.len) as u32;
+            start = Some(start.map_or(s, |x| x.min(s)));
+            end = Some(end.map_or(e, |x| x.max(e)));
+        }
+    }
+    Some((start?, end?))
+}
+
+fn loc_in_spans(loc: &SourceLoc, spans: &[(u32, u32)]) -> bool {
+    let i = loc.byte_start;
+    spans.iter().any(|&(s, e)| i >= s && i < e)
+}
+
+fn operator_token_in_comment(bytes: &[u8], loc: &SourceLoc) -> bool {
+    let i = loc.byte_start as usize;
+    if i >= bytes.len() {
         return false;
     }
-    let i = loc.byte_start as usize;
-    if i < bytes.len() {
-        let next = bytes.get(i + 1).copied();
-        if s == "/" && (next == Some(b'/') || next == Some(b'*')) {
-            return true;
+    byte_offset_in_comment(bytes, i)
+}
+
+/// Replace `//` / `/* */` interiors with spaces (newlines kept) so Expr parse
+/// and `rhs_has_mul_not_pow` cannot see comment operators.
+fn blank_sv_comments(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut in_line = false;
+    let mut in_block = false;
+    let mut in_string = false;
+    let mut k = 0usize;
+    while k < b.len() {
+        let c = b[k];
+        let n = b.get(k + 1).copied();
+        if in_line {
+            if c == b'\n' {
+                in_line = false;
+                out.push(c);
+            } else {
+                out.push(b' ');
+            }
+            k += 1;
+            continue;
         }
-        if s == "*" && i > 0 && bytes[i - 1] == b'/' {
-            return true;
+        if in_block {
+            if c == b'*' && n == Some(b'/') {
+                in_block = false;
+                out.push(b' ');
+                out.push(b' ');
+                k += 2;
+                continue;
+            }
+            out.push(if c == b'\n' { b'\n' } else { b' ' });
+            k += 1;
+            continue;
         }
+        if in_string {
+            out.push(c);
+            if c == b'\\' {
+                if let Some(nx) = n {
+                    out.push(nx);
+                    k += 2;
+                    continue;
+                }
+            }
+            if c == b'"' {
+                in_string = false;
+            }
+            k += 1;
+            continue;
+        }
+        if c == b'/' && n == Some(b'/') {
+            in_line = true;
+            out.push(b' ');
+            out.push(b' ');
+            k += 2;
+            continue;
+        }
+        if c == b'/' && n == Some(b'*') {
+            in_block = true;
+            out.push(b' ');
+            out.push(b' ');
+            k += 2;
+            continue;
+        }
+        if c == b'"' {
+            in_string = true;
+        }
+        out.push(c);
+        k += 1;
     }
-    let line_start = bytes
-        .get(..i.min(bytes.len()))
-        .and_then(|p| p.iter().rposition(|&b| b == b'\n').map(|p| p + 1))
-        .unwrap_or(0);
-    let rest = bytes.get(line_start..).unwrap_or(&[]);
-    let line_end = rest.iter().position(|&b| b == b'\n').unwrap_or(rest.len());
-    let trimmed = std::str::from_utf8(&rest[..line_end])
-        .unwrap_or("")
-        .trim_start();
-    trimmed.starts_with("//") || trimmed.starts_with("/*")
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Comment/string-aware scan from the start of `bytes` up to `i`.
+fn byte_offset_in_comment(bytes: &[u8], i: usize) -> bool {
+    let mut in_line = false;
+    let mut in_block = false;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut k = 0usize;
+    while k < i && k < bytes.len() {
+        let c = bytes[k];
+        let n = bytes.get(k + 1).copied();
+        if in_line {
+            if c == b'\n' {
+                in_line = false;
+            }
+            k += 1;
+            continue;
+        }
+        if in_block {
+            if c == b'*' && n == Some(b'/') {
+                in_block = false;
+                k += 2;
+                continue;
+            }
+            k += 1;
+            continue;
+        }
+        if in_string {
+            if c == b'\\' {
+                k += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_string = false;
+            }
+            k += 1;
+            continue;
+        }
+        if in_char {
+            if c == b'\\' {
+                k += 2;
+                continue;
+            }
+            if c == b'\'' {
+                in_char = false;
+            }
+            k += 1;
+            continue;
+        }
+        if c == b'/' && n == Some(b'/') {
+            in_line = true;
+            k += 2;
+            continue;
+        }
+        if c == b'/' && n == Some(b'*') {
+            in_block = true;
+            k += 2;
+            continue;
+        }
+        if c == b'"' {
+            in_string = true;
+            k += 1;
+            continue;
+        }
+        k += 1;
+    }
+    in_line || in_block
 }
 
 /// True when RHS has a datapath `*`, not `**` power or `*'` sized-cast.
@@ -1927,6 +2242,353 @@ mod tests {
         assert!(
             !out.design.opportunities.is_empty() || p0.slack_fo4 >= 0.0,
             "either opportunity or positive slack"
+        );
+    }
+
+    #[test]
+    fn part_select_and_repl_const_arith_are_not_datapath() {
+        let path = fixture("parse/part_select_const_arith.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.target = crate::ir::TimingTarget::new(4000.0, 20.0, 0.2);
+        opts.module_filter = vec!["part_select_const_arith".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "part_select_const_arith")
+            .expect("part_select_const_arith");
+        let lhs_of = |want: &str| {
+            m.nodes
+                .values()
+                .find(|n| n.lhs.as_deref().is_some_and(|s| s.contains(want)))
+                .unwrap_or_else(|| panic!("missing lhs {want}"))
+        };
+        let slice = lhs_of("slice_o");
+        assert!(
+            slice.fo4_cost < 2.0,
+            "HYP_EXT*2 slice billed {} class {:?} rhs={:?}",
+            slice.fo4_cost,
+            slice.op_class,
+            slice.rhs
+        );
+        assert_ne!(slice.op_class, Some(OperatorClass::Mul));
+        assert_ne!(slice.op_class, Some(OperatorClass::DivRem));
+        let repl = lhs_of("repl_o");
+        assert_ne!(
+            repl.op_class,
+            Some(OperatorClass::DivRem),
+            "replication count /% billed as DivRem rhs={:?}",
+            repl.rhs
+        );
+        assert_ne!(repl.op_class, Some(OperatorClass::Mul));
+        let prod = lhs_of("prod_o");
+        assert_eq!(prod.op_class, Some(OperatorClass::Mul));
+        assert!(prod.fo4_cost >= 50.0, "real mul under-counted {}", prod.fo4_cost);
+        let idx = lhs_of("idx_o");
+        assert_eq!(idx.op_class, Some(OperatorClass::Mul));
+        assert!(
+            idx.fo4_cost >= 50.0,
+            "runtime bit-select index under-counted {}",
+            idx.fo4_cost
+        );
+    }
+
+    #[test]
+    fn genvar_arith_inside_generate_is_not_datapath() {
+        let path = fixture("parse/genvar_lattice.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.target = crate::ir::TimingTarget::new(4000.0, 20.0, 0.2);
+        opts.module_filter = vec!["genvar_lattice".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "genvar_lattice")
+            .expect("genvar_lattice");
+        assert!(
+            m.gen_loops.iter().any(|g| g.genvar == "i" && g.loc.byte_end > g.loc.byte_start),
+            "expected generate-loop span for i, got {:?}",
+            m.gen_loops
+        );
+        let lhs_of = |want: &str| {
+            m.nodes
+                .values()
+                .find(|n| n.lhs.as_deref().is_some_and(|s| s.contains(want)))
+                .unwrap_or_else(|| panic!("missing lhs {want}"))
+        };
+        let cell = lhs_of("cells");
+        assert!(
+            cell.fo4_cost < 2.0,
+            "WIDTH * genvar i billed {} class {:?} rhs={:?}",
+            cell.fo4_cost,
+            cell.op_class,
+            cell.rhs
+        );
+        assert_ne!(cell.op_class, Some(OperatorClass::Mul));
+        assert_ne!(cell.op_class, Some(OperatorClass::DivRem));
+        let prod = lhs_of("p_o");
+        assert_eq!(prod.op_class, Some(OperatorClass::Mul));
+        assert!(
+            prod.fo4_cost >= 50.0,
+            "runtime a * idx under-counted {}",
+            prod.fo4_cost
+        );
+    }
+
+    #[test]
+    fn multi_module_file_scopes_ports_regions_and_instances() {
+        let path = fixture("measure/two_modules.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let leaf = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "leaf_a")
+            .expect("leaf_a");
+        let holder = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "holder_b")
+            .expect("holder_b");
+        let leaf_ports: Vec<&str> = leaf.ports.iter().map(|p| p.name.as_str()).collect();
+        let holder_ports: Vec<&str> = holder.ports.iter().map(|p| p.name.as_str()).collect();
+        assert!(leaf_ports.contains(&"a_i"), "leaf ports={leaf_ports:?}");
+        assert!(leaf_ports.contains(&"y_o"), "leaf ports={leaf_ports:?}");
+        assert!(
+            !leaf_ports.iter().any(|p| *p == "p_i" || *p == "q_o"),
+            "leaf_a inherited holder_b ports: {leaf_ports:?}"
+        );
+        assert!(holder_ports.contains(&"p_i"), "holder ports={holder_ports:?}");
+        assert!(
+            !holder_ports
+                .iter()
+                .any(|p| *p == "a_i" || *p == "b_i" || *p == "y_o"),
+            "holder_b inherited leaf_a ports: {holder_ports:?}"
+        );
+        let leaf_params: Vec<&str> = leaf.parameters.iter().map(|p| p.name.as_str()).collect();
+        let holder_params: Vec<&str> = holder.parameters.iter().map(|p| p.name.as_str()).collect();
+        assert!(
+            leaf_params.iter().any(|n| *n == "WIDTH_A"),
+            "leaf params={leaf_params:?}"
+        );
+        assert!(
+            !leaf_params.iter().any(|n| *n == "WIDTH_B"),
+            "leaf_a inherited WIDTH_B: {leaf_params:?}"
+        );
+        assert!(
+            holder_params.iter().any(|n| *n == "WIDTH_B"),
+            "holder params={holder_params:?}"
+        );
+        assert_eq!(
+            leaf.regions.len(),
+            1,
+            "leaf_a regions={} (union would be 2)",
+            leaf.regions.len()
+        );
+        assert_eq!(
+            holder.regions.len(),
+            1,
+            "holder_b regions={} (union would be 2)",
+            holder.regions.len()
+        );
+        assert!(
+            leaf.instances.is_empty(),
+            "leaf_a must not own i_leaf: {:?}",
+            leaf.instances
+        );
+        assert!(
+            holder
+                .instances
+                .iter()
+                .any(|i| i.instance_name == "i_leaf" && i.child_type == "leaf_a"),
+            "i_leaf must belong to holder_b: {:?}",
+            holder.instances
+        );
+    }
+
+    #[test]
+    fn mixed_case_localparam_arith_is_not_datapath() {
+        let path = fixture("parse/param_lattice.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.target = crate::ir::TimingTarget::new(4000.0, 20.0, 0.2);
+        opts.module_filter = vec!["param_lattice".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "param_lattice")
+            .expect("param_lattice");
+        assert!(
+            m.localparams.iter().any(|n| n == "VpnLen"),
+            "expected VpnLen localparam, got {:?}",
+            m.localparams
+        );
+        let lhs_of = |want: &str| {
+            m.nodes
+                .values()
+                .find(|n| n.lhs.as_deref().is_some_and(|s| s.contains(want)))
+                .unwrap_or_else(|| panic!("missing lhs {want}"))
+        };
+        let w = lhs_of("w_o");
+        assert!(
+            w.fo4_cost < 2.0,
+            "VpnLen/PtLevels billed {} class {:?} rhs={:?}",
+            w.fo4_cost,
+            w.op_class,
+            w.rhs
+        );
+        assert_ne!(w.op_class, Some(OperatorClass::Mul));
+        assert_ne!(w.op_class, Some(OperatorClass::DivRem));
+        let p = lhs_of("p_o");
+        assert_eq!(p.op_class, Some(OperatorClass::Mul));
+        assert!(p.fo4_cost >= 50.0, "real mul under-counted {}", p.fo4_cost);
+    }
+
+    #[test]
+    fn packed_dims_and_case_labels_are_not_datapath() {
+        let path = fixture("parse/packed_dim_lrm.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.module_filter = vec!["packed_dim_lrm".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "packed_dim_lrm")
+            .expect("packed_dim_lrm");
+        for n in m.nodes.values() {
+            assert_ne!(
+                n.op_class,
+                Some(OperatorClass::DivRem),
+                "packed-dim/case-label / billed as DivRem at {}:{} rhs={:?}",
+                n.loc.start_line,
+                n.loc.start_col,
+                n.rhs
+            );
+            assert_ne!(
+                n.op_class,
+                Some(OperatorClass::Mul),
+                "packed-dim * billed as Mul at {}:{}",
+                n.loc.start_line,
+                n.loc.start_col
+            );
+        }
+    }
+
+    #[test]
+    fn nba_vs_blocking_temps_are_not_flops() {
+        let path = fixture("measure/nba_vs_blocking.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.module_filter = vec!["nba_vs_blocking".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "nba_vs_blocking")
+            .expect("nba_vs_blocking");
+        let mut saw_block = false;
+        let mut saw_nba = false;
+        for n in m.nodes.values() {
+            let lhs = n.lhs.as_deref().map(crate::ref_order::ident_base);
+            match lhs.as_deref() {
+                Some("tmp") => {
+                    assert_eq!(n.assign_kind, AssignKind::Blocking, "tmp must be blocking");
+                    saw_block = true;
+                }
+                Some("y_q") => {
+                    assert_eq!(n.assign_kind, AssignKind::Nonblocking, "y_q must be NBA");
+                    saw_nba = true;
+                }
+                Some("y_o") => {
+                    assert_eq!(n.assign_kind, AssignKind::Continuous);
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_block && saw_nba, "expected tmp blocking and y_q NBA");
+    }
+
+    #[test]
+    fn comment_interiors_are_not_arithmetic() {
+        let path = fixture("parse/comment_interiors.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.module_filter = vec!["comment_interiors".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "comment_interiors")
+            .expect("comment_interiors");
+        for n in m.nodes.values() {
+            assert_ne!(
+                n.op_class,
+                Some(OperatorClass::Mul),
+                "comment * billed as Mul at {}:{} rhs={:?}",
+                n.loc.start_line,
+                n.loc.start_col,
+                n.rhs
+            );
+            assert_ne!(
+                n.op_class,
+                Some(OperatorClass::DivRem),
+                "comment / billed as DivRem at {}:{}",
+                n.loc.start_line,
+                n.loc.start_col
+            );
+            if n.loc.start_line == 16 {
+                // `assign y = tc_privchange_i /*|| (a * b) / 2 */;`
+                assert_ne!(
+                    n.op_class,
+                    Some(OperatorClass::LogicBit),
+                    "comment || billed as LogicBit"
+                );
+            }
+        }
+        let y_fo4: f64 = out
+            .design
+            .paths
+            .iter()
+            .filter(|p| p.primary_loc.start_line == 16)
+            .map(|p| p.total_fo4)
+            .fold(0.0, f64::max);
+        assert!(
+            y_fo4 < 10.0,
+            "te_priority-shaped assign must not keep 56 FO4 comment mul, got {y_fo4}"
         );
     }
 
@@ -2395,6 +3057,290 @@ mod tests {
                 "expected summed FO4 for multi-op expr, got {} (base add={})",
                 n.fo4_cost,
                 opts.cost_model.add_sub
+            );
+        }
+    }
+
+    #[test]
+    fn p10_handshake_switch_refuses_insert_reg() {
+        let path = fixture("measure/handshake_switch.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.target = crate::ir::TimingTarget::new(4000.0, 20.0, 0.2);
+        opts.module_filter = vec!["handshake_switch".into(), "handshake_bank".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let sw = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "handshake_switch")
+            .expect("handshake_switch");
+        let locked = out
+            .design
+            .paths
+            .iter()
+            .filter(|p| p.module == sw.id)
+            .filter(|p| crate::pass_strategy::path_is_handshake_locked(&out.design, p))
+            .count();
+        assert!(
+            locked > 0,
+            "expected P10 lock on switch/active pair, notes {:?}",
+            out.design
+                .paths
+                .iter()
+                .filter(|p| p.module == sw.id)
+                .map(|p| p.class_note.clone())
+                .collect::<Vec<_>>()
+        );
+        for p in out.design.paths.iter().filter(|p| p.module == sw.id) {
+            if crate::pass_strategy::path_is_handshake_locked(&out.design, p) {
+                assert!(
+                    !crate::pass_strategy::admits_insert_reg(p),
+                    "P10 path must refuse InsertReg {:?}",
+                    p.class_note
+                );
+                assert_eq!(
+                    crate::cone_lane::cone_lane(&out.design, p),
+                    crate::cone_lane::ConeLane::NextStateFsm
+                );
+            }
+        }
+        let bank = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "handshake_bank")
+            .expect("handshake_bank");
+        let restore_locked = out.design.paths.iter().any(|p| {
+            p.module == bank.id
+                && crate::pass_strategy::path_is_handshake_locked(&out.design, p)
+        });
+        assert!(
+            restore_locked,
+            "expected P10 lock on npc_restore_o = bank[active_hart_i]"
+        );
+    }
+
+    #[test]
+    fn p10_ternary_indexed_restore_refuses_insert_reg() {
+        let path = fixture("measure/ternary_indexed_restore.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.target = crate::ir::TimingTarget::new(4000.0, 20.0, 0.2);
+        opts.module_filter = vec!["ternary_indexed_restore".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let restore = out.design.paths.iter().any(|p| {
+            crate::pass_strategy::path_has_indexed_restore(&out.design, p)
+                || crate::pass_strategy::path_is_handshake_locked(&out.design, p)
+        });
+        assert!(
+            restore,
+            "ternary mem[port] must lock like inval_bus, notes {:?}",
+            out.design
+                .paths
+                .iter()
+                .map(|p| (p.path_kind, p.total_fo4, p.class_note.clone()))
+                .collect::<Vec<_>>()
+        );
+        for p in &out.design.paths {
+            if crate::pass_strategy::path_has_indexed_restore(&out.design, p) {
+                let ex = crate::pass_strategy::exception_policy(&out.design, p);
+                assert!(
+                    ex.as_ref().is_some_and(|e| !e.admit_insert_reg),
+                    "ternary restore must not be resilient {:?}",
+                    ex
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn always_ff_nba_bundle_does_not_serial_sum() {
+        let path = fixture("measure/always_ff_nba_bundle.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.target = crate::ir::TimingTarget::new(4000.0, 20.0, 0.2);
+        opts.module_filter = vec!["always_ff_nba_bundle".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let prim: f64 = out
+            .design
+            .paths
+            .iter()
+            .filter(|p| !p.multi_cycle)
+            .map(|p| p.total_fo4)
+            .fold(0.0, f64::max);
+        assert!(
+            prim < 40.0,
+            "sibling always_ff NBAs must not serial-sum, primary={prim} notes={:?}",
+            out.design
+                .paths
+                .iter()
+                .filter(|p| !p.multi_cycle && p.total_fo4 > 20.0)
+                .map(|p| (p.path_class, p.total_fo4, p.class_note.clone(), p.nodes.len()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn hpdcache_generate_cfg_divrem_is_not_srt() {
+        let path = fixture("parse/hpdcache_idx_mux.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.target = crate::ir::TimingTarget::new(4000.0, 20.0, 0.2);
+        opts.module_filter = vec!["hpdcache_idx_mux".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "hpdcache_idx_mux")
+            .expect("hpdcache_idx_mux");
+        assert!(
+            !m.gen_loops.is_empty(),
+            "expected generate-for genvars on hpdcache_idx_mux"
+        );
+        for n in m.nodes.values() {
+            assert_ne!(
+                n.op_class,
+                Some(OperatorClass::Mul),
+                "generate * Cfg billed Mul at {}:{} rhs={:?} fo4={} genvars={:?}",
+                n.loc.start_line,
+                n.loc.start_col,
+                n.rhs,
+                n.fo4_cost,
+                m.genvar_names_at(&n.loc)
+            );
+            assert_ne!(
+                n.op_class,
+                Some(OperatorClass::DivRem),
+                "generate %/ / Cfg billed DivRem at {}:{} rhs={:?} fo4={}",
+                n.loc.start_line,
+                n.loc.start_col,
+                n.rhs,
+                n.fo4_cost
+            );
+            assert!(
+                n.fo4_cost < 20.0,
+                "generate mux node {} FO4 at {}:{} rhs={:?}",
+                n.fo4_cost,
+                n.loc.start_line,
+                n.loc.start_col,
+                n.rhs
+            );
+        }
+        for p in out.design.paths.iter().filter(|p| p.module == m.id) {
+            assert_ne!(
+                p.path_class,
+                crate::path_class::PathClassKind::AtomicOverBudget,
+                "generate mux path atomic fo4={} note={:?}",
+                p.total_fo4,
+                p.class_note
+            );
+        }
+    }
+
+    #[test]
+    fn comb_for_index_times_localparam_is_not_mul() {
+        let path = fixture("parse/comb_for_scale.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.target = crate::ir::TimingTarget::new(4000.0, 20.0, 0.2);
+        opts.module_filter = vec!["comb_for_scale".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "comb_for_scale")
+            .expect("comb_for_scale");
+        assert!(
+            m.gen_loops.iter().any(|g| g.genvar == "w"),
+            "expected comb-for index w, got {:?}",
+            m.gen_loops.iter().map(|g| g.genvar.as_str()).collect::<Vec<_>>()
+        );
+        for n in m.nodes.values() {
+            assert_ne!(
+                n.op_class,
+                Some(OperatorClass::Mul),
+                "w*SETS billed Mul at {}:{} rhs={:?} fo4={} genvars={:?}",
+                n.loc.start_line,
+                n.loc.start_col,
+                n.rhs,
+                n.fo4_cost,
+                m.genvar_names_at(&n.loc)
+            );
+        }
+        for p in out.design.paths.iter().filter(|p| p.module == m.id) {
+            assert_ne!(
+                p.path_class,
+                crate::path_class::PathClassKind::AtomicOverBudget,
+                "comb-for path atomic fo4={} note={:?}",
+                p.total_fo4,
+                p.class_note
+            );
+            assert!(
+                p.total_fo4 < 30.0,
+                "comb-for primary {} note={:?}",
+                p.total_fo4,
+                p.class_note
+            );
+        }
+    }
+
+    #[test]
+    fn lzc_tree_is_not_a_90_fo4_serial_wall() {
+        let path = fixture("parse/lzc_tree.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut opts = LowerOptions::default();
+        opts.cost_model = default_fo4_v1_embedded();
+        opts.target = crate::ir::TimingTarget::new(4000.0, 20.0, 0.2);
+        opts.module_filter = vec!["lzc_tree".into()];
+        let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
+        let m = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "lzc_tree")
+            .expect("lzc_tree");
+        let worst = out
+            .design
+            .paths
+            .iter()
+            .filter(|p| p.module == m.id)
+            .map(|p| p.total_fo4)
+            .fold(0.0_f64, f64::max);
+        assert!(
+            worst < 40.0,
+            "lzc tree primary {worst} (serial generate sum?); paths {:?}",
+            out.design
+                .paths
+                .iter()
+                .filter(|p| p.module == m.id)
+                .map(|p| (p.total_fo4, p.nodes.len(), p.path_class, p.class_note.clone()))
+                .collect::<Vec<_>>()
+        );
+        for p in out.design.paths.iter().filter(|p| p.module == m.id) {
+            assert_ne!(
+                crate::cone_lane::cone_lane(&out.design, p),
+                crate::cone_lane::ConeLane::CombDatapath,
+                "lzc is a function tree; InsertReg would add consumer latency"
             );
         }
     }

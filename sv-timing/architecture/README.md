@@ -53,7 +53,7 @@ Live checklist: [`../AGENTS-todo.md`](../AGENTS-todo.md). Soak playbook + number
 | [`MONOREPO-SOAK.md`](MONOREPO-SOAK.md) | Opt-in real-`core/` FO4 soak; package-first fix cycle; validated soak table |
 | [`FO4-ALGORITHM-UPGRADES.md`](FO4-ALGORITHM-UPGRADES.md) | Research map + **validated** BalanceMux / path_class / emit stack |
 | [`RELOCATION-ANALYSIS.md`](RELOCATION-ANALYSIS.md) | Relocation plan: patterns → T0–T3 options → JSON cards |
-| [`PASS-STRATEGY.md`](PASS-STRATEGY.md) | **Measured** pattern signatures (P1–P9) → pre-pass planner → ordered S0–S5 schedule; artifact-vs-real triage and fixpoint/admission policy |
+| [`PASS-STRATEGY.md`](PASS-STRATEGY.md) | Pattern signatures (P1–P9) → planner → S0–S5. Indicative logs: `E:/cva6/build-platform/workspace/build/sv-timing/audit-strict-v4/{full_core,full_corev_apu}/analyze.json` |
 | [`../AGENTS.md`](../AGENTS.md) | Agent entry + playbook |
 | [`../AGENTS-auto-correct.md`](../AGENTS-auto-correct.md) | Auto-correct agent rules |
 | [`../AGENTS-js.md`](../AGENTS-js.md) | TypeScript package agent rules |

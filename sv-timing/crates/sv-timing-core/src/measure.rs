@@ -6,11 +6,16 @@
 //! Structural cost attribution and ranking.
 //! See `architecture/AUTO-CORRECT-CORE-API.md` §3.2.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::expr::{ConstSeed, Expr};
 use crate::ir::{
-    CombRegion, IrNode, LineCost, OperatorClass, Opportunity, OpportunityKind, RegionReport,
-    TimingDesign, TimingPath, TimingTarget,
+    CombRegion, IrNode, LineCost, ModuleId, NodeId, OperatorClass, Opportunity, OpportunityKind,
+    PathEndpoint, PathKind, RegionKind, RegionReport, TimingDesign, TimingModule, TimingPath,
+    TimingTarget,
 };
 use crate::loc::SourceLoc;
+use crate::ref_order::ident_base;
 
 /// Deterministic FO4 unit costs (subset of fo4-v1; full table later from toml).
 #[derive(Debug, Clone)]
@@ -88,18 +93,43 @@ impl CostModel {
 pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
     design.versions.cost_model = model.id.clone();
     let base = |c: OperatorClass| model.base_fo4(c);
+    let seeds: BTreeMap<crate::ir::ModuleId, ConstSeed> = design
+        .modules
+        .iter()
+        .map(|(id, m)| (*id, ConstSeed::from_names(design.elaboration_const_names(m))))
+        .collect();
     for module in design.modules.values_mut() {
+        let base_seed = seeds
+            .get(&module.id)
+            .cloned()
+            .unwrap_or_else(ConstSeed::heuristic);
+        let gen_spans: Vec<(u32, u32, String)> = module
+            .gen_loops
+            .iter()
+            .filter(|g| g.loc.byte_end > g.loc.byte_start)
+            .map(|g| (g.loc.byte_start, g.loc.byte_end, g.genvar.clone()))
+            .collect();
         for node in module.nodes.values_mut() {
             // Spine expand / half-split lock residual segment FO4 across remeasure.
             if node.fo4_locked {
                 continue;
             }
+            let mut seed = base_seed.clone();
+            let b = node.loc.byte_start;
+            for (s, e, gv) in &gen_spans {
+                if b >= *s && b < *e {
+                    seed.add(gv.clone());
+                }
+            }
             if let Some(ref ex) = node.rhs_expr {
-                let c = ex.fo4_critical_cost(&base);
-                if c > 0.0 {
-                    node.fo4_cost = c;
-                    // Align coarse class with dominant op for reports / cuts
-                    node.op_class = Some(ex.dominant_op_class());
+                // A parsed tree is authoritative, including 0 FO4 (P1 lattice /
+                // LRM-constant part-selects). Falling back when `c == 0` re-billed
+                // `v[HYP_EXT*2:0]` as Mul from a string `*` heuristic — the residual
+                // MMU `atomic_over_budget` 56 FO4 nodes. Opaque (parse failed)
+                // still falls through to `op_class`.
+                if !ex.is_opaque() {
+                    node.fo4_cost = ex.fo4_critical_cost_latticed(&base, &seed);
+                    node.op_class = Some(ex.dominant_op_class_latticed(&seed));
                     continue;
                 }
             }
@@ -149,9 +179,11 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
     tag_multi_cycle_paths(design);
     // Post-emptive exclusive-case / atomic exceptions; cheap under-budget short-circuit.
     crate::path_class::classify_and_adjust_paths(design, model, None);
+    crate::pass_strategy::tag_handshake_locks(design);
     crate::parallel_timing::fill_design_parallel_timing(design);
     crate::cleanliness::fill_design_cleanliness(design);
     refresh_primary_locs(design);
+    design.pass_plan = crate::pass_strategy::plan_from_design(design);
 }
 
 /// Point `primary_loc` at the highest-FO4 node on each path.
@@ -186,6 +218,330 @@ pub fn refresh_primary_locs(design: &mut TimingDesign) {
             path.primary_loc = loc;
         }
     }
+}
+
+/// PASS-STRATEGY P5 / P14 M1: compose combinational assign chains into
+/// launch→capture paths. Each continuous-assign / always_comb region is still
+/// a fragment (`intoout`); this adds the flop-to-flop (or in→reg / reg→out)
+/// cone that actually has to fit the period.
+pub fn compose_reg_to_reg_paths(design: &mut TimingDesign) {
+    let mids: Vec<ModuleId> = design.modules.keys().copied().collect();
+    for mid in mids {
+        compose_module_paths(design, mid);
+    }
+}
+
+fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
+    let Some(module) = design.modules.get(&mid) else {
+        return;
+    };
+    let mut seq_lhs: BTreeSet<String> = BTreeSet::new();
+    let mut seq_reads: BTreeSet<String> = BTreeSet::new();
+    let mut comb_ids: BTreeSet<NodeId> = BTreeSet::new();
+    let mut region_of: BTreeMap<NodeId, crate::ir::RegionId> = BTreeMap::new();
+    for region in module.regions.values() {
+        for &nid in &region.nodes {
+            region_of.insert(nid, region.id);
+            let Some(n) = module.nodes.get(&nid) else {
+                continue;
+            };
+            match region.kind {
+                RegionKind::AlwaysFf => {
+                    if n.assign_kind.is_seq_def() {
+                        if let Some(lhs) = n.lhs.as_deref() {
+                            let b = ident_base(lhs);
+                            if !b.is_empty() {
+                                seq_lhs.insert(b);
+                            }
+                        }
+                        for s in node_read_symbols(n) {
+                            seq_reads.insert(s);
+                        }
+                    } else if n.assign_kind.is_comb_def() {
+                        // Blocking temp in always_ff is combo, not a flop.
+                        comb_ids.insert(nid);
+                    }
+                }
+                RegionKind::AlwaysComb | RegionKind::ContAssign => {
+                    comb_ids.insert(nid);
+                }
+            }
+        }
+    }
+    if comb_ids.is_empty() {
+        return;
+    }
+    let mut comb_defs: BTreeMap<String, NodeId> = BTreeMap::new();
+    for &nid in &comb_ids {
+        if let Some(n) = module.nodes.get(&nid).and_then(|n| n.lhs.as_deref()) {
+            let b = ident_base(n);
+            if !b.is_empty() {
+                comb_defs.insert(b, nid);
+            }
+        }
+    }
+    let outputs: BTreeSet<String> = module
+        .ports
+        .iter()
+        .filter(|p| p.direction == "output" || p.direction == "inout")
+        .map(|p| ident_base(&p.name))
+        .collect();
+
+    let mut edges: Vec<(NodeId, NodeId)> = Vec::new();
+    let mut reads_reg: Vec<NodeId> = Vec::new();
+    let mut sinks: Vec<NodeId> = Vec::new();
+    for &nid in &comb_ids {
+        let Some(n) = module.nodes.get(&nid) else {
+            continue;
+        };
+        let reads = node_read_symbols(n);
+        let mut hits_seq = false;
+        for r in &reads {
+            if seq_lhs.contains(r) {
+                hits_seq = true;
+            }
+            if let Some(&src) = comb_defs.get(r) {
+                if src != nid {
+                    edges.push((src, nid));
+                }
+            }
+        }
+        if hits_seq {
+            reads_reg.push(nid);
+        }
+        let lhs = n.lhs.as_deref().map(ident_base).unwrap_or_default();
+        if !lhs.is_empty() && (seq_reads.contains(&lhs) || outputs.contains(&lhs)) {
+            sinks.push(nid);
+        }
+    }
+    if sinks.is_empty() {
+        return;
+    }
+
+    if let Some(module) = design.modules.get_mut(&mid) {
+        for (src, dst) in &edges {
+            if let Some(n) = module.nodes.get_mut(src) {
+                if !n.fans_out.contains(dst) {
+                    n.fans_out.push(*dst);
+                }
+            }
+            if let Some(n) = module.nodes.get_mut(dst) {
+                if !n.fans_in.contains(src) {
+                    n.fans_in.push(*src);
+                }
+            }
+        }
+        for id in &reads_reg {
+            if let Some(n) = module.nodes.get_mut(id) {
+                n.reads_reg = true;
+            }
+        }
+    }
+
+    let Some(module) = design.modules.get(&mid) else {
+        return;
+    };
+    let existing: BTreeSet<Vec<NodeId>> = design
+        .paths
+        .iter()
+        .filter(|p| p.module == mid)
+        .map(|p| p.nodes.clone())
+        .collect();
+    let mut next_id = design.paths.iter().map(|p| p.id).max().unwrap_or(0);
+    let mod_name = module.name.clone();
+    let mut new_paths: Vec<TimingPath> = Vec::new();
+    for sink in sinks {
+        let nodes = longest_comb_path(module, &comb_ids, sink);
+        if nodes.is_empty() || existing.contains(&nodes) {
+            continue;
+        }
+        let launch = nodes.iter().any(|id| {
+            module
+                .nodes
+                .get(id)
+                .map(|n| n.reads_reg)
+                .unwrap_or(false)
+        });
+        let lhs = module
+            .nodes
+            .get(&sink)
+            .and_then(|n| n.lhs.as_deref())
+            .map(ident_base)
+            .unwrap_or_default();
+        let capture = seq_reads.contains(&lhs);
+        let start = if launch {
+            PathEndpoint::RegClock { cell: 0 }
+        } else {
+            PathEndpoint::InputPort {
+                module: mid,
+                port: 0,
+            }
+        };
+        let end = if capture {
+            PathEndpoint::RegData { cell: 1 }
+        } else {
+            PathEndpoint::OutputPort {
+                module: mid,
+                port: 0,
+            }
+        };
+        let path_kind = PathKind::from_endpoints(&start, &end);
+        let total_fo4: f64 = nodes
+            .iter()
+            .filter_map(|id| module.nodes.get(id).map(|n| n.fo4_cost.max(0.0)))
+            .sum();
+        next_id += 1;
+        let region_id = region_of.get(&sink).copied().unwrap_or(0);
+        let primary = module
+            .nodes
+            .get(&sink)
+            .map(|n| n.loc.clone())
+            .unwrap_or_else(|| SourceLoc::file_start(&module.file));
+        new_paths.push(TimingPath {
+            id: next_id,
+            region_id,
+            module: mid,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind,
+            startpoint: start.report_name(&mod_name),
+            endpoint: end.report_name(&mod_name),
+            nodes,
+            total_fo4,
+            slack_fo4: 0.0,
+            max_freq_mhz: 0.0,
+            primary_loc: primary,
+            multi_cycle: false,
+            path_class: crate::path_class::PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: Some("P5 composed launch-capture".into()),
+        });
+    }
+    design.paths.extend(new_paths);
+}
+
+fn node_read_symbols(n: &IrNode) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut add = |s: &str| {
+        let b = ident_base(s);
+        if !b.is_empty() && looks_like_net(&b) {
+            out.insert(b);
+        }
+    };
+    if let Some(ex) = &n.rhs_expr {
+        ex.walk_idents(&mut |s| add(s));
+    }
+    if let Some(rhs) = &n.rhs {
+        Expr::parse(rhs).walk_idents(&mut |s| add(s));
+        for tok in ident_tokens(rhs) {
+            add(&tok);
+        }
+    }
+    out
+}
+
+fn looks_like_net(s: &str) -> bool {
+    !matches!(
+        s,
+        "if" | "else"
+            | "begin"
+            | "end"
+            | "logic"
+            | "wire"
+            | "reg"
+            | "assign"
+            | "posedge"
+            | "negedge"
+            | "or"
+            | "and"
+    )
+}
+
+fn ident_tokens(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            cur.push(c);
+        } else if !cur.is_empty() {
+            if cur.chars().next().is_some_and(|x| x.is_ascii_alphabetic() || x == '_') {
+                out.push(std::mem::take(&mut cur));
+            } else {
+                cur.clear();
+            }
+        }
+    }
+    if !cur.is_empty() && cur.chars().next().is_some_and(|x| x.is_ascii_alphabetic() || x == '_')
+    {
+        out.push(cur);
+    }
+    out
+}
+
+fn longest_comb_path(
+    module: &TimingModule,
+    comb: &BTreeSet<NodeId>,
+    sink: NodeId,
+) -> Vec<NodeId> {
+    let mut best_pred: BTreeMap<NodeId, Option<NodeId>> = BTreeMap::new();
+    let mut best_cost: BTreeMap<NodeId, f64> = BTreeMap::new();
+    fn dfs(
+        module: &TimingModule,
+        comb: &BTreeSet<NodeId>,
+        id: NodeId,
+        visiting: &mut BTreeSet<NodeId>,
+        best_pred: &mut BTreeMap<NodeId, Option<NodeId>>,
+        best_cost: &mut BTreeMap<NodeId, f64>,
+    ) -> f64 {
+        if let Some(&c) = best_cost.get(&id) {
+            return c;
+        }
+        if !visiting.insert(id) {
+            return 0.0;
+        }
+        let self_c = module.nodes.get(&id).map(|n| n.fo4_cost.max(0.0)).unwrap_or(0.0);
+        let mut pred = None;
+        let mut pred_c = 0.0_f64;
+        if let Some(n) = module.nodes.get(&id) {
+            for &p in &n.fans_in {
+                if !comb.contains(&p) {
+                    continue;
+                }
+                let c = dfs(module, comb, p, visiting, best_pred, best_cost);
+                if c > pred_c + 1e-12 {
+                    pred_c = c;
+                    pred = Some(p);
+                }
+            }
+        }
+        visiting.remove(&id);
+        let total = self_c + pred_c;
+        best_pred.insert(id, pred);
+        best_cost.insert(id, total);
+        total
+    }
+    let mut visiting = BTreeSet::new();
+    dfs(
+        module,
+        comb,
+        sink,
+        &mut visiting,
+        &mut best_pred,
+        &mut best_cost,
+    );
+    let mut chain = Vec::new();
+    let mut cur = Some(sink);
+    let mut guard = 0u32;
+    while let Some(id) = cur {
+        chain.push(id);
+        cur = best_pred.get(&id).copied().flatten();
+        guard += 1;
+        if guard > 4096 {
+            break;
+        }
+    }
+    chain.reverse();
+    chain
 }
 
 /// Max clock (MHz) for which path cost `total_fo4` still meets margin.
@@ -229,6 +585,12 @@ pub struct FrequencyClosure {
     pub failing_paths: usize,
     /// Count of reg→reg paths considered for core frequency.
     pub reg_to_reg_paths: usize,
+    /// Failing `intoout` fragments (PASS-STRATEGY P5). Not period paths.
+    #[serde(default)]
+    pub intoout_failing: usize,
+    /// Failing flop-to-flop paths used for `closes`.
+    #[serde(default)]
+    pub regtoreg_failing: usize,
 }
 
 /// Compute frequency-closure report from ranked paths.
@@ -240,7 +602,21 @@ pub fn frequency_closure(design: &TimingDesign) -> FrequencyClosure {
         .filter(|p| p.path_kind == crate::ir::PathKind::RegToReg)
         .count();
     let failing = ranked.primary.iter().filter(|p| p.slack_fo4 < 0.0).count();
-    let worst = ranked.primary.first();
+    let intoout_failing = ranked
+        .primary
+        .iter()
+        .filter(|p| p.slack_fo4 < 0.0 && p.path_kind == crate::ir::PathKind::InToOut)
+        .count();
+    let regtoreg_failing = ranked
+        .primary
+        .iter()
+        .filter(|p| p.slack_fo4 < 0.0 && p.path_kind == crate::ir::PathKind::RegToReg)
+        .count();
+    let worst = ranked
+        .primary
+        .iter()
+        .find(|p| p.path_kind == crate::ir::PathKind::RegToReg)
+        .or_else(|| ranked.primary.first());
     FrequencyClosure {
         target_mhz: design.target.target_mhz,
         budget_fo4: design.target.budget_fo4,
@@ -256,10 +632,15 @@ pub fn frequency_closure(design: &TimingDesign) -> FrequencyClosure {
         worst_path_kind: worst
             .map(|p| format!("{:?}", p.path_kind).to_ascii_lowercase())
             .unwrap_or_else(|| "none".into()),
-        closes: failing == 0 && !ranked.primary.is_empty(),
+        // P5: `intoout` fragments do not decide period closure. A fragment
+        // under budget says nothing; a fragment over budget is still reported
+        // in `intoout_failing` but `closes` follows flop-to-flop paths.
+        closes: regtoreg_failing == 0 && reg_to_reg > 0,
         max_freq_mhz: worst.map(|p| p.max_freq_mhz).unwrap_or(design.target.target_mhz),
         failing_paths: failing,
         reg_to_reg_paths: reg_to_reg,
+        intoout_failing,
+        regtoreg_failing,
     }
 }
 
@@ -459,7 +840,8 @@ pub fn tag_multi_cycle_paths(design: &mut TimingDesign) {
             path.multi_cycle = true;
             continue;
         }
-        // Large mul-only clouds (iterative mul / heavy array) over ~2× budget.
+        // Large mul-only clouds in *mul*/*fpnew* units (iterative array). A
+        // named datapath assign chain (gemm c_span) is P8, not multi-cycle.
         let budget = design.target.budget_fo4;
         let mul_heavy = path.nodes.iter().any(|id| {
             module.nodes.get(id).map(|n| {
@@ -469,8 +851,7 @@ pub fn tag_multi_cycle_paths(design: &mut TimingDesign) {
         if mul_heavy
             && (nlow.contains("mul")
                 || nlow.contains("mult")
-                || nlow.contains("fpnew")
-                || path.total_fo4 >= budget * 4.0)
+                || nlow.contains("fpnew"))
         {
             path.multi_cycle = true;
         }
@@ -530,6 +911,10 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
             continue;
         }
         if path.nodes.is_empty() {
+            continue;
+        }
+        // PASS-STRATEGY P3: a single-node path has no interior to cut.
+        if path.nodes.len() <= 1 {
             continue;
         }
         // Classification short-circuits (cache-backed on remeasure).
@@ -636,6 +1021,9 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
             continue;
         }
         if !crate::cone_lane::cone_lane(design, path).allows_insert_reg() {
+            continue;
+        }
+        if !crate::pass_strategy::admits_insert_reg(path) {
             continue;
         }
         // Timing basis §5: InsertReg only on the scratchboard's just-in-time
@@ -762,9 +1150,11 @@ pub fn remeasure_path_slacks_with_hints(
         Some(&hints)
     };
     crate::path_class::classify_and_adjust_paths(design, &model, hint_ref);
+    crate::pass_strategy::tag_handshake_locks(design);
     crate::parallel_timing::fill_design_parallel_timing(design);
     crate::cleanliness::fill_design_cleanliness(design);
     refresh_primary_locs(design);
+    design.pass_plan = crate::pass_strategy::plan_from_design(design);
     design.opportunities = suggest_opportunities(design);
 }
 
@@ -1046,6 +1436,7 @@ mod tests {
                 case_is_default: false,
                 case_selector: None,
                 fo4_locked: false,
+                assign_kind: Default::default(),
             },
         );
         nodes.insert(
@@ -1069,6 +1460,7 @@ mod tests {
                 case_is_default: true,
                 case_selector: None,
                 fo4_locked: false,
+                assign_kind: Default::default(),
             },
         );
         design.modules.insert(
@@ -1098,6 +1490,72 @@ mod tests {
         assert_eq!(
             design.paths[0].primary_loc.start_line, 340,
             "must blame the mul, not default: state_d"
+        );
+    }
+
+    #[test]
+    fn gemm_span_composes_reg_to_reg_mul_chain() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/gemm_span.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut lower = crate::lower::LowerOptions {
+            target: TimingTarget::new(4000.0, 20.0, 0.2),
+            cost_model: crate::cost_table::default_fo4_v1_embedded(),
+            module_filter: vec!["gemm_span".into()],
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let out = crate::lower::analyze_files(&[path], &crate::ParseOptions::default(), &lower)
+            .expect("analyze");
+        let composed: Vec<_> = out
+            .design
+            .paths
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p.path_kind,
+                    PathKind::RegToReg | PathKind::InToReg | PathKind::RegToOut
+                ) && p.nodes.len() > 1
+            })
+            .collect();
+        assert!(
+            !composed.is_empty(),
+            "expected P5 composed RegToReg on gemm_span; paths={:?}",
+            out.design
+                .paths
+                .iter()
+                .map(|p| format!(
+                    "id={} kind={:?} fo4={:.1} nodes={} note={:?}",
+                    p.id, p.path_kind, p.total_fo4, p.nodes.len(), p.class_note
+                ))
+                .collect::<Vec<_>>()
+        );
+        let best = composed
+            .iter()
+            .max_by(|a, b| {
+                let ar = a.total_fo4_raw.unwrap_or(a.total_fo4);
+                let br = b.total_fo4_raw.unwrap_or(b.total_fo4);
+                ar.partial_cmp(&br).unwrap()
+            })
+            .unwrap();
+        assert!(
+            best.nodes.len() > 1,
+            "composed path must chain assigns, nodes={}",
+            best.nodes.len()
+        );
+        let raw = best.total_fo4_raw.unwrap_or(best.total_fo4);
+        assert!(
+            raw > 50.0,
+            "composed cone still contains the mul in raw FO4, raw={raw} adj={}",
+            best.total_fo4
+        );
+        assert_ne!(
+            best.path_class,
+            crate::path_class::PathClassKind::IndependentLhsBundle,
+            "gemm serial chain must not be an independent-LHS bundle: {:?}",
+            best.class_note
         );
     }
 }

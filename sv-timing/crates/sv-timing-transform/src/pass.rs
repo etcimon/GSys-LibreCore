@@ -10,9 +10,11 @@ use thiserror::Error;
 use serde_json::{json, Map, Value};
 
 use sv_timing_core::{
-    attribute_costs, build_relocation_plan, cone_lane, rank_paths_by_slack, remeasure_path_slacks,
-    suggest_opportunities, AlgoTrace, ConeLane, CostModel, GateInfo, NameTable, OpportunityKind,
-    PathId, RankedPaths, RelocationPlan, TimingDesign,
+    admits_insert_reg, attribute_costs, build_relocation_plan, cone_lane, exception_policy,
+    is_latency_neutral_kind, is_shallow_over_budget, path_span_lhs_all_cut, plan_from_design,
+    rank_paths_by_slack, remeasure_path_slacks, s4_sibling_span_pending, span_family_lhs_on_path,
+    suggest_opportunities, AlgoTrace, ConeLane, CostModel, GateInfo, NameTable, Opportunity,
+    OpportunityKind, PathId, RankedPaths, RelocationPlan, TimingDesign, TimingPath,
 };
 
 use crate::edit::EditTrace;
@@ -59,6 +61,11 @@ pub struct PassPolicy {
     pub worklist: WorklistPolicy,
     /// Resolved optimization dials (`-O` surface).
     pub opt: sv_timing_core::OptOptions,
+    /// Credit IR FO4 / rewire paths only when emit will actually rewrite origin
+    /// (`--real-cut-feeds` / `--emit-balance-mux-rtl`). Lean soak emit is a
+    /// zero-feed sidecar — PASS-STRATEGY: do not book 304.5→96.5 that the
+    /// emitted SV does not contain.
+    pub emit_structural: bool,
 }
 
 impl Default for PassPolicy {
@@ -71,6 +78,7 @@ impl Default for PassPolicy {
             refuse_path_prefixes: Vec::new(),
             worklist: WorklistPolicy::default(),
             opt: sv_timing_core::OptOptions::default(),
+            emit_structural: true,
         }
     }
 }
@@ -102,6 +110,9 @@ impl PassPolicy {
                 use_relocation_plan: true,
             },
             opt,
+            // Library default: tests exercise IR rewires. CLI overwrites from
+            // `--real-cut-feeds` / `--emit-balance-mux-rtl` (lean soak = false).
+            emit_structural: true,
         }
     }
 
@@ -316,11 +327,35 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
             ("budget_fo4", json!(ctx.design.target.budget_fo4)),
             ("fo4_ps", json!(ctx.design.target.fo4_ps)),
             ("allow_latency", json!(ctx.policy.allow_latency)),
+            ("emit_structural", json!(ctx.policy.emit_structural)),
             ("opt", json!(ctx.policy.opt.summary())),
             ("allow_modules", json!(ctx.policy.correct_allow_modules.len())),
         ]),
     );
     ctx.measure();
+    let plan = plan_from_design(&ctx.design);
+    ctx.design.pass_plan = plan.clone();
+    ctx.algo_trace.emit(
+        "pass_plan",
+        0,
+        AlgoTrace::kv([
+            ("abort", json!(plan.abort_correct)),
+            ("artifacts", json!(plan.artifacts.len())),
+            ("by_pattern", json!(plan.by_pattern)),
+            ("rationale", json!(plan.rationale)),
+        ]),
+    );
+    if plan.abort_correct {
+        // PASS-STRATEGY §4: artifacts are a measurement bug. Do not spend
+        // InsertReg/BalanceMux on logic that does not exist (audit-strict-v4
+        // spent hundreds of edits for a 0.0 emitted delta).
+        ctx.algo_trace.emit(
+            "run.stop",
+            0,
+            AlgoTrace::kv([("reason", json!("artifacts_p1_p2"))]),
+        );
+        return Ok(ctx);
+    }
     // Per-module algorithm-set cleanliness (always_ff / always_comb density,
     // timing pass/fail, aggressiveness penalty). Factorize still runs for
     // always_ff — it is review-only and keeps the clock-aware scratch.
@@ -378,18 +413,49 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
     // Paths already tried without gain this session — skip so residual work continues.
     let mut skipped: std::collections::BTreeSet<sv_timing_core::PathId> =
         std::collections::BTreeSet::new();
+    let mut refuse_by_reason: BTreeMap<String, u32> = BTreeMap::new();
+    let mut refuse_by_class: BTreeMap<String, u32> = BTreeMap::new();
     // Successful applies per path (cap re-entry so prep_stage cannot thrash).
     let mut applied_count: std::collections::BTreeMap<sv_timing_core::PathId, u32> =
         std::collections::BTreeMap::new();
     let mut idle_streak = 0u32;
+    // PASS-STRATEGY §5–§6: S3 latency-neutral to fixpoint, then S4 InsertReg.
+    // Stop a stage after 2 consecutive passes with Δprimary < min_gain (the
+    // audit-strict-v4 full_core run applied 192 edits while primary stayed flat).
+    let mut stage_s4 = false;
+    let mut flat_streak = 0u32;
+    let mut last_primary = ctx
+        .ranked
+        .primary
+        .first()
+        .map(|p| p.total_fo4)
+        .unwrap_or(0.0);
+    let min_gain = ctx.policy.opt.min_gain_fo4.max(0.5);
+    // Uncut generate-if `*_span`/`*_end` after 2-flat (gemm a_span/b_span).
+    // v29 re-cut c_span/c_end; skip those idents. Extra passes InsertReg only
+    // uncut spans so policy_subcode keeps its diverse T2 (v29 starved it).
+    let mut cut_span_lhs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut sibling_extra = 0u32;
+    let mut extra_uncut_span = false;
+    const SIBLING_EXTRA_CAP: u32 = 2;
+    // PASS-STRATEGY §6.2: S3 must not consume S4's budget.
+    let stage_budget = (ctx.policy.max_passes / 2).max(1);
+    let mut stage_passes = 0u32;
+    ctx.log_algo(
+        "scale.stages",
+        AlgoTrace::kv([("stage_budget", json!(stage_budget))]),
+    );
     for _ in 0..ctx.policy.max_passes {
         ctx.pass_index += 1;
+        stage_passes += 1;
         ctx.log_algo(
             "pass.start",
             AlgoTrace::kv([
                 ("idle_streak", json!(idle_streak)),
                 ("skipped", json!(skipped.len())),
                 ("edits", json!(ctx.trace.records.len())),
+                ("stage_s4", json!(stage_s4)),
+                ("stage_passes", json!(stage_passes)),
             ]),
         );
         let work = order_worklist_with_plan(
@@ -398,6 +464,143 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
             &ctx.policy.worklist,
             ctx.relocation.as_ref(),
         );
+        let mut work: Vec<_> = work
+            .into_iter()
+            .filter_map(|mut w| {
+                let Some(opp) = w.opportunity.as_ref() else {
+                    return None;
+                };
+                // Lean sidecar does not rewrite origin. Skip every IR FO4
+                // mutation (InsertReg, BalanceMux, SplitAssign, rebalance).
+                if !ctx.policy.emit_structural {
+                    return None;
+                }
+                if stage_s4 {
+                    let path = ctx.design.paths.iter().find(|p| p.id == w.path_id)?;
+                    // Resilient datapath may still carry a P10 class_note from
+                    // sharing an always_ff with a status pulse (gemm 144-node).
+                    // Exception policy decides; admits_insert_reg is the default.
+                    let resilient = exception_policy(&ctx.design, path)
+                        .is_some_and(|e| e.admit_insert_reg);
+                    if !resilient && !admits_insert_reg(path) {
+                        return None;
+                    }
+                    if opp.kind == OpportunityKind::InsertReg || resilient {
+                        let mod_name = ctx
+                            .design
+                            .modules
+                            .get(&path.module)
+                            .map(|m| m.name.as_str())
+                            .unwrap_or("");
+                        let empty = BTreeSet::new();
+                        let cut = cut_span_lhs.get(mod_name).unwrap_or(&empty);
+                        if path_span_lhs_all_cut(&ctx.design, path, cut) {
+                            return None;
+                        }
+                        if extra_uncut_span && !s4_sibling_span_pending(&ctx.design, path)
+                        {
+                            return None;
+                        }
+                        if opp.kind != OpportunityKind::InsertReg {
+                            w.opportunity = Some(insert_reg_for_path(&ctx.design, path));
+                            w.relocation_option_id = Some("t2_insert_reg".into());
+                        }
+                        return Some(w);
+                    }
+                    return None;
+                }
+                is_latency_neutral_kind(opp.kind).then_some(w)
+            })
+            .collect();
+        if stage_s4 {
+            // Resilient P8-shaped cones (gemm) may have been T1-first in the
+            // relocation card and truncated off the worklist. Re-attach them.
+            let have: BTreeSet<PathId> = work.iter().map(|w| w.path_id).collect();
+            for p in &ctx.design.paths {
+                if have.contains(&p.id) || p.slack_fo4 >= 0.0 {
+                    continue;
+                }
+                if !exception_policy(&ctx.design, p).is_some_and(|e| e.admit_insert_reg) {
+                    continue;
+                }
+                let mod_name = ctx
+                    .design
+                    .modules
+                    .get(&p.module)
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("");
+                let empty = BTreeSet::new();
+                let cut = cut_span_lhs.get(mod_name).unwrap_or(&empty);
+                if path_span_lhs_all_cut(&ctx.design, p, cut) {
+                    continue;
+                }
+                if extra_uncut_span && !s4_sibling_span_pending(&ctx.design, p) {
+                    continue;
+                }
+                work.push(crate::worklist::WorkItem {
+                    path_id: p.id,
+                    slack_fo4: p.slack_fo4,
+                    total_fo4: p.total_fo4,
+                    opportunity: Some(insert_reg_for_path(&ctx.design, p)),
+                    file: p.primary_loc.file.clone(),
+                    line: p.primary_loc.start_line,
+                    relocation_option_id: Some("t2_insert_reg".into()),
+                });
+            }
+            // Resilient exceptions first (the APU gemm 161.5 cone), then P6
+            // shallow, then remaining monsters. audit-gemm-rcf S4 sorted
+            // shallow-first and never reached the 144-node primary.
+            let budget = ctx.design.target.budget_fo4;
+            work.sort_by(|a, b| {
+                let resilient = |id| {
+                    ctx.design
+                        .paths
+                        .iter()
+                        .find(|p| p.id == id)
+                        .is_some_and(|p| {
+                            exception_policy(&ctx.design, p).is_some_and(|e| e.admit_insert_reg)
+                        })
+                };
+                let shallow = |id| {
+                    ctx.design
+                        .paths
+                        .iter()
+                        .find(|p| p.id == id)
+                        .map(|p| is_shallow_over_budget(p, budget))
+                        .unwrap_or(false)
+                };
+                match (resilient(a.path_id), resilient(b.path_id)) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => match (shallow(a.path_id), shallow(b.path_id)) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => a
+                            .slack_fo4
+                            .partial_cmp(&b.slack_fo4)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(a.path_id.cmp(&b.path_id)),
+                    },
+                }
+            });
+        }
+        if work.is_empty() && !stage_s4 && ctx.policy.allow_latency {
+            if !ctx.policy.emit_structural {
+                ctx.log_algo(
+                    "run.stop",
+                    AlgoTrace::kv([("reason", json!("lean_emit_skip_s4"))]),
+                );
+                break;
+            }
+            stage_s4 = true;
+            stage_passes = 0;
+            flat_streak = 0;
+            ctx.log_algo(
+                "stage.s4",
+                AlgoTrace::kv([("reason", json!("s3_empty"))]),
+            );
+            continue;
+        }
         if ctx.algo_trace.is_enabled() {
             let preview: Vec<Value> = work
                 .iter()
@@ -427,6 +630,7 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
         let mut batch: Vec<crate::worklist::WorkItem> = Vec::new();
         let mut batch_mods: BTreeSet<String> = BTreeSet::new();
         let mut deferred_same_mod: Vec<crate::worklist::WorkItem> = Vec::new();
+        let apply_batch = if extra_uncut_span { 1 } else { batch_size };
         for w in work {
             if w.opportunity.is_none() || skipped.contains(&w.path_id) {
                 continue;
@@ -448,11 +652,52 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
             }
             // Cleanliness winner gates transforms: InsertReg only if the
             // module picked jit/multi-cut; exclusive/ff-factor stay always_*.
+            // Resilient datapath (gemm-shaped Plain RegToReg > budget) is
+            // a path-level exception: S4 InsertReg is admitted even when the
+            // mixed-module winner is seq_plus_comb / comb_exclusive.
             if let Some(opp) = w.opportunity.as_ref() {
                 if let Some(sol) = ctx.design.module_cleanliness.get(&mod_name) {
                     if !sol.allows_opportunity(opp.kind) {
-                        skipped.insert(w.path_id);
-                        continue;
+                        let path = ctx.design.paths.iter().find(|p| p.id == w.path_id);
+                        let ex = path.and_then(|p| exception_policy(&ctx.design, p));
+                        let admit_ex = opp.kind == OpportunityKind::InsertReg
+                            && ex.as_ref().is_some_and(|e| e.admit_insert_reg);
+                        if !admit_ex {
+                            skipped.insert(w.path_id);
+                            *refuse_by_reason
+                                .entry("cleanliness_set".into())
+                                .or_insert(0) += 1;
+                            let class = path
+                                .map(|p| format!("{:?}", p.path_class))
+                                .unwrap_or_else(|| "unknown".into());
+                            *refuse_by_class.entry(class.clone()).or_insert(0) += 1;
+                            ctx.algo_trace.emit_path(
+                                "refuse",
+                                ctx.pass_index,
+                                Some(w.path_id),
+                                Some(mod_name.clone()),
+                                AlgoTrace::kv([
+                                    ("applied", json!(false)),
+                                    ("reason", json!("cleanliness_set")),
+                                    ("set", json!(sol.chosen.as_str())),
+                                    ("class", json!(class)),
+                                    ("opp", json!(format!("{:?}", opp.kind))),
+                                ]),
+                            );
+                            continue;
+                        }
+                        ctx.algo_trace.emit_path(
+                            "exception",
+                            ctx.pass_index,
+                            Some(w.path_id),
+                            Some(mod_name.clone()),
+                            AlgoTrace::kv([
+                                ("policy", json!(ex.as_ref().map(|e| e.kind.as_str()))),
+                                ("set", json!(sol.chosen.as_str())),
+                                ("opp", json!(format!("{:?}", opp.kind))),
+                                ("note", json!(ex.as_ref().map(|e| e.note.clone()))),
+                            ]),
+                        );
                     }
                 }
             }
@@ -466,13 +711,13 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                 batch_mods.insert(mod_name);
             }
             batch.push(w);
-            if batch.len() >= batch_size {
+            if batch.len() >= apply_batch {
                 break;
             }
         }
         // Fill remaining batch slots with same-module residual if diversity exhausted.
         for w in deferred_same_mod {
-            if batch.len() >= batch_size {
+            if batch.len() >= apply_batch {
                 break;
             }
             if skipped.contains(&w.path_id) {
@@ -517,7 +762,7 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                 .iter()
                 .find(|p| p.id == item.path_id)
                 .map(|p| format!("{:?}", p.path_class));
-            let applied = apply_work_item(&mut ctx, &item)?;
+            let (applied, refuse_reason) = apply_work_item(&mut ctx, &item)?;
             let apply_kind = ctx
                 .trace
                 .records
@@ -542,16 +787,29 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                     ("fo4_after", json!(fo4_after)),
                     ("edit_kind", json!(apply_kind)),
                     ("opp", json!(item.opportunity.as_ref().map(|o| format!("{:?}", o.kind)))),
+                    ("reason", json!(refuse_reason)),
                 ]),
             );
 
             if !applied {
                 skipped.insert(item.path_id);
+                let reason = refuse_reason.unwrap_or("unspecified");
+                *refuse_by_reason.entry(reason.into()).or_insert(0) += 1;
+                *refuse_by_class
+                    .entry(class.clone().unwrap_or_else(|| "unknown".into()))
+                    .or_insert(0) += 1;
                 continue;
             }
             if apply_kind.as_deref() == Some("insertreg") {
                 if let Some(m) = module_name.as_ref() {
                     *ctx.insert_reg_by_module.entry(m.clone()).or_insert(0) += 1;
+                    if let Some(path) = ctx.design.paths.iter().find(|p| p.id == item.path_id)
+                    {
+                        let names = span_family_lhs_on_path(&ctx.design, path);
+                        if !names.is_empty() {
+                            cut_span_lhs.entry(m.clone()).or_default().extend(names);
+                        }
+                    }
                 }
             }
             any_applied = true;
@@ -592,6 +850,27 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
         idle_streak = 0;
 
         ctx.measure();
+        let now_primary = ctx
+            .ranked
+            .primary
+            .first()
+            .map(|p| p.total_fo4)
+            .unwrap_or(0.0);
+        if (last_primary - now_primary).abs() < min_gain {
+            flat_streak += 1;
+        } else {
+            flat_streak = 0;
+            extra_uncut_span = false;
+        }
+        last_primary = now_primary;
+        ctx.log_algo(
+            "measure",
+            AlgoTrace::kv([
+                ("primary_fo4", json!(now_primary)),
+                ("flat_streak", json!(flat_streak)),
+                ("stage_s4", json!(stage_s4)),
+            ]),
+        );
         if ctx
             .ranked
             .primary
@@ -605,30 +884,162 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
             );
             break;
         }
+        if flat_streak >= 2 {
+            if !stage_s4 && ctx.policy.allow_latency && ctx.policy.emit_structural {
+                stage_s4 = true;
+                stage_passes = 0;
+                flat_streak = 0;
+                ctx.log_algo(
+                    "stage.s4",
+                    AlgoTrace::kv([("reason", json!("s3_fixpoint"))]),
+                );
+                continue;
+            }
+            let stop = if !stage_s4 && !ctx.policy.emit_structural {
+                "lean_emit_skip_s4"
+            } else {
+                "fixpoint"
+            };
+            // After diverse S4 2-flat: ranked.primary.first is often the T3
+            // mul 74.5 (v31), not emit 18.5 a_span. Scan for an uncut
+            // resilient span/end leftover instead.
+            let uncut = ctx.ranked.primary.iter().any(|p| {
+                if p.slack_fo4 >= 0.0 {
+                    return false;
+                }
+                let mod_name = ctx
+                    .design
+                    .modules
+                    .get(&p.module)
+                    .map(|m| m.name.as_str())
+                    .unwrap_or("");
+                let empty = BTreeSet::new();
+                let cut = cut_span_lhs.get(mod_name).unwrap_or(&empty);
+                s4_sibling_span_pending(&ctx.design, p)
+                    && !path_span_lhs_all_cut(&ctx.design, p, cut)
+            });
+            if stage_s4
+                && sibling_extra < SIBLING_EXTRA_CAP
+                && ctx.policy.emit_structural
+                && uncut
+            {
+                sibling_extra += 1;
+                extra_uncut_span = true;
+                flat_streak = 0;
+                ctx.log_algo(
+                    "stage.s4",
+                    AlgoTrace::kv([
+                        ("reason", json!("uncut_sibling_span")),
+                        ("extra", json!(sibling_extra)),
+                    ]),
+                );
+                continue;
+            }
+            ctx.log_algo("run.stop", AlgoTrace::kv([("reason", json!(stop))]));
+            break;
+        }
+        if stage_passes >= stage_budget {
+            if !stage_s4 && ctx.policy.allow_latency && ctx.policy.emit_structural {
+                stage_s4 = true;
+                stage_passes = 0;
+                flat_streak = 0;
+                ctx.log_algo(
+                    "stage.s4",
+                    AlgoTrace::kv([("reason", json!("stage_budget"))]),
+                );
+                continue;
+            }
+            ctx.log_algo(
+                "run.stop",
+                AlgoTrace::kv([("reason", json!("stage_budget"))]),
+            );
+            break;
+        }
     }
+    // PASS-STRATEGY S5: T3 asks (P8 deep datapath / P9 iterative) — report only.
+    let t3 = ctx.relocation.as_ref().map(|r| r.summary.t3_only_cards).unwrap_or(0);
+    let p8 = ctx
+        .design
+        .paths
+        .iter()
+        .filter(|p| {
+            p.path_class == sv_timing_core::PathClassKind::AtomicOverBudget && !p.multi_cycle
+                || p.class_note
+                    .as_deref()
+                    .is_some_and(|s| s.contains("P4 remainder") || s.contains("P8"))
+        })
+        .count();
+    let p9 = ctx
+        .design
+        .paths
+        .iter()
+        .filter(|p| {
+            p.multi_cycle || p.path_class == sv_timing_core::PathClassKind::MultiCycleTagged
+        })
+        .count();
+    ctx.log_algo(
+        "stage.s5",
+        AlgoTrace::kv([
+            ("t3_only_cards", json!(t3)),
+            ("p8_or_remainder", json!(p8)),
+            ("p9_iterative", json!(p9)),
+        ]),
+    );
     ctx.algo_trace.emit(
         "run.end",
         ctx.pass_index,
         AlgoTrace::kv([
             ("edits", json!(ctx.trace.records.len())),
             ("passes", json!(ctx.pass_index)),
+            ("refuse_by_reason", json!(refuse_by_reason)),
+            ("refuse_by_class", json!(refuse_by_class)),
+            ("t3_only_cards", json!(t3)),
         ]),
     );
     Ok(ctx)
+}
+
+/// S4 opportunity for a resilient datapath: reuse a suggested InsertReg, else
+/// synthesize a mid-cone cut (relocation T1-first cards never attach one).
+fn insert_reg_for_path(design: &TimingDesign, path: &TimingPath) -> Opportunity {
+    if let Some(o) = design
+        .opportunities
+        .iter()
+        .find(|o| o.path_id == path.id && o.kind == OpportunityKind::InsertReg)
+    {
+        return o.clone();
+    }
+    let cut = if path.nodes.len() <= 1 {
+        path.nodes.first().copied().unwrap_or(0)
+    } else {
+        path.nodes[path.nodes.len() / 2 - 1]
+    };
+    let budget = design.target.budget_fo4;
+    Opportunity {
+        kind: OpportunityKind::InsertReg,
+        path_id: path.id,
+        insert_after: cut,
+        estimated_fo4_before: path.total_fo4,
+        estimated_fo4_after: (path.total_fo4 * 0.5).max(budget),
+        loc: path.primary_loc.clone(),
+        rationale: "exception_policy resilient_datapath → InsertReg".into(),
+        requires_clock_in_scope: true,
+        changes_latency: true,
+    }
 }
 
 /// Apply one worklist item (relocation-first transform cascade).
 fn apply_work_item(
     ctx: &mut PassContext,
     item: &crate::worklist::WorkItem,
-) -> TransformResult<bool> {
+) -> TransformResult<(bool, Option<&'static str>)> {
     let mut did = false;
     let Some(opp) = item.opportunity.clone() else {
-        return Ok(false);
+        return Ok((false, Some("no_opportunity")));
     };
     let origin = opp.loc.clone();
     if origin.origin != sv_timing_core::OriginKind::UserFile {
-        return Ok(false);
+        return Ok((false, Some("origin_not_user_file")));
     }
     let node = opp.insert_after;
     let reloc_id = item.relocation_option_id.as_deref().unwrap_or("");
@@ -657,6 +1068,21 @@ fn apply_work_item(
         reloc_id.contains("insert_reg") || opp.kind == OpportunityKind::InsertReg;
     let balance_preferred =
         reloc_id.contains("balance") || opp.kind == OpportunityKind::BalanceMux;
+    let admit_ex = ctx
+        .design
+        .paths
+        .iter()
+        .find(|p| p.id == opp.path_id)
+        .and_then(|p| exception_policy(&ctx.design, p))
+        .is_some_and(|e| e.admit_insert_reg);
+
+    // Lean emit (soak default): sidecar pipes / credit comments do not rewrite
+    // the measured assign. Refuse every IR FO4 mutation so post_closure cannot
+    // claim a cut the emitted file does not contain (audit-strict-v4 gemm
+    // 304.5 vs IR 96.5). InsertReg, BalanceMux, SplitAssign, rebalance, prep.
+    if !ctx.policy.emit_structural {
+        return Ok((false, Some("lean_emit_no_origin_rewrite")));
+    }
 
     // 0) PrepStage from relocation (atomic / deep expr) — before anything else.
     let prep_requested = !insert_preferred
@@ -759,7 +1185,7 @@ fn apply_work_item(
         && ctx.policy.allow_latency
         && !path_mc
         && insert_used < insert_cap
-        && lane.allows_insert_reg()
+        && (lane.allows_insert_reg() || admit_ex)
     {
         let ins = ctx
             .design
@@ -787,14 +1213,34 @@ fn apply_work_item(
                         }
                     }
                 }
-                Err(TransformError::IncompleteGateInfo)
-                | Err(TransformError::LatencyNotAllowed) => {}
-                Err(TransformError::InvalidOpportunity(_)) => {}
+                Err(TransformError::IncompleteGateInfo) => {
+                    return Ok((false, Some("incomplete_gate")));
+                }
+                Err(TransformError::LatencyNotAllowed) => {
+                    return Ok((false, Some("latency_not_allowed")));
+                }
+                Err(TransformError::InvalidOpportunity(_)) => {
+                    return Ok((false, Some("cut_schedule")));
+                }
                 Err(e) => return Err(e),
             }
         }
     }
-    Ok(did)
+    if did {
+        return Ok((true, None));
+    }
+    let reason = if insert_preferred && !ctx.policy.allow_latency {
+        "latency_not_allowed"
+    } else if insert_preferred && path_mc {
+        "multi_cycle"
+    } else if insert_preferred && !lane.allows_insert_reg() && !admit_ex {
+        "lane_forbids_insert_reg"
+    } else if insert_preferred && insert_used >= insert_cap {
+        "insert_cap"
+    } else {
+        "no_transform_matched"
+    };
+    Ok((false, Some(reason)))
 }
 
 #[cfg(test)]
@@ -877,6 +1323,158 @@ mod tests {
         assert!(text.contains("\"kind\":\"run.start\""), "{text}");
         assert!(text.contains("\"kind\":\"measure\""), "{text}");
         assert!(text.contains("\"kind\":\"run.end\"") || text.contains("\"kind\":\"run.stop\""), "{text}");
+        assert!(
+            text.contains("refuse_by_reason") || text.contains("\"kind\":\"run.stop\""),
+            "PASS-STRATEGY §6.4: run.end should count refuses: {text}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn emit_structural_false_refuses_insert_reg_and_balance_mux() {
+        // Lean soak emit (R12e) does not rewrite origin assigns. InsertReg /
+        // BalanceMux must not book IR FO4 the sidecar will not contain
+        // (audit-strict-v4 APU 304.5 → IR 96.5 on an unchanged c_span).
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/deep_add_chain.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut lower = LowerOptions {
+            target: TimingTarget::new(3000.0, 20.0, 0.2),
+            cost_model: default_fo4_v1_embedded(),
+            module_filter: vec!["deep_add_chain".into()],
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let out = analyze_files(&[path], &ParseOptions::default(), &lower).expect("analyze");
+        let mut policy = PassPolicy::default();
+        policy.correct_enabled = true;
+        policy.correct_allow_modules = vec!["deep_add_chain".into()];
+        policy.allow_latency = true;
+        policy.max_passes = 4;
+        policy.emit_structural = false;
+
+        let mut ctx = PassContext::new(out.design, out.names, policy);
+        ctx.assume_clk = true;
+        ctx.cost_model = default_fo4_v1_embedded();
+        let ctx = run_correct_passes(ctx).expect("correct");
+        let banned: Vec<_> = ctx
+            .trace
+            .records
+            .iter()
+            .filter(|r| {
+                !matches!(r.kind, crate::edit::EditKind::Annotate)
+            })
+            .map(|r| format!("{:?}", r.kind))
+            .collect();
+        assert!(
+            banned.is_empty(),
+            "lean emit credited IR-mutating kinds: {banned:?}"
+        );
+    }
+
+    #[test]
+    fn apply_work_item_refuses_insert_reg_when_not_emit_structural() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/deep_add_chain.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut lower = LowerOptions {
+            target: TimingTarget::new(3000.0, 20.0, 0.2),
+            cost_model: default_fo4_v1_embedded(),
+            module_filter: vec!["deep_add_chain".into()],
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let out = analyze_files(&[path], &ParseOptions::default(), &lower).expect("analyze");
+        let mut policy = PassPolicy::default();
+        policy.correct_enabled = true;
+        policy.correct_allow_modules = vec!["deep_add_chain".into()];
+        policy.allow_latency = true;
+        policy.emit_structural = false;
+        let mut ctx = PassContext::new(out.design, out.names, policy);
+        ctx.assume_clk = true;
+        ctx.cost_model = default_fo4_v1_embedded();
+        let opp = ctx
+            .design
+            .opportunities
+            .iter()
+            .find(|o| o.kind == OpportunityKind::InsertReg)
+            .cloned()
+            .unwrap_or_else(|| {
+                let p = ctx.design.paths.first().expect("analyzed path");
+                sv_timing_core::Opportunity {
+                    kind: OpportunityKind::InsertReg,
+                    path_id: p.id,
+                    insert_after: p.nodes.first().copied().unwrap_or(0),
+                    estimated_fo4_before: p.total_fo4,
+                    estimated_fo4_after: p.total_fo4 * 0.5,
+                    loc: p.primary_loc.clone(),
+                    rationale: "lean-emit refuse".into(),
+                    requires_clock_in_scope: true,
+                    changes_latency: true,
+                }
+            });
+        let item = crate::worklist::WorkItem {
+            path_id: opp.path_id,
+            slack_fo4: -1.0,
+            total_fo4: opp.estimated_fo4_before,
+            opportunity: Some(opp),
+            file: "deep_add_chain.sv".into(),
+            line: 1,
+            relocation_option_id: Some("insert_reg".into()),
+        };
+        let (applied, reason) = apply_work_item(&mut ctx, &item).expect("apply");
+        assert!(!applied, "InsertReg must refuse when emit_structural=false");
+        assert_eq!(reason, Some("lean_emit_no_origin_rewrite"));
+        assert!(
+            ctx.trace.records.is_empty(),
+            "lean refuse must not leave InsertReg edits"
+        );
+    }
+
+    #[test]
+    fn sibling_span_extra_cuts_uncut_spans_not_recut() {
+        // Two generate-if spans with different RHS. Extra S4 must cut both
+        // without looping forever (already-cut LHS are skipped).
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/sibling_span.sv");
+        if !path.exists() {
+            return;
+        }
+        let mut lower = LowerOptions {
+            target: TimingTarget::new(4000.0, 20.0, 0.2),
+            cost_model: default_fo4_v1_embedded(),
+            module_filter: vec!["sibling_span".into()],
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let out = analyze_files(&[path], &ParseOptions::default(), &lower).expect("analyze");
+        let mut policy = PassPolicy::from_opt(
+            sv_timing_core::OptOptions::preset(sv_timing_core::OptLevel::O3),
+            vec!["sibling_span".into()],
+            true,
+        );
+        policy.emit_structural = true;
+        let mut ctx = PassContext::new(out.design, out.names, policy);
+        ctx.assume_clk = true;
+        ctx.cost_model = default_fo4_v1_embedded();
+        let ctx = run_correct_passes(ctx).expect("correct");
+        let n_insert = ctx
+            .trace
+            .records
+            .iter()
+            .filter(|r| matches!(r.kind, crate::edit::EditKind::InsertReg))
+            .count();
+        assert!(
+            n_insert >= 2,
+            "expected uncut sibling-span InsertRegs, got {n_insert}"
+        );
+        assert!(
+            n_insert <= 4,
+            "must not re-cut the same span origins, got {n_insert}"
+        );
     }
 }

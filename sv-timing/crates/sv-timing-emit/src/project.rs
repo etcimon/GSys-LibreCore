@@ -254,7 +254,7 @@ pub fn synthesize_project(
 
         let mut dense = dense_options_from_source(src);
         dense.real_cut_feeds = opts.real_cut_feeds;
-        dense.emit_balance_mux_rtl = opts.emit_balance_mux_rtl;
+        dense.emit_balance_mux_rtl = opts.emit_balance_mux_rtl || opts.real_cut_feeds;
         let text = if file_trace.records.is_empty() {
             let mut t = machine_header(&policy.tool, &policy.run_id);
             t.push_str(src);

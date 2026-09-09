@@ -109,7 +109,7 @@ reused `begin : svt_balance_mux_stage` → `Duplicate declaration of block`.
 | InsertReg dense (decls, feeds, always_ff, sinks) | **Late** (before `endmodule`) | Feeds may use mid-module nets; sinks stay after pipe decls |
 | Named always_comb for arm staging | Unique label from top wire (`{top}_stage`) | No multi-arm block collision |
 
-API: `emit_blocks_for_trace` → `EmitBlocks { early, late }`; `apply_edits_to_source_dense` dual-injects.
+API: `emit_blocks_for_trace` → `EmitBlocks { early, late, bm_at_origin }`; `apply_edits_to_source_dense` injects early at first process, BalanceMux RTL at the origin process (after mid-module decls), late before `endmodule`.
 
 ---
 
@@ -139,13 +139,24 @@ multi-driver continuous sinks, and BalanceMux early inject of mid-module nets.
 Pipe stages still emit as a FO4 screening **sidecar** (always_ff + zero feeds).
 FO4 close @ 2.5 GHz is independent of feed fidelity.
 
+Lean default also **refuses IR credit** for every origin-mutating transform
+(`PassPolicy.emit_structural=false`: InsertReg, BalanceMux, SplitAssign,
+rebalance, prep). Without that gate the APU soak booked 304.5→96.5 on
+`g6lc_ai_gemm_seq` while `assign c_span = …` stayed byte-identical in the
+emitted file. `post_closure.reportable` is false; soak/host use `post_analyze`.
+Enable `--real-cut-feeds` / `--emit-balance-mux-rtl` to rewire origin and allow
+IR credit. `--real-cut-feeds` also turns on BalanceMux RTL. Continuous
+BalanceMux origin rewrite keeps the `assign` keyword (`te_packet_emitter`
+`address_off`; fixture-level `balance_mux_rhs_rewrite_keeps_assign_keyword`).
+Fixture `gemm_span.sv` covers the continuous-assign rewrite.
+
 ### Opt-in richer real-feed emit
 
 | Surface | Flag |
 |---------|------|
-| CLI | `sv-timing correct --emit --real-cut-feeds [--emit-balance-mux-rtl]` |
+| CLI | `sv-timing correct --emit --real-cut-feeds [--emit-balance-mux-rtl]` (`--real-cut-feeds` implies BalanceMux RTL) |
 | monorepo soak | `monorepo_soak.py --correct --emit --real-cut-feeds [--emit-balance-mux-rtl]` |
-| API | `ProjectEmitOptions { real_cut_feeds, emit_balance_mux_rtl }` → `DenseEmitOptions` |
+| API | `ProjectEmitOptions { real_cut_feeds, emit_balance_mux_rtl }` → `DenseEmitOptions` (`emit_balance_mux_rtl \|\| real_cut_feeds`) |
 
 R12 guards still apply when richer mode is on (generate-local refuse, free gen index,
 safe BalanceMux gate). Prefer lean for Verilator overlay soaks; enable richer for

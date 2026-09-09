@@ -10,6 +10,128 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 
 
 
+## 2026-09-09 — near-10 from original vs corrected (v27)
+
+Inferred from `audit-remain-v27` original RTL vs `corrected/**__svt.sv`
+(not a new soak):
+
+- **gemm 18.5:** original `c_span`/`c_end` at L608/L610 were cut and
+  twin-copied onto `gen_reuse_b` (`assign c_span = pipe_svt_p1_4`).
+  `a_span`/`b_span` stay live (`32'(m/n-1)*fmt_row_bytes+k_bytes`) because
+  twin requires identical RHS and S4 stopped on a flat 18.5 primary.
+- **instr_queue 15.5 / frontend 13:** S4 never reached them — global
+  fixpoint on the gemm headline.
+- **inval_bus 16 / axi2mem 14 / T3 mul 56:** P10 / wrap / atomic — S5.
+
+Implemented then soaked:
+
+- [x] **D** delay-v20: `fmt_row_bytes` / `ai_fmt_bytes` mux-of-shifts
+      (**kept**). General `(W)'(v)` still unparsed.
+- [x] **Soak `audit-remain-v29/` FAILED:** emit **18.5→30.5** / 1311 MHz,
+      191 edits. Sibling extra re-cut gemm `c_span`/`c_end` (same lines,
+      paths 5049/5377) instead of `a_span`/`b_span`. `policy_subcode`
+      InsertRegs 3→0, primary 30.5 n=16 Plain. Same class as v28.
+- [x] **B reverted** (S4 sibling extra in `pass.rs`). Helper
+      `s4_sibling_span_pending` stays unused, like `s4_has_pending_resilient`.
+- [x] **C reverted** (path_class back to v24). Flop-bundle threshold
+      change flipped cleanliness / skipped policy_subcode T2.
+
+Soak of record remains **`audit-remain-v27/` 18.5**. Do not quote v29.
+- [x] **B retry (uncut LHS):** extra S4 after 2-flat InsertReg **only**
+      span/end nets not already cut this run (`cut_span_lhs`). Extra
+      worklist is span-only (policy_subcode T2 already ran diverse).
+      Cap 2, batch 1. Fixture test `sibling_span_extra_cuts_uncut_spans_not_recut`.
+- [x] Soak **`audit-remain-v30/` FAILED:** emit **30.5** again. Extra did
+      **not** fire (primary was policy_subcode, not gemm span). gemm still
+      2 InsertRegs (`c_span`/`c_end`); `a_span`/`b_span` live. policy_subcode
+      BM-credit only; S4 InsertReg refused `cleanliness_set` because n=16
+      was treated as fat FSM (not resilient). v27 had exception+InsertReg.
+- [x] Fat-FSM floor **16→24** so policy_subcode n=16 is resilient again;
+      axi2mem n=39 still locked. Extra uncut-span kept for after 30.5 closes.
+- [x] Soak **`audit-remain-v31/` / `v32/`** match v27: emit **18.5**, 186
+      edits. Extra-S4 (B) is a no-op on `full_corev_apu` — `a_span`/`b_span`
+      are **not** over-budget IR paths during correct (only post_analyze of
+      emitted SV). Do not quote v29/v30 30.5.
+- [x] **A (emit-side):** `sibling_span_extra_cuts` in `sv-timing-emit`.
+      When a span-family InsertReg sits in a named generate-if, rewrite
+      uncut sibling `*_span`/`*_end` with **own** `pipe_svt_sib_*` names
+      (in-place, not twin-copy). Tests
+      `sibling_span_extra_cuts_uncut_spans_own_pipes` +
+      `sibling_span_extra_pipes_emit_own_decls`. Twin `c_span` unchanged.
+- [x] Soak **`audit-remain-v33/`** GREEN. Integrity joint/reparse/structural
+      OK. IR edits **186** (same as v27 — no origin steal). Emit primary
+      **74.5→16.0** / 2500 MHz (was 18.5 / 2162). gemm `a_span`/`b_span`/
+      `a_end`/`b_end` rewritten to `pipe_svt_sib_*`. Headline is now
+      **inval_bus 16.0 P10** (S5). New gemm leftover: sibling **feeds**
+      12.5 n=2 at L2539/L2540 (fmt mux 2.5 + AddSub 10). instr_queue 15.5
+      / axi2mem wrap 14 / frontend 13 still sit under that P10 headline.
+- [x] **A follow-on:** sibling extra `fat * … + tail` feed split (`_p` prep
+      pipe then add pipe). gemm 12.5 Mux+AddSub becomes 2.5 then 10.
+      Test `sibling_span_star_add_feed_splits_prep_pipe`. `{1'b0,pa}+span`
+      has no `*` on the left and stays a single add.
+- [x] Soak **`audit-remain-v34/`** GREEN. Split landed (`_p` prep + add)
+      but leftover stayed **12.5** at `prep_Q + k_bytes` because
+      `k_bytes = fmt_row_bytes(k_q)` is Mux 2.5. Integrity OK. Headline 16.0.
+- [x] Combo tail sample: simple non-`_q/_i/_d` ident on the add tail gets
+      its own `_t` flop so the add is Q+Q = 10.
+- [x] Soak **`audit-remain-v35/`** GREEN. Integrity OK. IR edits 186.
+      gemm sibling feeds **gone** (was 12.5). Emit primary still **16.0**
+      P10 inval_bus (S5). Next S4-admitted leftover: instr_queue 15.5 (E).
+- [x] **E (emit-side sandwich remainder):** uncut combo assign whose ident
+      sits in a cut feed and whose RHS uses a cut LHS (`push_instr`
+      between `lo_partial` and `push_instr_fifo`), plus one hop of combo
+      producers. Own `pipe_svt_rem_*`, in-place, no recut of claimed
+      lines (F2). Fixture `queue_remainder.sv`.
+- [x] Soak **`audit-remain-v36/`** GREEN. Integrity OK. IR edits 186
+      (no origin steal). Remainder extras only on `instr_queue`
+      (`fifo_pos`/`instr_overflow`/`slot0_pos`/`push_instr`).
+      **instr_queue 15.5 gone.** Emit primary still **16.0** P10.
+      Next S4-admitted leftover: frontend 13.0 Plain L1026.
+- [x] Soak **`audit-remain-v37-full-core/`** emitted the full core tree
+      (258 RTL, 10 fetch_A excluded, fetch_B live) but **integrity FAIL**:
+      `hpdcache_amo` comma-list `assign ugt, sgt, sum` rewritten as
+      procedural `sgt = pipe` + illegal feed. `cva6__svt` RVFI define is
+      context-only.
+- [x] Refuse cut claim when RHS is a comma-assign list
+      (`rhs_is_comma_assign_list`). Test `comma_assign_list_is_not_rewritten`.
+- [x] Soak **`audit-remain-v38-full-core/`** GREEN. Integrity joint/reparse/
+      structural OK. 10 fetch_A excluded, 0 in emit. `corrected/core` **230**
+      files (fetch_B 6). Emit primary **30.0→20.0** / 2000 MHz, 501 edits.
+      Headline `trigger_module` 20.0 P10. Do not quote v37 parse FAIL.
+- [x] **Or-reduce preps** on `_d` assigns with ≥2 unary `|ident` (frontend
+      `speculative_d` 13 FO4 on both soaks). 1-bit pipes, origin keeps
+      `assign spec_d = … pipe_red …`. Test `or_reduce_preps_on_next_state_d`.
+- [x] Soak **`audit-remain-v39/`** GREEN both profiles. Integrity
+      joint/reparse/structural OK. frontend **13.0 gone** (`pipe_svt_red_is_*`).
+      Headlines unchanged (S5): APU **16.0 P10** inval_bus, core **20.0 P10**
+      trigger_module. IR edits 186 / 501. Next S4: frontend 12.5 next-state
+      add+mux `[i]` (do not scalar-pipe), core wt_dcache 12.0 mixed `|tocheck`,
+      APU pe_dot/dm_sba 12 atomic or generate.
+- [x] Mixed or-reduce: one `|ident` in a ≥2 `&&`/`||` cone, no `_d` required,
+      skip `_o` ports. Test `or_reduce_preps_mixed_single_reduce` (wt_dcache
+      `fixup_rd_req`).
+- [x] Soak **`audit-remain-v40/` FAILED** integrity: `unary_or_reduces`
+      treated bitwise `cache_wren | inv_en` as unary (space after `|`).
+      frontend `if_ready` / icache `vld_we` lost `|`. Do not quote v40 FO4.
+- [x] Unary `|` only when previous non-ws is not ident/`)`/`]`. `|| |ident`
+      stays unary. Test `binary_or_is_not_unary_reduce`.
+- [x] Soak **`audit-remain-v41/`** GREEN both profiles. Integrity
+      joint/reparse/structural OK. bitwise `|` kept (`if_ready`, `vld_we`).
+      frontend 13 still gone. Headlines still S5: APU **16.0 P10**, core
+      **20.0 P10**. Mixed or-reduce did **not** close wt_dcache 12.0: S4
+      InsertReg claimed `fixup_rd_req` L389 but emit kept the origin
+      (named generate-if), extras skipped claimed lines. Fired instead on
+      `check_wr` `(|wbuffer_q[i].valid)` / `(|rd_hit_oh_q)`. Do not quote v40.
+      Soak of record: **`audit-remain-v41/`** (frontend 13) + v39 same 13-close.
+
+## 2026-09-09 — ALGORITHMS-EXPERTS.md (expert manual)
+
+- [x] Wrote `sv-timing/ALGORITHMS-EXPERTS.md`: per-algorithm theory (A1–A64 +
+      labs, invariants I1–I15, remaining-gap proof). Cites implementation
+      files, not architecture-doc exploration. Soak of record remains
+      `audit-remain-v27/` 18.5 FO4; v28 S4-continue stays reverted.
+      Campaign near-10 = VII.A+B(+D)+E+C; floor P10/wrap/T3 is not 10.
+
 ## 2026-09-08 — trace-driven algorithms (path_class v10, 4 GHz)
 
 Soak traces (`full_core` 645 InsertReg / 192 BalanceMux; residual `axi_adapter` 19.2 FO4;
@@ -266,7 +388,11 @@ structural estimates, not measured processor clock limits. A 4 GHz target remain
 Trace-log and path-distribution analysis of the strict corpus is written up in
 [`architecture/PASS-STRATEGY.md`](architecture/PASS-STRATEGY.md): nine measured pattern
 signatures (P1–P9), a pre-pass planner that triages artifact-vs-real before spending
-edits, and an ordered S0–S5 schedule. Recognizers and schedule are **not implemented**.
+edits, and an ordered S0–S5 schedule. Recognizers, constant lattice (P1 / `delay-v5`),
+comment-interior skip (P2), P4 remainder cuts, P5 `closes` on flop-to-flop, S3-before-S4
+and Δprimary fixpoint are **implemented**. Indicative logs:
+`E:/cva6/build-platform/workspace/build/sv-timing/audit-strict-v4/full_core/analyze.json`
+and `…/full_corev_apu/analyze.json`.
 The load-bearing measurements:
 
 - **~half the hard FO4 mass is still artifact.** Of `full_core`'s 35 failing
@@ -276,9 +402,10 @@ The load-bearing measurements:
   (`{HPDcacheCfg.reqDataWidth/64{...}}`, `{{(DataWidth/8-4){1'b0}}, 4'hF}`) that the LRM
   requires to be constant. `delay-v4` fixed this for `[msb:lsb]` bounds only; P1 is that
   fix generalized via a constant lattice seeded by the param-map.
-- **Comment lowering is still incomplete**: block-comment interiors
-  (`te_priority.sv:139`, 56.0 FO4) and trailing `//` on continued statements
-  (`cva6_shared_tlb.sv:260`, 136.0 FO4) still bill as arithmetic.
+- **Comment lowering (P2):** banner `//` was already skipped; block interiors and
+  trailing `//` still billed `||` / `*` as hardware because the skip only looked at
+  `/` and `*`. `operator_token_in_comment` now skips every CST operator inside a
+  comment; assign RHS is blanked before Expr parse (`parse/comment_interiors.sv`).
 - **The workload is shallow, not monstrous.** 469 of 621 core failures (75%) and 87 of 144
   APU failures sit in [10,20) FO4 — one rebalance or one register each. Only 15 core paths
   exceed 80 FO4. Schedule from the bulk, not from the worst path.
@@ -313,21 +440,305 @@ that all SMT2/8-issue/8-core/RVV/H/AI features are enabled in one elaborated tar
 - [ ] Full emitted elaboration and equivalence still unproven: the emitted tree
   re-parses and re-analyses, which is neither elaboration of a top nor an equivalence
   check. Nothing here shows the corrected RTL is functionally identical.
-- [ ] **Fix the IR/emitted accounting split** (diagnosed above): make IR post-correct
-  credit contingent on structure actually present in the emitted output, so
-  `post_closure` cannot claim 56.0 FO4 while its own emitted SV re-analyses at 70.0.
-  Until then `post_closure` is not a reportable number.
-- [ ] Explain the 6 residual `cva6_*` MMU `atomic_over_budget` paths (136.0 FO4 worst).
-  Determine whether they are real arithmetic, `+:`-form `Opaque` fallbacks, or another
-  constant-expression context not yet covered, before ranking them as datapath work.
-- [ ] Extend the constant-expression rule to the other LRM-constant contexts
-  (`+:`/`-:` **width**, packed dimensions, replication counts) instead of relying on the
-  `Opaque` fallback, and give the hand parser explicit select-kind nodes rather than
-  encoding `[msb:lsb]` as a `":"` binary.
-- [ ] Preserve assignment kind in IR to implement actual NBA old-Q versus blocking
-  temporary dependencies; do not infer extra clock edges from `ceil(FO4/budget)`.
-- [ ] Module-scoped lowering, complete function-body/call timing, resolved parameter and
-  genvar arithmetic, and genuine register/clock-domain path boundaries need further work.
+- [x] **IR/emitted accounting split:** lean emit (soak default) does not rewrite
+  origin assigns. `PassPolicy.emit_structural` is set from `--real-cut-feeds` /
+  `--emit-balance-mux-rtl`; without it every IR FO4 mutation (InsertReg, BalanceMux,
+  SplitAssign, rebalance, prep) refuses credit and S4 is skipped so
+  `post_closure` cannot claim 304.5→96.5 that
+  `audit-strict-v4/full_corev_apu` emit does not contain. `post_closure.reportable`
+  is false in lean mode; soak/host use `post_analyze`.
+- [x] Richer emit origin rewrite on a gemm-shaped continuous assign:
+  fixture `fixtures/auto_correct/gemm_span.sv` + emit test
+  `real_cut_feeds_rewrites_gemm_span_origin` — lean keeps live `assign c_span`;
+  `--real-cut-feeds` comments it out and sinks `c_span` from the pipe (reparses).
+- [x] **P5 intra-module compose (`delay-v6`):** `compose_reg_to_reg_paths` chains
+  assign/comb fragments into launch→capture cones. `gemm_span` is a `RegToReg`
+  mul+add path (`nodes>1`, not `intoout`/`atomic`). End-to-end test
+  `gemm_span_correct_emit_reanalyze_drops_fo4`: analyze → correct →
+  `--real-cut-feeds` emit → re-analyze FO4 drops. Detector v15 does not deflate
+  multi-region composed cones as independent-LHS bundles.
+- [x] **P4 remainder + refuse codes:** multi-node paths with one over-budget mul/div
+  stay `plain` and note `P4 remainder; atomic … is T3`. Apply-time refuses log a
+  reason (`lean_emit_no_origin_rewrite`, `cleanliness_set`, `lane_forbids_insert_reg`,
+  …) and `run.end` counts `refuse_by_reason` / `refuse_by_class` (PASS-STRATEGY §6.4).
+- [x] **P6 S4 preference + per-stage budget:** S3/S4 each get `max(1, max_passes/2)`.
+  S4 sorts `is_shallow_over_budget` (one-register [budget, 2·budget) slices) ahead of
+  monsters so the 75% [10,20) bulk sets the InsertReg schedule.
+- [x] **P2 comment interiors:** skip every CST operator inside `//` / `/*` (not only
+  `/` and `*`) and blank comment text out of assign RHS. Fixture
+  `parse/comment_interiors.sv` covers the te_priority `/*|| (a * b)` and trailing
+  `// c / d * e` shapes.
+- [x] Soak with `--real-cut-feeds` on `full_corev_apu` (`audit-gemm-expol7/`):
+  origin rewrite lands; integrity `reparse_ok`/`joint_ok`. Emitted
+  post_analyze **161.5→149.0** / 268.5 MHz (IR **161.5→129.0**, 188 edits).
+  Residual 149 is still the 144-node gemm capture `dot_pending_q` (InsertReg
+  origins were sequential NBAs in the same `always_ff`, not that capture).
+- [x] **6 residual `cva6_*` MMU atomics explained (`delay-v10`):** not `+:` Opaque.
+  `cva6_shared_tlb.sv:219` is `v_st_enbl[…][HYP_EXT*2:0]` (0-FO4 slice, string
+  `*` fallback → 56 Mul); `:260`/`:740` are `VpnLen/PtLevels` and `VpnLen%PtLevels`
+  in replication counts and `[msb:lsb]` (plus trailing `//`); `cva6_ptw.sv:580`,
+  `cva6_tlb.sv:211`, `:378` are the same `HYP_EXT*2` bound on multi-node cones
+  (P4 remainder once the Mul node is gone). Runtime `a * b` still charged.
+- [x] **P1 `+:` / `-:` indexed part-select (`delay-v7`):** parser no longer eats `+:`
+  as add, so `mem[(a / b) +: 8]` is an Index with `+:` (width LRM-constant, base
+  index charged). Replication counts were already zero-cost.
+- [x] **P1 packed dims / case labels (`delay-v8`):** BinaryOperator tokens whose
+  loc sits in a `PackedDimension` / `UnpackedDimension` / `CaseItemExpression`
+  span are skipped (`lrm_constant_spans`). Fixture `parse/packed_dim_lrm.sv`.
+- [x] **P1 select-kind AST (`delay-v9`):** `Expr::PartSelect { kind: FixedRange |
+  IndexedPlus | IndexedMinus }` instead of fake `Binary ":"` / `"+:"` / `"-:"`.
+  Cost / lattice / emit / spine walk the node; `[msb:lsb]` bounds and `+:`/`-:`
+  widths stay LRM-constant, runtime `+:` base still charged.
+- [x] **P1 parsed-tree 0 FO4 is authoritative (`delay-v10`):** `attribute_costs`
+  no longer falls back to a string-heuristic `Mul`/`DivRem` when the Expr tree
+  costs 0. CST skip extended to `ConstantRange` / indexed-select width /
+  replication count. Fixture `parse/part_select_const_arith.sv`. Explains the
+  six residual `cva6_*` MMU `atomic_over_budget` paths in `audit-strict-v4`
+  (`:219` `HYP_EXT*2` slice, `:260`/`:740` `VpnLen%PtLevels` pad, plus P4
+  multi-node remainders). **Confirmed delay-v13 soak:** MMU atomic count **6 → 0**.
+- [x] **P1 module-localparam seed (`delay-v11`):** `attribute_costs` / spine /
+  planner seed `ConstSeed` from module localparams, parameters, host param-map
+  keys, and imported package names. Mixed-case `VpnLen` / `PtLevels` are Const
+  (heuristic-only still treats them as runtime). Fixture `parse/param_lattice.sv`.
+  Genvars are per-span in delay-v13.
+- [x] **Module-scoped lowering restored (`delay-v12` / B3):** `ModuleScope` CST
+  slice per `module` so ports / params / localparams / regions / instances are
+  not the file union. Golden `fixtures/measure/two_modules.sv` +
+  `multi_module_file_scopes_ports_regions_and_instances`. Makes the v11 seed
+  actually per-module. Function-body/call timing remains open.
+- [x] **P1 genvar-scoped seed (`delay-v13`):** genvar names are Const only for
+  nodes whose loc sits in that `LoopGenerateConstruct` span
+  (`TimingModule::genvar_names_at`). Generate-for init/condition/step and
+  if/case-generate conditions are LRM-constant CST. Fixture
+  `parse/genvar_lattice.sv` (`WIDTH * i` inside `g` is not Mul; `a * idx` is).
+- [x] **Assignment kind in IR:** `IrNode.assign_kind` is Blocking / Nonblocking /
+  Continuous from the CST. Compose treats NBA lhs as flops and blocking
+  `always_ff` temps as combo (`fixtures/measure/nba_vs_blocking.sv`). Do not infer
+  extra clock edges from `ceil(FO4/budget)`.
+- [x] **S5 T3 report:** `run_correct_passes` emits `stage.s5` with `t3_only_cards`,
+  P8 remainder, and P9 iterative counts (asks, not cuts).
+- [x] **delay-v13 4 GHz analyze soak** (`audit-delay-v13/`, 4000 MHz / 20 ps /
+  margin 0.2 / `-O3`, analyze-only): P1/P2 closed the artifact atomic mass.
+- [x] **Detector v16 — composed exclusive/parallel (`audit-delay-v16/`):** P5
+  compose no longer skips exclusive/dense/parallel-timing. Independent-LHS
+  bundle stays skipped on multi-region cones (gemm InsertReg). Parallel-timing
+  on composed paths stays `plain` (CombDatapath). P4 remainder subtracts a T3
+  atomic from cones with `nodes>=8`. Re-soak primary **428.5→125** (core) and
+  **333→181.5** (APU gemm).
+- [x] **delay-v14 Const-divisor `/` `%` + detector v19 P4 remainder.** Runtime
+  `/` or `%` whose divisor is Const (`8`, `WIDTH`, `*Cfg.*`) is a shift /
+  bit-select, not a 120 FO4 SRT divider (`8 / a` stays DivRem). P4 remainder
+  subtracts a T3 atomic that owns ≥90% of cone FO4, or whose leftover is at
+  least as large as the atomic (twin `%`/`/` 120+120+1), or `nodes≥8`.
+  `gemm_span` 56/68 is kept. v16 primary 125 was `hpdcache_memctrl.sv:472`.
+- [x] **delay-v14 / v19 4 GHz analyze soak** (`audit-delay-v14/`, 4000 MHz /
+  20 ps / `-O3`). Core primary **125→90** (`lzc`); APU **181.5** gemm
+  unchanged. `pe_dot` 153 gone (`(cnt+1)/2`). slack<0 **2342→2257** core,
+  **676→552** APU.
+- [x] **delay-v15 nested genvar + P10 handshake.** Nested generate-for keeps
+  each loop's own genvar. P10 locks same-edge pulse+index output bundles and
+  consumer bank restores; InsertReg refuse. `lzc` is a prefix-tree lane.
+- [x] **delay-v15 4 GHz analyze soak** (`audit-delay-v15/`). Core primary
+  **90→86** (`hpdcache_mshr`); `worst_all` **120→97.5** (FMA MC). `lzc` 90
+  and `hpdcache :980` 120 gone. Core atomics **9→5**. APU primary still
+  **181.5** gemm (InsertReg/`--real-cut-feeds` remaining).
+- [x] **delay-v16 comb-for index Const.** `for (int unsigned w = 0; w < N; w++)`
+  in always_comb unrolls; `w * SETS` is not a Mul. Fixture
+  `parse/comb_for_scale.sv`. Core soak `audit-delay-v16/`: primary **86→51**
+  (`g6lc_ftq`); `hpdcache_mshr` 86 gone; atomics **5→4**; `worst_all` 97.5 FMA.
+
+### delay-v13 soak — remaining ordered by measured leverage
+
+Logs: `E:/cva6/build-platform/workspace/build/sv-timing/audit-delay-v13/{full_core,full_corev_apu}/analyze.json`.
+Budget 10 FO4. Compared to `audit-strict-v4` (delay-v4).
+
+| | delay-v4 core | delay-v13 core | delay-v4 APU | delay-v13 APU |
+|---|---:|---:|---:|---:|
+| paths | 5410 | **10041** | 4636 | **5340** |
+| slack<0 | 621 | **2495** | 144 | **702** |
+| atomic_over_budget | 35 / 3158.5 | **9 / 588.0** | 10 / 783.0 | **3 / 168.0** |
+| P4 atomic nodes>1 | 16 | **0** | 6 | **0** |
+| MMU atomic | 6 | **0** | 0 | 0 |
+| primary FO4 | 70 (`g6lc_ftq`) | **428.5** (`macro_decoder` regtoout) | 304.5 (gemm) | **333** (`g6lc_ai_pe_dot` intoout) |
+
+P1/P2 worked: `fpnew_opgroup_block` 176 DivRem → 56 Mul; shared-TLB 136/131 gone;
+icache wrapper 132.5 gone; gemm replication 131 gone; `te_priority` 56 gone.
+
+The new ceiling is **not leftover constant arithmetic**. Detector v15 skips exclusive /
+bundle / parallel-timing deflation on P5 composed multi-region cones
+(`path_class.rs` `p5_composed_cone`). That kept gemm from being an independent-LHS
+bundle, and it also left exclusive CSR/case cones as raw serial sums:
+
+1. **[x] Composed-path exclusive / parallel (detector v16).**
+   `csr_regfile` 370 and `macro_decoder` 428 dropped off primary. APU primary is
+   the gemm cone (181.5). `te_packet_emitter` 326→78 dense. Independent-LHS
+   bundle still skipped on multi-region (gemm stays InsertReg-able).
+2. **[x] P4 remainder FO4 on wide cones (`nodes>=8`).** Short serial mul chains
+   keep the operator in the period (`gemm_span` e2e). `pe_dot` 333→153 exclusive.
+   **v17:** subtract when the T3 node owns ≥90% of cone FO4 (any `nodes>1`).
+3. **[x] P8 gemm `--real-cut-feeds` on `full_corev_apu`.** Soak
+   `audit-gemm-rcf/` (delay-v16, `-O3`, `--allow-latency`, stages=20).
+   Analyze primary **181.5→161.5** from comb-for Const (not InsertReg).
+   Correct **152 edits**, primary **161.5→161.5**, emitted post_analyze
+   still 161.5 FO4 / 247.7 MHz. S4 did not cut the 144-node Plain cone
+   (cleanliness / worklist — not a missing emit flag). Fixture e2e remains
+   green.
+- [x] **Exception policy for resilient datapath (gemm).** Mixed modules
+   win `seq_plus_comb` and T1-first relocation cards never attach
+   InsertReg. `exception_policy` admits S4 InsertReg on Plain `RegToReg`
+   ≥ 2·budget. Indexed `mem[port]` restores (FTQ / pc_bank) stay
+   HandshakeLock. Incidental P10 class_note from sharing an `always_ff`
+   with a status pulse does **not** starve a gemm-shaped cone (path 3131).
+   S4 rewrites T1-first cards, prepends missing resilient cones, and
+   sorts them ahead of P6 shallow. Fixture `mixed_resilient.sv`.
+- [x] **Soak `audit-gemm-expol/`** (delay-v16 CLI, `-O3`, `--real-cut-feeds`,
+   stages=20) *before* the incidental-P10 override: exception fired
+   (gemm 74.5→56 InsertReg, `policy_subcode` 30.5→10, 164 edits vs 152).
+   Primary **161.5→161.5** because path 3131 (144-node) was tagged P10.
+- [x] **Soak `audit-gemm-expol2/`:** exception admitted 3131, then
+   `apply_work_item` refused `lane_forbids_insert_reg` (P10 → NextStateFsm).
+- [x] **Lane bypass:** `cone_lane` keeps CombDatapath for resilient cones;
+   `apply_work_item` InsertReg if the exception admits. Indexed restores
+   stay NextStateFsm. Handshake fixture still refuses.
+- [x] **Soak `audit-gemm-expol3/`** (after lane bypass): path 3131
+   InsertReg **161.5→10** IR. Correct IR primary **161.5→129.0** (new
+   gemm cone path 5340). 188 edits. Emitted `post_analyze` still **161.5**
+   / 247.7 MHz — `gen_reuse_b` `assign c_span` left live; `gen_reuse_a`
+   was commented + piped. Residual is emit origin-rewrite on the twin
+   generate, not admission.
+- [x] **Twin generate origin rewrite.** `rewrite_origin_assigns` now pipes
+   every other continuous `assign lhs = rhs` with the same text as a
+   claimed cut (`gen_reuse_a` / `gen_reuse_b` both `c_span`). Fixture
+   `twin_generate_span.sv`. Claimed line still uses module sink; twins
+   get in-place `assign lhs = pipe`.
+- [x] **Soak `audit-gemm-expol4/`** after twin rewrite: emit now has
+   `twin moved c_span` + `assign c_span = pipe_svt_p1_15` in `gen_reuse_b`.
+   IR still **161.5→129.0** (path 3131 InsertReg 161.5→10). Emitted
+   `post_analyze` still **161.5** / 247.7 MHz — the 144-node cone's
+   origin is procedural (`always_ff` :1859, R12d keeps it).
+- [x] **Procedural origin rewrite** under `--real-cut-feeds`: simple
+   `lhs <= rhs` / `lhs = rhs` → sample the pipe (no continuous sink).
+   Fixture `proc_nba_span.sv`. Blank-before-`assign` stays continuous
+   (`cut_rewrite_anchor`; `instr_queue` `idx_is_d`, `te_branch_map`
+   `map_o` — `audit-gemm-expol5` emitted illegal module-scope
+   `lhs = pipe`). Multi-line NBA with empty first-line RHS still emits
+   `lhs <= pipe` (`audit-gemm-expol6` left `row <=` dangling).
+- [x] **Soak `audit-gemm-expol7/`** (delay-v16 release CLI, `-O3`,
+   `--real-cut-feeds`, stages=20): integrity green. IR **161.5→129.0**.
+   Emitted post_analyze **161.5→149.0** / 268.5 MHz, 188 edits. Path
+   3131 InsertReg origins are `sum_i_q` / `ar_slot_q[…].col` /
+   `ar_slot_q[…].row` / `stc_elem_q`; `dot_pending_q` :1859 stays live
+   (still the 144-node hottest loc).
+- [x] **delay-v17 / path_class v20:** NBA write→later-read in one
+   `always_ff` is Q (IEEE NBA schedule), not a combo edge. That was
+   poisoning `procedural_ok` so IndependentLhsBundle never deflated the
+   144-node gemm always_ff (161.5 serial sum of sibling flops). Fixture
+   `measure/always_ff_nba_bundle.sv`. Blocking temps still chain.
+- [x] **Soak `audit-delay-v17/`** APU `-O3` `--real-cut-feeds` stages=20:
+   integrity green. Analyze max_adj **78** (`te_packet_emitter` intoout
+   dense). Path 3131 **IndependentLhsBundle 26**. RegToReg after correct
+   **36** (`g6lc_coherence_hub` dense, max_node=10). Gemm P4 remainder
+   74.5 (56 Mul T3) / bundles 34.
+- [x] **path_class v21:** next-state `_d` FO4 is **max_field**, not
+   scratchboard makespan (hub 30 FO4 chain of sibling fields). Composed
+   next-state FSMs still get IndependentLhsBundle; gemm named-temp
+   chains stay skipped. Fixture-level test
+   `composed_next_state_fsm_bundles_to_max_field_not_makespan`.
+- [x] **Soak `audit-pc-v21/`:** hub **36→11**. Analyze max_adj **74.5**
+   (gemm P4 remainder, 56 Mul T3). Emit RegToReg **30.5**
+   (`g6lc_ai_policy_subcode` Plain). Emitter intoout **61** (max_node 60).
+- [x] **Residual InsertReg keeps capture.** Dummy `OutputPort` made
+   residuals `RegToOut`, so `exception_policy` dropped the 20.5 FO4
+   `policy_subcode` remainder after the first `d = pipe` cut. Spine
+   expand now splices a fat non-atomic node on multi-node paths.
+   `max_cuts` follows `--opt-max-stages-per-region` (clamp 1–16).
+   `--real-cut-feeds` also sets `emit_balance_mux_rtl`. Continuous
+   BalanceMux rewrite keeps `assign` (`audit-remain-v21` Parse on
+   `te_packet_emitter` `address_off`).
+- [x] **Soak `audit-remain-v21b/`:** integrity green. Emit RegToReg
+   **74.5→26** / 1538 MHz (189 edits). `policy_subcode` three InsertRegs
+   30.5→10 (gone from post ≥20). IR 74.5→56 T3.
+- [x] **BalanceMux origin-process inject.** Snippets that reference
+   decls after the first `always_comb` (gemm `pe_float_en`) were demoted
+   as late locals. Inject at the origin process; late-decl check uses
+   that line. BM RHS rewrite runs **before** InsertReg so added comment
+   lines do not retarget the next NBA (`audit-remain-v22` wrote
+   `stc_elem_q <= svt_bm_top` instead of `dot_pending_q`). Fixture
+   `balance_mux_snippet_injects_after_mid_module_decls` +
+   `balance_mux_rewrite_not_shifted_by_insertreg_comments`.
+- [x] **Soak `audit-remain-v23/`:** integrity green. Emit RegToReg
+   **74.5→22** / 1818 MHz (189 edits). Gemm 26 gone (`dot_pending_q <=
+   svt_bm_top_p3131_n8174`).
+- [x] **delay-v18 / path_class v22.** P1: `pkg::NAME` is Const (`::`
+   split; `te_packet_emitter` `used_bits += te_pkg::XLEN+…` was 61 FO4
+   of 10-FO4 adds). `x+1` and const-offset `+` are increment (LogicBit),
+   not CPA. Unique-case mux tax is `model.mux` (2.5), not `log2(n)×2.5`.
+   Fixtures: `package_scope_screaming_idents_are_elaboration_const`,
+   `plus_one_is_increment_not_carry_propagate_add`.
+- [x] **Soak `audit-delay-v18/`:** integrity green. Emit **74.5→18.5** /
+   2162 MHz (181 edits). Analyze max_adj **74.5** (gemm P4 T3).
+   te_packet 61 / axi2mem 22 / timer 20 / l2_mshr exclusive 18.8 gone
+   from the flop primary.
+- [x] **path_class v23 + P6 resilient.** Next-state bundle/dense: no wire
+   tax, no log2 overwrite mux on `_d` fields (prefetcher 17). Exclusive
+   flop D/Q is max_arm (dram_timing 15.6 leftover). Ternary `mem[port]`
+   restore walks `?:` (inval_bus). Plain `RegToReg` > budget admits S4
+   InsertReg; real P10 / indexed restore / AXI wrap bundle stay locked.
+   Fixtures: `next_state_multi_write_field_is_max_not_log_mux`,
+   `exclusive_flop_capture_is_max_arm_not_mux_plus_leftover`,
+   `measure/ternary_indexed_restore.sv`.
+- [x] **Soak `audit-remain-v24/`:** integrity green. Emit **74.5→20.0** /
+   2000 MHz (184 edits, 37 InsertReg). Over-budget 401→192, RegToReg
+   205→86. Prefetcher 17 / dram_timing 15.6 / cluster-of-11 gone.
+   New primary: `g6lc_l2_mshr` **20** Plain P10 (`(IDX_W+1)'(1)` billed
+   as CPA). Gemm 18.5 geometry `b_span` remains. AXI wrap not InsertReg'd.
+- [x] **Soak `audit-remain-v25/` (reverted).** General `(W)'(v)` collapse
+   made gemm `32'(n-1)*row+k` a 67.5 Mul+add; analyze max_adj **74.5→123.5**,
+   emit **20→40.5**.
+- [x] **delay-v19 narrow `(W)'(1)`.** Only a width-cast of literal 1 is an
+   increment (`count_q - (IDX_W+1)'(1)`). Other `(W)'(v)` backtracks so
+   gemm `32'(n-1)*row` does not become Mul. Guard in
+   `plus_one_is_increment_not_carry_propagate_add`.
+- [x] **Soak `audit-remain-v26/`:** delay-v19 narrow did **not** move l2_mshr
+   20 (2-node `mem_d` waiter-shift + nwait, P10). Emit still **20.0**.
+   Analyze max_adj stayed **74.5** (gemm not inflated).
+- [x] **path_class v24.** Exclusive flop-D allows 2 arms / 2 nodes
+   (`mem_d.waiters` + `mem_d.nwait` Plain-sum 20). Fixture
+   `exclusive_flop_capture_two_arms_is_max_not_sum`.
+- [x] **Soak `audit-remain-v27/`:** integrity green. Emit **74.5→18.5** /
+   2162 MHz (186 edits). `g6lc_l2_mshr` 20 gone (2-arm `mem_d` exclusive).
+   Primary is gemm geometry **18.5**. AXI wrap not InsertReg'd. Analyze
+   max_adj **74.5** T3.
+- [x] **S4 pending resilient (reverted).** Extra S4 after a flat 18.5
+   primary made `policy_subcode` **30.5** (`audit-remain-v28/`). Loop
+   change reverted. Wrap-boundary / fat Plain FSM (≥16, no Mul) still
+   not resilient. Soak of record remains **`audit-remain-v27/` 18.5**.
+4. **[x] P1 Const-divisor `/` `%` (`delay-v14`) + P4 twin DivRem peel (v19).**
+   `hpdcache_memctrl` :472 dropped off primary (125→peeled). `:980` is still
+   a 1-node 120 DivRem (RHS not recovered on the generate mux — P3).
+   `(cnt + 1) / 2` un-ranked `pe_dot` 153. Remaining single-node atomics are
+   runtime muls (`fpnew_fma*`, `multiplier.sv:115`, gemm 459/519/608,
+   `wt_dcache_mem`, `issue_read_operands.sv:1479`) plus `:980`.
+5. **[x] P9 `control_mvp` 719** stays multi-cycle; v19 `worst_all` is 120
+   (`:980` atomic) / 181.5 (APU gemm).
+6. **[x] `te_packet_emitter` dense 78** (was 326 plain).
+7. **[x] `lzc` is a function tree.** `ConeLane` maps `lzc` / `lzc_*` /
+   `*_lzc` to ExclusiveMux (comb ok, no InsertReg). Fixture `parse/lzc_tree.sv`
+   primary < 40 FO4. Soak `lzc` 90 may still be a WIDTH-elaborated instance;
+   do not InsertReg it.
+8. **[x] P10 cycle-identity / same-edge handshake.** Implemented:
+   `path_is_handshake_locked` / `tag_handshake_locks`. Same-`always_ff` 2+
+   output-driving NBAs with a pulse-like RHS; consumer comb `mem[port]` of
+   an indexed-NBA base. InsertReg refuse + NextStateFsm lane. Fixture
+   `measure/handshake_switch.sv`. No `g6lc_*` names in crates.
+9. **[x] Nested generate-for genvar (`delay-v15`).** Outer loops no longer
+   inherit the innermost genvar name, so `gen_i * Cfg` / `gen_j % Cfg` in
+   `hpdcache_memctrl` generate muxes are Const∘Const (fixture
+   `parse/hpdcache_idx_mux.sv`). That was the `:980` 120 DivRem leftover.
+- [ ] Complete function-body/call timing and genuine register/clock-domain path
+  boundaries need further work. Module-scoped lowering is `delay-v12`; genvar
+  seed is `delay-v13`; Const-divisor scale is `delay-v14`. Recovered RHS on
+  generate-mux `%` (`hpdcache` :980) is the leftover P1 hole.
 - [ ] Compare legal transformed netlists with constrained OpenSTA setup/hold analysis.
   S1 currently fails on missing include/macro context; no S2 processor timing exists.
   Reference report parsing and mocked stages are not a real STA run.

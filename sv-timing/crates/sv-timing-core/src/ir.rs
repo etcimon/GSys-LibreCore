@@ -168,6 +168,38 @@ impl PathKind {
     }
 }
 
+/// How a statement writes its LHS (IEEE 1800 blocking / NBA / continuous).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignKind {
+    /// Unknown / not an assignment (bare operator token).
+    #[default]
+    Unknown,
+    /// Blocking `=` (combo temp, including in `always_ff`).
+    Blocking,
+    /// Non-blocking `<=` (flop write).
+    Nonblocking,
+    /// Continuous `assign`.
+    Continuous,
+}
+
+impl AssignKind {
+    /// Flop definition (NBA).
+    pub fn is_seq_def(self) -> bool {
+        matches!(self, AssignKind::Nonblocking)
+    }
+
+    /// Combinational definition (blocking or continuous).
+    pub fn is_comb_def(self) -> bool {
+        matches!(self, AssignKind::Blocking | AssignKind::Continuous)
+    }
+
+    /// True when kind was not recovered from CST.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, AssignKind::Unknown)
+    }
+}
+
 /// Kind of combinational / procedural region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -258,6 +290,10 @@ pub struct IrNode {
     /// from `rhs_expr` / `op_class` (spine expand / half-split residuals).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fo4_locked: bool,
+    /// Blocking / NBA / continuous. NBA lhs is a flop; blocking in `always_ff`
+    /// is a combo temp (PASS-STRATEGY: do not infer extra clock edges).
+    #[serde(default, skip_serializing_if = "AssignKind::is_unknown")]
+    pub assign_kind: AssignKind,
 }
 
 /// Timing path through a region.
@@ -430,7 +466,7 @@ pub struct GenerateLoop {
     pub bound_hint: Option<String>,
     /// Optional generate-block label.
     pub label: Option<String>,
-    /// Source locus of the generate loop.
+    /// Source locus of the **whole** generate loop (header + body).
     pub loc: SourceLoc,
     /// Continuous assigns / statements counted inside (timing density hint).
     pub body_assign_count: u32,
@@ -534,6 +570,18 @@ pub struct TimingModule {
     pub loc: SourceLoc,
 }
 
+impl TimingModule {
+    /// Genvar names whose generate-loop span covers `loc` (elaboration, not runtime `i`).
+    pub fn genvar_names_at(&self, loc: &SourceLoc) -> Vec<String> {
+        let b = loc.byte_start;
+        self.gen_loops
+            .iter()
+            .filter(|g| g.loc.byte_end > g.loc.byte_start && b >= g.loc.byte_start && b < g.loc.byte_end)
+            .map(|g| g.genvar.clone())
+            .collect()
+    }
+}
+
 /// Package IR (localparams + functions + typedefs; not a timing path root).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimingPackage {
@@ -591,6 +639,9 @@ pub struct TimingDesign {
     /// `always_comb` density and penalises aggressiveness and timing fail.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub module_cleanliness: BTreeMap<String, crate::cleanliness::ModuleSolution>,
+    /// Pre-pass plan (P1–P9). Artifacts abort correct.
+    #[serde(default, skip_serializing_if = "crate::pass_strategy::PassPlan::is_empty_plan")]
+    pub pass_plan: crate::pass_strategy::PassPlan,
     /// Versions.
     pub versions: VersionBanner,
 }
@@ -612,6 +663,7 @@ impl TimingDesign {
             path_exceptions: Vec::new(),
             parallel_timing: BTreeMap::new(),
             module_cleanliness: BTreeMap::new(),
+            pass_plan: crate::pass_strategy::PassPlan::default(),
             versions: VersionBanner {
                 package: crate::PACKAGE_VERSION.to_string(),
                 ir: crate::IR_VERSION.to_string(),
@@ -620,6 +672,24 @@ impl TimingDesign {
                 parser_pin: crate::PARSER_PIN_HINT.to_string(),
             },
         }
+    }
+
+    /// Localparam / parameter / param-map / imported-package names that seed P1.
+    ///
+    /// Mixed-case identifiers (`VpnLen`, `PtLevels`) are included. Genvars are
+    /// not listed here — they are added per-node via [`TimingModule::genvar_names_at`].
+    pub fn elaboration_const_names(&self, module: &TimingModule) -> Vec<String> {
+        let mut names = Vec::new();
+        names.extend(module.localparams.iter().cloned());
+        names.extend(module.parameters.iter().map(|p| p.name.clone()));
+        names.extend(self.param_map_keys.iter().cloned());
+        for pkg_name in &module.package_imports {
+            let key = pkg_name.split("::").next().unwrap_or(pkg_name);
+            if let Some(pkg) = self.packages.get(key) {
+                names.extend(pkg.localparams.iter().cloned());
+            }
+        }
+        names
     }
 }
 

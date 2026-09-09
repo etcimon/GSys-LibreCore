@@ -21,7 +21,7 @@ Handoff to real STA tools (SDC seeds, artifact mapping, workflow): [`STA-HANDOFF
 | `always_comb` / `assign` | `{mod}.in0` (PI) | `{mod}.out0` (PO) | `in_to_out` |
 | `always_ff` | `{mod}.reg0/CP` | `{mod}.reg1/D` | `reg_to_reg` |
 | After InsertReg cut | prior launch | pipe `regN/D` | `in_to_reg` / `reg_to_reg` |
-| Residual after cut | pipe Q | capture / PO | `reg_to_out` |
+| Residual after cut | pipe Q | original capture | same as parent (`RegToReg` stays `RegToReg`) |
 
 JSON (`analyze --json-out`) includes per-path:
 
@@ -89,11 +89,13 @@ Three things this changes:
 3. **Auto-correct moved primary FO4 by 0.0** on both profiles despite 462 and 308
    applied edits. The emitted tree is valid and re-analysable; it does not improve this
    target. Do not present the transform worklist as a path to a higher clock.
-4. **`post_closure` is not reportable.** The same `full_core` run books IR
+4. **`post_closure` is not reportable under lean emit.** The same `full_core` run books IR
    **56.0 FO4 / 714.3 MHz / 344 failing** while re-analysis of its own emitted SV gives
-   **70.0 FO4 / 571.4 MHz / 556 failing**, with integrity clean. The IR credits structure
-   the review-only output does not contain. Read `post_analyze`, which is what the host
-   and soak now use.
+   **70.0 FO4 / 571.4 MHz / 556 failing**, with integrity clean. Lean emit does not
+   rewrite origin; `PassPolicy.emit_structural` now refuses InsertReg/BalanceMux IR
+   credit in that mode and sets `post_closure.reportable=false`. Read `post_analyze`,
+   which is what the host and soak use. Richer emit (`--real-cut-feeds`) may book IR
+   because origin is actually rewritten.
 
 Both profiles are `structure OK` under host `timings validate --require-emit` while
 reporting MISS. That combination — a valid package that does not close — is the

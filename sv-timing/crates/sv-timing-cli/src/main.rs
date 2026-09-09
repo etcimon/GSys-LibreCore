@@ -785,6 +785,14 @@ fn design_to_analyze_json(
             "max_freq_mhz": closure.max_freq_mhz,
             "failing_paths": closure.failing_paths,
             "reg_to_reg_paths": closure.reg_to_reg_paths,
+            "intoout_failing": closure.intoout_failing,
+            "regtoreg_failing": closure.regtoreg_failing,
+        },
+        "pass_plan": {
+            "abort_correct": design.pass_plan.abort_correct,
+            "artifacts": design.pass_plan.artifacts.len(),
+            "by_pattern": design.pass_plan.by_pattern,
+            "rationale": design.pass_plan.rationale,
         },
         "param_map_keys": design.param_map_keys,
         "package_mode": design.package_mode,
@@ -1147,6 +1155,9 @@ fn main() -> ExitCode {
                 if all_modules { Vec::new() } else { allow.clone() },
                 allow_latency,
             );
+            // Lean emit (default soak) does not rewrite origin assigns. Do not
+            // book IR FO4 for cuts the emitted SV will not contain.
+            policy.emit_structural = real_cut_feeds || emit_balance_mux_rtl;
             if all_modules {
                 // Allowlist is filled after analyze discovers module names.
                 policy.correct_enabled = opt.max_passes > 0;
@@ -1361,7 +1372,7 @@ fn main() -> ExitCode {
                     generated_subdir: "generated".into(),
                     emit_unchanged: emit_all,
                     real_cut_feeds,
-                    emit_balance_mux_rtl,
+                    emit_balance_mux_rtl: real_cut_feeds || emit_balance_mux_rtl,
                 };
                 match emit_project_autocorrect(
                     &source_pairs,
@@ -1651,6 +1662,12 @@ fn main() -> ExitCode {
                         "max_freq_mhz": post_closure.max_freq_mhz,
                         "failing_paths": post_closure.failing_paths,
                         "reg_to_reg_paths": post_closure.reg_to_reg_paths,
+                        "reportable": ctx.policy.emit_structural,
+                        "note": if ctx.policy.emit_structural {
+                            "IR closure after structural emit"
+                        } else {
+                            "IR-only; not reportable — lean emit does not rewrite origin (use post_analyze)"
+                        },
                     },
                     "post_analyze": post_analyze_json,
                     "post_analyze_valid": post_analyze_valid,

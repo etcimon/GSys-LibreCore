@@ -743,9 +743,9 @@ Package defaults: refuse lists **empty** (hosts opt into project hazards). Fixtu
 
 | Class | v1 | Latency | Notes |
 |---|---|---|---|
-| **InsertReg** | Yes | **Always latency-changing** | Requires **`--allow-latency`** on every emit. Hosts must allowlist carefully — extra stages break multi-cycle FU protocols. |
+| **InsertReg** | Yes | **Always latency-changing** | Requires **`--allow-latency`** on every emit. Also requires `PassPolicy.emit_structural` (CLI `--real-cut-feeds`); lean soak emit refuses IR credit because origin is not rewritten. Hosts must allowlist carefully — extra stages break multi-cycle FU protocols. |
 | **SplitAssign** | Yes | No | Intermediate wires only |
-| **BalanceMux** | **Deferred** | — | Not in v1 until equivalence rules are written |
+| **BalanceMux** | Yes | No | Lean emit (`--emit-balance-mux-rtl` off) is credit-only comments; IR credit is refused unless `emit_structural`. |
 
 **Default CLI:** `sv-timing correct` ⇒ **dry-run** unless `--emit` (and `--allow-latency` for InsertReg).
 

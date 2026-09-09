@@ -12,6 +12,7 @@
 
 use crate::ir::{TimingDesign, TimingPath};
 use crate::path_class::PathClassKind;
+use crate::pass_strategy::{is_resilient_datapath, path_has_indexed_restore, path_is_handshake_locked};
 use crate::ref_order::RefOrderTree;
 
 /// Virtual concern a path belongs to (4 GHz worklist routing).
@@ -81,6 +82,19 @@ pub fn cone_lane(design: &TimingDesign, path: &TimingPath) -> ConeLane {
     if module_looks_pipelined(&name) {
         return ConeLane::PipelinedUnit;
     }
+    // Leading/trailing-zero and similar prefix trees are functions: a flop
+    // here adds latency to every consumer (PASS-STRATEGY §8 lzc).
+    if module_looks_prefix_tree(&name) {
+        return ConeLane::ExclusiveMux;
+    }
+    // Indexed restores (FTQ / pc_bank) never take InsertReg. A gemm-shaped
+    // Plain RegToReg that only shares an always_ff with a status pulse is
+    // still CombDatapath (audit-gemm-expol2 path 3131 lane_forbids).
+    if path_has_indexed_restore(design, path)
+        || (path_is_handshake_locked(design, path) && !is_resilient_datapath(design, path))
+    {
+        return ConeLane::NextStateFsm;
+    }
     match path.path_class {
         PathClassKind::ExclusiveCaseMux | PathClassKind::ExclusiveIfChain => {
             ConeLane::ExclusiveMux
@@ -117,6 +131,10 @@ fn module_looks_pipelined(n: &str) -> bool {
         || n.contains("fpnew_cast")
         || n.contains("fpnew_noncomp")
         || n.contains("fpnew_opgroup")
+}
+
+fn module_looks_prefix_tree(n: &str) -> bool {
+    n == "lzc" || n.starts_with("lzc_") || n.ends_with("_lzc")
 }
 
 #[cfg(test)]

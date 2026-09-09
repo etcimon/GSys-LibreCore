@@ -592,6 +592,7 @@ mod tests {
             case_is_default: false,
             case_selector: None,
             fo4_locked: false,
+            assign_kind: Default::default(),
         }
     }
 
@@ -649,7 +650,8 @@ mod tests {
     }
 
     #[test]
-    fn lowered_nba_and_blocking_writes_cannot_be_distinguished_by_node_metadata() {
+    fn lowered_nba_q_read_is_not_a_combo_edge() {
+        // `q <= d + a; r <= q + b;` — second NBA reads Q (IEEE NBA schedule).
         let nba = lower_sequential_body("q <= d + a;\nr <= q + b;");
         let blocking = lower_sequential_body("q  = d + a;\nr <= q + b;");
         let nba_module = nba.modules.values().next().unwrap();
@@ -664,35 +666,34 @@ mod tests {
             .values()
             .find(|n| n.lhs.as_deref() == Some("q"))
             .unwrap();
-        assert_eq!(nba_q.gate, blocking_q.gate);
-        assert_eq!(nba_q.rhs, blocking_q.rhs);
-        assert_eq!(nba_q.rhs_expr, blocking_q.rhs_expr);
-        assert_eq!(nba_q.reads_reg, blocking_q.reads_reg);
-        assert_eq!(nba_q.loc, blocking_q.loc);
-        for design in [&nba, &blocking] {
-            let module = design.modules.values().next().unwrap();
-            let region = module
-                .regions
-                .values()
-                .find(|r| r.kind == RegionKind::AlwaysFf)
-                .unwrap();
-            let scratch = ParallelScratch::schedule_for_region(
-                module,
-                region,
-                &design.target,
-                &BTreeMap::new(),
-            );
-            assert!(scratch.clock.is_sequential());
-            assert!(scratch.dep_edges > 0);
-            assert!(
-                !scratch.procedural_ok,
-                "assignment kind is unavailable; do not certify the current-write q -> r edge"
-            );
-            assert!(scratch.jit_cuts_on_clock().is_empty());
-            let board = &design.parallel_timing[&module.name];
-            assert!(!board.procedural_ok);
-            assert!(!board.scratch_for_region(region.id).unwrap().procedural_ok);
-        }
+        assert_eq!(nba_q.assign_kind, crate::ir::AssignKind::Nonblocking);
+        assert_eq!(blocking_q.assign_kind, crate::ir::AssignKind::Blocking);
+        let nba_region = nba_module
+            .regions
+            .values()
+            .find(|r| r.kind == RegionKind::AlwaysFf)
+            .unwrap();
+        let nba_scratch = ParallelScratch::schedule_for_region(
+            nba_module,
+            nba_region,
+            &nba.target,
+            &BTreeMap::new(),
+        );
+        assert!(nba_scratch.clock.is_sequential());
+        assert_eq!(nba_scratch.dep_edges, 0);
+        assert!(nba_scratch.procedural_ok);
+        let blocking_region = blocking_module
+            .regions
+            .values()
+            .find(|r| r.kind == RegionKind::AlwaysFf)
+            .unwrap();
+        let blocking_scratch = ParallelScratch::schedule_for_region(
+            blocking_module,
+            blocking_region,
+            &blocking.target,
+            &BTreeMap::new(),
+        );
+        assert!(blocking_scratch.dep_edges > 0);
     }
 
     #[test]

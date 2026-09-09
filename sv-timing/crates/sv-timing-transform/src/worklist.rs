@@ -391,6 +391,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                    assign_kind: Default::default(),
                 },
             );
         }

@@ -608,6 +608,7 @@ mod tests {
             case_is_default: false,
             case_selector: None,
             fo4_locked: false,
+            assign_kind: Default::default(),
         }
     }
 
@@ -1015,6 +1016,58 @@ mod tests {
         assert!(clean > dirty, "density must beat aggressiveness: {clean} vs {dirty}");
         let fail = w.score(0.8, 0.8, 0.10, false);
         assert!(clean > fail, "timing fail must penalize: {clean} vs {fail}");
+    }
+
+    #[test]
+    fn mixed_exclusive_and_deep_datapath_winner_forbids_insert_reg() {
+        // APU gemm shape: exclusive leftover + a 56 FO4 Plain cone. No set
+        // closes both, so seq_plus_comb wins and InsertReg is module-gated.
+        let budget = 10.0;
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        let mut nodes = BTreeMap::new();
+        nodes.insert(0, node(0, "rdata", "mux", 20.0));
+        nodes.insert(1, node(1, "prod", "a * b", 56.0));
+        nodes.insert(2, node(2, "acc", "prod + a", 4.0));
+        nodes.insert(3, node(3, "c_span", "acc + b", 4.0));
+        let mut m = empty_module("mixed_gemm", nodes);
+        m.regions.insert(0, ff_region(0, vec![]));
+        m.regions.insert(1, comb_region(1, vec![0]));
+        m.regions.insert(2, comb_region(2, vec![1, 2, 3]));
+        design.modules.insert(0, m);
+        design.paths.push(path(
+            1,
+            1,
+            20.0,
+            budget,
+            PathClassKind::ExclusiveCaseMux,
+            false,
+        ));
+        let mut dp = path(2, 2, 64.0, budget, PathClassKind::Plain, false);
+        dp.nodes = vec![1, 2, 3];
+        dp.path_kind = PathKind::RegToReg;
+        dp.start = PathEndpoint::RegClock { cell: 0 };
+        dp.end = PathEndpoint::RegData { cell: 1 };
+        dp.startpoint = "mixed_gemm.reg0/CP".into();
+        dp.endpoint = "mixed_gemm.reg1/D".into();
+        design.paths.push(dp.clone());
+        let sol = explore_module(
+            &design,
+            design.modules.get(&0).unwrap(),
+            CleanlinessWeights::default(),
+        );
+        assert_ne!(sol.chosen, AlgoSetId::JitDatapath, "{}", sol.rationale);
+        assert_ne!(sol.chosen, AlgoSetId::AggressivePipeline, "{}", sol.rationale);
+        assert!(
+            !sol.allows_opportunity(OpportunityKind::InsertReg),
+            "mixed winner must stay S3: {}",
+            sol.rationale
+        );
+        let ex = crate::pass_strategy::exception_policy(&design, &dp).expect("resilient");
+        assert_eq!(
+            ex.kind,
+            crate::pass_strategy::ExceptionPolicyKind::ResilientDatapath
+        );
+        assert!(ex.admit_insert_reg);
     }
 
     #[test]

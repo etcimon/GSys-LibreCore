@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sv_timing_core::{
     parse_paths, CoreError, CoreResult, ParseOptions, SourceLoc, TimingDesign,
 };
-use sv_timing_transform::EditTrace;
+use sv_timing_transform::{EditKind, EditRecord, EditTrace};
 
 pub mod dense;
 pub mod project;
@@ -35,8 +35,9 @@ pub use project::{
 };
 pub use rhs::{
     cut_assigns_from_source, has_free_gen_index, line_inside_generate, parse_assign_line,
-    primary_feed_expr, rewrite_origin_assigns, rewrite_origin_rhs_replaces, sink_assigns_sv,
-    unresolved_insert_regs, CutAssign,
+    all_emit_extra_cuts, primary_feed_expr, remainder_sandwich_extra_cuts,
+    rewrite_origin_assigns, rewrite_origin_rhs_replaces, sibling_span_extra_cuts,
+    sink_assigns_sv, unresolved_insert_regs, CutAssign,
 };
 pub use synth::{synthesize_module, synthesize_module_with, SynthOptions};
 
@@ -230,20 +231,27 @@ pub fn apply_edits_to_source_dense(
     // R12e lean default: do **not** rewrite origins or emit continuous sinks.
     // Pipe stages still emit with zero feeds (FO4 screening sidecar). Origin
     // rewrites and BalanceMux RTL remain opt-in for review fixtures.
-    let rewritten = if dense.real_cut_feeds {
-        let r = rewrite_origin_assigns(source, &cuts);
-        if dense.emit_balance_mux_rtl {
-            rewrite_origin_rhs_replaces(&r, trace)
-        } else {
-            r
-        }
-    } else if dense.emit_balance_mux_rtl {
+    //
+    // BalanceMux RHS rewrite **before** InsertReg: InsertReg injects a comment
+    // line per cut and shifts later origin lines (`audit-remain-v22` rewrote
+    // `stc_elem_q` instead of `dot_pending_q` at gemm :1859).
+    let after_bm = if dense.emit_balance_mux_rtl {
         rewrite_origin_rhs_replaces(source, trace)
     } else {
         source.to_string()
     };
+    let extras = if dense.real_cut_feeds {
+        all_emit_extra_cuts(&after_bm, &cuts)
+    } else {
+        Vec::new()
+    };
+    let rewritten = if dense.real_cut_feeds {
+        rewrite_origin_assigns(&after_bm, &cuts)
+    } else {
+        after_bm
+    };
     // Without real feeds, still pass cuts for stage naming; sinks suppressed below.
-    let cuts_for_dense: Vec<_> = if dense.real_cut_feeds {
+    let mut cuts_for_dense: Vec<_> = if dense.real_cut_feeds {
         cuts
     } else {
         // Drop continuous flag so sink_assigns_sv emits nothing.
@@ -257,13 +265,60 @@ pub fn apply_edits_to_source_dense(
             })
             .collect()
     };
+    // Sibling extras rewrite in-place inside named generate-if; do **not**
+    // emit module-scope sinks for generate-locals. Feed-only dense cuts
+    // (empty lhs) plus extra InsertReg records so the pipe decls exist.
+    let mut emit_trace_owned: Option<EditTrace> = None;
+    if !extras.is_empty() {
+        let mut t = trace.clone();
+        let seed_origin = t
+            .records
+            .iter()
+            .find(|r| r.kind == EditKind::InsertReg)
+            .map(|r| r.origin.clone());
+        for extra in &extras {
+            let mut origin = seed_origin
+                .clone()
+                .unwrap_or_else(|| SourceLoc::file_start(extra.pipe_name.as_str()));
+            origin.start_line = extra.line;
+            origin.end_line = extra.end_line.max(extra.line);
+            t.record_edit(EditRecord {
+                id: 0,
+                kind: EditKind::InsertReg,
+                origin,
+                path_id: None,
+                node_id: None,
+                new_name: Some(extra.pipe_name.clone()),
+                fo4_before: None,
+                fo4_after: None,
+                rationale: format!("emit extra {}", extra.lhs),
+                emit_rhs: None,
+                emit_rhs_extras: Vec::new(),
+                emit_snippet: None,
+            });
+            cuts_for_dense.push(CutAssign {
+                line: 0,
+                end_line: 0,
+                lhs: String::new(),
+                rhs: extra.rhs.clone(),
+                nonblocking: false,
+                pipe_name: extra.pipe_name.clone(),
+                edit_id: extra.edit_id,
+                continuous: false,
+            });
+        }
+        emit_trace_owned = Some(t);
+    }
+    let emit_trace = emit_trace_owned.as_ref().unwrap_or(trace);
     let blocks =
-        dense::emit_blocks_for_trace_src(trace, dense, &cuts_for_dense, Some(source));
+        dense::emit_blocks_for_trace_src(emit_trace, dense, &cuts_for_dense, Some(source));
     let header = machine_header(&policy.tool, &policy.run_id);
     // Dual inject (R11):
-    // - early: BalanceMux wires before first process (origin RHS rewrite legality)
+    // - early: factorize comments / first-process-safe review
+    // - origin process: BalanceMux RTL (after mid-module decls; gemm pe_float_en)
     // - late: dense pipe before endmodule (cut feeds may reference mid-module nets)
     let rewritten = inject_before_first_process(&rewritten, &blocks.early);
+    let rewritten = inject_bm_snippets_at_origin(&rewritten, &blocks.bm_at_origin);
     let rewritten = inject_before_endmodule(&rewritten, &blocks.late);
     let mut out = String::new();
     out.push_str(&header);
@@ -361,6 +416,128 @@ fn inject_before_first_process(source: &str, block: &str) -> String {
         return out;
     }
     inject_before_endmodule(source, block)
+}
+
+/// Insert each BalanceMux snippet immediately before the process that
+/// references its marker ident (origin RHS rewrite).
+fn inject_bm_snippets_at_origin(source: &str, jobs: &[(String, String)]) -> String {
+    if jobs.is_empty() {
+        return source.to_string();
+    }
+    let mut at: BTreeMap<usize, String> = BTreeMap::new();
+    let mut fallback = String::new();
+    for (marker, snippet) in jobs {
+        if marker.is_empty() || snippet.trim().is_empty() {
+            continue;
+        }
+        let Some(pos) = enclosing_process_byte_for_marker(source, marker) else {
+            fallback.push_str(snippet);
+            if !snippet.ends_with('\n') {
+                fallback.push('\n');
+            }
+            continue;
+        };
+        let entry = at.entry(pos).or_default();
+        if !snippet.ends_with('\n') {
+            entry.push_str(snippet);
+            entry.push('\n');
+        } else {
+            entry.push_str(snippet);
+        }
+    }
+    if at.is_empty() {
+        if fallback.is_empty() {
+            return source.to_string();
+        }
+        let mut block = String::from("  // BEGIN sv-timing auto-correct (balance_mux rewrite)\n");
+        block.push_str(&fallback);
+        block.push_str("  // END sv-timing auto-correct (balance_mux rewrite)\n");
+        return inject_before_first_process(source, &block);
+    }
+    let mut out = source.to_string();
+    // Later byte offsets first so earlier inserts stay valid.
+    let mut positions: Vec<(usize, String)> = at.into_iter().collect();
+    positions.sort_by_key(|(p, _)| std::cmp::Reverse(*p));
+    for (pos, body) in positions {
+        let mut block = String::from("  // BEGIN sv-timing auto-correct (balance_mux rewrite)\n");
+        block.push_str(&body);
+        if !body.ends_with('\n') {
+            block.push('\n');
+        }
+        block.push_str("  // END sv-timing auto-correct (balance_mux rewrite)\n");
+        let mut next = String::with_capacity(out.len() + block.len() + 8);
+        next.push_str(&out[..pos]);
+        if !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(&block);
+        if !block.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(&out[pos..]);
+        out = next;
+    }
+    if !fallback.is_empty() {
+        let mut block = String::from("  // BEGIN sv-timing auto-correct (balance_mux rewrite)\n");
+        block.push_str(&fallback);
+        block.push_str("  // END sv-timing auto-correct (balance_mux rewrite)\n");
+        out = inject_before_first_process(&out, &block);
+    }
+    out
+}
+
+fn ident_boundary(b: u8) -> bool {
+    !(b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Byte offset of the `always_*` / `assign` line that contains `marker`.
+fn enclosing_process_byte_for_marker(source: &str, marker: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let m = marker.as_bytes();
+    if m.is_empty() {
+        return None;
+    }
+    let mut i = 0usize;
+    let mut hit = None;
+    while i + m.len() <= bytes.len() {
+        if &bytes[i..i + m.len()] == m {
+            let before_ok = i == 0 || ident_boundary(bytes[i - 1]);
+            let after_ok = i + m.len() == bytes.len() || ident_boundary(bytes[i + m.len()]);
+            if before_ok && after_ok {
+                hit = Some(i);
+                break;
+            }
+        }
+        i += 1;
+    }
+    let pos = hit?;
+    let mut i = pos;
+    loop {
+        while i > 0 && bytes[i - 1] != b'\n' {
+            i -= 1;
+        }
+        let rest = &source[i..];
+        let t = rest.trim_start();
+        let lower = t.to_ascii_lowercase();
+        if lower.starts_with("always_comb")
+            || lower.starts_with("always_ff")
+            || lower.starts_with("always_latch")
+            || lower.starts_with("always ")
+            || lower.starts_with("always@")
+            || lower.starts_with("always @")
+            || lower.starts_with("assign ")
+            || lower.starts_with("assign\t")
+        {
+            return Some(i);
+        }
+        if i == 0 {
+            return Some(pos);
+        }
+        i -= 1;
+        while i > 0 && bytes[i - 1] != b'\n' {
+            i -= 1;
+        }
+    }
 }
 
 /// Insert `block` immediately before the last `endmodule` in `source`.
@@ -899,6 +1076,64 @@ mod tests {
         assert_valid_sv_bundle(&report).expect("reparse corrected");
     }
 
+    #[test]
+    fn sibling_span_extra_pipes_emit_own_decls() {
+        let src = include_str!("../../../fixtures/auto_correct/sibling_span.sv");
+        let line = src
+            .lines()
+            .position(|l| l.contains("assign a_span"))
+            .expect("a_span") as u32
+            + 1;
+        let mut trace = EditTrace::new();
+        trace.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: SourceLoc {
+                file: "sibling_span.sv".into(),
+                start_line: line,
+                start_col: 1,
+                end_line: line,
+                end_col: 1,
+                byte_start: 0,
+                byte_end: 0,
+                origin: OriginKind::UserFile,
+            },
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(18.5),
+            fo4_after: Some(10.0),
+            rationale: "a_span cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        let mut dense = dense_options_from_source(src);
+        dense.real_cut_feeds = true;
+        let text = apply_edits_to_source_dense(src, &trace, &EmitPolicy::default(), &dense);
+        assert!(
+            text.contains("sibling span moved"),
+            "expected sibling origin rewrite:\n{text}"
+        );
+        assert!(
+            text.contains("pipe_svt_sib_b_span"),
+            "expected extra b_span pipe decl:\n{text}"
+        );
+        assert!(
+            !text.contains("assign b_span = pipe_svt_p1"),
+            "different-RHS sibling must not share the seed pipe:\n{text}"
+        );
+        let live_b = text.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("assign b_span") && t.contains("p_q") && !t.starts_with("//")
+        });
+        assert!(!live_b, "b_span combo left live:\n{text}");
+        let mut tree = EmitTree::new();
+        tree.add_file("sibling_span__svt.sv", FileRole::Module, text);
+        let report = integrity_reparse(&tree, &ParseOptions::default());
+        assert_valid_sv_bundle(&report).expect("reparse sibling extras");
+    }
+
     /// Cut feed RHS uses a net declared *after* the first process — early inject
     /// would fail Verilator "used before its declaration"; late inject must win.
     #[test]
@@ -1026,6 +1261,529 @@ endmodule
         assert!(
             early < first_proc || text[..first_proc].contains("svt_bm_top_p1_n0"),
             "BalanceMux staging must be early"
+        );
+    }
+
+    /// gemm: first `always_comb` then later `logic pe_float_en` then `always_ff`.
+    /// Snippet must inject after the late decl, not at the first process.
+    #[test]
+    fn balance_mux_snippet_injects_after_mid_module_decls() {
+        let src = r#"module gemm_late (
+    input logic clk_i, rst_ni,
+    input logic pe_float_en_i,
+    output logic [3:0] dot_pending_q
+);
+  always_comb begin
+    // early mux
+  end
+  logic pe_float_en;
+  assign pe_float_en = pe_float_en_i;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) dot_pending_q <= '0;
+    else begin
+      dot_pending_q <= pe_float_en ? (dot_pending_q + 4'd1) : 4'd0;
+    end
+  end
+endmodule
+"#;
+        let snippet = "  logic [64-1:0] svt_bm_top_p1_n0;\n  always_comb begin : svt_bm_top_p1_n0_stage\n    svt_bm_top_p1_n0 = pe_float_en ? (dot_pending_q + 4'd1) : 4'd0;\n  end\n";
+        let origin_line = src
+            .lines()
+            .position(|l| l.contains("dot_pending_q <=") && l.contains("pe_float_en"))
+            .expect("nba") as u32
+            + 1;
+        assert!(
+            crate::rhs::balance_mux_snippet_safe(src, snippet, origin_line),
+            "snippet should be safe at origin process {}",
+            crate::rhs::enclosing_process_start_line(src, origin_line)
+        );
+        assert!(
+            !crate::rhs::has_free_gen_index(snippet),
+            "fixture snippet must not trip gen-index refuse"
+        );
+        let mut trace = EditTrace::new();
+        trace.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::BalanceMux,
+            origin: SourceLoc {
+                file: "gemm_late.sv".into(),
+                start_line: origin_line,
+                start_col: 1,
+                end_line: origin_line,
+                end_col: 1,
+                byte_start: 0,
+                byte_end: 0,
+                origin: OriginKind::UserFile,
+            },
+            path_id: Some(1),
+            node_id: Some(0),
+            new_name: Some("svt_bm_top_p1_n0".into()),
+            fo4_before: Some(26.0),
+            fo4_after: Some(10.0),
+            rationale: "stage".into(),
+            emit_rhs: Some("svt_bm_top_p1_n0".into()),
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: Some(snippet.into()),
+        });
+        let mut dense = dense_options_from_source(src);
+        dense.emit_balance_mux_rtl = true;
+        dense.real_cut_feeds = true;
+        let text = apply_edits_to_source_dense(src, &trace, &EmitPolicy::default(), &dense);
+        let decl = text.find("logic pe_float_en;").expect("late decl");
+        let snip = text
+            .find("svt_bm_top_p1_n0_stage")
+            .expect("snippet must emit, not demote");
+        assert!(
+            snip > decl,
+            "BalanceMux must inject after pe_float_en decl; decl={decl} snip={snip}\n{text}"
+        );
+        assert!(
+            text.contains("dot_pending_q <= svt_bm_top_p1_n0"),
+            "origin NBA must sample staged top:\n{text}"
+        );
+        let mut tree = EmitTree::new();
+        tree.add_file("gemm_late__svt.sv", FileRole::Module, text);
+        let report = integrity_reparse(&tree, &ParseOptions::default());
+        assert_valid_sv_bundle(&report).expect("reparse gemm_late");
+    }
+
+    /// InsertReg before a later BalanceMux origin must not steal the BM line.
+    #[test]
+    fn balance_mux_rewrite_not_shifted_by_insertreg_comments() {
+        let src = r#"module m;
+  logic clk_i, rst_ni, a, b;
+  logic [7:0] early_q, later_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      early_q <= '0;
+      later_q <= '0;
+    end else begin
+      early_q <= a * b;
+      later_q <= a + b + a;
+    end
+  end
+endmodule
+"#;
+        let later = src
+            .lines()
+            .position(|l| l.contains("later_q <=") && l.contains('+'))
+            .expect("later") as u32
+            + 1;
+        let early = src
+            .lines()
+            .position(|l| l.contains("early_q <=") && l.contains('*'))
+            .expect("early") as u32
+            + 1;
+        let snippet = "  logic [64-1:0] svt_bm_top;\n  always_comb begin : svt_bm_top_stage\n    svt_bm_top = a + b + a;\n  end\n";
+        let mut trace = EditTrace::new();
+        trace.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: SourceLoc {
+                file: "m.sv".into(),
+                start_line: early,
+                start_col: 1,
+                end_line: early,
+                end_col: 1,
+                byte_start: 0,
+                byte_end: 0,
+                origin: OriginKind::UserFile,
+            },
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(56.0),
+            fo4_after: Some(10.0),
+            rationale: "cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        trace.records[0].id = 0;
+        trace.records[0].new_name = Some("pipe_svt_p1".into());
+        trace.record_edit(EditRecord {
+            id: 1,
+            kind: EditKind::BalanceMux,
+            origin: SourceLoc {
+                file: "m.sv".into(),
+                start_line: later,
+                start_col: 1,
+                end_line: later,
+                end_col: 1,
+                byte_start: 0,
+                byte_end: 0,
+                origin: OriginKind::UserFile,
+            },
+            path_id: Some(1),
+            node_id: Some(2),
+            new_name: Some("svt_bm_top".into()),
+            fo4_before: Some(26.0),
+            fo4_after: Some(10.0),
+            rationale: "stage".into(),
+            emit_rhs: Some("svt_bm_top".into()),
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: Some(snippet.into()),
+        });
+        let mut dense = dense_options_from_source(src);
+        dense.emit_balance_mux_rtl = true;
+        dense.real_cut_feeds = true;
+        let text = apply_edits_to_source_dense(src, &trace, &EmitPolicy::default(), &dense);
+        assert!(
+            text.contains("later_q <= svt_bm_top"),
+            "BM must rewrite later_q, not a shifted neighbor:\n{text}"
+        );
+        assert!(
+            !text.contains("early_q <= svt_bm_top"),
+            "InsertReg origin must not receive the BM top:\n{text}"
+        );
+    }
+
+    /// PASS-STRATEGY: gemm `c_span` is a continuous assign. Lean emit must leave
+    /// it byte-identical; `--real-cut-feeds` must comment it out and sink lhs
+    /// from the pipe so post_analyze can see the cut.
+    #[test]
+    fn real_cut_feeds_rewrites_gemm_span_origin() {
+        let src = include_str!("../../../fixtures/auto_correct/gemm_span.sv");
+        let line = src
+            .lines()
+            .position(|l| l.contains("assign c_span"))
+            .expect("c_span assign") as u32
+            + 1;
+        let mut trace = EditTrace::new();
+        trace.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: SourceLoc {
+                file: "gemm_span.sv".into(),
+                start_line: line,
+                start_col: 1,
+                end_line: line,
+                end_col: 1,
+                byte_start: 0,
+                byte_end: 0,
+                origin: OriginKind::UserFile,
+            },
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(304.5),
+            fo4_after: Some(96.5),
+            rationale: "gemm c_span cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        let policy = EmitPolicy::default();
+        let lean = apply_edits_to_source(src, &trace, &policy);
+        assert!(
+            lean.lines().any(|l| {
+                let t = l.trim();
+                t.starts_with("assign c_span") && t.contains("<<") && !t.starts_with("//")
+            }),
+            "lean must keep live c_span origin: {lean}"
+        );
+        assert!(
+            !lean.contains("assign c_span = pipe_svt_p1"),
+            "lean must not sink c_span"
+        );
+
+        let mut dense = dense_options_from_source(src);
+        dense.real_cut_feeds = true;
+        let text = apply_edits_to_source_dense(src, &trace, &policy, &dense);
+        assert!(
+            text.contains("moved c_span"),
+            "richer emit must comment-out origin: {text}"
+        );
+        let live_origin = text.lines().any(|l| {
+            let t = l.trim();
+            if t.starts_with("//") || !t.starts_with("assign c_span") {
+                return false;
+            }
+            t.split("//").next().unwrap_or("").contains("<<")
+        });
+        assert!(!live_origin, "richer emit left live c_span origin: {text}");
+        assert!(
+            text.contains("assign c_span = pipe_svt_p1"),
+            "richer emit must sink c_span from pipe: {text}"
+        );
+        assert!(
+            text.contains("assign pipe_svt_p1_c =")
+                && (text.contains("acc1") || text.contains("prod")),
+            "richer emit must feed pipe from origin rhs: {text}"
+        );
+        let mut tree = EmitTree::new();
+        tree.add_file("gemm_span__svt.sv", FileRole::Module, text);
+        let report = integrity_reparse(&tree, &ParseOptions::default());
+        assert_valid_sv_bundle(&report).expect("reparse gemm_span richer emit");
+    }
+
+    /// `--real-cut-feeds` must rewrite a simple always_ff NBA (path 3131 shape).
+    #[test]
+    fn real_cut_feeds_rewrites_proc_nba_origin() {
+        let src = include_str!("../../../fixtures/auto_correct/proc_nba_span.sv");
+        let line = src
+            .lines()
+            .position(|l| l.contains("y_o <=") && l.contains("*"))
+            .or_else(|| src.lines().position(|l| l.contains("y_o <=")))
+            .expect("y_o nba") as u32
+            + 1;
+        let mut trace = EditTrace::new();
+        trace.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: SourceLoc {
+                file: "proc_nba_span.sv".into(),
+                start_line: line,
+                start_col: 1,
+                end_line: line,
+                end_col: 1,
+                byte_start: 0,
+                byte_end: 0,
+                origin: OriginKind::UserFile,
+            },
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(68.0),
+            fo4_after: Some(10.0),
+            rationale: "proc nba cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        let policy = EmitPolicy::default();
+        let lean = apply_edits_to_source(src, &trace, &policy);
+        assert!(
+            lean.lines().any(|l| {
+                let t = l.trim();
+                t.contains("y_o <=") && t.contains("*") && !t.starts_with("//")
+            }),
+            "lean must keep live NBA origin: {lean}"
+        );
+
+        let mut dense = dense_options_from_source(src);
+        dense.real_cut_feeds = true;
+        let text = apply_edits_to_source_dense(src, &trace, &policy, &dense);
+        assert!(
+            text.contains("moved y_o") && text.contains("y_o <= pipe_svt_p1"),
+            "richer emit must rewrite NBA: {text}"
+        );
+        let live_mul = text.lines().any(|l| {
+            let t = l.trim();
+            t.contains("y_o <=") && t.contains("*") && !t.starts_with("//")
+        });
+        assert!(!live_mul, "richer emit left live mul NBA: {text}");
+        let mut tree = EmitTree::new();
+        tree.add_file("proc_nba_span__svt.sv", FileRole::Module, text);
+        let report = integrity_reparse(&tree, &ParseOptions::default());
+        assert_valid_sv_bundle(&report).expect("reparse proc_nba richer emit");
+    }
+
+    /// Analyze → correct (`emit_structural`) → `--real-cut-feeds` emit → re-analyze.
+    /// The IR cut must land in emitted SV as a FO4 drop, not only as a sidecar.
+    #[test]
+    fn gemm_span_correct_emit_reanalyze_drops_fo4() {
+        use sv_timing_core::{
+            analyze_files, default_fo4_v1_embedded, frequency_closure, LowerOptions,
+            TimingTarget,
+        };
+        use sv_timing_transform::{run_correct_passes, PassContext, PassPolicy};
+        use std::path::PathBuf;
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/gemm_span.sv");
+        if !path.exists() {
+            panic!("missing fixture {}", path.display());
+        }
+        let src = std::fs::read_to_string(&path).expect("read gemm_span");
+        let mut lower = LowerOptions {
+            target: TimingTarget::new(4000.0, 20.0, 0.2),
+            cost_model: default_fo4_v1_embedded(),
+            module_filter: vec!["gemm_span".into()],
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let out = analyze_files(&[path.clone()], &ParseOptions::default(), &lower)
+            .expect("analyze gemm_span");
+        let path_dump: Vec<String> = out
+            .design
+            .paths
+            .iter()
+            .map(|p| {
+                format!(
+                    "id={} fo4={:.1} nodes={} class={:?} kind={:?} mc={} loc={}:{}",
+                    p.id,
+                    p.total_fo4,
+                    p.nodes.len(),
+                    p.path_class,
+                    p.path_kind,
+                    p.multi_cycle,
+                    p.primary_loc.file,
+                    p.primary_loc.start_line
+                )
+            })
+            .collect();
+        let sol = out
+            .design
+            .module_cleanliness
+            .get("gemm_span")
+            .map(|s| format!("set={} C={:.3} pass={}", s.chosen.as_str(), s.cleanliness, s.timing_pass));
+        let before = out
+            .design
+            .paths
+            .iter()
+            .filter(|p| !p.multi_cycle)
+            .map(|p| p.total_fo4)
+            .fold(0.0_f64, f64::max);
+        assert!(
+            before > 10.0,
+            "fixture should miss 4 GHz budget 10 FO4; before={before} paths={path_dump:?} sol={sol:?}"
+        );
+
+        let mut policy = PassPolicy::default();
+        policy.correct_enabled = true;
+        policy.correct_allow_modules = vec!["gemm_span".into()];
+        policy.allow_latency = true;
+        policy.max_passes = 8;
+        policy.emit_structural = true;
+        let mut ctx = PassContext::new(out.design, out.names, policy);
+        ctx.assume_clk = true;
+        ctx.cost_model = default_fo4_v1_embedded();
+        let ctx = run_correct_passes(ctx).expect("correct");
+        let kinds: Vec<_> = ctx
+            .trace
+            .records
+            .iter()
+            .map(|r| format!("{:?}", r.kind))
+            .collect();
+        assert!(
+            ctx.trace
+                .records
+                .iter()
+                .any(|r| r.kind == EditKind::InsertReg),
+            "expected InsertReg on gemm_span CombDatapath; edits={kinds:?} paths={path_dump:?} sol={sol:?}"
+        );
+
+        let mut dense = dense_options_from_source(&src);
+        dense.real_cut_feeds = true;
+        let text = apply_edits_to_source_dense(&src, &ctx.trace, &EmitPolicy::default(), &dense);
+        let origin_moved = text.contains("moved ")
+            && (text.contains("c_span")
+                || text.contains("acc0")
+                || text.contains("acc1")
+                || text.contains("prod"));
+        assert!(
+            origin_moved,
+            "richer emit must rewrite a continuous origin: {text}"
+        );
+
+        let dir = std::env::temp_dir().join(format!("svt-gemm-span-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let outp = dir.join("gemm_span__svt.sv");
+        std::fs::write(&outp, &text).expect("write emit");
+        let post = analyze_files(&[outp.clone()], &ParseOptions::default(), &lower)
+            .expect("re-analyze emit");
+        let after = post
+            .design
+            .paths
+            .iter()
+            .filter(|p| !p.multi_cycle)
+            .map(|p| p.total_fo4)
+            .fold(0.0_f64, f64::max);
+        let pc = frequency_closure(&post.design);
+        let post_dump: Vec<String> = post
+            .design
+            .paths
+            .iter()
+            .map(|p| {
+                format!(
+                    "id={} fo4={:.1} nodes={} class={:?} mc={}",
+                    p.id, p.total_fo4, p.nodes.len(), p.path_class, p.multi_cycle
+                )
+            })
+            .collect();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            after + 1.0 < before,
+            "emitted re-analysis must drop FO4 (IR/emit contract); before={before:.1} after={after:.1} closes={} paths={post_dump:?} emit_head={}",
+            pc.closes,
+            text.lines().take(48).collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    /// Mixed exclusive leftover + gemm-shaped cone: cleanliness stays S3, the
+    /// resilient exception still admits S4 InsertReg (audit-gemm-rcf hole).
+    #[test]
+    fn mixed_resilient_exception_admits_insert_reg() {
+        use sv_timing_core::{
+            analyze_files, default_fo4_v1_embedded, exception_policy, LowerOptions, TimingTarget,
+        };
+        use sv_timing_transform::{run_correct_passes, EditKind, PassContext, PassPolicy};
+        use std::path::PathBuf;
+
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/mixed_resilient.sv");
+        if !path.exists() {
+            panic!("missing fixture {}", path.display());
+        }
+        let mut lower = LowerOptions {
+            target: TimingTarget::new(4000.0, 20.0, 0.2),
+            cost_model: default_fo4_v1_embedded(),
+            module_filter: vec!["mixed_resilient".into()],
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let out = analyze_files(&[path.clone()], &ParseOptions::default(), &lower)
+            .expect("analyze mixed_resilient");
+        let dp = out
+            .design
+            .paths
+            .iter()
+            .filter(|p| {
+                !p.multi_cycle
+                    && p.path_class == sv_timing_core::PathClassKind::Plain
+                    && p.path_kind == sv_timing_core::PathKind::RegToReg
+            })
+            .max_by(|a, b| a.total_fo4.partial_cmp(&b.total_fo4).unwrap())
+            .expect("plain regtoreg cone");
+        let ex = exception_policy(&out.design, dp).expect("resilient exception");
+        assert!(
+            ex.admit_insert_reg,
+            "gemm-shaped cone must admit InsertReg; fo4={:.1} nodes={} kind={:?} note={}",
+            dp.total_fo4,
+            dp.nodes.len(),
+            dp.path_kind,
+            ex.note
+        );
+        let sol = out
+            .design
+            .module_cleanliness
+            .get("mixed_resilient")
+            .expect("cleanliness");
+        let set_label = sol.chosen.as_str().to_string();
+        let allows_ir = sol.allows_opportunity(sv_timing_core::OpportunityKind::InsertReg);
+        let mut policy = PassPolicy::default();
+        policy.correct_enabled = true;
+        policy.correct_allow_modules = vec!["mixed_resilient".into()];
+        policy.allow_latency = true;
+        policy.max_passes = 8;
+        policy.emit_structural = true;
+        let mut ctx = PassContext::new(out.design, out.names, policy);
+        ctx.assume_clk = true;
+        ctx.cost_model = default_fo4_v1_embedded();
+        let ctx = run_correct_passes(ctx).expect("correct");
+        let kinds: Vec<_> = ctx
+            .trace
+            .records
+            .iter()
+            .map(|r| format!("{:?}", r.kind))
+            .collect();
+        assert!(
+            ctx.trace
+                .records
+                .iter()
+                .any(|r| r.kind == EditKind::InsertReg),
+            "resilient exception must InsertReg even if cleanliness is {set_label}; edits={kinds:?} allows_ir={allows_ir}"
         );
     }
 }

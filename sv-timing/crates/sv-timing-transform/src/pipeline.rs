@@ -4,8 +4,8 @@
 //! Pipelining: cut selection, insert_register (IR rewire), split_assign.
 
 use sv_timing_core::{
-    EdgeKind, GateInfo, IrNode, NodeId, OperatorClass, Opportunity, OpportunityKind, PathClassKind,
-    PathEndpoint, PathId, SourceLoc,
+    ConstSeed, EdgeKind, GateInfo, IrNode, NodeId, OperatorClass, Opportunity, OpportunityKind,
+    PathClassKind, PathEndpoint, PathId, SourceLoc,
 };
 
 use crate::edit::{EditKind, EditRecord};
@@ -59,11 +59,35 @@ pub fn expand_expr_spine_for_path(
         .position(|p| p.id == path_id)
         .ok_or_else(|| TransformError::InvalidOpportunity(format!("path {path_id} missing")))?;
     let path = &ctx.design.paths[path_idx];
-    if path.nodes.len() != 1 {
-        return Ok(false);
-    }
-    let root_id = path.nodes[0];
     let module_id = path.module;
+    // Single-node mega-assign, or the hottest over-budget non-atomic node on a
+    // multi-node cone (policy_subcode 16-stmt 30.5 FO4: one fat `&&`/`*` assign
+    // in the middle — old code no-op'd whenever `nodes.len() != 1`).
+    let root_id = if path.nodes.len() == 1 {
+        path.nodes[0]
+    } else {
+        let module = ctx.design.modules.get(&module_id);
+        let mut best: Option<(NodeId, f64)> = None;
+        for &id in &path.nodes {
+            let Some(n) = module.and_then(|m| m.nodes.get(&id)) else {
+                continue;
+            };
+            if matches!(n.op_class, Some(OperatorClass::Mul | OperatorClass::DivRem))
+                && n.fo4_cost > budget + 1e-9
+            {
+                continue;
+            }
+            if n.fo4_cost > budget + 1e-9
+                && best.map(|(_, c)| n.fo4_cost > c).unwrap_or(true)
+            {
+                best = Some((id, n.fo4_cost));
+            }
+        }
+        match best {
+            Some((id, _)) => id,
+            None => return Ok(false),
+        }
+    };
     let origin = path.primary_loc.clone();
     let model = ctx.cost_model.clone();
     let base = move |c: OperatorClass| model.base_fo4(c);
@@ -79,10 +103,14 @@ pub fn expand_expr_spine_for_path(
             .nodes
             .get(&root_id)
             .ok_or_else(|| TransformError::InvalidOpportunity(format!("node {root_id} missing")))?;
+        let mut seed = ConstSeed::from_names(ctx.design.elaboration_const_names(module));
+        for gv in module.genvar_names_at(&n.loc) {
+            seed.add(gv);
+        }
         let spine = n
             .rhs_expr
             .as_ref()
-            .map(|ex| ex.critical_spine_ops(&base))
+            .map(|ex| ex.critical_spine_ops_latticed(&base, &seed))
             .unwrap_or_default();
         (
             n.fo4_cost.max(0.0),
@@ -205,6 +233,7 @@ fn apply_spine_expand(
                         case_is_default: false,
                         case_selector: None,
                         fo4_locked: true,
+                        assign_kind: Default::default(),
                     },
                 );
                 if let Some(p) = prev {
@@ -230,7 +259,16 @@ fn apply_spine_expand(
             }
         }
     }
-    ctx.design.paths[path_idx].nodes = new_nodes;
+    {
+        let path_nodes = &mut ctx.design.paths[path_idx].nodes;
+        if path_nodes.len() <= 1 {
+            *path_nodes = new_nodes;
+        } else if let Some(pos) = path_nodes.iter().position(|id| *id == root_id) {
+            path_nodes.splice(pos..pos + 1, new_nodes);
+        } else {
+            path_nodes.extend(new_nodes);
+        }
+    }
     ctx.design.paths[path_idx].primary_loc = origin;
     ctx.pending_ir_dirty = true;
     true
@@ -258,8 +296,10 @@ pub fn select_pipeline_cuts(
     }
     let gate = resolve_gate(ctx)?;
     let budget = ctx.design.target.budget_fo4.max(1.0);
-    // Cap cuts per plan: leave room for later passes; avoid runaway latency.
-    let max_cuts = (ctx.policy.max_passes as usize).clamp(1, 4);
+    // Cap cuts per plan from the stages dial (`--opt-max-stages-per-region`,
+    // `-O3` default 8, soak often 20). The old max_passes.clamp(1, 4) left
+    // policy_subcode 30.5 with a single 10/20 split.
+    let max_cuts = (ctx.policy.opt.max_stages_per_region as usize).clamp(1, 16);
 
     let cuts = match schedule_pipeline_cuts(ctx, opportunity.path_id, budget, max_cuts) {
         Ok(c) if !c.is_empty() => c,
@@ -700,6 +740,7 @@ fn rewire_path_at_cut(
                 case_is_default: false,
                 case_selector: None,
                 fo4_locked: true,
+                assign_kind: sv_timing_core::AssignKind::Nonblocking,
             },
         );
         // Record name on fan metadata via rationale only; name is in EditTrace.
@@ -726,13 +767,19 @@ fn rewire_path_at_cut(
                 .unwrap_or(0.0)
         };
         let left_fo4 = sum_nodes(&left);
+        // Keep the original capture so the residual stays the same path kind
+        // (RegToReg when the parent was). A dummy OutputPort made residuals
+        // RegToOut, so exception_policy stopped admitting the 20.5 FO4
+        // policy_subcode remainder after the first `d = pipe` cut.
+        let orig_end = ctx.design.paths[path_idx].end.clone();
+        let orig_endpoint = ctx.design.paths[path_idx].endpoint.clone();
         // Truncate original path to left segment (launch → pipe).
         ctx.design.paths[path_idx].nodes = left;
         ctx.design.paths[path_idx].end = PathEndpoint::RegData { cell: sig_id };
         ctx.design.paths[path_idx].total_fo4 = left_fo4;
         ctx.design.paths[path_idx].slack_fo4 =
             ctx.design.target.budget_fo4 - left_fo4;
-        // Residual comb after pipe as a new path (reg → capture).
+        // Residual comb after pipe as a new path (pipe → original capture).
         if !right.is_empty() {
             let right_fo4 = sum_nodes(&right);
             let new_id = ctx.design.paths.iter().map(|p| p.id).max().unwrap_or(0) + 1;
@@ -745,10 +792,7 @@ fn rewire_path_at_cut(
                 .map(|n| n.loc.clone())
                 .unwrap_or_else(|| cut.origin.clone());
             let start = PathEndpoint::RegData { cell: sig_id };
-            let end = PathEndpoint::OutputPort {
-                module: module_id,
-                port: 1,
-            };
+            let end = orig_end;
             let mod_name = ctx
                 .design
                 .modules
@@ -765,7 +809,7 @@ fn rewire_path_at_cut(
                 end: end.clone(),
                 path_kind,
                 startpoint: start.report_name(mod_name),
-                endpoint: end.report_name(mod_name),
+                endpoint: orig_endpoint,
                 nodes: right,
                 total_fo4: right_fo4,
                 slack_fo4: budget - right_fo4,
@@ -1681,6 +1725,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1828,6 +1873,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1924,6 +1970,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -1977,6 +2024,7 @@ mod tests {
         policy.correct_allow_modules = vec!["m".into()];
         policy.allow_latency = true;
         policy.max_passes = 4;
+        policy.opt.max_stages_per_region = 4;
         let mut ctx = PassContext::new(design, NameTable::new(), policy);
         ctx.active_module_name = "m".into();
         ctx.assume_clk = true;
@@ -2032,6 +2080,7 @@ mod tests {
                 case_is_default: false,
                 case_selector: None,
                 fo4_locked: false,
+                assign_kind: Default::default(),
             },
         );
         design.modules.insert(
@@ -2126,6 +2175,7 @@ mod tests {
                 case_is_default: false,
                 case_selector: None,
                 fo4_locked: false,
+                assign_kind: Default::default(),
             },
         );
         design.modules.insert(
@@ -2180,6 +2230,217 @@ mod tests {
     }
 
     #[test]
+    fn insert_register_residual_keeps_regtoreg_capture() {
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        design.target.budget_fo4 = 10.0;
+        let mut nodes = BTreeMap::new();
+        for id in 0..4u32 {
+            nodes.insert(
+                id,
+                IrNode {
+                    id,
+                    op_class: Some(OperatorClass::LogicBit),
+                    width: 8,
+                    fo4_cost: 8.0,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: if id == 0 { vec![] } else { vec![id - 1] },
+                    fans_out: if id == 3 { vec![] } else { vec![id + 1] },
+                    width_defaulted: false,
+                    reads_reg: false,
+                    lhs: Some(format!("t{id}")),
+                    rhs: None,
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: Default::default(),
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            sv_timing_core::TimingModule {
+                id: 0,
+                name: "m".into(),
+                file: "t.sv".into(),
+                nodes,
+                regions: BTreeMap::new(),
+                localparams: Vec::new(),
+                parameters: Vec::new(),
+                ports: Vec::new(),
+                gen_loops: Vec::new(),
+                functions: Vec::new(),
+                package_imports: Vec::new(),
+                instances: Vec::new(),
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("m".into(), 0);
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 0,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: sv_timing_core::PathKind::from_endpoints(&start, &end),
+            startpoint: start.report_name("m"),
+            endpoint: end.report_name("m"),
+            nodes: vec![0, 1, 2, 3],
+            total_fo4: 32.0,
+            slack_fo4: -22.0,
+            max_freq_mhz: 500.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: sv_timing_core::PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        let mut policy = PassPolicy::strict_test();
+        policy.correct_allow_modules = vec!["m".into()];
+        policy.allow_latency = true;
+        policy.opt.max_stages_per_region = 8;
+        let mut ctx = PassContext::new(design, NameTable::new(), policy);
+        ctx.active_module_name = "m".into();
+        ctx.assume_clk = true;
+        let opp = Opportunity {
+            kind: OpportunityKind::InsertReg,
+            path_id: 0,
+            insert_after: 0,
+            estimated_fo4_before: 32.0,
+            estimated_fo4_after: 10.0,
+            loc: loc(),
+            rationale: "cut".into(),
+            requires_clock_in_scope: true,
+            changes_latency: true,
+        };
+        let plan = select_pipeline_cuts(&ctx, &opp).unwrap();
+        assert!(
+            plan.cuts.len() >= 2,
+            "32 FO4 / budget 10 with stages=8 should multi-cut, got {}",
+            plan.cuts.len()
+        );
+        insert_register(&mut ctx, &plan).unwrap();
+        let capture = PathEndpoint::RegData { cell: 1 };
+        assert!(
+            ctx.design
+                .paths
+                .iter()
+                .any(|p| p.end == capture
+                    && matches!(p.start, PathEndpoint::RegData { .. })
+                    && p.path_kind == sv_timing_core::PathKind::RegToReg),
+            "residual after InsertReg must keep the original capture (RegToReg), paths={:?}",
+            ctx.design
+                .paths
+                .iter()
+                .map(|p| format!(
+                    "id={} kind={:?} start={:?} end={:?}",
+                    p.id, p.path_kind, p.start, p.end
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !ctx.design.paths.iter().any(|p| matches!(
+                p.end,
+                PathEndpoint::OutputPort { .. }
+            )),
+            "dummy OutputPort residual would drop exception_policy"
+        );
+    }
+
+    #[test]
+    fn expand_expr_spine_splices_fat_node_on_multi_node_path() {
+        let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
+        design.target.budget_fo4 = 10.0;
+        let mut nodes = BTreeMap::new();
+        for (id, cost) in [(0u32, 2.0), (1, 22.0), (2, 2.0)] {
+            nodes.insert(
+                id,
+                IrNode {
+                    id,
+                    op_class: Some(OperatorClass::LogicBit),
+                    width: 8,
+                    fo4_cost: cost,
+                    gate: None,
+                    loc: loc(),
+                    fans_in: if id == 0 { vec![] } else { vec![id - 1] },
+                    fans_out: if id == 2 { vec![] } else { vec![id + 1] },
+                    width_defaulted: false,
+                    reads_reg: false,
+                    lhs: Some(format!("t{id}")),
+                    rhs: None,
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: Default::default(),
+                },
+            );
+        }
+        design.modules.insert(
+            0,
+            sv_timing_core::TimingModule {
+                id: 0,
+                name: "m".into(),
+                file: "t.sv".into(),
+                nodes,
+                regions: BTreeMap::new(),
+                localparams: Vec::new(),
+                parameters: Vec::new(),
+                ports: Vec::new(),
+                gen_loops: Vec::new(),
+                functions: Vec::new(),
+                package_imports: Vec::new(),
+                instances: Vec::new(),
+                loc: loc(),
+            },
+        );
+        design.module_names.insert("m".into(), 0);
+        let start = PathEndpoint::RegClock { cell: 0 };
+        let end = PathEndpoint::RegData { cell: 1 };
+        design.paths.push(TimingPath {
+            id: 7,
+            region_id: 0,
+            module: 0,
+            start: start.clone(),
+            end: end.clone(),
+            path_kind: sv_timing_core::PathKind::from_endpoints(&start, &end),
+            startpoint: start.report_name("m"),
+            endpoint: end.report_name("m"),
+            nodes: vec![0, 1, 2],
+            total_fo4: 26.0,
+            slack_fo4: -16.0,
+            max_freq_mhz: 500.0,
+            primary_loc: loc(),
+            multi_cycle: false,
+            path_class: sv_timing_core::PathClassKind::Plain,
+            total_fo4_raw: None,
+            class_note: None,
+        });
+        let mut policy = PassPolicy::strict_test();
+        policy.correct_allow_modules = vec!["m".into()];
+        policy.allow_latency = true;
+        let mut ctx = PassContext::new(design, NameTable::new(), policy);
+        ctx.active_module_name = "m".into();
+        let expanded = expand_expr_spine_for_path(&mut ctx, 7).unwrap();
+        assert!(expanded, "fat non-atomic node on a 3-node path must half-split");
+        let path = ctx.design.paths.iter().find(|p| p.id == 7).unwrap();
+        assert!(
+            path.nodes.len() >= 4,
+            "splice must keep neighbors and insert prep, got {:?}",
+            path.nodes
+        );
+        assert_eq!(path.nodes.first().copied(), Some(0));
+        assert_eq!(path.nodes.last().copied(), Some(2));
+    }
+
+    #[test]
     fn rebalance_associative_validates_and_records() {
         use sv_timing_core::Expr;
         let mut design = TimingDesign::empty(TimingTarget::new(1000.0, 20.0, 0.2));
@@ -2207,6 +2468,7 @@ mod tests {
                 case_is_default: false,
                 case_selector: None,
                 fo4_locked: false,
+                assign_kind: Default::default(),
             },
         );
         design.modules.insert(
@@ -2281,6 +2543,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -2398,6 +2661,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: Some("op_i".into()),
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -2509,6 +2773,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: Some("op_i".into()),
                     fo4_locked: false,
+                assign_kind: Default::default(),
                 },
             );
         }
@@ -2543,6 +2808,7 @@ mod tests {
                 case_is_default: true,
                 case_selector: Some("op_i".into()),
                 fo4_locked: false,
+                assign_kind: Default::default(),
             },
         );
         design.modules.insert(
@@ -2636,6 +2902,7 @@ mod tests {
                 case_is_default: false,
                 case_selector: None,
                 fo4_locked: false,
+                assign_kind: Default::default(),
             },
         );
         design.modules.insert(

@@ -39,6 +39,7 @@ pub mod cone_lane;
 pub mod ref_order;
 pub mod parallel_timing;
 pub mod cleanliness;
+pub mod pass_strategy;
 pub mod relocation;
 pub mod version;
 
@@ -51,7 +52,9 @@ pub use debug_export::{
     DebugExport, DebugOptions,
 };
 pub use error::{CoreError, CoreResult};
-pub use expr::{classify_binary_op, Expr, ExprStagePlan};
+pub use expr::{
+    classify_binary_op, ConstClass, ConstSeed, Expr, ExprStagePlan, PartSelectKind,
+};
 pub use filelist::{
     load_filelist, load_filelist_default, write_filelist, FileList, FileListOptions,
 };
@@ -59,8 +62,9 @@ pub use ir::*;
 pub use loc::{OriginKind, SourceLoc};
 pub use lower::{analyze_files, lower_unit, AnalyzeOutput, LowerOptions};
 pub use measure::{
-    attribute_costs, frequency_closure, line_cost_map, max_freq_mhz_for_path, rank_paths_by_slack,
-    rank_regions_by_cost, refresh_primary_locs, remeasure_path_slacks, remeasure_path_slacks_with_hints,
+    attribute_costs, compose_reg_to_reg_paths, frequency_closure, line_cost_map,
+    max_freq_mhz_for_path, rank_paths_by_slack, rank_regions_by_cost, refresh_primary_locs,
+    remeasure_path_slacks, remeasure_path_slacks_with_hints,
     sta_hints_from_design, suggest_opportunities, tag_multi_cycle_paths, CostModel,
     FrequencyClosure, RankedPaths, StaHint,
 };
@@ -78,6 +82,14 @@ pub use parallel_timing::{
 pub use cleanliness::{
     algo_set_catalog, explore_module, fill_design_cleanliness, AlgoSetCandidate, AlgoSetId,
     AlgoSetSpec, CleanlinessWeights, ModuleSolution,
+};
+pub use pass_strategy::{
+    admits_insert_reg, classify_path, exception_policy, is_latency_neutral_kind,
+    is_resilient_datapath, is_shallow_over_budget, path_has_indexed_restore,
+    path_has_span_family_lhs, path_is_handshake_locked, path_span_lhs_all_cut,
+    plan_from_design, s4_has_pending_resilient, s4_sibling_span_pending,
+    span_family_lhs_on_path, tag_handshake_locks, ExceptionPolicy,
+    ExceptionPolicyKind, PassPlan, PatternHit, PatternId,
 };
 pub use relocation::{
     build_relocation_plan, is_measure_only, opportunity_to_relocation_kind,

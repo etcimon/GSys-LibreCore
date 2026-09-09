@@ -270,6 +270,45 @@ fn trailing_incomplete_operator(rhs: &str) -> bool {
     )
 }
 
+/// True when RHS still contains another `ident =` at depth 0.
+///
+/// HPDcache AMO uses comma-separated continuous assigns:
+/// `assign ugt = (a > b), sgt = (c > d), sum = c + d;`
+/// Recovering from the `sgt` line yields rhs `(c > d), sum = c + d`. Rewriting
+/// that as `sgt = pipe` / `assign pipe_c = (…, sum = …)` is illegal SV
+/// (`audit-remain-v37-full-core` hpdcache_amo parse).
+fn rhs_is_comma_assign_list(rhs: &str) -> bool {
+    let b = rhs.as_bytes();
+    let mut depth = 0i32;
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'(' | b'{' | b'[' => depth += 1,
+            b')' | b'}' | b']' => depth = (depth - 1).max(0),
+            b',' if depth == 0 => {
+                let rest = rhs[i + 1..].trim_start();
+                if let Some((lhs, _, _)) = parse_assign_line(rest) {
+                    if !lhs.is_empty() {
+                        return true;
+                    }
+                }
+                // `ident =` even without a leading `assign`.
+                let ident: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                let after = rest[ident.len()..].trim_start();
+                if !ident.is_empty() && after.starts_with('=') && !after.starts_with("==") {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Recover assignment spanning multiple lines (case label on one line, body on next).
 pub fn parse_assign_multiline(source: &str, start_line_1based: u32, max_extra: u32) -> Option<(String, String, bool, u32)> {
     // Returns (lhs, rhs, nba, end_line)
@@ -466,11 +505,56 @@ fn line_is_continuous_assign(source: &str, line: u32) -> bool {
     t.starts_with("assign ") || t.starts_with("assign\t")
 }
 
+fn line_looks_like_assign(source: &str, line: u32) -> bool {
+    if line_is_continuous_assign(source, line) {
+        return true;
+    }
+    let Some(raw) = source_line(source, line) else {
+        return false;
+    };
+    parse_assign_line(raw).is_some()
+}
+
+/// Pin rewrite to a real assign in `[start, end]` and detect `assign`.
+///
+/// IR origin can land on a blank/`end` line immediately before a continuous
+/// `assign` (`instr_queue` `idx_is_d`, `te_branch_map` `map_o`). Treating that
+/// as procedural emits illegal module-scope `lhs = pipe` (audit-gemm-expol5).
+fn cut_rewrite_anchor(source: &str, start: u32, end: u32) -> (u32, bool) {
+    let end = end.max(start);
+    let continuous = (start..=end).any(|ln| line_is_continuous_assign(source, ln));
+    let line = (start..=end)
+        .find(|&ln| line_looks_like_assign(source, ln))
+        .unwrap_or(start);
+    (line, continuous)
+}
+
 /// Base identifier of an lvalue (`foo[3:0]` → `foo`, `pkg::x` → last segment).
 fn lhs_base_ident(lhs: &str) -> &str {
     let s = lhs.trim();
     let s = s.split('[').next().unwrap_or(s).trim();
     s.rsplit("::").next().unwrap_or(s).trim()
+}
+
+fn norm_expr(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// True when rewriting this procedural line to `lhs = pipe` would drop `if`/`for`.
+fn procedural_cut_is_unsafe(line: &str, lhs: &str) -> bool {
+    if has_free_gen_index(lhs) {
+        return true;
+    }
+    let t = strip_line_comment(line).trim();
+    let t = strip_case_item_labels(t).trim();
+    let lower = t.to_ascii_lowercase();
+    lower.starts_with("if ")
+        || lower.starts_with("if(")
+        || lower.starts_with("else")
+        || lower.starts_with("for ")
+        || lower.starts_with("for(")
+        || lower.starts_with("while ")
+        || lower.starts_with("while(")
 }
 
 /// True when `lhs` is safe to drive from a module-scope continuous sink.
@@ -499,8 +583,51 @@ fn lhs_is_module_level_net(source: &str, lhs: &str) -> bool {
     true
 }
 
-/// Unified R12 gate: snippet is safe to inject early **and** to use for origin
-/// RHS rewrite. Keep demotion and rewrite in lockstep.
+/// 1-based start line of the `always_*` / `assign` that contains `origin_line`.
+///
+/// BalanceMux wires must be injected here (not at the module's first process):
+/// gemm declares `pe_float_en` after an early `always_comb`, and the hot NBA
+/// lives in a later `always_ff` (`audit-remain-v21b` demoted the snippet).
+pub fn enclosing_process_start_line(source: &str, origin_line: u32) -> u32 {
+    if origin_line == 0 {
+        return 1;
+    }
+    let mut last_proc = origin_line;
+    for (i, raw) in source.lines().enumerate() {
+        let ln = (i + 1) as u32;
+        let t = strip_line_comment(raw).trim();
+        let lower = t.to_ascii_lowercase();
+        if lower.starts_with("always_comb")
+            || lower.starts_with("always_ff")
+            || lower.starts_with("always_latch")
+            || lower.starts_with("always ")
+            || lower.starts_with("always@")
+            || lower.starts_with("always @")
+            || lower.starts_with("assign ")
+            || lower.starts_with("assign\t")
+        {
+            last_proc = ln;
+        }
+        if ln == origin_line {
+            return last_proc;
+        }
+    }
+    origin_line
+}
+
+fn line_to_byte_offset(source: &str, line: u32) -> usize {
+    let mut off = 0usize;
+    for (i, l) in source.lines().enumerate() {
+        if (i + 1) as u32 >= line.max(1) {
+            return off;
+        }
+        off += l.len() + 1;
+    }
+    off
+}
+
+/// Unified R12 gate: snippet is safe to inject at the origin process **and**
+/// to use for origin RHS rewrite. Keep demotion and rewrite in lockstep.
 pub fn balance_mux_snippet_safe(source: &str, snippet: &str, origin_line: u32) -> bool {
     let t = snippet.trim();
     if t.is_empty() {
@@ -515,7 +642,8 @@ pub fn balance_mux_snippet_safe(source: &str, snippet: &str, origin_line: u32) -
     if snippet_has_generate_local_param(t) {
         return false;
     }
-    if snippet_refs_late_declared_local(source, t) {
+    let inject_at = enclosing_process_start_line(source, origin_line);
+    if snippet_refs_late_declared_local(source, t, inject_at) {
         return false;
     }
     true
@@ -560,33 +688,17 @@ pub fn snippet_has_generate_local_param(text: &str) -> bool {
     false
 }
 
-/// True when snippet references idents declared only after the first process.
+/// True when snippet references idents declared only after `inject_before_line`.
 ///
-/// Shared with dense early-inject demotion so BalanceMux RHS rewrite and
-/// snippet inject stay aligned (R12).
-pub fn snippet_refs_late_declared_local(source: &str, snippet: &str) -> bool {
-    let first_proc = {
-        let lower = source.to_ascii_lowercase();
-        let mut best = source.len();
-        for key in [
-            "always_comb",
-            "always_ff",
-            "always_latch",
-            "always @",
-            "always@",
-            "\nassign ",
-            "\n  assign ",
-        ] {
-            if let Some(i) = lower.find(key) {
-                if let Some(mod_i) = lower.find("module ") {
-                    if i > mod_i {
-                        best = best.min(i);
-                    }
-                }
-            }
-        }
-        best
-    };
+/// Shared with dense inject demotion so BalanceMux RHS rewrite and snippet
+/// inject stay aligned (R12). `inject_before_line` is the enclosing process
+/// of the origin (not the module's first process).
+pub fn snippet_refs_late_declared_local(
+    source: &str,
+    snippet: &str,
+    inject_before_line: u32,
+) -> bool {
+    let inject_off = line_to_byte_offset(source, inject_before_line.max(1));
     let bytes = snippet.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -625,7 +737,7 @@ pub fn snippet_refs_late_declared_local(source: &str, snippet: &str) -> bool {
                         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                         .filter(|s| !s.is_empty())
                         .collect();
-                    if toks.iter().any(|tok| *tok == id) && off > first_proc {
+                    if toks.iter().any(|tok| *tok == id) && off >= inject_off {
                         return true;
                     }
                 }
@@ -731,20 +843,25 @@ pub fn cut_assigns_from_source_ex(
             {
                 let lhs_ok =
                     !has_free_gen_index(&lhs) && lhs_is_module_level_net(source, &lhs);
-                if rhs_structurally_complete(&rhs) && lhs_ok && !claimed_lhs.contains(&lhs) {
+                if rhs_structurally_complete(&rhs)
+                    && !rhs_is_comma_assign_list(&rhs)
+                    && lhs_ok
+                    && !claimed_lhs.contains(&lhs)
+                {
                     for ln in origin_line..=end {
                         claimed_lines.insert(ln);
                     }
                     claimed_lhs.insert(lhs.clone());
+                    let (line, continuous) = cut_rewrite_anchor(source, origin_line, end);
                     claimed = Some(CutAssign {
-                        line: origin_line,
+                        line,
                         end_line: end,
                         lhs,
                         rhs,
                         nonblocking: nba,
                         pipe_name: pipe.clone(),
                         edit_id: r.id,
-                        continuous: line_is_continuous_assign(source, origin_line),
+                        continuous,
                     });
                 }
             }
@@ -766,7 +883,7 @@ pub fn cut_assigns_from_source_ex(
                 else {
                     continue;
                 };
-                if !rhs_structurally_complete(&rhs) {
+                if !rhs_structurally_complete(&rhs) || rhs_is_comma_assign_list(&rhs) {
                     continue;
                 }
                 if has_free_gen_index(&lhs) || !lhs_is_module_level_net(source, &lhs) {
@@ -779,15 +896,16 @@ pub fn cut_assigns_from_source_ex(
                     claimed_lines.insert(ln);
                 }
                 claimed_lhs.insert(lhs.clone());
+                let (line, continuous) = cut_rewrite_anchor(source, line_no, end);
                 claimed = Some(CutAssign {
-                    line: line_no,
+                    line,
                     end_line: end,
                     lhs,
                     rhs,
                     nonblocking: nba,
                     pipe_name: pipe.clone(),
                     edit_id: r.id,
-                    continuous: line_is_continuous_assign(source, line_no),
+                    continuous,
                 });
                 break;
             }
@@ -824,6 +942,801 @@ pub fn primary_feed_expr(cuts: &[CutAssign]) -> Option<String> {
     cuts.first().map(|c| c.rhs.clone())
 }
 
+/// LHS ident is a generate-if span/end role (`a_span`, `b_end`).
+///
+/// KD0: suffix only. Twin copy (identical LHS **and** RHS) is separate;
+/// this names the leftover geometry that needs its own pipe.
+fn lhs_is_span_family_ident(lhs: &str) -> bool {
+    let base = lhs_base_ident(lhs);
+    let base = base.rsplit('.').next().unwrap_or(base);
+    base.ends_with("_span") || base.ends_with("_end")
+}
+
+fn lex_sv_line_tokens(t: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let b = t.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i] as char;
+        if c.is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c.is_ascii_alphabetic() || c == '_' {
+            let s = i;
+            i += 1;
+            while i < b.len() {
+                let d = b[i] as char;
+                if d.is_ascii_alphanumeric() || d == '_' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(t[s..i].to_string());
+            continue;
+        }
+        out.push(c.to_string());
+        i += 1;
+    }
+    out
+}
+
+fn tok_is(tok: &str, kw: &str) -> bool {
+    tok.eq_ignore_ascii_case(kw)
+}
+
+/// Named `if` / `else` generate-if ranges (`if (En) begin : gen_reuse_a`).
+///
+/// Keyword `generate`/`endgenerate` is **not** required (CVA6-style implicit
+/// generate). Used to pair sibling span/end assigns that twin-copy cannot
+/// share a pipe with because their RHS differ.
+fn named_generate_if_blocks(source: &str) -> Vec<(u32, u32, String)> {
+    let mut blocks = Vec::new();
+    let mut stack: Vec<(String, u32, i32)> = Vec::new(); // name, start, depth after begin
+    let mut depth: i32 = 0;
+    let mut pending_if = false;
+    for (i, raw) in source.lines().enumerate() {
+        let ln = (i + 1) as u32;
+        let t = strip_line_comment(raw).trim();
+        if t.is_empty() {
+            continue;
+        }
+        let toks = lex_sv_line_tokens(t);
+        let mut j = 0usize;
+        while j < toks.len() {
+            let tok = &toks[j];
+            if tok_is(tok, "if") || tok_is(tok, "else") {
+                pending_if = true;
+                j += 1;
+                continue;
+            }
+            if tok_is(tok, "begin") {
+                depth += 1;
+                let mut name: Option<String> = None;
+                if j + 2 < toks.len() && toks[j + 1] == ":" {
+                    let n = &toks[j + 2];
+                    if n.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+                        name = Some(n.clone());
+                    }
+                }
+                if pending_if {
+                    if let Some(n) = name {
+                        stack.push((n, ln, depth));
+                    }
+                    pending_if = false;
+                }
+                j += 1;
+                continue;
+            }
+            if tok_is(tok, "end") {
+                depth = (depth - 1).max(0);
+                while stack.last().is_some_and(|s| s.2 > depth) {
+                    let (n, start, _) = stack.pop().unwrap();
+                    blocks.push((start, ln, n));
+                }
+                j += 1;
+                continue;
+            }
+            if tok == ";" {
+                pending_if = false;
+            }
+            j += 1;
+        }
+        if t.ends_with(';') && !t.to_ascii_lowercase().contains("begin") {
+            pending_if = false;
+        }
+    }
+    blocks
+}
+
+fn line_in_named_if(blocks: &[(u32, u32, String)], line: u32) -> bool {
+    blocks.iter().any(|(s, e, _)| line >= *s && line <= *e)
+}
+
+fn sanitize_pipe_ident(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            out.push(c);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "x".into()
+    } else {
+        out
+    }
+}
+
+/// Split `fat * … + tail` at the last depth-0 `+` so the sibling extra can
+/// use a prep pipe (mux/shift/mul) then an add pipe (AddSub = budget).
+///
+/// gemm leftover after A: `32'(n-1) * fmt_row_bytes(…) + k_bytes` is Mux 2.5
+/// + AddSub 10 = 12.5 in one feed. `{1'b0, pa_q} + span` has no `*` on the
+/// left and is left as a single add (already 10).
+fn is_simple_ident(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Ports / flop Qs are already sequential; combo helpers like `k_bytes` are not.
+fn ident_already_sequential(s: &str) -> bool {
+    let s = s.trim();
+    s.ends_with("_q")
+        || s.ends_with("_i")
+        || s.ends_with("_n")
+        || s.ends_with("_d")
+        || s.ends_with("_qi")
+}
+
+fn split_trailing_star_add(rhs: &str) -> Option<(String, String)> {
+    let t = rhs.trim();
+    // One layer of wrapping parens so `(A * B + C)` still splits.
+    let s = if t.starts_with('(') && t.ends_with(')') {
+        let inner = t[1..t.len() - 1].trim();
+        if rhs_structurally_complete(inner) {
+            inner
+        } else {
+            t
+        }
+    } else {
+        t
+    };
+    let b = s.as_bytes();
+    let mut depth = 0i32;
+    let mut last_plus: Option<usize> = None;
+    let mut i = 0usize;
+    while i < b.len() {
+        match b[i] {
+            b'(' | b'{' | b'[' => depth += 1,
+            b')' | b'}' | b']' => depth = (depth - 1).max(0),
+            b'+' if depth == 0 => last_plus = Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    let idx = last_plus?;
+    let left = s[..idx].trim();
+    let right = s[idx + 1..].trim().trim_end_matches(';').trim();
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    if !left.contains('*') {
+        return None;
+    }
+    if !rhs_structurally_complete(left) || !rhs_structurally_complete(right) {
+        return None;
+    }
+    Some((left.to_string(), right.to_string()))
+}
+
+fn subst_ident_tokens(text: &str, map: &std::collections::BTreeMap<String, String>) -> String {
+    if map.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 8);
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i] as char;
+        if c.is_ascii_alphabetic() || c == '_' {
+            let s = i;
+            i += 1;
+            while i < b.len() {
+                let d = b[i] as char;
+                if d.is_ascii_alphanumeric() || d == '_' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let tok = &text[s..i];
+            if let Some(rep) = map.get(tok) {
+                out.push_str(rep);
+            } else {
+                out.push_str(tok);
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Extra InsertReg cuts for uncut sibling generate-if `*_span`/`*_end` assigns.
+///
+/// Twin copy requires identical LHS **and** RHS (`c_span` twins). gemm
+/// `a_span`/`b_span` have different RHS (`m`/`lda` vs `n`/`ldb`) and are not
+/// IR paths during correct, so S4 never sees them. When a span-family cut
+/// already exists inside a named generate-if, rewrite the uncut siblings in
+/// those named blocks onto **their own** pipes (not a shared twin pipe).
+///
+/// Origin rewrite is in-place (`assign lhs = extra_pipe`); dense feeds use
+/// the original RHS. Cap 8. Does not re-cut a seed LHS (`c_span`/`c_end`).
+pub fn sibling_span_extra_cuts(source: &str, cuts: &[CutAssign]) -> Vec<CutAssign> {
+    const CAP: usize = 8;
+    let seeds: Vec<&CutAssign> = cuts
+        .iter()
+        .filter(|c| {
+            c.continuous && c.line > 0 && !c.lhs.is_empty() && lhs_is_span_family_ident(&c.lhs)
+        })
+        .collect();
+    if seeds.is_empty() {
+        return Vec::new();
+    }
+    let blocks = named_generate_if_blocks(source);
+    if blocks.is_empty() {
+        return Vec::new();
+    }
+    let seed_in_named = seeds
+        .iter()
+        .any(|c| (c.line..=c.end_line.max(c.line)).any(|ln| line_in_named_if(&blocks, ln)));
+    if !seed_in_named {
+        return Vec::new();
+    }
+
+    let seed_lhs: std::collections::BTreeSet<String> = seeds
+        .iter()
+        .map(|c| lhs_base_ident(&c.lhs).to_string())
+        .collect();
+    let mut claimed_lines: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for c in cuts.iter().filter(|c| c.line > 0) {
+        for ln in c.line..=c.end_line.max(c.line) {
+            claimed_lines.insert(ln);
+        }
+    }
+    let mut used_pipes: std::collections::BTreeSet<String> =
+        cuts.iter().map(|c| c.pipe_name.clone()).collect();
+    let line_count = source.lines().count() as u32;
+
+    let mut found: Vec<(u32, u32, String, String)> = Vec::new(); // line, end, lhs, rhs
+    let mut seen_lhs: std::collections::BTreeSet<String> = seed_lhs.clone();
+    for ln in 1..=line_count {
+        if claimed_lines.contains(&ln) {
+            continue;
+        }
+        if !line_is_continuous_assign(source, ln) {
+            continue;
+        }
+        if !line_in_named_if(&blocks, ln) {
+            continue;
+        }
+        let Some((lhs, rhs, _, end)) = parse_assign_multiline(source, ln, 8) else {
+            continue;
+        };
+        if !lhs_is_span_family_ident(&lhs) {
+            continue;
+        }
+        let base = lhs_base_ident(&lhs).to_string();
+        if seed_lhs.contains(&base) || seen_lhs.contains(&base) {
+            continue;
+        }
+        if has_free_gen_index(&lhs) || !lhs_is_module_level_net(source, &lhs) {
+            continue;
+        }
+        if !rhs_structurally_complete(&rhs) {
+            continue;
+        }
+        seen_lhs.insert(base);
+        for n in ln..=end.max(ln) {
+            claimed_lines.insert(n);
+        }
+        found.push((ln, end.max(ln), lhs, rhs));
+    }
+    // `_span` before `_end` so end feeds can sample the sibling span pipe.
+    found.sort_by(|a, b| {
+        let a_span = lhs_base_ident(&a.2).ends_with("_span");
+        let b_span = lhs_base_ident(&b.2).ends_with("_span");
+        b_span.cmp(&a_span).then(a.0.cmp(&b.0))
+    });
+
+    let mut pipe_by_lhs: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    for c in &seeds {
+        pipe_by_lhs.insert(lhs_base_ident(&c.lhs).to_string(), c.pipe_name.clone());
+    }
+    let mut out = Vec::new();
+    for (line, end_line, lhs, rhs) in found {
+        if out.len() >= CAP {
+            break;
+        }
+        let base = lhs_base_ident(&lhs).to_string();
+        let mut pipe = format!("pipe_svt_sib_{}_{}", sanitize_pipe_ident(&base), line);
+        let mut n = 2u32;
+        while used_pipes.contains(&pipe) {
+            pipe = format!(
+                "pipe_svt_sib_{}_{}_{}",
+                sanitize_pipe_ident(&base),
+                line,
+                n
+            );
+            n += 1;
+        }
+        used_pipes.insert(pipe.clone());
+        let feed = subst_ident_tokens(&rhs, &pipe_by_lhs);
+        if let Some((left, right)) = split_trailing_star_add(&feed) {
+            let mut prep = format!("{pipe}_p");
+            let mut n = 2u32;
+            while used_pipes.contains(&prep) {
+                prep = format!("{pipe}_p{n}");
+                n += 1;
+            }
+            used_pipes.insert(prep.clone());
+            out.push(CutAssign {
+                line: 0,
+                end_line: 0,
+                lhs: String::new(),
+                rhs: left,
+                nonblocking: false,
+                pipe_name: prep.clone(),
+                edit_id: 10_000 + out.len() as u32,
+                continuous: false,
+            });
+            // Combo tails (`k_bytes = fmt_row_bytes(k_q)`) are Mux 2.5; adding
+            // them to prep Q is 12.5. Sample the ident so the add is Q+Q = 10.
+            let add_rhs = if is_simple_ident(&right) && !ident_already_sequential(&right) {
+                let mut tail = format!("{pipe}_t");
+                let mut n = 2u32;
+                while used_pipes.contains(&tail) {
+                    tail = format!("{pipe}_t{n}");
+                    n += 1;
+                }
+                used_pipes.insert(tail.clone());
+                out.push(CutAssign {
+                    line: 0,
+                    end_line: 0,
+                    lhs: String::new(),
+                    rhs: right.clone(),
+                    nonblocking: false,
+                    pipe_name: tail.clone(),
+                    edit_id: 10_000 + out.len() as u32,
+                    continuous: false,
+                });
+                format!("{prep} + {tail}")
+            } else {
+                format!("{prep} + {right}")
+            };
+            pipe_by_lhs.insert(base, pipe.clone());
+            out.push(CutAssign {
+                line,
+                end_line,
+                lhs,
+                rhs: add_rhs,
+                nonblocking: false,
+                pipe_name: pipe,
+                edit_id: 10_000 + out.len() as u32,
+                continuous: true,
+            });
+        } else {
+            pipe_by_lhs.insert(base, pipe.clone());
+            out.push(CutAssign {
+                line,
+                end_line,
+                lhs,
+                rhs: feed,
+                nonblocking: false,
+                pipe_name: pipe,
+                edit_id: 10_000 + out.len() as u32,
+                continuous: true,
+            });
+        }
+    }
+    out
+}
+
+fn ident_tokens_in(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i] as char;
+        if c.is_ascii_alphabetic() || c == '_' {
+            let s = i;
+            i += 1;
+            while i < b.len() {
+                let d = b[i] as char;
+                if d.is_ascii_alphanumeric() || d == '_' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            out.push(text[s..i].to_string());
+            continue;
+        }
+        i += 1;
+    }
+    out
+}
+
+fn collect_continuous_assigns(
+    source: &str,
+) -> std::collections::BTreeMap<String, (u32, u32, String)> {
+    let mut map = std::collections::BTreeMap::new();
+    let line_count = source.lines().count() as u32;
+    let mut claimed = std::collections::BTreeSet::new();
+    for ln in 1..=line_count {
+        if claimed.contains(&ln) || !line_is_continuous_assign(source, ln) {
+            continue;
+        }
+        let Some((lhs, rhs, _, end)) = parse_assign_multiline(source, ln, 8) else {
+            continue;
+        };
+        let base = lhs_base_ident(&lhs).to_string();
+        if base.is_empty() || map.contains_key(&base) {
+            continue;
+        }
+        for n in ln..=end.max(ln) {
+            claimed.insert(n);
+        }
+        map.insert(base, (ln, end.max(ln), rhs));
+    }
+    map
+}
+
+/// Uncut combo assign sandwiched between two InsertReg cuts (VII.E).
+///
+/// `instr_queue` leftover: `lo_partial` and `push_instr_fifo` are cut,
+/// `push_instr` in between is live and becomes the 15.5 feed into the
+/// fifo pipe. Extra-cut that sandwich and one hop of its combo producers
+/// (`fifo_pos`, `instr_overflow`, `slot0_pos`) so the remainder feed is
+/// a mux of pipe Qs, not a 9-node cone. In-place rewrite; does not recut
+/// claimed lines (F2). Cap 4. Span-family leftovers stay with sibling extras.
+pub fn remainder_sandwich_extra_cuts(source: &str, cuts: &[CutAssign]) -> Vec<CutAssign> {
+    const CAP: usize = 4;
+    let cut_lhs: std::collections::BTreeSet<String> = cuts
+        .iter()
+        .filter(|c| !c.lhs.is_empty())
+        .map(|c| lhs_base_ident(&c.lhs).to_string())
+        .collect();
+    if cut_lhs.is_empty() {
+        return Vec::new();
+    }
+    let assigns = collect_continuous_assigns(source);
+    let mut claimed_lines: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for c in cuts.iter().filter(|c| c.line > 0) {
+        for ln in c.line..=c.end_line.max(c.line) {
+            claimed_lines.insert(ln);
+        }
+    }
+    let mut used_pipes: std::collections::BTreeSet<String> =
+        cuts.iter().map(|c| c.pipe_name.clone()).collect();
+    let mut claimed_lhs = cut_lhs.clone();
+
+    let mut sandwiches: Vec<(String, u32, u32, String)> = Vec::new();
+    for c in cuts {
+        if c.rhs.is_empty() {
+            continue;
+        }
+        for tok in ident_tokens_in(&c.rhs) {
+            if claimed_lhs.contains(&tok) || lhs_is_span_family_ident(&tok) {
+                continue;
+            }
+            if ident_already_sequential(&tok) {
+                continue;
+            }
+            let Some((line, end, rhs)) = assigns.get(&tok) else {
+                continue;
+            };
+            if claimed_lines.contains(line) || line_inside_generate(source, *line) {
+                continue;
+            }
+            if !ident_tokens_in(rhs).iter().any(|t| cut_lhs.contains(t)) {
+                continue;
+            }
+            if has_free_gen_index(&tok) || !lhs_is_module_level_net(source, &tok) {
+                continue;
+            }
+            if !rhs_structurally_complete(rhs) {
+                continue;
+            }
+            claimed_lhs.insert(tok.clone());
+            sandwiches.push((tok, *line, *end, rhs.clone()));
+        }
+    }
+
+    // Hop-2: combo producers on a sandwich RHS (fifo_pos / instr_overflow).
+    let mut hop2: Vec<(String, u32, u32, String)> = Vec::new();
+    for (_, _, _, rhs) in &sandwiches {
+        for tok in ident_tokens_in(rhs) {
+            if claimed_lhs.contains(&tok) || lhs_is_span_family_ident(&tok) {
+                continue;
+            }
+            if ident_already_sequential(&tok) {
+                continue;
+            }
+            let Some((line, end, prod_rhs)) = assigns.get(&tok) else {
+                continue;
+            };
+            if claimed_lines.contains(line) || line_inside_generate(source, *line) {
+                continue;
+            }
+            if has_free_gen_index(&tok) || !lhs_is_module_level_net(source, &tok) {
+                continue;
+            }
+            if !rhs_structurally_complete(prod_rhs) {
+                continue;
+            }
+            claimed_lhs.insert(tok.clone());
+            hop2.push((tok, *line, *end, prod_rhs.clone()));
+        }
+    }
+
+    let mut pipe_by_lhs: std::collections::BTreeMap<String, String> = cuts
+        .iter()
+        .filter(|c| !c.lhs.is_empty())
+        .map(|c| (lhs_base_ident(&c.lhs).to_string(), c.pipe_name.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for (lhs, line, end_line, rhs) in hop2.into_iter().chain(sandwiches.into_iter()) {
+        if out.len() >= CAP {
+            break;
+        }
+        let mut pipe = format!("pipe_svt_rem_{}_{}", sanitize_pipe_ident(&lhs), line);
+        let mut n = 2u32;
+        while used_pipes.contains(&pipe) {
+            pipe = format!(
+                "pipe_svt_rem_{}_{}_{}",
+                sanitize_pipe_ident(&lhs),
+                line,
+                n
+            );
+            n += 1;
+        }
+        used_pipes.insert(pipe.clone());
+        let feed = subst_ident_tokens(&rhs, &pipe_by_lhs);
+        pipe_by_lhs.insert(lhs.clone(), pipe.clone());
+        for n in line..=end_line {
+            claimed_lines.insert(n);
+        }
+        out.push(CutAssign {
+            line,
+            end_line,
+            lhs,
+            rhs: feed,
+            nonblocking: false,
+            pipe_name: pipe,
+            edit_id: 20_000 + out.len() as u32,
+            continuous: true,
+        });
+    }
+    out
+}
+
+/// Count `&&` / `||` (not bitwise `&` / `|`).
+fn count_bool_binops(rhs: &str) -> usize {
+    let b = rhs.as_bytes();
+    let mut n = 0usize;
+    let mut i = 0usize;
+    while i + 1 < b.len() {
+        if (b[i] == b'&' && b[i + 1] == b'&') || (b[i] == b'|' && b[i + 1] == b'|') {
+            n += 1;
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// True when `rhs[i]` is unary `|` (`|vec`), not bitwise `a | b` or `||`.
+///
+/// `|| |is_branch` (space before unary `|`) is unary. `cache_wren | inv_en`
+/// is binary — the previous non-ws is an ident. v40 treated the latter as
+/// three reduces and deleted the `|` operators (`vld_we` / `if_ready`).
+fn is_unary_or_bar(b: &[u8], i: usize) -> bool {
+    if i + 1 < b.len() && b[i + 1] == b'|' {
+        return false;
+    }
+    if i > 0 && b[i - 1] == b'|' {
+        return false;
+    }
+    let mut k = i;
+    while k > 0 {
+        k -= 1;
+        if (b[k] as char).is_ascii_whitespace() {
+            continue;
+        }
+        let ch = b[k] as char;
+        if ch == '|' && k > 0 && b[k - 1] == b'|' {
+            return true;
+        }
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == ')' || ch == ']' || ch == '}' || ch == '\''
+        {
+            return false;
+        }
+        return true;
+    }
+    true
+}
+
+/// Unary or-reductions `|ident` in `rhs` (not `||`, not bitwise `|`).
+fn unary_or_reduces(rhs: &str) -> Vec<(usize, usize, String)> {
+    let b = rhs.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'|' && is_unary_or_bar(b, i) && i + 1 < b.len() {
+            let mut j = i + 1;
+            while j < b.len() && (b[j] as char).is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < b.len() {
+                let c = b[j] as char;
+                if c.is_ascii_alphabetic() || c == '_' {
+                    let s = j;
+                    j += 1;
+                    while j < b.len() {
+                        let d = b[j] as char;
+                        if d.is_ascii_alphanumeric() || d == '_' {
+                            j += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    out.push((i, j, rhs[s..j].to_string()));
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Prep pipes for `|vec` reductions in a mixed boolean cone.
+///
+/// Frontend 13: `spec_d = (q && !r || |is_branch || |is_return || |is_jalr) && !f`
+/// (several 1-bit reduces). wt_dcache 12: `fixup_rd_req = (st==PEND) && !hit
+/// && !(|tocheck) && !en_q && !en_q1` (one reduce in a wide AND). Pipelining
+/// the 1-bit reduce (not the `_d` / req itself) leaves Q-logic under budget.
+/// Needs ≥2 `&&`/`||` when there is only one reduce so a handshake
+/// `assign req_o = |vec && ack` is not extra-cycled. Cap 4 reduces / assign,
+/// 4 assigns / file. Skip `_o` ports and `[i]` lvalues.
+pub fn or_reduce_prep_cuts(
+    source: &str,
+    cuts: &[CutAssign],
+) -> (Vec<CutAssign>, std::collections::BTreeMap<u32, (String, String)>) {
+    const ASSIGN_CAP: usize = 4;
+    let mut preps = Vec::new();
+    let mut rewrites: std::collections::BTreeMap<u32, (String, String)> =
+        std::collections::BTreeMap::new();
+    let mut claimed: std::collections::BTreeSet<u32> = cuts
+        .iter()
+        .filter(|c| c.line > 0)
+        .flat_map(|c| c.line..=c.end_line.max(c.line))
+        .collect();
+    let mut used: std::collections::BTreeSet<String> =
+        cuts.iter().map(|c| c.pipe_name.clone()).collect();
+    let mut n_assigns = 0usize;
+    let line_count = source.lines().count() as u32;
+    for ln in 1..=line_count {
+        if n_assigns >= ASSIGN_CAP {
+            break;
+        }
+        if claimed.contains(&ln) || !line_is_continuous_assign(source, ln) {
+            continue;
+        }
+        if line_inside_generate(source, ln) {
+            continue;
+        }
+        let Some((lhs, rhs, _, end)) = parse_assign_multiline(source, ln, 8) else {
+            continue;
+        };
+        let base = lhs_base_ident(&lhs);
+        if base.ends_with("_o") || has_free_gen_index(&lhs) || lhs.contains('[') {
+            continue;
+        }
+        if rhs_is_comma_assign_list(&rhs) {
+            continue;
+        }
+        let reduces = unary_or_reduces(&rhs);
+        if reduces.is_empty() {
+            continue;
+        }
+        if reduces.len() < 2 && count_bool_binops(&rhs) < 2 {
+            continue;
+        }
+        let mut new_rhs = rhs.clone();
+        // Replace from the end so offsets stay valid.
+        for (start, stop, ident) in reduces.iter().rev().take(4) {
+            let mut pipe = format!("pipe_svt_red_{}_{}", sanitize_pipe_ident(ident), ln);
+            let mut n = 2u32;
+            while used.contains(&pipe) {
+                pipe = format!(
+                    "pipe_svt_red_{}_{}_{}",
+                    sanitize_pipe_ident(ident),
+                    ln,
+                    n
+                );
+                n += 1;
+            }
+            used.insert(pipe.clone());
+            preps.push(CutAssign {
+                line: 0,
+                end_line: 0,
+                lhs: String::new(),
+                rhs: format!("|{ident}"),
+                nonblocking: false,
+                pipe_name: pipe.clone(),
+                edit_id: 30_000 + preps.len() as u32,
+                continuous: false,
+            });
+            new_rhs.replace_range(*start..*stop, &pipe);
+        }
+        if new_rhs == rhs {
+            continue;
+        }
+        n_assigns += 1;
+        for n in ln..=end.max(ln) {
+            claimed.insert(n);
+        }
+        rewrites.insert(ln, (lhs, new_rhs));
+        for n in ln + 1..=end.max(ln) {
+            rewrites.entry(n).or_insert_with(|| (String::new(), String::new()));
+        }
+    }
+    (preps, rewrites)
+}
+
+/// Sibling span extras (VII.A) plus sandwich remainder extras (VII.E)
+/// plus or-reduce prep pipes.
+pub fn all_emit_extra_cuts(source: &str, cuts: &[CutAssign]) -> Vec<CutAssign> {
+    let mut out = sibling_span_extra_cuts(source, cuts);
+    let mut seen: std::collections::BTreeSet<String> = out
+        .iter()
+        .filter(|c| !c.lhs.is_empty())
+        .map(|c| lhs_base_ident(&c.lhs).to_string())
+        .collect();
+    for extra in remainder_sandwich_extra_cuts(source, cuts) {
+        let base = if extra.lhs.is_empty() {
+            String::new()
+        } else {
+            lhs_base_ident(&extra.lhs).to_string()
+        };
+        if !base.is_empty() && !seen.insert(base) {
+            continue;
+        }
+        out.push(extra);
+    }
+    let (preps, _) = or_reduce_prep_cuts(source, cuts);
+    out.extend(preps);
+    out
+}
+
 /// Comment-out origin assignment lines (avoid use-before-declare of pipe regs).
 ///
 /// `lhs = rhs` → `// sv-timing: cut #id moved lhs ← (rhs) via pipe`
@@ -843,25 +1756,107 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
             line_to_cut.entry(ln).or_insert(c);
         }
     }
+    // Twin generate locals (`gen_reuse_a` / `gen_reuse_b` both `assign c_span = mul`)
+    // share an lhs *name* but are distinct nets. claimed_lhs in cut_assigns keeps
+    // one pipe; rewrite every other identical continuous assign onto that pipe
+    // (audit-gemm-expol3 left gen_reuse_b live → post_analyze 161.5).
+    // Different-RHS siblings (`a_span` vs `b_span`) get **their own** pipes via
+    // [`sibling_span_extra_cuts`] (emit-side A) — never share the twin pipe.
+    let mut twin_line: std::collections::BTreeMap<u32, &CutAssign> =
+        std::collections::BTreeMap::new();
+    let line_count = source.lines().count() as u32;
+    for ln in 1..=line_count {
+        if line_to_cut.contains_key(&ln) || twin_line.contains_key(&ln) {
+            continue;
+        }
+        if !line_is_continuous_assign(source, ln) {
+            continue;
+        }
+        let Some((lhs, rhs, _, end)) = parse_assign_multiline(source, ln, 8) else {
+            continue;
+        };
+        let Some(cut) = cuts.iter().find(|c| {
+            c.continuous
+                && c.line > 0
+                && lhs_base_ident(&c.lhs) == lhs_base_ident(&lhs)
+                && norm_expr(&c.rhs) == norm_expr(&rhs)
+        }) else {
+            continue;
+        };
+        for n in ln..=end.max(ln) {
+            twin_line.entry(n).or_insert(cut);
+        }
+    }
+    let extras = all_emit_extra_cuts(source, cuts);
+    let (_, reduce_rw) = or_reduce_prep_cuts(source, cuts);
+    let mut sibling_line: std::collections::BTreeMap<u32, &CutAssign> =
+        std::collections::BTreeMap::new();
+    for extra in &extras {
+        if extra.line == 0 {
+            continue;
+        }
+        for n in extra.line..=extra.end_line.max(extra.line) {
+            if line_to_cut.contains_key(&n) || twin_line.contains_key(&n) {
+                continue;
+            }
+            sibling_line.entry(n).or_insert(extra);
+        }
+    }
 
     let lines: Vec<&str> = source.lines().collect();
     let mut out = String::with_capacity(source.len() + 64 * cuts.len());
     for (i, line) in lines.iter().enumerate() {
         let line_no = (i + 1) as u32;
         if let Some(cut) = line_to_cut.get(&line_no) {
-            // R12d: only rewrite continuous-assign cuts. Procedural always_comb
-            // bodies are kept intact (pipe still stages with zero feed).
-            if !cut.continuous {
+            // Procedural always_ff / always_comb: `--real-cut-feeds` rewrites
+            // a simple assign/NBA to sample the pipe (audit-gemm-expol4 path
+            // 3131 origin is `always_ff` :1859). Unsafe control tails (bare
+            // `if`/`for` on the same line, generate index) keep the origin.
+            let t = strip_line_comment(line).trim();
+            let line_is_assign_kw =
+                t.starts_with("assign ") || t.starts_with("assign\t");
+            if !cut.continuous && !line_is_assign_kw {
+                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
                 if line_no == cut.line {
-                    let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                    if procedural_cut_is_unsafe(line, &cut.lhs) {
+                        out.push_str(&indent);
+                        out.push_str(&format!(
+                            "// sv-timing: cut #{} note (procedural origin kept; lean pipe)\n",
+                            cut.edit_id
+                        ));
+                        out.push_str(line);
+                        out.push('\n');
+                    } else {
+                        let labels = case_item_label_prefix(line);
+                        let op = if cut.nonblocking { " <= " } else { " = " };
+                        out.push_str(&indent);
+                        out.push_str("// sv-timing: cut #");
+                        out.push_str(&cut.edit_id.to_string());
+                        out.push_str(" moved ");
+                        out.push_str(&cut.lhs);
+                        out.push_str(" <- (");
+                        out.push_str(&cut.rhs);
+                        out.push_str(") via ");
+                        out.push_str(&cut.pipe_name);
+                        out.push_str(" (procedural)\n");
+                        out.push_str(&indent);
+                        out.push_str(&labels);
+                        out.push_str(&cut.lhs);
+                        out.push_str(op);
+                        out.push_str(&cut.pipe_name);
+                        out.push_str(";\n");
+                    }
+                } else if is_case_label_only_line(line) {
+                    out.push_str(line);
+                    out.push('\n');
+                } else {
                     out.push_str(&indent);
-                    out.push_str(&format!(
-                        "// sv-timing: cut #{} note (procedural origin kept; lean pipe)\n",
-                        cut.edit_id
-                    ));
+                    out.push_str("// sv-timing: (cut #");
+                    out.push_str(&cut.edit_id.to_string());
+                    out.push_str(" continuation) ");
+                    out.push_str(line.trim());
+                    out.push('\n');
                 }
-                out.push_str(line);
-                out.push('\n');
                 continue;
             }
             let indent: String = line
@@ -899,6 +1894,95 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
                 out.push_str(" continuation) ");
                 out.push_str(line.trim());
                 out.push('\n');
+            }
+        } else if let Some(cut) = twin_line.get(&line_no) {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            if line_is_continuous_assign(source, line_no) {
+                let lhs = parse_assign_multiline(source, line_no, 8)
+                    .map(|(l, _, _, _)| l)
+                    .unwrap_or_else(|| cut.lhs.clone());
+                out.push_str(&indent);
+                out.push_str("// sv-timing: cut #");
+                out.push_str(&cut.edit_id.to_string());
+                out.push_str(" twin moved ");
+                out.push_str(&lhs);
+                out.push_str(" <- (");
+                out.push_str(&cut.rhs);
+                out.push_str(") via ");
+                out.push_str(&cut.pipe_name);
+                out.push_str("\n");
+                out.push_str(&indent);
+                out.push_str("assign ");
+                out.push_str(&lhs);
+                out.push_str(" = ");
+                out.push_str(&cut.pipe_name);
+                out.push_str(";\n");
+            } else if is_case_label_only_line(line) {
+                out.push_str(line);
+                out.push('\n');
+            } else {
+                out.push_str(&indent);
+                out.push_str("// sv-timing: (cut #");
+                out.push_str(&cut.edit_id.to_string());
+                out.push_str(" twin continuation) ");
+                out.push_str(line.trim());
+                out.push('\n');
+            }
+        } else if let Some(cut) = sibling_line.get(&line_no) {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            if line_is_continuous_assign(source, line_no) {
+                let lhs = parse_assign_multiline(source, line_no, 8)
+                    .map(|(l, _, _, _)| l)
+                    .unwrap_or_else(|| cut.lhs.clone());
+                out.push_str(&indent);
+                out.push_str("// sv-timing: cut #");
+                out.push_str(&cut.edit_id.to_string());
+                if lhs_is_span_family_ident(&lhs) {
+                    out.push_str(" sibling span moved ");
+                } else {
+                    out.push_str(" remainder moved ");
+                }
+                out.push_str(&lhs);
+                out.push_str(" <- (");
+                out.push_str(&cut.rhs);
+                out.push_str(") via ");
+                out.push_str(&cut.pipe_name);
+                out.push_str("\n");
+                out.push_str(&indent);
+                out.push_str("assign ");
+                out.push_str(&lhs);
+                out.push_str(" = ");
+                out.push_str(&cut.pipe_name);
+                out.push_str(";\n");
+            } else if is_case_label_only_line(line) {
+                out.push_str(line);
+                out.push('\n');
+            } else {
+                out.push_str(&indent);
+                out.push_str("// sv-timing: (cut #");
+                out.push_str(&cut.edit_id.to_string());
+                out.push_str(" sibling span continuation) ");
+                out.push_str(line.trim());
+                out.push('\n');
+            }
+        } else if let Some((lhs, new_rhs)) = reduce_rw.get(&line_no) {
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            if lhs.is_empty() {
+                out.push_str(&indent);
+                out.push_str("// sv-timing: (or-reduce continuation) ");
+                out.push_str(line.trim());
+                out.push('\n');
+            } else {
+                out.push_str(&indent);
+                out.push_str("// sv-timing: or-reduce preps for ");
+                out.push_str(lhs);
+                out.push_str("\n");
+                out.push_str(&indent);
+                out.push_str("assign ");
+                out.push_str(lhs);
+                out.push_str(" = ");
+                out.push_str(new_rhs);
+                out.push_str(";\n");
             }
         } else {
             out.push_str(line);
@@ -1001,9 +2085,14 @@ pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
                 {
                     let op = if nba { "<=" } else { "=" };
                     let case_prefix = case_item_label_prefix(line);
+                    // Keep `assign` on continuous origins. Dropping it made
+                    // `te_packet_emitter` `assign address_off = …` a module-scope
+                    // blocking assign (`audit-remain-v21` integrity Parse).
+                    let keep_assign = line_is_continuous_assign(source, body_start);
+                    let assign_kw = if keep_assign { "assign " } else { "" };
                     out.push_str(&indent);
                     out.push_str(&format!(
-                        "{case_prefix}{lhs} {op} {new_rhs}; // sv-timing: BalanceMux/rebalance #{edit_id} RHS rewrite\n"
+                        "{case_prefix}{assign_kw}{lhs} {op} {new_rhs}; // sv-timing: BalanceMux/rebalance #{edit_id} RHS rewrite\n"
                     ));
                 } else {
                     out.push_str(line);
@@ -1200,6 +2289,45 @@ mod tests {
     #[test]
     fn parse_skips_compare() {
         assert!(parse_assign_line("    if (a == b) begin").is_none());
+    }
+
+    #[test]
+    fn balance_mux_rhs_rewrite_keeps_assign_keyword() {
+        let src = r#"module te (
+    input logic [7:0] keep_bits_i,
+    output logic [3:0] address_off
+);
+    assign address_off = (keep_bits_i + 7)>>3;
+endmodule
+"#;
+        let snippet = "  logic [64-1:0] svt_bm_top;\n  always_comb begin : svt_bm_top_stage\n    svt_bm_top = keep_bits_i + 7;\n  end\n";
+        let mut trace = EditTrace::new();
+        trace.record_edit(EditRecord {
+            id: 7,
+            kind: EditKind::BalanceMux,
+            origin: test_loc("te.sv", 5),
+            path_id: Some(1),
+            node_id: Some(0),
+            new_name: Some("svt_bm_top".into()),
+            fo4_before: Some(22.0),
+            fo4_after: Some(10.0),
+            rationale: "stage".into(),
+            emit_rhs: Some("svt_bm_top".into()),
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: Some(snippet.into()),
+        });
+        let out = rewrite_origin_rhs_replaces(src, &trace);
+        assert!(
+            out.contains("assign address_off = svt_bm_top;"),
+            "continuous BalanceMux rewrite must keep assign, got:\n{out}"
+        );
+        assert!(
+            !out.lines().any(|l| {
+                let t = l.trim();
+                t.starts_with("address_off =") && !t.starts_with("assign ")
+            }),
+            "bare module-scope blocking assign is illegal:\n{out}"
+        );
     }
 
     #[test]
@@ -1466,10 +2594,13 @@ endmodule
         assert_eq!(cuts[0].rhs, "t0 + c_i");
         assert!(!cuts[0].continuous, "always_comb body is procedural");
         let rewritten = rewrite_origin_assigns(src, &cuts);
-        // R12d: procedural origins kept; annotated only (no continuous sink).
         assert!(
-            rewritten.contains("procedural origin kept") || rewritten.contains("t1 = t0 + c_i"),
-            "{rewritten}"
+            rewritten.contains("moved t1") && rewritten.contains("t1 = t0_svt_p1"),
+            "real-cut-feeds must rewrite procedural origin: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("t1 = t0 + c_i"),
+            "live add must leave the always_comb: {rewritten}"
         );
         assert!(rewritten.contains("t0 = a_i + b_i;")); // other lines intact
         let sinks = sink_assigns_sv(&cuts);
@@ -1477,6 +2608,170 @@ endmodule
             !sinks.contains("assign t1 = t0_svt_p1"),
             "no continuous sink for procedural origin"
         );
+    }
+
+    #[test]
+    fn rewrite_procedural_nba_samples_pipe() {
+        let src = include_str!("../../../fixtures/auto_correct/proc_nba_span.sv");
+        let line = src
+            .lines()
+            .position(|l| l.contains("y_o <=") && l.contains('*'))
+            .expect("y_o nba mul") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("proc_nba_span.sv", line),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(68.0),
+            fo4_after: Some(10.0),
+            rationale: "nba cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        assert_eq!(cuts.len(), 1);
+        assert_eq!(cuts[0].lhs, "y_o");
+        assert!(cuts[0].nonblocking);
+        assert!(!cuts[0].continuous);
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        assert!(
+            rewritten.contains("moved y_o") && rewritten.contains("y_o <= pipe_svt_p1"),
+            "{rewritten}"
+        );
+        let live_mul = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.contains("y_o <=") && t.contains("*") && !t.starts_with("//")
+        });
+        assert!(!live_mul, "live mul NBA left in always_ff:\n{rewritten}");
+    }
+
+    #[test]
+    fn multiline_nba_empty_first_rhs_samples_pipe() {
+        // gemm `ar_slot_q[ridx].row <=\n  row + 1;` — first line has empty RHS so
+        // parse_assign_line fails; rewrite must still emit `lhs <= pipe` (expol6).
+        let src = r#"module m;
+  logic clk_i, rst_ni;
+  logic [31:0] y_o, a, b;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) y_o <= '0;
+    else begin
+      y_o <=
+          a * b + 32'd1;
+    end
+  end
+endmodule
+"#;
+        let line = src
+            .lines()
+            .position(|l| l.contains("y_o <=") && !l.contains("'0"))
+            .expect("nba") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("m.sv", line),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(56.0),
+            fo4_after: Some(10.0),
+            rationale: "cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        assert_eq!(cuts.len(), 1);
+        assert!(!cuts[0].continuous);
+        assert_eq!(cuts[0].lhs, "y_o");
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        assert!(
+            rewritten.contains("y_o <= pipe_svt_p1"),
+            "first line must sample pipe:\n{rewritten}"
+        );
+        let dangling = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.ends_with("<=") && !t.starts_with("//")
+        });
+        assert!(!dangling, "dangling NBA with no RHS:\n{rewritten}");
+        let live_mul = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.contains('*') && !t.starts_with("//")
+        });
+        assert!(!live_mul, "live mul continuation:\n{rewritten}");
+    }
+
+    #[test]
+    fn blank_line_origin_keeps_continuous_assign() {
+        // instr_queue / te_branch_map: IR loc on the blank line before `assign`.
+        let src = r#"module m;
+  logic [3:0] idx_is_d, idx_is_q, shamt, push_seq_d, push_seq_q, IdxMask;
+  always_comb begin
+    shamt = '0;
+  end
+
+  assign idx_is_d = (idx_is_q + shamt) & IdxMask;
+  assign push_seq_d = push_seq_q + shamt;
+endmodule
+"#;
+        let assign_line = src
+            .lines()
+            .position(|l| l.contains("assign idx_is_d"))
+            .expect("assign") as u32
+            + 1;
+        let origin = assign_line - 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("m.sv", origin),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(20.0),
+            fo4_after: Some(10.0),
+            rationale: "cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        assert_eq!(cuts.len(), 1);
+        assert!(
+            cuts[0].continuous,
+            "blank-before-assign must stay continuous: {cuts:?}"
+        );
+        assert_eq!(cuts[0].lhs, "idx_is_d");
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        let bare = rewritten.lines().any(|l| {
+            let t = l.trim();
+            !t.starts_with("//") && t.starts_with("idx_is_d =") && !t.starts_with("assign")
+        });
+        assert!(
+            !bare,
+            "illegal module-scope blocking assign:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("moved idx_is_d"),
+            "expected origin rewrite:\n{rewritten}"
+        );
+        let live = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("assign idx_is_d") && t.contains("IdxMask") && !t.starts_with("//")
+        });
+        assert!(!live, "live assign idx_is_d left:\n{rewritten}");
     }
 
     #[test]
@@ -1536,7 +2831,6 @@ endmodule
             );
             assert_ne!(cuts[1].lhs, cuts[0].lhs);
         }
-        // Procedural origins: kept with note (R12d lean).
         let rewritten = rewrite_origin_assigns(src, &cuts);
         let notes = rewritten.matches("procedural origin kept").count()
             + rewritten.matches("moved ").count();
@@ -1588,5 +2882,552 @@ endmodule
             "procedural origins must not get continuous sinks"
         );
         assert!(cuts.iter().all(|c| !c.continuous));
+    }
+
+    #[test]
+    fn twin_generate_c_span_rewrites_both_assigns() {
+        let src = include_str!("../../../fixtures/auto_correct/twin_generate_span.sv");
+        let line = src
+            .lines()
+            .position(|l| l.contains("assign c_span"))
+            .expect("first c_span") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("twin_generate_span.sv", line),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(56.0),
+            fo4_after: Some(10.0),
+            rationale: "c_span cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        assert_eq!(cuts.len(), 1, "one pipe for identical rhs");
+        assert_eq!(cuts[0].lhs, "c_span");
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        let live_mul = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("assign c_span") && t.contains("<<") && !t.starts_with("//")
+        });
+        assert!(!live_mul, "twin generate left a live c_span mul:\n{rewritten}");
+        assert!(
+            rewritten.contains("twin moved c_span"),
+            "expected twin origin rewrite:\n{rewritten}"
+        );
+        assert!(
+            rewritten.contains("assign c_span = pipe_svt_p1"),
+            "twin must sample the shared pipe:\n{rewritten}"
+        );
+        assert_eq!(
+            rewritten.matches("assign c_span = pipe_svt_p1").count(),
+            1,
+            "exactly one in-place twin sink (claimed line still uses module sink):\n{rewritten}"
+        );
+        let extras = sibling_span_extra_cuts(src, &cuts);
+        assert!(
+            extras.is_empty(),
+            "identical-RHS twins must not grow extra pipes: {extras:?}"
+        );
+    }
+
+    #[test]
+    fn sibling_span_extra_cuts_uncut_spans_own_pipes() {
+        let src = include_str!("../../../fixtures/auto_correct/sibling_span.sv");
+        let line = src
+            .lines()
+            .position(|l| l.contains("assign a_span"))
+            .expect("a_span") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("sibling_span.sv", line),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(18.5),
+            fo4_after: Some(10.0),
+            rationale: "a_span cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        assert_eq!(cuts.len(), 1);
+        assert_eq!(cuts[0].lhs, "a_span");
+        let extras = sibling_span_extra_cuts(src, &cuts);
+        let extra_lhs: Vec<&str> = extras.iter().map(|c| c.lhs.as_str()).collect();
+        assert!(
+            extra_lhs.contains(&"b_span"),
+            "expected uncut b_span extra, got {extra_lhs:?}"
+        );
+        assert!(
+            extra_lhs.contains(&"a_end") && extra_lhs.contains(&"b_end"),
+            "expected uncut *_end extras, got {extra_lhs:?}"
+        );
+        assert!(
+            !extra_lhs.contains(&"a_span"),
+            "must not re-cut claimed a_span: {extra_lhs:?}"
+        );
+        let extra_pipes: std::collections::BTreeSet<&str> =
+            extras.iter().map(|c| c.pipe_name.as_str()).collect();
+        assert_eq!(extra_pipes.len(), extras.len(), "unique sibling pipes");
+        assert!(!extra_pipes.contains("pipe_svt_p1"));
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        assert!(
+            rewritten.contains("sibling span moved"),
+            "expected sibling origin rewrite:\n{rewritten}"
+        );
+        let live_b = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("assign b_span") && t.contains("p_q") && !t.starts_with("//")
+        });
+        assert!(!live_b, "b_span combo left live:\n{rewritten}");
+        assert!(
+            extras.iter().any(|c| rewritten.contains(&format!(
+                "assign b_span = {}",
+                c.pipe_name
+            ))),
+            "b_span must sample its own pipe:\n{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("assign b_span = pipe_svt_p1"),
+            "different-RHS sibling must not share the twin pipe:\n{rewritten}"
+        );
+    }
+
+    #[test]
+    fn sibling_span_star_add_feed_splits_prep_pipe() {
+        let src = r#"
+module sibling_span_scale (
+    input  logic        clk_i,
+    input  logic        rst_ni,
+    input  logic [31:0] x_q, y_q, p_q, q_q, pa_q, pb_q, k_bytes,
+    output logic [31:0] ya_o, yb_o
+);
+  localparam bit ReuseAEn = 1'b1;
+  localparam bit ReuseBEn = 1'b1;
+  logic [31:0] a_span, a_end, b_span, b_end;
+  if (ReuseAEn) begin : gen_reuse_a
+    assign a_span = x_q * y_q + pa_q;
+    assign a_end = pa_q + a_span;
+  end
+  if (ReuseBEn) begin : gen_reuse_b
+    assign b_span = p_q * q_q + k_bytes;
+    assign b_end = pb_q + b_span;
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) ya_o <= '0;
+    else         ya_o <= a_end;
+  end
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) yb_o <= '0;
+    else         yb_o <= b_end;
+  end
+endmodule
+"#;
+        let line = src
+            .lines()
+            .position(|l| l.contains("assign a_span"))
+            .expect("a_span") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("sibling_span_scale.sv", line),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(12.5),
+            fo4_after: Some(10.0),
+            rationale: "a_span cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        let extras = sibling_span_extra_cuts(src, &cuts);
+        let b_span = extras
+            .iter()
+            .find(|c| c.lhs == "b_span")
+            .expect("b_span extra");
+        assert!(
+            b_span.rhs.contains(" + "),
+            "b_span feed should be prep + tail, got {}",
+            b_span.rhs
+        );
+        assert!(
+            !b_span.rhs.contains('*'),
+            "mul must live in the prep pipe, not the add pipe: {}",
+            b_span.rhs
+        );
+        assert!(
+            !b_span.rhs.contains("k_bytes"),
+            "combo tail k_bytes must be sampled, not added live: {}",
+            b_span.rhs
+        );
+        let prep = extras.iter().find(|c| {
+            c.line == 0 && c.lhs.is_empty() && c.rhs.contains('*') && !c.rhs.contains(" + ")
+        });
+        assert!(
+            prep.is_some(),
+            "expected prep extra for p_q * q_q, extras={extras:?}"
+        );
+        let prep = prep.unwrap();
+        let tail = extras.iter().find(|c| {
+            c.line == 0 && c.lhs.is_empty() && c.rhs.trim() == "k_bytes"
+        });
+        assert!(
+            tail.is_some(),
+            "expected tail sample extra for k_bytes, extras={extras:?}"
+        );
+        let tail = tail.unwrap();
+        assert!(
+            b_span.rhs.contains(&prep.pipe_name) && b_span.rhs.contains(&tail.pipe_name),
+            "add pipe must sample prep Q and tail Q: {} vs {} / {}",
+            b_span.rhs,
+            prep.pipe_name,
+            tail.pipe_name
+        );
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        assert!(
+            rewritten.contains(&format!("assign b_span = {}", b_span.pipe_name)),
+            "b_span must sample the add pipe:\n{rewritten}"
+        );
+    }
+
+    #[test]
+    fn queue_remainder_sandwich_cuts_mid_not_claimed() {
+        let src = include_str!("../../../fixtures/auto_correct/queue_remainder.sv");
+        let line_a = src
+            .lines()
+            .position(|l| l.contains("assign a ="))
+            .expect("a") as u32
+            + 1;
+        let line_b = src
+            .lines()
+            .position(|l| l.contains("assign b ="))
+            .expect("b") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        for (id, line, name) in [
+            (0u32, line_a, "pipe_svt_p1"),
+            (1u32, line_b, "pipe_svt_p2"),
+        ] {
+            tr.record_edit(EditRecord {
+                id,
+                kind: EditKind::InsertReg,
+                origin: test_loc("queue_remainder.sv", line),
+                path_id: Some(0),
+                node_id: Some(id),
+                new_name: Some(name.into()),
+                fo4_before: Some(20.0),
+                fo4_after: Some(10.0),
+                rationale: "cut".into(),
+                emit_rhs: None,
+                emit_rhs_extras: Vec::new(),
+                emit_snippet: None,
+            });
+        }
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        tr.records[1].id = 1;
+        tr.records[1].new_name = Some("pipe_svt_p2".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        assert_eq!(cuts.len(), 2);
+        let extras = remainder_sandwich_extra_cuts(src, &cuts);
+        assert!(
+            extras.iter().any(|c| c.lhs == "mid"),
+            "expected sandwich extra on mid, got {extras:?}"
+        );
+        assert!(
+            extras.iter().all(|c| c.lhs != "a" && c.lhs != "b"),
+            "must not recut claimed a/b: {extras:?}"
+        );
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        assert!(
+            rewritten.contains("remainder moved"),
+            "expected remainder origin rewrite:\n{rewritten}"
+        );
+        let live_mid = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("assign mid") && t.contains("p_q") && !t.starts_with("//")
+        });
+        assert!(!live_mid, "mid combo left live:\n{rewritten}");
+        assert!(
+            !rewritten.contains("assign mid = pipe_svt_p1")
+                && !rewritten.contains("assign mid = pipe_svt_p2"),
+            "mid must use its own remainder pipe:\n{rewritten}"
+        );
+    }
+
+    #[test]
+    fn comma_assign_list_is_not_rewritten() {
+        let src = r#"
+module amo_comma (
+    input  logic [63:0] ld_data, st_data,
+    output logic        ugt, sgt,
+    output logic [63:0] sum
+);
+    assign ugt = (ld_data > st_data),
+           sgt = (ld_data > st_data),
+           sum =  ld_data + st_data;
+endmodule
+"#;
+        let line = src
+            .lines()
+            .position(|l| l.contains("sgt ="))
+            .expect("sgt") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("amo_comma.sv", line),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(12.0),
+            fo4_after: Some(10.0),
+            rationale: "sgt cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        assert!(
+            cuts.iter().all(|c| c.line == 0 || !c.rhs.contains("sum =")),
+            "comma-list tail must not become a cut rhs: {cuts:?}"
+        );
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        assert!(
+            rewritten.contains("sgt = (ld_data > st_data)"),
+            "origin comma-list must stay: {rewritten}"
+        );
+        assert!(
+            !rewritten.contains("sgt = pipe_svt_p1"),
+            "must not rewrite comma-list lvalue as pipe sample:\n{rewritten}"
+        );
+    }
+
+    #[test]
+    fn or_reduce_preps_on_next_state_d() {
+        let src = r#"
+module fe_spec (
+    input  logic clk_i, rst_ni, flush_i, resolved,
+    input  logic [3:0] is_branch, is_return, is_jalr,
+    output logic spec_q
+);
+  logic spec_d;
+  logic [31:0] t0, t1;
+  assign t0 = 32'd1;
+  assign spec_d = (spec_q && !resolved || |is_branch || |is_return || |is_jalr) && !flush_i;
+  assign t1 = t0 + 32'd1;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) spec_q <= 1'b0;
+    else         spec_q <= spec_d;
+  end
+endmodule
+"#;
+        let line_t1 = src
+            .lines()
+            .position(|l| l.contains("assign t1"))
+            .expect("t1") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("fe_spec.sv", line_t1),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(12.0),
+            fo4_after: Some(10.0),
+            rationale: "t1".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        let extras = all_emit_extra_cuts(src, &cuts);
+        let reds: Vec<&str> = extras
+            .iter()
+            .filter(|c| c.pipe_name.contains("pipe_svt_red_"))
+            .map(|c| c.rhs.as_str())
+            .collect();
+        assert!(
+            reds.iter().any(|r| *r == "|is_branch")
+                && reds.iter().any(|r| *r == "|is_return")
+                && reds.iter().any(|r| *r == "|is_jalr"),
+            "expected three or-reduce preps, got {reds:?} extras={extras:?}"
+        );
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        assert!(
+            rewritten.contains("or-reduce preps for spec_d"),
+            "expected or-reduce rewrite:\n{rewritten}"
+        );
+        let live = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("assign spec_d") && t.contains("|is_branch") && !t.starts_with("//")
+        });
+        assert!(!live, "live |is_branch left on spec_d:\n{rewritten}");
+        assert!(
+            rewritten.contains("assign spec_d") && rewritten.contains("pipe_svt_red_is_branch"),
+            "spec_d must sample reduce pipes:\n{rewritten}"
+        );
+    }
+
+    #[test]
+    fn or_reduce_preps_mixed_single_reduce() {
+        let src = r#"
+module wbuf_fixup (
+    input  logic clk_i, rst_ni,
+    input  logic [7:0] tocheck,
+    input  logic hit_q, en_q, en_q1,
+    input  logic [1:0] state_q,
+    output logic req_o, miss_req_o
+);
+  logic req, t1;
+  assign t1 = 1'b1;
+  assign req = (state_q == 2'd1) && !hit_q && !(|tocheck) && !en_q && !en_q1;
+  assign miss_req_o = (|tocheck) && en_q;
+  assign req_o = req;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) ;
+    else         ;
+  end
+endmodule
+"#;
+        let line_t1 = src
+            .lines()
+            .position(|l| l.contains("assign t1"))
+            .expect("t1") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("wbuf_fixup.sv", line_t1),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(12.0),
+            fo4_after: Some(10.0),
+            rationale: "t1".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        let extras = all_emit_extra_cuts(src, &cuts);
+        let reds: Vec<&str> = extras
+            .iter()
+            .filter(|c| c.pipe_name.contains("pipe_svt_red_"))
+            .map(|c| c.rhs.as_str())
+            .collect();
+        assert_eq!(reds, vec!["|tocheck"], "mixed AND cone: {reds:?} extras={extras:?}");
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        assert!(
+            rewritten.contains("or-reduce preps for req"),
+            "expected mixed or-reduce rewrite:\n{rewritten}"
+        );
+        let live = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("assign req") && t.contains("|tocheck") && !t.starts_with("//")
+        });
+        assert!(!live, "live |tocheck left on req:\n{rewritten}");
+        assert!(
+            rewritten.contains("pipe_svt_red_tocheck"),
+            "req must sample reduce pipe:\n{rewritten}"
+        );
+        let live_port = rewritten.lines().any(|l| {
+            let t = l.trim();
+            t.starts_with("assign miss_req_o") && t.contains("pipe_svt_red") && !t.starts_with("//")
+        });
+        assert!(!live_port, "must not extra-cycle _o handshake:\n{rewritten}");
+    }
+
+    #[test]
+    fn binary_or_is_not_unary_reduce() {
+        let src = r#"
+module icache_we (
+    input  logic clk_i, rst_ni, cache_wren, inv_en, flush_en, en_q, hit_q,
+    input  logic [7:0] tocheck,
+    output logic we, req
+);
+  logic t1;
+  assign t1 = 1'b1;
+  assign we = (cache_wren | inv_en | flush_en);
+  assign req = (en_q == 1'b1) && !hit_q && !(|tocheck) && !en_q && !flush_en;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) ;
+    else         ;
+  end
+endmodule
+"#;
+        let line_t1 = src
+            .lines()
+            .position(|l| l.contains("assign t1"))
+            .expect("t1") as u32
+            + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("icache_we.sv", line_t1),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(12.0),
+            fo4_after: Some(10.0),
+            rationale: "t1".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        tr.records[0].id = 0;
+        tr.records[0].new_name = Some("pipe_svt_p1".into());
+        let cuts = cut_assigns_from_source(src, &tr);
+        let extras = all_emit_extra_cuts(src, &cuts);
+        let reds: Vec<&str> = extras
+            .iter()
+            .filter(|c| c.pipe_name.contains("pipe_svt_red_"))
+            .map(|c| c.rhs.as_str())
+            .collect();
+        assert!(
+            !reds.iter().any(|r| r.contains("inv_en") || r.contains("flush_en") || r.contains("cache_wren")),
+            "bitwise | must not become or-reduce: {reds:?}"
+        );
+        assert_eq!(reds, vec!["|tocheck"], "only unary |tocheck: {reds:?}");
+        let rewritten = rewrite_origin_assigns(src, &cuts);
+        assert!(
+            rewritten.contains("assign we = (cache_wren | inv_en | flush_en)"),
+            "we bitwise or must stay:\n{rewritten}"
+        );
+        assert!(
+            !rewritten.contains("assign we = (cache_wren pipe_svt_red"),
+            "must not delete bitwise |:\n{rewritten}"
+        );
     }
 }

@@ -7,8 +7,9 @@
 //!
 //! Supports a practical subset of SystemVerilog expression surface:
 //! identifiers, sized/unsized literals, unary/binary ops, ternary `?:`,
-//! concatenation `{a,b}`, bit/part selects `a[i]` / `a[h:l]`, and simple
-//! function calls `f(a,b)`. Anything unrecognized becomes [`Expr::Opaque`].
+//! concatenation `{a,b}`, bit/part selects `a[i]` / `a[h:l]` /
+//! [`Expr::PartSelect`] (`[msb:lsb]`, `+:`, `-:`), and simple function calls
+//! `f(a,b)`. Anything unrecognized becomes [`Expr::Opaque`].
 //!
 //! See `architecture/STA-HANDOFF.md` for how trees relate to STA (they do **not**
 //! replace STA).
@@ -70,12 +71,24 @@ pub enum Expr {
         /// Body.
         body: Box<Expr>,
     },
-    /// Index / part-select `base[index]` or `base[hi:lo]` (index as opaque/binary).
+    /// Index / part-select `base[index]` or `base[hi:lo]` (index may be [`PartSelect`]).
     Index {
         /// Base expression.
         base: Box<Expr>,
-        /// Index or part-select expression (may be `Binary` with `:`).
+        /// Index or part-select expression.
         index: Box<Expr>,
+    },
+    /// Part-select inside `base[...]`: `[msb:lsb]`, `[i +: w]`, `[i -: w]`.
+    ///
+    /// Not a binary arithmetic operator (PASS-STRATEGY P1). Width / both
+    /// fixed-range bounds are LRM-constant; indexed base may be runtime.
+    PartSelect {
+        /// Select form.
+        kind: PartSelectKind,
+        /// `msb` or indexed base.
+        left: Box<Expr>,
+        /// `lsb` or width.
+        right: Box<Expr>,
     },
     /// Function / system call `name(args…)`.
     Call {
@@ -89,6 +102,167 @@ pub enum Expr {
         /// Original text.
         text: String,
     },
+}
+
+/// IEEE 1800 §11.5.1 part-select form (not arithmetic).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PartSelectKind {
+    /// `[msb:lsb]` — both bounds are constant expressions.
+    FixedRange,
+    /// `[base +: width]` — width is constant; base may be runtime.
+    IndexedPlus,
+    /// `[base -: width]` — width is constant; base may be runtime.
+    IndexedMinus,
+}
+
+impl PartSelectKind {
+    /// Operator spelling used in emit.
+    pub fn as_op(self) -> &'static str {
+        match self {
+            PartSelectKind::FixedRange => ":",
+            PartSelectKind::IndexedPlus => "+:",
+            PartSelectKind::IndexedMinus => "-:",
+        }
+    }
+
+    fn from_op(op: &str) -> Option<Self> {
+        match op {
+            ":" => Some(PartSelectKind::FixedRange),
+            "+:" => Some(PartSelectKind::IndexedPlus),
+            "-:" => Some(PartSelectKind::IndexedMinus),
+            _ => None,
+        }
+    }
+
+    fn is_indexed(self) -> bool {
+        matches!(
+            self,
+            PartSelectKind::IndexedPlus | PartSelectKind::IndexedMinus
+        )
+    }
+}
+
+/// Elaboration-constant lattice (PASS-STRATEGY P1). `Const ∘ Const → Const → zero delay`.
+///
+/// This is a **measurement** correction, not an optimization gain. Seeded by
+/// literals, param-map / localparam names, `*Cfg.*` fields, SCREAMING_CASE
+/// parameters, and `$clog2`/`$bits` of constants. LRM-constant contexts
+/// (replication counts, fixed `[msb:lsb]` bounds) are Const by rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstClass {
+    /// Proven elaboration-time.
+    Const,
+    /// Not resolved; charged as hardware (conservative).
+    Unknown,
+    /// Runtime data.
+    Runtime,
+}
+
+impl ConstClass {
+    /// Both sides Const → Const; any Runtime → Runtime; else Unknown.
+    pub fn join_arith(self, other: Self) -> Self {
+        use ConstClass::*;
+        match (self, other) {
+            (Const, Const) => Const,
+            (Runtime, _) | (_, Runtime) => Runtime,
+            _ => Unknown,
+        }
+    }
+
+    /// True when delay must be zero.
+    pub fn is_const(self) -> bool {
+        matches!(self, ConstClass::Const)
+    }
+}
+
+/// Names that seed the constant lattice (param-map keys, localparams, …).
+#[derive(Debug, Clone, Default)]
+pub struct ConstSeed {
+    /// Exact names (`CVA6Cfg.XLEN`, `PRECISION_BITS`, …).
+    pub names: std::collections::BTreeSet<String>,
+}
+
+impl ConstSeed {
+    /// Heuristic seed: `*Cfg.*` and SCREAMING_CASE identifiers, no host map.
+    pub fn heuristic() -> Self {
+        Self::default()
+    }
+
+    /// Seed from localparam / parameter / param-map names (mixed-case included).
+    pub fn from_names<I, S>(names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut seed = Self::default();
+        for n in names {
+            seed.add(n);
+        }
+        seed
+    }
+
+    /// Insert a name and its last `a.b` / `pkg::NAME` segment.
+    pub fn add(&mut self, name: impl Into<String>) {
+        let n = name.into();
+        let n = n.trim();
+        if n.is_empty() {
+            return;
+        }
+        if let Some((_, base)) = n.rsplit_once("::") {
+            if !base.is_empty() {
+                self.names.insert(base.to_string());
+            }
+        }
+        if let Some((_, base)) = n.rsplit_once('.') {
+            if !base.is_empty() {
+                self.names.insert(base.to_string());
+            }
+        }
+        self.names.insert(n.to_string());
+    }
+
+    /// True when `name` is an elaboration parameter, not a runtime net.
+    pub fn looks_const(&self, name: &str) -> bool {
+        let n = name.trim();
+        if n.is_empty() {
+            return false;
+        }
+        if self.names.contains(n) {
+            return true;
+        }
+        // SV package scope is `::` (IEEE 1800); struct fields use `.`.
+        let base = n
+            .rsplit("::")
+            .next()
+            .unwrap_or(n)
+            .rsplit('.')
+            .next()
+            .unwrap_or(n);
+        if self.names.contains(base) {
+            return true;
+        }
+        // Package/config struct fields (`CVA6Cfg.X`, `HPDcacheCfg.reqDataWidth`).
+        if n.contains("Cfg.") {
+            return true;
+        }
+        ident_is_screaming_param(base)
+    }
+}
+
+fn ident_is_screaming_param(base: &str) -> bool {
+    let mut letters = 0u32;
+    for c in base.chars() {
+        if c.is_ascii_uppercase() {
+            letters += 1;
+            continue;
+        }
+        if c.is_ascii_digit() || c == '_' {
+            continue;
+        }
+        return false;
+    }
+    letters >= 2
 }
 
 impl Expr {
@@ -162,6 +336,12 @@ impl Expr {
             Expr::Index { base, index } => {
                 format!("{}[{}]", paren_if_needed(base), index.emit())
             }
+            Expr::PartSelect { kind, left, right } => format!(
+                "{} {} {}",
+                paren_if_needed(left),
+                kind.as_op(),
+                paren_if_needed(right)
+            ),
             Expr::Call { name, args } => {
                 let inner = args
                     .iter()
@@ -177,7 +357,17 @@ impl Expr {
     ///
     /// Address-scale multiplies (`i*8`) do **not** rank as full datapath Mul.
     pub fn dominant_op_class(&self) -> OperatorClass {
-        dominant_op_class_measured(self)
+        self.dominant_op_class_latticed(&ConstSeed::heuristic())
+    }
+
+    /// Dominant class with an explicit constant-lattice seed.
+    pub fn dominant_op_class_latticed(&self, seed: &ConstSeed) -> OperatorClass {
+        dominant_op_class_measured_seeded(self, seed)
+    }
+
+    /// True when parse failed and the original text is kept as-is.
+    pub fn is_opaque(&self) -> bool {
+        matches!(self, Expr::Opaque { .. })
     }
 
     /// Structural FO4 estimate: **sum** of operator-node base costs (idents free).
@@ -200,27 +390,43 @@ impl Expr {
     /// over-counts reconvergent / parallel subtrees). Used by measure for node
     /// FO4 when an RHS tree is present.
     pub fn fo4_critical_cost(&self, base: &dyn Fn(OperatorClass) -> f64) -> f64 {
+        self.fo4_critical_cost_latticed(base, &ConstSeed::heuristic())
+    }
+
+    /// Critical-path FO4 with an explicit constant-lattice seed (param-map).
+    pub fn fo4_critical_cost_latticed(
+        &self,
+        base: &dyn Fn(OperatorClass) -> f64,
+        seed: &ConstSeed,
+    ) -> f64 {
+        // PASS-STRATEGY P1: Const ∘ Const is elaboration, not hardware.
+        if self.const_class(seed).is_const() {
+            return 0.0;
+        }
         match self {
             Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => 0.0,
-            Expr::Unary { op, arg, .. } => base(classify_unary(op)) + arg.fo4_critical_cost(base),
+            Expr::Unary { op, arg, .. } => {
+                base(classify_unary(op)) + arg.fo4_critical_cost_latticed(base, seed)
+            }
+            Expr::PartSelect { kind, left, right } => {
+                if kind.is_indexed() {
+                    left.fo4_critical_cost_latticed(base, seed)
+                } else {
+                    let _ = right;
+                    0.0
+                }
+            }
             Expr::Binary {
                 op,
                 op_class,
                 left,
                 right,
             } => {
-                // Only literal power-of-two multiplication proves wiring without symbol resolution.
-                let op_cost = if matches!(*op_class, OperatorClass::Mul | OperatorClass::DivRem)
-                    && is_literal_power_of_two_mul(op, left, right)
-                {
-                    base(OperatorClass::Other)
-                } else {
-                    base(*op_class)
-                };
-                op_cost
+                let billed = billed_binary_class(op, *op_class, left, right, seed);
+                base(billed)
                     + left
-                        .fo4_critical_cost(base)
-                        .max(right.fo4_critical_cost(base))
+                        .fo4_critical_cost_latticed(base, seed)
+                        .max(right.fo4_critical_cost_latticed(base, seed))
             }
             Expr::Ternary {
                 cond,
@@ -229,39 +435,116 @@ impl Expr {
             } => {
                 base(OperatorClass::Mux)
                     + cond
-                        .fo4_critical_cost(base)
-                        .max(then_e.fo4_critical_cost(base))
-                        .max(else_e.fo4_critical_cost(base))
+                        .fo4_critical_cost_latticed(base, seed)
+                        .max(then_e.fo4_critical_cost_latticed(base, seed))
+                        .max(else_e.fo4_critical_cost_latticed(base, seed))
             }
             Expr::Concat { parts } => {
                 base(OperatorClass::Concat)
                     + parts
                         .iter()
-                        .map(|p| p.fo4_critical_cost(base))
+                        .map(|p| p.fo4_critical_cost_latticed(base, seed))
                         .fold(0.0_f64, f64::max)
             }
-            Expr::Replicate { count, body } => {
-                base(OperatorClass::Concat)
-                    + count
-                        .fo4_critical_cost(base)
-                        .max(body.fo4_critical_cost(base))
+            Expr::Replicate { count: _, body } => {
+                // IEEE 1800 replication count is a constant expression by rule.
+                // Charge the body only (PASS-STRATEGY P1 LRM context).
+                body.fo4_critical_cost_latticed(base, seed)
             }
             Expr::Index { base: b, index } => {
                 // A fixed `[msb:lsb]` bound is constant by LRM rule, so it contributes no
-                // delay. Any other index (bit-select, `+:` base) may be runtime data.
+                // delay. Indexed `+:` / `-:` width is also LRM-constant; the base
+                // index may be runtime (IEEE 1800 §11.5.1).
                 if is_constant_range_select(index) {
-                    return b.fo4_critical_cost(base);
+                    return b.fo4_critical_cost_latticed(base, seed);
                 }
-                b.fo4_critical_cost(base)
-                    .max(index.fo4_critical_cost_as_index(base))
+                if let Some(base_idx) = indexed_part_select_base(index) {
+                    return b
+                        .fo4_critical_cost_latticed(base, seed)
+                        .max(base_idx.fo4_critical_cost_latticed(base, seed));
+                }
+                b.fo4_critical_cost_latticed(base, seed)
+                    .max(index.fo4_critical_cost_latticed(base, seed))
             }
-            Expr::Call { args, .. } => {
-                base(OperatorClass::Other)
+            Expr::Call { name, args } => {
+                if is_elab_system_fn(name)
+                    && args.iter().all(|a| a.const_class(seed).is_const())
+                {
+                    return 0.0;
+                }
+                let call_op = if is_fmt_scale_fn(name) {
+                    // INT4 `(elems+1)>>1` else `elems << log2(1|2|4)`.
+                    OperatorClass::Mux
+                } else {
+                    OperatorClass::Other
+                };
+                base(call_op)
                     + args
                         .iter()
-                        .map(|a| a.fo4_critical_cost(base))
+                        .map(|a| a.fo4_critical_cost_latticed(base, seed))
                         .fold(0.0_f64, f64::max)
             }
+        }
+    }
+
+    /// Lattice class of this expression (P1).
+    pub fn const_class(&self, seed: &ConstSeed) -> ConstClass {
+        match self {
+            Expr::Literal { .. } => ConstClass::Const,
+            Expr::Ident { name } => {
+                if seed.looks_const(name) {
+                    ConstClass::Const
+                } else {
+                    ConstClass::Runtime
+                }
+            }
+            Expr::Unary { arg, .. } => arg.const_class(seed),
+            Expr::PartSelect { kind, left, right } => {
+                if kind.is_indexed() {
+                    left.const_class(seed)
+                } else {
+                    let _ = right;
+                    ConstClass::Const
+                }
+            }
+            Expr::Binary { left, right, .. } => {
+                left.const_class(seed).join_arith(right.const_class(seed))
+            }
+            Expr::Ternary {
+                cond,
+                then_e,
+                else_e,
+            } => cond
+                .const_class(seed)
+                .join_arith(then_e.const_class(seed))
+                .join_arith(else_e.const_class(seed)),
+            Expr::Concat { parts } => parts.iter().fold(ConstClass::Const, |a, p| {
+                a.join_arith(p.const_class(seed))
+            }),
+            Expr::Replicate { count: _, body } => body.const_class(seed),
+            Expr::Index { base, index } => {
+                if is_constant_range_select(index) {
+                    base.const_class(seed)
+                } else if let Some(base_idx) = indexed_part_select_base(index) {
+                    base.const_class(seed)
+                        .join_arith(base_idx.const_class(seed))
+                } else {
+                    base.const_class(seed)
+                        .join_arith(index.const_class(seed))
+                }
+            }
+            Expr::Call { name, args } => {
+                if is_elab_system_fn(name)
+                    && args.iter().all(|a| a.const_class(seed).is_const())
+                {
+                    ConstClass::Const
+                } else if args.iter().any(|a| a.const_class(seed) == ConstClass::Runtime) {
+                    ConstClass::Runtime
+                } else {
+                    ConstClass::Unknown
+                }
+            }
+            Expr::Opaque { .. } => ConstClass::Unknown,
         }
     }
 
@@ -276,6 +559,10 @@ impl Expr {
             Expr::Ident { name } => f(name),
             Expr::Literal { .. } | Expr::Opaque { .. } => {}
             Expr::Unary { arg, .. } => arg.walk_idents(f),
+            Expr::PartSelect { left, right, .. } => {
+                left.walk_idents(f);
+                right.walk_idents(f);
+            }
             Expr::Binary { left, right, .. } => {
                 left.walk_idents(f);
                 right.walk_idents(f);
@@ -315,6 +602,10 @@ impl Expr {
         match self {
             Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => {}
             Expr::Unary { arg, .. } => arg.walk_calls(f),
+            Expr::PartSelect { left, right, .. } => {
+                left.walk_calls(f);
+                right.walk_calls(f);
+            }
             Expr::Binary { left, right, .. } => {
                 left.walk_calls(f);
                 right.walk_calls(f);
@@ -359,11 +650,27 @@ impl Expr {
     ///
     /// Sum of base costs equals [`Self::fo4_critical_cost`] for pure trees.
     pub fn critical_spine_ops(&self, base: &dyn Fn(OperatorClass) -> f64) -> Vec<(OperatorClass, f64)> {
+        self.critical_spine_ops_latticed(base, &ConstSeed::heuristic())
+    }
+
+    /// Spine with an explicit constant-lattice seed (module params / localparams).
+    pub fn critical_spine_ops_latticed(
+        &self,
+        base: &dyn Fn(OperatorClass) -> f64,
+        seed: &ConstSeed,
+    ) -> Vec<(OperatorClass, f64)> {
         match self {
             Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => Vec::new(),
+            Expr::PartSelect { kind, left, .. } => {
+                if kind.is_indexed() {
+                    left.critical_spine_ops_latticed(base, seed)
+                } else {
+                    Vec::new()
+                }
+            }
             Expr::Unary { op, arg, .. } => {
                 let cls = classify_unary(op);
-                let mut s = arg.critical_spine_ops(base);
+                let mut s = arg.critical_spine_ops_latticed(base, seed);
                 s.push((cls, base(cls)));
                 s
             }
@@ -373,20 +680,17 @@ impl Expr {
                 left,
                 right,
             } => {
-                let lc = left.fo4_critical_cost(base);
-                let rc = right.fo4_critical_cost(base);
+                if left.const_class(seed).is_const() && right.const_class(seed).is_const() {
+                    return Vec::new();
+                }
+                let lc = left.fo4_critical_cost_latticed(base, seed);
+                let rc = right.fo4_critical_cost_latticed(base, seed);
                 let mut s = if lc >= rc {
-                    left.critical_spine_ops(base)
+                    left.critical_spine_ops_latticed(base, seed)
                 } else {
-                    right.critical_spine_ops(base)
+                    right.critical_spine_ops_latticed(base, seed)
                 };
-                let cls = if matches!(*op_class, OperatorClass::Mul | OperatorClass::DivRem)
-                    && is_literal_power_of_two_mul(op, left, right)
-                {
-                    OperatorClass::Other
-                } else {
-                    *op_class
-                };
+                let cls = billed_binary_class(op, *op_class, left, right, seed);
                 s.push((cls, base(cls)));
                 s
             }
@@ -399,12 +703,12 @@ impl Expr {
                 let best = arms
                     .into_iter()
                     .max_by(|a, b| {
-                        a.fo4_critical_cost(base)
-                            .partial_cmp(&b.fo4_critical_cost(base))
+                        a.fo4_critical_cost_latticed(base, seed)
+                            .partial_cmp(&b.fo4_critical_cost_latticed(base, seed))
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .unwrap();
-                let mut s = best.critical_spine_ops(base);
+                let mut s = best.critical_spine_ops_latticed(base, seed);
                 s.push((OperatorClass::Mux, base(OperatorClass::Mux)));
                 s
             }
@@ -412,47 +716,37 @@ impl Expr {
                 let mut s = parts
                     .iter()
                     .max_by(|a, b| {
-                        a.fo4_critical_cost(base)
-                            .partial_cmp(&b.fo4_critical_cost(base))
+                        a.fo4_critical_cost_latticed(base, seed)
+                            .partial_cmp(&b.fo4_critical_cost_latticed(base, seed))
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
-                    .map(|p| p.critical_spine_ops(base))
+                    .map(|p| p.critical_spine_ops_latticed(base, seed))
                     .unwrap_or_default();
                 s.push((OperatorClass::Concat, base(OperatorClass::Concat)));
                 s
             }
-            Expr::Replicate { count, body } => {
-                let cc = count.fo4_critical_cost(base);
-                let bc = body.fo4_critical_cost(base);
-                let mut s = if cc >= bc {
-                    count.critical_spine_ops(base)
-                } else {
-                    body.critical_spine_ops(base)
-                };
-                s.push((OperatorClass::Concat, base(OperatorClass::Concat)));
-                s
-            }
+            Expr::Replicate { count: _, body } => body.critical_spine_ops_latticed(base, seed),
             Expr::Index { base: b, index } => {
                 if is_constant_range_select(index) {
-                    return b.critical_spine_ops(base);
+                    return b.critical_spine_ops_latticed(base, seed);
                 }
-                let bc = b.fo4_critical_cost(base);
-                let ic = index.fo4_critical_cost(base);
+                let bc = b.fo4_critical_cost_latticed(base, seed);
+                let ic = index.fo4_critical_cost_latticed(base, seed);
                 if bc >= ic {
-                    b.critical_spine_ops(base)
+                    b.critical_spine_ops_latticed(base, seed)
                 } else {
-                    index.critical_spine_ops(base)
+                    index.critical_spine_ops_latticed(base, seed)
                 }
             }
             Expr::Call { args, .. } => {
                 let mut s = args
                     .iter()
                     .max_by(|a, b| {
-                        a.fo4_critical_cost(base)
-                            .partial_cmp(&b.fo4_critical_cost(base))
+                        a.fo4_critical_cost_latticed(base, seed)
+                            .partial_cmp(&b.fo4_critical_cost_latticed(base, seed))
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
-                    .map(|a| a.critical_spine_ops(base))
+                    .map(|a| a.critical_spine_ops_latticed(base, seed))
                     .unwrap_or_default();
                 s.push((OperatorClass::Other, base(OperatorClass::Other)));
                 s
@@ -507,6 +801,7 @@ impl Expr {
                 Some(c.saturating_mul(body.width_class_hint().unwrap_or(1)).max(1))
             }
             Expr::Unary { arg, .. } => arg.width_class_hint(),
+            Expr::PartSelect { .. } => None,
             Expr::Index { base, .. } => base.width_class_hint(), // conservative: full base
             Expr::Binary { left, right, .. } => {
                 // Both known and equal → that width; else unknown
@@ -588,6 +883,11 @@ impl Expr {
                 base: Box::new(base.rebalance_associative()),
                 index: Box::new(index.rebalance_associative()),
             },
+            Expr::PartSelect { kind, left, right } => Expr::PartSelect {
+                kind: *kind,
+                left: Box::new(left.rebalance_associative()),
+                right: Box::new(right.rebalance_associative()),
+            },
             Expr::Call { name, args } => Expr::Call {
                 name: name.clone(),
                 args: args.iter().map(|a| a.rebalance_associative()).collect(),
@@ -601,7 +901,9 @@ impl Expr {
         match self {
             Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => 1,
             Expr::Unary { arg, .. } | Expr::Index { base: arg, .. } => 1 + arg.depth(),
-            Expr::Binary { left, right, .. } => 1 + left.depth().max(right.depth()),
+            Expr::PartSelect { left, right, .. } | Expr::Binary { left, right, .. } => {
+                1 + left.depth().max(right.depth())
+            }
             Expr::Ternary {
                 cond,
                 then_e,
@@ -664,7 +966,7 @@ impl Expr {
         match self {
             Expr::Concat { .. } | Expr::Replicate { .. } => true,
             Expr::Unary { arg, .. } | Expr::Index { base: arg, .. } => arg.contains_struct_ops(),
-            Expr::Binary { left, right, .. } => {
+            Expr::PartSelect { left, right, .. } | Expr::Binary { left, right, .. } => {
                 left.contains_struct_ops() || right.contains_struct_ops()
             }
             Expr::Ternary {
@@ -689,6 +991,11 @@ impl Expr {
     ) -> Expr {
         match self {
             Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => self.clone(),
+            Expr::PartSelect { kind, left, right } => Expr::PartSelect {
+                kind: *kind,
+                left: Box::new(left.stage_balance_rec(prefix, wires, counter)),
+                right: Box::new(right.stage_balance_rec(prefix, wires, counter)),
+            },
             Expr::Unary { op, arg } => {
                 let a = if arg.depth() > 1 {
                     let inner = arg.stage_balance_rec(prefix, wires, counter);
@@ -828,6 +1135,13 @@ impl Expr {
     fn walk_ops(&self, f: &mut dyn FnMut(OperatorClass)) {
         match self {
             Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => {}
+            Expr::PartSelect { kind, left, right } => {
+                if kind.is_indexed() {
+                    left.walk_ops(f);
+                } else {
+                    let _ = (left, right);
+                }
+            }
             Expr::Unary { arg, op, .. } => {
                 f(classify_unary(op));
                 arg.walk_ops(f);
@@ -1063,7 +1377,37 @@ fn parse_unsized_decimal(text: &str) -> Option<u32> {
 /// 202.0 FO4 `atomic_over_budget` DivRem, the worst raw path in `full_core`, for a slice
 /// that synthesises to wires. Only the `:` form is trusted; `+:` bases stay charged.
 fn is_constant_range_select(index: &Expr) -> bool {
-    matches!(index, Expr::Binary { op, .. } if op == ":")
+    matches!(
+        index,
+        Expr::PartSelect {
+            kind: PartSelectKind::FixedRange,
+            ..
+        }
+    )
+}
+
+fn is_elab_system_fn(name: &str) -> bool {
+    matches!(
+        name,
+        "$clog2" | "$bits" | "$unsigned" | "$signed" | "$ceil" | "$floor" | "$ln" | "$log10"
+    )
+}
+
+/// Format byte-width helpers (INT4 pack or `{1,2,4}`-byte element). A call is
+/// a mux-of-shifts, not a 56 FO4 datapath mul. Never used to parse `32'(expr)`.
+fn is_fmt_scale_fn(name: &str) -> bool {
+    matches!(name, "fmt_row_bytes" | "ai_fmt_bytes")
+}
+
+fn is_fmt_scale_call(e: &Expr) -> bool {
+    matches!(e, Expr::Call { name, .. } if is_fmt_scale_fn(name))
+}
+
+fn indexed_part_select_base(index: &Expr) -> Option<&Expr> {
+    match index {
+        Expr::PartSelect { kind, left, .. } if kind.is_indexed() => Some(left.as_ref()),
+        _ => None,
+    }
 }
 
 /// `*` used as array/genvar index scale, not datapath multiply.
@@ -1072,6 +1416,71 @@ fn is_literal_power_of_two_mul(op: &str, left: &Expr, right: &Expr) -> bool {
         && [left, right]
             .into_iter()
             .any(|e| positive_literal_value(e).is_some_and(u128::is_power_of_two))
+}
+
+/// Class billed for a binary op after cheap-scale demotion (P1).
+///
+/// Runtime `*` of a literal power of two is a shift. Runtime `/` or `%` whose
+/// **divisor** is Const (`8`, `WIDTH`, `HPDcacheCfg.u.dataWaysPerRamWord`) is
+/// a shift or bit-select, not a 120 FO4 SRT divider. `8 / a` (runtime divisor)
+/// stays [`OperatorClass::DivRem`].
+fn billed_binary_class(
+    op: &str,
+    op_class: OperatorClass,
+    left: &Expr,
+    right: &Expr,
+    seed: &ConstSeed,
+) -> OperatorClass {
+    if matches!(op_class, OperatorClass::Mul | OperatorClass::DivRem)
+        && is_literal_power_of_two_mul(op, left, right)
+    {
+        return OperatorClass::Other;
+    }
+    // `x * fmt_row_bytes(...)` / `elems * ai_fmt_bytes()` is a shift, not Mul.
+    // Do not use this to parse general `32'(expr)` (gemm v25 regression).
+    if matches!(op_class, OperatorClass::Mul) && op == "*" && (is_fmt_scale_call(left) || is_fmt_scale_call(right))
+    {
+        return OperatorClass::ShiftConst;
+    }
+    if matches!(op_class, OperatorClass::DivRem)
+        && matches!(op, "/" | "%")
+        && is_const_divisor_scale(right, seed)
+    {
+        return OperatorClass::Other;
+    }
+    // `x + 1` / `x - 1'd1` is an increment, not a 10 FO4 carry-propagate add
+    // (axi2mem wrap staging: `len + 1` then `<< LOG` then `wrap +`).
+    if matches!(op_class, OperatorClass::AddSub)
+        && matches!(op, "+" | "-")
+        && is_unit_increment_operand(left, right)
+    {
+        return OperatorClass::LogicBit;
+    }
+    // Const offset (`used_bits += te_pkg::XLEN + (address_off * 8)`): folding
+    // the constant does not insert a 10 FO4 CPA on the runtime spine.
+    if matches!(op_class, OperatorClass::AddSub)
+        && matches!(op, "+" | "-")
+        && (left.const_class(seed).is_const() || right.const_class(seed).is_const())
+    {
+        return OperatorClass::LogicBit;
+    }
+    op_class
+}
+
+fn is_unit_increment_operand(left: &Expr, right: &Expr) -> bool {
+    matches!(positive_literal_value(left), Some(1))
+        || matches!(positive_literal_value(right), Some(1))
+}
+
+fn is_const_divisor_scale(right: &Expr, seed: &ConstSeed) -> bool {
+    if !right.const_class(seed).is_const() {
+        return false;
+    }
+    match positive_literal_value(right) {
+        Some(0) => false,
+        Some(_) => true,
+        None => true,
+    }
 }
 
 fn positive_literal_value(e: &Expr) -> Option<u128> {
@@ -1106,15 +1515,26 @@ fn positive_literal_value(e: &Expr) -> Option<u128> {
 
 /// Dominant op for coarse class: do not rank addr-scale mul as full Mul.
 pub fn dominant_op_class_measured(e: &Expr) -> OperatorClass {
+    dominant_op_class_measured_seeded(e, &ConstSeed::heuristic())
+}
+
+fn dominant_op_class_measured_seeded(e: &Expr, seed: &ConstSeed) -> OperatorClass {
     // Prefer non-scale classification by temporarily ranking via walk with scale demotion.
     let mut best = OperatorClass::Other;
     let mut best_rank = 0u8;
-    fn walk(e: &Expr, f: &mut dyn FnMut(OperatorClass)) {
+    fn walk(e: &Expr, seed: &ConstSeed, f: &mut dyn FnMut(OperatorClass)) {
         match e {
             Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => {}
+            Expr::PartSelect { kind, left, right } => {
+                if kind.is_indexed() {
+                    walk(left, seed, f);
+                } else {
+                    let _ = (left, right);
+                }
+            }
             Expr::Unary { arg, op, .. } => {
                 f(classify_unary(op));
-                walk(arg, f);
+                walk(arg, seed, f);
             }
             Expr::Binary {
                 op,
@@ -1123,15 +1543,13 @@ pub fn dominant_op_class_measured(e: &Expr) -> OperatorClass {
                 right,
                 ..
             } => {
-                if matches!(*op_class, OperatorClass::Mul | OperatorClass::DivRem)
-                    && is_literal_power_of_two_mul(op, left, right)
-                {
-                    f(OperatorClass::Other);
+                if left.const_class(seed).is_const() && right.const_class(seed).is_const() {
+                    // P1: do not nominate Const arithmetic as the path's class.
                 } else {
-                    f(*op_class);
+                    f(billed_binary_class(op, *op_class, left, right, seed));
+                    walk(left, seed, f);
+                    walk(right, seed, f);
                 }
-                walk(left, f);
-                walk(right, f);
             }
             Expr::Ternary {
                 cond,
@@ -1139,38 +1557,52 @@ pub fn dominant_op_class_measured(e: &Expr) -> OperatorClass {
                 else_e,
             } => {
                 f(OperatorClass::Mux);
-                walk(cond, f);
-                walk(then_e, f);
-                walk(else_e, f);
+                walk(cond, seed, f);
+                walk(then_e, seed, f);
+                walk(else_e, seed, f);
             }
             Expr::Concat { parts } => {
                 f(OperatorClass::Concat);
                 for p in parts {
-                    walk(p, f);
+                    walk(p, seed, f);
                 }
             }
-            Expr::Replicate { count, body } => {
-                f(OperatorClass::Concat);
-                walk(count, f);
-                walk(body, f);
+            Expr::Replicate { count: _, body } => {
+                // Replication count is LRM-constant — do not walk it as hardware.
+                walk(body, seed, f);
             }
             Expr::Index { base, index } => {
-                walk(base, f);
+                walk(base, seed, f);
                 // Constant `[msb:lsb]` bounds must not nominate the path's class: the
                 // ptw slice above would otherwise rank as a DivRem cone.
-                if !is_constant_range_select(index) {
-                    walk(index, f);
+                if is_constant_range_select(index) {
+                    // bounds are elaboration-time
+                } else if let Some(base_idx) = indexed_part_select_base(index) {
+                    walk(base_idx, seed, f);
+                } else {
+                    walk(index, seed, f);
                 }
             }
-            Expr::Call { args, .. } => {
-                f(OperatorClass::Other);
-                for a in args {
-                    walk(a, f);
+            Expr::Call { name, args, .. } => {
+                if is_elab_system_fn(name)
+                    && args.iter().all(|a| a.const_class(seed).is_const())
+                {
+                    // P1 $clog2/$bits of constants — not an operator class.
+                } else if is_fmt_scale_fn(name) {
+                    f(OperatorClass::Mux);
+                    for a in args {
+                        walk(a, seed, f);
+                    }
+                } else {
+                    f(OperatorClass::Other);
+                    for a in args {
+                        walk(a, seed, f);
+                    }
                 }
             }
         }
     }
-    walk(e, &mut |c| {
+    walk(e, seed, &mut |c| {
         let r = class_rank(c);
         if r > best_rank {
             best_rank = r;
@@ -1182,7 +1614,9 @@ pub fn dominant_op_class_measured(e: &Expr) -> OperatorClass {
 
 fn paren_if_needed(e: &Expr) -> String {
     match e {
-        Expr::Binary { .. } | Expr::Ternary { .. } => format!("({})", e.emit()),
+        Expr::Binary { .. } | Expr::Ternary { .. } | Expr::PartSelect { .. } => {
+            format!("({})", e.emit())
+        }
         _ => e.emit(),
     }
 }
@@ -1396,6 +1830,13 @@ impl<'a> Parser<'a> {
                 {
                     continue;
                 }
+                // Indexed part-select `+:` / `-:` is not add/sub.
+                if (op == "+" || op == "-")
+                    && self.i + b.len() < self.src.len()
+                    && self.src[self.i + b.len()] == b':'
+                {
+                    continue;
+                }
                 // For single-char ops that start multi-char ops of higher precedence
                 // handled by sorted order within the set only.
                 self.i += b.len();
@@ -1427,14 +1868,19 @@ impl<'a> Parser<'a> {
                     self.bump();
                     let idx = self.parse_expr()?;
                     self.skip_ws();
-                    // optional : for part select — already in parse_expr via ternary? No, `:` is ternary.
-                    // Handle `hi:lo` inside brackets as binary with op ":"
-                    let index = if self.peek() == Some(b':') {
+                    // `hi:lo` or indexed `base +: width` / `base -: width` (IEEE 1800 §11.5.1).
+                    let index = if let Some(sel) = self.match_op(&["+:", "-:"]) {
+                        let width = self.parse_expr()?;
+                        Expr::PartSelect {
+                            kind: PartSelectKind::from_op(&sel).unwrap_or(PartSelectKind::IndexedPlus),
+                            left: Box::new(idx),
+                            right: Box::new(width),
+                        }
+                    } else if self.peek() == Some(b':') {
                         self.bump();
                         let lo = self.parse_expr()?;
-                        Expr::Binary {
-                            op: ":".into(),
-                            op_class: OperatorClass::Other,
+                        Expr::PartSelect {
+                            kind: PartSelectKind::FixedRange,
                             left: Box::new(idx),
                             right: Box::new(lo),
                         }
@@ -1475,6 +1921,28 @@ impl<'a> Parser<'a> {
                         self.bump();
                     }
                     e = Expr::Call { name, args };
+                }
+                Some(b'\'') if self.src.get(self.i + 1) == Some(&b'(') => {
+                    // Narrow: only `(W)'(1)` / `idx'(1'b1)` is a unit increment
+                    // (l2_mshr `count_q - (IDX_W+1)'(1)`). General `(W)'(v)`
+                    // backtracks — delay-v19 collapsing every cast made gemm
+                    // `32'(n-1)*row+k` a 67.5 Mul+add (audit-remain-v25).
+                    let save = self.i;
+                    self.bump();
+                    self.bump();
+                    match self.parse_expr() {
+                        Some(val) if matches!(positive_literal_value(&val), Some(1)) => {
+                            self.skip_ws();
+                            if self.peek() == Some(b')') {
+                                self.bump();
+                            }
+                            e = val;
+                        }
+                        _ => {
+                            self.i = save;
+                            break;
+                        }
+                    }
                 }
                 _ => break,
             }
@@ -1678,15 +2146,32 @@ mod tests {
         let fma = Expr::parse("mantissa_a * mantissa_b");
         assert_eq!(fma.dominant_op_class(), OperatorClass::Mul);
         assert!(fma.fo4_critical_cost(&base) >= 56.0);
-        // Parameter-looking names do not prove compile-time values.
+        // Mixed-case VpnLen is runtime under the heuristic seed (no module map).
         let cast_w = Expr::parse("(CVA6Cfg.PtLevels + HYP_EXT) * VpnLen");
         assert_eq!(cast_w.dominant_op_class(), OperatorClass::Mul);
-        assert_eq!(cast_w.fo4_critical_cost(&base), 66.0);
+        assert!(cast_w.fo4_critical_cost(&base) >= 56.0);
+        // Same expression is elaboration when VpnLen is a module localparam.
+        let seeded = ConstSeed::from_names(["VpnLen", "PtLevels"]);
+        assert_eq!(
+            Expr::parse("(VpnLen / PtLevels) * VpnLen")
+                .fo4_critical_cost_latticed(&base, &seeded),
+            0.0
+        );
+        assert_ne!(
+            Expr::parse("(VpnLen / PtLevels) * VpnLen").dominant_op_class_latticed(&seeded),
+            OperatorClass::Mul
+        );
+        // Pure parameter arithmetic is elaboration (P1), not hardware.
+        assert_eq!(
+            Expr::parse("3 * PRECISION_BITS + 4").fo4_critical_cost(&base),
+            0.0
+        );
         let pow = Expr::parse("2 ** lvl");
         assert_ne!(pow.dominant_op_class(), OperatorClass::Mul);
         // Part-select bound arithmetic may use dynamic operands.
         let idx = Expr::parse("vaddr_q[(WIDTH / 8) * i]");
-        assert_eq!(idx.dominant_op_class(), OperatorClass::DivRem, "{idx:?}");
+        // WIDTH/8 is Const (P1); the remaining runtime op is `* i`.
+        assert_eq!(idx.dominant_op_class(), OperatorClass::Mul, "{idx:?}");
     }
 
     fn arithmetic_base(c: OperatorClass) -> f64 {
@@ -1725,7 +2210,6 @@ mod tests {
             ("x", "y"),
             ("i", "j"),
             ("A", "B"),
-            ("WIDTH", "SIZE"),
             ("count", "num_items"),
             ("cfg.a", "cfg.b"),
             ("ExampleCfg.PtLevels", "VpnLen"),
@@ -1761,10 +2245,121 @@ mod tests {
             // false 202.0 FO4 ptw path. Covered by
             // `fixed_part_select_bounds_are_elaboration_constants`.
             ("(a * b)[i]", OperatorClass::Mul, 56.0),
-            ("mem[(WIDTH / 8) * i]", OperatorClass::DivRem, 176.0),
+            // WIDTH/8 is Const (P1); the runtime op is `* i`.
+            ("mem[(WIDTH / 8) * i]", OperatorClass::Mul, 56.0),
         ] {
             assert_arithmetic_cost(text, class, cost);
         }
+    }
+
+    #[test]
+    fn const_divisor_divrem_is_index_scale_not_srt() {
+        // hpdcache_memctrl :472 / :980 — `way % dataWaysPerRamWord` is a bit-select.
+        for text in [
+            "way % HPDcacheCfg.u.dataWaysPerRamWord",
+            "way / HPDcacheCfg.u.dataWaysPerRamWord",
+            "gen_j % HPDcacheCfg.u.dataWaysPerRamWord",
+            "a / 8",
+            "a % 8",
+            "a / WIDTH",
+        ] {
+            let e = Expr::parse(text);
+            assert_ne!(
+                e.dominant_op_class(),
+                OperatorClass::DivRem,
+                "{text}: {e:?}"
+            );
+            assert!(
+                e.fo4_critical_cost(&arithmetic_base) < 20.0,
+                "{text} still billed as divider: {} {e:?}",
+                e.fo4_critical_cost(&arithmetic_base)
+            );
+            assert!(
+                !e.has_atomic_over_budget(&arithmetic_base, 10.0),
+                "{text} still atomic"
+            );
+        }
+        // Runtime both sides, and const / runtime, stay dividers.
+        assert_arithmetic_cost("a / b", OperatorClass::DivRem, 120.0);
+        assert_arithmetic_cost("a % b", OperatorClass::DivRem, 120.0);
+        assert_arithmetic_cost("8 / a", OperatorClass::DivRem, 120.0);
+        assert_arithmetic_cost("WIDTH / a", OperatorClass::DivRem, 120.0);
+    }
+
+    #[test]
+    fn package_scope_screaming_idents_are_elaboration_const() {
+        let e = Expr::parse(
+            "1 + te_pkg::PRIV_LEN + te_pkg::XLEN + 2 + te_pkg::TIME_LEN + te_pkg::XLEN",
+        );
+        assert!(
+            e.const_class(&ConstSeed::heuristic()).is_const(),
+            "pkg::NAME must be Const, class={:?} e={e:?}",
+            e.const_class(&ConstSeed::heuristic())
+        );
+        assert_eq!(
+            e.fo4_critical_cost(&arithmetic_base),
+            0.0,
+            "package-const sum billed as adders: {}",
+            e.fo4_critical_cost(&arithmetic_base)
+        );
+        let mixed = Expr::parse(
+            "1 + te_pkg::PRIV_LEN + te_pkg::XLEN + 2 + (address_off * 8) + te_pkg::TIME_LEN",
+        );
+        let c = mixed.fo4_critical_cost(&arithmetic_base);
+        assert!(
+            c < 15.0,
+            "used_bits += pkg consts + (address_off*8) should be increment/shift/add, got {c}"
+        );
+    }
+
+    #[test]
+    fn plus_one_is_increment_not_carry_propagate_add() {
+        let e = Expr::parse("ax_req_q.len + 1");
+        assert!(
+            e.fo4_critical_cost(&arithmetic_base) < 4.0,
+            "len+1 billed as full add: {}",
+            e.fo4_critical_cost(&arithmetic_base)
+        );
+        let wrap = Expr::parse("wrap_boundary + ((ax_req_q.len + 1) << 3)");
+        let c = wrap.fo4_critical_cost(&arithmetic_base);
+        assert!(
+            c < 16.0,
+            "wrap + ((len+1)<<k) should be inc+shift+add, got {c}"
+        );
+        assert_arithmetic_cost("a + b", OperatorClass::AddSub, 10.0);
+        // l2_mshr: width-cast of 1 is an increment, not CPA-of-(IDX_W+1).
+        let cast1 = Expr::parse("count_q - (IDX_W+1)'(1)");
+        assert!(
+            cast1.fo4_critical_cost(&arithmetic_base) < 4.0,
+            "width-cast 1 billed as add: {} {cast1:?}",
+            cast1.fo4_critical_cost(&arithmetic_base)
+        );
+        // Must not parse general `32'(expr)` (gemm `32'(n-1)*row+k` regression).
+        let gemm = Expr::parse(
+            "32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes",
+        );
+        assert_ne!(
+            gemm.dominant_op_class(),
+            OperatorClass::Mul,
+            "general width-cast must not expose inner mul: {gemm:?}"
+        );
+        assert_ne!(
+            Expr::parse("32'(a + b)").dominant_op_class(),
+            OperatorClass::AddSub,
+            "32'(a+b) must not collapse to a+b"
+        );
+        let fmt = Expr::parse("fmt_row_bytes({16'd0, ldb_q})");
+        assert!(
+            fmt.fo4_critical_cost(&arithmetic_base) < 10.0,
+            "fmt_row_bytes must be mux-of-shifts, got {} {fmt:?}",
+            fmt.fo4_critical_cost(&arithmetic_base)
+        );
+        let scaled = Expr::parse("k_q * ai_fmt_bytes()");
+        assert_ne!(
+            scaled.dominant_op_class(),
+            OperatorClass::Mul,
+            "elems * ai_fmt_bytes is a shift, got {scaled:?}"
+        );
     }
 
     #[test]
@@ -1790,7 +2385,8 @@ mod tests {
                 assert_arithmetic_cost(&text, OperatorClass::Other, 1.0);
             }
         }
-        assert_arithmetic_cost("(i + 1) * 8 - 1", OperatorClass::AddSub, 21.0);
+        // `+1` / `-1` are increments; `* 8` is a shift — not a 10+10 CPA.
+        assert_arithmetic_cost("(i + 1) * 8 - 1", OperatorClass::LogicBit, 3.0);
         assert_arithmetic_cost("mem[i * 8]", OperatorClass::Other, 1.0);
     }
 
@@ -1813,14 +2409,14 @@ mod tests {
             "(a + b) * (c + d)",
             "a[i] * b[j]",
             "a * WIDTH",
-            "WIDTH * 3",
         ] {
             let e = Expr::parse(text);
             assert_eq!(e.dominant_op_class(), OperatorClass::Mul, "{text}: {e:?}");
             assert!(e.fo4_critical_cost(&arithmetic_base) >= 56.0, "{text}");
             assert!(e.has_atomic_over_budget(&arithmetic_base, 10.0), "{text}");
         }
-        for text in ["a / 8", "8 / a", "a % 8", "8 % a", "a / 0", "a % 0"] {
+        // Runtime divisor stays a divider. Literal / Cfg divisor is delay-v14 scale.
+        for text in ["8 / a", "8 % a", "a / 0", "a % 0"] {
             assert_arithmetic_cost(text, OperatorClass::DivRem, 120.0);
         }
     }
@@ -1842,9 +2438,8 @@ mod tests {
         // Pure wire slice off a plain signal: no operator delay at all.
         assert_eq!(ptw.fo4_critical_cost(&arithmetic_base), 0.0);
 
-        // Only the `:` form is a language-guaranteed constant. A bit-select index is
-        // charged, and `+:` / `-:` do not even reach the rule -- they parse to `Opaque`,
-        // so an indexed part-select base can never be excused by it.
+        // Bit-select runtime index is charged. Indexed `+:` / `-:` width is
+        // LRM-constant; the base index is still hardware (IEEE 1800 §11.5.1).
         for text in ["mem[a / b]", "mem[a * b]", "mem[other[a / b]]"] {
             let e = Expr::parse(text);
             assert!(
@@ -1852,19 +2447,83 @@ mod tests {
                 "{text} was excused: {e:?}"
             );
         }
-        for text in ["mem[(a / b) +: 8]", "operand_b[i << 3 +: 8]", "mem[x -: 4]"] {
-            let e = Expr::parse(text);
-            let Expr::Index { index, .. } = &e else {
-                assert!(matches!(e, Expr::Opaque { .. }), "{text}: {e:?}");
-                continue;
-            };
-            assert!(
-                !is_constant_range_select(index),
-                "{text}: indexed part-select treated as a constant range bound"
-            );
+        let idx_div = Expr::parse("mem[(a / b) +: 8]");
+        match &idx_div {
+            Expr::Index { index, .. } => {
+                assert!(
+                    !is_constant_range_select(index),
+                    "+: must not look like [msb:lsb]"
+                );
+                assert!(
+                    matches!(
+                        index.as_ref(),
+                        Expr::PartSelect {
+                            kind: PartSelectKind::IndexedPlus,
+                            ..
+                        }
+                    ),
+                    "+: must parse as PartSelect, got {index:?}"
+                );
+            }
+            other => panic!("expected Index, got {other:?}"),
         }
+        assert!(
+            idx_div.fo4_critical_cost(&arithmetic_base) >= 120.0,
+            "runtime base of +: was excused: {idx_div:?}"
+        );
+        let idx_shl = Expr::parse("operand_b[i << 3 +: 8]");
+        assert!(
+            idx_shl.fo4_critical_cost(&arithmetic_base) >= 1.0,
+            "shift base of +: was excused: {idx_shl:?}"
+        );
+        assert_eq!(
+            Expr::parse("v[HYP_EXT*2:0]").fo4_critical_cost(&arithmetic_base),
+            0.0,
+            "HYP_EXT*2 in [msb:lsb] must be elaboration"
+        );
+        assert_ne!(
+            Expr::parse("v[HYP_EXT*2:0]").dominant_op_class(),
+            OperatorClass::Mul,
+            "const slice must not rank as Mul"
+        );
+        assert_eq!(
+            Expr::parse("mem[WIDTH +: 8]").fo4_critical_cost(&arithmetic_base),
+            0.0,
+            "const base +: width must be elaboration"
+        );
+        assert_eq!(
+            Expr::parse("mem[x -: 4]").fo4_critical_cost(&arithmetic_base),
+            0.0,
+            "ident bit-base -: width has no arithmetic"
+        );
 
         // The selected base is still measured through a constant slice.
+        assert_eq!(Expr::parse("WIDTH * 3").fo4_critical_cost(&arithmetic_base), 0.0);
+        assert_eq!(
+            Expr::parse("3 * PRECISION_BITS + 4").fo4_critical_cost(&arithmetic_base),
+            0.0
+        );
+        assert_eq!(
+            Expr::parse("$clog2(CVA6Cfg.AxiDataWidth / 8)").fo4_critical_cost(&arithmetic_base),
+            0.0
+        );
+        assert_eq!(
+            Expr::parse("{{(DataWidth/8-4){1'b0}}, 4'hF}").fo4_critical_cost(&arithmetic_base),
+            0.0
+        );
+        // Runtime * const (non power-of-two) stays a multiply. Runtime / const
+        // divisor is a shift (delay-v14), not a 120 FO4 divider.
+        assert!(
+            Expr::parse("a * WIDTH").fo4_critical_cost(&arithmetic_base) >= 56.0
+        );
+        let cnt_half = Expr::parse("(cnt + 1) / 2");
+        assert_ne!(cnt_half.dominant_op_class(), OperatorClass::DivRem);
+        assert!(
+            cnt_half.fo4_critical_cost(&arithmetic_base) < 20.0,
+            "const-divisor /2 must not be DivRem, got {}",
+            cnt_half.fo4_critical_cost(&arithmetic_base)
+        );
+
         assert_arithmetic_cost("(a * b)[7:0]", OperatorClass::Mul, 56.0);
         assert_arithmetic_cost("mem[f(a / b)][7:0]", OperatorClass::DivRem, 121.0);
     }

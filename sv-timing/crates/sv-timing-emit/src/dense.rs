@@ -207,6 +207,10 @@ pub struct EmitBlocks {
     pub early: String,
     /// Inject before `endmodule`.
     pub late: String,
+    /// BalanceMux RTL: `(marker ident, snippet)` injected before the origin
+    /// process that references `marker` (gemm `pe_float_en` is declared after
+    /// the first `always_comb`).
+    pub bm_at_origin: Vec<(String, String)>,
 }
 
 /// Build early + late emit blocks for dual inject placement.
@@ -254,8 +258,11 @@ pub fn emit_blocks_for_trace_src(
         .collect();
 
     // Collect snippets; demote unless emit_balance_mux_rtl + scope-safe (R12d).
-    // always_ff factorize comments are comment-only — always inject.
+    // always_ff factorize comments are comment-only — always inject early.
+    // BalanceMux RTL injects at the origin process (`bm_at_origin`), not at
+    // the module's first process (gemm `pe_float_en` is declared in between).
     let mut snippets: Vec<&str> = Vec::new();
+    let mut bm_at_origin: Vec<(String, String)> = Vec::new();
     for r in &trace.records {
         if let Some(s) = r.emit_snippet.as_ref() {
             if s.trim().is_empty() {
@@ -274,7 +281,16 @@ pub fn emit_blocks_for_trace_src(
             if !safe {
                 continue; // demoted — FO4 credit already on the edit
             }
-            snippets.push(s.as_str());
+            let marker = r
+                .emit_rhs
+                .clone()
+                .or_else(|| r.new_name.clone())
+                .unwrap_or_default();
+            if marker.is_empty() {
+                snippets.push(s.as_str());
+            } else {
+                bm_at_origin.push((marker, s.clone()));
+            }
         }
     }
 
@@ -286,13 +302,17 @@ pub fn emit_blocks_for_trace_src(
     };
 
     // No structural content at all → empty.
-    if early.is_empty() && late.is_empty() {
+    if early.is_empty() && late.is_empty() && bm_at_origin.is_empty() {
         return EmitBlocks::default();
     }
     // Pipe-only: early empty, late dense.
     // BalanceMux-only: early block, late empty.
     // Both: early BalanceMux + late dense (snippets not duplicated in dense).
-    EmitBlocks { early, late }
+    EmitBlocks {
+        early,
+        late,
+        bm_at_origin,
+    }
 }
 
 /// Same as [`dense_autocorrect_block`] with optional cut-site RHS wiring.
@@ -307,6 +327,16 @@ pub fn dense_autocorrect_block_with_cuts(
     let blocks = emit_blocks_for_trace(trace, opts, cuts);
     let mut b = String::new();
     b.push_str(&blocks.early);
+    if !blocks.bm_at_origin.is_empty() {
+        b.push_str("  // BEGIN sv-timing auto-correct (balance_mux rewrite)\n");
+        for (_, s) in &blocks.bm_at_origin {
+            b.push_str(s);
+            if !s.ends_with('\n') {
+                b.push('\n');
+            }
+        }
+        b.push_str("  // END sv-timing auto-correct (balance_mux rewrite)\n");
+    }
     b.push_str(&blocks.late);
     b
 }
