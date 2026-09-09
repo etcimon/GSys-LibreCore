@@ -102,6 +102,7 @@ impl BoardSpec {
             ("http_files_html", self.kernel.http.files.html),
             ("http_files_js", self.kernel.http.files.js),
             ("http_files_wasm", self.kernel.http.files.wasm),
+            ("http_files_assets", self.kernel.http.files.assets),
             (
                 "https_files",
                 self.kernel.http.files.enable && self.kernel.http.files.https,
@@ -380,6 +381,7 @@ fn files_html_only() -> HttpFiles {
         js: false,
         wasm: false,
         https: false,
+        assets: false,
         root: "/ui".into(),
     }
 }
@@ -391,6 +393,7 @@ fn files_https_ui(wasm: bool) -> HttpFiles {
         js: true,
         wasm,
         https: true,
+        assets: true,
         root: "/ui".into(),
     }
 }

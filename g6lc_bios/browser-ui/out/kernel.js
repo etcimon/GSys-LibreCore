@@ -754,17 +754,21 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
       if (asyncify && asyncify.getState() !== 0) return false;
       return true;
     }
+    const rafNow = typeof requestAnimationFrame === "function"
+      ? requestAnimationFrame
+      : (fn) => setTimeout(() => fn(0), 16);
+    const cafNow = typeof cancelAnimationFrame === "function" ? cancelAnimationFrame : clearTimeout;
     function scheduleTimer(ctx, ptr, ms, interval) {
       const id = nextTimerId++;
       if (!eventsEnabled) {
-        timers.set(id, { ctx, ptr, interval: false });
+        timers.set(id, { ctx, ptr, interval: false, raf: false });
         return id;
       }
       const handle = (interval ? setInterval : setTimeout)(() => {
         if (!canReenter()) return;
         try { callDelegate(ptr, ctx); } catch (e) { /* host event failures are not guest traps */ }
       }, ms);
-      timers.set(id, { handle, ctx, ptr, interval });
+      timers.set(id, { handle, ctx, ptr, interval, raf: false });
       return id;
     }
     out.libwasm_set__function = (nlen, nptr, ctx, ptr) => {
@@ -779,12 +783,31 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
     out.setInterval = (ctx, ptr, ms) => scheduleTimer(ctx, ptr, ms, true);
     out.clearTimeout = (id) => {
       const t = timers.get(id);
-      if (t?.handle) clearTimeout(t.handle);
+      if (t?.handle) (t.raf ? cafNow : clearTimeout)(t.handle);
       timers.delete(id);
     };
     out.clearInterval = (id) => {
       const t = timers.get(id);
       if (t?.handle) clearInterval(t.handle);
+      timers.delete(id);
+    };
+    out.requestAnimationFrame = (ctx, ptr) => {
+      const id = nextTimerId++;
+      if (!eventsEnabled) {
+        timers.set(id, { ctx, ptr, raf: true });
+        return id;
+      }
+      const handle = rafNow(() => {
+        timers.delete(id);
+        if (!canReenter()) return;
+        try { callDelegate(ptr, ctx); } catch { /* host event failures are not guest traps */ }
+      });
+      timers.set(id, { handle, ctx, ptr, raf: true });
+      return id;
+    };
+    out.cancelAnimationFrame = (id) => {
+      const t = timers.get(id);
+      if (t?.handle && t.raf) cafNow(t.handle);
       timers.delete(id);
     };
     out.Object_Call_EventHandler__void = (handle, mlen, mptr, defined, ctx, ptr) => {
@@ -829,7 +852,7 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
     },
     fetch(ptr, len) {
       const url = text(len, ptr);
-      if (!/^\/bios\//.test(url)) throw new Error("libwasm fetch URL not in /bios/ router: " + url);
+      if (!/^\/(bios|ui)\//.test(url)) throw new Error("libwasm fetch URL not a local /bios/ or /ui/ path: " + url);
       if (!asyncify) return 1;
       const promise = fetchFn(url, { method: "GET", credentials: "same-origin", redirect: "error" }).then((r) => {
         if (typeof r === "string") return r;
@@ -872,7 +895,13 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
       if (name === "innerText" || name === "textContent") n.textContent = value;
       else if (name === "className" || name === "title" || name === "value") n[name] = value;
       else if (name === "id") n.id = value;
-      else if (["innerHTML", "outerHTML", "src", "onclick", "__proto__", "constructor", "style"].includes(name)) {
+      else if (name === "src") {
+        if (!/^\/ui\/[A-Za-z0-9._/-]+\.(svg|png|jpg|ico)$/.test(value)) {
+          throw new Error("WASM src must be a local /ui/ image path");
+        }
+        n.setAttribute("src", value);
+      }
+      else if (["innerHTML", "outerHTML", "onclick", "__proto__", "constructor", "style"].includes(name)) {
         throw new Error("WASM unsupported DOM property: " + name);
       } else n.setAttribute(name, value);
     },
@@ -1839,6 +1868,8 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
     async start() {
       if (started || !ui) return;
       started = true;
+      // Native-browser fallback until the LDC cell's g6b_listen listeners
+      // own tab/refresh (B87). Same protocol as BrowserSession::cell_click.
       for (const link of links) {
         link.addEventListener("click", async (event) => {
           event.preventDefault();

@@ -160,16 +160,22 @@ live objects, and a host that ignores `libwasm_removeObject` leaks. The current
 g6b browser host allocates object handles from `0x0010_0000` and never frees;
 that is a bounded-lifetime shortcut, not the libwasm contract.
 
-For the BIOS the two roots are **not** `document`/`window`. They are:
+svelte-engine is the spec: `{1: document, 2: window}`. The BIOS kernel is
+**not** the type hook (`architecture/BROWSER-RUNTIME.md`). `JsExports` is
+`window.__svelteD.ts`. The G6LC_G6B `getRoot() → 1` mount is transitional.
+
+For the BIOS the two DOM-handle roots are **not** BoardSpec:
 
 | Handle | g6b meaning |
 |---|---|
-| `1` | the detached staging DOM root (already true, `BROWSER.md`) |
-| `2` | the `BoardSpec`-derived global scope: menus, capabilities, kernel router |
+| `1` | Spa mount (`#libwasm-root` stand-in) until LDC `getRoot` matches svelte-engine |
+| `2` | first `createElement` (svelte-engine would have reserved this for `window`) |
+| `libwasm_global("document"\|"window"\|"console")` | interned UI-thread objects at `OBJECT_BASE+` |
 
-That substitution is the whole point of `version(G6LC_G6B)`. It must be
-documented at the boundary, because a binding written against `window` will
-silently address the BoardSpec object instead.
+`version(G6LC_G6B)` replaces the JS import table with the g6b host boundary.
+It does **not** mean handle 2 is BoardSpec. Bindings that want `window` must
+call `libwasm_global("window")` (or, after the next LDC rebuild, use the
+svelte-engine `{1,2}` roots).
 
 ## 4. Events
 
@@ -478,9 +484,9 @@ handlers and only dispatches them when the DOM transaction is `committed` and,
 when asyncify is present, the asyncify state is `0` (no unwind/rewind). Timer
 callbacks are gated by `opts.events` (defaulting to `!!asyncify`), so
 non-asyncified cells and the build verifier get fail-closed no-op timers
-while the real libwasm asyncified SPA can schedule. The kernel lane in
-`g6b-wasm` returns zero ids / empty `Optional!T` srets and never re-enters a
-running instance.
+while the real libwasm asyncified SPA can schedule. The kernel lane's
+default `Host` still issues a non-zero no-op id. The UI-thread
+`KernelHost` (B89) owns a `TimerHeap` and re-enters through `WasmUi::call`.
 
 The virtio-input queue (`DomKey`/`DomNav`) and `jsCallback` export path remain
 open for later work; the browser event surface is intentionally bounded to the
@@ -559,10 +565,11 @@ and `dispatch_key` perform CSS `HitBox` lookup and call `Node::dispatch_event`.
 The libwasm host imports `addEventListener`, `removeEventListener`, and
 `dispatchEvent` are declared in `g6b-wasm` and dispatched in `call_import`.
 `g6b-kernel/src/lib.rs` defines the `Listener` enum covering both AOT
-(`g6b_js::Op` programs) and libwasm (`function_index` / `handle`) callbacks. The
-concrete callback execution — AOT `g6b_js::run` and libwasm guest re-entry — is
-still pending; the current slice records triggered listeners in `diagnostics` so
-the host boundary is exercised without claiming full guest execution.
+(`g6b_js::Op` programs) and libwasm (`function_index` / `handle`) callbacks.
+`listeners_run` already re-enters the interpreter (`g6b_js::run` / `run_with_fuel_mut`).
+The remaining hole is not the listener enum: there is not yet a persistent
+`WasmInstance` (tables are reconstructed per event), no live-tree CSS
+invalidation, and no UI-thread frame present onto virtio-gpu.
 
 ### Permanently refused
 

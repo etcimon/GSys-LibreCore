@@ -11,6 +11,7 @@ import { printG6bJs } from "./print-ts.ts";
 import { createWasmHost, createBrowserApp, createLibwasmHost, createParticleBackground, createRenderInspector, createBrowserContext } from "../src/kernel.ts";
 import { isLdc143Text, resolveToolchain } from "./ldc.ts";
 import { parseSvelte } from "./parse.ts";
+import { printApp } from "./print-d.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -992,8 +993,11 @@ describe("libwasm DOM kernel", () => {
     expect(id1).toBeGreaterThan(0);
     const id2 = env.setInterval(3, 4, 20);
     expect(id2).toBeGreaterThan(id1);
+    const id3 = env.requestAnimationFrame(1, 2);
+    expect(id3).toBeGreaterThan(id2);
     env.clearTimeout(id1);
     env.clearInterval(id2);
+    env.cancelAnimationFrame(id3);
 
     // Event handler set/get round-trip on a DOM node.
     const node = env.createElement(26);
@@ -1485,6 +1489,13 @@ holycEval("UsbLs(\\"ntfs\\")");
     expect(r.js).toContain('fetch("/bios/menu")');
     expect(r.js).toContain('fetch("/bios/menu/settings")');
     expect(r.js).toContain('fetch("/bios/menu/cpu")');
+    const d = printApp(loadProject(join(root, "src")));
+    expect(d).toContain('g6b_fetch("/bios/menu")');
+    expect(d).toContain('g6b_fetch("/bios/menu/cpu")');
+    expect(d).toContain('setProperty(bios_mark, "src", "/ui/g6lc.svg")');
+    expect(d).toContain('g6b_listen("tab-cpu", "click")');
+    expect(d).toContain('g6b_listen("refresh", "click")');
+    expect(d).not.toContain('setProperty(tab_cpu, "on:click"');
     expect(r.catalog).toContain("Settings");
     expect(r.cell?.via).toBe("skip");
     expect(r.catalog).toContain("FileMgr");

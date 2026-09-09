@@ -90,6 +90,9 @@ export function verifyLibwasmAbi(bytes: Uint8Array, lane: "app" | "fx-probe" = "
     libwasm_add__object: "->127",
     // B72: resolve a browser-instance global to a protected object handle.
     libwasm_global: "127,127->127",
+    // svelte-engine spa.ts: `addCss` is void(string); `getRoot` is Handle().
+    addCss: "127,127->",
+    getRoot: "->127",
     libwasm_removeObject: "127->",
     libwasm_copyObjectRef: "127->127",
 
@@ -256,6 +259,8 @@ export function verifyLibwasmAbi(bytes: Uint8Array, lane: "app" | "fx-probe" = "
     setInterval: "127,127,127->127",
     clearTimeout: "127->",
     clearInterval: "127->",
+    requestAnimationFrame: "127,127->127",
+    cancelAnimationFrame: "127->",
     // Object_Call_EventHandler__void(handle, name, defined, ctx, ptr) -> void.
     Object_Call_EventHandler__void: "127,127,127,127,127,127->",
     // Object_Getter__EventHandler(sret, handle, name) -> void (sret holds ctx, ptr, defined).

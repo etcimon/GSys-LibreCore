@@ -428,6 +428,11 @@ impl Router {
         }
     }
 
+    /// True when `path` is a mounted static UI file (`/ui/…`).
+    pub fn has_file(&self, path: &str) -> bool {
+        self.files.contains_key(path)
+    }
+
     /// Convenience for JS `fetch(url)` (GET).
     pub fn fetch_get(&self, url: &str) -> Response {
         self.fetch("GET", url)

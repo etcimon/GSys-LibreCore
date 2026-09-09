@@ -489,6 +489,54 @@ pub trait Host {
     fn ldexec_handle(&mut self, _call: Ldexec<'_>) -> Result<i32, String> {
         Err("libwasm ldexec is not implemented by this host".into())
     }
+
+    /// `env.libwasm_global(name) -> handle`. svelte-engine maps
+    /// `document` / `window` / `console` onto the live browser instance.
+    /// Default is the ABI null handle (unavailable). The BIOS UI host
+    /// (`BrowserSession`) overrides this — the kernel is not the type table.
+    fn libwasm_global(&mut self, name: &str) -> Result<i32, String> {
+        let _ = name;
+        Ok(0)
+    }
+
+    /// `env.getRoot() -> handle`. svelte-engine is
+    /// `addObject(document.querySelector('#root'))` (a **new** handle).
+    /// Default returns the G6LC_G6B Spa mount (handle 1) so a cell that
+    /// still compiles `getRoot() { return 1; }` keeps working.
+    fn get_root(&mut self) -> Result<i32, String> {
+        Ok(1)
+    }
+
+    /// `env.addCss(css)` — svelte-engine `spa.ts` creates a `<style>` and
+    /// appends it to `document.head`. Default is a no-op (handle 0).
+    fn add_css(&mut self, _css: &str) -> Result<i32, String> {
+        Ok(0)
+    }
+
+    /// B66/B89: `env.setTimeout(ctx, ptr, ms) -> id`. Default is a non-zero
+    /// no-op id so tests that do not implement a heap still fail closed
+    /// without returning the historic `0`.
+    fn set_timeout(&mut self, ctx: i32, ptr: i32, ms: i32) -> Result<i32, String> {
+        let _ = (ctx, ptr, ms);
+        Ok(1)
+    }
+    fn set_interval(&mut self, ctx: i32, ptr: i32, ms: i32) -> Result<i32, String> {
+        let _ = (ctx, ptr, ms);
+        Ok(1)
+    }
+    fn clear_timeout(&mut self, id: i32) -> Result<(), String> {
+        let _ = id;
+        Ok(())
+    }
+    fn clear_interval(&mut self, id: i32) -> Result<(), String> {
+        self.clear_timeout(id)
+    }
+    fn request_animation_frame(&mut self, ctx: i32, ptr: i32) -> Result<i32, String> {
+        self.set_timeout(ctx, ptr, 0)
+    }
+    fn cancel_animation_frame(&mut self, id: i32) -> Result<(), String> {
+        self.clear_timeout(id)
+    }
 }
 
 /// DOM host used by the BIOS browser.
@@ -2009,8 +2057,45 @@ impl<H: Host> Runtime<'_, H> {
             "libwasm_set__function"
             | "libwasm_unset__function"
             | "Object_Call_EventHandler__void" => Ok(Some(Vec::new())),
-            "setTimeout" | "setInterval" => Ok(Some(vec![Value::I32(0)])),
-            "clearTimeout" | "clearInterval" => Ok(Some(Vec::new())),
+            "setTimeout" => {
+                let ctx = args.first().ok_or("setTimeout arity")?.as_i32()?;
+                let ptr = args.get(1).ok_or("setTimeout arity")?.as_i32()?;
+                let ms = args.get(2).ok_or("setTimeout arity")?.as_i32()?;
+                Ok(Some(vec![Value::I32(self.host.set_timeout(ctx, ptr, ms)?)]))
+            }
+            "setInterval" => {
+                let ctx = args.first().ok_or("setInterval arity")?.as_i32()?;
+                let ptr = args.get(1).ok_or("setInterval arity")?.as_i32()?;
+                let ms = args.get(2).ok_or("setInterval arity")?.as_i32()?;
+                Ok(Some(vec![Value::I32(
+                    self.host.set_interval(ctx, ptr, ms)?,
+                )]))
+            }
+            "clearTimeout" => {
+                let id = args.first().copied().unwrap_or(Value::I32(0)).as_i32()?;
+                self.host.clear_timeout(id)?;
+                Ok(Some(Vec::new()))
+            }
+            "clearInterval" => {
+                let id = args.first().copied().unwrap_or(Value::I32(0)).as_i32()?;
+                self.host.clear_interval(id)?;
+                Ok(Some(Vec::new()))
+            }
+            "requestAnimationFrame" => {
+                let ctx = args
+                    .first()
+                    .ok_or("requestAnimationFrame arity")?
+                    .as_i32()?;
+                let ptr = args.get(1).ok_or("requestAnimationFrame arity")?.as_i32()?;
+                Ok(Some(vec![Value::I32(
+                    self.host.request_animation_frame(ctx, ptr)?,
+                )]))
+            }
+            "cancelAnimationFrame" => {
+                let id = args.first().ok_or("cancelAnimationFrame arity")?.as_i32()?;
+                self.host.cancel_animation_frame(id)?;
+                Ok(Some(Vec::new()))
+            }
             "Object_Getter__EventHandler" => {
                 let raw = args
                     .first()
@@ -2069,24 +2154,23 @@ impl<H: Host> Runtime<'_, H> {
     }
 
     /// B69: bounded ES6 Map surface.  The browser host creates a JS Map;
-    /// the kernel lane cannot re-enter, so it returns a zero/fail-closed
-    /// placeholder and writes empty strings for Optional!T lookups.
-    /// `libwasm_global` (B72) is dispatched here too: it shares the
-    /// fail-closed "kernel lane cannot host a live JS object" contract.
+    /// hosts without a table return a zero/fail-closed placeholder.
+    /// `libwasm_global` is a **browser-host** import (svelte-engine
+    /// `{1: document, 2: window}`); it is not a kernel type hook.
     fn b69_map_dispatch(
         &mut self,
         name: &str,
         args: &[Value],
     ) -> Result<Option<Vec<Value>>, String> {
         match name {
-            // B72: browser-instance globals. The kernel lane has no JS
-            // `console`/`window`/`document`, so it returns the null handle the
-            // ABI defines for "unavailable" rather than inventing an object.
-            // The guest must check, exactly as it must in the browser lane
-            // when no context is bound.
+            // B72: `libwasm_global(string) -> handle`. String lowering is
+            // libwasm order `(len, ptr)`. The UI-thread Host interned
+            // `document`/`window`/`console`; unknown names are handle 0.
             "libwasm_global" => {
-                let _ = args.first().ok_or("libwasm_global arity")?.as_i32()?;
-                Ok(Some(vec![Value::I32(0)]))
+                let len = args.first().ok_or("libwasm_global arity")?.as_i32()?;
+                let ptr = args.get(1).ok_or("libwasm_global arity")?.as_i32()?;
+                let name = mem_str(&self.memory, ptr, len)?;
+                Ok(Some(vec![Value::I32(self.host.libwasm_global(&name)?)]))
             }
             "libwasm_map_create" => Ok(Some(vec![Value::I32(0)])),
             "libwasm_map_set" | "libwasm_map_delete" | "libwasm_map_clear" => {
@@ -2174,6 +2258,11 @@ impl<H: Host> Runtime<'_, H> {
             (name, [ty]) if name == IMPORT_CREATE_ELEMENT => {
                 let tag = node_type_tag(*ty).unwrap_or("div");
                 return Ok(vec![Value::I32(self.host.create_element(tag)?)]);
+            }
+            ("getRoot", []) => return Ok(vec![Value::I32(self.host.get_root()?)]),
+            ("addCss", [len, ptr]) => {
+                let css = mem_str(&self.memory, *ptr, *len)?;
+                self.host.add_css(&css)?;
             }
             (name, [parent, child]) if name == IMPORT_APPEND_CHILD => {
                 self.host.append_child(*parent, *child)?;
@@ -2485,6 +2574,21 @@ fn node_type_tag(ty: i32) -> Option<&'static str> {
         1024 => "root",
         _ => return None,
     })
+}
+
+/// Resolve a libwasm delegate `ptr` (indirect-table index) to a function
+/// index. `ptr == 0` is absent.
+pub fn table_funcref(m: &Module, ptr: i32) -> Result<u32, String> {
+    if ptr <= 0 {
+        return Err("delegate pointer invalid".into());
+    }
+    let tables = init_tables(m);
+    tables
+        .first()
+        .and_then(|t| t.get(ptr as usize))
+        .copied()
+        .flatten()
+        .ok_or_else(|| format!("delegate {ptr} not in function table"))
 }
 
 fn init_tables(m: &Module) -> Vec<Vec<Option<u32>>> {

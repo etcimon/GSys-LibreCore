@@ -14,7 +14,8 @@ kernel-spec (spec) + LibreCore architecture (conformity)
                 →  g6b-gr     SysGrInit 16-colour 8×8 plane + display-proxy
                                (HDMI/DP / host-GL, 30/60/120 fps) + GLES2 listing
                 →  g6b-webidl / g6b-js / g6b-dom / g6b-wasm + browser-ui
-                               BIOS browser + svelte-d NodeDef + WASM-JIT on the kernel
+                               BIOS browser loads the LDC cell (WasmUi);
+                               guest WASM-JIT stays the VGA glyph face
                 →  g6b-tls    Botan rewrite: SHA-256 / AES-128 / HMAC / RSA / ECDSA / X.509
                                HolyC HttpsGet + TlsClientHello; adapter :443 / :2222 until NET-DELEGATE
                 →  g6b-http   HTTP/1.1 + HTTP/2 parse; JS fetch ≡ HolyC RegisterEndpoint

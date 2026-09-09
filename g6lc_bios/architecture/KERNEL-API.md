@@ -35,6 +35,7 @@ Each row is a BoardSpec gate. Off ⇒ no `#define`, no route, no IR object.
 | `/bios/update` | `kernel.flash.self_update` | small | **yes** — BIOS self-update |
 | `/bios/settings` | `kernel.settings.enable` | tiny JSON | **yes** — export/import |
 | `/bios/settings/usb` | `kernel.settings.usb_key` | small | **yes** — USB key; without USB: UART/mailbox |
+| `/bios/store` `/bios/store/{uuid}/*` | `kernel.store.enable` | small | **later S2** — UUID instances, purpose-based BIOS UI; USB dump import/export when `persist.usb` ([`g6b-store-instances.md`](g6b-store-instances.md)). Default **off**. Not SvelteKit |
 | `/bios/profile` `/bios/features` | `kernel.http.enable` | tiny | **yes** — compiled feature map |
 | `/bios/usb` `/bios/usb/ls` `POST /bios/usb/flash` | `kernel.usb.flash_fat32` | small | **yes** — **always** with USB; FAT32 firmware only |
 | `/bios/files` `/bios/files/{fat32,ntfs,ext4}` | `kernel.usb.key` | small | **yes** — USB-key FileMgr; NTFS/ext4 listing, not flash |

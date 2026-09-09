@@ -45,6 +45,33 @@ def run_cargo(argv: list[str]) -> int:
     return subprocess.run(cmd, cwd=str(package_root()), env=env).returncode
 
 
+def cmd_pglite_dist(_: argparse.Namespace) -> int:
+    """PR1 stub. Real extract (SHA-256 verify + four files) is PR8."""
+    log("pglite-dist: stub — extract lands in PR8")
+    log(
+        "pin: @electric-sql/pglite@0.5.8 "
+        "sha256=d71088d246d86e946c5d53b152a23c6b79ee65c8bc43dab69670af53b57c788d"
+    )
+    log("tarball: https://registry.npmjs.org/@electric-sql/pglite/-/pglite-0.5.8.tgz")
+    log("extracts: pglite.wasm initdb.wasm pglite.data index.js → .tools/pglite-dist/")
+    log("usage: python tools/g6b.py pglite-dist")
+    return 0
+
+
+def cmd_store_embed(args: argparse.Namespace) -> int:
+    """PR1 stub. Real emit of __g6b_store_dump is PR3c.
+
+    Fixture JSON is a uuid-led dump (g6b_store=1, uuid, purpose, tables).
+    See architecture/g6b-store-instances.md.
+    """
+    log("store-embed: stub — emit lands in PR3c")
+    log("dump: {g6b_store:1, uuid, purpose, tables} → __g6b_store_dump")
+    log("usage: python tools/g6b.py store-embed --fixture FILE --out FILE")
+    if args.fixture or args.out:
+        log(f"fixture={args.fixture!s} out={args.out!s} (ignored until PR3c)")
+    return 0
+
+
 def cmd_check(_: argparse.Namespace) -> int:
     failed: list[str] = []
     log("--- independence ---")
@@ -228,6 +255,16 @@ def main() -> int:
     dpx = sub.add_parser("display-proxy")
     dpx.add_argument("--spec")
     dpx.add_argument("--out")
+    pd = sub.add_parser(
+        "pglite-dist",
+        help="extract pinned @electric-sql/pglite dist into .tools/pglite-dist (PR8)",
+    )
+    se = sub.add_parser(
+        "store-embed",
+        help="emit first-party __g6b_store_dump rodata from a fixture (PR3c)",
+    )
+    se.add_argument("--fixture", help="JSON dump fixture")
+    se.add_argument("--out", help="output path")
     args = p.parse_args()
     if args.cmd == "check":
         rc = cmd_check(args)
@@ -255,6 +292,10 @@ def main() -> int:
         return cmd_gr(args)
     if args.cmd == "display-proxy":
         return cmd_display_proxy(args)
+    if args.cmd == "pglite-dist":
+        return cmd_pglite_dist(args)
+    if args.cmd == "store-embed":
+        return cmd_store_embed(args)
     return 2
 
 

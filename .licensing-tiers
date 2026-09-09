@@ -137,6 +137,9 @@ U   g6lc_bios/kernel-spec/goosie/**
 # g6lc_bios/libwasm/source/libwasm/g6b_kernel.d.
 U   g6lc_bios/libwasm/**
 U   g6lc_bios/svelte-d/**
+# Electric SQL PGlite sources (Apache-2.0). Dist wasm is gitignored npm pin,
+# not this tree. Verbatim; E-UPSTREAMWRITE. First-party store is crates/g6b-pglite (later).
+U   g6lc_bios/pglite/**
 # linux-dist OpenWrt trees are upstream GPL (etcimon forks of official). Leave
 # them verbatim (E-UPSTREAMWRITE). First-party linux-dist/*.md and ubuntu/
 # scaffold stay tier T via the g6lc_qemu/** rule above; last match wins.

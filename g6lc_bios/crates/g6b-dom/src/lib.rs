@@ -10,6 +10,48 @@ pub use event::*;
 
 use std::collections::BTreeMap;
 
+/// goosie invalidation bits (Style / Layout / Paint). `Node` has no parent
+/// pointer, so callers walk [`Node::dirty_union`] instead of bubbling up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DirtyFlag(pub u8);
+
+impl DirtyFlag {
+    pub const NONE: Self = Self(0);
+    pub const STYLE: Self = Self(1 << 0);
+    pub const LAYOUT: Self = Self(1 << 1);
+    pub const PAINT: Self = Self(1 << 2);
+    pub const ALL: Self = Self((1 << 0) | (1 << 1) | (1 << 2));
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn contains(self, bit: Self) -> bool {
+        self.0 & bit.0 == bit.0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub fn insert(&mut self, bit: Self) {
+        self.0 |= bit.0;
+    }
+}
+
+impl std::ops::BitOr for DirtyFlag {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        self.union(rhs)
+    }
+}
+
+impl std::ops::BitOrAssign for DirtyFlag {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.insert(rhs);
+    }
+}
+
 /// A node in the BIOS DOM.
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -18,6 +60,7 @@ pub struct Node {
     pub text: String,
     pub children: Vec<Node>,
     pub dirty: bool,
+    pub dirty_flags: DirtyFlag,
     pub hidden: bool,
     pub attributes: BTreeMap<String, String>,
     pub event_listeners: Vec<event::Listener>,
@@ -31,6 +74,7 @@ impl Node {
             text: String::new(),
             children: Vec::new(),
             dirty: true,
+            dirty_flags: DirtyFlag::ALL,
             hidden: false,
             attributes: BTreeMap::new(),
             event_listeners: Vec::new(),
@@ -44,10 +88,34 @@ impl Node {
             text: text.to_string(),
             children: Vec::new(),
             dirty: true,
+            dirty_flags: DirtyFlag::ALL,
             hidden: false,
             attributes: BTreeMap::new(),
             event_listeners: Vec::new(),
         }
+    }
+
+    /// Record a goosie invalidation. `dirty` stays the any-bit convenience
+    /// the rest of the tree already tests.
+    pub fn mark_dirty(&mut self, flags: DirtyFlag) {
+        if flags.is_empty() {
+            return;
+        }
+        self.dirty_flags.insert(flags);
+        self.dirty = true;
+    }
+
+    /// OR of this node and every descendant. Engine skip-if-clean uses this
+    /// because there is no parent pointer to bubble into.
+    pub fn dirty_union(&self) -> DirtyFlag {
+        let mut flags = self.dirty_flags;
+        for child in &self.children {
+            flags = flags.union(child.dirty_union());
+            if flags.contains(DirtyFlag::ALL) {
+                break;
+            }
+        }
+        flags
     }
 
     /// Depth-first find by `id` attribute.
@@ -76,7 +144,7 @@ impl Node {
         if self.name == "#text" {
             if self.text != t {
                 self.text = t.into();
-                self.dirty = true;
+                self.mark_dirty(DirtyFlag::LAYOUT | DirtyFlag::PAINT);
             }
             return;
         }
@@ -92,7 +160,7 @@ impl Node {
         } else {
             vec![Node::text_node(t)]
         };
-        self.dirty = true;
+        self.mark_dirty(DirtyFlag::LAYOUT | DirtyFlag::PAINT);
     }
 
     pub fn get_attribute(&self, name: &str) -> Option<&str> {
@@ -124,8 +192,10 @@ impl Node {
         } else if name == "hidden" {
             self.hidden = true;
         }
-        self.attributes.insert(name, value.into());
-        self.dirty |= changed;
+        self.attributes.insert(name.clone(), value.into());
+        if changed {
+            self.mark_dirty(attribute_dirty(&name));
+        }
         Ok(changed)
     }
 
@@ -138,7 +208,9 @@ impl Node {
         } else if name == "hidden" {
             self.hidden = false;
         }
-        self.dirty |= changed;
+        if changed {
+            self.mark_dirty(attribute_dirty(&name));
+        }
         changed
     }
 
@@ -148,14 +220,14 @@ impl Node {
         } else if !self.hidden {
             self.hidden = true;
             self.attributes.insert("hidden".into(), String::new());
-            self.dirty = true;
+            self.mark_dirty(DirtyFlag::STYLE | DirtyFlag::LAYOUT | DirtyFlag::PAINT);
         }
     }
 
     pub fn append_child(&mut self, child: Node) -> usize {
         let index = self.children.len();
         self.children.push(child);
-        self.dirty = true;
+        self.mark_dirty(DirtyFlag::ALL);
         index
     }
 
@@ -163,12 +235,13 @@ impl Node {
         if index >= self.children.len() {
             return None;
         }
-        self.dirty = true;
+        self.mark_dirty(DirtyFlag::ALL);
         Some(self.children.remove(index))
     }
 
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
+        self.dirty_flags = DirtyFlag::NONE;
         for child in &mut self.children {
             child.clear_dirty();
         }
@@ -211,6 +284,16 @@ impl Node {
         for child in &self.children {
             child.collect_matching(selector, out);
         }
+    }
+}
+
+fn attribute_dirty(name: &str) -> DirtyFlag {
+    match name {
+        "class" | "style" | "hidden" | "width" | "height" | "src" => {
+            DirtyFlag::STYLE | DirtyFlag::LAYOUT | DirtyFlag::PAINT
+        }
+        "data-hover" => DirtyFlag::STYLE | DirtyFlag::PAINT,
+        _ => DirtyFlag::STYLE | DirtyFlag::PAINT,
     }
 }
 
@@ -456,5 +539,29 @@ mod tests {
         root.set_inner_text("perf");
         assert_eq!(root.inner_text(), "perf");
         assert!(root.dirty);
+    }
+
+    #[test]
+    fn dirty_flags_classify_mutations() {
+        let mut root = Node::elem("div");
+        root.clear_dirty();
+        root.set_inner_text("row");
+        assert!(root.dirty_flags.contains(DirtyFlag::LAYOUT));
+        assert!(root.dirty_flags.contains(DirtyFlag::PAINT));
+        root.clear_dirty();
+        root.set_attribute("class", "bios-tab").unwrap();
+        assert!(root.dirty_flags.contains(DirtyFlag::STYLE));
+        assert!(root.dirty_flags.contains(DirtyFlag::LAYOUT));
+        root.clear_dirty();
+        root.set_attribute("data-hover", "1").unwrap();
+        assert!(root.dirty_flags.contains(DirtyFlag::STYLE));
+        assert!(root.dirty_flags.contains(DirtyFlag::PAINT));
+        assert!(!root.dirty_flags.contains(DirtyFlag::LAYOUT));
+        let mut parent = Node::elem("body");
+        parent.append_child(root);
+        parent.clear_dirty();
+        parent.children[0].set_attribute("class", "on").unwrap();
+        assert!(parent.dirty_union().contains(DirtyFlag::STYLE));
+        assert!(!parent.dirty_flags.contains(DirtyFlag::STYLE));
     }
 }

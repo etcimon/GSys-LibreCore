@@ -48,14 +48,19 @@ plane with a boot scanline, and an 8×8 `G6LC` blit; QEMU still uses
 `virtio-gpu-device` (never `-netdev`; `proxy.gl` selects
 `virtio-gpu-gl-device` + `egl-headless,gl=on`). `ProxyScale` runs when
 `kernel.proxy.gl`.
-`UiInit` publishes a `G6UI` header at `__ui_blob`; the ELF carries
-`bios-ui.wasm` in `.rodata`. UART/mbox `Ui` prints `UI`. `FileServe` echoes
-`\0asm` and prints `/ui/` paths; UART/mbox `File` lists them. `GetFile` is GET
-`/ui/ui.wasm` (mailbox RSP `\0asm`+size; not a netdev). `WasmJit` is the
-`i32.add` leaf when `kernel.wasm.jit`; `WasmUi` then runs `WasmStart`
-(lowered straight-line wasm `_start` import calls) against `__ui_dom` and
-`DomPaint` (`DOM| ` serial + 8x8 glyphs into `__gr_plane`) — a bounded
-boot-time lane, not a guest browser or JIT install. UART `Ui` re-dumps the
+`UiInit` publishes a `G6UI` header at `__ui_blob`; the ELF carries the UI
+wasm (LDC libwasm cell when live) in `.rodata`. UART/mbox `Ui` prints `UI`.
+`FileServe` echoes `\0asm` and prints `/ui/` paths; UART/mbox `File` lists
+them. `GetFile` is GET `/ui/ui.wasm` (mailbox RSP `\0asm`+size; not a
+netdev). Host `BrowserSession` runs that LDC cell and does **not** fall back
+to the MVP encoder wasm. `WasmJit` is the numeric `i32.add` worker leaf when
+`kernel.wasm.jit`; `WasmUi` then runs `WasmStart` (MVP straight-line `_start`
+imports) against `__ui_dom` and `DomPaint` (8×8 glyphs) — a VGA/UART text
+face, not the web engine. GPU-class scanout must present `BrowserSession`
+Canvas32 (B90: host blit of dirty tiles into modelled `__scan_fb`; B91:
+guest `VioPaint` TRANSFERs `__ui_cap` tiles when WEB_PRESENT, else
+full-frame `FbExpandSel`).
+UART `Ui` re-dumps the
 live DOM via `DomPaint`. `VioProbe` (`Purpose::Virtio`, live when
 `wants_virtio_gpu`) scans QEMU-virt virtio-mmio slots `0x10001000+0x1000*i`
 (all 8 transports exist at a 0x1000 stride; `-device` attaches to the last
@@ -277,9 +282,12 @@ python tools/g6b.py display-proxy --spec fixtures/g6lc64-virt.json --out out/pro
 python tools/g6b.py regress
 ```
 
-Navigate: plan of record `architecture/PLAN.md`; keep/refuse map `architecture/ZEAL.md`;
+Navigate: plan of record `architecture/PLAN.md`; web-engine endpoint
+`architecture/plan-endpoint.md` (B82–B91); keep/refuse map `architecture/ZEAL.md`;
 codegen philosophy `architecture/CODEGEN.md`; display-proxy `architecture/DISPLAY.md`;
-browser `architecture/BROWSER.md`; render validation + CSS methodology
+interactive UI `architecture/BROWSER-RUNTIME.md` (browser loads the LDC cell
+on a UI thread; GLES2 `u_dom` onto virtio-gpu/HDMI); subset/config
+`architecture/BROWSER.md`; render validation + CSS methodology
 `architecture/RENDER-VALIDATION.md`; libwasm host ABI + completion plan
 `architecture/LIBWASM-ABI.md`; USB `architecture/USB.md`; menus
 `architecture/MENUS.md`; file server `architecture/FILE-SERVER.md`; TLS

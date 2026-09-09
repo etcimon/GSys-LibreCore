@@ -11,7 +11,7 @@ BoardSpec kernel.http.files
         ▼
 g6b-http::files::mount  →  /ui/index.html  /ui/app.js  /ui/ui.wasm
         (HTML from g6b-ui; native app.js from browser-ui/src/kernel.ts;
-         WASM from browser-ui/out; host boot uses g6b-wasm KernelHost)
+         WASM = LDC cell when live — the app BrowserSession::wasm_ui loads)
         │
         ├─ HTTP/1.1  GET  (h1 encode, content-type)
         └─ TLS 1.2   ClientHello → ServerHello+Cert+HelloDone
@@ -56,8 +56,10 @@ without `tls.https` is refused. Files need `http.serve` (adapter or mailbox).
 | `/ui/index.html` `/ui/` `/` | `text/html` |
 | `/ui/app.js` | `application/javascript` |
 | `/ui/worker.js` | `application/javascript`, tasking + JS/file gated Dedicated Worker |
-| `/ui/ui.wasm` | `application/wasm` (`\0asm`), bounded first-party VM lane |
-| `/ui/ui-libwasm.wasm` | `application/wasm`, optional LDC 1.43 component/particle lane |
+| `/ui/ui.wasm` | `application/wasm` (`\0asm`): **the UI application** — LDC cell when the svelte-d lane is live, else the MVP encoder demo |
+| `/ui/ui-libwasm.wasm` | `application/wasm`, LDC 1.43 libwasm cell (same bytes as live `/ui/ui.wasm`) |
+| `/ui/bios-ui.css` | `text/css`, goosie-matchable sheet the UI thread concatenates into the live raster |
+| `/ui/g6lc.svg` | `image/svg+xml`, local `<img src>` / `fetch` asset |
 | `/ui` `/bios/www` | JSON listing |
 
 SvelteKit `+page` routing is refused. The USB-key FileMgr (`/bios/files`) is a
@@ -113,8 +115,9 @@ the larger LDC module needs the full guest runtime and transport/scanout work.
 
 The OpenSBI payload does **not** mount a VFS. When WASM or HTTP files are
 live, `UiInit` writes a 32-byte header at `__ui_blob` (BSS after the UART
-line) and the ELF carries `browser-ui/out/bios-ui.wasm` in `.rodata`
-(`__ui_wasm`):
+line) and the ELF carries the UI wasm in `.rodata` (`__ui_wasm`) — the
+LDC libwasm cell when that artifact is live, otherwise the MVP encoder
+demonstration:
 
 | Offset | Word |
 |---|---|
@@ -136,5 +139,6 @@ prints `FILE` plus each live `/ui/` path. UART/mbox `File` / `F` is the HolyC
 kick `G` writes `\0asm` at RSP+0 and the wasm size at RSP+4 (length 8). After
 `NET-DELEGATE` that is the `/dev/g6lc-bios` GET, still **not** a netdev.
 
-Host file-serve still uses `g6b-wasm::BIOS_UI_WASM`; the guest blob is the
-in-payload copy.
+Host `/ui/ui.wasm` is the same cell as the guest blob (LDC when live).
+`install_start` still lowers the **MVP encoder** `_start` into VGA-glyph
+`WasmStart` imports; that path is not the web engine.

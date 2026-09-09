@@ -1,29 +1,7 @@
 {
   "schema": "g6lc-libwasm-status/v1",
   "available": true,
-  "status": "fresh",
-  "reason": "verified cached asyncified LDC artifact (wasm EH + asyncify)",
-  "scope": "component-shell preview and particle state; Asyncify build path landed; not full Svelte CSS/reactivity/tree or D await/catch host driver",
-  "provenance": {
-    "schema": "g6lc-libwasm-artifact/v1",
-    "abi": "g6lc-libwasm-dom-shell-fx/v1",
-    "inputs": "0eaec03e500acc59f61b52a5f41e784a46136017a50a10fa1acaedd368dcdae6",
-    "sha256": "b0a9b1d443a1280f93c46214e4763732822d502f3aeaaacef785b83bdb5b02cb",
-    "buildType": "release",
-    "compiler": "LDC - the LLVM D compiler (1.43.0-beta1):",
-    "imports": [
-      "__cpp_exception",
-      "appendChild",
-      "createElement",
-      "fetch",
-      "holyc",
-      "libwasm_add__string",
-      "libwasm_await__void",
-      "libwasm_await_supported",
-      "libwasm_await_value",
-      "libwasm_removeObject",
-      "register_endpoint",
-      "setProperty"
-    ]
-  }
+  "status": "stale",
+  "reason": "Error: stale libwasm provenance: source/runtime/toolchain/ABI mismatch",
+  "scope": "component-shell preview and particle state; Asyncify build path landed; not full Svelte CSS/reactivity/tree or D await/catch host driver"
 }

@@ -27,6 +27,9 @@ pub struct Event {
     pub composed: bool,
     /// Extra payload (key, mouse coordinates, etc.) as a JSON-ish string.
     pub detail: String,
+    /// Pointer client coordinates (CSS pixels), 0 for non-pointer events.
+    pub client_x: i32,
+    pub client_y: i32,
 }
 
 /// Initializer for `Event`.
@@ -62,6 +65,8 @@ impl Event {
             immediate_stopped: false,
             composed: init.composed,
             detail: init.detail,
+            client_x: 0,
+            client_y: 0,
         }
     }
 

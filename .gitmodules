@@ -109,3 +109,7 @@
 	path = sv-timing/crates/sv-parser
 	url = https://github.com/etcimon/sv-parser.git
 	branch = g6lc
+[submodule "g6lc_bios/pglite"]
+	path = g6lc_bios/pglite
+	url = https://github.com/etcimon/pglite.git
+	branch = main

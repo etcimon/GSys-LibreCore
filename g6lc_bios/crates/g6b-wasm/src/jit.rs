@@ -879,6 +879,11 @@ fn alloc(scratch: &mut u32) -> Result<u32, String> {
 /// `module.wasm_data` — the shared merge used by `g6b-elf` (ELF + smoke) and
 /// `g6b-design` (`KStart.S`) so the listing cannot diverge from the payload.
 /// The anchor label must already exist (`g6b-asm::dom::attach`).
+///
+/// This lowers the **MVP encoder** `_start` into guest VGA-glyph DOM imports
+/// (`WasmDomText` / `WasmFetch`). It is not the BIOS web engine: that is the
+/// LDC libwasm cell running in `BrowserSession`. GPU-class scanout must
+/// present `BrowserSession` Canvas32, not this glyph path.
 pub fn install_start(module: &mut Module, xlen: u32) -> Result<(), String> {
     let wm = crate::decode(crate::BIOS_UI_WASM)?;
     let ops = start_ops(&wm, xlen)?;

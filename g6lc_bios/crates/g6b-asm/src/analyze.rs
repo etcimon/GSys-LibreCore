@@ -23,9 +23,9 @@ use crate::encode::{
     VIO_DEV_GPU, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
 };
 use crate::{
-    gr_bss_len, gr_stride, Addr, Module, Node, Op, Purpose, BIOS_UI_WASM, GR_HEADER_BYTES,
-    MBOX_DEAD_OFF, STACK_BYTES, STACK_SHIFT, UART1_DEAD_OFF, UART_LINE_BSS, UART_LINE_CAP,
-    UI_HEADER_BYTES,
+    gr_bss_len, gr_stride, Addr, Module, Node, Op, Purpose, BIOS_UI_LIBWASM, BIOS_UI_WASM,
+    GR_HEADER_BYTES, MBOX_DEAD_OFF, STACK_BYTES, STACK_SHIFT, UART1_DEAD_OFF, UART_LINE_BSS,
+    UART_LINE_CAP, UI_HEADER_BYTES,
 };
 
 /// One analyzed object: purpose, architectural home, whether it is live.
@@ -419,6 +419,7 @@ pub fn kstart(spec: &BoardSpec) -> Module {
             .unwrap_or(0)
             .min(crate::vio::VIO_FB_MAX);
         m.vio_fb_bytes = fb;
+        m.cap_bytes = crate::vio::UI_CAP_BYTES;
     }
     if let Some(o) = vio {
         m.push(vio_call_node(o, spec));
@@ -3696,7 +3697,13 @@ fn file_serve_node(spec: &BoardSpec) -> Node {
 
 fn ui_wasm_bytes(spec: &BoardSpec) -> &'static [u8] {
     if spec.kernel.wasm.enable || spec.kernel.http.files.wasm {
-        BIOS_UI_WASM
+        // Guest GET `/ui/ui.wasm` is the LDC cell when present. The MVP
+        // encoder blob remains the input to `start_ops` (VGA glyph demo).
+        if BIOS_UI_LIBWASM.starts_with(b"\0asm\x01") {
+            BIOS_UI_LIBWASM
+        } else {
+            BIOS_UI_WASM
+        }
     } else {
         &[]
     }
@@ -4565,11 +4572,11 @@ mod tests {
         assert!(s.contains("__ui_blob"), "{s}");
         assert!(s.contains("__ui_wasm"), "{s}");
         assert_eq!(m.ui_bytes, UI_HEADER_BYTES);
-        assert_eq!(m.ui_wasm, BIOS_UI_WASM);
+        assert_eq!(m.ui_wasm, ui_wasm_bytes(&spec));
         let (_, ro) = payload(&spec, b"x\0").to_words(0x8020_0000).unwrap();
         assert!(
             ro.windows(4).any(|w| w == b"\0asm"),
-            "guest ELF rodata must embed bios-ui.wasm"
+            "guest ELF rodata must embed the UI wasm cell"
         );
     }
 

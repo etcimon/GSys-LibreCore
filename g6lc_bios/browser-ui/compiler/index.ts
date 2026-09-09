@@ -91,6 +91,17 @@ export function writeOut(root: string, result: CompileResult): void {
   result.cell = cell;
   const out = join(root, "out");
   mkdirSync(out, { recursive: true });
+  // A non-dub / stale-provenance build must not clobber a valid shipped
+  // LDC cell. `include_bytes!` in g6b-asm loads this file as the UI wasm.
+  if (optional.length === 0) {
+    const existing = join(out, "bios-ui-libwasm.wasm");
+    if (existsSync(existing)) {
+      const prev = readFileSync(existing);
+      if (prev.length >= 8 && prev[0] === 0x00 && prev[1] === 0x61 && prev[2] === 0x73 && prev[3] === 0x6d) {
+        optional = prev;
+      }
+    }
+  }
   rmSync(join(out, "build.json"), { force: true });
   writeFileSync(join(out, "bios-ui.wasm"), result.wasm);
   writeFileSync(join(out, "bios-ui.js"), result.js);
@@ -99,9 +110,6 @@ export function writeOut(root: string, result: CompileResult): void {
   writeFileSync(join(out, "bios-ui.css"), css);
   writeFileSync(join(out, "kernel.js"), adapter);
   writeFileSync(join(out, "worker.js"), worker);
-  // Second lane: the LDC/libwasm wasm-eh cell. Kept across non-dub builds so
-  // the shipped artifact stays reproducible; created empty when absent so
-  // `include_bytes!` always resolves.
   writeFileSync(join(out, "bios-ui-libwasm.wasm"), optional);
   writeFileSync(join(out, "bios-ui-libwasm.json"), JSON.stringify({
     schema: "g6lc-libwasm-status/v1", available: optional.length > 0,

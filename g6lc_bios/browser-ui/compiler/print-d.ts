@@ -206,6 +206,7 @@ function printDNode(node: MarkupNode | string, parent: string, ctx: DTreeContext
   const out: string[] = [];
   out.push(`${pad}auto ${varName} = createElement(NodeType.${nodeTypeTag(node.tag)});`);
   for (const [name, value] of Object.entries(node.attrs)) {
+    if (name.startsWith("on:")) continue;
     out.push(`${pad}setProperty(${varName}, "${escapeD(name)}", "${escapeD(value)}");`);
   }
   for (const c of node.children) {
@@ -213,6 +214,10 @@ function printDNode(node: MarkupNode | string, parent: string, ctx: DTreeContext
   }
   if (node.tag === "tbody" && id) ctx.tbody.set(id, varName);
   out.push(`${pad}appendChild(${parent}, ${varName});`);
+  // Cell-owned clicks (B87): tabs (`data-menu-link`) and `#refresh`.
+  if (id && (node.attrs["data-menu-link"] !== undefined || id === "refresh")) {
+    out.push(`${pad}g6b_listen("${escapeD(id)}", "click");`);
+  }
   return out;
 }
 

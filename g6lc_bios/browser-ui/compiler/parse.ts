@@ -170,7 +170,7 @@ function firstTag(src: string): string | undefined {
 
 function parseAttrs(raw: string): Record<string, string> {
   const attrs: Record<string, string> = {};
-  for (const m of raw.matchAll(/\b([a-z][a-z0-9-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/gi)) {
+  for (const m of raw.matchAll(/\b((?:on:[a-z]+)|[a-z][a-z0-9-]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>"']+)))?/gi)) {
     const name = m[1].toLowerCase();
     const value = m[2] ?? m[3] ?? m[4] ?? "";
     attrs[name] = value;

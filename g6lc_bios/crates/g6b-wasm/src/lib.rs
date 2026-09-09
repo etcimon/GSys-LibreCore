@@ -8,6 +8,7 @@
 
 mod asyncify;
 mod binary;
+mod browser;
 mod interp;
 mod jit;
 mod json;
@@ -20,9 +21,10 @@ pub use binary::{
     Module, ValType, MAX_CONTROL_DEPTH, MAX_FUNCTIONS, MAX_INSTRUCTIONS, MAX_LOCALS,
     MAX_MEMORY_PAGES, MAX_MODULE_BYTES, MAX_STACK,
 };
+pub use browser::{JsExportKind, JsExports, KernelPort};
 pub use interp::{
-    run, run_start, run_with_fuel, run_with_fuel_mut, DomHost, GuestFn, Host, Ldexec, LdexecInit,
-    DEFAULT_FUEL, MAX_CALL_DEPTH, MAX_FUEL,
+    run, run_start, run_with_fuel, run_with_fuel_mut, table_funcref, DomHost, GuestFn, Host,
+    Ldexec, LdexecInit, DEFAULT_FUEL, MAX_CALL_DEPTH, MAX_FUEL,
 };
 pub use jit::{
     data_image, install_start, jit_add_i32, jit_riscv, start_ops, MAX_JIT_INSTRUCTIONS,

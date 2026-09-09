@@ -2,6 +2,10 @@
 
 Green commands: `python tools/g6b.py check` (independence + Bun tests/build + fmt + clippy + workspace tests), then `python tools/g6b.py regress` (separate BIOS/transport regression).
 
+Web-engine endpoint (one BrowserSession, one LDC cell, remaining B86–B91):
+[`architecture/plan-endpoint.md`](architecture/plan-endpoint.md). Work tree
+**`E:\cva6/g6lc_bios`**.
+
 | Stage | State |
 |---|---|
 | **B0** scaffold KD0 + schema + fixtures | landed |
@@ -69,6 +73,17 @@ Green commands: `python tools/g6b.py check` (independence + Bun tests/build + fm
 | **B58** Cooperative RV32/RV64 task-switch IR, bounded scheduler/task services, DedicatedWorker compute protocol shared by browser/HolyC menus | landed (host IR + services; guest dispatch open) |
 | **B59** LDC 1.43 + vendored `runtime-v1.43.0` libwasm cell: DUB workspace, provenance/ABI/startup-gated publication, Asyncify build path with custom binaryen, D particle exports + WebGL backdrop | landed (component-shell artifact; libwasm await status/object-string ABI, `g6b-wasm` dispatch and JS host `createLibwasmHost` landed; D `catch` rejection->wasm-EH throw and full Svelte tree still open) |
 | **B59b** pinned LDC toolchain: `browser-ui/toolchains/ldc.lock.json` (upstream `v1.43.0-beta1`, per-host SHA-256), `scripts/install-ldc.ts` verify-then-extract installer, pin-first discovery in `compiler/ldc.ts` | landed (host; replaces ambient `1.43.0-git` discovery — see below) |
+| **B82** Cut misleading UI lanes: svelte-d requires the LDC cell; live DOM is the raster; guest `WasmStart` is VGA glyphs only | landed (host) |
+| **B83** `fetch` / `<img src>` through `/ui` files; GLES2 `u_dom` = CSS Canvas32 | landed (host) |
+| **B84** libwasm types on the UI-thread Host, not the kernel; `KernelPort`; goosie `:hover` | landed (host) |
+| **B85** Interactive UI: browser loads the LDC cell as `WasmUi`; tick/present_gl; live tab classList | landed (host docs + persistent instance) |
+| **B86** Persistent `instance.call` without KernelHost reconstruct; event object coords / preventDefault; LDC `getRoot` host import | landed (host; shipped cell still inlines `getRoot()=1` until `G6B_DUB_WASM=1`) |
+| **B87** Cell-owned tab/refresh/JSON: `on:click` → `g6b_listen`; host `Listener::Cell` preventDefault + fetch/select; Rust `select_menu` is default action only | landed (host; D emit ready, shipped cell uses host bind until `G6B_DUB_WASM=1`) |
+| **B88** Live CSS `Engine::paint(&Node)`; DirtyFlag Style/Layout/Paint; goldens per tab + hover (no HTML round-trip) | landed (host; 4bpp `ui_ppm` still HTML; dirty tiles B90) |
+| **B89** UI-thread `Role::Ui` / `ui_hart` runs `tick`; timer heap; fps 100/144; B66 timers implemented or ABI-verifier refused | landed (host) |
+| **B90** Dirty-tile GLES2 + virtio-gpu TRANSFER/FLUSH; QMP tab screendumps vs `ui_ppm32` goldens; host blit of Canvas32 into modelled `__scan_fb` | landed (host; QMP tab shots remain `qemu_tab_shots.sh` / remote g6q) |
+| **B91** Guest libwasm instance: same Host + compact DOM + dirty paint in S-mode. Do not grow `start_ops` to `Object_Call` | compact persist + dirty-tile `VioPaint` landed; **B91b** exec-model `guest_cell_scanout` / `smoke_cell` (same Host import set) **landed** |
+| **S0** `g6b-pglite` submodule + npm pin; UUID store-instance architecture | landed (PR1; no crate yet). Identity: [`architecture/g6b-store-instances.md`](architecture/g6b-store-instances.md) |
 
 B53 guest-DOM increment (2026-09): `g6b-asm` gained `Purpose::UiDom`,
 `Addr::{WasmData,UiFont,UiDom}`, `Module.{wasm_data,font,dom_bytes}`, the
@@ -1008,3 +1023,125 @@ The shipped artifact is `via=dub artifact=fresh verified asyncified LDC artifact
 (wasm EH + asyncify)`; a new `compile.test.ts` case instantiates it through the
 real host with a mock `/bios/` fetch and asserts the injected rows are present.
 `bun test` 97 pass / 2 skip, `g6b.py check` and `bios-regress` green.
+
+B81 (2026-09) - the libwasm LDC cell is now the source for the host CSS
+scanout path. `g6b-kernel::KernelHost` was already able to run `_start` against
+a fresh mount under `#libwasm-root`; this pass added `dom_to_html` (with hidden
+skip, text/attribute escaping, void-tag and style/script handling), immutable
+`find_node_by_id`/`first_descendant_by_name`, and `renderable_setup_html`.
+`ui_ppm`, `ui_ppm_output`, `ui_ppm32`, `ui_ppm32_output` and `ui_ppm32_output_at`
+now: (1) run `BrowserSession` when the libwasm lane is live, (2) extract the
+libwasm `<main>` from `#libwasm-spa`, and (3) wrap it in a self-contained
+`<html><head><style>` document so the CSS raster paints the Svelte-built tree
+without duplicating the static `#bios-ui` shell. The old debug
+`probe_libwasm_import_types` test was removed, Clippy warnings in the libwasm
+host were fixed, and `python tools/g6b.py check` stays green (independence, Bun
+tests/build, fmt, strict Clippy, workspace tests, 13/13 bios-regress cases
+including `dom_js_ui_boot`). Real QEMU screendump is the next verification step
+and depends on the separate `g6lc_qemu` build.
+
+**B82 (2026-09)** — cut misleading UI lanes (web-engine PR 1). Host
+`BrowserSession` no longer falls back to the MVP encoder wasm when the LDC
+cell fails or is absent: `kernel.ui=svelte-d` requires the libwasm artifact
+and `_start` errors are session failures (`BROWSER-ERROR`), not a second
+module. Hit boxes and `ui_ppm*` serialize the **live** Svelte tree
+(`live_render_html`). `/ui/ui.wasm` (host HTTP and guest `__ui_wasm`) is the
+LDC cell when live. `setProperty(..., "style")` writes the same style
+attribute as `element.style`. `WasmJit` / `WasmStart` remain the VGA glyph
+face (MVP `start_ops`); they are documented as not the web engine.
+`LIBWASM-ABI.md` B70 now names the real hole (persistent instance, live CSS,
+frame present) instead of claiming callback execution is pending.
+
+**B83 (2026-09)** — Svelte `fetch()` and `<img src>` through the D cell and
+`/ui` file server. `g6b_fetch` (print-d) already emits `env.fetch`; the kernel
+host now serves local `/ui/…` files from the same router as `/bios/…` menu
+JSON. `setProperty("src")` is allowed for `/ui/*.svg|png|jpg|ico` (remote /
+`javascript:` refused). `HttpFiles.assets` mounts `fixtures/ui-assets/g6lc.svg`
+as `/ui/g6lc.svg`. `ui_ppm32` loads those files into the CSS `AssetMap` so
+render32 paints `<img>`. GLES2 listing documents `u_dom` as the wasm-mutated
+Canvas32 (`composite_ppm32`). App.svelte carries `#bios-mark`. The LDC cell
+picks the img up on the next `G6B_DUB_WASM=1` rebuild; host HTTP and CSS
+assets do not wait on that.
+
+**B84 (2026-09)** — g6b-kernel is the wrong place to hook libwasm types.
+`libwasm_global` no longer returns 0 with a "kernel cannot host window"
+comment; the UI-thread `Host` interns `window` / `document` / `console`.
+`KernelPort` (`g6b-kernel::RouterPort`) is the only kernel I/O the wasm
+cell may call. `Host::get_root` / `add_css` match svelte-engine `spa.ts`.
+goosie `:hover` is live (`data-hover` + `g6b-css`). `BrowserSession::tick`
+presents GLES2 `u_dom` when the DOM is dirty. Handle 2 is still the first
+`createElement` until the LDC cell's `getRoot()` is rebuilt.
+
+**B85 (2026-09)** — architecture names the interactive UI as a browser that
+loads the svelte-d LDC cell (`WasmUi`) on a UI thread and presents goosie
+Canvas32 through GLES2 `u_dom` onto virtio-gpu / HDMI / host-GL. The cell is
+not a kernel type and not guest `WasmStart`. `BrowserSession` keeps one
+persistent instance (module, object table, interned window/document,
+`JsExports`) so live DOM mutation and JS exports survive `tick` and pointer
+dispatch. Tab clicks restyle `bios-tab-active` on the live tree.
+
+**B86 (2026-09)** — `WasmUi::call` / `call_listener` re-enter the persistent
+cell without empty KernelHost reconstruct. Interned `Event` objects carry
+`type`/`target`/`detail`/`clientX`/`clientY`/`cancelable`/`defaultPrevented`.
+`preventDefault` on that object skips the Rust tab default action. D
+`getRoot` is now an `env.getRoot` host import (svelte-engine
+`querySelector('#root')`); the shipped LDC blob still inlines `return 1`
+until `G6B_DUB_WASM=1`.
+
+**B87 (2026-09)** — cell-owned tab/refresh/JSON. `App.svelte` `on:click`
+lowers through print-d to `g6b_listen(id, "click")` (listener 0). The host
+maps that to `Listener::Cell`, which `preventDefault`s and runs `select_menu`
++ `/bios/menu/{id}` fetch (or `refresh()`). Rust `select_menu` is the default
+action only. The shipped LDC cell has not emitted `g6b_listen` yet;
+`bind_cell_clicks` covers tabs and `#refresh` until `G6B_DUB_WASM=1`.
+
+**B88 (2026-09)** — live CSS. `g6b-css::Engine::paint(&Node)` rasters the
+Svelte tree without HTML serialize/parse. `DirtyFlag` is Style/Layout/Paint
+on `g6b-dom::Node`; skip-if-clean walks `dirty_union`. Goldens:
+`ui_tab_cpu_ppm32`, `ui_tab_hover_ppm32`, `ui_tick_skips_clean_frame`.
+Track-B 4bpp `ui_ppm` still uses `live_render_html`. Dirty tiles landed in B90.
+
+**B89 (2026-09)** — UI hart + timers. When `kernel.tasking` is on,
+`Role::Ui` / `Job::Ui` on `ui_hart` is the `BrowserSession::tick` body.
+`TimerHeap` implements B66 `setTimeout`/`setInterval`/`clear*` and a
+bounded `requestAnimationFrame` (ids start at 1, never 0). Due callbacks
+re-enter through `WasmUi::call`. BoardSpec `kernel.proxy.fps` admits 100
+and 144 (auto picks 144 when `detected_hz >= 144`). Skip-if-clean stays
+the present budget.
+
+**B90 (2026-09)** — Dirty-tile present. `Engine` records a pixel bbox
+(`DirtyRegion::from_diff`) and splits it into 64 px tiles (collapse to one
+rect past 64 tiles). `tick` paints then `present_scanout`: blit those tiles
+of Canvas32 into modelled `__scan_fb` (X8R8G8B8, flatten over white) and
+emit `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` of just those rects
+(`SCAN-TRANSFER` / `SCAN-FLUSH`). Skip-if-clean is `SCAN-SKIP` / no
+TRANSFER. GLES2 listing documents `glTexSubImage2D` per tile. Check
+evidence is host-modelled `scanout_ppm` vs `ui_ppm32` (`ui_scan_fb_matches_css_ppm32`,
+`ui_tab_cpu_dirties_scanout_tiles`). QMP Main→CPU→Memory tab shots stay
+`tools/qemu_tab_shots.sh` on remote g6q (2D `virtio-gpu-device`; WSL2 has
+no DRM). Guest `VioPaint` is still full-frame unless `__ui_cap` WEB_PRESENT.
+
+**B91 (2026-09)** — Guest dirty-tile present + compact persist. `__ui_cap`
+(`G6CP`) holds a live node count and ≤64 dirty rects. When the exec model
+packs `GuestWebPresent` (BrowserSession Canvas32 + tiles), `VioScan` skips
+the green band fill and `VioPaint` TRANSFERs those tiles then consumes
+them (`VIRTIO-PAINT-SKIP` on a later `Ui`). VGA `start_ops` / 48-row
+`__ui_dom` / glyph `FbExpandSel` stay the text face. The LDC cell is not
+JIT’d in S-mode; do not grow `start_ops` to `Object_Call`.
+
+## Remaining web-engine schedule (plan-endpoint)
+
+Do these on `E:\cva6/g6lc_bios` in this order. Do not grow guest `start_ops`
+into `Object_Call`. B12b–B13 and B54 are a different axis.
+
+| Next | Depends | Work |
+|---|---|---|
+| **B86** | B85 | **landed** — `WasmUi::call` / `call_listener`; Event `clientX`/`clientY`/`preventDefault`; D `getRoot` is a host import. Shipped cell still `return 1` until `G6B_DUB_WASM=1` |
+| **B87** | B86 | **landed** — `on:click` → `g6b_listen`; host `Listener::Cell`; Rust `select_menu` is default action. Shipped cell uses host bind until `G6B_DUB_WASM=1` |
+| **B88** | B86 | **landed** — `g6b-css` `Engine::paint(&Node)`; DirtyFlag Style/Layout/Paint; goldens `ui_tab_cpu_ppm32` / `ui_tab_hover_ppm32` / `ui_tick_skips_clean_frame`; 32-bit session path no longer serializes HTML |
+| **B89** | B86 | **landed** — `Role::Ui` on `ui_hart` runs `tick`; `TimerHeap` for `setTimeout`/`setInterval`/rAF (id > 0); BoardSpec `fps` 100/144; skip-if-clean |
+| **B90** | B87–B89 | **landed** — dirty-tile GLES2 `u_dom` + virtio-gpu `TRANSFER_TO_HOST_2D`/`FLUSH`; host blit of Canvas32 into modelled `__scan_fb`; check vs `ui_ppm32`. QMP tab shots: `qemu_tab_shots.sh` / remote g6q |
+| **B91** | B90 | **landed** — `__ui_cap` compact persist + dirty-tile `VioPaint` of host-packed Canvas32. `start_ops` not grown. |
+| **B91b** | B91 | **landed** — exec-model S-mode stand-in: `guest_cell_scanout` runs the LDC cell on `KernelHost` (same Host imports as `BrowserSession`), `smoke_cell` packs `__ui_cap`. Not a RISC-V interpreter of the cell; `start_ops` unchanged. |
+| **B92** | B88–B89 | **later** — BIOS windowing, Firefox-like tabs, iframe sessions; URL is a local app path (`app:files`, `/ui/…`) or remote `http(s):` (adapter/mailbox, never `-netdev`). New session re-populates JS (no mix with the shell cell / HolyC). Native KernelPort only for the shell and registered local apps; local paths may later elevate via a HolyC-derived BIOS chrome prompt (`once`/`page`/`session`/`origin`/`persistent`). Session may bind a UUID store instance (`drop_on_close` for ephemeral memory). [`architecture/plan-iframe.md`](architecture/plan-iframe.md) [`architecture/g6b-store-instances.md`](architecture/g6b-store-instances.md) |
+| **S0** | — | **landed (PR1)** — `etcimon/pglite` submodule on `main` + npm dist pin; UUID-led store instances, purpose-based BIOS UI, deletable memory, USB key import/export (crate in later PRs). |

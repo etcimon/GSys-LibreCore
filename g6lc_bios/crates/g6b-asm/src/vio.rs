@@ -46,6 +46,18 @@ use g6b_spec::BoardSpec;
 /// key-queue head/tail @0x574/0x578, key codes @0x580 (16×4B).
 pub const VIO_BSS: u64 = 0x680;
 
+/// Compact persist (`__ui_cap`) after `__ui_dom`. Dirty tiles + live node
+/// count for the web engine. Not the 48-row `__ui_dom` table.
+pub const UI_CAP_MAGIC: u32 = u32::from_le_bytes(*b"G6CP");
+/// Host exec / later guest compact paint filled `__scan_fb`; skip FbExpandSel.
+pub const UI_CAP_FLAG_WEB: u32 = 1;
+pub const UI_CAP_OFF_FLAGS: i32 = 4;
+pub const UI_CAP_OFF_NODES: i32 = 8;
+pub const UI_CAP_OFF_NTILE: i32 = 12;
+pub const UI_CAP_OFF_RECTS: i32 = 16;
+pub const UI_CAP_MAX_TILES: usize = 64;
+pub const UI_CAP_BYTES: u64 = 16 + (UI_CAP_MAX_TILES as u64) * 16;
+
 /// `DispSel` result block in `__vio` — the *runtime* answer to "which output
 /// won and what feeds it". Written once at boot by `DispSel`, read by the paint
 /// path and dumped by the UART `Disp` command. Everything before `0x600` is the
@@ -2527,7 +2539,24 @@ pub fn scan_node(spec: &BoardSpec) -> Node {
     sw_i(&mut ops, T2, 44, 1); // resource_id
     submit_nodata(&mut ops, 48, "vs_fail");
     // 4. paint the top `band` rows of the backing (bounded loop).
+    // B91: WEB_PRESENT means host already filled Canvas32; do not paint the
+    // bring-up green band over it.
     ops.extend([
+        Op::La {
+            rd: T6,
+            addr: Addr::UiCap,
+        },
+        lw(T3, T6, UI_CAP_OFF_FLAGS),
+        Op::Andi {
+            rd: T3,
+            rs: T3,
+            imm: UI_CAP_FLAG_WEB as i32,
+        },
+        Op::Bne {
+            rs1: T3,
+            rs2: X0,
+            to: "vs_no_fill".into(),
+        },
         Op::La {
             rd: T2,
             addr: Addr::ScanFb,
@@ -2558,6 +2587,7 @@ pub fn scan_node(spec: &BoardSpec) -> Node {
             rs2: X0,
             to: "vs_fill".into(),
         },
+        Op::Label("vs_no_fill".into()),
     ]);
     // 5. TRANSFER_TO_HOST_2D — rect {0,0,w,band}, backing offset 0, res 1.
     req_hdr(&mut ops, VIO_GPU_TRANSFER_TO_HOST_2D);
@@ -3440,8 +3470,9 @@ pub fn paint_node(spec: &BoardSpec) -> Node {
     let xlen = spec.isa.xlen;
     let mut ops = vec![
         Op::Comment(
-            "VioPaint — jal FbExpandSel (__gr_plane → __scan_fb X8R8G8B8), \
-             then full-frame TRANSFER+FLUSH; geometry from __disp"
+            "VioPaint — if __ui_cap WEB_PRESENT, TRANSFER dirty tiles of \
+             Canvas32 already in __scan_fb (B91; skip FbExpandSel). Else \
+             jal FbExpandSel then full-frame TRANSFER+FLUSH"
                 .to_string(),
         ),
         Op::Glob("VioPaint".into()),
@@ -3496,11 +3527,104 @@ pub fn paint_node(spec: &BoardSpec) -> Node {
         lw(S0, T5, DISP_SEL_W),
         lw(S1, T5, DISP_SEL_H),
         // Surface-gated (see DispPaint): upscale only on the VGA surface.
+        // B91: compact persist WEB_PRESENT means __scan_fb already holds
+        // Canvas32; TRANSFER those dirty tiles instead of FbExpandSel.
+        Op::La {
+            rd: T6,
+            addr: Addr::UiCap,
+        },
+        lw(T3, T6, UI_CAP_OFF_FLAGS),
+        Op::Andi {
+            rd: T3,
+            rs: T3,
+            imm: UI_CAP_FLAG_WEB as i32,
+        },
+        Op::Bne {
+            rs1: T3,
+            rs2: X0,
+            to: "vp_web".into(),
+        },
         Op::Jal {
             rd: RA,
             to: "FbExpandSel".into(),
         },
+        Op::Jal {
+            rd: X0,
+            to: "vp_full".into(),
+        },
+        Op::Label("vp_web".into()),
+        lw(T4, T6, UI_CAP_OFF_NTILE),
+        Op::Beq {
+            rs1: T4,
+            rs2: X0,
+            to: "vp_skip".into(),
+        },
+        Op::Li { rd: S2, imm: 0 },
+        Op::Label("vp_tile".into()),
+        Op::La {
+            rd: T6,
+            addr: Addr::UiCap,
+        },
+        Op::Slli {
+            rd: T1,
+            rs: S2,
+            shamt: 4,
+        },
+        Op::Add {
+            rd: T1,
+            rs1: T6,
+            rs2: T1,
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: UI_CAP_OFF_RECTS,
+        },
+        lw(A3, T1, 0),
+        lw(A4, T1, 4),
+        lw(A5, T1, 8),
+        lw(A6, T1, 12),
     ];
+    req_hdr(&mut ops, VIO_GPU_TRANSFER_TO_HOST_2D);
+    ops.push(sw(A3, T2, 24));
+    ops.push(sw(A4, T2, 28));
+    ops.push(sw(A5, T2, 32));
+    ops.push(sw(A6, T2, 36));
+    ops.push(sw(X0, T2, 40));
+    ops.push(sw(X0, T2, 44));
+    sw_i(&mut ops, T2, 48, 1);
+    sw_i(&mut ops, T2, 52, 0);
+    submit_nodata(&mut ops, 56, "vp_fail");
+    ops.extend([
+        Op::Addi {
+            rd: S2,
+            rs: S2,
+            imm: 1,
+        },
+        Op::La {
+            rd: T6,
+            addr: Addr::UiCap,
+        },
+        lw(T4, T6, UI_CAP_OFF_NTILE),
+        Op::Bne {
+            rs1: S2,
+            rs2: T4,
+            to: "vp_tile".into(),
+        },
+        // Consume tiles so a later tick is skip-if-clean.
+        sw(X0, T6, UI_CAP_OFF_NTILE),
+        Op::Jal {
+            rd: X0,
+            to: "vp_flush".into(),
+        },
+        Op::Label("vp_skip".into()),
+    ]);
+    putc_str(&mut ops, "VIRTIO-PAINT-SKIP\n");
+    ops.push(Op::Jal {
+        rd: X0,
+        to: "vp_out".into(),
+    });
+    ops.push(Op::Label("vp_full".into()));
     // TRANSFER_TO_HOST_2D — rect {0,0,w,h}, backing offset 0, res 1.
     req_hdr(&mut ops, VIO_GPU_TRANSFER_TO_HOST_2D);
     ops.push(sw(X0, T2, 24));
@@ -3512,6 +3636,7 @@ pub fn paint_node(spec: &BoardSpec) -> Node {
     sw_i(&mut ops, T2, 48, 1);
     sw_i(&mut ops, T2, 52, 0);
     submit_nodata(&mut ops, 56, "vp_fail");
+    ops.push(Op::Label("vp_flush".into()));
     // RESOURCE_FLUSH — rect {0,0,w,h}, res 1.
     req_hdr(&mut ops, VIO_GPU_RESOURCE_FLUSH);
     ops.push(sw(X0, T2, 24));

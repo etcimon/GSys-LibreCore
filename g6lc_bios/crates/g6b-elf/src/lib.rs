@@ -81,17 +81,7 @@ fn assemble(spec: &BoardSpec, entry: u64, msg: &[u8]) -> Result<(Vec<u8>, u32, u
         out.extend_from_slice(&w.to_le_bytes());
     }
     out.extend_from_slice(&rodata);
-    Ok((
-        out,
-        module.n_harts(),
-        module
-            .gr_bytes
-            .saturating_add(module.line_bytes)
-            .saturating_add(module.ui_bytes)
-            .saturating_add(module.dom_bytes)
-            .saturating_add(module.vio_bytes)
-            .saturating_add(module.vio_fb_bytes),
-    ))
+    Ok((out, module.n_harts(), module.extra_bss()))
 }
 
 fn pack_elf(
@@ -187,6 +177,21 @@ pub fn smoke(spec: &BoardSpec) -> Result<g6b_asm::exec::Smoke, String> {
     let text = payload_text(spec);
     let module = payload_module(spec, &text)?;
     g6b_asm::exec::run_module(spec, &module, entry)
+}
+
+/// Exec-model S-mode stand-in: LDC cell on the same [`g6b_wasm::Host`] as
+/// `BrowserSession`, packed into `__ui_cap` / `__scan_fb`, then guest
+/// `VioPaint` TRANSFERs dirty tiles. Does not grow `start_ops`. Default
+/// [`smoke`] stays the VGA glyph path so bios-regress is unchanged.
+pub fn smoke_cell(spec: &BoardSpec) -> Result<g6b_asm::exec::Smoke, String> {
+    let cell = g6b_kernel::guest_cell_scanout(spec)?;
+    if !cell.wasm_executed {
+        return Err("smoke_cell: LDC cell did not run on KernelHost".into());
+    }
+    let entry = load_addr(spec)?;
+    let text = payload_text(spec);
+    let module = payload_module(spec, &text)?;
+    g6b_asm::exec::run_module_web(spec, &module, entry, 0, Some(&cell.present))
 }
 
 /// Write `g6lc_bios.elf` under `dir` (or `dir` itself if it ends in `.elf`).
@@ -393,6 +398,24 @@ mod tests {
             "{:?}",
             s.halt
         );
+    }
+
+    #[test]
+    fn smoke_cell_runs_ldc_host_not_start_ops() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let cell = g6b_kernel::guest_cell_scanout(&spec).unwrap();
+        assert!(cell.wasm_executed);
+        assert!(
+            cell.diagnostics
+                .iter()
+                .any(|d| d.contains("WASM-INTERPRETER")),
+            "{:?}",
+            cell.diagnostics
+        );
+        let s = smoke_cell(&spec).unwrap();
+        assert!(s.console.contains("VIRTIO-PAINT\n"), "{}", s.console);
+        assert!(s.cap_nodes > 1, "compact persist from live cell DOM");
+        assert_eq!(s.cap_tiles, 0);
     }
 
     #[test]

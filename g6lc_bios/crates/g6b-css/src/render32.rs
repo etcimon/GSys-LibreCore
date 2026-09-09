@@ -74,7 +74,61 @@ pub fn render_sheet_to_output(
     fonts: &FontSet,
 ) -> Result<Render32Output, String> {
     let root = g6b_html::parse(html);
-    let body = find_body(&root).unwrap_or(&root);
+    paint_node(sheet, &root, w, h, assets, fonts)
+}
+
+/// Paint a live DOM node. No HTML serialize/parse.
+///
+/// * `html`/`body` — painted as the root block (body background + padding).
+/// * any other element — painted as the sole child of an anonymous `body`
+///   so fragment trees (the LDC cell's `<main>`) still take the stylesheet's
+///   `body { ... }` rules, matching the old wrap-in-`<body>` path.
+pub fn paint_node(
+    sheet: &Stylesheet,
+    node: &Node,
+    w: u32,
+    h: u32,
+    assets: &AssetMap,
+    fonts: &FontSet,
+) -> Result<Render32Output, String> {
+    let root = if node.name.eq_ignore_ascii_case("html") {
+        find_body(node).unwrap_or(node)
+    } else {
+        node
+    };
+    if root.name.eq_ignore_ascii_case("body") {
+        paint_root_block(sheet, root, w, h, assets, fonts)
+    } else {
+        paint_fragments_in_body(sheet, &[root], w, h, assets, fonts)
+    }
+}
+
+/// Paint one or more live nodes as children of an anonymous `body`.
+pub fn paint_nodes(
+    sheet: &Stylesheet,
+    nodes: &[&Node],
+    w: u32,
+    h: u32,
+    assets: &AssetMap,
+    fonts: &FontSet,
+) -> Result<Render32Output, String> {
+    match nodes {
+        [] => paint_root_block(sheet, &Node::elem("body"), w, h, assets, fonts),
+        [one] if one.name.eq_ignore_ascii_case("html") || one.name.eq_ignore_ascii_case("body") => {
+            paint_node(sheet, one, w, h, assets, fonts)
+        }
+        _ => paint_fragments_in_body(sheet, nodes, w, h, assets, fonts),
+    }
+}
+
+fn paint_root_block(
+    sheet: &Stylesheet,
+    body: &Node,
+    w: u32,
+    h: u32,
+    assets: &AssetMap,
+    fonts: &FontSet,
+) -> Result<Render32Output, String> {
     let mut canvas = Canvas32::opaque(w, h, [255, 255, 255]);
     let ctx = Ctx32 {
         sheet,
@@ -92,8 +146,6 @@ pub fn render_sheet_to_output(
         absolutes: Vec::new(),
     };
     let tctx = TextCtx::default();
-    // The <body> (or root) is a block formatting context; paint it as one block
-    // so its own background, padding, and children all share one flow.
     let mut root_path = Vec::new();
     paint_block(
         &mut canvas,
@@ -113,19 +165,113 @@ pub fn render_sheet_to_output(
         None,
         None,
     )?;
+    finish_absolutes(&mut canvas, &ctx, &mut sink)?;
+    Ok(Render32Output {
+        canvas,
+        hit_boxes: sink.hit_boxes,
+    })
+}
 
+/// Anonymous-body wrap without cloning fragments or serializing HTML.
+fn paint_fragments_in_body(
+    sheet: &Stylesheet,
+    fragments: &[&Node],
+    w: u32,
+    h: u32,
+    assets: &AssetMap,
+    fonts: &FontSet,
+) -> Result<Render32Output, String> {
+    let body_style = cascade(sheet, &ElementRef::new("body"));
+    let bg = body_style
+        .get("background-color")
+        .and_then(parse_rgba)
+        .unwrap_or([255, 255, 255, 255]);
+    let mut canvas = Canvas32::opaque(w, h, [bg[0], bg[1], bg[2]]);
+    let ctx = Ctx32 {
+        sheet,
+        fonts,
+        assets,
+    };
+    let icb = Rect {
+        x: 0,
+        y: 0,
+        w: w as i32,
+        h: h as i32,
+    };
+    let mut tctx = TextCtx::default();
+    tctx.color = color_for(&body_style, "color", tctx.color, 255);
+    tctx.family = body_style
+        .get("font-family")
+        .map(str::to_string)
+        .unwrap_or(tctx.family);
+    tctx.size = font_size_for(&body_style, tctx.size);
+    tctx.bold = is_bold(&body_style).unwrap_or(tctx.bold);
+    tctx.align = align_for(&body_style).unwrap_or(tctx.align);
+    let b = computed_box(&body_style, w as i32).map_err(|e| e.to_string())?;
+    let origin_x = b.margin.left + b.border.left + b.padding.left;
+    let origin_y = b.margin.top + b.border.top + b.padding.top;
+    let avail_w = content_width_safe(&b);
+    let mut sink = Sink {
+        hit_boxes: Vec::new(),
+        absolutes: Vec::new(),
+    };
+    let mut y = origin_y;
+    for (index, fragment) in fragments.iter().enumerate() {
+        let style = cascade(sheet, &ElementRef::from_node(fragment));
+        if computed_position(&style).map_err(|e| e.to_string())? == Position::Absolute {
+            if sink.absolutes.len() >= MAX_ABSOLUTE_BOXES {
+                return Err("absolute box budget exceeded".into());
+            }
+            sink.absolutes.push(Absolute {
+                node: fragment,
+                cb: icb,
+                path: vec![index],
+                depth: 1,
+            });
+            continue;
+        }
+        let flow = Flow {
+            x: origin_x,
+            y,
+            avail_w,
+            depth: 1,
+        };
+        let mut path = vec![index];
+        y = paint_block(
+            &mut canvas,
+            &ctx,
+            fragment,
+            flow,
+            icb,
+            255,
+            &tctx,
+            &mut path,
+            &mut sink,
+            None,
+            None,
+        )?;
+    }
+    finish_absolutes(&mut canvas, &ctx, &mut sink)?;
+    Ok(Render32Output {
+        canvas,
+        hit_boxes: sink.hit_boxes,
+    })
+}
+
+fn finish_absolutes(
+    canvas: &mut Canvas32,
+    ctx: &Ctx32<'_>,
+    sink: &mut Sink<'_>,
+) -> Result<(), String> {
     let mut drained = 0usize;
     while let Some(abs) = sink.absolutes.pop() {
         drained += 1;
         if drained > MAX_ABSOLUTE_BOXES {
             return Err("absolute box budget exceeded".into());
         }
-        paint_absolute(&mut canvas, &ctx, &abs, &mut sink)?;
+        paint_absolute(canvas, ctx, &abs, sink)?;
     }
-    Ok(Render32Output {
-        canvas,
-        hit_boxes: sink.hit_boxes,
-    })
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

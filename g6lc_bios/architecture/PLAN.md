@@ -101,7 +101,7 @@ on-guest JIT. Detailed supported/refused boundaries: `BROWSER.md`, `WASM.md`.
 | Payload | `g6b elf` RV32/64 ET_EXEC: KStart rewrite (`tp`=hartid, `sp`, `stvec`, handoff-hart KMain — OpenSBI `a1≠0`, any hart id — others WFI). Map: `KERNEL-RV.md` |
 | QEMU | `g6q --loader bios` + UART1 `-serial tcp:127.0.0.1:2222` for the custom board; **stock-virt verified**: `fixtures/g6lc64-qemu.json` + `qemu-args` (`-nographic -smp N -global virtio-mmio.force-legacy=false -device virtio-gpu-device` — or `virtio-gpu-gl-device` + `egl-headless,gl=on` under `proxy.gl`, `--no-gl` fallback, `--vnc N` frontend) boots under OpenSBI 1.5/QEMU 8.2 to `VIRTIO-SCAN`+`VIRTIO-PAINT` with a **1920×1080 QMP screendump** (640×480 DOM/Gr plane ×2 centered — `FbExpand` = `Proxy::to_ppm` semantics). Native uncore HDMI/DP: `display`-class peripheral → `DispPaint` register commit + `G6FB` simplefb handoff (`architecture/uncore/hdmi-display.md`, `fixtures/g6lc64-hdmi.json`, exec-modelled). No `-netdev`. `g6lc64-virt.json` still needs a custom mbox/UART1 device model for QEMU |
 | Post-boot | `until-delegate` NIC then `LOOPBACK-MBOX` + PLIC IRQ 3 @ `0x10100000` → `/dev/g6lc-bios`. Immutable view-only; Reboot/Shutdown/Wakeup |
-| Gr / proxy | `g6b-gr` 640×480×16 plane + display-proxy `fit`/`fill`/`dpi` to HDMI/DP / host-GL (30/60/120 fps, high DPI, up to 8K). OpenGL-ES2 listing. Docs: `DISPLAY.md` |
+| Gr / proxy | `g6b-gr` 640×480×16 plane + display-proxy `fit`/`fill`/`dpi` to HDMI/DP / host-GL (30/60/100/120/144 fps, high DPI, up to 8K). OpenGL-ES2 listing. Docs: `DISPLAY.md` |
 | Browser | `g6b-webidl` + `browser-ui` (svelte-d NodeDef + **FileMgr**, **not SvelteKit**) + `g6b-wasm` JIT on the g6b kernel. Fetch is live via kernel HTTP. B69 adds generic DOM methods (`setAttribute`, `classList`) and a bounded ES6 `Map` host surface. `BROWSER.md` `USB.md` `WASM.md` `KERNEL-API.md` |
 | TLS | `g6b-tls` SHA-256, AES-128, HMAC, RSA PKCS#1, ECDSA P-256, X.509; ClientHello rsa+ecdsa. Botan spec, not linked. `TLS.md` |
 | HTTP / endpoints | `g6b-http` HTTP/1.1 + HTTP/2+HPACK; HolyC/JS register the same router; `/bios/{clocks,edk2,u-boot,bootloader,flash,update,settings,usb,files}` |
@@ -177,6 +177,19 @@ RTL mailbox / DTS merge into `corev_apu` is an inference recorded in
 | **B57** | Transactional DOM: Rust `DomTransaction` + native-browser DOM-kernel host (validated handles, rollback, property allowlist); explicit libwasm ABI mount with startup verification | landed (host) |
 | **B58** | Cooperative RV32/RV64 task-switch IR, bounded multicore scheduler/task services, DedicatedWorker compute protocol (SHA-256/AES-GCM) shared by browser and HolyC menus | landed (host IR + host services; guest dispatch open) |
 | **B59** | LDC 1.43 + carried `runtime-v1.43.0` libwasm cell: DUB workspace generation, provenance/ABI/startup-gated publication, `g6b-wasm::Asyncify` runtime, D particle exports + WebGL backdrop | landed (component-shell artifact; full Svelte tree open, non-MVP opcodes fail-closed) |
+| **B82** | Cut misleading UI lanes: svelte-d requires the LDC cell; live DOM is the raster; guest `WasmStart` is VGA glyphs only | landed (host) |
+| **B83** | `fetch` / `<img src>` through `/ui` files; GLES2 `u_dom` = CSS Canvas32 | landed (host) |
+| **B84** | libwasm types on the UI-thread Host, not the kernel; `KernelPort`; goosie `:hover` | landed (host) |
+| **B85** | Interactive UI principle: browser loads the LDC cell as `WasmUi`; UI-thread tick presents onto virtio-gpu / HDMI | landed (host docs + persistent instance) |
+| **B86** | Persistent `instance.call` without KernelHost reconstruct; event coords / preventDefault; LDC `getRoot` host import | landed (host; LDC rebuild still pending) |
+| **B87** | Cell-owned tab/refresh/JSON (`on:click` → `g6b_listen`; host `Listener::Cell`) | landed (host; LDC rebuild still pending) |
+| **B88** | Live CSS `paint(&Node)` + DirtyFlag + tab/hover goldens | landed (host) |
+| **B89** | UI-thread `Role::Ui` tick; timer heap; fps 100/144; B66 or verifier-refuse | landed (host) |
+| **B90** | Dirty-tile GL + virtio-gpu TRANSFER + QMP tab screendumps | landed (host blit + modelled scan_fb; QMP shots remain remote g6q) |
+| **B91** | Guest libwasm instance; same Host + dirty paint in S-mode | landed (compact persist + dirty-tile `VioPaint`; `start_ops` unchanged) |
+| **B92** | Windowing + tab engine + iframe sessions (local app path or remote URL) | **later** — [`plan-iframe.md`](plan-iframe.md); do not cut B89–B91 |
+| **S0–S4** | First-party registry store `g6b-pglite` + optional Electric dist wasm | **S0 (PR1)** — submodule + npm dist pin, no compile. UUID instances, purpose-based BIOS UI, deletable memory, USB key import/export (later PRs). Design: [`g6b-pglite.md`](g6b-pglite.md) [`g6b-store-instances.md`](g6b-store-instances.md) |
+| **B91b** | Guest S-mode LDC cell on the same Host import set as `BrowserSession` | **landed** — exec-model `guest_cell_scanout` / `smoke_cell`; `start_ops` unchanged |
 
 Kernel-spec RISC-V map: [`KERNEL-RV.md`](KERNEL-RV.md). Generated `zeal/KStart.S`
 and `zeal/KInts.S` match `g6b-elf` because both lower `g6b-asm` IR
@@ -206,13 +219,13 @@ remain the sole authority; OpenSBI remains M-mode and BIOS stays S-mode.
   (`DOM| ` serial rows + 8x8 first-party font glyphs into the 4bpp
   `__gr_plane`). `__wasm_data`/`__font` are payload `.rodata`. Evidence is
   host `g6b-elf` smoke (`dom_rows`, `DOM|`, `dom_pix0`), not a QEMU scanout.
-- Required before full libwasm: persistent instance globals/tables and indirect
-  calls, numeric types beyond i32, EH cleanup, real callback/Promise handles,
-  allocation/GC semantics for exercised paths, full component lifetime/reactivity
-  and a verified Asyncify or native continuation transform. The `g6b-wasm::Asyncify`
-  runtime and `run_with_fuel_mut` persistent state are now in place; non-MVP
-  opcodes (i64/f32/f64, call_indirect, bulk memory, EH) are still rejected by
-  `validate`/`run`, and the `env.libwasm_await__void` host hook is not yet wired.
+- **UI-thread principle (B85):** the LDC cell is a browser-loaded application
+  (`BrowserSession::wasm_ui`), not a kernel type and not guest `start_ops`.
+  Persistent instance + live DOM + `JsExports` + goosie raster + GLES2 `u_dom`
+  onto virtio-gpu / HDMI is [`BROWSER-RUNTIME.md`](BROWSER-RUNTIME.md).
+  Remaining web-engine work is **B86–B91** in
+  [`plan-endpoint.md`](plan-endpoint.md). Host `validate`/`run` already
+  execute i64/f32/f64, `call_indirect`, bulk memory, and `libwasm_await__void`.
 - QEMU display + input are now **verified** (QEMU 8.2.2 + OpenSBI
   fw_dynamic, stock `-M virt`, `fixtures/g6lc64-virt.json`): the
   virtio-input eventq → `InpDrain` → `INP_KQ` → `DomKey`/`DomNav` DOM lane

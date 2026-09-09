@@ -22,14 +22,21 @@ pub enum ObjectKind {
     Empty,
     /// A DOM/Node/Element produced by `createElement` or the libwasm SPA.
     Element,
-    /// The BoardSpec / settings scope (handle 2).
+    /// Retired G6LC_G6B name for handle 2 (it was never BoardSpec). Prefer
+    /// [`ObjectKind::Window`].
     Scope,
+    /// The browser `window` (JS export registry, location, fetch).
+    Window,
+    /// The browser `document`.
+    Document,
     /// A kernel router or fetch result.
     Router,
     /// B65: a parsed JSON object (`JSON_parse_string`).
     Json,
     /// B65: a JSON array, stored with numeric string keys.
     Array,
+    /// A DOM `Event` interned for listener re-entry (`clientX`/`preventDefault`).
+    Event,
 }
 
 /// Payload stored in an [`ObjectTable`] for libwasm object handles.

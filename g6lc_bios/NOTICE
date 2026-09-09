@@ -1,0 +1,12 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# Third-party notices for g6lc_bios build inputs (not compiled unless noted).
+
+Electric SQL PGlite
+  submodule: pglite/  (https://github.com/etcimon/pglite, origin/main; fork of electric-sql/pglite)
+  TypeScript client: Apache License 2.0 (upstream LICENSE, verbatim)
+  Dist wasm (npm @electric-sql/pglite, gitignored .tools/pglite-dist/):
+    Postgres-in-WASM carries the PostgreSQL License as embedded third-party
+    material. Not rewritten. Not a Cargo member. First-party store rewrite is
+    MIT in crates/g6b-pglite (later).

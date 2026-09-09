@@ -78,3 +78,25 @@ rev = "c26482bb6ad3f80106d28504ec5db3c6a360732c"
 path = "kernel-spec/TempleOS"
 license = "public-domain"
 note = "not a crate; not linked; original HolyC/Adam/Kernel snapshot"
+
+# Electric SQL PGlite — build input, not kernel-spec (dist bytes will be served).
+# Git submodule has sources only; `/packages/pglite/dist` is gitignored upstream.
+# Dist wasm is the npm tarball pin (PR8 extracts). Not a Cargo member. Not compiled.
+[pglite]
+role = "build-input"
+url = "https://github.com/etcimon/pglite.git"
+rev = "ae182ff8bd5ba4acb887d6c925d607a1498aa0b5"
+branch = "main"
+path = "pglite"
+license = "Apache-2.0"
+note = "Fork of electric-sql/pglite origin/main. TS client Apache-2.0; Postgres wasm inside dist is PostgreSQL License (NOTICE). Never rewritten. Never a crate."
+
+[pglite.dist]
+package = "@electric-sql/pglite"
+version = "0.5.8"
+tarball = "https://registry.npmjs.org/@electric-sql/pglite/-/pglite-0.5.8.tgz"
+sha256 = "d71088d246d86e946c5d53b152a23c6b79ee65c8bc43dab69670af53b57c788d"
+integrity = "sha512-n9tsbUOhwx2epK1V0ZG9Ar4SHWUju04dhmzZXiSBXwBoleOvIfals33NAaWgagQVAL4Rbvx/Ptsu3P+pA09f6Q=="
+files = ["pglite.wasm", "initdb.wasm", "pglite.data", "index.js"]
+extract_to = ".tools/pglite-dist"
+note = "git submodule cannot fetch dist. python tools/g6b.py pglite-dist extracts here (PR8). Never include_bytes a missing git dist/."

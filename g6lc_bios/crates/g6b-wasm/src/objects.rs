@@ -10,15 +10,20 @@
 //! wrong in a way the guest cannot detect, so this table implements both and
 //! fails closed on double-free and use-after-free.
 //!
-//! Handles `1` and `2` are permanently-live roots the guest never frees. In a
-//! browser they are `document` and `window`; under `version(G6LC_G6B)` they are
-//! the detached staging DOM root and the `BoardSpec` scope (`LIBWASM-ABI.md`
-//! §3). They live outside this table: `copy` of a root is identity and `remove`
-//! of a root is an error.
+//! Handles `1` and `2` are permanently-live roots the guest never frees.
+//! svelte-engine `libwasm.ts` maps them to `document` and `window`. The
+//! G6LC_G6B cell's `getRoot()` still returns 1 as the Spa mount (a `#root`
+//! stand-in). That is a transitional BIOS shortcut, **not** a BoardSpec
+//! object and **not** a kernel type: `libwasm_global("document"|"window")`
+//! intern the live browser instance on the UI-thread Host.
+//! `copy` of a root is identity and `remove` of a root is an error.
 
-/// Staging DOM root — never allocated, never freed.
+/// Spa mount / document root — never allocated, never freed.
 pub const OBJECT_ROOT_DOM: i32 = 1;
-/// `BoardSpec` scope root — never allocated, never freed.
+/// `window` root in svelte-engine. The shipped G6LC_G6B cell still uses DOM
+/// handle 2 as the first `createElement`; interned `window` lives at
+/// `OBJECT_BASE+` via `libwasm_global("window")` until the LDC cell's
+/// `getRoot()` matches svelte-engine (`querySelector('#root')`).
 pub const OBJECT_ROOT_SCOPE: i32 = 2;
 /// First handle this table hands out. Above the DOM handle space so a DOM
 /// handle can never be mistaken for an object handle while the two spaces

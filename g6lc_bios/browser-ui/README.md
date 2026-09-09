@@ -127,8 +127,9 @@ Use local HTTP; production authenticated TLS is not implemented by this preview.
 - Both HolyC and browser menus use the same BoardSpec rows. JS-off, read-proxy,
   utility and file gates remain effective. Values are read-only; F10 refreshes,
   never saves. Left/Right/Home/End navigate while focus is in setup controls.
-- `/ui/ui.wasm` is the small first-party VM artifact. The optional
-  `/ui/ui-libwasm.wasm` is the LDC component scaffold and particle simulation;
+- `/ui/ui.wasm` is the LDC libwasm cell when live (MVP encoder otherwise).
+  `/ui/ui-libwasm.wasm` is the same LDC artifact. `/ui/g6lc.svg` is a bundled
+  mark for `<img src>` / `fetch("/ui/…")`. The optional particle simulation;
   its imports use D `(length,pointer)` strings and an i32 exception tag.
 - The LDC scaffold explicitly disables its unused D router. Unsupported object,
   event, Promise and runtime calls trap rather than inventing successful values.

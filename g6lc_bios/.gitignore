@@ -34,5 +34,8 @@
 **/__pycache__/
 *.py[cod]
 
+# Pinned Electric PGlite npm dist (wasm+initdb+data). Pin is pins.toml [pglite.dist].
+/.tools/pglite-dist/
+
 # Temporary rename of nested spec-fork .git dirs while vendoring
 **/.git.nested.bak/

@@ -1,6 +1,13 @@
 # Lightweight BIOS browser
 
-Not Chromium, not Go goja, not puppeteer. Specs:
+Not Chromium, not Go goja, not puppeteer. The **interactive BIOS UI** is this
+browser: it loads the svelte-d LDC cell into a live DOM, restyles on a UI
+thread, and presents GLES2 `u_dom` onto virtio-gpu / HDMI / host-GL. That
+principle, and the level at which the `.wasm` sits, is
+[`BROWSER-RUNTIME.md`](BROWSER-RUNTIME.md). This file is the subset, config,
+and event-model detail.
+
+Specs:
 
 | Spec | Path | License | Role |
 |---|---|---|---|
@@ -16,13 +23,12 @@ First-party MIT implementation (B50–B52):
 BoardSpec.menus() + g6b-ui::faces_for / setup_reads
     ├─ HolyC Menu* → g6b-http::Router → same menu JSON
     └─ g6b-ui::setup_html → checked HTML / g6b-dom
-         ├─ g6b-kernel::BrowserSession
-         │    setup_script → g6b-js AOT → DOM + shared router
-         │    generated WASM _start → bounded g6b-wasm + KernelHost
-         │    refresh → select_menu → UART / Gr / display-proxy
-         └─ /ui/index.html + /ui/app.js (browser-ui/src/kernel.ts)
-              native DOM navigation + fetch → shared router
-              native WebAssembly + queued host imports → refresh
+         ├─ g6b-kernel::BrowserSession   ← UI thread
+         │    WasmUi (LDC cell, persistent) mutates live DOM + JsExports
+         │    tick → goosie CSS → GLES2 u_dom → virtio-gpu / HDMI / host-GL
+         │    KernelPort fetch / HolyC / register (not a document)
+         └─ /ui/index.html + /ui/app.js + /ui/ui.wasm
+              native adapter loads the same cell; fetch → shared router
 ```
 
 These are distinct execution surfaces. Host `BrowserSession` and the HTTP
@@ -154,15 +160,16 @@ drains them asynchronously after `_start`; no Promise is returned to an i32
 WASM import. Browser import memory, call and queue budgets are checked, but
 native WebAssembly does not have the Rust interpreter's fuel counter.
 
-The optional LDC artifact is a **separate component scaffold**, never the
-BoardSpec settings authority. Its DOM bridge interprets D strings as `(len,ptr)`
-(unlike MVP `(ptr,len)`), binds root handle 1 to a detached staging root, and
-commits only after successful `_start`. Rollback restores the original node
-identities. Handles, UTF-8, memory ranges, call counts, total strings and tree
-depth are bounded; unknown handles, root moves/cycles, active tags, arbitrary
-property setters, HTML injection, URL properties and event setters are refused.
-Unmount detaches without invalidating the retained handle. The current contract
-is initialization-only, not a callback/reactive object bridge.
+The LDC cell is the **UI application** loaded into `BrowserSession::wasm_ui`,
+never the BoardSpec settings authority. Its DOM bridge interprets D strings as
+`(len,ptr)` (unlike MVP `(ptr,len)`). The instance is persistent: object table,
+DOM handles, interned `window`/`document`/`console`, and `JsExports` survive
+`_start` so events, `tick`, and GLES2 present re-enter the same cell. Handles,
+UTF-8, memory ranges, call counts, total strings and tree depth are bounded;
+unknown handles, root moves/cycles, active tags, arbitrary property setters,
+HTML injection, remote `src`, and event setters are refused. Unmount detaches
+without invalidating the retained handle. Guest `WasmStart`/`start_ops` is the
+VGA glyph face, not this runtime.
 
 The libwasm host also exposes the libwasm await/object-string ABI:
 `env.libwasm_await_supported`, `env.libwasm_await_failed`,
@@ -184,9 +191,12 @@ rejection reason after a rewind.
 Since B61 that table is **refcounted**, matching `struct JsHandle`:
 `libwasm_copyObjectRef` increments and returns the same handle,
 `libwasm_removeObject` decrements and frees at zero, freed slots are reused,
-and the table is capped at 4,096 live objects. Handles `1` (staging DOM root)
-and `2` (BoardSpec scope) are protected roots — copy is identity, release is an
-error. Double free, use-after-free and over-budget allocation all throw, and
+and the table is capped at 4,096 live objects. Handles `1` (Spa mount until
+LDC `getRoot` matches svelte-engine) and interned `window`/`document` via
+`libwasm_global` are the live browser roots — copy of a protected root is
+identity, release is an error. DOM handle 2 is still the first `createElement`
+in the shipped cell, **not** BoardSpec. Double free, use-after-free and
+over-budget allocation all throw, and
 because import errors mark the transaction `failed`, a lifetime violation can
 never commit a partial tree. Object handles still carry no properties; the
 per-receiver property registry is B63.

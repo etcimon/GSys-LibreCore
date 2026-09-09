@@ -8,7 +8,7 @@ interface and scales it onto a generic high-DPI, high-resolution adapter.
 ZealOS Gr 640×480×16  ──nearest scale + letterbox──►  HDMI / DisplayPort / host-GL
 DOM + JS BIOS UI      ──OpenGL-ES2 adapter──────────►  compositor (same scanout)
                               ▲
-                     fps = 30 | 60 | 120
+                     fps = 30 | 60 | 100 | 120 | 144
                      from BoardSpec, or auto from EDID/DPCD
 ```
 
@@ -20,10 +20,11 @@ DOM + JS BIOS UI      ──OpenGL-ES2 adapter──────────► 
 | Optional accel | BoardSpec `kernel.proxy.accel`: `off` (default) \| `auto` \| `rvv` \| `ai-island`. RVV needs `isa.v` live + xlen=64 (`G6LC_PROXY_ACCEL_RVV`). AI-island tiles the blit; GEMM stays at `0x40000000` and is **not** the GR plane (`G6LC_PROXY_ACCEL_AI`). |
 | Link | BoardSpec `kernel.proxy.link`: `uart` \| `virtio-gpu` \| `hdmi` \| `displayport` \| `host-gl` |
 
-Refresh: if `fps` is 30/60/120 it is pinned; if `fps=0` (auto) pick 120 when
-detected ≥ 90 Hz, 60 when ≥ 45 Hz, else 30. HDMI/DP detection is an uncore
-EDID/DPCD ask (`architecture/uncore/hdmi-display.md`); the BIOS records the
-number in `detected_hz` rather than probing analog VGA.
+Refresh: if `fps` is 30/60/100/120/144 it is pinned; if `fps=0` (auto) pick
+144 when detected ≥ 144 Hz, 120 when ≥ 90 Hz, 60 when ≥ 45 Hz, else 30.
+HDMI/DP detection is an uncore EDID/DPCD ask
+(`architecture/uncore/hdmi-display.md`); the BIOS records the number in
+`detected_hz` rather than probing analog VGA.
 
 Scale (`kernel.proxy.scale_mode`):
 
@@ -75,9 +76,21 @@ resolution.
 | surface | source | scaling |
 |---|---|---|
 | `vga` | 4bpp `__gr_plane`, 8×8 font, UART cells | proxy `fit`/`fill`/`dpi` + letterbox |
-| `gpu` | rendering at the output's own geometry | none |
+| `gpu` | **live BrowserSession DOM** at the output's own geometry (goosie Canvas32 → GLES2 `u_dom`) | none |
 
-The default follows the active output's class, so **the low-res plane is never
+The GPU surface is the interactive BIOS UI: the svelte-d LDC cell mutates a
+live DOM on the UI thread, `g6b-css` rasters it (truth), and `g6b-gr::gl`
+composites `u_dom` onto virtio-gpu / HDMI / DisplayPort / host-GL. See
+[`BROWSER-RUNTIME.md`](BROWSER-RUNTIME.md). **B90:** `BrowserSession::tick`
+blits dirty 64 px tiles of that Canvas32 into modelled `__scan_fb`
+(X8R8G8B8) and records `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` of just
+those rects. Skip-if-clean is no TRANSFER. `scanout_ppm` is the host
+Main→CPU→Memory evidence against `ui_ppm32`. **B91:** guest `VioPaint`
+TRANSFERs `__ui_cap` dirty tiles when `WEB_PRESENT` (host-packed Canvas32);
+otherwise it stays a full-frame `FbExpandSel`. QMP tab screendumps stay
+`tools/qemu_tab_shots.sh` on remote g6q (2D `virtio-gpu-device`; WSL2 has
+no DRM render node) — they are not part of `g6b.py check`. The default
+follows the active output's class, so **the low-res plane is never
 upscaled onto a GPU-class output unless explicitly asked for**.
 `kernel.proxy.surface` (`vga` \| `gpu`, empty = follow the class) forces it, and
 the display-proxy toggle flips it at runtime. Two consequences on the host path:

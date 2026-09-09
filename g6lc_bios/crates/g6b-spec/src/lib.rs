@@ -333,17 +333,19 @@ impl ProxyAccel {
 }
 
 impl DisplayProxy {
-    /// 30 / 60 / 120 from pin or EDID/DPCD-style detection.
+    /// 30 / 60 / 100 / 120 / 144 from pin or EDID/DPCD-style detection.
     pub fn refresh_hz(&self) -> u32 {
         match self.fps {
-            30 | 60 | 120 => self.fps,
+            30 | 60 | 100 | 120 | 144 => self.fps,
             _ => {
                 let d = if self.detected_hz == 0 {
                     60
                 } else {
                     self.detected_hz
                 };
-                if d >= 90 {
+                if d >= 144 {
+                    144
+                } else if d >= 90 {
                     120
                 } else if d >= 45 {
                     60
@@ -410,6 +412,8 @@ pub struct HttpFiles {
     pub wasm: bool,
     /// Wrap file bodies in TLS records after ServerHello (`files.https`).
     pub https: bool,
+    /// Serve bundled PNG/SVG under `{root}/` for `<img src>` / `fetch("/ui/…")`.
+    pub assets: bool,
     /// URL prefix, default `/ui`.
     pub root: String,
 }
@@ -422,6 +426,7 @@ impl Default for HttpFiles {
             js: false,
             wasm: false,
             https: false,
+            assets: false,
             root: "/ui".into(),
         }
     }
@@ -1141,8 +1146,8 @@ impl BoardSpec {
                     ));
                 }
             }
-            if !matches!(self.kernel.proxy.fps, 0 | 30 | 60 | 120) {
-                return Err("kernel.proxy.fps must be 0 (auto), 30, 60, or 120".into());
+            if !matches!(self.kernel.proxy.fps, 0 | 30 | 60 | 100 | 120 | 144) {
+                return Err("kernel.proxy.fps must be 0 (auto), 30, 60, 100, 120, or 144".into());
             }
             if !(72..=384).contains(&self.kernel.proxy.dpi) {
                 return Err("kernel.proxy.dpi must be 72..=384".into());
@@ -1303,12 +1308,16 @@ impl BoardSpec {
         if self.kernel.tls.serve && !self.kernel.tls.enable {
             return Err("kernel.tls.serve needs kernel.tls.enable".into());
         }
+        if self.kernel.http.files.assets && !self.kernel.http.files.enable {
+            return Err("kernel.http.files.assets needs kernel.http.files.enable".into());
+        }
         if self.kernel.http.files.enable
             && !self.kernel.http.files.html
             && !self.kernel.http.files.js
             && !self.kernel.http.files.wasm
+            && !self.kernel.http.files.assets
         {
-            return Err("kernel.http.files.enable needs html, js, or wasm".into());
+            return Err("kernel.http.files.enable needs html, js, wasm, or assets".into());
         }
         if self.kernel.settings.usb_key && !self.kernel.usb.enable {
             return Err("settings.usb_key needs kernel.usb.enable".into());
@@ -2201,6 +2210,9 @@ fn apply_http_files(f: &mut HttpFiles, v: &Json) {
     if let Some(b) = v.get("https").as_bool() {
         f.https = b;
     }
+    if let Some(b) = v.get("assets").as_bool() {
+        f.assets = b;
+    }
     if let Some(s) = v.get("root").as_str() {
         f.root = if s.starts_with('/') {
             s.to_string()
@@ -2736,6 +2748,21 @@ mod tests {
         .unwrap();
         assert_eq!(spec.kernel.proxy.refresh_hz(), 120);
         assert!(spec.kernel.proxy.gl);
+        let hz144 = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"proxy":{"enable":true,"link":"host-gl","fps":144}}}"#,
+        )
+        .unwrap();
+        assert_eq!(hz144.kernel.proxy.refresh_hz(), 144);
+        let hz100 = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"proxy":{"enable":true,"link":"host-gl","fps":100}}}"#,
+        )
+        .unwrap();
+        assert_eq!(hz100.kernel.proxy.refresh_hz(), 100);
+        let auto144 = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"proxy":{"enable":true,"link":"hdmi","fps":0,"detected_hz":144}}}"#,
+        )
+        .unwrap();
+        assert_eq!(auto144.kernel.proxy.refresh_hz(), 144);
         let req = spec.inferred_arch().join("\n");
         assert!(req.contains("display-proxy"), "{req}");
         assert!(req.contains("HDMI"), "{req}");

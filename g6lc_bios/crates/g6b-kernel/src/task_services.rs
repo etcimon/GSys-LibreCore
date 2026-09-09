@@ -18,6 +18,7 @@ pub struct TaskServices {
     xlen: u32,
     stack_bytes: u32,
     worker_limit: usize,
+    ui_task: Option<TaskId>,
 }
 
 pub struct Work {
@@ -79,6 +80,7 @@ impl TaskServices {
             xlen: spec.isa.xlen,
             stack_bytes: spec.kernel.tasking.stack_bytes,
             worker_limit: spec.worker_limit() as usize,
+            ui_task: None,
         })
     }
 
@@ -260,6 +262,47 @@ impl TaskServices {
     }
     pub fn counters(&self) -> crate::tasks::Counters {
         self.scheduler.counters()
+    }
+
+    /// Pin `Job::Ui` on `ui_hart` if it is not already running.
+    pub fn ensure_ui(&mut self) -> Result<TaskId, WorkerError> {
+        if let Some(id) = self.ui_task {
+            if self.scheduler.task(id).is_ok() {
+                return Ok(id);
+            }
+        }
+        let id = self
+            .scheduler
+            .spawn(Role::Ui, Job::Ui)
+            .map_err(scheduler_error)?;
+        self.ui_task = Some(id);
+        Ok(id)
+    }
+
+    /// Dispatch the UI job on `ui_hart` (not counted against the worker
+    /// limit). None means the hart is already running a slice.
+    pub fn take_ui_dispatch(&mut self) -> Result<Option<Dispatch>, WorkerError> {
+        self.ensure_ui()?;
+        let hart = self.scheduler.config().ui_hart;
+        self.scheduler.dispatch(hart).map_err(scheduler_error)
+    }
+
+    pub fn yield_ui(&mut self, dispatch: Dispatch) -> Result<(), WorkerError> {
+        self.scheduler
+            .yield_now(dispatch)
+            .map(|_| ())
+            .map_err(scheduler_error)
+    }
+
+    pub fn ui_task(&self) -> Option<TaskId> {
+        self.ui_task
+    }
+
+    pub fn ui_role(&self) -> Result<Role, WorkerError> {
+        let id = self
+            .ui_task
+            .ok_or_else(|| failure(WorkerErrorName::InvalidStateError, "no UI task"))?;
+        Ok(self.task(id)?.role)
     }
     pub fn worker_harts(&self) -> Vec<usize> {
         self.scheduler.config().worker_harts().unwrap_or_default()

@@ -21,18 +21,20 @@ browser-ui/svelte-engine-ws/     dub.sdl wasm-eh cell
         └─ bun first-party MVP encoder → out/bios-ui.wasm
                  │
                  ▼
-        g6b-wasm decode + KernelHost
-                 ├─ set_inner_text → g6b-dom
-                 ├─ fetch          → g6b-http::Router
-                 └─ jit_riscv      → g6b-asm Purpose::WasmJit
-        g6b-elf payload
-                 ├─ `.rodata` `__ui_wasm` = out/bios-ui.wasm
-                 ├─ BSS `__ui_blob` `G6UI` header (size/flags/ptr/`\0asm`/nfiles)
-                 └─ KStart `jal UiInit` / `FileServe` / `GetFile` / `WasmJit` (`i32.add`)
-        g6b-js AOT of g6b-ui::setup_script(BoardSpec)
-                 └─ selected read-only fetch → same Router
+        g6b-wasm decode + UI-thread Host (BrowserSession::wasm_ui)
+                 ├─ document/window/JS exports  → live g6b-dom + JsExports
+                 ├─ fetch                       → KernelPort / g6b-http::Router
+                 └─ tick → Engine::paint(&Node) Canvas32 → GLES2 u_dom → virtio-gpu / HDMI
+        g6b-elf payload  (not the web engine)
+                 ├─ `.rodata` `__ui_wasm` = LDC cell bytes for FileServe/GetFile
+                 ├─ BSS `__ui_blob` `G6UI` header
+                 └─ `WasmJit` / `WasmStart` = VGA glyph face (MVP `start_ops`)
+        Host BrowserSession runs the LDC cell only (no MVP fallback)
+        /ui/ui.wasm is the same cell the native kernel.ts adapter instantiates
         out/bios-ui.js remains an all-profile compiler demonstration
-        /ui/app.js uses the native browser adapter instead
+        B91b: guest_cell_scanout runs that cell on KernelHost (same Host
+              import set), packs Canvas32 + dirty tiles for guest VioPaint.
+              start_ops stays the VGA glyph face — not Object_Call.
 ```
 
 The local libwasm adaptation is **not** `kernel-spec/libwasm`.
@@ -136,14 +138,15 @@ The libwasm D host imports (`env.createElement` with a `NodeType` enum,
 `env.appendChild`, `env.setProperty` with D `(length, ptr)` string pairs,
 `env.fetch`, `env.libwasm_await__void`, `env.holyc`,
 `env.register_endpoint`) are dispatched to the `Host` trait.
-`g6b-kernel::KernelHost` and `g6b-wasm::DomHost` now maintain a handle
- table (handle 1 = root, 2+ = created elements), so `_start` can build the
-live DOM under a real kernel session. With a no-op `TestHost` the real
+The LDC cell is loaded as `BrowserSession::wasm_ui` (see
+[`BROWSER-RUNTIME.md`](BROWSER-RUNTIME.md)): a persistent instance with
+interned `window`/`document`, `JsExports`, and live DOM handles. `KernelHost`
+is the UI-thread `Host` adapter (KernelPort for fetch/HolyC), not a kernel
+type table. Guest `WasmJit` remains the numeric `i32.add` / VGA-glyph lane
+and does not execute this cell. With a no-op `TestHost` the real
 `browser-ui/out/bios-ui-libwasm.wasm` `_start` export also runs to
 completion under the default fuel budget, confirming structural decoding
 and the i32/i64/f32/f64 + control-flow execution lanes.
-A compiled LDC wasm-eh cell is not thereby supported by this bounded guest
-engine.
 
 | Budget | Bound |
 |---|---|

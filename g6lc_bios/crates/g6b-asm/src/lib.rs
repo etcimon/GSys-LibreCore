@@ -178,7 +178,7 @@ pub enum Addr {
     UartLine,
     /// Guest file-serve / WASM header after the UART line (`G6UI`).
     UiBlob,
-    /// `browser-ui/out/bios-ui.wasm` in `.rodata` after the boot log.
+    /// UI wasm in `.rodata` after the boot log (LDC libwasm cell when live).
     UiWasm,
     /// Decoded wasm data image (`__wasm_data`) in `.rodata` after `__ui_wasm`.
     WasmData,
@@ -186,7 +186,10 @@ pub enum Addr {
     UiFont,
     /// Bounded guest DOM row table (`__ui_dom`) in BSS after `__ui_blob`.
     UiDom,
-    /// Virtio-mmio virtqueue + request/response area (`__vio`) after `__ui_dom`.
+    /// Compact web-engine persist (`__ui_cap`) after `__ui_dom`: dirty tiles +
+    /// node count. Not the 48-row table and not `start_ops` `Object_Call`.
+    UiCap,
+    /// Virtio-mmio virtqueue + request/response area (`__vio`) after `__ui_cap`.
     VioBss,
     /// Linear X8R8G8B8 scanout surface (`__scan_fb`) after `__vio` —
     /// backend-agnostic: the virtio-gpu TRANSFER or the uncore display
@@ -386,7 +389,7 @@ pub struct Module {
     pub line_bytes: u64,
     /// Guest UI header BSS (`G6UI` + size/flags/accel/ptr/wasm-magic/nfiles) when live.
     pub ui_bytes: u64,
-    /// Guest copy of `browser-ui/out/bios-ui.wasm` (rodata after the boot log; not a VFS).
+    /// Guest copy of the UI wasm (LDC cell when live; rodata after the boot log; not a VFS).
     pub ui_wasm: Vec<u8>,
     /// Decoded wasm data image (`__wasm_data`) — the linear-memory snapshot the
     /// lowered `WasmStart` resolves string pointers against.
@@ -395,6 +398,8 @@ pub struct Module {
     pub font: Vec<u8>,
     /// Bounded guest DOM row table BSS (`__ui_dom`) when `kernel.wasm.jit`.
     pub dom_bytes: u64,
+    /// Compact persist BSS (`__ui_cap`) when a scanout path is live (B91).
+    pub cap_bytes: u64,
     /// Virtio virtqueue/request BSS (`__vio`) when `wants_virtio_gpu`.
     pub vio_bytes: u64,
     /// Linear X8R8G8B8 scanout BSS (`__scan_fb`) when a display path is
@@ -477,6 +482,17 @@ impl Module {
         self.nharts.max(1)
     }
 
+    /// BSS after stacks: Gr + UART line + G6UI + DOM + compact cap + virtio + scanout.
+    pub fn extra_bss(&self) -> u64 {
+        self.gr_bytes
+            .saturating_add(self.line_bytes)
+            .saturating_add(self.ui_bytes)
+            .saturating_add(self.dom_bytes)
+            .saturating_add(self.cap_bytes)
+            .saturating_add(self.vio_bytes)
+            .saturating_add(self.vio_fb_bytes)
+    }
+
     /// GNU as text. Comments include purpose and state home.
     pub fn to_asm(&self) -> String {
         let mut s =
@@ -545,11 +561,22 @@ impl Module {
             }
             s.push_str(&format!("__ui_dom:\n.space {:#x}\n", self.dom_bytes));
         }
+        if self.cap_bytes > 0 {
+            if !self.nodes.iter().any(|n| n.purpose == Purpose::Stack)
+                && self.line_bytes == 0
+                && self.ui_bytes == 0
+                && self.dom_bytes == 0
+            {
+                s.push_str("\n.section .bss\n");
+            }
+            s.push_str(&format!("__ui_cap:\n.space {:#x}\n", self.cap_bytes));
+        }
         if self.vio_bytes > 0 {
             if !self.nodes.iter().any(|n| n.purpose == Purpose::Stack)
                 && self.line_bytes == 0
                 && self.ui_bytes == 0
                 && self.dom_bytes == 0
+                && self.cap_bytes == 0
             {
                 s.push_str("\n.section .bss\n");
             }
@@ -560,6 +587,7 @@ impl Module {
                 && self.line_bytes == 0
                 && self.ui_bytes == 0
                 && self.dom_bytes == 0
+                && self.cap_bytes == 0
                 && self.vio_bytes == 0
             {
                 s.push_str("\n.section .bss\n");
@@ -577,6 +605,25 @@ impl Module {
     /// module allocates no `__vio`.
     pub fn vio_bss_addr(&self, entry: u64) -> Option<u64> {
         if self.vio_bytes == 0 {
+            return None;
+        }
+        let (words, _) = self.to_words(entry).ok()?;
+        let code_bytes = (words.len() * 4) as u64;
+        let filesz = self.image_filesz(code_bytes);
+        let stacks = entry.wrapping_add(stack_memsz(filesz, self.n_harts()));
+        Some(
+            stacks
+                .wrapping_add(self.gr_bytes)
+                .wrapping_add(self.line_bytes)
+                .wrapping_add(self.ui_bytes)
+                .wrapping_add(self.dom_bytes)
+                .wrapping_add(self.cap_bytes),
+        )
+    }
+
+    /// Resolved `__ui_cap` BSS address, or `None` when the module has no cap.
+    pub fn cap_addr(&self, entry: u64) -> Option<u64> {
+        if self.cap_bytes == 0 {
             return None;
         }
         let (words, _) = self.to_words(entry).ok()?;
@@ -650,16 +697,23 @@ impl Module {
                             .wrapping_add(self.gr_bytes)
                             .wrapping_add(self.line_bytes)
                             .wrapping_add(self.ui_bytes),
-                        Addr::VioBss => stacks
+                        Addr::UiCap => stacks
                             .wrapping_add(self.gr_bytes)
                             .wrapping_add(self.line_bytes)
                             .wrapping_add(self.ui_bytes)
                             .wrapping_add(self.dom_bytes),
+                        Addr::VioBss => stacks
+                            .wrapping_add(self.gr_bytes)
+                            .wrapping_add(self.line_bytes)
+                            .wrapping_add(self.ui_bytes)
+                            .wrapping_add(self.dom_bytes)
+                            .wrapping_add(self.cap_bytes),
                         Addr::ScanFb => stacks
                             .wrapping_add(self.gr_bytes)
                             .wrapping_add(self.line_bytes)
                             .wrapping_add(self.ui_bytes)
                             .wrapping_add(self.dom_bytes)
+                            .wrapping_add(self.cap_bytes)
                             .wrapping_add(self.vio_bytes),
                         Addr::Label(l) => {
                             let at = *labels.get(l).ok_or_else(|| format!("unknown label {l}"))?;
@@ -904,6 +958,7 @@ fn op_to_asm(op: &Op) -> String {
             Addr::WasmData => format!("\tla\t{}, __wasm_data", reg_name(*rd)),
             Addr::UiFont => format!("\tla\t{}, __font", reg_name(*rd)),
             Addr::UiDom => format!("\tla\t{}, __ui_dom", reg_name(*rd)),
+            Addr::UiCap => format!("\tla\t{}, __ui_cap", reg_name(*rd)),
             Addr::VioBss => format!("\tla\t{}, __vio", reg_name(*rd)),
             Addr::ScanFb => format!("\tla\t{}, __scan_fb", reg_name(*rd)),
         },

@@ -26,7 +26,7 @@ _FORBIDDEN = [
 # External crates that are pinned in pins.toml and KD0-explicitly allowed.
 _ALLOWED_EXTERNAL = {"fontdue"}
 
-_SKIP = {".git", "target", ".tools", "out", "__pycache__", "kernel-spec"}
+_SKIP = {".git", "target", ".tools", "out", "__pycache__", "kernel-spec", "pglite"}
 
 
 def main() -> int:

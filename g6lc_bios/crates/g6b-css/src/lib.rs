@@ -19,9 +19,12 @@
 
 #![allow(missing_docs)]
 
+pub mod engine;
 pub mod inspect;
 pub mod render;
 pub mod render32;
+
+pub use engine::{DirtyRegion, Engine, PaintOutput};
 
 // Re-export the asset/font types the modern renderer consumes so callers
 // do not have to pull in extra crates just to invoke `render32`.
@@ -382,6 +385,8 @@ pub struct Selector {
     pub element: Option<String>,
     pub id: Option<String>,
     pub classes: Vec<String>,
+    /// goosie `:hover` pseudo-class (class-column specificity).
+    pub hover: bool,
     /// True when parsing produced a shape this matcher understands.
     pub matchable: bool,
 }
@@ -405,9 +410,9 @@ impl Selector {
             return sel;
         }
         let mut cursor = raw;
-        // A leading element name runs until the first '.' or '#'.
+        // A leading element name runs until the first '.', '#' or ':'.
         let head = cursor
-            .find(['.', '#'])
+            .find(['.', '#', ':'])
             .map_or(cursor, |i| &cursor[..i])
             .to_string();
         if !head.is_empty() {
@@ -420,7 +425,7 @@ impl Selector {
         while !cursor.is_empty() {
             let kind = cursor.as_bytes()[0];
             let rest = &cursor[1..];
-            let end = rest.find(['.', '#']).unwrap_or(rest.len());
+            let end = rest.find(['.', '#', ':']).unwrap_or(rest.len());
             let name = &rest[..end];
             if name.is_empty() {
                 return sel;
@@ -433,6 +438,15 @@ impl Selector {
                     sel.id = Some(name.to_string());
                 }
                 b'.' => sel.classes.push(name.to_string()),
+                // goosie: pseudo-classes live in the class-specificity
+                // column. Only `:hover` is implemented; anything else stays
+                // unmatchable rather than silently matching.
+                b':' => {
+                    if name != "hover" || sel.hover {
+                        return sel;
+                    }
+                    sel.hover = true;
+                }
                 _ => return sel,
             }
             cursor = &rest[end..];
@@ -443,11 +457,11 @@ impl Selector {
 
     /// CSS specificity as the comparable `(id, class, element)` tuple.
     /// Deliberately excludes inline styles and `!important`; the cascade in
-    /// [`cascade`] layers those on top.
+    /// [`cascade`] layers those on top. `:hover` counts as a class.
     pub fn specificity(&self) -> Specificity {
         (
             u32::from(self.id.is_some()),
-            self.classes.len() as u32,
+            self.classes.len() as u32 + u32::from(self.hover),
             u32::from(self.element.is_some()),
         )
     }
@@ -466,6 +480,9 @@ impl Selector {
             if el.id.as_deref() != Some(id.as_str()) {
                 return false;
             }
+        }
+        if self.hover && !el.hovered {
+            return false;
         }
         self.classes
             .iter()
@@ -493,6 +510,8 @@ pub struct ElementRef {
     pub name: String,
     pub id: Option<String>,
     pub classes: Vec<String>,
+    /// UI-thread hover (goosie mouse-hover). Set from `data-hover="1"`.
+    pub hovered: bool,
 }
 
 impl ElementRef {
@@ -501,6 +520,7 @@ impl ElementRef {
             name: name.to_ascii_lowercase(),
             id: None,
             classes: Vec::new(),
+            hovered: false,
         }
     }
 
@@ -515,6 +535,10 @@ impl ElementRef {
                 .get("class")
                 .map(|c| c.split_whitespace().map(str::to_string).collect())
                 .unwrap_or_default(),
+            hovered: node
+                .attributes
+                .get("data-hover")
+                .is_some_and(|v| v == "1" || v == "true"),
         }
     }
 }
@@ -1155,6 +1179,20 @@ mod tests {
         assert!(!Selector::parse(".row.missing").matches(&el));
         assert!(!Selector::parse("span").matches(&el));
         assert!(!Selector::parse("#other").matches(&el));
+    }
+
+    #[test]
+    fn hover_pseudo_matches_only_hovered_elements() {
+        let mut el = ElementRef::new("a");
+        el.classes = vec!["bios-tab".into()];
+        let sel = Selector::parse(".bios-tab:hover");
+        assert!(sel.matchable, "{}", sel.raw);
+        assert!(sel.hover);
+        assert_eq!(sel.specificity(), (0, 2, 0));
+        assert!(!sel.matches(&el));
+        el.hovered = true;
+        assert!(sel.matches(&el));
+        assert!(!Selector::parse("a:focus-visible").matchable);
     }
 
     #[test]

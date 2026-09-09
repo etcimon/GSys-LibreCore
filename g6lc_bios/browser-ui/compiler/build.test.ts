@@ -303,13 +303,17 @@ describe("LDC build integrity", () => {
     }
   });
 
-  test("non-DUB output labels absent/stale artifact rather than preserving shipped bytes", () => {
+  test("non-DUB output wipes garbage but keeps a valid shipped LDC cell", () => {
     const { dir } = fixture();
     put(join(dir, "out/bios-ui-libwasm.wasm"), "stale");
     writeOut(dir, { files: [app()], wasm: new Uint8Array(), js: "", catalog: "{}", wsFiles: [] });
     expect(readFileSync(join(dir, "out/bios-ui-libwasm.wasm")).length).toBe(0);
     expect(JSON.parse(readFileSync(join(dir, "out/bios-ui-libwasm.json"), "utf8")).available).toBe(false);
-    expect(JSON.parse(readFileSync(join(dir, "out/build.json"), "utf8")).files["bios-ui-libwasm.wasm"]).toBe(sha256(new Uint8Array()));
+    const magic = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0xaa]);
+    put(join(dir, "out/bios-ui-libwasm.wasm"), magic);
+    writeOut(dir, { files: [app()], wasm: new Uint8Array(), js: "", catalog: "{}", wsFiles: [] });
+    expect(readFileSync(join(dir, "out/bios-ui-libwasm.wasm"))).toEqual(Buffer.from(magic));
+    expect(JSON.parse(readFileSync(join(dir, "out/bios-ui-libwasm.json"), "utf8")).available).toBe(true);
   });
 });
 

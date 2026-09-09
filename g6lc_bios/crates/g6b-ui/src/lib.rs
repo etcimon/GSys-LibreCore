@@ -373,6 +373,36 @@ fn escape_html(value: &str) -> String {
         .replace('\'', "&#39;")
 }
 
+/// Drop the element whose `id` attribute is `id`, including a matching
+/// close tag when present. Used to gate `#refresh` off the static shell.
+fn strip_tag_with_id(html: &mut String, id: &str) {
+    let needle = format!("id=\"{id}\"");
+    let Some(id_at) = html.find(&needle) else {
+        return;
+    };
+    let Some(start) = html[..id_at].rfind('<') else {
+        return;
+    };
+    let Some(gt) = html[id_at..].find('>') else {
+        return;
+    };
+    let open_end = id_at + gt;
+    let tag = html[start + 1..]
+        .split(|c: char| c.is_whitespace() || c == '>')
+        .next()
+        .unwrap_or("");
+    if tag.is_empty() {
+        return;
+    }
+    let close = format!("</{tag}>");
+    if let Some(rel) = html[open_end + 1..].find(&close) {
+        let end = open_end + 1 + rel + close.len();
+        html.replace_range(start..end, "");
+    } else {
+        html.replace_range(start..=open_end, "");
+    }
+}
+
 pub fn setup_html(spec: &BoardSpec) -> String {
     setup_html_ext(spec, None)
 }
@@ -446,11 +476,9 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
     );
 
     // Remove the refresh button when there is no JS proxy path to refresh.
+    // The static shell may carry `on:click` / `on click` from App.svelte (B87).
     if !(js && spec.kernel.http.proxy_js && !reads.is_empty()) {
-        html = html.replace(
-            "<button id=\"refresh\" type=\"button\">Refresh values</button>",
-            "",
-        );
+        strip_tag_with_id(&mut html, "refresh");
     }
 
     // The nav strip can refresh its title from /bios/menu.

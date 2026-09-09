@@ -119,6 +119,12 @@ pub struct Smoke {
     pub vio_scanout: bool,
     /// `RESOURCE_FLUSH` count.
     pub vio_flushes: u32,
+    /// Compact persist magic (`G6CP`) when `__ui_cap` is allocated.
+    pub cap_magic: u32,
+    /// Live g6b-dom node count packed into `__ui_cap` (B91).
+    pub cap_nodes: u32,
+    /// Dirty-tile count remaining in `__ui_cap` after the run.
+    pub cap_tiles: u32,
     /// Used-buffer interrupt assertions (InterruptStatus bit 0 sets).
     pub vio_irqs: u32,
     /// Uncore display engine latched a scanout commit (`disp`-class
@@ -152,23 +158,44 @@ pub fn run_module_hart(
     entry: u64,
     hartid: u64,
 ) -> Result<Smoke, String> {
+    run_module_web(spec, module, entry, hartid, None)
+}
+
+/// Host-injected Canvas32 + dirty tiles for the guest compact persist (B91).
+/// Exec writes these into `__scan_fb` / `__ui_cap` before the payload runs
+/// so `VioPaint` TRANSFERs the web engine, not a glyph expand. Does not
+/// grow `start_ops`.
+#[derive(Debug, Clone, Default)]
+pub struct GuestWebPresent {
+    pub scan_fb: Vec<u8>,
+    pub tiles: Vec<DirtyTile>,
+    pub node_count: u32,
+}
+
+/// One virtio-gpu `TRANSFER_TO_HOST_2D` rectangle packed into `__ui_cap`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirtyTile {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// Like [`run_module`] with an optional web-engine present (compact persist).
+pub fn run_module_web(
+    spec: &BoardSpec,
+    module: &Module,
+    entry: u64,
+    hartid: u64,
+    web: Option<&GuestWebPresent>,
+) -> Result<Smoke, String> {
     let (insns, rodata) = module.to_words(entry)?;
     let mut image = Vec::with_capacity(insns.len() * 4 + rodata.len());
     for w in insns {
         image.extend_from_slice(&w.to_le_bytes());
     }
     image.extend_from_slice(&rodata);
-    let memsz = payload_memsz(
-        image.len() as u64,
-        module.n_harts(),
-        module
-            .gr_bytes
-            .saturating_add(module.line_bytes)
-            .saturating_add(module.ui_bytes)
-            .saturating_add(module.dom_bytes)
-            .saturating_add(module.vio_bytes)
-            .saturating_add(module.vio_fb_bytes),
-    );
+    let memsz = payload_memsz(image.len() as u64, module.n_harts(), module.extra_bss());
     run_with_kick(
         spec,
         &image,
@@ -181,6 +208,8 @@ pub fn run_module_hart(
         module.vio_bss_addr(entry).unwrap_or(0),
         module.scan_fb_addr(entry).unwrap_or(0),
         module.vio_fb_bytes,
+        module.cap_addr(entry).unwrap_or(0),
+        web,
     )
 }
 
@@ -197,17 +226,7 @@ pub fn run_module_kick(
         image.extend_from_slice(&w.to_le_bytes());
     }
     image.extend_from_slice(&rodata);
-    let memsz = payload_memsz(
-        image.len() as u64,
-        module.n_harts(),
-        module
-            .gr_bytes
-            .saturating_add(module.line_bytes)
-            .saturating_add(module.ui_bytes)
-            .saturating_add(module.dom_bytes)
-            .saturating_add(module.vio_bytes)
-            .saturating_add(module.vio_fb_bytes),
-    );
+    let memsz = payload_memsz(image.len() as u64, module.n_harts(), module.extra_bss());
     run_with_kick(
         spec,
         &image,
@@ -220,6 +239,8 @@ pub fn run_module_kick(
         module.vio_bss_addr(entry).unwrap_or(0),
         module.scan_fb_addr(entry).unwrap_or(0),
         module.vio_fb_bytes,
+        module.cap_addr(entry).unwrap_or(0),
+        None,
     )
 }
 
@@ -232,17 +253,7 @@ pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Resul
         image.extend_from_slice(&w.to_le_bytes());
     }
     image.extend_from_slice(&rodata);
-    let memsz = payload_memsz(
-        image.len() as u64,
-        module.n_harts(),
-        module
-            .gr_bytes
-            .saturating_add(module.line_bytes)
-            .saturating_add(module.ui_bytes)
-            .saturating_add(module.dom_bytes)
-            .saturating_add(module.vio_bytes)
-            .saturating_add(module.vio_fb_bytes),
-    );
+    let memsz = payload_memsz(image.len() as u64, module.n_harts(), module.extra_bss());
     run_with_kick(
         spec,
         &image,
@@ -255,6 +266,8 @@ pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Resul
         module.vio_bss_addr(entry).unwrap_or(0),
         module.scan_fb_addr(entry).unwrap_or(0),
         module.vio_fb_bytes,
+        module.cap_addr(entry).unwrap_or(0),
+        None,
     )
 }
 
@@ -268,17 +281,7 @@ pub fn run_module_bare(spec: &BoardSpec, module: &Module, entry: u64) -> Result<
         image.extend_from_slice(&w.to_le_bytes());
     }
     image.extend_from_slice(&rodata);
-    let memsz = payload_memsz(
-        image.len() as u64,
-        module.n_harts(),
-        module
-            .gr_bytes
-            .saturating_add(module.line_bytes)
-            .saturating_add(module.ui_bytes)
-            .saturating_add(module.dom_bytes)
-            .saturating_add(module.vio_bytes)
-            .saturating_add(module.vio_fb_bytes),
-    );
+    let memsz = payload_memsz(image.len() as u64, module.n_harts(), module.extra_bss());
     run_with_kick(
         spec,
         &image,
@@ -291,6 +294,8 @@ pub fn run_module_bare(spec: &BoardSpec, module: &Module, entry: u64) -> Result<
         module.vio_bss_addr(entry).unwrap_or(0),
         module.scan_fb_addr(entry).unwrap_or(0),
         module.vio_fb_bytes,
+        module.cap_addr(entry).unwrap_or(0),
+        None,
     )
 }
 
@@ -317,6 +322,8 @@ pub fn run(
         // unknown and is skipped rather than guessed.
         0,
         0,
+        0,
+        None,
     )
 }
 
@@ -337,6 +344,8 @@ fn run_with_kick(
     // 32bpp surface. Both `0` when the caller has no module to resolve it from.
     scan_fb_base: u64,
     scan_fb_bytes: u64,
+    cap_base: u64,
+    web: Option<&GuestWebPresent>,
 ) -> Result<Smoke, String> {
     let xlen = spec.isa.xlen;
     if xlen != 32 && xlen != 64 {
@@ -347,6 +356,9 @@ fn run_with_kick(
         return Err("image larger than memsz".into());
     }
     ram[..image.len()].copy_from_slice(image);
+    if let Some(web) = web {
+        inject_web_present(&mut ram, entry, scan_fb_base, cap_base, web);
+    }
     let mut x = [0u64; 32];
     x[10] = hartid; // a0 hartid
                     // a1 models the OpenSBI handoff: the *boot* hart gets the FDT pointer
@@ -392,6 +404,7 @@ fn run_with_kick(
         vio_base,
         scan_fb_base,
         scan_fb_bytes,
+        cap_base,
         pci_ecam: spec.pcie_ecam().unwrap_or(0),
         pci_dev,
         pci_fb_base,
@@ -705,6 +718,33 @@ fn done(
         vio_fb_h: csr.vio_res_h,
         vio_scanout: csr.vio_scanout,
         vio_flushes: csr.vio_flushes,
+        cap_magic: if csr.cap_base != 0 {
+            load_u32(ram, base, csr.cap_base).unwrap_or(0)
+        } else {
+            0
+        },
+        cap_nodes: if csr.cap_base != 0 {
+            load_u32(
+                ram,
+                base,
+                csr.cap_base
+                    .wrapping_add(crate::vio::UI_CAP_OFF_NODES as u64),
+            )
+            .unwrap_or(0)
+        } else {
+            0
+        },
+        cap_tiles: if csr.cap_base != 0 {
+            load_u32(
+                ram,
+                base,
+                csr.cap_base
+                    .wrapping_add(crate::vio::UI_CAP_OFF_NTILE as u64),
+            )
+            .unwrap_or(0)
+        } else {
+            0
+        },
         vio_irqs: csr.vio_irqs,
         disp_committed: csr.disp_committed,
         disp_desc: (
@@ -874,6 +914,8 @@ struct Csr {
     scan_fb_base: u64,
     /// Bytes of `__scan_fb` to copy (0 when no native scanout is allocated).
     scan_fb_bytes: u64,
+    /// Resolved `__ui_cap` base (0 when the module has no compact persist).
+    cap_base: u64,
     /// PCIe ECAM window base — 0 = no host bridge modelled.
     pci_ecam: u64,
     /// Modelled bus-0 display controller: `(dev, vendor<<16|device, class_word,
@@ -2157,6 +2199,63 @@ fn store_u8(ram: &mut [u8], base: u64, addr: u64, v: u8) -> bool {
     false
 }
 
+fn inject_web_present(
+    ram: &mut [u8],
+    base: u64,
+    scan_fb_base: u64,
+    cap_base: u64,
+    web: &GuestWebPresent,
+) {
+    if scan_fb_base != 0 && !web.scan_fb.is_empty() {
+        if let Some(o) = scan_fb_base
+            .checked_sub(base)
+            .and_then(|d| usize::try_from(d).ok())
+        {
+            let n = web.scan_fb.len().min(ram.len().saturating_sub(o));
+            if n > 0 {
+                ram[o..o + n].copy_from_slice(&web.scan_fb[..n]);
+            }
+        }
+    }
+    if cap_base == 0 {
+        return;
+    }
+    let ntile = web.tiles.len().min(crate::vio::UI_CAP_MAX_TILES) as u32;
+    store_u32(ram, base, cap_base, crate::vio::UI_CAP_MAGIC);
+    store_u32(
+        ram,
+        base,
+        cap_base.wrapping_add(crate::vio::UI_CAP_OFF_FLAGS as u64),
+        crate::vio::UI_CAP_FLAG_WEB,
+    );
+    store_u32(
+        ram,
+        base,
+        cap_base.wrapping_add(crate::vio::UI_CAP_OFF_NODES as u64),
+        web.node_count,
+    );
+    store_u32(
+        ram,
+        base,
+        cap_base.wrapping_add(crate::vio::UI_CAP_OFF_NTILE as u64),
+        ntile,
+    );
+    for (i, t) in web
+        .tiles
+        .iter()
+        .take(crate::vio::UI_CAP_MAX_TILES)
+        .enumerate()
+    {
+        let at = cap_base
+            .wrapping_add(crate::vio::UI_CAP_OFF_RECTS as u64)
+            .wrapping_add((i as u64) * 16);
+        store_u32(ram, base, at, t.x as u32);
+        store_u32(ram, base, at.wrapping_add(4), t.y as u32);
+        store_u32(ram, base, at.wrapping_add(8), t.w as u32);
+        store_u32(ram, base, at.wrapping_add(12), t.h as u32);
+    }
+}
+
 fn store_u32(ram: &mut [u8], base: u64, addr: u64, v: u32) -> bool {
     if let Some(o) = addr.checked_sub(base).and_then(|d| usize::try_from(d).ok()) {
         if o + 4 <= ram.len() {
@@ -2955,6 +3054,44 @@ mod tests {
                 "odd pixel of plane byte {i}"
             );
         }
+    }
+
+    #[test]
+    fn vio_paint_web_present_transfers_dirty_tiles_not_glyphs() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let mut fb = vec![0u8; 640 * 480 * 4];
+        // Opaque red in B8G8R8X8 at (0,0).
+        fb[0] = 0;
+        fb[1] = 0;
+        fb[2] = 0xff;
+        fb[3] = 0xff;
+        let web = GuestWebPresent {
+            scan_fb: fb,
+            tiles: vec![DirtyTile {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            }],
+            node_count: 7,
+        };
+        let s = run_module_web(&spec, &m, 0x8020_0000, 0, Some(&web)).unwrap();
+        assert!(s.console.contains("VIRTIO-PAINT\n"), "{}", s.console);
+        // UART `Ui` re-paints after tiles were consumed → skip-if-clean.
+        assert!(s.console.contains("VIRTIO-PAINT-SKIP"), "{}", s.console);
+        assert_eq!(s.cap_magic, crate::vio::UI_CAP_MAGIC);
+        assert_eq!(s.cap_nodes, 7);
+        assert_eq!(s.cap_tiles, 0, "VioPaint consumes tiles");
+        assert_eq!(&s.vio_fb[..4], &[0, 0, 0xff, 0xff]);
+        // Neighbour pixel was not in the dirty tile — stays the VioScan band
+        // or zero, not a 4bpp glyph expand of the whole frame.
+        assert_ne!(&s.vio_fb[4..8], &[0, 0, 0xff, 0xff]);
     }
 
     #[test]
@@ -3827,7 +3964,7 @@ mod tests {
         assert!(s.console.contains("KSTART-PROXY-SCALE"), "{}", s.console);
         assert!(s.console.contains("KSTART-WASM-JIT"), "{}", s.console);
         assert_eq!(s.ui_magic, crate::encode::UI_MAGIC, "G6UI ident");
-        assert_eq!(s.ui_size, crate::BIOS_UI_WASM.len() as u32, "wasm size");
+        assert_eq!(s.ui_size, m.ui_wasm.len() as u32, "wasm size");
         assert_eq!(s.ui_flags & 1, 1, "wasm flag {:#x}", s.ui_flags);
         assert_eq!(s.ui_flags & 64, 64, "jit flag {:#x}", s.ui_flags);
         assert_eq!(
@@ -3898,7 +4035,7 @@ mod tests {
         );
         assert_eq!(
             s.mbox_rsp1,
-            crate::BIOS_UI_WASM.len() as u32,
+            m.ui_wasm.len() as u32,
             "GET rsp size {}",
             s.mbox_rsp1
         );

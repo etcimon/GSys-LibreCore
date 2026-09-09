@@ -68,11 +68,18 @@ pub fn mount(spec: &BoardSpec) -> BTreeMap<String, StaticFile> {
         }
     }
     if f.wasm {
+        // `/ui/ui.wasm` is the UI application: the LDC cell when the
+        // svelte-d lane is live, otherwise the MVP encoder demonstration.
+        let ui_wasm = if libwasm {
+            g6b_wasm::bios_ui_libwasm()
+        } else {
+            g6b_wasm::bios_ui_wasm()
+        };
         put(
             &mut out,
             &format!("{root}/ui.wasm"),
             "application/wasm",
-            g6b_wasm::bios_ui_wasm().to_vec(),
+            ui_wasm.to_vec(),
         );
         if libwasm {
             put(
@@ -83,6 +90,22 @@ pub fn mount(spec: &BoardSpec) -> BTreeMap<String, StaticFile> {
             );
         }
     }
+    if f.assets {
+        put(
+            &mut out,
+            &format!("{root}/g6lc.svg"),
+            "image/svg+xml",
+            include_bytes!("../../../fixtures/ui-assets/g6lc.svg").to_vec(),
+        );
+        put(
+            &mut out,
+            &format!("{root}/bios-ui.css"),
+            "text/css; charset=utf-8",
+            include_str!("../../../browser-ui/out/bios-ui.css")
+                .as_bytes()
+                .to_vec(),
+        );
+    }
     let listing = listing_json(&out);
     let listing_path = if root.is_empty() { "/files.json" } else { root };
     put(
@@ -92,6 +115,19 @@ pub fn mount(spec: &BoardSpec) -> BTreeMap<String, StaticFile> {
         listing.into_bytes(),
     );
     out
+}
+
+/// PNG/SVG bodies keyed by their served path, for the CSS `AssetMap`.
+pub fn image_files(spec: &BoardSpec) -> Vec<(String, Vec<u8>)> {
+    mount(spec)
+        .into_iter()
+        .filter(|(path, file)| {
+            file.content_type.starts_with("image/")
+                || path.ends_with(".svg")
+                || path.ends_with(".png")
+        })
+        .map(|(path, file)| (path, file.body))
+        .collect()
 }
 
 fn put(map: &mut BTreeMap<String, StaticFile>, path: &str, ct: &str, body: Vec<u8>) {
@@ -251,5 +287,15 @@ mod tests {
         assert!(m.contains_key("/ui/app.js"));
         let wasm = &m.get("/ui/ui.wasm").unwrap().body;
         assert_eq!(&wasm[..4], b"\0asm");
+        let mark = m.get("/ui/g6lc.svg").expect("bundled UI mark");
+        assert_eq!(mark.content_type, "image/svg+xml");
+        assert!(mark.body.windows(4).any(|w| w == b"<svg"), "svg body");
+        if g6b_wasm::bios_ui_libwasm_live() {
+            assert_eq!(
+                wasm.as_slice(),
+                g6b_wasm::bios_ui_libwasm(),
+                "/ui/ui.wasm is the LDC cell when live"
+            );
+        }
     }
 }

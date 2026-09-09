@@ -26,6 +26,13 @@ nothrow:
       setProperty(banner, "id", "banner");
       setProperty(banner, "innerText", "G6LC-BIOS | GSys LibreCore");
       appendChild(root, banner);
+      auto bios_mark = createElement(NodeType.img);
+      setProperty(bios_mark, "id", "bios-mark");
+      setProperty(bios_mark, "src", "/ui/g6lc.svg");
+      setProperty(bios_mark, "width", "48");
+      setProperty(bios_mark, "height", "24");
+      setProperty(bios_mark, "alt", "G6LC");
+      appendChild(root, bios_mark);
       auto profile = createElement(NodeType.p);
       setProperty(profile, "id", "profile");
       appendChild(root, profile);
@@ -47,6 +54,7 @@ nothrow:
       setProperty(tab_main, "aria-selected", "false");
       setProperty(tab_main, "innerText", "Main");
       appendChild(bios_menu, tab_main);
+      g6b_listen("tab-main", "click");
       auto tab_cpu = createElement(NodeType.a);
       setProperty(tab_cpu, "id", "tab-cpu");
       setProperty(tab_cpu, "class", "bios-tab");
@@ -57,6 +65,7 @@ nothrow:
       setProperty(tab_cpu, "aria-selected", "false");
       setProperty(tab_cpu, "innerText", "CPU");
       appendChild(bios_menu, tab_cpu);
+      g6b_listen("tab-cpu", "click");
       auto tab_memory = createElement(NodeType.a);
       setProperty(tab_memory, "id", "tab-memory");
       setProperty(tab_memory, "class", "bios-tab");
@@ -67,6 +76,7 @@ nothrow:
       setProperty(tab_memory, "aria-selected", "false");
       setProperty(tab_memory, "innerText", "Memory");
       appendChild(bios_menu, tab_memory);
+      g6b_listen("tab-memory", "click");
       auto tab_uncore = createElement(NodeType.a);
       setProperty(tab_uncore, "id", "tab-uncore");
       setProperty(tab_uncore, "class", "bios-tab");
@@ -77,6 +87,7 @@ nothrow:
       setProperty(tab_uncore, "aria-selected", "false");
       setProperty(tab_uncore, "innerText", "Uncore");
       appendChild(bios_menu, tab_uncore);
+      g6b_listen("tab-uncore", "click");
       auto tab_devices = createElement(NodeType.a);
       setProperty(tab_devices, "id", "tab-devices");
       setProperty(tab_devices, "class", "bios-tab");
@@ -87,6 +98,7 @@ nothrow:
       setProperty(tab_devices, "aria-selected", "false");
       setProperty(tab_devices, "innerText", "Devices");
       appendChild(bios_menu, tab_devices);
+      g6b_listen("tab-devices", "click");
       auto tab_boot = createElement(NodeType.a);
       setProperty(tab_boot, "id", "tab-boot");
       setProperty(tab_boot, "class", "bios-tab");
@@ -97,6 +109,7 @@ nothrow:
       setProperty(tab_boot, "aria-selected", "false");
       setProperty(tab_boot, "innerText", "Boot");
       appendChild(bios_menu, tab_boot);
+      g6b_listen("tab-boot", "click");
       auto tab_settings = createElement(NodeType.a);
       setProperty(tab_settings, "id", "tab-settings");
       setProperty(tab_settings, "class", "bios-tab");
@@ -107,6 +120,7 @@ nothrow:
       setProperty(tab_settings, "aria-selected", "false");
       setProperty(tab_settings, "innerText", "Settings");
       appendChild(bios_menu, tab_settings);
+      g6b_listen("tab-settings", "click");
       appendChild(root, bios_menu);
       auto status = createElement(NodeType.p);
       setProperty(status, "id", "status");
@@ -126,6 +140,7 @@ nothrow:
       setProperty(refresh, "type", "button");
       setProperty(refresh, "innerText", "Refresh values");
       appendChild(root, refresh);
+      g6b_listen("refresh", "click");
       auto menu_main = createElement(NodeType.section);
       setProperty(menu_main, "id", "menu-main");
       setProperty(menu_main, "data-menu", "main");
